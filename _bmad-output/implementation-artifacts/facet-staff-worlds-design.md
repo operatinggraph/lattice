@@ -260,3 +260,67 @@ The lesson generalizes past this fire: a fixture that invents the shape it asser
 three front-desk handlers. Location indirection is the lease's unit (`leaseapp_unit`), so the covering
 comprehension hangs off `(la)-[:appliesToUnit]->(unit)-[:containedIn*0..8]->(c)`. `cmd/cafe-app/readauth.go`
 needs the same `workplaces`/`isOperator` change; five handlers gate on `hats.isStaff` today.
+
+### 9.2 Increment 2 fire brief — café (Winston, 2026-07-26)
+
+**Scope sentence (verbatim, lane row).** "A `worksAt` anchor to any location anywhere grants the whole
+house — café's tabs/ledger/front-desk grid, and every wellness studio's roster. Staff *writes* are
+workplace-confined; these read paths carry no workplace term."
+
+**What the scout changed about the checkpoint.** Two corrections, both narrowing-consistent:
+
+1. The front-desk grid's three lenses live in **`packages/front-desk`**, not `cafe-domain`
+   (`front-desk/lenses.go:11,19,31` → `frontDeskBookings` / `frontDeskLeaseDetails` / `frontDeskVisits`).
+   The checkpoint said "cafe-domain + cafe-ledger".
+2. The count is **seven** `hats.isStaff` gate sites, not five: `tabs.go:120,139` · `leases.go:71` ·
+   `residents.go:98` · `ledger.go:124` · `frontdesk.go:60,124,189`. `leases.go` and `residents.go` are
+   the POS/front-desk **pickers** the three grid handlers join against by `leaseAppKey` — confining the
+   grid while `/api/leases` still returns every building's lease keys would leave the same read open one
+   hop away. Same mechanism, same surface; not an adjacent one.
+
+**The unifier.** *Every* café staff read site keys on `leaseAppKey` — `tabSettlementProjection`,
+`leaseAccountProjection`, `leaseApplicationProjection.entityKey`, `ledgerEntryProjection`, and all three
+front-desk rows. So the workplace term does **not** belong on seven lenses across four packages (which
+would also force an edit to the shared `lease-signing` lens). It belongs **once, on the lease**, resolved
+per request into a covered-lease set the way `residentOwnLeases` (`residents.go:115`) already resolves the
+resident's own set. Every handler then intersects on a key it already carries.
+
+**Shape.** A new `cafeLeaseWorkplaces` lens in **cafe-domain**, one row per `leaseapp`:
+
+```
+MATCH (l:leaseapp)
+RETURN l.key AS key, l.key AS leaseAppKey,
+  [(l)-[:appliesToUnit]->(u)-[:containedIn*0..8]->(c) | c.key] AS coveringLocations
+```
+
+It sits in cafe-domain, not cafe-ledger, for two reasons. cafe-domain is the package that already owns
+the write-side original this mirrors (`worksAt_covers` `ddls.go:441`, `leaseapp_unit` `ddls.go:511`), so
+the two definitions read side by side. And cafe-ledger is separately installable: sourcing cafe-domain's
+own read boundary from it would make that boundary depend on a filter declared in another package —
+the exact objection `readauth.go:68-76` already raises about `identityAnchors`. Extending the existing
+`cafeLeaseAccounts` was the cheaper option and is rejected on those grounds, not on cost.
+
+`*0..` is load-bearing (depth-0 = the unit itself, so a staffer wired to the exact unit matches); the hop
+bound is `WORKPLACE_MAX_DEPTH` = 8 (`ddls.go:416`) so neither side reaches a depth the other refuses.
+
+**Verified touch-list.**
+`packages/cafe-domain/{lenses.go,lens_cypher_test.go,manifest.yaml,package.go}` (0.7.5 → 0.8.0) ·
+`cmd/cafe-app/{readauth.go,tabs.go,leases.go,residents.go,ledger.go,frontdesk.go}` + their tests.
+
+**Increment order** (each green on its own): (a) the lens + cypher tests; (b) `readauth.go` —
+`isStaff bool` → `workplaces []string` + `isOperator` + `covers()`, mirroring wellness's shipped shape
+incl. `bootstrap.RoleOperatorKey` (the `90d823e5` correction — `/v1/actor` forwards role KEYS, not names);
+(c) a `staffCoveredLeases` resolver + the seven gate sites; (d) handler tests.
+
+**Dependencies re-verified both ways.** The Refractor **auto-creates** a nats-kv bucket on lens load
+(`cafe-ledger/lenses.go:11`) — no `provision-readpath`, which is a Protected/GrantTable step only.
+`appliesToUnit` is the live leaseapp→unit relation (`leaseapp_unit`, `front-desk/lenses.go:102`). The
+two-hop `fixed → variable-length` comprehension form is already shipped and cypher-proven by increment 1.
+
+**Fail-closed answer.** An empty covering set denies for anyone but an operator — the same answer
+`require_workplace` gives an empty `location_keys`. A lease with no `appliesToUnit`, and a projection
+written before this column existed, both decode to an empty set and are refused rather than waved through.
+
+**Non-goals.** `menuCatalog` stays open — it is the member self-order browse catalog, so confining it
+breaks self-order (the same call the wellness schedule grid got). No write guard, no Protected/RLS
+surface, no `operator` change, no `lease-signing` lens edit, and no change to the resident/self branches.
