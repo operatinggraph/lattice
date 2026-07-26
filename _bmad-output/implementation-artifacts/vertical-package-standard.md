@@ -445,3 +445,45 @@ and lease-signing's bare shadow — resolving last-writer-wins, harmless because
 
 **Remaining `s1Debt`: 0.** **`lens-cypher`: 5** (`augur`, `console-operator`, `demo-operator`,
 `identity-domain`, `rbac-domain`), unchanged — the next increment.
+
+## 9. §3.3 — the last five lens-cypher packages: Inc 6 fire brief (Winston, 2026-07-26)
+
+**Scope sentence (verbatim, S6).** *"a `lens_cypher_test.go` executing every lens over a seeded topology"*
+— for the five packages `s6Debt["lens-cypher-test"]` still exempts. **Scope-diff gate:** narrow-only. No
+lens spec, adapter, output descriptor, grant, permission or DDL changes; the deliverable is five new
+`_test.go` files plus the five baseline deletions. If a test proves a lens *wrong*, that is a finding to
+file, not a spec edit inside this increment.
+
+**Touch-list (verified live).** 9 lenses across 5 packages:
+
+| Package | Lens | Shape | What only execution can prove |
+|---|---|---|---|
+| console-operator | `consoleOperatorReadGrants` (`package.go:64-70`) | GrantTable/postgres | the `canonicalName` WHERE actually filters — a broken filter hands the read-side **wildcard** grant to every role-holder; `nanoIdFromKey` yields the bare NanoID RLS matches on, not the full key |
+| demo-operator | `demoOperatorReadGrants` (`package.go:65-71`) | GrantTable/postgres | same, for the read-only demo boundary |
+| rbac-domain | `capabilityRoles` (`lenses.go:80-91`) | actorAggregate | the `$actorKey` anchor keeps another actor's permissions out; a role-less actor yields the **single degenerate all-null entry** `RealnessFilter`+`EmptyBehavior:delete` are premised on |
+| rbac-domain | `capabilityRoleIndex` (`lenses.go:97-103`) | op-aggregate | two roles granting one op collapse to one row carrying both names |
+| identity-domain | `identityIndexHint` (`lenses.go:126-129`) | flat | one row per live index vertex, carrying only hash-key + identityKey |
+| identity-domain | `identityCredentialsRead` (`lenses.go:110-117`) | Protected + SecureColumn | `WHERE credentialBinding.data <> null` is fail-closed, and `authz_anchors` is the identity's **own** NanoID — the whole RLS self-anchor |
+| identity-domain | `identityAnchors` (`lenses.go:158-173`) | actorAggregate | the **inverse** `<-[:identifiedBy]-` walk, container stamping, and the degenerate-entry premise |
+| augur | `augurProposals` (`lenses.go:134-151`) | flat | a claim still in flight (no `.proposed`/`.review`) projects null model columns rather than dropping |
+| augur | `augurDispatchPending` (`lenses.go:95-107`) | actorAggregate | `violating` is **default-deny**: true only for `reviewState = "approved"`, false for pending/rejected/**null** |
+
+**Precedent to mirror:** `packages/edge-manifest/lens_cypher_test.go` (fixture with `vtx`/`aspect`/`edge`/
+`project`, embedded NATS via `jsstore.Dir(t)`, deterministic 20-char NanoIDs, `full.New()` +
+`ExecuteWith`). Each package keeps its own copy of the ~40-line harness — 19 files already do, and a shared
+helper introduced for five files only would create a second idiom. *(Adjacent find, not filed as debt: that
+harness is duplicated 19× and would be a clean `internal/lenstest` extraction as a single corpus-wide sweep,
+which is a different item from this one.)*
+
+**Increment order + green check:** one package at a time, `go test ./packages/<pkg>/` after each; then
+delete that package's `s6Debt` entry and re-run `STRICT=1 go run ./scripts/lint-package-standard.go` —
+the gate's stale-entry check makes the deletion self-verifying (an entry left behind after the file lands
+fails the gate just as loudly as a missing file).
+
+**Gotchas in scope:** the `full` engine's equality is `=`, not `==`, and compares null false rather than
+erroring; an actor-aggregate spec needs `$actorKey` in `Parameters`; `augurDispatchPending`'s `violating`
+is a *column*, so the test asserts on the projected value, not on row presence.
+
+**Non-goals:** the `Output` descriptor's own wrapping (BuildKey / RealnessFilter / EmptyBehavior) is engine
+machinery with its own tests in `internal/refractor` — these tests drive the **cypher**, exactly as the 19
+precedents do. No `verify-package-*` script, no version bumps (no installed content changes).
