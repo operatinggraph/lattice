@@ -100,33 +100,69 @@ Comparison is **semantic, not raw bytes**: both sides unmarshal to `any` and com
 `reflect.DeepEqual`, so a pure JSON key-ordering difference from an older marshaller is not a write, while
 any value difference is.
 
-## 5. Scope — the whole primordial set, minus the op tracker
+## 5. Scope — kernel *definitions* only, and never over a deliberate deletion
 
-The principle: **the binary is the authority on kernel content; Core KV is its materialization.** That is
-already the premise of `scripts/verify-kernel.go`, which asserts Core KV matches what the binary expects —
-today a mismatch merely fails, with `make down && make up` as the only offered remedy.
+The tempting scope is "the whole primordial set", on the principle that the binary is the authority on kernel
+content. **That reasoning is wrong, and adversarial review caught it before it shipped.** It rested on the
+claim that every primordial root carries `data.protected: true`, so the Processor's commit-time guard
+(`rejectProtectedMutations`) closes the op path and any difference must mean an older binary. Two things
+falsify it:
 
-The one exclusion is the **bootstrap op tracker** (`BootstrapOpKey`). It is the seeded sentinel that
-`PrimordialSeeded` / `DecideReseed` probe and the two-phase-commit marker (Contract #7 §7.4) — seeding-state
-machinery, not kernel content. Reconcile leaves it untouched so that state machine keeps a single authority.
+- **The 12 primordial links are outside that guard by design.** `protectedRootKey`
+  (`internal/processor/step8_commit.go:637-643`) returns `""` for anything not vertex-rooted, with the
+  comment that links "are not kernel-protected entities". None of the primordial links carries a protected
+  flag either.
+- **rbac-domain has a first-class op that writes exactly those keys.** `RevokeRole`
+  (`packages/rbac-domain/ddls.go:376-388`) computes `lnk.<actorType>.<actorId>.holdsRole.role.<roleId>` and
+  tombstones it — the precise shape of `LoomHoldsRoleLinkKey` and its siblings. `RevokePermission` does the
+  same for the six `grantedBy` links.
 
-Reconciling the rest is safe because it cannot legitimately drift: every other primordial **root** carries
-`data.protected: true`, and the Processor's commit-time guard
-(`rejectProtectedMutations`, `internal/processor/step8_commit.go`) rejects any update/tombstone whose root is
-protected. The op path is closed against these keys, so a difference is by definition an older binary.
+A Lattice tombstone is **soft**: the key stays, carrying `isDeleted: true`. So a revoked grant is
+byte-different from what the binary builds and *looks exactly like staleness*. A whole-set reconcile would
+have rewritten it back to `isDeleted: false` — restoring root-equivalence to a decommissioned service actor,
+on an ordinary boot, with nothing but an Info log. That is a privilege escalation performed by a repair tool.
 
-### Two unprotected roots found while grounding
+The scope is therefore narrow, and each exclusion earns its place:
 
-The claim "every primordial root is protected" is **not** currently true, and the exceptions are worth
-naming:
+| stored state | action | why |
+|---|---|---|
+| absent | **create** | an incomplete kernel is never correct; a soft tombstone leaves the key present, so this cannot resurrect a revocation |
+| `isDeleted: true` | **never write** | a deliberate act recorded by an operation, not staleness |
+| differs, `vtx.meta.*` | **rewrite** | scripts, schemas and lens specs — the kernel *code* a stale bucket must not keep |
+| differs, anything else | **never write** | identities, roles, permissions and links are topology whose lifecycle belongs to operations, not to the seeder |
+| bootstrap op tracker | **never touched** | the sentinel `PrimordialSeeded`/`DecideReseed` probe and two-phase-commit marker (Contract #7 §7.4) — seeding-state machinery |
 
-- the **bootstrap op tracker** (`MakeBootstrapOpEnvelope`, `envelope.go:75`) — excluded from reconcile
-  anyway;
-- the **5 aspect-type meta roots** (`seedAspectTypeMeta`, `primordial.go:1021`) are built with
-  `map[string]any{}` — no `protected` flag — while every other kernel meta root has one. These are kernel
-  DDLs (`meta.ddl.aspectType`) that a package uninstall or upgrade could in principle tombstone or update.
+Everything the fire actually exists to fix lives under `vtx.meta.*`. Divergence outside that set is
+**reported** (counted as `Retained`, logged at Warn) and left alone — the seeder observes topology, it does
+not adjudicate it.
 
-That gap is *adjacent* to this fire, not part of it — filed as its own board row rather than folded in.
+### A related gap found while grounding
+
+The **5 aspect-type meta roots** (`seedAspectTypeMeta`, `primordial.go:1021`) are built with
+`map[string]any{}` — no `protected` flag — while every other kernel meta root has one. They are kernel DDLs
+(`meta.ddl.aspectType`) that a package uninstall or upgrade could in principle tombstone or update. The
+`isDeleted` rule above means reconcile will not fight such a deletion, but the missing flag is a real hole.
+Filed as its own board row rather than folded in.
+
+## 5b. Writes are one atomic batch
+
+The seed this repairs is a single `substrate.AtomicBatch` (`primordial.go:359`), and the reconcile keeps that
+guarantee rather than degrading to a per-key loop. The reason is concrete: a meta-vertex's aspects are
+separate keys written in sequence (`canonicalName, permittedCommands, description, script, …`), so a pass
+that aborted midway — a context deadline on ~76 sequential round trips is entirely reachable — could leave a
+DDL with a **new `.script` beside an old `.inputSchema`**, validating ops against one definition and
+executing another. And that half-written state *is* reachable by a live Processor without a restart: the
+in-commit `Invalidate` re-reads the meta root from Core KV on any later `vtx.meta.*` commit.
+
+`substrate.BatchOp` carries per-op `HasRevision`/`Revision`, so rewrites are revision-conditioned on the body
+the plan compared and a concurrent writer is never clobbered. A rejected batch changes nothing and re-plans
+on the next boot.
+
+**Restores are deliberately not revision-conditioned.** `CreateOnly` asserts last-sequence zero, which a
+deleted key's own tombstone marker already violates — conditioning a restore would make a purged kernel
+entry *permanently* unrestorable, rejected on every boot forever. There is nothing to protect on a key the
+plan observed as absent, and the bytes written are the same deterministic kernel body any concurrent
+bootstrapper would write. (Caught by the restore test, which failed exactly this way.)
 
 ## 6. Write path (P2) and where reconcile runs
 
@@ -145,16 +181,64 @@ same phase, with the same authority.
 the branch stays inside `SeedPrimordial`: seeded ⇒ reconcile, unseeded ⇒ the existing atomic batch. One code
 path, and every caller — including `internal/testutil/pipeline.go` — gets convergence.
 
-## 7. Visibility on an already-running stack
+## 7. Visibility on an already-running stack — why `reseed-kernel` is load-bearing
 
-The Processor's `DDLCache` is built by `Refresh` at startup and invalidated only in-commit
-(`internal/processor/ddl_cache.go:50-52`; step-8 `Invalidate`). It does **not** watch Core KV. So a
-bootstrap-direct kernel write reaches a *running* Processor only when that Processor restarts.
+The Processor's `DDLCache` is filled by `Refresh` at startup; thereafter a meta root is re-read only by the
+in-commit `Invalidate` (`internal/processor/ddl_cache.go:50-52`, step-8). It does not watch Core KV, so a
+bootstrap-direct kernel write reaches a running Processor only when that Processor restarts.
 
-Boot order makes this a non-issue for `make up` — bootstrap precedes the engines. Applying a kernel fix to an
-already-running stack requires cycling the Processor binary, which is a single-binary cycle against the live
-stack, not a teardown. Stated here rather than worked around: adding a kernel-DDL KV watch to the Processor
-would be a real design change with its own trust implications, and no consumer needs it yet.
+**`make up` does not close this gap either**, and the first draft of this design wrongly assumed boot order
+would. `make up` short-circuits: when NATS and Postgres are healthy, the Processor and Refractor are running,
+and `lattice bootstrap verify` passes, it prints *"Kernel already up … reusing"* and **never runs
+`bin/bootstrap` at all** (`Makefile:157-165`). And `bootstrap verify` asserts presence and envelope shape, not
+content — a stale `UpgradePackage` script passes it cleanly, which is exactly how the reported failure
+survived.
+
+So on the stack this fire targets — healthy, running, stale — `make up` after the fix lands would do nothing.
+**`make reseed-kernel` (§7c) is the remedy, not a convenience wrapper**; it is the only path that reconciles
+and then cycles the Processor.
+
+Adding a kernel-DDL KV watch to the Processor would be a real design change with its own trust implications,
+and no consumer needs it yet.
+
+## 7b. Making staleness visible — the verify-kernel freshness assertion
+
+Reconcile repairs a stale kernel, but nothing *detects* one. `scripts/verify-kernel.go` asserts that every
+kernel key is present, that its envelope carries the required fields, that `isDeleted` is false and
+`createdBy` is the bootstrap identity — all of which a bucket seeded by an older binary satisfies **while
+running superseded DDL scripts**. It passed on the stuck dev stack, with the broken `UpgradePackage` script
+sitting right there. A presence check cannot see this class of defect by construction.
+
+So the gate gains the assertion the reconcile makes meaningful: `bootstrap.KernelDrift` — the read-only twin
+of `ReconcilePrimordial`, same comparison, no writes — reports entries that are missing or whose stored body
+differs from the built one, and `verify-kernel` fails on either, naming `make reseed-kernel` as the remedy.
+
+CI bootstraps fresh, so the converged case is the normal one and the gate stays quiet; it fires exactly on
+the condition that was previously invisible.
+
+## 7c. Operator surface
+
+`cycle-refractor` and `cycle-loupe` already exist; the Processor had no cycle target, which is what applying
+a kernel fix to a live stack needs (§7). Two Makefile targets close that:
+
+- **`cycle-processor`** — rebuild `bin/processor` and relaunch it against the still-running stack, mirroring
+  `cycle-refractor` exactly (`assert-main-checkout` guard, env sourced from the `up` recipe, `pgrep` liveness
+  check, appends to `processor.log`). Not a teardown.
+- **`reseed-kernel`** — rebuild `bin/bootstrap`, run the reconcile pass against the live Core KV, then
+  `cycle-processor` so the repaired DDLs are actually loaded. This is the whole remedy, in one command, with
+  no wipe.
+
+## 7d. What review changed
+
+Recording this because the corrections are the load-bearing part of the design, not footnotes. Three-layer
+adversarial review (security · edge-case · acceptance) ran before merge and produced two real defects:
+
+1. **Whole-set reconcile would have resurrected revoked grants** (found independently by two reviewers). The
+   scope narrowed to §5's table, and `TestReconcilePrimordial_DoesNotResurrectARevokedGrant` now pins it.
+2. **`make up` never reaches this code on a healthy stack** — the reuse short-circuit. §7 rewritten;
+   `reseed-kernel` is the remedy, not a convenience.
+
+A third correction came from the restore test itself: `CreateOnly` cannot restore a purged key (§5b).
 
 ## 8. Not in scope — named residual
 
@@ -170,6 +254,18 @@ package's DDL), so it is filed as its own row rather than guessed at here.
 next time the kernel drops an entity, that bucket keeps a live orphan the binary no longer knows about.
 Nobody is blocked on it today; the kernel has not shrunk since the RoleMgmt move.
 
+### `bootstrap verify` still reports a stale kernel as fresh
+
+`VerifyKernel` (`internal/bootstrap/verify.go`) asserts presence, envelope shape, `isDeleted`, `class` and
+`vertexKey` — never content. `make up`'s reuse short-circuit calls it (§7), so `make up` will keep printing
+*"Kernel already up … reusing"* over a bucket whose DDL scripts this binary no longer builds.
+
+`KernelDrift` now makes the missing assertion a few lines of work, and wiring it into `VerifyKernel` would
+make `make up` self-healing — drift would drop it out of the fast path into the bootstrap it already runs
+there. **Named consumer: `make up`'s freshness probe (`Makefile:157-165`).** Not folded into this fire
+because it changes the inner-loop behavior of `make up` for every developer and the demo box, which deserves
+its own scope rather than riding along. Filed as its own row.
+
 ## 9. Build order
 
 1. **Inc 1** — `internal/bootstrap/reconcile.go`: `ReconcilePrimordial` + result counts, semantic comparison,
@@ -177,8 +273,10 @@ Nobody is blocked on it today; the kernel has not shrunk since the RoleMgmt move
    **fixpoint** assertion (two reconciles in a row ⇒ second writes nothing), op-tracker untouched.
 2. **Inc 2** — wire it: `SeedPrimordial`'s seeded branch reconciles instead of skipping;
    `cmd/bootstrap/main.go` calls `SeedPrimordial` unconditionally.
-3. **Inc 3** — live proof on the shared dev stack: re-run `bin/bootstrap`, cycle `bin/processor`, then
-   re-run the lease-signing upgrade that is currently stuck and confirm the tombstone commits.
+3. **Inc 3** — `bootstrap.KernelDrift` + the `verify-kernel` freshness assertion (§7b), and the
+   `cycle-processor` / `reseed-kernel` operator targets (§7c).
+4. **Inc 4** — live proof on the shared dev stack: `make reseed-kernel`, then re-run the lease-signing
+   upgrade that is currently stuck and confirm the tombstone commits.
 
 **Green checks:** `go build ./...`, `make vet`, `golangci-lint run ./...`, `go test ./internal/bootstrap/...`,
 `make verify-kernel`, plus the full suite (the change is in the boot path every test fixture uses).
@@ -187,6 +285,9 @@ Nobody is blocked on it today; the kernel has not shrunk since the RoleMgmt move
 
 - **Never stamp wall-clock provenance in a reconciled envelope** (§4) — it turns the fixpoint into an
   every-boot rewrite.
+- **"Differs from what the binary builds" is not a synonym for "stale"** (§5). A soft tombstone and an
+  operation's write both differ. Widening the rewrite scope without re-deriving *why* each key class is
+  safe is how this mechanism becomes a privilege-escalation path.
 - `internal/testutil/pipeline.go:392` calls `SeedPrimordial` on a fresh embedded bucket every time; the
   reconcile branch must be a genuine no-op there (unseeded ⇒ atomic batch, unchanged).
 - `DecideReseed` must keep its current meaning. Reconcile is *not* a re-seed: it does not reopen the

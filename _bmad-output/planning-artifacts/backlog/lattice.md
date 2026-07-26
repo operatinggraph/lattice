@@ -46,11 +46,11 @@ Open items only (shipped ones are in the Done log). Grouped by component tag.
 
 | Item | What it is | Imp | Size | State |
 |---|---|---|---|---|
-| **[Bootstrap] Kernel-seed reconcile — a seeded Core KV never gets kernel fixes** | `SeedPrimordial` skips the whole batch once the op tracker exists and seeds `CreateOnly`, so every kernel-DDL fix is invisible to a long-lived bucket (wipe is the only remedy). Boot reconciles built-vs-stored content instead. | ★★★ | M | 🏗️ building · [design](../../implementation-artifacts/kernel-seed-reconcile-design.md) · next: Inc 1 reconcile + tests |
 | **[Bootstrap] 5 aspect-type meta roots carry no `protected` flag** | `seedAspectTypeMeta` builds them with empty data while every other kernel root sets `protected: true`, so the step-8 guard does not cover them — a package upgrade/uninstall could update or tombstone a kernel DDL. | ★★ | XS | 📋 ready · [why](../../implementation-artifacts/kernel-seed-reconcile-design.md) §5 |
+| **[Bootstrap] `bootstrap verify` reports a stale kernel as fresh** | It asserts presence + envelope shape, never content, so `make up`'s reuse short-circuit prints "kernel already up" over DDL scripts this binary no longer builds. `KernelDrift` now makes the assertion cheap; wiring it in makes `make up` self-healing. | ★★ | S | 📋 ready · [why](../../implementation-artifacts/kernel-seed-reconcile-design.md) §8 |
 | **[Bootstrap] Reconcile creates + updates but never removes a retired kernel key** | A kernel entity the current binary no longer builds survives forever in an old bucket; needs an authoritative kernel-owned key enumeration separable from package-written `vtx.meta.*`. | ★ | S–M | 📋 ready · [why](../../implementation-artifacts/kernel-seed-reconcile-design.md) §8 |
 | **[Loom] Guardless-step recovery check-before-act probe** | On total `loom-state` loss + a re-triggered `StartLoomPattern`, a fresh instance replays guards from cursor 0 (re-runs an already-applied guarded step). | ★ | S–M | 🗄️ shelved-backup (Andrew: no new engine Core-KV reads) |
-| **[Processor] Tombstone-with-document warn→reject flip (Fire 2)** | Fire 1 (emitter sweep + parser warn) shipped `6b68fde4`; flip the warn to a reject once warn sightings are clean (stale stored scripts clear via world recreation). | ★★ | XS | 🚧 seq behind clean warn-window · [design](../../implementation-artifacts/tombstone-body-preservation-design.md) §6 |
+| **[Processor] Tombstone-with-document warn→reject flip (Fire 2)** | Fire 1 (emitter sweep + parser warn) shipped `6b68fde4`; flip the warn to a reject once warn sightings are clean (stale stored scripts clear via world recreation). | ★★ | XS | 🚧 seq behind clean warn-window · [design](../../implementation-artifacts/tombstone-body-preservation-design.md) §6 · stale stored scripts now clear via `make reseed-kernel` |
 
 ### Survey log (round-robin rotation)
 
@@ -211,6 +211,7 @@ Real but low-value; do **not** spend design or build effort here unless Andrew g
 
 One line per shipped item (`date · SHA · [tag] title`). Oldest roll to `archive/` past ~25.
 
+- 2026-07-26 · `0a409757` · [bootstrap] kernel-seed reconcile — a seeded Core KV picks up kernel-DDL fixes instead of freezing at the binary that seeded it; verify-kernel now asserts content
 - 2026-07-25 · `1a1379f7` · [CI] Refractor sweep-count flake root-caused — the test read a per-pass aggregate mid-pass; 4-in-6 failing → 10/10 green, no assertion loosened
 - 2026-07-25 · `a0a4bb34` · [pkgmgr,refractor] an upgrade that cannot take effect says so where the operator is — `reloadpin` predicts the refusal at apply time; `ReactivationRequired` + drift guard
 
