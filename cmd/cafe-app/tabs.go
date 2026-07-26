@@ -97,10 +97,11 @@ func computeTabs(keys []string, get kvGetter, leaseAppKey string) []tabRow {
 // handleTabs implements GET /api/tabs[?leaseAppKey=] — the front-desk
 // open-tabs list and the POS/resident view's tab lookup for one lease,
 // served from the cafeTabSettlement convergence lens (P5). A `worksAt`
-// staffer sees the house (unfiltered, or narrowed to whichever leaseAppKey it
-// named); a resident may only name a lease they hold, and an unfiltered
-// request scopes to their own lease(s) only (persona-worlds-design.md Fire W4
-// §3).
+// staffer sees the tabs of the leases their workplace covers
+// (facet-staff-worlds-design.md §9); a resident sees their own. Either way a
+// named leaseAppKey they are not admitted for is refused rather than answered
+// empty, so the boundary reads the same whichever lease is asked for
+// (persona-worlds-design.md Fire W4 §3).
 func (s *server) handleTabs(w http.ResponseWriter, r *http.Request) {
 	conn, ok := s.requireConn(w)
 	if !ok {
@@ -116,17 +117,14 @@ func (s *server) handleTabs(w http.ResponseWriter, r *http.Request) {
 
 	leaseAppKey := strings.TrimSpace(r.URL.Query().Get("leaseAppKey"))
 
-	var own map[string]bool
-	if !hats.isStaff {
-		own, err = s.residentOwnLeases(ctx, hats.identityID)
-		if err != nil {
-			s.writeError(w, http.StatusBadGateway, "resolve resident's own leases: "+err.Error())
-			return
-		}
-		if leaseAppKey != "" && !own[leaseAppKey] {
-			s.writeError(w, http.StatusForbidden, "that lease is not yours")
-			return
-		}
+	visible, err := s.visibleLeases(ctx, hats)
+	if err != nil {
+		s.writeError(w, http.StatusBadGateway, err.Error())
+		return
+	}
+	if leaseAppKey != "" && !visible.admits(leaseAppKey) {
+		s.writeError(w, http.StatusForbidden, notYourLease(hats))
+		return
 	}
 
 	keys, err := conn.KVListKeys(ctx, weaverTargetsBucket)
@@ -136,14 +134,11 @@ func (s *server) handleTabs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	rows := computeTabs(keys, s.kvGetter(ctx, weaverTargetsBucket), leaseAppKey)
-	if !hats.isStaff && leaseAppKey == "" {
-		filtered := make([]tabRow, 0, len(rows))
-		for _, row := range rows {
-			if own[row.LeaseAppKey] {
-				filtered = append(filtered, row)
-			}
+	filtered := make([]tabRow, 0, len(rows))
+	for _, row := range rows {
+		if visible.admits(row.LeaseAppKey) {
+			filtered = append(filtered, row)
 		}
-		rows = filtered
 	}
-	s.writeJSON(w, http.StatusOK, map[string]any{"tabs": rows})
+	s.writeJSON(w, http.StatusOK, map[string]any{"tabs": filtered})
 }

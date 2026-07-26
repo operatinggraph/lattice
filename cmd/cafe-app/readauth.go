@@ -10,17 +10,27 @@ import (
 	"time"
 
 	"github.com/operatinggraph/lattice/internal/appsession"
+	"github.com/operatinggraph/lattice/internal/bootstrap"
+	cafedomain "github.com/operatinggraph/lattice/packages/cafe-domain"
 )
 
 // cafe-app has no protected Postgres read boundary (every café lens is plain
 // NATS-KV, P5) — the read boundary here is SESSION-scoped instead
 // (persona-worlds-design.md Fire W4 §3): a resident may see only rows for
 // leases whose bookerKey is their own signed-in identity, and a `worksAt`
-// staffer sees the house, including the front-desk staff surface. Every read
-// handler resolves the caller through authenticateRead or resolveSubjectHats,
-// mirroring cmd/clinic-app's own authenticateRead read boundary.
+// staffer sees the leases their workplace covers — the house they work in, not
+// every house (facet-staff-worlds-design.md §9). Every read handler resolves
+// the caller through authenticateRead or resolveSubjectHats, mirroring
+// cmd/clinic-app's own authenticateRead read boundary.
 
 const actorFetchTimeout = 10 * time.Second
+
+// operatorRoleKey is the primordial root role's VERTEX KEY. /v1/actor reports
+// roles as keys, not canonical names, and the operator id is loaded at runtime
+// from the bootstrap JSON (bootstrap.Load in main), so this cannot be a
+// compile-time constant — the same reason cafe-domain's `actor_holds_operator`
+// resolves the role from the graph rather than from a substituted literal.
+func operatorRoleKey() string { return bootstrap.RoleOperatorKey }
 
 // authenticateRead returns the bare identity the session middleware already
 // resolved from this request's verified cookie. Defense in depth: the
@@ -34,13 +44,51 @@ func (s *server) authenticateRead(r *http.Request) (string, error) {
 	return subject, nil
 }
 
-// subjectHats is the caller's read-boundary role, resolved from the
-// signed-in session: isStaff marks a `worksAt` anchor (sees the house,
-// including the front-desk staff surface); otherwise the caller is a
-// resident, scoped to their own lease's rows.
+// subjectHats is the caller's read-boundary role, resolved from the signed-in
+// session. workplaces holds the location keys the caller `worksAt` — a staffer
+// reads the leases those locations cover and no others, including on the
+// front-desk staff surface; a caller with none is a resident, scoped to their
+// own lease's rows.
 type subjectHats struct {
 	identityID string
-	isStaff    bool
+	workplaces []string
+	// isOperator marks the primordial root role. The write side exempts it
+	// from workplace confinement (`require_workplace`'s actor_holds_operator,
+	// cafe-domain's ddls.go), so the read side does too: break-glass admin
+	// that can settle a tab at any building must be able to see it.
+	isOperator bool
+}
+
+// isStaff reports whether the caller carries any workplace at all. It answers
+// "is this a staff surface" — NOT "may this staffer read this row", which is
+// covers()'s question. A staff surface still has to name which rows.
+func (h subjectHats) isStaff() bool { return len(h.workplaces) > 0 }
+
+// covers reports whether any location the caller works at appears in a lease's
+// projected covering set — the read-side mirror of cafe-domain's
+// `worksAt_covers`, which walks a unit's containedIn chain upward testing the
+// actor's worksAt link at each level (facet-staff-worlds-design.md §9). The
+// cafeLeaseWorkplaces lens materializes that chain per lease, so the same
+// answer falls out of a set intersection. Fails CLOSED on both empty sides: a
+// caller with no workplace covers nothing, and a lease whose topology is
+// unwired is covered by nobody — the denial require_workplace gives an empty
+// location list.
+func (h subjectHats) covers(coveringLocations []string) bool {
+	for _, loc := range coveringLocations {
+		// Compare the TRIMMED value, not merely test it for emptiness: the
+		// workplace keys were trimmed when they were collected, so testing one
+		// form and comparing the other would silently refuse a padded key.
+		loc = strings.TrimSpace(loc)
+		if loc == "" {
+			continue
+		}
+		for _, work := range h.workplaces {
+			if work == loc {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // resolveSubjectHats authenticates the caller and asks the Gateway's own
@@ -59,12 +107,22 @@ func (s *server) resolveSubjectHats(r *http.Request) (subjectHats, error) {
 	if token == "" {
 		return subjectHats{}, fmt.Errorf("no session token to resolve a role from (sign in at %s)", appsession.LoginPagePath)
 	}
-	anchors, err := s.fetchActorAnchors(r.Context(), token)
+	actor, err := s.fetchActorAnchors(r.Context(), token)
 	if err != nil {
 		return subjectHats{}, fmt.Errorf("resolve session role from the Gateway: %w", err)
 	}
-	staff := false
-	for _, a := range anchors {
+	hats := subjectHats{identityID: identityID}
+	// The operator key is empty until bootstrap.Load has run; comparing
+	// against it then would exempt every role-less caller, so a blank key
+	// matches nothing rather than everything.
+	if opKey := operatorRoleKey(); strings.TrimSpace(opKey) != "" {
+		for _, role := range actor.Roles {
+			if strings.TrimSpace(role) == opKey {
+				hats.isOperator = true
+			}
+		}
+	}
+	for _, a := range actor.Anchors {
 		// The key must be present, not just the relation. identityAnchors
 		// stamps `relation` as a literal constant on every collected entry,
 		// so an identity with NO workplace still yields a {key:null,
@@ -75,41 +133,156 @@ func (s *server) resolveSubjectHats(r *http.Request) (subjectHats, error) {
 		// filter declared in a different package; requiring the key is what
 		// makes the boundary self-contained.
 		if a.Relation == "worksAt" && strings.TrimSpace(a.Key) != "" {
-			staff = true
-			break
+			hats.workplaces = append(hats.workplaces, strings.TrimSpace(a.Key))
 		}
 	}
-	return subjectHats{identityID: identityID, isStaff: staff}, nil
+	return hats, nil
 }
 
 // actorAnchorsResponse decodes the Gateway's GET /v1/actor body far enough to
-// read the anchors array; the response also carries actorId/roles, which
+// read the anchors and roles arrays; the response also carries actorId, which
 // this read boundary does not need.
 type actorAnchorsResponse struct {
 	Anchors []appsession.ActorAnchor `json:"anchors"`
+	Roles   []string                 `json:"roles"`
 }
 
-// fetchActorAnchors asks the Gateway which residence/workplace anchors
-// token's actor carries.
-func (s *server) fetchActorAnchors(ctx context.Context, token string) ([]appsession.ActorAnchor, error) {
+// fetchActorAnchors asks the Gateway which residence/workplace anchors and
+// roles token's actor carries.
+func (s *server) fetchActorAnchors(ctx context.Context, token string) (actorAnchorsResponse, error) {
 	ctx, cancel := context.WithTimeout(ctx, actorFetchTimeout)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, s.gatewayURL+"/v1/actor", nil)
 	if err != nil {
-		return nil, err
+		return actorAnchorsResponse{}, err
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return nil, err
+		return actorAnchorsResponse{}, err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("gateway /v1/actor: HTTP %d", resp.StatusCode)
+		return actorAnchorsResponse{}, fmt.Errorf("gateway /v1/actor: HTTP %d", resp.StatusCode)
 	}
 	var body actorAnchorsResponse
 	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&body); err != nil {
-		return nil, err
+		return actorAnchorsResponse{}, err
 	}
-	return body.Anchors, nil
+	return body, nil
+}
+
+// leaseVisibility is the set of leases one caller may see rows for. Every café
+// staff and resident read keys on leaseAppKey — tabs, leases, residents,
+// ledger, and all three front-desk grid rows — so ONE resolved set confines
+// all of them, and each handler asks the same question of it.
+//
+// The zero value admits nothing, which is what makes this fail closed by
+// construction: an unresolved or errored visibility cannot be mistaken for an
+// unrestricted one. `unrestricted` is set on exactly one path (the operator),
+// never as a fallback.
+type leaseVisibility struct {
+	unrestricted bool
+	leases       map[string]bool
+}
+
+// admits reports whether this caller may see rows for leaseAppKey.
+func (v leaseVisibility) admits(leaseAppKey string) bool {
+	return v.unrestricted || v.leases[leaseAppKey]
+}
+
+// visibleLeases resolves the caller's lease visibility: an operator sees every
+// lease (the exemption require_workplace gives root on the write side), and
+// everyone else sees the UNION of the leases they hold as a resident and — if
+// they carry a `worksAt` anchor — the leases their workplace covers
+// (facet-staff-worlds-design.md §9). One rule read at one place rather than a
+// staff test repeated at seven handlers, which is how the workplace term came
+// to be missing from all of them at once.
+//
+// The union is load-bearing, not incidental. A café staffer who also LIVES in
+// the building is one person with two hats, and the hats are complementary,
+// not alternatives — the write side says so in as many words
+// (require_workplace's own comment, cafe-domain's ddls.go: a scope=self caller
+// is bound by their op's ownership probe, a scope=any staff caller by the
+// workplace guard, "each binds the path the other cannot see"). Resolving only
+// the staff half would hide a staffer's OWN house tab from them the moment
+// they take a job at a different building.
+func (s *server) visibleLeases(ctx context.Context, hats subjectHats) (leaseVisibility, error) {
+	if hats.isOperator {
+		return leaseVisibility{unrestricted: true}, nil
+	}
+	leases, err := s.residentOwnLeases(ctx, hats.identityID)
+	if err != nil {
+		return leaseVisibility{}, fmt.Errorf("resolve resident's own leases: %w", err)
+	}
+	if hats.isStaff() {
+		covered, err := s.staffCoveredLeases(ctx, hats)
+		if err != nil {
+			return leaseVisibility{}, err
+		}
+		for key := range covered {
+			leases[key] = true
+		}
+	}
+	return leaseVisibility{leases: leases}, nil
+}
+
+// notYourLease is the denial for naming a lease outside the caller's
+// visibility. A staffer and a resident are refused for different reasons, and
+// the message says which — "not yours" is misleading at the front desk, where
+// the lease genuinely is somebody's, just not at this staffer's building.
+// Neither message names the lease's actual location: that a lease exists
+// somewhere is already implied by asking for it, but where is not.
+func notYourLease(hats subjectHats) string {
+	if hats.isStaff() {
+		return "that lease is not at a place you work"
+	}
+	return "that lease is not yours"
+}
+
+// leaseWorkplaceProjection is one row of the cafe-domain `cafeLeaseWorkplaces`
+// lens — the locations that cover a lease.
+type leaseWorkplaceProjection struct {
+	LeaseAppKey       string   `json:"leaseAppKey"`
+	CoveringLocations []string `json:"coveringLocations"`
+}
+
+// staffCoveredLeases returns the set of lease keys this staffer's workplace
+// reaches — the staff analog of residentOwnLeases (residents.go), and used the
+// same way: resolved once per request, then intersected with whatever rows the
+// handler was going to return. Every café staff read keys on leaseAppKey, so
+// one covered-lease set confines all of them.
+//
+// Fails CLOSED throughout. A caller with no workplace gets an empty set, not a
+// pass. A lease whose row is missing entirely — a projection written before
+// this lens existed, or one that has not converged yet — is simply absent from
+// the set and therefore denied, rather than defaulting to visible. Only the
+// bucket-missing case is distinguished, and it is reported as an error rather
+// than as an empty answer, so a stack where cafe-domain 0.8.0 has not been
+// installed fails loudly instead of silently blanking every staff view.
+func (s *server) staffCoveredLeases(ctx context.Context, hats subjectHats) (map[string]bool, error) {
+	covered := map[string]bool{}
+	if !hats.isStaff() {
+		return covered, nil
+	}
+	bucket := cafedomain.LeaseWorkplacesBucket
+	keys, err := s.conn.KVListKeys(ctx, bucket)
+	if err != nil {
+		return nil, fmt.Errorf("list %s: %w (is cafe-domain 0.8.0 installed and the Refractor projecting?)", bucket, err)
+	}
+	get := s.kvGetter(ctx, bucket)
+	for _, k := range keys {
+		raw, ok := get(k)
+		if !ok {
+			continue
+		}
+		var p leaseWorkplaceProjection
+		if json.Unmarshal(raw, &p) != nil || p.LeaseAppKey == "" {
+			continue
+		}
+		if hats.covers(p.CoveringLocations) {
+			covered[p.LeaseAppKey] = true
+		}
+	}
+	return covered, nil
 }

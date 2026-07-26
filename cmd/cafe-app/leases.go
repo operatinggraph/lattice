@@ -42,10 +42,15 @@ func computeLeases(keys []string, get kvGetter) []leaseRow {
 	return rows
 }
 
-// handleLeases implements GET /api/leases — every lease the POS/front-desk
+// handleLeases implements GET /api/leases — the leases the POS/front-desk
 // pickers offer, served from the cafeLeaseAccounts lens (P5). A `worksAt`
-// staffer sees every lease; a resident sees only the lease(s) they applied
-// for (persona-worlds-design.md Fire W4 §3).
+// staffer sees the leases their workplace covers
+// (facet-staff-worlds-design.md §9); a resident sees only the lease(s) they
+// applied for (persona-worlds-design.md Fire W4 §3). This is a picker feeding
+// the same grid handleTabs and the front-desk views render, so it has to be
+// confined by the same term they are — an unconfined picker would put every
+// building's lease keys in one building's staffer's hands, one hop from a read
+// those handlers do confine.
 func (s *server) handleLeases(w http.ResponseWriter, r *http.Request) {
 	conn, ok := s.requireConn(w)
 	if !ok {
@@ -68,19 +73,16 @@ func (s *server) handleLeases(w http.ResponseWriter, r *http.Request) {
 	}
 	rows := computeLeases(keys, s.kvGetter(ctx, bucket))
 
-	if !hats.isStaff {
-		own, err := s.residentOwnLeases(ctx, hats.identityID)
-		if err != nil {
-			s.writeError(w, http.StatusBadGateway, "resolve resident's own leases: "+err.Error())
-			return
-		}
-		filtered := make([]leaseRow, 0, len(rows))
-		for _, row := range rows {
-			if own[row.LeaseAppKey] {
-				filtered = append(filtered, row)
-			}
-		}
-		rows = filtered
+	visible, err := s.visibleLeases(ctx, hats)
+	if err != nil {
+		s.writeError(w, http.StatusBadGateway, err.Error())
+		return
 	}
-	s.writeJSON(w, http.StatusOK, map[string]any{"leases": rows})
+	filtered := make([]leaseRow, 0, len(rows))
+	for _, row := range rows {
+		if visible.admits(row.LeaseAppKey) {
+			filtered = append(filtered, row)
+		}
+	}
+	s.writeJSON(w, http.StatusOK, map[string]any{"leases": filtered})
 }

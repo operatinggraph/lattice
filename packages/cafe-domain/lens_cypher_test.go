@@ -19,6 +19,7 @@ package cafedomain
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"testing"
 	"time"
 
@@ -244,4 +245,198 @@ func TestCafeTabSettlement_SettledAndCharged_Converged(t *testing.T) {
 	require.Equal(t, false, v["missing_account"])
 	require.Equal(t, false, v["missing_charge"], "a cafetransaction settles this tab — converged")
 	require.Equal(t, false, v["violating"])
+}
+
+// project runs an UNANCHORED spec (cafeLeaseWorkplaces takes no $actorKey,
+// unlike the tab-anchored convergence lens projectAt drives).
+func (f *cdFixture) project(t *testing.T, spec string) []ruleengine.ProjectionResult {
+	t.Helper()
+	now := time.Now().UTC().Format(time.RFC3339)
+	eng := full.New()
+	cr, err := eng.Parse(spec)
+	require.NoError(t, err, "spec must parse on the full engine")
+	out, err := eng.ExecuteWith(context.Background(), cr, ruleengine.EventContext{Parameters: map[string]any{
+		"now": now, "projectedAt": now,
+	}}, f.adjKV, f.coreKV)
+	require.NoError(t, err)
+	return out
+}
+
+// TestCafeLeaseWorkplaces_CoveringLocations proves the read-side workplace
+// term: a lease's coveringLocations carries its applied-to unit AND every
+// containedIn ancestor, so a staff read boundary intersecting it with the
+// caller's `worksAt` keys matches whether that staffer is wired to the exact
+// unit or to the building above it — the read-model mirror of this package's
+// own leaseapp_unit + worksAt_covers walk (facet-staff-worlds-design.md §9).
+func TestCafeLeaseWorkplaces_CoveringLocations(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newCdFixture(t)
+	f.vtx(t, "lease", "leaseapp")
+	unitKey := f.vtx(t, "unit4b", "unit")
+	buildingKey := f.vtx(t, "riverside", "location")
+	f.edge(t, "appliesToUnit", "lease", "unit4b")
+	f.edge(t, "containedIn", "unit4b", "riverside")
+
+	rows := f.project(t, leaseWorkplacesSpec)
+	require.Len(t, rows, 1, "the comprehension must not fan the lease into one row per ancestor")
+	require.ElementsMatch(t, []any{unitKey, buildingKey}, rows[0].Values["coveringLocations"],
+		"depth-0 (the lease's own unit) and its containedIn ancestor both cover the lease")
+}
+
+// TestCafeLeaseWorkplaces_DeepChainWalksEveryLevel proves the chain is walked
+// past one hop — unit -> floor -> building — so a staffer wired at any level
+// above the unit matches. A `*0..1` bound would pass the test above and fail
+// this one.
+func TestCafeLeaseWorkplaces_DeepChainWalksEveryLevel(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newCdFixture(t)
+	f.vtx(t, "lease", "leaseapp")
+	unitKey := f.vtx(t, "unit4b", "unit")
+	floorKey := f.vtx(t, "floor4", "location")
+	buildingKey := f.vtx(t, "riverside", "location")
+	f.edge(t, "appliesToUnit", "lease", "unit4b")
+	f.edge(t, "containedIn", "unit4b", "floor4")
+	f.edge(t, "containedIn", "floor4", "riverside")
+
+	rows := f.project(t, leaseWorkplacesSpec)
+	require.Len(t, rows, 1)
+	require.ElementsMatch(t, []any{unitKey, floorKey, buildingKey}, rows[0].Values["coveringLocations"],
+		"every level of the containment chain covers the lease, not just the first")
+}
+
+// TestCafeLeaseWorkplaces_NoUnitEmptyCovering proves a lease with no
+// appliesToUnit still projects one row, with an EMPTY covering set rather than
+// a null or a missing column: the staff boundary reads that as "no workplace
+// covers this row" and denies, matching require_workplace's
+// empty-location_keys denial. The comprehension's head is the matched lease,
+// so this is also the vector that would catch it seeding the whole keyspace
+// instead of binding empty.
+func TestCafeLeaseWorkplaces_NoUnitEmptyCovering(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newCdFixture(t)
+	f.vtx(t, "lease", "leaseapp")
+
+	rows := f.project(t, leaseWorkplacesSpec)
+	require.Len(t, rows, 1, "an unwired lease must still project a row, so its denial is explicit")
+	require.Empty(t, rows[0].Values["coveringLocations"],
+		"an unwired lease is covered by nobody; the boundary must not read that as unrestricted")
+}
+
+// TestCafeLeaseWorkplaces_UnwiredUnitCoversItself proves the depth-0 entry
+// survives on its own when the unit has no parent at all — the staffer wired
+// to a standalone unit still matches, and the set is not emptied by the
+// variable-length hop finding nothing.
+func TestCafeLeaseWorkplaces_UnwiredUnitCoversItself(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newCdFixture(t)
+	f.vtx(t, "lease", "leaseapp")
+	unitKey := f.vtx(t, "unit4b", "unit")
+	f.edge(t, "appliesToUnit", "lease", "unit4b")
+
+	rows := f.project(t, leaseWorkplacesSpec)
+	require.Len(t, rows, 1)
+	require.ElementsMatch(t, []any{unitKey}, rows[0].Values["coveringLocations"],
+		"*0.. must keep the unit itself when the upward walk finds no parent")
+}
+
+// TestCafeLeaseWorkplaces_OneRowPerLease proves two leases at different
+// buildings project two rows whose covering sets do NOT bleed into each other
+// — the discriminating pair the whole confinement rests on, since a staffer at
+// one building is admitted by the first and must be refused by the second.
+func TestCafeLeaseWorkplaces_OneRowPerLease(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newCdFixture(t)
+	f.vtx(t, "northLease", "leaseapp")
+	f.vtx(t, "southLease", "leaseapp")
+	northUnit := f.vtx(t, "northUnit", "unit")
+	southUnit := f.vtx(t, "southUnit", "unit")
+	northBuilding := f.vtx(t, "north", "location")
+	southBuilding := f.vtx(t, "south", "location")
+	f.edge(t, "appliesToUnit", "northLease", "northUnit")
+	f.edge(t, "appliesToUnit", "southLease", "southUnit")
+	f.edge(t, "containedIn", "northUnit", "north")
+	f.edge(t, "containedIn", "southUnit", "south")
+
+	rows := f.project(t, leaseWorkplacesSpec)
+	require.Len(t, rows, 2)
+	got := map[string]any{}
+	for _, r := range rows {
+		got[r.Values["leaseAppKey"].(string)] = r.Values["coveringLocations"]
+	}
+	require.ElementsMatch(t, []any{northUnit, northBuilding}, got["vtx.leaseapp."+f.ids["northLease"]])
+	require.ElementsMatch(t, []any{southUnit, southBuilding}, got["vtx.leaseapp."+f.ids["southLease"]],
+		"the south lease must not inherit the north building")
+}
+
+// TestCafeLeaseWorkplaces_MultiParentUnitUnionsBothChains proves a unit with
+// two containment parents contributes BOTH to one row. This DIVERGES from the
+// write side, which keeps only the last non-deleted parent per level
+// (`worksAt_covers`, ddls.go) and so follows one branch: a staffer on the
+// dropped branch is admitted here and refused there. The union is the correct
+// half — a staffer at either parent is equally entitled — and the single-branch
+// walk is the bug, filed as its own lane row. Pinned here so the read side's
+// answer is the deliberate one and the write side's fix is a convergence
+// toward it rather than a surprise.
+func TestCafeLeaseWorkplaces_MultiParentUnitUnionsBothChains(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newCdFixture(t)
+	f.vtx(t, "lease", "leaseapp")
+	unitKey := f.vtx(t, "unit4b", "unit")
+	towerKey := f.vtx(t, "tower", "location")
+	campusKey := f.vtx(t, "campus", "location")
+	f.edge(t, "appliesToUnit", "lease", "unit4b")
+	f.edge(t, "containedIn", "unit4b", "tower")
+	f.edge(t, "containedIn", "unit4b", "campus")
+
+	rows := f.project(t, leaseWorkplacesSpec)
+	require.Len(t, rows, 1, "two parents must union into one row, not fan into two")
+	require.ElementsMatch(t, []any{unitKey, towerKey, campusKey}, rows[0].Values["coveringLocations"])
+}
+
+// TestCafeLeaseWorkplaces_HopBoundMatchesTheWriteSide pins the exact depth the
+// covering set reaches. The write side walks `range(WORKPLACE_MAX_DEPTH)` = 8
+// iterations testing depths 0..7, so the read side must admit depths 0..7 and
+// NO further: `*0..8` would admit a staffer nine levels up whose writes
+// require_workplace refuses — a read the write side would not have allowed.
+// Nothing else pins this, and the two bounds are written in different
+// languages with different counting conventions, so it is exactly the kind of
+// divergence that survives review.
+func TestCafeLeaseWorkplaces_HopBoundMatchesTheWriteSide(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newCdFixture(t)
+	f.vtx(t, "lease", "leaseapp")
+	unitKey := f.vtx(t, "unit", "unit")
+	f.edge(t, "appliesToUnit", "lease", "unit")
+
+	// unit(0) -> a1(1) -> ... -> a8(8): one level deeper than either side reaches.
+	want := []any{unitKey}
+	prev := "unit"
+	for i := 1; i <= 8; i++ {
+		name := fmt.Sprintf("a%d", i)
+		key := f.vtx(t, name, "location")
+		f.edge(t, "containedIn", prev, name)
+		if i <= 7 {
+			want = append(want, key)
+		}
+		prev = name
+	}
+
+	rows := f.project(t, leaseWorkplacesSpec)
+	require.Len(t, rows, 1)
+	require.ElementsMatch(t, want, rows[0].Values["coveringLocations"],
+		"depths 0..7 cover the lease and depth 8 does not — the write side's own reach")
 }

@@ -11,6 +11,7 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 
 	"github.com/operatinggraph/lattice/internal/appsession"
+	"github.com/operatinggraph/lattice/internal/bootstrap"
 )
 
 // TestMain points the dev-auth posture's shared-dev-key loader at the repo
@@ -23,13 +24,50 @@ func TestMain(m *testing.M) {
 	os.Exit(m.Run())
 }
 
+// staffWorkplace is the location a plain staff subject `worksAt`;
+// otherWorkplace is a second building nobody in the default fixture works at.
+// The pair is what makes the workplace boundary DISCRIMINATING rather than
+// merely present — a test seeding only staffWorkplace would pass just as well
+// against a boundary that admitted every lease.
+const (
+	staffWorkplace = "vtx.building.A9jnKK2bGwZNrfHHkLme"
+	otherWorkplace = "vtx.building.T4pQmZbNxKrWvL8dHcyR"
+)
+
 // fakeGatewayActor stands in for the Gateway's external GET /v1/actor door
 // that resolveSubjectHats calls: it decodes the bearer's JWT subject
 // (unverified — a trusted test double, not a security boundary, standing in
 // for the Gateway which has already verified the token) and reports a
-// `worksAt` anchor for exactly the staff subjects named. Returns the fake
-// server's base URL, to set as server.gatewayURL.
+// `worksAt` anchor at staffWorkplace for exactly the staff subjects named.
+// Returns the fake server's base URL, to set as server.gatewayURL.
 func fakeGatewayActor(t *testing.T, staffSubjects map[string]bool) string {
+	t.Helper()
+	workplaces := map[string][]string{}
+	for subj := range staffSubjects {
+		workplaces[subj] = []string{staffWorkplace}
+	}
+	return fakeGatewayActorWorkplaces(t, workplaces, nil)
+}
+
+// nonOperatorRoleKey is a role vertex key that is NOT the primordial operator
+// — the shape a consoleOperator or frontOfHouse holder carries. A test that
+// only ever emitted the operator key could not tell "exempts the operator"
+// from "exempts anyone holding any role".
+const nonOperatorRoleKey = "vtx.role.T4pQmZbNxKrWvL8dHcyR"
+
+// fakeGatewayActorWorkplaces is the same double with the workplace anchors
+// named per subject, plus the set of subjects holding the primordial operator
+// role. Roles are reported as VERTEX KEYS, never canonical names, because that
+// is what the real Gateway forwards (internal/gateway/whoami.go returns what
+// rolesanchors resolved) — a fixture answering "operator" would let a
+// name comparison pass here while matching nothing against a live Gateway.
+func fakeGatewayActorWorkplaces(t *testing.T, workplaces map[string][]string, operators map[string]bool) string {
+	return fakeGatewayActorRoles(t, workplaces, operators, nil)
+}
+
+// fakeGatewayActorRoles is the fullest form: workplace anchors, the operator
+// exemption, and arbitrary extra role keys per subject.
+func fakeGatewayActorRoles(t *testing.T, workplaces map[string][]string, operators map[string]bool, extraRoles map[string][]string) string {
 	t.Helper()
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/actor", func(w http.ResponseWriter, r *http.Request) {
@@ -45,18 +83,20 @@ func fakeGatewayActor(t *testing.T, staffSubjects map[string]bool) string {
 		// fixture that omitted the key would be shaped like the degenerate
 		// entry and could not tell the two apart.
 		anchors := []appsession.ActorAnchor{}
-		if staffSubjects[claims.Subject] {
+		for _, key := range workplaces[claims.Subject] {
 			anchors = append(anchors, appsession.ActorAnchor{
-				Relation: "worksAt",
-				Key:      "vtx.building.A9jnKK2bGwZNrfHHkLme",
-				Name:     "Riverside Building",
+				Relation: "worksAt", Key: key, Name: "Riverside Building",
 			})
+		}
+		roles := append([]string{}, extraRoles[claims.Subject]...)
+		if operators[claims.Subject] {
+			roles = append(roles, bootstrap.RoleOperatorKey)
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"actorId":         "vtx.identity." + claims.Subject,
 			"resolvedActorId": "vtx.identity." + claims.Subject,
-			"roles":           []string{},
+			"roles":           roles,
 			"anchors":         anchors,
 		})
 	})
@@ -155,7 +195,7 @@ func TestResolveSubjectHats_KeylessWorksAtAnchorIsNotStaff(t *testing.T) {
 		if err != nil {
 			t.Fatalf("resolveSubjectHats: %v", err)
 		}
-		if hats.isStaff {
+		if hats.isStaff() {
 			t.Error("a keyless worksAt anchor must not confer the staff hat")
 		}
 	})).ServeHTTP(rec, r)

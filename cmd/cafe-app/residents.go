@@ -73,8 +73,12 @@ func computeResidents(keys []string, get kvGetter) []residentRow {
 
 // handleResidents implements GET /api/residents — the lease-applicant
 // roster, served from the shared leaseApplicationComplete convergence lens
-// (P5). A `worksAt` staffer sees every applicant; a resident sees only their
-// own row(s) (persona-worlds-design.md Fire W4 §3).
+// (P5). A `worksAt` staffer sees the applicants of the leases their workplace
+// covers (facet-staff-worlds-design.md §9); a resident sees only their own
+// row(s) (persona-worlds-design.md Fire W4 §3). Confining by LEASE also
+// answers the resident case exactly: a resident's own leases are precisely the
+// rows whose applicant is them, so both hats ask visibleLeases the same
+// question and this roster needs no second rule of its own.
 func (s *server) handleResidents(w http.ResponseWriter, r *http.Request) {
 	conn, ok := s.requireConn(w)
 	if !ok {
@@ -95,17 +99,18 @@ func (s *server) handleResidents(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	rows := computeResidents(keys, s.kvGetter(ctx, weaverTargetsBucket))
-	if !hats.isStaff {
-		own := auth.IdentityKeyPrefix + hats.identityID
-		filtered := make([]residentRow, 0, len(rows))
-		for _, row := range rows {
-			if row.BookerKey == own {
-				filtered = append(filtered, row)
-			}
-		}
-		rows = filtered
+	visible, err := s.visibleLeases(ctx, hats)
+	if err != nil {
+		s.writeError(w, http.StatusBadGateway, err.Error())
+		return
 	}
-	s.writeJSON(w, http.StatusOK, map[string]any{"residents": rows})
+	filtered := make([]residentRow, 0, len(rows))
+	for _, row := range rows {
+		if visible.admits(row.LeaseAppKey) {
+			filtered = append(filtered, row)
+		}
+	}
+	s.writeJSON(w, http.StatusOK, map[string]any{"residents": filtered})
 }
 
 // residentOwnLeases returns the set of lease keys identityID (a bare

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -13,10 +14,13 @@ import (
 	"github.com/nats-io/nats.go/jetstream"
 
 	"github.com/operatinggraph/lattice/internal/appsession"
+	"github.com/operatinggraph/lattice/internal/bootstrap"
 	"github.com/operatinggraph/lattice/internal/jsstore"
 	"github.com/operatinggraph/lattice/internal/substrate"
+	"github.com/operatinggraph/lattice/internal/testutil"
 	cafedomain "github.com/operatinggraph/lattice/packages/cafe-domain"
 	cafeledger "github.com/operatinggraph/lattice/packages/cafe-ledger"
+	frontdesk "github.com/operatinggraph/lattice/packages/front-desk"
 )
 
 const testTimeout = 5 * time.Second
@@ -41,7 +45,8 @@ func newTestConn(t *testing.T) *substrate.Conn {
 	}
 	t.Cleanup(conn.Close)
 
-	for _, bucket := range []string{weaverTargetsBucket, cafeledger.LeaseAccountsBucket, cafeledger.LedgerHistoryBucket, cafedomain.MenuCatalogBucket} {
+	for _, bucket := range []string{weaverTargetsBucket, cafeledger.LeaseAccountsBucket, cafeledger.LedgerHistoryBucket, cafedomain.MenuCatalogBucket, cafedomain.LeaseWorkplacesBucket,
+		frontdesk.BookingsBucket, frontdesk.LeaseDetailsBucket, frontdesk.VisitsBucket} {
 		if _, err := conn.JetStream().CreateOrUpdateKeyValue(ctx, jetstream.KeyValueConfig{Bucket: bucket}); err != nil {
 			t.Fatalf("create %s bucket: %v", bucket, err)
 		}
@@ -69,6 +74,14 @@ func putJSON(t *testing.T, conn *substrate.Conn, bucket, key string, v any) {
 // resolveSubjectHats calls.
 func devSessionServer(t *testing.T, gatewayURL string) (*server, func(subject string) *http.Cookie) {
 	t.Helper()
+	// The read boundary compares a role entry against the primordial operator
+	// role KEY, which main() resolves from the bootstrap ids at boot. Without
+	// them that key is empty and a fixture minting an empty role would prove
+	// nothing.
+	testutil.EnsurePrimordials(t)
+	if bootstrap.RoleOperatorKey == "" {
+		t.Fatal("primordial ids loaded but the operator role key is empty")
+	}
 	t.Setenv(envPrefix+"_DEV_AUTH", "1")
 	signer, err := appsession.NewDevSigner(discardLogger(), envPrefix, true)
 	if err != nil {
@@ -126,6 +139,16 @@ func sessionGET(s *server, h http.HandlerFunc, path string, c *http.Cookie) *htt
 // for leaseAppKey, applied for by bookerIdentity (a bare NanoID).
 func seedLease(t *testing.T, conn *substrate.Conn, leaseAppKey, bookerIdentity string) {
 	t.Helper()
+	seedLeaseAt(t, conn, leaseAppKey, bookerIdentity, staffWorkplace)
+}
+
+// seedLeaseAt is seedLease with the lease's covering locations named — the
+// cafeLeaseWorkplaces row the staff read boundary intersects against. Passing
+// no location at all seeds the row with an EMPTY covering set, the shape an
+// unwired lease projects, which must deny every staffer rather than be read as
+// unrestricted.
+func seedLeaseAt(t *testing.T, conn *substrate.Conn, leaseAppKey, bookerIdentity string, coveringLocations ...string) {
+	t.Helper()
 	putJSON(t, conn, weaverTargetsBucket, leaseApplicationKeyPrefix+leaseAppKey, map[string]any{
 		"entityKey":        leaseAppKey,
 		"applicant":        "vtx.identity." + bookerIdentity,
@@ -134,6 +157,10 @@ func seedLease(t *testing.T, conn *substrate.Conn, leaseAppKey, bookerIdentity s
 	putJSON(t, conn, cafeledger.LeaseAccountsBucket, leaseAppKey, map[string]any{
 		"leaseAppKey": leaseAppKey,
 		"accountKey":  "",
+	})
+	putJSON(t, conn, cafedomain.LeaseWorkplacesBucket, leaseAppKey, map[string]any{
+		"leaseAppKey":       leaseAppKey,
+		"coveringLocations": coveringLocations,
 	})
 }
 
@@ -180,7 +207,7 @@ func TestHandleLeases_Resident_SeesOnlyOwnLease(t *testing.T) {
 	}
 }
 
-func TestHandleLeases_Staff_SeesTheHouse(t *testing.T) {
+func TestHandleLeases_Staff_SeesCoveredLeases(t *testing.T) {
 	staff, resA, resB := "AAAAAAAAAAAAAAAAAAAA", "BBBBBBBBBBBBBBBBBBBB", "CCCCCCCCCCCCCCCCCCCC"
 	s, cookieFor := devSessionServer(t, fakeGatewayActor(t, map[string]bool{staff: true}))
 	seedLease(t, s.conn, "vtx.leaseapp.aaa", resA)
@@ -197,7 +224,7 @@ func TestHandleLeases_Staff_SeesTheHouse(t *testing.T) {
 		t.Fatalf("decode: %v", err)
 	}
 	if len(body.Leases) != 2 {
-		t.Fatalf("staff's leases = %+v, want both leases (the house)", body.Leases)
+		t.Fatalf("staff's leases = %+v, want both leases (both sit at this staffer's workplace)", body.Leases)
 	}
 }
 
@@ -273,7 +300,7 @@ func TestHandleTabs_Resident_ExplicitOwnLease_200(t *testing.T) {
 	}
 }
 
-func TestHandleTabs_Staff_SeesTheHouse(t *testing.T) {
+func TestHandleTabs_Staff_SeesCoveredTabs(t *testing.T) {
 	staff, resA, resB := "AAAAAAAAAAAAAAAAAAAA", "BBBBBBBBBBBBBBBBBBBB", "CCCCCCCCCCCCCCCCCCCC"
 	s, cookieFor := devSessionServer(t, fakeGatewayActor(t, map[string]bool{staff: true}))
 	seedLease(t, s.conn, "vtx.leaseapp.aaa", resA)
@@ -292,7 +319,7 @@ func TestHandleTabs_Staff_SeesTheHouse(t *testing.T) {
 		t.Fatalf("decode: %v", err)
 	}
 	if len(body.Tabs) != 2 {
-		t.Fatalf("staff's tabs = %+v, want both tabs (the house)", body.Tabs)
+		t.Fatalf("staff's tabs = %+v, want both tabs (both leases sit at this staffer's workplace)", body.Tabs)
 	}
 }
 
@@ -319,7 +346,7 @@ func TestHandleResidents_Resident_SeesOnlyOwnRow(t *testing.T) {
 	}
 }
 
-func TestHandleResidents_Staff_SeesTheRoster(t *testing.T) {
+func TestHandleResidents_Staff_SeesCoveredRoster(t *testing.T) {
 	staff, resA, resB := "AAAAAAAAAAAAAAAAAAAA", "BBBBBBBBBBBBBBBBBBBB", "CCCCCCCCCCCCCCCCCCCC"
 	s, cookieFor := devSessionServer(t, fakeGatewayActor(t, map[string]bool{staff: true}))
 	seedLease(t, s.conn, "vtx.leaseapp.aaa", resA)
@@ -336,7 +363,7 @@ func TestHandleResidents_Staff_SeesTheRoster(t *testing.T) {
 		t.Fatalf("decode: %v", err)
 	}
 	if len(body.Residents) != 2 {
-		t.Fatalf("staff's roster = %+v, want both residents", body.Residents)
+		t.Fatalf("staff's roster = %+v, want both residents (both leases sit at this staffer's workplace)", body.Residents)
 	}
 }
 
@@ -365,14 +392,14 @@ func TestHandleLedger_Resident_OtherLease_403(t *testing.T) {
 	}
 }
 
-func TestHandleLedger_Staff_AnyLease_OK(t *testing.T) {
+func TestHandleLedger_Staff_CoveredLease_OK(t *testing.T) {
 	staff, resB := "AAAAAAAAAAAAAAAAAAAA", "CCCCCCCCCCCCCCCCCCCC"
 	s, cookieFor := devSessionServer(t, fakeGatewayActor(t, map[string]bool{staff: true}))
 	seedLease(t, s.conn, "vtx.leaseapp.bbb", resB)
 
 	rec := sessionGET(s, s.handleLedger, "/api/ledger?leaseAppKey=vtx.leaseapp.bbb", cookieFor(staff))
 	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, body=%s (staff must read any lease's ledger)", rec.Code, rec.Body.String())
+		t.Fatalf("status = %d, body=%s (staff must read the ledger of a lease their workplace covers)", rec.Code, rec.Body.String())
 	}
 }
 
@@ -470,5 +497,434 @@ func TestRegisterRoutes_LoginPageServedWithNoSession(t *testing.T) {
 	mux.ServeHTTP(rec, r)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("GET /login uncredentialed: status = %d, want 200 (the kit's own routes must not be behind RequireSession)", rec.Code)
+	}
+}
+
+// ---- workplace confinement (facet-staff-worlds-design.md §9) ----
+//
+// Every test here pairs a POSITIVE and a NEGATIVE vector for the SAME staffer
+// on the SAME endpoint, differing only in where the lease sits. A negative
+// alone would pass against a boundary that denied everything, and a positive
+// alone against one that admitted everything; only the pair proves the term is
+// the workplace and not something else.
+
+// staffAtOneBuilding seeds two leases — one at the staffer's workplace, one at
+// a building they do not work at — and returns the server plus the cookie
+// helper. Both leases are otherwise identical, so any difference in what the
+// staffer can read is attributable to the covering set alone.
+func staffAtOneBuilding(t *testing.T) (*server, func(string) *http.Cookie, string) {
+	t.Helper()
+	const staff, resA, resB = "AAAAAAAAAAAAAAAAAAAA", "BBBBBBBBBBBBBBBBBBBB", "CCCCCCCCCCCCCCCCCCCC"
+	s, cookieFor := devSessionServer(t, fakeGatewayActorWorkplaces(t,
+		map[string][]string{staff: {staffWorkplace}}, nil))
+	seedLeaseAt(t, s.conn, "vtx.leaseapp.mine", resA, staffWorkplace)
+	seedLeaseAt(t, s.conn, "vtx.leaseapp.theirs", resB, otherWorkplace)
+	return s, cookieFor, staff
+}
+
+func TestHandleLeases_Staff_SeesOnlyLeasesTheirWorkplaceCovers(t *testing.T) {
+	s, cookieFor, staff := staffAtOneBuilding(t)
+
+	rec := sessionGET(s, s.handleLeases, "/api/leases", cookieFor(staff))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+	var body struct {
+		Leases []leaseRow `json:"leases"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(body.Leases) != 1 || body.Leases[0].LeaseAppKey != "vtx.leaseapp.mine" {
+		t.Fatalf("staff's leases = %+v, want exactly [vtx.leaseapp.mine] — the other building's lease must not be listed", body.Leases)
+	}
+}
+
+func TestHandleTabs_Staff_ForeignLeaseTabsNotListed(t *testing.T) {
+	s, cookieFor, staff := staffAtOneBuilding(t)
+	seedOpenTab(t, s.conn, "vtx.tab.mine", "vtx.leaseapp.mine")
+	seedOpenTab(t, s.conn, "vtx.tab.theirs", "vtx.leaseapp.theirs")
+
+	rec := sessionGET(s, s.handleTabs, "/api/tabs", cookieFor(staff))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+	var body struct {
+		Tabs []tabRow `json:"tabs"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(body.Tabs) != 1 || body.Tabs[0].TabKey != "vtx.tab.mine" {
+		t.Fatalf("staff's tabs = %+v, want exactly [vtx.tab.mine]", body.Tabs)
+	}
+}
+
+// TestHandleTabs_Staff_NamedForeignLease_403 is the other half of the tab
+// boundary: filtering the unfiltered list is not enough if naming the lease
+// outright still answers. The refusal must also not read like the resident's
+// ("that lease is not yours"), which would be false at the front desk.
+func TestHandleTabs_Staff_NamedForeignLease_403(t *testing.T) {
+	s, cookieFor, staff := staffAtOneBuilding(t)
+	seedOpenTab(t, s.conn, "vtx.tab.theirs", "vtx.leaseapp.theirs")
+
+	rec := sessionGET(s, s.handleTabs, "/api/tabs?leaseAppKey=vtx.leaseapp.theirs", cookieFor(staff))
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403 (a lease at a building this staffer does not work at); body=%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "not at a place you work") {
+		t.Errorf("denial = %s, want the staff-shaped reason", rec.Body.String())
+	}
+
+	ok := sessionGET(s, s.handleTabs, "/api/tabs?leaseAppKey=vtx.leaseapp.mine", cookieFor(staff))
+	if ok.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 for the lease at their own workplace; body=%s", ok.Code, ok.Body.String())
+	}
+}
+
+func TestHandleLedger_Staff_ForeignLease_403(t *testing.T) {
+	s, cookieFor, staff := staffAtOneBuilding(t)
+
+	rec := sessionGET(s, s.handleLedger, "/api/ledger?leaseAppKey=vtx.leaseapp.theirs", cookieFor(staff))
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403 (another building's ledger); body=%s", rec.Code, rec.Body.String())
+	}
+	ok := sessionGET(s, s.handleLedger, "/api/ledger?leaseAppKey=vtx.leaseapp.mine", cookieFor(staff))
+	if ok.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 for their own building's ledger; body=%s", ok.Code, ok.Body.String())
+	}
+}
+
+func TestHandleResidents_Staff_SeesOnlyCoveredApplicants(t *testing.T) {
+	s, cookieFor, staff := staffAtOneBuilding(t)
+
+	rec := sessionGET(s, s.handleResidents, "/api/residents", cookieFor(staff))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+	var body struct {
+		Residents []residentRow `json:"residents"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(body.Residents) != 1 || body.Residents[0].LeaseAppKey != "vtx.leaseapp.mine" {
+		t.Fatalf("staff's roster = %+v, want only the applicant at their own building", body.Residents)
+	}
+}
+
+// TestHandleFrontDeskLeaseDetails_Staff_SeesOnlyCoveredLeases proves the grid
+// itself narrows, not merely the pickers feeding it. The row carries the
+// unit's address and rent, so an unconfined grid published one building's
+// tenancy terms to another building's front desk.
+func TestHandleFrontDeskLeaseDetails_Staff_SeesOnlyCoveredLeases(t *testing.T) {
+	s, cookieFor, staff := staffAtOneBuilding(t)
+	for _, lease := range []string{"vtx.leaseapp.mine", "vtx.leaseapp.theirs"} {
+		putJSON(t, s.conn, frontdesk.LeaseDetailsBucket, lease, map[string]any{
+			"leaseAppKey": lease, "unitAddress": "1 Main St", "unitRent": 2400.0,
+		})
+	}
+
+	rec := sessionGET(s, s.handleFrontDeskLeaseDetails, "/api/frontdesk-lease-details", cookieFor(staff))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+	var body struct {
+		LeaseDetails []leaseDetailRow `json:"leaseDetails"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(body.LeaseDetails) != 1 || body.LeaseDetails[0].LeaseAppKey != "vtx.leaseapp.mine" {
+		t.Fatalf("front-desk grid = %+v, want only the lease at their own building", body.LeaseDetails)
+	}
+}
+
+// TestHandleFrontDeskBookings_Staff_SeesOnlyCoveredLeases: the booked-class
+// badge is a cross-vertical join (a wellness booking surfaced on a café grid),
+// so it is the row most likely to carry another building's resident.
+func TestHandleFrontDeskBookings_Staff_SeesOnlyCoveredLeases(t *testing.T) {
+	s, cookieFor, staff := staffAtOneBuilding(t)
+	for _, lease := range []string{"vtx.leaseapp.mine", "vtx.leaseapp.theirs"} {
+		putJSON(t, s.conn, frontdesk.BookingsBucket, lease, map[string]any{
+			"bookingKey": "vtx.booking." + lease, "leaseAppKey": lease, "sessionName": "Vinyasa Flow",
+		})
+	}
+
+	rec := sessionGET(s, s.handleFrontDeskBookings, "/api/frontdesk-bookings", cookieFor(staff))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+	var body struct {
+		Bookings []bookingRow `json:"bookings"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(body.Bookings) != 1 || body.Bookings[0].LeaseAppKey != "vtx.leaseapp.mine" {
+		t.Fatalf("front-desk bookings = %+v, want only the lease at their own building", body.Bookings)
+	}
+}
+
+// TestStaff_ContainingLocationCovers is the app-side half of the containment
+// walk: given a covering set that holds BOTH the lease's own unit and the
+// building above it — the shape the lens projects — a staffer wired to the
+// building is admitted, not only one wired to the exact unit. That the LENS
+// actually walks containedIn to produce that set is pinned separately, and by
+// construction, in cafe-domain's TestCafeLeaseWorkplaces_CoveringLocations;
+// this test seeds the row and so cannot prove it.
+func TestStaff_ContainingLocationCovers(t *testing.T) {
+	const staff, res = "AAAAAAAAAAAAAAAAAAAA", "BBBBBBBBBBBBBBBBBBBB"
+	const unitKey = "vtx.unit.K3mWqZbNxKrPvL7dHcyR"
+	s, cookieFor := devSessionServer(t, fakeGatewayActorWorkplaces(t,
+		map[string][]string{staff: {staffWorkplace}}, nil))
+	// The unit's own key AND the building above it, the shape the lens's
+	// `containedIn*0..` comprehension projects.
+	seedLeaseAt(t, s.conn, "vtx.leaseapp.mine", res, unitKey, staffWorkplace)
+
+	rec := sessionGET(s, s.handleLedger, "/api/ledger?leaseAppKey=vtx.leaseapp.mine", cookieFor(staff))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (the staffer works at a location CONTAINING the lease's unit); body=%s",
+			rec.Code, rec.Body.String())
+	}
+}
+
+// TestStaff_UnwiredLeaseDenied: a lease whose covering set is empty — its unit
+// has no containment and the lease may have no unit at all — is covered by
+// nobody. This is the vector that would otherwise wave a whole class of rows
+// through, since an empty set is the shape the lens projects for anything the
+// topology has not reached yet.
+func TestStaff_UnwiredLeaseDenied(t *testing.T) {
+	const staff, res = "AAAAAAAAAAAAAAAAAAAA", "BBBBBBBBBBBBBBBBBBBB"
+	s, cookieFor := devSessionServer(t, fakeGatewayActorWorkplaces(t,
+		map[string][]string{staff: {staffWorkplace}}, nil))
+	seedLeaseAt(t, s.conn, "vtx.leaseapp.nowhere", res)
+
+	rec := sessionGET(s, s.handleLedger, "/api/ledger?leaseAppKey=vtx.leaseapp.nowhere", cookieFor(staff))
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403 (an unwired lease is covered by nobody); body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestStaff_LeaseWithNoWorkplaceRowDenied is the STALE-PROJECTION vector: a
+// lease that has a leaseApplicationComplete row but no cafeLeaseWorkplaces row
+// at all — exactly what a stack projects between installing cafe-domain 0.8.0
+// and the Refractor catching up. An absent row must deny like an empty one,
+// rather than falling through to visible.
+func TestStaff_LeaseWithNoWorkplaceRowDenied(t *testing.T) {
+	const staff, res = "AAAAAAAAAAAAAAAAAAAA", "BBBBBBBBBBBBBBBBBBBB"
+	s, cookieFor := devSessionServer(t, fakeGatewayActorWorkplaces(t,
+		map[string][]string{staff: {staffWorkplace}}, nil))
+	putJSON(t, s.conn, weaverTargetsBucket, leaseApplicationKeyPrefix+"vtx.leaseapp.stale", map[string]any{
+		"entityKey": "vtx.leaseapp.stale", "applicant": "vtx.identity." + res, "landlordApproved": true,
+	})
+
+	rec := sessionGET(s, s.handleLedger, "/api/ledger?leaseAppKey=vtx.leaseapp.stale", cookieFor(staff))
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403 (no covering projection yet ⇒ covered by nobody); body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestMultiWorkplaceStaff_ReadsBoth: a staffer wired to two buildings reads
+// both, so the intersection is a UNION over their workplaces and not a
+// first-match.
+func TestMultiWorkplaceStaff_ReadsBoth(t *testing.T) {
+	const staff, resA, resB = "AAAAAAAAAAAAAAAAAAAA", "BBBBBBBBBBBBBBBBBBBB", "CCCCCCCCCCCCCCCCCCCC"
+	s, cookieFor := devSessionServer(t, fakeGatewayActorWorkplaces(t,
+		map[string][]string{staff: {staffWorkplace, otherWorkplace}}, nil))
+	seedLeaseAt(t, s.conn, "vtx.leaseapp.north", resA, staffWorkplace)
+	seedLeaseAt(t, s.conn, "vtx.leaseapp.south", resB, otherWorkplace)
+
+	rec := sessionGET(s, s.handleLeases, "/api/leases", cookieFor(staff))
+	var body struct {
+		Leases []leaseRow `json:"leases"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(body.Leases) != 2 {
+		t.Fatalf("two-building staffer's leases = %+v, want both", body.Leases)
+	}
+}
+
+// TestOperator_ReadsEveryLease: the primordial operator holds NO workplace and
+// still reads any lease — the exemption require_workplace gives root on the
+// write side (facet-staff-worlds-design.md §9). It is asserted against
+// bootstrap.RoleOperatorKey because /v1/actor forwards role VERTEX KEYS; a
+// fixture answering the canonical name "operator" would pass here while
+// matching nothing against a live Gateway.
+func TestOperator_ReadsEveryLease(t *testing.T) {
+	const root, res = "FFFFFFFFFFFFFFFFFFFF", "BBBBBBBBBBBBBBBBBBBB"
+	s, cookieFor := devSessionServer(t, fakeGatewayActorWorkplaces(t,
+		map[string][]string{}, map[string]bool{root: true}))
+	seedLeaseAt(t, s.conn, "vtx.leaseapp.theirs", res, otherWorkplace)
+
+	rec := sessionGET(s, s.handleLedger, "/api/ledger?leaseAppKey=vtx.leaseapp.theirs", cookieFor(root))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (an operator holds no workplace and still reads any lease); body=%s",
+			rec.Code, rec.Body.String())
+	}
+}
+
+// TestNonOperatorRole_IsNotExempt is the discriminating sibling of
+// TestOperator_ReadsEveryLease: a staffer carrying a REAL non-operator role
+// key is still confined to their workplace. Without a genuine second role key
+// in the fixture, a boundary that exempted anyone holding any role at all
+// would pass both tests — and the caller must also hold a workplace, or the
+// 403 could be the resident branch answering rather than the role term.
+func TestNonOperatorRole_IsNotExempt(t *testing.T) {
+	const other, res = "EEEEEEEEEEEEEEEEEEEE", "BBBBBBBBBBBBBBBBBBBB"
+	s, cookieFor := devSessionServer(t, fakeGatewayActorRoles(t,
+		map[string][]string{other: {staffWorkplace}},
+		map[string]bool{},
+		map[string][]string{other: {nonOperatorRoleKey}}))
+	seedLeaseAt(t, s.conn, "vtx.leaseapp.theirs", res, otherWorkplace)
+	seedLeaseAt(t, s.conn, "vtx.leaseapp.mine", res, staffWorkplace)
+
+	rec := sessionGET(s, s.handleLedger, "/api/ledger?leaseAppKey=vtx.leaseapp.theirs", cookieFor(other))
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403 (a role that is not the primordial operator confers no exemption); body=%s",
+			rec.Code, rec.Body.String())
+	}
+	// The positive half: the same caller, same role, a lease at their own
+	// workplace. Without it the 403 above could be a blanket denial.
+	ok := sessionGET(s, s.handleLedger, "/api/ledger?leaseAppKey=vtx.leaseapp.mine", cookieFor(other))
+	if ok.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (the role is irrelevant; the workplace is what admits); body=%s",
+			ok.Code, ok.Body.String())
+	}
+}
+
+// TestOperator_ReachesTheFrontDesk: the front desk gates on being staff, and
+// an operator holds no workplace, so without the explicit exemption root would
+// be locked out of the surface it is meant to be able to inspect.
+func TestOperator_ReachesTheFrontDesk(t *testing.T) {
+	const root = "FFFFFFFFFFFFFFFFFFFF"
+	s, cookieFor := devSessionServer(t, fakeGatewayActorWorkplaces(t,
+		map[string][]string{}, map[string]bool{root: true}))
+
+	putJSON(t, s.conn, frontdesk.BookingsBucket, "vtx.leaseapp.theirs", map[string]any{
+		"bookingKey": "vtx.booking.x", "leaseAppKey": "vtx.leaseapp.theirs", "sessionName": "Vinyasa Flow",
+	})
+
+	rec := sessionGET(s, s.handleFrontDeskBookings, "/api/frontdesk-bookings", cookieFor(root))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (an operator reaches the front desk); body=%s", rec.Code, rec.Body.String())
+	}
+	var body struct {
+		Bookings []bookingRow `json:"bookings"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	// Reaching the surface is not the same as being served its rows: without
+	// this the test would pass against an operator handed an empty grid.
+	if len(body.Bookings) != 1 {
+		t.Fatalf("operator's front-desk grid = %+v, want the row at a building they do not work at", body.Bookings)
+	}
+}
+
+// TestStaffWhoAlsoLives_SeesTheirOwnLeaseToo: one person, two hats. A café
+// staffer who works at one building and RENTS at another must still see their
+// own house tab — the write side says the ownership probe and the workplace
+// guard are complementary, not alternatives (require_workplace's own comment,
+// cafe-domain's ddls.go), and the read side has to agree. Resolving only the
+// staff half would take a staffer's own lease away from them the day they took
+// a job across town.
+func TestStaffWhoAlsoLives_SeesTheirOwnLeaseToo(t *testing.T) {
+	const dana, neighbour = "DDDDDDDDDDDDDDDDDDDD", "BBBBBBBBBBBBBBBBBBBB"
+	s, cookieFor := devSessionServer(t, fakeGatewayActorWorkplaces(t,
+		map[string][]string{dana: {staffWorkplace}}, nil))
+	// Dana's own lease is at the building she does NOT work at.
+	seedLeaseAt(t, s.conn, "vtx.leaseapp.danahome", dana, otherWorkplace)
+	// A lease at her workplace, held by somebody else — the staff half.
+	seedLeaseAt(t, s.conn, "vtx.leaseapp.atwork", neighbour, staffWorkplace)
+	// And a lease that is neither: not hers, not at her workplace.
+	seedLeaseAt(t, s.conn, "vtx.leaseapp.stranger", neighbour, otherWorkplace)
+
+	own := sessionGET(s, s.handleLedger, "/api/ledger?leaseAppKey=vtx.leaseapp.danahome", cookieFor(dana))
+	if own.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 — a staffer must still read their OWN lease's ledger; body=%s",
+			own.Code, own.Body.String())
+	}
+	atWork := sessionGET(s, s.handleLedger, "/api/ledger?leaseAppKey=vtx.leaseapp.atwork", cookieFor(dana))
+	if atWork.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 for a lease at her workplace; body=%s", atWork.Code, atWork.Body.String())
+	}
+	// The union must not become "everything": a lease that is neither hers nor
+	// at her workplace is still refused.
+	stranger := sessionGET(s, s.handleLedger, "/api/ledger?leaseAppKey=vtx.leaseapp.stranger", cookieFor(dana))
+	if stranger.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403 — the union of two hats is not every lease; body=%s",
+			stranger.Code, stranger.Body.String())
+	}
+
+	rec := sessionGET(s, s.handleLeases, "/api/leases", cookieFor(dana))
+	var body struct {
+		Leases []leaseRow `json:"leases"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(body.Leases) != 2 {
+		t.Fatalf("two-hat caller's leases = %+v, want exactly her own and her workplace's", body.Leases)
+	}
+}
+
+func TestHandleFrontDeskVisits_Staff_SeesOnlyCoveredLeases(t *testing.T) {
+	s, cookieFor, staff := staffAtOneBuilding(t)
+	for _, lease := range []string{"vtx.leaseapp.mine", "vtx.leaseapp.theirs"} {
+		putJSON(t, s.conn, frontdesk.VisitsBucket, lease, map[string]any{
+			"appointmentKey": "vtx.appointment." + lease, "leaseAppKey": lease,
+			"startsAt": "2026-07-27T09:00:00Z", "endsAt": "2026-07-27T09:30:00Z",
+		})
+	}
+
+	rec := sessionGET(s, s.handleFrontDeskVisits, "/api/frontdesk-visits", cookieFor(staff))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+	var body struct {
+		Visits []visitRow `json:"visits"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(body.Visits) != 1 || body.Visits[0].LeaseAppKey != "vtx.leaseapp.mine" {
+		t.Fatalf("front-desk visits = %+v, want only the lease at their own building", body.Visits)
+	}
+}
+
+// TestFrontDesk_MissingWorkplacesBucket_502 pins the deliberate asymmetry in
+// the front desk's best-effort posture. A missing FRONT-DESK bucket is
+// tolerated — that package is an optional cross-vertical join, so the grid
+// renders without its badges. A missing WORKPLACES bucket is not: it is the
+// confinement source, and answering an unconfined-looking empty grid would
+// read as "nobody is here today" while actually meaning "this app cannot tell
+// who you may see." It fails loudly instead.
+func TestFrontDesk_MissingWorkplacesBucket_502(t *testing.T) {
+	s, cookieFor, staff := staffAtOneBuilding(t)
+	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
+	defer cancel()
+	if err := s.conn.JetStream().DeleteKeyValue(ctx, cafedomain.LeaseWorkplacesBucket); err != nil {
+		t.Fatalf("delete %s: %v", cafedomain.LeaseWorkplacesBucket, err)
+	}
+
+	for _, tc := range []struct {
+		name string
+		h    http.HandlerFunc
+		path string
+	}{
+		{"bookings", s.handleFrontDeskBookings, "/api/frontdesk-bookings"},
+		{"lease-details", s.handleFrontDeskLeaseDetails, "/api/frontdesk-lease-details"},
+		{"visits", s.handleFrontDeskVisits, "/api/frontdesk-visits"},
+		{"tabs", s.handleTabs, "/api/tabs"},
+		{"leases", s.handleLeases, "/api/leases"},
+	} {
+		rec := sessionGET(s, tc.h, tc.path, cookieFor(staff))
+		if rec.Code != http.StatusBadGateway {
+			t.Errorf("%s: status = %d, want 502 — no confinement source must never read as an answer; body=%s",
+				tc.name, rec.Code, rec.Body.String())
+		}
 	}
 }
