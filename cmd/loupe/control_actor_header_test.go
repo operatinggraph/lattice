@@ -5,11 +5,11 @@ import (
 	"testing"
 	"time"
 
-	nats "github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/micro"
 	"github.com/stretchr/testify/require"
 
 	"github.com/operatinggraph/lattice/internal/controlauth"
+	"github.com/operatinggraph/lattice/internal/natsfixture"
 	"github.com/operatinggraph/lattice/internal/substrate"
 	"github.com/operatinggraph/lattice/internal/testutil"
 )
@@ -20,8 +20,7 @@ import (
 func TestControlRequest_StampsOperatorActorKey(t *testing.T) {
 	url := testutil.StartEmbeddedNATS(t)
 
-	nc, err := nats.Connect(url)
-	require.NoError(t, err)
+	nc := natsfixture.Connect(t, url)
 	t.Cleanup(nc.Close)
 
 	var gotActor string

@@ -27,6 +27,9 @@ func requireNATSStack(t *testing.T) *nats.Conn {
 	if url == "" {
 		url = "nats://localhost:4222"
 	}
+	// nats-connect: (probe) this dials the externally-run Docker stack to decide
+	// whether to skip, so it must fail FAST when nothing is listening; a fixture's
+	// generous budget would stall every stack-less run before skipping.
 	nc, err := nats.Connect(url, nats.Timeout(2*time.Second))
 	if err != nil {
 		t.Skipf("NATS stack not reachable (%v) — run `make up` first", err)

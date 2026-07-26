@@ -18,11 +18,11 @@ import (
 
 	natsserver "github.com/nats-io/nats-server/v2/server"
 	natstest "github.com/nats-io/nats-server/v2/test"
-	nats "github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 	"github.com/stretchr/testify/require"
 
 	"github.com/operatinggraph/lattice/internal/jsstore"
+	"github.com/operatinggraph/lattice/internal/natsfixture"
 	"github.com/operatinggraph/lattice/internal/refractor/adapter"
 	"github.com/operatinggraph/lattice/internal/refractor/consumer"
 	"github.com/operatinggraph/lattice/internal/refractor/control"
@@ -54,8 +54,7 @@ func newPL2Harness(t *testing.T) *pl2Harness {
 	s := natstest.RunServer(opts)
 	t.Cleanup(s.Shutdown)
 
-	nc, err := nats.Connect(s.ClientURL())
-	require.NoError(t, err)
+	nc := natsfixture.Connect(t, s.ClientURL())
 	t.Cleanup(nc.Close)
 
 	conn, err := substrate.Wrap(nc)

@@ -8,13 +8,13 @@ import (
 	"os"
 	"testing"
 
-	"github.com/nats-io/nats.go"
 	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	internalloom "github.com/operatinggraph/lattice/internal/loom"
 	"github.com/operatinggraph/lattice/internal/loom/control"
+	"github.com/operatinggraph/lattice/internal/natsfixture"
 	"github.com/operatinggraph/lattice/internal/testutil"
 )
 
@@ -64,8 +64,7 @@ func startLoomControlTest(t *testing.T, eng *fakeEngine) string {
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 
-	conn, err := nats.Connect(url)
-	require.NoError(t, err)
+	conn := natsfixture.Connect(t, url)
 	t.Cleanup(conn.Close)
 
 	// Explicit allow-all stub: these tests exercise the CLI→wire mechanics, not
@@ -97,8 +96,7 @@ func startLoomControlTestWithCapability(t *testing.T, eng *fakeEngine, cap contr
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 
-	conn, err := nats.Connect(url)
-	require.NoError(t, err)
+	conn := natsfixture.Connect(t, url)
 	t.Cleanup(conn.Close)
 
 	svc := control.NewService(eng, cap, testutil.TestLogger())

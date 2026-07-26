@@ -205,6 +205,12 @@ var (
 	// with `read tcp ...: i/o timeout`; internal/natsfixture owns the hardened
 	// fixture (see its package doc).
 	embeddedNATSCtor = regexp.MustCompile(`\bnatsserver\.NewServer\(|\bserver\.NewServer\(`)
+	// bareConnectCall anchors a direct nats.Connect in a test. natsfixture.Connect
+	// is the fixture path; a direct call inherits nats.go's 2s whole-handshake
+	// deadline with no retry. natsConnectShape is the declaration a deliberate
+	// direct call must carry, capturing the class and its trailing `<why>`.
+	bareConnectCall  = regexp.MustCompile(`\bnats\.Connect\(`)
+	natsConnectShape = regexp.MustCompile(`//\s*nats-connect:\s*\(([a-z-]+)\)(.*)$`)
 	// authContext.target shape declaration (authcontext-target-validated-
 	// primitive-design.md §5.5). authCtxTargetRef anchors any script reference
 	// to the forwarded, unvalidated field; authCtxTargetShape is the annotation
@@ -261,6 +267,19 @@ const loadOrGenerateExemptFile = "internal/pkgmgr/installer_test.go"
 // natsfixturePkg owns the embedded-NATS fixture, so it is the one place allowed to
 // construct a server directly.
 const natsfixturePkg = "internal/natsfixture/"
+
+// natsConnectClasses are the two reasons a test may dial NATS directly instead of
+// through natsfixture.Connect. Both are cases where the fixture's generous
+// handshake budget would be WRONG, not merely unnecessary — so they are declared,
+// never assumed.
+var natsConnectClasses = map[string]bool{
+	// (reject): the test asserts the connect is denied/fails. Retrying it on a
+	// long budget would turn a fast negative vector into a multi-minute one.
+	"reject": true,
+	// (probe): a liveness probe against an externally-run stack that must fail
+	// fast so the test can skip when the stack is down.
+	"probe": true,
+}
 
 // annotation is one classification comment: the raw line it sits on (sub-field
 // checks like `relation=` / `epoch=` read that line, not the annotated
@@ -446,6 +465,26 @@ func main() {
 // edit. Findings are fed back to the editing agent via a PostToolUse
 // hookSpecificOutput.additionalContext object on stdout (ignored harmlessly by a
 // harness that predates that field) and mirrored to stderr for the human.
+// repoRelative converts an absolute edit path to the repo-relative form every
+// scope test in scanSource is written against (`internal/…`, `packages/…`).
+// Without it the hook checks a DIFFERENT set of rules than CI: prefix-scoped
+// exemptions stop matching, so exempt files get flagged, and prefix-scoped
+// checks stop firing, so real findings go unreported.
+func repoRelative(path string) string {
+	if !filepath.IsAbs(path) {
+		return path
+	}
+	root, err := os.Getwd()
+	if err != nil {
+		return path
+	}
+	rel, err := filepath.Rel(root, path)
+	if err != nil || strings.HasPrefix(rel, "..") {
+		return path
+	}
+	return rel
+}
+
 func runHook() {
 	data, err := io.ReadAll(os.Stdin)
 	if err != nil {
@@ -463,7 +502,7 @@ func runHook() {
 	if path == "" || !strings.HasSuffix(path, ".go") {
 		return
 	}
-	findings := scanFile(path)
+	findings := scanFile(repoRelative(path))
 	if len(findings) == 0 {
 		return
 	}
@@ -523,6 +562,12 @@ func scanSource(path string, data []byte) []finding {
 		out = append(out, checkLensProtectedByDefault(path, string(data))...)
 	}
 	embeddedNATSScoped := !strings.HasPrefix(slash, natsfixturePkg)
+	// natsfixture proves the bare default's behavior, so it dials directly.
+	bareConnectScoped := isTest && !strings.HasPrefix(slash, natsfixturePkg)
+	var connectAt map[int]annotation
+	if bareConnectScoped {
+		connectAt = annotationSpans(strings.Split(string(data), "\n"), natsConnectShape)
+	}
 	loadOrGenerateScoped := isTest &&
 		!strings.HasPrefix(slash, "internal/bootstrap/") &&
 		!strings.HasPrefix(slash, "internal/testutil/") &&
@@ -558,6 +603,15 @@ func scanSource(path string, data []byte) []finding {
 		}
 		if !isTest && p7Discriminator.MatchString(line) {
 			out = append(out, finding{file: path, line: ln, msg: "P7 violation — discriminator aspect (.class/.family/.kind) shadows the envelope class; the type belongs on the vertex class field, resolved behind a fine-grained class by the step-6 instanceOf chain (lattice-architecture.md P7, Contract #1 §1.5)"})
+		}
+		if bareConnectScoped && bareConnectCall.MatchString(line) {
+			if a, ok := connectAt[ln]; !ok {
+				out = append(out, finding{file: path, line: ln, msg: "bare nats.Connect in a test — it inherits nats.go's 2s whole-handshake deadline with no retry, so a host stall fails it in a package nobody touched; use natsfixture.Connect(t, url, opts...), or declare `// nats-connect: (reject|probe) <why>` if a long budget would be wrong here"})
+			} else if !natsConnectClasses[a.shape] {
+				out = append(out, finding{file: path, line: ln, msg: "unknown nats-connect class (" + a.shape + ") — the declared reasons a test dials directly are (reject) the connect is asserted to fail, and (probe) a fast-failing liveness check against an externally-run stack"})
+			} else if strings.TrimSpace(a.why) == "" {
+				out = append(out, finding{file: path, line: ln, msg: "nats-connect: (" + a.shape + ") declaration carries no `<why>` — name what makes a long handshake budget wrong here, so the next reader need not re-derive it"})
+			}
 		}
 		if embeddedNATSScoped && embeddedNATSCtor.MatchString(line) {
 			out = append(out, finding{file: path, line: ln, msg: "hand-rolled embedded NATS fixture — a bare nats.Connect inherits nats.go's 2s whole-handshake deadline with no retry, so a host stall fails a random untouched package with `read tcp ...: i/o timeout`; use natsfixture.Server(t) / natsfixture.StartServer(t) (internal/natsfixture)"})

@@ -10,10 +10,10 @@ import (
 
 	natsserver "github.com/nats-io/nats-server/v2/server"
 	natstest "github.com/nats-io/nats-server/v2/test"
-	nats "github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 
 	"github.com/operatinggraph/lattice/internal/jsstore"
+	"github.com/operatinggraph/lattice/internal/natsfixture"
 	"github.com/operatinggraph/lattice/internal/substrate"
 )
 
@@ -24,10 +24,7 @@ func newStateTestStore(t *testing.T, ctx context.Context) *markStore {
 	opts := &natsserver.Options{Host: "127.0.0.1", Port: -1, JetStream: true, StoreDir: jsstore.Dir(t)}
 	srv := natstest.RunServer(opts)
 	t.Cleanup(srv.Shutdown)
-	nc, err := nats.Connect(srv.ClientURL())
-	if err != nil {
-		t.Fatalf("nats connect: %v", err)
-	}
+	nc := natsfixture.Connect(t, srv.ClientURL())
 	t.Cleanup(nc.Close)
 	conn, err := substrate.Wrap(nc)
 	if err != nil {

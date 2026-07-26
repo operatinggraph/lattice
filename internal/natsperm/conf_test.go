@@ -13,14 +13,15 @@ import (
 	"testing"
 	"time"
 
-	"github.com/operatinggraph/lattice/internal/bootstrap"
-	"github.com/operatinggraph/lattice/internal/jsstore"
-	"github.com/operatinggraph/lattice/internal/substrate"
 	"github.com/nats-io/nats-server/v2/server"
 	natsserver "github.com/nats-io/nats-server/v2/test"
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 	"github.com/nats-io/nkeys"
+	"github.com/operatinggraph/lattice/internal/bootstrap"
+	"github.com/operatinggraph/lattice/internal/jsstore"
+	"github.com/operatinggraph/lattice/internal/natsfixture"
+	"github.com/operatinggraph/lattice/internal/substrate"
 )
 
 // deniedTimeout bounds a publish we expect the server to reject: a denied
@@ -46,7 +47,7 @@ func repoRoot(t *testing.T) string {
 	return filepath.Clean(filepath.Join(filepath.Dir(thisFile), "..", ".."))
 }
 
-func confPath(t *testing.T) string  { return filepath.Join(repoRoot(t), "deploy", "nats-server.conf") }
+func confPath(t *testing.T) string { return filepath.Join(repoRoot(t), "deploy", "nats-server.conf") }
 func seedPath(t *testing.T, c string) string {
 	return filepath.Join(repoRoot(t), "deploy", "nkeys", c+".nk")
 }
@@ -938,15 +939,11 @@ func TestFacetSubscribeConfinement(t *testing.T) {
 	// error text ("Permissions Violation for Subscription to %q"), so the
 	// violation is matched by substring, not by identity.
 	violations := make(chan string, 4)
-	nc, err := nats.Connect(url, nkeyOpt, nats.ErrorHandler(func(_ *nats.Conn, _ *nats.Subscription, err error) {
+	nc := natsfixture.Connect(t, url, nkeyOpt, nats.ErrorHandler(func(_ *nats.Conn, _ *nats.Subscription, err error) {
 		if err != nil {
 			violations <- err.Error()
 		}
 	}))
-	if err != nil {
-		t.Fatalf("connect as facet: %v", err)
-	}
-	t.Cleanup(nc.Close)
 
 	deniedSubject := "lattice.sync.user.someidentity12345678"
 	if _, err := nc.Subscribe(deniedSubject, func(*nats.Msg) {}); err != nil {

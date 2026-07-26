@@ -8,11 +8,11 @@ import (
 	"os"
 	"testing"
 
-	"github.com/nats-io/nats.go"
 	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/operatinggraph/lattice/internal/natsfixture"
 	"github.com/operatinggraph/lattice/internal/testutil"
 	internalweaver "github.com/operatinggraph/lattice/internal/weaver"
 	"github.com/operatinggraph/lattice/internal/weaver/control"
@@ -61,8 +61,7 @@ func startWeaverControlTest(t *testing.T, eng *fakeEngine) string {
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 
-	conn, err := connectRaw(t, url)
-	require.NoError(t, err)
+	conn := natsfixture.Connect(t, url)
 
 	// Explicit allow-all stub: these tests exercise the CLI→wire mechanics, not
 	// capability enforcement (a nil checker fails closed). Auth is covered by the
@@ -93,8 +92,7 @@ func startWeaverControlTestWithCapability(t *testing.T, eng *fakeEngine, cap con
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 
-	conn, err := connectRaw(t, url)
-	require.NoError(t, err)
+	conn := natsfixture.Connect(t, url)
 
 	svc := control.NewService(eng, cap, testutil.TestLogger())
 	require.NoError(t, svc.StartNATSListener(ctx, conn))
@@ -137,12 +135,6 @@ func TestWeaverList_DefaultActorFallsBackToCredentialFile(t *testing.T) {
 	_, err := runCmd(t, cmd, []string{"list"})
 	require.NoError(t, err)
 	assert.Equal(t, "vtx.identity.CREDFILE", rec.last)
-}
-
-// connectRaw opens a plain *nats.Conn for the control service under test.
-func connectRaw(t *testing.T, url string) (*nats.Conn, error) {
-	t.Helper()
-	return nats.Connect(url)
 }
 
 // runCmd executes cmd with args, capturing stdout. Returns stdout and the

@@ -18,6 +18,7 @@ import (
 
 	"github.com/operatinggraph/lattice/internal/bridge"
 	"github.com/operatinggraph/lattice/internal/jsstore"
+	"github.com/operatinggraph/lattice/internal/natsfixture"
 	"github.com/operatinggraph/lattice/internal/opstatus"
 	"github.com/operatinggraph/lattice/internal/substrate"
 )
@@ -64,8 +65,7 @@ func startNATS(t *testing.T) *nats.Conn {
 	opts := &natsserver.Options{Host: "127.0.0.1", Port: -1, JetStream: true, StoreDir: jsstore.Dir(t)}
 	s := natstest.RunServer(opts)
 	t.Cleanup(s.Shutdown)
-	nc, err := nats.Connect(s.ClientURL())
-	require.NoError(t, err)
+	nc := natsfixture.Connect(t, s.ClientURL())
 	t.Cleanup(nc.Close)
 	return nc
 }

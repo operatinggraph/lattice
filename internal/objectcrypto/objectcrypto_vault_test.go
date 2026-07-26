@@ -8,12 +8,13 @@ import (
 	"testing"
 	"time"
 
-	"github.com/operatinggraph/lattice/internal/jsstore"
-	"github.com/operatinggraph/lattice/internal/substrate"
-	"github.com/operatinggraph/lattice/internal/vault"
 	"github.com/nats-io/nats-server/v2/server"
 	natsserver "github.com/nats-io/nats-server/v2/test"
 	"github.com/nats-io/nats.go"
+	"github.com/operatinggraph/lattice/internal/jsstore"
+	"github.com/operatinggraph/lattice/internal/natsfixture"
+	"github.com/operatinggraph/lattice/internal/substrate"
+	"github.com/operatinggraph/lattice/internal/vault"
 )
 
 // newVaultRPCConn stands up an in-process NATS server and returns a
@@ -36,10 +37,7 @@ func newVaultRPCConn(t *testing.T) (*substrate.Conn, *nats.Conn, context.Context
 		_ = server.VERSION
 	})
 
-	nc, err := nats.Connect(s.ClientURL())
-	if err != nil {
-		t.Fatalf("nats.Connect: %v", err)
-	}
+	nc := natsfixture.Connect(t, s.ClientURL())
 	t.Cleanup(nc.Close)
 
 	conn, err := substrate.Wrap(nc)

@@ -20,12 +20,12 @@ import (
 
 	natsserver "github.com/nats-io/nats-server/v2/server"
 	natstest "github.com/nats-io/nats-server/v2/test"
-	nats "github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 	"github.com/stretchr/testify/require"
 
 	"github.com/operatinggraph/lattice/internal/bootstrap"
 	"github.com/operatinggraph/lattice/internal/jsstore"
+	"github.com/operatinggraph/lattice/internal/natsfixture"
 	"github.com/operatinggraph/lattice/internal/pkgmgr"
 	"github.com/operatinggraph/lattice/internal/refractor/adapter"
 	"github.com/operatinggraph/lattice/internal/refractor/consumer"
@@ -45,8 +45,7 @@ func TestRefractor_MyTasksLens_AssignedToTrigger_E2E(t *testing.T) {
 	s := natstest.RunServer(opts)
 	defer s.Shutdown()
 
-	nc, err := nats.Connect(s.ClientURL())
-	require.NoError(t, err)
+	nc := natsfixture.Connect(t, s.ClientURL())
 	defer nc.Close()
 
 	conn, err := substrate.Wrap(nc)
@@ -151,14 +150,14 @@ func TestRefractor_MyTasksLens_AssignedToTrigger_E2E(t *testing.T) {
 	writeLink := func(srcType, srcID, rel, dstType, dstID string) {
 		linkKey := substrate.LinkKey(srcType, srcID, rel, dstType, dstID)
 		body := map[string]any{
-			"key":          linkKey,
-			"class":        "link",
-			"isDeleted":    false,
-			"createdAt":    provenanceAt,
+			"key":            linkKey,
+			"class":          "link",
+			"isDeleted":      false,
+			"createdAt":      provenanceAt,
 			"lastModifiedAt": provenanceAt,
-			"sourceVertex": substrate.VertexKey(srcType, srcID),
-			"targetVertex": substrate.VertexKey(dstType, dstID),
-			"localName":    rel,
+			"sourceVertex":   substrate.VertexKey(srcType, srcID),
+			"targetVertex":   substrate.VertexKey(dstType, dstID),
+			"localName":      rel,
 		}
 		data, jerr := json.Marshal(body)
 		require.NoError(t, jerr)

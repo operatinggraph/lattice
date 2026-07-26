@@ -8,11 +8,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/operatinggraph/lattice/internal/jsstore"
 	"github.com/nats-io/nats-server/v2/server"
 	natsserver "github.com/nats-io/nats-server/v2/test"
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nkeys"
+	"github.com/operatinggraph/lattice/internal/jsstore"
+	"github.com/operatinggraph/lattice/internal/natsfixture"
 )
 
 // newUserNKey mints a fresh NATS user NKey, writes its seed to a temp file,
@@ -165,10 +166,7 @@ func TestConnect_MissingCredsFile_Errors(t *testing.T) {
 func TestWrap_RoundTrip(t *testing.T) {
 	t.Parallel()
 	url := startEmbeddedNATS(t)
-	nc, err := nats.Connect(url, nats.Name("wrap-test"))
-	if err != nil {
-		t.Fatalf("nats.Connect: %v", err)
-	}
+	nc := natsfixture.Connect(t, url, nats.Name("wrap-test"))
 	t.Cleanup(nc.Close)
 
 	c, err := Wrap(nc)
@@ -198,10 +196,7 @@ func TestWrap_RoundTrip(t *testing.T) {
 func TestWrap_ClosedConn_FailsOnUse(t *testing.T) {
 	t.Parallel()
 	url := startEmbeddedNATS(t)
-	nc, err := nats.Connect(url)
-	if err != nil {
-		t.Fatalf("nats.Connect: %v", err)
-	}
+	nc := natsfixture.Connect(t, url)
 	nc.Close()
 
 	c, err := Wrap(nc)

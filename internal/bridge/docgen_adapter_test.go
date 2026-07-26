@@ -10,12 +10,12 @@ import (
 
 	natsserver "github.com/nats-io/nats-server/v2/server"
 	natstest "github.com/nats-io/nats-server/v2/test"
-	nats "github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 	"github.com/stretchr/testify/require"
 
 	"github.com/operatinggraph/lattice/internal/bridge"
 	"github.com/operatinggraph/lattice/internal/jsstore"
+	"github.com/operatinggraph/lattice/internal/natsfixture"
 	"github.com/operatinggraph/lattice/internal/substrate"
 )
 
@@ -36,8 +36,7 @@ func startDocGenStore(t *testing.T) *substrate.Conn {
 	opts := &natsserver.Options{Host: "127.0.0.1", Port: -1, JetStream: true, StoreDir: jsstore.Dir(t)}
 	s := natstest.RunServer(opts)
 	t.Cleanup(s.Shutdown)
-	nc, err := nats.Connect(s.ClientURL())
-	require.NoError(t, err)
+	nc := natsfixture.Connect(t, s.ClientURL())
 	t.Cleanup(nc.Close)
 	conn, err := substrate.Wrap(nc)
 	require.NoError(t, err)

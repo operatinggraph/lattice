@@ -206,6 +206,10 @@ func connectEdge(t *testing.T, url, bearerToken, identity, deviceName string) (*
 	var nc *nats.Conn
 	var err error
 	for attempt := 1; attempt <= maxEdgeConnectAttempts; attempt++ {
+		// nats-connect: (reject) this helper RETURNS the error because callers
+		// assert authorization denial; a fixture's retry budget would turn every
+		// negative vector into a multi-minute wait for a failure that is the
+		// point of the test.
 		nc, err = nats.Connect(url, opts...)
 		if err == nil || !strings.Contains(err.Error(), pongPingHandshakeRace) {
 			break

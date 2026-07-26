@@ -10,10 +10,10 @@ import (
 
 	natsserver "github.com/nats-io/nats-server/v2/server"
 	natstest "github.com/nats-io/nats-server/v2/test"
-	nats "github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 
 	"github.com/operatinggraph/lattice/internal/jsstore"
+	"github.com/operatinggraph/lattice/internal/natsfixture"
 	"github.com/operatinggraph/lattice/internal/refractor/adapter"
 	"github.com/operatinggraph/lattice/internal/refractor/lens"
 	"github.com/operatinggraph/lattice/internal/refractor/personalinterest"
@@ -31,10 +31,7 @@ func newPersonalTestBucket(t *testing.T, bucket string) *substrate.KV {
 	s := natstest.RunServer(opts)
 	t.Cleanup(s.Shutdown)
 
-	nc, err := nats.Connect(s.ClientURL())
-	if err != nil {
-		t.Fatalf("connect: %v", err)
-	}
+	nc := natsfixture.Connect(t, s.ClientURL())
 	t.Cleanup(nc.Close)
 
 	conn, err := substrate.Wrap(nc)
@@ -308,7 +305,7 @@ func TestPersonalEnvelopeFn_InterestSet_RelevantType_Proceeds(t *testing.T) {
 // delta an actor may not read is denied even when a device declares it
 // relevant (personal-secure-lens-design.md §3.4).
 func TestPersonalEnvelopeFn_SecurityWinsOverRelevance(t *testing.T) {
-	capKV := newPersonalTestBucket(t, "capability-kv")     // empty: no grant at all
+	capKV := newPersonalTestBucket(t, "capability-kv") // empty: no grant at all
 	interestKV := newPersonalTestBucket(t, "personal-lens-interest")
 	if err := personalinterest.Register(context.Background(), interestKV, "Hj4kPmRtw9nbCxz5vQ2y", "device1",
 		[]string{"task"}, nil, time.Now().UTC().Format(time.RFC3339)); err != nil {

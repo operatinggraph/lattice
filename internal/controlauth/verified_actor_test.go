@@ -14,6 +14,7 @@ import (
 	"github.com/nats-io/nats.go/micro"
 
 	"github.com/operatinggraph/lattice/internal/gateway/auth"
+	"github.com/operatinggraph/lattice/internal/natsfixture"
 	"github.com/operatinggraph/lattice/internal/testutil"
 )
 
@@ -69,10 +70,7 @@ func TestResolveActor_NilVerifier_PassesThroughRawHeader(t *testing.T) {
 	srv := startResolveEchoService(t, nil)
 	defer srv.Stop()
 
-	nc, err := nats.Connect(srv.natsURL)
-	if err != nil {
-		t.Fatalf("connect: %v", err)
-	}
+	nc := natsfixture.Connect(t, srv.natsURL)
 	defer nc.Close()
 
 	reply, err := nc.RequestMsg(NewActorRequestMsg("controlauth.test.resolve", "vtx.identity.OPERATOR"), 2*time.Second)
@@ -88,10 +86,7 @@ func TestResolveActor_NilVerifier_NoHeaderResolvesEmpty(t *testing.T) {
 	srv := startResolveEchoService(t, nil)
 	defer srv.Stop()
 
-	nc, err := nats.Connect(srv.natsURL)
-	if err != nil {
-		t.Fatalf("connect: %v", err)
-	}
+	nc := natsfixture.Connect(t, srv.natsURL)
 	defer nc.Close()
 
 	reply, err := nc.RequestMsg(NewActorRequestMsg("controlauth.test.resolve", ""), 2*time.Second)
@@ -116,10 +111,7 @@ func TestResolveActor_VerifierConfigured_ValidTokenResolvesActorID(t *testing.T)
 
 	srv := startResolveEchoService(t, av)
 	defer srv.Stop()
-	nc, err := nats.Connect(srv.natsURL)
-	if err != nil {
-		t.Fatalf("connect: %v", err)
-	}
+	nc := natsfixture.Connect(t, srv.natsURL)
 	defer nc.Close()
 
 	token := signTestToken(t, priv, testVerifierKID, validTestClaims("HWiis7G8Q9pqmc2nm5x1"))
@@ -269,10 +261,7 @@ func startResolveEchoService(t *testing.T, verifier *ActorVerifier) *resolveEcho
 	t.Helper()
 	url := testutil.StartEmbeddedNATS(t)
 
-	nc, err := nats.Connect(url)
-	if err != nil {
-		t.Fatalf("connect: %v", err)
-	}
+	nc := natsfixture.Connect(t, url)
 
 	svc, err := micro.AddService(nc, micro.Config{Name: "controlauth-resolve-test", Version: "0.0.1"})
 	if err != nil {

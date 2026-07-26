@@ -11,11 +11,11 @@ import (
 
 	natsserver "github.com/nats-io/nats-server/v2/server"
 	"github.com/nats-io/nats-server/v2/test"
-	nats "github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 	"github.com/stretchr/testify/require"
 
 	"github.com/operatinggraph/lattice/internal/jsstore"
+	"github.com/operatinggraph/lattice/internal/natsfixture"
 	"github.com/operatinggraph/lattice/internal/refractor/lens"
 	"github.com/operatinggraph/lattice/internal/substrate"
 )
@@ -31,8 +31,7 @@ func TestCoreKVSource_LoadsLensFromAspect(t *testing.T) {
 	s := test.RunServer(opts)
 	defer s.Shutdown()
 
-	nc, err := nats.Connect(s.ClientURL())
-	require.NoError(t, err)
+	nc := natsfixture.Connect(t, s.ClientURL())
 	defer nc.Close()
 
 	conn, err := substrate.Wrap(nc)
@@ -110,8 +109,7 @@ func TestCoreKVSource_LoadsLensFromAspect_SpecBeforeParent(t *testing.T) {
 	s := test.RunServer(opts)
 	defer s.Shutdown()
 
-	nc, err := nats.Connect(s.ClientURL())
-	require.NoError(t, err)
+	nc := natsfixture.Connect(t, s.ClientURL())
 	defer nc.Close()
 
 	conn, err := substrate.Wrap(nc)
@@ -178,8 +176,7 @@ func TestCoreKVSource_SkipsEventStreamSpec(t *testing.T) {
 	s := test.RunServer(opts)
 	defer s.Shutdown()
 
-	nc, err := nats.Connect(s.ClientURL())
-	require.NoError(t, err)
+	nc := natsfixture.Connect(t, s.ClientURL())
 	defer nc.Close()
 
 	conn, err := substrate.Wrap(nc)
@@ -262,8 +259,7 @@ func TestCoreKVSource_ReplaysOnRestart(t *testing.T) {
 	s := test.RunServer(opts)
 	defer s.Shutdown()
 
-	nc, err := nats.Connect(s.ClientURL())
-	require.NoError(t, err)
+	nc := natsfixture.Connect(t, s.ClientURL())
 	defer nc.Close()
 
 	conn, err := substrate.Wrap(nc)
@@ -346,8 +342,7 @@ func TestCoreKVSource_MigratesFromLegacyFixedDurable(t *testing.T) {
 	s := test.RunServer(opts)
 	defer s.Shutdown()
 
-	nc, err := nats.Connect(s.ClientURL())
-	require.NoError(t, err)
+	nc := natsfixture.Connect(t, s.ClientURL())
 	defer nc.Close()
 
 	conn, err := substrate.Wrap(nc)

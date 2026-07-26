@@ -53,6 +53,7 @@ import (
 	"github.com/operatinggraph/lattice/internal/bootstrap"
 	"github.com/operatinggraph/lattice/internal/bridge"
 	"github.com/operatinggraph/lattice/internal/jsstore"
+	"github.com/operatinggraph/lattice/internal/natsfixture"
 	"github.com/operatinggraph/lattice/internal/opstatus"
 	"github.com/operatinggraph/lattice/internal/pkgmgr"
 	"github.com/operatinggraph/lattice/internal/processor"
@@ -88,8 +89,7 @@ func newHarness(t *testing.T, prepare func(*bridge.FakeAugur)) *harness {
 	s := natstest.RunServer(opts)
 	t.Cleanup(s.Shutdown)
 
-	nc, err := nats.Connect(s.ClientURL())
-	require.NoError(t, err)
+	nc := natsfixture.Connect(t, s.ClientURL())
 	t.Cleanup(nc.Close)
 	conn, err := substrate.Wrap(nc)
 	require.NoError(t, err)

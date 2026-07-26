@@ -13,6 +13,7 @@ import (
 	"github.com/nats-io/nats.go/jetstream"
 
 	"github.com/operatinggraph/lattice/internal/jsstore"
+	"github.com/operatinggraph/lattice/internal/natsfixture"
 	"github.com/operatinggraph/lattice/internal/substrate"
 )
 
@@ -31,10 +32,7 @@ func newSweepHarness(t *testing.T, ctx context.Context, opts ...func(*Config)) *
 	srvOpts := &natsserver.Options{Host: "127.0.0.1", Port: -1, JetStream: true, StoreDir: jsstore.Dir(t)}
 	srv := natstest.RunServer(srvOpts)
 	t.Cleanup(srv.Shutdown)
-	nc, err := nats.Connect(srv.ClientURL())
-	if err != nil {
-		t.Fatalf("nats connect: %v", err)
-	}
+	nc := natsfixture.Connect(t, srv.ClientURL())
 	t.Cleanup(nc.Close)
 	conn, err := substrate.Wrap(nc)
 	if err != nil {

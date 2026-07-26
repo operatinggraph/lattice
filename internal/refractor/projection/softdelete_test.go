@@ -8,10 +8,10 @@ import (
 
 	natsserver "github.com/nats-io/nats-server/v2/server"
 	natstest "github.com/nats-io/nats-server/v2/test"
-	nats "github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 
 	"github.com/operatinggraph/lattice/internal/jsstore"
+	"github.com/operatinggraph/lattice/internal/natsfixture"
 	"github.com/operatinggraph/lattice/internal/refractor/adapter"
 	"github.com/operatinggraph/lattice/internal/refractor/projection"
 	"github.com/operatinggraph/lattice/internal/substrate"
@@ -84,10 +84,7 @@ func startTargetKV(t *testing.T) *substrate.KV {
 	opts := &natsserver.Options{Host: "127.0.0.1", Port: -1, JetStream: true, StoreDir: jsstore.Dir(t)}
 	s := natstest.RunServer(opts)
 	t.Cleanup(s.Shutdown)
-	nc, err := nats.Connect(s.ClientURL())
-	if err != nil {
-		t.Fatalf("connect: %v", err)
-	}
+	nc := natsfixture.Connect(t, s.ClientURL())
 	t.Cleanup(nc.Close)
 	js, err := jetstream.New(nc)
 	if err != nil {
