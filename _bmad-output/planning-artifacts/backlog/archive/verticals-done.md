@@ -2,6 +2,12 @@
 
 Rolled from `verticals.md` when its live Done log passed ~25 entries. Full detail is in git.
 
+- 2026-07-22 · `35ca90f5` · `seed-showcase.go`'s `ensureStaff` resolves by `holdsRole` instead of an ambiguous `worksAt` scan — was silently mis-resolving `FACET_STAFF_NANOID` to the maintenance tech once F5 gave it a second `worksAt` link
+- 2026-07-22 · `28c69837` · `RecordIdentityPII` scoped to unclaimed identities for standing frontOfHouse/backOfHouse grants; operator + task/self-scoped submissions exempt — facet-staff-worlds-design.md §3.2
+- 2026-07-22 · `3d98f51c` · Café `VoidCharge` — corrects a mis-tapped charge; mirrors Charge's OCC-conditioned totalCents accumulate but subtracts, clamped at 0; operator/frontOfHouse only, no self-service grant (fraud vector)
+- 2026-07-21 · `e269c27d` · Facet staff worlds F5 Inc 2 — `edgeStaffWorkOrders` workplace-spine lens (first inbound var-length walk) + grant branch + offline-capable Work-order UI; severed-network resolve→drain live-proven
+- 2026-07-21 · `5f2517ab` · Facet staff worlds F5 Inc 1 — `maintenance-domain` work orders; ResolveWorkOrder is the op the queued task grants, §10.6 auto-complete closes it, so no completion op exists
+- 2026-07-21 · `5f2517ab` · Maintenance work-order producer CLOSED — shipped in F5 Inc 1; identical-notes re-resolve is an accepted no-op so an offline drain retry cannot lose the tech's work
 - 2026-07-21 · `566d710a` · Showcase demo session no longer ages out — wellness session id rolls by UTC day so a reseed always mints a FUTURE class + Nearby hides past-start entities; live-proven (rolled FUTURE, legacy fixed PAST + filtered)
 - 2026-07-21 · `bded5cc8` · scope=self ownership guards treat a tombstoned link as absent — café/clinic/wellness `== None` probes adopt F4's `== None or .isDeleted` (7 sites); tombstoned applicationFor drives Rejected (accepts without the fix)
 - 2026-07-20 · `a3fa5318` · Facet staff worlds F4 — worksAt write confinement, the multi-org gate; live: staff AuthDenied at a second building, operator unconfined

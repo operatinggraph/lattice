@@ -25,25 +25,12 @@ buildable-first; F11–F13 gated on lattice cross-lane asks (§6 there).
 
 | Item | What it is | Imp | Size | State |
 |---|---|---|---|---|
-| **F13 — Chronicler Time Machine** | Flow-history browser + map scrubber + ledger browser (platform-edges brief §4 L1–L3); overrides the Chronicler design's "rides F6" display note (Loupe scope). | ★★★ | L | 🚧 L1 reconciled (shipped Flows tab satisfies it, no rebuild) + L2 v1 SHIPPED (flow-liveness scrubber); L2-full/L3 blocked-on: Chronicler archive mode (lattice, unscheduled) · [UX §4](../../implementation-artifacts/loupe-platform-edges-ux.md) |
-| **F22 — lens Contents panel handles `nats_subject` targets** | `lensRowsTarget` (cmd/loupe/lens.go:393) knows only `nats_kv` and `postgres`, so a valid `nats_subject` lens falls to `default` and renders as a red "unknown targetType" malformed-spec error — visible in the public demo. The platform accepts three types; a `nats_subject` target is a per-actor delta stream with no stored rows by design. Add a third rows-target kind, keeping `default` for real malformations. | ★★ | S | ✅ SHIPPED |
-
-## New capability surfaces — 2026-07-18 PO survey
-
-Gaps found wearing the PO hat: Lattice platform capabilities shipped since Loupe's last feature work
-(~F15, 2026-07-07) that have **no operator surface** in the console today (all CLI-only). Pipeline: each
-needs a Sally UX pass → Winston adjudicates (Andrew-delegated for this program) → Loupe Steward builds.
-
-| Item | What it is | Imp | Size | State |
-|---|---|---|---|---|
+| **F13 — Chronicler Time Machine (L2-full + L3)** | L1 is satisfied by the shipped Flows tab and L2 v1 by the flow-liveness scrubber; scrubbing past the live window and browsing the ledger both need history Loupe cannot read yet. | ★★★ | L | 🚧 blocked-on: Chronicler archive mode (lattice, Andrew-deferred) · [UX §4](../../implementation-artifacts/loupe-platform-edges-ux.md) |
 
 ## Component maintenance
 
 | Item | What it is | Imp | Size | State |
 |---|---|---|---|---|
-| **Loupe's cross-origin gate is the weaker fork of the shipped kit gate** | Loupe kept its own ~110-line copy of the kit's origin gate + public-origin parser; the decision is now the shared `appsession.OriginGate`, with Loupe rendering only its own 403 shape. | ★ | S | ✅ SHIPPED — kit half `1a0d1849` extracted the gate off `*Manager`; console half `256229a4` · [kit](../../../docs/components/appsession.md) |
-| **Capability apply has no in-console recovery from a half-commit** | `/apply` is two Processor commits (install, then the closing mark op). When only the first lands the package is live but the proposal still reads approved, and Apply can never repair it — the plan builder refuses a `newPackage` name that is now installed. Recovery meant hand-submitting the op via CLI. | ★ | S | ✅ SHIPPED |
-| **Loupe package install can't resolve non-operator GrantsTo roles** | `cmd/loupe/pkg.go` `kernelRoleIDs()` resolves only `operator`, so installing/upgrading any package whose permissions grant `consumer`/`frontOfHouse`/`backOfHouse`/`provider` through Loupe's admin UI fails on GrantsTo resolution. | ★★ | S | ✅ SHIPPED — fixed in passing by `4790992b` (Verticals lane); roster now mirrors `cmd/lattice-pkg` |
 
 ## Parked
 
@@ -103,8 +90,5 @@ One line per shipped item (`date · SHA · [tag] title`). Oldest roll to `archiv
 - 2026-07-06 · `c5e1c80` · [Loupe/F13] L1 reconciled + L2 v1 map scrubber (flow-liveness replay); 3-layer review fixed forward; verified live + CI green
 - 2026-07-06 · `f7c7e36` · [Loupe/maint] Ad-hoc (Andrew) — human-scale `freshness` "ago" past a minute (`32914s ago` → `9h ago`); single-point fix; verified live + CI green
 - 2026-07-06 · `78ca047` · [Loupe/F12 inc.3] Crypto-shred proof view — `#/graph/<identity>?view=shred`, typed-confirm `ShredIdentityKey` via `/api/op`; F12 CLOSED; 3-layer review fixed forward; verified live + CI green
-- 2026-07-06 · `fa78cde` · [Loupe/F12 inc.2] Reveal — audited decrypt in the Graph explorer (`POST /api/vault/decrypt`, sealed/revealed aspect rows); 3-layer review fixed forward; verified live + CI green
-- 2026-07-06 · `8742f49` · [Loupe/F12 inc.1] Vault component page — metrics line + `GET /api/vault/shreds` read-only shred-status fleet view (in-flight identities linked into the Graph explorer); verified live, lead self-review
-- 2026-07-04 · `cc0df14` · [Loupe/F14] Map scale — package-grouped lens cluster cards (exception-first density, filter) + verticals as curated door-band `app` nodes (offline≠red); verified live, lead self-review
 
 Older entries (F1–F11, deploy) rolled to [`archive/loupe-done.md`](archive/loupe-done.md).
