@@ -362,3 +362,70 @@ empty grid would read as "nobody is here today" rather than "this app cannot tel
 `containedIn` branch; both write-side walks keep only the last parent per level. The union is the correct
 half and the single-branch walk is the bug — it keeps the existing `worksAt_covers` lane row, updated.
 Unreachable in today's single-parent topology.
+
+## 10. `worksAt_covers` follows every containment parent — fire brief (Winston, 2026-07-26)
+
+**Scope sentence (verbatim, from the lane row):** *the upward walk keeps the LAST non-deleted
+`containedIn` target per level and discards the rest, so a location with two parents confines a staffer
+wired to the other one out of writes they hold — while both read-side `coveringLocations` lenses union
+every branch, the correct half. Denial not leak, unreachable in today's single-parent topology; the sides
+should agree.*
+
+**Scope-diff gate.** Narrow-only against §9.3's filed residual, with one correction the row itself got
+wrong: the row (and §9.3) name **three** packages. A live grep names **nine copies of the function across
+seven packages** — the guard is pasted per *script*, not per package, so wellness-domain alone holds three.
+Fixing the three the row names would leave six copies of the same defect and a corpus that disagrees with
+itself. The fire covers all nine. Nothing else is in scope: no new confinement, no call-site changes, no
+touch to the read side (which is already correct).
+
+**Verified touch-list** (`file:line`, checked live at `e4940151`):
+
+| Site | Constants | `def worksAt_covers` |
+|---|---|---|
+| `packages/cafe-domain/ddls.go` | 414–416 | 441–468 |
+| `packages/cafe-ledger/scripts.go` | 192–194 | 219–246 |
+| `packages/clinic-domain/ddls.go` | 1608–1610 | 1635–1662 |
+| `packages/clinic-reminders/visitseries.go` | 403–405 | 427–455 |
+| `packages/lease-signing/scripts.go` | 203–205 | 230–257 |
+| `packages/maintenance-domain/ddls.go` | 265–267 | 292–319 |
+| `packages/wellness-domain/ddls.go` (studio) | 806–808 | 833–860 |
+| `packages/wellness-domain/ddls.go` (session) | 1086–1088 | 1113–1140 |
+| `packages/wellness-domain/ddls.go` (booking) | 1552–1553 | 1555–1582 |
+
+All nine bodies are byte-identical but for comment prose (clinic-reminders' differs; the logic does not).
+Fourteen op call sites route through them — cafe OpenTab/Charge/VoidCharge/Settle, cafe-ledger
+CreditCafeAccount, clinic CreateAppointment/Reschedule/SetStatus, clinic-reminders Start/ChangeVisitSeries,
+lease-signing DecideLeaseApplication, maintenance ReportIssue, wellness CreateStudio/CreateSession/
+CreateBooking/CancelBooking — none of which change.
+
+**Precedent to mirror.** The read side is the specification: `[(l)-[:appliesToUnit]->(u)-[:containedIn*0..7]->(c) | c.key]`
+(`cafe-domain/lenses.go:106`, `wellness-domain/lenses.go:182,240`) unions every branch to depth 0..7. The
+write side must compute the same covering set. `range(WORKPLACE_MAX_DEPTH)` with `WORKPLACE_MAX_DEPTH = 8`
+already tests 8 levels = depths 0..7, so the *bound* matches (`1532a6c5` pinned it); only the *breadth*
+diverges.
+
+**The change.** The linear `cur = one parent` walk becomes a breadth-first frontier that expands every
+non-deleted `containedIn` target, deduped through a `seen` list and capped at `WORKPLACE_MAX_NODES = 64`
+distinct nodes in addition to the existing depth and per-level page bounds. Exhausting any bound falls
+through to `return False` — a denial, matching how an unresolvable topology already fails closed. A
+malformed (non-3-segment) key stops *its own branch* rather than aborting the walk, which preserves today's
+denial for the single-candidate case that `wellness-domain/ddls.go:921` relies on.
+
+**This can only convert false denials into allows, and only ones the read side already grants.** In a
+single-parent topology every input produces a byte-identical answer, which is why no existing test moves.
+
+**Increment order + green checks.** One increment: all nine bodies, seven version bumps
+(`package.go` + `manifest.yaml`), then the new multi-parent test. `go build ./... && make vet &&
+golangci-lint run ./... && STRICT=1 go run ./scripts/lint-conventions.go && STRICT=1 go run
+./scripts/lint-package-version.go` plus `go test ./packages/...`.
+
+**Gotcha in scope.** Every package whose script text changes needs a version bump or the install no-ops
+(`feedback_package_edit_needs_version_bump`) — seven of them, each in two files that a drift test pins.
+
+**Test.** No existing test builds a multi-parent containment topology (verified across
+`{cafe-domain,cafe-ledger,wellness-domain}/workplace_confinement_test.go`), so today's suite cannot see
+the defect. The fire adds one that wires a unit under *two* buildings and a staffer to the branch the old
+walk discarded — red before, green after.
+
+**Non-goals.** Collapsing the nine copies into a shared prelude (its own lane row, `★ M`); any change to
+`require_workplace`, `workplace_exempt`, `actor_holds_operator`, or the read-side lenses.
