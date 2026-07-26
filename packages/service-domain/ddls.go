@@ -565,6 +565,8 @@ def parts_of(key, name, want_type):
         fail("InvalidArgument: " + name + ": required vtx.<type>.<NanoID> (exactly 3 segments); got " + key)
     if parts[1] == "":
         fail("InvalidArgument: " + name + ": empty type segment; required vtx.<type>.<NanoID>; got " + key)
+    if parts[2] == "":
+        fail("InvalidArgument: " + name + ": empty id segment; required vtx.<type>.<NanoID>; got " + key)
     if want_type != "" and parts[1] != want_type:
         fail("InvalidArgument: " + name + ": required vtx." + want_type + ".<NanoID>; got " + key)
     return parts[1], parts[2]
@@ -806,11 +808,13 @@ def parts_of(key, name, want_type):
     # Parses a VERTEX key: exactly 3 segments vtx.<type>.<NanoID>. A non-3
     # segment key (e.g. an aspect/link key, or a vertex key with a stray tail)
     # is rejected, not silently truncated to its first three segments.
-    parts = split_key(key)
+    parts = key.split(".")
     if len(parts) != 3 or parts[0] != "vtx":
         fail("InvalidArgument: " + name + ": required vtx.<type>.<NanoID> (exactly 3 segments); got " + key)
     if parts[1] == "":
         fail("InvalidArgument: " + name + ": empty type segment; required vtx.<type>.<NanoID>; got " + key)
+    if parts[2] == "":
+        fail("InvalidArgument: " + name + ": empty id segment; required vtx.<type>.<NanoID>; got " + key)
     if want_type != "" and parts[1] != want_type:
         fail("InvalidArgument: " + name + ": required vtx." + want_type + ".<NanoID>; got " + key)
     return parts[1], parts[2]

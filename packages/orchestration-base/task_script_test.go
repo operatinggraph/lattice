@@ -170,6 +170,53 @@ func TestCreateTask_EmptyTypeSegment_Rejected(t *testing.T) {
 	}
 }
 
+// TestCreateTask_ExtraSegmentKey_Rejected: a scopedTo carrying an ASPECT key
+// (four segments, vtx.<type>.<id>.<localName>) is rejected on arity rather than
+// truncated to its first three segments. This copy of parts_of tested
+// `len(parts) < 3` where the rest of the corpus tested `!= 3`, so the tail was
+// silently dropped and the scopedTo link was built from what remained — a link
+// to a vertex the submitter never named. The arity test alone is the guard: the
+// want_type comparison reads parts[1], which a four-segment aspect key still
+// fills correctly, so every caller of this script was exposed, not only the
+// untyped scopedTo one.
+func TestCreateTask_ExtraSegmentKey_Rejected(t *testing.T) {
+	badScoped := tsScopedTo + ".terms"
+	// Hydrated alive, and deliberately so: vertex_alive is a shape-blind state
+	// lookup, so an un-hydrated key would be rejected by the liveness check and
+	// prove nothing about the arity guard.
+	eps := aliveEndpoints()
+	delete(eps, tsScopedTo)
+	eps[badScoped] = processor.VertexDoc{Key: badScoped, Class: "leaseapp"}
+
+	_, err := runCreateTask(t, badScoped, "2026-06-04T14:00:00Z", eps)
+	if err == nil {
+		t.Fatal("four-segment aspect key: expected rejection, got nil error")
+	}
+	if !strings.Contains(err.Error(), "exactly 3 segments") {
+		t.Fatalf("four-segment aspect key error = %q, want 'exactly 3 segments'", err.Error())
+	}
+}
+
+// TestCreateTask_EmptyIdSegment_Rejected: a scopedTo whose id segment is empty
+// (vtx.<type>.) is rejected by parts_of rather than returning an empty id that
+// every caller is then trusted to notice. The corpus's renamed siblings
+// (clinic-domain / loftspace-domain vertex_parts) already rejected it; the
+// pinned helper now agrees with them.
+func TestCreateTask_EmptyIdSegment_Rejected(t *testing.T) {
+	badScoped := "vtx.leaseapp."
+	eps := aliveEndpoints()
+	delete(eps, tsScopedTo)
+	eps[badScoped] = processor.VertexDoc{Key: badScoped, Class: "leaseapp"}
+
+	_, err := runCreateTask(t, badScoped, "2026-06-04T14:00:00Z", eps)
+	if err == nil {
+		t.Fatal("empty id segment: expected rejection, got nil error")
+	}
+	if !strings.Contains(err.Error(), "empty id segment") {
+		t.Fatalf("empty id segment error = %q, want 'empty id segment'", err.Error())
+	}
+}
+
 // taskKey pulls the created task vertex key from the mutation set.
 func taskKeyOf(t *testing.T, res processor.ScriptResult) string {
 	t.Helper()

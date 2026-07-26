@@ -296,6 +296,27 @@ func checkS9(rep *report, defs map[string]pkgmgr.Definition) {
 // gone. An exclusion justified by an unverified premise is worse than no gate,
 // because the recorded reason stops the next reader from re-checking.
 //
+// `parts_of` is here because it is where a key stops being a string and becomes
+// a TYPED vertex reference: every guard downstream spends the type and id it
+// hands back, so a lax copy is a type check that silently did not happen. It was
+// the most-copied helper in the corpus (31 copies, more than the other three
+// combined) and held seven implementations. Six differences were cosmetic or
+// unreachable; the seventh was not — orchestration-base tested `len(parts) < 3`
+// where every other copy tested `!= 3`, which ACCEPTS a four-segment ASPECT key
+// as a vertex reference and truncates it to (parts[1], parts[2]).
+//
+// The laxity is the whole defect on its own, and it reached ALL ELEVEN callers
+// of that copy, not just the untyped one: `want_type` is compared against
+// parts[1], which a four-segment aspect key still fills correctly, so
+// `parts_of("vtx.meta.<id>.canonicalName", "forOperation", "meta")` passes the
+// type check and returns ("meta", <id>). A first draft of this comment blamed
+// the combination of `< 3` with the empty want_type at ddls.go:274 and called
+// that the corpus's only untyped caller. Both halves were wrong — thirteen call
+// sites across seven packages passed an empty want_type, and the type check
+// never protected anyone from this — which is why the fix is stated here as the
+// arity test alone. Two reviewers caught it independently; see the paragraph
+// above on what a wrong recorded reason costs.
+//
 // Deliberately NOT listed: `require_workplace`, whose copies genuinely differ on
 // POLICY, each documented at its site — clinic-reminders omits the
 // validated-target exemption (its ops have no consumer self path, so a self
@@ -304,7 +325,7 @@ func checkS9(rep *report, defs map[string]pkgmgr.Definition) {
 // were read before being excluded. A variant that genuinely differs gets a
 // different NAME, which is what `enforce_workplace` already does; this list binds
 // only helpers where variation has no legitimate meaning.
-var sharedGuardHelpers = []string{"worksAt_covers", "workplace_exempt", "actor_holds_operator"}
+var sharedGuardHelpers = []string{"worksAt_covers", "workplace_exempt", "actor_holds_operator", "parts_of"}
 
 // guardConstants are the module-level Starlark constants the pinned helpers read.
 // Pinning helper BODIES is not enough on its own: a body references its bounds by
@@ -449,7 +470,14 @@ func starlarkFuncBodies(path, name string) []starlarkFuncSite {
 		if !strings.HasPrefix(ln, prefix) {
 			continue
 		}
-		var code []string
+		// The `def` line is part of the digest, not just the scan anchor. A body
+		// can only be pinned against a fixed SIGNATURE: two copies agreeing
+		// statement-for-statement still disagree if one declares a default
+		// (`def parts_of(key, name, want_type=""):`), because every call in that
+		// script may then omit the argument and skip the check the statements
+		// perform. That is not hypothetical — it is the shape two copies of
+		// parts_of were in before they were converged.
+		code := []string{ln}
 		for j := i + 1; j < len(lines); j++ {
 			s := lines[j]
 			// A body ends at the first line with content in column 0. Decode a

@@ -309,10 +309,16 @@ def required_bare_id(p, name):
             fail("InvalidArgument: " + name + ": must carry no dots / key segments, wildcards, or whitespace; got " + v)
     return v
 
-def parts_of(key, name):
+def parts_of(key, name, want_type):
     parts = key.split(".")
     if len(parts) != 3 or parts[0] != "vtx":
         fail("InvalidArgument: " + name + ": required vtx.<type>.<NanoID> (exactly 3 segments); got " + key)
+    if parts[1] == "":
+        fail("InvalidArgument: " + name + ": empty type segment; required vtx.<type>.<NanoID>; got " + key)
+    if parts[2] == "":
+        fail("InvalidArgument: " + name + ": empty id segment; required vtx.<type>.<NanoID>; got " + key)
+    if want_type != "" and parts[1] != want_type:
+        fail("InvalidArgument: " + name + ": required vtx." + want_type + ".<NanoID>; got " + key)
     return parts[1], parts[2]
 
 def alive(doc):
@@ -358,7 +364,7 @@ def execute(state, op):
         context_ref = optional_string_attr(p, "contextRef")
 
         requester = op.actor
-        requester_type, requester_id = parts_of(requester, "actor")
+        requester_type, requester_id = parts_of(requester, "actor", "")
 
         proposal_key = "vtx.capabilityproposal." + proposal_id
         requestedby_lnk = "lnk.capabilityproposal." + proposal_id + ".requestedBy." + requester_type + "." + requester_id
@@ -544,7 +550,7 @@ def execute(state, op):
             fail("InvalidReviewTransition: proposal " + proposal_key + " is '" + cur_state + "', only a pending proposal is reviewable")
 
         reviewer = op.actor
-        reviewer_type, reviewer_id = parts_of(reviewer, "actor")
+        reviewer_type, reviewer_id = parts_of(reviewer, "actor", "")
         reviewed_at = op.submittedAt
 
         new_state = "approved"
@@ -617,7 +623,7 @@ def execute(state, op):
         package_key = required_string(p, "packageKey")
         install_request_id = required_string(p, "installRequestId")
 
-        package_type, package_id = parts_of(package_key, "packageKey")
+        package_type, package_id = parts_of(package_key, "packageKey", "")
         if package_type != "package":
             fail("InvalidArgument: packageKey: required vtx.package.<NanoID>; got " + package_key)
 

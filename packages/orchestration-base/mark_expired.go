@@ -156,7 +156,7 @@ def required_string(p, name):
         fail("InvalidArgument: " + name + ": required non-empty string")
     return v.strip()
 
-def parts_of(key, name):
+def parts_of(key, name, want_type):
     # Parse a VERTEX key: exactly 3 segments vtx.<type>.<NanoID>. Any other shape
     # (aspect/link key, stray tail) is rejected — the marker must attach to a
     # vertex root, and "<entityKey>.freshnessExpiry" must be a well-formed
@@ -166,6 +166,10 @@ def parts_of(key, name):
         fail("InvalidArgument: " + name + ": required vtx.<type>.<NanoID> (exactly 3 segments); got " + key)
     if parts[1] == "":
         fail("InvalidArgument: " + name + ": empty type segment; required vtx.<type>.<NanoID>; got " + key)
+    if parts[2] == "":
+        fail("InvalidArgument: " + name + ": empty id segment; required vtx.<type>.<NanoID>; got " + key)
+    if want_type != "" and parts[1] != want_type:
+        fail("InvalidArgument: " + name + ": required vtx." + want_type + ".<NanoID>; got " + key)
     return parts[1], parts[2]
 
 def vertex_alive(state, key):
@@ -191,7 +195,7 @@ def execute(state, op):
         expired_at = required_string(p, "expiredAt")
         # Validate the key shape only (type-agnostic — any type segment is
         # accepted); names no concrete type.
-        parts_of(entity_key, "entityKey")
+        parts_of(entity_key, "entityKey", "")
 
         # Target-existence guard: never write a marker (and a 4-segment aspect
         # key) onto an absent or tombstoned parent. The op hydrates [entityKey]

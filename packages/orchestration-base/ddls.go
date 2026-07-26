@@ -232,11 +232,13 @@ def bare_nanoid_or_mint(p):
     return v
 
 def parts_of(key, name, want_type):
-    parts = split_key(key)
-    if len(parts) < 3 or parts[0] != "vtx":
-        fail("InvalidArgument: " + name + ": required vtx.<type>.<NanoID>; got " + key)
+    parts = key.split(".")
+    if len(parts) != 3 or parts[0] != "vtx":
+        fail("InvalidArgument: " + name + ": required vtx.<type>.<NanoID> (exactly 3 segments); got " + key)
     if parts[1] == "":
         fail("InvalidArgument: " + name + ": empty type segment; required vtx.<type>.<NanoID>; got " + key)
+    if parts[2] == "":
+        fail("InvalidArgument: " + name + ": empty id segment; required vtx.<type>.<NanoID>; got " + key)
     if want_type != "" and parts[1] != want_type:
         fail("InvalidArgument: " + name + ": required vtx." + want_type + ".<NanoID>; got " + key)
     return parts[1], parts[2]
