@@ -235,6 +235,38 @@ cycle-loupe: assert-main-checkout
 	 NATS_URL=$(NATS_URL) NATS_NKEY=$(NKEY_LOUPE) BOOTSTRAP_JSON_PATH=$(BOOTSTRAP_JSON) LOUPE_PG_DSN=$(LOUPE_PG_DSN) LOUPE_OPERATOR_ACTOR_KEY="$$LOUPE_OP_KEY" LOUPE_DEV_AUTH=1 ./bin/loupe >>loupe.log 2>&1 </dev/null & \
 	  sleep 2; pgrep -f "bin/loupe" >/dev/null && echo "==> Loupe running on http://127.0.0.1:7777" || { echo "!! Loupe failed to start — see loupe.log"; exit 1; }
 
+## cycle-processor — Rebuild bin/processor from the current tree and relaunch it
+## against the STILL-RUNNING stack, the sibling of cycle-refractor above and not
+## a teardown either. Use it after any change that reaches internal/processor or
+## cmd/processor — derive the full set of affected binaries with
+## `go list -deps ./cmd/<x>`, never from memory. Env matches the launch in `up`,
+## which is the authority for how this component runs; logs continue to
+## processor.log.
+cycle-processor: assert-main-checkout
+	@echo "==> Killing the running processor..."
+	-pkill -x processor 2>/dev/null || true
+	@echo "==> Rebuilding bin/processor..."
+	go build -o bin/processor ./cmd/processor
+	@echo "==> Starting processor in background..."
+	@NATS_URL=$(NATS_URL) NATS_NKEY=$(NKEY_PROCESSOR) BOOTSTRAP_JSON_PATH=$(BOOTSTRAP_JSON) PROCESSOR_FILTER=ops.default,ops.urgent,ops.system,ops.meta LATTICE_AUTH_MODE=$(LATTICE_PROCESSOR_AUTH_MODE) LATTICE_VAULT_MASTER_KEK_FILE=$(VAULT_KEK_FILE) ./bin/processor >>processor.log 2>&1 </dev/null & \
+	  sleep 2; pgrep -x processor >/dev/null && echo "==> processor running (PID $$(pgrep -x processor))" || { echo "!! processor failed to start — see processor.log"; exit 1; }
+
+## reseed-kernel — Apply this tree's kernel DDLs to a long-lived Core KV without
+## wiping it. Seeding is create-only and runs once, so a bucket seeded by an
+## older binary keeps that binary's kernel scripts/schemas/lens specs until
+## something reconciles them; bootstrap does that on every run (it compares what
+## it builds against what is stored and rewrites only the differences). The
+## Processor's DDL cache is loaded at startup and never watches Core KV, so the
+## reconciled kernel reaches a RUNNING stack only after the Processor restarts —
+## hence the cycle. Not a teardown: NATS, Postgres, and every other engine keep
+## running.
+reseed-kernel: assert-main-checkout
+	@echo "==> Rebuilding bin/bootstrap..."
+	go build -o bin/bootstrap ./cmd/bootstrap
+	@echo "==> Reconciling the kernel in Core KV against this tree..."
+	NATS_URL=$(NATS_URL) NATS_NKEY=$(NKEY_BOOTSTRAP) BOOTSTRAP_JSON_PATH=$(BOOTSTRAP_JSON) ./bin/bootstrap -skip-ready-wait
+	@$(MAKE) cycle-processor
+
 # Per-vertical launch env for cycle-<vertical> below. Each mirrors the launch in
 # that vertical's own up-<vertical> target, which stays the authority for how the
 # app runs — loftspace and clinic read a non-superuser SELECT-only DSN, café and

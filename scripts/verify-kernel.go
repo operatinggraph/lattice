@@ -316,6 +316,27 @@ func main() {
 		}
 	}
 
+	// Kernel freshness. Every check above asserts that a key is present and
+	// well-formed, which a bucket seeded by an older binary satisfies while
+	// running superseded DDL scripts. This compares stored content against
+	// what this binary builds, so a kernel that boot would reconcile is
+	// reported rather than passing silently.
+	fmt.Println("Checking kernel content matches this binary...")
+	missing, stale, driftErr := bootstrap.KernelDrift(ctx, coreKV)
+	switch {
+	case driftErr != nil:
+		failures = append(failures, fmt.Sprintf("CANNOT compare kernel content: %v", driftErr))
+	case len(missing) == 0 && len(stale) == 0:
+		fmt.Printf("  OK  kernel content matches this binary\n")
+	default:
+		for _, k := range missing {
+			failures = append(failures, fmt.Sprintf("KERNEL ENTRY MISSING: %s (run `make reseed-kernel`)", k))
+		}
+		for _, k := range stale {
+			failures = append(failures, fmt.Sprintf("KERNEL ENTRY STALE: %s holds a body this binary no longer builds (run `make reseed-kernel`)", k))
+		}
+	}
+
 	fmt.Println()
 	if len(failures) == 0 {
 		fmt.Printf("verify-kernel: ALL ASSERTIONS PASSED\n")

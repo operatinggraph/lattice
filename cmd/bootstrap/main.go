@@ -7,23 +7,27 @@
 // Idempotent: if lattice.bootstrap.json already exists with
 // status="committed", bucket/stream provisioning still runs (to recover
 // from partial failures) and Core KV is then probed for the primordial set.
-// Seeding is skipped only when the bucket confirms the set is present, per
-// Contract #7 §7.4; if the file and the bucket disagree — a recreated or
-// wiped Core KV behind a surviving committed file — the binary warns and
-// re-seeds using the file's stable NanoIDs, so the platform never comes up
-// "ready" over an empty Core KV.
+// A bucket that already holds the set is reconciled against the kernel this
+// binary builds — missing entries created, differing ones rewritten, matching
+// ones left alone — so a converged bucket takes no writes and Contract #7
+// §7.4's re-run safety holds, while a bucket seeded by an older binary picks
+// up kernel fixes without being wiped. If the file and the bucket disagree —
+// a recreated or wiped Core KV behind a surviving committed file — the binary
+// warns and re-seeds using the file's stable NanoIDs, so the platform never
+// comes up "ready" over an empty Core KV.
 //
 // Crash recovery: if lattice.bootstrap.json exists with
 // status="in-progress", the same NanoIDs are reused and SeedPrimordial
-// is re-run. SeedPrimordial's own idempotency guard skips keys that
-// already exist in Core KV, so partial-seeding crashes are safe to retry.
+// is re-run. Keys that already exist in Core KV are reconciled rather than
+// re-created, so partial-seeding crashes are safe to retry.
 //
 // Readiness phasing: the §7.5 readiness gate blocks until the admin, Loom,
 // and Weaver `cap.*` projections exist — but those are produced by Refractor,
 // which `make up` starts AFTER seeding. To avoid a deadlock the binary runs in
 // two phases: the seed pass is invoked with the explicit -skip-ready-wait flag
 // (provision + seed + mark, no wait), Refractor is started, then a second
-// idempotent pass (no flag, seeding skipped) runs the readiness gate. The skip
+// idempotent pass (no flag; the kernel is already converged, so it writes
+// nothing) runs the readiness gate. The skip
 // is an explicit CLI flag, never an ambient env var, so an exported variable in
 // an operator/CI shell cannot leak into the wait pass and silently defeat the
 // gate.
@@ -122,15 +126,21 @@ func main() {
 		os.Exit(1)
 	}
 
+	// SeedPrimordial probes the bucket itself and branches: an unseeded Core KV
+	// gets the create-only atomic batch, an already-seeded one is reconciled
+	// against the kernel this binary builds. Both paths run on every boot —
+	// a bucket seeded by an older binary would otherwise keep that binary's
+	// kernel DDLs forever, with a wipe as the only way to move them.
+	logger.Info("seeding or reconciling primordial Core KV entries")
+	seedCtx, cancelSeed := context.WithTimeout(ctx, time.Duration(timeoutSec)*time.Second)
+	seedErr := seeder.SeedPrimordial(seedCtx)
+	cancelSeed()
+	if seedErr != nil {
+		logger.Error("primordial seeding failed", "error", seedErr)
+		os.Exit(1)
+	}
+
 	if freshlyGenerated {
-		logger.Info("seeding primordial Core KV entries")
-		seedCtx, cancelSeed := context.WithTimeout(ctx, time.Duration(timeoutSec)*time.Second)
-		err := seeder.SeedPrimordial(seedCtx)
-		cancelSeed()
-		if err != nil {
-			logger.Error("primordial seeding failed", "error", err)
-			os.Exit(1)
-		}
 		// Rewrite lattice.bootstrap.json with status="committed" now that
 		// seeding has succeeded. The in-progress file written by
 		// LoadOrGenerate already holds the stable NanoIDs; this rewrite
@@ -140,8 +150,6 @@ func main() {
 			os.Exit(1)
 		}
 		logger.Info("lattice.bootstrap.json committed", "path", bootstrapJSONPath)
-	} else {
-		logger.Info("primordial seeding skipped — already done on prior run")
 	}
 
 	// cmd/bootstrap writes this marker itself because it is the only process

@@ -313,14 +313,20 @@ func DecideReseed(ctx context.Context, seeder *Seeder, bootstrapJSONPath string,
 // the bootstrap op tracker key already exists in Core KV, the function returns
 // without re-issuing the batch.
 func (s *Seeder) SeedPrimordial(ctx context.Context) error {
-	// Idempotent re-run guard: if the primordial set is already present in
-	// this Core KV, skip the whole batch.
+	// Idempotent re-run guard: the batch below is create-only, so it can only
+	// run against a bucket that has never been seeded. An already-seeded bucket
+	// instead reconciles — the kernel it holds was written by whatever binary
+	// seeded it first, and skipping outright is what made every later kernel
+	// fix invisible. Reconcile is a fixpoint, so a converged bucket still
+	// writes nothing and re-run safety (Contract #7 §7.4) is unchanged.
 	seeded, err := s.PrimordialSeeded(ctx)
 	if err != nil {
 		return err
 	}
 	if seeded {
-		s.logger.Info("primordial set already present — skipping batch", "key", BootstrapOpKey)
+		if _, recErr := s.ReconcilePrimordial(ctx); recErr != nil {
+			return fmt.Errorf("reconcile primordial set: %w", recErr)
+		}
 		return nil
 	}
 
