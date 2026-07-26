@@ -414,9 +414,10 @@
     <div class="sec-head">
       <span class="eyebrow">Interactive demo</span>
       <h2>One graph, four lenses.</h2>
-      <p>For example: one mixed-use building — homes, a clinic, a café, a wellness studio. Toggle its
-         packages, then switch personas. It's the same graph every time — each persona sees only their
-         projection of it. That's the security model, not a visualization trick: access is a lens.</p>
+      <p>For example: one mixed-use building — homes, a clinic, a café, a wellness studio. It runs
+         itself: packages install, lenses switch. Take over whenever — pause the tour, toggle packages,
+         switch personas. It's the same graph every time — each persona sees only their projection of
+         it. That's the security model, not a visualization trick: access is a lens.</p>
     </div>
 
     <div class="demo-shell">
@@ -424,6 +425,15 @@
         A deterministic walkthrough with canned data — not a live instance. <b>The flows, lens names
         and key shapes mirror the real stack</b>, and the packages mirror Lattice's showcase verticals.
         The hosted demo is the real stack — real lenses, real operations, reset nightly.
+      </div>
+
+      <div class="demo-tour paused">
+        <button class="tour-btn" type="button" aria-label="Play the auto tour">
+          <span class="tour-icon" aria-hidden="true"></span><span class="tour-btn-label">Auto-tour</span>
+        </button>
+        <span class="tour-step"></span>
+        <span class="tour-note"></span>
+        <span class="tour-bar"><i></i></span>
       </div>
 
       <div class="demo-body">

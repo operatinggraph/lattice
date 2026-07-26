@@ -309,24 +309,169 @@
     `<button class="persona-tab${state.persona === id ? " on" : ""}" data-persona-id="${id}" type="button">${p.label}</button>`
   ).join("");
 
+  function setPkg(id, want, quiet) {
+    if (state.pkgs[id] === want) return;
+    state.pkgs[id] = want;
+    const btn = root.querySelector(`.pkg-toggle[data-pkg="${id}"]`);
+    if (btn) btn.classList.toggle("on", want);
+    if (quiet) return;
+    pushTick(want
+      ? [`<span class="op">install ${id} package</span> → DDL via ops.meta.> · entities + lenses + operations registered`, ...TICKS[id]]
+      : UNTICKS[id]);
+  }
+
+  function setPersona(id) {
+    state.persona = id;
+    root.querySelectorAll(".persona-tab").forEach(t => t.classList.toggle("on", t.dataset.personaId === id));
+  }
+
+  // ---------------------------------------------------------------- auto-tour
+  // The demo drives itself so a reader who never touches a control still sees
+  // the point: one graph, packages composing, each persona a different lens.
+  // Any manual click hands the controls over and parks the tour.
+  const ALL_PKGS = Object.keys(PKGS);
+  const TOUR = [
+    { pkgs: ["leasing"], persona: "resident", dwell: 4000,
+      note: "One package installed. Maya's lens is her own subgraph — nothing else." },
+    { pkgs: ["leasing"], persona: "front", dwell: 4800,
+      note: "Same graph, different lens: the front desk sees today's work." },
+    { pkgs: ["leasing"], persona: "back", dwell: 4800,
+      note: "Operations sees the business — aggregates, not private records." },
+    { pkgs: ["leasing", "clinic"], persona: "resident", dwell: 6000,
+      note: "A second package installs — onto the identity Maya already had." },
+    { pkgs: ["leasing", "clinic"], persona: "front", dwell: 5200,
+      note: "No integration was written; the desk just sees both service lines." },
+    { pkgs: ["leasing", "clinic", "cafe"], persona: "resident", dwell: 5800,
+      note: "Café next: the tab settles on the lease — both hang off Maya." },
+    { pkgs: ALL_PKGS, persona: "resident", dwell: 5800,
+      note: "Wellness completes the building — the resident rate rides the lease." },
+    { pkgs: ALL_PKGS, persona: "back", dwell: 5600,
+      note: "Four packages, one graph: a view no single package could produce." },
+    { pkgs: ALL_PKGS, persona: "operator", dwell: 6800,
+      note: "Every vertex, every key. Reads are lenses; writes are operations." },
+  ];
+
+  const tour = (function () {
+    const box = el(".demo-tour"), btn = el(".tour-btn");
+    const bar = el(".tour-bar i"), note = el(".tour-note"), step = el(".tour-step");
+    // A stale cached page without the tour strip still gets a working demo.
+    if (!box || !btn || !bar || !note || !step) return { toggle() {}, takeOver() {} };
+    const autoOK = !window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+    let idx = -1, timer = null, running = false, taken = false, inView = false;
+    let remaining = 0, startedAt = 0, frozen = 0;
+
+    function barRun(ms, from) {
+      bar.style.transition = "none";
+      bar.style.transform = `scaleX(${from})`;
+      void bar.offsetWidth;
+      bar.style.transition = `transform ${ms}ms linear`;
+      bar.style.transform = "scaleX(1)";
+    }
+    function barFreeze() {
+      const m = /matrix\(([-\d.]+)/.exec(getComputedStyle(bar).transform);
+      frozen = m ? parseFloat(m[1]) : 0;
+      bar.style.transition = "none";
+      bar.style.transform = `scaleX(${frozen})`;
+    }
+
+    // Each step is an absolute target state, so resuming after a manual detour
+    // never has to replay anything — it just states where it wants to be.
+    function show(i) {
+      const s = TOUR[i], want = new Set(s.pkgs);
+      const drop = ALL_PKGS.filter(id => state.pkgs[id] && !want.has(id));
+      if (drop.length > 1) {
+        drop.forEach(id => setPkg(id, false, true));
+        pushTick([`<span class="op">uninstall ${drop.join(" · ")}</span> → lens rows retracted · the graph keeps only what is installed`]);
+      } else {
+        drop.forEach(id => setPkg(id, false));
+      }
+      ALL_PKGS.filter(id => want.has(id)).forEach(id => setPkg(id, true));
+      setPersona(s.persona);
+      renderAll();
+      note.textContent = s.note;
+      step.textContent = `${i + 1}/${TOUR.length}`;
+    }
+
+    function advance() {
+      idx = (idx + 1) % TOUR.length;
+      show(idx);
+      remaining = TOUR[idx].dwell;
+      startedAt = performance.now();
+      barRun(remaining, 0);
+      timer = setTimeout(advance, remaining);
+    }
+
+    function start() {
+      if (running) return;
+      // Resuming after a manual detour moves on rather than finishing a step
+      // whose caption no longer describes what is on screen.
+      const detoured = taken;
+      running = true; taken = false;
+      box.classList.remove("paused");
+      btn.setAttribute("aria-label", "Pause the auto tour");
+      if (idx < 0 || detoured || remaining <= 400) { advance(); return; }
+      startedAt = performance.now();
+      barRun(remaining, frozen);
+      timer = setTimeout(advance, remaining);
+    }
+
+    function halt(byUser) {
+      clearTimeout(timer); timer = null;
+      if (running) remaining = Math.max(800, remaining - (performance.now() - startedAt));
+      running = false;
+      barFreeze();
+      box.classList.add("paused");
+      btn.setAttribute("aria-label", "Play the auto tour");
+      if (byUser) {
+        taken = true;
+        note.textContent = "You have the controls — toggle packages, switch lenses. Press play to resume the tour.";
+        step.textContent = "";
+      }
+    }
+
+    note.textContent = autoOK
+      ? "A guided tour of package composition — take over any time."
+      : "Press play for a guided tour of package composition.";
+
+    if ("IntersectionObserver" in window) {
+      new IntersectionObserver((entries) => {
+        inView = entries[0].isIntersecting;
+        if (inView) { if (autoOK && !taken && !document.hidden) start(); }
+        else if (running) halt(false);
+      }, { threshold: 0.25 }).observe(el(".demo-shell"));
+    }
+
+    document.addEventListener("visibilitychange", () => {
+      if (document.hidden) { if (running) halt(false); }
+      else if (inView && autoOK && !taken) start();
+    });
+
+    return { toggle: () => (running ? halt(true) : start()), takeOver: () => halt(true) };
+  })();
+
   root.addEventListener("click", (e) => {
+    if (e.target.closest(".tour-btn")) { tour.toggle(); return; }
     const pkgBtn = e.target.closest(".pkg-toggle");
     if (pkgBtn) {
       const id = pkgBtn.dataset.pkg;
-      state.pkgs[id] = !state.pkgs[id];
-      pkgBtn.classList.toggle("on", state.pkgs[id]);
-      pushTick(state.pkgs[id]
-        ? [`<span class="op">install ${id} package</span> → DDL via ops.meta.> · entities + lenses + operations registered`, ...TICKS[id]]
-        : UNTICKS[id]);
+      setPkg(id, !state.pkgs[id]);
       renderAll();
+      tour.takeOver();
       return;
     }
     const tab = e.target.closest(".persona-tab");
     if (tab) {
-      state.persona = tab.dataset.personaId;
-      root.querySelectorAll(".persona-tab").forEach(t => t.classList.toggle("on", t === tab));
+      setPersona(tab.dataset.personaId);
       renderAll();
+      tour.takeOver();
     }
+  });
+
+  // Keyboard users land on a control before they press it; stop the tour from
+  // moving the target out from under them.
+  root.addEventListener("focusin", (e) => {
+    if (e.target.closest(".pkg-toggle, .persona-tab")) tour.takeOver();
   });
 
   pushTick([`bootstrap · kernel verified · <span class="op">install leasing package</span>`, ...TICKS.leasing.slice(0, 2)]);
