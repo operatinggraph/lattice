@@ -1,5 +1,5 @@
 name: wellness-domain
-version: 0.14.0
+version: 0.15.0
 description: |
   Wellness bookable domain: studio / session / booking / instructor vertex
   types + their aspects and links, written by Create*/Tombstone*/Cancel*/Bind*
@@ -26,9 +26,12 @@ description: |
   booker) guard afterwards; either value corrects the other, a class that has
   not begun is rejected (SessionNotStarted, the mirror of SessionInPast), and
   the same standing guard confines a bound instructor to bookings on sessions
-  they lead. Three projection lenses
-  (wellnessStudios, wellnessSessions, wellnessBookings) are the P5 read models
-  a wellness FE reads. No PHI/PII, no protected Postgres layer. Depends
+  they lead. Five projection lenses
+  (wellnessStudios, wellnessSessions, wellnessBookings, wellnessInstructors,
+  wellnessMembers) are the P5 read models a wellness FE reads; wellnessMembers
+  carries each member's covering locations so the front desk's book-a-member
+  picker offers only the members whose building the staffer works at, mirroring
+  cafe-domain's cafeLeaseWorkplaces. No PHI/PII, no protected Postgres layer. Depends
   lease-signing (documentation only — CreateBooking reads its leaseapp by
   known key, no install-order requirement enforced at the Starlark level).
   CreateBooking, CancelBooking, TombstoneSession, and SetBookingAttendance
@@ -83,6 +86,10 @@ declares:
     - canonicalName: wellnessInstructors
       adapter: nats-kv
       bucket: wellness-instructors
+      engine: full
+    - canonicalName: wellnessMembers
+      adapter: nats-kv
+      bucket: wellness-members
       engine: full
   permissions:
     - operationType: CreateStudio

@@ -26,7 +26,15 @@ const WellnessBookingsBucket = "wellness-bookings"
 // class is `ledBy`, never Core KV.
 const WellnessInstructorsBucket = "wellness-instructors"
 
-// Lenses returns the package's four flat projection lenses. No aggregation
+// WellnessMembersBucket is the NATS-KV read model the wellnessMembers lens
+// projects into — the **P5 query surface** for the one question the front
+// desk's book-a-member picker has to answer before offering a name: "does this
+// staffer's workplace reach this member". One row per lease, carrying the
+// member and the set of locations that COVER them; the wellness app reads THIS
+// bucket, never Core KV. The Refractor auto-creates the bucket on lens load.
+const WellnessMembersBucket = "wellness-members"
+
+// Lenses returns the package's five flat projection lenses. No aggregation
 // (no WITH), so OPTIONAL-matched neighbour bindings are live directly in
 // RETURN — the same §4-B1 no-WITH-drop shape clinic-domain's lenses use.
 // None of these carry PHI/PII, so — unlike clinic-domain's patient/provider
@@ -65,6 +73,14 @@ func Lenses() []pkgmgr.LensSpec {
 			Engine:        "full",
 			Spec:          wellnessInstructorsSpec,
 		},
+		{
+			CanonicalName: "wellnessMembers",
+			Class:         "meta.lens",
+			Adapter:       "nats-kv",
+			Bucket:        WellnessMembersBucket,
+			Engine:        "full",
+			Spec:          wellnessMembersSpec,
+		},
 	}
 }
 
@@ -97,6 +113,64 @@ RETURN
   i.key AS instructorKey,
   i.profile.data.displayName AS displayName,
   s.key AS studioKey`
+
+// wellnessMembersSpec projects one row per lease carrying the member who holds
+// it and coveringLocations — every location that COVERS them: the applied-to
+// unit plus each of that unit's `containedIn` ancestors. It is the source of
+// the front desk's book-a-member picker: a staffer is offered the members whose
+// building they work at, intersecting this set with their own `worksAt` keys,
+// which is the same answer `worksAt_covers` computes by walking upward from a
+// location (ddls.go). Mirrors cafe-domain's `cafeLeaseWorkplaces` — the read
+// side of workplace confinement, keyed on the lease — with the applicant column
+// added, because a picker has to name a person and not merely a lease.
+//
+// The picker is an AFFORDANCE, not the authority. `CreateBooking` confines a
+// front-desk caller by the SESSION's location — never by who the booker is
+// (permissions.go, and `require_workplace(session_locations(session), …)` in
+// ddls.go) — so what this lens decides is who a staffer is OFFERED, and the
+// script still decides what they may write. Narrowing it is a read boundary:
+// republishing the whole building's members to a staffer at another building
+// would undo the boundary the resident-directory deletion drew.
+//
+// applicationFor is a REQUIRED match (lease-signing's own
+// leaseApplicationSummary idiom, lenses.go): every leaseapp writes that link at
+// CreateLeaseApplication, and a row with no member is a row this picker cannot
+// offer — unlike coveringLocations, where an empty set is meaningful and must
+// project. That set stays projected for every matched lease precisely because an
+// absent row and an empty set have to deny alike: an unwired unit is covered by
+// nobody, the same answer require_workplace gives an empty location list.
+//
+// The `.tenancy` presence filter is what makes this a MEMBER directory rather
+// than an applicant one. `DecideLeaseApplication` tombstones neither the
+// leaseapp nor its applicationFor link on a decline (lease-signing/scripts.go),
+// so both a pending and a REJECTED applicant keep a live link — without this
+// filter the front desk would be handed the identity of everyone who ever
+// applied to their building and told they were members. `.tenancy` is stamped
+// CreateOnly on the FIRST approve and is the only signal that an application
+// actually became a tenancy; CreateBooking's own resident-rate check reads
+// exactly this aspect for exactly this reason (ddls.go), and the two sides
+// agreeing is the point. A member with no lease at all is therefore not
+// offerable here — the directory is lease-anchored by construction, as the
+// resident directory it replaces was.
+//
+// Bounds match wellnessSessionsSpec's above for the same reason: zero-hop is
+// load-bearing (a staffer wired to the exact unit matches, not only one wired to
+// the building), and the upper bound is WORKPLACE_MAX_DEPTH - 1 because `*0..N`
+// admits depths 0..N inclusive while the Starlark walk tests 0..7 — `*0..8`
+// would offer a staffer nine levels up members their writes cannot reach. The
+// list-comprehension form (lease-signing's authz_anchors idiom) keeps the row
+// one-per-lease; an OPTIONAL MATCH on a multi-parent unit would fan it out
+// instead. A member holding two leases is deliberately two rows: the lease is
+// what carries both the covering location and the resident-rate hint the picker
+// passes to CreateBooking.
+const wellnessMembersSpec = `MATCH (l:leaseapp)
+MATCH (l)-[:applicationFor]->(id:identity)
+WHERE l.tenancy.data.leaseStart <> null
+RETURN
+  l.key AS key,
+  l.key AS leaseAppKey,
+  id.key AS bookerKey,
+  [(l)-[:appliesToUnit]->(u)-[:containedIn*0..7]->(c) | c.key] AS coveringLocations`
 
 // wellnessSessionsSpec projects one row per session, walking atStudio and
 // ledBy (each 0..1, so the row stays one-per-anchor — the §10.2 shape,

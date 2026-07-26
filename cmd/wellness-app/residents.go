@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/operatinggraph/lattice/internal/gateway/auth"
+	wellnessdomain "github.com/operatinggraph/lattice/packages/wellness-domain"
 )
 
 // weaverTargetsBucket is the shared cross-package Weaver convergence bucket
@@ -100,4 +101,104 @@ func (s *server) handleMyResidency(w http.ResponseWriter, r *http.Request) {
 	}
 	rows := computeOwnResidency(keys, s.kvGetter(ctx, weaverTargetsBucket), auth.IdentityKeyPrefix+subject)
 	s.writeJSON(w, http.StatusOK, map[string]any{"leases": rows})
+}
+
+// memberProjection is one row of the wellness-domain `wellnessMembers` lens —
+// a member, the lease they hold, and the locations that cover them.
+type memberProjection struct {
+	LeaseAppKey       string   `json:"leaseAppKey"`
+	BookerKey         string   `json:"bookerKey"`
+	CoveringLocations []string `json:"coveringLocations"`
+}
+
+// memberRow is one entry of the front desk's book-a-member picker. The
+// covering set is deliberately NOT carried out to the client: it is the
+// server's confinement input, not something the FE needs or should publish —
+// a staffer learns which members they may book, never the topology that
+// decided it.
+type memberRow struct {
+	BookerKey   string `json:"bookerKey"`
+	LeaseAppKey string `json:"leaseAppKey"`
+}
+
+// computeCoveredMembers decodes every wellnessMembers row and keeps the ones
+// this caller's workplace reaches, sorted for a stable picker order. A row
+// that fails to decode or names no member is skipped (the tombstoned-entry
+// guard computeBookings uses).
+//
+// Fails CLOSED throughout, the same construction cmd/cafe-app's
+// staffCoveredLeases uses: an operator alone is unrestricted, a caller with no
+// workplace covers nothing, and a member whose lease has not converged — or
+// whose unit is unwired — is simply absent from the answer rather than
+// defaulting to visible.
+func computeCoveredMembers(keys []string, get kvGetter, hats subjectHats) []memberRow {
+	rows := make([]memberRow, 0)
+	for _, k := range keys {
+		raw, ok := get(k)
+		if !ok {
+			continue
+		}
+		var p memberProjection
+		if json.Unmarshal(raw, &p) != nil || p.BookerKey == "" || p.LeaseAppKey == "" {
+			continue
+		}
+		if !hats.isOperator && !hats.covers(p.CoveringLocations) {
+			continue
+		}
+		rows = append(rows, memberRow{BookerKey: p.BookerKey, LeaseAppKey: p.LeaseAppKey})
+	}
+	sort.Slice(rows, func(i, j int) bool {
+		if rows[i].BookerKey != rows[j].BookerKey {
+			return rows[i].BookerKey < rows[j].BookerKey
+		}
+		return rows[i].LeaseAppKey < rows[j].LeaseAppKey
+	})
+	return rows
+}
+
+// handleMembers implements GET /api/members — the front desk's book-a-member
+// picker, served from the wellnessMembers lens (P5) and scoped server-side to
+// the members the caller's workplace covers.
+//
+// It is a STAFF surface: a member is refused outright rather than served their
+// own row, because a directory of who else lives here is not a member's to
+// read — that is the boundary the old unscoped /api/residents lacked, and the
+// reason deleting it was correct. An instructor is refused for the same
+// reason; leading a class confers no directory.
+//
+// The picker is an affordance, not the authority. `CreateBooking` confines a
+// front-desk caller by the SESSION's location, never by who the booker is
+// (packages/wellness-domain/permissions.go), so this narrows what a staffer is
+// OFFERED and the Starlark guard still decides what they may write.
+func (s *server) handleMembers(w http.ResponseWriter, r *http.Request) {
+	conn, ok := s.requireConn(w)
+	if !ok {
+		return
+	}
+	hats, err := s.resolveSubjectHats(r)
+	if err != nil {
+		s.writeAuthError(w, err)
+		return
+	}
+	if !hats.isStaff() && !hats.isOperator {
+		s.writeError(w, http.StatusForbidden,
+			"the member directory is a staff surface for the place you work at")
+		return
+	}
+	ctx, cancel := s.reqContext(r)
+	defer cancel()
+
+	bucket := wellnessdomain.WellnessMembersBucket
+	// A missing bucket is an ERROR, not an empty answer. This one is the
+	// confinement source: an empty picker would read as "nobody is a member
+	// here" rather than "this app cannot tell who you may book" — the same
+	// distinction cmd/cafe-app draws for cafeLeaseWorkplaces.
+	keys, err := conn.KVListKeys(ctx, bucket)
+	if err != nil {
+		s.writeError(w, http.StatusBadGateway,
+			"list "+bucket+": "+err.Error()+" (is wellness-domain 0.15.0 installed and the Refractor projecting?)")
+		return
+	}
+	rows := computeCoveredMembers(keys, s.kvGetter(ctx, bucket), hats)
+	s.writeJSON(w, http.StatusOK, map[string]any{"members": rows})
 }

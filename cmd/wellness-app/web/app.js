@@ -360,6 +360,18 @@ async function loadInstructors() {
   return instructorsCache;
 }
 
+// loadMembers is the front desk's book-a-member picker source. The server
+// scopes it to the members the staffer's workplace covers and refuses a
+// non-staff caller outright (GET /api/members), so there is no client-side
+// filtering to get wrong — and no member list to leak to a member.
+let membersCache = null;
+async function loadMembers() {
+  if (membersCache) return membersCache;
+  const body = await appGet("/api/members");
+  membersCache = body.members || [];
+  return membersCache;
+}
+
 // ownLeaseAppKey is the signed-in member's own lease, CreateBooking's
 // optional resident-rate hint. The server answers only for the caller
 // (GET /api/my-residency), so there is nobody else's to pick. An approved
@@ -566,9 +578,16 @@ function myClassCard(b) {
 // 403 rather than being filtered out of the picker — the schedule is the open
 // member catalog and carries no location column to narrow by.
 //
-// Nobody cancels a seat from here: CancelBooking scope=any grants `operator`
-// alone (packages/wellness-domain/permissions.go), so neither hat may cancel
-// somebody else's seat — a member cancels their own from My Classes.
+// The front desk both fills and empties the room from here. CreateBooking and
+// CancelBooking each grant `frontOfHouse` at scope=any, confined in-script to a
+// session whose studio sits at a location the caller worksAt
+// (packages/wellness-domain/permissions.go), so a staffer books a member into
+// the class in front of them and releases a seat; an instructor, holding
+// neither grant, sees neither control even on their own roster, and a member
+// cancels their own seat from My Classes. Who the desk can book is whoever the
+// member directory offers, which is lease-anchored — somebody with no tenancy
+// at this building is not offerable here even though CreateBooking itself
+// constrains only the session's location, never the booker.
 //
 // What the roster CAN write is attendance. SetBookingAttendance grants
 // `provider` scope=any, confined in-script to a booking on a session the
@@ -614,12 +633,23 @@ async function loadRoster() {
   await renderRoster();
 }
 
+// rosterGeneration counts roster renders. Each render captures it and any
+// async continuation checks it before painting, so a slow render whose class
+// the staffer has already moved on from drops its result instead of overwriting
+// the newer one.
+let rosterGeneration = 0;
+
 async function renderRoster() {
+  const generation = ++rosterGeneration;
   const body = document.getElementById("roster-body");
   const summary = document.getElementById("roster-summary");
   const sessionKey = document.getElementById("roster-session").value;
   body.innerHTML = "";
   summary.textContent = "";
+  // The book-a-member control names the SELECTED class, so it is hidden again
+  // on every path that fails to establish one — otherwise a stale form would
+  // still submit against whichever class was last rendered.
+  document.getElementById("roster-book").hidden = true;
   if (!sessionKey) {
     body.innerHTML = '<div class="empty">No session selected.</div>';
     return;
@@ -651,7 +681,129 @@ async function renderRoster() {
   }
   if (isLeader && started) bindAttendance(sessionKey, mine);
   if (isStaff() && bookings.length) bindSeatCancels(sessionKey);
+  await renderBookMember(se, bookings, generation);
   renderCancelClass(sessionKey);
+}
+
+// renderBookMember shows the front desk's book-a-member control for the
+// selected class, and hides it for everyone else. The picker offers the
+// members this staffer's workplace covers — the server decides that, not this
+// code — minus whoever already holds a seat, since CreateBooking rejects a
+// second live booking by the same booker on the same session (DoubleBooked,
+// ddls.go).
+//
+// It offers nothing at all for a class that has already begun or is full:
+// CreateBooking answers SessionInPast and SessionFull respectively (ddls.go),
+// so the control could only fail closed — the same reasoning that keeps the
+// attendance control hidden until a class starts, and that excludes the
+// already-seated above.
+//
+// The control is an affordance, not the authority: which classes a staffer may
+// book into is decided by require_workplace against the SESSION's own location
+// at submit time, so a class at another building is refused there even though
+// the roster's session picker still lists it.
+//
+// `generation` is renderRoster's own render token. Two roster renders can be in
+// flight at once (the session picker's change listener starts one per change),
+// and this one awaits a fetch, so a stale render must not paint its answer over
+// a newer one's — it would show a picker for the class the staffer just moved
+// away from, next to the newer class's seats.
+async function renderBookMember(se, bookings, generation) {
+  const form = document.getElementById("roster-book");
+  const select = document.getElementById("roster-book-member");
+  const started = !!(se && se.startsAt && new Date(se.startsAt).getTime() <= Date.now());
+  const full = !!(se && se.capacity && bookings.length >= se.capacity);
+  if (!isStaff() || !se || started || full) {
+    form.hidden = true;
+    return;
+  }
+  let members;
+  try {
+    members = await loadMembers();
+  } catch (e) {
+    if (generation !== rosterGeneration) return;
+    form.hidden = true;
+    toast(e.message, false);
+    return;
+  }
+  if (generation !== rosterGeneration) return;
+  const seated = new Set(bookings.map((b) => b.bookerKey));
+  const free = members.filter((m) => !seated.has(m.bookerKey));
+  select.innerHTML = "";
+  if (!free.length) {
+    const opt = document.createElement("option");
+    opt.value = "";
+    opt.textContent = members.length ? "(everyone here is already booked)" : "(no members at your building)";
+    select.appendChild(opt);
+  } else {
+    for (const m of free) {
+      const opt = document.createElement("option");
+      // The value carries BOTH keys: the lease is what CreateBooking checks
+      // for the resident rate, and a member holding two leases is two rows.
+      opt.value = m.bookerKey + "|" + m.leaseAppKey;
+      opt.textContent = shortKey(m.bookerKey) + " — lease " + shortKey(m.leaseAppKey);
+      select.appendChild(opt);
+    }
+  }
+  document.getElementById("roster-book-submit").disabled = false;
+  form.hidden = false;
+}
+
+// bookSelectedMember is the Book button's handler, bound ONCE at init like
+// every other static control. It resolves which class it is booking at CLICK
+// time, from the session picker's current value — never from a render's
+// captured one, which can be a class the staffer has already navigated away
+// from while a render was in flight.
+async function bookSelectedMember() {
+  const btn = document.getElementById("roster-book-submit");
+  const value = document.getElementById("roster-book-member").value;
+  const sessionKey = document.getElementById("roster-session").value;
+  const se = (sessionsCache || []).find((x) => x.sessionKey === sessionKey);
+  if (!value || !se) return;
+  const [bookerKey, leaseAppKey] = value.split("|");
+  btn.disabled = true;
+  try {
+    await bookMemberIn(se, bookerKey, leaseAppKey);
+    toast("Booked.", true);
+    setTimeout(renderRoster, 700);
+  } catch (e) {
+    toast(e.message, false);
+    btn.disabled = false;
+  }
+}
+
+// bookMemberIn submits CreateBooking for a member as the front desk. It
+// carries NO authContext.target — that field is the CONSUMER path's binding
+// (the booking's booker must BE the target), and a staffer booking somebody
+// else is never that identity; the workplace walk over the session's own
+// location binds them instead. The declared reads mirror the self-service
+// path's exactly, the resident-rate lookup included: the lease this names is
+// the member's, not the caller's, but CreateBooking verifies it against the
+// booker's own applicationFor link either way and falls through to the
+// standard rate on a mismatch.
+async function bookMemberIn(se, bookerKey, leaseAppKey) {
+  const optionalReads = seatKeys(se.sessionKey, se.capacity);
+  optionalReads.push(se.sessionKey + ".bkr" + idOf(bookerKey));
+  const payload = { session: se.sessionKey, booker: bookerKey };
+  if (leaseAppKey) {
+    payload.leaseAppKey = leaseAppKey;
+    optionalReads.push(
+      leaseAppKey,
+      leaseAppKey + ".tenancy",
+      "lnk.leaseapp." + idOf(leaseAppKey) + ".applicationFor.identity." + idOf(bookerKey),
+    );
+  }
+  await opOrThrow(
+    {
+      operationType: "CreateBooking",
+      class: "booking",
+      reads: [se.sessionKey, se.sessionKey + ".schedule", bookerKey],
+      optionalReads,
+      payload,
+    },
+    "book the member in",
+    false,
+  );
 }
 
 // bindSeatCancels wires the front desk's release-a-seat control. CancelBooking
@@ -1119,10 +1271,11 @@ function init() {
   document.getElementById("myclasses-refresh").addEventListener("click", renderMyClasses);
   document.getElementById("roster-session").addEventListener("change", renderRoster);
   document.getElementById("roster-refresh").addEventListener("click", () => {
-    sessionsCache = null;
+    sessionsCache = null; membersCache = null;
     document.getElementById("roster-session").dataset.loaded = "";
     loadRoster();
   });
+  document.getElementById("roster-book-submit").addEventListener("click", bookSelectedMember);
   document.getElementById("studios-refresh").addEventListener("click", () => {
     studiosCache = null; instructorsCache = null;
     renderStudiosAdmin();

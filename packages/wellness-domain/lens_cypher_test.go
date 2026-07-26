@@ -1,10 +1,11 @@
 package wellnessdomain
 
 // Rule-engine proof of the wellness projection lenses (wellnessStudios,
-// wellnessSessions, wellnessBookings). These drive the lens specs through the
-// `full` rule engine directly — the engine selected at activation via
-// engine:"full" — against an embedded NATS Core/Adjacency KV, the same
-// harness clinic-domain / lease-signing use for their lens cypher tests.
+// wellnessSessions, wellnessBookings, wellnessInstructors, wellnessMembers).
+// These drive the lens specs through the `full` rule engine directly — the
+// engine selected at activation via engine:"full" — against an embedded NATS
+// Core/Adjacency KV, the same harness clinic-domain / lease-signing use for
+// their lens cypher tests.
 //
 // What they prove that the unit/structure tests cannot:
 //   - wellnessSessions is ONE ROW PER SESSION even with a studio linked
@@ -15,6 +16,10 @@ package wellnessdomain
 //     row.
 //   - wellnessStudios / a WHERE presence filter excludes a studio with no
 //     .profile.
+//   - both containment walks — a session's and a member's — reach exactly the
+//     depths their write-side guard reaches, and project an EMPTY set rather
+//     than going missing when the topology is unwired, so the read boundaries
+//     that intersect them deny.
 
 import (
 	"context"
@@ -362,6 +367,8 @@ func TestWellnessSessions_NoLocationEmptyCovering(t *testing.T) {
 
 	rows := f.project(t, wellnessSessionsSpec)
 	require.Len(t, rows, 1)
+	require.Contains(t, rows[0].Values, "coveringLocations",
+		"the column must project even when the set is empty")
 	require.Empty(t, rows[0].Values["coveringLocations"],
 		"an unwired studio covers nothing; the boundary must not read that as unrestricted")
 }
@@ -457,4 +464,148 @@ func TestWellnessSessions_HopBoundMatchesTheWriteSide(t *testing.T) {
 	require.Len(t, rows, 1)
 	require.ElementsMatch(t, want, rows[0].Values["coveringLocations"],
 		"depths 0..7 cover the session and depth 8 does not — the write side's own reach")
+}
+
+// TestWellnessMembers_JoinsMemberAndCoveringLocations proves the front desk's
+// picker source: one row per lease, carrying the member who holds it and the
+// locations that cover them — the applied-to unit at depth 0 and its
+// containedIn ancestors above — so a staffer wired to either the unit or the
+// building matches on a set intersection.
+func TestWellnessMembers_JoinsMemberAndCoveringLocations(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newWdFixture(t)
+	leaseKey := f.vtx(t, "lease", "leaseapp")
+	memberKey := f.vtx(t, "member", "identity")
+	unitKey := f.vtx(t, "unit12", "location")
+	buildingKey := f.vtx(t, "building", "location")
+	f.edge(t, "applicationFor", "lease", "member")
+	f.edge(t, "appliesToUnit", "lease", "unit12")
+	f.edge(t, "containedIn", "unit12", "building")
+	f.aspect(t, "lease", "tenancy", "tenancy", map[string]any{"leaseStart": "2026-01-01T00:00:00Z"})
+
+	rows := f.project(t, wellnessMembersSpec)
+	require.Len(t, rows, 1, "the comprehension must not fan the lease into one row per ancestor")
+	row := wdRowByKey(rows, leaseKey)
+	require.Equal(t, leaseKey, row["leaseAppKey"])
+	require.Equal(t, memberKey, row["bookerKey"], "a picker has to name a person, not only a lease")
+	require.ElementsMatch(t, []any{unitKey, buildingKey}, row["coveringLocations"],
+		"depth-0 (the member's own unit) and its containedIn ancestor both cover them")
+}
+
+// TestWellnessMembers_NoUnitEmptyCovering proves a lease with no applied-to
+// unit projects an EMPTY covering set rather than a null or a missing column:
+// the picker reads that as "no workplace reaches this member" and offers them
+// to nobody, matching require_workplace's empty-location_keys denial.
+func TestWellnessMembers_NoUnitEmptyCovering(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newWdFixture(t)
+	f.vtx(t, "lease", "leaseapp")
+	f.vtx(t, "member", "identity")
+	f.edge(t, "applicationFor", "lease", "member")
+	f.aspect(t, "lease", "tenancy", "tenancy", map[string]any{"leaseStart": "2026-01-01T00:00:00Z"})
+
+	rows := f.project(t, wellnessMembersSpec)
+	require.Len(t, rows, 1, "the row must project so an unwired lease DENIES rather than going missing")
+	// Contains before Empty: require.Empty passes identically on an ABSENT map
+	// key, so on its own it could not tell "projected empty" from "the column
+	// is not projected at all" — which is the distinction this test is named
+	// for.
+	require.Contains(t, rows[0].Values, "coveringLocations",
+		"the column must project even when the set is empty")
+	require.Empty(t, rows[0].Values["coveringLocations"],
+		"an unwired unit covers nobody; the picker must not read that as unrestricted")
+}
+
+// TestWellnessMembers_NoApplicantDropsRow proves the applicationFor match is
+// REQUIRED, not optional: a lease with no applicant names no member, so it is
+// not a row the picker could offer. This is the one column where absence drops
+// the row rather than denying on it — coveringLocations must still project
+// empty (the test above), because there an empty set is the denial.
+func TestWellnessMembers_NoApplicantDropsRow(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newWdFixture(t)
+	f.vtx(t, "lease", "leaseapp")
+	f.vtx(t, "unit12", "location")
+	f.edge(t, "appliesToUnit", "lease", "unit12")
+	// A real tenancy, so the ONLY thing missing is the applicant. Without this
+	// the row would drop on the .tenancy filter instead and the test would pass
+	// while proving nothing about the applicationFor match.
+	f.aspect(t, "lease", "tenancy", "tenancy", map[string]any{"leaseStart": "2026-01-01T00:00:00Z"})
+
+	rows := f.project(t, wellnessMembersSpec)
+	require.Empty(t, rows, "a lease naming no applicant is not a member the picker can offer")
+}
+
+// TestWellnessMembers_DepthBoundMatchesWriteSide pins the containment reach to
+// the write side's own: WORKPLACE_MAX_DEPTH - 1, because `*0..7` admits depths
+// 0..7 inclusive while the Starlark walk runs range(WORKPLACE_MAX_DEPTH) over
+// the same span. A staffer nine levels up must NOT be offered a member their
+// writes could not reach.
+func TestWellnessMembers_DepthBoundMatchesWriteSide(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newWdFixture(t)
+	f.vtx(t, "lease", "leaseapp")
+	f.vtx(t, "member", "identity")
+	unitKey := f.vtx(t, "unit12", "location")
+	f.edge(t, "applicationFor", "lease", "member")
+	f.edge(t, "appliesToUnit", "lease", "unit12")
+	f.aspect(t, "lease", "tenancy", "tenancy", map[string]any{"leaseStart": "2026-01-01T00:00:00Z"})
+
+	// unit12(0) -> a1(1) -> ... -> a8(8): one level deeper than either side reaches.
+	want := []any{unitKey}
+	prev := "unit12"
+	for i := 1; i <= 8; i++ {
+		name := fmt.Sprintf("a%d", i)
+		key := f.vtx(t, name, "location")
+		f.edge(t, "containedIn", prev, name)
+		if i <= 7 {
+			want = append(want, key)
+		}
+		prev = name
+	}
+
+	rows := f.project(t, wellnessMembersSpec)
+	require.Len(t, rows, 1)
+	require.ElementsMatch(t, want, rows[0].Values["coveringLocations"],
+		"depths 0..7 cover the member and depth 8 does not — the write side's own reach")
+}
+
+// TestWellnessMembers_PendingOrDeclinedApplicantIsNotAMember proves the
+// `.tenancy` presence filter discriminates: DecideLeaseApplication tombstones
+// neither the leaseapp nor its applicationFor link on a decline, so a rejected
+// applicant keeps a live link to the building they were refused. Without this
+// filter the front desk would be handed their identity and told they were a
+// member. The positive control sits beside it in the same graph, so a pass
+// cannot come from the fixture merely being empty.
+func TestWellnessMembers_PendingOrDeclinedApplicantIsNotAMember(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newWdFixture(t)
+	f.vtx(t, "unit12", "location")
+
+	tenantLease := f.vtx(t, "tenantLease", "leaseapp")
+	f.vtx(t, "tenant", "identity")
+	f.edge(t, "applicationFor", "tenantLease", "tenant")
+	f.edge(t, "appliesToUnit", "tenantLease", "unit12")
+	f.aspect(t, "tenantLease", "tenancy", "tenancy", map[string]any{"leaseStart": "2026-01-01T00:00:00Z"})
+
+	// Same building, same link shape, no .tenancy — never became a tenancy.
+	f.vtx(t, "refusedLease", "leaseapp")
+	f.vtx(t, "refused", "identity")
+	f.edge(t, "applicationFor", "refusedLease", "refused")
+	f.edge(t, "appliesToUnit", "refusedLease", "unit12")
+
+	rows := f.project(t, wellnessMembersSpec)
+	require.Len(t, rows, 1, "only the actual tenancy is a member")
+	require.Equal(t, tenantLease, rows[0].Values["leaseAppKey"],
+		"an applicant with no .tenancy is not somebody the front desk may be shown")
 }

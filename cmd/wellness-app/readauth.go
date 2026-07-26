@@ -102,7 +102,11 @@ func (h subjectHats) isStaff() bool { return len(h.workplaces) > 0 }
 // nobody — the denial require_workplace gives an empty location list.
 func (h subjectHats) covers(coveringLocations []string) bool {
 	for _, loc := range coveringLocations {
-		if strings.TrimSpace(loc) == "" {
+		// Compare the TRIMMED value, not merely test it for emptiness: the
+		// workplace keys were trimmed when they were collected, so testing one
+		// form and comparing the other would silently refuse a padded key.
+		loc = strings.TrimSpace(loc)
+		if loc == "" {
 			continue
 		}
 		for _, work := range h.workplaces {

@@ -90,6 +90,7 @@ func newTestConn(t *testing.T) *substrate.Conn {
 		wellnessdomain.WellnessSessionsBucket,
 		wellnessdomain.WellnessBookingsBucket,
 		wellnessdomain.WellnessInstructorsBucket,
+		wellnessdomain.WellnessMembersBucket,
 	} {
 		if _, err := conn.JetStream().CreateOrUpdateKeyValue(ctx, jetstream.KeyValueConfig{Bucket: bucket}); err != nil {
 			t.Fatalf("create %s bucket: %v", bucket, err)
@@ -788,5 +789,198 @@ func TestHandleBookings_Roster_RowWithoutCoveringLocationsDenies(t *testing.T) {
 	rec := sessionGET(s, s.handleBookings, "/api/bookings?sessionKey="+ledSessionKey, cookieFor(staffSubj))
 	if rec.Code != http.StatusForbidden {
 		t.Fatalf("status = %d, want 403 for a row carrying no covering set; body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+// ---- /api/members: the front desk's picker, scoped to where they work ----
+
+// seedMember seeds one wellnessMembers row for bookerSubject (a bare id),
+// covered by coveringLocations — defaulting to the one building staffSubj
+// works at, so a caller that says nothing about topology gets a member the
+// staff hat can legitimately reach. Mirrors seedSession's defaulting.
+func seedMember(t *testing.T, conn *substrate.Conn, leaseAppKey, bookerSubject string, coveringLocations ...string) {
+	t.Helper()
+	if coveringLocations == nil {
+		coveringLocations = []string{staffWorkplace}
+	}
+	putJSON(t, conn, wellnessdomain.WellnessMembersBucket, leaseAppKey, map[string]any{
+		"leaseAppKey":       leaseAppKey,
+		"bookerKey":         "vtx.identity." + bookerSubject,
+		"coveringLocations": coveringLocations,
+	})
+}
+
+const (
+	leaseHere      = "vtx.leaseapp.pK4mRtZbXvNqL7wHdYcj"
+	leaseElsewhere = "vtx.leaseapp.zT8nWpKrBvMqX3LdHcyg"
+)
+
+func decodeMembers(t *testing.T, rec *httptest.ResponseRecorder) []memberRow {
+	t.Helper()
+	var body struct {
+		Members []memberRow `json:"members"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode members: %v (body=%s)", err, rec.Body.String())
+	}
+	return body.Members
+}
+
+// The discriminating pair for the whole surface: the SAME staffer, the same
+// call, two members differing only in which building their lease sits at.
+// Without the workplace term this returned both.
+func TestHandleMembers_StaffSeesOnlyTheirWorkplace(t *testing.T) {
+	s, cookieFor := devSessionServer(t)
+	seedMember(t, s.conn, leaseHere, memberA)
+	seedMember(t, s.conn, leaseElsewhere, memberB, otherWorkplace)
+
+	rec := sessionGET(s, s.handleMembers, "/api/members", cookieFor(staffSubj))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	members := decodeMembers(t, rec)
+	if len(members) != 1 {
+		t.Fatalf("got %d members, want 1 (the one at this staffer's building); %+v", len(members), members)
+	}
+	if members[0].BookerKey != "vtx.identity."+memberA || members[0].LeaseAppKey != leaseHere {
+		t.Fatalf("got %+v, want memberA on %s", members[0], leaseHere)
+	}
+}
+
+// A staffer wired to the BUILDING reaches a member whose lease is on a unit
+// inside it: the lens projects the whole containment chain, so the depth-0
+// unit and its ancestors all count.
+func TestHandleMembers_StaffCoveredByAContainingLocation(t *testing.T) {
+	s, cookieFor := devSessionServer(t)
+	seedMember(t, s.conn, leaseHere, memberA, "vtx.unit.qR7mKpXvZnBtL4wHdYcj", staffWorkplace)
+
+	rec := sessionGET(s, s.handleMembers, "/api/members", cookieFor(staffSubj))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	if got := decodeMembers(t, rec); len(got) != 1 {
+		t.Fatalf("got %d members, want 1 — a containing location covers the unit below it; %+v", len(got), got)
+	}
+}
+
+// A lease whose unit is unwired is covered by nobody. It must not be offered:
+// an empty covering set denies rather than falling open, the same answer
+// require_workplace gives an empty location list.
+func TestHandleMembers_UnlocatedLeaseOfferedToNobody(t *testing.T) {
+	s, cookieFor := devSessionServer(t)
+	seedMember(t, s.conn, leaseHere, memberA, noLocations...)
+
+	rec := sessionGET(s, s.handleMembers, "/api/members", cookieFor(staffSubj))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	if got := decodeMembers(t, rec); len(got) != 0 {
+		t.Fatalf("got %d members, want 0 — an unwired lease covers nobody; %+v", len(got), got)
+	}
+}
+
+// A row projected by an OLDER version of the lens carries no coveringLocations
+// key at all. That decodes to a nil slice and must DENY — the stale-projection
+// case is where a fail-open would publish the whole directory.
+func TestHandleMembers_RowWithoutCoveringLocationsDenies(t *testing.T) {
+	s, cookieFor := devSessionServer(t)
+	putJSON(t, s.conn, wellnessdomain.WellnessMembersBucket, leaseHere, map[string]any{
+		"leaseAppKey": leaseHere,
+		"bookerKey":   "vtx.identity." + memberA,
+	})
+
+	rec := sessionGET(s, s.handleMembers, "/api/members", cookieFor(staffSubj))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	if got := decodeMembers(t, rec); len(got) != 0 {
+		t.Fatalf("got %d members, want 0 for a row carrying no covering set; %+v", len(got), got)
+	}
+}
+
+// A directory of who else lives here is not a member's to read. This is the
+// boundary the deleted /api/residents lacked.
+func TestHandleMembers_MemberForbidden(t *testing.T) {
+	s, cookieFor := devSessionServer(t)
+	seedMember(t, s.conn, leaseHere, memberA)
+
+	rec := sessionGET(s, s.handleMembers, "/api/members", cookieFor(memberA))
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403 — a member reads no directory, not even one they appear in; body=%s",
+			rec.Code, rec.Body.String())
+	}
+}
+
+// Leading a class confers no directory: an instructor holds no CreateBooking
+// grant, so the picker that feeds it is not theirs either.
+func TestHandleMembers_InstructorForbidden(t *testing.T) {
+	s, cookieFor := devSessionServer(t)
+	seedMember(t, s.conn, leaseHere, memberA)
+
+	rec := sessionGET(s, s.handleMembers, "/api/members", cookieFor(instrSubj))
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403; body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+// The operator holds no workplace at all, and reads every member — the
+// break-glass exemption require_workplace gives root on the write side.
+func TestHandleMembers_OperatorSeesEveryMember(t *testing.T) {
+	s, cookieFor := devSessionServer(t)
+	seedMember(t, s.conn, leaseHere, memberA)
+	seedMember(t, s.conn, leaseElsewhere, memberB, otherWorkplace)
+
+	rec := sessionGET(s, s.handleMembers, "/api/members", cookieFor(rootSubj))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	if got := decodeMembers(t, rec); len(got) != 2 {
+		t.Fatalf("got %d members, want 2 — root is exempt from confinement, not from the read; %+v", len(got), got)
+	}
+}
+
+// A staffer at two buildings reads the members of both — the union, not the
+// first match.
+func TestHandleMembers_TwoHatStafferSeesBothBuildings(t *testing.T) {
+	s, cookieFor := devSessionServer(t)
+	seedMember(t, s.conn, leaseHere, memberA)
+	seedMember(t, s.conn, leaseElsewhere, memberB, otherWorkplace)
+
+	rec := sessionGET(s, s.handleMembers, "/api/members", cookieFor(twoHatSubj))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	if got := decodeMembers(t, rec); len(got) != 2 {
+		t.Fatalf("got %d members, want 2 — both workplaces count; %+v", len(got), got)
+	}
+}
+
+// The picker is a per-user read, so it needs a session like every other one.
+func TestHandleMembers_RefusesWithNoSession(t *testing.T) {
+	s, _ := devSessionServer(t)
+	seedMember(t, s.conn, leaseHere, memberA)
+
+	rec := muxGET(s, "/api/members", nil)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401 — /api/members must not be on the public-read exemption list; body=%s",
+			rec.Code, rec.Body.String())
+	}
+}
+
+// The covering set is the server's confinement input, not the client's. It must
+// not travel: publishing it would hand a staffer the building topology that
+// decided the answer, and it is what the picker is deliberately silent about.
+// Asserted on the RAW body, since decodeMembers would silently drop the field
+// and let a regression pass green.
+func TestHandleMembers_WithholdsCoveringLocationsFromTheClient(t *testing.T) {
+	s, cookieFor := devSessionServer(t)
+	seedMember(t, s.conn, leaseHere, memberA)
+
+	rec := sessionGET(s, s.handleMembers, "/api/members", cookieFor(staffSubj))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	if body := rec.Body.String(); strings.Contains(body, "coveringLocations") || strings.Contains(body, staffWorkplace) {
+		t.Fatalf("the response carries the confinement input; body=%s", body)
 	}
 }
