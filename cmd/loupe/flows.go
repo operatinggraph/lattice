@@ -1,33 +1,87 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"sort"
 	"time"
 
 	"github.com/operatinggraph/lattice/internal/bootstrap"
+	"github.com/operatinggraph/lattice/internal/substrate"
 )
 
 // flowRow is one row of the Chronicler's `loomFlowHistory` read model
 // (orchestration-history-read-model-design.md §2.6), read from its NATS-KV
 // bucket over the P5 path (Loupe reads the lens target, never `loom-state`).
-// Live is cross-referenced against the live `lattice.ctrl.loom.list` control
-// read (§2.7): true when a "running" row still has a matching live instance,
-// false when the terminal event was lost or the engine died mid-flight — the
-// "orphaned" signal the design calls out as observational value, not a leak.
-// nil means "unknown" — either the row isn't "running" (badge doesn't apply)
-// or the live control read itself failed, which must NOT render as a false
-// "orphaned" (that would misreport a control-plane outage as a stuck flow).
+//
+// Liveness cross-references a "running" row against the live
+// `lattice.ctrl.loom.list` control read — see flowLiveness for the three
+// verdicts and why the engine's own status, not mere membership in that list,
+// is what decides them. EngineStatus carries Loom's answer verbatim so the
+// card can quote both voices when they disagree.
+//
+// PatternName is the pattern's canonicalName, resolved from
+// vtx.meta.<id>.canonicalName. A flow's identity to an operator is which
+// pattern ran; the bare `vtx.meta.<NanoID>` ref that the read model stores
+// makes every card look like every other card.
 type flowRow struct {
 	InstanceID    string `json:"instanceId"`
 	PatternRef    string `json:"patternRef"`
+	PatternName   string `json:"patternName,omitempty"`
 	SubjectKey    string `json:"subjectKey"`
 	Status        string `json:"status"`
 	StartedAt     string `json:"startedAt,omitempty"`
 	EndedAt       string `json:"endedAt,omitempty"`
 	FailureReason string `json:"failureReason,omitempty"`
-	Live          *bool  `json:"live,omitempty"`
+	Liveness      string `json:"liveness,omitempty"`
+	EngineStatus  string `json:"engineStatus,omitempty"`
+}
+
+// The liveness verdicts on a history row that still reads "running".
+const (
+	// livenessLive — Loom is running this instance right now. The history
+	// row and the engine agree.
+	livenessLive = "live"
+	// livenessOrphaned — Loom has no record of the instance at all: the
+	// terminal event was lost or the engine died mid-flight. Observational
+	// value, not a leak (design §2.7).
+	livenessOrphaned = "orphaned"
+	// livenessStaleHistory — Loom has the instance and considers it FINISHED
+	// while the history row still says running. The flow is not stuck; the
+	// projection is behind, or it re-opened a row it should have left closed.
+	livenessStaleHistory = "stale-history"
+)
+
+// loomTerminal reports whether a Loom instance status is an end state
+// (internal/loom/state.go: running | complete | failed).
+func loomTerminal(status string) bool {
+	return status == "complete" || status == "failed"
+}
+
+// flowLiveness classifies a history row against Loom's authoritative instance
+// state. Empty means no badge: the row is already terminal (nothing to
+// cross-reference), or the control read failed and an unknown must never
+// render as a confirmed verdict.
+//
+// The engine's STATUS decides this, not the row's presence in the instance
+// list. Loom keeps an instance record after it finishes, so membership alone
+// is true of every completed flow — badging on it makes "live" mean "Loom
+// still remembers this id", which is exactly the row this badge exists to
+// catch. A row saying running against an engine saying complete is the
+// design's own "terminal event never landed" case, and it now says so in its
+// own word rather than being waved through as live.
+func flowLiveness(rowStatus, engineStatus string, engineKnown, engineHas bool) string {
+	if rowStatus != "running" || !engineKnown {
+		return ""
+	}
+	if !engineHas {
+		return livenessOrphaned
+	}
+	if loomTerminal(engineStatus) {
+		return livenessStaleHistory
+	}
+	return livenessLive
 }
 
 // computeFlows assembles the Flows-tab rows from the orchestration-history
@@ -35,11 +89,12 @@ type flowRow struct {
 // key). A row that fails to decode is skipped — a durable read model
 // tolerates a poison entry rather than failing the whole list. statusFilter
 // "" or "all" returns every row; otherwise only rows whose status matches.
-// liveIDs is the set of instanceIds the live `loom.list` control read
-// currently reports; liveKnown is false when that control read itself failed
-// (§2.5.2: a terminal row is never badged live/orphaned regardless — it is
-// just done — and a "running" row stays unbadged, not falsely "orphaned",
-// when liveKnown is false).
+// engineStatuses maps instanceId to the status Loom's `loom.list` control read
+// reports for it; engineKnown is false when that control read itself failed
+// (§2.5.2: a terminal row is never badged regardless — it is just done — and a
+// "running" row stays unbadged, not falsely "orphaned", when the engine's
+// answer is unavailable). patternName resolves a patternRef to its
+// canonicalName; nil leaves every name empty.
 // flowCols is the Chronicler's on-the-wire read-model row (snake_case,
 // orchestration-history-read-model-design.md §2.6) — shared by every handler
 // that reads the `orchestration-history` bucket so the decode rule (and its
@@ -65,7 +120,7 @@ func decodeFlowCols(raw []byte) (flowCols, bool) {
 	return cols, true
 }
 
-func computeFlows(keys []string, get kvGetter, liveIDs map[string]bool, liveKnown bool, statusFilter string) []flowRow {
+func computeFlows(keys []string, get kvGetter, engineStatuses map[string]string, engineKnown bool, statusFilter string, patternName func(string) string) []flowRow {
 	rows := make([]flowRow, 0)
 	for _, k := range keys {
 		raw, ok := get(k)
@@ -88,15 +143,20 @@ func computeFlows(keys []string, get kvGetter, liveIDs map[string]bool, liveKnow
 			EndedAt:       cols.EndedAt,
 			FailureReason: cols.FailureReason,
 		}
-		if row.Status == "running" && liveKnown {
-			live := liveIDs[row.InstanceID]
-			row.Live = &live
+		engineStatus, engineHas := engineStatuses[row.InstanceID]
+		row.Liveness = flowLiveness(row.Status, engineStatus, engineKnown, engineHas)
+		if engineHas {
+			row.EngineStatus = engineStatus
+		}
+		if patternName != nil {
+			row.PatternName = patternName(row.PatternRef)
 		}
 		rows = append(rows, row)
 	}
-	// Most-recently-started first (a fresh flow is the operator's likeliest
-	// interest); a blank/equal startedAt falls back to instanceId for a
-	// stable order.
+	// Most-recently-started first, as the deterministic base order; a
+	// blank/equal startedAt falls back to instanceId. The exception-first
+	// triage sort and the per-pattern grouping are the logic tier's job
+	// (logic/flows.js), the same split computeCapabilityProposals uses.
 	sort.Slice(rows, func(i, j int) bool {
 		if rows[i].StartedAt != rows[j].StartedAt {
 			return rows[i].StartedAt > rows[j].StartedAt
@@ -106,26 +166,64 @@ func computeFlows(keys []string, get kvGetter, liveIDs map[string]bool, liveKnow
 	return rows
 }
 
-// liveLoomInstances decodes the `instanceId` set out of a `lattice.ctrl.loom.list`
-// raw reply. Loupe's control proxy forwards raw JSON without decoding into
-// Loom's typed control structs (control.go's doc comment) — this mirrors that
-// idiom, pulling only the one field the badge needs rather than importing
-// internal/loom/control. A decode failure yields an empty set (badge omitted,
+// loomInstanceStatuses decodes instanceId → status out of a
+// `lattice.ctrl.loom.list` raw reply. Loupe's control proxy forwards raw JSON
+// without decoding into Loom's typed control structs (control.go's doc
+// comment) — this mirrors that idiom, pulling only the two fields the badge
+// needs rather than importing internal/loom/control.
+//
+// The status is half the answer, not decoration: the list carries FINISHED
+// instances too, so a decoder that kept only the ids could not tell a running
+// flow from a remembered one. A decode failure yields an empty map (no badge,
 // never a hard failure of the whole Flows list).
-func liveLoomInstances(raw json.RawMessage) map[string]bool {
+func loomInstanceStatuses(raw json.RawMessage) map[string]string {
 	var reply struct {
 		Instances []struct {
 			InstanceID string `json:"instanceId"`
+			Status     string `json:"status"`
 		} `json:"instances"`
 	}
-	out := make(map[string]bool)
+	out := make(map[string]string)
 	if len(raw) == 0 || json.Unmarshal(raw, &reply) != nil {
 		return out
 	}
 	for _, inst := range reply.Instances {
-		out[inst.InstanceID] = true
+		if inst.InstanceID != "" {
+			out[inst.InstanceID] = inst.Status
+		}
 	}
 	return out
+}
+
+// patternNameResolver returns a memoized patternRef → canonicalName lookup
+// over Core KV (Loupe as the console inspector — the same targeted
+// vtx.meta.<id>.canonicalName read the lens page already makes, not a scan).
+//
+// Memoized because a page of flows is a handful of DISTINCT patterns repeated
+// many times over — 26 rows across 3 patterns on the stack this was built
+// against — so the per-row cost is one map hit, not one round trip. An
+// unresolvable ref yields "" and the card falls back to the raw ref rather
+// than showing nothing.
+func (s *server) patternNameResolver(ctx context.Context, conn *substrate.Conn) func(string) string {
+	seen := make(map[string]string)
+	return func(patternRef string) string {
+		if patternRef == "" {
+			return ""
+		}
+		if name, ok := seen[patternRef]; ok {
+			return name
+		}
+		get := func(key string) ([]byte, bool) {
+			entry, err := conn.KVGet(ctx, bootstrap.CoreKVBucket, key)
+			if err != nil {
+				return nil, false
+			}
+			return entry.Value, true
+		}
+		name := dataString(metaData(get, patternRef+".canonicalName"), "value", "name", "canonicalName")
+		seen[patternRef] = name
+		return name
+	}
 }
 
 // timelineFlow is one flow's liveness span for the map scrubber (F13 §4.2's
@@ -266,13 +364,15 @@ func (s *server) handleFlows(w http.ResponseWriter, r *http.Request) {
 		return entry.Value, true
 	}
 
-	var liveIDs map[string]bool
-	liveKnown := false
+	var engineStatuses map[string]string
+	engineKnown := false
 	if raw, err := s.controlRequest(ctx, conn, "lattice.ctrl.loom.list"); err == nil {
-		liveIDs = liveLoomInstances(raw)
-		liveKnown = true
+		engineStatuses = loomInstanceStatuses(raw)
+		engineKnown = true
 	}
 
 	statusFilter := r.URL.Query().Get("status")
-	s.writeJSON(w, http.StatusOK, map[string]any{"flows": computeFlows(keys, get, liveIDs, liveKnown, statusFilter)})
+	s.writeJSON(w, http.StatusOK, map[string]any{
+		"flows": computeFlows(keys, get, engineStatuses, engineKnown, statusFilter, s.patternNameResolver(ctx, conn)),
+	})
 }

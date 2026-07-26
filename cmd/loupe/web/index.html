@@ -172,9 +172,13 @@
         <span class="muted" id="flows-status-msg"></span>
       </div>
       <p class="muted small">The Chronicler's durable Loom-flow history — every instance's lifecycle
-        (pattern, timestamps, failure reason), reconstructed from the <code>loom.*</code> event stream. A
-        "running" row is badged <b>live</b> or <b>orphaned</b> against the live control-plane list — an
-        orphaned row is a flow whose terminal event never landed, not a leak.</p>
+        (pattern, timestamps, failure reason), reconstructed from the <code>loom.*</code> event stream,
+        grouped by pattern and ordered worst-first. A still-running row is cross-referenced against
+        Loom's own instance state: <b>live</b> (the engine is running it), <b>history stale</b> (the
+        engine considers it finished — the terminal event never reached this projection), or
+        <b>orphaned</b> (the engine has no record of it at all). Neither of the last two is a leak, and
+        neither is a stuck flow; both are the history disagreeing with the engine. Read-only — Loom
+        exposes no per-instance redrive, so there is no control-plane op from here.</p>
       <div class="cards" id="flows-cards"></div>
     </section>
 
