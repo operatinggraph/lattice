@@ -8,7 +8,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -22,6 +21,7 @@ import (
 	"github.com/operatinggraph/lattice/internal/bootstrap"
 	"github.com/operatinggraph/lattice/internal/jsstore"
 	"github.com/operatinggraph/lattice/internal/substrate"
+	"github.com/operatinggraph/lattice/internal/testutil"
 	wellnessdomain "github.com/operatinggraph/lattice/packages/wellness-domain"
 )
 
@@ -62,25 +62,7 @@ const (
 func TestMain(m *testing.M) {
 	os.Setenv(envPrefix+"_DEV_PRIVATE_KEY_PATH", "../../deploy/gateway-dev-key/dev-private.pem")
 	os.Setenv(envPrefix+"_DEV_PUBLIC_KEY_PATH", "../../deploy/gateway-dev-key/dev-public.pem")
-	// main() loads the primordial ids before serving, and the operator role KEY
-	// the read boundary compares against is resolved from them. Without them
-	// that key is empty and a fixture minting an empty role would prove
-	// nothing. Generated into a throwaway path rather than read from the repo:
-	// lattice.bootstrap.json is a locally-generated file that no clean checkout
-	// has (internal/bootstrap's own tests generate theirs the same way).
-	tmp, err := os.MkdirTemp("", "wellness-app-bootstrap")
-	if err != nil {
-		panic("temp dir for bootstrap ids: " + err.Error())
-	}
-	if _, err := bootstrap.LoadOrGenerate(filepath.Join(tmp, "lattice.bootstrap.json")); err != nil {
-		panic("load bootstrap ids: " + err.Error())
-	}
-	if bootstrap.RoleOperatorKey == "" {
-		panic("bootstrap loaded but the operator role key is empty")
-	}
-	code := m.Run()
-	os.RemoveAll(tmp)
-	os.Exit(code)
+	os.Exit(m.Run())
 }
 
 func discardLogger() *slog.Logger {
@@ -211,6 +193,14 @@ func fakeGatewayActor(t *testing.T) string {
 // Returns the helper that mints a session cookie for a bare identity id.
 func devSessionServer(t *testing.T) (*server, func(subject string) *http.Cookie) {
 	t.Helper()
+	// The read boundary compares a role entry against the primordial operator
+	// role KEY, which main() resolves from the bootstrap ids at boot. Without
+	// them that key is empty and a fixture minting an empty role would prove
+	// nothing.
+	testutil.EnsurePrimordials(t)
+	if bootstrap.RoleOperatorKey == "" {
+		t.Fatal("primordial ids loaded but the operator role key is empty")
+	}
 	gatewayURL := fakeGatewayActor(t)
 	t.Setenv(envPrefix+"_DEV_AUTH", "1")
 	signer, err := appsession.NewDevSigner(discardLogger(), envPrefix, true)
