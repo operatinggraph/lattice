@@ -248,6 +248,11 @@ func InstallActorAggregate(
 		})
 	}
 
+	// Scope this lens's rebuild truncate to its own rows. Independent of the
+	// guard: a lens sharing a bucket must not purge its siblings whether or not
+	// its writes are ordered.
+	ApplyTruncateScope(adpt, r)
+
 	guarded := plan.RequiresGuard()
 	if guarded {
 		if gErr := EnableProjectionGuard(adpt, r.ID); gErr != nil {
@@ -288,6 +293,37 @@ func ApplyGuard(adpt adapter.Adapter, r *lens.Rule) error {
 		return nil
 	}
 	return EnableProjectionGuard(adpt, r.ID)
+}
+
+// ApplyTruncateScope binds a lens rule's key prefix to an adapter built for that
+// rule, so a rebuild truncates only the rows this lens wrote.
+//
+// It is separable from InstallActorAggregate for the same reason ApplyGuard is:
+// which keys a lens owns is a property of the RULE, so a replacement adapter
+// swapped into a running pipeline on an INTO-only hot reload must carry it too.
+// An adapter that lost the scoping on a reload would purge a shared bucket whole
+// on its next rebuild — the wipe the scoping exists to prevent, reached through
+// the swap rather than through activation.
+//
+// A rule with no derivable prefix leaves the adapter untouched, which truncates
+// the whole bucket. That is not a downgrade: a lens with no output key pattern
+// is not a shared-target lens, and a dedicated target's rebuild has to clear
+// everything to reach the empty high-water state §6.2 wants.
+func ApplyTruncateScope(adpt adapter.Adapter, r *lens.Rule) {
+	nkv, ok := adpt.(*adapter.NatsKVAdapter)
+	if !ok {
+		return
+	}
+	if !IsActorAggregate(r) {
+		return
+	}
+	desc, err := ParseOutputDescriptor(r.Output)
+	if err != nil {
+		return
+	}
+	if prefix, ok := desc.KeyPrefix(); ok {
+		nkv.SetKeyPrefix(prefix)
+	}
 }
 
 // RequiresGuard reports whether a lens rule's writes must run under the §6.2

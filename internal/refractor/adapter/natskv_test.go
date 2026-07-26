@@ -620,3 +620,61 @@ func TestNatsKVAdapter_ListKeysPrefix_ScopesToTheLensOwnRows(t *testing.T) {
 	_, err = a.ListKeysPrefix(ctx, "")
 	require.Error(t, err)
 }
+
+// TestNatsKVAdapter_Truncate_ScopedToTheLensOwnRows is the rebuild half of the
+// same ownership question the sweep asks. Rebuilding ONE lens whose target it
+// shares must not clear the others: on the auth plane's `capability` bucket an
+// unscoped purge is a platform-wide authorization wipe, healed only at sweep
+// pace. Against a real bucket, since the boundary semantics are the substrate's.
+func TestNatsKVAdapter_Truncate_ScopedToTheLensOwnRows(t *testing.T) {
+	kv := startKV(t)
+	a, err := adapter.New(kv, []string{"key"}, adapter.DeleteModeHard)
+	require.NoError(t, err)
+	ctx := context.Background()
+
+	mine := []string{
+		"cap.roles.identity.Hj4kPmRtw9nbCxz5vQ2y",
+		"cap.roles.identity.Lk2Pn6mQrtwzKbcXvP3T",
+	}
+	siblings := []string{
+		"cap.identity.Hj4kPmRtw9nbCxz5vQ2y",
+		"cap.svc.identity.Hj4kPmRtw9nbCxz5vQ2y",
+		"cap.ephemeral.identity.Hj4kPmRtw9nbCxz5vQ2y",
+	}
+	for _, k := range append(append([]string{}, mine...), siblings...) {
+		require.NoError(t, a.Upsert(ctx, map[string]any{"key": k}, map[string]any{"v": 1}, 0))
+	}
+
+	a.SetKeyPrefix("cap.roles.")
+	require.NoError(t, a.Truncate(ctx))
+
+	rows, err := a.ListKeys(ctx)
+	require.NoError(t, err)
+	got := make([]string, 0, len(rows))
+	for _, r := range rows {
+		got = append(got, r["key"].(string))
+	}
+	require.ElementsMatch(t, siblings, got,
+		"a scoped truncate must purge this lens's rows and leave every sibling lens's rows live")
+}
+
+// TestNatsKVAdapter_Truncate_UnscopedClearsTheWholeBucket pins the other half:
+// a lens owning its target outright still has to reach the empty high-water
+// state a guarded rebuild replays into (§6.2). Scoping that would silently turn
+// a working rebuild into a no-op.
+func TestNatsKVAdapter_Truncate_UnscopedClearsTheWholeBucket(t *testing.T) {
+	kv := startKV(t)
+	a, err := adapter.New(kv, []string{"key"}, adapter.DeleteModeHard)
+	require.NoError(t, err)
+	ctx := context.Background()
+
+	for _, k := range []string{"read_landlord_units.a", "read_landlord_units.b", "other.c"} {
+		require.NoError(t, a.Upsert(ctx, map[string]any{"key": k}, map[string]any{"v": 1}, 0))
+	}
+
+	require.NoError(t, a.Truncate(ctx))
+
+	rows, err := a.ListKeys(ctx)
+	require.NoError(t, err)
+	require.Empty(t, rows, "a lens with no declared prefix owns its bucket and truncates all of it")
+}

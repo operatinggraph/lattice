@@ -39,6 +39,9 @@ func buildAdapter(r *lens.Rule, buildTarget targetBuilder) (adapter.Adapter, err
 	if err := projection.ApplyGuard(adpt, r); err != nil {
 		return nil, err
 	}
+	// Which keys the lens owns is a rule property too, and a replacement that
+	// lost it would purge a shared bucket whole on its next rebuild.
+	projection.ApplyTruncateScope(adpt, r)
 	return adpt, nil
 }
 

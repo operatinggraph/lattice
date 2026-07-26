@@ -58,6 +58,12 @@ type NatsKVAdapter struct {
 	// projectionSeq is stamped into the persisted body. Set per-lens via
 	// SetGuarded, from the lens's own compiled projection plan.
 	guarded bool
+	// keyPrefix is the literal prefix every key this lens writes starts with
+	// (OutputDescriptor.KeyPrefix), when the lens has one. It scopes Truncate to
+	// the lens's own rows in a bucket several lenses share. Empty means the lens
+	// owns the whole bucket, which is the dedicated-target case. Set per-lens via
+	// SetKeyPrefix, from the same compiled projection plan SetGuarded reads.
+	keyPrefix string
 }
 
 // New creates a NatsKVAdapter that writes to kv.
@@ -82,6 +88,21 @@ func New(kv *substrate.KV, keyOrder []string, deleteMode DeleteMode) (*NatsKVAda
 // adapter. It must be called at construction time, before the pipeline starts
 // writing — the flag is not safe to flip concurrently with writes.
 func (a *NatsKVAdapter) SetGuarded(guarded bool) { a.guarded = guarded }
+
+// SetKeyPrefix scopes this adapter's Truncate to the keys the lens itself
+// writes. Like SetGuarded it must be called at construction time, before the
+// pipeline starts writing.
+//
+// prefix is OutputDescriptor.KeyPrefix — the same literal AnchorFromKey matches
+// first, already validated as a usable NATS subject filter (non-empty, ending
+// on a "." boundary, no wildcard token). Passing "" leaves the adapter
+// truncating the whole bucket, which is correct for a lens that owns its target
+// outright.
+func (a *NatsKVAdapter) SetKeyPrefix(prefix string) { a.keyPrefix = prefix }
+
+// KeyPrefix reports the prefix Truncate is scoped to, or "" when this adapter
+// truncates its whole bucket.
+func (a *NatsKVAdapter) KeyPrefix() string { return a.keyPrefix }
 
 // Guarded reports whether the projection-write guard is enabled. The pipeline
 // consults it to decide whether the non-stream-sequenced adjacency-watch path
@@ -397,17 +418,27 @@ func (a *NatsKVAdapter) GetRow(ctx context.Context, keys map[string]any) (map[st
 	return doc, true, nil
 }
 
-// Truncate clears the bucket by purging every key, so a rebuild's stream replay
+// Truncate clears the lens's rows by purging them, so a rebuild's stream replay
 // starts from an empty high-water state and the highest-seq write wins
 // (Contract #6 §6.2). Purge removes each key's prior revisions and leaves a
 // delete marker as the latest revision, so a subsequent Get returns
 // ErrKeyNotFound: a guarded rebuild then takes the absent→Create path on the
 // first replay and never reads a stale projectionSeq watermark, eliminating the
 // rejected-write holes a lower-seq replay against a live watermark would leave.
+//
+// What "the lens's rows" means depends on whether the target is shared. With a
+// key prefix set (SetKeyPrefix), only keys under it are purged: several lenses
+// project into one bucket — the auth plane's `capability` is the live case — and
+// an unscoped purge there is a platform-wide authorization wipe, every sibling
+// lens's keys gone and healed only at sweep pace. The Postgres side has always
+// worked this way for the same reason, from the other direction:
+// GrantWriterAdapter implements no Truncater at all because actor_read_grants is
+// shared (read_path_adapters.go). Without a prefix the whole bucket is purged,
+// which is what a lens owning its target outright needs.
 func (a *NatsKVAdapter) Truncate(ctx context.Context) error {
-	keys, err := a.kv.ListKeys(ctx)
+	keys, err := a.truncateKeys(ctx)
 	if err != nil {
-		return fmt.Errorf("natskv truncate: list keys: %w", err)
+		return err
 	}
 	for _, key := range keys {
 		// Purge is idempotent: a key deleted out from under us between the list
@@ -417,6 +448,23 @@ func (a *NatsKVAdapter) Truncate(ctx context.Context) error {
 		}
 	}
 	return nil
+}
+
+// truncateKeys returns the keys Truncate is allowed to purge: the lens's own
+// rows when it declares a key prefix, the whole bucket when it does not.
+func (a *NatsKVAdapter) truncateKeys(ctx context.Context) ([]string, error) {
+	if a.keyPrefix == "" {
+		keys, err := a.kv.ListKeys(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("natskv truncate: list keys: %w", err)
+		}
+		return keys, nil
+	}
+	keys, err := a.kv.ListKeysPrefix(ctx, a.keyPrefix)
+	if err != nil {
+		return nil, fmt.Errorf("natskv truncate: list keys under %q: %w", a.keyPrefix, err)
+	}
+	return keys, nil
 }
 
 // Probe checks whether the NATS KV bucket is reachable by calling kv.Status.

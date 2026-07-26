@@ -226,6 +226,72 @@ func TestApplyGuard_NotActorAggregate_NoOp(t *testing.T) {
 	}
 }
 
+func TestApplyTruncateScope_BindsTheLensOwnPrefix(t *testing.T) {
+	r := installRule(t, projection.AuthPlaneBucket, string(projection.EmptySkip))
+	adpt := newUnguardedAdapter(t)
+
+	projection.ApplyTruncateScope(adpt, r)
+
+	if got := adpt.KeyPrefix(); got != "installTest." {
+		t.Fatalf("truncate must be scoped to the lens's own key prefix, got %q", got)
+	}
+}
+
+// A replacement adapter built by an INTO-only hot reload must carry the scoping
+// too. One that lost it would purge a shared bucket whole on its next rebuild —
+// the wipe reached through the swap instead of through activation.
+func TestApplyTruncateScope_ScopesAFreshAdapter(t *testing.T) {
+	r := installRule(t, projection.AuthPlaneBucket, string(projection.EmptyDelete))
+
+	for _, adpt := range []*adapter.NatsKVAdapter{newUnguardedAdapter(t), newUnguardedAdapter(t)} {
+		projection.ApplyTruncateScope(adpt, r)
+		if adpt.KeyPrefix() == "" {
+			t.Fatalf("every adapter a lens writes through must carry its truncate scope")
+		}
+	}
+}
+
+func TestApplyTruncateScope_NotActorAggregate_NoOp(t *testing.T) {
+	r := installRule(t, projection.AuthPlaneBucket, string(projection.EmptySkip))
+	r.ProjectionKind = "" // a plain lens has no output descriptor to scope by
+	adpt := newUnguardedAdapter(t)
+
+	projection.ApplyTruncateScope(adpt, r)
+
+	if adpt.KeyPrefix() != "" {
+		t.Fatalf("a plain lens must not acquire a truncate scope from the actor-aggregate predicate")
+	}
+}
+
+// An unscopable pattern leaves the adapter truncating its whole bucket. That is
+// the same refusal sweepEnrolment makes, with the opposite default: no scope is
+// safe for a rebuild (it clears everything, which a dedicated target needs),
+// where no scope is NOT safe for a sweep (it would enumerate the bucket).
+func TestApplyTruncateScope_UnscopableKeyPattern_LeavesBucketWideTruncate(t *testing.T) {
+	r := installRule(t, projection.AuthPlaneBucket, string(projection.EmptySkip))
+	r.Output.OutputKeyPattern = "{actorSuffix}.installTest"
+	adpt := newUnguardedAdapter(t)
+
+	projection.ApplyTruncateScope(adpt, r)
+
+	if adpt.KeyPrefix() != "" {
+		t.Fatalf("a pattern yielding no literal prefix must not produce a bogus scope")
+	}
+}
+
+func TestInstallActorAggregate_ScopesTheTruncate(t *testing.T) {
+	r := installRule(t, projection.AuthPlaneBucket, string(projection.EmptySkip))
+	adpt := newUnguardedAdapter(t)
+	p := newTestPipeline(t, adpt)
+
+	if !projection.InstallActorAggregate(p, adpt, r, func(string) uint64 { return 0 }, nil, nil, discardLogger()) {
+		t.Fatalf("install must succeed")
+	}
+	if adpt.KeyPrefix() != "installTest." {
+		t.Fatalf("activation must scope the lens's rebuild truncate to its own rows")
+	}
+}
+
 func TestApplyGuard_GuardRequiredButAdapterCannotEnforce_Errors(t *testing.T) {
 	r := installRule(t, projection.AuthPlaneBucket, string(projection.EmptySkip))
 
