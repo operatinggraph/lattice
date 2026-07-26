@@ -2,7 +2,7 @@ package edgemanifest
 
 import "github.com/operatinggraph/lattice/internal/pkgmgr"
 
-// Lenses returns the package's fourteen Personal-Lens declarations
+// Lenses returns the package's sixteen Personal-Lens declarations
 // (edge-showcase-app-design.md §3.2; the manifest.ent entity lenses per
 // facet-entity-browse-design.md; the staff siblings edgeCatalogRoles +
 // edgeTasksQueued + edgeStaffWorkOrders per facet-staff-worlds-design.md
@@ -10,17 +10,17 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 // edgeInstructorSessions per persona-worlds-design.md Fire W0) — the repo's
 // first `nats-subject` / Personal Lens package.
 //
-// Thirteen of the fourteen are NON-SELF-ANCHORED: each keys its rows on a
+// Fifteen of the sixteen are NON-SELF-ANCHORED: each keys its rows on a
 // vertex other than the recipient identity (a service template, an op meta, a
-// task, an instance, a session, a provider, a booking, a work order, an
-// appointment). Refractor's D1 gate (internal/refractor/projection/personal.go
+// task, an instance, a session, a provider, a booking, a tab, a studio, a work
+// order, an appointment). Refractor's D1 gate (internal/refractor/projection/personal.go
 // → capabilityread.IsReadable) drops such a row unless the actor's unioned
 // `cap-read.<domain>.<actor>` slices list the anchor's bare NanoID — silently,
 // fail-closed, by design (Contract #6 §6.14 Path B; NOT the Postgres
 // actor_read_grants table a `GrantTable:true` lens feeds, which is Path A / RLS
 // for Protected reads and irrelevant here — this package has no Postgres lens).
 //
-// So each of those thirteen declares its actor→anchor reachability ONCE, as a
+// So each of those fifteen declares its actor→anchor reachability ONCE, as a
 // `Walk`, and pkgmgr compiles BOTH artifacts from it: the lens's own OPTIONAL
 // MATCH prefix, and the read-grant producer that grants the anchors. `Spec`
 // therefore carries the presentation TAIL only. The three producers
@@ -205,6 +205,46 @@ func Lenses() []pkgmgr.LensSpec {
 				Chain:       []string{"(identity)<-[:bookedBy]-(bk:booking)"},
 			},
 			Spec: edgeEntityBookingsTail,
+		},
+		{
+			CanonicalName: "edgeEntityTabs",
+			Class:         "meta.lens",
+			Adapter:       "nats-subject",
+			SubjectPrefix: manifestSubjectPrefix,
+			Stream:        manifestStream,
+			Personal:      true,
+			Engine:        "full",
+			IntoKey:       []string{"__actor", "ns", "entityId"},
+			Walk: &pkgmgr.AnchorWalk{
+				GrantDomain: domainBase,
+				AnchorType:  "tab",
+				AnchorVar:   "tab",
+				Chain: []string{
+					"(identity)<-[:applicationFor]-(la:leaseapp)",
+					"(la)<-[:openFor]-(tab:tab)",
+				},
+			},
+			Spec: edgeEntityTabsTail,
+		},
+		{
+			CanonicalName: "edgeEntityStudios",
+			Class:         "meta.lens",
+			Adapter:       "nats-subject",
+			SubjectPrefix: manifestSubjectPrefix,
+			Stream:        manifestStream,
+			Personal:      true,
+			Engine:        "full",
+			IntoKey:       []string{"__actor", "ns", "entityId"},
+			Walk: &pkgmgr.AnchorWalk{
+				GrantDomain: domainStaff,
+				AnchorType:  "studio",
+				AnchorVar:   "studio",
+				Chain: []string{
+					"(identity)-[:worksAt]->(work)",
+					"(work)<-[:containedIn*0..]-(place)<-[:locatedAt]-(studio:studio)",
+				},
+			},
+			Spec: edgeEntityStudiosTail,
 		},
 		{
 			CanonicalName: "edgeCatalogRoles",
@@ -670,6 +710,75 @@ RETURN
   studio.profile.data.name AS subtitle,
   sess.schedule.data.startsAt AS startsAt,
   sess.key AS sessionKey
+`
+
+// edgeEntityTabsTail presents one `manifest.ent.<tabId>` row per OPEN café tab
+// the actor's own lease holds — the browse rows for `dispatch.targetType:
+// "tab"` (café Charge / Settle / VoidCharge).
+//
+// The walk is the actor's own lease, not locality: a tab is opened `openFor` a
+// leaseapp (cafe-domain/ddls.go's OpenTab), and that leaseapp is the one whose
+// `applicationFor` lands on this identity. Same inherently-private row set as
+// edgeEntityBookings, and for the same reason — a neighbour's bar tab is
+// nobody's business, and a resident's tab at a café outside their building is
+// still theirs.
+//
+// The open-status filter is a PRESENTATION narrowing, exactly as on edgeTasks:
+// the walk grants the tab anchor whatever its status, so grant ⊇ projection
+// holds and a settled tab simply stops being offered as a charge target. The
+// grant side cannot narrow with it — a status lives on an ASPECT and the walk
+// chain expresses node patterns only — and Settle leaves the tab alive rather
+// than tombstoning it (cafe-domain/ddls.go), so unlike edgeEntityBookings this
+// branch's granted set grows with a resident's lifetime tab count. Bounding it
+// is a filed lane item, not something to fake here with a key-list.
+//
+// The unit name is the title because a tab has no name of its own — the lease
+// names the household the tab belongs to, via the same `appliesToUnit` hop
+// edgeTasks uses for its scoped label. totalCents rides along because which
+// tab to settle is a question about the running total; the renderer picks it
+// up from the column name alone. No `startsAt`: app.js's isUpcoming hides a
+// time-anchored row once its instant passes, and a tab is open from before
+// then until it is settled.
+const edgeEntityTabsTail = `
+OPTIONAL MATCH (la)-[:appliesToUnit]->(unit:unit)
+WITH tab, unit
+WHERE tab.status.data.value = "open"
+RETURN
+  tab.key AS anchor,
+  "manifest.ent" AS ns,
+  nanoIdFromKey(tab.key) AS entityId,
+  tab.key AS entityKey,
+  "tab" AS entityType,
+  unit.presentation.data.name AS title,
+  tab.status.data.totalCents AS totalCents
+`
+
+// edgeEntityStudiosTail presents one `manifest.ent.<studioId>` row per wellness
+// studio at a place the actor worksAt — the browse rows for
+// `dispatch.targetType: "studio"` (wellness CreateSession).
+//
+// The spine is the workplace one edgeStaffWorkOrders walks, not the residence
+// one edgeEntitySessions walks, because scheduling a class is staff authority
+// and CreateSession's own script confines a front-desk caller to a studio in a
+// building they work at. Projecting studios by residence would offer a target
+// the Processor then refuses — the browse surface would be lying about what is
+// submittable.
+//
+// The place name is the subtitle for the same reason edgeStaffWorkOrders
+// projects one: a staff actor who works at more than one building needs to see
+// which studio is which. No `startsAt`: a studio is a room, not a scheduled
+// thing (the edgeEntityProviders shape).
+const edgeEntityStudiosTail = `
+WITH studio, place
+WHERE studio.key <> null
+RETURN
+  studio.key AS anchor,
+  "manifest.ent" AS ns,
+  nanoIdFromKey(studio.key) AS entityId,
+  studio.key AS entityKey,
+  "studio" AS entityType,
+  studio.profile.data.name AS title,
+  place.presentation.data.name AS subtitle
 `
 
 // edgeCatalogRolesTail presents one `manifest.op.<opMetaId>` row per op meta the

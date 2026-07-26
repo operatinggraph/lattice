@@ -858,12 +858,29 @@ function renderBrowse() {
   $("view-browse").innerHTML = html;
 }
 
+// entityMeta composes the secondary line every manifest.ent row shares. It
+// reads COLUMNS, never entityType: a lens that projects `startsAt` gets a
+// relative time, and one that projects a `*Cents` amount gets it as money —
+// the same `/Cents$/` convention the descriptor form's money input keys on. A
+// café tab's running total is the whole reason to pick one tab over another,
+// and a type-branching renderer is exactly what the one-lens-per-kind design
+// (§3 F2) keeps out of here.
+function entityMeta(d) {
+  const parts = [];
+  if (d.subtitle) parts.push(esc(d.subtitle));
+  if (d.startsAt) parts.push(esc(relativeTime(d.startsAt)));
+  for (const [k, v] of Object.entries(d)) {
+    if (/Cents$/.test(k) && typeof v === "number") parts.push("$" + (v / 100).toFixed(2));
+  }
+  return parts.join(" &middot; ");
+}
+
 function entityRow(e) {
   const d = e.data;
   return `<div class="card" data-goto="entity" data-key="${esc(e.key)}" style="flex-direction:row;align-items:center;gap:12px;margin-bottom:8px">
     <div style="flex:1">
       <div class="title">${esc(d.title || prettify(d.entityKey))}</div>
-      <div class="subtitle">${esc(d.subtitle || "")}${d.startsAt ? ` &middot; ${esc(relativeTime(d.startsAt))}` : ""}</div>
+      <div class="subtitle">${entityMeta(d)}</div>
     </div>
   </div>`;
 }
@@ -880,7 +897,7 @@ function openEntityDetail(key) {
   showModal(`
     <button class="close-x" data-close>&times;</button>
     <h2>${esc(d.title || prettify(d.entityKey))}</h2>
-    <p class="lead">${esc(d.subtitle || "")}${d.startsAt ? ` &middot; ${esc(relativeTime(d.startsAt))}` : ""}</p>
+    <p class="lead">${entityMeta(d)}</p>
     <h3 class="category-heading">Operations</h3>
     ${myOps.length ? myOps.map((o) => opButton(o, { entityKey: d.entityKey })).join("") : `<div class="empty">Nothing to do here yet.</div>`}
   `);
@@ -1405,17 +1422,31 @@ function selfAnchorKey(type) {
   return keys && keys.size === 1 ? [...keys][0] : undefined;
 }
 
-// unresolvableSelfAnchor returns the first {me.<type>} an op's
-// dispatch.contextParams declares that this identity cannot answer, or
-// undefined when every one resolves. A contextParam is filled and never
-// rendered, so an unresolvable one would otherwise reach the Processor as an
-// empty string — the same failure dispatchTargetType's gate exists to prevent.
+// unresolvableSelfAnchor returns the first {me.<type>} an op declares that
+// this identity cannot answer, or undefined when every one resolves.
+//
+// It scans dispatch.contextParams AND dispatch.optionalReads, because both
+// carry the same consequence for the same reason. A contextParam is filled and
+// never rendered, so an unresolvable one reaches the Processor as an empty
+// string. An optionalRead is absence-TOLERANT of the key, not of the template:
+// an unresolvable {me.<type>} leaves a hole that wholeKey drops, so the
+// ownership probe the script requires is never declared and the op fails
+// closed at the Processor with an AuthDenied the visitor cannot act on. Both
+// are the failure dispatchTargetType's gate exists to prevent, and saying so
+// up front beats a server-side rejection on the visitor's own record.
+//
+// The `:id` modifier is a rendering instruction, not part of the anchor type
+// (substituteTemplate strips it) — a probe declared `{me.leaseapp:id}` asks the
+// same question of the same anchor as `{me.leaseapp}`.
 function unresolvableSelfAnchor(op) {
   const params = maybeParseJSON(op.dispatchContextParams) || {};
-  for (const template of Object.values(params)) {
+  const optional = maybeParseJSON(op.dispatchOptionalReads) || [];
+  const templates = Object.values(params).concat(Array.isArray(optional) ? optional : []);
+  for (const template of templates) {
     if (typeof template !== "string") continue;
     for (const m of template.matchAll(/\{me\.([^}]+)\}/g)) {
-      if (!selfAnchorKey(m[1])) return m[1];
+      const type = m[1].endsWith(":id") ? m[1].slice(0, -3) : m[1];
+      if (!selfAnchorKey(type)) return type;
     }
   }
   return undefined;
@@ -1610,11 +1641,20 @@ function keyType(k) {
 // — wellness CreateBooking asked for a vtx.session and got a vtx.identity.
 //
 // Candidates run most-specific first: the entity in view, the task's scopedTo
-// target, the service. ctx.entityKey is the seam a browse surface fills in
-// (open a session, then "Book a class" resolves); nothing populates it yet,
-// which is precisely why those ops read as unofferable rather than broken.
+// target, the task itself, the service. ctx.entityKey is the seam a browse
+// surface fills in (open a session, then "Book a class" resolves).
+// ctx.taskKey answers an op ABOUT the task rather than about its subject —
+// openTaskDetail populates it, and the subject still outranks it, so a
+// Reschedule offered from a task row does not start claiming the task.
 // Falling back to a unique self-anchored key of the wanted type lets an op
 // resolve against an entity the visitor demonstrably owns.
+//
+// Every type resolves the same way, `identity` included: a target is
+// something this context DEMONSTRATES, never something inferred from who is
+// signed in. Substituting the submitter for an unresolvable identity target
+// is not a fallback but a silent retarget — RecordIdentityPII would write
+// SSN/DOB onto the operator running it, and an operator's guard exemption
+// means nothing downstream would refuse it.
 //
 // undefined means "this op cannot be submitted from here" — opButton's gate,
 // not a hole to paper over with a wrong-typed key.
@@ -1632,12 +1672,8 @@ function resolveTargetKey(op, ctx) {
     return undefined;
   }
 
-  for (const c of [ctx.entityKey, ctx.scopedTo, ctx.serviceKey]) {
+  for (const c of [ctx.entityKey, ctx.scopedTo, ctx.taskKey, ctx.serviceKey]) {
     if (keyType(c) === want) return c;
-  }
-  if (want === "identity") {
-    const m = me();
-    return (m && m.identityKey) || undefined;
   }
   return selfAnchorKey(want);
 }

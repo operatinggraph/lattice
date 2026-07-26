@@ -25,6 +25,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -36,7 +37,7 @@ import (
 	"github.com/operatinggraph/lattice/internal/refractor/ruleengine"
 )
 
-// emComposedLenses returns the package's composed lens specs — the fourteen
+// emComposedLenses returns the package's composed lens specs — the sixteen
 // data lenses with their compiled reachability prefixes plus the three
 // generated read-grant producers, in install order.
 func emComposedLenses(t *testing.T) []pkgmgr.LensSpec {
@@ -192,32 +193,56 @@ func TestMigration_DegenerateRowIsSuppressed(t *testing.T) {
 // --- Migration assertion 2: producer document equality minus `via` -----------
 
 // TestMigration_GeneratedProducersGrantTheSameAnchors pins that each generated
-// producer's whole readableAnchors document matches the hand-authored producer
-// it replaces, entry for entry, once `via` is dropped. `via` is derived from the
-// declared chain now (the full relation list, in order) rather than hand-typed,
-// which is a deliberate change: it is audit-only, and capabilityread.IsReadable
-// matches NanoID to NanoID without ever reading it.
+// producer's readableAnchors document still contains, entry for entry once
+// `via` is dropped, everything the hand-authored producer it replaces granted —
+// and that whatever it grants BEYOND that set is exactly the anchor types the
+// lenses added since have declared, never an unexplained widening. `via` is
+// derived from the declared chain now (the full relation list, in order) rather
+// than hand-typed, which is a deliberate change: it is audit-only, and
+// capabilityread.IsReadable matches NanoID to NanoID without ever reading it.
+//
+// The frozen specs are historical: a lens added after the migration declares an
+// anchor type they could not have granted, so `addedTypes` is where that arrives
+// — naming it here is what keeps the claim a pin rather than a shrug. The
+// forward direction (nothing PROJECTED goes ungranted) is coverage_proof_test's.
 func TestMigration_GeneratedProducersGrantTheSameAnchors(t *testing.T) {
 	if testing.Short() {
 		t.Skip("requires NATS")
 	}
 	for _, c := range []struct {
-		producer string
-		frozen   string
-		world    func(*testing.T) *emFixture
-		actor    string
+		producer   string
+		frozen     string
+		world      func(*testing.T) *emFixture
+		actor      string
+		addedTypes []string
 	}{
-		{"edgeManifestReadGrants", frozenBaseReadGrantsSpec, emResidentWorld, "resident"},
-		{"edgeManifestStaffReadGrants", frozenStaffReadGrantsSpec, emStaffWorldFull, "tech"},
-		{"edgeManifestProviderReadGrants", frozenProviderReadGrantsSpec, emProviderWorld, "providerId"},
+		{"edgeManifestReadGrants", frozenBaseReadGrantsSpec, emResidentWorld, "resident", []string{"tab"}},
+		{"edgeManifestStaffReadGrants", frozenStaffReadGrantsSpec, emStaffWorldFull, "tech", []string{"studio"}},
+		{"edgeManifestProviderReadGrants", frozenProviderReadGrantsSpec, emProviderWorld, "providerId", nil},
 	} {
 		t.Run(c.producer, func(t *testing.T) {
 			f := c.world(t)
 			actor := f.key(c.actor)
 			before := emAnchorEntries(t, f.project(t, c.frozen, actor))
 			after := emAnchorEntries(t, f.project(t, emComposedSpec(t, c.producer), actor))
-			require.NotEmpty(t, before, "the frozen producer granted nothing — the equality claim would be vacuous")
-			require.Equal(t, before, after, "generated producer changed the granted anchor set")
+			require.NotEmpty(t, before, "the frozen producer granted nothing — the containment claim would be vacuous")
+			require.Subset(t, after, before, "generated producer dropped an anchor the hand-authored one granted")
+
+			kept := map[string]bool{}
+			for _, e := range before {
+				kept[e] = true
+			}
+			addedTypes := []string{}
+			for _, e := range after {
+				if !kept[e] {
+					addedTypes = append(addedTypes, strings.SplitN(e, "/", 2)[0])
+				}
+			}
+			sort.Strings(addedTypes)
+			want := append([]string{}, c.addedTypes...)
+			sort.Strings(want)
+			require.Equal(t, want, addedTypes,
+				"generated producer grants an anchor type no declared lens accounts for")
 		})
 	}
 }

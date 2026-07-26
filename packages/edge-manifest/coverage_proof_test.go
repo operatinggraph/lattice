@@ -124,6 +124,7 @@ func sortedKeys(m map[string]bool) []string {
 //	resident ←assignedTo— openTask(task, status=open)
 //	resident ←providedTo— inst(service instance)
 //	resident ←bookedBy— booking(booking)
+//	resident ←applicationFor— lease(leaseapp) ←openFor— tab(tab, status=open)
 func emResidentWorld(t *testing.T) *emFixture {
 	f := newEmFixture(t)
 	f.vtx(t, "resident", "identity")
@@ -136,6 +137,12 @@ func emResidentWorld(t *testing.T) *emFixture {
 	f.vtx(t, "sess", "session")
 	f.vtx(t, "prov", "provider")
 	f.vtx(t, "booking", "booking")
+	f.vtx(t, "lease", "leaseapp")
+	f.vtx(t, "tab", "tab")
+
+	f.aspect(t, "home", "presentation", "locationPresentation", map[string]any{"name": "Unit 1"})
+	f.aspect(t, "tab", "status", "tabStatus", map[string]any{
+		"value": "open", "totalCents": 450, "openedAt": "2026-07-26T09:00:00Z"})
 
 	f.edge(t, "residesIn", "resident", "home")
 	f.edge(t, "availableAt", "svcTpl", "home")
@@ -146,6 +153,9 @@ func emResidentWorld(t *testing.T) *emFixture {
 	f.edge(t, "atStudio", "sess", "studio")
 	f.edge(t, "practicesAt", "prov", "home")
 	f.edge(t, "bookedBy", "booking", "resident")
+	f.edge(t, "applicationFor", "lease", "resident")
+	f.edge(t, "appliesToUnit", "lease", "home")
+	f.edge(t, "openFor", "tab", "lease")
 	return f
 }
 
@@ -167,8 +177,37 @@ func TestManifestAnchorCoverage_ResidentWorld(t *testing.T) {
 			{"edgeEntitySessions", emComposedSpec(t, "edgeEntitySessions")},
 			{"edgeEntityProviders", emComposedSpec(t, "edgeEntityProviders")},
 			{"edgeEntityBookings", emComposedSpec(t, "edgeEntityBookings")},
+			{"edgeEntityTabs", emComposedSpec(t, "edgeEntityTabs")},
 		},
 		[]string{emComposedSpec(t, "edgeManifestReadGrants")})
+}
+
+// TestEdgeEntityTabs_ProjectsOnlyTheActorsOwnOpenTab pins the two things the
+// walk decides: the row set is the actor's OWN lease's tabs (not locality —
+// a neighbour's bar tab is nobody's business), and a settled tab stops being
+// offered as a charge target while the grant that reaches it is unchanged.
+func TestEdgeEntityTabs_ProjectsOnlyTheActorsOwnOpenTab(t *testing.T) {
+	f := emResidentWorld(t)
+	f.vtx(t, "neighbour", "identity")
+	f.vtx(t, "otherLease", "leaseapp")
+	f.vtx(t, "otherTab", "tab")
+	f.aspect(t, "otherTab", "status", "tabStatus", map[string]any{
+		"value": "open", "totalCents": 900, "openedAt": "2026-07-26T09:30:00Z"})
+	f.edge(t, "applicationFor", "otherLease", "neighbour")
+	f.edge(t, "openFor", "otherTab", "otherLease")
+
+	rows := emRowsByEntity(f.project(t, emComposedSpec(t, "edgeEntityTabs"), f.key("resident")))
+	require.Len(t, rows, 1, "only the actor's own lease's open tab projects")
+	own, ok := rows[f.ids["tab"]]
+	require.True(t, ok, "the actor's own open tab must project")
+	require.Equal(t, "tab", own["entityType"])
+	require.Equal(t, f.key("tab"), own["entityKey"])
+	require.Equal(t, "Unit 1", own["title"], "the lease's unit names the tab, which has no name of its own")
+
+	f.aspect(t, "tab", "status", "tabStatus", map[string]any{
+		"value": "settled", "totalCents": 450, "openedAt": "2026-07-26T09:00:00Z"})
+	settled := f.project(t, emComposedSpec(t, "edgeEntityTabs"), f.key("resident"))
+	require.Empty(t, settled, "a settled tab is no longer a charge target")
 }
 
 // --- Staff persona -----------------------------------------------------------
@@ -178,17 +217,22 @@ func TestManifestAnchorCoverage_ResidentWorld(t *testing.T) {
 //
 //	tech —holdsRole→ maintRole ←grantedBy— fixPerm —forOperation→ fixOp(meta)
 //	tech —holdsRole→ maintRole ←queuedFor— queuedTask(task, status=open)
+//	tech —worksAt→ bldgA ←locatedAt— studioA (the workplace-spine studio)
 func emStaffWorldFull(t *testing.T) *emFixture {
 	f := emStaffWorld(t)
 	f.vtx(t, "maintRole", "role")
 	f.vtx(t, "fixPerm", "permission")
 	f.vtx(t, "fixOp", "meta")
 	f.vtxData(t, "queuedTask", "task", map[string]any{"status": "open"})
+	f.vtx(t, "studioA", "studio")
+
+	f.aspect(t, "studioA", "profile", "studioProfile", map[string]any{"name": "The Loft"})
 
 	f.edge(t, "holdsRole", "tech", "maintRole")
 	f.edge(t, "grantedBy", "fixPerm", "maintRole")
 	f.edge(t, "forOperation", "fixPerm", "fixOp")
 	f.edge(t, "queuedFor", "queuedTask", "maintRole")
+	f.edge(t, "locatedAt", "studioA", "bldgA")
 	return f
 }
 
@@ -203,8 +247,43 @@ func TestManifestAnchorCoverage_StaffWorld(t *testing.T) {
 			{"edgeStaffWorkOrders", emComposedSpec(t, "edgeStaffWorkOrders")},
 			{"edgeCatalogRoles", emComposedSpec(t, "edgeCatalogRoles")},
 			{"edgeTasksQueued", emComposedSpec(t, "edgeTasksQueued")},
+			{"edgeEntityStudios", emComposedSpec(t, "edgeEntityStudios")},
 		},
 		[]string{emComposedSpec(t, "edgeManifestStaffReadGrants")})
+}
+
+// TestEdgeEntityStudios_IsBoundedByTheWorkplace pins that the studio browse
+// rows follow the WORKPLACE spine rather than residence: CreateSession's own
+// script confines a front-desk caller to a studio in a building they work at,
+// so projecting studios anywhere else would offer a target the Processor then
+// refuses.
+func TestEdgeEntityStudios_IsBoundedByTheWorkplace(t *testing.T) {
+	f := emStaffWorldFull(t)
+	f.vtx(t, "studioB", "studio")
+	f.aspect(t, "studioB", "profile", "studioProfile", map[string]any{"name": "Elsewhere Studio"})
+	f.edge(t, "locatedAt", "studioB", "bldgB")
+
+	rows := emRowsByEntity(f.project(t, emComposedSpec(t, "edgeEntityStudios"), f.key("tech")))
+	require.Len(t, rows, 1, "only studios at the actor's own workplace project")
+	own, ok := rows[f.ids["studioA"]]
+	require.True(t, ok, "the studio at the workplace must project")
+	require.Equal(t, "studio", own["entityType"])
+	require.Equal(t, "The Loft", own["title"])
+	require.Equal(t, "Riverside Building", own["subtitle"], "a multi-building staff actor needs to see which studio is which")
+}
+
+// TestEdgeEntityStudios_WalksDownFromTheWorkplace covers the same inbound
+// variable-length hop edgeStaffWorkOrders depends on: a studio inside a UNIT
+// of the workplace, not directly at the building, must still project.
+func TestEdgeEntityStudios_WalksDownFromTheWorkplace(t *testing.T) {
+	f := emStaffWorldFull(t)
+	f.vtx(t, "studioInUnit", "studio")
+	f.aspect(t, "studioInUnit", "profile", "studioProfile", map[string]any{"name": "Mezzanine"})
+	f.edge(t, "locatedAt", "studioInUnit", "unitA1")
+
+	rows := emRowsByEntity(f.project(t, emComposedSpec(t, "edgeEntityStudios"), f.key("tech")))
+	_, ok := rows[f.ids["studioInUnit"]]
+	require.True(t, ok, "a studio at a unit inside the workplace must project (the *0.. inbound hop)")
 }
 
 // --- Provider persona --------------------------------------------------------

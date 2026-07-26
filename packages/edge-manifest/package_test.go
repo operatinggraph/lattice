@@ -33,8 +33,8 @@ func TestPackage_NoDDLsOrPermissions(t *testing.T) {
 	}
 }
 
-// manifestLensNames are the fourteen Personal Lenses (edge-showcase-app-
-// design.md §3.2; the three manifest.ent entity lenses per
+// manifestLensNames are the sixteen Personal Lenses (edge-showcase-app-
+// design.md §3.2; the five manifest.ent entity lenses per
 // facet-entity-browse-design.md; the staff siblings per
 // facet-staff-worlds-design.md §3.3; the workplace-spine work-order lens per
 // its §6 F5; the three provider-hat siblings per persona-worlds-design.md
@@ -47,7 +47,8 @@ var manifestLensNames = map[string]bool{
 	"edgeIdentity": true, "edgeServices": true, "edgeCatalog": true,
 	"edgeTasks": true, "edgeInstances": true,
 	"edgeEntitySessions": true, "edgeEntityProviders": true,
-	"edgeEntityBookings": true,
+	"edgeEntityBookings": true, "edgeEntityTabs": true,
+	"edgeEntityStudios": true,
 	"edgeCatalogRoles":   true, "edgeTasksQueued": true,
 	"edgeStaffWorkOrders":  true,
 	"edgeProviderSchedule": true, "edgeProviderQueue": true,
@@ -67,9 +68,9 @@ var readGrantLensNames = map[string]bool{
 	"edgeManifestProviderReadGrants": true,
 }
 
-func TestPackage_SeventeenLenses(t *testing.T) {
-	if got := len(emComposedLenses(t)); got != 17 {
-		t.Fatalf("expected 17 lenses (14 manifest + 3 read-grant producers), got %d", got)
+func TestPackage_NineteenLenses(t *testing.T) {
+	if got := len(emComposedLenses(t)); got != 19 {
+		t.Fatalf("expected 19 lenses (16 manifest + 3 read-grant producers), got %d", got)
 	}
 	names := map[string]bool{}
 	for _, l := range emComposedLenses(t) {
@@ -181,6 +182,8 @@ func TestPackage_LensRowKeysAreManifestNamespaced(t *testing.T) {
 		"edgeEntitySessions":  `"manifest.ent" AS ns`,
 		"edgeEntityProviders": `"manifest.ent" AS ns`,
 		"edgeEntityBookings":  `"manifest.ent" AS ns`,
+		"edgeEntityTabs":      `"manifest.ent" AS ns`,
+		"edgeEntityStudios":   `"manifest.ent" AS ns`,
 		// The staff siblings share their non-staff counterpart's namespace on
 		// purpose: same ns + same entityId means an op or task reachable by
 		// both paths projects the identical row under the identical key, and

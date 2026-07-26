@@ -1,22 +1,24 @@
 name: edge-manifest
-version: 0.11.0
+version: 0.12.0
 description: |
-  The Facet edge app's world manifest: fourteen Personal Lenses (edgeIdentity/
+  The Facet edge app's world manifest: sixteen Personal Lenses (edgeIdentity/
   edgeServices/edgeCatalog/edgeCatalogRoles/edgeTasks/edgeTasksQueued/
   edgeInstances/edgeEntitySessions/edgeEntityProviders/edgeEntityBookings/
-  edgeStaffWorkOrders/edgeProviderSchedule/edgeProviderQueue/
-  edgeInstructorSessions) projecting identity (incl. the provider/instructor/
-  serviceprovider self-anchors for {me.<type>} dispatch, and the same bindings
+  edgeEntityTabs/edgeEntityStudios/edgeStaffWorkOrders/edgeProviderSchedule/
+  edgeProviderQueue/edgeInstructorSessions) projecting identity (incl. the
+  provider/instructor/serviceprovider self-anchors for {me.<type>} dispatch,
+  and the same bindings
   relation-stamped and named in anchors so the renderer can group a person's
   hats by provenance — persona-worlds-design.md Fires W0/W5), reachable
   services, the op descriptor vocabulary, open and queued tasks, the
   maintenance work orders at a staff actor's workplace, service instances,
   and browsable dispatch-target entities (wellness sessions via studio
   locatedAt, clinic providers via practicesAt, the actor's own bookings via
-  bookedBy, a bound provider's own appointments, a bound serviceprovider's
-  own instance queue, a bound instructor's own led sessions — manifest.ent
-  rows a declared dispatch.targetType resolves against) into the manifest.*
-  namespace over the per-actor SYNC transport.
+  bookedBy, the actor's own open cafe tabs via their lease, the wellness
+  studios at a staff actor's workplace, a bound provider's own appointments,
+  a bound serviceprovider's own instance queue, a bound instructor's own led
+  sessions — manifest.ent rows a declared dispatch.targetType resolves
+  against) into the manifest.* namespace over the per-actor SYNC transport.
   Each non-self-anchored lens declares its actor->anchor reachability once, as
   an AnchorWalk, and pkgmgr compiles both the lens's own cypher and the
   read-grant producer that grants its anchors. That yields three generated
@@ -58,6 +60,12 @@ declares:
       adapter: nats-subject
       engine: full
     - canonicalName: edgeEntityBookings
+      adapter: nats-subject
+      engine: full
+    - canonicalName: edgeEntityTabs
+      adapter: nats-subject
+      engine: full
+    - canonicalName: edgeEntityStudios
       adapter: nats-subject
       engine: full
     - canonicalName: edgeCatalogRoles

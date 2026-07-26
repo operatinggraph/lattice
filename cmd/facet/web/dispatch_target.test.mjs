@@ -32,9 +32,24 @@ function loadApp() {
   return sandbox;
 }
 
+// signIn seeds the manifest.me row the resolver's me() reads. app.js's `state`
+// is a top-level `const`, which lands in the context's global LEXICAL scope
+// rather than on the sandbox object — a later script in the SAME context still
+// sees it, which is the only way to give these vectors a signed-in actor.
+// Without one, "does not resolve to the submitter" would pass on an absent
+// identity rather than on the rule under test.
+function signIn(sandbox, identityKey) {
+  vm.runInContext(
+    `state.rows.set("manifest.me", { data: { identityKey: ${JSON.stringify(identityKey)} }, pending: false })`,
+    sandbox);
+}
+
 const SESSION = "vtx.session.AAAAAAAAAAAAAAAAAAAA";
 const APPT = "vtx.appointment.BBBBBBBBBBBBBBBBBBBB";
 const SERVICE = "vtx.service.CCCCCCCCCCCCCCCCCCCC";
+const TASK = "vtx.task.DDDDDDDDDDDDDDDDDDDD";
+const IDENTITY = "vtx.identity.EEEEEEEEEEEEEEEEEEEE";
+const OTHER_IDENTITY = "vtx.identity.FFFFFFFFFFFFFFFFFFFF";
 
 test("keyType reads the Contract #1 type out of a vtx key", () => {
   const { keyType } = loadApp();
@@ -113,6 +128,59 @@ test("an op meta with no declared targetType keeps the authContext fallback", ()
   assert.equal(resolveTargetKey(legacySelf, { serviceKey: SERVICE }), undefined);
 });
 
+// An op whose target IS the task rather than the task's subject — ClaimTask's
+// shape. openTaskDetail is the surface that populates ctx.taskKey.
+test("a task-typed target resolves from the task in context", () => {
+  const { resolveTargetKey } = loadApp();
+  const claimTask = {
+    dispatchAuthContext: "task",
+    dispatchTargetField: "taskKey",
+    dispatchTargetType: "task",
+  };
+  assert.equal(resolveTargetKey(claimTask, { taskKey: TASK, scopedTo: APPT }), TASK);
+});
+
+// The task's scopedTo subject still wins for an op about that subject — a
+// Reschedule offered from the same row must not start claiming the task.
+test("the task key does not outrank the scopedTo subject for a subject-typed op", () => {
+  const { resolveTargetKey } = loadApp();
+  const reschedule = {
+    dispatchAuthContext: "task",
+    dispatchTargetField: "appointmentKey",
+    dispatchTargetType: "appointment",
+  };
+  assert.equal(resolveTargetKey(reschedule, { taskKey: TASK, scopedTo: APPT }), APPT);
+});
+
+// An identity target is resolved, never inferred. RecordIdentityPII arrives on
+// a task scopedTo the subject; offered anywhere else it must degrade, because
+// substituting the signed-in operator would write that operator's own SSN/DOB
+// row — and an operator's guard exemption means nothing downstream refuses it.
+test("an identity-typed target resolves from the task's subject, not the submitter", () => {
+  const sandbox = loadApp();
+  signIn(sandbox, IDENTITY);
+  const { resolveTargetKey } = sandbox;
+  const recordPII = {
+    dispatchAuthContext: "task",
+    dispatchTargetField: "identityKey",
+    dispatchTargetType: "identity",
+  };
+  assert.equal(resolveTargetKey(recordPII, { taskKey: TASK, scopedTo: OTHER_IDENTITY }), OTHER_IDENTITY);
+});
+
+test("an identity-typed target with nothing to resolve against degrades", () => {
+  const sandbox = loadApp();
+  signIn(sandbox, IDENTITY);
+  const { resolveTargetKey, me } = sandbox;
+  assert.equal(me().identityKey, IDENTITY, "the actor must be signed in, or this vector proves nothing");
+  const recordPII = {
+    dispatchAuthContext: "task",
+    dispatchTargetField: "identityKey",
+    dispatchTargetType: "identity",
+  };
+  assert.equal(resolveTargetKey(recordPII, { serviceKey: SERVICE }), undefined);
+});
+
 test("an op with no targetField resolves to nothing at all", () => {
   const { resolveTargetKey } = loadApp();
   const openTab = { dispatchAuthContext: "self", dispatchClass: "tab" };
@@ -142,6 +210,49 @@ test("opButton offers a typed-target op when an entity of that type is in view",
   const offered = opButton(createBooking, { entityKey: SESSION });
   assert.match(offered, /<button/);
   assert.match(offered, /data-entity-key="vtx\.session\./);
+});
+
+// The café ownership probe rides in optionalReads, not contextParams. A
+// resident holding two lease applications cannot answer {me.leaseapp}, so the
+// probe would substitute a hole, never be declared, and the script would refuse
+// the visitor's own tab with an AuthDenied they cannot act on.
+test("an unresolvable {me.<type>} in optionalReads degrades the op", () => {
+  const sandbox = loadApp();
+  const { unresolvableSelfAnchor } = sandbox;
+  const settle = {
+    dispatchAuthContext: "self",
+    dispatchTargetField: "tabKey",
+    dispatchTargetType: "tab",
+    dispatchOptionalReads: ["lnk.leaseapp.{me.leaseapp:id}.applicationFor.identity.{actor:id}"],
+  };
+  // no me-row at all: the anchor is unanswerable, and the `:id` modifier must
+  // not be mistaken for part of the anchor type
+  assert.equal(unresolvableSelfAnchor(settle), "leaseapp");
+
+  vm.runInContext(
+    `state.rows.set("manifest.me", { data: { identityKey: ${JSON.stringify(IDENTITY)}, selfAnchors: [
+       { type: "leaseapp", key: "vtx.leaseapp.GGGGGGGGGGGGGGGGGGGG" }] }, pending: false })`,
+    sandbox);
+  assert.equal(unresolvableSelfAnchor(settle), undefined, "one lease answers the probe");
+
+  vm.runInContext(
+    `state.rows.get("manifest.me").data.selfAnchors.push(
+       { type: "leaseapp", key: "vtx.leaseapp.HHHHHHHHHHHHHHHHHHHH" })`,
+    sandbox);
+  assert.equal(unresolvableSelfAnchor(settle), "leaseapp", "two leases are not a value to guess at");
+});
+
+// The browse row's secondary line reads COLUMNS, not entityType — so a lens
+// that projects a running total gets it rendered without the renderer learning
+// what a café tab is.
+test("an entity row's meta line renders a projected *Cents column as money", () => {
+  const { entityMeta } = loadApp();
+  assert.equal(entityMeta({ subtitle: "Unit 1", totalCents: 450 }), "Unit 1 &middot; $4.50");
+  assert.equal(entityMeta({ totalCents: 0 }), "$0.00");
+  assert.equal(entityMeta({ subtitle: "Riverside Building" }), "Riverside Building");
+  assert.equal(entityMeta({}), "");
+  // a non-numeric lookalike is not an amount
+  assert.equal(entityMeta({ subtitle: "x", someCents: "450" }), "x");
 });
 
 test("indefinite article follows the label's leading sound", () => {
