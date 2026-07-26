@@ -101,9 +101,19 @@ candidates; clinic and lease-signing converge incrementally). Routing:
 2. **W1–W4 (persona-worlds)** carry their vertical's package to conformance as part of the rework — their
    briefs cite this Standard rule-by-rule (S1 discoverability lands with the sign-in-first FE anyway: an
    invisible op can't be offered honestly).
+   **This route CLOSED without discharging its S6 obligation.** Persona-worlds closed 2026-07-25 with
+   café's and wellness's structure pins never landed — no commit touches either `package_test.go` but the
+   module-path rename — and no residual row was filed for them. Their S6 debt is rerouted to the §3.3 sweep.
 3. **One sweep fire** for the non-FE packages (ledgers, front-desk, one-bill, location, service-location,
    maintenance, lease-signing): S1 metas, S6 pins/cypher tests, S7 hygiene — mechanical against the census
    scorecards.
+   **Widened at build time** (2026-07-25, §6) to **every package the gate's debt baseline holds an entry
+   for**: `semantic-contracts` (a LoftSpace vertical package the enumeration simply omitted — its own
+   `package.go` names it as one), `cafe-domain` + `wellness-domain` (§3.2's undischarged route, above), and
+   `augur` + `capability-author` + `privacy-base` (platform-tier, outside §1's vertical scope — but the gate
+   runs corpus-wide over `pkgregistry`, so their entries had no route to ever close, which is exactly the
+   permanent amnesty the ratification banner forbids). None was defensibly excluded on merit, and a structure
+   pin is ~15 mechanical lines, so none is left behind.
 4. **identity-domain** conforms last (it is the idiom source; its own gap is S1 — the four consumer
    credential ops have no metas).
 
@@ -125,3 +135,58 @@ Nothing here re-litigates persona-worlds — the Standard is the *quality bar* t
 build to, plus a sweep for the packages those fires don't touch. No frozen-contract text changes; no
 big-bang rewrite mandate (per-fire choice); no new platform mechanisms (the two named gaps route to the
 lattice lane on their own merits); Loupe untouched.
+
+## 6. §3.3 sweep — Inc 1 build note (Winston, 2026-07-25)
+
+**Scope sentence (§3.3, verbatim):** *"One sweep fire for the non-FE packages … S1 metas, S6 pins/cypher
+tests, S7 hygiene — mechanical against the census scorecards."* **Inc 1 = the S1 descriptors** for the
+lease-signing / loftspace-domain self-service surface. Grounded at `0289dab8`.
+
+**Work-list is the gate's own baseline, not a re-derivation.** `scripts/lint-package-standard.go` carries
+`s1Debt` / `s6Debt` shrink-only; those entries *are* the convergence program's remaining surface.
+
+**Inc 1 closes 7 `s1Debt` entries + one whole board row.** The verticals-lane row *"Op-metas still declare
+`authContext: standing` for the five landlord ops"* is **the same edit** as the lease-signing S1 debt —
+writing a full `OpMetaSpec` *requires* naming `Dispatch.AuthContext`. Built as one increment (coupled work =
+one fire), so the row closes here rather than re-touching the same file later.
+
+| Op | Payload (per its DDL) | Grants | `AuthContext` |
+|---|---|---|---|
+| `CreateLeaseApplication` | `{applicant, unit, moveInDate?, leaseTermMonths?, requestedRent?}` | operator any · consumer self | `self` |
+| `WithdrawLeaseApplication` | `{leaseAppKey, unit, applicant}` | operator any · consumer self | `self` |
+| `SetApplicantProfile` | `{leaseAppKey, unit, annualIncome, employmentStatus, …guarantor/co-applicant}` | operator any · consumer self | `self` |
+| `DecideLeaseApplication` | `{leaseAppKey, decision, reason?, unit?}` | operator+frontOfHouse any · consumer self | **`standing` → `self`** |
+| `SetRenewalTerms` | `{renewalKey, rentAmount, termMonths}` | consumer self | `self` |
+| `VerifyGuarantor` | `{renewalKey, leaseApp, applicant, method?}` | consumer self | `self` |
+| `CancelRenewal` | `{renewalKey, reason?}` | consumer self | `self` |
+| `SetListingStatus` (loftspace-domain) | `{unit, status}` | consumer self (only grant) | `self` |
+
+**Precedent, verified not assumed:** `packages/clinic-domain/opmetas.go:44-135`. Clinic's three dual-grant
+ops (staff scope=any **and** consumer scope=self) each carry **one** meta with `AuthContext: "self"`, written
+in the self voice. That settles the dual-grant question without inventing anything: the descriptor names the
+**self** path, because a staff FE hardcodes its own dispatch while a descriptor-driven client cannot infer
+the self path. Full-vocabulary idiom (Reads / OptionalReads / `:id` link fragments) is
+`lease-signing/permissions.go:209-252`; field semantics `internal/pkgmgr/definition.go:518-545`.
+
+**Bare metas stay bare.** `SignLease`, `RecordIdentityPII`, the service/doc instance+outcome ops and
+`SignRenewal` exist for orchestration `forOperation` resolution only (S1) — the doc block at
+`lease-signing/permissions.go:176-196` states why. Not upgraded.
+
+**Increments.** Inc 1 — the eight descriptors above + delete the 7 closed `s1Debt` entries + manifest bumps.
+Inc 2 — S6 `lens_cypher_test.go` for `cafe-ledger` + `loftspace-ledger`. Inc 3 — S6 structure pins for all
+**eight** debt-listed packages (§3.3 as widened); `privacy-base` has no `package_test.go` at all and gets one.
+
+**Gotchas.** Package edit ⇒ manifest version bump or the install no-ops on a running stack. `grantsTo`
+mirrored field-by-field (S7 runs corpus-wide, so a miss reds CI, not just an install). A descriptor is **not**
+an authorization change — the scripts' owner guards already bind these ops; do not loosen a guard to make a
+descriptor "work". `SetApplicantProfile`'s raw financials are deliberately never projected — the descriptor
+describes INPUT fields and must not imply they read back.
+
+**Non-goals.** front-desk / one-bill / location-domain / service-location (later increments); identity-domain
+(§3.4, last); Facet-side rendering; any guard or permission-semantics change.
+
+**Adjacent find, filed:** the census covered **15** packages but `git ls-tree fda8019c packages/` shows **29**
+existed at that same pin, and §3's routing was written "mechanical against the census scorecards" — so 14
+packages were never routed by anything. The six swept above are only the subset the *gate* happens to hold
+debt for. A census-derived program cannot see what the census missed, so "the Standard is converged" will be
+false in a way no gate reports. Re-running the scorecard census across all 29 is filed as its own lane row.
