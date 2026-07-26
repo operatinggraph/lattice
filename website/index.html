@@ -195,7 +195,7 @@
          is a client of those two paths.</p>
     </div>
     <div class="diagram-wrap">
-      <svg viewBox="0 0 960 360" role="img" aria-label="Lattice architecture. External apps submit writes through the Gateway to the core-operations stream, which the Processor consumes and commits to the Core KV graph; the Processor emits the core-events stream, which the Refractor projects into lenses that apps read back through the Gateway. Loom, Weaver, Bridge and the Chronicler ride the same two streams.">
+      <svg viewBox="0 0 960 360" role="img" aria-label="Lattice architecture. External apps — Facet and your own — submit writes through the Gateway to the core-operations stream, which the Processor consumes and commits to the Core KV graph; the Processor emits the core-events stream, which the Refractor projects into lenses that apps read back through the Gateway. Loom, Weaver, Bridge and the Chronicler are a cluster of clients riding those same two streams.">
         <defs>
           <marker id="arr" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto">
             <path d="M0 0 L8 4 L0 8 z" fill="#6b7699"/>
@@ -207,9 +207,9 @@
         <text class="dg-tag" x="632" y="52" text-anchor="middle" fill="#59d8ff">core-events</text>
 
         <!-- top spine: apps -> Gateway -> Processor -> Core KV -> Refractor -> Lenses -->
-        <rect class="dg-box" x="32"  y="64" width="126" height="56" rx="10"/>
-        <text class="dg-label" x="95" y="90" text-anchor="middle">Your apps</text>
-        <text class="dg-sub"   x="95" y="108" text-anchor="middle">external actors</text>
+        <rect class="dg-box" x="16"  y="64" width="142" height="56" rx="10"/>
+        <text class="dg-label" x="87" y="90" text-anchor="middle">Facet · your apps</text>
+        <text class="dg-sub"   x="87" y="108" text-anchor="middle">external actors</text>
 
         <rect class="dg-box" x="186" y="64" width="126" height="56" rx="10" style="stroke:#59d8ff"/>
         <text class="dg-label" x="249" y="90" text-anchor="middle">Gateway</text>
@@ -239,31 +239,34 @@
         <line class="dg-flow" x1="774" y1="92" x2="798" y2="92"/>
 
         <!-- read loop-back: apps read lenses back through the Gateway -->
-        <path class="dg-flow" d="M 865 124 C 865 158, 130 158, 96 124"/>
+        <path class="dg-flow" d="M 865 124 C 865 158, 122 158, 87 124"/>
         <text class="dg-tag" x="243" y="144" text-anchor="middle">read path · RLS (P5)</text>
 
-        <!-- orchestration cluster: rides the same two streams -->
-        <rect class="dg-box" x="201" y="256" width="120" height="52" rx="10"/>
-        <text class="dg-label" x="261" y="278" text-anchor="middle">Loom</text>
-        <text class="dg-sub"   x="261" y="294" text-anchor="middle">procedures</text>
+        <!-- orchestration cluster: one group, riding the same two streams -->
+        <rect class="dg-group" x="185" y="234" width="590" height="106" rx="14"/>
+        <text class="dg-tag" x="201" y="254">clients of the same two streams</text>
 
-        <rect class="dg-box" x="347" y="256" width="120" height="52" rx="10"/>
-        <text class="dg-label" x="407" y="278" text-anchor="middle">Weaver</text>
-        <text class="dg-sub"   x="407" y="294" text-anchor="middle">convergence</text>
+        <rect class="dg-box" x="201" y="268" width="120" height="52" rx="10"/>
+        <text class="dg-label" x="261" y="290" text-anchor="middle">Loom</text>
+        <text class="dg-sub"   x="261" y="306" text-anchor="middle">procedures</text>
 
-        <rect class="dg-box" x="493" y="256" width="120" height="52" rx="10"/>
-        <text class="dg-label" x="553" y="278" text-anchor="middle">Bridge</text>
-        <text class="dg-sub"   x="553" y="294" text-anchor="middle">external I/O</text>
+        <rect class="dg-box" x="347" y="268" width="120" height="52" rx="10"/>
+        <text class="dg-label" x="407" y="290" text-anchor="middle">Weaver</text>
+        <text class="dg-sub"   x="407" y="306" text-anchor="middle">convergence</text>
 
-        <rect class="dg-box" x="639" y="256" width="120" height="52" rx="10"/>
-        <text class="dg-label" x="699" y="278" text-anchor="middle">Chronicler</text>
-        <text class="dg-sub"   x="699" y="294" text-anchor="middle">history</text>
+        <rect class="dg-box" x="493" y="268" width="120" height="52" rx="10"/>
+        <text class="dg-label" x="553" y="290" text-anchor="middle">Bridge</text>
+        <text class="dg-sub"   x="553" y="306" text-anchor="middle">external I/O</text>
 
-        <!-- stream-mediated feedback: submit ops up, consume events down -->
-        <line class="dg-flow" x1="360" y1="254" x2="360" y2="122"/>
-        <text class="dg-tag" x="366" y="200" text-anchor="start">submit ops</text>
-        <line class="dg-flow" x1="600" y1="122" x2="600" y2="254"/>
-        <text class="dg-tag" x="606" y="200" text-anchor="start">consume events</text>
+        <rect class="dg-box" x="639" y="268" width="120" height="52" rx="10"/>
+        <text class="dg-label" x="699" y="290" text-anchor="middle">Chronicler</text>
+        <text class="dg-sub"   x="699" y="306" text-anchor="middle">history</text>
+
+        <!-- stream-mediated feedback: the cluster submits ops and consumes events -->
+        <line class="dg-flow" x1="403" y1="234" x2="403" y2="122"/>
+        <text class="dg-tag" x="411" y="196" text-anchor="start">submit ops</text>
+        <line class="dg-flow" x1="557" y1="122" x2="557" y2="233"/>
+        <text class="dg-tag" x="565" y="196" text-anchor="start">consume events</text>
       </svg>
     </div>
     <p class="diagram-cap">

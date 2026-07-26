@@ -163,6 +163,7 @@ pre.code .val { color: #ffd9a0; }
 .diagram-cap { margin-top: 16px; color: var(--faint); font-size: 14px; max-width: 760px; }
 .dg-box { fill: var(--surface-2); stroke: var(--line-strong); rx: 10; }
 .dg-box.core { stroke: var(--c-operator); }
+.dg-group { fill: var(--surface); stroke: var(--line); }
 .dg-label { fill: var(--text); font-family: var(--display); font-size: 14px; font-weight: 700; }
 .dg-sub { fill: var(--muted); font-family: var(--mono); font-size: 10.5px; }
 .dg-flow { stroke: var(--faint); stroke-width: 1.4; fill: none; marker-end: url(#arr); }
