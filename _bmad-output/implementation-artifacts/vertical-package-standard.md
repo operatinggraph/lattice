@@ -285,3 +285,30 @@ is loosened to make a descriptor "work".
 **Non-goals.** identity-domain (§3.4, conforms last); the 5 `lens-cypher` entries; `AdvanceVisitSeries`
 and the other bare orchestration metas; any FE work to render these descriptors; any guard, grant, or
 permission-semantics change.
+
+**Shipped `e27e7da0`.** All nine landed; `s1Debt` is now identity-domain's seven alone. Three things came
+out of the build that the brief did not anticipate:
+
+- **The vocabulary had a live hole, and writing these found it.** A template is *substituted*, not
+  evaluated, so hanging an aspect suffix off an **optional** field leaves the literal text behind when the
+  field is absent: `{payload.identityKey}.patientClaim` becomes `.patientClaim`. NATS rejects that as
+  malformed rather than reporting it absent, and `step4_hydrate` turns anything that is not
+  key-not-found into a **rejected operation** — so registering a patient with no identity, the ordinary
+  path, would have failed on a key naming no field and no op. Two fixes, because either alone leaves the
+  hole open for someone: Facet declares a key only when every dot-separated segment survived substitution
+  (`wholeKey`, applied to the required half too), and `lint-package-standard` refuses a descriptor that
+  builds a key around a field nothing guarantees is present — not required, not a `contextParam`, not the
+  `targetField`. Normative text would not have bound the next author; the gate does.
+- **That rule found six instances already shipped**, in `lease-signing`'s `DecideLeaseApplication` and
+  `service-domain`'s `RecordServiceOutcome`, where the wrapped field is supplied on one branch and not the
+  other (`unit` on a first approve but not a decline). They are **baselined shrink-only**, not guessed at:
+  deciding between guaranteeing the field and declaring the read bare is a semantics call in each owning
+  package. The runtime fix means they now cost a worse diagnostic rather than a rejection.
+- **Complete metadata is not a rendered button.** A client must also resolve `TargetType` against
+  something it projects, and Facet's context carries no `tab`, `patient`, `visitseries`, `task`, or
+  `studio` entity — so eight of the nine degrade rather than offer. `ClaimTask` is one line from working
+  (`ctx.taskKey` is populated but absent from `resolveTargetKey`'s candidates). Filed as its own row; the
+  descriptors are what make closing it possible at all, and the comments no longer claim otherwise.
+
+**Remaining `s1Debt`: 7**, all identity-domain (§3.4, conforming last by design). **`lens-cypher`: 5**,
+unchanged.
