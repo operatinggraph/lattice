@@ -2040,3 +2040,47 @@ grant). **Book-for-a-resident is NOT restored** and is filed as its own row: its
 `/api/residents` directory W3 (`d3a7cc7b`) deleted, and republishing an unscoped one would undo the read
 boundary that deletion drew — the clean form needs a workplace-scoped member read, which is a new lens, not a
 UI restore.
+
+### W3 Inc 4 — the front desk books a member in (fire brief, 2026-07-26)
+
+**Scope sentence (verbatim, from `backlog/verticals.md`).** *"The front desk cannot book a member in. The third
+surface W3's mint deletion removed. Its picker was fed by the `/api/residents` directory that deletion also
+removed, and republishing an unscoped one would undo the read boundary it drew — `CreateBooking`'s staff grant
++ workplace guard already ship, so all that is missing is a member list scoped to the staffer's covering
+locations (the `cafeLeaseWorkplaces` shape, on wellness bookers)."*
+
+**Scope-diff gate.** The row's premise re-verified both ways, live: `CreateBooking` scope=any *does* already
+grant `frontOfHouse` (`permissions.go:92`) and its script *does* already confine a non-operator caller with
+`require_workplace(session_locations(session), …)` (`ddls.go:1683`) — so **no write-side change is in scope**,
+and adding one would be substituting an adjacent mechanism. What is missing is exactly one read: a member
+directory a staffer may see. That is a **lens**, which is package work by the no-paper-over rule, not a
+platform primitive — nothing is filed to `lattice.md`.
+
+**Verified touch-list.**
+- `packages/wellness-domain/lenses.go` — a fourth bucket const + a fifth lens, mirroring
+  `packages/cafe-domain/lenses.go:102` (`leaseWorkplacesSpec`) with the applicant column added.
+- `packages/wellness-domain/{manifest.yaml:70,package.go:96,package_test.go:45}` — the manifest lens list,
+  the version, and the S6 structure pin (`Lenses: 4` → `5`).
+- `packages/wellness-domain/lens_cypher_test.go:318` — the `coveringLocations` proofs to mirror.
+- `cmd/wellness-app/residents.go` — the file the handler joins; `readauth.go:103` (`covers`) is the
+  intersection already built for the roster boundary, reused unchanged.
+- `cmd/wellness-app/web/app.js:585` — the Roster view, whose stale header comment ("Nobody cancels a seat from
+  here") Inc 3 falsified and this fire corrects while editing the same block.
+
+**Precedents to mirror.** `cafeLeaseWorkplaces` for the lens shape and its zero-hop / `*0..7` bound reasoning;
+`cmd/cafe-app/frontdesk.go:55` for a staff-only handler that intersects rows against a resolved visibility;
+`lease-signing`'s `leaseApplicationSummary` (`lenses.go:781`) for making `applicationFor` a REQUIRED match.
+
+**Increment order + green checks.**
+1. Package: the `wellnessMembers` lens → `go test ./packages/wellness-domain/`.
+2. App: `GET /api/members` → `go test ./cmd/wellness-app/`.
+3. FE: the roster's book-a-member control → `node --check`, then in-browser on the running stack.
+
+**In-scope gotchas.** (a) The picker is an **affordance, not the authority** — the write boundary confines by
+the *session's* location, never by who the booker is, so the member list narrows what is *offered* and the
+Starlark guard still decides. (b) A member holding two leases is two rows, deliberately: the lease is what
+carries both the covering location and the resident-rate hint. (c) `CreateBooking` re-derives residency
+itself, so the row needs no approval column — passing `leaseAppKey` is enough.
+
+**Non-goals.** No write-side change. No display names (identity carries none; the picker shows bare keys, as
+the deleted one did). Not the roster session-picker's own cross-building narrowing — that is its own filed row.
