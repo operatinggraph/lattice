@@ -2198,3 +2198,40 @@ idiom verbatim. Every hop reads a link the *platform* wrote (`heldFor` at `Creat
 plus its front-desk consumer, and that is exactly Inc 1 + Inc 2. No adjacent mechanism substituted; the
 declared dependency (a café workplace binder to mirror) re-verified both ways — `cafe-domain` has the idiom at
 the six line ranges above, and `cafe-ledger` genuinely has none, which is what made the row's premise true.
+
+**As-built — SHIPPED, with one scope correction the brief did not anticipate.** Adversarial review
+refuted the brief's central assumption. The brief treated "widen the grant + confine the script" as
+self-contained inside `cafe-ledger`; it is not. A standing grant is matched by **operationType string
+equality alone** (`processor.matchPlatformPermission`), and the envelope's `class` — which selects the
+DDL that will run — is a client hint step 3 never reads. `loftspace-ledger` and `clinic-ledger` each
+declare their own `CreditAccount`, and every ledger's transaction DDL admits it in `permittedCommands`.
+Granting `frontOfHouse` the name `CreditAccount` here would therefore have authorized every front-desk
+actor in every vertical against LoftSpace's and Clinic's ledgers, which carry no workplace guard at all
+— a cross-vertical escalation produced by a one-word permission edit, invisible in this package's diff.
+
+The collision itself was already known and already mitigated in the wrong plane: `cafe-domain`'s Weaver
+target pins `class` explicitly because "DebitAccount is claimed by 4 installed ledger DDLs"
+(`targets.go`). Pinning the class fixes *dispatch*; authorization never sees it.
+
+So the café's payment op ships as **`CreditCafeAccount`** — the same vertical-prefixing device this
+package already applies to `cafetransaction` and `.cafeLedgerAccount`, and for the same reason.
+`CreateAccount` and `DebitAccount` keep their bare names deliberately: granted to `operator` alone, and
+the operator is unconfined everywhere by design, so for them the collision confers nothing.
+
+Two additions beyond the brief's §5, both compelled rather than opportunistic:
+
+- **`opmetas.go`** — the S1 gate requires a full descriptor for any op granted beyond the trusted-tool
+  roles. Widening to `frontOfHouse` is exactly what makes `CreditCafeAccount` user-facing, so the
+  descriptor is part of the grant, not an extra.
+- **`lint-package-standard` S9** — a new corpus-wide gate: an operationType granted beyond the
+  trusted-tool roles must be admitted by exactly one package. The corpus passes with zero debt, and the
+  gate was verified to FIRE by re-applying the vulnerable name (it names both sibling claimants). Without
+  it the invariant this fix depends on binds nobody, and the next author re-introduces the hole by
+  choosing an obvious name.
+
+**Named residuals.** One is filed: the `worksAt_covers` single-parent row gains `cafe-ledger` as a third
+copy site, so whoever fixes that walk fixes all three. One is deliberately **not** filed: the sibling
+ledgers' `CreditAccount` stays operator-only and unconfined. That is correct today — the operator is
+unconfined everywhere by design — and it has no consumer, since neither Clinic nor LoftSpace has filed
+demand for a front-desk payment. A row naming no consumer would just age. The invariant is held by the
+S9 gate instead, which will red the fire that widens either one rather than let it ship the hole.
