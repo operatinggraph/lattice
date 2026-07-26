@@ -234,6 +234,27 @@ the hop bound now matches `WORKPLACE_MAX_DEPTH`, and `operator` is exempt on the
 the write side (`/v1/actor`'s `roles`). Three findings became lane rows instead — the picker UX, the
 write-side single-parent walk, and the lens-rebuild question — rather than being widened into this fire.
 
+**Live-verified on the running stack** (`90d823e5`), four ways on one endpoint and — for the last
+three — one and the same session, so nothing rests on which row was asked for:
+
+| caller | roles / anchors | session | result |
+|---|---|---|---|
+| front-desk staffer | `frontOfHouse`, `worksAt` Riverside Building | studio at Riverside | **200** |
+| the same staffer | — | studio sitting nowhere | **403** |
+| Loupe console actor | `consoleOperator`, no workplace | that same session | **403** |
+| root | `operator` (primordial), no workplace | that same session | **200**, roster row returned |
+
+That third row is the one worth keeping: `consoleOperator` is not root, and the exemption correctly
+does not reach it. The read models confirm the term independently — showcase studios project
+`["vtx.building.A9jnKK2bGwZNrfHHkLme"]`, the studio at a `containedIn`-less unit projects that unit
+alone, and the ad-hoc studios earlier PO fires created without a location project `[]`.
+
+The live run is also what caught the exemption comparing against the canonical name `"operator"` while
+`/v1/actor` forwards role VERTEX KEYS — inert against a real Gateway, and green in the suite because
+the fixture minted the name it was being compared to. Fixed to `bootstrap.RoleOperatorKey` with an
+empty-key guard, and `TestMain` now loads the bootstrap ids so the vector runs against the real key.
+The lesson generalizes past this fire: a fixture that invents the shape it asserts proves only itself.
+
 **Worktree:** `.claude/worktrees/staff-read-workplace` (branch `fire/staff-read-workplace`).
 **Next (increment 2, café):** the same shape over `cafe-domain` + `cafe-ledger` — tabs, ledger, and the
 three front-desk handlers. Location indirection is the lease's unit (`leaseapp_unit`), so the covering
