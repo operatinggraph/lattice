@@ -97,3 +97,64 @@ func TestReportIssue_GrantedToBothStaffRoles(t *testing.T) {
 		}
 	}
 }
+
+// TestPackage_StructurePins pins every declared element by count and canonical
+// name (Vertical Package Standard S6, loftspace-domain/package_test.go idiom). A
+// declaration added or dropped without a deliberate edit here reds this test
+// rather than reaching an install, where the same change is a silent capability
+// or read-model shift.
+//
+// This package is the canonical source for the five guard idioms (S4), so its
+// shape is copied by every other package's author — a drift here propagates by
+// imitation, which is exactly why it is pinned.
+func TestPackage_StructurePins(t *testing.T) {
+	if got, want := len(Package.DDLs), 3; got != want {
+		t.Errorf("DDLs: got %d, want %d", got, want)
+	}
+	if got, want := len(Package.Lenses), 0; got != want {
+		t.Errorf("Lenses: got %d, want %d — this package projects nothing; its work orders are read through the verticals", got, want)
+	}
+	if got, want := len(Package.Permissions), 2; got != want {
+		t.Errorf("Permissions: got %d, want %d", got, want)
+	}
+	if got, want := len(Package.OpMetas), 2; got != want {
+		t.Errorf("OpMetas: got %d, want %d", got, want)
+	}
+	if got, want := len(Package.Roles), 0; got != want {
+		t.Errorf("Roles: got %d, want %d", got, want)
+	}
+	if got, want := len(Package.WeaverTargets), 0; got != want {
+		t.Errorf("WeaverTargets: got %d, want %d", got, want)
+	}
+	if got, want := len(Package.LoomPatterns), 0; got != want {
+		t.Errorf("LoomPatterns: got %d, want %d", got, want)
+	}
+	if len(Package.Depends) != 1 || Package.Depends[0] != "location-domain" {
+		t.Errorf("Depends: got %v, want [location-domain]", Package.Depends)
+	}
+
+	wantDDLs := []struct{ name, class string }{
+		{"workOrder", "meta.ddl.vertexType"},
+		{"workOrderReport", "meta.ddl.aspectType"},
+		{"workOrderResolution", "meta.ddl.aspectType"},
+	}
+	for i, want := range wantDDLs {
+		if i >= len(Package.DDLs) {
+			break
+		}
+		got := Package.DDLs[i]
+		if got.CanonicalName != want.name || got.Class != want.class {
+			t.Errorf("DDLs[%d]: got %s/%s, want %s/%s", i, got.CanonicalName, got.Class, want.name, want.class)
+		}
+	}
+	wantPerms := []struct{ op, scope string }{{"ReportIssue", "any"}, {"ResolveWorkOrder", "any"}}
+	for i, want := range wantPerms {
+		if i >= len(Package.Permissions) {
+			break
+		}
+		got := Package.Permissions[i]
+		if got.OperationType != want.op || got.Scope != want.scope {
+			t.Errorf("Permissions[%d]: got %s/%s, want %s/%s", i, got.OperationType, got.Scope, want.op, want.scope)
+		}
+	}
+}

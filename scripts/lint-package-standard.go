@@ -120,16 +120,9 @@ var s6Debt = map[string]map[string]bool{
 		"identity-domain":  true,
 		"rbac-domain":      true,
 	},
-	"structure-pins": {
-		"augur":              true,
-		"cafe-domain":        true,
-		"capability-author":  true,
-		"lease-signing":      true,
-		"maintenance-domain": true,
-		"privacy-base":       true,
-		"semantic-contracts": true,
-		"wellness-domain":    true,
-	},
+	// Empty: every registered package pins its structure. The rule now binds
+	// with no exemptions, so a new package ships a pin or reds the gate.
+	"structure-pins": {},
 }
 
 type report struct {

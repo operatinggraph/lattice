@@ -108,3 +108,123 @@ func TestPackage_EngineLegsStayBare(t *testing.T) {
 		}
 	}
 }
+
+// TestPackage_StructurePins pins every declared element by count and canonical
+// name (Vertical Package Standard S6, loftspace-domain/package_test.go idiom). A
+// declaration added or dropped without a deliberate edit here reds this test
+// rather than reaching an install, where the same change is a silent capability
+// or read-model shift.
+//
+// This is the largest package in the corpus and had neither a pin nor a verify
+// script, inversely to its size — the census called that out. Two things here are
+// load-bearing beyond their counts:
+//
+//   - The permissions are pinned as (op, scope) PAIRS, because a permission IS
+//     its pair (Contract #8 §8.1). Seven ops carry both an operator scope=any
+//     grant and a consumer scope=self one; losing a self row would remove
+//     self-service while a count-only pin still matched.
+//   - Three of the six lenses are PROTECTED Postgres read models. A lens quietly
+//     losing Protected would move identity-bearing rows onto an open surface, so
+//     the flag is pinned per lens, not just the lens name.
+func TestPackage_StructurePins(t *testing.T) {
+	if got, want := len(Package.DDLs), 10; got != want {
+		t.Errorf("DDLs: got %d, want %d", got, want)
+	}
+	if got, want := len(Package.Lenses), 6; got != want {
+		t.Errorf("Lenses: got %d, want %d", got, want)
+	}
+	if got, want := len(Package.Permissions), 22; got != want {
+		t.Errorf("Permissions: got %d, want %d", got, want)
+	}
+	if got, want := len(Package.OpMetas), 15; got != want {
+		t.Errorf("OpMetas: got %d, want %d", got, want)
+	}
+	if got, want := len(Package.Roles), 0; got != want {
+		t.Errorf("Roles: got %d, want %d", got, want)
+	}
+	if got, want := len(Package.WeaverTargets), 3; got != want {
+		t.Errorf("WeaverTargets: got %d, want %d", got, want)
+	}
+	if got, want := len(Package.LoomPatterns), 4; got != want {
+		t.Errorf("LoomPatterns: got %d, want %d", got, want)
+	}
+	wantDeps := []string{"identity-domain", "service-domain", "orchestration-base"}
+	if len(Package.Depends) != len(wantDeps) {
+		t.Errorf("Depends: got %v, want %v", Package.Depends, wantDeps)
+	}
+	for i, want := range wantDeps {
+		if i < len(Package.Depends) && Package.Depends[i] != want {
+			t.Errorf("Depends[%d]: got %q, want %q", i, Package.Depends[i], want)
+		}
+	}
+
+	wantDDLs := []struct{ name, class string }{
+		{"leaseapp", "meta.ddl.vertexType"},
+		{"leaseServiceInstance", "meta.ddl.vertexType"},
+		{"leaseServiceReply", "meta.ddl.vertexType"},
+		{"leaseServiceDispatch", "meta.ddl.vertexType"},
+		{"leaseServiceOutcome", "meta.ddl.aspectType"},
+		{"leaseServiceDispatchMarker", "meta.ddl.aspectType"},
+		{"leaseDocInstance", "meta.ddl.vertexType"},
+		{"leaseDocReply", "meta.ddl.vertexType"},
+		{"leaseDocOutcome", "meta.ddl.aspectType"},
+		{"renewal", "meta.ddl.vertexType"},
+	}
+	for i, want := range wantDDLs {
+		if i >= len(Package.DDLs) {
+			break
+		}
+		got := Package.DDLs[i]
+		if got.CanonicalName != want.name || got.Class != want.class {
+			t.Errorf("DDLs[%d]: got %s/%s, want %s/%s", i, got.CanonicalName, got.Class, want.name, want.class)
+		}
+	}
+
+	wantLenses := []struct {
+		name      string
+		adapter   string
+		protected bool
+	}{
+		{"leaseApplicationComplete", "nats-kv", false},
+		{"leaseApplicationsRead", "postgres", true},
+		{"landlordLeaseApplicationsRead", "postgres", true},
+		{"leaseExpiry", "nats-kv", false},
+		{"renewalComplete", "nats-kv", false},
+		{"renewalsRead", "postgres", true},
+	}
+	for i, want := range wantLenses {
+		if i >= len(Package.Lenses) {
+			break
+		}
+		got := Package.Lenses[i]
+		if got.CanonicalName != want.name || got.Adapter != want.adapter || got.Protected != want.protected {
+			t.Errorf("Lenses[%d]: got %s/%s/protected=%v, want %s/%s/protected=%v",
+				i, got.CanonicalName, got.Adapter, got.Protected, want.name, want.adapter, want.protected)
+		}
+	}
+
+	wantPerms := []struct{ op, scope string }{
+		{"CreateLeaseApplication", "any"}, {"CreateLeaseApplication", "self"},
+		{"CreateLeaseServiceInstance", "any"},
+		{"RecordLeaseServiceOutcome", "any"}, {"RecordServiceDispatch", "any"},
+		{"CreateLeaseDocInstance", "any"}, {"RecordLeaseDocOutcome", "any"},
+		{"SignLease", "any"},
+		{"WithdrawLeaseApplication", "any"}, {"WithdrawLeaseApplication", "self"},
+		{"DecideLeaseApplication", "any"}, {"DecideLeaseApplication", "self"},
+		{"SetApplicantProfile", "any"}, {"SetApplicantProfile", "self"},
+		{"OpenRenewal", "any"},
+		{"SetRenewalTerms", "any"}, {"SetRenewalTerms", "self"},
+		{"VerifyGuarantor", "any"}, {"VerifyGuarantor", "self"},
+		{"SignRenewal", "any"},
+		{"CancelRenewal", "any"}, {"CancelRenewal", "self"},
+	}
+	for i, want := range wantPerms {
+		if i >= len(Package.Permissions) {
+			break
+		}
+		got := Package.Permissions[i]
+		if got.OperationType != want.op || got.Scope != want.scope {
+			t.Errorf("Permissions[%d]: got %s/%s, want %s/%s", i, got.OperationType, got.Scope, want.op, want.scope)
+		}
+	}
+}

@@ -1,0 +1,79 @@
+package privacybase
+
+import (
+	"testing"
+)
+
+// TestPackage_StructurePins pins every declared element by count and canonical
+// name (Vertical Package Standard S6, loftspace-domain/package_test.go idiom). A
+// declaration added or dropped without a deliberate edit here reds this test
+// rather than reaching an install, where the same change is a silent capability
+// or read-model shift.
+//
+// This package is load-bearing for crypto-shred and declares no operation a
+// script dispatches: piiKey is minted and read by the Processor's own commit
+// path, and the class is registered here only so the DDL cache and Loupe can
+// see it. A DDL quietly vanishing from this list would therefore break
+// encrypt-on-write with no failing operation to point at.
+func TestPackage_StructurePins(t *testing.T) {
+	if got, want := len(Package.DDLs), 3; got != want {
+		t.Errorf("DDLs: got %d, want %d", got, want)
+	}
+	if got, want := len(Package.Lenses), 2; got != want {
+		t.Errorf("Lenses: got %d, want %d", got, want)
+	}
+	if got, want := len(Package.Permissions), 1; got != want {
+		t.Errorf("Permissions: got %d, want %d", got, want)
+	}
+	if got, want := len(Package.OpMetas), 0; got != want {
+		t.Errorf("OpMetas: got %d, want %d", got, want)
+	}
+	if got, want := len(Package.Roles), 0; got != want {
+		t.Errorf("Roles: got %d, want %d", got, want)
+	}
+	if got, want := len(Package.WeaverTargets), 0; got != want {
+		t.Errorf("WeaverTargets: got %d, want %d", got, want)
+	}
+	if got, want := len(Package.LoomPatterns), 0; got != want {
+		t.Errorf("LoomPatterns: got %d, want %d", got, want)
+	}
+	if got, want := len(Package.Depends), 0; got != want {
+		t.Errorf("Depends: got %d, want %d — this package sits at the bottom of the stack", got, want)
+	}
+
+	wantDDLs := []struct{ name, class string }{
+		{"piiKey", "meta.ddl.aspectType"},
+		{"shredIdentityKey", "meta.ddl.vertexType"},
+		{"privacy.keyShredded", "meta.ddl.eventType"},
+	}
+	for i, want := range wantDDLs {
+		if i >= len(Package.DDLs) {
+			break
+		}
+		got := Package.DDLs[i]
+		if got.CanonicalName != want.name || got.Class != want.class {
+			t.Errorf("DDLs[%d]: got %s/%s, want %s/%s", i, got.CanonicalName, got.Class, want.name, want.class)
+		}
+	}
+
+	wantLenses := []string{"shredStatus", "piiKeyEnvelope"}
+	for i, want := range wantLenses {
+		if i >= len(Package.Lenses) {
+			break
+		}
+		if got := Package.Lenses[i].CanonicalName; got != want {
+			t.Errorf("Lenses[%d]: got %q, want %q", i, got, want)
+		}
+	}
+
+	wantPerms := []struct{ op, scope string }{{"RecordShredFinalization", "any"}}
+	for i, want := range wantPerms {
+		if i >= len(Package.Permissions) {
+			break
+		}
+		got := Package.Permissions[i]
+		if got.OperationType != want.op || got.Scope != want.scope {
+			t.Errorf("Permissions[%d]: got %s/%s, want %s/%s", i, got.OperationType, got.Scope, want.op, want.scope)
+		}
+	}
+}
