@@ -1,6 +1,8 @@
 package main
 
 import (
+	"net/http"
+	"net/http/httptest"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -9,21 +11,26 @@ import (
 
 // docSet builds the readDoc callback computeEdgeFleet takes, from a plain map.
 // A key absent from the map reads as "gone" (raced a deregister).
-func docSet(docs map[string]interestDoc) func(string) (interestDoc, bool, bool) {
-	return func(k string) (interestDoc, bool, bool) {
+func docSet(docs map[string]interestDoc) func(string) interestRead {
+	return func(k string) interestRead {
 		d, ok := docs[k]
 		if !ok {
-			return interestDoc{}, false, false
+			return interestRead{}
 		}
-		return d, true, true
+		return interestRead{Doc: d, Found: true, Parsed: true}
 	}
 }
 
-// consumerSet builds the readConsumer callback from durable-name → state.
-func consumerSet(cs map[string]consumerState) func(string, string) (consumerState, bool) {
-	return func(identityID, deviceID string) (consumerState, bool) {
+// consumerSet builds the readConsumer callback from durable-name → state. A
+// durable absent from the map reads as "no such consumer", never as a failed
+// lookup — the two are distinct outcomes and the tests that care say so.
+func consumerSet(cs map[string]consumerState) func(string, string) consumerLookup {
+	return func(identityID, deviceID string) consumerLookup {
 		c, ok := cs[edgeSyncDurable(identityID, deviceID)]
-		return c, ok
+		if !ok {
+			return consumerLookup{}
+		}
+		return consumerLookup{State: c, Found: true}
 	}
 }
 
@@ -68,7 +75,7 @@ func TestComputeEdgeFleet_GapFromAckFloor(t *testing.T) {
 		edgeSyncDurable(idB, "laptop"): {AckFloor: 900, Pending: 0},  // inside the window
 	}
 
-	devices, gapped, unsubscribed, _ := computeEdgeFleet(keys, docSet(docs), consumerSet(cons), 500, true)
+	devices, gapped, unsubscribed, _ := computeEdgeFleet(keys, docSet(docs), consumerSet(cons), retentionWindow{FirstSeq: 500, LastSeq: 900, Known: true})
 	require.Len(t, devices, 2)
 	assert.Equal(t, 1, gapped)
 	assert.Equal(t, 0, unsubscribed)
@@ -110,7 +117,7 @@ func TestComputeEdgeFleet_GappedMeansDataActuallyLost(t *testing.T) {
 			[]string{id + ".phone"},
 			docSet(map[string]interestDoc{id + ".phone": {}}),
 			consumerSet(map[string]consumerState{edgeSyncDurable(id, "phone"): {AckFloor: ackFloor}}),
-			firstSeq, true)
+			retentionWindow{FirstSeq: firstSeq, LastSeq: firstSeq + 400, Known: true})
 		require.Len(t, devices, 1)
 		return devices[0]
 	}
@@ -157,11 +164,11 @@ func TestComputeEdgeFleet_UnknownCounted(t *testing.T) {
 	docs := map[string]interestDoc{id + ".attached": {}, id + ".never": {}}
 	cons := map[string]consumerState{edgeSyncDurable(id, "attached"): {AckFloor: 900}}
 
-	_, _, _, unknown := computeEdgeFleet(keys, docSet(docs), consumerSet(cons), 500, true)
+	_, _, _, unknown := computeEdgeFleet(keys, docSet(docs), consumerSet(cons), retentionWindow{FirstSeq: 500, LastSeq: 900, Known: true})
 	assert.Equal(t, 1, unknown, "only the unattached device is unmeasured")
 
 	// No readable stream ⇒ nothing is measurable at all.
-	_, _, _, allUnknown := computeEdgeFleet(keys, docSet(docs), consumerSet(cons), 0, false)
+	_, _, _, allUnknown := computeEdgeFleet(keys, docSet(docs), consumerSet(cons), retentionWindow{FirstSeq: 0, LastSeq: 0, Known: false})
 	assert.Equal(t, 2, allUnknown)
 }
 
@@ -173,7 +180,7 @@ func TestComputeEdgeFleet_UnknownIsNeverFalse(t *testing.T) {
 	t.Run("stream unreadable", func(t *testing.T) {
 		docs := map[string]interestDoc{id + ".phone": {RevisionCursor: 900}}
 		cons := map[string]consumerState{edgeSyncDurable(id, "phone"): {AckFloor: 900}}
-		devices, gapped, unsubscribed, _ := computeEdgeFleet([]string{id + ".phone"}, docSet(docs), consumerSet(cons), 0, false)
+		devices, gapped, unsubscribed, _ := computeEdgeFleet([]string{id + ".phone"}, docSet(docs), consumerSet(cons), retentionWindow{FirstSeq: 0, LastSeq: 0, Known: false})
 		require.Len(t, devices, 1)
 		assert.Nil(t, devices[0].Gapped, "no readable stream ⇒ no verdict")
 		assert.Zero(t, gapped)
@@ -185,7 +192,7 @@ func TestComputeEdgeFleet_UnknownIsNeverFalse(t *testing.T) {
 
 	t.Run("registered but never attached", func(t *testing.T) {
 		docs := map[string]interestDoc{id + ".phone": {RegisteredAt: "2026-07-19T00:00:00Z"}}
-		devices, gapped, unsubscribed, _ := computeEdgeFleet([]string{id + ".phone"}, docSet(docs), consumerSet(nil), 500, true)
+		devices, gapped, unsubscribed, _ := computeEdgeFleet([]string{id + ".phone"}, docSet(docs), consumerSet(nil), retentionWindow{FirstSeq: 500, LastSeq: 900, Known: true})
 		require.Len(t, devices, 1)
 		assert.Nil(t, devices[0].Gapped, "no durable ⇒ no comparable position")
 		assert.False(t, devices[0].Subscribed)
@@ -203,7 +210,7 @@ func TestComputeEdgeFleet_RevisionCursorNeverProducesVerdict(t *testing.T) {
 	docs := map[string]interestDoc{id + ".phone": {RevisionCursor: 2487}}
 	// 2487 sits far below a realistic SYNC floor of 8355 — the exact shape that
 	// would read as "gapped by 5867" if the two sequence spaces were conflated.
-	devices, gapped, _, _ := computeEdgeFleet([]string{id + ".phone"}, docSet(docs), consumerSet(nil), 8355, true)
+	devices, gapped, _, _ := computeEdgeFleet([]string{id + ".phone"}, docSet(docs), consumerSet(nil), retentionWindow{FirstSeq: 8355, LastSeq: 8755, Known: true})
 	require.Len(t, devices, 1)
 	assert.Nil(t, devices[0].Gapped, "a hydration checkpoint is not a stream position")
 	assert.Zero(t, devices[0].BehindBy)
@@ -219,16 +226,16 @@ func TestComputeEdgeFleet_RevisionCursorNeverProducesVerdict(t *testing.T) {
 func TestComputeEdgeFleet_MalformedAndRacedRows(t *testing.T) {
 	const id = "AAAAAAAAAAAAAAAAAAAA"
 	keys := []string{"nodot", id + ".gone", id + ".broken"}
-	readDoc := func(k string) (interestDoc, bool, bool) {
+	readDoc := func(k string) interestRead {
 		switch k {
 		case id + ".gone":
-			return interestDoc{}, false, false // deregistered mid-page
+			return interestRead{} // deregistered mid-page
 		case id + ".broken":
-			return interestDoc{}, true, false // present but unreadable
+			return interestRead{Found: true} // present, and its document will not parse
 		}
-		return interestDoc{}, false, false
+		return interestRead{}
 	}
-	devices, _, _, _ := computeEdgeFleet(keys, readDoc, consumerSet(nil), 500, true)
+	devices, _, _, _ := computeEdgeFleet(keys, readDoc, consumerSet(nil), retentionWindow{FirstSeq: 500, LastSeq: 900, Known: true})
 	require.Len(t, devices, 1, "only the unreadable-but-present row survives")
 	assert.Equal(t, id+".broken", devices[0].Key)
 	assert.True(t, devices[0].Malformed)
@@ -280,4 +287,242 @@ func TestPersonalSyncStream(t *testing.T) {
 		assert.Empty(t, got, "ambiguity must not resolve to an arbitrary stream")
 		assert.Contains(t, note, "more than one stream")
 	})
+}
+
+// Headroom must survive the round trip as a POINTER: 0 is the tightest real
+// reading there is (the device sits exactly on the floor), so it cannot share
+// an encoding with "not measured".
+func TestComputeEdgeFleet_HeadroomZeroIsNotAbsent(t *testing.T) {
+	const id = "AAAAAAAAAAAAAAAAAAAA"
+	run := func(cs map[string]consumerState, win retentionWindow) edgeDevice {
+		devices, _, _, _ := computeEdgeFleet(
+			[]string{id + ".phone"},
+			docSet(map[string]interestDoc{id + ".phone": {}}),
+			consumerSet(cs), win)
+		require.Len(t, devices, 1)
+		return devices[0]
+	}
+	win := retentionWindow{FirstSeq: 500, LastSeq: 900, Known: true}
+
+	onFloor := run(map[string]consumerState{edgeSyncDurable(id, "phone"): {AckFloor: 499}}, win)
+	require.NotNil(t, onFloor.Headroom, "a device on the floor was measured, so headroom is 0 and not absent")
+	assert.Equal(t, uint64(0), *onFloor.Headroom)
+
+	inside := run(map[string]consumerState{edgeSyncDurable(id, "phone"): {AckFloor: 600}}, win)
+	require.NotNil(t, inside.Headroom)
+	assert.Equal(t, uint64(101), *inside.Headroom, "500..600 inclusive is 101 retained below the device")
+
+	// Unmeasured: no durable at all. Nothing to compare, so nothing is claimed.
+	unmeasured := run(nil, win)
+	assert.Nil(t, unmeasured.Headroom, "an unmeasured device must not report a headroom")
+	assert.Nil(t, unmeasured.Gapped)
+
+	// Gapped: the damage is BehindBy; a headroom alongside it would be a second,
+	// contradictory reading of the same position.
+	gapped := run(map[string]consumerState{edgeSyncDurable(id, "phone"): {AckFloor: 100}}, win)
+	require.NotNil(t, gapped.Gapped)
+	assert.True(t, *gapped.Gapped)
+	assert.Nil(t, gapped.Headroom)
+}
+
+// retentionHeadroom counts only what the stream actually holds — a drained
+// stream, a brand-new one, and an ack floor past the last sequence must all
+// yield 0 rather than a window-sized or wrapped-around count.
+func TestRetentionHeadroomClamps(t *testing.T) {
+	cases := []struct {
+		name     string
+		ackFloor uint64
+		win      retentionWindow
+		want     uint64
+		wantOK   bool
+	}{
+		// A stream retaining nothing gives no headroom READING at all. Answering
+		// 0 would render every fully-caught-up device as the tightest row on the
+		// fleet the moment an idle stack ages its stream to empty — the same
+		// fleet-wide false red the gap predicate is written to avoid.
+		{"drained stream reports firstSeq = lastSeq+1", 900, retentionWindow{FirstSeq: 901, LastSeq: 900, Known: true}, 0, false},
+		{"brand-new stream reports 0/0", 0, retentionWindow{FirstSeq: 0, LastSeq: 0, Known: true}, 0, false},
+		{"below the floor holds nothing", 400, retentionWindow{FirstSeq: 500, LastSeq: 900, Known: true}, 0, true},
+		{"exactly on the floor holds one", 500, retentionWindow{FirstSeq: 500, LastSeq: 900, Known: true}, 1, true},
+		{"at the head holds the whole window", 900, retentionWindow{FirstSeq: 500, LastSeq: 900, Known: true}, 401, true},
+		{"past the head clamps to the window", 1200, retentionWindow{FirstSeq: 500, LastSeq: 900, Known: true}, 401, true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got, ok := retentionHeadroom(c.ackFloor, c.win)
+			assert.Equal(t, c.wantOK, ok)
+			assert.Equal(t, c.want, got)
+		})
+	}
+}
+
+// An empty stream must leave every still-current device UNMEASURED rather than
+// reporting a headroom of 0, which the console renders as "on the retention
+// floor" in error styling. Nothing is retained, so nothing can be lost.
+func TestComputeEdgeFleet_EmptyStreamLeavesHeadroomUnmeasured(t *testing.T) {
+	const id = "AAAAAAAAAAAAAAAAAAAA"
+	for _, win := range []retentionWindow{
+		{FirstSeq: 901, LastSeq: 900, Known: true}, // drained by MaxAge
+		{FirstSeq: 0, LastSeq: 0, Known: true},     // brand new
+	} {
+		devices, gapped, _, _ := computeEdgeFleet(
+			[]string{id + ".phone"},
+			docSet(map[string]interestDoc{id + ".phone": {}}),
+			consumerSet(map[string]consumerState{edgeSyncDurable(id, "phone"): {AckFloor: 900}}),
+			win)
+		require.Len(t, devices, 1)
+		assert.Zero(t, gapped, "an empty stream has discarded nothing this device wanted")
+		require.NotNil(t, devices[0].Gapped)
+		assert.False(t, *devices[0].Gapped)
+		assert.Nil(t, devices[0].Headroom,
+			"a stream holding nothing gives no headroom reading; 0 would render as the tightest row on the fleet")
+	}
+}
+
+// A consumer lookup that BROKE is not evidence the device never attached: it
+// must not join the unattached count, and it carries its own flag so the view
+// can say the measurement failed instead of asserting an absence.
+func TestComputeEdgeFleet_FailedConsumerLookupIsNotAnAbsence(t *testing.T) {
+	const id = "AAAAAAAAAAAAAAAAAAAA"
+	keys := []string{id + ".broke", id + ".absent"}
+	docs := map[string]interestDoc{id + ".broke": {}, id + ".absent": {}}
+	readConsumer := func(identityID, deviceID string) consumerLookup {
+		if deviceID == "broke" {
+			return consumerLookup{Failed: true}
+		}
+		return consumerLookup{}
+	}
+
+	devices, _, unsubscribed, unknown := computeEdgeFleet(keys, docSet(docs), readConsumer,
+		retentionWindow{FirstSeq: 500, LastSeq: 900, Known: true})
+	require.Len(t, devices, 2)
+	byID := map[string]edgeDevice{}
+	for _, d := range devices {
+		byID[d.DeviceID] = d
+	}
+	assert.True(t, byID["broke"].AttachUnknown, "a failed lookup must say so")
+	assert.False(t, byID["broke"].Subscribed)
+	assert.False(t, byID["absent"].AttachUnknown, "a genuine ErrConsumerNotFound is an absence, not a fault")
+	assert.Equal(t, 1, unsubscribed, "only the genuinely-absent durable counts as unattached")
+	assert.Equal(t, 2, unknown, "neither device has a comparable position, so both are gap-unknown")
+}
+
+// A registration whose READ broke is not a corrupt document. Reporting it as
+// malformed tells an operator their registration is damaged when a request
+// merely timed out.
+func TestComputeEdgeFleet_FailedReadIsNotAMalformedDocument(t *testing.T) {
+	const id = "AAAAAAAAAAAAAAAAAAAA"
+	keys := []string{id + ".broke", id + ".corrupt", id + ".gone"}
+	readDoc := func(k string) interestRead {
+		switch k {
+		case id + ".broke":
+			return interestRead{Found: true, Failed: true}
+		case id + ".corrupt":
+			return interestRead{Found: true}
+		default:
+			return interestRead{} // deregistered mid-read
+		}
+	}
+
+	devices, _, _, _ := computeEdgeFleet(keys, readDoc, consumerSet(nil),
+		retentionWindow{FirstSeq: 500, LastSeq: 900, Known: true})
+	require.Len(t, devices, 2, "a genuinely absent registration drops; the other two stay")
+	byID := map[string]edgeDevice{}
+	for _, d := range devices {
+		byID[d.DeviceID] = d
+	}
+	assert.True(t, byID["broke"].Unreadable)
+	assert.False(t, byID["broke"].Malformed, "a failed read must not be blamed on the document")
+	assert.True(t, byID["corrupt"].Malformed)
+	assert.False(t, byID["corrupt"].Unreadable)
+	// Neither may assert a filter: an unparsed document says nothing about the
+	// subscription's width.
+	assert.False(t, byID["broke"].Unfiltered)
+	assert.False(t, byID["corrupt"].Unfiltered)
+}
+
+// The panel's roster is narrowed to one identity, and the target is matched on
+// the full registration KEY: two identities may name a device the same thing.
+func TestIdentityKeysAndSelectDeviceAndSiblings(t *testing.T) {
+	const idA, idB = "AAAAAAAAAAAAAAAAAAAA", "BBBBBBBBBBBBBBBBBBBB"
+	keys := []string{idA + ".phone", idB + ".phone", idA + ".laptop", "nodot", idB + ".tablet"}
+
+	kin := identityKeys(keys, idA)
+	assert.Equal(t, []string{idA + ".phone", idA + ".laptop"}, kin,
+		"only this identity's registrations, and a key that does not split is not one")
+	assert.Empty(t, identityKeys(keys, "CCCCCCCCCCCCCCCCCCCC"))
+
+	devices := []edgeDevice{
+		{Key: idA + ".phone", DeviceID: "phone"},
+		{Key: idA + ".laptop", DeviceID: "laptop"},
+	}
+	target, siblings := selectDeviceAndSiblings(devices, idA+".laptop")
+	require.NotNil(t, target)
+	assert.Equal(t, "laptop", target.DeviceID)
+	require.Len(t, siblings, 1)
+	assert.Equal(t, "phone", siblings[0].DeviceID)
+
+	// A device id that matches but whose key does not must NOT be selected.
+	missing, all := selectDeviceAndSiblings(devices, idB+".phone")
+	assert.Nil(t, missing, "matching is on the key, not the device id")
+	assert.Len(t, all, 2)
+}
+
+// The roster is ordered for TRIAGE: most data lost first, then the devices
+// nobody could measure, then the still-current ones with the least room left.
+//
+// The unmeasured tier sitting above the current one is the deliberate half: a
+// device whose gap state could not be determined is an open question, and
+// sinking it below every answered row buries exactly the rows to chase.
+func TestComputeEdgeFleet_OrdersWorstFirst(t *testing.T) {
+	const id = "AAAAAAAAAAAAAAAAAAAA"
+	names := []string{"lost-a-little", "lost-a-lot", "unmeasured", "roomy", "tight"}
+	keys := make([]string, 0, len(names))
+	docs := map[string]interestDoc{}
+	for _, n := range names {
+		keys = append(keys, id+"."+n)
+		docs[id+"."+n] = interestDoc{}
+	}
+	cons := map[string]consumerState{
+		edgeSyncDurable(id, "lost-a-little"): {AckFloor: 480}, // 19 lost
+		edgeSyncDurable(id, "lost-a-lot"):    {AckFloor: 100}, // 399 lost
+		edgeSyncDurable(id, "roomy"):         {AckFloor: 890},
+		edgeSyncDurable(id, "tight"):         {AckFloor: 505},
+		// "unmeasured" has no durable at all.
+	}
+
+	devices, _, _, _ := computeEdgeFleet(keys, docSet(docs), consumerSet(cons),
+		retentionWindow{FirstSeq: 500, LastSeq: 900, Known: true})
+	got := make([]string, 0, len(devices))
+	for _, d := range devices {
+		got = append(got, d.DeviceID)
+	}
+	assert.Equal(t, []string{"lost-a-lot", "lost-a-little", "unmeasured", "tight", "roomy"}, got)
+}
+
+func TestHandleEdgeDevice_Validation(t *testing.T) {
+	mux := testServer()
+
+	cases := []struct {
+		method, path string
+		want         int
+	}{
+		// Key validation runs BEFORE requireConn (testServer has a nil conn), so
+		// a malformed request answers 400 rather than a misleading 502.
+		{"GET", "/api/edge/device", http.StatusBadRequest},
+		{"GET", "/api/edge/device?key=", http.StatusBadRequest},
+		{"GET", "/api/edge/device?key=nodot", http.StatusBadRequest},
+		{"GET", "/api/edge/device?key=.leading", http.StatusBadRequest},
+		{"GET", "/api/edge/device?key=trailing.", http.StatusBadRequest},
+		{"POST", "/api/edge/device?key=AAAAAAAAAAAAAAAAAAAA.phone", http.StatusBadRequest},
+		// A well-formed key with no NATS gets the honest upstream answer.
+		{"GET", "/api/edge/device?key=AAAAAAAAAAAAAAAAAAAA.phone", http.StatusBadGateway},
+	}
+	for _, c := range cases {
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, httptest.NewRequest(c.method, c.path, nil))
+		if rec.Code != c.want {
+			t.Errorf("%s %s: status = %d, want %d", c.method, c.path, rec.Code, c.want)
+		}
+	}
 }

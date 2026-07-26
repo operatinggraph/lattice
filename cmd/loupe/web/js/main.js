@@ -112,6 +112,23 @@ function renderCrumbs(route, entry) {
     return;
   }
 
+  // An Edge arg is a personal-lens-interest KEY, not a Core KV vertex key: it
+  // splits identity/device on the FIRST dot, and the device half may itself
+  // contain dots. Walking it with the vertex-key decomposition below would
+  // render "AAA.com.apple.phone" as four peer segments, none of which is a
+  // segment of anything.
+  if (route.view === "edge") {
+    const cut = route.arg.indexOf(".");
+    const box = el("span", "crumb-key");
+    box.appendChild(el("span", null, cut < 0 ? route.arg : route.arg.slice(0, cut)));
+    if (cut >= 0) {
+      box.appendChild(el("span", "crumb-dot", "›"));
+      box.appendChild(el("span", null, route.arg.slice(cut + 1)));
+    }
+    bar.appendChild(box);
+    return;
+  }
+
   const segs = route.arg.split(".");
   const keyBox = el("span", "crumb-key");
   segs.forEach((s, i) => {

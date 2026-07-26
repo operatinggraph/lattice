@@ -237,7 +237,7 @@ pre {
    is not a degraded state of the device. */
 .badge-unknown { color: var(--text-dim); border-color: var(--border); }
 
-/* Edge fleet (F19): one card per identity, its devices stacked inside. */
+/* Edge fleet: one card per identity, its devices stacked inside. */
 .edge-identity .edge-device { border-top: 1px solid var(--border); padding-top: 8px; margin-top: 8px; }
 .edge-identity .edge-device:first-of-type { border-top: 0; }
 .edge-device-id { font-family: var(--mono); color: var(--text); margin-right: 8px; }
@@ -246,6 +246,25 @@ pre {
 .edge-identity > .card-key .card-group { white-space: nowrap; }
 .edge-device .card-meta { flex-wrap: wrap; align-items: center; row-gap: 4px; }
 #edge-notes { margin-bottom: 10px; display: flex; flex-direction: column; gap: 4px; }
+#edge-triage { color: var(--text); }
+/* The roster and one device's panel are two modes of the same tab (the Flows
+   shape), so exactly one is ever mounted. */
+#edge-list, #edge-detail { display: none; }
+#edge-list.visible, #edge-detail.visible { display: block; }
+#edge-detail { max-width: 900px; }
+/* An in-place expander: collapsed by default so a long Interest Set never
+   pushes the next device off the fold. */
+.edge-interest-terms { display: none; margin: 4px 0 6px 12px; }
+.edge-interest-terms.visible { display: block; }
+.edge-interest-term { display: flex; align-items: center; gap: 6px; font-size: 12px; padding: 1px 0; }
+.edge-sibling { display: flex; align-items: center; gap: 8px; padding: 3px 0; }
+/* A control that navigates rather than acts — styled as the link it behaves
+   like, so a <button> here does not read as a write affordance. */
+.linkish {
+  background: none; border: 0; padding: 0; font: inherit; color: var(--accent);
+  cursor: pointer; text-align: left;
+}
+.linkish:hover { text-decoration: underline; }
 .card-sub { font-family: var(--mono); font-size: 11px; color: var(--text-dim); word-break: break-all; margin-bottom: 6px; }
 .card-meta { display: flex; gap: 12px; color: var(--text-dim); font-size: 12px; }
 .card-status { font-weight: 600; }

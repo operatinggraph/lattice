@@ -139,22 +139,30 @@
 
     <!-- Edge -->
     <section class="panel" id="panel-edge">
-      <div class="panel-controls">
-        <button id="edge-load">Refresh</button>
-        <label class="muted"><input type="checkbox" id="edge-gapped-only"> gapped only</label>
-        <span class="muted" id="edge-status-msg"></span>
+      <div id="edge-list" class="visible">
+        <div class="panel-controls">
+          <button id="edge-load">Refresh</button>
+          <label class="muted"><input type="checkbox" id="edge-gapped-only"> gapped only</label>
+          <span class="muted" id="edge-status-msg"></span>
+        </div>
+        <p class="muted small">The Personal Lens subscriber fleet — every device registered through
+          <code>personal.register</code>, with its Interest Set and its position in the
+          <code>SYNC</code> stream. A device is <strong>gapped</strong> when the stream's retention floor has
+          overtaken the point it consumed through: those deltas aged out, so a warm resume would silently
+          miss them and the device needs a cold <code>personal.hydrate</code>. Gap state comes from each
+          device's own JetStream ack floor; a device with no consumer has no comparable position, so its
+          gap state reads <em>unknown</em> rather than healthy. Identities are ordered by their worst device,
+          and each identity's devices worst-first — most data lost, then unmeasured, then tightest
+          remaining headroom. This is who is <strong>registered</strong>, not who is connected: a device's
+          <em>last acked</em> time is the closest thing to liveness here, and it says the device consumed
+          a delta at some point, never that it is attached now. Remediation is the device's own next
+          attach — the console cannot start a hydration for it.</p>
+        <p class="muted small" id="edge-retention"></p>
+        <p class="small" id="edge-triage"></p>
+        <div id="edge-notes"></div>
+        <div class="cards" id="edge-groups"></div>
       </div>
-      <p class="muted small">The Personal Lens subscriber fleet — every device registered through
-        <code>personal.register</code>, with its Interest Set and its position in the
-        <code>SYNC</code> stream. A device is <strong>gapped</strong> when the stream's retention floor has
-        overtaken the point it consumed through: those deltas aged out, so a warm resume would silently
-        miss them and the device needs a cold <code>personal.hydrate</code>. Gap state comes from each
-        device's own JetStream ack floor; a device with no consumer has no comparable position, so its
-        gap state reads <em>unknown</em> rather than healthy. This is who is <strong>registered</strong>,
-        not who is connected.</p>
-      <p class="muted small" id="edge-retention"></p>
-      <div id="edge-notes"></div>
-      <div class="cards" id="edge-groups"></div>
+      <div id="edge-detail"></div>
     </section>
 
     <!-- Flows -->

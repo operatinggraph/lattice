@@ -137,6 +137,7 @@ func (s *server) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/history/timeline", s.handleHistoryTimeline)
 	mux.HandleFunc("/api/gateway/revocations", s.handleGatewayRevocations)
 	mux.HandleFunc("/api/edge/fleet", s.handleEdgeFleet)
+	mux.HandleFunc("/api/edge/device", s.handleEdgeDevice)
 	mux.HandleFunc("/api/vault/shreds", s.handleVaultShreds)
 	mux.HandleFunc("/api/vault/decrypt", s.handleVaultDecrypt)
 	mux.HandleFunc("/api/review/", s.handleReview)
