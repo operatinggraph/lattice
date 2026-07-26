@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -61,16 +62,25 @@ const (
 func TestMain(m *testing.M) {
 	os.Setenv(envPrefix+"_DEV_PRIVATE_KEY_PATH", "../../deploy/gateway-dev-key/dev-private.pem")
 	os.Setenv(envPrefix+"_DEV_PUBLIC_KEY_PATH", "../../deploy/gateway-dev-key/dev-public.pem")
-	// main() loads this before serving, and the operator role KEY the read
-	// boundary compares against is resolved from it. Without the load that key
-	// is empty, and a fixture minting an empty role would prove nothing.
-	if err := bootstrap.Load("../../lattice.bootstrap.json"); err != nil {
+	// main() loads the primordial ids before serving, and the operator role KEY
+	// the read boundary compares against is resolved from them. Without them
+	// that key is empty and a fixture minting an empty role would prove
+	// nothing. Generated into a throwaway path rather than read from the repo:
+	// lattice.bootstrap.json is a locally-generated file that no clean checkout
+	// has (internal/bootstrap's own tests generate theirs the same way).
+	tmp, err := os.MkdirTemp("", "wellness-app-bootstrap")
+	if err != nil {
+		panic("temp dir for bootstrap ids: " + err.Error())
+	}
+	if _, err := bootstrap.LoadOrGenerate(filepath.Join(tmp, "lattice.bootstrap.json")); err != nil {
 		panic("load bootstrap ids: " + err.Error())
 	}
 	if bootstrap.RoleOperatorKey == "" {
 		panic("bootstrap loaded but the operator role key is empty")
 	}
-	os.Exit(m.Run())
+	code := m.Run()
+	os.RemoveAll(tmp)
+	os.Exit(code)
 }
 
 func discardLogger() *slog.Logger {
