@@ -605,3 +605,60 @@ Two more holes closed in the same fire, both found by review rather than by the 
 
 Each of the three classes is mutation-tested: diverge one body, re-indent one line, or lower one constant,
 and the gate names it. The first version of this rule caught only the first of those three.
+
+## 12. S10 — `parts_of` joins the pin: fire brief (Winston, 2026-07-26)
+
+**Scope sentence.** Converge all 31 copies of the vertex-key parser `parts_of` onto one implementation and
+add it to `sharedGuardHelpers`, so the corpus's most-copied helper is pinned like the other three.
+
+`parts_of` is where a key stops being a string and becomes a typed vertex reference. Every guard downstream
+of it — `worksAt_covers`'s `actor_id`, every `require_live_typed`, every deterministic link key a script
+builds — is spending the type and id this function hands back. It is copied more times than the three
+already-pinned helpers combined, and it was measured at **7 distinct implementations across 31 copies**.
+
+**One of the seven is a real defect, not prose drift.**
+
+| Variant | Copies | Divergence | Reachable? |
+|---|---|---|---|
+| majority | 21 | — | — |
+| `orchestration-base/ddls.go:234` | 1 | `len(parts) < 3` where every other copy has `!= 3` | **yes** |
+| `clinic-reminders` ×3 | 3 | drops the `want_type != ""` guard (fails closed) | no caller passes `""` |
+| `cafe-domain` ×2 | 2 | drops the empty-type-segment check | no caller passes `""` |
+| `objects-base`, `service-domain` | 2 | calls `split_key(key)` for `key.split(".")` | identical — `split_key` has one implementation |
+| `orchestration-base/mark_expired.go`, `capability-author` | 2 | two-argument: no `want_type` at all | by construction |
+
+`< 3` **accepts a key with four or more segments and silently truncates it**, and orchestration-base holds
+the corpus's only caller that passes an empty `want_type` — `parts_of(scoped_to, "scopedTo", "")`
+(`ddls.go:274`), which is how `CreateTask` decides what a task is scoped to. So an **aspect** key
+(`vtx.leaseapp.<id>.terms` — four segments, Contract #1) is accepted there, truncated to
+`("leaseapp", <id>)`, and a `scopedTo` link is built from the truncation. Nothing else in the corpus is
+this lax; the checked shape is exactly what Contract #1 §1.1 already requires, so this narrows to the
+contract rather than changing it. No 4-segment `scopedTo` exists anywhere (`cmd/loupe/tasks*.go`,
+`cmd/loftspace-app`, `cmd/facet` all build 3-segment keys), so the tightening breaks no live caller.
+
+**The two-argument copies converge rather than get renamed.** S10's escape hatch is renaming, but that is
+for a variant that carries *different policy*; these two carry the same policy with an argument missing.
+`capability-author` uses the returned type (`requester_type`, `package_type`) and `mark_expired` discards
+both — i.e. both want precisely `want_type == ""`, which the majority implementation already expresses.
+Converging them means one function corpus-wide instead of two names for one idea, and it closes
+`capability-author`'s dropped empty-type check on the way (`requester_type` could come back `""` today).
+
+**Touch list** (verified live). Bodies: `orchestration-base/ddls.go:234`, `orchestration-base/mark_expired.go:159`,
+`capability-author/ddls.go:312`, `cafe-domain/ddls.go:375` + `:923`, `clinic-reminders/ddls.go:148` +
+`followups.go:144` + `visitseries.go:367`, `objects-base/ddls.go:329`, `service-domain/ddls.go:805`.
+Call sites gaining a `""` argument: `mark_expired.go:194`, `capability-author/ddls.go:361` + `:547` + `:620`.
+Gate: `scripts/lint-package-standard.go` `sharedGuardHelpers`. Six packages change scripts and so take a
+**version bump** — a same-version edit no-ops on a running stack.
+
+**Increment order.** (1) converge the five 3-argument variants; (2) converge the two 2-argument copies and
+their four call sites; (3) add `parts_of` to the pin and watch it go green; (4) version-bump the six
+packages. Green check after each: `STRICT=1 go run ./scripts/lint-package-standard.go`, then
+`go test ./packages/...`.
+
+**Non-goals.** `require_workplace` (9 copies, 3 variants) stays unpinned and stays on the board row: two of
+its three variants are load-bearing — `maintenance-domain` delegates to the deliberately-renamed
+`enforce_workplace`, and `clinic-reminders/visitseries.go` omits the `op.authTargetValidated` short-circuit,
+which is *stricter*, not weaker. Adding that short-circuit to make a digest agree would weaken a guard to
+satisfy a linter, which is the wrong direction; deciding it needs the scope=self grant analysis this fire
+does not do. The shared-prelude mechanism itself also stays out of scope — pinning is the ratified pattern
+(S10) and does not preclude a prelude later, which the gate's own error message already anticipates.
