@@ -52,7 +52,11 @@ func loftspaceOwnershipVertexDDL() pkgmgr.DDLSpec {
 			"already-tombstoned → clean no-op), the reversible complement so an ownership transfer needs no " +
 			"tombstone-and-recreate. The link needs no link-type DDL (it resolves to the step-6 permissive default). " +
 			"This package introduces no vertex type; it contributes the management link on top of identity-domain's " +
-			"identity and location-domain's unit.",
+			"identity and location-domain's unit. Both ops DEFAULT-DENY on their actor: enforce_manages exempts the " +
+			"operator role alone (resolved from the graph, not from a validated-target bit), and requires every other " +
+			"actor to already hold a live manages link to the payload unit — so management is only ever conferred by " +
+			"someone who already holds it and can never be bootstrapped onto an unheld unit. Off the operator role " +
+			"RemoveUnitOwner additionally requires payload.landlord == op.actor, so a co-manager cannot unseat a peer.",
 		Script: loftspaceOwnershipDDLScript,
 		InputSchema: `{"type":"object","properties":` +
 			`{"landlord":{"type":"string","description":"vtx.identity.<NanoID> of the landlord / property-manager identity (required; validated alive). Listed in ContextHint.Reads."},` +
@@ -133,15 +137,77 @@ def required_string(p, name):
         fail("InvalidArgument: " + name + ": required non-empty string")
     return v.strip()
 
-def vertex_parts(key, name, want_type):
-    # Parse key as vtx.<want_type>.<NanoID>: exactly 3 segments, the type segment
-    # fixed. A non-3-segment key (aspect/link) or wrong type is rejected.
+def parts_of(key, name, want_type):
     parts = key.split(".")
-    if len(parts) != 3 or parts[0] != "vtx" or parts[1] != want_type:
-        fail("InvalidArgument: " + name + ": required vtx." + want_type + ".<NanoID> (exactly 3 segments); got " + key)
+    if len(parts) != 3 or parts[0] != "vtx":
+        fail("InvalidArgument: " + name + ": required vtx.<type>.<NanoID> (exactly 3 segments); got " + key)
+    if parts[1] == "":
+        fail("InvalidArgument: " + name + ": empty type segment; required vtx.<type>.<NanoID>; got " + key)
     if parts[2] == "":
-        fail("InvalidArgument: " + name + ": empty id segment; required vtx." + want_type + ".<NanoID>; got " + key)
-    return parts[2]
+        fail("InvalidArgument: " + name + ": empty id segment; required vtx.<type>.<NanoID>; got " + key)
+    if want_type != "" and parts[1] != want_type:
+        fail("InvalidArgument: " + name + ": required vtx." + want_type + ".<NanoID>; got " + key)
+    return parts[1], parts[2]
+
+ROLE_PAGE_LIMIT = 50
+
+def actor_holds_operator(actor_key):
+    # Resolved from the GRAPH, not from a compile-time constant: the primordial
+    # role ids are loaded at runtime (bootstrap.LoadPrimordialNanoIDs) while a
+    # package's Definition -- and so its script text -- is built at package-init,
+    # so no substitution can see the operator id. The walk mirrors the kernel's
+    # own root-grant lens exactly (internal/bootstrap/lenses.go: MATCH (identity)
+    # -[:holdsRole]->(role) WHERE role.canonicalName.data.value = 'operator').
+    #
+    # read-posture: (e) relation=holdsRole epoch=none -- an identity holds few
+    # roles, so this is never a keyspace scan. A role granted concurrently with
+    # this write is not a race worth closing: it can only widen authority, and
+    # the confined branch is the safe one.
+    page, _ = kv.Links(actor_key, "holdsRole", "out", None, ROLE_PAGE_LIMIT)
+    for lk in page:
+        if lk.isDeleted:
+            continue
+        # read-posture: (e) per-candidate follow-up read off the enumeration
+        # above (data-derived key -- the role is unknown until it resolves).
+        cn = kv.Read(lk.targetVertex + ".canonicalName")
+        if cn != None and not cn.isDeleted and cn.data.get("value") == "operator":
+            return True
+    return False
+
+def enforce_manages(unit_id, what):
+    # The ownership probe for the two ops that CONFER management, and the reason
+    # either could ever be granted outside the operator role. It DEFAULT-DENIES:
+    # every actor but an operator must already hold a live manages link to the
+    # unit, so management is only ever handed out by someone who already holds it
+    # and can never be bootstrapped onto a unit the actor does not hold. Returns
+    # whether it actually bound, so a caller can layer a further rule on the same
+    # non-operator population without walking the roles twice.
+    #
+    # The exemption is the operator ROLE, and deliberately NOT the absence of a
+    # platform-validated authContext target. Exempting on that bit would read as
+    # "only the operator gets here", which is false twice over
+    # (internal/processor/operation_context.go): the service path authorizes
+    # without ever inspecting a target, and a task grant whose scopedTo vertex
+    # was tombstoned projects an empty target that matches an empty authContext
+    # and authorizes with the bit still unset. Either would walk straight through
+    # an exemption written that way. Conferring management is the one authority
+    # that must never be reachable without already holding it, so the only escape
+    # is the role the platform itself seeds.
+    if actor_holds_operator(op.actor):
+        return False
+    _, actor_id = parts_of(op.actor, "actor", "identity")
+    # read-posture: (d) declared optionalReads at AssignUnitOwner /
+    # RemoveUnitOwner dispatch -- a DIFFERENT key from the payload pair's link
+    # whenever the actor is conferring on someone else, so a dispatcher declares
+    # both. optionalReads, not reads: absence IS the denial this probe exists to
+    # produce, so hydrating it as required would turn every unauthorized call
+    # into a HydrationMiss before the guard could answer.
+    lnk = kv.Read("lnk.identity." + actor_id + ".manages.unit." + unit_id)
+    if lnk == None or lnk.isDeleted:
+        # The unit is deliberately NOT named: a caller who manages nothing must
+        # not learn from the denial whether that unit exists.
+        fail("AuthDenied: " + op.actor + " does not manage the unit this write is for; " + what)
+    return True
 
 def vertex_alive(state, key):
     if key not in state or state[key] == None:
@@ -174,9 +240,13 @@ def execute(state, op):
 
     if ot == "AssignUnitOwner":
         landlord = required_string(p, "landlord")
-        landlord_id = vertex_parts(landlord, "landlord", "identity")
+        _, landlord_id = parts_of(landlord, "landlord", "identity")
         unit = required_string(p, "unit")
-        unit_id = vertex_parts(unit, "unit", "unit")
+        _, unit_id = parts_of(unit, "unit", "unit")
+
+        # The probe answers before the alive checks, or a caller who manages
+        # nothing could use this op to learn whether a unit exists.
+        enforce_manages(unit_id, "cannot confer management of " + unit)
 
         # No-orphan invariant (FR29 / P4): both endpoints MUST be alive. The
         # landlord is alive-checked (so the caller lists it in Reads); the unit is
@@ -212,9 +282,16 @@ def execute(state, op):
 
     if ot == "RemoveUnitOwner":
         landlord = required_string(p, "landlord")
-        landlord_id = vertex_parts(landlord, "landlord", "identity")
+        _, landlord_id = parts_of(landlord, "landlord", "identity")
         unit = required_string(p, "unit")
-        unit_id = vertex_parts(unit, "unit", "unit")
+        _, unit_id = parts_of(unit, "unit", "unit")
+
+        # A revoker must already hold the unit, and off the operator role may
+        # drop only their OWN management: manages is a flat set with no primary,
+        # so a symmetric revoke would let whoever was delegated management last
+        # remove everyone who came before.
+        if enforce_manages(unit_id, "cannot revoke management of " + unit) and landlord != op.actor:
+            fail("AuthDenied: " + op.actor + " may revoke only its own management of this unit")
 
         link_key = "lnk.identity." + landlord_id + ".manages.unit." + unit_id
         # read-posture: (d) declared optionalReads at RemoveUnitOwner dispatch

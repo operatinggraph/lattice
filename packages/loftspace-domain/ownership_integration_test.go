@@ -68,13 +68,13 @@ func assignUnitOwner(t *testing.T, ctx context.Context, conn *substrate.Conn, cp
 
 // removeUnitOwner submits RemoveUnitOwner(landlord, unit). The link is read on
 // demand (d, declared optionalReads — it may not exist, idempotent no-op).
-func removeUnitOwner(t *testing.T, ctx context.Context, conn *substrate.Conn, cp *processor.CommitPath, cons jetstream.Consumer, label, landlordKey, unitKey string, want processor.MessageOutcome) {
+func removeUnitOwner(t *testing.T, ctx context.Context, conn *substrate.Conn, cp *processor.CommitPath, cons jetstream.Consumer, label, landlordKey, unitKey, actor string, want processor.MessageOutcome) {
 	t.Helper()
 	env := &processor.OperationEnvelope{
 		RequestID:     testutil.GenReqID(label),
 		Lane:          processor.LaneDefault,
 		OperationType: "RemoveUnitOwner",
-		Actor:         lsStaffActorKey,
+		Actor:         actor,
 		SubmittedAt:   time.Now().UTC().Format(time.RFC3339),
 		Class:         "loftspaceOwnership",
 		Payload:       json.RawMessage(`{"landlord":"` + landlordKey + `","unit":"` + unitKey + `"}`),
@@ -144,7 +144,7 @@ func TestLoftspace_RemoveThenReassign(t *testing.T) {
 
 	assignUnitOwner(t, ctx, conn, cp, cons, "rr0001", lsLandlordKey, unitKey, lsStaffActorKey, processor.OutcomeAccepted)
 
-	removeUnitOwner(t, ctx, conn, cp, cons, "rr0002", lsLandlordKey, unitKey, processor.OutcomeAccepted)
+	removeUnitOwner(t, ctx, conn, cp, cons, "rr0002", lsLandlordKey, unitKey, lsStaffActorKey, processor.OutcomeAccepted)
 	dead := lsReadDoc(t, ctx, conn, lk)
 	if del, _ := dead["isDeleted"].(bool); !del {
 		t.Fatalf("link should be tombstoned after RemoveUnitOwner; got isDeleted=%v", del)
@@ -199,7 +199,7 @@ func TestLoftspace_RemoveUnitOwnerNoLink(t *testing.T) {
 	lsSeedVertex(t, ctx, conn, lsLandlordKey, "identity", false)
 	unitKey := createUnit(t, ctx, conn, cp, cons)
 
-	removeUnitOwner(t, ctx, conn, cp, cons, "noLink0001", lsLandlordKey, unitKey, processor.OutcomeAccepted)
+	removeUnitOwner(t, ctx, conn, cp, cons, "noLink0001", lsLandlordKey, unitKey, lsStaffActorKey, processor.OutcomeAccepted)
 	if _, err := conn.KVGet(ctx, testutil.HarnessCoreBucket, manageLinkKey(lsLandlordKey, unitKey)); err == nil {
 		t.Fatalf("a no-op RemoveUnitOwner should commit no link")
 	}

@@ -268,18 +268,56 @@ func TestPackage_NoScans(t *testing.T) {
 func TestPackage_OwnershipScriptGuards(t *testing.T) {
 	src := loftspaceOwnershipDDLScript
 	for _, want := range []string{
-		`vertex_parts(landlord, "landlord", "identity")`, // landlord must be vtx.identity
-		`vertex_parts(unit, "unit", "unit")`,             // unit must be vtx.unit
-		"UnknownLandlord",                                // alive-identity guard
-		"NotAUnit",                                       // class=location guard
-		".manages.unit.",                                 // the management link key shape
-		"kv.Read(link_key)",                              // on-demand per-pair read
-		"make_link_revive_occ",                           // revive-after-remove (CAS)
-		"make_link_tombstone",                            // RemoveUnitOwner
+		`parts_of(landlord, "landlord", "identity")`, // landlord must be vtx.identity
+		`parts_of(unit, "unit", "unit")`,             // unit must be vtx.unit
+		"UnknownLandlord",                            // alive-identity guard
+		"NotAUnit",                                   // class=location guard
+		".manages.unit.",                             // the management link key shape
+		"kv.Read(link_key)",                          // on-demand per-pair read
+		"make_link_revive_occ",                       // revive-after-remove (CAS)
+		"make_link_tombstone",                        // RemoveUnitOwner
 	} {
 		if !strings.Contains(src, want) {
 			t.Errorf("loftspaceOwnership script must reference %q", want)
 		}
+	}
+}
+
+// TestPackage_OwnershipActorBinding pins the SHAPE of the actor binding, not
+// just its presence. The two ops CONFER management, so the guard default-denies
+// and the only exemption is the operator ROLE resolved from the graph. Keying
+// the exemption on `not op.authTargetValidated` instead would read as "only the
+// operator gets here" and be false: the service path never inspects a target,
+// and a task grant whose scopedTo vertex was tombstoned projects an empty target
+// that matches an empty authContext and authorizes with the bit still false.
+// Both call sites must also precede the alive checks, so a caller who manages
+// nothing cannot probe for a unit's existence, and the revoke path must be
+// self-only off the operator role.
+func TestPackage_OwnershipActorBinding(t *testing.T) {
+	src := loftspaceOwnershipDDLScript
+	for _, want := range []string{
+		"if actor_holds_operator(op.actor):",                               // the ONLY exemption
+		`kv.Read("lnk.identity." + actor_id + ".manages.unit." + unit_id)`, // op.actor's own link
+		"AuthDenied: ", // the denial class
+		`enforce_manages(unit_id, "cannot confer management of "`, // AssignUnitOwner
+		`enforce_manages(unit_id, "cannot revoke management of "`, // RemoveUnitOwner
+		"and landlord != op.actor:",                               // revoke is self-only
+	} {
+		if !strings.Contains(src, want) {
+			t.Errorf("loftspaceOwnership script must reference %q", want)
+		}
+	}
+	for _, forbidden := range []string{"op.authTargetValidated", "op.authContextTarget"} {
+		if strings.Contains(src, forbidden) {
+			t.Errorf("the ownership probe must not read %s: a validated target proves the target was "+
+				"CHECKED, and both the service path and an empty-target task grant authorize with that "+
+				"bit false — exempting on it would let either confer management unbound", forbidden)
+		}
+	}
+	assign := strings.Index(src, `enforce_manages(unit_id, "cannot confer management of "`)
+	alive := strings.Index(src, "if not vertex_alive(state, landlord):")
+	if assign < 0 || alive < 0 || assign > alive {
+		t.Errorf("the ownership probe must answer before the alive checks (probe at %d, alive at %d)", assign, alive)
 	}
 }
 

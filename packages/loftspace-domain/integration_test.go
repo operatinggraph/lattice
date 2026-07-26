@@ -105,6 +105,10 @@ func setupLoftspaceEnv(t *testing.T) (context.Context, *substrate.Conn) {
 	stop()
 	testutil.SeedCapDoc(t, ctx, conn, lsStaffCapDoc())
 	testutil.SeedCapDoc(t, ctx, conn, lsConsumerCapDoc())
+	// The staff actor is the OPERATOR, and the ownership probe resolves that
+	// from the graph rather than from the cap doc's roles[] (the kernel's own
+	// root-grant lens shape), so the holdsRole link has to exist in Core KV.
+	testutil.SeedHoldsRole(t, ctx, conn, lsStaffActorKey, bootstrap.RoleOperatorKey)
 	return ctx, conn
 }
 
