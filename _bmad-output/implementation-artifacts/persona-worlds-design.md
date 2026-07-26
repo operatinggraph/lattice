@@ -2084,3 +2084,35 @@ itself, so the row needs no approval column — passing `leaseAppKey` is enough.
 
 **Non-goals.** No write-side change. No display names (identity carries none; the picker shows bare keys, as
 the deleted one did). Not the roster session-picker's own cross-building narrowing — that is its own filed row.
+
+**As-built — W3 Inc 4 SHIPPED (2026-07-26, `0b14d0f7`).** wellness-domain 0.14.0→0.15.0. `wellnessMembers`
+projects one row per lease carrying its member and `coveringLocations`; `GET /api/members` intersects that set
+with the caller's own `worksAt` keys and refuses a member or an instructor outright. The FE's book-a-member
+control lives on the Roster, `worksAt`-gated. The brief's premise held: no write-side change was needed and no
+platform primitive was filed.
+
+The adversarial review found three things the brief did not, all fixed before the merge:
+
+- **The lens needed a `.tenancy` filter to be a MEMBER directory at all.** `DecideLeaseApplication` tombstones
+  neither the leaseapp nor its `applicationFor` link on a decline, so the first cut would have handed the front
+  desk the identity of everyone who ever applied to their building — refused applicants included — labelled as
+  members. `.tenancy` is stamped CreateOnly on the first approve and is the signal `CreateBooking`'s own
+  resident-rate check already reads; the two sides agreeing is the fix, not a new rule. A discriminating cypher
+  vector (a tenancy and a refused application on the same unit) pins it.
+- **The Book button was a one-shot.** The first cut re-bound it per render via `cloneNode(true)`, which copies
+  the reflected `disabled` attribute — so after one successful booking every later render re-cloned a dead
+  button. It is now bound once at init, resolving its class from the session picker at CLICK time, which also
+  closes the second half: two overlapping roster renders could otherwise leave the button submitting against a
+  class the staffer had already navigated away from. A render-generation token stops a slow render painting a
+  picker over a newer one — including beside a roster that just 403'd.
+- **The control offered submits that could only fail.** It is hidden for a class that has already begun
+  (`SessionInPast`) or is full (`SessionFull`), the same reasoning that already excludes the already-seated
+  (`DoubleBooked`) and keeps the attendance control hidden until a class starts.
+
+Also aligned in passing: `cmd/wellness-app`'s `covers` trimmed a projected location before testing it for
+emptiness but compared the untrimmed value — fail-closed, so a padded key silently denied. `cmd/cafe-app`
+had already fixed exactly this and says why; wellness now matches.
+
+**Named residual.** The directory is lease-anchored, so a genuine non-resident guest cannot be booked through
+the FE even though `CreateBooking` itself constrains only the session's location and never the booker. That is
+a product question (do wellness classes admit non-residents?), filed as its own row rather than decided here.
