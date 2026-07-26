@@ -210,8 +210,22 @@ func TestRefractor_ConvergenceSweep_DetectsAndHealsLostProjection_E2E(t *testing
 
 	sw := p.Sweeper()
 	require.NotNil(t, sw)
-	require.GreaterOrEqual(t, sw.Status().Reconciled, uint64(1),
-		"a healed divergence must be counted so the heal is loud, not silent")
+
+	// The healed ROW lands mid-pass; the heal COUNT is folded in when the pass
+	// ends (Sweeper.record persists the cursor and the cumulative count in one
+	// write, so the cursor can never advance past a heal it did not count).
+	// Sampling the counter the instant the row appears therefore races the rest
+	// of the pass — which is exactly why the fast runs failed here and the slow
+	// ones passed. The wait is the fix, not a weaker claim: a heal must still be
+	// counted, and the deadline still fails loudly if it never is.
+	countDeadline := time.Now().Add(30 * time.Second)
+	for sw.Status().Reconciled < 1 {
+		if time.Now().After(countDeadline) {
+			t.Fatal("a healed divergence must be counted so the heal is loud, not silent; " +
+				"reconciled was still 0 30s after the heal landed")
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
 
 	// Convergence: once the world agrees, the sweep must go quiet — the
 	// divergent streak clears (which is what closes CapabilityCoverageDivergence)
