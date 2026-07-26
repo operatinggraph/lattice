@@ -85,24 +85,16 @@ type opRef struct {
 
 func (r opRef) String() string { return fmt.Sprintf("%s %s (scope=%s)", r.pkg, r.op, r.scope) }
 
-// s1Debt is the shipped user-facing surface that predates this gate and does
-// not yet carry a full descriptor. What remains is identity-domain alone — the
-// Standard §3.4 has it conform LAST, on purpose: it is the idiom source every
-// other package copies, so its own descriptors are written once the vocabulary
-// has settled against the corpus rather than ahead of it. Its named gap is
-// exactly the consumer credential ops below.
+// s1Debt carried the shipped user-facing surface that predated this gate. It is
+// EMPTY: identity-domain was the last holdout, conforming last on purpose
+// (Standard §3.4) because it is the idiom source every other package copies, so
+// its descriptors were written once the vocabulary had settled against the
+// corpus rather than ahead of it. S1 now binds with no exemptions — a granted,
+// user-facing op ships a full descriptor or reds this gate.
 //
-// Shrink only. Never add a row here for a NEW op — write its descriptor, or
-// state the exemption in its permission Note.
-var s1Debt = map[opRef]bool{
-	{"identity-domain", "CreateUnclaimedIdentity", "any"}: true,
-	{"identity-domain", "ClaimIdentity", "self"}:          true,
-	{"identity-domain", "RotateClaimKey", "any"}:          true,
-	{"identity-domain", "RecordIdentityPII", "any"}:       true,
-	{"identity-domain", "InitiateCredentialLink", "self"}: true,
-	{"identity-domain", "CompleteCredentialLink", "self"}: true,
-	{"identity-domain", "UnlinkCredential", "self"}:       true,
-}
+// Never add a row here for a NEW op — write its descriptor, or state the
+// exemption in its permission Note.
+var s1Debt = map[opRef]bool{}
 
 // readTemplateDebt is the shipped set of read declarations that build a key
 // around a payload field nothing guarantees is present (checkReadTemplates).

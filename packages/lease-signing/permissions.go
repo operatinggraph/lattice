@@ -178,10 +178,12 @@ func Permissions() []pkgmgr.PermissionSpec {
 //   - SignLease — REQUIRED: the assignTask operation the §10.8 playbook binds;
 //     the Weaver Actuator resolves forOperation to its op-meta when it creates
 //     the remediation task. Its absence would break the missing_signature gap.
-//   - RecordIdentityPII — REQUIRED: the onboarding pattern's userTask step
-//     resolves forOperation to this op-meta live at submit (Loom's opMetaKey).
-//     identity-domain ships the op but no op-meta for it, so the onboarding
-//     pattern declares it here.
+//   - RecordIdentityPII carries NO entry here. identity-domain owns that op's
+//     DDL and now declares its own full descriptor, and both engines index
+//     op-metas into a flat operationType map off the corpus-wide vtx.meta.>
+//     CDC — so a second meta for the same op would resolve last-writer-wins.
+//     The onboarding pattern's userTask still resolves forOperation, to
+//     identity-domain's meta, which this package Depends on.
 //   - CreateLeaseServiceInstance / RecordLeaseServiceOutcome /
 //     RecordServiceDispatch / CreateLeaseDocInstance / RecordLeaseDocOutcome —
 //     declared for discoverability + the manifest cross-check. The engine
@@ -532,7 +534,6 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 		// assignTask targets a client never builds a form for. Bare on
 		// purpose: they exist so forOperation resolves, not to be rendered.
 		{OperationType: "SignLease"},
-		{OperationType: "RecordIdentityPII"},
 		{OperationType: "CreateLeaseServiceInstance"},
 		{OperationType: "RecordLeaseServiceOutcome"},
 		{OperationType: "RecordServiceDispatch"},

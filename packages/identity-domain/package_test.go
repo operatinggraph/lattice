@@ -151,3 +151,114 @@ func TestPackage_DependsOnRbacDomain(t *testing.T) {
 		t.Error("identity-domain must declare rbac-domain as a dependency")
 	}
 }
+
+// TestPackage_OpMetasAreFullDescriptors pins the S1 surface (Vertical Package
+// Standard §2 S1, §3.4). A count alone would miss the defect that matters — an
+// entry surviving as a bare {OperationType} still counts while rendering
+// nothing — so each is pinned to its full shape and to the authContext its
+// caller actually uses.
+//
+// RecordIdentityPII is "task", not "standing": its descriptor-driven caller is
+// the applicant submitting lease-signing's onboarding userTask, who holds no
+// standing grant for this op at all. A standing descriptor sends no authContext
+// and step 3 refuses it.
+func TestPackage_OpMetasAreFullDescriptors(t *testing.T) {
+	wantAuthContext := map[string]string{
+		"ClaimIdentity":     "self",
+		"RecordIdentityPII": "task",
+	}
+	if got, want := len(Package.OpMetas), len(wantAuthContext); got != want {
+		t.Fatalf("OpMetas: got %d, want %d", got, want)
+	}
+	byOp := map[string]pkgmgr.OpMetaSpec{}
+	for _, m := range Package.OpMetas {
+		byOp[m.OperationType] = m
+	}
+	for op, wantAC := range wantAuthContext {
+		m, ok := byOp[op]
+		if !ok {
+			t.Fatalf("%s: no op-meta — a granted, user-facing op must be self-describing (S1)", op)
+		}
+		if m.Presentation == nil || m.Presentation.Title == "" || m.InputSchema == "" ||
+			len(m.FieldDescriptions) == 0 || m.Dispatch == nil {
+			t.Fatalf("%s: needs a FULL descriptor (presentation+schema+fields+dispatch), got %+v", op, m)
+		}
+		if m.Dispatch.Class != "identity" {
+			t.Errorf("%s: dispatch class = %q, want identity (the owning DDL's canonicalName)", op, m.Dispatch.Class)
+		}
+		if m.Dispatch.AuthContext != wantAC {
+			t.Errorf("%s: authContext = %q, want %q", op, m.Dispatch.AuthContext, wantAC)
+		}
+	}
+	// ClaimIdentity must NOT name a targetType. A client resolving targetType
+	// "identity" falls back to the SUBMITTER's own identity rather than
+	// degrading, so a target it cannot really resolve would be substituted
+	// silently. RecordIdentityPII may, and only because its task context
+	// carries a scopedTo of that type, which matches before the fallback.
+	if d := byOp["ClaimIdentity"].Dispatch; d.TargetField != "" || d.TargetType != "" {
+		t.Errorf("ClaimIdentity: declares targetField %q/targetType %q; the claim target comes from the invitation, and a declared identity targetType silently resolves to the submitter", d.TargetField, d.TargetType)
+	}
+	if d := byOp["RecordIdentityPII"].Dispatch; d.TargetField == "" || d.TargetType != "identity" {
+		t.Errorf("RecordIdentityPII: targetField %q/targetType %q, want a field typed identity so the task's scopedTo fills it", d.TargetField, d.TargetType)
+	}
+	// Only RecordIdentityPII masks its payload: the flag is per-OP and a client
+	// masks every field it renders, which is safe here only because its
+	// targetField is filtered out, leaving exactly ssn+dob.
+	for op, m := range byOp {
+		if want := op == "RecordIdentityPII"; m.Sensitive != want {
+			t.Errorf("%s: Sensitive = %v, want %v", op, m.Sensitive, want)
+		}
+	}
+}
+
+// TestPackage_CeremonyOpsStateTheirExemption pins the other half of S1. These
+// five are user-facing — a person triggers each — but their submission is a
+// client-side ceremony the descriptor vocabulary cannot express: a minted
+// secret whose plaintext never reaches Lattice, a submission as a different
+// actor than the client authenticated as, or an input nothing projects. S1
+// admits that only when the permission Note SAYS so, and the reason has to
+// survive in the Note or this fails.
+func TestPackage_CeremonyOpsStateTheirExemption(t *testing.T) {
+	ceremony := map[string]bool{
+		"CreateUnclaimedIdentity": true,
+		"RotateClaimKey":          true,
+		"InitiateCredentialLink":  true,
+		"CompleteCredentialLink":  true,
+		"UnlinkCredential":        true,
+	}
+	seen := map[string]bool{}
+	for _, p := range Package.Permissions {
+		if !ceremony[p.OperationType] {
+			continue
+		}
+		seen[p.OperationType] = true
+		if !strings.Contains(p.Note, "[no-op-meta:") {
+			t.Errorf("%s: no stated exemption — S1 needs the reason in the permission Note, not just an absent descriptor", p.OperationType)
+		}
+	}
+	for op := range ceremony {
+		if !seen[op] {
+			t.Errorf("%s: expected a permission entry to carry its exemption", op)
+		}
+	}
+	// The complement: a ceremony op must not ALSO carry a descriptor, which
+	// would be the exemption and the promise at once.
+	for _, m := range Package.OpMetas {
+		if ceremony[m.OperationType] {
+			t.Errorf("%s: exempt in its Note but also declares an op-meta", m.OperationType)
+		}
+	}
+}
+
+// TestPackage_NoDescriptorForOperatorOnlyOps: an op only a trusted tool submits
+// gets no descriptor at all, not a bare one. A bare entry would still mint a
+// vtx.meta vertex and occupy forOperation's flat operationType index for no
+// caller's benefit.
+func TestPackage_NoDescriptorForOperatorOnlyOps(t *testing.T) {
+	for _, m := range Package.OpMetas {
+		switch m.OperationType {
+		case "UpdateIdentityState", "ProvisionConsumerIdentity", "RevokeActor", "UnrevokeActor":
+			t.Errorf("%s: operator/system-only, no human triggers it — it should carry no op-meta", m.OperationType)
+		}
+	}
+}

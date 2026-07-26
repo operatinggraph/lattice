@@ -90,7 +90,7 @@ func TestPackage_SelfServiceDescriptorsNameTheSelfPath(t *testing.T) {
 // one a descriptor would offer a client a form for an op no human submits.
 func TestPackage_EngineLegsStayBare(t *testing.T) {
 	engineLegs := []string{
-		"SignLease", "RecordIdentityPII", "CreateLeaseServiceInstance",
+		"SignLease", "CreateLeaseServiceInstance",
 		"RecordLeaseServiceOutcome", "RecordServiceDispatch",
 		"CreateLeaseDocInstance", "RecordLeaseDocOutcome", "SignRenewal",
 	}
@@ -136,7 +136,7 @@ func TestPackage_StructurePins(t *testing.T) {
 	if got, want := len(Package.Permissions), 22; got != want {
 		t.Errorf("Permissions: got %d, want %d", got, want)
 	}
-	if got, want := len(Package.OpMetas), 15; got != want {
+	if got, want := len(Package.OpMetas), 14; got != want {
 		t.Errorf("OpMetas: got %d, want %d", got, want)
 	}
 	if got, want := len(Package.Roles), 0; got != want {

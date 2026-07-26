@@ -1320,6 +1320,10 @@ refresh-cafe:
 	@echo "==> Diff-applying café packages in place..."
 	NATS_URL=$(NATS_URL) NATS_NKEY=$(NKEY_LATTICE_PKG) BOOTSTRAP_JSON_PATH=$(BOOTSTRAP_JSON) ./bin/lattice-pkg install --force packages/orchestration-base
 	NATS_URL=$(NATS_URL) NATS_NKEY=$(NKEY_LATTICE_PKG) BOOTSTRAP_JSON_PATH=$(BOOTSTRAP_JSON) ./bin/lattice-pkg install --force packages/service-domain
+	# identity-domain owns RecordIdentityPII and its descriptor; lease-signing
+	# resolves the onboarding userTask through it, so refresh it in dependency
+	# order or an upgraded lease-signing can leave that op with no op-meta.
+	NATS_URL=$(NATS_URL) NATS_NKEY=$(NKEY_LATTICE_PKG) BOOTSTRAP_JSON_PATH=$(BOOTSTRAP_JSON) ./bin/lattice-pkg install --force packages/identity-domain
 	NATS_URL=$(NATS_URL) NATS_NKEY=$(NKEY_LATTICE_PKG) BOOTSTRAP_JSON_PATH=$(BOOTSTRAP_JSON) ./bin/lattice-pkg install --force packages/lease-signing
 	NATS_URL=$(NATS_URL) NATS_NKEY=$(NKEY_LATTICE_PKG) BOOTSTRAP_JSON_PATH=$(BOOTSTRAP_JSON) ./bin/lattice-pkg install --force packages/cafe-ledger
 	NATS_URL=$(NATS_URL) NATS_NKEY=$(NKEY_LATTICE_PKG) BOOTSTRAP_JSON_PATH=$(BOOTSTRAP_JSON) ./bin/lattice-pkg install --force packages/cafe-domain
@@ -1344,6 +1348,10 @@ refresh-wellness:
 	@echo "==> Diff-applying wellness packages in place..."
 	NATS_URL=$(NATS_URL) NATS_NKEY=$(NKEY_LATTICE_PKG) BOOTSTRAP_JSON_PATH=$(BOOTSTRAP_JSON) ./bin/lattice-pkg install --force packages/orchestration-base
 	NATS_URL=$(NATS_URL) NATS_NKEY=$(NKEY_LATTICE_PKG) BOOTSTRAP_JSON_PATH=$(BOOTSTRAP_JSON) ./bin/lattice-pkg install --force packages/service-domain
+	# identity-domain owns RecordIdentityPII and its descriptor; lease-signing
+	# resolves the onboarding userTask through it, so refresh it in dependency
+	# order or an upgraded lease-signing can leave that op with no op-meta.
+	NATS_URL=$(NATS_URL) NATS_NKEY=$(NKEY_LATTICE_PKG) BOOTSTRAP_JSON_PATH=$(BOOTSTRAP_JSON) ./bin/lattice-pkg install --force packages/identity-domain
 	NATS_URL=$(NATS_URL) NATS_NKEY=$(NKEY_LATTICE_PKG) BOOTSTRAP_JSON_PATH=$(BOOTSTRAP_JSON) ./bin/lattice-pkg install --force packages/lease-signing
 	NATS_URL=$(NATS_URL) NATS_NKEY=$(NKEY_LATTICE_PKG) BOOTSTRAP_JSON_PATH=$(BOOTSTRAP_JSON) ./bin/lattice-pkg install --force packages/wellness-domain
 	@echo "==> Rebuilding wellness-app binary..."
@@ -1370,6 +1378,10 @@ refresh-loftspace:
 	NATS_URL=$(NATS_URL) NATS_NKEY=$(NKEY_LATTICE_PKG) BOOTSTRAP_JSON_PATH=$(BOOTSTRAP_JSON) ./bin/lattice-pkg install --force packages/location-domain
 	NATS_URL=$(NATS_URL) NATS_NKEY=$(NKEY_LATTICE_PKG) BOOTSTRAP_JSON_PATH=$(BOOTSTRAP_JSON) ./bin/lattice-pkg install --force packages/loftspace-domain
 	NATS_URL=$(NATS_URL) NATS_NKEY=$(NKEY_LATTICE_PKG) BOOTSTRAP_JSON_PATH=$(BOOTSTRAP_JSON) ./bin/lattice-pkg install --force packages/service-domain
+	# identity-domain owns RecordIdentityPII and its descriptor; lease-signing
+	# resolves the onboarding userTask through it, so refresh it in dependency
+	# order or an upgraded lease-signing can leave that op with no op-meta.
+	NATS_URL=$(NATS_URL) NATS_NKEY=$(NKEY_LATTICE_PKG) BOOTSTRAP_JSON_PATH=$(BOOTSTRAP_JSON) ./bin/lattice-pkg install --force packages/identity-domain
 	NATS_URL=$(NATS_URL) NATS_NKEY=$(NKEY_LATTICE_PKG) BOOTSTRAP_JSON_PATH=$(BOOTSTRAP_JSON) ./bin/lattice-pkg install --force packages/lease-signing
 	NATS_URL=$(NATS_URL) NATS_NKEY=$(NKEY_LATTICE_PKG) BOOTSTRAP_JSON_PATH=$(BOOTSTRAP_JSON) ./bin/lattice-pkg install --force packages/loftspace-ledger
 	NATS_URL=$(NATS_URL) NATS_NKEY=$(NKEY_LATTICE_PKG) BOOTSTRAP_JSON_PATH=$(BOOTSTRAP_JSON) ./bin/lattice-pkg install --force packages/semantic-contracts

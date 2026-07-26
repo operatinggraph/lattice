@@ -21,7 +21,7 @@ DDLs, and `SignLease` — into one installable package (currently **v0.10.0**).
 | WeaverTarget (playbook) | `leaseApplicationComplete` | gap → remediation (§10.8). |
 | LoomPattern | `backgroundCheck`, `collectPayment` | single `externalTask` step each, `completionDomains: ["orchestration"]`. |
 | LoomPattern | `onboarding` | single `userTask` step (`RecordIdentityPII`), `completionDomains: ["orchestration"]`. |
-| OpMetas | `SignLease`, `RecordIdentityPII`, `CreateLeaseServiceInstance`, `RecordLeaseServiceOutcome`, `RecordServiceDispatch` | `forOperation` resolution + discoverability. |
+| OpMetas | `SignLease`, `CreateLeaseServiceInstance`, `RecordLeaseServiceOutcome`, `RecordServiceDispatch` | `forOperation` resolution + discoverability. `RecordIdentityPII` is NOT here: identity-domain owns that op and declares its descriptor, and a second meta for one operationType would resolve last-writer-wins in the engines' flat index. |
 
 Depends: `identity-domain`, `service-domain`, `orchestration-base`.
 

@@ -1,5 +1,5 @@
 name: identity-domain
-version: 0.8.1
+version: 0.9.0
 description: |
   Identity vertex creation, claim, and state-machine management. Provides
   CreateUnclaimedIdentity, UpdateIdentityState, ClaimIdentity, RotateClaimKey,
@@ -90,3 +90,6 @@ declares:
     - operationType: UnrevokeActor
       scope: any
       grantsTo: [operator]
+  opMetas:
+    - operationType: ClaimIdentity
+    - operationType: RecordIdentityPII
