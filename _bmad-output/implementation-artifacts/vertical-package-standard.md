@@ -429,5 +429,19 @@ only compares against `canonicalName` aspects, which `build.go` never emits for 
 not have caught the original double-meta and cannot catch a future one. Named here because it is the *class*
 the shadow deletion only fixes an instance of.
 
+**Landing it on the running stack surfaced a kernel bug, and only this fire could have.** This is the
+first change in the corpus to REMOVE an op-meta, so it is the first to make a package upgrade emit a
+**tombstone**. identity-domain went 0.8.1 → 0.9.0 cleanly (its two descriptors are live and correct,
+`authContext` `self` and `task`). lease-signing's upgrade was **rejected**: *"mutation requires a document
+dict: vtx.meta.EUay…"*, which is `opMeta:RecordIdentityPII`. The planner is right — `--dry-run` reports
+`op=tombstone`, `tombstoned=1` — and current source is right: `install_ddl.go`'s UpgradePackage script takes
+the `if mop == "tombstone"` branch *before* the document check (landed `6b68fde4`, 2026-07-22). The script
+actually **installed** in Core KV has no such branch. Root cause, verified: `primordial.go:316-323` skips the
+whole primordial batch when the tracker key exists, and seeds with `CreateOnly` — so **kernel DDLs are
+written once and never updated**, and any Core KV seeded before that commit can never apply a key-removing
+upgrade. Filed to the Lattice lane as its own item (a versioned kernel-seed migration); **not** worked around
+by wiping the shared stack. Live consequence until then: two `RecordIdentityPII` metas coexist — the full one
+and lease-signing's bare shadow — resolving last-writer-wins, harmless because both name the same op.
+
 **Remaining `s1Debt`: 0.** **`lens-cypher`: 5** (`augur`, `console-operator`, `demo-operator`,
 `identity-domain`, `rbac-domain`), unchanged — the next increment.
