@@ -661,7 +661,8 @@ function bindAttendance(sessionKey, mine) {
       try {
         await markAttendance(btn.dataset.attend, sessionKey, btn.dataset.value, mine);
         toast("Attendance recorded.", true);
-        setTimeout(renderRoster, 700);
+        await awaitProjectedStatus(sessionKey, btn.dataset.attend, btn.dataset.value);
+        await renderRoster();
       } catch (e) {
         toast(e.message, false);
         buttons.forEach((b) => (b.disabled = b.dataset.wasDisabled === "1"));
@@ -669,6 +670,29 @@ function bindAttendance(sessionKey, mine) {
     });
     btn.dataset.wasDisabled = btn.disabled ? "1" : "0";
   });
+}
+
+// ATTENDANCE_PROJECTION_POLL_MS bounds how long the roster waits for the mark
+// it just committed to appear in the read model. The write commits to Core KV,
+// but the roster renders from the wellnessBookings LENS, and a lens reprojects
+// a beat later — so an immediate re-read returns the pre-mark row and the click
+// looks like it did nothing. Polling until the projection catches up (or the
+// bound expires, after which whatever the lens says is what renders) keeps the
+// affordance honest without ever showing a state the read model has not
+// actually reached.
+const ATTENDANCE_PROJECTION_POLL_MS = [250, 400, 600, 900, 1200, 1500];
+
+async function awaitProjectedStatus(sessionKey, bookingKey, want) {
+  for (const wait of ATTENDANCE_PROJECTION_POLL_MS) {
+    await new Promise((r) => setTimeout(r, wait));
+    try {
+      const r = await appGet("/api/bookings?sessionKey=" + encodeURIComponent(sessionKey));
+      const row = (r.bookings || []).find((b) => b.bookingKey === bookingKey);
+      if (row && row.status === want) return;
+    } catch (e) {
+      return; // renderRoster surfaces the read failure on its own.
+    }
+  }
 }
 
 // markAttendance submits SetBookingAttendance for a booking on a class this
