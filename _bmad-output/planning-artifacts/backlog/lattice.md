@@ -190,7 +190,6 @@ designed-through, but the *fork decision* + the *contract commit* are Andrew's.
 ### Refinements & ops
 | Item | What it is | Imp | Size | State |
 |---|---|---|---|---|
-| **Package-Standard conformance sweep (drain the S1/S6 debt baseline)** | The `lint-package-standard` gate holds the line; these are the 38 gaps it enumerates in `scripts/lint-package-standard.go` (shrink-only): 23 user-facing ops with no descriptor, 7 packages whose lenses no cypher test executes, 8 with no structure pins. Routing per [Standard §3](../../implementation-artifacts/vertical-package-standard.md). | ★★ | M–L | 📋 ready · consumers: descriptor-driven clients + the next package author |
 | **[Refractor] The sweep-heal e2e polls the row, then asserts the counter** | `TestRefractor_ConvergenceSweep_DetectsAndHealsLostProjection_E2E` waits for the healed doc in KV then requires `Reconciled >= 1`; write and counter are separate steps, so under load the row lands first and the assert reads 0 — as it also would if CDC re-projection healed it, not the sweep. Tighten, never loosen. | ★★ | S | 📋 ready · owner: Whetstone · CI run 30182951177, green on re-run |
 | **Embedded-NATS shard flakes under parallel load** | Two different embedded-NATS tests failed on CI runners on consecutive days (`TestLaneSpecs_PerLaneBacklogIsolation` unit-1; `TestPersonalLens_PL2_E2E_InterestSetFiltersThenAdmits` unit-2); both post-date the per-test-server parallelization. Local repro: `go test ./...` with NO `-p` cap reddens 3 other embedded-NATS tests that pass 3x in isolation and under CI's `-p 4`. Root-cause per the flake rule: tighten, never loosen. | ★★ | M | 📋 ready · owner: Whetstone |
 | **CI pipeline speed (continuous)** | Make CI faster without weakening any gate — owned continuously by the **Whetstone**. Matrix split done (serial → 4 parallel jobs); convergence + unit parallelized; unit itself now sharded across 2 runners. | ★★ | M (ongoing) | 🏗️ continuous (Whetstone) · aggregate-CPU ceiling confirmed 2x, isolating natsperm into its own step reconfirmed it (Done log) · next: propose paid larger runners to Andrew |
@@ -213,6 +212,7 @@ Real but low-value; do **not** spend design or build effort here unless Andrew g
 
 One line per shipped item (`date · SHA · [tag] title`). Oldest roll to `archive/` past ~25.
 
+- 2026-07-26 · — · [Packages] Conformance-sweep row closes as overtaken — Standard Inc 1–6 (verticals) drained it: `s1Debt`/`s6Debt` empty, 29 pkgs, no exemptions; `readTemplateDebt` (2) has its own verticals row
 - 2026-07-26 · `6cacb337` · [CI] embedded-server ctor sweep — 97 `RunServer` fixtures routed through `natsfixture`, ctor gate now anchors both construction routes; net -480 lines
 - 2026-07-26 · `f9a86e45` · [CI] bare-connect sweep — 84 embedded dials routed through `natsfixture.Connect`, the 6 that must fail fast declared via `// nats-connect:`; linter hook-mode path bug fixed
 - 2026-07-26 · `7ac54ce1` · [CI] embedded-NATS handshake flake root-caused — 42 hand-rolled fixtures each inherited nats.go's single-shot 2s handshake deadline; `internal/natsfixture` owns it, lint blocks regressions, no assertion loosened
