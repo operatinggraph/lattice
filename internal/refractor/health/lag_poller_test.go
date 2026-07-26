@@ -12,7 +12,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/operatinggraph/lattice/internal/natstest"
+	"github.com/operatinggraph/lattice/internal/natsfixture"
 	"github.com/operatinggraph/lattice/internal/refractor/health"
 	"github.com/operatinggraph/lattice/internal/refractor/subjects"
 	"github.com/operatinggraph/lattice/internal/substrate"
@@ -39,7 +39,7 @@ func startLagServer(t *testing.T) *lagEnv {
 	if testing.Short() {
 		t.Skip("skipping NATS integration test in short mode")
 	}
-	_, nc := natstest.Server(t)
+	_, nc := natsfixture.Server(t)
 
 	conn, err := substrate.Wrap(nc)
 	require.NoError(t, err)

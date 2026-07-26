@@ -10,7 +10,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/operatinggraph/lattice/internal/natstest"
+	"github.com/operatinggraph/lattice/internal/natsfixture"
 	"github.com/operatinggraph/lattice/internal/refractor/failure"
 	"github.com/operatinggraph/lattice/internal/substrate"
 )
@@ -20,7 +20,7 @@ import (
 // via t.Cleanup at the end of the test.
 func startFailureJetStreamServer(t *testing.T) (*substrate.Conn, jetstream.JetStream) {
 	t.Helper()
-	_, nc := natstest.Server(t)
+	_, nc := natsfixture.Server(t)
 
 	conn, err := substrate.Wrap(nc)
 	require.NoError(t, err)

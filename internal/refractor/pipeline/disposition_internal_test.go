@@ -14,7 +14,7 @@ import (
 	"github.com/nats-io/nats.go/jetstream"
 	"github.com/stretchr/testify/require"
 
-	"github.com/operatinggraph/lattice/internal/natstest"
+	"github.com/operatinggraph/lattice/internal/natsfixture"
 	"github.com/operatinggraph/lattice/internal/refractor/failure"
 	"github.com/operatinggraph/lattice/internal/refractor/ruleengine"
 	"github.com/operatinggraph/lattice/internal/substrate"
@@ -186,7 +186,7 @@ func TestEvalAspectFanOut_RoutesEvaluateErrorIntoDispositionEvalErr(t *testing.T
 // pre-provisioned KV buckets.
 func newDispositionConn(t *testing.T) (*substrate.Conn, jetstream.JetStream) {
 	t.Helper()
-	_, nc := natstest.Server(t)
+	_, nc := natsfixture.Server(t)
 
 	js, err := jetstream.New(nc)
 	require.NoError(t, err)

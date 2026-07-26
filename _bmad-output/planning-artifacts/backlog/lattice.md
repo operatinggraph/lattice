@@ -213,7 +213,7 @@ Real but low-value; do **not** spend design or build effort here unless Andrew g
 
 One line per shipped item (`date · SHA · [tag] title`). Oldest roll to `archive/` past ~25.
 
-- 2026-07-26 · `7ac54ce1` · [CI] embedded-NATS handshake flake root-caused — 42 hand-rolled fixtures each inherited nats.go's single-shot 2s handshake deadline; `internal/natstest` owns it, lint blocks regressions, no assertion loosened
+- 2026-07-26 · `7ac54ce1` · [CI] embedded-NATS handshake flake root-caused — 42 hand-rolled fixtures each inherited nats.go's single-shot 2s handshake deadline; `internal/natsfixture` owns it, lint blocks regressions, no assertion loosened
 - 2026-07-26 · `0a409757` · [bootstrap] kernel-seed reconcile — a seeded Core KV picks up kernel-DDL fixes instead of freezing at the binary that seeded it; verify-kernel now asserts content
 - 2026-07-25 · `1a1379f7` · [CI] Refractor sweep-count flake root-caused — the test read a per-pass aggregate mid-pass; 4-in-6 failing → 10/10 green, no assertion loosened
 - 2026-07-25 · `a0a4bb34` · [pkgmgr,refractor] an upgrade that cannot take effect says so where the operator is — `reloadpin` predicts the refusal at apply time; `ReactivationRequired` + drift guard

@@ -47,14 +47,14 @@
 //     instanceOf-chain resolver (Contract #1 §1.5). The signal is anchored on the
 //     Starlark aspect-emit helper, so a discriminator word used as a CLI flag, a
 //     string-slice element, or an aspect's `cls` arg is not flagged.
-//   - Hand-rolled embedded NATS fixture. internal/natstest owns the embedded
+//   - Hand-rolled embedded NATS fixture. internal/natsfixture owns the embedded
 //     NATS + JetStream fixture. A hand-rolled copy inherits nats.go's default
 //     connect options, and that default pins the WHOLE initial handshake to a
 //     2s deadline with no retry — so any multi-second host stall (memory
 //     pressure, a saturated box, a Docker stack alongside `go test -p 4`) fails
 //     whichever package happened to be connecting, typically one the author
 //     never touched, with `read tcp 127.0.0.1:A->B: i/o timeout`. The signal is
-//     the server constructor; natstest itself is exempt.
+//     the server constructor; natsfixture itself is exempt.
 //   - Read-posture classification (Contract #2 §2.5; BLOCKING — fails
 //     --strict, per the script-read-posture design §13's flip once the
 //     platform + verticals sweeps closed the debt list). Every script
@@ -202,7 +202,7 @@ var (
 	// embeddedNATSCtor anchors a hand-rolled embedded NATS server fixture. Each
 	// hand-rolled copy silently inherits nats.go's 2s default whole-handshake
 	// deadline with no retry, so a host stall fails a random untouched package
-	// with `read tcp ...: i/o timeout`; internal/natstest owns the hardened
+	// with `read tcp ...: i/o timeout`; internal/natsfixture owns the hardened
 	// fixture (see its package doc).
 	embeddedNATSCtor = regexp.MustCompile(`\bnatsserver\.NewServer\(|\bserver\.NewServer\(`)
 	// authContext.target shape declaration (authcontext-target-validated-
@@ -258,9 +258,9 @@ var authCtxTargetShapes = map[string]bool{
 // an import cycle there.
 const loadOrGenerateExemptFile = "internal/pkgmgr/installer_test.go"
 
-// natstestPkg owns the embedded-NATS fixture, so it is the one place allowed to
+// natsfixturePkg owns the embedded-NATS fixture, so it is the one place allowed to
 // construct a server directly.
-const natstestPkg = "internal/natstest/"
+const natsfixturePkg = "internal/natsfixture/"
 
 // annotation is one classification comment: the raw line it sits on (sub-field
 // checks like `relation=` / `epoch=` read that line, not the annotated
@@ -522,7 +522,7 @@ func scanSource(path string, data []byte) []finding {
 	if !isTest {
 		out = append(out, checkLensProtectedByDefault(path, string(data))...)
 	}
-	embeddedNATSScoped := !strings.HasPrefix(slash, natstestPkg)
+	embeddedNATSScoped := !strings.HasPrefix(slash, natsfixturePkg)
 	loadOrGenerateScoped := isTest &&
 		!strings.HasPrefix(slash, "internal/bootstrap/") &&
 		!strings.HasPrefix(slash, "internal/testutil/") &&
@@ -560,7 +560,7 @@ func scanSource(path string, data []byte) []finding {
 			out = append(out, finding{file: path, line: ln, msg: "P7 violation — discriminator aspect (.class/.family/.kind) shadows the envelope class; the type belongs on the vertex class field, resolved behind a fine-grained class by the step-6 instanceOf chain (lattice-architecture.md P7, Contract #1 §1.5)"})
 		}
 		if embeddedNATSScoped && embeddedNATSCtor.MatchString(line) {
-			out = append(out, finding{file: path, line: ln, msg: "hand-rolled embedded NATS fixture — a bare nats.Connect inherits nats.go's 2s whole-handshake deadline with no retry, so a host stall fails a random untouched package with `read tcp ...: i/o timeout`; use natstest.Server(t) / natstest.StartServer(t) (internal/natstest)"})
+			out = append(out, finding{file: path, line: ln, msg: "hand-rolled embedded NATS fixture — a bare nats.Connect inherits nats.go's 2s whole-handshake deadline with no retry, so a host stall fails a random untouched package with `read tcp ...: i/o timeout`; use natsfixture.Server(t) / natsfixture.StartServer(t) (internal/natsfixture)"})
 		}
 		if loadOrGenerateScoped && loadOrGenerateCall.MatchString(line) {
 			out = append(out, finding{file: path, line: ln, msg: "per-test bootstrap.LoadOrGenerate — re-populates internal/bootstrap's globals per test, which races under t.Parallel(); use testutil.EnsurePrimordials(t) instead (bootstrap-primordial-globals-race-design.md §4)"})

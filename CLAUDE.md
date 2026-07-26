@@ -71,7 +71,7 @@ Two kinds of actor read this file; know which one you are.
 Never use fixed `time.Sleep` for synchronization in tests — use deterministic sync (channels, polling with condition, WaitGroup). 
 Use valid 20-char NanoIDs with limited alphabet (see `internal/substrate/nanoid.go`) in seed data.
 
-- **Embedded NATS fixtures come from `internal/natstest`** — `natstest.Server(t)` / `natstest.StartServer(t)`.
+- **Embedded NATS fixtures come from `internal/natsfixture`** — `natsfixture.Server(t)` / `natsfixture.StartServer(t)`.
   Never hand-roll `natsserver.NewServer` + `nats.Connect` in a test (`lint-conventions` blocks it): a bare
   `nats.Connect` inherits nats.go's **2-second whole-handshake deadline with no retry**, so any host stall
   fails whichever package happened to be connecting.
@@ -83,7 +83,7 @@ Use valid 20-char NanoIDs with limited alphabet (see `internal/substrate/nanoid.
   suite is usually what tips it). Confirm with **one** re-run of that package alone
   (`go test ./<pkg>/ -count=1`) and move on — do not re-run the whole suite repeatedly, and **never** loosen an
   assertion or wrap one in a retry to make it go green. Conversely a failure *inside* a test's assertions is
-  yours even if it looks intermittent; see `internal/natstest`'s package doc for the mechanism and the boundary.
+  yours even if it looks intermittent; see `internal/natsfixture`'s package doc for the mechanism and the boundary.
 
 ## Authoritative external sources (vendors)
 

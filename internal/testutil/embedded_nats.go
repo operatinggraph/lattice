@@ -22,11 +22,16 @@ import (
 // StartEmbeddedNATS spins up an in-process JetStream-enabled NATS server
 // and returns its client URL. The server is shut down via t.Cleanup.
 //
-// Each call allocates a unique StoreDir under t.TempDir() so that
+// Each call allocates a unique StoreDir via internal/jsstore so that
 // concurrently running test packages do not share the JetStream file store.
 // Without an explicit StoreDir, NATS defaults to os.TempDir()/jetstream,
 // which is shared across all processes and causes cross-package contamination
-// when tests run in parallel.
+// when tests run in parallel. jsstore rather than t.TempDir() because the
+// framework's own cleanup races JetStream's trailing filestore write.
+//
+// Callers that dial the returned URL should connect via natsfixture.Connect:
+// a bare nats.Connect inherits nats.go's 2s whole-handshake deadline with no
+// retry, which a stalled host blows (see internal/natsfixture).
 func StartEmbeddedNATS(t *testing.T) string {
 	t.Helper()
 	opts := natsserver.DefaultTestOptions
@@ -34,8 +39,11 @@ func StartEmbeddedNATS(t *testing.T) string {
 	opts.JetStream = true
 	opts.StoreDir = jsstore.Dir(t)
 	s := natsserver.RunServer(&opts)
+	// Shutdown only starts the teardown; WaitForShutdown is the barrier for it
+	// having finished, so a dying server stops overlapping the next test's.
 	t.Cleanup(func() {
 		s.Shutdown()
+		s.WaitForShutdown()
 		_ = server.VERSION
 	})
 	return s.ClientURL()

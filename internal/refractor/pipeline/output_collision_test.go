@@ -9,7 +9,7 @@ import (
 	"github.com/nats-io/nats.go/jetstream"
 	"github.com/stretchr/testify/require"
 
-	"github.com/operatinggraph/lattice/internal/natstest"
+	"github.com/operatinggraph/lattice/internal/natsfixture"
 	"github.com/operatinggraph/lattice/internal/refractor/adjacency"
 	"github.com/operatinggraph/lattice/internal/refractor/failure"
 	"github.com/operatinggraph/lattice/internal/refractor/health"
@@ -307,7 +307,7 @@ func TestExecuteFullForActor_OneRowPerAnchor_NoGuard(t *testing.T) {
 // Health KV buckets for the output-key-collision tests.
 func newCollisionKVs(t *testing.T) (coreKV, adjKV, healthKV *substrate.KV) {
 	t.Helper()
-	_, nc := natstest.Server(t)
+	_, nc := natsfixture.Server(t)
 
 	js, err := jetstream.New(nc)
 	require.NoError(t, err)

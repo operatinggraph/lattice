@@ -1,4 +1,4 @@
-// Package natstest provides the canonical embedded NATS + JetStream fixture for
+// Package natsfixture provides the canonical embedded NATS + JetStream fixture for
 // Lattice tests: one server per caller, on an OS-assigned loopback port, with a
 // private JetStream store, a connected client, and complete teardown.
 //
@@ -38,7 +38,7 @@
 // this package. Do not generalise these retries into "retry the flaky test":
 // a retry around an assertion hides real bugs, which is a different thing
 // entirely from tolerating a stalled TCP handshake to a server we just booted.
-package natstest
+package natsfixture
 
 import (
 	"fmt"
@@ -103,12 +103,12 @@ func StartServerWith(t *testing.T, opts *natsserver.Options) *natsserver.Server 
 	t.Helper()
 	s, err := natsserver.NewServer(opts)
 	if err != nil {
-		t.Fatalf("natstest: new embedded NATS server: %v", err)
+		t.Fatalf("natsfixture: new embedded NATS server: %v", err)
 	}
 	go s.Start()
 	if !s.ReadyForConnections(readyTimeout) {
 		s.Shutdown()
-		t.Fatalf("natstest: embedded NATS server not ready for connections within %v", readyTimeout)
+		t.Fatalf("natsfixture: embedded NATS server not ready for connections within %v", readyTimeout)
 	}
 	// Shutdown only kicks out the accept loop and starts closing clients;
 	// WaitForShutdown is the documented barrier for it having finished. Waiting
@@ -159,7 +159,7 @@ func connect(url string, opts ...nats.Option) (*nats.Conn, error) {
 // handshakeFailure names the signature so a reader triaging a suite failure can
 // classify it in one glance instead of re-deriving it.
 func handshakeFailure(attempts int, err error) string {
-	return fmt.Sprintf(`natstest: could not connect to the embedded NATS server after %d attempts (%v each): %v
+	return fmt.Sprintf(`natsfixture: could not connect to the embedded NATS server after %d attempts (%v each): %v
 
 This is the embedded-NATS FIXTURE HANDSHAKE signature, not a defect in the code under test.
 The fixture dials a server this very test just started, over loopback. A failure here means the

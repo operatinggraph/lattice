@@ -7,7 +7,7 @@ import (
 	"github.com/nats-io/nats.go/jetstream"
 	"github.com/stretchr/testify/require"
 
-	"github.com/operatinggraph/lattice/internal/natstest"
+	"github.com/operatinggraph/lattice/internal/natsfixture"
 	"github.com/operatinggraph/lattice/internal/refractor/ruleengine"
 	"github.com/operatinggraph/lattice/internal/refractor/ruleengine/full"
 	"github.com/operatinggraph/lattice/internal/substrate"
@@ -32,7 +32,7 @@ func newDeleteKeyKV(t *testing.T) (coreKV, adjKV *substrate.KV) {
 	if testing.Short() {
 		t.Skip("skipping NATS-backed test in short mode")
 	}
-	_, nc := natstest.Server(t)
+	_, nc := natsfixture.Server(t)
 
 	js, err := jetstream.New(nc)
 	require.NoError(t, err)

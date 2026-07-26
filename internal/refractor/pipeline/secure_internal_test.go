@@ -20,7 +20,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/operatinggraph/lattice/internal/natstest"
+	"github.com/operatinggraph/lattice/internal/natsfixture"
 	"github.com/operatinggraph/lattice/internal/refractor/adapter"
 	"github.com/operatinggraph/lattice/internal/refractor/adjacency"
 	"github.com/operatinggraph/lattice/internal/refractor/failure"
@@ -361,7 +361,7 @@ func newSecureRoundTripPipeline(t *testing.T, idSuffix string) (*Pipeline, *vaul
 	t.Helper()
 	ctx := context.Background()
 
-	_, nc := natstest.Server(t)
+	_, nc := natsfixture.Server(t)
 	js, err := jetstream.New(nc)
 	require.NoError(t, err)
 	conn, err := substrate.Wrap(nc)
@@ -476,7 +476,7 @@ func TestSecureLens_FullEngineRoundTrip(t *testing.T) {
 func TestSecureLens_NeighborShredReprojectsAnchoredRows(t *testing.T) {
 	ctx := context.Background()
 
-	_, nc := natstest.Server(t)
+	_, nc := natsfixture.Server(t)
 	js, err := jetstream.New(nc)
 	require.NoError(t, err)
 	conn, err := substrate.Wrap(nc)

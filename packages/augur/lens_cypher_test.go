@@ -36,7 +36,7 @@ import (
 	"github.com/nats-io/nats.go/jetstream"
 	"github.com/stretchr/testify/require"
 
-	"github.com/operatinggraph/lattice/internal/natstest"
+	"github.com/operatinggraph/lattice/internal/natsfixture"
 	"github.com/operatinggraph/lattice/internal/refractor/ruleengine"
 	"github.com/operatinggraph/lattice/internal/refractor/ruleengine/full"
 	"github.com/operatinggraph/lattice/internal/substrate"
@@ -44,7 +44,7 @@ import (
 
 func augurCypherKVs(t *testing.T) (adjKV, coreKV *substrate.KV) {
 	t.Helper()
-	_, nc := natstest.Server(t)
+	_, nc := natsfixture.Server(t)
 	js, err := jetstream.New(nc)
 	require.NoError(t, err)
 	conn, err := substrate.Wrap(nc)

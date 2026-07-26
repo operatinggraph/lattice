@@ -1,4 +1,4 @@
-package natstest_test
+package natsfixture_test
 
 import (
 	"io"
@@ -11,13 +11,13 @@ import (
 	"github.com/nats-io/nats.go/jetstream"
 	"github.com/stretchr/testify/require"
 
-	"github.com/operatinggraph/lattice/internal/natstest"
+	"github.com/operatinggraph/lattice/internal/natsfixture"
 )
 
 // TestServerIsUsable proves the fixture returns a live JetStream-capable server
 // on a loopback port the kernel assigned.
 func TestServerIsUsable(t *testing.T) {
-	s, nc := natstest.Server(t)
+	s, nc := natsfixture.Server(t)
 
 	require.True(t, nc.IsConnected())
 	addr, ok := s.Addr().(*net.TCPAddr)
@@ -26,15 +26,15 @@ func TestServerIsUsable(t *testing.T) {
 
 	js, err := jetstream.New(nc)
 	require.NoError(t, err)
-	_, err = js.CreateKeyValue(t.Context(), jetstream.KeyValueConfig{Bucket: "natstest-selftest"})
+	_, err = js.CreateKeyValue(t.Context(), jetstream.KeyValueConfig{Bucket: "natsfixture-selftest"})
 	require.NoError(t, err)
 }
 
 // TestDistinctServersGetDistinctPorts guards the RANDOM_PORT invariant that lets
 // packages run concurrently under `go test -p N`.
 func TestDistinctServersGetDistinctPorts(t *testing.T) {
-	a := natstest.StartServer(t)
-	b := natstest.StartServer(t)
+	a := natsfixture.StartServer(t)
+	b := natsfixture.StartServer(t)
 	require.NotEqual(t, a.Addr().(*net.TCPAddr).Port, b.Addr().(*net.TCPAddr).Port)
 }
 
@@ -70,33 +70,33 @@ func stallProxy(t *testing.T, backend string, stall time.Duration) string {
 // TestConnectAbsorbsHostStall is the regression proof for this package's whole
 // reason to exist: a handshake stall that blows nats.go's 2s default — the
 // documented `read tcp ...: i/o timeout` signature — is absorbed by
-// natstest.Connect. The bare-default connect is asserted to fail first, so this
+// natsfixture.Connect. The bare-default connect is asserted to fail first, so this
 // test cannot silently stop proving anything if the default ever changes.
 func TestConnectAbsorbsHostStall(t *testing.T) {
 	const stall = 4 * time.Second
-	s := natstest.StartServer(t)
+	s := natsfixture.StartServer(t)
 	url := stallProxy(t, s.Addr().String(), stall)
 
-	// The idiom this package replaced: one 2s window, no retry.
+	// A bare connect gets one 2s window and no retry.
 	start := time.Now()
 	bare, err := nats.Connect(url)
 	if err == nil {
 		bare.Close()
 		t.Fatalf("precondition broken: a %v stall no longer blows the nats.go default handshake "+
-			"deadline (connected in %v) — re-derive the timeout budget in natstest", stall, time.Since(start))
+			"deadline (connected in %v) — re-derive the timeout budget in natsfixture", stall, time.Since(start))
 	}
 	require.Contains(t, err.Error(), "i/o timeout", "expected the documented handshake signature")
 
 	// The hardened fixture connect absorbs the same stall.
-	nc := natstest.Connect(t, url)
+	nc := natsfixture.Connect(t, url)
 	require.True(t, nc.IsConnected())
 }
 
 // TestConnectRespectsCallerOptions proves caller options are applied after the
 // defaults, so a test can still pin its own timeout when that is the point.
 func TestConnectRespectsCallerOptions(t *testing.T) {
-	s := natstest.StartServer(t)
-	nc := natstest.Connect(t, s.ClientURL(), nats.Name("caller-named"))
+	s := natsfixture.StartServer(t)
+	nc := natsfixture.Connect(t, s.ClientURL(), nats.Name("caller-named"))
 	require.True(t, nc.IsConnected())
 	require.Equal(t, "caller-named", nc.Opts.Name)
 }
@@ -106,7 +106,7 @@ func TestConnectRespectsCallerOptions(t *testing.T) {
 func TestCleanupFullyStopsServer(t *testing.T) {
 	var addr string
 	t.Run("inner", func(t *testing.T) {
-		s := natstest.StartServer(t)
+		s := natsfixture.StartServer(t)
 		addr = s.Addr().String()
 	})
 	// The inner subtest's cleanup has run; the port must no longer serve NATS.

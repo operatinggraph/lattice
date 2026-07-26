@@ -12,7 +12,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/operatinggraph/lattice/internal/natstest"
+	"github.com/operatinggraph/lattice/internal/natsfixture"
 	"github.com/operatinggraph/lattice/internal/refractor/adjacency"
 	"github.com/operatinggraph/lattice/internal/refractor/consumer"
 	"github.com/operatinggraph/lattice/internal/substrate"
@@ -22,7 +22,7 @@ import (
 // connected JetStream context and the underlying NATS connection.
 func startJS(t *testing.T) (jetstream.JetStream, *nats.Conn) {
 	t.Helper()
-	_, nc := natstest.Server(t)
+	_, nc := natsfixture.Server(t)
 
 	js, err := jetstream.New(nc)
 	require.NoError(t, err)
