@@ -219,3 +219,23 @@ subject as today) — the same fail-closed answer `require_workplace` gives an e
 **Non-goals.** Wellness's `handleSessions` schedule grid stays open — it is the member browse catalog (a
 member must see a session to book it), not a staff surface; confining it would break booking. Nothing here
 touches the write guards, the Protected/RLS spine, or `operator`.
+
+### 9.1 Increment 1 checkpoint — wellness roster CONFINED (`ad36e9e9`, 2026-07-26)
+
+Shipped: `wellnessSessions` projects `coveringLocations`
+(`[(s)-[:locatedAt]->(pl)-[:containedIn*0..8]->(c) | c.key]`, wellness-domain 0.13.0);
+`subjectHats` keeps `workplaces` + `isOperator`; `mayReadRoster` intersects. Eleven roster tests,
+including the discriminating staff pair (same staffer, two sessions differing only in location), the
+containing-location positive, the multi-workplace caller, and the stale-row vector — a projection
+carrying no `coveringLocations` key denies rather than waving through.
+
+Two divergences from `worksAt_covers` were found by the adversarial pass and closed rather than noted:
+the hop bound now matches `WORKPLACE_MAX_DEPTH`, and `operator` is exempt on the read side as it is on
+the write side (`/v1/actor`'s `roles`). Three findings became lane rows instead — the picker UX, the
+write-side single-parent walk, and the lens-rebuild question — rather than being widened into this fire.
+
+**Worktree:** `.claude/worktrees/staff-read-workplace` (branch `fire/staff-read-workplace`).
+**Next (increment 2, café):** the same shape over `cafe-domain` + `cafe-ledger` — tabs, ledger, and the
+three front-desk handlers. Location indirection is the lease's unit (`leaseapp_unit`), so the covering
+comprehension hangs off `(la)-[:appliesToUnit]->(unit)-[:containedIn*0..8]->(c)`. `cmd/cafe-app/readauth.go`
+needs the same `workplaces`/`isOperator` change; five handlers gate on `hats.isStaff` today.
