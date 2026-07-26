@@ -21,10 +21,10 @@ import (
 // is what decides them. EngineStatus carries Loom's answer verbatim so the
 // card can quote both voices when they disagree.
 //
-// PatternName is the pattern's canonicalName, resolved from
-// vtx.meta.<id>.canonicalName. A flow's identity to an operator is which
-// pattern ran; the bare `vtx.meta.<NanoID>` ref that the read model stores
-// makes every card look like every other card.
+// PatternName is the pattern's human name, resolved from its meta-vertex (see
+// patternNameFrom). A flow's identity to an operator is which pattern ran; the
+// bare `vtx.meta.<NanoID>` ref that the read model stores makes every card
+// look like every other card.
 type flowRow struct {
 	InstanceID    string `json:"instanceId"`
 	PatternRef    string `json:"patternRef"`
@@ -93,8 +93,8 @@ func flowLiveness(rowStatus, engineStatus string, engineKnown, engineHas bool) s
 // reports for it; engineKnown is false when that control read itself failed
 // (§2.5.2: a terminal row is never badged regardless — it is just done — and a
 // "running" row stays unbadged, not falsely "orphaned", when the engine's
-// answer is unavailable). patternName resolves a patternRef to its
-// canonicalName; nil leaves every name empty.
+// answer is unavailable). patternName resolves a patternRef to its human
+// name; nil leaves every name empty.
 // flowCols is the Chronicler's on-the-wire read-model row (snake_case,
 // orchestration-history-read-model-design.md §2.6) — shared by every handler
 // that reads the `orchestration-history` bucket so the decode rule (and its
@@ -195,9 +195,15 @@ func loomInstanceStatuses(raw json.RawMessage) map[string]string {
 	return out
 }
 
-// patternNameResolver returns a memoized patternRef → canonicalName lookup
-// over Core KV (Loupe as the console inspector — the same targeted
-// vtx.meta.<id>.canonicalName read the lens page already makes, not a scan).
+// patternNameResolver returns a memoized patternRef → human name lookup over
+// Core KV (Loupe as the console inspector — targeted reads, not a scan).
+//
+// A Loom pattern's name is `patternId` inside its `.spec` aspect
+// (pkgmgr's loomPatternSpecBody, Contract #10 §10.5) — NOT the
+// `.canonicalName` aspect a lens meta-vertex carries. The two meta families
+// look alike and are not: a pattern vertex has no canonicalName aspect at all,
+// so the lens page's resolver reads nothing here. canonicalName is still tried
+// as a fallback so a pattern that ever grows one resolves without a change.
 //
 // Memoized because a page of flows is a handful of DISTINCT patterns repeated
 // many times over — 26 rows across 3 patterns on the stack this was built
@@ -220,10 +226,21 @@ func (s *server) patternNameResolver(ctx context.Context, conn *substrate.Conn) 
 			}
 			return entry.Value, true
 		}
-		name := dataString(metaData(get, patternRef+".canonicalName"), "value", "name", "canonicalName")
+		name := patternNameFrom(get, patternRef)
 		seen[patternRef] = name
 		return name
 	}
+}
+
+// patternNameFrom reads one pattern meta-vertex's human name. Split out from
+// the memoizing resolver so a test can pin the KEY and FIELD it reads — the
+// lens family's `.canonicalName` shape resolves nothing on a pattern vertex,
+// and injecting a fake resolver at the computeFlows seam cannot catch that.
+func patternNameFrom(get kvGetter, patternRef string) string {
+	if name := dataString(metaData(get, patternRef+".spec"), "patternId"); name != "" {
+		return name
+	}
+	return dataString(metaData(get, patternRef+".canonicalName"), "value", "name", "canonicalName")
 }
 
 // timelineFlow is one flow's liveness span for the map scrubber (F13 §4.2's

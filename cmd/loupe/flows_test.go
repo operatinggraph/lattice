@@ -216,6 +216,35 @@ func TestHandleHistoryTimelineValidation(t *testing.T) {
 	}
 }
 
+// A Loom pattern's name lives in `patternId` on its `.spec` aspect. The lens
+// family's `.canonicalName` aspect does not exist on a pattern vertex at all,
+// so a resolver that reads only that one returns "" for every flow on the
+// stack — which is what shipped until a live check caught it.
+func TestPatternNameFrom(t *testing.T) {
+	store := map[string][]byte{
+		"vtx.meta.pat1.spec": []byte(`{"data":{"patternId":"onboarding","subjectType":"identity"}}`),
+		// A meta-vertex carrying only the lens-family shape still resolves,
+		// so the fallback is real rather than decorative.
+		"vtx.meta.pat2.canonicalName": []byte(`{"data":{"value":"legacyNamed"}}`),
+		// A pattern vertex with a spec that names nothing.
+		"vtx.meta.pat3.spec": []byte(`{"data":{"subjectType":"identity"}}`),
+	}
+	get := func(key string) ([]byte, bool) { b, ok := store[key]; return b, ok }
+
+	if got := patternNameFrom(get, "vtx.meta.pat1"); got != "onboarding" {
+		t.Errorf("spec patternId = %q, want onboarding", got)
+	}
+	if got := patternNameFrom(get, "vtx.meta.pat2"); got != "legacyNamed" {
+		t.Errorf("canonicalName fallback = %q", got)
+	}
+	if got := patternNameFrom(get, "vtx.meta.pat3"); got != "" {
+		t.Errorf("a spec naming nothing = %q, want empty so the card falls back to the ref", got)
+	}
+	if got := patternNameFrom(get, "vtx.meta.missing"); got != "" {
+		t.Errorf("absent vertex = %q, want empty", got)
+	}
+}
+
 func TestLoomInstanceStatuses(t *testing.T) {
 	t.Run("decodes instanceId to status, terminal instances included", func(t *testing.T) {
 		// Loom's list carries finished instances alongside running ones —
