@@ -192,4 +192,4 @@ and the Processor's DDL cache both react to any commit, not just updates. Only a
 
 Lattice is **source-available, not open source**: the code is public to read, run locally, and
 evaluate; all other rights are reserved — see [LICENSE](LICENSE). For commercial licensing or
-partnership inquiries: [asolgan@gmail.com](mailto:asolgan@gmail.com).
+partnership inquiries: [hello@operatinggraph.com](mailto:hello@operatinggraph.com).
