@@ -312,3 +312,82 @@ out of the build that the brief did not anticipate:
 
 **Remaining `s1Debt`: 7**, all identity-domain (§3.4, conforming last by design). **`lens-cypher`: 5**,
 unchanged.
+
+## 8. §3.4 — identity-domain conforms: Inc 5 build note (Winston, 2026-07-26)
+
+**Scope-diff gate.** §3.4's scope sentence is *"identity-domain conforms last (it is the idiom source; its
+own gap is S1 — the four consumer credential ops have no metas)."* Inc 5 takes exactly that: the **7**
+remaining `s1Debt` entries, all identity-domain, which empties the baseline so S1 binds corpus-wide with no
+exemptions — the same milestone Inc 3 reached for `structure-pins`. Narrow-only: no guard, grant, or
+permission semantics move; no FE work; the **5** `lens-cypher` entries (identity-domain's own included) are
+a later increment. §3.4 says *four* credential ops because that was the census's read; the gate's baseline
+is the authority and holds **seven** — the four credential ops plus `CreateUnclaimedIdentity`,
+`RotateClaimKey`, `RecordIdentityPII`. All seven land.
+
+| Op | Grants | `AuthContext` | TargetField/Type | Declared reads |
+|---|---|---|---|---|
+| `CreateUnclaimedIdentity` | frontOfHouse+backOfHouse+operator any | `standing` | — (mints) | none |
+| `ClaimIdentity` | consumer self | `self` | — | `{payload.targetIdentityKey}` + `.state` + `.claimKey` |
+| `RotateClaimKey` | frontOfHouse+backOfHouse+operator any | `standing` | `identityKey` → `identity` | `{payload.identityKey}` + `.state` + `.claimKey` |
+| `RecordIdentityPII` | frontOfHouse+backOfHouse+operator any | `standing` | `identityKey` → `identity` | `{payload.identityKey}` + `.state` |
+| `InitiateCredentialLink` | consumer self | `self` | — | `{actor}` + `.state` |
+| `CompleteCredentialLink` | consumer self | `self` | — | `{payload.targetIdentityKey}` + `.state`; optional `.linkKey`, `.credentialBinding` |
+| `UnlinkCredential` | consumer self | `self` | — | `{actor}` + `.state`; optional `{actor}.credentialBinding` |
+
+**The read declarations are the live dispatchers', not a derivation.** `cmd/facet/claim.go:121`,
+`cmd/facet/credentials.go:225,270-276,374-377` are what these ops are actually submitted with today, and
+each matches its script branch's `state[…]` lookups (`ddls.go:879-908` claim, `:1048-1054` initiate,
+`:1097-1128` complete, `:980-1008` rotate, `:1297-1301` PII). Three ops read their target through
+`{payload.…}` and two through `{actor}` — the split is the design's own: Initiate and Unlink are submitted
+through the normal resolved path (`op.actor == U`), while Complete is submitted as the *new* credential A2,
+so U is a payload field there (`permissions.go:26-34`).
+
+**Two keys are deliberately undeclared, and neither is a hole.** The credential-dedup probe
+`vtx.credentialindex.<sha256(actor)>` (ClaimIdentity + CompleteCredentialLink) and
+CreateUnclaimedIdentity's `vtx.identityindex.<sha256(email|phone|name)>` probes are **sha256-derived**, and
+the template vocabulary substitutes — it does not compute (`definition.go:490-506`). Neither is expressible,
+and neither needs to be: the script's own comment says so verbatim — *"a declared-optionalReads guard for
+the friendly generic error only — the load-bearing stop is the CreateOnly create of cred_index_key below,
+which RevisionConflicts on an already-bound credential regardless of declaration"* (`ddls.go:1106-1111`).
+Undeclared costs a worse diagnostic, not a weaker guard. The same reasoning covers the create-path dedup,
+which rides the `IdentityCreated` event's `data.duplicate` flag rather than a rejection.
+
+**`RecordIdentityPII` forces the shadow question, and the Standard already answered it.** S1: *"a package
+never declares a meta for an op another package owns (the lease-signing `RecordIdentityPII` shadow hazard —
+collision checking is per-package only)."* lease-signing carries a **bare** `RecordIdentityPII` meta
+(`permissions.go:535`) whose stated reason is *"identity-domain ships the op but no op-meta for it, so the
+onboarding pattern declares it here"* (`permissions.go:181-184`) — a precondition this increment discharges.
+The collision is not cosmetic: both Loom and Weaver index op-metas into a **flat `operationType →
+vtx.meta.<id>` map** off the corpus-wide `vtx.meta.>` CDC (`internal/loom/source.go:298-309`,
+`internal/weaver/registry.go:1129-1140`), so two metas for one op is **last-writer-wins**, and the onboarding
+userTask would resolve to the bare meta or the full one depending on CDC arrival order. So identity-domain
+declares the full meta (it owns the DDL) and **lease-signing's bare shadow is deleted in the same commit** —
+its `OpMetas()` entry, its `manifest.yaml` line, its `EngineLegsStayBare` list entry, and its `OpMetas`
+count pin 15→14. Safe by dependency: lease-signing `Depends` on identity-domain (`package.go:104`), so the
+real meta is installed first, and `leaseApplicationComplete`'s join is on `onbOp.data.operationType`
+(`lenses.go:672`) — the same string on either vertex, so the lens is untouched either way.
+
+**`standing` is honest for the three staff ops.** `CreateUnclaimedIdentity` / `RotateClaimKey` /
+`RecordIdentityPII` are scope=any role grants — authority is a role, not a relationship to the target
+(`OpDispatchSpec.AuthContext`'s fourth case, `definition.go:521-530`). `RecordIdentityPII` *does* read
+`op.authContextTarget`, but only as an **exemption** from the unclaimed-only confinement
+(`ddls.go:1341-1343`): the standing front-desk path is the one a descriptor describes, and declaring `self`
+would tell a client to send an authContext the standing grant does not need. `CreateUnclaimedIdentity` names
+no TargetField — it mints, exactly like clinic's `CreatePatient`.
+
+**`Sensitive: true` on `RecordIdentityPII`.** Its payload carries ssn/dob, the platform's sensitive
+aspect-types (`ddls.go:220-264`) — this is precisely the field's stated purpose (masked entry, no local
+echo). It is the first op-meta in the corpus to set it.
+
+**Gotchas.** identity-domain has **no `OpMetas` field** today (`package.go:31-46`), so the field, an
+`opmetas.go`, and a `manifest.yaml` `opMetas:` block land together — the orchestration-base Inc 4 precedent.
+A manifest's `opMetas:` is an **order-matched list** verified field-by-field
+(`internal/pkgmgr/manifest.go:141,189-193`). Both packages need version bumps in **both** `package.go` and
+`manifest.yaml` (identity-domain 0.8.1→0.9.0, lease-signing 0.26.0→0.27.0) or the install no-ops on a running
+stack. `checkReadTemplates` requires every payload field a read wraps to be `required` in the op-meta's own
+InputSchema — `targetIdentityKey` and `identityKey` therefore are.
+
+**Non-goals.** The 5 `lens-cypher` entries incl. identity-domain's own; the 2 `readTemplateDebt` entries
+(their own board row); `UpdateIdentityState` / `ProvisionConsumerIdentity` / `RevokeActor` / `UnrevokeActor`
+(operator- and system-only, no human trigger, no debt entry); any guard, grant, or permission-semantics
+change; any FE rendering of these descriptors.
