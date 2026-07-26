@@ -2,6 +2,8 @@
 
 Rolled from `verticals.md` when its live Done log passed ~25 entries. Full detail is in git.
 
+- 2026-07-23 · `626763bc` · Persona-worlds W0 — provider archetype spine (role + per-domain bindings + operator-only Bind* + provider grants/guards + clinic GrantTable + 3 edge-manifest hat lenses + seeds); live-verified
+- 2026-07-24 · `283dd1a9` · Clinic is sign-in-first — session-keyed reads/writes, both dev-token mints deleted, appsession production branch, patient identity read-grant bridge (persona-worlds W1 Inc 1+1b)
 - 2026-07-24 · `c4b45b33` · Ownership guards answer before payload-matching probes — 6 sites (lease-signing, clinic ×2, wellness ×2, service-domain); `ClaimTask` exempt: no caller-supplied candidate; testutil can now assert WHICH check answered
 - 2026-07-24 · `5556e753` · Maintenance `ResolveWorkOrder` authorizes before its terminal `.resolution` read — closes the resolved-vs-open oracle for a caller outside the building; wellness bind-grant comment truthed up
 - 2026-07-23 · `8c246540` · Clinic booking date/time field now snaps to the 15-minute grid — off-grid `min` was rejecting legal grid times and suggesting off-grid ones; Andrew-reported, live-verified (change-time snap + submit-time backstop)
