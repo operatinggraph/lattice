@@ -152,3 +152,58 @@ Gates: `go build ./...`, `make vet`, `golangci-lint run ./...`, `STRICT=1 go run
 - Does not make Facet a graph browser (§3 F3): only entities a declared `dispatch.targetType` names are ever
   projected, bounded by the actor's own residence reachability.
 - Does not change the descriptor vocabulary. `targetType` shipped in `dda7ad98` and is already correct.
+
+## 6. Build note — Inc 4's descriptors get their nouns (2026-07-26)
+
+**Scope sentence** (verbatim, [verticals.md](../planning-artifacts/backlog/verticals.md)): *"`resolveTargetKey`
+matches `TargetType` against projected entity types + selfAnchors; the context carries no `tab`, `patient`,
+`visitseries`, `task` or `studio`, so the Inc 4 descriptors degrade instead of offering a button. `ClaimTask` is
+one line — `ctx.taskKey` is already populated but is not among the candidates. The others need the entity
+projected or an anchor declared."* Coupled in the same function, so the same fire: *"`identity` targetType
+resolves to the submitter, not a degrade."*
+
+This is §3 F2's "one lens per kind" applied to two more kinds. Nothing here is a new mechanism.
+
+**Verified touch-list** (`file:line` read live at `a472fc9e`):
+
+| Where | What |
+|---|---|
+| [app.js:1635](../../cmd/facet/web/app.js) | candidate list — `ctx.taskKey` absent, so `ClaimTask`'s `targetType: "task"` never resolves though the task row already carries it |
+| [app.js:1638-1641](../../cmd/facet/web/app.js) | the `want === "identity"` fallback to `me().identityKey` — the degrade gate at [app.js:793](../../cmd/facet/web/app.js) can never fire for that type |
+| [lenses.go:151-205](../../packages/edge-manifest/lenses.go) | the three `manifest.ent` lens specs to mirror |
+| [lenses.go:596-680](../../packages/edge-manifest/lenses.go) | their tails; `edgeEntityBookings` is the precedent for an inherently-private (own-link, not locality) row set |
+| [coverage_proof_test.go:127-208](../../packages/edge-manifest/coverage_proof_test.go) | the resident + staff worlds a new lens must be seeded into, or its coverage claim is vacuous |
+| [package_test.go:45-58, 70, 176-183](../../packages/edge-manifest/package_test.go) | lens-name set, the 17-lens count pin, the `manifest.<ns>` pin |
+| [package.go:20](../../packages/edge-manifest/package.go) · [manifest.yaml](../../packages/edge-manifest/manifest.yaml) | version bump + the declared-lens list (a same-version edit no-ops on install) |
+
+**Precedents to mirror.** `edgeEntityBookings` for a private own-link walk (`(identity)<-[:bookedBy]-`);
+`edgeStaffWorkOrders` for the workplace spine (`(identity)-[:worksAt]->(work)<-[:containedIn*0..]-(place)`);
+`edgeEntityProviders` for a row shape with **no `startsAt`** — [app.js:259-264](../../cmd/facet/web/app.js)'s
+`isUpcoming` hides a time-anchored row once its instant passes, and neither a tab nor a studio is a scheduled
+thing.
+
+**Increment order, each with its own green check:**
+
+1. **`resolveTargetKey`** — add `ctx.taskKey` to the candidate list; delete the `identity` fallback so an
+   unresolvable identity target degrades like every other type. `RecordIdentityPII` is the only op declaring
+   `targetType: "identity"` ([identity-domain/opmetas.go:135](../../packages/identity-domain/opmetas.go)) and it
+   is offered from a task whose `scopedTo` **is** the identity, so the candidate loop still resolves it;
+   `ClaimIdentity` is already pinned as declaring no `targetType`
+   ([identity-domain/package_test.go:193-202](../../packages/identity-domain/package_test.go)). Green:
+   `node --test cmd/facet/web/`.
+2. **`edgeEntityTabs`** — `(identity)<-[:applicationFor]-(la:leaseapp)<-[:openFor]-(tab:tab)`, base grant domain,
+   open tabs only (a presentation narrowing; the walk grants regardless, keeping grant ⊇ projection). Resolves
+   café `Charge` / `Settle` / `VoidCharge`. Green: `go test ./packages/edge-manifest/...`.
+3. **`edgeEntityStudios`** — the `edgeStaffWorkOrders` workplace spine with `<-[:locatedAt]-(studio:studio)`,
+   staff grant domain. Resolves wellness `CreateSession`. Green: same.
+
+**In-scope gotchas.** The engine has no `UNION`, so a second kind is a sibling lens, never another branch
+(§3 F2). `entityType` is a literal stamped per walk — the engine has no vertex-type-from-key function. A new
+lens without its read-grant branch is silently dropped by D1 (§3 F4); the `AnchorWalk` declaration is what
+generates that branch, and `coverage_proof_test.go` is what proves it.
+
+**Non-goals (and why).** `patient` and `visitseries` stay unresolved. A `manifest.ent` row for a patient would
+put a patient's display name on the broadcast SYNC plane, which is exactly what D3 forbids and what
+`6b1c667c` ("patient names out of open clinic nats-kv lenses") deliberately undid; `visitseries` hangs off the
+patient and inherits the question. That is a design call about clinical reachability on the edge plane, not an
+execution step — it stays filed, not freelanced here.
