@@ -215,3 +215,73 @@ existed at that same pin, and §3's routing was written "mechanical against the 
 packages were never routed by anything. The six swept above are only the subset the *gate* happens to hold
 debt for. A census-derived program cannot see what the census missed, so "the Standard is converged" will be
 false in a way no gate reports. Re-running the scorecard census across all 29 is filed as its own lane row.
+
+## 7. §3.3 sweep — Inc 4 build note (Winston, 2026-07-26)
+
+**Scope-diff gate.** §3.3's scope sentence is *"S1 metas, S6 pins/cypher tests, S7 hygiene"*. Inc 4 takes the
+**S1 metas** half and closes **every remaining `s1Debt` entry outside identity-domain** — 9 of the 16. This is
+narrow-only: no adjacent mechanism is substituted, no guard or permission semantics move. identity-domain's
+remaining **7** stay by design (§3.4 has it conform last, it being the idiom source); the **5** `lens-cypher`
+entries are a later increment.
+
+| Package | Op(s) | `AuthContext` | Target |
+|---|---|---|---|
+| `cafe-domain` | `Charge` (closes **both** the `any` + `self` rows) | `self` | `tabKey` → `tab` |
+| `cafe-domain` | `VoidCharge` | `standing` | `tabKey` → `tab` |
+| `clinic-domain` | `CreatePatient` | `standing` | — (mints a patient) |
+| `clinic-reminders` | `StartVisitSeries` | `standing` | `patientKey` → `patient` |
+| `clinic-reminders` | `PauseVisitSeries`, `ResumeVisitSeries` | `standing` | `seriesKey` → `visitseries` |
+| `orchestration-base` | `ClaimTask` | `standing` | `taskKey` → `task` |
+| `wellness-domain` | `CreateSession` | `standing` | `studio` → `studio` |
+
+**`Charge` is one meta in the self voice, closing two debt rows.** Inc 1 settled the dual-grant question
+against `packages/clinic-domain/opmetas.go:44-135`: an op granted both scope=any (staff) and scope=self
+(consumer) carries **one** descriptor written in the **self** voice, because a staff FE hardcodes its own
+dispatch while a descriptor-driven client cannot infer the self path. The self slice therefore names
+`tabKey` + `menuItemKey` and **omits `amountCents`** — `ddls.go:672-676` branches on
+`op.authContextTarget` and derives the amount from the menuItem's own `.price`, so a self-submitted
+`amountCents` is never read. Describing it would be a lie about the input.
+
+The existing doc comment at `cafe-domain/opmetas.go:5-10` asserts *"Charge has no op-meta: it stays
+operator-only (permissions.go), so it is never Facet-reachable."* That is **false at HEAD** —
+`permissions.go:58-62` grants `Charge` scope=self to `consumer`. The comment is rewritten to describe the
+package as it now is.
+
+**`AuthContext: "standing"` is the honest value for the other seven.** All are staff-standing grants
+(`operator` + `frontOfHouse`/`backOfHouse`) whose authority is a role, not a relationship to the target —
+`OpDispatchSpec.AuthContext`'s own fourth case (`definition.go:521-530`: *populate none of the envelope's
+authContext fields*). Idiom: clinic's `SetProviderHours`/`SetProviderTimeOff`.
+
+**Reads are declared only where the script's own read is grounded, never speculatively.** The
+`TargetField` fallback already declares the target VERTEX but not its aspects (`cafe-domain/opmetas.go`
+Settle comment), and clinic's five metas declare no `Reads` at all. So: `Charge` declares
+`{payload.tabKey}.status` (`require_open_status`) and `{payload.menuItemKey}` + `.price` — the script
+*names* that contract, failing with *"caller must declare … in contextHint.reads"* (`ddls.go:562-563`);
+`StartVisitSeries` declares `{payload.patientKey}` + `{payload.providerKey}`, which its own field docs call
+mandatory (`visitseries.go:91-96`). Everything the scripts reach through a **class-(e) bounded
+enumeration or a data-derived follow-up** — `ClaimTask`'s `kv.Links(queuedFor)` → `holdsRole` read
+(`ddls.go:419-449`), `require_workplace`'s site walk, the visit-series guard's prior-`.series`/`.paused`
+reads — is **deliberately undeclared**: those keys are unknowable to the caller in advance, which is
+exactly why the read posture sanctions them live.
+
+**`orchestration-base` gains its first `OpMetas`.** Its `Package` has no such field today
+(`package.go:46-55`), so the field, the `OpMetas()` function, and a `manifest.yaml` `opMetas:` block all
+land together. Verified not assumed: **no** package declares a `ClaimTask` meta anywhere, so this is not
+the cross-package shadow the S1 rule warns about — orchestration-base owns the op's DDL.
+
+**`clinic-reminders` upgrades bare→full in place.** `visitSeriesOpMetas()` (`visitseries.go:845-852`)
+already returns four bare `{OperationType}` entries; three become full descriptors and
+`AdvanceVisitSeries` **stays bare** — it is engine-driven (Weaver re-arms the series), carries no debt
+entry, and no human triggers it. Count and order are unchanged, so `clinic-reminders/manifest.yaml`
+needs no edit.
+
+**Gotchas.** A manifest's `opMetas:` is an **order-matched list of `operationType`** verified
+field-by-field (`internal/pkgmgr/manifest.go:141,189-193`), so an added meta needs a manifest entry **in
+the same position**. `cafe-domain/package_test.go:49` pins `len(Package.OpMetas)` at 2 → 4. Package edit
+⇒ version bump in **both** `package.go` and `manifest.yaml` or the install no-ops on a running stack. A
+descriptor is not an authorization change: every one of these ops keeps its existing guard, and no guard
+is loosened to make a descriptor "work".
+
+**Non-goals.** identity-domain (§3.4, conforms last); the 5 `lens-cypher` entries; `AdvanceVisitSeries`
+and the other bare orchestration metas; any FE work to render these descriptors; any guard, grant, or
+permission-semantics change.
