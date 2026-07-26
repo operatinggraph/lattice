@@ -235,6 +235,54 @@ cycle-loupe: assert-main-checkout
 	 NATS_URL=$(NATS_URL) NATS_NKEY=$(NKEY_LOUPE) BOOTSTRAP_JSON_PATH=$(BOOTSTRAP_JSON) LOUPE_PG_DSN=$(LOUPE_PG_DSN) LOUPE_OPERATOR_ACTOR_KEY="$$LOUPE_OP_KEY" LOUPE_DEV_AUTH=1 ./bin/loupe >>loupe.log 2>&1 </dev/null & \
 	  sleep 2; pgrep -f "bin/loupe" >/dev/null && echo "==> Loupe running on http://127.0.0.1:7777" || { echo "!! Loupe failed to start — see loupe.log"; exit 1; }
 
+# Per-vertical launch env for cycle-<vertical> below. Each mirrors the launch in
+# that vertical's own up-<vertical> target, which stays the authority for how the
+# app runs — loftspace and clinic read a non-superuser SELECT-only DSN, café and
+# wellness take none.
+CYCLE_NKEY_loftspace = $(NKEY_LOFTSPACE_APP)
+CYCLE_ENV_loftspace  = LOFTSPACE_APP_PG_DSN="$(LOFTSPACE_APP_PG_DSN)" LOFTSPACE_APP_DEV_AUTH=1
+CYCLE_PORT_loftspace = 7788
+CYCLE_NKEY_clinic    = $(NKEY_CLINIC_APP)
+CYCLE_ENV_clinic     = CLINIC_APP_PG_DSN="$(CLINIC_APP_PG_DSN)" CLINIC_APP_DEV_AUTH=1
+CYCLE_PORT_clinic    = 7799
+CYCLE_NKEY_cafe      = $(NKEY_CAFE_APP)
+CYCLE_ENV_cafe       = CAFE_APP_DEV_AUTH=1
+CYCLE_PORT_cafe      = 7801
+CYCLE_NKEY_wellness  = $(NKEY_WELLNESS_APP)
+CYCLE_ENV_wellness   = WELLNESS_APP_DEV_AUTH=1
+CYCLE_PORT_wellness  = 7802
+
+## cycle-<vertical> — Rebuild bin/<vertical>-app from the current tree and
+## relaunch it against the STILL-RUNNING stack: cycle-loftspace, cycle-clinic,
+## cycle-cafe, cycle-wellness. The vertical-app sibling of cycle-loupe /
+## cycle-refractor above, and not a teardown either.
+##
+## Use it after any change that reaches cmd/<vertical>-app or a package it links
+## — derive the set with `go list -deps ./cmd/<x>`, never from memory. A merge
+## does not update the bin/* the stack runs, and a stale binary is a perfectly
+## healthy running process, so liveness is not freshness.
+##
+## This exists because up-<vertical> chains up-full + provisioning, which is the
+## wrong tool once a stack is already up: cycling ONE binary you changed is
+## explicitly allowed, tearing down a shared stack is not. A changed package
+## DDL/lens is a different axis again — reach for `make reinstall-package
+## PKG=packages/<x>`, which diff-applies in place with no teardown.
+##
+## Logs append to <vertical>-app.log rather than truncating, so a crash loop
+## keeps its earlier evidence.
+cycle-loftspace cycle-clinic cycle-cafe cycle-wellness: cycle-%: assert-main-checkout
+	@if [ -z "$(CYCLE_NKEY_$*)" ]; then echo "!! no launch env for vertical '$*'"; exit 2; fi
+	@echo "==> Killing the running $*-app..."
+	-pkill -f "bin/$*-app" 2>/dev/null || true
+	@echo "==> Rebuilding bin/$*-app..."
+	go build -o bin/$*-app ./cmd/$*-app
+	@echo "==> Starting $*-app in background..."
+	@NATS_URL=$(NATS_URL) NATS_NKEY=$(CYCLE_NKEY_$*) BOOTSTRAP_JSON_PATH=$(BOOTSTRAP_JSON) \
+	  $(CYCLE_ENV_$*) ./bin/$*-app >>$*-app.log 2>&1 </dev/null & \
+	  sleep 2; pgrep -f "bin/$*-app" >/dev/null \
+	    && echo "==> $*-app running on http://127.0.0.1:$(CYCLE_PORT_$*)" \
+	    || { echo "!! $*-app failed to start — see $*-app.log"; exit 1; }
+
 ## down — Tear down all containers and remove the per-graph dev JSON artifacts
 ## (lattice.bootstrap.json + loupe-operator.json). Both name random NanoIDs seeded
 ## into the now-destroyed graph, so a stale copy dangles a fresh bootstrap (empty
