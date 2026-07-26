@@ -102,12 +102,16 @@ text. Both should reach the Graph, and the pattern should also reach its package
 
 ### 2.1 What can be built now
 
-**F23.1 — Flow detail (S).** Click a flow → a detail panel: resolved pattern name (linked to
-the meta-vertex and its owning package), subject keyLink, the step sequence with the cursor
-marked, `pendingToken`, `retryCount`, `terminal`, and the failure reason when there is one.
-The step list comes from the pinned pattern via `inspect`. Where the read model and Loom
-disagree, the panel says so in both voices rather than picking one — that disagreement is
-diagnostic, and 1.1 turns it into a first-class badge.
+**F23.1 — Flow detail (S) — SHIPPED `1551f31b`.** `#/flows/<instanceId>`: resolved pattern name
+(linked to the meta-vertex), subject keyLink, the step sequence with the cursor marked,
+`retryCount`, and the failure reason when there is one. Where the read model and Loom disagree
+the panel states it in a sentence rather than picking a winner.
+
+Two corrections found in the build. **`pendingToken` is not reachable** — `InstanceSummary`
+carries instanceId/patternRef/subjectKey/cursor/status/retryCount and nothing else, so the
+panel shows what the control plane actually exposes. And **the step LIST does not come from
+`inspect`** — the control plane resolves only the *current* step, so the sequence is read from
+the pinned pattern's own `.spec` aspect and the cursor marks the instance's place in it.
 
 **F23.2 — Make the wall readable (XS–S).** Resolve pattern names, group by pattern, sort
 exception-first, linkify the pattern ref. Mechanically small; it is the difference between a
@@ -190,7 +194,7 @@ should say plainly that remediation is the device's own next attach.
 |---|---|---|---|
 | **F23.0** | Live-badge honesty: terminal instances are not live; read-model-vs-Loom disagreement becomes `stale-history` | XS–S | ✅ SHIPPED `f5eb461c` |
 | **F23.2** | Flows readability: resolved pattern names, grouping, exception-first sort, linkified pattern | XS–S | ✅ SHIPPED `f5eb461c` |
-| **F23.1** | Flow detail panel: steps, cursor, pendingToken, retryCount, failure reason | S | F23.0 ✅ |
+| **F23.1** | Flow detail panel: steps, cursor, retryCount, failure reason | S | ✅ SHIPPED `1551f31b` |
 | **F24.1** | Edge fleet triage: worst-first, retention-headroom headline, expandable Interest Set | XS–S | — |
 | **F24.2** | Edge device detail panel | S | F24.1 |
 

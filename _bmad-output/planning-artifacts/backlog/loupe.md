@@ -36,7 +36,6 @@ fire order: [loupe-flows-edge-depth-ux.md](../../implementation-artifacts/loupe-
 
 | Item | What it is | Imp | Size | State |
 |---|---|---|---|---|
-| **F23.1 — a flow has no detail, only a tile** | A flow is a sequence of steps and the card shows none of it. Loom's `inspect` already returns cursor / currentStep / pendingToken / retryCount / terminal and is classified read-only, so the panel needs no cross-lane ask (verified live). | ★★ | S | 📋 ready · [§2.1](../../implementation-artifacts/loupe-flows-edge-depth-ux.md) |
 | **F24.1 — Edge states a fleet problem with no triage order** | 26 of 31 devices gapped, sorted by identity, so the worst device is wherever its identity falls; no retention-headroom headline, Interest Set not expandable. | ★★ | XS–S | 📋 ready · [§3.1](../../implementation-artifacts/loupe-flows-edge-depth-ux.md) |
 | **F24.2 — no per-device detail on the Edge fleet** | Each device is a flat text block: no Interest Set contents, no ack position against the retention floor in time as well as messages, no registration provenance, no sibling devices. | ★ | S | 📋 ready · seq: F24.1 · [§3.1](../../implementation-artifacts/loupe-flows-edge-depth-ux.md) |
 | **Flows stays read-only until Loom can redrive an instance** | Loom exposes no retry: `failed` is terminal, `RetryCount` only counts, pause/resume are consumer-scoped, and `StartLoomPattern` is idempotent on instanceId. A console button minting a fresh instance would double-execute every committed side effect. | ★★ | S | 🚧 blocked-on: Loom per-instance redrive (lattice) · [§2.2](../../implementation-artifacts/loupe-flows-edge-depth-ux.md) |
@@ -79,6 +78,7 @@ fire order: [loupe-flows-edge-depth-ux.md](../../implementation-artifacts/loupe-
 
 One line per shipped item (`date · SHA · [tag] title`). Oldest roll to `archive/` past ~25.
 
+- 2026-07-25 · `1551f31b` · [Loupe/F23.1] Flow detail — `#/flows/<id>` step sequence off the pinned pattern + the instance cursor; history/engine/pattern kept separable, disagreement stated. Lead self-review, live-verified
 - 2026-07-25 · `f5eb461c` · [Loupe/F23.0+F23.2] Flows badge reads Loom's status not its memory — terminal-aware liveness + `stale-history`; pattern names resolved, grouped, exception-first. Lead self-review, live-verified
 - 2026-07-25 · `44aa4a22` · [Loupe/maint] Capability apply recovers from a half-commit in-console — payload-free `mark-applied`, version-verified; rejected op replies no longer read as success. 3-layer review, CI green
 - 2026-07-25 · `1a0d1849` · [Loupe/maint] Cross-origin fork retired — `appsession.OriginGate` extracted off `*Manager`; Loupe's copy (parser + matcher + loopback test) deleted, kit tests cover it
