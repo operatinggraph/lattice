@@ -209,8 +209,10 @@ func TestEvalCapabilityLenses_AnExplainedStallStillEscalates(t *testing.T) {
 func TestEvalCapabilityLenses_ALongRebuildWarnsButNeverEscalates(t *testing.T) {
 	// A rebuild is a superset of the sweep — truncate plus full rescan — so a
 	// long one is not an unverified projection. It is worth a degrade (the read
-	// model is mid-refill) but the sweep detector cannot judge how long a
-	// rebuild may legitimately run, so it must not escalate on duration.
+	// model is mid-refill) but duration alone is not this detector's verdict.
+	// With no progress report yet, the rebuild is UNKNOWN rather than wedged:
+	// there is a real gap between Rebuild starting and its first poll landing,
+	// and calling that stuck would fire on every rebuild there is.
 	_, issues := sweptThenHeld(stallWindow*10, "rebuild in flight", func(s *CapabilityLensStatus) {
 		s.Status = "rebuilding"
 	})
@@ -224,6 +226,81 @@ func TestEvalCapabilityLenses_ALongRebuildWarnsButNeverEscalates(t *testing.T) {
 	}
 	if s := aggregateStatus(issues); s != "degraded" {
 		t.Fatalf("status = %q, want degraded", s)
+	}
+}
+
+func TestEvalCapabilityLenses_ADrainingRebuildNeverEscalatesHoweverLongItRuns(t *testing.T) {
+	// The exemption a rebuild earns is for DRAINING, and it is unconditional on
+	// duration: a genuinely large rescan can outrun any window, and the whole
+	// reason this detector defers to the rebuild is that it cannot judge how long
+	// that legitimately takes.
+	start := time.Now()
+	cur := sweepSnap("capability", start, 0, "")
+	h := &LatticeHeartbeater{CapabilityLensProvider: func() []CapabilityLensStatus {
+		return []CapabilityLensStatus{cur}
+	}}
+	h.evalCapabilityLenses(start)
+
+	at := start.Add(stallWindow * 20)
+	cur = sweepSnap("capability", at, stallWindow*20, "rebuild in flight")
+	cur.Status = "rebuilding"
+	cur.RebuildOutstanding = 4200
+	cur.RebuildProgressAt = at.Add(-time.Second) // drained a moment ago
+	_, issues := h.evalCapabilityLenses(at)
+
+	is, ok := issueByCode(issues, issueCapabilitySweepStalled)
+	if !ok {
+		t.Fatalf("expected %s, got %v", issueCapabilitySweepStalled, issues)
+	}
+	if is.Severity != "warning" {
+		t.Fatalf("severity = %q, want warning — a rebuild that is still draining is not stuck", is.Severity)
+	}
+}
+
+func TestEvalCapabilityLenses_AWedgedRebuildLosesTheExemption(t *testing.T) {
+	// The carve-out exists because a rebuild supersedes the sweep. A rebuild that
+	// has not drained a single message in the window that would have escalated
+	// the sweep is superseding it with nothing: the sweep will not resume on its
+	// own, and the auth-plane read model is unverified with no one told.
+	start := time.Now()
+	cur := sweepSnap("capability", start, 0, "")
+	h := &LatticeHeartbeater{CapabilityLensProvider: func() []CapabilityLensStatus {
+		return []CapabilityLensStatus{cur}
+	}}
+	h.evalCapabilityLenses(start)
+
+	at := start.Add(stallWindow * 4)
+	cur = sweepSnap("capability", at, stallWindow*4, "rebuild in flight")
+	cur.Status = "rebuilding"
+	cur.RebuildOutstanding = 900
+	cur.RebuildProgressAt = start // polled once, has drained nothing since
+	metric, issues := h.evalCapabilityLenses(at)
+
+	is, ok := issueByCode(issues, issueCapabilitySweepStalled)
+	if !ok {
+		t.Fatalf("expected %s, got %v", issueCapabilitySweepStalled, issues)
+	}
+	if is.Severity != "error" {
+		t.Fatalf("severity = %q, want error — a rebuild draining nothing is stuck, not slow", is.Severity)
+	}
+	if !strings.Contains(is.Message, "has not drained") {
+		t.Fatalf("the message must name the rebuild as the cause, got %q", is.Message)
+	}
+	if got := metric["capability"]["rebuildOutstanding"]; got != uint64(900) {
+		t.Fatalf("rebuildOutstanding = %v, want the count an operator needs to see", got)
+	}
+}
+
+func TestEvalCapabilityLenses_AFinishedRebuildPublishesNoStaleCount(t *testing.T) {
+	// The last count a finished rebuild ended on is not a fact about the lens
+	// now; publishing it would read as a rebuild permanently stuck there.
+	metric, _ := sweptThenHeld(stallWindow+time.Minute, "", func(s *CapabilityLensStatus) {
+		s.RebuildOutstanding = 77
+		s.RebuildProgressAt = time.Now()
+	})
+
+	if _, present := metric["capability"]["rebuildOutstanding"]; present {
+		t.Fatalf("an active lens must not publish a finished rebuild's outstanding count")
 	}
 }
 

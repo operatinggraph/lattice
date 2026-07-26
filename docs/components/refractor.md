@@ -655,8 +655,16 @@ drawn so a lens keeps its slot across restarts.
   `sweep-stalled`: `error` at once when no *fresh* suppression reason explains it (the sweep
   should be ticking and is not — a reason older than ~2 intervals describes a tick that
   already ended, so it explains nothing), `warning` escalating to `error` at 3× the window
-  when a cause is named, and `warning` without escalation while the lens is `rebuilding` (a
-  rebuild supersedes the sweep, and its own duration is not this detector's verdict). A
+  when a cause is named, and `warning` while the lens is `rebuilding` — a rebuild supersedes
+  the sweep, and its own duration is not this detector's verdict. A rebuild that has stopped
+  **draining** does escalate to `error`: `watchRebuildCompletion` records the un-drained count
+  and when it last *decreased*, and a rebuild that has not drained a message within the same
+  staleness window is stuck rather than slow, superseding the sweep with nothing. A rebuild
+  still draining is exempt however long it runs; one that has not yet reported a count is
+  unknown, not wedged. While a rebuild is in flight the metric carries `rebuildOutstanding`
+  and `rebuildProgressAt` (dropped once it finishes, so a stale final count is never published
+  as a stuck one). A poll that keeps erroring records no progress deliberately — that retry is
+  unbounded, so an error that never clears must read as wedged. A
   paused lens is exempt — already an error in its own right — and the exemption re-baselines
   the clock, so a resume does not read as stalled for the length of the pause. The cursor and
   heal count persist on the lens's existing health entry, so a restart resumes rather than

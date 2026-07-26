@@ -99,11 +99,30 @@ const defaultCapabilitySweepStallCycles = 10
 // something an operator can clear, so the first window is a warning; still
 // unswept 30 minutes later (at the defaults) nobody is clearing it, and the
 // auth-plane read model has gone unverified long enough to outrank a degrade.
-// A rebuild is exempt from the escalation, never from the warning: a rebuild is
-// a SUPERSET of the sweep (truncate + full rescan), so a long one is not an
-// unverified projection — how long a rebuild may legitimately run is the
-// rebuild's own signal to own, not a verdict this detector can reach.
+// A rebuild that is DRAINING is exempt from the escalation, never from the
+// warning: a rebuild is a SUPERSET of the sweep (truncate + full rescan), so a
+// long one is not an unverified projection. How long a rebuild may legitimately
+// run is the rebuild's own signal to own — and it owns one now (see
+// evalRebuildWedged), so a rebuild that has stopped draining no longer inherits
+// the exemption its draining sibling earns.
 const capabilitySweepStallErrorMultiplier = 3
+
+// evalRebuildWedged reports how long a rebuild has gone without draining a
+// single message, and whether that is long enough to call it stuck rather than
+// slow. The window is the same staleness window the sweep would have been judged
+// on: the rebuild took the sweep's place, so it answers to the sweep's clock.
+//
+// A rebuild that has never reported (zero timestamp) is unknown, not wedged —
+// the poll interval means there is a real gap between Rebuild returning and the
+// first count arriving, and reporting a rebuild as stuck the instant it starts
+// would fire on every one of them.
+func evalRebuildWedged(s CapabilityLensStatus, now time.Time, stallAfter time.Duration) (time.Duration, bool) {
+	if s.RebuildProgressAt.IsZero() {
+		return 0, false
+	}
+	since := now.Sub(s.RebuildProgressAt)
+	return since, since > stallAfter
+}
 
 // capabilitySweepSuppressionFreshnessCycles bounds how old a recorded
 // suppression reason may be and still count as explaining the current stall.
@@ -194,6 +213,16 @@ type CapabilityLensStatus struct {
 	SweepSuppression   string
 	SweepSuppressionAt time.Time
 	SweepInterval      time.Duration
+	// RebuildOutstanding is the rebuild's most recent un-drained count and
+	// RebuildProgressAt when that count last DECREASED. A rebuild suppresses the
+	// sweep, so while one runs the sweep's silence is explained and the stall
+	// detector can say nothing about it — these are what let the detector judge
+	// the rebuild instead. A rebuild that is draining keeps advancing the
+	// timestamp; one that is wedged does not, and neither does one whose
+	// outstanding poll keeps erroring (that retry is unbounded). Zero
+	// RebuildProgressAt means no rebuild has reported yet — unknown, not stalled.
+	RebuildOutstanding uint64
+	RebuildProgressAt  time.Time
 }
 
 // LensLivenessStatus is one non-auth-plane (business) lens's liveness snapshot,
@@ -752,7 +781,17 @@ func (h *LatticeHeartbeater) evalCapabilityLenses(now time.Time) (map[string]map
 				stallSeverity = "error"
 			case s.Status == "rebuilding":
 				detail += ", suppressed: " + s.SweepSuppression
-				if stallSeverity == "" {
+				// How long a rebuild may legitimately run is the rebuild's own
+				// signal to own, and now it owns one. A rebuild still draining
+				// stays exempt however long it takes; one that has not drained a
+				// message in the same window that would have escalated the sweep
+				// is not a long rebuild, it is a stuck one, and the sweep it
+				// suppresses is not going to resume on its own.
+				if wedgedFor, wedged := evalRebuildWedged(s, now, stallAfter); wedged {
+					detail += fmt.Sprintf(", rebuild has not drained for %s (%d outstanding)",
+						wedgedFor.Round(time.Second), s.RebuildOutstanding)
+					stallSeverity = "error"
+				} else if stallSeverity == "" {
 					stallSeverity = "warning"
 				}
 			case stalledFor > time.Duration(capabilitySweepStallErrorMultiplier)*stallAfter:
@@ -780,6 +819,13 @@ func (h *LatticeHeartbeater) evalCapabilityLenses(now time.Time) (map[string]map
 			"failingActors":    s.SweepFailingActors,
 			"sweepLastPassAt":  lastPassAt,
 			"sweepSuppression": s.SweepSuppression,
+		}
+		if s.Status == "rebuilding" && !s.RebuildProgressAt.IsZero() {
+			// Only while one is running: a finished rebuild's last count is not a
+			// fact about the lens now, and publishing it would read as a rebuild
+			// permanently stuck at whatever it ended on.
+			entryMetric["rebuildOutstanding"] = s.RebuildOutstanding
+			entryMetric["rebuildProgressAt"] = substrate.FormatTimestamp(s.RebuildProgressAt)
 		}
 		if s.Unreadable != "" {
 			// An explicit null, not a zero: "we could not read the lag" and "the

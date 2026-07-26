@@ -365,6 +365,10 @@ func main() {
 				snap.SweepSuppressionAt = status.SuppressionAt
 				snap.SweepInterval = sw.Interval()
 			}
+			// A rebuild suppresses the sweep, so the stall detector cannot judge
+			// the sweep's silence while one runs. These let it judge the REBUILD
+			// instead — one that is draining against one that is wedged.
+			snap.RebuildOutstanding, snap.RebuildProgressAt = entry.pipeline.RebuildProgress()
 			// A lens whose liveness inputs cannot be read is reported as unknown,
 			// never omitted: dropping it removes the lens from
 			// metrics.capabilityLens entirely, which is indistinguishable from a

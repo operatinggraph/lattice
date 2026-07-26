@@ -64,3 +64,57 @@ func TestRebuild_UnguardedBucketTruncatesWhenRequested(t *testing.T) {
 	assert.True(t, rebuildTruncates(t, ad, true),
 		"an unguarded bucket must truncate when truncate=true is explicitly requested")
 }
+
+// TestRebuildProgress_AdvancesOnlyWhenTheBacklogSHRINKS is what separates a
+// rebuild that is draining from one that is wedged. "Last observed" is true of a
+// wedged rebuild on every poll and would report it healthy forever; only "last
+// went down" is evidence of progress.
+func TestRebuildProgress_AdvancesOnlyWhenTheBacklogShrinks(t *testing.T) {
+	p, err := New("rule-rebuild-progress", "nats_kv", "CORE", nil, nil, &guardedTruncAdapter{}, nil)
+	require.NoError(t, err)
+
+	// The first poll of a rebuild establishes the baseline: there is nothing to
+	// have decreased from yet, so it counts as progress.
+	p.recordRebuildProgress(500)
+	outstanding, first := p.RebuildProgress()
+	require.EqualValues(t, 500, outstanding)
+	require.False(t, first.IsZero(), "the first poll baselines the clock")
+
+	// A poll at the SAME count is the wedge: the count is fresh, the rebuild is
+	// not moving.
+	p.recordRebuildProgress(500)
+	_, held := p.RebuildProgress()
+	assert.Equal(t, first, held, "an unchanged backlog is not progress")
+
+	// A backlog that GROWS is not progress either — a rebuild racing new writes
+	// can legitimately grow, but an oscillating count must not keep resetting
+	// the clock and mask a rebuild that never gets closer to done.
+	p.recordRebuildProgress(600)
+	_, grown := p.RebuildProgress()
+	assert.Equal(t, first, grown, "a growing backlog does not reset the progress clock")
+
+	// A strict decrease is progress.
+	p.recordRebuildProgress(400)
+	outstanding, drained := p.RebuildProgress()
+	require.EqualValues(t, 400, outstanding)
+	assert.True(t, drained.After(first), "a shrinking backlog advances the progress clock")
+}
+
+// TestRebuild_ClearsThePreviousRebuildsProgress: a finished rebuild's timestamp
+// must not be inherited by the next one, or a fresh rebuild is judged on a clock
+// it never started.
+func TestRebuild_ClearsThePreviousRebuildsProgress(t *testing.T) {
+	ad := &guardedTruncAdapter{guarded: true}
+	p, err := New("rule-rebuild-progress-reset", "nats_kv", "CORE", nil, nil, ad, nil)
+	require.NoError(t, err)
+
+	p.recordRebuildProgress(10)
+	_, before := p.RebuildProgress()
+	require.False(t, before.IsZero())
+
+	require.Error(t, p.Rebuild(context.Background(), false)) // no supervisor
+	outstanding, after := p.RebuildProgress()
+
+	assert.Zero(t, outstanding)
+	assert.True(t, after.IsZero(), "a new rebuild starts with no progress record of its own")
+}

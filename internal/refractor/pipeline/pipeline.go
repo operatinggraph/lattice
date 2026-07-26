@@ -135,6 +135,16 @@ type Pipeline struct {
 	// prematurely reporting "active" while the rescan is still draining.
 	rebuildPollInterval time.Duration
 	rebuildInFlight     atomic.Bool
+	// rebuildOutstanding is the most recent un-drained count watchRebuildCompletion
+	// polled, and rebuildProgressAt when that count last went DOWN. Together they
+	// separate a rebuild that is draining from one that is wedged — a distinction
+	// elapsed time alone cannot make, which is why the sweep-stall detector
+	// exempts a rebuild from escalation entirely. A poll that ERRORS deliberately
+	// advances neither: OutstandingForConsumer is retried indefinitely, so an
+	// error that never clears is exactly the wedge this is here to expose.
+	rebuildMu          sync.Mutex
+	rebuildOutstanding uint64
+	rebuildProgressAt  time.Time
 
 	// sweeper is the auth-plane convergence sweep, installed via SetSweepPlan
 	// for an auth-plane actor-aggregate lens only and driven by RunSweep. Nil
@@ -561,6 +571,12 @@ func (p *Pipeline) Rebuild(ctx context.Context, truncate bool) error {
 	// publish "active" while the rescan is still draining.
 	p.rebuildInFlight.Store(true)
 
+	// Clear the previous rebuild's progress record so this one is judged on its
+	// own draining, not on a stale timestamp a finished rebuild left behind.
+	p.rebuildMu.Lock()
+	p.rebuildOutstanding, p.rebuildProgressAt = 0, time.Time{}
+	p.rebuildMu.Unlock()
+
 	// 1. Set health status to "rebuilding".
 	if p.reporter != nil {
 		if err := p.reporter.SetRebuilding(ctx); err != nil {
@@ -662,8 +678,11 @@ func (p *Pipeline) watchRebuildCompletion(ctx context.Context) {
 					return
 				}
 				// Consumer may still be initializing or context cancelled; retry.
+				// No progress is recorded: this retries forever, so an error that
+				// never clears must read as wedged rather than as quietly fine.
 				continue
 			}
+			p.recordRebuildProgress(outstanding)
 			if outstanding == 0 {
 				// Clear the flag before the status write so a concurrent health
 				// sink SetActive that re-checks the flag converges on "active".
@@ -677,6 +696,34 @@ func (p *Pipeline) watchRebuildCompletion(ctx context.Context) {
 			}
 		}
 	}
+}
+
+// recordRebuildProgress folds one poll of the un-drained count into the rebuild's
+// progress record. The timestamp advances only on a STRICT decrease, so it
+// answers "when did this rebuild last actually drain something" rather than
+// "when was it last observed" — the second is true of a wedged rebuild every
+// poll interval and would report it as healthy forever.
+//
+// A count that goes UP is still progress in the sense that matters here: the
+// consumer is live and the backlog is real, and a rebuild racing new writes can
+// legitimately grow. What it must not do is reset the clock, so an oscillating
+// count cannot mask a rebuild that never gets closer to done.
+func (p *Pipeline) recordRebuildProgress(outstanding uint64) {
+	p.rebuildMu.Lock()
+	defer p.rebuildMu.Unlock()
+	if p.rebuildProgressAt.IsZero() || outstanding < p.rebuildOutstanding {
+		p.rebuildProgressAt = time.Now()
+	}
+	p.rebuildOutstanding = outstanding
+}
+
+// RebuildProgress reports the rebuild's un-drained count and when it last
+// decreased. progressAt is zero when no rebuild has polled yet, which a consumer
+// must read as "unknown", never as "stalled since the epoch".
+func (p *Pipeline) RebuildProgress() (outstanding uint64, progressAt time.Time) {
+	p.rebuildMu.Lock()
+	defer p.rebuildMu.Unlock()
+	return p.rebuildOutstanding, p.rebuildProgressAt
 }
 
 // handleTracked wraps handle to advance the projection-liveness forward
