@@ -1,5 +1,22 @@
 # Refractor open rows — compiled fire briefs (scouting pass, 2026-07-25)
 
+> ## ✅ All six fires shipped, 2026-07-25
+>
+> | Fire | Shipped | Outcome against the brief |
+> |---|---|---|
+> | B | `90d79ff8` | As briefed. `SetKeyPrefix` mirrored `SetGuarded`; bound via `ApplyTruncateScope` at activation **and** on every hot-reload rebuild, which the brief did not call out — a replacement adapter that lost the scoping reaches the same wipe through the swap. |
+> | D | `4de52240` | **Premise disproven, as the brief predicted it might be.** The falsification test passed: `Rebuild(truncate=false)` already re-derives absent rows. Collapsed from S–M to a test + the corrected operator warning + docs. No repair mechanism was built. |
+> | A | `33a6cc61` | As briefed, no new substrate primitive. The tail-fairness test was **vacuous when first written** — it asserted on the selection, which the deep verify reaches independently, so it passed with the coverage cursor frozen. Rewritten onto the cursor. |
+> | C | `7f183d69` | As briefed. The count was already in hand and discarded; the carve-out now keys on *draining* rather than on *being a rebuild*. |
+> | F | `e5268c2f` | Reshaped during the build. An enrolled business lens is **guarded**, and the §6.2 guard refuses a token-less write — so the "never projected" fixture the auth-plane precedent uses cannot be healed at all. The test runs the consumer and loses the row out-of-band instead. |
+> | E | `a0a4bb34` | Fork resolved to **(a) refuse-and-report**, as the brief recommended. The Refractor half already existed (`298ef8ed` records refusals on health); the built half is the apply-time predictor, constrained by the standing rule that pkgmgr must not import `internal/refractor/lens`. |
+>
+> **Not built, correctly:** the `cap-read` size bound (Andrew ratified the design `08166be8` and shelved it
+> behind showcase completion) and the cross-instance rollup (HA-NATS). Both were named non-buildable here.
+>
+> The brief below is kept as written, including the parts the build corrected — a scouting pass whose
+> misses are edited out teaches nothing about how far ahead of a build one can usefully see.
+
 **Status:** scouting artifact, not a design. Every buildable row below is already ratified or `📋 ready` on
 the Lattice board; nothing here proposes new architecture or needs Andrew's signature. The two rows that
 *do* need him are named as such and carry no build brief.

@@ -48,7 +48,6 @@ Open items only (shipped ones are in the Done log). Grouped by component tag.
 |---|---|---|---|---|
 | **[Loom] Guardless-step recovery check-before-act probe** | On total `loom-state` loss + a re-triggered `StartLoomPattern`, a fresh instance replays guards from cursor 0 (re-runs an already-applied guarded step). | ★ | S–M | 🗄️ shelved-backup (Andrew: no new engine Core-KV reads) |
 | **[Processor] Tombstone-with-document warn→reject flip (Fire 2)** | Fire 1 (emitter sweep + parser warn) shipped `6b68fde4`; flip the warn to a reject once warn sightings are clean (stale stored scripts clear via world recreation). | ★★ | XS | 🚧 seq behind clean warn-window · [design](../../implementation-artifacts/tombstone-body-preservation-design.md) §6 |
-| **[Refractor] Shared-bucket rebuild truncate wipes sibling lenses** | Guarded rebuild forces truncate (`pipeline.go:585-594`) and `NatsKVAdapter.Truncate` purges the whole bucket, so rebuilding ONE lens wipes every sibling's keys in the shared `capability` bucket — auth outage until sweeps heal (~25 actors/min). Fix: prefix-scoped truncate (keys the lens's `AnchorFromKey` claims). | ★★ | S–M | 📋 ready (standalone fire-briefs Fire B; the shelved [cap-read design](../../implementation-artifacts/cap-read-per-anchor-grant-keys-design.md) §4.5 inherits it at revive) |
 
 ### Survey log (round-robin rotation)
 
@@ -115,17 +114,16 @@ designed-through, but the *fork decision* + the *contract commit* are Andrew's.
 > build when Verticals has work queued, and yield the lock.
 > **Build-ready now** (within that): the
 > **script live-read budget** (★★ M, the bigger sibling of the shipped envelope ceiling), the
-> **MergeIdentity dead collision check** (★★ S–M), the
-> **rebuild-progress signal** (★★ S–M), the **diverged `actor_read_grants` repair path**
-> (★★ S–M), then the two ★ Processor sensitive-predicate rows. Both 2026-07-25 ratifications are
+> **MergeIdentity dead collision check** (★★ S–M), then the two ★ Processor sensitive-predicate
+> rows. Both 2026-07-25 ratifications are
 > 🗄️ **shelved with named revives** (cap-read → showcase completion; appsession → first real-IdP
 > deployment) — the Steward does not select them.
 > Every `✅ ratified` row is done or driver-blocked; the rest are Whetstone's or parking-lot.
 > A stale callout starves the lane — whoever ships next renames this.
 >
-> 📎 **The nine `[Refractor]` rows are pre-compiled** into six fires with verified touch-lists, precedents and
-> green checks — [refractor-open-rows-fire-briefs.md](../../implementation-artifacts/refractor-open-rows-fire-briefs.md).
-> Suggested order B → A → C → F → E; **D's premise is falsify-first**.
+> 📎 **Refractor is drained.** All seven buildable rows shipped 2026-07-25 against
+> [refractor-open-rows-fire-briefs.md](../../implementation-artifacts/refractor-open-rows-fire-briefs.md);
+> the two that remain are the shelved cap-read row and the HA-NATS-blocked rollup.
 
 ### Security & trust boundary
 | Item | What it is | Imp | Size | State |
@@ -137,12 +135,6 @@ designed-through, but the *fork decision* + the *contract commit* are Andrew's.
 | **[identity-hygiene] MergeIdentity's link-collision check can never fire** | `state[new_key]` tests the primary-rewritten link key, but the dispatcher declares only the secondary's edges — each carries `secondary_id` in the rewritten position, so `new_key` is never in `state` and a colliding `create` reaches step 8. Bites when both identities hold the same relation to one vertex (e.g. a shared role). Declaring the rewritten keys doubles the read set. | ★★ | S–M | 📋 ready · consumer: any merge of two identities sharing a relation |
 | **[packages] ~20 read-posture comments assert hydration-time fatality** | `packages/*` DDL comments + two READMEs still say a declared-but-absent read faults "before the script runs" (identity-domain, service-domain, privacy-base, objects-base, orchestration-base, clinic/loftspace READMEs), as does `docs/contracts/10-orchestration-substrate.md:238`. Doc-only sweep. | ★ | S | 📋 ready |
 | **Starlark 250ms wall budget fails installs under parallel test load** | `go test ./...` at default `-p` reds a different package-install test each run with `ScriptTimeout: script exceeded wall budget 250ms` — reproduced on unmodified `main`, so it predates any one fire. Costs every fire an investigation to rule out its own change. | ★★ | S–M | 📋 ready |
-| **[Refractor] The sweep's ANCHOR listing is unscoped, and enrolment multiplied it** | `ListKeysPrefix("vtx.<type>.")` returns every aspect key as well as every root, once per lens per tick, with five lenses sharing `anchorType: identity` and no sharing between them. A `vtx.<type>.*` single-token filter drops the aspect keys at the substrate. Cost, not correctness. | ★★ | S–M | 📋 ready · consumer: any cell with many vertices of a swept anchor type · [why](../../implementation-artifacts/lens-projection-liveness-design.md) §15.1 |
-| **[Refractor] A business lens's detect-and-heal has no e2e** | The auth-plane sweep has one and the plane-independent path is covered at the pipeline level, but nothing proves the whole chain — enrolled, scoped, healed, siblings untouched — for a business lens against a real substrate. | ★★ | S | 📋 ready · consumer: the next fire changing sweep selection or enrolment · [why](../../implementation-artifacts/lens-projection-liveness-design.md) §15.1 |
-| **[Refractor] A diverged `actor_read_grants` has no repair path** | A grant lens cannot truncate on rebuild (shared table, correctly no `Truncater`) and the adj-watch bulk re-insert is gone, so rows lost to an out-of-band restore/wipe are re-derived by nothing. A `DiffRetraction` producer heals on its next CDC event; the five non-diff producers wait for one touching their labels. Fail-closed. | ★★ | S–M | 📋 ready · consumer: an operator repairing `actor_read_grants` after a restore · [why](../../implementation-artifacts/lens-projection-liveness-design.md) §13.4 |
-| **[Refractor] A refused hot-reload leaves a package upgrade unapplied** | A lens ID is version-independent, so a package upgrade updates the spec in place — and re-authoring an actorAggregate lens's `Output` is refused whole (correctly; the alternative half-applied it). Nothing re-activates the lens, so `lattice-pkg apply` reports success while Refractor serves the old spec until restart. | ★★ | M | 📋 ready · consumer: a package author upgrading an actorAggregate lens's `Output` · [why](../../implementation-artifacts/lens-projection-liveness-design.md) §14.5 |
-| **[Refractor] The sweep's coverage walk reads once per row-less anchor examined** | `anchorLive` is a Core-KV read per *examined* row-less anchor, but only a *selected* one counts against the budget — so a large tombstone population is walked and read every tick while selecting nothing, against a design cost model of "one bounded batch of cypher evaluations a minute". | ★ | S | 📋 ready · consumer: any cell with many tombstoned anchors · [why](../../implementation-artifacts/lens-projection-liveness-design.md) §11.1 |
-| **[Refractor] A long-running rebuild has no progress signal** | A rebuild suppresses the sweep, so `CapabilitySweepStalled` reports it — but only as elapsed time, and cannot tell a rebuild that is draining from one wedged forever (`watchRebuildCompletion` retries an erroring `OutstandingForConsumer` indefinitely). Hence its deliberate no-escalation carve-out. A rebuild-progress signal (outstanding count, monotonic) would let the stall detector escalate a wedged rebuild. | ★★ | S–M | 📋 ready · consumer: operators, via the `sweep-stalled` warning that cannot escalate |
 | **[Refractor] A `cap-read` document has no size bound** | Even deduped, an actor reaching enough distinct anchors renders `cap-read.<domain>.<actor>` past NATS's max payload; the write then fails permanently, freezing that actor's grant set so revocations stop landing (fail-OPEN). Design: per-anchor keys (the Postgres per-row twin). | ★★ | L | 🗄️ shelved (revive: showcase completion) · ✅ design Andrew-ratified 2026-07-25 (Option A) · [design](../../implementation-artifacts/cap-read-per-anchor-grant-keys-design.md) · §6.13/§6.14 contract edit committed |
 | **[appsession] The production IdP posture cannot open a session** | `setCookie` runs only under a non-nil `Signer`, so with `_JWT_PUBLIC_KEY`/`_ISSUER` set nothing can issue the cookie — the verify-only posture is unreachable (401 everywhere), and `/api/session/refresh` 404s so every FE write path dies with it. Design: the kit becomes the OIDC code-flow RP. | ★★ | L | 🗄️ shelved (revive: first real-IdP deployment) · ✅ design Andrew-ratified 2026-07-25 · [design](../../implementation-artifacts/appsession-oidc-production-signin-design.md) |
 | **Multi-hat `scope=any`+`scope=self` first-match over-confines** | `matchPlatformPermission` returns on the first operationType match regardless of scope, and `capabilityRoles` collects roles unordered — so a consumer+staff identity (e.g. seed-showcase `seedSamMultiHat`) can authorize their OWN cafe tab as scope=any, losing the self exemption. Fail-closed; bites a multi-hat who works and lives in different buildings. | ★ | S–M | 📋 ready · no live victim (showcase multi-hat has no leaseapp) |
@@ -216,6 +208,18 @@ Real but low-value; do **not** spend design or build effort here unless Andrew g
 
 One line per shipped item (`date · SHA · [tag] title`). Oldest roll to `archive/` past ~25.
 
+- 2026-07-25 · `a0a4bb34` · [pkgmgr,refractor] an upgrade that cannot take effect says so where the operator is — `reloadpin` predicts the refusal at apply time; `ReactivationRequired` + drift guard
+
+- 2026-07-25 · `e5268c2f` · [refractor] a business lens heals its own hole and leaves its neighbours alone — real-substrate e2e: enrolled, scoped, healed, siblings pinned by revision
+
+- 2026-07-25 · `7f183d69` · [refractor] a rebuild owns the signal the stall detector deferred to — outstanding + last-decreased published; a wedged rebuild escalates, a draining one stays exempt
+
+- 2026-07-25 · `33a6cc61` · [refractor] the sweep lists roots at the substrate and pays for what it examines — `vtx.<type>.*` filter + budgeted anchorLive walk, cursor keeps the tail reachable
+
+- 2026-07-25 · `4de52240` · [refractor] the un-truncatable rebuild is the grant table's repair, and now says so — premise disproven: absent rows re-derive through the ON CONFLICT arm; warning corrected
+
+- 2026-07-25 · `90d79ff8` · [refractor] a rebuild truncates what the lens owns, not the bucket it borrows — prefix-scoped `Truncate` bound to the rule, closing the shared-bucket auth wipe
+
 - 2026-07-25 · `043608a5` · [processor] a declared read set is bounded, and a repeated key is one read — summed `MaxDeclaredReads` ceiling at the envelope + `distinctKeys` in all three hydration loops; Contract #2 §2.5 edit staged uncommitted
 
 - 2026-07-25 · `34b13ffd` · [refractor] every actor-aggregate lens gets the healer, gated on what it can prove it owns — ownership-scoped listing + three-part install gate; business verdicts warning-only
@@ -246,12 +250,5 @@ One line per shipped item (`date · SHA · [tag] title`). Oldest roll to `archiv
 - 2026-07-25 · `ae05f60a` · [processor] the external-egress guard fires on what the script CONSUMED, not on what hydration decrypted — closes the sensitive-class oracle; whole-set exposure records, `state` attrs default-deny
 - 2026-07-25 · `3a78c109` · [processor] a declared read faults where the operation NAMES the key, not at hydration — closes the pre-script Core-KV existence oracle; enumeration deliberately does not fault
 - 2026-07-24 · `10f01e71` · [lint,clinic-domain] a declaration binds to its own statement, not the next 8 lines (12 drifted sites fixed); clinic keys its exemption on `op.authTargetValidated`, `(legacy-self-exempt)` deleted
-- 2026-07-24 · `185a47ee` · [edge-manifest,test] the generated cap-read producer driven through the projection driver — an emptied slice retracts its key, a reachable actor keeps every real entry
-- 2026-07-24 · `bd3b76ba` · [pkgmgr,edge-manifest,lint] one `AnchorWalk` declaration compiles both read-grant enumerations — closes the dual-enumeration footgun (S2); 13 lenses migrated, 3 producers generated, gate flipped
-- 2026-07-24 · `390a6754` · [identity-domain,lint] validated-target exemptions are declared, not assumed — RecordIdentityPII rekeyed + §3.4.1 resource-bound; closes the forgeable-`authContext.target` item (Fire 2 of 2)
-- 2026-07-24 · `390a6754` · [lint] `authcontext-target` + `workplace-exempt` blocking gates (derived helper set, fixture self-test) — closes the validated-target-exemption-without-a-resource-bind item
-- 2026-07-24 · `fe8378c0` · [processor,packages] `op.authTargetValidated` closes the forgeable-`authContext.target` confinement bypass — primitive + 4-package guard migration (Fire 1 of 2)
-- 2026-07-24 · `acdcfc7c` · [controlauth,test] flush the responder SUB before the echo helpers return — kills the `no responders available` unit-1 flake (client raced the responder's subscription); deterministic, 20x -p4 clean
-- 2026-07-24 · `657861dd` · [gateway] `/v1/actor` answers its own CORS preflight — `handleWhoami` sets Vary/allow-listed headers + OPTIONS→204 before the GET-guard (mirrors `handleOperationStatus`); completes the whoami-hats browser surface
 
 - *(older entries rolled to [archive/lattice-done.md](archive/lattice-done.md); includes `94c8224` hello-lattice NFR-P3 flake fix)*

@@ -346,3 +346,10 @@ Rolled from `lattice.md` when its live Done log passed ~25 entries. Full detail 
 - 2026-06-27 · `f16e625` · [Core] Processor health-honesty — real `lane_lag` + status/issues
 - 2026-06-26 · `4de7677` · [Weaver] Heartbeat status/issue-severity inconsistency
 - 2026-06-26 · `2877a1c` · [Loupe] Surface component `status`/`issues` on health + system-map
+- 2026-07-24 · `185a47ee` · [edge-manifest,test] the generated cap-read producer driven through the projection driver — an emptied slice retracts its key, a reachable actor keeps every real entry
+- 2026-07-24 · `bd3b76ba` · [pkgmgr,edge-manifest,lint] one `AnchorWalk` declaration compiles both read-grant enumerations — closes the dual-enumeration footgun (S2); 13 lenses migrated, 3 producers generated, gate flipped
+- 2026-07-24 · `390a6754` · [identity-domain,lint] validated-target exemptions are declared, not assumed — RecordIdentityPII rekeyed + §3.4.1 resource-bound; closes the forgeable-`authContext.target` item (Fire 2 of 2)
+- 2026-07-24 · `390a6754` · [lint] `authcontext-target` + `workplace-exempt` blocking gates (derived helper set, fixture self-test) — closes the validated-target-exemption-without-a-resource-bind item
+- 2026-07-24 · `fe8378c0` · [processor,packages] `op.authTargetValidated` closes the forgeable-`authContext.target` confinement bypass — primitive + 4-package guard migration (Fire 1 of 2)
+- 2026-07-24 · `acdcfc7c` · [controlauth,test] flush the responder SUB before the echo helpers return — kills the `no responders available` unit-1 flake (client raced the responder's subscription); deterministic, 20x -p4 clean
+- 2026-07-24 · `657861dd` · [gateway] `/v1/actor` answers its own CORS preflight — `handleWhoami` sets Vary/allow-listed headers + OPTIONS→204 before the GET-guard (mirrors `handleOperationStatus`); completes the whoami-hats browser surface
