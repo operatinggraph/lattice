@@ -28,7 +28,13 @@
 //	                    stamped as the Lattice-Actor header on every
 //	                    personal.{register,deregister,hydrate} control
 //	                    request, and presented as the Gateway's Bearer
-//	                    credential on every submitted intent (required)
+//	                    credential on every submitted intent (required).
+//	                    Captured once at startup, by design: this reference
+//	                    node is a dev/CI harness — nothing deploys it — and
+//	                    each run is handed a fresh token by its operator;
+//	                    when the token expires the session ends rather than
+//	                    renews. The deployed Edge host is cmd/facet, whose
+//	                    TokenHandler/TokenSource seams do the live refresh.
 //
 // Logs to stderr in slog text format. Blocks until SIGINT/SIGTERM.
 package main
