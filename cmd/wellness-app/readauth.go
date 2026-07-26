@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/operatinggraph/lattice/internal/appsession"
+	"github.com/operatinggraph/lattice/internal/bootstrap"
 	"github.com/operatinggraph/lattice/internal/gateway/auth"
 )
 
@@ -34,10 +35,13 @@ const actorFetchTimeout = 10 * time.Second
 // {key: bound.key, relation: 'identifiedBy'}).
 const instructorKeyPrefix = "vtx.instructor."
 
-// operatorRole is the primordial root role. The Gateway reports it by
-// canonical name in /v1/actor's roles array, which is the same fact
-// wellness-domain's `actor_holds_operator` resolves from the graph.
-const operatorRole = "operator"
+// operatorRoleKey is the primordial root role's VERTEX KEY. /v1/actor reports
+// roles as keys, not canonical names, and the operator id is loaded at runtime
+// from the bootstrap JSON (bootstrap.Load in main), so this cannot be a
+// compile-time constant — the same reason wellness-domain's
+// `actor_holds_operator` resolves the role from the graph rather than from a
+// substituted literal.
+func operatorRoleKey() string { return bootstrap.RoleOperatorKey }
 
 // errNoSession marks the caller having no usable session, as distinct from
 // this app being unable to resolve one. The two must not be conflated at the
@@ -139,9 +143,14 @@ func (s *server) resolveSubjectHats(r *http.Request) (subjectHats, error) {
 		return subjectHats{}, fmt.Errorf("resolve session role from the Gateway: %w", err)
 	}
 	hats := subjectHats{identityID: identityID}
-	for _, role := range actor.Roles {
-		if strings.TrimSpace(role) == operatorRole {
-			hats.isOperator = true
+	// An unloaded bootstrap leaves the operator key empty. Comparing against it
+	// would make every blank role entry root, so an unresolvable operator id
+	// grants the exemption to nobody rather than to everybody.
+	if opKey := operatorRoleKey(); opKey != "" {
+		for _, role := range actor.Roles {
+			if strings.TrimSpace(role) == opKey {
+				hats.isOperator = true
+			}
 		}
 	}
 	for _, a := range actor.Anchors {

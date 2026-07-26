@@ -18,6 +18,7 @@ import (
 	"github.com/nats-io/nats.go/jetstream"
 
 	"github.com/operatinggraph/lattice/internal/appsession"
+	"github.com/operatinggraph/lattice/internal/bootstrap"
 	"github.com/operatinggraph/lattice/internal/jsstore"
 	"github.com/operatinggraph/lattice/internal/substrate"
 	wellnessdomain "github.com/operatinggraph/lattice/packages/wellness-domain"
@@ -60,6 +61,15 @@ const (
 func TestMain(m *testing.M) {
 	os.Setenv(envPrefix+"_DEV_PRIVATE_KEY_PATH", "../../deploy/gateway-dev-key/dev-private.pem")
 	os.Setenv(envPrefix+"_DEV_PUBLIC_KEY_PATH", "../../deploy/gateway-dev-key/dev-public.pem")
+	// main() loads this before serving, and the operator role KEY the read
+	// boundary compares against is resolved from it. Without the load that key
+	// is empty, and a fixture minting an empty role would prove nothing.
+	if err := bootstrap.Load("../../lattice.bootstrap.json"); err != nil {
+		panic("load bootstrap ids: " + err.Error())
+	}
+	if bootstrap.RoleOperatorKey == "" {
+		panic("bootstrap loaded but the operator role key is empty")
+	}
 	os.Exit(m.Run())
 }
 
@@ -162,9 +172,14 @@ func fakeGatewayActor(t *testing.T) string {
 				appsession.ActorAnchor{Relation: "identifiedBy"},
 			)
 		}
-		roles := []string{}
+		// The real Gateway reports roles as VERTEX KEYS, never canonical
+		// names (internal/gateway/whoami.go forwards what rolesanchors
+		// resolves), so the fixture has to speak keys — a fixture saying
+		// "operator" would let a name comparison pass here and match nothing
+		// against a live Gateway.
+		roles := []string{"vtx.role.9vGfETkjxLSNuZzb9vGf"}
 		if claims.Subject == rootSubj {
-			roles = append(roles, "operator")
+			roles = append(roles, bootstrap.RoleOperatorKey)
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{
