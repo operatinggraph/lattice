@@ -199,9 +199,9 @@ func TestCreateTask_ExtraSegmentKey_Rejected(t *testing.T) {
 
 // TestCreateTask_EmptyIdSegment_Rejected: a scopedTo whose id segment is empty
 // (vtx.<type>.) is rejected by parts_of rather than returning an empty id that
-// every caller is then trusted to notice. The corpus's renamed siblings
-// (clinic-domain / loftspace-domain vertex_parts) already rejected it; the
-// pinned helper now agrees with them.
+// every caller is then trusted to notice. No legitimate caller can pass one —
+// such a vertex cannot exist — so the check costs nothing and stops ~160 call
+// sites each being responsible for noticing.
 func TestCreateTask_EmptyIdSegment_Rejected(t *testing.T) {
 	badScoped := "vtx.leaseapp."
 	eps := aliveEndpoints()

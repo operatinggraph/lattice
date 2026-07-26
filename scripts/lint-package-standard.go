@@ -317,15 +317,50 @@ func checkS9(rep *report, defs map[string]pkgmgr.Definition) {
 // arity test alone. Two reviewers caught it independently; see the paragraph
 // above on what a wrong recorded reason costs.
 //
-// Deliberately NOT listed: `require_workplace`, whose copies genuinely differ on
-// POLICY, each documented at its site — clinic-reminders omits the
-// validated-target exemption (its ops have no consumer self path, so a self
-// exemption would let a front-desk actor forge target == actor), and
-// maintenance-domain factors the non-exempt half into `enforce_workplace`. Both
-// were read before being excluded. A variant that genuinely differs gets a
-// different NAME, which is what `enforce_workplace` already does; this list binds
-// only helpers where variation has no legitimate meaning.
-var sharedGuardHelpers = []string{"worksAt_covers", "workplace_exempt", "actor_holds_operator", "parts_of"}
+// `require_workplace` and `enforce_workplace` are the workplace guard, split so
+// that the one policy difference among its copies is carried by the NAME rather
+// than by a comment no gate can read. `enforce_workplace` is the walk itself:
+// operator, else the actor must worksAt-cover one of the candidate locations.
+// `require_workplace` is that walk behind a platform-validated-target
+// short-circuit, for ops whose scope=self path is bound by their own ownership
+// probe instead. An op with no consumer self path — clinic-reminders' visit
+// series — calls `enforce_workplace` directly and is thereby strictly confined;
+// the short-circuit is not something it opts out of, it is a function it does
+// not call.
+//
+// The split is what makes them pinnable at all. Described as policy the guard
+// looks like several irreconcilable variants; described as bodies it is these
+// two functions, and every site is one or the other. Folding the short-circuit
+// into the strict form to make a digest agree would weaken a guard to satisfy a
+// linter — the wrong direction. Giving it a name costs nothing and puts the
+// difference somewhere the gate can see.
+var sharedGuardHelpers = []string{
+	"worksAt_covers", "workplace_exempt", "actor_holds_operator", "parts_of",
+	"require_workplace", "enforce_workplace",
+}
+
+// guardHelperFloors is the number of copies of each pinned helper the corpus is
+// known to hold — a `>=` floor, not an equality. A single flat floor across all
+// helpers would be a scan-broke tripwire and nothing more: 33 of `parts_of`'s 35
+// copies could vanish and the gate would still report success, having compared
+// two bodies. Pinning the measurement per helper means a mass disappearance — a
+// bad sweep, a moved corpus, a helper quietly deleted from six scripts — fails
+// the gate at the exact helper.
+//
+// It is `>=` because growth is the normal case and should not require editing
+// this file: a new package legitimately pastes another copy, and the body pin
+// already forces that copy to agree with every other. Shrinking is the
+// deliberate act, so lowering a number here is one reviewed line beside the
+// deletion that motivated it. S6's structure-pins work the same way — the pin
+// IS the measurement.
+var guardHelperFloors = map[string]int{
+	"worksAt_covers":       9,
+	"workplace_exempt":     8,
+	"actor_holds_operator": 13,
+	"parts_of":             35,
+	"require_workplace":    8,
+	"enforce_workplace":    9,
+}
 
 // guardConstants are the module-level Starlark constants the pinned helpers read.
 // Pinning helper BODIES is not enough on its own: a body references its bounds by
@@ -343,7 +378,15 @@ var guardConstants = []string{
 
 // guardConstantRe matches a module-level Starlark constant assignment in column 0
 // — `WORKPLACE_MAX_DEPTH = 8`.
-var guardConstantRe = regexp.MustCompile(`(?m)^([A-Z][A-Z0-9_]*) = (.+)$`)
+//
+// The whitespace around `=` is optional and the value is trimmed, because
+// Starlark accepts `WORKPLACE_MAX_DEPTH=4` and a pattern demanding the spaces
+// fails OPEN on it: the assignment becomes invisible to this check, and the
+// helper bodies name their bounds by CONSTANT, so no digest changes either.
+// Deleting two spaces would have narrowed the workplace walk in one script with
+// nothing to see it. Trimming likewise stops `= 8` and `=  8` reading as two
+// different values and reporting a divergence that is only whitespace.
+var guardConstantRe = regexp.MustCompile(`(?m)^([A-Z][A-Z0-9_]*)[ \t]*=[ \t]*(.+?)[ \t]*$`)
 
 // checkGuardConstants requires each guardConstant to have a single value
 // corpus-wide. WORKPLACE_MAX_DEPTH additionally has to match the read side's hop
@@ -391,36 +434,59 @@ func checkGuardConstants(rep *report, sources []string) {
 	}
 }
 
-// minGuardHelperCopies is the floor below which S10 assumes it is looking at the
-// wrong corpus rather than at a clean one. The rule's whole premise is that these
-// helpers are pasted MANY times; finding one copy, or none, means the scan broke
-// (wrong cwd, a moved corpus) or the shared prelude finally landed — and either
-// way a silent pass would be a gate reporting success for work it never did.
-const minGuardHelperCopies = 2
-
 // checkS10 requires every copy of a sharedGuardHelper to have the same CODE.
 // Comments are excluded: each package's copy legitimately explains itself in
 // terms of its own resolver, and prose drift is not a defect. Only the
 // statements have to agree.
+//
+// It scans TEST sources too. Embedded Starlark already lives in a _test.go
+// (orchestration-base/external_params_test.go), and a fixture defining its own
+// drifted copy of a pinned helper is a test proving a body that does not ship —
+// the one place a divergence is guaranteed never to be noticed, because the
+// test goes green.
 func checkS10(rep *report) {
-	sources := packageSources()
+	sources := packageSources(withTests)
 	checkGuardConstants(rep, sources)
+	// Two maps, deliberately not one. isPinned answers "is this name spoken for"
+	// and must stay populated even for a helper whose floor failed, or that
+	// helper's own definitions become alias candidates against the other five.
+	// pinned holds the digests to match against, and is populated only for a
+	// helper whose corpus this run actually trusts.
+	isPinned := map[string]bool{}
+	pinned := map[string]map[string]bool{} // helper -> name-independent digest set
+	for _, helper := range sharedGuardHelpers {
+		isPinned[helper] = true
+	}
 	for _, helper := range sharedGuardHelpers {
 		bodies := map[string][]string{} // code digest -> sites
+		anon := map[string]bool{}       // name-independent digests of those bodies
 		for _, path := range sources {
 			for _, site := range starlarkFuncBodies(path, helper) {
 				bodies[site.code] = append(bodies[site.code], site.where)
+				anon[site.anon] = true
 			}
 		}
 		total := 0
 		for _, sites := range bodies {
 			total += len(sites)
 		}
-		if total < minGuardHelperCopies {
-			rep.issuef("S10 — found %d cop%s of %s under packages/, expected at least %d. Either the scan is looking at the wrong tree (S10 walks packages/ relative to the working directory) or these helpers moved into a shared prelude — in which case point this rule at the prelude instead of deleting it. A consistency gate that silently finds nothing reports success for work it never did.",
-				total, map[bool]string{true: "y", false: "ies"}[total == 1], helper, minGuardHelperCopies)
+		// A floor below 2 disarms all three rules at once for this helper: the
+		// count clears trivially, `len(bodies) < 2` skips the body pin, and the
+		// alias rule then matches against an empty digest set. Every pinned
+		// helper is pasted many times by construction, so a floor under 2 is
+		// never a measurement — it is the rule being switched off in a diff that
+		// reads as maintenance. Two is the floor the floor itself has.
+		floor, hasFloor := guardHelperFloors[helper]
+		if !hasFloor || floor < 2 {
+			rep.issuef("S10 — %s is pinned in sharedGuardHelpers but has no usable guardHelperFloors entry (%d; a missing key reads as 0). A floor under 2 silently disables this helper's copy floor, its body pin, and the alias rule together — the whole point of the pin, switched off by one line. Give it its measured copy count.", helper, floor)
 			continue
 		}
+		if total < floor {
+			rep.issuef("S10 — found %d cop%s of %s under packages/, expected at least %d. Copies do not normally disappear: the scan may be looking at the wrong tree (S10 walks packages/ relative to the working directory), a sweep may have deleted the helper from scripts that still need it, the copies may have been RENAMED (see the alias rule — a rename is not a deletion, and lowering the floor is the wrong fix for it), or these helpers moved into a shared prelude, in which case point this rule at the prelude instead of deleting it. Lower the floor only for a deliberate deletion, in the same change. A consistency gate that silently finds nothing reports success for work it never did.",
+				total, map[bool]string{true: "y", false: "ies"}[total == 1], helper, floor)
+			continue
+		}
+		pinned[helper] = anon
 		if len(bodies) < 2 {
 			continue
 		}
@@ -446,13 +512,115 @@ func checkS10(rep *report) {
 				helper, len(bodies), total, total)
 		}
 	}
+	checkGuardHelperAliases(rep, sources, isPinned, pinned)
 }
+
+// checkGuardHelperAliases catches the pin's remaining escape: copy a pinned
+// helper verbatim and rename it. S10 keys on the NAME, so a renamed copy is
+// invisible to it and free to drift — and the corpus has already run that
+// experiment. `parts_of` lived under three other names (`vertex_parts` under
+// two different signatures, `typed_vertex_parts`, `unit_parts`), all of them
+// the same validator, none reachable by the pin. ONE of them — the untyped
+// `vertex_parts`, which every endpoint parse in service-location delegated to —
+// had quietly dropped the empty-id check. The count is one, not two: the other
+// copies omit only the standalone empty-TYPE test, which their `parts[1] !=
+// want_type` comparison already subsumes, so they rejected everything the
+// canonical body rejects. That distinction is the point of stating it — an
+// exclusion or an alarm justified by an unverified premise is the failure this
+// gate has now recorded twice.
+//
+// The rule is exact-digest, so it carries no baseline and no judgement: an
+// identical body under two names is a second name for one idea, never a
+// deliberate variant. That leaves renaming still available as S10's escape
+// hatch — a variant that genuinely differs has a different body by definition,
+// which is what makes it a variant.
+//
+// A broader "vertex-key parsing outside parts_of" rule was considered and
+// rejected. The structural signal (a split, an arity test, a "vtx" literal)
+// fires today on ~10 sites across rbac-domain, location-domain, privacy-base,
+// identity-hygiene and augur. A gate that ships with a ten-site baseline
+// teaches the next author that the baseline is where their code goes.
+func checkGuardHelperAliases(rep *report, sources []string, isPinned map[string]bool, pinned map[string]map[string]bool) {
+	for _, path := range sources {
+		for _, name := range starlarkFuncNames(path) {
+			if isPinned[name] {
+				continue
+			}
+			for _, site := range starlarkFuncBodies(path, name) {
+				for _, helper := range sharedGuardHelpers {
+					// site.anon has the function's own name replaced by a
+					// placeholder, so this matches exactly when the alias is the
+					// pinned helper down to its parameter list and indentation.
+					if !pinned[helper][site.anon] {
+						continue
+					}
+					rep.issuef("S10 — %s at %s is %s under a different name: same statements, same signature. S10 keys on the NAME, so this copy is outside the pin and free to drift — which is what happened to parts_of, whose untyped vertex_parts alias had dropped the empty-id check by the time anyone looked. Call %s instead. Renaming stays the escape hatch for a variant that genuinely differs — but such a variant has a different BODY, which is what makes it one.",
+						name, site.where, helper, helper)
+				}
+			}
+		}
+	}
+}
+
+// indentLevels ranks raw leading-whitespace widths into nesting levels: the
+// narrowest distinct width in a body becomes 0, the next 1, and so on. It is
+// what makes the digest measure structure rather than style — a body re-indented
+// from four spaces per level to two keeps its levels, while a statement moved
+// into or out of a block does not.
+func indentLevels(widths []int) []int {
+	seen := map[int]bool{}
+	for _, w := range widths {
+		seen[w] = true
+	}
+	distinct := make([]int, 0, len(seen))
+	for w := range seen {
+		distinct = append(distinct, w)
+	}
+	sort.Ints(distinct)
+	rank := make(map[int]int, len(distinct))
+	for i, w := range distinct {
+		rank[w] = i
+	}
+	out := make([]int, len(widths))
+	for i, w := range widths {
+		out[i] = rank[w]
+	}
+	return out
+}
+
+// starlarkFuncNames lists every top-level `def <name>(` in a Go file's embedded
+// Starlark, in source order, deduplicated.
+func starlarkFuncNames(path string) []string {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil
+	}
+	seen := map[string]bool{}
+	var out []string
+	for _, ln := range strings.Split(string(data), "\n") {
+		m := starlarkDefRe.FindStringSubmatch(ln)
+		if m == nil || seen[m[1]] {
+			continue
+		}
+		seen[m[1]] = true
+		out = append(out, m[1])
+	}
+	return out
+}
+
+// starlarkDefRe matches a top-level Starlark function definition in column 0.
+var starlarkDefRe = regexp.MustCompile(`^def ([A-Za-z_][A-Za-z0-9_]*)\(`)
 
 // starlarkFuncSite is one `def <name>(...)` occurrence: where it is, and a
 // digest of its statements with comments and blank lines removed.
 type starlarkFuncSite struct {
 	where string
 	code  string
+	// anon is code with the function's own NAME replaced by a placeholder, so
+	// two functions differing only in what they are called digest alike. It is
+	// what the alias rule compares; `code` stays name-bearing so the pin itself
+	// cannot be satisfied by a rename.
+	anon string
 }
 
 // starlarkFuncBodies finds every top-level `def <name>(` in a Go file's embedded
@@ -478,6 +646,9 @@ func starlarkFuncBodies(path, name string) []starlarkFuncSite {
 		// perform. That is not hypothetical — it is the shape two copies of
 		// parts_of were in before they were converged.
 		code := []string{ln}
+		// widths[k] is the raw leading-whitespace width of code[k+1] (the def
+		// line has none). Ranked into levels once the body is complete.
+		var widths []int
 		for j := i + 1; j < len(lines); j++ {
 			s := lines[j]
 			// A body ends at the first line with content in column 0. Decode a
@@ -496,22 +667,39 @@ func starlarkFuncBodies(path, name string) []starlarkFuncSite {
 			// nests a statement inside the loop above it — which is precisely
 			// how the walk this rule exists to protect went wrong (a
 			// `nxt = lk.targetVertex` at the wrong depth kept the wrong parent).
-			// The depth is normalized to a count of leading whitespace runes so
-			// a tabs-vs-spaces reindent is not reported as a behaviour change,
-			// while a change in nesting is.
-			depth := 0
+			//
+			// The raw width is recorded here and converted to a LEVEL below,
+			// because what carries meaning is which block a statement sits in,
+			// not how many spaces express it. Hashing the width itself would
+			// make a whole-body 4-space-to-2-space reindent — a pure style edit
+			// — read as a behaviour change, and would let the same edit carry a
+			// verbatim copy of a pinned helper past the alias rule under a new
+			// name. Levels are invariant to that and still separate.
+			width := 0
 			for _, r := range s {
 				if !unicode.IsSpace(r) {
 					break
 				}
-				depth++
+				width++
 			}
-			code = append(code, fmt.Sprintf("%d\x00%s", depth, t))
+			widths = append(widths, width)
+			code = append(code, t)
 		}
-		sum := sha256.Sum256([]byte(strings.Join(code, "\n")))
+		// Rank the distinct widths into levels: the k-th narrowest indentation in
+		// this body becomes k. Two bodies nesting identically agree whatever
+		// their indent unit; move one statement into or out of a block and the
+		// level sequence changes.
+		levels := indentLevels(widths)
+		for k := range levels {
+			code[k+1] = fmt.Sprintf("%d\x00%s", levels[k], code[k+1])
+		}
+		joined := strings.Join(code, "\n")
+		sum := sha256.Sum256([]byte(joined))
+		anonSum := sha256.Sum256([]byte(strings.Replace(joined, prefix, "def \x00(", 1)))
 		out = append(out, starlarkFuncSite{
 			where: fmt.Sprintf("%s:%d", path, i+1),
 			code:  hex.EncodeToString(sum[:8]),
+			anon:  hex.EncodeToString(anonSum[:8]),
 		})
 	}
 	return out
@@ -519,13 +707,20 @@ func starlarkFuncBodies(path, name string) []starlarkFuncSite {
 
 // packageSources lists every non-test Go file under packages/ — where the
 // embedded Starlark lives.
-func packageSources() []string {
+// withTests is the packageSources option that includes _test.go files. Only
+// S10 passes it: the rules that read a package's shipped shape must not see
+// fixtures, but the rules that pin a Starlark body must, because a fixture is
+// exactly where a drifted copy hides behind a green test.
+const withTests = true
+
+func packageSources(includeTests ...bool) []string {
+	tests := len(includeTests) > 0 && includeTests[0]
 	var out []string
 	_ = filepath.WalkDir("packages", func(path string, d fs.DirEntry, err error) error {
 		if err != nil || d.IsDir() {
 			return nil
 		}
-		if strings.HasSuffix(path, ".go") && !strings.HasSuffix(path, "_test.go") {
+		if strings.HasSuffix(path, ".go") && (tests || !strings.HasSuffix(path, "_test.go")) {
 			out = append(out, filepath.ToSlash(path))
 		}
 		return nil

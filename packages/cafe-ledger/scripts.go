@@ -328,13 +328,22 @@ def require_workplace(location_keys, what):
     # non-empty: the raw target is a client-supplied hint that any scope=any
     # holder can set, so exempting on its presence would let any staff member
     # opt out of confinement.
-    #
-    # location_keys is a LIST of candidate locations, and covering ANY ONE of
-    # them authorizes the write. An empty list -- an account whose location
-    # cannot be resolved at all -- is a DENIAL for anyone but an operator, so an
-    # unwired topology fails closed rather than falling open.
     if op.authTargetValidated:
         return
+    enforce_workplace(location_keys, what)
+
+def enforce_workplace(location_keys, what):
+    # require_workplace minus the validated-target exemption, for a
+    # resource-scoped op that has already checked for itself that the validated
+    # target names the resource being acted on. Past that check the caller is an
+    # ordinary staff member and must clear the worksAt walk like any other.
+    #
+    # location_keys is a LIST of candidate locations, and covering ANY ONE of
+    # them authorizes the write: a target can legitimately sit at several places
+    # at once (a provider practises at two buildings), and staff at either one
+    # are equally entitled to it. An empty list -- a target whose location
+    # cannot be resolved at all -- is a DENIAL for anyone but an operator, so an
+    # unwired topology fails closed rather than falling open.
     if actor_holds_operator(op.actor):
         return
     _, actor_id = parts_of(op.actor, "actor", "identity")

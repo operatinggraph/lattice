@@ -210,21 +210,20 @@ def required_string(p, name):
 # the vertices; the scheme references them by class.
 LOCATION_CLASS = "location"
 
-def vertex_parts(key, name):
+def parts_of(key, name, want_type):
     # Parses a VERTEX key: exactly 3 segments vtx.<type>.<NanoID>. A non-3
     # segment key (e.g. an aspect/link key) is rejected, not silently truncated.
-    parts = split_key(key)
+    # An empty want_type accepts any type and still returns it.
+    parts = key.split(".")
     if len(parts) != 3 or parts[0] != "vtx":
         fail("InvalidArgument: " + name + ": required vtx.<type>.<NanoID> (exactly 3 segments); got " + key)
     if parts[1] == "":
         fail("InvalidArgument: " + name + ": empty type segment; required vtx.<type>.<NanoID>; got " + key)
-    return parts[1], parts[2]
-
-def typed_vertex_parts(key, name, want_type):
-    vtype, vid = vertex_parts(key, name)
-    if vtype != want_type:
+    if parts[2] == "":
+        fail("InvalidArgument: " + name + ": empty id segment; required vtx.<type>.<NanoID>; got " + key)
+    if want_type != "" and parts[1] != want_type:
         fail("InvalidArgument: " + name + ": required vtx." + want_type + ".<NanoID>; got " + key)
-    return vtype, vid
+    return parts[1], parts[2]
 
 def link_parts(key, name, relation):
     # Parses a LINK key: exactly 6 segments lnk.<aType>.<aId>.<relation>.<bType>.<bId>
@@ -326,8 +325,8 @@ def execute(state, op):
     if ot == "WireResidesIn":
         identity = required_string(p, "identity")
         location = required_string(p, "location")
-        id_type, id_id = typed_vertex_parts(identity, "identity", "identity")
-        loc_type, loc_id = vertex_parts(location, "location")
+        id_type, id_id = parts_of(identity, "identity", "identity")
+        loc_type, loc_id = parts_of(location, "location", "")
         if not vertex_alive(state, identity):
             fail("UnknownIdentity: identity: " + identity + " is absent or tombstoned")
         require_live_location(state, location, "location")
@@ -341,8 +340,8 @@ def execute(state, op):
     if ot == "WireWorksAt":
         identity = required_string(p, "identity")
         location = required_string(p, "location")
-        id_type, id_id = typed_vertex_parts(identity, "identity", "identity")
-        loc_type, loc_id = vertex_parts(location, "location")
+        id_type, id_id = parts_of(identity, "identity", "identity")
+        loc_type, loc_id = parts_of(location, "location", "")
         if not vertex_alive(state, identity):
             fail("UnknownIdentity: identity: " + identity + " is absent or tombstoned")
         require_live_location(state, location, "location")
@@ -356,8 +355,8 @@ def execute(state, op):
     if ot == "WireAvailableAt":
         service = required_string(p, "service")
         location = required_string(p, "location")
-        _, svc_id = typed_vertex_parts(service, "service", "service")
-        loc_type, loc_id = vertex_parts(location, "location")
+        _, svc_id = parts_of(service, "service", "service")
+        loc_type, loc_id = parts_of(location, "location", "")
         require_live_service_template(state, service, "service")
         require_live_location(state, location, "location")
         lnk_key, mutations = wire(state, service, location, "availableAt", "service", svc_id, loc_type, loc_id)
@@ -370,8 +369,8 @@ def execute(state, op):
     if ot == "WireUnavailableAt":
         service = required_string(p, "service")
         location = required_string(p, "location")
-        _, svc_id = typed_vertex_parts(service, "service", "service")
-        loc_type, loc_id = vertex_parts(location, "location")
+        _, svc_id = parts_of(service, "service", "service")
+        loc_type, loc_id = parts_of(location, "location", "")
         require_live_service_template(state, service, "service")
         require_live_location(state, location, "location")
         lnk_key, mutations = wire(state, service, location, "unavailableAt", "service", svc_id, loc_type, loc_id)
@@ -384,8 +383,8 @@ def execute(state, op):
     if ot == "WirePermitsOperation":
         service = required_string(p, "service")
         operation = required_string(p, "operation")
-        _, svc_id = typed_vertex_parts(service, "service", "service")
-        _, op_id = typed_vertex_parts(operation, "operation", "meta")
+        _, svc_id = parts_of(service, "service", "service")
+        _, op_id = parts_of(operation, "operation", "meta")
         require_live_service(state, service, "service")
         require_live_opmeta(state, operation, "operation")
         lnk_key, mutations = wire(state, service, operation, "permitsOperation", "service", svc_id, "meta", op_id)

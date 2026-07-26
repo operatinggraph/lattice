@@ -327,8 +327,12 @@ func TestPackage_OwnershipActorBinding(t *testing.T) {
 func TestPackage_ScriptGuards(t *testing.T) {
 	src := loftspaceListingDDLScript
 	for _, want := range []string{
-		`vtx.unit.<NanoID>`, // unit key-shape guard
-		"NotAUnit",          // class=location guard
+		// The unit key-shape guard, pinned as the CALL rather than as a
+		// substring of the message it fails with: parts_of composes that message
+		// from want_type, so an error-string assertion would pass just as well
+		// with want_type dropped — which is the guard, not the prose.
+		`parts_of(unit, "unit", "unit")`,
+		"NotAUnit", // class=location guard
 		"require_live_unit",
 		"available, pending, leased", // status enum
 		`"op": "update"`,             // unconditioned upsert (no CreateOnly)

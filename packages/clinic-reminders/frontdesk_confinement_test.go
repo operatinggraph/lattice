@@ -8,8 +8,9 @@
 //
 // The load-bearing divergence from clinic-domain's appointment guard: these ops
 // carry NO consumer/scope=self grant and NO identifiedBy ownership backstop, so
-// require_workplace here is OPERATOR-EXEMPT ONLY — there is no
-// authContextTarget==actor self exemption. TestFrontDesk_VisitSeries_ForgedTarget*
+// they call enforce_workplace, not require_workplace — root is the only
+// exemption, and there is no authContextTarget==actor self exemption anywhere on
+// the path. TestFrontDesk_VisitSeries_ForgedTarget*
 // pins exactly that: a front-desk actor that forges target==actor is STILL
 // confined (under a copied appointment guard it would have skipped confinement).
 //

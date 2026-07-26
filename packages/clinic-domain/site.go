@@ -244,13 +244,17 @@ def required_string(p, name):
         fail("InvalidArgument: " + name + ": required non-empty string")
     return v.strip()
 
-def vertex_parts(key, name, want_type):
+def parts_of(key, name, want_type):
     parts = key.split(".")
-    if len(parts) != 3 or parts[0] != "vtx" or parts[1] != want_type:
-        fail("InvalidArgument: " + name + ": required vtx." + want_type + ".<NanoID> (exactly 3 segments); got " + key)
+    if len(parts) != 3 or parts[0] != "vtx":
+        fail("InvalidArgument: " + name + ": required vtx.<type>.<NanoID> (exactly 3 segments); got " + key)
+    if parts[1] == "":
+        fail("InvalidArgument: " + name + ": empty type segment; required vtx.<type>.<NanoID>; got " + key)
     if parts[2] == "":
-        fail("InvalidArgument: " + name + ": empty id segment; required vtx." + want_type + ".<NanoID>; got " + key)
-    return parts[2]
+        fail("InvalidArgument: " + name + ": empty id segment; required vtx.<type>.<NanoID>; got " + key)
+    if want_type != "" and parts[1] != want_type:
+        fail("InvalidArgument: " + name + ": required vtx." + want_type + ".<NanoID>; got " + key)
+    return parts[1], parts[2]
 
 def vertex_alive(state, key):
     if key not in state or state[key] == None:
@@ -281,9 +285,9 @@ def execute(state, op):
 
     if ot == "AssignProviderSite":
         provider = required_string(p, "provider")
-        provider_id = vertex_parts(provider, "provider", "provider")
+        _, provider_id = parts_of(provider, "provider", "provider")
         building = required_string(p, "building")
-        building_id = vertex_parts(building, "building", "building")
+        _, building_id = parts_of(building, "building", "building")
 
         if not vertex_alive(state, provider):
             fail("UnknownProvider: " + provider + " is absent or tombstoned")
@@ -306,9 +310,9 @@ def execute(state, op):
 
     if ot == "RemoveProviderSite":
         provider = required_string(p, "provider")
-        provider_id = vertex_parts(provider, "provider", "provider")
+        _, provider_id = parts_of(provider, "provider", "provider")
         building = required_string(p, "building")
-        building_id = vertex_parts(building, "building", "building")
+        _, building_id = parts_of(building, "building", "building")
 
         link_key = "lnk.provider." + provider_id + ".practicesAt.building." + building_id
         # read-posture: (d) declared optionalReads at RemoveProviderSite dispatch

@@ -302,16 +302,20 @@ def copy_data(d):
         out[k] = d[k]
     return out
 
-def unit_parts(key):
-    # Parse the target as a UNIT vertex key: exactly 3 segments vtx.unit.<NanoID>.
-    # A non-3-segment key (aspect/link), or a type segment other than "unit", is
-    # rejected — listing economics attach only to a leasable unit.
+def parts_of(key, name, want_type):
+    # Parse a VERTEX key: exactly 3 segments vtx.<type>.<NanoID>. A non-3-segment
+    # key (aspect/link) is rejected, not silently truncated. The unit callers pass
+    # want_type "unit" — listing economics attach only to a leasable unit.
     parts = key.split(".")
-    if len(parts) != 3 or parts[0] != "vtx" or parts[1] != "unit":
-        fail("InvalidArgument: unit: required vtx.unit.<NanoID> (exactly 3 segments); got " + key)
+    if len(parts) != 3 or parts[0] != "vtx":
+        fail("InvalidArgument: " + name + ": required vtx.<type>.<NanoID> (exactly 3 segments); got " + key)
+    if parts[1] == "":
+        fail("InvalidArgument: " + name + ": empty type segment; required vtx.<type>.<NanoID>; got " + key)
     if parts[2] == "":
-        fail("InvalidArgument: unit: empty id segment; required vtx.unit.<NanoID>; got " + key)
-    return parts[2]
+        fail("InvalidArgument: " + name + ": empty id segment; required vtx.<type>.<NanoID>; got " + key)
+    if want_type != "" and parts[1] != want_type:
+        fail("InvalidArgument: " + name + ": required vtx." + want_type + ".<NanoID>; got " + key)
+    return parts[1], parts[2]
 
 def require_manages(unit_key, what):
     # The landlord ownership probe: a signed-in landlord authorizes a listing
@@ -332,7 +336,7 @@ def require_manages(unit_key, what):
     actor_parts = op.actor.split(".")
     if len(actor_parts) != 3 or actor_parts[0] != "vtx" or actor_parts[1] != "identity":
         fail("AuthDenied: " + op.actor + " is not an identity, so it holds no management link; " + what)
-    unit_id = unit_parts(unit_key)
+    _, unit_id = parts_of(unit_key, "unit", "unit")
     # read-posture: (d) declared optionalReads at SetListingStatus dispatch on
     # the landlord path. optionalReads, not reads: absence IS the denial this
     # probe exists to produce, so hydrating it as required would turn every
@@ -373,7 +377,7 @@ def execute(state, op):
 
     if ot == "SetListing":
         unit = required_string(p, "unit")
-        unit_parts(unit)
+        parts_of(unit, "unit", "unit")
         require_live_unit(state, unit)
 
         data = {
@@ -400,7 +404,7 @@ def execute(state, op):
 
     if ot == "SetUnitAddress":
         unit = required_string(p, "unit")
-        unit_parts(unit)
+        parts_of(unit, "unit", "unit")
         require_live_unit(state, unit)
 
         data = {
@@ -428,7 +432,7 @@ def execute(state, op):
         # allowed — convergence only ever drives it to leased). The unit root is
         # hydrated via ContextHint.Reads=[unit] (the playbook routes row.unitKey).
         unit = required_string(p, "unit")
-        unit_parts(unit)
+        parts_of(unit, "unit", "unit")
         # workplace-exempt: (ownership-bound) the ownership probe answers before
         # require_live_unit, so a caller who manages nothing cannot use this op
         # to learn whether a unit exists.

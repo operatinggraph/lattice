@@ -395,15 +395,15 @@ def vertex_alive_of_class(state, key, want_class):
 # Front-desk workplace confinement — the frontOfHouse standing guard for the
 # staff visit-series ops (Start/Pause/Resume). Mirrors clinic-domain's
 # CreateAppointment confinement (ddls.go) — same helpers, resolved through the
-# same withProvider -> practicesAt edge clinicAppointmentsRead anchors on — with
-# ONE deliberate divergence: require_workplace here is OPERATOR-EXEMPT ONLY. The
-# appointment version also exempts authContextTarget == op.actor (the consumer
-# self-book path), safe there only because a downstream identifiedBy patient
-# binding backstops it. These ops carry no consumer/scope=self grant and no such
-# backstop, and a scope=any caller can attach ANY target (the Gateway forwards
-# authContext verbatim; step 3 authorizes scope=any without inspecting target),
-# so a self exemption would let a front-desk actor forge target==actor and skip
-# confinement entirely — hence root is the only exemption.
+# same withProvider -> practicesAt edge clinicAppointmentsRead anchors on — but
+# these ops call enforce_workplace rather than require_workplace, so root is the
+# only exemption. The appointment version's require_workplace also exempts
+# a platform-validated target, safe there only because a downstream identifiedBy
+# patient binding backstops the consumer self-book path. These ops carry no
+# consumer/scope=self grant and no such backstop, and a scope=any caller can
+# attach ANY target (the Gateway forwards authContext verbatim; step 3
+# authorizes scope=any without inspecting target), so that exemption would let a
+# front-desk actor forge target==actor and skip confinement entirely.
 ROLE_PAGE_LIMIT = 50
 WORKPLACE_PARENT_PAGE_LIMIT = 20
 WORKPLACE_MAX_DEPTH = 8
@@ -549,14 +549,21 @@ def series_provider(series_key):
             provider = lk.targetVertex
     return provider
 
-def require_workplace(location_keys, what):
-    # OPERATOR-EXEMPT ONLY (see the block comment above): no authContextTarget ==
-    # op.actor self exemption, because these ops have no consumer self path to
-    # protect and no identifiedBy backstop to make a self exemption safe.
-    # location_keys is a LIST — covering ANY one authorizes (a provider may
-    # practise at several buildings, and staff at either are equally entitled);
-    # an EMPTY list (a target whose location cannot be resolved) is a DENIAL for
-    # anyone but an operator, so unwired topology fails CLOSED.
+def enforce_workplace(location_keys, what):
+    # require_workplace minus the validated-target exemption, for a
+    # resource-scoped op that has already checked for itself that the validated
+    # target names the resource being acted on. Past that check the caller is an
+    # ordinary staff member and must clear the worksAt walk like any other.
+    # These ops go further: they have no consumer self path to protect and no
+    # identifiedBy backstop, so they never offer the exemption at all — the
+    # block comment above records why.
+    #
+    # location_keys is a LIST of candidate locations, and covering ANY ONE of
+    # them authorizes the write: a target can legitimately sit at several places
+    # at once (a provider practises at two buildings), and staff at either one
+    # are equally entitled to it. An empty list -- a target whose location
+    # cannot be resolved at all -- is a DENIAL for anyone but an operator, so an
+    # unwired topology fails closed rather than falling open.
     if actor_holds_operator(op.actor):
         return
     _, actor_id = parts_of(op.actor, "actor", "identity")
@@ -592,7 +599,7 @@ def execute(state, op):
         # a front-desk actor may start a series only with a provider practising at
         # a building it worksAt — resolved off the PAYLOAD provider (validated
         # alive + class=provider just above). No-op for operator (root is exempt).
-        require_workplace(sites_for_provider(provider_key), "cannot start a visit series with provider " + provider_key)
+        enforce_workplace(sites_for_provider(provider_key), "cannot start a visit series with provider " + provider_key)
 
         # At most one ACTIVE series per (patient, provider) pair (Cap-KV §06 — the
         # op's own logic licenses the check). The guard is a deterministic pointer
@@ -674,7 +681,7 @@ def execute(state, op):
         # only a series whose provider practises at a building it worksAt —
         # resolved off the series' OWN withProvider link (Pause/Resume carry no
         # provider payload). No-op for operator (root is exempt).
-        require_workplace(sites_for_provider(series_provider(series_key)), "cannot change visit series " + series_key)
+        enforce_workplace(sites_for_provider(series_provider(series_key)), "cannot change visit series " + series_key)
         paused = (ot == "PauseVisitSeries")
         mutations = [make_aspect_upsert(series_key, "paused", "visitSeriesPaused", {"value": paused})]
         events = [{"class": "clinic.visitSeriesPausedChanged", "data": {"seriesKey": series_key, "paused": paused}}]
@@ -871,7 +878,7 @@ func visitSeriesDueTarget() pkgmgr.WeaverTargetSpec {
 // clinic-domain's CreateAppointment / RescheduleAppointment). Unlike those, the
 // guard here is OPERATOR-EXEMPT ONLY — these ops carry no consumer/scope=self
 // grant and no identifiedBy ownership backstop, so a forged authContextTarget ==
-// actor cannot be exempted (see require_workplace in visitSeriesScript).
+// actor cannot be exempted (see enforce_workplace in visitSeriesScript).
 // AdvanceVisitSeries stays operator-only — it is Weaver's directOp, dispatched
 // under the operator service-actor (the reminder-op idiom), never a front-desk
 // action.
@@ -925,7 +932,7 @@ func visitSeriesPermissions() []pkgmgr.PermissionSpec {
 // StartVisitSeries names both endpoint vertices because its own field
 // documentation makes them mandatory; Pause/Resume rely on the targetField
 // fallback for the series vertex, which is the only key they read. Everything
-// else these scripts reach — require_workplace's site walk, the dedup guard's
+// else these scripts reach — enforce_workplace's site walk, the dedup guard's
 // prior-series .series/.paused follow-ups — is a class-(e) read off a key the
 // caller cannot know in advance, which is why the read posture sanctions it
 // live rather than declared. The one guard key a caller CAN derive, the
