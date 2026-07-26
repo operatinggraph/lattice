@@ -201,6 +201,71 @@ func (d OutputDescriptor) BuildKey(actorKey string) string {
 	return strings.ReplaceAll(d.OutputKeyPattern, ActorSuffixPlaceholder, suffix)
 }
 
+// patternParts splits the output key pattern around the actor-suffix
+// placeholder into the literal text that brackets it. Reports false for a
+// pattern carrying no placeholder, which renders one fixed key for every anchor
+// and so has no per-anchor inverse.
+func (d OutputDescriptor) patternParts() (prefix, suffix string, ok bool) {
+	idx := strings.Index(d.OutputKeyPattern, ActorSuffixPlaceholder)
+	if idx < 0 {
+		return "", "", false
+	}
+	return d.OutputKeyPattern[:idx], d.OutputKeyPattern[idx+len(ActorSuffixPlaceholder):], true
+}
+
+// KeyPrefix returns the prefix every key this descriptor builds starts with,
+// for a caller enumerating the lens's own rows out of a target several lenses
+// share. It reports false unless the prefix is usable as a NATS subject filter:
+// non-empty, and ending on a "." segment boundary, since the filter it becomes
+// is prefix + ">".
+//
+// A NATS wildcard token in the prefix is refused: `*.{actorSuffix}` would scope
+// to every 2-token key in a shared target — the whole-bucket enumeration the
+// scoping exists to prevent, reached through the mechanism meant to prevent it.
+//
+// This SCOPES a listing; it does not decide ownership. The prefix is the same
+// literal AnchorFromKey matches first, so a scoped listing can only omit keys
+// AnchorFromKey would have rejected — but it can also admit a sibling's (cap.
+// is a prefix of cap.roles.), so the exact test still has to run on what comes
+// back.
+func (d OutputDescriptor) KeyPrefix() (string, bool) {
+	prefix, _, ok := d.patternParts()
+	if !ok || prefix == "" {
+		return "", false
+	}
+	if !strings.HasSuffix(prefix, ".") {
+		return "", false
+	}
+	if strings.ContainsAny(prefix, "*> ") {
+		return "", false
+	}
+	return prefix, true
+}
+
+// SweepAnchorSample is the synthetic anchor key the round-trip probe below is
+// run against. It is a well-formed Contract #1 vertex key of the descriptor's
+// own anchor type, carrying a NanoID from the platform alphabet.
+func (d OutputDescriptor) sweepAnchorSample() string {
+	return substrate.VertexPrefix + "." + d.AnchorType + ".ZwqPmRtw9nbCxz5vQ2yH"
+}
+
+// KeyOwnershipRoundTrips reports whether AnchorFromKey recovers exactly the
+// anchor BuildKey rendered a key for. The convergence sweep's orphan direction
+// — the ONLY detector for a row whose anchor is gone, since the deep verify
+// walks anchors and an orphan's anchor is by definition not among them — is a
+// no-op for a descriptor whose two halves disagree, and it fails silently:
+// claiming nothing looks exactly like having nothing to claim.
+//
+// The pattern grammar permits shapes where they do disagree (the placeholder
+// may appear more than once; BuildKey substitutes every occurrence while the
+// inverse brackets the first), so the sweep's install gate probes the pair
+// rather than trusting that a derivable prefix implies a working inverse.
+func (d OutputDescriptor) KeyOwnershipRoundTrips() bool {
+	sample := d.sweepAnchorSample()
+	recovered, ok := d.AnchorFromKey(d.BuildKey(sample))
+	return ok && recovered == sample
+}
+
 // AnchorFromKey is the inverse of BuildKey: it recovers the anchor vertex key a
 // target key was built for, reporting false for any key this descriptor's
 // pattern did not produce. The convergence sweep
@@ -216,12 +281,10 @@ func (d OutputDescriptor) BuildKey(actorKey string) string {
 // four-segment key ParseVertexKey rejects, so neither lens claims the other's
 // rows.
 func (d OutputDescriptor) AnchorFromKey(targetKey string) (string, bool) {
-	idx := strings.Index(d.OutputKeyPattern, ActorSuffixPlaceholder)
-	if idx < 0 {
+	prefix, suffix, ok := d.patternParts()
+	if !ok {
 		return "", false
 	}
-	prefix := d.OutputKeyPattern[:idx]
-	suffix := d.OutputKeyPattern[idx+len(ActorSuffixPlaceholder):]
 
 	rest, ok := strings.CutPrefix(targetKey, prefix)
 	if !ok {

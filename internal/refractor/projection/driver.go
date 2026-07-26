@@ -3,6 +3,7 @@ package projection
 import (
 	"fmt"
 	"log/slog"
+	"time"
 
 	"github.com/operatinggraph/lattice/internal/refractor/adapter"
 	"github.com/operatinggraph/lattice/internal/refractor/lens"
@@ -134,6 +135,51 @@ func (d OutputDescriptor) EnvelopeFn(lensDefKey string, revisionOf func(string) 
 // pinned to "1.0" for Phase 1. Every actor-aggregate document carries it.
 const Version = "1.0"
 
+// BusinessSweepInterval is how often a non-auth-plane actor-aggregate lens
+// sweeps, against the auth plane's DefaultSweepInterval.
+//
+// The two clocks carry the same asymmetry the health path already states: a
+// stale business read model is one vertical's outage, an unhealed capability
+// document is an authorization failure. Sweeping a dozen business lenses on the
+// auth plane's clock would also multiply the cell's steady-state reprojection
+// load by the lens count, for rows whose staleness costs a view rather than a
+// decision.
+const BusinessSweepInterval = 5 * time.Minute
+
+// sweepInterval selects the clock for a lens's plan; zero leaves the sweeper's
+// own default, which is the auth plane's.
+func sweepInterval(authPlane bool) time.Duration {
+	if authPlane {
+		return 0
+	}
+	return BusinessSweepInterval
+}
+
+// sweepEnrolment decides whether a lens may be swept, returning the prefix its
+// target listing is scoped by, or a non-empty reason it may not be.
+//
+// A lens is enrolled only when it can prove it owns its rows, on all three
+// counts a shared target demands. The gate is structural rather than a
+// name list because the alternative is not a lens that sweeps badly — it is one
+// whose sweep faults on every tick, which reports as a lens that cannot be
+// repaired rather than one that is not being swept.
+func sweepEnrolment(desc OutputDescriptor, adpt adapter.Adapter) (prefix, refusal string) {
+	prefix, ok := desc.KeyPrefix()
+	if !ok {
+		return "", "its output key pattern yields no prefix to scope a target listing by"
+	}
+	if !desc.KeyOwnershipRoundTrips() {
+		// Without a working inverse the orphan direction claims nothing, which
+		// is indistinguishable from having nothing to claim — the detector
+		// would be off and the lens would report healthy.
+		return "", "its output key pattern does not round-trip through AnchorFromKey, so the orphan direction could never claim a row"
+	}
+	if _, ok := adpt.(adapter.PrefixKeyLister); !ok {
+		return "", fmt.Sprintf("its target adapter %T cannot enumerate the keys under that prefix", adpt)
+	}
+	return prefix, ""
+}
+
 // InstallActorAggregate wires an actor-aggregate lens through the compiled
 // ProjectionPlan: the §6.13 Output descriptor drives the on-wire envelope, the
 // per-actor cross-vertex fan-out, the empty/delete-key behavior, and the §6.2
@@ -173,16 +219,32 @@ func InstallActorAggregate(
 	p.SetActorDeleteKey(desc.BuildKey)
 	p.SetLatencyBuffer(pipeline.NewLatencyRingBuffer(pipeline.DefaultLatencyBufferSize))
 
-	// The auth-plane convergence sweep (capability-projection-reconciliation-
-	// design.md §3.2). Installing a plan is what opts a lens in, and only an
-	// auth-plane actor-aggregate lens receives one — a plain lens retracts
-	// through filter/diff retraction and the Personal Lens has its own Hydrate,
-	// so neither is excluded by a name list; it simply never gets a plan.
-	if authPlane {
+	// The convergence sweep (capability-projection-reconciliation-design.md
+	// §3.2, generalized by lens-projection-liveness-design.md §15). Installing
+	// a plan is what opts a lens in, and every actor-aggregate lens that can
+	// name its own rows receives one — a plain lens retracts through
+	// filter/diff retraction and the Personal Lens has its own Hydrate, so
+	// neither is excluded by a name list; it simply never gets a plan.
+	//
+	// The sweep is the only healer for a row that is present but stale, which
+	// is exactly what adding a walk to a lens leaves behind, so withholding it
+	// from business lenses left them converging only when a CDC event next
+	// happened to touch the actor.
+	if prefix, refusal := sweepEnrolment(desc, adpt); refusal != "" {
+		// Refusing is the same posture the grant adapter takes for a lens
+		// declaring no grant_source: no scoping, no enumeration. A sweep the
+		// lens cannot support is not a degraded sweep — it is one that faults
+		// every tick, reporting a lens that is unrepairable rather than one
+		// that is simply not swept.
+		logger.Warn("actor-aggregate lens gets no convergence sweep",
+			"lensId", r.ID, "reason", refusal, "outputKeyPattern", desc.OutputKeyPattern)
+	} else {
 		p.SetSweepPlan(pipeline.SweepPlan{
 			AnchorType:    desc.AnchorType,
 			BuildKey:      desc.BuildKey,
 			AnchorFromKey: desc.AnchorFromKey,
+			KeyPrefix:     prefix,
+			Interval:      sweepInterval(authPlane),
 		})
 	}
 

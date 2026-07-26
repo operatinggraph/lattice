@@ -420,6 +420,24 @@ func main() {
 				CanonicalName: entry.canonicalName,
 				RuleID:        ent.lensID,
 			}
+			// The convergence sweep's verdicts, read from the in-process sweeper
+			// and before the reporter, for the reasons the cap path reads them
+			// there: the streaks are per-run state the health entry does not
+			// carry, and a live repair failure must not be lost to an unreadable
+			// health entry — that is an observation fault, not a sweep one. Nil
+			// for a lens the install gate did not enrol.
+			if sw := entry.pipeline.Sweeper(); sw != nil {
+				status := sw.Status()
+				snap.SweepReconciled = status.Reconciled
+				snap.SweepDivergentStreak = status.DivergentStreak
+				snap.SweepFailingActors = status.FailingActors
+				snap.SweepFailedStreak = status.FailedStreak
+				snap.SweepLastFailure = status.LastFailure
+				snap.SweepLastPassAt = status.LastPassAt
+				snap.SweepSuppression = status.Suppression
+				snap.SweepSuppressionAt = status.SuppressionAt
+				snap.SweepInterval = sw.Interval()
+			}
 			// A lens whose liveness inputs cannot be read is reported as
 			// unknown, never omitted: dropping it removes the lens from
 			// metrics.lensLiveness entirely, which is indistinguishable from a
@@ -816,10 +834,10 @@ func main() {
 			controlSvc.RegisterReprojector(r.ID, reprojectorFor(p))
 		}
 
-		// The auth-plane convergence sweep (§3.2) runs beside the pump on the
-		// same lens context, so it stops with the lens. RunSweep returns
-		// immediately unless the driver installed a sweep plan, which it does
-		// only for an auth-plane actor-aggregate lens.
+		// The convergence sweep (§3.2) runs beside the pump on the same lens
+		// context, so it stops with the lens. RunSweep returns immediately
+		// unless the driver installed a sweep plan, which it does for an
+		// actor-aggregate lens able to scope a listing to its own keys.
 		wg.Add(1)
 		go func() {
 			defer wg.Done()

@@ -42,6 +42,25 @@ type KeyLister interface {
 	ListKeys(ctx context.Context) ([]map[string]any, error)
 }
 
+// PrefixKeyLister is an optional interface for adapters that can enumerate only
+// the keys under a given prefix, in the same map shape KeyLister returns.
+//
+// A target is shared: one NATS-KV bucket (weaver-targets, capability-kv) holds
+// the rows of every lens pointed at it. An unscoped listing therefore hands a
+// caller its siblings' keys, and every caller that acts on what it lists has to
+// re-derive ownership afterwards — which the convergence sweep does exactly
+// (OutputDescriptor.AnchorFromKey), at the cost of streaming the whole bucket
+// once per lens per tick. Scoping the listing to the lens's own key prefix
+// moves that cost to the substrate, where a JetStream subject filter answers it.
+//
+// The prefix must end on a "." segment boundary: the NATS filter it becomes is
+// prefix + ">". It scopes, it does not prove ownership — cap. is a legitimate
+// prefix of cap.roles. — so a caller whose correctness depends on ownership
+// keeps its exact test.
+type PrefixKeyLister interface {
+	ListKeysPrefix(ctx context.Context, prefix string) ([]map[string]any, error)
+}
+
 // SeqGuarded is an optional interface reporting whether an adapter's writes are
 // ordered by the projectionSeq token (Contract #6 §6.2). It exists for the one
 // caller that must decide BEFORE writing — reconciliation, which reports back

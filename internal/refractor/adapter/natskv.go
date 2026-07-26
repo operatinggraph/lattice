@@ -16,6 +16,7 @@ import (
 var _ Adapter = (*NatsKVAdapter)(nil)
 var _ Truncater = (*NatsKVAdapter)(nil)
 var _ KeyLister = (*NatsKVAdapter)(nil)
+var _ PrefixKeyLister = (*NatsKVAdapter)(nil)
 var _ RowReader = (*NatsKVAdapter)(nil)
 var _ SeqGuarded = (*NatsKVAdapter)(nil)
 
@@ -41,6 +42,7 @@ type kvStore interface {
 	Put(ctx context.Context, key string, value []byte) (uint64, error)
 	Delete(ctx context.Context, key string) error
 	ListKeys(ctx context.Context) ([]string, error)
+	ListKeysPrefix(ctx context.Context, prefix string) ([]string, error)
 	Purge(ctx context.Context, key string) error
 	Status(ctx context.Context) error
 }
@@ -312,13 +314,39 @@ func (a *NatsKVAdapter) ListKeys(ctx context.Context) ([]map[string]any, error) 
 	if err != nil {
 		return nil, fmt.Errorf("natskv list keys: %w", err)
 	}
+	return a.mapKeys(keys), nil
+}
+
+// ListKeysPrefix returns the live keys under one prefix, in the same shape
+// ListKeys returns them. The prefix becomes a JetStream subject filter, so the
+// bucket is never streamed in full — which is what makes a per-lens listing
+// affordable on a bucket several lenses share.
+//
+// An empty prefix is refused rather than silently answered with the whole
+// bucket: this method's whole contract is that the caller receives a scoped
+// listing, and a caller that asked to scope and was quietly given everything is
+// the failure mode worth being loud about.
+func (a *NatsKVAdapter) ListKeysPrefix(ctx context.Context, prefix string) ([]map[string]any, error) {
+	if prefix == "" {
+		return nil, fmt.Errorf("natskv list keys by prefix: prefix must not be empty")
+	}
+	keys, err := a.kv.ListKeysPrefix(ctx, prefix)
+	if err != nil {
+		return nil, fmt.Errorf("natskv list keys by prefix %q: %w", prefix, err)
+	}
+	return a.mapKeys(keys), nil
+}
+
+// mapKeys renders raw target keys as the keyOrder field-name maps ListKeys and
+// ListKeysPrefix both return.
+func (a *NatsKVAdapter) mapKeys(keys []string) []map[string]any {
 	out := make([]map[string]any, 0, len(keys))
 	if len(a.keyOrder) == 1 {
 		field := a.keyOrder[0]
 		for _, k := range keys {
 			out = append(out, map[string]any{field: k})
 		}
-		return out, nil
+		return out
 	}
 	for _, k := range keys {
 		parts := strings.Split(k, ".")
@@ -333,7 +361,7 @@ func (a *NatsKVAdapter) ListKeys(ctx context.Context) ([]map[string]any, error) 
 		}
 		out = append(out, m)
 	}
-	return out, nil
+	return out
 }
 
 // GetRow reads back the row previously written at keys, stripped of the

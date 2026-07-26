@@ -128,6 +128,16 @@ const (
 	// than vanish from the metric map, where it is indistinguishable from a
 	// lens that never existed.
 	issueLensProjectionUnreadable = "LensProjectionUnreadable"
+	// The convergence sweep's three verdicts for a business lens, mirroring the
+	// capability codes one for one. They stay `warning` at every streak length,
+	// where the cap path escalates to `error`: the invariant this path is built
+	// on is that a single business lens's read model, however wrong, degrades
+	// the instance rather than failing it. The streaks are still carried in the
+	// message, so an operator sees the difference between a blip and a lens
+	// that has been unrepaired for an hour.
+	issueLensCoverageDivergence = "LensCoverageDivergence"
+	issueLensRepairFailing      = "LensRepairFailing"
+	issueLensSweepStalled       = "LensSweepStalled"
 )
 
 // issueLensRegistryIncomplete is the registry-reconciliation-probe issue
@@ -205,6 +215,20 @@ type LensLivenessStatus struct {
 	// indistinguishable from a lens that was never installed, which is the
 	// quietest way for a read model to go unobserved.
 	Unreadable string
+	// The convergence sweep's verdicts, carried for a business lens exactly as
+	// CapabilityLensStatus carries them for an auth-plane one. They answer what
+	// the lag and pause fields structurally cannot: a lens can be active and
+	// caught up while its projection has a hole, because the events that would
+	// have filled it are in the past.
+	SweepReconciled      uint64
+	SweepDivergentStreak int
+	SweepFailingActors   int
+	SweepFailedStreak    int
+	SweepLastFailure     string
+	SweepLastPassAt      time.Time
+	SweepSuppression     string
+	SweepSuppressionAt   time.Time
+	SweepInterval        time.Duration
 }
 
 // issueRecord is one entry of the Health-KV `issues` array (Contract #5 §5.5).
@@ -371,6 +395,11 @@ type LatticeHeartbeater struct {
 	openLensIssues map[string]string
 	lensLagMu      sync.Mutex
 	lensLagState   map[string]*lagHysteresis
+	// lensSweepBase is the business-lens sibling of sweepBase, separate for the
+	// same reason: the cap path prunes sweepBase against the auth-plane lens
+	// set, so one shared map would have each path evicting the other's
+	// staleness baselines every cycle and neither lens ever reading stalled.
+	lensSweepBase map[string]time.Time
 
 	// registryIssueMu guards openRegistryIssueSince — its own SEPARATE
 	// since-persistence state (not folded into openLensIssues, which
@@ -1008,11 +1037,18 @@ func (h *LatticeHeartbeater) evalLenses(now time.Time) (map[string]map[string]an
 	snaps := h.LensProvider()
 	metric := make(map[string]map[string]any, len(snaps))
 	var paused, lagging, unreadable []string
+	var diverging, unrepaired, stalled []string
 	seen := make(map[string]struct{}, len(snaps))
 	for _, s := range snaps {
 		name := lensName(s)
 		seen[name] = struct{}{}
 		alert := "ok"
+		// The sweep's verdicts are read before the reporter-derived ones and
+		// survive an unreadable entry, the same order the cap path takes: a
+		// repair that is failing right now is a fact about the projection, and
+		// losing it to a fault in observing something else would leave the lens
+		// looking merely unobserved.
+		sweepAlert := h.evalLensSweep(name, now, s, &diverging, &unrepaired, &stalled)
 		if s.Unreadable != "" {
 			// The reporter-derived inputs (status, pause reason, projection lag)
 			// are the untrusted ones, so their thresholds are skipped rather
@@ -1024,13 +1060,15 @@ func (h *LatticeHeartbeater) evalLenses(now time.Time) (map[string]map[string]an
 			alert = "unreadable"
 			unreadable = append(unreadable, fmt.Sprintf("%s (%s)", name, s.Unreadable))
 			h.resetLensLagState(name)
-			metric[name] = map[string]any{
+			m := map[string]any{
 				"status":          s.Status,
 				"projectionLag":   nil,
 				"lastProjectedAt": "",
 				"alert":           alert,
 				"unreadable":      s.Unreadable,
 			}
+			addLensSweepMetrics(m, s)
+			metric[name] = m
 			continue
 		}
 		switch s.Status {
@@ -1052,16 +1090,33 @@ func (h *LatticeHeartbeater) evalLenses(now time.Time) (map[string]map[string]an
 			// any pending streak.
 			h.resetLensLagState(name)
 		}
+		// Alert precedence, the cap path's: paused outranks everything (the
+		// sweep is suppressed while paused, so a verdict there is a frozen
+		// artifact), a row that is wrong now outranks one that is merely behind,
+		// and the detector's own silence is what is left when nothing else is
+		// wrong. Nothing displaced is lost — each condition raises its own issue.
+		switch sweepAlert {
+		case "repair-failing":
+			if alert != "paused" {
+				alert = sweepAlert
+			}
+		case "sweep-stalled":
+			if alert == "ok" || alert == "lagging" {
+				alert = sweepAlert
+			}
+		}
 		lastProjectedAt := ""
 		if !s.LastProjectedAt.IsZero() {
 			lastProjectedAt = substrate.FormatTimestamp(s.LastProjectedAt)
 		}
-		metric[name] = map[string]any{
+		m := map[string]any{
 			"status":          s.Status,
 			"projectionLag":   s.ProjectionLag,
 			"lastProjectedAt": lastProjectedAt,
 			"alert":           alert,
 		}
+		addLensSweepMetrics(m, s)
+		metric[name] = m
 	}
 	h.pruneLensLagState(seen)
 
@@ -1087,7 +1142,132 @@ func (h *LatticeHeartbeater) evalLenses(now time.Time) (map[string]map[string]an
 				strings.Join(unreadable, ", "),
 		}
 	}
+	if len(diverging) > 0 {
+		active[issueLensCoverageDivergence] = capIssue{
+			severity: "warning",
+			message: "convergence sweep healed a graph ↔ read-model divergence; the lens's consumer is caught up but MISSED events: " +
+				strings.Join(diverging, ", "),
+		}
+	}
+	if len(unrepaired) > 0 {
+		active[issueLensRepairFailing] = capIssue{
+			severity: "warning",
+			message: "convergence sweep could not write its repair, so the read model is still wrong and no other signal says so: " +
+				strings.Join(unrepaired, ", "),
+		}
+	}
+	if len(stalled) > 0 {
+		active[issueLensSweepStalled] = capIssue{
+			severity: "warning",
+			message: "convergence sweep has reached no verdict for longer than its staleness window, so every verdict above describes a pass that is no longer happening: " +
+				strings.Join(stalled, ", "),
+		}
+	}
 	return metric, h.reconcileLensIssues(active, now)
+}
+
+// addLensSweepMetrics publishes the sweep's own state alongside the lens's
+// liveness, mirroring the capability path's fields.
+//
+// `sweepEnrolled` is the one field the cap path has no need of: enrolment there
+// is universal, while here the install gate declines any lens that cannot scope
+// a listing to its own rows. That decision is otherwise a line in the
+// activation log, and a lens quietly running without its only stale-row
+// detector reads exactly like a lens whose sweep keeps finding nothing.
+func addLensSweepMetrics(m map[string]any, s LensLivenessStatus) {
+	enrolled := s.SweepInterval > 0
+	m["sweepEnrolled"] = enrolled
+	if !enrolled {
+		return
+	}
+	lastPassAt := ""
+	if !s.SweepLastPassAt.IsZero() {
+		lastPassAt = substrate.FormatTimestamp(s.SweepLastPassAt)
+	}
+	m["reconciled"] = s.SweepReconciled
+	m["failingActors"] = s.SweepFailingActors
+	m["sweepLastPassAt"] = lastPassAt
+	m["sweepSuppression"] = s.SweepSuppression
+}
+
+// evalLensSweep collects one business lens's convergence-sweep verdicts into the
+// caller's detail lists and returns the alert this lens's sweep argues for
+// ("repair-failing", "sweep-stalled", or "" for none) — the caller applies the
+// precedence against the consumer-derived alerts.
+//
+// The sibling of the cap path's inline sweep block, and deliberately not a
+// shared one: it raises different issue codes, keeps its staleness clock in its
+// own map (the cap path prunes that map against the auth-plane lens set, so
+// sharing it would have each path evicting the other's baselines every cycle),
+// and — the substantive difference — never escalates past `warning`. A wrong
+// business read model is one vertical's outage; failing the whole Refractor
+// instance for it would take down the auth plane with it.
+func (h *LatticeHeartbeater) evalLensSweep(
+	name string,
+	now time.Time,
+	s LensLivenessStatus,
+	diverging, unrepaired, stalled *[]string,
+) string {
+	alert := ""
+	if s.SweepDivergentStreak > 0 {
+		*diverging = append(*diverging, fmt.Sprintf("%s (%d consecutive sweeps, %d healed)",
+			name, s.SweepDivergentStreak, s.SweepReconciled))
+	}
+	if s.SweepFailedStreak >= capabilityRepairWarnStreak {
+		var detail string
+		if s.SweepFailingActors > 0 {
+			detail = fmt.Sprintf("%s (%d actor(s) unrepaired over %d consecutive passes",
+				name, s.SweepFailingActors, s.SweepFailedStreak)
+		} else {
+			// A pass-level fault — an unreadable survey, or a tick abandoned
+			// before it verified anything — names no actor.
+			detail = fmt.Sprintf("%s (%d consecutive passes verified nothing",
+				name, s.SweepFailedStreak)
+		}
+		if s.SweepLastFailure != "" {
+			detail += ": " + s.SweepLastFailure
+		}
+		*unrepaired = append(*unrepaired, detail+")")
+		alert = "repair-failing"
+	}
+
+	stallCycles := h.CapabilitySweepStallCycles
+	if stallCycles == 0 {
+		stallCycles = defaultCapabilitySweepStallCycles
+	}
+	stallAfter := time.Duration(stallCycles) * s.SweepInterval
+	switch {
+	case s.SweepInterval <= 0 || stallAfter <= 0:
+		// No sweeper installed (a lens whose key pattern cannot scope a
+		// listing), or a window so large it overflowed: no cadence to be late
+		// against.
+		return alert
+	case s.Status == "paused":
+		// Suppression while paused is deliberate and indefinite, and the pause
+		// is already an issue of its own. Rebasing also stops a resumed lens
+		// starting out stalled for the length of its pause.
+		h.rebaseLensSweepClock(name, now)
+		return alert
+	}
+	stalledFor, isStalled := h.evalLensSweepStall(name, now, s.SweepLastPassAt, stallAfter)
+	if !isStalled {
+		return alert
+	}
+	detail := fmt.Sprintf("%s (no verdict for %s", name, stalledFor.Round(time.Second))
+	// A reason recorded more than a couple of intervals ago describes an
+	// earlier tick — the sweep is wedged, not suppressed.
+	explained := s.SweepSuppression != "" &&
+		now.Sub(s.SweepSuppressionAt) <= time.Duration(capabilitySweepSuppressionFreshnessCycles)*s.SweepInterval
+	if explained {
+		detail += ", suppressed: " + s.SweepSuppression
+	} else {
+		detail += ", no suppression recorded — the sweep is not ticking"
+	}
+	*stalled = append(*stalled, detail+")")
+	if alert == "" {
+		alert = "sweep-stalled"
+	}
+	return alert
 }
 
 // evalRegistryReconciliation surfaces the RegistryReconciliationProvider's
@@ -1199,8 +1379,9 @@ func (h *LatticeHeartbeater) resetLensLagState(name string) {
 	delete(h.lensLagState, name)
 }
 
-// pruneLensLagState drops debounce state for lenses no longer reported this
-// cycle (general-lens sibling of pruneLagState).
+// pruneLensLagState drops per-lens business-path state — lag debounce and sweep
+// staleness baseline — for lenses no longer reported this cycle (general-lens
+// sibling of pruneLagState), keeping both maps bounded to live lenses.
 func (h *LatticeHeartbeater) pruneLensLagState(seen map[string]struct{}) {
 	h.lensLagMu.Lock()
 	defer h.lensLagMu.Unlock()
@@ -1209,6 +1390,52 @@ func (h *LatticeHeartbeater) pruneLensLagState(seen map[string]struct{}) {
 			delete(h.lensLagState, name)
 		}
 	}
+	for name := range h.lensSweepBase {
+		if _, ok := seen[name]; !ok {
+			delete(h.lensSweepBase, name)
+		}
+	}
+}
+
+// lensSweepClockBase returns a business lens's staleness baseline, stamping it
+// at now if it has none. It is the floor under the staleness clock: a lens
+// installed or resumed mid-run has legitimately not swept yet, and its first
+// pass is one interval from ITS activation, not from boot.
+func (h *LatticeHeartbeater) lensSweepClockBase(name string, now time.Time) time.Time {
+	h.lensLagMu.Lock()
+	defer h.lensLagMu.Unlock()
+	if h.lensSweepBase == nil {
+		h.lensSweepBase = map[string]time.Time{}
+	}
+	if base, ok := h.lensSweepBase[name]; ok {
+		return base
+	}
+	h.lensSweepBase[name] = now
+	return now
+}
+
+// rebaseLensSweepClock moves a business lens's staleness baseline forward, so a
+// period the lens is exempt from the verdict is not counted against it once the
+// exemption lifts.
+func (h *LatticeHeartbeater) rebaseLensSweepClock(name string, now time.Time) {
+	h.lensLagMu.Lock()
+	defer h.lensLagMu.Unlock()
+	if h.lensSweepBase == nil {
+		h.lensSweepBase = map[string]time.Time{}
+	}
+	h.lensSweepBase[name] = now
+}
+
+// evalLensSweepStall reports how long a business lens's sweep has gone without a
+// verdict and whether that exceeds stallAfter, measured from the later of its
+// last verdict and its staleness baseline.
+func (h *LatticeHeartbeater) evalLensSweepStall(name string, now, lastPassAt time.Time, stallAfter time.Duration) (time.Duration, bool) {
+	since := h.lensSweepClockBase(name, now)
+	if lastPassAt.After(since) {
+		since = lastPassAt
+	}
+	elapsed := now.Sub(since)
+	return elapsed, elapsed > stallAfter
 }
 
 func (h *LatticeHeartbeater) healthKey() string {

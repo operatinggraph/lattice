@@ -323,3 +323,99 @@ func TestRequiresGuard_AnswersFromTheRuleAlone(t *testing.T) {
 		})
 	}
 }
+
+// ── The convergence sweep's install gate: a lens is enrolled when it can name
+// its own rows, on a clock scaled to what its staleness costs. ───────────────
+
+func TestInstallActorAggregate_BusinessLens_IsEnrolledOnTheSlowerClock(t *testing.T) {
+	// The healer a business actorAggregate lens had no access to: without a
+	// plan, a row added by a lens edit converges only when a CDC event next
+	// happens to touch that actor.
+	r := installRule(t, "weaver-targets", string(projection.EmptyDelete))
+	adpt := newUnguardedAdapter(t)
+	p := newTestPipeline(t, adpt)
+
+	if ok := projection.InstallActorAggregate(p, adpt, r, func(string) uint64 { return 0 }, nil, nil, discardLogger()); !ok {
+		t.Fatalf("expected a business actor-aggregate lens to install")
+	}
+	sw := p.Sweeper()
+	if sw == nil {
+		t.Fatalf("a business actor-aggregate lens must be enrolled in the convergence sweep")
+	}
+	if got := sw.Interval(); got != projection.BusinessSweepInterval {
+		t.Fatalf("business sweep interval = %v, want %v", got, projection.BusinessSweepInterval)
+	}
+}
+
+func TestInstallActorAggregate_AuthPlaneLens_KeepsTheAuthPlaneClock(t *testing.T) {
+	// Widening enrolment must not slow the plane the sweep was built for: an
+	// unhealed capability document is an authorization failure, not a stale view.
+	r := installRule(t, projection.AuthPlaneBucket, string(projection.EmptyDelete))
+	adpt := newUnguardedAdapter(t)
+	p := newTestPipeline(t, adpt)
+
+	if ok := projection.InstallActorAggregate(p, adpt, r, func(string) uint64 { return 0 }, nil, nil, discardLogger()); !ok {
+		t.Fatalf("expected an auth-plane lens to install")
+	}
+	sw := p.Sweeper()
+	if sw == nil {
+		t.Fatalf("an auth-plane lens must keep its convergence sweep")
+	}
+	if got := sw.Interval(); got != pipeline.DefaultSweepInterval {
+		t.Fatalf("auth-plane sweep interval = %v, want the default %v", got, pipeline.DefaultSweepInterval)
+	}
+}
+
+func TestInstallActorAggregate_UnscopableKeyPattern_InstallsWithoutASweep(t *testing.T) {
+	// A pattern whose keys start at the actor suffix cannot scope a listing, so
+	// sweeping it would mean enumerating a target it shares with other lenses to
+	// find rows it may not own. The lens still runs; it just gets no sweep.
+	r := installRule(t, "weaver-targets", string(projection.EmptyDelete))
+	r.Output.OutputKeyPattern = "{actorSuffix}"
+	adpt := newUnguardedAdapter(t)
+	p := newTestPipeline(t, adpt)
+
+	if ok := projection.InstallActorAggregate(p, adpt, r, func(string) uint64 { return 0 }, nil, nil, discardLogger()); !ok {
+		t.Fatalf("an unscopable key pattern must not refuse the lens itself")
+	}
+	if p.Sweeper() != nil {
+		t.Fatalf("a lens that cannot scope a listing must not be enrolled in the sweep")
+	}
+}
+
+func TestInstallActorAggregate_AdapterThatCannotScopeAListing_GetsNoSweep(t *testing.T) {
+	// The refusal has to be structural, not incidental. A sweep on an adapter
+	// that cannot enumerate under a prefix is not a degraded sweep: survey
+	// faults on every tick, the streak raises a repair-failing verdict forever,
+	// and the healer never runs once — a lens reported unrepairable rather than
+	// unswept.
+	r := installRule(t, "weaver-targets", string(projection.EmptySkip)) // skip ⇒ no guard ⇒ any adapter installs
+	adpt := nonKVAdapter{}
+	p := newTestPipeline(t, adpt)
+
+	if ok := projection.InstallActorAggregate(p, adpt, r, func(string) uint64 { return 0 }, nil, nil, discardLogger()); !ok {
+		t.Fatalf("an adapter that cannot scope a listing must not refuse the lens itself")
+	}
+	if p.Sweeper() != nil {
+		t.Fatalf("a lens whose adapter cannot enumerate under a prefix must not be enrolled")
+	}
+}
+
+func TestInstallActorAggregate_KeyPatternThatDoesNotRoundTrip_GetsNoSweep(t *testing.T) {
+	// The orphan direction is the only detector for a row whose anchor is gone,
+	// and it fails silently when BuildKey and AnchorFromKey disagree: claiming
+	// nothing looks exactly like having nothing to claim. A repeated
+	// placeholder is the shape the pattern grammar allows and the inverse does
+	// not survive.
+	r := installRule(t, "weaver-targets", string(projection.EmptyDelete))
+	r.Output.OutputKeyPattern = "installTest.{actorSuffix}.x.{actorSuffix}"
+	adpt := newUnguardedAdapter(t)
+	p := newTestPipeline(t, adpt)
+
+	if ok := projection.InstallActorAggregate(p, adpt, r, func(string) uint64 { return 0 }, nil, nil, discardLogger()); !ok {
+		t.Fatalf("a non-round-tripping key pattern must not refuse the lens itself")
+	}
+	if p.Sweeper() != nil {
+		t.Fatalf("a lens whose key pattern has no working inverse must not be enrolled")
+	}
+}

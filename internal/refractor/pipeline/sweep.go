@@ -3,6 +3,7 @@ package pipeline
 import (
 	"context"
 	"errors"
+	"hash/fnv"
 	"log/slog"
 	"slices"
 	"sort"
@@ -39,6 +40,13 @@ type SweepPlan struct {
 	// AnchorFromKey recovers the anchor a target key was built for, reporting
 	// false for a key this lens does not own (OutputDescriptor.AnchorFromKey).
 	AnchorFromKey func(targetKey string) (string, bool)
+	// KeyPrefix scopes the target listing to this lens's own rows
+	// (OutputDescriptor.KeyPrefix). It is what makes a sweep affordable on a
+	// bucket several lenses share, and the driver refuses to install a plan
+	// without one — an unscoped listing costs the whole bucket per lens per
+	// tick, and the fact that a lens cannot name its own keys is itself the
+	// reason not to sweep it.
+	KeyPrefix string
 	// Interval and Batch override the sweep defaults; zero selects them.
 	Interval time.Duration
 	Batch    int
@@ -264,6 +272,18 @@ func (p *Pipeline) RunSweep(ctx context.Context) {
 	}
 	s.restore(ctx)
 
+	// Every lens's sweeper starts inside the same activation loop, so without a
+	// stagger they all tick together: one instant per interval in which the
+	// whole lens set enumerates its anchors and reprojects a batch each, and an
+	// otherwise idle interval around it. The offset is derived from the lens ID
+	// rather than drawn randomly so a given lens keeps its slot across restarts
+	// and a test can predict it.
+	select {
+	case <-ctx.Done():
+		return
+	case <-time.After(s.startOffset()):
+	}
+
 	ticker := time.NewTicker(s.interval)
 	defer ticker.Stop()
 	for {
@@ -274,6 +294,13 @@ func (p *Pipeline) RunSweep(ctx context.Context) {
 			s.pass(ctx)
 		}
 	}
+}
+
+// startOffset spreads this lens's ticks across the interval, in [0, interval).
+func (s *Sweeper) startOffset() time.Duration {
+	h := fnv.New64a()
+	_, _ = h.Write([]byte(s.p.ruleID))
+	return time.Duration(h.Sum64() % uint64(s.interval))
 }
 
 // restore seeds the in-memory status from Health KV so a restarted process
@@ -542,6 +569,13 @@ func truncateFailure(s string) string {
 // prefilter instead defers the liveness check to the point where it changes a
 // decision (see candidates), and the deep verify reprojects a tombstoned anchor
 // to the envelope's own delete semantics anyway.
+//
+// The target listing is scoped to the lens's own key prefix, so a bucket shared
+// by a dozen lenses is not streamed in full once per lens per tick. Scoping
+// narrows only: the prefix is the same literal AnchorFromKey matches first, so
+// every key it removes is one candidates would have rejected as unowned. It is
+// not a substitute for that test — one lens's prefix can be another's ancestor
+// (cap. and cap.roles.) — and candidates still applies it.
 func (s *Sweeper) survey(ctx context.Context) (anchors []string, targets map[string]struct{}, err error) {
 	prefix := substrate.VertexPrefix + "." + s.plan.AnchorType + "."
 	keys, err := s.p.coreKV.ListKeysPrefix(ctx, prefix)
@@ -560,14 +594,15 @@ func (s *Sweeper) survey(ctx context.Context) (anchors []string, targets map[str
 	}
 	sort.Strings(anchors)
 
-	lister, ok := s.p.currentAdapter().(adapter.KeyLister)
+	lister, ok := s.p.currentAdapter().(adapter.PrefixKeyLister)
 	if !ok {
-		// Every auth-plane target is NATS-KV (the §6.2 guard demands it), so
-		// this is unreachable in production; report it rather than sweeping
-		// with half the comparison silently missing.
+		// Every actor-aggregate target is NATS-KV (the §6.2 guard demands it,
+		// and every such lens is guarded), so this is unreachable in
+		// production; report it rather than sweeping with half the comparison
+		// silently missing.
 		return nil, nil, errSweepNoKeyLister
 	}
-	rows, err := lister.ListKeys(ctx)
+	rows, err := lister.ListKeysPrefix(ctx, s.plan.KeyPrefix)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -909,6 +944,8 @@ func (s *Sweeper) record(ctx context.Context, healed int, fault error) {
 	}
 }
 
-// errSweepNoKeyLister marks a target store that cannot enumerate its keys —
-// the coverage prefilter's precondition.
-var errSweepNoKeyLister = errors.New("pipeline: sweep: target adapter cannot enumerate keys (not a KeyLister)")
+// errSweepNoKeyLister marks a target store that cannot enumerate the keys under
+// this lens's own prefix — the coverage prefilter's precondition. An unscoped
+// enumeration is not a fallback: on a shared target it returns rows this lens
+// does not own.
+var errSweepNoKeyLister = errors.New("pipeline: sweep: target adapter cannot enumerate this lens's keys (not a PrefixKeyLister)")

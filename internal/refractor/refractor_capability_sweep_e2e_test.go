@@ -129,10 +129,13 @@ func TestRefractor_ConvergenceSweep_DetectsAndHealsLostProjection_E2E(t *testing
 	// The sweep as the driver installs it, with the tick compressed so the test
 	// exercises many bounded passes rather than waiting out the production
 	// minute. Batch and interval are the only things it overrides.
+	capPrefix, ok := capDesc.KeyPrefix()
+	require.True(t, ok, "the capability lens must be able to scope a listing to its own keys")
 	p.SetSweepPlan(pipeline.SweepPlan{
 		AnchorType:    capDesc.AnchorType,
 		BuildKey:      capDesc.BuildKey,
 		AnchorFromKey: capDesc.AnchorFromKey,
+		KeyPrefix:     capPrefix,
 		Interval:      250 * time.Millisecond,
 		Batch:         25,
 	})

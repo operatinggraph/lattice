@@ -52,6 +52,9 @@ func (s *scriptedKVStore) Delete(ctx context.Context, key string) error {
 func (s *scriptedKVStore) ListKeys(ctx context.Context) ([]string, error) {
 	panic("unused by guardedWrite tests")
 }
+func (s *scriptedKVStore) ListKeysPrefix(ctx context.Context, prefix string) ([]string, error) {
+	panic("unused by guardedWrite tests")
+}
 func (s *scriptedKVStore) Purge(ctx context.Context, key string) error {
 	panic("unused by guardedWrite tests")
 }

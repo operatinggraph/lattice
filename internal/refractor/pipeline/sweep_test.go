@@ -38,22 +38,44 @@ func sweepAnchorFromKey(targetKey string) (string, bool) {
 }
 
 // listingAdapter is a recordingAdapter that can also enumerate the target's
-// live keys, so a test can pose both prefilter directions.
+// live keys, so a test can pose both prefilter directions. keys stands for the
+// whole shared bucket — including rows a sibling lens wrote — and the prefix
+// listing filters it the way the substrate's subject filter does, so a test
+// seeing a foreign key at all is a test that scoping let it through.
 type listingAdapter struct {
 	recordingAdapter
-	keys    []string
-	listErr error
+	keys           []string
+	listErr        error
+	listedPrefixes []string
 }
 
 func (a *listingAdapter) ListKeys(context.Context) ([]map[string]any, error) {
 	if a.listErr != nil {
 		return nil, a.listErr
 	}
-	out := make([]map[string]any, 0, len(a.keys))
+	return keyRows(a.keys), nil
+}
+
+func (a *listingAdapter) ListKeysPrefix(_ context.Context, prefix string) ([]map[string]any, error) {
+	a.listedPrefixes = append(a.listedPrefixes, prefix)
+	if a.listErr != nil {
+		return nil, a.listErr
+	}
+	scoped := make([]string, 0, len(a.keys))
 	for _, k := range a.keys {
+		if strings.HasPrefix(k, prefix) {
+			scoped = append(scoped, k)
+		}
+	}
+	return keyRows(scoped), nil
+}
+
+func keyRows(keys []string) []map[string]any {
+	out := make([]map[string]any, 0, len(keys))
+	for _, k := range keys {
 		out = append(out, map[string]any{"key": k})
 	}
-	return out, nil
+	return out
 }
 
 const (
@@ -86,6 +108,7 @@ func newSweepPipeline(t *testing.T, adpt *listingAdapter, batch int) *Pipeline {
 		AnchorType:    "identity",
 		BuildKey:      sweepBuildKey,
 		AnchorFromKey: sweepAnchorFromKey,
+		KeyPrefix:     "cap.roles.",
 		Interval:      time.Hour, // ticks are driven explicitly by the tests
 		Batch:         batch,
 	})
@@ -858,4 +881,34 @@ func TestSweepPass_AFilteringLensLearnsItsCoverageWalkIsUnproductive(t *testing.
 			"path would leave no evidence and pass this test vacuously")
 	require.Equal(t, hintMissesBeforeFloor, sw.hintMissesForTest("coverage"),
 		"a pass whose every coverage candidate was already correct is the evidence")
+}
+
+func TestSweepSurvey_ScopesTheTargetListingToThisLensOwnKeys(t *testing.T) {
+	// A target bucket holds every lens's rows. Enumerating all of them once per
+	// lens per tick is what made enrolling a dozen business lenses unaffordable;
+	// the listing is scoped to the lens's own key prefix instead, and the
+	// ownership test still runs on what survives that.
+	sibling := "cap.svc." + strings.TrimPrefix(sweepActorB, "vtx.")
+	adpt := &listingAdapter{keys: []string{sweepBuildKey(sweepActorA), sibling}}
+	p := newSweepPipeline(t, adpt, 10)
+	writeAnchor(t, p, sweepActorA, false)
+
+	_, targets, err := p.Sweeper().survey(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, []string{"cap.roles."}, adpt.listedPrefixes,
+		"the survey must ask the target for this lens's prefix, not for everything")
+	require.NotContains(t, targets, sibling,
+		"a sibling lens's row must not even reach the comparison")
+	require.Contains(t, targets, sweepBuildKey(sweepActorA))
+}
+
+func TestSweepSurvey_AdapterThatCannotScopeItsListingIsRefused(t *testing.T) {
+	// Falling back to an unscoped listing would hand the sweep keys it does not
+	// own on a shared target, so the sweep reports the missing capability rather
+	// than sweeping against a comparison it cannot trust.
+	p := newSweepPipeline(t, &listingAdapter{}, 10)
+	p.adpt = &recordingAdapter{}
+
+	_, _, err := p.Sweeper().survey(context.Background())
+	require.ErrorIs(t, err, errSweepNoKeyLister)
 }

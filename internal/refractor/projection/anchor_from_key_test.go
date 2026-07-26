@@ -1,6 +1,9 @@
 package projection
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 // AnchorFromKey is BuildKey's inverse and the convergence sweep's ownership
 // test. It has to round-trip exactly — a key the sweep cannot invert reads as
@@ -78,5 +81,101 @@ func TestAnchorFromKey_KeyColumnDescriptorRefusesANonNanoIDSuffix(t *testing.T) 
 	d := OutputDescriptor{AnchorType: "leaseapp", OutputKeyPattern: "leaseApplicationComplete.{actorSuffix}", KeyColumn: "entityId"}
 	if _, ok := d.AnchorFromKey("leaseApplicationComplete.leaseapp.Lk2Pn6mQrtwzKbcXvP3T"); ok {
 		t.Fatal("a <type>.<id> suffix must not parse under a bare-NanoID descriptor")
+	}
+}
+
+func TestKeyPrefix_AcceptsTheShippedPatternsAndRefusesTheUnscopableOnes(t *testing.T) {
+	// The prefix becomes a NATS subject filter (prefix + ">"), so it has to end
+	// on a segment boundary; and a pattern that starts at the actor suffix
+	// scopes to the whole target, which is the thing scoping exists to avoid.
+	accepted := map[string]string{
+		"cap.{actorSuffix}":                      "cap.",
+		"cap.roles.{actorSuffix}":                "cap.roles.",
+		"unroutedTasks.{actorSuffix}":            "unroutedTasks.",
+		"leaseApplicationComplete.{actorSuffix}": "leaseApplicationComplete.",
+	}
+	for pattern, want := range accepted {
+		d := OutputDescriptor{AnchorType: "identity", OutputKeyPattern: pattern}
+		got, ok := d.KeyPrefix()
+		if !ok {
+			t.Fatalf("pattern %q: expected a usable key prefix", pattern)
+		}
+		if got != want {
+			t.Fatalf("pattern %q: key prefix = %q, want %q", pattern, got, want)
+		}
+	}
+
+	refused := map[string]string{
+		"{actorSuffix}":      "no literal prefix at all",
+		"cap{actorSuffix}":   "a prefix that does not end on a segment boundary",
+		"cap.roles.identity": "no actor-suffix placeholder, so no per-anchor keys",
+	}
+	for pattern, why := range refused {
+		d := OutputDescriptor{AnchorType: "identity", OutputKeyPattern: pattern}
+		if got, ok := d.KeyPrefix(); ok {
+			t.Fatalf("%s: pattern %q returned prefix %q; it must be refused", why, pattern, got)
+		}
+	}
+}
+
+func TestKeyPrefix_NeverAdmitsLessThanAnchorFromKey(t *testing.T) {
+	// Scoping a listing by the prefix is only safe because it narrows: every key
+	// AnchorFromKey claims starts with the prefix, so filtering can drop nothing
+	// the ownership test would have kept. The reverse does not hold, which is
+	// why the ownership test still runs on what comes back.
+	d := OutputDescriptor{AnchorType: "identity", OutputKeyPattern: "cap.roles.{actorSuffix}"}
+	prefix, ok := d.KeyPrefix()
+	if !ok {
+		t.Fatal("expected a usable key prefix")
+	}
+	for _, actor := range []string{
+		"vtx.identity.Hj4kPmRtw9nbCxz5vQ2y",
+		"vtx.identity.Tswp1AaaaaaaaaaaaaaZ",
+	} {
+		key := d.BuildKey(actor)
+		if !strings.HasPrefix(key, prefix) {
+			t.Fatalf("BuildKey(%q) = %q does not start with the scoping prefix %q", actor, key, prefix)
+		}
+		if _, owned := d.AnchorFromKey(key); !owned {
+			t.Fatalf("AnchorFromKey must claim the key BuildKey produced: %q", key)
+		}
+	}
+	// The prefix admits a sibling's key; only AnchorFromKey rejects it.
+	sibling := "cap.roles.service.Hj4kPmRtw9nbCxz5vQ2y"
+	if !strings.HasPrefix(sibling, prefix) {
+		t.Fatalf("expected %q to survive prefix scoping", sibling)
+	}
+	if _, owned := d.AnchorFromKey(sibling); owned {
+		t.Fatalf("AnchorFromKey must still refuse %q", sibling)
+	}
+}
+
+func TestKeyPrefix_RefusesANatsWildcard(t *testing.T) {
+	// `*.{actorSuffix}` scopes to every 2-token key in a shared target — the
+	// whole-bucket enumeration the scoping exists to prevent, reached through
+	// the mechanism meant to prevent it.
+	for _, pattern := range []string{"*.{actorSuffix}", "a.*.{actorSuffix}", "a.>.{actorSuffix}"} {
+		d := OutputDescriptor{AnchorType: "identity", OutputKeyPattern: pattern}
+		if got, ok := d.KeyPrefix(); ok {
+			t.Fatalf("pattern %q returned prefix %q; a wildcard token must be refused", pattern, got)
+		}
+	}
+}
+
+func TestKeyOwnershipRoundTrips_CatchesARepeatedPlaceholder(t *testing.T) {
+	// BuildKey substitutes every occurrence; the inverse brackets the first. A
+	// descriptor where they disagree renders keys its own orphan direction can
+	// never claim.
+	good := OutputDescriptor{AnchorType: "identity", OutputKeyPattern: "cap.roles.{actorSuffix}"}
+	if !good.KeyOwnershipRoundTrips() {
+		t.Fatal("a shipped pattern must round-trip")
+	}
+	withKeyColumn := OutputDescriptor{AnchorType: "leaseapp", OutputKeyPattern: "leaseExpiry.{actorSuffix}", KeyColumn: "entityId"}
+	if !withKeyColumn.KeyOwnershipRoundTrips() {
+		t.Fatal("a bare-NanoID (keyColumn) pattern must round-trip too")
+	}
+	repeated := OutputDescriptor{AnchorType: "identity", OutputKeyPattern: "cap.{actorSuffix}.x.{actorSuffix}"}
+	if repeated.KeyOwnershipRoundTrips() {
+		t.Fatal("a repeated placeholder must not report a working inverse")
 	}
 }

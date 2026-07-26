@@ -574,3 +574,49 @@ func TestNatsKVAdapter_Close(t *testing.T) {
 	a := newAdapter(t, kv, []string{"id"})
 	assert.NoError(t, a.Close())
 }
+
+// TestNatsKVAdapter_ListKeysPrefix_ScopesToTheLensOwnRows proves the scoping
+// against a real bucket rather than a fake: the convergence sweep enumerates a
+// target a dozen lenses share, and the boundary semantics of the subject filter
+// it becomes (prefix + ">") are the substrate's, not a HasPrefix approximation.
+func TestNatsKVAdapter_ListKeysPrefix_ScopesToTheLensOwnRows(t *testing.T) {
+	kv := startKV(t)
+	a, err := adapter.New(kv, []string{"key"}, adapter.DeleteModeHard)
+	require.NoError(t, err)
+	ctx := context.Background()
+
+	// One shared bucket, three lenses' rows plus the bare-prefix edge case.
+	mine := []string{
+		"cap.roles.identity.Hj4kPmRtw9nbCxz5vQ2y",
+		"cap.roles.identity.Lk2Pn6mQrtwzKbcXvP3T",
+	}
+	theirs := []string{
+		"cap.identity.Hj4kPmRtw9nbCxz5vQ2y",
+		"cap.svc.identity.Hj4kPmRtw9nbCxz5vQ2y",
+		"cap.ephemeral.identity.Hj4kPmRtw9nbCxz5vQ2y",
+	}
+	for _, k := range append(append([]string{}, mine...), theirs...) {
+		require.NoError(t, a.Upsert(ctx, map[string]any{"key": k}, map[string]any{"v": 1}, 0))
+	}
+
+	rows, err := a.ListKeysPrefix(ctx, "cap.roles.")
+	require.NoError(t, err)
+	got := make([]string, 0, len(rows))
+	for _, r := range rows {
+		got = append(got, r["key"].(string))
+	}
+	require.ElementsMatch(t, mine, got, "a scoped listing must return this lens's rows and only those")
+
+	// The ancestor prefix legitimately admits its descendants — scoping is a
+	// cost mechanism, and ownership is decided by AnchorFromKey on what comes
+	// back. This is the property that lets `cap.` and `cap.roles.` coexist.
+	rows, err = a.ListKeysPrefix(ctx, "cap.")
+	require.NoError(t, err)
+	require.Len(t, rows, len(mine)+len(theirs))
+
+	// An unscoped listing is refused rather than answered with the bucket: a
+	// caller that asked to scope and was quietly given everything is exactly
+	// the failure the sweep's install gate exists to prevent.
+	_, err = a.ListKeysPrefix(ctx, "")
+	require.Error(t, err)
+}
