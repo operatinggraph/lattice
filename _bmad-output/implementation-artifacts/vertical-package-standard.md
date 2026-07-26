@@ -710,3 +710,98 @@ one signature are each named by the gate, at the exact site.
   already lives in one (`packages/orchestration-base/external_params_test.go:20`); no pinned helper is
   defined in a test file today. And `minGuardHelperCopies = 2` is a flat floor, so 29 of 31 copies could
   disappear silently. Both are gate-design calls, deliberately not made late in a build fire.
+
+## 13. S10 — the workplace guard joins the pin, and the rename hatch closes: fire brief (Winston, 2026-07-26)
+
+**Scope sentence.** Close every remaining escape from the S10 pin: pin `require_workplace` +
+`enforce_workplace` by adopting maintenance-domain's two-function factoring corpus-wide, delete the three
+renamed copies of `parts_of` (`vertex_parts` ×2 signatures, `typed_vertex_parts`, `unit_parts`), and make
+the three gate-design calls §12 deliberately deferred — per-helper copy floors, `_test.go` in scan, and a
+digest-alias rule that catches the next copy-under-a-new-name.
+
+### 13.1 `require_workplace` — the factoring already in the corpus is the answer
+
+§12 left it unpinned because two of its three variants are load-bearing, and recorded that resolving it
+"needs the scope=self grant analysis this fire does not do." It does not, and that framing was the block.
+Read as bodies rather than as policy, the nine copies are **two functions, not three variants**:
+
+| Shape | Copies | Body |
+|---|---|---|
+| A — inline | 7 | `if op.authTargetValidated: return` · operator · walk |
+| B — factored | 1 (`maintenance-domain/ddls.go:391` + `:409`) | `require_workplace` = validated-target short-circuit → `enforce_workplace`; `enforce_workplace` = operator · walk |
+| C — strict | 1 (`clinic-reminders/visitseries.go:552`) | operator · walk |
+
+**C *is* B's `enforce_workplace`, byte for byte** — the same statements, under a name that claims to be
+something it is not. And A is B inlined: `validated → operator → walk` in both, same order, same outcome.
+So the convergence weakens nothing and needs no grant analysis. §11's escape hatch — *a variant that
+genuinely differs is a different function and should say so* — is the mechanism, and maintenance-domain
+already built it; the work is adopting it, not designing it.
+
+- The 7 shape-A copies split into the two-function form. Behaviour identical.
+- `clinic-reminders/visitseries.go` renames its copy to `enforce_workplace` and updates its two call sites
+  (`:595`, `:677`). It gains no `require_workplace`; the self-exemption it deliberately omits stays omitted,
+  now stated by the name instead of by a comment the gate cannot read.
+- `maintenance-domain` is already canonical and does not change.
+- Both names enter `sharedGuardHelpers`.
+
+The prize is that a documented divergence becomes **structure the gate can see**. §11 records the cost of
+the alternative: an exclusion carrying a recorded reason stops the next reader from re-checking, and one of
+those reasons was already false.
+
+### 13.2 The rename hatch — three aliases, one validator
+
+All three are `parts_of` with an argument or a return value missing. None carries different policy, so
+§11's rename hatch does not license them; converging is the same call §12 made for the two-argument copies.
+
+| Alias | Site | Equivalent | Call sites |
+|---|---|---|---|
+| `vertex_parts(key, name, want_type)` → id | `clinic-domain/site.go:247` | `_, id = parts_of(k, n, t)` | `:284`, `:286`, `:309`, `:311` |
+| `vertex_parts(key, name)` → (type, id) | `service-location/ddls.go:213` | `parts_of(k, n, "")` | `:330`, `:345`, `:360`, `:374` |
+| `typed_vertex_parts(key, name, want_type)` | `service-location/ddls.go:223` | `parts_of(k, n, t)` | `:329`, `:344`, `:359`, `:373`, `:387`, `:388` |
+| `unit_parts(key)` → id | `loftspace-domain/ddls.go:305` | `_, id = parts_of(k, "unit", "unit")` | `:335`, `:376`, `:403`, `:431` |
+
+`clinic-domain/site.go` and `loftspace-domain/ddls.go` hold no `parts_of` of their own (each Starlark
+script has its own module scope), so both gain the canonical copy. Converging service-location's pair
+**tightens** it — its `vertex_parts` skips the empty-id check `parts_of` shipped in §12 — which is the same
+direction §12 took and breaks no caller (an empty-id vertex cannot exist). No test asserts on any of the
+four error strings, verified corpus-wide.
+
+**Deliberately out of scope, and named rather than dropped:** `loftspace-domain/ddls.go:332`
+(`require_manages`) hand-rolls the same three-segment test inline, and it fails with `AuthDenied` rather
+than `InvalidArgument` — a different error class on a path where a non-identity actor is a denial, not a
+bad argument. Converging it would change an authorization failure's shape; that is a decision, not a
+sweep, and it belongs to whoever revisits the ownership probe.
+
+### 13.3 The three gate-design calls
+
+- **Per-helper copy floors.** `minGuardHelperCopies = 2` becomes a per-helper map pinned at the measured
+  count, `>=` not `==`: disappearance is what the floor exists to catch, and a new package legitimately
+  adding a copy should not have to edit the gate. Mirrors S6's structure-pins, where the pin *is* the
+  measurement and lowering it is a deliberate reviewed line.
+- **`_test.go` enters the S10 scan.** Embedded Starlark already lives in a test file, and a test fixture
+  defining a drifted copy of a pinned helper proves a body that does not exist. No test defines one today,
+  so it binds with zero reconciliation — which is exactly when to add it.
+- **A digest-alias rule.** After the convergence the remaining hatch is verbatim: copy a pinned helper,
+  rename it. Any top-level `def` whose statement digest equals a pinned helper's — under a different name —
+  is flagged. An identical body under two names is never legitimate, so this carries no baseline.
+
+**A broader "vertex-key parsing outside `parts_of`" rule was considered and rejected.** A structural
+heuristic (`split(".")` + an arity test + `"vtx"`) fires today on ~10 sites across `rbac-domain`,
+`location-domain`, `privacy-base`, `identity-hygiene`, `augur` and the walk loops — packages this fire has
+not read. A gate that ships with a ten-site baseline teaches the next author that the baseline is where
+their code goes. Filed as its own row instead, with those packages named.
+
+### 13.4 Increments + green checks
+
+1. `require_workplace` / `enforce_workplace` factoring across 7 packages; both names into `sharedGuardHelpers`.
+2. The three aliases deleted, 18 call sites rewritten, `parts_of` added to the two scripts lacking it.
+3. Gate: per-helper floors, `_test.go` in scan, digest-alias rule — each mutation-tested per §11.
+4. Version bumps for every package whose scripts changed (a same-version edit no-ops on a running stack).
+
+After each: `STRICT=1 go run ./scripts/lint-package-standard.go` · `go test ./packages/...`. Full gates
+before admit: `go build ./...`, `make vet`, `golangci-lint run ./...`,
+`STRICT=1 go run ./scripts/lint-conventions.go`, `STRICT=1 go run ./scripts/lint-package-version.go`.
+
+**Non-goals.** The shared-prelude mechanism (pinning is the ratified pattern). Any change to what a guard
+*decides* — this fire moves statements between functions and renames aliases; every authorization outcome
+is identical before and after, and that invariant is the review's job to falsify.
