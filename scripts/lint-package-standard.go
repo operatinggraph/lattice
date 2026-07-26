@@ -115,11 +115,9 @@ var s1Debt = map[opRef]bool{
 var s6Debt = map[string]map[string]bool{
 	"lens-cypher-test": {
 		"augur":            true,
-		"cafe-ledger":      true,
 		"console-operator": true,
 		"demo-operator":    true,
 		"identity-domain":  true,
-		"loftspace-ledger": true,
 		"rbac-domain":      true,
 	},
 	"structure-pins": {
