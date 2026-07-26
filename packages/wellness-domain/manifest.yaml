@@ -1,5 +1,5 @@
 name: wellness-domain
-version: 0.11.0
+version: 0.12.0
 description: |
   Wellness bookable domain: studio / session / booking / instructor vertex
   types + their aspects and links, written by Create*/Tombstone*/Cancel*/Bind*
@@ -19,12 +19,20 @@ description: |
   to a real login identity via the identity-domain `provider` archetype role
   (persona-worlds-design.md Fire W0), mirroring clinic-domain's
   BindProviderIdentity; a bound instructor's TombstoneSession grant is
-  confined, in-script, to sessions they lead. Three projection lenses
+  confined, in-script, to sessions they lead. SetBookingAttendance moves a
+  booking's .status.value from booked to attended or noShow, carrying rate /
+  seat / booker forward on an OCC upsert of the aspect's own revision so
+  CancelBooking can still release the correct seat cell and per-(session,
+  booker) guard afterwards; either value corrects the other, a class that has
+  not begun is rejected (SessionNotStarted, the mirror of SessionInPast), and
+  the same standing guard confines a bound instructor to bookings on sessions
+  they lead. Three projection lenses
   (wellnessStudios, wellnessSessions, wellnessBookings) are the P5 read models
   a wellness FE reads. No PHI/PII, no protected Postgres layer. Depends
   lease-signing (documentation only — CreateBooking reads its leaseapp by
   known key, no install-order requirement enforced at the Starlark level).
-  CreateBooking, CancelBooking, and TombstoneSession each carry an op-meta
+  CreateBooking, CancelBooking, TombstoneSession, and SetBookingAttendance
+  each carry an op-meta
   with the edge-manifest descriptor vocabulary (presentation/inputSchema/
   dispatch, edge-showcase-app-design.md §3.3, Fire 5 adoption) — metadata
   only; a client still needs a service-catalog path (permitsOperation) to
@@ -101,6 +109,9 @@ declares:
     - operationType: CancelBooking
       scope: self
       grantsTo: [consumer]
+    - operationType: SetBookingAttendance
+      scope: any
+      grantsTo: [operator, provider]
     - operationType: CreateInstructor
       scope: any
       grantsTo: [operator]
@@ -114,3 +125,4 @@ declares:
     - operationType: CreateBooking
     - operationType: CancelBooking
     - operationType: TombstoneSession
+    - operationType: SetBookingAttendance

@@ -314,7 +314,7 @@ func bookingVertexTypeDDL() pkgmgr.DDLSpec {
 	return pkgmgr.DDLSpec{
 		CanonicalName:     bookingVertexDDL,
 		Class:             "meta.ddl.vertexType",
-		PermittedCommands: []string{"CreateBooking", "CancelBooking"},
+		PermittedCommands: []string{"CreateBooking", "CancelBooking", "SetBookingAttendance"},
 		Description: "Wellness booking DDL. Vertex shape: vtx.booking.<NanoID>, class=booking, root data = {} " +
 			"(minimal, D5). CreateBooking validates the session is alive + class=session and the booker is alive " +
 			"+ class=identity, reads the session's .schedule.capacity, and claims the first free " +
@@ -334,23 +334,36 @@ func bookingVertexTypeDDL() pkgmgr.DDLSpec {
 			"CancelBooking validates the booking is alive + class=booking and the supplied session is its actual " +
 			"session (via the forSession link), reads the booking's own .status.seat (stored at create time — no " +
 			"stored back-reference needed to recompute it), then releases that seat cell and soft-deletes the " +
-			"booking.",
+			"booking. SetBookingAttendance records who actually showed: it moves .status.value from booked to " +
+			"attended or noShow, carrying rate / seat / booker forward unchanged (an OCC upsert on the aspect's " +
+			"own revision) so CancelBooking can still release the correct seat cell and per-(session, booker) " +
+			"guard afterwards. It is re-markable — attended and noShow correct each other — and rejects a session " +
+			"that has not begun (SessionNotStarted, the mirror of CreateBooking's SessionInPast). Its standing " +
+			"guard mirrors TombstoneSession's: the operator passes unconditionally; a bound instructor may mark " +
+			"only a booking on a class THEY lead, the caller supplying the instructor param and the script " +
+			"requiring BOTH lnk.instructor.<iid>.identifiedBy.identity.<actor> AND " +
+			"lnk.session.<sid>.ledBy.instructor.<iid> to be alive (known keys), rejecting AuthDenied otherwise; " +
+			"front-of-house staff hold no SetBookingAttendance grant.",
 		Script: bookingDDLScript,
 		InputSchema: `{"type":"object","properties":` +
-			`{"session":{"type":"string","description":"vtx.session.<NanoID> being booked (CreateBooking; required, validated alive + class=session; on CancelBooking it must be the booking's actual session, validated via the forSession link)."},` +
+			`{"session":{"type":"string","description":"vtx.session.<NanoID> being booked (CreateBooking; required, validated alive + class=session; on CancelBooking and SetBookingAttendance it must be the booking's actual session, validated via the forSession link)."},` +
 			`"booker":{"type":"string","description":"vtx.identity.<NanoID> making the booking (CreateBooking; required, validated alive + class=identity)."},` +
 			`"leaseAppKey":{"type":"string","description":"Optional vtx.leaseapp.<NanoID> the booker claims residency under (CreateBooking; optional). Checked against the lease's applicationFor link — a mismatch falls through to the standard rate, never a hard failure."},` +
 			`"bookingId":{"type":"string","description":"Optional bare NanoID for the new booking vertex (CreateBooking); absent → minted."},` +
-			`"bookingKey":{"type":"string","description":"vtx.booking.<NanoID> of an existing booking (CancelBooking; required, validated alive)."}},` +
+			`"bookingKey":{"type":"string","description":"vtx.booking.<NanoID> of an existing booking (CancelBooking / SetBookingAttendance; required, validated alive)."},` +
+			`"status":{"type":"string","description":"attended | noShow (SetBookingAttendance; required). Re-markable — either value corrects the other."},` +
+			`"instructor":{"type":"string","description":"vtx.instructor.<NanoID> the caller is bound to (SetBookingAttendance; required for an instructor (non-operator) caller marking a booking on their OWN class — validated via identifiedBy + ledBy)."}},` +
 			`"required":[]}`,
 		OutputSchema: `{"type":"object","properties":` +
 			`{"primaryKey":{"type":"string","description":"vtx.booking.<NanoID> the operation wrote."}}}`,
 		FieldDescription: map[string]string{
-			"session":     "Full vtx.session.<NanoID> key being booked. CreateBooking validates it is alive + class=session, reads its capacity, claims a free seat, and writes the forSession link. CancelBooking also requires it (the booking's actual session, validated via the forSession link) to release the held seat.",
+			"session":     "Full vtx.session.<NanoID> key being booked. CreateBooking validates it is alive + class=session, reads its capacity, claims a free seat, and writes the forSession link. CancelBooking also requires it (the booking's actual session, validated via the forSession link) to release the held seat. SetBookingAttendance requires it to resolve the class's start time and, for an instructor caller, the ledBy binding.",
 			"booker":      "Full vtx.identity.<NanoID> key of the person booking. CreateBooking validates it is alive + class=identity and writes the bookedBy link.",
 			"leaseAppKey": "Optional full vtx.leaseapp.<NanoID> key the booker claims residency under (CreateBooking). Verified via the lease's applicationFor link before granting rate=resident; a mismatch or absent lease silently falls back to rate=standard.",
 			"bookingId":   "Optional bare NanoID (no dots / key segments) for the new booking vertex. Absent → minted with nanoid.new().",
-			"bookingKey":  "Full vtx.booking.<NanoID> key of an existing booking to cancel (CancelBooking).",
+			"bookingKey":  "Full vtx.booking.<NanoID> key of an existing booking to cancel (CancelBooking) or record attendance on (SetBookingAttendance).",
+			"status":      "attended | noShow (SetBookingAttendance). Replaces .status.value; rate, seat and booker are carried forward unchanged.",
+			"instructor":  "Full vtx.instructor.<NanoID> key the caller claims to be. Required for a non-operator SetBookingAttendance caller: the script requires the caller's own identifiedBy binding to it AND the session's ledBy link to it, so a forged value only fails closed.",
 		},
 		Examples: []pkgmgr.ExampleSpec{
 			{
@@ -375,6 +388,18 @@ func bookingVertexTypeDDL() pkgmgr.DDLSpec {
 				Name:            "CancelBooking — release a seat",
 				Payload:         map[string]any{"bookingKey": "vtx.booking.<NanoID>", "session": "vtx.session.<NanoID>"},
 				ExpectedOutcome: "Validates the booking is alive + class=booking and the supplied session is its actual session, releases the held seat, and soft-deletes the booking. Returns primaryKey.",
+			},
+			{
+				Name: "SetBookingAttendance — an instructor marks their own class",
+				Payload: map[string]any{
+					"bookingKey": "vtx.booking.<NanoID>",
+					"session":    "vtx.session.<NanoID>",
+					"status":     "attended",
+					"instructor": "vtx.instructor.<NanoID>",
+				},
+				ExpectedOutcome: "Requires the caller's identifiedBy binding to the named instructor and that instructor's " +
+					"ledBy link to the session, then moves .status.value to attended with rate / seat / booker unchanged. " +
+					"SessionNotStarted before the class begins; AuthDenied for any other instructor's class.",
 			},
 		},
 	}
@@ -450,20 +475,22 @@ func bookingStatusAspectTypeDDL() pkgmgr.DDLSpec {
 	return pkgmgr.DDLSpec{
 		CanonicalName:     bookingStatusAspectDDL,
 		Class:             "meta.ddl.aspectType",
-		PermittedCommands: []string{"CreateBooking"},
+		PermittedCommands: []string{"CreateBooking", "SetBookingAttendance"},
 		Description: "Booking status aspect (wellness). Stored as vtx.booking.<NanoID>.status (class " +
-			"bookingStatus) = {value: booked, rate: standard|resident, seat, booker}. Non-sensitive. Written by " +
-			"CreateBooking (whose booking vertexType DDL owns the script); this aspect-type DDL is the step-6 " +
+			"bookingStatus) = {value: booked|attended|noShow, rate: standard|resident, seat, booker}. " +
+			"Non-sensitive. Written by CreateBooking (value=booked) and SetBookingAttendance (value=attended|" +
+			"noShow, an OCC upsert carrying rate / seat / booker forward untouched) — the booking vertexType DDL " +
+			"owns both scripts; this aspect-type DDL is the step-6 " +
 			"write gate. seat + booker are internal bookkeeping (the claimed seat index, the booker's identity " +
 			"key) CancelBooking reads to recompute which vtx.session.<s>.seat<n> cell and vtx.session.<s>.bkr<b> " +
 			"double-book guard to release — a single anchor each, NOT a stored relationship-as-key-list (the booker " +
 			"relationship stays the bookedBy link, Contract #1). Declaration-only: no op handler.",
 		Script: aspectDeclarationOnlyScript,
 		InputSchema: `{"type":"object","properties":` +
-			`{"value":{"type":"string","enum":["booked"]},"rate":{"type":"string","enum":["standard","resident"]},"seat":{"type":"integer"},"booker":{"type":"string"}}}`,
+			`{"value":{"type":"string","enum":["booked","attended","noShow"]},"rate":{"type":"string","enum":["standard","resident"]},"seat":{"type":"integer"},"booker":{"type":"string"}}}`,
 		OutputSchema: `{"type":"object"}`,
 		FieldDescription: map[string]string{
-			"value":  "Booking status: booked (the only value this increment writes).",
+			"value":  "Booking status: booked at create time; attended | noShow once SetBookingAttendance records who showed.",
 			"rate":   "standard | resident, derived by CreateBooking from the optional leaseAppKey residency check.",
 			"seat":   "The claimed seat index on the session (internal bookkeeping; CancelBooking reads it to release the correct seat cell).",
 			"booker": "The booker's full vtx.identity.<NanoID> key (internal bookkeeping; CancelBooking reads it to release the correct per-(session, booker) double-book guard). A single anchor, not a relationship — the bookedBy link carries the relationship.",
@@ -1305,12 +1332,38 @@ def require_live_typed(state, key, name, want_class):
 def require_matching_session(book_id, session):
     _, sess_id = parts_of(session, "session", "session")
     for_session_lnk = "lnk.booking." + book_id + ".forSession.session." + sess_id
-    # read-posture: (a) declared reads at CancelBooking dispatch (validation
-    # link; absence means the caller named the wrong session — WrongSession).
+    # read-posture: (a) declared reads at CancelBooking / SetBookingAttendance
+    # dispatch (validation link; absence means the caller named the wrong
+    # session — WrongSession).
     fs = kv.Read(for_session_lnk)
     if fs == None or fs.isDeleted:
         fail("WrongSession: session " + session + " is not the session of booking vtx.booking." + book_id)
     return sess_id
+
+ROLE_PAGE_LIMIT = 50
+
+def actor_holds_operator(actor_key):
+    # Resolved from the GRAPH, not from a compile-time constant: the primordial
+    # role ids are loaded at runtime (bootstrap.LoadPrimordialNanoIDs) while a
+    # package's Definition -- and so its script text -- is built at package-init,
+    # so no substitution can see the operator id. The walk mirrors the kernel's
+    # own root-grant lens exactly (internal/bootstrap/lenses.go: MATCH (identity)
+    # -[:holdsRole]->(role) WHERE role.canonicalName.data.value = 'operator').
+    #
+    # read-posture: (e) relation=holdsRole epoch=none -- an identity holds few
+    # roles, so this is never a keyspace scan. A role granted concurrently with
+    # this write is not a race worth closing: it can only widen authority, and
+    # the confined branch is the safe one.
+    page, _ = kv.Links(actor_key, "holdsRole", "out", None, ROLE_PAGE_LIMIT)
+    for lk in page:
+        if lk.isDeleted:
+            continue
+        # read-posture: (e) per-candidate follow-up read off the enumeration
+        # above (data-derived key -- the role is unknown until it resolves).
+        cn = kv.Read(lk.targetVertex + ".canonicalName")
+        if cn != None and not cn.isDeleted and cn.data.get("value") == "operator":
+            return True
+    return False
 
 MAX_SESSION_CAPACITY = 200
 
@@ -1516,6 +1569,95 @@ def execute(state, op):
             _, guard_booker_id = parts_of(booker, "booker", "identity")
             mutations.append(make_tombstone(session + ".bkr" + guard_booker_id))
         events = [{"class": "wellness.bookingCancelled", "data": {"bookingKey": book_key}}]
+        return {"mutations": mutations, "events": events, "response": {"primaryKey": book_key}}
+
+    if ot == "SetBookingAttendance":
+        book_key = required_string(p, "bookingKey")
+        _, book_id = parts_of(book_key, "bookingKey", "booking")
+        if not vertex_alive(state, book_key):
+            fail("UnknownBooking: " + book_key)
+        cls = class_of(state, book_key)
+        if cls != "booking":
+            fail("WrongClass: bookingKey: " + book_key + " has class " + str(cls) + ", required booking")
+
+        value = required_string(p, "status")
+        if value != "attended" and value != "noShow":
+            fail("InvalidArgument: status: must be attended or noShow; got " + value)
+
+        session = required_string(p, "session")
+        _, sess_id = parts_of(session, "session", "session")
+
+        # Standing binder, the shape TombstoneSession uses: the operator passes
+        # unconditionally; a bound instructor may additionally mark only a
+        # booking on a class THEY lead — the caller supplies the instructor
+        # param and BOTH the session's ledBy link to it AND the caller's own
+        # identifiedBy binding to it must be alive (known keys). front-of-house
+        # holds no SetBookingAttendance grant, so no workplace binder is needed.
+        if not actor_holds_operator(op.actor):
+            instr_key = optional_string(p, "instructor")
+            if instr_key == None:
+                fail("AuthDenied: " + op.actor + " may not record attendance on " + book_key + " (no instructor supplied)")
+            _, instr_id = parts_of(instr_key, "instructor", "instructor")
+            _, actor_id = parts_of(op.actor, "actor", "identity")
+            # The caller's own binding answers first. It is keyed on op.actor, so
+            # it can only ever say "am I this instructor?" — whereas the ledBy
+            # check below answers about the SESSION, and every bound instructor in
+            # the deployment holds this grant. Ahead of the binding, one
+            # instructor could walk a studio's published schedule against a
+            # stranger's class and read off who leads it, by which of the two
+            # denials came back.
+            # read-posture: (d) declared optionalReads by SetBookingAttendance's dispatcher.
+            bound = kv.Read("lnk.instructor." + instr_id + ".identifiedBy.identity." + actor_id)
+            if bound == None or bound.isDeleted:
+                fail("AuthDenied: " + op.actor + " is not identifiedBy-bound to instructor " + instr_key)
+            # read-posture: (d) declared optionalReads by SetBookingAttendance's
+            # dispatcher for the instructor-standing path (absence is a
+            # meaningful AuthDenied, not a correctness error).
+            led_by = kv.Read("lnk.session." + sess_id + ".ledBy.instructor." + instr_id)
+            if led_by == None or led_by.isDeleted:
+                fail("AuthDenied: " + instr_key + " does not lead session " + session)
+
+        # Ordered after the binder: this answers differently for THIS booking's
+        # session than any other, so ahead of the guard it would tell any caller
+        # holding the grant which class a stranger's booking is for.
+        require_matching_session(book_id, session)
+
+        # read-posture: (a) declared reads at SetBookingAttendance dispatch —
+        # attendance is only meaningful once the class has begun, the mirror of
+        # CreateBooking's SessionInPast. Both sides are rfc3339-normalized UTC,
+        # so lexically == chronologically.
+        sched = kv.Read(session + ".schedule")
+        if sched == None or sched.isDeleted:
+            fail("InvalidState: " + session + ".schedule is missing; cannot record attendance")
+        starts_at = sched.data.get("startsAt")
+        if starts_at == None:
+            fail("InvalidState: " + session + ".schedule.startsAt is missing; cannot record attendance")
+        submitted = time.rfc3339_utc(op.submittedAt)
+        if submitted < starts_at:
+            fail("SessionNotStarted: session " + session + " starts at " + str(starts_at) + ", attendance cannot be recorded yet (submitted " + submitted + ")")
+
+        status_key = book_key + ".status"
+        # read-posture: (a) declared reads at SetBookingAttendance dispatch — the
+        # live status carries the rate / seat / booker bookkeeping this write
+        # must preserve. Overwriting it with value alone would strip .seat and
+        # .booker, and CancelBooking reads BOTH to release the seat cell and the
+        # per-(session, booker) double-book guard: a marked booking would then
+        # fail to cancel and leak its guard, locking the booker out of re-booking.
+        status = kv.Read(status_key)
+        if status == None or status.isDeleted:
+            fail("InvalidState: " + status_key + " is missing; cannot record attendance")
+        merged = {"value": value}
+        for field in ["rate", "seat", "booker"]:
+            carried = status.data.get(field)
+            if carried != None:
+                merged[field] = carried
+
+        # The OCC upsert is keyed on the status aspect's own revision, so two
+        # markers racing the same booking commit exactly one. Either value
+        # corrects the other — re-marking is the affordance, not a defect.
+        mutations = [make_aspect_upsert_occ(book_key, "status", "bookingStatus", merged, status.revision)]
+        events = [{"class": "wellness.attendanceRecorded",
+                   "data": {"bookingKey": book_key, "session": session, "value": value}}]
         return {"mutations": mutations, "events": events, "response": {"primaryKey": book_key}}
 
     fail("UnknownOperation: " + ot)

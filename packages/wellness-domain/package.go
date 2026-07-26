@@ -40,8 +40,8 @@
 // new primitive: both are the identical write-path claim idiom applied to a
 // different candidate-key dimension.
 //
-// Six ops (known-key kv.Read only — no kv.Links enumeration, no raw prefix
-// scans):
+// Seven ops (known-key kv.Read only, apart from the bounded holdsRole walk
+// the operator-exemption shares with clinic-domain — no raw prefix scans):
 //
 //	CreateStudio / TombstoneStudio
 //	CreateSession (validates the studio alive + class, discretizes the grid,
@@ -52,7 +52,10 @@
 //	  when an optional leaseAppKey is supplied, verifies the booker is that
 //	  lease's actual applicant via the applicationFor link before granting
 //	  the resident rate; a mismatch falls through to the standard rate,
-//	  never a hard rejection) / CancelBooking (releases the held seat)
+//	  never a hard rejection) / CancelBooking (releases the held seat) /
+//	  SetBookingAttendance (records attended | noShow once the class has
+//	  begun, carrying the seat / booker bookkeeping forward so a marked
+//	  booking still cancels cleanly)
 //
 // Three PROJECTION lenses are the P5 query surface a wellness FE reads
 // (never Core KV): wellnessStudios (the studio picker), wellnessSessions
@@ -89,8 +92,8 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 // Package is the static, install-time bundle.
 var Package = pkgmgr.Definition{
 	Name:        "wellness-domain",
-	Version:     "0.11.0",
-	Description: "Wellness bookable domain: studio / session / booking / instructor vertex types + their aspects and links, written by Create*/Tombstone*/Cancel*/Bind* ops. CreateSession claims a deterministic studioSlotClaim per covered 15-minute cell (double-session lock, mirrors clinic-domain's providerSlotClaim). CreateBooking claims the first free sessionSeatClaim within the session's capacity (SessionFull once exhausted — the same CreateOnly idiom extended over a seat-index dimension), rejects a booking on an already-started/ended session (SessionInPast, mirroring clinic's ScheduleInPast) and a booker's second live booking on the same session (DoubleBooked, a deterministic per-(session, booker) sessionBookerClaim guard mirroring cafe's cafeOpenTabGuard, released by CancelBooking so a re-book re-claims it) and, given an optional leaseAppKey, verifies residency via lease-signing's applicationFor link before granting the resident rate (a mismatch falls through to standard, never a hard failure). BindInstructorIdentity binds an instructor to a real login identity via the identity-domain `provider` archetype role (persona-worlds-design.md Fire W0), mirroring clinic-domain's BindProviderIdentity; a bound instructor's TombstoneSession grant is confined, in-script, to sessions they lead. Three projection lenses (wellnessStudios, wellnessSessions, wellnessBookings) are the P5 read models a wellness FE reads. No PHI/PII, no protected Postgres layer. Depends lease-signing (documentation only — CreateBooking reads its leaseapp by known key, no install-order requirement enforced at the Starlark level). CreateBooking, CancelBooking, and TombstoneSession each carry an op-meta with the edge-manifest descriptor vocabulary (presentation/inputSchema/dispatch, edge-showcase-app-design.md §3.3, Fire 5 adoption) — metadata only; a client still needs a service-catalog path (permitsOperation) to discover these ops.",
+	Version:     "0.12.0",
+	Description: "Wellness bookable domain: studio / session / booking / instructor vertex types + their aspects and links, written by Create*/Tombstone*/Cancel*/Bind* ops. CreateSession claims a deterministic studioSlotClaim per covered 15-minute cell (double-session lock, mirrors clinic-domain's providerSlotClaim). CreateBooking claims the first free sessionSeatClaim within the session's capacity (SessionFull once exhausted — the same CreateOnly idiom extended over a seat-index dimension), rejects a booking on an already-started/ended session (SessionInPast, mirroring clinic's ScheduleInPast) and a booker's second live booking on the same session (DoubleBooked, a deterministic per-(session, booker) sessionBookerClaim guard mirroring cafe's cafeOpenTabGuard, released by CancelBooking so a re-book re-claims it) and, given an optional leaseAppKey, verifies residency via lease-signing's applicationFor link before granting the resident rate (a mismatch falls through to standard, never a hard failure). BindInstructorIdentity binds an instructor to a real login identity via the identity-domain `provider` archetype role (persona-worlds-design.md Fire W0), mirroring clinic-domain's BindProviderIdentity; a bound instructor's TombstoneSession grant is confined, in-script, to sessions they lead. SetBookingAttendance moves a booking's .status.value from booked to attended or noShow, carrying rate / seat / booker forward on an OCC upsert of the aspect's own revision so CancelBooking can still release the correct seat cell and per-(session, booker) guard afterwards; either value corrects the other, a class that has not begun is rejected (SessionNotStarted, the mirror of SessionInPast), and the same standing guard confines a bound instructor to bookings on sessions they lead. Three projection lenses (wellnessStudios, wellnessSessions, wellnessBookings) are the P5 read models a wellness FE reads. No PHI/PII, no protected Postgres layer. Depends lease-signing (documentation only — CreateBooking reads its leaseapp by known key, no install-order requirement enforced at the Starlark level). CreateBooking, CancelBooking, TombstoneSession, and SetBookingAttendance each carry an op-meta with the edge-manifest descriptor vocabulary (presentation/inputSchema/dispatch, edge-showcase-app-design.md §3.3, Fire 5 adoption) — metadata only; a client still needs a service-catalog path (permitsOperation) to discover these ops.",
 	DDLs:        DDLs(),
 	Lenses:      Lenses(),
 	Permissions: Permissions(),

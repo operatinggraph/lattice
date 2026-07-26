@@ -82,6 +82,7 @@ func domainCapDoc() *processor.CapabilityDoc {
 			{OperationType: "TombstoneSession", Scope: "any"},
 			{OperationType: "CreateBooking", Scope: "any"},
 			{OperationType: "CancelBooking", Scope: "any"},
+			{OperationType: "SetBookingAttendance", Scope: "any"},
 		},
 		ServiceAccess:   []processor.ServiceAccessEntry{},
 		EphemeralGrants: []processor.EphemeralGrant{},
@@ -342,6 +343,315 @@ func createBooking(t *testing.T, ctx context.Context, conn *substrate.Conn, cp *
 	testutil.PublishOp(t, conn, env)
 	outcome := testutil.DriveOne(t, ctx, cp, cons, "")
 	return "vtx.booking." + nanoIDFromRequestID(reqID), outcome
+}
+
+// attendanceEnv builds a SetBookingAttendance envelope with the read posture
+// its dispatcher declares (ddls.go): the booking + its .status + the session's
+// .schedule are required reads, the session-match and the two ownership probes
+// are optionalReads. An empty instructor is the operator path, which supplies
+// neither the param nor its probes.
+func attendanceEnv(t *testing.T, label, bookingKey, sessionKey, status, instructorKey, actorKey, submittedAt string) *processor.OperationEnvelope {
+	t.Helper()
+	_, bookID, _ := substrate.ParseVertexKey(bookingKey)
+	_, sessID, _ := substrate.ParseVertexKey(sessionKey)
+	payloadMap := map[string]any{"bookingKey": bookingKey, "session": sessionKey, "status": status}
+	optionalReads := []string{"lnk.booking." + bookID + ".forSession.session." + sessID}
+	if instructorKey != "" {
+		payloadMap["instructor"] = instructorKey
+		_, instrID, _ := substrate.ParseVertexKey(instructorKey)
+		_, actorID, _ := substrate.ParseVertexKey(actorKey)
+		optionalReads = append(optionalReads,
+			"lnk.session."+sessID+".ledBy.instructor."+instrID,
+			"lnk.instructor."+instrID+".identifiedBy.identity."+actorID)
+	}
+	payload, _ := json.Marshal(payloadMap)
+	return &processor.OperationEnvelope{
+		RequestID:     testutil.GenReqID(label),
+		Lane:          processor.LaneDefault,
+		OperationType: "SetBookingAttendance",
+		Actor:         actorKey,
+		SubmittedAt:   submittedAt,
+		Class:         "booking",
+		Payload:       payload,
+		ContextHint: &processor.ContextHint{
+			Reads:         []string{bookingKey, bookingKey + ".status", sessionKey + ".schedule"},
+			OptionalReads: optionalReads,
+		},
+	}
+}
+
+func attendanceStatus(t *testing.T, ctx context.Context, conn *substrate.Conn, bookingKey string) map[string]any {
+	t.Helper()
+	doc := readDoc(t, ctx, conn, bookingKey+".status")
+	data, _ := doc["data"].(map[string]any)
+	return data
+}
+
+// TestSetBookingAttendance_CarriesSeatAndBookerThroughToCancel is the load-
+// bearing one. The attendance write replaces .status, and CancelBooking reads
+// .status.seat to release the seat cell and .status.booker to release the
+// per-(session, booker) double-book guard. A write that stored `value` alone
+// would strip both: the booking would fail to cancel, and its guard would
+// survive, locking the booker out of ever re-booking that session.
+func TestSetBookingAttendance_CarriesSeatAndBookerThroughToCancel(t *testing.T) {
+	ctx, conn := setupDomainEnv(t)
+	cp, cons := newDomainPipeline(t, ctx, conn, "attendcarry")
+
+	studioKey := createStudio(t, ctx, conn, cp, cons, "wdattendstudio000001", "Flow Room")
+	sessionKey, _ := createSession(t, ctx, conn, cp, cons, "wdattendsessio000001", studioKey, "Vinyasa Flow", "2026-07-08T09:00:00Z", "2026-07-08T09:30:00Z", 20)
+	bookerKey := seedIdentity(t, ctx, conn, "BBWELLATTNDCRYHJKMNP")
+
+	bookingKey, outcome := createBooking(t, ctx, conn, cp, cons, "wdattendbookin000001", sessionKey, bookerKey, "")
+	if outcome != processor.OutcomeAccepted {
+		t.Fatalf("CreateBooking outcome = %v, want Accepted", outcome)
+	}
+	before := attendanceStatus(t, ctx, conn, bookingKey)
+
+	testutil.PublishOp(t, conn, attendanceEnv(t, "wdattendmark00000001", bookingKey, sessionKey, "attended", "", domainActorKey, "2026-07-08T09:05:00Z"))
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
+
+	after := attendanceStatus(t, ctx, conn, bookingKey)
+	if got, _ := after["value"].(string); got != "attended" {
+		t.Fatalf("status.value = %q, want attended", got)
+	}
+	for _, field := range []string{"rate", "seat", "booker"} {
+		if after[field] != before[field] {
+			t.Errorf("status.%s = %v after marking, want %v carried forward unchanged", field, after[field], before[field])
+		}
+	}
+
+	// The whole point: a marked booking still cancels, releasing both the seat
+	// cell and the guard, so the booker can re-book.
+	cancelEnv := &processor.OperationEnvelope{
+		RequestID:     testutil.GenReqID("wdattendcancel000001"),
+		Lane:          processor.LaneDefault,
+		OperationType: "CancelBooking",
+		Actor:         domainActorKey,
+		SubmittedAt:   "2026-07-08T09:40:00Z",
+		Class:         "booking",
+		Payload:       json.RawMessage(`{"bookingKey":"` + bookingKey + `","session":"` + sessionKey + `"}`),
+		ContextHint: &processor.ContextHint{Reads: []string{
+			bookingKey, bookingKey + ".status",
+			forSessionLnkKey(t, bookingKey, sessionKey),
+		}},
+	}
+	testutil.PublishOp(t, conn, cancelEnv)
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
+
+	if keyExists(t, ctx, conn, sessionKey+".seat1") {
+		t.Errorf("seat1 must be released after cancelling a marked booking")
+	}
+	_, bookerID, _ := substrate.ParseVertexKey(bookerKey)
+	if keyExists(t, ctx, conn, sessionKey+".bkr"+bookerID) {
+		t.Errorf("the double-book guard must be released after cancelling a marked booking")
+	}
+}
+
+// TestSetBookingAttendance_RejectsBeforeTheClassBegins: attendance is a record
+// of what happened, so it cannot be taken on a class that has not started —
+// the mirror of CreateBooking's SessionInPast.
+func TestSetBookingAttendance_RejectsBeforeTheClassBegins(t *testing.T) {
+	ctx, conn := setupDomainEnv(t)
+	cp, cons := newDomainPipeline(t, ctx, conn, "attendearly")
+
+	studioKey := createStudio(t, ctx, conn, cp, cons, "wdattendstudio000002", "Flow Room")
+	sessionKey, _ := createSession(t, ctx, conn, cp, cons, "wdattendsessio000002", studioKey, "Vinyasa Flow", "2026-07-08T09:00:00Z", "2026-07-08T09:30:00Z", 20)
+	bookerKey := seedIdentity(t, ctx, conn, "BBWELLATTNDERLHJKMNP")
+	bookingKey, _ := createBooking(t, ctx, conn, cp, cons, "wdattendbookin000002", sessionKey, bookerKey, "")
+
+	outcome, reply := testutil.SubmitAndAwaitReply(t, ctx, conn, cp, cons,
+		attendanceEnv(t, "wdattendearly0000001", bookingKey, sessionKey, "attended", "", domainActorKey, "2026-07-08T08:59:00Z"))
+	if outcome != processor.OutcomeRejected {
+		t.Fatalf("marking a class that has not begun = %v, want Rejected", outcome)
+	}
+	if reply.Error == nil || !strings.Contains(reply.Error.Message, "SessionNotStarted") {
+		t.Fatalf("rejection should be SessionNotStarted, got %+v", reply.Error)
+	}
+
+	// One minute past the start it is allowed — the boundary is the start
+	// instant, not some later cutoff.
+	testutil.PublishOp(t, conn, attendanceEnv(t, "wdattendontime000001", bookingKey, sessionKey, "attended", "", domainActorKey, "2026-07-08T09:00:00Z"))
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
+}
+
+// TestSetBookingAttendance_EitherValueCorrectsTheOther: a mis-marked member is
+// restated rather than stranded — cafe-domain's missing charge-correction op
+// is the gap this avoids.
+func TestSetBookingAttendance_EitherValueCorrectsTheOther(t *testing.T) {
+	ctx, conn := setupDomainEnv(t)
+	cp, cons := newDomainPipeline(t, ctx, conn, "attendremark")
+
+	studioKey := createStudio(t, ctx, conn, cp, cons, "wdattendstudio000003", "Flow Room")
+	sessionKey, _ := createSession(t, ctx, conn, cp, cons, "wdattendsessio000003", studioKey, "Vinyasa Flow", "2026-07-08T09:00:00Z", "2026-07-08T09:30:00Z", 20)
+	bookerKey := seedIdentity(t, ctx, conn, "BBWELLATTNDRMKHJKMNP")
+	bookingKey, _ := createBooking(t, ctx, conn, cp, cons, "wdattendbookin000003", sessionKey, bookerKey, "")
+
+	for i, want := range []string{"noShow", "attended", "noShow"} {
+		testutil.PublishOp(t, conn, attendanceEnv(t, "wdattendremark00000"+strconv.Itoa(i), bookingKey, sessionKey, want, "", domainActorKey, "2026-07-08T09:05:00Z"))
+		testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
+		if got, _ := attendanceStatus(t, ctx, conn, bookingKey)["value"].(string); got != want {
+			t.Fatalf("after mark %d: status.value = %q, want %q", i, got, want)
+		}
+	}
+}
+
+// TestSetBookingAttendance_RejectsAnUnknownStatus: the aspect's enum is not
+// merely documentation — an arbitrary value would land in the read model the
+// roster renders.
+func TestSetBookingAttendance_RejectsAnUnknownStatus(t *testing.T) {
+	ctx, conn := setupDomainEnv(t)
+	cp, cons := newDomainPipeline(t, ctx, conn, "attendbadvalue")
+
+	studioKey := createStudio(t, ctx, conn, cp, cons, "wdattendstudio000004", "Flow Room")
+	sessionKey, _ := createSession(t, ctx, conn, cp, cons, "wdattendsessio000004", studioKey, "Vinyasa Flow", "2026-07-08T09:00:00Z", "2026-07-08T09:30:00Z", 20)
+	bookerKey := seedIdentity(t, ctx, conn, "BBWELLATTNDBADHJKMNP")
+	bookingKey, _ := createBooking(t, ctx, conn, cp, cons, "wdattendbookin000004", sessionKey, bookerKey, "")
+
+	outcome, reply := testutil.SubmitAndAwaitReply(t, ctx, conn, cp, cons,
+		attendanceEnv(t, "wdattendbadval000001", bookingKey, sessionKey, "maybe", "", domainActorKey, "2026-07-08T09:05:00Z"))
+	if outcome != processor.OutcomeRejected {
+		t.Fatalf("an unknown status = %v, want Rejected", outcome)
+	}
+	if reply.Error == nil || !strings.Contains(reply.Error.Message, "must be attended or noShow") {
+		t.Fatalf("rejection should name the permitted values, got %+v", reply.Error)
+	}
+	if got, _ := attendanceStatus(t, ctx, conn, bookingKey)["value"].(string); got != "booked" {
+		t.Fatalf("status.value = %q after a rejected mark, want booked (untouched)", got)
+	}
+}
+
+// TestSetBookingAttendance_InstructorConfinedToTheirOwnClass: every bound
+// instructor in the deployment holds the same standing scope=any grant, so the
+// capability plane cannot tell one from another — the script's two-hop binder
+// is the entire boundary. It also asserts the ORDER: naming the session's real
+// leader must be indistinguishable from naming any other instructor, or one
+// instructor reads off who leads a stranger's class from which denial returns.
+func TestSetBookingAttendance_InstructorConfinedToTheirOwnClass(t *testing.T) {
+	ctx, conn := setupDomainEnv(t)
+	cp, cons := newDomainPipeline(t, ctx, conn, "attendconfine")
+
+	opDoc := domainCapDoc()
+	opDoc.PlatformPermissions = append(opDoc.PlatformPermissions,
+		processor.PlatformPermission{OperationType: "CreateInstructor", Scope: "any"})
+	testutil.SeedCapDoc(t, ctx, conn, opDoc)
+
+	// The instructor's login. It holds exactly the standing grant every bound
+	// instructor holds — nothing about the capability doc says WHICH classes.
+	const instructorActorID = "BBWELLATTNDNSTRACTRK"
+	instructorActorKey := "vtx.identity." + instructorActorID
+	testutil.SeedCapDoc(t, ctx, conn, &processor.CapabilityDoc{
+		Key:                    "cap.identity." + instructorActorID,
+		Actor:                  instructorActorKey,
+		Version:                "1.0",
+		ProjectedAt:            time.Now().UTC().Format(time.RFC3339Nano),
+		ProjectedFromRevisions: map[string]uint64{instructorActorKey: 1},
+		Lanes:                  []string{"default"},
+		PlatformPermissions: []processor.PlatformPermission{
+			{OperationType: "SetBookingAttendance", Scope: "any"},
+		},
+		ServiceAccess:   []processor.ServiceAccessEntry{},
+		EphemeralGrants: []processor.EphemeralGrant{},
+		Roles:           []string{"vtx.role." + pkgmgr.RoleID("identity-domain", "provider")},
+	})
+
+	mkInstructor := func(label, name string) string {
+		reqID := testutil.GenReqID(label)
+		testutil.PublishOp(t, conn, &processor.OperationEnvelope{
+			RequestID:     reqID,
+			Lane:          processor.LaneDefault,
+			OperationType: "CreateInstructor",
+			Actor:         domainActorKey,
+			SubmittedAt:   "2026-07-07T12:00:00Z",
+			Class:         "instructor",
+			Payload:       json.RawMessage(`{"displayName":"` + name + `"}`),
+		})
+		testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
+		return "vtx.instructor." + nanoIDFromRequestID(reqID)
+	}
+	mineKey := mkInstructor("wdattendinstr000001", "Mine")
+	theirsKey := mkInstructor("wdattendinstr000002", "Theirs")
+
+	// The identifiedBy binding BindInstructorIdentity would mint. Seeded
+	// directly so this test proves the attendance guard, not the bind.
+	_, mineID, _ := substrate.ParseVertexKey(mineKey)
+	seedLink(t, ctx, conn, "lnk.instructor."+mineID+".identifiedBy.identity."+instructorActorID,
+		mineKey, instructorActorKey, "identifiedBy", "identifiedBy")
+
+	ledSession := func(label, studioLabel, studioName, instructorKey, startsAt, endsAt string) string {
+		studioKey := createStudio(t, ctx, conn, cp, cons, studioLabel, studioName)
+		reqID := testutil.GenReqID(label)
+		testutil.PublishOp(t, conn, &processor.OperationEnvelope{
+			RequestID:     reqID,
+			Lane:          processor.LaneDefault,
+			OperationType: "CreateSession",
+			Actor:         domainActorKey,
+			SubmittedAt:   "2026-07-07T12:00:00Z",
+			Class:         "session",
+			Payload: json.RawMessage(`{"studio":"` + studioKey + `","name":"Class","instructor":"` + instructorKey +
+				`","startsAt":"` + startsAt + `","endsAt":"` + endsAt + `","capacity":4}`),
+			ContextHint: &processor.ContextHint{
+				Reads:         []string{studioKey, instructorKey},
+				OptionalReads: wdSlotClaimKeys(t, studioKey, startsAt, endsAt),
+			},
+		})
+		testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
+		return "vtx.session." + nanoIDFromRequestID(reqID)
+	}
+	mySession := ledSession("wdattendsessio000005", "wdattendstudio000005", "Mine Room", mineKey, "2026-07-08T09:00:00Z", "2026-07-08T09:30:00Z")
+	theirSession := ledSession("wdattendsessio000006", "wdattendstudio000006", "Their Room", theirsKey, "2026-07-08T09:00:00Z", "2026-07-08T09:30:00Z")
+
+	booker := seedIdentity(t, ctx, conn, "BBWELLATTNDCNFHJKMNP")
+	myBooking, _ := createBooking(t, ctx, conn, cp, cons, "wdattendbookin000005", mySession, booker, "")
+	theirBooking, _ := createBooking(t, ctx, conn, cp, cons, "wdattendbookin000006", theirSession, booker, "")
+
+	// The instructor marks a booking on the class they lead.
+	testutil.PublishOp(t, conn, attendanceEnv(t, "wdattendmine00000001", myBooking, mySession, "attended", mineKey, instructorActorKey, "2026-07-08T09:05:00Z"))
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
+	if got, _ := attendanceStatus(t, ctx, conn, myBooking)["value"].(string); got != "attended" {
+		t.Fatalf("a bound instructor must be able to mark their own class: status.value = %q", got)
+	}
+
+	// The same instructor, another instructor's class, naming themselves.
+	outcome, reply := testutil.SubmitAndAwaitReply(t, ctx, conn, cp, cons,
+		attendanceEnv(t, "wdattendtheirs000001", theirBooking, theirSession, "noShow", mineKey, instructorActorKey, "2026-07-08T09:05:00Z"))
+	if outcome != processor.OutcomeRejected {
+		t.Fatalf("marking another instructor's class = %v, want Rejected", outcome)
+	}
+	if reply.Error == nil || !strings.Contains(reply.Error.Message, "does not lead session") {
+		t.Fatalf("rejection should be the ledBy denial, got %+v", reply.Error)
+	}
+	if got, _ := attendanceStatus(t, ctx, conn, theirBooking)["value"].(string); got != "booked" {
+		t.Fatalf("another instructor's booking was written: status.value = %q, want booked", got)
+	}
+
+	// Naming an instructor they are NOT bound to must be answered by the
+	// binding, not by the ledBy check — the real leader and a decoy must be
+	// indistinguishable.
+	// The candidate key is echoed back, but the caller supplied it, so it tells
+	// them nothing they did not already know. What must NOT differ is the
+	// denial itself — that is what would separate "this instructor leads that
+	// class" from "this one does not".
+	denial := func(label, candidate string) string {
+		_, reply := testutil.SubmitAndAwaitReply(t, ctx, conn, cp, cons,
+			attendanceEnv(t, label, theirBooking, theirSession, "attended", candidate, instructorActorKey, "2026-07-08T09:05:00Z"))
+		if reply.Error == nil {
+			t.Fatalf("%s: expected a rejection", label)
+		}
+		msg := reply.Error.Message
+		i := strings.Index(msg, "fail: ")
+		if i < 0 {
+			t.Fatalf("%s: rejection carries no script failure: %s", label, msg)
+		}
+		return strings.ReplaceAll(msg[i+len("fail: "):], candidate, "<candidate>")
+	}
+	realLeader := denial("wdattendleader000001", theirsKey)
+	decoy := denial("wdattenddecoy0000001", mkInstructor("wdattendinstr000003", "Decoy"))
+	if realLeader != decoy {
+		t.Errorf("naming a class's real leader is distinguishable from naming a stranger:\n  leader → %s\n  decoy  → %s", realLeader, decoy)
+	}
+	if !strings.Contains(realLeader, "not identifiedBy-bound") {
+		t.Errorf("both should be answered by the caller's own binding, got %q", realLeader)
+	}
 }
 
 func TestCreateStudio_MintsStudioWithProfile(t *testing.T) {

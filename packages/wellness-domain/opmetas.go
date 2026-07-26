@@ -3,10 +3,11 @@ package wellnessdomain
 import "github.com/operatinggraph/lattice/internal/pkgmgr"
 
 // OpMetas declares descriptor-vocabulary metadata (edge-showcase-app-design.md
-// §3.3, edge-manifest Fire 1) for wellness-domain's two consumer-invocable
-// (scope=self) ops — CreateBooking and CancelBooking — mirroring clinic-
-// domain's adoption (Fire 5 Inc 1) and service-domain's original RequestService
-// op-meta.
+// §3.3, edge-manifest Fire 1) for wellness-domain's client-invocable ops — the
+// two consumer (scope=self) ones, CreateBooking and CancelBooking, and the two
+// provider-hat standing ones, TombstoneSession and SetBookingAttendance —
+// mirroring clinic-domain's adoption (Fire 5 Inc 1) and service-domain's
+// original RequestService op-meta.
 //
 // Dispatch.Class on each entry is "booking" — the booking DDL's own
 // CanonicalName (bookingVertexDDL), the Contract #2 §2.1 envelope `class`
@@ -42,6 +43,13 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 // identity with no instructor binding cannot answer it and a descriptor-
 // driven client declines to offer the self-cancel path, leaving the
 // operator/front-of-house surface untouched.
+//
+// SetBookingAttendance is the same provider-hat standing shape one entity
+// deeper: the target is the BOOKING, so `instructor` is the same
+// `{me.instructor}` self-anchor while `session` is the `{entity.sessionKey}`
+// auto-fill CancelBooking already uses — the instructor names neither, and
+// types only who showed. Its `status` field is therefore the one genuinely
+// user-entered value in the whole set.
 func OpMetas() []pkgmgr.OpMetaSpec {
 	return []pkgmgr.OpMetaSpec{
 		{
@@ -161,6 +169,59 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 				// CancelBooking's OptionalReads use above.
 				OptionalReads: []string{
 					"lnk.session.{payload.sessionKey:id}.ledBy.instructor.{payload.instructor:id}",
+					"lnk.instructor.{payload.instructor:id}.identifiedBy.identity.{actor:id}",
+				},
+			},
+		},
+		{
+			OperationType: "SetBookingAttendance",
+			Presentation: &pkgmgr.OpPresentationSpec{
+				Title:       "Record attendance",
+				Description: "Mark whether this member showed up for the class.",
+				Icon:        "check",
+				Tone:        "primary",
+				SubmitLabel: "Record",
+			},
+			InputSchema: `{"type":"object","properties":` +
+				`{"bookingKey":{"type":"string","description":"vtx.booking.<NanoID> being marked — auto-filled from the booking being viewed."},` +
+				`"session":{"type":"string","description":"vtx.session.<NanoID> — must be the booking's actual session."},` +
+				`"status":{"type":"string","enum":["attended","noShow"],"description":"Whether the member showed up."},` +
+				`"instructor":{"type":"string","description":"vtx.instructor.<NanoID> of your own instructor record — required when marking as an instructor rather than staff."}},` +
+				`"required":["bookingKey","session","status"]}`,
+			FieldDescriptions: map[string]string{
+				"bookingKey": "The booking being marked — auto-filled by the client from the booking being viewed (dispatch.targetField), not user-entered.",
+				"session":    "Must match the booking's actual forSession link — a client renders this from the booking record it already loaded.",
+				"status":     "attended or noShow. Either corrects the other, so a mistaken mark can be restated.",
+				"instructor": "Your own instructor record — auto-filled from your identity's own instructor self-anchor. Required when marking as an instructor (a class you lead); staff mark with no instructor field.",
+			},
+			Dispatch: &pkgmgr.OpDispatchSpec{
+				Class:       "booking",
+				AuthContext: "standing",
+				TargetField: "bookingKey",
+				TargetType:  "booking",
+				ContextParams: map[string]string{
+					"session":    "{entity.sessionKey}",
+					"instructor": "{me.instructor}",
+				},
+				// The booking's own .status is REQUIRED: the script carries its
+				// rate / seat / booker forward onto the attendance write, so its
+				// absence is a correctness error, not a rejection. The session's
+				// .schedule is required for the same reason — attendance before
+				// the class begins is SessionNotStarted, and the start time is
+				// what answers that. The targetField fallback declares the
+				// booking vertex but never its aspects.
+				Reads: []string{
+					"{payload.bookingKey}",
+					"{payload.bookingKey}.status",
+					"{payload.session}.schedule",
+				},
+				// The session-match and the two ownership probes. Absence of any
+				// is a meaningful rejection the script renders (WrongSession /
+				// AuthDenied), not a correctness error — the same shape
+				// CancelBooking and TombstoneSession use above.
+				OptionalReads: []string{
+					"lnk.booking.{payload.bookingKey:id}.forSession.session.{payload.session:id}",
+					"lnk.session.{payload.session:id}.ledBy.instructor.{payload.instructor:id}",
 					"lnk.instructor.{payload.instructor:id}.identifiedBy.identity.{actor:id}",
 				},
 			},

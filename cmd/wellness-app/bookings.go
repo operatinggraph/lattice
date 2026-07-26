@@ -26,9 +26,12 @@ type bookingProjection struct {
 	BookerKey   string `json:"bookerKey"`
 }
 
-// bookingRow is the roster / my-classes row a view renders.
+// bookingRow is the roster / my-classes row a view renders. Status carries
+// booked | attended | noShow so the roster can show who the instructor has
+// already marked, and offer the correcting mark for who they have not.
 type bookingRow struct {
 	BookingKey  string `json:"bookingKey"`
+	Status      string `json:"status"`
 	Rate        string `json:"rate"`
 	SessionKey  string `json:"sessionKey"`
 	SessionName string `json:"sessionName"`
@@ -59,15 +62,10 @@ func computeBookings(keys []string, get kvGetter, sessionKey, bookerKey string) 
 		if bookerKey != "" && p.BookerKey != bookerKey {
 			continue
 		}
-		rows = append(rows, bookingRow{
-			BookingKey:  p.BookingKey,
-			Rate:        p.Rate,
-			SessionKey:  p.SessionKey,
-			SessionName: p.SessionName,
-			StartsAt:    p.StartsAt,
-			EndsAt:      p.EndsAt,
-			BookerKey:   p.BookerKey,
-		})
+		// The rendered row mirrors the projection field-for-field; the two stay
+		// separate types so a future lens column is a deliberate decision to
+		// expose rather than an automatic one.
+		rows = append(rows, bookingRow(p))
 	}
 	sort.Slice(rows, func(i, j int) bool {
 		if rows[i].StartsAt != rows[j].StartsAt {

@@ -563,9 +563,16 @@ function myClassCard(b) {
 // own binding leads (persona-worlds-design.md §7.3), so the picker below
 // offers an instructor exactly their own classes.
 //
-// The seat list is read-only: CancelBooking scope=any grants `operator` alone
-// (packages/wellness-domain/permissions.go), so neither hat may cancel
+// Nobody cancels a seat from here: CancelBooking scope=any grants `operator`
+// alone (packages/wellness-domain/permissions.go), so neither hat may cancel
 // somebody else's seat — a member cancels their own from My Classes.
+//
+// What the roster CAN write is attendance. SetBookingAttendance grants
+// `provider` scope=any, confined in-script to a booking on a session the
+// caller both leads (ledBy) and is identifiedBy-bound to, so the bound
+// instructor marks who showed — the "attendance" half of §7.3's instructor
+// hat. Staff hold no such grant, so the controls appear for the bound
+// instructor alone, and only once the class has started.
 //
 // The CLASS itself is different. TombstoneSession grants `provider`
 // scope=any, confined in-script to a session the caller both leads (ledBy)
@@ -622,11 +629,76 @@ async function renderRoster() {
     body.innerHTML = '<div class="empty">' + esc(e.message) + "</div>";
     return;
   }
+  // Marking attendance is the bound instructor's own beat, and only once the
+  // class has begun — SetBookingAttendance answers SessionNotStarted before
+  // that, so the control would only fail closed. The server re-derives both
+  // facts and the Starlark guard re-derives them again at submit; this is the
+  // affordance, not the authority.
+  const se = (sessionsCache || []).find((x) => x.sessionKey === sessionKey);
+  const mine = instructorKey();
+  const isLeader = !!(se && mine && se.instructorKey === mine);
+  const started = !!(se && se.startsAt && new Date(se.startsAt).getTime() <= Date.now());
+
   summary.textContent = bookings.length + " booked";
   body.innerHTML = bookings.length
-    ? '<div class="grid">' + bookings.map(rosterCard).join("") + "</div>"
+    ? '<div class="grid">' + bookings.map((b) => rosterCard(b, isLeader && started)).join("") + "</div>"
     : '<div class="empty">No one has booked this session yet.</div>';
+  if (isLeader && !started && bookings.length) {
+    summary.textContent += " — attendance opens when the class starts";
+  }
+  if (isLeader && started) bindAttendance(sessionKey, mine);
   renderCancelClass(sessionKey);
+}
+
+// bindAttendance wires each card's Attended / No-show control. The whole set
+// is disabled while one submit is in flight, then the roster is re-read so the
+// badges reflect what actually committed rather than what was clicked.
+function bindAttendance(sessionKey, mine) {
+  const buttons = document.querySelectorAll("#roster-body [data-attend]");
+  buttons.forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      buttons.forEach((b) => (b.disabled = true));
+      try {
+        await markAttendance(btn.dataset.attend, sessionKey, btn.dataset.value, mine);
+        toast("Attendance recorded.", true);
+        setTimeout(renderRoster, 700);
+      } catch (e) {
+        toast(e.message, false);
+        buttons.forEach((b) => (b.disabled = b.dataset.wasDisabled === "1"));
+      }
+    });
+    btn.dataset.wasDisabled = btn.disabled ? "1" : "0";
+  });
+}
+
+// markAttendance submits SetBookingAttendance for a booking on a class this
+// instructor leads. It carries NO authContext.target — the grant is scope=any
+// and the script confines it by the three links below, not by a caller-supplied
+// target (packages/wellness-domain/ddls.go).
+async function markAttendance(bookingKey, sessionKey, value, mine) {
+  const bookId = idOf(bookingKey);
+  const sessId = idOf(sessionKey);
+  await opOrThrow(
+    {
+      operationType: "SetBookingAttendance",
+      class: "booking",
+      // The booking's own .status is required — the script carries its rate /
+      // seat / booker forward onto this write, so its absence is a correctness
+      // error, not a rejection. The session's .schedule is required for the
+      // same reason: its startsAt is what answers SessionNotStarted. The
+      // session-match and the two ownership probes are (d)-declared — an absent
+      // link is a meaningful rejection, not a correctness error.
+      reads: [bookingKey, bookingKey + ".status", sessionKey + ".schedule"],
+      optionalReads: [
+        "lnk.booking." + bookId + ".forSession.session." + sessId,
+        "lnk.session." + sessId + ".ledBy.instructor." + idOf(mine),
+        "lnk.instructor." + idOf(mine) + ".identifiedBy.identity." + idOf(identityKey()),
+      ],
+      payload: { bookingKey: bookingKey, session: sessionKey, status: value, instructor: mine },
+    },
+    "record attendance",
+    false,
+  );
 }
 
 // renderCancelClass appends the instructor's own "Call off this class"
@@ -687,13 +759,34 @@ async function cancelOwnClass(se, mine) {
   );
 }
 
-function rosterCard(b) {
+// ATTENDANCE_MARKS maps a booking's committed status to how the roster shows
+// it. `booked` carries no badge — not-yet-marked is the resting state, and a
+// badge on every card would drown the ones that say something.
+const ATTENDANCE_MARKS = {
+  attended: { badge: "posted", label: "attended" },
+  noShow: { badge: "settled", label: "no-show" },
+};
+
+function rosterCard(b, markable) {
+  const mark = ATTENDANCE_MARKS[b.status];
   return (
     '<div class="card">' +
     '<span class="badge ' + (b.rate === "resident" ? "posted" : "open") + '">' + esc(b.rate || "standard") + "</span>" +
+    (mark ? '<span class="badge ' + mark.badge + '">' + mark.label + "</span>" : "") +
     '<div class="who">' + esc(shortKey(b.bookerKey)) + "</div>" +
+    (markable ? attendanceActions(b) : "") +
     "</div>"
   );
+}
+
+// attendanceActions renders the two marks as a pair, with the one already
+// recorded disabled — either value corrects the other, so the control the
+// instructor needs is always the OTHER one.
+function attendanceActions(b) {
+  const btn = (value, label) =>
+    '<button class="ghost" data-attend="' + esc(b.bookingKey) + '" data-value="' + value + '"' +
+    (b.status === value ? " disabled" : "") + ">" + label + "</button>";
+  return '<div class="card-actions">' + btn("attended", "Attended") + btn("noShow", "No-show") + "</div>";
 }
 
 // ---- Studios (staff) view ------------------------------------------
