@@ -118,16 +118,15 @@ async function loadDetail(id) {
   const panel = $("#flow-detail");
   panel.classList.add("visible");
   panel.innerHTML = "";
-  setStatus("flows-status-msg", "loading flow…");
+  panel.appendChild(el("div", "muted", "loading flow…"));
   const body = await api("/api/flows/" + encodeURIComponent(id));
   if (state.arg !== id) return; // navigated away
+  panel.innerHTML = "";
   if (body.error) {
-    setStatus("flows-status-msg", body.error, true);
-    panel.appendChild(el("div", "muted", body.error));
+    panel.appendChild(el("div", "card-issue bad", body.error));
     return;
   }
   const row = body.row || {};
-  setStatus("flows-status-msg", patternLabel(row) + " · " + row.instanceId);
 
   const head = el("div", "flow-detail-head");
   head.appendChild(el("span", "flow-group-name", patternLabel(row)));
