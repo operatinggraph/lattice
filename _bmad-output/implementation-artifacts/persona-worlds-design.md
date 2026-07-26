@@ -1784,6 +1784,24 @@ has started. The op carries an op-meta (`authContext: standing`, `{me.instructor
 auto-fills, `status` the one user-entered field) but is NOT service-catalog wired — matching TombstoneSession,
 the sibling provider-hat op, which Facet reaches through the hat surface rather than a `permitsOperation` path.
 
+*Live-verified end to end (`a922fe35`), and the browser earned its keep.* Signed in as Sam Okafor
+(staff · instructor · member) on the running stack: scheduled a Sam-led class, booked it, and before the
+start instant the roster read `1 booked — attendance opens when the class starts` with NO marking controls.
+At the start instant the two controls appeared; Attended committed through the Gateway on Sam's real
+session — which is the one thing the integration tests cannot prove, since they seed capability docs
+directly rather than earning the grant through a signed-in provider hat. Core KV then read
+`{value: attended, rate: standard, seat: 1, booker: …}` — the merge, live. No-show corrected it, and
+cancelling the MARKED booking from My Classes tombstoned the booking and released BOTH
+`session.<s>.seat1` and `session.<s>.bkr<booker>` — the wedge this increment's whole design guards
+against, disproven on the real stack. Both verification classes were called off afterwards and their four
+studio slot cells released, leaving the stack at its original eleven sessions.
+
+The browser also caught a defect no gate would have: the mark committed but the roster re-read the
+`wellnessBookings` LENS 700ms later, before it reprojected, so the badge did not appear and the click read
+as a no-op until a manual Refresh. The roster now polls the read model on a bounded backoff and renders
+only what the lens actually reports — a write that silently failed to project still reads as unmarked
+rather than as done, which the optimistic alternative would have gotten backwards.
+
 *Residual.* Row L32 (`instructor`/`serviceprovider` hats carry no record-administering ops) is UNCHANGED by
 this fire and stays open: both wellness provider-hat ops target a `session`/`booking`, neither targets an
 `instructor` record, so the profile/availability surface that row names is still absent.
