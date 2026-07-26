@@ -476,3 +476,76 @@ deliberate trade (one prelude would make it moot — its lane row is open), and 
 blind spots got closed in this fire rather than later. One of the three is weaker than it first read: the
 cycle test stays green with the visited set deleted, because the *depth* bound is what guarantees
 termination — the test comment now says so instead of claiming to pin `seen`.
+
+## 11. The domain resolvers test their hop vertices — fire brief (Winston, 2026-07-26)
+
+**Scope sentence (from the board row, verbatim):** *"The resolvers feeding `require_workplace` its
+candidates — `studio_locations`, `session_locations`, `sites_for_provider`, `leaseapp_unit`,
+`account_unit` — test only LINK liveness, never the target vertex, and `TombstoneLocation` cascades to no
+links. `worksAt_covers` now checks every location vertex itself, so it catches the location case; a
+tombstoned studio/provider/unit still resolves for anything else reading them."*
+
+**Why the location case being closed does not close this.** §10 put a vertex test on every node
+`worksAt_covers` stands on, so a tombstoned **location** confers nothing. But a resolver's job is to
+*produce* those candidate locations, and it produces them by walking through vertices of other types
+that nothing tests: a **provider**, a **studio**, a **lease**. Those hops are invisible to
+`worksAt_covers` — by the time it runs, the dead vertex has already been transited and only its live
+locations remain. The confinement it computes is therefore the dead entity's ex-topology.
+
+**Two of the five holes are reachable by a shipped operation today**, not defensively:
+
+| Resolver | Untested hop | Op that kills it | Effect |
+|---|---|---|---|
+| `sites_for_provider` (clinic-domain `ddls.go:1801`, clinic-reminders `visitseries.go:518`) | the `provider` vertex, before enumerating `practicesAt` | `TombstoneProvider` (`clinic-domain/ddls.go:1295` — mutations are `[make_tombstone(prkey)]`, no cascade) | a tombstoned provider still returns its sites, so staff at a building it no longer practises at keep authority over its appointments + visit series |
+| `session_locations` (wellness-domain `ddls.go:1826`) | the `studio` at the `atStudio` hop | `TombstoneStudio` (DDL doc states "no cascade onto its sessions") | a session at a decommissioned studio still confers that studio's ex-locations |
+| `studio_locations` (wellness-domain `ddls.go:1317`) | the `studio_key` itself | `TombstoneStudio` | same, one hop shorter |
+| `account_unit` (cafe-ledger `scripts.go:356`) | the `lease` at the `heldFor` hop | none today | defensive |
+| `leaseapp_unit` (cafe-domain `ddls.go:580`, lease-signing `scripts.go:369`) | the returned `unit` | none today | defensive for the `require_workplace` consumer (`worksAt_covers` re-reads the unit anyway) but **not** for lease-signing's `require_manages(decide_unit, …)` (`scripts.go:653`), which tests the `manages` link and never the unit vertex |
+
+**The rule, applied uniformly rather than per-site.** Every vertex a resolver *transits* or *returns* is
+tested for liveness — not only the ones a tombstone op exists for. `worksAt_covers`' own doc gives the
+reason: *"a guard where a dead ancestor confers nothing but a dead starting location confers everything
+would be exactly the kind of inconsistency the next reader copies wrongly."* The resolvers are precisely
+what the next author copies, so they get the whole rule, and the two defensive sites cost one bounded
+read each.
+
+**Precedent to mirror:** `worksAt_covers`' inline vertex test (`node = kv.Read(cur); if node == None or
+node.isDeleted: continue`), which exists because a tombstone is a *document*, not an absence —
+`step4_hydrate` routes only `ErrKeyNotFound` to `knownAbsent`, so `== None` alone reads a tombstone as
+live.
+
+**Shape: one helper, joined to the S10 pin.** Seven inline copies of a security-relevant liveness test
+across six packages is the exact shape the previous two fires spent themselves collapsing (`c35eb3be`,
+`1946ce92`). So the test lands as `vertex_live(key)` — the standalone, live-KV form, named to sit beside
+the existing declared-reads `vertex_alive(state, key)` — and joins `guardHelpers` +
+`guardHelperFloors` in `lint-package-standard` so the next copy has to agree with the others. Read
+posture is class **(e)**: a per-candidate follow-up read off a bounded `kv.Links` enumeration, the same
+posture `worksAt_covers` already annotates for its own vertex read (Contract #2 §2.5).
+
+`worksAt_covers` is deliberately **not** refactored onto the helper: it is digest-pinned at 9 copies, its
+inline read sits inside a bounded walk with its own node budget, and rewriting nine pinned bodies buys no
+correctness. Its comment gains a pointer to the standalone form instead.
+
+**Direction is fail-closed by construction.** Every change only ever *removes* a candidate from the list
+`require_workplace` receives, and an empty list is already a denial for anyone but an operator
+(`enforce_workplace`: *"an unwired topology fails closed rather than falling open"*). No branch widens.
+
+**Increment order + green checks.** One increment; the helper and its call sites must ship together.
+1. `vertex_live` into the six scripts + the five resolvers' hops (`go build ./...`).
+2. `guardHelpers` / `guardHelperFloors` entry (`STRICT=1 go run ./scripts/lint-package-standard.go`).
+3. Behavioural tests in wellness-domain (tombstoned studio denies) + clinic-domain (tombstoned provider
+   denies), each mutation-tested by reverting the resolver and watching them fail.
+4. Package version bumps — an edit at the same version no-ops on a running stack.
+5. `make vet`, `golangci-lint run ./...`, `STRICT=1 go run ./scripts/lint-conventions.go`,
+   `go test ./packages/...`, `make verify-package-*` for the touched packages.
+
+**In-scope gotchas.** (a) A package edit needs a **version bump** or the install diff-applies nothing.
+(b) `sites_for_provider` and `leaseapp_unit` each have two copies — both must change identically even
+though neither is digest-pinned, or the next S10 sweep inherits a divergence. (c) The new helper must not
+be named `vertex_alive`; that name is taken by the `state`-based form and the two are not
+interchangeable — one reads declared `contextHint.reads`, the other live KV.
+
+**Non-goals.** Making `TombstoneProvider` / `TombstoneStudio` cascade onto their links (a no-cascade rule
+is deliberate and stated in both DDLs — the readers anchor on the live root); auditing the read-side
+lenses for the same hop (they anchor on live roots, and the full engine's `fetchNode` yields nothing for
+a soft-deleted node); refactoring `worksAt_covers`.
