@@ -110,7 +110,7 @@ def execute(state, op):
     fail("account DDL: unknown operationType: " + ot)
 `
 
-// transactionDDLScript handles DebitAccount and CreditAccount. Each mints a
+// transactionDDLScript handles DebitAccount and CreditCafeAccount. Each mints a
 // fresh transaction vertex + a .entry aspect + the postedTo link to the
 // account. The ledger is append-only: no aspect on the account is read or
 // mutated here, so concurrent debits/credits against the same account never
@@ -159,6 +159,16 @@ def require_number(p, name):
         fail("InvalidArgument: " + name + ": required number")
     return v
 
+def require_cents(p, name):
+    # Money is whole cents. A fractional amount would post an entry the
+    # cafeLedgerHistory balance sums into a non-representable total, and every
+    # description of this field -- the DDL's own, the op-meta's schema, the
+    # aspect's -- already says integer cents. Enforce what they all claim.
+    v = require_number(p, name)
+    if v != int(v):
+        fail("InvalidArgument: " + name + ": required whole cents, got " + str(v))
+    return int(v)
+
 def parts_of(key, name, want_type):
     parts = key.split(".")
     if len(parts) != 3 or parts[0] != "vtx":
@@ -179,7 +189,125 @@ def vertex_alive(state, key):
         return False
     return True
 
-def post_entry(state, op, entry_type, event_class, allow_tab_ref):
+WORKPLACE_ROLE_PAGE_LIMIT = 50
+WORKPLACE_PARENT_PAGE_LIMIT = 20
+WORKPLACE_MAX_DEPTH = 8
+
+def actor_holds_operator(actor_key):
+    # Resolved from the GRAPH, not from a compile-time constant: the primordial
+    # role ids are loaded at runtime (bootstrap.LoadPrimordialNanoIDs) while a
+    # package's Definition -- and so its script text -- is built at package-init,
+    # so no substitution can see the operator id. The walk mirrors the kernel's
+    # own root-grant lens exactly (internal/bootstrap/lenses.go: MATCH (identity)
+    # -[:holdsRole]->(role) WHERE role.canonicalName.data.value = 'operator').
+    #
+    # read-posture: (e) relation=holdsRole epoch=none -- an identity holds few
+    # roles, so this is never a keyspace scan. A role granted concurrently with
+    # this write is not a race worth closing: it can only widen authority, and
+    # the confined branch is the safe one.
+    page, _ = kv.Links(actor_key, "holdsRole", "out", None, WORKPLACE_ROLE_PAGE_LIMIT)
+    for lk in page:
+        if lk.isDeleted:
+            continue
+        # read-posture: (e) per-candidate follow-up read off the enumeration
+        # above (data-derived key -- the role is unknown until it resolves).
+        cn = kv.Read(lk.targetVertex + ".canonicalName")
+        if cn != None and not cn.isDeleted and cn.data.get("value") == "operator":
+            return True
+    return False
+
+def worksAt_covers(actor_id, location_key):
+    # Walks the location's containedIn chain upward, testing the actor's
+    # deterministic worksAt link at each level. The location itself is tested
+    # first, so a staff member wired to an exact unit matches too; one wired to
+    # the building matches everything containedIn it.
+    cur = location_key
+    for _ in range(WORKPLACE_MAX_DEPTH):
+        if cur == None:
+            return False
+        parts = cur.split(".")
+        if len(parts) != 3:
+            return False
+        # read-posture: (e) per-candidate follow-up read off the containedIn
+        # enumeration below (data-derived key -- the ancestor chain is not
+        # knowable client-side, so it cannot be pre-declared).
+        lnk = kv.Read("lnk.identity." + actor_id + ".worksAt." + parts[1] + "." + parts[2])
+        if lnk != None and not lnk.isDeleted:
+            return True
+        # read-posture: (e) relation=containedIn epoch=none -- a location has at
+        # most a few parents; containment is provisioned topology, not written
+        # concurrently with this op.
+        page, _ = kv.Links(cur, "containedIn", "out", None, WORKPLACE_PARENT_PAGE_LIMIT)
+        nxt = None
+        for lk in page:
+            if not lk.isDeleted:
+                nxt = lk.targetVertex
+        cur = nxt
+    return False
+
+def workplace_exempt():
+    # The cheap half of require_workplace, callable BEFORE the account's
+    # topology is resolved. Starlark evaluates arguments eagerly, so
+    # require_workplace(account_unit(x), ...) would walk that topology even for
+    # an operator -- wasted reads, and worse, a malformed key anywhere in that
+    # walk raises where the op would otherwise succeed. The call site therefore
+    # gates on this; require_workplace re-checks it anyway, so forgetting the
+    # gate is still CORRECT, only slower.
+    return op.authTargetValidated or actor_holds_operator(op.actor)
+
+def require_workplace(location_keys, what):
+    # Binds the STANDING path only -- operator and staff role grants, which
+    # authorize via scope=any and so carry no target the platform has checked.
+    # CreditCafeAccount has no scope=self grant at all, so for this script the
+    # authTargetValidated branch is unreachable today; it is kept because the
+    # exemption is part of the idiom's meaning, not an optimization.
+    #
+    # The exemption keys on authTargetValidated, NOT on authContextTarget being
+    # non-empty: the raw target is a client-supplied hint that any scope=any
+    # holder can set, so exempting on its presence would let any staff member
+    # opt out of confinement.
+    #
+    # location_keys is a LIST of candidate locations, and covering ANY ONE of
+    # them authorizes the write. An empty list -- an account whose location
+    # cannot be resolved at all -- is a DENIAL for anyone but an operator, so an
+    # unwired topology fails closed rather than falling open.
+    if op.authTargetValidated:
+        return
+    if actor_holds_operator(op.actor):
+        return
+    _, actor_id = parts_of(op.actor, "actor", "identity")
+    for loc in location_keys:
+        if loc != None and worksAt_covers(actor_id, loc):
+            return
+    fail("AuthDenied: " + op.actor + " does not worksAt any location covering " +
+         str(location_keys) + "; " + what)
+
+def account_unit(acct_key):
+    # An account's location is its lease's unit, two platform-written hops
+    # away: heldFor (written by CreateAccount) then appliesToUnit (required at
+    # CreateLeaseApplication). Neither hop reads a payload field, so the
+    # workplace a credit resolves to cannot be forged by the submitter.
+    # read-posture: (e) relation=heldFor epoch=none -- a cafeaccount carries
+    # exactly one heldFor link, guarded create-only by the lease's
+    # .cafeLedgerAccount aspect, so this is never a keyspace scan.
+    page, _ = kv.Links(acct_key, "heldFor", "out")
+    lease = None
+    for lk in page:
+        if not lk.isDeleted:
+            lease = lk.targetVertex
+    if lease == None:
+        return None
+    # read-posture: (e) relation=appliesToUnit epoch=none -- a leaseapp carries
+    # exactly one appliesToUnit link (required at CreateLeaseApplication), so
+    # this is never a keyspace scan.
+    page, _ = kv.Links(lease, "appliesToUnit", "out")
+    unit = None
+    for lk in page:
+        if not lk.isDeleted:
+            unit = lk.targetVertex
+    return unit
+
+def post_entry(state, op, entry_type, event_class, allow_tab_ref, confine):
     p = op.payload
     acct_key = required_string(p, "accountKey")
     _, acct_id = parts_of(acct_key, "accountKey", "cafeaccount")
@@ -187,7 +315,18 @@ def post_entry(state, op, entry_type, event_class, allow_tab_ref):
     if not vertex_alive(state, acct_key):
         fail("UnknownAccount: " + acct_key)
 
-    amount_cents = require_number(p, "amountCents")
+    # Staff-standing confinement: the location comes from the ACCOUNT's own
+    # heldFor lease, never from the payload, so the workplace it resolves to
+    # cannot be forged. Earliest point the location is derivable -- the account
+    # has to be known alive before its topology means anything.
+    # workplace-exempt: (per-call-site) post_entry is itself the exemption
+    # helper here -- whether confinement applies at all is the caller's
+    # decision, so the discharge belongs to the execute() dispatch below.
+    if confine and not workplace_exempt():
+        require_workplace([account_unit(acct_key)],
+                          "cannot post to account " + acct_key)
+
+    amount_cents = require_cents(p, "amountCents")
     if amount_cents <= 0:
         fail("InvalidArgument: amountCents: required positive number")
     memo = optional_string(p, "memo")
@@ -244,10 +383,24 @@ def execute(state, op):
     ot = op.operationType
 
     if ot == "DebitAccount":
-        return post_entry(state, op, "debit", "account.debited", True)
+        # A charge is posted by the cafeTabSettlement playbook dispatch, not by
+        # a human at the counter, and its grant stays operator-only -- there is
+        # no staff path to confine, so confinement is not attempted.
+        # workplace-exempt: (no-validated-path) DebitAccount declares one
+        # scope=any grant to [operator] (permissions.go) and no package mints a
+        # task forOperation it, so op.authTargetValidated is never legitimately
+        # true. Granting it to a staff role, or minting a task for it, makes
+        # this claim false and requires confine=True here.
+        return post_entry(state, op, "debit", "account.debited", True, False)
 
-    if ot == "CreditAccount":
-        return post_entry(state, op, "credit", "account.credited", False)
+    if ot == "CreditCafeAccount":
+        # workplace-exempt: (no-validated-path) CreditCafeAccount declares one
+        # scope=any grant, to [operator, frontOfHouse] (permissions.go), and no
+        # package mints a task forOperation it -- so op.authTargetValidated is
+        # never legitimately true and only an operator reaches the exemption.
+        # The frontOfHouse half is bound by require_workplace instead. Adding a
+        # scope=self grant, or a task, makes this claim false.
+        return post_entry(state, op, "credit", "account.credited", False, True)
 
     fail("transaction DDL: unknown operationType: " + ot)
 `

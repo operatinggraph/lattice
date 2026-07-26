@@ -155,14 +155,19 @@ func main() {
 	seenS6Debt := map[string]map[string]bool{"lens-cypher-test": {}, "structure-pins": {}}
 	seenReadTemplateDebt := map[opRef]bool{}
 
+	defs := map[string]pkgmgr.Definition{}
 	for _, name := range pkgregistry.Names() {
 		def, _ := pkgregistry.Lookup(name)
+		defs[name] = def
 		dir := filepath.Join("packages", name)
 		checkS1(rep, name, def, seenS1Debt)
 		checkReadTemplates(rep, name, def, seenReadTemplateDebt)
 		checkS6(rep, name, dir, def, seenS6Debt)
 		checkS7(rep, name, dir, def)
 	}
+	// S9 is corpus-wide: the collision only exists BETWEEN packages, so it
+	// cannot be decided while walking one.
+	checkS9(rep, defs)
 
 	for ref := range s1Debt {
 		if !seenS1Debt[ref] {
@@ -201,6 +206,70 @@ func main() {
 	if strict {
 		os.Exit(1)
 	}
+}
+
+// checkS9 requires that an operationType granted beyond the trusted-tool roles
+// is claimed by exactly ONE package.
+//
+// A standing grant is matched by operationType string equality alone
+// (Contract #6; processor.matchPlatformPermission), and the envelope's `class`
+// — which selects the DDL that will run — is a client-supplied hint step 3
+// never reads. operationType is therefore a GLOBAL namespace: if two packages
+// each admit the name in some DDL's permittedCommands, a grant issued by one
+// authorizes the caller against the other's script too.
+//
+// While every claimant grants the name to `operator` alone that is harmless —
+// the operator is unconfined everywhere by design. The moment ONE claimant
+// widens to a person-held role, that role reaches every other claimant's
+// script, and those scripts were written expecting operator-only callers, so
+// they typically carry no confinement at all. That is a cross-vertical
+// privilege escalation produced by a one-word permission edit, invisible in the
+// diff of the package making it.
+//
+// The fix is to give the widened op a vertical-unique name (cafe-ledger's
+// CreditCafeAccount), which is the same prefixing device packages already use
+// for colliding DDL canonical names and guard aspects.
+func checkS9(rep *report, defs map[string]pkgmgr.Definition) {
+	claimants := map[string]map[string]bool{}
+	for name, def := range defs {
+		for _, d := range def.DDLs {
+			for _, op := range d.PermittedCommands {
+				if claimants[op] == nil {
+					claimants[op] = map[string]bool{}
+				}
+				claimants[op][name] = true
+			}
+		}
+	}
+	for _, name := range sortedKeys(defs) {
+		for _, p := range defs[name].Permissions {
+			if !userFacing(p) {
+				continue
+			}
+			others := make([]string, 0, len(claimants[p.OperationType]))
+			for c := range claimants[p.OperationType] {
+				if c != name {
+					others = append(others, c)
+				}
+			}
+			if len(others) == 0 {
+				continue
+			}
+			sort.Strings(others)
+			rep.issuef("%s: S9 — %s is granted to %s, but the operationType %q is also admitted by %s. A standing grant matches on operationType alone (the envelope `class` picks the DDL and step 3 never reads it), so that role reaches those packages' scripts too — where no such grant was ever intended. Give this op a vertical-unique name (cafe-ledger's CreditCafeAccount idiom).",
+				name, opRef{name, p.OperationType, p.Scope}, strings.Join(humanRoles(p), "+"),
+				p.OperationType, strings.Join(others, ", "))
+		}
+	}
+}
+
+func sortedKeys(m map[string]pkgmgr.Definition) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // checkS1 requires a full descriptor for every user-facing op the package

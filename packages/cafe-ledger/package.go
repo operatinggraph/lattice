@@ -22,7 +22,7 @@
 //     unlike loftspace-ledger/clinic-ledger which anchor different ones.
 //
 //   - The `cafetransaction` vertex type (DDL `cafetransaction`) —
-//     DebitAccount (a charge: a settled café tab) and CreditAccount (a
+//     DebitAccount (a charge: a settled café tab) and CreditCafeAccount (a
 //     payment received) each mint vtx.cafetransaction.<NanoID> (root data {}
 //     per D5) with a .entry aspect {type, amountCents, memo?, postedAt},
 //     linked to the account via postedTo. The ledger is append-only: a
@@ -59,14 +59,15 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 // Package is the static, install-time bundle.
 var Package = pkgmgr.Definition{
 	Name:    "cafe-ledger",
-	Version: "0.2.0",
+	Version: "0.3.0",
 	Description: "Café house-tab payment ledger: the cafeaccount vertex type (CreateAccount, independently-minted " +
 		"id, one per lease via a .cafeLedgerAccount guard aspect on the leaseapp) + the cafetransaction vertex type " +
-		"(DebitAccount/CreditAccount, append-only entries linked to the account via postedTo) + the " +
+		"(DebitAccount/CreditCafeAccount, append-only entries linked to the account via postedTo) + the " +
 		"cafeLedgerHistory read-model lens (one row per transaction) + the cafeLeaseAccounts lens (lease -> account " +
 		"key lookup). Depends lease-signing.",
 	Depends:     []string{"lease-signing"},
 	DDLs:        DDLs(),
 	Lenses:      Lenses(),
 	Permissions: Permissions(),
+	OpMetas:     OpMetas(),
 }

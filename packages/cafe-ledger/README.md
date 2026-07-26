@@ -1,6 +1,6 @@
 # cafe-ledger
 
-The Café house-tab payment ledger (v0.1.0) — a per-lease financial account that records café charges
+The Café house-tab payment ledger (v0.3.0) — a per-lease financial account that records café charges
 and payments as an **append-only** transaction history; a balance is always derived by summing
 entries, never stored as a mutable running total.
 
@@ -24,11 +24,15 @@ checkpoint of the same increment. The one-bill composition lens unioning `ledger
 | **Vertex types** (2) | `cafeaccount` (root `{}`, D5) · `cafetransaction` (root `{}`, D5, `.entry` aspect) |
 | **Aspect types** (1) | `cafeLedgerAccountGuard` — `vtx.leaseapp.<id>.cafeLedgerAccount`, the per-lease create-only uniqueness guard |
 | **Links** (2) | `heldFor` (cafeaccount → leaseapp) · `postedTo` (cafetransaction → cafeaccount) |
-| **Operations** (3) | `CreateAccount` · `DebitAccount` (optional `tabRef` — `cafe-domain`'s Settle consumer) · `CreditAccount` |
+| **Operations** (3) | `CreateAccount` · `DebitAccount` (optional `tabRef` — `cafe-domain`'s Settle consumer) · `CreditCafeAccount` |
 | **Projection lenses** (2) | `cafeLedgerHistory` (one row per transaction) → `cafe-ledger-history` · `cafeLeaseAccounts` (lease → account key lookup) → `cafe-lease-accounts` (both `nats-kv`, `full` engine) |
 
-Every op is granted to the `operator` role at `scope: any` (`permissions.go`) — the trusted
-single-identity model, no new capability surface, identical to `loftspace-ledger` / `clinic-ledger`.
+`CreateAccount` and `DebitAccount` are granted to `operator` alone at `scope: any`
+(`permissions.go`) — both are orchestrator-submitted, neither is something a person decides to do.
+`CreditCafeAccount` also grants `frontOfHouse`, because recording a payment is a front-desk act with a
+human on the other side of the counter; a staffer holding it is confined by `transactionDDLScript`
+to accounts whose lease sits at a location they `worksAt`, while `operator` stays unconfined. It is
+the package's only op carrying an `OpMetaSpec` descriptor, for the same reason.
 
 ## Key shapes (Contract #1)
 
@@ -60,7 +64,7 @@ key embeds the *source* vertex's own type (`cafeaccount` vs `account`), so it is
 
 ## Append-only ledger
 
-`DebitAccount`/`CreditAccount` each mint a fresh `vtx.cafetransaction.<id>` with a `.entry` aspect and
+`DebitAccount`/`CreditCafeAccount` each mint a fresh `vtx.cafetransaction.<id>` with a `.entry` aspect and
 the `postedTo` link back to the account — no balance field is ever written or mutated; the
 `cafeLedgerHistory` lens derives a balance by summing `amountCents` (positive for debit, negative for
 credit) client-side, so concurrent debits/credits never race a read-modify-write.
@@ -84,5 +88,5 @@ is byte-for-byte unaffected.
 
 - **The thin café FE** — a follow-up checkpoint of `cafe-domain`'s Increment 2.
 - **A stored/cached balance** — deliberately never materialized; always summed from `cafeLedgerHistory`.
-- **Refunds / voids as a distinct operation** — model as an offsetting `CreditAccount`/`DebitAccount`
+- **Refunds / voids as a distinct operation** — model as an offsetting `CreditCafeAccount`/`DebitAccount`
   entry with an explanatory `memo`, mirroring the other ledger packages.

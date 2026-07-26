@@ -83,7 +83,6 @@ func domainCapDoc() *processor.CapabilityDoc {
 			{OperationType: "CreateLeaseApplication", Scope: "any"},
 			{OperationType: "CreateAccount", Scope: "any"},
 			{OperationType: "DebitAccount", Scope: "any"},
-			{OperationType: "CreditAccount", Scope: "any"},
 			{OperationType: "OpenTab", Scope: "any"},
 			{OperationType: "Charge", Scope: "any"},
 			{OperationType: "VoidCharge", Scope: "any"},

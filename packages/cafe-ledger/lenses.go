@@ -57,7 +57,7 @@ func Lenses() []pkgmgr.LensSpec {
 // leaseAppKey with no extra hop. Every MATCH is REQUIRED (not OPTIONAL): a
 // transaction projects a row only when it is genuinely posted to a live
 // account held for a live lease (the normal shape every
-// DebitAccount/CreditAccount commit produces). The per-row key is the
+// DebitAccount/CreditCafeAccount commit produces). The per-row key is the
 // transaction key (the IntoKey default), so the read model is keyed by
 // vtx.cafetransaction.<id>; transactionKey repeats it in the body for the
 // reader.

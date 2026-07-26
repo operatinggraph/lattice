@@ -52,7 +52,7 @@ func ledgerCapDoc() *processor.CapabilityDoc {
 			{OperationType: "CreateLeaseApplication", Scope: "any"},
 			{OperationType: "CreateAccount", Scope: "any"},
 			{OperationType: "DebitAccount", Scope: "any"},
-			{OperationType: "CreditAccount", Scope: "any"},
+			{OperationType: "CreditCafeAccount", Scope: "any"},
 		},
 		ServiceAccess:   []processor.ServiceAccessEntry{},
 		EphemeralGrants: []processor.EphemeralGrant{},
@@ -80,6 +80,11 @@ func setupLedgerEnv(t *testing.T) (context.Context, *substrate.Conn) {
 		t.Fatalf("install cafe-ledger: %v", err)
 	}
 	testutil.SeedCapDoc(t, ctx, conn, ledgerCapDoc())
+	// CreditCafeAccount's workplace guard asks the GRAPH whether its caller is
+	// root, so the cap doc's Roles claim is not enough on its own — without the
+	// link this actor reads as an unprivileged caller with no worksAt anywhere
+	// (testutil.SeedHoldsRole's doc comment).
+	testutil.SeedHoldsRole(t, ctx, conn, ledgerActorKey, bootstrap.RoleOperatorKey)
 	return ctx, conn
 }
 
@@ -285,11 +290,11 @@ func TestCreateAccount_UnknownLease(t *testing.T) {
 	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeRejected)
 }
 
-// TestDebitCreditAccount_PostEntries (test 2). DebitAccount/CreditAccount
+// TestDebitCreditCafeAccount_PostEntries (test 2). DebitAccount/CreditCafeAccount
 // each mint a fresh transaction vertex (root {} — D5) + a .entry aspect +
 // the postedTo link to the account; the account root is never touched
 // (append-only ledger, no balance stored).
-func TestDebitCreditAccount_PostEntries(t *testing.T) {
+func TestDebitCreditCafeAccount_PostEntries(t *testing.T) {
 	ctx, conn := setupLedgerEnv(t)
 	cp, cons := newLedgerPipeline(t, ctx, conn, "postentries")
 
@@ -340,12 +345,12 @@ func TestDebitCreditAccount_PostEntries(t *testing.T) {
 		t.Fatalf("account root data must stay minimal ({}) after a debit — the ledger is append-only, got %v", d)
 	}
 
-	// CreditAccount — a house-tab payment received.
+	// CreditCafeAccount — a house-tab payment received.
 	creditReqID := testutil.GenReqID("cafecreditpay0000001")
 	creditEnv := &processor.OperationEnvelope{
 		RequestID:     creditReqID,
 		Lane:          processor.LaneDefault,
-		OperationType: "CreditAccount",
+		OperationType: "CreditCafeAccount",
 		Actor:         ledgerActorKey,
 		SubmittedAt:   "2026-07-05T09:00:00Z",
 		Class:         "cafetransaction",
@@ -387,7 +392,7 @@ func TestDebitAccount_UnknownAccount(t *testing.T) {
 // mirroring semantic-contracts' clauseRef test): a DebitAccount carrying a
 // live tabRef writes the settles audit link (transaction→tab) alongside the
 // normal postedTo link, on top of the byte-for-byte-unaffected plain path
-// TestDebitCreditAccount_PostEntries already covers (no tabRef at all).
+// TestDebitCreditCafeAccount_PostEntries already covers (no tabRef at all).
 func TestDebitAccount_TabRefWritesSettlesLink(t *testing.T) {
 	ctx, conn := setupLedgerEnv(t)
 	cp, cons := newLedgerPipeline(t, ctx, conn, "tabref")

@@ -658,9 +658,54 @@ async function renderResident() {
           .join("") +
         "</ul>"
       : '<p class="meta">No posted café charges yet.</p>') +
+    // Recording a payment is a front-desk act — someone hands money over at
+    // the counter. A resident never credits their own account, so this is the
+    // staff half of the pane. The control needs the lease's account to exist;
+    // until it does there is nothing to credit, and saying so beats a button
+    // that can only fail.
+    (selfMode
+      ? ""
+      : ledger.accountKey
+        ? '<form id="record-payment-form" class="field-row" style="margin-top:14px;">' +
+          '<input id="record-payment-amount" type="number" step="0.01" min="0.01" placeholder="Payment ($)" required />' +
+          '<input id="record-payment-memo" type="text" placeholder="Memo (optional)" />' +
+          '<button id="record-payment-submit" type="submit">Record Payment</button>' +
+          "</form>"
+        : '<p class="meta" style="margin-top:14px;">No café account for this lease yet — nothing to credit.</p>') +
     "</div>"
   );
   body.innerHTML = parts.join("");
+  const paymentForm = document.getElementById("record-payment-form");
+  if (paymentForm) {
+    paymentForm.addEventListener("submit", async (ev) => {
+      ev.preventDefault();
+      const amountInput = document.getElementById("record-payment-amount");
+      const memoInput = document.getElementById("record-payment-memo");
+      const cents = parseDollars(amountInput.value);
+      if (cents === null) { toast("Enter a payment amount greater than $0.", false); return; }
+      const btn = document.getElementById("record-payment-submit");
+      btn.disabled = true;
+      try {
+        const payload = { accountKey: ledger.accountKey, amountCents: cents };
+        const memo = memoInput.value.trim();
+        if (memo) payload.memo = memo;
+        await opOrThrow(
+          {
+            operationType: "CreditCafeAccount",
+            class: "cafetransaction",
+            reads: [ledger.accountKey],
+            payload,
+          },
+          "record the payment"
+        );
+        toast("Recorded " + money(cents) + ".", true);
+        setTimeout(renderResident, 700);
+      } catch (e) {
+        toast(e.message, false);
+        btn.disabled = false;
+      }
+    });
+  }
   if (selfMode) {
     const openBtn = document.getElementById("resident-open-tab-btn");
     if (openBtn) {
