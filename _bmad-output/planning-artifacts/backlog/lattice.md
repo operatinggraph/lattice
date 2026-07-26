@@ -48,7 +48,6 @@ Open items only (shipped ones are in the Done log). Grouped by component tag.
 |---|---|---|---|---|
 | **[Loom] Guardless-step recovery check-before-act probe** | On total `loom-state` loss + a re-triggered `StartLoomPattern`, a fresh instance replays guards from cursor 0 (re-runs an already-applied guarded step). | ★ | S–M | 🗄️ shelved-backup (Andrew: no new engine Core-KV reads) |
 | **[Processor] Tombstone-with-document warn→reject flip (Fire 2)** | Fire 1 (emitter sweep + parser warn) shipped `6b68fde4`; flip the warn to a reject once warn sightings are clean (stale stored scripts clear via world recreation). | ★★ | XS | 🚧 seq behind clean warn-window · [design](../../implementation-artifacts/tombstone-body-preservation-design.md) §6 |
-| **[Refractor] A sweep heal lands in KV before it is counted — `Reconciled` reads 0** | `TestRefractor_ConvergenceSweep_DetectsAndHealsLostProjection_E2E:213` fails ~4-in-6 locally and intermittently in CI. The sweep heals and logs it while `Sweeper().Status().Reconciled` still reads 0 — fast runs fail, slow ones pass, so the healed row is observable before the counter meant to make the heal loud. The same silence would reach the operator signal, not just the test. | ★★★ | S | 📋 ready · whetstone (flake root-cause) |
 
 ### Survey log (round-robin rotation)
 
@@ -209,6 +208,7 @@ Real but low-value; do **not** spend design or build effort here unless Andrew g
 
 One line per shipped item (`date · SHA · [tag] title`). Oldest roll to `archive/` past ~25.
 
+- 2026-07-25 · `1a1379f7` · [CI] Refractor sweep-count flake root-caused — the test read a per-pass aggregate mid-pass; 4-in-6 failing → 10/10 green, no assertion loosened
 - 2026-07-25 · `a0a4bb34` · [pkgmgr,refractor] an upgrade that cannot take effect says so where the operator is — `reloadpin` predicts the refusal at apply time; `ReactivationRequired` + drift guard
 
 - 2026-07-25 · `e5268c2f` · [refractor] a business lens heals its own hole and leaves its neighbours alone — real-substrate e2e: enrolled, scoped, healed, siblings pinned by revision
