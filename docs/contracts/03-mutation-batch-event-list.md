@@ -232,11 +232,22 @@ Vault-decrypt consumer (a trusted tool, or the read-path-authorized Secure Lens)
 external-egress unwrap** (§10.5 sensitive-ref params — plaintext bounded to the in-memory adapter call).
 `ShredIdentityKey` destroys the DEK, after which no consumer can decrypt.
 
-**External-egress guard.** An operation that emits an `external.*`-domain event must not have decrypted
-sensitive plaintext in the same execution (via `reads`, `optionalReads`, or a lazy `kv.Read`) — the
-Processor rejects the commit. Sensitive data reaches an external event only as a **sensitive-ref**
-hydrated under `contextHint.egressReads` (Contract #2 §2.5 class (f)); the ref carries the at-rest
-ciphertext, never plaintext.
+**External-egress guard.** An operation that emits an `external.*`-domain event must not have **consumed**
+readable sensitive data in the same execution — its script taking such a document from `state` or a
+`kv.Read`, whether declared under `reads` / `optionalReads` or read lazily. The Processor rejects the
+commit. Sensitive data reaches an external event only as a **sensitive-ref** hydrated under
+`contextHint.egressReads` (Contract #2 §2.5 class (f)); the ref carries the at-rest ciphertext, never
+plaintext.
+
+The trigger is **consumption, not decryption**. Hydration decrypts every present declared sensitive key,
+so keying the guard on the decrypt made a *surplus* declared read — one the script never names — split the
+operation's outcome on whether that key exists: present rejected, absent committed. Since `contextHint` is
+client-supplied and step 3 authorizes without inspecting the declared read set, that answered "does this
+key exist, and is its class sensitive?" to any actor holding a grant on such an operation. An operation
+that genuinely consumes the data is rejected exactly as before. Correspondingly, "readable" is not
+"decrypted": a sensitive-classed aspect that was never encrypted at rest (no Vault configured, so the
+write path never encrypted it) counts as consumed when read — the guard does not depend on a crypto
+boundary being present to bind.
 
 **Live-envelope rule.** A Vault-decrypt consumer resolves the identity's key envelope from the
 **current** `piiKey` state (the aspect, or its lens projection) **at decrypt time — never from a stored

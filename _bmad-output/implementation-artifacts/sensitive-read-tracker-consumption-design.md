@@ -1,7 +1,7 @@
 # Sensitive-read tracker — flip on consumption, not on hydration
 
-**Status:** ✅ SHIPPED `ae05f60a` (Winston-ratified, implementation-level throughout). Two contract-doc
-truth-ups prepared UNCOMMITTED for Andrew — see §6.1; neither gated the build.
+**Status:** ✅ SHIPPED `ae05f60a` (Winston-ratified, implementation-level throughout). The Contract #3
+truth-up is **Andrew-ratified 2026-07-25** and committed — see §6.1; it never gated the build.
 **Lane:** Lattice (Stream 2). **Board row:** [Processor] Sensitive-read tracker flips at hydration, not at
 consumption (★★ M).
 **Filed by:** `4098ba21`, as the residual §2.5 of
@@ -210,9 +210,9 @@ Read-scope authorization of declared keys (D1, Andrew's fork). Changing the guar
 message, or external-egress-only scope. Changing the `egressReads` ref disposition. The §2.2 enumerating
 residual. Any package/FE work — `internal/processor` only.
 
-### 6.1 Contract edits prepared (UNCOMMITTED, for Andrew)
+### 6.1 Contract edits — Andrew-ratified 2026-07-25
 
-Two, both in `main`, uncommitted per CLAUDE.md — the diffs are the proposals.
+Two were prepared uncommitted per CLAUDE.md (the diffs were the proposals); both ratified and committed.
 
 - **Contract #3 §sensitive-aspect, external-egress guard** — stated the guard as "must not have
   **decrypted** sensitive plaintext". The trigger is now **consumption**, and "readable" is not

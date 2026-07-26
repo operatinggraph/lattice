@@ -1,7 +1,7 @@
 # `contextHint.reads` pre-script existence oracle — deferred-miss hydration
 
-**Status:** ✅ Winston-ratified — build-ready (implementation-level throughout; see §7 for the one
-additive Contract #2 §2.5 paragraph left UNCOMMITTED for Andrew).
+**Status:** ✅ SHIPPED `3a78c109` (Winston-ratified, implementation-level throughout). The one additive
+Contract #2 §2.5 paragraph is **Andrew-ratified 2026-07-25** and committed (see §7).
 **Lane:** Lattice (Stream 2). **Board row:** `contextHint.reads` is a pre-script Core-KV existence oracle (★★★, M).
 **Filed by:** `8375b4d4`, as the residual the package-level probe-before-guard sweep (`c4b45b33`) does not reach.
 
@@ -221,14 +221,16 @@ Read-scope authorization of declared keys (D1, Andrew's fork). Changing `optiona
 `missingKey`. Touching the DDL-namespace hydration errors. Any package/FE work — this is `internal/processor`
 only.
 
-## 7. Contract note — UNCOMMITTED for Andrew
+## 7. Contract note — Andrew-ratified 2026-07-25
 
 Contract #2 §2.5's authoring rule says a key whose absence is a correctness error MUST go in `reads`
 ("fail-closed `HydrationMiss`"). That remains exactly true. What this design refines is *when* the fault
 is raised — at first use rather than at step 4 — and therefore that a declared key the operation never
 touches no longer rejects it.
 
-The contract does not state the step-4 timing as a normative guarantee, so the build does not depend on
-the edit. But the distinction is load-bearing enough to be written down, so an additive paragraph is
-prepared in `docs/contracts/02-operation-envelope.md` §2.5 and left **UNCOMMITTED** in `main` per
-CLAUDE.md — that diff is the proposal. No frozen invariant changes.
+The contract does not state the step-4 timing as a normative guarantee, so the build did not depend on
+the edit. But the distinction is load-bearing enough to be written down, so an additive paragraph in
+`docs/contracts/02-operation-envelope.md` §2.5 ("When the fail-closed fault is raised") carries it —
+ratified by Andrew 2026-07-25 and committed. No frozen invariant changed. (One sentence of the staged
+paragraph — enumeration wrongly listed among the fault paths — was corrected in place by the
+sensitive-read-tracker fire before ratification; the ratified text is the corrected one.)
