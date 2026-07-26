@@ -840,13 +840,119 @@ func visitSeriesPermissions() []pkgmgr.PermissionSpec {
 	return perms
 }
 
-// visitSeriesOpMetas makes the four visit-series ops forOperation-resolvable for
-// discoverability (Loupe's op-submit forms).
+// visitSeriesOpMetas makes the four visit-series ops forOperation-resolvable and
+// gives the three a human triggers a full descriptor — the form, the field help,
+// and the submission recipe (edge-showcase-app-design.md §3.3).
+//
+// Complete metadata is not the same as a rendered button: a client also has to
+// resolve TargetType against something it projects, and Facet's context carries
+// no patient or visitseries entity today, so it degrades these rather than
+// offering them. That is a gap in what the client projects, not in what the
+// descriptor says; the descriptor is what makes closing it possible at all.
+//
+// All three are AuthContext "standing": permissions.go grants them scope=any to
+// operator + frontOfHouse, so the caller's authority is a standing role rather
+// than a relationship to the target, and the client sends no authContext object
+// at all (OpDispatchSpec.AuthContext's fourth case). Idiom: clinic-domain's
+// SetProviderHours.
+//
+// Dispatch.Class is "visitseries" — the owning DDL's own CanonicalName
+// (visitSeriesVertexDDL), never the vertical name — including on
+// StartVisitSeries, which targets a PATIENT but mints a visitseries.
+//
+// Reads declare exactly what the script hydrates from `state` and no more.
+// StartVisitSeries names both endpoint vertices because its own field
+// documentation makes them mandatory; Pause/Resume rely on the targetField
+// fallback for the series vertex, which is the only key they read. Everything
+// else these scripts reach — require_workplace's site walk, the dedup guard's
+// prior-series .series/.paused follow-ups — is a class-(e) read off a key the
+// caller cannot know in advance, which is why the read posture sanctions it
+// live rather than declared. The one guard key a caller CAN derive, the
+// per-(patient, provider) dedup pointer, is declared optional: it is absent on a
+// first series, so requiring it would fail the common case.
+//
+// AdvanceVisitSeries stays a bare meta. Weaver re-arms a due series through it;
+// no human triggers it, so it owes no descriptor.
 func visitSeriesOpMetas() []pkgmgr.OpMetaSpec {
 	return []pkgmgr.OpMetaSpec{
-		{OperationType: startVisitSeriesOp},
-		{OperationType: pauseVisitSeriesOp},
-		{OperationType: resumeVisitSeriesOp},
+		{
+			OperationType: startVisitSeriesOp,
+			Presentation: &pkgmgr.OpPresentationSpec{
+				Title:       "Start a visit series",
+				Description: "Put a patient on a recurring visit cadence with a provider.",
+				Icon:        "repeat",
+				Tone:        "primary",
+				SubmitLabel: "Start series",
+			},
+			InputSchema: `{"type":"object","properties":` +
+				`{"patientKey":{"type":"string","description":"vtx.patient.<NanoID> the series is for — auto-filled from the patient being viewed."},` +
+				`"providerKey":{"type":"string","description":"vtx.provider.<NanoID> the series is with."},` +
+				`"intervalDays":{"type":"integer","minimum":1,"description":"Days between visits."},` +
+				`"startAt":{"type":"string","description":"When the first visit falls due, RFC3339."},` +
+				`"activeUntil":{"type":"string","description":"When the series stops re-arming, RFC3339. Omit for open-ended."}},` +
+				`"required":["patientKey","providerKey","intervalDays","startAt"]}`,
+			FieldDescriptions: map[string]string{
+				"patientKey":   "The patient this cadence is for — auto-filled by the client from the patient being viewed (dispatch.targetField), not user-entered.",
+				"providerKey":  "The provider the visits are with. A front-desk caller may only name a provider practising at a building they work at.",
+				"intervalDays": "How many days apart the visits fall. A patient may hold only one active series per provider at a time.",
+				"startAt":      "When the first visit falls due.",
+				"activeUntil":  "Optional. When the series stops re-arming. Omitted means it runs until someone ends it.",
+			},
+			Dispatch: &pkgmgr.OpDispatchSpec{
+				Class:       visitSeriesVertexDDL,
+				AuthContext: "standing",
+				TargetField: "patientKey",
+				TargetType:  "patient",
+				Reads:       []string{"{payload.patientKey}", "{payload.providerKey}"},
+				OptionalReads: []string{
+					"{payload.patientKey}.activeVisitSeriesWith{payload.providerKey:id}",
+				},
+			},
+		},
+		{
+			OperationType: pauseVisitSeriesOp,
+			Presentation: &pkgmgr.OpPresentationSpec{
+				Title:       "Pause visit series",
+				Description: "Stop a recurring visit series from falling due, without ending it.",
+				Icon:        "pause",
+				Tone:        "neutral",
+				SubmitLabel: "Pause series",
+			},
+			InputSchema: `{"type":"object","properties":` +
+				`{"seriesKey":{"type":"string","description":"vtx.visitseries.<NanoID> to pause — auto-filled from the series being viewed."}},` +
+				`"required":["seriesKey"]}`,
+			FieldDescriptions: map[string]string{
+				"seriesKey": "The series being paused — auto-filled by the client from the series being viewed (dispatch.targetField), not user-entered. A paused series stops falling due but keeps its cadence and history.",
+			},
+			Dispatch: &pkgmgr.OpDispatchSpec{
+				Class:       visitSeriesVertexDDL,
+				AuthContext: "standing",
+				TargetField: "seriesKey",
+				TargetType:  visitSeriesVertexDDL,
+			},
+		},
+		{
+			OperationType: resumeVisitSeriesOp,
+			Presentation: &pkgmgr.OpPresentationSpec{
+				Title:       "Resume visit series",
+				Description: "Put a paused visit series back on its cadence.",
+				Icon:        "play",
+				Tone:        "primary",
+				SubmitLabel: "Resume series",
+			},
+			InputSchema: `{"type":"object","properties":` +
+				`{"seriesKey":{"type":"string","description":"vtx.visitseries.<NanoID> to resume — auto-filled from the series being viewed."}},` +
+				`"required":["seriesKey"]}`,
+			FieldDescriptions: map[string]string{
+				"seriesKey": "The series being resumed — auto-filled by the client from the series being viewed (dispatch.targetField), not user-entered. It picks its cadence back up from where it was paused.",
+			},
+			Dispatch: &pkgmgr.OpDispatchSpec{
+				Class:       visitSeriesVertexDDL,
+				AuthContext: "standing",
+				TargetField: "seriesKey",
+				TargetType:  visitSeriesVertexDDL,
+			},
+		},
 		{OperationType: advanceVisitSeriesOp},
 	}
 }

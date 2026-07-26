@@ -38,6 +38,13 @@ func TestPackage_DDLs(t *testing.T) {
 	if got := len(Package.DDLs); got != 13 {
 		t.Fatalf("expected 13 DDLs, got %d", got)
 	}
+	// Eight op-metas: the three visit-series ops a human triggers carry a full
+	// descriptor, the rest stay bare for forOperation resolution alone. A
+	// dropped meta would surface only as an op that quietly stops being
+	// offerable, so the count is what catches it.
+	if got := len(Package.OpMetas); got != 8 {
+		t.Fatalf("expected 8 opMetas, got %d", got)
+	}
 	byName := map[string]pkgmgr.DDLSpec{}
 	for _, d := range Package.DDLs {
 		byName[d.CanonicalName] = d

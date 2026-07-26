@@ -289,6 +289,9 @@ func TestPackage_Permissions(t *testing.T) {
 	if got := len(Package.WeaverTargets); got != 0 {
 		t.Fatalf("expected 0 weaverTargets, got %d", got)
 	}
+	if got := len(Package.OpMetas); got != 6 {
+		t.Errorf("OpMetas: got %d, want 6", got)
+	}
 	if got := len(Package.LoomPatterns); got != 0 {
 		t.Fatalf("expected 0 loomPatterns, got %d", got)
 	}

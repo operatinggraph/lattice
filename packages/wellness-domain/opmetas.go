@@ -226,5 +226,53 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 				},
 			},
 		},
+		{
+			OperationType: "CreateSession",
+			Presentation: &pkgmgr.OpPresentationSpec{
+				Title:       "Schedule a class",
+				Description: "Put a class on a studio's grid.",
+				Icon:        "calendar",
+				Tone:        "primary",
+				SubmitLabel: "Schedule class",
+			},
+			InputSchema: `{"type":"object","properties":` +
+				`{"studio":{"type":"string","description":"vtx.studio.<NanoID> the class runs at — auto-filled from the studio being viewed."},` +
+				`"name":{"type":"string","description":"What the class is called, e.g. Vinyasa Flow."},` +
+				`"startsAt":{"type":"string","description":"Class start, RFC3339, aligned to the 15-minute grid."},` +
+				`"endsAt":{"type":"string","description":"Class end, RFC3339, aligned to the 15-minute grid."},` +
+				`"capacity":{"type":"integer","minimum":1,"maximum":200,"description":"How many people may book a seat."},` +
+				`"instructor":{"type":"string","description":"vtx.instructor.<NanoID> leading the class."}},` +
+				`"required":["studio","name","startsAt","endsAt","capacity"]}`,
+			FieldDescriptions: map[string]string{
+				"studio":     "The studio the class runs in — auto-filled by the client from the studio being viewed (dispatch.targetField), not user-entered. A front-desk caller may only schedule at a studio in a building they work at.",
+				"name":       "What the class is called, as members will see it.",
+				"startsAt":   "When the class starts. Must align to the 15-minute grid; the studio cannot already be booked for any part of the span.",
+				"endsAt":     "When the class ends. Must align to the 15-minute grid and be at most 24 hours after the start.",
+				"capacity":   "How many seats the class has, 1 to 200.",
+				"instructor": "Optional. The instructor leading the class. Omitted leaves the class unassigned.",
+			},
+			Dispatch: &pkgmgr.OpDispatchSpec{
+				Class:       sessionVertexDDL,
+				AuthContext: "standing",
+				TargetField: "studio",
+				TargetType:  studioVertexDDL,
+				// The instructor is validated alive + typed only when supplied,
+				// so it is optional on both counts. The studio comes free with
+				// the targetField fallback.
+				//
+				// The per-cell slot claims are NOT declared, and cannot be: the
+				// script reads one guard key per 15-minute cell the class covers
+				// (up to 96), each derived from startsAt/endsAt by arithmetic
+				// the template vocabulary has no form for — it substitutes
+				// values, it does not compute a set. The hand-written dispatcher
+				// enumerates them (cmd/wellness-app/web/app.js); a
+				// descriptor-driven caller leaves them to the script's own
+				// read, so a conflict surfaces as the commit-time
+				// RevisionConflict rather than the script's StudioConflict. It
+				// fails closed either way, and the ceiling stays the same
+				// CreateOnly conditioning; what is lost is the better error.
+				OptionalReads: []string{"{payload.instructor}"},
+			},
+		},
 	}
 }

@@ -3,11 +3,21 @@ package cafedomain
 import "github.com/operatinggraph/lattice/internal/pkgmgr"
 
 // OpMetas declares descriptor-vocabulary metadata (edge-showcase-app-design.md
-// §3.3, edge-manifest Fire 1) for cafe-domain's two consumer-invocable
-// (scope=self) ops — OpenTab and Settle — mirroring clinic-domain's
-// (Fire 5 Inc 1) and wellness-domain's (Fire 5 Inc 1) adoption. Charge has no
-// op-meta: it stays operator-only (permissions.go), so it is never
-// Facet-reachable.
+// §3.3, edge-manifest Fire 1) for every cafe-domain op a person may trigger —
+// the whole tab lifecycle: OpenTab, Charge, VoidCharge, Settle — mirroring
+// clinic-domain's and wellness-domain's adoption.
+//
+// Three of the four are consumer-invocable (scope=self); VoidCharge is
+// staff-standing. Charge is BOTH: permissions.go grants it scope=any to
+// operator + frontOfHouse and scope=self to consumer, and it carries ONE
+// descriptor written in the SELF voice, per clinic-domain's dual-grant idiom
+// (opmetas.go — its three staff-and-consumer ops each declare a single
+// AuthContext "self" meta). A staff FE hardcodes its own dispatch; a
+// descriptor-driven client cannot infer the self path, so the self path is what
+// the descriptor must name. Charge's self slice therefore names menuItemKey and
+// NOT amountCents: on the self branch the amount comes from the item's own
+// .price aspect and a caller-supplied amountCents is never read (ddls.go
+// require_menu_item_price), so describing it as an input would be a lie.
 //
 // leaseAppKey (OpenTab) is declared `{me.leaseapp}` in
 // dispatch.contextParams — the submitter's own lease, which is the only
@@ -35,12 +45,17 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 // declared only the applicationFor link in OptionalReads came back
 // UnknownLeaseApplication.
 //
-// Dispatch.OptionalReads carries the absence-tolerant half both ops need: the
-// per-lease cafeOpenTabGuard dedup key (absent on a lease's first-ever tab,
-// TOMBSTONED once a prior tab settled — so a required Read would fail the
+// Dispatch.OptionalReads carries the absence-tolerant half the self-scope ops
+// need: the per-lease cafeOpenTabGuard dedup key (absent on a lease's first-ever
+// tab, TOMBSTONED once a prior tab settled — so a required Read would fail the
 // common case) and the applicationFor ownership link the self-scope check
 // probes. The link key is built with the `:id` template modifier, since a
 // Contract #1 link is 6 segments of bare ids rather than a vtx key.
+//
+// VoidCharge declares no ownership probe: it has no self grant at all (a POS
+// correction is a staff decision even when reversing a resident's own mis-tap),
+// so its only confinement is require_workplace, whose site walk is a class-(e)
+// enumeration the caller cannot pre-declare.
 func OpMetas() []pkgmgr.OpMetaSpec {
 	return []pkgmgr.OpMetaSpec{
 		{
@@ -67,6 +82,67 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 					"{payload.leaseAppKey}.cafeOpenTab",
 					"lnk.leaseapp.{payload.leaseAppKey:id}.applicationFor.identity.{actor:id}",
 				},
+			},
+		},
+		{
+			OperationType: "Charge",
+			Presentation: &pkgmgr.OpPresentationSpec{
+				Title:       "Order an item",
+				Description: "Add a menu item to your open tab.",
+				Icon:        "cafe",
+				Tone:        "primary",
+				SubmitLabel: "Add to tab",
+			},
+			InputSchema: `{"type":"object","properties":` +
+				`{"tabKey":{"type":"string","description":"vtx.tab.<NanoID> of your open tab — auto-filled from the tab you opened."},` +
+				`"menuItemKey":{"type":"string","description":"vtx.menuitem.<NanoID> of the catalog item to order; its own price is what gets charged."}},` +
+				`"required":["tabKey","menuItemKey"]}`,
+			FieldDescriptions: map[string]string{
+				"tabKey":      "The tab being charged — auto-filled by the client from the tab it opened (dispatch.targetField), not user-entered.",
+				"menuItemKey": "The catalog item you are ordering. The amount charged is the item's own listed price — a self-service order never names its own amount.",
+			},
+			Dispatch: &pkgmgr.OpDispatchSpec{
+				Class:       "tab",
+				AuthContext: "self",
+				TargetField: "tabKey",
+				TargetType:  "tab",
+				// .status is REQUIRED for the same reason as Settle
+				// (require_open_status carries the running total forward), and
+				// the menuItem's .price is required by name: the script fails
+				// with "caller must declare <key> in contextHint.reads" rather
+				// than reading it live, since every live menuItem has one.
+				Reads: []string{
+					"{payload.tabKey}", "{payload.tabKey}.status",
+					"{payload.menuItemKey}", "{payload.menuItemKey}.price",
+				},
+				OptionalReads: []string{
+					"lnk.leaseapp.{me.leaseapp:id}.applicationFor.identity.{actor:id}",
+				},
+			},
+		},
+		{
+			OperationType: "VoidCharge",
+			Presentation: &pkgmgr.OpPresentationSpec{
+				Title:       "Void a charge",
+				Description: "Correct a mis-tapped charge by taking it back off an open tab.",
+				Icon:        "receipt",
+				Tone:        "destructive",
+				SubmitLabel: "Void charge",
+			},
+			InputSchema: `{"type":"object","properties":` +
+				`{"tabKey":{"type":"string","description":"vtx.tab.<NanoID> of the open tab to correct — auto-filled from the tab being viewed."},` +
+				`"amountCents":{"type":"integer","minimum":1,"description":"Amount to take back off the tab, in whole cents."}},` +
+				`"required":["tabKey","amountCents"]}`,
+			FieldDescriptions: map[string]string{
+				"tabKey":      "The tab being corrected — auto-filled by the client from the tab being viewed (dispatch.targetField), not user-entered.",
+				"amountCents": "How much to subtract, in whole cents. A void larger than the running total clamps the tab to zero rather than failing.",
+			},
+			Dispatch: &pkgmgr.OpDispatchSpec{
+				Class:       "tab",
+				AuthContext: "standing",
+				TargetField: "tabKey",
+				TargetType:  "tab",
+				Reads:       []string{"{payload.tabKey}", "{payload.tabKey}.status"},
 			},
 		},
 		{

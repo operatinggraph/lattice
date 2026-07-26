@@ -264,3 +264,43 @@ test("opButton degrades an op whose {entity.<column>} the row can't answer", () 
   assert.match(badHtml, /sessionKey/);
   assert.doesNotMatch(badHtml, /data-open-op=/);
 });
+
+// A read declaration is only usable when EVERY dot-separated segment survived
+// substitution. The shape that motivates this: a descriptor hangs an aspect
+// suffix off an OPTIONAL payload field ("{payload.identityKey}.patientClaim"),
+// the visitor leaves the field blank, and the placeholder resolves to "". What
+// is left is not a shorter key — it is ".patientClaim", which NATS rejects as
+// an invalid key rather than reporting it absent, so the Processor's hydrate
+// step fails the whole operation instead of letting the script take its
+// absent branch. The old guard caught an interior ".." but not a hole at
+// either end, which is exactly where an omitted leading placeholder puts one.
+test("wholeKey rejects a key with any empty segment, keeps a fully-substituted one", () => {
+  const { wholeKey } = loadApp({ identityKey: "vtx.identity.DDDDDDDDDDDDDDDDDDDD" });
+
+  assert.equal(wholeKey("vtx.identity.DDDDDDDDDDDDDDDDDDDD.patientClaim"), true);
+  assert.equal(wholeKey("lnk.task.AAAAAAAAAAAAAAAAAAAA.assignedTo.identity.BBBBBBBBBBBBBBBBBBBB"), true);
+
+  assert.equal(wholeKey(".patientClaim"), false);                      // leading hole
+  assert.equal(wholeKey("vtx.identity.AAAAAAAAAAAAAAAAAAAA."), false); // trailing hole
+  assert.equal(wholeKey("lnk.task..assignedTo"), false);               // interior hole
+  assert.equal(wholeKey(""), false);
+  assert.equal(wholeKey("{payload.identityKey}.x"), false);            // never substituted at all
+  assert.equal(wholeKey(undefined), false);
+});
+
+// The end-to-end shape of the same bug, through substituteTemplate: an omitted
+// optional field must yield a declaration the filter drops, not a malformed one
+// it forwards.
+test("an omitted optional field yields no read declaration at all", () => {
+  const app = loadApp({ identityKey: "vtx.identity.DDDDDDDDDDDDDDDDDDDD" });
+  const declare = (tmpl, payload) =>
+    [app.substituteTemplate(tmpl, {}, payload)].filter(app.wholeKey);
+
+  // supplied → the guard key is declared, exactly as the script reads it
+  assert.deepEqual(
+    declare("{payload.identityKey}.patientClaim", { identityKey: "vtx.identity.AAAAAAAAAAAAAAAAAAAA" }),
+    ["vtx.identity.AAAAAAAAAAAAAAAAAAAA.patientClaim"],
+  );
+  // omitted → nothing is declared, and the script's own lazy read decides
+  assert.deepEqual(declare("{payload.identityKey}.patientClaim", {}), []);
+});

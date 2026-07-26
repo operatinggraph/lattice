@@ -1567,6 +1567,19 @@ function bareKeyId(key) {
   return parts.length >= 3 ? parts[2] : "";
 }
 
+// wholeKey accepts a substituted read declaration only when every dot-separated
+// segment survived. A placeholder that resolved to "" leaves a hole — a leading
+// `.patientClaim`, a trailing `vtx.identity.ABC.`, an interior `..` — and the
+// remainder is not a shorter key, it is a DIFFERENT and invalid one. NATS
+// rejects such a key with ErrInvalidKey rather than ErrKeyNotFound, and the
+// Processor's hydrate step turns anything that is not key-not-found into a
+// rejected operation, so one unresolved optional template would fail the whole
+// submission instead of taking the script's absent branch. Declaring nothing is
+// always the safe reading of "this key did not resolve".
+function wholeKey(k) {
+  return typeof k === "string" && k !== "" && !k.includes("{") && !k.split(".").includes("");
+}
+
 function buildAuthContext(kind, ctx) {
   const m = me();
   if (kind === "self") return { target: m && m.identityKey };
@@ -1666,7 +1679,11 @@ function submitDescriptorForm(form, op, opKey, ctx, fieldNames, props, contextPa
     payload[op.dispatchTargetField] = resolveTargetKey(op, ctx);
   }
 
-  const reads = (op.dispatchReads || []).map((t) => substituteTemplate(t, ctx, payload));
+  // Same whole-key rule as the optional half below. A REQUIRED read that failed
+  // to substitute is a broken descriptor either way, but dropping it lets the
+  // script answer with its own "caller must declare <key>" message instead of
+  // the operation dying on an invalid KV key that names no op and no field.
+  const reads = (op.dispatchReads || []).map((t) => substituteTemplate(t, ctx, payload)).filter(wholeKey);
   // A targetField value is a vertex key the script almost certainly needs
   // to read (it's what authContext resolves against) — include it even
   // when dispatch.reads doesn't name it explicitly, since an op meta that
@@ -1691,7 +1708,7 @@ function submitDescriptorForm(form, op, opKey, ctx, fieldNames, props, contextPa
   // would only make the script's absent-branch look deliberate.
   const optionalReads = (op.dispatchOptionalReads || [])
     .map((t) => substituteTemplate(t, ctx, payload))
-    .filter((k) => k && !k.includes("{") && !k.includes(".."));
+    .filter(wholeKey);
   const authContext = buildAuthContext(op.dispatchAuthContext, ctx);
   const touchedKey = resolveTouchedKey(op, ctx);
 

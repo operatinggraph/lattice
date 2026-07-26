@@ -1,5 +1,5 @@
 name: cafe-domain
-version: 0.7.4
+version: 0.7.5
 description: |
   Café house-tab POS session domain: the tab vertex type (OpenTab/Charge/
   VoidCharge/Settle, OCC-conditioned running total) + the tabStatus aspect
@@ -70,4 +70,6 @@ declares:
       lensRef: cafeTabSettlement
   opMetas:
     - operationType: OpenTab
+    - operationType: Charge
+    - operationType: VoidCharge
     - operationType: Settle

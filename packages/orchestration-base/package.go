@@ -45,11 +45,12 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 // Package is the static, install-time bundle.
 var Package = pkgmgr.Definition{
 	Name:          "orchestration-base",
-	Version:       "0.7.0",
+	Version:       "0.7.1",
 	Description:   "Generic task substrate (task DDL + CreateTask/ClaimTask/SetAvailability, FR28 role-queue + fallback + Fire-2 availability routing) + package-owned capabilityEphemeral/myTasks lenses (FR56 grant re-sourcing + role-queue fan-out) + the FR29 unroutedTasks Weaver convergence target (surface-only).",
 	Depends:       []string{"identity-domain"},
 	DDLs:          DDLs(),
 	Lenses:        Lenses(),
 	Permissions:   Permissions(),
 	WeaverTargets: WeaverTargets(),
+	OpMetas:       OpMetas(),
 }

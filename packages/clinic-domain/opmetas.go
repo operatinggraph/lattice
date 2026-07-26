@@ -40,6 +40,12 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 // §2.1 envelope `class` DDL-hint (mirrors service-domain's RequestService
 // op-meta doc comment: Dispatch.Class = the owning DDL's CanonicalName, never
 // the vertical name).
+//
+// CreatePatient is the third AuthContext "standing" entry and the only one that
+// names no TargetField: it MINTS the patient, so there is no pre-existing vertex
+// for a client to derive the field from. Its optional identityKey is the one
+// read it declares — absence-tolerant on both counts, since the field itself is
+// optional and the patientClaim guard it probes is absent on every first bind.
 func OpMetas() []pkgmgr.OpMetaSpec {
 	return []pkgmgr.OpMetaSpec{
 		{
@@ -180,6 +186,39 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 				AuthContext: "standing",
 				TargetField: "providerKey",
 				TargetType:  "provider",
+			},
+		},
+		{
+			OperationType: "CreatePatient",
+			Presentation: &pkgmgr.OpPresentationSpec{
+				Title:       "Register patient",
+				Description: "Add a new patient to the practice roster.",
+				Icon:        "user-plus",
+				Tone:        "primary",
+				SubmitLabel: "Register",
+			},
+			InputSchema: `{"type":"object","properties":` +
+				`{"fullName":{"type":"string","description":"The patient's full name."},` +
+				`"identityKey":{"type":"string","description":"vtx.identity.<NanoID> of a pre-minted identity carrying the patient's contact details."}},` +
+				`"required":["fullName"]}`,
+			FieldDescriptions: map[string]string{
+				"fullName":    "The patient's full name, as it should appear on the roster.",
+				"identityKey": "Optional. An existing identity to wire this patient to, so their contact details resolve from the Vault plane. An identity may be claimed by at most one patient.",
+			},
+			Dispatch: &pkgmgr.OpDispatchSpec{
+				Class:       "patient",
+				AuthContext: "standing",
+				// Only the identity vertex, never its .patientClaim guard. A
+				// template that hangs a suffix off an OPTIONAL field cannot
+				// express "declare this only when the field is supplied": an
+				// omitted identityKey substitutes empty and leaves the bare
+				// aspect suffix, which is not a valid KV key and rejects the
+				// whole operation. The guard is read lazily in-script for
+				// exactly this reason (ddls.go claim_identity), and the
+				// hand-written dispatcher declares it conditionally
+				// (cmd/clinic-app/web/app.js), which the vocabulary has no
+				// form for.
+				OptionalReads: []string{"{payload.identityKey}"},
 			},
 		},
 	}

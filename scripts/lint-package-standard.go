@@ -43,9 +43,11 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 
@@ -84,21 +86,15 @@ type opRef struct {
 func (r opRef) String() string { return fmt.Sprintf("%s %s (scope=%s)", r.pkg, r.op, r.scope) }
 
 // s1Debt is the shipped user-facing surface that predates this gate and does
-// not yet carry a full descriptor — the Standard §3's convergence program is
-// what closes it (§3.2 W1–W4 carry their vertical's package; §3.3 is the sweep
-// fire for the non-FE packages; §3.4 has identity-domain conform last, its own
-// named gap being exactly the consumer credential ops below).
+// not yet carry a full descriptor. What remains is identity-domain alone — the
+// Standard §3.4 has it conform LAST, on purpose: it is the idiom source every
+// other package copies, so its own descriptors are written once the vocabulary
+// has settled against the corpus rather than ahead of it. Its named gap is
+// exactly the consumer credential ops below.
 //
 // Shrink only. Never add a row here for a NEW op — write its descriptor, or
 // state the exemption in its permission Note.
 var s1Debt = map[opRef]bool{
-	{"cafe-domain", "Charge", "any"}:                      true,
-	{"cafe-domain", "Charge", "self"}:                     true,
-	{"cafe-domain", "VoidCharge", "any"}:                  true,
-	{"clinic-domain", "CreatePatient", "any"}:             true,
-	{"clinic-reminders", "StartVisitSeries", "any"}:       true,
-	{"clinic-reminders", "PauseVisitSeries", "any"}:       true,
-	{"clinic-reminders", "ResumeVisitSeries", "any"}:      true,
 	{"identity-domain", "CreateUnclaimedIdentity", "any"}: true,
 	{"identity-domain", "ClaimIdentity", "self"}:          true,
 	{"identity-domain", "RotateClaimKey", "any"}:          true,
@@ -106,8 +102,26 @@ var s1Debt = map[opRef]bool{
 	{"identity-domain", "InitiateCredentialLink", "self"}: true,
 	{"identity-domain", "CompleteCredentialLink", "self"}: true,
 	{"identity-domain", "UnlinkCredential", "self"}:       true,
-	{"orchestration-base", "ClaimTask", "any"}:            true,
-	{"wellness-domain", "CreateSession", "any"}:           true,
+}
+
+// readTemplateDebt is the shipped set of read declarations that build a key
+// around a payload field nothing guarantees is present (checkReadTemplates).
+// Both entries are conditionally-supplied by design — lease-signing's `unit` is
+// named on a first approve but not on a decline, and service-domain's
+// `template`/`serviceprovider` are carried only by the instance path — so on the
+// other branch each template resolves to a malformed key.
+//
+// Facet drops such a key before submitting (its wholeKey filter), so today this
+// costs a worse diagnostic rather than a rejected operation: the script falls to
+// its own read instead of receiving the declared one. Fixing it properly means
+// deciding, per op, whether the field should be guaranteed or the read should be
+// bare — a semantics call in each owning package, not a mechanical edit.
+//
+// Shrink only, same discipline as s1Debt: an entry that stops violating fails
+// the gate too. Never add a row here for a NEW descriptor.
+var readTemplateDebt = map[opRef]bool{
+	{"lease-signing", "DecideLeaseApplication", ""}: true,
+	{"service-domain", "RecordServiceOutcome", ""}:  true,
 }
 
 // s6Debt lists packages below the verification floor, per rule. Same
@@ -150,11 +164,13 @@ func main() {
 	rep := &report{}
 	seenS1Debt := map[opRef]bool{}
 	seenS6Debt := map[string]map[string]bool{"lens-cypher-test": {}, "structure-pins": {}}
+	seenReadTemplateDebt := map[opRef]bool{}
 
 	for _, name := range pkgregistry.Names() {
 		def, _ := pkgregistry.Lookup(name)
 		dir := filepath.Join("packages", name)
 		checkS1(rep, name, def, seenS1Debt)
+		checkReadTemplates(rep, name, def, seenReadTemplateDebt)
 		checkS6(rep, name, dir, def, seenS6Debt)
 		checkS7(rep, name, dir, def)
 	}
@@ -162,6 +178,11 @@ func main() {
 	for ref := range s1Debt {
 		if !seenS1Debt[ref] {
 			rep.stalef("s1Debt lists %s, which no longer violates S1 (or no longer exists) — delete the entry", ref)
+		}
+	}
+	for ref := range readTemplateDebt {
+		if !seenReadTemplateDebt[ref] {
+			rep.stalef("readTemplateDebt lists %s %s, whose read templates no longer wrap an unguaranteed field — delete the entry", ref.pkg, ref.op)
 		}
 	}
 	for rule, pkgs := range s6Debt {
@@ -264,6 +285,93 @@ func descriptorGaps(metas map[string]pkgmgr.OpMetaSpec, op string) []string {
 	}
 	return gaps
 }
+
+// checkReadTemplates rejects a read declaration that builds a key AROUND a
+// payload placeholder whose field is optional.
+//
+// A template is substituted, not evaluated: an absent field becomes "", and the
+// literal text wrapped around it survives. `{payload.identityKey}.patientClaim`
+// with no identityKey is therefore not a shorter key, it is ".patientClaim" — a
+// key NATS rejects as malformed rather than reporting absent, which turns the
+// Processor's hydrate step into a rejected operation instead of the script's
+// own absent branch. The client drops such a key defensively (Facet's
+// wholeKey), but a declaration that can only ever resolve to garbage is an
+// authoring error, and the author is who should hear about it.
+//
+// A placeholder that IS the whole entry is fine at any required-ness: it
+// resolves to "" and is dropped cleanly, which is exactly what an optional read
+// of an unsupplied field should do.
+func checkReadTemplates(rep *report, pkg string, def pkgmgr.Definition, seen map[opRef]bool) {
+	for _, m := range def.OpMetas {
+		if m.Dispatch == nil {
+			continue
+		}
+		guaranteed := requiredFields(m.InputSchema)
+		// A field the descriptor fills itself is as present as a required one:
+		// contextParams substitute BEFORE reads (the client resolves them in
+		// that order), and a client that cannot resolve one refuses to offer the
+		// op at all rather than submitting a hole. The visitor never sees such a
+		// field, so "optional in the input schema" says nothing about whether it
+		// will be there.
+		for field := range m.Dispatch.ContextParams {
+			guaranteed[field] = true
+		}
+		if m.Dispatch.TargetField != "" {
+			guaranteed[m.Dispatch.TargetField] = true
+		}
+		for _, entry := range append(append([]string{}, m.Dispatch.Reads...), m.Dispatch.OptionalReads...) {
+			for _, field := range payloadPlaceholders(entry) {
+				whole := entry == "{payload."+field+"}"
+				if whole || guaranteed[field] {
+					continue
+				}
+				if ref := (opRef{pkg, m.OperationType, ""}); readTemplateDebt[ref] {
+					seen[ref] = true
+					continue
+				}
+				rep.issuef("%s: S1 — %s declares the read %q, which builds a key around payload field %q that nothing guarantees is present: it is not required, not a contextParam, and not the targetField. An omitted %s substitutes empty and leaves a malformed key (a leading, interior, or trailing dot), which NATS rejects outright rather than reporting absent, so the Processor fails the whole operation instead of letting the script take its absent branch. Declare the bare {payload.%s} and let the script's own read decide, or guarantee the field.",
+					pkg, m.OperationType, entry, field, field, field)
+			}
+		}
+	}
+}
+
+// requiredFields reads the `required` array out of an op-meta's InputSchema. An
+// absent or unparseable schema yields no required fields, which makes the check
+// above strictly more suspicious rather than less.
+func requiredFields(schema string) map[string]bool {
+	out := map[string]bool{}
+	if schema == "" {
+		return out
+	}
+	var parsed struct {
+		Required []string `json:"required"`
+	}
+	if err := json.Unmarshal([]byte(schema), &parsed); err != nil {
+		return out
+	}
+	for _, f := range parsed.Required {
+		out[f] = true
+	}
+	return out
+}
+
+// payloadPlaceholders names every payload field a template entry substitutes,
+// with any trailing `:id` modifier stripped.
+func payloadPlaceholders(entry string) []string {
+	var out []string
+	for _, m := range placeholderRe.FindAllStringSubmatch(entry, -1) {
+		expr := strings.TrimSuffix(m[1], ":id")
+		if f, ok := strings.CutPrefix(expr, "payload."); ok {
+			out = append(out, f)
+		}
+	}
+	return out
+}
+
+// placeholderRe matches one `{...}` template placeholder, mirroring the
+// client-side resolver's own pattern (cmd/facet/web/app.js substituteTemplate).
+var placeholderRe = regexp.MustCompile(`\{([^}]+)\}`)
 
 // checkS6 enforces the verification floor: lenses are executed by a cypher
 // test, and the package's structure is pinned by a count assertion.

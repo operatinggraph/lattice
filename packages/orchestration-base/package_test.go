@@ -54,6 +54,12 @@ func TestPackage_DDLsLensesPermissions(t *testing.T) {
 	if got := len(Package.Permissions); got != 10 {
 		t.Fatalf("expected 10 permissions, got %d", got)
 	}
+	// ClaimTask is the one op here a person triggers, so it is the one that
+	// owes a descriptor (S1). Losing the meta would show up only as an op
+	// that silently stops being offerable, never as a failing read.
+	if got := len(Package.OpMetas); got != 1 {
+		t.Fatalf("expected 1 opMeta, got %d", got)
+	}
 }
 
 // TestPackage_MarkExpiredDDL pins the generic freshness-marker DDL (RF#3): a

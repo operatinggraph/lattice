@@ -427,8 +427,9 @@ def execute(state, op):
             # committed) is an idempotent no-op; anyone else gets
             # TaskAlreadyClaimed.
             # read-posture: (d) declared in contextHint.optionalReads by
-            # ClaimTask's dispatcher (test envelope today — no production
-            # dispatcher yet, hard case 3, script-read-posture-design §13);
+            # ClaimTask's dispatchers — Facet's hardcoded claim beat and this
+            # op's own descriptor (opmetas.go) alike (hard case 3,
+            # script-read-posture-design §13);
             # absence is a legitimate not-yet-claimed-by-this-actor branch
             assigned_doc = kv.Read(assigned_lnk)
             if assigned_doc != None and not assigned_doc.isDeleted:
