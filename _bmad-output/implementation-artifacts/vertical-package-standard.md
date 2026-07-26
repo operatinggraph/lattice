@@ -714,8 +714,8 @@ one signature are each named by the gate, at the exact site.
 ## 13. S10 — the workplace guard joins the pin, and the rename hatch closes: fire brief (Winston, 2026-07-26)
 
 **Scope sentence.** Close every remaining escape from the S10 pin: pin `require_workplace` +
-`enforce_workplace` by adopting maintenance-domain's two-function factoring corpus-wide, delete the three
-renamed copies of `parts_of` (`vertex_parts` ×2 signatures, `typed_vertex_parts`, `unit_parts`), and make
+`enforce_workplace` by adopting maintenance-domain's two-function factoring corpus-wide, delete the four
+renamed copies of `parts_of` (`vertex_parts` under two signatures, `typed_vertex_parts`, `unit_parts`), and make
 the three gate-design calls §12 deliberately deferred — per-helper copy floors, `_test.go` in scan, and a
 digest-alias rule that catches the next copy-under-a-new-name.
 
@@ -748,10 +748,12 @@ The prize is that a documented divergence becomes **structure the gate can see**
 the alternative: an exclusion carrying a recorded reason stops the next reader from re-checking, and one of
 those reasons was already false.
 
-### 13.2 The rename hatch — three aliases, one validator
+### 13.2 The rename hatch — four definitions, three names, one validator
 
-All three are `parts_of` with an argument or a return value missing. None carries different policy, so
+Every one is `parts_of` with an argument or a return value missing. None carries different policy, so
 §11's rename hatch does not license them; converging is the same call §12 made for the two-argument copies.
+(§12's residual note also listed `loftspace-domain/ownership.go:136` — that copy is already `parts_of`;
+the same fire converged it. Re-measured live rather than inherited.)
 
 | Alias | Site | Equivalent | Call sites |
 |---|---|---|---|
@@ -805,3 +807,84 @@ before admit: `go build ./...`, `make vet`, `golangci-lint run ./...`,
 **Non-goals.** The shared-prelude mechanism (pinning is the ratified pattern). Any change to what a guard
 *decides* — this fire moves statements between functions and renames aliases; every authorization outcome
 is identical before and after, and that invariant is the review's job to falsify.
+
+### §13 build note
+
+Six helpers are now pinned (was four), the aliases are gone, and the three gate-design calls are made.
+`sharedGuardHelpers` holds `worksAt_covers`, `workplace_exempt`, `actor_holds_operator`, `parts_of`,
+`require_workplace`, `enforce_workplace`; `parts_of` is at 35 copies, `enforce_workplace` at 9.
+
+Three things beyond the brief, each because building it surfaced a shape the brief had not:
+
+- **The floor map needed a missing-entry rule of its own.** `guardHelperFloors[helper]` on an absent key
+  returns 0, and `total < 0` is never true — so a helper added to `sharedGuardHelpers` without a floor
+  would be pinned for BODY and unbounded for COUNT, silently. That is the same class of silent-pass the
+  flat floor was replacing. A pinned helper with no floor entry is now itself an issue.
+- **The alias rule compares a second digest, not the first one.** `starlarkFuncSite.code` is a sha256 of
+  the normalized statements *including the def line* — deliberately, since §12 — so a rename cannot be
+  detected by string-substituting the name into a hash. Sites now carry `anon`, the same digest with the
+  function's own name replaced by a placeholder. `code` stays name-bearing so the pin itself still cannot
+  be satisfied by renaming; `anon` is what the alias rule reads.
+- **One test asserted the guard by its error message.** `loftspace-domain`'s `TestPackage_ScriptGuards`
+  pinned the literal `vtx.unit.<NanoID>`, which `unit_parts` had in its message and `parts_of` composes
+  from `want_type`. The assertion now pins the CALL — `parts_of(unit, "unit", "unit")` — because the
+  message-substring form would have passed just as well with `want_type` dropped, which is the guard.
+
+**Adversarial review changed the gate in four ways, one of them blocking.**
+
+- **A floor of 0 — or a deleted map entry — disarmed all three rules at once.** Go returns 0 for a
+  missing `int` key, so `total < 0` never fires; the helper then reached `pinned[helper]` with an empty
+  digest set, skipped the body pin via `len(bodies) < 2`, and matched nothing in the alias rule. One line
+  reading as routine maintenance (`"parts_of": 0,`) would have re-opened exactly the hole this fire
+  closes, on the file that exists to prevent it. The flat floor it replaced could not be switched off,
+  because it was an unconditional constant. A pinned helper now needs a floor of at least 2 — the floor
+  the floor itself has.
+- **The indent digest measured style, not structure.** It hashed a raw leading-whitespace *count*, so a
+  whole-body 4-space-to-2-space reindent — a pure style edit — read as a behaviour change, AND carried a
+  verbatim copy of a pinned helper past the alias rule under a new name. Widths are now ranked into
+  levels: the narrowest distinct indent in a body is 0, the next 1. A body re-indented uniformly keeps
+  its digest; a statement moved into or out of a block does not. This also makes the comment above it
+  true, which it was not — a rune count is not tab/space invariant.
+- **`guardConstantRe` failed OPEN on `WORKPLACE_MAX_DEPTH=4`.** It required a literal `" = "`, and
+  Starlark does not. Deleting two spaces made the assignment invisible to the constant check while the
+  helper bodies still named the bound by constant, so no digest changed either — a one-keystroke edit
+  narrowing the workplace walk in one script with nothing to see it. The pattern now tolerates and trims
+  the whitespace, which also stops `= 8` and `=  8` reporting as two values.
+- **`pinned` was doing two jobs.** It answered both "is this name spoken for" and "what digests may it
+  match", so a helper whose floor failed lost its name-guard and became an alias candidate against the
+  other five. Harmless today — no two pinned helpers share a body — but the coupling was unintended.
+  Split into `isPinned` (names, always populated) and `pinned` (digests, only for a trusted corpus).
+
+Review also caught a false statement in the gate's own rationale — it claimed *two* of the aliases had
+dropped a check, where only `service-location`'s untyped `vertex_parts` had (the other two omit only the
+standalone empty-TYPE test, which their `want_type` comparison subsumes). It is corrected in the comment
+and in the runtime message. §11 and §12 each record this same failure — a premise inferred rather than
+read — and this is its third instance in the same file; the count is stated now precisely so the next
+reader does not have to re-derive it.
+
+All new rules are mutation-tested as §11 requires, each named at the exact site: deleting one
+`parts_of` copy trips the floor (`found 34 … expected at least 35`); zeroing or deleting its floor entry
+trips the usable-floor rule; pasting `parts_of` under a new name trips the alias rule, and so does pasting
+it re-indented; a drifted copy in a `_test.go` fixture trips the pin, which it could not before; a
+one-line nesting change is still caught while a uniform reindent is not; and `WORKPLACE_MAX_DEPTH=4`
+without spaces is now caught, where it was previously invisible.
+
+**Named residuals** (filed as rows, not left in prose):
+
+- **Vertex-key parsing still happens outside `parts_of`, in bodies too different to digest-match.**
+  `loftspace-domain/ddls.go`'s `require_manages` inlines the three-segment test and fails `AuthDenied`
+  rather than `InvalidArgument`; `rbac-domain`, `location-domain`, `privacy-base`, `identity-hygiene` and
+  `augur` hold ~10 more. §13.3 records why a structural gate for these was rejected rather than shipped
+  with a ten-site baseline. Consumer: the next author who copies one of those instead of `parts_of`.
+- **The alias rule raises the cost of a rename; it does not make one impossible.** It is exact-digest by
+  design, so renaming a parameter or inserting a no-op still evades it (a uniform reindent no longer
+  does). What it buys is that the historical escape — a verbatim paste under a new name, which is what
+  all four aliases were — is no longer free. `require_workplace` and `workplace_exempt` have a second
+  gate in `lint-conventions.go`'s `checkWorkplaceExempt`, which derives its helper set from the script
+  text and is therefore name-independent; `parts_of`, `worksAt_covers`, `actor_holds_operator` and
+  `enforce_workplace` do not. Consumer: whoever next wants a divergent copy badly enough to obfuscate it.
+- **`checkGuardConstants` has no floor of its own.** `len(byVal) < 2 → continue` is the same
+  compare-nothing shape the helper floors now close, left unclosed on the constants half: if a constant
+  vanished from every script at once it would pass silently. Partial deletion fails loudly at runtime
+  (the bodies name their bounds, so the script raises), which is why this was not treated as blocking.
+  Consumer: a future sweep that moves the bounds somewhere else.
