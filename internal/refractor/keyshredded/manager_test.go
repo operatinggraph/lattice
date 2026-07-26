@@ -7,12 +7,9 @@ import (
 	"testing"
 	"time"
 
-	natsserver "github.com/nats-io/nats-server/v2/server"
-	natstest "github.com/nats-io/nats-server/v2/test"
 	"github.com/nats-io/nats.go/jetstream"
 	"github.com/stretchr/testify/require"
 
-	"github.com/operatinggraph/lattice/internal/jsstore"
 	"github.com/operatinggraph/lattice/internal/natsfixture"
 	"github.com/operatinggraph/lattice/internal/refractor/control"
 	"github.com/operatinggraph/lattice/internal/refractor/failure"
@@ -213,9 +210,7 @@ func TestFailurePrivacyCritical_Classify(t *testing.T) {
 // Mirrors internal/privacyworker's harness (jsstore.Dir StoreDir convention).
 func newSubmitTestConn(t *testing.T) (*substrate.Conn, context.Context, jetstream.Consumer) {
 	t.Helper()
-	opts := &natsserver.Options{Host: "127.0.0.1", Port: -1, JetStream: true, StoreDir: jsstore.Dir(t)}
-	s := natstest.RunServer(opts)
-	t.Cleanup(s.Shutdown)
+	s := natsfixture.StartServer(t)
 
 	nc := natsfixture.Connect(t, s.ClientURL())
 	t.Cleanup(nc.Close)

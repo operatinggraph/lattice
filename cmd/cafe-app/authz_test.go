@@ -9,13 +9,11 @@ import (
 	"testing"
 	"time"
 
-	natsserver "github.com/nats-io/nats-server/v2/server"
-	natstest "github.com/nats-io/nats-server/v2/test"
 	"github.com/nats-io/nats.go/jetstream"
 
 	"github.com/operatinggraph/lattice/internal/appsession"
 	"github.com/operatinggraph/lattice/internal/bootstrap"
-	"github.com/operatinggraph/lattice/internal/jsstore"
+	"github.com/operatinggraph/lattice/internal/natsfixture"
 	"github.com/operatinggraph/lattice/internal/substrate"
 	"github.com/operatinggraph/lattice/internal/testutil"
 	cafedomain "github.com/operatinggraph/lattice/packages/cafe-domain"
@@ -32,9 +30,7 @@ const testTimeout = 5 * time.Second
 // cmd/loftspace-app/objects_crypto_test.go's sensitiveObjectFixture).
 func newTestConn(t *testing.T) *substrate.Conn {
 	t.Helper()
-	opts := &natsserver.Options{Host: "127.0.0.1", Port: -1, JetStream: true, StoreDir: jsstore.Dir(t)}
-	ns := natstest.RunServer(opts)
-	t.Cleanup(ns.Shutdown)
+	ns := natsfixture.StartServer(t)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)

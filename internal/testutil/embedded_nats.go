@@ -11,42 +11,23 @@ import (
 	"testing"
 	"time"
 
-	"github.com/nats-io/nats-server/v2/server"
-	natsserver "github.com/nats-io/nats-server/v2/test"
 	"github.com/nats-io/nats.go/jetstream"
 
-	"github.com/operatinggraph/lattice/internal/jsstore"
+	"github.com/operatinggraph/lattice/internal/natsfixture"
 	"github.com/operatinggraph/lattice/internal/processor"
 )
 
-// StartEmbeddedNATS spins up an in-process JetStream-enabled NATS server
-// and returns its client URL. The server is shut down via t.Cleanup.
+// StartEmbeddedNATS returns the client URL of an embedded JetStream server,
+// torn down via t.Cleanup. It exists so callers that only want a URL need not
+// hold the server handle; the fixture itself — port, private store, teardown
+// barrier — belongs to internal/natsfixture.
 //
-// Each call allocates a unique StoreDir via internal/jsstore so that
-// concurrently running test packages do not share the JetStream file store.
-// Without an explicit StoreDir, NATS defaults to os.TempDir()/jetstream,
-// which is shared across all processes and causes cross-package contamination
-// when tests run in parallel. jsstore rather than t.TempDir() because the
-// framework's own cleanup races JetStream's trailing filestore write.
-//
-// Callers that dial the returned URL should connect via natsfixture.Connect:
-// a bare nats.Connect inherits nats.go's 2s whole-handshake deadline with no
-// retry, which a stalled host blows (see internal/natsfixture).
+// Dial the returned URL with natsfixture.Connect: a bare nats.Connect inherits
+// nats.go's 2s whole-handshake deadline with no retry, which a stalled host
+// blows (see internal/natsfixture).
 func StartEmbeddedNATS(t *testing.T) string {
 	t.Helper()
-	opts := natsserver.DefaultTestOptions
-	opts.Port = -1
-	opts.JetStream = true
-	opts.StoreDir = jsstore.Dir(t)
-	s := natsserver.RunServer(&opts)
-	// Shutdown only starts the teardown; WaitForShutdown is the barrier for it
-	// having finished, so a dying server stops overlapping the next test's.
-	t.Cleanup(func() {
-		s.Shutdown()
-		s.WaitForShutdown()
-		_ = server.VERSION
-	})
-	return s.ClientURL()
+	return natsfixture.StartServer(t).ClientURL()
 }
 
 // TestLogger returns a slog Logger configured at WARN level for tests.

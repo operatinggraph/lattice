@@ -6,13 +6,10 @@ import (
 	"testing"
 	"time"
 
-	natsserver "github.com/nats-io/nats-server/v2/server"
-	natstest "github.com/nats-io/nats-server/v2/test"
 	nats "github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 
 	"github.com/operatinggraph/lattice/internal/guardgrammar"
-	"github.com/operatinggraph/lattice/internal/jsstore"
 	"github.com/operatinggraph/lattice/internal/natsfixture"
 	"github.com/operatinggraph/lattice/internal/substrate"
 )
@@ -29,9 +26,7 @@ type controlHarness struct {
 
 func newControlHarness(t *testing.T, ctx context.Context) *controlHarness {
 	t.Helper()
-	opts := &natsserver.Options{Host: "127.0.0.1", Port: -1, JetStream: true, StoreDir: jsstore.Dir(t)}
-	srv := natstest.RunServer(opts)
-	t.Cleanup(srv.Shutdown)
+	srv := natsfixture.StartServer(t)
 	nc := natsfixture.Connect(t, srv.ClientURL())
 	t.Cleanup(nc.Close)
 	conn, err := substrate.Wrap(nc)
@@ -404,9 +399,7 @@ func TestSeedDisabledTargets_RestoresInMemorySet(t *testing.T) {
 func TestSeedDisabledTargets_ListKeysErrorPropagates(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	opts := &natsserver.Options{Host: "127.0.0.1", Port: -1, JetStream: true, StoreDir: jsstore.Dir(t)}
-	srv := natstest.RunServer(opts)
-	t.Cleanup(srv.Shutdown)
+	srv := natsfixture.StartServer(t)
 	nc := natsfixture.Connect(t, srv.ClientURL())
 	t.Cleanup(nc.Close)
 	conn, err := substrate.Wrap(nc)

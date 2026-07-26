@@ -18,12 +18,9 @@ import (
 	"testing"
 	"time"
 
-	natsserver "github.com/nats-io/nats-server/v2/server"
-	natstest "github.com/nats-io/nats-server/v2/test"
 	"github.com/stretchr/testify/require"
 
 	"github.com/operatinggraph/lattice/internal/bootstrap"
-	"github.com/operatinggraph/lattice/internal/jsstore"
 	"github.com/operatinggraph/lattice/internal/natsfixture"
 	"github.com/operatinggraph/lattice/internal/refractor/adapter"
 	"github.com/operatinggraph/lattice/internal/refractor/adjacency"
@@ -58,9 +55,7 @@ func TestRefractor_ServiceActorRootEquivalence_E2E(t *testing.T) {
 		t.Skip("skipping service-actor projection e2e in -short mode")
 	}
 
-	opts := &natsserver.Options{Host: "127.0.0.1", Port: -1, JetStream: true, StoreDir: jsstore.Dir(t)}
-	s := natstest.RunServer(opts)
-	defer s.Shutdown()
+	s := natsfixture.StartServer(t)
 
 	nc := natsfixture.Connect(t, s.ClientURL())
 	defer nc.Close()

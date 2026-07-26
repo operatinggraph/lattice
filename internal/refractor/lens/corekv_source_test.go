@@ -9,12 +9,9 @@ import (
 	"testing"
 	"time"
 
-	natsserver "github.com/nats-io/nats-server/v2/server"
-	"github.com/nats-io/nats-server/v2/test"
 	"github.com/nats-io/nats.go/jetstream"
 	"github.com/stretchr/testify/require"
 
-	"github.com/operatinggraph/lattice/internal/jsstore"
 	"github.com/operatinggraph/lattice/internal/natsfixture"
 	"github.com/operatinggraph/lattice/internal/refractor/lens"
 	"github.com/operatinggraph/lattice/internal/substrate"
@@ -27,9 +24,7 @@ import (
 // the AC #3 path: "Lens activation flows through the standard Processor
 // write path" (data-contracts.md §1.2 line 70).
 func TestCoreKVSource_LoadsLensFromAspect(t *testing.T) {
-	opts := &natsserver.Options{Host: "127.0.0.1", Port: -1, JetStream: true, StoreDir: jsstore.Dir(t)}
-	s := test.RunServer(opts)
-	defer s.Shutdown()
+	s := natsfixture.StartServer(t)
 
 	nc := natsfixture.Connect(t, s.ClientURL())
 	defer nc.Close()
@@ -105,9 +100,7 @@ func TestCoreKVSource_LoadsLensFromAspect(t *testing.T) {
 // spec must be buffered in pendingSpecs and replayed once the parent vertex
 // (with class `meta.lens`) is observed — not dropped.
 func TestCoreKVSource_LoadsLensFromAspect_SpecBeforeParent(t *testing.T) {
-	opts := &natsserver.Options{Host: "127.0.0.1", Port: -1, JetStream: true, StoreDir: jsstore.Dir(t)}
-	s := test.RunServer(opts)
-	defer s.Shutdown()
+	s := natsfixture.StartServer(t)
 
 	nc := natsfixture.Connect(t, s.ClientURL())
 	defer nc.Close()
@@ -172,9 +165,7 @@ func TestCoreKVSource_LoadsLensFromAspect_SpecBeforeParent(t *testing.T) {
 // and spam an ERROR log on every restart / Core-KV replay
 // (chronicler-host-reconciliation Increment 2).
 func TestCoreKVSource_SkipsEventStreamSpec(t *testing.T) {
-	opts := &natsserver.Options{Host: "127.0.0.1", Port: -1, JetStream: true, StoreDir: jsstore.Dir(t)}
-	s := test.RunServer(opts)
-	defer s.Shutdown()
+	s := natsfixture.StartServer(t)
 
 	nc := natsfixture.Connect(t, s.ClientURL())
 	defer nc.Close()
@@ -255,9 +246,7 @@ func TestCoreKVSource_SkipsEventStreamSpec(t *testing.T) {
 // loadCB never fires — the live P0 incident in miniature); passes with
 // Fire A.
 func TestCoreKVSource_ReplaysOnRestart(t *testing.T) {
-	opts := &natsserver.Options{Host: "127.0.0.1", Port: -1, JetStream: true, StoreDir: jsstore.Dir(t)}
-	s := test.RunServer(opts)
-	defer s.Shutdown()
+	s := natsfixture.StartServer(t)
 
 	nc := natsfixture.Connect(t, s.ClientURL())
 	defer nc.Close()
@@ -338,9 +327,7 @@ func TestCoreKVSource_ReplaysOnRestart(t *testing.T) {
 // matters here: lens data is never lost, regardless of the legacy
 // durable's presence or prune timing.
 func TestCoreKVSource_MigratesFromLegacyFixedDurable(t *testing.T) {
-	opts := &natsserver.Options{Host: "127.0.0.1", Port: -1, JetStream: true, StoreDir: jsstore.Dir(t)}
-	s := test.RunServer(opts)
-	defer s.Shutdown()
+	s := natsfixture.StartServer(t)
 
 	nc := natsfixture.Connect(t, s.ClientURL())
 	defer nc.Close()

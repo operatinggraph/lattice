@@ -6,10 +6,9 @@ import (
 	"testing"
 	"time"
 
-	natsserver "github.com/nats-io/nats-server/v2/test"
 	"github.com/nats-io/nats.go/jetstream"
 
-	"github.com/operatinggraph/lattice/internal/jsstore"
+	"github.com/operatinggraph/lattice/internal/natsfixture"
 	"github.com/operatinggraph/lattice/internal/substrate"
 )
 
@@ -17,12 +16,7 @@ const testHealthBucket = "health-kv"
 
 func startEmbeddedNATS(t *testing.T) string {
 	t.Helper()
-	opts := natsserver.DefaultTestOptions
-	opts.Port = -1
-	opts.JetStream = true
-	opts.StoreDir = jsstore.Dir(t)
-	s := natsserver.RunServer(&opts)
-	t.Cleanup(s.Shutdown)
+	s := natsfixture.StartServer(t)
 	return s.ClientURL()
 }
 

@@ -199,12 +199,13 @@ var (
 	// per-test-populate hazard bootstrap-primordial-globals-race-design.md §4
 	// closes via testutil.EnsurePrimordials).
 	loadOrGenerateCall = regexp.MustCompile(`bootstrap\.LoadOrGenerate\(`)
-	// embeddedNATSCtor anchors a hand-rolled embedded NATS server fixture. Each
-	// hand-rolled copy silently inherits nats.go's 2s default whole-handshake
-	// deadline with no retry, so a host stall fails a random untouched package
-	// with `read tcp ...: i/o timeout`; internal/natsfixture owns the hardened
-	// fixture (see its package doc).
-	embeddedNATSCtor = regexp.MustCompile(`\bnatsserver\.NewServer\(|\bserver\.NewServer\(`)
+	// embeddedNATSCtor anchors a hand-rolled embedded NATS server fixture, by
+	// either construction route: natsserver.NewServer + Start, or the upstream
+	// test package's RunServer. internal/natsfixture owns the hardened fixture
+	// (see its package doc) — a hand-rolled copy re-acquires the defects it
+	// encodes against, and its callers then dial with nats.go's 2s default
+	// whole-handshake deadline and no retry.
+	embeddedNATSCtor = regexp.MustCompile(`\b(?:natsserver|natstest|natssrv|server|test)\.(?:NewServer|RunServer)\(`)
 	// bareConnectCall anchors a direct nats.Connect in a test. natsfixture.Connect
 	// is the fixture path; a direct call inherits nats.go's 2s whole-handshake
 	// deadline with no retry. natsConnectShape is the declaration a deliberate
@@ -561,7 +562,9 @@ func scanSource(path string, data []byte) []finding {
 	if !isTest {
 		out = append(out, checkLensProtectedByDefault(path, string(data))...)
 	}
-	embeddedNATSScoped := !strings.HasPrefix(slash, natsfixturePkg)
+	// internal/spike holds standalone `main` benchmarks with no *testing.T, so the
+	// fixture (which is t-bound by construction) is not available to them.
+	embeddedNATSScoped := !strings.HasPrefix(slash, natsfixturePkg) && !strings.HasPrefix(slash, "internal/spike/")
 	// natsfixture proves the bare default's behavior, so it dials directly.
 	bareConnectScoped := isTest && !strings.HasPrefix(slash, natsfixturePkg)
 	var connectAt map[int]annotation

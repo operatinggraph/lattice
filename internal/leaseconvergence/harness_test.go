@@ -34,15 +34,12 @@ import (
 	"testing"
 	"time"
 
-	natsserver "github.com/nats-io/nats-server/v2/server"
-	natstest "github.com/nats-io/nats-server/v2/test"
 	nats "github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 	"github.com/stretchr/testify/require"
 
 	"github.com/operatinggraph/lattice/internal/bootstrap"
 	"github.com/operatinggraph/lattice/internal/bridge"
-	"github.com/operatinggraph/lattice/internal/jsstore"
 	"github.com/operatinggraph/lattice/internal/loom"
 	"github.com/operatinggraph/lattice/internal/natsfixture"
 	"github.com/operatinggraph/lattice/internal/opstatus"
@@ -150,9 +147,7 @@ func newHarness(t *testing.T, opts ...harnessOpt) *harness {
 		opt(&hc)
 	}
 
-	srvOpts := &natsserver.Options{Host: "127.0.0.1", Port: -1, JetStream: true, StoreDir: jsstore.Dir(t)}
-	s := natstest.RunServer(srvOpts)
-	t.Cleanup(s.Shutdown)
+	s := natsfixture.StartServer(t)
 
 	nc := natsfixture.Connect(t, s.ClientURL())
 	t.Cleanup(nc.Close)

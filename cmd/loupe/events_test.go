@@ -12,11 +12,8 @@ import (
 	"testing"
 	"time"
 
-	natsserver "github.com/nats-io/nats-server/v2/server"
-	natstest "github.com/nats-io/nats-server/v2/test"
-
 	"github.com/operatinggraph/lattice/internal/bootstrap"
-	"github.com/operatinggraph/lattice/internal/jsstore"
+	"github.com/operatinggraph/lattice/internal/natsfixture"
 	"github.com/operatinggraph/lattice/internal/substrate"
 )
 
@@ -92,9 +89,7 @@ func TestEventStream_ClientLimit(t *testing.T) {
 // over a live HTTP connection, and a published event arriving shaped —
 // deliver-new (the pre-connect event never replays), payload stripped.
 func TestEventStream_TailsCoreEvents(t *testing.T) {
-	opts := &natsserver.Options{Host: "127.0.0.1", Port: -1, JetStream: true, StoreDir: jsstore.Dir(t)}
-	ns := natstest.RunServer(opts)
-	defer ns.Shutdown()
+	ns := natsfixture.StartServer(t)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()

@@ -9,10 +9,8 @@ import (
 	"time"
 
 	"github.com/nats-io/nats-server/v2/server"
-	natsserver "github.com/nats-io/nats-server/v2/test"
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nkeys"
-	"github.com/operatinggraph/lattice/internal/jsstore"
 	"github.com/operatinggraph/lattice/internal/natsfixture"
 )
 
@@ -53,18 +51,9 @@ func writeUserSeed(t *testing.T) string {
 // or mismatched client is rejected at the handshake.
 func startEmbeddedNATSWithNKey(t *testing.T, publicKey string) (url string) {
 	t.Helper()
-	opts := natsserver.DefaultTestOptions
-	opts.Port = -1
-	opts.JetStream = true
-	opts.StoreDir = jsstore.Dir(t)
+	opts := natsfixture.Options(t)
 	opts.Nkeys = []*server.NkeyUser{{Nkey: publicKey}}
-	s := natsserver.RunServer(&opts)
-	t.Cleanup(func() {
-		if jsCfg := s.JetStreamConfig(); jsCfg != nil {
-			defer os.RemoveAll(jsCfg.StoreDir)
-		}
-		s.Shutdown()
-	})
+	s := natsfixture.StartServerWith(t, opts)
 	return s.ClientURL()
 }
 
@@ -276,18 +265,9 @@ func TestConnect_TokenWithTokenHandler_Rejected(t *testing.T) {
 // for the Token/TokenHandler credential kind.
 func startEmbeddedNATSWithToken(t *testing.T, token string) (url string) {
 	t.Helper()
-	opts := natsserver.DefaultTestOptions
-	opts.Port = -1
-	opts.JetStream = true
-	opts.StoreDir = jsstore.Dir(t)
+	opts := natsfixture.Options(t)
 	opts.Authorization = token
-	s := natsserver.RunServer(&opts)
-	t.Cleanup(func() {
-		if jsCfg := s.JetStreamConfig(); jsCfg != nil {
-			defer os.RemoveAll(jsCfg.StoreDir)
-		}
-		s.Shutdown()
-	})
+	s := natsfixture.StartServerWith(t, opts)
 	return s.ClientURL()
 }
 

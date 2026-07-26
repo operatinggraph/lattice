@@ -44,15 +44,12 @@ import (
 	"testing"
 	"time"
 
-	natsserver "github.com/nats-io/nats-server/v2/server"
-	natstest "github.com/nats-io/nats-server/v2/test"
 	nats "github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 	"github.com/stretchr/testify/require"
 
 	"github.com/operatinggraph/lattice/internal/bootstrap"
 	"github.com/operatinggraph/lattice/internal/bridge"
-	"github.com/operatinggraph/lattice/internal/jsstore"
 	"github.com/operatinggraph/lattice/internal/natsfixture"
 	"github.com/operatinggraph/lattice/internal/opstatus"
 	"github.com/operatinggraph/lattice/internal/pkgmgr"
@@ -85,9 +82,7 @@ type harness struct {
 func newHarness(t *testing.T, prepare func(*bridge.FakeAugur)) *harness {
 	t.Helper()
 
-	opts := &natsserver.Options{Host: "127.0.0.1", Port: -1, JetStream: true, StoreDir: jsstore.Dir(t)}
-	s := natstest.RunServer(opts)
-	t.Cleanup(s.Shutdown)
+	s := natsfixture.StartServer(t)
 
 	nc := natsfixture.Connect(t, s.ClientURL())
 	t.Cleanup(nc.Close)

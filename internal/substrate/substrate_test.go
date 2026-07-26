@@ -4,32 +4,18 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
 	"testing"
 	"time"
 
-	"github.com/operatinggraph/lattice/internal/jsstore"
-	"github.com/nats-io/nats-server/v2/server"
-	natsserver "github.com/nats-io/nats-server/v2/test"
 	"github.com/nats-io/nats.go/jetstream"
+	"github.com/operatinggraph/lattice/internal/natsfixture"
 )
 
 // startEmbeddedNATS runs a JetStream-enabled NATS server in-process and
 // returns the connection URL. Cleanup is registered via t.Cleanup.
 func startEmbeddedNATS(t *testing.T) (url string) {
 	t.Helper()
-	opts := natsserver.DefaultTestOptions
-	opts.Port = -1
-	opts.JetStream = true
-	opts.StoreDir = jsstore.Dir(t)
-	s := natsserver.RunServer(&opts)
-	t.Cleanup(func() {
-		if jsCfg := s.JetStreamConfig(); jsCfg != nil {
-			defer os.RemoveAll(jsCfg.StoreDir)
-		}
-		s.Shutdown()
-		_ = server.VERSION // silence unused
-	})
+	s := natsfixture.StartServer(t)
 	return s.ClientURL()
 }
 

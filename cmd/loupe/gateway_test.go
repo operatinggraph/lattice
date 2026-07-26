@@ -10,12 +10,10 @@ import (
 	"testing"
 	"time"
 
-	natsserver "github.com/nats-io/nats-server/v2/server"
-	natstest "github.com/nats-io/nats-server/v2/test"
 	"github.com/nats-io/nats.go/jetstream"
 
 	"github.com/operatinggraph/lattice/internal/gateway/revocation"
-	"github.com/operatinggraph/lattice/internal/jsstore"
+	"github.com/operatinggraph/lattice/internal/natsfixture"
 	"github.com/operatinggraph/lattice/internal/substrate"
 )
 
@@ -24,9 +22,7 @@ import (
 // carrying the materializer's audit fields, and a doc-less/unparseable entry
 // still lists by key (presence IS the revocation).
 func TestGatewayRevocations_ListsBucket(t *testing.T) {
-	opts := &natsserver.Options{Host: "127.0.0.1", Port: -1, JetStream: true, StoreDir: jsstore.Dir(t)}
-	ns := natstest.RunServer(opts)
-	defer ns.Shutdown()
+	ns := natsfixture.StartServer(t)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
@@ -118,9 +114,7 @@ func TestGatewayRevocations_ListsBucket(t *testing.T) {
 // endpoint reports that as an upstream error, not an empty (falsely clean)
 // list.
 func TestGatewayRevocations_BucketMissing(t *testing.T) {
-	opts := &natsserver.Options{Host: "127.0.0.1", Port: -1, JetStream: true, StoreDir: jsstore.Dir(t)}
-	ns := natstest.RunServer(opts)
-	defer ns.Shutdown()
+	ns := natsfixture.StartServer(t)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()

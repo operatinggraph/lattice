@@ -12,12 +12,10 @@ import (
 	"testing"
 	"time"
 
-	natsserver "github.com/nats-io/nats-server/v2/server"
-	natstest "github.com/nats-io/nats-server/v2/test"
 	"github.com/nats-io/nats.go/jetstream"
 
 	"github.com/operatinggraph/lattice/internal/bootstrap"
-	"github.com/operatinggraph/lattice/internal/jsstore"
+	"github.com/operatinggraph/lattice/internal/natsfixture"
 	"github.com/operatinggraph/lattice/internal/processor"
 	"github.com/operatinggraph/lattice/internal/processor/opwire"
 	"github.com/operatinggraph/lattice/internal/substrate"
@@ -104,9 +102,7 @@ func newTestReviewServer(t *testing.T) (client *http.Client, baseURL string, put
 // this fixture deliberately does not install.
 func newTestReviewServerWithSrv(t *testing.T) (srv *server, client *http.Client, baseURL string, put func(bucket, key, value string)) {
 	t.Helper()
-	opts := &natsserver.Options{Host: "127.0.0.1", Port: -1, JetStream: true, StoreDir: jsstore.Dir(t)}
-	ns := natstest.RunServer(opts)
-	t.Cleanup(ns.Shutdown)
+	ns := natsfixture.StartServer(t)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
@@ -386,10 +382,10 @@ func TestHandleReview_RoutingErrors(t *testing.T) {
 		{http.MethodGet, "/api/review/capability/a/b", http.StatusBadRequest},
 		{http.MethodGet, "/api/review/augur/a/b", http.StatusBadRequest},
 		// F16.2 action endpoints: POST-only, capability-only, known verbs only.
-		{http.MethodGet, "/api/review/capability/x/approve", http.StatusBadRequest},  // GET on a POST endpoint
-		{http.MethodPost, "/api/review/augur/x/approve", http.StatusBadRequest},      // augur has no approve endpoint
-		{http.MethodPost, "/api/review/augur/x/apply", http.StatusBadRequest},        // augur has no apply endpoint
-		{http.MethodPost, "/api/review/capability/x/bogus", http.StatusBadRequest},   // unknown verb
+		{http.MethodGet, "/api/review/capability/x/approve", http.StatusBadRequest}, // GET on a POST endpoint
+		{http.MethodPost, "/api/review/augur/x/approve", http.StatusBadRequest},     // augur has no approve endpoint
+		{http.MethodPost, "/api/review/augur/x/apply", http.StatusBadRequest},       // augur has no apply endpoint
+		{http.MethodPost, "/api/review/capability/x/bogus", http.StatusBadRequest},  // unknown verb
 		{http.MethodGet, "/api/review/capability/x/mark-applied", http.StatusBadRequest},
 		{http.MethodPost, "/api/review/augur/x/mark-applied", http.StatusBadRequest},
 	}
@@ -962,9 +958,7 @@ func TestFreshCapabilityVerdict_Lens(t *testing.T) {
 // bucket as unprovisioned, not a fault.
 func newBareReviewServer(t *testing.T) (client *http.Client, baseURL string) {
 	t.Helper()
-	opts := &natsserver.Options{Host: "127.0.0.1", Port: -1, JetStream: true, StoreDir: jsstore.Dir(t)}
-	ns := natstest.RunServer(opts)
-	t.Cleanup(ns.Shutdown)
+	ns := natsfixture.StartServer(t)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()

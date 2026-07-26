@@ -8,13 +8,10 @@ import (
 	"testing"
 	"time"
 
-	natsserver "github.com/nats-io/nats-server/v2/server"
-	natstest "github.com/nats-io/nats-server/v2/test"
 	nats "github.com/nats-io/nats.go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/operatinggraph/lattice/internal/jsstore"
 	"github.com/operatinggraph/lattice/internal/loom"
 	"github.com/operatinggraph/lattice/internal/loom/control"
 	"github.com/operatinggraph/lattice/internal/natsfixture"
@@ -138,9 +135,7 @@ func startTestServer(t *testing.T) *nats.Conn {
 	if testing.Short() {
 		t.Skip("skipping NATS integration test in short mode")
 	}
-	opts := &natsserver.Options{Host: "127.0.0.1", Port: -1, JetStream: true, StoreDir: jsstore.Dir(t)}
-	srv := natstest.RunServer(opts)
-	t.Cleanup(srv.Shutdown)
+	srv := natsfixture.StartServer(t)
 	nc := natsfixture.Connect(t, srv.ClientURL())
 	t.Cleanup(nc.Close)
 	return nc

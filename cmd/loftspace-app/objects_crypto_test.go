@@ -12,12 +12,10 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	natsserver "github.com/nats-io/nats-server/v2/server"
-	natstest "github.com/nats-io/nats-server/v2/test"
 	"github.com/nats-io/nats.go/jetstream"
 
 	"github.com/operatinggraph/lattice/internal/bootstrap"
-	"github.com/operatinggraph/lattice/internal/jsstore"
+	"github.com/operatinggraph/lattice/internal/natsfixture"
 	"github.com/operatinggraph/lattice/internal/objectcrypto"
 	"github.com/operatinggraph/lattice/internal/substrate"
 	"github.com/operatinggraph/lattice/internal/vault"
@@ -34,9 +32,7 @@ import (
 // the lens-projected read model for Loupe's direct Core-KV read.
 func sensitiveObjectFixture(t *testing.T) (srv *server, hs *httptest.Server, backend *vault.LocalBackend, conn *substrate.Conn, cookieFor func(subject string) *http.Cookie) {
 	t.Helper()
-	opts := &natsserver.Options{Host: "127.0.0.1", Port: -1, JetStream: true, StoreDir: jsstore.Dir(t)}
-	ns := natstest.RunServer(opts)
-	t.Cleanup(ns.Shutdown)
+	ns := natsfixture.StartServer(t)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)

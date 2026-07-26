@@ -8,11 +8,8 @@ import (
 	"testing"
 	"time"
 
-	natsserver "github.com/nats-io/nats-server/v2/server"
-	natstest "github.com/nats-io/nats-server/v2/test"
 	"github.com/nats-io/nats.go/jetstream"
 
-	"github.com/operatinggraph/lattice/internal/jsstore"
 	"github.com/operatinggraph/lattice/internal/natsfixture"
 	"github.com/operatinggraph/lattice/internal/substrate"
 )
@@ -21,9 +18,7 @@ import (
 // weaver-state bucket and returns a markStore against it.
 func newStateTestStore(t *testing.T, ctx context.Context) *markStore {
 	t.Helper()
-	opts := &natsserver.Options{Host: "127.0.0.1", Port: -1, JetStream: true, StoreDir: jsstore.Dir(t)}
-	srv := natstest.RunServer(opts)
-	t.Cleanup(srv.Shutdown)
+	srv := natsfixture.StartServer(t)
 	nc := natsfixture.Connect(t, srv.ClientURL())
 	t.Cleanup(nc.Close)
 	conn, err := substrate.Wrap(nc)

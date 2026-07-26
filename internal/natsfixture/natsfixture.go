@@ -69,16 +69,20 @@ const (
 	connectBackoff = 250 * time.Millisecond
 )
 
-// Options returns the canonical embedded-server options: JetStream on, a
-// private file store that outlives Shutdown safely (see internal/jsstore), no
-// logging, no signal handlers, and an OS-assigned port.
+// Options returns the canonical embedded-server options: loopback-only,
+// JetStream on, a private file store that outlives Shutdown safely (see
+// internal/jsstore), no logging, no signal handlers, and an OS-assigned port.
 //
 // Port MUST stay RANDOM_PORT: it resolves to a bind on :0, so the kernel — not
 // the process — picks a free port, which is what keeps concurrent test packages
 // from colliding under `go test -p N`.
+//
+// Host is pinned to loopback so a test server is never reachable off-box and
+// never trips the macOS firewall prompt.
 func Options(t *testing.T) *natsserver.Options {
 	t.Helper()
 	return &natsserver.Options{
+		Host:      "127.0.0.1",
 		JetStream: true,
 		StoreDir:  jsstore.Dir(t),
 		NoLog:     true,

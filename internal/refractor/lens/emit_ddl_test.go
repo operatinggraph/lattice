@@ -7,12 +7,9 @@ import (
 	"testing"
 	"time"
 
-	natsserver "github.com/nats-io/nats-server/v2/server"
-	"github.com/nats-io/nats-server/v2/test"
 	"github.com/nats-io/nats.go/jetstream"
 	"github.com/stretchr/testify/require"
 
-	"github.com/operatinggraph/lattice/internal/jsstore"
 	"github.com/operatinggraph/lattice/internal/natsfixture"
 	"github.com/operatinggraph/lattice/internal/refractor/adapter"
 	"github.com/operatinggraph/lattice/internal/refractor/lens"
@@ -31,9 +28,7 @@ func seedSpec(ctx context.Context, t *testing.T, kv jetstream.KeyValue, id strin
 }
 
 func TestEmitReadPathDDL(t *testing.T) {
-	opts := &natsserver.Options{Host: "127.0.0.1", Port: -1, JetStream: true, StoreDir: jsstore.Dir(t)}
-	s := test.RunServer(opts)
-	defer s.Shutdown()
+	s := natsfixture.StartServer(t)
 
 	nc := natsfixture.Connect(t, s.ClientURL())
 	defer nc.Close()
@@ -128,9 +123,7 @@ func TestEmitReadPathDDL(t *testing.T) {
 }
 
 func TestEmitReadPathDDL_NoReadPathLenses(t *testing.T) {
-	opts := &natsserver.Options{Host: "127.0.0.1", Port: -1, JetStream: true, StoreDir: jsstore.Dir(t)}
-	s := test.RunServer(opts)
-	defer s.Shutdown()
+	s := natsfixture.StartServer(t)
 
 	nc := natsfixture.Connect(t, s.ClientURL())
 	defer nc.Close()
@@ -169,9 +162,7 @@ func TestEmitReadPathDDL_NoReadPathLenses(t *testing.T) {
 // consumer, must inspect the envelope's isDeleted field itself rather than
 // treating every enumerated spec as active.
 func TestEmitReadPathDDL_TombstonedSpec_Skipped(t *testing.T) {
-	opts := &natsserver.Options{Host: "127.0.0.1", Port: -1, JetStream: true, StoreDir: jsstore.Dir(t)}
-	s := test.RunServer(opts)
-	defer s.Shutdown()
+	s := natsfixture.StartServer(t)
 
 	nc := natsfixture.Connect(t, s.ClientURL())
 	defer nc.Close()
@@ -233,9 +224,7 @@ func TestEmitReadPathDDL_TombstonedSpec_Skipped(t *testing.T) {
 // lens spec coherent" and silently provision a table for a lens that can never
 // activate.
 func TestEmitReadPathDDL_ProtectedSoftDelete_Rejected(t *testing.T) {
-	opts := &natsserver.Options{Host: "127.0.0.1", Port: -1, JetStream: true, StoreDir: jsstore.Dir(t)}
-	s := test.RunServer(opts)
-	defer s.Shutdown()
+	s := natsfixture.StartServer(t)
 
 	nc := natsfixture.Connect(t, s.ClientURL())
 	defer nc.Close()

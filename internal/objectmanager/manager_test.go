@@ -5,30 +5,18 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"os"
 	"testing"
 	"time"
 
-	natsserver "github.com/nats-io/nats-server/v2/test"
 	"github.com/nats-io/nats.go/jetstream"
 
-	"github.com/operatinggraph/lattice/internal/jsstore"
+	"github.com/operatinggraph/lattice/internal/natsfixture"
 	"github.com/operatinggraph/lattice/internal/substrate"
 )
 
 func testConn(t *testing.T) (*substrate.Conn, context.Context) {
 	t.Helper()
-	opts := natsserver.DefaultTestOptions
-	opts.Port = -1
-	opts.JetStream = true
-	opts.StoreDir = jsstore.Dir(t) // unique per test — avoid a shared-JetStream collision
-	s := natsserver.RunServer(&opts)
-	t.Cleanup(func() {
-		if jsCfg := s.JetStreamConfig(); jsCfg != nil {
-			defer os.RemoveAll(jsCfg.StoreDir)
-		}
-		s.Shutdown()
-	})
+	s := natsfixture.StartServer(t)
 	ctx := context.Background()
 	conn, err := substrate.Connect(ctx, substrate.ConnectOpts{URL: s.ClientURL()})
 	if err != nil {

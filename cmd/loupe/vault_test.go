@@ -11,12 +11,10 @@ import (
 	"testing"
 	"time"
 
-	natsserver "github.com/nats-io/nats-server/v2/server"
-	natstest "github.com/nats-io/nats-server/v2/test"
 	"github.com/nats-io/nats.go/jetstream"
 
 	"github.com/operatinggraph/lattice/internal/bootstrap"
-	"github.com/operatinggraph/lattice/internal/jsstore"
+	"github.com/operatinggraph/lattice/internal/natsfixture"
 	"github.com/operatinggraph/lattice/internal/substrate"
 	"github.com/operatinggraph/lattice/internal/vault"
 	privacybase "github.com/operatinggraph/lattice/packages/privacy-base"
@@ -27,9 +25,7 @@ import (
 // sorted rows, and a doc-less/unparseable entry still lists by key (the key
 // alone names a shredded identity).
 func TestVaultShreds_ListsBucket(t *testing.T) {
-	opts := &natsserver.Options{Host: "127.0.0.1", Port: -1, JetStream: true, StoreDir: jsstore.Dir(t)}
-	ns := natstest.RunServer(opts)
-	defer ns.Shutdown()
+	ns := natsfixture.StartServer(t)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
@@ -122,9 +118,7 @@ func TestVaultShreds_ListsBucket(t *testing.T) {
 // privacy-base package isn't installed has no privacy-shreds bucket, and the
 // endpoint reports that as an upstream error, not a falsely clean empty list.
 func TestVaultShreds_BucketMissing(t *testing.T) {
-	opts := &natsserver.Options{Host: "127.0.0.1", Port: -1, JetStream: true, StoreDir: jsstore.Dir(t)}
-	ns := natstest.RunServer(opts)
-	defer ns.Shutdown()
+	ns := natsfixture.StartServer(t)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
@@ -163,9 +157,7 @@ func TestVaultShreds_BucketMissing(t *testing.T) {
 // test can shred a key mid-scenario.
 func vaultDecryptFixture(t *testing.T) (hs *httptest.Server, backend *vault.LocalBackend, conn *substrate.Conn) {
 	t.Helper()
-	opts := &natsserver.Options{Host: "127.0.0.1", Port: -1, JetStream: true, StoreDir: jsstore.Dir(t)}
-	ns := natstest.RunServer(opts)
-	t.Cleanup(ns.Shutdown)
+	ns := natsfixture.StartServer(t)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)

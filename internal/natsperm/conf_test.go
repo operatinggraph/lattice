@@ -14,7 +14,6 @@ import (
 	"time"
 
 	"github.com/nats-io/nats-server/v2/server"
-	natsserver "github.com/nats-io/nats-server/v2/test"
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 	"github.com/nats-io/nkeys"
@@ -90,8 +89,8 @@ func startServerFromConfDual(t *testing.T) (tcpURL, wsURL string) {
 	// take an ephemeral one instead or parallel tests collide on it — the same
 	// parallel-safety reason opts.Port is overridden above. -1 makes the server
 	// pick a free port and write it back into opts under the same lock the
-	// readiness check reads, and RunServer does not return until the listener is
-	// bound, so the port below is settled and race-free.
+	// readiness check reads, and the fixture does not return until the listener
+	// is bound, so the port below is settled and race-free.
 	opts.Websocket.Port = -1
 	opts.JetStream = true
 	opts.StoreDir = jsstore.Dir(t)
@@ -105,8 +104,7 @@ func startServerFromConfDual(t *testing.T) (tcpURL, wsURL string) {
 	// the test ever exercises the permission model. Test-only override —
 	// deploy/nats-server.conf itself is untouched.
 	opts.AuthTimeout = 10
-	s := natsserver.RunServer(opts)
-	t.Cleanup(s.Shutdown)
+	s := natsfixture.StartServerWith(t, opts)
 	return s.ClientURL(), fmt.Sprintf("ws://127.0.0.1:%d", opts.Websocket.Port)
 }
 
