@@ -1954,3 +1954,66 @@ sensitive reads, not this op's, and it belongs with the sensitive-read tracker w
 `internal/` changes are not a widening: each is a defect that this increment's own grants would otherwise
 have turned into a live regression, which is the "wear the other hat / do not bounce coupled work" rule, not
 new scope. No op was left un-granted or un-guarded, and no adjacent mechanism was substituted for a named one.
+
+### Fire W3 Inc 3 (wellness staff writes) fire brief (build note, 2026-07-26)
+
+**Scope sentence (verbatim, lane row).** "`CreateStudio` and `CreateBooking`/`CancelBooking` scope=any are
+`operator`-only, so W3's mint deletion left three FE surfaces with no authorized hat and they were removed
+(ops + grants untouched). A plain `frontOfHouse` grant would be unconfined authority over any member's
+booking; the clean form mirrors `CreateSession`'s workplace walk."
+
+**The three surfaces** W3 (`d3a7cc7b`) removed rather than granted: **create-studio**, **book-for-a-resident**,
+and **roster cancel-anyone**. They existed only because the app impersonated bootstrap; deleting the mint left
+them with no authorized hat.
+
+**Grounding ledger (verified live in code this fire).**
+
+| fact | where |
+|---|---|
+| `CreateStudio` scope=any → `operator` only | `permissions.go:57` |
+| `CreateBooking` / `CancelBooking` scope=any → `operator` only; scope=self → `consumer` | `permissions.go:71,78` / `:73-77,80-84` |
+| `CreateSession` scope=any → `operator` + `frontOfHouse`, **confined** | `permissions.go:60-64`, guard `ddls.go:1128-1129` |
+| the pattern to mirror | `if not workplace_exempt(): require_workplace(studio_locations(studio), …)` |
+| `studio_locations` walks the studio's own `locatedAt` links | `ddls.go:1043-1053` |
+| `require_workplace` exempts `op.authTargetValidated` — the scope=self path | `ddls.go:1012-1041` |
+| session → studio is a **deterministic** `atStudio` link written at CreateSession | `ddls.go:1092,1144,1151` |
+| the four DDL scripts are standalone; helpers are **duplicated per script** | `parts_of` at `:748,888,1295,1728`; `actor_holds_operator` at `:950,1345` |
+| the workplace block exists **only** in `sessionDDLScript` | `ddls.go:973-1053` |
+
+**Two forks, both resolved here as Winston (implementation calls, not contract).**
+
+1. **`CreateStudio` has an OPTIONAL `location` payload field** (`ddls.go:797-802`; a studio with no location
+   is legal and simply un-browsable). The confinement therefore falls out with no new concept: guard on the
+   supplied location, and an omitted one yields an EMPTY candidate list, which `require_workplace` already
+   denies for anyone but an operator. So **a staffer must name a location they work at, and an unlocated
+   studio stays operator-only.** No new payload field, no new rule.
+2. **The booking ops carry no location** — but they carry `session`, and `session -atStudio-> studio
+   -locatedAt-> location` is two bounded link enumerations, structurally identical to `studio_locations` and
+   annotated the same class-(e) read posture. So a `session_locations(session_key)` helper mirrors an
+   established idiom; this is **package work, not a missing platform primitive**, and does not get bounced to
+   `lattice.md`.
+
+**Increment order** (each independently green):
+1. **Package.** `session_locations` + the workplace helper block copied into `bookingDDLScript` (which
+   already has `parts_of` + `actor_holds_operator`) and into `studioDDLScript`; `require_workplace` guards on
+   `CreateStudio`, `CreateBooking`, `CancelBooking`; `frontOfHouse` added to those three scope=any rows;
+   version bump + `verify-package-wellness`.
+2. **FE.** Restore the three surfaces in `cmd/wellness-app/web/app.js`, gated on the `worksAt` staff anchor
+   whoami already returns. Writes go browser-direct to the Gateway's `POST /v1/operations` — there is no
+   generic `/api/op` in this app (`server.go:69-74`), so no new endpoint is needed. UX-then-FE.
+
+**Non-goals.** The scope=self `consumer` path is untouched: `require_workplace` returns early on
+`op.authTargetValidated`, so a member still books and cancels their own seat — the two guards are
+complementary, which is the same property the café read boundary relied on this morning.
+`SetBookingAttendance` keeps its instructor binding and is not re-guarded. No prelude refactor: the helper
+duplication is the established idiom in this file (four scripts, four `parts_of`), and de-duplicating it is
+its own item, filed — substituting it here would be an adjacent mechanism, not this one.
+
+**Deliberately NOT deferred to a primitive.** Grounded both ways before concluding: the `atStudio` link is
+deterministic and already written, and `kv.Links` enumeration is the sanctioned class-(e) posture, so nothing
+here needs an engine change.
+
+**🏗️ CHECKPOINT (2026-07-26).** Brief committed, **no code yet**. The build was deliberately not started in
+this fire: the CI-reliability role was concurrently running six back-to-back `go test ./... -p 4` suites to
+characterise a contention flake rate, and adding build load would have inflated the very number it was
+measuring. **Next fire: increment 1 (package), then increment 2 (FE).** No worktree yet — start a fresh one.
