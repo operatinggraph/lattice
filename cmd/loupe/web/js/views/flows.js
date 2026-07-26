@@ -58,16 +58,19 @@ function patternGroup(g) {
 
 function flowCard(f) {
   const card = el("div", "card flow-card " + f.cls);
-  const title = el("div", "card-key");
-  title.appendChild(el("span", null, f.instanceId));
-  title.appendChild(el("span", "card-group", f.status));
+  // The id and the badges are separate rows: an instance id is a 20-char
+  // NanoID with no break points, so sharing a line with two badges wraps it
+  // mid-token and neither reads.
+  card.appendChild(el("div", "card-key flow-id", f.instanceId));
+  const badges = el("div", "flow-badges");
+  badges.appendChild(el("span", "card-group", f.status));
   // A running row also carries the cross-reference verdict. It is omitted
   // entirely when the control read failed — an unknown must never render as a
   // confirmed one.
   if (f.liveness) {
-    title.appendChild(el("span", "card-group " + (f.liveness === "live" ? "green" : "red"), f.label));
+    badges.appendChild(el("span", "card-group " + (f.liveness === "live" ? "green" : "red"), f.label));
   }
-  card.appendChild(title);
+  card.appendChild(badges);
   if (f.subjectKey) {
     const sub = el("div", "card-sub");
     sub.appendChild(document.createTextNode("subject "));

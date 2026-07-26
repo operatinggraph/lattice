@@ -263,6 +263,11 @@ pre {
   border-bottom: 1px solid var(--border);
 }
 .flow-group-name { font-weight: 600; font-size: 14px; }
+/* An instance id is an unbreakable 20-char NanoID: it gets its own line, and
+   the badges get theirs, or the two wrap through each other. */
+.flow-id { display: block; font-family: var(--mono); font-size: 12px; }
+.flow-badges { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 6px; }
+.flow-badges .card-group { white-space: nowrap; }
 
 .card-issues { margin-top: 8px; }
 .card-issue { color: var(--yellow); font-size: 12px; font-family: var(--mono); }
