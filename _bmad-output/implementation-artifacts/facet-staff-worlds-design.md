@@ -429,3 +429,50 @@ walk discarded — red before, green after.
 
 **Non-goals.** Collapsing the nine copies into a shared prelude (its own lane row, `★ M`); any change to
 `require_workplace`, `workplace_exempt`, `actor_holds_operator`, or the read-side lenses.
+
+### 10.1 Adversarial pass — the central claim was REFUTED, and the fire grew to answer it
+
+The brief above asserted: *"This can only convert false denials into allows, and only ones the read side
+already grants."* A refute-first review falsified it in both directions. Both counterexamples were
+verified against the engine before being accepted, and both were fixed rather than noted — the whole
+point of the item is *the two sides should agree*, so shipping a change justified by parity while
+knowingly leaving a case where parity fails would have been worse than not shipping.
+
+- **The walk transited TOMBSTONED ancestors — new over-permission the read side does not grant.** The
+  walk tested `isDeleted` on each `containedIn` *link* but never on the ancestor *vertex*.
+  `TombstoneLocation` (location-domain) emits `[make_tombstone(loc_key)]` with **no link cascade**, so a
+  decommissioned floor keeps live links and only its own flag marks it gone — while the read side stops
+  dead there (`full/executor.go`'s `fetchNode` returns `nil` for a soft-deleted node, and the walk
+  `continue`s). So a retired floor still conferred write authority over everything it contained: write
+  authority outliving the read it mirrors, and outliving the operator action that revoked it. The defect
+  pre-dated this fire for every single-parent chain; following every branch would have made it
+  deterministic instead of ordering-dependent. The walk now tests the ancestor vertex too.
+- **The node budget converted old ALLOWS into DENIES.** `WORKPLACE_MAX_NODES` truncated the frontier
+  before depth 7 in a wide DAG, where the old linear walk always reached level 7 — reintroducing the very
+  read/write divergence being closed, in the wide regime. It also over-ran its own bound by up to a page
+  (63 + 20 = 83, not 64) because the check sat outside the append loop. The bound is now charged before
+  the liveness read, so it holds exactly, and the comment states plainly that the node cap is the one
+  bound the read side does **not** share and that exhausting it denies — fail-closed, and set far above
+  any real topology.
+
+**What the reviewers could not refute**, recorded so the next author does not re-litigate it: depth
+accounting is right (both walks test 0..7, matching `*0..7`); the malformed-key `continue` cannot fail
+open (only the caller-supplied seed can be malformed, and at level 0 the frontier holds nothing else, so
+it still denies); Starlark semantics are sound and precedented (`x in list`, `list.append` on locals —
+starlark-go's post-load freeze does not reach function locals); and the read side remains a superset of
+the write side on reachability, tombstones aside.
+
+**Also corrected here:** the pasted comment cited "the read-side lenses" as if all seven packages had
+one. Only cafe-domain and wellness-domain project a `coveringLocations` set; maintenance-domain ships no
+lenses at all and lease-signing's containment walk is `*1..` (unbounded, excluding level 0). The comment
+now names the two that do rather than implying seven. A cypher test in cafe-domain was also still
+narrating the old write-side behaviour as a live divergence (a CLAUDE.md no-changelog violation, now
+describing the two halves of one rule).
+
+**Test posture, stated honestly.** Three behavioural tests land in wellness-domain — multi-parent
+coverage, the tombstoned-ancestor denial, and a cyclic topology — each mutation-tested. The other eight
+copies have **no behavioural coverage of their own**; their proof is S10 plus byte-identity. That is the
+deliberate trade (one prelude would make it moot — its lane row is open), and it is why S10's own
+blind spots got closed in this fire rather than later. One of the three is weaker than it first read: the
+cycle test stays green with the visited set deleted, because the *depth* bound is what guarantees
+termination — the test comment now says so instead of claiming to pin `seen`.

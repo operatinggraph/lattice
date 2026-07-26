@@ -92,6 +92,26 @@ greenfield.
 - **S8 — D3 everywhere, not just SYNC.** No person names on Personal-lens rows (established) **and** no
   subject-person names in open-KV read models (new, from S3, with S3's published-directory exception) —
   display names for the people a row is *about* come from the Protected/Vault planes.
+- **S10 — A policy-free guard helper has ONE implementation, corpus-wide — and its BOUNDS have one
+  value.** *The enforcement half of S4, which already asks for "byte-identical" guard text but, being
+  normative prose, did not bind anyone.* Starlark guard helpers are
+  pasted per *script* (there is no prelude yet), so the corpus holds many copies of each and a fix applied
+  to one silently leaves the rest defective. Where a helper carries **no package-specific policy** —
+  `worksAt_covers`, `workplace_exempt`, `actor_holds_operator`: plain arguments in, a question about the
+  graph out — every copy must have identical *code*, **indentation included** (comments are free to differ;
+  each package explains itself in terms of its own resolver). Indentation is hashed because it is semantics
+  in Starlark, and a statement at the wrong nesting depth is exactly how such a walk drifts. The
+  module-level **bounds** those bodies read (`ROLE_PAGE_LIMIT`, `WORKPLACE_PARENT_PAGE_LIMIT`,
+  `WORKPLACE_MAX_DEPTH`, `WORKPLACE_MAX_NODES`) must each hold ONE value corpus-wide, because a body
+  references its bounds by name and a digest cannot see 50 quietly becoming 10. Lint-enforced over
+  `packages/**` non-test sources; the message names every copy, so the next author is told how many sites
+  the fix has to reach, and finding too FEW copies is itself an error rather than a silent pass.
+  **Helpers that *do* encode policy are out of scope** and must not be forced identical: `require_workplace`
+  legitimately varies (clinic-reminders is operator-exempt-only because its ops have no consumer self path;
+  maintenance-domain factors the non-exempt half into `enforce_workplace`). A genuinely divergent variant
+  gets a **different name**, not an exemption. *Origin: `worksAt_covers` followed only the last
+  `containedIn` parent per level while the read-side lenses unioned every branch — and the lane row naming
+  the defect named three packages while the corpus held nine copies across seven (§11).*
 
 ## 3. The convergence program
 
@@ -544,3 +564,44 @@ main checkout's generated `lattice.bootstrap.json`) and has no bearing here — 
 corpus's cypher tests. Extracting it to an `internal/lenstest` helper is a single mechanical sweep, but
 doing it for five files only would have created a second idiom, so it stays a corpus-wide item with a named
 consumer: the next package to declare a lens, which today copies 40 lines to satisfy S6.
+
+## 11. S10 — one implementation per policy-free guard helper (build note, 2026-07-26)
+
+Added with the `worksAt_covers` multi-parent fix (facet-staff-worlds-design.md §10), which is also the
+evidence for it: a confinement defect was filed against three packages and lived in **nine copies across
+seven**. The gate is corpus-wide in `scripts/lint-package-standard.go` (`checkS10`), alongside S9, because
+the copies do not line up with packages at all — wellness-domain alone holds three, one per DDL script.
+
+Two decisions worth keeping:
+
+- **It compares code, not text.** Each copy's comment block legitimately names its own caller
+  (`require_workplace(resolve(x), …)` vs `require_workplace(account_unit(x), …)`), so pinning whole bodies
+  would fail on prose that carries no behaviour. Comments and blank lines are stripped; the statements must
+  agree.
+- **The helper list was measured, then RE-measured after a reviewer called the measurement wrong — and it
+  was.** `require_workplace` (3 distinct bodies) is genuinely, documentedly divergent, and excluding it is
+  correct. `actor_holds_operator` was excluded on the same reasoning, recorded as "identity-domain and
+  service-domain resolve the operator differently" — **which was false.** It was inferred from a digest count
+  without reading the bodies. All twelve are the identical `holdsRole` → `.canonicalName == "operator"` walk;
+  the only difference was five spellings of one page-limit constant, every one of them `50`. Since
+  `actor_holds_operator` *is* the operator escape — the single branch that clears every workplace guard in
+  the corpus — it was the worst possible thing to exempt, and the exemption came with a recorded reason that
+  would have stopped the next reader from re-checking. The constants are now one name and the helper is
+  pinned. **An exclusion justified by an unverified premise is worse than no gate at all.**
+
+The rule's escape hatch is renaming, not an exemption baseline: a variant that genuinely differs is a
+different function and should say so, which is exactly what maintenance-domain's `enforce_workplace`
+already does.
+
+Two more holes closed in the same fire, both found by review rather than by the author:
+
+- **The digest was indentation-blind**, which in an indentation-significant language is semantics-blind. Two
+  bodies differing only in nesting depth hashed alike — and a statement at the wrong depth is *precisely* how
+  the walk this rule protects went wrong. Depth is now hashed as a normalized leading-whitespace count, so a
+  tabs-vs-spaces reindent is not flagged but a nesting change is.
+- **The bounds were outside the digest.** A body names its limits by constant, so `ROLE_PAGE_LIMIT = 50`
+  becoming `10` in one script weakened a guard without changing any line the digest compared. Each named
+  bound now has to hold one value corpus-wide.
+
+Each of the three classes is mutation-tested: diverge one body, re-indent one line, or lower one constant,
+and the gate names it. The first version of this rule caught only the first of those three.
