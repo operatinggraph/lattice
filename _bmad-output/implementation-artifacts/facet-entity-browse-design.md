@@ -254,3 +254,91 @@ this stack holding an open tab is a PO-created café walk-in with no Facet contr
 tenant's tabs are all settled. The positive path — own open tab projects, a neighbour's does not, a settled
 one clears — is proven deterministically against the real engine in
 `TestEdgeEntityTabs_ProjectsOnlyTheActorsOwnOpenTab`.
+
+## 7. Build note — the menu item becomes a noun the form can pick (2026-07-26)
+
+**Scope sentence** (verbatim, [verticals.md](../planning-artifacts/backlog/verticals.md)): *"`Charge` resolves
+its tab now, but its other required field is a `vtx.menuitem.<NanoID>` and no lens projects menu items, so the
+descriptor form renders a free-text vertex key nobody can type. `Settle` + `VoidCharge` drive end-to-end;
+`Charge` does not. Either a `menuitem` browse lens off the café's location or an enum sourced from the
+catalog."*
+
+**The fork the row left open, resolved: the browse lens, not the enum.** A JSON-Schema `enum` is a
+compile-time closed set — every one of the ~30 enums under `packages/` is a status/decision vocabulary. A café
+catalog is *data*, minted and retired by operators at runtime, so an enum would either be stale the moment an
+item is added or would require regenerating a package version per menu change. The lens is also the option
+that generalizes: the identical gap sits on `RescheduleAppointment{provider, patient}`
+([clinic-domain/opmetas.go:90-97](../../packages/clinic-domain/opmetas.go)), which renders two raw vertex keys
+as free text today for exactly the same reason.
+
+**What the row's own premise turned out to under-state (grounded, not substituted).** Two facts make this
+larger than "add a lens", and both are *inside* the scope sentence rather than adjacent to it:
+
+1. **A menu item has no links at all.** `CreateMenuItem`'s mutation list is `make_vtx` + `make_aspect` and
+   nothing else ([cafe-domain/ddls.go:1013-1016](../../packages/cafe-domain/ddls.go)) — a bare
+   `vtx.menuitem.<NanoID>`. Every `manifest.ent` lens is an `AnchorWalk`, and the walk grammar admits only
+   rooted linear relationship patterns with a named relation
+   ([internal/pkgmgr/anchorwalk.go:693-763](../../internal/pkgmgr/anchorwalk.go)). So "a browse lens off the
+   café's location" is not expressible until the location edge exists. Minting it is the first increment, not
+   a separate item.
+2. **`menuItemKey` is not `Charge`'s dispatch target — `tabKey` is.** So the noun does not arrive through
+   `resolveTargetKey`; it arrives through the per-FIELD widget. That widget already exists as a stub:
+   `renderField` branches on `schema["x-entityRef"]` ([app.js:1545-1548](../../cmd/facet/web/app.js)) but
+   discards the declared vertex type, and `onGlobalInput` sources candidates from a hardcoded
+   `[...services(), ...instances()]` ([app.js:1858-1861](../../cmd/facet/web/app.js)). No op-meta anywhere in
+   `packages/` sets `x-entityRef` today, so the branch has never run. Making it type-driven is what connects
+   the new lens to the field.
+
+**Verified touch-list** (`file:line` read live at `cccc581c`):
+
+| Where | What |
+|---|---|
+| [cafe-domain/ddls.go:1004-1019](../../packages/cafe-domain/ddls.go) | `CreateMenuItem` branch — gains a required `locationKey`, a live+class check, and the `servedAt` link |
+| [cafe-domain/ddls.go:217-259](../../packages/cafe-domain/ddls.go) | the `menuitem` vertexType DDL — description, InputSchema, FieldDescriptions, Examples all name the new field |
+| [maintenance-domain/ddls.go:239-244,467-469](../../packages/maintenance-domain/ddls.go) · [service-location/ddls.go:258-263](../../packages/service-location/ddls.go) | the two precedents for validating a caller-supplied location key — `require_live_typed` / `require_live_location`; mirror, do not invent |
+| [cafe-domain/ddls.go:762](../../packages/cafe-domain/ddls.go) | `OpenTab`'s `make_link` — the in-file precedent for link direction + key shape |
+| [cafe-domain/opmetas.go:98-99](../../packages/cafe-domain/opmetas.go) | `Charge`'s self-slice InputSchema — `menuItemKey` gains `"x-entityRef": "menuitem"` |
+| [edge-manifest/lenses.go:172-191](../../packages/edge-manifest/lenses.go) | `edgeEntityProviders` — the exact mirror: residence spine, one hop down to a thing at the place, `domainBase` |
+| [edge-manifest/lenses.go:404](../../packages/edge-manifest/lenses.go) | `chainResidence`, shared by textual identity — the new walk must reuse the constant or the producer stops factoring the prefix |
+| [edge-manifest/package_test.go:51,69-70,186](../../packages/edge-manifest/package_test.go) | lens-name set · the hardcoded lens COUNT (19→20) and its doc comment · the `ns` literal map |
+| [edge-manifest/coverage_proof_test.go:127-208](../../packages/edge-manifest/coverage_proof_test.go) | the resident world the new lens must be seeded into, or its coverage claim is vacuous |
+| [app.js:1545-1548,1786-1794,1850-1864](../../cmd/facet/web/app.js) | the entity-ref widget: render · pick · candidate source |
+| [app.js:844-858](../../cmd/facet/web/app.js) | `renderBrowse` — see the F3 note below |
+| [app.js:868-876](../../cmd/facet/web/app.js) | `entityMeta` already renders any `*Cents` column as money — so the lens projects `priceCents` and the price needs no renderer change |
+| [scripts/seed-classic-demo.go:146-149](../../scripts/seed-classic-demo.go) | both `CreateMenuItem` calls pass `nil` ContextHint — they must now declare the `locationKey` read (Contract #2 §2.5) |
+
+**F3 re-checked, and one line added to keep it literally true.** §3 F3 ratified that browse "is not a graph
+browser: only entities a declared `dispatch.targetType` names are ever projected." No op targets `menuitem`, so
+a menu-item row would appear in Browse under a "Menu items" heading with "Nothing to do here yet." — the exact
+graph-browser drift F3 forbids. The lens is still right (`x-entityRef` is a declared vocabulary term the client
+resolves against, the same as `targetType`), so the principle widens on the *vocabulary* side and `renderBrowse`
+gains the filter that F3 always described: render a type only when some op's `dispatchTargetType` names it.
+The rows stay in state for the picker; they stop being a browse category.
+
+**Increment order + green check per step**
+
+1. **cafe-domain** — required `locationKey`, `require_live_typed`-style guard, `menuitem servedAt location`
+   link, DDL prose/schema/examples, version 0.8.4→0.9.0, `createMenuItem` test helper + the 5 tests built on
+   it, both seed calls. → `go test ./packages/cafe-domain/ ./scripts/...`
+2. **edge-manifest** — `edgeEntityMenuItems` (walk `chainResidence` + `(container)<-[:servedAt]-(item:menuitem)`,
+   `domainBase`) + tail, the four `package_test.go` pins, a dedicated coverage-proof test, manifest.yaml +
+   package.go + the file's own lens-count prose, version 0.12.0→0.13.0. → `go test ./packages/edge-manifest/`
+3. **Facet FE** — `renderField` carries the declared type onto the element; `onGlobalInput` sources from
+   `entitiesByType(type)` (services/instances stay the source for those two types) and offers candidates on an
+   empty query so a two-item catalog is pickable without guessing a search term; `renderBrowse` filter.
+   → `node --check`, then live.
+4. **Gates** — `go build ./...`, `make vet`, `golangci-lint run ./...`, `STRICT=1 go run ./scripts/lint-conventions.go`,
+   `lint-lens-anchors`, `lint-package-standard`, `lint-package-version`, `make verify-package-cafe-domain` /
+   `-edge-manifest`, `go test ./...`.
+
+**Non-goals.** No change to `menuCatalog` or `cmd/cafe-app` — that app's own picker already reads the KV read
+model and is unaffected (`menu.go:54-55`, a public catalog). No per-field `Sensitive`. No `CreateMenuItem`
+op-meta (operator-only, trusted-tool). No backfill: menu items minted before this change carry no `servedAt`
+link and simply will not browse until re-minted — named here rather than papered over, and the demo seed
+re-mints them.
+
+**Adjacent finds, filed now rather than at admit.** `docs/components/edge-manifest.md:14-15` still says "six
+lenses" and names none of the entity lenses, against its own header rule that the page updates in the same
+commit as the code — pre-existing drift, filed as its own row. The `RescheduleAppointment{provider, patient}`
+raw-key fields ([clinic-domain/opmetas.go:90-97](../../packages/clinic-domain/opmetas.go)) become buildable the
+moment increment 3 lands, and are filed as the mechanism's second consumer.
