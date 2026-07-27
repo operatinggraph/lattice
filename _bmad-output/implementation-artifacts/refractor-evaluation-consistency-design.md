@@ -1,6 +1,8 @@
 # Evaluation consistency — the torn-row verdict + auth-plane footprint validation (design)
 
-**Status: 📐 awaiting-Andrew (ratification).** Author: Winston (Designer fire, 2026-07-27) · Lattice lane
+**Status: ✅ Andrew-ratified (2026-07-27)** — scope as recommended (Fire 1 structural on
+`actorAggregate ∧ IsAuthPlane`; Fire 2 returns to design; no snapshots). Ready for the Lattice
+Steward. Author: Winston (Designer fire, 2026-07-27) · Lattice lane
 (Stream 2, [Refractor]). Backlog row: *"Does a lens evaluation need a point-in-time snapshot?"*
 (`lattice.md` Component maintenance, ★★ M, filed by `e8d78278`'s own commit message).
 Adversarial pass **✅ RUN this fire** (independent read-only reviewer) — 3 blockers + 6 must-fixes
