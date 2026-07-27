@@ -150,6 +150,38 @@ HOURS_PER_MONTH = 730
 
 RENEWAL_WALK_PAGE_LIMIT = 10
 
+def vertex_live(key):
+    # Is this vertex present AND not tombstoned? The standalone form of the
+    # vertex test worksAt_covers performs inline at every node of its bounded
+    # walk, for the resolvers that walk THROUGH a vertex to produce that walk's
+    # input -- a provider, a studio, a lease. Those hops are invisible to
+    # worksAt_covers: by the time it runs the dead vertex has already been
+    # transited and only its live locations remain, so the confinement it
+    # computes is the dead entity's ex-topology.
+    #
+    # A tombstone is a DOCUMENT, not an absence. kv.Read returns it rather than
+    # None (step4_hydrate routes only ErrKeyNotFound to knownAbsent), so the
+    # '== None' test alone reads a tombstoned vertex as live. Both halves are
+    # required, and a None key answers False so a caller that resolved nothing
+    # takes the same denying branch as one that resolved something dead.
+    #
+    # Distinct from vertex_alive(state, key), which answers the same question
+    # from the operation's DECLARED contextHint.reads. The keys here are
+    # data-derived -- resolved from a link mid-walk, so unknowable client-side
+    # and undeclarable -- and only a live read can see them.
+    #
+    if key == None:
+        return False
+    # read-posture: (e) one bounded read per candidate. At the sites this exists
+    # for, the key is data-derived -- resolved from a kv.Links enumeration
+    # mid-walk, so unknowable client-side and undeclarable. A resolver cannot
+    # see which caller it has, and some callers reach it with a payload key a
+    # declared read has already proved live; there this is a redundant re-proof,
+    # not a second class of access. Screening at the resolver rather than per
+    # call site is what keeps the rule uniform.
+    node = kv.Read(key)
+    return node != None and not node.isDeleted
+
 def renewal_unit(renewal_key):
     # The unit a renewal cycle is FOR, walked entirely across the graph's own
     # links -- renewal -renews-> leaseapp -appliesToUnit-> unit -- so no payload
@@ -165,7 +197,10 @@ def renewal_unit(renewal_key):
     for lk in rpage:
         if not lk.isDeleted:
             app_key = lk.targetVertex
-    if app_key == None:
+    # The leaseapp VERTEX, not just a resolved key. WithdrawLeaseApplication
+    # soft-deletes it and deliberately leaves its links in place, so without
+    # this a withdrawn application's renewal legs stay authorized.
+    if not vertex_live(app_key):
         return None
     # read-posture: (e) relation=appliesToUnit epoch=none -- one link per
     # leaseapp, off the enumeration above (data-derived key).
@@ -174,6 +209,9 @@ def renewal_unit(renewal_key):
     for lk in upage:
         if not lk.isDeleted:
             unit = lk.targetVertex
+    # require_manages tests the manages LINK and never the unit itself.
+    if not vertex_live(unit):
+        return None
     return unit
 
 def require_manages(unit_key, what):

@@ -336,7 +336,7 @@ func checkS9(rep *report, defs map[string]pkgmgr.Definition) {
 // difference somewhere the gate can see.
 var sharedGuardHelpers = []string{
 	"worksAt_covers", "workplace_exempt", "actor_holds_operator", "parts_of",
-	"require_workplace", "enforce_workplace",
+	"require_workplace", "enforce_workplace", "vertex_live",
 }
 
 // guardHelperFloors is the number of copies of each pinned helper the corpus is
@@ -360,6 +360,7 @@ var guardHelperFloors = map[string]int{
 	"parts_of":             35,
 	"require_workplace":    8,
 	"enforce_workplace":    9,
+	"vertex_live":          8,
 }
 
 // guardConstants are the module-level Starlark constants the pinned helpers read.

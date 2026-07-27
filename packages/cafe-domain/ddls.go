@@ -577,9 +577,48 @@ def enforce_workplace(location_keys, what):
     fail("AuthDenied: " + op.actor + " does not worksAt any location covering " +
          str(location_keys) + "; " + what)
 
+def vertex_live(key):
+    # Is this vertex present AND not tombstoned? The standalone form of the
+    # vertex test worksAt_covers performs inline at every node of its bounded
+    # walk, for the resolvers that walk THROUGH a vertex to produce that walk's
+    # input -- a provider, a studio, a lease. Those hops are invisible to
+    # worksAt_covers: by the time it runs the dead vertex has already been
+    # transited and only its live locations remain, so the confinement it
+    # computes is the dead entity's ex-topology.
+    #
+    # A tombstone is a DOCUMENT, not an absence. kv.Read returns it rather than
+    # None (step4_hydrate routes only ErrKeyNotFound to knownAbsent), so the
+    # '== None' test alone reads a tombstoned vertex as live. Both halves are
+    # required, and a None key answers False so a caller that resolved nothing
+    # takes the same denying branch as one that resolved something dead.
+    #
+    # Distinct from vertex_alive(state, key), which answers the same question
+    # from the operation's DECLARED contextHint.reads. The keys here are
+    # data-derived -- resolved from a link mid-walk, so unknowable client-side
+    # and undeclarable -- and only a live read can see them.
+    #
+    if key == None:
+        return False
+    # read-posture: (e) one bounded read per candidate. At the sites this exists
+    # for, the key is data-derived -- resolved from a kv.Links enumeration
+    # mid-walk, so unknowable client-side and undeclarable. A resolver cannot
+    # see which caller it has, and some callers reach it with a payload key a
+    # declared read has already proved live; there this is a redundant re-proof,
+    # not a second class of access. Screening at the resolver rather than per
+    # call site is what keeps the rule uniform.
+    node = kv.Read(key)
+    return node != None and not node.isDeleted
+
 def leaseapp_unit(lease_key):
     # A tab's location is its lease's unit -- lease-signing's appliesToUnit link,
     # the same indirection landlordLeaseApplicationsRead anchors its building on.
+    # The leaseapp VERTEX this walk transits. WithdrawLeaseApplication
+    # soft-deletes it without cascading to its links, so a withdrawn
+    # application must not carry the walk any further. A broken chain already
+    # answered None here, so this adds an input to that branch, not a new
+    # answer a caller can distinguish.
+    if not vertex_live(lease_key):
+        return None
     # read-posture: (e) relation=appliesToUnit epoch=none -- a leaseapp carries
     # exactly one appliesToUnit link (required at CreateLeaseApplication), so
     # this is never a keyspace scan.
@@ -588,6 +627,11 @@ def leaseapp_unit(lease_key):
     for lk in page:
         if not lk.isDeleted:
             unit = lk.targetVertex
+    # The unit VERTEX. require_workplace's own walk re-reads it, so this is
+    # belt-and-braces here -- but the resolvers are what the next author copies,
+    # and lease-signing's copy feeds require_manages, which does not.
+    if not vertex_live(unit):
+        return None
     return unit
 
 def class_of(state, key):

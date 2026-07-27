@@ -1314,9 +1314,47 @@ def enforce_workplace(location_keys, what):
     fail("AuthDenied: " + op.actor + " does not worksAt any location covering " +
          str(location_keys) + "; " + what)
 
+def vertex_live(key):
+    # Is this vertex present AND not tombstoned? The standalone form of the
+    # vertex test worksAt_covers performs inline at every node of its bounded
+    # walk, for the resolvers that walk THROUGH a vertex to produce that walk's
+    # input -- a provider, a studio, a lease. Those hops are invisible to
+    # worksAt_covers: by the time it runs the dead vertex has already been
+    # transited and only its live locations remain, so the confinement it
+    # computes is the dead entity's ex-topology.
+    #
+    # A tombstone is a DOCUMENT, not an absence. kv.Read returns it rather than
+    # None (step4_hydrate routes only ErrKeyNotFound to knownAbsent), so the
+    # '== None' test alone reads a tombstoned vertex as live. Both halves are
+    # required, and a None key answers False so a caller that resolved nothing
+    # takes the same denying branch as one that resolved something dead.
+    #
+    # Distinct from vertex_alive(state, key), which answers the same question
+    # from the operation's DECLARED contextHint.reads. The keys here are
+    # data-derived -- resolved from a link mid-walk, so unknowable client-side
+    # and undeclarable -- and only a live read can see them.
+    #
+    if key == None:
+        return False
+    # read-posture: (e) one bounded read per candidate. At the sites this exists
+    # for, the key is data-derived -- resolved from a kv.Links enumeration
+    # mid-walk, so unknowable client-side and undeclarable. A resolver cannot
+    # see which caller it has, and some callers reach it with a payload key a
+    # declared read has already proved live; there this is a redundant re-proof,
+    # not a second class of access. Screening at the resolver rather than per
+    # call site is what keeps the rule uniform.
+    node = kv.Read(key)
+    return node != None and not node.isDeleted
+
 def studio_locations(studio_key):
     # A session's location is where its studio sits -- the studio -locatedAt->
     # location link wellness-domain writes at CreateStudio.
+    #
+    # The studio VERTEX first: TombstoneStudio soft-deletes it with no cascade
+    # onto locatedAt, so a decommissioned studio would otherwise keep conferring
+    # its old building.
+    if not vertex_live(studio_key):
+        return []
     # read-posture: (e) relation=locatedAt epoch=none -- a studio sits at a
     # handful of locations at most, so this is never a keyspace scan.
     page, _ = kv.Links(studio_key, "locatedAt", "out")
@@ -1823,6 +1861,38 @@ def enforce_workplace(location_keys, what):
     fail("AuthDenied: " + op.actor + " does not worksAt any location covering " +
          str(location_keys) + "; " + what)
 
+def vertex_live(key):
+    # Is this vertex present AND not tombstoned? The standalone form of the
+    # vertex test worksAt_covers performs inline at every node of its bounded
+    # walk, for the resolvers that walk THROUGH a vertex to produce that walk's
+    # input -- a provider, a studio, a lease. Those hops are invisible to
+    # worksAt_covers: by the time it runs the dead vertex has already been
+    # transited and only its live locations remain, so the confinement it
+    # computes is the dead entity's ex-topology.
+    #
+    # A tombstone is a DOCUMENT, not an absence. kv.Read returns it rather than
+    # None (step4_hydrate routes only ErrKeyNotFound to knownAbsent), so the
+    # '== None' test alone reads a tombstoned vertex as live. Both halves are
+    # required, and a None key answers False so a caller that resolved nothing
+    # takes the same denying branch as one that resolved something dead.
+    #
+    # Distinct from vertex_alive(state, key), which answers the same question
+    # from the operation's DECLARED contextHint.reads. The keys here are
+    # data-derived -- resolved from a link mid-walk, so unknowable client-side
+    # and undeclarable -- and only a live read can see them.
+    #
+    if key == None:
+        return False
+    # read-posture: (e) one bounded read per candidate. At the sites this exists
+    # for, the key is data-derived -- resolved from a kv.Links enumeration
+    # mid-walk, so unknowable client-side and undeclarable. A resolver cannot
+    # see which caller it has, and some callers reach it with a payload key a
+    # declared read has already proved live; there this is a redundant re-proof,
+    # not a second class of access. Screening at the resolver rather than per
+    # call site is what keeps the rule uniform.
+    node = kv.Read(key)
+    return node != None and not node.isDeleted
+
 def session_locations(session_key):
     # A booking's location is where its session's studio sits: the session
     # -atStudio-> studio link CreateSession writes, then that studio's own
@@ -1833,6 +1903,11 @@ def session_locations(session_key):
     locs = []
     for lk in page:
         if lk.isDeleted:
+            continue
+        # The studio the session sits at, tested as a VERTEX: the caller has
+        # already proved the SESSION alive, but nothing has looked at the studio,
+        # and TombstoneStudio does not cascade onto this link.
+        if not vertex_live(lk.targetVertex):
             continue
         # read-posture: (e) relation=locatedAt epoch=none -- a studio sits at a
         # handful of locations at most, so this is never a keyspace scan.

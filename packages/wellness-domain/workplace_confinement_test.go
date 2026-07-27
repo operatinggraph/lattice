@@ -32,7 +32,8 @@ const (
 	wcStaffKey = "vtx.identity." + wcStaffID
 	wcStaffCap = "cap.identity." + wcStaffID
 
-	wcMemberID = "BBWELLWKPLACEMEMBRHJ"
+	wcMemberID  = "BBWELLWKPLACEMEMBRHJ"
+	wcMember2ID = "BBWELLWKPLACEMEMBRJK"
 
 	wcBuildingAID = "BBWELLWKPLACEBLDGAHJ"
 	wcBuildingBID = "BBWELLWKPLACEBLDGBHJ"
@@ -135,6 +136,40 @@ func wcCreateBookingAs(t *testing.T, ctx context.Context, conn *substrate.Conn,
 	}
 	testutil.PublishOp(t, conn, env)
 	return "vtx.booking." + nanoIDFromRequestID(reqID), testutil.DriveOne(t, ctx, cp, cons, "")
+}
+
+// wcCreateBookingAsWithReason is wcCreateBookingAs plus the script's own failure
+// text, so a rejection can be attributed to the confinement guard rather than to
+// whichever other gate happened to answer first.
+func wcCreateBookingAsWithReason(t *testing.T, ctx context.Context, conn *substrate.Conn,
+	cp *processor.CommitPath, cons jetstream.Consumer,
+	label, sessionKey, bookerKey, actorKey string) (string, processor.MessageOutcome, string) {
+	t.Helper()
+	reqID := testutil.GenReqID(label)
+	payload, _ := json.Marshal(map[string]any{"session": sessionKey, "booker": bookerKey})
+	_, bookerID, _ := substrate.ParseVertexKey(bookerKey)
+	optionalReads := append(wdSeatKeys(sessionKey, 20), sessionKey+".bkr"+bookerID)
+	env := &processor.OperationEnvelope{
+		RequestID:     reqID,
+		Lane:          processor.LaneDefault,
+		OperationType: "CreateBooking",
+		Actor:         actorKey,
+		SubmittedAt:   "2026-07-07T12:00:00Z",
+		Class:         "booking",
+		Payload:       payload,
+		ContextHint: &processor.ContextHint{
+			Reads:         []string{sessionKey, sessionKey + ".schedule", bookerKey},
+			OptionalReads: optionalReads,
+		},
+	}
+	outcome, reply := testutil.SubmitAndAwaitReply(t, ctx, conn, cp, cons, env)
+	failure := ""
+	if reply != nil && reply.Error != nil {
+		if i := strings.Index(reply.Error.Message, "fail: "); i >= 0 {
+			failure = reply.Error.Message[i+len("fail: "):]
+		}
+	}
+	return "vtx.booking." + nanoIDFromRequestID(reqID), outcome, failure
 }
 
 // wcCancelBookingAs submits CancelBooking as an arbitrary actor and returns the
@@ -595,13 +630,14 @@ func TestWorkplace_TombstonedAncestorConfersNothing(t *testing.T) {
 }
 
 // TestWorkplace_TombstonedSeedLocationConfersNothing is the level-0 half of the
-// same rule. The candidate locations `require_workplace` receives come from
-// resolvers that test only LINK liveness (studio_locations, session_locations,
-// sites_for_provider, leaseapp_unit, account_unit — none reads the target
-// vertex), so a tombstoned location can reach the walk as its STARTING node. A
-// staffer wired directly to a retired location must not keep writing there
-// either: a guard where a dead ancestor confers nothing but a dead starting
-// point confers everything is the inconsistency the next reader copies wrongly.
+// same rule: a tombstoned location can reach the walk as its STARTING node, and
+// a staffer wired directly to a retired location must not keep writing there. A
+// guard where a dead ancestor confers nothing but a dead starting point confers
+// everything is the inconsistency the next reader copies wrongly.
+//
+// This pins the walk's own vertex test. The candidate locations it receives are
+// screened one layer earlier, by the resolvers — see
+// TestWorkplace_TombstonedStudioConfersNothing for that half.
 func TestWorkplace_TombstonedSeedLocationConfersNothing(t *testing.T) {
 	ctx, conn := setupDomainEnv(t)
 	cp, cons := newDomainPipeline(t, ctx, conn, "wdwcdeadseed")
@@ -633,6 +669,76 @@ func TestWorkplace_TombstonedSeedLocationConfersNothing(t *testing.T) {
 	}
 	if keyExists(t, ctx, conn, dead) {
 		t.Errorf("the denied CreateStudio wrote %s", dead)
+	}
+}
+
+// TestWorkplace_TombstonedStudioConfersNothing pins the RESOLVER's half of the
+// tombstone rule. `session_locations` walks session -atStudio-> studio
+// -locatedAt-> location, and CreateBooking proves only the SESSION alive — the
+// studio in between is reached by a live link and nothing had ever looked at the
+// vertex. TombstoneStudio soft-deletes it with no cascade onto that link or onto
+// its sessions (both DDLs state the no-cascade rule), so a decommissioned studio
+// went on handing back the building it used to sit in, and the confinement
+// `require_workplace` computed was the dead studio's ex-topology.
+//
+// The operator control at the end is what makes the negative discriminating: it
+// proves the session is still perfectly bookable after the tombstone, so the
+// staff denial is the confinement guard talking and not a session the
+// tombstone quietly broke.
+func TestWorkplace_TombstonedStudioConfersNothing(t *testing.T) {
+	ctx, conn := setupDomainEnv(t)
+	cp, cons := newDomainPipeline(t, ctx, conn, "wdwcdeadstudio")
+	wcSeedStaff(t, ctx, conn) // staff A worksAt building A
+
+	studioA := createStudio(t, ctx, conn, cp, cons, "wdwcdsstudioa0000001", "Studio A")
+	wfSeedStudioAt(t, ctx, conn, studioA, wcBuildingAKey, wcBuildingAID)
+	sessionA, outcome := createSession(t, ctx, conn, cp, cons, "wdwcdssessiona000001",
+		studioA, "Morning Flow", "2026-07-08T09:00:00Z", "2026-07-08T09:30:00Z", 20)
+	if outcome != processor.OutcomeAccepted {
+		t.Fatalf("CreateSession at studio A = %v, want Accepted", outcome)
+	}
+	member := seedIdentity(t, ctx, conn, wcMemberID)
+	member2 := seedIdentity(t, ctx, conn, wcMember2ID)
+
+	// POSITIVE SIBLING: while the studio is alive, the two-hop chain authorizes.
+	live, got := wcCreateBookingAs(t, ctx, conn, cp, cons,
+		"wdwcdsbooklive000001", sessionA, member, wcStaffKey)
+	if got != processor.OutcomeAccepted {
+		t.Fatalf("staff CreateBooking on a session at a LIVE studio = %v, want Accepted "+
+			"(the positive sibling — if this fails the negative proves nothing)", got)
+	}
+	if !keyExists(t, ctx, conn, live) {
+		t.Fatalf("%s was not written by the accepted CreateBooking", live)
+	}
+
+	// Decommission the studio. Its locatedAt link and its session both stay live,
+	// exactly as TombstoneStudio leaves them.
+	seedTombstonedVertex(t, ctx, conn, studioA, "studio")
+
+	dead, got, why := wcCreateBookingAsWithReason(t, ctx, conn, cp, cons,
+		"wdwcdsbookdead000001", sessionA, member2, wcStaffKey)
+	if got != processor.OutcomeRejected {
+		t.Fatalf("staff CreateBooking on a session at a TOMBSTONED studio = %v, want Rejected — "+
+			"a retired studio must not keep conferring the building it sat in", got)
+	}
+	if !strings.Contains(why, "does not worksAt") {
+		t.Errorf("the tombstoned-studio denial said %q, want the confinement guard's message", why)
+	}
+	if keyExists(t, ctx, conn, dead) {
+		t.Errorf("the denied CreateBooking wrote %s; it must be denied before any mutation", dead)
+	}
+
+	// CONTROL: the operator is exempt from confinement, so the same booking still
+	// goes through — the session did not become unbookable, it became unbookable
+	// BY THIS STAFFER.
+	ctl, got := createBooking(t, ctx, conn, cp, cons,
+		"wdwcdsbookctl0000001", sessionA, member2, "")
+	if got != processor.OutcomeAccepted {
+		t.Fatalf("operator CreateBooking on the same session = %v, want Accepted — the staff "+
+			"denial above must be confinement, not a session the tombstone broke", got)
+	}
+	if !keyExists(t, ctx, conn, ctl) {
+		t.Errorf("%s was not written by the accepted operator CreateBooking", ctl)
 	}
 }
 

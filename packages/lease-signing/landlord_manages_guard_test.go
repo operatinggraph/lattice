@@ -163,6 +163,74 @@ func TestLandlord_DecideConfinedToManagedUnit(t *testing.T) {
 	}
 }
 
+// llTombstoneVertex soft-deletes a vertex in place, the state
+// WithdrawLeaseApplication leaves behind: the document stays, isDeleted flips,
+// and the leaseapp's own links (renews, appliesToUnit) are deliberately NOT
+// cascaded.
+func llTombstoneVertex(t *testing.T, ctx context.Context, conn *substrate.Conn, key, class string) {
+	t.Helper()
+	doc, _ := json.Marshal(map[string]any{
+		"class": class, "isDeleted": true, "data": map[string]any{},
+	})
+	if _, err := conn.KVPut(ctx, testutil.HarnessCoreBucket, key, doc); err != nil {
+		t.Fatalf("tombstone vertex %s: %v", key, err)
+	}
+}
+
+// TestLandlord_RenewalOpsDenyOnAWithdrawnApplication covers the OTHER consumer
+// of the resolver liveness rule. require_workplace re-reads its candidate
+// locations inside worksAt_covers, so a dead one is caught downstream even if a
+// resolver hands it over; require_manages does not — it tests the manages LINK
+// and nothing else. A landlord's management link outlives the application, so
+// renewal_unit walking through a withdrawn leaseapp is the whole authorization.
+//
+// The landlord's manages link and the renewal itself stay live throughout. The
+// only thing that changes between the two calls is the leaseapp's isDeleted.
+func TestLandlord_RenewalOpsDenyOnAWithdrawnApplication(t *testing.T) {
+	t.Parallel()
+	ctx, conn := setupLeaseEnv(t)
+	cp, cons := newLeasePipeline(t, ctx, conn, "llWithdrawn")
+	llSetupLandlord(t, ctx, conn)
+
+	appKey, _, unitKey := approveAndSignLeaseApp(t, ctx, conn, cp, cons, "BBRenGoneAntHJKMNPTV")
+	llSeedManages(t, ctx, conn, unitKey)
+	renewalKey := openRenewalHelper(t, ctx, conn, cp, cons, appKey)
+
+	termsHint := &processor.ContextHint{
+		Reads:         []string{renewalKey},
+		OptionalReads: []string{renewalKey + ".renewalSignature"},
+	}
+
+	// POSITIVE SIBLING: the two-hop walk resolves and the manages link answers.
+	if got := llSubmitAsLandlord(t, ctx, conn, cp, cons, "llGone1", "SetRenewalTerms", "renewal",
+		map[string]any{"renewalKey": renewalKey, "rentAmount": 2400, "termMonths": 12},
+		termsHint); got != processor.OutcomeAccepted {
+		t.Fatalf("landlord sets terms while the application is LIVE = %v, want Accepted "+
+			"(the positive sibling — if this fails the negative proves nothing)", got)
+	}
+
+	// Withdraw the application. Its renews + appliesToUnit links stay live, so
+	// the walk still has a path to the unit — only the vertex is gone.
+	llTombstoneVertex(t, ctx, conn, appKey, "leaseapp")
+
+	got, reply := llSubmitAsLandlordReply(t, ctx, conn, cp, cons, "llGone2", "SetRenewalTerms", "renewal",
+		map[string]any{"renewalKey": renewalKey, "rentAmount": 9999, "termMonths": 24},
+		termsHint)
+	if got != processor.OutcomeRejected {
+		t.Fatalf("landlord sets terms on a renewal whose application is WITHDRAWN = %v, want Rejected — "+
+			"a withdrawn application must not keep authorizing its renewal legs", got)
+	}
+	if why := llRejectReason(reply); !strings.Contains(why, "no unit resolves") {
+		t.Errorf("the withdrawn-application denial said %q, want the resolver's no-unit denial", why)
+	}
+	// The rejected call named a DIFFERENT rent, so the terms standing after it
+	// prove nothing was written.
+	terms := readDoc(t, ctx, conn, renewalKey+".terms")
+	if d, _ := terms["data"].(map[string]any); d["rentAmount"] != float64(2400) {
+		t.Errorf("the denied SetRenewalTerms moved rentAmount to %v; it must be denied before any mutation", d["rentAmount"])
+	}
+}
+
 // TestLandlord_RenewalOpsConfinedToManagedUnit walks the three renewal legs.
 // The unit is two hops away (renewal→renews→leaseapp→appliesToUnit→unit), so
 // this is the walk under test as much as the link read.
@@ -195,8 +263,8 @@ func TestLandlord_RenewalOpsConfinedToManagedUnit(t *testing.T) {
 		termsHint(renewalTheirs)); got != processor.OutcomeRejected {
 		t.Fatalf("landlord sets terms on another landlord's renewal = %v, want Rejected", got)
 	}
-	if keyExists(t, ctx, conn, renewalTheirs+".renewalTerms") {
-		t.Errorf("the denied SetRenewalTerms wrote %s.renewalTerms", renewalTheirs)
+	if keyExists(t, ctx, conn, renewalTheirs+".terms") {
+		t.Errorf("the denied SetRenewalTerms wrote %s.terms", renewalTheirs)
 	}
 
 	// VerifyGuarantor — the probe must answer BEFORE the applicant's profile is
