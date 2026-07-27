@@ -2,6 +2,8 @@
 
 Rolled from `verticals.md` when its live Done log passed ~25 entries. Full detail is in git.
 
+- 2026-07-24 · `6392ea7f` · IdP session-boundary hardened (kit) — `_JWT_AUDIENCE` trimmed + `parsePublicKeyPEM` refuses non-RSA/ECDSA keys at startup; two silent-misconfig boots now fail closed (persona-worlds W1 Inc 2 tail; discriminating tests)
+- 2026-07-24 · `82b9eaec` · Clinic front-desk (`frontOfHouse`) can run the Follow-ups tab — Start/Pause/ResumeVisitSeries grant frontOfHouse + workplace confinement (mirror CreateAppointment), operator-exempt-only guard; clinic-reminders 0.6.0
 - 2026-07-24 · `50ff65dd` · Wellness `CreateBooking` rejects double-books (per-(session,booker) `sessionBookerClaim` guard, café-idiom, released on cancel) + past-start sessions (`SessionInPast`); wellness-domain 0.10.0
 - 2026-07-24 · `6b1c667c` · Patient names out of open clinic nats-kv lenses — `clinicAppointments`/`clinicPatients` are key-only; names stay Protected (`clinicPatientsRead` RLS); provider directory stays public
 - 2026-07-23 · `1e8dc41b` · Clinic front-desk (`frontOfHouse`) can book + register again — grants audit + workplace confinement; closes a forgeable-`authContext.target` bypass (persona-worlds W1 Inc 2a)

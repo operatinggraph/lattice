@@ -450,3 +450,49 @@ already on the lane, and not worth a legacy dual-match that would preserve the c
 
 **Non-goals.** No walk-grammar change, no aspect-reachable grant narrowing, no key-list index, no linkType DDL
 (`openFor` has never declared one, and this fire is not the place to change that convention for one package).
+
+### 8.1 As built (`7a52a673`)
+
+Shipped as briefed, with two narrowings and one adjacent fix.
+
+**No new Starlark helper was needed.** The brief planned to add `make_link_tombstone` mirroring
+[clinic-domain/site.go:233](../../packages/clinic-domain/site.go). The package's existing generic
+`make_tombstone(key)` already works on a link key — `rbac-domain/ddls.go:385` and
+`service-location/ddls.go:319` both call it exactly that way — and the adjacency removal derives source and
+target from the six-segment key rather than the envelope, so the full-envelope form buys nothing here. One
+call, no helper.
+
+**`Settle` now derives `lease_id` through `parts_of` rather than `.split(".")[2]`.** The link key needs it
+unconditionally, and the raw split only existed inside the `authContextTarget` branch. Routing it through the
+S10-pinned helper means a malformed `leaseAppKey` on the tab's own `.status` fails closed instead of
+constructing a garbage key — it cannot happen (OpenTab validates before writing it) but the guard is free.
+
+**Every test was verified to fail against the previous hop before being trusted.** Reverting the lens to
+`openFor` fails `SurvivesTheOpenForRetraction` ("should have 1 item(s), but has 0"),
+`OpenForAloneDoesNotAnchor` (projects a row it must not), and the four `mkTab`-driven settled cases. The
+grant-side test was falsified the other way — re-adding an `openFor` edge to the settled tab makes it fail —
+so it pins the hop, not the fixture.
+
+**A masking defect surfaced during that falsification and was fixed.** Six cases indexed
+`f.projectAt(t, …)[0]`, which panics on an empty projection and aborts the whole test binary: the first
+falsification run reported ONE failure when six were real, and the missing five looked like passes.
+`valuesAt` requires exactly one row instead, so a dropped projection reports its own cause and the rest of
+the package still runs.
+
+**The retraction transport was checked, not assumed.** A shrinking grant only works if Refractor re-projects
+the producer when a link is tombstoned — an upsert-only path would leave the withdrawn anchor standing, which
+is the over-grant failure mode this whole change is about. It holds, and is already e2e-guarded platform-side:
+`refractor_capability_linkfanout_e2e_test.go:257-281` drives both an `isDeleted: true` overwrite and a
+physical `DEL` and asserts the capability doc shrinks and is ultimately deleted.
+
+**Blast radius checked.** `edgeEntityTabs` and `cafeTabSettlement` are the only two lenses anchored on `tab`,
+nothing else in `packages/` walks `openFor`, and no lens uses an untyped or variable-length hop that a new
+`chargedTo` edge could widen (the walk grammar forbids untyped hops outright —
+[anchorwalk.go:693-708](../../internal/pkgmgr/anchorwalk.go)). edge-manifest's composed spec is byte-identical;
+its 0.13.0→0.13.1 bump exists only because `lint-package-version` counts any non-test, non-markdown diff, which
+is the correct conservatism given lens specs live in string literals.
+
+**Adjacent find, filed.** `packages/cafe-domain/README.md` claims one vertex type and one aspect type and
+names neither `menuitem`/`menuItemPrice`, `cafeOpenTabGuard`, `menuCatalog`, nor `cafeLeaseWorkplaces` — it
+predates three shipped fires. Only the two link lines this change falsified were corrected; the rest is filed
+as its own row rather than folded into a security-adjacent diff.
