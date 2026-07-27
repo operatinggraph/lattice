@@ -103,10 +103,12 @@ var s1Debt = map[opRef]bool{}
 
 // readTemplateDebt is the shipped set of read declarations that build a key
 // around a payload field nothing guarantees is present (checkReadTemplates).
-// Both entries are conditionally-supplied by design — lease-signing's `unit` is
-// named on a first approve but not on a decline, and service-domain's
-// `template`/`serviceprovider` are carried only by the instance path — so on the
-// other branch each template resolves to a malformed key.
+// service-domain's `template`/`serviceprovider` are carried only by the
+// non-operator provider path, so on the operator path each template resolves
+// to a malformed key. (lease-signing's `DecideLeaseApplication` used to be a
+// second entry here — its `unit` was named on a first approve but not on a
+// decline — closed by resolving the unit from the application's own
+// appliesToUnit link instead of the payload, scripts.go.)
 //
 // Facet drops such a key before submitting (its wholeKey filter), so today this
 // costs a worse diagnostic rather than a rejected operation: the script falls to
@@ -117,8 +119,7 @@ var s1Debt = map[opRef]bool{}
 // Shrink only, same discipline as s1Debt: an entry that stops violating fails
 // the gate too. Never add a row here for a NEW descriptor.
 var readTemplateDebt = map[opRef]bool{
-	{"lease-signing", "DecideLeaseApplication", ""}: true,
-	{"service-domain", "RecordServiceOutcome", ""}:  true,
+	{"service-domain", "RecordServiceOutcome", ""}: true,
 }
 
 // s6Debt lists packages below the verification floor, per rule. Same

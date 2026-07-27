@@ -771,42 +771,39 @@ def execute(state, op):
         # idempotent at the DecisionFinal guard above, but even a same-value
         # re-submission must never re-derive .tenancy and silently truncate a
         # SignRenewal-extended leaseEnd back to the original term, design §4.1).
-        # Read the unit via the leaseapp's OWN appliesToUnit link (never the
-        # payload — the caller cannot forge which unit's listing feeds the term
-        # math) and its .listing economics; both are on-demand kv.Read (like
-        # SetApplicantProfile's rent lookup) so the caller need only list the
-        # unit key in ContextHint.Reads, mirroring the existing unit-verification
-        # idiom in this script.
+        # Read the unit via decide_unit — the leaseapp's OWN appliesToUnit
+        # target, already resolved above for confinement — never a payload
+        # field, so a caller cannot forge which unit's listing feeds the term
+        # math (Standard §readTemplateDebt: a payload-conditional unit field
+        # can only ever build a malformed read key on a decline or re-approve,
+        # where it is absent by design).
         if decision == "approved":
             # read-posture: (d) declared optionalReads at DecideLeaseApplication
             # dispatch — None is the expected, common first-approve case.
             existing_tenancy = kv.Read(app_key + ".tenancy")
             if existing_tenancy == None or existing_tenancy.isDeleted:
-                # appliesToUnit is required at CreateLeaseApplication (no unit-less
-                # application, §3 D5), so a live application always names exactly
-                # one unit. Starlark has no prefix scan, so the caller supplies the
-                # unit key explicitly and it is verified against the leaseapp's own
-                # deterministic appliesToUnit link — the same unit-verification
-                # idiom WithdrawLeaseApplication / SetApplicantProfile already use —
-                # so a wrong / fabricated unit can never feed the term math.
-                unit = required_string(p, "unit")
-                _, unit_id = parts_of(unit, "unit", "unit")
-                applies_to_lnk = "lnk.leaseapp." + app_id + ".appliesToUnit.unit." + unit_id
-                # read-posture: (a) declared reads at DecideLeaseApplication
-                # dispatch (validation link; absence — UnitMismatch — means the
-                # caller named a unit that isn't this application's own).
-                ulink = kv.Read(applies_to_lnk)
-                if ulink == None or ulink.isDeleted:
-                    fail("UnitMismatch: " + unit + " is not the unit application " + app_key + " applies to")
-                # read-posture: (a) declared reads at DecideLeaseApplication
-                # dispatch (script-read-posture-design.md §13 hard case 4).
-                listing = kv.Read(unit + ".listing")
+                # appliesToUnit is required at CreateLeaseApplication (no
+                # unit-less application, §3 D5), so a live application always
+                # names exactly one unit, and require_manages above already
+                # failed closed (AuthDenied) when decide_unit resolved to None
+                # on the scope=self path. The only caller who can reach here
+                # with decide_unit == None is an operator/staff caller on an
+                # application whose link somehow broke — reject the same as an
+                # unlistable unit rather than crash on a missing .listing read.
+                if decide_unit == None:
+                    fail("NoListing: application " + app_key + " names no live unit; cannot compute a tenancy term")
+                # read-posture: (e) per-candidate follow-up read off the
+                # appliesToUnit enumeration leaseapp_unit() already walked
+                # above — decide_unit is the resolved, live unit key, not a
+                # payload placeholder that would build a malformed key when
+                # absent.
+                listing = kv.Read(decide_unit + ".listing")
                 if listing == None or listing.isDeleted:
-                    fail("NoListing: unit " + unit + " has no .listing aspect; cannot compute a tenancy term")
+                    fail("NoListing: unit " + decide_unit + " has no .listing aspect; cannot compute a tenancy term")
                 available_from = listing.data.get("availableFrom")
                 term_months = listing.data.get("leaseTermMonths")
                 if available_from == None or term_months == None:
-                    fail("NoListing: unit " + unit + "'s .listing is missing availableFrom/leaseTermMonths")
+                    fail("NoListing: unit " + decide_unit + "'s .listing is missing availableFrom/leaseTermMonths")
                 lease_start = time.rfc3339_utc(available_from)
                 lease_end = add_months(lease_start, term_months)
                 renewal_opens_at = time.rfc3339_add(lease_end, "-__RENEWAL_WINDOW__")

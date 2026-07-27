@@ -1581,29 +1581,30 @@ func TestSignLease_WritesSignatureAspect(t *testing.T) {
 	_ = identitydomain.Package
 }
 
-// decideReadsFor builds DecideLeaseApplication's declared ContextHint: the
-// appliesToUnit validation link + unit.listing are (a) required reads (the
-// FIRST approve's tenancy-stamp block, scripts.go); .tenancy, .decision (the
+// decideReadsFor builds DecideLeaseApplication's declared ContextHint:
+// leaseAppKey itself is the only required read. .tenancy, .decision (the
 // terminal-decision guard's prior-value check), and .signature (the
 // approve-readiness floor) are all (d) optionalReads — None is the expected
-// first-decide / first-approve case. Harmless (unread, but declared
-// regardless) on a decline or an already-tenancy-stamped re-approve —
-// script-read-posture-design.md §13 hard case 4.
+// first-decide / first-approve case. The appliesToUnit link + unit.listing are
+// declared nowhere here — the script resolves the unit itself from the
+// application's own appliesToUnit link on the FIRST approve (a class-(e)
+// follow-up, scripts.go), never from a client-declared read, unit param kept
+// for call-site symmetry with decide()'s signature though unused here.
 func decideReadsFor(leaseAppKey, unit string) *processor.ContextHint {
-	_, appID, _ := substrate.ParseVertexKey(leaseAppKey)
-	_, unitID, _ := substrate.ParseVertexKey(unit)
+	_ = unit
 	return &processor.ContextHint{
-		Reads:         []string{leaseAppKey, "lnk.leaseapp." + appID + ".appliesToUnit.unit." + unitID, unit + ".listing"},
+		Reads:         []string{leaseAppKey},
 		OptionalReads: []string{leaseAppKey + ".tenancy", leaseAppKey + ".decision", leaseAppKey + ".signature"},
 	}
 }
 
-// decide submits DecideLeaseApplication{leaseAppKey, decision, unit} (class
-// leaseapp) at the given submittedAt and asserts the outcome. unit is the
-// application's own appliesToUnit target (createApplication/unitKeyFor's
-// deterministic key) — required on the FIRST approve so the op can stamp
-// .tenancy from the unit's .listing; harmless (unread) on a decline or a
-// re-approve that already carries .tenancy.
+// decide submits DecideLeaseApplication{leaseAppKey, decision} (class
+// leaseapp) at the given submittedAt and asserts the outcome. unit is kept as
+// a parameter so every call site still names the application's own
+// appliesToUnit target for readability, but it is no longer sent — the op
+// resolves the unit itself from the application's own link (scripts.go), so
+// a payload unit field would only ever be a caller-supplied value the script
+// ignores.
 func decide(t *testing.T, ctx context.Context, conn *substrate.Conn, cp *processor.CommitPath, cons jetstream.Consumer, label, leaseAppKey, decision, unit, submittedAt string, want processor.MessageOutcome) {
 	t.Helper()
 	env := &processor.OperationEnvelope{
@@ -1613,7 +1614,7 @@ func decide(t *testing.T, ctx context.Context, conn *substrate.Conn, cp *process
 		Actor:         lsActorKey,
 		SubmittedAt:   submittedAt,
 		Class:         "leaseapp",
-		Payload:       json.RawMessage(`{"leaseAppKey":"` + leaseAppKey + `","decision":"` + decision + `","unit":"` + unit + `"}`),
+		Payload:       json.RawMessage(`{"leaseAppKey":"` + leaseAppKey + `","decision":"` + decision + `"}`),
 		ContextHint:   decideReadsFor(leaseAppKey, unit),
 	}
 	testutil.PublishOp(t, conn, env)
@@ -1703,13 +1704,13 @@ func TestDecideLeaseApplication(t *testing.T) {
 	decide(t, ctx, conn, cp, cons, "decideTombsto", appKey, "approved", unitKey, "2026-06-26T14:00:00Z", processor.OutcomeRejected)
 }
 
-// decideReason submits DecideLeaseApplication{leaseAppKey, decision, reason,
-// unit} so the optional reason path can be exercised separately from the
-// no-reason decide helper. unit mirrors decide's — required on a first
-// approve, harmless otherwise.
+// decideReason submits DecideLeaseApplication{leaseAppKey, decision, reason}
+// so the optional reason path can be exercised separately from the no-reason
+// decide helper. unit mirrors decide's — kept for call-site readability, no
+// longer sent (the op resolves it itself, scripts.go).
 func decideReason(t *testing.T, ctx context.Context, conn *substrate.Conn, cp *processor.CommitPath, cons jetstream.Consumer, label, leaseAppKey, decision, reason, unit, submittedAt string, want processor.MessageOutcome) {
 	t.Helper()
-	payload, _ := json.Marshal(map[string]any{"leaseAppKey": leaseAppKey, "decision": decision, "reason": reason, "unit": unit})
+	payload, _ := json.Marshal(map[string]any{"leaseAppKey": leaseAppKey, "decision": decision, "reason": reason})
 	env := &processor.OperationEnvelope{
 		RequestID:     testutil.GenReqID(label),
 		Lane:          processor.LaneDefault,
