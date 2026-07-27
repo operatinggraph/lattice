@@ -252,6 +252,22 @@ tombstones. **Capability KV is a lens projection** (projection correctness = aut
   assumed-retraction reflexes above: there a channel was assumed to exist; here a channel is assumed to
   *survive*.
 
+- **Pick the ENFORCEMENT POINT by what the rule protects — and right-size the build to the
+  observed demand.** A commit-time (Processor) guard is for a **security invariant** that must
+  hold against a hostile/careless author regardless of path (§8.4 protected roots). **Lifecycle
+  hygiene is an AUTHORSHIP decision** — cancel-vs-migrate belongs to the package author at
+  authoring time, enforced by the authoring tool's preflight (default-deny the undeclared drop),
+  not discovered via a Processor rejection. Two sharpenings from the trial (2026-07-27, op-meta
+  zombie-task design — Andrew rejected the commit-guard shape at ratification): (1)
+  **"degree-bounded" does not exempt an enumeration from the write-path no-scans invariant** —
+  a walk bounded by *all-time* link degree (links are never pruned) inside the serial meta lane
+  IS the forbidden scan; class-(e)'s sanction is submitter-side, declared, and tight-degree
+  (ClaimTask: ≤1 live link). (2) **A once-observed, operator-recoverable failure earns the
+  smallest authorship-time mechanism, not authoritative machinery** — lead with the smallest
+  shape and let recurrence justify more; "a lot of build for not much gain" is a ratification
+  outcome to pre-empt, not receive. (Same precedent-transfer failure class as the RLS-anchor
+  lesson: same word — "guard" — different job.)
+
 **Run the pre-build gates you write into your own designs — "ratified" ≠ "build-ready."** If a design
 self-flags a pre-build adversarial / `bmad-party-mode` pass (a deferred gate), that pass is a **Designer-lane
 obligation**: run it and **record it as run** before the design is build-ready. Do not leave it dangling for
