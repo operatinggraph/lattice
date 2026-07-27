@@ -54,6 +54,29 @@ type executor struct {
 	coreKV     *substrate.KV
 	params     map[string]any
 	keyColumns []string
+
+	// nodes memoizes fetchNode by Core KV key for the life of ONE evaluation,
+	// giving the executor repeatable-read semantics: every access to a given
+	// key inside one Execute observes the same value, whatever commits land
+	// while the evaluation runs.
+	//
+	// This is a correctness requirement, not a cache. An aspect hop
+	// (`u.listing.data.status`) that misses the vertex root body resolves as a
+	// live point-read, and projectItems evaluates every non-aggregate WITH
+	// column once per binding row — so one column is read once per row of the
+	// OPTIONAL MATCH cross-product. Without the memo a commit landing between
+	// two of those reads yields two different values for one column; because
+	// the non-aggregate columns ARE the grouping key, that splits a single
+	// anchor into two groups, and an actor-aggregate lens then emits two rows
+	// sharing one anchor-derived output key. The pipeline's collision guard
+	// fails that actor closed, so the projection update is dropped entirely.
+	// Memoizing by key closes the class: a group splits only when the same
+	// expression yields two values, and the same expression over the same node
+	// is always the same key.
+	//
+	// A nil entry (absent / tombstoned / null-body) is memoized too — an
+	// absent-then-created aspect splits a group exactly as a changed one does.
+	nodes map[string]*nodeRef
 }
 
 // ExecuteWith runs cr against the given Core and Adjacency KVs, binding
@@ -81,6 +104,7 @@ func (e *Engine) ExecuteWith(
 		coreKV:     coreKV,
 		params:     ec.Parameters,
 		keyColumns: compiled.KeyColumns,
+		nodes:      map[string]*nodeRef{},
 	}
 
 	bindings := []binding{{}}
@@ -477,7 +501,29 @@ func (ex *executor) seedNodes(b binding, n NodePattern) ([]*nodeRef, error) {
 }
 
 // fetchNode reads a Core KV vertex, returning nil for missing or soft-deleted.
+// fetchNode reads the vertex (or aspect) at key, memoized for the life of this
+// evaluation — see executor.nodes for why repeatable-read is a correctness
+// requirement here. A read error is never memoized: it is transport, not a
+// value, so a retry within the same evaluation may legitimately succeed.
 func (ex *executor) fetchNode(key string) (*nodeRef, error) {
+	if ref, ok := ex.nodes[key]; ok {
+		return ref, nil
+	}
+	ref, err := ex.readNode(key)
+	if err != nil {
+		return nil, err
+	}
+	// The read-free key-resolution path (anchor_delete) builds an executor with
+	// no memo; it resolves at most one key per call, so a nil map just means no
+	// memoization rather than a second read.
+	if ex.nodes != nil {
+		ex.nodes[key] = ref
+	}
+	return ref, nil
+}
+
+// readNode performs the uncached Core KV point-read behind fetchNode.
+func (ex *executor) readNode(key string) (*nodeRef, error) {
 	entry, err := ex.coreKV.Get(ex.ctx, key)
 	if err != nil {
 		if errors.Is(err, substrate.ErrKeyNotFound) {
