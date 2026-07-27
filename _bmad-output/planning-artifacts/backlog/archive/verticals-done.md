@@ -2,6 +2,8 @@
 
 Rolled from `verticals.md` when its live Done log passed ~25 entries. Full detail is in git.
 
+- 2026-07-24 · `6b1c667c` · Patient names out of open clinic nats-kv lenses — `clinicAppointments`/`clinicPatients` are key-only; names stay Protected (`clinicPatientsRead` RLS); provider directory stays public
+- 2026-07-23 · `1e8dc41b` · Clinic front-desk (`frontOfHouse`) can book + register again — grants audit + workplace confinement; closes a forgeable-`authContext.target` bypass (persona-worlds W1 Inc 2a)
 - 2026-07-23 · `626763bc` · Persona-worlds W0 — provider archetype spine (role + per-domain bindings + operator-only Bind* + provider grants/guards + clinic GrantTable + 3 edge-manifest hat lenses + seeds); live-verified
 - 2026-07-24 · `283dd1a9` · Clinic is sign-in-first — session-keyed reads/writes, both dev-token mints deleted, appsession production branch, patient identity read-grant bridge (persona-worlds W1 Inc 1+1b)
 - 2026-07-24 · `c4b45b33` · Ownership guards answer before payload-matching probes — 6 sites (lease-signing, clinic ×2, wellness ×2, service-domain); `ClaimTask` exempt: no caller-supplied candidate; testutil can now assert WHICH check answered

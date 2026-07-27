@@ -549,3 +549,53 @@ interchangeable — one reads declared `contextHint.reads`, the other live KV.
 is deliberate and stated in both DDLs — the readers anchor on the live root); auditing the read-side
 lenses for the same hop (they anchor on live roots, and the full engine's `fetchNode` yields nothing for
 a soft-deleted node); refactoring `worksAt_covers`.
+
+### 11.1 SHIPPED — and the adversarial pass found a sixth resolver
+
+`6b74deaf`. The brief's scope sentence said five resolvers; the count was wrong, and the
+adversarial pass is what caught it.
+
+**`renewal_unit` (`lease-signing/renewal_scripts.go`) has the same shape and the worse consumer.**
+It walks `renewal -renews-> leaseapp -appliesToUnit-> unit` and feeds `require_manages` on three
+legs — `SetRenewalTerms`, `VerifyGuarantor`, `CancelRenewal`. `WithdrawLeaseApplication` soft-deletes
+the leaseapp and *deliberately* leaves its links in place, and a landlord's `manages` link outlives
+the application entirely, so a withdrawn application went on authorizing all three. This is worse
+than the studio/provider cases because `require_manages` tests the `manages` LINK and nothing else —
+there is no downstream `worksAt_covers` to re-read the vertex and catch it. It is fixed here, and the
+count in this section's table should be read as **six**.
+
+**Two transited vertices were also missed on the first pass** — the leaseapp hop in both
+`leaseapp_unit` copies, which `account_unit`'s sibling in the same diff *did* test. The
+cafe-domain copy is live-reachable: a tab's `.status.leaseAppKey` survives the withdraw, and
+`Charge`/`VoidCharge`/`Settle` prove only the tab alive.
+
+**A behavioural consequence, stated rather than discovered later.** Retiring an entity now takes its
+outstanding work with it: after `TombstoneProvider`, front-desk staff can no longer set status on or
+reschedule that provider's remaining appointments; after `TombstoneStudio`, they can no longer cancel
+already-sold seats at it. Operators can (they are exempt), and a patient's own self-cancel is
+unaffected (it rides `workplace_exempt`). This is the correct direction — a dead entity confers
+nothing — but the cleanup affordance is now operator-only, and no cascade was shipped to make it
+unnecessary. Filed as its own row rather than decided here: whether retirement should cascade, or
+should refuse while work is outstanding, is a product call, and both tombstone DDLs state the
+no-cascade rule deliberately.
+
+**Read posture, corrected.** The first annotation claimed class (e) — a data-derived follow-up read —
+at all sites. That is false at three of them: `studio_locations`' `studio` and `sites_for_provider`'s
+provider (from `CreateAppointment` / `StartVisitSeries`) are payload fields a declared read has
+*already* proved live, so there the read is a redundant re-proof, not a data-derived one. The helper
+now says so. It is still the right place for the test: a resolver cannot see which caller it has, and
+`sites_for_provider`'s fourth caller — the appointment's own link — is exactly the one that needs it.
+`lint-conventions` checks that an annotation exists and parses, never that its class is truthful, so
+this was not something a gate would have caught.
+
+**Coverage, stated honestly.** Three behavioural tests over the **two** consumers —
+`require_workplace` (wellness studio, clinic provider) and `require_manages` (lease-signing withdrawn
+application) — each mutation-tested by reverting its resolver and watching the write come back
+`accepted`. The other five copies have no behavioural coverage of their own; their proof is S10
+byte-identity of `vertex_live` (floor 8) plus the uniform application rule. That is the same trade
+§10 made, with the same caveat: S10 pins the helper's body, not which hops a resolver chose to feed
+it, so the *application* of the rule rests on review.
+
+**One weak assertion fixed in passing.** `TestLandlord_RenewalOpsConfinedToManagedUnit` checked that
+a denied `SetRenewalTerms` had not written `.renewalTerms` — an aspect that op has never written (it
+writes `.terms`). The check could not fail. It can now.
