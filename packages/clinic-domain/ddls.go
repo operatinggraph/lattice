@@ -1622,6 +1622,7 @@ def vertex_alive(state, key):
 ROLE_PAGE_LIMIT = 50
 MAX_ROLE_PAGES = 4
 WORKPLACE_PARENT_PAGE_LIMIT = 20
+MAX_PARENT_PAGES = 4
 WORKPLACE_MAX_DEPTH = 8
 WORKPLACE_MAX_NODES = 64
 
@@ -1721,23 +1722,30 @@ def worksAt_covers(actor_id, location_key):
             lnk = kv.Read("lnk.identity." + actor_id + ".worksAt." + parts[1] + "." + parts[2])
             if lnk != None and not lnk.isDeleted:
                 return True
-            # read-posture: (e) relation=containedIn epoch=none -- a location has
-            # at most a few parents; containment is provisioned topology, not
-            # written concurrently with this op.
-            page, _ = kv.Links(cur, "containedIn", "out", None, WORKPLACE_PARENT_PAGE_LIMIT)
-            for lk in page:
-                if lk.isDeleted:
-                    continue
-                nxt = lk.targetVertex
-                if nxt in seen:
-                    continue
-                if len(seen) >= WORKPLACE_MAX_NODES:
-                    continue
-                # Charged to the budget at ENQUEUE, so the node count bounds the
-                # walk's reads exactly rather than to within a page, and an
-                # ancestor reachable from several branches is visited once.
-                seen.append(nxt)
-                parents.append(nxt)
+            # Paginated: a parent beyond page 1 must not read as "no more
+            # parents" -- the walk follows the cursor up to MAX_PARENT_PAGES
+            # pages before moving on, same as actor_holds_operator's role walk.
+            cursor = None
+            for _page in range(MAX_PARENT_PAGES):
+                # read-posture: (e) relation=containedIn epoch=none -- a location has
+                # at most a few parents; containment is provisioned topology, not
+                # written concurrently with this op.
+                page, cursor = kv.Links(cur, "containedIn", "out", cursor, WORKPLACE_PARENT_PAGE_LIMIT)
+                for lk in page:
+                    if lk.isDeleted:
+                        continue
+                    nxt = lk.targetVertex
+                    if nxt in seen:
+                        continue
+                    if len(seen) >= WORKPLACE_MAX_NODES:
+                        continue
+                    # Charged to the budget at ENQUEUE, so the node count bounds the
+                    # walk's reads exactly rather than to within a page, and an
+                    # ancestor reachable from several branches is visited once.
+                    seen.append(nxt)
+                    parents.append(nxt)
+                if cursor == None:
+                    break
         frontier = parents
     return False
 
