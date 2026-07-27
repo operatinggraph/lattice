@@ -556,6 +556,13 @@ by design, permanently. No change to `RescheduleAppointment`'s free-text `patien
 ever read the mirror, so this fix's worklist-row-specific channel doesn't generalize to them; a generic
 Protected-pane-backed picker widget would be new mechanism, not filed here.
 
+**Superseded in mechanism, 2026-07-27 (facet-discovery-restoration-design.md).** The behavior above stands,
+but its implementation moved out of app code: the third read is now a section of the `staffWorklist` pane
+DESCRIPTOR (`packages/edge-manifest/panes.go`), executed by `cmd/facet`'s generic pane executor; the
+Pause/Resume pairing is expressed as `dispatch.visibleWhen {active}` on the two op-metas
+(`packages/clinic-reminders/visitseries.go`) rather than op-name lookups in `app.js`. `staff.go` no longer
+exists; `scripts/lint-facet-discovery.go` blocks its reintroduction.
+
 Gates: `go build ./...`, `go vet ./...`, `golangci-lint run ./...`, `STRICT=1 lint-conventions`,
 `lint-lens-anchors`, `lint-package-standard`, `lint-package-version` all clean; `go test
 ./cmd/facet/... ./packages/clinic-reminders/...` and the full `node --test cmd/facet/web/*.test.mjs` (127
