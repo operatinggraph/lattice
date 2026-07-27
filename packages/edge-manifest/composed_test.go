@@ -413,7 +413,8 @@ RETURN
   op.dispatch.data.visibleWhen AS dispatchVisibleWhen,
   op.sensitive.data.value AS sensitive,
   role.key AS viaRole,
-  role.canonicalName.data.value AS viaRoleName
+  role.canonicalName.data.value AS viaRoleName,
+  [(op)<-[:permitsOperation]-(svc:service) | svc.key] AS viaServices
 `
 
 const frozenEdgeTasksQueuedSpec = `
