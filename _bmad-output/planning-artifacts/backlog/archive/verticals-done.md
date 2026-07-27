@@ -2,6 +2,16 @@
 
 Rolled from `verticals.md` when its live Done log passed ~25 entries. Full detail is in git.
 
+- 2026-07-25 · `d3a7cc7b` · Wellness is sign-in-first — both mints + the fixed admin actor deleted, the `?bookerKey=` identity filter closed, per-user reads session-scoped; member/staff/instructor hats. persona-worlds W3 Inc 1
+- 2026-07-25 · `f5a9c8a3` · Café is sign-in-first — session spine, both mints + the fixed admin actor deleted, all eight reads authenticated and scoped to the signed-in subject; Record Payment removed (no authorized hat). persona-worlds W4
+- 2026-07-25 · `4aad350b` · The plain-landlord persona exists — a seeded identity holding `consumer` + `manages` over its own unit, listing and signed application; the scope=self path Inc 3 shipped now has a walker. persona-worlds W2 Inc 4
+- 2026-07-25 · `4790992b` · LoftSpace landlord hat can write — `consumer` scope=self grants + a `manages` ownership probe on all five landlord ops; fixes first-match permission shadowing + Loupe role resolution. persona-worlds W2 Inc 3
+- 2026-07-24 · `13c01922` · LoftSpace is sign-in-first — session spine, both dev-token mints deleted, `adminActor` retired; whoami `manages` anchor gates the landlord hat; server-side credential-link ceremony. persona-worlds W2 Inc 2
+- 2026-07-24 · `02be1f86` · LoftSpace applicant self-service grants — `SetApplicantProfile` + `WithdrawLeaseApplication` get `consumer` scope=self grants + owner guards; FE submits per-actor. persona-worlds W2 loftspace Inc 1
+- 2026-07-24 · `a36625a3` · Clinic provider hat — a bound provider sees a read-only **My Schedule** (own day) via RLS-scoped `/api/my-schedule`, gated on the `identifiedBy`-provider anchor; closes that endpoint's zero-caller residual. W1 Inc 2
+- 2026-07-24 · `2dbc8232` · `identityAnchors` projects the `identifiedBy` binding anchor — whoami `anchors[]` now carries a provider's binding (persona-worlds §4.1); a provider had no anchors before; identity-domain 0.7.0. W1 Inc 2c
+- 2026-07-24 · `a934fd8b` · Clinic hat-gating — whoami forwards `/v1/actor` roles+anchors; FE gates the 5 staff tabs + New-patient on the `worksAt` anchor (patient sees Book + My Appointments only); live-verified. W1 Inc 2b
+- 2026-07-24 · `4fe21968` · Clinic FE session-resilience — activity-gated keepalive (no TTL hard-lapse mid-read), 5 lapse-blind reads → `appGet` (slot picker stops offering taken times), whoami retried; persona-worlds W1 Inc 2b FE tail
 - 2026-07-24 · `6392ea7f` · IdP session-boundary hardened (kit) — `_JWT_AUDIENCE` trimmed + `parsePublicKeyPEM` refuses non-RSA/ECDSA keys at startup; two silent-misconfig boots now fail closed (persona-worlds W1 Inc 2 tail; discriminating tests)
 - 2026-07-24 · `82b9eaec` · Clinic front-desk (`frontOfHouse`) can run the Follow-ups tab — Start/Pause/ResumeVisitSeries grant frontOfHouse + workplace confinement (mirror CreateAppointment), operator-exempt-only guard; clinic-reminders 0.6.0
 - 2026-07-24 · `50ff65dd` · Wellness `CreateBooking` rejects double-books (per-(session,booker) `sessionBookerClaim` guard, café-idiom, released on cancel) + past-start sessions (`SessionInPast`); wellness-domain 0.10.0

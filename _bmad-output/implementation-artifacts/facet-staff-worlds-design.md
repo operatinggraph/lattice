@@ -774,3 +774,38 @@ never trusted, since `operator` may also call this op.
 `ClaimIdentity` (it already grants at claim time), and no removal of `seed-showcase`'s explicit `AssignRole`
 (a seeded persona that never authenticates still needs it). Not a widening of who may call the op: the
 grant's subject is always the authenticated actor the Gateway verified.
+
+**Shipped** — `5c914479` (identity-domain 0.10.0). The already-exists branch ensures the
+`holdsRole → consumer` grant instead of returning a blanket no-op, so the Gateway's promise now holds for
+every actor it verifies rather than only for identities it minted. Absent → create, present → no-op, and a
+**tombstoned grant stays tombstoned**: `AssignRole` revives because an operator is explicitly re-granting,
+whereas this caller fires on every request, so reviving would mean a `RevokeRole` is undone by the revoked
+actor's next request. A tombstoned identity acquires nothing. Five tests: the bound persona gains the grant
+without being re-provisioned (state stays `unclaimed`, the entity role survives), the revoked grant is not
+revived, the dead identity gains nothing, re-provision leaves a live grant alone, and — the one that pins a
+design choice rather than a behavior — an already-granted actor no-ops even with the consumer role vertex
+tombstoned, because the role-liveness read sits inside the granting branches.
+
+**The adversarial pass earned its keep — it found a brick, not a nit.** `ClaimIdentity` grants the *same*
+deterministic link key with an unconditional `create`, which asserts revision 0 and fails the whole atomic
+claim batch if the link exists. Since the pre-flight now creates that link on any authenticated touch, a
+single sign-in by an unclaimed persona would have left the person holding its claim secret **permanently
+unable to claim it** — silently, and only in the dev/nanoid-mode sign-in the demo actually uses. The
+collision was already real: `seed-showcase` avoids the real ceremony in three places *because of it*
+(`seedTenant`, `seedStaff`, `seedLandlord`). Fixed by making that grant an **upsert**, which needs no
+declared read — an `update` conditions on the revision the key is read at in step 8, or commits
+unconditioned when genuinely absent (`internal/processor/step8_commit.go:191-215`). A three-state read was
+rejected as unviable: `ClaimIdentity`'s dispatchers include browser clients that cannot compute the
+deterministic consumer-role key a declared read would require. Regression-tested, and the test was
+mutation-checked — it fails with the `create` form restored.
+
+**Two claims were verified by breaking them on purpose,** because both are the kind of assertion that reads
+as boilerplate and silently rots: dropping the `optionalReads` declaration fails
+`AlreadyProvisioned_Idempotent` (proving the declaration is load-bearing), and hoisting the role read back to
+the top fails the role-vertex-health test. Neither test passes for free.
+
+**Residual, filed as its own row:** the seeded showcase personas remain `unclaimed` forever — the seeder
+flips `.state` via `UpdateIdentityState` because it cannot run the device-credential ceremony — so nothing
+in the demo world exercises the real claim path end-to-end, and the collision this fire fixed was therefore
+invisible to every gate. `TestClaimIdentity_ConsumerGrantAlreadyHeld_Succeeds` covers it at the package
+level; the live path has no walker.
