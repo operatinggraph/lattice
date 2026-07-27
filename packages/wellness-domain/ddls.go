@@ -158,7 +158,10 @@ func sessionVertexTypeDDL() pkgmgr.DDLSpec {
 		Description: "Wellness session DDL. Vertex shape: vtx.session.<NanoID>, class=session, root data = {} " +
 			"(minimal, D5). CreateSession validates the studio is alive + class=studio, then atomically mints the " +
 			"session + the .schedule aspect {name, startsAt, endsAt, capacity} + the atStudio link " +
-			"(session→studio, Contract #1 §1.1 later-arriving source). The studio's booking grid is a mandatory " +
+			"(session→studio, Contract #1 §1.1 later-arriving source) + one atLocation link (session→location) per " +
+			"location the studio sits at right now, per its locatedAt link(s) — a write-time snapshot session_locations " +
+			"falls back to once the studio is later tombstoned (TombstoneStudio soft-deletes with no cascade onto " +
+			"locatedAt), mirroring clinic-domain's atSite fallback for a tombstoned provider. The studio's booking grid is a mandatory " +
 			"15-minute cadence (mirrors clinic-domain's appointment grid exactly): CreateSession discretizes " +
 			"[startsAt,endsAt) into its covered 15-minute cells and CLAIMS a deterministic studioSlotClaim aspect " +
 			"per cell on the studio hub (vtx.studio.<s>.slot<cellcode>) — the write-path CreateOnly/expectedRevision " +
@@ -1452,6 +1455,11 @@ def execute(state, op):
         if not workplace_exempt():
             require_workplace(studio_locations(studio), "cannot create a session at studio " + studio)
 
+        # The studio's live location(s) at THIS moment, snapshotted below onto
+        # the session's own atLocation link(s) -- a second bounded read off the
+        # same studio, not a second class of access.
+        studio_locs = studio_locations(studio)
+
         name = required_string(p, "name")
         starts_at = time.rfc3339_utc(required_string(p, "startsAt"))
         ends_at = time.rfc3339_utc(required_string(p, "endsAt"))
@@ -1474,6 +1482,19 @@ def execute(state, op):
             make_aspect(sess_key, "schedule", "sessionSchedule", sched),
             make_link(at_studio_lnk, sess_key, studio, "atStudio", "atStudio", {}),
         ]
+        # A snapshot of the studio's live locatedAt link(s), independent of the
+        # studio's LATER status: TombstoneStudio soft-deletes the studio with no
+        # cascade onto locatedAt, so studio_locations' vertex_live gate goes to
+        # [] for a tombstoned studio -- stranding front-of-house staff on a
+        # session (and its outstanding bookings) that predates the tombstone.
+        # session_locations falls back to this atLocation link when the studio
+        # is dead, mirroring clinic-domain's atSite fallback for a tombstoned
+        # provider (appointment_sites). A studio wired to no location writes no
+        # atLocation link, exactly as it confers no workplace above.
+        for loc in studio_locs:
+            ltype, lid = parts_of(loc, "location", "")
+            mutations.append(make_link("lnk.session." + sess_id + ".atLocation." + ltype + "." + lid,
+                                       sess_key, loc, "atLocation", "atLocation", {}))
         # Optional instructor leading the class (persona-worlds-design.md Fire
         # W0): validated alive + typed, minted beside atStudio. Sentence:
         # "session ledBy instructor". Omitted → the session carries no
@@ -1905,29 +1926,67 @@ def vertex_live(key):
     node = kv.Read(key)
     return node != None and not node.isDeleted
 
-def session_locations(session_key):
-    # A booking's location is where its session's studio sits: the session
-    # -atStudio-> studio link CreateSession writes, then that studio's own
-    # locatedAt links -- the same two-hop shape studio_locations covers in one.
+def studio_locations(studio_key):
+    # A studio's OWN locatedAt link(s) -- duplicated from sessionDDLScript's
+    # copy of the same helper, since Starlark scripts share no globals across
+    # DDLs. The studio VERTEX first: TombstoneStudio soft-deletes it with no
+    # cascade onto locatedAt, so a decommissioned studio would otherwise keep
+    # conferring its old building.
+    if not vertex_live(studio_key):
+        return []
+    # read-posture: (e) relation=locatedAt epoch=none -- a studio sits at a
+    # handful of locations at most, so this is never a keyspace scan.
+    page, _ = kv.Links(studio_key, "locatedAt", "out")
+    locs = []
+    for lk in page:
+        if not lk.isDeleted:
+            locs.append(lk.targetVertex)
+    return locs
+
+def session_studio(session_key):
+    # The session's OWN studio, resolved from the graph (never a
+    # caller-supplied payload field -- a caller cannot forge which studio it
+    # is writing against). Factored out of session_locations below, mirroring
+    # clinic-domain's appointment_provider / appointment_sites split.
     # read-posture: (e) relation=atStudio epoch=none -- CreateSession writes
     # exactly one atStudio link per session, so this resolves a single studio.
     page, _ = kv.Links(session_key, "atStudio", "out")
-    locs = []
+    studio = None
     for lk in page:
-        if lk.isDeleted:
-            continue
-        # The studio the session sits at, tested as a VERTEX: the caller has
-        # already proved the SESSION alive, but nothing has looked at the studio,
-        # and TombstoneStudio does not cascade onto this link.
-        if not vertex_live(lk.targetVertex):
-            continue
-        # read-posture: (e) relation=locatedAt epoch=none -- a studio sits at a
-        # handful of locations at most, so this is never a keyspace scan.
-        spage, _ = kv.Links(lk.targetVertex, "locatedAt", "out")
-        for sl in spage:
-            if not sl.isDeleted:
-                locs.append(sl.targetVertex)
-    return locs
+        if not lk.isDeleted:
+            studio = lk.targetVertex
+    return studio
+
+def session_locations(session_key):
+    # A booking's location is where its session's studio sits -- the session
+    # -atStudio-> studio link CreateSession writes, then that studio's own
+    # locatedAt links (studio_locations, which also re-proves the studio VERTEX
+    # alive: TombstoneStudio does not cascade onto atStudio, so the caller
+    # having proved the SESSION alive says nothing about the studio).
+    locs = studio_locations(session_studio(session_key))
+    if locs:
+        return locs
+    # TombstoneStudio soft-deletes the studio with no cascade onto locatedAt,
+    # so studio_locations now returns [] for a session whose studio is dead --
+    # stranding front-of-house staff who need to manage a session (and its
+    # outstanding bookings) that predates the tombstone. Fall back to the
+    # session's own atLocation link(s): CreateSession snapshots the studio's
+    # then-live locatedAt target(s) at write time, so they name real locations
+    # independent of the studio's current status, never caller-forged. Mirrors
+    # clinic-domain's appointment_sites fallback to atSite for a tombstoned
+    # provider. A session created before this fallback existed, or whose
+    # studio carried no location at CreateSession time, has no atLocation link
+    # and stays denied here -- exactly as it was before the studio died.
+    # read-posture: (e) relation=atLocation epoch=none -- CreateSession writes
+    # at most one atLocation link per location the studio then sat at, a
+    # single bounded enumeration off the session key already proven alive by
+    # the caller, never a keyspace scan.
+    apage, _ = kv.Links(session_key, "atLocation", "out")
+    out = []
+    for lk in apage:
+        if not lk.isDeleted:
+            out.append(lk.targetVertex)
+    return out
 
 def execute(state, op):
     ot = op.operationType

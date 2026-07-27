@@ -637,7 +637,7 @@ func TestWorkplace_TombstonedAncestorConfersNothing(t *testing.T) {
 //
 // This pins the walk's own vertex test. The candidate locations it receives are
 // screened one layer earlier, by the resolvers — see
-// TestWorkplace_TombstonedStudioConfersNothing for that half.
+// TestWorkplace_TombstonedStudioFallsBackToAtLocationSnapshot for that half.
 func TestWorkplace_TombstonedSeedLocationConfersNothing(t *testing.T) {
 	ctx, conn := setupDomainEnv(t)
 	cp, cons := newDomainPipeline(t, ctx, conn, "wdwcdeadseed")
@@ -672,23 +672,23 @@ func TestWorkplace_TombstonedSeedLocationConfersNothing(t *testing.T) {
 	}
 }
 
-// TestWorkplace_TombstonedStudioConfersNothing pins the RESOLVER's half of the
-// tombstone rule. `session_locations` walks session -atStudio-> studio
-// -locatedAt-> location, and CreateBooking proves only the SESSION alive — the
-// studio in between is reached by a live link and nothing had ever looked at the
-// vertex. TombstoneStudio soft-deletes it with no cascade onto that link or onto
-// its sessions (both DDLs state the no-cascade rule), so a decommissioned studio
-// went on handing back the building it used to sit in, and the confinement
-// `require_workplace` computed was the dead studio's ex-topology.
-//
-// The operator control at the end is what makes the negative discriminating: it
-// proves the session is still perfectly bookable after the tombstone, so the
-// staff denial is the confinement guard talking and not a session the
-// tombstone quietly broke.
-func TestWorkplace_TombstonedStudioConfersNothing(t *testing.T) {
+// TestWorkplace_TombstonedStudioFallsBackToAtLocationSnapshot pins the
+// RESOLVER's half of the tombstone rule for a session whose studio HAD a live
+// location at CreateSession time. `session_locations` walks session
+// -atStudio-> studio -locatedAt-> location, and CreateBooking proves only the
+// SESSION alive — the studio in between is reached by a live link and nothing
+// had ever looked at the vertex. TombstoneStudio soft-deletes it with no
+// cascade onto that link or onto its sessions (both DDLs state the no-cascade
+// rule), so `studio_locations`' vertex_live gate now returns [] for the dead
+// studio — but CreateSession snapshotted the studio's then-live location onto
+// the session's own atLocation link, and `session_locations` falls back to
+// it, so a decommissioned studio's outstanding session stays manageable by the
+// SAME staff who could reach it before the tombstone, and by no one else.
+func TestWorkplace_TombstonedStudioFallsBackToAtLocationSnapshot(t *testing.T) {
 	ctx, conn := setupDomainEnv(t)
 	cp, cons := newDomainPipeline(t, ctx, conn, "wdwcdeadstudio")
 	wcSeedStaff(t, ctx, conn) // staff A worksAt building A
+	wcSeedStaffAt(t, ctx, conn, wcStaffBKey, wcStaffBID, wcBuildingBKey, wcBuildingBID)
 
 	studioA := createStudio(t, ctx, conn, cp, cons, "wdwcdsstudioa0000001", "Studio A")
 	wfSeedStudioAt(t, ctx, conn, studioA, wcBuildingAKey, wcBuildingAID)
@@ -697,6 +697,12 @@ func TestWorkplace_TombstonedStudioConfersNothing(t *testing.T) {
 	if outcome != processor.OutcomeAccepted {
 		t.Fatalf("CreateSession at studio A = %v, want Accepted", outcome)
 	}
+	_, sessionAID, _ := substrate.ParseVertexKey(sessionA)
+	atLocationLnk := "lnk.session." + sessionAID + ".atLocation.building." + wcBuildingAID
+	if !keyExists(t, ctx, conn, atLocationLnk) {
+		t.Fatalf("CreateSession did not write the atLocation snapshot link %s", atLocationLnk)
+	}
+
 	member := seedIdentity(t, ctx, conn, wcMemberID)
 	member2 := seedIdentity(t, ctx, conn, wcMember2ID)
 
@@ -705,7 +711,7 @@ func TestWorkplace_TombstonedStudioConfersNothing(t *testing.T) {
 		"wdwcdsbooklive000001", sessionA, member, wcStaffKey)
 	if got != processor.OutcomeAccepted {
 		t.Fatalf("staff CreateBooking on a session at a LIVE studio = %v, want Accepted "+
-			"(the positive sibling — if this fails the negative proves nothing)", got)
+			"(the positive sibling — if this fails the rest proves nothing)", got)
 	}
 	if !keyExists(t, ctx, conn, live) {
 		t.Fatalf("%s was not written by the accepted CreateBooking", live)
@@ -715,24 +721,83 @@ func TestWorkplace_TombstonedStudioConfersNothing(t *testing.T) {
 	// exactly as TombstoneStudio leaves them.
 	seedTombstonedVertex(t, ctx, conn, studioA, "studio")
 
-	dead, got, why := wcCreateBookingAsWithReason(t, ctx, conn, cp, cons,
-		"wdwcdsbookdead000001", sessionA, member2, wcStaffKey)
+	// DISCRIMINATING NEGATIVE: staff B, who only worksAt building B, must still
+	// be denied — the atLocation snapshot names building A specifically, it is
+	// not a blanket bypass the tombstone accidentally opened.
+	other, got, why := wcCreateBookingAsWithReason(t, ctx, conn, cp, cons,
+		"wdwcdsbookother00001", sessionA, member2, wcStaffBKey)
 	if got != processor.OutcomeRejected {
-		t.Fatalf("staff CreateBooking on a session at a TOMBSTONED studio = %v, want Rejected — "+
-			"a retired studio must not keep conferring the building it sat in", got)
+		t.Fatalf("staff B (building B only) CreateBooking on a TOMBSTONED-studio session at building A = %v, "+
+			"want Rejected — the atLocation snapshot must confer building A specifically, not every building", got)
 	}
 	if !strings.Contains(why, "does not worksAt") {
-		t.Errorf("the tombstoned-studio denial said %q, want the confinement guard's message", why)
+		t.Errorf("staff B's denial said %q, want the confinement guard's message", why)
+	}
+	if keyExists(t, ctx, conn, other) {
+		t.Errorf("the denied CreateBooking wrote %s; it must be denied before any mutation", other)
+	}
+
+	// The staffer who could reach this session before the tombstone still can:
+	// the atLocation snapshot keeps conferring the building the studio sat in
+	// at CreateSession time, independent of the studio's current status.
+	still, got := wcCreateBookingAs(t, ctx, conn, cp, cons,
+		"wdwcdsbookdead000001", sessionA, member2, wcStaffKey)
+	if got != processor.OutcomeAccepted {
+		t.Fatalf("staff A CreateBooking on a session at a TOMBSTONED studio = %v, want Accepted — "+
+			"the session's own atLocation snapshot must keep conferring the building the studio sat in "+
+			"at CreateSession time", got)
+	}
+	if !keyExists(t, ctx, conn, still) {
+		t.Errorf("%s was not written by the accepted CreateBooking", still)
+	}
+}
+
+// TestWorkplace_TombstonedStudioWithNoLocationConfersNothing is the negative
+// sibling of the snapshot fallback above: a studio an operator opens with NO
+// location (require_workplace only allows this for the operator escape — a
+// staffer must always name a location, wcSeedStaff's positive coverage
+// elsewhere) writes no atLocation link at CreateSession, so a session on it
+// has nothing to fall back to once the studio is tombstoned. It must deny
+// exactly as before this fallback existed, and only the operator escape (not
+// any staffer's own topology) can still act.
+func TestWorkplace_TombstonedStudioWithNoLocationConfersNothing(t *testing.T) {
+	ctx, conn := setupDomainEnv(t)
+	cp, cons := newDomainPipeline(t, ctx, conn, "wdwcdeadstudionoloc")
+	wcSeedStaff(t, ctx, conn) // staff A worksAt building A
+
+	studioA := createStudio(t, ctx, conn, cp, cons, "wdwcdsnlstudioa00001", "Unlocated Studio")
+	sessionA, outcome := createSession(t, ctx, conn, cp, cons, "wdwcdsnlsessiona0001",
+		studioA, "Morning Flow", "2026-07-08T09:00:00Z", "2026-07-08T09:30:00Z", 20)
+	if outcome != processor.OutcomeAccepted {
+		t.Fatalf("operator CreateSession at an unlocated studio = %v, want Accepted", outcome)
+	}
+	_, sessionAID, _ := substrate.ParseVertexKey(sessionA)
+	if keyExists(t, ctx, conn, "lnk.session."+sessionAID+".atLocation.building."+wcBuildingAID) {
+		t.Fatalf("CreateSession wrote an atLocation link for a studio with no location")
+	}
+
+	member := seedIdentity(t, ctx, conn, wcMemberID)
+
+	// Decommission the studio. No atLocation snapshot exists to fall back to.
+	seedTombstonedVertex(t, ctx, conn, studioA, "studio")
+
+	dead, got, why := wcCreateBookingAsWithReason(t, ctx, conn, cp, cons,
+		"wdwcdsnlbookdead0001", sessionA, member, wcStaffKey)
+	if got != processor.OutcomeRejected {
+		t.Fatalf("staff CreateBooking on a TOMBSTONED, never-located studio's session = %v, want Rejected — "+
+			"with no atLocation snapshot to fall back to, an empty candidate list must still deny", got)
+	}
+	if !strings.Contains(why, "does not worksAt") {
+		t.Errorf("the denial said %q, want the confinement guard's message", why)
 	}
 	if keyExists(t, ctx, conn, dead) {
 		t.Errorf("the denied CreateBooking wrote %s; it must be denied before any mutation", dead)
 	}
 
 	// CONTROL: the operator is exempt from confinement, so the same booking still
-	// goes through — the session did not become unbookable, it became unbookable
-	// BY THIS STAFFER.
+	// goes through.
 	ctl, got := createBooking(t, ctx, conn, cp, cons,
-		"wdwcdsbookctl0000001", sessionA, member2, "")
+		"wdwcdsnlbookctl0001", sessionA, member, "")
 	if got != processor.OutcomeAccepted {
 		t.Fatalf("operator CreateBooking on the same session = %v, want Accepted — the staff "+
 			"denial above must be confinement, not a session the tombstone broke", got)
