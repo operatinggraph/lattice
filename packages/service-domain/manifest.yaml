@@ -1,10 +1,10 @@
 name: service-domain
-version: 0.9.4
+version: 0.10.0
 description: |
   Service template + instance vertex type (the service DDL + lifecycle/wiring
   ops CreateServiceTemplate, CreateServiceInstance, RecordServiceOutcome,
   RequestService, RetireServiceTemplate, WireProvidedBy) plus the lean
-  serviceprovider DDL (CreateServiceProvider, BindServiceProviderIdentity —
+  serviceprovider DDL (CreateServiceProvider, SetServiceProviderProfile, BindServiceProviderIdentity —
   the provider-archetype binding, persona-worlds-design.md Fire W0). A
   service instance is a real linked vertex (instanceOf a template, providedTo
   an applicant identity) whose external-call outcome (status + completedAt)
@@ -52,6 +52,9 @@ declares:
     - operationType: CreateServiceProvider
       scope: any
       grantsTo: [operator]
+    - operationType: SetServiceProviderProfile
+      scope: any
+      grantsTo: [operator, provider]
     - operationType: BindServiceProviderIdentity
       scope: any
       grantsTo: [operator]
@@ -62,3 +65,4 @@ declares:
     - operationType: CreateServiceInstance
     - operationType: RecordServiceOutcome
     - operationType: RequestService
+    - operationType: SetServiceProviderProfile

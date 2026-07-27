@@ -67,6 +67,12 @@ func Permissions() []pkgmgr.PermissionSpec {
 			GrantsTo:      []string{"operator"},
 		},
 		{
+			OperationType: "SetServiceProviderProfile",
+			Scope:         "any",
+			Note:          "Grants the operator the right to submit SetServiceProviderProfile operations, and a bound service provider the right to edit THEIR OWN profile (the script's standing guard confines a non-operator caller to the serviceprovider it is identifiedBy-bound to). The `provider` role here is the generic one all three bind ops mint — a bound clinician and instructor hold it too, so the guard, not this grant, is what stops one archetype editing another's record.",
+			GrantsTo:      []string{"operator", "provider"},
+		},
+		{
 			OperationType: "BindServiceProviderIdentity",
 			Scope:         "any",
 			Note:          "Grants the operator alone the right to bind an existing service provider to its login identity. The bind mints the identity-domain `provider` role; it is operator-only to match its precondition CreateServiceProvider and to keep the role-minting ceremony off the front-desk grant, mirroring clinic-domain BindProviderIdentity.",

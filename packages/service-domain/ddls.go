@@ -115,6 +115,10 @@ func DDLs() []pkgmgr.DDLSpec {
 // that records the outcome). CreateServiceTemplate is install-time / admin
 // provisioning and is not bound by a downstream step, so it gets no op-meta.
 //
+// SetServiceProviderProfile is the serviceprovider hat's record-administering
+// op: it dispatches against the serviceprovider vertex itself rather than the
+// `service` DDL, so a bound provider's own hat resolves it.
+//
 // RequestService (edge-manifest Fire 1, G8) is the platform's first
 // service-path consumer op — its op-meta carries the descriptor-vocabulary
 // aspects (edge-showcase-app-design.md §3.3) so an edge client can render +
@@ -185,6 +189,50 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 				AuthContext: "service",
 				TargetField: "service",
 				TargetType:  "service",
+			},
+		},
+		{
+			// The serviceprovider hat's record-administering op, the counterpart
+			// to clinic-domain's SetProviderHours. Facet's hatOps filter
+			// (cmd/facet/web/app.js) offers an op on an anchor only when BOTH
+			// dispatchClass AND dispatchTargetType equal the anchor's type, so
+			// both are serviceProviderVertexDDL — the serviceprovider DDL, not
+			// the `service` DDL the other metas dispatch against, which is what
+			// makes this op reachable from a bound provider's own hat.
+			//
+			// It is self-service where clinic-domain's SetProviderProfile is
+			// operator-only, and the distinction is deliberate: that aspect
+			// carries a clinician's specialty and credentials, which nobody
+			// self-attests. This one carries a display name.
+			OperationType: "SetServiceProviderProfile",
+			Presentation: &pkgmgr.OpPresentationSpec{
+				Title:       "Edit my profile",
+				Description: "Change the name shown for the service you provide.",
+				Icon:        "user",
+				Tone:        "primary",
+				SubmitLabel: "Save profile",
+			},
+			InputSchema: `{"type":"object","properties":` +
+				`{"serviceProviderKey":{"type":"string","description":"vtx.serviceprovider.<NanoID> of the record being edited — auto-filled from the service provider being viewed."},` +
+				`"displayName":{"type":"string","description":"Your service-provider display name, as residents see it."}},` +
+				`"required":["serviceProviderKey","displayName"]}`,
+			FieldDescriptions: map[string]string{
+				"serviceProviderKey": "The service-provider record being edited — auto-filled by the client from the record being viewed (dispatch.targetField), not user-entered.",
+				"displayName":        "Your service-provider display name. It labels your own hat and names you on the services you provide. Required — the profile is replaced wholesale, so there is no way to clear it.",
+			},
+			Dispatch: &pkgmgr.OpDispatchSpec{
+				Class:       serviceProviderVertexDDL,
+				AuthContext: "standing",
+				TargetField: "serviceProviderKey",
+				TargetType:  serviceProviderVertexDDL,
+				// The standing guard's own-binding probe, declared rather than
+				// left live (Contract #2 §2.5): absence is a meaningful
+				// rejection the script renders as AuthDenied, not a correctness
+				// error, so it is an optionalRead — the one-hop form of the
+				// ownership chain RecordServiceOutcome declares above.
+				OptionalReads: []string{
+					"lnk.serviceprovider.{payload.serviceProviderKey:id}.identifiedBy.identity.{actor:id}",
+				},
 			},
 		},
 	}
@@ -368,11 +416,16 @@ func serviceProviderVertexTypeDDL() pkgmgr.DDLSpec {
 	return pkgmgr.DDLSpec{
 		CanonicalName:     serviceProviderVertexDDL,
 		Class:             "meta.ddl.vertexType",
-		PermittedCommands: []string{"CreateServiceProvider", "BindServiceProviderIdentity"},
+		PermittedCommands: []string{"CreateServiceProvider", "SetServiceProviderProfile", "BindServiceProviderIdentity"},
 		Description: "Generic template-attached service provider DDL (e.g. a laundry operator). Vertex shape: " +
 			"vtx.serviceprovider.<NanoID>, class=serviceprovider, root data = {} (minimal, D5 — the data lives " +
 			"in the .profile aspect). CreateServiceProvider mints the serviceprovider + writes the .profile " +
-			"aspect {displayName (required)} atomically. BindServiceProviderIdentity binds an existing " +
+			"aspect {displayName (required)} atomically. SetServiceProviderProfile edits an existing one's " +
+			".profile — it REPLACES the aspect with the supplied displayName (still required, so the hat-chip " +
+			"label edgeIdentity projects can never be nulled). It is the serviceprovider hat's " +
+			"record-administering op: a standing binder passes an operator unconditionally and otherwise " +
+			"requires the caller be identifiedBy-bound to THIS serviceprovider (mirrors clinic-domain's " +
+			"SetProviderHours). BindServiceProviderIdentity binds an existing " +
 			"serviceprovider to a pre-minted vtx.identity (both validated alive + typed): it mints " +
 			"lnk.serviceprovider.<id>.identifiedBy.identity.<id> (serviceprovider identifiedBy identity, " +
 			"Contract #1 §1.1), claims a CreateOnly guard aspect on EACH side (.identityClaim on the " +
@@ -384,17 +437,17 @@ func serviceProviderVertexTypeDDL() pkgmgr.DDLSpec {
 			"WireProvidedBy op (above) or at CreateServiceTemplate time.",
 		Script: serviceProviderDDLScript,
 		InputSchema: `{"type":"object","properties":` +
-			`{"displayName":{"type":"string","description":"The service provider's display name (CreateServiceProvider; required)."},` +
+			`{"displayName":{"type":"string","description":"The service provider's display name (CreateServiceProvider / SetServiceProviderProfile; required)."},` +
 			`"serviceProviderId":{"type":"string","description":"Optional bare NanoID for the new serviceprovider vertex (CreateServiceProvider); absent → minted."},` +
-			`"serviceProviderKey":{"type":"string","description":"vtx.serviceprovider.<NanoID> of an existing serviceprovider (BindServiceProviderIdentity; required, validated alive)."},` +
+			`"serviceProviderKey":{"type":"string","description":"vtx.serviceprovider.<NanoID> of an existing serviceprovider (SetServiceProviderProfile / BindServiceProviderIdentity; required, validated alive)."},` +
 			`"identityKey":{"type":"string","description":"vtx.identity.<NanoID> of a pre-minted identity to bind to the serviceprovider (BindServiceProviderIdentity; required, validated alive + class=identity)."}},` +
 			`"required":[]}`,
 		OutputSchema: `{"type":"object","properties":` +
 			`{"primaryKey":{"type":"string","description":"vtx.serviceprovider.<NanoID> the operation wrote (BindServiceProviderIdentity returns the identifiedBy link key instead)."}}}`,
 		FieldDescription: map[string]string{
-			"displayName":        "The service provider's display name. Stored on the .profile aspect (CreateServiceProvider; required).",
+			"displayName":        "The service provider's display name. Stored on the .profile aspect (CreateServiceProvider mints it, SetServiceProviderProfile replaces it; required in both).",
 			"serviceProviderId":  "Optional bare NanoID (no dots / key segments) for the new serviceprovider vertex. Absent → minted with nanoid.new().",
-			"serviceProviderKey": "Full vtx.serviceprovider.<NanoID> key of an existing serviceprovider vertex (BindServiceProviderIdentity binds it to a login identity).",
+			"serviceProviderKey": "Full vtx.serviceprovider.<NanoID> key of an existing serviceprovider vertex (SetServiceProviderProfile edits its profile; BindServiceProviderIdentity binds it to a login identity). For SetServiceProviderProfile it is auto-filled by the client from the serviceprovider being viewed (dispatch.targetField), not user-entered.",
 			"identityKey":        "Full vtx.identity.<NanoID> key of a pre-minted identity to bind (BindServiceProviderIdentity; required). Must be alive + class=identity; wires the identifiedBy link, claims CreateOnly guard aspects on BOTH sides (rejected if either side is already bound), and idempotently grants the identity the provider role.",
 		},
 		Examples: []pkgmgr.ExampleSpec{
@@ -403,6 +456,13 @@ func serviceProviderVertexTypeDDL() pkgmgr.DDLSpec {
 				Payload: map[string]any{"displayName": "Kai's Laundry"},
 				ExpectedOutcome: "Mints vtx.serviceprovider.<NanoID> (class=serviceprovider, root {}) + the .profile " +
 					"aspect {displayName}. Returns primaryKey (the serviceprovider key).",
+			},
+			{
+				Name:    "SetServiceProviderProfile — a bound provider edits their own display name",
+				Payload: map[string]any{"serviceProviderKey": "vtx.serviceprovider.<NanoID>", "displayName": "Kai's Laundry Co."},
+				ExpectedOutcome: "Requires the caller hold operator, or be identifiedBy-bound to THIS serviceprovider. " +
+					"Replaces the .profile aspect with {displayName}. AuthDenied for any other provider's record " +
+					"(including a bound clinician or instructor, who hold the same `provider` role).",
 			},
 			{
 				Name:    "BindServiceProviderIdentity — bind a service provider to its login identity",
@@ -416,17 +476,17 @@ func serviceProviderVertexTypeDDL() pkgmgr.DDLSpec {
 }
 
 // serviceProviderProfileAspectTypeDDL declares the .profile aspect (class
-// serviceProviderProfile) — the step-6 write gate for CreateServiceProvider.
-// Declaration-only; NON-sensitive.
+// serviceProviderProfile) — the step-6 write gate for CreateServiceProvider +
+// SetServiceProviderProfile. Declaration-only; NON-sensitive.
 func serviceProviderProfileAspectTypeDDL() pkgmgr.DDLSpec {
 	return pkgmgr.DDLSpec{
 		CanonicalName:     serviceProviderProfileAspectDDL,
 		Class:             "meta.ddl.aspectType",
-		PermittedCommands: []string{"CreateServiceProvider"},
+		PermittedCommands: []string{"CreateServiceProvider", "SetServiceProviderProfile"},
 		Description: "Service provider profile aspect. Stored as vtx.serviceprovider.<NanoID>.profile (class " +
-			"serviceProviderProfile) = {displayName}. Non-sensitive. Written by CreateServiceProvider (whose " +
-			"serviceprovider vertexType DDL owns the script); this aspect-type DDL is the step-6 write gate. " +
-			"Declaration-only: no op handler.",
+			"serviceProviderProfile) = {displayName}. Non-sensitive. Written by CreateServiceProvider (mints it) " +
+			"and SetServiceProviderProfile (replaces it) — both owned by the serviceprovider vertexType DDL's " +
+			"script; this aspect-type DDL is the step-6 write gate. Declaration-only: no op handler.",
 		Script: aspectDeclarationOnlyScript,
 		InputSchema: `{"type":"object","properties":` +
 			`{"displayName":{"type":"string"}}}`,
@@ -438,7 +498,7 @@ func serviceProviderProfileAspectTypeDDL() pkgmgr.DDLSpec {
 			{
 				Name:            "service provider profile aspect",
 				Payload:         map[string]any{"displayName": "Kai's Laundry"},
-				ExpectedOutcome: "Stored as vtx.serviceprovider.<NanoID>.profile; written by CreateServiceProvider.",
+				ExpectedOutcome: "Stored as vtx.serviceprovider.<NanoID>.profile; minted by CreateServiceProvider, replaced by SetServiceProviderProfile.",
 			},
 		},
 	}
@@ -596,6 +656,60 @@ def require_live_typed(state, key, name, want_class):
     if cls != want_class:
         fail("WrongClass: " + name + ": " + key + " has class " + str(cls) + ", required " + want_class)
 
+def make_aspect_upsert(vtx_key, local_name, cls, data):
+    # Unconditioned update: create-if-absent / overwrite-if-present. .profile
+    # always exists (CreateServiceProvider mints it), so this is the overwrite path.
+    return {"op": "update", "key": vtx_key + "." + local_name,
+            "document": {"class": cls, "isDeleted": False,
+                         "vertexKey": vtx_key, "localName": local_name, "data": data}}
+
+ROLE_PAGE_LIMIT = 50
+
+def actor_holds_operator(actor_key):
+    # Resolved from the GRAPH, not from a compile-time constant: the primordial
+    # role ids are loaded at runtime (bootstrap.LoadPrimordialNanoIDs) while a
+    # package's Definition -- and so its script text -- is built at package-init,
+    # so no substitution can see the operator id. The walk mirrors the kernel's
+    # own root-grant lens exactly (internal/bootstrap/lenses.go: MATCH (identity)
+    # -[:holdsRole]->(role) WHERE role.canonicalName.data.value = 'operator').
+    #
+    # read-posture: (e) relation=holdsRole epoch=none -- an identity holds few
+    # roles, so this is never a keyspace scan. A role granted concurrently with
+    # this write is not a race worth closing: it can only widen authority, and
+    # the confined branch is the safe one.
+    page, _ = kv.Links(actor_key, "holdsRole", "out", None, ROLE_PAGE_LIMIT)
+    for lk in page:
+        if lk.isDeleted:
+            continue
+        # read-posture: (e) per-candidate follow-up read off the enumeration
+        # above (data-derived key -- the role is unknown until it resolves).
+        cn = kv.Read(lk.targetVertex + ".canonicalName")
+        if cn != None and not cn.isDeleted and cn.data.get("value") == "operator":
+            return True
+    return False
+
+def actor_bound_to_serviceprovider(actor_key, sp_key):
+    # The standing serviceprovider-binding guard: an actor identifiedBy-bound to
+    # THIS SPECIFIC serviceprovider may edit its own profile even without an
+    # operator grant -- complementary to actor_holds_operator, never a
+    # replacement (mirrors clinic-domain's actor_bound_to_provider verbatim, and
+    # is the one-hop form of the ownership chain RecordServiceOutcome walks).
+    #
+    # Load-bearing, not decorative: BindServiceProviderIdentity grants the SAME
+    # generic identity-domain provider role that clinic's BindProviderIdentity
+    # and wellness's BindInstructorIdentity grant, so the permission row's
+    # provider grant is reachable by a bound clinician and a bound instructor
+    # too. This guard -- not the grant -- is what confines the write to the
+    # caller's own serviceprovider record.
+    _, actor_id = parts_of(actor_key, "actor", "identity")
+    _, target_sp_id = parts_of(sp_key, "serviceProviderKey", "serviceprovider")
+    # read-posture: (d) declared in contextHint.optionalReads by the standing
+    # caller's dispatcher (probing whether THIS actor is bound to the TARGET
+    # serviceprovider; absent -> AuthDenied, mirroring claim-style
+    # absence-tolerance)
+    lnk = kv.Read("lnk.serviceprovider." + target_sp_id + ".identifiedBy.identity." + actor_id)
+    return lnk != None and not lnk.isDeleted
+
 def claim_serviceprovider_identity(sp_key):
     # Entity-keyed guard: at most one identity may ever bind THIS
     # serviceprovider (nothing releases the claim, so it is never
@@ -631,6 +745,31 @@ def execute(state, op):
             make_aspect(spkey, "profile", "serviceProviderProfile", {"displayName": display_name}),
         ]
         events = [{"class": "service.serviceProviderCreated", "data": {"serviceProviderKey": spkey}}]
+        return {"mutations": mutations, "events": events, "response": {"primaryKey": spkey}}
+
+    if ot == "SetServiceProviderProfile":
+        spkey = required_string(p, "serviceProviderKey")
+        parts_of(spkey, "serviceProviderKey", "serviceprovider")
+        if not vertex_alive(state, spkey):
+            fail("UnknownServiceProvider: " + spkey)
+        cls = class_of(state, spkey)
+        if cls != "serviceprovider":
+            fail("WrongClass: serviceProviderKey: " + spkey + " has class " + str(cls) + ", required serviceprovider")
+        # Standing binder: operator passes unconditionally; otherwise the actor
+        # must be identifiedBy-bound to THIS serviceprovider (a provider edits
+        # only THEIR OWN profile). Two binders, complementary, mirroring clinic's
+        # SetProviderHours actor_holds_operator/actor_bound_to_provider framing.
+        if not actor_holds_operator(op.actor):
+            if not actor_bound_to_serviceprovider(op.actor, spkey):
+                fail("AuthDenied: " + op.actor + " may not set the profile of service provider " + spkey)
+        display_name = required_string(p, "displayName")
+        # Unconditioned upsert REPLACING the whole .profile aspect (it always
+        # exists -- CreateServiceProvider mints it). displayName stays REQUIRED:
+        # it is the only field the aspect carries, and edge-manifest's
+        # edgeIdentity lens projects it as the serviceprovider hat's own chip
+        # label, so an edit that could drop it would leave the hat nameless.
+        mutations = [make_aspect_upsert(spkey, "profile", "serviceProviderProfile", {"displayName": display_name})]
+        events = [{"class": "service.serviceProviderProfileSet", "data": {"serviceProviderKey": spkey}}]
         return {"mutations": mutations, "events": events, "response": {"primaryKey": spkey}}
 
     if ot == "BindServiceProviderIdentity":

@@ -77,7 +77,7 @@ func TestPackage_DDLAndOps(t *testing.T) {
 		t.Fatalf("missing DDLs: %v", wantDDLs)
 	}
 	spDDL := Package.DDLs[1]
-	wantSPCmds := map[string]bool{"CreateServiceProvider": false, "BindServiceProviderIdentity": false}
+	wantSPCmds := map[string]bool{"CreateServiceProvider": false, "SetServiceProviderProfile": false, "BindServiceProviderIdentity": false}
 	for _, c := range spDDL.PermittedCommands {
 		if _, ok := wantSPCmds[c]; !ok {
 			t.Fatalf("unexpected serviceprovider permittedCommand %q", c)
@@ -100,6 +100,7 @@ func TestPackage_DDLAndOps(t *testing.T) {
 		"RecordServiceOutcome":        {"operator", "provider"},
 		"RetireServiceTemplate":       {"operator"},
 		"CreateServiceProvider":       {"operator"},
+		"SetServiceProviderProfile":   {"operator", "provider"},
 		"BindServiceProviderIdentity": {"operator"},
 		"WireProvidedBy":              {"operator"},
 	}
@@ -139,11 +140,13 @@ func TestPackage_DDLAndOps(t *testing.T) {
 	// forOperation-resolvable (14.4's externalTask path binds them);
 	// RequestService is forOperation-resolvable AND carries the
 	// descriptor-vocabulary aspects (edge-manifest Fire 1); CreateServiceTemplate
-	// is install-time admin and declares none. CreateServiceProvider /
-	// BindServiceProviderIdentity / WireProvidedBy are staff/operator
-	// ceremonies and declare no op-meta either (mirrors clinic-domain's
-	// CreateProvider / BindProviderIdentity).
-	wantMetas := map[string]bool{"CreateServiceInstance": false, "RecordServiceOutcome": false, "RequestService": false}
+	// is install-time admin and declares none. SetServiceProviderProfile is the
+	// serviceprovider hat's record-administering op and dispatches against the
+	// serviceprovider vertex itself, so its chip resolves in Facet.
+	// CreateServiceProvider / BindServiceProviderIdentity / WireProvidedBy are
+	// staff/operator ceremonies and declare no op-meta either (mirrors
+	// clinic-domain's CreateProvider / BindProviderIdentity).
+	wantMetas := map[string]bool{"CreateServiceInstance": false, "RecordServiceOutcome": false, "RequestService": false, "SetServiceProviderProfile": false}
 	if got := len(Package.OpMetas); got != len(wantMetas) {
 		t.Fatalf("expected %d opMetas, got %d", len(wantMetas), got)
 	}
