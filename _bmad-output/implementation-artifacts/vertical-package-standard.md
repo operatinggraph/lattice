@@ -888,3 +888,43 @@ without spaces is now caught, where it was previously invisible.
   vanished from every script at once it would pass silently. Partial deletion fails loudly at runtime
   (the bodies name their bounds, so the script raises), which is why this was not treated as blocking.
   Consumer: a future sweep that moves the bounds somewhere else.
+
+## 14. The 29-package census, re-run (Winston, 2026-07-27)
+
+**§3's adjacent-find discharged.** The original census (§1) scored 15 of 29 registered packages; S1/S6/S7
+now bind corpus-wide with zero exemptions (verified green: `lint-package-standard: 0 issues across 29
+packages`), so the remaining unmeasured dimensions were S2 (grant-matrix doc block), S3 (read-boundary
+tiering), S4 (guard-idiom canonicity), S5 (read-posture annotation), and S8 (D3 everywhere). Four read-only
+scouts each audited a disjoint ~7-package slice against all five; two of their flagged findings did not
+survive ground-truth verification and are recorded here so the next sweep doesn't re-raise them:
+
+- **clinic-domain S3/S8 — false positive.** A scout matched the wrong lens (the Postgres
+  `clinicProviderReadGrants` GrantTable producer) instead of the actual open-KV `clinicAppointments`
+  projection, which already carries the required exception comment at `lenses.go:409-411` ("deliberately-
+  public directory"). clinic-domain is clean.
+- **identity-domain S2 — false positive.** A scout read the doc block's per-op `Note` prose as the
+  binder-naming requirement; the package's `permissions.go:7-17` in fact opens with the literal tabular
+  `Grant matrix:` block §2 asks for. identity-domain remains the S2 idiom source.
+- **S4's canonical-text half is no longer a manual-audit dimension.** `S10` (§11-§13) has since made
+  guard-idiom byte-identity a blocking, corpus-wide lint gate — every package the scouts found using
+  `require_workplace` / `workplace_exempt` / `actor_holds_operator` / CreateOnly / slot-cell idioms is
+  already covered by it, verified green above. What S4 asked for manually, S10 now asks for mechanically;
+  future census re-runs can skip it.
+- **S3/S5/S8 — clean corpus-wide.** No open-KV lens projects a subject-person's name/contact past an
+  opaque key anywhere in the 29; every `kv.Read`/`kv.Links` in the corpus carries a `# read-posture:`
+  annotation. Both dimensions can be marked closed rather than re-audited each sweep, absent a new package.
+
+**One genuine, corpus-wide gap survives verification: S2's tabular format is not universal.**
+identity-domain's `Grant matrix:` header (op → archetypes, one line each) is the canonical form S2 names,
+but roughly a third of the corpus documents grants as narrative prose instead — same information,
+different shape, harder to scan and impossible to lint mechanically as long as it stays prose. Verified
+directly (not from scout claims alone): `control-authz`, `demo-operator`, `identity-hygiene`,
+`lease-signing`, `location-domain`, `loftspace-domain`, `loftspace-ledger`, `maintenance-domain`,
+`objects-base`, `orchestration-base` all open `permissions.go` with prose rather than a `Grant matrix:`
+table. Filed as its own row (below) rather than fixed in this fire — it is real work (10 files) beyond
+what an audit fire should absorb, mechanical, and no different in kind from the S1/S6/S7 sweeps §3 already
+ran.
+
+**Census closed as re-run; not re-opened per-fire.** The next package added to the corpus is what should
+trigger the next spot-check, not a calendar re-audit — S1/S6/S7/S10 already re-check themselves every CI
+run.
