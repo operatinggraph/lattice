@@ -51,7 +51,7 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 // Package is the static, install-time bundle.
 var Package = pkgmgr.Definition{
 	Name:        "maintenance-domain",
-	Version:     "0.2.5",
+	Version:     "0.2.6",
 	Description: "Cross-vertical maintenance work orders: vtx.workorder.<NanoID> raised at a location by ReportIssue and closed by ResolveWorkOrder, the op an FR28 role-queued task grants its claimant (the §10.6 auto-complete closes the task, so no separate completion op exists). `.resolution` is the read-before-write terminal marker — an identical re-submit is an idempotent no-op so an offline device's drain retry cannot fail the work, a differing one is rejected so a resolution never silently flips. Both ops carry F4's canonical workplace write-confinement guard. ResolveWorkOrder carries an op-meta with the full edge-manifest descriptor vocabulary (presentation/inputSchema/dispatch authContext=task) so a Facet client can render and submit it from the task row alone.",
 	Depends:     []string{"location-domain"},
 	DDLs:        DDLs(),
