@@ -558,7 +558,8 @@ RETURN
 // "correct" this to IS NOT NULL).
 const edgeServicesTail = `
 OPTIONAL MATCH (tpl)-[:providedBy]->(provider)
-WITH tpl, provider, container
+OPTIONAL MATCH (tpl)-[:availableAt]->(via)
+WITH tpl, provider, via
 WHERE tpl.key <> null
 RETURN
   tpl.key AS anchor,
@@ -570,8 +571,8 @@ RETURN
   tpl.presentation.data.icon AS icon,
   tpl.presentation.data.category AS category,
   provider.key AS providerKey,
-  container.key AS resolvedVia,
-  container.presentation.data.name AS resolvedViaLabel
+  via.key AS resolvedVia,
+  via.presentation.data.name AS resolvedViaLabel
 `
 
 // edgeCatalogTail presents one `manifest.op.<opMetaId>` row per op meta the
