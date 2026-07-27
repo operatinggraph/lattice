@@ -184,7 +184,12 @@ var legacyMislabeledTemplates = []string{
 }
 
 func main() {
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	// Exceeds projectionLagWindow (the longest single retry wait any submitOp
+	// call can block on) with headroom for the rest of the sequential run — a
+	// flat 60s cut this off mid-retry on a cold stack still digesting the
+	// package-install CDC burst, surfacing as an opaque context-deadline error
+	// well before the intended FATAL AuthDenied message.
+	ctx, cancel := context.WithTimeout(context.Background(), projectionLagWindow+6*time.Minute)
 	defer cancel()
 
 	natsURL := pkgverify.EnvOrDefault("NATS_URL", "nats://localhost:4222")
@@ -208,7 +213,7 @@ func main() {
 
 	if alive(ctx, conn, buildingKey) {
 		fmt.Println("==> showcase world already loaded (building", buildingKey, "is alive) — recovering persona keys, layering in any missing increment.")
-		tenant1Key, tenant2Key := recoverTenants(ctx, conn, adminKey)
+		tenant1Key, tenant2Key := recoverTenants(ctx, conn, adminKey, consumerRoleKey)
 		retireLegacyTemplates(ctx, conn)
 		// The building's liveness only proves the ORIGINAL world loaded; a
 		// later increment (e.g. the §7.4 clinic template, the wellness
@@ -500,7 +505,8 @@ func seedTenant(ctx context.Context, conn *substrate.Conn, adminKey, consumerRol
 	claimKeyPlaintext := "showcase-" + salt
 	claimSum := mustSHA256Hex(claimKeyPlaintext)
 	reply := submitOp(ctx, conn, adminKey, "CreateUnclaimedIdentity", "identity",
-		map[string]any{"name": name, "email": email, "claimKeyHash": claimSum}, nil)
+		map[string]any{"name": name, "email": email, "claimKeyHash": claimSum},
+		&processor.ContextHint{OptionalReads: identityIndexOptionalReads(name, email)})
 	tenantKey := reply.PrimaryKey
 
 	submitOp(ctx, conn, adminKey, "AssignRole", "",
@@ -593,7 +599,8 @@ func seedStaff(ctx context.Context, conn *substrate.Conn, adminKey, roleKey, bui
 	must(err, "generate staff claim-key salt")
 	claimSum := mustSHA256Hex("showcase-staff-" + salt)
 	reply := submitOp(ctx, conn, adminKey, "CreateUnclaimedIdentity", "identity",
-		map[string]any{"name": name, "email": email, "claimKeyHash": claimSum}, nil)
+		map[string]any{"name": name, "email": email, "claimKeyHash": claimSum},
+		&processor.ContextHint{OptionalReads: identityIndexOptionalReads(name, email)})
 	staffKey := reply.PrimaryKey
 
 	submitOp(ctx, conn, adminKey, "AssignRole", "",
@@ -856,7 +863,8 @@ func ensureProviderIdentity(ctx context.Context, conn *substrate.Conn, adminKey,
 	must(err, "generate provider claim-key salt")
 	claimSum := mustSHA256Hex("showcase-provider-" + salt)
 	reply := submitOp(ctx, conn, adminKey, "CreateUnclaimedIdentity", "identity",
-		map[string]any{"name": name, "email": email, "claimKeyHash": claimSum}, nil)
+		map[string]any{"name": name, "email": email, "claimKeyHash": claimSum},
+		&processor.ContextHint{OptionalReads: identityIndexOptionalReads(name, email)})
 	identityKey := reply.PrimaryKey
 
 	submitOp(ctx, conn, adminKey, "BindProviderIdentity", "provider",
@@ -927,7 +935,8 @@ func ensureServiceProviderIdentity(ctx context.Context, conn *substrate.Conn, ad
 	must(err, "generate service provider claim-key salt")
 	claimSum := mustSHA256Hex("showcase-serviceprovider-" + salt)
 	reply := submitOp(ctx, conn, adminKey, "CreateUnclaimedIdentity", "identity",
-		map[string]any{"name": name, "email": email, "claimKeyHash": claimSum}, nil)
+		map[string]any{"name": name, "email": email, "claimKeyHash": claimSum},
+		&processor.ContextHint{OptionalReads: identityIndexOptionalReads(name, email)})
 	identityKey := reply.PrimaryKey
 
 	submitOp(ctx, conn, adminKey, "BindServiceProviderIdentity", "serviceprovider",
@@ -1167,7 +1176,8 @@ func seedStaffWorklistApplication(ctx context.Context, conn *substrate.Conn, adm
 		must(err, "generate applicant claim-key salt")
 		reply := submitOp(ctx, conn, adminKey, "CreateUnclaimedIdentity", "identity",
 			map[string]any{"name": applicant3Name, "email": applicant3Email,
-				"claimKeyHash": mustSHA256Hex("showcase-applicant-" + salt)}, nil)
+				"claimKeyHash": mustSHA256Hex("showcase-applicant-" + salt)},
+			&processor.ContextHint{OptionalReads: identityIndexOptionalReads(applicant3Name, applicant3Email)})
 		applicantKey := reply.PrimaryKey
 		submitOp(ctx, conn, adminKey, "CreateLeaseApplication", "leaseapp",
 			map[string]any{"applicant": applicantKey, "unit": unit3Key, "leaseAppId": leaseApp3ID,
@@ -1233,7 +1243,8 @@ func seedLandlordWorld(ctx context.Context, conn *substrate.Conn, adminKey, cons
 		must(err, "generate landlord applicant claim-key salt")
 		reply := submitOp(ctx, conn, adminKey, "CreateUnclaimedIdentity", "identity",
 			map[string]any{"name": applicant4Name, "email": applicant4Email,
-				"claimKeyHash": mustSHA256Hex("showcase-landlord-applicant-" + salt)}, nil)
+				"claimKeyHash": mustSHA256Hex("showcase-landlord-applicant-" + salt)},
+			&processor.ContextHint{OptionalReads: identityIndexOptionalReads(applicant4Name, applicant4Email)})
 		applicantKey := reply.PrimaryKey
 		submitOp(ctx, conn, adminKey, "CreateLeaseApplication", "leaseapp",
 			map[string]any{"applicant": applicantKey, "unit": unit4Key, "leaseAppId": leaseApp4ID,
@@ -1293,7 +1304,8 @@ func seedLandlord(ctx context.Context, conn *substrate.Conn, adminKey, consumerR
 	must(err, "generate landlord claim-key salt")
 	reply := submitOp(ctx, conn, adminKey, "CreateUnclaimedIdentity", "identity",
 		map[string]any{"name": landlordName, "email": landlordEmail,
-			"claimKeyHash": mustSHA256Hex("showcase-landlord-" + salt)}, nil)
+			"claimKeyHash": mustSHA256Hex("showcase-landlord-" + salt)},
+		&processor.ContextHint{OptionalReads: identityIndexOptionalReads(landlordName, landlordEmail)})
 	landlordKey := reply.PrimaryKey
 
 	submitOp(ctx, conn, adminKey, "AssignRole", "",
@@ -1346,10 +1358,10 @@ func retireLegacyTemplates(ctx context.Context, conn *substrate.Conn) {
 // in the same machine-readable form the from-scratch path does. The staff
 // persona is the same recovery one relation over, and ensureStaff owns it —
 // including printing FACET_STAFF_NANOID. Returns (tenant1Key, tenant2Key) —
-// either may come back "" on a world whose residence link cannot be found at
-// all, which the caller must check before using it (the W0 personas hanging
-// off tenant1/tenant2 all key on their identity, not their fixed unit).
-func recoverTenants(ctx context.Context, conn *substrate.Conn, adminKey string) (string, string) {
+// either may come back "" if seedTenant's own remint (below) fails, which the
+// caller must check before using it (the W0 personas hanging off
+// tenant1/tenant2 all key on their identity, not their fixed unit).
+func recoverTenants(ctx context.Context, conn *substrate.Conn, adminKey, consumerRoleKey string) (string, string) {
 	js := conn.JetStream()
 	coreKV, err := js.KeyValue(ctx, bootstrap.CoreKVBucket)
 	must(err, "open core-kv")
@@ -1360,19 +1372,27 @@ func recoverTenants(ctx context.Context, conn *substrate.Conn, adminKey string) 
 	for i, t := range []struct {
 		envVar  string
 		unitKey string
+		name    string
+		email   string
 	}{
-		{"FACET_TENANT1_NANOID", unit1Key},
-		{"FACET_TENANT2_NANOID", unit2Key},
+		{"FACET_TENANT1_NANOID", unit1Key, tenant1Name, tenant1Email},
+		{"FACET_TENANT2_NANOID", unit2Key, tenant2Name, tenant2Email},
 	} {
 		tenantKey, live := findResidentOf(ctx, coreKV, allKeys, t.unitKey)
 		if tenantKey == "" {
 			// The building is alive (why recoverTenants runs at all), but this
 			// unit's resident never resolved — the death-mid-ceremony wedge:
-			// CreateUnclaimedIdentity ran but nothing ever wired residesIn. A
-			// silent skip here surfaces many calls later as a cryptic reject
-			// against an empty identity key, with no clue which unit is unwired.
-			fmt.Fprintf(os.Stderr, "==> WARNING:         no resident found for %s (%s unset) — a partial prior seed run?\n",
-				t.unitKey, t.envVar)
+			// CreateUnclaimedIdentity ran but nothing ever wired residesIn.
+			// seedTenant's own mint now declares the identityindex probes
+			// (identityIndexOptionalReads), so re-running it is safe even if an
+			// earlier attempt already minted an orphan holding this email: the
+			// DDL resolves the collision as a duplicateOf link instead of
+			// RevisionConflict, and this run converges the unit's world on the
+			// freshly minted, fully-wired identity.
+			tenantKey = seedTenant(ctx, conn, adminKey, consumerRoleKey, t.unitKey, t.name, t.email)
+			fmt.Printf("==> healed:          reminted %s residesIn %s (no resident found — a partial prior seed run)\n", tenantKey, t.unitKey)
+			fmt.Println(t.envVar + "=" + strings.TrimPrefix(tenantKey, "vtx.identity."))
+			tenantKeys[i] = tenantKey
 			continue
 		}
 		if !live {
@@ -1642,6 +1662,22 @@ func must(err error, context string) {
 func mustSHA256Hex(s string) string {
 	sum := sha256.Sum256([]byte(s))
 	return hex.EncodeToString(sum[:])
+}
+
+// identityIndexOptionalReads derives the identityindex dedup-probe keys
+// (identity-domain's ddls.go CreateUnclaimedIdentity DDL: crypto.sha256NanoID
+// over "email:"+email and "name:"+normalized-name) that every
+// CreateUnclaimedIdentity call must declare as OptionalReads. Without them the
+// script sees no index hit regardless of what is actually live, so a re-mint
+// against an email a prior partial run already indexed emits a fresh "create"
+// mutation on that index vertex and hard-fails RevisionConflict instead of
+// resolving as a duplicateOf link (packages/identity-domain/dedup_test.go).
+func identityIndexOptionalReads(name, email string) []string {
+	normalizedName := strings.Join(strings.Fields(strings.ToLower(name)), " ")
+	return []string{
+		"vtx.identityindex." + substrate.SHA256NanoID("email:"+email),
+		"vtx.identityindex." + substrate.SHA256NanoID("name:"+normalizedName),
+	}
 }
 
 // waitForRoleGrant polls actorKey's cap.roles.<actor> projection until it
