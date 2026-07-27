@@ -5,6 +5,9 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -162,4 +165,95 @@ func TestRunSyncLoop_MarksDegradedOnRunError(t *testing.T) {
 	require.True(t, <-rec.ch, "first failed Run must mark sync degraded")
 	cancel()
 	<-done
+}
+
+// TestFeed_HydrationIsStickyAndReplayed pins the signal the renderer's boot
+// gate waits on (facet-app-ux.md §10). edge/sync fires OnHydrationComplete on
+// the cold path only, so a browser that connects after hydration — a reload
+// onto a warm engine, or a second tab — would hear nothing at all and could
+// not tell a finished world from one still catching up.
+func TestFeed_HydrationIsStickyAndReplayed(t *testing.T) {
+	fd := newFeed(nil)
+
+	hydrated, rev := fd.hydrationState()
+	require.False(t, hydrated, "a fresh engine has not hydrated")
+	require.Zero(t, rev)
+
+	ch := fd.subscribe()
+	defer fd.unsubscribe(ch)
+	fd.publishReady(42)
+
+	select {
+	case fr := <-ch:
+		require.Equal(t, "ready", fr.Kind)
+		require.Equal(t, uint64(42), fr.Revision)
+	default:
+		t.Fatal("publishReady published no live frame")
+	}
+
+	hydrated, rev = fd.hydrationState()
+	require.True(t, hydrated, "hydration is sticky for the engine's lifetime")
+	require.Equal(t, uint64(42), rev)
+}
+
+// TestFeed_MarkResumed pins the warm-resume half: an engine rebuilt over a
+// store that already carries a cursor is past hydration by edge/sync's own
+// cold-vs-warm test, and will never signal it again.
+func TestFeed_MarkResumed(t *testing.T) {
+	fd := newFeed(nil)
+	ch := fd.subscribe()
+	defer fd.unsubscribe(ch)
+
+	fd.markResumed(7)
+
+	hydrated, rev := fd.hydrationState()
+	require.True(t, hydrated)
+	require.Equal(t, uint64(7), rev)
+
+	select {
+	case fr := <-ch:
+		t.Fatalf("markResumed must not broadcast — no tab is waiting on a past event: %+v", fr)
+	default:
+	}
+
+	// A retention-gapped store re-hydrates; the later signal just re-marks.
+	fd.publishReady(9)
+	hydrated, rev = fd.hydrationState()
+	require.True(t, hydrated)
+	require.Equal(t, uint64(9), rev)
+}
+
+// TestWriteSSE_ReplaysReadyAfterTheSnapshot proves the replay a reconnecting
+// browser gets, and its ORDER: `ready` releases the renderer's boot gate, so a
+// ready ahead of the snapshot burst would paint an empty Home for the frame it
+// takes the rows to land. An engine that has not hydrated replays no ready at
+// all — that silence is what holds the gate on a fresh sign-in.
+func TestWriteSSE_ReplaysReadyAfterTheSnapshot(t *testing.T) {
+	// A cancelled request context makes this deterministic without a sleep:
+	// writeSSE writes its whole replay before it ever reaches the stream loop,
+	// then returns on the first select.
+	serve := func(fd *feed, snapshot func() []frame) string {
+		t.Helper()
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		req := httptest.NewRequest(http.MethodGet, "/api/feed", nil).WithContext(ctx)
+		rec := httptest.NewRecorder()
+		writeSSE(rec, req, slog.New(slog.NewTextHandler(io.Discard, nil)), fd, snapshot)
+		return rec.Body.String()
+	}
+	oneRow := func() []frame {
+		return []frame{{Kind: "manifest", Key: "vtx.unit.aaaaaaaaaaaaaaaaaaaa.manifest"}}
+	}
+
+	hydrating := newFeed(nil)
+	body := serve(hydrating, oneRow)
+	require.NotContains(t, body, "event: ready",
+		"a still-hydrating engine promises nothing — the gate stays up")
+
+	warm := newFeed(nil)
+	warm.publishReady(11)
+	body = serve(warm, oneRow)
+	require.Contains(t, body, "event: ready")
+	require.Less(t, strings.Index(body, "event: manifest"), strings.Index(body, "event: ready"),
+		"ready must follow the snapshot burst it releases the gate for")
 }

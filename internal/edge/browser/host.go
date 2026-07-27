@@ -149,6 +149,18 @@ func Start(ctx context.Context, cfg Config) (*Host, error) {
 		selfName = edgevault.NewSelfName(vaultClient)
 	}
 	fd := newFeed(selfName)
+	// An IndexedDB mirror that already carries a cursor was populated in an
+	// earlier page lifetime, so edge/sync will warm-resume it and never signal
+	// hydration again. Tell the feed now, or the renderer would hold its boot
+	// gate waiting for a frame that cannot come. A read error is not fatal:
+	// the worst case is that gate's outer safety net rather than an instant
+	// paint.
+	if cursor, ok, cErr := st.Cursor(); cErr != nil {
+		logger.Warn("edge/browser: cursor read failed; boot gate falls back to its timer",
+			"identityId", cfg.IdentityID, "err", cErr)
+	} else if ok {
+		fd.markHydrated(cursor)
+	}
 
 	mgr, err := edgesync.New(tr, st, edgesync.Config{
 		IdentityID: cfg.IdentityID,
@@ -173,6 +185,7 @@ func Start(ctx context.Context, cfg Config) (*Host, error) {
 			signalPeer(cfg.Shell, key, deleted)
 		},
 		OnHydrationComplete: func(revision uint64) {
+			fd.markHydrated(revision)
 			fd.publish(frame{Kind: "ready", Revision: revision})
 		},
 		OnRunEstablished: func() {
@@ -403,6 +416,12 @@ func (h *Host) Snapshot() ([]frame, error) {
 	}
 	for _, e := range h.feed.snapshotOutbox() {
 		out = append(out, frame{Kind: "outbox", Outbox: e})
+	}
+	// After the rows, never before: this frame releases the renderer's boot
+	// gate, and a gate released ahead of the burst would paint an empty Home
+	// for the one frame it takes the rows to land.
+	if hydrated, revision := h.feed.hydrationState(); hydrated {
+		out = append(out, frame{Kind: "ready", Revision: revision})
 	}
 	if reason, ok := h.feed.revoked(); ok {
 		out = append(out, frame{Kind: "revoked", Reason: reason})

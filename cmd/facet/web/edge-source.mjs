@@ -45,9 +45,10 @@ export function edgeSource(api) {
   let unsub = null;
   return {
     // start subscribes to the live delta stream, then replays the current
-    // snapshot — the same burst the SSE host sends on connect (manifest rows +
-    // outbox + connectivity, no `ready`; `ready` arrives live once hydration
-    // completes, or the renderer's 3s silence fallback finishes boot). Live and
+    // snapshot — the same burst the SSE host sends on connect: connectivity +
+    // manifest rows + outbox, and `ready` only for a mirror already past its
+    // catch-up. A cold engine's `ready` arrives live instead, which is what
+    // holds the renderer's boot gate until there is a world to paint. Live and
     // snapshot frames both feed the LWW reducer, so their interleaving order
     // does not matter. Returns the snapshot promise so a caller can await the
     // first paint.

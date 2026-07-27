@@ -1653,7 +1653,7 @@ test-edge-consumer-parity:
 .PHONY: test-facet-web
 test-facet-web:
 	@echo "==> Running the Facet renderer unit vectors (feed-source swap, node --test)..."
-	node --test cmd/facet/web/degraded_render.test.mjs cmd/facet/web/edge-source.test.mjs cmd/facet/web/feed_source.test.mjs cmd/facet/web/descriptor_autofill.test.mjs cmd/facet/web/display_label.test.mjs cmd/facet/web/dispatch_target.test.mjs cmd/facet/web/staff_world.test.mjs cmd/facet/web/staff_worklist.test.mjs cmd/facet/web/work_orders.test.mjs cmd/facet/web/nearby_upcoming.test.mjs cmd/facet/web/sync_degraded_banner.test.mjs
+	node --test cmd/facet/web/degraded_render.test.mjs cmd/facet/web/edge-source.test.mjs cmd/facet/web/feed_source.test.mjs cmd/facet/web/descriptor_autofill.test.mjs cmd/facet/web/display_label.test.mjs cmd/facet/web/dispatch_target.test.mjs cmd/facet/web/staff_world.test.mjs cmd/facet/web/staff_worklist.test.mjs cmd/facet/web/work_orders.test.mjs cmd/facet/web/nearby_upcoming.test.mjs cmd/facet/web/sync_degraded_banner.test.mjs cmd/facet/web/boot_gate.test.mjs
 
 ## build-edge-wasm — the browser Edge node's wasm artifact
 ## (edge-browser-node-design.md §3.3). Compiles cmd/edge-wasm (the same

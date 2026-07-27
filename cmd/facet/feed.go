@@ -25,7 +25,10 @@ import (
 //   - "outbox"   — one Outbox entry's lifecycle state changed
 //     (queued/submitting/confirmed/rejected, §3.4a/b).
 //   - "ready"    — the cold hydration catch-up finished (§3.0's "Hydrating"
-//     → "Home" transition signal).
+//     → "Home" transition signal). Sticky, and replayed on (re)connect: the
+//     underlying OnHydrationComplete fires on the cold path only, so an engine
+//     that hydrated in an earlier page lifetime would otherwise leave every
+//     later tab unable to distinguish a finished world from a catching-up one.
 //   - "revoked"  — the Gateway refused this identity's credential outright
 //     (agent.ErrCredentialRejected: revoked via the kill-switch, or
 //     expired). Drives §4.4's sign-out flow. The browser cannot observe this
@@ -110,6 +113,15 @@ type feed struct {
 	// retry gets past its freshness gate. Replayed to fresh SSE connections
 	// for the same reason connected is.
 	syncDegraded bool
+	// hydrated, and the revision it completed at, are sticky for the same
+	// reason: edge/sync fires OnHydrationComplete on the cold-hydrate path
+	// only, so an engine that hydrated during an earlier page lifetime never
+	// fires it again — and a browser reconnecting to that engine would have no
+	// way to tell a finished world from one still catching up. writeSSE
+	// replays it, which is what lets the renderer hold its boot gate on the
+	// signal rather than on a timer (facet-app-ux.md §10).
+	hydrated         bool
+	hydratedRevision uint64
 	// selfName decrypts this identity's sealed name into the manifest.me
 	// row's displayName on its way to the browser. nil (no Vault control
 	// plane wired) passes every row through untouched.
@@ -209,7 +221,32 @@ func (f *feed) snapshotManifestFrames(st store.Store, ov *overlay.Overlay) ([]fr
 }
 
 func (f *feed) publishReady(revision uint64) {
+	f.mu.Lock()
+	f.hydrated = true
+	f.hydratedRevision = revision
+	f.mu.Unlock()
 	f.publish(frame{Kind: "ready", Revision: revision})
+}
+
+// markResumed records that this engine's store was already past hydration when
+// it opened. A persisted cursor is edge/sync's own cold-vs-warm test (sync.go's
+// ensureFresh), and on the warm branch it never calls OnHydrationComplete — so
+// without this, an engine rebuilt over an existing mirror after a host restart
+// would report "still hydrating" for its whole lifetime. Harmless if that store
+// turns out retention-gapped and re-hydrates: publishReady just re-marks it.
+func (f *feed) markResumed(revision uint64) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.hydrated = true
+	f.hydratedRevision = revision
+}
+
+// hydrationState returns the sticky hydration pair, for the replay a fresh SSE
+// connection receives (writeSSE).
+func (f *feed) hydrationState() (hydrated bool, revision uint64) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.hydrated, f.hydratedRevision
 }
 
 // publishRevoked records + broadcasts that the Gateway refused this
@@ -356,6 +393,12 @@ func writeSSE(w http.ResponseWriter, r *http.Request, logger *slog.Logger, fd *f
 	}
 	for _, e := range fd.snapshotOutbox() {
 		writeFrame(w, frame{Kind: "outbox", Outbox: e})
+	}
+	// After the rows, never before: this frame is what releases the renderer's
+	// boot gate, and a gate released ahead of the snapshot would paint an empty
+	// Home for the one frame it takes the burst to land.
+	if hydrated, revision := fd.hydrationState(); hydrated {
+		writeFrame(w, frame{Kind: "ready", Revision: revision})
 	}
 	if reason, ok := fd.revoked(); ok {
 		writeFrame(w, frame{Kind: "revoked", Reason: reason})

@@ -226,6 +226,12 @@ const state = {
   // TRUE so a device that has not yet heard a frame does not accuse itself of
   // being offline.
   connected: true,
+  // Whether the engine has signalled that its catch-up finished — the `ready`
+  // frame, live or replayed. Defaults FALSE, the opposite default to
+  // `connected`: an unheard-from engine is assumed still hydrating, because
+  // the cost of guessing wrong that way is a spinner and the cost of the other
+  // way is painting an empty world as if it were the answer.
+  hydrated: false,
 };
 
 const maxOutboxHistory = 50;
@@ -304,7 +310,7 @@ const feedHandlers = {
     scheduleRender();
   },
   outbox(entry) { applyOutboxFrame(entry); },
-  ready() { finishBoot(); },
+  ready() { state.hydrated = true; finishBoot(); },
   revoked(reason) {
     showRevocationBanner(reason);
     finishBoot(); // never strand a revoked session on the boot spinner
@@ -427,9 +433,24 @@ function startFeed() {
     });
 }
 
+// The boot gate closes on silence, and silence means two opposite things.
+// After the world has arrived — `ready`, or rows a snapshot replay carried —
+// a short quiet window just says the burst is over. Before it, on a fresh
+// sign-in, the engine is mid-hydration and delivers nothing for tens of
+// seconds; releasing on the short window there paints "No residence linked
+// yet" as if it were the answer, half a minute before the rows land. So the
+// delay is a function of whether there is anything to show, and the long arm
+// is only the net a wedged host still needs — not a wait anyone should see.
+const BOOT_QUIET_MS = 3000;
+const BOOT_HYDRATING_MS = 45000;
+
+function bootGateDelay(hasWorld) {
+  return hasWorld ? BOOT_QUIET_MS : BOOT_HYDRATING_MS;
+}
+
 function armSilenceFallback() {
   clearTimeout(sseSilenceTimer);
-  sseSilenceTimer = setTimeout(finishBoot, 3000);
+  sseSilenceTimer = setTimeout(finishBoot, bootGateDelay(state.hydrated || state.rows.size > 0));
 }
 
 function finishBoot() {

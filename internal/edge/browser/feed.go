@@ -83,6 +83,12 @@ type feed struct {
 	// per page lifetime (no restart loop), so an error exit marks it and a
 	// reload is what clears it.
 	syncDegraded bool
+	// hydrated, and the revision it completed at, are sticky for the same
+	// reason: a renderer cannot tell a finished world from one still catching
+	// up, and the difference decides whether an empty Home is the answer or a
+	// half-minute-premature guess at it.
+	hydrated         bool
+	hydratedRevision uint64
 
 	// selfName decrypts this identity's sealed name into the manifest.me
 	// row's displayName on its way to the renderer. nil passes every row
@@ -202,6 +208,26 @@ func (f *feed) setSyncDegraded(degraded bool) {
 	if changed {
 		f.publish(frame{Kind: "connectivity", Connected: connected, SyncDegraded: degraded})
 	}
+}
+
+// markHydrated records that this host's mirror is past its catch-up — either
+// because edge/sync signalled it (OnHydrationComplete) or because the store it
+// opened already carried a cursor, which is edge/sync's own warm-resume test
+// (sync.go's ensureFresh) and the branch that never signals. Snapshot replays
+// it so the renderer's boot gate releases on the signal rather than on its
+// hydrating-safety-net timer (facet-app-ux.md §10).
+func (f *feed) markHydrated(revision uint64) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.hydrated = true
+	f.hydratedRevision = revision
+}
+
+// hydrationState returns the sticky hydration pair, for the snapshot replay.
+func (f *feed) hydrationState() (hydrated bool, revision uint64) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.hydrated, f.hydratedRevision
 }
 
 // connectivityState returns the sticky connectivity pair (for the snapshot

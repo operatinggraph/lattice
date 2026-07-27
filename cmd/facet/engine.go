@@ -141,6 +141,18 @@ func newEngine(ctx context.Context, cfg engineConfig, identityID, deviceID, toke
 	}
 
 	fd := newFeed(selfName)
+	// A store that already carries a cursor consumed the delta stream in an
+	// earlier process lifetime, so edge/sync will warm-resume it and never
+	// signal hydration again. Tell the feed now, or every browser this engine
+	// serves would hold its boot gate waiting for a frame that cannot come. A
+	// read error is not fatal: the worst case is the renderer's outer
+	// safety net rather than an instant paint.
+	if cursor, ok, cErr := st.Cursor(); cErr != nil {
+		cfg.Logger.Warn("facet engine: cursor read failed; boot gate falls back to its timer",
+			"identityId", identityID, "err", cErr)
+	} else if ok {
+		fd.markResumed(cursor)
+	}
 	// Connectivity handlers key the offline banner on this connection's own
 	// host↔NATS state (design §4.4), not the browser↔host SSE transport —
 	// nats.go calls these on every disconnect/reconnect cycle regardless of
