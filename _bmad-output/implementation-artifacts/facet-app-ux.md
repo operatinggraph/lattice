@@ -94,10 +94,12 @@ states before showing real content:
    Go host's NATS connection + `personal.register`/`personal.hydrate` call are in flight (host hasn't yet
    opened the browser-facing feed).
 2. **Hydrating** — same layout, label becomes "Loading your world…" with a thin indeterminate progress bar.
-   Shown from feed-connect until the `hydrationComplete` signal arrives (see the gap noted in §2 — until
-   the FE Engineer wires `OnHydrationComplete`, a **timeout fallback** of 3s-of-silence-on-the-feed treated
-   as "probably done" is an acceptable Fire-2 stopgap, called out explicitly in code as a stopgap so it
-   isn't mistaken for the real signal).
+   Shown from feed-connect until hydration is signalled: the `ready` frame, live from
+   `OnHydrationComplete` or replayed for a mirror already past its catch-up (§10). The
+   3s-of-silence timeout this section once accepted as a Fire-2 stopgap is **no longer the gate's
+   release** — it survives only as the short quiet window that closes a snapshot burst once rows are
+   on screen, behind a much longer net for the cold case. See §10 for why the stopgap was a lie
+   exactly where it mattered most: a fresh sign-in.
 3. **Ready** — the chrome (top bar + bottom nav) mounts and **Home** renders. If `manifest.me` shows
    `claimed:false` (design §4.1's "claim beat") — **out of scope for Fire 2** (claim UX is Fire 3, needs
    real `whoami`/`ClaimIdentity`); Fire 2's seed identity is always pre-claimed so this state is simply
