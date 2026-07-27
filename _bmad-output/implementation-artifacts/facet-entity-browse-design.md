@@ -384,3 +384,69 @@ picker path is not demonstrable on this stack and the reason is the data, not th
 predates `servedAt` and so carries no link, exactly the non-goal named above — the demo seed re-mints them
 with one. That path is proven deterministically against the real engine in
 `TestEdgeEntityMenuItems_IsBoundedByTheResidenceChain`, the same posture §6 took for the café tab row.
+
+## 8. Build note — a tab's two relations get their two lifetimes (2026-07-27)
+
+**Scope sentence.** Bound the `edgeEntityTabs` read grant to a resident's *currently open* tabs by splitting
+the tab→lease relation into the two facts it has been conflating: a permanent `chargedTo` the settlement lens
+anchors on, and a transient `openFor` that `Settle` retracts.
+
+**The defect.** `edgeEntityTabs`' walk is `(identity)<-[:applicationFor]-(la:leaseapp)`,
+`(la)<-[:openFor]-(tab:tab)` ([edge-manifest/lenses.go:218-227](../../packages/edge-manifest/lenses.go)), and
+`Settle` leaves the `openFor` link standing ([cafe-domain/ddls.go:901-955](../../packages/cafe-domain/ddls.go)).
+So the compiled grant producer collects every tab the lease has *ever* held, for the lease's whole life, while
+the presentation tail filters to `status = "open"`. Grant ⊇ projection still holds — there is no over-read —
+but the `cap-read.edgeManifest.<actor>` slice this resident appears in grows without bound, and each entry
+rides the producer's cross-branch fan-out. §6's own comment names this and says bounding it is a lane item
+rather than something to fake with a key-list; this is that item.
+
+**Why the obvious two fixes are both wrong.** *Narrow the grant side* is inexpressible: a tab's status lives on
+an ASPECT and a `Walk.Chain` clause is a node pattern
+([pkgmgr/anchorwalk.go:40-45](../../internal/pkgmgr/anchorwalk.go)). *Retract `openFor` at `Settle`* is a money
+bug: `cafeTabSettlement` opens `MATCH (t)-[:openFor]->(l:leaseapp)` as a REQUIRED match and reads the lease's
+`cafeLedgerAccount` guard off it ([cafe-domain/lenses.go:146-157](../../packages/cafe-domain/lenses.go)), so a
+settled tab would project no row at all, `EmptyBehavior: "delete"` would drop the target, and Weaver would
+never dispatch `CreateAccount` / `DebitAccount` — the convergence fires exactly when the link would vanish.
+Tombstoning the tab VERTEX fails the same way and for the same reason.
+
+**The shape.** One link was carrying two facts with different lifetimes, which is why neither could be fixed
+without breaking the other:
+
+- `tab chargedTo leaseapp` — permanent. Minted by `OpenTab`, never retracted; the ledger spine
+  `cafeTabSettlement` anchors on. Mirrors the `account heldFor lease` anchor the three ledgers already mint
+  ([cafe-ledger/scripts.go:105](../../packages/cafe-ledger/scripts.go)). Direction per Contract #1 §1.1 — the
+  later-arriving tab is the source.
+- `tab openFor leaseapp` — transient, keeping its honest name. Minted by `OpenTab`, tombstoned by `Settle`, so
+  the walk's reach *is* the open set and the tail's `WHERE` becomes belt-and-braces rather than the only bound.
+
+This is the link form of a lifecycle the package already runs: the `cafeOpenTabGuard` aspect is claimed by
+`OpenTab` and released by `Settle` over and over across a lease's life
+([cafe-domain/ddls.go:182-204](../../packages/cafe-domain/ddls.go)). Two links between one pair is not a
+denormalized index — both are first-class relations, and neither stores a key in an aspect.
+
+**Increment order + green checks.**
+
+1. `cafe-domain` script — `make_link_tombstone` (mirroring
+   [clinic-domain/site.go:233](../../packages/clinic-domain/site.go): `op: update`, full envelope,
+   unconditioned, same as `Settle`'s existing guard release); `OpenTab` mints `chargedTo` alongside `openFor`;
+   `Settle` tombstones `openFor`. Both link keys are derivable from `tab_key` + the `.status`-denormalized
+   `leaseAppKey`, so no new declared read. → `go test ./packages/cafe-domain/`
+2. `cafeTabSettlement` re-anchors on `chargedTo`; `lens_cypher_test` fixtures seed both links, plus a new case
+   proving a settled tab with `openFor` retracted still converges. → same package test
+3. `edge-manifest` — the Walk is UNCHANGED; only `edgeEntityTabsTail`'s comment, which currently documents the
+   unbounded growth as accepted. `coverage_proof_test` gains the grant-side half: a tab whose `openFor` is gone
+   is not in `readableAnchors`. → `go test ./packages/edge-manifest/`
+4. Version bumps + `manifest.yaml`; `make verify-package-cafe-domain`.
+
+**In-scope gotchas.** A tombstoned link envelope removes both directional adjacency entries
+([refractor/consumer/bootstrap_test.go:261](../../internal/refractor/consumer/bootstrap_test.go)), which is
+what makes retraction actually drop the hop. `Settle` derives `lease_id` only inside its `authContextTarget`
+branch today — the link key needs it unconditionally.
+
+**Known data boundary, not a defect.** A tab opened before this version carries no `chargedTo`, so its
+settlement stops converging. `Charge` / `Settle` / the resident surfaces are unaffected (they read `.status`,
+not links). Recoverable by a reseed, which the demo box already does nightly — the same class as the seed items
+already on the lane, and not worth a legacy dual-match that would preserve the conflated shape forever.
+
+**Non-goals.** No walk-grammar change, no aspect-reachable grant narrowing, no key-list index, no linkType DDL
+(`openFor` has never declared one, and this fire is not the place to change that convention for one package).
