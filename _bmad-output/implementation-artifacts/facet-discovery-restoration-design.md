@@ -201,3 +201,32 @@ in-body in FSW §3.4, FEB §9, ESAD §3.2, and `docs/components/edge-manifest.md
   `edgeIdentity`'s anchors project `typeLabel` (the mechanism exists; a lens-side edit when a
   design wants curated hat words — cosmetic, no row filed). Icon tokens `basket`/`lotus` replaced
   the two vertical-named seeds' tokens.
+
+## 6. Live-walk follow-on (Winston, 2026-07-27 — same day, Andrew's signed-in findings)
+
+A multi-hat walk (Sam Okafor) surfaced four root causes; three fixed and verified live, one
+grounded and filed:
+
+- **Picker path** (`bb9fe41a`): an op whose `dispatch.targetType` is unresolvable from context is
+  still offerable when its target field declares an `x-entityRef` picker with mirror candidates —
+  the form collects the target; the submit path keeps the picker value when context yields
+  nothing. Verified live: `CreateAppointment` renders as a live button on a Clinician entity.
+- **No label floors to a short id** (`bb9fe41a` + 0.14.2): `scopedLabel` names the viewer's own
+  key with the me-row display name ("Sam Okafor", "You" pre-decrypt); `edgeServices` projects
+  `resolvedViaLabel` — bound in the TAIL, because a walk-prefix intermediate projects its key but
+  not its aspects (the engine finding this fire named; the `scopedUnit` precedent is the pattern).
+  `panes_test.go` pins the pairing rule structurally (entityType→typeLabel,
+  resolvedVia→resolvedViaLabel).
+- **The zombie task**: an open task pointed `forOperation` at an op-meta a package move had
+  tombstoned — undispatchable by construction, healed via operator `CancelTask`, and the lifecycle
+  gap filed (`[Pkgmgr] An op-meta tombstone orphans the open tasks that reference it`).
+- **The blanked service modal**: two racing lenses on one row key erased `viaServices` for
+  multi-hat actors (`[Refractor] Two lenses sharing one IntoKey race per column`, filed). The
+  0.14.4 mitigation makes both catalog tails project the join, but the roles tail's inbound
+  `(op)<-[:permitsOperation]-(psvc)` collect — proven correct in the ruleengine's own store by
+  `TestEdgeCatalogRoles_CarriesTheServiceJoin` — does not bind in the live projection (spec
+  current in KV, Refractor cycled, cold hydrate): filed as
+  `[Refractor] A tail expansion from a walk anchor binds in-memory but not in the live projection`.
+  Until it closes, the modal lists no ops for multi-hat actors (the pre-existing state — not a
+  regression) while the same ops offer normally from Nearby entities and tasks. The mitigation is
+  in place so the modal heals automatically when the loader gap closes.
