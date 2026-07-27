@@ -372,3 +372,48 @@ transition).
 
 Both resolved in the Fire 2 build (`f5b3031`): `OnHydrationComplete` added to `internal/edge/sync/sync.go`;
 port `:7810` confirmed free and wired into `make up-facet`.
+
+## 10. Build note — the first paint waits for a world (§3.0's stopgap, discharged)
+
+**Scope.** Facet's post-login first paint stays behind §3.0's "Loading your world…" gate until there is a
+world to show — the `ready` frame, or rows a snapshot already carried — instead of releasing on the
+3-seconds-of-silence fallback §3.0 called an explicit Fire-2 stopgap.
+
+**Why it is wrong today.** `armSilenceFallback` (`app.js`) arms one 3s timer and re-arms it on every
+`manifest` frame, so the gate lifts after 3s of quiet no matter what caused the quiet. Two different
+worlds produce that quiet:
+
+- **Warm** — the engine hydrated in an earlier page lifetime, so `writeSSE`'s snapshot burst lands rows
+  immediately and the 3s timer then paints a populated Home. Correct by accident.
+- **Cold (a fresh sign-in)** — `engineManager` builds the engine at login and `edgesync` hydrates for
+  ~20–30s before its first row. The snapshot is empty, no frame arrives, the 3s timer fires, and Home
+  paints "No residence linked yet" / "No services available yet" as if that were the answer. The rows
+  arrive half a minute later. Every live-demo first impression hits this.
+
+`ready` is the honest signal (`engine.go` → `OnHydrationComplete` → `feed.publishReady`), but it does not
+cover the warm case on its own: `sync.go` fires `OnHydrationComplete` on the **cold-hydrate path only**,
+and `writeSSE` never replays it, so a reload onto a hydrated engine would hang on a `ready`-only gate.
+
+**The two halves.**
+
+1. **Host** — `feed` keeps `ready` sticky (the revision it fired with) exactly as it already keeps
+   `revoked` / `connected` / `syncDegraded` sticky, and `writeSSE` replays it to a fresh connection. A
+   browser reconnecting to a hydrated engine now learns that deterministically instead of inferring it
+   from a timer.
+2. **Renderer** — the fallback delay becomes a function of whether there is anything to show. `ready` seen
+   or rows present → the existing short quiet window closes the burst. Neither → the engine is still
+   cold-hydrating, so hold the gate and fall back only on an outer net a genuinely wedged host still needs.
+
+**Touch list** (verified live): `cmd/facet/feed.go:47` (frame), `:87` (feed struct), `:211` (`publishReady`),
+`:338` (`writeSSE`) · `cmd/facet/web/app.js:210` (state), `:299` (`feedHandlers`), `:430`
+(`armSilenceFallback`) · new vector `cmd/facet/web/boot_gate.test.mjs` + its `Makefile` `test-facet-web` entry
+· `cmd/facet/feed_test.go`.
+
+**Non-goals.** Hydration is not made faster, and `internal/edge/*` is untouched — the browser-native host
+(`internal/edge/browser/host.go`) builds its engine per page lifetime, so it always cold-hydrates and always
+fires `ready` live; it needs the renderer half only, which it gets for free (the reducer is source-agnostic).
+The empty-state copy itself stays as-is: it is correct once hydration has actually completed.
+
+**Green checks.** `go test ./cmd/facet/...`, `make test-facet-web`, `go build ./...`, `make vet`,
+`golangci-lint run ./...`, `STRICT=1 go run ./scripts/lint-conventions.go`, then a live cold sign-in on
+`:7810`.
