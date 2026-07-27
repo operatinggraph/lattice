@@ -683,9 +683,9 @@ test envelopes declaring a `.profile` read production does not (so the tests wer
 production commits unconditioned), and no test proving the **operator** branch *accepts* — a guard broken to
 always-deny would have passed everything. The last is now pinned in both packages.
 
-One finding is filed rather than fixed: `actor_holds_operator` pages `holdsRole` at 50 and discards the
-cursor, so it is fail-closed above that ceiling. It is a verbatim copy of the clinic precedent and now lives
-in three packages, which is why it gets its own row rather than a silent divergence here.
+One finding was filed rather than fixed here: `actor_holds_operator` paged `holdsRole` at 50 and discarded
+the cursor, fail-closed above that ceiling — closed 2026-07-27 (`af302004`) across all 15 S10-pinned copies
+corpus-wide, following the cursor up to `MAX_ROLE_PAGES=4` pages before denying.
 
 **Not built, deliberately:** no availability/hours op for either domain (nothing reads instructor or provider
 availability, so it would be scaffolding with no consumer), and no `consumer`-role backfill — that remains
