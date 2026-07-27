@@ -214,6 +214,7 @@ Real but low-value; do **not** spend design or build effort here unless Andrew g
 
 One line per shipped item (`date · SHA · [tag] title`). Oldest roll to `archive/` past ~25.
 
+- 2026-07-27 · `8981a8b0` · [CI] lease-convergence drain budget — the 3 15s outliers join the suite's 30s convention; the chain converged microseconds late on CI, and the window ceiling the old comment claimed was measured from the wrong instant
 - 2026-07-27 · `e8d78278` · [Refractor] evaluation-scoped read memo — one cypher run observes one value per key, so a commit landing mid-evaluation can no longer split an anchor into two rows and drop the projection
 - 2026-07-26 · — · [Packages] Conformance-sweep row closes as overtaken — Standard Inc 1–6 (verticals) drained it: `s1Debt`/`s6Debt` empty, 29 pkgs, no exemptions; `readTemplateDebt` (2) has its own verticals row
 - 2026-07-26 · `6cacb337` · [CI] embedded-server ctor sweep — 97 `RunServer` fixtures routed through `natsfixture`, ctor gate now anchors both construction routes; net -480 lines
