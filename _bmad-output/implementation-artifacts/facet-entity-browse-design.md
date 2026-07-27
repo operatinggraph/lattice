@@ -550,6 +550,16 @@ of `cmd/clinic-app`'s patient-self view today), newly *reachable* now Facet rend
 well means projecting a raw `paused` (or `activeUntil`) column and a three-state client badge — a small but
 separate decision from "make the trio resolve at all," filed as its own row (verticals.md).
 
+**Resolved** (Winston, 2026-07-27, verticals.md "A naturally-ended visit series still shows a working Resume
+button"): `visitSeriesReadSpec` (`clinic-reminders/visitseries.go`) replaces the fused `active` boolean with a
+raw `series_status` text column — `"active" | "paused" | "ended"`, precedence sequential (paused is judged
+first, so a series paused before it would have ended still reads "paused", never "ended"). `cmd/clinic-app`'s
+`renderMySeriesCard` now offers Pause/Resume only for `"active"`/`"paused"` and neither for `"ended"`; the
+`clinic-reminders` Pause/Resume op-metas' `dispatch.visibleWhen` moved from `{field:"active"}` to
+`{field:"series_status"}` so the SAME fix reaches Facet's staff worklist pane (`edge-manifest`
+`panes.go`'s `visitSeries` section) with no app change, exactly as the descriptor-driven design intends.
+clinic-reminders 0.7.2, edge-manifest 0.14.7.
+
 **Non-goals.** No change to the mirror (`manifest.ent`/`edge-manifest`) — `patient` still can never ride it,
 by design, permanently. No change to `RescheduleAppointment`'s free-text `patient` field
 ([verticals.md Done log](../planning-artifacts/backlog/verticals.md), `0badf04e`) — `x-entityRef` pickers only

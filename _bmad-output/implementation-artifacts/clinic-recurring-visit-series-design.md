@@ -216,3 +216,45 @@ grant; no `contextHint` change; no contract text; no self/consumer path.
 (Start→Start/Pause/Resume) is intent-preserving (the named "Follow-ups tab" consumer submits all three)
 and recorded above, never a substitution of an adjacent mechanism; the operator-exempt-only divergence
 is a *narrowing* of the mirrored precedent (fewer exemptions), grounded in the missing ownership backstop.
+
+## 8. Build note — the fused `active` boolean splits into a three-state read (Winston, 2026-07-27)
+
+**Scope sentence** (verbatim, verticals.md): *"A naturally-ended visit series still shows a working Resume
+button — `active` fuses 'not paused' with 'not past `activeUntil`', so an ended-not-paused series shows
+Resume; it submits and succeeds but changes nothing observable. Needs a raw `paused`/`activeUntil` column +
+a 3-state badge."* Surfaced as a named residual of facet-entity-browse-design.md §9 once Facet made the
+Pause/Resume pair reachable from its staff worklist; the same fusion was always live in `cmd/clinic-app`'s
+own patient-self view (§4's own formula, above), just never rendered a button on the *ended* branch there.
+
+**What shipped.** `visitSeriesReadSpec` (the FE-facing Postgres lens; `visitSeriesDueSpec` — Weaver's own
+convergence question, "should this fire next" — is untouched, a different question) replaces `active BOOLEAN`
+with `series_status TEXT ∈ {"active","paused","ended"}`, a sequential `CASE`: paused is judged first (a
+series paused before its own end still reads "paused", never "ended" — pausing is what the human did, and
+wall-clock catching up to a frozen `activeUntil` comparison shouldn't reclassify it out from under them),
+then "ended" (`activeUntil` set AND `nextDueAt` past it), else "active" — mirroring the raw-enum idiom
+`appointmentStatus`/`bookingStatus`/loftspace listing-status already use, not a new pattern.
+
+Every consumer of the old boolean moved to the new field: `clinic-reminders`'s Pause/Resume op-metas'
+`dispatch.visibleWhen` (`{field:"active"}` → `{field:"series_status", equals:"active"/"paused"}`) — which is
+also what Facet's staff worklist pane reads, no app change needed there; `edge-manifest`'s `panes.go`
+`visitSeries` section column (`active` badge/boolean → `series_status` badge/text, default `"ended"` — the
+safer bias when a row hasn't yet re-projected under the new shape, matching "offer nothing" over "offer the
+wrong toggle"); `cmd/clinic-app`'s `protectedVisitSeriesRow`/`renderMySeriesCard`/`renderSeriesCard`/
+`seriesUrgency`/`toggleSeries`. `renderMySeriesCard` (the patient-view card the bug named) now renders NO
+toggle at all once a series is `"ended"` — the direct fix — while the staff worklist's "Paused / ended"
+urgency bucket keeps grouping both non-active states together, unchanged, since scheduling urgency doesn't
+care which.
+
+**Versions:** clinic-reminders 0.7.1→0.7.2, edge-manifest 0.14.5→0.14.7 (0.14.6 landed the unrelated
+`instructorKey` provenance column in the same fire; see persona-worlds-design.md §7 "Resolved").
+
+**Gates:** `go build ./...`, `go vet ./...`, `golangci-lint run ./...`, `STRICT=1 lint-conventions`,
+`lint-lens-anchors`, `lint-package-standard`, `lint-package-version`, full `go test ./... -p 4` (shared
+edge-manifest change) all clean; `go test ./packages/clinic-reminders/... ./cmd/clinic-app/... ./cmd/facet/...`
+plus the full facet `node --test *.test.mjs` (156 vectors, extended for the third `visibleWhen` state and the
+`series_status` pane fixture) green.
+
+**Non-goals.** No change to `visitSeriesDueSpec`/Weaver's own convergence gate. No backend rejection added to
+`ResumeVisitSeries` on an ended series — it stays a harmless idempotent no-op; the FE now simply never offers
+it, which is the named fix. No Postgres migration script — the read model is Refractor-projected and
+re-derives its full row shape on the next CDC event, per the Protected-lens convention.

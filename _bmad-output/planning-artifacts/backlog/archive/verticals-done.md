@@ -2,6 +2,19 @@
 
 Rolled from `verticals.md` when its live Done log passed ~25 entries. Full detail is in git.
 
+- 2026-07-27 · `7a52a673` · A tab's two lease relations get their two lifetimes — permanent `chargedTo` anchors settlement, transient `openFor` is retracted by `Settle`, bounding the read grant to open tabs. facet-entity-browse §8
+- 2026-07-26 · `51bc4afa` · The first paint waits for a world — the boot gate releases on hydration, sticky + replayed on both hosts, not on a 3s silence a cold sign-in outlasts. facet-app-ux §10
+- 2026-07-26 · `87010105` · The café charge form picks a menu item — `menuitem servedAt location` + `edgeEntityMenuItems`; the `x-entityRef` widget stops being a stub and becomes type-driven. facet-entity-browse §7
+- 2026-07-26 · `6b74deaf` · The domain resolvers test the vertices they walk through — a tombstoned provider / studio / withdrawn leaseapp conferred its ex-topology; six resolvers, `vertex_live` joins the S10 pin. facet-staff-worlds §11
+- 2026-07-26 · `1946ce92` · The workplace guard joins the S10 pin — nine copies were two functions, not three variants; the four `parts_of` aliases deleted; per-helper floors, `_test.go` scanned, a digest-alias rule. Standard §13
+- 2026-07-26 · `618196de` · The ownership ops bind their actor — `enforce_manages` default-denies every non-operator with no live `manages` link; the exemption is the operator ROLE, not a validated target. persona-worlds W2 Inc 5
+- 2026-07-26 · `c35eb3be` · One vertex-key parser — `parts_of` converges 31 copies onto one body and joins the S10 pin; the `< 3` arity laxity that truncated a four-segment aspect key into a `scopedTo` link is closed. Standard §12
+- 2026-07-26 · `57e089b9` · Workplace guard covers every containment parent, and no tombstoned location — 9 copies unified across 7 packages; new S10 gate. facet-staff-worlds §10
+- 2026-07-26 · `cc6a377b` · The café front desk records a payment again — `CreditCafeAccount` grants `frontOfHouse` behind a workplace guard off the account's own lease; the prefix keeps a name-matched grant off the sibling ledgers. New S9 gate
+- 2026-07-26 · `0b14d0f7` · The wellness front desk books a member in again — `wellnessMembers` backs a workplace-scoped `/api/members` + the roster's book control. persona-worlds W3 Inc 4
+- 2026-07-26 · `ff9c7278` · Wellness staff writes are workplace-confined — CreateStudio/CreateBooking/CancelBooking widen to frontOfHouse behind `require_workplace`; new-studio + release-seat FE restored. persona-worlds W3 Inc 3
+- 2026-07-26 · `48a06798` · Staff reads are workplace-confined — café's seven read sites unify on one `cafeLeaseWorkplaces` visibility rule (own ∪ covered, operator exempt); closes the wellness+café row. facet-staff-worlds §9
+- 2026-07-26 · `1532a6c5` · Wellness `coveringLocations` hop bound matched to the write side — `*0..8` reached one level deeper than `worksAt_covers`; now pinned
 - 2026-07-26 · `c84d1eb5` · Two more nouns for the descriptors — `edgeEntityTabs` + `edgeEntityStudios`; the `identity` retarget-to-submitter fallback deleted. facet-entity-browse §6
 - 2026-07-26 · `dc396cb3` · Vertical Package Standard CLOSED — Inc 6 executes the last nine lenses; all four §3 routes discharged, S1/S6/S7 bind corpus-wide with zero exemptions. Standard §9
 - 2026-07-26 · `52711a5a` · identity-domain conforms — s1Debt is EMPTY; ClaimIdentity + RecordIdentityPII get descriptors, the 5 ceremony ops state why they cannot, lease-signing's shadow meta deleted. Standard §3.4 Inc 5

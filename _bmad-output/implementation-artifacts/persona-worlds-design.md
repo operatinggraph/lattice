@@ -1980,6 +1980,17 @@ hat's op on a shared type and it **fails closed in-script**. Correcting it needs
 `manifest.ent` rows do not carry; UX-only, filed as its own row rather than freelanced here. No attendance ops
 (W3 Inc 2's row); no `cmd/<app>` FE changes; no contract edits; no new engine capability.
 
+**Resolved** (Winston, 2026-07-27, verticals.md "Entity detail attaches cross-hat ops"): `app.js`'s
+`crossHatMismatch` withholds a self-administer op (`dispatchClass === dispatchTargetType`) from `opButton`
+whenever the entity being viewed is provably not the caller's own — either the row's key isn't among the
+caller's own anchors of the target's type (the no-`{me.<type>}`-param shape, e.g. a provider's own hours), or
+a declared `{me.<type>}` ownership param resolves to something that disagrees with a new `<type>Key`
+provenance column the row now carries (the cross-type shape, e.g. an instructor's own class). `instructorKey`
+rides `edgeEntitySessionsTail` / `edgeInstructorSessionsTail` / `edgeEntityBookingsTail` (edge-manifest
+0.14.7) for exactly this. Left deliberately narrow: an op with no anchor of the target's type held by ANYONE
+(a workplace-confined standing op, e.g. a recurring visit series' Pause/Resume) is left alone rather than
+guessed at — see `clinic-recurring-visit-series-design.md`'s own three-state fix for that different mechanism.
+
 ## 10a. Non-goals
 
 No OIDC/IdP build; no SSO; no runtime archetype enum; no generic collections surface (named-deferred); no café
