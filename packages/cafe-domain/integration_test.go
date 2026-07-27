@@ -248,6 +248,18 @@ func seedLeaseWithApplicant(t *testing.T, ctx context.Context, conn *substrate.C
 	return key
 }
 
+// seedAppliesToUnit wires a leaseapp's appliesToUnit link to a unit location
+// the way lease-signing actually mints one — leaseapp_unit (ddls.go) resolves
+// a tab's own building from this link, never from a payload field, so a
+// self-order Charge's locality bound has nothing to check without it.
+func seedAppliesToUnit(t *testing.T, ctx context.Context, conn *substrate.Conn, leaseKey, unitKey string) {
+	t.Helper()
+	leaseID := strings.TrimPrefix(leaseKey, "vtx.leaseapp.")
+	unitID := strings.TrimPrefix(unitKey, "vtx.unit.")
+	seedLink(t, ctx, conn, "lnk.leaseapp."+leaseID+".appliesToUnit.unit."+unitID,
+		leaseKey, unitKey, "appliesToUnit", "appliesToUnit")
+}
+
 // openTab submits OpenTab{leaseAppKey}, declaring the per-lease
 // cafeOpenTab guard in OptionalReads (Contract #2 §2.5 class-(d) — the
 // guard legitimately may or may not exist yet), and returns the tab key.
@@ -1125,9 +1137,10 @@ func TestCharge_SelfOrder_DerivesAmountFromMenuItem(t *testing.T) {
 
 	seedIdentity(t, ctx, conn, domainConsumerID)
 	leaseKey := seedLeaseWithApplicant(t, ctx, conn, "BBCAFEDMNCHGQKLEASEH", domainConsumerID)
+	unitKey := seedLocation(t, ctx, conn, "BBCAFEDMNCHGQKUNPTHJ")
+	seedAppliesToUnit(t, ctx, conn, leaseKey, unitKey)
 	tabKey := openTab(t, ctx, conn, cp, cons, "cdselfchargesetup001", leaseKey)
-	locKey := seedLocation(t, ctx, conn, "BBCAFEDMNMENULCTNHJC")
-	itemKey := createMenuItem(t, ctx, conn, cp, cons, "cdselfchargemenu0001", "Latte", 450, locKey)
+	itemKey := createMenuItem(t, ctx, conn, cp, cons, "cdselfchargemenu0001", "Latte", 450, unitKey)
 	applicationForLnk := "lnk.leaseapp.BBCAFEDMNCHGQKLEASEH.applicationFor.identity." + domainConsumerID
 
 	reqID := testutil.GenReqID("cdselfchargetab000001")
@@ -1229,6 +1242,93 @@ func TestCharge_SelfOrder_UnknownMenuItemRejected(t *testing.T) {
 	outcome := testutil.DriveOne(t, ctx, cp, cons, "")
 	if outcome != processor.OutcomeRejected {
 		t.Fatalf("self-order Charge against an unknown menu item outcome = %v, want Rejected", outcome)
+	}
+}
+
+// TestCharge_SelfOrder_RejectedForMenuItemAtAnotherBuilding proves a consumer
+// satisfying every existing check (own tab, own applicationFor) is still
+// rejected when the referenced menu item is served at a location unrelated to
+// the tab's own building — the write confinement servedAt never had before.
+func TestCharge_SelfOrder_RejectedForMenuItemAtAnotherBuilding(t *testing.T) {
+	ctx, conn := setupDomainEnv(t)
+	testutil.SeedCapDoc(t, ctx, conn, domainConsumerCapDoc())
+	cp, cons := newDomainPipeline(t, ctx, conn, "chargeselfotherbldg")
+
+	seedIdentity(t, ctx, conn, domainConsumerID)
+	leaseKey := seedLeaseWithApplicant(t, ctx, conn, "BBCAFEDMNCHGXBLEASEH", domainConsumerID)
+	unitKey := seedLocation(t, ctx, conn, "BBCAFEDMNCHGXBUNPTHJ")
+	seedAppliesToUnit(t, ctx, conn, leaseKey, unitKey)
+	tabKey := openTab(t, ctx, conn, cp, cons, "cdselfchargeoth10001", leaseKey)
+
+	otherLocKey := seedLocation(t, ctx, conn, "BBCAFEDMNCHGXBBLDGHJ")
+	itemKey := createMenuItem(t, ctx, conn, cp, cons, "cdselfchargeothmenu2", "Latte", 450, otherLocKey)
+	applicationForLnk := "lnk.leaseapp.BBCAFEDMNCHGXBLEASEH.applicationFor.identity." + domainConsumerID
+
+	reqID := testutil.GenReqID("cdselfchargeoth10002")
+	env := &processor.OperationEnvelope{
+		RequestID:     reqID,
+		Lane:          processor.LaneDefault,
+		OperationType: "Charge",
+		Actor:         domainConsumerKey,
+		SubmittedAt:   "2026-07-27T12:10:00Z",
+		Class:         "tab",
+		Payload:       json.RawMessage(`{"tabKey":"` + tabKey + `","menuItemKey":"` + itemKey + `"}`),
+		ContextHint: &processor.ContextHint{
+			Reads:         []string{tabKey, tabKey + ".status", itemKey, itemKey + ".price"},
+			OptionalReads: []string{applicationForLnk},
+		},
+		AuthContext: &processor.AuthContext{Target: domainConsumerKey},
+	}
+	testutil.PublishOp(t, conn, env)
+	outcome := testutil.DriveOne(t, ctx, cp, cons, "")
+	if outcome != processor.OutcomeRejected {
+		t.Fatalf("self-order Charge for a menu item at another building outcome = %v, want Rejected (AuthDenied)", outcome)
+	}
+}
+
+// TestCharge_SelfOrder_AcceptsMenuItemServedAtCoveringBuilding proves the
+// locality bound is ancestor-inclusive, not exact-match-only: a menu item
+// served at the BUILDING that contains the tab's own unit (a building-level
+// café, not one scoped per-unit) is still chargeable — mirrors
+// worksAt_covers' "wired to any containing building matches everything
+// containedIn it".
+func TestCharge_SelfOrder_AcceptsMenuItemServedAtCoveringBuilding(t *testing.T) {
+	ctx, conn := setupDomainEnv(t)
+	testutil.SeedCapDoc(t, ctx, conn, domainConsumerCapDoc())
+	cp, cons := newDomainPipeline(t, ctx, conn, "chargeselfcovering")
+
+	seedIdentity(t, ctx, conn, domainConsumerID)
+	leaseKey := seedLeaseWithApplicant(t, ctx, conn, "BBCAFEDMNCHGCVLEASEH", domainConsumerID)
+	unitKey := seedLocation(t, ctx, conn, "BBCAFEDMNCHGCVUNPTHJ")
+	seedAppliesToUnit(t, ctx, conn, leaseKey, unitKey)
+	buildingKey := "vtx.building.BBCAFEDMNCHGCVBLDGHJ"
+	seedVertex(t, ctx, conn, buildingKey, "location", map[string]any{})
+	seedLink(t, ctx, conn, "lnk.unit.BBCAFEDMNCHGCVUNPTHJ.containedIn.building.BBCAFEDMNCHGCVBLDGHJ",
+		unitKey, buildingKey, "containedIn", "containedIn")
+	tabKey := openTab(t, ctx, conn, cp, cons, "cdselfchargecov10001", leaseKey)
+
+	itemKey := createMenuItem(t, ctx, conn, cp, cons, "cdselfchargecovmenu2", "Latte", 450, buildingKey)
+	applicationForLnk := "lnk.leaseapp.BBCAFEDMNCHGCVLEASEH.applicationFor.identity." + domainConsumerID
+
+	reqID := testutil.GenReqID("cdselfchargecov10002")
+	env := &processor.OperationEnvelope{
+		RequestID:     reqID,
+		Lane:          processor.LaneDefault,
+		OperationType: "Charge",
+		Actor:         domainConsumerKey,
+		SubmittedAt:   "2026-07-27T12:10:00Z",
+		Class:         "tab",
+		Payload:       json.RawMessage(`{"tabKey":"` + tabKey + `","menuItemKey":"` + itemKey + `"}`),
+		ContextHint: &processor.ContextHint{
+			Reads:         []string{tabKey, tabKey + ".status", itemKey, itemKey + ".price"},
+			OptionalReads: []string{applicationForLnk},
+		},
+		AuthContext: &processor.AuthContext{Target: domainConsumerKey},
+	}
+	testutil.PublishOp(t, conn, env)
+	outcome := testutil.DriveOne(t, ctx, cp, cons, "")
+	if outcome != processor.OutcomeAccepted {
+		t.Fatalf("self-order Charge for a menu item served at a covering building outcome = %v, want Accepted", outcome)
 	}
 }
 

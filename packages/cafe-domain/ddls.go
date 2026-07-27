@@ -553,6 +553,62 @@ def worksAt_covers(actor_id, location_key):
         frontier = parents
     return False
 
+def location_covers(candidate_key, target_key):
+    # Answers "is candidate_key target_key itself, or an ancestor of it in the
+    # containedIn topology?" -- the same bounded breadth-first walk as
+    # worksAt_covers, testing node EQUALITY at each step instead of an actor's
+    # worksAt link. This is what confines a self-order Charge to the menu
+    # item's own building: candidate_key is the item's servedAt place,
+    # target_key is the tab's own leaseapp_unit, and the item must be offered
+    # at that unit or somewhere containing it (a building-level café serving
+    # every unit inside it).
+    #
+    # A tombstoned link OR VERTEX is absent, tested the same three ways
+    # worksAt_covers does, for the same reason: TombstoneLocation does not
+    # cascade to containedIn links, so only the vertex's own isDeleted stops a
+    # decommissioned location from still matching.
+    #
+    # Unresolvable input is a DENIAL, never an escape: candidate_key == None
+    # (item minted with no servedAt, impossible today but not provable so from
+    # here) and target_key == None (the tab's lease carries no appliesToUnit)
+    # both fail closed rather than falling open.
+    if candidate_key == None or target_key == None:
+        return False
+    frontier = [target_key]
+    seen = [target_key]
+    for _ in range(WORKPLACE_MAX_DEPTH):
+        if len(frontier) == 0:
+            return False
+        parents = []
+        for cur in frontier:
+            parts = cur.split(".")
+            if len(parts) != 3:
+                continue
+            # read-posture: (e) per-candidate follow-up read off the
+            # containedIn enumeration below -- the location VERTEX, so a
+            # tombstoned one neither matches nor is walked through.
+            node = kv.Read(cur)
+            if node == None or node.isDeleted:
+                continue
+            if cur == candidate_key:
+                return True
+            # read-posture: (e) relation=containedIn epoch=none -- a location
+            # has at most a few parents; containment is provisioned topology,
+            # not written concurrently with this op.
+            page, _ = kv.Links(cur, "containedIn", "out", None, WORKPLACE_PARENT_PAGE_LIMIT)
+            for lk in page:
+                if lk.isDeleted:
+                    continue
+                nxt = lk.targetVertex
+                if nxt in seen:
+                    continue
+                if len(seen) >= WORKPLACE_MAX_NODES:
+                    continue
+                seen.append(nxt)
+                parents.append(nxt)
+        frontier = parents
+    return False
+
 def workplace_exempt():
     # The cheap half of require_workplace, callable BEFORE a domain resolver
     # runs. Starlark evaluates arguments eagerly, so
@@ -680,6 +736,20 @@ def require_open_status(state, tab_key):
         fail("TabNotOpen: " + tab_key + " is " + str(existing.data.get("value")))
     return existing
 
+def menu_item_served_at(menu_item_key):
+    # A menu item's home location -- CreateMenuItem's servedAt link
+    # (menuItemVertexTypeDDL). This is the second topology chain a self-order
+    # Charge walks, alongside leaseapp_unit's appliesToUnit: the write is
+    # confined to a tab whose own building the item is actually served at.
+    #
+    # read-posture: (e) relation=servedAt epoch=none -- a menu item carries
+    # exactly one servedAt link (required at CreateMenuItem, never rewired).
+    page, _ = kv.Links(menu_item_key, "servedAt", "out", None, 1)
+    for lk in page:
+        if not lk.isDeleted:
+            return lk.targetVertex
+    return None
+
 def require_menu_item_price(state, p):
     # A self-service Charge binds against the menuItem catalog rather than
     # trusting a caller-supplied amountCents (mirrors service-domain's
@@ -690,14 +760,9 @@ def require_menu_item_price(state, p):
     # with the vertex), so an undeclared read here is a caller error, not a
     # legitimately-missing aspect.
     #
-    # The catalog is deliberately CROSS-LOCALITY on this side: any live item
-    # may be charged to any tab the caller is already authorized to charge.
-    # A menu item's servedAt place bounds who is OFFERED it (edge-manifest's
-    # edgeEntityMenuItems walks a resident's residence chain to reach one),
-    # and that is a presentation bound, NOT an authorization one — do not read
-    # the picker as a guard. Confining the write would take the item's servedAt
-    # target, which is not derivable from this payload; it is a filed lane item
-    # with a product question in front of it, not an oversight here.
+    # The locality bound lives in the Charge branch below (location_covers
+    # against menu_item_served_at), not here — this function only derives the
+    # amount; it does not decide whether the item may be charged at all.
     menu_item_key = required_string(p, "menuItemKey")
     parts_of(menu_item_key, "menuItemKey", "menuitem")
     if not vertex_alive(state, menu_item_key):
@@ -867,6 +932,19 @@ def execute(state, op):
             application_for = kv.Read(application_for_lnk)
             if application_for == None or application_for.isDeleted:
                 fail("AuthDenied: a resident may only charge their own tab")
+
+            # Locality bound: a self-order may only name a menu item served at
+            # the tab's OWN building -- servedAt bounds what a browse walk
+            # OFFERS, but until now nothing bound what Charge would ACCEPT.
+            # Both locations are resolved from topology the caller cannot
+            # forge (the item's own servedAt link, the tab's own lease's
+            # appliesToUnit), never from a payload field.
+            menu_item_key = required_string(p, "menuItemKey")
+            item_location = menu_item_served_at(menu_item_key)
+            tab_location = leaseapp_unit(lease_key)
+            if not location_covers(item_location, tab_location):
+                fail("AuthDenied: menuItemKey " + menu_item_key +
+                     " is not served at tab " + tab_key + "'s building")
 
         new_total = existing.data.get("totalCents") + amount_cents
         status_data = {"value": "open", "totalCents": new_total,
