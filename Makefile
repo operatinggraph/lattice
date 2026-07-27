@@ -1649,11 +1649,13 @@ test-edge-consumer-parity:
 ## swaps that source from the Go host's SSE feed to the browser-native engine's
 ## in-page onFrame (edge-browser-node-design.md §3.4). These vectors pin the
 ## degraded-render contract + both source adapters (SSE and edge) + boot.mjs's
-## config gate and engine-assembly wiring against fakes. Node only, no Docker.
+## config gate and engine-assembly wiring against fakes, plus the hat-grouped
+## landing's dispatch filter. Node only, no Docker. The glob is deliberate: an
+## enumerated list silently drops a file nobody remembers to add.
 .PHONY: test-facet-web
 test-facet-web:
 	@echo "==> Running the Facet renderer unit vectors (feed-source swap, node --test)..."
-	node --test cmd/facet/web/degraded_render.test.mjs cmd/facet/web/edge-source.test.mjs cmd/facet/web/feed_source.test.mjs cmd/facet/web/descriptor_autofill.test.mjs cmd/facet/web/display_label.test.mjs cmd/facet/web/dispatch_target.test.mjs cmd/facet/web/staff_world.test.mjs cmd/facet/web/staff_worklist.test.mjs cmd/facet/web/work_orders.test.mjs cmd/facet/web/nearby_upcoming.test.mjs cmd/facet/web/sync_degraded_banner.test.mjs cmd/facet/web/boot_gate.test.mjs
+	node --test cmd/facet/web/*.test.mjs
 
 ## build-edge-wasm — the browser Edge node's wasm artifact
 ## (edge-browser-node-design.md §3.3). Compiles cmd/edge-wasm (the same

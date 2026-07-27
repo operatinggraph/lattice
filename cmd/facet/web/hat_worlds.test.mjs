@@ -151,11 +151,12 @@ test("hatOps ignores an op that declares no dispatch target field", () => {
   assert.deepEqual(app.hatOps(anchor), []);
 });
 
-test("an instructor and a service provider hat carry no ops in today's corpus", () => {
-  // No op in packages/ declares dispatch class or targetType "instructor" or
-  // "serviceprovider" — the wellness and service ops target a session and a
-  // service instance instead. The binding types are declared symmetrically, so
-  // this pins the asymmetry that actually exists rather than assuming parity.
+test("each bound-entity hat carries its own record-administering op, and only its own", () => {
+  // wellness-domain SetInstructorProfile and service-domain
+  // SetServiceProviderProfile dispatch against the binding's own vertex type,
+  // which is what makes these two hats resolvable. The session- and
+  // service-targeted ops in the same corpus must NOT attach: they target a
+  // class the binding is not, and hatOps filters on both dispatch terms.
   const app = loadWorld(
     {
       identityKey: "vtx.identity.sam",
@@ -167,11 +168,15 @@ test("an instructor and a service provider hat carry no ops in today's corpus", 
     [
       { operationType: "TombstoneSession", dispatchClass: "session", dispatchTargetField: "session", dispatchTargetType: "session" },
       { operationType: "RecordServiceOutcome", dispatchClass: "service", dispatchTargetField: "instanceKey", dispatchTargetType: "service" },
+      { operationType: "SetInstructorProfile", dispatchClass: "instructor", dispatchTargetField: "instructorKey", dispatchTargetType: "instructor" },
+      { operationType: "SetServiceProviderProfile", dispatchClass: "serviceprovider", dispatchTargetField: "serviceProviderKey", dispatchTargetType: "serviceprovider" },
     ],
   );
   const [instructor, laundry] = app.splitAnchors(app.me()).bindings;
-  assert.deepEqual(app.hatOps(instructor), []);
-  assert.deepEqual(app.hatOps(laundry), []);
+  // Each hat gets its own op and never the sibling archetype's — the client-side
+  // mirror of the in-script standing guard, which denies exactly that crossing.
+  assert.deepEqual(app.hatOps(instructor).map((o) => o.data.operationType), ["SetInstructorProfile"]);
+  assert.deepEqual(app.hatOps(laundry).map((o) => o.data.operationType), ["SetServiceProviderProfile"]);
 });
 
 test("a hat with no ops renders an inert chip; a hat with ops renders a tappable one", () => {
