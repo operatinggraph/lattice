@@ -925,6 +925,8 @@ RETURN
 const edgeCatalogRolesTail = `
 WITH op, role
 WHERE op.key <> null
+OPTIONAL MATCH (op)<-[:permitsOperation]-(psvc:service)
+WITH op, role, collect(DISTINCT psvc.key) AS viaSvcKeys
 RETURN
   op.key AS anchor,
   "manifest.op" AS ns,
@@ -951,7 +953,7 @@ RETURN
   op.sensitive.data.value AS sensitive,
   role.key AS viaRole,
   role.canonicalName.data.value AS viaRoleName,
-  [(op)<-[:permitsOperation]-(svc:service) | svc.key] AS viaServices
+  viaSvcKeys AS viaServices
 `
 
 // edgeTasksQueuedTail presents one `manifest.task.<taskId>` row per OPEN task
