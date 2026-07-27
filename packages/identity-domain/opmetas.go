@@ -52,12 +52,12 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 			// identity for that type rather than degrading, so a wrong target
 			// would be substituted silently instead of the op being withheld.
 			InputSchema: `{"type":"object","properties":` +
-				`{"targetIdentityKey":{"type":"string","description":"vtx.identity.<NanoID> of the identity being claimed — carried by the claim invitation."},` +
-				`"claimKey":{"type":"string","description":"The one-time claim secret you were given."}},` +
+				`{"targetIdentityKey":{"type":"string","title":"Identity to claim","description":"vtx.identity.<NanoID> of the identity being claimed — carried by the claim invitation."},` +
+				`"claimKey":{"type":"string","title":"Claim key","description":"The one-time claim secret you were given."}},` +
 				`"required":["targetIdentityKey","claimKey"]}`,
 			FieldDescriptions: map[string]string{
 				"targetIdentityKey": "The identity waiting to be claimed. Comes from the claim invitation, not from anything you are looking at.",
-				"claimKey":          "The one-time secret you were handed. Its sha256 is compared against the stored hash; it is spent by a successful claim and cannot be reused. A wrong or spent secret and an already-bound credential fail identically, so a rejection tells an attacker nothing about which one it was.",
+				"claimKey":          "The one-time secret you were handed. A successful claim spends it, so it cannot be used twice.",
 			},
 			// NOT Sensitive, deliberately. The flag is per-OP and masks every
 			// field a client renders — here that is claimKey (a secret, worth
@@ -93,18 +93,24 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 				Description: "Provide the SSN and date of birth your application's background check needs.",
 				Icon:        "shield",
 				Tone:        "neutral",
-				SubmitLabel: "Submit",
+				SubmitLabel: "Save details",
 				Group:       "Identity",
 			},
+			// dob carries format "date" so it reaches the date widget: the
+			// renderer routes a declared date format BEFORE the op-level
+			// Sensitive masking, which otherwise renders every field as a
+			// password box — a masked date is unenterable, and a birth date is
+			// not a secret from the person typing their own. The op stays
+			// Sensitive, so ssn keeps its masked, no-echo entry.
 			InputSchema: `{"type":"object","properties":` +
 				`{"identityKey":{"type":"string","description":"vtx.identity.<NanoID> the details are recorded onto — the task's own subject."},` +
-				`"ssn":{"type":"string","description":"Social Security Number: 9 digits. Hyphens are accepted and stripped."},` +
-				`"dob":{"type":"string","description":"Date of birth, ISO YYYY-MM-DD."}},` +
+				`"ssn":{"type":"string","title":"Social security number","description":"Social Security Number: 9 digits. Hyphens are accepted and stripped."},` +
+				`"dob":{"type":"string","format":"date","title":"Date of birth","description":"Date of birth."}},` +
 				`"required":["identityKey","ssn","dob"]}`,
 			FieldDescriptions: map[string]string{
 				"identityKey": "The identity these details belong to — filled from the task's own scopedTo subject, never typed.",
-				"ssn":         "Social Security Number. 9 digits; hyphens are accepted and stripped, and it is stored normalized in a sensitive, identity-anchored aspect — the crypto-shred unit.",
-				"dob":         "Date of birth, ISO YYYY-MM-DD. Validated as a real calendar date (leap years included) and stored in a sensitive aspect alongside the SSN.",
+				"ssn":         "9 digits — hyphens are fine. Stored encrypted under your own key, and erased for good if your data is ever shredded.",
+				"dob":         "Your date of birth. Stored encrypted alongside the SSN.",
 			},
 			// ssn/dob are the platform's sensitive aspect-types: masked entry,
 			// no local echo. Safe to set here precisely because the only two

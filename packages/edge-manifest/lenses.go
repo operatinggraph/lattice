@@ -532,6 +532,7 @@ OPTIONAL MATCH (identity)<-[:applicationFor]-(leaseapp:leaseapp)
 OPTIONAL MATCH (identity)<-[:identifiedBy]-(prov:provider)
 OPTIONAL MATCH (identity)<-[:identifiedBy]-(instr:instructor)
 OPTIONAL MATCH (identity)<-[:identifiedBy]-(sp:serviceprovider)
+OPTIONAL MATCH (identity)<-[:identifiedBy]-(pat:patient)
 RETURN
   identity.key AS anchor,
   "manifest.me" AS ns,
@@ -549,7 +550,8 @@ RETURN
   collect(DISTINCT {type: 'workplace', key: work.key}) +
   collect(DISTINCT {type: 'provider', key: prov.key}) +
   collect(DISTINCT {type: 'instructor', key: instr.key}) +
-  collect(DISTINCT {type: 'serviceprovider', key: sp.key}) AS selfAnchors
+  collect(DISTINCT {type: 'serviceprovider', key: sp.key}) +
+  collect(DISTINCT {type: 'patient', key: pat.key}) AS selfAnchors
 `
 
 // edgeServicesTail presents one `manifest.svc.<tplId>` row per service template
@@ -726,6 +728,7 @@ RETURN
   "Class session" AS typeLabel,
   sess.schedule.data.name AS title,
   studio.profile.data.name AS subtitle,
+  studio.key AS studioKey,
   sess.schedule.data.startsAt AS startsAt
 `
 
@@ -780,6 +783,7 @@ RETURN
   "Booking" AS typeLabel,
   sess.schedule.data.name AS title,
   studio.profile.data.name AS subtitle,
+  studio.key AS studioKey,
   sess.schedule.data.startsAt AS startsAt,
   sess.key AS sessionKey
 `
@@ -1131,5 +1135,6 @@ RETURN
   "Class session" AS typeLabel,
   sess.schedule.data.name AS title,
   studio.profile.data.name AS subtitle,
+  studio.key AS studioKey,
   sess.schedule.data.startsAt AS startsAt
 `

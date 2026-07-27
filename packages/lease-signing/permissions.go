@@ -246,8 +246,8 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 			},
 			InputSchema: `{"type":"object","properties":` +
 				`{"leaseAppKey":{"type":"string","description":"vtx.leaseapp.<NanoID> of the application being decided."},` +
-				`"decision":{"type":"string","enum":["approved","declined"],"description":"The decision. Terminal once recorded."},` +
-				`"reason":{"type":"string","description":"Why the application was declined. Ignored on an approve."}},` +
+				`"decision":{"type":"string","title":"Decision","enum":["approved","declined"],"description":"The decision. Terminal once recorded."},` +
+				`"reason":{"type":"string","title":"Reason","description":"Why the application was declined. Ignored on an approve."}},` +
 				`"required":["leaseAppKey","decision"]}`,
 			FieldDescriptions: map[string]string{
 				"leaseAppKey": "The application being decided — filled from the application in view, not typed.",
@@ -293,9 +293,9 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 			InputSchema: `{"type":"object","properties":` +
 				`{"applicant":{"type":"string","description":"vtx.identity.<NanoID> of the applicant — your own identity."},` +
 				`"unit":{"type":"string","description":"vtx.unit.<NanoID> of the unit being applied for."},` +
-				`"moveInDate":{"type":"string","description":"Requested move-in date, RFC3339. Optional; supplying it requires leaseTermMonths."},` +
-				`"leaseTermMonths":{"type":"integer","description":"Requested lease term in months. Required when moveInDate is supplied."},` +
-				`"requestedRent":{"type":"number","description":"Optional rent the applicant is offering."}},` +
+				`"moveInDate":{"type":"string","format":"date","title":"Move-in date","description":"Requested move-in date. Optional; supplying it requires leaseTermMonths."},` +
+				`"leaseTermMonths":{"type":"integer","title":"Lease term (months)","description":"Requested lease term in months. Required when moveInDate is supplied."},` +
+				`"requestedRent":{"type":"number","title":"Monthly rent","description":"Optional rent the applicant is offering."}},` +
 				`"required":["applicant","unit"]}`,
 			FieldDescriptions: map[string]string{
 				"applicant":       "Your own identity — filled from the session, never typed. The scope=self grant requires it to equal the acting identity.",
@@ -309,7 +309,12 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 				AuthContext: "self",
 				TargetField: "unit",
 				TargetType:  "unit",
-				Reads:       []string{"{payload.applicant}", "{payload.unit}"},
+				// The scope=self grant already requires applicant == the acting
+				// identity, so the value was never the visitor's to type — the
+				// client fills it from the session and renders no field for it
+				// (the help's "filled from the session" promise, made real).
+				ContextParams: map[string]string{"applicant": "{actor}"},
+				Reads:         []string{"{payload.applicant}", "{payload.unit}"},
 				// The per-(applicant, unit) guard link is absent on a first
 				// application and tombstoned after a withdraw — its absence is
 				// exactly the condition that permits the create, so it can
@@ -332,7 +337,7 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 			},
 			InputSchema: `{"type":"object","properties":` +
 				`{"leaseAppKey":{"type":"string","description":"vtx.leaseapp.<NanoID> of the application being withdrawn."},` +
-				`"unit":{"type":"string","description":"vtx.unit.<NanoID> the application is for — verified against the application's own appliesToUnit link."},` +
+				`"unit":{"type":"string","title":"Unit","description":"vtx.unit.<NanoID> the application is for — verified against the application's own appliesToUnit link."},` +
 				`"applicant":{"type":"string","description":"vtx.identity.<NanoID> of the applicant — verified against the application's own applicationFor link."}},` +
 				`"required":["leaseAppKey","unit","applicant"]}`,
 			FieldDescriptions: map[string]string{
@@ -345,6 +350,12 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 				AuthContext: "self",
 				TargetField: "leaseAppKey",
 				TargetType:  "leaseapp",
+				// The applicant is verified against the application's own
+				// applicationFor link, and only the acting identity's own value
+				// can pass it — so the client fills it from the session and
+				// renders no field for it. The unit stays user-supplied until
+				// an entity lens projects it as a fillable column.
+				ContextParams: map[string]string{"applicant": "{actor}"},
 				// Both validation links are required: the script verifies the
 				// unit and the applicant against the application's OWN links
 				// rather than trusting the payload, so their absence is a
@@ -378,18 +389,18 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 			// fields; none of them reads back.
 			InputSchema: `{"type":"object","properties":` +
 				`{"leaseAppKey":{"type":"string","description":"vtx.leaseapp.<NanoID> of your application."},` +
-				`"unit":{"type":"string","description":"vtx.unit.<NanoID> the application is for — verified against the appliesToUnit link."},` +
-				`"annualIncome":{"type":"number","description":"Gross annual income."},` +
-				`"employmentStatus":{"type":"string","description":"Employment status."},` +
-				`"employerName":{"type":"string","description":"Employer name. Optional."},` +
-				`"references":{"type":"integer","description":"Number of references offered. Optional."},` +
-				`"hasCoApplicant":{"type":"boolean","description":"Whether a co-applicant is joining. Optional."},` +
-				`"coApplicantName":{"type":"string","description":"Co-applicant's name. Optional."},` +
-				`"coApplicantContact":{"type":"string","description":"Co-applicant's contact. Optional."},` +
-				`"hasGuarantor":{"type":"boolean","description":"Whether a guarantor is backing the application. Optional."},` +
-				`"guarantorName":{"type":"string","description":"Guarantor's name. Optional."},` +
-				`"guarantorRelationship":{"type":"string","description":"Guarantor's relationship to you. Optional."},` +
-				`"guarantorAnnualIncome":{"type":"number","description":"Guarantor's gross annual income. Optional."}},` +
+				`"unit":{"type":"string","title":"Unit","description":"vtx.unit.<NanoID> the application is for — verified against the appliesToUnit link."},` +
+				`"annualIncome":{"type":"number","title":"Annual income","description":"Gross annual income."},` +
+				`"employmentStatus":{"type":"string","title":"Employment","description":"Employment status."},` +
+				`"employerName":{"type":"string","title":"Employer","description":"Employer name. Optional."},` +
+				`"references":{"type":"integer","title":"References","description":"Number of references offered. Optional."},` +
+				`"hasCoApplicant":{"type":"boolean","title":"Applying with someone?","description":"Whether a co-applicant is joining. Optional."},` +
+				`"coApplicantName":{"type":"string","title":"Co-applicant's name","description":"Co-applicant's name. Optional."},` +
+				`"coApplicantContact":{"type":"string","title":"Co-applicant's contact","description":"Co-applicant's contact. Optional."},` +
+				`"hasGuarantor":{"type":"boolean","title":"Backed by a guarantor?","description":"Whether a guarantor is backing the application. Optional."},` +
+				`"guarantorName":{"type":"string","title":"Guarantor's name","description":"Guarantor's name. Optional."},` +
+				`"guarantorRelationship":{"type":"string","title":"Guarantor's relationship","description":"Guarantor's relationship to you. Optional."},` +
+				`"guarantorAnnualIncome":{"type":"number","title":"Guarantor's annual income","description":"Guarantor's gross annual income. Optional."}},` +
 				`"required":["leaseAppKey","unit","annualIncome","employmentStatus"]}`,
 			FieldDescriptions: map[string]string{
 				"leaseAppKey":           "Your application — filled from the application in view, not typed.",
@@ -439,8 +450,8 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 			},
 			InputSchema: `{"type":"object","properties":` +
 				`{"renewalKey":{"type":"string","description":"vtx.renewal.<NanoID> of the renewal cycle."},` +
-				`"rentAmount":{"type":"number","description":"Monthly rent for the renewed term. Must be greater than zero."},` +
-				`"termMonths":{"type":"integer","description":"Renewed lease term in whole months. Must be at least the package's renewal window."}},` +
+				`"rentAmount":{"type":"number","title":"Monthly rent","description":"Monthly rent for the renewed term. Must be greater than zero."},` +
+				`"termMonths":{"type":"integer","title":"Term (months)","description":"Renewed lease term in whole months. Must be at least the package's renewal window."}},` +
 				`"required":["renewalKey","rentAmount","termMonths"]}`,
 			FieldDescriptions: map[string]string{
 				"renewalKey": "The renewal cycle — filled from the renewal in view, not typed.",
@@ -471,9 +482,9 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 			},
 			InputSchema: `{"type":"object","properties":` +
 				`{"renewalKey":{"type":"string","description":"vtx.renewal.<NanoID> of the renewal cycle."},` +
-				`"leaseApp":{"type":"string","description":"vtx.leaseapp.<NanoID> the renewal is for — verified against the renewal's own renews link."},` +
-				`"applicant":{"type":"string","description":"vtx.identity.<NanoID> of the tenant — verified against the application's own applicationFor link."},` +
-				`"method":{"type":"string","description":"How the guarantor was verified, e.g. phone call, updated pay stub. Optional."}},` +
+				`"leaseApp":{"type":"string","title":"Application","description":"vtx.leaseapp.<NanoID> the renewal is for — verified against the renewal's own renews link."},` +
+				`"applicant":{"type":"string","title":"Tenant","description":"vtx.identity.<NanoID> of the tenant — verified against the application's own applicationFor link."},` +
+				`"method":{"type":"string","title":"How you verified","description":"How the guarantor was verified, e.g. phone call, updated pay stub. Optional."}},` +
 				`"required":["renewalKey","leaseApp","applicant"]}`,
 			FieldDescriptions: map[string]string{
 				"renewalKey": "The renewal cycle — filled from the renewal in view, not typed.",
@@ -511,7 +522,7 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 			},
 			InputSchema: `{"type":"object","properties":` +
 				`{"renewalKey":{"type":"string","description":"vtx.renewal.<NanoID> of the renewal cycle being declined."},` +
-				`"reason":{"type":"string","description":"Why the renewal is being declined. Optional."}},` +
+				`"reason":{"type":"string","title":"Reason","description":"Why the renewal is being declined. Optional."}},` +
 				`"required":["renewalKey"]}`,
 			FieldDescriptions: map[string]string{
 				"renewalKey": "The renewal cycle — filled from the renewal in view, not typed.",

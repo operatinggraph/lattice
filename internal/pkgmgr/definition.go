@@ -515,6 +515,13 @@ type OpPresentationSpec struct {
 // client that cannot resolve a declared `{me.<type>}` has no business
 // offering the op (the same rule TargetType states below).
 //
+// A placeholder may also close with a `?` OPTIONAL marker ({me.leaseapp?},
+// {me.leaseapp:id?}): the client fills the param silently when it resolves
+// and OMITS the param silently when it doesn't — the field is never
+// rendered and the op stays offered either way. It exists for
+// rate/eligibility params whose ABSENCE is a designed script branch; a
+// required key never carries it (the same split Reads/OptionalReads states).
+//
 // Any placeholder accepts a trailing `:id` modifier, which substitutes the
 // Contract #1 BARE id rather than the full `vtx.<type>.<id>` key. That is what
 // makes a LINK key expressible as a read declaration — a 6-segment

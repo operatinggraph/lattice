@@ -71,7 +71,7 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 			},
 			InputSchema: `{"type":"object","properties":` +
 				`{"workOrderKey":{"type":"string","description":"vtx.workorder.<NanoID> being resolved — auto-filled from the task."},` +
-				`"notes":{"type":"string","description":"What you did to resolve it."}},` +
+				`"notes":{"type":"string","title":"What you did","description":"What you did to resolve it."}},` +
 				`"required":["workOrderKey","notes"]}`,
 			FieldDescriptions: map[string]string{
 				"workOrderKey": "The work order this task is scoped to — filled by the client from the task, not typed.",
@@ -97,13 +97,13 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 				ShortLabel:  "Report",
 				Description: "Raise a maintenance work order against a place.",
 				Icon:        "wrench",
-				Tone:        "default",
+				Tone:        "primary",
 				SubmitLabel: "Report it",
 				Group:       "Maintenance",
 			},
 			InputSchema: `{"type":"object","properties":` +
-				`{"summary":{"type":"string","description":"What is wrong."},` +
-				`"priority":{"type":"string","enum":["low","normal","urgent"],"description":"How urgent it is."},` +
+				`{"summary":{"type":"string","title":"What's wrong","description":"What is wrong."},` +
+				`"priority":{"type":"string","title":"Priority","enum":["low","normal","urgent"],"description":"How urgent it is."},` +
 				`"location":{"type":"string","description":"vtx.<locType>.<NanoID> of the place — auto-filled from the place being viewed."}},` +
 				`"required":["summary","location"]}`,
 			FieldDescriptions: map[string]string{

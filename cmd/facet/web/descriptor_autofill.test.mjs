@@ -304,3 +304,46 @@ test("an omitted optional field yields no read declaration at all", () => {
   // omitted → nothing is declared, and the script's own lazy read decides
   assert.deepEqual(declare("{payload.identityKey}.patientClaim", {}), []);
 });
+
+// ---- optional {me.<type>?} vectors (UX humanization pass) ----
+// The `?` marker: fill when it resolves, OMIT the param when it doesn't —
+// the op stays offered, the field never renders, and the script's absence
+// branch (standard rate) is the designed outcome. Without the marker an
+// unresolvable {me.<type>} correctly blocks the offer, which is exactly why
+// optional rate params could never use the template channel before.
+
+test("an optional me-token that resolves fills its param invisibly", () => {
+  const sandbox = loadApp({
+    identityKey: "vtx.identity.EEEEEEEEEEEEEEEEEEEE",
+    selfAnchors: [{ type: "leaseapp", key: LEASE_A }],
+  });
+  assert.equal(sandbox.templateIsOptional("{me.leaseapp?}"), true);
+  assert.equal(sandbox.templateIsOptional("{me.leaseapp}"), false);
+  assert.equal(sandbox.stripOptionalMarkers("{me.leaseapp:id?}"), "{me.leaseapp:id}");
+  assert.equal(
+    sandbox.substituteTemplate(sandbox.stripOptionalMarkers("{me.leaseapp?}"), {}, {}),
+    LEASE_A);
+});
+
+test("an unresolvable optional me-token neither blocks the offer nor names a missing anchor", () => {
+  const sandbox = loadApp({
+    identityKey: "vtx.identity.EEEEEEEEEEEEEEEEEEEE",
+    selfAnchors: [],
+  });
+  const op = {
+    dispatchContextParams: JSON.stringify({ leaseAppKey: "{me.leaseapp?}" }),
+    dispatchOptionalReads: JSON.stringify([]),
+  };
+  assert.equal(sandbox.unresolvableSelfAnchor(op), undefined,
+    "optional templates are exempt from the fail-closed offer gate");
+  const required = { dispatchContextParams: JSON.stringify({ leaseAppKey: "{me.leaseapp}" }) };
+  assert.equal(sandbox.unresolvableSelfAnchor(required), "leaseapp",
+    "the unmarked form still fails closed");
+});
+
+test("prettifyFieldName floors identifiers to words", () => {
+  const sandbox = loadApp({});
+  assert.equal(sandbox.prettifyFieldName("leaseAppKey"), "Lease app key");
+  assert.equal(sandbox.prettifyFieldName("interval_days"), "Interval days");
+  assert.equal(sandbox.prettifyFieldName("startsAt"), "Starts at");
+});

@@ -68,14 +68,23 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 				`"required":["session"]}`,
 			FieldDescriptions: map[string]string{
 				"session":     "The session this booking is for — auto-filled by the client from the session being viewed (dispatch.targetField), not user-entered.",
-				"leaseAppKey": "Optional — your own lease application, if you have one. When it names you as the applicant, your booking gets the resident rate; otherwise you still book, at the standard rate.",
+				"leaseAppKey": "Booked at the resident rate automatically when you live here.",
 			},
 			Dispatch: &pkgmgr.OpDispatchSpec{
-				Class:         "booking",
-				AuthContext:   "self",
-				TargetField:   "session",
-				TargetType:    "session",
-				ContextParams: map[string]string{"booker": "{actor}"},
+				Class:       "booking",
+				AuthContext: "self",
+				TargetField: "session",
+				TargetType:  "session",
+				// leaseAppKey is the resident-rate eligibility param, filled
+				// from the booker's own lease self-anchor rather than asked for
+				// as a raw vertex key. The trailing `?` OPTIONAL marker is
+				// load-bearing: a booker with no lease is the DESIGNED
+				// standard-rate branch, so the param is omitted silently and
+				// the op stays offered — the field is never rendered either way.
+				ContextParams: map[string]string{
+					"booker":      "{actor}",
+					"leaseAppKey": "{me.leaseapp?}",
+				},
 				// The per-(session, booker) double-book guard. It must be
 				// DECLARED (not merely relied on via CreateOnly-at-commit like
 				// the seat claim): the script reads its current state to
@@ -146,12 +155,12 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 			},
 			InputSchema: `{"type":"object","properties":` +
 				`{"sessionKey":{"type":"string","description":"vtx.session.<NanoID> of the session to cancel — auto-filled from the session being viewed."},` +
-				`"studio":{"type":"string","description":"vtx.studio.<NanoID> — must be the session's actual studio."},` +
+				`"studio":{"type":"string","title":"Studio","description":"vtx.studio.<NanoID> — must be the session's actual studio."},` +
 				`"instructor":{"type":"string","description":"vtx.instructor.<NanoID> of your own instructor record — required when cancelling as an instructor rather than staff."}},` +
 				`"required":["sessionKey","studio"]}`,
 			FieldDescriptions: map[string]string{
 				"sessionKey": "The session being cancelled — auto-filled by the client from the session being viewed (dispatch.targetField), not user-entered.",
-				"studio":     "Must match the session's actual atStudio link — a client renders this from the session row it already loaded.",
+				"studio":     "The studio this class runs at — it must be the class's own studio, so a mismatched value is rejected.",
 				"instructor": "Your own instructor record — auto-filled from your identity's own instructor self-anchor. Required when cancelling as an instructor (a class you lead); staff cancel with no instructor field.",
 			},
 			Dispatch: &pkgmgr.OpDispatchSpec{
@@ -163,7 +172,14 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 				// edgeIdentity's edge-manifest lens projects for a bound
 				// instructor (Fire W0) — the exact vocabulary ReportIssue's
 				// `{me.workplace}` proves (maintenance-domain/permissions.go).
-				ContextParams: map[string]string{"instructor": "{me.instructor}"},
+				// `{entity.studioKey}` fills the studio from the session row
+				// being viewed (edge-manifest projects the column), so the
+				// one value only the machine knows is never asked of the
+				// instructor.
+				ContextParams: map[string]string{
+					"instructor": "{me.instructor}",
+					"studio":     "{entity.studioKey}",
+				},
 				// The ledBy and identifiedBy ownership probes. Absence of
 				// either is a meaningful rejection the script renders
 				// (AuthDenied), not a correctness error — the same shape
@@ -186,13 +202,13 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 			InputSchema: `{"type":"object","properties":` +
 				`{"bookingKey":{"type":"string","description":"vtx.booking.<NanoID> being marked — auto-filled from the booking being viewed."},` +
 				`"session":{"type":"string","description":"vtx.session.<NanoID> — must be the booking's actual session."},` +
-				`"status":{"type":"string","enum":["attended","noShow"],"description":"Whether the member showed up."},` +
+				`"status":{"type":"string","title":"Attendance","enum":["attended","noShow"],"enumLabels":{"attended":"Attended","noShow":"No-show"},"description":"Whether the member showed up."},` +
 				`"instructor":{"type":"string","description":"vtx.instructor.<NanoID> of your own instructor record — required when marking as an instructor rather than staff."}},` +
 				`"required":["bookingKey","session","status"]}`,
 			FieldDescriptions: map[string]string{
 				"bookingKey": "The booking being marked — auto-filled by the client from the booking being viewed (dispatch.targetField), not user-entered.",
 				"session":    "Must match the booking's actual forSession link — a client renders this from the booking record it already loaded.",
-				"status":     "attended or noShow. Either corrects the other, so a mistaken mark can be restated.",
+				"status":     "Did the member show up? Either answer corrects the other, so a mistaken mark can be restated.",
 				"instructor": "Your own instructor record — auto-filled from your identity's own instructor self-anchor. Required when marking as an instructor (a class you lead); staff mark with no instructor field.",
 			},
 			Dispatch: &pkgmgr.OpDispatchSpec{
@@ -238,11 +254,11 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 			},
 			InputSchema: `{"type":"object","properties":` +
 				`{"studio":{"type":"string","description":"vtx.studio.<NanoID> the class runs at — auto-filled from the studio being viewed."},` +
-				`"name":{"type":"string","description":"What the class is called, e.g. Vinyasa Flow."},` +
-				`"startsAt":{"type":"string","description":"Class start, RFC3339, aligned to the 15-minute grid."},` +
-				`"endsAt":{"type":"string","description":"Class end, RFC3339, aligned to the 15-minute grid."},` +
-				`"capacity":{"type":"integer","minimum":1,"maximum":200,"description":"How many people may book a seat."},` +
-				`"instructor":{"type":"string","description":"vtx.instructor.<NanoID> leading the class."}},` +
+				`"name":{"type":"string","title":"Name","description":"What the class is called, e.g. Vinyasa Flow."},` +
+				`"startsAt":{"type":"string","format":"date-time","title":"Starts","description":"Class start, aligned to the 15-minute grid."},` +
+				`"endsAt":{"type":"string","format":"date-time","title":"Ends","description":"Class end, aligned to the 15-minute grid."},` +
+				`"capacity":{"type":"integer","title":"Capacity","minimum":1,"maximum":200,"description":"How many people may book a seat."},` +
+				`"instructor":{"type":"string","title":"Instructor","description":"vtx.instructor.<NanoID> leading the class."}},` +
 				`"required":["studio","name","startsAt","endsAt","capacity"]}`,
 			FieldDescriptions: map[string]string{
 				"studio":     "The studio the class runs in — auto-filled by the client from the studio being viewed (dispatch.targetField), not user-entered. A front-desk caller may only schedule at a studio in a building they work at.",
@@ -285,7 +301,7 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 				SubmitLabel: "Open studio",
 			},
 			InputSchema: `{"type":"object","properties":` +
-				`{"name":{"type":"string","description":"What the studio is called, e.g. Flow Room."},` +
+				`{"name":{"type":"string","title":"Name","description":"What the studio is called, e.g. Flow Room."},` +
 				`"location":{"type":"string","description":"vtx.<locType>.<NanoID> of the building it sits in — auto-filled from where you work."}},` +
 				`"required":["name","location"]}`,
 			FieldDescriptions: map[string]string{
@@ -338,7 +354,7 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 			},
 			InputSchema: `{"type":"object","properties":` +
 				`{"instructorKey":{"type":"string","description":"vtx.instructor.<NanoID> of the instructor record being edited — auto-filled from the instructor being viewed."},` +
-				`"displayName":{"type":"string","description":"Your professional display name, as members see it on the class list."}},` +
+				`"displayName":{"type":"string","title":"Name","description":"Your professional display name, as members see it on the class list."}},` +
 				`"required":["instructorKey","displayName"]}`,
 			FieldDescriptions: map[string]string{
 				"instructorKey": "The instructor record being edited — auto-filled by the client from the instructor being viewed (dispatch.targetField), not user-entered.",

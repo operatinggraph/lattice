@@ -1,5 +1,5 @@
 name: service-domain
-version: 0.10.2
+version: 0.10.3
 description: |
   Service template + instance vertex type (the service DDL + lifecycle/wiring
   ops CreateServiceTemplate, CreateServiceInstance, RecordServiceOutcome,

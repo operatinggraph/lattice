@@ -32,7 +32,7 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 			},
 			InputSchema: `{"type":"object","properties":` +
 				`{"unit":{"type":"string","description":"vtx.unit.<NanoID> of the unit whose listing status is changing."},` +
-				`"status":{"type":"string","enum":["available","pending","leased","withdrawn"],"description":"The new listing status."}},` +
+				`"status":{"type":"string","title":"New status","enum":["available","pending","leased","withdrawn"],"description":"The new listing status."}},` +
 				`"required":["unit","status"]}`,
 			FieldDescriptions: map[string]string{
 				"unit":   "The unit — filled from the unit in view, not typed. You must hold a manages link to it.",

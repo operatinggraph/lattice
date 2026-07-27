@@ -58,17 +58,17 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 				SubmitLabel: "Book",
 			},
 			InputSchema: `{"type":"object","properties":` +
-				`{"patient":{"type":"string","description":"vtx.patient.<NanoID> of your own patient record."},` +
+				`{"patient":{"type":"string","title":"Patient","description":"vtx.patient.<NanoID> of your own patient record."},` +
 				`"provider":{"type":"string","description":"vtx.provider.<NanoID> of the provider to book with — auto-filled from the provider being viewed."},` +
-				`"startsAt":{"type":"string","description":"Appointment start, RFC3339, aligned to the 15-minute booking grid."},` +
-				`"endsAt":{"type":"string","description":"Appointment end, RFC3339, aligned to the 15-minute booking grid."},` +
-				`"reason":{"type":"string","description":"Optional visit reason."}},` +
+				`"startsAt":{"type":"string","format":"date-time","title":"Starts","description":"Appointment start, aligned to the 15-minute booking grid."},` +
+				`"endsAt":{"type":"string","format":"date-time","title":"Ends","description":"Appointment end, aligned to the 15-minute booking grid."},` +
+				`"reason":{"type":"string","title":"Reason","description":"Optional visit reason."}},` +
 				`"required":["patient","provider","startsAt","endsAt"]}`,
 			FieldDescriptions: map[string]string{
-				"patient":  "Your own patient record — must be linked, via identifiedBy, to your identity (self-scope grant requirement).",
+				"patient":  "Your own patient record — you can only book for yourself.",
 				"provider": "The provider this appointment is with — auto-filled by the client from the provider being viewed (dispatch.targetField), not user-entered.",
-				"startsAt": "Appointment start time. Must land in the future and align to the clinic's 15-minute grid.",
-				"endsAt":   "Appointment end time. Must align to the 15-minute grid; span capped at 24 hours.",
+				"startsAt": "When the appointment starts. Must land in the future and align to the clinic's 15-minute grid.",
+				"endsAt":   "When the appointment ends. Must align to the 15-minute grid; span capped at 24 hours.",
 				"reason":   "Optional visit reason / chief complaint.",
 			},
 			Dispatch: &pkgmgr.OpDispatchSpec{
@@ -76,6 +76,14 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 				AuthContext: "self",
 				TargetField: "provider",
 				TargetType:  "provider",
+				// `{me.patient}` addresses the `patient` selfAnchor
+				// edgeIdentity projects for an identity a patient record is
+				// identifiedBy-bound to — the script requires exactly that
+				// binding, so the unmarked (offer-gating) form is correct:
+				// an identity with no patient record could only ever be
+				// rejected server-side, and now sees the honest "needs your
+				// own Patient" card instead of a form that cannot succeed.
+				ContextParams: map[string]string{"patient": "{me.patient}"},
 			},
 		},
 		{
@@ -89,18 +97,18 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 			},
 			InputSchema: `{"type":"object","properties":` +
 				`{"appointmentKey":{"type":"string","description":"vtx.appointment.<NanoID> of the appointment to reschedule — auto-filled from the appointment being viewed."},` +
-				`"provider":{"type":"string","x-entityRef":"provider","description":"vtx.provider.<NanoID> — must be the appointment's actual provider."},` +
-				`"patient":{"type":"string","description":"vtx.patient.<NanoID> — must be the appointment's actual patient."},` +
-				`"startsAt":{"type":"string","description":"New start, RFC3339, aligned to the 15-minute booking grid."},` +
-				`"endsAt":{"type":"string","description":"New end, RFC3339, aligned to the 15-minute booking grid."},` +
-				`"reason":{"type":"string","description":"Optional visit reason; omitted clears the existing one."}},` +
+				`"provider":{"type":"string","title":"Provider","x-entityRef":"provider","description":"vtx.provider.<NanoID> — must be the appointment's actual provider."},` +
+				`"patient":{"type":"string","title":"Patient","description":"vtx.patient.<NanoID> — must be the appointment's actual patient."},` +
+				`"startsAt":{"type":"string","format":"date-time","title":"New start","description":"New start, aligned to the 15-minute booking grid."},` +
+				`"endsAt":{"type":"string","format":"date-time","title":"New end","description":"New end, aligned to the 15-minute booking grid."},` +
+				`"reason":{"type":"string","title":"Reason","description":"Optional visit reason; omitted clears the existing one."}},` +
 				`"required":["appointmentKey","provider","patient","startsAt","endsAt"]}`,
 			FieldDescriptions: map[string]string{
 				"appointmentKey": "The appointment being rescheduled — auto-filled by the client from the appointment being viewed (dispatch.targetField), not user-entered.",
-				"provider":       "Must match the appointment's actual withProvider link.",
-				"patient":        "Must match the appointment's actual forPatient link, which must be linked to your identity (self-scope grant requirement).",
-				"startsAt":       "New start time. Must land in the future and align to the 15-minute grid.",
-				"endsAt":         "New end time. Must align to the 15-minute grid; span capped at 24 hours.",
+				"provider":       "The provider the appointment is with — a rescheduled appointment keeps its provider, so a different one is rejected.",
+				"patient":        "The appointment's own patient — you can only reschedule your own appointment.",
+				"startsAt":       "The new start time. Must land in the future and align to the 15-minute grid.",
+				"endsAt":         "The new end time. Must align to the 15-minute grid; span capped at 24 hours.",
 				"reason":         "Optional visit reason. Omitted clears the appointment's existing reason.",
 			},
 			Dispatch: &pkgmgr.OpDispatchSpec{
@@ -125,13 +133,13 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 			// package doc comment above).
 			InputSchema: `{"type":"object","properties":` +
 				`{"appointmentKey":{"type":"string","description":"vtx.appointment.<NanoID> of the appointment to cancel — auto-filled from the appointment being viewed."},` +
-				`"status":{"type":"string","enum":["cancelled"],"default":"cancelled","description":"Fixed to cancelled — the only self-service transition."},` +
-				`"note":{"type":"string","description":"Optional cancellation reason."}},` +
+				`"status":{"type":"string","title":"Status","enum":["cancelled"],"default":"cancelled","description":"Fixed to cancelled — the only self-service transition."},` +
+				`"note":{"type":"string","title":"Note","description":"Optional cancellation reason."}},` +
 				`"required":["appointmentKey","status"]}`,
 			FieldDescriptions: map[string]string{
 				"appointmentKey": "The appointment being cancelled — auto-filled by the client from the appointment being viewed (dispatch.targetField), not user-entered.",
-				"status":         "Fixed to \"cancelled\" — a self-service caller cannot set any other status (rejected in-script).",
-				"note":           "Optional cancellation reason, stored on the appointment's .status aspect.",
+				"status":         "Fixed to \"cancelled\" — cancelling is the only change you can make here.",
+				"note":           "Optional cancellation reason, kept with the appointment.",
 			},
 			Dispatch: &pkgmgr.OpDispatchSpec{
 				Class:       "appointment",
@@ -151,7 +159,7 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 			},
 			InputSchema: `{"type":"object","properties":` +
 				`{"providerKey":{"type":"string","description":"vtx.provider.<NanoID> of the provider these hours belong to — auto-filled from the provider being viewed."},` +
-				`"windows":{"type":"array","description":"Your recurring weekly availability windows. Each {day:0-6 (Sun=0), openSec:0-86400, closeSec:0-86400} with openSec<closeSec; UTC seconds-of-day. An empty array clears the constraint.","items":{"type":"object","properties":{"day":{"type":"integer"},"openSec":{"type":"integer"},"closeSec":{"type":"integer"}}}}},` +
+				`"windows":{"type":"array","title":"Weekly hours","description":"Your recurring weekly availability windows. Each {day:0-6 (Sun=0), openSec:0-86400, closeSec:0-86400} with openSec<closeSec; UTC seconds-of-day. An empty array clears the constraint.","items":{"type":"object","properties":{"day":{"type":"integer"},"openSec":{"type":"integer"},"closeSec":{"type":"integer"}}}}},` +
 				`"required":["providerKey","windows"]}`,
 			FieldDescriptions: map[string]string{
 				"providerKey": "The provider whose hours are being set — auto-filled by the client from the provider being viewed (dispatch.targetField), not user-entered.",
@@ -175,7 +183,7 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 			},
 			InputSchema: `{"type":"object","properties":` +
 				`{"providerKey":{"type":"string","description":"vtx.provider.<NanoID> of the provider this time off belongs to — auto-filled from the provider being viewed."},` +
-				`"ranges":{"type":"array","description":"Your date-specific blackout ranges, on top of your weekly hours. Each {from, to, reason?} with from/to RFC3339 UTC instants and from<to. An empty array clears all blackouts.","items":{"type":"object","properties":{"from":{"type":"string"},"to":{"type":"string"},"reason":{"type":"string"}}}}},` +
+				`"ranges":{"type":"array","title":"Time off","description":"Your date-specific blackout ranges, on top of your weekly hours. Each {from, to, reason?} with from/to RFC3339 UTC instants and from<to. An empty array clears all blackouts.","items":{"type":"object","properties":{"from":{"type":"string"},"to":{"type":"string"},"reason":{"type":"string"}}}}},` +
 				`"required":["providerKey","ranges"]}`,
 			FieldDescriptions: map[string]string{
 				"providerKey": "The provider whose time off is being set — auto-filled by the client from the provider being viewed (dispatch.targetField), not user-entered.",
@@ -198,12 +206,12 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 				SubmitLabel: "Register",
 			},
 			InputSchema: `{"type":"object","properties":` +
-				`{"fullName":{"type":"string","description":"The patient's full name."},` +
-				`"identityKey":{"type":"string","description":"vtx.identity.<NanoID> of a pre-minted identity carrying the patient's contact details."}},` +
+				`{"fullName":{"type":"string","title":"Full name","description":"The patient's full name."},` +
+				`"identityKey":{"type":"string","title":"Identity to link","description":"vtx.identity.<NanoID> of a pre-minted identity carrying the patient's contact details."}},` +
 				`"required":["fullName"]}`,
 			FieldDescriptions: map[string]string{
 				"fullName":    "The patient's full name, as it should appear on the roster.",
-				"identityKey": "Optional. An existing identity to wire this patient to, so their contact details resolve from the Vault plane. An identity may be claimed by at most one patient.",
+				"identityKey": "Optional. An existing sign-in identity to connect this patient to, so their contact details follow them. An identity can back at most one patient.",
 			},
 			Dispatch: &pkgmgr.OpDispatchSpec{
 				Class:       "patient",

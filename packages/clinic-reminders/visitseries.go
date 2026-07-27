@@ -1017,10 +1017,10 @@ func visitSeriesOpMetas() []pkgmgr.OpMetaSpec {
 			},
 			InputSchema: `{"type":"object","properties":` +
 				`{"patientKey":{"type":"string","description":"vtx.patient.<NanoID> the series is for — auto-filled from the patient being viewed."},` +
-				`"providerKey":{"type":"string","x-entityRef":"provider","description":"vtx.provider.<NanoID> the series is with."},` +
-				`"intervalDays":{"type":"integer","minimum":1,"description":"Days between visits."},` +
-				`"startAt":{"type":"string","description":"When the first visit falls due, RFC3339."},` +
-				`"activeUntil":{"type":"string","description":"When the series stops re-arming, RFC3339. Omit for open-ended."}},` +
+				`"providerKey":{"type":"string","title":"Provider","x-entityRef":"provider","description":"vtx.provider.<NanoID> the series is with."},` +
+				`"intervalDays":{"type":"integer","title":"Every (days)","minimum":1,"description":"Days between visits."},` +
+				`"startAt":{"type":"string","format":"date-time","title":"First visit","description":"When the first visit falls due."},` +
+				`"activeUntil":{"type":"string","format":"date-time","title":"Runs until","description":"When the series stops re-arming. Omit for open-ended."}},` +
 				`"required":["patientKey","providerKey","intervalDays","startAt"]}`,
 			FieldDescriptions: map[string]string{
 				"patientKey":   "The patient this cadence is for — auto-filled by the client from the patient being viewed (dispatch.targetField), not user-entered.",

@@ -42,12 +42,12 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 			},
 			InputSchema: `{"type":"object","properties":` +
 				`{"accountKey":{"type":"string","description":"vtx.cafeaccount.<NanoID> of the house account being paid — auto-filled from the account being viewed."},` +
-				`"amountCents":{"type":"integer","minimum":1,"description":"Amount received, in whole cents."},` +
-				`"memo":{"type":"string","description":"Optional note describing the payment."}},` +
+				`"amountCents":{"type":"integer","title":"Amount","minimum":1,"description":"Amount received, in whole cents."},` +
+				`"memo":{"type":"string","title":"Note","description":"Optional note describing the payment."}},` +
 				`"required":["accountKey","amountCents"]}`,
 			FieldDescriptions: map[string]string{
 				"accountKey":  "The house account being credited — auto-filled by the client from the account being viewed (dispatch.targetField), not user-entered. A staffer may only credit accounts whose lease sits at a location they worksAt.",
-				"amountCents": "How much was received, in whole cents. Must be greater than zero; a payment reduces what the resident owes.",
+				"amountCents": "How much was received, entered in dollars — e.g. 4.50. Must be more than zero; a payment reduces what the resident owes.",
 				"memo":        "Optional free text describing the payment — how it was tendered, a reference number, whatever the front desk needs to recognise it later.",
 			},
 			Dispatch: &pkgmgr.OpDispatchSpec{

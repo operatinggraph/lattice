@@ -1619,12 +1619,29 @@ function selfAnchorKey(type) {
 // The `:id` modifier is a rendering instruction, not part of the anchor type
 // (substituteTemplate strips it) — a probe declared `{me.<type>:id}` asks the
 // same question of the same anchor as `{me.<type>}`.
+// A trailing `?` closing a placeholder ({me.<type>?}, {me.<type>:id?})
+// marks it OPTIONAL: fill silently when it resolves, OMIT the whole param
+// silently when it doesn't — never render a field, never block the offer.
+// The modifier exists for rate/eligibility params ("your own X, if you have
+// one") where the required form would hide the op from everyone else and
+// the raw form asked a human to paste a vertex key.
+function templateIsOptional(template) {
+  return typeof template === "string" && template.includes("?}");
+}
+
+// stripOptionalMarkers removes `?` markers so the shared resolution paths see
+// the canonical placeholder grammar ({me.<type>:id?} → {me.<type>:id}).
+function stripOptionalMarkers(template) {
+  return typeof template === "string" ? template.replace(/\?\}/g, "}") : template;
+}
+
 function unresolvableSelfAnchor(op) {
   const params = maybeParseJSON(op.dispatchContextParams) || {};
   const optional = maybeParseJSON(op.dispatchOptionalReads) || [];
   const templates = Object.values(params).concat(Array.isArray(optional) ? optional : []);
   for (const template of templates) {
     if (typeof template !== "string") continue;
+    if (templateIsOptional(template)) continue;
     for (const m of template.matchAll(/\{me\.([^}]+)\}/g)) {
       const type = m[1].endsWith(":id") ? m[1].slice(0, -3) : m[1];
       if (!selfAnchorKey(type)) return type;
@@ -1655,6 +1672,7 @@ function unresolvableEntityColumn(op, ctx) {
   const params = maybeParseJSON(op.dispatchContextParams) || {};
   for (const template of Object.values(params)) {
     if (typeof template !== "string") continue;
+    if (templateIsOptional(template)) continue;
     for (const m of template.matchAll(/\{entity\.([^}]+)\}/g)) {
       const column = m[1].endsWith(":id") ? m[1].slice(0, -3) : m[1];
       if (!entityColumn(ctx, column)) return column;
@@ -1697,9 +1715,24 @@ function renderDescriptorForm(op, opKey, ctx, prefill, reviewBanner) {
   });
 }
 
+// prettifyFieldName is the label floor for a schema property with no declared
+// title: camelCase and snake_case identifiers read as words with a leading
+// capital ("startsAt" → "Starts at", "interval_days" → "Interval days"). A
+// declared `title` always wins — this is what a human sees when a package
+// hasn't titled a field yet, and it must never be a bare identifier.
+function prettifyFieldName(name) {
+  if (!name) return "";
+  const spaced = String(name)
+    .replace(/_/g, " ")
+    .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
+    .toLowerCase()
+    .trim();
+  return spaced.charAt(0).toUpperCase() + spaced.slice(1);
+}
+
 function renderField(name, schema, help, isRequired, prefillVal, opSensitive) {
   schema = schema || {};
-  const label = schema.title || name;
+  const label = schema.title || prettifyFieldName(name);
   const helpHtml = help ? `<div class="help">${esc(help)}</div>` : "";
   const reqAttr = isRequired ? "required" : "";
   const val = prefillVal !== undefined && prefillVal !== null ? prefillVal : "";
@@ -1881,6 +1914,17 @@ function resolveTouchedKey(op, ctx) {
   return undefined;
 }
 
+// datetimeLocalToRFC3339 converts a datetime-local control's value
+// ("YYYY-MM-DDTHH:MM", the visitor's local wall clock) into the RFC3339 UTC
+// instant scripts validate. An unparseable value passes through unchanged so
+// the server rejects it with its own message rather than this layer
+// inventing one.
+function datetimeLocalToRFC3339(v) {
+  if (typeof v !== "string" || !v) return v;
+  const d = new Date(v);
+  return isNaN(d.getTime()) ? v : d.toISOString().replace(/\.\d{3}Z$/, "Z");
+}
+
 function submitDescriptorForm(form, op, opKey, ctx, fieldNames, props, contextParams, required) {
   const payload = {};
   for (const name of fieldNames) {
@@ -1896,6 +1940,7 @@ function submitDescriptorForm(form, op, opKey, ctx, fieldNames, props, contextPa
     if (el.dataset && el.dataset.moneyField !== undefined) v = Math.round(parseFloat(el.value) * 100);
     else if (schema.type === "integer") v = parseInt(v, 10);
     else if (schema.type === "number") v = parseFloat(v);
+    else if (schema.format === "date-time") v = datetimeLocalToRFC3339(v);
     payload[name] = v;
   }
 
@@ -1913,7 +1958,16 @@ function submitDescriptorForm(form, op, opKey, ctx, fieldNames, props, contextPa
   }
 
   for (const [field, template] of Object.entries(contextParams)) {
-    payload[field] = substituteTemplate(template, ctx, payload);
+    const optional = templateIsOptional(template);
+    const v = substituteTemplate(stripOptionalMarkers(template), ctx, payload);
+    if (optional && !v) {
+      // An optional param that didn't resolve is OMITTED — the script's
+      // absence branch (standard rate, no eligibility) is the designed
+      // outcome, and an empty-string key would instead fail the request.
+      delete payload[field];
+      continue;
+    }
+    payload[field] = v;
   }
   if (op.dispatchTargetField) {
     // Context resolution wins when it yields a key; a form-collected picker

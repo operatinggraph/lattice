@@ -141,21 +141,31 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 			},
 			InputSchema: `{"type":"object","properties":` +
 				`{"instanceKey":{"type":"string","description":"vtx.service.<NanoID> of the instance to record an outcome for — auto-filled from the instance being viewed."},` +
-				`"status":{"type":"string","enum":["completed","failed"],"description":"The terminal outcome: completed or failed."},` +
-				`"completedAt":{"type":"string","description":"RFC3339 instant the run completed."},` +
+				`"status":{"type":"string","title":"Outcome","enum":["completed","failed"],"description":"The terminal outcome: completed or failed."},` +
+				`"completedAt":{"type":"string","format":"date-time","title":"Completed at","description":"When the run completed."},` +
 				`"serviceprovider":{"type":"string","description":"vtx.serviceprovider.<NanoID> of your own service-provider record — required for a provider (non-operator) caller."}},` +
 				`"required":["instanceKey","status","completedAt"]}`,
 			FieldDescriptions: map[string]string{
 				"instanceKey":     "The instance this outcome is for — auto-filled by the client from the instance being viewed (dispatch.targetField), not user-entered.",
-				"status":          "completed or failed.",
-				"completedAt":     "RFC3339 instant the run completed.",
-				"serviceprovider": "Your own service-provider record — required for a provider caller. Must be providedBy the instance's own template and identifiedBy-bound to you.",
+				"status":          "How the run ended — completed or failed.",
+				"completedAt":     "When the run completed.",
+				"serviceprovider": "Attached automatically when you provide this service — you record outcomes only for your own runs.",
 			},
 			Dispatch: &pkgmgr.OpDispatchSpec{
 				Class:       "service",
 				AuthContext: "standing",
 				TargetField: "instanceKey",
 				TargetType:  "service",
+				// serviceprovider is the provider-path standing-guard param,
+				// filled from the caller's own serviceprovider self-anchor
+				// rather than asked for as a raw vertex key. The trailing `?`
+				// OPTIONAL marker is load-bearing: the OPERATOR path passes the
+				// script's guard with no serviceprovider at all (its absence is
+				// the designed branch), so the param is omitted silently for a
+				// caller with no provider binding and the op stays offered.
+				ContextParams: map[string]string{
+					"serviceprovider": "{me.serviceprovider?}",
+				},
 				// The providedBy/identifiedBy ownership-chain probes.
 				// Absence of either is a meaningful rejection the script
 				// renders (AuthDenied), not a correctness error — the same
@@ -216,7 +226,7 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 			},
 			InputSchema: `{"type":"object","properties":` +
 				`{"serviceProviderKey":{"type":"string","description":"vtx.serviceprovider.<NanoID> of the record being edited — auto-filled from the service provider being viewed."},` +
-				`"displayName":{"type":"string","description":"Your service-provider display name, as residents see it."}},` +
+				`"displayName":{"type":"string","title":"Name","description":"Your service-provider display name, as residents see it."}},` +
 				`"required":["serviceProviderKey","displayName"]}`,
 			FieldDescriptions: map[string]string{
 				"serviceProviderKey": "The service-provider record being edited — auto-filled by the client from the record being viewed (dispatch.targetField), not user-entered.",

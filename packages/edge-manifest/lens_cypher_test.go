@@ -412,3 +412,31 @@ func TestEdgeIdentity_MultiHatTopologyYieldsOneAnchorPerRelation(t *testing.T) {
 	require.Len(t, byRel["identifiedBy"], 1, "one binding")
 	require.Equal(t, "Sam Okafor", byRel["identifiedBy"][0]["name"])
 }
+
+// TestEdgeCatalogRoles_CarriesTheServiceJoin is the POSITIVE vector for the
+// shared-row-key repair: an op reachable BOTH by role grant and by service
+// permitsOperation must project viaServices from the roles lens too, or the
+// two lenses' last-writer race erases the service join for any multi-hat
+// actor. The tail's OPTIONAL MATCH + collect must actually bind the edge —
+// an empty-collect pass on a linkless fixture proves nothing.
+func TestEdgeCatalogRoles_CarriesTheServiceJoin(t *testing.T) {
+	f := newEmFixture(t)
+	f.vtx(t, "staff", "identity")
+	f.vtx(t, "role", "role")
+	f.vtx(t, "perm", "permission")
+	f.vtx(t, "opMeta", "meta")
+	f.vtx(t, "tpl", "service")
+	f.aspect(t, "role", "canonicalName", "canonicalName", map[string]any{"value": "frontOfHouse"})
+	f.edge(t, "holdsRole", "staff", "role")
+	f.edge(t, "grantedBy", "perm", "role")
+	f.edge(t, "forOperation", "perm", "opMeta")
+	f.edge(t, "permitsOperation", "tpl", "opMeta")
+
+	rows := emRowsByEntity(f.project(t, emComposedSpec(t, "edgeCatalogRoles"), f.key("staff")))
+	row, ok := rows[f.ids["opMeta"]]
+	require.True(t, ok, "the role-granted op must project")
+	via, ok := row["viaServices"].([]any)
+	require.True(t, ok, "viaServices must be a list, got %T (%v)", row["viaServices"], row["viaServices"])
+	require.Len(t, via, 1, "the permitsOperation service must be collected")
+	require.Equal(t, f.key("tpl"), via[0])
+}

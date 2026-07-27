@@ -118,9 +118,7 @@ var s1Debt = map[opRef]bool{}
 //
 // Shrink only, same discipline as s1Debt: an entry that stops violating fails
 // the gate too. Never add a row here for a NEW descriptor.
-var readTemplateDebt = map[opRef]bool{
-	{"service-domain", "RecordServiceOutcome", ""}: true,
-}
+var readTemplateDebt = map[opRef]bool{}
 
 // s6Debt lists packages below the verification floor, per rule. Same
 // shrink-only discipline as s1Debt.

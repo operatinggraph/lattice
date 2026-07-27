@@ -104,7 +104,7 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 			},
 			InputSchema: `{"type":"object","properties":` +
 				`{"tabKey":{"type":"string","description":"vtx.tab.<NanoID> of your open tab — auto-filled from the tab you opened."},` +
-				`"menuItemKey":{"type":"string","x-entityRef":"menuitem","description":"vtx.menuitem.<NanoID> of the catalog item to order; its own price is what gets charged."}},` +
+				`"menuItemKey":{"type":"string","title":"Item","x-entityRef":"menuitem","description":"vtx.menuitem.<NanoID> of the catalog item to order; its own price is what gets charged."}},` +
 				`"required":["tabKey","menuItemKey"]}`,
 			FieldDescriptions: map[string]string{
 				"tabKey":      "The tab being charged — auto-filled by the client from the tab it opened (dispatch.targetField), not user-entered.",
@@ -140,11 +140,11 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 			},
 			InputSchema: `{"type":"object","properties":` +
 				`{"tabKey":{"type":"string","description":"vtx.tab.<NanoID> of the open tab to correct — auto-filled from the tab being viewed."},` +
-				`"amountCents":{"type":"integer","minimum":1,"description":"Amount to take back off the tab, in whole cents."}},` +
+				`"amountCents":{"type":"integer","title":"Amount","minimum":1,"description":"Amount to take back off the tab, in whole cents."}},` +
 				`"required":["tabKey","amountCents"]}`,
 			FieldDescriptions: map[string]string{
 				"tabKey":      "The tab being corrected — auto-filled by the client from the tab being viewed (dispatch.targetField), not user-entered.",
-				"amountCents": "How much to subtract, in whole cents. A void larger than the running total clamps the tab to zero rather than failing.",
+				"amountCents": "How much to take back off the tab, entered in dollars — e.g. 4.50. A void larger than the running total clamps the tab to zero rather than failing.",
 			},
 			Dispatch: &pkgmgr.OpDispatchSpec{
 				Class:       "tab",
