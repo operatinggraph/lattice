@@ -143,8 +143,15 @@ RETURN
 // A tab with totalCents=0 (opened and settled with nothing charged) never
 // violates either gap — no house-tab posting is needed for a zero-amount
 // visit.
+//
+// The lease hop is `chargedTo`, the tab's PERMANENT link, not the `openFor`
+// one Settle retracts (ddls.go). Both gaps only ever open on a SETTLED tab, so
+// a required match on a hop that disappears at settlement would project no row
+// exactly when one is owed — and with EmptyBehavior "delete" the target row
+// would vanish and Weaver would dispatch nothing. Which link this walks is
+// therefore a money question, not a naming one.
 const tabSettlementSpec = `MATCH (t:tab {key: $actorKey})
-MATCH (t)-[:openFor]->(l:leaseapp)
+MATCH (t)-[:chargedTo]->(l:leaseapp)
 OPTIONAL MATCH (t)<-[:settles]-(tx:cafetransaction)
 WITH
   t.key AS entityKey,

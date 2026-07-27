@@ -215,6 +215,34 @@ func TestEdgeEntityTabs_ProjectsOnlyTheActorsOwnOpenTab(t *testing.T) {
 	require.Empty(t, settled, "a settled tab is no longer a charge target")
 }
 
+// TestEdgeEntityTabs_GrantIsBoundedByTheOpenForHop is the grant-side half of
+// the row set the test above pins, and the reason a resident's cap-read slice
+// does not grow with every tab they ever open.
+//
+// A walk chain is node patterns only, so this producer can never read the
+// `.status` aspect the presentation tail filters on. The narrowing is
+// structural instead: `Settle` tombstones the tab's `openFor` link
+// (cafe-domain/ddls.go), which is the only hop this walk traverses, so a
+// settled tab leaves the granted set by losing its edge rather than by failing
+// a filter that does not exist here. The fixture seeds exactly that shape — a
+// settled tab with no `openFor` edge — and the open tab beside it proves the
+// walk still reaches what it should.
+func TestEdgeEntityTabs_GrantIsBoundedByTheOpenForHop(t *testing.T) {
+	f := emResidentWorld(t)
+	f.vtx(t, "settledTab", "tab")
+	f.aspect(t, "settledTab", "status", "tabStatus", map[string]any{
+		"value": "settled", "totalCents": 450,
+		"openedAt": "2026-07-26T08:00:00Z", "settledAt": "2026-07-26T08:45:00Z"})
+	// Post-Settle shape: same lease as the open tab, chargedTo standing (which
+	// this walk does not traverse), openFor gone.
+	f.edge(t, "chargedTo", "settledTab", "lease")
+
+	granted := f.grantedAnchorIDs(t, f.key("resident"), []string{emComposedSpec(t, "edgeManifestReadGrants")})
+	require.True(t, granted[f.ids["tab"]], "the open tab must still be granted")
+	require.False(t, granted[f.ids["settledTab"]],
+		"a settled tab must leave the grant — otherwise the slice grows with the lease's lifetime tab count")
+}
+
 // TestEdgeEntityMenuItems_IsBoundedByTheResidenceChain pins the two things the
 // walk decides. A catalog is locality-scoped, not private — every item served
 // where the actor lives projects, which is what makes it a pickable set — and

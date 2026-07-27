@@ -131,13 +131,30 @@ func (f *cdFixture) projectAt(t *testing.T, tabName string) []ruleengine.Project
 	return out
 }
 
-// mkTab seeds one tab openFor a fresh leaseapp, with the given status.
+// valuesAt is projectAt for the single-row case. Indexing the slice directly
+// panics when a spec change drops the row, which aborts the whole test binary
+// and hides every later failure behind the first one; require.Len reports the
+// real cause and lets the rest of the package still run.
+func (f *cdFixture) valuesAt(t *testing.T, tabName string) map[string]any {
+	t.Helper()
+	rows := f.projectAt(t, tabName)
+	require.Len(t, rows, 1, "cafeTabSettlement must project exactly one row per tab")
+	return rows[0].Values
+}
+
+// mkTab seeds one tab against a fresh leaseapp, with the given status, in the
+// exact link shape production leaves it in: `chargedTo` always, and `openFor`
+// only while the tab is open — Settle tombstones that hop (ddls.go), so a
+// settled tab genuinely has no `openFor` link to walk.
 func (f *cdFixture) mkTab(t *testing.T, name string, status string, totalCents float64) {
 	t.Helper()
 	f.vtx(t, name, "tab")
 	f.aspect(t, name, "status", "tabStatus", map[string]any{"value": status, "totalCents": totalCents, "openedAt": "2026-07-07T12:00:00Z"})
 	f.vtx(t, name+"_lease", "leaseapp")
-	f.edge(t, "openFor", name, name+"_lease")
+	f.edge(t, "chargedTo", name, name+"_lease")
+	if status == "open" {
+		f.edge(t, "openFor", name, name+"_lease")
+	}
 }
 
 func TestCafeTabSettlement_OpenNotViolating(t *testing.T) {
@@ -147,7 +164,7 @@ func TestCafeTabSettlement_OpenNotViolating(t *testing.T) {
 	f := newCdFixture(t)
 	f.mkTab(t, "opentab", "open", 850)
 
-	v := f.projectAt(t, "opentab")[0].Values
+	v := f.valuesAt(t, "opentab")
 	require.Equal(t, "vtx.tab."+f.ids["opentab"], v["entityKey"])
 	require.Equal(t, "open", v["status"])
 	require.Equal(t, "2026-07-07T12:00:00Z", v["openedAt"])
@@ -168,12 +185,12 @@ func TestCafeTabSettlement_SettledStatusAndTimestampsProjected(t *testing.T) {
 		"openedAt": "2026-07-07T12:00:00Z", "settledAt": "2026-07-07T13:00:00Z",
 	})
 	f.vtx(t, "settledtab_lease", "leaseapp")
-	f.edge(t, "openFor", "settledtab", "settledtab_lease")
+	f.edge(t, "chargedTo", "settledtab", "settledtab_lease")
 	f.aspect(t, "settledtab_lease", "cafeLedgerAccount", "cafeLedgerAccountGuard", map[string]any{"accountKey": "vtx.cafeaccount.BBFAKEACCTHJKMNPQRST"})
 	f.vtx(t, "settledtab_tx", "cafetransaction")
 	f.edge(t, "settles", "settledtab_tx", "settledtab")
 
-	v := f.projectAt(t, "settledtab")[0].Values
+	v := f.valuesAt(t, "settledtab")
 	require.Equal(t, "settled", v["status"])
 	require.Equal(t, "2026-07-07T12:00:00Z", v["openedAt"])
 	require.Equal(t, "2026-07-07T13:00:00Z", v["settledAt"])
@@ -187,7 +204,7 @@ func TestCafeTabSettlement_SettledZeroTotal_NotViolating(t *testing.T) {
 	f := newCdFixture(t)
 	f.mkTab(t, "zerotab", "settled", 0)
 
-	v := f.projectAt(t, "zerotab")[0].Values
+	v := f.valuesAt(t, "zerotab")
 	require.Equal(t, false, v["missing_account"], "zero total needs no posting")
 	require.Equal(t, false, v["missing_charge"], "zero total needs no posting")
 	require.Equal(t, false, v["violating"])
@@ -200,7 +217,7 @@ func TestCafeTabSettlement_SettledNoAccount_MissingAccount(t *testing.T) {
 	f := newCdFixture(t)
 	f.mkTab(t, "noaccttab", "settled", 1200)
 
-	v := f.projectAt(t, "noaccttab")[0].Values
+	v := f.valuesAt(t, "noaccttab")
 	require.Nil(t, v["accountKey"], "lease has no café-ledger account yet")
 	require.Equal(t, true, v["missing_account"], "settled + owes money + no account — violating")
 	require.Equal(t, false, v["missing_charge"], "no account to charge yet — this gap doesn't gate")
@@ -215,7 +232,7 @@ func TestCafeTabSettlement_SettledWithAccountNoCharge_MissingCharge(t *testing.T
 	f.mkTab(t, "unchargedtab", "settled", 1200)
 	f.aspect(t, "unchargedtab_lease", "cafeLedgerAccount", "cafeLedgerAccountGuard", map[string]any{"accountKey": "vtx.cafeaccount.BBFAKEACCTHJKMNPQRST"})
 
-	v := f.projectAt(t, "unchargedtab")[0].Values
+	v := f.valuesAt(t, "unchargedtab")
 	require.Equal(t, "vtx.cafeaccount.BBFAKEACCTHJKMNPQRST", v["accountKey"])
 	require.Equal(t, false, v["missing_account"], "account already exists")
 	require.Equal(t, true, v["missing_charge"], "no cafetransaction settles this tab yet — violating")
@@ -232,10 +249,65 @@ func TestCafeTabSettlement_SettledAndCharged_Converged(t *testing.T) {
 	f.vtx(t, "chargedtab_tx", "cafetransaction")
 	f.edge(t, "settles", "chargedtab_tx", "chargedtab")
 
-	v := f.projectAt(t, "chargedtab")[0].Values
+	v := f.valuesAt(t, "chargedtab")
 	require.Equal(t, false, v["missing_account"])
 	require.Equal(t, false, v["missing_charge"], "a cafetransaction settles this tab — converged")
 	require.Equal(t, false, v["violating"])
+}
+
+// TestCafeTabSettlement_SurvivesTheOpenForRetraction pins which of a tab's two
+// lease links the convergence walks, because getting it wrong loses money
+// silently rather than loudly.
+//
+// Settle tombstones `openFor` — that retraction is what bounds a resident's
+// edgeEntityTabs read grant to their open tabs — and it lands in the SAME
+// mutation set that flips .status to settled. So the instant a tab starts
+// owing a posting is the instant `openFor` stops existing. A convergence lens
+// that required that hop would project no row at all for the one tab shape it
+// exists to catch, and with EmptyBehavior "delete" the target row would be
+// removed and Weaver would dispatch nothing: an unposted house tab, no error
+// anywhere. Only `chargedTo` survives settlement, so only `chargedTo` can
+// carry this walk.
+func TestCafeTabSettlement_SurvivesTheOpenForRetraction(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newCdFixture(t)
+	f.vtx(t, "posttab", "tab")
+	f.aspect(t, "posttab", "status", "tabStatus", map[string]any{
+		"value": "settled", "totalCents": 1750.0,
+		"openedAt": "2026-07-07T12:00:00Z", "settledAt": "2026-07-07T13:30:00Z",
+	})
+	f.vtx(t, "posttab_lease", "leaseapp")
+	// Exactly what Settle leaves behind: chargedTo standing, no openFor.
+	f.edge(t, "chargedTo", "posttab", "posttab_lease")
+
+	rows := f.projectAt(t, "posttab")
+	require.Len(t, rows, 1, "a settled tab must still project — its posting has not happened yet")
+	v := rows[0].Values
+	require.Equal(t, "vtx.leaseapp."+f.ids["posttab_lease"], v["leaseAppKey"],
+		"the lease must still be reachable after the openFor retraction")
+	require.Equal(t, true, v["missing_account"], "settled + owes money + no account — Weaver must be told")
+	require.Equal(t, true, v["violating"])
+}
+
+// TestCafeTabSettlement_OpenForAloneDoesNotAnchor proves the retraction is
+// load-bearing in the other direction too: a tab wired ONLY with the transient
+// hop projects nothing, so no lingering `openFor` can quietly keep a
+// pre-`chargedTo` tab converging and mask a missing permanent link.
+func TestCafeTabSettlement_OpenForAloneDoesNotAnchor(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newCdFixture(t)
+	f.vtx(t, "legacytab", "tab")
+	f.aspect(t, "legacytab", "status", "tabStatus", map[string]any{
+		"value": "settled", "totalCents": 900.0, "openedAt": "2026-07-07T12:00:00Z"})
+	f.vtx(t, "legacytab_lease", "leaseapp")
+	f.edge(t, "openFor", "legacytab", "legacytab_lease")
+
+	require.Empty(t, f.projectAt(t, "legacytab"),
+		"chargedTo is the settlement anchor; openFor must not stand in for it")
 }
 
 // project runs an UNANCHORED spec (cafeLeaseWorkplaces takes no $actorKey,

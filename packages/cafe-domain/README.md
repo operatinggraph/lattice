@@ -22,7 +22,7 @@ composition lens unioning `ledgerHistory` + `cafeLedgerHistory` by `leaseAppKey`
 |---|---|
 | **Vertex types** (1) | `tab` (root `{}`, D5, `.status` aspect) |
 | **Aspect types** (1) | `tabStatus` — `vtx.tab.<id>.status`, `{value, totalCents, openedAt, leaseAppKey, settledAt?}` |
-| **Links** (1) | `openFor` (tab → leaseapp) |
+| **Links** (2) | `chargedTo` (tab → leaseapp, permanent) · `openFor` (tab → leaseapp, released by `Settle`) |
 | **Operations** (4) | `OpenTab` · `Charge` · `VoidCharge` · `Settle` |
 | **Convergence lens** (1) | `cafeTabSettlement` (one row per tab, `missing_account`/`missing_charge`) → `weaver-targets` (`nats-kv`, `full` engine, actorAggregate) |
 | **Weaver playbook** (1) | `cafeTabSettlement` — `missing_account` → `directOp(CreateAccount)` · `missing_charge` → `directOp(DebitAccount)` (both cafe-ledger) |
@@ -36,7 +36,8 @@ single-identity model, no new capability surface, identical to `cafe-ledger`.
 vtx.tab.<id>            class=tab        root {} (D5)
 vtx.tab.<id>.status     class=tabStatus  {value ∈ open|settled, totalCents, openedAt, leaseAppKey, settledAt?}
 
-lnk.tab.<id>.openFor.leaseapp.<id>            (tab → leaseapp; tab is the later-arriving vertex)
+lnk.tab.<id>.chargedTo.leaseapp.<id>          (tab → leaseapp; permanent — where the money lands; cafeTabSettlement anchors here)
+lnk.tab.<id>.openFor.leaseapp.<id>            (tab → leaseapp; transient — that the tab is open; Settle tombstones it)
 lnk.cafetransaction.<id>.settles.tab.<id>     (cafetransaction → tab; written by cafe-ledger's DebitAccount tabRef)
 ```
 

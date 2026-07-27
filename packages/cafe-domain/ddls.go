@@ -47,7 +47,9 @@ func tabVertexTypeDDL() pkgmgr.DDLSpec {
 			"optionalReads dedup — create the guard fresh on a lease's first-ever tab, OCC-revive it from its prior " +
 			"tombstone on a later one), mints the tab, writes .status {value: open, totalCents: 0, openedAt, " +
 			"leaseAppKey} (leaseAppKey denormalized onto .status so Charge/Settle never need a second declared read " +
-			"for the link target) and the openFor link (tab→leaseapp). Charge{tabKey, amountCents} (operator) adds " +
+			"for the link target) and BOTH tab→leaseapp links: chargedTo (permanent — where the money lands, the " +
+			"anchor cafeTabSettlement walks to reach the lease's ledger-account guard) and openFor (transient — " +
+			"that the tab is open). Charge{tabKey, amountCents} (operator) adds " +
 			"a positive amount to an OPEN tab's running total — an OCC-conditioned upsert of .status keyed on the " +
 			"aspect's own current revision (the providerSlotClaim precedent: two concurrent charges racing the " +
 			"same tab must not lose an update, so totalCents is a real accumulator, not an idempotent set). A " +
@@ -60,7 +62,10 @@ func tabVertexTypeDDL() pkgmgr.DDLSpec {
 			"the current total (an over-void is a caller mistake worth correcting cleanly, not a hard failure). " +
 			"Settle{tabKey} closes an " +
 			"OPEN tab (.status.value → settled, settledAt stamped, totalCents frozen), also OCC-conditioned, and " +
-			"tombstones the lease's cafeOpenTabGuard so a later OpenTab can claim it again. Settling emits tab.settled " +
+			"tombstones both the lease's cafeOpenTabGuard (so a later OpenTab can claim it again) and the tab's own " +
+			"openFor link (so the tab leaves every resident's edgeEntityTabs read grant, which walks that hop and " +
+			"cannot see the .status aspect the lens tail filters on). chargedTo is deliberately left standing — the " +
+			"settlement convergence below anchors on it and runs AFTER this. Settling emits tab.settled " +
 			"— the cafeTabSettlement lens (lenses.go) picks up a settled tab with totalCents>0 and dispatches the " +
 			"resident's café-ledger posting (opening a cafeaccount via CreateAccount on first use, then " +
 			"DebitAccount{tabRef}) through Weaver, never a direct cross-package write from this script. Charge, " +
@@ -91,7 +96,8 @@ func tabVertexTypeDDL() pkgmgr.DDLSpec {
 				Name:    "OpenTab — start a house tab for a resident",
 				Payload: map[string]any{"leaseAppKey": "vtx.leaseapp.<NanoID>"},
 				ExpectedOutcome: "Validates the lease is alive. Mints vtx.tab.<NanoID> (root {}) + .status " +
-					"{value: open, totalCents: 0, openedAt, leaseAppKey} + the openFor link (tab→leaseapp) + claims " +
+					"{value: open, totalCents: 0, openedAt, leaseAppKey} + the chargedTo and openFor links " +
+					"(both tab→leaseapp) + claims " +
 					"the lease's cafeOpenTabGuard. Returns primaryKey (the tab key). Rejects UnknownLeaseApplication " +
 					"if the lease is absent, or OpenTabAlreadyExists if the lease already has an open tab.",
 			},
@@ -122,7 +128,9 @@ func tabVertexTypeDDL() pkgmgr.DDLSpec {
 				Name:    "Settle — close a tab for house-account posting",
 				Payload: map[string]any{"tabKey": "vtx.tab.<NanoID>"},
 				ExpectedOutcome: "Validates the tab is alive + open, sets .status.value to settled and stamps " +
-					"settledAt (OCC-conditioned; totalCents/leaseAppKey carried over unchanged). Emits tab.settled" +
+					"settledAt (OCC-conditioned; totalCents/leaseAppKey carried over unchanged), and tombstones the " +
+					"lease's cafeOpenTabGuard + the tab's openFor link (chargedTo stays — settlement anchors on it). " +
+					"Emits tab.settled" +
 					"{tabKey, leaseAppKey, totalCents}. Returns primaryKey. Rejects TabNotOpen if already settled.",
 			},
 		},
@@ -770,8 +778,22 @@ def execute(state, op):
         tab_key = "vtx.tab." + tab_id
         opened_at = time.rfc3339_utc(op.submittedAt)
 
-        # openFor: the tab (later-arriving) is the source, the pre-existing
-        # lease is the target (Contract #1 §1.1). Reads as "tab openFor lease."
+        # Two links, because a tab holds two facts about its lease that expire
+        # at different times. Both put the later-arriving tab in the source
+        # position (Contract #1 §1.1) and read as sentences.
+        #
+        #   chargedTo — PERMANENT. Where this tab's money lands. The anchor
+        #     cafeTabSettlement (lenses.go) walks to reach the lease's
+        #     cafeLedgerAccount guard, so it must outlive the tab's closing:
+        #     settlement converges precisely AFTER Settle runs. Mirrors the
+        #     account heldFor lease anchor the ledgers mint.
+        #   openFor — TRANSIENT. That this tab is open, released by Settle
+        #     below. It is the only hop edge-manifest's edgeEntityTabs walk
+        #     traverses, so retracting it is what keeps a resident's read
+        #     grant bounded by their open tabs rather than by every tab the
+        #     lease has ever held (a walk chain is node patterns only and
+        #     cannot see the .status aspect the presentation tail filters on).
+        charged_to_lnk = "lnk.tab." + tab_id + ".chargedTo.leaseapp." + lease_id
         open_for_lnk = "lnk.tab." + tab_id + ".openFor.leaseapp." + lease_id
 
         if guard_revision == None:
@@ -784,6 +806,7 @@ def execute(state, op):
             make_vtx(tab_key, "tab", {}),
             make_aspect(tab_key, "status", "tabStatus",
                         {"value": "open", "totalCents": 0, "openedAt": opened_at, "leaseAppKey": lease_key}),
+            make_link(charged_to_lnk, tab_key, lease_key, "chargedTo", "chargedTo", {}),
             make_link(open_for_lnk, tab_key, lease_key, "openFor", "openFor", {}),
             guard_mut,
         ]
@@ -900,7 +923,7 @@ def execute(state, op):
 
     if ot == "Settle":
         tab_key = required_string(p, "tabKey")
-        parts_of(tab_key, "tabKey", "tab")
+        _, tab_id = parts_of(tab_key, "tabKey", "tab")
         if not vertex_alive(state, tab_key):
             fail("UnknownTab: " + tab_key)
         if class_of(state, tab_key) != "tab":
@@ -910,6 +933,7 @@ def execute(state, op):
         settled_at = time.rfc3339_utc(op.submittedAt)
         total_cents = existing.data.get("totalCents")
         lease_key = existing.data.get("leaseAppKey")
+        _, lease_id = parts_of(lease_key, "leaseAppKey", "leaseapp")
 
         # Staff-standing confinement: same derivation as Charge — the lease comes
         # from the tab's own .status aspect, so the workplace cannot be forged.
@@ -928,7 +952,6 @@ def execute(state, op):
         # the tab's own lease, so a forged one only fails closed.
         if op.authContextTarget != "":
             _, target_identity_id = parts_of(op.authContextTarget, "authContextTarget", "identity")
-            lease_id = lease_key.split(".")[2]
             application_for_lnk = "lnk.leaseapp." + lease_id + ".applicationFor.identity." + target_identity_id
             # read-posture: (d) declared in contextHint.optionalReads by the
             # self-service caller (it knows its own tabKey + leaseAppKey +
@@ -940,14 +963,22 @@ def execute(state, op):
         status_data = {"value": "settled", "totalCents": total_cents,
                         "openedAt": existing.data.get("openedAt"),
                         "leaseAppKey": lease_key, "settledAt": settled_at}
-        # Release the lease's open-tab guard so its next OpenTab can claim it
-        # again — unconditioned, mirroring clinic-domain's slot-cell release
-        # (a stale-tombstone race can only free the guard early, never leave
-        # two tabs open; OpenTab's own OCC-revive is what actually
-        # serializes a genuine race on the next claim).
+        # Two releases, both unconditioned, mirroring clinic-domain's slot-cell
+        # release (a stale-tombstone race can only free them early; OpenTab's
+        # own OCC-revive is what actually serializes a genuine race on the next
+        # claim). The tab's chargedTo link is deliberately NOT among them —
+        # cafeTabSettlement anchors on it and converges after this runs.
+        #
+        #   .cafeOpenTab — the lease's open-tab guard, so its next OpenTab can
+        #     claim it again.
+        #   openFor — the "this tab is open" hop. Retracting it narrows every
+        #     resident's edgeEntityTabs read grant to their currently-open tabs;
+        #     the lens tail's status filter then re-states the same bound
+        #     rather than being the only one enforcing it.
         mutations = [
             make_aspect_upsert_occ(tab_key, "status", "tabStatus", status_data, existing.revision),
             make_tombstone(lease_key + ".cafeOpenTab"),
+            make_tombstone("lnk.tab." + tab_id + ".openFor.leaseapp." + lease_id),
         ]
         events = [{"class": "tab.settled", "data": {"tabKey": tab_key, "leaseAppKey": lease_key, "totalCents": total_cents}}]
         return {"mutations": mutations, "events": events,

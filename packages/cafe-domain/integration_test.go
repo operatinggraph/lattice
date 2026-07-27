@@ -308,9 +308,11 @@ func TestOpenTab_MintsTabOpenForLease(t *testing.T) {
 		t.Fatalf("status.leaseAppKey = %q, want %q", got, leaseKey)
 	}
 
-	openForLnk := "lnk.tab." + tabID + ".openFor.leaseapp." + leaseID
-	if !keyExists(t, ctx, conn, openForLnk) {
-		t.Fatalf("openFor link must exist: %s", openForLnk)
+	for _, rel := range []string{"chargedTo", "openFor"} {
+		lnk := "lnk.tab." + tabID + "." + rel + ".leaseapp." + leaseID
+		if !keyExists(t, ctx, conn, lnk) {
+			t.Fatalf("%s link must exist after OpenTab: %s", rel, lnk)
+		}
 	}
 }
 
@@ -621,6 +623,21 @@ func TestSettle_ClosesTabFreezesTotal(t *testing.T) {
 	}
 	if _, ok := statusData["settledAt"]; !ok {
 		t.Fatalf("status.settledAt must be stamped on settle")
+	}
+
+	// The two lease links part ways here. `openFor` is retracted, which is what
+	// drops the tab out of every resident's edgeEntityTabs read grant (that walk
+	// traverses this hop and cannot see the .status aspect). `chargedTo` must
+	// survive: cafeTabSettlement anchors on it, and the posting it drives is
+	// owed only NOW that the tab is settled — retracting both would delete the
+	// convergence row and silently leave the house tab unposted.
+	tabID := tabKey[len("vtx.tab."):]
+	leaseID := leaseKey[len("vtx.leaseapp."):]
+	if keyExists(t, ctx, conn, "lnk.tab."+tabID+".openFor.leaseapp."+leaseID) {
+		t.Fatalf("Settle must tombstone the openFor link")
+	}
+	if !keyExists(t, ctx, conn, "lnk.tab."+tabID+".chargedTo.leaseapp."+leaseID) {
+		t.Fatalf("Settle must LEAVE chargedTo alive — cafeTabSettlement anchors on it")
 	}
 }
 

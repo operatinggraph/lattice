@@ -743,14 +743,19 @@ RETURN
 // nobody's business, and a resident's tab at a café outside their building is
 // still theirs.
 //
-// The open-status filter is a PRESENTATION narrowing, exactly as on edgeTasks:
-// the walk grants the tab anchor whatever its status, so grant ⊇ projection
-// holds and a settled tab simply stops being offered as a charge target. The
-// grant side cannot narrow with it — a status lives on an ASPECT and the walk
-// chain expresses node patterns only — and Settle leaves the tab alive rather
-// than tombstoning it (cafe-domain/ddls.go), so unlike edgeEntityBookings this
-// branch's granted set grows with a resident's lifetime tab count. Bounding it
-// is a filed lane item, not something to fake here with a key-list.
+// The `openFor` hop is itself the open-tab bound, which is why this branch's
+// granted set stays the size of a resident's OPEN tabs rather than their
+// lifetime tab count. A walk chain expresses node patterns only and can never
+// see the `.status` aspect, so the narrowing had to be structural: cafe-domain
+// gives a tab two lease links with two lifetimes and `Settle` tombstones this
+// one, leaving the permanent `chargedTo` for its settlement lens to anchor on.
+//
+// The tail's status filter therefore re-states the walk's bound rather than
+// being the only thing enforcing it. It stays for two reasons: grant ⊇
+// projection must hold by construction, not by coincidence, and the two sides
+// are independent CDC re-executions, so during the window between a Settle's
+// retraction and this lens re-projecting, the filter is what keeps a settled
+// tab from being offered as a charge target.
 //
 // The unit name is the title because a tab has no name of its own — the lease
 // names the household the tab belongs to, via the same `appliesToUnit` hop

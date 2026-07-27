@@ -8,15 +8,21 @@
 //   - The `tab` vertex type (DDL `tab`) — OpenTab validates the lease has no
 //     open tab already (the cafeOpenTabGuard aspect below), mints
 //     vtx.tab.<NanoID> (root data {} per D5) + a .status aspect {value:
-//     open, totalCents: 0, openedAt, leaseAppKey} + the openFor link
-//     (tab→leaseapp). Charge OCC-conditions an accumulate onto
+//     open, totalCents: 0, openedAt, leaseAppKey} + two tab→leaseapp
+//     links: chargedTo (permanent — the anchor cafeTabSettlement walks to
+//     reach the lease's ledger-account guard, so it must outlive the tab's
+//     closing) and openFor (transient — that the tab is open, and the only
+//     hop edge-manifest's edgeEntityTabs walk traverses).
+//     Charge OCC-conditions an accumulate onto
 //     .status.totalCents (the providerSlotClaim precedent: a real
 //     accumulator must not lose a concurrent update, unlike an idempotent
 //     status flip). VoidCharge OCC-conditions the mirror-image decrement,
 //     clamped at 0 rather than rejected on an over-void — operator/
 //     frontOfHouse only, no self-service grant (a POS correction is a
 //     staff decision). Settle OCC-conditions the close (.status.value →
-//     settled, settledAt stamped) and releases the guard.
+//     settled, settledAt stamped) and releases both the guard and the
+//     openFor link, which is what bounds a resident's edgeEntityTabs read
+//     grant to their currently-open tabs.
 //
 //   - The `tabStatus` aspect type (DDL `tabStatus`) — the step-6 write gate
 //     for .status, written by the tab vertexType DDL's own script.
@@ -72,7 +78,7 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 // Package is the static, install-time bundle.
 var Package = pkgmgr.Definition{
 	Name:    "cafe-domain",
-	Version: "0.9.0",
+	Version: "0.10.0",
 	Description: "Café house-tab POS session domain: the tab vertex type (OpenTab/Charge/VoidCharge/Settle, " +
 		"OCC-conditioned running total) + the tabStatus aspect type + the cafeTabSettlement actorAggregate " +
 		"convergence lens (missing_account/missing_charge) + the §10.8 playbook dispatching directOp(CreateAccount)/" +
