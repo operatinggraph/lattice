@@ -47,7 +47,7 @@ var manifestLensNames = map[string]bool{
 	"edgeIdentity": true, "edgeServices": true, "edgeCatalog": true,
 	"edgeTasks": true, "edgeInstances": true,
 	"edgeEntitySessions": true, "edgeEntityProviders": true,
-	"edgeEntityBookings": true, "edgeEntityTabs": true,
+	"edgeEntityBookings": true, "edgeEntityTabs": true, "edgeEntityMenuItems": true,
 	"edgeEntityStudios": true,
 	"edgeCatalogRoles":   true, "edgeTasksQueued": true,
 	"edgeStaffWorkOrders":  true,
@@ -68,9 +68,9 @@ var readGrantLensNames = map[string]bool{
 	"edgeManifestProviderReadGrants": true,
 }
 
-func TestPackage_NineteenLenses(t *testing.T) {
-	if got := len(emComposedLenses(t)); got != 19 {
-		t.Fatalf("expected 19 lenses (16 manifest + 3 read-grant producers), got %d", got)
+func TestPackage_TwentyLenses(t *testing.T) {
+	if got := len(emComposedLenses(t)); got != 20 {
+		t.Fatalf("expected 20 lenses (17 manifest + 3 read-grant producers), got %d", got)
 	}
 	names := map[string]bool{}
 	for _, l := range emComposedLenses(t) {
@@ -184,6 +184,7 @@ func TestPackage_LensRowKeysAreManifestNamespaced(t *testing.T) {
 		"edgeEntityBookings":  `"manifest.ent" AS ns`,
 		"edgeEntityTabs":      `"manifest.ent" AS ns`,
 		"edgeEntityStudios":   `"manifest.ent" AS ns`,
+		"edgeEntityMenuItems": `"manifest.ent" AS ns`,
 		// The staff siblings share their non-staff counterpart's namespace on
 		// purpose: same ns + same entityId means an op or task reachable by
 		// both paths projects the identical row under the identical key, and

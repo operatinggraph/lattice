@@ -842,7 +842,14 @@ function instanceRow(i) {
 // ever projected.
 
 function renderBrowse() {
-  const ents = upcomingEntities();
+  // Browse offers only types some op can ACT on. A manifest.ent row can also
+  // exist to feed a descriptor field's picker (an `x-entityRef` type — the café
+  // menu item is the first), and such a row has no ops of its own: rendering it
+  // here would be a category whose every detail view says "nothing to do", i.e.
+  // the graph browser §3 F3 ratified this surface is not. The rows stay in
+  // state for the picker; only the category goes.
+  const actionable = new Set(ops().map((o) => o.data.dispatchTargetType).filter(Boolean));
+  const ents = upcomingEntities().filter((e) => actionable.has(e.data.entityType));
   if (!ents.length) { $("view-browse").innerHTML = `<div class="empty">Nothing nearby to book yet.</div>`; return; }
   const byType = new Map();
   for (const e of ents) {
@@ -1507,7 +1514,7 @@ function renderDescriptorForm(op, opKey, ctx, prefill, reviewBanner) {
   const form = $("descriptor-form");
   form.addEventListener("submit", (e) => {
     e.preventDefault();
-    submitDescriptorForm(form, op, opKey, ctx, fieldNames, props, contextParams);
+    submitDescriptorForm(form, op, opKey, ctx, fieldNames, props, contextParams, required);
   });
 }
 
@@ -1543,7 +1550,11 @@ function renderField(name, schema, help, isRequired, prefillVal, opSensitive) {
   } else if (schema.type === "string" && schema.format === "date-time") {
     inputHtml = `<input type="datetime-local" name="${esc(name)}" value="${esc(val)}" ${reqAttr}>`;
   } else if (schema.type === "string" && schema["x-entityRef"]) {
-    inputHtml = `<input type="text" data-entity-ref-visible="${esc(name)}" placeholder="Search…" autocomplete="off">
+    // The declared vertex TYPE rides onto the element: a field holding a
+    // Contract #1 key that is not the dispatch target still names what kind of
+    // thing it holds, and that name is the whole basis for offering candidates.
+    const refType = String(schema["x-entityRef"]);
+    inputHtml = `<input type="text" data-entity-ref-visible="${esc(name)}" data-entity-ref-type="${esc(refType)}" placeholder="Search ${esc(typeLabel(refType).toLowerCase())}s…" autocomplete="off">
       <input type="hidden" name="${esc(name)}" value="${esc(val)}">
       <div class="entity-ref-results" data-entity-ref-results="${esc(name)}"></div>`;
   } else if (schema.type === "string" && (schema.maxLength || 0) > 120) {
@@ -1691,7 +1702,7 @@ function resolveTouchedKey(op, ctx) {
   return undefined;
 }
 
-function submitDescriptorForm(form, op, opKey, ctx, fieldNames, props, contextParams) {
+function submitDescriptorForm(form, op, opKey, ctx, fieldNames, props, contextParams, required) {
   const payload = {};
   for (const name of fieldNames) {
     const schema = props[name] || {};
@@ -1708,6 +1719,20 @@ function submitDescriptorForm(form, op, opKey, ctx, fieldNames, props, contextPa
     else if (schema.type === "number") v = parseFloat(v);
     payload[name] = v;
   }
+
+  // An entity-ref field's value lives in a HIDDEN input, which the browser
+  // excludes from constraint validation — so a visitor who typed a query but
+  // never picked a row would otherwise submit with the field silently absent
+  // and get the script's "required" rejection back with no idea which control
+  // failed. Name the control instead.
+  for (const name of fieldNames) {
+    const schema = props[name] || {};
+    if (!schema["x-entityRef"] || payload[name]) continue;
+    if (!required.has(name)) continue;
+    toast(`Pick ${indefinite(typeLabel(String(schema["x-entityRef"])))} first.`, false);
+    return;
+  }
+
   for (const [field, template] of Object.entries(contextParams)) {
     payload[field] = substituteTemplate(template, ctx, payload);
   }
@@ -1788,7 +1813,7 @@ function onGlobalClick(e) {
     const name = pick.dataset.entityRefPick;
     const form = pick.closest("form");
     form.querySelector('input[type="hidden"][name="' + name + '"]').value = pick.dataset.entityRefValue;
-    form.querySelector('[data-entity-ref-visible="' + name + '"]').value = pick.textContent;
+    form.querySelector('[data-entity-ref-visible="' + name + '"]').value = pick.dataset.entityRefLabel;
     document.querySelector('[data-entity-ref-results="' + name + '"]').innerHTML = "";
     return;
   }
@@ -1847,20 +1872,62 @@ function onGlobalClick(e) {
   if (e.target.hasAttribute("data-close-overlay")) { hideModal(); return; }
 }
 
+// entityRefCandidates answers what an `x-entityRef: "<type>"` field may hold,
+// from the rows this client already holds for that type. Service templates and
+// instances keep their own manifest namespaces (they predate manifest.ent and
+// carry their own key columns); everything else is a manifest.ent row, so a
+// type the manifest projects becomes pickable with no client change at all —
+// which is the point of the field naming a TYPE rather than a source.
+function entityRefCandidates(type) {
+  if (type === "service") {
+    return services().map((r) => ({ key: r.data.serviceKey || r.key, label: r.data.name || r.data.templateName || prettify(r.key) }));
+  }
+  if (type === "instance") {
+    return instances().map((r) => ({ key: r.data.instanceKey || r.key, label: r.data.name || r.data.templateName || prettify(r.key) }));
+  }
+  return entitiesByType(type).map((r) => ({
+    key: r.data.entityKey,
+    label: r.data.title || prettify(r.data.entityKey),
+    meta: entityMeta(r.data),
+  }));
+}
+
 function onGlobalInput(e) {
   const vis = e.target.closest("[data-entity-ref-visible]");
   if (!vis) return;
+  // Typing INVALIDATES a previous pick. The value that gets submitted lives in
+  // the hidden input, so leaving it alone while the visible box says something
+  // else submits the old key under the new label — the wrong item charged, with
+  // nothing on screen to show it. Clearing it makes the required-field guard in
+  // submitDescriptorForm catch the diverged state instead.
+  const form = vis.closest("form");
+  const hidden = form && form.querySelector('input[type="hidden"][name="' + vis.dataset.entityRefVisible + '"]');
+  if (hidden) hidden.value = "";
+  renderEntityRefResults(vis);
+}
+
+function onGlobalFocusIn(e) {
+  const vis = e.target.closest("[data-entity-ref-visible]");
+  if (!vis) return;
+  renderEntityRefResults(vis);
+}
+
+// renderEntityRefResults offers candidates for an EMPTY query too. A catalog is
+// usually a handful of rows, and demanding a search term first means guessing
+// the name of a thing you are trying to be shown — the free-text vertex key
+// this widget exists to replace, one step removed.
+function renderEntityRefResults(vis) {
   const name = vis.dataset.entityRefVisible;
-  const q = vis.value.trim().toLowerCase();
   const results = document.querySelector('[data-entity-ref-results="' + name + '"]');
   if (!results) return;
-  if (!q) { results.innerHTML = ""; return; }
-  const candidates = [...services(), ...instances()].map((r) => ({
-    key: r.data.serviceKey || r.data.instanceKey || r.key,
-    label: r.data.name || r.data.templateName || prettify(r.key),
-  }));
-  const matches = candidates.filter((c) => c.label.toLowerCase().includes(q)).slice(0, 6);
-  results.innerHTML = matches.map((m) => `<div class="chip" style="cursor:pointer;display:block;margin-bottom:4px" data-entity-ref-pick="${esc(name)}" data-entity-ref-value="${esc(m.key)}">${esc(m.label)}</div>`).join("");
+  const q = vis.value.trim().toLowerCase();
+  const all = entityRefCandidates(vis.dataset.entityRefType || "");
+  const matches = (q ? all.filter((c) => c.label.toLowerCase().includes(q)) : all).slice(0, 6);
+  if (!matches.length) {
+    results.innerHTML = `<div class="meta">${esc(all.length ? "Nothing matches that." : "Nothing available to pick yet.")}</div>`;
+    return;
+  }
+  results.innerHTML = matches.map((m) => `<div class="chip" style="cursor:pointer;display:block;margin-bottom:4px" data-entity-ref-pick="${esc(name)}" data-entity-ref-value="${esc(m.key)}" data-entity-ref-label="${esc(m.label)}">${esc(m.label)}${m.meta ? ` &middot; ${m.meta}` : ""}</div>`).join("");
 }
 
 // -------------------------------------------------------------------- init
@@ -1869,6 +1936,9 @@ document.addEventListener("DOMContentLoaded", () => {
   window.__facetAuthDeath = onAuthDeath;
   document.body.addEventListener("click", onGlobalClick);
   document.body.addEventListener("input", onGlobalInput);
+  // Focus, not just typing: the candidate list is what tells a visitor the
+  // field is a picker at all rather than a key to transcribe.
+  document.body.addEventListener("focusin", onGlobalFocusIn);
   loadWhoami();
   startFeed();
 });

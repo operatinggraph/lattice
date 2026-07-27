@@ -216,7 +216,7 @@ func TestMigration_GeneratedProducersGrantTheSameAnchors(t *testing.T) {
 		actor      string
 		addedTypes []string
 	}{
-		{"edgeManifestReadGrants", frozenBaseReadGrantsSpec, emResidentWorld, "resident", []string{"tab"}},
+		{"edgeManifestReadGrants", frozenBaseReadGrantsSpec, emResidentWorld, "resident", []string{"menuitem", "tab"}},
 		{"edgeManifestStaffReadGrants", frozenStaffReadGrantsSpec, emStaffWorldFull, "tech", []string{"studio"}},
 		{"edgeManifestProviderReadGrants", frozenProviderReadGrantsSpec, emProviderWorld, "providerId", nil},
 	} {

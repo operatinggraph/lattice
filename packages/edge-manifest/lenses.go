@@ -2,7 +2,7 @@ package edgemanifest
 
 import "github.com/operatinggraph/lattice/internal/pkgmgr"
 
-// Lenses returns the package's sixteen Personal-Lens declarations
+// Lenses returns the package's seventeen Personal-Lens declarations
 // (edge-showcase-app-design.md §3.2; the manifest.ent entity lenses per
 // facet-entity-browse-design.md; the staff siblings edgeCatalogRoles +
 // edgeTasksQueued + edgeStaffWorkOrders per facet-staff-worlds-design.md
@@ -10,17 +10,17 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 // edgeInstructorSessions per persona-worlds-design.md Fire W0) — the repo's
 // first `nats-subject` / Personal Lens package.
 //
-// Fifteen of the sixteen are NON-SELF-ANCHORED: each keys its rows on a
+// Sixteen of the seventeen are NON-SELF-ANCHORED: each keys its rows on a
 // vertex other than the recipient identity (a service template, an op meta, a
-// task, an instance, a session, a provider, a booking, a tab, a studio, a work
-// order, an appointment). Refractor's D1 gate (internal/refractor/projection/personal.go
+// task, an instance, a session, a provider, a booking, a tab, a studio, a menu
+// item, a work order, an appointment). Refractor's D1 gate (internal/refractor/projection/personal.go
 // → capabilityread.IsReadable) drops such a row unless the actor's unioned
 // `cap-read.<domain>.<actor>` slices list the anchor's bare NanoID — silently,
 // fail-closed, by design (Contract #6 §6.14 Path B; NOT the Postgres
 // actor_read_grants table a `GrantTable:true` lens feeds, which is Path A / RLS
 // for Protected reads and irrelevant here — this package has no Postgres lens).
 //
-// So each of those fifteen declares its actor→anchor reachability ONCE, as a
+// So each of those sixteen declares its actor→anchor reachability ONCE, as a
 // `Walk`, and pkgmgr compiles BOTH artifacts from it: the lens's own OPTIONAL
 // MATCH prefix, and the read-grant producer that grants the anchors. `Spec`
 // therefore carries the presentation TAIL only. The three producers
@@ -245,6 +245,26 @@ func Lenses() []pkgmgr.LensSpec {
 				},
 			},
 			Spec: edgeEntityStudiosTail,
+		},
+		{
+			CanonicalName: "edgeEntityMenuItems",
+			Class:         "meta.lens",
+			Adapter:       "nats-subject",
+			SubjectPrefix: manifestSubjectPrefix,
+			Stream:        manifestStream,
+			Personal:      true,
+			Engine:        "full",
+			IntoKey:       []string{"__actor", "ns", "entityId"},
+			Walk: &pkgmgr.AnchorWalk{
+				GrantDomain: domainBase,
+				AnchorType:  "menuitem",
+				AnchorVar:   "item",
+				Chain: []string{
+					chainResidence,
+					"(container)<-[:servedAt]-(item:menuitem)",
+				},
+			},
+			Spec: edgeEntityMenuItemsTail,
 		},
 		{
 			CanonicalName: "edgeCatalogRoles",
@@ -779,6 +799,47 @@ RETURN
   "studio" AS entityType,
   studio.profile.data.name AS title,
   place.presentation.data.name AS subtitle
+`
+
+// edgeEntityMenuItemsTail presents one `manifest.ent.<itemId>` row per café
+// catalog item served where the actor lives — the pickable values for the café
+// `Charge`'s `menuItemKey` field.
+//
+// This is the first entity lens whose rows are NOT a dispatch target. Nothing
+// declares `dispatch.targetType: "menuitem"`; `Charge` targets a `tab`, and the
+// menu item is its SECOND required field, resolved by the descriptor form's
+// per-field `x-entityRef` widget rather than by resolveTargetKey. The row shape
+// is identical either way — a client resolving a declared vocabulary term
+// against reachability-bounded rows — which is why this is one more lens rather
+// than a new mechanism. (The browse VIEW filters to types some op targets, so
+// these rows feed the picker without becoming a category with nothing to do.)
+//
+// The spine is residence, mirroring edgeEntityProviders: a menu is a property
+// of the place, and the actor reaches it exactly when they live somewhere the
+// serving place contains — `containedIn*0..` binds the unit itself at depth 0,
+// so an item served at a resident's own building resolves on the first hop.
+// Unlike edgeEntityTabs there is nothing private here; a catalog is public to
+// everyone the walk reaches, which is what makes the locality spine the right
+// bound rather than a per-actor one.
+//
+// The place name is the subtitle for the edgeEntityStudios reason — a resident
+// whose chain covers more than one place needs to see whose menu this is. The
+// price rides as `priceCents` and needs no renderer support: app.js's entityMeta
+// formats any `*Cents` column as money, the same convention the descriptor
+// form's money input keys on. No `startsAt`: a menu item is a thing on a shelf,
+// not a scheduled one.
+const edgeEntityMenuItemsTail = `
+WITH item, container
+WHERE item.key <> null
+RETURN
+  item.key AS anchor,
+  "manifest.ent" AS ns,
+  nanoIdFromKey(item.key) AS entityId,
+  item.key AS entityKey,
+  "menuitem" AS entityType,
+  item.price.data.name AS title,
+  container.presentation.data.name AS subtitle,
+  item.price.data.priceCents AS priceCents
 `
 
 // edgeCatalogRolesTail presents one `manifest.op.<opMetaId>` row per op meta the

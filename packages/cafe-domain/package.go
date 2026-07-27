@@ -47,7 +47,8 @@
 //
 //   - The `menuItem` vertex type (DDL `menuItem`) + `menuItemPrice` aspect
 //     type — an operator-only self-order catalog (CreateMenuItem mints an
-//     item + its .price {name, priceCents} aspect; RetireMenuItem
+//     item + its .price {name, priceCents} aspect + a `servedAt` link to the
+//     place that serves it; RetireMenuItem
 //     tombstones it, self-OCC'd). A self-service Charge submits
 //     Charge{tabKey, menuItemKey} instead of a raw amountCents: the amount
 //     is derived from the referenced item's own .price.priceCents, never
@@ -71,7 +72,7 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 // Package is the static, install-time bundle.
 var Package = pkgmgr.Definition{
 	Name:    "cafe-domain",
-	Version: "0.8.4",
+	Version: "0.9.0",
 	Description: "Café house-tab POS session domain: the tab vertex type (OpenTab/Charge/VoidCharge/Settle, " +
 		"OCC-conditioned running total) + the tabStatus aspect type + the cafeTabSettlement actorAggregate " +
 		"convergence lens (missing_account/missing_charge) + the §10.8 playbook dispatching directOp(CreateAccount)/" +
@@ -79,7 +80,9 @@ var Package = pkgmgr.Definition{
 		"edge-manifest descriptor metadata (OpenTab/Settle, Fire 5 Inc 4) so the two self-scope ops are " +
 		"Facet-renderable + the menuItem self-order catalog (CreateMenuItem/RetireMenuItem, the menuCatalog " +
 		"lens) a self-service Charge binds against, deriving amountCents from a catalog entry rather than " +
-		"trusting a caller-supplied number. VoidCharge corrects a mis-tapped charge (operator/frontOfHouse " +
+		"trusting a caller-supplied number; each item carries a servedAt link to the place that serves it, " +
+		"which is what lets a browse lens offer it to a resident who lives there. " +
+		"VoidCharge corrects a mis-tapped charge (operator/frontOfHouse " +
 		"only, no self-service grant). Depends lease-signing + cafe-ledger.",
 	Depends:       []string{"lease-signing", "cafe-ledger"},
 	DDLs:          DDLs(),

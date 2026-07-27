@@ -1,5 +1,5 @@
 name: cafe-domain
-version: 0.8.4
+version: 0.9.0
 description: |
   Café house-tab POS session domain: the tab vertex type (OpenTab/Charge/
   VoidCharge/Settle, OCC-conditioned running total) + the tabStatus aspect
@@ -10,7 +10,9 @@ description: |
   descriptor metadata (OpenTab/Settle, Fire 5 Inc 4) + the menuItem
   self-order catalog (CreateMenuItem/RetireMenuItem, the menuCatalog lens)
   a self-service Charge binds against, deriving amountCents from a catalog
-  entry rather than trusting a caller-supplied number. VoidCharge corrects
+  entry rather than trusting a caller-supplied number; each item carries a
+  servedAt link to the place that serves it, which is what lets a browse
+  lens offer it to a resident who lives there. VoidCharge corrects
   a mis-tapped charge (operator/frontOfHouse only). The cafeLeaseWorkplaces
   lens carries each lease's covering locations — the read-side half of the
   workplace confinement this package's own require_workplace enforces on

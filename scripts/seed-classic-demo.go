@@ -143,11 +143,15 @@ func main() {
 		})
 	fmt.Printf("==> tab:             %s (open)\n", tabReply.PrimaryKey)
 
+	// Both items are served at the demo unit, which is where the resident
+	// lives — the residence chain a Facet browse walk descends binds the unit
+	// itself at depth 0, so the catalog is reachable from the first hop.
+	menuLocationHint := &processor.ContextHint{Reads: []string{unitKey}}
 	menuItemReply := submitOp(ctx, conn, adminKey, "CreateMenuItem", "menuitem",
-		map[string]any{"name": "Latte", "priceCents": 450}, nil)
+		map[string]any{"name": "Latte", "priceCents": 450, "locationKey": unitKey}, menuLocationHint)
 	fmt.Printf("==> menu item:       %s (Latte, $4.50)\n", menuItemReply.PrimaryKey)
 	submitOp(ctx, conn, adminKey, "CreateMenuItem", "menuitem",
-		map[string]any{"name": "Croissant", "priceCents": 350}, nil)
+		map[string]any{"name": "Croissant", "priceCents": 350, "locationKey": unitKey}, menuLocationHint)
 	fmt.Println("==> menu item:       Croissant, $3.50")
 
 	// --- Wellness: studio + bookable session ---------------------------------

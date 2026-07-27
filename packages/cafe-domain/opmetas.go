@@ -19,6 +19,15 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 // .price aspect and a caller-supplied amountCents is never read (ddls.go
 // require_menu_item_price), so describing it as an input would be a lie.
 //
+// menuItemKey carries `x-entityRef: "menuitem"`. The field holds a Contract #1
+// vertex key but is NOT dispatch.targetField (tabKey is), so it does not arrive
+// through the client's target resolution — a descriptor client would otherwise
+// render a raw key input nobody can type. The annotation names the vertex TYPE,
+// and the client picks from the reachability-bounded rows it already holds for
+// that type (edge-manifest's edgeEntityMenuItems). Naming the type rather than
+// a lens or an endpoint keeps the vocabulary declarative: the op says what kind
+// of thing the field holds, and stays silent on how any given client finds one.
+//
 // leaseAppKey (OpenTab) is declared `{me.leaseapp}` in
 // dispatch.contextParams — the submitter's own lease, which is the only
 // lease the self-scope grant would accept anyway. dispatch.targetField
@@ -95,7 +104,7 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 			},
 			InputSchema: `{"type":"object","properties":` +
 				`{"tabKey":{"type":"string","description":"vtx.tab.<NanoID> of your open tab — auto-filled from the tab you opened."},` +
-				`"menuItemKey":{"type":"string","description":"vtx.menuitem.<NanoID> of the catalog item to order; its own price is what gets charged."}},` +
+				`"menuItemKey":{"type":"string","x-entityRef":"menuitem","description":"vtx.menuitem.<NanoID> of the catalog item to order; its own price is what gets charged."}},` +
 				`"required":["tabKey","menuItemKey"]}`,
 			FieldDescriptions: map[string]string{
 				"tabKey":      "The tab being charged — auto-filled by the client from the tab it opened (dispatch.targetField), not user-entered.",

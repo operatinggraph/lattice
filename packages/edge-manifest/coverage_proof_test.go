@@ -125,6 +125,7 @@ func sortedKeys(m map[string]bool) []string {
 //	resident ←providedTo— inst(service instance)
 //	resident ←bookedBy— booking(booking)
 //	resident ←applicationFor— lease(leaseapp) ←openFor— tab(tab, status=open)
+//	  home ←servedAt— item(menuitem)
 func emResidentWorld(t *testing.T) *emFixture {
 	f := newEmFixture(t)
 	f.vtx(t, "resident", "identity")
@@ -139,10 +140,12 @@ func emResidentWorld(t *testing.T) *emFixture {
 	f.vtx(t, "booking", "booking")
 	f.vtx(t, "lease", "leaseapp")
 	f.vtx(t, "tab", "tab")
+	f.vtx(t, "item", "menuitem")
 
 	f.aspect(t, "home", "presentation", "locationPresentation", map[string]any{"name": "Unit 1"})
 	f.aspect(t, "tab", "status", "tabStatus", map[string]any{
 		"value": "open", "totalCents": 450, "openedAt": "2026-07-26T09:00:00Z"})
+	f.aspect(t, "item", "price", "menuItemPrice", map[string]any{"name": "Latte", "priceCents": 450})
 
 	f.edge(t, "residesIn", "resident", "home")
 	f.edge(t, "availableAt", "svcTpl", "home")
@@ -156,6 +159,7 @@ func emResidentWorld(t *testing.T) *emFixture {
 	f.edge(t, "applicationFor", "lease", "resident")
 	f.edge(t, "appliesToUnit", "lease", "home")
 	f.edge(t, "openFor", "tab", "lease")
+	f.edge(t, "servedAt", "item", "home")
 	return f
 }
 
@@ -178,6 +182,7 @@ func TestManifestAnchorCoverage_ResidentWorld(t *testing.T) {
 			{"edgeEntityProviders", emComposedSpec(t, "edgeEntityProviders")},
 			{"edgeEntityBookings", emComposedSpec(t, "edgeEntityBookings")},
 			{"edgeEntityTabs", emComposedSpec(t, "edgeEntityTabs")},
+			{"edgeEntityMenuItems", emComposedSpec(t, "edgeEntityMenuItems")},
 		},
 		[]string{emComposedSpec(t, "edgeManifestReadGrants")})
 }
@@ -208,6 +213,42 @@ func TestEdgeEntityTabs_ProjectsOnlyTheActorsOwnOpenTab(t *testing.T) {
 		"value": "settled", "totalCents": 450, "openedAt": "2026-07-26T09:00:00Z"})
 	settled := f.project(t, emComposedSpec(t, "edgeEntityTabs"), f.key("resident"))
 	require.Empty(t, settled, "a settled tab is no longer a charge target")
+}
+
+// TestEdgeEntityMenuItems_IsBoundedByTheResidenceChain pins the two things the
+// walk decides. A catalog is locality-scoped, not private — every item served
+// where the actor lives projects, which is what makes it a pickable set — and
+// an item served somewhere the actor's residence chain does not reach does NOT,
+// even though a menu is otherwise public information. The bound is the walk's,
+// so widening it would take a link, not a filter.
+func TestEdgeEntityMenuItems_IsBoundedByTheResidenceChain(t *testing.T) {
+	f := emResidentWorld(t)
+	f.vtx(t, "elsewhere", "unit")
+	f.vtx(t, "otherItem", "menuitem")
+	f.aspect(t, "otherItem", "price", "menuItemPrice", map[string]any{"name": "Flat White", "priceCents": 400})
+	f.edge(t, "servedAt", "otherItem", "elsewhere")
+
+	rows := emRowsByEntity(f.project(t, emComposedSpec(t, "edgeEntityMenuItems"), f.key("resident")))
+	require.Len(t, rows, 1, "only items served where the actor lives project")
+	own, ok := rows[f.ids["item"]]
+	require.True(t, ok, "an item served at the actor's own home must project")
+	require.Equal(t, "menuitem", own["entityType"])
+	require.Equal(t, f.key("item"), own["entityKey"])
+	require.Equal(t, "Latte", own["title"], "the item's own .price aspect names it")
+	require.Equal(t, "Unit 1", own["subtitle"], "the serving place names whose menu this is")
+	require.EqualValues(t, 450, own["priceCents"], "priceCents rides along; the renderer formats any *Cents column as money")
+}
+
+// TestEdgeEntityMenuItems_DropsARetiredItem proves the tombstone path needs no
+// filter in the tail: a retired item leaves the MATCH, the same way menuCatalog
+// relies on (cafe-domain/lenses.go). Without this the picker would keep
+// offering an item Charge then rejects with UnknownMenuItem.
+func TestEdgeEntityMenuItems_DropsARetiredItem(t *testing.T) {
+	f := emResidentWorld(t)
+	f.tombstone(t, "item")
+
+	rows := f.project(t, emComposedSpec(t, "edgeEntityMenuItems"), f.key("resident"))
+	require.Empty(t, rows, "a retired catalog item stops being offered")
 }
 
 // --- Staff persona -----------------------------------------------------------

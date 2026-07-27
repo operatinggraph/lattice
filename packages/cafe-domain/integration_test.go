@@ -194,6 +194,18 @@ func seedIdentity(t *testing.T, ctx context.Context, conn *substrate.Conn, id st
 	return key
 }
 
+// seedLocation seeds a location the way location-domain actually mints one:
+// the key TYPE segment is the location level (unit|building|property) and the
+// CLASS is always `location` (location-domain/ddls.go). Seeding a
+// `vtx.location.<id>` would test a key shape production never produces — and
+// would hide that servedAt's link key carries the level, not the class.
+func seedLocation(t *testing.T, ctx context.Context, conn *substrate.Conn, id string) string {
+	t.Helper()
+	key := "vtx.unit." + id
+	seedVertex(t, ctx, conn, key, "location", map[string]any{})
+	return key
+}
+
 func seedLink(t *testing.T, ctx context.Context, conn *substrate.Conn, key, source, target, class, localName string) {
 	t.Helper()
 	doc := map[string]any{
@@ -932,9 +944,11 @@ func TestSettle_ConsumerSelfScope_RejectedForOthersTab(t *testing.T) {
 	}
 }
 
-// createMenuItem submits CreateMenuItem{name, priceCents} expecting
-// acceptance and returns the new item's key.
-func createMenuItem(t *testing.T, ctx context.Context, conn *substrate.Conn, cp *processor.CommitPath, cons jetstream.Consumer, label, name string, priceCents int) string {
+// createMenuItem submits CreateMenuItem{name, priceCents, locationKey}
+// expecting acceptance and returns the new item's key. locationKey is a
+// declared read (Contract #2 §2.5) — the script's liveness check reads the
+// hydrated location document, so an undeclared key would fail closed.
+func createMenuItem(t *testing.T, ctx context.Context, conn *substrate.Conn, cp *processor.CommitPath, cons jetstream.Consumer, label, name string, priceCents int, locationKey string) string {
 	t.Helper()
 	reqID := testutil.GenReqID(label)
 	env := &processor.OperationEnvelope{
@@ -944,7 +958,8 @@ func createMenuItem(t *testing.T, ctx context.Context, conn *substrate.Conn, cp 
 		Actor:         domainActorKey,
 		SubmittedAt:   "2026-07-18T12:00:00Z",
 		Class:         "menuitem",
-		Payload:       json.RawMessage(`{"name":"` + name + `","priceCents":` + strconv.Itoa(priceCents) + `}`),
+		Payload:       json.RawMessage(`{"name":"` + name + `","priceCents":` + strconv.Itoa(priceCents) + `,"locationKey":"` + locationKey + `"}`),
+		ContextHint:   &processor.ContextHint{Reads: []string{locationKey}},
 	}
 	testutil.PublishOp(t, conn, env)
 	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
@@ -955,7 +970,8 @@ func TestCreateMenuItem_MintsItemAndPriceAspect(t *testing.T) {
 	ctx, conn := setupDomainEnv(t)
 	cp, cons := newDomainPipeline(t, ctx, conn, "createmenuitem")
 
-	itemKey := createMenuItem(t, ctx, conn, cp, cons, "cdcreatemenuitem0001", "Latte", 450)
+	locKey := seedLocation(t, ctx, conn, "BBCAFEDMNMENULCTNHJA")
+	itemKey := createMenuItem(t, ctx, conn, cp, cons, "cdcreatemenuitem0001", "Latte", 450, locKey)
 
 	itemDoc := readDoc(t, ctx, conn, itemKey)
 	if d, _ := itemDoc["data"].(map[string]any); len(d) != 0 {
@@ -969,12 +985,32 @@ func TestCreateMenuItem_MintsItemAndPriceAspect(t *testing.T) {
 	if got, _ := priceData["priceCents"].(float64); got != 450 {
 		t.Fatalf("price.priceCents = %v, want 450", got)
 	}
+
+	// The servedAt link is the item's only reachability — without it no walk
+	// can offer the item to anyone, so its absence is a silent feature loss
+	// rather than a visible failure.
+	servedAtLnk := "lnk.menuitem." + strings.TrimPrefix(itemKey, "vtx.menuitem.") +
+		".servedAt.unit." + strings.TrimPrefix(locKey, "vtx.unit.")
+	if !keyExists(t, ctx, conn, servedAtLnk) {
+		t.Fatalf("servedAt link must exist: %s", servedAtLnk)
+	}
+	lnkDoc := readDoc(t, ctx, conn, servedAtLnk)
+	if got, _ := lnkDoc["sourceVertex"].(string); got != itemKey {
+		t.Fatalf("servedAt sourceVertex = %q, want the item %q (Contract #1 §1.1: the later-arriving vertex is the source)", got, itemKey)
+	}
+	if got, _ := lnkDoc["targetVertex"].(string); got != locKey {
+		t.Fatalf("servedAt targetVertex = %q, want the location %q", got, locKey)
+	}
 }
 
+// TestCreateMenuItem_RejectsNonPositivePrice supplies a LIVE location so the
+// only thing wrong with the submission is the price — otherwise the rejection
+// would prove nothing about the price check.
 func TestCreateMenuItem_RejectsNonPositivePrice(t *testing.T) {
 	ctx, conn := setupDomainEnv(t)
 	cp, cons := newDomainPipeline(t, ctx, conn, "createmenuitembad")
 
+	locKey := seedLocation(t, ctx, conn, "BBCAFEDMNMENULCTNHJE")
 	env := &processor.OperationEnvelope{
 		RequestID:     testutil.GenReqID("cdcreatemenuitembad1"),
 		Lane:          processor.LaneDefault,
@@ -982,17 +1018,66 @@ func TestCreateMenuItem_RejectsNonPositivePrice(t *testing.T) {
 		Actor:         domainActorKey,
 		SubmittedAt:   "2026-07-18T12:00:00Z",
 		Class:         "menuitem",
-		Payload:       json.RawMessage(`{"name":"Free Sample","priceCents":0}`),
+		Payload:       json.RawMessage(`{"name":"Free Sample","priceCents":0,"locationKey":"` + locKey + `"}`),
+		ContextHint:   &processor.ContextHint{Reads: []string{locKey}},
 	}
 	testutil.PublishOp(t, conn, env)
 	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeRejected)
+}
+
+// TestCreateMenuItem_RejectsUnservedLocation covers the two ways the anchor can
+// be wrong: a key naming nothing live, and a key naming a live vertex of the
+// wrong class. Both must fail closed — an item minted against neither is an
+// item no browse walk can reach, which is exactly the state this field exists
+// to make impossible.
+func TestCreateMenuItem_RejectsUnservedLocation(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		label string
+		seed  func(t *testing.T, ctx context.Context, conn *substrate.Conn) string
+	}{
+		{
+			name:  "absent location",
+			label: "cdcreatemenuitemnoloc",
+			seed: func(t *testing.T, ctx context.Context, conn *substrate.Conn) string {
+				return "vtx.unit.BBCAFEDMNMENUGHSTHJA"
+			},
+		},
+		{
+			name:  "live vertex of the wrong class",
+			label: "cdcreatemenuitemwrongc",
+			seed: func(t *testing.T, ctx context.Context, conn *substrate.Conn) string {
+				return seedLease(t, ctx, conn, "BBCAFEDMNMENUWRNGCLHJ")
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, conn := setupDomainEnv(t)
+			cp, cons := newDomainPipeline(t, ctx, conn, "createmenuitem"+tc.label)
+
+			locKey := tc.seed(t, ctx, conn)
+			env := &processor.OperationEnvelope{
+				RequestID:     testutil.GenReqID(tc.label[:20]),
+				Lane:          processor.LaneDefault,
+				OperationType: "CreateMenuItem",
+				Actor:         domainActorKey,
+				SubmittedAt:   "2026-07-18T12:00:00Z",
+				Class:         "menuitem",
+				Payload:       json.RawMessage(`{"name":"Latte","priceCents":450,"locationKey":"` + locKey + `"}`),
+				ContextHint:   &processor.ContextHint{Reads: []string{locKey}},
+			}
+			testutil.PublishOp(t, conn, env)
+			testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeRejected)
+		})
+	}
 }
 
 func TestRetireMenuItem_Tombstones(t *testing.T) {
 	ctx, conn := setupDomainEnv(t)
 	cp, cons := newDomainPipeline(t, ctx, conn, "retiremenuitem")
 
-	itemKey := createMenuItem(t, ctx, conn, cp, cons, "cdretiremenuitemsu01", "Croissant", 350)
+	locKey := seedLocation(t, ctx, conn, "BBCAFEDMNMENULCTNHJB")
+	itemKey := createMenuItem(t, ctx, conn, cp, cons, "cdretiremenuitemsu01", "Croissant", 350, locKey)
 
 	env := &processor.OperationEnvelope{
 		RequestID:     testutil.GenReqID("cdretiremenuitem0001"),
@@ -1024,7 +1109,8 @@ func TestCharge_SelfOrder_DerivesAmountFromMenuItem(t *testing.T) {
 	seedIdentity(t, ctx, conn, domainConsumerID)
 	leaseKey := seedLeaseWithApplicant(t, ctx, conn, "BBCAFEDMNCHGQKLEASEH", domainConsumerID)
 	tabKey := openTab(t, ctx, conn, cp, cons, "cdselfchargesetup001", leaseKey)
-	itemKey := createMenuItem(t, ctx, conn, cp, cons, "cdselfchargemenu0001", "Latte", 450)
+	locKey := seedLocation(t, ctx, conn, "BBCAFEDMNMENULCTNHJC")
+	itemKey := createMenuItem(t, ctx, conn, cp, cons, "cdselfchargemenu0001", "Latte", 450, locKey)
 	applicationForLnk := "lnk.leaseapp.BBCAFEDMNCHGQKLEASEH.applicationFor.identity." + domainConsumerID
 
 	reqID := testutil.GenReqID("cdselfchargetab000001")
@@ -1069,7 +1155,8 @@ func TestCharge_SelfOrder_RejectedForOthersTab(t *testing.T) {
 	seedIdentity(t, ctx, conn, otherApplicantID)
 	leaseKey := seedLeaseWithApplicant(t, ctx, conn, "BBCAFEDMNCHGQTHLEASE", otherApplicantID)
 	tabKey := openTab(t, ctx, conn, cp, cons, "cdselfchargeoth00001", leaseKey)
-	itemKey := createMenuItem(t, ctx, conn, cp, cons, "cdselfchargeothmenu1", "Latte", 450)
+	locKey := seedLocation(t, ctx, conn, "BBCAFEDMNMENULCTNHJD")
+	itemKey := createMenuItem(t, ctx, conn, cp, cons, "cdselfchargeothmenu1", "Latte", 450, locKey)
 	wrongApplicationForLnk := "lnk.leaseapp.BBCAFEDMNCHGQTHLEASE.applicationFor.identity." + domainConsumerID
 
 	reqID := testutil.GenReqID("cdselfchargetab000002")

@@ -214,14 +214,26 @@ func openTabGuardAspectTypeDDL() pkgmgr.DDLSpec {
 // self-OCC'd tombstone), scaled down to cafe-domain's own simpler
 // single-vertexType-DDL style (no envelope-class family discriminator
 // needed — there is exactly one kind of menu item).
+//
+// A catalog item is anchored to the place that serves it by a `servedAt` link
+// (menuitem → location). The relation is what makes the item REACHABLE: an
+// edge-manifest browse lens walks a resident's residence chain down to the
+// items served where they live, and that walk is a linear pattern over named
+// relations (internal/pkgmgr/anchorwalk.go), so an item with no edge is an item
+// no walk can offer. It is also the honest shape — a menu belongs to a café,
+// not to the deployment.
 func menuItemVertexTypeDDL() pkgmgr.DDLSpec {
 	return pkgmgr.DDLSpec{
 		CanonicalName:     "menuitem",
 		Class:             "meta.ddl.vertexType",
 		PermittedCommands: []string{"CreateMenuItem", "RetireMenuItem"},
 		Description: "Café self-order menu-item catalog DDL. Vertex shape: vtx.menuitem.<NanoID>, class=menuitem, " +
-			"root data = {} (D5 — name/price live on the .price aspect). CreateMenuItem{name, priceCents} " +
-			"(operator-only) mints a catalog item + its .price {name, priceCents} aspect. RetireMenuItem{menuItemKey} " +
+			"root data = {} (D5 — name/price live on the .price aspect). CreateMenuItem{name, priceCents, locationKey} " +
+			"(operator-only) mints a catalog item + its .price {name, priceCents} aspect + the servedAt link " +
+			"(menuitem→location, the item being the later-arriving vertex), rejecting UnknownLocation / NotALocation " +
+			"if locationKey is absent, tombstoned, or not a location. That link is the item's only reachability: an " +
+			"edge-manifest browse lens walks a resident's residence chain down to the items served where they live, " +
+			"so an unlinked item is one no client can offer. RetireMenuItem{menuItemKey} " +
 			"(operator-only) tombstones a live item, self-OCC'd on its hydrated revision (mirrors service-domain's " +
 			"RetireServiceTemplate). Charge (tab vertexType DDL, above) reads a menu item's .price aspect by known " +
 			"key when a self-service caller submits menuItemKey, deriving amountCents from priceCents rather than " +
@@ -230,6 +242,7 @@ func menuItemVertexTypeDDL() pkgmgr.DDLSpec {
 		InputSchema: `{"type":"object","properties":` +
 			`{"name":{"type":"string","description":"Menu item display name (CreateMenuItem; required, non-empty)."},` +
 			`"priceCents":{"type":"number","description":"Price in integer cents; required, must be > 0 (CreateMenuItem)."},` +
+			`"locationKey":{"type":"string","description":"vtx.<locationType>.<NanoID> of the place that serves this item (CreateMenuItem; required, validated alive + class=location)."},` +
 			`"menuItemId":{"type":"string","description":"Optional bare NanoID for the new item (CreateMenuItem); absent → minted."},` +
 			`"menuItemKey":{"type":"string","description":"vtx.menuitem.<NanoID> of an existing item (RetireMenuItem; required, validated alive)."}},` +
 			`"required":[]}`,
@@ -238,15 +251,18 @@ func menuItemVertexTypeDDL() pkgmgr.DDLSpec {
 		FieldDescription: map[string]string{
 			"name":        "Menu item display name (CreateMenuItem; required, non-empty string), stored on the .price aspect.",
 			"priceCents":  "The item's price in integer cents; required, must be a positive number (CreateMenuItem).",
+			"locationKey": "Full vtx.<locationType>.<NanoID> key (unit|building|property — the class is always `location`) of the place that serves this item (CreateMenuItem; required, validated alive + class=location). Becomes the servedAt link, which is what makes the item reachable from a resident of that place.",
 			"menuItemId":  "Optional bare NanoID (no dots / key segments) for the new item (vtx.menuitem.<menuItemId>). Absent → minted with nanoid.new() (CreateMenuItem).",
 			"menuItemKey": "Full vtx.menuitem.<NanoID> key of an existing item (RetireMenuItem; required, validated alive + class=menuitem).",
 		},
 		Examples: []pkgmgr.ExampleSpec{
 			{
 				Name:    "CreateMenuItem — add a catalog item residents can self-order",
-				Payload: map[string]any{"name": "Latte", "priceCents": 450},
-				ExpectedOutcome: "Mints vtx.menuitem.<NanoID> (root {}) + .price {name: Latte, priceCents: 450}. " +
-					"Returns primaryKey. Rejects InvalidArgument if name is empty or priceCents <= 0.",
+				Payload: map[string]any{"name": "Latte", "priceCents": 450, "locationKey": "vtx.unit.<NanoID>"},
+				ExpectedOutcome: "Mints vtx.menuitem.<NanoID> (root {}) + .price {name: Latte, priceCents: 450} + " +
+					"lnk.menuitem.<NanoID>.servedAt.<locationType>.<NanoID>. " +
+					"Returns primaryKey. Rejects InvalidArgument if name is empty or priceCents <= 0, " +
+					"UnknownLocation / NotALocation if locationKey is absent, tombstoned, or not a location.",
 			},
 			{
 				Name:    "RetireMenuItem — remove an item from the catalog",
@@ -665,6 +681,15 @@ def require_menu_item_price(state, p):
     # menuItem carries a .price aspect (CreateMenuItem writes it atomically
     # with the vertex), so an undeclared read here is a caller error, not a
     # legitimately-missing aspect.
+    #
+    # The catalog is deliberately CROSS-LOCALITY on this side: any live item
+    # may be charged to any tab the caller is already authorized to charge.
+    # A menu item's servedAt place bounds who is OFFERED it (edge-manifest's
+    # edgeEntityMenuItems walks a resident's residence chain to reach one),
+    # and that is a presentation bound, NOT an authorization one — do not read
+    # the picker as a guard. Confining the write would take the item's servedAt
+    # target, which is not derivable from this payload; it is a filed lane item
+    # with a product question in front of it, not an oversight here.
     menu_item_key = required_string(p, "menuItemKey")
     parts_of(menu_item_key, "menuItemKey", "menuitem")
     if not vertex_alive(state, menu_item_key):
@@ -945,6 +970,12 @@ def make_aspect(vtx_key, local_name, cls, data):
             "document": {"class": cls, "isDeleted": False,
                          "vertexKey": vtx_key, "localName": local_name, "data": data}}
 
+def make_link(key, source, target, cls, local_name, data):
+    return {"op": "create", "key": key,
+            "document": {"class": cls, "isDeleted": False,
+                         "sourceVertex": source, "targetVertex": target,
+                         "localName": local_name, "data": data}}
+
 def required_string(p, name):
     if not hasattr(p, name):
         fail("InvalidArgument: " + name + ": required")
@@ -997,6 +1028,26 @@ def vertex_alive(state, key):
         return False
     return True
 
+def class_of(state, key):
+    if key not in state:
+        return None
+    doc = state[key]
+    if doc == None or not hasattr(doc, "class"):
+        return None
+    return getattr(doc, "class")
+
+# The class a servedAt link's target must carry. location-domain owns the
+# vertices; this scheme references them by class, the way service-location's
+# wiring ops do.
+LOCATION_CLASS = "location"
+
+def require_live_location(state, key, name):
+    if not vertex_alive(state, key):
+        fail("UnknownLocation: " + name + ": " + key + " is absent or tombstoned")
+    cls = class_of(state, key)
+    if cls != LOCATION_CLASS:
+        fail("NotALocation: " + name + ": " + key + " has class " + str(cls) + ", required " + LOCATION_CLASS)
+
 def execute(state, op):
     ot = op.operationType
     p = op.payload
@@ -1007,14 +1058,28 @@ def execute(state, op):
         if price_cents <= 0:
             fail("InvalidArgument: priceCents: required positive number")
 
+        # The place that serves the item. Declared-read (Contract #2 §2.5): the
+        # submitter lists locationKey in contextHint.reads, so an absent entry
+        # reads as a tombstoned vertex here and fails closed rather than minting
+        # an item linked to nothing.
+        location_key = required_string(p, "locationKey")
+        loc_type, loc_id = parts_of(location_key, "locationKey", "")
+        require_live_location(state, location_key, "locationKey")
+
         item_id = bare_nanoid_or_mint(p, "menuItemId")
         item_key = "vtx.menuitem." + item_id
+
+        # servedAt: the item (later-arriving) is the source, the pre-existing
+        # place is the target (Contract #1 §1.1). Reads as "menu item servedAt
+        # place."
+        served_at_lnk = "lnk.menuitem." + item_id + ".servedAt." + loc_type + "." + loc_id
 
         mutations = [
             make_vtx(item_key, "menuitem", {}),
             make_aspect(item_key, "price", "menuItemPrice", {"name": name, "priceCents": price_cents}),
+            make_link(served_at_lnk, item_key, location_key, "servedAt", "servedAt", {}),
         ]
-        events = [{"class": "menuItem.created", "data": {"menuItemKey": item_key, "name": name, "priceCents": price_cents}}]
+        events = [{"class": "menuItem.created", "data": {"menuItemKey": item_key, "name": name, "priceCents": price_cents, "locationKey": location_key}}]
         return {"mutations": mutations, "events": events,
                 "response": {"primaryKey": item_key}}
 

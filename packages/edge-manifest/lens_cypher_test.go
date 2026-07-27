@@ -95,6 +95,18 @@ func (f *emFixture) vtx(t *testing.T, name, typ string) string {
 	return key
 }
 
+// tombstone marks an already-seeded vertex deleted, leaving its adjacency
+// edges intact — the state a retire op leaves behind, and the one a lens
+// walking to that vertex must drop rather than project.
+func (f *emFixture) tombstone(t *testing.T, name string) {
+	t.Helper()
+	key := f.key(name)
+	body := map[string]any{"key": key, "class": f.types[f.ids[name]], "isDeleted": true, "data": map[string]any{}}
+	raw, _ := json.Marshal(body)
+	_, err := f.coreKV.Put(context.Background(), key, raw)
+	require.NoError(t, err)
+}
+
 func (f *emFixture) key(name string) string {
 	return "vtx." + f.types[f.ids[name]] + "." + f.ids[name]
 }
