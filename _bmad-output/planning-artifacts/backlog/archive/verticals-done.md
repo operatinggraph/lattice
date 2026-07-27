@@ -2,6 +2,16 @@
 
 Rolled from `verticals.md` when its live Done log passed ~25 entries. Full detail is in git.
 
+- 2026-07-26 · `c84d1eb5` · Two more nouns for the descriptors — `edgeEntityTabs` + `edgeEntityStudios`; the `identity` retarget-to-submitter fallback deleted. facet-entity-browse §6
+- 2026-07-26 · `dc396cb3` · Vertical Package Standard CLOSED — Inc 6 executes the last nine lenses; all four §3 routes discharged, S1/S6/S7 bind corpus-wide with zero exemptions. Standard §9
+- 2026-07-26 · `52711a5a` · identity-domain conforms — s1Debt is EMPTY; ClaimIdentity + RecordIdentityPII get descriptors, the 5 ceremony ops state why they cannot, lease-signing's shadow meta deleted. Standard §3.4 Inc 5
+- 2026-07-26 · `e27e7da0` · Nine ops describe themselves — café Charge/VoidCharge, clinic CreatePatient, 3 visit-series, ClaimTask, wellness CreateSession; a read template can no longer build a malformed key. Standard §3.3 Inc 4
+- 2026-07-25 · `5dbdd84e` · Every package pins its structure — 8 packages, S6 structure-pins baseline now empty; perms pinned as (op,scope) pairs. Standard §3.3 Inc 3
+- 2026-07-25 · `849ebbd2` · Both ledger lenses are executed — cypher tests prove the REQUIRED postedTo/heldFor hops and the lease-anchored null account. Standard §3.3 Inc 2
+- 2026-07-25 · `2507abb3` · Self-service ops are self-describing — 7 full descriptors + loftspace-domain's first op-metas; DecideLeaseApplication names the self path. Standard §3.3 Inc 1; closes the authContext row
+- 2026-07-25 · `—` · Persona worlds CLOSED — P1/P2 + W0–W5 + W3 Inc 2 all shipped; the named residuals live on as their own rows
+- 2026-07-25 · `5397dd2e` · Wellness attendance — `SetBookingAttendance` marks attended/noShow behind the two-hop instructor guard, merging seat/booker so a marked booking still cancels. persona-worlds W3 Inc 2
+- 2026-07-25 · `e5b5c375` · Facet hats + landing — a bound provider's binding is a third anchor spine rendering as "What I provide", and its detail surfaces the record-administering ops. persona-worlds W5
 - 2026-07-25 · `d3a7cc7b` · Wellness is sign-in-first — both mints + the fixed admin actor deleted, the `?bookerKey=` identity filter closed, per-user reads session-scoped; member/staff/instructor hats. persona-worlds W3 Inc 1
 - 2026-07-25 · `f5a9c8a3` · Café is sign-in-first — session spine, both mints + the fixed admin actor deleted, all eight reads authenticated and scoped to the signed-in subject; Record Payment removed (no authorized hat). persona-worlds W4
 - 2026-07-25 · `4aad350b` · The plain-landlord persona exists — a seeded identity holding `consumer` + `manages` over its own unit, listing and signed application; the scope=self path Inc 3 shipped now has a walker. persona-worlds W2 Inc 4
