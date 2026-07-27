@@ -70,6 +70,7 @@ dated run-logs live in git history. Rotate LoftSpace ↔ Clinic ↔ Café ↔ We
 
 One line per shipped item (`date · SHA · title`). Oldest roll to `archive/` past ~25.
 
+- 2026-07-27 · `7911ccf6` · The descriptor corpus speaks human — titles/date-widgets/auto-filled keys across 12 packages, `{me.<type>?}` optional templates, label floor; booking E2E-verified at the resident rate. facet-discovery-restoration §7
 - 2026-07-27 · `bb9fe41a` · Live-walk follow-on — pickered targets offer without ctx resolution, no label floors to a short id, the orphaned task healed; the modal's lens-race + loader gaps filed to lattice.md. facet-discovery-restoration §6
 - 2026-07-27 · `86564999` · The discovery covenant restored — panes/labels/state-conditions become descriptor data, `staff.go` dies, `lint-facet-discovery` gates cmd/facet in CI. facet-discovery-restoration-design.md
 - 2026-07-27 · `69d8ccce` · `worksAt_covers` follows the containedIn-page cursor — 9 S10-pinned copies + cafe-domain's `location_covers` sibling fixed identically; `MAX_PARENT_PAGES=4` bounds the walk, common path unchanged.

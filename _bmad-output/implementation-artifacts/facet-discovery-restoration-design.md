@@ -230,3 +230,31 @@ grounded and filed:
   Until it closes, the modal lists no ops for multi-hat actors (the pre-existing state — not a
   regression) while the same ops offer normally from Nearby entities and tasks. The mitigation is
   in place so the modal heals automatically when the loader gap closes.
+
+## 7. UX humanization pass (Winston, 2026-07-27 — Andrew's "make it make sense to a human")
+
+A field-level audit of all 37 full descriptors (14 op-meta-declaring packages) found: **zero**
+JSON-Schema titles corpus-wide (camelCase identifiers as labels — the "leaseAppKey" box), 13
+key-shaped raw-text fields a human cannot fill, 10 hand-typed RFC3339 boxes, two
+rendered-but-always-rejected JSON-array fields, and a money help text instructing a 100× error.
+Shipped in one pass:
+
+- **`{me.<type>?}` optional template modifier** (client + OpDispatchSpec doc): fill when
+  resolvable, omit the param when not — never rendered, never offer-blocking. The vocabulary gap
+  that forced CreateBooking's lease field to be a raw box (required-form would have hidden the op
+  from non-residents). Applied: CreateBooking.leaseAppKey, RecordServiceOutcome.serviceprovider
+  (its lint-package-standard readTemplateDebt entry retired with it).
+- **Titles + humanized help on every rendered field** across ten packages; `format:"date-time"/
+  "date"` on the RFC3339 fields with a datetime-local→RFC3339 submit conversion; `enumLabels`
+  where tokens aren't words; the amountCents dollars help fixed; RecordIdentityPII's dob de-masked
+  via `format:"date"`; a `prettifyFieldName` renderer floor so an untitled property can never
+  render as a bare identifier again.
+- **New auto-fill data**: a `patient` selfAnchor (identifiedBy walk, key-only, D3-safe) feeds
+  `{me.patient}` on CreateAppointment — non-patients now get the honest degraded card instead of a
+  form that can only be rejected; `studioKey` columns on both session lenses feed
+  `{entity.studioKey}` on TombstoneSession. edge-manifest 0.14.5; twelve packages bumped total.
+- **Left filed/deferred, named**: the SetProviderHours/SetProviderTimeOff array widget (rendered
+  but unsubmittable — needs renderer vocabulary), SignLease/SignRenewal task-path descriptors, the
+  Protected-pane-backed identity picker (D8 void), lease-signing's unit/leaseApp entity columns,
+  RescheduleAppointment.patient (staff path via panes can't feed `{me.patient}`; stays titled
+  free-text pending the pane-row context seam).
