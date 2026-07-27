@@ -1,6 +1,6 @@
 // Unit vectors for the staff-world renderer beats (facet-staff-worlds-design.md
-// §3.3): the two identity spines render apart, a role-queued task is claimable
-// rather than openable, and a "standing" op dispatches with no authContext.
+// §3.3): the two identity spines render apart, a role-queued task is both
+// claimable AND openable, and a "standing" op dispatches with no authContext.
 //
 // Same harness as display_label.test.mjs — app.js is a plain browser script, so
 // vm.runInContext hoists its function declarations onto the sandbox.
@@ -58,7 +58,7 @@ test("an anchor with no relation stamp counts as a residence", () => {
   assert.equal(workplaces.length, 0);
 });
 
-test("a role-queued task renders a claim affordance, not a detail link", () => {
+test("a role-queued task renders BOTH a claim affordance and a detail link", () => {
   const { taskRow } = loadApp();
   const html = taskRow({
     key: "manifest.task.T1",
@@ -71,14 +71,17 @@ test("a role-queued task renders a claim affordance, not a detail link", () => {
   });
   assert.match(html, /data-claim-task/);
   assert.match(html, /frontOfHouse/);
-  // Nobody owns it yet, so opening a detail view to act on it would be wrong.
-  assert.doesNotMatch(html, /data-goto="task"/);
-  // The claim button must carry the Core-KV vertex key (data.taskKey), never
-  // the manifest row's own SYNC-plane storage key ("manifest.task.T1") — the
-  // two look alike, but the Processor's hydrate step reads contextHint.reads
-  // against Core KV, so the manifest-namespaced form fails HydrationMiss.
-  assert.match(html, /data-key="vtx\.task\.T1"/);
-  assert.doesNotMatch(html, /data-key="manifest\.task\.T1"/);
+  // What the task is FOR is worth seeing before claiming it blind, so the row
+  // opens the same detail view as owned work — the claim button stays the
+  // one-tap shortcut, it does not gate the click-through.
+  assert.match(html, /data-goto="task"/);
+  // The row's own goto target is the manifest row's SYNC-plane storage key
+  // (state.rows is keyed by it), while the claim button carries the Core-KV
+  // vertex key (data.taskKey) — the two look alike, but the Processor's
+  // hydrate step reads contextHint.reads against Core KV, so the
+  // manifest-namespaced form fails HydrationMiss if the claim button used it.
+  assert.match(html, /data-goto="task" data-key="manifest\.task\.T1"/);
+  assert.match(html, /data-claim-task data-key="vtx\.task\.T1"/);
 });
 
 test("a directly-assigned task stays an openable detail row", () => {

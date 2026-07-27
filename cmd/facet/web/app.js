@@ -657,13 +657,16 @@ function taskRow(t) {
   const due = d.expiresAt ? " &middot; due " + esc(relativeTime(d.expiresAt)) : "";
 
   // A queued row (edgeTasksQueued) is work offered to a ROLE the signed-in
-  // person holds — nobody owns it yet, so opening its detail view to act on it
-  // would be wrong. It gets a claim affordance instead; claiming swaps
-  // queuedFor→assignedTo at the Processor, after which the row re-projects
-  // through edgeTasks and renders as ordinary owned work below.
+  // person holds — nobody owns it yet. It gets a one-tap claim affordance
+  // (claiming swaps queuedFor→assignedTo at the Processor, after which the row
+  // re-projects through edgeTasks and renders as ordinary owned work below),
+  // but the row itself still opens the same detail view as owned work: what
+  // the task is FOR is worth seeing before claiming it blind, and the claim
+  // affordance belongs there too — through the generic dispatch path, not a
+  // second hardcoded button — for whoever skips the row's shortcut.
   if (d.queuedRole) {
     const role = d.queuedRoleName || prettify(d.queuedRole);
-    return `<div class="card" style="flex-direction:row;align-items:center;gap:12px;cursor:default">
+    return `<div class="card" data-goto="task" data-key="${esc(t.key)}" style="flex-direction:row;align-items:center;gap:12px">
       ${t.pending ? `<span class="pending-chip">Pending</span>` : ""}
       <div style="flex:1">
         <div class="title">${esc(title)}</div>
@@ -825,6 +828,14 @@ function opButton(o, ctx) {
   if (missing) {
     return `<div class="degraded-card">${esc(d.title || prettifyOpType(d.operationType))} — This needs your own ${esc(typeLabel(missing))}; you don't have one yet.</div>`;
   }
+  // A self-administer op reached by entityKey alone (not through the hat
+  // surface, which already proved ownership) is only submittable against the
+  // caller's OWN record — holding some anchor of the right kind is not the
+  // same as this being that one.
+  const mismatch = crossHatMismatch(d, ctx);
+  if (mismatch) {
+    return `<div class="degraded-card">${esc(d.title || prettifyOpType(d.operationType))} — This belongs to someone else.</div>`;
+  }
   // Same gate for a {entity.<column>} contextParam: it is filled from the
   // viewed row and never rendered, so a column this row doesn't carry has no
   // field the visitor could correct — submitting "" is strictly worse than
@@ -914,8 +925,9 @@ function entityRow(e) {
 
 // openEntityDetail is the seam the dispatch gate has been waiting on
 // (app.js resolveTargetKey's ctx.entityKey candidate): the entity's
-// offerable ops are exactly those whose declared dispatch.targetType IS
-// this entity's type.
+// candidate ops are every one whose declared dispatch.targetType IS this
+// entity's type — opButton's own crossHatMismatch check then withholds a
+// self-administer op this specific row isn't the caller's to submit.
 function openEntityDetail(key) {
   const row = state.rows.get(key);
   if (!row) return;
@@ -1289,16 +1301,32 @@ function timeOfDay(iso) {
   return isNaN(d.getTime()) ? "" : d.toISOString().slice(11, 16) + " — ";
 }
 
+// openTaskDetail shows the task's own business op (forOperationKey) alongside
+// any op whose declared dispatch.targetType is the task itself — both
+// through the SAME opButton/resolveTargetKey seam every other detail view
+// uses, with ctx.taskKey set so a targetType-"task" op (an admin action ABOUT
+// the task, not its subject) can resolve against it. Routing the business op
+// through opButton too, instead of opening its form directly, means an
+// unresolvable target degrades here rather than reaching the Processor as a
+// server-side rejection.
 function openTaskDetail(key) {
   const row = state.rows.get(key);
   if (!row) return;
   const d = row.data;
+  const ctx = { taskKey: d.taskKey, scopedTo: d.scopedTo };
   const opRow = opByFullKey(d.forOperationKey);
-  if (!opRow) {
-    showModal(`<button class="close-x" data-close>&times;</button><div class="degraded-card">This task's operation isn't described yet — ask staff for help via the admin console.</div>`);
-    return;
-  }
-  openDescriptorForm(opRow.key, { taskKey: d.taskKey, scopedTo: d.scopedTo });
+  const taskOps = ops().filter((o) => o.data.dispatchTargetType === "task" && (!opRow || o.key !== opRow.key));
+  const cards = opRow
+    ? [opButton(opRow, ctx)]
+    : [`<div class="degraded-card">This task's operation isn't described yet — ask staff for help via the admin console.</div>`];
+  cards.push(...taskOps.map((o) => opButton(o, ctx)));
+  showModal(`
+    <button class="close-x" data-close>&times;</button>
+    <h2>${esc((opRow && opRow.data.title) || prettifyOpType(d.operationType))}</h2>
+    <p class="lead">${esc(scopedLabel(d.scopedTo, d.scopedToLabel || d.scopedName))}</p>
+    <h3 class="category-heading">Operations</h3>
+    ${cards.join("")}
+  `);
 }
 
 // -------------------------------------------------------------- Activity
@@ -1679,6 +1707,63 @@ function unresolvableEntityColumn(op, ctx) {
     }
   }
   return undefined;
+}
+
+// crossHatMismatch answers whether the entity row being viewed is provably
+// NOT the caller's to administer, for a self-administer op — one that
+// declares the SAME type as both its class and its target ("an op that
+// administers the record declares the binding's own type as its class",
+// hatOps' own rule). hatOps already resolves this correctly for the hat
+// surface, by construction: it only ever offers such an op against one of
+// the viewer's own bound anchors. openEntityDetail has no such
+// discriminator — it offers by targetType alone — so a multi-hat visitor
+// browsing an entity that merely SHARES a type with something they
+// administer elsewhere gets a live button that fails closed in-script. Two
+// shapes, both load-bearing:
+//
+//   - no {me.<type>} ownership param at all: the row IS the bound record, so
+//     ownership is exactly hatOps' own test — the row's key must be among
+//     the viewer's own anchors of the target's type. But only when the
+//     viewer HOLDS at least one anchor of that type at all: most
+//     Class===targetType ops are confined some OTHER way entirely (workplace,
+//     a private per-viewer walk) with no personal-anchor concept to violate,
+//     and nobody ever holds an anchor of THAT type — treating "holds none" as
+//     a mismatch would degrade those universally, for every viewer, which is
+//     a regression, not a narrowing. Silence here is deliberate: this branch
+//     only sharpens the multi-hat case (the viewer HAS a hat of this exact
+//     kind, just not this instance of it); it does not newly gate a type that
+//     was never hat-shaped to begin with.
+//   - a {me.<type>} param naming a DIFFERENT type than the target: that
+//     anchor resolves to SOME value for anyone bound that way, which is not
+//     by itself proof this row is theirs — that needs the row's own
+//     <type>Key column (the same {entity.<column>} convention every other
+//     auto-fill already rides). A row not yet carrying that column can't be
+//     checked and is left alone; unresolvableSelfAnchor already covers
+//     "holds no such anchor at all", so this only narrows further once
+//     proof is available.
+//
+// Only ctx.entityKey callers (openEntityDetail's own seam) are in scope: a
+// task or service context names no entity row to own, and gating on its
+// absence is what keeps this from misfiring against the standing-role shape
+// a task-targeted op like ClaimTask uses.
+function crossHatMismatch(op, ctx) {
+  if (!ctx || !ctx.entityKey) return undefined;
+  if (!op.dispatchClass || op.dispatchClass !== op.dispatchTargetType) return undefined;
+  const params = maybeParseJSON(op.dispatchContextParams) || {};
+  const ownerParam = Object.values(params).find(
+    (t) => typeof t === "string" && !templateIsOptional(t) && /^\{me\.[^}]+\}$/.test(t)
+  );
+  if (!ownerParam) {
+    const anchors = selfAnchoredKeys().get(op.dispatchTargetType);
+    return anchors && !anchors.has(ctx.entityKey) ? op.dispatchTargetType : undefined;
+  }
+  const m = /\{me\.([^}]+)\}/.exec(ownerParam);
+  const type = m[1].endsWith(":id") ? m[1].slice(0, -3) : m[1];
+  if (type === op.dispatchTargetType) return undefined;
+  const anchorKey = selfAnchorKey(type);
+  if (!anchorKey) return undefined;
+  const provenance = entityColumn(ctx, type + "Key");
+  return provenance && provenance !== anchorKey ? type : undefined;
 }
 
 function renderDescriptorForm(op, opKey, ctx, prefill, reviewBanner) {

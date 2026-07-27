@@ -52,3 +52,110 @@ test("opButton renders a normal submit button for a described op (has dispatchCl
   assert.match(html, /data-service-key="manifest\.svc\.xyz"/);
   assert.match(html, />Order</);
 });
+
+// crossHatMismatch (facet-entity-browse-design.md / verticals.md "Entity
+// detail attaches cross-hat ops"): a self-administer op (dispatchClass ===
+// dispatchTargetType) reached via openEntityDetail's plain targetType match,
+// not the hat surface that already proves ownership.
+
+// selfAdministerOp is the SetProviderHours/SetInstructorProfile shape: no
+// {me.<type>} ownership param at all, so the row IS the bound record.
+function selfAdministerOp(type) {
+  return {
+    key: "manifest.op.hours",
+    data: { operationType: "SetWorkingHours", dispatchClass: type, dispatchTargetType: type, submitLabel: "Save" },
+  };
+}
+
+test("crossHatMismatch: viewing your OWN record renders live, not degraded", () => {
+  const sandbox = loadApp();
+  sandbox.me = () => ({ selfAnchors: [{ key: "vtx.provider.MINE", type: "provider" }] });
+  const html = sandbox.opButton(selfAdministerOp("provider"), { entityKey: "vtx.provider.MINE" });
+  assert.doesNotMatch(html, /degraded-card/);
+  assert.match(html, /data-open-op/);
+});
+
+test("crossHatMismatch: a bound provider viewing a DIFFERENT provider's record degrades", () => {
+  // The multi-hat case the item names: holding some anchor of the right KIND
+  // is not proof this particular row is that one.
+  const sandbox = loadApp();
+  sandbox.me = () => ({ selfAnchors: [{ key: "vtx.provider.MINE", type: "provider" }] });
+  const html = sandbox.opButton(selfAdministerOp("provider"), { entityKey: "vtx.provider.SOMEONE_ELSE" });
+  assert.match(html, /degraded-card/);
+  assert.match(html, /belongs to someone else/);
+});
+
+test("crossHatMismatch: holding NO anchor of that type at all does not degrade — most Class===targetType ops are confined some other way entirely (workplace, a private per-viewer walk), and this branch must not newly gate a type that was never hat-shaped", () => {
+  const sandbox = loadApp();
+  sandbox.me = () => ({ selfAnchors: [] });
+  const html = sandbox.opButton(selfAdministerOp("visitseries"), { entityKey: "vtx.visitseries.ANY" });
+  assert.doesNotMatch(html, /degraded-card/);
+  assert.match(html, /data-open-op/);
+});
+
+test("crossHatMismatch: a {me.<type>} ownership param naming a DIFFERENT type than the target degrades when the row's own provenance column disagrees", () => {
+  const sandbox = loadApp();
+  sandbox.me = () => ({ selfAnchors: [{ key: "vtx.instructor.MINE", type: "instructor" }] });
+  sandbox.entities = () => [{ data: { entityKey: "vtx.session.THEIRS", instructorKey: "vtx.instructor.SOMEONE_ELSE" } }];
+  const op = {
+    key: "manifest.op.cancel",
+    data: {
+      operationType: "TombstoneSession",
+      dispatchClass: "session",
+      dispatchTargetType: "session",
+      dispatchContextParams: JSON.stringify({ instructor: "{me.instructor}", studio: "{entity.studioKey}" }),
+      submitLabel: "Cancel",
+    },
+  };
+  const html = sandbox.opButton(op, { entityKey: "vtx.session.THEIRS" });
+  assert.match(html, /degraded-card/);
+  assert.match(html, /belongs to someone else/);
+});
+
+test("crossHatMismatch: the same op renders live when the row's provenance column IS this identity's own anchor", () => {
+  const sandbox = loadApp();
+  sandbox.me = () => ({ selfAnchors: [{ key: "vtx.instructor.MINE", type: "instructor" }] });
+  sandbox.entities = () => [{ data: { entityKey: "vtx.session.MINE", instructorKey: "vtx.instructor.MINE", studioKey: "vtx.studio.S1" } }];
+  const op = {
+    key: "manifest.op.cancel",
+    data: {
+      operationType: "TombstoneSession",
+      dispatchClass: "session",
+      dispatchTargetType: "session",
+      dispatchContextParams: JSON.stringify({ instructor: "{me.instructor}", studio: "{entity.studioKey}" }),
+      submitLabel: "Cancel",
+    },
+  };
+  const html = sandbox.opButton(op, { entityKey: "vtx.session.MINE" });
+  assert.doesNotMatch(html, /degraded-card/);
+});
+
+test("crossHatMismatch: a row not yet projecting the provenance column is left alone, not degraded", () => {
+  const sandbox = loadApp();
+  sandbox.me = () => ({ selfAnchors: [{ key: "vtx.instructor.MINE", type: "instructor" }] });
+  sandbox.entities = () => [{ data: { entityKey: "vtx.session.UNPROJECTED" } }];
+  const op = {
+    key: "manifest.op.cancel",
+    data: {
+      operationType: "TombstoneSession",
+      dispatchClass: "session",
+      dispatchTargetType: "session",
+      dispatchContextParams: JSON.stringify({ instructor: "{me.instructor}" }),
+      submitLabel: "Cancel",
+    },
+  };
+  const html = sandbox.opButton(op, { entityKey: "vtx.session.UNPROJECTED" });
+  assert.doesNotMatch(html, /degraded-card/);
+});
+
+test("crossHatMismatch never engages for a task/service context (no entityKey) — the ClaimTask shape", () => {
+  const sandbox = loadApp();
+  sandbox.me = () => ({ selfAnchors: [] });
+  const op = {
+    key: "manifest.op.claim",
+    data: { operationType: "ClaimTask", dispatchClass: "task", dispatchTargetType: "task", submitLabel: "Claim" },
+  };
+  const html = sandbox.opButton(op, { taskKey: "vtx.task.T1" });
+  assert.doesNotMatch(html, /degraded-card/);
+  assert.match(html, /data-open-op/);
+});
