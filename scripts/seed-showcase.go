@@ -1366,6 +1366,13 @@ func recoverTenants(ctx context.Context, conn *substrate.Conn, adminKey string) 
 	} {
 		tenantKey, live := findResidentOf(ctx, coreKV, allKeys, t.unitKey)
 		if tenantKey == "" {
+			// The building is alive (why recoverTenants runs at all), but this
+			// unit's resident never resolved — the death-mid-ceremony wedge:
+			// CreateUnclaimedIdentity ran but nothing ever wired residesIn. A
+			// silent skip here surfaces many calls later as a cryptic reject
+			// against an empty identity key, with no clue which unit is unwired.
+			fmt.Fprintf(os.Stderr, "==> WARNING:         no resident found for %s (%s unset) — a partial prior seed run?\n",
+				t.unitKey, t.envVar)
 			continue
 		}
 		if !live {
@@ -1432,7 +1439,11 @@ func findLinkedIdentity(ctx context.Context, coreKV jetstream.KeyValue, allKeys 
 	for _, k := range candidates {
 		env, err := pkgverify.GetEnvelope(ctx, coreKV, k)
 		if err != nil {
-			continue
+			// k came from allKeys, a listing that just proved this key exists —
+			// a read failing here is a genuine KV anomaly, not absence. Treating
+			// it as "no candidate" would let the caller mint a fresh identity
+			// that collides with the real one on the email index.
+			must(err, "read candidate link "+k)
 		}
 		src := linkSourceIdentity(k)
 		if src == "" {
@@ -1481,6 +1492,12 @@ func findBoundIdentity(allKeys map[string]struct{}, entityKey string) (string, b
 		return "", false
 	}
 	sort.Strings(candidates)
+	if len(candidates) > 1 {
+		// CreateOnly should make this impossible (see above), so more than one
+		// is a real anomaly worth a human's attention, not a silent pick.
+		fmt.Fprintf(os.Stderr, "==> WARNING:         %s has %d identifiedBy binds (%s); adopting %s\n",
+			entityKey, len(candidates), strings.Join(candidates, ", "), candidates[0])
+	}
 	identityID := strings.TrimPrefix(candidates[0], prefix)
 	if identityID == "" {
 		return "", false
