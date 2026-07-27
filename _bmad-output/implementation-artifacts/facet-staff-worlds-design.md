@@ -599,3 +599,65 @@ it, so the *application* of the rule rests on review.
 **One weak assertion fixed in passing.** `TestLandlord_RenewalOpsConfinedToManagedUnit` checked that
 a denied `SetRenewalTerms` had not written `.renewalTerms` — an aspect that op has never written (it
 writes `.terms`). The check could not fail. It can now.
+
+## 12. The instructor + serviceprovider hats get their record-administering op — fire brief (Winston, 2026-07-27)
+
+**Scope sentence (from the board row, verbatim):** *"No op in `packages/` declares dispatch class or
+targetType `instructor`/`serviceprovider` — wellness targets a `session`, service-domain a `service`
+instance — so those two bindings render an inert Facet hat chip while the clinic `provider` hat has three
+ops. Either the two domains gain record-administering ops (profile/availability, mirroring
+`SetProviderHours`) or the hat surface is clinic-only by design."*
+
+**The fork, resolved (Winston, product call — §0 decide-don't-defer).** The hat surface is **not**
+clinic-only by design. The bound-entity spine (persona-worlds W0/W5) exists precisely so a bound entity's
+binding renders as a hat whose detail surfaces its record-administering ops; Sam's instructor hat and Kai's
+serviceprovider hat are live on the demo login and render inert today. Both domains gain the op.
+
+**Grounding ledger (verified live this fire).**
+
+| Fact | Where |
+|---|---|
+| No op anywhere in `packages/` declares `TargetType` `instructor` or `serviceprovider` — the 16 declared target types are tab/cafeaccount/provider/appointment/identity/unit/task/session/booking/service | corpus sweep of `Dispatch.TargetType` |
+| The chip is inert because `hatOps` requires **both** `dispatchClass === a.type` **and** `dispatchTargetType === a.type` | `cmd/facet/web/app.js:132-138` |
+| `instructor` / `serviceprovider` vertex DDL CanonicalNames are exactly the strings the filter needs | `wellness-domain/ddls.go:27`, `service-domain/ddls.go:22` |
+| All three bind-ops grant the **same generic `provider` role**, so a grant to `provider` is reachable by a clinic provider too — the in-script standing guard is what confines, not the grant | `wellness-domain/ddls.go:2405`, `service-domain/ddls.go:660`, `clinic-domain/ddls.go:1462` |
+| `.profile` is **write-once on both**: its aspect DDL permits only the Create op, so a bound persona cannot correct their own display name | `wellness-domain/ddls.go:589-598`, `service-domain/ddls.go:419-441` |
+| The edit has real consumers — `wellnessSessions` projects `instructorName` to members, `wellnessInstructors` to the staff scheduling form, and `edgeIdentity` projects the serviceprovider `displayName` as its own hat-chip label | `wellness-domain/lenses.go:239`, `:98-113`, `edge-manifest/lenses.go:520` |
+| Neither target script defines `actor_holds_operator` / `ROLE_PAGE_LIMIT` — both must be added, copied verbatim from the same-package precedent | `wellness-domain/ddls.go:808`, `service-domain/ddls.go:846` |
+
+**Precedent to mirror, exactly: `SetProviderHours`** (not `SetProviderProfile` — that one is operator-only,
+has no op-meta and no standing guard, so it is the wrong half of the precedent). Four coupled parts:
+op-meta `Dispatch{Class, AuthContext:"standing", TargetField, TargetType}` (`clinic-domain/opmetas.go:144-165`)
+· permission `Scope:"any", GrantsTo:["operator","provider"]` (`permissions.go:86-95`) · in-script standing
+guard `if not actor_holds_operator(op.actor): if not actor_bound_to_<entity>(...): fail("AuthDenied: …")`
+(`ddls.go:1305-1319`) · the `identifiedBy` probe declared read-posture (d) in the dispatcher's
+`OptionalReads` (`ddls.go:1208-1221`).
+
+**Touch-list (verified `file:line`).**
+
+- `packages/wellness-domain/`: `ddls.go` (instructor vertex `PermittedCommands` :412 · `instructorProfile`
+  aspect `PermittedCommands` :591 · InputSchema/FieldDescription/Examples :427-470 · script branch +
+  two guards in `instructorDDLScriptTemplate` :2232) · `opmetas.go` (new meta) · `permissions.go` ·
+  `package.go:100` version · `package_test.go` + `opmetas_test.go` structure pins.
+- `packages/service-domain/`: `ddls.go` (serviceprovider vertex `PermittedCommands` :371 ·
+  `serviceProviderProfile` aspect `PermittedCommands` :425 · schema block :385-415 · `OpMetas()` :126 ·
+  script branch + two guards in `serviceProviderDDLScriptTemplate` :524) · `permissions.go` ·
+  `package.go:78` version · `package_test.go` structure pins (DDL/perm/meta counts are asserted).
+
+**Increment order + green checks.** Inc 1 wellness `SetInstructorProfile` → Inc 2 service-domain
+`SetServiceProviderProfile`. Each: `go build ./...` · `make vet` · `golangci-lint run ./...` ·
+`STRICT=1 go run ./scripts/lint-conventions.go` · `go run ./scripts/lint-package-standard.go` ·
+`go run ./scripts/lint-package-version.go` · `go test ./packages/<pkg>/...`.
+
+**In-scope gotchas.** (a) A grant to `provider` is reachable by **all three** bound archetypes — without the
+standing guard, Osei (clinic) could rewrite Sam's instructor profile; the negative test must use a
+*different bound archetype*, not an unbound stranger, or it passes for the wrong reason. (b) `parts_of` is
+S10-pinned — the copies must stay digest-identical. (c) A package edit needs a **version bump** or the
+reinstall silently no-ops. (d) `.profile` upsert **replaces** the aspect, so `displayName` stays required —
+dropping it would null the `instructorName` column the member-facing lens depends on.
+
+**Non-goals (deliberate).** No availability/hours op. The board row offers "profile/availability", but
+clinic's hours feed a slot picker that consumes them; wellness has **no** availability machinery — no lens
+projects instructor availability and no op enforces it, so an hours aspect would be dead scaffolding with no
+nameable consumer. Profile only, both domains, symmetric. No `consumer`-role backfill (its own board row).
+**No FE change** — `hatOps` is generic, so the chips go live on the op-metas alone; verify, don't build.
