@@ -357,7 +357,7 @@ var sharedGuardHelpers = []string{
 var guardHelperFloors = map[string]int{
 	"worksAt_covers":       9,
 	"workplace_exempt":     8,
-	"actor_holds_operator": 13,
+	"actor_holds_operator": 15,
 	"parts_of":             35,
 	"require_workplace":    8,
 	"enforce_workplace":    9,
@@ -373,6 +373,7 @@ var guardHelperFloors = map[string]int{
 // the corpus.
 var guardConstants = []string{
 	"ROLE_PAGE_LIMIT",
+	"MAX_ROLE_PAGES",
 	"WORKPLACE_PARENT_PAGE_LIMIT",
 	"WORKPLACE_MAX_DEPTH",
 	"WORKPLACE_MAX_NODES",
