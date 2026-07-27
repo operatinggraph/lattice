@@ -570,7 +570,8 @@ RETURN
   tpl.presentation.data.icon AS icon,
   tpl.presentation.data.category AS category,
   provider.key AS providerKey,
-  container.key AS resolvedVia
+  container.key AS resolvedVia,
+  container.presentation.data.name AS resolvedViaLabel
 `
 
 // edgeCatalogTail presents one `manifest.op.<opMetaId>` row per op meta the

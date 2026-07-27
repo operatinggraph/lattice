@@ -284,3 +284,49 @@ test("opButton gates a visibleWhen op on the ctx row's declared state", () => {
   assert.equal(opButton(pause, { entityKey: SERIES, row: {} }), ""); // no field: fail closed
   assert.equal(opButton(pause, { entityKey: SERIES }), "");          // no row at all
 });
+
+// ---- picker-path vectors (facet-discovery-restoration follow-on) ----
+// An op whose declared targetType is unresolvable from context is still
+// OFFERABLE when its target field is a declared x-entityRef picker with
+// candidates in the mirror: the form collects the target; context resolution
+// was only ever the auto-fill convenience. No candidates, or no picker ⇒ the
+// degraded hint stands.
+
+const PICKER_OP = {
+  dispatchClass: "appointment",
+  dispatchAuthContext: "self",
+  dispatchTargetField: "providerKey",
+  dispatchTargetType: "provider",
+  operationType: "CreateAppointment",
+  title: "Book appointment",
+  inputSchema: JSON.stringify({
+    type: "object",
+    properties: { providerKey: { type: "string", "x-entityRef": "provider" }, startsAt: { type: "string" } },
+    required: ["providerKey", "startsAt"],
+  }),
+};
+
+function seedProvider(sandbox) {
+  vm.runInContext(
+    `state.rows.set("manifest.ent.p1", { data: { ns: "manifest.ent", entityKey: "vtx.provider.GGGGGGGGGGGGGGGGGGGG", entityType: "provider", title: "Dr. P" }, pending: false })`,
+    sandbox);
+}
+
+test("pickerFillsTargetField needs both the declared picker and a candidate", () => {
+  const sandbox = loadApp();
+  assert.equal(sandbox.pickerFillsTargetField(PICKER_OP), false, "no candidates in the mirror yet");
+  seedProvider(sandbox);
+  assert.equal(sandbox.pickerFillsTargetField(PICKER_OP), true, "picker + candidate = fillable");
+  const noPicker = { ...PICKER_OP, inputSchema: JSON.stringify({ type: "object", properties: { providerKey: { type: "string" } } }) };
+  assert.equal(sandbox.pickerFillsTargetField(noPicker), false, "no x-entityRef = not fillable");
+});
+
+test("an unresolvable-but-pickered op renders a live button, not a degraded card", () => {
+  const sandbox = loadApp();
+  seedProvider(sandbox);
+  const html = sandbox.opButton({ data: PICKER_OP }, { serviceKey: SERVICE });
+  assert.match(html, /op-btn|<button/, "offerable: the picker collects the target");
+  assert.doesNotMatch(html, /degraded-card/);
+  const bare = sandbox.opButton({ data: { ...PICKER_OP, inputSchema: "{}" } }, { serviceKey: SERVICE });
+  assert.match(bare, /degraded-card/, "without the picker the degraded hint stands");
+});

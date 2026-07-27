@@ -96,3 +96,35 @@ test("identityLabel prefers the sealed self-name, else a typed fallback (never U
   // no name, no key: the neutral "You", not "Unnamed" and not a domain word
   assert.equal(identityLabel({}), "You");
 });
+
+// ---- scopedTo-self vectors (facet-discovery-restoration follow-on) ----
+// A task scoped to the signed-in identity labels as the viewer's own
+// decrypted display name — the one identity whose name never needs a lens to
+// project it. Another identity's key still floors to the typed label (its
+// name is sealed, by design).
+
+test("a self-scoped target labels as the viewer's own name, never a short id", () => {
+  const sandbox = loadApp();
+  vm.runInContext(
+    `state.rows.set("manifest.me", { data: { identityKey: "vtx.identity.EEEEEEEEEEEEEEEEEEEE", displayName: "Sam Okafor" }, pending: false })`,
+    sandbox);
+  assert.equal(sandbox.scopedLabel("vtx.identity.EEEEEEEEEEEEEEEEEEEE", null), "Sam Okafor");
+  assert.equal(sandbox.scopedLabel("vtx.identity.FFFFFFFFFFFFFFFFFFFF", null), sandbox.prettify("vtx.identity.FFFFFFFFFFFFFFFFFFFF"),
+    "another identity still floors to the typed label");
+});
+
+test("a self-scoped target labels You before the display name arrives", () => {
+  const sandbox = loadApp();
+  vm.runInContext(
+    `state.rows.set("manifest.me", { data: { identityKey: "vtx.identity.EEEEEEEEEEEEEEEEEEEE" }, pending: false })`,
+    sandbox);
+  assert.equal(sandbox.scopedLabel("vtx.identity.EEEEEEEEEEEEEEEEEEEE", null), "You");
+});
+
+test("a projected scoped name always wins over the self rule", () => {
+  const sandbox = loadApp();
+  vm.runInContext(
+    `state.rows.set("manifest.me", { data: { identityKey: "vtx.identity.EEEEEEEEEEEEEEEEEEEE", displayName: "Sam Okafor" }, pending: false })`,
+    sandbox);
+  assert.equal(sandbox.scopedLabel("vtx.identity.EEEEEEEEEEEEEEEEEEEE", "Unit 2 lease"), "Unit 2 lease");
+});

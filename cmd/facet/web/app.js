@@ -133,7 +133,17 @@ function chipRow(anchors, emptyHTML) {
 // falls through to the typed floor (prettify), never a bare NanoID.
 function scopedLabel(scopedTo, scopedName) {
   if (!scopedTo) return "";
-  return scopedName || prettify(scopedTo);
+  return scopedName || selfLabelFor(scopedTo) || prettify(scopedTo);
+}
+
+// selfLabelFor names a key that IS the signed-in identity: the viewer's own
+// decrypted display name (me-row, N3), or the neutral "You" before it
+// arrives. The lens can never project another identity's name (sealed, by
+// design) — but the viewer's own name never needs it to.
+function selfLabelFor(key) {
+  const m = me();
+  if (!m || !key || m.identityKey !== key) return "";
+  return m.displayName || "You";
 }
 
 // identityLabel names the signed-in identity (class-3, design §2). The sealed
@@ -741,7 +751,7 @@ function openServiceDetail(key) {
     <button class="close-x" data-close>&times;</button>
     <div class="icon" style="font-size:32px">${iconGlyph(d.icon)}</div>
     <h2>${esc(d.name || "Service")}</h2>
-    <p class="lead">${esc(d.description || "")}${d.resolvedVia ? ` &middot; via ${esc(prettify(d.resolvedVia))}` : ""}</p>
+    <p class="lead">${esc(d.description || "")}${d.resolvedVia ? ` &middot; via ${esc(d.resolvedViaLabel || prettify(d.resolvedVia))}` : ""}</p>
     <h3 class="category-heading">Operations</h3>
     ${myOps.length ? myOps.map((o) => opButton(o, { serviceKey: d.serviceKey })).join("") : `<div class="empty">Nothing to do here yet.</div>`}
     <h3 class="category-heading">My instances of this service</h3>
@@ -794,10 +804,13 @@ function opButton(o, ctx) {
   // An op whose declared dispatch.targetType can't be resolved from this
   // context is not submittable from here — offering it anyway is how an op
   // once reached the Processor with the actor's vtx.identity where another
-  // vertex type was required. Say what's missing — and when the Nearby view
-  // actually has entities of that type, link straight to it instead of
-  // dead-ending.
-  if (d.dispatchTargetField && !resolveTargetKey(d, ctx)) {
+  // vertex type was required. EXCEPT when the target field itself is a
+  // declared picker (x-entityRef) with candidates in the mirror: then the
+  // form collects the target and context resolution was only ever the
+  // auto-fill convenience. Otherwise say what's missing — and when the
+  // Nearby view actually has entities of that type, link straight to it
+  // instead of dead-ending.
+  if (d.dispatchTargetField && !resolveTargetKey(d, ctx) && !pickerFillsTargetField(d)) {
     const label = typeLabel(d.dispatchTargetType);
     const browsable = d.dispatchTargetType && upcomingEntitiesByType(d.dispatchTargetType).length > 0;
     const hint = browsable
@@ -1237,6 +1250,18 @@ function paneRowOps(sec, row) {
 // strictly (JSON scalar equality — boolean, string, number) — a missing row,
 // a missing field, or a null value all fail closed: no state, no offer.
 // Visibility only; the script remains the enforcer.
+// pickerFillsTargetField reports whether an op's dispatch target field can be
+// collected IN the form: its inputSchema property declares an x-entityRef
+// picker and the mirror holds at least one candidate of that type. Purely
+// descriptor-driven — no op or type is named here.
+function pickerFillsTargetField(d) {
+  if (!d.dispatchTargetField || !d.inputSchema) return false;
+  const schema = maybeParseJSON(d.inputSchema);
+  const prop = schema && schema.properties && schema.properties[d.dispatchTargetField];
+  const refType = prop && prop["x-entityRef"];
+  return !!refType && entitiesByType(refType).length > 0;
+}
+
 function opVisibleForRow(opData, row) {
   const raw = opData.dispatchVisibleWhen;
   if (raw === undefined || raw === null) return true;
@@ -1645,7 +1670,12 @@ function renderDescriptorForm(op, opKey, ctx, prefill, reviewBanner) {
   const fieldDescs = maybeParseJSON(op.fieldDescriptions) || {};
   const contextParams = maybeParseJSON(op.dispatchContextParams) || {};
   const targetField = op.dispatchTargetField;
-  const fieldNames = Object.keys(props).filter((f) => !(f in contextParams) && f !== targetField);
+  // The target field stays out of the form when context already resolves it
+  // (auto-filled, never asked). When it does NOT resolve and the field is a
+  // declared picker, it renders like any other field — the picker IS how the
+  // visitor supplies the target (pickerFillsTargetField gated the offer).
+  const targetInForm = targetField && !resolveTargetKey(op, ctx) && pickerFillsTargetField(op);
+  const fieldNames = Object.keys(props).filter((f) => !(f in contextParams) && (f !== targetField || targetInForm));
 
   const fieldsHtml = fieldNames.map((name) => renderField(name, props[name], fieldDescs[name], required.has(name), prefill[name], op.sensitive)).join("");
 
@@ -1886,7 +1916,12 @@ function submitDescriptorForm(form, op, opKey, ctx, fieldNames, props, contextPa
     payload[field] = substituteTemplate(template, ctx, payload);
   }
   if (op.dispatchTargetField) {
-    payload[op.dispatchTargetField] = resolveTargetKey(op, ctx);
+    // Context resolution wins when it yields a key; a form-collected picker
+    // value (the targetInForm path) survives when it doesn't. Neither ⇒ the
+    // field stays absent and the script rejects — the server remains the
+    // enforcer either way.
+    const resolved = resolveTargetKey(op, ctx);
+    if (resolved) payload[op.dispatchTargetField] = resolved;
   }
 
   // Same whole-key rule as the optional half below. A REQUIRED read that failed

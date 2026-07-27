@@ -156,3 +156,22 @@ func TestPanes_SectionsRawStringStaysValid(t *testing.T) {
 	}
 	decodeSections(t, staffWorklistSections)
 }
+
+// TestLenses_KeyColumnsPairWithLabels — the display-name floor's DATA half:
+// a projected column whose value is a vertex KEY is only renderable as a
+// bare short-id unless a label rides beside it, so the renderer's floor rule
+// keeps getting pushed to the floor by data holes. Every tail stamping an
+// entityType must stamp its typeLabel; every tail projecting resolvedVia
+// must project resolvedViaLabel. Structural — a new lens cannot reintroduce
+// the "via Building · A9jnKK" class of hole without failing here.
+func TestLenses_KeyColumnsPairWithLabels(t *testing.T) {
+	for _, l := range Lenses() {
+		spec := l.Spec
+		if strings.Contains(spec, "AS entityType") && !strings.Contains(spec, "AS typeLabel") {
+			t.Errorf("lens %s stamps entityType without typeLabel", l.CanonicalName)
+		}
+		if strings.Contains(spec, "AS resolvedVia,") && !strings.Contains(spec, "AS resolvedViaLabel") {
+			t.Errorf("lens %s projects resolvedVia without resolvedViaLabel", l.CanonicalName)
+		}
+	}
+}
