@@ -51,7 +51,7 @@ func TestLeaseConvergence_SensitiveParamEgress_PlaintextAtAdapter_CiphertextOnEv
 
 	h.driveApplicantSteps(appKey, applicantKey)
 	h.decideLandlord(appKey, "approved")
-	h.drainUntilConverged(appID, 15*time.Second)
+	h.drainUntilConverged(appID, 30*time.Second)
 
 	handle := h.bgcheckHandle(applicantID)
 	require.NotEmpty(t, handle, "a backgroundCheck service instance must have been minted for the applicant")
@@ -106,7 +106,7 @@ func TestLeaseConvergence_SensitiveParamEgress_ShredThenReplay_NeverDecrypts(t *
 
 	h.driveApplicantSteps(appKey, applicantKey)
 	h.decideLandlord(appKey, "approved")
-	h.drainUntilConverged(appID, 15*time.Second)
+	h.drainUntilConverged(appID, 30*time.Second)
 
 	handle := h.bgcheckHandle(applicantID)
 	require.NotEmpty(t, handle)

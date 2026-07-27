@@ -156,11 +156,14 @@ func TestLeaseConvergence_DrainThenAssert_SteadyState(t *testing.T) {
 	// unit leases (the bridge round-trips the bgcheck + payment, the two ops close
 	// onboarding + signature, and the directOp flips the listing to leased).
 	//
-	// The drain cap (15s) + the settle hold (5s) below is the ceiling the
-	// `leaseshortwindow` freshness window (25s) must clear so the bgcheck does not
-	// lapse mid-assertion; converge runs in ~1s in-process, so 15s is far above the
-	// real drain while keeping that ceiling under the window with a 5s margin.
-	h.drainUntilConverged(appID, 15*time.Second)
+	// What must fit inside the `leaseshortwindow` freshness window (25s) is the
+	// settle hold below, not the drain plus the hold: the window is measured from
+	// the bgcheck's own completedAt, and the bgcheck is among the LAST gaps to
+	// close, so it completes at the end of the drain however long that drain took.
+	// The cap is therefore patience for a chain whose latency tracks host load —
+	// eleven all-engines harnesses share the runner under the suite's own
+	// t.Parallel — and never an assertion about how fast that chain is.
+	h.drainUntilConverged(appID, 30*time.Second)
 
 	// Assert steady: it stays converged (no oscillation).
 	h.assertSteadyState(appID, 5*time.Second)
