@@ -137,3 +137,100 @@ func (s *server) handleSessions(w http.ResponseWriter, r *http.Request) {
 	rows := computeSessions(sessionKeys, s.kvGetter(ctx, sessionsBucket), bookedCounts)
 	s.writeJSON(w, http.StatusOK, map[string]any{"sessions": rows})
 }
+
+// computeRosterSessions is computeSessions narrowed to the sessions this
+// caller may read — mirroring mayReadRoster's own per-row test exactly
+// (bookings.go), the authority behind this picker: an operator reads every
+// row, a workplace staffer reads the sessions their workplace covers, and a
+// bound instructor reads the sessions their own instructor entity leads, on
+// top of any workplace they also hold. A row that fails to decode, or that
+// none of the three answers reach, is simply absent rather than answered and
+// then refused: the same distinction handleMembers draws for the front
+// desk's member picker.
+func computeRosterSessions(keys []string, get kvGetter, bookedCounts map[string]int, hats subjectHats) []sessionRow {
+	rows := make([]sessionRow, 0, len(keys))
+	for _, k := range keys {
+		raw, ok := get(k)
+		if !ok {
+			continue
+		}
+		var p sessionProjection
+		if json.Unmarshal(raw, &p) != nil || p.SessionKey == "" {
+			continue
+		}
+		leadsIt := p.InstructorKey != "" && p.InstructorKey == hats.instructorKey
+		if !hats.isOperator && !hats.covers(p.CoveringLocations) && !leadsIt {
+			continue
+		}
+		var capacity int64
+		if p.Capacity != nil {
+			capacity = int64(*p.Capacity)
+		}
+		rows = append(rows, sessionRow{
+			SessionKey:     p.SessionKey,
+			Name:           p.Name,
+			StartsAt:       p.StartsAt,
+			EndsAt:         p.EndsAt,
+			Capacity:       capacity,
+			StudioKey:      p.StudioKey,
+			StudioName:     p.StudioName,
+			InstructorKey:  p.InstructorKey,
+			InstructorName: p.InstructorName,
+			BookedCount:    bookedCounts[p.SessionKey],
+		})
+	}
+	sort.Slice(rows, func(i, j int) bool {
+		if rows[i].StartsAt != rows[j].StartsAt {
+			return rows[i].StartsAt < rows[j].StartsAt
+		}
+		return rows[i].SessionKey < rows[j].SessionKey
+	})
+	return rows
+}
+
+// handleRosterSessions implements GET /api/roster-sessions — the front
+// desk's roster picker, narrowed to the sessions this caller may read
+// (computeRosterSessions). /api/sessions stays public and unscoped for the
+// member-facing schedule grid, which a resident needs to browse
+// building-wide; this one is a staff/instructor surface, so a plain member
+// gets the same refusal handleMembers gives rather than a topology-bearing
+// list they cannot act on. Same rows, same shape as /api/sessions — the
+// difference is only which ones this caller is offered.
+func (s *server) handleRosterSessions(w http.ResponseWriter, r *http.Request) {
+	hats, err := s.resolveSubjectHats(r)
+	if err != nil {
+		s.writeAuthError(w, err)
+		return
+	}
+	if !hats.isOperator && !hats.isStaff() && hats.instructorKey == "" {
+		s.writeError(w, http.StatusForbidden,
+			"the roster is a staff surface for the place you work at, or an instructor's own classes")
+		return
+	}
+	conn, ok := s.requireConn(w)
+	if !ok {
+		return
+	}
+	ctx, cancel := s.reqContext(r)
+	defer cancel()
+
+	sessionsBucket := wellnessdomain.WellnessSessionsBucket
+	sessionKeys, err := conn.KVListKeys(ctx, sessionsBucket)
+	if err != nil {
+		s.writeError(w, http.StatusBadGateway,
+			"list "+sessionsBucket+": "+err.Error()+" (is wellness-domain installed and the Refractor projecting?)")
+		return
+	}
+
+	bookingsBucket := wellnessdomain.WellnessBookingsBucket
+	bookingKeys, err := conn.KVListKeys(ctx, bookingsBucket)
+	if err != nil {
+		s.writeError(w, http.StatusBadGateway,
+			"list "+bookingsBucket+": "+err.Error()+" (is wellness-domain installed and the Refractor projecting?)")
+		return
+	}
+	bookedCounts := countBookingsBySession(bookingKeys, s.kvGetter(ctx, bookingsBucket))
+
+	rows := computeRosterSessions(sessionKeys, s.kvGetter(ctx, sessionsBucket), bookedCounts, hats)
+	s.writeJSON(w, http.StatusOK, map[string]any{"sessions": rows})
+}

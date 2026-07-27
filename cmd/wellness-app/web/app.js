@@ -352,6 +352,20 @@ async function loadSessions(force) {
   return sessionsCache;
 }
 
+// loadStaffSessions is the roster picker's source, narrowed server-side to
+// the sessions this staffer's workplace covers (GET /api/roster-sessions) —
+// deliberately a separate cache from loadSessions: that one backs the public,
+// building-wide schedule grid a resident browses, and folding the two would
+// either publish roster topology there or narrow a resident's own browse to
+// one building.
+let staffSessionsCache = null;
+async function loadStaffSessions(force) {
+  if (staffSessionsCache && !force) return staffSessionsCache;
+  const body = await appGet("/api/roster-sessions");
+  staffSessionsCache = body.sessions || [];
+  return staffSessionsCache;
+}
+
 let instructorsCache = null;
 async function loadInstructors() {
   if (instructorsCache) return instructorsCache;
@@ -607,7 +621,7 @@ async function loadRoster() {
   if (!select.dataset.loaded) {
     let sessions;
     try {
-      sessions = await loadSessions();
+      sessions = await loadStaffSessions();
     } catch (e) {
       select.innerHTML = '<option value="">(' + esc(e.message) + ")</option>";
       return;
@@ -667,7 +681,7 @@ async function renderRoster() {
   // that, so the control would only fail closed. The server re-derives both
   // facts and the Starlark guard re-derives them again at submit; this is the
   // affordance, not the authority.
-  const se = (sessionsCache || []).find((x) => x.sessionKey === sessionKey);
+  const se = (staffSessionsCache || []).find((x) => x.sessionKey === sessionKey);
   const mine = instructorKey();
   const isLeader = !!(se && mine && se.instructorKey === mine);
   const started = !!(se && se.startsAt && new Date(se.startsAt).getTime() <= Date.now());
@@ -685,12 +699,15 @@ async function renderRoster() {
   renderCancelClass(sessionKey);
 }
 
-// renderBookMember shows the front desk's book-a-member control for the
-// selected class, and hides it for everyone else. The picker offers the
-// members this staffer's workplace covers — the server decides that, not this
-// code — minus whoever already holds a seat, since CreateBooking rejects a
-// second live booking by the same booker on the same session (DoubleBooked,
-// ddls.go).
+// renderBookMember shows the front desk's book-a-member control (and the
+// book-a-guest control beside it) for the selected class, and hides both for
+// everyone else. The picker offers the members this staffer's workplace
+// covers — the server decides that, not this code — minus whoever already
+// holds a seat, since CreateBooking rejects a second live booking by the same
+// booker on the same session (DoubleBooked, ddls.go). The guest control has
+// no such directory to scope against — a walk-in has no lease at all, which
+// is exactly why the picker can't offer them — so it takes a typed key
+// instead and leaves the seated-twice guard to the same in-script check.
 //
 // It offers nothing at all for a class that has already begun or is full:
 // CreateBooking answers SessionInPast and SessionFull respectively (ddls.go),
@@ -746,7 +763,34 @@ async function renderBookMember(se, bookings, generation) {
     }
   }
   document.getElementById("roster-book-submit").disabled = false;
+  document.getElementById("roster-book-guest").value = "";
   form.hidden = false;
+}
+
+// bookGuest is the front desk's walk-in path: CreateBooking's booker field
+// takes any live identity, and the member picker above only ever offers the
+// wellnessMembers directory (lease-anchored by construction), so a guest with
+// no lease at this building has no row to pick — this control books them
+// directly by key instead, with no leaseAppKey, which CreateBooking already
+// treats as the designed standard-rate branch rather than a rejection.
+async function bookGuest() {
+  const btn = document.getElementById("roster-book-guest-submit");
+  const input = document.getElementById("roster-book-guest");
+  const guestKey = input.value.trim();
+  const sessionKey = document.getElementById("roster-session").value;
+  const se = (staffSessionsCache || []).find((x) => x.sessionKey === sessionKey);
+  if (!guestKey || !se) return;
+  btn.disabled = true;
+  try {
+    await bookMemberIn(se, guestKey, "");
+    input.value = "";
+    toast("Booked.", true);
+    setTimeout(renderRoster, 700);
+  } catch (e) {
+    toast(e.message, false);
+  } finally {
+    btn.disabled = false;
+  }
 }
 
 // bookSelectedMember is the Book button's handler, bound ONCE at init like
@@ -758,7 +802,7 @@ async function bookSelectedMember() {
   const btn = document.getElementById("roster-book-submit");
   const value = document.getElementById("roster-book-member").value;
   const sessionKey = document.getElementById("roster-session").value;
-  const se = (sessionsCache || []).find((x) => x.sessionKey === sessionKey);
+  const se = (staffSessionsCache || []).find((x) => x.sessionKey === sessionKey);
   if (!value || !se) return;
   const [bookerKey, leaseAppKey] = value.split("|");
   btn.disabled = true;
@@ -772,15 +816,16 @@ async function bookSelectedMember() {
   }
 }
 
-// bookMemberIn submits CreateBooking for a member as the front desk. It
-// carries NO authContext.target — that field is the CONSUMER path's binding
-// (the booking's booker must BE the target), and a staffer booking somebody
-// else is never that identity; the workplace walk over the session's own
-// location binds them instead. The declared reads mirror the self-service
-// path's exactly, the resident-rate lookup included: the lease this names is
-// the member's, not the caller's, but CreateBooking verifies it against the
-// booker's own applicationFor link either way and falls through to the
-// standard rate on a mismatch.
+// bookMemberIn submits CreateBooking for a member OR a guest as the front
+// desk (bookSelectedMember / bookGuest, the picker and the by-key control
+// respectively). It carries NO authContext.target — that field is the
+// CONSUMER path's binding (the booking's booker must BE the target), and a
+// staffer booking somebody else is never that identity; the workplace walk
+// over the session's own location binds them instead. The declared reads
+// mirror the self-service path's exactly, the resident-rate lookup included:
+// an absent leaseAppKey (a guest with no residency) is the designed
+// standard-rate branch, not a narrower case to reject — CreateBooking itself
+// never requires one.
 async function bookMemberIn(se, bookerKey, leaseAppKey) {
   const optionalReads = seatKeys(se.sessionKey, se.capacity);
   optionalReads.push(se.sessionKey + ".bkr" + idOf(bookerKey));
@@ -935,7 +980,7 @@ async function markAttendance(bookingKey, sessionKey, value, mine) {
 function renderCancelClass(sessionKey) {
   const mine = instructorKey();
   if (!mine) return;
-  const se = (sessionsCache || []).find((x) => x.sessionKey === sessionKey);
+  const se = (staffSessionsCache || []).find((x) => x.sessionKey === sessionKey);
   if (!se || se.instructorKey !== mine) return;
 
   const wrap = document.createElement("div");
@@ -948,7 +993,7 @@ function renderCancelClass(sessionKey) {
     try {
       await cancelOwnClass(se, mine);
       toast("Class called off.", true);
-      sessionsCache = null;
+      staffSessionsCache = null;
       document.getElementById("roster-session").dataset.loaded = "";
       setTimeout(loadRoster, 700);
     } catch (e) {
@@ -1246,7 +1291,7 @@ async function createSession(studioKey, els) {
     );
     toast("Class scheduled.", true);
     els.name.value = "";
-    sessionsCache = null;
+    staffSessionsCache = null;
     document.getElementById("roster-session").dataset.loaded = "";
     setTimeout(renderStudiosAdmin, 700);
   } catch (e) {
@@ -1271,11 +1316,12 @@ function init() {
   document.getElementById("myclasses-refresh").addEventListener("click", renderMyClasses);
   document.getElementById("roster-session").addEventListener("change", renderRoster);
   document.getElementById("roster-refresh").addEventListener("click", () => {
-    sessionsCache = null; membersCache = null;
+    staffSessionsCache = null; membersCache = null;
     document.getElementById("roster-session").dataset.loaded = "";
     loadRoster();
   });
   document.getElementById("roster-book-submit").addEventListener("click", bookSelectedMember);
+  document.getElementById("roster-book-guest-submit").addEventListener("click", bookGuest);
   document.getElementById("studios-refresh").addEventListener("click", () => {
     studiosCache = null; instructorsCache = null;
     renderStudiosAdmin();

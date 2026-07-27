@@ -43,6 +43,10 @@ const (
 	// works at both buildings.
 	rootSubj   = "ffffffffffffffffffff"
 	twoHatSubj = "gggggggggggggggggggg"
+	// instrStaffSubj holds BOTH the instructor binding AND a workplace — the
+	// roster's own union case: their own led class anywhere, plus every class
+	// at the building they work.
+	instrStaffSubj = "hhhhhhhhhhhhhhhhhhhh"
 )
 
 // The instructor entity instrSubj is identifiedBy-bound to, and the session
@@ -152,6 +156,11 @@ func fakeGatewayActor(t *testing.T) string {
 			anchors = append(anchors,
 				appsession.ActorAnchor{Relation: "worksAt", Key: staffWorkplace},
 				appsession.ActorAnchor{Relation: "worksAt", Key: otherWorkplace},
+			)
+		case instrStaffSubj:
+			anchors = append(anchors,
+				appsession.ActorAnchor{Relation: "worksAt", Key: staffWorkplace},
+				appsession.ActorAnchor{Relation: "identifiedBy", Key: instructorKeyFixture},
 			)
 		case memberB:
 			// The degenerate unmatched-OPTIONAL-MATCH shape: a relation with
@@ -1053,5 +1062,153 @@ func TestHandleMembers_OperatorAlsoSeesNoDeclinedApplicant(t *testing.T) {
 	}
 	if got := decodeMembers(t, rec); len(got) != 1 || got[0].BookerKey != "vtx.identity."+memberB {
 		t.Fatalf("got %+v, want only the undecided member at the other building", got)
+	}
+}
+
+// ---- /api/roster-sessions: the roster's own picker, scoped to where a staffer works or an instructor leads ----
+
+func decodeRosterSessions(t *testing.T, rec *httptest.ResponseRecorder) []sessionRow {
+	t.Helper()
+	var body struct {
+		Sessions []sessionRow `json:"sessions"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode sessions: %v (body=%s)", err, rec.Body.String())
+	}
+	return body.Sessions
+}
+
+// The discriminating pair for the whole surface: the SAME staffer, the same
+// call, two sessions differing only in which building they run at. Before
+// this endpoint existed, the roster's session picker was the public,
+// building-wide /api/sessions — this is exactly the leak filed to
+// verticals.md ("Wellness roster picker offers classes at other buildings").
+func TestHandleRosterSessions_StaffSeesOnlyTheirWorkplace(t *testing.T) {
+	s, cookieFor := devSessionServer(t)
+	seedSession(t, s.conn, ledSessionKey, "Vinyasa Flow", "")
+	seedSession(t, s.conn, otherSessionKey, "Class at another building", "", otherWorkplace)
+
+	rec := sessionGET(s, s.handleRosterSessions, "/api/roster-sessions", cookieFor(staffSubj))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	sessions := decodeRosterSessions(t, rec)
+	if len(sessions) != 1 {
+		t.Fatalf("got %d sessions, want 1 (the one at this staffer's building); %+v", len(sessions), sessions)
+	}
+	if sessions[0].SessionKey != ledSessionKey {
+		t.Fatalf("got %+v, want %s", sessions[0], ledSessionKey)
+	}
+}
+
+// A bound instructor holds no workplace at all, so covers() answers nothing
+// for either session — but the class they lead is theirs to read regardless,
+// mirroring mayReadRoster's own dual test (bookings.go), and the one they do
+// not lead stays refused even though neither session is covered by any
+// workplace.
+func TestHandleRosterSessions_InstructorSeesOnlyTheirOwnLedSession(t *testing.T) {
+	s, cookieFor := devSessionServer(t)
+	seedSession(t, s.conn, ledSessionKey, "Evening Flow with Sam", instructorKeyFixture, noLocations...)
+	seedSession(t, s.conn, otherSessionKey, "Somebody else's class", "", noLocations...)
+
+	rec := sessionGET(s, s.handleRosterSessions, "/api/roster-sessions", cookieFor(instrSubj))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	sessions := decodeRosterSessions(t, rec)
+	if len(sessions) != 1 {
+		t.Fatalf("got %d sessions, want 1 (the one this instructor leads); %+v", len(sessions), sessions)
+	}
+	if sessions[0].SessionKey != ledSessionKey {
+		t.Fatalf("got %+v, want %s", sessions[0], ledSessionKey)
+	}
+}
+
+// A human who both works a building AND leads a class elsewhere sees the
+// UNION of the two answers, not just one: their own led session at a
+// building they do NOT work, plus a house class at the building they DO work
+// (which they do not lead), and nothing from a third building neither reaches.
+func TestHandleRosterSessions_TwoHatSeesTheUnion(t *testing.T) {
+	s, cookieFor := devSessionServer(t)
+	seedSession(t, s.conn, ledSessionKey, "Evening Flow with Sam", instructorKeyFixture, otherWorkplace)
+	seedSession(t, s.conn, otherSessionKey, "House class", "", staffWorkplace)
+	unreached := "vtx.session.pN6mVtXrKbLqZ9wHdYcs"
+	seedSession(t, s.conn, unreached, "Nowhere this caller reaches", "", otherWorkplace)
+
+	rec := sessionGET(s, s.handleRosterSessions, "/api/roster-sessions", cookieFor(instrStaffSubj))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	got := map[string]bool{}
+	for _, se := range decodeRosterSessions(t, rec) {
+		got[se.SessionKey] = true
+	}
+	if len(got) != 2 || !got[ledSessionKey] || !got[otherSessionKey] {
+		t.Fatalf("got %+v, want exactly the led session and the worked-building session", got)
+	}
+}
+
+// A plain member holds neither hat. The roster is not theirs to read, same
+// boundary handleMembers draws for the member directory.
+func TestHandleRosterSessions_MemberForbidden(t *testing.T) {
+	s, cookieFor := devSessionServer(t)
+	seedSession(t, s.conn, ledSessionKey, "Vinyasa Flow", "")
+
+	rec := sessionGET(s, s.handleRosterSessions, "/api/roster-sessions", cookieFor(memberA))
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403; body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+// The operator holds no workplace and leads nothing, and reads every
+// session anyway — the break-glass exemption require_workplace gives root on
+// the write side.
+func TestHandleRosterSessions_OperatorSeesEverySession(t *testing.T) {
+	s, cookieFor := devSessionServer(t)
+	seedSession(t, s.conn, ledSessionKey, "Vinyasa Flow", "")
+	seedSession(t, s.conn, otherSessionKey, "Class at another building", "", otherWorkplace)
+
+	rec := sessionGET(s, s.handleRosterSessions, "/api/roster-sessions", cookieFor(rootSubj))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	if got := decodeRosterSessions(t, rec); len(got) != 2 {
+		t.Fatalf("got %d sessions, want 2 — root sees every building; %+v", len(got), got)
+	}
+}
+
+// The picker is a per-user read, so it needs a session like every other one.
+func TestHandleRosterSessions_RefusesWithNoSession(t *testing.T) {
+	s, _ := devSessionServer(t)
+	seedSession(t, s.conn, ledSessionKey, "Vinyasa Flow", "")
+
+	rec := muxGET(s, "/api/roster-sessions", nil)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401 — /api/roster-sessions must not be on the public-read exemption list; body=%s",
+			rec.Code, rec.Body.String())
+	}
+}
+
+// /api/sessions itself must stay exactly as public and building-wide as
+// before: a resident browsing the schedule grid still needs every session
+// everywhere, which is the whole reason the roster needed its OWN endpoint
+// rather than narrowing this one.
+func TestHandleSessions_StaysPublicAndUnscoped(t *testing.T) {
+	s, _ := devSessionServer(t)
+	seedSession(t, s.conn, ledSessionKey, "Vinyasa Flow", "")
+	seedSession(t, s.conn, otherSessionKey, "Class at another building", "", otherWorkplace)
+
+	rec := muxGET(s, "/api/sessions", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 — /api/sessions stays public-read; body=%s", rec.Code, rec.Body.String())
+	}
+	var body struct {
+		Sessions []sessionRow `json:"sessions"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode sessions: %v (body=%s)", err, rec.Body.String())
+	}
+	if len(body.Sessions) != 2 {
+		t.Fatalf("got %d sessions, want 2 — the schedule grid stays building-wide; %+v", len(body.Sessions), body.Sessions)
 	}
 }
