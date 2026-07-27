@@ -1,6 +1,14 @@
 # Done log archive — lattice (older shipped items, newest first)
 
 
+- 2026-07-25 · `1b9852f2` · [refractor] DISTINCT binds on the aggregator that carries it, not the RETURN item — composed `collect(DISTINCT)+collect(DISTINCT)` deduped; unfroze a 1MB-over-payload `cap-read` doc; `normalizeForKey` made injective
+- 2026-07-25 · `fbf46f9a` · [scripts] verify-package-loftspace-domain asserts each (op, scope) grant — one id per operationType let map iteration hide `SetListingStatus`'s second (landlord scope=self) vertex, red-or-green at random
+- 2026-07-25 · `1a0d1849` · [appsession,loupe] the origin gate is `OriginGate`, usable without a session Manager — nested-navigation (iframe) clickjacking refused, Loupe's ~110-line fork deleted
+- 2026-07-25 · `8e61174f` · [appsession,demo] a request must prove it came from the app's own origin — Fetch-Metadata + Origin gate at the RequireSession choke point, `_PUBLIC_ORIGIN` + demo wiring, kit component page
+- 2026-07-25 · `2fff6e40` · [starlarksandbox] a script gets no host output channel — `print` discarded, so `print(state)` no longer renders decrypted plaintext to the Processor's stderr
+- 2026-07-25 · `ae05f60a` · [processor] the external-egress guard fires on what the script CONSUMED, not on what hydration decrypted — closes the sensitive-class oracle; whole-set exposure records, `state` attrs default-deny
+- 2026-07-25 · `3a78c109` · [processor] a declared read faults where the operation NAMES the key, not at hydration — closes the pre-script Core-KV existence oracle; enumeration deliberately does not fault
+- 2026-07-24 · `10f01e71` · [lint,clinic-domain] a declaration binds to its own statement, not the next 8 lines (12 drifted sites fixed); clinic keys its exemption on `op.authTargetValidated`, `(legacy-self-exempt)` deleted
 - 2026-07-24 · `6aa4959c` · [refractor,test] manifest.me self-anchored reprojection proven sound — e2e (existing personal row grows on a 2nd holdsRole link, D1 self-gate active); filed "ordering-token" freeze mechanism disproven, no server bug
 - 2026-07-24 · `473929e3` · [rbac,clinic,wellness,service] revive a tombstoned grant instead of failing — grant_link/revive at 6 sites so a RevokeRole'd identity + re-bound provider can be re-granted; pkg versions bumped
 - 2026-07-24 · `68ffc584` · [lint,edge-manifest] dual-enumeration S1 done — `lint-lens-anchors` CI gate (every non-self Personal-lens anchor kind needs a producer branch) + provider-world coverage; testkit now spans all 3 personas
