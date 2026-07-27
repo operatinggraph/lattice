@@ -342,3 +342,45 @@ lenses" and names none of the entity lenses, against its own header rule that th
 commit as the code — pre-existing drift, filed as its own row. The `RescheduleAppointment{provider, patient}`
 raw-key fields ([clinic-domain/opmetas.go:90-97](../../packages/clinic-domain/opmetas.go)) become buildable the
 moment increment 3 lands, and are filed as the mechanism's second consumer.
+
+### 7.1 As built (`87010105`)
+
+Three increments landed as briefed. Review changed the code in two places and settled a third as posture.
+
+**The key shape was wrong in the docs and in the fixtures.** The brief and the first cut both said
+`locationKey` holds a `vtx.location.<NanoID>`. location-domain mints `vtx.{unit,building,property}.<NanoID>`
+with `class=location` — the level is the key's TYPE segment, the class is invariant
+([location-domain/ddls.go:31-33,75](../../packages/location-domain/ddls.go)). So the descriptor advertised a
+shape production never produces, and `seedLocation` was proving the link key against that same fiction: the
+`servedAt` link real callers mint is `…servedAt.unit.<id>`, which no test had ever seen. Docs and fixtures now
+name `vtx.<locationType>`, and the class check (not the type segment) is what the script enforces — which is
+why `parts_of` is called with an empty `want_type`, mirroring service-location.
+
+**A picked entity-ref survived being typed over.** The value submitted lives in a hidden input, which the
+browser excludes from constraint validation. Pick "Latte", then type "Croissant" without picking, and the form
+submitted `menuItemKey: <Latte>` under the label "Croissant" — the wrong item charged, with nothing on screen
+to show it. Typing now clears the hidden value, so the required-field guard catches the diverged state instead
+of the server rejecting a submission whose failing control the visitor cannot see.
+
+**`servedAt` is a presentation bound, not an authorization one — stated, not fixed.** `Charge` accepts any
+live `menuitem`, and `menuCatalog` is a global read model any signed-in session may list
+([cafe-app/menu.go:54-55](../../cmd/cafe-app/menu.go)), so a resident who reads another building's item key can
+charge it to their own tab. This predates the fire, but the fire is what makes the picker *look* like a guard,
+so `require_menu_item_price` now says plainly that it is not. Confining the write needs the item's `servedAt`
+target, which `Charge`'s payload cannot derive, and "may a resident order from a café they do not live at" is a
+product question before it is a mechanism — filed as its own row rather than answered here.
+
+The base cap-read producer's anchor-type pin ([composed_test.go:219](../../packages/edge-manifest/composed_test.go))
+failed on the first run, exactly as designed: `menuitem` joins `tab` as a resident-reachable anchor, declared
+rather than absorbed. The trace that matters for a walk appended to a shared producer — that no existing
+branch's clauses or variable bindings change, and that `collect(DISTINCT …)` keeps a new trailing OPTIONAL
+MATCH from inflating any prior branch's set — was checked against `generateProducerSpec`'s factoring and
+renaming, and holds because the walk is appended last and `item` is a name no other `domainBase` walk binds.
+
+**Live.** cafe-domain 0.8.4→0.9.0 and edge-manifest 0.12.0→0.13.0 diff-applied in place (10 updated; 6 created
++ 5 updated), Refractor loaded `edgeEntityMenuItems` with no divergence, and `bin/{facet,cafe-app,
+loftspace-app,loupe}` were rebuilt from the merge and cycled against the still-running stack. The POSITIVE
+picker path is not demonstrable on this stack and the reason is the data, not the code: every seeded menu item
+predates `servedAt` and so carries no link, exactly the non-goal named above — the demo seed re-mints them
+with one. That path is proven deterministically against the real engine in
+`TestEdgeEntityMenuItems_IsBoundedByTheResidenceChain`, the same posture §6 took for the café tab row.
