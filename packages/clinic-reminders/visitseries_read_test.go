@@ -62,7 +62,7 @@ func TestVisitSeriesRead_ProjectsPatientSelfAnchor(t *testing.T) {
 	require.Equal(t, float64(30), v["interval_days"])
 	require.Equal(t, "2026-08-01T09:00:00Z", v["next_due_at"])
 	require.Equal(t, float64(2), v["occurrence_count"])
-	require.Equal(t, true, v["active"])
+	require.Equal(t, "active", v["series_status"])
 
 	anchors, ok := v["authz_anchors"].([]any)
 	require.True(t, ok, "authz_anchors must project as a list")
@@ -130,9 +130,12 @@ func TestVisitSeriesRead_NoProviderLinkStillProjects(t *testing.T) {
 	require.Equal(t, []any{f.ids["alice"]}, anchors)
 }
 
-// TestVisitSeriesRead_PausedProjectsInactive — active reflects the same
-// paused/activeUntil derivation as visitSeriesDueSpec.
-func TestVisitSeriesRead_PausedProjectsInactive(t *testing.T) {
+// TestVisitSeriesRead_PausedProjectsPaused — series_status distinguishes an
+// explicitly paused series from a naturally-ended one (verticals.md "A
+// naturally-ended visit series still shows a working Resume button"): both
+// used to collapse into one fused `active=false`, indistinguishable at the
+// client.
+func TestVisitSeriesRead_PausedProjectsPaused(t *testing.T) {
 	if testing.Short() {
 		t.Skip("requires NATS")
 	}
@@ -144,7 +147,64 @@ func TestVisitSeriesRead_PausedProjectsInactive(t *testing.T) {
 
 	rows := f.project(t, visitSeriesReadSpec)
 	require.Len(t, rows, 1)
-	require.Equal(t, false, rows[0].Values["active"], "paused series projects active=false")
+	require.Equal(t, "paused", rows[0].Values["series_status"])
+}
+
+// TestVisitSeriesRead_NaturallyEndedProjectsEnded — a series never paused
+// whose next occurrence would fall past its own activeUntil reads "ended",
+// not "paused": the exact distinction the fused boolean lost, which let a
+// finished series show a Resume button that submitted and changed nothing
+// observable (verticals.md).
+func TestVisitSeriesRead_NaturallyEndedProjectsEnded(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newRemFixture(t)
+	f.mkVisitSeries(t, "series", 30, "2026-07-01T09:00:00Z", "2026-08-01T09:00:00Z", 0, nil)
+	f.vtx(t, "alice", "patient")
+	f.edge(t, "forPatient", "series", "alice")
+
+	rows := f.project(t, visitSeriesReadSpec)
+	require.Len(t, rows, 1)
+	require.Equal(t, "ended", rows[0].Values["series_status"],
+		"never paused, but nextDueAt (2026-08-01) is past activeUntil (2026-07-01)")
+}
+
+// TestVisitSeriesRead_PausedPastItsEndStaysPaused — a series paused BEFORE it
+// would have ended stays "paused", not "ended": pausing is what the human
+// did, and reclassifying it out from under them just because wall-clock
+// caught up would make Resume (which still works — pausing freezes
+// nextDueAt) look like a dead end it is not.
+func TestVisitSeriesRead_PausedPastItsEndStaysPaused(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newRemFixture(t)
+	yes := true
+	f.mkVisitSeries(t, "series", 30, "2026-07-01T09:00:00Z", "2026-08-01T09:00:00Z", 0, &yes)
+	f.vtx(t, "alice", "patient")
+	f.edge(t, "forPatient", "series", "alice")
+
+	rows := f.project(t, visitSeriesReadSpec)
+	require.Len(t, rows, 1)
+	require.Equal(t, "paused", rows[0].Values["series_status"])
+}
+
+// TestVisitSeriesRead_NoActiveUntilNeverEnds — an open-ended series (no
+// activeUntil at all) can never read "ended", regardless of how far
+// nextDueAt has rolled.
+func TestVisitSeriesRead_NoActiveUntilNeverEnds(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newRemFixture(t)
+	f.mkVisitSeries(t, "series", 30, "", "2099-01-01T09:00:00Z", 40, nil)
+	f.vtx(t, "alice", "patient")
+	f.edge(t, "forPatient", "series", "alice")
+
+	rows := f.project(t, visitSeriesReadSpec)
+	require.Len(t, rows, 1)
+	require.Equal(t, "active", rows[0].Values["series_status"])
 }
 
 // TestVisitSeriesRead_AnchorsProviderWorkplace — authz_anchors carries the

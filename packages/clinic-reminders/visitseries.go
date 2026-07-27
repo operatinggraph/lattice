@@ -856,11 +856,12 @@ RETURN
 // forPatient is a REQUIRED match (the anchor walk) so a series with no
 // patient link projects NO row — fail-closed, mirroring
 // clinicAppointmentsReadSpec's REQUIRED forPatient walk. withProvider stays
-// OPTIONAL: a display-only neighbour, not the anchor. active / next_due_at /
-// interval_days / occurrence_count are the same display columns the
-// unprotected visitSeriesDue lens carries; the Weaver-dispatch machinery
-// columns (freshUntil, missing_series_advance, violating) are NOT projected
-// here — this is a read model, not a convergence target.
+// OPTIONAL: a display-only neighbour, not the anchor. series_status /
+// next_due_at / interval_days / occurrence_count are the same display columns
+// the unprotected visitSeriesDue lens's own active/nextDueAt/etc. derive from;
+// the Weaver-dispatch machinery columns (freshUntil, missing_series_advance,
+// violating) are NOT projected here — this is a read model, not a convergence
+// target.
 func visitSeriesReadLens() pkgmgr.LensSpec {
 	return pkgmgr.LensSpec{
 		CanonicalName: "visitSeriesRead",
@@ -881,14 +882,28 @@ func visitSeriesReadLens() pkgmgr.LensSpec {
 			{Name: "interval_days", Type: "integer"},
 			{Name: "next_due_at", Type: "text"},
 			{Name: "occurrence_count", Type: "integer"},
-			{Name: "active", Type: "boolean"},
+			{Name: "series_status", Type: "text"},
 		},
 	}
 }
 
 // visitSeriesReadSpec is the PATIENT-anchored protected Postgres read model's
-// cypher (D1.5). Same active/nextDueAt derivation as visitSeriesDueSpec, minus
-// the freshUntil/missing_series_advance/violating dispatch columns.
+// cypher (D1.5). Same nextDueAt derivation as visitSeriesDueSpec, minus the
+// freshUntil/missing_series_advance/violating dispatch columns.
+//
+// series_status is the raw three-state read a client renders directly
+// (mirroring clinic-domain's own appointmentStatus idiom) rather than the
+// fused `active` boolean visitSeriesDueSpec still carries for Weaver's own
+// convergence question ("should this fire next"), a different question this
+// read model does not need to answer: a series that reached its natural end
+// (never paused, but its next occurrence would fall past activeUntil) is
+// "ended", not the same state as one a human explicitly paused — collapsing
+// them left a naturally-ended series showing a Resume button that submitted
+// and changed nothing observable (verticals.md). Precedence is sequential,
+// not layered: a series paused before it ran out still reads "paused" even
+// if activeUntil has since passed, because "ended" only ever tests the NOT
+// PAUSED branch — matching the intent "did this run its course on its own",
+// not "is today past the cutoff".
 const visitSeriesReadSpec = `MATCH (s:visitseries)
 MATCH (s)-[:forPatient]->(p:patient)
 OPTIONAL MATCH (s)-[:withProvider]->(pr:provider)
@@ -903,7 +918,11 @@ RETURN
   s.series.data.intervalDays    AS interval_days,
   s.progress.data.nextDueAt     AS next_due_at,
   s.progress.data.occurrenceCount AS occurrence_count,
-  ((s.paused.data.value <> true) AND ((s.series.data.activeUntil = null) OR (s.progress.data.nextDueAt <= s.series.data.activeUntil))) AS active,
+  CASE
+    WHEN (s.paused.data.value <> true) AND (s.series.data.activeUntil <> null) AND (s.progress.data.nextDueAt > s.series.data.activeUntil) THEN "ended"
+    WHEN (s.paused.data.value <> true) THEN "active"
+    ELSE "paused"
+  END AS series_status,
   [nanoIdFromKey(p.key)] + [(pr)-[:practicesAt]->(b:building) | nanoIdFromKey(b.key)]
                                  AS authz_anchors
 `
@@ -1060,7 +1079,7 @@ func visitSeriesOpMetas() []pkgmgr.OpMetaSpec {
 				AuthContext: "standing",
 				TargetField: "seriesKey",
 				TargetType:  visitSeriesVertexDDL,
-				VisibleWhen: &pkgmgr.OpVisibleWhenSpec{Field: "active", Equals: true},
+				VisibleWhen: &pkgmgr.OpVisibleWhenSpec{Field: "series_status", Equals: "active"},
 			},
 		},
 		{
@@ -1083,7 +1102,7 @@ func visitSeriesOpMetas() []pkgmgr.OpMetaSpec {
 				AuthContext: "standing",
 				TargetField: "seriesKey",
 				TargetType:  visitSeriesVertexDDL,
-				VisibleWhen: &pkgmgr.OpVisibleWhenSpec{Field: "active", Equals: false},
+				VisibleWhen: &pkgmgr.OpVisibleWhenSpec{Field: "series_status", Equals: "paused"},
 			},
 		},
 		{OperationType: advanceVisitSeriesOp},

@@ -93,7 +93,7 @@ const PANE = {
           { name: "patient_name", kind: "text", role: "title", fallback: "Patient" },
           { name: "interval_days", label: "Every", kind: "number", role: "meta", suffix: "d" },
           { name: "balance_cents", label: "Balance", kind: "money", unit: "cents", role: "meta" },
-          { name: "active", kind: "badge", role: "state", default: false, valueLabels: { "true": "active", "false": "paused" } },
+          { name: "series_status", kind: "badge", role: "state", default: "ended" },
         ],
         limit: 200,
       },
@@ -132,12 +132,12 @@ const startOp = {
 const pauseOp = {
   operationType: "PauseVisitSeries", dispatchClass: "visitseries",
   dispatchTargetField: "seriesKey", dispatchTargetType: "visitseries",
-  submitLabel: "Pause series", dispatchVisibleWhen: { field: "active", equals: true },
+  submitLabel: "Pause series", dispatchVisibleWhen: { field: "series_status", equals: "active" },
 };
 const resumeOp = {
   operationType: "ResumeVisitSeries", dispatchClass: "visitseries",
   dispatchTargetField: "seriesKey", dispatchTargetType: "visitseries",
-  submitLabel: "Resume series", dispatchVisibleWhen: { field: "active", equals: false },
+  submitLabel: "Resume series", dispatchVisibleWhen: { field: "series_status", equals: "paused" },
 };
 
 test("the Work tab derives from the workplace spine, not from curation", () => {
@@ -240,7 +240,7 @@ test("money renders at the declared unit's scale, never guessed from a name", ()
   ]));
   assert.match(dollars, /Rent \$1250\.50/);
   const cents = paneHTML(PANE, loadedWith("visitSeries", [
-    { patient_name: "Row", balance_cents: 450, active: true },
+    { patient_name: "Row", balance_cents: 450, series_status: "active" },
   ]));
   assert.match(cents, /Balance \$4\.50/);
 });
@@ -248,7 +248,7 @@ test("money renders at the declared unit's scale, never guessed from a name", ()
 test("a meta column composes label + value + suffix", () => {
   const { paneHTML } = loadWorld([]);
   const html = paneHTML(PANE, loadedWith("visitSeries", [
-    { patient_name: "Row", interval_days: 5, active: true },
+    { patient_name: "Row", interval_days: 5, series_status: "active" },
   ]));
   assert.match(html, /Every 5d/);
 });
@@ -319,17 +319,27 @@ test("no ops in the manifest means rows render with no buttons", () => {
 test("visibleWhen offers exactly the half of a state pair the row's state earns", () => {
   const { paneHTML } = loadWorld([startOp, pauseOp, resumeOp]);
   const active = paneHTML(PANE, loadedWith("visitSeries", [
-    { patient_name: "Row", entity_key: SERIES, active: true },
+    { patient_name: "Row", entity_key: SERIES, series_status: "active" },
   ]));
   assert.match(active, /Pause series/);
   assert.doesNotMatch(active, /Resume series/);
   assert.match(active, new RegExp(`data-entity-key="${SERIES.replace(/\./g, "\\.")}"`));
 
   const paused = paneHTML(PANE, loadedWith("visitSeries", [
-    { patient_name: "Row", entity_key: SERIES, active: false },
+    { patient_name: "Row", entity_key: SERIES, series_status: "paused" },
   ]));
   assert.match(paused, /Resume series/);
   assert.doesNotMatch(paused, /Pause series/);
+
+  // The third state neither half earns: a naturally-ended series (never
+  // paused, but past its own activeUntil) offers NEITHER Pause nor Resume —
+  // the exact fix for the fused boolean that could not tell this apart from
+  // "paused" (verticals.md).
+  const ended = paneHTML(PANE, loadedWith("visitSeries", [
+    { patient_name: "Row", entity_key: SERIES, series_status: "ended" },
+  ]));
+  assert.doesNotMatch(ended, /Pause series/);
+  assert.doesNotMatch(ended, /Resume series/);
 });
 
 test("visibleWhen against a row lacking the field offers neither half — fail closed", () => {
@@ -344,16 +354,16 @@ test("visibleWhen against a row lacking the field offers neither half — fail c
 test("a state column with kind badge renders the state; hidden columns never render", () => {
   const { paneHTML } = loadWorld([]);
   const html = paneHTML(PANE, loadedWith("visitSeries", [
-    { patient_name: "Row", patient_key: PATIENT, active: true },
+    { patient_name: "Row", patient_key: PATIENT, series_status: "active" },
   ]));
-  assert.match(html, /badge confirmed/);
+  assert.match(html, /badge queued/);
   assert.match(html, /active/);
   assert.doesNotMatch(html, new RegExp(PATIENT.replace(/\./g, "\\."))); // hidden role
   // A null state falls to the column's declared default before rendering.
   const nulled = paneHTML(PANE, loadedWith("visitSeries", [
-    { patient_name: "Row", active: null },
+    { patient_name: "Row", series_status: null },
   ]));
-  assert.match(nulled, /paused/);
+  assert.match(nulled, /ended/);
 });
 
 test("opVisibleForRow evaluates strictly, both arrival shapes, fail-closed", () => {

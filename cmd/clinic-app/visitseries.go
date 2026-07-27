@@ -9,7 +9,11 @@ import (
 // read model (D1.5) — the patient-anchored recurring-visit-series view.
 // PatientKey is non-nullable (the anchor walk is REQUIRED, fail-closed); every
 // other neighbour/display column is nullable (an OPTIONAL match or a value not
-// yet set).
+// yet set). SeriesStatus is one of "active" / "paused" / "ended" — a raw
+// three-state read a client renders directly, rather than the fused boolean
+// that let a naturally-ended series (never paused, but past its own
+// activeUntil) render the same as a paused one and show a working-looking
+// Resume button (verticals.md).
 type protectedVisitSeriesRow struct {
 	EntityKey         string  `json:"entityKey"`
 	PatientKey        string  `json:"patientKey"`
@@ -20,7 +24,7 @@ type protectedVisitSeriesRow struct {
 	IntervalDays      int     `json:"intervalDays"`
 	NextDueAt         string  `json:"nextDueAt"`
 	OccurrenceCount   int     `json:"occurrenceCount"`
-	Active            bool    `json:"active"`
+	SeriesStatus      string  `json:"seriesStatus"`
 }
 
 // selectMyVisitSeriesSQL reads the protected model. It carries NO auth WHERE —
@@ -31,7 +35,7 @@ type protectedVisitSeriesRow struct {
 const selectMyVisitSeriesSQL = `
 SELECT entity_key, patient_key, patient_name, provider_key, provider_name, provider_specialty,
        COALESCE(interval_days, 0), COALESCE(next_due_at, ''), COALESCE(occurrence_count, 0),
-       COALESCE(active, false)
+       COALESCE(series_status, 'ended')
 FROM read_visit_series
 ORDER BY next_due_at, entity_key`
 
@@ -66,7 +70,7 @@ func queryMyVisitSeries(ctx context.Context, pool pgxBeginner, actorID string) (
 		var row protectedVisitSeriesRow
 		if err := rows.Scan(
 			&row.EntityKey, &row.PatientKey, &row.PatientName, &row.ProviderKey, &row.ProviderName, &row.ProviderSpecialty,
-			&row.IntervalDays, &row.NextDueAt, &row.OccurrenceCount, &row.Active,
+			&row.IntervalDays, &row.NextDueAt, &row.OccurrenceCount, &row.SeriesStatus,
 		); err != nil {
 			return nil, err
 		}

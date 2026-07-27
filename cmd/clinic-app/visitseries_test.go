@@ -29,7 +29,7 @@ var visitSeriesColumns = []adapter.ColumnDef{
 	{Name: "interval_days", Type: "integer"},
 	{Name: "next_due_at", Type: "text"},
 	{Name: "occurrence_count", Type: "integer"},
-	{Name: "active", Type: "boolean"},
+	{Name: "series_status", Type: "text"},
 }
 
 func TestVisitSeriesReadBoundary_RLS_Enforcement(t *testing.T) {
@@ -72,10 +72,10 @@ func TestVisitSeriesReadBoundary_RLS_Enforcement(t *testing.T) {
 	exec("GRANT SELECT ON " + clinicRLSTestSchema + ".read_visit_series TO " + clinicRLSTestRole)
 	exec("GRANT SELECT ON " + clinicRLSTestSchema + ".actor_read_grants TO " + clinicRLSTestRole)
 
-	exec(`INSERT INTO read_visit_series (series_id, entity_key, patient_key, patient_name, interval_days, next_due_at, occurrence_count, active, authz_anchors, projection_seq)
-	      VALUES ('series-A', 'vtx.visitseries.A', 'vtx.patient.`+subPatientA+`', 'Alice Rivera', 30, '2026-08-01T09:00:00Z', 2, true, $1, 1)`, []string{subPatientA})
-	exec(`INSERT INTO read_visit_series (series_id, entity_key, patient_key, patient_name, interval_days, next_due_at, occurrence_count, active, authz_anchors, projection_seq)
-	      VALUES ('series-B', 'vtx.visitseries.B', 'vtx.patient.`+subPatientB+`', 'Bob Nguyen', 7, '2026-07-15T09:00:00Z', 0, true, $1, 1)`, []string{subPatientB})
+	exec(`INSERT INTO read_visit_series (series_id, entity_key, patient_key, patient_name, interval_days, next_due_at, occurrence_count, series_status, authz_anchors, projection_seq)
+	      VALUES ('series-A', 'vtx.visitseries.A', 'vtx.patient.`+subPatientA+`', 'Alice Rivera', 30, '2026-08-01T09:00:00Z', 2, 'active', $1, 1)`, []string{subPatientA})
+	exec(`INSERT INTO read_visit_series (series_id, entity_key, patient_key, patient_name, interval_days, next_due_at, occurrence_count, series_status, authz_anchors, projection_seq)
+	      VALUES ('series-B', 'vtx.visitseries.B', 'vtx.patient.`+subPatientB+`', 'Bob Nguyen', 7, '2026-07-15T09:00:00Z', 0, 'active', $1, 1)`, []string{subPatientB})
 	exec(`INSERT INTO actor_read_grants (actor_id, anchor_id, grant_source, projection_seq, is_deleted)
 	      VALUES ($1, $1, 'cap-read', 1, false)`, subPatientA)
 	exec(`INSERT INTO actor_read_grants (actor_id, anchor_id, grant_source, projection_seq, is_deleted)

@@ -2679,10 +2679,10 @@ async function submitLedgerEntry(opType, what) {
 
 // seriesUrgency buckets a series by how soon its next occurrence is due, mirroring
 // followupUrgency: overdue (today or past), soon (within 14 days), later, or
-// inactive (paused, or past its activeUntil — the lens's "active" column already
-// folds both cases together, so the FE does not distinguish them).
+// inactive (paused OR ended — the same "Paused / ended" worklist bucket either
+// way; seriesStatus distinguishes the two for display, not for bucketing).
 function seriesUrgency(s) {
-  if (!s.active) return "inactive";
+  if (s.seriesStatus !== "active") return "inactive";
   const date = (s.nextDueAt || "").slice(0, 10);
   if (!date) return "later";
   if (date < localDateStr(0)) return "overdue";
@@ -2712,7 +2712,7 @@ function renderSeries() {
   }
 
   const filter = ($("#series-filter") && $("#series-filter").value) || "active";
-  const rows = state.series.filter((s) => filter === "all" || s.active);
+  const rows = state.series.filter((s) => filter === "all" || s.seriesStatus === "active");
   if (rows.length === 0) {
     empty.hidden = false;
     empty.textContent = "No active recurring visit series.";
@@ -2761,7 +2761,10 @@ function renderSeriesCard(s) {
 
   const due = document.createElement("div");
   due.className = "when";
-  due.textContent = s.active ? (s.nextDueAt ? "Next due " + s.nextDueAt.slice(0, 10) : "No upcoming occurrence") : "Paused or ended";
+  due.textContent =
+    s.seriesStatus === "active" ? (s.nextDueAt ? "Next due " + s.nextDueAt.slice(0, 10) : "No upcoming occurrence")
+    : s.seriesStatus === "paused" ? "Paused"
+    : "Ended";
 
   const actions = document.createElement("div");
   actions.className = "card-actions";
@@ -2850,18 +2853,27 @@ function renderMySeriesCard(s) {
 
   const due = document.createElement("div");
   due.className = "when";
-  due.textContent = s.active ? (s.nextDueAt ? "Next due " + s.nextDueAt.slice(0, 10) : "No upcoming occurrence") : "Paused";
+  due.textContent =
+    s.seriesStatus === "active" ? (s.nextDueAt ? "Next due " + s.nextDueAt.slice(0, 10) : "No upcoming occurrence")
+    : s.seriesStatus === "paused" ? "Paused"
+    : "Ended";
 
   const actions = document.createElement("div");
   actions.className = "card-actions";
-  const btns = document.createElement("span");
-  btns.className = "card-btns";
-  const toggle = document.createElement("button");
-  toggle.className = "ghost";
-  toggle.textContent = s.active ? "Pause" : "Resume";
-  toggle.addEventListener("click", () => toggleSeries(s));
-  btns.append(toggle);
-  actions.append(btns);
+  // A series that ran its own course (never paused, but past its own
+  // activeUntil) offers neither toggle: Pause makes no sense on a series that
+  // is not running, and Resume would submit and change nothing observable —
+  // the exact bug this three-state read exists to close (verticals.md).
+  if (s.seriesStatus !== "ended") {
+    const btns = document.createElement("span");
+    btns.className = "card-btns";
+    const toggle = document.createElement("button");
+    toggle.className = "ghost";
+    toggle.textContent = s.seriesStatus === "active" ? "Pause" : "Resume";
+    toggle.addEventListener("click", () => toggleSeries(s));
+    btns.append(toggle);
+    actions.append(btns);
+  }
 
   card.append(title);
   card.append(cadence);
@@ -2870,13 +2882,11 @@ function renderMySeriesCard(s) {
   return card;
 }
 
-// toggleSeries submits Pause/ResumeVisitSeries for one series and reloads. Resuming
-// a series whose activeUntil has already passed is a harmless no-op — the lens's
-// "active" column stays false because the term is (not paused) AND (within
-// activeUntil), and there is no FE affordance yet to distinguish that from a plain
-// pause (the design's noted, deferred skip-to-latest / re-arm case).
+// toggleSeries submits Pause/ResumeVisitSeries for one series and reloads.
+// Only ever wired for an "active" or "paused" series (renderMySeriesCard
+// offers no toggle at all once a series has ended).
 async function toggleSeries(s) {
-  const op = s.active ? "PauseVisitSeries" : "ResumeVisitSeries";
+  const op = s.seriesStatus === "active" ? "PauseVisitSeries" : "ResumeVisitSeries";
   try {
     const reply = await submitOp(op, "", { seriesKey: s.entityKey }, [s.entityKey]);
     const msg = rejectionMessage(reply);
@@ -2884,7 +2894,7 @@ async function toggleSeries(s) {
       toast(msg, "err");
       return;
     }
-    toast(s.active ? "Series paused." : "Series resumed.", "ok");
+    toast(s.seriesStatus === "active" ? "Series paused." : "Series resumed.", "ok");
     loadSeries();
   } catch (e) {
     toast("Could not update series: " + e.message, "err");
