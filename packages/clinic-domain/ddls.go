@@ -1180,6 +1180,7 @@ def require_live_typed(state, key, name, want_class):
         fail("WrongClass: " + name + ": " + key + " has class " + str(cls) + ", required " + want_class)
 
 ROLE_PAGE_LIMIT = 50
+MAX_ROLE_PAGES = 4
 
 def actor_holds_operator(actor_key):
     # Resolved from the GRAPH, not from a compile-time constant: the primordial
@@ -1190,19 +1191,26 @@ def actor_holds_operator(actor_key):
     # -[:holdsRole]->(role) WHERE role.canonicalName.data.value = 'operator') --
     # the same idiom the appointment DDL's workplace guard uses.
     #
-    # read-posture: (e) relation=holdsRole epoch=none -- an identity holds few
-    # roles, so this is never a keyspace scan. A role granted concurrently with
-    # this write is not a race worth closing: it can only widen authority, and
-    # the confined branch is the safe one.
-    page, _ = kv.Links(actor_key, "holdsRole", "out", None, ROLE_PAGE_LIMIT)
-    for lk in page:
-        if lk.isDeleted:
-            continue
-        # read-posture: (e) per-candidate follow-up read off the enumeration
-        # above (data-derived key -- the role is unknown until it resolves).
-        cn = kv.Read(lk.targetVertex + ".canonicalName")
-        if cn != None and not cn.isDeleted and cn.data.get("value") == "operator":
-            return True
+    # Paginated: a role beyond page 1 must not read as "not held" -- the walk
+    # follows the cursor up to MAX_ROLE_PAGES pages before giving up, and
+    # giving up still denies (fail-closed).
+    cursor = None
+    for _page in range(MAX_ROLE_PAGES):
+        # read-posture: (e) relation=holdsRole epoch=none -- an identity holds few
+        # roles, so this is never a keyspace scan. A role granted concurrently with
+        # this write is not a race worth closing: it can only widen authority, and
+        # the confined branch is the safe one.
+        page, cursor = kv.Links(actor_key, "holdsRole", "out", cursor, ROLE_PAGE_LIMIT)
+        for lk in page:
+            if lk.isDeleted:
+                continue
+            # read-posture: (e) per-candidate follow-up read off the enumeration
+            # above (data-derived key -- the role is unknown until it resolves).
+            cn = kv.Read(lk.targetVertex + ".canonicalName")
+            if cn != None and not cn.isDeleted and cn.data.get("value") == "operator":
+                return True
+        if cursor == None:
+            return False
     return False
 
 def actor_bound_to_provider(actor_key, provider_key):
@@ -1612,6 +1620,7 @@ def vertex_alive(state, key):
 # 3. The location is resolved from the TARGET's own topology, never from a
 #    payload field -- a caller cannot forge which building it is writing at.
 ROLE_PAGE_LIMIT = 50
+MAX_ROLE_PAGES = 4
 WORKPLACE_PARENT_PAGE_LIMIT = 20
 WORKPLACE_MAX_DEPTH = 8
 WORKPLACE_MAX_NODES = 64
@@ -1624,19 +1633,26 @@ def actor_holds_operator(actor_key):
     # own root-grant lens exactly (internal/bootstrap/lenses.go: MATCH (identity)
     # -[:holdsRole]->(role) WHERE role.canonicalName.data.value = 'operator').
     #
-    # read-posture: (e) relation=holdsRole epoch=none -- an identity holds few
-    # roles, so this is never a keyspace scan. A role granted concurrently with
-    # this write is not a race worth closing: it can only widen authority, and
-    # the confined branch is the safe one.
-    page, _ = kv.Links(actor_key, "holdsRole", "out", None, ROLE_PAGE_LIMIT)
-    for lk in page:
-        if lk.isDeleted:
-            continue
-        # read-posture: (e) per-candidate follow-up read off the enumeration
-        # above (data-derived key -- the role is unknown until it resolves).
-        cn = kv.Read(lk.targetVertex + ".canonicalName")
-        if cn != None and not cn.isDeleted and cn.data.get("value") == "operator":
-            return True
+    # Paginated: a role beyond page 1 must not read as "not held" -- the walk
+    # follows the cursor up to MAX_ROLE_PAGES pages before giving up, and
+    # giving up still denies (fail-closed).
+    cursor = None
+    for _page in range(MAX_ROLE_PAGES):
+        # read-posture: (e) relation=holdsRole epoch=none -- an identity holds few
+        # roles, so this is never a keyspace scan. A role granted concurrently with
+        # this write is not a race worth closing: it can only widen authority, and
+        # the confined branch is the safe one.
+        page, cursor = kv.Links(actor_key, "holdsRole", "out", cursor, ROLE_PAGE_LIMIT)
+        for lk in page:
+            if lk.isDeleted:
+                continue
+            # read-posture: (e) per-candidate follow-up read off the enumeration
+            # above (data-derived key -- the role is unknown until it resolves).
+            cn = kv.Read(lk.targetVertex + ".canonicalName")
+            if cn != None and not cn.isDeleted and cn.data.get("value") == "operator":
+                return True
+        if cursor == None:
+            return False
     return False
 
 def worksAt_covers(actor_id, location_key):

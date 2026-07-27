@@ -591,6 +591,7 @@ def enforce_not_merged(current_state, merged_into):
         fail("IdentityMerged: mergedInto=" + (merged_into if merged_into != None else "<unknown>"))
 
 ROLE_PAGE_LIMIT = 50
+MAX_ROLE_PAGES = 4
 
 def actor_holds_operator(actor_key):
     # Resolved from the GRAPH, not from a compile-time constant: the primordial
@@ -604,19 +605,26 @@ def actor_holds_operator(actor_key):
     # wellness-domain/maintenance-domain) -- this package has no location to
     # pair it with, so only the operator-exemption half is needed here.
     #
-    # read-posture: (e) relation=holdsRole epoch=none -- an identity holds few
-    # roles, so this is never a keyspace scan. A role granted concurrently with
-    # this write is not a race worth closing: it can only widen authority, and
-    # the confined branch is the safe one.
-    page, _ = kv.Links(actor_key, "holdsRole", "out", None, ROLE_PAGE_LIMIT)
-    for lk in page:
-        if lk.isDeleted:
-            continue
-        # read-posture: (e) per-candidate follow-up read off the enumeration
-        # above (data-derived key -- the role is unknown until it resolves).
-        cn = kv.Read(lk.targetVertex + ".canonicalName")
-        if cn != None and not cn.isDeleted and cn.data.get("value") == "operator":
-            return True
+    # Paginated: a role beyond page 1 must not read as "not held" -- the walk
+    # follows the cursor up to MAX_ROLE_PAGES pages before giving up, and
+    # giving up still denies (fail-closed).
+    cursor = None
+    for _page in range(MAX_ROLE_PAGES):
+        # read-posture: (e) relation=holdsRole epoch=none -- an identity holds few
+        # roles, so this is never a keyspace scan. A role granted concurrently with
+        # this write is not a race worth closing: it can only widen authority, and
+        # the confined branch is the safe one.
+        page, cursor = kv.Links(actor_key, "holdsRole", "out", cursor, ROLE_PAGE_LIMIT)
+        for lk in page:
+            if lk.isDeleted:
+                continue
+            # read-posture: (e) per-candidate follow-up read off the enumeration
+            # above (data-derived key -- the role is unknown until it resolves).
+            cn = kv.Read(lk.targetVertex + ".canonicalName")
+            if cn != None and not cn.isDeleted and cn.data.get("value") == "operator":
+                return True
+        if cursor == None:
+            return False
     return False
 
 def require_live_role(role_key):

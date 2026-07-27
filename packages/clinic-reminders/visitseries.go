@@ -405,6 +405,7 @@ def vertex_alive_of_class(state, key, want_class):
 # authorizes scope=any without inspecting target), so that exemption would let a
 # front-desk actor forge target==actor and skip confinement entirely.
 ROLE_PAGE_LIMIT = 50
+MAX_ROLE_PAGES = 4
 WORKPLACE_PARENT_PAGE_LIMIT = 20
 WORKPLACE_MAX_DEPTH = 8
 WORKPLACE_MAX_NODES = 64
@@ -414,19 +415,25 @@ def actor_holds_operator(actor_key):
     # (internal/bootstrap/lenses.go: MATCH (identity)-[:holdsRole]->(role) WHERE
     # role.canonicalName.data.value = 'operator') — never a compile-time constant
     # (the primordial operator id is loaded at runtime, invisible to this
-    # package-init script text).
-    # read-posture: (e) relation=holdsRole epoch=none — an identity holds few
-    # roles, so this is never a keyspace scan; a role granted concurrently can
-    # only widen authority, and the confined branch is the safe one.
-    page, _ = kv.Links(actor_key, "holdsRole", "out", None, ROLE_PAGE_LIMIT)
-    for lk in page:
-        if lk.isDeleted:
-            continue
-        # read-posture: (e) per-candidate follow-up read off the enumeration above
-        # (data-derived key — the role is unknown until it resolves).
-        cn = kv.Read(lk.targetVertex + ".canonicalName")
-        if cn != None and not cn.isDeleted and cn.data.get("value") == "operator":
-            return True
+    # package-init script text). Paginated: a role beyond page 1 must not read
+    # as "not held" — the walk follows the cursor up to MAX_ROLE_PAGES pages
+    # before giving up, and giving up still denies (fail-closed).
+    cursor = None
+    for _page in range(MAX_ROLE_PAGES):
+        # read-posture: (e) relation=holdsRole epoch=none — an identity holds few
+        # roles, so this is never a keyspace scan; a role granted concurrently can
+        # only widen authority, and the confined branch is the safe one.
+        page, cursor = kv.Links(actor_key, "holdsRole", "out", cursor, ROLE_PAGE_LIMIT)
+        for lk in page:
+            if lk.isDeleted:
+                continue
+            # read-posture: (e) per-candidate follow-up read off the enumeration above
+            # (data-derived key — the role is unknown until it resolves).
+            cn = kv.Read(lk.targetVertex + ".canonicalName")
+            if cn != None and not cn.isDeleted and cn.data.get("value") == "operator":
+                return True
+        if cursor == None:
+            return False
     return False
 
 def worksAt_covers(actor_id, location_key):
