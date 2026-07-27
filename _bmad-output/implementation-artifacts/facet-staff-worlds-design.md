@@ -661,3 +661,33 @@ clinic's hours feed a slot picker that consumes them; wellness has **no** availa
 projects instructor availability and no op enforces it, so an hours aspect would be dead scaffolding with no
 nameable consumer. Profile only, both domains, symmetric. No `consumer`-role backfill (its own board row).
 **No FE change** — `hatOps` is generic, so the chips go live on the op-metas alone; verify, don't build.
+
+**Shipped** — `0485d145` (wellness `SetInstructorProfile`, 0.17.0) + `2c41318b` (service-domain
+`SetServiceProviderProfile`, 0.10.0). Both dispatch `Class = TargetType = <entity vertex DDL>`, which is
+what `hatOps` requires, so the two chips resolve with no FE change. Each carries three tests: the bound
+persona edits its own record (accept), the same persona on another's record (deny), and — the vector that
+matters — an actor holding the identical generic `provider` role bound elsewhere (deny), which is the shape
+a bound clinician arrives in.
+
+**Adversarial review — no exploitable bypass.** Attacked key-segment injection through `parts_of` (closed:
+3-segment exact match, and step 6 re-validates the NanoID), tombstoned and wrong-class links at the probe
+key (no non-operator op can write one), operator-role forgery (all ten rbac ops are operator-only), and
+undeclared/mis-declared `optionalReads` (an omitted declaration falls through to a live read and returns the
+true answer; a mis-declared key simply misses the hydration cache — there is no way to seed a false
+positive). The new ops are strictly tighter than the clinic precedent, which leaves its equivalent probe
+undeclared.
+
+Four review findings were fixed before merge: two comments narrating change relative to a prior state
+(CLAUDE.md's no-changelog rule), service-domain's aspect-DDL docs left behind its new PermittedCommand,
+test envelopes declaring a `.profile` read production does not (so the tests were committing under OCC while
+production commits unconditioned), and no test proving the **operator** branch *accepts* — a guard broken to
+always-deny would have passed everything. The last is now pinned in both packages.
+
+One finding is filed rather than fixed: `actor_holds_operator` pages `holdsRole` at 50 and discards the
+cursor, so it is fail-closed above that ceiling. It is a verbatim copy of the clinic precedent and now lives
+in three packages, which is why it gets its own row rather than a silent divergence here.
+
+**Not built, deliberately:** no availability/hours op for either domain (nothing reads instructor or provider
+availability, so it would be scaffolding with no consumer), and no `consumer`-role backfill — that remains
+its own row, and this fire is evidence for how it should go: record-administering self-service rides the
+entity `provider` role plus an in-script binding guard, not a `consumer` scope=self grant.
