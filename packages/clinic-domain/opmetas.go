@@ -89,7 +89,7 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 			},
 			InputSchema: `{"type":"object","properties":` +
 				`{"appointmentKey":{"type":"string","description":"vtx.appointment.<NanoID> of the appointment to reschedule — auto-filled from the appointment being viewed."},` +
-				`"provider":{"type":"string","description":"vtx.provider.<NanoID> — must be the appointment's actual provider."},` +
+				`"provider":{"type":"string","x-entityRef":"provider","description":"vtx.provider.<NanoID> — must be the appointment's actual provider."},` +
 				`"patient":{"type":"string","description":"vtx.patient.<NanoID> — must be the appointment's actual patient."},` +
 				`"startsAt":{"type":"string","description":"New start, RFC3339, aligned to the 15-minute booking grid."},` +
 				`"endsAt":{"type":"string","description":"New end, RFC3339, aligned to the 15-minute booking grid."},` +
