@@ -696,7 +696,13 @@ RETURN
 // means. One lens per entity kind: the engine has no UNION, and a row-per-entity
 // cypher carrying two unrelated kinds would cross-product. The schedule instant
 // projects as `startsAt`, not the design's `when` — WHEN is a CASE keyword in
-// this engine's lexer and an alias by that name fails to parse.
+// this engine's lexer and an alias by that name fails to parse. `instructorKey`
+// is a tail-local OPTIONAL MATCH (never an aspect read off a walk-prefix var —
+// a KEY is safe from either origin, but this one genuinely needs its own
+// binding since the residence walk never reaches an instructor): app.js's
+// crossHatMismatch compares it against `{me.instructor}` so an op that
+// administers "the session I lead" isn't offered against a session somebody
+// else leads merely because both share the entityType.
 // edgeStaffPanesTail projects one `manifest.pane.<paneMetaId>` row per pane
 // meta reachable over holdsRole → offeredTo: the pane's id, presentation, and
 // its section descriptors (a JSON string, the inputSchema convention). The
@@ -717,7 +723,8 @@ RETURN
 `
 
 const edgeEntitySessionsTail = `
-WITH sess, studio
+OPTIONAL MATCH (sess)-[:ledBy]->(instr:instructor)
+WITH sess, studio, instr
 WHERE sess.key <> null
 RETURN
   sess.key AS anchor,
@@ -729,7 +736,8 @@ RETURN
   sess.schedule.data.name AS title,
   studio.profile.data.name AS subtitle,
   studio.key AS studioKey,
-  sess.schedule.data.startsAt AS startsAt
+  sess.schedule.data.startsAt AS startsAt,
+  instr.key AS instructorKey
 `
 
 // edgeEntityProvidersTail presents one `manifest.ent.<providerId>` row per
@@ -768,11 +776,16 @@ RETURN
 // in its payload (the seat-cell key it tombstones is rebuilt from it) and the
 // renderer fills that from the viewed row via `{entity.<column>}`. A
 // cancelled booking tombstones its own vertex, so the row self-clears with no
-// status filter.
+// status filter. `instructorKey` (the booking's own session's `ledBy`
+// instructor, one hop further) rides along for the same reason
+// edgeEntitySessionsTail's does: SetBookingAttendance's `{me.instructor}`
+// param is not by itself proof the viewer leads THIS booking's class, and
+// app.js's crossHatMismatch needs this row's own answer to check it against.
 const edgeEntityBookingsTail = `
 OPTIONAL MATCH (bk)-[:forSession]->(sess:session)
 OPTIONAL MATCH (sess)-[:atStudio]->(studio:studio)
-WITH bk, sess, studio
+OPTIONAL MATCH (sess)-[:ledBy]->(instr:instructor)
+WITH bk, sess, studio, instr
 WHERE bk.key <> null
 RETURN
   bk.key AS anchor,
@@ -785,7 +798,8 @@ RETURN
   studio.profile.data.name AS subtitle,
   studio.key AS studioKey,
   sess.schedule.data.startsAt AS startsAt,
-  sess.key AS sessionKey
+  sess.key AS sessionKey,
+  instr.key AS instructorKey
 `
 
 // edgeEntityTabsTail presents one `manifest.ent.<tabId>` row per OPEN café tab
@@ -1121,10 +1135,15 @@ RETURN
 // purpose: a resident who is ALSO the instructor of a session reachable by
 // BOTH walks projects the identical row under the identical key — an
 // LWW-idempotent overlap, the same pattern edgeCatalogRolesTail already
-// proves for a dual-reachable op meta.
+// proves for a dual-reachable op meta. `instructorKey` (this tail's own walk
+// var, already bound before the tail even starts) rides along for the same
+// reason `studioKey` does: a client-side ownership check (app.js
+// crossHatMismatch) needs to tell "the instructor this session is led by"
+// from "the instructor viewing it", which the entityType/targetType match
+// alone cannot.
 const edgeInstructorSessionsTail = `
 OPTIONAL MATCH (sess)-[:atStudio]->(studio:studio)
-WITH sess, studio
+WITH sess, studio, instr
 WHERE sess.key <> null
 RETURN
   sess.key AS anchor,
@@ -1136,5 +1155,6 @@ RETURN
   sess.schedule.data.name AS title,
   studio.profile.data.name AS subtitle,
   studio.key AS studioKey,
-  sess.schedule.data.startsAt AS startsAt
+  sess.schedule.data.startsAt AS startsAt,
+  instr.key AS instructorKey
 `

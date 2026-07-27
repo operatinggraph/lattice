@@ -440,3 +440,73 @@ func TestEdgeCatalogRoles_CarriesTheServiceJoin(t *testing.T) {
 	require.Len(t, via, 1, "the permitsOperation service must be collected")
 	require.Equal(t, f.key("tpl"), via[0])
 }
+
+// TestEdgeEntitySessions_ProjectsTheLeadingInstructorKey proves the tail-local
+// OPTIONAL MATCH: a resident's residence-anchored session row (emResidentWorld,
+// coverage_proof_test.go) carries the session's own ledBy instructor as
+// instructorKey once one is wired, a plain KEY projection (safe from a
+// tail-local OPTIONAL MATCH regardless of the walk-prefix aspect-hydration
+// caveat — reference_lens_tail_binding_rules.md). verticals.md "Entity detail
+// attaches cross-hat ops": app.js's crossHatMismatch compares this column
+// against the viewer's own {me.instructor} anchor, so a resident who is ALSO
+// bound as some OTHER instructor doesn't get a live "Cancel class" button on
+// a session they don't lead.
+func TestEdgeEntitySessions_ProjectsTheLeadingInstructorKey(t *testing.T) {
+	f := emResidentWorld(t)
+	f.vtx(t, "instr", "instructor")
+	f.edge(t, "ledBy", "sess", "instr")
+
+	rows := emRowsByEntity(f.project(t, emComposedSpec(t, "edgeEntitySessions"), f.key("resident")))
+	row, ok := rows[f.ids["sess"]]
+	require.True(t, ok, "the residence-reached session must project")
+	require.Equal(t, f.key("instr"), row["instructorKey"])
+}
+
+// TestEdgeEntitySessions_NoLedByLeavesInstructorKeyNil — a session nobody
+// leads yet must not project a stray instructorKey (a nil OPTIONAL MATCH
+// costs the column, never the row) — emResidentWorld's own session has no
+// ledBy link at all.
+func TestEdgeEntitySessions_NoLedByLeavesInstructorKeyNil(t *testing.T) {
+	f := emResidentWorld(t)
+	rows := emRowsByEntity(f.project(t, emComposedSpec(t, "edgeEntitySessions"), f.key("resident")))
+	row, ok := rows[f.ids["sess"]]
+	require.True(t, ok)
+	require.Nil(t, row["instructorKey"])
+}
+
+// TestEdgeInstructorSessions_ProjectsTheLeadingInstructorKey — the OWN
+// instructor-anchored tail also carries instructorKey (it is byte-identical
+// to edgeEntitySessions' RETURN on purpose, incl. this column), here off the
+// ALREADY walk-prefix-bound `instr` rather than a tail-local rebind.
+func TestEdgeInstructorSessions_ProjectsTheLeadingInstructorKey(t *testing.T) {
+	f := newEmFixture(t)
+	f.vtx(t, "teacher", "identity")
+	f.vtx(t, "instr", "instructor")
+	f.vtx(t, "sess", "session")
+	f.aspect(t, "sess", "schedule", "wellnessSessionSchedule", map[string]any{"name": "Evening Flow", "startsAt": "2026-08-01T18:00:00Z"})
+	f.edge(t, "identifiedBy", "instr", "teacher")
+	f.edge(t, "ledBy", "sess", "instr")
+
+	rows := emRowsByEntity(f.project(t, emComposedSpec(t, "edgeInstructorSessions"), f.key("teacher")))
+	row, ok := rows[f.ids["sess"]]
+	require.True(t, ok, "the instructor's own led session must project")
+	require.Equal(t, f.key("instr"), row["instructorKey"])
+}
+
+// TestEdgeEntityBookings_ProjectsItsSessionsInstructorKey — a booking's row
+// carries its session's ledBy instructor one hop further out (the same
+// column SetBookingAttendance's {me.instructor} needs proof against), via
+// its own tail-local OPTIONAL MATCH chained off the booking's forSession hop
+// — emResidentWorld's booking carries no forSession link of its own, so this
+// wires one on top of the shared world.
+func TestEdgeEntityBookings_ProjectsItsSessionsInstructorKey(t *testing.T) {
+	f := emResidentWorld(t)
+	f.vtx(t, "instr", "instructor")
+	f.edge(t, "forSession", "booking", "sess")
+	f.edge(t, "ledBy", "sess", "instr")
+
+	rows := emRowsByEntity(f.project(t, emComposedSpec(t, "edgeEntityBookings"), f.key("resident")))
+	row, ok := rows[f.ids["booking"]]
+	require.True(t, ok, "the booker's own booking must project")
+	require.Equal(t, f.key("instr"), row["instructorKey"])
+}

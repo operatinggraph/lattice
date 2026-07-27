@@ -125,9 +125,11 @@ func TestPanes_ScheduleStaysClinicalContentFree(t *testing.T) {
 }
 
 // TestPanes_VisitSeriesStateColumn pins the visit-series section to carrying
-// the `active` state column ops' visibleWhen conditions read — without it the
-// Pause/Resume pair would evaluate against a missing column and (correctly,
-// fail-closed) never be offered.
+// the `series_status` state column ops' visibleWhen conditions read — without
+// it the Pause/Resume pair would evaluate against a missing column and
+// (correctly, fail-closed) never be offered. The three-state text column
+// replaced a fused `active` boolean that could not distinguish a naturally-
+// ended series from a paused one (verticals.md).
 func TestPanes_VisitSeriesStateColumn(t *testing.T) {
 	found := false
 	for _, pane := range Panes() {
@@ -136,14 +138,14 @@ func TestPanes_VisitSeriesStateColumn(t *testing.T) {
 				continue
 			}
 			for _, c := range sec.Source.Columns {
-				if c.Name == "active" && c.Role == "state" {
+				if c.Name == "series_status" && c.Role == "state" {
 					found = true
 				}
 			}
 		}
 	}
 	if !found {
-		t.Fatal("no visit-series section carries the active state column")
+		t.Fatal("no visit-series section carries the series_status state column")
 	}
 }
 
