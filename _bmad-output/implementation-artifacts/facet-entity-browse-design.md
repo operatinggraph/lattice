@@ -496,3 +496,67 @@ is the correct conservatism given lens specs live in string literals.
 names neither `menuitem`/`menuItemPrice`, `cafeOpenTabGuard`, `menuCatalog`, nor `cafeLeaseWorkplaces` — it
 predates three shipped fires. Only the two link lines this change falsified were corrected; the rest is filed
 as its own row rather than folded into a security-adjacent diff.
+
+## 9. Build note — the D3 non-goal reopened: `patient`/`visitseries` close through the Protected pane, not the mirror (2026-07-27)
+
+**Scope sentence** (verbatim, [verticals.md](../planning-artifacts/backlog/verticals.md), now in the Done
+log): *"`StartVisitSeries` (`patient`) and Pause/Resume (`visitseries`) still degrade: a `manifest.ent` row
+for a patient puts a patient's name on the broadcast SYNC plane, which D3 forbids, and a visit series
+inherits it."* §6's non-goal called this "a design call about clinical reachability on the edge plane... it
+stays filed, not freelanced here." It was filed blocked, but never actually filed as a `lattice.md` primitive
+request — re-grounding it found the "new posture" it was waiting on already exists.
+
+**The re-grounding.** D3 itself (`display-name-convention-design.md` §0) names the channel for
+other-identity display: "Protected-lens territory," not a new mechanism. `facet-staff-worlds-design.md` F3
+(shipped 2026-07-19/20, *before* this item was ever marked blocked) built exactly that for Facet — a
+session-scoped, RLS-confined `GET /api/staff/worklist` pane (`cmd/facet/staff.go`, mirroring
+`credentials.go`), reading Protected Postgres tables that never ride the mirror. The read model this needed
+was already shipped too: `visitSeriesRead` ([visitseries.go](../../packages/clinic-reminders/visitseries.go)),
+serving both patient-self and (operator-only) staff views in `cmd/clinic-app`. Two gaps remained, both
+mechanical extensions of F3's own pattern, not new design: `visitSeriesRead`'s `authz_anchors` carried only
+the patient anchor (no building token, so `frontOfHouse` — who already holds the three ops' permission —
+couldn't see a target to act on), and the Protected pane was read-only (no row had ever driven an `opButton`).
+
+**What shipped.** `visitSeriesReadSpec`'s `authz_anchors` gains the identical comprehension
+`clinicAppointmentsReadSpec` already carries (`[nanoIdFromKey(p.key)] +
+[(pr)-[:practicesAt]->(b:building) | nanoIdFromKey(b.key)]`) — additive, patient-self and operator reads
+unchanged, proven by a leak-check test (a provider-less series never picks up an unrelated series' building).
+`cmd/facet/staff.go`'s worklist query gains a third read (`read_visit_series`) inside the same transaction,
+plus a `patient_key` column on the existing appointments read. `app.js`'s worklist rows now supply
+`ctx.entityKey` straight into the *existing* `opButton`/`resolveTargetKey` seam the mirror browse view
+(`openEntityDetail`) already used — no new dispatch mechanism, just a second row source feeding it.
+`StartVisitSeries`'s `providerKey` field also gained `x-entityRef: "provider"` (`edgeEntityProviders` already
+projects providers — they're public directory data, not PII) so the form the new button opens is fillable,
+not just offerable.
+
+**Adversarial review (3 independent passes) found and this fixed one real defect.** `interval_days` and
+`active` were scanned into non-nullable Go fields; the lens's `MATCH (s:visitseries)` admits a vertex whose
+`.series`/`.progress` haven't landed (theoretically, between mint and the atomic aspect-write reaching the
+projection — never observed live, but the vertex+`forPatient`-link state is reachable by the schema), and a
+NULL there would fail the whole row's `Scan` — taking the applications and schedule sections down with it,
+not just degrading the series one. `cmd/clinic-app/visitseries.go`'s own reader of this same table already
+`COALESCE`s exactly these columns; `staff.go` now matches it. An `entity_key` `ORDER BY` tiebreaker was added
+for the same reason (same precedent). Two more findings were traced to ground truth and are **not** defects:
+a forged `data-entity-key` cannot bypass the unchanged `enforce_workplace` write-path guard
+(`TestFrontDesk_VisitSeries_ForgedTargetCannotSkipConfinement` already proves it; this diff touches no
+write-path code), and a NULL-bound `pr` in the anchor comprehension fails closed by construction
+(`internal/refractor/ruleengine/full/executor.go`'s `nullBindNewVars`/`matchPath`), not by scanning the
+keyspace.
+
+**Known residual, filed rather than fixed here.** `active` fuses "not explicitly paused" with "not past
+`activeUntil`" — a series that reached its natural end (never paused) reads `active=false` and now renders a
+"Resume" button that succeeds but changes nothing observable. Pre-existing in the shared formula (also true
+of `cmd/clinic-app`'s patient-self view today), newly *reachable* now Facet renders a button on it. Fixing it
+well means projecting a raw `paused` (or `activeUntil`) column and a three-state client badge — a small but
+separate decision from "make the trio resolve at all," filed as its own row (verticals.md).
+
+**Non-goals.** No change to the mirror (`manifest.ent`/`edge-manifest`) — `patient` still can never ride it,
+by design, permanently. No change to `RescheduleAppointment`'s free-text `patient` field
+([verticals.md Done log](../planning-artifacts/backlog/verticals.md), `0badf04e`) — `x-entityRef` pickers only
+ever read the mirror, so this fix's worklist-row-specific channel doesn't generalize to them; a generic
+Protected-pane-backed picker widget would be new mechanism, not filed here.
+
+Gates: `go build ./...`, `go vet ./...`, `golangci-lint run ./...`, `STRICT=1 lint-conventions`,
+`lint-lens-anchors`, `lint-package-standard`, `lint-package-version` all clean; `go test
+./cmd/facet/... ./packages/clinic-reminders/...` and the full `node --test cmd/facet/web/*.test.mjs` (127
+vectors) green; `make verify-package-clinic-reminders` — 47/47 assertions — against the live shared stack.
