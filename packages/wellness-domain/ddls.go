@@ -409,13 +409,18 @@ func instructorVertexTypeDDL() pkgmgr.DDLSpec {
 	return pkgmgr.DDLSpec{
 		CanonicalName:     instructorVertexDDL,
 		Class:             "meta.ddl.vertexType",
-		PermittedCommands: []string{"CreateInstructor", "TombstoneInstructor", "BindInstructorIdentity"},
+		PermittedCommands: []string{"CreateInstructor", "TombstoneInstructor", "SetInstructorProfile", "BindInstructorIdentity"},
 		Description: "Wellness instructor DDL. Vertex shape: vtx.instructor.<NanoID>, class=instructor, root data = " +
 			"{} (minimal, D5 — the data lives in the .profile aspect). CreateInstructor mints the instructor + " +
 			"writes the .profile aspect {displayName (required)} atomically, and — when the optional studio param " +
 			"is supplied — the instructor teachesAt studio LINK (lnk.instructor.<id>.teachesAt.studio.<sid>, class " +
 			"\"teachesAt\"; source = the later-arriving instructor, target = the pre-existing studio, Contract #1 " +
-			"§1.1; validated alive + class=studio). TombstoneInstructor soft-deletes one (no cascade onto sessions " +
+			"§1.1; validated alive + class=studio). SetInstructorProfile edits an existing instructor's .profile — " +
+			"it REPLACES the aspect with the supplied displayName (still required, so the instructorName column " +
+			"wellnessSessions / wellnessInstructors project can never be nulled). It is the instructor hat's " +
+			"record-administering op: a standing binder passes an operator unconditionally and otherwise requires " +
+			"the caller be identifiedBy-bound to THIS instructor (mirrors clinic-domain's SetProviderHours). " +
+			"TombstoneInstructor soft-deletes one (no cascade onto sessions " +
 			"it leads — the projection lenses anchor on the live root, mirroring the studio/session no-cascade " +
 			"rule). BindInstructorIdentity binds an existing instructor to a pre-minted vtx.identity (both " +
 			"validated alive + typed): it mints lnk.instructor.<id>.identifiedBy.identity.<id> (instructor " +
@@ -426,19 +431,19 @@ func instructorVertexTypeDDL() pkgmgr.DDLSpec {
 			"— persona-worlds-design.md Fire W0; a link already alive is left untouched rather than re-created).",
 		Script: instructorDDLScript,
 		InputSchema: `{"type":"object","properties":` +
-			`{"displayName":{"type":"string","description":"The instructor's display name (CreateInstructor; required)."},` +
+			`{"displayName":{"type":"string","description":"The instructor's display name (CreateInstructor / SetInstructorProfile; required)."},` +
 			`"studio":{"type":"string","description":"Optional vtx.studio.<NanoID> the instructor teaches at (CreateInstructor; validated alive + class=studio; writes the teachesAt link). Listed in ContextHint.Reads when supplied."},` +
 			`"instructorId":{"type":"string","description":"Optional bare NanoID for the new instructor vertex (CreateInstructor); absent → minted."},` +
-			`"instructorKey":{"type":"string","description":"vtx.instructor.<NanoID> of an existing instructor (TombstoneInstructor / BindInstructorIdentity; required, validated alive)."},` +
+			`"instructorKey":{"type":"string","description":"vtx.instructor.<NanoID> of an existing instructor (TombstoneInstructor / SetInstructorProfile / BindInstructorIdentity; required, validated alive)."},` +
 			`"identityKey":{"type":"string","description":"vtx.identity.<NanoID> of a pre-minted identity to bind to the instructor (BindInstructorIdentity; required, validated alive + class=identity)."}},` +
 			`"required":[]}`,
 		OutputSchema: `{"type":"object","properties":` +
 			`{"primaryKey":{"type":"string","description":"vtx.instructor.<NanoID> the operation wrote (BindInstructorIdentity returns the identifiedBy link key instead)."}}}`,
 		FieldDescription: map[string]string{
-			"displayName":   "The instructor's display name. Stored on the .profile aspect (CreateInstructor; required).",
+			"displayName":   "The instructor's display name. Stored on the .profile aspect (CreateInstructor mints it, SetInstructorProfile replaces it; required in both).",
 			"studio":        "Optional full vtx.studio.<NanoID> key the instructor teaches at. Validated alive + class=studio; CreateInstructor writes the instructor teachesAt studio link. MUST be listed in ContextHint.Reads when supplied.",
 			"instructorId":  "Optional bare NanoID (no dots / key segments) for the new instructor vertex. Absent → minted with nanoid.new().",
-			"instructorKey": "Full vtx.instructor.<NanoID> key of an existing instructor vertex (TombstoneInstructor tombstones it; BindInstructorIdentity binds it to a login identity).",
+			"instructorKey": "Full vtx.instructor.<NanoID> key of an existing instructor vertex (TombstoneInstructor tombstones it; SetInstructorProfile edits its profile; BindInstructorIdentity binds it to a login identity). For SetInstructorProfile it is auto-filled by the client from the instructor being viewed (dispatch.targetField), not user-entered.",
 			"identityKey":   "Full vtx.identity.<NanoID> key of a pre-minted identity to bind (BindInstructorIdentity; required). Must be alive + class=identity; wires the identifiedBy link, claims CreateOnly guard aspects on BOTH sides (rejected if either side is already bound), and idempotently grants the identity the provider role.",
 		},
 		Examples: []pkgmgr.ExampleSpec{
@@ -459,6 +464,13 @@ func instructorVertexTypeDDL() pkgmgr.DDLSpec {
 				Name:            "TombstoneInstructor — remove an instructor",
 				Payload:         map[string]any{"instructorKey": "vtx.instructor.<NanoID>"},
 				ExpectedOutcome: "Soft-deletes the instructor vertex. Returns primaryKey. Rejects an absent / already-dead instructor.",
+			},
+			{
+				Name:    "SetInstructorProfile — a bound instructor edits their own display name",
+				Payload: map[string]any{"instructorKey": "vtx.instructor.<NanoID>", "displayName": "Kai Nakamura, RYT-500"},
+				ExpectedOutcome: "Requires the caller hold operator, or be identifiedBy-bound to THIS instructor. " +
+					"Replaces the .profile aspect with {displayName}. AuthDenied for any other instructor's record " +
+					"(including a bound clinic provider or service provider, who hold the same `provider` role).",
 			},
 			{
 				Name:    "BindInstructorIdentity — bind an instructor to its login identity",
@@ -584,17 +596,17 @@ func sessionBookerClaimAspectTypeDDL() pkgmgr.DDLSpec {
 }
 
 // instructorProfileAspectTypeDDL declares the .profile aspect (class
-// instructorProfile) — the step-6 write gate for CreateInstructor.
-// Declaration-only; NON-sensitive.
+// instructorProfile) — the step-6 write gate for CreateInstructor +
+// SetInstructorProfile. Declaration-only; NON-sensitive.
 func instructorProfileAspectTypeDDL() pkgmgr.DDLSpec {
 	return pkgmgr.DDLSpec{
 		CanonicalName:     instructorProfileAspectDDL,
 		Class:             "meta.ddl.aspectType",
-		PermittedCommands: []string{"CreateInstructor"},
+		PermittedCommands: []string{"CreateInstructor", "SetInstructorProfile"},
 		Description: "Instructor profile aspect (wellness). Stored as vtx.instructor.<NanoID>.profile (class " +
-			"instructorProfile) = {displayName}. Non-sensitive. Written by CreateInstructor (whose instructor " +
-			"vertexType DDL owns the script); this aspect-type DDL is the step-6 write gate. Declaration-only: no " +
-			"op handler.",
+			"instructorProfile) = {displayName}. Non-sensitive. Written by CreateInstructor (mints it) and " +
+			"SetInstructorProfile (replaces it) — both owned by the instructor vertexType DDL's script; this " +
+			"aspect-type DDL is the step-6 write gate. Declaration-only: no op handler.",
 		Script: aspectDeclarationOnlyScript,
 		InputSchema: `{"type":"object","properties":` +
 			`{"displayName":{"type":"string"}}}`,
@@ -2321,6 +2333,58 @@ def require_live_typed(state, key, name, want_class):
     if cls != want_class:
         fail("WrongClass: " + name + ": " + key + " has class " + str(cls) + ", required " + want_class)
 
+def make_aspect_upsert(vtx_key, local_name, cls, data):
+    # Unconditioned update: create-if-absent / overwrite-if-present. .profile
+    # always exists (CreateInstructor mints it), so this is the overwrite path.
+    return {"op": "update", "key": vtx_key + "." + local_name,
+            "document": {"class": cls, "isDeleted": False,
+                         "vertexKey": vtx_key, "localName": local_name, "data": data}}
+
+ROLE_PAGE_LIMIT = 50
+
+def actor_holds_operator(actor_key):
+    # Resolved from the GRAPH, not from a compile-time constant: the primordial
+    # role ids are loaded at runtime (bootstrap.LoadPrimordialNanoIDs) while a
+    # package's Definition -- and so its script text -- is built at package-init,
+    # so no substitution can see the operator id. The walk mirrors the kernel's
+    # own root-grant lens exactly (internal/bootstrap/lenses.go: MATCH (identity)
+    # -[:holdsRole]->(role) WHERE role.canonicalName.data.value = 'operator').
+    #
+    # read-posture: (e) relation=holdsRole epoch=none -- an identity holds few
+    # roles, so this is never a keyspace scan. A role granted concurrently with
+    # this write is not a race worth closing: it can only widen authority, and
+    # the confined branch is the safe one.
+    page, _ = kv.Links(actor_key, "holdsRole", "out", None, ROLE_PAGE_LIMIT)
+    for lk in page:
+        if lk.isDeleted:
+            continue
+        # read-posture: (e) per-candidate follow-up read off the enumeration
+        # above (data-derived key -- the role is unknown until it resolves).
+        cn = kv.Read(lk.targetVertex + ".canonicalName")
+        if cn != None and not cn.isDeleted and cn.data.get("value") == "operator":
+            return True
+    return False
+
+def actor_bound_to_instructor(actor_key, instructor_key):
+    # The standing instructor-binding guard: an actor identifiedBy-bound to
+    # THIS SPECIFIC instructor may edit its own profile even without an
+    # operator grant -- complementary to actor_holds_operator, never a
+    # replacement (mirrors clinic-domain's actor_bound_to_provider verbatim).
+    #
+    # Load-bearing, not decorative: BindInstructorIdentity grants the SAME
+    # generic identity-domain provider role that clinic's BindProviderIdentity
+    # and service-domain's BindServiceProviderIdentity grant, so the permission
+    # row's provider grant is reachable by a bound clinic provider and a bound
+    # service provider too. This guard -- not the grant -- is what confines the
+    # write to the caller's own instructor record.
+    _, actor_id = parts_of(actor_key, "actor", "identity")
+    _, target_instructor_id = parts_of(instructor_key, "instructorKey", "instructor")
+    # read-posture: (d) declared in contextHint.optionalReads by the standing
+    # caller's dispatcher (probing whether THIS actor is bound to the TARGET
+    # instructor; absent -> AuthDenied, mirroring claim-style absence-tolerance)
+    lnk = kv.Read("lnk.instructor." + target_instructor_id + ".identifiedBy.identity." + actor_id)
+    return lnk != None and not lnk.isDeleted
+
 def claim_instructor_identity(instr_key):
     # Entity-keyed guard: at most one identity may ever bind THIS instructor
     # (nothing releases the claim, so it is never tombstoned) — mirrors
@@ -2376,6 +2440,32 @@ def execute(state, op):
             fail("UnknownInstructor: " + ikey)
         mutations = [make_tombstone(ikey)]
         events = [{"class": "wellness.instructorTombstoned", "data": {"instructorKey": ikey}}]
+        return {"mutations": mutations, "events": events, "response": {"primaryKey": ikey}}
+
+    if ot == "SetInstructorProfile":
+        ikey = required_string(p, "instructorKey")
+        parts_of(ikey, "instructorKey", "instructor")
+        if not vertex_alive(state, ikey):
+            fail("UnknownInstructor: " + ikey)
+        cls = class_of(state, ikey)
+        if cls != "instructor":
+            fail("WrongClass: instructorKey: " + ikey + " has class " + str(cls) + ", required instructor")
+        # Standing binder: operator passes unconditionally; otherwise the actor
+        # must be identifiedBy-bound to THIS instructor (an instructor edits only
+        # THEIR OWN profile). Two binders, complementary, mirroring clinic's
+        # SetProviderHours actor_holds_operator/actor_bound_to_provider framing.
+        if not actor_holds_operator(op.actor):
+            if not actor_bound_to_instructor(op.actor, ikey):
+                fail("AuthDenied: " + op.actor + " may not set the profile of instructor " + ikey)
+        display_name = required_string(p, "displayName")
+        # Unconditioned upsert REPLACING the whole .profile aspect (it always
+        # exists -- CreateInstructor mints it). displayName stays REQUIRED: it is
+        # the only field the aspect carries, and both wellnessSessions
+        # (instructorName) and wellnessInstructors project it, so an edit that
+        # could drop it would null a column the member-facing class list and the
+        # staff scheduling form both depend on.
+        mutations = [make_aspect_upsert(ikey, "profile", "instructorProfile", {"displayName": display_name})]
+        events = [{"class": "wellness.instructorProfileSet", "data": {"instructorKey": ikey}}]
         return {"mutations": mutations, "events": events, "response": {"primaryKey": ikey}}
 
     if ot == "BindInstructorIdentity":

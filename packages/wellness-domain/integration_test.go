@@ -1443,3 +1443,248 @@ func TestCancelBooking_ConsumerSelfScope_RejectedForOthersBooking(t *testing.T) 
 		t.Fatalf("self-service CancelBooking of another's booking outcome = %v, want Rejected (AuthDenied)", cancelOutcome)
 	}
 }
+
+// profileEnv builds a SetInstructorProfile envelope. The identifiedBy probe is
+// an optionalRead (the standing guard renders its absence as AuthDenied), which
+// is what the op-meta declares — the script never reads a key no dispatcher
+// named.
+func profileEnv(t *testing.T, label, instructorKey, displayName, actorKey string) *processor.OperationEnvelope {
+	t.Helper()
+	_, instrID, _ := substrate.ParseVertexKey(instructorKey)
+	_, actorID, _ := substrate.ParseVertexKey(actorKey)
+	payload, _ := json.Marshal(map[string]any{"instructorKey": instructorKey, "displayName": displayName})
+	return &processor.OperationEnvelope{
+		RequestID:     testutil.GenReqID(label),
+		Lane:          processor.LaneDefault,
+		OperationType: "SetInstructorProfile",
+		Actor:         actorKey,
+		SubmittedAt:   "2026-07-08T09:00:00Z",
+		Class:         "instructor",
+		Payload:       payload,
+		ContextHint: &processor.ContextHint{
+			Reads:         []string{instructorKey},
+			OptionalReads: []string{"lnk.instructor." + instrID + ".identifiedBy.identity." + actorID},
+		},
+	}
+}
+
+func instructorDisplayName(t *testing.T, ctx context.Context, conn *substrate.Conn, instructorKey string) string {
+	t.Helper()
+	doc := readDoc(t, ctx, conn, instructorKey+".profile")
+	data, _ := doc["data"].(map[string]any)
+	name, _ := data["displayName"].(string)
+	return name
+}
+
+// TestSetInstructorProfile_ConfinedToTheCallersOwnRecord is the security proof
+// for the instructor hat's record-administering op.
+//
+// The grant it runs under is `provider` at scope=any — and `provider` is the
+// GENERIC archetype role that all three bind ops mint (wellness's
+// BindInstructorIdentity, clinic's BindProviderIdentity, service-domain's
+// BindServiceProviderIdentity). So the capability plane cannot tell a bound
+// instructor from a bound clinician: every one of them arrives holding exactly
+// the role seeded below. The in-script standing guard is the ONLY thing that
+// confines the write, and that is what this test pins.
+//
+// The negative vector is therefore an actor holding the SAME role but bound
+// elsewhere — not an unbound stranger, who would be refused by the capability
+// plane before the script ever ran and would prove nothing about the guard.
+func TestSetInstructorProfile_ConfinedToTheCallersOwnRecord(t *testing.T) {
+	ctx, conn := setupDomainEnv(t)
+	cp, cons := newDomainPipeline(t, ctx, conn, "instrprofile")
+
+	opDoc := domainCapDoc()
+	opDoc.PlatformPermissions = append(opDoc.PlatformPermissions,
+		processor.PlatformPermission{OperationType: "CreateInstructor", Scope: "any"})
+	testutil.SeedCapDoc(t, ctx, conn, opDoc)
+
+	// Two logins, each holding the identical generic `provider` role and the
+	// identical standing grant. Nothing in either capability doc says WHICH
+	// instructor record it may touch — mine is bound to an instructor, theirs
+	// stands in for a bound clinic provider / service provider, who holds the
+	// same role from a different domain's bind ceremony.
+	providerRole := "vtx.role." + pkgmgr.RoleID("identity-domain", "provider")
+	seedProviderLogin := func(actorID string) string {
+		actorKey := "vtx.identity." + actorID
+		testutil.SeedCapDoc(t, ctx, conn, &processor.CapabilityDoc{
+			Key:                    "cap.identity." + actorID,
+			Actor:                  actorKey,
+			Version:                "1.0",
+			ProjectedAt:            time.Now().UTC().Format(time.RFC3339Nano),
+			ProjectedFromRevisions: map[string]uint64{actorKey: 1},
+			Lanes:                  []string{"default"},
+			PlatformPermissions: []processor.PlatformPermission{
+				{OperationType: "SetInstructorProfile", Scope: "any"},
+			},
+			ServiceAccess:   []processor.ServiceAccessEntry{},
+			EphemeralGrants: []processor.EphemeralGrant{},
+			Roles:           []string{providerRole},
+		})
+		return actorKey
+	}
+	mineActorKey := seedProviderLogin("BBWELLPRFLMNEACTRKAB")
+	otherArchetypeKey := seedProviderLogin("BBWELLPRFLTHRACTRKAB")
+
+	mkInstructor := func(label, name string) string {
+		reqID := testutil.GenReqID(label)
+		testutil.PublishOp(t, conn, &processor.OperationEnvelope{
+			RequestID:     reqID,
+			Lane:          processor.LaneDefault,
+			OperationType: "CreateInstructor",
+			Actor:         domainActorKey,
+			SubmittedAt:   "2026-07-07T12:00:00Z",
+			Class:         "instructor",
+			Payload:       json.RawMessage(`{"displayName":"` + name + `"}`),
+		})
+		testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
+		return "vtx.instructor." + nanoIDFromRequestID(reqID)
+	}
+	mineKey := mkInstructor("wdprofileinstr000001", "Mine")
+	theirsKey := mkInstructor("wdprofileinstr000002", "Theirs")
+
+	// The identifiedBy binding BindInstructorIdentity would mint. Seeded
+	// directly so this test proves the profile guard, not the bind.
+	_, mineID, _ := substrate.ParseVertexKey(mineKey)
+	_, mineActorID, _ := substrate.ParseVertexKey(mineActorKey)
+	seedLink(t, ctx, conn, "lnk.instructor."+mineID+".identifiedBy.identity."+mineActorID,
+		mineKey, mineActorKey, "identifiedBy", "identifiedBy")
+
+	// A bound instructor edits their own profile.
+	testutil.PublishOp(t, conn, profileEnv(t, "wdprofilemine0000001", mineKey, "Kai Nakamura, RYT-500", mineActorKey))
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
+	if got := instructorDisplayName(t, ctx, conn, mineKey); got != "Kai Nakamura, RYT-500" {
+		t.Fatalf("a bound instructor must be able to edit their own profile: displayName = %q", got)
+	}
+
+	// The same instructor, someone else's record.
+	outcome, reply := testutil.SubmitAndAwaitReply(t, ctx, conn, cp, cons,
+		profileEnv(t, "wdprofiletheirs00001", theirsKey, "Hijacked", mineActorKey))
+	if outcome != processor.OutcomeRejected {
+		t.Fatalf("editing another instructor's profile = %v, want Rejected", outcome)
+	}
+	if reply.Error == nil || !strings.Contains(reply.Error.Message, "may not set the profile of instructor") {
+		t.Fatalf("rejection should be the standing-guard denial, got %+v", reply.Error)
+	}
+	if got := instructorDisplayName(t, ctx, conn, theirsKey); got != "Theirs" {
+		t.Fatalf("another instructor's profile was written: displayName = %q, want %q", got, "Theirs")
+	}
+
+	// The cross-archetype vector: the same generic `provider` role, bound to no
+	// instructor at all. This is the shape a bound clinic provider arrives in,
+	// and it must be refused by the binding, not by the role.
+	outcome, reply = testutil.SubmitAndAwaitReply(t, ctx, conn, cp, cons,
+		profileEnv(t, "wdprofilecross000001", mineKey, "Hijacked", otherArchetypeKey))
+	if outcome != processor.OutcomeRejected {
+		t.Fatalf("a provider-role holder bound elsewhere = %v, want Rejected", outcome)
+	}
+	if reply.Error == nil || !strings.Contains(reply.Error.Message, "may not set the profile of instructor") {
+		t.Fatalf("rejection should be the standing-guard denial, got %+v", reply.Error)
+	}
+	if got := instructorDisplayName(t, ctx, conn, mineKey); got != "Kai Nakamura, RYT-500" {
+		t.Fatalf("a cross-archetype caller overwrote the profile: displayName = %q", got)
+	}
+}
+
+// TestSetInstructorProfile_RejectsAnEmptyDisplayName pins the field the
+// member-facing lenses depend on. The .profile aspect is REPLACED wholesale, so
+// a blank displayName would null the instructorName column wellnessSessions
+// projects to members and wellnessInstructors projects to the scheduling form.
+func TestSetInstructorProfile_RejectsAnEmptyDisplayName(t *testing.T) {
+	ctx, conn := setupDomainEnv(t)
+	cp, cons := newDomainPipeline(t, ctx, conn, "instrprofblank")
+
+	opDoc := domainCapDoc()
+	opDoc.PlatformPermissions = append(opDoc.PlatformPermissions,
+		processor.PlatformPermission{OperationType: "CreateInstructor", Scope: "any"},
+		processor.PlatformPermission{OperationType: "SetInstructorProfile", Scope: "any"})
+	testutil.SeedCapDoc(t, ctx, conn, opDoc)
+
+	reqID := testutil.GenReqID("wdprofblankinst00001")
+	testutil.PublishOp(t, conn, &processor.OperationEnvelope{
+		RequestID:     reqID,
+		Lane:          processor.LaneDefault,
+		OperationType: "CreateInstructor",
+		Actor:         domainActorKey,
+		SubmittedAt:   "2026-07-07T12:00:00Z",
+		Class:         "instructor",
+		Payload:       json.RawMessage(`{"displayName":"Kai"}`),
+	})
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
+	instructorKey := "vtx.instructor." + nanoIDFromRequestID(reqID)
+
+	_, instrID, _ := substrate.ParseVertexKey(instructorKey)
+	_, actorID, _ := substrate.ParseVertexKey(domainActorKey)
+	seedLink(t, ctx, conn, "lnk.instructor."+instrID+".identifiedBy.identity."+actorID,
+		instructorKey, domainActorKey, "identifiedBy", "identifiedBy")
+
+	outcome, reply := testutil.SubmitAndAwaitReply(t, ctx, conn, cp, cons,
+		profileEnv(t, "wdprofblank000000001", instructorKey, "   ", domainActorKey))
+	if outcome != processor.OutcomeRejected {
+		t.Fatalf("a blank displayName = %v, want Rejected", outcome)
+	}
+	if reply.Error == nil || !strings.Contains(reply.Error.Message, "displayName: required non-empty string") {
+		t.Fatalf("rejection should name the empty displayName, got %+v", reply.Error)
+	}
+	if got := instructorDisplayName(t, ctx, conn, instructorKey); got != "Kai" {
+		t.Fatalf("the profile was overwritten by a rejected edit: displayName = %q", got)
+	}
+}
+
+// TestSetInstructorProfile_OperatorPassesUnbound proves the guard's FIRST
+// binder accepts. Every other test exercises actor_holds_operator only in its
+// False direction, so a helper broken to always return False would still let
+// them all pass while silently locking operators out of the op.
+func TestSetInstructorProfile_OperatorPassesUnbound(t *testing.T) {
+	ctx, conn := setupDomainEnv(t)
+	cp, cons := newDomainPipeline(t, ctx, conn, "instrprofop")
+
+	opDoc := domainCapDoc()
+	opDoc.PlatformPermissions = append(opDoc.PlatformPermissions,
+		processor.PlatformPermission{OperationType: "CreateInstructor", Scope: "any"})
+	testutil.SeedCapDoc(t, ctx, conn, opDoc)
+
+	reqID := testutil.GenReqID("wdprofopinstr0000001")
+	testutil.PublishOp(t, conn, &processor.OperationEnvelope{
+		RequestID:     reqID,
+		Lane:          processor.LaneDefault,
+		OperationType: "CreateInstructor",
+		Actor:         domainActorKey,
+		SubmittedAt:   "2026-07-07T12:00:00Z",
+		Class:         "instructor",
+		Payload:       json.RawMessage(`{"displayName":"Before"}`),
+	})
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
+	instructorKey := "vtx.instructor." + nanoIDFromRequestID(reqID)
+
+	// An operator bound to NO instructor at all: the binding branch cannot carry
+	// this call, so only the operator branch can.
+	const actorID = "BBWELLPRFLPACTRHJKMN"
+	actorKey := "vtx.identity." + actorID
+	testutil.SeedCapDoc(t, ctx, conn, &processor.CapabilityDoc{
+		Key:                    "cap.identity." + actorID,
+		Actor:                  actorKey,
+		Version:                "1.0",
+		ProjectedAt:            time.Now().UTC().Format(time.RFC3339Nano),
+		ProjectedFromRevisions: map[string]uint64{actorKey: 1},
+		Lanes:                  []string{"default"},
+		PlatformPermissions: []processor.PlatformPermission{
+			{OperationType: "SetInstructorProfile", Scope: "any"},
+		},
+		ServiceAccess:   []processor.ServiceAccessEntry{},
+		EphemeralGrants: []processor.EphemeralGrant{},
+		Roles:           []string{bootstrap.RoleOperatorKey},
+	})
+
+	// actor_holds_operator resolves the role from the GRAPH, not the cap doc,
+	// so the holdsRole link has to actually exist.
+	roleID := bootstrap.RoleOperatorKey[len("vtx.role."):]
+	seedLink(t, ctx, conn, "lnk.identity."+actorID+".holdsRole.role."+roleID,
+		actorKey, bootstrap.RoleOperatorKey, "holdsRole", "holdsRole")
+
+	testutil.PublishOp(t, conn, profileEnv(t, "wdprofoperator000001", instructorKey, "After", actorKey))
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
+	if got := instructorDisplayName(t, ctx, conn, instructorKey); got != "After" {
+		t.Fatalf("an operator bound to no instructor must pass: displayName = %q", got)
+	}
+}

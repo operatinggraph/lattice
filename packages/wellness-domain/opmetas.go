@@ -4,8 +4,9 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 
 // OpMetas declares descriptor-vocabulary metadata (edge-showcase-app-design.md
 // §3.3, edge-manifest Fire 1) for wellness-domain's client-invocable ops — the
-// two consumer (scope=self) ones, CreateBooking and CancelBooking, and the two
-// provider-hat standing ones, TombstoneSession and SetBookingAttendance —
+// two consumer (scope=self) ones, CreateBooking and CancelBooking; the staff
+// standing ones, CreateStudio and CreateSession; and the provider-hat standing
+// ones, TombstoneSession, SetBookingAttendance and SetInstructorProfile —
 // mirroring clinic-domain's adoption (Fire 5 Inc 1) and service-domain's
 // original RequestService op-meta.
 //
@@ -313,6 +314,52 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 				// render a control that fails closed.
 				ContextParams: map[string]string{"location": "{me.workplace}"},
 				Reads:         []string{"{payload.location}"},
+			},
+		},
+		{
+			// The instructor hat's record-administering op, the counterpart to
+			// clinic-domain's SetProviderHours. Facet's hatOps filter
+			// (cmd/facet/web/app.js) offers an op on an anchor only when BOTH
+			// dispatchClass AND dispatchTargetType equal the anchor's type, so
+			// both are instructorVertexDDL — which is what makes this op
+			// reachable from a bound instructor's own hat.
+			//
+			// It is self-service where clinic-domain's SetProviderProfile is
+			// operator-only, and the distinction is deliberate: that aspect
+			// carries a clinician's specialty and credentials, which nobody
+			// self-attests. This one carries a display name.
+			OperationType: "SetInstructorProfile",
+			Presentation: &pkgmgr.OpPresentationSpec{
+				Title:       "Edit my profile",
+				Description: "Change the name members see on your classes.",
+				Icon:        "user",
+				Tone:        "primary",
+				SubmitLabel: "Save profile",
+			},
+			InputSchema: `{"type":"object","properties":` +
+				`{"instructorKey":{"type":"string","description":"vtx.instructor.<NanoID> of the instructor record being edited — auto-filled from the instructor being viewed."},` +
+				`"displayName":{"type":"string","description":"Your professional display name, as members see it on the class list."}},` +
+				`"required":["instructorKey","displayName"]}`,
+			FieldDescriptions: map[string]string{
+				"instructorKey": "The instructor record being edited — auto-filled by the client from the instructor being viewed (dispatch.targetField), not user-entered.",
+				"displayName":   "Your professional display name. Members see it on every class you lead, and the staff scheduling form lists you by it. Required — the profile is replaced wholesale, so there is no way to clear it.",
+			},
+			Dispatch: &pkgmgr.OpDispatchSpec{
+				Class:       instructorVertexDDL,
+				AuthContext: "standing",
+				TargetField: "instructorKey",
+				TargetType:  instructorVertexDDL,
+				// The standing guard's own-binding probe, declared rather than
+				// left live (Contract #2 §2.5): absence is a meaningful
+				// rejection the script renders as AuthDenied, not a correctness
+				// error, so it is an optionalRead — the same shape
+				// service-domain's RecordServiceOutcome uses for its
+				// serviceprovider→identity hop. Declared here deliberately:
+				// clinic's SetProviderHours leaves the equivalent probe
+				// undeclared, and that is the class-(b) debt not to copy.
+				OptionalReads: []string{
+					"lnk.instructor.{payload.instructorKey:id}.identifiedBy.identity.{actor:id}",
+				},
 			},
 		},
 	}
