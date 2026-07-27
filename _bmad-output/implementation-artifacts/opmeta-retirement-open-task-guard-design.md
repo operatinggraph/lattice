@@ -17,6 +17,11 @@ recurrence or the first package move that must preserve in-flight work.**
 > invariants** that must hold against any author; lifecycle hygiene belongs to the **authoring
 > tool**. This doc is rewritten to the surviving shape (below); the staged contract edits
 > (#2 §2.6 `OpMetaInUse`, #8 §8.5, #10 §10.1 rebind) were reverted un-committed.
+> **Caveat (Andrew, same session):** the **decision** is authorship-time; the **enumeration**
+> is apply-time and environment-relative (dev and prod see different open-task sets). So the
+> declaration is unconditional policy required on every op drop, and the refusal never keys on
+> the authoring environment's referent count — otherwise a referent-free dev apply goes green
+> and hides the prod refusal.
 
 **Backlog row:** `[Pkgmgr] An op-meta tombstone orphans the open tasks that reference it`
 (lattice.md, Component maintenance · ★★ → shelved). Live repro 2026-07-27
@@ -51,18 +56,28 @@ disposition belongs to authorship (below) and no commit-path machinery is warran
 enumeration happens client-side in pkgmgr (a platform binary, Core-KV read-sanctioned,
 off-lane — no serialization cost anywhere), using the diff it already computes:
 
-1. **Preflight (in `computeDeltaAgainst` callers — Upgrade/Apply/Uninstall):** for each op-meta
-   the delta would tombstone (recognizer: 3-segment `vtx.meta.<id>` whose committed doc carries
-   `data.operationType` — build.go:222-232), enumerate
-   `lnk.task.*.forOperation.meta.<id>` via `KVListKeysFilter` and count referents whose link is
-   live and whose task root is alive ∧ `status == "open"` ∧ unexpired (`time.Parse`, mirroring
-   step 3's expiry check; unparseable counts as blocking).
-2. **No declared disposition + open referents → refuse to submit** (the op is never built):
-   the error names the operation, the task keys, and the two remediations. The bare drop is
-   default-deny **at authorship**, where the author is present to decide.
+**The decision and the enumeration are split across time and place (Andrew's caveat):** the
+*decision* is versioned policy in the package — made once, at authorship; the *enumeration* is
+an apply-time act against whichever environment is being upgraded, and its result varies (dev:
+usually zero referents; prod: real in-flight work). The declaration is therefore
+**unconditional — required on every op drop** — and the refusal never keys on the current
+environment's referent count: gating on "referents exist here" would let a referent-free dev
+apply go green and surface the missing declaration first in prod.
+
+1. **Declaration check (environment-independent):** a delta that tombstones an op-meta
+   (recognizer: 3-segment `vtx.meta.<id>` whose committed doc carries `data.operationType` —
+   build.go:222-232) without a declared disposition for that operationType → **refuse to
+   submit**, in every environment, with the error naming the operation and the two
+   declarations. The bare drop is default-deny at authorship, where the author is present to
+   decide.
+2. **Enumeration (apply-time, environment-relative — sizes the remediation, never the
+   decision):** enumerate `lnk.task.*.forOperation.meta.<id>` via `KVListKeysFilter`; a
+   referent counts iff its link is live and its task root is alive ∧ `status == "open"` ∧
+   unexpired (`time.Parse`, mirroring step 3's expiry check; unparseable counts).
 3. **Declared dispositions** on the Definition of the version dropping the op:
    - `RetireCancelsOpenTasks: [<operationType>, …]` — pkgmgr submits the existing `CancelTask`
-     per open referent (ddls.go:527 — status flip, OCC on the task root), then the upgrade.
+     per enumerated referent (ddls.go:527 — status flip, OCC on the task root) — 0..N per
+     environment — then the upgrade.
    - `MovedOps: {<operationType>: <destinationPackage>}` — **deferred** (see §3); declaring it
      today fails preflight with "work-preserving moves are not yet supported — cancel or wait".
      The vocabulary is reserved so the declaration surface doesn't churn when the move path
@@ -115,9 +130,10 @@ still be authorship-side (a preflight verb for the console), not a Processor sca
 ## 5. Test strategy + decomposition (the one fire, when revived or picked up cheap)
 
 Single fire, S–M, entirely in `internal/pkgmgr` + `packages/orchestration-base` verify:
-preflight unit vectors (open referent + no declaration → refusal naming tasks; declared cancel
-→ CancelTasks submitted then upgrade; complete/cancelled/expired referents don't block;
-unparseable expiresAt blocks; MovedOps declared → explicit not-yet-supported refusal) + one
+preflight unit vectors (undeclared drop → refusal **even with zero referents** — the dev-green
+trap pinned; declared cancel + zero referents → clean apply; declared cancel + N referents →
+CancelTasks submitted then upgrade; complete/cancelled/expired referents don't count;
+unparseable expiresAt counts; MovedOps declared → explicit not-yet-supported refusal) + one
 e2e: install → CreateTask → upgrade dropping the op → preflight refusal → re-run with
 `RetireCancelsOpenTasks` → task cancelled, upgrade lands, zero zombies. Processor: zero
 changes; no new error codes; no contract edits.

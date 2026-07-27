@@ -265,8 +265,12 @@ tombstones. **Capability KV is a lens projection** (projection correctness = aut
   (ClaimTask: ≤1 live link). (2) **A once-observed, operator-recoverable failure earns the
   smallest authorship-time mechanism, not authoritative machinery** — lead with the smallest
   shape and let recurrence justify more; "a lot of build for not much gain" is a ratification
-  outcome to pre-empt, not receive. (Same precedent-transfer failure class as the RLS-anchor
-  lesson: same word — "guard" — different job.)
+  outcome to pre-empt, not receive. (3) **Split the decision from the enumeration across time
+  and place**: the authoring-time decision is unconditional versioned policy (required on every
+  drop); the enumeration runs at apply time against whichever environment is upgrading — never
+  key the refusal on the authoring environment's referent count, or a referent-free dev apply
+  goes green and the missing declaration surfaces first in prod. (Same precedent-transfer
+  failure class as the RLS-anchor lesson: same word — "guard" — different job.)
 
 **Run the pre-build gates you write into your own designs — "ratified" ≠ "build-ready."** If a design
 self-flags a pre-build adversarial / `bmad-party-mode` pass (a deferred gate), that pass is a **Designer-lane
