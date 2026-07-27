@@ -9,11 +9,17 @@
 //     identity + .state=claimed + holdsRole->consumer link
 //  2. TestProvisionConsumerIdentity_AlreadyProvisioned_Idempotent — second
 //     call for the same actor is a no-op, same response
-//  3. TestProvisionConsumerIdentity_MalformedTargetActorKey_Rejected
-//  4. TestProvisionConsumerIdentity_UnknownConsumerRoleKey_Rejected
-//  5. TestProvisionConsumerIdentity_NonGatewayActor_Denied — the fail-closed
+//  3. TestProvisionConsumerIdentity_ExistingIdentity_GrantsConsumer — an
+//     identity another path minted (a seeded / bound persona) gains the grant
+//     without being re-provisioned
+//  4. TestProvisionConsumerIdentity_RevokedGrant_StaysRevoked — the grant is
+//     absent-only, so a RevokeRole holds against the pre-flight
+//  5. TestProvisionConsumerIdentity_TombstonedIdentity_GrantsNothing
+//  6. TestProvisionConsumerIdentity_MalformedTargetActorKey_Rejected
+//  7. TestProvisionConsumerIdentity_UnknownConsumerRoleKey_Rejected
+//  8. TestProvisionConsumerIdentity_NonGatewayActor_Denied — the fail-closed
 //     window before the Gateway's identityProvisioner grant is wired
-//  6. TestProvisionConsumerIdentity_OtherLiveRoleKey_Rejected — a live but
+//  9. TestProvisionConsumerIdentity_OtherLiveRoleKey_Rejected — a live but
 //     WRONG role (operator) must never be grantable through this op
 package identitydomain_test
 
@@ -32,6 +38,83 @@ import (
 )
 
 const freshActorKey = "vtx.identity.JfrshActHJKMNPQRSTUV"
+
+// boundPersonaKey stands for the shape every bound-entity persona arrives in
+// (persona-worlds W0/W5): an identity some other path minted — seeded by
+// seed-showcase, bound by BindProviderIdentity / BindInstructorIdentity /
+// BindServiceProviderIdentity — holding its entity role and no consumer grant.
+const boundPersonaKey = "vtx.identity.JbndPrsnHJKMNPQRSTU9"
+
+// providerRoleKey is the generic entity-archetype role all three bind-ops grant
+// (clinic BindProviderIdentity, wellness BindInstructorIdentity, service-domain
+// BindServiceProviderIdentity) — the only role a bound persona arrives holding.
+var providerRoleKey = "vtx.role." + pkgmgr.RoleID("identity-domain", "provider")
+
+// consumerGrantLink is the deterministic Contract #1 §1.1 key the Gateway
+// declares and the script tests. Built here independently of the production
+// helper so a change to either side has to be made deliberately in both.
+func consumerGrantLink(actorKey, roleKey string) string {
+	return "lnk.identity." + actorKey[len("vtx.identity."):] +
+		".holdsRole.role." + roleKey[len("vtx.role."):]
+}
+
+// provisionEnvelope mirrors internal/gateway's provisionActorIfNeeded,
+// declaring both class-(d) optional reads: the identity vertex (absent on the
+// fresh-actor path) and the grant link (absent until granted). The link
+// declaration is what lets the script tell "already granted" from "grant
+// missing"; a dispatcher that omits it hydrates the link as absent and drives
+// an already-granted actor into a create it can never commit.
+func provisionEnvelope(t *testing.T, requestID, targetActorKey, roleKey, submittedAt string) *processor.OperationEnvelope {
+	t.Helper()
+	return &processor.OperationEnvelope{
+		RequestID:     requestID,
+		Lane:          processor.LaneDefault,
+		OperationType: "ProvisionConsumerIdentity",
+		Actor:         gatewayActorKey,
+		SubmittedAt:   submittedAt,
+		Class:         "identity",
+		Payload:       provisionPayload(t, targetActorKey, roleKey),
+		ContextHint: &processor.ContextHint{
+			Reads:         []string{roleKey},
+			OptionalReads: []string{targetActorKey, consumerGrantLink(targetActorKey, roleKey)},
+		},
+	}
+}
+
+// seedTombstonedGrant writes the document a committed RevokeRole leaves at the
+// grant link: present, isDeleted. The op must read this as "revoked", not as
+// "absent" — the harness stands in for the rbac-domain op because the
+// identity-domain operator cap doc grants no rbac permissions.
+func seedTombstonedGrant(t *testing.T, ctx context.Context, conn *substrate.Conn, linkKey, actorKey, roleKey string) {
+	t.Helper()
+	doc := map[string]any{
+		"class": "holdsRole", "isDeleted": true,
+		"sourceVertex": actorKey, "targetVertex": roleKey,
+		"localName": "holdsRole", "data": map[string]any{},
+	}
+	b, err := json.Marshal(doc)
+	if err != nil {
+		t.Fatalf("marshal tombstoned grant: %v", err)
+	}
+	if _, err := conn.KVPut(ctx, testutil.HarnessCoreBucket, linkKey, b); err != nil {
+		t.Fatalf("seed tombstoned grant %s: %v", linkKey, err)
+	}
+}
+
+func grantIsDeleted(t *testing.T, ctx context.Context, conn *substrate.Conn, linkKey string) bool {
+	t.Helper()
+	entry, err := conn.KVGet(ctx, testutil.HarnessCoreBucket, linkKey)
+	if err != nil {
+		t.Fatalf("KVGet %s: %v", linkKey, err)
+	}
+	var doc struct {
+		IsDeleted bool `json:"isDeleted"`
+	}
+	if err := json.Unmarshal(entry.Value, &doc); err != nil {
+		t.Fatalf("unmarshal %s: %v", linkKey, err)
+	}
+	return doc.IsDeleted
+}
 
 func newProvisionPipeline(t *testing.T, ctx context.Context, conn *substrate.Conn, durable string) (*processor.CommitPath, jetstream.Consumer) {
 	t.Helper()
@@ -107,34 +190,161 @@ func TestProvisionConsumerIdentity_AlreadyProvisioned_Idempotent(t *testing.T) {
 	cp, cons := newProvisionPipeline(t, ctx, conn, "pci-idem")
 	roleKey := consumerRoleKey(t)
 
-	env := &processor.OperationEnvelope{
-		RequestID:     testutil.GenReqID("PCIIdem1"),
-		Lane:          processor.LaneDefault,
-		OperationType: "ProvisionConsumerIdentity",
-		Actor:         gatewayActorKey,
-		SubmittedAt:   "2026-07-06T10:00:00Z",
-		Class:         "identity",
-		Payload:       provisionPayload(t, freshActorKey, roleKey),
+	testutil.PublishOp(t, conn, provisionEnvelope(t, testutil.GenReqID("PCIIdem1"), freshActorKey, roleKey, "2026-07-06T10:00:00Z"))
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
+
+	testutil.PublishOp(t, conn, provisionEnvelope(t, testutil.GenReqID("PCIIdem2"), freshActorKey, roleKey, "2026-07-06T10:05:00Z"))
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
+
+	linkKey := consumerGrantLink(freshActorKey, roleKey)
+	if _, err := conn.KVGet(ctx, testutil.HarnessCoreBucket, linkKey); err != nil {
+		t.Fatalf("holdsRole link missing after re-provision: %v", err)
 	}
+	if grantIsDeleted(t, ctx, conn, linkKey) {
+		t.Fatalf("re-provision must leave the live grant untouched, found it tombstoned")
+	}
+}
+
+// TestProvisionConsumerIdentity_ExistingIdentity_GrantsConsumer is the
+// bound-persona case: the identity vertex exists (minted by seed-showcase and
+// bound to a clinic provider / wellness instructor / service provider) and
+// holds its entity role alone, so before this grant lands the persona can
+// reach none of the twenty consumer scope=self ops — it cannot book its own
+// appointment or apply for a lease in the building it works in.
+//
+// The persona is deliberately left at state=unclaimed, which is where
+// CreateUnclaimedIdentity leaves it and where every seeded persona stays: a
+// grant gated on claim state would exclude exactly the identities this exists
+// to serve.
+func TestProvisionConsumerIdentity_ExistingIdentity_GrantsConsumer(t *testing.T) {
+	t.Parallel()
+	ctx, conn := setupTestEnv(t)
+	cp, cons := newProvisionPipeline(t, ctx, conn, "pci-backfill")
+	roleKey := consumerRoleKey(t)
+
+	seedIdentityVertex(t, ctx, conn, boundPersonaKey, "unclaimed", "")
+	testutil.SeedHoldsRole(t, ctx, conn, boundPersonaKey, providerRoleKey)
+
+	linkKey := consumerGrantLink(boundPersonaKey, roleKey)
+	if _, err := conn.KVGet(ctx, testutil.HarnessCoreBucket, linkKey); err == nil {
+		t.Fatalf("precondition: the bound persona must hold no consumer grant")
+	}
+
+	env := provisionEnvelope(t, testutil.GenReqID("PCIBackfill"), boundPersonaKey, roleKey, "2026-07-27T10:00:00Z")
 	testutil.PublishOp(t, conn, env)
 	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
 
-	env2 := &processor.OperationEnvelope{
-		RequestID:     testutil.GenReqID("PCIIdem2"),
-		Lane:          processor.LaneDefault,
-		OperationType: "ProvisionConsumerIdentity",
-		Actor:         gatewayActorKey,
-		SubmittedAt:   "2026-07-06T10:05:00Z",
-		Class:         "identity",
-		Payload:       provisionPayload(t, freshActorKey, roleKey),
+	entry, err := conn.KVGet(ctx, testutil.HarnessCoreBucket, linkKey)
+	if err != nil {
+		t.Fatalf("consumer grant not created for the existing identity: %v", err)
 	}
-	testutil.PublishOp(t, conn, env2)
+	var linkDoc struct {
+		Class        string `json:"class"`
+		IsDeleted    bool   `json:"isDeleted"`
+		SourceVertex string `json:"sourceVertex"`
+		TargetVertex string `json:"targetVertex"`
+	}
+	if err := json.Unmarshal(entry.Value, &linkDoc); err != nil {
+		t.Fatalf("unmarshal grant link: %v", err)
+	}
+	if linkDoc.Class != "holdsRole" || linkDoc.IsDeleted {
+		t.Fatalf("grant link class/isDeleted = %q/%v, want holdsRole/false", linkDoc.Class, linkDoc.IsDeleted)
+	}
+	if linkDoc.SourceVertex != boundPersonaKey || linkDoc.TargetVertex != roleKey {
+		t.Fatalf("grant source/target = %q/%q, want %q/%q",
+			linkDoc.SourceVertex, linkDoc.TargetVertex, boundPersonaKey, roleKey)
+	}
+
+	// The entity role it already held must survive: this completes a persona's
+	// grants, it does not re-provision the identity.
+	if _, err := conn.KVGet(ctx, testutil.HarnessCoreBucket, consumerGrantLink(boundPersonaKey, providerRoleKey)); err != nil {
+		t.Fatalf("pre-existing entity role grant lost: %v", err)
+	}
+	stateAspect := readAspectData(t, ctx, conn, boundPersonaKey+".state")
+	if got, _ := stateAspect["value"].(string); got != "unclaimed" {
+		t.Fatalf("state = %q, want unclaimed (the grant must not re-provision the identity)", got)
+	}
+
+	assertTrackerEvent(t, ctx, conn, env.RequestID, "identity.consumerGranted")
+}
+
+// TestProvisionConsumerIdentity_RevokedGrant_StaysRevoked is the reason this op
+// grants absent-only instead of reusing AssignRole's revive branch. The caller
+// is an automatic per-request pre-flight, so a revive would mean a RevokeRole on
+// consumer is undone by the revoked actor's very next authenticated request —
+// a revocation that silently does not hold.
+func TestProvisionConsumerIdentity_RevokedGrant_StaysRevoked(t *testing.T) {
+	t.Parallel()
+	ctx, conn := setupTestEnv(t)
+	cp, cons := newProvisionPipeline(t, ctx, conn, "pci-revoked")
+	roleKey := consumerRoleKey(t)
+
+	seedIdentityVertex(t, ctx, conn, boundPersonaKey, "claimed", "")
+	linkKey := consumerGrantLink(boundPersonaKey, roleKey)
+	seedTombstonedGrant(t, ctx, conn, linkKey, boundPersonaKey, roleKey)
+
+	testutil.PublishOp(t, conn, provisionEnvelope(t, testutil.GenReqID("PCIRevoked"), boundPersonaKey, roleKey, "2026-07-27T11:00:00Z"))
 	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
 
-	roleID := roleKey[len("vtx.role."):]
-	linkKey := "lnk.identity.JfrshActHJKMNPQRSTUV.holdsRole.role." + roleID
-	if _, err := conn.KVGet(ctx, testutil.HarnessCoreBucket, linkKey); err != nil {
-		t.Fatalf("holdsRole link missing after re-provision: %v", err)
+	if !grantIsDeleted(t, ctx, conn, linkKey) {
+		t.Fatalf("a revoked consumer grant was revived by the provisioning pre-flight")
+	}
+}
+
+// TestProvisionConsumerIdentity_AlreadyGranted_IgnoresRoleVertexHealth pins the
+// reason the role-vertex read sits inside the granting branches rather than at
+// the top of the op: this runs on every authenticated request, so the path a
+// returning actor takes must not be able to fail on the health of state it does
+// not need. With the role vertex tombstoned out from under it, an actor who
+// already holds the grant still gets a clean no-op.
+func TestProvisionConsumerIdentity_AlreadyGranted_IgnoresRoleVertexHealth(t *testing.T) {
+	t.Parallel()
+	ctx, conn := setupTestEnv(t)
+	cp, cons := newProvisionPipeline(t, ctx, conn, "pci-deadrole")
+	roleKey := consumerRoleKey(t)
+
+	seedIdentityVertex(t, ctx, conn, boundPersonaKey, "claimed", "")
+	testutil.SeedHoldsRole(t, ctx, conn, boundPersonaKey, roleKey)
+
+	deadRole := map[string]any{"class": "role", "isDeleted": true, "data": map[string]any{}}
+	b, err := json.Marshal(deadRole)
+	if err != nil {
+		t.Fatalf("marshal tombstoned role: %v", err)
+	}
+	if _, err := conn.KVPut(ctx, testutil.HarnessCoreBucket, roleKey, b); err != nil {
+		t.Fatalf("tombstone the consumer role vertex: %v", err)
+	}
+
+	testutil.PublishOp(t, conn, provisionEnvelope(t, testutil.GenReqID("PCIDeadRole"), boundPersonaKey, roleKey, "2026-07-27T13:00:00Z"))
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
+
+	if grantIsDeleted(t, ctx, conn, consumerGrantLink(boundPersonaKey, roleKey)) {
+		t.Fatalf("the existing grant must be left alone")
+	}
+}
+
+// TestProvisionConsumerIdentity_TombstonedIdentity_GrantsNothing — a dead
+// vertex confers nothing and must not acquire a role on its way out.
+func TestProvisionConsumerIdentity_TombstonedIdentity_GrantsNothing(t *testing.T) {
+	t.Parallel()
+	ctx, conn := setupTestEnv(t)
+	cp, cons := newProvisionPipeline(t, ctx, conn, "pci-dead")
+	roleKey := consumerRoleKey(t)
+
+	deadDoc := map[string]any{"class": "identity", "isDeleted": true, "data": map[string]any{}}
+	b, err := json.Marshal(deadDoc)
+	if err != nil {
+		t.Fatalf("marshal tombstoned identity: %v", err)
+	}
+	if _, err := conn.KVPut(ctx, testutil.HarnessCoreBucket, boundPersonaKey, b); err != nil {
+		t.Fatalf("seed tombstoned identity: %v", err)
+	}
+
+	testutil.PublishOp(t, conn, provisionEnvelope(t, testutil.GenReqID("PCIDead"), boundPersonaKey, roleKey, "2026-07-27T12:00:00Z"))
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
+
+	if _, err := conn.KVGet(ctx, testutil.HarnessCoreBucket, consumerGrantLink(boundPersonaKey, roleKey)); err == nil {
+		t.Fatalf("a tombstoned identity acquired a consumer grant")
 	}
 }
 

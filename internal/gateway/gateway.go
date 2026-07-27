@@ -608,6 +608,25 @@ func isBareRequestID(s string) bool {
 	return !strings.ContainsAny(s, ".*> \t\n")
 }
 
+// consumerGrantLinkKey builds the deterministic Contract #1 §1.1 link key for
+// "identity holdsRole role" — the key ProvisionConsumerIdentity's script tests
+// to tell an actor who already holds the consumer grant from one who does not.
+// It is derived, never configured, so the Gateway and the script agree by
+// construction. Returns "" when either input is not the vtx.<type>.<id> shape
+// the script itself requires, so a misconfigured role key drops the read
+// rather than declaring a malformed one.
+func consumerGrantLinkKey(actorKey, roleKey string) string {
+	actorID, ok := strings.CutPrefix(actorKey, "vtx.identity.")
+	if !ok || actorID == "" {
+		return ""
+	}
+	roleID, ok := strings.CutPrefix(roleKey, "vtx.role.")
+	if !ok || roleID == "" {
+		return ""
+	}
+	return "lnk.identity." + actorID + ".holdsRole.role." + roleID
+}
+
 // provisionActorIfNeeded submits ProvisionConsumerIdentity under the
 // Gateway's own actor for a verified actor not yet in the in-memory
 // provisioned set. A no-op when ConfigureProvisioning was never called.
@@ -647,6 +666,10 @@ func (s *Server) provisionActorIfNeeded(ctx context.Context, actorID, idpIssuer,
 		s.logger.Error("gateway: generate provisioning requestId", "actor", actorID, "error", err)
 		return
 	}
+	optionalReads := []string{actorID}
+	if grantLink := consumerGrantLinkKey(actorID, s.consumerRoleKey); grantLink != "" {
+		optionalReads = append(optionalReads, grantLink)
+	}
 	env := &processor.OperationEnvelope{
 		RequestID:     requestID,
 		Lane:          processor.LaneDefault,
@@ -661,9 +684,17 @@ func (s *Server) provisionActorIfNeeded(ctx context.Context, actorID, idpIssuer,
 		// legitimately-absent key and would wedge every first-touch
 		// request). consumerRoleKey is class (a) — a pinned, always-live
 		// role vertex; its absence is a wiring fault.
+		//
+		// The holdsRole grant link is class (d) for the same reason and is
+		// load-bearing, not hygiene: the script distinguishes "already
+		// granted" (no-op) from "grant missing" (create) by this key alone,
+		// and an undeclared key hydrates as absent. An actor who already
+		// holds the grant would then take the create branch, whose revision-0
+		// conditioning can never match a live key — turning a silent no-op
+		// into a RevisionConflict on every authenticated request.
 		ContextHint: &processor.ContextHint{
 			Reads:         []string{s.consumerRoleKey},
-			OptionalReads: []string{actorID},
+			OptionalReads: optionalReads,
 		},
 	}
 	reply, err := s.submit(ctx, env)

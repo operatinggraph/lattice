@@ -9,6 +9,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -417,14 +418,24 @@ func TestHandleOperations_ProvisioningPreflight_FirstTouch(t *testing.T) {
 	// OptionalReads (absence-tolerant — legitimately absent on first touch,
 	// never Reads which would fault HydrationMiss); consumerRoleKey is a
 	// pinned, always-live role vertex and rides Reads.
+	//
+	// The grant link rides OptionalReads for the same reason and is asserted
+	// here because it is load-bearing, not hygiene: it is how the script tells
+	// an actor who already holds the consumer grant from one who does not.
+	// Dropped, an already-granted actor hydrates the link as absent, takes the
+	// create branch, and RevisionConflicts on every authenticated request.
 	if prov.ContextHint == nil {
-		t.Fatal("first submit ContextHint = nil, want Reads=[consumerRoleKey] OptionalReads=[targetActorKey]")
+		t.Fatal("first submit ContextHint = nil, want Reads=[consumerRoleKey] OptionalReads=[targetActorKey, grantLink]")
 	}
 	if got := prov.ContextHint.Reads; len(got) != 1 || got[0] != "vtx.role.CONSUMER0000000000A" {
 		t.Fatalf("first submit ContextHint.Reads = %v, want [vtx.role.CONSUMER0000000000A]", got)
 	}
-	if got := prov.ContextHint.OptionalReads; len(got) != 1 || got[0] != "vtx.identity.nXFwju1FgWbCTmAdPZkF" {
-		t.Fatalf("first submit ContextHint.OptionalReads = %v, want [vtx.identity.nXFwju1FgWbCTmAdPZkF]", got)
+	wantOptional := []string{
+		"vtx.identity.nXFwju1FgWbCTmAdPZkF",
+		"lnk.identity.nXFwju1FgWbCTmAdPZkF.holdsRole.role.CONSUMER0000000000A",
+	}
+	if got := prov.ContextHint.OptionalReads; !slices.Equal(got, wantOptional) {
+		t.Fatalf("first submit ContextHint.OptionalReads = %v, want %v", got, wantOptional)
 	}
 	var payload struct {
 		TargetActorKey  string `json:"targetActorKey"`

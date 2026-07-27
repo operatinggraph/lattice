@@ -184,6 +184,60 @@ func TestClaimIdentity_Success(t *testing.T) {
 	}
 }
 
+// TestClaimIdentity_ConsumerGrantAlreadyHeld_Succeeds covers the identity that
+// was reached before it was claimed: any authenticated touch runs the Gateway's
+// ProvisionConsumerIdentity pre-flight, and a seeder may grant `consumer`
+// outright, so the grant link can already exist when the ceremony runs. The
+// claim's grant is an upsert for that reason — as a create it asserts revision 0
+// and takes the whole atomic batch with it, leaving the person permanently
+// unable to claim the identity they hold the secret for.
+func TestClaimIdentity_ConsumerGrantAlreadyHeld_Succeeds(t *testing.T) {
+	t.Parallel()
+	ctx, conn := setupTestEnv(t)
+	cp, cons := newClaimPipeline(t, ctx, conn, "pregrant")
+
+	createReqID := testutil.GenReqID("ClmPreGrantCrt")
+	identityKey, claimKeyPlaintext := createIdentityAndGetKeys(t, ctx, conn, cp, cons, createReqID)
+
+	// The state the pre-flight leaves behind on an unclaimed identity.
+	testutil.SeedHoldsRole(t, ctx, conn, identityKey, consumerRoleKey(t))
+
+	claimReqID := testutil.GenReqID("ClmPreGrantClm")
+	claimEnv := &processor.OperationEnvelope{
+		RequestID:     claimReqID,
+		Lane:          processor.LaneDefault,
+		OperationType: "ClaimIdentity",
+		Actor:         consumerActorKey,
+		SubmittedAt:   "2026-07-27T10:01:00Z",
+		Class:         "identity",
+		Payload:       json.RawMessage(`{"claimKey":"` + claimKeyPlaintext + `","targetIdentityKey":"` + identityKey + `"}`),
+		AuthContext:   &processor.AuthContext{Target: consumerActorKey},
+		ContextHint: &processor.ContextHint{
+			Reads: []string{
+				identityKey,
+				identityKey + ".state",
+				identityKey + ".claimKey",
+			},
+		},
+	}
+	testutil.PublishOp(t, conn, claimEnv)
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
+
+	// The whole batch had to land, not just the grant: the ceremony's real work
+	// is the state transition + the credential binding.
+	stateAspect := readAspectData(t, ctx, conn, identityKey+".state")
+	if got, _ := stateAspect["value"].(string); got != "claimed" {
+		t.Fatalf("state = %q, want claimed", got)
+	}
+	bindData := readDecryptedAspectData(t, ctx, conn, identityKey, "credentialBinding")
+	if got, _ := bindData["actorKey"].(string); got != consumerActorKey {
+		t.Fatalf("credentialBinding.actorKey = %q, want %q", got, consumerActorKey)
+	}
+	if grantIsDeleted(t, ctx, conn, claimedConsumerGrantKey(t, identityKey)) {
+		t.Fatalf("the claimed identity must still hold a live consumer grant")
+	}
+}
+
 func TestClaimIdentity_WrongKey_GenericError(t *testing.T) {
 	t.Parallel()
 	ctx, conn := setupTestEnv(t)

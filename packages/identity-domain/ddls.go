@@ -81,10 +81,13 @@ func DDLs() []pkgmgr.DDLSpec {
 				"The client mints the claim secret, submits only claimKeyHash; Lattice never holds the plaintext. " +
 				"State machine + IdentityMerged guard enforced in .script. " +
 				"ProvisionConsumerIdentity: idempotently creates a bare, already-claimed consumer identity at a " +
-				"caller-supplied key (the Gateway's first-authenticated-touch auto-provisioning pre-flight) — " +
+				"caller-supplied key (the Gateway's authenticated-touch auto-provisioning pre-flight) — " +
 				"the deterministic ActorID a verified JWT subject maps to, not a minted key. Grants the consumer " +
 				"role via a holdsRole link; optionally records IdP provenance (.idpBinding) when the token was " +
-				"opaque-mode; otherwise no PII. " +
+				"opaque-mode; otherwise no PII. Where the identity vertex already exists but holds no consumer " +
+				"grant — a seeded persona, or an identity an entity binding minted — it creates the grant alone, " +
+				"so the op's contract holds for every actor the Gateway verifies and not only for ones it minted; " +
+				"a grant that was explicitly revoked stays revoked. " +
 				"RotateClaimKey: staff-gated re-issue of an unclaimed identity's claimKeyHash (the lost-secret " +
 				"recovery path — Lattice never held the plaintext to recover). Overwrites .claimKey; fails closed " +
 				"unless state==unclaimed. " +
@@ -203,8 +206,11 @@ func DDLs() []pkgmgr.DDLSpec {
 					Name:    "ProvisionConsumerIdentity — Gateway first-touch auto-provisioning",
 					Payload: map[string]any{"targetActorKey": "vtx.identity.<NanoID>", "consumerRoleKey": "vtx.role.<NanoID>"},
 					ExpectedOutcome: "Fresh actor: creates the identity vertex + a .state=claimed aspect + a holdsRole link to " +
-						"consumerRoleKey, emits identity.provisioned, returns primaryKey=targetActorKey. Already-provisioned " +
-						"actor: no-op (empty mutations/events, no response) — safe to call on every request.",
+						"consumerRoleKey, emits identity.provisioned, returns primaryKey=targetActorKey. Existing identity " +
+						"without the grant (a seeded persona, an entity binding's identity): creates the holdsRole link alone, " +
+						"emits identity.consumerGranted, returns primaryKey=<link key>. Already-granted actor: no-op (empty " +
+						"mutations/events, no response) — safe to call on every request. A tombstoned grant stays revoked and a " +
+						"tombstoned identity acquires nothing.",
 				},
 				{
 					Name: "ProvisionConsumerIdentity — opaque-mode first touch with IdP provenance",
@@ -613,6 +619,16 @@ def actor_holds_operator(actor_key):
             return True
     return False
 
+def require_live_role(role_key):
+    # Called only on a path that is about to grant the role, so a caller that
+    # needs no grant never depends on the role vertex.
+    # read-posture: (a) declared in contextHint.reads by the Gateway's
+    # provisionActorIfNeeded dispatcher (internal/gateway/gateway.go) — a
+    # pinned, always-live role vertex; absence is a wiring fault.
+    role_vtx = kv.Read(role_key)
+    if role_vtx == None or role_vtx.isDeleted:
+        fail("UnknownRole: " + role_key)
+
 def validate_state_transition(current, new):
     if current == None:
         fail("InvalidStateTransition: <missing> -> " + str(new))
@@ -794,45 +810,79 @@ def execute(state, op):
             if ch not in nanoid_alphabet:
                 fail("InvalidArgument: targetActorKey: id segment must be NanoID-alphabet")
 
-        # target_actor_key legitimately may not exist yet (the fresh-actor
-        # case). Unlike CreateTask, no op in this package (or anywhere) ever
-        # tombstones a bare identity vertex, so there is no
-        # un-tombstone-and-recreate case to self-heal here: ANY existing
-        # record — live or (hypothetically) tombstoned — is
-        # already-provisioned. Treating a tombstoned record as absent and
-        # falling through to "create" would hit a hard RevisionConflict at
-        # commit (create-only conditioning targets the NATS subject's last
-        # sequence, not its logical isDeleted flag), so deliberately not
-        # mirroring CreateTask's isDeleted branch here.
-        # read-posture: (d) declared in contextHint.optionalReads by the
-        # Gateway's provisionActorIfNeeded dispatcher (internal/gateway/gateway.go)
-        existing = kv.Read(target_actor_key)
-        if existing != None:
-            # No "response" here: the write-path reply-constraint rejects a
-            # script-named primaryKey that isn't in this op's own write
-            # footprint, and an empty-mutations no-op writes nothing
-            # (mirrors AssignRole / CreateTask's idempotent no-op shape).
-            return {"mutations": [], "events": []}
-
         # Pinned to the package's OWN consumer role, not trusted from the
         # payload: the grant matrix lets identityProvisioner AND operator
         # call this op, so a caller-supplied consumerRoleKey that was merely
-        # checked for "is some live role" could steer a first-touch actor
-        # into ANY role (e.g. operator) instead of consumer. Equality against
-        # the literal closes that — the field still exists so the caller is
-        # explicit about intent, but the script is the enforcement boundary.
+        # checked for "is some live role" could steer an actor into ANY role
+        # (e.g. operator) instead of consumer. Equality against the literal
+        # closes that — the field still exists so the caller is explicit
+        # about intent, but the script is the enforcement boundary.
         consumer_role_key = p.consumerRoleKey if hasattr(p, "consumerRoleKey") else None
         if consumer_role_key != "__EXPECTED_CONSUMER_ROLE_KEY__":
             fail("InvalidArgument: consumerRoleKey: must be the identity-domain consumer role")
-        # read-posture: (a) declared in contextHint.reads by the Gateway's
-        # provisionActorIfNeeded dispatcher (internal/gateway/gateway.go) — a
-        # pinned, always-live role vertex; absence is a wiring fault
-        role_vtx = kv.Read(consumer_role_key)
-        if role_vtx == None or role_vtx.isDeleted:
-            fail("UnknownRole: " + consumer_role_key)
         role_id = consumer_role_key[len("vtx.role."):]
-
         link_key = "lnk.identity." + actor_id + ".holdsRole.role." + role_id
+
+        # target_actor_key legitimately may not exist yet (the fresh-actor
+        # case).
+        # read-posture: (d) declared in contextHint.optionalReads by the
+        # Gateway's provisionActorIfNeeded dispatcher (internal/gateway/gateway.go)
+        #
+        # Every read past this point sits inside a branch that is about to
+        # write. The dominant case by far is a returning actor who already
+        # holds the grant, and that path deliberately touches nothing beyond
+        # these two keys: this op runs on every authenticated request, so a
+        # no-op must not be able to fail on the health of state it does not
+        # need.
+        existing = kv.Read(target_actor_key)
+        if existing != None:
+            # The vertex exists but the grant may not: an identity minted by
+            # any other path (a seeded persona, an entity binding's
+            # CreateUnclaimedIdentity) holds whatever roles that path granted
+            # and no consumer among them. This op's contract is "the actor the
+            # Gateway verified holds consumer", so completing a half-provisioned
+            # identity is the same job as provisioning a fresh one.
+            #
+            # ABSENT-ONLY, deliberately diverging from AssignRole's revive
+            # branch (rbac-domain grant_link): that caller is an operator
+            # explicitly re-granting, whereas this one is an automatic
+            # per-request pre-flight, so reviving a tombstone would mean a
+            # RevokeRole on consumer is undone by the revoked actor's very
+            # next request. Tombstoned stays tombstoned.
+            #
+            # A tombstoned IDENTITY confers nothing and must not acquire a
+            # role, so it takes the same no-op path.
+            if existing.isDeleted:
+                return {"mutations": [], "events": []}
+            granted = state[link_key] if link_key in state else None
+            if granted != None:
+                # No "response" on the no-op path: the write-path
+                # reply-constraint rejects a script-named primaryKey that isn't
+                # in this op's own write footprint, and an empty-mutations
+                # no-op writes nothing (mirrors AssignRole / CreateTask's
+                # idempotent no-op shape). Absence here is indistinguishable
+                # from an undeclared read, which is why the deterministic
+                # link_key is a REQUIRED optionalReads entry at every
+                # dispatcher: hydrated as absent, an already-granted actor
+                # would fall through to a create and RevisionConflict on
+                # every authenticated request.
+                return {"mutations": [], "events": []}
+            require_live_role(consumer_role_key)
+            grant = {"op": "create", "key": link_key,
+                     "document": {"class": "holdsRole", "isDeleted": False,
+                                  "sourceVertex": target_actor_key,
+                                  "targetVertex": consumer_role_key,
+                                  "localName": "holdsRole", "data": {}}}
+            # primaryKey is the link, not the identity: the link is the only
+            # key in this branch's write footprint.
+            return {"mutations": [grant],
+                    "events": [{"class": "identity.consumerGranted",
+                                "data": {"identityKey": target_actor_key,
+                                         "roleKey": consumer_role_key,
+                                         "linkKey": link_key}}],
+                    "response": {"primaryKey": link_key}}
+
+        require_live_role(consumer_role_key)
         mutations = [
             {"op": "create", "key": target_actor_key,
              "document": {"class": "identity", "isDeleted": False, "data": {}}},
@@ -942,7 +992,23 @@ def execute(state, op):
                           "data": {"value": "claimed"}}},
             {"op": "tombstone", "key": target_identity_key + ".claimKey"},
             credential_index_mutation(cred_index_key, cred_index, actor_key, target_identity_key, observed_at),
-            {"op": "create", "key": consumer_grant_key,
+            # An upsert, not a create: the grant may already be present, because
+            # any authenticated touch of this identity provisions it (the
+            # Gateway's ProvisionConsumerIdentity pre-flight) and a seeder may
+            # grant it outright via AssignRole. A create asserts revision 0 and
+            # would take the whole atomic claim batch down with a
+            # RevisionConflict, so the ceremony would be unable to complete for
+            # exactly the identities that had already been reached. An update
+            # commits conditioned on the revision the key is read at (step 8),
+            # or unconditioned when it is genuinely absent, which is what
+            # "ensure this claimed identity holds consumer" means. Unlike the
+            # per-request pre-flight — which grants only where the link is
+            # absent, so a RevokeRole is never undone by mere traffic — the
+            # ceremony is a one-time, secret-bearing act that must leave the
+            # person able to act at all, and its dispatchers include browser
+            # clients that cannot compute the deterministic role key a declared
+            # read would require.
+            {"op": "update", "key": consumer_grant_key,
              "document": {"class": "holdsRole", "isDeleted": False,
                           "sourceVertex": target_identity_key, "targetVertex": consumer_role_key,
                           "localName": "holdsRole", "data": {}}},

@@ -490,9 +490,10 @@ func ensureMaintenanceTech(ctx context.Context, conn *substrate.Conn, adminKey, 
 // seedTenant mints an unclaimed identity, grants consumer, wires residesIn,
 // and (mirroring seed-edge-demo.go's §3.0 note) flips .state to claimed
 // directly via UpdateIdentityState rather than the real ClaimIdentity
-// ceremony — that op's own mutation unconditionally re-creates the
-// holdsRole→consumer link, which would collide with the AssignRole grant
-// above (RevisionConflict). Returns the minted identity key.
+// ceremony: that ceremony must be submitted BY a separate device credential
+// with authContext.target naming itself, which is a client-side flow a seeder
+// running as one admin actor has no way — and no reason — to perform.
+// Returns the minted identity key.
 func seedTenant(ctx context.Context, conn *substrate.Conn, adminKey, consumerRoleKey, unitKey, name, email string) string {
 	salt, err := substrate.NewNanoID()
 	must(err, "generate tenant claim-key salt")
@@ -574,16 +575,19 @@ func ensureStaff(ctx context.Context, conn *substrate.Conn, adminKey, roleKey, c
 // and the difference is the whole point of the staff spine: a resident's world
 // composes from residesIn, a staff member's from worksAt + holdsRole.
 //
-// The persona deliberately gets NO residesIn link and NO consumer role, so its
-// world is purely staff-derived. It also holds no `operator` role: everything
+// The persona deliberately gets NO residesIn link, so its building-shaped world
+// is purely staff-derived. It also holds no `operator` role: every staff thing
 // it can do comes from the frontOfHouse grants the vertical packages declare
 // (DecideLeaseApplication, the two clinic schedule ops, the three café tab ops,
 // CreateSession) — which is what makes it the first showcase actor whose write
-// surface is narrower than root.
+// surface is narrower than root. It is not seeded with `consumer` either, though
+// signing in earns that baseline like any authenticated person (the Gateway's
+// provisioning pre-flight): what stays staff-derived is its authority over other
+// people's records, since every `consumer` grant is scope=self.
 //
 // State is flipped via UpdateIdentityState for the same reason seedTenant does
-// it: the real ClaimIdentity ceremony re-creates a holdsRole link that would
-// collide with the AssignRole grant above.
+// it: the ceremony is a client-side flow submitted by a separate device
+// credential, which a seeder cannot perform.
 func seedStaff(ctx context.Context, conn *substrate.Conn, adminKey, roleKey, buildingKey, name, email string) string {
 	salt, err := substrate.NewNanoID()
 	must(err, "generate staff claim-key salt")
@@ -1187,11 +1191,10 @@ func seedStaffWorklistApplication(ctx context.Context, conn *substrate.Conn, adm
 // point. The staff persona reaches DecideLeaseApplication through the standing
 // frontOfHouse grant; this one holds no staff role at all, so every landlord op
 // it can submit is authorized by a `consumer` scope=self grant whose script then
-// proves the `manages` link. That path had no persona able to walk it: the
-// Gateway auto-grants `consumer` to actors it authenticates, but
-// ProvisionConsumerIdentity is first-touch only and returns a clean no-op for an
-// identity that already exists — so a seeded persona can never acquire the role
-// that way, and must be granted it here.
+// proves the `manages` link. The grant is made here rather than left to the
+// Gateway's own `ProvisionConsumerIdentity` pre-flight because the seeded world
+// must be complete and walkable before anyone signs in — the pre-flight only
+// fires once this persona actually authenticates.
 //
 // Unit 4 is created before the persona because AssignUnitOwner requires a live
 // unit. Every step is liveness-guarded: this runs on an already-loaded world
@@ -1283,8 +1286,8 @@ func ensureLandlord(ctx context.Context, conn *substrate.Conn, adminKey, consume
 // entire world composes from the `manages` link.
 //
 // State is flipped via UpdateIdentityState for the same reason seedTenant and
-// seedStaff do it: the real ClaimIdentity ceremony re-creates a holdsRole link
-// that would collide with the AssignRole grant above it.
+// seedStaff do it: the ceremony is a client-side flow submitted by a separate
+// device credential, which a seeder cannot perform.
 func seedLandlord(ctx context.Context, conn *substrate.Conn, adminKey, consumerRoleKey string) string {
 	salt, err := substrate.NewNanoID()
 	must(err, "generate landlord claim-key salt")
