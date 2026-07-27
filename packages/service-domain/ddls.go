@@ -143,28 +143,30 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 				`{"instanceKey":{"type":"string","description":"vtx.service.<NanoID> of the instance to record an outcome for — auto-filled from the instance being viewed."},` +
 				`"status":{"type":"string","enum":["completed","failed"],"description":"The terminal outcome: completed or failed."},` +
 				`"completedAt":{"type":"string","description":"RFC3339 instant the run completed."},` +
-				`"template":{"type":"string","description":"vtx.service.<NanoID> of the instance's own template — required for a provider (non-operator) caller."},` +
 				`"serviceprovider":{"type":"string","description":"vtx.serviceprovider.<NanoID> of your own service-provider record — required for a provider (non-operator) caller."}},` +
 				`"required":["instanceKey","status","completedAt"]}`,
 			FieldDescriptions: map[string]string{
 				"instanceKey":     "The instance this outcome is for — auto-filled by the client from the instance being viewed (dispatch.targetField), not user-entered.",
 				"status":          "completed or failed.",
 				"completedAt":     "RFC3339 instant the run completed.",
-				"template":        "The instance's own template — required for a provider caller (the script's standing guard walks instance→template→serviceprovider→identity).",
-				"serviceprovider": "Your own service-provider record — required for a provider caller. Must be providedBy the instance's template and identifiedBy-bound to you.",
+				"serviceprovider": "Your own service-provider record — required for a provider caller. Must be providedBy the instance's own template and identifiedBy-bound to you.",
 			},
 			Dispatch: &pkgmgr.OpDispatchSpec{
 				Class:       "service",
 				AuthContext: "standing",
 				TargetField: "instanceKey",
 				TargetType:  "service",
-				// The instanceOf/providedBy/identifiedBy ownership-chain
-				// probes. Absence of any is a meaningful rejection the
-				// script renders (AuthDenied), not a correctness error —
-				// the same shape wellness-domain's CancelBooking uses.
+				// The providedBy/identifiedBy ownership-chain probes.
+				// Absence of either is a meaningful rejection the script
+				// renders (AuthDenied), not a correctness error — the same
+				// shape wellness-domain's CancelBooking uses. The instance's
+				// template is declared nowhere here — the script resolves it
+				// itself from the instance's own instanceOf link (a
+				// class-(e) follow-up, ddls.go's instance_template), never a
+				// payload field, so there is no caller-supplied candidate
+				// that could learn which template a stranger's instance is
+				// (Standard §readTemplateDebt).
 				OptionalReads: []string{
-					"lnk.service.{payload.instanceKey:id}.instanceOf.service.{payload.template:id}",
-					"lnk.service.{payload.template:id}.providedBy.serviceprovider.{payload.serviceprovider:id}",
 					"lnk.serviceprovider.{payload.serviceprovider:id}.identifiedBy.identity.{actor:id}",
 				},
 			},
@@ -1008,6 +1010,29 @@ def actor_holds_operator(actor_key):
             return True
     return False
 
+INSTANCE_TEMPLATE_PAGE_LIMIT = 5
+
+def instance_template(inst_key):
+    # The template this instance is instanceOf, from the instance's OWN link
+    # -- never a payload field, so a caller cannot name a template that isn't
+    # genuinely this instance's own. Which template a stranger's instance is
+    # IS the fact RecordServiceOutcome's standing guard must not leak, and a
+    # caller-supplied candidate is exactly the shape that would invite
+    # learning it by probing (the enumerate-inward direction
+    # TestRecordServiceOutcome_ProviderProbesLearnNothingAboutAnotherInstance
+    # guards, Standard §readTemplateDebt). An instance carries exactly one
+    # instanceOf link (stamped once at CreateServiceInstance), so this is
+    # never a keyspace scan.
+    #
+    # read-posture: (e) relation=instanceOf epoch=none -- an instance has one
+    # template, resolved once here.
+    page, _ = kv.Links(inst_key, "instanceOf", "out", None, INSTANCE_TEMPLATE_PAGE_LIMIT)
+    tpl = None
+    for lk in page:
+        if not lk.isDeleted:
+            tpl = lk.targetVertex
+    return tpl
+
 def execute(state, op):
     ot = op.operationType
     p = op.payload
@@ -1198,11 +1223,9 @@ def execute(state, op):
         # having proven nothing about themselves. Starting at the caller's own
         # binding means every later answer is about a template they provide.
         if not actor_holds_operator(op.actor):
-            template = optional_string(p, "template")
             serviceprovider = optional_string(p, "serviceprovider")
-            if template == None or serviceprovider == None:
-                fail("AuthDenied: " + op.actor + " must supply template + serviceprovider to record an outcome as a provider")
-            _, tpl_id = parts_of(template, "template", "service")
+            if serviceprovider == None:
+                fail("AuthDenied: " + op.actor + " must supply serviceprovider to record an outcome as a provider")
             _, sp_id = parts_of(serviceprovider, "serviceprovider", "serviceprovider")
             _, actor_id = parts_of(op.actor, "actor", "identity")
             # read-posture: (d) declared optionalReads by RecordServiceOutcome's
@@ -1211,14 +1234,16 @@ def execute(state, op):
             identified_by = kv.Read("lnk.serviceprovider." + sp_id + ".identifiedBy.identity." + actor_id)
             if identified_by == None or identified_by.isDeleted:
                 fail("AuthDenied: " + op.actor + " is not identifiedBy-bound to serviceprovider " + serviceprovider)
-            # read-posture: (d) declared optionalReads by RecordServiceOutcome's dispatcher.
+            tpl_key = instance_template(inst_key)
+            if tpl_key == None:
+                fail("AuthDenied: " + inst_key + " names no live template")
+            _, tpl_id = parts_of(tpl_key, "template", "service")
+            # read-posture: (e) per-candidate follow-up read off the
+            # instanceOf enumeration above (data-derived key -- the template
+            # is not knowable until the instance's own link resolves).
             provided_by = kv.Read("lnk.service." + tpl_id + ".providedBy.serviceprovider." + sp_id)
             if provided_by == None or provided_by.isDeleted:
-                fail("AuthDenied: template " + template + " is not providedBy serviceprovider " + serviceprovider)
-            # read-posture: (d) declared optionalReads by RecordServiceOutcome's dispatcher.
-            instance_of = kv.Read("lnk.service." + inst_id + ".instanceOf.service." + tpl_id)
-            if instance_of == None or instance_of.isDeleted:
-                fail("AuthDenied: " + inst_key + " is not an instance of template " + template)
+                fail("AuthDenied: template " + tpl_key + " is not providedBy serviceprovider " + serviceprovider)
 
         # The outcome is recorded once, guarded on two load-bearing paths:
         #   - SEQUENTIAL second-record (the first has committed): the

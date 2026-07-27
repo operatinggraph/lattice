@@ -1194,3 +1194,104 @@ func TestRecordServiceOutcome_ProviderProbesLearnNothingAboutAnotherInstance(t *
 		t.Fatalf("a denied probe must not record an outcome")
 	}
 }
+
+// seedProvidedByServiceProviderLink writes the template providedBy
+// serviceprovider link WireProvidedBy would mint, so this test proves
+// RecordServiceOutcome's standing guard rather than the wiring ceremony.
+func seedProvidedByServiceProviderLink(t *testing.T, ctx context.Context, conn *substrate.Conn, tplKey, spKey string) {
+	t.Helper()
+	tplID := tplKey[len("vtx.service."):]
+	spID := spKey[len("vtx.serviceprovider."):]
+	key := "lnk.service." + tplID + ".providedBy.serviceprovider." + spID
+	doc := map[string]any{
+		"class": "providedBy", "isDeleted": false,
+		"sourceVertex": tplKey, "targetVertex": spKey,
+		"localName": "providedBy", "data": map[string]any{},
+	}
+	b, _ := json.Marshal(doc)
+	if _, err := conn.KVPut(ctx, testutil.HarnessCoreBucket, key, b); err != nil {
+		t.Fatalf("seed link %s: %v", key, err)
+	}
+}
+
+// TestRecordServiceOutcome_BoundProviderRecordsOwnOutcome proves the standing
+// guard's SUCCESS path: a serviceprovider identifiedBy-bound to a
+// serviceprovider that the instance's OWN template is providedBy may record
+// the outcome without ever naming the template — the script resolves it
+// itself from the instance's instanceOf link (instance_template, ddls.go),
+// never a payload field (Standard §readTemplateDebt).
+func TestRecordServiceOutcome_BoundProviderRecordsOwnOutcome(t *testing.T) {
+	ctx, conn := setupServiceEnv(t)
+	cp, cons := newServicePipeline(t, ctx, conn, "bound-provider")
+
+	tplKey := createTemplate(t, ctx, conn, cp, cons, "backgroundCheck")
+
+	applicantKey := "vtx.identity.BBboundApp1icHJKMNPQ"
+	seedVertex(t, ctx, conn, applicantKey, "identity", map[string]any{"state": "claimed"})
+
+	instReqID := testutil.GenReqID("boundInstance1")
+	instKey := "vtx.service." + nanoIDFromRequestID(instReqID)
+	testutil.PublishOp(t, conn, &processor.OperationEnvelope{
+		RequestID:     instReqID,
+		Lane:          processor.LaneDefault,
+		OperationType: "CreateServiceInstance",
+		Actor:         svcStaffActorKey,
+		SubmittedAt:   time.Now().UTC().Format(time.RFC3339),
+		Class:         "service",
+		Payload:       json.RawMessage(`{"family":"backgroundCheck","template":"` + tplKey + `","providedTo":"` + applicantKey + `"}`),
+		ContextHint:   &processor.ContextHint{Reads: []string{tplKey, applicantKey}},
+	})
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
+
+	const providerID = "BBboundprovidrHJKMNP"
+	providerKey := "vtx.identity." + providerID
+	spKey := "vtx.serviceprovider.BBboundspHJKMNPQRSTU"
+	seedVertex(t, ctx, conn, spKey, "serviceprovider", nil)
+	seedIdentifiedByLink(t, ctx, conn, spKey, providerKey)
+	seedProvidedByServiceProviderLink(t, ctx, conn, tplKey, spKey)
+	testutil.SeedCapDoc(t, ctx, conn, &processor.CapabilityDoc{
+		Key:                    "cap.identity." + providerID,
+		Actor:                  providerKey,
+		Version:                "1.0",
+		ProjectedAt:            time.Now().UTC().Format(time.RFC3339Nano),
+		ProjectedFromRevisions: map[string]uint64{providerKey: 1},
+		Lanes:                  []string{"default"},
+		PlatformPermissions: []processor.PlatformPermission{
+			{OperationType: "RecordServiceOutcome", Scope: "any"},
+		},
+		ServiceAccess:   []processor.ServiceAccessEntry{},
+		EphemeralGrants: []processor.EphemeralGrant{},
+		Roles:           []string{"vtx.role." + pkgmgr.RoleID("identity-domain", "provider")},
+	})
+
+	spID := spKey[len("vtx.serviceprovider."):]
+	env := &processor.OperationEnvelope{
+		RequestID:     testutil.GenReqID("boundRecord001"),
+		Lane:          processor.LaneDefault,
+		OperationType: "RecordServiceOutcome",
+		Actor:         providerKey,
+		SubmittedAt:   time.Now().UTC().Format(time.RFC3339),
+		Class:         "service",
+		// No "template" field at all — the guard resolves it itself.
+		Payload: json.RawMessage(`{"instanceKey":"` + instKey + `","status":"completed","completedAt":"2026-06-18T14:00:00Z"` +
+			`,"serviceprovider":"` + spKey + `"}`),
+		ContextHint: &processor.ContextHint{
+			Reads:         []string{instKey},
+			OptionalReads: []string{"lnk.serviceprovider." + spID + ".identifiedBy.identity." + providerID},
+		},
+	}
+	outcome, reply := testutil.SubmitAndAwaitReply(t, ctx, conn, cp, cons, env)
+	if outcome != processor.OutcomeAccepted {
+		msg := ""
+		if reply.Error != nil {
+			msg = string(reply.Error.Code) + ": " + reply.Error.Message
+		}
+		t.Fatalf("outcome = %v, want Accepted: %s", outcome, msg)
+	}
+
+	doc := readDoc(t, ctx, conn, instKey+".outcome")
+	data, _ := doc["data"].(map[string]any)
+	if got, _ := data["status"].(string); got != "completed" {
+		t.Fatalf("outcome.status = %q, want completed", got)
+	}
+}
