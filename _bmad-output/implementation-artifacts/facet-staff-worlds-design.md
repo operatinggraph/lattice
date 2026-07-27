@@ -808,4 +808,43 @@ the top fails the role-vertex-health test. Neither test passes for free.
 flips `.state` via `UpdateIdentityState` because it cannot run the device-credential ceremony — so nothing
 in the demo world exercises the real claim path end-to-end, and the collision this fire fixed was therefore
 invisible to every gate. `TestClaimIdentity_ConsumerGrantAlreadyHeld_Succeeds` covers it at the package
-level; the live path has no walker.
+level; the live path has no walker. **Superseded by §13.1 — the walker now exists, and found a second,
+distinct brick this residual predicted but could not see.**
+
+## 13.1 The live path has a walker now, and it found a live capability-projection gap (Winston, 2026-07-27)
+
+**Scope sentence (from the board row, verbatim):** *"Nothing walks the real claim ceremony"* — built
+`scripts/verify-claim-ceremony.go` / `make test-claim-ceremony`, mirroring `verify-real-actor-write-auth.go`:
+mints a staff-minted unclaimed identity, mints a brand-new RS256 dev token for a never-before-seen device
+subject, and drives `ClaimIdentity` through the real Gateway (retrying through the known
+`isTransientAuthLag` race `cmd/facet/claim.go` already handles), then a second never-before-seen device
+replaying the same claim.
+
+**The walker works, and it found a real, reproducible gap the unit-level regression above cannot see.**
+Confirmed live, twice, with different NanoIDs each time:
+
+| Fact | Evidence |
+|---|---|
+| The claim itself succeeds: `.state` → `claimed`, `.claimKey` tombstoned | `verify-claim-ceremony.go` assertions, both runs |
+| The R2 grant link (`lnk.identity.<target>.holdsRole.role.<consumer>`) lands correctly in Core KV — `isDeleted:false`, correct source/target | `lattice graph read`, both runs |
+| `cap.roles.<target>` (or `cap.identity.<target>`) is **never created** — `NotFound`, still absent minutes later, **after** a completed `capabilityRoles` sweep pass (`sweepLastPassAt` postdates the write) | `lattice query cap`, `lattice lens lag` |
+| It is not a Terminal failure reaching the DLQ — `REFRACTOR_DLQ_CAPABILITYROLES` (or any `REFRACTOR_DLQ_*`) stream does not exist | `nats stream ls` against the live stack |
+| The device credential's OWN grant (written by `ProvisionConsumerIdentity`, same request, same link shape) projects correctly and promptly every time | `verify-claim-ceremony.go`, both runs |
+
+**Leading hypothesis (grounded, not confirmed — needs the live NATS-level check below).** §13's own fix
+made this exact write a genuinely **unconditioned** `Put` — `internal/processor/step8_commit.go:191-215`,
+`prior[m.Key].Found == false` for a first-ever grant, so `HasRevision` stays `false` — the *first live
+exercise* of that code path against a real Refractor (the unit-level regression tests it against
+`testutil`'s harness pipeline, not the production CDC/lens-fanout path). That unconditioned member still
+rides inside the SAME atomic multi-key batch as the conditioned `.state`/`.claimKey` writes, published via
+NATS's atomic-batch headers (`Nats-Batch-Id`/`-Sequence`/`-Commit`, `internal/substrate/batch.go:335-360` —
+per `docs/vendors.md`, atomic batch is NATS 2.12+, our pin 2.14, no ADR number on file for it yet). Refractor's
+own fan-out dispatch was verified (read-only, this fire) to key purely on KV key-shape + body, never
+op-type, and JetStream stream-sequence ordering is monotonic — so a **batch-commit vs per-subject-watch
+delivery gap specific to an unconditioned member of an atomic batch** is the lead suspect. **Ground this in
+the pinned nats-server 2.14 source / `nats-io/nats-architecture-and-design` ADRs before touching code**
+(CLAUDE.md's vendor rule) — do not guess at a fix.
+
+**Not filed as a residual — filed as its own row** (this is what the walker was built to catch, and it
+caught it): see `lattice.md` `[Refractor] A live claim's own consumer grant never projects into Capability
+KV`. Reproduce with `make test-claim-ceremony` against a running `make up-full-capability` stack.
