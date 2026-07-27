@@ -76,7 +76,7 @@ dated run-logs live in git history. Rotate LoftSpace ↔ Clinic ↔ Café ↔ We
 
 One line per shipped item (`date · SHA · title`). Oldest roll to `archive/` past ~25.
 
-- 2026-07-27 · `PENDING` · `RecordServiceOutcome` resolves its own template off the instance's link too; only the caller-asserted `serviceprovider` hop stays debt
+- 2026-07-27 · `d2ae444f` · `RecordServiceOutcome` resolves its own template off the instance's link too; only the caller-asserted `serviceprovider` hop stays debt
 - 2026-07-27 · `023359f5` · `DecideLeaseApplication` stamps tenancy off its own resolved unit, not a payload field a decline never carries; closes 1 of 2 readTemplateDebt entries
 - 2026-07-27 · `526edfdf` · The claim ceremony gets a live walker — it found a live capability-projection gap the unit tests couldn't see; bug filed to lattice.md, repro `make test-claim-ceremony`. facet-staff-worlds §13.1
 - 2026-07-27 · `5c914479` · A pre-existing identity acquires the consumer grant the Gateway promises it — bound personas reach the 20 self-service ops; absent-only, so a RevokeRole holds. facet-staff-worlds §13
