@@ -691,3 +691,86 @@ in three packages, which is why it gets its own row rather than a silent diverge
 availability, so it would be scaffolding with no consumer), and no `consumer`-role backfill — that remains
 its own row, and this fire is evidence for how it should go: record-administering self-service rides the
 entity `provider` role plus an in-script binding guard, not a `consumer` scope=self grant.
+
+## 13. A pre-existing identity acquires the `consumer` grant the Gateway promises it — fire brief (Winston, 2026-07-27)
+
+**Scope sentence (from the board row, verbatim):** *"`ProvisionConsumerIdentity` is first-touch only, so the
+Gateway cannot backfill `consumer` onto a pre-existing seeded identity — only `seedTenant`/`seedLandlord`
+grant it. The bound provider / serviceprovider / instructor personas therefore hold their entity role alone
+and can reach no `consumer` scope=self grant. Needs a sweep of which self-service ops that actually closes
+off."*
+
+**The sweep the row asks for (done this fire).** Twenty ops carry a `consumer` scope=self grant, and a bound
+persona holding only the generic `provider` role can reach **none** of them: `ClaimIdentity`,
+`InitiateCredentialLink`, `CompleteCredentialLink`, `UnlinkCredential` (identity-domain) · `CreateAppointment`,
+`RescheduleAppointment`, `SetAppointmentStatus` (clinic) · `CreateLeaseApplication`,
+`WithdrawLeaseApplication`, `DecideLeaseApplication`, `SetApplicantProfile`, `SetRenewalTerms`,
+`VerifyGuarantor`, `CancelRenewal` (lease-signing) · `SetListingStatus` (loftspace) · `CreateBooking`,
+`CancelBooking` (wellness) · `OpenTab`, `Charge`, `Settle` (café). §12 established that a bound persona's
+*record-administering* op rides the entity role plus a binding guard — this row is the complement: everything
+a bound persona does **as a resident/patient/member of the building**, which is exactly the `consumer` plane.
+
+**Grounding ledger (verified `file:line` this fire).**
+
+| Fact | Where |
+|---|---|
+| The already-exists branch returns a blanket no-op — the sole blocker; nothing else in the op is gated on first touch | `packages/identity-domain/ddls.go:809-815` |
+| The Gateway submits for **any** verified actor; its `provisioned` set is a bounded latency cache whose false miss "just re-runs the idempotent op", so correctness never depended on skipping | `internal/gateway/gateway.go:139-166`, `:628-631` |
+| The single runtime dispatcher declares `Reads:[consumerRoleKey]` + `OptionalReads:[actorID]` — no link key | `internal/gateway/gateway.go:664-667` |
+| The premise is already documented in-tree as a workaround: a seeded persona "must be granted it here" via `AssignRole` | `scripts/seed-showcase.go:1191-1194` |
+| All three bind-ops grant the entity `provider` role only, never `consumer` | `clinic-domain/ddls.go:1447-1462`, `service-domain/ddls.go:795-817`, `wellness-domain/ddls.go:2491-2514` |
+| Bound personas are minted `CreateUnclaimedIdentity`, so they sit at `state=unclaimed` and are never claimed — the grant must **not** gate on claim state or it would exclude the exact personas at issue | `scripts/seed-showcase.go:854-858`, `:925-929`, `:1046` |
+| `identity.provisioned` has no `meta.ddl.eventType` entry and none is required for emission (the §3.4 validator is a no-op) | `packages/identity-domain/revocation.go:113-118` |
+
+**Precedent to mirror: `AssignRole`'s `grant_link`** (`rbac-domain/ddls.go:164-175`, `:352-374`) — the
+three-state grant read off the hydrated snapshot: alive → empty mutations, tombstoned → `revive_link` update,
+absent → create. Reviving needs the tombstoned revision, which is why the deterministic link key must be a
+caller-declared `optionalReads` entry (`revive_link`'s own comment, `:149-158`).
+
+**The one deliberate divergence from that precedent — the grant is absent-only, never revive-aware.**
+`AssignRole`'s revive branch exists because an **operator** explicitly re-grants. Here the caller is an
+automatic per-request pre-flight, so reviving would mean a `RevokeRole` on `consumer` is undone by the
+revoked actor's very next request — a revocation that silently does not hold. Tombstoned therefore stays
+tombstoned: absent → create, alive → no-op, tombstoned → no-op. (`RevokeActor`'s token kill-switch is a
+different mechanism and already refuses the request upstream at 403; this protects the *role* revocation.)
+
+**Why the declaration is load-bearing, not hygiene.** Without the link key in the read set, an already-granted
+actor hydrates it as *absent*, the script emits a `create`, and create-only conditioning asserts revision 0
+against a live key → `RevisionConflict` on every authenticated request. Fail-closed (no wrong grant is ever
+written) but it would turn a silent no-op into permanent op churn, so the dispatcher declaration and the
+script branch ship together. The existing
+`TestProvisionConsumerIdentity_AlreadyProvisioned_Idempotent` declares no `ContextHint` and therefore
+**must** be updated in the same increment — its failure is the proof the declaration carries weight.
+
+**Touch-list (verified `file:line`).**
+
+- `packages/identity-domain/ddls.go` — hoist the `consumerRoleKey` literal pin + role-vertex read above the
+  existence check (`:824-833`), then replace the blanket no-op (`:809-815`) with the three-state ensure;
+  op-meta `ExpectedOutcome` (`:205-207`) states "Already-provisioned actor: no-op"; `package.go:33` version.
+- `internal/gateway/gateway.go:664-667` — add the deterministic
+  `lnk.identity.<actorId>.holdsRole.role.<roleId>` to `OptionalReads` (class (d): a first-touch actor
+  legitimately has none, so never `Reads`).
+- `scripts/seed-showcase.go:1182-1198` — the comment asserts a seeded persona "can never acquire the role
+  that way"; it must describe what the code does now, and the explicit `AssignRole` still earns its keep for
+  a persona that never signs in.
+- Tests: `packages/identity-domain/provision_test.go` (backfill onto an identity holding another role ·
+  revoked-grant-stays-revoked · declare the link in the idempotent test) ·
+  `internal/gateway/gateway_test.go` (pin the `OptionalReads` entry so a refactor cannot silently drop it).
+
+**Increment order + green checks.** Inc 1 script + dispatcher + tests (one unit — they are correctness-coupled
+per the paragraph above). `go build ./...` · `make vet` · `golangci-lint run ./...` ·
+`STRICT=1 go run ./scripts/lint-conventions.go` · `go run ./scripts/lint-package-standard.go` ·
+`go run ./scripts/lint-package-version.go` · `go test ./packages/identity-domain/... ./internal/gateway/...`.
+
+**In-scope gotchas.** (a) Do **not** gate on `state`: the personas are `unclaimed` (ledger above), so a
+claimed-only guard would silently exclude every one of them. (b) Do gate on the identity vertex being alive —
+a tombstoned identity must not acquire a role. (c) The backfill branch may return
+`primaryKey = <link key>` only because the link is in its own write footprint; the pre-existing branch
+returned no response precisely because `targetActorKey` is not. (d) A package edit needs a version bump or
+the reinstall silently no-ops. (e) The role key stays pinned to the package literal — the payload field is
+never trusted, since `operator` may also call this op.
+
+**Non-goals (deliberate).** No new role, no change to which ops grant `consumer`, no change to
+`ClaimIdentity` (it already grants at claim time), and no removal of `seed-showcase`'s explicit `AssignRole`
+(a seeded persona that never authenticates still needs it). Not a widening of who may call the op: the
+grant's subject is always the authenticated actor the Gateway verified.
