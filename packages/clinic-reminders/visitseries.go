@@ -829,11 +829,21 @@ RETURN
 // visitSeriesReadLens is the PATIENT-anchored protected Postgres read model for
 // the recurring-visit-series view (D1.5, mirroring clinic-domain's
 // clinicAppointmentsRead). cmd/clinic-app's handleMyVisitSeries reads it as the
-// patient's own view: RLS scopes the read to the verified JWT subject. The
-// clinic-wide STAFF worklist reads THIS SAME table via handleStaffVisitSeries,
-// under the reserved WildcardAnchor grant (no separate staff projection
-// needed — the same mechanism handleStaffAppointments uses against
-// clinicAppointmentsRead).
+// patient's own view: RLS scopes the read to the verified JWT subject. Staff
+// reach it two ways: cmd/clinic-app's handleStaffVisitSeries under the reserved
+// WildcardAnchor grant (no separate staff projection needed — the same
+// mechanism handleStaffAppointments uses against clinicAppointmentsRead), and
+// cmd/facet's narrower frontOfHouse worklist pane via the workplace token below
+// (facet-staff-worlds-design.md §3.5's staffReadGrants).
+//
+// authz_anchors carries the patient's own NanoID plus the WORKPLACE token — the
+// building the series' provider practises at — mirroring
+// clinicAppointmentsReadSpec exactly (clinic-domain/lenses.go): front-desk
+// staff working that building read the row through service-location's
+// staffReadGrants. The workplace half is a pattern COMPREHENSION, not a second
+// array element — a walk that finds no building yields [] rather than a NULL
+// element, which ProtectedAdapter.toStringSlice would reject and fail the
+// whole row's upsert, hiding the series from its own patient too.
 //
 // forPatient is a REQUIRED match (the anchor walk) so a series with no
 // patient link projects NO row — fail-closed, mirroring
@@ -886,7 +896,8 @@ RETURN
   s.progress.data.nextDueAt     AS next_due_at,
   s.progress.data.occurrenceCount AS occurrence_count,
   ((s.paused.data.value <> true) AND ((s.series.data.activeUntil = null) OR (s.progress.data.nextDueAt <= s.series.data.activeUntil))) AS active,
-  [nanoIdFromKey(p.key)]        AS authz_anchors
+  [nanoIdFromKey(p.key)] + [(pr)-[:practicesAt]->(b:building) | nanoIdFromKey(b.key)]
+                                 AS authz_anchors
 `
 
 // visitSeriesDueTarget returns the §10.8 playbook: the single missing_series_advance gap →
@@ -955,10 +966,12 @@ func visitSeriesPermissions() []pkgmgr.PermissionSpec {
 // and the submission recipe (edge-showcase-app-design.md §3.3).
 //
 // Complete metadata is not the same as a rendered button: a client also has to
-// resolve TargetType against something it projects, and Facet's context carries
-// no patient or visitseries entity today, so it degrades these rather than
-// offering them. That is a gap in what the client projects, not in what the
-// descriptor says; the descriptor is what makes closing it possible at all.
+// resolve TargetType against something it projects. patient/visitseries carry
+// PII a patient's name would put on the broadcast SYNC plane, so — unlike the
+// mirror-projected types (session, provider, studio, tab, booking) — Facet
+// resolves these two from the session-scoped Protected staff-worklist pane
+// (cmd/facet/staff.go's /api/staff/worklist, reading visitSeriesRead below),
+// never from a manifest.ent row.
 //
 // All three are AuthContext "standing": permissions.go grants them scope=any to
 // operator + frontOfHouse, so the caller's authority is a standing role rather
@@ -996,7 +1009,7 @@ func visitSeriesOpMetas() []pkgmgr.OpMetaSpec {
 			},
 			InputSchema: `{"type":"object","properties":` +
 				`{"patientKey":{"type":"string","description":"vtx.patient.<NanoID> the series is for — auto-filled from the patient being viewed."},` +
-				`"providerKey":{"type":"string","description":"vtx.provider.<NanoID> the series is with."},` +
+				`"providerKey":{"type":"string","x-entityRef":"provider","description":"vtx.provider.<NanoID> the series is with."},` +
 				`"intervalDays":{"type":"integer","minimum":1,"description":"Days between visits."},` +
 				`"startAt":{"type":"string","description":"When the first visit falls due, RFC3339."},` +
 				`"activeUntil":{"type":"string","description":"When the series stops re-arming, RFC3339. Omit for open-ended."}},` +

@@ -5,10 +5,12 @@ package clinicreminders
 // drive visitSeriesReadSpec through the same `full` engine selected at
 // activation (engine:"full"), against an embedded NATS Core/Adjacency KV, and
 // assert the ENGINE PROJECTION ROW: the display scalars hop correctly and —
-// the headline — authz_anchors carries exactly the patient's bare NanoID. The
-// Postgres RLS round-trip is the platform-side proof (cmd/clinic-app's
-// visitseries_test.go, gated on POSTGRES_TEST_DSN); the cypher's anchor
-// derivation is proven here.
+// the headline — authz_anchors carries the patient's bare NanoID plus the
+// series' provider's workplace token, when one is wired (workplace_anchor_test.go
+// pins the comprehension; TestVisitSeriesRead_AnchorsProviderWorkplace below
+// proves the token appears). The Postgres RLS round-trip is the platform-side
+// proof (cmd/clinic-app's visitseries_test.go, gated on POSTGRES_TEST_DSN);
+// the cypher's anchor derivation is proven here.
 
 import (
 	"testing"
@@ -31,9 +33,11 @@ func (f *remFixture) seedVisitSeries(t *testing.T, seriesName, patientName, prov
 
 // TestVisitSeriesRead_ProjectsPatientSelfAnchor — the protected read model
 // projects one row per series carrying the display scalars and an
-// authz_anchors set of exactly the patient's bare NanoID (§6.14). This is the
-// grant RLS matches: the base cap-read.<actor> self-anchor grants the patient
-// their own NanoID, so the row is readable by the patient and nobody else.
+// authz_anchors set of exactly the patient's bare NanoID (§6.14) WHEN the
+// series' provider carries no practicesAt link, as this fixture's does not
+// (TestVisitSeriesRead_AnchorsProviderWorkplace covers the wired case). This
+// is the grant the base cap-read.<actor> self-anchor matches: the patient's
+// own NanoID grants them the row.
 func TestVisitSeriesRead_ProjectsPatientSelfAnchor(t *testing.T) {
 	if testing.Short() {
 		t.Skip("requires NATS")
@@ -141,4 +145,75 @@ func TestVisitSeriesRead_PausedProjectsInactive(t *testing.T) {
 	rows := f.project(t, visitSeriesReadSpec)
 	require.Len(t, rows, 1)
 	require.Equal(t, false, rows[0].Values["active"], "paused series projects active=false")
+}
+
+// TestVisitSeriesRead_AnchorsProviderWorkplace — authz_anchors carries the
+// patient's own NanoID PLUS the workplace token (the building the series'
+// provider practises at), mirroring clinicAppointmentsReadSpec exactly. This
+// is what lets cmd/facet's frontOfHouse worklist pane read a workplace's
+// series through service-location's staffReadGrants, without a WildcardAnchor.
+func TestVisitSeriesRead_AnchorsProviderWorkplace(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newRemFixture(t)
+	f.seedVisitSeries(t, "series", "alice", "drsam")
+	f.vtx(t, "riverside", "building")
+	f.edge(t, "practicesAt", "drsam", "riverside")
+
+	rows := f.project(t, visitSeriesReadSpec)
+	require.Len(t, rows, 1)
+	anchors, ok := rows[0].Values["authz_anchors"].([]any)
+	require.True(t, ok, "authz_anchors must project as a list")
+	require.Equal(t, []any{f.ids["alice"], f.ids["riverside"]}, anchors,
+		"authz_anchors must carry the patient anchor first, then the provider's workplace token")
+}
+
+// TestVisitSeriesRead_ProviderWithNoWorkplaceStillProjects — a provider who
+// practises nowhere costs the row its staff visibility, never its existence
+// (§ the null-element hazard the pattern comprehension exists to avoid): the
+// series still projects, anchored to the patient alone.
+func TestVisitSeriesRead_ProviderWithNoWorkplaceStillProjects(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newRemFixture(t)
+	f.seedVisitSeries(t, "series", "alice", "drsam") // drsam has no practicesAt link
+
+	rows := f.project(t, visitSeriesReadSpec)
+	require.Len(t, rows, 1)
+	anchors, ok := rows[0].Values["authz_anchors"].([]any)
+	require.True(t, ok)
+	require.Equal(t, []any{f.ids["alice"]}, anchors,
+		"a workplace-less provider must cost the row its staff visibility, never the row itself")
+}
+
+// TestVisitSeriesRead_NoWithProviderLinkDoesNotLeakAnUnrelatedBuilding — a
+// series with NO withProvider link at all (pr unbound, not merely
+// workplace-less) must anchor to the patient alone even while an UNRELATED
+// series' provider practises somewhere: the comprehension starts from pr
+// itself, never a keyspace scan, so a null pr can never pick up a building
+// that belongs to a different provider entirely.
+func TestVisitSeriesRead_NoWithProviderLinkDoesNotLeakAnUnrelatedBuilding(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newRemFixture(t)
+	f.mkVisitSeries(t, "orphan", 30, "", "2026-08-01T09:00:00Z", 0, nil) // no withProvider link
+	f.vtx(t, "alice", "patient")
+	f.edge(t, "forPatient", "orphan", "alice")
+
+	f.seedVisitSeries(t, "series", "bob", "drsam")
+	f.vtx(t, "riverside", "building")
+	f.edge(t, "practicesAt", "drsam", "riverside")
+
+	rows := f.project(t, visitSeriesReadSpec)
+	require.Len(t, rows, 2)
+	byID := map[string][]any{}
+	for _, r := range rows {
+		byID[r.Values["series_id"].(string)] = r.Values["authz_anchors"].([]any)
+	}
+	require.Equal(t, []any{f.ids["alice"]}, byID[f.ids["orphan"]],
+		"a provider-less series must anchor to its patient alone, never an unrelated series' building")
+	require.Equal(t, []any{f.ids["bob"], f.ids["riverside"]}, byID[f.ids["series"]])
 }

@@ -85,3 +85,107 @@ test("the qualified flag renders three distinct states, not two", () => {
   assert.doesNotMatch(unknown, /qualified/);
   assert.doesNotMatch(unknown, /incomplete/);
 });
+
+// The Protected-pane dispatch wiring: a worklist row supplies ctx.entityKey
+// itself, straight to the SAME opButton/resolveTargetKey seam
+// the mirror browse view uses.
+const startSeriesOp = {
+  key: "vtx.meta.startvisitseriesop",
+  data: {
+    operationType: "StartVisitSeries",
+    dispatchClass: "visitseries",
+    dispatchTargetField: "patientKey",
+    dispatchTargetType: "patient",
+    title: "Start a visit series",
+    submitLabel: "Start series",
+    tone: "primary",
+  },
+};
+const pauseOp = {
+  key: "vtx.meta.pausevisitseriesop",
+  data: {
+    operationType: "PauseVisitSeries",
+    dispatchClass: "visitseries",
+    dispatchTargetField: "seriesKey",
+    dispatchTargetType: "visitseries",
+    title: "Pause visit series",
+    submitLabel: "Pause series",
+    tone: "neutral",
+  },
+};
+const resumeOp = {
+  key: "vtx.meta.resumevisitseriesop",
+  data: {
+    operationType: "ResumeVisitSeries",
+    dispatchClass: "visitseries",
+    dispatchTargetField: "seriesKey",
+    dispatchTargetType: "visitseries",
+    title: "Resume visit series",
+    submitLabel: "Resume series",
+    tone: "primary",
+  },
+};
+
+test("a schedule row with a patient key and the op offers Start series", () => {
+  const { worklistAppointmentRow } = loadApp();
+  const html = worklistAppointmentRow(
+    { appointmentId: "P1", patientKey: "vtx.patient.abc123", patientName: "Riley Chen" },
+    startSeriesOp,
+  );
+  assert.match(html, /data-open-op="vtx\.meta\.startvisitseriesop"/);
+  assert.match(html, /data-entity-key="vtx\.patient\.abc123"/);
+  assert.match(html, /Start series/);
+});
+
+test("a schedule row renders no Start-series button when the actor holds no such op", () => {
+  // startSeriesOp is undefined for an actor without the grant — the row must
+  // degrade by omitting the button, never by calling opButton with nothing.
+  const { worklistAppointmentRow } = loadApp();
+  const html = worklistAppointmentRow({ appointmentId: "P1", patientKey: "vtx.patient.abc123", patientName: "Riley Chen" });
+  assert.doesNotMatch(html, /data-open-op/);
+});
+
+test("an active series offers Pause, a paused series offers Resume, never both", () => {
+  const { worklistVisitSeriesRow } = loadApp();
+  const active = worklistVisitSeriesRow(
+    { entityKey: "vtx.visitseries.s1", patientName: "Riley Chen", active: true },
+    pauseOp, resumeOp,
+  );
+  assert.match(active, /Pause series/);
+  assert.doesNotMatch(active, /Resume series/);
+  assert.match(active, /data-entity-key="vtx\.visitseries\.s1"/);
+
+  const paused = worklistVisitSeriesRow(
+    { entityKey: "vtx.visitseries.s2", patientName: "Riley Chen", active: false },
+    pauseOp, resumeOp,
+  );
+  assert.match(paused, /Resume series/);
+  assert.doesNotMatch(paused, /Pause series/);
+});
+
+test("a visit series row with no patient name costs the label, never the row, and never a bare NanoID as the label", () => {
+  // entityKey legitimately appears in data-entity-key (the dispatch
+  // attribute); the display-label floor rule is about the VISIBLE title, so
+  // this checks that span specifically rather than the whole markup.
+  const { worklistVisitSeriesRow } = loadApp();
+  const html = worklistVisitSeriesRow({ entityKey: "vtx.visitseries.s3", active: true }, pauseOp, resumeOp);
+  assert.match(html, /timeline-item/);
+  const title = html.match(/<span class="title">([^<]*)<\/span>/);
+  assert.equal(title && title[1], "Patient");
+});
+
+test("the worklist pane lists a Recurring visit series category", () => {
+  const { worklistHTML } = loadApp();
+  const html = worklistHTML(
+    { status: "ready", applications: [], schedule: [], visitSeries: [{ entityKey: "vtx.visitseries.s1", patientName: "Riley Chen", active: true }], day: "2026-07-20" },
+    "Riverside",
+  );
+  assert.match(html, /Recurring visit series/);
+  assert.match(html, /Riley Chen/);
+});
+
+test("a worklist with no visitSeries field (back-compat) still renders", () => {
+  const { worklistHTML } = loadApp();
+  const html = worklistHTML({ status: "ready", applications: [], schedule: [], day: "2026-07-20" }, "Riverside");
+  assert.match(html, /No recurring series at this workplace/);
+});

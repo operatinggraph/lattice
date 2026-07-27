@@ -48,13 +48,25 @@ func TestHandleStaffWorklist_ReportsUnconfiguredReadModel(t *testing.T) {
 // staff actor holding no worksAt link must read zero rows because it holds no
 // tokens, not because a filter happened to match nothing.
 func TestStaffWorklistSQL_CarriesNoWorkplacePredicate(t *testing.T) {
-	for _, sql := range []string{selectStaffApplicationsSQL, selectStaffScheduleSQL} {
+	for _, sql := range []string{selectStaffApplicationsSQL, selectStaffScheduleSQL, selectStaffVisitSeriesSQL} {
 		lower := strings.ToLower(sql)
 		for _, banned := range []string{"actor", "landlord_id", "building", "workplace", "works_at", "clinic_id", "lattice.actor_id"} {
 			require.NotContains(t, lower, banned,
 				"the worklist queries must not filter by actor or workplace — RLS is the boundary (%q)", banned)
 		}
 	}
+}
+
+// TestStaffVisitSeriesSQL_HasNoActiveOnlyFilter — the pane must offer BOTH
+// Pause and Resume, so a paused series must still be readable: an active-only
+// WHERE would make a paused series permanently unreachable to Resume from
+// Facet once front desk paused it.
+func TestStaffVisitSeriesSQL_HasNoActiveOnlyFilter(t *testing.T) {
+	lower := strings.ToLower(selectStaffVisitSeriesSQL)
+	require.NotContains(t, lower, "where",
+		"selectStaffVisitSeriesSQL must not filter by active — a paused series must stay readable to Resume it")
+	require.Contains(t, lower, "active",
+		"the active column itself must still be selected — the WHERE-absence check above is vacuous otherwise")
 }
 
 // TestStaffScheduleSQL_ExcludesClinicalContent — a front-desk worklist's

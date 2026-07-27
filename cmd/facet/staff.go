@@ -34,14 +34,35 @@ type staffApplicationRow struct {
 }
 
 // staffAppointmentRow is one row of today's schedule at the reader's workplace.
+// PatientKey is the vtx.patient.<NanoID> StartVisitSeries dispatches against —
+// the patient resolves as a dispatch target from this row, never from the
+// SYNC-plane mirror (facet-entity-browse-design.md §6).
 type staffAppointmentRow struct {
 	AppointmentID     string `json:"appointmentId"`
+	PatientKey        string `json:"patientKey"`
 	StartsAt          string `json:"startsAt"`
 	EndsAt            string `json:"endsAt"`
 	Status            string `json:"status"`
 	PatientName       string `json:"patientName"`
 	ProviderName      string `json:"providerName"`
 	ProviderSpecialty string `json:"providerSpecialty"`
+}
+
+// staffVisitSeriesRow is one row of the reader's workplace's recurring visit
+// series — both active and paused, so the pane can offer Pause and Resume.
+// EntityKey is the vtx.visitseries.<NanoID> Pause/ResumeVisitSeries dispatch
+// against; unlike the schedule/applications rows, a series is not bound to a
+// single day.
+type staffVisitSeriesRow struct {
+	SeriesID          string `json:"seriesId"`
+	EntityKey         string `json:"entityKey"`
+	PatientKey        string `json:"patientKey"`
+	PatientName       string `json:"patientName"`
+	ProviderName      string `json:"providerName"`
+	ProviderSpecialty string `json:"providerSpecialty"`
+	IntervalDays      int32  `json:"intervalDays"`
+	NextDueAt         string `json:"nextDueAt"`
+	Active            bool   `json:"active"`
 }
 
 // selectStaffApplicationsSQL reads the pending-decision slice of the landlord
@@ -66,33 +87,50 @@ LIMIT 200`
 // starts_at is an ISO-8601 text column, so a lexicographic half-open range is
 // an exact day filter.
 const selectStaffScheduleSQL = `
-SELECT appointment_id, starts_at, ends_at, status,
+SELECT appointment_id, patient_key, starts_at, ends_at, status,
        patient_name, provider_name, provider_specialty
 FROM read_clinic_appointments
 WHERE starts_at >= $1 AND starts_at < $2
 ORDER BY starts_at
 LIMIT 200`
 
-// queryStaffWorklist runs both worklist reads inside ONE transaction with a
-// single txn-local actor session variable — the credentials.go shape, extended
-// to two SELECTs so both panes observe the same grant state. actorID must be
-// the session identity's own bare NanoID; nothing here accepts a caller-supplied
-// actor or workplace.
-func queryStaffWorklist(ctx context.Context, pool pgxBeginner, actorID string, dayStart, dayEnd string) ([]staffApplicationRow, []staffAppointmentRow, error) {
+// selectStaffVisitSeriesSQL reads the workplace's recurring visit series. No
+// day bound and no active-only filter (unlike the schedule above) — a series
+// is not a scheduled instant, and the pane must show paused ones too, or
+// front desk could never find one to Resume. interval_days and active are
+// COALESCEd (mirroring cmd/clinic-app/visitseries.go's selectMyVisitSeriesSQL
+// against this same table): the MATCH admits a visitseries vertex whose
+// .series/.progress aspects haven't landed, and both scan into non-nullable
+// Go fields — a raw NULL there would fail the whole row's Scan and take the
+// applications and schedule sections down with it, not just this one.
+// entity_key breaks ties so the 200-row page is stable across requests.
+const selectStaffVisitSeriesSQL = `
+SELECT series_id, entity_key, patient_key, patient_name,
+       provider_name, provider_specialty, COALESCE(interval_days, 0), next_due_at, COALESCE(active, false)
+FROM read_visit_series
+ORDER BY next_due_at NULLS LAST, entity_key
+LIMIT 200`
+
+// queryStaffWorklist runs all three worklist reads inside ONE transaction with
+// a single txn-local actor session variable — the credentials.go shape,
+// extended to three SELECTs so every pane observes the same grant state.
+// actorID must be the session identity's own bare NanoID; nothing here
+// accepts a caller-supplied actor or workplace.
+func queryStaffWorklist(ctx context.Context, pool pgxBeginner, actorID string, dayStart, dayEnd string) ([]staffApplicationRow, []staffAppointmentRow, []staffVisitSeriesRow, error) {
 	tx, err := pool.Begin(ctx)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	defer tx.Rollback(ctx)
 
 	if _, err := tx.Exec(ctx, "SELECT set_config('lattice.actor_id', $1, true)", actorID); err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 
 	apps := []staffApplicationRow{}
 	rows, err := tx.Query(ctx, selectStaffApplicationsSQL)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	for rows.Next() {
 		var a staffApplicationRow
@@ -101,43 +139,65 @@ func queryStaffWorklist(ctx context.Context, pool pgxBeginner, actorID string, d
 		if err := rows.Scan(&a.AppID, &applicantName, &unitAddress, &unitCity,
 			&signedAt, &moveIn, &a.Qualified, &rent); err != nil {
 			rows.Close()
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
 		a.ApplicantName, a.UnitAddress, a.UnitCity = applicantName.val, unitAddress.val, unitCity.val
 		a.SignedAt, a.MoveInDate, a.RequestedRent = signedAt.val, moveIn.val, rent.val
 		apps = append(apps, a)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	rows.Close()
 
 	sched := []staffAppointmentRow{}
 	rows2, err := tx.Query(ctx, selectStaffScheduleSQL, dayStart, dayEnd)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	for rows2.Next() {
 		var s staffAppointmentRow
 		var startsAt, endsAt, status, patientName, providerName, specialty pgtypeText
-		if err := rows2.Scan(&s.AppointmentID, &startsAt, &endsAt, &status,
+		if err := rows2.Scan(&s.AppointmentID, &s.PatientKey, &startsAt, &endsAt, &status,
 			&patientName, &providerName, &specialty); err != nil {
 			rows2.Close()
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
 		s.StartsAt, s.EndsAt, s.Status = startsAt.val, endsAt.val, status.val
 		s.PatientName, s.ProviderName, s.ProviderSpecialty = patientName.val, providerName.val, specialty.val
 		sched = append(sched, s)
 	}
 	if err := rows2.Err(); err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	rows2.Close()
 
-	if err := tx.Commit(ctx); err != nil {
-		return nil, nil, err
+	series := []staffVisitSeriesRow{}
+	rows3, err := tx.Query(ctx, selectStaffVisitSeriesSQL)
+	if err != nil {
+		return nil, nil, nil, err
 	}
-	return apps, sched, nil
+	for rows3.Next() {
+		var v staffVisitSeriesRow
+		var patientName, providerName, specialty, nextDueAt pgtypeText
+		if err := rows3.Scan(&v.SeriesID, &v.EntityKey, &v.PatientKey, &patientName,
+			&providerName, &specialty, &v.IntervalDays, &nextDueAt, &v.Active); err != nil {
+			rows3.Close()
+			return nil, nil, nil, err
+		}
+		v.PatientName, v.ProviderName, v.ProviderSpecialty, v.NextDueAt =
+			patientName.val, providerName.val, specialty.val, nextDueAt.val
+		series = append(series, v)
+	}
+	if err := rows3.Err(); err != nil {
+		return nil, nil, nil, err
+	}
+	rows3.Close()
+
+	if err := tx.Commit(ctx); err != nil {
+		return nil, nil, nil, err
+	}
+	return apps, sched, series, nil
 }
 
 // pgtypeText / pgtypeFloat scan a nullable column into its zero value. Every
@@ -204,7 +264,7 @@ func (s *server) handleStaffWorklist(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 	defer cancel()
 
-	apps, sched, err := queryStaffWorklist(ctx, s.pgPool, identityID, dayStart, dayEnd)
+	apps, sched, series, err := queryStaffWorklist(ctx, s.pgPool, identityID, dayStart, dayEnd)
 	if err != nil {
 		s.logger.Error("facet: read staff worklist", "identityId", identityID, "err", err)
 		s.writeError(w, http.StatusBadGateway, "could not read the protected staff worklist models")
@@ -213,6 +273,7 @@ func (s *server) handleStaffWorklist(w http.ResponseWriter, r *http.Request) {
 	s.writeJSON(w, http.StatusOK, map[string]any{
 		"applications": apps,
 		"schedule":     sched,
+		"visitSeries":  series,
 		"day":          dayStart[:10],
 	})
 }

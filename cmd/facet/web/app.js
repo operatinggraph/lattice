@@ -221,7 +221,7 @@ const state = {
   // deliberately NOT in `rows`, because those mirror onto the device and this
   // must not: it is cross-identity Protected data, session-scoped, and
   // unavailable offline while the manifest half keeps working.
-  worklist: { status: "idle", applications: [], schedule: [], day: "" },
+  worklist: { status: "idle", applications: [], schedule: [], visitSeries: [], day: "" },
   // Host↔NATS connectivity, mirrored from the connectivity frame. Defaults
   // TRUE so a device that has not yet heard a frame does not accuse itself of
   // being offline.
@@ -974,6 +974,7 @@ function loadWorklist() {
         status: "ready",
         applications: body.applications || [],
         schedule: body.schedule || [],
+        visitSeries: body.visitSeries || [],
         day: body.day || "",
       };
       scheduleRender();
@@ -1085,6 +1086,17 @@ function worklistHTML(w, where) {
   if (w.status === "idle" || w.status === "loading") {
     return `<div class="empty">Loading…</div>`;
   }
+  const series = w.visitSeries || [];
+  // Op descriptors are looked up once here (manifest.op mirror rows, never
+  // PII) and passed down so worklistAppointmentRow/worklistVisitSeriesRow
+  // stay simple functions of one row plus the op(s) it might offer, exactly
+  // opButton's own (o, ctx) shape — the Protected pane can drive the SAME
+  // opButton/resolveTargetKey seam the manifest.ent browse view uses
+  // (openEntityDetail), by supplying ctx.entityKey from a fetched pane row
+  // instead of a mirrored one.
+  const startSeriesOp = ops().find((o) => o.data.operationType === "StartVisitSeries");
+  const pauseOp = ops().find((o) => o.data.operationType === "PauseVisitSeries");
+  const resumeOp = ops().find((o) => o.data.operationType === "ResumeVisitSeries");
   return `
     ${where ? `<div class="section-title">${esc(where)}</div>` : ""}
     <div class="category-heading">Applications to review${w.applications.length ? ` (${w.applications.length})` : ""}</div>
@@ -1093,8 +1105,12 @@ function worklistHTML(w, where) {
       : `<div class="empty">No applications waiting.</div>`}
     <div class="category-heading">Today's schedule${w.day ? ` · ${esc(w.day)}` : ""}</div>
     ${w.schedule.length
-      ? w.schedule.map(worklistAppointmentRow).join("")
-      : `<div class="empty">Nothing scheduled today.</div>`}`;
+      ? w.schedule.map((s) => worklistAppointmentRow(s, startSeriesOp)).join("")
+      : `<div class="empty">Nothing scheduled today.</div>`}
+    <div class="category-heading">Recurring visit series${series.length ? ` (${series.length})` : ""}</div>
+    ${series.length
+      ? series.map((v) => worklistVisitSeriesRow(v, pauseOp, resumeOp)).join("")
+      : `<div class="empty">No recurring series at this workplace.</div>`}`;
 }
 
 // Both row renderers follow the display-label floor rule (display-names N2):
@@ -1115,7 +1131,11 @@ function worklistApplicationRow(a) {
     </div>`;
 }
 
-function worklistAppointmentRow(s) {
+// startSeriesOp is optional so the pane still renders when the signed-in
+// actor holds no StartVisitSeries grant (or in a context, like a unit test,
+// that never looked one up) — the row degrades by omitting the button, never
+// by calling opButton with a missing op.
+function worklistAppointmentRow(s, startSeriesOp) {
   const who = [s.providerName, s.providerSpecialty].filter(Boolean).join(" · ");
   return `
     <div class="timeline-item">
@@ -1124,6 +1144,28 @@ function worklistAppointmentRow(s) {
         ${s.status ? `<span class="badge queued">${esc(s.status)}</span>` : ""}
       </div>
       <div class="meta">${esc(who || "Provider")}</div>
+      ${startSeriesOp ? opButton(startSeriesOp, { entityKey: s.patientKey }) : ""}
+    </div>`;
+}
+
+// worklistVisitSeriesRow is the Protected-pane counterpart to a manifest.ent
+// row (openEntityDetail): the card supplies ctx.entityKey itself, straight
+// from the fetched pane row, through the SAME opButton/resolveTargetKey seam
+// the mirror browse view uses — this view only feeds dispatch resolution, it
+// never changes it. Which of Pause/Resume applies follows the row's own
+// active flag, never both.
+function worklistVisitSeriesRow(v, pauseOp, resumeOp) {
+  const who = [v.providerName, v.providerSpecialty].filter(Boolean).join(" · ");
+  const op = v.active ? pauseOp : resumeOp;
+  return `
+    <div class="timeline-item">
+      <div class="row1">
+        <span class="title">${esc(v.patientName || "Patient")}</span>
+        <span class="badge ${v.active ? "confirmed" : "queued"}">${v.active ? "active" : "paused"}</span>
+      </div>
+      <div class="meta">${esc(who || "Provider")}${v.intervalDays ? ` · every ${v.intervalDays}d` : ""}</div>
+      ${v.nextDueAt ? `<div class="meta">Next due ${esc(relativeTime(v.nextDueAt))}</div>` : ""}
+      ${op ? opButton(op, { entityKey: v.entityKey }) : ""}
     </div>`;
 }
 
