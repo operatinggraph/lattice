@@ -1855,7 +1855,27 @@ def sites_for_provider(provider):
     return sites
 
 def appointment_sites(appt_id):
-    return sites_for_provider(appointment_provider(appt_id))
+    sites = sites_for_provider(appointment_provider(appt_id))
+    if sites:
+        return sites
+    # TombstoneProvider soft-deletes with no cascade onto practicesAt, so
+    # sites_for_provider's vertex_live gate now returns [] for a tombstoned
+    # provider -- stranding staff who need to manage an appointment that
+    # predates the tombstone. Fall back to the appointment's own atSite link:
+    # CreateAppointment validates it alive + provider-assigned at write time,
+    # so it names a real site independent of the provider's current status,
+    # never a caller-forged one. worksAt_covers re-proves the building itself
+    # is alive before trusting it, exactly as it does for a live provider's
+    # sites.
+    # read-posture: (e) relation=atSite epoch=none -- CreateAppointment writes
+    # at most one atSite link per appointment, so this is a single bounded
+    # enumeration off the appointment key already proven alive by the caller,
+    # never a keyspace scan.
+    apage, _ = kv.Links("vtx.appointment." + appt_id, "atSite", "out")
+    for lk in apage:
+        if not lk.isDeleted:
+            return [lk.targetVertex]
+    return []
 
 def actor_bound_to_appointment_provider(actor_key, provider):
     # The THIRD standing binder (beside operator/workplace, require_workplace's
@@ -2352,18 +2372,20 @@ def execute(state, op):
             fail("WrongClass: appointmentKey: " + appt_key + " has class " + str(cls) + ", required appointment")
 
         # Staff-standing confinement: the sites come from the appointment's OWN
-        # withProvider -> practicesAt walk, never the payload, so a caller cannot
-        # forge which building it is writing at. No-op on the patient-self path,
-        # which the identifiedBy probe below binds instead. The bound provider
-        # (identifiedBy-bound to THIS appointment's own withProvider provider)
-        # is a THIRD standing binder, alongside workplace: a provider need not
-        # also worksAt a building to reschedule their own appointment.
+        # withProvider -> practicesAt walk (falling back to its atSite link if
+        # the provider is now tombstoned -- appointment_sites), never the
+        # payload, so a caller cannot forge which building it is writing at.
+        # No-op on the patient-self path, which the identifiedBy probe below
+        # binds instead. The bound provider (identifiedBy-bound to THIS
+        # appointment's own withProvider provider) is a THIRD standing binder,
+        # alongside workplace: a provider need not also worksAt a building to
+        # reschedule their own appointment.
         # workplace-exempt: (ownership-bound) the identifiedBy probe below
         # requires the target to be this appointment's patient's identity.
         if not workplace_exempt():
             standing_provider = appointment_provider(appt_id)
             if not actor_bound_to_appointment_provider(op.actor, standing_provider):
-                require_workplace(sites_for_provider(standing_provider), "cannot reschedule appointment " + appt_key)
+                require_workplace(appointment_sites(appt_id), "cannot reschedule appointment " + appt_key)
 
         # The appointment's provider / patient — required so the move is conflict-
         # checked against each book exactly as CreateAppointment is, and so the OLD
@@ -2496,17 +2518,19 @@ def execute(state, op):
         if cls != "appointment":
             fail("WrongClass: appointmentKey: " + appt_key + " has class " + str(cls) + ", required appointment")
 
-        # Staff-standing confinement: same withProvider -> practicesAt derivation
-        # as RescheduleAppointment. Bound here rather than on the terminal branch
-        # alone -- a non-terminal status write (confirmed / checkedIn) is just as
-        # much a write into someone else's building. The bound provider is a
-        # THIRD standing binder alongside workplace, mirroring RescheduleAppointment.
+        # Staff-standing confinement: same withProvider -> practicesAt
+        # derivation as RescheduleAppointment, including the atSite fallback
+        # for a now-tombstoned provider (appointment_sites). Bound here rather
+        # than on the terminal branch alone -- a non-terminal status write
+        # (confirmed / checkedIn) is just as much a write into someone else's
+        # building. The bound provider is a THIRD standing binder alongside
+        # workplace, mirroring RescheduleAppointment.
         # workplace-exempt: (ownership-bound) the identifiedBy probe below
         # requires the target to be this appointment's patient's identity.
         if not workplace_exempt():
             standing_provider = appointment_provider(appt_id)
             if not actor_bound_to_appointment_provider(op.actor, standing_provider):
-                require_workplace(sites_for_provider(standing_provider), "cannot set status on appointment " + appt_key)
+                require_workplace(appointment_sites(appt_id), "cannot set status on appointment " + appt_key)
 
         status = required_status(p)
 

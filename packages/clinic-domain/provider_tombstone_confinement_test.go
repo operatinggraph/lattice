@@ -49,6 +49,18 @@ const (
 	ptProviderKey = "vtx.provider." + ptProviderID
 	ptPatientKey  = "vtx.patient." + ptPatientID
 	ptApptKey     = "vtx.appointment." + ptApptID
+
+	// A second provider that never practicesAt ptBuildingKey at all — its
+	// tombstone status is irrelevant to sites_for_provider either way, so an
+	// appointment resolved through it only gains ptBuildingKey via its OWN
+	// atSite link, isolating the fallback path from the practicesAt one.
+	ptSiteProviderID = "CLPTSTVPRVDHJKMNPQRS"
+	ptSitePatientID  = "CLPTSTVPATNHJKMNPQRS"
+	ptSiteApptID     = "CLPTSTVAPPTHJKMNPQRS"
+
+	ptSiteProviderKey = "vtx.provider." + ptSiteProviderID
+	ptSitePatientKey  = "vtx.patient." + ptSitePatientID
+	ptSiteApptKey     = "vtx.appointment." + ptSiteApptID
 )
 
 // ptCapDoc grants the front-desk actor SetAppointmentStatus at scope=any — the
@@ -104,14 +116,23 @@ func seedProviderTombstoneTopology(t *testing.T, ctx context.Context, conn *subs
 	testutil.SeedCapDoc(t, ctx, conn, ptCapDoc())
 }
 
-// submitSetStatusAs submits SetAppointmentStatus as an arbitrary actor and
-// returns the outcome plus the script's own failure text, so a rejection can be
-// attributed to the confinement guard rather than to any other gate.
+// submitSetStatusAs submits SetAppointmentStatus against ptApptKey as an
+// arbitrary actor and returns the outcome plus the script's own failure text,
+// so a rejection can be attributed to the confinement guard rather than to
+// any other gate.
 func submitSetStatusAs(t *testing.T, ctx context.Context, conn *substrate.Conn,
 	cp *processor.CommitPath, cons jetstream.Consumer,
 	label, status, actorKey string) (processor.MessageOutcome, string) {
 	t.Helper()
-	payload, _ := json.Marshal(map[string]any{"appointmentKey": ptApptKey, "status": status})
+	return submitSetStatusAsKey(t, ctx, conn, cp, cons, label, status, actorKey, ptApptKey)
+}
+
+// submitSetStatusAsKey is submitSetStatusAs against an arbitrary appointment.
+func submitSetStatusAsKey(t *testing.T, ctx context.Context, conn *substrate.Conn,
+	cp *processor.CommitPath, cons jetstream.Consumer,
+	label, status, actorKey, apptKey string) (processor.MessageOutcome, string) {
+	t.Helper()
+	payload, _ := json.Marshal(map[string]any{"appointmentKey": apptKey, "status": status})
 	env := &processor.OperationEnvelope{
 		RequestID:     testutil.GenReqID(label),
 		Lane:          processor.LaneDefault,
@@ -120,7 +141,7 @@ func submitSetStatusAs(t *testing.T, ctx context.Context, conn *substrate.Conn,
 		SubmittedAt:   clSubmittedAnchor,
 		Class:         "appointment",
 		Payload:       payload,
-		ContextHint:   &processor.ContextHint{Reads: []string{ptApptKey}},
+		ContextHint:   &processor.ContextHint{Reads: []string{apptKey}},
 	}
 	outcome, reply := testutil.SubmitAndAwaitReply(t, ctx, conn, cp, cons, env)
 	failure := ""
@@ -171,5 +192,56 @@ func TestWorkplace_TombstonedProviderConfersNothing(t *testing.T) {
 	status = clReadDoc(t, ctx, conn, ptApptKey+".status")
 	if st, _ := status["data"].(map[string]any); st["value"] != "confirmed" {
 		t.Errorf("the denied SetAppointmentStatus moved status to %v; it must be denied before any mutation", st["value"])
+	}
+}
+
+// seedProviderAtSiteFallbackTopology builds an appointment whose provider
+// never practicesAt ptBuildingKey — the appointment's own atSite link is the
+// ONLY path to ptBuildingKey, isolating appointment_sites' fallback from the
+// practicesAt walk the sibling test above exercises.
+func seedProviderAtSiteFallbackTopology(t *testing.T, ctx context.Context, conn *substrate.Conn) {
+	t.Helper()
+	clSeedVertex(t, ctx, conn, ptSiteProviderKey, "provider", false)
+	clSeedVertex(t, ctx, conn, ptSitePatientKey, "patient", false)
+	clSeedVertex(t, ctx, conn, ptSiteApptKey, "appointment", false)
+	clSeedVertex(t, ctx, conn, ptSiteApptKey+".status", "appointmentStatus", false)
+
+	clSeedLink(t, ctx, conn,
+		"lnk.appointment."+ptSiteApptID+".withProvider.provider."+ptSiteProviderID,
+		ptSiteApptKey, ptSiteProviderKey, "withProvider", "withProvider")
+	clSeedLink(t, ctx, conn,
+		"lnk.appointment."+ptSiteApptID+".forPatient.patient."+ptSitePatientID,
+		ptSiteApptKey, ptSitePatientKey, "forPatient", "forPatient")
+	clSeedLink(t, ctx, conn,
+		"lnk.appointment."+ptSiteApptID+".atSite.building."+ptBuildingID,
+		ptSiteApptKey, ptBuildingKey, "atSite", "atSite")
+}
+
+// TestWorkplace_TombstonedProviderAtSiteFallbackConfersAuthority proves the
+// other half of appointment_sites: a provider that never practicesAt the
+// staffer's building confers nothing either way (dead or alive), but the
+// appointment's own atSite link — recorded, provider-validated, at
+// CreateAppointment time — still lets front desk manage an appointment whose
+// provider has since been tombstoned.
+func TestWorkplace_TombstonedProviderAtSiteFallbackConfersAuthority(t *testing.T) {
+	ctx, conn := setupClinicEnv(t)
+	seedProviderTombstoneTopology(t, ctx, conn)
+	seedProviderAtSiteFallbackTopology(t, ctx, conn)
+	cp, cons := newClinicPipeline(t, ctx, conn, "ptsitefb")
+
+	// Retire the provider up front — sites_for_provider(ptSiteProviderKey)
+	// returns [] regardless (no practicesAt link was ever seeded), so this
+	// isolates the atSite fallback from the practicesAt liveness gate.
+	clSeedVertex(t, ctx, conn, ptSiteProviderKey, "provider", true)
+
+	got, why := submitSetStatusAsKey(t, ctx, conn, cp, cons, "ptsitefb01", "confirmed", ptActorKey, ptSiteApptKey)
+	if got != processor.OutcomeAccepted {
+		t.Fatalf("staff SetAppointmentStatus on an appointment whose atSite is a building they worksAt = %v (%s), "+
+			"want Accepted — the appointment's own atSite link must confer independently of the (tombstoned, "+
+			"non-practicing) provider", got, why)
+	}
+	status := clReadDoc(t, ctx, conn, ptSiteApptKey+".status")
+	if st, _ := status["data"].(map[string]any); st["value"] != "confirmed" {
+		t.Fatalf("after the accepted SetAppointmentStatus, status = %v, want confirmed", st["value"])
 	}
 }
