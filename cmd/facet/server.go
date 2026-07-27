@@ -40,12 +40,11 @@ type server struct {
 	// bootIdentityID is the boot-env EDGE_IDENTITY_ID fallback identity —
 	// the single-user posture a browser with no cookie resolves to.
 	bootIdentityID string
-	// pgPool backs GET /api/credentials (credentials.go, Inc 3) — the
-	// identityCredentialsRead Protected Postgres lens, mirroring
-	// cmd/loftspace-app's read boundary. Nil when FACET_PG_DSN is unset;
-	// handleCredentials reports the read model as unconfigured rather than
-	// failing the whole process (same optional-dependency posture as
-	// loftspace-app's own pgPool).
+	// pgPool backs GET /api/credentials (credentials.go, Inc 3) and the
+	// generic pane executor (pane.go) — the Protected Postgres read
+	// boundary. Nil when FACET_PG_DSN is unset; both handlers report the
+	// read model as unconfigured rather than failing the whole process
+	// (same optional-dependency posture as the sibling FEs' own pgPool).
 	pgPool *pgxpool.Pool
 	// browserEngine, when non-nil (FACET_BROWSER_ENGINE), turns cmd/facet into
 	// a static host for the in-page wasm engine: it serves the wasm + shell
@@ -82,7 +81,7 @@ func (s *server) registerRoutes(mux *http.ServeMux) {
 	inner.HandleFunc("/api/credentials", s.handleCredentials)
 	inner.HandleFunc("/api/credentials/link", s.handleCredentialsLink)
 	inner.HandleFunc("/api/credentials/unlink", s.handleCredentialsUnlink)
-	inner.HandleFunc("/api/staff/worklist", s.handleStaffWorklist)
+	inner.HandleFunc("/api/pane", s.handlePane)
 	s.session.RegisterRoutes(inner)
 	mux.Handle("/", s.session.RequireSession(inner))
 }
@@ -133,9 +132,9 @@ type enqueueRequest struct {
 	// TouchedKey, if set, is a Contract #1 key this write's optimistic
 	// effect should overlay immediately (design R3) — only meaningful for
 	// an update to an already-known key (e.g. a task's own key); a create
-	// op (RequestService — the server mints the new instance's key) has no
-	// predictable target and leaves this empty, per facet-app-ux.md §3.4a's
-	// "Pending chip" being opportunistic, not universal.
+	// op has no predictable target (the server mints the new key) and
+	// leaves this empty, per facet-app-ux.md §3.4a's "Pending chip" being
+	// opportunistic, not universal.
 	TouchedKey string `json:"touchedKey,omitempty"`
 }
 

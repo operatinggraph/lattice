@@ -29,6 +29,7 @@ type ManifestBlock struct {
 	WeaverTargets []ManifestWeaverTarget `yaml:"weaverTargets,omitempty"`
 	LoomPatterns  []ManifestLoomPattern  `yaml:"loomPatterns,omitempty"`
 	OpMetas       []ManifestOpMeta       `yaml:"opMetas,omitempty"`
+	Panes         []ManifestPane         `yaml:"panes,omitempty"`
 }
 
 // ManifestDDL is one DDL declaration entry. Class defaults to
@@ -71,6 +72,12 @@ type ManifestLoomPattern struct {
 // VerifyAgainstDefinition cross-checks is `operationType`.
 type ManifestOpMeta struct {
 	OperationType string `yaml:"operationType"`
+}
+
+// ManifestPane is one pane declaration entry. The identity field
+// VerifyAgainstDefinition cross-checks is `paneId`.
+type ManifestPane struct {
+	PaneID string `yaml:"paneId"`
 }
 
 // ParseManifest reads and validates a manifest.yaml file. Required
@@ -141,6 +148,9 @@ func (m *Manifest) VerifyAgainstDefinition(d Definition) error {
 	if got, want := len(m.Declares.OpMetas), len(d.OpMetas); got != want {
 		return fmt.Errorf("pkgmgr: manifest declares %d opMetas but Definition has %d", got, want)
 	}
+	if got, want := len(m.Declares.Panes), len(d.Panes); got != want {
+		return fmt.Errorf("pkgmgr: manifest declares %d panes but Definition has %d", got, want)
+	}
 	for i, dm := range m.Declares.DDLs {
 		if dm.CanonicalName != d.DDLs[i].CanonicalName {
 			return fmt.Errorf("pkgmgr: DDL[%d] canonicalName mismatch: manifest=%q definition=%q",
@@ -190,6 +200,12 @@ func (m *Manifest) VerifyAgainstDefinition(d Definition) error {
 		if om.OperationType != d.OpMetas[i].OperationType {
 			return fmt.Errorf("pkgmgr: OpMeta[%d] operationType mismatch: manifest=%q definition=%q",
 				i, om.OperationType, d.OpMetas[i].OperationType)
+		}
+	}
+	for i, pm := range m.Declares.Panes {
+		if pm.PaneID != d.Panes[i].CanonicalName {
+			return fmt.Errorf("pkgmgr: Pane[%d] paneId mismatch: manifest=%q definition=%q",
+				i, pm.PaneID, d.Panes[i].CanonicalName)
 		}
 	}
 	return nil

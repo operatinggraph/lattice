@@ -80,11 +80,13 @@ test("splitAnchors drops the degenerate null-key entries the unmatched binding w
 });
 
 test("bindingLabel names the trade and the person, and keeps the trade when the profile is absent", () => {
+  // With no ent rows in state, the trade is the titleCase fallback of the raw
+  // type segment; a projected typeLabel row would override it with data.
   const { bindingLabel } = loadApp();
   assert.equal(bindingLabel({ type: "instructor", name: "Sam Okafor" }), "Instructor · Sam Okafor");
-  assert.equal(bindingLabel({ type: "provider", name: "Dr. Amara Osei" }), "Clinician · Dr. Amara Osei");
+  assert.equal(bindingLabel({ type: "provider", name: "Dr. Amara Osei" }), "Provider · Dr. Amara Osei");
   // A binding whose profile never resolved must not degrade to a bare NanoID.
-  assert.equal(bindingLabel({ type: "serviceprovider", key: "vtx.serviceprovider.K1" }), "Service provider");
+  assert.equal(bindingLabel({ type: "serviceprovider", key: "vtx.serviceprovider.K1" }), "Serviceprovider");
 });
 
 // The real dispatch shapes from packages/clinic-domain/opmetas.go — the only
@@ -189,5 +191,5 @@ test("a hat with no ops renders an inert chip; a hat with ops renders a tappable
   const empty = loadWorld(OSEI, [CREATE_APPOINTMENT]);
   const emptyRow = empty.bindingChipRow(empty.splitAnchors(empty.me()).bindings);
   assert.doesNotMatch(emptyRow, /data-goto="hat"/);
-  assert.match(emptyRow, /Clinician · Dr\. Amara Osei/);
+  assert.match(emptyRow, /Provider · Dr\. Amara Osei/);
 });

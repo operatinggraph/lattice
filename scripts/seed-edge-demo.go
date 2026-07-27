@@ -148,7 +148,7 @@ func main() {
 			"presentation": map[string]any{
 				"name":        "Maple Laundry",
 				"description": "Wash-and-fold, 24h turnaround",
-				"icon":        "laundry",
+				"icon":        "basket",
 				"category":    "home",
 			},
 		}, nil)

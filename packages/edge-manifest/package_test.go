@@ -69,8 +69,8 @@ var readGrantLensNames = map[string]bool{
 }
 
 func TestPackage_TwentyLenses(t *testing.T) {
-	if got := len(emComposedLenses(t)); got != 20 {
-		t.Fatalf("expected 20 lenses (17 manifest + 3 read-grant producers), got %d", got)
+	if got := len(emComposedLenses(t)); got != 21 {
+		t.Fatalf("expected 21 lenses (18 manifest + 3 read-grant producers), got %d", got)
 	}
 	names := map[string]bool{}
 	for _, l := range emComposedLenses(t) {
@@ -199,6 +199,7 @@ func TestPackage_LensRowKeysAreManifestNamespaced(t *testing.T) {
 		// staff siblings: same ns + same entityId means a row reachable by
 		// both a provider binding and residence/staff reachability projects
 		// the identical row under the identical key.
+		"edgeStaffPanes":         `"manifest.pane" AS ns`,
 		"edgeProviderSchedule":   `"manifest.ent" AS ns`,
 		"edgeProviderQueue":      `"manifest.ent" AS ns`,
 		"edgeInstructorSessions": `"manifest.ent" AS ns`,

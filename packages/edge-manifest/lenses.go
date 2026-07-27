@@ -2,15 +2,16 @@ package edgemanifest
 
 import "github.com/operatinggraph/lattice/internal/pkgmgr"
 
-// Lenses returns the package's seventeen Personal-Lens declarations
+// Lenses returns the package's eighteen Personal-Lens declarations
 // (edge-showcase-app-design.md §3.2; the manifest.ent entity lenses per
 // facet-entity-browse-design.md; the staff siblings edgeCatalogRoles +
 // edgeTasksQueued + edgeStaffWorkOrders per facet-staff-worlds-design.md
 // §3.3; the provider-hat siblings edgeProviderSchedule + edgeProviderQueue +
-// edgeInstructorSessions per persona-worlds-design.md Fire W0) — the repo's
-// first `nats-subject` / Personal Lens package.
+// edgeInstructorSessions per persona-worlds-design.md Fire W0; the
+// edgeStaffPanes descriptor lens per facet-discovery-restoration-design.md
+// §2.1) — the repo's first `nats-subject` / Personal Lens package.
 //
-// Sixteen of the seventeen are NON-SELF-ANCHORED: each keys its rows on a
+// Seventeen of the eighteen are NON-SELF-ANCHORED: each keys its rows on a
 // vertex other than the recipient identity (a service template, an op meta, a
 // task, an instance, a session, a provider, a booking, a tab, a studio, a menu
 // item, a work order, an appointment). Refractor's D1 gate (internal/refractor/projection/personal.go
@@ -307,6 +308,32 @@ func Lenses() []pkgmgr.LensSpec {
 			Spec: edgeTasksQueuedTail,
 		},
 		{
+			// edgeStaffPanes delivers server-pane DESCRIPTORS (never pane
+			// rows — those are Protected, session-scoped, host-executed) to
+			// the identities whose held roles a pane is offeredTo. Pane metas
+			// + their offeredTo links are install data (pkgmgr.PaneSpec,
+			// panes.go), so pane visibility mirrors the role topology by
+			// construction, the staff-catalog convention.
+			CanonicalName: "edgeStaffPanes",
+			Class:         "meta.lens",
+			Adapter:       "nats-subject",
+			SubjectPrefix: manifestSubjectPrefix,
+			Stream:        manifestStream,
+			Personal:      true,
+			Engine:        "full",
+			IntoKey:       []string{"__actor", "ns", "entityId"},
+			Walk: &pkgmgr.AnchorWalk{
+				GrantDomain: domainStaff,
+				AnchorType:  "meta",
+				AnchorVar:   "pane",
+				Chain: []string{
+					chainHeldRoles,
+					"(role)<-[:offeredTo]-(pane:meta)",
+				},
+			},
+			Spec: edgeStaffPanesTail,
+		},
+		{
 			CanonicalName: "edgeStaffWorkOrders",
 			Class:         "meta.lens",
 			Adapter:       "nats-subject",
@@ -584,6 +611,7 @@ RETURN
   op.dispatch.data.contextParams AS dispatchContextParams,
   op.dispatch.data.reads AS dispatchReads,
   op.dispatch.data.optionalReads AS dispatchOptionalReads,
+  op.dispatch.data.visibleWhen AS dispatchVisibleWhen,
   op.sensitive.data.value AS sensitive,
   [(op)<-[:permitsOperation]-(svc:service) | svc.key] AS viaServices
 `
@@ -665,6 +693,25 @@ RETURN
 // cypher carrying two unrelated kinds would cross-product. The schedule instant
 // projects as `startsAt`, not the design's `when` — WHEN is a CASE keyword in
 // this engine's lexer and an alias by that name fails to parse.
+// edgeStaffPanesTail projects one `manifest.pane.<paneMetaId>` row per pane
+// meta reachable over holdsRole → offeredTo: the pane's id, presentation, and
+// its section descriptors (a JSON string, the inputSchema convention). The
+// client discovers panes by this ns prefix; the HOST re-reads the same row
+// from its own mirror when executing `/api/pane` — one descriptor, two
+// consumers, zero pane knowledge in either.
+const edgeStaffPanesTail = `
+WITH pane
+WHERE pane.key <> null
+RETURN
+  pane.key AS anchor,
+  "manifest.pane" AS ns,
+  nanoIdFromKey(pane.key) AS entityId,
+  pane.paneDescriptor.data.paneId AS paneId,
+  pane.paneDescriptor.data.title AS title,
+  pane.paneDescriptor.data.icon AS icon,
+  pane.paneDescriptor.data.sections AS sections
+`
+
 const edgeEntitySessionsTail = `
 WITH sess, studio
 WHERE sess.key <> null
@@ -674,6 +721,7 @@ RETURN
   nanoIdFromKey(sess.key) AS entityId,
   sess.key AS entityKey,
   "session" AS entityType,
+  "Class session" AS typeLabel,
   sess.schedule.data.name AS title,
   studio.profile.data.name AS subtitle,
   sess.schedule.data.startsAt AS startsAt
@@ -695,6 +743,7 @@ RETURN
   nanoIdFromKey(prov.key) AS entityId,
   prov.key AS entityKey,
   "provider" AS entityType,
+  "Clinician" AS typeLabel,
   prov.profile.data.fullName AS title,
   prov.profile.data.specialty AS subtitle
 `
@@ -726,6 +775,7 @@ RETURN
   nanoIdFromKey(bk.key) AS entityId,
   bk.key AS entityKey,
   "booking" AS entityType,
+  "Booking" AS typeLabel,
   sess.schedule.data.name AS title,
   studio.profile.data.name AS subtitle,
   sess.schedule.data.startsAt AS startsAt,
@@ -774,6 +824,7 @@ RETURN
   nanoIdFromKey(tab.key) AS entityId,
   tab.key AS entityKey,
   "tab" AS entityType,
+  "Tab" AS typeLabel,
   unit.presentation.data.name AS title,
   tab.status.data.totalCents AS totalCents
 `
@@ -802,6 +853,7 @@ RETURN
   nanoIdFromKey(studio.key) AS entityId,
   studio.key AS entityKey,
   "studio" AS entityType,
+  "Studio" AS typeLabel,
   studio.profile.data.name AS title,
   place.presentation.data.name AS subtitle
 `
@@ -842,6 +894,7 @@ RETURN
   nanoIdFromKey(item.key) AS entityId,
   item.key AS entityKey,
   "menuitem" AS entityType,
+  "Menu item" AS typeLabel,
   item.price.data.name AS title,
   container.presentation.data.name AS subtitle,
   item.price.data.priceCents AS priceCents
@@ -892,6 +945,7 @@ RETURN
   op.dispatch.data.contextParams AS dispatchContextParams,
   op.dispatch.data.reads AS dispatchReads,
   op.dispatch.data.optionalReads AS dispatchOptionalReads,
+  op.dispatch.data.visibleWhen AS dispatchVisibleWhen,
   op.sensitive.data.value AS sensitive,
   role.key AS viaRole,
   role.canonicalName.data.value AS viaRoleName
@@ -1008,6 +1062,7 @@ RETURN
   nanoIdFromKey(appt.key) AS entityId,
   appt.key AS entityKey,
   "appointment" AS entityType,
+  "Appointment" AS typeLabel,
   appt.schedule.data.reason AS title,
   appt.status.data.value AS subtitle,
   appt.schedule.data.startsAt AS startsAt,
@@ -1037,6 +1092,7 @@ RETURN
   nanoIdFromKey(inst.key) AS entityId,
   inst.key AS entityKey,
   "service" AS entityType,
+  "Service" AS typeLabel,
   tpl.presentation.data.name AS title,
   (CASE WHEN inst.outcome.data.status <> null THEN inst.outcome.data.status ELSE "open" END) AS subtitle,
   tpl.key AS templateKey,
@@ -1067,6 +1123,7 @@ RETURN
   nanoIdFromKey(sess.key) AS entityId,
   sess.key AS entityKey,
   "session" AS entityType,
+  "Class session" AS typeLabel,
   sess.schedule.data.name AS title,
   studio.profile.data.name AS subtitle,
   sess.schedule.data.startsAt AS startsAt

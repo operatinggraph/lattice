@@ -134,6 +134,14 @@ jobs:
           DIFF_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
         run: go run ./scripts/lint-package-version.go
 
+      - name: Facet discovery-covenant lint (no vertical vocabulary in cmd/facet)
+        # The structural guard on Facet's founding covenant: the app hardcodes
+        # only login machinery, config, and the descriptor-vocabulary
+        # interpreter. Any vertical noun / key type / SQL table / op literal
+        # beyond the gate's cited allowlists fails the build — a design doc
+        # cannot widen the surface without editing the gate in the same diff.
+        run: STRICT=1 go run ./scripts/lint-facet-discovery.go
+
       - name: Board lint (the backlog is an index, not a journal)
         # Backstop on code commits (board-only commits hit board-lint.yml,
         # which the main paths-ignore skips): fails on an over-budget row, a

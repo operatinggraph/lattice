@@ -14,11 +14,11 @@ import (
 )
 
 // maxClaimBodyBytes bounds POST /api/claim's request body, mirroring
-// cmd/loftspace-app/server.go's requireBody 1 MiB cap.
+// the sibling FEs' requireBody 1 MiB cap.
 const maxClaimBodyBytes = 1 << 20
 
 // claimRetryBackoffs is isTransientAuthLag's bounded backoff schedule,
-// ported verbatim from cmd/loftspace-app/web/app.js's retryBackoffsMs
+// the established claim-retry cadence
 // (~3s total): the freshly-minted device credential's ProvisionConsumerIdentity
 // auto-provision commits to Core KV synchronously, but the CapabilityAuthorizer
 // reads an async-projected Capability Lens, so the very next request (this
@@ -54,7 +54,7 @@ type claimRequest struct {
 // handleClaim implements POST /api/claim: mints a bare device credential and
 // submits ClaimIdentity through the Gateway as that credential — the
 // raw-credential carve-out (gateway-claim-flow-identity-provisioning-
-// design.md §11.0), mirroring cmd/loftspace-app/web/app.js's
+// design.md §11.0), the established
 // runClaimCeremony wire shape verbatim (authContext.target == the minted
 // credential's own key; payload.targetIdentityKey == the identity being
 // claimed, which is the op's real subject — see identity-domain's

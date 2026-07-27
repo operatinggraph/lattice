@@ -37,9 +37,20 @@ func BuildInstallBatchForTest(def Definition) ([]InstallMutationForTest, []strin
 	for idx, o := range def.OpMetas {
 		opMetaIDs[idx] = entityNanoID(def.Name, "opMeta:"+o.OperationType)
 	}
+	paneIDs := make([]string, len(def.Panes))
+	for idx, p := range def.Panes {
+		paneIDs[idx] = entityNanoID(def.Name, "pane:"+p.CanonicalName)
+	}
+	if inst.RoleIDs == nil {
+		inst.RoleIDs = map[string]string{}
+	}
+	for idx, r := range def.Roles {
+		inst.RoleIDs[r.CanonicalName] = roleIDs[idx]
+	}
+	def = inst.resolvePaneRoles(def)
 
 	ops, declared, err := inst.buildInstallBatch(def, pkgKey, ddlIDs, lensIDs, permIDs, roleIDs,
-		weaverTargetIDs, loomPatternIDs, opMetaIDs)
+		weaverTargetIDs, loomPatternIDs, opMetaIDs, paneIDs)
 	if err != nil {
 		return nil, nil, err
 	}

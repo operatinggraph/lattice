@@ -2,13 +2,16 @@
 // design.md §2, N2): a bare NanoID is never a primary label. prettify is the
 // last rung of the ladder ("<Type> · <short-id>"); anchorLabel composes the
 // N1-projected location + container names; identityLabel renders the typed
-// fallback instead of "Unnamed" until N3's sealed self-name arrives.
+// fallback instead of "Unnamed" until N3's sealed self-name arrives. Type
+// labels themselves are DATA: an observed manifest.ent row's typeLabel wins,
+// and titleCase of the raw segment is the only hardcoded floor.
 //
 // Same harness as descriptor_autofill.test.mjs: app.js is a plain browser
 // script, so vm.runInContext hoists its function declarations onto the sandbox.
-// prettify / typeLabel / anchorLabel / identityLabel read only their arguments
-// (identityLabel's no-key branch falls through to shortIdentityLabel, which
-// reads the module-scoped whoamiIdentityID — "" at load, so "Resident").
+// The accessors resolve off the global at call time, so overwriting entities
+// injects observed rows without a DOM or a feed (identityLabel's no-key branch
+// falls through to shortIdentityLabel, which reads the module-scoped
+// whoamiIdentityID — "" at load, so the neutral "You").
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -27,15 +30,41 @@ function loadApp() {
   return sandbox;
 }
 
+test("typeLabel prefers an observed ent row's projected typeLabel", () => {
+  const app = loadApp();
+  app.entities = () => [
+    { key: "manifest.ent.x", data: { entityType: "leaseapp", typeLabel: "Lease application" } },
+    { key: "manifest.ent.y", data: { entityType: "session" } }, // no label projected
+  ];
+  assert.equal(app.typeLabel("leaseapp"), "Lease application");
+  // a type observed without a projected label still titleCases its segment
+  assert.equal(app.typeLabel("session"), "Session");
+  // a type never observed at all does too
+  assert.equal(app.typeLabel("widget"), "Widget");
+});
+
+test("typeLabel titleCases the raw segment when nothing projected a label", () => {
+  const { typeLabel } = loadApp(); // no ent rows in state at all
+  assert.equal(typeLabel("leaseapp"), "Leaseapp");
+  assert.equal(typeLabel("workorder"), "Workorder");
+  assert.equal(typeLabel(""), "Item");
+  assert.equal(typeLabel(undefined), "Item");
+});
+
 test("prettify renders a typed label with a short id, never a bare NanoID", () => {
-  const { prettify } = loadApp();
-  assert.equal(prettify("vtx.leaseapp.AAAAAAAAAAAAAAAAAAAA"), "Lease application · AAAAAA");
-  assert.equal(prettify("vtx.building.BBBBBBBBBBBBBBBBBBBB"), "Building · BBBBBB");
-  // an unmapped type titleCases its own segment rather than dropping to raw
-  assert.equal(prettify("vtx.widget.CCCCCCCCCCCCCCCCCCCC"), "Widget · CCCCCC");
+  const app = loadApp();
+  // with no projected labels, every type titleCases its own segment
+  assert.equal(app.prettify("vtx.leaseapp.AAAAAAAAAAAAAAAAAAAA"), "Leaseapp · AAAAAA");
+  assert.equal(app.prettify("vtx.building.BBBBBBBBBBBBBBBBBBBB"), "Building · BBBBBB");
+  assert.equal(app.prettify("vtx.widget.CCCCCCCCCCCCCCCCCCCC"), "Widget · CCCCCC");
+  // an observed typeLabel flows through to the composed floor label
+  app.entities = () => [
+    { key: "manifest.ent.x", data: { entityType: "leaseapp", typeLabel: "Lease application" } },
+  ];
+  assert.equal(app.prettify("vtx.leaseapp.AAAAAAAAAAAAAAAAAAAA"), "Lease application · AAAAAA");
   // too-short to be a Contract #1 key: passthrough, no crash
-  assert.equal(prettify("manifest.me"), "manifest.me");
-  assert.equal(prettify(""), "Unknown");
+  assert.equal(app.prettify("manifest.me"), "manifest.me");
+  assert.equal(app.prettify(""), "Unknown");
 });
 
 test("anchorLabel composes N1 location + container names, floors to typed", () => {
@@ -48,22 +77,22 @@ test("anchorLabel composes N1 location + container names, floors to typed", () =
   assert.equal(anchorLabel({ key }), "Unit · UUUUUU");
 });
 
-test("scopedLabel composes the class-4 relational label from the projected subject name", () => {
+test("scopedLabel renders the projected label verbatim — no client suffixing", () => {
   const { scopedLabel } = loadApp();
-  const leaseapp = "vtx.leaseapp.LLLLLLLLLLLLLLLLLLLL";
-  // N2-tail: the lens projects the applied-for unit's name onto the task row
-  assert.equal(scopedLabel(leaseapp, "Unit 1"), "Unit 1 lease");
-  // a scoped type with no relational suffix mapping: the subject name alone
+  const scoped = "vtx.leaseapp.LLLLLLLLLLLLLLLLLLLL";
+  // whatever phrase the lens projected IS the label; the client adds nothing
+  assert.equal(scopedLabel(scoped, "Unit 1 lease"), "Unit 1 lease");
+  assert.equal(scopedLabel(scoped, "Unit 1"), "Unit 1");
   assert.equal(scopedLabel("vtx.booking.BBBBBBBBBBBBBBBBBBBB", "Yoga Flow"), "Yoga Flow");
-  // no projected subject name (non-leaseapp scope / unnamed unit): typed floor
-  assert.equal(scopedLabel(leaseapp, null), "Lease application · LLLLLL");
+  // no projected name: typed floor, never a bare NanoID
+  assert.equal(scopedLabel(scoped, null), "Leaseapp · LLLLLL");
   assert.equal(scopedLabel("", "Unit 1"), "");
 });
 
 test("identityLabel prefers the sealed self-name, else a typed fallback (never Unnamed)", () => {
   const { identityLabel } = loadApp();
   assert.equal(identityLabel({ displayName: "Sam Okafor" }), "Sam Okafor");
-  assert.equal(identityLabel({ identityKey: "vtx.identity.IIIIIIIIIIIIIIIIIIII" }), "Resident · IIIIII");
-  // no name, no key: still typed, not "Unnamed"
-  assert.equal(identityLabel({}), "Resident");
+  assert.equal(identityLabel({ identityKey: "vtx.identity.IIIIIIIIIIIIIIIIIIII" }), "Identity · IIIIII");
+  // no name, no key: the neutral "You", not "Unnamed" and not a domain word
+  assert.equal(identityLabel({}), "You");
 });

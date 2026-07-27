@@ -206,8 +206,10 @@ func (i *Installer) buildManifestBatch(def Definition) ([]installMutation, []str
 		i.RoleIDs[r.CanonicalName] = id
 	}
 
-	// Resolve any unresolved canonical names in GrantsTo via i.RoleIDs.
+	// Resolve any unresolved canonical names in GrantsTo (and pane
+	// OfferedToRoles) via i.RoleIDs.
 	def = i.resolveGrants(def)
+	def = i.resolvePaneRoles(def)
 
 	// Validate all GrantsTo entries resolved to valid NanoIDs. A remaining
 	// canonical name (non-NanoID) means the bootstrap JSON is missing the
@@ -218,6 +220,13 @@ func (i *Installer) buildManifestBatch(def Definition) ([]installMutation, []str
 		for _, g := range p.GrantsTo {
 			if !substrate.IsValidNanoID(g) {
 				return nil, nil, "", fmt.Errorf("pkgmgr: Permission[%d] %q: GrantsTo entry %q is not a valid NanoID — role may not be installed or bootstrap JSON is missing the role ID", idx, p.OperationType, g)
+			}
+		}
+	}
+	for idx, p := range def.Panes {
+		for _, g := range p.OfferedToRoles {
+			if !substrate.IsValidNanoID(g) {
+				return nil, nil, "", fmt.Errorf("pkgmgr: Pane[%d] %q: OfferedToRoles entry %q is not a valid NanoID — role may not be installed or bootstrap JSON is missing the role ID", idx, p.CanonicalName, g)
 			}
 		}
 	}
@@ -251,9 +260,13 @@ func (i *Installer) buildManifestBatch(def Definition) ([]installMutation, []str
 	for idx, o := range def.OpMetas {
 		opMetaNanoIDs[idx] = entityNanoID(def.Name, "opMeta:"+o.OperationType)
 	}
+	paneNanoIDs := make([]string, len(def.Panes))
+	for idx, p := range def.Panes {
+		paneNanoIDs[idx] = entityNanoID(def.Name, "pane:"+p.CanonicalName)
+	}
 
 	ops, declared, err := i.buildInstallBatch(def, pkgKey, ddlNanoIDs, lensNanoIDs, permNanoIDs, roleNanoIDs,
-		weaverTargetNanoIDs, loomPatternNanoIDs, opMetaNanoIDs)
+		weaverTargetNanoIDs, loomPatternNanoIDs, opMetaNanoIDs, paneNanoIDs)
 	if err != nil {
 		return nil, nil, "", err
 	}
@@ -442,6 +455,36 @@ func (i *Installer) resolveGrants(def Definition) Definition {
 		}
 		p.GrantsTo = newGrants
 		out.Permissions[idx] = p
+	}
+	return out
+}
+
+// resolvePaneRoles maps pane OfferedToRoles canonical names to role NanoIDs,
+// with the same accept-a-vtx.role.-prefix / accept-a-raw-NanoID behavior
+// resolveGrants applies to Permission GrantsTo.
+func (i *Installer) resolvePaneRoles(def Definition) Definition {
+	if len(def.Panes) == 0 {
+		return def
+	}
+	out := def
+	out.Panes = make([]PaneSpec, len(def.Panes))
+	for idx, p := range def.Panes {
+		resolved := make([]string, 0, len(p.OfferedToRoles))
+		for _, g := range p.OfferedToRoles {
+			if len(g) > len("vtx.role.") && g[:len("vtx.role.")] == "vtx.role." {
+				resolved = append(resolved, g[len("vtx.role."):])
+				continue
+			}
+			if i.RoleIDs != nil {
+				if id, ok := i.RoleIDs[g]; ok && id != "" {
+					resolved = append(resolved, id)
+					continue
+				}
+			}
+			resolved = append(resolved, g)
+		}
+		p.OfferedToRoles = resolved
+		out.Panes[idx] = p
 	}
 	return out
 }

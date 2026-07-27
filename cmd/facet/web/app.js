@@ -25,36 +25,20 @@ function maybeParseJSON(v) {
   try { return JSON.parse(v); } catch (e) { return null; }
 }
 
-// Human labels for the vertex types that surface in Facet. The floor rule
-// (display-name-convention-design.md §2) composes a typed label from the key
-// when no projected name exists — "Lease application · Lh1ry1", never a bare
-// NanoID. A type without an entry titleCases its own segment.
-const TYPE_LABELS = {
-  leaseapp: "Lease application",
-  identity: "Resident",
-  building: "Building",
-  unit: "Unit",
-  location: "Place",
-  role: "Role",
-  service: "Service",
-  task: "Task",
-  tab: "Tab",
-  booking: "Booking",
-  appointment: "Appointment",
-  session: "Class session",
-  studio: "Studio",
-  menuitem: "Menu item",
-  workorder: "Work order",
-  provider: "Clinician",
-  instructor: "Instructor",
-  serviceprovider: "Service provider",
-};
+// typeLabel names a vertex type for display. The label is DATA: a lens that
+// stamps an entityType literal also projects a typeLabel column, so any
+// observed manifest.ent row of that type answers for it at runtime. A type
+// nothing has labelled titleCases its own segment — the floor rule
+// (display-name-convention-design.md §2) still composes a typed label from
+// the key when no projected name exists, never a bare NanoID.
 function typeLabel(type) {
-  return TYPE_LABELS[type] || (type ? titleCase(type) : "Item");
+  if (!type) return "Item";
+  const seen = entities().find((e) => e.data && e.data.entityType === type && e.data.typeLabel);
+  return (seen && seen.data.typeLabel) || titleCase(type);
 }
 
-// indefinite prepends the right article — "an Appointment", "a Class
-// session" — for copy that names a type mid-sentence.
+// indefinite prepends the right article — "an Item", "a Place" — for copy
+// that names a type mid-sentence.
 function indefinite(label) {
   return (/^[aeiou]/i.test(label) ? "an " : "a ") + label;
 }
@@ -70,8 +54,8 @@ function prettify(key) {
 }
 
 // anchorLabel names a residence anchor (class-2 location, design §2). N1
-// projects the unit's own `.presentation` name plus its container's name onto
-// the manifest.me anchor; compose "Unit 1 · Riverside Building", falling
+// projects the location's own `.presentation` name plus its container's name
+// onto the manifest.me anchor; compose "name · container name", falling
 // through name-only / container-only to the typed floor — never a bare NanoID.
 function anchorLabel(a) {
   if (!a) return "";
@@ -101,11 +85,10 @@ function splitAnchors(m) {
 }
 
 // bindingLabel names a provider hat by what the person DOES there, not by the
-// bare record: "Instructor · Sam Okafor". The type carries the trade (a clinic
-// provider, a yoga instructor, a laundry operator are three vertex types
-// precisely so their worlds differ), and the profile name identifies which
-// one. A binding whose profile never resolved keeps the typed label alone
-// rather than degrading to a NanoID.
+// bare record: "<trade> · <profile name>". The type carries the trade (each
+// bound-entity kind is its own vertex type precisely so their worlds differ),
+// and the profile name identifies which one. A binding whose profile never
+// resolved keeps the typed label alone rather than degrading to a NanoID.
 function bindingLabel(a) {
   const trade = typeLabel(a && a.type);
   const name = a && a.name;
@@ -115,16 +98,16 @@ function bindingLabel(a) {
 // hatOps answers "what is this hat's own work" — the ops that ADMINISTER the
 // bound record, not merely the ops that point at one.
 //
-// `dispatchClass` is what separates the two, and the distinction is sharp:
-// SetProviderHours declares class "provider" because the provider record is
-// its subject, while CreateAppointment declares class "appointment" and merely
-// names a provider as the counterparty you book WITH. Both carry
-// targetType "provider", so a targetType-only filter would offer a clinician
-// "Book appointment" against herself — a wrong-hat card on the one surface
-// whose whole purpose is telling hats apart. The class term is the hat
-// membership test; the targetType + resolveTargetKey terms are the same
-// dispatch gate every other surface runs, so nothing renders here that could
-// not be submitted from here.
+// `dispatchClass` is what separates the two, and the distinction is sharp: an
+// op that administers the record declares the binding's own type as its
+// class, while an op that merely transacts WITH the record declares its own
+// subject's class and names the binding's type only as its targetType. Both
+// carry the same targetType, so a targetType-only filter would offer the
+// counterparty op against the holder's own record — a wrong-hat card on the
+// one surface whose whole purpose is telling hats apart. The class term is
+// the hat membership test; the targetType + resolveTargetKey terms are the
+// same dispatch gate every other surface runs, so nothing renders here that
+// could not be submitted from here.
 //
 // This is a DISPATCH-level filter, not an authorization one: the capability
 // plane remains the only thing that decides what a hat may actually do, and an
@@ -143,27 +126,25 @@ function chipRow(anchors, emptyHTML) {
   return `<div class="chip-row">${anchors.map((a) => `<span class="chip">${esc(anchorLabel(a))}</span>`).join("")}</div>`;
 }
 
-// design §2). The lens projects the target's subject name (scopedName) — a
-// SignLease task scopedTo a leaseapp carries its applied-for unit's name — so
-// compose "Unit 1 lease" from the subject + the target's type. Absent subject
-// name falls through to the typed floor (prettify), never a bare NanoID.
-const RELATIONAL_SUFFIX = { leaseapp: "lease" };
+// scopedLabel names a task's scoped target (class-4 relational label, design
+// §2) from the columns the lens projects — the display phrase arrives as DATA
+// (scopedToLabel, or the plain subject name scopedName), so the client
+// invents no relational phrasing of its own. Absent any projected name it
+// falls through to the typed floor (prettify), never a bare NanoID.
 function scopedLabel(scopedTo, scopedName) {
   if (!scopedTo) return "";
-  if (!scopedName) return prettify(scopedTo);
-  const type = (scopedTo.split(".")[1]) || "";
-  const suffix = RELATIONAL_SUFFIX[type];
-  return suffix ? scopedName + " " + suffix : scopedName;
+  return scopedName || prettify(scopedTo);
 }
 
 // identityLabel names the signed-in identity (class-3, design §2). The sealed
 // self-name (displayName) arrives via N3's vault decrypt; until then the floor
-// rule renders the typed fallback, never "Unnamed" — an absent name is a typed
-// label, not a shrug (design §2 renderer floor).
+// rule renders the typed fallback — or the neutral "You" when even the key is
+// unknown — never "Unnamed": an absent name is a fallback label, not a shrug
+// (design §2 renderer floor).
 function identityLabel(m) {
   if (m && m.displayName) return m.displayName;
   if (m && m.identityKey) return prettify(m.identityKey);
-  return shortIdentityLabel() || "Resident";
+  return shortIdentityLabel() || "You";
 }
 
 function prettifyOpType(t) {
@@ -174,7 +155,7 @@ function titleCase(s) {
   return String(s).replace(/([a-z])([A-Z])/g, "$1 $2").replace(/^./, (c) => c.toUpperCase());
 }
 
-const ICONS = { laundry: "\u{1F9FA}", basket: "\u{1F9FA}", home: "\u{1F3E0}", wellness: "\u{1F9D8}", calendar: "\u{1F4C5}", doc: "\u{1F4C4}" };
+const ICONS = { basket: "\u{1F9FA}", home: "\u{1F3E0}", lotus: "\u{1FAB7}", calendar: "\u{1F4C5}", doc: "\u{1F4C4}" };
 function iconGlyph(name) { return ICONS[name] || "◆"; }
 
 function toneClass(tone) { return tone === "destructive" ? "destructive" : (tone === "neutral" ? "neutral" : ""); }
@@ -217,11 +198,14 @@ const state = {
   outboxHistory: [],
   view: "home",
   credentials: null, // null = not yet loaded; array once GET /api/credentials resolves
-  // worklist is the STAFF SERVER-PANE (facet-staff-worlds-design.md §3.4) —
-  // deliberately NOT in `rows`, because those mirror onto the device and this
-  // must not: it is cross-identity Protected data, session-scoped, and
-  // unavailable offline while the manifest half keeps working.
-  worklist: { status: "idle", applications: [], schedule: [], visitSeries: [], day: "" },
+  // panes holds each SERVER-PANE's fetched state, keyed by paneId
+  // (facet-staff-worlds-design.md §3.4) — deliberately NOT in `rows`, because
+  // those mirror onto the device and this must not: pane rows are
+  // cross-identity Protected data, session-scoped, and unavailable offline
+  // while the manifest half keeps working. WHICH panes exist, and what each
+  // renders, arrives as manifest.pane.* descriptor rows; the entries here are
+  // {status, sections} per discovered pane.
+  panes: new Map(),
   // Host↔NATS connectivity, mirrored from the connectivity frame. Defaults
   // TRUE so a device that has not yet heard a frame does not accuse itself of
   // being offline.
@@ -251,17 +235,17 @@ function tasks() { return rowsByNs("manifest.task").filter((t) => !isExpired(t.d
 function instances() { return rowsByNs("manifest.inst"); }
 function entities() { return rowsByNs("manifest.ent"); }
 // Work orders at this actor's workplace (edgeStaffWorkOrders). Unlike the
-// Protected worklist pane these are MIRROR rows, so they render — and stay
+// Protected server panes these are MIRROR rows, so they render — and stay
 // actionable — with no connection at all.
 function workOrders() { return rowsByNs("manifest.work"); }
 function entitiesByType(type) { return entities().filter((e) => e.data.entityType === type); }
 
-// A time-anchored entity (a class session) is offerable only while it is still
-// upcoming — a browse view exists to book something that hasn't happened yet.
-// Rows with no startsAt (a clinic provider, a café) are always current; a
-// present-but-unparseable startsAt is left visible rather than silently hidden.
-// Time is read live, so a demo world that outlived its seed drops its stale
-// sessions on the next render even before the nightly reseed replaces them.
+// A time-anchored entity is offerable only while it is still upcoming — a
+// browse view exists to act on something that hasn't happened yet. Rows with
+// no startsAt are always current; a present-but-unparseable startsAt is left
+// visible rather than silently hidden. Time is read live, so a demo world
+// that outlived its seed drops its stale time-anchored rows on the next
+// render even before the nightly reseed replaces them.
 function isUpcoming(e) {
   const s = e && e.data && e.data.startsAt;
   if (!s) return true;
@@ -523,11 +507,11 @@ function scheduleRender() {
 // ------------------------------------------------------------------- nav
 
 function setView(view) {
-  // Entering the Worklist is an explicit nav action, so it re-reads: the pane
-  // is live server data, and tapping the tab is how a staff actor both
-  // refreshes it and retries one that failed while offline. (Refreshing from
-  // renderView instead would re-fetch on every render.)
-  if (view === "worklist" && state.worklist.status !== "loading") loadWorklist();
+  // Entering the Work screen is an explicit nav action, so it re-reads every
+  // discovered pane: a pane is live server data, and tapping the tab is how
+  // an actor both refreshes one and retries one that failed while offline.
+  // (Refreshing from renderView instead would re-fetch on every render.)
+  if (view === "worklist") reloadPanes();
   state.view = view;
   document.querySelectorAll("main.screen > section").forEach((el) => { el.hidden = el.dataset.view !== view; });
   document.querySelectorAll(".bottom-nav button").forEach((b) => b.classList.toggle("active", b.dataset.view === view));
@@ -570,7 +554,7 @@ function updateBadges() {
   // which is the honesty invariant working, not two mechanisms agreeing.
   const staff = isStaff();
   $("worklist-nav").hidden = !staff;
-  if (staff && state.worklist.status === "idle") loadWorklist();
+  if (staff) loadIdlePanes();
 }
 
 // whoami is fetched once at boot; the header reads it until (and unless) a
@@ -603,11 +587,8 @@ function loadWhoami() {
 // the services and entity surfaces — so a binding chip opens a detail view
 // (persona-worlds §3.4).
 //
-// It opens one only when that hat actually has work: the three binding types
-// are declared symmetrically, but only the clinic `provider` has ops whose
-// dispatch class names it, so an instructor's and a service provider's chips
-// would open on "Nothing to do here yet." A chip that offers a tap and then
-// says nothing is worse than a chip that plainly states what you are.
+// It opens one only when that hat actually has work: a chip that offers a tap
+// and then says nothing is worse than a chip that plainly states what you are.
 function bindingChipRow(bindings) {
   return `<div class="chip-row">${bindings.map((a) => {
     const label = esc(bindingLabel(a));
@@ -623,8 +604,8 @@ function renderHome() {
   const svcs = services();
   const tsks = tasks();
   // The "no residence" note is for a person with no world at all, not for a
-  // bound provider who simply doesn't live here — telling Dr. Osei her
-  // residence is missing would be reporting the wrong absence.
+  // bound provider who simply doesn't live here — a missing-residence note on
+  // their world would be reporting the wrong absence.
   const rootless = !homes.length && !workplaces.length && !bindings.length;
   $("view-home").innerHTML = `
     ${homes.length || rootless ? `<section>
@@ -676,7 +657,7 @@ function taskRow(t) {
       ${t.pending ? `<span class="pending-chip">Pending</span>` : ""}
       <div style="flex:1">
         <div class="title">${esc(title)}</div>
-        <div class="subtitle">${esc(scopedLabel(d.scopedTo, d.scopedName))}${due}</div>
+        <div class="subtitle">${esc(scopedLabel(d.scopedTo, d.scopedToLabel || d.scopedName))}${due}</div>
         <div class="subtitle">Queued to ${esc(role)}</div>
       </div>
       <button class="btn" data-claim-task data-key="${esc(d.taskKey)}">Claim</button>
@@ -687,7 +668,7 @@ function taskRow(t) {
     ${t.pending ? `<span class="pending-chip">Pending</span>` : ""}
     <div style="flex:1">
       <div class="title">${esc(title)}</div>
-      <div class="subtitle">${esc(scopedLabel(d.scopedTo, d.scopedName))}${due}</div>
+      <div class="subtitle">${esc(scopedLabel(d.scopedTo, d.scopedToLabel || d.scopedName))}${due}</div>
     </div>
   </div>`;
 }
@@ -732,8 +713,6 @@ function claimTask(taskKey) {
     .catch((err) => toast(String(err), false));
 }
 
-// scopedLabel names a task's scoped target (class-4 relational label,
-
 // ------------------------------------------------------------- Services
 
 function renderServices() {
@@ -766,7 +745,7 @@ function openServiceDetail(key) {
     <h3 class="category-heading">Operations</h3>
     ${myOps.length ? myOps.map((o) => opButton(o, { serviceKey: d.serviceKey })).join("") : `<div class="empty">Nothing to do here yet.</div>`}
     <h3 class="category-heading">My instances of this service</h3>
-    ${myInstances.length ? myInstances.map(instanceRow).join("") : `<div class="empty">No orders yet.</div>`}
+    ${myInstances.length ? myInstances.map(instanceRow).join("") : `<div class="empty">Nothing here yet.</div>`}
   `);
 }
 
@@ -803,14 +782,21 @@ function openHatDetail(key) {
 
 function opButton(o, ctx) {
   const d = o.data;
+  // An op that declares dispatchVisibleWhen is offered only against a target
+  // ROW carrying the declared state (ctx.row) — it is simply absent
+  // everywhere else, which is not the same statement as the degraded cards
+  // below: those say "described but not submittable here", this says "not
+  // offered here at all".
+  if (!opVisibleForRow(d, ctx.row)) return "";
   if (!d.dispatchClass) {
     return `<div class="degraded-card">${esc(prettifyOpType(d.operationType))} — This isn't completable here yet — ask staff to help via the admin console.</div>`;
   }
   // An op whose declared dispatch.targetType can't be resolved from this
-  // context is not submittable from here — offering it anyway is how "Book a
-  // class" reached the Processor with a vtx.identity where a vtx.session was
-  // required. Say what's missing — and when the Nearby view actually has
-  // entities of that type, link straight to it instead of dead-ending.
+  // context is not submittable from here — offering it anyway is how an op
+  // once reached the Processor with the actor's vtx.identity where another
+  // vertex type was required. Say what's missing — and when the Nearby view
+  // actually has entities of that type, link straight to it instead of
+  // dead-ending.
   if (d.dispatchTargetField && !resolveTargetKey(d, ctx)) {
     const label = typeLabel(d.dispatchTargetType);
     const browsable = d.dispatchTargetType && upcomingEntitiesByType(d.dispatchTargetType).length > 0;
@@ -864,14 +850,14 @@ function instanceRow(i) {
 
 function renderBrowse() {
   // Browse offers only types some op can ACT on. A manifest.ent row can also
-  // exist to feed a descriptor field's picker (an `x-entityRef` type — the café
-  // menu item is the first), and such a row has no ops of its own: rendering it
-  // here would be a category whose every detail view says "nothing to do", i.e.
-  // the graph browser §3 F3 ratified this surface is not. The rows stay in
-  // state for the picker; only the category goes.
+  // exist purely to feed a descriptor field's picker (an `x-entityRef` type),
+  // and such a row has no ops of its own: rendering it here would be a
+  // category whose every detail view says "nothing to do", i.e. the graph
+  // browser §3 F3 ratified this surface is not. The rows stay in state for
+  // the picker; only the category goes.
   const actionable = new Set(ops().map((o) => o.data.dispatchTargetType).filter(Boolean));
   const ents = upcomingEntities().filter((e) => actionable.has(e.data.entityType));
-  if (!ents.length) { $("view-browse").innerHTML = `<div class="empty">Nothing nearby to book yet.</div>`; return; }
+  if (!ents.length) { $("view-browse").innerHTML = `<div class="empty">Nothing nearby yet.</div>`; return; }
   const byType = new Map();
   for (const e of ents) {
     const t = e.data.entityType || "other";
@@ -890,7 +876,7 @@ function renderBrowse() {
 // reads COLUMNS, never entityType: a lens that projects `startsAt` gets a
 // relative time, and one that projects a `*Cents` amount gets it as money —
 // the same `/Cents$/` convention the descriptor form's money input keys on. A
-// café tab's running total is the whole reason to pick one tab over another,
+// projected running total is the whole reason to pick one row over another,
 // and a type-branching renderer is exactly what the one-lens-per-kind design
 // (§3 F2) keeps out of here.
 function entityMeta(d) {
@@ -922,12 +908,14 @@ function openEntityDetail(key) {
   if (!row) return;
   const d = row.data;
   const myOps = ops().filter((o) => o.data.dispatchTargetType === d.entityType);
+  // ctx.row carries the viewed row's own columns so an op gated by
+  // dispatchVisibleWhen can read the state this row already declares.
   showModal(`
     <button class="close-x" data-close>&times;</button>
     <h2>${esc(d.title || prettify(d.entityKey))}</h2>
     <p class="lead">${entityMeta(d)}</p>
     <h3 class="category-heading">Operations</h3>
-    ${myOps.length ? myOps.map((o) => opButton(o, { entityKey: d.entityKey })).join("") : `<div class="empty">Nothing to do here yet.</div>`}
+    ${myOps.length ? myOps.map((o) => opButton(o, { entityKey: d.entityKey, row: d })).join("") : `<div class="empty">Nothing to do here yet.</div>`}
   `);
 }
 
@@ -938,18 +926,26 @@ function renderTasks() {
   $("view-tasks").innerHTML = tsks.length ? tsks.map(taskRow).join("") : `<div class="empty">Nothing needs your attention.</div>`;
 }
 
-// --------------------------------------------------------- Worklist (staff)
+// ---------------------------------------------------- Work (server panes)
 
-// The Worklist screen archetype (facet-staff-worlds-design.md §3.4). Two
+// The server-pane screen archetype (facet-staff-worlds-design.md §3.4). Two
 // distinctions this screen has to keep visible, because they are real:
 //
-//   1. It is SERVER-PANE, not mirror. Every other screen renders from the
-//      local manifest and works offline; this one is a live Protected read and
+//   1. A pane is SERVER-PANE, not mirror. Every other screen renders from the
+//      local manifest and works offline; a pane is a live Protected read and
 //      says so when it can't reach the host, instead of rendering stale or
 //      empty rows that would read as "no work today."
 //   2. It exists only for an actor with a workplace. Visibility derives from
 //      the grant topology (a `worksAt` anchor in the manifest), never from
-//      curation — §3.3's honesty invariant. A resident never sees the tab.
+//      curation — §3.3's honesty invariant. An actor with no workplace never
+//      sees the tab.
+//
+// WHICH panes exist, and what each renders, is DATA: every manifest.pane.*
+// mirror row carries one pane's descriptor — section titles, source columns
+// with display roles/kinds, empty copy, and each section's dispatch
+// target column/type. The renderer below interprets that vocabulary
+// generically; it names no table, no column, and no operation.
+
 // isStaffMe is the tab-visibility rule as a pure function of the me-row, so it
 // states the derivation in one place and can be checked without a live state.
 function isStaffMe(m) {
@@ -964,27 +960,48 @@ function isStaff() {
   return isStaffMe(me());
 }
 
-function loadWorklist() {
-  if (!isStaff()) return Promise.resolve();
-  state.worklist.status = "loading";
-  return fetch("/api/staff/worklist")
+// paneRows lists the pane descriptors the manifest carries. They are pane
+// METADATA only — presentation and section descriptors, never Protected row
+// data — which is what lets them ride the mirror legitimately.
+function paneRows() {
+  return rowsByNs("manifest.pane").filter((p) => p.data && p.data.paneId);
+}
+
+function paneStateFor(paneId) {
+  return state.panes.get(paneId) || { status: "idle", sections: [] };
+}
+
+// loadIdlePanes fetches every discovered pane not yet asked for — the
+// first-appearance trigger, run whenever the badges recompute, because a
+// descriptor row can arrive over the feed at any time.
+function loadIdlePanes() {
+  for (const p of paneRows()) {
+    if (paneStateFor(p.data.paneId).status === "idle") loadPane(p.data.paneId);
+  }
+}
+
+// reloadPanes re-reads every discovered pane — the explicit-nav trigger, so
+// tapping the tab both refreshes a pane and retries one that failed offline.
+function reloadPanes() {
+  for (const p of paneRows()) {
+    if (paneStateFor(p.data.paneId).status !== "loading") loadPane(p.data.paneId);
+  }
+}
+
+function loadPane(paneId) {
+  state.panes.set(paneId, { ...paneStateFor(paneId), status: "loading" });
+  return fetch("/api/pane?key=" + encodeURIComponent(paneId))
     .then((r) => (r.ok ? r.json() : Promise.reject(new Error(String(r.status)))))
     .then((body) => {
-      state.worklist = {
-        status: "ready",
-        applications: body.applications || [],
-        schedule: body.schedule || [],
-        visitSeries: body.visitSeries || [],
-        day: body.day || "",
-      };
+      state.panes.set(paneId, { status: "ready", sections: (body && body.sections) || [] });
       scheduleRender();
     })
     .catch(() => {
       // Offline, or the Protected model isn't reachable. Either way the pane
-      // is UNAVAILABLE, which is a different statement from "empty" — an empty
-      // worklist is a real answer about the workplace, and showing one here
-      // when we simply couldn't read would be a lie a front-desk actor acts on.
-      state.worklist = { ...state.worklist, status: "unavailable" };
+      // is UNAVAILABLE, which is a different statement from "empty" — an
+      // empty section is a real answer about the workplace, and showing one
+      // here when we simply couldn't read would be a lie the reader acts on.
+      state.panes.set(paneId, { ...paneStateFor(paneId), status: "unavailable" });
       scheduleRender();
     });
 }
@@ -992,8 +1009,11 @@ function loadWorklist() {
 function renderWorklist() {
   const places = staffWorkplaces();
   const where = places.length ? places.map((p) => anchorLabel(p)).join(", ") : "";
+  const panes = paneRows();
   $("view-worklist").innerHTML =
-    workOrdersHTML(workOrders(), tasks(), state.connected) + worklistHTML(state.worklist, where);
+    workOrdersHTML(workOrders(), tasks(), state.connected) +
+    (panes.length && where ? `<div class="section-title">${esc(where)}</div>` : "") +
+    panes.map((p) => paneHTML(p.data, paneStateFor(p.data.paneId))).join("");
 }
 
 // --------------------------------------------- Work orders (mirror, offline)
@@ -1057,7 +1077,7 @@ function workOrderRow(w, tsks) {
   return `
     <div class="timeline-item" data-workorder="${esc(d.workOrderKey)}">
       <div class="row1">
-        <span class="title">${esc(d.summary || typeLabel("workorder"))}</span>
+        <span class="title">${esc(d.summary || "Work order")}</span>
         ${d.priority === "urgent" && !resolved ? `<span class="badge queued">urgent</span>` : ""}
         ${resolved ? `<span class="badge confirmed">resolved</span>` : ""}
         ${pending ? `<span class="pending-chip">Pending</span>` : ""}
@@ -1078,95 +1098,162 @@ function vtxTypeOf(key) {
   return parts.length === 3 && parts[0] === "vtx" ? parts[1] : "";
 }
 
-// worklistHTML is the pane's markup as a pure function of its loaded state.
-function worklistHTML(w, where) {
-  if (w.status === "unavailable") {
-    return `<div class="degraded-card">Worklist unavailable — it needs a live connection. Everything else keeps working offline.</div>`;
+// paneSections parses the descriptor's section array off the pane row — a
+// JSON string column, the inputSchema convention.
+function paneSections(pane) {
+  const secs = maybeParseJSON(pane.sections);
+  return Array.isArray(secs) ? secs : [];
+}
+
+// paneHTML is one pane's markup as a pure function of its descriptor row and
+// its fetched state. Sections render in DESCRIPTOR order — the descriptor is
+// the authority on shape; the response carries only rows (plus a section's
+// resolved day when its filter is day-scoped).
+function paneHTML(pane, ps) {
+  if (ps.status === "unavailable") {
+    return `<div class="degraded-card">${esc(pane.title || "This pane")} unavailable — it needs a live connection. Everything else keeps working offline.</div>`;
   }
-  if (w.status === "idle" || w.status === "loading") {
+  if (ps.status === "idle" || ps.status === "loading") {
     return `<div class="empty">Loading…</div>`;
   }
-  const series = w.visitSeries || [];
-  // Op descriptors are looked up once here (manifest.op mirror rows, never
-  // PII) and passed down so worklistAppointmentRow/worklistVisitSeriesRow
-  // stay simple functions of one row plus the op(s) it might offer, exactly
-  // opButton's own (o, ctx) shape — the Protected pane can drive the SAME
-  // opButton/resolveTargetKey seam the manifest.ent browse view uses
-  // (openEntityDetail), by supplying ctx.entityKey from a fetched pane row
-  // instead of a mirrored one.
-  const startSeriesOp = ops().find((o) => o.data.operationType === "StartVisitSeries");
-  const pauseOp = ops().find((o) => o.data.operationType === "PauseVisitSeries");
-  const resumeOp = ops().find((o) => o.data.operationType === "ResumeVisitSeries");
-  return `
-    ${where ? `<div class="section-title">${esc(where)}</div>` : ""}
-    <div class="category-heading">Applications to review${w.applications.length ? ` (${w.applications.length})` : ""}</div>
-    ${w.applications.length
-      ? w.applications.map(worklistApplicationRow).join("")
-      : `<div class="empty">No applications waiting.</div>`}
-    <div class="category-heading">Today's schedule${w.day ? ` · ${esc(w.day)}` : ""}</div>
-    ${w.schedule.length
-      ? w.schedule.map((s) => worklistAppointmentRow(s, startSeriesOp)).join("")
-      : `<div class="empty">Nothing scheduled today.</div>`}
-    <div class="category-heading">Recurring visit series${series.length ? ` (${series.length})` : ""}</div>
-    ${series.length
-      ? series.map((v) => worklistVisitSeriesRow(v, pauseOp, resumeOp)).join("")
-      : `<div class="empty">No recurring series at this workplace.</div>`}`;
+  const loaded = new Map((ps.sections || []).map((s) => [s.id, s]));
+  return (pane.title ? `<div class="section-title">${esc(pane.title)}</div>` : "") +
+    paneSections(pane).map((sec) => paneSectionHTML(sec, loaded.get(sec.id) || {})).join("");
 }
 
-// Both row renderers follow the display-label floor rule (display-names N2):
-// a nameless row gets a typed label, never a bare NanoID and never "Unnamed".
-function worklistApplicationRow(a) {
-  const place = [a.unitAddress, a.unitCity].filter(Boolean).join(", ");
-  const badge = a.qualified === true
-    ? `<span class="badge confirmed">qualified</span>`
-    : a.qualified === false ? `<span class="badge queued">incomplete</span>` : "";
+// paneSectionHTML renders one declared section: its heading (with the
+// response's resolved day when present), then its rows, or the descriptor's
+// own empty copy — an empty section is a real answer, stated in the
+// vocabulary the descriptor chose.
+function paneSectionHTML(sec, loaded) {
+  const rows = loaded.rows || [];
+  const day = loaded.day ? ` · ${esc(loaded.day)}` : "";
+  return `<div class="category-heading">${esc(sec.title || "")}${day}</div>` +
+    (rows.length
+      ? rows.map((row) => paneRowHTML(sec, row)).join("")
+      : `<div class="empty">${esc(sec.emptyCopy || "Nothing here yet.")}</div>`);
+}
+
+// paneColumnValue reads one declared column off a row. Null/absent/empty
+// falls to the column's declared default; otherwise it stays undefined so the
+// caller omits the part — a null costs the field, never the row (the
+// display-label floor rule, display-names N2).
+function paneColumnValue(row, c) {
+  const v = row ? row[c.name] : undefined;
+  if (v === undefined || v === null || v === "") {
+    return c.default !== undefined ? c.default : undefined;
+  }
+  return v;
+}
+
+// paneCellText formats a value by its declared KIND, reusing the app's
+// existing formatters: datetime renders relative, money renders at the
+// declared unit's scale (never guessed from a column name), badge maps
+// through the declared valueLabels. text/date/number render as projected.
+function paneCellText(c, v) {
+  if (v === undefined) return "";
+  if (c.kind === "datetime") return relativeTime(v);
+  if (c.kind === "money") {
+    const n = Number(v);
+    if (isNaN(n)) return String(v);
+    return "$" + (c.unit === "cents" ? n / 100 : n).toFixed(2);
+  }
+  if (c.kind === "badge" && c.valueLabels && c.valueLabels[String(v)] !== undefined) {
+    return String(c.valueLabels[String(v)]);
+  }
+  return String(v);
+}
+
+// paneBadge renders a badge-kind value as a chip. Tone derives from the
+// VALUE's own shape, never from a domain rule: boolean true reads confirmed,
+// everything else queued.
+function paneBadge(c, v) {
+  if (v === undefined) return "";
+  return `<span class="badge ${v === true ? "confirmed" : "queued"}">${esc(paneCellText(c, v))}</span>`;
+}
+
+// paneRowHTML composes one row purely from the declared column roles: a
+// time-range prefix plus the title parts, badges beside them, subtitle parts
+// joined " · ", labeled meta facts, then whatever ops the section's dispatch
+// declaration earns the row. `id`, `target` and `hidden` columns are data,
+// not display; a `state` column renders only when its kind says badge.
+function paneRowHTML(sec, row) {
+  const cols = (sec.source && sec.source.columns) || [];
+  const titles = [];
+  const subtitles = [];
+  const metas = [];
+  let badges = "";
+  let timeStart, timeEnd;
+  for (const c of cols) {
+    const v = paneColumnValue(row, c);
+    if (c.role === "title" || c.role === "subtitle") {
+      const text = v === undefined ? (c.fallback || "") : paneCellText(c, v);
+      if (text) (c.role === "title" ? titles : subtitles).push(text);
+    } else if (c.role === "meta") {
+      if (v !== undefined) {
+        metas.push(`${c.label ? c.label + " " : ""}${paneCellText(c, v)}${c.suffix || ""}`);
+      }
+    } else if (c.role === "badge" || (c.role === "state" && c.kind === "badge")) {
+      badges += paneBadge(c, v);
+    } else if (c.role === "time") {
+      timeStart = v;
+    } else if (c.role === "timeEnd") {
+      timeEnd = v;
+    }
+  }
   return `
     <div class="timeline-item">
       <div class="row1">
-        <span class="title">${esc(a.applicantName || "Applicant")}</span>
-        ${badge}
+        <span class="title">${esc(timeRange(timeStart, timeEnd))}${esc(titles.join(" · "))}</span>
+        ${badges}
       </div>
-      <div class="meta">${esc(place || "Unit")}</div>
-      ${a.moveInDate ? `<div class="meta">Move-in ${esc(a.moveInDate)}</div>` : ""}
+      ${subtitles.length ? `<div class="meta">${esc(subtitles.join(" · "))}</div>` : ""}
+      ${metas.length ? `<div class="meta">${esc(metas.join(" · "))}</div>` : ""}
+      ${paneRowOps(sec, row)}
     </div>`;
 }
 
-// startSeriesOp is optional so the pane still renders when the signed-in
-// actor holds no StartVisitSeries grant (or in a context, like a unit test,
-// that never looked one up) — the row degrades by omitting the button, never
-// by calling opButton with a missing op.
-function worklistAppointmentRow(s, startSeriesOp) {
-  const who = [s.providerName, s.providerSpecialty].filter(Boolean).join(" · ");
-  return `
-    <div class="timeline-item">
-      <div class="row1">
-        <span class="title">${esc(timeOfDay(s.startsAt))}${esc(s.patientName || "Patient")}</span>
-        ${s.status ? `<span class="badge queued">${esc(s.status)}</span>` : ""}
-      </div>
-      <div class="meta">${esc(who || "Provider")}</div>
-      ${startSeriesOp ? opButton(startSeriesOp, { entityKey: s.patientKey }) : ""}
-    </div>`;
+// paneRowOps offers the ops a section's dispatch declaration earns a row: the
+// row's target key comes from the declared column, and every op descriptor
+// whose dispatch.targetType matches is offered through the SAME
+// opButton/resolveTargetKey seam the mirror browse view drives — the fetched
+// row rides along as ctx.row so a dispatchVisibleWhen gate can read the state
+// the row already carries. No op is named here; a row without its target key
+// simply carries no affordance.
+function paneRowOps(sec, row) {
+  const dispatch = sec.dispatch;
+  if (!dispatch || !dispatch.targetColumn) return "";
+  const entityKey = row[dispatch.targetColumn];
+  if (!entityKey) return "";
+  return ops()
+    .filter((o) => o.data.dispatchTargetType === dispatch.targetType)
+    .map((o) => opButton(o, { entityKey, row }))
+    .join("");
 }
 
-// worklistVisitSeriesRow is the Protected-pane counterpart to a manifest.ent
-// row (openEntityDetail): the card supplies ctx.entityKey itself, straight
-// from the fetched pane row, through the SAME opButton/resolveTargetKey seam
-// the mirror browse view uses — this view only feeds dispatch resolution, it
-// never changes it. Which of Pause/Resume applies follows the row's own
-// active flag, never both.
-function worklistVisitSeriesRow(v, pauseOp, resumeOp) {
-  const who = [v.providerName, v.providerSpecialty].filter(Boolean).join(" · ");
-  const op = v.active ? pauseOp : resumeOp;
-  return `
-    <div class="timeline-item">
-      <div class="row1">
-        <span class="title">${esc(v.patientName || "Patient")}</span>
-        <span class="badge ${v.active ? "confirmed" : "queued"}">${v.active ? "active" : "paused"}</span>
-      </div>
-      <div class="meta">${esc(who || "Provider")}${v.intervalDays ? ` · every ${v.intervalDays}d` : ""}</div>
-      ${v.nextDueAt ? `<div class="meta">Next due ${esc(relativeTime(v.nextDueAt))}</div>` : ""}
-      ${op ? opButton(op, { entityKey: v.entityKey }) : ""}
-    </div>`;
+// opVisibleForRow evaluates an op descriptor's dispatchVisibleWhen against
+// the target row it resolved from. No declaration offers unconditionally. A
+// declared condition needs the row to CARRY the named field and match it
+// strictly (JSON scalar equality — boolean, string, number) — a missing row,
+// a missing field, or a null value all fail closed: no state, no offer.
+// Visibility only; the script remains the enforcer.
+function opVisibleForRow(opData, row) {
+  const raw = opData.dispatchVisibleWhen;
+  if (raw === undefined || raw === null) return true;
+  const cond = maybeParseJSON(raw);
+  if (!cond || typeof cond !== "object" || typeof cond.field !== "string" || !cond.field) return false;
+  if (!row || typeof row !== "object" || !(cond.field in row)) return false;
+  return row[cond.field] === cond.equals;
+}
+
+// timeRange renders one or two ISO instants as a "HH:MM — " (or
+// "HH:MM–HH:MM — ") title prefix, or "" when the start is absent or
+// unparseable (a null costs the prefix, never the row).
+function timeRange(startIso, endIso) {
+  const s = timeOfDay(startIso);
+  if (!s) return "";
+  const e = timeOfDay(endIso);
+  return e ? s.slice(0, 5) + "–" + e.slice(0, 5) + " — " : s;
 }
 
 // timeOfDay renders an ISO instant as a "HH:MM — " prefix, or "" if the column
@@ -1327,12 +1414,11 @@ function submitSelfClaim() {
 // §3/§8, edge-showcase-app-design.md §7.2 Inc 3) ----
 //
 // Lists the credentials bound to the signed-in identity (GET /api/credentials,
-// the identityCredentialsRead Protected Postgres lens — mirrors
-// cmd/loftspace-app's account-settings page, credentials.go), links a new one
-// and removes one. Unlike loftspace's browser-direct dance, Facet's browser
-// never talks to the Gateway itself, so link/unlink are each ONE backend
-// call (credentials.go runs the Initiate/CompleteCredentialLink pair
-// server-side, mirroring /api/claim's own mint-a-throwaway-device shape).
+// the identityCredentialsRead Protected Postgres lens), links a new one and
+// removes one. Facet's browser never talks to the Gateway itself, so
+// link/unlink are each ONE backend call (credentials.go runs the
+// Initiate/CompleteCredentialLink pair server-side, mirroring /api/claim's
+// own mint-a-throwaway-device shape).
 
 let credentialsLoading = false;
 
@@ -1484,9 +1570,9 @@ function selfAnchoredKeys() {
 }
 
 // selfAnchorKey answers "the signed-in identity's own <type>" — and only when
-// that is unambiguous. Zero (no such vertex) or several (two leases) is not a
-// value to guess at: the caller degrades the op instead, which is the point
-// of the anchor being declared rather than inferred.
+// that is unambiguous. Zero (no such vertex) or several is not a value to
+// guess at: the caller degrades the op instead, which is the point of the
+// anchor being declared rather than inferred.
 function selfAnchorKey(type) {
   const keys = type && selfAnchoredKeys().get(type);
   return keys && keys.size === 1 ? [...keys][0] : undefined;
@@ -1506,8 +1592,8 @@ function selfAnchorKey(type) {
 // up front beats a server-side rejection on the visitor's own record.
 //
 // The `:id` modifier is a rendering instruction, not part of the anchor type
-// (substituteTemplate strips it) — a probe declared `{me.leaseapp:id}` asks the
-// same question of the same anchor as `{me.leaseapp}`.
+// (substituteTemplate strips it) — a probe declared `{me.<type>:id}` asks the
+// same question of the same anchor as `{me.<type>}`.
 function unresolvableSelfAnchor(op) {
   const params = maybeParseJSON(op.dispatchContextParams) || {};
   const optional = maybeParseJSON(op.dispatchOptionalReads) || [];
@@ -1674,7 +1760,7 @@ function bareKeyId(key) {
 
 // wholeKey accepts a substituted read declaration only when every dot-separated
 // segment survived. A placeholder that resolved to "" leaves a hole — a leading
-// `.patientClaim`, a trailing `vtx.identity.ABC.`, an interior `..` — and the
+// `.someAspect`, a trailing `vtx.identity.ABC.`, an interior `..` — and the
 // remainder is not a shorter key, it is a DIFFERENT and invalid one. NATS
 // rejects such a key with ErrInvalidKey rather than ErrKeyNotFound, and the
 // Processor's hydrate step turns anything that is not key-not-found into a
@@ -1712,23 +1798,23 @@ function keyType(k) {
 // the client populates, NOT where targetField's value comes from. Keying the
 // source off authContext conflated the two and filled every
 // `authContext:"self"` op's typed entity field with the actor's identity key
-// — wellness CreateBooking asked for a vtx.session and got a vtx.identity.
+// — an op asked for its declared entity type and got a vtx.identity.
 //
 // Candidates run most-specific first: the entity in view, the task's scopedTo
 // target, the task itself, the service. ctx.entityKey is the seam a browse
-// surface fills in (open a session, then "Book a class" resolves).
+// surface fills in (open an entity of the wanted type, and the op resolves).
 // ctx.taskKey answers an op ABOUT the task rather than about its subject —
 // openTaskDetail populates it, and the subject still outranks it, so a
-// Reschedule offered from a task row does not start claiming the task.
+// subject-typed op offered from a task row does not start claiming the task.
 // Falling back to a unique self-anchored key of the wanted type lets an op
 // resolve against an entity the visitor demonstrably owns.
 //
 // Every type resolves the same way, `identity` included: a target is
 // something this context DEMONSTRATES, never something inferred from who is
 // signed in. Substituting the submitter for an unresolvable identity target
-// is not a fallback but a silent retarget — RecordIdentityPII would write
-// SSN/DOB onto the operator running it, and an operator's guard exemption
-// means nothing downstream would refuse it.
+// is not a fallback but a silent retarget — an op recording identity PII
+// would write SSN/DOB onto the operator running it, and an operator's guard
+// exemption means nothing downstream would refuse it.
 //
 // undefined means "this op cannot be submitted from here" — opButton's gate,
 // not a hole to paper over with a wrong-typed key.
@@ -1818,11 +1904,10 @@ function submitDescriptorForm(form, op, opKey, ctx, fieldNames, props, contextPa
     if (v && !reads.includes(v)) reads.push(v);
   }
   // The submitting identity's own key is read-free per Contract #2's model
-  // (op.actor is always available to the script) in principle, but a
-  // script that additionally validates the actor vertex itself (as
-  // RequestService's real installed script does — "UnknownApplicant"
-  // otherwise) needs it declared. Over-reading is harmless; under-reading
-  // fails the request, so include it unconditionally.
+  // (op.actor is always available to the script) in principle, but a script
+  // that additionally validates the actor vertex itself needs it declared.
+  // Over-reading is harmless; under-reading fails the request, so include it
+  // unconditionally.
   const selfKey = me() && me().identityKey;
   if (selfKey && !reads.includes(selfKey)) reads.push(selfKey);
   // The absence-tolerant half (Contract #2 §2.5 class-(d)): a uniqueness

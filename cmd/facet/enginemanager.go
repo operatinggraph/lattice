@@ -46,7 +46,7 @@ type engineEntry struct {
 // engineManager multiplexes one engine per identity, ref-counted by active
 // holders and reaped after engineIdleTimeout of disuse — the "per-session
 // engines" mechanism edge-showcase-app-design.md §7.2/Inc 2 names. Facet is
-// no longer per-process single-tenant: it's per-identity multi-tenant,
+// no longer bound to one process-wide identity: it's per-identity,
 // bounded by however many distinct identities are actively signed in on this
 // host at once, not by request volume.
 type engineManager struct {

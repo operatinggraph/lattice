@@ -305,7 +305,7 @@ func main() {
 	requestServiceMeta := findOpMetaByType(ctx, conn, "RequestService")
 
 	seedTemplate(ctx, conn, adminKey, requestServiceMeta, laundryTplID, "laundry",
-		map[string]any{"name": "Maple Laundry", "description": "Wash-and-fold, 24h turnaround", "icon": "laundry", "category": "home"})
+		map[string]any{"name": "Maple Laundry", "description": "Wash-and-fold, 24h turnaround", "icon": "basket", "category": "home"})
 	fmt.Println("==> template laundry: " + laundryTplKey + " availableAt building")
 
 	seedTemplate(ctx, conn, adminKey, requestServiceMeta, fitnessTplID, "fitness",
@@ -690,7 +690,7 @@ func seedWellnessTemplate(ctx context.Context, conn *substrate.Conn, adminKey st
 			map[string]any{"family": "wellness", "templateId": wellnessTplID, "presentation": map[string]any{
 				"name":        "Riverside Wellness Studio",
 				"description": "Book, or cancel, a class",
-				"icon":        "wellness",
+				"icon":        "lotus",
 				"category":    "wellness",
 			}}, nil)
 	}

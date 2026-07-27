@@ -21,11 +21,11 @@ import (
 )
 
 // edge-showcase-app-design.md §7.2 Inc 3: the Me screen's "manage sign-in
-// methods" entry — mirrors cmd/loftspace-app/credentials.go's identityCredentialsRead
+// methods" entry — the identityCredentialsRead
 // Protected-lens read verbatim (same lens, same RLS-anchored query shape),
 // adapted to Facet's session model (the caller is always the session
 // identity, never a client-supplied actorId) and to Facet's "browser talks
-// to no one but this Go host" invariant: unlike loftspace's browser-direct
+// to no one but this Go host" invariant: unlike a browser-direct
 // Initiate/CompleteCredentialLink pair, linking here is ONE self-contained
 // backend call that runs both ops server-side, mirroring claim.go's own
 // mint-a-throwaway-device-credential shape for the second (proving) leg.
@@ -61,7 +61,7 @@ func (d credentialBindingData) entries() []credentialEntry {
 	return []credentialEntry{{ActorKey: d.ActorKey, BoundAt: d.BoundAt}}
 }
 
-// selectIdentityCredentialsSQL mirrors cmd/loftspace-app/credentials.go's
+// selectIdentityCredentialsSQL is the established
 // query verbatim — no auth WHERE, RLS (the identity's own NanoID as
 // authz_anchor) scopes it to the caller's txn-local lattice.actor_id.
 const selectIdentityCredentialsSQL = `
@@ -165,7 +165,7 @@ func mintLinkSecret() (plaintext, hashHex string, err error) {
 // handleCredentialsLink implements POST /api/credentials/link — runs
 // InitiateCredentialLink (as the session identity U) then CompleteCredentialLink
 // (as a freshly minted throwaway device credential A2) back to back, mirroring
-// cmd/loftspace-app/web/app.js's linkNewCredential exactly, just server-side:
+// the established linkNewCredential ceremony exactly, just server-side:
 // Facet's browser never gets a Gateway URL or bearer token of its own
 // (server.go's own invariant — same reasoning as claim.go).
 func (s *server) handleCredentialsLink(w http.ResponseWriter, r *http.Request) {

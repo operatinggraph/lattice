@@ -176,6 +176,17 @@ type Definition struct {
 	// (or a `userTask` step) must declare a matching OpMetaSpec.
 	OpMetas []OpMetaSpec
 
+	// Panes lists the server-pane descriptors this package declares
+	// (facet-discovery-restoration-design.md §2.1). Each is a meta.pane
+	// meta-vertex carrying a `.paneDescriptor` aspect — the data-driven
+	// replacement for hardcoding a Protected read-model pane (its tables,
+	// columns, and dispatch targets) into an edge client's host. The installer
+	// emits the vertex, the aspect, and one `pane offeredTo role` link per
+	// OfferedToRoles entry; an identity-anchored lens walks
+	// holdsRole → offeredTo to deliver the descriptor to exactly the
+	// identities whose grant topology earns the pane.
+	Panes []PaneSpec
+
 	// ReadGrantDomains declares the cap-read producer slices this package owns
 	// (Contract #6 §6.14 `cap-read.<domain>.<actorSuffix>`). Every Personal
 	// lens Walk.GrantDomain must name one, and every declared domain must be
@@ -561,6 +572,53 @@ type OpDispatchSpec struct {
 	// belongs here — declaring such a key as a required Read fails the whole
 	// submission the first time it is legitimately absent.
 	OptionalReads []string
+
+	// VisibleWhen gates OFFERING this op against the state of the target row
+	// the client resolved TargetType from: the op is offered only when the
+	// row's Field column equals Equals. It exists for state-machine op pairs
+	// (pause/resume, open/settle) where offering both halves at once forces
+	// the visitor to know the state the row already carries. Visibility only —
+	// the script remains the enforcer, exactly as it is for every descriptor
+	// affordance. Nil offers the op unconditionally, and a client evaluating
+	// VisibleWhen against a row that LACKS the named column must treat the
+	// condition as unmet (fail-closed: no state, no offer).
+	VisibleWhen *OpVisibleWhenSpec
+}
+
+// OpVisibleWhenSpec is OpDispatchSpec.VisibleWhen's single-condition form:
+// offer the op iff the resolved target row's Field column strictly equals
+// Equals (JSON-value equality — bool, string, or number).
+type OpVisibleWhenSpec struct {
+	Field  string
+	Equals any
+}
+
+// PaneSpec is one server-pane descriptor. The pane's SECTIONS — which
+// Protected read-model table each reads, which columns it projects (a PHI
+// decision made here, in reviewable package data, never in an app), how rows
+// filter/order, and which column is a dispatch target of which vertex type —
+// travel as a JSON string exactly as OpMetaSpec.InputSchema does, and the
+// client + host both consume them from the projected `manifest.pane.*` row.
+// The host's generic pane executor validates every identifier against its own
+// strict grammar before compiling SQL; a descriptor is package data with the
+// same trust shape as the lens DDL that projects the table itself.
+type PaneSpec struct {
+	// CanonicalName is the pane's stable id (e.g. "staffWorklist") — the
+	// value clients pass back to the host's pane executor.
+	CanonicalName string
+
+	// OfferedToRoles lists role canonical names (resolved to role NanoIDs at
+	// install exactly as PermissionSpec.GrantsTo is); one
+	// `pane offeredTo role` link is emitted per entry.
+	OfferedToRoles []string
+
+	// Title / Icon are the pane's client-facing presentation (icon is a
+	// semantic token, same vocabulary as OpPresentationSpec.Icon).
+	Title string
+	Icon  string
+
+	// Sections is the pane's section-descriptor array as a JSON string.
+	Sections string
 }
 
 // RoleSpec is one user-facing role a package declares. The installer

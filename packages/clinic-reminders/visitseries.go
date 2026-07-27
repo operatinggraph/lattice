@@ -1060,6 +1060,7 @@ func visitSeriesOpMetas() []pkgmgr.OpMetaSpec {
 				AuthContext: "standing",
 				TargetField: "seriesKey",
 				TargetType:  visitSeriesVertexDDL,
+				VisibleWhen: &pkgmgr.OpVisibleWhenSpec{Field: "active", Equals: true},
 			},
 		},
 		{
@@ -1082,6 +1083,7 @@ func visitSeriesOpMetas() []pkgmgr.OpMetaSpec {
 				AuthContext: "standing",
 				TargetField: "seriesKey",
 				TargetType:  visitSeriesVertexDDL,
+				VisibleWhen: &pkgmgr.OpVisibleWhenSpec{Field: "active", Equals: false},
 			},
 		},
 		{OperationType: advanceVisitSeriesOp},

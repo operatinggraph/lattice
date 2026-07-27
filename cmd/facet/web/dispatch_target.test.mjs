@@ -261,3 +261,26 @@ test("indefinite article follows the label's leading sound", () => {
   assert.equal(indefinite("Class session"), "a Class session");
   assert.equal(indefinite("Provider"), "a Provider");
 });
+
+// An op that declares dispatchVisibleWhen is offered only against a resolved
+// target ROW carrying the declared state — the ctx.row seam. Every rowless
+// context (a service card, a hat detail) fails closed rather than offering a
+// state-machine op whose state nobody can see.
+test("opButton gates a visibleWhen op on the ctx row's declared state", () => {
+  const { opButton } = loadApp();
+  const pause = {
+    key: "manifest.op.p",
+    data: {
+      operationType: "PauseVisitSeries",
+      dispatchClass: "visitseries", dispatchAuthContext: "standing",
+      dispatchTargetField: "seriesKey", dispatchTargetType: "visitseries",
+      submitLabel: "Pause series",
+      dispatchVisibleWhen: { field: "active", equals: true },
+    },
+  };
+  const SERIES = "vtx.visitseries.KKKKKKKKKKKKKKKKKKKK";
+  assert.match(opButton(pause, { entityKey: SERIES, row: { active: true } }), /<button/);
+  assert.equal(opButton(pause, { entityKey: SERIES, row: { active: false } }), "");
+  assert.equal(opButton(pause, { entityKey: SERIES, row: {} }), ""); // no field: fail closed
+  assert.equal(opButton(pause, { entityKey: SERIES }), "");          // no row at all
+});

@@ -410,6 +410,7 @@ RETURN
   op.dispatch.data.contextParams AS dispatchContextParams,
   op.dispatch.data.reads AS dispatchReads,
   op.dispatch.data.optionalReads AS dispatchOptionalReads,
+  op.dispatch.data.visibleWhen AS dispatchVisibleWhen,
   op.sensitive.data.value AS sensitive,
   role.key AS viaRole,
   role.canonicalName.data.value AS viaRoleName

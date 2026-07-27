@@ -9,7 +9,7 @@
 // a localhost HTTP/SSE feed. The browser never talks NATS directly (that is
 // Stage 2 / Fire 4) — it only ever calls this process's own HTTP surface.
 //
-// Inc 2 (design §7.2): Facet is no longer per-process single-tenant. Each
+// Inc 2 (design §7.2): Facet is no longer bound to one process-wide identity. Each
 // signed-in identity gets its own engine (engine.go), multiplexed by
 // engineManager (enginemanager.go) and selected per-request by a session
 // cookie (internal/appsession) — "same binary, different identity, different app"
@@ -45,7 +45,7 @@
 //	FACET_DEV_PUBLIC_KEY_PATH   overrides the shared dev trust key path (optional)
 //	FACET_PG_DSN       OPTIONAL Postgres DSN for the identityCredentialsRead
 //	                   Protected read model (credentials.go, Inc 3's "manage
-//	                   sign-in methods" — mirrors cmd/loftspace-app's
+//	                   sign-in methods" — the established
 //	                   LOFTSPACE_APP_PG_DSN). Unset: GET /api/credentials
 //	                   reports the read model as unconfigured; nothing else
 //	                   in Facet depends on it.
@@ -168,10 +168,9 @@ func run(logger *slog.Logger) error {
 	})
 	defer engines.CloseAll()
 
-	// identityCredentialsRead read boundary (Inc 3, mirrors cmd/loftspace-app/
-	// main.go's pgPool wiring): optional at startup, same as there — a
-	// missing/unreachable DSN degrades GET /api/credentials to a clean
-	// error rather than failing the whole process.
+	// The Protected Postgres read boundary (Inc 3): optional at startup —
+	// a missing/unreachable DSN degrades GET /api/credentials and the pane
+	// executor to a clean error rather than failing the whole process.
 	var pgPool *pgxpool.Pool
 	if dsn := strings.TrimSpace(os.Getenv("FACET_PG_DSN")); dsn != "" {
 		pool, err := pgxpool.New(context.Background(), dsn)

@@ -127,7 +127,7 @@ func newEngine(ctx context.Context, cfg engineConfig, identityID, deviceID, toke
 	// aspect the manifest.me row carries can be decrypted in memory for
 	// display (display-name-convention-design.md §3 N3). A construction
 	// failure is not fatal: its only consequence is that the renderer keeps
-	// painting its typed fallback instead of the resident's name — the same
+	// painting its typed fallback instead of the identity's name — the same
 	// degraded state a shredded identity produces by design.
 	var selfName *edgevault.SelfName
 	if vaultClient, verr := edgevault.New(ctrl, edgevault.Config{

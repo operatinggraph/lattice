@@ -40,6 +40,13 @@ already have on the nats-kv side).
 | `edgeTasks` | `manifest.task.<taskId>` | tasks directly `assignedTo` the actor and still open |
 | `edgeInstances` | `manifest.inst.<instId>` | service instances `providedTo` the actor ("my orders") |
 | `edgeManifestReadGrants` | `cap-read.edgeManifest.<actor>` (nats-kv, `capability-kv`) | the D1 read-grant half (Contract #6 §6.14): projects each actor's readable manifest anchors so the fail-closed `readableAnchors` gate publishes the four non-self-anchored lenses — without it only `manifest.me` ever leaves the Refractor |
+| `edgeStaffPanes` | `manifest.pane.<paneMetaId>` | pane meta-vertices reachable over `holdsRole` → `offeredTo` (facet-discovery-restoration-design.md §2.1): `{paneId, title, icon, sections}` where `sections` is a JSON string of section descriptors — the Protected server-pane's tables/columns/filters/dispatch targets as DATA. The client discovers panes by this prefix; the host's generic executor re-reads the same row from its own mirror and compiles the RLS-confined reads |
+
+Vocabulary additions riding the op rows: `dispatchVisibleWhen` (`{field, equals}`, nullable) gates
+OFFERING an op against the resolved target row's state — the state-machine-pair seam (pause/resume)
+that previously forced clients to branch by op name. `manifest.ent` rows (and both session-typed hat
+lenses) carry `typeLabel`, the per-type display word the renderer's label ladder consumes instead of
+a hardcoded client-side type map.
 
 This page + `lenses.go` are the normative as-built row shapes (design §3.2's JSON is the semantic
 reference — as-built rows flatten its nesting, per its 2026-07-16 amendment; the `vocab` stamp is not

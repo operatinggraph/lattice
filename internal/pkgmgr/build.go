@@ -21,6 +21,7 @@ const (
 	loomPatternClass      = "meta.loomPattern"
 	loomPatternSpecClass  = "loomPatternSpec"
 	opMetaClass           = "meta.ddl.vertexType"
+	paneClass             = "meta.pane"
 )
 
 // metaVertexPrefix is the Contract #1 prefix for both DDL and Lens
@@ -52,7 +53,7 @@ func (i *Installer) buildInstallBatch(
 	def Definition,
 	pkgKey string,
 	ddlIDs, lensIDs, permIDs, roleIDs []string,
-	weaverTargetIDs, loomPatternIDs, opMetaIDs []string,
+	weaverTargetIDs, loomPatternIDs, opMetaIDs, paneIDs []string,
 ) ([]installMutation, []string, error) {
 	var ops []installMutation
 	var declared []string
@@ -259,6 +260,30 @@ func (i *Installer) buildInstallBatch(
 		if o.Sensitive {
 			addCreate(opMetaKey+".sensitive", docAspect(opMetaKey, "sensitive", "sensitive",
 				map[string]any{"value": true}))
+		}
+	}
+
+	// Pane meta-vertices (facet-discovery-restoration-design.md §2.1): a
+	// meta.pane vertex whose `.paneDescriptor` aspect carries the pane's
+	// presentation + section descriptors (sections as a JSON string, the
+	// InputSchema convention), plus one `pane offeredTo role` link per
+	// resolved OfferedToRoles entry — the topology an identity-anchored
+	// lens walks (holdsRole → offeredTo) to deliver the descriptor.
+	for idx, p := range def.Panes {
+		paneKey := metaVertexPrefix + paneIDs[idx]
+		addCreate(paneKey, docVertex(paneClass,
+			map[string]any{"paneId": p.CanonicalName}))
+		addCreate(paneKey+".paneDescriptor", docAspect(paneKey, "paneDescriptor", "paneDescriptor",
+			map[string]any{
+				"paneId":   p.CanonicalName,
+				"title":    p.Title,
+				"icon":     p.Icon,
+				"sections": p.Sections,
+			}))
+		for _, roleID := range p.OfferedToRoles {
+			linkKey := "lnk.meta." + paneIDs[idx] + ".offeredTo.role." + roleID
+			addCreate(linkKey, docLink(paneKey, "vtx.role."+roleID,
+				"offeredTo", "offeredTo", nil))
 		}
 	}
 
@@ -600,6 +625,12 @@ func opDispatchBody(d *OpDispatchSpec) map[string]any {
 			optional[i] = r
 		}
 		body["optionalReads"] = optional
+	}
+	if d.VisibleWhen != nil {
+		body["visibleWhen"] = map[string]any{
+			"field":  d.VisibleWhen.Field,
+			"equals": d.VisibleWhen.Equals,
+		}
 	}
 	return body
 }
