@@ -229,6 +229,28 @@ func TestParseOutputDescriptor_EntryKeyColumn_AcceptAndReject(t *testing.T) {
 	if _, err := ParseOutputDescriptor(twoCols); err == nil || !strings.Contains(err.Error(), "entryKeyColumn requires exactly one") {
 		t.Fatalf("expected entryKeyColumn multi-column rejection, got %v", err)
 	}
+
+	// Reject: entryKeyColumn with no realnessFilter would permanently error
+	// every zero-grant actor's evaluation instead of dropping the degenerate
+	// collect entry — refused at parse time.
+	noRealness := validDescriptor()
+	noRealness.BodyColumns = []string{"readableAnchors"}
+	noRealness.EntryKeyColumn = "anchorId"
+	noRealness.RealnessFilter = ""
+	if _, err := ParseOutputDescriptor(noRealness); err == nil || !strings.Contains(err.Error(), "requires realnessFilter") {
+		t.Fatalf("expected entryKeyColumn-without-realnessFilter rejection, got %v", err)
+	}
+
+	// Reject: entryKeyColumn with a literal trailing {actorSuffix} in the key
+	// pattern produces a key shape the perEntry AnchorFromKey inverse (§4.4)
+	// can never parse back.
+	trailingLiteral := validDescriptor()
+	trailingLiteral.BodyColumns = []string{"readableAnchors"}
+	trailingLiteral.EntryKeyColumn = "anchorId"
+	trailingLiteral.OutputKeyPattern = "cap-read.{actorSuffix}.roster"
+	if _, err := ParseOutputDescriptor(trailingLiteral); err == nil || !strings.Contains(err.Error(), "END with") {
+		t.Fatalf("expected entryKeyColumn-with-trailing-literal rejection, got %v", err)
+	}
 }
 
 // A descriptor parsed without entryKeyColumn defaults it empty and keeps the

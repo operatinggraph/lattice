@@ -131,6 +131,151 @@ func (d OutputDescriptor) EnvelopeFn(lensDefKey string, revisionOf func(string) 
 	}
 }
 
+// EntryEnvelopeFn builds the pipeline per-entry envelope wrapper for an
+// actor-aggregate lens whose descriptor sets EntryKeyColumn (§3.3/§4.1 of
+// cap-read-per-anchor-grant-keys-design.md): instead of one document per
+// actor it emits one guarded key per REAL entry of the descriptor's single
+// split list column. ParseOutputDescriptor already enforces exactly one
+// BodyColumns entry when EntryKeyColumn is set, so d.BodyColumns[0] names
+// that column.
+//
+// Behavior:
+//   - The whole-row skip / anchor-type checks mirror EnvelopeFn exactly (an
+//     empty or wrong-type actorKey declines the whole row via
+//     pipeline.ErrSkipProjection).
+//   - The list column is realness-filtered exactly as EnvelopeFn's roster
+//     path (RealnessFiltered); entries the filter drops emit no key. Zero
+//     surviving entries is not an error — it returns an empty entry set (no
+//     write, no delete). Retracting any PREVIOUSLY-projected key this actor
+//     no longer earns is §4.2's job (a later increment), not this one's.
+//   - Each surviving entry must be a map (the shape every live roster column
+//     — {anchorId, anchorType, via} and similar — produces) whose
+//     EntryKeyColumn field is a non-empty, NanoID-alphabet string (a subject
+//     metacharacter must never reach a key, Contract #1). Any other shape —
+//     absent, empty, non-string, non-map entry, or a malformed token — errors
+//     the WHOLE actor evaluation (fail-closed: never silently drops a grant,
+//     never writes a malformed key), exactly the posture §3.3 specifies.
+//   - The key is d.BuildKey(actorKey) + "." + the entry's key-field value.
+//     The body is the entry's OTHER fields (the key field is not duplicated
+//     into the body — §3.2) plus the envelope metadata (key, ActorField,
+//     version, projectedAt). projectedFromRevisions is deliberately absent
+//     (§3.2 — it was aggregate-level provenance; a per-key guard's
+//     projectionSeq, stamped by the adapter write path, is the ordering
+//     authority for a per-anchor key).
+//   - Duplicate key-field values within one row's entries collapse to one
+//     key, last entry wins (§3.3 — the cypher's own DISTINCT dedup already
+//     collapses exact duplicates; a genuine collision across walk branches is
+//     audit-only and benign).
+//
+// This function has no caller in InstallActorAggregate yet: the
+// entryKeyColumn branch there still refuses registration, because emitting
+// fresh per-entry keys without §4.2's retraction transport (+ §4.3's
+// retry-path refusal, + §4.4's sweep deltas) would leave a revoked anchor's
+// key live forever — an over-grant on the security plane. See the design's
+// Fire 1 increment-2 checkpoint for the sequencing.
+func (d OutputDescriptor) EntryEnvelopeFn() pipeline.MultiEnvelopeFn {
+	if d.EntryKeyColumn == "" || len(d.BodyColumns) != 1 {
+		// ParseOutputDescriptor already refuses this shape (§3.3), so a
+		// caller reaching here went around it — a hand-built OutputDescriptor
+		// literal, which the exported fields allow. Return a func that
+		// errors on every call rather than let the len(d.BodyColumns) == 0
+		// index below panic.
+		return func(map[string]any, map[string]any, map[string]any) ([]pipeline.Envelope, error) {
+			return nil, fmt.Errorf("projection: EntryEnvelopeFn requires entryKeyColumn set and exactly one bodyColumns entry (got entryKeyColumn=%q, bodyColumns=%v)", d.EntryKeyColumn, d.BodyColumns)
+		}
+	}
+	listCol := d.BodyColumns[0]
+	return func(row map[string]any, _ map[string]any, params map[string]any) ([]pipeline.Envelope, error) {
+		actorKey, _ := row["actorKey"].(string)
+		if actorKey == "" {
+			actorKey, _ = params["actorKey"].(string)
+		}
+		if actorKey == "" {
+			return nil, pipeline.ErrSkipProjection
+		}
+		vtxType, _, ok := substrate.ParseVertexKey(actorKey)
+		if !ok {
+			return nil, fmt.Errorf("projection: actorKey %q is not a Contract #1 vertex key", actorKey)
+		}
+		if vtxType != d.AnchorType {
+			return nil, pipeline.ErrSkipProjection
+		}
+
+		list, _ := row[listCol].([]any)
+		real := d.RealnessFiltered(list)
+
+		byID := make(map[string]pipeline.Envelope, len(real))
+		order := make([]string, 0, len(real))
+		for _, e := range real {
+			entry, isMap := e.(map[string]any)
+			if !isMap {
+				return nil, fmt.Errorf("projection: entryKeyColumn %q: entry is not a map (%T)", d.EntryKeyColumn, e)
+			}
+			idVal, isStr := entry[d.EntryKeyColumn].(string)
+			if !isStr || idVal == "" {
+				return nil, fmt.Errorf("projection: entryKeyColumn %q: entry carries no usable key field", d.EntryKeyColumn)
+			}
+			if !substrate.IsValidNanoID(idVal) {
+				return nil, fmt.Errorf("projection: entryKeyColumn %q value %q is not a valid NanoID key token", d.EntryKeyColumn, idVal)
+			}
+
+			outKey := d.BuildKey(actorKey) + "." + idVal
+			body := make(map[string]any, len(entry)+3)
+			for k, v := range entry {
+				if k == d.EntryKeyColumn {
+					continue
+				}
+				if _, reserved := entryReservedFields[k]; reserved || k == d.ActorField {
+					// The entry's own fields land at the body's top level
+					// (unlike doc-mode, which nests body columns under their
+					// own name — driver.go's EnvelopeFn — an entry field can
+					// never collide with the envelope namespace there). A
+					// roster whose collected map happens to carry a field
+					// named "isDeleted" or "projectionSeq" (e.g. copied
+					// straight off a Core KV vertex body, which carries
+					// isDeleted) must never be let overwrite the guard's own
+					// tombstone/watermark fields — that would silently
+					// deny-by-tombstone or poison the §6.2 seq watermark on
+					// write. Fail closed rather than let the last writer
+					// (entry vs. metadata) win by accident.
+					return nil, fmt.Errorf("projection: entryKeyColumn %q: entry carries reserved field %q, which would collide with the envelope metadata", d.EntryKeyColumn, k)
+				}
+				body[k] = v
+			}
+			body["key"] = outKey
+			body[d.ActorField] = actorKey
+			body["version"] = Version
+			body["projectedAt"] = params["projectedAt"]
+
+			if _, seen := byID[idVal]; !seen {
+				order = append(order, idVal)
+			}
+			byID[idVal] = pipeline.Envelope{Keys: map[string]any{"key": outKey}, Row: body}
+		}
+
+		entries := make([]pipeline.Envelope, 0, len(order))
+		for _, id := range order {
+			entries = append(entries, byID[id])
+		}
+		return entries, nil
+	}
+}
+
+// entryReservedFields are the per-entry body field names EntryEnvelopeFn
+// itself writes (key, version, projectedAt) plus the two fields the guarded
+// NATS-KV write path stamps or reads out-of-band (natskv.go's guardedBody
+// injects projectionSeq; a soft-tombstoned key carries isDeleted — Contract
+// #6 §6.8). d.ActorField ("actor" by default) is checked separately since
+// it is configurable, not a literal. An entry field sharing any of these
+// names is refused rather than silently overwritten or overwriting.
+var entryReservedFields = map[string]struct{}{
+	"key":           {},
+	"version":       {},
+	"projectedAt":   {},
+	"projectionSeq": {},
+	"isDeleted":     {},
+}
+
 // Version is the Capability KV envelope schema version (Contract #6 §6.3),
 // pinned to "1.0" for Phase 1. Every actor-aggregate document carries it.
 const Version = "1.0"
@@ -205,13 +350,17 @@ func InstallActorAggregate(
 		return false
 	}
 	if desc.EntryKeyColumn != "" {
-		// EnvelopeFn below has no perEntry emission path yet (§4.1 of
-		// cap-read-per-anchor-grant-keys-design.md ships it in a later
-		// increment) — writing the one-document-per-actor shape for a lens
-		// that opted into per-entry keys would silently keep the unbounded
-		// document this design exists to retire. Refuse loudly (fail-closed,
-		// under-grant) rather than degrade the write silently.
-		logger.Error("actor-aggregate output descriptor sets entryKeyColumn but the driver has no perEntry emission yet — refusing registration",
+		// EntryEnvelopeFn (this package) ships the emission mechanism, but
+		// wiring it in here is deliberately deferred: emitting fresh
+		// per-entry keys with no retraction transport (§4.2), no
+		// retry-path refusal (§4.3), and a sweep that still treats every
+		// live child key as an orphan (§4.4) would either leave a revoked
+		// anchor's key live forever or flood-delete a live actor's whole
+		// roster on the next sweep tick — both are security-plane defects,
+		// not a mere degradation. Refuse loudly (fail-closed, under-grant)
+		// until those increments land together. See the design's Fire 1
+		// checkpoint for the sequencing.
+		logger.Error("actor-aggregate output descriptor sets entryKeyColumn but the driver's retraction/retry/sweep support isn't wired in yet — refusing registration",
 			"lensId", r.ID)
 		return false
 	}

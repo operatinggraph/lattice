@@ -226,6 +226,22 @@ func (p *Pipeline) executeFullForActor(ctx context.Context, actorKey string, nod
 	for _, r := range out {
 		row := r.Values
 		keys := r.Key
+		if p.multiEnvelopeFn != nil {
+			entries, envErr := p.multiEnvelopeFn(row, keys, params)
+			if errors.Is(envErr, ErrSkipProjection) {
+				continue
+			}
+			if envErr != nil {
+				return nil, fmt.Errorf("pipeline: multi-envelope: %w", envErr)
+			}
+			for _, e := range entries {
+				results = append(results, ruleengine.EvalResult{
+					Keys: e.Keys,
+					Row:  e.Row,
+				})
+			}
+			continue
+		}
 		if p.envelopeFn != nil {
 			newRow, newKeys, envErr := p.envelopeFn(row, keys, params)
 			if errors.Is(envErr, ErrSkipProjection) {
@@ -257,8 +273,12 @@ func (p *Pipeline) executeFullForActor(ctx context.Context, actorKey string, nod
 	// in turn (last-writer-wins) and silently drop the rest — an FR29 violation.
 	// The aggregation belongs in the cypher (collect → one row per anchor); when it
 	// is missing, surface the authoring defect and fail the actor's projection
-	// closed rather than write a half-result.
-	if p.envelopeFn != nil {
+	// closed rather than write a half-result. A perEntry lens's own within-row
+	// dedup (EntryEnvelopeFn's byID map) only closes this for entries collected
+	// inside ONE row — a cypher missing aggregation still returns 2+ rows per
+	// actor, and the same anchor could be keyed by each, so the guard applies to
+	// multiEnvelopeFn's results too, not only envelopeFn's.
+	if p.envelopeFn != nil || p.multiEnvelopeFn != nil {
 		if err := p.guardOutputKeyCollision(ctx, actorKey, results); err != nil {
 			return nil, err
 		}

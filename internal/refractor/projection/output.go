@@ -135,6 +135,25 @@ func ParseOutputDescriptor(spec *lens.OutputDescriptorSpec) (OutputDescriptor, e
 		if len(spec.BodyColumns) != 1 {
 			return OutputDescriptor{}, fmt.Errorf("output descriptor: entryKeyColumn requires exactly one bodyColumns entry (the list it splits), got %d", len(spec.BodyColumns))
 		}
+		// realnessFilter is what turns a degenerate OPTIONAL-match artifact
+		// (an entry with no real key field) into a dropped entry rather than
+		// a hard error (EntryEnvelopeFn errors the whole actor evaluation on
+		// an entry missing its key field). Without one, EVERY zero-grant
+		// actor's evaluation would error permanently on every re-evaluation
+		// instead of correctly producing zero keys.
+		if strings.TrimSpace(spec.RealnessFilter) == "" {
+			return OutputDescriptor{}, fmt.Errorf("output descriptor: entryKeyColumn requires realnessFilter to be set (else a zero-grant actor's degenerate collect entry would error every evaluation instead of dropping)")
+		}
+		// The id is appended AFTER the whole rendered pattern (BuildKey +
+		// "." + idVal), so a literal trailing the {actorSuffix} placeholder
+		// (e.g. "cap-read.{actorSuffix}.roster") would produce a key shape
+		// the perEntry AnchorFromKey inverse (§4.4) can never parse back —
+		// the sweep's orphan direction would claim nothing. Refuse it at
+		// authoring time rather than let it compile into an unrecoverable
+		// lens.
+		if !strings.HasSuffix(spec.OutputKeyPattern, ActorSuffixPlaceholder) {
+			return OutputDescriptor{}, fmt.Errorf("output descriptor: entryKeyColumn requires outputKeyPattern to END with %q (a literal trailing the actor suffix has no perEntry inverse)", ActorSuffixPlaceholder)
+		}
 	}
 
 	actorField := spec.ActorField

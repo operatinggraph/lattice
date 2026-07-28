@@ -92,11 +92,11 @@ func TestInstallActorAggregate_InvalidOutputDescriptor_Refuses(t *testing.T) {
 	}
 }
 
-// The driver's EnvelopeFn has no perEntry emission yet
-// (cap-read-per-anchor-grant-keys-design.md §4.1 ships it in a later
-// increment); a lens opting into entryKeyColumn must be refused registration
-// rather than silently keep writing the one-document-per-actor shape it
-// asked out of.
+// InstallActorAggregate does not yet wire EntryEnvelopeFn in (no retraction
+// transport, retry-path refusal, or sweep support for the perEntry shape —
+// cap-read-per-anchor-grant-keys-design.md §4.2-§4.4); a lens opting into
+// entryKeyColumn must be refused registration rather than run with only part
+// of the mechanism that keeps it safe.
 func TestInstallActorAggregate_EntryKeyColumnSet_Refuses(t *testing.T) {
 	r := installRule(t, "my-tasks", string(projection.EmptySkip))
 	r.Output.EntryKeyColumn = "anchorId"
