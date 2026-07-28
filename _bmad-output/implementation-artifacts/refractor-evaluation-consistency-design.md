@@ -323,18 +323,57 @@ issues), `STRICT=1 go run ./scripts/lint-conventions.go` (0 issues), `go test
 ./internal/refractor/...` (all green, full package tree — the change's blast radius is contained
 to `internal/refractor`, no cross-component caller exists).
 
-**🏗️ CHECKPOINT — next increment (Fire 1 Increment 2):** wire the validation seam itself —
-after `ExecuteWith` returns and before a result reaches the adapter/envelope, re-read each
-footprint entry (`ex.nodes` + `ex.edges`/`edgeRevisions`) and compare revisions, scoped to
-`actorAggregate ∧ projection.IsAuthPlane` (§4.4); on drift, one inline re-execution, then a typed
-`ErrEvalDrift` on the existing pump retry-queue / sweep-repair failure channels (§4.3, never an
-empty result set — the four downstream seams §12 #7 names); ship the `evalDriftRetries`/
-`evalDriftRequeues` health counters (§4.6) and the `docs/components/refractor.md` §8.5 paragraph
-in the same increment. Needs its own pipeline-unit + E2E tests per §9 (the scripted-interleave
-`capabilityEphemeral` role-queue vector needs an evaluator pause hook the executor doesn't have
-yet — build that hook as part of the increment, not a separate one). Worktree for Increment 1 was
-`.claude/worktrees/refractor-eval-footprint-fire1` (merged, safe to remove); Increment 2 opens a
-fresh worktree per the fresh-worktree-per-fire convention.
+**🏗️ CHECKPOINT — next increment (Fire 1 Increment 2), REVISED after a reverted attempt
+(2026-07-28):** a full build of the §4.2-§4.6 validation seam (footprint capture exposed from the
+engine, `actorAggregate ∧ projection.IsAuthPlane` scope predicate, verify/re-execute/requeue wired
+into `executeFullForActor`, `evalDriftRetries`/`evalDriftRequeues` counters, the evaluator pause
+hook, the `docs/components/refractor.md` paragraph) passed every unit/pipeline gate
+(`go build`, `make vet`, `golangci-lint`, `lint-conventions`, `go test ./internal/refractor/...`
+all green) but was **reverted off `main`** (commits `da1b4641`/`b709a62c`, reverted
+`1e33a90f`/`72f9d7f6`) when CI's `stack-gates` job caught a real liveness regression the unit
+tier cannot see: `make verify-package-service-location` failed 10 assertions —
+`cap.roles.identity.<operator>` never reflected 10 permissions granted to one role in a tight
+install-time loop within the gate's 10s window.
+
+**Root cause (grounded, not guessed):** `projection.IsAuthPlane` gates on **bucket**
+(`capability-kv`), so the scope predicate `actorAggregate ∧ IsAuthPlane` catches every lens
+writing there — including **census row 4** (`capabilityRoles`, §3 table), which the census itself
+already proved is single-key (`perm.data`) and **safe from tearing** ("ordinary bounded
+staleness", no validation needed for correctness). The coarse predicate validates it anyway (by
+design, §4.4: "forgetting is impossible"). During a package install, many permissions land
+`grantedBy` the SAME role in rapid succession — a normal pattern (service-location seeds 10), not
+a pathological one. Each permission's link event fans out to reproject every actor holding that
+role; the fan-out's footprint includes the role's own adjacency document, which the NEXT
+permission's `grantedBy` link also bumps. Under real install-time arrival rates the window between
+footprint capture and validation is not always ms-scale relative to sibling writes to the SAME
+adjacency node, so `maxFootprintRetries = 1` is exhausted and the evaluation requeues via
+`ErrEvalDrift` — repeatedly, for a lens the census had already cleared. This is exactly the
+unmeasured risk §5 named ("the role-queue hot path doubles an already-heavy walk... if the
+drift-retry rate on hot queues is material, the branch's own shape is the thing to revisit") and
+§11 named ("drift-retry rate under real churn is unmeasured") — now measured, and material enough
+to break a routine package install, not just degrade its latency.
+
+**What must change before Increment 2 re-attempts** (design work — do not just retry the same
+scope predicate): narrow §4.4's predicate from the blanket `actorAggregate ∧ IsAuthPlane` to the
+census's actual harmful set — rows 1-3 only (`matchEphemeralGrant`'s taskKey∧operationType∧target,
+`matchServiceAccess`'s service∧allowedOperations, the RLS grant tables) — so a single-key-conjunct
+auth-plane lens like `capabilityRoles` (row 4) is exempted by construction, not merely by
+practice. This likely means predicate needs a per-lens declaration (e.g. a `Rule.NeedsFootprint`
+/ conjunctive-columns marker set at compile time from the cypher's own MATCH shape, or an explicit
+opt-in flag on the 3 known lenses) rather than a structural bucket test — **this is itself a
+design decision**, not an implementation detail, since getting the boundary wrong either
+re-admits row 4's regression or silently exempts a future row-1/2/3-shaped lens. Flagged for
+`lattice-designer` to ground and re-decide before Increment 2 is re-attempted; the Steward should
+not re-guess it. A shared-adjacency-fan-in stress scenario (N rapid grants to one role) belongs in
+whatever tier replaces/extends §9 for the re-scoped predicate, since it is what caught this and the
+unit tier alone did not.
+
+Worktree for the reverted attempt (`.claude/worktrees/refractor-eval-footprint-fire2`) has been
+removed. Increment 1's primitives (revision-bearing `Neighbors`, the edge memo, `nodeRef.revision`)
+remain on `main`, unaffected by the revert — only Increment 2's additions (`ExecuteWithFootprint`,
+the validation seam, the scope predicate, the counters, the pause hook) were reverted. A future
+re-attempt still builds on Increment 1, opening a fresh worktree per the fresh-worktree-per-fire
+convention.
 
 ## 11. Risks
 
