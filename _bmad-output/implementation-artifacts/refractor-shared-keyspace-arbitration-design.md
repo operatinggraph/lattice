@@ -314,3 +314,49 @@ separateness was itself an artifact of the one-walk-one-lens coupling, not of th
 key?"* — none exists (§2.3); the overlap was workaround, not requirement, and the design's job
 was to remove its causes, not arbitrate its symptoms. Standing rule reaffirmed: **long-term
 value decides; size never rejects the right shape** ([[feedback_no_expedient_wrong_longterm_options]]).
+
+## 10. Build note — Fire U1 increment 1 (Winston, Lattice Steward fire, 2026-07-28)
+
+**Shipped:** `pkgmgr.LensSpec.Walk *AnchorWalk` → `Walks []AnchorWalk` (§3.1's primitive). All 17
+non-self-anchored edge-manifest lenses migrated mechanically to a one-element `Walks` slice —
+byte-identical compiled output, proven by the existing `TestEdgeManifest_Fire2_E2E_*` e2e and the
+full `anchorwalk_test.go` suite (all passing unchanged). `ExpandReadGrantWalks` now loops
+`parseWalks` per lens: every walk in one lens must resolve to the same `AnchorType`/`AnchorVar`
+(fail-closed — a lens has one hand-authored tail, so it can `RETURN` exactly one anchor variable),
+and no walk may bind a variable an earlier walk in the same lens already bound (fail-closed,
+excluding a walk's own legitimate multi-clause reuse of its own bindings). `composeDataLensSpec`
+concatenates every walk's `OPTIONAL MATCH` clauses ahead of the shared tail, in declaration order.
+
+**Correction to §3.1 (found building, not fixed — real composition work remains):** §3.1's "the
+compiled prelude is the actor head + every chain as OPTIONAL MATCH; the anchor is reachable via
+any walk" does **not** hold for the DATA lens as literally specified once a second walk shares the
+first's `AnchorVar` (which every walk in a lens must, by the rule above — there is no other case).
+Grounded directly in the engine (`internal/refractor/ruleengine/full/executor.go`): `matchPath`'s
+first-node check (:306-326) and `traverseRel`'s destination check (:668-679) both treat an
+**already-bound variable — including one already null-bound by an earlier failed OPTIONAL MATCH —
+as a same-node join constraint on re-reference**, never a fresh scan. Concretely: if walk 1's path
+to `op` fails for an actor (residence-only lens with no role standing), `op` is null-bound; walk
+2's OPTIONAL MATCH then sees `op` already present (even though null) and refuses to rebind it via
+its own (role) path — that actor's role-only-reachable `op` rows never appear. The producer side
+was already immune (`generateProducerSpec` renames colliding variables and unions per-branch
+`collect(DISTINCT …)`); the DATA side's "verbatim" choice was not.
+
+**Consequence:** `parseWalks`' variable-disjointness guard, added for the (still real) case of two
+walks' *unrelated* variables accidentally colliding, has the side effect of rejecting **every**
+2+-walk lens today, since the shared `AnchorVar` always re-collides. This is the correct,
+fail-closed posture until the composition is designed — not a bug to route around. **Named
+residual, filed:** the edge-manifest catalog/tasks/sessions unification (this fire's other named
+deliverable) and the A3a tails audit **cannot proceed** until a follow-up increment designs the
+actual multi-path-to-one-anchor composition — the leading candidate is renaming each walk's own
+introduced variables on the data side too (mirroring the producer), with the tail rewritten to
+combine the renamed candidates (needs `coalesce`-equivalent support in
+`internal/refractor/ruleengine/full` — unverified whether it exists) rather than one shared
+literal `RETURN <var>.key AS anchor`. Filed as [[project_refractor_shared_keyspace_u1_composition]]
+— **Board:** `lattice.md`'s shared-keyspace row stays `🏗️ building`, next step "design the
+multi-path anchor composition (data-side rename + coalesce tail)."
+
+**Gates green:** `go build ./...`, `make vet`, `golangci-lint run ./...` (0 issues, full repo),
+`STRICT=1 lint-conventions.go`, `lint-package-standard.go`, `lint-package-version.go` (edge-manifest
+bumped 0.14.8→0.14.9), `lint-lens-anchors.go` (updated for the field rename), `lint-facet-discovery.go`,
+full `go test ./... -p 4` (0 failures). `lint-lens-anchors.go` itself needed the same `Walk`→`Walks`
+AST-field update (it statically parses lens declarations, independent of the compiler).
