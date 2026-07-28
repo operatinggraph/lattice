@@ -98,6 +98,20 @@ func TestReproject_RequiresActorKey(t *testing.T) {
 	require.Error(t, err)
 }
 
+// TestReproject_RefusesNonVertexActorKey proves a malformed actorKey (an
+// aspect or link key, e.g. passed by mistake) is refused rather than
+// evaluated as an anchor that resolves to zero rows and reads back as a
+// clean, converged no-op — which would silently drop whatever this call was
+// actually meant to satisfy.
+func TestReproject_RefusesNonVertexActorKey(t *testing.T) {
+	adpt := &recordingAdapter{}
+	p := newReprojectPipeline(t, adpt)
+	_, err := p.Reproject(context.Background(), "vtx.identity.x.someAspect")
+	require.Error(t, err)
+	require.Empty(t, adpt.upserts)
+	require.Empty(t, adpt.deletes)
+}
+
 func TestReproject_MissingActor_DeletesRow(t *testing.T) {
 	// Actor absent from Core KV and a row still stored → the reconciler
 	// retracts it, carrying the captured sequence as the ordering token.

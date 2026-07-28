@@ -9,13 +9,16 @@ import (
 	"maps"
 
 	"github.com/operatinggraph/lattice/internal/refractor/adapter"
+	"github.com/operatinggraph/lattice/internal/substrate"
 )
 
-// ErrNotActorAggregate is returned by Reproject on a pipeline that has no
-// envelope wrapper installed. Per-actor reconciliation is defined only for
-// actor-aggregate lenses: a plain lens retracts through filter-diff
-// retraction and the Personal Lens has its own Hydrate, so neither needs —
-// nor can answer — a per-actor reprojection request.
+// ErrNotActorAggregate is returned by Reproject on a pipeline that has
+// neither envelope wrapper installed (envelopeFn for a one-document-per-actor
+// lens, multiEnvelopeFn for a perEntry one — cap-read-per-anchor-grant-keys-design.md
+// §3.3). Per-actor reconciliation is defined only for actor-aggregate lenses:
+// a plain lens retracts through filter-diff retraction and the Personal Lens
+// has its own Hydrate, so neither needs — nor can answer — a per-actor
+// reprojection request.
 var ErrNotActorAggregate = errors.New("pipeline: reproject: lens is not actor-aggregate")
 
 // ErrNoOrderingToken is returned when reconciliation would have to write
@@ -85,8 +88,15 @@ var volatileEnvelopeFields = []string{"projectedAt"}
 // A converged actor costs zero KV writes: the recomputed body is compared
 // against the stored one (modulo volatileEnvelopeFields) and the write is
 // dropped when they match, so the sweep in Fire 1b is churn-free at rest.
+//
+// Three callers reach this method: the sweep's deep-verify, the operator
+// control-plane "reproject" RPC (control/service.go), and — since §4.3 —
+// the pipeline's own retry queue re-evaluating a perEntry actor whose write
+// failed transiently (enqueueActorReprojectRetry). Widening the gate below
+// to accept multiEnvelopeFn makes a perEntry lens reachable through all
+// three, not just the retry path.
 func (p *Pipeline) Reproject(ctx context.Context, actorKey string) (Reprojection, error) {
-	if p.envelopeFn == nil {
+	if p.envelopeFn == nil && p.multiEnvelopeFn == nil {
 		return Reprojection{}, ErrNotActorAggregate
 	}
 	if _, isPersonal := p.currentAdapter().(adapter.KeySetPublisher); isPersonal {
@@ -104,6 +114,17 @@ func (p *Pipeline) Reproject(ctx context.Context, actorKey string) (Reprojection
 	if actorKey == "" {
 		return Reprojection{}, fmt.Errorf("pipeline: reproject: actorKey is required")
 	}
+	if _, _, ok := substrate.ParseVertexKey(actorKey); !ok {
+		// A non-vertex actorKey (an aspect or link key handed in by mistake)
+		// would evaluate the anchor MATCH against it, resolve to zero rows,
+		// and return a clean Reprojection{Wrote: false} — every caller reads
+		// that as "converged, nothing to do", so the request this call was
+		// actually meant to satisfy silently vanishes with no error and no
+		// trace. Refuse it here rather than let each of the three callers
+		// (sweep, control-plane RPC, retry-queue actor-reproject) re-derive
+		// the same guard independently.
+		return Reprojection{}, fmt.Errorf("pipeline: reproject: actorKey %q is not a Contract #1 vertex key", actorKey)
+	}
 
 	seq := p.Progress().LastAppliedSeq
 
@@ -116,6 +137,16 @@ func (p *Pipeline) Reproject(ctx context.Context, actorKey string) (Reprojection
 	adpt := p.currentAdapter()
 	reader, canRead := adpt.(adapter.RowReader)
 
+	// Every result is attempted even after one fails: a doc-mode lens's
+	// single result made "abort on first error" indistinguishable from
+	// "attempt all", but a perEntry lens's actor-reproject (§4.3 of
+	// cap-read-per-anchor-grant-keys-design.md) can carry many results for
+	// one actor, and this call is never retried per-result — the whole
+	// actor is the retry unit (writeResults' enqueueActorReprojectRetry). A
+	// deterministic failure on one anchor must not permanently block a
+	// transiently-failing sibling's heal; errors are joined and reported
+	// together so the caller still sees (and can retry) the failure.
+	var errs []error
 	for _, result := range results {
 		if result.Delete {
 			// A delete is skippable only when the row is already gone;
@@ -128,10 +159,12 @@ func (p *Pipeline) Reproject(ctx context.Context, actorKey string) (Reprojection
 				}
 			}
 			if seq == 0 {
-				return Reprojection{}, ErrNoOrderingToken
+				errs = append(errs, ErrNoOrderingToken)
+				continue
 			}
 			if derr := adpt.Delete(ctx, result.Keys, seq); derr != nil {
-				return Reprojection{}, fmt.Errorf("pipeline: reproject %q: delete: %w", actorKey, derr)
+				errs = append(errs, fmt.Errorf("delete %v: %w", result.Keys, derr))
+				continue
 			}
 			out.Deleted = true
 			out.Wrote = true
@@ -141,7 +174,8 @@ func (p *Pipeline) Reproject(ctx context.Context, actorKey string) (Reprojection
 		if canRead {
 			stored, present, rerr := reader.GetRow(ctx, result.Keys)
 			if rerr != nil {
-				return Reprojection{}, fmt.Errorf("pipeline: reproject %q: read stored row: %w", actorKey, rerr)
+				errs = append(errs, fmt.Errorf("read stored row %v: %w", result.Keys, rerr))
+				continue
 			}
 			if present && rowsEquivalent(stored, result.Row) {
 				out.Converged = true
@@ -159,14 +193,21 @@ func (p *Pipeline) Reproject(ctx context.Context, actorKey string) (Reprojection
 			// entirely, so refusing would decline a create that would have
 			// succeeded, which is the lost-first-projection heal.
 			if guard, guarded := adpt.(adapter.SeqGuarded); seq == 0 && guarded && guard.Guarded() {
-				return Reprojection{}, ErrNoOrderingToken
+				errs = append(errs, ErrNoOrderingToken)
+				continue
 			}
 		}
 
 		if uerr := adpt.Upsert(ctx, result.Keys, result.Row, seq); uerr != nil {
-			return Reprojection{}, fmt.Errorf("pipeline: reproject %q: upsert: %w", actorKey, uerr)
+			errs = append(errs, fmt.Errorf("upsert %v: %w", result.Keys, uerr))
+			continue
 		}
 		out.Wrote = true
+	}
+
+	if len(errs) > 0 {
+		return Reprojection{}, fmt.Errorf("pipeline: reproject %q: %d/%d results failed: %w",
+			actorKey, len(errs), len(results), errors.Join(errs...))
 	}
 
 	if out.Wrote {

@@ -350,17 +350,18 @@ func InstallActorAggregate(
 		return false
 	}
 	if desc.EntryKeyColumn != "" {
-		// EntryEnvelopeFn (this package) ships the emission mechanism, but
-		// wiring it in here is deliberately deferred: emitting fresh
-		// per-entry keys with no retraction transport (§4.2), no
-		// retry-path refusal (§4.3), and a sweep that still treats every
-		// live child key as an orphan (§4.4) would either leave a revoked
-		// anchor's key live forever or flood-delete a live actor's whole
-		// roster on the next sweep tick — both are security-plane defects,
-		// not a mere degradation. Refuse loudly (fail-closed, under-grant)
-		// until those increments land together. See the design's Fire 1
-		// checkpoint for the sequencing.
-		logger.Error("actor-aggregate output descriptor sets entryKeyColumn but the driver's retraction/retry/sweep support isn't wired in yet — refusing registration",
+		// EntryEnvelopeFn (this package) ships the emission mechanism, the
+		// per-actor prefix-diff retraction transport ships (§4.2), and the
+		// retry queue's raw-replay refusal + actor-reproject routing ships
+		// (§4.3) — but wiring registration in here is still deliberately
+		// deferred: the sweep still treats every live child key as an
+		// orphan (§4.4's AnchorFromKey perEntry variant + coverage/orphan
+		// deltas aren't built), so installing a SweepPlan for a real
+		// entryKeyColumn lens today would flood-delete a live actor's whole
+		// roster on the next sweep tick — a security-plane defect, not a
+		// mere degradation. Refuse loudly (fail-closed, under-grant) until
+		// §4.4 lands. See the design's Fire 1 checkpoint for the sequencing.
+		logger.Error("actor-aggregate output descriptor sets entryKeyColumn but the driver's sweep support isn't wired in yet — refusing registration",
 			"lensId", r.ID)
 		return false
 	}
