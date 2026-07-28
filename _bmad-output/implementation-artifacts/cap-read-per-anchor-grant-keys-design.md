@@ -1,14 +1,32 @@
 # `cap-read` size bound — per-anchor grant keys (the KV read-grant slice stops being one unbounded document)
 
-**Status: ✅ Andrew-ratified 2026-07-25 (Option A — keep the KV family, per-anchor) — BUILD SHELVED
-(revive: showcase completion).** The §6.13/§6.14 contract edit is **committed** at ratification per the
-house rule (the contract is the build-to target; its transitional note marks the legacy document shape as
-the live wire format until the build drains it). **Why shelved:** the Lattice steward shares the build
-lock with the Verticals stream and keeps winning it, while the showcase — Facet rendering every archetype
-world correctly — is the standing priority and Verticals has barely advanced in days (Andrew,
-2026-07-25). This L-size build must not compete for the lock until the showcase is done. On revive, fires
-ship 1→2→3 (+4 independent) as decomposed in §10; §4.5's prefix-scoped truncate may land earlier via the
-standalone fire-briefs Fire B, which Fire 1 then inherits.
+**Status: ✅ Andrew-ratified 2026-07-25 (Option A — keep the KV family, per-anchor) — 🏗️ BUILDING
+(Fire 1, in progress).** The §6.13/§6.14 contract edit is **committed** at ratification per the house
+rule (the contract is the build-to target; its transitional note marks the legacy document shape as the
+live wire format until the build drains it). The build-shelve (showcase priority) lifted 2026-07-27 —
+Facet's showcase build shipped end-to-end — and Fire 1 started the same fire. Fires ship 1→2→3 (+4
+independent) as decomposed in §10; §4.5's prefix-scoped truncate may land earlier via the standalone
+fire-briefs Fire B, which Fire 1 then inherits.
+
+**CHECKPOINT (Fire 1, increment 1 — 2026-07-27, worktree `.claude/worktrees/cap-read-per-anchor-fire1`,
+branch `fire/cap-read-per-anchor-fire1`, merged to main `ccf17553`):** shipped the §3.3 `entryKeyColumn`
+output-descriptor field — `lens.OutputDescriptorSpec.EntryKeyColumn` + `projection.OutputDescriptor
+.EntryKeyColumn` + `ParseOutputDescriptor` fail-closed validation (exactly one bodyColumns entry when
+set, blank rejected). Deliberately **not** wired into the write path yet: `EnvelopeFn` is untouched, and
+`InstallActorAggregate` **refuses registration** of any lens that sets `entryKeyColumn` (no perEntry
+emission consumer exists yet — a loud refusal, not a silent doc-mode fallback), pinned by
+`TestInstallActorAggregate_EntryKeyColumnSet_Refuses`. `outputDescriptorsEqual` (cmd/refractor/reload.go)
+now includes the field so a future flip is correctly judged not-hot-reloadable. No lens sets the field
+today — zero behavior change for any existing lens. Adversarially reviewed (opus) before merge; 2 majors
+found and fixed in the same fire (the reload-equality gap and the silent-no-op registration hole above),
+4 minors fixed (TrimSpace on the stored value, test-coverage precision, this checkpoint).
+**Next increment:** §4.1 driver perEntry emission — this needs new pipeline plumbing first
+(`pipeline.EnvelopeFn` is a strict 1-row-in-1-row-out transform; true per-entry key emission needs either
+a new N-envelope registration path on `Pipeline` or an equivalent fan-out inside `EnvelopeFn`'s caller in
+`evaluate.go` — ground that shape before writing the driver side), then remove the
+`InstallActorAggregate` refusal added this increment. §4.2's prefix-diff retraction is the increment
+after that (§4.1 and §4.2 are tightly coupled — likely land together). Left with gates green, CI to
+watch after push.
 **Author:** Winston (Designer fire, 2026-07-25)
 **Backlog:** Stream-2 Security & trust boundary — *[Refractor] A `cap-read` document has no size bound* (★★, M)
 **Owning components:** `internal/refractor/{projection,pipeline,adapter,capabilityread,keyshredded}` (mechanism), `internal/bootstrap/lenses.go` + `internal/pkgmgr/anchorwalk.go` (producers), `packages/edge-manifest` (+ any package shipping a `cap-read.*` NATS-KV producer). Docs: `docs/contracts/06-capability-kv.md` §6.13/§6.14 (edit prepared uncommitted in the working tree), `docs/components/refractor.md`.
