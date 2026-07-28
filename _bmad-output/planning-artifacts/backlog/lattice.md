@@ -127,9 +127,8 @@ designed-through, but the *fork decision* + the *contract commit* are Andrew's.
 > winning the shared build lock over it. Until the showcase is done: prefer S-sized picks, start no M+
 > build when Verticals has work queued, and yield the lock.
 > **Build-ready now** (within that): the
-> **script live-read budget** (★★ M, the bigger sibling of the shipped envelope ceiling), the
-> **MergeIdentity dead collision check** (★★ S–M), then the two ★ Processor sensitive-predicate
-> rows. Both 2026-07-25 ratifications are
+> **script live-read budget** (★★ M, the bigger sibling of the shipped envelope ceiling), then the
+> two ★ Processor sensitive-predicate rows. Both 2026-07-25 ratifications are
 > 🗄️ **shelved with named revives** (cap-read → showcase completion; appsession → first real-IdP
 > deployment) — the Steward does not select them.
 > Every `✅ ratified` row is done or driver-blocked; the rest are Whetstone's or parking-lot.
@@ -146,7 +145,6 @@ designed-through, but the *fork decision* + the *contract commit* are Andrew's.
 | **[appsession] A co-hosted page can plant a session cookie (fixation)** | Cookies ignore port, so a sibling localhost app's page can `document.cookie` an ABSENT session cookie (HttpOnly blocks overwrite, not create) and the shared dev key makes it verify — the victim browses as an attacker-chosen identity. The origin gate cannot reach it (no request made); `__Host-` or a cookie-bound token closes it. | ★ | S–M | 📋 ready · dev/demo only (shared key) · [kit](../../../docs/components/appsession.md) |
 | **[Processor] The sensitive predicate misses instanceOf-chained classes and links entirely** | Both the encrypt (step 6.5) and decrypt-on-read paths resolve `sensitive` by exact `DDLs.Lookup`, not step 6's `instanceOf` chain walk; and step 6 gates the sensitive write-scope on `KindAspect`, so a `Sensitive: true` **link** class is never rejected, never encrypted, and `kv.Links` never applies the read disposition to it. | ★ | S–M | 📋 ready · no live victim (every shipped sensitive DDL registers under its exact name; no sensitive link class) |
 | **[Processor] A script's live reads have no budget** | Class-(e) `kv.Links` paging + one `kv.Read` per link is uncapped at the Processor: `identity_has_open_tasks` alone walks 64 pages × 256 links, so one MergeIdentity can issue ~16k sequential Core-KV GETs — ~16x the declared-read ceiling, which never sees a live read. `connKVReader.ReadVertex` has no budget. | ★★ | M | 📋 ready · consumer: any actor able to submit an op whose script enumerates |
-| **[identity-hygiene] MergeIdentity's link-collision check can never fire** | `state[new_key]` tests the primary-rewritten link key, but the dispatcher declares only the secondary's edges — each carries `secondary_id` in the rewritten position, so `new_key` is never in `state` and a colliding `create` reaches step 8. Bites when both identities hold the same relation to one vertex (e.g. a shared role). Declaring the rewritten keys doubles the read set. | ★★ | S–M | 📋 ready · consumer: any merge of two identities sharing a relation |
 | **[packages] ~20 read-posture comments assert hydration-time fatality** | `packages/*` DDL comments + two READMEs still say a declared-but-absent read faults "before the script runs" (identity-domain, service-domain, privacy-base, objects-base, orchestration-base, clinic/loftspace READMEs), as does `docs/contracts/10-orchestration-substrate.md:238`. Doc-only sweep. | ★ | S | 📋 ready |
 | **Starlark 250ms wall budget fails installs under parallel test load** | `go test ./...` at default `-p` reds a different package-install test each run with `ScriptTimeout: script exceeded wall budget 250ms` — reproduced on unmodified `main`, so it predates any one fire. Costs every fire an investigation to rule out its own change. | ★★ | S–M | 📋 ready |
 | **[Refractor] A `cap-read` document has no size bound** | Even deduped, an actor reaching enough distinct anchors renders `cap-read.<domain>.<actor>` past NATS's max payload; the write then fails permanently, freezing that actor's grant set so revocations stop landing (fail-OPEN). Design: per-anchor keys (the Postgres per-row twin). | ★★ | L | 🗄️ shelved (revive: showcase completion) · ✅ design Andrew-ratified 2026-07-25 (Option A) · [design](../../implementation-artifacts/cap-read-per-anchor-grant-keys-design.md) · §6.13/§6.14 contract edit committed |
@@ -221,6 +219,7 @@ Real but low-value; do **not** spend design or build effort here unless Andrew g
 
 One line per shipped item (`date · SHA · [tag] title`). Oldest roll to `archive/` past ~25.
 
+- 2026-07-27 · `d8bdf7fe` · [identity-hygiene] MergeIdentity's dead link-collision check now fires — rewritten-key optionalReads declared, so a real collision migrates as a duplicate instead of rejecting the whole merge
 - 2026-07-27 · `8981a8b0` · [CI] lease-convergence drain budget — the 3 15s outliers join the suite's 30s convention; the chain converged microseconds late on CI, and the window ceiling the old comment claimed was measured from the wrong instant
 - 2026-07-27 · `e8d78278` · [Refractor] evaluation-scoped read memo — one cypher run observes one value per key, so a commit landing mid-evaluation can no longer split an anchor into two rows and drop the projection
 - 2026-07-26 · — · [Packages] Conformance-sweep row closes as overtaken — Standard Inc 1–6 (verticals) drained it: `s1Debt`/`s6Debt` empty, 29 pkgs, no exemptions; `readTemplateDebt` (2) has its own verticals row
