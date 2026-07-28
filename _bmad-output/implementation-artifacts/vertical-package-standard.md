@@ -565,6 +565,13 @@ corpus's cypher tests. Extracting it to an `internal/lenstest` helper is a singl
 doing it for five files only would have created a second idiom, so it stays a corpus-wide item with a named
 consumer: the next package to declare a lens, which today copies 40 lines to satisfy S6.
 
+**Residual swept — shipped `c6294007`.** Diffing all 24 (by then) copies showed only the KV-bucket-setup and
+NanoID-derivation halves were byte-identical modulo the local function name — the vtx/aspect/edge/project
+fixture layer had already diverged per package (some packages skip it entirely for domain-specific builders
+like objects-base's `object`/`content`/`link`), so only the truly universal pair moved to
+`internal/lenstest.KVs` / `.NanoID`. 940 lines removed across 26 files (24 `lens_cypher_test.go` + 2 files
+with a cross-file call site), no fixture-layer behavior changed.
+
 ## 11. S10 — one implementation per policy-free guard helper (build note, 2026-07-26)
 
 Added with the `worksAt_covers` multi-parent fix (facet-staff-worlds-design.md §10), which is also the
