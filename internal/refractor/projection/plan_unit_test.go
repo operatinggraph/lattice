@@ -187,6 +187,64 @@ func TestParseOutputDescriptor_KeyColumn_AcceptAndReject(t *testing.T) {
 	}
 }
 
+// --- entryKeyColumn: per-entry key emission opt-in (cap-read-per-anchor-grant-keys-design.md §3.3) ---
+
+func TestParseOutputDescriptor_EntryKeyColumn_AcceptAndReject(t *testing.T) {
+	// Accept: entryKeyColumn set + exactly one bodyColumns entry parses and is
+	// carried onto the descriptor.
+	accept := validDescriptor()
+	accept.BodyColumns = []string{"readableAnchors"}
+	accept.EntryKeyColumn = "anchorId"
+	d, err := ParseOutputDescriptor(accept)
+	if err != nil {
+		t.Fatalf("entryKeyColumn must be accepted: %v", err)
+	}
+	if d.EntryKeyColumn != "anchorId" {
+		t.Fatalf("EntryKeyColumn not carried: got %q", d.EntryKeyColumn)
+	}
+
+	// Reject: a whitespace-only entryKeyColumn is fail-closed.
+	blank := validDescriptor()
+	blank.BodyColumns = []string{"readableAnchors"}
+	blank.EntryKeyColumn = "   "
+	if _, err := ParseOutputDescriptor(blank); err == nil || !strings.Contains(err.Error(), "entryKeyColumn") {
+		t.Fatalf("expected whitespace-only entryKeyColumn rejection, got %v", err)
+	}
+
+	// Reject: entryKeyColumn set with zero bodyColumns is still fail-closed —
+	// caught by the pre-existing "bodyColumns must list at least one RETURN
+	// alias" check above this block, not the entryKeyColumn branch itself
+	// (there is nothing to split either way).
+	zeroCols := validDescriptor()
+	zeroCols.BodyColumns = nil
+	zeroCols.EntryKeyColumn = "anchorId"
+	if _, err := ParseOutputDescriptor(zeroCols); err == nil || !strings.Contains(err.Error(), "bodyColumns") {
+		t.Fatalf("expected bodyColumns rejection (zero columns) with entryKeyColumn set, got %v", err)
+	}
+
+	// Reject: entryKeyColumn requires exactly one bodyColumns entry — more than one.
+	twoCols := validDescriptor()
+	twoCols.BodyColumns = []string{"readableAnchors", "extra"}
+	twoCols.EntryKeyColumn = "anchorId"
+	if _, err := ParseOutputDescriptor(twoCols); err == nil || !strings.Contains(err.Error(), "entryKeyColumn requires exactly one") {
+		t.Fatalf("expected entryKeyColumn multi-column rejection, got %v", err)
+	}
+}
+
+// A descriptor parsed without entryKeyColumn defaults it empty and keeps the
+// document (one-envelope-per-actor) path byte-identical — the regression pin
+// for the driver-side no-op this increment promises (EnvelopeFn is untouched;
+// perEntry emission has no driver consumer yet).
+func TestParseOutputDescriptor_EntryKeyColumn_DefaultsEmpty(t *testing.T) {
+	d, err := ParseOutputDescriptor(validDescriptor())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if d.EntryKeyColumn != "" {
+		t.Fatalf("EntryKeyColumn must default empty, got %q", d.EntryKeyColumn)
+	}
+}
+
 // --- realness filter (AC4) ---
 
 func TestRealnessFiltered(t *testing.T) {

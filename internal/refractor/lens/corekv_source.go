@@ -175,6 +175,16 @@ type OutputDescriptorSpec struct {
 	// in the disjoint cap.ephemeral.<actor> document; §6.2/§6.3 require the field
 	// to be present here).
 	StaticEmptyColumns []string `json:"staticEmptyColumns,omitempty"`
+
+	// EntryKeyColumn opts an actor-aggregate lens into per-entry key emission
+	// (cap-read-per-anchor-grant-keys-design.md §3.3): instead of one document
+	// per actor, the descriptor's single list body column is split into one
+	// guarded key per real entry, keyed by BuildKey(actorKey) + "." +
+	// entry[EntryKeyColumn]. Empty leaves the default one-document-per-actor
+	// path unchanged. When set, BodyColumns must name exactly one column (the
+	// list this descriptor splits) — there is no shape for splitting more than
+	// one list per actor evaluation.
+	EntryKeyColumn string `json:"entryKeyColumn,omitempty"`
 }
 
 // TargetPostgresConfig is the expected shape of LensSpec.TargetConfig

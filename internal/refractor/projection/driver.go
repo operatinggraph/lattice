@@ -204,6 +204,17 @@ func InstallActorAggregate(
 			"lensId", r.ID, "err", err)
 		return false
 	}
+	if desc.EntryKeyColumn != "" {
+		// EnvelopeFn below has no perEntry emission path yet (§4.1 of
+		// cap-read-per-anchor-grant-keys-design.md ships it in a later
+		// increment) — writing the one-document-per-actor shape for a lens
+		// that opted into per-entry keys would silently keep the unbounded
+		// document this design exists to retire. Refuse loudly (fail-closed,
+		// under-grant) rather than degrade the write silently.
+		logger.Error("actor-aggregate output descriptor sets entryKeyColumn but the driver has no perEntry emission yet — refusing registration",
+			"lensId", r.ID)
+		return false
+	}
 
 	plan, err := Compile(r)
 	if err != nil {

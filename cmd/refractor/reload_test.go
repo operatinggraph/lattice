@@ -247,6 +247,7 @@ func TestHotReloadRefusal_OutputDescriptorChange(t *testing.T) {
 		{"bodyColumns", func(o *lens.OutputDescriptorSpec) { o.BodyColumns = []string{"tasks", "grants"} }},
 		{"realnessFilter", func(o *lens.OutputDescriptorSpec) { o.RealnessFilter = "taskKey" }},
 		{"keyColumn", func(o *lens.OutputDescriptorSpec) { o.KeyColumn = "entityId" }},
+		{"entryKeyColumn", func(o *lens.OutputDescriptorSpec) { o.BodyColumns = []string{"tasks"}; o.EntryKeyColumn = "anchorId" }},
 		{"actorField", func(o *lens.OutputDescriptorSpec) { o.ActorField = "assignee" }},
 		{"lanes", func(o *lens.OutputDescriptorSpec) { o.Lanes = []string{"write"} }},
 		{"staticEmptyColumns", func(o *lens.OutputDescriptorSpec) { o.StaticEmptyColumns = []string{"ephemeralGrants"} }},

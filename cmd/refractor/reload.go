@@ -162,6 +162,7 @@ func outputDescriptorsEqual(a, b *lens.OutputDescriptorSpec) bool {
 		a.RealnessFilter == b.RealnessFilter &&
 		a.Freshness == b.Freshness &&
 		a.KeyColumn == b.KeyColumn &&
+		a.EntryKeyColumn == b.EntryKeyColumn &&
 		actorFieldOf(a) == actorFieldOf(b) &&
 		sameColumnSet(a.BodyColumns, b.BodyColumns) &&
 		stringsEqual(a.Lanes, b.Lanes) &&

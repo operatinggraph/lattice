@@ -62,6 +62,15 @@ type OutputDescriptor struct {
 	Lanes []string
 	// StaticEmptyColumns are body columns always materialized as an empty array.
 	StaticEmptyColumns []string
+
+	// EntryKeyColumn opts the descriptor into per-entry key emission (§3.3 of
+	// cap-read-per-anchor-grant-keys-design.md): the sole BodyColumns list
+	// entry's EntryKeyColumn field keys one guarded key per real entry, instead
+	// of one document per actor. Empty leaves the byte-identical one-document
+	// path (EnvelopeFn) untouched — this field is carried by ParseOutputDescriptor
+	// but has no driver-side consumer yet (perEntry emission ships in the design's
+	// next Fire 1 increment).
+	EntryKeyColumn string
 }
 
 // ParseOutputDescriptor validates a raw OutputDescriptorSpec and returns the
@@ -71,7 +80,9 @@ type OutputDescriptor struct {
 //   - bodyColumns non-empty;
 //   - emptyBehavior ∈ {delete, softDelete, emptyDoc, skip};
 //   - realnessFilter, when set, names a field;
-//   - freshness, when set, is "auto".
+//   - freshness, when set, is "auto";
+//   - entryKeyColumn, when set, is non-blank and bodyColumns names exactly one
+//     column (§3.3).
 func ParseOutputDescriptor(spec *lens.OutputDescriptorSpec) (OutputDescriptor, error) {
 	if spec == nil {
 		return OutputDescriptor{}, fmt.Errorf("output descriptor: missing (actorAggregate lens requires an output descriptor)")
@@ -112,6 +123,20 @@ func ParseOutputDescriptor(spec *lens.OutputDescriptorSpec) (OutputDescriptor, e
 		return OutputDescriptor{}, fmt.Errorf("output descriptor: keyColumn, when set, must not be blank")
 	}
 
+	// entryKeyColumn (§3.3): present-but-blank is fail-closed exactly like
+	// keyColumn above. When set, bodyColumns must name exactly the one list
+	// column being split into per-entry keys — there is no shape for splitting
+	// more than one list per actor evaluation. (A zero-column spec is already
+	// rejected above, before this check runs.)
+	if spec.EntryKeyColumn != "" {
+		if strings.TrimSpace(spec.EntryKeyColumn) == "" {
+			return OutputDescriptor{}, fmt.Errorf("output descriptor: entryKeyColumn, when set, must not be blank")
+		}
+		if len(spec.BodyColumns) != 1 {
+			return OutputDescriptor{}, fmt.Errorf("output descriptor: entryKeyColumn requires exactly one bodyColumns entry (the list it splits), got %d", len(spec.BodyColumns))
+		}
+	}
+
 	actorField := spec.ActorField
 	if strings.TrimSpace(actorField) == "" {
 		actorField = DefaultActorField
@@ -128,6 +153,7 @@ func ParseOutputDescriptor(spec *lens.OutputDescriptorSpec) (OutputDescriptor, e
 		ActorField:         actorField,
 		Lanes:              append([]string(nil), spec.Lanes...),
 		StaticEmptyColumns: append([]string(nil), spec.StaticEmptyColumns...),
+		EntryKeyColumn:     strings.TrimSpace(spec.EntryKeyColumn),
 	}, nil
 }
 
