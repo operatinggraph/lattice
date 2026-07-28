@@ -2,10 +2,19 @@ package locationdomain
 
 import "github.com/operatinggraph/lattice/internal/pkgmgr"
 
-// Permissions returns the four permission vertices + their grants. Every
-// operation is granted to the `operator` role (scope any). The role canonical
-// name `operator` is resolved by cmd/lattice-pkg to the seeded NanoID from
-// lattice.bootstrap.json.
+// Permissions returns the five permission vertices + their grants.
+//
+// Grant matrix:
+//
+//	CreateLocation           → operator
+//	TombstoneLocation        → operator
+//	WireContainedIn          → operator
+//	UnwireContainedIn        → operator
+//	SetLocationPresentation  → operator
+//
+// Every operation is granted to the `operator` role (scope any). The role
+// canonical name `operator` is resolved by cmd/lattice-pkg to the seeded
+// NanoID from lattice.bootstrap.json.
 func Permissions() []pkgmgr.PermissionSpec {
 	mk := func(op string) pkgmgr.PermissionSpec {
 		return pkgmgr.PermissionSpec{

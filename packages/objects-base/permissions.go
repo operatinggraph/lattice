@@ -4,6 +4,12 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 
 // Permissions returns the package's permission vertices + grants.
 //
+// Grant matrix:
+//
+//	AttachObject      → operator
+//	DetachObject      → operator
+//	TombstoneObject   → operator
+//
 // The three lifecycle ops are granted to `operator` only (scope: any) — the
 // operator-grant idiom service-domain / orchestration-base use for lifecycle ops.
 // Live submitters: the object-store-manager owner-tombstone cascade (TombstoneObject,

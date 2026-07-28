@@ -73,7 +73,7 @@ RETURN
 // Package is the static, install-time bundle.
 var Package = pkgmgr.Definition{
 	Name:        "demo-operator",
-	Version:     "0.1.0",
+	Version:     "0.1.1",
 	Description: "Grants a scoped demoOperator role the non-mutating ctrl.*.read control-plane grants plus its read-side wildcard grant, and nothing that writes — the platform boundary for a public read-only Loupe demo.",
 	Depends:     []string{"rbac-domain", "identity-domain", "privacy-base", "objects-base"},
 	Permissions: Permissions(),

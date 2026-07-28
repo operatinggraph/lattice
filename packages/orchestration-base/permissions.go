@@ -2,7 +2,21 @@ package orchestrationbase
 
 import "github.com/operatinggraph/lattice/internal/pkgmgr"
 
-// Permissions returns the package's permission vertices + grants.
+// Permissions returns the package's permission vertices + grants (incl. the
+// LoomLifecyclePermissions / MarkExpiredPermissions grants in loom_lifecycle.go).
+//
+// Grant matrix:
+//
+//	CreateTask         → operator
+//	ClaimTask          → operator, frontOfHouse, backOfHouse
+//	ReAssignTask       → operator
+//	CompleteTask       → operator
+//	CancelTask         → operator
+//	SetAvailability    → operator
+//	StartLoomPattern   → operator
+//	CompletePattern    → operator
+//	FailPattern        → operator
+//	MarkExpired        → operator
 //
 // The task lifecycle ops are staff/operator-grantable management ops (a
 // leasing manager / operator assigns task-scoped ephemeral grants and manages

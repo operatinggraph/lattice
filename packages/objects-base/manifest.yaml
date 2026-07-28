@@ -1,5 +1,5 @@
 name: objects-base
-version: 0.3.1
+version: 0.3.2
 description: |
   Generic large-object vertex type (the object DDL + lifecycle ops
   AttachObject, DetachObject, TombstoneObject) — the graph side of the

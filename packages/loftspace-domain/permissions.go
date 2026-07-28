@@ -6,6 +6,15 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 // canonical name `operator` is resolved by cmd/lattice-pkg to the seeded NanoID
 // from lattice.bootstrap.json.
 //
+// Grant matrix:
+//
+//	SetListing               → operator
+//	SetUnitAddress           → operator
+//	SetListingStatus         → operator
+//	AssignUnitOwner          → operator
+//	RemoveUnitOwner          → operator
+//	SetListingStatus (self)  → consumer
+//
 // SetListingStatus additionally carries a scope=self grant to `consumer` — the
 // landlord path. The ownership ops (AssignUnitOwner / RemoveUnitOwner) carry no
 // such grant: they are what CONFERS management, and the FIRST assignment onto a

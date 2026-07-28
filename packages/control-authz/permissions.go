@@ -5,7 +5,16 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 // Permissions returns the 18 ctrl.<component>.<verb> platform permissions,
 // each granting `scope: any` (v1 — the only working platform scope,
 // control-plane-capability-authz-design.md §2(a)) to the control-operator
-// role. The op→verb tables here MUST stay in lockstep with
+// role.
+//
+// Grant matrix:
+//
+//	ctrl.weaver.{read,disable,enable,revoke,resetConfidence}         → control-operator
+//	ctrl.loom.{read,pause,resume}                                     → control-operator
+//	ctrl.refractor.{read,rebuild,pause,resume,delete,reproject}       → control-operator
+//	ctrl.refractor.{register,deregister,hydrate,sessionkey,syncgap}   → control-operator, consumer, frontOfHouse, backOfHouse, provider
+//
+// The op→verb tables here MUST stay in lockstep with
 // internal/controlauth's WeaverOps/LoomOps/RefractorOps (both are read off
 // the same source: each component's control/service.go dispatch table).
 //

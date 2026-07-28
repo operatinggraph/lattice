@@ -1,5 +1,5 @@
 name: location-domain
-version: 0.2.0
+version: 0.2.1
 description: |
   Spatial base domain — the place graph. Owns the unit/building/property
   location vertex types (all class location, Contract #6 §6.9) and the

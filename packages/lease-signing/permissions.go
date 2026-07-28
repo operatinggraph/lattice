@@ -4,6 +4,31 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 
 // Permissions returns the package's permission vertices + grants.
 //
+// Grant matrix:
+//
+//	CreateLeaseApplication          → operator
+//	CreateLeaseApplication (self)   → consumer
+//	CreateLeaseServiceInstance      → operator
+//	RecordLeaseServiceOutcome       → operator
+//	RecordServiceDispatch           → operator
+//	CreateLeaseDocInstance          → operator
+//	RecordLeaseDocOutcome           → operator
+//	SignLease                       → operator
+//	WithdrawLeaseApplication        → operator
+//	WithdrawLeaseApplication (self) → consumer
+//	DecideLeaseApplication          → operator, frontOfHouse
+//	DecideLeaseApplication (self)   → consumer
+//	SetApplicantProfile             → operator
+//	SetApplicantProfile (self)      → consumer
+//	OpenRenewal                     → operator
+//	SetRenewalTerms                 → operator
+//	SetRenewalTerms (self)          → consumer
+//	VerifyGuarantor                 → operator
+//	VerifyGuarantor (self)          → consumer
+//	SignRenewal                     → operator
+//	CancelRenewal                   → operator
+//	CancelRenewal (self)            → consumer
+//
 // The orchestrator-submitted ops are operator-driven (the same operator-grant
 // idiom service-domain / orchestration-base use):
 //   - CreateLeaseApplication — the installer / test / orchestrator starts an

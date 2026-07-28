@@ -2,10 +2,18 @@ package loftspaceledger
 
 import "github.com/operatinggraph/lattice/internal/pkgmgr"
 
-// Permissions returns the package's permission vertices + grants. All three
-// ops are orchestrator-submitted (the same operator-grant idiom lease-signing
-// uses): the trusted-tool app submits CreateAccount when a lease is signed and
-// DebitAccount/CreditAccount when a charge or payment is recorded.
+// Permissions returns the package's permission vertices + grants.
+//
+// Grant matrix:
+//
+//	CreateAccount  → operator
+//	DebitAccount   → operator
+//	CreditAccount  → operator
+//
+// All three ops are orchestrator-submitted (the same operator-grant idiom
+// lease-signing uses): the trusted-tool app submits CreateAccount when a
+// lease is signed and DebitAccount/CreditAccount when a charge or payment is
+// recorded.
 func Permissions() []pkgmgr.PermissionSpec {
 	return []pkgmgr.PermissionSpec{
 		{

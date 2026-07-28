@@ -3,8 +3,15 @@ package demooperator
 import "github.com/operatinggraph/lattice/internal/pkgmgr"
 
 // Permissions grants the demoOperator role ONLY the non-mutating
-// control-plane reads — ctrl.weaver.read, ctrl.loom.read, ctrl.refractor.read
-// (loupe-f20-demo-operator-ux.md §3.1). Every one resolves to a Read: true op
+// control-plane reads (loupe-f20-demo-operator-ux.md §3.1).
+//
+// Grant matrix:
+//
+//	ctrl.weaver.read     → demoOperator
+//	ctrl.loom.read       → demoOperator
+//	ctrl.refractor.read  → demoOperator
+//
+// Every one resolves to a Read: true op
 // in internal/controlauth's WeaverOps/LoomOps/RefractorOps tables, so this set
 // is exactly the inspect-only control surface: a single ctrl.<component>.read
 // grant authorizes every non-mutating op that component exposes (weaver

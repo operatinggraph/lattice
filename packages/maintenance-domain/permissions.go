@@ -4,6 +4,11 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 
 // Permissions grants the two work-order ops.
 //
+// Grant matrix:
+//
+//	ReportIssue        → operator, frontOfHouse, backOfHouse
+//	ResolveWorkOrder   → operator
+//
 // ReportIssue goes to `operator` and to BOTH staff roles: front-of-house takes
 // the walk-in report ("the tap in 204 is dripping"), back-of-house raises the
 // work it finds itself. Neither grant is a widening — the workplace guard in
