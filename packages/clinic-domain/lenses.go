@@ -531,10 +531,11 @@ RETURN
 // clinicPatientsReadSpec is the protected Postgres read model's cypher for the
 // clinic-wide patient roster (D1.5, the staff-wildcard increment; Vault Fire 5
 // added the identifiedBy contact columns). Same WHERE guard as
-// clinicPatientsSpec (only NAMED patients project). authz_anchors is the
-// empty list literal for every row — there is no per-patient self-anchor here
-// (see clinicPatientsRead's doc comment), so only the reserved WildcardAnchor
-// grant ever matches.
+// clinicPatientsSpec (only NAMED patients project). authz_anchors carries the
+// row's own patient NanoID, so exactly two kinds of actor match: the reserved
+// WildcardAnchor grant (the whole roster), and, via patientIdentityReadGrants
+// below, the signed-in identity that patient is identifiedBy (its own row
+// only — see clinicPatientsRead's doc comment).
 //
 // identifiedBy is OPTIONAL — a patient created before its contact was minted,
 // or one with no contact at all, has no linked identity, so identityKey /

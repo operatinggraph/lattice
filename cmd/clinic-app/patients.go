@@ -24,12 +24,13 @@ type protectedPatientRow struct {
 // selectPatientsSQL reads the protected model. It carries NO auth WHERE — the
 // RLS policy (FORCE ROW LEVEL SECURITY + the §6.14 set-membership policy)
 // injects the actor scope from the txn-local lattice.actor_id session
-// variable. Every row here projects an EMPTY authz_anchors set (there is no
-// per-patient self-anchor for "the whole roster"), so only an actor holding
-// the reserved WildcardAnchor grant ever matches a row. Sorted by name for a
-// stable switcher, mirroring the retired computePatients' sort. identity_key
-// (nil for a patient with no identifiedBy link) is what lets the FE offer
-// patient self-service booking — see the clinicPatientsRead lens spec.
+// variable. Every row projects its own patient's NanoID as its authz_anchor,
+// so an actor matches a row either by holding the reserved WildcardAnchor
+// grant (the whole roster) or, via patientIdentityReadGrants, by being the
+// identity that row's patient is identifiedBy (its own row only). Sorted by
+// name for a stable switcher, mirroring the retired computePatients' sort.
+// identity_key (nil for a patient with no identifiedBy link) is what lets the
+// FE offer patient self-service booking — see the clinicPatientsRead lens spec.
 const selectPatientsSQL = `
 SELECT patient_key, name, email, phone, identity_key
 FROM read_clinic_patients
@@ -97,12 +98,13 @@ func queryPatients(ctx context.Context, pool pgxBeginner, actorID, q string) ([]
 // handlePatients, which served the same roster from the unprotected
 // clinicPatients NATS-KV bucket to ANY caller with no authentication at all —
 // a clinic-wide membership-disclosure PHI dump (which patients exist at this
-// clinic, by full name). Every row projects an empty authz_anchors set, so
-// only an actor holding the reserved WildcardAnchor grant (the bootstrap
-// capabilityReadWildcardGrants lens, kernel-seeded root-equivalent identities
-// only, D1 design §3.4 M5) can read a row here — unlike appointments /
-// visit-series there is no patient-self view of "the whole roster" to carve
-// out separately.
+// clinic, by full name). An actor reads a row here either by holding the
+// reserved WildcardAnchor grant (the bootstrap capabilityReadWildcardGrants
+// lens, kernel-seeded root-equivalent identities only, D1 design §3.4 M5) —
+// the whole roster, front-desk's view — or, via patientIdentityReadGrants,
+// by being the identity that row's own patient is identifiedBy — exactly
+// their own row, which is what lets a signed-in patient session find itself
+// (cmd/clinic-app/web/app.js's applySelfPatientLock).
 func (s *server) handleStaffPatients(w http.ResponseWriter, r *http.Request) {
 	actor, err := s.authenticateRead(r)
 	if err != nil {

@@ -13,11 +13,14 @@ import (
 // lets an actor read the ENTIRE clinicPatientsRead protected table — the real
 // Postgres RLS enforcement of the policy's wildcard OR-clause
 // (internal/refractor/adapter/rls.go), driven through handleStaffPatients
-// exactly like a live clinic-domain deployment would. Unlike
-// clinicAppointmentsRead/providerAppointmentsRead there is no self-anchor
-// here: every seeded row carries an EMPTY authz_anchors set, so an ordinary
-// actor (no wildcard grant at all) must see NOTHING — proving the roster has
-// no accidental public-read fallback.
+// exactly like a live clinic-domain deployment would. Each seeded row also
+// carries its OWN patient's NanoID as its sole authz_anchor (mirroring
+// clinicPatientsReadSpec's `[nanoIdFromKey(p.key)] AS authz_anchors`), so an
+// ordinary actor holding the identifiedBy-bridged self-grant
+// (patientIdentityReadGrants) sees exactly their own row and no other —
+// proving both halves at once: the roster has no accidental public-read
+// fallback, and the self-anchor bridge that lets a patient find their own
+// record actually works.
 //
 // Enforcement is REAL (non-superuser reader role, same fixture discipline as
 // TestReadBoundary_RLS_Enforcement / TestStaffAppointmentsReadBoundary_
@@ -71,14 +74,17 @@ func TestStaffPatientsReadBoundary_WildcardSeesEverything(t *testing.T) {
 	exec("GRANT SELECT ON " + clinicRLSTestSchema + ".read_clinic_patients TO " + clinicRLSTestRole)
 	exec("GRANT SELECT ON " + clinicRLSTestSchema + ".actor_read_grants TO " + clinicRLSTestRole)
 
-	// Seed two patients with an EMPTY authz_anchors set each (the roster has no
-	// self-anchor) plus a self-grant for patient A only, proving A's own
-	// cap-read self-grant does NOT unlock the roster row (only the wildcard
-	// does — the row itself carries no anchor a self-grant could ever match).
+	// Seed two patients, each carrying its OWN NanoID as its sole authz_anchor
+	// (the real clinicPatientsReadSpec shape), plus the identifiedBy-bridged
+	// self-grant for patient A only (patientIdentityReadGrants: actor_id = the
+	// signed-in identity, anchor_id = the patient's own key — which equals
+	// subPatientA in this fixture) — proving A's self-grant unlocks EXACTLY
+	// A's own row, never B's, and that the wildcard is still the only way to
+	// see the whole roster.
 	exec(`INSERT INTO read_clinic_patients (patient_id, entity_key, patient_key, name, authz_anchors, projection_seq)
-	      VALUES ('pat-A', 'vtx.patient.`+subPatientA+`', 'vtx.patient.`+subPatientA+`', 'Alice Rivera', '{}', 1)`)
+	      VALUES ('pat-A', 'vtx.patient.`+subPatientA+`', 'vtx.patient.`+subPatientA+`', 'Alice Rivera', '{`+subPatientA+`}', 1)`)
 	exec(`INSERT INTO read_clinic_patients (patient_id, entity_key, patient_key, name, authz_anchors, projection_seq)
-	      VALUES ('pat-B', 'vtx.patient.`+subPatientB+`', 'vtx.patient.`+subPatientB+`', 'Bob Nguyen', '{}', 1)`)
+	      VALUES ('pat-B', 'vtx.patient.`+subPatientB+`', 'vtx.patient.`+subPatientB+`', 'Bob Nguyen', '{`+subPatientB+`}', 1)`)
 	exec(`INSERT INTO actor_read_grants (actor_id, anchor_id, grant_source, projection_seq, is_deleted)
 	      VALUES ($1, $1, 'cap-read', 1, false)`, subPatientA)
 	exec(`INSERT INTO actor_read_grants (actor_id, anchor_id, grant_source, projection_seq, is_deleted)
@@ -123,23 +129,43 @@ func TestStaffPatientsReadBoundary_WildcardSeesEverything(t *testing.T) {
 		}
 	})
 
-	t.Run("?q= still enforces RLS — no wildcard grant sees nothing even on a matching name", func(t *testing.T) {
+	t.Run("?q= still enforces RLS — a non-wildcard actor's filtered search never surfaces another patient's row", func(t *testing.T) {
+		code, rows := getPath(t, "/api/staff/patients?q=nguy", cookieFor(subPatientA))
+		if code != http.StatusOK {
+			t.Fatalf("status = %d, want 200", code)
+		}
+		if len(rows) != 0 {
+			t.Fatalf("patient A must never see patient B's row, even under a name filter A can't have typed, got %+v", rows)
+		}
+	})
+
+	t.Run("?q= matching the caller's own name still returns only their own row", func(t *testing.T) {
 		code, rows := getPath(t, "/api/staff/patients?q=riv", cookieFor(subPatientA))
 		if code != http.StatusOK {
 			t.Fatalf("status = %d, want 200", code)
 		}
-		if len(rows) != 0 {
-			t.Fatalf("a non-wildcard actor must see no roster rows even under a name filter, got %+v", rows)
+		if len(rows) != 1 || rows[0].Name != "Alice Rivera" {
+			t.Fatalf("a self-anchored patient searching their own name must see exactly their own row, got %+v", rows)
 		}
 	})
 
-	t.Run("an ordinary patient (self-grant only, no wildcard) sees nothing — no self-anchor exists on the roster", func(t *testing.T) {
+	t.Run("an ordinary patient (self-grant, no wildcard) sees exactly their own row via the identifiedBy self-anchor", func(t *testing.T) {
 		code, rows := get(t, cookieFor(subPatientA))
 		if code != http.StatusOK {
 			t.Fatalf("status = %d, want 200", code)
 		}
+		if len(rows) != 1 || rows[0].Name != "Alice Rivera" {
+			t.Fatalf("a self-anchored patient must see exactly their own roster row, got %+v", rows)
+		}
+	})
+
+	t.Run("an ordinary patient with no grant at all sees nothing", func(t *testing.T) {
+		code, rows := get(t, cookieFor(subPatientB))
+		if code != http.StatusOK {
+			t.Fatalf("status = %d, want 200", code)
+		}
 		if len(rows) != 0 {
-			t.Fatalf("a non-wildcard actor must see no roster rows, got %+v", rows)
+			t.Fatalf("patient B holds no read grant on the roster (no self-grant seeded for B), got %+v", rows)
 		}
 	})
 
