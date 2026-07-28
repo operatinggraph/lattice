@@ -26,6 +26,8 @@ the row is `🚧 blocked-on:` it (a missing *lens* is package work, built here).
 | **Every vertical app's "Signed in as" prints a raw NanoID, not a name** | `cafe-app` and `wellness-app` have no protected identity-name roster (Secure Lens) to resolve a signed-in identity's name — `loftspace-app` and (now) `clinic-app` do. | Cross-vertical | pkg + FE | ★★★ | M | 🏗️ building · clinic-app done · next: cafe-domain + wellness-domain Secure Lens (identity_key, name) + FE wiring |
 | **A called-off class leaves its members holding a blank card** | `TombstoneSession` kills the session + releases the studio's slot cells and emits `wellness.sessionCancelled`, which nothing consumes — bookings, seat claims and the double-book guard go untouched ([ddls.go:1594](../../../packages/wellness-domain/ddls.go)). Live E2E (create → member books → instructor calls it off): the booking stays live and `booked`, My Classes renders `? → ?` with a Cancel button, seat + guard leak on a dead session. Nobody is told. | Wellness | pkg + FE | ★★★ | M | 📋 ready |
 | **My Classes hides attendance and lets a member erase it** | `/api/bookings` serves `status` (booked/attended/noShow); `myClassCard` ([app.js:572](../../../cmd/wellness-app/web/app.js)) renders the rate badge instead and never shows it, while offering an unconditional Cancel. `CancelBooking` (ddls.go:2171) has no past-class and no attendance guard — the asymmetry to `SetBookingAttendance`'s `SessionNotStarted`. Live: cancelling a booking on a class that ended 7 days earlier was accepted, so a no-show is member-deletable. | Wellness | pkg + FE | ★★ | M | 📋 ready |
+| **No seeded world can approve a lease — the terminal step is unreachable** | 0 `.decision`/`.tenancy`/renewal across 29 applications; three blocks: the showcase unit's `availableFrom` is date-only ([seed-showcase.go:1237](../../../scripts/seed-showcase.go)) so the first approve's `time.rfc3339_utc` rejects live, classic-demo units carry no `manages` link so no landlord can decide, the other managed unit has no `.listing`. `SetListing` stores it verbatim against its RFC3339 contract ([ddls.go:387](../../../packages/loftspace-domain/ddls.go)). | LoftSpace | pkg | ★★★ | M | 📋 ready |
+| **LoftSpace can't work a maintenance queue** | `maintenance-domain` ships with the showcase world and 14 work orders sit `locatedAt` LoftSpace units, but `cmd/loftspace-app` names neither `ReportIssue` nor `ResolveWorkOrder` — no tenant report path, no super queue. Live, 5 open `ResolveWorkOrder` tasks render as disabled "Complete in Loupe" cards titled by a bare NanoID, and `openTaskRow` ([tasks.go:34](../../../cmd/loftspace-app/tasks.go)) drops the lens's `queuedRole` so none can be claimed. | LoftSpace | pkg + FE | ★★★ | M | 📋 ready |
 
 **Explicitly descoped (ambitious-PO pass, 2026-07-09):** structured diagnosis/procedure coding (ICD/CPT),
 vitals, and e-prescribing were considered and deliberately NOT filed — a certified EHR is out of scope for a
@@ -45,10 +47,9 @@ dated run-logs live in git history. Rotate LoftSpace ↔ Clinic ↔ Café ↔ We
 **Wellness joined** 2026-07-09 (`cmd/wellness-app` shipped, live on :7802) — fold it into rotation; see
 [agents/vertical-po/SKILL.md](../../../agents/vertical-po/SKILL.md) §1.
 
-- **Rotation to date:** LoftSpace ×16, Clinic ×15, Café ×6, Wellness ×3.
+- **Rotation to date:** LoftSpace ×17, Clinic ×15, Café ×6, Wellness ×3.
 - **Method:** reuse the already-up shared stack (detect NATS :4222 / app :7788/:7799/:7801/:7802), drive the real flow via `/api/op` + the lens projections as the product owner, file scored items. All four apps exist + are exercisable live (`:7788` / `:7799` / `:7801` / `:7802`).
 - **Live-stack note:** a stale bootstrap JSON vs. a recreated Core KV was a recurring dev-loop trap (2026-07-03, 2026-07-04) that silently emptied reads; `make up` now self-heals it (`109f59a`, 2026-07-05) — re-verify empty-read reports as a real product bug first.
-- **2026-07-17:** Café — hand-minted a lease + drove OpenTab/Charge/Settle + self-service scope=self live (open/settle-own-lease ✅, cross-lease + Charge correctly denied ✅); found no classic demo seed data + no self-order catalog, filed both.
 - **2026-07-18:** LoftSpace — drove Applicant Browse/Apply/My Applications live (clean) + Landlord console; caught a live reload race hard-failing sign-in with `RotateClaimKey requires state=unclaimed, got claimed`, root-caused + filed.
 - **2026-07-18:** Wellness — first-ever PO exercise (live since 07-09, never driven); found empty studios/sessions, hand-minted one + proved self-service booking/cancel end-to-end live, filed the seed gap + missing studio-admin FE.
 - **2026-07-22:** Clinic — drove no-show→ledger auto-charge live (first-ever verify, converged once an account existed, as designed) + multi-site provider assignment; found unprofiled-site rows render blank, filed FE-only fix.
@@ -59,7 +60,8 @@ dated run-logs live in git history. Rotate LoftSpace ↔ Clinic ↔ Café ↔ We
 - **2026-07-27:** Clinic (Andrew-directed) — repro'd a reported patient/NanoID display leak live; root-caused to an unscoped localStorage key + no self-booking write path (403, Checkpoint unfiled) + a "Signed in as" name-resolution gap confirmed cross-vertical (3 of 4 apps, LoftSpace the exception); filed 4.
 - **2026-07-28:** Café — drove self-order + staff POS live; the picker offers items `Charge` refuses, the POS has no catalog, tabs aren't itemized; filed 4.
 - **2026-07-28:** Wellness — drove member/staff/instructor hats live; the schedule's Book is mostly dead, a called-off class tells nobody, attendance is invisible + member-erasable; filed 3.
-- **Next:** LoftSpace.
+- **2026-07-28:** LoftSpace — drove applicant, landlord + back-of-house hats live; no seeded world can approve a lease, and maintenance work never reaches the app; filed 2.
+- **Next:** Clinic.
 
 ## Done log — verticals (newest first)
 
