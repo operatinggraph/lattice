@@ -155,15 +155,15 @@ func TestExpandReadGrantWalks_RenamesACollidingSuffixVariable(t *testing.T) {
 
 // --- Fire U1: multiple Walks declared on ONE lens -------------------------
 
-// TestExpandReadGrantWalks_MultiWalkLensComposesConcatenatedPrelude proves the
-// core Fire U1 primitive: two Walks entries on ONE lens, reaching DIFFERENT
-// anchor kinds is disallowed (Contract #6 one-RETURN-shape — see the mismatch
-// test below), but this pins that when a lens's Walks entries are otherwise
-// independent (distinct GrantDomain, distinct chain, distinct variables) the
-// composed prelude is every entry's clauses concatenated in declaration
-// order, ahead of the shared tail — the N=1 case (all 17 edge-manifest lenses
-// today) unchanged byte-for-byte, generalized to N.
-func TestExpandReadGrantWalks_MultiWalkLensComposesConcatenatedPrelude(t *testing.T) {
+// TestExpandReadGrantWalks_MultiWalkLensComposesCoalescedAnchor proves the
+// core Fire U1 composition primitive: two Walks entries on ONE lens, reaching
+// the SAME anchor kind via independent paths, compose into one prelude where
+// each walk's copy of the shared AnchorVar is scoped to a walk-local name and
+// a WITH clause coalesces them back to the declared name — the anchor is
+// reachable via EITHER path, not just where both happen to land on one
+// vertex. Every other variable a walk binds (here "w") is unique to that walk
+// by the cross-walk guard, so it passes through the WITH unrenamed.
+func TestExpandReadGrantWalks_MultiWalkLensComposesCoalescedAnchor(t *testing.T) {
 	def := Definition{
 		Name:             "fixture",
 		Version:          "1.0.0",
@@ -188,23 +188,19 @@ func TestExpandReadGrantWalks_MultiWalkLensComposesConcatenatedPrelude(t *testin
 			},
 		},
 	}
-	_, err := def.ExpandReadGrantWalks()
-	// This is the residual the collision guard exists to name, not to hide:
-	// composing N independent paths to ONE shared anchor variable needs
-	// per-walk renaming (mirroring the producer side) plus a tail contract
-	// that can combine the renamed candidates — verbatim concatenation with a
-	// shared variable name is NOT yet safe, because the executor treats an
-	// already-bound (even null) variable as a same-node join constraint on
-	// re-reference (executor.go's matchPath / traverseRel destination check),
-	// so a second walk can never rebind an anchor the first walk's path left
-	// null. Fail closed until that composition is designed, rather than
-	// silently under-project rows for actors reachable only via the second
-	// walk.
-	if err == nil {
-		t.Fatal("expected rejection — multi-walk-to-one-shared-anchor composition is not yet safe, see comment above")
+	expanded, err := def.ExpandReadGrantWalks()
+	if err != nil {
+		t.Fatalf("ExpandReadGrantWalks: %v", err)
 	}
-	if !strings.Contains(err.Error(), "already bound by an earlier walk in this lens") {
-		t.Errorf("expected the cross-walk variable-collision guard to fire, got: %v", err)
+	got := expanded.Lenses[0].Spec
+	want := "\n" + anchorWalkHead + "\n" +
+		"OPTIONAL MATCH (identity)<-[:assignedTo]-(t_w0:task)\n" +
+		"OPTIONAL MATCH (identity)-[:worksAt]->(w)\n" +
+		"OPTIONAL MATCH (w)<-[:queuedFor]-(t_w1:task)\n" +
+		"WITH coalesce(t_w0, t_w1) AS t, identity, w\n" +
+		"RETURN t.key AS anchor\n"
+	if got != want {
+		t.Errorf("composed spec mismatch:\ngot:\n%s\nwant:\n%s", got, want)
 	}
 }
 

@@ -1344,8 +1344,41 @@ func (ex *executor) evalFunctionCall(b binding, fc *FunctionCall) (any, error) {
 			return nil, fmt.Errorf("full engine: nanoIdFromKey argument must be a string, got %T", v)
 		}
 		return nanoIDFromVertexKey(s)
+	case "coalesce":
+		// coalesce(a, b, ...) → the first argument that is not Cypher NULL.
+		// The shared-anchor composition primitive (pkgmgr Walks, composeDataLensSpec):
+		// each walk's OPTIONAL MATCH binds its own scoped copy of the declared anchor
+		// variable, at most one non-null per row, and a WITH clause folds them back to
+		// the walk-declared name via coalesce.
+		if len(fc.Args) == 0 {
+			return nil, fmt.Errorf("full engine: coalesce takes at least 1 argument")
+		}
+		for _, arg := range fc.Args {
+			v, err := ex.evalExpr(b, arg)
+			if err != nil {
+				return nil, err
+			}
+			if !isNullBound(v) {
+				return v, nil
+			}
+		}
+		return nil, nil
 	}
 	return nil, fmt.Errorf("full engine: unsupported function %q", fc.Name)
+}
+
+// isNullBound reports whether v is Cypher NULL: a nil interface, or a node
+// variable's OPTIONAL-MATCH null sentinel ((*nodeRef)(nil)) — a bare `v ==
+// nil` misses the latter because a typed nil pointer boxed in `any` is
+// itself a non-nil interface value.
+func isNullBound(v any) bool {
+	if v == nil {
+		return true
+	}
+	if ref, ok := v.(*nodeRef); ok {
+		return ref == nil
+	}
+	return false
 }
 
 // nanoIDFromVertexKey extracts the bare NanoID (the <id> segment) from a
