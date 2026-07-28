@@ -360,3 +360,62 @@ multi-path anchor composition (data-side rename + coalesce tail)."
 bumped 0.14.8→0.14.9), `lint-lens-anchors.go` (updated for the field rename), `lint-facet-discovery.go`,
 full `go test ./... -p 4` (0 failures). `lint-lens-anchors.go` itself needed the same `Walk`→`Walks`
 AST-field update (it statically parses lens declarations, independent of the compiler).
+
+## 11. Build note — Fire U1 increment 2, the multi-path anchor composition (Winston, Lattice Steward fire, 2026-07-28)
+
+**Shipped the composition increment 1's residual named:** a 2+-walk lens sharing one `AnchorVar` now
+compiles and executes correctly, closing the fail-closed guard increment 1 left in place.
+
+**Engine (`internal/refractor/ruleengine/full/executor.go`):** added a `coalesce(a, b, …)` function to
+`evalFunctionCall` — returns the first argument that is not Cypher NULL, checked via a new `isNullBound`
+helper that recognizes both a genuine nil interface and a node variable's OPTIONAL-MATCH null sentinel
+(`(*nodeRef)(nil)`, which a bare `v == nil` misses since a typed nil pointer boxed in `any` is itself a
+non-nil interface value). No grammar or visitor change was needed — `coalesce(...)` already parsed as a
+generic function call; only the executor's dispatch switch was missing the case (confirmed by grounding:
+the closest existing construct, `*CaseExpr`'s first-truthy-wins evaluation, sits right next to where the
+new `case` landed).
+
+**Pkgmgr (`internal/pkgmgr/anchorwalk.go`):** `composeDataLensSpec` now branches on walk count. A single
+walk compiles exactly as before (byte-identical). Two or more walks: each walk's copy of the shared
+`AnchorVar` is renamed to a walk-scoped name (`scopedVarName`, the same helper `generateProducerSpec`
+already used) before its `OPTIONAL MATCH` clauses are emitted, then one `WITH coalesce(<scoped candidates>)
+AS <AnchorVar>, <every other variable any walk bound>` clause folds them back to the declared name before
+the shared tail runs. `parseWalks`' cross-walk collision guard now exempts the shared `AnchorVar` itself
+(every walk binds it by construction) while still rejecting a collision on any OTHER variable name — that
+part of the fail-closed posture is unchanged and still real (two independently-authored walks accidentally
+reusing an unrelated variable name would still silently join).
+
+**Why WITH-rebind, not a textual tail rewrite:** the design doc's leading candidate; confirmed as the
+right shape by reading the executor rather than assuming — `applyWith` (`executor.go:708`) *replaces* the
+binding set with only the projected items (no `WITH *`), so every variable the tail needs had to be
+explicitly carried forward, but a `*nodeRef` value survives a `WITH … AS` projection intact (bindings are
+`map[string]any`, and `resolveProperty`/further pattern-matching operate on whatever `*nodeRef` a name
+holds, regardless of whether a `MATCH` or a `WITH` most recently bound it) — so the tail's own `<v>.key AS
+anchor` and any further traversal off `<v>` keep working unmodified. Also confirmed the two existing
+plain-lens retraction mechanisms that inspect compiled query shape (`AnchorProjectionKey` /
+`AnchorDeleteResult`, `internal/refractor/ruleengine/full/anchor_delete.go`) are gated on
+`actorEnumerator == nil` in `internal/refractor/pipeline/evaluate.go` — i.e. they never run for Personal
+(actor-per-key) lenses, which is the only class `Walks` applies to — so their wholesale "reject any query
+containing a WITH clause" rule (written for plain lenses, which never use WITH) does not apply here.
+
+**Proof, not just compilation:** `TestExpandReadGrantWalks_MultiWalkLensComposesCoalescedAnchor`
+(`internal/pkgmgr/anchorwalk_test.go`, replacing the increment-1 test that pinned rejection) asserts the
+exact composed spec string. `TestExec_CoalesceMultiWalkAnchorComposition`
+(`internal/refractor/ruleengine/full/executor_test.go`) goes further and actually *executes* the composed
+query shape against a real embedded-NATS-backed KV with three identities — reachable via walk 0 only, walk
+1 only, and neither — proving the previously-broken case (an actor reachable only via the second walk)
+now projects the right anchor, and that reaching neither leaves one null-anchor row (not zero rows, and not
+an error). `TestExec_CoalesceScalar` pins the plain scalar case.
+
+**Consequence / what's still open:** the collision guard's remaining exemption boundary (OTHER variables
+still can't collide across walks — unchanged) and the disjoint-key guard (§3.3, Fire G) are unaffected by
+this increment. What this increment unblocks: the edge-manifest catalog/tasks/sessions unification (§3.1's
+other named deliverable) and the A3a tails audit can now proceed — **not done in this fire** (out of scope
+for one bounded increment: each pair needs its own tail rewrite, a package version bump, D1-gate regression
+tests, and for catalog specifically the `viaRoles` map-literal `collect(DISTINCT …)` §3.1 already flagged).
+**Board:** `lattice.md`'s shared-keyspace row moves next step to "edge-manifest catalog/tasks/sessions
+unification (§3.1) + A3a tails audit," composition itself no longer blocking.
+
+**Gates green:** `go build ./...`, `make vet`, `golangci-lint run ./...` (0 issues, full repo), `STRICT=1
+lint-conventions.go`, `lint-package-standard.go`, `lint-package-version.go` (no packages/ content
+changed), `lint-lens-anchors.go`, `lint-facet-discovery.go`, full `go test ./... -p 4` (0 failures).
