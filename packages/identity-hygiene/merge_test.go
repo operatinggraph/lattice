@@ -22,6 +22,10 @@
 //  12. TestMerge_TombstonesDuplicateOfLink_InvertedMerge — pair link tombstoned when merge roles invert its direction
 //  13. TestMerge_IndexesRepoint_OwnedAndThirdPartyUntouched — owned identityindex repointed, third-party untouched
 //  14. TestMerge_TrustGateAcceptsRealClassLink — real production class (not "link") migrates
+//  15. TestMerge_LinkCollisionKeyDeclared_MergesAsDuplicate — declared rewritten-key optionalRead lets a
+//     real collision merge as a duplicate instead of reaching step 8 as a colliding create
+//  16. TestMerge_LinkCollisionKeyUndeclared_RejectsOnDuplicateCreate — omitting that optionalRead
+//     reproduces the pre-fix failure mode: the whole merge is rejected
 package identityhygiene_test
 
 import (
@@ -844,4 +848,109 @@ func TestMerge_TrustGateAcceptsRealClassLink(t *testing.T) {
 	assertLinkTombstoned(t, ctx, conn, roleLnk)
 	newRoleLnk := "lnk.identity." + primaryID + ".holdsRole.role." + roleID
 	assertLinkLive(t, ctx, conn, newRoleLnk)
+}
+
+// --- 15. TestMerge_LinkCollisionKeyDeclared_MergesAsDuplicate ---
+
+// TestMerge_LinkCollisionKeyDeclared_MergesAsDuplicate seeds primary already
+// holding the same relation to a shared target that secondary also holds, so
+// rewriting secondary's edge onto primary produces a key that already exists
+// (a genuine link collision). The caller declares that rewritten key in
+// ContextHint.OptionalReads — as cmd/lattice/candidates now does via
+// rewrittenEdgeKeys — so the script's state[new_key] lookup finds the live
+// primary link and counts it as a collision (drop the duplicate) instead of
+// emitting a colliding create. Asserts: Accepted, secondary's original edge
+// tombstoned, primary's pre-existing link left untouched.
+func TestMerge_LinkCollisionKeyDeclared_MergesAsDuplicate(t *testing.T) {
+	ctx, conn := setupTestEnv(t)
+	cp, cons := newMergePipeline(t, ctx, conn, "mcolldecl")
+
+	primaryID := testutil.GenReqID("PrimCollDecl0")
+	secondaryID := testutil.GenReqID("SecCollDecl00")
+	otherID := testutil.GenReqID("OtherCollDecl")
+	primaryKey := "vtx.identity." + primaryID
+	secondaryKey := "vtx.identity." + secondaryID
+
+	seedIdentityVertex(t, ctx, conn, primaryKey, "unclaimed", "")
+	seedIdentityVertex(t, ctx, conn, secondaryKey, "unclaimed", "")
+
+	// primary already knows other — the collision target.
+	primaryLnk := "lnk.identity." + primaryID + ".knows.identity." + otherID
+	seedLinkVertexWithClass(t, ctx, conn, primaryLnk, "knows", false, map[string]any{"note": "primary-original"})
+
+	// secondary also knows other — rewriting its src endpoint to primary
+	// produces exactly primaryLnk's key.
+	secondaryLnk := "lnk.identity." + secondaryID + ".knows.identity." + otherID
+	seedLinkVertexWithClass(t, ctx, conn, secondaryLnk, "knows", false, map[string]any{"note": "secondary-original"})
+
+	edges := []string{secondaryLnk}
+	reqID := testutil.GenReqID("MrgCollDecl00")
+
+	env := &processor.OperationEnvelope{
+		RequestID:     reqID,
+		Lane:          processor.LaneDefault,
+		OperationType: "MergeIdentity",
+		Actor:         operatorActorKey,
+		SubmittedAt:   "2026-05-23T10:20:00Z",
+		Class:         "identityHygiene",
+		Payload:       mergePayload(primaryKey, secondaryKey, edges),
+		ContextHint: &processor.ContextHint{
+			Reads:         mergeReads(primaryKey, secondaryKey, edges),
+			OptionalReads: []string{primaryLnk},
+		},
+	}
+	testutil.PublishOp(t, conn, env)
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
+
+	assertLinkTombstoned(t, ctx, conn, secondaryLnk)
+
+	data := readAspectData(t, ctx, conn, primaryLnk)
+	if note, _ := data["note"].(string); note != "primary-original" {
+		t.Fatalf("primary's pre-existing link was overwritten: note=%q, want primary-original", note)
+	}
+}
+
+// --- 16. TestMerge_LinkCollisionKeyUndeclared_RejectsOnDuplicateCreate ---
+
+// TestMerge_LinkCollisionKeyUndeclared_RejectsOnDuplicateCreate mirrors the
+// previous test but omits the rewritten key from ContextHint.OptionalReads
+// (the pre-fix caller behavior). state[new_key] never hydrates, the
+// collision check can't fire, and the script emits a colliding `create`
+// against primary's already-live link — the Committer's CreateOnly semantics
+// reject the whole batch instead of the merge migrating as a duplicate. This
+// locks in the failure mode the caller-side fix closes.
+func TestMerge_LinkCollisionKeyUndeclared_RejectsOnDuplicateCreate(t *testing.T) {
+	ctx, conn := setupTestEnv(t)
+	cp, cons := newMergePipeline(t, ctx, conn, "mcollundecl")
+
+	primaryID := testutil.GenReqID("PrimCollUndcl")
+	secondaryID := testutil.GenReqID("SecCollUndcl0")
+	otherID := testutil.GenReqID("OtherCollUndc")
+	primaryKey := "vtx.identity." + primaryID
+	secondaryKey := "vtx.identity." + secondaryID
+
+	seedIdentityVertex(t, ctx, conn, primaryKey, "unclaimed", "")
+	seedIdentityVertex(t, ctx, conn, secondaryKey, "unclaimed", "")
+
+	primaryLnk := "lnk.identity." + primaryID + ".knows.identity." + otherID
+	seedLinkVertexWithClass(t, ctx, conn, primaryLnk, "knows", false, map[string]any{"note": "primary-original"})
+
+	secondaryLnk := "lnk.identity." + secondaryID + ".knows.identity." + otherID
+	seedLinkVertexWithClass(t, ctx, conn, secondaryLnk, "knows", false, map[string]any{"note": "secondary-original"})
+
+	edges := []string{secondaryLnk}
+	reqID := testutil.GenReqID("MrgCollUndcl0")
+
+	env := &processor.OperationEnvelope{
+		RequestID:     reqID,
+		Lane:          processor.LaneDefault,
+		OperationType: "MergeIdentity",
+		Actor:         operatorActorKey,
+		SubmittedAt:   "2026-05-23T10:21:00Z",
+		Class:         "identityHygiene",
+		Payload:       mergePayload(primaryKey, secondaryKey, edges),
+		ContextHint:   &processor.ContextHint{Reads: mergeReads(primaryKey, secondaryKey, edges)},
+	}
+	testutil.PublishOp(t, conn, env)
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeRejected)
 }

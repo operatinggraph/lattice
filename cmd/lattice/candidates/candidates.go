@@ -208,6 +208,14 @@ maintained by the script itself (both declared, not part of the edge list).`,
 				primaryKey+".credentialBinding",
 			)
 
+			// The script's link-migration collision check reads the
+			// primary-rewritten form of every edge (state[new_key]) to
+			// decide whether to create it or drop it as a duplicate — that
+			// rewritten key is only ever live on a genuine collision, so
+			// it's dispatch-derivable + absence-tolerant, same as the
+			// duplicateOf/credentialBinding probes above.
+			optionalReads = append(optionalReads, rewrittenEdgeKeys(edges, primaryID, secondaryID)...)
+
 			env := &processor.OperationEnvelope{
 				RequestID:     requestID,
 				Lane:          processor.LaneDefault,
@@ -300,6 +308,34 @@ func enumerateSecondaryEdges(ctx context.Context, conn *substrate.Conn, secondar
 		}
 	}
 	return edges, nil
+}
+
+// rewrittenEdgeKeys computes, for each edge touching secondary, the link key
+// it becomes after the merge script rewrites secondaryID endpoints to
+// primaryID — mirroring identity-hygiene's identityHygieneScript exactly
+// (packages/identity-hygiene/ddls.go). A self-loop after rewrite (both
+// endpoints collapse to primary) has no rewritten key to probe — the script
+// tombstones the original and stops, never reading state[new_key] for it.
+func rewrittenEdgeKeys(edges []string, primaryID, secondaryID string) []string {
+	var keys []string
+	for _, lk := range edges {
+		parts := strings.Split(lk, ".")
+		if len(parts) != 6 || parts[0] != "lnk" {
+			continue
+		}
+		srcType, srcID, rel, tgtType, tgtID := parts[1], parts[2], parts[3], parts[4], parts[5]
+		if srcType == "identity" && srcID == secondaryID {
+			srcID = primaryID
+		}
+		if tgtType == "identity" && tgtID == secondaryID {
+			tgtID = primaryID
+		}
+		if srcType == tgtType && srcID == tgtID {
+			continue
+		}
+		keys = append(keys, "lnk."+srcType+"."+srcID+"."+rel+"."+tgtType+"."+tgtID)
+	}
+	return keys
 }
 
 func stripPrefix(s, prefix string) string {

@@ -174,6 +174,16 @@ func DDLs() []pkgmgr.DDLSpec {
 //   - secondary.credentialBinding
 //   - primary.credentialBinding
 //
+// Caller's ContextHint.OptionalReads MUST also include, for every entry in
+// `edges`, that edge's key with each secondaryID endpoint rewritten to
+// primaryID (self-loops-after-rewrite excluded): the link-migration collision
+// check below reads state[new_key] to decide create-vs-drop-as-duplicate, and
+// that key is only ever live on a genuine collision — dispatch-derivable
+// from `edges` + primary + secondary, absence-tolerant, same idiom as the
+// two probes above. Omitting it silently degrades every rewritten-key lookup
+// to "not found", so a real collision reaches step 8 as a `create` against an
+// already-live key and the whole merge is rejected instead of migrated.
+//
 // Caller's ContextHint.Enumerations MUST declare the secondary's inbound
 // `indexes` links (Hub: secondary, Relation: "indexes", Direction: "in"), in
 // addition to the existing assignedTo enumeration.

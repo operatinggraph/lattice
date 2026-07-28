@@ -130,6 +130,41 @@ func TestCandidatesMerge_EnumeratesSecondaryEdgesExcludingPairEvidence(t *testin
 	}
 }
 
+// TestRewrittenEdgeKeys_RewritesSecondaryEndpointsAndSkipsSelfLoops proves
+// rewrittenEdgeKeys mirrors identity-hygiene's script-side rewrite exactly:
+// each secondaryID endpoint becomes primaryID, an edge already touching only
+// primary passes through unrewritten, and an edge that collapses into a
+// self-loop after rewrite (both endpoints become primary) is skipped — the
+// script never probes state[new_key] for that case.
+func TestRewrittenEdgeKeys_RewritesSecondaryEndpointsAndSkipsSelfLoops(t *testing.T) {
+	primaryID := "primaryIDRewrite0001"
+	secondaryID := "secondryIDRewrite01"
+	otherID := "otherIDRewriteEdge1"
+
+	edges := []string{
+		"lnk.identity." + secondaryID + ".knows.identity." + otherID,     // src rewritten
+		"lnk.task." + otherID + ".assignedTo.identity." + secondaryID,    // tgt rewritten
+		"lnk.identity." + primaryID + ".likes.identity." + otherID,       // no secondary endpoint
+		"lnk.identity." + secondaryID + ".mirrors.identity." + primaryID, // collapses to self-loop
+		"not-a-link-key", // malformed, ignored
+	}
+
+	got := rewrittenEdgeKeys(edges, primaryID, secondaryID)
+	want := []string{
+		"lnk.identity." + primaryID + ".knows.identity." + otherID,
+		"lnk.task." + otherID + ".assignedTo.identity." + primaryID,
+		"lnk.identity." + primaryID + ".likes.identity." + otherID,
+	}
+	if len(got) != len(want) {
+		t.Fatalf("rewrittenEdgeKeys = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("rewrittenEdgeKeys[%d] = %q, want %q", i, got[i], want[i])
+		}
+	}
+}
+
 func seedIdentityVertex(t *testing.T, ctx context.Context, conn *substrate.Conn, key string) {
 	t.Helper()
 	doc := map[string]interface{}{
