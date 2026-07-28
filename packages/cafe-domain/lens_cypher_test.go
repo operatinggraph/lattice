@@ -467,3 +467,70 @@ func TestCafeLeaseWorkplaces_HopBoundMatchesTheWriteSide(t *testing.T) {
 	require.ElementsMatch(t, want, rows[0].Values["coveringLocations"],
 		"depths 0..7 cover the lease and depth 8 does not — the write side's own reach")
 }
+
+// identity seeds a bare vtx.identity vertex — cafeIdentitiesReadSpec's own
+// anchor type, distinct from cdFixture.vtx's tab/leaseapp/unit/location
+// vertices above.
+func (f *cdFixture) identity(t *testing.T, name string) string {
+	t.Helper()
+	return f.vtx(t, name, "identity")
+}
+
+// envelopeData is an at-rest sensitive-aspect data map as step 6.5's
+// encrypt-on-write commits it: base64 ct/nonce + the wrapping key id, no
+// plaintext field — mirrors loftspace-domain/lens_cypher_test.go's helper of
+// the same name.
+func envelopeData() map[string]any {
+	return map[string]any{"ct": "3q2+7w==", "nonce": "AAAAAAAAAAAAAAAA", "keyId": "k1"}
+}
+
+// TestCafeIdentitiesRead_ProjectsEnvelopeWholeAndSelfAnchors proves a named
+// identity projects one row: the name column carries the ciphertext envelope
+// MAP whole (for the Secure-Lens decryptor, never the engine), and
+// authz_anchors carries exactly the identity's OWN bare NanoID — the
+// self-anchor that lets the signed-in actor read their own row via the
+// platform's base cap-read self-grant with no extra grant declaration
+// (mirrors loftspace-domain's landlordUnitsRead self-anchor idiom, NOT
+// applicantRosterRead's empty/wildcard-only set).
+func TestCafeIdentitiesRead_ProjectsEnvelopeWholeAndSelfAnchors(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newCdFixture(t)
+	aliceKey := f.identity(t, "alice")
+	f.aspect(t, "alice", "name", "name", envelopeData())
+
+	rows := f.project(t, cafeIdentitiesReadSpec)
+	require.Len(t, rows, 1, "exactly one roster row for the one named identity")
+	v := rows[0].Values
+	require.Equal(t, f.ids["alice"], v["identity_id"], "identity_id is the bare NanoID (nanoIdFromKey)")
+	require.Equal(t, aliceKey, v["identity_key"], "identity_key is the secure decryptor's key-custody column")
+	name, ok := v["name"].(map[string]any)
+	require.True(t, ok, "name must be the ciphertext envelope map, got %T (%v)", v["name"], v["name"])
+	require.Equal(t, "3q2+7w==", name["ct"], "the envelope reaches the decryptor whole")
+	anchors, ok := v["authz_anchors"].([]any)
+	require.True(t, ok, "authz_anchors must be a list, got %T", v["authz_anchors"])
+	require.ElementsMatch(t, []any{f.ids["alice"]}, anchors,
+		"the row is self-anchored on the identity's own bare NanoID, not empty/wildcard-only")
+}
+
+// TestCafeIdentitiesRead_ExcludesUnnamedAndPlaintextShapedIdentities proves
+// the ciphertext-presence WHERE: an identity with no .name aspect and an
+// identity whose .name data is plaintext-shaped ({value}, no ct — a shape
+// step 6.5 can never commit) both project NO row, so the lens can neither
+// roster unnamed actors nor carry plaintext PII by itself.
+func TestCafeIdentitiesRead_ExcludesUnnamedAndPlaintextShapedIdentities(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newCdFixture(t)
+	f.identity(t, "svc") // no .name at all
+	f.identity(t, "legacy")
+	f.aspect(t, "legacy", "name", "name", map[string]any{"value": "Plain Text"})
+	bobKey := f.identity(t, "bob")
+	f.aspect(t, "bob", "name", "name", envelopeData())
+
+	rows := f.project(t, cafeIdentitiesReadSpec)
+	require.Len(t, rows, 1, "only the ciphertext-named identity projects")
+	require.Equal(t, bobKey, rows[0].Values["identity_key"])
+}

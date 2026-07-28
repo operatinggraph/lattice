@@ -1,5 +1,5 @@
 name: cafe-domain
-version: 0.11.4
+version: 0.11.5
 description: |
   Café house-tab POS session domain: the tab vertex type (OpenTab/Charge/
   VoidCharge/Settle, OCC-conditioned running total) + the tabStatus aspect
@@ -20,8 +20,11 @@ description: |
   VoidCharge corrects a mis-tapped charge (operator/frontOfHouse only). The cafeLeaseWorkplaces
   lens carries each lease's covering locations — the read-side half of the
   workplace confinement this package's own require_workplace enforces on
-  writes, so a staff read is scoped to the building they work at. Depends
-  lease-signing + cafe-ledger.
+  writes, so a staff read is scoped to the building they work at.
+  cafeIdentitiesRead is a PROTECTED, self-anchored Postgres SECURE LENS
+  (Contract #3 §3.10) resolving a signed-in identity's own name — cmd/cafe-app
+  reads it to render "Signed in as <name>" instead of a raw NanoID, mirroring
+  loftspace-domain's applicantRosterRead. Depends lease-signing + cafe-ledger.
 depends:
   - lease-signing
   - cafe-ledger
@@ -49,6 +52,9 @@ declares:
     - canonicalName: cafeLeaseWorkplaces
       adapter: nats-kv
       bucket: cafe-lease-workplaces
+      engine: full
+    - canonicalName: cafeIdentitiesRead
+      adapter: postgres
       engine: full
   permissions:
     - operationType: OpenTab

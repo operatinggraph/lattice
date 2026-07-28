@@ -14,14 +14,16 @@ import (
 	cafedomain "github.com/operatinggraph/lattice/packages/cafe-domain"
 )
 
-// cafe-app has no protected Postgres read boundary (every café lens is plain
-// NATS-KV, P5) — the read boundary here is SESSION-scoped instead
-// (persona-worlds-design.md Fire W4 §3): a resident may see only rows for
-// leases whose bookerKey is their own signed-in identity, and a `worksAt`
-// staffer sees the leases their workplace covers — the house they work in, not
-// every house (facet-staff-worlds-design.md §9). Every read handler resolves
-// the caller through authenticateRead or resolveSubjectHats, mirroring
-// cmd/clinic-app's own authenticateRead read boundary.
+// Every café lens but one is plain NATS-KV (P5) — the read boundary for those
+// is SESSION-scoped instead (persona-worlds-design.md Fire W4 §3): a resident
+// may see only rows for leases whose bookerKey is their own signed-in
+// identity, and a `worksAt` staffer sees the leases their workplace covers —
+// the house they work in, not every house (facet-staff-worlds-design.md §9).
+// Every read handler resolves the caller through authenticateRead or
+// resolveSubjectHats, mirroring cmd/clinic-app's own authenticateRead read
+// boundary. The one exception is /api/identities (identities.go), the
+// protected cafeIdentitiesRead Postgres model, RLS-scoped rather than
+// filtered here.
 
 const actorFetchTimeout = 10 * time.Second
 

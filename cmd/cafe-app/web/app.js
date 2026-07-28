@@ -15,6 +15,7 @@ const state = {
   identityId: null, // the signed-in identity's bare NanoID (GET /api/whoami) — the one actor every read and write runs as
   canSignOut: false, // whether whoami reports a real cookie session
   anchors: [], // the signed-in identity's residence/workplace anchors (whoami hat hints, persona-worlds-design.md §4). A `worksAt` anchor marks front-of-house staff.
+  identities: [], // the protected cafeIdentitiesRead roster (loadIdentities) — at minimum the signed-in actor's own row, resolved by name
 };
 
 // ---- wire helpers -----------------------------------------------------
@@ -251,11 +252,33 @@ function isFrontDesk() {
   return Array.isArray(state.anchors) && state.anchors.some((a) => a && a.relation === "worksAt");
 }
 
+// nameForIdentity resolves a bare identity NanoID to its display name via the
+// loaded protected roster (state.identities), falling back to the truncated
+// key when the roster hasn't loaded yet or carries no matching row — mirrors
+// cmd/clinic-app's nameForIdentity / cmd/loftspace-app's nameFor.
+function nameForIdentity(key) {
+  const m = state.identities.find((i) => idOf(i.identityKey) === key);
+  return m && m.name ? m.name : shortKey(key);
+}
+
+// loadIdentities reads the protected, RLS-scoped identity-name roster
+// (cafeIdentitiesRead) as the signed-in session — at minimum the caller's own
+// self-anchored row, plus every named identity for a WildcardAnchor holder.
+async function loadIdentities() {
+  try {
+    const data = await api("/api/identities", { credentials: "same-origin" });
+    state.identities = (data && data.identities) || [];
+  } catch (_) {
+    state.identities = [];
+  }
+  refreshMeBar();
+}
+
 function refreshMeBar() {
   const status = document.getElementById("me-status");
   const signOutBtn = document.getElementById("sign-out");
   status.textContent = state.identityId
-    ? "Signed in as " + shortKey(state.identityId) + (isFrontDesk() ? " (front of house)" : " (resident)")
+    ? "Signed in as " + nameForIdentity(state.identityId) + (isFrontDesk() ? " (front of house)" : " (resident)")
     : "";
   signOutBtn.hidden = !state.canSignOut;
 }
@@ -810,6 +833,7 @@ function init() {
   loadWhoami().then(() => {
     applyHatGating();
     showView(isFrontDesk() ? "pos" : "resident");
+    if (state.identityId) loadIdentities();
   });
 }
 

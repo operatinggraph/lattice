@@ -40,7 +40,7 @@ func TestPackage_StructurePins(t *testing.T) {
 	if got, want := len(Package.DDLs), 5; got != want {
 		t.Errorf("DDLs: got %d, want %d", got, want)
 	}
-	if got, want := len(Package.Lenses), 3; got != want {
+	if got, want := len(Package.Lenses), 4; got != want {
 		t.Errorf("Lenses: got %d, want %d", got, want)
 	}
 	if got, want := len(Package.Permissions), 9; got != want {

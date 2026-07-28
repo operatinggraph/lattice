@@ -60,6 +60,44 @@ func Lenses() []pkgmgr.LensSpec {
 			Engine:        "full",
 			Spec:          leaseWorkplacesSpec,
 		},
+		{
+			// cafeIdentitiesRead — the protected Postgres identity-name lens
+			// closing the cross-vertical "Signed in as <NanoID>" gap
+			// (verticals.md): cafe-app has no roster of named identities to
+			// resolve the signed-in actor's own name against, so it falls back
+			// to printing the raw key. NAME ONLY, mirroring
+			// loftspace-domain's applicantRosterRead SECURE LENS (Contract #3
+			// §3.10) — the identity `name` is a sensitive aspect, so Core KV
+			// holds only its ciphertext envelope, and the cypher RETURNs the
+			// envelope whole for Refractor to decrypt at projection time.
+			//
+			// SELF-ANCHORED, unlike applicantRosterRead's empty/wildcard-only
+			// set: each row's authz_anchors carries the identity's OWN bare
+			// NanoID, so the platform's base cap-read self-grant
+			// (CapabilityReadGrantsLensDefinition, every actor's
+			// actor_id==anchor_id=='s own key) lets a signed-in resident or
+			// staffer read their OWN row with no extra grant declaration —
+			// the landlordUnitsRead idiom (loftspace-domain/lenses.go), not
+			// clinic's indirect two-lens patientIdentityReadGrants (there is
+			// no business vertex between the row and the login identity to
+			// route through — the anchor IS the identity). A staffer holding
+			// the reserved WildcardAnchor grant still reads every row.
+			CanonicalName: "cafeIdentitiesRead",
+			Class:         "meta.lens",
+			Adapter:       "postgres",
+			Table:         "read_cafe_identities",
+			Engine:        "full",
+			Spec:          cafeIdentitiesReadSpec,
+			Protected:     true,
+			IntoKey:       []string{"identity_id"},
+			Columns: []pkgmgr.PostgresColumn{
+				{Name: "identity_key", Type: "text"},
+				{Name: "name", Type: "text"},
+			},
+			SecureColumns: []pkgmgr.SecureColumn{
+				{Column: "name", IdentityKeyColumn: "identity_key", Field: "value"},
+			},
+		},
 	}
 }
 
@@ -184,4 +222,20 @@ RETURN
     ((status = 'settled') AND (totalCents > 0) AND (accountKey = null))
     OR ((status = 'settled') AND (totalCents > 0) AND (accountKey <> null) AND (txCount = 0))
   ) AS violating
+`
+
+// cafeIdentitiesReadSpec projects one row per NAMED identity — the roster
+// cafe-app resolves the signed-in actor's own name against. The WHERE keeps
+// only identities carrying a `.name` aspect via ciphertext presence
+// (`i.name.data.ct <> null` — there is no plaintext `value` field at rest),
+// mirroring loftspace-domain's applicantRosterReadSpec. authz_anchors carries
+// the identity's OWN bare NanoID — see the Lenses() declaration above for why
+// that self-anchor (not an empty wildcard-only set) is the right shape here.
+const cafeIdentitiesReadSpec = `MATCH (i:identity)
+WHERE i.name.data.ct <> null
+RETURN
+  nanoIdFromKey(i.key)   AS identity_id,
+  i.key                  AS identity_key,
+  i.name.data            AS name,
+  [nanoIdFromKey(i.key)] AS authz_anchors
 `

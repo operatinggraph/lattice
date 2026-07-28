@@ -2,13 +2,15 @@ package main
 
 import (
 	"context"
+	"time"
 
 	"github.com/operatinggraph/lattice/internal/healthkv"
 )
 
 // healthProbe re-checks cafe-app's own dependencies each tick — bootstrap,
-// NATS, and the session auth posture — so a heartbeat can never merely echo a
-// boot-time snapshot (mirrors cmd/clinic-app's probe).
+// NATS, the protected read-model pool, and the session auth posture — so a
+// heartbeat can never merely echo a boot-time snapshot (mirrors
+// cmd/clinic-app's probe).
 func (s *server) healthProbe(ctx context.Context) healthkv.Snapshot {
 	var issues []healthkv.Issue
 
@@ -25,6 +27,18 @@ func (s *server) healthProbe(ctx context.Context) healthkv.Snapshot {
 			Severity: "error",
 			Message:  "NATS connection is down; every /api/* read will fail",
 		})
+	}
+	if s.pgPool != nil {
+		pingCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+		err := s.pgPool.Ping(pingCtx)
+		cancel()
+		if err != nil {
+			issues = append(issues, healthkv.Issue{
+				Code:     "ReadModelUnreachable",
+				Severity: "warning",
+				Message:  "protected cafeIdentitiesRead Postgres pool unreachable; /api/identities will 502",
+			})
+		}
 	}
 	if s.authn == nil {
 		issues = append(issues, healthkv.Issue{
