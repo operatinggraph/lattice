@@ -292,6 +292,50 @@ never inside it. §8.5 stages the component-doc posture paragraph.
   report, never the manager whose `cap.ephemeral.*` doc embeds it
   (`actor_enumerator.go:136-151`); live staleness/over-grant window independent of tearing. ★★, S–M.
 
+## 10.1 Build note — Fire 1 Increment 1 (Lattice Steward, 2026-07-28, `ea3f3852`)
+
+**Scope-diff gate:** brief = §4.1's footprint-capture primitives only (revision-bearing
+`Neighbors` + the edge memo + `nodeRef.revision`), deliberately narrower than all of §4's Fire 1 —
+the validation/re-execute/requeue seam (§4.2-§4.4), the `actorAggregate ∧ IsAuthPlane` scope
+predicate, the `evalDriftRetries`/`evalDriftRequeues` counters, and the §8.5 doc paragraph are
+**not yet built**. Landed as its own green commit because it is independently correct and
+independently valuable — it closes §2's stated pre-existing gap ("link reads aren't even
+repeatable within one evaluation today") the same way `e8d78278` closed it for vertices — and
+because the validation seam consumes exactly the primitives this increment ships (revisions on
+`nodeRef` + the per-evaluation edge memo), so building it first de-risks the harder seam.
+
+**What shipped:** `adjacency.Neighbors` returns the adjacency document's KV revision alongside
+the edge list (0 = absent); `executor.nodeRef` carries the Core KV revision it was read at;
+`executor.edges`/`edgeRevisions` memoize relationship-hop reads per evaluation exactly as `nodes`
+already memoized vertex/aspect reads (`fetchEdges`, mirroring `fetchNode`). All 15 call sites of
+`adjacency.Neighbors` (2 production: `executor.go` via the new `fetchEdges`, `actor_enumerator.go`
+discarding the revision; 13 test) updated for the 3-value return. No behavior change to any
+projection output — this is groundwork + a correctness fix for edge-read repeatability, not yet
+the footprint-validation certificate itself.
+
+**Tests:** `TestExec_EdgeReadIsRepeatableWithinOneEvaluation` (edge_memo_test.go) pins the
+adjacency repeatable-read contract, mirroring `TestExec_AspectReadIsRepeatableWithinOneEvaluation`;
+`TestExec_NodeRevisionCapturedOnRead` pins that a memoized `nodeRef`'s revision is stable within
+one evaluation and moves in a fresh one.
+
+**Gates run:** `go build ./...`, `make vet`, `golangci-lint run ./internal/refractor/...` (0
+issues), `STRICT=1 go run ./scripts/lint-conventions.go` (0 issues), `go test
+./internal/refractor/...` (all green, full package tree — the change's blast radius is contained
+to `internal/refractor`, no cross-component caller exists).
+
+**🏗️ CHECKPOINT — next increment (Fire 1 Increment 2):** wire the validation seam itself —
+after `ExecuteWith` returns and before a result reaches the adapter/envelope, re-read each
+footprint entry (`ex.nodes` + `ex.edges`/`edgeRevisions`) and compare revisions, scoped to
+`actorAggregate ∧ projection.IsAuthPlane` (§4.4); on drift, one inline re-execution, then a typed
+`ErrEvalDrift` on the existing pump retry-queue / sweep-repair failure channels (§4.3, never an
+empty result set — the four downstream seams §12 #7 names); ship the `evalDriftRetries`/
+`evalDriftRequeues` health counters (§4.6) and the `docs/components/refractor.md` §8.5 paragraph
+in the same increment. Needs its own pipeline-unit + E2E tests per §9 (the scripted-interleave
+`capabilityEphemeral` role-queue vector needs an evaluator pause hook the executor doesn't have
+yet — build that hook as part of the increment, not a separate one). Worktree for Increment 1 was
+`.claude/worktrees/refractor-eval-footprint-fire1` (merged, safe to remove); Increment 2 opens a
+fresh worktree per the fresh-worktree-per-fire convention.
+
 ## 11. Risks
 
 - **Drift-retry rate under real churn is unmeasured** — Fire 1 ships the instrument before
