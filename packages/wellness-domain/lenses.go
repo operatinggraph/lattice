@@ -34,11 +34,11 @@ const WellnessInstructorsBucket = "wellness-instructors"
 // bucket, never Core KV. The Refractor auto-creates the bucket on lens load.
 const WellnessMembersBucket = "wellness-members"
 
-// Lenses returns the package's five flat projection lenses. No aggregation
-// (no WITH), so OPTIONAL-matched neighbour bindings are live directly in
-// RETURN — the same §4-B1 no-WITH-drop shape clinic-domain's lenses use.
-// None of these carry PHI/PII, so — unlike clinic-domain's patient/provider
-// lenses — no protected Postgres/RLS layer is needed this increment.
+// Lenses returns the package's five flat projection lenses plus
+// wellnessIdentitiesRead, the one protected Postgres/RLS layer this package
+// carries. No aggregation (no WITH), so OPTIONAL-matched neighbour bindings
+// are live directly in RETURN — the same §4-B1 no-WITH-drop shape
+// clinic-domain's lenses use.
 func Lenses() []pkgmgr.LensSpec {
 	return []pkgmgr.LensSpec{
 		{
@@ -80,6 +80,44 @@ func Lenses() []pkgmgr.LensSpec {
 			Bucket:        WellnessMembersBucket,
 			Engine:        "full",
 			Spec:          wellnessMembersSpec,
+		},
+		{
+			// wellnessIdentitiesRead — the protected Postgres identity-name
+			// lens closing the cross-vertical "Signed in as <NanoID>" gap
+			// (verticals.md): wellness-app has no roster of named identities
+			// to resolve the signed-in actor's own name against, so it falls
+			// back to printing the raw key. NAME ONLY, mirroring
+			// loftspace-domain's applicantRosterRead SECURE LENS (Contract #3
+			// §3.10) — the identity `name` is a sensitive aspect, so Core KV
+			// holds only its ciphertext envelope, and the cypher RETURNs the
+			// envelope whole for Refractor to decrypt at projection time.
+			//
+			// SELF-ANCHORED, unlike applicantRosterRead's empty/wildcard-only
+			// set: each row's authz_anchors carries the identity's OWN bare
+			// NanoID, so the platform's base cap-read self-grant (every
+			// actor's actor_id==anchor_id=='s own key) lets a signed-in
+			// member, instructor, or staffer read their OWN row with no extra
+			// grant declaration — the landlordUnitsRead idiom
+			// (loftspace-domain/lenses.go), not clinic's indirect two-lens
+			// patientIdentityReadGrants (there is no business vertex between
+			// the row and the login identity to route through — the anchor
+			// IS the identity). A staffer holding the reserved WildcardAnchor
+			// grant still reads every row.
+			CanonicalName: "wellnessIdentitiesRead",
+			Class:         "meta.lens",
+			Adapter:       "postgres",
+			Table:         "read_wellness_identities",
+			Engine:        "full",
+			Spec:          wellnessIdentitiesReadSpec,
+			Protected:     true,
+			IntoKey:       []string{"identity_id"},
+			Columns: []pkgmgr.PostgresColumn{
+				{Name: "identity_key", Type: "text"},
+				{Name: "name", Type: "text"},
+			},
+			SecureColumns: []pkgmgr.SecureColumn{
+				{Column: "name", IdentityKeyColumn: "identity_key", Field: "value"},
+			},
 		},
 	}
 }
@@ -257,3 +295,20 @@ RETURN
   se.schedule.data.startsAt AS startsAt,
   se.schedule.data.endsAt AS endsAt,
   id.key AS bookerKey`
+
+// wellnessIdentitiesReadSpec projects one row per NAMED identity — the
+// roster wellness-app resolves the signed-in actor's own name against. The
+// WHERE keeps only identities carrying a `.name` aspect via ciphertext
+// presence (`i.name.data.ct <> null` — there is no plaintext `value` field
+// at rest), mirroring loftspace-domain's applicantRosterReadSpec.
+// authz_anchors carries the identity's OWN bare NanoID — see the Lenses()
+// declaration above for why that self-anchor (not an empty wildcard-only
+// set) is the right shape here.
+const wellnessIdentitiesReadSpec = `MATCH (i:identity)
+WHERE i.name.data.ct <> null
+RETURN
+  nanoIdFromKey(i.key)   AS identity_id,
+  i.key                  AS identity_key,
+  i.name.data            AS name,
+  [nanoIdFromKey(i.key)] AS authz_anchors
+`

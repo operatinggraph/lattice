@@ -1,5 +1,5 @@
 name: wellness-domain
-version: 0.17.5
+version: 0.17.6
 description: |
   Wellness bookable domain: studio / session / booking / instructor vertex
   types + their aspects and links, written by Create*/Tombstone*/Cancel*/Bind*
@@ -26,12 +26,16 @@ description: |
   booker) guard afterwards; either value corrects the other, a class that has
   not begun is rejected (SessionNotStarted, the mirror of SessionInPast), and
   the same standing guard confines a bound instructor to bookings on sessions
-  they lead. Five projection lenses
+  they lead. Five plain projection lenses
   (wellnessStudios, wellnessSessions, wellnessBookings, wellnessInstructors,
   wellnessMembers) are the P5 read models a wellness FE reads; wellnessMembers
   carries each member's covering locations so the front desk's book-a-member
   picker offers only the members whose building the staffer works at, mirroring
-  cafe-domain's cafeLeaseWorkplaces. No PHI/PII, no protected Postgres layer. Depends
+  cafe-domain's cafeLeaseWorkplaces. wellnessIdentitiesRead is a PROTECTED,
+  self-anchored Postgres SECURE LENS (Contract #3 §3.10) resolving a
+  signed-in identity's own name — cmd/wellness-app reads it to render
+  "Signed in as <name>" instead of a raw NanoID, mirroring
+  loftspace-domain's applicantRosterRead. Depends
   lease-signing (documentation only — CreateBooking reads its leaseapp by
   known key, no install-order requirement enforced at the Starlark level).
   CreateBooking, CancelBooking, TombstoneSession, and SetBookingAttendance
@@ -90,6 +94,9 @@ declares:
     - canonicalName: wellnessMembers
       adapter: nats-kv
       bucket: wellness-members
+      engine: full
+    - canonicalName: wellnessIdentitiesRead
+      adapter: postgres
       engine: full
   permissions:
     - operationType: CreateStudio

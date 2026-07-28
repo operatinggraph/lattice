@@ -9,6 +9,9 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
+
 	"github.com/operatinggraph/lattice/internal/appsession"
 	"github.com/operatinggraph/lattice/internal/gateway/auth"
 	"github.com/operatinggraph/lattice/internal/substrate"
@@ -48,6 +51,17 @@ type server struct {
 	// used server-side by resolveSubjectHats to ask the Gateway's own
 	// external /v1/actor door which anchors the signed-in session carries.
 	gatewayURL string
+
+	// pgPool is the protected wellnessIdentitiesRead read-model pool; nil
+	// when WELLNESS_APP_PG_DSN / REFRACTOR_PG_DSN is unset → /api/identities
+	// returns a clean 502 rather than panicking.
+	pgPool *pgxpool.Pool
+}
+
+// pgxBeginner is the subset of *pgxpool.Pool the protected read uses — a
+// single Begin so the query path can be unit-tested with a fake transaction.
+type pgxBeginner interface {
+	Begin(ctx context.Context) (pgx.Tx, error)
 }
 
 func (s *server) registerRoutes(mux *http.ServeMux) {
@@ -73,6 +87,7 @@ func (s *server) registerRoutes(mux *http.ServeMux) {
 	inner.HandleFunc("/api/bookings", s.handleBookings)
 	inner.HandleFunc("/api/my-residency", s.handleMyResidency)
 	inner.HandleFunc("/api/members", s.handleMembers)
+	inner.HandleFunc("/api/identities", s.handleIdentities)
 	inner.HandleFunc("/api/config", s.handleConfig)
 
 	s.session.RegisterRoutes(inner)

@@ -15,15 +15,17 @@ import (
 	"github.com/operatinggraph/lattice/internal/gateway/auth"
 )
 
-// wellness-app has no protected Postgres read boundary (every wellness lens is
-// plain NATS-KV, P5) — the read boundary here is SESSION-scoped instead
-// (persona-worlds-design.md Fire W3 §3). It is tiered by data rather than by
-// habit: the class SCHEDULE (/api/studios, /api/sessions) is public-read,
-// carrying no person-identifying column about the people its rows are about,
-// while every per-user read resolves the caller through authenticateRead or
-// resolveSubjectHats — a member sees only their own bookings, and a roster is
-// a staff or bound-instructor surface. Mirrors cmd/cafe-app's own read
-// boundary, with the instructor hat added.
+// Every wellness lens but one is plain NATS-KV (P5) — the read boundary for
+// those is SESSION-scoped instead (persona-worlds-design.md Fire W3 §3). It is
+// tiered by data rather than by habit: the class SCHEDULE (/api/studios,
+// /api/sessions) is public-read, carrying no person-identifying column about
+// the people its rows are about, while every per-user read resolves the
+// caller through authenticateRead or resolveSubjectHats — a member sees only
+// their own bookings, and a roster is a staff or bound-instructor surface.
+// Mirrors cmd/cafe-app's own read boundary, with the instructor hat added.
+// The one exception is /api/identities (identities.go), the protected
+// wellnessIdentitiesRead Postgres model, RLS-scoped rather than filtered
+// here.
 
 const actorFetchTimeout = 10 * time.Second
 

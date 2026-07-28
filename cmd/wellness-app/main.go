@@ -14,13 +14,14 @@
 // merely named.
 //
 // WRITES go browser-direct to the Gateway's POST /v1/operations under the
-// signed-in actor's own token — the app never proxies a write. READS are all
+// signed-in actor's own token — the app never proxies a write. Most READS are
 // plain NATS-KV lens projections (P5) plus the shared weaver-targets
-// convergence bucket — no protected Postgres read model exists for wellness,
-// so this app carries no pgxpool — and the boundary over them is the session
-// (persona-worlds-design.md Fire W3 §3): the class SCHEDULE is public-read
-// (studios and sessions carry no person-identifying column), while every
-// per-user read is gated and scoped server-side to the session's subject.
+// convergence bucket, boundary the session (persona-worlds-design.md Fire W3
+// §3): the class SCHEDULE is public-read (studios and sessions carry no
+// person-identifying column), while every per-user read is gated and scoped
+// server-side to the session's subject. /api/identities is the one protected
+// Postgres read model (wellnessIdentitiesRead, RLS-scoped): a signed-in
+// actor's own name, resolved for the "Signed in as" bar.
 // Three hats derive from the Gateway's own /v1/actor anchors: a member (any
 // verified session), a `worksAt` staffer, and an instructor bound to a
 // vtx.instructor entity by `identifiedBy`.
@@ -34,6 +35,9 @@
 //	WELLNESS_APP_ADDR      HTTP listen address (default: 127.0.0.1:7802)
 //	NATS_URL               NATS server URL (default: nats://localhost:4222)
 //	BOOTSTRAP_JSON_PATH    path to lattice.bootstrap.json (default: ./lattice.bootstrap.json)
+//	WELLNESS_APP_PG_DSN    Postgres DSN for the protected wellnessIdentitiesRead
+//	                       read model; falls back to REFRACTOR_PG_DSN. Unset ⇒
+//	                       /api/identities reports the model unconfigured.
 //	WELLNESS_APP_DEV_AUTH  "1" enables the demo in-process minter behind /api/dev-login
 //	                       (loopback bind only).
 //	WELLNESS_APP_JWT_PUBLIC_KEY / _JWT_ISSUER  the production verify-only posture: an
@@ -63,9 +67,11 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/nats-io/nats.go"
 
 	"github.com/operatinggraph/lattice/internal/appsession"
@@ -131,6 +137,31 @@ func run(logger *slog.Logger) error {
 	} else {
 		logger.Info("connected to NATS", "natsURL", natsURL)
 		defer conn.Close()
+	}
+
+	// The read boundary for /api/identities — the protected
+	// wellnessIdentitiesRead Postgres read model + the JWT-authenticated
+	// reader (mirrors cmd/clinic-app's readModelDSN wiring). A missing DSN is
+	// NOT fatal (the UI still serves and /api/identities returns a clean
+	// error), but a configured DSN that cannot be parsed IS fatal.
+	var pgPool *pgxpool.Pool
+	if dsn := readModelDSN(); dsn != "" {
+		pool, err := pgxpool.New(context.Background(), dsn)
+		if err != nil {
+			return err
+		}
+		defer pool.Close()
+		pgPool = pool
+		pingCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		if err := pool.Ping(pingCtx); err != nil {
+			logger.Warn("protected read model pool configured but unreachable at startup; /api/identities will 502 until Postgres is reachable",
+				"error", err)
+		} else {
+			logger.Info("protected read model pool configured")
+		}
+		cancel()
+	} else {
+		logger.Warn("WELLNESS_APP_PG_DSN / REFRACTOR_PG_DSN unset; /api/identities will report the protected read model is unconfigured")
 	}
 
 	// Token-revocation kill-switch (external-actor-authn-binding-design.md
@@ -204,6 +235,7 @@ func run(logger *slog.Logger) error {
 		bootstrapLoaded: bootstrapLoaded,
 		logger:          logger,
 		natsTimeout:     natsRequestLimit,
+		pgPool:          pgPool,
 		authn:           authn,
 		session:         session,
 		gatewayURL:      gatewayURL,
@@ -304,4 +336,15 @@ func envDuration(key string, def time.Duration, logger *slog.Logger) time.Durati
 		return def
 	}
 	return d
+}
+
+// readModelDSN resolves the protected read model's Postgres DSN. It prefers
+// the app-specific WELLNESS_APP_PG_DSN (which may name a non-superuser,
+// SELECT-only role distinct from Refractor's projector role) and falls back
+// to the shared REFRACTOR_PG_DSN. Empty when neither is set.
+func readModelDSN() string {
+	if v := strings.TrimSpace(os.Getenv("WELLNESS_APP_PG_DSN")); v != "" {
+		return v
+	}
+	return strings.TrimSpace(os.Getenv("REFRACTOR_PG_DSN"))
 }
