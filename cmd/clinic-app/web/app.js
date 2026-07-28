@@ -488,6 +488,27 @@ async function loadPatients(q) {
   populatePatientSelect();
   renderPatientContact();
   syncBookPatient();
+  applySelfPatientLock();
+}
+
+// applySelfPatientLock locks the header's patient picker to the signed-in
+// patient's own record instead of the front-desk search+select — the
+// consumer hat's roster (RLS self-anchor, patientIdentityReadGrants) never
+// carries more than the caller's own row, so there is nothing to pick.
+// Auto-selects it (clearing the "Select a patient first" friction a fresh
+// sign-in otherwise hits) and renders a fixed name into #patient-self-name;
+// applyHatGating is what shows/hides that element vs. the search+select, so
+// a front-desk session (which this skips entirely) is unaffected.
+function applySelfPatientLock() {
+  if (isFrontDesk()) return;
+  const el = $("#patient-self-name");
+  if (state.patients.length === 0) {
+    if (el) el.textContent = "No patient record is linked to your account yet.";
+    return;
+  }
+  const mine = state.patients[0];
+  if (el) el.textContent = mine.name || "—";
+  if (state.patient !== mine.patientKey) setPatient(mine.patientKey);
 }
 
 // evictStalePatientSelection clears a persisted patient key that doesn't
@@ -3968,6 +3989,12 @@ function viewAllowed(view) {
 // whenever whoami resolves.
 function applyHatGating() {
   const fd = isFrontDesk();
+  const search = $("#patient-search");
+  const select = $("#patient");
+  const selfName = $("#patient-self-name");
+  if (search) search.hidden = !fd;
+  if (select) select.hidden = !fd;
+  if (selfName) selfName.hidden = fd;
   for (const v of STAFF_VIEWS) {
     const tab = $("#tab-" + v);
     if (tab) tab.hidden = !fd;
