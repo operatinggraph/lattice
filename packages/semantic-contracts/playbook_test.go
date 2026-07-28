@@ -58,9 +58,18 @@ func TestSemanticContracts_PlaybookColumnsMatchLens(t *testing.T) {
 				continue
 			}
 			refCol := strings.TrimPrefix(v, "row.")
-			if !lensCols[refCol] {
-				t.Fatalf("gap %q action references row.%s, which is not a lens BodyColumn (lens has %v)", col, refCol, cols)
+			if lensCols[refCol] {
+				continue
 			}
+			// A Reads-only derived-aspect form row.<col>.<aspect> (§13 hard
+			// case 4, strategist.go resolveReadKey): the BASE column must
+			// still be a lens BodyColumn even though the full dotted string
+			// isn't one.
+			base, _, isSuffixed := strings.Cut(refCol, ".")
+			if isSuffixed && lensCols[base] {
+				continue
+			}
+			t.Fatalf("gap %q action references row.%s, which is not a lens BodyColumn (lens has %v)", col, refCol, cols)
 		}
 	}
 }

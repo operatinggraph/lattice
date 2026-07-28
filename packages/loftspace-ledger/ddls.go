@@ -104,8 +104,11 @@ func transactionDDL() pkgmgr.DDLSpec {
 			"entries, so concurrent debits/credits never race a read-modify-write. Requires the accountKey be a " +
 			"live account and amountCents be a positive number. DebitAccount's optional clauseRef (the " +
 			"semantic-contracts Executable Paper consumer, Contract #10 §10.8's canonical directOp target) " +
-			"additionally validates the clause is live and writes the authorizedBy link (transaction→clause, the " +
-			"audit chain of custody). What it does to the clause's .status next depends on the accompanying " +
+			"additionally validates the clause is live, DERIVES the authoritative amountCents from the clause's " +
+			"own .terms aspect (rejecting AmountMismatch if the payload's amountCents disagrees — money is " +
+			"append-only and never self-heals, so a stale or copied payload value is never trusted over the " +
+			"clause's own record) and writes the authorizedBy link (transaction→clause, the audit chain of " +
+			"custody). What it does to the clause's .status next depends on the accompanying " +
 			"`period` param (Fire V3, semantic-contracts' clauseSatisfaction playbook always supplies it alongside " +
 			"clauseRef): period=\"monthly\" keeps state active (a recurring clause never completes); any other " +
 			"value (or clauseRef with no period, the Fire V1/V2 shape) marks .status completed as before. " +
@@ -120,16 +123,16 @@ func transactionDDL() pkgmgr.DDLSpec {
 			`{"accountKey":{"type":"string","description":"vtx.account.<NanoID> the transaction posts to (DebitAccount/CreditAccount; required, validated alive)."},` +
 			`"amountCents":{"type":"number","description":"The transaction amount in integer cents; required, must be > 0. A debit is a charge (increases what the tenant owes); a credit is a payment (decreases it)."},` +
 			`"memo":{"type":"string","description":"Optional free-text description of the charge or payment (e.g. \"June rent\", \"Late fee\"). Optional."},` +
-			`"clauseRef":{"type":"string","description":"DebitAccount only: vtx.clause.<NanoID> of the semantic-contract clause authorizing this charge (optional, validated alive when supplied). Writes the authorizedBy audit link and updates the clause's .status."},` +
+			`"clauseRef":{"type":"string","description":"DebitAccount only: vtx.clause.<NanoID> of the semantic-contract clause authorizing this charge (optional, validated alive when supplied). The clause's OWN .terms.amountCents is authoritative — a payload amountCents that disagrees is rejected (AmountMismatch). Writes the authorizedBy audit link and updates the clause's .status."},` +
 			`"period":{"type":"string","description":"DebitAccount only, alongside clauseRef (Fire V3): \"monthly\" keeps the clause active instead of completing it; any other value (or omitted) marks the clause completed, the Fire V1/V2 behavior. chargeValidUntil is stamped unconditionally either way (defense-in-depth — see the DDL description)."}},` +
 			`"required":["accountKey","amountCents"]}`,
 		OutputSchema: `{"type":"object","properties":` +
 			`{"primaryKey":{"type":"string","description":"vtx.transaction.<NanoID> of the minted transaction (the operation's principal key)."}}}`,
 		FieldDescription: map[string]string{
 			"accountKey":  "Full vtx.account.<NanoID> key the transaction posts to. DebitAccount/CreditAccount validate it is alive and write the postedTo link (transaction→account) the ledgerHistory lens walks.",
-			"amountCents": "The transaction amount in integer cents; required, must be a positive number. Stored on the .entry aspect and projected verbatim by the ledgerHistory lens.",
+			"amountCents": "The transaction amount in integer cents; required, must be a positive number. Stored on the .entry aspect and projected verbatim by the ledgerHistory lens. DebitAccount with a clauseRef must match the clause's own .terms.amountCents exactly (AmountMismatch otherwise) — the clause is the authoritative amount, not the payload.",
 			"memo":        "Optional free-text description of the charge or payment (e.g. \"June rent\", \"Late fee — 5 days\"). Stored on the .entry aspect when supplied; projected by the ledgerHistory lens.",
-			"clauseRef":   "DebitAccount only. Full vtx.clause.<NanoID> key of the semantic-contract clause authorizing this charge. When supplied, validates the clause is alive, writes the authorizedBy link (transaction→clause), and updates the clause's .status per the period param.",
+			"clauseRef":   "DebitAccount only. Full vtx.clause.<NanoID> key of the semantic-contract clause authorizing this charge. When supplied, validates the clause is alive, derives the authoritative amountCents from the clause's own .terms (rejecting AmountMismatch on disagreement with the payload), writes the authorizedBy link (transaction→clause), and updates the clause's .status per the period param.",
 			"period":      "DebitAccount only, alongside clauseRef (Fire V3). \"monthly\" keeps the clause active (recurring); anything else marks .status completed (one-time, Fire V1/V2 default). chargeValidUntil is stamped either way, unconditionally.",
 		},
 		Examples: []pkgmgr.ExampleSpec{

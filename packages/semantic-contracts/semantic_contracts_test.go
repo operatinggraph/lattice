@@ -315,7 +315,7 @@ func TestDebitAccount_ClauseRef_WritesAuthorizedByAndCompletesClause(t *testing.
 		SubmittedAt:   "2026-07-02T13:00:00Z",
 		Class:         "transaction",
 		Payload:       json.RawMessage(`{"accountKey":"` + acctKey + `","amountCents":4500,"clauseRef":"` + clauseKey + `"}`),
-		ContextHint:   &processor.ContextHint{Reads: []string{acctKey, clauseKey}},
+		ContextHint:   &processor.ContextHint{Reads: []string{acctKey, clauseKey, clauseKey + ".terms"}},
 	}
 	testutil.PublishOp(t, conn, debitEnv)
 	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
@@ -341,6 +341,43 @@ func TestDebitAccount_ClauseRef_WritesAuthorizedByAndCompletesClause(t *testing.
 	entryData, _ := entryDoc["data"].(map[string]any)
 	if got, _ := entryData["amountCents"].(float64); got != 4500 {
 		t.Fatalf("entry.amountCents = %v, want 4500", got)
+	}
+}
+
+// TestDebitAccount_ClauseRef_AmountMismatchRejected — the money-provenance
+// fix's own regression: a clause-authorized DebitAccount whose payload
+// amountCents disagrees with the clause's own .terms.amountCents must be
+// rejected (AmountMismatch), never posted. Ledger entries are append-only and
+// never self-heal, so a stale-or-wrong copied amount must never reach the
+// entry — the clause's own live .terms is the sole authority.
+func TestDebitAccount_ClauseRef_AmountMismatchRejected(t *testing.T) {
+	ctx, conn := setupBcEnv(t)
+	cp, cons := newBcPipeline(t, ctx, conn, "debitclausemismatch")
+
+	leaseKey := seedLease(t, ctx, conn, "BBLEASEMSMATCHHJKMNP")
+	acctKey := createAccount(t, ctx, conn, cp, cons, "createacctmismatch1", leaseKey)
+	clauseKey := createClause(t, ctx, conn, cp, cons, "createclausemismat1", leaseKey, acctKey,
+		"Tenant agrees to a $45 lockout fee.", 4500)
+
+	// Payload claims 4600 — the clause's own .terms says 4500.
+	debitEnv := &processor.OperationEnvelope{
+		RequestID:     testutil.GenReqID("debitmismatch00001"),
+		Lane:          processor.LaneDefault,
+		OperationType: "DebitAccount",
+		Actor:         scActorKey,
+		SubmittedAt:   "2026-07-02T13:00:00Z",
+		Class:         "transaction",
+		Payload:       json.RawMessage(`{"accountKey":"` + acctKey + `","amountCents":4600,"clauseRef":"` + clauseKey + `"}`),
+		ContextHint:   &processor.ContextHint{Reads: []string{acctKey, clauseKey, clauseKey + ".terms"}},
+	}
+	testutil.PublishOp(t, conn, debitEnv)
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeRejected)
+
+	// The clause must stay unsatisfied — no authorizedBy link, no completion.
+	statusDoc := readDoc(t, ctx, conn, clauseKey+".status")
+	statusData, _ := statusDoc["data"].(map[string]any)
+	if got, _ := statusData["state"].(string); got == "completed" {
+		t.Fatalf("clause status.state must NOT be completed by a rejected mismatched debit, got %q", got)
 	}
 }
 
@@ -742,7 +779,7 @@ func TestDebitAccount_RecurringClause_ReArmsChargeValidUntil(t *testing.T) {
 		SubmittedAt:   "2026-07-02T13:00:00Z",
 		Class:         "transaction",
 		Payload:       json.RawMessage(`{"accountKey":"` + acctKey + `","amountCents":1500,"clauseRef":"` + clauseKey + `","period":"monthly"}`),
-		ContextHint:   &processor.ContextHint{Reads: []string{acctKey, clauseKey}},
+		ContextHint:   &processor.ContextHint{Reads: []string{acctKey, clauseKey, clauseKey + ".terms"}},
 	}
 	testutil.PublishOp(t, conn, debitEnv)
 	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
@@ -823,7 +860,7 @@ func TestDebitAccount_RecurringClause_MismatchedPeriodOmitted_StillReArms(t *tes
 		SubmittedAt:   "2026-07-02T13:00:00Z",
 		Class:         "transaction",
 		Payload:       json.RawMessage(`{"accountKey":"` + acctKey + `","amountCents":1500,"clauseRef":"` + clauseKey + `"}`),
-		ContextHint:   &processor.ContextHint{Reads: []string{acctKey, clauseKey}},
+		ContextHint:   &processor.ContextHint{Reads: []string{acctKey, clauseKey, clauseKey + ".terms"}},
 	}
 	testutil.PublishOp(t, conn, debitEnv)
 	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)

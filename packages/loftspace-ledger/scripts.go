@@ -232,6 +232,25 @@ def post_entry(state, op, entry_type, event_class, allow_clause_ref):
             _, clause_id = parts_of(clause_key, "clauseRef", "clause")
             if not vertex_alive(state, clause_key):
                 fail("UnknownClause: " + clause_key)
+
+            # amountCents provenance: a clause-authorized charge is money
+            # that never self-heals once posted (append-only ledger), so it
+            # must be DERIVED from the clause's own .terms — never trusted
+            # verbatim from a caller/Weaver-copied number, which could
+            # reflect a stale or torn read of whatever projection dispatched
+            # it. The clauseSatisfaction playbook (semantic-contracts
+            # targets.go) declares clauseRef + ".terms" in Reads, so it is
+            # already hydrated here alongside the clause root.
+            terms_key = clause_key + ".terms"
+            if not vertex_alive(state, terms_key):
+                fail("InvalidState: clause " + clause_key + " has no live .terms aspect")
+            clause_amount = state[terms_key].data.get("amountCents")
+            if clause_amount == None:
+                fail("InvalidArgument: clauseRef: clause " + clause_key + " carries no fixed amountCents (a judgment clause has none)")
+            if clause_amount != amount_cents:
+                fail("AmountMismatch: payload amountCents disagrees with clause " + clause_key + "'s authoritative amountCents")
+            amount_cents = clause_amount
+
             # period (Fire V3): the clauseSatisfaction playbook always
             # templates row.period alongside clauseRef, so a Weaver-dispatched
             # charge always carries it; a hand-submitted clauseRef with no
@@ -269,10 +288,12 @@ def post_entry(state, op, entry_type, event_class, allow_clause_ref):
         mutations.append(make_link(authorized_by_lnk, tx_key, clause_key, "authorizedBy", "authorizedBy", {}))
 
         # clauseValidUntil is stamped UNCONDITIONALLY, regardless of which
-        # branch below fires. This op has no read of the clause's own
-        # .terms.data.period (only its root is hydrated — see
-        # semantic-contracts' targets.go Reads), so clause_period is a
-        # caller-supplied signal, not a verified one; a hand-submitted
+        # branch below fires. .terms.data.period exists but is deliberately
+        # not read here (only amountCents is, above, for money provenance) —
+        # clause_period stays a caller-supplied signal, not a verified one;
+        # cross-checking it is out of scope for the amountCents fix and the
+        # unconditional stamp below already closes the dangerous mismatch
+        # direction for free (see next paragraph). A hand-submitted
         # DebitAccount (this is an ordinary operator-granted op, not
         # Weaver-exclusive) could in principle pass a period that disagrees
         # with the clause's real archetype. Always stamping chargeValidUntil

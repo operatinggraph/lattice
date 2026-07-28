@@ -17,8 +17,11 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 //     the clauseRef param loftspace-ledger's DebitAccount reads), and (Fire
 //     V3) row.period — DebitAccount branches on period="monthly" to re-arm
 //     the clause's chargeValidUntil instead of completing it — into the op's
-//     payload; Reads routes the account + clause keys into ContextHint.Reads
-//     so the Processor hydrates them. The `directOp`-must-be-literal guard is
+//     payload; Reads routes the account + clause keys — and the clause's own
+//     .terms aspect (row.clauseKey.terms), so loftspace-ledger's DebitAccount
+//     can derive the authoritative amountCents from the clause instead of
+//     trusting this row-templated copy — into ContextHint.Reads so the
+//     Processor hydrates them. The `directOp`-must-be-literal guard is
 //     satisfied — DebitAccount is a literal operation name, only params/reads
 //     are row-templated (the objectLiveness → TombstoneObject / appointment
 //     Reminders → RecordAppointmentReminder precedent, granted to operator,
@@ -48,7 +51,7 @@ func WeaverTargets() []pkgmgr.WeaverTargetSpec {
 					// (MissingClass).
 					Class:  "transaction",
 					Params: map[string]string{"accountKey": "row.accountKey", "amountCents": "row.amountCents", "clauseRef": "row.clauseKey", "period": "row.period"},
-					Reads:  []string{"row.accountKey", "row.clauseKey"},
+					Reads:  []string{"row.accountKey", "row.clauseKey", "row.clauseKey.terms"},
 				},
 				"missing_inspection": {
 					Action:    "assignTask",
