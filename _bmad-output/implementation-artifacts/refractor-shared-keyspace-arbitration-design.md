@@ -419,3 +419,67 @@ unification (§3.1) + A3a tails audit," composition itself no longer blocking.
 **Gates green:** `go build ./...`, `make vet`, `golangci-lint run ./...` (0 issues, full repo), `STRICT=1
 lint-conventions.go`, `lint-package-standard.go`, `lint-package-version.go` (no packages/ content
 changed), `lint-lens-anchors.go`, `lint-facet-discovery.go`, full `go test ./... -p 4` (0 failures).
+
+## 12. Correction to §3.1 (increment 3 attempt, halted) — the coalesce shape silently drops rows when both walks multi-match (Winston, Lattice Steward fire, 2026-07-28)
+
+**What was attempted:** the sessions pair (§3.1's simplest unification — byte-identical bodies) —
+folding `edgeInstructorSessions` into `edgeEntitySessions` as its second `AnchorWalk`, per increment
+2's shipped composition primitive. Lens edit, manifest/package/doc/verify-script updates, and test
+rewrites were drafted in a worktree and got as far as a clean `go build`.
+
+**What grounding the mechanism before shipping found:** increment 2's own regression test
+(`TestExec_CoalesceMultiWalkAnchorComposition`) only exercises three actors each reachable via **at
+most one** walk (direct-only, team-only, neither) — it never seeds an actor whose **both** walks
+independently multi-match. That case behaves differently, and wrongly. A scratch executor-level
+repro (same query shape, one actor with 2 real matches on walk 0 **and** 1 real match on walk 1)
+returns **2 rows total, both showing a walk-0 anchor** — the walk-1 anchor never appears, in any row,
+with no error.
+
+**Root cause:** `composeDataLensSpec` concatenates every walk's `OPTIONAL MATCH` clauses
+*sequentially* into one query (§3.1's "the compiled prelude is ... every chain as OPTIONAL MATCH").
+`applyMatch` (`internal/refractor/ruleengine/full/executor.go:149-208`) expands **every** binding
+from the prior clause through the next one — a nested-loop join, not a union — so two walks that
+each depend only on the actor (not on each other's output) cross-product: N matches on walk 0 × M
+matches on walk 1 → N×M rows. `coalesce(scoped_w0, scoped_w1, …)` (§11's rebind) then picks
+whichever branch is non-null **first** on each cross-joined row — since both branches are genuinely
+non-null on every one of those N×M rows once both walks have any real match, the query never emits
+a row where the *other* branch's value is the one selected. The walk-1 anchors are not
+duplicated — they are **dropped**, silently, with zero errors or empty-result signal. This is a
+different (and worse) failure shape than increment 1's bug: that one *refused* a reachable anchor
+outright (loud — a lens failed the anchor-coverage gate or a e2e); this one produces a
+plausible-looking, non-empty result set that is simply short rows, which no existing gate catches.
+
+**Scope of impact — not a security bug.** The read-grant **producer** side
+(`generateProducerSpec`) shares the same cross-product but is immune: its
+`collect(DISTINCT {anchorType, anchorId, via}) + collect(DISTINCT {...})` aggregates *within* each
+branch's own `collect`, and `DISTINCT` absorbs the duplication — every real anchor from both walks
+still lands in `readableAnchors`. So `cap-read.*` grants stay correct; only the **data lens's row
+projection** (browse rows a Facet client renders) silently under-projects. No live victim today —
+**zero shipped packages currently declare a 2+-walk lens** (this fire would have been the first
+consumer) — but it blocks **all three** of §3.1's planned pair unifications, not just sessions:
+catalog (an op reachable via *both* a permitted service *and* a held role — plausible for any
+multi-hat staff actor) and tasks (an actor with both directly-assigned *and* role-queued tasks) have
+the identical shape — two walks, either capable of multiple real matches for one actor.
+
+**Not fixed in this fire — this is design work, not a build increment.** The coalesce shape is only
+correct when at most one match is structurally guaranteed per walk per actor, which does not hold
+for any of the three census pairs. Two directions, neither of them a quick patch:
+
+1. **Real per-branch UNION for Personal-lens walk composition** — revisit §3.2's "a Personal tail
+   carrying UNION is refused, declare Walks instead" scope-down; Personal lenses may need the same
+   branch-independent evaluation Fire U2 designs for plain lenses, not merely a different vocabulary
+   surface for declaring the same broken compilation.
+2. **N independently-executed queries, one per walk, rows unioned+deduped by the caller** —
+   compile each walk as its own query (as the OLD sibling-lens shape did), but have Refractor's own
+   lens-evaluation loop merge their result ROWS into one target, instead of pkgmgr merging them into
+   one QUERY. Avoids grammar/visitor work entirely; the open question is whether this reintroduces
+   the divergent-column race U1 exists to eliminate for a row reached by both walks (sessions is
+   immune — byte-identical bodies — catalog/tasks are the cases that motivated U1 in the first
+   place, so this direction needs to show it still merges their columns correctly, not just their
+   keys).
+
+Neither is a same-fire fix; this needs a design pass (flagged for `lattice-designer`), not another
+Steward build increment. **Board:** `lattice.md`'s shared-keyspace row moves to `🚧 blocked-on`
+this correction — *not* `🏗️ building` a pair — until §12 resolves. The sessions-pair worktree was
+discarded (clean `go build`, but shipping it would have silently dropped a dual-hat actor's
+instructor-led sessions); no code from this fire landed.
