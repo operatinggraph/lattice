@@ -376,7 +376,7 @@ func (cp *CommitPath) commitPipeline(ctx context.Context, msg substrate.Message,
 		// both); either nil skips the stage.
 		var mintedPiiKey bool
 		if cp.deps.Vault != nil && cp.deps.DDLs != nil {
-			encrypted, minted, err := cp.encryptSensitiveMutations(ctx, result.Mutations)
+			encrypted, minted, err := cp.encryptSensitiveMutations(ctx, result.Mutations, state)
 			if err != nil {
 				return cp.handleStubFailure(ctx, msg, env, "encrypt", err)
 			}

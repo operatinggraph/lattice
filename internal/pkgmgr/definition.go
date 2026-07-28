@@ -40,6 +40,7 @@ func (def Definition) validateAll() error {
 		def.validateLoomPatterns,
 		def.validateOpMetas,
 		def.validateEffects,
+		def.validateSensitiveClassScope,
 		def.validateCanonicalNameUniqueness,
 		def.validatePermissionIdentityUniqueness,
 	} {
@@ -665,9 +666,9 @@ type DDLSpec struct {
 	// (lattice-architecture Item 6 — the aspect-level sensitivity
 	// boundary). The Processor's step-6 validator anchors sensitive
 	// aspects to identity vertices (NFR-S3). Meaningful only for
-	// Class == "meta.ddl.aspectType"; defaults false (non-sensitive),
-	// so a DDL that omits it installs exactly as before (no `.sensitive`
-	// aspect emitted).
+	// Class == "meta.ddl.aspectType" — validateSensitiveClassScope rejects
+	// the install otherwise; defaults false (non-sensitive), so a DDL that
+	// omits it installs exactly as before (no `.sensitive` aspect emitted).
 	Sensitive bool
 
 	// Self-description aspects. Required for all DDL classes.

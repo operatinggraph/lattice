@@ -37,13 +37,13 @@ func (e *DDLViolation) Error() string {
 // schema/permittedCommands/sensitive checks are skipped (a permissive
 // pass-through). Other checks (key pattern, op enum) apply regardless.
 type ValidatorImpl struct {
-	DDLs   *DDLCache
+	// *ddlResolver carries DDLs + linkReader and the shared governing-DDL /
+	// instanceOf-chain resolution (step6_resolve_ddl.go) — the same
+	// resolution step 6.5's encrypt and decrypt-on-read reuse via their own
+	// ddlResolver, so a sensitive class resolvable only via the chain is
+	// treated identically by every path that needs to know it's sensitive.
+	*ddlResolver
 	Logger *slog.Logger
-	// linkReader is the on-demand fallback for resolving a vertex's instanceOf
-	// target from committed Core KV (Contract #1 §1.5 governing-DDL walk). Nil
-	// ⇒ on-demand discovery is skipped (the batch + working-set paths still
-	// resolve); the production constructor wires a conn-backed reader.
-	linkReader instanceOfTargetReader
 }
 
 // NewValidator wires a real Validator backed by the DDL cache. conn/coreBucket
@@ -56,9 +56,10 @@ func NewValidator(cache *DDLCache, conn *substrate.Conn, coreBucket string, logg
 	if logger == nil {
 		logger = slog.Default()
 	}
-	v := &ValidatorImpl{DDLs: cache, Logger: logger}
+	v := &ValidatorImpl{ddlResolver: &ddlResolver{DDLs: cache, Logger: logger}, Logger: logger}
 	if conn != nil && coreBucket != "" {
 		v.linkReader = &connInstanceOfReader{conn: conn, coreBucket: coreBucket}
+		v.classReader = &connVertexClassReader{conn: conn, coreBucket: coreBucket}
 	}
 	return v
 }

@@ -21,15 +21,12 @@ import (
 // AFTER step 6 (Validate), which checked the plaintext shape/anchoring — the
 // stored bytes are opaque ciphertext, deliberately unchecked by DDL schema.
 //
-// Sensitivity resolution is exact-class-name only (DDLs.Lookup), unlike step
-// 6's resolveGoverningDDL, which additionally walks a bounded instanceOf
-// chain to a fine-grained discriminator class's type authority. No shipped
-// sensitive DDL today (ssn/dob/name/email/phone/claimKey/credentialBinding)
-// needs that walk — all register under their own exact canonical name — but a
-// FUTURE sensitive DDL resolvable only via the chain would silently commit as
-// plaintext here (Lookup miss) while step 6 still scope-checks it correctly.
-// Known limitation, not exercised by any package today; fold in the shared
-// resolution path if that pattern is ever used for a sensitive aspect.
+// Sensitivity resolution reuses step 6's own ddlResolver (exact class→DDL
+// lookup first, then the bounded instanceOf-chain walk over the SAME batch +
+// hydrated working set step 6 validated against), so a fine-grained
+// discriminator class resolvable only via the chain is encrypted exactly as
+// consistently as step 6 scope-checked it — no separate, narrower resolution
+// path to drift out of sync.
 //
 // Returns mintedPiiKey=true when this call minted a NEW piiKey (the identity
 // had none yet) — a "create" mutation, which applyHydratedRevisions never
@@ -39,12 +36,20 @@ import (
 // retry-eligible signal alongside `moved`, so two concurrent first-sensitive
 // writes for the same identity get a transparent retry instead of a hard
 // rejection.
-func (cp *CommitPath) encryptSensitiveMutations(ctx context.Context, mutations []MutationOp) ([]MutationOp, bool, error) {
+func (cp *CommitPath) encryptSensitiveMutations(ctx context.Context, mutations []MutationOp, state HydratedState) ([]MutationOp, bool, error) {
 	var extra []MutationOp
 	envelopes := make(map[string]vault.Envelope) // vertexKey -> envelope, cached for this batch
 
 	out := make([]MutationOp, len(mutations))
 	copy(out, mutations)
+
+	resolver := &ddlResolver{
+		DDLs:        cp.deps.DDLs,
+		linkReader:  &connInstanceOfReader{conn: cp.deps.Conn, coreBucket: cp.deps.CoreBucket},
+		classReader: &connVertexClassReader{conn: cp.deps.Conn, coreBucket: cp.deps.CoreBucket},
+		Logger:      cp.deps.Logger,
+	}
+	result := ScriptResult{Mutations: mutations}
 
 	for i := range out {
 		m := &out[i]
@@ -55,7 +60,8 @@ func (cp *CommitPath) encryptSensitiveMutations(ctx context.Context, mutations [
 		if class == "" {
 			continue
 		}
-		ref, ok := cp.deps.DDLs.Lookup(class)
+		kind := substrate.ClassifyKey(m.Key)
+		ref, ok := resolver.resolveGoverningDDL(ctx, class, m.Key, kind, result, state)
 		if !ok || !ref.Sensitive {
 			continue
 		}

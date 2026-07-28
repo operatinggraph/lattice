@@ -3,6 +3,7 @@ package processor
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"testing"
 
 	"github.com/operatinggraph/lattice/internal/substrate"
@@ -58,7 +59,7 @@ func TestEncryptSensitiveMutations_MintsKeyAndEncrypts(t *testing.T) {
 	aspectKey := identityKey + ".ssn"
 	in := []MutationOp{sensitiveMutation(aspectKey, "ssn", "123-45-6789")}
 
-	out, minted, err := cp.encryptSensitiveMutations(ctx, in)
+	out, minted, err := cp.encryptSensitiveMutations(ctx, in, HydratedState{})
 	if err != nil {
 		t.Fatalf("encryptSensitiveMutations: %v", err)
 	}
@@ -130,7 +131,7 @@ func TestEncryptSensitiveMutations_ReusesKeyWithinBatch(t *testing.T) {
 		},
 	}
 
-	out, minted, err := cp.encryptSensitiveMutations(ctx, in)
+	out, minted, err := cp.encryptSensitiveMutations(ctx, in, HydratedState{})
 	if err != nil {
 		t.Fatalf("encryptSensitiveMutations: %v", err)
 	}
@@ -167,7 +168,7 @@ func TestEncryptSensitiveMutations_ExistingPiiKey_NoMint(t *testing.T) {
 	seedPiiKeyAspect(t, ctx, conn, identityKey, env)
 
 	in := []MutationOp{sensitiveMutation(identityKey+".ssn", "ssn", "123-45-6789")}
-	out, minted, err := cp.encryptSensitiveMutations(ctx, in)
+	out, minted, err := cp.encryptSensitiveMutations(ctx, in, HydratedState{})
 	if err != nil {
 		t.Fatalf("encryptSensitiveMutations: %v", err)
 	}
@@ -189,7 +190,7 @@ func TestEncryptSensitiveMutations_NonSensitiveClass_PassesThrough(t *testing.T)
 	identityKey := "vtx.identity." + testNanoID2
 	in := []MutationOp{sensitiveMutation(identityKey+".nickname", "nickname", "Andy")}
 
-	out, minted, err := cp.encryptSensitiveMutations(ctx, in)
+	out, minted, err := cp.encryptSensitiveMutations(ctx, in, HydratedState{})
 	if err != nil {
 		t.Fatalf("encryptSensitiveMutations: %v", err)
 	}
@@ -215,7 +216,7 @@ func TestEncryptSensitiveMutations_Tombstone_PassesThrough(t *testing.T) {
 	identityKey := "vtx.identity." + testNanoID2
 	in := []MutationOp{{Op: "tombstone", Key: identityKey + ".ssn"}}
 
-	out, minted, err := cp.encryptSensitiveMutations(ctx, in)
+	out, minted, err := cp.encryptSensitiveMutations(ctx, in, HydratedState{})
 	if err != nil {
 		t.Fatalf("encryptSensitiveMutations: %v", err)
 	}
@@ -238,7 +239,7 @@ func TestEncryptSensitiveMutations_NonIdentityAnchor_PassesThrough(t *testing.T)
 
 	in := []MutationOp{sensitiveMutation("vtx.task."+testNanoID2+".ssn", "ssn", "123-45-6789")}
 
-	out, minted, err := cp.encryptSensitiveMutations(ctx, in)
+	out, minted, err := cp.encryptSensitiveMutations(ctx, in, HydratedState{})
 	if err != nil {
 		t.Fatalf("encryptSensitiveMutations: %v", err)
 	}
@@ -248,6 +249,62 @@ func TestEncryptSensitiveMutations_NonIdentityAnchor_PassesThrough(t *testing.T)
 	data := out[0].Document["data"].(map[string]interface{})
 	if data["value"] != "123-45-6789" {
 		t.Fatalf("data = %+v, want the plaintext left untouched (no identity key to encrypt under)", data)
+	}
+}
+
+// TestEncryptSensitiveMutations_InstanceOfChainedSensitiveClass_Encrypts: a
+// mutation's OWN class ("ssn.v2") is not directly registered, but its
+// identity's instanceOf chain resolves — via the SAME ddlResolver step 6 uses
+// — to a vertex classed "ssn", a registered Sensitive DDL. Before wiring step
+// 6.5 through the shared resolver this mutation's raw DDLs.Lookup("ssn.v2")
+// missed and the plaintext committed unencrypted; the shared resolver now
+// encrypts it exactly as step 6 would anchor-check it.
+func TestEncryptSensitiveMutations_InstanceOfChainedSensitiveClass_Encrypts(t *testing.T) {
+	t.Parallel()
+	ctx, conn, _, _, _ := setupTestPipeline(t)
+	cp, _ := newEncryptTestCommitPath(t, ctx, conn)
+
+	identityKey := "vtx.identity." + testNanoID2
+	aspectKey := identityKey + ".ssn2"
+	targetKey := "vtx.widget." + tplID
+
+	in := []MutationOp{
+		sensitiveMutation(aspectKey, "ssn.v2", "123-45-6789"),
+		{
+			Op:  "create",
+			Key: targetKey,
+			Document: map[string]interface{}{
+				"class": "ssn", "isDeleted": false, "data": map[string]interface{}{},
+			},
+		},
+		{
+			Op:  "create",
+			Key: fmt.Sprintf("lnk.identity.%s.instanceOf.widget.%s", testNanoID2, tplID),
+			Document: map[string]interface{}{
+				"class": "instanceOf", "isDeleted": false,
+			},
+		},
+	}
+
+	out, minted, err := cp.encryptSensitiveMutations(ctx, in, HydratedState{})
+	if err != nil {
+		t.Fatalf("encryptSensitiveMutations: %v", err)
+	}
+	if !minted {
+		t.Fatalf("mintedPiiKey = false, want true (chain-resolved sensitive class must mint a piiKey)")
+	}
+	var found bool
+	for _, m := range out {
+		if m.Key != aspectKey {
+			continue
+		}
+		found = true
+		if _, ok := m.Document["data"].(vault.Ciphertext); !ok {
+			t.Fatalf("ssn.v2 mutation data = %+v (%T), want a vault.Ciphertext — chain-resolved sensitivity must encrypt", m.Document["data"], m.Document["data"])
+		}
+	}
+	if !found {
+		t.Fatalf("aspect mutation missing from output: %+v", out)
 	}
 }
 

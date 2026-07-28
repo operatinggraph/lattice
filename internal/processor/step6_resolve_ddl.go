@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"sort"
 	"strings"
 
@@ -91,6 +92,75 @@ func (r *connInstanceOfReader) LiveInstanceOfTargets(ctx context.Context, vtxRoo
 	return edges, nil
 }
 
+// ddlResolver carries the DDL cache + the on-demand instanceOf reader behind
+// the shared governing-DDL resolution below. Step 6 (ValidatorImpl embeds
+// one), step 6.5's encrypt, and decrypt-on-read each hold their own
+// ddlResolver so a sensitive class resolvable only via the instanceOf chain —
+// not step 6's exact class→DDL lookup — is recognized identically by every
+// path that needs to know a mutation or document is sensitive, not just the
+// write-scope gate.
+type ddlResolver struct {
+	DDLs *DDLCache
+	// linkReader is the on-demand fallback for resolving a vertex's instanceOf
+	// target from committed Core KV (Contract #1 §1.5 governing-DDL walk). Nil
+	// ⇒ on-demand discovery is skipped (the batch + working-set paths still
+	// resolve, when the caller has any of those to offer).
+	linkReader instanceOfTargetReader
+	// classReader is the on-demand fallback classOf uses to learn a chain
+	// terminal's own class from committed Core KV. Deliberately NOT a
+	// ScriptKVReader/decrypt-aware read: a vertex's class field is never
+	// encrypted (only its data is), and routing this through
+	// decryptSensitiveDoc would let a chain terminal that is ITSELF
+	// unresolved-by-exact-lookup recurse back into resolveGoverningDDL —
+	// unbounded across a mutual instanceOf cycle, since each nested call gets
+	// its own fresh hop/visited bound with no shared depth guard. Nil ⇒
+	// on-demand discovery is skipped (the batch + working-set paths still
+	// resolve).
+	classReader vertexClassReader
+	// Logger receives a warning on an on-demand read fault (fail-open to the
+	// permissive default). Nil is safe — slog.Default() is used instead.
+	Logger *slog.Logger
+}
+
+// vertexClassReader reads only a committed vertex's class field — the
+// minimal live-read classOf needs, never the full decrypt-aware VertexDoc.
+type vertexClassReader interface {
+	ClassOf(ctx context.Context, key string) (class string, ok bool, err error)
+}
+
+// connVertexClassReader is the production vertexClassReader, backed by the
+// Processor's substrate connection. A single key GET, no decrypt — the class
+// field is plaintext regardless of whether the document is sensitive.
+type connVertexClassReader struct {
+	conn       *substrate.Conn
+	coreBucket string
+}
+
+func (r *connVertexClassReader) ClassOf(ctx context.Context, key string) (string, bool, error) {
+	entry, err := r.conn.KVGet(ctx, r.coreBucket, key)
+	if err != nil {
+		if errors.Is(err, substrate.ErrKeyNotFound) {
+			return "", false, nil
+		}
+		return "", false, err
+	}
+	var d struct {
+		Class     string `json:"class"`
+		IsDeleted bool   `json:"isDeleted"`
+	}
+	if uerr := json.Unmarshal(entry.Value, &d); uerr != nil || d.IsDeleted {
+		return "", false, nil
+	}
+	return d.Class, true, nil
+}
+
+func (r *ddlResolver) logger() *slog.Logger {
+	if r.Logger != nil {
+		return r.Logger
+	}
+	return slog.Default()
+}
+
 // resolveGoverningDDL resolves the DDL that gates a mutation's write
 // (Contract #1 §1.5). It first tries the exact class→DDL lookup (today's fast
 // path, unchanged); on a miss it walks the mutation's vertex root up its
@@ -103,8 +173,8 @@ func (r *connInstanceOfReader) LiveInstanceOfTargets(ctx context.Context, vtxRoo
 // then (only if both miss) a single bounded on-demand Core KV read. For every
 // coarse-class vertex shipping today the exact lookup wins first, so the walk —
 // and any read — never runs.
-func (v *ValidatorImpl) resolveGoverningDDL(ctx context.Context, class, key string, kind substrate.KeyKind, result ScriptResult, state HydratedState) (MetaVertexRef, bool) {
-	if ref, ok := v.DDLs.Lookup(class); ok {
+func (r *ddlResolver) resolveGoverningDDL(ctx context.Context, class, key string, kind substrate.KeyKind, result ScriptResult, state HydratedState) (MetaVertexRef, bool) {
+	if ref, ok := r.DDLs.Lookup(class); ok {
 		return ref, true // exact match — unchanged Contract #1 §1.5 step-3 path
 	}
 
@@ -116,7 +186,7 @@ func (v *ValidatorImpl) resolveGoverningDDL(ctx context.Context, class, key stri
 	visited := map[string]bool{root: true}
 	cur := root
 	for hop := 0; hop < maxInstanceOfHops; hop++ {
-		target, ok := v.instanceOfTargetOf(ctx, cur, result, state)
+		target, ok := r.instanceOfTargetOf(ctx, cur, result, state)
 		if !ok {
 			break // no instanceOf link → no type authority
 		}
@@ -129,7 +199,7 @@ func (v *ValidatorImpl) resolveGoverningDDL(ctx context.Context, class, key stri
 			// Terminal: the target IS a DDL meta-vertex. Only a vertexType DDL
 			// is a legitimate governing authority (an aspect/link/event DDL is
 			// not a write-gate type).
-			if ref, ok := v.DDLs.LookupByMetaKey(target); ok && ref.Kind == "vertexType" {
+			if ref, ok := r.DDLs.LookupByMetaKey(target); ok && ref.Kind == "vertexType" {
 				return ref, true
 			}
 			break
@@ -137,8 +207,8 @@ func (v *ValidatorImpl) resolveGoverningDDL(ctx context.Context, class, key stri
 
 		// A business vertex whose own class is itself a registered DDL is also a
 		// terminal (the one-hop instance→type domain shape).
-		if tclass, ok := v.classOf(ctx, target, result, state); ok {
-			if ref, ok := v.DDLs.Lookup(tclass); ok {
+		if tclass, ok := r.classOf(ctx, target, result, state); ok {
+			if ref, ok := r.DDLs.Lookup(tclass); ok {
 				return ref, true
 			}
 		}
@@ -159,7 +229,7 @@ func (v *ValidatorImpl) resolveGoverningDDL(ctx context.Context, class, key stri
 // the gate). The in-flight batch is the authoritative layer (last op per link
 // key wins; a tombstone in the batch suppresses the same link committed below);
 // then the hydrated working set, then a single bounded on-demand Core KV read.
-func (v *ValidatorImpl) instanceOfTargetOf(ctx context.Context, vtxRoot string, result ScriptResult, state HydratedState) (string, bool) {
+func (r *ddlResolver) instanceOfTargetOf(ctx context.Context, vtxRoot string, result ScriptResult, state HydratedState) (string, bool) {
 	batchLive, batchDead := reconcileBatchInstanceOf(vtxRoot, result.Mutations)
 	if len(batchLive) > 0 {
 		return soleTarget(batchLive)
@@ -167,12 +237,12 @@ func (v *ValidatorImpl) instanceOfTargetOf(ctx context.Context, vtxRoot string, 
 	if edges := workingSetInstanceOfEdges(vtxRoot, state.Context.Hydrated, batchDead); len(edges) > 0 {
 		return soleTarget(edges)
 	}
-	if v.linkReader != nil {
-		edges, err := v.linkReader.LiveInstanceOfTargets(ctx, vtxRoot)
+	if r.linkReader != nil {
+		edges, err := r.linkReader.LiveInstanceOfTargets(ctx, vtxRoot)
 		if err != nil {
 			// Fail-open to the permissive default — never resolve into a wrong
 			// DDL on a read fault. A read error degrades to today's behavior.
-			v.Logger.Warn("step 6: instanceOf on-demand read failed; resolving to permissive default",
+			r.logger().Warn("step 6: instanceOf on-demand read failed; resolving to permissive default",
 				"vtxRoot", vtxRoot, "error", err)
 			return "", false
 		}
@@ -268,7 +338,7 @@ func sortEdges(edges []instanceOfEdge) {
 // classOf resolves the class of the vertex at targetKey, preferring the batch,
 // then the working set, then a single on-demand Core KV read. Used to detect a
 // terminal whose own class is itself a registered DDL.
-func (v *ValidatorImpl) classOf(ctx context.Context, targetKey string, result ScriptResult, state HydratedState) (string, bool) {
+func (r *ddlResolver) classOf(ctx context.Context, targetKey string, result ScriptResult, state HydratedState) (string, bool) {
 	for _, m := range result.Mutations {
 		if m.Key != targetKey || m.Document == nil || mutationTombstoned(m) {
 			continue
@@ -283,10 +353,9 @@ func (v *ValidatorImpl) classOf(ctx context.Context, targetKey string, result Sc
 	if doc, ok := state.Context.Hydrated[targetKey]; ok && !doc.IsDeleted {
 		return doc.Class, true
 	}
-	if state.Context.KVReader != nil {
-		doc, err := state.Context.KVReader.ReadVertex(ctx, targetKey)
-		if err == nil && doc != nil && !doc.IsDeleted {
-			return doc.Class, true
+	if r.classReader != nil {
+		if class, ok, err := r.classReader.ClassOf(ctx, targetKey); err == nil && ok {
+			return class, true
 		}
 	}
 	return "", false

@@ -104,6 +104,23 @@ func (t *deferredMissTracker) missed() string {
 // sensitive, leaves doc untouched: the aspect's ciphertext shape passes
 // through as opaque data.
 //
+// Resolution reuses the same ddlResolver step 6 and step 6.5 share: exact
+// class→DDL lookup first, then — on a miss — the bounded instanceOf-chain
+// walk to the type authority. A document read here is already committed, so
+// only the walk's live layers are meaningful (there is no in-flight batch or
+// hydrated working set to consult): the instanceOf link itself resolves via
+// the on-demand linkReader, and a chain terminal that is a business vertex
+// (rather than a DDL meta-vertex) resolves its class via the resolver's
+// classReader — a plain, non-decrypting class-only read (a vertex's class is
+// never encrypted; only its data is). This deliberately does NOT reuse the
+// script-facing, decrypt-aware ScriptKVReader/connKVReader for that lookup:
+// doing so would call back into decryptSensitiveDoc for the chain terminal,
+// which — now that this function itself performs the chain walk — could
+// recurse without bound across a mutual instanceOf cycle (each nested call
+// gets its own fresh hop bound, with no depth guard shared across calls). conn
+// nil (a test affordance) leaves every live layer disabled, same as the
+// exact-match-only behavior before this resolver existed.
+//
 // egress selects the disposition for a sensitive doc: false decrypts to
 // plaintext (v nil leaves the ciphertext untouched — the safe default for a
 // pipeline that never wired a Vault, most test harnesses that do not
@@ -123,7 +140,12 @@ func decryptSensitiveDoc(ctx context.Context, conn *substrate.Conn, bucket strin
 	if ddls == nil || doc == nil {
 		return nil
 	}
-	ref, ok := ddls.Lookup(doc.Class)
+	resolver := &ddlResolver{DDLs: ddls}
+	if conn != nil {
+		resolver.linkReader = &connInstanceOfReader{conn: conn, coreBucket: bucket}
+		resolver.classReader = &connVertexClassReader{conn: conn, coreBucket: bucket}
+	}
+	ref, ok := resolver.resolveGoverningDDL(ctx, doc.Class, doc.Key, substrate.ClassifyKey(doc.Key), ScriptResult{}, HydratedState{})
 	if !ok || !ref.Sensitive {
 		return nil
 	}
