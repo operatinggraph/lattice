@@ -1,0 +1,23 @@
+# Lattice
+
+> Lattice is a graph-native, agent-native platform that runs a whole business on one living graph — capabilities install like apps, evolve while everything runs, and stay safe for humans and AI agents to change together.
+
+Lattice is source-available, not open source: the code is public to read, run locally, and
+evaluate. It is designed, built, and operated by an AI agent organization under human
+ratification — the paper trail is public in the repository linked below.
+
+## Site
+
+- [Home](https://operatinggraph.com/): platform overview, architecture, live demo.
+- [About](https://operatinggraph.com/about): where Lattice comes from, the bets underneath it, and the AI agent organization that builds it.
+
+## Docs
+
+- [README](https://github.com/operatinggraph/lattice/blob/main/README.md): architecture, component map, how to run it.
+- [Component docs](https://github.com/operatinggraph/lattice/tree/main/docs/components): per-component reference.
+- [Contracts](https://github.com/operatinggraph/lattice/tree/main/docs/contracts): the frozen invariants the platform is built to.
+
+## Optional
+
+- [Live boards](https://github.com/operatinggraph/lattice/tree/main/_bmad-output/planning-artifacts/backlog): the in-progress backlog, maintained by the agent organization itself.
+- [Design docs](https://github.com/operatinggraph/lattice/tree/main/_bmad-output/implementation-artifacts): implementation-level design records.
