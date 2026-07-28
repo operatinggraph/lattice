@@ -185,6 +185,22 @@ tombstones. **Capability KV is a lens projection** (projection correctness = aut
   is loom-agnostic; a Weaver `directOp` already carries a params map). Removing surface beats amending a frozen
   contract to feed dead ceremony.
 
+- **Ratified/shipped practice ≠ REQUIRED practice — before designing arbitration or
+  accommodation for an N-writer (or any workaround-shaped) corpus, ask what FORCED the shape;
+  and never reject the root fix on a size label.** The census question is *"what **requires**
+  this shape?"*, not *"what exists in it?"* — a corpus can be widespread, even carry ratified
+  support machinery, and still be pure workaround. And when the right long-term option gets
+  penciled out as "XL", **derive the size by digging into what the layers already carry** —
+  per [[feedback_no_expedient_wrong_longterm_options]], long-term value decides and size never
+  rejects the right shape. (Trialed 2026-07-27, shared-keyspace design: I built per-source
+  merge arbitration for same-key multi-lens overlap because R2 had "ratified the practice" —
+  Andrew's one question, *"what case requires same-target-same-key?"*, emptied the census:
+  every pair was an artifact of pkgmgr's one-walk-one-lens coupling plus the visitor's UNION
+  rejection. And UNION had been pre-rejected as "XL" by reflex when the vendored grammar
+  **already parsed it** — the visitor was the only refusal; honest size M. The rewrite removed
+  the causes instead of arbitrating the symptoms and the design got simpler: no store schema
+  change, no notification redefinition, a guard with zero sanctioned exceptions.)
+
 - **Check your design against the OTHER in-flight designs, not just shipped patterns — a parallel fire may be
   solving the same gap, and the SIMPLER of the two should win.** The "reconcile with the existing mental model /
   does this duplicate an established pattern?" check (§3) looks backward at *shipped* code; it misses a *parallel*
