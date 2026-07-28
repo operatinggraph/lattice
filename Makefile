@@ -30,6 +30,13 @@ LOFTSPACE_APP_PG_DSN ?= postgres://loftspace_app:loftspace_app_dev@localhost:543
 # The clinic-app read-boundary DSN (D1.5), same NON-superuser SELECT-only posture
 # as LOFTSPACE_APP_PG_DSN. See provision-clinic-role.
 CLINIC_APP_PG_DSN ?= postgres://clinic_app:clinic_app_dev@localhost:5432/lattice?sslmode=disable
+# The cafe-app read-boundary DSN (cafeIdentitiesRead), same NON-superuser
+# SELECT-only posture as LOFTSPACE_APP_PG_DSN. See provision-cafe-role.
+CAFE_APP_PG_DSN ?= postgres://cafe_app:cafe_app_dev@localhost:5432/lattice?sslmode=disable
+# The wellness-app read-boundary DSN (wellnessIdentitiesRead), same
+# NON-superuser SELECT-only posture as LOFTSPACE_APP_PG_DSN. See
+# provision-wellness-role.
+WELLNESS_APP_PG_DSN ?= postgres://wellness_app:wellness_app_dev@localhost:5432/lattice?sslmode=disable
 # Loupe's lens-contents read seam (loupe-2-ux-design.md §6.4/F9): a NON-superuser,
 # SELECT-only role's DSN — same posture as LOFTSPACE_APP_PG_DSN/CLINIC_APP_PG_DSN/
 # GATEWAY_PG_DSN, deliberately NOT BYPASSRLS. Andrew's ratified M5 decision
@@ -99,7 +106,7 @@ LATTICE_PROCESSOR_AUTH_MODE ?= capability
 # Load .env if it exists (ignored by git).
 -include .env
 
-.PHONY: assert-main-checkout up up-full up-full-capability dev-seed-staff provision-gateway-identity-provisioner test-real-actor-auth test-claim-ceremony up-loftspace orchestration install-packages install-loftspace run-loupe run-gateway run-loftspace-app down verify-kernel verify-package-rbac verify-package-identity verify-package-identity-hygiene verify-package-objects-base verify-package-location-domain verify-package-loftspace-domain verify-package-clinic-domain verify-package-clinic-reminders up-clinic install-clinic refresh-clinic refresh-loftspace provision-loftspace-role provision-clinic-role provision-gateway-role provision-readpath provision-vault-kek reinstall-package verify-package-service-location verify-package-edge-manifest install-edge-manifest install-ai seed-edge-demo seed-classic-demo seed-showcase install-showcase-domains install-maintenance up-facet up-facet-edge run-facet provision-facet-role verify-package-augur verify-conformance build vet lint-conventions lint-board lint-package-version lint-lens-anchors lint-package-standard lint-facet-discovery install-skills test test-rollback test-lease-convergence test-object-gc test-edge-idb-conformance test-crypto-shred test-system-actor-capability test-control-plane-authz test-augur-convergence test-unrouted-convergence test-cli test-hello-lattice test-health-completeness processor run-processor clean logs ps
+.PHONY: assert-main-checkout up up-full up-full-capability dev-seed-staff provision-gateway-identity-provisioner test-real-actor-auth test-claim-ceremony up-loftspace orchestration install-packages install-loftspace run-loupe run-gateway run-loftspace-app down verify-kernel verify-package-rbac verify-package-identity verify-package-identity-hygiene verify-package-objects-base verify-package-location-domain verify-package-loftspace-domain verify-package-clinic-domain verify-package-clinic-reminders up-clinic install-clinic refresh-clinic refresh-loftspace provision-loftspace-role provision-clinic-role provision-cafe-role provision-wellness-role provision-gateway-role provision-readpath provision-vault-kek reinstall-package verify-package-service-location verify-package-edge-manifest install-edge-manifest install-ai seed-edge-demo seed-classic-demo seed-showcase install-showcase-domains install-maintenance up-facet up-facet-edge run-facet provision-facet-role verify-package-augur verify-conformance build vet lint-conventions lint-board lint-package-version lint-lens-anchors lint-package-standard lint-facet-discovery install-skills test test-rollback test-lease-convergence test-object-gc test-edge-idb-conformance test-crypto-shred test-system-actor-capability test-control-plane-authz test-augur-convergence test-unrouted-convergence test-cli test-hello-lattice test-health-completeness processor run-processor clean logs ps
 
 ## assert-main-checkout — Refuse stack lifecycle from anywhere but the main working
 ## tree. docker-compose.yml mounts deploy/nats-server.conf by a RELATIVE path, so a
@@ -285,8 +292,8 @@ reseed-kernel: assert-main-checkout
 
 # Per-vertical launch env for cycle-<vertical> below. Each mirrors the launch in
 # that vertical's own up-<vertical> target, which stays the authority for how the
-# app runs — loftspace and clinic read a non-superuser SELECT-only DSN, café and
-# wellness take none.
+# app runs — all four verticals now read a non-superuser SELECT-only DSN
+# (cafeIdentitiesRead / wellnessIdentitiesRead).
 CYCLE_NKEY_loftspace = $(NKEY_LOFTSPACE_APP)
 CYCLE_ENV_loftspace  = LOFTSPACE_APP_PG_DSN="$(LOFTSPACE_APP_PG_DSN)" LOFTSPACE_APP_DEV_AUTH=1
 CYCLE_PORT_loftspace = 7788
@@ -294,10 +301,10 @@ CYCLE_NKEY_clinic    = $(NKEY_CLINIC_APP)
 CYCLE_ENV_clinic     = CLINIC_APP_PG_DSN="$(CLINIC_APP_PG_DSN)" CLINIC_APP_DEV_AUTH=1
 CYCLE_PORT_clinic    = 7799
 CYCLE_NKEY_cafe      = $(NKEY_CAFE_APP)
-CYCLE_ENV_cafe       = CAFE_APP_DEV_AUTH=1
+CYCLE_ENV_cafe       = CAFE_APP_PG_DSN="$(CAFE_APP_PG_DSN)" CAFE_APP_DEV_AUTH=1
 CYCLE_PORT_cafe      = 7801
 CYCLE_NKEY_wellness  = $(NKEY_WELLNESS_APP)
-CYCLE_ENV_wellness   = WELLNESS_APP_DEV_AUTH=1
+CYCLE_ENV_wellness   = WELLNESS_APP_PG_DSN="$(WELLNESS_APP_PG_DSN)" WELLNESS_APP_DEV_AUTH=1
 CYCLE_PORT_wellness  = 7802
 
 ## cycle-<vertical> — Rebuild bin/<vertical>-app from the current tree and
@@ -869,20 +876,22 @@ up-clinic:
 	@echo "==> Clinic ready. Operator/inspector: http://127.0.0.1:7777 (Loupe) · patient app: http://127.0.0.1:7799"
 
 ## up-cafe — One-command Café vertical: up-full → install-cafe → build + start
-## cafe-app (:7801) in the background alongside Loupe (:7777). No protected
-## Postgres read model exists for café (every lens is plain NATS-KV), so no
-## provision-*-role step is needed, unlike up-loftspace/up-clinic.
-## Logs: cafe-app.log (+ the up-full logs).
+## cafe-app (:7801) in the background alongside Loupe (:7777). Provisions the
+## cafe-app read-boundary role (mirrors up-loftspace/up-clinic's wiring) so
+## the shipped protected read (cafeIdentitiesRead) serves instead of 500ing
+## "not configured". Logs: cafe-app.log (+ the up-full logs).
 up-cafe:
 	@$(MAKE) up-full
+	@$(MAKE) provision-cafe-role
 	@$(MAKE) install-cafe
+	@$(MAKE) provision-readpath
 	@echo "==> Building cafe-app binary..."
 	go build -o bin/cafe-app ./cmd/cafe-app
 	@echo "==> Killing any prior cafe-app process..."
 	-pkill -f "bin/cafe-app" 2>/dev/null || true
 	@echo "==> Starting cafe-app in background (sign-in-first: dev-auth session posture, sign in at /login)..."
 	NATS_URL=$(NATS_URL) NATS_NKEY=$(NKEY_CAFE_APP) BOOTSTRAP_JSON_PATH=$(BOOTSTRAP_JSON) \
-		CAFE_APP_DEV_AUTH=1 \
+		CAFE_APP_PG_DSN="$(CAFE_APP_PG_DSN)" CAFE_APP_DEV_AUTH=1 \
 		./bin/cafe-app >cafe-app.log 2>&1 </dev/null &
 	@sleep 1
 	@echo "==> Café ready. Operator/inspector: http://127.0.0.1:7777 (Loupe) · café app: http://127.0.0.1:7801 (sign in at /login)"
@@ -903,6 +912,40 @@ provision-clinic-role:
 		-c "GRANT USAGE ON SCHEMA public TO clinic_app;" \
 		-c "ALTER DEFAULT PRIVILEGES FOR ROLE lattice IN SCHEMA public GRANT SELECT ON TABLES TO clinic_app;" \
 		-c "GRANT SELECT ON ALL TABLES IN SCHEMA public TO clinic_app;"
+
+## provision-cafe-role — Create the cafe-app's Postgres read role: a
+## NON-superuser, SELECT-only role, mirroring provision-clinic-role. The app
+## MUST NOT read as the `lattice` superuser — superusers (and BYPASSRLS roles)
+## skip RLS entirely, so the protected cafeIdentitiesRead model would leak
+## every actor's row. Idempotent.
+provision-cafe-role:
+	@echo "==> Provisioning cafe-app non-superuser SELECT-only Postgres role..."
+	docker compose exec -T postgres psql -U lattice -d lattice -v ON_ERROR_STOP=1 -c "\
+		DO \$$\$$ BEGIN \
+		  IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname='cafe_app') THEN \
+		    CREATE ROLE cafe_app LOGIN PASSWORD 'cafe_app_dev' NOSUPERUSER NOCREATEDB NOCREATEROLE; \
+		  END IF; \
+		END \$$\$$;" \
+		-c "GRANT USAGE ON SCHEMA public TO cafe_app;" \
+		-c "ALTER DEFAULT PRIVILEGES FOR ROLE lattice IN SCHEMA public GRANT SELECT ON TABLES TO cafe_app;" \
+		-c "GRANT SELECT ON ALL TABLES IN SCHEMA public TO cafe_app;"
+
+## provision-wellness-role — Create the wellness-app's Postgres read role: a
+## NON-superuser, SELECT-only role, mirroring provision-clinic-role. The app
+## MUST NOT read as the `lattice` superuser — superusers (and BYPASSRLS roles)
+## skip RLS entirely, so the protected wellnessIdentitiesRead model would leak
+## every actor's row. Idempotent.
+provision-wellness-role:
+	@echo "==> Provisioning wellness-app non-superuser SELECT-only Postgres role..."
+	docker compose exec -T postgres psql -U lattice -d lattice -v ON_ERROR_STOP=1 -c "\
+		DO \$$\$$ BEGIN \
+		  IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname='wellness_app') THEN \
+		    CREATE ROLE wellness_app LOGIN PASSWORD 'wellness_app_dev' NOSUPERUSER NOCREATEDB NOCREATEROLE; \
+		  END IF; \
+		END \$$\$$;" \
+		-c "GRANT USAGE ON SCHEMA public TO wellness_app;" \
+		-c "ALTER DEFAULT PRIVILEGES FOR ROLE lattice IN SCHEMA public GRANT SELECT ON TABLES TO wellness_app;" \
+		-c "GRANT SELECT ON ALL TABLES IN SCHEMA public TO wellness_app;"
 
 ## provision-gateway-role — Provision the Gateway's non-superuser SELECT-only
 ## Postgres role for the read-path front (Fire 3), same posture as
@@ -1121,19 +1164,22 @@ install-maintenance:
 
 ## up-wellness — One-command Wellness vertical: up-full → install-wellness →
 ## build + start wellness-app (:7802) in the background alongside Loupe
-## (:7777). Sign in at /login. No protected Postgres read model exists for
-## wellness (every lens is plain NATS-KV), so no provision-*-role step is needed, unlike
-## up-loftspace/up-clinic. Logs: wellness-app.log (+ the up-full logs).
+## (:7777). Sign in at /login. Provisions the wellness-app read-boundary role
+## (mirrors up-loftspace/up-clinic's wiring) so the shipped protected read
+## (wellnessIdentitiesRead) serves instead of 500ing "not configured".
+## Logs: wellness-app.log (+ the up-full logs).
 up-wellness:
 	@$(MAKE) up-full
+	@$(MAKE) provision-wellness-role
 	@$(MAKE) install-wellness
+	@$(MAKE) provision-readpath
 	@echo "==> Building wellness-app binary..."
 	go build -o bin/wellness-app ./cmd/wellness-app
 	@echo "==> Killing any prior wellness-app process..."
 	-pkill -f "bin/wellness-app" 2>/dev/null || true
 	@echo "==> Starting wellness-app in background (sign-in-first: dev-auth session posture, sign in at /login)..."
 	NATS_URL=$(NATS_URL) NATS_NKEY=$(NKEY_WELLNESS_APP) BOOTSTRAP_JSON_PATH=$(BOOTSTRAP_JSON) \
-		WELLNESS_APP_DEV_AUTH=1 \
+		WELLNESS_APP_PG_DSN="$(WELLNESS_APP_PG_DSN)" WELLNESS_APP_DEV_AUTH=1 \
 		./bin/wellness-app >wellness-app.log 2>&1 </dev/null &
 	@sleep 1
 	@echo "==> Wellness ready. Operator/inspector: http://127.0.0.1:7777 (Loupe) · wellness app: http://127.0.0.1:7802 (sign in at /login)"
@@ -1393,12 +1439,14 @@ refresh-cafe:
 	NATS_URL=$(NATS_URL) NATS_NKEY=$(NKEY_LATTICE_PKG) BOOTSTRAP_JSON_PATH=$(BOOTSTRAP_JSON) ./bin/lattice-pkg install --force packages/lease-signing
 	NATS_URL=$(NATS_URL) NATS_NKEY=$(NKEY_LATTICE_PKG) BOOTSTRAP_JSON_PATH=$(BOOTSTRAP_JSON) ./bin/lattice-pkg install --force packages/cafe-ledger
 	NATS_URL=$(NATS_URL) NATS_NKEY=$(NKEY_LATTICE_PKG) BOOTSTRAP_JSON_PATH=$(BOOTSTRAP_JSON) ./bin/lattice-pkg install --force packages/cafe-domain
+	@$(MAKE) provision-cafe-role
+	@$(MAKE) provision-readpath
 	@echo "==> Rebuilding cafe-app binary..."
 	go build -o bin/cafe-app ./cmd/cafe-app
 	@echo "==> Restarting cafe-app..."
 	-pkill -f "bin/cafe-app" 2>/dev/null || true
 	NATS_URL=$(NATS_URL) NATS_NKEY=$(NKEY_CAFE_APP) BOOTSTRAP_JSON_PATH=$(BOOTSTRAP_JSON) \
-		CAFE_APP_DEV_AUTH=1 \
+		CAFE_APP_PG_DSN="$(CAFE_APP_PG_DSN)" CAFE_APP_DEV_AUTH=1 \
 		./bin/cafe-app >cafe-app.log 2>&1 </dev/null &
 	@sleep 1
 	@echo "==> Café refreshed (packages diff-applied + cafe-app restarted). Café app: http://127.0.0.1:7801"
@@ -1420,12 +1468,14 @@ refresh-wellness:
 	NATS_URL=$(NATS_URL) NATS_NKEY=$(NKEY_LATTICE_PKG) BOOTSTRAP_JSON_PATH=$(BOOTSTRAP_JSON) ./bin/lattice-pkg install --force packages/identity-domain
 	NATS_URL=$(NATS_URL) NATS_NKEY=$(NKEY_LATTICE_PKG) BOOTSTRAP_JSON_PATH=$(BOOTSTRAP_JSON) ./bin/lattice-pkg install --force packages/lease-signing
 	NATS_URL=$(NATS_URL) NATS_NKEY=$(NKEY_LATTICE_PKG) BOOTSTRAP_JSON_PATH=$(BOOTSTRAP_JSON) ./bin/lattice-pkg install --force packages/wellness-domain
+	@$(MAKE) provision-wellness-role
+	@$(MAKE) provision-readpath
 	@echo "==> Rebuilding wellness-app binary..."
 	go build -o bin/wellness-app ./cmd/wellness-app
 	@echo "==> Restarting wellness-app..."
 	-pkill -f "bin/wellness-app" 2>/dev/null || true
 	NATS_URL=$(NATS_URL) NATS_NKEY=$(NKEY_WELLNESS_APP) BOOTSTRAP_JSON_PATH=$(BOOTSTRAP_JSON) \
-		WELLNESS_APP_DEV_AUTH=1 \
+		WELLNESS_APP_PG_DSN="$(WELLNESS_APP_PG_DSN)" WELLNESS_APP_DEV_AUTH=1 \
 		./bin/wellness-app >wellness-app.log 2>&1 </dev/null &
 	@sleep 1
 	@echo "==> Wellness refreshed (packages diff-applied + wellness-app restarted). Wellness app: http://127.0.0.1:7802 (sign in at /login)"
