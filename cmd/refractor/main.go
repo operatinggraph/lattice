@@ -199,12 +199,15 @@ func main() {
 	// The KeyShredded nullification listener (vault-crypto-shredding-design.md
 	// §2.4, Fire 4a) — the Refractor half of crypto-shredding's async
 	// finalization; internal/privacyworker (in cmd/processor) is the other,
-	// independent consumer of the same event. Targets is empty until a
-	// vertical's Phase-A lens opts in (see internal/refractor/keyshredded's
-	// package doc) — an empty list is a harmless no-op consumer that still
-	// exercises the event and the counters. The privacy service actor (Fire 4b
-	// finalization recording) is graph-discovered — absent on a pre-v15
-	// kernel, which disables recording without disabling nullification.
+	// independent consumer of the same event. The bootstrap capabilityRead
+	// base lens is a perEntry target (cap-read-per-anchor-grant-keys-design.md
+	// §6): a shredded identity's own per-anchor grant children
+	// (cap-read.identity.<id>.<anchorId>) must be enumerated and nullified,
+	// not just their retired legacy parent document (which the base-lens
+	// flip's own per-actor evaluation already tombstones, paired separately).
+	// The privacy service actor (Fire 4b finalization recording) is
+	// graph-discovered — absent on a pre-v15 kernel, which disables recording
+	// without disabling nullification.
 	privacyCtx, privacyCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	privacyActorKey, paErr := bootstrap.PrivacyActorKey(privacyCtx, conn)
 	privacyCancel()
@@ -218,6 +221,9 @@ func main() {
 		Control:      controlSvc,
 		Logger:       logger,
 		ActorKey:     privacyActorKey,
+		Targets: []keyshredded.NullifyTarget{
+			{RuleID: bootstrap.CapabilityReadLensID, PerEntry: true},
+		},
 	})
 	// The Vault backend for Secure-Lens decrypt-at-projection (Contract #3
 	// §3.10; vault-crypto-shredding-design.md §2.3 Phase B). Optional: a

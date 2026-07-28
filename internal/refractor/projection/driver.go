@@ -169,9 +169,8 @@ func (d OutputDescriptor) EnvelopeFn(lensDefKey string, revisionOf func(string) 
 //
 // InstallActorAggregate calls this for any descriptor with entryKeyColumn
 // set, alongside the full §4.2 retraction transport, §4.3's retry-path
-// routing, and §4.4's sweep deltas — no lens sets the field yet, so the
-// combination is provably dead in production until the bootstrap
-// capabilityRead base-lens migration (§6) flips one live.
+// routing, and §4.4's sweep deltas — the bootstrap capabilityRead base lens
+// (§6) is the first live one.
 func (d OutputDescriptor) EntryEnvelopeFn() pipeline.MultiEnvelopeFn {
 	if d.EntryKeyColumn == "" || len(d.BodyColumns) != 1 {
 		// ParseOutputDescriptor already refuses this shape (§3.3), so a

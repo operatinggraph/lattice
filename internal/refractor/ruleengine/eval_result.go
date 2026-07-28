@@ -22,4 +22,16 @@ type EvalResult struct {
 	// adapter uses to reject a lower-seq replay. Zero means unguarded/unknown
 	// (no triggering stream message, e.g. the adjacency-watch path).
 	ProjectionSeq uint64
+	// FailClosed marks a result whose write must never be silently skipped
+	// while its batch siblings still land (cap-read-per-anchor-grant-keys-
+	// design.md §4.2's deny-closed ordering — a retraction tombstone that is
+	// supposed to land before a sibling upsert, e.g. a perEntry lens's dropped-
+	// anchor/legacy-parent-document tombstones). The pipeline write loop
+	// aborts the whole batch (full redelivery) on ANY failure of a
+	// FailClosed result, regardless of failure.Category — a category that
+	// would otherwise let the loop continue (CatTerminal's DLQ-and-continue,
+	// CatTransient's per-actor-retry-and-continue) would let a still-live
+	// stale grant this write meant to retire survive alongside a sibling's
+	// successful fresh write in the very same pass.
+	FailClosed bool
 }

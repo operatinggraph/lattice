@@ -320,6 +320,192 @@ func TestExecuteFullForActor_MultiEnvelopeFn_Retraction_AlreadyTombstonedSkipped
 	require.Equal(t, "child.a1", results[0].Keys["key"])
 }
 
+// TestExecuteFullForActor_MultiEnvelopeFn_Retraction_LegacyParentTombstoned pins
+// the §6 migration transport: an actor's first evaluation under a perEntry
+// lens must guard-tombstone a still-live legacy parent document (the exact
+// actorDeleteKey, no child suffix) in the same batch, ordered ahead of every
+// fresh upsert — this is what keeps capabilityread.IsReadable's dual-read
+// window from serving a stale legacy grant past this evaluation.
+func TestExecuteFullForActor_MultiEnvelopeFn_Retraction_LegacyParentTombstoned(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping NATS-backed test in short mode")
+	}
+	coreKV, adjKV, _ := newCollisionKVs(t)
+	ctx := context.Background()
+
+	const identityID = "Tcc3JdentityKkkkkkkk"
+	identityKey := "vtx.identity." + identityID
+	writeCollisionVertex(t, coreKV, identityKey, "identity", map[string]any{})
+
+	adpt := newMultiEntryTargetAdapter(t)
+	require.NoError(t, adpt.Upsert(ctx, map[string]any{"key": "child"}, map[string]any{"key": "child", "readableAnchors": []any{}}, 1))
+
+	eng, cr := singleRowEngine(t)
+	entryFn := func(row, keys, params map[string]any) ([]Envelope, error) {
+		return fanOutEntryFn(map[string]any{"ids": []any{"a1"}}, keys, params)
+	}
+
+	p := &Pipeline{
+		ruleID:          "rule-multi-retract-legacy-parent",
+		coreKV:          coreKV,
+		adjKV:           adjKV,
+		adpt:            adpt,
+		actorDeleteKey:  func(string) string { return "child" },
+		engineKind:      ruleengine.EngineFull,
+		fullEngine:      eng,
+		fullCR:          cr,
+		multiEnvelopeFn: entryFn,
+	}
+
+	nodeProps := map[string]any{"lastModifiedAt": "2026-05-15T10:00:00Z"}
+	results, err := p.executeFullForActor(ctx, identityKey, nodeProps)
+	require.NoError(t, err)
+	require.Len(t, results, 2)
+	require.True(t, results[0].Delete, "the legacy parent doc's tombstone must be ordered ahead of the fresh upsert")
+	require.Equal(t, "child", results[0].Keys["key"])
+	require.False(t, results[1].Delete)
+	require.Equal(t, "child.a1", results[1].Keys["key"])
+}
+
+// failOnDeleteKeyAdapter wraps a real guarded multi-entry target adapter,
+// failing every Delete call for one specific key while delegating every
+// other call (including Delete for any other key, and every Upsert) to the
+// embedded adapter. Embeds the CONCRETE *adapter.NatsKVAdapter (not the
+// adapter.Adapter interface) so GetRow/ListKeysPrefix promote automatically —
+// multiEntryRetractions needs both.
+type failOnDeleteKeyAdapter struct {
+	*adapter.NatsKVAdapter
+	failKey string
+}
+
+func (a *failOnDeleteKeyAdapter) Delete(ctx context.Context, keys map[string]any, seq uint64) error {
+	if k, _ := keys["key"].(string); k == a.failKey {
+		return errors.New("injected: transient delete failure for " + k)
+	}
+	return a.NatsKVAdapter.Delete(ctx, keys, seq)
+}
+
+// TestWriteResults_FailClosedTombstoneFails_AbortsBatch_FreshUpsertNeverLands
+// is the regression pin for the race an adversarial review surfaced: a
+// transient failure on exactly a FailClosed tombstone write (here, the §6
+// legacy-parent-document tombstone) must abort the WHOLE batch rather than
+// let writeResults continue on to write the sibling fresh per-anchor upsert
+// that follows it in the same result list. Before the FailClosed fix,
+// CatTransient's per-actor-continue path let the loop proceed past the
+// failing tombstone: the legacy parent stayed live (still granting a
+// meanwhile-revoked anchor) while the fresh entry for a DIFFERENT, still-
+// granted anchor landed successfully — exactly the fail-OPEN shape this
+// design exists to close, reopened one batch at a time. This proves the
+// fresh upsert never lands when the tombstone ahead of it fails.
+func TestWriteResults_FailClosedTombstoneFails_AbortsBatch_FreshUpsertNeverLands(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping NATS-backed test in short mode")
+	}
+	ctx := context.Background()
+	real := newMultiEntryTargetAdapter(t)
+	require.NoError(t, real.Upsert(ctx, map[string]any{"key": "child"}, map[string]any{"key": "child", "readableAnchors": []any{}}, 1))
+	failing := &failOnDeleteKeyAdapter{NatsKVAdapter: real, failKey: "child"}
+
+	p := &Pipeline{ruleID: "rule-failclosed-abort", adpt: failing}
+
+	results := []ruleengine.EvalResult{
+		{Delete: true, Keys: map[string]any{"key": "child"}, FailClosed: true},
+		{Keys: map[string]any{"key": "child.a1"}, Row: map[string]any{"key": "child.a1", "id": "a1"}},
+	}
+	msg := substrate.Message{Sequence: 42}
+	decision, err := p.writeResults(ctx, msg, "vtx.identity.x", results, nil)
+	require.Error(t, err, "the FailClosed tombstone's failure must surface, not be swallowed")
+	require.Equal(t, substrate.Nak, decision, "a FailClosed write failure must Nak the whole message for full redelivery")
+
+	reader := failing.NatsKVAdapter
+	_, liveParent, err := reader.GetRow(ctx, map[string]any{"key": "child"})
+	require.NoError(t, err)
+	require.True(t, liveParent, "the legacy parent must still be live — its own tombstone write failed")
+	_, liveFresh, err := reader.GetRow(ctx, map[string]any{"key": "child.a1"})
+	require.NoError(t, err)
+	require.False(t, liveFresh, "the fresh upsert that followed the failing tombstone in the batch must never have been written")
+}
+
+// TestExecuteFullForActor_MultiEnvelopeFn_Retraction_AlreadyTombstonedLegacyParentSkipped
+// pins that an already soft-deleted legacy parent document is never rewritten
+// — mirroring the child-key tombstone-skip semantics at the parent level.
+func TestExecuteFullForActor_MultiEnvelopeFn_Retraction_AlreadyTombstonedLegacyParentSkipped(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping NATS-backed test in short mode")
+	}
+	coreKV, adjKV, _ := newCollisionKVs(t)
+	ctx := context.Background()
+
+	const identityID = "Tcc3JdentityLllllll1"
+	identityKey := "vtx.identity." + identityID
+	writeCollisionVertex(t, coreKV, identityKey, "identity", map[string]any{})
+
+	adpt := newMultiEntryTargetAdapter(t)
+	require.NoError(t, adpt.Upsert(ctx, map[string]any{"key": "child"}, map[string]any{"key": "child", "readableAnchors": []any{}}, 1))
+	require.NoError(t, adpt.Delete(ctx, map[string]any{"key": "child"}, 5))
+
+	eng, cr := singleRowEngine(t)
+	entryFn := func(row, keys, params map[string]any) ([]Envelope, error) {
+		return fanOutEntryFn(map[string]any{"ids": []any{"a1"}}, keys, params)
+	}
+
+	p := &Pipeline{
+		ruleID:          "rule-multi-retract-legacy-parent-skip",
+		coreKV:          coreKV,
+		adjKV:           adjKV,
+		adpt:            adpt,
+		actorDeleteKey:  func(string) string { return "child" },
+		engineKind:      ruleengine.EngineFull,
+		fullEngine:      eng,
+		fullCR:          cr,
+		multiEnvelopeFn: entryFn,
+	}
+
+	nodeProps := map[string]any{"lastModifiedAt": "2026-05-15T10:00:00Z"}
+	results, err := p.executeFullForActor(ctx, identityKey, nodeProps)
+	require.NoError(t, err)
+	require.Len(t, results, 1, "an already-tombstoned legacy parent must not be rewritten")
+	require.False(t, results[0].Delete)
+	require.Equal(t, "child.a1", results[0].Keys["key"])
+}
+
+// TestExecuteFullForActor_MultiEnvelopeFn_ActorDisappearance_TombstonesLegacyParentToo
+// pins that the actor-disappearance path (fresh=nil) also retires a still-live
+// legacy parent document alongside every live child key — an actor gone
+// before it ever converged to per-anchor keys must not leave its old
+// aggregate grant document behind.
+func TestExecuteFullForActor_MultiEnvelopeFn_ActorDisappearance_TombstonesLegacyParentToo(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping NATS-backed test in short mode")
+	}
+	_, adjKV, _ := newCollisionKVs(t)
+	ctx := context.Background()
+
+	adpt := newMultiEntryTargetAdapter(t)
+	require.NoError(t, adpt.Upsert(ctx, map[string]any{"key": "child"}, map[string]any{"key": "child", "readableAnchors": []any{}}, 1))
+	require.NoError(t, adpt.Upsert(ctx, map[string]any{"key": "child.a1"}, map[string]any{"key": "child.a1", "id": "a1"}, 1))
+
+	p := &Pipeline{
+		ruleID:          "rule-multi-retract-disappearance",
+		adjKV:           adjKV,
+		adpt:            adpt,
+		actorDeleteKey:  func(string) string { return "child" },
+		multiEnvelopeFn: fanOutEntryFn,
+	}
+
+	results, err := p.multiEntryRetractions(ctx, "vtx.identity.gone", nil)
+	require.NoError(t, err)
+	require.Len(t, results, 2)
+	keys := map[string]bool{}
+	for _, r := range results {
+		require.True(t, r.Delete)
+		k, _ := r.Keys["key"].(string)
+		keys[k] = true
+	}
+	require.True(t, keys["child"], "legacy parent doc must be tombstoned")
+	require.True(t, keys["child.a1"], "live child key must be tombstoned")
+}
+
 // TestExecuteFullForActor_MultiEnvelopeFn_Retraction_MalformedFreshKey_FailsClosed
 // pins that a fresh entry carrying no usable "key" field fails the whole
 // actor evaluation rather than silently vanishing from the fresh set — the

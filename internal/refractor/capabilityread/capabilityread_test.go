@@ -52,6 +52,116 @@ func putReadDoc(t *testing.T, kv *substrate.KV, key string, isDeleted bool, anch
 	require.NoError(t, err)
 }
 
+func putPerAnchorEntry(t *testing.T, kv *substrate.KV, key string, isDeleted bool) {
+	t.Helper()
+	body := struct {
+		IsDeleted bool `json:"isDeleted"`
+	}{IsDeleted: isDeleted}
+	raw, err := json.Marshal(body)
+	require.NoError(t, err)
+	_, err = kv.Put(context.Background(), key, raw)
+	require.NoError(t, err)
+}
+
+func TestIsReadable_PerAnchorBaseKey_Grants(t *testing.T) {
+	kv := newTestKV(t)
+	putPerAnchorEntry(t, kv, "cap-read.identity.A1.unitNano1", false)
+
+	readable, err := capabilityread.IsReadable(context.Background(), kv, "identity", "A1", "unitNano1")
+	require.NoError(t, err)
+	require.True(t, readable, "a live per-anchor base key must grant")
+
+	readable, err = capabilityread.IsReadable(context.Background(), kv, "identity", "A1", "unitNano2")
+	require.NoError(t, err)
+	require.False(t, readable, "an anchor with no per-anchor key must deny")
+}
+
+func TestIsReadable_PerAnchorDomainKey_Grants(t *testing.T) {
+	kv := newTestKV(t)
+	putPerAnchorEntry(t, kv, "cap-read.residence.identity.A1.leaseNano1", false)
+
+	readable, err := capabilityread.IsReadable(context.Background(), kv, "identity", "A1", "leaseNano1")
+	require.NoError(t, err)
+	require.True(t, readable, "a live per-anchor domain key must grant on its own")
+}
+
+// TestIsReadable_PerAnchorKey_TombstonedDenies pins that a soft-tombstoned
+// per-anchor key reads as absent, the same posture the legacy aggregate
+// document's isDeleted flag takes — a departed producer or genuine
+// revocation must never be misread as a live grant.
+func TestIsReadable_PerAnchorKey_TombstonedDenies(t *testing.T) {
+	kv := newTestKV(t)
+	putPerAnchorEntry(t, kv, "cap-read.identity.A1.unitNano1", true)
+
+	readable, err := capabilityread.IsReadable(context.Background(), kv, "identity", "A1", "unitNano1")
+	require.NoError(t, err)
+	require.False(t, readable, "a soft-tombstoned per-anchor key must be treated as absent")
+}
+
+// TestIsReadable_MigrationCoexistence_UnionsBothShapes pins the §6 dual-read
+// migration window: one domain already flipped to per-anchor keys, a sibling
+// domain still on the legacy aggregate-document shape, for the SAME actor.
+// Both must independently grant — the reader never requires every producer
+// to be on the same shape before it can serve either.
+func TestIsReadable_MigrationCoexistence_UnionsBothShapes(t *testing.T) {
+	kv := newTestKV(t)
+	putPerAnchorEntry(t, kv, "cap-read.residence.identity.A1.unitNano1", false)
+	putReadDoc(t, kv, "cap-read.clinic.identity.A1", false, [2]string{"patient", "patientNano1"})
+
+	readable, err := capabilityread.IsReadable(context.Background(), kv, "identity", "A1", "unitNano1")
+	require.NoError(t, err)
+	require.True(t, readable, "the flipped domain's per-anchor key must grant")
+
+	readable, err = capabilityread.IsReadable(context.Background(), kv, "identity", "A1", "patientNano1")
+	require.NoError(t, err)
+	require.True(t, readable, "the not-yet-flipped domain's legacy document must still grant")
+}
+
+// TestIsReadable_MigrationCoexistence_LegacyParentTombstonedRevocationWins
+// pins the write-path invariant §4.2/§6 guarantees (proven at the pipeline
+// level by TestExecuteFullForActor_MultiEnvelopeFn_Retraction_LegacyParentTombstoned):
+// the same evaluation that writes an actor's fresh per-anchor keys also
+// guard-tombstones its legacy parent document, so once a domain's legacy doc
+// is tombstoned, an anchor that dropped out of the fresh set (absent per-
+// anchor key) can never be resurrected by a stale legacy read — revocation
+// wins, it does not fall back to whatever the retired document used to say.
+func TestIsReadable_MigrationCoexistence_LegacyParentTombstonedRevocationWins(t *testing.T) {
+	kv := newTestKV(t)
+	// The legacy document is tombstoned (the post-flip evaluation retired it)
+	// even though it still carries the now-revoked anchor in its stale body —
+	// §6.8's retained-watermark convention, mirroring
+	// TestIsReadable_TombstonedSlice_DeniesAsAbsent.
+	putReadDoc(t, kv, "cap-read.residence.identity.A1", true, [2]string{"unit", "unitNano1"})
+	// No per-anchor key exists for unitNano1 — it was not in the fresh set.
+
+	readable, err := capabilityread.IsReadable(context.Background(), kv, "identity", "A1", "unitNano1")
+	require.NoError(t, err)
+	require.False(t, readable, "a revoked anchor must not be resurrected by its retired legacy document")
+}
+
+func TestIsReadable_RejectsSubjectMetacharactersInAnchorID(t *testing.T) {
+	kv := newTestKV(t)
+	for _, bad := range []string{"a.b", "a*b", "a>b"} {
+		_, err := capabilityread.IsReadable(context.Background(), kv, "identity", "A1", bad)
+		require.Error(t, err, "anchorID %q containing a NATS subject metacharacter must be rejected", bad)
+	}
+}
+
+// TestIsReadable_WildcardAnchorEntry_NeverAdmitsAConcreteRequest pins §8.1's
+// wildcard-anchor non-admission: a stored anchor entry literally equal to "*"
+// (the Postgres-only WildcardAnchor escape hatch has no NATS-KV projection,
+// but a hand-seeded or buggy producer could still write one) must never be
+// treated as matching every concrete anchor — admission is always exact
+// string equality, never wildcard semantics.
+func TestIsReadable_WildcardAnchorEntry_NeverAdmitsAConcreteRequest(t *testing.T) {
+	kv := newTestKV(t)
+	putReadDoc(t, kv, "cap-read.identity.A1", false, [2]string{"identity", "*"})
+
+	readable, err := capabilityread.IsReadable(context.Background(), kv, "identity", "A1", "unitNano1")
+	require.NoError(t, err)
+	require.False(t, readable, "a stored literal \"*\" anchor entry must not admit a concrete, unrelated anchorID request")
+}
+
 func TestIsReadable_NoEntry_DeniesFailClosed(t *testing.T) {
 	kv := newTestKV(t)
 	readable, err := capabilityread.IsReadable(context.Background(), kv, "identity", "A1", "unitNano1")
@@ -157,18 +267,19 @@ func TestIsReadable_MalformedJSON_PropagatesError(t *testing.T) {
 	require.Contains(t, err.Error(), "cap-read.identity.A1")
 }
 
-// TestIsReadable_ListKeysFailure_PropagatesError pins the fail-closed *error*
-// arm on the domain-slice discovery list: a KV-list failure (here, an
-// already-canceled context — ListKeysFilter checks ctx.Err() after
-// enumerating, substrate/kv.go:282) must surface as an error, not the silent
-// "no domain slices" a swallowed error would produce.
-func TestIsReadable_ListKeysFailure_PropagatesError(t *testing.T) {
+// TestIsReadable_KVFailure_PropagatesError pins the fail-closed *error* arm:
+// a KV op failure (here, an already-canceled context, which every Get/
+// ListKeysFilter call surfaces via ctx.Err()) must surface as an error, not
+// the silent "not found" a swallowed error would produce — whichever of the
+// four union sources (per-anchor base/domain, legacy base/domain) IsReadable
+// checks first.
+func TestIsReadable_KVFailure_PropagatesError(t *testing.T) {
 	kv := newTestKV(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
 	readable, err := capabilityread.IsReadable(ctx, kv, "identity", "A1", "unitNano1")
-	require.Error(t, err, "a list-keys failure must error, not silently deny as if no domain slices existed")
+	require.Error(t, err, "a KV failure must error, not silently deny as if absent")
 	require.False(t, readable)
-	require.Contains(t, err.Error(), "list domain slices")
+	require.Contains(t, err.Error(), "capabilityread:")
 }

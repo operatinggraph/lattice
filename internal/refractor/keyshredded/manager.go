@@ -26,9 +26,10 @@
 // plain lenses whose rows should be DELETED outright on a shred. A plain lens
 // only ever projects a sensitive aspect as its ciphertext envelope (general
 // lenses never decrypt), so an un-listed plain lens holds garbage ciphertext
-// after a shred — hygiene, not a plaintext leak. No lens opts in today, so
-// empty Targets makes this a harmless no-op consumer that still exercises the
-// event, the counters, and the failure-tier path.
+// after a shred — hygiene, not a plaintext leak. The bootstrap capabilityRead
+// base lens is the first opt-in (a perEntry target, cmd/refractor/main.go);
+// an empty Targets list elsewhere still makes this a harmless no-op consumer
+// that exercises the event, the counters, and the failure-tier path.
 //
 // On a nullification failure this raises the privacy-critical failure tier
 // (failure.PrivacyCritical): the affected lens is paused via the control

@@ -330,6 +330,24 @@ func (p *Pipeline) executeFullForActor(ctx context.Context, actorKey string, nod
 // derivation actorDeleteKeyFor uses for a whole-actor tombstone) — never a
 // bucket-wide listing, so a sibling lens sharing the target never sees its
 // keys named here.
+//
+// It also carries the §6 migration transport: an actor's first evaluation
+// under a perEntry lens may still find a live pre-flip legacy parent document
+// at the exact parent key (no child suffix) — that document is guard-
+// tombstoned in the same batch, tombstones-first, so the dual-read window
+// (capabilityread.IsReadable) never serves it past this evaluation. This is
+// unconditional (not gated on the child listing being non-empty): the very
+// first post-flip evaluation of an actor has no children yet either.
+//
+// Every tombstone this function returns carries ruleengine.EvalResult's
+// FailClosed — writeResults aborts the whole batch (full redelivery) if a
+// tombstone write fails, rather than continuing to write the fresh entries
+// that follow it in the same list. Without that, a transient failure on
+// exactly the tombstone write (while sibling fresh upserts still succeed)
+// would leave a revoked anchor's stale grant (legacy parent doc or a dropped
+// child key) live alongside the correctly-updated rest of the set — the
+// exact fail-OPEN shape this design exists to close, reopened one batch at a
+// time.
 func (p *Pipeline) multiEntryRetractions(ctx context.Context, actorKey string, fresh []ruleengine.EvalResult) ([]ruleengine.EvalResult, error) {
 	adpt := p.currentAdapter()
 	lister, ok := adpt.(adapter.PrefixKeyLister)
@@ -341,13 +359,24 @@ func (p *Pipeline) multiEntryRetractions(ctx context.Context, actorKey string, f
 		return nil, fmt.Errorf("pipeline: multi-entry retraction: adapter %T cannot read back a row — tombstone-skip cannot be decided", adpt)
 	}
 
-	childPrefix := p.actorDeleteKeyFor(actorKey) + "."
+	parentKey := p.actorDeleteKeyFor(actorKey)
+	var tombstones []ruleengine.EvalResult
+	if _, live, err := reader.GetRow(ctx, map[string]any{"key": parentKey}); err != nil {
+		return nil, fmt.Errorf("pipeline: multi-entry retraction: get legacy parent %q: %w", parentKey, err)
+	} else if live {
+		tombstones = append(tombstones, ruleengine.EvalResult{Delete: true, Keys: map[string]any{"key": parentKey}, FailClosed: true})
+	}
+
+	childPrefix := parentKey + "."
 	existing, err := lister.ListKeysPrefix(ctx, childPrefix)
 	if err != nil {
 		return nil, fmt.Errorf("pipeline: multi-entry retraction: list %q: %w", childPrefix, err)
 	}
 	if len(existing) == 0 {
-		return fresh, nil
+		if len(tombstones) == 0 {
+			return fresh, nil
+		}
+		return append(tombstones, fresh...), nil
 	}
 
 	freshKeys := make(map[string]struct{}, len(fresh))
@@ -368,7 +397,6 @@ func (p *Pipeline) multiEntryRetractions(ctx context.Context, actorKey string, f
 		freshKeys[k] = struct{}{}
 	}
 
-	var tombstones []ruleengine.EvalResult
 	for _, keys := range existing {
 		k, ok := keys["key"].(string)
 		if !ok {
@@ -384,7 +412,7 @@ func (p *Pipeline) multiEntryRetractions(ctx context.Context, actorKey string, f
 		if !live {
 			continue
 		}
-		tombstones = append(tombstones, ruleengine.EvalResult{Delete: true, Keys: keys})
+		tombstones = append(tombstones, ruleengine.EvalResult{Delete: true, Keys: keys, FailClosed: true})
 	}
 	if len(tombstones) == 0 {
 		return fresh, nil
@@ -605,19 +633,18 @@ func (p *Pipeline) reprojectActors(ctx context.Context, actorKeys []string) ([]r
 			}
 			// Actor missing → retract its projection so the Capability KV
 			// reflects the disappearance. This case can occur if the actor
-			// was tombstoned but its adjacency hasn't been pruned yet. A
-			// perEntry lens has no single parent key to delete — reuse
+			// was tombstoned but its adjacency hasn't been pruned yet. Reuse
 			// multiEntryRetractions with an empty fresh set so every live
-			// child under the actor's prefix is tombstoned
-			// (cap-read-per-anchor-grant-keys-design.md §4.2). Reproject's
+			// child under the actor's prefix is tombstoned, along with a
+			// still-live legacy parent document if one exists
+			// (cap-read-per-anchor-grant-keys-design.md §4.2/§6). Reproject's
 			// own gate accepts a perEntry lens too (§4.3, widened to
 			// `p.envelopeFn == nil && p.multiEnvelopeFn == nil`), so this
 			// branch is reachable via the retry path's actor-reproject
 			// (enqueueActorReprojectRetry) and the sweep's deep-verify alike:
 			// `InstallActorAggregate` wires a real `entryKeyColumn` lens's
-			// `SetMultiEnvelopeFn` at registration. No lens sets the field
-			// yet (§6, the bootstrap `capabilityRead` base-lens migration, is
-			// still unbuilt), so this stays dead in production until then.
+			// `SetMultiEnvelopeFn` at registration — the bootstrap
+			// `capabilityRead` base lens is the first live one.
 			if p.multiEnvelopeFn != nil {
 				tombstones, rerr := p.multiEntryRetractions(ctx, actorKey, nil)
 				if rerr != nil {

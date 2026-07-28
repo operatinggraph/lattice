@@ -358,11 +358,80 @@ Gates green: `go build ./...`, full `internal/refractor/...` suite (incl. `-race
 stroke, a Refractor restart to re-derive activation, and the legacy-parent-document tombstone
 (§4.2/§6 dual-read) that pairs with the flip. This is the fire that finally makes the mechanism live —
 review it at the security-plane depth §4's adversarial passes used, not a routine M/S pass.
+
+**CHECKPOINT (Fire 1, increment 9 — 2026-07-28, worktree `.claude/worktrees/cap-read-fire1-inc9`,
+branch `fire/cap-read-fire1-inc9`):** built §6, the base-lens flip — the mechanism is now live in
+source. **Corrected a wrong mechanism claim before building against it** (grounding-first, per the
+increment-8 checkpoint's own deferral): the base `capabilityRead` lens vertex is `protected: true`, and
+`UpdateMetaVertex`'s Starlark DDL refuses a protected vertex outright — the `UpdateMetaVertex`
+migration this design named in §6 would have been rejected by the Processor, not accepted. §6 above is
+rewritten around the mechanism that actually lands a protected kernel definition edit —
+`bootstrap.Seeder.ReconcilePrimordial` (`make reseed-kernel`) + `cycle-processor` + a Refractor
+restart — the same path Story 12.4's prior actor-aggregate-lens migration used.
+
+Four pieces, all in this increment: **(1)** `bootstrap.OutputDescriptorSpec` gained `EntryKeyColumn
+string \`json:"entryKeyColumn,omitempty"\`` (`lenses.go`), matching the Refractor-side
+`lens.OutputDescriptorSpec` field/tag verbatim; `CapabilityReadLensDefinition` now sets
+`EntryKeyColumn: "anchorId"` + `RealnessFilter: "anchorId"` and its `OutputSchema` reflects the §3.2
+per-key document (`key/actor/version/projectedAt/projectionSeq/anchorType/via`, dropping
+`readableAnchors`/`projectedFromRevisions`) — `addLensAspects`/`makeLensSpecBody` already marshal
+`def.Output`/`def.OutputSchema` verbatim, so no further bootstrap wiring was needed.
+**(2)** `multiEntryRetractions` (`pipeline/evaluate.go`) now unconditionally checks the actor's exact
+legacy parent-doc key (`actorDeleteKeyFor(actorKey)`, no child suffix) via `reader.GetRow` *before* the
+child-prefix listing (moved out from under the `len(existing)==0` early return, which previously would
+have skipped it on an actor's very first post-flip evaluation) — a live legacy doc is guard-tombstoned
+in the same batch, tombstones-first, ahead of every fresh per-anchor upsert; an absent/already-tombstoned
+one is a no-op. Covers both the normal per-actor path and the actor-disappearance path (both call
+`multiEntryRetractions`). **(3)** `capabilityread.IsReadable` now checks the per-anchor exact base key
++ filtered domain keys first, falling back to the legacy aggregate-document union (§3.4's dual-read) —
+either admits; `anchorID` gets the same subject-metacharacter hardening `actorType`/`actorID` already
+had (it now feeds a filter too); a wildcard-literal-anchor non-admission pin was added (exact-string
+equality only, never wildcard semantics). **(4)** `cmd/refractor/main.go` wires
+`keyshredded.NullifyTarget{RuleID: bootstrap.CapabilityReadLensID, PerEntry: true}` — previously inert
+per increment 8's own finding — so a crypto-shredded identity's per-anchor grant children are enumerated
+and nullified via `Control.NullifyActor`, not just their (separately-tombstoned) legacy parent.
+
+Tests: 4 new `pipeline` tests (legacy-parent tombstoned/skip-if-already-tombstoned, actor-disappearance
+tombstones both parent+children); 8 new `capabilityread` tests (per-anchor base/domain grant, tombstone
+denies, migration-coexistence union across mixed-shape domains, revocation-wins-over-stale-legacy,
+anchorID metacharacter rejection, wildcard non-admission pin) + one existing test's assertion updated to
+the new first-failing call (`TestIsReadable_KVFailure_PropagatesError`, was
+`..._ListKeysFailure_...`); the base-lens contract-conformance test
+(`ruleengine/full/capability_read_lens_contract_test.go`) rewritten to exercise `EntryEnvelopeFn`
+instead of the now-bypassed `EnvelopeFn`, asserting the §3.2 per-key shape.
+
+**Adversarially reviewed before merge — 1 major folded in.** `writeResults`'s per-result loop (§4.2's
+tombstones-first ordering assumes tombstones and fresh upserts in one batch either all land or the
+message Naks) actually let a `CatTransient` write failure (the *default* classification for an
+unrecognized error) `continue` past the failing result rather than abort — so a transient failure on
+*exactly* the legacy-parent (or a dropped-child) tombstone write, while a sibling fresh upsert in the
+same batch succeeded, could leave a revoked/superseded grant readable through the still-live document
+this same pass meant to retire: the fail-OPEN shape this whole design exists to close, reopened one
+batch at a time. Fixed structurally, not by patching this one call site: `ruleengine.EvalResult` gained
+a `FailClosed` field, `multiEntryRetractions` sets it on every tombstone it returns (legacy-parent AND
+per-anchor child — the same race existed for child tombstones since increment 2, pre-dating this
+increment), and `writeResults` aborts the whole batch (Nak, full redelivery) on ANY failure of a
+FailClosed result regardless of `failure.Category`. Proven by
+`TestWriteResults_FailClosedTombstoneFails_AbortsBatch_FreshUpsertNeverLands`
+(`pipeline/multi_envelope_test.go`): a fault-injected transient delete failure on the legacy parent key,
+with a fresh sibling upsert queued right after it, asserts the message Naks and the fresh entry is
+never written. Full suite re-run clean after the fix (113 packages, 0 failures).
+
+**Deliberately not in this increment (still open):** actually running `make reseed-kernel` +
+`cycle-processor` + a Refractor restart against a live dev-stack cell — a deployment step, not a code
+change, done once this increment lands on `main` (see the fire's own admit step). Fire 2 (producer
+flips — `pkgmgr.generateProducerLens` emitting `entryKeyColumn`, every hand-authored `cap-read.*`
+producer, `validateGrantDomainName` hardening) is unstarted. `keyshredded/manager.go`'s own doc
+comment already noted (increment 8) that a `PerEntry` target's legacy PARENT tombstone stays paired
+with the base-lens flip rather than being built into the shred path itself — item (2) above is that
+pairing; the shred path itself still only reaches per-anchor children, by design.
+
 **Author:** Winston (Designer fire, 2026-07-25); increment 2 built by Winston (Lattice Steward fire, 2026-07-27);
 increment 3 built by Winston (Lattice Steward fire, 2026-07-27); increment 4 built by Winston (Lattice
 Steward fire, 2026-07-28); increment 5 built by Winston (Lattice Steward fire, 2026-07-28); increment 6
 built by Winston (Lattice Steward fire, 2026-07-28); increment 7 built by Winston (Lattice Steward fire,
-2026-07-28); increment 8 built by Winston (Lattice Steward fire, 2026-07-28)
+2026-07-28); increment 8 built by Winston (Lattice Steward fire, 2026-07-28); increment 9 built by
+Winston (Lattice Steward fire, 2026-07-28)
 **Backlog:** Stream-2 Security & trust boundary — *[Refractor] A `cap-read` document has no size bound* (★★, M)
 **Owning components:** `internal/refractor/{projection,pipeline,adapter,capabilityread,keyshredded}` (mechanism), `internal/bootstrap/lenses.go` + `internal/pkgmgr/anchorwalk.go` (producers), `packages/edge-manifest` (+ any package shipping a `cap-read.*` NATS-KV producer). Docs: `docs/contracts/06-capability-kv.md` §6.13/§6.14 (edit prepared uncommitted in the working tree), `docs/components/refractor.md`.
 
@@ -537,7 +606,7 @@ The write-path capability documents (`cap.<actor>`, `cap.roles.<actor>`, `cap.sv
 Shape disjointness (§3.1) means both shapes coexist without reader ambiguity, which makes the migration **drainable, not flag-day**. The deployment mechanics are named honestly — three facts constrain them: bootstrap seeding is presence-gated (an edited base-lens *definition* never reaches a live cell's Core KV by itself); nothing triggers `Pipeline.Rebuild` on install/upgrade (and §4.5 forbids it here anyway); and an Output-descriptor change does **not** hot-reload (the update path handles cypher and INTO changes; the envelope/output wiring installs at activation only).
 
 1. **Dual-read first (Fire 1):** `IsReadable` unions the legacy document shapes with the new per-anchor shape. Correctness during the window, argued per the retraction rule: a producer not yet flipped keeps live-maintaining its legacy doc (correct); a flipped producer's **first evaluation of each actor writes the per-anchor keys and guard-tombstones that actor's legacy parent doc in the same pass, tombstones-first** (§4.2). The event that revokes a grant *is* an evaluation of that actor — so the legacy doc can never serve a stale grant past the actor's first post-flip write.
-2. **Flip transport (Fires 1–2):** the base `capabilityRead` lens flips via an explicit **lens-vertex migration** (an `UpdateMetaVertex` meta-op on the lens vertex — the P2-sanctioned DDL path — shipped with the fire, the same way bootstrap-seeded lens changes have landed before), followed by a **Refractor restart** (the standard deploy step; MERGED ≠ RUNNING already requires rebuilding the binary) so activation re-derives the envelope from the updated Output descriptor. **The same migration must update the lens's `OutputSchema` in the same stroke** — today it hard-`require`s `projectedFromRevisions` and `readableAnchors` (`bootstrap/lenses.go:224-232`), which the per-anchor entry body no longer carries; flipping the descriptor without the schema would fail activation-time validation against the new shape. Package producers flip via the normal package **version bump** (the `lint-package-version` gate enforces it) whose reinstall updates the lens vertices — again converging at the next restart/activation.
+2. **Flip transport (Fires 1–2) — corrected at increment 9 (2026-07-28):** the base `capabilityRead` lens is **`protected: true`** (`bootstrap/primordial.go`'s `CapabilityReadLensKey` entry), and `UpdateMetaVertex`'s Starlark DDL explicitly refuses a protected meta-vertex (`fail("ProtectedMetaVertex: …")`, `bootstrap/meta_ddl.go`) — an `UpdateMetaVertex` op against it is **refused by the Processor**, not accepted; this design's earlier text naming that op as the flip transport was wrong, grounded against the wrong precedent. The **actual** mechanism a protected kernel definition change already uses (`186254b4`, Story 12.4's actor-aggregate-lens migration) is `bootstrap.Seeder.ReconcilePrimordial` (`internal/bootstrap/reconcile.go`, driven by `make reseed-kernel`): it diffs `buildPrimordialEntries()` — which now includes the edited `CapabilityReadLensDefinition`'s `EntryKeyColumn`/`OutputSchema` — against the stored `vtx.meta.*` aspects and rewrites any drifted kernel definition **directly into Core KV**, deliberately bypassing the Processor (`reconcile.go`'s own doc comment: *"the repair cannot route through the Processor: the Processor's own DDLs are what is being repaired, and protected kernel roots are rejected at commit time by design"*). `make reseed-kernel` chains `cycle-processor` (the Processor's `DDLCache` loads once at startup) and must be followed by a **Refractor restart** (`CoreKVSource.Start` replays `vtx.meta.*` with `IncludeHistory: true` at boot; `reloadpin.go` pins `"output"` as non-hot-reloadable, so only a restart re-derives activation from the updated Output descriptor). **The same reseed picks up the lens's `OutputSchema` in the same stroke** — today it hard-`require`s `projectedFromRevisions` and `readableAnchors` (`bootstrap/lenses.go:224-232` pre-increment-9), which the per-anchor entry body no longer carries; the increment-9 edit updates both fields in the one Go definition, so one reseed rewrites both. Package producers flip via the normal package **version bump** (the `lint-package-version` gate enforces it) whose reinstall updates the (non-protected) lens vertices through the ordinary `InstallPackage`/`UpgradePackage` `UpdateMetaVertex` path — that transport is correct for a package-owned lens; only the protected kernel base lens needed the correction above.
 3. **Convergence/drain:** actors converge to the new shape via (a) any fan-out event touching them (immediate) and (b) the auth-plane sweep's **deep-verify rotation** — the mechanism that actually exists — at its budgeted pace (default ~25 actors/min per lens; population/25 minutes to full coverage). During the drain, legacy docs are still-current truth for untouched actors (their grants haven't changed) and are tombstoned actor-by-actor as evaluations reach them.
 4. **Legacy-read retirement (Fire 3):** after every `cap-read.*` NATS producer is perEntry and a full sweep rotation has completed, run an explicit **one-shot purge** of any remaining legacy-shape keys (bounded prefix enumeration + guard-tombstone — this also catches docs of actors who departed *before* the flip, which no sweep direction can claim: the perEntry `AnchorFromKey` rejects legacy shapes by design), then drop the legacy-shape read from `IsReadable` and delete the doc-shape fixtures. Dropping the read earlier would *under*-grant never-evaluated actors (fail-closed, but an Edge-stream outage); the fire's gate is the bucket scan coming back empty.
 

@@ -1,18 +1,19 @@
 // Contract #6 §6.14 byte-shape conformance test for the base read-path
-// authorization lens (cap-read.<actor>, D1).
+// authorization lens (cap-read.<actor>.<anchorId>, D1, per-anchor keys —
+// cap-read-per-anchor-grant-keys-design.md §3.1/§6).
 //
 // Mirrors TestCapabilityLens_ContractConformance: it runs the LITERAL
 // CapabilityReadLensDefinition().CypherRule from the bootstrap package against a
 // deterministically seeded graph and wraps the RETURN row through the lens's
-// §6.13 Output descriptor envelope, so the assertion targets the on-wire
-// cap-read.<actor> document — catching schema drift if the cypher or the §6.14
-// contract shape changes without the other.
+// §6.13 Output descriptor's per-entry envelope, so the assertion targets the
+// on-wire cap-read.<actor>.<anchorId> key — catching schema drift if the
+// cypher or the §6.14 contract shape changes without the other.
 //
 // Unlike the write-path base capability lens (which projects only protected
 // kernel identities), the read base projects the SELF anchor for EVERY actor —
 // self-read is the universal, package-independent primordial grant. The fixture
 // therefore seeds an ORDINARY (non-protected) identity and asserts it still
-// gets a cap-read doc.
+// gets a cap-read key.
 package full_test
 
 import (
@@ -46,6 +47,7 @@ func capabilityReadDescriptor(t *testing.T) projection.OutputDescriptor {
 		Freshness:          o.Freshness,
 		ActorField:         o.ActorField,
 		Lanes:              o.Lanes,
+		EntryKeyColumn:     o.EntryKeyColumn,
 		StaticEmptyColumns: o.StaticEmptyColumns,
 	})
 	require.NoError(t, err)
@@ -82,78 +84,55 @@ func TestCapabilityReadLens_ContractConformance(t *testing.T) {
 	require.NoError(t, err, "literal cap-read cypher must execute")
 	require.Len(t, out, 1, "cap-read query should produce exactly one row")
 	row := out[0].Values
-	keys := out[0].Key
 
-	// --- wrap through the production envelope (Contract #6 §6.14) ---
-	wrapper := capabilityReadDescriptor(t).EnvelopeFn("vtx.meta.test-capread-lens",
-		func(k string) uint64 { return 42 })
-	envRow, envKeys, envErr := wrapper(row, keys, params)
-	require.NoError(t, envErr, "envelope wrapping must succeed")
-	require.NotNil(t, envRow)
-	require.NotNil(t, envKeys)
+	// --- wrap through the production per-entry envelope (§3.3/§4.1) ---
+	desc := capabilityReadDescriptor(t)
+	require.Equal(t, "anchorId", desc.EntryKeyColumn, "the base lens must set entryKeyColumn (§6 flip)")
+	entries, entryErr := desc.EntryEnvelopeFn()(row, nil, params)
+	require.NoError(t, entryErr, "per-entry envelope wrapping must succeed")
+	require.Lenf(t, entries, 1, "base lens projects exactly one per-anchor key (the self anchor); got %v", entries)
+	envRow := entries[0].Row
+	envKeys := entries[0].Keys
 
-	// --- Contract #6 §6.14 field-by-field assertions ---
+	aliceNanoID := strings.TrimPrefix(aliceKey, "vtx.identity.")
+	require.NotEqual(t, aliceKey, aliceNanoID, "fixture sanity: actor key must carry the vtx.identity. prefix")
 
-	// `key`: "cap-read.identity.<NanoID>" derived from the actor vertex key.
+	// --- §3.1/§3.2 field-by-field assertions ---
+
+	// `key`: "cap-read.identity.<actorNanoID>.<anchorId>" — the self anchor's
+	// anchorId equals the actor's own bare NanoID, so it appears twice.
+	wantKey := "cap-read.identity." + aliceNanoID + "." + aliceNanoID
 	keyVal, ok := envRow["key"].(string)
-	require.True(t, ok, "envelope.key must be a string")
-	require.Equalf(t, "cap-read.identity.", keyVal[:len("cap-read.identity.")],
-		"envelope.key must start with 'cap-read.identity.'; got %q", keyVal)
-	require.Truef(t, len(keyVal) > len("cap-read.identity."),
-		"envelope.key must include actor NanoID; got %q", keyVal)
-	require.Equal(t, keyVal, envKeys["key"], "Keys map must mirror envelope.key")
+	require.True(t, ok, "entry.key must be a string")
+	require.Equal(t, wantKey, keyVal, "entry.key must be cap-read.identity.<actorNanoID>.<anchorId>")
+	require.Equal(t, keyVal, envKeys["key"], "Keys map must mirror entry.key")
 
 	// `actor`: the full actor vertex key passed in $actorKey.
 	require.Equalf(t, aliceKey, envRow["actor"],
-		"envelope.actor must equal $actorKey; got %v", envRow["actor"])
+		"entry.actor must equal $actorKey; got %v", envRow["actor"])
 
 	// `version`: "1.0" (Phase 1 pin, read-path mirror of §6.3).
-	require.Equal(t, "1.0", envRow["version"], "envelope.version must be '1.0'")
+	require.Equal(t, "1.0", envRow["version"], "entry.version must be '1.0'")
 
 	// `projectedAt`: the params projectedAt (RFC3339 string).
 	pa, ok := envRow["projectedAt"].(string)
-	require.True(t, ok, "envelope.projectedAt must be a string")
-	require.Equalf(t, projectedAt, pa, "envelope.projectedAt must equal params.projectedAt")
+	require.True(t, ok, "entry.projectedAt must be a string")
+	require.Equalf(t, projectedAt, pa, "entry.projectedAt must equal params.projectedAt")
 
-	// `projectedFromRevisions`: a revision map including the anchor + lens-def.
-	revs, ok := envRow["projectedFromRevisions"].(map[string]uint64)
-	require.True(t, ok, "envelope.projectedFromRevisions must be a map[string]uint64")
-	require.Containsf(t, revs, aliceKey,
-		"projectedFromRevisions must include anchor revision; got %v", revs)
-	require.Containsf(t, revs, "vtx.meta.test-capread-lens",
-		"projectedFromRevisions must include lens-def revision; got %v", revs)
+	// §3.2: no projectedFromRevisions (aggregate-only provenance) and no
+	// readableAnchors wrapper — the entry's own fields (anchorType, via) land
+	// at the body's top level instead.
+	require.NotContains(t, envRow, "projectedFromRevisions", "a per-anchor entry must not carry aggregate-only provenance")
+	require.NotContains(t, envRow, "readableAnchors", "a per-anchor entry's own fields land at the top level, not nested")
 
-	// `lanes`: non-empty, includes "default".
-	switch lanes := envRow["lanes"].(type) {
-	case []string:
-		require.NotEmpty(t, lanes, "envelope.lanes must not be empty")
-		require.Equal(t, "default", lanes[0])
-	case []any:
-		require.NotEmpty(t, lanes, "envelope.lanes must not be empty")
-		require.Equal(t, "default", lanes[0])
-	default:
-		t.Fatalf("envelope.lanes must be a string array; got %T", envRow["lanes"])
-	}
-
-	// `readableAnchors`: exactly the self anchor for this actor —
+	// `anchorType`/`via`: the self anchor —
 	// {anchorType:'identity', anchorId:<actor bare NanoID>, via:['self']} (§6.14).
 	// anchorId is the §6.14 opaque-match-token rep: the bare NanoID extracted from
-	// the actor's vertex key by the auth-plane engine's nanoIdFromKey function.
-	anchorsRaw := envRow["readableAnchors"]
-	anchors, ok := anchorsRaw.([]any)
-	require.Truef(t, ok, "envelope.readableAnchors must be a list; got %T", anchorsRaw)
-	require.Lenf(t, anchors, 1, "base lens projects exactly the self anchor; got %v", anchors)
-
-	anchor, ok := anchors[0].(map[string]any)
-	require.True(t, ok, "readableAnchors entry must be an object")
-	require.Equal(t, "identity", anchor["anchorType"], "self anchor anchorType must be 'identity'")
-	aliceNanoID := strings.TrimPrefix(aliceKey, "vtx.identity.")
-	require.NotEqual(t, aliceKey, aliceNanoID, "fixture sanity: actor key must carry the vtx.identity. prefix")
-	require.Equalf(t, aliceNanoID, anchor["anchorId"],
-		"self anchor anchorId must be the actor's bare NanoID (nanoIdFromKey); got %v", anchor["anchorId"])
-
-	via, ok := anchor["via"].([]any)
-	require.Truef(t, ok, "self anchor via must be a list; got %T", anchor["via"])
+	// the actor's vertex key by the auth-plane engine's nanoIdFromKey function; it
+	// lives in the key here, not the body (§3.2).
+	require.Equal(t, "identity", envRow["anchorType"], "self anchor anchorType must be 'identity'")
+	via, ok := envRow["via"].([]any)
+	require.Truef(t, ok, "self anchor via must be a list; got %T", envRow["via"])
 	require.Len(t, via, 1, "self anchor via must be ['self']")
 	require.Equal(t, "self", via[0], "self anchor via must be ['self']")
 }

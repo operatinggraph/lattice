@@ -1169,6 +1169,14 @@ func (p *Pipeline) writeResults(ctx context.Context, msg substrate.Message, key 
 				"ruleId", p.ruleID, "entityId", key,
 				"stage", "write", "adapter", p.adapterName, "err", writeErr)
 
+			if result.FailClosed {
+				// A FailClosed result's own failure must never be masked by
+				// continuing to write its batch siblings (ruleengine.EvalResult's
+				// doc) — abort for a full redelivery regardless of category,
+				// rather than let e.g. CatTransient's per-actor-continue land a
+				// sibling's fresh upsert while this retraction never took effect.
+				return substrate.Nak, writeErr
+			}
 			if cat == failure.CatInfra || cat == failure.CatStructural {
 				// Buffered dispositions are dropped — redelivery re-evaluates
 				// every result after the pause resolves.

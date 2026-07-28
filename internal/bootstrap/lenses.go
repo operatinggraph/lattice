@@ -68,6 +68,15 @@ type OutputDescriptorSpec struct {
 	ActorField         string   `json:"actorField,omitempty"`
 	Lanes              []string `json:"lanes,omitempty"`
 	StaticEmptyColumns []string `json:"staticEmptyColumns,omitempty"`
+
+	// EntryKeyColumn opts an actor-aggregate lens into per-entry key emission
+	// (cap-read-per-anchor-grant-keys-design.md §3.3/§4.1): one guarded key per
+	// real list entry instead of one document per actor. Mirrors the
+	// Refractor-side lens.OutputDescriptorSpec.EntryKeyColumn field/tag exactly
+	// — Refractor's CoreKVSource decodes this struct verbatim from the `output`
+	// aspect + `spec.output`. Empty leaves the default one-document-per-actor
+	// behavior.
+	EntryKeyColumn string `json:"entryKeyColumn,omitempty"`
 }
 
 // CapabilityLensDefinition returns the primary Capability Lens definition —
@@ -193,6 +202,14 @@ RETURN
 // dereferenceable read-hint address. emptyBehavior:delete is the
 // actor-disappearance tombstone — the self anchor is always present, so the key
 // drops only when the identity vertex itself disappears.
+//
+// entryKeyColumn:"anchorId" opts this base lens into per-anchor key emission
+// (cap-read-per-anchor-grant-keys-design.md §3.3/§6): each real readableAnchors
+// entry writes its own guarded key (BuildKey(actorKey)+"."+anchorId) instead of
+// one aggregate document per actor, so a well-connected actor's grant slice
+// never approaches NATS's max_payload. realnessFilter names the same field —
+// the self anchor's nanoIdFromKey value is always non-empty, so every
+// evaluation's one entry is real.
 func CapabilityReadLensDefinition() LensDefinition {
 	return LensDefinition{
 		CanonicalName:  "capabilityRead",
@@ -203,8 +220,10 @@ func CapabilityReadLensDefinition() LensDefinition {
 			OutputKeyPattern: "cap-read.{actorSuffix}",
 			BodyColumns:      []string{"readableAnchors"},
 			EmptyBehavior:    "delete",
+			RealnessFilter:   "anchorId",
 			Freshness:        "auto",
 			Lanes:            []string{"default"},
+			EntryKeyColumn:   "anchorId",
 		},
 		CypherRule: `
 MATCH (identity:identity {key: $actorKey})
@@ -214,30 +233,24 @@ RETURN
     {anchorType: 'identity', anchorId: nanoIdFromKey(identity.key), via: ['self']}
   ] AS readableAnchors
 `,
-		// outputSchema: JSON Schema for the cap-read.<actor> document per
-		// Contract #6 §6.14 (read-path mirror of the §6.2 envelope; the body
-		// carries readableAnchors instead of the write-path grant columns).
+		// outputSchema: JSON Schema for the per-anchor cap-read.<actor>.<anchorId>
+		// key (§3.2's per-key document) — one small constant-size body per
+		// granted anchor rather than one growing document per actor.
+		// projectionSeq is stamped by the guarded NATS-KV write path, not by
+		// this schema's producer; it is documented here as the ordering
+		// authority a reader may observe.
 		OutputSchema: `{
   "$schema": "http://json-schema.org/draft-07/schema#",
   "type": "object",
-  "required": ["key","actor","version","projectedAt","projectedFromRevisions","lanes",
-               "readableAnchors"],
+  "required": ["key","actor","version","projectedAt","anchorType","via"],
   "properties": {
-    "key":                   {"type": "string"},
-    "actor":                 {"type": "string"},
-    "version":               {"type": "string"},
-    "projectedAt":           {"type": "string", "format": "date-time"},
-    "projectedFromRevisions":{"type": "object", "additionalProperties": {"type": "integer"}},
-    "lanes":                 {"type": "array",  "items": {"type": "string"}},
-    "readableAnchors":       {"type": "array",  "items": {
-      "type": "object",
-      "required": ["anchorType","anchorId","via"],
-      "properties": {
-        "anchorType": {"type": "string"},
-        "anchorId":   {"type": "string"},
-        "via":        {"type": "array", "items": {"type": "string"}}
-      }
-    }}
+    "key":           {"type": "string"},
+    "actor":         {"type": "string"},
+    "version":       {"type": "string"},
+    "projectedAt":   {"type": "string", "format": "date-time"},
+    "projectionSeq": {"type": "integer"},
+    "anchorType":    {"type": "string"},
+    "via":           {"type": "array", "items": {"type": "string"}}
   }
 }`,
 	}
