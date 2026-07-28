@@ -234,6 +234,7 @@ async function loadWhoami() {
 }
 
 function signOut() {
+  localStorage.removeItem(PATIENT_KEY);
   fetch("/api/logout", { method: "POST", credentials: "same-origin" })
     .catch(() => {})
     .finally(() => location.replace("/login"));
@@ -480,9 +481,26 @@ async function loadPatients(q) {
     state.patientOptions = [];
     if (!query) state.patients = [];
   }
+  // The unfiltered call is the identity's authoritative full roster — a
+  // filtered search response only adds to state.patients, never removes, so
+  // it can't be used to evict.
+  if (!query) evictStalePatientSelection();
   populatePatientSelect();
   renderPatientContact();
   syncBookPatient();
+}
+
+// evictStalePatientSelection clears a persisted patient key that doesn't
+// belong to the current identity's roster. A different identity signing in
+// on the same browser (or a session simply expiring/switching) leaves the
+// prior identity's key in localStorage; without this, nameForPatient() falls
+// through to shortKey() and renders that raw patient NanoID into Book
+// Appointment's Patient field — a cross-identity PHI key leak.
+function evictStalePatientSelection() {
+  if (!state.patient) return;
+  if (state.patients.some((p) => p.patientKey === state.patient)) return;
+  state.patient = null;
+  localStorage.removeItem(PATIENT_KEY);
 }
 
 // wirePatientSearch debounces #patient-search into loadPatients(q) — mirrors
