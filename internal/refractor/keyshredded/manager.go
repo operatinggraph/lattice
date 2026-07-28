@@ -79,13 +79,23 @@ const (
 	maxNotRegisteredDeliveries = 20
 )
 
-// NullifyTarget names one lens whose projected row for a shredded identity
+// NullifyTarget names one lens whose projected row(s) for a shredded identity
 // must be removed. KeyField is the Into.Key field name the identityKey maps
 // to for THIS lens (lenses may key their output differently), so the delete
-// call can build the right keys map.
+// call can build the right keys map — ignored when PerEntry is set. PerEntry
+// marks a perEntry lens (cap-read-per-anchor-grant-keys-design.md §3.3,
+// OutputDescriptor.EntryKeyColumn set): the identity's grants live under N
+// per-anchor child keys, so nullification routes through Control.NullifyActor
+// (enumerate-then-delete-all, §4.2 point (d)) instead of Control.NullifyRow's
+// single explicit-key delete. A PerEntry target during the §6 dual-read
+// migration window may ALSO still carry a live legacy parent document (the
+// pre-flip doc-mode shape) — this target only reaches the per-anchor
+// children; the legacy-parent tombstone stays paired with the base-lens
+// migration flip (§6) per the design, not built here.
 type NullifyTarget struct {
 	RuleID   string
 	KeyField string
+	PerEntry bool
 }
 
 // Config configures the Manager.
@@ -202,7 +212,6 @@ func (m *Manager) handleKeyShredded(ctx context.Context, msg substrate.Message) 
 	notRegistered := false
 	allClean := true
 	for _, target := range m.cfg.Targets {
-		keys := map[string]any{target.KeyField: ev.Payload.IdentityKey}
 		// projectionSeq: a GUARDED nats_kv target (adapter/natskv.go's H4
 		// no-resurrect guard, opted in per-lens via SetGuarded — e.g.
 		// capabilityEphemeral/myTasks) drops a write whose projectionSeq is <=
@@ -234,7 +243,17 @@ func (m *Manager) handleKeyShredded(ctx context.Context, msg substrate.Message) 
 		// (mirroring the negative/filter-retraction projection pattern) or Fire
 		// 5's Secure Lens closes the gap. Flagged on the board as a Fire 4a
 		// residual, not silently swept under "done."
-		err := m.cfg.Control.NullifyRow(ctx, target.RuleID, keys, math.MaxInt64)
+		var err error
+		if target.PerEntry {
+			// A perEntry lens has no single parent row to key on: the
+			// identity's grants live under N per-anchor child keys, so this
+			// enumerates the actor's prefix and nullifies every one it finds
+			// (cap-read-per-anchor-grant-keys-design.md §4.2 point (d)).
+			err = m.cfg.Control.NullifyActor(ctx, target.RuleID, ev.Payload.IdentityKey, math.MaxInt64)
+		} else {
+			keys := map[string]any{target.KeyField: ev.Payload.IdentityKey}
+			err = m.cfg.Control.NullifyRow(ctx, target.RuleID, keys, math.MaxInt64)
+		}
 		if err == nil {
 			continue
 		}
@@ -299,12 +318,12 @@ func (m *Manager) handleKeyShredded(ctx context.Context, msg substrate.Message) 
 // as a private copy to keep the module boundary clean (the
 // weaver/objectmanager/privacyworker idiom).
 type finalizationOpEnvelope struct {
-	RequestID     string                  `json:"requestId"`
-	Lane          string                  `json:"lane"`
-	OperationType string                  `json:"operationType"`
-	Actor         string                  `json:"actor"`
-	SubmittedAt   string                  `json:"submittedAt"`
-	Payload       json.RawMessage         `json:"payload"`
+	RequestID     string                   `json:"requestId"`
+	Lane          string                   `json:"lane"`
+	OperationType string                   `json:"operationType"`
+	Actor         string                   `json:"actor"`
+	SubmittedAt   string                   `json:"submittedAt"`
+	Payload       json.RawMessage          `json:"payload"`
 	ContextHint   *finalizationContextHint `json:"contextHint,omitempty"`
 }
 

@@ -151,6 +151,21 @@ type RowNullifier interface {
 	Delete(ctx context.Context, keys map[string]any, projectionSeq uint64) error
 }
 
+// RowSetNullifier is implemented by any component that can remove EVERY
+// projected row under one actor's key prefix — the perEntry-lens analog of
+// RowNullifier (cap-read-per-anchor-grant-keys-design.md §4.2 point (d)): a
+// perEntry lens's grants live under N per-anchor keys rather than the single
+// parent key RowNullifier.Delete targets, so shredding that actor must
+// enumerate and remove all N. *pipeline.Pipeline satisfies this via its
+// DeleteAllForActor method (the same prefix-listing machinery
+// multiEntryRetractions already uses for CDC-driven retraction, run
+// out-of-band). Used by the Refractor KeyShredded nullification listener for
+// any NullifyTarget configured PerEntry.
+// Defined here so internal/control does not import internal/pipeline (architecture boundary).
+type RowSetNullifier interface {
+	DeleteAllForActor(ctx context.Context, actorKey string, projectionSeq uint64) error
+}
+
 // The control-plane wire format is defined in
 // internal/refractor/control/controlwire, a leaf package that depends on
 // nothing but the standard library. It is re-exported here because it reads as
@@ -218,16 +233,17 @@ type FieldReport = controlwire.FieldReport
 // independent pipelines is non-deterministic. Only rules targeting different tables may safely
 // run in parallel.
 type Service struct {
-	mu                   sync.Mutex
-	resumerByRuleID      map[string]Resumer
-	pauserByRuleID       map[string]Pauser
-	rebuilderByRuleID    map[string]Rebuilder
-	deleterByRuleID      map[string]Deleter
-	rowNullifierByRuleID map[string]RowNullifier
-	reprojectorByRuleID  map[string]Reprojector
-	reporters            map[string]*health.Reporter
-	microSvc             micro.Service // set by StartNATSListener; nil until started
-	ruleGetter           RuleGetter    // set via SetRuleGetter; used by validate op
+	mu                      sync.Mutex
+	resumerByRuleID         map[string]Resumer
+	pauserByRuleID          map[string]Pauser
+	rebuilderByRuleID       map[string]Rebuilder
+	deleterByRuleID         map[string]Deleter
+	rowNullifierByRuleID    map[string]RowNullifier
+	rowSetNullifierByRuleID map[string]RowSetNullifier
+	reprojectorByRuleID     map[string]Reprojector
+	reporters               map[string]*health.Reporter
+	microSvc                micro.Service // set by StartNATSListener; nil until started
+	ruleGetter              RuleGetter    // set via SetRuleGetter; used by validate op
 	// personalInterestKV backs the "register"/"deregister" ops (Personal Lens
 	// Interest Set, personal-secure-lens-design.md §3.3). nil until
 	// SetPersonalInterestKV is called; those two ops fail closed until then.
@@ -282,6 +298,7 @@ func NewService() *Service {
 		rebuilderByRuleID:        make(map[string]Rebuilder),
 		deleterByRuleID:          make(map[string]Deleter),
 		rowNullifierByRuleID:     make(map[string]RowNullifier),
+		rowSetNullifierByRuleID:  make(map[string]RowSetNullifier),
 		reprojectorByRuleID:      make(map[string]Reprojector),
 		personalHydratorByRuleID: make(map[string]Hydrator),
 		reporters:                make(map[string]*health.Reporter),
@@ -405,7 +422,8 @@ func (s *Service) Register(ruleID string, r Resumer, reporter *health.Reporter) 
 }
 
 // Unregister removes all registry entries (Resumer, Pauser, Rebuilder, Deleter,
-// RowNullifier, Reporter) for ruleID. No-op for any map that does not contain ruleID.
+// RowNullifier, RowSetNullifier, Reporter) for ruleID. No-op for any map that
+// does not contain ruleID.
 func (s *Service) Unregister(ruleID string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -414,6 +432,7 @@ func (s *Service) Unregister(ruleID string) {
 	delete(s.rebuilderByRuleID, ruleID)
 	delete(s.deleterByRuleID, ruleID)
 	delete(s.rowNullifierByRuleID, ruleID)
+	delete(s.rowSetNullifierByRuleID, ruleID)
 	delete(s.reporters, ruleID)
 }
 
@@ -497,6 +516,26 @@ func (s *Service) UnregisterRowNullifier(ruleID string) {
 	delete(s.rowNullifierByRuleID, ruleID)
 }
 
+// RegisterRowSetNullifier records a RowSetNullifier for the given ruleID.
+// Overwrites any prior registration (safe for hot-reload).
+// Panics if n is nil.
+func (s *Service) RegisterRowSetNullifier(ruleID string, n RowSetNullifier) {
+	if n == nil {
+		panic("control: RegisterRowSetNullifier: RowSetNullifier must not be nil")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.rowSetNullifierByRuleID[ruleID] = n
+}
+
+// UnregisterRowSetNullifier removes the RowSetNullifier entry for ruleID.
+// No-op if ruleID is not registered.
+func (s *Service) UnregisterRowSetNullifier(ruleID string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.rowSetNullifierByRuleID, ruleID)
+}
+
 // RegisterReprojector registers the Reprojector the "reproject" op dispatches
 // to for ruleID (capability-projection-reconciliation-design.md §3.1). Only
 // actor-aggregate lenses register one; the op answers "not registered" for
@@ -564,6 +603,21 @@ func (s *Service) NullifyRow(ctx context.Context, ruleID string, keys map[string
 		return fmt.Errorf("control: rule %q: %w", ruleID, ErrRuleNotRegistered)
 	}
 	return n.Delete(ctx, keys, projectionSeq)
+}
+
+// NullifyActor deletes EVERY projected row under actorKey's prefix from
+// ruleID's target store via its registered RowSetNullifier
+// (*pipeline.Pipeline.DeleteAllForActor) — the perEntry-lens analog of
+// NullifyRow. Returns an error if ruleID is not registered as a
+// RowSetNullifier, or if the underlying delete fails.
+func (s *Service) NullifyActor(ctx context.Context, ruleID string, actorKey string, projectionSeq uint64) error {
+	s.mu.Lock()
+	n, ok := s.rowSetNullifierByRuleID[ruleID]
+	s.mu.Unlock()
+	if !ok {
+		return fmt.Errorf("control: rule %q: %w", ruleID, ErrRuleNotRegistered)
+	}
+	return n.DeleteAllForActor(ctx, actorKey, projectionSeq)
 }
 
 // controlSubjectPrefix is the wildcard subject pattern the control
@@ -889,7 +943,7 @@ func (s *Service) deleteRule(ctx context.Context, ruleID string) ControlResponse
 	if err := d.Delete(ctx); err != nil {
 		return ControlResponse{Error: fmt.Sprintf("delete %q: %s", ruleID, err.Error())}
 	}
-	s.Unregister(ruleID) // cleans remaining four registries (deleterByRuleID already cleared above)
+	s.Unregister(ruleID) // cleans remaining registries (deleterByRuleID already cleared above)
 	return ControlResponse{Delete: &DeleteResult{Deleted: true}}
 }
 
