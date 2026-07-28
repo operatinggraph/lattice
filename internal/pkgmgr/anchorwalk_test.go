@@ -87,6 +87,10 @@ func TestExpandReadGrantWalks_GeneratesOneProducerPerDomain(t *testing.T) {
 		t.Errorf("without realnessFilter=anchorId + emptyBehavior=delete the driver never deletes an emptied slice: got %q/%q",
 			p.Output.RealnessFilter, p.Output.EmptyBehavior)
 	}
+	if p.Output.EntryKeyColumn != "anchorId" {
+		t.Errorf("EntryKeyColumn = %q, want anchorId — every generated producer must opt into per-anchor "+
+			"key emission (Fire 2)", p.Output.EntryKeyColumn)
+	}
 
 	// The shared leading clause is emitted ONCE (with its bindings), and each
 	// walk contributes one collect branch whose `via` is its full chain.
@@ -331,6 +335,20 @@ func TestExpandReadGrantWalks_Rejects(t *testing.T) {
 			base(personalLens("x", okWalk(), "\nRETURN t.key AS anchor\n"),
 				ReadGrantDomainSpec{Name: "fx"}, ReadGrantDomainSpec{Name: "fx"}),
 			"duplicate domain",
+		},
+		{
+			// The Fire 2 residual hardening (cap-read-per-anchor-grant-keys-
+			// design.md §3.1): "identity" is the ONLY vertex-type token any
+			// cap-read key ever carries (every generated producer's actorSuffix),
+			// so a domain named identically to it collides in form with that
+			// fixed segment at the same key position. An anchor's OWN type
+			// (Walk.AnchorType, e.g. "task" here) never appears in a key at all —
+			// only its bare NanoID does — so it is NOT part of this check.
+			"grant domain name collides with the platform's fixed actorSuffix type",
+			base(personalLens("x", &AnchorWalk{GrantDomain: "identity", AnchorType: "task", AnchorVar: "t",
+				Chain: []string{"(identity)<-[:assignedTo]-(t:task)"}}, "\nRETURN t.key AS anchor\n"),
+				ReadGrantDomainSpec{Name: "identity"}),
+			"collides with the fixed actorSuffix vertex-type token",
 		},
 	}
 

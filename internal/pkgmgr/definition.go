@@ -974,6 +974,15 @@ type OutputDescriptorSpec struct {
 	ActorField         string   `json:"actorField,omitempty"`
 	Lanes              []string `json:"lanes,omitempty"`
 	StaticEmptyColumns []string `json:"staticEmptyColumns,omitempty"`
+
+	// EntryKeyColumn opts an actor-aggregate lens into per-entry key emission
+	// (cap-read-per-anchor-grant-keys-design.md §3.3): instead of one document
+	// per actor, the descriptor's single list body column is split into one
+	// guarded key per real entry, keyed by BuildKey(actorKey) + "." +
+	// entry[EntryKeyColumn]. Empty leaves the default one-document-per-actor
+	// path unchanged. Field/tag matches the Refractor-side
+	// lens.OutputDescriptorSpec.EntryKeyColumn exactly.
+	EntryKeyColumn string `json:"entryKeyColumn,omitempty"`
 }
 
 // PermissionSpec is one permission vertex + grant set.
