@@ -8,8 +8,8 @@ Facet's showcase build shipped end-to-end — and Fire 1 started the same fire. 
 independent) as decomposed in §10; §4.5's prefix-scoped truncate may land earlier via the standalone
 fire-briefs Fire B, which Fire 1 then inherits.
 
-**CHECKPOINT (Fire 1, increment 1 — 2026-07-27, worktree `.claude/worktrees/cap-read-per-anchor-fire1`,
-branch `fire/cap-read-per-anchor-fire1`, merged to main `ccf17553`):** shipped the §3.3 `entryKeyColumn`
+**CHECKPOINT (Fire 1, increment 1 — 2026-07-27, merged to main `81e157ca`; worktree removed, fully
+merged, no unlanded work — start a fresh worktree for the next increment):** shipped the §3.3 `entryKeyColumn`
 output-descriptor field — `lens.OutputDescriptorSpec.EntryKeyColumn` + `projection.OutputDescriptor
 .EntryKeyColumn` + `ParseOutputDescriptor` fail-closed validation (exactly one bodyColumns entry when
 set, blank rejected). Deliberately **not** wired into the write path yet: `EnvelopeFn` is untouched, and
