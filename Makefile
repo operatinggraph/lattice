@@ -251,6 +251,22 @@ cycle-processor: assert-main-checkout
 	@NATS_URL=$(NATS_URL) NATS_NKEY=$(NKEY_PROCESSOR) BOOTSTRAP_JSON_PATH=$(BOOTSTRAP_JSON) PROCESSOR_FILTER=ops.default,ops.urgent,ops.system,ops.meta LATTICE_AUTH_MODE=$(LATTICE_PROCESSOR_AUTH_MODE) LATTICE_VAULT_MASTER_KEK_FILE=$(VAULT_KEK_FILE) ./bin/processor >>processor.log 2>&1 </dev/null & \
 	  sleep 2; pgrep -x processor >/dev/null && echo "==> processor running (PID $$(pgrep -x processor))" || { echo "!! processor failed to start — see processor.log"; exit 1; }
 
+## cycle-gateway — Rebuild bin/gateway from the current tree and relaunch it
+## against the STILL-RUNNING stack, the sibling of cycle-processor above and not
+## a teardown either. Use it after any change that reaches internal/gateway,
+## internal/processor (the Gateway links it), or cmd/gateway — derive the full
+## set of affected binaries with `go list -deps ./cmd/<x>`, never from memory.
+## Env matches the launch in `up-full`, which is the authority for how this
+## component runs; logs continue to gateway.log.
+cycle-gateway: assert-main-checkout
+	@echo "==> Killing the running Gateway..."
+	-pkill -f "bin/gateway" 2>/dev/null || true
+	@echo "==> Rebuilding bin/gateway..."
+	go build -o bin/gateway ./cmd/gateway
+	@echo "==> Starting Gateway (:8080, dev-mode) in background..."
+	@NATS_URL=$(NATS_URL) NATS_NKEY=$(NKEY_GATEWAY) GATEWAY_DEV_MODE=true GATEWAY_PG_DSN=$(GATEWAY_PG_DSN) GATEWAY_READ_MODELS_DIR=$(GATEWAY_READ_MODELS_DIR) GATEWAY_CORS_ORIGINS=$(GATEWAY_CORS_ORIGINS) ./bin/gateway >>gateway.log 2>&1 </dev/null & \
+	  sleep 2; pgrep -f "bin/gateway" >/dev/null && echo "==> Gateway running on :8080" || { echo "!! Gateway failed to start — see gateway.log"; exit 1; }
+
 ## reseed-kernel — Apply this tree's kernel DDLs to a long-lived Core KV without
 ## wiping it. Seeding is create-only and runs once, so a bucket seeded by an
 ## older binary keeps that binary's kernel scripts/schemas/lens specs until
