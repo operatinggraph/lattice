@@ -445,7 +445,7 @@ func TestHandleFrontDeskVisits_Resident_403(t *testing.T) {
 	}
 }
 
-// ---- /api/menu (public catalog: session required, no per-subject filtering) ----
+// ---- /api/menu (session required; leaseAppKey confines the catalog to what that lease's Charge would accept) ----
 
 func TestHandleMenu_Unauthenticated_401(t *testing.T) {
 	s, _ := devSessionServer(t, fakeGatewayActor(t, nil))
@@ -461,6 +461,47 @@ func TestHandleMenu_AnySignedInSubject_200(t *testing.T) {
 	rec := sessionGET(s, s.handleMenu, "/api/menu", cookieFor(resA))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, body=%s, want 200 (menu is a public catalog once signed in)", rec.Code, rec.Body.String())
+	}
+}
+
+// A self-order picker (leaseAppKey named) offers only what a Charge against
+// that lease would actually accept — the offer side of cafe-domain's
+// location_covers bound.
+func TestHandleMenu_LeaseAppKey_OffersOnlyItemsChargeWouldAccept(t *testing.T) {
+	resA := "BBBBBBBBBBBBBBBBBBBB"
+	s, cookieFor := devSessionServer(t, fakeGatewayActor(t, nil))
+	seedLeaseAt(t, s.conn, "vtx.leaseapp.aaa", resA, staffWorkplace)
+	putJSON(t, s.conn, cafedomain.MenuCatalogBucket, "vtx.menuitem.covered", map[string]any{
+		"menuItemKey": "vtx.menuitem.covered", "name": "Latte", "priceCents": 450, "servedAt": staffWorkplace,
+	})
+	putJSON(t, s.conn, cafedomain.MenuCatalogBucket, "vtx.menuitem.elsewhere", map[string]any{
+		"menuItemKey": "vtx.menuitem.elsewhere", "name": "Croissant", "priceCents": 350, "servedAt": otherWorkplace,
+	})
+
+	rec := sessionGET(s, s.handleMenu, "/api/menu?leaseAppKey=vtx.leaseapp.aaa", cookieFor(resA))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+	var body struct {
+		Menu []menuItemRow `json:"menu"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(body.Menu) != 1 || body.Menu[0].MenuItemKey != "vtx.menuitem.covered" {
+		t.Fatalf("menu = %+v, want exactly the item served at this lease's covering location", body.Menu)
+	}
+}
+
+func TestHandleMenu_LeaseAppKey_NotYourLease_403(t *testing.T) {
+	resA, resB := "BBBBBBBBBBBBBBBBBBBB", "CCCCCCCCCCCCCCCCCCCC"
+	s, cookieFor := devSessionServer(t, fakeGatewayActor(t, nil))
+	seedLeaseAt(t, s.conn, "vtx.leaseapp.aaa", resA, staffWorkplace)
+	seedLeaseAt(t, s.conn, "vtx.leaseapp.bbb", resB, staffWorkplace)
+
+	rec := sessionGET(s, s.handleMenu, "/api/menu?leaseAppKey=vtx.leaseapp.bbb", cookieFor(resA))
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403 (resident A naming resident B's lease)", rec.Code)
 	}
 }
 

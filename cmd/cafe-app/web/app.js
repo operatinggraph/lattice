@@ -589,7 +589,7 @@ async function renderResident() {
       appGet("/api/ledger?leaseAppKey=" + encodeURIComponent(leaseAppKey)),
       appGet("/api/tabs?leaseAppKey=" + encodeURIComponent(leaseAppKey)),
     ];
-    if (selfMode) fetches.push(appGet("/api/menu"));
+    if (selfMode) fetches.push(appGet("/api/menu?leaseAppKey=" + encodeURIComponent(leaseAppKey)));
     const results = await Promise.all(fetches);
     ledger = results[0];
     tabs = results[1];

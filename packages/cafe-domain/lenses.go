@@ -110,13 +110,19 @@ RETURN
 // here (mirrors loftspace-domain's availableListingsSpec). The per-row key
 // column is `key` (the item key, the IntoKey default), so the read model is
 // keyed by vtx.menuitem.<id>; `menuItemKey` repeats it in the body for the
-// reader.
+// reader. `servedAt` carries the item's own serving-location key (OPTIONAL
+// MATCH, so an item minted with no servedAt link still projects a row rather
+// than dropping out) — the exact key `location_covers` (ddls.go) resolves via
+// `menu_item_served_at` when a self-order Charge is bound, so a picker that
+// filters on this column offers only what that same Charge would accept.
 const menuCatalogSpec = `MATCH (m:menuitem)
+OPTIONAL MATCH (m)-[:servedAt]->(loc)
 RETURN
   m.key AS key,
   m.key AS menuItemKey,
   m.price.data.name AS name,
-  m.price.data.priceCents AS priceCents`
+  m.price.data.priceCents AS priceCents,
+  loc.key AS servedAt`
 
 // tabSettlementSpec is the one-row-per-tab convergence cypher: a settled tab
 // with a positive total needs its charge posted onto the resident's

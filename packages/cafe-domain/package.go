@@ -78,7 +78,7 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 // Package is the static, install-time bundle.
 var Package = pkgmgr.Definition{
 	Name:    "cafe-domain",
-	Version: "0.11.3",
+	Version: "0.11.4",
 	Description: "Café house-tab POS session domain: the tab vertex type (OpenTab/Charge/VoidCharge/Settle, " +
 		"OCC-conditioned running total) + the tabStatus aspect type + the cafeTabSettlement actorAggregate " +
 		"convergence lens (missing_account/missing_charge) + the §10.8 playbook dispatching directOp(CreateAccount)/" +
@@ -89,7 +89,8 @@ var Package = pkgmgr.Definition{
 		"trusting a caller-supplied number; each item carries a servedAt link to the place that serves it, " +
 		"which is what lets a browse lens offer it to a resident who lives there, and which a self-service " +
 		"Charge is now confined to (the item's servedAt place must cover the tab's own lease-unit, or an " +
-		"ancestor of it, or the charge is denied). " +
+		"ancestor of it, or the charge is denied); the menuCatalog lens now projects that same servedAt key " +
+		"per item, so a picker can offer only what the confined Charge would accept. " +
 		"VoidCharge corrects a mis-tapped charge (operator/frontOfHouse " +
 		"only, no self-service grant). Depends lease-signing + cafe-ledger.",
 	Depends:       []string{"lease-signing", "cafe-ledger"},
