@@ -448,7 +448,19 @@ async function renderSchedule() {
     return;
   }
   const leaseAppKey = await ownLeaseAppKey();
-  grid.innerHTML = sessions.map(scheduleCard).join("");
+  // The signed-in member's own live bookings — CreateBooking's DoubleBooked
+  // guard (ddls.go) stays keyed alive until CancelBooking releases it, and a
+  // tombstoned booking drops out of this same GET (computeBookings skips it),
+  // so "appears here" and "guard is alive" agree.
+  let bookedSessionKeys = new Set();
+  try {
+    const r = await appGet("/api/bookings");
+    bookedSessionKeys = new Set((r.bookings || []).map((b) => b.sessionKey));
+  } catch (_) {
+    // Affordance only — worst case the button offers a class CreateBooking
+    // will still correctly refuse.
+  }
+  grid.innerHTML = sessions.map((se) => scheduleCard(se, bookedSessionKeys)).join("");
   sessions.forEach((se) => {
     const bookBtn = document.getElementById("book-" + domId(se.sessionKey));
     if (!bookBtn) return;
@@ -498,9 +510,18 @@ function domId(key) {
   return key.replace(/[^a-zA-Z0-9]/g, "");
 }
 
-function scheduleCard(se) {
+// scheduleCard renders one class on the resident-facing Schedule grid. The
+// Book control is disabled for exactly the reasons CreateBooking would refuse
+// it — started (SessionInPast), full (SessionFull), or already booked
+// (DoubleBooked) — mirroring renderBookMember's started/full gate below so
+// the button is never offered only to fail closed.
+function scheduleCard(se, bookedSessionKeys) {
   const id = domId(se.sessionKey);
   const full = se.bookedCount >= se.capacity;
+  const started = !!(se.startsAt && new Date(se.startsAt).getTime() <= Date.now());
+  const alreadyBooked = !!(bookedSessionKeys && bookedSessionKeys.has(se.sessionKey));
+  const disabled = full || started || alreadyBooked;
+  const label = alreadyBooked ? "Booked" : started ? "Started" : full ? "Full" : "Book";
   const led = se.instructorName ? '<div class="meta">with ' + esc(se.instructorName) + "</div>" : "";
   return (
     '<div class="card">' +
@@ -510,7 +531,7 @@ function scheduleCard(se) {
     led +
     '<div class="meta">' + esc(fmtRange(se.startsAt, se.endsAt)) + "</div>" +
     '<div class="field-row">' +
-    '<button id="book-' + id + '"' + (full ? " disabled" : "") + ">Book</button>" +
+    '<button id="book-' + id + '"' + (disabled ? " disabled" : "") + ">" + label + "</button>" +
     "</div>" +
     "</div>"
   );
