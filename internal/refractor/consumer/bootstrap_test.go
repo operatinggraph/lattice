@@ -114,7 +114,7 @@ func TestBootstrapper_ReadyAfterLargeBacklog(t *testing.T) {
 
 	// At the instant Ready fires, EVERY seeded edge must already be indexed —
 	// Ready must not have been raised on a partially-built index.
-	edges, err := adjacency.Neighbors(ctx, adjKV, "nodeBig")
+	edges, _, err := adjacency.Neighbors(ctx, adjKV, "nodeBig")
 	require.NoError(t, err)
 	assert.Len(t, edges, backlog,
 		"all %d edges must be indexed at the instant Ready fires (prefetch-race guard)", backlog)
@@ -160,7 +160,7 @@ func TestBootstrapper_ReadyAfterProcessingMessages(t *testing.T) {
 	}
 
 	// Both edges must appear in the adjacency index.
-	edges, err := adjacency.Neighbors(ctx, adjKV, "nodeA")
+	edges, _, err := adjacency.Neighbors(ctx, adjKV, "nodeA")
 	require.NoError(t, err)
 	assert.Len(t, edges, 2)
 
@@ -239,7 +239,7 @@ func TestBootstrapper_LinkEnvelopeBridge(t *testing.T) {
 	}
 
 	// Source-side: identityID → outbound `holdsRole` → roleID.
-	srcEdges, err := adjacency.Neighbors(ctx, adjKV, identityID)
+	srcEdges, _, err := adjacency.Neighbors(ctx, adjKV, identityID)
 	require.NoError(t, err)
 	require.Len(t, srcEdges, 1, "src adjacency must have one outbound edge")
 	assert.Equal(t, "outbound", srcEdges[0].Direction)
@@ -249,7 +249,7 @@ func TestBootstrapper_LinkEnvelopeBridge(t *testing.T) {
 	assert.Equal(t, linkKey, srcEdges[0].EdgeID)
 
 	// Dst-side: roleID → inbound `holdsRole` → identityID.
-	dstEdges, err := adjacency.Neighbors(ctx, adjKV, roleID)
+	dstEdges, _, err := adjacency.Neighbors(ctx, adjKV, roleID)
 	require.NoError(t, err)
 	require.Len(t, dstEdges, 1, "dst adjacency must have one inbound edge")
 	assert.Equal(t, "inbound", dstEdges[0].Direction)
@@ -318,15 +318,15 @@ func TestBootstrapper_LinkEnvelopeBridge_Tombstone(t *testing.T) {
 	// guarantees the tombstone follows the live event.
 	deadline := time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) {
-		srcEdges, _ := adjacency.Neighbors(ctx, adjKV, identityID)
-		dstEdges, _ := adjacency.Neighbors(ctx, adjKV, roleID)
+		srcEdges, _, _ := adjacency.Neighbors(ctx, adjKV, identityID)
+		dstEdges, _, _ := adjacency.Neighbors(ctx, adjKV, roleID)
 		if len(srcEdges) == 0 && len(dstEdges) == 0 {
 			return
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
-	srcEdges, _ := adjacency.Neighbors(ctx, adjKV, identityID)
-	dstEdges, _ := adjacency.Neighbors(ctx, adjKV, roleID)
+	srcEdges, _, _ := adjacency.Neighbors(ctx, adjKV, identityID)
+	dstEdges, _, _ := adjacency.Neighbors(ctx, adjKV, roleID)
 	t.Fatalf("link tombstone did not remove both adjacency entries: src=%v dst=%v", srcEdges, dstEdges)
 }
 

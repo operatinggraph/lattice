@@ -115,7 +115,7 @@ func (e *ActorEnumerator) Enumerate(ctx context.Context, eventVertexKey, eventVe
 		if cur.depth >= e.maxDepth {
 			continue
 		}
-		edges, err := adjacency.Neighbors(ctx, e.adjKV, cur.nodeID)
+		edges, _, err := adjacency.Neighbors(ctx, e.adjKV, cur.nodeID)
 		if err != nil {
 			return nil, fmt.Errorf("pipeline: actor enumerator: neighbours of %q: %w", cur.nodeID, err)
 		}

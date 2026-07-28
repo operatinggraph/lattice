@@ -37,9 +37,14 @@ var errCoreKVReadDisabled = errors.New("full engine: Core KV read disabled (read
 
 // nodeRef is the executor's in-memory handle to a Core KV vertex.
 // A nil nodeRef represents an OPTIONAL MATCH null binding.
+//
+// revision is the Core KV revision the entry was read at (0 for an absent
+// key) — the read-surface footprint a validating caller compares after
+// evaluation to detect a mid-evaluation write to this key.
 type nodeRef struct {
-	key   string
-	props map[string]any
+	key      string
+	props    map[string]any
+	revision uint64
 }
 
 // binding maps variable names to values. Variable bindings established by
@@ -77,6 +82,19 @@ type executor struct {
 	// A nil entry (absent / tombstoned / null-body) is memoized too — an
 	// absent-then-created aspect splits a group exactly as a changed one does.
 	nodes map[string]*nodeRef
+
+	// edges memoizes adjacency.Neighbors by adjacency NodeID for the life of
+	// ONE evaluation — the link twin of nodes, closing the same class of
+	// defect for relationship hops: without it, every hop through a given
+	// node reads live from Adjacency KV, so two hops through the same node
+	// inside one evaluation (a variable-length traversal revisiting a
+	// frontier node, or two separate MATCH clauses walking through it) could
+	// observe two different edge lists for it. edgeRevisions records the KV
+	// revision each memoized node's adjacency document was read at (0 =
+	// absent) — the adjacency half of the read-surface footprint a
+	// validating caller compares after evaluation.
+	edges         map[string][]adjacency.EdgeEntry
+	edgeRevisions map[string]uint64
 }
 
 // ExecuteWith runs cr against the given Core and Adjacency KVs, binding
@@ -99,12 +117,14 @@ func (e *Engine) ExecuteWith(
 	}
 
 	ex := &executor{
-		ctx:        ctx,
-		adjKV:      adjKV,
-		coreKV:     coreKV,
-		params:     ec.Parameters,
-		keyColumns: compiled.KeyColumns,
-		nodes:      map[string]*nodeRef{},
+		ctx:           ctx,
+		adjKV:         adjKV,
+		coreKV:        coreKV,
+		params:        ec.Parameters,
+		keyColumns:    compiled.KeyColumns,
+		nodes:         map[string]*nodeRef{},
+		edges:         map[string][]adjacency.EdgeEntry{},
+		edgeRevisions: map[string]uint64{},
 	}
 
 	bindings := []binding{{}}
@@ -544,7 +564,28 @@ func (ex *executor) readNode(key string) (*nodeRef, error) {
 		return nil, nil
 	}
 	props["key"] = key
-	return &nodeRef{key: key, props: props}, nil
+	return &nodeRef{key: key, props: props, revision: entry.Revision}, nil
+}
+
+// fetchEdges returns adjNodeID's edge list, memoized for the life of this
+// evaluation — see executor.edges for why repeatable-read is a correctness
+// requirement here, mirroring fetchNode/nodes for adjacency reads. A read
+// error is never memoized: it is transport, not a value. Mirrors fetchNode's
+// nil-map guard: the read-free key-resolution executor (anchor_delete) never
+// traverses a relationship, so this only matters defensively.
+func (ex *executor) fetchEdges(adjNodeID string) ([]adjacency.EdgeEntry, error) {
+	if edges, ok := ex.edges[adjNodeID]; ok {
+		return edges, nil
+	}
+	edges, revision, err := adjacency.Neighbors(ex.ctx, ex.adjKV, adjNodeID)
+	if err != nil {
+		return nil, err
+	}
+	if ex.edges != nil {
+		ex.edges[adjNodeID] = edges
+		ex.edgeRevisions[adjNodeID] = revision
+	}
+	return edges, nil
 }
 
 // traverseRel expands one relationship hop (possibly variable-length).
@@ -599,7 +640,7 @@ func (ex *executor) traverseRel(b binding, from *nodeRef, rel RelPattern, to Nod
 			if _, nodeID, ok := substrate.ParseVertexKey(f.node.key); ok {
 				adjLookupID = nodeID
 			}
-			edges, err := adjacency.Neighbors(ex.ctx, ex.adjKV, adjLookupID)
+			edges, err := ex.fetchEdges(adjLookupID)
 			if err != nil {
 				return nil, fmt.Errorf("full engine: neighbors(%s): %w", adjLookupID, err)
 			}

@@ -49,7 +49,7 @@ func TestBuild_SingleEdge(t *testing.T) {
 	}
 	require.NoError(t, adjacency.Build(ctx, kv, evt))
 
-	edges, err := adjacency.Neighbors(ctx, kv, "nodeA")
+	edges, _, err := adjacency.Neighbors(ctx, kv, "nodeA")
 	require.NoError(t, err)
 	require.Len(t, edges, 1)
 	assert.Equal(t, "e1", edges[0].EdgeID)
@@ -75,7 +75,7 @@ func TestBuild_TwoEdgesSameNode(t *testing.T) {
 		Direction: "outbound", NodeID: "nodeA", OtherNodeID: "nodeC",
 	}))
 
-	edges, err := adjacency.Neighbors(ctx, kv, "nodeA")
+	edges, _, err := adjacency.Neighbors(ctx, kv, "nodeA")
 	require.NoError(t, err)
 	assert.Len(t, edges, 2)
 
@@ -99,7 +99,7 @@ func TestBuild_UpsertReplacesExistingEdge(t *testing.T) {
 		Direction: "outbound", NodeID: "nodeA", OtherNodeID: "nodeC",
 	}))
 
-	edges, err := adjacency.Neighbors(ctx, kv, "nodeA")
+	edges, _, err := adjacency.Neighbors(ctx, kv, "nodeA")
 	require.NoError(t, err)
 	require.Len(t, edges, 1)
 	assert.Equal(t, "e1", edges[0].EdgeID)
@@ -129,7 +129,7 @@ func TestBuild_DeleteEdge(t *testing.T) {
 		EdgeID: "e1", NodeID: "nodeA", IsDeleted: true,
 	}))
 
-	edges, err := adjacency.Neighbors(ctx, kv, "nodeA")
+	edges, _, err := adjacency.Neighbors(ctx, kv, "nodeA")
 	require.NoError(t, err)
 	require.Len(t, edges, 1)
 	assert.Equal(t, "e2", edges[0].EdgeID)
@@ -153,7 +153,7 @@ func TestBuild_DeleteNonexistentEdge(t *testing.T) {
 	}))
 
 	// e1 must still be present
-	edges, err := adjacency.Neighbors(ctx, kv, "nodeA")
+	edges, _, err := adjacency.Neighbors(ctx, kv, "nodeA")
 	require.NoError(t, err)
 	require.Len(t, edges, 1)
 	assert.Equal(t, "e1", edges[0].EdgeID)
