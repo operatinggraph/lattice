@@ -167,6 +167,7 @@ func Classify(err error) Category {
 	if errors.As(err, &pgErr) {
 		switch pgErr.Code {
 		case "42P01", // undefined_table — relation does not exist (FR37)
+			"42703", // undefined_column — column does not exist (sibling of 42P01: undefined_table)
 			"23502", // not_null_violation — NULL into NOT NULL column (FR38)
 			"42804", // datatype_mismatch — column type incompatible with value (FR38)
 			"22P02": // invalid_text_representation — e.g. non-numeric string → INTEGER (FR38)

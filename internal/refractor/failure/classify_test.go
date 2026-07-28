@@ -60,6 +60,11 @@ func TestClassify_Structural_PgError_UndefinedTable(t *testing.T) {
 	assert.Equal(t, CatStructural, Classify(err), "42P01 undefined_table must be CatStructural (FR37)")
 }
 
+func TestClassify_Structural_PgError_UndefinedColumn(t *testing.T) {
+	err := &pgconn.PgError{Code: "42703", Message: `column "series_status" of relation "read_visit_series" does not exist`}
+	assert.Equal(t, CatStructural, Classify(err), "42703 undefined_column must be CatStructural")
+}
+
 func TestClassify_Structural_PgError_NotNullViolation(t *testing.T) {
 	err := &pgconn.PgError{Code: "23502", Message: `null value in column "name" violates not-null constraint`}
 	assert.Equal(t, CatStructural, Classify(err), "23502 not_null_violation must be CatStructural (FR38)")
