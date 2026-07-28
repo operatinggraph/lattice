@@ -127,9 +127,10 @@ designed-through, but the *fork decision* + the *contract commit* are Andrew's.
 > host Xcode tooling, not on lane priority ([verticals.md](verticals.md)'s Edge showcase app row —
 > "every non-iOS increment shipped"). The Lattice lane no longer caps picks at S-sized or yields the
 > shared build lock on that basis — select by importance × readiness as normal (§2 above).
-> **Build-ready now:** the **[Processor] sensitive predicate misses instanceOf-chained classes**
-> row (★ S–M, no live victim) is the next ready security/trust-boundary item; its sibling
-> whole-set-exposure row stays seq-blocked behind read-path auth (D1). The **script live-read
+> **Build-ready now:** the sensitive-predicate instanceOf-chain gap **shipped** 2026-07-28 (Done
+> log); its sibling whole-set-exposure row stays seq-blocked behind read-path auth (D1). The
+> next ready security/trust-boundary item is **[appsession] co-hosted-page session fixation**
+> (★ S–M, dev/demo only). The **script live-read
 > budget** (★★ M) is now **✅ shipped** 2026-07-28 (Done log) — kv.Read/kv.Links share a
 > per-execution round-trip ceiling. The **cap-read per-anchor grant keys** fix (★★ L) is also
 > **✅ shipped** — Fires 1-3 all landed 2026-07-28 (Done log); the shred-nullify follow-on for
@@ -147,7 +148,6 @@ designed-through, but the *fork decision* + the *contract commit* are Andrew's.
 |---|---|---|---|---|
 | **[Processor] Whole-set `state` exposure remains an existence oracle for sensitive classes** | A guard keyed on consumption still splits on a surplus sensitive declared read when the script takes a whole-set exposure (`items()`/`values()`/rendering `state`) — the flip is correct, so only read-scope validation of the declared set closes it. | ★ | S | 🚧 seq behind read-path auth (D1) · [design §2.2](../../implementation-artifacts/sensitive-read-tracker-consumption-design.md) · no live victim (no package script does it) |
 | **[appsession] A co-hosted page can plant a session cookie (fixation)** | Cookies ignore port, so a sibling localhost app's page can `document.cookie` an ABSENT session cookie (HttpOnly blocks overwrite, not create) and the shared dev key makes it verify — the victim browses as an attacker-chosen identity. The origin gate cannot reach it (no request made); `__Host-` or a cookie-bound token closes it. | ★ | S–M | 📋 ready · dev/demo only (shared key) · [kit](../../../docs/components/appsession.md) |
-| **[Processor] The sensitive predicate misses instanceOf-chained classes and links entirely** | Both the encrypt (step 6.5) and decrypt-on-read paths resolve `sensitive` by exact `DDLs.Lookup`, not step 6's `instanceOf` chain walk; and step 6 gates the sensitive write-scope on `KindAspect`, so a `Sensitive: true` **link** class is never rejected, never encrypted, and `kv.Links` never applies the read disposition to it. | ★ | S–M | 📋 ready · no live victim (every shipped sensitive DDL registers under its exact name; no sensitive link class) |
 | **[Processor] step6's own instanceOf-chain DDL resolution reads live Core KV with no shared budget** | `connInstanceOfReader.LiveInstanceOfTargets` (step6_resolve_ddl.go) issues its own prefix-list + per-key GETs, up to `maxInstanceOfHops`=4 chain hops per mutation — a separate live-read surface from the kv.Read/kv.Links budget (script-live-read-budget fire), not covered by it. Already soft-bounded by the hop cap + the atomic-batch mutation ceiling, not unbounded, but worth its own accounting pass. | ★ | S | 📋 ready · found reviewing the script-live-read-budget fix |
 | **[packages] ~20 read-posture comments assert hydration-time fatality** | `packages/*` DDL comments + two READMEs still say a declared-but-absent read faults "before the script runs" (identity-domain, service-domain, privacy-base, objects-base, orchestration-base, clinic/loftspace READMEs), as does `docs/contracts/10-orchestration-substrate.md:238`. Doc-only sweep. | ★ | S | 📋 ready |
 | **Starlark 250ms wall budget fails installs under parallel test load** | `go test ./...` at default `-p` reds a different package-install test each run with `ScriptTimeout: script exceeded wall budget 250ms` — reproduced on unmodified `main`, so it predates any one fire. Costs every fire an investigation to rule out its own change. | ★★ | S–M | 📋 ready |
@@ -223,6 +223,7 @@ Real but low-value; do **not** spend design or build effort here unless Andrew g
 
 One line per shipped item (`date · SHA · [tag] title`). Oldest roll to `archive/` past ~25.
 
+- 2026-07-28 · `c08c28be` · [Processor] sensitive predicate now covers instanceOf-chained classes; pkgmgr rejects Sensitive on a non-aspectType DDL, closing the link/event gap by construction
 - 2026-07-28 · `ea3f3852` · [Refractor] evaluation-consistency Fire 1 Inc 1 — edge memo + node/edge revisions, the footprint-validation primitives; item continues 🏗️
 - 2026-07-28 · `e8fee3b0` · [Processor] script live-read budget — kv.Read/kv.Links share a per-execution round-trip ceiling (charged at the clamped page limit, race-safe), sized + pinned against MergeIdentity's own worst case
 - 2026-07-28 · `76c9629e` · [cap-read] Fire 3 legacy-shape purge — one-shot tool tombstones any surviving legacy doc, IsReadable drops the dual-read union; item closes (Fires 1-3 all shipped)
