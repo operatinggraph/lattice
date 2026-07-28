@@ -249,14 +249,18 @@ type parsedWalk struct {
 // Cross-walk rules (beyond per-walk grammar, §3.1's "one lens still projects
 // one entity kind"): every walk must resolve to the same AnchorType/
 // AnchorVar — the tail RETURNs one anchor, so a lens declaring two would be
-// ambiguous about which one — and no walk may bind a variable an earlier
-// walk in the same lens already bound. The latter isn't a grammar nicety:
-// composeDataLensSpec concatenates every walk's OPTIONAL MATCH clauses
-// verbatim into ONE cypher query, and Cypher treats a variable reused across
-// MATCH clauses as a join constraint (the second occurrence must match the
-// SAME bound node) — a name collision between two independently-authored
-// walks would silently turn "anchor reachable via either path" into "anchor
-// reachable only where both paths land on one vertex."
+// ambiguous about which one — and no walk may bind any OTHER variable an
+// earlier walk in the same lens already bound. The shared AnchorVar itself is
+// exempt from that second check — every walk binds it by construction, and
+// composeDataLensSpec scopes each walk's copy to a walk-local name before
+// coalescing them back to it (the multi-path anchor composition). Any other
+// name collision isn't a grammar nicety: composeDataLensSpec concatenates
+// every walk's OPTIONAL MATCH clauses into ONE cypher query, and Cypher
+// treats a variable reused across MATCH clauses as a join constraint (the
+// second occurrence must match the SAME bound node) — a name collision
+// between two independently-authored walks would silently turn "anchor
+// reachable via either path" into "anchor reachable only where both paths
+// land on one vertex."
 func parseWalks(l LensSpec, domains map[string]ReadGrantDomainSpec) ([]*parsedWalk, error) {
 	name := l.CanonicalName
 	if l.Adapter != "nats-subject" || !l.Personal {
@@ -287,10 +291,12 @@ func parseWalks(l LensSpec, domains map[string]ReadGrantDomainSpec) ([]*parsedWa
 		// Own is deduped first: a variable this walk's own later clauses
 		// legitimately REUSE (bound in clause N, referenced again in clause
 		// N+1 of the SAME walk — exactly how a chain is meant to read) must
-		// not trip the cross-walk check below just because it recurs.
+		// not trip the cross-walk check below just because it recurs. The
+		// shared AnchorVar is excluded too — every walk binds it by
+		// construction, and composeDataLensSpec composes it, not this guard.
 		own := map[string]bool{}
 		for _, v := range patternVarNames(pw.clauses) {
-			if v != anchorWalkActorVar {
+			if v != anchorWalkActorVar && v != anchorVar {
 				own[v] = true
 			}
 		}
@@ -411,13 +417,29 @@ func validateWalkTail(pw *parsedWalk) error {
 }
 
 // composeDataLensSpec is the data-side compilation: the actor head, one
-// OPTIONAL MATCH per chain clause of every walk in declaration order
-// (verbatim, original variable names — the hand-authored tail references
-// them), then the shared tail. parseWalks has already proven every walk
-// resolves to the same anchor and binds no variable another walk in the same
-// lens claimed, so concatenation is safe: the anchor is reachable via ANY of
-// the walks, and existing null-skip/realness handling in the tail covers a
-// path-less row.
+// OPTIONAL MATCH per chain clause of every walk in declaration order, then
+// the shared tail.
+//
+// A single walk compiles verbatim (original variable names — the
+// hand-authored tail references them directly): the anchor is bound exactly
+// once, so no composition is needed.
+//
+// Two or more walks share one AnchorVar by construction (parseWalks), and the
+// engine treats a variable already bound by an earlier OPTIONAL MATCH —
+// including one only null-bound because that walk's path failed — as a
+// same-node JOIN constraint on re-reference, never a fresh scan
+// (executor.go's matchPath/traverseRel). Emitting every walk's copy of the
+// anchor verbatim would therefore silently turn "reachable via ANY walk" into
+// "reachable only where every walk lands on the same vertex" (usually never).
+// The fix scopes each walk's copy of the anchor to a walk-local name
+// (mirroring generateProducerSpec's variable-renaming, but here applied
+// unconditionally to the one variable every walk is required to share), then
+// a WITH clause folds them back to the walk-declared AnchorVar via
+// coalesce(...) — the row's actual anchor is whichever walk's copy is
+// non-null, and existing null-skip/realness handling in the tail covers a
+// row no walk reached. Every other variable a walk binds is, by parseWalks'
+// cross-walk guard, unique to that walk, so it passes through the WITH
+// unrenamed.
 //
 // Every clause compiles as OPTIONAL MATCH, including for a walk whose lens
 // previously fused the chain into a required MATCH: a degenerate unmatched row
@@ -428,13 +450,56 @@ func composeDataLensSpec(pws []*parsedWalk) string {
 	b.WriteString("\n")
 	b.WriteString(anchorWalkHead)
 	b.WriteString("\n")
-	for _, pw := range pws {
-		for _, lp := range pw.clauses {
+
+	if len(pws) == 1 {
+		for _, lp := range pws[0].clauses {
 			b.WriteString("OPTIONAL MATCH ")
 			b.WriteString(lp.src)
 			b.WriteString("\n")
 		}
+		b.WriteString(pws[0].tail)
+		b.WriteString("\n")
+		return b.String()
 	}
+
+	anchorVar := pws[0].walk.AnchorVar
+	taken := map[string]bool{anchorWalkActorVar: true}
+	for _, pw := range pws {
+		for _, v := range patternVarNames(pw.clauses) {
+			taken[v] = true
+		}
+	}
+
+	scoped := make([]string, len(pws))
+	carrySeen := map[string]bool{anchorWalkActorVar: true, anchorVar: true}
+	carry := []string{anchorWalkActorVar}
+	for wi, pw := range pws {
+		nn := scopedVarName(anchorVar, wi, taken)
+		taken[nn] = true
+		scoped[wi] = nn
+		rename := map[string]string{anchorVar: nn}
+		for _, lp := range pw.clauses {
+			b.WriteString("OPTIONAL MATCH ")
+			b.WriteString(lp.render(rename))
+			b.WriteString("\n")
+		}
+		for _, v := range patternVarNames(pw.clauses) {
+			if !carrySeen[v] {
+				carrySeen[v] = true
+				carry = append(carry, v)
+			}
+		}
+	}
+
+	b.WriteString("WITH coalesce(")
+	b.WriteString(strings.Join(scoped, ", "))
+	b.WriteString(") AS ")
+	b.WriteString(anchorVar)
+	for _, v := range carry {
+		b.WriteString(", ")
+		b.WriteString(v)
+	}
+	b.WriteString("\n")
 	b.WriteString(pws[0].tail)
 	b.WriteString("\n")
 	return b.String()

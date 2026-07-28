@@ -358,3 +358,74 @@ func TestExec_PatternComprehension(t *testing.T) {
 	require.True(t, ok)
 	require.Len(t, ops, 2)
 }
+
+func TestExec_CoalesceScalar(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	adjKV, coreKV := startExecKVs(t)
+	reg := newFixtureRegistry()
+	putVertex(t, reg, coreKV, "alice", "identity", nil)
+
+	results := parseExec(t,
+		`MATCH (i:identity {key: $k}) RETURN coalesce(null, 5) AS a, coalesce(3, null) AS b, coalesce(null, null) AS c`,
+		ruleengine.EventContext{Parameters: map[string]any{"k": vtxKey(reg, "alice")}},
+		adjKV, coreKV,
+	)
+	require.Len(t, results, 1)
+	require.EqualValues(t, 5, results[0].Values["a"])
+	require.EqualValues(t, 3, results[0].Values["b"])
+	require.Nil(t, results[0].Values["c"])
+}
+
+// TestExec_CoalesceMultiWalkAnchorComposition proves the shared-keyspace
+// composition primitive (pkgmgr's composeDataLensSpec) actually executes
+// correctly, not just compiles: two OPTIONAL MATCH branches bind their own
+// scoped copy of a would-be-shared anchor variable, and a WITH clause
+// coalesces them back to one name. Before this primitive, emitting both
+// branches under the SAME variable name silently made the anchor reachable
+// only where both paths landed on one vertex (matchPath/traverseRel treat an
+// already-bound — even null-bound — variable as a same-node join constraint
+// on re-reference), so an actor reachable via only the second path never
+// projected. This pins that each path independently reaches the anchor, and
+// that reaching neither leaves a single null-anchor row rather than no row.
+func TestExec_CoalesceMultiWalkAnchorComposition(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	adjKV, coreKV := startExecKVs(t)
+	reg := newFixtureRegistry()
+	putVertex(t, reg, coreKV, "direct", "identity", nil)
+	putVertex(t, reg, coreKV, "viaTeam", "identity", nil)
+	putVertex(t, reg, coreKV, "neither", "identity", nil)
+	putVertex(t, reg, coreKV, "teamA", "team", nil)
+	putVertex(t, reg, coreKV, "task1", "task", nil)
+	putVertex(t, reg, coreKV, "task2", "task", nil)
+	// "direct" is reachable only via walk 0 (a task directly assigned).
+	putEdge(t, reg, adjKV, "assignedTo", "task1", "direct")
+	// "viaTeam" is reachable only via walk 1 (a task queued for its team).
+	putEdge(t, reg, adjKV, "worksAt", "viaTeam", "teamA")
+	putEdge(t, reg, adjKV, "queuedFor", "task2", "teamA")
+
+	query := `MATCH (identity:identity {key: $k})
+OPTIONAL MATCH (identity)<-[:assignedTo]-(t_w0:task)
+OPTIONAL MATCH (identity)-[:worksAt]->(w)
+OPTIONAL MATCH (w)<-[:queuedFor]-(t_w1:task)
+WITH coalesce(t_w0, t_w1) AS t, identity, w
+RETURN t.key AS anchor`
+
+	direct := parseExec(t, query,
+		ruleengine.EventContext{Parameters: map[string]any{"k": vtxKey(reg, "direct")}}, adjKV, coreKV)
+	require.Len(t, direct, 1)
+	require.Equal(t, vtxKey(reg, "task1"), direct[0].Values["anchor"])
+
+	viaTeam := parseExec(t, query,
+		ruleengine.EventContext{Parameters: map[string]any{"k": vtxKey(reg, "viaTeam")}}, adjKV, coreKV)
+	require.Len(t, viaTeam, 1)
+	require.Equal(t, vtxKey(reg, "task2"), viaTeam[0].Values["anchor"])
+
+	neither := parseExec(t, query,
+		ruleengine.EventContext{Parameters: map[string]any{"k": vtxKey(reg, "neither")}}, adjKV, coreKV)
+	require.Len(t, neither, 1)
+	require.Nil(t, neither[0].Values["anchor"])
+}
