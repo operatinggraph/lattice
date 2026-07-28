@@ -292,6 +292,16 @@ let hasBootstrapped = false;
 let sseSilenceTimer = null;
 let activeSource = null; // the live feed source — closed on sign-out (§4.4 purge)
 
+// Boot-progress ticking (§3.0's spinner, given something real to say). A cold
+// hydrate can run for tens of seconds — see BOOT_HYDRATING_MS below — with
+// nothing else on screen, so the label counts the world as it actually
+// arrives instead of sitting on static copy the whole time.
+let bootTickTimer = null;
+let bootStartedAt = null; // set once, on the first pre-bootstrap `open` — null, not 0, so a clock legitimately reading 0 (a fresh fake-timer test) is not mistaken for "unset"
+// bootNow is a seam so a test can advance elapsed time without a real wait —
+// mirrors boot.mjs's createTokenRefresher(now) for the same reason.
+let bootNow = () => Date.now();
+
 // feedHandlers is the reducer's entry point, called by whichever source is
 // live. Both sources deliver the same parsed frame shapes (cmd/facet/feed.go
 // and internal/edge/browser/feed.go are the same struct), so these handlers
@@ -301,6 +311,7 @@ const feedHandlers = {
     if (fr.deleted) state.rows.delete(fr.key);
     else state.rows.set(fr.key, { data: fr.data, pending: !!fr.pending });
     armSilenceFallback();
+    if (!hasBootstrapped) renderBootProgress();
     scheduleRender();
   },
   outbox(entry) { applyOutboxFrame(entry); },
@@ -327,8 +338,10 @@ const feedHandlers = {
   },
   open() {
     if (!hasBootstrapped) {
-      setBootLabel("Loading your world…", true);
+      if (bootStartedAt === null) bootStartedAt = bootNow();
+      renderBootProgress();
       armSilenceFallback();
+      armBootTick();
     }
   },
 };
@@ -447,10 +460,53 @@ function armSilenceFallback() {
   sseSilenceTimer = setTimeout(finishBoot, bootGateDelay(state.hydrated || state.rows.size > 0));
 }
 
+// bootTickMs is how often the boot label re-renders while still hydrating —
+// frequent enough that the sublabel's elapsed count visibly moves, cheap
+// enough to run for the length of a cold hydrate.
+const BOOT_TICK_MS = 1000;
+// bootSublabelDelayMs is how long a boot runs before it admits the wait is
+// real. Under it, "Loading your world…" alone still reads as normal
+// latency — the reassurance would be noise on the common fast path.
+const BOOT_SUBLABEL_DELAY_MS = 8000;
+
+// renderBootProgress is the single place that decides what the boot screen
+// says right now, called both event-driven (a manifest frame landed) and
+// tick-driven (a second passed with or without one). A row count alone can
+// plateau while the engine is still genuinely working — a purged mirror's
+// cold hydrate replays that actor's full delta history, not just its
+// current rows (edge/sync's per-actor subject keeps every past hydrate
+// burst) — so the elapsed clock is what keeps the screen honest once the
+// count stops climbing.
+function renderBootProgress() {
+  const n = state.rows.size;
+  setBootLabel(
+    n > 0 ? `Loading your world… ${n} item${n === 1 ? "" : "s"} so far` : "Loading your world…",
+    true,
+  );
+  const elapsedMs = bootStartedAt === null ? 0 : bootNow() - bootStartedAt;
+  if (elapsedMs >= BOOT_SUBLABEL_DELAY_MS) {
+    setBootSublabel(`Taking longer than usual — still syncing (${Math.round(elapsedMs / 1000)}s)`);
+  }
+}
+
+// armBootTick reschedules itself once a second until finishBoot cancels it —
+// the same self-rescheduling shape as armSilenceFallback, so a boot stuck on
+// a quiet-but-not-silent connection still shows a visibly live clock instead
+// of copy that reads as frozen even though the tab is not.
+function armBootTick() {
+  clearTimeout(bootTickTimer);
+  bootTickTimer = setTimeout(() => {
+    if (hasBootstrapped) return;
+    renderBootProgress();
+    armBootTick();
+  }, BOOT_TICK_MS);
+}
+
 function finishBoot() {
   if (hasBootstrapped) return;
   hasBootstrapped = true;
   clearTimeout(sseSilenceTimer);
+  clearTimeout(bootTickTimer);
   $("boot").hidden = true;
   $("app").hidden = false;
   renderView(state.view);
@@ -459,6 +515,12 @@ function finishBoot() {
 function setBootLabel(text, showProgress) {
   $("boot-label").textContent = text;
   $("boot-progress").hidden = !showProgress;
+}
+
+function setBootSublabel(text) {
+  const el = $("boot-sublabel");
+  el.textContent = text;
+  el.hidden = false;
 }
 
 function showReconnectBanner() { $("reconnect-banner").hidden = false; }
