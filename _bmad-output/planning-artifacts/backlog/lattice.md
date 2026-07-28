@@ -160,7 +160,6 @@ designed-through, but the *fork decision* + the *contract commit* are Andrew's.
 ### Orchestration & edge — Loupe-routed (2026-07-25 PO pass)
 | Item | What it is | Imp | Size | State |
 |---|---|---|---|---|
-| **[orchestration-base] A re-dispatched flow's history row never clears its terminal** | The `eventStream` projection merges each event onto the stored row and cannot say "this event clears this column", so a re-dispatch under Weaver's STABLE instanceId sets status=running over a row keeping the previous run's `ended_at` (10 live rows read ended-BEFORE-started) and its `failure_reason`. | ★★★ | S–M | 📋 ready · consumer: Loupe Flows · [why](../../implementation-artifacts/loupe-flows-edge-depth-ux.md) §1.2 |
 | **[Loom] No per-instance redrive** | `failed` is terminal, `RetryCount` only counts it, pause/resume are consumer-scoped (and the relay/deadline consumers are refused outright), and `StartLoomPattern` is idempotent on instanceId — so a failed flow cannot be resumed or safely re-run. Needs the double-execution question answered by design: resume at cursor, or restart under a new id with the old tombstoned. | ★★ | M | 📋 ready · consumer: Loupe Flows "act on it" · [why](../../implementation-artifacts/loupe-flows-edge-depth-ux.md) §2.2 |
 | **[Personal Lens] No operator-initiated device hydration** | A gapped device is fixed by a warm resume, but edge nodes cannot self-report and no connection state is observable, so nothing can push one. A durable per-device hydration flag, consumed on the device's next SYNC attach, is the only shape the asymmetry allows. | ★★ | M | 📋 ready · consumer: Loupe Edge fleet · [why](../../implementation-artifacts/loupe-flows-edge-depth-ux.md) §3.2 |
 
@@ -223,6 +222,7 @@ Real but low-value; do **not** spend design or build effort here unless Andrew g
 
 One line per shipped item (`date · SHA · [tag] title`). Oldest roll to `archive/` past ~25.
 
+- 2026-07-28 · `6c720482` · [chronicler,orchestration-base] eventStream ColumnMapping gains ClearOn — a Loom re-dispatch's patternStarted no longer carries the prior run's ended_at/failure_reason onto the new running row
 - 2026-07-28 · `c08c28be` · [Processor] sensitive predicate now covers instanceOf-chained classes; pkgmgr rejects Sensitive on a non-aspectType DDL, closing the link/event gap by construction
 - 2026-07-28 · `ea3f3852` · [Refractor] evaluation-consistency Fire 1 Inc 1 — edge memo + node/edge revisions, the footprint-validation primitives; item continues 🏗️
 - 2026-07-28 · `e8fee3b0` · [Processor] script live-read budget — kv.Read/kv.Links share a per-execution round-trip ceiling (charged at the clamped page limit, race-safe), sized + pinned against MergeIdentity's own worst case

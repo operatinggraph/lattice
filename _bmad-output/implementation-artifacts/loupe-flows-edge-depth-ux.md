@@ -68,9 +68,14 @@ can restart hits it.
 **Consequence worth naming:** `failure_reason` carries forward the same way, so a flow that
 failed and later re-ran renders a red failure reason on a healthy running row.
 
-**Routing:** `lattice.md` — the `eventStream` projection needs column clearing (or the
-lifecycle DDL must stop emitting `patternStarted` for an instance that will not start).
-Loupe's 1.1 fix stands on its own and does not wait for it.
+**Fix — SHIPPED `6c720482`:** `ColumnMapping` gained a `ClearOn []string` field (orthogonal to
+the existing Path/{from,map}/{when,value} shapes, mirrored across `internal/chronicler` and its
+`internal/pkgmgr` wire-shape twin) naming event types on which the Manager resets a column to
+absent regardless of carry-forward. `loomFlowHistorySource` wires
+`ClearOn: ["loom.patternStarted"]` onto `ended_at`/`failure_reason`, so a re-dispatch's
+patternStarted now drops both instead of carrying the prior run's terminal values forward.
+`orchestration-base` bumped 0.7.3 → 0.7.4; Chronicler is not hot-reloadable (`source.go`), so
+the running `cmd/chronicler` process needs a restart to pick up the new lens definition.
 
 ---
 
