@@ -830,6 +830,7 @@ func main() {
 		controlSvc.RegisterPauser(r.ID, p)
 		controlSvc.RegisterRebuilder(r.ID, p)
 		controlSvc.RegisterRowNullifier(r.ID, p)
+		controlSvc.RegisterRowSetNullifier(r.ID, p)
 		// Per-actor reconciliation is defined only for actor-aggregate lenses
 		// (capability-projection-reconciliation-design.md §3.1); the pipeline
 		// refuses structurally besides, so the registry is the routing gate

@@ -1299,6 +1299,61 @@ func (p *Pipeline) Delete(ctx context.Context, keys map[string]any, projectionSe
 	return p.currentAdapter().Delete(ctx, keys, projectionSeq)
 }
 
+// DeleteAllForActor removes every child key under actorKey's perEntry prefix
+// (cap-read-per-anchor-grant-keys-design.md §4.2 point (d)), via the
+// currently-active adapter, independent of the rule's own CDC stream — the
+// perEntry-lens analog of Delete: a perEntry lens's grants for one actor live
+// under N per-anchor keys rather than the single parent key Delete targets, so
+// the Refractor KeyShredded nullification listener (control.RowSetNullifier)
+// calls this instead when a target lens is configured PerEntry. Refuses
+// closed when this pipeline is not actually a perEntry lens (no
+// MultiEnvelopeFn installed): a doc-mode lens's row lives at the parent key
+// itself, not under a trailing-dot child prefix, so a mis-flagged
+// NullifyTarget would otherwise list zero keys and return nil — a silent,
+// falsely-clean shred rather than a loud misconfiguration error. Also
+// requires the adapter to support prefix listing (adapter.PrefixKeyLister —
+// the same requirement multiEntryRetractions already enforces for CDC-driven
+// retraction). Attempts every listed key even if some fail, joining their
+// errors, so a transient failure on one key never abandons the rest (this
+// path is never retried by its caller — see keyshredded's privacy-critical
+// tier — so partial progress here is strictly better than none). Safe to
+// call from any goroutine; the adapter's Delete is idempotent per key, so
+// re-shredding an already-tombstoned entry is harmless. NOT a closed
+// guarantee against a child key created after the enumeration below: unlike
+// NullifyRow (which can plant a MaxInt64 tombstone at a key that does not
+// exist yet), this method can only act on keys that were live at ListKeysPrefix
+// time — a later CDC delivery that re-derives the actor's projection can
+// still write a brand-new anchor key this call never saw.
+func (p *Pipeline) DeleteAllForActor(ctx context.Context, actorKey string, projectionSeq uint64) error {
+	if p.multiEnvelopeFn == nil {
+		return fmt.Errorf("pipeline: DeleteAllForActor: rule %q is not a perEntry lens (no MultiEnvelopeFn installed) — refusing rather than risk silently reporting a clean shred", p.ruleID)
+	}
+	adpt := p.currentAdapter()
+	lister, ok := adpt.(adapter.PrefixKeyLister)
+	if !ok {
+		return fmt.Errorf("pipeline: DeleteAllForActor: adapter %T cannot enumerate keys by prefix — a perEntry lens cannot shred an actor's per-anchor keys", adpt)
+	}
+	childPrefix := p.actorDeleteKeyFor(actorKey) + "."
+	existing, err := lister.ListKeysPrefix(ctx, childPrefix)
+	if err != nil {
+		return fmt.Errorf("pipeline: DeleteAllForActor: list %q: %w", childPrefix, err)
+	}
+	var errs []error
+	deleted := 0
+	for _, keys := range existing {
+		if err := adpt.Delete(ctx, keys, projectionSeq); err != nil {
+			errs = append(errs, fmt.Errorf("delete %v: %w", keys, err))
+			continue
+		}
+		deleted++
+	}
+	if len(errs) > 0 {
+		return fmt.Errorf("pipeline: DeleteAllForActor: deleted %d/%d keys under %q, then failed: %w",
+			deleted, len(existing), childPrefix, errors.Join(errs...))
+	}
+	return nil
+}
+
 // publishTerminalDLQ publishes a DLQ message for an entity whose data is permanently
 // unrecoverable (failure.CatTerminal). Uses p.retryConn — the same substrate connection set via
 // SetRetryQueue. If p.retryConn == nil (no connection configured), logs and returns without

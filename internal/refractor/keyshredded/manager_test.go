@@ -28,6 +28,18 @@ func (f *fakeNullifier) Delete(_ context.Context, keys map[string]any, _ uint64)
 	return f.err
 }
 
+// fakeRowSetNullifier is a control.RowSetNullifier test double.
+// DeleteAllForActor returns err (nil for success) and records every call.
+type fakeRowSetNullifier struct {
+	err   error
+	calls []string
+}
+
+func (f *fakeRowSetNullifier) DeleteAllForActor(_ context.Context, actorKey string, _ uint64) error {
+	f.calls = append(f.calls, actorKey)
+	return f.err
+}
+
 // fakePauser is a control.Pauser test double recording whether Pause was called.
 type fakePauser struct {
 	paused bool
@@ -168,6 +180,59 @@ func TestHandleKeyShredded_OneTargetFailsAnotherSucceeds_BothAttempted(t *testin
 	require.True(t, pauser.paused)
 	require.Len(t, failing.calls, 1)
 	require.Len(t, ok.calls, 1, "the second target must still be attempted after the first fails")
+}
+
+// TestHandleKeyShredded_PerEntryTarget_RoutesThroughNullifyActor proves a
+// PerEntry target calls Control.NullifyActor (enumerate-then-delete-all)
+// instead of NullifyRow's single explicit-key delete, and that KeyField is
+// unused for a PerEntry target.
+func TestHandleKeyShredded_PerEntryTarget_RoutesThroughNullifyActor(t *testing.T) {
+	svc := control.NewService()
+	rowNullifier := &fakeNullifier{}
+	rowSetNullifier := &fakeRowSetNullifier{}
+	svc.RegisterRowNullifier("lens-a", rowNullifier)
+	svc.RegisterRowSetNullifier("lens-a", rowSetNullifier)
+	m := newTestManager(t, svc, []NullifyTarget{{RuleID: "lens-a", PerEntry: true}})
+
+	decision := m.handleKeyShredded(context.Background(), keyShreddedMsg(t, "vtx.identity.AAAAAAAAAAAAAAAAAAAA"))
+
+	require.Equal(t, substrate.Ack, decision)
+	require.Equal(t, uint64(1), m.HandledTotal())
+	require.Empty(t, rowNullifier.calls, "a PerEntry target must never call the single-key NullifyRow path")
+	require.Equal(t, []string{"vtx.identity.AAAAAAAAAAAAAAAAAAAA"}, rowSetNullifier.calls)
+}
+
+// TestHandleKeyShredded_PerEntryTarget_NotRegistered_NaksForRedelivery proves
+// the PerEntry path shares the same not-yet-registered retry behavior as the
+// doc-mode path (ErrRuleNotRegistered from NullifyActor naks for redelivery,
+// bounded by maxNotRegisteredDeliveries).
+func TestHandleKeyShredded_PerEntryTarget_NotRegistered_NaksForRedelivery(t *testing.T) {
+	svc := control.NewService() // lens-a never registered as a RowSetNullifier
+	m := newTestManager(t, svc, []NullifyTarget{{RuleID: "lens-a", PerEntry: true}})
+
+	decision := m.handleKeyShredded(context.Background(), keyShreddedMsg(t, "vtx.identity.AAAAAAAAAAAAAAAAAAAA"))
+
+	require.Equal(t, substrate.NakWithDelay, decision)
+	require.Equal(t, uint64(0), m.HandledTotal())
+}
+
+// TestHandleKeyShredded_PerEntryTarget_DeleteFails_RaisesPrivacyCritical
+// proves a real DeleteAllForActor failure on a PerEntry target pauses the
+// lens and Acks (never retries), mirroring the doc-mode failure tier.
+func TestHandleKeyShredded_PerEntryTarget_DeleteFails_RaisesPrivacyCritical(t *testing.T) {
+	svc := control.NewService()
+	boom := errors.New("adapter: boom")
+	rowSetNullifier := &fakeRowSetNullifier{err: boom}
+	pauser := &fakePauser{}
+	svc.RegisterRowSetNullifier("lens-a", rowSetNullifier)
+	svc.RegisterPauser("lens-a", pauser)
+	m := newTestManager(t, svc, []NullifyTarget{{RuleID: "lens-a", PerEntry: true}})
+
+	decision := m.handleKeyShredded(context.Background(), keyShreddedMsg(t, "vtx.identity.AAAAAAAAAAAAAAAAAAAA"))
+
+	require.Equal(t, substrate.Ack, decision, "a privacy-critical failure must never be retried")
+	require.True(t, pauser.paused)
+	require.Equal(t, uint64(1), m.HandledTotal())
 }
 
 func TestHandleKeyShredded_EmptyBody_Acks(t *testing.T) {
