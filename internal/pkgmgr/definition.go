@@ -730,11 +730,11 @@ type LensSpec struct {
 	// Kind "eventStream" sources a durable core-events subject instead: Spec
 	// must be left empty.
 	//
-	// SourceConfig mirrors internal/refractor/lens.SourceConfig's JSON shape
-	// (NOT the same Go type — pkgmgr must not import internal/refractor/lens;
+	// SourceConfig mirrors internal/chronicler.SourceConfig's JSON shape
+	// (NOT the same Go type — pkgmgr must not import internal/chronicler;
 	// it depends on internal/refractor/ruleengine/full, which a full-engine
-	// test imports packages/orchestration-base from, so importing lens here
-	// would cycle). Exactly the same mirror-by-JSON-shape convention
+	// test imports packages/orchestration-base from, so importing chronicler
+	// here would cycle). Exactly the same mirror-by-JSON-shape convention
 	// OutputDescriptorSpec below already uses.
 	Source *SourceConfig
 
@@ -899,29 +899,29 @@ type SecureColumn struct {
 
 // SourceConfig mirrors the on-wire lens-source descriptor (the Chronicler's
 // `eventStream` primitive, orchestration-history-read-model-design.md §2.2).
-// Field shape matches the Refractor-side lens.SourceConfig — a separate Go
-// type by necessity (see LensSpec.Source's doc comment), kept in sync by
-// hand like OutputDescriptorSpec below.
+// Field shape matches internal/chronicler.SourceConfig — a separate Go type
+// by necessity (see LensSpec.Source's doc comment), kept in sync by hand
+// like OutputDescriptorSpec below.
 type SourceConfig struct {
 	Kind     string           `json:"kind"`
 	Subjects []string         `json:"subjects,omitempty"`
 	Project  *EventProjection `json:"project,omitempty"`
 }
 
-// EventProjection mirrors the on-wire lens.EventProjection: a pure, total
-// `event → row` mapping (no cypher, no Adjacency, no Core-KV read — an event
-// lens's only data is the event body).
+// EventProjection mirrors the on-wire internal/chronicler.EventProjection: a
+// pure, total `event → row` mapping (no cypher, no Adjacency, no Core-KV
+// read — an event lens's only data is the event body).
 type EventProjection struct {
 	Key     string                   `json:"key"`
 	Columns map[string]ColumnMapping `json:"columns"`
 }
 
-// ColumnMapping mirrors the on-wire lens.ColumnMapping's three shapes: a
-// bare dot-path string, {from,map}, or {when,value} — see
-// internal/refractor/lens/eventsource.go for the full doctrine. MarshalJSON
-// picks the shape by which fields are populated (the mirror image of
-// lens.ColumnMapping.UnmarshalJSON, which Refractor applies when it reads
-// this back off the installed lens's aspect data).
+// ColumnMapping mirrors the on-wire internal/chronicler.ColumnMapping's
+// shapes: a bare dot-path string, {from,map}, {when,value}, plus the
+// orthogonal ClearOn — see that type's doc comment for the full doctrine.
+// MarshalJSON picks the shape by which fields are populated (the mirror
+// image of chronicler.ColumnMapping.UnmarshalJSON, which Chronicler applies
+// when it reads this back off the installed lens's aspect data).
 type ColumnMapping struct {
 	// Path is set for a bare dot-path mapping (mutually exclusive with the
 	// two structured shapes below).
@@ -932,14 +932,20 @@ type ColumnMapping struct {
 
 	When  []string
 	Value string
+
+	// ClearOn lists event types on which this column resets to absent
+	// instead of carrying forward — orthogonal to, and may accompany, any
+	// of the three shapes above. See internal/chronicler.ColumnMapping's
+	// doc comment (the reader of this wire shape) for the full doctrine.
+	ClearOn []string
 }
 
-// MarshalJSON encodes a bare-path mapping as a JSON string and the two
-// structured shapes as objects. Mirrors the mutual-exclusivity guards
-// internal/refractor/lens.ColumnMapping.MarshalJSON enforces on the same
-// three shapes — a malformed literal (e.g. Path set alongside From/Map from
-// a copy-paste mistake authoring a package's Lenses()) fails loudly here
-// too, instead of silently keeping only the first-matched shape.
+// MarshalJSON encodes a bare-path mapping with no ClearOn as a JSON string
+// and every other case as an object. Mirrors the mutual-exclusivity guards
+// internal/chronicler.ColumnMapping.MarshalJSON enforces on the same three
+// shapes — a malformed literal (e.g. Path set alongside From/Map from a
+// copy-paste mistake authoring a package's Lenses()) fails loudly here too,
+// instead of silently keeping only the first-matched shape.
 func (c ColumnMapping) MarshalJSON() ([]byte, error) {
 	isFromMap := c.From != "" || len(c.Map) > 0
 	isConditional := len(c.When) > 0 || c.Value != ""
@@ -948,20 +954,28 @@ func (c ColumnMapping) MarshalJSON() ([]byte, error) {
 		if isFromMap || isConditional {
 			return nil, fmt.Errorf("pkgmgr: column mapping: a bare path cannot also carry from/map/when/value")
 		}
-		return json.Marshal(c.Path)
+		if len(c.ClearOn) == 0 {
+			return json.Marshal(c.Path)
+		}
+		return json.Marshal(struct {
+			Path    string   `json:"path"`
+			ClearOn []string `json:"clearOn"`
+		}{Path: c.Path, ClearOn: c.ClearOn})
 	case isFromMap:
 		if isConditional {
 			return nil, fmt.Errorf("pkgmgr: column mapping: from/map and when/value are mutually exclusive")
 		}
 		return json.Marshal(struct {
-			From string            `json:"from"`
-			Map  map[string]string `json:"map"`
-		}{From: c.From, Map: c.Map})
+			From    string            `json:"from"`
+			Map     map[string]string `json:"map"`
+			ClearOn []string          `json:"clearOn,omitempty"`
+		}{From: c.From, Map: c.Map, ClearOn: c.ClearOn})
 	case isConditional:
 		return json.Marshal(struct {
-			When  []string `json:"when"`
-			Value string   `json:"value"`
-		}{When: c.When, Value: c.Value})
+			When    []string `json:"when"`
+			Value   string   `json:"value"`
+			ClearOn []string `json:"clearOn,omitempty"`
+		}{When: c.When, Value: c.Value, ClearOn: c.ClearOn})
 	default:
 		return nil, fmt.Errorf("pkgmgr: column mapping: empty mapping (expected a path, {from,map}, or {when,value})")
 	}

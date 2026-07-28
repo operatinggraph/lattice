@@ -139,6 +139,22 @@ func (m *Manager) handle(ctx context.Context, msg substrate.Message) substrate.D
 	for k, v := range partial {
 		merged[k] = v
 	}
+	// A column's ClearOn resets it to absent on a matching event type,
+	// overriding both the carried-forward existing value and (were a
+	// contradictory mapping to somehow pass load-time validation) anything
+	// this same event just set — clearing always wins. This is how a
+	// re-dispatch of Weaver's stable instanceId (a fresh patternStarted for
+	// an instance whose PRIOR run already completed/failed) drops that
+	// run's ended_at/failure_reason instead of carrying them forward onto
+	// the new running row (design §1.2).
+	for col, cm := range m.cfg.Project.Columns {
+		for _, w := range cm.ClearOn {
+			if w == ev.EventType {
+				delete(merged, col)
+				break
+			}
+		}
+	}
 	if err := m.cfg.Adapter.Upsert(ctx, keys, merged, msg.Sequence); err != nil {
 		m.cfg.Logger.Warn("chronicler: upsert failed; retrying", "key", key, "error", err)
 		return substrate.NakWithDelay

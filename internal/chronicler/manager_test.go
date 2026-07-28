@@ -14,9 +14,9 @@ import (
 	"github.com/operatinggraph/lattice/internal/substrate"
 )
 
-// testProjection mirrors internal/refractor/eventlens's own Loom-flow-history
-// test fixture — the same shape byte-for-byte, ported to this package's local
-// EventProjection/ColumnMapping types.
+// testProjection mirrors packages/orchestration-base's production
+// loomFlowHistorySource lens byte-for-byte, including the ClearOn wiring on
+// ended_at/failure_reason (loupe-flows-edge-depth-ux.md §1.2).
 func testProjection() *EventProjection {
 	return &EventProjection{
 		Key: "payload.instanceId",
@@ -31,9 +31,13 @@ func testProjection() *EventProjection {
 					"loom.patternFailed":    "failed",
 				},
 			},
-			"failure_reason": {Path: "payload.reason"},
+			"failure_reason": {Path: "payload.reason", ClearOn: []string{"loom.patternStarted"}},
 			"started_at":     {When: []string{"loom.patternStarted"}, Value: "timestamp"},
-			"ended_at":       {When: []string{"loom.patternCompleted", "loom.patternFailed"}, Value: "timestamp"},
+			"ended_at": {
+				When:    []string{"loom.patternCompleted", "loom.patternFailed"},
+				Value:   "timestamp",
+				ClearOn: []string{"loom.patternStarted"},
+			},
 			"last_event_seq": {Path: "message.sequence"},
 		},
 	}
@@ -124,6 +128,43 @@ func TestManagerHandle_OutOfOrderReplay_DoesNotClobberTerminal(t *testing.T) {
 	require.True(t, ok)
 	require.Equal(t, "complete", row["status"], "a lower-seq replay must never resurrect a terminal row to running")
 	require.Equal(t, float64(20), row["last_event_seq"])
+}
+
+// TestManagerHandle_RedispatchClearsTerminalColumns pins the
+// loupe-flows-edge-depth-ux.md §1.2 fix: Weaver's stable instanceId means a
+// re-dispatch's patternStarted collapses onto an already-terminal instance.
+// Without ClearOn, ended_at/failure_reason from the PRIOR run would carry
+// forward onto the new running row (ended_at before started_at, a stale
+// failure_reason on a healthy flow). The re-dispatch must drop both.
+func TestManagerHandle_RedispatchClearsTerminalColumns(t *testing.T) {
+	mgr, nkv, _, ctx := testHarness(t)
+
+	require.Equal(t, substrate.Ack, mgr.handle(ctx, eventMsg(t, "loom.patternStarted", map[string]any{
+		"instanceId": "inst-redispatch", "patternRef": "p", "subjectKey": "s",
+	}, 1)))
+	require.Equal(t, substrate.Ack, mgr.handle(ctx, eventMsg(t, "loom.patternFailed", map[string]any{
+		"instanceId": "inst-redispatch", "reason": "step timed out",
+	}, 2)))
+
+	row, ok, err := nkv.GetRow(ctx, map[string]any{"instance_id": "inst-redispatch"})
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.Equal(t, "failed", row["status"])
+	require.Equal(t, "step timed out", row["failure_reason"])
+	require.Equal(t, "2026-07-05T10:00:00Z", row["ended_at"])
+
+	// Re-dispatch: a fresh patternStarted for the same (stable) instanceId.
+	require.Equal(t, substrate.Ack, mgr.handle(ctx, eventMsg(t, "loom.patternStarted", map[string]any{
+		"instanceId": "inst-redispatch", "patternRef": "p", "subjectKey": "s",
+	}, 3)))
+
+	row, ok, err = nkv.GetRow(ctx, map[string]any{"instance_id": "inst-redispatch"})
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.Equal(t, "running", row["status"])
+	require.Nil(t, row["ended_at"], "the prior run's ended_at must not survive a re-dispatch onto the same instance")
+	require.Nil(t, row["failure_reason"], "the prior run's failure_reason must not survive a re-dispatch onto the same instance")
+	require.Equal(t, "p", row["pattern_ref"], "columns with no ClearOn keep carrying forward as before")
 }
 
 func TestManagerHandle_UnmappedEventType_Terms(t *testing.T) {

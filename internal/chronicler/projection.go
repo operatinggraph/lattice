@@ -51,6 +51,12 @@ type EventProjection struct {
 //     column from `value` only when the event's `eventType` is `when` (or is
 //     in the `when` list); otherwise the column is UNSET for this event
 //     (carried forward, same as a missing bare path).
+//
+// ClearOn is a fourth, orthogonal concern: event types on which the Manager
+// resets this column to absent instead of carrying it forward, regardless of
+// which of the three shapes above derives the column's normal value. It may
+// accompany any shape (a column can be SET by one event type and CLEARED by
+// another) — see ClearOn's own doc comment.
 type ColumnMapping struct {
 	Path string // populated when the JSON value was a bare string
 
@@ -59,48 +65,78 @@ type ColumnMapping struct {
 
 	When  []string `json:"when,omitempty"`
 	Value string   `json:"value,omitempty"`
+
+	// ClearOn lists event types on which the Manager resets this column to
+	// absent for this row, overriding carry-forward. Needed for a column
+	// whose value is only meaningful for the span between two lifecycle
+	// event types: Weaver derives a STABLE instanceId per (target, entity,
+	// gap, claim) so a re-dispatch collapses onto the existing Loom
+	// instance, and the loomLifecycle DDL emits a fresh patternStarted for
+	// it regardless of whether Loom will act on it — without ClearOn, the
+	// PRIOR run's ended_at/failure_reason survives carry-forward onto the
+	// new running row (orchestration-history-read-model-design.md §2.2;
+	// loupe-flows-edge-depth-ux.md §1.2).
+	ClearOn []string `json:"clearOn,omitempty"`
 }
 
-// UnmarshalJSON accepts either a bare JSON string (a dot-path) or an object
-// carrying exactly one of the two structured shapes.
+// UnmarshalJSON accepts either a bare JSON string (a dot-path, no ClearOn),
+// or an object carrying a path/{from,map}/{when,value} shape plus an
+// optional clearOn.
 func (c *ColumnMapping) UnmarshalJSON(data []byte) error {
 	var asString string
 	if err := json.Unmarshal(data, &asString); err == nil {
 		c.Path = asString
 		return nil
 	}
-	// The object form's `when` may be a bare string or an array; decode into
-	// a tolerant shape then normalize to []string.
 	var obj struct {
-		From  string            `json:"from"`
-		Map   map[string]string `json:"map"`
-		When  json.RawMessage   `json:"when"`
-		Value string            `json:"value"`
+		Path    string            `json:"path"`
+		From    string            `json:"from"`
+		Map     map[string]string `json:"map"`
+		When    json.RawMessage   `json:"when"`
+		Value   string            `json:"value"`
+		ClearOn json.RawMessage   `json:"clearOn"`
 	}
 	if err := json.Unmarshal(data, &obj); err != nil {
 		return fmt.Errorf("column mapping: must be a string or an object: %w", err)
 	}
+	c.Path = obj.Path
 	c.From = obj.From
 	c.Map = obj.Map
 	c.Value = obj.Value
-	if len(obj.When) > 0 {
-		var single string
-		if err := json.Unmarshal(obj.When, &single); err == nil {
-			c.When = []string{single}
-		} else {
-			var multi []string
-			if err := json.Unmarshal(obj.When, &multi); err != nil {
-				return fmt.Errorf("column mapping: when must be a string or array of strings: %w", err)
-			}
-			c.When = multi
-		}
+	when, err := decodeStringOrStringSlice(obj.When)
+	if err != nil {
+		return fmt.Errorf("column mapping: when must be a string or array of strings: %w", err)
 	}
+	c.When = when
+	clearOn, err := decodeStringOrStringSlice(obj.ClearOn)
+	if err != nil {
+		return fmt.Errorf("column mapping: clearOn must be a string or array of strings: %w", err)
+	}
+	c.ClearOn = clearOn
 	return nil
 }
 
-// MarshalJSON is the mirror image of UnmarshalJSON: a bare-path mapping
-// encodes as a JSON string, the two structured shapes as objects. Needed so
-// a ColumnMapping constructed as a Go literal (a package's LensSpec, e.g.
+// decodeStringOrStringSlice tolerantly decodes a JSON value that is either a
+// bare string or an array of strings into []string. An absent/empty raw
+// message decodes to nil.
+func decodeStringOrStringSlice(raw json.RawMessage) ([]string, error) {
+	if len(raw) == 0 {
+		return nil, nil
+	}
+	var single string
+	if err := json.Unmarshal(raw, &single); err == nil {
+		return []string{single}, nil
+	}
+	var multi []string
+	if err := json.Unmarshal(raw, &multi); err != nil {
+		return nil, err
+	}
+	return multi, nil
+}
+
+// MarshalJSON is the mirror image of UnmarshalJSON: a bare-path mapping with
+// no ClearOn encodes as a JSON string, every other case as an object. Needed
+// so a ColumnMapping constructed as a Go literal (a package's LensSpec, e.g.
 // orchestration-base's loomFlowHistory lens) round-trips correctly through
 // the aspect-data JSON the installed lens definition is stored as — without
 // this, the default reflection-based encoding would serialize the untagged
@@ -112,20 +148,28 @@ func (c ColumnMapping) MarshalJSON() ([]byte, error) {
 		if c.isFromMap() || c.isConditional() {
 			return nil, fmt.Errorf("column mapping: a bare path cannot also carry from/map/when/value")
 		}
-		return json.Marshal(c.Path)
+		if len(c.ClearOn) == 0 {
+			return json.Marshal(c.Path)
+		}
+		return json.Marshal(struct {
+			Path    string   `json:"path"`
+			ClearOn []string `json:"clearOn"`
+		}{Path: c.Path, ClearOn: c.ClearOn})
 	case c.isFromMap():
 		if c.isConditional() {
 			return nil, fmt.Errorf("column mapping: from/map and when/value are mutually exclusive")
 		}
 		return json.Marshal(struct {
-			From string            `json:"from"`
-			Map  map[string]string `json:"map"`
-		}{From: c.From, Map: c.Map})
+			From    string            `json:"from"`
+			Map     map[string]string `json:"map"`
+			ClearOn []string          `json:"clearOn,omitempty"`
+		}{From: c.From, Map: c.Map, ClearOn: c.ClearOn})
 	case c.isConditional():
 		return json.Marshal(struct {
-			When  []string `json:"when"`
-			Value string   `json:"value"`
-		}{When: c.When, Value: c.Value})
+			When    []string `json:"when"`
+			Value   string   `json:"value"`
+			ClearOn []string `json:"clearOn,omitempty"`
+		}{When: c.When, Value: c.Value, ClearOn: c.ClearOn})
 	default:
 		return nil, fmt.Errorf("column mapping: empty mapping cannot be marshaled")
 	}
@@ -177,6 +221,11 @@ func validatePath(path string) error {
 
 // validate checks one column mapping's shape + path syntax at load time.
 func (c ColumnMapping) validate(column string) error {
+	for _, w := range c.ClearOn {
+		if w == "" {
+			return fmt.Errorf("column %q: clearOn entries must not be empty", column)
+		}
+	}
 	switch {
 	case c.Path != "":
 		if c.isFromMap() || c.isConditional() {
@@ -201,6 +250,11 @@ func (c ColumnMapping) validate(column string) error {
 		for _, w := range c.When {
 			if w == "" {
 				return fmt.Errorf("column %q: when entries must not be empty", column)
+			}
+			for _, co := range c.ClearOn {
+				if w == co {
+					return fmt.Errorf("column %q: event type %q cannot appear in both when and clearOn (self-contradictory: set and clear on the same event)", column, w)
+				}
 			}
 		}
 		if c.Value == "" {

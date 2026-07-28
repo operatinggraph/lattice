@@ -213,18 +213,22 @@ func TestLensSpecBody_NoSource_OmitsSourceKey(t *testing.T) {
 	}
 }
 
-// TestColumnMapping_MarshalJSON_WireShape asserts each of the three shapes
-// encodes to what internal/refractor/lens.ColumnMapping.UnmarshalJSON
-// expects — the two ColumnMapping types are independent (pkgmgr cannot
-// import internal/refractor/lens without a cycle) but must agree on JSON
-// shape across that package boundary.
+// TestColumnMapping_MarshalJSON_WireShape asserts each shape encodes to what
+// internal/chronicler.ColumnMapping.UnmarshalJSON expects — the two
+// ColumnMapping types are independent (pkgmgr cannot import
+// internal/chronicler without a cycle) but must agree on JSON shape across
+// that package boundary.
 func TestColumnMapping_MarshalJSON_WireShape(t *testing.T) {
 	cases := map[string]ColumnMapping{
 		"bare path": {Path: "payload.instanceId"},
 		"from/map": {From: "eventType", Map: map[string]string{
 			"loom.patternStarted": "running", "loom.patternCompleted": "complete",
 		}},
-		"when/value": {When: []string{"loom.patternStarted", "loom.patternCompleted"}, Value: "timestamp"},
+		"when/value":       {When: []string{"loom.patternStarted", "loom.patternCompleted"}, Value: "timestamp"},
+		"bare path + clearOn": {
+			Path:    "payload.reason",
+			ClearOn: []string{"loom.patternStarted"},
+		},
 	}
 	for name, cm := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -234,20 +238,24 @@ func TestColumnMapping_MarshalJSON_WireShape(t *testing.T) {
 			}
 			// pkgmgr.ColumnMapping has no custom UnmarshalJSON (pkgmgr never
 			// reads this back — it only ever marshals for the install-op
-			// payload); internal/refractor/lens.ColumnMapping is the reader,
+			// payload); internal/chronicler.ColumnMapping is the reader,
 			// exercised by that package's own round-trip test
-			// (TestColumnMapping_MarshalJSON_RoundTrip in eventsource_test.go)
-			// and by the cross-package install-path test
-			// (TestManager_LoomFlowHistoryLens_E2E). Here, just assert this
-			// package's wire shape is what that reader's UnmarshalJSON expects.
+			// (TestColumnMapping_ClearOn_RoundTrips in projection_test.go).
+			// Here, just assert this package's wire shape is what that
+			// reader's UnmarshalJSON expects.
 			var wire any
 			if err := json.Unmarshal(data, &wire); err != nil {
 				t.Fatalf("decode wire shape: %v", err)
 			}
 			switch {
-			case cm.Path != "":
+			case cm.Path != "" && len(cm.ClearOn) == 0:
 				if wire != cm.Path {
 					t.Errorf("bare path: wire = %v, want %q", wire, cm.Path)
+				}
+			case cm.Path != "":
+				obj, ok := wire.(map[string]any)
+				if !ok || obj["path"] != cm.Path {
+					t.Errorf("path + clearOn: wire = %v", wire)
 				}
 			case cm.From != "" || len(cm.Map) > 0:
 				obj, ok := wire.(map[string]any)

@@ -103,6 +103,14 @@ func Lenses() []pkgmgr.LensSpec {
 // ordering token that makes an out-of-order replay converge (design §2.4):
 // a replayed lower-seq patternStarted cannot clobber an already-applied
 // higher-seq terminal event.
+//
+// ended_at/failure_reason carry ClearOn: ["loom.patternStarted"]
+// (loupe-flows-edge-depth-ux.md §1.2): Weaver derives a STABLE instanceId
+// per (target, entity, gap, claim), so a re-dispatch's patternStarted
+// collapses onto an already-terminal row's existing instance rather than
+// starting a fresh one. Without ClearOn, that PRIOR run's ended_at (and any
+// failure_reason) would carry forward onto the new running row — ended_at
+// before started_at, and a healthy running flow showing a stale failure.
 var loomFlowHistorySource = &pkgmgr.SourceConfig{
 	Kind:     "eventStream",
 	Subjects: []string{"events.loom.>"},
@@ -120,14 +128,18 @@ var loomFlowHistorySource = &pkgmgr.SourceConfig{
 					"loom.patternFailed":    "failed",
 				},
 			},
-			"failure_reason": {Path: "payload.reason"},
+			"failure_reason": {
+				Path:    "payload.reason",
+				ClearOn: []string{"loom.patternStarted"},
+			},
 			"started_at": {
 				When:  []string{"loom.patternStarted"},
 				Value: "timestamp",
 			},
 			"ended_at": {
-				When:  []string{"loom.patternCompleted", "loom.patternFailed"},
-				Value: "timestamp",
+				When:    []string{"loom.patternCompleted", "loom.patternFailed"},
+				Value:   "timestamp",
+				ClearOn: []string{"loom.patternStarted"},
 			},
 			"last_event_seq": {Path: "message.sequence"},
 		},
