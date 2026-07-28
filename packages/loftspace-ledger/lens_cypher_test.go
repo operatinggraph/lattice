@@ -26,51 +26,14 @@ import (
 	"testing"
 	"time"
 
-	"github.com/nats-io/nats.go/jetstream"
 	"github.com/stretchr/testify/require"
 
-	"github.com/operatinggraph/lattice/internal/natsfixture"
+	"github.com/operatinggraph/lattice/internal/lenstest"
 	"github.com/operatinggraph/lattice/internal/refractor/adjacency"
 	"github.com/operatinggraph/lattice/internal/refractor/ruleengine"
 	"github.com/operatinggraph/lattice/internal/refractor/ruleengine/full"
 	"github.com/operatinggraph/lattice/internal/substrate"
 )
-
-func lensKVs(t *testing.T) (adjKV, coreKV *substrate.KV) {
-	t.Helper()
-	_, nc := natsfixture.Server(t)
-	js, err := jetstream.New(nc)
-	require.NoError(t, err)
-	conn, err := substrate.Wrap(nc)
-	require.NoError(t, err)
-	ctx := context.Background()
-	_, err = js.CreateKeyValue(ctx, jetstream.KeyValueConfig{Bucket: "adj-lsled-cypher-test"})
-	require.NoError(t, err)
-	_, err = js.CreateKeyValue(ctx, jetstream.KeyValueConfig{Bucket: "core-lsled-cypher-test"})
-	require.NoError(t, err)
-	adjKV, err = conn.OpenKV(ctx, "adj-lsled-cypher-test")
-	require.NoError(t, err)
-	coreKV, err = conn.OpenKV(ctx, "core-lsled-cypher-test")
-	require.NoError(t, err)
-	return adjKV, coreKV
-}
-
-// lensNanoID derives a deterministic 20-char NanoID over the limited alphabet
-// from a test-local name, so a failure names the same key every run.
-func lensNanoID(name string) string {
-	alphabet := substrate.Alphabet
-	var seed uint64 = 1469598103934665603
-	for _, b := range []byte(name) {
-		seed ^= uint64(b)
-		seed *= 1099511628211
-	}
-	var out [20]byte
-	for i := 0; i < 20; i++ {
-		out[i] = alphabet[seed%uint64(len(alphabet))]
-		seed = seed*1099511628211 + 0x9E3779B97F4A7C15
-	}
-	return string(out[:])
-}
 
 type lensFixture struct {
 	adjKV, coreKV *substrate.KV
@@ -79,13 +42,13 @@ type lensFixture struct {
 }
 
 func newLensFixture(t *testing.T) *lensFixture {
-	adjKV, coreKV := lensKVs(t)
+	adjKV, coreKV := lenstest.KVs(t)
 	return &lensFixture{adjKV: adjKV, coreKV: coreKV, ids: map[string]string{}, types: map[string]string{}}
 }
 
 func (f *lensFixture) vtx(t *testing.T, name, typ string) string {
 	t.Helper()
-	id := lensNanoID(name)
+	id := lenstest.NanoID(name)
 	f.ids[name] = id
 	f.types[id] = typ
 	key := "vtx." + typ + "." + id

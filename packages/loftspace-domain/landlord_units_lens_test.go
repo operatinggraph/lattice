@@ -25,6 +25,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/operatinggraph/lattice/internal/lenstest"
 	"github.com/operatinggraph/lattice/internal/refractor/adjacency"
 	"github.com/operatinggraph/lattice/internal/refractor/ruleengine"
 	"github.com/operatinggraph/lattice/internal/refractor/ruleengine/full"
@@ -44,7 +45,7 @@ func newLuFixture(t *testing.T) *luFixture {
 
 func (f *luFixture) vtx(t *testing.T, name, typ string) string {
 	t.Helper()
-	id := cNanoID(name)
+	id := lenstest.NanoID(name)
 	f.ids[name] = id
 	f.types[id] = typ
 	key := "vtx." + typ + "." + id

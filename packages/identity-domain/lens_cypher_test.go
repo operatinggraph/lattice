@@ -37,51 +37,14 @@ import (
 	"testing"
 	"time"
 
-	"github.com/nats-io/nats.go/jetstream"
 	"github.com/stretchr/testify/require"
 
-	"github.com/operatinggraph/lattice/internal/natsfixture"
+	"github.com/operatinggraph/lattice/internal/lenstest"
 	"github.com/operatinggraph/lattice/internal/refractor/adjacency"
 	"github.com/operatinggraph/lattice/internal/refractor/ruleengine"
 	"github.com/operatinggraph/lattice/internal/refractor/ruleengine/full"
 	"github.com/operatinggraph/lattice/internal/substrate"
 )
-
-func idCypherKVs(t *testing.T) (adjKV, coreKV *substrate.KV) {
-	t.Helper()
-	_, nc := natsfixture.Server(t)
-	js, err := jetstream.New(nc)
-	require.NoError(t, err)
-	conn, err := substrate.Wrap(nc)
-	require.NoError(t, err)
-	ctx := context.Background()
-	_, err = js.CreateKeyValue(ctx, jetstream.KeyValueConfig{Bucket: "adj-identitydomain-cypher-test"})
-	require.NoError(t, err)
-	_, err = js.CreateKeyValue(ctx, jetstream.KeyValueConfig{Bucket: "core-identitydomain-cypher-test"})
-	require.NoError(t, err)
-	adjKV, err = conn.OpenKV(ctx, "adj-identitydomain-cypher-test")
-	require.NoError(t, err)
-	coreKV, err = conn.OpenKV(ctx, "core-identitydomain-cypher-test")
-	require.NoError(t, err)
-	return adjKV, coreKV
-}
-
-// idNanoID returns a deterministic 20-char Contract #1 NanoID from a logical
-// name (the edge-manifest / wellness-domain helper's derivation).
-func idNanoID(name string) string {
-	alphabet := substrate.Alphabet
-	var seed uint64 = 1469598103934665603
-	for _, b := range []byte(name) {
-		seed ^= uint64(b)
-		seed *= 1099511628211
-	}
-	var out [20]byte
-	for i := 0; i < 20; i++ {
-		out[i] = alphabet[seed%uint64(len(alphabet))]
-		seed = seed*1099511628211 + 0x9E3779B97F4A7C15
-	}
-	return string(out[:])
-}
 
 type idFixture struct {
 	adjKV, coreKV *substrate.KV
@@ -90,13 +53,13 @@ type idFixture struct {
 }
 
 func newIDFixture(t *testing.T) *idFixture {
-	adjKV, coreKV := idCypherKVs(t)
+	adjKV, coreKV := lenstest.KVs(t)
 	return &idFixture{adjKV: adjKV, coreKV: coreKV, ids: map[string]string{}, types: map[string]string{}}
 }
 
 func (f *idFixture) vtx(t *testing.T, name, typ string, data map[string]any) string {
 	t.Helper()
-	id := idNanoID(name)
+	id := lenstest.NanoID(name)
 	f.ids[name] = id
 	f.types[id] = typ
 	key := "vtx." + typ + "." + id
@@ -165,9 +128,9 @@ func TestIdentityIndexHint_ProjectsTheHashKeyAndNothingElse(t *testing.T) {
 	// The index vertices are keyed by a one-way hash of the contact value; the
 	// probe reads them to learn whether a registration would collide.
 	f.vtx(t, "emailIdx", "identityindex", map[string]any{
-		"identityKey": "vtx.identity." + idNanoID("resident"), "contactType": "email"})
+		"identityKey": "vtx.identity." + lenstest.NanoID("resident"), "contactType": "email"})
 	f.vtx(t, "phoneIdx", "identityindex", map[string]any{
-		"identityKey": "vtx.identity." + idNanoID("resident"), "contactType": "phone"})
+		"identityKey": "vtx.identity." + lenstest.NanoID("resident"), "contactType": "phone"})
 	// A non-index vertex the flat MATCH must not pick up.
 	f.vtx(t, "resident", "identity", nil)
 
@@ -182,7 +145,7 @@ func TestIdentityIndexHint_ProjectsTheHashKeyAndNothingElse(t *testing.T) {
 	require.Contains(t, byKey, f.key("phoneIdx"))
 
 	row := byKey[f.key("emailIdx")]
-	require.Equal(t, "vtx.identity."+idNanoID("resident"), row["identityKey"])
+	require.Equal(t, "vtx.identity."+lenstest.NanoID("resident"), row["identityKey"])
 	require.Equal(t, "email", row["contactType"])
 	require.Len(t, row, 3,
 		"the row carries only the hash key, the identity it resolves to, and the contact type — an extra column here is how the pre-image gets back into an open KV bucket")
@@ -213,12 +176,12 @@ func TestIdentityCredentialsRead_AnchorsOnTheReadersOwnNanoID(t *testing.T) {
 	require.Len(t, rows, 1, "only the claimed identity has a binding to read; got %v", rows)
 
 	row := rows[0].Values
-	require.Equal(t, idNanoID("claimed"), row["identity_id"])
+	require.Equal(t, lenstest.NanoID("claimed"), row["identity_id"])
 	require.Equal(t, f.key("claimed"), row["entity_key"])
 	require.Equal(t, f.key("claimed"), row["identity_key"],
 		"identity_key is the SecureColumn's IdentityKeyColumn — the Vault decrypts this row against it, so it must be the owning identity's key")
 
-	require.Equal(t, []any{idNanoID("claimed")}, row["authz_anchors"],
+	require.Equal(t, []any{lenstest.NanoID("claimed")}, row["authz_anchors"],
 		"the row is self-anchored: RLS compares lattice.actor_id against this list, so any other NanoID here hands one identity's decrypted credential list to another")
 
 	binding := row["binding"].(map[string]any)

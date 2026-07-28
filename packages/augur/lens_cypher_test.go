@@ -33,50 +33,13 @@ import (
 	"testing"
 	"time"
 
-	"github.com/nats-io/nats.go/jetstream"
 	"github.com/stretchr/testify/require"
 
-	"github.com/operatinggraph/lattice/internal/natsfixture"
+	"github.com/operatinggraph/lattice/internal/lenstest"
 	"github.com/operatinggraph/lattice/internal/refractor/ruleengine"
 	"github.com/operatinggraph/lattice/internal/refractor/ruleengine/full"
 	"github.com/operatinggraph/lattice/internal/substrate"
 )
-
-func augurCypherKVs(t *testing.T) (adjKV, coreKV *substrate.KV) {
-	t.Helper()
-	_, nc := natsfixture.Server(t)
-	js, err := jetstream.New(nc)
-	require.NoError(t, err)
-	conn, err := substrate.Wrap(nc)
-	require.NoError(t, err)
-	ctx := context.Background()
-	_, err = js.CreateKeyValue(ctx, jetstream.KeyValueConfig{Bucket: "adj-augur-cypher-test"})
-	require.NoError(t, err)
-	_, err = js.CreateKeyValue(ctx, jetstream.KeyValueConfig{Bucket: "core-augur-cypher-test"})
-	require.NoError(t, err)
-	adjKV, err = conn.OpenKV(ctx, "adj-augur-cypher-test")
-	require.NoError(t, err)
-	coreKV, err = conn.OpenKV(ctx, "core-augur-cypher-test")
-	require.NoError(t, err)
-	return adjKV, coreKV
-}
-
-// augurNanoID returns a deterministic 20-char Contract #1 NanoID from a logical
-// name (the edge-manifest / wellness-domain helper's derivation).
-func augurNanoID(name string) string {
-	alphabet := substrate.Alphabet
-	var seed uint64 = 1469598103934665603
-	for _, b := range []byte(name) {
-		seed ^= uint64(b)
-		seed *= 1099511628211
-	}
-	var out [20]byte
-	for i := 0; i < 20; i++ {
-		out[i] = alphabet[seed%uint64(len(alphabet))]
-		seed = seed*1099511628211 + 0x9E3779B97F4A7C15
-	}
-	return string(out[:])
-}
 
 type augurFixture struct {
 	adjKV, coreKV *substrate.KV
@@ -84,7 +47,7 @@ type augurFixture struct {
 }
 
 func newAugurFixture(t *testing.T) *augurFixture {
-	adjKV, coreKV := augurCypherKVs(t)
+	adjKV, coreKV := lenstest.KVs(t)
 	return &augurFixture{adjKV: adjKV, coreKV: coreKV, ids: map[string]string{}}
 }
 
@@ -106,7 +69,7 @@ func (f *augurFixture) aspect(t *testing.T, ownerName, local, class string, data
 // CreateAugurReasoningClaim leaves behind while the model is still reasoning.
 func (f *augurFixture) claim(t *testing.T, name, candidate, targetMeta, gapColumn string) {
 	t.Helper()
-	id := augurNanoID(name)
+	id := lenstest.NanoID(name)
 	f.ids[name] = id
 	key := "vtx.augurproposal." + id
 	body := map[string]any{"key": key, "class": "augurproposal", "isDeleted": false, "data": map[string]any{}}

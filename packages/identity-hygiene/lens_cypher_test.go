@@ -25,50 +25,14 @@ import (
 	"testing"
 	"time"
 
-	"github.com/nats-io/nats.go/jetstream"
 	"github.com/stretchr/testify/require"
 
-	"github.com/operatinggraph/lattice/internal/natsfixture"
+	"github.com/operatinggraph/lattice/internal/lenstest"
 	"github.com/operatinggraph/lattice/internal/refractor/adjacency"
 	"github.com/operatinggraph/lattice/internal/refractor/ruleengine"
 	"github.com/operatinggraph/lattice/internal/refractor/ruleengine/full"
 	"github.com/operatinggraph/lattice/internal/substrate"
 )
-
-func dedupCypherKVs(t *testing.T) (adjKV, coreKV *substrate.KV) {
-	t.Helper()
-	_, nc := natsfixture.Server(t)
-	js, err := jetstream.New(nc)
-	require.NoError(t, err)
-	conn, err := substrate.Wrap(nc)
-	require.NoError(t, err)
-	ctx := context.Background()
-	_, err = js.CreateKeyValue(ctx, jetstream.KeyValueConfig{Bucket: "adj-dedup-cypher-test"})
-	require.NoError(t, err)
-	_, err = js.CreateKeyValue(ctx, jetstream.KeyValueConfig{Bucket: "core-dedup-cypher-test"})
-	require.NoError(t, err)
-	adjKV, err = conn.OpenKV(ctx, "adj-dedup-cypher-test")
-	require.NoError(t, err)
-	coreKV, err = conn.OpenKV(ctx, "core-dedup-cypher-test")
-	require.NoError(t, err)
-	return adjKV, coreKV
-}
-
-// dNanoID returns a deterministic 20-char Contract #1 NanoID from a logical name.
-func dNanoID(name string) string {
-	alphabet := substrate.Alphabet
-	var seed uint64 = 1469598103934665603
-	for _, b := range []byte(name) {
-		seed ^= uint64(b)
-		seed *= 1099511628211
-	}
-	var out [20]byte
-	for i := 0; i < 20; i++ {
-		out[i] = alphabet[seed%uint64(len(alphabet))]
-		seed = seed*1099511628211 + 0x9E3779B97F4A7C15
-	}
-	return string(out[:])
-}
 
 type dedupFixture struct {
 	adjKV, coreKV *substrate.KV
@@ -76,7 +40,7 @@ type dedupFixture struct {
 }
 
 func newDedupFixture(t *testing.T) *dedupFixture {
-	adjKV, coreKV := dedupCypherKVs(t)
+	adjKV, coreKV := lenstest.KVs(t)
 	return &dedupFixture{adjKV: adjKV, coreKV: coreKV, ids: map[string]string{}}
 }
 
@@ -84,7 +48,7 @@ func newDedupFixture(t *testing.T) *dedupFixture {
 func (f *dedupFixture) identity(t *testing.T, name, state string) string {
 	t.Helper()
 	ctx := context.Background()
-	id := dNanoID(name)
+	id := lenstest.NanoID(name)
 	f.ids[name] = id
 	key := "vtx.identity." + id
 	body := map[string]any{"key": key, "class": "identity", "isDeleted": false, "data": map[string]any{}}
@@ -141,10 +105,10 @@ func TestDuplicateCandidatesLens_ProjectsOnlyFlaggedPairs(t *testing.T) {
 	require.Len(t, rows, 1, "only the flagged pair may project; got %v", rows)
 
 	row := rows[0].Values
-	require.Equal(t, dNanoID("incumbent"), row["primaryId"])
-	require.Equal(t, dNanoID("newcomer"), row["secondaryId"])
-	require.Equal(t, "vtx.identity."+dNanoID("incumbent"), row["primaryKey"])
-	require.Equal(t, "vtx.identity."+dNanoID("newcomer"), row["secondaryKey"])
+	require.Equal(t, lenstest.NanoID("incumbent"), row["primaryId"])
+	require.Equal(t, lenstest.NanoID("newcomer"), row["secondaryId"])
+	require.Equal(t, "vtx.identity."+lenstest.NanoID("incumbent"), row["primaryKey"])
+	require.Equal(t, "vtx.identity."+lenstest.NanoID("newcomer"), row["secondaryKey"])
 }
 
 func TestDuplicateCandidatesLens_StateFilterExcludesMergedEitherSide(t *testing.T) {

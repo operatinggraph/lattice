@@ -33,51 +33,14 @@ import (
 	"testing"
 	"time"
 
-	"github.com/nats-io/nats.go/jetstream"
 	"github.com/stretchr/testify/require"
 
-	"github.com/operatinggraph/lattice/internal/natsfixture"
+	"github.com/operatinggraph/lattice/internal/lenstest"
 	"github.com/operatinggraph/lattice/internal/refractor/adjacency"
 	"github.com/operatinggraph/lattice/internal/refractor/ruleengine"
 	"github.com/operatinggraph/lattice/internal/refractor/ruleengine/full"
 	"github.com/operatinggraph/lattice/internal/substrate"
 )
-
-func rbacCypherKVs(t *testing.T) (adjKV, coreKV *substrate.KV) {
-	t.Helper()
-	_, nc := natsfixture.Server(t)
-	js, err := jetstream.New(nc)
-	require.NoError(t, err)
-	conn, err := substrate.Wrap(nc)
-	require.NoError(t, err)
-	ctx := context.Background()
-	_, err = js.CreateKeyValue(ctx, jetstream.KeyValueConfig{Bucket: "adj-rbacdomain-cypher-test"})
-	require.NoError(t, err)
-	_, err = js.CreateKeyValue(ctx, jetstream.KeyValueConfig{Bucket: "core-rbacdomain-cypher-test"})
-	require.NoError(t, err)
-	adjKV, err = conn.OpenKV(ctx, "adj-rbacdomain-cypher-test")
-	require.NoError(t, err)
-	coreKV, err = conn.OpenKV(ctx, "core-rbacdomain-cypher-test")
-	require.NoError(t, err)
-	return adjKV, coreKV
-}
-
-// rbacNanoID returns a deterministic 20-char Contract #1 NanoID from a logical
-// name (the edge-manifest / wellness-domain helper's derivation).
-func rbacNanoID(name string) string {
-	alphabet := substrate.Alphabet
-	var seed uint64 = 1469598103934665603
-	for _, b := range []byte(name) {
-		seed ^= uint64(b)
-		seed *= 1099511628211
-	}
-	var out [20]byte
-	for i := 0; i < 20; i++ {
-		out[i] = alphabet[seed%uint64(len(alphabet))]
-		seed = seed*1099511628211 + 0x9E3779B97F4A7C15
-	}
-	return string(out[:])
-}
 
 type rbacFixture struct {
 	adjKV, coreKV *substrate.KV
@@ -86,13 +49,13 @@ type rbacFixture struct {
 }
 
 func newRbacFixture(t *testing.T) *rbacFixture {
-	adjKV, coreKV := rbacCypherKVs(t)
+	adjKV, coreKV := lenstest.KVs(t)
 	return &rbacFixture{adjKV: adjKV, coreKV: coreKV, ids: map[string]string{}, types: map[string]string{}}
 }
 
 func (f *rbacFixture) vtx(t *testing.T, name, typ string, data map[string]any) string {
 	t.Helper()
-	id := rbacNanoID(name)
+	id := lenstest.NanoID(name)
 	f.ids[name] = id
 	f.types[id] = typ
 	key := "vtx." + typ + "." + id

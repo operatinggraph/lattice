@@ -22,33 +22,13 @@ import (
 	"testing"
 	"time"
 
-	"github.com/nats-io/nats.go/jetstream"
 	"github.com/stretchr/testify/require"
 
-	"github.com/operatinggraph/lattice/internal/natsfixture"
+	"github.com/operatinggraph/lattice/internal/lenstest"
 	"github.com/operatinggraph/lattice/internal/refractor/ruleengine"
 	"github.com/operatinggraph/lattice/internal/refractor/ruleengine/full"
 	"github.com/operatinggraph/lattice/internal/substrate"
 )
-
-func capAuthorCypherKVs(t *testing.T) (adjKV, coreKV *substrate.KV) {
-	t.Helper()
-	_, nc := natsfixture.Server(t)
-	js, err := jetstream.New(nc)
-	require.NoError(t, err)
-	ctx := context.Background()
-	_, err = js.CreateKeyValue(ctx, jetstream.KeyValueConfig{Bucket: "adj-capauth-cypher-test"})
-	require.NoError(t, err)
-	_, err = js.CreateKeyValue(ctx, jetstream.KeyValueConfig{Bucket: "core-capauth-cypher-test"})
-	require.NoError(t, err)
-	conn, err := substrate.Wrap(nc)
-	require.NoError(t, err)
-	adjKV, err = conn.OpenKV(ctx, "adj-capauth-cypher-test")
-	require.NoError(t, err)
-	coreKV, err = conn.OpenKV(ctx, "core-capauth-cypher-test")
-	require.NoError(t, err)
-	return adjKV, coreKV
-}
 
 // putVertex writes a root vertex document with an explicit class (which may
 // differ from the key's TYPE segment, as every meta-vertex class does).
@@ -94,33 +74,13 @@ func rowByCapAuthorKey(rows []ruleengine.ProjectionResult, key string) map[strin
 	return nil
 }
 
-// capAuthorNanoID returns a deterministic, Contract-#1-valid 20-char NanoID
-// derived from a logical name (mirrors clinic-domain's lens_cypher_test.go
-// cNanoID helper) — meta-vertex keys need a real NanoID, not an arbitrary
-// string, since the full engine's seed scan classifies/parses every Core KV
-// key through substrate.ParseVertexKey.
-func capAuthorNanoID(name string) string {
-	alphabet := substrate.Alphabet
-	var seed uint64 = 1469598103934665603
-	for _, b := range []byte(name) {
-		seed ^= uint64(b)
-		seed *= 1099511628211
-	}
-	var out [20]byte
-	for i := 0; i < 20; i++ {
-		out[i] = alphabet[seed%uint64(len(alphabet))]
-		seed = seed*1099511628211 + 0x9E3779B97F4A7C15
-	}
-	return string(out[:])
-}
-
 // TestCapabilityProposals_FullEpisodeProjects proves every aspect the capture
 // pair can write surfaces on the review lens, one row per proposal.
 func TestCapabilityProposals_FullEpisodeProjects(t *testing.T) {
 	if testing.Short() {
 		t.Skip("requires NATS")
 	}
-	adjKV, coreKV := capAuthorCypherKVs(t)
+	adjKV, coreKV := lenstest.KVs(t)
 	key := "vtx.capabilityproposal.capPropOneHJKMNPQRST"
 	putVertex(t, coreKV, key, "capabilityproposal")
 	putAspect(t, coreKV, key, "request", "capabilityProposalRequest", map[string]any{
@@ -159,7 +119,7 @@ func TestCapabilityProposals_ClaimInFlight_NullDownstreamColumns(t *testing.T) {
 	if testing.Short() {
 		t.Skip("requires NATS")
 	}
-	adjKV, coreKV := capAuthorCypherKVs(t)
+	adjKV, coreKV := lenstest.KVs(t)
 	key := "vtx.capabilityproposal.capPropTwoHJKMNPQRST"
 	putVertex(t, coreKV, key, "capabilityproposal")
 	putAspect(t, coreKV, key, "request", "capabilityProposalRequest", map[string]any{
@@ -186,9 +146,9 @@ func TestCapabilityAuthorContext_DDLAndNonDDLMetaBothProject(t *testing.T) {
 	if testing.Short() {
 		t.Skip("requires NATS")
 	}
-	adjKV, coreKV := capAuthorCypherKVs(t)
+	adjKV, coreKV := lenstest.KVs(t)
 
-	ddlKey := "vtx.meta." + capAuthorNanoID("capability-proposal-ddl")
+	ddlKey := "vtx.meta." + lenstest.NanoID("capability-proposal-ddl")
 	putVertex(t, coreKV, ddlKey, "meta.ddl.vertexType")
 	putAspect(t, coreKV, ddlKey, "canonicalName", "canonicalName", map[string]any{"value": "capabilityproposal"})
 	putAspect(t, coreKV, ddlKey, "description", "description", map[string]any{"text": "AI-authored capability proposal DDL."})
@@ -198,7 +158,7 @@ func TestCapabilityAuthorContext_DDLAndNonDDLMetaBothProject(t *testing.T) {
 	putAspect(t, coreKV, ddlKey, "fieldDescription", "fieldDescription", map[string]any{"fieldDescriptions": map[string]any{"intent": "the plain-language request"}})
 	putAspect(t, coreKV, ddlKey, "examples", "examples", map[string]any{"examples": []any{map[string]any{"name": "basic"}}})
 
-	lensKey := "vtx.meta." + capAuthorNanoID("capability-proposals-lens")
+	lensKey := "vtx.meta." + lenstest.NanoID("capability-proposals-lens")
 	putVertex(t, coreKV, lensKey, "meta.lens")
 	putAspect(t, coreKV, lensKey, "canonicalName", "canonicalName", map[string]any{"value": "capabilityProposals"})
 	putAspect(t, coreKV, lensKey, "description", "description", map[string]any{"text": "The operator review lens."})

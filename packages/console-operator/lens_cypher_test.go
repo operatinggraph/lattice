@@ -27,51 +27,14 @@ import (
 	"testing"
 	"time"
 
-	"github.com/nats-io/nats.go/jetstream"
 	"github.com/stretchr/testify/require"
 
-	"github.com/operatinggraph/lattice/internal/natsfixture"
+	"github.com/operatinggraph/lattice/internal/lenstest"
 	"github.com/operatinggraph/lattice/internal/refractor/adjacency"
 	"github.com/operatinggraph/lattice/internal/refractor/ruleengine"
 	"github.com/operatinggraph/lattice/internal/refractor/ruleengine/full"
 	"github.com/operatinggraph/lattice/internal/substrate"
 )
-
-func coCypherKVs(t *testing.T) (adjKV, coreKV *substrate.KV) {
-	t.Helper()
-	_, nc := natsfixture.Server(t)
-	js, err := jetstream.New(nc)
-	require.NoError(t, err)
-	conn, err := substrate.Wrap(nc)
-	require.NoError(t, err)
-	ctx := context.Background()
-	_, err = js.CreateKeyValue(ctx, jetstream.KeyValueConfig{Bucket: "adj-consoleoperator-cypher-test"})
-	require.NoError(t, err)
-	_, err = js.CreateKeyValue(ctx, jetstream.KeyValueConfig{Bucket: "core-consoleoperator-cypher-test"})
-	require.NoError(t, err)
-	adjKV, err = conn.OpenKV(ctx, "adj-consoleoperator-cypher-test")
-	require.NoError(t, err)
-	coreKV, err = conn.OpenKV(ctx, "core-consoleoperator-cypher-test")
-	require.NoError(t, err)
-	return adjKV, coreKV
-}
-
-// coNanoID returns a deterministic 20-char Contract #1 NanoID from a logical
-// name (the edge-manifest / wellness-domain helper's derivation).
-func coNanoID(name string) string {
-	alphabet := substrate.Alphabet
-	var seed uint64 = 1469598103934665603
-	for _, b := range []byte(name) {
-		seed ^= uint64(b)
-		seed *= 1099511628211
-	}
-	var out [20]byte
-	for i := 0; i < 20; i++ {
-		out[i] = alphabet[seed%uint64(len(alphabet))]
-		seed = seed*1099511628211 + 0x9E3779B97F4A7C15
-	}
-	return string(out[:])
-}
 
 type coFixture struct {
 	adjKV, coreKV *substrate.KV
@@ -80,13 +43,13 @@ type coFixture struct {
 }
 
 func newCoFixture(t *testing.T) *coFixture {
-	adjKV, coreKV := coCypherKVs(t)
+	adjKV, coreKV := lenstest.KVs(t)
 	return &coFixture{adjKV: adjKV, coreKV: coreKV, ids: map[string]string{}, types: map[string]string{}}
 }
 
 func (f *coFixture) vtx(t *testing.T, name, typ string) string {
 	t.Helper()
-	id := coNanoID(name)
+	id := lenstest.NanoID(name)
 	f.ids[name] = id
 	f.types[id] = typ
 	key := "vtx." + typ + "." + id
@@ -174,7 +137,7 @@ func TestConsoleOperatorReadGrants_GrantsOnlyTheConsoleRoleHolder(t *testing.T) 
 		"only the consoleOperator holder may receive the read-side wildcard — the read-only demoOperator reads through its OWN package's grant, never this one. got %v", rows)
 
 	row := rows[0].Values
-	require.Equal(t, coNanoID("console"), row["actor_id"],
+	require.Equal(t, lenstest.NanoID("console"), row["actor_id"],
 		"actor_id must be the BARE NanoID — Postgres RLS compares it against lattice.actor_id, which is bare; a full vtx key denies every row while the table still looks populated")
 	require.Equal(t, "*", row["anchor_id"])
 	require.Equal(t, "cap-read.consoleOperator", row["grant_source"],

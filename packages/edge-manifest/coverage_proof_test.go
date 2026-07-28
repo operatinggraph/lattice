@@ -30,6 +30,7 @@ import (
 	"sort"
 	"testing"
 
+	"github.com/operatinggraph/lattice/internal/lenstest"
 	"github.com/stretchr/testify/require"
 )
 
@@ -45,7 +46,7 @@ type dataLens struct {
 // reads the vertex root, not an aspect.
 func (f *emFixture) vtxData(t *testing.T, name, typ string, data map[string]any) string {
 	t.Helper()
-	id := emNanoID(name)
+	id := lenstest.NanoID(name)
 	f.ids[name] = id
 	f.types[id] = typ
 	key := "vtx." + typ + "." + id

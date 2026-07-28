@@ -18,33 +18,13 @@ import (
 	"testing"
 	"time"
 
-	"github.com/nats-io/nats.go/jetstream"
 	"github.com/stretchr/testify/require"
 
-	"github.com/operatinggraph/lattice/internal/natsfixture"
+	"github.com/operatinggraph/lattice/internal/lenstest"
 	"github.com/operatinggraph/lattice/internal/refractor/ruleengine"
 	"github.com/operatinggraph/lattice/internal/refractor/ruleengine/full"
 	"github.com/operatinggraph/lattice/internal/substrate"
 )
-
-func shredCypherKVs(t *testing.T) (adjKV, coreKV *substrate.KV) {
-	t.Helper()
-	_, nc := natsfixture.Server(t)
-	js, err := jetstream.New(nc)
-	require.NoError(t, err)
-	conn, err := substrate.Wrap(nc)
-	require.NoError(t, err)
-	ctx := context.Background()
-	_, err = js.CreateKeyValue(ctx, jetstream.KeyValueConfig{Bucket: "adj-shred-cypher-test"})
-	require.NoError(t, err)
-	_, err = js.CreateKeyValue(ctx, jetstream.KeyValueConfig{Bucket: "core-shred-cypher-test"})
-	require.NoError(t, err)
-	adjKV, err = conn.OpenKV(ctx, "adj-shred-cypher-test")
-	require.NoError(t, err)
-	coreKV, err = conn.OpenKV(ctx, "core-shred-cypher-test")
-	require.NoError(t, err)
-	return adjKV, coreKV
-}
 
 func putShredVtx(t *testing.T, coreKV *substrate.KV, id string, piiKeyData map[string]any) string {
 	t.Helper()
@@ -65,7 +45,7 @@ func putShredVtx(t *testing.T, coreKV *substrate.KV, id string, piiKeyData map[s
 }
 
 func TestShredStatusLens_ProjectsOnlyShreddedIdentities(t *testing.T) {
-	adjKV, coreKV := shredCypherKVs(t)
+	adjKV, coreKV := lenstest.KVs(t)
 
 	// In-flight shred: shredded, neither finalization step recorded yet.
 	inflightKey := putShredVtx(t, coreKV, "AAshredInFlightAAAAA", map[string]any{
@@ -118,7 +98,7 @@ func TestShredStatusLens_ProjectsOnlyShreddedIdentities(t *testing.T) {
 // then fails closed on it, which is correct), and keeps piiKey-less
 // identities out entirely.
 func TestPiiKeyEnvelopeLens_ProjectsOnlyIdentitiesWithAnEnvelope(t *testing.T) {
-	adjKV, coreKV := shredCypherKVs(t)
+	adjKV, coreKV := lenstest.KVs(t)
 
 	realKey := putShredVtx(t, coreKV, "AArealEnvelopeAAAAAA", map[string]any{
 		"wrappedDEK": "d2FyID09PT0=", "keyId": "vtx.identity.AArealEnvelopeAAAAAA",
