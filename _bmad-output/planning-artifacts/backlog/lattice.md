@@ -129,11 +129,9 @@ designed-through, but the *fork decision* + the *contract commit* are Andrew's.
 > shared build lock on that basis — select by importance × readiness as normal (§2 above).
 > **Build-ready now:** the **script live-read budget** (★★ M, the bigger sibling of the shipped
 > envelope ceiling) and the two ★ Processor sensitive-predicate rows. The **cap-read per-anchor
-> grant keys** fix (★★ L) is now `🏗️ building` — Fire 1 (mechanism + base-lens migration, all 9
-> increments) and Fire 2 (producer flips — every package-generated `cap-read.*` producer now emits
-> the per-anchor shape) shipped **and Fire 1 is deployed live**; next is Fire 3, the one-shot
-> legacy-shape purge, gated on a full sweep rotation. `appsession`'s OIDC design stays
-> 🗄️ **shelved** (revive: first real-IdP deployment) — unrelated to the showcase.
+> grant keys** fix (★★ L) is now **✅ shipped** — Fires 1-3 all landed 2026-07-28 (Done log); the
+> shred-nullify follow-on for package-generated producers is its own filed row below. `appsession`'s
+> OIDC design stays 🗄️ **shelved** (revive: first real-IdP deployment) — unrelated to the showcase.
 > Every `✅ ratified` row is done or driver-blocked; the rest are Whetstone's or parking-lot.
 > A stale callout starves the lane — whoever ships next renames this.
 >
@@ -150,7 +148,6 @@ designed-through, but the *fork decision* + the *contract commit* are Andrew's.
 | **[Processor] A script's live reads have no budget** | Class-(e) `kv.Links` paging + one `kv.Read` per link is uncapped at the Processor: `identity_has_open_tasks` alone walks 64 pages × 256 links, so one MergeIdentity can issue ~16k sequential Core-KV GETs — ~16x the declared-read ceiling, which never sees a live read. `connKVReader.ReadVertex` has no budget. | ★★ | M | 📋 ready · consumer: any actor able to submit an op whose script enumerates |
 | **[packages] ~20 read-posture comments assert hydration-time fatality** | `packages/*` DDL comments + two READMEs still say a declared-but-absent read faults "before the script runs" (identity-domain, service-domain, privacy-base, objects-base, orchestration-base, clinic/loftspace READMEs), as does `docs/contracts/10-orchestration-substrate.md:238`. Doc-only sweep. | ★ | S | 📋 ready |
 | **Starlark 250ms wall budget fails installs under parallel test load** | `go test ./...` at default `-p` reds a different package-install test each run with `ScriptTimeout: script exceeded wall budget 250ms` — reproduced on unmodified `main`, so it predates any one fire. Costs every fire an investigation to rule out its own change. | ★★ | S–M | 📋 ready |
-| **[Refractor] A `cap-read` document has no size bound** | Even deduped, an actor reaching enough distinct anchors renders `cap-read.<domain>.<actor>` past NATS's max payload; the write then fails permanently, freezing that actor's grant set so revocations stop landing (fail-OPEN). Design: per-anchor keys (the Postgres per-row twin). | ★★ | L | 🏗️ building · [design](../../implementation-artifacts/cap-read-per-anchor-grant-keys-design.md) §10 Fire 1+2 shipped + live · next: Fire 3 legacy purge |
 | **[Refractor] A package-generated `cap-read.*` producer's grants are not shred-nullified** | Only the base lens is wired into `keyshredded`'s `NullifyTarget` list — a shredded identity's package-domain grants (e.g. edge-manifest's) survive. Needs per-producer `NullifyTarget` wiring (lens IDs are install-time NanoIDs, not a static list). | ★★ | S–M | 📋 ready · [design](../../implementation-artifacts/cap-read-per-anchor-grant-keys-design.md) |
 | **[appsession] The production IdP posture cannot open a session** | `setCookie` runs only under a non-nil `Signer`, so with `_JWT_PUBLIC_KEY`/`_ISSUER` set nothing can issue the cookie — the verify-only posture is unreachable (401 everywhere), and `/api/session/refresh` 404s so every FE write path dies with it. Design: the kit becomes the OIDC code-flow RP. | ★★ | L | 🗄️ shelved (revive: first real-IdP deployment) · ✅ design Andrew-ratified 2026-07-25 · [design](../../implementation-artifacts/appsession-oidc-production-signin-design.md) |
 | **Multi-hat `scope=any`+`scope=self` first-match over-confines** | `matchPlatformPermission` returns on the first operationType match regardless of scope, and `capabilityRoles` collects roles unordered — so a consumer+staff identity (e.g. seed-showcase `seedSamMultiHat`) can authorize their OWN cafe tab as scope=any, losing the self exemption. Fail-closed; bites a multi-hat who works and lives in different buildings. | ★ | S–M | 📋 ready · no live victim (showcase multi-hat has no leaseapp) |
@@ -223,6 +220,7 @@ Real but low-value; do **not** spend design or build effort here unless Andrew g
 
 One line per shipped item (`date · SHA · [tag] title`). Oldest roll to `archive/` past ~25.
 
+- 2026-07-28 · `76c9629e` · [cap-read] Fire 3 legacy-shape purge — one-shot tool tombstones any surviving legacy doc, IsReadable drops the dual-read union; item closes (Fires 1-3 all shipped)
 - 2026-07-28 · `3d950442` · [weaver,loftspace-ledger] DebitAccount derives amountCents from the clause's own .terms — never a Weaver-copied row value — closing the census row 5 money-provenance gap
 - 2026-07-28 · `101b01fd` · [cap-read] Fire 2 producer flips — every generated cap-read producer (edge-manifest's three) now emits per-anchor grant keys; validateGrantDomainName hardened
 - 2026-07-27 · `d8bdf7fe` · [identity-hygiene] MergeIdentity's dead link-collision check now fires — rewritten-key optionalReads declared, so a real collision migrates as a duplicate instead of rejecting the whole merge

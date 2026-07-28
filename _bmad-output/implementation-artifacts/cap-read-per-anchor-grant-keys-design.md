@@ -1,14 +1,15 @@
 # `cap-read` size bound — per-anchor grant keys (the KV read-grant slice stops being one unbounded document)
 
-**Status: ✅ Andrew-ratified 2026-07-25 (Option A — keep the KV family, per-anchor) — 🏗️ BUILDING
-(Fire 1 + Fire 2 shipped and live; Fire 3 open).** The §6.13/§6.14 contract edit is **committed** at
-ratification per the house rule (the contract is the build-to target; its transitional note marks the
-legacy document shape as the live wire format until the build drains it). The build-shelve (showcase
-priority) lifted 2026-07-27 — Facet's showcase build shipped end-to-end — and Fire 1 started the same
-fire. Fires ship 1→2→3 (+4 independent) as decomposed in §10; §4.5's prefix-scoped truncate landed via
+**Status: ✅ Andrew-ratified 2026-07-25 (Option A — keep the KV family, per-anchor) — ✅ BUILT
+(Fires 1-3 shipped and live).** The §6.13/§6.14 contract edit was **committed** at ratification per the
+house rule (the contract is the build-to target); its transitional note is now updated **uncommitted**
+in the working tree to record the drain's completion (a factual correction, not a new decision —
+flagged for Andrew per the standalone-contract-edit convention). The build-shelve (showcase priority)
+lifted 2026-07-27 — Facet's showcase build shipped end-to-end — and Fire 1 started the same fire. Fires
+shipped 1→2→3 (+4 independent, unaffected) as decomposed in §10; §4.5's prefix-scoped truncate landed via
 Fire 1 (inheriting the standalone fire-briefs Fire B). Fire 2 (producer flips) shipped 2026-07-28 —
-every `cap-read.*` producer repo-wide (base lens + every package-generated one) now emits the per-anchor
-shape; only Fire 3's one-shot legacy-shape purge remains.
+every `cap-read.*` producer repo-wide (base lens + every package-generated one) emits the per-anchor
+shape. Fire 3 (legacy-shape retirement) shipped 2026-07-28 — see checkpoint below.
 
 **CHECKPOINT (Fire 1, increment 1 — 2026-07-27, merged to main `81e157ca`; worktree removed, fully
 merged, no unlanded work — start a fresh worktree for the next increment):** shipped the §3.3 `entryKeyColumn`
@@ -508,8 +509,35 @@ Gates green: `go build ./...`, `make vet`, `golangci-lint run ./...` (full repo,
 lint-conventions.go`, `lint-package-version.go`, `STRICT=1 lint-package-standard.go`,
 `lint-lens-anchors.go`, `lint-facet-discovery.go`, full `go test ./...` (0 failures).
 
-**Next increment (Fire 3, XS–S):** the §6.4 one-shot legacy-shape purge, gated on a full sweep rotation
-having drained every package-domain slice post-flip.
+**CHECKPOINT (Fire 3 — 2026-07-28, merged to main `76c9629e`; no worktree — the gate check + tool were
+run directly against the live stack, then the read-path edit landed in `main`; nothing left in flight):** verified the §6 point 4
+gate live before building anything — a purpose-built classifier (bucket `kv ls` conflates the new 4-token
+base per-anchor shape with the legacy 4-token domain-doc shape by raw token count alone; had to
+disambiguate by the §3.1 disjointness test, not just count) confirmed all 200 legacy-shape `cap-read.*`
+entries (50 base + 150 domain) already carried `isDeleted:true` — the sweep had already drained the
+population. Built `scripts/purge-cap-read-legacy.go` (+ `make purge-cap-read-legacy`) as the durable
+one-shot tool the design calls for (bounded `cap-read.` prefix enumeration, §3.1 shape classification,
+guard-tombstone at `math.MaxInt64` reimplementing `guardedWrite`'s tombstone CAS loop — no existing
+exported function reaches this from outside a running pipeline), ran it against the live stack: `scanned
+=1429 new-shape=1229 legacy-already-tombstoned=200 legacy-purged-now=0 unknown=0 errors=0`, confirming
+the gate with a real, reusable mechanism rather than a one-off manual check. Then dropped the legacy
+dual-read union from `capabilityread.IsReadable` (`internal/refractor/capabilityread/capabilityread.go`)
+— deleted the `readDoc`/`readableAnchor` types and the base+domain aggregate-document fallback, keeping
+only the two per-anchor-key checks. Converted every doc-shape test fixture found repo-wide to per-anchor
+seeding (not deleted where the invariant is still real): `capabilityread_test.go` (6 pure-legacy tests
+dropped as redundant with existing per-anchor siblings, `WildcardAnchorEntry` converted to pin a
+**stronger** property than before — NATS-KV itself refuses to write a key with a literal `*` anchor-id
+segment, `jetstream.ErrInvalidKey`, so the vulnerable state is unconstructable rather than merely
+unadmitted), `internal/refractor/personal_lens_pl3_e2e_test.go`, `personal_lens_selfanchor_grow_e2e_test.go`,
+and `internal/refractor/projection/personal_internal_test.go` (a distinct `putReadDoc` helper in a
+different package, same legacy shape, seeding `personalEnvelopeFn`'s real-grant path — would have quietly
+gone stale/wrong without the repo-wide grep). `edge_manifest_fire2_producer_flip_e2e_test.go`'s legacy
+seed is correctly untouched (it proves the writer-side tombstone-on-flip, not the reader). Updated
+`docs/contracts/06-capability-kv.md`'s transitional note (left **uncommitted** — a factual correction,
+not a new decision, flagged on the board). Gates green: `go build ./...`, `go vet ./...`, `golangci-lint
+run ./...` (0 issues), `STRICT=1 lint-conventions.go`, `lint-lens-anchors.go`, `lint-facet-discovery.go`,
+`STRICT=1 lint-package-standard.go`, `lint-package-version.go`, full `go test ./...` (113 packages, 0
+failures).
 
 **Author:** Winston (Designer fire, 2026-07-25); increment 2 built by Winston (Lattice Steward fire, 2026-07-27);
 increment 3 built by Winston (Lattice Steward fire, 2026-07-27); increment 4 built by Winston (Lattice
@@ -517,7 +545,8 @@ Steward fire, 2026-07-28); increment 5 built by Winston (Lattice Steward fire, 2
 built by Winston (Lattice Steward fire, 2026-07-28); increment 7 built by Winston (Lattice Steward fire,
 2026-07-28); increment 8 built by Winston (Lattice Steward fire, 2026-07-28); increment 9 built by
 Winston (Lattice Steward fire, 2026-07-28); increment 9 deployed live by Winston (Lattice Steward fire,
-2026-07-28); Fire 2 built by Winston (Lattice Steward fire, 2026-07-28)
+2026-07-28); Fire 2 built by Winston (Lattice Steward fire, 2026-07-28); Fire 3 built by Winston (Lattice
+Steward fire, 2026-07-28)
 **Backlog:** Stream-2 Security & trust boundary — *[Refractor] A `cap-read` document has no size bound* (★★, M)
 **Owning components:** `internal/refractor/{projection,pipeline,adapter,capabilityread,keyshredded}` (mechanism), `internal/bootstrap/lenses.go` + `internal/pkgmgr/anchorwalk.go` (producers), `packages/edge-manifest` (+ any package shipping a `cap-read.*` NATS-KV producer). Docs: `docs/contracts/06-capability-kv.md` §6.13/§6.14 (edit prepared uncommitted in the working tree), `docs/components/refractor.md`.
 
