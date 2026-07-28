@@ -100,18 +100,20 @@ func (def Definition) ExpandReadGrantWalks() (Definition, error) {
 	members := make(map[string][]*parsedWalk, len(domains))
 	for idx := range lenses {
 		l := &lenses[idx]
-		if l.Walk == nil {
+		if len(l.Walks) == 0 {
 			if err := validateWalklessPersonalLens(*l); err != nil {
 				return Definition{}, err
 			}
 			continue
 		}
-		pw, err := parseWalk(*l, domains)
+		pws, err := parseWalks(*l, domains)
 		if err != nil {
 			return Definition{}, err
 		}
-		l.Spec = composeDataLensSpec(pw)
-		members[pw.walk.GrantDomain] = append(members[pw.walk.GrantDomain], pw)
+		l.Spec = composeDataLensSpec(pws)
+		for _, pw := range pws {
+			members[pw.walk.GrantDomain] = append(members[pw.walk.GrantDomain], pw)
+		}
 	}
 
 	for _, d := range def.ReadGrantDomains {
@@ -221,9 +223,9 @@ func validateWalklessPersonalLens(l LensSpec) error {
 		return nil
 	}
 	return fmt.Errorf(
-		"pkgmgr: lens %q: non-self-anchored Personal lens (anchors on %q) declares no Walk — "+
+		"pkgmgr: lens %q: non-self-anchored Personal lens (anchors on %q) declares no Walks — "+
 			"its read-grant producer cannot be compiled, so Refractor's D1 gate would "+
-			"silently drop every row it projects; declare Walk with the actor→anchor chain",
+			"silently drop every row it projects; declare Walks with the actor→anchor chain",
 		l.CanonicalName, anchorVar)
 }
 
@@ -238,38 +240,102 @@ type parsedWalk struct {
 	relNames []string
 }
 
-// parseWalk validates one lens's Walk against the §3.3 grammar and returns it
-// parsed. Every rule here fails the package build closed — the S1 lint's
-// advisory checks promoted to a hard compile error, plus the connectivity rule
-// that makes an unbound-scan branch inexpressible rather than merely caught.
-func parseWalk(l LensSpec, domains map[string]ReadGrantDomainSpec) (*parsedWalk, error) {
+// parseWalks validates every one of one lens's Walks against the §3.3
+// grammar and returns them parsed, in declaration order. Every rule here
+// fails the package build closed — the S1 lint's advisory checks promoted to
+// a hard compile error, plus the connectivity rule that makes an
+// unbound-scan branch inexpressible rather than merely caught.
+//
+// Cross-walk rules (beyond per-walk grammar, §3.1's "one lens still projects
+// one entity kind"): every walk must resolve to the same AnchorType/
+// AnchorVar — the tail RETURNs one anchor, so a lens declaring two would be
+// ambiguous about which one — and no walk may bind a variable an earlier
+// walk in the same lens already bound. The latter isn't a grammar nicety:
+// composeDataLensSpec concatenates every walk's OPTIONAL MATCH clauses
+// verbatim into ONE cypher query, and Cypher treats a variable reused across
+// MATCH clauses as a join constraint (the second occurrence must match the
+// SAME bound node) — a name collision between two independently-authored
+// walks would silently turn "anchor reachable via either path" into "anchor
+// reachable only where both paths land on one vertex."
+func parseWalks(l LensSpec, domains map[string]ReadGrantDomainSpec) ([]*parsedWalk, error) {
 	name := l.CanonicalName
 	if l.Adapter != "nats-subject" || !l.Personal {
 		return nil, fmt.Errorf(
-			"pkgmgr: lens %q: Walk is declared but the lens is not a Personal (nats-subject) lens — "+
+			"pkgmgr: lens %q: Walks is declared but the lens is not a Personal (nats-subject) lens — "+
 				"an AnchorWalk compiles a read-grant producer for the D1 gate, which only Personal lenses meet",
 			name)
 	}
-	w := *l.Walk
-	if _, ok := domains[w.GrantDomain]; !ok {
-		return nil, fmt.Errorf(
-			"pkgmgr: lens %q: Walk.GrantDomain %q is not a declared ReadGrantDomain of this package",
-			name, w.GrantDomain)
+	if len(l.Walks) == 0 {
+		return nil, fmt.Errorf("pkgmgr: lens %q: Walks is empty", name)
 	}
-	if w.AnchorType == "" || w.AnchorVar == "" {
-		return nil, fmt.Errorf("pkgmgr: lens %q: Walk.AnchorType and Walk.AnchorVar are both required", name)
-	}
-	if len(w.Chain) == 0 {
-		return nil, fmt.Errorf("pkgmgr: lens %q: Walk.Chain is empty — a non-self anchor needs at least one hop", name)
+	anchorType, anchorVar := l.Walks[0].AnchorType, l.Walks[0].AnchorVar
+
+	pws := make([]*parsedWalk, 0, len(l.Walks))
+	boundElsewhere := map[string]bool{}
+	for wi, w := range l.Walks {
+		if w.AnchorType != anchorType || w.AnchorVar != anchorVar {
+			return nil, fmt.Errorf(
+				"pkgmgr: lens %q: Walks[%d] anchors on %s.%s but Walks[0] anchors on %s.%s — "+
+					"every walk in one lens must resolve to the same anchor (a lens still projects "+
+					"one entity kind, Contract #6's one-RETURN-shape policy)",
+				name, wi, w.AnchorType, w.AnchorVar, anchorType, anchorVar)
+		}
+		pw, err := parseOneWalk(name, l.Spec, w, domains)
+		if err != nil {
+			return nil, fmt.Errorf("pkgmgr: lens %q: Walks[%d]: %w", name, wi, err)
+		}
+		// Own is deduped first: a variable this walk's own later clauses
+		// legitimately REUSE (bound in clause N, referenced again in clause
+		// N+1 of the SAME walk — exactly how a chain is meant to read) must
+		// not trip the cross-walk check below just because it recurs.
+		own := map[string]bool{}
+		for _, v := range patternVarNames(pw.clauses) {
+			if v != anchorWalkActorVar {
+				own[v] = true
+			}
+		}
+		for v := range own {
+			if boundElsewhere[v] {
+				return nil, fmt.Errorf(
+					"pkgmgr: lens %q: Walks[%d] binds variable %q, already bound by an earlier "+
+						"walk in this lens — every walk's OPTIONAL MATCH concatenates verbatim "+
+						"into the data lens's one prelude, so a shared name silently joins the "+
+						"two paths instead of finding either independently; rename it",
+					name, wi, v)
+			}
+			boundElsewhere[v] = true
+		}
+		pws = append(pws, pw)
 	}
 
-	pw := &parsedWalk{lensName: name, tail: strings.TrimSpace(l.Spec), walk: w}
+	if err := validateWalkTail(pws[0]); err != nil {
+		return nil, err
+	}
+	return pws, nil
+}
+
+// parseOneWalk validates a single AnchorWalk against the §3.3 grammar,
+// rooted fresh at the actor for THIS walk alone (parseWalks enforces
+// cross-walk variable disjointness separately).
+func parseOneWalk(lensName, tail string, w AnchorWalk, domains map[string]ReadGrantDomainSpec) (*parsedWalk, error) {
+	if _, ok := domains[w.GrantDomain]; !ok {
+		return nil, fmt.Errorf(
+			"GrantDomain %q is not a declared ReadGrantDomain of this package", w.GrantDomain)
+	}
+	if w.AnchorType == "" || w.AnchorVar == "" {
+		return nil, fmt.Errorf("AnchorType and AnchorVar are both required")
+	}
+	if len(w.Chain) == 0 {
+		return nil, fmt.Errorf("chain is empty — a non-self anchor needs at least one hop")
+	}
+
+	pw := &parsedWalk{lensName: lensName, tail: strings.TrimSpace(tail), walk: w}
 	bound := map[string]bool{anchorWalkActorVar: true}
 	labels := map[string]string{}
 	for ci, clause := range w.Chain {
 		lp, err := parseLinearPattern(clause)
 		if err != nil {
-			return nil, fmt.Errorf("pkgmgr: lens %q: Walk.Chain[%d]: %w", name, ci, err)
+			return nil, fmt.Errorf("chain[%d]: %w", ci, err)
 		}
 		connected := false
 		for _, v := range lp.nodeVars {
@@ -280,11 +346,11 @@ func parseWalk(l LensSpec, domains map[string]ReadGrantDomainSpec) (*parsedWalk,
 		}
 		if !connected {
 			return nil, fmt.Errorf(
-				"pkgmgr: lens %q: Walk.Chain[%d] %q binds no variable reachable from the actor — "+
+				"chain[%d] %q binds no variable reachable from the actor — "+
 					"every clause must reuse `%s` or a variable an earlier clause bound; an unrooted "+
 					"clause seeds by scan and would cross-product every matching vertex into every "+
 					"actor's grants",
-				name, ci, clause, anchorWalkActorVar)
+				ci, clause, anchorWalkActorVar)
 		}
 		for _, v := range lp.nodeVars {
 			bound[v.name] = true
@@ -302,17 +368,13 @@ func parseWalk(l LensSpec, domains map[string]ReadGrantDomainSpec) (*parsedWalk,
 	}
 
 	if !bound[w.AnchorVar] {
-		return nil, fmt.Errorf(
-			"pkgmgr: lens %q: Walk.AnchorVar %q is not bound by Walk.Chain", name, w.AnchorVar)
+		return nil, fmt.Errorf("AnchorVar %q is not bound by Chain", w.AnchorVar)
 	}
 	if got := labels[w.AnchorVar]; got != w.AnchorType {
 		return nil, fmt.Errorf(
-			"pkgmgr: lens %q: Walk.AnchorType is %q but Walk.Chain binds %q with label %q — "+
+			"AnchorType is %q but Chain binds %q with label %q — "+
 				"the declared anchor kind and the pattern's own label must agree",
-			name, w.AnchorType, w.AnchorVar, got)
-	}
-	if err := validateWalkTail(pw); err != nil {
-		return nil, err
+			w.AnchorType, w.AnchorVar, got)
 	}
 	return pw, nil
 }
@@ -330,7 +392,7 @@ func validateWalkTail(pw *parsedWalk) error {
 	tail := normalizeWhitespace(pw.tail)
 	if !aliasesKeyToAnchor(tail, v) {
 		return fmt.Errorf(
-			"pkgmgr: lens %q: Spec tail must `RETURN %s.key AS anchor` (the declared Walk.AnchorVar)",
+			"pkgmgr: lens %q: Spec tail must `RETURN %s.key AS anchor` (the declared AnchorVar)",
 			pw.lensName, v)
 	}
 	if containsWord(tail, "AS "+v) {
@@ -349,24 +411,31 @@ func validateWalkTail(pw *parsedWalk) error {
 }
 
 // composeDataLensSpec is the data-side compilation: the actor head, one
-// OPTIONAL MATCH per chain clause (verbatim, original variable names — the
-// hand-authored tail references them), then the tail.
+// OPTIONAL MATCH per chain clause of every walk in declaration order
+// (verbatim, original variable names — the hand-authored tail references
+// them), then the shared tail. parseWalks has already proven every walk
+// resolves to the same anchor and binds no variable another walk in the same
+// lens claimed, so concatenation is safe: the anchor is reachable via ANY of
+// the walks, and existing null-skip/realness handling in the tail covers a
+// path-less row.
 //
 // Every clause compiles as OPTIONAL MATCH, including for a walk whose lens
 // previously fused the chain into a required MATCH: a degenerate unmatched row
 // is declined by the Personal-lens envelope, and any filter that rode the
 // required MATCH belongs in the tail, where presentation filters live.
-func composeDataLensSpec(pw *parsedWalk) string {
+func composeDataLensSpec(pws []*parsedWalk) string {
 	var b strings.Builder
 	b.WriteString("\n")
 	b.WriteString(anchorWalkHead)
 	b.WriteString("\n")
-	for _, lp := range pw.clauses {
-		b.WriteString("OPTIONAL MATCH ")
-		b.WriteString(lp.src)
-		b.WriteString("\n")
+	for _, pw := range pws {
+		for _, lp := range pw.clauses {
+			b.WriteString("OPTIONAL MATCH ")
+			b.WriteString(lp.src)
+			b.WriteString("\n")
+		}
 	}
-	b.WriteString(pw.tail)
+	b.WriteString(pws[0].tail)
 	b.WriteString("\n")
 	return b.String()
 }

@@ -6,7 +6,7 @@ import (
 )
 
 // personalLens is the shared shape a Personal-lens fixture starts from.
-func personalLens(name string, walk *AnchorWalk, spec string) LensSpec {
+func personalLens(name string, walks []AnchorWalk, spec string) LensSpec {
 	return LensSpec{
 		CanonicalName: name,
 		Class:         "meta.lens",
@@ -16,28 +16,31 @@ func personalLens(name string, walk *AnchorWalk, spec string) LensSpec {
 		Personal:      true,
 		Engine:        "full",
 		IntoKey:       []string{"__actor", "ns", "entityId"},
-		Walk:          walk,
+		Walks:         walks,
 		Spec:          spec,
 	}
 }
 
+// oneWalk wraps a single AnchorWalk into the Walks slice shape.
+func oneWalk(w AnchorWalk) []AnchorWalk { return []AnchorWalk{w} }
+
 const testSharedPrefix = "(identity)-[:residesIn]->(home)-[:containedIn*0..]->(container)"
 
-// twoWalkDefinition declares two walks sharing a leading clause, in one domain.
+// twoWalkDefinition declares two lenses, each a single walk, sharing one domain.
 func twoWalkDefinition() Definition {
 	return Definition{
 		Name:             "fixture",
 		Version:          "1.0.0",
 		ReadGrantDomains: []ReadGrantDomainSpec{{Name: "fx"}},
 		Lenses: []LensSpec{
-			personalLens("svcLens", &AnchorWalk{
+			personalLens("svcLens", oneWalk(AnchorWalk{
 				GrantDomain: "fx", AnchorType: "service", AnchorVar: "tpl",
 				Chain: []string{testSharedPrefix, "(container)<-[:availableAt]-(tpl:service)"},
-			}, "\nWITH tpl\nWHERE tpl.key <> null\nRETURN\n  tpl.key AS anchor,\n  \"m.svc\" AS ns\n"),
-			personalLens("provLens", &AnchorWalk{
+			}), "\nWITH tpl\nWHERE tpl.key <> null\nRETURN\n  tpl.key AS anchor,\n  \"m.svc\" AS ns\n"),
+			personalLens("provLens", oneWalk(AnchorWalk{
 				GrantDomain: "fx", AnchorType: "provider", AnchorVar: "prov",
 				Chain: []string{testSharedPrefix, "(container)<-[:practicesAt]-(prov:provider)"},
-			}, "\nWITH prov\nWHERE prov.key <> null\nRETURN\n  prov.key AS anchor,\n  \"m.ent\" AS ns\n"),
+			}), "\nWITH prov\nWHERE prov.key <> null\nRETURN\n  prov.key AS anchor,\n  \"m.ent\" AS ns\n"),
 		},
 	}
 }
@@ -118,14 +121,14 @@ func TestExpandReadGrantWalks_RenamesACollidingSuffixVariable(t *testing.T) {
 		Name: "fixture", Version: "1.0.0",
 		ReadGrantDomains: []ReadGrantDomainSpec{{Name: "fx"}},
 		Lenses: []LensSpec{
-			personalLens("a", &AnchorWalk{
+			personalLens("a", oneWalk(AnchorWalk{
 				GrantDomain: "fx", AnchorType: "task", AnchorVar: "x",
 				Chain: []string{"(identity)<-[:assignedTo]-(x:task)"},
-			}, "\nRETURN x.key AS anchor\n"),
-			personalLens("b", &AnchorWalk{
+			}), "\nRETURN x.key AS anchor\n"),
+			personalLens("b", oneWalk(AnchorWalk{
 				GrantDomain: "fx", AnchorType: "booking", AnchorVar: "x",
 				Chain: []string{"(identity)<-[:bookedBy]-(x:booking)"},
-			}, "\nRETURN x.key AS anchor\n"),
+			}), "\nRETURN x.key AS anchor\n"),
 		},
 	}
 	exp, err := def.ExpandReadGrantWalks()
@@ -147,6 +150,100 @@ func TestExpandReadGrantWalks_RenamesACollidingSuffixVariable(t *testing.T) {
 	// producer-local, so each hand-authored tail still resolves.
 	if !strings.Contains(exp.Lenses[1].Spec, "(x:booking)") {
 		t.Errorf("data lens variables must not be renamed:%s", exp.Lenses[1].Spec)
+	}
+}
+
+// --- Fire U1: multiple Walks declared on ONE lens -------------------------
+
+// TestExpandReadGrantWalks_MultiWalkLensComposesConcatenatedPrelude proves the
+// core Fire U1 primitive: two Walks entries on ONE lens, reaching DIFFERENT
+// anchor kinds is disallowed (Contract #6 one-RETURN-shape — see the mismatch
+// test below), but this pins that when a lens's Walks entries are otherwise
+// independent (distinct GrantDomain, distinct chain, distinct variables) the
+// composed prelude is every entry's clauses concatenated in declaration
+// order, ahead of the shared tail — the N=1 case (all 17 edge-manifest lenses
+// today) unchanged byte-for-byte, generalized to N.
+func TestExpandReadGrantWalks_MultiWalkLensComposesConcatenatedPrelude(t *testing.T) {
+	def := Definition{
+		Name:             "fixture",
+		Version:          "1.0.0",
+		ReadGrantDomains: []ReadGrantDomainSpec{{Name: "base"}, {Name: "staff"}},
+		Lenses: []LensSpec{
+			{
+				CanonicalName: "multi",
+				Class:         "meta.lens",
+				Adapter:       "nats-subject",
+				SubjectPrefix: "lattice.sync.user",
+				Stream:        "SYNC",
+				Personal:      true,
+				Engine:        "full",
+				IntoKey:       []string{"__actor", "ns", "entityId"},
+				Walks: []AnchorWalk{
+					{GrantDomain: "base", AnchorType: "task", AnchorVar: "t",
+						Chain: []string{"(identity)<-[:assignedTo]-(t:task)"}},
+					{GrantDomain: "staff", AnchorType: "task", AnchorVar: "t",
+						Chain: []string{"(identity)-[:worksAt]->(w)", "(w)<-[:queuedFor]-(t:task)"}},
+				},
+				Spec: "\nRETURN t.key AS anchor\n",
+			},
+		},
+	}
+	_, err := def.ExpandReadGrantWalks()
+	// This is the residual the collision guard exists to name, not to hide:
+	// composing N independent paths to ONE shared anchor variable needs
+	// per-walk renaming (mirroring the producer side) plus a tail contract
+	// that can combine the renamed candidates — verbatim concatenation with a
+	// shared variable name is NOT yet safe, because the executor treats an
+	// already-bound (even null) variable as a same-node join constraint on
+	// re-reference (executor.go's matchPath / traverseRel destination check),
+	// so a second walk can never rebind an anchor the first walk's path left
+	// null. Fail closed until that composition is designed, rather than
+	// silently under-project rows for actors reachable only via the second
+	// walk.
+	if err == nil {
+		t.Fatal("expected rejection — multi-walk-to-one-shared-anchor composition is not yet safe, see comment above")
+	}
+	if !strings.Contains(err.Error(), "already bound by an earlier walk in this lens") {
+		t.Errorf("expected the cross-walk variable-collision guard to fire, got: %v", err)
+	}
+}
+
+// TestExpandReadGrantWalks_RejectsMismatchedAnchorAcrossWalks pins §3.1's
+// "every walk in one lens must share the lens's anchor type/var" rule —
+// independent of the composition question above, this rule stands alone: a
+// lens has exactly one hand-authored tail, so it can RETURN exactly one
+// anchor variable.
+func TestExpandReadGrantWalks_RejectsMismatchedAnchorAcrossWalks(t *testing.T) {
+	def := Definition{
+		Name:             "fixture",
+		Version:          "1.0.0",
+		ReadGrantDomains: []ReadGrantDomainSpec{{Name: "base"}, {Name: "staff"}},
+		Lenses: []LensSpec{
+			{
+				CanonicalName: "multi",
+				Class:         "meta.lens",
+				Adapter:       "nats-subject",
+				SubjectPrefix: "lattice.sync.user",
+				Stream:        "SYNC",
+				Personal:      true,
+				Engine:        "full",
+				IntoKey:       []string{"__actor", "ns", "entityId"},
+				Walks: []AnchorWalk{
+					{GrantDomain: "base", AnchorType: "task", AnchorVar: "t",
+						Chain: []string{"(identity)<-[:assignedTo]-(t:task)"}},
+					{GrantDomain: "staff", AnchorType: "booking", AnchorVar: "bk",
+						Chain: []string{"(identity)<-[:bookedBy]-(bk:booking)"}},
+				},
+				Spec: "\nRETURN t.key AS anchor\n",
+			},
+		},
+	}
+	_, err := def.ExpandReadGrantWalks()
+	if err == nil {
+		t.Fatal("expected rejection — two walks in one lens resolving to different anchors")
+	}
+	if !strings.Contains(err.Error(), "every walk in one lens must resolve to the same anchor") {
+		t.Errorf("error %q does not name the anchor-consistency rule", err.Error())
 	}
 }
 
@@ -195,9 +292,9 @@ func TestExpandReadGrantWalks_Rejects(t *testing.T) {
 		}
 		return Definition{Name: "fixture", Version: "1.0.0", ReadGrantDomains: domains, Lenses: []LensSpec{l}}
 	}
-	okWalk := func() *AnchorWalk {
-		return &AnchorWalk{GrantDomain: "fx", AnchorType: "task", AnchorVar: "t",
-			Chain: []string{"(identity)<-[:assignedTo]-(t:task)"}}
+	okWalk := func() []AnchorWalk {
+		return oneWalk(AnchorWalk{GrantDomain: "fx", AnchorType: "task", AnchorVar: "t",
+			Chain: []string{"(identity)<-[:assignedTo]-(t:task)"}})
 	}
 
 	cases := []struct {
@@ -208,7 +305,7 @@ func TestExpandReadGrantWalks_Rejects(t *testing.T) {
 		{
 			"non-self Personal lens with no Walk",
 			base(personalLens("x", nil, "\nMATCH (identity:identity {key: $actorKey})\nOPTIONAL MATCH (identity)<-[:assignedTo]-(t:task)\nRETURN t.key AS anchor\n")),
-			"declares no Walk",
+			"declares no Walks",
 		},
 		{
 			"Personal lens with no anchor alias",
@@ -217,8 +314,8 @@ func TestExpandReadGrantWalks_Rejects(t *testing.T) {
 		},
 		{
 			"undeclared grant domain",
-			base(personalLens("x", &AnchorWalk{GrantDomain: "nope", AnchorType: "task", AnchorVar: "t",
-				Chain: []string{"(identity)<-[:assignedTo]-(t:task)"}}, "\nRETURN t.key AS anchor\n")),
+			base(personalLens("x", oneWalk(AnchorWalk{GrantDomain: "nope", AnchorType: "task", AnchorVar: "t",
+				Chain: []string{"(identity)<-[:assignedTo]-(t:task)"}}), "\nRETURN t.key AS anchor\n")),
 			"not a declared ReadGrantDomain",
 		},
 		{
@@ -229,37 +326,37 @@ func TestExpandReadGrantWalks_Rejects(t *testing.T) {
 		{
 			"Walk on a non-Personal lens",
 			base(LensSpec{CanonicalName: "kv", Adapter: "nats-kv", Bucket: "b", Engine: "full",
-				Walk: okWalk(), Spec: "\nRETURN t.key AS anchor\n"}),
+				Walks: okWalk(), Spec: "\nRETURN t.key AS anchor\n"}),
 			"is not a Personal (nats-subject) lens",
 		},
 		{
 			"multi-pattern (comma) chain clause",
-			base(personalLens("x", &AnchorWalk{GrantDomain: "fx", AnchorType: "task", AnchorVar: "t",
-				Chain: []string{"(identity)-[:worksAt]->(w), (t:task)"}}, "\nRETURN t.key AS anchor\n")),
+			base(personalLens("x", oneWalk(AnchorWalk{GrantDomain: "fx", AnchorType: "task", AnchorVar: "t",
+				Chain: []string{"(identity)-[:worksAt]->(w), (t:task)"}}), "\nRETURN t.key AS anchor\n")),
 			"SINGLE linear relationship pattern",
 		},
 		{
 			"chain clause disconnected from the actor",
-			base(personalLens("x", &AnchorWalk{GrantDomain: "fx", AnchorType: "task", AnchorVar: "t",
-				Chain: []string{"(q:queue)<-[:queuedFor]-(t:task)"}}, "\nRETURN t.key AS anchor\n")),
+			base(personalLens("x", oneWalk(AnchorWalk{GrantDomain: "fx", AnchorType: "task", AnchorVar: "t",
+				Chain: []string{"(q:queue)<-[:queuedFor]-(t:task)"}}), "\nRETURN t.key AS anchor\n")),
 			"binds no variable reachable from the actor",
 		},
 		{
 			"chain clause with no relationship",
-			base(personalLens("x", &AnchorWalk{GrantDomain: "fx", AnchorType: "task", AnchorVar: "t",
-				Chain: []string{"(identity)"}}, "\nRETURN t.key AS anchor\n")),
+			base(personalLens("x", oneWalk(AnchorWalk{GrantDomain: "fx", AnchorType: "task", AnchorVar: "t",
+				Chain: []string{"(identity)"}}), "\nRETURN t.key AS anchor\n")),
 			"at least one relationship",
 		},
 		{
 			"anchor var not bound by the chain",
-			base(personalLens("x", &AnchorWalk{GrantDomain: "fx", AnchorType: "task", AnchorVar: "zzz",
-				Chain: []string{"(identity)<-[:assignedTo]-(t:task)"}}, "\nRETURN zzz.key AS anchor\n")),
-			"is not bound by Walk.Chain",
+			base(personalLens("x", oneWalk(AnchorWalk{GrantDomain: "fx", AnchorType: "task", AnchorVar: "zzz",
+				Chain: []string{"(identity)<-[:assignedTo]-(t:task)"}}), "\nRETURN zzz.key AS anchor\n")),
+			"is not bound by Chain",
 		},
 		{
 			"anchor label disagrees with AnchorType",
-			base(personalLens("x", &AnchorWalk{GrantDomain: "fx", AnchorType: "workorder", AnchorVar: "t",
-				Chain: []string{"(identity)<-[:assignedTo]-(t:task)"}}, "\nRETURN t.key AS anchor\n")),
+			base(personalLens("x", oneWalk(AnchorWalk{GrantDomain: "fx", AnchorType: "workorder", AnchorVar: "t",
+				Chain: []string{"(identity)<-[:assignedTo]-(t:task)"}}), "\nRETURN t.key AS anchor\n")),
 			"must agree",
 		},
 		{
@@ -279,9 +376,9 @@ func TestExpandReadGrantWalks_Rejects(t *testing.T) {
 		},
 		{
 			"empty chain",
-			base(personalLens("x", &AnchorWalk{GrantDomain: "fx", AnchorType: "task", AnchorVar: "t"},
+			base(personalLens("x", oneWalk(AnchorWalk{GrantDomain: "fx", AnchorType: "task", AnchorVar: "t"}),
 				"\nRETURN t.key AS anchor\n")),
-			"Walk.Chain is empty",
+			"chain is empty",
 		},
 		{
 			// The anchor-alias check must be identifier-bounded on the LEFT:
@@ -303,21 +400,21 @@ func TestExpandReadGrantWalks_Rejects(t *testing.T) {
 			// A chain hop with no relation type reaches every neighbour over any
 			// relation — the walk would grant far more than it names.
 			"untyped chain hop",
-			base(personalLens("x", &AnchorWalk{GrantDomain: "fx", AnchorType: "task", AnchorVar: "t",
-				Chain: []string{"(identity)-[r*0..3]->(t:task)"}}, "\nRETURN t.key AS anchor\n")),
+			base(personalLens("x", oneWalk(AnchorWalk{GrantDomain: "fx", AnchorType: "task", AnchorVar: "t",
+				Chain: []string{"(identity)-[r*0..3]->(t:task)"}}), "\nRETURN t.key AS anchor\n")),
 			"must name its relation type",
 		},
 		{
 			// An alternation reaches two relations but `via` reports one.
 			"alternation chain hop",
-			base(personalLens("x", &AnchorWalk{GrantDomain: "fx", AnchorType: "task", AnchorVar: "t",
-				Chain: []string{"(identity)<-[:assignedTo|:queuedFor]-(t:task)"}}, "\nRETURN t.key AS anchor\n")),
+			base(personalLens("x", oneWalk(AnchorWalk{GrantDomain: "fx", AnchorType: "task", AnchorVar: "t",
+				Chain: []string{"(identity)<-[:assignedTo|:queuedFor]-(t:task)"}}), "\nRETURN t.key AS anchor\n")),
 			"exactly ONE relation type",
 		},
 		{
 			"bidirectional chain hop",
-			base(personalLens("x", &AnchorWalk{GrantDomain: "fx", AnchorType: "task", AnchorVar: "t",
-				Chain: []string{"(identity)<-[:assignedTo]->(t:task)"}}, "\nRETURN t.key AS anchor\n")),
+			base(personalLens("x", oneWalk(AnchorWalk{GrantDomain: "fx", AnchorType: "task", AnchorVar: "t",
+				Chain: []string{"(identity)<-[:assignedTo]->(t:task)"}}), "\nRETURN t.key AS anchor\n")),
 			"one direction, not both",
 		},
 		{
@@ -325,8 +422,8 @@ func TestExpandReadGrantWalks_Rejects(t *testing.T) {
 			// cap-read slices with a single-token wildcard — the slice would never
 			// be found and every row of its lenses silently dropped.
 			"grant domain name that is not a single key token",
-			base(personalLens("x", &AnchorWalk{GrantDomain: "fx.sub", AnchorType: "task", AnchorVar: "t",
-				Chain: []string{"(identity)<-[:assignedTo]-(t:task)"}}, "\nRETURN t.key AS anchor\n"),
+			base(personalLens("x", oneWalk(AnchorWalk{GrantDomain: "fx.sub", AnchorType: "task", AnchorVar: "t",
+				Chain: []string{"(identity)<-[:assignedTo]-(t:task)"}}), "\nRETURN t.key AS anchor\n"),
 				ReadGrantDomainSpec{Name: "fx.sub"}),
 			"must be a single key token",
 		},
@@ -345,8 +442,8 @@ func TestExpandReadGrantWalks_Rejects(t *testing.T) {
 			// (Walk.AnchorType, e.g. "task" here) never appears in a key at all —
 			// only its bare NanoID does — so it is NOT part of this check.
 			"grant domain name collides with the platform's fixed actorSuffix type",
-			base(personalLens("x", &AnchorWalk{GrantDomain: "identity", AnchorType: "task", AnchorVar: "t",
-				Chain: []string{"(identity)<-[:assignedTo]-(t:task)"}}, "\nRETURN t.key AS anchor\n"),
+			base(personalLens("x", oneWalk(AnchorWalk{GrantDomain: "identity", AnchorType: "task", AnchorVar: "t",
+				Chain: []string{"(identity)<-[:assignedTo]-(t:task)"}}), "\nRETURN t.key AS anchor\n"),
 				ReadGrantDomainSpec{Name: "identity"}),
 			"collides with the fixed actorSuffix vertex-type token",
 		},
@@ -404,10 +501,10 @@ func TestExpandReadGrantWalks_TailMayEnrichOffBoundVariables(t *testing.T) {
 	def := Definition{
 		Name: "fixture", Version: "1.0.0",
 		ReadGrantDomains: []ReadGrantDomainSpec{{Name: "fx"}},
-		Lenses: []LensSpec{personalLens("x", &AnchorWalk{
+		Lenses: []LensSpec{personalLens("x", oneWalk(AnchorWalk{
 			GrantDomain: "fx", AnchorType: "task", AnchorVar: "t",
 			Chain: []string{"(identity)<-[:assignedTo]-(t:task)"},
-		}, "\nOPTIONAL MATCH (t)-[:scopedTo]->(tgt)\nWITH t, tgt\nWHERE t.key <> null\nRETURN t.key AS anchor, tgt.key AS scopedTo\n")},
+		}), "\nOPTIONAL MATCH (t)-[:scopedTo]->(tgt)\nWITH t, tgt\nWHERE t.key <> null\nRETURN t.key AS anchor, tgt.key AS scopedTo\n")},
 	}
 	if _, err := def.ExpandReadGrantWalks(); err != nil {
 		t.Fatalf("unlabelled reuse of a bound variable must stay legal: %v", err)

@@ -86,12 +86,12 @@ func Lenses() []pkgmgr.LensSpec {
 			Personal:      true,
 			Engine:        "full",
 			IntoKey:       []string{"__actor", "ns", "entityId"},
-			Walk: &pkgmgr.AnchorWalk{
+			Walks: []pkgmgr.AnchorWalk{{
 				GrantDomain: domainBase,
 				AnchorType:  "service",
 				AnchorVar:   "tpl",
 				Chain:       []string{chainResidence, chainAvailableTemplates},
-			},
+			}},
 			Spec: edgeServicesTail,
 		},
 		{
@@ -103,7 +103,7 @@ func Lenses() []pkgmgr.LensSpec {
 			Personal:      true,
 			Engine:        "full",
 			IntoKey:       []string{"__actor", "ns", "entityId"},
-			Walk: &pkgmgr.AnchorWalk{
+			Walks: []pkgmgr.AnchorWalk{{
 				GrantDomain: domainBase,
 				AnchorType:  "meta",
 				AnchorVar:   "op",
@@ -112,7 +112,7 @@ func Lenses() []pkgmgr.LensSpec {
 					chainAvailableTemplates,
 					"(tpl)-[:permitsOperation]->(op:meta)",
 				},
-			},
+			}},
 			Spec: edgeCatalogTail,
 		},
 		{
@@ -124,12 +124,12 @@ func Lenses() []pkgmgr.LensSpec {
 			Personal:      true,
 			Engine:        "full",
 			IntoKey:       []string{"__actor", "ns", "entityId"},
-			Walk: &pkgmgr.AnchorWalk{
+			Walks: []pkgmgr.AnchorWalk{{
 				GrantDomain: domainBase,
 				AnchorType:  "task",
 				AnchorVar:   "task",
 				Chain:       []string{"(identity)<-[:assignedTo]-(task:task)"},
-			},
+			}},
 			Spec: edgeTasksTail,
 		},
 		{
@@ -141,12 +141,12 @@ func Lenses() []pkgmgr.LensSpec {
 			Personal:      true,
 			Engine:        "full",
 			IntoKey:       []string{"__actor", "ns", "entityId"},
-			Walk: &pkgmgr.AnchorWalk{
+			Walks: []pkgmgr.AnchorWalk{{
 				GrantDomain: domainBase,
 				AnchorType:  "service",
 				AnchorVar:   "inst",
 				Chain:       []string{"(identity)<-[:providedTo]-(inst:service)"},
-			},
+			}},
 			Spec: edgeInstancesTail,
 		},
 		{
@@ -158,7 +158,7 @@ func Lenses() []pkgmgr.LensSpec {
 			Personal:      true,
 			Engine:        "full",
 			IntoKey:       []string{"__actor", "ns", "entityId"},
-			Walk: &pkgmgr.AnchorWalk{
+			Walks: []pkgmgr.AnchorWalk{{
 				GrantDomain: domainBase,
 				AnchorType:  "session",
 				AnchorVar:   "sess",
@@ -167,7 +167,7 @@ func Lenses() []pkgmgr.LensSpec {
 					"(container)<-[:locatedAt]-(studio:studio)",
 					"(studio)<-[:atStudio]-(sess:session)",
 				},
-			},
+			}},
 			Spec: edgeEntitySessionsTail,
 		},
 		{
@@ -179,7 +179,7 @@ func Lenses() []pkgmgr.LensSpec {
 			Personal:      true,
 			Engine:        "full",
 			IntoKey:       []string{"__actor", "ns", "entityId"},
-			Walk: &pkgmgr.AnchorWalk{
+			Walks: []pkgmgr.AnchorWalk{{
 				GrantDomain: domainBase,
 				AnchorType:  "provider",
 				AnchorVar:   "prov",
@@ -187,7 +187,7 @@ func Lenses() []pkgmgr.LensSpec {
 					chainResidence,
 					"(container)<-[:practicesAt]-(prov:provider)",
 				},
-			},
+			}},
 			Spec: edgeEntityProvidersTail,
 		},
 		{
@@ -199,12 +199,12 @@ func Lenses() []pkgmgr.LensSpec {
 			Personal:      true,
 			Engine:        "full",
 			IntoKey:       []string{"__actor", "ns", "entityId"},
-			Walk: &pkgmgr.AnchorWalk{
+			Walks: []pkgmgr.AnchorWalk{{
 				GrantDomain: domainBase,
 				AnchorType:  "booking",
 				AnchorVar:   "bk",
 				Chain:       []string{"(identity)<-[:bookedBy]-(bk:booking)"},
-			},
+			}},
 			Spec: edgeEntityBookingsTail,
 		},
 		{
@@ -216,7 +216,7 @@ func Lenses() []pkgmgr.LensSpec {
 			Personal:      true,
 			Engine:        "full",
 			IntoKey:       []string{"__actor", "ns", "entityId"},
-			Walk: &pkgmgr.AnchorWalk{
+			Walks: []pkgmgr.AnchorWalk{{
 				GrantDomain: domainBase,
 				AnchorType:  "tab",
 				AnchorVar:   "tab",
@@ -224,7 +224,7 @@ func Lenses() []pkgmgr.LensSpec {
 					"(identity)<-[:applicationFor]-(la:leaseapp)",
 					"(la)<-[:openFor]-(tab:tab)",
 				},
-			},
+			}},
 			Spec: edgeEntityTabsTail,
 		},
 		{
@@ -236,7 +236,7 @@ func Lenses() []pkgmgr.LensSpec {
 			Personal:      true,
 			Engine:        "full",
 			IntoKey:       []string{"__actor", "ns", "entityId"},
-			Walk: &pkgmgr.AnchorWalk{
+			Walks: []pkgmgr.AnchorWalk{{
 				GrantDomain: domainStaff,
 				AnchorType:  "studio",
 				AnchorVar:   "studio",
@@ -244,7 +244,7 @@ func Lenses() []pkgmgr.LensSpec {
 					"(identity)-[:worksAt]->(work)",
 					"(work)<-[:containedIn*0..]-(place)<-[:locatedAt]-(studio:studio)",
 				},
-			},
+			}},
 			Spec: edgeEntityStudiosTail,
 		},
 		{
@@ -256,7 +256,7 @@ func Lenses() []pkgmgr.LensSpec {
 			Personal:      true,
 			Engine:        "full",
 			IntoKey:       []string{"__actor", "ns", "entityId"},
-			Walk: &pkgmgr.AnchorWalk{
+			Walks: []pkgmgr.AnchorWalk{{
 				GrantDomain: domainBase,
 				AnchorType:  "menuitem",
 				AnchorVar:   "item",
@@ -264,7 +264,7 @@ func Lenses() []pkgmgr.LensSpec {
 					chainResidence,
 					"(container)<-[:servedAt]-(item:menuitem)",
 				},
-			},
+			}},
 			Spec: edgeEntityMenuItemsTail,
 		},
 		{
@@ -276,7 +276,7 @@ func Lenses() []pkgmgr.LensSpec {
 			Personal:      true,
 			Engine:        "full",
 			IntoKey:       []string{"__actor", "ns", "entityId"},
-			Walk: &pkgmgr.AnchorWalk{
+			Walks: []pkgmgr.AnchorWalk{{
 				GrantDomain: domainStaff,
 				AnchorType:  "meta",
 				AnchorVar:   "op",
@@ -284,7 +284,7 @@ func Lenses() []pkgmgr.LensSpec {
 					chainHeldRoles,
 					"(role)<-[:grantedBy]-(perm:permission)-[:forOperation]->(op:meta)",
 				},
-			},
+			}},
 			Spec: edgeCatalogRolesTail,
 		},
 		{
@@ -296,7 +296,7 @@ func Lenses() []pkgmgr.LensSpec {
 			Personal:      true,
 			Engine:        "full",
 			IntoKey:       []string{"__actor", "ns", "entityId"},
-			Walk: &pkgmgr.AnchorWalk{
+			Walks: []pkgmgr.AnchorWalk{{
 				GrantDomain: domainStaff,
 				AnchorType:  "task",
 				AnchorVar:   "task",
@@ -304,7 +304,7 @@ func Lenses() []pkgmgr.LensSpec {
 					chainHeldRoles,
 					"(role)<-[:queuedFor]-(task:task)",
 				},
-			},
+			}},
 			Spec: edgeTasksQueuedTail,
 		},
 		{
@@ -322,7 +322,7 @@ func Lenses() []pkgmgr.LensSpec {
 			Personal:      true,
 			Engine:        "full",
 			IntoKey:       []string{"__actor", "ns", "entityId"},
-			Walk: &pkgmgr.AnchorWalk{
+			Walks: []pkgmgr.AnchorWalk{{
 				GrantDomain: domainStaff,
 				AnchorType:  "meta",
 				AnchorVar:   "pane",
@@ -330,7 +330,7 @@ func Lenses() []pkgmgr.LensSpec {
 					chainHeldRoles,
 					"(role)<-[:offeredTo]-(pane:meta)",
 				},
-			},
+			}},
 			Spec: edgeStaffPanesTail,
 		},
 		{
@@ -342,7 +342,7 @@ func Lenses() []pkgmgr.LensSpec {
 			Personal:      true,
 			Engine:        "full",
 			IntoKey:       []string{"__actor", "ns", "entityId"},
-			Walk: &pkgmgr.AnchorWalk{
+			Walks: []pkgmgr.AnchorWalk{{
 				GrantDomain: domainStaff,
 				AnchorType:  "workorder",
 				AnchorVar:   "wo",
@@ -350,7 +350,7 @@ func Lenses() []pkgmgr.LensSpec {
 					"(identity)-[:worksAt]->(work)",
 					"(work)<-[:containedIn*0..]-(place)<-[:locatedAt]-(wo:workorder)",
 				},
-			},
+			}},
 			Spec: edgeStaffWorkOrdersTail,
 		},
 		{
@@ -362,14 +362,14 @@ func Lenses() []pkgmgr.LensSpec {
 			Personal:      true,
 			Engine:        "full",
 			IntoKey:       []string{"__actor", "ns", "entityId"},
-			Walk: &pkgmgr.AnchorWalk{
+			Walks: []pkgmgr.AnchorWalk{{
 				GrantDomain: domainProvider,
 				AnchorType:  "appointment",
 				AnchorVar:   "appt",
 				Chain: []string{
 					"(identity)<-[:identifiedBy]-(pr:provider)<-[:withProvider]-(appt:appointment)",
 				},
-			},
+			}},
 			Spec: edgeProviderScheduleTail,
 		},
 		{
@@ -381,14 +381,14 @@ func Lenses() []pkgmgr.LensSpec {
 			Personal:      true,
 			Engine:        "full",
 			IntoKey:       []string{"__actor", "ns", "entityId"},
-			Walk: &pkgmgr.AnchorWalk{
+			Walks: []pkgmgr.AnchorWalk{{
 				GrantDomain: domainProvider,
 				AnchorType:  "service",
 				AnchorVar:   "inst",
 				Chain: []string{
 					"(identity)<-[:identifiedBy]-(sp:serviceprovider)<-[:providedBy]-(tpl:service)<-[:instanceOf]-(inst:service)",
 				},
-			},
+			}},
 			Spec: edgeProviderQueueTail,
 		},
 		{
@@ -400,14 +400,14 @@ func Lenses() []pkgmgr.LensSpec {
 			Personal:      true,
 			Engine:        "full",
 			IntoKey:       []string{"__actor", "ns", "entityId"},
-			Walk: &pkgmgr.AnchorWalk{
+			Walks: []pkgmgr.AnchorWalk{{
 				GrantDomain: domainProvider,
 				AnchorType:  "session",
 				AnchorVar:   "sess",
 				Chain: []string{
 					"(identity)<-[:identifiedBy]-(instr:instructor)<-[:ledBy]-(sess:session)",
 				},
-			},
+			}},
 			Spec: edgeInstructorSessionsTail,
 		},
 	}

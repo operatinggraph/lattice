@@ -1,5 +1,5 @@
 name: edge-manifest
-version: 0.14.8
+version: 0.14.9
 description: |
   The Facet edge app's world manifest: eighteen Personal Lenses (edgeIdentity/
   edgeServices/edgeCatalog/edgeCatalogRoles/edgeTasks/edgeTasksQueued/
