@@ -31,7 +31,7 @@
   --line-strong: rgba(148, 163, 216, 0.28);
   --text: #e8ecf7;
   --muted: #9aa5c3;
-  --faint: #6b7699;
+  --faint: #7681a1;
 
   --c-consumer: #59d8ff;
   --c-front: #a78bfa;
@@ -62,6 +62,7 @@ body {
 
 a { color: var(--c-consumer); text-decoration: none; }
 a:hover { text-decoration: underline; }
+.sec-head p a, .prose p a, .card p a, .status-list li a { text-decoration: underline; }
 img, svg { max-width: 100%; }
 
 .wrap { max-width: var(--maxw); margin: 0 auto; padding: 0 24px; }
