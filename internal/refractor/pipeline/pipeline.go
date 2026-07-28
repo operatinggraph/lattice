@@ -1133,6 +1133,7 @@ func (p *Pipeline) writeResults(ctx context.Context, msg substrate.Message, key 
 	adpt := p.currentAdapter()
 	var retryResults []ruleengine.EvalResult
 	var terminalErrs []error
+	transientActorRetry := false
 	for i := range results {
 		// Stamp the triggering CDC message's stream sequence as the monotonic
 		// ordering token before any write. The retry-queue capture copies the
@@ -1168,6 +1169,23 @@ func (p *Pipeline) writeResults(ctx context.Context, msg substrate.Message, key 
 				continue
 			}
 			if cat == failure.CatTransient && p.retryQueue != nil && p.retryMaxAttempts > 0 {
+				if p.multiEnvelopeFn != nil {
+					// §4.3: a perEntry lens's grants live under N per-anchor
+					// keys, not the single parent row a raw WriteFn replay
+					// (enqueueRetry) assumes. Replaying this failed write's
+					// captured Keys/Row/Seq later could resurrect a
+					// since-revoked anchor through the absent-key Create
+					// door — a grant-era write that failed here leaves no
+					// key and no watermark, so a later revocation's prefix
+					// diff can never tombstone it, and the stale replay then
+					// lands unopposed. Refuse the raw replay and re-evaluate
+					// the actor instead (enqueueActorReprojectRetry) — the
+					// same unit the sweep already repairs at, so a revoked
+					// anchor is simply absent from the fresh set rather than
+					// resurrected.
+					transientActorRetry = true
+					continue
+				}
 				retryResults = append(retryResults, result)
 				continue
 			}
@@ -1184,8 +1202,50 @@ func (p *Pipeline) writeResults(ctx context.Context, msg substrate.Message, key 
 	for _, r := range retryResults {
 		p.enqueueRetry(key, msg.Body, r)
 	}
+	if transientActorRetry {
+		// enumeratedActors is nil for the actor's own vertex re-evaluating
+		// itself (key IS the actor key there); a fan-out call already names
+		// every affected actor — but only because InstallActorAggregate
+		// (projection/driver.go) always pairs multiEnvelopeFn with an
+		// ActorEnumerator, so this fallback is safe ONLY under that pairing.
+		// Nothing here structurally enforces it (a hand-built pipeline could
+		// set multiEnvelopeFn alone), and getting it wrong is worse than the
+		// bug this mechanism replaces: Reproject on a non-actor key (an
+		// aspect/link key) evaluates to zero rows and returns a clean
+		// "wrote nothing", which reads as success — the failed write
+		// vanishes with no DLQ, no trace. Refuse closed instead of guessing.
+		if p.actorEnumerator == nil {
+			err := fmt.Errorf("pipeline: writeResults: rule %q: a perEntry lens (multiEnvelopeFn) has no ActorEnumerator installed — refusing to guess an actor key for retry rather than risk reprojecting the wrong entity or silently losing the write", p.ruleID)
+			slog.Error("pipeline: transient write refused — perEntry lens missing its ActorEnumerator pairing", "ruleId", p.ruleID, "entityId", key, "err", err)
+			return substrate.Nak, err
+		}
+		// Reprojects every actor this batch touched, not just the one whose
+		// write failed — a zero-write no-op for any actor whose row already
+		// converged (Reproject's own comparison). This is a known cost, not
+		// a free one: a large fan-out (ActorEnumerator's own documented cap
+		// is in the thousands) turns one transient blip into that many full
+		// cypher re-evaluations queued on the pipeline's single shared
+		// RetryQueue, head-of-line-blocking every other lens's retries for
+		// the duration. Narrowing this to only the actor(s) that actually
+		// own a failed result needs the same key→actor inversion §4.4's
+		// AnchorFromKey builds for the sweep — deliberately not duplicated
+		// here; this increment accepts the coarser, safe-but-costlier retry
+		// unit and names the cost rather than silently absorbing it.
+		//
+		// enumeratedActors is nil for the actor's own vertex re-evaluating
+		// itself — key IS the actor key there, safe now that the check
+		// above has confirmed p.actorEnumerator != nil (the only condition
+		// that fallback ever relies on).
+		actors := enumeratedActors
+		if len(actors) == 0 {
+			actors = []string{key}
+		}
+		for _, actor := range actors {
+			p.enqueueActorReprojectRetry(msg.Body, actor)
+		}
+	}
 
-	if len(retryResults) > 0 || len(terminalErrs) > 0 {
+	if len(retryResults) > 0 || len(terminalErrs) > 0 || transientActorRetry {
 		// Transient enqueue / terminal DLQ: the message is fully disposed —
 		// ack to prevent redelivery (the retry queue owns the eventual write).
 		// No frame here — a retry-enqueued or DLQ'd result did not (yet, or
@@ -1225,6 +1285,55 @@ func (p *Pipeline) enqueueRetry(key string, rawPayload []byte, result ruleengine
 				return a.Delete(rctx, capturedResult.Keys, capturedResult.ProjectionSeq)
 			}
 			return a.Upsert(rctx, capturedResult.Keys, capturedResult.Row, capturedResult.ProjectionSeq)
+		},
+		Attempt:     0,
+		MaxAttempts: p.retryMaxAttempts,
+		BaseBackoff: p.retryBaseBackoff,
+		Conn:        p.retryConn,
+		OnDLQPublished: func(rctx context.Context, errMsg string) {
+			if capturedReporter != nil {
+				if recErr := capturedReporter.RecordError(rctx, errMsg); recErr != nil {
+					slog.Error("pipeline: update health errorCount after retry DLQ",
+						"ruleId", p.ruleID, "err", recErr)
+				}
+			}
+		},
+	}
+	p.retryQueue.Enqueue(e)
+}
+
+// enqueueActorReprojectRetry constructs and enqueues a RetryEntry for a
+// perEntry lens's transient write failure, re-evaluating actorKey (via
+// Reproject) on each attempt instead of replaying a captured raw write
+// (§4.3 of cap-read-per-anchor-grant-keys-design.md — see the writeResults
+// comment at the call site for why a raw replay is unsafe for per-anchor
+// keys). Reuses the same RetryEntry queue/backoff/DLQ-escalation machinery
+// as enqueueRetry; only the WriteFn's unit of work changes, from "the write"
+// to "the actor".
+func (p *Pipeline) enqueueActorReprojectRetry(rawPayload []byte, actorKey string) {
+	capturedReporter := p.reporter
+	capturedSeq := ""
+	if p.reporter != nil {
+		if seq := p.reporter.ActiveSequence(); seq != 0 {
+			capturedSeq = fmt.Sprintf("%d", seq)
+		}
+	}
+	e := &failure.RetryEntry{
+		RuleID: p.ruleID,
+		// actorKey, not key: key is the triggering entity (an actor's own
+		// vertex, or a fan-out's aspect/link key) — actorKey is the thing
+		// actually being retried, and the only identity worth logging or
+		// escalating to the DLQ on exhaustion. A fan-out batch enqueues one
+		// entry per actor, so each must name its OWN actor here or every
+		// entry (and every DLQ message on exhaustion) reads identically and
+		// names none of them.
+		EntityID:     actorKey,
+		Stage:        "write",
+		RawPayload:   rawPayload,
+		RuleSequence: capturedSeq,
+		WriteFn: func(rctx context.Context) error {
+			_, err := p.Reproject(rctx, actorKey)
+			return err
 		},
 		Attempt:     0,
 		MaxAttempts: p.retryMaxAttempts,

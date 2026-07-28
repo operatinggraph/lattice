@@ -181,7 +181,7 @@ func (p *Pipeline) evaluateForEntryRaw(ctx context.Context, entry ruleengine.Nod
 	// by test. The tombstoned-anchor shortcut above returns before this
 	// check; a tombstone it could not derive keys for cannot derive them
 	// here either (same derivation).
-	if p.actorEnumerator == nil && p.envelopeFn == nil {
+	if p.actorEnumerator == nil && p.envelopeFn == nil && p.multiEnvelopeFn == nil {
 		if keys, ok := p.fullEngine.AnchorProjectionKey(
 			p.fullCR, entry.CoreKVKey, entry.NodeLabel, entry.Properties); ok &&
 			!resultsContainKeys(results, keys) {
@@ -609,11 +609,17 @@ func (p *Pipeline) reprojectActors(ctx context.Context, actorKeys []string) ([]r
 			// perEntry lens has no single parent key to delete — reuse
 			// multiEntryRetractions with an empty fresh set so every live
 			// child under the actor's prefix is tombstoned
-			// (cap-read-per-anchor-grant-keys-design.md §4.2). NOT yet
-			// reachable via sweep Reproject for a perEntry lens: Reproject
-			// bails on p.envelopeFn == nil before calling reprojectActors,
-			// and SetMultiEnvelopeFn always clears envelopeFn — closing
-			// that gate is §4.3/§4.4's deferred sweep-integration work.
+			// (cap-read-per-anchor-grant-keys-design.md §4.2). Reproject's
+			// own gate now accepts a perEntry lens too (§4.3, widened to
+			// `p.envelopeFn == nil && p.multiEnvelopeFn == nil`), so this
+			// branch is reachable in principle via the retry path's
+			// actor-reproject (enqueueActorReprojectRetry) — but not yet in
+			// production, for the same reason the sweep can't reach it
+			// either: `InstallActorAggregate` still refuses to register any
+			// real `entryKeyColumn` lens, and nothing outside this package's
+			// own tests ever calls `SetMultiEnvelopeFn` at all. Both the
+			// retry path and the sweep's deep-verify stay dead until that
+			// registration refusal lifts — §4.4's sweep-integration work.
 			if p.multiEnvelopeFn != nil {
 				tombstones, rerr := p.multiEntryRetractions(ctx, actorKey, nil)
 				if rerr != nil {
