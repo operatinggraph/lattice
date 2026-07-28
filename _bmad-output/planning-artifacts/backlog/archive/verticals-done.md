@@ -2,6 +2,16 @@
 
 Rolled from `verticals.md` when its live Done log passed ~25 entries. Full detail is in git.
 
+- 2026-07-27 · `2c41318b` · The instructor + serviceprovider hats get their op — two inert chips resolve; the standing guard, not the shared `provider` role, confines. facet-staff-worlds §12
+- 2026-07-27 · `5c914479` · A pre-existing identity acquires the consumer grant the Gateway promises it — bound personas reach the 20 self-service ops; absent-only, so a RevokeRole holds. facet-staff-worlds §13
+- 2026-07-27 · `526edfdf` · The claim ceremony gets a live walker — it found a live capability-projection gap the unit tests couldn't see; bug filed to lattice.md, repro `make test-claim-ceremony`. facet-staff-worlds §13.1
+- 2026-07-27 · `023359f5` · `DecideLeaseApplication` stamps tenancy off its own resolved unit, not a payload field a decline never carries; closes 1 of 2 readTemplateDebt entries
+- 2026-07-27 · `d2ae444f` · `RecordServiceOutcome` resolves its own template off the instance's link too; only the caller-asserted `serviceprovider` hop stays debt
+- 2026-07-27 · `6985a24d` · seed-showcase's recovery helpers fail loud on a KV read anomaly, warn on an ambiguous bind (RevisionConflict/orphan-adopt + ctx-window gaps closed by `65254aee`, below)
+- 2026-07-27 · `0badf04e` · `RescheduleAppointment`'s `provider` field gets `x-entityRef`; `patient` stays free-text — pickers only read the mirror, still barred to patient PII. facet-entity-browse-design §9
+- 2026-07-27 · `—` (closed, not built) · Vertical dev-login persona fence — by-design, mirrors `up-facet` + the F20.5 declared-origin fence; a static list would regress free-form dev sign-in
+- 2026-07-27 · `9d8ac19b` · Reschedule/SetAppointmentStatus keep authority after a provider tombstone via the appointment's own `atSite` link; wellness sibling narrowed to its own row
+- 2026-07-27 · `499bf482` · CreateSession snapshots its studio onto a new `atLocation` link; `session_locations` falls back to it post-tombstone, mirroring clinic's `atSite` — staff keep authority over outstanding bookings
 - 2026-07-27 · `7a52a673` · A tab's two lease relations get their two lifetimes — permanent `chargedTo` anchors settlement, transient `openFor` is retracted by `Settle`, bounding the read grant to open tabs. facet-entity-browse §8
 - 2026-07-26 · `51bc4afa` · The first paint waits for a world — the boot gate releases on hydration, sticky + replayed on both hosts, not on a 3s silence a cold sign-in outlasts. facet-app-ux §10
 - 2026-07-26 · `87010105` · The café charge form picks a menu item — `menuitem servedAt location` + `edgeEntityMenuItems`; the `x-entityRef` widget stops being a stub and becomes type-driven. facet-entity-browse §7
