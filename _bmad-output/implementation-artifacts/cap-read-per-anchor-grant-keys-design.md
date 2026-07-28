@@ -256,14 +256,63 @@ block a healthy one, nor get re-written on the next attempt), and the missing-`A
 `go build ./...`, full `internal/refractor/...` suite (incl. `-race` on `pipeline`), `golangci-lint run
 ./...`, `STRICT=1 lint-conventions.go`, `make vet`.
 
-**Next increment:** §4.4 (sweep deltas — the `AnchorFromKey` perEntry variant, coverage/orphan-direction
-changes — which is also what's needed before `InstallActorAggregate`'s registration refusal can lift and
-before `Reproject` is reachable via the sweep's own deep-verify for a perEntry lens). The
-legacy-parent-document tombstone stays paired with the base-lens migration flip.
+**CHECKPOINT (Fire 1, increment 7 — 2026-07-28, worktree `.claude/worktrees/cap-read-fire1-inc7`,
+merged to main `08212521`; worktree fully merged, no unlanded work):** closed §4.4, the sweep deltas.
+`OutputDescriptor.AnchorFromKey` gains a perEntry inverse (`anchorFromKeyPerEntry`): strip the pattern's
+literal prefix, split the remainder on its LAST `.` (never ambiguous — a Contract #1 type segment and a
+NanoID both exclude `.`), validate the trailing token as a NanoID and the rest as an `AnchorType`-typed
+vertex key. `KeyOwnershipRoundTrips` appends a synthetic entry token before probing a perEntry descriptor,
+so the driver's enrolment gate (`sweepEnrolment`) passes it the same as a doc-mode one. `entryKeyColumn`
+is now rejected in combination with `keyColumn` at parse time — the two suffix shapes overlap enough
+(`<entityId>.<entryId>` vs. a doc-mode sibling's own `<type>.<id>` suffix landing at the same position)
+that `AnchorFromKey` had no primitive to tell them apart, an adversarial-review finding folded in before
+ship.
+
+`pipeline.candidates()`'s coverage and orphan directions were both re-derived from a single pass over the
+target listing, grouped by the anchor `AnchorFromKey` recovers per key — replacing the coverage
+direction's exact `targets[BuildKey(actor)]` probe (never true for a perEntry lens; every real key carries
+one more trailing entry token) and the orphan direction's `key ∉ expected` test (which would have flooded
+every live actor's own child keys into the orphan set). For a doc-mode lens the two computations provably
+coincide (one document per actor round-trips to exactly that actor), so every existing doc-mode sweep test
+passed unchanged — this is one mechanism now, not two per lens shape. `SweepPlan.BuildKey` (no reader left
+in the package after the refactor) was dropped from the struct and every call site.
+
+Adversarially reviewed (3-layer: Blind Hunter / Edge-Case Hunter / Acceptance Auditor). All three
+independently flagged that the flood-prevention test's assertions didn't discriminate the mechanism being
+tested from a scenario where the coverage direction's `seen`-dedup happened to pre-empt the orphan
+direction — fixed by mixing a live and a departed actor's structurally-identical perEntry keys under one
+survey with the coverage hint floored to a share of one, so a naive per-key probe demonstrably leaks the
+unclaimed live actor into `fromOrphan` while the shipped grouping does not
+(`TestSweepCandidates_PerEntry_LiveActorsChildKeysNeverFloodTheOrphanSetWhileADepartedActorsDo`). Also
+added: a projection-package test that drives the real `EntryEnvelopeFn` emission path and feeds its actual
+output back into `AnchorFromKey` (`TestDriver_EntryEnvelope_EmittedKeysRoundTripThroughAnchorFromKey`) —
+every other perEntry `AnchorFromKey` test, in both packages, had built its sample keys by hand rather than
+exercising production emission, which a parser divergence between the two would have passed silently. The
+`entryKeyColumn`+`keyColumn` rejection above closed the one Medium finding; a stale doc-mode-flip
+residual (a full-grant document surviving a lens's flip to perEntry mode until §4.5's prefix-scoped
+truncate reaches it) was named but is out of scope here — carried forward to §4.5 below, not fixed by
+this increment.
+
+`InstallActorAggregate` still refuses to register any `entryKeyColumn` lens — updated its refusal comment
+to name the ACTUAL remaining blockers now that §4.4 is done: the driver still unconditionally wires
+`p.SetEnvelopeFn(desc.EnvelopeFn(...))` rather than `p.SetMultiEnvelopeFn(desc.EntryEnvelopeFn())` for a
+perEntry descriptor, and §4.5's prefix-scoped truncate + the bootstrap `capabilityRead` base-lens
+migration (§6) are still unbuilt. This mechanism remains provably dead in production, same posture as
+increments 1-6.
+
+Gates green: `go build ./...`, full `internal/refractor/...` suite (incl. `-race` on `pipeline` and
+`projection`), `go test ./...`, `golangci-lint run ./...`, `STRICT=1 lint-conventions.go`, `make vet`.
+
+**Next increment:** the per-entry envelope wiring (`InstallActorAggregate` calling
+`p.SetMultiEnvelopeFn(desc.EntryEnvelopeFn())` for an `entryKeyColumn` descriptor instead of refusing),
+§4.5's prefix-scoped truncate (inherited from fire-briefs Fire B if it lands first), and the bootstrap
+`capabilityRead` base-lens migration (§6) — only once all three are in does the registration refusal
+actually lift. The legacy-parent-document tombstone stays paired with the base-lens migration flip.
 **Author:** Winston (Designer fire, 2026-07-25); increment 2 built by Winston (Lattice Steward fire, 2026-07-27);
 increment 3 built by Winston (Lattice Steward fire, 2026-07-27); increment 4 built by Winston (Lattice
 Steward fire, 2026-07-28); increment 5 built by Winston (Lattice Steward fire, 2026-07-28); increment 6
-built by Winston (Lattice Steward fire, 2026-07-28)
+built by Winston (Lattice Steward fire, 2026-07-28); increment 7 built by Winston (Lattice Steward fire,
+2026-07-28)
 **Backlog:** Stream-2 Security & trust boundary — *[Refractor] A `cap-read` document has no size bound* (★★, M)
 **Owning components:** `internal/refractor/{projection,pipeline,adapter,capabilityread,keyshredded}` (mechanism), `internal/bootstrap/lenses.go` + `internal/pkgmgr/anchorwalk.go` (producers), `packages/edge-manifest` (+ any package shipping a `cap-read.*` NATS-KV producer). Docs: `docs/contracts/06-capability-kv.md` §6.13/§6.14 (edit prepared uncommitted in the working tree), `docs/components/refractor.md`.
 
