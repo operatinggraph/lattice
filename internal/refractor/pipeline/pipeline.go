@@ -50,6 +50,13 @@ type Pipeline struct {
 	fullCR     ruleengine.CompiledRule
 	envelopeFn EnvelopeFn
 
+	// multiEnvelopeFn is envelopeFn's per-entry sibling (§4.1 of
+	// cap-read-per-anchor-grant-keys-design.md). Mutually exclusive with
+	// envelopeFn — SetEnvelopeFn / SetMultiEnvelopeFn each clear the other, so
+	// executeFullForActor's dispatch on "whichever is non-nil" never sees both
+	// set at once.
+	multiEnvelopeFn MultiEnvelopeFn
+
 	// plainReprojectLabels is the exhaustive set of vertex types this lens's
 	// patterns can bind (full.CompiledRule.ReferencedLabels), used by the
 	// plain aspect/link reprojection arms to skip events on types the lens
@@ -244,6 +251,24 @@ func (p *Pipeline) recordProjected() {
 // A nil EnvelopeFn writes the row verbatim.
 type EnvelopeFn func(row map[string]any, keys map[string]any, params map[string]any) (newRow, newKeys map[string]any, err error)
 
+// Envelope is one (key, body) pair a MultiEnvelopeFn emits for a single real
+// entry of an actor's split list column.
+type Envelope struct {
+	Keys map[string]any
+	Row  map[string]any
+}
+
+// MultiEnvelopeFn is EnvelopeFn's per-entry sibling (§4.1 of
+// cap-read-per-anchor-grant-keys-design.md): instead of rewriting one
+// projection row into exactly one on-wire document, it rewrites the row into
+// the actor's fresh CHILD-key set — zero or more Envelopes, one per real
+// entry of the descriptor's single split list column. Returning
+// ErrSkipProjection declines the whole row (mirrors EnvelopeFn's skip
+// contract); any other error fails the actor's projection closed rather than
+// writing a partial or malformed key. A nil MultiEnvelopeFn leaves the
+// existing one-document EnvelopeFn path untouched.
+type MultiEnvelopeFn func(row map[string]any, keys map[string]any, params map[string]any) ([]Envelope, error)
+
 // New creates a Pipeline for the given rule.
 // adapterName is a display label for slog ("nats_kv" or "postgres").
 // reporter may be nil — health KV reads/writes are skipped when nil.
@@ -313,9 +338,24 @@ func (p *Pipeline) plainReactsTo(vertexType string) bool {
 }
 
 // SetEnvelopeFn installs the on-wire envelope wrapper. Pass nil to clear.
-// Must be called before Run.
+// Clears any installed MultiEnvelopeFn — the two are alternatives, never both
+// active on the same pipeline. Must be called before Run.
 func (p *Pipeline) SetEnvelopeFn(fn EnvelopeFn) {
 	p.envelopeFn = fn
+	if fn != nil {
+		p.multiEnvelopeFn = nil
+	}
+}
+
+// SetMultiEnvelopeFn installs the per-entry envelope wrapper (§4.1 of
+// cap-read-per-anchor-grant-keys-design.md). Pass nil to clear. Clears any
+// installed EnvelopeFn — the two are alternatives, never both active on the
+// same pipeline. Must be called before Run.
+func (p *Pipeline) SetMultiEnvelopeFn(fn MultiEnvelopeFn) {
+	p.multiEnvelopeFn = fn
+	if fn != nil {
+		p.envelopeFn = nil
+	}
 }
 
 // SetDiffRetraction opts this plain lens into Fire 3's target-diff retraction
