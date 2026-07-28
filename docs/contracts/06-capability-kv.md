@@ -573,10 +573,10 @@ tombstones-first, in the same pass — a row-set shrink has no automatic overwri
 failures retry as actor re-evaluations, never raw-write replays** (a replayed `Create` at an absent key
 carries no watermark to lose against and would resurrect a revoked grant).
 
-> **Transitional:** the legacy per-actor *document* shape remains the live wire format until the
-> per-anchor build lands and drains it (dual-read, actor-by-actor tombstone of legacy parent docs, then a
-> one-shot purge — cap-read-per-anchor-grant-keys-design.md §6). The two shapes are disjoint by
-> construction, so they coexist without reader ambiguity during the drain.
+> **Migration complete (2026-07-28):** the legacy per-actor *document* shape (dual-read, actor-by-actor
+> tombstone of legacy parent docs, then a one-shot purge — cap-read-per-anchor-grant-keys-design.md §6,
+> Fires 1-3) has fully drained; the per-anchor shape below is the only live wire format. `IsReadable`
+> no longer reads the legacy shape.
 
 **Per-anchor NATS-KV entry shape (`cap-read[.<source>].<actorSuffix>.<anchorId>`).** Each producer projects
 one entry per anchor it grants; the actor's effective readable set is the union of live (non-tombstoned)
