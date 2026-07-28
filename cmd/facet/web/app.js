@@ -1856,7 +1856,13 @@ function renderField(name, schema, help, isRequired, prefillVal, opSensitive) {
       <div class="entity-ref-results" data-entity-ref-results="${esc(name)}"></div>`;
   } else if (schema.type === "string" && (schema.maxLength || 0) > 120) {
     inputHtml = `<textarea name="${esc(name)}" ${schema.maxLength ? `maxlength="${schema.maxLength}"` : ""} ${reqAttr}>${esc(val)}</textarea>`;
-  } else if (opSensitive) {
+  } else if (opSensitive || schema["x-sensitive"]) {
+    // x-sensitive masks ONE field regardless of the op-level flag — the
+    // per-field granularity op.sensitive alone cannot express (it masks
+    // every rendered field, dropping any prefilled value, so it is only
+    // honest when ALL of an op's fields are secret). A field the op-level
+    // flag would wrongly sweep in (a transcribed key beside a secret, e.g.
+    // ClaimIdentity's targetIdentityKey) stays a plain, prefillable input.
     inputHtml = `<input type="password" name="${esc(name)}" autocomplete="off" ${reqAttr}>`;
   } else {
     inputHtml = `<input type="text" name="${esc(name)}" value="${esc(val)}" ${schema.maxLength ? `maxlength="${schema.maxLength}"` : ""} ${reqAttr}>`;

@@ -53,20 +53,20 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 			// would be substituted silently instead of the op being withheld.
 			InputSchema: `{"type":"object","properties":` +
 				`{"targetIdentityKey":{"type":"string","title":"Identity to claim","description":"vtx.identity.<NanoID> of the identity being claimed — carried by the claim invitation."},` +
-				`"claimKey":{"type":"string","title":"Claim key","description":"The one-time claim secret you were given."}},` +
+				`"claimKey":{"type":"string","title":"Claim key","description":"The one-time claim secret you were given.","x-sensitive":true}},` +
 				`"required":["targetIdentityKey","claimKey"]}`,
 			FieldDescriptions: map[string]string{
 				"targetIdentityKey": "The identity waiting to be claimed. Comes from the claim invitation, not from anything you are looking at.",
 				"claimKey":          "The one-time secret you were handed. A successful claim spends it, so it cannot be used twice.",
 			},
-			// NOT Sensitive, deliberately. The flag is per-OP and masks every
-			// field a client renders — here that is claimKey (a secret, worth
-			// masking) AND targetIdentityKey (a key transcribed from the
-			// invitation, which masking would make unenterable, since the
-			// masked input also drops any prefilled value). Over-masking breaks
-			// the flow; echoing a secret the person is reading off their own
-			// invitation does not. See the README note on the missing per-field
-			// granularity.
+			// NOT Sensitive (the op-level flag): it masks every field a client
+			// renders, which would ALSO catch targetIdentityKey (a key
+			// transcribed from the invitation, which masking would make
+			// unenterable, since the masked input also drops any prefilled
+			// value). claimKey instead carries the per-field
+			// InputSchema `"x-sensitive":true` extension (renderField, app.js)
+			// — masked, no-echo entry for that one field, targetIdentityKey
+			// stays a plain, prefillable input.
 			Dispatch: &pkgmgr.OpDispatchSpec{
 				Class:       "identity",
 				AuthContext: "self",
