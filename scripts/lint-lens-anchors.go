@@ -15,7 +15,7 @@
 //
 //   - Every Personal lens either anchors on the ACTOR (its anchor variable
 //     bound `{key: $actorKey}` — covered by the platform base cap-read
-//     self-grant) or declares a `Walk`.
+//     self-grant) or declares `Walks`.
 //   - A package that ships Personal lenses does not ALSO hand-author a Path-B
 //     cap-read producer (`ProjectionKind: "actorAggregate"` writing a
 //     `cap-read.*` key). Those are generated per declared ReadGrantDomain; a
@@ -27,7 +27,7 @@
 // different mechanism — a row→anchor comprehension meeting actor→anchor grants
 // at the anchor vocabulary, not one walk duplicated — and are untouched here.
 //
-// pkgmgr's expansion pass rejects the missing-Walk violation at package-build
+// pkgmgr's expansion pass rejects the missing-Walks violation at package-build
 // time too (and a registry-wide test compiles every shipped package), but only
 // this gate catches BOTH across every package in CI without an install — which
 // is what binds the NEXT author.
@@ -51,12 +51,12 @@ type lens struct {
 	name           string // CanonicalName
 	adapter        string
 	personal       bool
-	hasWalk        bool
+	hasWalks       bool
 	projectionKind string
 	hasOutput      bool
 	outputKey      string // Output.OutputKeyPattern, "" when not statically resolvable
 	grantTable     bool
-	spec           string // resolved cypher (the presentation tail only, with a Walk)
+	spec           string // resolved cypher (the presentation tail only, with Walks)
 	pos            token.Position
 }
 
@@ -90,7 +90,7 @@ func main() {
 	}
 
 	if issues == 0 && warns == 0 {
-		fmt.Println("lint-lens-anchors: 0 issues — every non-self-anchored Personal lens declares its read-grant Walk")
+		fmt.Println("lint-lens-anchors: 0 issues — every non-self-anchored Personal lens declares its read-grant Walks")
 		return
 	}
 	fmt.Printf("lint-lens-anchors: %d issue(s), %d advisory warning(s)\n", issues, warns)
@@ -158,19 +158,19 @@ func checkPackage(dir string) (issues, warns int) {
 		if l.adapter != "nats-subject" || !l.personal {
 			continue
 		}
-		if l.hasWalk {
+		if l.hasWalks {
 			continue // non-self by construction, and its producer is compiled
 		}
 		m := reAnchor.FindStringSubmatch(l.spec)
 		if m == nil {
-			fmt.Printf("%s: warn: Personal lens %s declares no Walk and has no `<var>.key AS anchor` — cannot verify its read-grant coverage\n", posOf(l), l.name)
+			fmt.Printf("%s: warn: Personal lens %s declares no Walks and has no `<var>.key AS anchor` — cannot verify its read-grant coverage\n", posOf(l), l.name)
 			warns++
 			continue
 		}
 		if isSelfAnchored(l.spec, m[1]) {
 			continue // self-anchored — base cap-read self-grant covers it
 		}
-		fmt.Printf("%s: Personal lens %s anchors on `%s` (not the actor) but declares no Walk — pkgmgr cannot compile its read-grant producer, so Refractor's D1 gate would silently drop every row it projects (the 'forgot the slice' dual-enumeration bug). Declare Walk with the actor→anchor chain and a GrantDomain.\n",
+		fmt.Printf("%s: Personal lens %s anchors on `%s` (not the actor) but declares no Walks — pkgmgr cannot compile its read-grant producer, so Refractor's D1 gate would silently drop every row it projects (the 'forgot the slice' dual-enumeration bug). Declare Walks with the actor→anchor chain and a GrantDomain.\n",
 			posOf(l), l.name, m[1])
 		issues++
 	}
@@ -242,10 +242,17 @@ func collectLenses(fset *token.FileSet, f *ast.File, consts map[string]string) [
 					l.adapter = stringLit(kv.Value)
 				case "ProjectionKind":
 					l.projectionKind = stringLit(kv.Value)
-				case "Walk":
-					// An explicit `Walk: nil` declares nothing.
-					id, isIdent := kv.Value.(*ast.Ident)
-					l.hasWalk = !isIdent || id.Name != "nil"
+				case "Walks":
+					// An explicit `Walks: nil` or an empty slice literal
+					// declares nothing.
+					switch v := kv.Value.(type) {
+					case *ast.Ident:
+						l.hasWalks = v.Name != "nil"
+					case *ast.CompositeLit:
+						l.hasWalks = len(v.Elts) > 0
+					default:
+						l.hasWalks = true
+					}
 				case "Personal":
 					if id, ok := kv.Value.(*ast.Ident); ok {
 						l.personal = id.Name == "true"

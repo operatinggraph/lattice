@@ -189,15 +189,15 @@ type Definition struct {
 
 	// ReadGrantDomains declares the cap-read producer slices this package owns
 	// (Contract #6 §6.14 `cap-read.<domain>.<actorSuffix>`). Every Personal
-	// lens Walk.GrantDomain must name one, and every declared domain must be
-	// named by at least one walk. ExpandReadGrantWalks generates exactly one
-	// actorAggregate producer lens per domain — a Path-B producer is compiled
-	// from the walks it grants, never hand-authored.
+	// lens's Walks[i].GrantDomain must name one, and every declared domain
+	// must be named by at least one walk. ExpandReadGrantWalks generates
+	// exactly one actorAggregate producer lens per domain — a Path-B producer
+	// is compiled from the walks it grants, never hand-authored.
 	ReadGrantDomains []ReadGrantDomainSpec
 
 	// readGrantWalksExpanded marks a Definition that already ran through
 	// ExpandReadGrantWalks and is what makes the pass idempotent. A composed
-	// lens still carries the Walk it was compiled from (only its Spec is
+	// lens still carries the Walks it was compiled from (only its Spec is
 	// rewritten), so without this flag a second pass would prepend the head and
 	// chain again and append a duplicate producer. The flag travels with the
 	// value, so the composed Definition must be the one every downstream step
@@ -767,17 +767,23 @@ type LensSpec struct {
 	// the cypher's own RETURN to supply the actor. nats-subject only.
 	Personal bool
 
-	// Walk declares a non-self-anchored Personal lens's actor→anchor
-	// reachability ONCE. ExpandReadGrantWalks compiles it into both this
-	// lens's reachability prefix and the owning grant domain's producer, so
-	// the walk the D1 gate's two enumerations run cannot drift apart. Required
-	// on every non-self-anchored Personal lens; nil on a self-anchored one
-	// (the platform base cap-read self-grant covers the actor's own key) and
-	// on every non-Personal lens.
+	// Walks declares a non-self-anchored Personal lens's actor→anchor
+	// reachability, one entry per independent path. ExpandReadGrantWalks
+	// compiles every entry into both this lens's reachability prefix and its
+	// own grant domain's producer, so the walk the D1 gate's two enumerations
+	// run cannot drift apart. Required (non-empty) on every non-self-anchored
+	// Personal lens; empty on a self-anchored one (the platform base cap-read
+	// self-grant covers the actor's own key) and on every non-Personal lens.
+	// Every entry must resolve to the same AnchorType/AnchorVar (one lens
+	// still projects one entity kind, Contract #6's one-RETURN-shape policy)
+	// and bind no variable another entry in the same lens already bound (each
+	// concatenates verbatim into one prelude, so a shared name would silently
+	// join the paths).
 	//
-	// With a Walk declared, Spec carries the presentation TAIL only — the head
-	// and the chain's OPTIONAL MATCH clauses are compiled in front of it.
-	Walk *AnchorWalk
+	// With Walks declared, Spec carries the presentation TAIL only — the head
+	// and every entry's chain OPTIONAL MATCH clauses are compiled in front of
+	// it, in declaration order.
+	Walks []AnchorWalk
 
 	// DSN is the Postgres connection string (postgres adapter only). A package
 	// declares posture + columns, not a deployment connection string, so DSN may
