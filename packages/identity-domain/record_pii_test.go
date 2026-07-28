@@ -18,6 +18,7 @@ import (
 	"encoding/json"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/nats-io/nats.go/jetstream"
 
@@ -534,6 +535,88 @@ func TestRecordPII_OperatorAllowedOnClaimedIdentity(t *testing.T) {
 	if got, _ := ssn["value"].(string); got != "123456789" {
 		t.Fatalf("ssn aspect value = %q, want normalized 123456789", got)
 	}
+}
+
+// seedRoleWithCanonicalName seeds a role vertex + its canonicalName aspect —
+// the shape actor_holds_operator's kv.Read(link.targetVertex + ".canonicalName")
+// walk expects.
+func seedRoleWithCanonicalName(t *testing.T, ctx context.Context, conn *substrate.Conn, roleKey, canonicalName string) {
+	t.Helper()
+	vtxDoc := map[string]any{"class": "role", "isDeleted": false, "data": map[string]any{}}
+	vb, _ := json.Marshal(vtxDoc)
+	if _, err := conn.KVPut(ctx, testutil.HarnessCoreBucket, roleKey, vb); err != nil {
+		t.Fatalf("seed role vertex %s: %v", roleKey, err)
+	}
+	cnDoc := map[string]any{
+		"class": "canonicalName", "vertexKey": roleKey, "localName": "canonicalName",
+		"isDeleted": false, "data": map[string]any{"value": canonicalName},
+	}
+	cb, _ := json.Marshal(cnDoc)
+	if _, err := conn.KVPut(ctx, testutil.HarnessCoreBucket, roleKey+".canonicalName", cb); err != nil {
+		t.Fatalf("seed role canonicalName %s: %v", roleKey, err)
+	}
+}
+
+// TestRecordPII_OperatorRoleOnSecondPage proves actor_holds_operator's
+// pagination cursor keeps walking past page 1: ROLE_PAGE_LIMIT is 50
+// (identity-domain/ddls.go), so an actor holding 51 roles gets its operator
+// role back only on the second kv.Links page. No existing fixture seeds more
+// than a couple of holdsRole links, so a regression collapsing the `for _page
+// in range(MAX_ROLE_PAGES)` loop back to a single page would ship with every
+// other test in this suite still green.
+func TestRecordPII_OperatorRoleOnSecondPage(t *testing.T) {
+	t.Parallel()
+	ctx, conn := setupTestEnv(t)
+	cp, cons := newPIIPipeline(t, ctx, conn, "pii-operator-page2")
+
+	const (
+		pagedActorID  = "JPagedActorFixtureXX"
+		pagedActorKey = "vtx.identity." + pagedActorID
+		pagedCapKey   = "cap.identity." + pagedActorID
+	)
+	testutil.SeedCapDoc(t, ctx, conn, &processor.CapabilityDoc{
+		Key:                    pagedCapKey,
+		Actor:                  pagedActorKey,
+		Version:                "1.0",
+		ProjectedAt:            time.Now().UTC().Format(time.RFC3339Nano),
+		ProjectedFromRevisions: map[string]uint64{pagedActorKey: 1},
+		Lanes:                  []string{"default"},
+		PlatformPermissions: []processor.PlatformPermission{
+			{OperationType: "RecordIdentityPII", Scope: "any"},
+		},
+		ServiceAccess:   []processor.ServiceAccessEntry{},
+		EphemeralGrants: []processor.EphemeralGrant{},
+	})
+
+	// 50 non-operator roles, NanoIDs "APagedDummyFixtureX" + one alphabet char
+	// — sorted lexically ahead of the operator role's "z…" id below (kv.Links'
+	// cursor pages sort.Strings the full link key, substrate/kv.go), so these
+	// entirely fill kv.Links' first ROLE_PAGE_LIMIT=50 page.
+	const fillerPrefix = "APagedDummyFixtureX"
+	for i := 0; i < 50; i++ {
+		roleKey := "vtx.role." + fillerPrefix + string(substrate.Alphabet[i])
+		seedRoleWithCanonicalName(t, ctx, conn, roleKey, "filler")
+		testutil.SeedHoldsRole(t, ctx, conn, pagedActorKey, roleKey)
+	}
+	const operatorRoleKey = "vtx.role.zPagedDummyFixtureX9"
+	seedRoleWithCanonicalName(t, ctx, conn, operatorRoleKey, "operator")
+	testutil.SeedHoldsRole(t, ctx, conn, pagedActorKey, operatorRoleKey)
+
+	claimedKey := "vtx.identity." + testutil.GenReqID("PIIOpPaged")
+	seedDirectIdentity(t, ctx, conn, claimedKey, "claimed", "")
+
+	env := &processor.OperationEnvelope{
+		RequestID:     testutil.GenReqID("PIIOpPagedOp"),
+		Lane:          processor.LaneDefault,
+		OperationType: "RecordIdentityPII",
+		Actor:         pagedActorKey,
+		SubmittedAt:   "2026-07-27T11:00:00Z",
+		Class:         "identity",
+		Payload:       json.RawMessage(`{"identityKey":"` + claimedKey + `","ssn":"123-45-6789","dob":"1990-01-15"}`),
+		ContextHint:   recordPIIReads(claimedKey),
+	}
+	testutil.PublishOp(t, conn, env)
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
 }
 
 // TestRecordPII_RejectsBadTarget — missing / non-identity identityKey is
