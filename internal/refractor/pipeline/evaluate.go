@@ -122,11 +122,23 @@ func (p *Pipeline) evaluateForEntryRaw(ctx context.Context, entry ruleengine.Nod
 	// one is the identity-tombstone defect this design closes structurally
 	// (§3.4): return no result, just the enumerated actor, so
 	// emitPersonalFrames's empty frame retracts every key for this identity
-	// instead. A capability (or other actor-aware) target keeps the
-	// existing Delete-against-cap-key shortcut.
+	// instead. A perEntry lens has no single cap-shaped parent key to delete
+	// either — its live rows are the actor's per-anchor children — so it
+	// reuses multiEntryRetractions with an empty fresh set: every currently
+	// live child under the actor's prefix is tombstoned
+	// (cap-read-per-anchor-grant-keys-design.md §4.2). A doc-mode capability
+	// (or other actor-aware) target keeps the existing Delete-against-cap-key
+	// shortcut.
 	if entry.IsDeleted && p.actorEnumerator != nil {
 		if _, isPersonal := p.currentAdapter().(adapter.KeySetPublisher); isPersonal {
 			return nil, []string{entry.CoreKVKey}, nil
+		}
+		if p.multiEnvelopeFn != nil {
+			tombstones, rerr := p.multiEntryRetractions(ctx, entry.CoreKVKey, nil)
+			if rerr != nil {
+				return nil, nil, rerr
+			}
+			return tombstones, nil, nil
 		}
 		delKey := p.actorDeleteKeyFor(entry.CoreKVKey)
 		return []ruleengine.EvalResult{{
@@ -591,10 +603,25 @@ func (p *Pipeline) reprojectActors(ctx context.Context, actorKeys []string) ([]r
 				// is what retracts every key, so emit no result here.
 				continue
 			}
-			// Actor missing → emit a Delete (cap key) so the Capability
-			// KV reflects the disappearance. This case can occur if the
-			// actor was tombstoned but its adjacency hasn't been
-			// pruned yet.
+			// Actor missing → retract its projection so the Capability KV
+			// reflects the disappearance. This case can occur if the actor
+			// was tombstoned but its adjacency hasn't been pruned yet. A
+			// perEntry lens has no single parent key to delete — reuse
+			// multiEntryRetractions with an empty fresh set so every live
+			// child under the actor's prefix is tombstoned
+			// (cap-read-per-anchor-grant-keys-design.md §4.2). NOT yet
+			// reachable via sweep Reproject for a perEntry lens: Reproject
+			// bails on p.envelopeFn == nil before calling reprojectActors,
+			// and SetMultiEnvelopeFn always clears envelopeFn — closing
+			// that gate is §4.3/§4.4's deferred sweep-integration work.
+			if p.multiEnvelopeFn != nil {
+				tombstones, rerr := p.multiEntryRetractions(ctx, actorKey, nil)
+				if rerr != nil {
+					return nil, rerr
+				}
+				all = append(all, tombstones...)
+				continue
+			}
 			delKey := p.actorDeleteKeyFor(actorKey)
 			all = append(all, ruleengine.EvalResult{
 				Delete: true,
