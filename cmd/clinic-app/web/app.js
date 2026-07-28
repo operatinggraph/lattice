@@ -200,6 +200,27 @@ function startSessionKeepalive() {
 // paint must not permanently render a real cookie session as anonymous.
 const whoamiRetryBackoffsMs = [200, 500, 1200];
 
+// nameForIdentity resolves the signed-in identity's bare NanoID to its human
+// name via the already-loaded patient roster (state.patients carries
+// identityKey per row as a FULL vtx.identity.<NanoID> key — the same
+// PROTECTED, RLS-scoped clinicPatientsRead projection nameForPatient reads —
+// so the match runs through bareId(), the same comparison actingAsSelf
+// already uses), falling back to the short key when the roster hasn't
+// loaded yet or the signed-in identity isn't a patient (front-desk staff,
+// whose own name has no row there) — mirrors loftspace-app's
+// nameFor/renderSignedInAs (cmd/loftspace-app/web/app.js).
+function nameForIdentity(key) {
+  const m = state.patients.find((p) => bareId(p.identityKey) === key);
+  return m && m.name ? m.name : shortKey(key);
+}
+
+// renderSignedInAs shows who the session belongs to, resolved to a name once
+// the patient roster lands (loadPatients calls this again after it loads).
+function renderSignedInAs() {
+  const who = $("#signed-in-as");
+  if (who) who.textContent = state.identityId ? nameForIdentity(state.identityId) : "";
+}
+
 // loadWhoami records who is signed in — the single actor every read and write
 // runs as — and offers sign-out only for a real cookie session. A boot-env
 // fallback identity is authenticated by no cookie, so there is nothing for a
@@ -216,8 +237,7 @@ async function loadWhoami() {
       state.anchors = (body && Array.isArray(body.anchors) && body.anchors) || [];
       const btn = $("#sign-out");
       if (btn) btn.hidden = !state.canSignOut;
-      const who = $("#signed-in-as");
-      if (who) who.textContent = state.identityId ? "Signed in · " + state.identityId.slice(0, 8) + "…" : "";
+      renderSignedInAs();
       applyHatGating();
       return;
     } catch (_) {
@@ -489,6 +509,7 @@ async function loadPatients(q) {
   renderPatientContact();
   syncBookPatient();
   applySelfPatientLock();
+  renderSignedInAs();
 }
 
 // applySelfPatientLock locks the header's patient picker to the signed-in
