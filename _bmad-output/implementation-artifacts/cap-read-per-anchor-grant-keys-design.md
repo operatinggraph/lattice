@@ -129,14 +129,58 @@ guarded adapter (`newMultiEntryTargetAdapter`), not a fake KV. Gates green: `go 
 `internal/refractor/...` suite, `golangci-lint run ./internal/refractor/...`, `STRICT=1
 lint-conventions.go`, `make vet`.
 
-**Next increment:** the remaining §4.2 pieces — the legacy-parent-document tombstone (paired with the
-base-lens migration flip) and the three delete-consumer prefix-loop conversions (CDC disappearance,
-`emptyBehavior:delete`, sweep `Reproject`) + the shred site — then §4.3 (retry-path refusal, incl. widening
-the two deferred proxy checks) and §4.4 (sweep deltas). Per increment 1's note these may combine depending
-on how coupled the remaining work turns out to be once grounded; the `InstallActorAggregate` refusal lifts
-only once the retry-path and sweep support are in place too.
+**CHECKPOINT (Fire 1, increment 4 — 2026-07-28, worktree `.claude/worktrees/cap-read-fire1-inc4`,
+branch `fire/cap-read-fire1-inc4`):** shipped 2 of §4.2's four delete-consumer conversions, and closed
+a third for free. `evaluate.go`'s two `actorDeleteKeyFor` single-key-delete call sites — the CDC
+actor-tombstone branch (`evaluateForEntryRaw`) and the missing-actor branch (`reprojectActors`, shared
+by the fan-out and sweep `Reproject` callers) — now call `multiEntryRetractions(ctx, actorKey, nil)`
+when `p.multiEnvelopeFn != nil`: an empty fresh set makes the existing prefix diff tombstone every live
+child under the actor's prefix, reusing increment 3's machinery verbatim rather than adding a new code
+path. Grounded (and confirmed by both adversarial layers) that the third named consumer,
+`emptyBehavior:delete`, needs **no code change**: `multiEntryRetractions` already runs unconditionally
+in `executeFullForActor` whenever `multiEnvelopeFn != nil`, regardless of whether the evaluation's fresh
+set is empty — so a perEntry lens whose `EntryEnvelopeFn` returns zero real entries for an actor already
+tombstones every previously-live child via the same diff, no `EmptyAction` dispatch needed (that switch
+is doc-mode-only, unreachable once `SetMultiEnvelopeFn` clears `envelopeFn`).
+
+**Deliberately NOT this increment:** sweep `Reproject` does not yet reach a perEntry lens in production —
+`Reproject` bails at `p.envelopeFn == nil` before calling `reprojectActors`, and `SetMultiEnvelopeFn`
+always clears `envelopeFn`; closing that gate is §4.3/§4.4's sweep-integration work, named honestly in
+`evaluate.go`'s own comment rather than implied done. The shred site's own prefix enumeration (§4.2 point
+d) is untouched — it needs a new `Control`-plane capability + a `NullifyTarget` config field, judged
+out of scope for this bounded fire. The legacy-parent-document tombstone (§4.2 point 2's second half)
+stays paired with the base-lens migration flip, not yet scheduled. `InstallActorAggregate`'s registration
+refusal (`projection/driver.go`) is untouched — still refuses every real `entryKeyColumn` lens; this
+increment's code remains provably dead in production.
+
+Adversarially reviewed (3-layer: Blind Hunter / Edge-Case Hunter / Acceptance Auditor). Blind Hunter and
+Edge-Case Hunter independently converged on the same real gap: the missing-actor branch's comment
+claimed it was "also the path sweep Reproject rides for a single missing actor" — false for a perEntry
+lens per the `Reproject`/`envelopeFn` gate above. Fixed by correcting the comment (in both the source and
+the mirroring test comment) to name the gap explicitly instead of overclaiming coverage; no logic change
+needed, both reviewers confirmed the retraction/error-propagation/multi-actor-loop mechanics themselves
+are sound. Acceptance Auditor confirmed the diff's actual scope matches this checkpoint exactly — no
+overclaim, no silent drop — and flagged two non-blocking nits (an absolute-sounding "no parent key
+either" phrasing that doesn't hedge the future migration-flip case, and a pre-existing stale comment in
+`driver.go` this fire didn't touch); neither required a code change.
+
+Added test coverage: `pipeline/actor_delete_key_multientry_test.go` — actor tombstone with existing
+children (all tombstoned), actor tombstone with none (empty, no error), `reprojectActors` missing-actor
+with existing children (all tombstoned), missing-actor with none (empty, no error) — all against the
+real guarded embedded-NATS adapter `newMultiEntryTargetAdapter` already used by increment 3's tests, not
+a fake. Gates green: `go build ./...`, full `internal/refractor/...` suite, `golangci-lint run
+./internal/refractor/pipeline/...`, `STRICT=1 lint-conventions.go`, `make vet`.
+
+**Next increment:** the shred site's prefix enumeration (needs a new `Control` capability +
+`NullifyTarget.PerEntry`-style config, the larger of the two remaining §4.2 pieces), then §4.3
+(retry-path refusal, incl. widening the two deferred proxy checks) and §4.4 (sweep deltas, which is also
+what's needed before `Reproject` can reach a perEntry lens at all). The legacy-parent-document tombstone
+stays paired with the base-lens migration flip. Per increment 1's note these may combine depending on how
+coupled the remaining work turns out to be once grounded; the `InstallActorAggregate` refusal lifts only
+once the retry-path and sweep support are in place too.
 **Author:** Winston (Designer fire, 2026-07-25); increment 2 built by Winston (Lattice Steward fire, 2026-07-27);
-increment 3 built by Winston (Lattice Steward fire, 2026-07-27)
+increment 3 built by Winston (Lattice Steward fire, 2026-07-27); increment 4 built by Winston (Lattice
+Steward fire, 2026-07-28)
 **Backlog:** Stream-2 Security & trust boundary — *[Refractor] A `cap-read` document has no size bound* (★★, M)
 **Owning components:** `internal/refractor/{projection,pipeline,adapter,capabilityread,keyshredded}` (mechanism), `internal/bootstrap/lenses.go` + `internal/pkgmgr/anchorwalk.go` (producers), `packages/edge-manifest` (+ any package shipping a `cap-read.*` NATS-KV producer). Docs: `docs/contracts/06-capability-kv.md` §6.13/§6.14 (edit prepared uncommitted in the working tree), `docs/components/refractor.md`.
 
