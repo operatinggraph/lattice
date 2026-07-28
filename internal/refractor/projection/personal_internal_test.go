@@ -46,24 +46,16 @@ func newPersonalTestBucket(t *testing.T, bucket string) *substrate.KV {
 	return kv
 }
 
-func putReadDoc(t *testing.T, kv *substrate.KV, key string, anchors ...string) {
+// putPerAnchorEntry seeds one cap-read-per-anchor-grant-keys-design.md §3.2
+// per-anchor key: "cap-read.<actorSuffix>.<anchorID>", body {"isDeleted":
+// false}. anchorId lives in the key, not the body.
+func putPerAnchorEntry(t *testing.T, kv *substrate.KV, actorSuffix, anchorID string) {
 	t.Helper()
-	type readableAnchor struct {
-		AnchorType string `json:"anchorType"`
-		AnchorID   string `json:"anchorId"`
-	}
-	body := struct {
-		IsDeleted       bool             `json:"isDeleted"`
-		ReadableAnchors []readableAnchor `json:"readableAnchors"`
-	}{}
-	for _, a := range anchors {
-		body.ReadableAnchors = append(body.ReadableAnchors, readableAnchor{AnchorType: "task", AnchorID: a})
-	}
-	raw, err := json.Marshal(body)
+	raw, err := json.Marshal(map[string]any{"isDeleted": false})
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
-	if _, err := kv.Put(context.Background(), key, raw); err != nil {
+	if _, err := kv.Put(context.Background(), "cap-read."+actorSuffix+"."+anchorID, raw); err != nil {
 		t.Fatalf("put: %v", err)
 	}
 }
@@ -239,7 +231,7 @@ func TestPersonalEnvelopeFn_CapKV_NoGrant_Skips(t *testing.T) {
 
 func TestPersonalEnvelopeFn_CapKV_RealGrant_Proceeds(t *testing.T) {
 	capKV := newPersonalTestBucket(t, "capability-kv")
-	putReadDoc(t, capKV, "cap-read.identity.Hj4kPmRtw9nbCxz5vQ2y", "Aj4kPmRtw9nbCxz5vQ2y")
+	putPerAnchorEntry(t, capKV, "identity.Hj4kPmRtw9nbCxz5vQ2y", "Aj4kPmRtw9nbCxz5vQ2y")
 	fn := personalEnvelopeFn(nil, capKV, discardTestLogger())
 	row := map[string]any{"anchor": "vtx.task.Aj4kPmRtw9nbCxz5vQ2y", "kind": "task"}
 	newRow, newKeys, err := fn(row, nil, map[string]any{"actorKey": personalTestActorKey})

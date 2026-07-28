@@ -23,23 +23,18 @@ import (
 	"github.com/operatinggraph/lattice/internal/substrate"
 )
 
-// seedSelfReadGrant writes the base `cap-read.identity.<actor>` slice
-// CapabilityReadLensDefinition (internal/bootstrap/lenses.go) projects for
-// every actor — its self anchor ("an actor may always read its own vertex").
-// Threading a non-nil capKV seeded with this is what makes the self-anchored
-// manifest.me row pass personalEnvelopeFn's D1 IsReadable gate in production;
-// without the slice the gate fail-closes the actor's own row.
+// seedSelfReadGrant writes the base `cap-read.identity.<actor>.<actor>`
+// per-anchor key CapabilityReadLensDefinition (internal/bootstrap/lenses.go)
+// projects for every actor — its self anchor ("an actor may always read its
+// own vertex"), anchorId == actorId. Threading a non-nil capKV seeded with
+// this is what makes the self-anchored manifest.me row pass
+// personalEnvelopeFn's D1 IsReadable gate in production; without the key the
+// gate fail-closes the actor's own row.
 func seedSelfReadGrant(t *testing.T, h *pl2Harness, actorID string) {
 	t.Helper()
-	doc := map[string]any{
-		"isDeleted": false,
-		"readableAnchors": []map[string]any{
-			{"anchorType": "identity", "anchorId": actorID, "via": []string{"self"}},
-		},
-	}
-	b, err := json.Marshal(doc)
+	b, err := json.Marshal(map[string]any{"isDeleted": false})
 	require.NoError(t, err)
-	_, err = h.capKV.Put(h.ctx, "cap-read.identity."+actorID, b)
+	_, err = h.capKV.Put(h.ctx, "cap-read.identity."+actorID+"."+actorID, b)
 	require.NoError(t, err)
 }
 

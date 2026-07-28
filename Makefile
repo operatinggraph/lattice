@@ -349,6 +349,12 @@ verify-kernel:
 	@echo "==> Running kernel verification..."
 	NATS_URL=$(NATS_URL) NATS_NKEY=$(NKEY_LATTICE_CLI) go run ./scripts/verify-kernel.go
 
+## purge-cap-read-legacy — cap-read-per-anchor-grant-keys-design.md §6 point 4,
+## Fire 3's one-shot legacy-shape purge. Targets the shared stack's NATS_URL.
+purge-cap-read-legacy:
+	@echo "==> Purging legacy-shape cap-read.* documents..."
+	NATS_URL=$(NATS_URL) NATS_NKEY=$(NKEY_LATTICE_CLI) go run ./scripts/purge-cap-read-legacy.go
+
 ## verify-package-rbac — Install rbac-domain package and assert its KV state.
 verify-package-rbac:
 	@echo "==> Building lattice-pkg..."

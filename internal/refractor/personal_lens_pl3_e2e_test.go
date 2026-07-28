@@ -30,26 +30,17 @@ import (
 	"github.com/operatinggraph/lattice/internal/substrate"
 )
 
-// pl3ReadableAnchor / pl3ReadDoc mirror the on-wire shape Contract #6 §6.14
-// producers write to "cap-read.<source>.<actor>" — seeded directly here since
-// no D1 read-grant lens runs in this ephemeral-NATS fixture (the object under
-// test is the Personal Lens's CONSUMPTION of that KV, not D1's production of
-// it, which has its own contract-conformance coverage).
-type pl3ReadableAnchor struct {
-	AnchorType string `json:"anchorType"`
-	AnchorID   string `json:"anchorId"`
-}
-
-type pl3ReadDoc struct {
-	IsDeleted       bool                `json:"isDeleted"`
-	ReadableAnchors []pl3ReadableAnchor `json:"readableAnchors"`
-}
-
-func putPL3ReadDoc(t *testing.T, h *pl2Harness, key string, isDeleted bool, anchors ...pl3ReadableAnchor) {
+// putPL3PerAnchorEntry mirrors the on-wire shape cap-read-per-anchor-grant-
+// keys-design.md §3.2 producers write at "cap-read[.<domain>].<actorSuffix>.
+// <anchorId>" — one guarded key per granted anchor — seeded directly here
+// since no D1 read-grant lens runs in this ephemeral-NATS fixture (the
+// object under test is the Personal Lens's CONSUMPTION of that KV, not D1's
+// production of it, which has its own contract-conformance coverage).
+func putPL3PerAnchorEntry(t *testing.T, h *pl2Harness, actorSuffix, anchorID string, isDeleted bool) {
 	t.Helper()
-	raw, err := json.Marshal(pl3ReadDoc{IsDeleted: isDeleted, ReadableAnchors: anchors})
+	raw, err := json.Marshal(map[string]any{"isDeleted": isDeleted})
 	require.NoError(t, err)
-	_, err = h.capKV.Put(h.ctx, key, raw)
+	_, err = h.capKV.Put(h.ctx, "cap-read."+actorSuffix+"."+anchorID, raw)
 	require.NoError(t, err)
 }
 
@@ -121,8 +112,7 @@ func TestPersonalLens_PL3_E2E_SecurityWinsOverRelevance(t *testing.T) {
 	_, _ = activatePersonalLens(t, h, pl2NanoID("pl3-secwins-lens"), pl3LeaseCypher(), []string{"entityId"}, h.capKV)
 
 	// cap-read grants a DIFFERENT anchor only — this lease is NOT among it.
-	putPL3ReadDoc(t, h, "cap-read.identity."+recipient, false,
-		pl3ReadableAnchor{AnchorType: "unit", AnchorID: pl2NanoID("pl3-secwins-other-anchor")})
+	putPL3PerAnchorEntry(t, h, "identity."+recipient, pl2NanoID("pl3-secwins-other-anchor"), false)
 
 	// The device's Interest Set explicitly declares "lease" relevant — the
 	// relevance filter alone would admit this delta.
@@ -178,8 +168,8 @@ func TestPersonalLens_PL3_E2E_GrantedAnchor_StreamsThenRevokeStops(t *testing.T)
 
 	_, _ = activatePersonalLens(t, h, pl2NanoID("pl3-revoke-lens"), pl3LeaseCypher(), []string{"entityId"}, h.capKV)
 
-	grantKey := "cap-read.identity." + recipient
-	putPL3ReadDoc(t, h, grantKey, false, pl3ReadableAnchor{AnchorType: "lease", AnchorID: leaseBareID})
+	actorSuffix := "identity." + recipient
+	putPL3PerAnchorEntry(t, h, actorSuffix, leaseBareID, false)
 
 	writePL2Vertex(t, h, identityKey, "identity", map[string]any{"name": "recipient"})
 	writePL2Vertex(t, h, leaseKey, "lease", map[string]any{"id": "lease-pl3-3", "monthlyRent": 3000})
@@ -198,7 +188,7 @@ func TestPersonalLens_PL3_E2E_GrantedAnchor_StreamsThenRevokeStops(t *testing.T)
 	// Revoke: soft-tombstone the grant (§6.8 — the retained watermark
 	// convention; the Personal Lens's read side treats isDeleted:true as
 	// absent regardless of the surviving projectionSeq).
-	putPL3ReadDoc(t, h, grantKey, true)
+	putPL3PerAnchorEntry(t, h, actorSuffix, leaseBareID, true)
 
 	writePL2Vertex(t, h, leaseKey, "lease", map[string]any{"id": "lease-pl3-3", "monthlyRent": 3100})
 
