@@ -464,14 +464,23 @@ hardcodes (`capReadActorType`) — so the check is narrowed to reject exactly a 
 closing the real §3.1 corner instead of an imagined broader one.
 
 `packages/edge-manifest` version-bumped 0.14.7→0.14.8 (the only live consumer of the flipped generator).
-**Deployment note, not yet performed:** the Output descriptor is a pinned, non-hot-reloadable field
-(`reloadpin.PinnedFields`) — a plain package upgrade lands the new shape into the lens's `.spec` aspect,
-but the running Refractor keeps emitting the legacy doc shape for `edgeManifest*ReadGrants` until
-`make cycle-refractor` re-derives activation from the updated descriptor (the same mechanic §6's base-lens
-flip used). The sweep cannot itself claim a legacy DOMAIN doc (§4.4's `AnchorFromKey` rejects it, by
-design, the same disjointness this fire hardens) — drain proceeds only via `multiEntryRetractions`'
-legacy-parent check on each actor's own fan-out-triggered evaluation, converging at the auth-plane sweep's
-normal per-actor rotation pace, identical to §6's base-lens drain.
+
+**Deployment (2026-07-28, same-day follow-on): landed on the live dev-stack cell.** The Output descriptor
+is a pinned, non-hot-reloadable field (`reloadpin.PinnedFields`), so a plain package upgrade alone lands
+the new shape into the lens's `.spec` aspect but leaves the running Refractor still emitting the legacy
+doc shape until re-activation. Ran `make reinstall-package PKG=packages/edge-manifest` (upgrade committed
+0.14.7→0.14.8, 5 updated; Refractor logged the expected `"lens change requires re-activation"` transient
+for all three generated producer specs) then `make cycle-refractor`: on restart all three logged
+`"actor-aggregate envelope + fan-out + delete-key + latency installed" perEntry:true guarded:true
+authPlane:true` — no refusal. Verified directly against `capability-kv` (`nats kv get`): a live
+`cap-read.edgeManifest.identity.<id>.<anchorId>` key holds the exact §3.2 per-key shape
+(`actor`/`anchorType`/`key`/`projectedAt`/`projectionSeq`/`version`/`via`). The sweep cannot itself claim a
+legacy DOMAIN doc (§4.4's `AnchorFromKey` rejects it, by design, the same disjointness this fire hardens)
+— drain proceeds only via `multiEntryRetractions`' legacy-parent check on each actor's own
+fan-out-triggered evaluation; the restart's own CDC catch-up replay drained most of the population within
+minutes (1123 per-anchor keys observed vs 200 legacy domain docs remaining), the long tail converging at
+the auth-plane sweep's normal per-actor rotation pace, identical to §6's base-lens drain. Zero errors
+logged after the restart.
 
 Added `internal/refractor/edge_manifest_fire2_producer_flip_e2e_test.go`: installs the real
 `edgemanifest.Package` via the real `InstallPackage` path, activates `edgeManifestReadGrants` through the
