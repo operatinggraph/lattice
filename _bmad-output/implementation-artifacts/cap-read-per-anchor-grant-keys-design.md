@@ -171,16 +171,49 @@ real guarded embedded-NATS adapter `newMultiEntryTargetAdapter` already used by 
 a fake. Gates green: `go build ./...`, full `internal/refractor/...` suite, `golangci-lint run
 ./internal/refractor/pipeline/...`, `STRICT=1 lint-conventions.go`, `make vet`.
 
-**Next increment:** the shred site's prefix enumeration (needs a new `Control` capability +
-`NullifyTarget.PerEntry`-style config, the larger of the two remaining §4.2 pieces), then §4.3
-(retry-path refusal, incl. widening the two deferred proxy checks) and §4.4 (sweep deltas, which is also
-what's needed before `Reproject` can reach a perEntry lens at all). The legacy-parent-document tombstone
-stays paired with the base-lens migration flip. Per increment 1's note these may combine depending on how
-coupled the remaining work turns out to be once grounded; the `InstallActorAggregate` refusal lifts only
-once the retry-path and sweep support are in place too.
+**CHECKPOINT (Fire 1, increment 5 — 2026-07-28, worktree `.claude/worktrees/cap-read-fire1-inc5`,
+merged to main `eec0b205`; worktree fully merged, no unlanded work):** closed §4.2 point (d), the
+shred site's prefix enumeration — the last of the four un-enumerated delete consumers. Added
+`control.RowSetNullifier`/`Service.NullifyActor` (the perEntry analog of the existing
+`RowNullifier`/`NullifyRow`) and `*pipeline.Pipeline.DeleteAllForActor`, which lists an actor's
+child-key prefix via `adapter.PrefixKeyLister` and deletes every live entry. `keyshredded.NullifyTarget`
+gained a `PerEntry bool` field; `handleKeyShredded` routes a PerEntry target through `NullifyActor`
+instead of the single explicit-key `NullifyRow`. Every pipeline registers as a `RowSetNullifier`
+unconditionally (`cmd/refractor/main.go`), mirroring the existing unconditional `RowNullifier`
+registration — no live `PerEntry` target is configured, so this stays provably dead in production
+(same posture as increment 4).
+
+Adversarially reviewed (3-layer: Blind Hunter / Edge-Case Hunter / Acceptance Auditor). All three
+independently converged on the same two real gaps in the first draft, both fixed before merge: **(1)**
+the delete loop aborted on the first failing child key, abandoning the rest of the set — this path is
+never retried by its caller (keyshredded's privacy-critical tier Acks, never Naks), so the fix attempts
+every key and joins the errors (`errors.Join`), reporting `deleted/total` in the wrapped error. **(2)**
+`DeleteAllForActor` had no structural check that the pipeline is actually a perEntry lens — a
+`PerEntry: true` misconfiguration against a doc-mode lens (or a genuine perEntry lens reached through an
+install path that never sets `actorDeleteKey`) would list zero keys under a prefix the doc-mode row was
+never keyed under, return `nil`, and the manager would durably record a **falsely-clean** shred
+finalization; now refuses closed when `multiEnvelopeFn == nil`, naming the rule ID in the error.
+Acceptance Auditor separately flagged that the legacy parent document (pre-flip doc-mode shape, live
+during the §6 dual-read window) is untouched by this consumer — correct per scope, since its tombstone
+stays paired with the base-lens migration flip (§6), not this increment; the `NullifyTarget` doc comment
+now says so explicitly rather than leaving it implied. Added test coverage:
+`pipeline/delete_all_for_actor_test.go` — every-child-deleted, no-children no-op, already-tombstoned
+idempotent, adapter-lacks-`PrefixKeyLister` refusal, not-a-perEntry-lens refusal, sibling-actor-prefix
+isolation (the fixture's `actorDeleteKey` derives from its argument, unlike the shared
+`newMultiEntryDeleteKeyPipeline` stub, so this is the test that actually proves the argument→prefix
+binding), and partial-failure attempt-all-and-join. `keyshredded/manager_test.go` — PerEntry routing,
+not-registered nak, and privacy-critical-pause parity with the doc-mode path. Gates green:
+`go build ./...`, full `internal/refractor/...` suite, `golangci-lint run ./...`, `STRICT=1
+lint-conventions.go`, `make vet`.
+
+**Next increment:** §4.3 (retry-path refusal, incl. widening the two deferred proxy checks) and §4.4
+(sweep deltas, which is also what's needed before `Reproject` can reach a perEntry lens at all). The
+legacy-parent-document tombstone stays paired with the base-lens migration flip. Per increment 1's note
+these may combine depending on how coupled the remaining work turns out to be once grounded; the
+`InstallActorAggregate` refusal lifts only once the retry-path and sweep support are in place too.
 **Author:** Winston (Designer fire, 2026-07-25); increment 2 built by Winston (Lattice Steward fire, 2026-07-27);
 increment 3 built by Winston (Lattice Steward fire, 2026-07-27); increment 4 built by Winston (Lattice
-Steward fire, 2026-07-28)
+Steward fire, 2026-07-28); increment 5 built by Winston (Lattice Steward fire, 2026-07-28)
 **Backlog:** Stream-2 Security & trust boundary — *[Refractor] A `cap-read` document has no size bound* (★★, M)
 **Owning components:** `internal/refractor/{projection,pipeline,adapter,capabilityread,keyshredded}` (mechanism), `internal/bootstrap/lenses.go` + `internal/pkgmgr/anchorwalk.go` (producers), `packages/edge-manifest` (+ any package shipping a `cap-read.*` NATS-KV producer). Docs: `docs/contracts/06-capability-kv.md` §6.13/§6.14 (edit prepared uncommitted in the working tree), `docs/components/refractor.md`.
 
