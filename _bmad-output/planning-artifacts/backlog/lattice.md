@@ -122,21 +122,23 @@ ratified). Everything here needs design and is fair game **except** 🚧 Andrew-
 **forks** (Gateway, read-path auth, Vault, multi-cell, HA-NATS) and **frozen-contract** changes are
 designed-through, but the *fork decision* + the *contract commit* are Andrew's.
 
-> 🎯 **Showcase-period priority (Andrew, 2026-07-25): the Verticals stream has build priority** — the
-> showcase (Facet rendering every archetype world correctly) is the standing goal, and this lane keeps
-> winning the shared build lock over it. Until the showcase is done: prefer S-sized picks, start no M+
-> build when Verticals has work queued, and yield the lock.
-> **Build-ready now** (within that): the
-> **script live-read budget** (★★ M, the bigger sibling of the shipped envelope ceiling), then the
-> two ★ Processor sensitive-predicate rows. Both 2026-07-25 ratifications are
-> 🗄️ **shelved with named revives** (cap-read → showcase completion; appsession → first real-IdP
-> deployment) — the Steward does not select them.
+> **Showcase-period priority LIFTED (2026-07-27).** The 2026-07-25 Andrew directive that gave the
+> Verticals stream build priority "until the showcase is done" no longer applies: Facet's
+> archetype-world rendering is shipped end-to-end except the iOS-native increment, which is blocked on
+> host Xcode tooling, not on lane priority ([verticals.md](verticals.md)'s Edge showcase app row —
+> "every non-iOS increment shipped"). The Lattice lane no longer caps picks at S-sized or yields the
+> shared build lock on that basis — select by importance × readiness as normal (§2 above).
+> **Build-ready now:** the **script live-read budget** (★★ M, the bigger sibling of the shipped
+> envelope ceiling), the **cap-read per-anchor grant keys** fix (★★ L — its revive condition,
+> showcase completion, is now met; no longer shelved), and the two ★ Processor sensitive-predicate
+> rows. `appsession`'s OIDC design stays 🗄️ **shelved** (revive: first real-IdP deployment) —
+> unrelated to the showcase.
 > Every `✅ ratified` row is done or driver-blocked; the rest are Whetstone's or parking-lot.
 > A stale callout starves the lane — whoever ships next renames this.
 >
 > 📎 **Refractor is drained.** All seven buildable rows shipped 2026-07-25 against
 > [refractor-open-rows-fire-briefs.md](../../implementation-artifacts/refractor-open-rows-fire-briefs.md);
-> the two that remain are the shelved cap-read row and the HA-NATS-blocked rollup.
+> the cap-read row above (now build-ready) and the HA-NATS-blocked rollup are what remain.
 
 ### Security & trust boundary
 | Item | What it is | Imp | Size | State |
@@ -147,7 +149,7 @@ designed-through, but the *fork decision* + the *contract commit* are Andrew's.
 | **[Processor] A script's live reads have no budget** | Class-(e) `kv.Links` paging + one `kv.Read` per link is uncapped at the Processor: `identity_has_open_tasks` alone walks 64 pages × 256 links, so one MergeIdentity can issue ~16k sequential Core-KV GETs — ~16x the declared-read ceiling, which never sees a live read. `connKVReader.ReadVertex` has no budget. | ★★ | M | 📋 ready · consumer: any actor able to submit an op whose script enumerates |
 | **[packages] ~20 read-posture comments assert hydration-time fatality** | `packages/*` DDL comments + two READMEs still say a declared-but-absent read faults "before the script runs" (identity-domain, service-domain, privacy-base, objects-base, orchestration-base, clinic/loftspace READMEs), as does `docs/contracts/10-orchestration-substrate.md:238`. Doc-only sweep. | ★ | S | 📋 ready |
 | **Starlark 250ms wall budget fails installs under parallel test load** | `go test ./...` at default `-p` reds a different package-install test each run with `ScriptTimeout: script exceeded wall budget 250ms` — reproduced on unmodified `main`, so it predates any one fire. Costs every fire an investigation to rule out its own change. | ★★ | S–M | 📋 ready |
-| **[Refractor] A `cap-read` document has no size bound** | Even deduped, an actor reaching enough distinct anchors renders `cap-read.<domain>.<actor>` past NATS's max payload; the write then fails permanently, freezing that actor's grant set so revocations stop landing (fail-OPEN). Design: per-anchor keys (the Postgres per-row twin). | ★★ | L | 🗄️ shelved (revive: showcase completion) · ✅ design Andrew-ratified 2026-07-25 (Option A) · [design](../../implementation-artifacts/cap-read-per-anchor-grant-keys-design.md) · §6.13/§6.14 contract edit committed |
+| **[Refractor] A `cap-read` document has no size bound** | Even deduped, an actor reaching enough distinct anchors renders `cap-read.<domain>.<actor>` past NATS's max payload; the write then fails permanently, freezing that actor's grant set so revocations stop landing (fail-OPEN). Design: per-anchor keys (the Postgres per-row twin). | ★★ | L | 📋 ready · revive condition met (showcase substantially shipped) · ✅ design Andrew-ratified 2026-07-25 (Option A) · [design](../../implementation-artifacts/cap-read-per-anchor-grant-keys-design.md) · §6.13/§6.14 contract edit committed |
 | **[appsession] The production IdP posture cannot open a session** | `setCookie` runs only under a non-nil `Signer`, so with `_JWT_PUBLIC_KEY`/`_ISSUER` set nothing can issue the cookie — the verify-only posture is unreachable (401 everywhere), and `/api/session/refresh` 404s so every FE write path dies with it. Design: the kit becomes the OIDC code-flow RP. | ★★ | L | 🗄️ shelved (revive: first real-IdP deployment) · ✅ design Andrew-ratified 2026-07-25 · [design](../../implementation-artifacts/appsession-oidc-production-signin-design.md) |
 | **Multi-hat `scope=any`+`scope=self` first-match over-confines** | `matchPlatformPermission` returns on the first operationType match regardless of scope, and `capabilityRoles` collects roles unordered — so a consumer+staff identity (e.g. seed-showcase `seedSamMultiHat`) can authorize their OWN cafe tab as scope=any, losing the self exemption. Fail-closed; bites a multi-hat who works and lives in different buildings. | ★ | S–M | 📋 ready · no live victim (showcase multi-hat has no leaseapp) |
 | **NATS write restriction — Fire 4 (production mTLS)** | Fires 1–3 closed the fabricated-KV-write surface at the account level; the remaining fire binds subject permissions to client certificates instead of NKeys, which only matters off the dev stack. | ★ now / ★★ prod | M | 🗄️ shelved (revive: production deployment) · [design](../../implementation-artifacts/nats-account-write-restriction-design.md) §Fire-3-status |
