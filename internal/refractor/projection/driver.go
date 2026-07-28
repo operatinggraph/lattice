@@ -167,12 +167,11 @@ func (d OutputDescriptor) EnvelopeFn(lensDefKey string, revisionOf func(string) 
 //     collapses exact duplicates; a genuine collision across walk branches is
 //     audit-only and benign).
 //
-// This function has no caller in InstallActorAggregate yet: the
-// entryKeyColumn branch there still refuses registration, because emitting
-// fresh per-entry keys without §4.2's retraction transport (+ §4.3's
-// retry-path refusal, + §4.4's sweep deltas) would leave a revoked anchor's
-// key live forever — an over-grant on the security plane. See the design's
-// Fire 1 increment-2 checkpoint for the sequencing.
+// InstallActorAggregate calls this for any descriptor with entryKeyColumn
+// set, alongside the full §4.2 retraction transport, §4.3's retry-path
+// routing, and §4.4's sweep deltas — no lens sets the field yet, so the
+// combination is provably dead in production until the bootstrap
+// capabilityRead base-lens migration (§6) flips one live.
 func (d OutputDescriptor) EntryEnvelopeFn() pipeline.MultiEnvelopeFn {
 	if d.EntryKeyColumn == "" || len(d.BodyColumns) != 1 {
 		// ParseOutputDescriptor already refuses this shape (§3.3), so a
@@ -349,27 +348,6 @@ func InstallActorAggregate(
 			"lensId", r.ID, "err", err)
 		return false
 	}
-	if desc.EntryKeyColumn != "" {
-		// EntryEnvelopeFn (this package) ships the emission mechanism, the
-		// per-actor prefix-diff retraction transport ships (§4.2), the retry
-		// queue's raw-replay refusal + actor-reproject routing ships (§4.3),
-		// and the sweep's AnchorFromKey perEntry variant + coverage/orphan
-		// deltas ship (§4.4) — but wiring registration in here is still
-		// deliberately deferred: below this block, InstallActorAggregate
-		// unconditionally calls p.SetEnvelopeFn(desc.EnvelopeFn(...)), the
-		// one-document-per-actor wrapper, never
-		// p.SetMultiEnvelopeFn(desc.EntryEnvelopeFn()) — so a real
-		// entryKeyColumn lens registered today would still project one
-		// document instead of per-entry keys, and §4.5's prefix-scoped
-		// truncate plus the bootstrap capabilityRead base-lens migration
-		// (§6) are still unbuilt. Refuse loudly (fail-closed, under-grant)
-		// until that wiring lands. See the design's Fire 1 checkpoint for
-		// the sequencing.
-		logger.Error("actor-aggregate output descriptor sets entryKeyColumn but the driver does not yet wire its per-entry envelope — refusing registration",
-			"lensId", r.ID)
-		return false
-	}
-
 	plan, err := Compile(r)
 	if err != nil {
 		logger.Error("actor-aggregate plan compile failed — refusing registration",
@@ -378,8 +356,39 @@ func InstallActorAggregate(
 	}
 	authPlane := plan.AuthPlane
 
+	// A perEntry descriptor (entryKeyColumn set) projects through
+	// EntryEnvelopeFn's per-anchor keys instead of EnvelopeFn's one document
+	// per actor (cap-read-per-anchor-grant-keys-design.md §4.1); every other
+	// installation step below — fan-out, delete-key derivation, sweep
+	// enrolment, truncate scoping, guard — already reads from desc/plan alone
+	// and needs no perEntry branch of its own (§4.2's retraction, §4.3's
+	// retry-path routing, and §4.4's sweep deltas all dispatch on whichever
+	// envelope func is installed, not on how it got installed).
 	lensDefKey := "vtx.meta." + r.ID
-	p.SetEnvelopeFn(desc.EnvelopeFn(lensDefKey, projectionRevision))
+	if desc.EntryKeyColumn != "" {
+		// The §4.2 retraction transport (multiEntryRetractions) that every
+		// perEntry evaluation runs through requires the adapter to both list
+		// its own keys by prefix and read a candidate back to decide
+		// tombstone-skip — refusing here when the target can't is the same
+		// posture EnableProjectionGuard and SetDiffRetraction already take
+		// for their own adapter requirements: a lens installed without the
+		// capability its mechanism depends on doesn't run degraded, it fails
+		// every evaluation, which is a worse failure mode than never
+		// installing.
+		if _, ok := adpt.(adapter.PrefixKeyLister); !ok {
+			logger.Error("actor-aggregate entryKeyColumn descriptor requires an adapter that can list keys by prefix — refusing registration",
+				"lensId", r.ID, "adapter", fmt.Sprintf("%T", adpt))
+			return false
+		}
+		if _, ok := adpt.(adapter.RowReader); !ok {
+			logger.Error("actor-aggregate entryKeyColumn descriptor requires an adapter that can read a row back — refusing registration",
+				"lensId", r.ID, "adapter", fmt.Sprintf("%T", adpt))
+			return false
+		}
+		p.SetMultiEnvelopeFn(desc.EntryEnvelopeFn())
+	} else {
+		p.SetEnvelopeFn(desc.EnvelopeFn(lensDefKey, projectionRevision))
+	}
 	p.SetActorEnumerator(pipeline.NewActorEnumerator(adjKV, coreKV, desc.AnchorType))
 	p.SetActorDeleteKey(desc.BuildKey)
 	p.SetLatencyBuffer(pipeline.NewLatencyRingBuffer(pipeline.DefaultLatencyBufferSize))
@@ -432,7 +441,8 @@ func InstallActorAggregate(
 
 	logger.Info("actor-aggregate envelope + fan-out + delete-key + latency installed",
 		"lensId", r.ID, "lensDefKey", lensDefKey,
-		"anchorType", desc.AnchorType, "guarded", guarded, "authPlane", authPlane)
+		"anchorType", desc.AnchorType, "guarded", guarded, "authPlane", authPlane,
+		"perEntry", desc.EntryKeyColumn != "")
 	return true
 }
 

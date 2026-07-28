@@ -610,16 +610,14 @@ func (p *Pipeline) reprojectActors(ctx context.Context, actorKeys []string) ([]r
 			// multiEntryRetractions with an empty fresh set so every live
 			// child under the actor's prefix is tombstoned
 			// (cap-read-per-anchor-grant-keys-design.md §4.2). Reproject's
-			// own gate now accepts a perEntry lens too (§4.3, widened to
+			// own gate accepts a perEntry lens too (§4.3, widened to
 			// `p.envelopeFn == nil && p.multiEnvelopeFn == nil`), so this
-			// branch is reachable in principle via the retry path's
-			// actor-reproject (enqueueActorReprojectRetry) — but not yet in
-			// production, for the same reason the sweep can't reach it
-			// either: `InstallActorAggregate` still refuses to register any
-			// real `entryKeyColumn` lens, and nothing outside this package's
-			// own tests ever calls `SetMultiEnvelopeFn` at all. Both the
-			// retry path and the sweep's deep-verify stay dead until that
-			// registration refusal lifts — §4.4's sweep-integration work.
+			// branch is reachable via the retry path's actor-reproject
+			// (enqueueActorReprojectRetry) and the sweep's deep-verify alike:
+			// `InstallActorAggregate` wires a real `entryKeyColumn` lens's
+			// `SetMultiEnvelopeFn` at registration. No lens sets the field
+			// yet (§6, the bootstrap `capabilityRead` base-lens migration, is
+			// still unbuilt), so this stays dead in production until then.
 			if p.multiEnvelopeFn != nil {
 				tombstones, rerr := p.multiEntryRetractions(ctx, actorKey, nil)
 				if rerr != nil {

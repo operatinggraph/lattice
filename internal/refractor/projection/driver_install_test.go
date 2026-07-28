@@ -92,20 +92,83 @@ func TestInstallActorAggregate_InvalidOutputDescriptor_Refuses(t *testing.T) {
 	}
 }
 
-// InstallActorAggregate does not yet wire EntryEnvelopeFn in (no retraction
-// transport, retry-path refusal, or sweep support for the perEntry shape —
-// cap-read-per-anchor-grant-keys-design.md §4.2-§4.4); a lens opting into
-// entryKeyColumn must be refused registration rather than run with only part
-// of the mechanism that keeps it safe.
-func TestInstallActorAggregate_EntryKeyColumnSet_Refuses(t *testing.T) {
+// A descriptor with entryKeyColumn set installs through the per-entry
+// envelope (SetMultiEnvelopeFn) rather than the one-document-per-actor
+// EnvelopeFn, and gets every other installation step doc-mode lenses get —
+// fan-out, sweep enrolment, truncate scoping, guard — since none of them
+// branch on envelope shape (cap-read-per-anchor-grant-keys-design.md §4.1).
+func TestInstallActorAggregate_EntryKeyColumnSet_InstallsMultiEnvelope(t *testing.T) {
 	r := installRule(t, "my-tasks", string(projection.EmptySkip))
 	r.Output.EntryKeyColumn = "anchorId"
+	r.Output.RealnessFilter = "anchorId"
 	adpt := newUnguardedAdapter(t)
 	p := newTestPipeline(t, adpt)
 
 	ok := projection.InstallActorAggregate(p, adpt, r, func(string) uint64 { return 0 }, nil, nil, discardLogger())
+	if !ok {
+		t.Fatalf("expected a well-formed entryKeyColumn descriptor to install")
+	}
+	if !p.IsPerEntry() {
+		t.Fatalf("expected InstallActorAggregate to wire SetMultiEnvelopeFn for an entryKeyColumn descriptor")
+	}
+	if adpt.KeyPrefix() != "installTest." {
+		t.Fatalf("a perEntry lens's truncate scope derives from the same OutputKeyPattern prefix as doc-mode, got %q", adpt.KeyPrefix())
+	}
+	if p.Sweeper() == nil {
+		t.Fatalf("a perEntry lens whose key pattern round-trips through AnchorFromKey must still get a convergence sweep")
+	}
+}
+
+// The bootstrap capabilityRead base lens's actual §6 shape: auth-plane bucket
+// + emptyBehavior=delete. A perEntry lens must be guarded exactly like its
+// doc-mode counterpart — RequiresGuard reads AuthPlane/EmptyBehavior off the
+// compiled plan, never the envelope shape.
+func TestInstallActorAggregate_EntryKeyColumnSet_AuthPlane_EnablesGuard(t *testing.T) {
+	r := installRule(t, projection.AuthPlaneBucket, string(projection.EmptyDelete))
+	r.Output.EntryKeyColumn = "anchorId"
+	r.Output.RealnessFilter = "anchorId"
+	adpt := newUnguardedAdapter(t)
+	p := newTestPipeline(t, adpt)
+
+	ok := projection.InstallActorAggregate(p, adpt, r, func(string) uint64 { return 0 }, nil, nil, discardLogger())
+	if !ok {
+		t.Fatalf("expected an auth-plane entryKeyColumn descriptor to install")
+	}
+	if !adpt.Guarded() {
+		t.Fatalf("an auth-plane perEntry lens must enable the projection-write guard, same as doc-mode")
+	}
+}
+
+// InstallActorAggregate's §4.2 retraction transport requires the adapter to
+// list its own keys by prefix and read a candidate row back
+// (multiEntryRetractions, evaluate.go) — an adapter missing either must be
+// refused at install, not left to fail every live evaluation.
+func TestInstallActorAggregate_EntryKeyColumnSet_AdapterCannotListByPrefix_Refuses(t *testing.T) {
+	r := installRule(t, "my-tasks", string(projection.EmptySkip))
+	r.Output.EntryKeyColumn = "anchorId"
+	r.Output.RealnessFilter = "anchorId"
+	adpt := nonKVAdapter{}
+	p := newTestPipeline(t, adpt)
+
+	ok := projection.InstallActorAggregate(p, adpt, r, func(string) uint64 { return 0 }, nil, nil, discardLogger())
 	if ok {
-		t.Fatalf("expected refusal for a descriptor with entryKeyColumn set (no driver consumer yet)")
+		t.Fatalf("expected refusal for an entryKeyColumn descriptor on an adapter that cannot list keys by prefix or read a row back")
+	}
+}
+
+// The doc-mode counterpart to the test above: a descriptor with no
+// entryKeyColumn installs through EnvelopeFn, never SetMultiEnvelopeFn.
+func TestInstallActorAggregate_NoEntryKeyColumn_InstallsSingleEnvelope(t *testing.T) {
+	r := installRule(t, "my-tasks", string(projection.EmptySkip))
+	adpt := newUnguardedAdapter(t)
+	p := newTestPipeline(t, adpt)
+
+	ok := projection.InstallActorAggregate(p, adpt, r, func(string) uint64 { return 0 }, nil, nil, discardLogger())
+	if !ok {
+		t.Fatalf("expected a well-formed doc-mode descriptor to install")
+	}
+	if p.IsPerEntry() {
+		t.Fatalf("expected InstallActorAggregate to wire SetEnvelopeFn (doc mode), not SetMultiEnvelopeFn, when entryKeyColumn is unset")
 	}
 }
 

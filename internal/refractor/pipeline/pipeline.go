@@ -358,6 +358,16 @@ func (p *Pipeline) SetMultiEnvelopeFn(fn MultiEnvelopeFn) {
 	}
 }
 
+// IsPerEntry reports whether this pipeline projects through the per-entry
+// envelope (a MultiEnvelopeFn installed via SetMultiEnvelopeFn) rather than
+// the one-document-per-actor EnvelopeFn — the same distinction
+// DeleteAllForActor's refusal reads, exposed for callers (installation-time
+// wiring checks, tests) that need to observe the shape without exercising the
+// live shred path.
+func (p *Pipeline) IsPerEntry() bool {
+	return p.multiEnvelopeFn != nil
+}
+
 // SetDiffRetraction opts this plain lens into Fire 3's target-diff retraction
 // (see the diffRetraction field doc). Must be called before Run.
 //

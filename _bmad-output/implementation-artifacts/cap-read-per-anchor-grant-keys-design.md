@@ -303,16 +303,66 @@ increments 1-6.
 Gates green: `go build ./...`, full `internal/refractor/...` suite (incl. `-race` on `pipeline` and
 `projection`), `go test ./...`, `golangci-lint run ./...`, `STRICT=1 lint-conventions.go`, `make vet`.
 
-**Next increment:** the per-entry envelope wiring (`InstallActorAggregate` calling
-`p.SetMultiEnvelopeFn(desc.EntryEnvelopeFn())` for an `entryKeyColumn` descriptor instead of refusing),
-§4.5's prefix-scoped truncate (inherited from fire-briefs Fire B if it lands first), and the bootstrap
-`capabilityRead` base-lens migration (§6) — only once all three are in does the registration refusal
-actually lift. The legacy-parent-document tombstone stays paired with the base-lens migration flip.
+**CHECKPOINT (Fire 1, increment 8 — 2026-07-28, worktree `.claude/worktrees/cap-read-fire1-inc8`,
+branch `fire/cap-read-fire1-inc8`; not yet merged at time of writing):** closed the §4.1 wiring gap —
+`InstallActorAggregate` no longer refuses an `entryKeyColumn` descriptor. It now dispatches
+`p.SetMultiEnvelopeFn(desc.EntryEnvelopeFn())` for a perEntry descriptor and
+`p.SetEnvelopeFn(desc.EnvelopeFn(...))` otherwise, then runs every remaining installation step
+(fan-out enumerator, actor-delete-key, sweep enrolment, truncate scoping, guard) unchanged — none of
+them branch on envelope shape, confirming the §4.2-§4.4 machinery built in increments 2-7 was already
+generic. Grounded, not assumed: `OutputDescriptor.KeyPrefix()` derives from the literal text before the
+actor-suffix placeholder in `OutputKeyPattern`, which a perEntry key's trailing `.<entryId>` never
+touches, so `ApplyTruncateScope`'s existing prefix binding already scopes a perEntry lens's rebuild
+truncate correctly — §4.5 needed no perEntry-specific code, only this confirmation (traced against
+`natskv.go`'s `Truncate`/`truncateKeys` and `output.go`'s `KeyPrefix`). Added `Pipeline.IsPerEntry()`
+(pipeline.go) so a caller can observe which envelope shape got installed without exercising the live
+shred path (`DeleteAllForActor` would otherwise be the only witness, and it touches a real KV listing).
+`TestInstallActorAggregate_EntryKeyColumnSet_Refuses` replaced with
+`TestInstallActorAggregate_EntryKeyColumnSet_InstallsMultiEnvelope` (asserts `IsPerEntry()` true + the
+truncate scope matches doc-mode's + `Sweeper()` non-nil) and
+`TestInstallActorAggregate_NoEntryKeyColumn_InstallsSingleEnvelope` (the negative twin, `IsPerEntry()`
+false) — both in `driver_install_test.go`. The stale "`InstallActorAggregate` still refuses…" comments
+(three sites: `evaluate.go`'s actor-disappearance branch, and the doc comments on `EntryEnvelopeFn` in
+`driver.go` and the `EntryKeyColumn` field in `output.go`) rewritten to state the current, still-dead-
+in-production posture accurately. **Still no lens sets `entryKeyColumn`** (confirmed by grep across every
+file type, not just `.go` — no bootstrap seed, package lens, or JSON/Starlark definition sets it): the
+mechanism remains provably dead in production; only §6's bootstrap `capabilityRead` base-lens migration
+(the lens-vertex flip + `OutputSchema` update + Refractor restart) actually activates it, and that is a
+separate, higher-risk cutover this increment deliberately does not attempt.
+
+**Adversarially reviewed (opus) before merge.** One major folded in: the perEntry branch now refuses
+registration when the adapter doesn't implement both `adapter.PrefixKeyLister` and `adapter.RowReader` —
+`multiEntryRetractions` (evaluate.go, §4.2) unconditionally requires both on every perEntry evaluation,
+and the same fail-closed-at-install posture `EnableProjectionGuard`/`SetDiffRetraction` already take for
+their own adapter requirements applies here; without it a misconfigured perEntry lens would install
+clean and then error on every single evaluation instead of never installing
+(`TestInstallActorAggregate_EntryKeyColumnSet_AdapterCannotListByPrefix_Refuses`). Two tests added:
+the guard branch for perEntry on the actual §6 shape (auth-plane bucket + `emptyBehavior: delete`,
+`TestInstallActorAggregate_EntryKeyColumnSet_AuthPlane_EnablesGuard`) and the adapter-capability refusal
+above. Three stale-comment sites fixed (was one). Two informational findings surfaced for §6, not fixed
+here since neither is reachable in this diff: (1) the bootstrap `capabilityRead` lens
+(`internal/bootstrap/lenses.go:196-224`) has no `realnessFilter` and its `OutputSchema` still `require`s
+`projectedFromRevisions` — both must flip in the same §6 stroke or `ParseOutputDescriptor`/schema
+validation refuses the migration; (2) `keyshredded.NullifyTarget.PerEntry`
+(`internal/refractor/keyshredded/manager.go:98`) is a hand-declared bool decoupled from the lens's own
+`entryKeyColumn` — currently inert (`Config.Targets` is empty) but §6 must flip it in lock-step with the
+lens or a crypto-shredded identity's per-anchor grant children survive their parent's tombstone. Both
+noted for the §6 fire's own grounding pass, not filed as separate rows (same fire will re-derive them).
+
+Gates green: `go build ./...`, full `internal/refractor/...` suite (incl. `-race` on `pipeline` and
+`projection`), full `go test ./...` (two clean runs, 113 packages, 0 failures), `golangci-lint run ./...`
+(full repo, 0 issues), `STRICT=1 lint-conventions.go`, `make vet`.
+
+**Next increment:** the bootstrap `capabilityRead` base-lens migration (§6) — the lens-vertex
+`UpdateMetaVertex` meta-op flipping the base lens's `entryKeyColumn` + `OutputSchema` in the same
+stroke, a Refractor restart to re-derive activation, and the legacy-parent-document tombstone
+(§4.2/§6 dual-read) that pairs with the flip. This is the fire that finally makes the mechanism live —
+review it at the security-plane depth §4's adversarial passes used, not a routine M/S pass.
 **Author:** Winston (Designer fire, 2026-07-25); increment 2 built by Winston (Lattice Steward fire, 2026-07-27);
 increment 3 built by Winston (Lattice Steward fire, 2026-07-27); increment 4 built by Winston (Lattice
 Steward fire, 2026-07-28); increment 5 built by Winston (Lattice Steward fire, 2026-07-28); increment 6
 built by Winston (Lattice Steward fire, 2026-07-28); increment 7 built by Winston (Lattice Steward fire,
-2026-07-28)
+2026-07-28); increment 8 built by Winston (Lattice Steward fire, 2026-07-28)
 **Backlog:** Stream-2 Security & trust boundary — *[Refractor] A `cap-read` document has no size bound* (★★, M)
 **Owning components:** `internal/refractor/{projection,pipeline,adapter,capabilityread,keyshredded}` (mechanism), `internal/bootstrap/lenses.go` + `internal/pkgmgr/anchorwalk.go` (producers), `packages/edge-manifest` (+ any package shipping a `cap-read.*` NATS-KV producer). Docs: `docs/contracts/06-capability-kv.md` §6.13/§6.14 (edit prepared uncommitted in the working tree), `docs/components/refractor.md`.
 

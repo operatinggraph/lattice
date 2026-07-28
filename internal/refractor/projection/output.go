@@ -67,9 +67,10 @@ type OutputDescriptor struct {
 	// cap-read-per-anchor-grant-keys-design.md): the sole BodyColumns list
 	// entry's EntryKeyColumn field keys one guarded key per real entry, instead
 	// of one document per actor. Empty leaves the byte-identical one-document
-	// path (EnvelopeFn) untouched — this field is carried by ParseOutputDescriptor
-	// but has no driver-side consumer yet (perEntry emission ships in the design's
-	// next Fire 1 increment).
+	// path (EnvelopeFn) untouched. InstallActorAggregate dispatches on this
+	// field to wire EntryEnvelopeFn instead of EnvelopeFn — no lens sets it
+	// yet, so the perEntry path stays dead in production until the bootstrap
+	// capabilityRead base-lens migration (§6) flips one live.
 	EntryKeyColumn string
 }
 
