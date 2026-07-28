@@ -206,14 +206,64 @@ not-registered nak, and privacy-critical-pause parity with the doc-mode path. Ga
 `go build ./...`, full `internal/refractor/...` suite, `golangci-lint run ./...`, `STRICT=1
 lint-conventions.go`, `make vet`.
 
-**Next increment:** §4.3 (retry-path refusal, incl. widening the two deferred proxy checks) and §4.4
-(sweep deltas, which is also what's needed before `Reproject` can reach a perEntry lens at all). The
-legacy-parent-document tombstone stays paired with the base-lens migration flip. Per increment 1's note
-these may combine depending on how coupled the remaining work turns out to be once grounded; the
-`InstallActorAggregate` refusal lifts only once the retry-path and sweep support are in place too.
+**CHECKPOINT (Fire 1, increment 6 — 2026-07-28, worktree `.claude/worktrees/cap-read-fire1-inc6`,
+merged to main `575076e5`; worktree fully merged, no unlanded work):** closed §4.3, the retry-path
+refusal, plus both proxy-check widenings the increment-3 checkpoint named. `writeResults`
+(`internal/refractor/pipeline/pipeline.go`) now refuses the raw-replay retry for a perEntry lens
+(`multiEnvelopeFn != nil`) and instead enqueues `enqueueActorReprojectRetry` — one per actor in
+`enumeratedActors` (or `[key]` for a lens's own vertex re-evaluating itself) — whose `WriteFn` calls
+`Reproject` rather than replaying a captured `(keys, row, seq)` closure: the retry unit becomes "the
+actor," so a revoked anchor converges to absent instead of being resurrected through the absent-key
+`Create` door a stale replay would open. `Reproject`'s own gate (`p.envelopeFn == nil` →
+`p.envelopeFn == nil && p.multiEnvelopeFn == nil`) and `evaluate.go`'s plain-filter-retraction branch
+gate both widen as increment 3 flagged. `InstallActorAggregate` (`projection/driver.go`) still refuses
+registration of any real `entryKeyColumn` lens, and nothing outside this package's own tests calls
+`SetMultiEnvelopeFn` — this mechanism remains provably dead in production, same posture as increments 1-5.
+
+Adversarially reviewed (3-layer: Blind Hunter / Edge-Case Hunter / Acceptance Auditor). All three
+independently converged on the same real gap: `Reproject` aborted on a perEntry actor's *first* failing
+result, so one deterministically-failing anchor permanently blocked a transiently-failing sibling from
+ever healing — defeating the point of retrying "the actor" rather than "the write." Fixed: `Reproject`
+now attempts every result and joins errors (`errors.Join`), mirroring increment 5's `DeleteAllForActor`
+attempt-all pattern. Blind Hunter separately found a latent hazard nothing structurally guarded against:
+`multiEnvelopeFn` set with no paired `ActorEnumerator` would let `writeResults`' `[]string{key}` fallback
+treat a non-actor key (an aspect/link key) as the retry's actor; `Reproject` would then evaluate it to
+zero rows and return a clean "wrote nothing" — read by the caller as a heal, silently losing the write
+with no trace, worse than the raw-replay bug this mechanism replaces. Closed with two guards:
+`writeResults` refuses closed (Nak + error) when `multiEnvelopeFn` is set with no `ActorEnumerator`
+installed, and `Reproject` itself now rejects any `actorKey` that doesn't parse as a Contract #1 vertex
+key — protecting its other two callers (the sweep, the operator control-plane RPC) the same way, not
+just the new retry-queue caller. Also fixed on the same review pass: `enqueueActorReprojectRetry`'s
+`RetryEntry.EntityID` now names the actor actually being retried (was the triggering CDC entity), so an
+exhausted fan-out retry's DLQ message and logs are traceable to the actor that never converged.
+
+**Named, not fixed** (both real, both zero-live-consumer scale/observability concerns rather than
+correctness holes — flagged in code comments at their sites for whoever wires perEntry registration on
+in §4.4 to weigh): a large fan-out enqueues one full actor re-evaluation per enumerated actor onto the
+pipeline's single shared `RetryQueue` (serial, one goroutine), so one transient blip on a big fan-out
+could head-of-line-block every other lens's retries for the duration — narrowing this to only the
+actor(s) that actually own a failed result needs the same key→actor inversion §4.4's `AnchorFromKey`
+builds for the sweep, deliberately not duplicated here. And a reproject attempt increments the heartbeat
+latency sample and (on a collision defect) the health error count once per attempt per actor, which the
+old raw-replay path touched neither of — low severity, unaudited by any test.
+
+Added test coverage: `pipeline/retry_actor_reproject_test.go` — single-actor transient-failure routes
+through `Reproject` not raw replay (proven by the landed `projectionSeq` differing from the originally
+captured one), fan-out reprojects every enumerated actor, the widened `Reproject` gate accepts a
+perEntry lens, partial-failure attempt-all-and-join (a deterministically-failing sibling anchor does not
+block a healthy one, nor get re-written on the next attempt), and the missing-`ActorEnumerator` refusal.
+`reproject_test.go` — the new `ParseVertexKey` guard rejects a non-vertex `actorKey`. Gates green:
+`go build ./...`, full `internal/refractor/...` suite (incl. `-race` on `pipeline`), `golangci-lint run
+./...`, `STRICT=1 lint-conventions.go`, `make vet`.
+
+**Next increment:** §4.4 (sweep deltas — the `AnchorFromKey` perEntry variant, coverage/orphan-direction
+changes — which is also what's needed before `InstallActorAggregate`'s registration refusal can lift and
+before `Reproject` is reachable via the sweep's own deep-verify for a perEntry lens). The
+legacy-parent-document tombstone stays paired with the base-lens migration flip.
 **Author:** Winston (Designer fire, 2026-07-25); increment 2 built by Winston (Lattice Steward fire, 2026-07-27);
 increment 3 built by Winston (Lattice Steward fire, 2026-07-27); increment 4 built by Winston (Lattice
-Steward fire, 2026-07-28); increment 5 built by Winston (Lattice Steward fire, 2026-07-28)
+Steward fire, 2026-07-28); increment 5 built by Winston (Lattice Steward fire, 2026-07-28); increment 6
+built by Winston (Lattice Steward fire, 2026-07-28)
 **Backlog:** Stream-2 Security & trust boundary — *[Refractor] A `cap-read` document has no size bound* (★★, M)
 **Owning components:** `internal/refractor/{projection,pipeline,adapter,capabilityread,keyshredded}` (mechanism), `internal/bootstrap/lenses.go` + `internal/pkgmgr/anchorwalk.go` (producers), `packages/edge-manifest` (+ any package shipping a `cap-read.*` NATS-KV producer). Docs: `docs/contracts/06-capability-kv.md` §6.13/§6.14 (edit prepared uncommitted in the working tree), `docs/components/refractor.md`.
 
