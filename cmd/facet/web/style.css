@@ -41,6 +41,7 @@ button, input, select, textarea { font-family: inherit; }
 }
 .boot .brand-mark { font-size: 28px; font-weight: 700; letter-spacing: 0.4px; }
 .boot .boot-label { color: var(--text-dim); font-size: 14px; }
+.boot .boot-sublabel { color: var(--text-dim); font-size: 12px; opacity: 0.75; max-width: 260px; text-align: center; }
 .spinner {
   width: 28px; height: 28px;
   border: 3px solid var(--border);
