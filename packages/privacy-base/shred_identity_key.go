@@ -158,6 +158,18 @@ def vertex_alive(state, key):
         return False
     return True
 
+def parts_of(key, name, want_type):
+    parts = key.split(".")
+    if len(parts) != 3 or parts[0] != "vtx":
+        fail("InvalidArgument: " + name + ": required vtx.<type>.<NanoID> (exactly 3 segments); got " + key)
+    if parts[1] == "":
+        fail("InvalidArgument: " + name + ": empty type segment; required vtx.<type>.<NanoID>; got " + key)
+    if parts[2] == "":
+        fail("InvalidArgument: " + name + ": empty id segment; required vtx.<type>.<NanoID>; got " + key)
+    if want_type != "" and parts[1] != want_type:
+        fail("InvalidArgument: " + name + ": required vtx." + want_type + ".<NanoID>; got " + key)
+    return parts[1], parts[2]
+
 INDEXES_PAGE_LIMIT = 256
 MAX_INDEXES_PAGES = 64
 
@@ -218,9 +230,7 @@ def execute(state, op):
 
     if ot == "ShredIdentityKey":
         identity_key = required_string(p, "identityKey")
-        parts = identity_key.split(".")
-        if len(parts) != 3 or parts[0] != "vtx" or parts[1] != "identity":
-            fail("InvalidArgument: identityKey: required vtx.identity.<NanoID> (exactly 3 segments); got " + identity_key)
+        parts_of(identity_key, "identityKey", "identity")
 
         if not vertex_alive(state, identity_key):
             fail("NotFound: identityKey " + identity_key + " is absent or tombstoned")
@@ -299,9 +309,7 @@ def execute(state, op):
 
     if ot == "RecordShredFinalization":
         identity_key = required_string(p, "identityKey")
-        parts = identity_key.split(".")
-        if len(parts) != 3 or parts[0] != "vtx" or parts[1] != "identity":
-            fail("InvalidArgument: identityKey: required vtx.identity.<NanoID> (exactly 3 segments); got " + identity_key)
+        parts_of(identity_key, "identityKey", "identity")
         step = required_string(p, "step")
         if step != "vaultKeyDestroyed" and step != "projectionsNullified":
             fail("InvalidArgument: step: required vaultKeyDestroyed or projectionsNullified; got " + step)

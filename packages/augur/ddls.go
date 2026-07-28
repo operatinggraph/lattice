@@ -468,9 +468,8 @@ def execute(state, op):
         # masking the adapter's own default with garbage.
         model = optional_string_attr(p, "model").strip()
 
-        parts_of(target_key, "targetId", "meta")
+        _, target_id = parts_of(target_key, "targetId", "meta")
         entity_type, entity_id = parts_of(entity_key, "entityId", "")
-        target_id = target_key.split(".")[2]
 
         # No-orphan (FR29 / P4): both link endpoints MUST be alive. Weaver's
         # directOp routes the candidate / target keys into the op's

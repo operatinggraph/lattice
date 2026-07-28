@@ -178,26 +178,28 @@ def make_tombstone(key):
     return {"op": "tombstone", "key": key,
             "document": {"isDeleted": True, "data": {}}}
 
-def split_key(k):
-    return k.split(".")
+def parts_of(key, name, want_type):
+    parts = key.split(".")
+    if len(parts) != 3 or parts[0] != "vtx":
+        fail("InvalidArgument: " + name + ": required vtx.<type>.<NanoID> (exactly 3 segments); got " + key)
+    if parts[1] == "":
+        fail("InvalidArgument: " + name + ": empty type segment; required vtx.<type>.<NanoID>; got " + key)
+    if parts[2] == "":
+        fail("InvalidArgument: " + name + ": empty id segment; required vtx.<type>.<NanoID>; got " + key)
+    if want_type != "" and parts[1] != want_type:
+        fail("InvalidArgument: " + name + ": required vtx." + want_type + ".<NanoID>; got " + key)
+    return parts[1], parts[2]
 
 def role_id_from_key(role_key):
-    parts = split_key(role_key)
-    if len(parts) < 3 or parts[0] != "vtx" or parts[1] != "role":
-        fail("InvalidArgument: roleKey: required vtx.role.<NanoID>")
-    return parts[2]
+    _, role_id = parts_of(role_key, "roleKey", "role")
+    return role_id
 
 def perm_id_from_key(perm_key):
-    parts = split_key(perm_key)
-    if len(parts) < 3 or parts[0] != "vtx" or parts[1] != "permission":
-        fail("InvalidArgument: permKey: required vtx.permission.<NanoID>")
-    return parts[2]
+    _, perm_id = parts_of(perm_key, "permKey", "permission")
+    return perm_id
 
 def actor_parts(actor_key):
-    parts = split_key(actor_key)
-    if len(parts) < 3 or parts[0] != "vtx":
-        fail("InvalidArgument: actorKey: required vtx.<type>.<NanoID>")
-    return parts[1], parts[2]
+    return parts_of(actor_key, "actorKey", "")
 
 def required_string(p, name):
     if not hasattr(p, name):
