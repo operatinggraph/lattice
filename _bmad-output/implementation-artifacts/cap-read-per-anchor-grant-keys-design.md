@@ -86,12 +86,57 @@ new `ParseOutputDescriptor` rejection tests for the two new validations. Gates g
 full `internal/refractor/...` suite, `golangci-lint run ./internal/refractor/...`, `STRICT=1
 lint-conventions.go`, `make vet`.
 
-**Next increment:** §4.2's prefix-diff retraction (tombstone-first ordering, tombstone-skip semantics, the
-four delete consumers named in §4.2) is next — still needed before the `InstallActorAggregate` refusal can
-lift. §4.3 (retry-path refusal) and §4.4 (sweep deltas, incl. the two deferred-proxy widenings named above)
-follow; per increment 1's note they may combine with §4.2 depending on how coupled the retraction code
-turns out to be once grounded.
-**Author:** Winston (Designer fire, 2026-07-25); increment 2 built by Winston (Lattice Steward fire, 2026-07-27)
+**CHECKPOINT (Fire 1, increment 3 — 2026-07-27, worktree `.claude/worktrees/cap-read-fire1-inc3`,
+branch `fire/cap-read-fire1-inc3`):** shipped §4.2's core per-actor prefix diff — `Pipeline.
+multiEntryRetractions` (`internal/refractor/pipeline/evaluate.go`), called from `executeFullForActor`
+whenever `multiEnvelopeFn` is installed (after `guardOutputKeyCollision` validates the fresh set, before
+the latency record). It lists the actor's existing child keys via `adapter.PrefixKeyLister.
+ListKeysPrefix(actorDeleteKeyFor(actorKey) + ".")`, diffs against the fresh entry set, and for every
+listed key the fresh set no longer carries: `adapter.RowReader.GetRow` decides live-vs-already-tombstoned
+(a tombstoned candidate is skipped, no rewrite — its stored watermark already outranks any replay) and a
+live one becomes a guarded `{Delete: true}` result. Tombstones are returned ahead of the fresh set
+(`append(tombstones, fresh...)`), and `writeResults`' strictly-sequential dispatch is what makes that the
+actual deny-closed write order — no new ordering primitive needed. An adapter lacking either capability
+refuses loudly (configuration-defect posture, mirroring `applyDiffRetraction`'s existing precedent) rather
+than silently skipping the diff.
+
+**Deliberately NOT this increment:** the legacy-parent-document tombstone (§4.2 point 2's second half —
+belongs with the base-lens migration flip, not yet scheduled); the three `actorDeleteKeyFor`-sharing
+delete consumers — CDC actor-disappearance, `emptyBehavior:delete`, sweep `Reproject` — and the shred
+site's own prefix enumeration (§4.2's four "consumers," left single-key); §4.3's retry-path refusal; §4.4's
+sweep deltas (including the two deferred-proxy widenings — `evaluate.go`'s plain-filter-retraction branch
+and `reproject.go`'s `Reproject`, neither of which this increment's code path reaches, so neither needed
+widening here). The `InstallActorAggregate` refusal (`projection/driver.go`) is untouched and still refuses
+registration of any real `entryKeyColumn` lens — this increment is still provably dead code in production,
+zero behavior change to any live lens, exactly as increments 1 and 2 left it.
+
+Adversarially reviewed (3-layer: Blind Hunter / Edge-Case Hunter / Acceptance Auditor) before merge. Blind
+Hunter and Edge-Case Hunter independently converged on the same real gap: a `fresh` entry with no usable
+string `"key"` field was silently dropped from the diff's fresh-set index rather than erroring — which
+would have let a still-live sibling key get durably tombstoned with no error surfaced (the malformed
+entry's own same-key, same-seq upsert then loses to the guard as a stale no-op). Fixed: `multiEntryRetractions`
+now fails the whole actor evaluation on a malformed fresh key, mirroring `EntryEnvelopeFn`'s own fail-closed
+posture. Not currently reachable in production (the only producer, `EntryEnvelopeFn`, always emits a valid
+string key), but the function is written against the generic `MultiEnvelopeFn` type, not against that one
+caller. Acceptance Auditor confirmed the core mechanism (list/diff/tombstone-skip/ordering) matches §4.2's
+text exactly, the deferred scope is honest (nothing overclaimed), and the registration refusal still holds.
+No other findings from any of the three layers.
+
+Added test coverage: `pipeline/multi_envelope_test.go` — dropped-anchor tombstone (ordered ahead of the
+fresh upsert), already-tombstoned candidate skipped without rewrite, malformed-fresh-key fail-closed, and
+adapter-capability refusal (no `PrefixKeyLister` / no `RowReader`) — all against a real embedded-NATS
+guarded adapter (`newMultiEntryTargetAdapter`), not a fake KV. Gates green: `go build ./...`, full
+`internal/refractor/...` suite, `golangci-lint run ./internal/refractor/...`, `STRICT=1
+lint-conventions.go`, `make vet`.
+
+**Next increment:** the remaining §4.2 pieces — the legacy-parent-document tombstone (paired with the
+base-lens migration flip) and the three delete-consumer prefix-loop conversions (CDC disappearance,
+`emptyBehavior:delete`, sweep `Reproject`) + the shred site — then §4.3 (retry-path refusal, incl. widening
+the two deferred proxy checks) and §4.4 (sweep deltas). Per increment 1's note these may combine depending
+on how coupled the remaining work turns out to be once grounded; the `InstallActorAggregate` refusal lifts
+only once the retry-path and sweep support are in place too.
+**Author:** Winston (Designer fire, 2026-07-25); increment 2 built by Winston (Lattice Steward fire, 2026-07-27);
+increment 3 built by Winston (Lattice Steward fire, 2026-07-27)
 **Backlog:** Stream-2 Security & trust boundary — *[Refractor] A `cap-read` document has no size bound* (★★, M)
 **Owning components:** `internal/refractor/{projection,pipeline,adapter,capabilityread,keyshredded}` (mechanism), `internal/bootstrap/lenses.go` + `internal/pkgmgr/anchorwalk.go` (producers), `packages/edge-manifest` (+ any package shipping a `cap-read.*` NATS-KV producer). Docs: `docs/contracts/06-capability-kv.md` §6.13/§6.14 (edit prepared uncommitted in the working tree), `docs/components/refractor.md`.
 
