@@ -354,6 +354,7 @@ func InstallActorAggregate(
 		return false
 	}
 	authPlane := plan.AuthPlane
+	p.SetAuthPlane(authPlane)
 
 	// A perEntry descriptor (entryKeyColumn set) projects through
 	// EntryEnvelopeFn's per-anchor keys instead of EnvelopeFn's one document

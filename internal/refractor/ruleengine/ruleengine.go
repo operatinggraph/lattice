@@ -62,6 +62,23 @@ type ProjectionResult struct {
 	Delete bool
 }
 
+// EvalFootprint is the read-surface certificate one full-engine ExecuteWith
+// call produces: every Core KV key (vertex or aspect) and every adjacency
+// node the evaluation read, each paired with the KV revision observed (0 for
+// a key that was absent). A validating caller re-reads every entry after the
+// evaluation and compares revisions to detect a mid-evaluation write to any
+// key the row depended on — an absence flipping to present (or the reverse)
+// counts as a moved revision, since 0 is itself a recorded value, not a
+// missing map entry.
+type EvalFootprint struct {
+	// NodeRevisions maps a Core KV vertex or aspect key to the revision it
+	// was read at.
+	NodeRevisions map[string]uint64
+	// EdgeRevisions maps an adjacency NodeID to the revision its edge
+	// document was read at.
+	EdgeRevisions map[string]uint64
+}
+
 // ParseError carries a structured failure from an engine's Parse() call so
 // the selection-logic can report which engine(s) rejected the rule body.
 type ParseError struct {

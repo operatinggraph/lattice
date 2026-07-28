@@ -56,4 +56,18 @@ type Entry struct {
 	// sweep has healed for this lens. Healing is deliberately loud: a nonzero
 	// rate is itself the signal to go find the delivery gap it is papering over.
 	SweepReconciled uint64 `json:"sweepReconciled,omitempty"`
+	// EvalDriftRetries is the cumulative number of inline re-executions an
+	// auth-plane evaluation's footprint validation has triggered — a
+	// mid-evaluation write moved a key the evaluation read
+	// (refractor-evaluation-consistency-design.md §4.6). Zero for every lens
+	// outside the actorAggregate ∧ auth-plane scope, and expected to be rare
+	// even in scope: drift is ms-scale by construction.
+	EvalDriftRetries uint64 `json:"evalDriftRetries,omitempty"`
+	// EvalDriftRequeues is the cumulative number of evaluations whose read
+	// surface still diverged after the inline re-execution and were requeued
+	// as a typed transient failure (failure.ErrEvalDrift) rather than landing
+	// a possibly-torn row. A nonzero rate under sustained load is the signal
+	// that sizes the still-undesigned per-row footprint validation for the
+	// unanchored grant-table scans.
+	EvalDriftRequeues uint64 `json:"evalDriftRequeues,omitempty"`
 }

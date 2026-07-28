@@ -6,18 +6,23 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/operatinggraph/lattice/internal/refractor/adjacency"
 	"github.com/operatinggraph/lattice/internal/refractor/ruleengine"
 	"github.com/operatinggraph/lattice/internal/substrate"
 )
 
 // newTestExecutor builds an executor over the given KVs with the same memo
 // wiring ExecuteWith installs, so these tests exercise the production shape
-// rather than a bare struct literal.
-func newTestExecutor(coreKV *substrate.KV) *executor {
+// rather than a bare struct literal. adjKV may be nil for a test that never
+// traverses a relationship.
+func newTestExecutor(adjKV, coreKV *substrate.KV) *executor {
 	return &executor{
-		ctx:    context.Background(),
-		coreKV: coreKV,
-		nodes:  map[string]*nodeRef{},
+		ctx:           context.Background(),
+		adjKV:         adjKV,
+		coreKV:        coreKV,
+		nodes:         map[string]*nodeRef{},
+		edges:         map[string][]adjacency.EdgeEntry{},
+		edgeRevisions: map[string]uint64{},
 	}
 }
 
@@ -50,7 +55,7 @@ func TestExec_AspectReadIsRepeatableWithinOneEvaluation(t *testing.T) {
 	unit := putVertex(t, reg, coreKV, "unit", "unit", nil)
 	putAspect(t, reg, coreKV, "unit", "listing", map[string]any{"status": "available"})
 
-	ex := newTestExecutor(coreKV)
+	ex := newTestExecutor(nil, coreKV)
 	unitRef, err := ex.fetchNode(unit)
 	require.NoError(t, err)
 	require.NotNil(t, unitRef)
@@ -69,7 +74,7 @@ func TestExec_AspectReadIsRepeatableWithinOneEvaluation(t *testing.T) {
 
 	// The memo is evaluation-scoped, never global: the NEXT evaluation must see
 	// the committed value, or the read model would never catch up.
-	next := newTestExecutor(coreKV)
+	next := newTestExecutor(nil, coreKV)
 	nextUnit, err := next.fetchNode(unit)
 	require.NoError(t, err)
 	fresh, err := next.resolveProperty(nextUnit, "listing")
@@ -91,7 +96,7 @@ func TestExec_AbsentAspectStaysAbsentWithinOneEvaluation(t *testing.T) {
 	reg := newFixtureRegistry()
 	unit := putVertex(t, reg, coreKV, "unit", "unit", nil)
 
-	ex := newTestExecutor(coreKV)
+	ex := newTestExecutor(nil, coreKV)
 	unitRef, err := ex.fetchNode(unit)
 	require.NoError(t, err)
 
@@ -106,7 +111,7 @@ func TestExec_AbsentAspectStaysAbsentWithinOneEvaluation(t *testing.T) {
 	require.Nil(t, stillAbsent,
 		"an absence observed inside ONE evaluation must stay absent for that evaluation")
 
-	next := newTestExecutor(coreKV)
+	next := newTestExecutor(nil, coreKV)
 	nextUnit, err := next.fetchNode(unit)
 	require.NoError(t, err)
 	present, err := next.resolveProperty(nextUnit, "listing")

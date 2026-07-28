@@ -102,18 +102,38 @@ type executor struct {
 // CDC event on the full-engine path.
 //
 // Returns one ProjectionResult per result row. Empty result => zero rows.
+// ExecuteWithFootprint is the sibling entry point that also returns the
+// evaluation's read-surface footprint; ExecuteWith exists unchanged so every
+// pre-existing caller (package lens tests across packages/*, and any
+// production caller uninterested in footprint validation) keeps compiling
+// against the same two-return shape.
 func (e *Engine) ExecuteWith(
 	ctx context.Context,
 	cr ruleengine.CompiledRule,
 	ec ruleengine.EventContext,
 	adjKV, coreKV *substrate.KV,
 ) ([]ruleengine.ProjectionResult, error) {
+	results, _, err := e.ExecuteWithFootprint(ctx, cr, ec, adjKV, coreKV)
+	return results, err
+}
+
+// ExecuteWithFootprint runs cr exactly as ExecuteWith does, additionally
+// returning this evaluation's read-surface footprint (every vertex/aspect key
+// and adjacency node it read, with the revision observed) — the certificate a
+// validating caller (executeFullForActor in package pipeline) compares
+// against current KV state after evaluation to detect a mid-evaluation write.
+func (e *Engine) ExecuteWithFootprint(
+	ctx context.Context,
+	cr ruleengine.CompiledRule,
+	ec ruleengine.EventContext,
+	adjKV, coreKV *substrate.KV,
+) ([]ruleengine.ProjectionResult, ruleengine.EvalFootprint, error) {
 	compiled, ok := cr.(*CompiledRule)
 	if !ok {
-		return nil, fmt.Errorf("full engine: expected *CompiledRule, got %T", cr)
+		return nil, ruleengine.EvalFootprint{}, fmt.Errorf("full engine: expected *CompiledRule, got %T", cr)
 	}
 	if compiled.Query == nil {
-		return nil, errors.New("full engine: compiled rule has nil query")
+		return nil, ruleengine.EvalFootprint{}, errors.New("full engine: compiled rule has nil query")
 	}
 
 	ex := &executor{
@@ -135,13 +155,13 @@ func (e *Engine) ExecuteWith(
 		case *Match:
 			next, err := ex.applyMatch(bindings, c)
 			if err != nil {
-				return nil, err
+				return nil, ruleengine.EvalFootprint{}, err
 			}
 			bindings = next
 		case *With:
 			next, err := ex.applyWith(bindings, c)
 			if err != nil {
-				return nil, err
+				return nil, ruleengine.EvalFootprint{}, err
 			}
 			bindings = next
 		case *Return:
@@ -150,9 +170,38 @@ func (e *Engine) ExecuteWith(
 	}
 
 	if lastReturn == nil {
-		return nil, errors.New("full engine: query missing RETURN clause")
+		return nil, ruleengine.EvalFootprint{}, errors.New("full engine: query missing RETURN clause")
 	}
-	return ex.applyReturn(bindings, lastReturn)
+	results, err := ex.applyReturn(bindings, lastReturn)
+	if err != nil {
+		return nil, ruleengine.EvalFootprint{}, err
+	}
+	footprint := ex.footprint()
+	if hook := footprintCapturedHook(ctx); hook != nil {
+		hook()
+	}
+	return results, footprint, nil
+}
+
+// footprint returns the read-surface certificate this evaluation observed —
+// every Core KV key it read (via the node memo, absent = revision 0) and
+// every adjacency node it read (via the edge memo, absent = revision 0). Both
+// memos are already populated for the life of the evaluation (see the nodes/
+// edges field docs), so building the footprint costs no extra reads.
+func (ex *executor) footprint() ruleengine.EvalFootprint {
+	nodeRevs := make(map[string]uint64, len(ex.nodes))
+	for key, ref := range ex.nodes {
+		if ref == nil {
+			nodeRevs[key] = 0
+			continue
+		}
+		nodeRevs[key] = ref.revision
+	}
+	edgeRevs := make(map[string]uint64, len(ex.edgeRevisions))
+	for nodeID, rev := range ex.edgeRevisions {
+		edgeRevs[nodeID] = rev
+	}
+	return ruleengine.EvalFootprint{NodeRevisions: nodeRevs, EdgeRevisions: edgeRevs}
 }
 
 // Execute satisfies ruleengine.RuleEngine. It is the single-row convenience
