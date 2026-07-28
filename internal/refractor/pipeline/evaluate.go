@@ -283,6 +283,19 @@ func (p *Pipeline) executeFullForActor(ctx context.Context, actorKey string, nod
 			return nil, err
 		}
 	}
+	// A perEntry lens's fresh entry set is only ever additive on its own
+	// (EntryEnvelopeFn never sees the actor's previously-projected children,
+	// only this evaluation's rows) — an anchor the actor no longer holds
+	// would otherwise linger as a stale key forever (an over-grant on the
+	// security plane, cap-read-per-anchor-grant-keys-design.md §4.2). The
+	// prefix diff below is the retraction transport that closes it.
+	if p.multiEnvelopeFn != nil {
+		withRetractions, rerr := p.multiEntryRetractions(ctx, actorKey, results)
+		if rerr != nil {
+			return nil, rerr
+		}
+		results = withRetractions
+	}
 	// Record per-event projection latency for the heartbeat aggregator.
 	// The buffer is cheap (single atomic-protected ring slot per insert)
 	// so calling it on every fan-out actor is fine.
@@ -290,6 +303,81 @@ func (p *Pipeline) executeFullForActor(ctx context.Context, actorKey string, nod
 		p.latencyBuf.Record(time.Since(start))
 	}
 	return results, nil
+}
+
+// multiEntryRetractions computes cap-read-per-anchor-grant-keys-design.md
+// §4.2's per-actor prefix diff: it lists actorKey's existing child keys under
+// its perEntry lens prefix and tombstones every one the fresh set no longer
+// carries, returned ahead of fresh so writeResults' sequential dispatch lands
+// every tombstone before any upsert (deny-closed ordering — a pass that dies
+// mid-way only ever under-grants, never over-grants). A listed candidate
+// already carrying isDeleted is skipped without a rewrite: its stored
+// projectionSeq watermark already outranks any grant-era replay (the §6.2
+// guard), so re-stamping it would be pure churn, not a correctness
+// requirement. The prefix is actorKey's own parent doc key (the same
+// derivation actorDeleteKeyFor uses for a whole-actor tombstone) — never a
+// bucket-wide listing, so a sibling lens sharing the target never sees its
+// keys named here.
+func (p *Pipeline) multiEntryRetractions(ctx context.Context, actorKey string, fresh []ruleengine.EvalResult) ([]ruleengine.EvalResult, error) {
+	adpt := p.currentAdapter()
+	lister, ok := adpt.(adapter.PrefixKeyLister)
+	if !ok {
+		return nil, fmt.Errorf("pipeline: multi-entry retraction: adapter %T cannot enumerate keys by prefix — a perEntry lens cannot retract a dropped anchor", adpt)
+	}
+	reader, ok := adpt.(adapter.RowReader)
+	if !ok {
+		return nil, fmt.Errorf("pipeline: multi-entry retraction: adapter %T cannot read back a row — tombstone-skip cannot be decided", adpt)
+	}
+
+	childPrefix := p.actorDeleteKeyFor(actorKey) + "."
+	existing, err := lister.ListKeysPrefix(ctx, childPrefix)
+	if err != nil {
+		return nil, fmt.Errorf("pipeline: multi-entry retraction: list %q: %w", childPrefix, err)
+	}
+	if len(existing) == 0 {
+		return fresh, nil
+	}
+
+	freshKeys := make(map[string]struct{}, len(fresh))
+	for _, f := range fresh {
+		k, ok := f.Keys["key"].(string)
+		if !ok {
+			// A fresh entry this pass just built carrying no usable "key"
+			// would otherwise silently vanish from freshKeys — its still-live
+			// existing key then reads as dropped and gets tombstoned below,
+			// while this malformed entry's own upsert (same key, same
+			// incoming seq) is rejected by the adapter's §6.2 guard as a
+			// same-seq no-op. Net effect: a still-granted anchor is durably
+			// revoked with no error. Fail the whole evaluation instead,
+			// mirroring EntryEnvelopeFn's fail-closed posture for a
+			// malformed key field (never silently drop a grant).
+			return nil, fmt.Errorf("pipeline: multi-entry retraction: fresh result carries no usable \"key\" field (%v)", f.Keys)
+		}
+		freshKeys[k] = struct{}{}
+	}
+
+	var tombstones []ruleengine.EvalResult
+	for _, keys := range existing {
+		k, ok := keys["key"].(string)
+		if !ok {
+			continue
+		}
+		if _, stillFresh := freshKeys[k]; stillFresh {
+			continue
+		}
+		_, live, err := reader.GetRow(ctx, keys)
+		if err != nil {
+			return nil, fmt.Errorf("pipeline: multi-entry retraction: get %q: %w", k, err)
+		}
+		if !live {
+			continue
+		}
+		tombstones = append(tombstones, ruleengine.EvalResult{Delete: true, Keys: keys})
+	}
+	if len(tombstones) == 0 {
+		return fresh, nil
+	}
+	return append(tombstones, fresh...), nil
 }
 
 // guardOutputKeyCollision enforces the one-row-per-anchor invariant of an
