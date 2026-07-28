@@ -61,7 +61,7 @@ func projectedAtFromProvenance(nodeProps map[string]any) (string, error) {
 // evaluateForEntry runs the full-engine evaluate path against entry and
 // returns the normalised []ruleengine.EvalResult shape the write loop expects.
 // It binds `$actorKey`, `$now`, `$projectedAt` from the event/provenance and
-// calls full.Engine.ExecuteWithFootprint. When an EnvelopeFn is installed, each row
+// calls full.Engine.ExecuteWith. When an EnvelopeFn is installed, each row
 // is rewritten before being handed to the adapter. When a SecureDecryptor is
 // installed (a Secure Lens), each row's declared secure columns are decrypted
 // before the results reach any write path — this wrapper is the single choke
@@ -208,191 +208,31 @@ func (p *Pipeline) evaluateForEntryRaw(ctx context.Context, entry ruleengine.Nod
 	return results, nil, nil
 }
 
-// maxFootprintRetries bounds footprint validation's inline re-execution to
-// exactly one extra attempt (evaluation-consistency-design.md §4.3): drift is
-// ms-scale, so a single re-execution against post-drift state converges in
-// the common case, and sustained churn requeues rather than retrying inline
-// without bound.
-const maxFootprintRetries = 1
-
-// executeFullForActor runs the full-engine cypher against a single actor key,
-// wraps each row through envelopeFn/multiEnvelopeFn (when installed), and —
-// for an auth-plane actor-aggregate lens — validates the evaluation's read
-// surface against current KV state before trusting the result (see
-// executeFullForActorAttempt). nodeProps is the actor vertex's stored Core KV
-// body; it's used only to derive projectedAt (the engine itself always reads
-// the graph fresh, memoized per evaluation).
+// executeFullForActor runs the full-engine cypher against a single
+// actor key and wraps each row through envelopeFn (when installed).
+// nodeProps is the actor vertex's stored Core KV body; it's passed
+// through to the engine's EventContext so the executor can resolve
+// the anchor without an extra Core KV read.
 func (p *Pipeline) executeFullForActor(ctx context.Context, actorKey string, nodeProps map[string]any) ([]ruleengine.EvalResult, error) {
 	start := time.Now()
-	results, err := p.executeFullForActorAttempt(ctx, actorKey, nodeProps, 0)
-	if err != nil {
-		return nil, err
-	}
-	// Record per-event projection latency for the heartbeat aggregator.
-	// The buffer is cheap (single atomic-protected ring slot per insert)
-	// so calling it on every fan-out actor is fine. Measured across every
-	// attempt (including a drift retry), so a validated lens's latency
-	// honestly reflects the doubled cost the design's perf gate measures.
-	if p.latencyBuf != nil {
-		p.latencyBuf.Record(time.Since(start))
-	}
-	return results, nil
-}
-
-// executeFullForActorAttempt is executeFullForActor's core, parameterized by
-// attempt (0 = first execution, up to maxFootprintRetries = the allowed
-// inline retries) so the footprint-validation recursion can never run deeper
-// than the design's stated bound.
-//
-// Scope (needsFootprintValidation): only an actor-aggregate lens
-// (envelopeFn/multiEnvelopeFn installed) projecting an auth-plane surface
-// (p.authPlane) pays for validation — every other lens returns its first
-// execution's results unchanged, zero extra reads.
-//
-// In scope, the read surface ExecuteWith reports (every vertex/aspect key and
-// adjacency node it read, with the revision observed) is re-read fresh
-// immediately after evaluation. A moved revision means the row could blend
-// two different instants — never a real one — so it is never trusted as-is.
-// One immediate re-execution against the now-current state is attempted;
-// if the retry's OWN footprint still diverges (sustained churn), this
-// returns failure.ErrEvalDrift instead of the possibly-torn result — never a
-// silently empty set, which four downstream consumers would misread as "zero
-// rows" (design §4.3). The caller's existing transient-failure handling
-// (dispositionEvalErr's retry-enqueue, the sweep's repair-failure accounting)
-// takes it from there.
-func (p *Pipeline) executeFullForActorAttempt(ctx context.Context, actorKey string, nodeProps map[string]any, attempt int) ([]ruleengine.EvalResult, error) {
-	results, footprint, err := p.executeFullForActorOnce(ctx, actorKey, nodeProps)
-	if err != nil {
-		return nil, err
-	}
-	if !p.needsFootprintValidation() {
-		return results, nil
-	}
-	valid, verr := p.footprintValid(ctx, footprint)
-	if verr != nil {
-		return nil, fmt.Errorf("pipeline: footprint validation for %q: %w", actorKey, verr)
-	}
-	if valid {
-		return results, nil
-	}
-	if attempt >= maxFootprintRetries {
-		if p.reporter != nil {
-			if rerr := p.reporter.RecordEvalDriftRequeue(ctx); rerr != nil {
-				slog.Error("pipeline: record eval-drift requeue", "ruleId", p.ruleID, "actorKey", actorKey, "err", rerr)
-			}
-		}
-		return nil, fmt.Errorf("pipeline: %q: %w", actorKey, failure.ErrEvalDrift)
-	}
-	if p.reporter != nil {
-		if rerr := p.reporter.RecordEvalDriftRetry(ctx); rerr != nil {
-			slog.Error("pipeline: record eval-drift retry", "ruleId", p.ruleID, "actorKey", actorKey, "err", rerr)
-		}
-	}
-	// Re-fetch the actor's own vertex body for the retry: nodeProps only
-	// drives projectedAt derivation (the engine re-reads the graph itself
-	// regardless), but the drift that triggered this retry could be exactly
-	// a commit to the actor's own vertex, and a retry computed against a
-	// provenance timestamp older than the state it re-reads would be
-	// internally inconsistent.
-	freshProps, ferr := p.fetchVertexProps(ctx, actorKey)
-	if ferr != nil {
-		return nil, fmt.Errorf("pipeline: re-fetch %q after drift: %w", actorKey, ferr)
-	}
-	return p.executeFullForActorAttempt(ctx, actorKey, freshProps, attempt+1)
-}
-
-// needsFootprintValidation reports whether this pipeline's evaluations must
-// pass footprint validation before their results are trusted — the scope
-// predicate (evaluation-consistency-design.md §4.4): actorAggregate (an
-// envelope wrapper installed) AND auth-plane (projects an authorization
-// surface, projection.IsAuthPlane / p.authPlane). Every other lens pays zero
-// validation cost.
-func (p *Pipeline) needsFootprintValidation() bool {
-	return (p.envelopeFn != nil || p.multiEnvelopeFn != nil) && p.authPlane
-}
-
-// footprintValid re-reads every entry in fp against CURRENT KV state and
-// reports whether every revision still matches what the evaluation observed
-// — including a present-then-absent or absent-then-present flip (design
-// §4.1: absence is itself part of the footprint, closing the NOT-predicate
-// conjunct: 0 is a recorded revision, not a missing map entry). There is no
-// header-only read in substrate (design §5), so each entry costs a full
-// re-read, paid honestly rather than approximated.
-func (p *Pipeline) footprintValid(ctx context.Context, fp ruleengine.EvalFootprint) (bool, error) {
-	for key, wantRev := range fp.NodeRevisions {
-		gotRev, err := p.currentNodeRevision(ctx, key)
-		if err != nil {
-			return false, err
-		}
-		if gotRev != wantRev {
-			return false, nil
-		}
-	}
-	for nodeID, wantRev := range fp.EdgeRevisions {
-		_, gotRev, err := adjacency.Neighbors(ctx, p.adjKV, nodeID)
-		if err != nil {
-			return false, err
-		}
-		if gotRev != wantRev {
-			return false, nil
-		}
-	}
-	return true, nil
-}
-
-// currentNodeRevision returns key's current Core KV revision, or 0 when the
-// key is absent by the same test the executor's readNode uses: a genuinely
-// missing key, a null JSON body, or a soft-deleted (isDeleted: true) vertex
-// all read as absent there, so a footprinted key that was absent for THAT
-// reason and still is must compare equal (0 == 0), not spuriously drift
-// because its KV entry technically still exists.
-func (p *Pipeline) currentNodeRevision(ctx context.Context, key string) (uint64, error) {
-	entry, err := p.coreKV.Get(ctx, key)
-	if err != nil {
-		if errors.Is(err, substrate.ErrKeyNotFound) {
-			return 0, nil
-		}
-		return 0, fmt.Errorf("pipeline: footprint re-read %q: %w", key, err)
-	}
-	var props map[string]any
-	if uerr := json.Unmarshal(entry.Value, &props); uerr != nil {
-		return 0, fmt.Errorf("pipeline: footprint re-read %q: unmarshal: %w", key, uerr)
-	}
-	if props == nil {
-		return 0, nil
-	}
-	if deleted, _ := props["isDeleted"].(bool); deleted {
-		return 0, nil
-	}
-	return entry.Revision, nil
-}
-
-// executeFullForActorOnce runs ONE evaluation of the full-engine cypher
-// against actorKey and wraps each row through envelopeFn/multiEnvelopeFn
-// (when installed), returning the evaluation's read-surface footprint
-// alongside the results so a caller can validate it. Factored out of
-// executeFullForActor so the footprint-validation retry
-// (executeFullForActorAttempt) can re-run exactly this step against fresh
-// state without duplicating the envelope/collision-guard/retraction logic.
-func (p *Pipeline) executeFullForActorOnce(ctx context.Context, actorKey string, nodeProps map[string]any) ([]ruleengine.EvalResult, ruleengine.EvalFootprint, error) {
-	now := time.Now().UTC()
+	now := start.UTC()
 	projectedAt, perr := projectedAtFromProvenance(nodeProps)
 	if perr != nil {
-		return nil, ruleengine.EvalFootprint{}, fmt.Errorf("pipeline: projectedAt for %q: %w", actorKey, perr)
+		return nil, fmt.Errorf("pipeline: projectedAt for %q: %w", actorKey, perr)
 	}
 	params := map[string]any{
 		"actorKey":    actorKey,
 		"now":         now.Format(time.RFC3339),
 		"projectedAt": projectedAt,
 	}
-	out, footprint, err := p.fullEngine.ExecuteWithFootprint(ctx, p.fullCR,
+	out, err := p.fullEngine.ExecuteWith(ctx, p.fullCR,
 		ruleengine.EventContext{
 			NodeKey:    actorKey,
 			NodeProps:  nodeProps,
 			Parameters: params,
 		}, p.adjKV, p.coreKV)
 	if err != nil {
-		return nil, ruleengine.EvalFootprint{}, err
+		return nil, err
 	}
 	results := make([]ruleengine.EvalResult, 0, len(out))
 	for _, r := range out {
@@ -404,7 +244,7 @@ func (p *Pipeline) executeFullForActorOnce(ctx context.Context, actorKey string,
 				continue
 			}
 			if envErr != nil {
-				return nil, ruleengine.EvalFootprint{}, fmt.Errorf("pipeline: multi-envelope: %w", envErr)
+				return nil, fmt.Errorf("pipeline: multi-envelope: %w", envErr)
 			}
 			for _, e := range entries {
 				results = append(results, ruleengine.EvalResult{
@@ -428,7 +268,7 @@ func (p *Pipeline) executeFullForActorOnce(ctx context.Context, actorKey string,
 				continue
 			}
 			if envErr != nil {
-				return nil, ruleengine.EvalFootprint{}, fmt.Errorf("pipeline: envelope: %w", envErr)
+				return nil, fmt.Errorf("pipeline: envelope: %w", envErr)
 			}
 			row = newRow
 			keys = newKeys
@@ -452,7 +292,7 @@ func (p *Pipeline) executeFullForActorOnce(ctx context.Context, actorKey string,
 	// multiEnvelopeFn's results too, not only envelopeFn's.
 	if p.envelopeFn != nil || p.multiEnvelopeFn != nil {
 		if err := p.guardOutputKeyCollision(ctx, actorKey, results); err != nil {
-			return nil, ruleengine.EvalFootprint{}, err
+			return nil, err
 		}
 	}
 	// A perEntry lens's fresh entry set is only ever additive on its own
@@ -464,11 +304,17 @@ func (p *Pipeline) executeFullForActorOnce(ctx context.Context, actorKey string,
 	if p.multiEnvelopeFn != nil {
 		withRetractions, rerr := p.multiEntryRetractions(ctx, actorKey, results)
 		if rerr != nil {
-			return nil, ruleengine.EvalFootprint{}, rerr
+			return nil, rerr
 		}
 		results = withRetractions
 	}
-	return results, footprint, nil
+	// Record per-event projection latency for the heartbeat aggregator.
+	// The buffer is cheap (single atomic-protected ring slot per insert)
+	// so calling it on every fan-out actor is fine.
+	if p.latencyBuf != nil {
+		p.latencyBuf.Record(time.Since(start))
+	}
+	return results, nil
 }
 
 // multiEntryRetractions computes cap-read-per-anchor-grant-keys-design.md

@@ -57,7 +57,7 @@ func TestDispositionEvalErr_FourTiers(t *testing.T) {
 			p := &Pipeline{ruleID: "rule-disposition"}
 			dec, err := p.dispositionEvalErr(context.Background(),
 				substrate.Message{Subject: "$KV.CORE.vtx.agreement.X", Body: []byte("{}")},
-				"vtx.agreement.X", "traversal", tc.err, nil)
+				"vtx.agreement.X", "traversal", tc.err)
 			require.Equal(t, tc.wantDec, dec)
 			if tc.wantErrNil {
 				require.NoError(t, err)
@@ -84,7 +84,7 @@ func TestDispositionEvalErr_Terminal_PublishesDLQAndAcks(t *testing.T) {
 
 	msg := substrate.Message{Subject: "$KV.CORE.vtx.agreement.X", Body: []byte(`{"key":"vtx.agreement.X"}`)}
 	dec, err := p.dispositionEvalErr(ctx, msg, "vtx.agreement.X", "traversal",
-		failure.Terminal(errDispositionBoom), nil)
+		failure.Terminal(errDispositionBoom))
 	require.NoError(t, err)
 	require.Equal(t, substrate.Ack, dec)
 

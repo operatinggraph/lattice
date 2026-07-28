@@ -81,7 +81,7 @@ func TestExec_NodeRevisionCapturedOnRead(t *testing.T) {
 	reg := newFixtureRegistry()
 	unit := putVertex(t, reg, coreKV, "unit", "unit", nil)
 
-	ex := newTestExecutor(nil, coreKV)
+	ex := newTestExecutor(coreKV)
 	ref, err := ex.fetchNode(unit)
 	require.NoError(t, err)
 	require.NotNil(t, ref)
@@ -97,7 +97,7 @@ func TestExec_NodeRevisionCapturedOnRead(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, original, again.revision)
 
-	next := newTestExecutor(nil, coreKV)
+	next := newTestExecutor(coreKV)
 	fresh, err := next.fetchNode(unit)
 	require.NoError(t, err)
 	require.NotEqual(t, original, fresh.revision, "a fresh evaluation must observe the bumped revision")
