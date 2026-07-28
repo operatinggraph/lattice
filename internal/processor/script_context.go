@@ -78,6 +78,12 @@ type ScriptContext struct {
 	// (Hydrate); consulted by step 6's external-egress emission guard
 	// (design sensitive-param-egress §3.6). Never nil in production wiring.
 	SensitiveReads *sensitiveReadTracker
+	// LiveReads bounds the total live Core KV round trips this execution's
+	// kv.Read/kv.Links builtins may issue (Contract #2 §2.5 "What the ceiling
+	// does not cover" — the declared-read ceiling never sees a live read).
+	// Populated by step 4 (Hydrate); the runner defaults it if left nil
+	// (starlark_runner.go), the same trust posture as DeferredMiss.
+	LiveReads *liveReadBudgetTracker
 }
 
 // ScriptKVReader performs a single on-demand Core KV read for a Starlark

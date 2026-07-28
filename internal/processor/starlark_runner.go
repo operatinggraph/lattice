@@ -68,6 +68,13 @@ func (r *StarlarkRunner) Run(ctx context.Context, sc ScriptContext) (ScriptResul
 	if sc.DeferredMiss == nil {
 		sc.DeferredMiss = &deferredMissTracker{}
 	}
+	// Same posture for the live-read budget: an un-wired tracker must default
+	// to a bounded budget, not to liveReadBudgetTracker's nil-receiver
+	// "unlimited" behavior (that's the test-harness convenience, not the
+	// production default).
+	if sc.LiveReads == nil {
+		sc.LiveReads = &liveReadBudgetTracker{budget: DefaultLiveReadBudget}
+	}
 
 	stateVal := vertexMapToStarlarkWithHydrated(sc)
 	opVal := operationEnvelopeToStarlark(sc.Operation)

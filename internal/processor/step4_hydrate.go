@@ -310,6 +310,7 @@ func (h *HydratorImpl) Hydrate(ctx context.Context, env *OperationEnvelope) (Hyd
 			// over the same Conn + Core bucket — the op-time set-valued enumeration.
 			LinkLister:     connLinkLister{conn: h.Conn, bucket: h.CoreBucket},
 			SensitiveReads: tracker,
+			LiveReads:      &liveReadBudgetTracker{budget: DefaultLiveReadBudget},
 		},
 	}, nil
 }

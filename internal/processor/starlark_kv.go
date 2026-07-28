@@ -116,6 +116,9 @@ func kvModule(sc ScriptContext) *starlarkstruct.Struct {
 		if sc.KVReader == nil {
 			return nil, errBuiltin("kv.Read: no Core KV reader wired for on-demand read of " + key)
 		}
+		if !sc.LiveReads.charge(1) {
+			return nil, errBuiltin("kv.Read: live-read budget exceeded")
+		}
 		doc, err := sc.KVReader.ReadVertex(starlarksandbox.ContextFromThread(thread, context.Background()), key)
 		if err != nil {
 			return nil, errBuiltin("kv.Read: " + err.Error())
@@ -198,9 +201,26 @@ func kvModule(sc ScriptContext) *starlarkstruct.Struct {
 		if sc.LinkLister == nil {
 			return nil, errBuiltin("kv.Links: no Core KV link lister wired for enumeration of " + keyFilter)
 		}
+		// Pre-charge the list call itself so an execution already over budget
+		// aborts before issuing it; the per-link GET cost (below) can only be
+		// counted once the page size is known.
+		if !sc.LiveReads.charge(1) {
+			return nil, errBuiltin("kv.Links: live-read budget exceeded")
+		}
 		links, nextCursor, err := sc.LinkLister.ListLinks(starlarksandbox.ContextFromThread(thread, context.Background()), keyFilter, cursor, limit)
 		if err != nil {
 			return nil, errBuiltin("kv.Links: " + err.Error())
+		}
+		// Charge the clamped LIMIT, not len(links): connLinkLister issues one
+		// KVGet per listed key regardless of outcome, so a key that races a
+		// concurrent hard-delete between the list and the GET (skipped from
+		// links, starlark_kv.go's ListLinks) still cost a real round trip. Limit
+		// is the deterministic upper bound on that per-page cost; charging it
+		// keeps "one charge unit == at most one round trip" true even when the
+		// page comes back sparse, at the cost of over-charging a page that
+		// returns fewer live links than it asked for.
+		if !sc.LiveReads.charge(limit) {
+			return nil, errBuiltin("kv.Links: live-read budget exceeded")
 		}
 
 		page := starlarklib.NewList(nil)

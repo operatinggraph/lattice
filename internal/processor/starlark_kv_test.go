@@ -294,6 +294,36 @@ def execute(state, op):
 	}
 }
 
+// TestKVRead_LiveReadBudgetExceeded — once the shared live-read budget is
+// exhausted, a further on-demand kv.Read aborts the script instead of issuing
+// another Core KV round trip.
+func TestKVRead_LiveReadBudgetExceeded(t *testing.T) {
+	reader := &fakeKVReader{docs: map[string]*VertexDoc{
+		"vtx.task.a": {Key: "vtx.task.a", Class: "task"},
+		"vtx.task.b": {Key: "vtx.task.b", Class: "task"},
+	}}
+	sc := ScriptContext{KVReader: reader, LiveReads: &liveReadBudgetTracker{budget: 1}}
+	_, err := runKVScript(t, sc, `
+def execute(state, op):
+    a = kv.Read("vtx.task.a")
+    b = kv.Read("vtx.task.b")
+    return {"mutations": [], "events": [{"class": "x"}]}
+`)
+	if err == nil {
+		t.Fatalf("expected the second kv.Read to trip the budget")
+	}
+	se, ok := err.(*ScriptError)
+	if !ok {
+		t.Fatalf("want *ScriptError, got %T: %v", err, err)
+	}
+	if !strings.Contains(se.Message, "live-read budget exceeded") {
+		t.Fatalf("error message = %q, want it to mention the live-read budget", se.Message)
+	}
+	if len(reader.calls) != 1 {
+		t.Fatalf("reader.calls = %d, want 1 (the budget is charged before the round trip, so the tripping read never reaches KVReader)", len(reader.calls))
+	}
+}
+
 // TestKVRead_ArgValidation — arity/type/empty-key misuse fails fast. A fake
 // reader is supplied so failures are argument validation, not a missing reader.
 func TestKVRead_ArgValidation(t *testing.T) {
@@ -653,6 +683,64 @@ def execute(state, op):
 	}
 	if !strings.Contains(err.Error(), "boom-list") {
 		t.Fatalf("error = %q, want it to carry the underlying cause", err.Error())
+	}
+}
+
+// TestKVLinks_LiveReadBudgetExceeded_PageTooLarge — a single page whose
+// returned link count alone exceeds the remaining budget trips, so a hub with
+// a pathological fan-out cannot spend the whole budget in one page and still
+// hand the script a page it never paid for.
+func TestKVLinks_LiveReadBudgetExceeded_PageTooLarge(t *testing.T) {
+	links := make([]LinkDoc, 3)
+	for i := range links {
+		links[i] = LinkDoc{Key: "lnk.provider." + linkProvID + ".hasBooking.appointment." + linkApptID1}
+	}
+	sc := ScriptContext{
+		LinkLister: &fakeLinkLister{links: links},
+		LiveReads:  &liveReadBudgetTracker{budget: 2}, // 1 (list) + 3 (links) > 2
+	}
+	_, err := runKVScript(t, sc, `
+def execute(state, op):
+    page, nxt = kv.Links("vtx.provider.`+linkProvID+`", "hasBooking", "out")
+    return {"mutations": [], "events": []}
+`)
+	if err == nil {
+		t.Fatalf("expected the oversized page to trip the live-read budget")
+	}
+	se, ok := err.(*ScriptError)
+	if !ok {
+		t.Fatalf("want *ScriptError, got %T: %v", err, err)
+	}
+	if !strings.Contains(se.Message, "live-read budget exceeded") {
+		t.Fatalf("error message = %q, want it to mention the live-read budget", se.Message)
+	}
+}
+
+// TestKVLinks_LiveReadBudgetExceeded_AcrossPages — a script paging through
+// kv.Links repeatedly trips the shared budget on a later page once the sum of
+// prior pages' cost (list call + per-link GETs) exhausts it.
+func TestKVLinks_LiveReadBudgetExceeded_AcrossPages(t *testing.T) {
+	l1 := &fakeLinkLister{
+		links:      []LinkDoc{{Key: "lnk.provider." + linkProvID + ".hasBooking.appointment." + linkApptID1}},
+		nextCursor: "cursor-1",
+	}
+	// Budget covers page 1 (1 list + 1 link = 2) exactly, so page 2's
+	// pre-charged list call (a 3rd unit) trips.
+	sc := ScriptContext{LinkLister: l1, LiveReads: &liveReadBudgetTracker{budget: 2}}
+	_, err := runKVScript(t, sc, `
+def execute(state, op):
+    page1, nxt = kv.Links("vtx.provider.`+linkProvID+`", "hasBooking", "out", limit=1)
+    page2, nxt2 = kv.Links("vtx.provider.`+linkProvID+`", "hasBooking", "out", cursor=nxt, limit=1)
+    return {"mutations": [], "events": []}
+`)
+	if err == nil {
+		t.Fatalf("expected the second page to trip the shared budget")
+	}
+	if !strings.Contains(err.Error(), "live-read budget exceeded") {
+		t.Fatalf("error = %q, want it to mention the live-read budget", err.Error())
+	}
+	if len(l1.calls) != 1 {
+		t.Fatalf("lister.calls = %d, want 1 (the second page's list call never fires once pre-charge trips)", len(l1.calls))
 	}
 }
 
