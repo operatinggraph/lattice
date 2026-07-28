@@ -126,6 +126,6 @@ func TestSweeper_IntervalReportsTheAppliedDefault(t *testing.T) {
 	p := newSweepPipeline(t, &listingAdapter{}, 10)
 	require.Equal(t, time.Hour, p.Sweeper().Interval())
 
-	bare := newSweeper(p, SweepPlan{AnchorType: "identity", BuildKey: sweepBuildKey, AnchorFromKey: sweepAnchorFromKey})
+	bare := newSweeper(p, SweepPlan{AnchorType: "identity", AnchorFromKey: sweepAnchorFromKey})
 	require.Equal(t, DefaultSweepInterval, bare.Interval())
 }

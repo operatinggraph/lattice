@@ -335,3 +335,45 @@ func TestDriver_EntryEnvelope_DuplicateKeys_LastEntryWins(t *testing.T) {
 		t.Fatalf("last entry's audit fields must win, got via=%v", entries[0].Row["via"])
 	}
 }
+
+// TestDriver_EntryEnvelope_EmittedKeysRoundTripThroughAnchorFromKey closes the
+// loop the sweep's own tests cannot: every other perEntry AnchorFromKey test
+// (in this package and in pipeline's sweep_perentry_test.go, which cannot
+// import this one — projection depends on pipeline, not the reverse) builds
+// its sample keys by hand, string-concatenating a shape that MIRRORS
+// EntryEnvelopeFn rather than exercising it. A parser divergence between what
+// production actually writes and what the inverse expects would read as an
+// unclaimable orphan forever (a stale grant that never retracts), and none of
+// those hand-built tests could catch it. This one drives the real emission
+// path and feeds its real output back into the real inverse.
+func TestDriver_EntryEnvelope_EmittedKeysRoundTripThroughAnchorFromKey(t *testing.T) {
+	desc := readableAnchorsDesc(t)
+	fn := desc.EntryEnvelopeFn()
+	row := map[string]any{
+		"actorKey": entryActor,
+		"readableAnchors": []any{
+			map[string]any{"anchorId": anchorUnit1, "anchorType": "unit", "via": []any{"residesIn"}},
+			map[string]any{"anchorId": anchorUnit2, "anchorType": "unit", "via": []any{"residesIn"}},
+		},
+	}
+	entries, err := fn(row, nil, map[string]any{"projectedAt": "2026-07-25T14:32:18.142Z"})
+	if err != nil {
+		t.Fatalf("entry envelope: %v", err)
+	}
+	if len(entries) != 2 {
+		t.Fatalf("want 2 entries, got %d", len(entries))
+	}
+	for _, e := range entries {
+		key, _ := e.Keys["key"].(string)
+		if key == "" {
+			t.Fatalf("entry carries no key: %+v", e)
+		}
+		got, ok := desc.AnchorFromKey(key)
+		if !ok {
+			t.Fatalf("AnchorFromKey rejected a key EntryEnvelopeFn actually emitted: %q", key)
+		}
+		if got != entryActor {
+			t.Fatalf("AnchorFromKey(%q) = %q, want %q", key, got, entryActor)
+		}
+	}
+}

@@ -162,6 +162,68 @@ func TestKeyPrefix_RefusesANatsWildcard(t *testing.T) {
 	}
 }
 
+func TestAnchorFromKey_PerEntry_RoundTripsAnEntryKey(t *testing.T) {
+	// A perEntry descriptor's real keys always carry one trailing entry token
+	// beyond BuildKey(actor) alone (§4.4 of
+	// cap-read-per-anchor-grant-keys-design.md); the inverse must recover the
+	// owning actor from that shape, not the bare BuildKey(actor) prefix.
+	d := OutputDescriptor{
+		AnchorType:       "identity",
+		OutputKeyPattern: "cap-read.roles.{actorSuffix}",
+		EntryKeyColumn:   "anchorId",
+	}
+	actor := "vtx.identity.Hj4kPmRtw9nbCxz5vQ2y"
+	entryID := "Kx3TmZpq7RvwNsY2Hc9L"
+	key := d.BuildKey(actor) + "." + entryID
+
+	got, ok := d.AnchorFromKey(key)
+	if !ok {
+		t.Fatalf("AnchorFromKey rejected a well-formed perEntry key %q", key)
+	}
+	if got != actor {
+		t.Fatalf("round trip: got %q, want %q", got, actor)
+	}
+}
+
+func TestAnchorFromKey_PerEntry_RejectsAKeyWithNoTrailingEntryToken(t *testing.T) {
+	// BuildKey(actor) alone is never a real perEntry key — accepting it as one
+	// would let the coverage direction see a bare actor prefix (never written
+	// by EntryEnvelopeFn) as evidence of a live row.
+	d := OutputDescriptor{AnchorType: "identity", OutputKeyPattern: "cap-read.roles.{actorSuffix}", EntryKeyColumn: "anchorId"}
+	actor := "vtx.identity.Hj4kPmRtw9nbCxz5vQ2y"
+	if _, ok := d.AnchorFromKey(d.BuildKey(actor)); ok {
+		t.Fatal("a bare BuildKey(actor) prefix must not parse as a perEntry key")
+	}
+}
+
+func TestAnchorFromKey_PerEntry_RejectsANonNanoIDTrailingToken(t *testing.T) {
+	d := OutputDescriptor{AnchorType: "identity", OutputKeyPattern: "cap-read.roles.{actorSuffix}", EntryKeyColumn: "anchorId"}
+	actor := "vtx.identity.Hj4kPmRtw9nbCxz5vQ2y"
+	if _, ok := d.AnchorFromKey(d.BuildKey(actor) + ".not-a-nanoid"); ok {
+		t.Fatal("a malformed trailing entry token must be refused")
+	}
+}
+
+func TestAnchorFromKey_PerEntry_RejectsAForeignAnchorType(t *testing.T) {
+	// The shared-bucket exactness guarantee must survive the extra trailing
+	// segment: a sibling lens sharing this lens's prefix but a different
+	// anchor type must still be refused.
+	d := OutputDescriptor{AnchorType: "identity", OutputKeyPattern: "cap-read.roles.{actorSuffix}", EntryKeyColumn: "anchorId"}
+	foreign := "cap-read.roles.service.Hj4kPmRtw9nbCxz5vQ2y.Kx3TmZpq7RvwNsY2Hc9L"
+	if _, ok := d.AnchorFromKey(foreign); ok {
+		t.Fatal("a different anchor type must be refused")
+	}
+}
+
+func TestKeyOwnershipRoundTrips_PerEntryDescriptorRoundTrips(t *testing.T) {
+	// The sweep's install gate (sweepEnrolment) probes this before enrolling
+	// any lens; a perEntry descriptor must pass it the same as a doc-mode one.
+	d := OutputDescriptor{AnchorType: "identity", OutputKeyPattern: "cap-read.roles.{actorSuffix}", EntryKeyColumn: "anchorId"}
+	if !d.KeyOwnershipRoundTrips() {
+		t.Fatal("a well-formed perEntry descriptor must round-trip")
+	}
+}
+
 func TestKeyOwnershipRoundTrips_CatchesARepeatedPlaceholder(t *testing.T) {
 	// BuildKey substitutes every occurrence; the inverse brackets the first. A
 	// descriptor where they disagree renders keys its own orphan direction can

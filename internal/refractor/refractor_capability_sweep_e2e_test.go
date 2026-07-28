@@ -127,7 +127,6 @@ func TestRefractor_ConvergenceSweep_DetectsAndHealsLostProjection_E2E(t *testing
 	require.True(t, ok, "the capability lens must be able to scope a listing to its own keys")
 	p.SetSweepPlan(pipeline.SweepPlan{
 		AnchorType:    capDesc.AnchorType,
-		BuildKey:      capDesc.BuildKey,
 		AnchorFromKey: capDesc.AnchorFromKey,
 		KeyPrefix:     capPrefix,
 		Interval:      250 * time.Millisecond,

@@ -35,8 +35,6 @@ type SweepPlan struct {
 	// AnchorType is the actor vertex type whose Core KV population defines
 	// the lens's expected coverage.
 	AnchorType string
-	// BuildKey renders one anchor's target key (OutputDescriptor.BuildKey).
-	BuildKey func(actorKey string) string
 	// AnchorFromKey recovers the anchor a target key was built for, reporting
 	// false for a key this lens does not own (OutputDescriptor.AnchorFromKey).
 	AnchorFromKey func(targetKey string) (string, bool)
@@ -705,30 +703,46 @@ func (s *Sweeper) candidates(ctx context.Context, anchors []string, targets map[
 		return true
 	}
 
-	// The expected-key map is built over EVERY anchor, before and independently
-	// of any budget. It is what tells the orphan direction which target keys
-	// have a live anchor behind them, so a map truncated by a selection budget
-	// would hand that direction healthy actors to re-project as orphans.
-	expected := make(map[string]string, len(anchors))
+	// listedAnchors is the set of anchor vertex keys survey() found in Core KV
+	// — present, whether tombstoned or not; anchorLive below is the real
+	// liveness test — built over EVERY anchor before and independently of any
+	// budget. A set truncated by a selection budget would hand the orphan
+	// direction below a tombstoned-but-still-listed actor's row to retract as
+	// if its anchor had vanished outright, which is the deep verify's call to
+	// make, not the orphan hint's.
+	listedAnchors := make(map[string]struct{}, len(anchors))
 	for _, actor := range anchors {
-		expected[s.plan.BuildKey(actor)] = actor
+		listedAnchors[actor] = struct{}{}
 	}
 
-	// The orphan hint's candidate set — a target key with no live anchor behind
-	// it. Keys this lens does not own are rejected by AnchorFromKey, so a shared
-	// bucket's sibling rows are never touched. Resolving it up front costs no
-	// I/O and is what lets its share be sized to the work that exists. It is
-	// sorted so the cursor can resume in it, and deduplicated so a lens with
-	// several keys per anchor sizes the share by actors to reproject rather than
-	// by keys.
+	// coveredAnchors and orphans are both grouped from the SAME single pass
+	// over the target listing, by the anchor AnchorFromKey recovers for each
+	// key — not by testing key equality against one BuildKey(actor) probe per
+	// anchor. That distinction is load-bearing for a perEntry lens (§4.4 of
+	// cap-read-per-anchor-grant-keys-design.md): no single real key ever
+	// equals BuildKey(actor) alone (every real key carries one more trailing
+	// entry token), so an equality probe would find every live actor's every
+	// child key "not expected" and flood the orphan set with actors that are
+	// very much alive. Grouping by recovered anchor instead answers both
+	// directions correctly for a doc-mode lens too (its one document per actor
+	// recovers to that actor exactly, so the two computations coincide) — one
+	// mechanism, not two per lens shape.
+	//
+	// Keys this lens does not own are rejected by AnchorFromKey, so a shared
+	// bucket's sibling rows are never touched, in either set. Resolving both
+	// sets up front costs no I/O beyond the listing already in hand.
+	coveredAnchors := make(map[string]struct{}, len(anchors))
 	orphans := make([]string, 0)
 	for key := range targets {
-		if _, isExpected := expected[key]; isExpected {
+		actor, owned := s.plan.AnchorFromKey(key)
+		if !owned {
 			continue
 		}
-		if actor, owned := s.plan.AnchorFromKey(key); owned {
-			orphans = append(orphans, actor)
+		if _, listed := listedAnchors[actor]; listed {
+			coveredAnchors[actor] = struct{}{}
+			continue
 		}
+		orphans = append(orphans, actor)
 	}
 	sort.Strings(orphans)
 	orphans = slices.Compact(orphans)
@@ -777,8 +791,7 @@ func (s *Sweeper) candidates(ctx context.Context, anchors []string, targets map[
 				break
 			}
 			actor := anchors[(start+i)%len(anchors)]
-			key := s.plan.BuildKey(actor)
-			if _, present := targets[key]; present {
+			if _, present := coveredAnchors[actor]; present {
 				last = actor
 				continue
 			}
@@ -858,8 +871,8 @@ func (s *Sweeper) candidates(ctx context.Context, anchors []string, targets map[
 
 // selection is one tick's candidate set plus which prefilter hint proposed each
 // actor, so the pass can test each hint's premise against what Reproject found.
-// The two hint sets are disjoint by construction: an orphan's key is absent from
-// the expected map, which is exactly what makes it not an anchor.
+// The two hint sets are disjoint by construction: an orphan's recovered anchor
+// is absent from listedAnchors, which is exactly what makes it not an anchor.
 type selection struct {
 	actors       []string
 	fromCoverage map[string]struct{}

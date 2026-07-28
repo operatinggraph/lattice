@@ -147,7 +147,6 @@ func TestRefractor_BusinessLensConvergenceSweep_HealsWithoutTouchingSiblings_E2E
 	require.True(t, ok)
 	p.SetSweepPlan(pipeline.SweepPlan{
 		AnchorType:    desc.AnchorType,
-		BuildKey:      desc.BuildKey,
 		AnchorFromKey: desc.AnchorFromKey,
 		KeyPrefix:     prefix,
 		Interval:      250 * time.Millisecond,

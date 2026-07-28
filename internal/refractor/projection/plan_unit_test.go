@@ -251,6 +251,19 @@ func TestParseOutputDescriptor_EntryKeyColumn_AcceptAndReject(t *testing.T) {
 	if _, err := ParseOutputDescriptor(trailingLiteral); err == nil || !strings.Contains(err.Error(), "END with") {
 		t.Fatalf("expected entryKeyColumn-with-trailing-literal rejection, got %v", err)
 	}
+
+	// Reject: entryKeyColumn combined with keyColumn. keyColumn substitutes a
+	// bare NanoID for {actorSuffix}, so the perEntry parse would read a real
+	// key's remainder as <entityId>.<entryId> — a shape a shared-bucket
+	// doc-mode sibling with a matching literal prefix can also produce, which
+	// AnchorFromKey has no primitive to tell apart from this lens's own rows.
+	withKeyColumn := validDescriptor()
+	withKeyColumn.BodyColumns = []string{"readableAnchors"}
+	withKeyColumn.EntryKeyColumn = "anchorId"
+	withKeyColumn.KeyColumn = "entityId"
+	if _, err := ParseOutputDescriptor(withKeyColumn); err == nil || !strings.Contains(err.Error(), "incompatible with keyColumn") {
+		t.Fatalf("expected entryKeyColumn+keyColumn rejection, got %v", err)
+	}
 }
 
 // A descriptor parsed without entryKeyColumn defaults it empty and keeps the

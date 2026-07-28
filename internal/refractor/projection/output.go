@@ -135,6 +135,17 @@ func ParseOutputDescriptor(spec *lens.OutputDescriptorSpec) (OutputDescriptor, e
 		if len(spec.BodyColumns) != 1 {
 			return OutputDescriptor{}, fmt.Errorf("output descriptor: entryKeyColumn requires exactly one bodyColumns entry (the list it splits), got %d", len(spec.BodyColumns))
 		}
+		// keyColumn substitutes a bare NanoID for the {actorSuffix} slot, so a
+		// perEntry key's remainder would read as <entityId>.<entryId> — the
+		// same shape a shared-bucket sibling doc-mode lens with a matching
+		// literal prefix can also produce (its own <type>.<id> suffix's second
+		// segment collides with the entry token's position). AnchorFromKey's
+		// exactness would then depend on discriminating the two by content
+		// alone, which the combination has no primitive for. Refuse it rather
+		// than ship a parse that can misclaim a sibling's row.
+		if spec.KeyColumn != "" {
+			return OutputDescriptor{}, fmt.Errorf("output descriptor: entryKeyColumn is incompatible with keyColumn (perEntry keys combine only with the default <type>.<id> actor suffix)")
+		}
 		// realnessFilter is what turns a degenerate OPTIONAL-match artifact
 		// (an entry with no real key field) into a dropped entry rather than
 		// a hard error (EntryEnvelopeFn errors the whole actor evaluation on
@@ -294,6 +305,12 @@ func (d OutputDescriptor) sweepAnchorSample() string {
 	return substrate.VertexPrefix + "." + d.AnchorType + ".ZwqPmRtw9nbCxz5vQ2yH"
 }
 
+// sweepEntrySample is the synthetic per-entry key token the perEntry
+// round-trip probe appends to the anchor sample, distinct from
+// sweepAnchorSample so a probe bug that confused the two segments would show
+// up as a round-trip failure rather than an accidental match.
+const sweepEntrySample = "Kx3TmZpq7RvwNsY2Hc9L"
+
 // KeyOwnershipRoundTrips reports whether AnchorFromKey recovers exactly the
 // anchor BuildKey rendered a key for. The convergence sweep's orphan direction
 // — the ONLY detector for a row whose anchor is gone, since the deep verify
@@ -305,9 +322,18 @@ func (d OutputDescriptor) sweepAnchorSample() string {
 // may appear more than once; BuildKey substitutes every occurrence while the
 // inverse brackets the first), so the sweep's install gate probes the pair
 // rather than trusting that a derivable prefix implies a working inverse.
+//
+// A perEntry descriptor (EntryKeyColumn set) never has a real key equal to
+// BuildKey(actor) alone — every real key carries one more trailing NanoID
+// token — so the probe appends a synthetic one before checking the inverse,
+// the same shape EntryEnvelopeFn renders in production.
 func (d OutputDescriptor) KeyOwnershipRoundTrips() bool {
 	sample := d.sweepAnchorSample()
-	recovered, ok := d.AnchorFromKey(d.BuildKey(sample))
+	key := d.BuildKey(sample)
+	if d.EntryKeyColumn != "" {
+		key = key + "." + sweepEntrySample
+	}
+	recovered, ok := d.AnchorFromKey(key)
 	return ok && recovered == sample
 }
 
@@ -325,6 +351,11 @@ func (d OutputDescriptor) KeyOwnershipRoundTrips() bool {
 // prefix (cap.{actorSuffix} against cap.roles.identity.<id>) recovers a
 // four-segment key ParseVertexKey rejects, so neither lens claims the other's
 // rows.
+//
+// A perEntry descriptor (EntryKeyColumn set) carries one more trailing
+// segment — the entry's own key, appended by EntryEnvelopeFn after the
+// rendered pattern — so its inverse is delegated to anchorFromKeyPerEntry
+// rather than parsed as a bare vertex key.
 func (d OutputDescriptor) AnchorFromKey(targetKey string) (string, bool) {
 	prefix, suffix, ok := d.patternParts()
 	if !ok {
@@ -340,12 +371,52 @@ func (d OutputDescriptor) AnchorFromKey(targetKey string) (string, bool) {
 		return "", false
 	}
 
+	if d.EntryKeyColumn != "" {
+		return d.anchorFromKeyPerEntry(rest)
+	}
+
 	actorKey := substrate.VertexPrefix + "." + rest
 	if d.KeyColumn != "" {
 		// §10.2 Option (b): the suffix is the anchor's bare NanoID, so the type
 		// segment comes back from the descriptor.
 		actorKey = substrate.VertexPrefix + "." + d.AnchorType + "." + rest
 	}
+	vtxType, _, parsed := substrate.ParseVertexKey(actorKey)
+	if !parsed || vtxType != d.AnchorType {
+		return "", false
+	}
+	return actorKey, true
+}
+
+// anchorFromKeyPerEntry recovers the owning actor from a per-entry key's
+// remainder — the portion left after AnchorFromKey strips the pattern's
+// literal prefix/suffix — which is exactly the actor's rendered suffix plus
+// one trailing "." plus the entry's own key (never containing a "." itself:
+// EntryEnvelopeFn validates it as a NanoID token before ever writing a key,
+// §3.3). Splitting on the LAST "." therefore separates the two unambiguously
+// regardless of how many dot-separated segments the actor suffix itself
+// carries (the default <type>.<id> suffix has one already).
+//
+// Both the actor suffix and the trailing entry token are validated exactly as
+// strictly as the doc-mode path validates its own suffix: a malformed or
+// foreign actor suffix, or a non-NanoID trailing token, is refused rather than
+// guessed at — the same exactness guarantee that keeps sibling lenses' rows
+// unclaimable (§4.4 of cap-read-per-anchor-grant-keys-design.md).
+//
+// There is no keyColumn branch here: ParseOutputDescriptor refuses the
+// entryKeyColumn+keyColumn combination outright, so the actor suffix is
+// always the default <type>.<id> shape.
+func (d OutputDescriptor) anchorFromKeyPerEntry(rest string) (string, bool) {
+	idx := strings.LastIndexByte(rest, '.')
+	if idx < 0 {
+		return "", false
+	}
+	actorPart, entryID := rest[:idx], rest[idx+1:]
+	if !substrate.IsValidNanoID(entryID) {
+		return "", false
+	}
+
+	actorKey := substrate.VertexPrefix + "." + actorPart
 	vtxType, _, parsed := substrate.ParseVertexKey(actorKey)
 	if !parsed || vtxType != d.AnchorType {
 		return "", false

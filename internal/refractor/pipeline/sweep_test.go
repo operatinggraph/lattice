@@ -108,7 +108,6 @@ func newSweepPipeline(t *testing.T, adpt *listingAdapter, batch int) *Pipeline {
 	p.SetActorDeleteKey(sweepBuildKey)
 	p.SetSweepPlan(SweepPlan{
 		AnchorType:    "identity",
-		BuildKey:      sweepBuildKey,
 		AnchorFromKey: sweepAnchorFromKey,
 		KeyPrefix:     "cap.roles.",
 		Interval:      time.Hour, // ticks are driven explicitly by the tests

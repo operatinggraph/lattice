@@ -351,17 +351,21 @@ func InstallActorAggregate(
 	}
 	if desc.EntryKeyColumn != "" {
 		// EntryEnvelopeFn (this package) ships the emission mechanism, the
-		// per-actor prefix-diff retraction transport ships (§4.2), and the
-		// retry queue's raw-replay refusal + actor-reproject routing ships
-		// (§4.3) — but wiring registration in here is still deliberately
-		// deferred: the sweep still treats every live child key as an
-		// orphan (§4.4's AnchorFromKey perEntry variant + coverage/orphan
-		// deltas aren't built), so installing a SweepPlan for a real
-		// entryKeyColumn lens today would flood-delete a live actor's whole
-		// roster on the next sweep tick — a security-plane defect, not a
-		// mere degradation. Refuse loudly (fail-closed, under-grant) until
-		// §4.4 lands. See the design's Fire 1 checkpoint for the sequencing.
-		logger.Error("actor-aggregate output descriptor sets entryKeyColumn but the driver's sweep support isn't wired in yet — refusing registration",
+		// per-actor prefix-diff retraction transport ships (§4.2), the retry
+		// queue's raw-replay refusal + actor-reproject routing ships (§4.3),
+		// and the sweep's AnchorFromKey perEntry variant + coverage/orphan
+		// deltas ship (§4.4) — but wiring registration in here is still
+		// deliberately deferred: below this block, InstallActorAggregate
+		// unconditionally calls p.SetEnvelopeFn(desc.EnvelopeFn(...)), the
+		// one-document-per-actor wrapper, never
+		// p.SetMultiEnvelopeFn(desc.EntryEnvelopeFn()) — so a real
+		// entryKeyColumn lens registered today would still project one
+		// document instead of per-entry keys, and §4.5's prefix-scoped
+		// truncate plus the bootstrap capabilityRead base-lens migration
+		// (§6) are still unbuilt. Refuse loudly (fail-closed, under-grant)
+		// until that wiring lands. See the design's Fire 1 checkpoint for
+		// the sequencing.
+		logger.Error("actor-aggregate output descriptor sets entryKeyColumn but the driver does not yet wire its per-entry envelope — refusing registration",
 			"lensId", r.ID)
 		return false
 	}
@@ -402,7 +406,6 @@ func InstallActorAggregate(
 	} else {
 		p.SetSweepPlan(pipeline.SweepPlan{
 			AnchorType:    desc.AnchorType,
-			BuildKey:      desc.BuildKey,
 			AnchorFromKey: desc.AnchorFromKey,
 			KeyPrefix:     prefix,
 			Interval:      sweepInterval(authPlane),
