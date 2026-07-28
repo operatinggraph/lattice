@@ -1,12 +1,14 @@
 # `cap-read` size bound — per-anchor grant keys (the KV read-grant slice stops being one unbounded document)
 
 **Status: ✅ Andrew-ratified 2026-07-25 (Option A — keep the KV family, per-anchor) — 🏗️ BUILDING
-(Fire 1, in progress).** The §6.13/§6.14 contract edit is **committed** at ratification per the house
-rule (the contract is the build-to target; its transitional note marks the legacy document shape as the
-live wire format until the build drains it). The build-shelve (showcase priority) lifted 2026-07-27 —
-Facet's showcase build shipped end-to-end — and Fire 1 started the same fire. Fires ship 1→2→3 (+4
-independent) as decomposed in §10; §4.5's prefix-scoped truncate may land earlier via the standalone
-fire-briefs Fire B, which Fire 1 then inherits.
+(Fire 1 + Fire 2 shipped and live; Fire 3 open).** The §6.13/§6.14 contract edit is **committed** at
+ratification per the house rule (the contract is the build-to target; its transitional note marks the
+legacy document shape as the live wire format until the build drains it). The build-shelve (showcase
+priority) lifted 2026-07-27 — Facet's showcase build shipped end-to-end — and Fire 1 started the same
+fire. Fires ship 1→2→3 (+4 independent) as decomposed in §10; §4.5's prefix-scoped truncate landed via
+Fire 1 (inheriting the standalone fire-briefs Fire B). Fire 2 (producer flips) shipped 2026-07-28 —
+every `cap-read.*` producer repo-wide (base lens + every package-generated one) now emits the per-anchor
+shape; only Fire 3's one-shot legacy-shape purge remains.
 
 **CHECKPOINT (Fire 1, increment 1 — 2026-07-27, merged to main `81e157ca`; worktree removed, fully
 merged, no unlanded work — start a fresh worktree for the next increment):** shipped the §3.3 `entryKeyColumn`
@@ -439,13 +441,74 @@ that a `PerEntry` target's legacy PARENT tombstone stays paired with the base-le
 built into the shred path itself — item (2) of increment 9 is that pairing; the shred path itself still
 only reaches per-anchor children, by design.
 
+**Fire 2 (2026-07-28, worktree `.claude/worktrees/cap-read-fire2-inc1`, branch
+`fire/cap-read-fire2-inc1`): producer flips — shipped.** Enumerated every `cap-read.*` NATS-KV producer
+repo-wide (grep on `OutputKeyPattern`): exactly two exist — the bootstrap base lens (Fire 1) and
+`pkgmgr.generateProducerLens`, the single generator every package's `ReadGrantDomains`/`AnchorWalk`
+declaration compiles through (today only `packages/edge-manifest`, three generated producers). No
+hand-authored `cap-read.*` producer exists outside this generator, so flipping it flips every one.
+
+Three pieces: **(1)** `pkgmgr.OutputDescriptorSpec` (`definition.go`) gained `EntryKeyColumn
+string \`json:"entryKeyColumn,omitempty"\``, field/tag matching the Refractor-side
+`lens.OutputDescriptorSpec.EntryKeyColumn` verbatim. **(2)** `generateProducerLens` (`anchorwalk.go`)
+now sets `EntryKeyColumn: capReadActorType` (`"anchorId"`) unconditionally — the cypher is untouched,
+only the output mode flips; every generated producer becomes per-anchor-keyed with zero package-author
+action beyond the version bump below. **(3)** `validateGrantDomainName` hardening — corrected mid-fire
+by adversarial review, which found the first draft's premise wrong: an anchor's OWN type
+(`Walk.AnchorType`) never appears in a cap-read key at all (only its bare NanoID does — `anchorType` is a
+body-only audit field, §3.2), so scoping the collision check to a Definition's declared `AnchorType`
+values was both over-broad (would reject a legitimate future domain named after its own anchor type) and
+under-broad (misses a domain colliding with a vertex type used by some OTHER package). The only vertex-type
+token any cap-read key structurally carries is the fixed `"identity"` actorSuffix literal every producer
+hardcodes (`capReadActorType`) — so the check is narrowed to reject exactly a domain named `"identity"`,
+closing the real §3.1 corner instead of an imagined broader one.
+
+`packages/edge-manifest` version-bumped 0.14.7→0.14.8 (the only live consumer of the flipped generator).
+**Deployment note, not yet performed:** the Output descriptor is a pinned, non-hot-reloadable field
+(`reloadpin.PinnedFields`) — a plain package upgrade lands the new shape into the lens's `.spec` aspect,
+but the running Refractor keeps emitting the legacy doc shape for `edgeManifest*ReadGrants` until
+`make cycle-refractor` re-derives activation from the updated descriptor (the same mechanic §6's base-lens
+flip used). The sweep cannot itself claim a legacy DOMAIN doc (§4.4's `AnchorFromKey` rejects it, by
+design, the same disjointness this fire hardens) — drain proceeds only via `multiEntryRetractions`'
+legacy-parent check on each actor's own fan-out-triggered evaluation, converging at the auth-plane sweep's
+normal per-actor rotation pace, identical to §6's base-lens drain.
+
+Added `internal/refractor/edge_manifest_fire2_producer_flip_e2e_test.go`: installs the real
+`edgemanifest.Package` via the real `InstallPackage` path, activates `edgeManifestReadGrants` through the
+same `projection.InstallActorAggregate` production wiring `cmd/refractor` uses (bucket `capability-kv` ⇒
+`IsAuthPlane` ⇒ guarded automatically, no test-side guard wiring), and proves against a real `providedTo`
+graph link: **admit** (the per-anchor key appears), **legacy drain** (a pre-seeded legacy 4-token doc for
+the same actor is guard-tombstoned on its first post-flip evaluation), and **revoke** (tombstoning the
+link drops the per-anchor key). Mutation-tested: removing `EntryKeyColumn` from `generateProducerLens`
+fails the test at ADMIT, confirming it exercises the real flip rather than an already-passing shortcut.
+
+Adversarially reviewed (opus) before merge — one real finding, fixed (the `validateGrantDomainName`
+premise correction above); confirmed clean otherwise: descriptor conformance vs `ParseOutputDescriptor`
+(exactly one `BodyColumns`, `RealnessFilter` set, `KeyColumn` unset, pattern ends with the placeholder),
+Fire 2's producer enumeration is complete (no hand-authored producer missed), migration correctness
+(version bump alone suffices — non-protected lens, ordinary `UpgradePackage` path, dual-read serves both
+shapes), and the e2e is not a false positive. **Named, not fixed** (pre-existing, not introduced by this
+fire — every package-generated `cap-read.*` producer, doc-mode or per-anchor alike, was never wired into
+`keyshredded`'s `NullifyTarget` list; only the base lens is, since increment 9): a crypto-shredded
+identity's `edgeManifest*ReadGrants` domain grants are not nullified by the shred path. Needs a
+per-package-producer `NullifyTarget` wiring mechanism (the generated lens IDs are install-time NanoIDs,
+not a static list `cmd/refractor/main.go` can hardcode) — genuinely new Control-plane work, not this
+bounded fire's scope; filed as its own board row (Security & trust boundary) rather than left unrecorded.
+
+Gates green: `go build ./...`, `make vet`, `golangci-lint run ./...` (full repo, 0 issues), `STRICT=1
+lint-conventions.go`, `lint-package-version.go`, `STRICT=1 lint-package-standard.go`,
+`lint-lens-anchors.go`, `lint-facet-discovery.go`, full `go test ./...` (0 failures).
+
+**Next increment (Fire 3, XS–S):** the §6.4 one-shot legacy-shape purge, gated on a full sweep rotation
+having drained every package-domain slice post-flip.
+
 **Author:** Winston (Designer fire, 2026-07-25); increment 2 built by Winston (Lattice Steward fire, 2026-07-27);
 increment 3 built by Winston (Lattice Steward fire, 2026-07-27); increment 4 built by Winston (Lattice
 Steward fire, 2026-07-28); increment 5 built by Winston (Lattice Steward fire, 2026-07-28); increment 6
 built by Winston (Lattice Steward fire, 2026-07-28); increment 7 built by Winston (Lattice Steward fire,
 2026-07-28); increment 8 built by Winston (Lattice Steward fire, 2026-07-28); increment 9 built by
 Winston (Lattice Steward fire, 2026-07-28); increment 9 deployed live by Winston (Lattice Steward fire,
-2026-07-28)
+2026-07-28); Fire 2 built by Winston (Lattice Steward fire, 2026-07-28)
 **Backlog:** Stream-2 Security & trust boundary — *[Refractor] A `cap-read` document has no size bound* (★★, M)
 **Owning components:** `internal/refractor/{projection,pipeline,adapter,capabilityread,keyshredded}` (mechanism), `internal/bootstrap/lenses.go` + `internal/pkgmgr/anchorwalk.go` (producers), `packages/edge-manifest` (+ any package shipping a `cap-read.*` NATS-KV producer). Docs: `docs/contracts/06-capability-kv.md` §6.13/§6.14 (edit prepared uncommitted in the working tree), `docs/components/refractor.md`.
 

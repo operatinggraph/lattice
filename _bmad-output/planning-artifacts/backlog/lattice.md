@@ -130,12 +130,10 @@ designed-through, but the *fork decision* + the *contract commit* are Andrew's.
 > shared build lock on that basis — select by importance × readiness as normal (§2 above).
 > **Build-ready now:** the **script live-read budget** (★★ M, the bigger sibling of the shipped
 > envelope ceiling) and the two ★ Processor sensitive-predicate rows. The **cap-read per-anchor
-> grant keys** fix (★★ L) is now `🏗️ building` — Fire 1 increments 1–9 (descriptor field, driver
-> perEntry emission, core prefix-diff retraction, actor-disappearance retraction, shred-site prefix
-> enumeration, retry-path refusal, sweep coverage/orphan deltas, per-entry envelope wiring, the
-> bootstrap `capabilityRead` base-lens migration) shipped **and deployed live** (2026-07-28: kernel
-> reconciled, processor + Refractor cycled, the auth-plane sweep organically healed every self-anchor
-> actor to the new per-key shape — zero errors); next is Fire 2, the per-domain producer flips. `appsession`'s OIDC design stays
+> grant keys** fix (★★ L) is now `🏗️ building` — Fire 1 (mechanism + base-lens migration, all 9
+> increments) and Fire 2 (producer flips — every package-generated `cap-read.*` producer now emits
+> the per-anchor shape) shipped **and Fire 1 is deployed live**; next is Fire 3, the one-shot
+> legacy-shape purge, gated on a full sweep rotation. `appsession`'s OIDC design stays
 > 🗄️ **shelved** (revive: first real-IdP deployment) — unrelated to the showcase.
 > Every `✅ ratified` row is done or driver-blocked; the rest are Whetstone's or parking-lot.
 > A stale callout starves the lane — whoever ships next renames this.
@@ -153,7 +151,8 @@ designed-through, but the *fork decision* + the *contract commit* are Andrew's.
 | **[Processor] A script's live reads have no budget** | Class-(e) `kv.Links` paging + one `kv.Read` per link is uncapped at the Processor: `identity_has_open_tasks` alone walks 64 pages × 256 links, so one MergeIdentity can issue ~16k sequential Core-KV GETs — ~16x the declared-read ceiling, which never sees a live read. `connKVReader.ReadVertex` has no budget. | ★★ | M | 📋 ready · consumer: any actor able to submit an op whose script enumerates |
 | **[packages] ~20 read-posture comments assert hydration-time fatality** | `packages/*` DDL comments + two READMEs still say a declared-but-absent read faults "before the script runs" (identity-domain, service-domain, privacy-base, objects-base, orchestration-base, clinic/loftspace READMEs), as does `docs/contracts/10-orchestration-substrate.md:238`. Doc-only sweep. | ★ | S | 📋 ready |
 | **Starlark 250ms wall budget fails installs under parallel test load** | `go test ./...` at default `-p` reds a different package-install test each run with `ScriptTimeout: script exceeded wall budget 250ms` — reproduced on unmodified `main`, so it predates any one fire. Costs every fire an investigation to rule out its own change. | ★★ | S–M | 📋 ready |
-| **[Refractor] A `cap-read` document has no size bound** | Even deduped, an actor reaching enough distinct anchors renders `cap-read.<domain>.<actor>` past NATS's max payload; the write then fails permanently, freezing that actor's grant set so revocations stop landing (fail-OPEN). Design: per-anchor keys (the Postgres per-row twin). | ★★ | L | 🏗️ building · [design](../../implementation-artifacts/cap-read-per-anchor-grant-keys-design.md) §10 Fire 1 inc. 9 shipped + live · next: Fire 2 producer flips |
+| **[Refractor] A `cap-read` document has no size bound** | Even deduped, an actor reaching enough distinct anchors renders `cap-read.<domain>.<actor>` past NATS's max payload; the write then fails permanently, freezing that actor's grant set so revocations stop landing (fail-OPEN). Design: per-anchor keys (the Postgres per-row twin). | ★★ | L | 🏗️ building · [design](../../implementation-artifacts/cap-read-per-anchor-grant-keys-design.md) §10 Fire 1+2 shipped (Fire 1 live) · next: Fire 3 legacy purge |
+| **[Refractor] A package-generated `cap-read.*` producer's grants are not shred-nullified** | Only the base lens is wired into `keyshredded`'s `NullifyTarget` list — a shredded identity's package-domain grants (e.g. edge-manifest's) survive. Needs per-producer `NullifyTarget` wiring (lens IDs are install-time NanoIDs, not a static list). | ★★ | S–M | 📋 ready · [design](../../implementation-artifacts/cap-read-per-anchor-grant-keys-design.md) |
 | **[appsession] The production IdP posture cannot open a session** | `setCookie` runs only under a non-nil `Signer`, so with `_JWT_PUBLIC_KEY`/`_ISSUER` set nothing can issue the cookie — the verify-only posture is unreachable (401 everywhere), and `/api/session/refresh` 404s so every FE write path dies with it. Design: the kit becomes the OIDC code-flow RP. | ★★ | L | 🗄️ shelved (revive: first real-IdP deployment) · ✅ design Andrew-ratified 2026-07-25 · [design](../../implementation-artifacts/appsession-oidc-production-signin-design.md) |
 | **Multi-hat `scope=any`+`scope=self` first-match over-confines** | `matchPlatformPermission` returns on the first operationType match regardless of scope, and `capabilityRoles` collects roles unordered — so a consumer+staff identity (e.g. seed-showcase `seedSamMultiHat`) can authorize their OWN cafe tab as scope=any, losing the self exemption. Fail-closed; bites a multi-hat who works and lives in different buildings. | ★ | S–M | 📋 ready · no live victim (showcase multi-hat has no leaseapp) |
 | **NATS write restriction — Fire 4 (production mTLS)** | Fires 1–3 closed the fabricated-KV-write surface at the account level; the remaining fire binds subject permissions to client certificates instead of NKeys, which only matters off the dev stack. | ★ now / ★★ prod | M | 🗄️ shelved (revive: production deployment) · [design](../../implementation-artifacts/nats-account-write-restriction-design.md) §Fire-3-status |
@@ -225,6 +224,7 @@ Real but low-value; do **not** spend design or build effort here unless Andrew g
 
 One line per shipped item (`date · SHA · [tag] title`). Oldest roll to `archive/` past ~25.
 
+- 2026-07-28 · `101b01fd` · [cap-read] Fire 2 producer flips — every generated cap-read producer (edge-manifest's three) now emits per-anchor grant keys; validateGrantDomainName hardened
 - 2026-07-27 · `d8bdf7fe` · [identity-hygiene] MergeIdentity's dead link-collision check now fires — rewritten-key optionalReads declared, so a real collision migrates as a duplicate instead of rejecting the whole merge
 - 2026-07-27 · `8981a8b0` · [CI] lease-convergence drain budget — the 3 15s outliers join the suite's 30s convention; the chain converged microseconds late on CI, and the window ceiling the old comment claimed was measured from the wrong instant
 - 2026-07-27 · `e8d78278` · [Refractor] evaluation-scoped read memo — one cypher run observes one value per key, so a commit landing mid-evaluation can no longer split an anchor into two rows and drop the projection
@@ -241,14 +241,4 @@ One line per shipped item (`date · SHA · [tag] title`). Oldest roll to `archiv
 - 2026-07-25 · `4de52240` · [refractor] the un-truncatable rebuild is the grant table's repair, and now says so — premise disproven: absent rows re-derive through the ON CONFLICT arm; warning corrected
 - 2026-07-25 · `90d79ff8` · [refractor] a rebuild truncates what the lens owns, not the bucket it borrows — prefix-scoped `Truncate` bound to the rule, closing the shared-bucket auth wipe
 - 2026-07-25 · `043608a5` · [processor] a declared read set is bounded, and a repeated key is one read — summed `MaxDeclaredReads` ceiling at the envelope + `distinctKeys` in all three hydration loops; Contract #2 §2.5 edit staged uncommitted
-- 2026-07-25 · `34b13ffd` · [refractor] every actor-aggregate lens gets the healer, gated on what it can prove it owns — ownership-scoped listing + three-part install gate; business verdicts warning-only
-- 2026-07-25 · `298ef8ed` · [refractor] the hot-reload path decides in the open, and says so — refusal set extracted + testable, Output/grantTable/protected pinned (guard sources closed), refusals recorded on health
-- 2026-07-25 · `f630efc3` · [refractor] the grant family's guard is real, so the pipeline is told about it — `SeqGuarded` on the read-grant adapter closes an unordered seq-0 grant INSERT on the adj-watch path
-- 2026-07-25 · `8400efd7` · [refractor] the projection-write guard belongs to the lens, not to one adapter instance — rule-derived + re-applied on every build; guarded lens pinned to its target surface
-- 2026-07-25 · `82f52fc4` · [refractor] a reconciliation write the guard drops is not a heal — absent-row seq-0 upsert refused where the guard binds; unguarded targets still create
-- 2026-07-25 · `7e6030aa` · [refractor] the sweep's prefilter directions are hints that earn their share, not assumptions about the lens — both hints rotate + earn their budget; unstarves the only orphan detector
-- 2026-07-25 · `a5210fb2` · [refractor] a business lens whose liveness cannot be read says so instead of vanishing — `LensProjectionUnreadable` + `projectionLag: null`, mirroring the auth-plane fix
-- 2026-07-25 · `94ce0950` · [lint,pkgmgr] the Vertical Package Standard is enforced by a gate, not by prose — `lint-package-standard` (S1/S6/S7) blocking in CI + shrink-only debt baseline; corpus single-sourced in `internal/pkgregistry`
-- 2026-07-25 · `831b0da9` · [refractor] a sweep that verifies nothing reports that, not the last pass's verdict — `CapabilitySweepStalled` (staleness clock + suppression cause) + `CapabilityLensUnreadable` (never dropped)
-- 2026-07-25 · `3b0798c8` · [refractor] the sweep reports what it could not REPAIR, not only what it healed — `CapabilityRepairFailing` + `failingActors` gauge, slot-yielding per-actor backoff, departed-actor reap
 - *(older entries rolled to [archive/lattice-done.md](archive/lattice-done.md); includes `94c8224` hello-lattice NFR-P3 flake fix)*

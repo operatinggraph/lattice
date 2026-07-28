@@ -1,6 +1,16 @@
 # Done log archive — lattice (older shipped items, newest first)
 
 
+- 2026-07-25 · `34b13ffd` · [refractor] every actor-aggregate lens gets the healer, gated on what it can prove it owns — ownership-scoped listing + three-part install gate; business verdicts warning-only
+- 2026-07-25 · `298ef8ed` · [refractor] the hot-reload path decides in the open, and says so — refusal set extracted + testable, Output/grantTable/protected pinned (guard sources closed), refusals recorded on health
+- 2026-07-25 · `f630efc3` · [refractor] the grant family's guard is real, so the pipeline is told about it — `SeqGuarded` on the read-grant adapter closes an unordered seq-0 grant INSERT on the adj-watch path
+- 2026-07-25 · `8400efd7` · [refractor] the projection-write guard belongs to the lens, not to one adapter instance — rule-derived + re-applied on every build; guarded lens pinned to its target surface
+- 2026-07-25 · `82f52fc4` · [refractor] a reconciliation write the guard drops is not a heal — absent-row seq-0 upsert refused where the guard binds; unguarded targets still create
+- 2026-07-25 · `7e6030aa` · [refractor] the sweep's prefilter directions are hints that earn their share, not assumptions about the lens — both hints rotate + earn their budget; unstarves the only orphan detector
+- 2026-07-25 · `a5210fb2` · [refractor] a business lens whose liveness cannot be read says so instead of vanishing — `LensProjectionUnreadable` + `projectionLag: null`, mirroring the auth-plane fix
+- 2026-07-25 · `94ce0950` · [lint,pkgmgr] the Vertical Package Standard is enforced by a gate, not by prose — `lint-package-standard` (S1/S6/S7) blocking in CI + shrink-only debt baseline; corpus single-sourced in `internal/pkgregistry`
+- 2026-07-25 · `831b0da9` · [refractor] a sweep that verifies nothing reports that, not the last pass's verdict — `CapabilitySweepStalled` (staleness clock + suppression cause) + `CapabilityLensUnreadable` (never dropped)
+- 2026-07-25 · `3b0798c8` · [refractor] the sweep reports what it could not REPAIR, not only what it healed — `CapabilityRepairFailing` + `failingActors` gauge, slot-yielding per-actor backoff, departed-actor reap
 - 2026-07-25 · `1b9852f2` · [refractor] DISTINCT binds on the aggregator that carries it, not the RETURN item — composed `collect(DISTINCT)+collect(DISTINCT)` deduped; unfroze a 1MB-over-payload `cap-read` doc; `normalizeForKey` made injective
 - 2026-07-25 · `fbf46f9a` · [scripts] verify-package-loftspace-domain asserts each (op, scope) grant — one id per operationType let map iteration hide `SetListingStatus`'s second (landlord scope=self) vertex, red-or-green at random
 - 2026-07-25 · `1a0d1849` · [appsession,loupe] the origin gate is `OriginGate`, usable without a session Manager — nested-navigation (iframe) clickjacking refused, Loupe's ~110-line fork deleted
