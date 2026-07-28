@@ -20,14 +20,78 @@ now includes the field so a future flip is correctly judged not-hot-reloadable. 
 today — zero behavior change for any existing lens. Adversarially reviewed (opus) before merge; 2 majors
 found and fixed in the same fire (the reload-equality gap and the silent-no-op registration hole above),
 4 minors fixed (TrimSpace on the stored value, test-coverage precision, this checkpoint).
-**Next increment:** §4.1 driver perEntry emission — this needs new pipeline plumbing first
-(`pipeline.EnvelopeFn` is a strict 1-row-in-1-row-out transform; true per-entry key emission needs either
-a new N-envelope registration path on `Pipeline` or an equivalent fan-out inside `EnvelopeFn`'s caller in
-`evaluate.go` — ground that shape before writing the driver side), then remove the
-`InstallActorAggregate` refusal added this increment. §4.2's prefix-diff retraction is the increment
-after that (§4.1 and §4.2 are tightly coupled — likely land together). Left with gates green, CI to
-watch after push.
-**Author:** Winston (Designer fire, 2026-07-25)
+**CHECKPOINT (Fire 1, increment 2 — 2026-07-27, worktree `.claude/worktrees/cap-read-fire1-inc2`,
+branch `fire/cap-read-fire1-inc2`; not yet merged at time of writing):** shipped §4.1's driver perEntry
+emission mechanism. Grounded the plumbing shape named in increment 1's checkpoint: chose the "new
+N-envelope registration path on `Pipeline`" branch, not a fan-out inside `EnvelopeFn`'s caller — added
+`pipeline.Envelope` (one key/body pair) + `pipeline.MultiEnvelopeFn` (row → `[]Envelope`) as `EnvelopeFn`'s
+per-entry sibling, a `Pipeline.multiEnvelopeFn` field, and `SetMultiEnvelopeFn` (mutually exclusive with
+`SetEnvelopeFn` — installing one clears the other). `executeFullForActor` (evaluate.go) dispatches to it
+when installed, appending N `EvalResult`s per cypher row instead of the usual one; `writeResults`,
+per-result `ProjectionSeq` stamping, and the retry-enqueue closure needed no changes (already generic over
+`[]EvalResult`). `projection.OutputDescriptor.EntryEnvelopeFn()` (driver.go) is the actual emission logic:
+mirrors `EnvelopeFn`'s actorKey/anchorType skip checks, realness-filters the split list column, validates
+each real entry's key field (non-empty string + `substrate.IsValidNanoID`) fail-closed, builds
+`BuildKey(actorKey)+"."+id`, and copies the entry's other fields into the body alongside the metadata
+(`key`/`ActorField`/`version`/`projectedAt`; deliberately no `projectedFromRevisions`, §3.2). Duplicate
+key values within one row collapse last-write-wins.
+
+**Deliberate deviation from increment 1's checkpoint text:** did **not** remove the
+`InstallActorAggregate` refusal this increment. Grounding why: lifting it would let a lens register with
+`entryKeyColumn` set while §4.2 (retraction), §4.3 (retry-path refusal), and §4.4 (sweep deltas) still
+don't exist — a revoked anchor's key would never be tombstoned (a live over-grant), and the existing
+sweep would either flood-orphan every child key or claim nothing (§4.4's stated failure modes). The
+refusal is cheap insurance against a *future* fire flipping a real lens before the mechanism is actually
+safe to run; it costs nothing today since this increment's own code has no other caller. Re-worded the
+refusal's log line + `driver_install_test.go`'s comment to name the real reason (missing
+retraction/retry/sweep support) instead of the now-stale "no perEntry emission yet."
+
+Adversarially reviewed (opus) before merge; findings and disposition:
+- **major, fixed:** entry fields land at the body's top level (unlike doc-mode's per-column nesting), so
+  an entry carrying a field named `isDeleted` or `projectionSeq` (e.g. copied off a Core KV vertex body)
+  could silently poison the guard's own tombstone/watermark fields. Added `entryReservedFields` + an
+  `ActorField` check; any collision now errors the whole evaluation instead of silently overwriting.
+- **minor, fixed:** the FR29 output-key-collision guard (`guardOutputKeyCollision`) only ran for
+  `envelopeFn != nil`, so a perEntry lens whose cypher forgot per-actor aggregation (2+ rows, not 1) would
+  silently drop colliding entries across rows with no signal. Now gated on `envelopeFn != nil ||
+  multiEnvelopeFn != nil`.
+- **minor, fixed:** `entryKeyColumn` had no dependency on `realnessFilter` — set without one, a zero-grant
+  actor's degenerate collect artifact would hard-error every re-evaluation forever (a wedge, not a no-op).
+  `ParseOutputDescriptor` now requires `realnessFilter` whenever `entryKeyColumn` is set.
+- **minor, fixed:** a literal trailing `{actorSuffix}` in `outputKeyPattern` (e.g.
+  `"cap-read.{actorSuffix}.roster"`) would build a perEntry key shape §4.4's `AnchorFromKey` inverse can
+  never parse back (id appended after the *whole* rendered pattern). `ParseOutputDescriptor` now requires
+  `entryKeyColumn`'s pattern to END with the placeholder.
+- **minor, fixed:** `EntryEnvelopeFn` indexed `d.BodyColumns[0]` and never checked `EntryKeyColumn != ""`
+  at construction — safe today (only `ParseOutputDescriptor`-validated descriptors reach it) but a panic
+  waiting for a hand-built `OutputDescriptor` literal. Now returns an always-erroring func instead.
+- **minor, fixed:** 4 test fixture IDs in the new `multi_envelope_test.go` were 21-22 chars, not the
+  canonical 20 (CLAUDE.md convention; harmless today, latent drift).
+- **not a finding, confirmed deliberate:** the design's stated "absent key field errors the whole
+  evaluation" (§3.3) is unreachable in the shipping `realnessFilter == entryKeyColumn` configuration —
+  `RealnessFiltered` drops an absent-key entry as unreal before the error path ever sees it. Matches
+  doc-mode's roster precedent; only the non-string/malformed-token vectors actually reach the error.
+- **deferred to §4.2/§4.4, not fixed here (flagging so the next increment doesn't rediscover them):**
+  `evaluate.go`'s plain-filter-retraction branch and `reproject.go`'s `Reproject` both use `envelopeFn ==
+  nil`/`!= nil` as an "is this lens actor-aggregate" proxy, which a perEntry pipeline breaks. Dormant today
+  (`InstallActorAggregate` always installs an `ActorEnumerator` for an actor-aggregate lens, so neither
+  branch is reachable via the driver) but the next increment touching either file should widen the check
+  to `multiEnvelopeFn != nil` too.
+
+Added test coverage: `pipeline/multi_envelope_test.go` (dispatch: N-result emission, zero-entries no-op,
+skip, whole-actor error propagation, mutual-exclusion), `projection/driver_entry_envelope_test.go` (shape,
+realness filtering, actorKey/anchorType skip, non-map/missing-key/non-string-key/malformed-NanoID/
+metacharacter-at-valid-length/reserved-field/ActorField-collision errors, duplicate-key last-wins), plus
+new `ParseOutputDescriptor` rejection tests for the two new validations. Gates green: `go build ./...`,
+full `internal/refractor/...` suite, `golangci-lint run ./internal/refractor/...`, `STRICT=1
+lint-conventions.go`, `make vet`.
+
+**Next increment:** §4.2's prefix-diff retraction (tombstone-first ordering, tombstone-skip semantics, the
+four delete consumers named in §4.2) is next — still needed before the `InstallActorAggregate` refusal can
+lift. §4.3 (retry-path refusal) and §4.4 (sweep deltas, incl. the two deferred-proxy widenings named above)
+follow; per increment 1's note they may combine with §4.2 depending on how coupled the retraction code
+turns out to be once grounded.
+**Author:** Winston (Designer fire, 2026-07-25); increment 2 built by Winston (Lattice Steward fire, 2026-07-27)
 **Backlog:** Stream-2 Security & trust boundary — *[Refractor] A `cap-read` document has no size bound* (★★, M)
 **Owning components:** `internal/refractor/{projection,pipeline,adapter,capabilityread,keyshredded}` (mechanism), `internal/bootstrap/lenses.go` + `internal/pkgmgr/anchorwalk.go` (producers), `packages/edge-manifest` (+ any package shipping a `cap-read.*` NATS-KV producer). Docs: `docs/contracts/06-capability-kv.md` §6.13/§6.14 (edit prepared uncommitted in the working tree), `docs/components/refractor.md`.
 
