@@ -144,12 +144,29 @@ func (def Definition) indexReadGrantDomains() (map[string]ReadGrantDomainSpec, e
 	return out, nil
 }
 
+// capReadActorType is the ONLY vertex-type token any cap-read key ever
+// carries: every generated producer's Output descriptor hardcodes
+// AnchorType: capReadActorType for the actorSuffix (generateProducerLens
+// below) — an anchor's own type (Walk.AnchorType) never appears in a key, only
+// its bare NanoID (§3.2's `via`/`anchorType` audit fields are body-only).
+const capReadActorType = "identity"
+
 // validateGrantDomainName rejects a domain name that would not survive the
 // §6.14 key space. The name becomes one token of
 // `cap-read.<domain>.<actorSuffix>`, and capabilityread lists slices with the
 // single-token wildcard `cap-read.*.<actorSuffix>` — so a name carrying a dot
 // (or whitespace, or a subject wildcard) yields a key no reader can ever match,
 // and every lens in that domain has 100% of its rows dropped, silently.
+//
+// It additionally rejects a name equal to capReadActorType — the Fire 2
+// residual hardening named in cap-read-per-anchor-grant-keys-design.md §3.1: a
+// domain named "identity" would make a legacy DOMAIN doc for it
+// (`cap-read.identity.identity.<id>`) collide in FORM with a BASE grant key's
+// own actorSuffix segment at the same token position, for any tool that
+// classifies a bare `cap-read.*` key by checking "is this token the fixed
+// actor-type literal" instead of parsing the full pattern. Closes that corner
+// structurally rather than resting on the argument that no domain would ever
+// be named that way.
 func validateGrantDomainName(idx int, name string) error {
 	if name == "" {
 		return fmt.Errorf("pkgmgr: ReadGrantDomains[%d]: Name is required", idx)
@@ -164,6 +181,14 @@ func validateGrantDomainName(idx int, name string) error {
 					"reader can match and every row of its lenses is silently dropped",
 				idx, name)
 		}
+	}
+	if name == capReadActorType {
+		return fmt.Errorf(
+			"pkgmgr: ReadGrantDomains[%d]: Name %q collides with the fixed actorSuffix vertex-type "+
+				"token every cap-read key carries — a domain named identically to it is indistinguishable "+
+				"from that segment in form at the same token position "+
+				"(cap-read-per-anchor-grant-keys-design.md §3.1); choose a different domain name",
+			idx, name)
 	}
 	return nil
 }
@@ -352,7 +377,12 @@ func composeDataLensSpec(pw *parsedWalk) string {
 // The Output descriptor is field-for-field what a hand-authored Path-B producer
 // declares, plus the realness filter on `anchorId` — without it the driver's
 // empty-delete branch never runs, and an all-OPTIONAL producer mints a
-// placeholder-only document for every binding-less identity.
+// placeholder-only document for every binding-less identity. `entryKeyColumn`
+// opts every generated producer into the per-anchor keyed shape
+// (cap-read-per-anchor-grant-keys-design.md §3.3/§10 Fire 2): the single
+// `readableAnchors` list body column splits into one guarded key per real
+// entry instead of one unbounded document per actor. The cypher itself is
+// unchanged — only the output mode flips.
 func generateProducerLens(d ReadGrantDomainSpec, walks []*parsedWalk) LensSpec {
 	return LensSpec{
 		CanonicalName:  d.producerCanonicalName(),
@@ -362,13 +392,14 @@ func generateProducerLens(d ReadGrantDomainSpec, walks []*parsedWalk) LensSpec {
 		Engine:         "full",
 		ProjectionKind: "actorAggregate",
 		Output: &OutputDescriptorSpec{
-			AnchorType:       "identity",
+			AnchorType:       capReadActorType,
 			OutputKeyPattern: "cap-read." + d.Name + ".{actorSuffix}",
 			BodyColumns:      []string{"readableAnchors"},
 			EmptyBehavior:    "delete",
 			RealnessFilter:   "anchorId",
 			Freshness:        "auto",
 			Lanes:            []string{"default"},
+			EntryKeyColumn:   "anchorId",
 		},
 		Spec: generateProducerSpec(walks),
 	}
