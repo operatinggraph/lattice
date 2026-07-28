@@ -417,21 +417,35 @@ FailClosed result regardless of `failure.Category`. Proven by
 with a fresh sibling upsert queued right after it, asserts the message Naks and the fresh entry is
 never written. Full suite re-run clean after the fix (113 packages, 0 failures).
 
-**Deliberately not in this increment (still open):** actually running `make reseed-kernel` +
-`cycle-processor` + a Refractor restart against a live dev-stack cell — a deployment step, not a code
-change, done once this increment lands on `main` (see the fire's own admit step). Fire 2 (producer
+**Deployment (2026-07-28, same-day follow-on fire): landed on the live dev-stack cell.** Ran
+`make reseed-kernel` (rebuilt `bin/bootstrap`, reconciled `vtx.meta.FksprR5p6RF6BAiLkf1k`'s
+`output`/`outputSchema`/`spec` — 3 updated, 126 kernel entries unchanged, cycled the processor) then
+`make cycle-refractor`. Refractor logged the reconcile's mid-flight write as the expected
+"not hot-reloadable" transient (the running process hadn't yet restarted to pick it up), then on restart:
+`"actor-aggregate envelope + fan-out + delete-key + latency installed" perEntry:true` — no refusal. The
+60s auth-plane sweep then organically healed every live self-anchor actor within the first pass (`pipeline:
+sweep: healed a divergent projection ... deleted:true`), tombstoning each legacy 3-token
+`cap-read.identity.<id>` doc and writing the 4-token per-anchor key
+(`cap-read.identity.<id>.<id>`) in the same batch — verified directly against `capability-kv` for a sample
+actor (legacy doc `{"isDeleted":true,...}`, new key holds the §3.2 shape). Zero errors logged after the
+restart. The base/self-anchor lens migration is now **fully live**, not just merged.
+
+**Deliberately not in this increment (still open):** Fire 2 (producer
 flips — `pkgmgr.generateProducerLens` emitting `entryKeyColumn`, every hand-authored `cap-read.*`
-producer, `validateGrantDomainName` hardening) is unstarted. `keyshredded/manager.go`'s own doc
-comment already noted (increment 8) that a `PerEntry` target's legacy PARENT tombstone stays paired
-with the base-lens flip rather than being built into the shred path itself — item (2) above is that
-pairing; the shred path itself still only reaches per-anchor children, by design.
+producer, `validateGrantDomainName` hardening) is unstarted — every non-self domain slice
+(`cap-read.<domain>.identity.<id>`) is still the legacy 4-token doc shape, correctly served by §3.4's
+dual-read fallback in the meantime. `keyshredded/manager.go`'s own doc comment already noted (increment 8)
+that a `PerEntry` target's legacy PARENT tombstone stays paired with the base-lens flip rather than being
+built into the shred path itself — item (2) of increment 9 is that pairing; the shred path itself still
+only reaches per-anchor children, by design.
 
 **Author:** Winston (Designer fire, 2026-07-25); increment 2 built by Winston (Lattice Steward fire, 2026-07-27);
 increment 3 built by Winston (Lattice Steward fire, 2026-07-27); increment 4 built by Winston (Lattice
 Steward fire, 2026-07-28); increment 5 built by Winston (Lattice Steward fire, 2026-07-28); increment 6
 built by Winston (Lattice Steward fire, 2026-07-28); increment 7 built by Winston (Lattice Steward fire,
 2026-07-28); increment 8 built by Winston (Lattice Steward fire, 2026-07-28); increment 9 built by
-Winston (Lattice Steward fire, 2026-07-28)
+Winston (Lattice Steward fire, 2026-07-28); increment 9 deployed live by Winston (Lattice Steward fire,
+2026-07-28)
 **Backlog:** Stream-2 Security & trust boundary — *[Refractor] A `cap-read` document has no size bound* (★★, M)
 **Owning components:** `internal/refractor/{projection,pipeline,adapter,capabilityread,keyshredded}` (mechanism), `internal/bootstrap/lenses.go` + `internal/pkgmgr/anchorwalk.go` (producers), `packages/edge-manifest` (+ any package shipping a `cap-read.*` NATS-KV producer). Docs: `docs/contracts/06-capability-kv.md` §6.13/§6.14 (edit prepared uncommitted in the working tree), `docs/components/refractor.md`.
 
