@@ -376,13 +376,16 @@ func TestEdgeIdentity_MultiHatTopologyYieldsOneAnchorPerRelation(t *testing.T) {
 	require.Equal(t, "Sam Okafor", byRel["identifiedBy"][0]["name"])
 }
 
-// TestEdgeCatalogRoles_CarriesTheServiceJoin is the POSITIVE vector for the
-// shared-row-key repair: an op reachable BOTH by role grant and by service
-// permitsOperation must project viaServices from the roles lens too, or the
-// two lenses' last-writer race erases the service join for any multi-hat
-// actor. The tail's OPTIONAL MATCH + collect must actually bind the edge —
-// an empty-collect pass on a linkless fixture proves nothing.
-func TestEdgeCatalogRoles_CarriesTheServiceJoin(t *testing.T) {
+// TestEdgeCatalog_RoleBranchCarriesTheServiceJoin is the POSITIVE vector for
+// the shared-row-key repair (refractor-shared-keyspace-arbitration-
+// design.md §13.7 build order (c)): an op reachable BOTH by role grant and
+// by service permitsOperation must project viaServices from the role
+// branch too, or the two former sibling lenses' last-writer race erases the
+// service join for any multi-hat actor. viaServices is anchor-derived (a
+// pattern comprehension off `op` alone), so both branches compute it
+// identically by construction — an empty-result pass on a linkless fixture
+// proves nothing.
+func TestEdgeCatalog_RoleBranchCarriesTheServiceJoin(t *testing.T) {
 	f := newEmFixture(t)
 	f.vtx(t, "staff", "identity")
 	f.vtx(t, "role", "role")
@@ -395,13 +398,14 @@ func TestEdgeCatalogRoles_CarriesTheServiceJoin(t *testing.T) {
 	f.edge(t, "forOperation", "perm", "opMeta")
 	f.edge(t, "permitsOperation", "tpl", "opMeta")
 
-	rows := emRowsByEntity(f.project(t, emComposedSpec(t, "edgeCatalogRoles"), f.key("staff")))
+	rows := emRowsByEntity(f.project(t, emComposedSpecBranch(t, "edgeCatalog", 1), f.key("staff")))
 	row, ok := rows[f.ids["opMeta"]]
 	require.True(t, ok, "the role-granted op must project")
 	via, ok := row["viaServices"].([]any)
 	require.True(t, ok, "viaServices must be a list, got %T (%v)", row["viaServices"], row["viaServices"])
 	require.Len(t, via, 1, "the permitsOperation service must be collected")
 	require.Equal(t, f.key("tpl"), via[0])
+	require.Equal(t, f.key("role"), row["viaRole"], "viaRole must carry the granting role")
 }
 
 // TestEdgeEntitySessions_ProjectsTheLeadingInstructorKey proves the shared

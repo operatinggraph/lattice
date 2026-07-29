@@ -88,6 +88,33 @@ func TestClassifyBranchReturnColumns_WalkOwnedAndAnchorDerived(t *testing.T) {
 	require.Equal(t, 1, byAlias["viaRoles"].OwnerBranch)
 }
 
+// TestClassifyBranchReturnColumns_PatternComprehensionLocalVarIsNotADependency
+// probes a shape twoWalkBranches's shared literal tail cannot express: an
+// anchor-derived column computed via a pattern comprehension whose own
+// pattern introduces a fresh, comprehension-local node (`psvc`, never bound
+// by EITHER branch's own MATCH/OPTIONAL MATCH clauses — unlike `svc`, which
+// twoWalkBranches' branch 0 already binds as its real walk variable)
+// alongside the real dependency (`anchor`, common to every branch) — the
+// shape packages/edge-manifest's catalog unification needs for
+// `viaServices` (refractor-shared-keyspace-arbitration-design.md §13.7
+// build order (c)). Before the fix, `psvc` was indistinguishable from a
+// genuine cross-walk variable and refused the column as ambiguous.
+func TestClassifyBranchReturnColumns_PatternComprehensionLocalVarIsNotADependency(t *testing.T) {
+	branches := twoWalkBranches(t,
+		`RETURN anchor.key AS anchorKey, [(anchor)<-[:offers]-(psvc:service) | psvc.key] AS viaServices, role.name AS viaRole`)
+	plan, err := ClassifyBranchReturnColumns(branches)
+	require.NoError(t, err)
+
+	byAlias := map[string]ReturnColumnPlan{}
+	for _, p := range plan {
+		byAlias[p.Alias] = p
+	}
+	require.Equal(t, ColumnAnchorDerived, byAlias["anchorKey"].Ownership)
+	require.Equal(t, ColumnAnchorDerived, byAlias["viaServices"].Ownership)
+	require.Equal(t, ColumnWalkOwned, byAlias["viaRole"].Ownership)
+	require.Equal(t, 1, byAlias["viaRole"].OwnerBranch)
+}
+
 func TestClassifyBranchReturnColumns_MixedWalkVarsRefused(t *testing.T) {
 	branches := twoWalkBranches(t,
 		`RETURN anchor.key AS anchorKey, svc.name + role.name AS combined`)

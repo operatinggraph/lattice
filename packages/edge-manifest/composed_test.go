@@ -174,7 +174,6 @@ func TestMigration_RewrittenLensesProjectTheSameRows(t *testing.T) {
 
 		actor := f.key("tech")
 		for _, c := range []struct{ name, frozen string }{
-			{"edgeCatalogRoles", frozenEdgeCatalogRolesSpec},
 			{"edgeTasksQueued", frozenEdgeTasksQueuedSpec},
 			{"edgeStaffWorkOrders", frozenEdgeStaffWorkOrdersSpec},
 		} {
@@ -183,6 +182,14 @@ func TestMigration_RewrittenLensesProjectTheSameRows(t *testing.T) {
 			require.NotEmpty(t, before, "%s: the frozen cypher projected nothing — the equality claim would be vacuous", c.name)
 			require.Equal(t, before, after, "%s: composed cypher changed the projected row set", c.name)
 		}
+
+		// edgeCatalog's role Walk (branch 1, §13.7 build order (c)) replaces
+		// the retired edgeCatalogRoles sibling — same row-set assertion,
+		// against that branch instead of a standalone composed lens.
+		catalogBefore := f.emProjectedRowSet(t, frozenEdgeCatalogRolesSpec, actor)
+		catalogAfter := f.emProjectedRowSet(t, emComposedSpecBranch(t, "edgeCatalog", 1), actor)
+		require.NotEmpty(t, catalogBefore, "edgeCatalog role branch: the frozen cypher projected nothing — the equality claim would be vacuous")
+		require.Equal(t, catalogBefore, catalogAfter, "edgeCatalog role branch: composed cypher changed the projected row set")
 
 		queued := emRowsByEntity(f.project(t, emComposedSpec(t, "edgeTasksQueued"), actor))
 		require.Contains(t, queued, f.ids["queuedTask"], "the open queued task must project")
@@ -210,10 +217,12 @@ func TestMigration_DegenerateRowIsSuppressed(t *testing.T) {
 	f.vtx(t, "bareRole", "role")
 	f.edge(t, "holdsRole", "bare", "bareRole")
 
-	for _, name := range []string{"edgeTasks", "edgeInstances", "edgeCatalogRoles", "edgeTasksQueued"} {
+	for _, name := range []string{"edgeTasks", "edgeInstances", "edgeTasksQueued"} {
 		require.Emptyf(t, f.project(t, emComposedSpec(t, name), f.key("bare")),
 			"%s: an unreached actor must project no row, not a degenerate all-null one", name)
 	}
+	require.Emptyf(t, f.project(t, emComposedSpecBranch(t, "edgeCatalog", 1), f.key("bare")),
+		"edgeCatalog role branch: an unreached actor must project no row, not a degenerate all-null one")
 }
 
 // --- Migration assertion 2: producer document equality minus `via` -----------
