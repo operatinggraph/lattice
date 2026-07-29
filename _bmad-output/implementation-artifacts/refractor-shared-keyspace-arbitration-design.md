@@ -199,6 +199,19 @@ struct-derivable v1 set (§2.4): container (`Bucket` / table+`GrantSource` /
 - **Spec-only lenses** (no IntoKey, no walk): `one-bill` exits the class via U2; the named
   residual is `capabilityRoleIndex` (prefix lives in envelope code; kernel-adjacent and
   stable) — out of v1 scope by name, not silently.
+  - **The precondition that escape rests on (Andrew, 2026-07-29): the branches must be
+    co-owned by ONE package.** A Lens spec belongs to exactly one package and no mechanism
+    lets two packages contribute branches to one spec — so U2's reach is bounded by
+    construction to what a single package already authors. `one-bill` qualifies: it is a
+    dedicated composition package owning no vertex types, links or permissions, declaring
+    both ledgers as dependencies and matching both their class labels in its own cypher
+    (`packages/one-bill/package.go:1-20`); the ledgers write their own separate buckets
+    (`loftspace-ledger-history`, `cafe-ledger-history`) and neither writes this one. **The
+    unresolved shape is a spec-only overlap whose branches are genuinely cross-package:**
+    the guard cannot see its keys (they live in cypher — §2.4 forbids a cypher extractor
+    comparable) and U2 cannot merge it (no cross-package spec). None exists today; if one
+    is ever proposed, the answer is a composition package (the `one-bill` shape) or
+    struct-visible disjoint keys — not a guard exception.
 - **Sequencing — migration then gate, no warn-first:** U1's unification empties the collision
   census; the gate lands blocking against a clean tree.
 
