@@ -74,6 +74,8 @@ const (
 	instance1ID   = "w3wX6tCr9EQMDo7zKu6P"
 	studioID      = "aZmZkW2ws3mUHhRnWTJL"
 	providerID    = "fkCFqiGUn5t9En8hoCrc"
+	latteID       = "FRhZCATJdnYErcK29nz4"
+	croissantID   = "4oj3aPiwByCgkWPqZ1X4"
 
 	// CreateLocation mints vtx.<locationType>.<id> — the type-specific prefix,
 	// not a generic "location" one (location-domain's ddls.go).
@@ -87,6 +89,8 @@ const (
 	cafeTplKey     = "vtx.service." + cafeTplID
 	studioKey      = "vtx.studio." + studioID
 	providerKey    = "vtx.provider." + providerID
+	latteKey       = "vtx.menuitem." + latteID
+	croissantKey   = "vtx.menuitem." + croissantID
 
 	tenant1Name  = "Riley Chen"
 	tenant1Email = "riley.chen@showcase.dev.lattice.local"
@@ -228,6 +232,8 @@ func main() {
 		fmt.Println("==> template wellness: " + wellnessTplKey + " availableAt building, permits CreateBooking/CancelBooking")
 		seedCafeTemplate(ctx, conn, adminKey)
 		fmt.Println("==> template cafe: " + cafeTplKey + " availableAt building, permits OpenTab/Settle")
+		seedCafeMenuItems(ctx, conn, adminKey)
+		fmt.Println("==> menu items:      " + latteKey + " (Latte, $4.50), " + croissantKey + " (Croissant, $3.50) servedAt building")
 		sessKey := seedWellnessEntities(ctx, conn, adminKey)
 		fmt.Println("==> studio+session: " + studioKey + " locatedAt building; " + sessKey + " bookable")
 		seedClinicProvider(ctx, conn, adminKey)
@@ -338,6 +344,8 @@ func main() {
 
 	seedCafeTemplate(ctx, conn, adminKey)
 	fmt.Println("==> template cafe: " + cafeTplKey + " availableAt building, permits OpenTab/Settle")
+	seedCafeMenuItems(ctx, conn, adminKey)
+	fmt.Println("==> menu items:      " + latteKey + " (Latte, $4.50), " + croissantKey + " (Croissant, $3.50) servedAt building")
 
 	// --- browsable dispatch-target entities: a located studio with one
 	// bookable session, and a provider practicing at the building (facet-
@@ -750,6 +758,26 @@ func seedCafeTemplate(ctx context.Context, conn *substrate.Conn, adminKey string
 		submitOp(ctx, conn, adminKey, "WirePermitsOperation", "serviceLocation",
 			map[string]any{"service": cafeTplKey, "operation": opMeta},
 			wireHint(cafeTplKey, "permitsOperation", opMeta))
+	}
+}
+
+// seedCafeMenuItems mints the two showcase catalog items (mirroring
+// seed-classic-demo.go's Latte/Croissant), servedAt the showcase building so
+// every resident of any showcase unit can self-order them (location_covers
+// walks a tab's unit up the containedIn chain to the building). Fixed,
+// checked-in ids + a per-item alive() guard (CreateMenuItem mints no
+// deterministic key of its own) make this idempotent like every other
+// per-mutation increment in this file.
+func seedCafeMenuItems(ctx context.Context, conn *substrate.Conn, adminKey string) {
+	if !alive(ctx, conn, latteKey) {
+		submitOp(ctx, conn, adminKey, "CreateMenuItem", "menuitem",
+			map[string]any{"name": "Latte", "priceCents": 450, "locationKey": buildingKey, "menuItemId": latteID},
+			&processor.ContextHint{Reads: []string{buildingKey}})
+	}
+	if !alive(ctx, conn, croissantKey) {
+		submitOp(ctx, conn, adminKey, "CreateMenuItem", "menuitem",
+			map[string]any{"name": "Croissant", "priceCents": 350, "locationKey": buildingKey, "menuItemId": croissantID},
+			&processor.ContextHint{Reads: []string{buildingKey}})
 	}
 }
 
