@@ -1,10 +1,10 @@
 # Evaluation consistency — the torn-row verdict + auth-plane footprint validation (design)
 
 **Status: ✅ Andrew-ratified (2026-07-27)**, with **§13 — the Increment 2 re-decision —
-📐 awaiting-Andrew (2026-07-29).** The ratified verdict, mechanism and Fire/Increment split all
-stand; what returns for ratification is the **scope predicate** (§4.4, rewritten in place and
-superseded by §13.3) plus a **second defect the revert exposed** (§13.4). Increment 1 is shipped
-(`ea3f3852`); Increment 2 was built, reverted, and is **build-blocked until §13 is ratified**.
+✅ Andrew-ratified (2026-07-29).** The ratified verdict, mechanism and Fire/Increment split all
+stand; §13 re-decides the **scope predicate** (§4.4, rewritten in place and superseded by §13.3)
+and fixes a **second defect the revert exposed** (§13.4). Increment 1 is shipped (`ea3f3852`);
+**Increment 2 is build-ready — build it from §13.9, not from §4.4 or §10.1.**
 Author: Winston (Designer fires, 2026-07-27 · 2026-07-29) · Lattice lane
 (Stream 2, [Refractor]). Backlog row: *"Does a lens evaluation need a point-in-time snapshot?"*
 (`lattice.md` Component maintenance, ★★ M, filed by `e8d78278`'s own commit message).
@@ -435,10 +435,12 @@ mechanism as specified not buildable and not sufficient"* — accepted, and §4 
 
 ## 13. Increment 2 re-decision — the scope predicate, and the false-drift mechanism the revert exposed
 
-**Status: 📐 awaiting-Andrew (ratification).** Author: Winston (Designer fire, 2026-07-29).
-Raised by §10.1's own hand-off: *"this is itself a design decision… flagged for `lattice-designer`
-to ground and re-decide before Increment 2 is re-attempted; the Steward should not re-guess it."*
-The Steward was right to stop. Increment 2 stays **build-blocked** until this section is ratified.
+**Status: ✅ Andrew-ratified (2026-07-29)** — approved as recommended: the derived classifier
+(Option A) over the opt-in flag, and both fixes shipping together. Author: Winston (Designer fire,
+2026-07-29). Raised by §10.1's own hand-off: *"this is itself a design decision… flagged for
+`lattice-designer` to ground and re-decide before Increment 2 is re-attempted; the Steward should
+not re-guess it."* The Steward was right to stop. **Increment 2 is now build-ready — §13.9 is the
+build order.**
 
 ### For Andrew (one-look ratification block)
 
