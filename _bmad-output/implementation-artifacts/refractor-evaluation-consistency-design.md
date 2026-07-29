@@ -771,3 +771,32 @@ plainly rather than implied). Four probes, all grounded in code, all folded abov
 4. *"Does the anchor/key column need a special case?"* — no, and the probe is why the unit rule
    splits top-level scalars from collection entries instead of exempting a named column. A special
    case for the anchor would have been a rule to get wrong later.
+
+## 14. Build note — Fire 1 Increment 2 (Lattice Steward, 2026-07-29, `c80bfa00`)
+
+**Shipped, per §13.9's build order, in one fire:** the fan-in stress test (written first, confirmed
+RED against the freshly-cherry-picked `da1b4641` seam alone — `capabilityRoles` drift-retried once
+on its own legitimate churn, exactly defect 1); the §13.3 conjunct-unit classifier
+(`projection.hasMultiBindingConjunctUnit`, pinned against the REAL shipped
+`capabilityEphemeral`/`capabilityServiceAccess`/`staffReadGrants`/`capabilityRoles`/`capabilityRoleIndex`
+specs — all five verdicts match the census); the §13.4 selector-scoped footprint (adjacency
+`DirectionMatches` relocated + exported so both the executor's capture side and the pipeline's
+validation side share one vocabulary mapping, never duplicated); and the recovered validation/
+re-execute/requeue seam from `da1b4641` unchanged except for the two corrections. Stress test
+confirmed GREEN with both fixes landed, reproduced 3× incl. `-race`.
+
+**Gates:** `go build ./...`, `make vet`, `golangci-lint run ./internal/refractor/...` (cache
+cleared), `STRICT=1 lint-conventions.go`, `go test ./internal/refractor/...`, full
+`go test ./... -p 4` (113 packages, wide-blast-radius — touches `adjacency`/`ruleengine`), and
+`make verify-package-service-location` against the shared stack — 67/67 assertions, all 10
+`cap.roles.<operator>` grants "projected live" (corroborating; the package was already installed,
+so the primary proof is the Go-tier stress test, not this run).
+
+**Residual, honestly named:** the stress test drives `pipeline.Reproject` (the same synchronous
+per-actor path the sweep/control-RPC/retry-queue use) rather than the live consumer pump —
+`substrate.ConsumerSupervisor.Add` derives its pump context from `context.Background()`, not from
+`Run`'s caller context, so a footprint-captured-hook attached to `Run`'s context never reaches a
+live-pump-triggered evaluation. This is a pre-existing pump/hook wiring gap, not something this
+fire introduced or needs to fix — `Reproject` reaches the identical `executeFullForActor`/
+`footprintValid` code path, so the mechanism proof is unaffected — but a future test wanting to
+exercise footprint validation through the live CDC pump specifically will hit the same wall.
