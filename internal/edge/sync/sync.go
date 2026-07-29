@@ -18,6 +18,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	stdsync "sync"
 	"time"
 
 	"github.com/operatinggraph/lattice/internal/edge/store"
@@ -130,6 +131,14 @@ type Manager struct {
 	prefix  string
 	durable string
 	logger  *slog.Logger
+
+	// gateMu guards hydrateTarget/hydrateArmed (see armHydrateGate /
+	// hydrationGateReady): hydrate() arms it from Run's/Rehydrate's calling
+	// goroutine while handle() reads it from the durable consumer's delivery
+	// goroutine.
+	gateMu        stdsync.Mutex
+	hydrateTarget uint64
+	hydrateArmed  bool
 }
 
 // New creates a Manager. Returns an error if cfg.IdentityID or cfg.DeviceID
@@ -306,14 +315,23 @@ func (m *Manager) syncGapOnce(ctx context.Context, cursor uint64) (bool, error) 
 // per-actor subject the caller's durable consumer reads next, so no local
 // state beyond the registration/hydrate acknowledgement needs recording here
 // — handle() advances the cursor as those messages arrive.
+//
+// The per-actor subject retains every delta ever published to it, including
+// every prior hydrate cycle's own terminal marker, so a cold durable
+// consumer — one with no ack floor, i.e. exactly the case that just called
+// hydrate() — replays them all before reaching the fresh burst this call
+// just triggered. armHydrateGate records the revision this call targets so
+// handle() can tell that fresh marker apart from a stale one and never
+// release the caller's boot gate early.
 func (m *Manager) hydrate(ctx context.Context) error {
 	if err := m.registerInterest(ctx); err != nil {
 		return fmt.Errorf("personal.register: %w", err)
 	}
-	_, lenses, err := m.callHydrate(ctx)
+	revision, lenses, err := m.callHydrate(ctx)
 	if err != nil {
 		return fmt.Errorf("personal.hydrate: %w", err)
 	}
+	m.armHydrateGate(revision)
 	// A lens dropped from the DDL, or re-minted under a new rule ID, has no
 	// emitter left to heal its stranded attributions (personal-lens-
 	// retraction-design.md §3.4) — a completed hydrate is what closes that
@@ -328,6 +346,35 @@ func (m *Manager) hydrate(ctx context.Context) error {
 		}
 	}
 	return nil
+}
+
+// armHydrateGate records the revision the personal.hydrate RPC just
+// targeted, so hydrationGateReady can hold OnHydrationComplete off any
+// hydrationComplete marker replayed from before that point.
+func (m *Manager) armHydrateGate(target uint64) {
+	m.gateMu.Lock()
+	m.hydrateTarget = target
+	m.hydrateArmed = true
+	m.gateMu.Unlock()
+}
+
+// hydrationGateReady reports whether a hydrationComplete marker at revision
+// satisfies the currently armed gate, disarming it if so, and the target it
+// was checked against (for logging — reading m.hydrateTarget outside gateMu
+// would race armHydrateGate). No gate armed — a warm-resume live tail never
+// called hydrate(), or this Run's gate already cleared — always reports
+// ready, matching handle()'s pre-gate behavior.
+func (m *Manager) hydrationGateReady(revision uint64) (ready bool, target uint64) {
+	m.gateMu.Lock()
+	defer m.gateMu.Unlock()
+	if !m.hydrateArmed {
+		return true, 0
+	}
+	if revision < m.hydrateTarget {
+		return false, m.hydrateTarget
+	}
+	m.hydrateArmed = false
+	return true, m.hydrateTarget
 }
 
 func (m *Manager) registerInterest(ctx context.Context) error {
@@ -436,6 +483,10 @@ func (m *Manager) handle(_ context.Context, d transport.Delta) transport.Decisio
 			}
 		}
 	case "hydrationComplete":
+		if ready, target := m.hydrationGateReady(env.Revision); !ready {
+			m.logger.Info("edge/sync: stale hydrationComplete marker replayed, ignoring", "revision", env.Revision, "target", target)
+			break
+		}
 		m.logger.Info("edge/sync: hydration complete", "revision", env.Revision)
 		if m.cfg.OnHydrationComplete != nil {
 			m.cfg.OnHydrationComplete(env.Revision)

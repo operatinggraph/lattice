@@ -418,6 +418,63 @@ func TestManager_Handle(t *testing.T) {
 	assert.Equal(t, transport.Term, decision, "a malformed envelope is dropped, not redelivered")
 }
 
+// TestManager_Handle_HydrationCompleteGateIgnoresStaleReplayedMarker proves
+// the fix for the cold-reconnect hydration race: the per-actor SYNC subject
+// retains every historical delta, including every prior hydrate cycle's own
+// terminal hydrationComplete marker, so a fresh cold hydrate's durable
+// consumer (no ack floor) replays them all before the burst hydrate() just
+// triggered. A stale marker below the just-armed target must NOT fire
+// OnHydrationComplete (the boot-gate release); the marker at or above the
+// target must, and a later marker after the gate has already cleared (a live
+// tail from another device's hydrate) must fire same as before this fix.
+func TestManager_Handle_HydrationCompleteGateIgnoresStaleReplayedMarker(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	tr := &fakeControlTransport{reply: happyControlReply(false)}
+	tr.reply = func(op string, _ controlwire.ControlRequest) (controlwire.ControlResponse, error) {
+		switch op {
+		case "register":
+			return controlwire.ControlResponse{PersonalRegister: &controlwire.PersonalRegisterResult{Registered: true}}, nil
+		case "hydrate":
+			return controlwire.ControlResponse{PersonalHydrate: &controlwire.PersonalHydrateResult{Hydrated: true, Revision: 42}}, nil
+		default:
+			return controlwire.ControlResponse{Error: "unexpected op " + op}, nil
+		}
+	}
+	st := openTestStore(t)
+	var completedAt []uint64
+	mgr, err := New(tr, st, Config{
+		IdentityID: "identityA", DeviceID: "deviceX", Logger: testutil.TestLogger(),
+		OnHydrationComplete: func(revision uint64) { completedAt = append(completedAt, revision) },
+	})
+	require.NoError(t, err)
+
+	require.NoError(t, mgr.hydrate(ctx))
+
+	body := func(env deltaEnvelope) []byte {
+		b, err := json.Marshal(env)
+		require.NoError(t, err)
+		return b
+	}
+
+	decision := mgr.handle(ctx, transport.Delta{Sequence: 1, Body: body(deltaEnvelope{Op: "hydrationComplete", Revision: 10})})
+	require.Equal(t, transport.Ack, decision)
+	assert.Empty(t, completedAt, "a stale marker below the armed target must not release the boot gate")
+
+	decision = mgr.handle(ctx, transport.Delta{Sequence: 2, Body: body(deltaEnvelope{Op: "hydrationComplete", Revision: 42})})
+	require.Equal(t, transport.Ack, decision)
+	assert.Equal(t, []uint64{42}, completedAt, "the marker at the armed target must release the boot gate exactly once")
+
+	decision = mgr.handle(ctx, transport.Delta{Sequence: 3, Body: body(deltaEnvelope{Op: "hydrationComplete", Revision: 50})})
+	require.Equal(t, transport.Ack, decision)
+	assert.Equal(t, []uint64{42, 50}, completedAt, "a live-tail marker after the gate cleared fires same as pre-fix behavior")
+
+	cursor, ok, err := st.Cursor()
+	require.NoError(t, err)
+	require.True(t, ok)
+	assert.Equal(t, uint64(3), cursor, "the stale marker still advances the cursor — it is dropped only as a boot-gate signal")
+}
+
 // TestManager_Handle_UnstorableKeyTerminates proves a delta carrying a key the
 // store can never accept (neither a Contract #1 key nor a manifest-prefixed
 // projection row — e.g. a lens `ns` typo) is Term'd, not Nak'd: the store
