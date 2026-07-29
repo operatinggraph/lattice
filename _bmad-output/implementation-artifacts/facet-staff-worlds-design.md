@@ -848,3 +848,58 @@ the pinned nats-server 2.14 source / `nats-io/nats-architecture-and-design` ADRs
 **Not filed as a residual — filed as its own row** (this is what the walker was built to catch, and it
 caught it): see `lattice.md` `[Refractor] A live claim's own consumer grant never projects into Capability
 KV`. Reproduce with `make test-claim-ceremony` against a running `make up-full-capability` stack.
+
+## 13.2 The NATS-layer hypothesis is disproven; the gap is narrowed to Refractor's own pipeline (Winston, 2026-07-29)
+
+**§13.1's leading hypothesis is WRONG.** Grounded per CLAUDE.md's vendor rule against the authoritative
+source, not a blog: [ADR-50](https://github.com/nats-io/nats-architecture-and-design/blob/main/adr/ADR-50.md)
+(atomic batched publishes) states each batch message becomes an ordinary, individually-sequenced stream
+entry once the batch commits — no differential treatment based on whether a member carried a conditioning
+header (`Nats-Expected-Last-Subject-Sequence`). **Confirmed empirically against our own pinned nats-server
+2.14** (not just read — tested): `TestAtomicBatch_UnconditionedMemberIsDeliveredToDurableConsumer`
+(`internal/substrate/batch_unconditioned_delivery_test.go`, shipped this fire) commits a 2-member atomic
+batch — one `CreateOnly`-conditioned member, one genuinely unconditioned member reproducing
+step8_commit.go:207-214's exact shape — then drives a subject-filtered durable consumer mirroring
+Refractor's adjacency bootstrapper (`internal/refractor/consumer/bootstrap.go`) verbatim. **Both members are
+delivered identically; the test passes.** There is no batch-commit-vs-per-subject-watch delivery gap. This
+closes the open vendor question §13.1 flagged — the substrate/NATS layer is cleared.
+
+**Traced three further candidate mechanisms this fire; all three check out correct in isolation:**
+
+1. **Cross-consumer adjacency race** (the dedicated adjacency bootstrapper vs. the rule pipeline's own
+   stream consumer, both reacting to the same link CDC event with no ordering guarantee between them) —
+   already anticipated and closed: `evaluateLinkFanOut` (`internal/refractor/pipeline/evaluate.go:725-776`)
+   self-applies `adjacency.Build` for both directions **before** enumerating actors, exactly mirroring the
+   plain-lens path's identical guard (`evalPlainLinkReprojection`, `pipeline.go:1042-1057`, whose own comment
+   names this same race). Not the gap.
+2. **Dispatch-level filtering** — `handle()` (`pipeline.go:881-922`) routes every `KindLink` CDC event to
+   `evalLinkFanOut` unconditionally on the actor-aware (guarded) pipeline; unlike the plain path's
+   `plainReactsTo` optimization, there is no early-return that could silently drop this link. Not the gap.
+3. **The `capabilityRoles` cypher itself**
+   (`packages/rbac-domain/lenses.go:80-91`) — a two-hop pattern,
+   `(identity)-[:holdsRole]->(role)<-[:grantedBy]-(perm:permission)`. The `grantedBy` (permission→role) edges
+   are static, installed with the package, long before any claim — so by the time a fresh `holdsRole` edge is
+   self-applied (per #1), both hops should resolve. Read, not live-tested; lower-confidence than #1/#2 but no
+   defect found.
+
+**What the guarded-lens skip-write on the adjacency-watch path (`handleAdjNode`, `pipeline.go:1785-1802`)
+means given #1 holds:** that skip is sound **iff** `evalLinkFanOut` (the stream-sequenced path) always runs
+and writes correctly on the first pass — which #1 shows it should. If the live gap is real despite this (the
+§13.1 walker's repro is trusted, not re-run this fire), the remaining candidates are **cross-message
+concurrency** within one durable consumer's handling of the claim batch's sibling mutations (the `.state`
+aspect fan-out and the `holdsRole` link fan-out reprojecting the same actor from two different triggering
+messages — the 2026-07-29 "evaluation-scoped read memo" fix covers one-cypher-run consistency, not
+necessarily cross-message ordering) or a defect in `reprojectActors` /
+`p.actorEnumerator.Enumerate` neither of which this fire traced to the same depth as #1/#2.
+
+**Checkpoint — next fire, narrow scope:** static reading is exhausted without a smoking gun; the next step
+is a **live reproduction**, not more code reading — write an integration test in
+`internal/refractor/pipeline` (or extend `scripts/verify-claim-ceremony.go`'s package-level sibling) that
+drives a real `capabilityRoles`-shaped lens through an embedded Refractor pipeline with a fresh identity +
+fresh `holdsRole` grant, exactly reproducing the claim batch's mutation set (create + update + tombstone +
+unconditioned update, all in one atomic batch), and observe whether `cap.roles.<target>` actually projects.
+If it does project in this harness, the gap is specific to something the live stack has that this harness
+doesn't (timing, load, a second lens/consumer interaction) — instrument the live stack next instead. If it
+does NOT project, the harness has just captured the bug's minimal repro; bisect from there (start by removing
+the unconditioned-update sibling mutation to isolate #1's self-apply-adjacency guard from the aspect-fanout
+interaction named above).
