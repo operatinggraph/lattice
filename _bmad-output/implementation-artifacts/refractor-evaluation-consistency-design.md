@@ -1,8 +1,11 @@
 # Evaluation consistency — the torn-row verdict + auth-plane footprint validation (design)
 
-**Status: ✅ Andrew-ratified (2026-07-27)** — scope as recommended (Fire 1 structural on
-`actorAggregate ∧ IsAuthPlane`; Fire 2 returns to design; no snapshots). Ready for the Lattice
-Steward. Author: Winston (Designer fire, 2026-07-27) · Lattice lane
+**Status: ✅ Andrew-ratified (2026-07-27)**, with **§13 — the Increment 2 re-decision —
+📐 awaiting-Andrew (2026-07-29).** The ratified verdict, mechanism and Fire/Increment split all
+stand; what returns for ratification is the **scope predicate** (§4.4, rewritten in place and
+superseded by §13.3) plus a **second defect the revert exposed** (§13.4). Increment 1 is shipped
+(`ea3f3852`); Increment 2 was built, reverted, and is **build-blocked until §13 is ratified**.
+Author: Winston (Designer fires, 2026-07-27 · 2026-07-29) · Lattice lane
 (Stream 2, [Refractor]). Backlog row: *"Does a lens evaluation need a point-in-time snapshot?"*
 (`lattice.md` Component maintenance, ★★ M, filed by `e8d78278`'s own commit message).
 Adversarial pass **✅ RUN this fire** (independent read-only reviewer) — 3 blockers + 6 must-fixes
@@ -149,7 +152,12 @@ every link conjunct, and its drop-on-drift was fail-open):
      (absent = 0). No interface change.
    - **Adjacency: `Neighbors` gains a revision-bearing return, and traversal reads are memoized
      per evaluation** (`ex.edges`, the link twin of `ex.nodes`) — closing, in the same stroke,
-     the fact that link reads today aren't even repeatable within one evaluation. Negative
+     the fact that link reads today aren't even repeatable within one evaluation. (Shipped in
+     Increment 1, `ea3f3852`. **The *comparison* granularity is refined by §13.4**: the adjacency
+     document is a per-node bundle of every relation, so comparing its whole revision
+     over-detects — the footprint compares the **relation-scoped edge set the walk actually
+     consumed**, falling back to the whole-document revision whenever the walk's selector is not
+     narrow enough to scope. Capture is unchanged; only the equality test narrows.) Negative
      patterns (`existsAsPredicate`) footprint the adjacency entries they inspected, present
      *or absent* — which is what closes census row 2's NOT-predicates (an edge created
      mid-evaluation bumps exactly the adjacency key the NOT read as empty).
@@ -167,13 +175,18 @@ every link conjunct, and its drop-on-drift was fail-open):
    pass. **Never an empty result set** — the first draft's silent drop read as "zero rows" to
    four downstream paths (presence-check Delete, diff-retraction mass-Delete, empty keyset
    frame, sweep false-convergence); a typed error reaches none of them.
-4. **Scope predicate, Fire 1 — structural:** `actorAggregate ∧ projection.IsAuthPlane` — the
-   capability-kv envelope lenses, i.e. **every source step-3 reads** (`cap.`, `cap.roles.`,
-   `cap.ephemeral.`, `cap.svc.`). A new auth-plane envelope lens gets validation automatically;
-   forgetting is impossible. (The bare `IsAuthPlane` predicate alone would also catch the
-   unanchored grant scans and — via drift-on-every-scan — would have mass-revoked
-   `actor_read_grants` through diff-retraction; the pass caught this. Fire 1's predicate is the
-   conjunction, deliberately.)
+4. **Scope predicate, Fire 1 — SUPERSEDED by §13.3. Do not build the text struck below.**
+   ~~`actorAggregate ∧ projection.IsAuthPlane` — every capability-kv envelope lens.~~ That
+   two-way conjunction shipped, broke `make verify-package-service-location`, and was reverted
+   (§10.1): it validates **census row 4** (`capabilityRoles`), which §3 had already cleared as
+   single-key and tear-safe, and validating it turns an ordinary package install into sustained
+   drift-requeue. The predicate is now the **three-way** conjunction
+   `actorAggregate ∧ IsAuthPlane ∧ multi-binding conjunct unit`, where the third term is
+   **derived from the lens's own cypher at compile time** — no author declaration, row 4 exempt
+   by construction. Full mechanism, the classifier's rules, and its fail-closed defaults: **§13.3**.
+   (Retained from the ratified reasoning: the bare `IsAuthPlane` predicate alone would also catch
+   the unanchored grant scans and — via drift-on-every-scan — would have mass-revoked
+   `actor_read_grants` through diff-retraction. Both surviving conjuncts are deliberate.)
 5. **Fire 2 — the unanchored grant-table scans — returns to design.** Whole-evaluation
    validation is vacuous there (the footprint is the bucket; it always drifts), and per-row
    read attribution at the read chokepoint is **ill-defined** (seed scans attribute to the root
@@ -323,6 +336,11 @@ issues), `STRICT=1 go run ./scripts/lint-conventions.go` (0 issues), `go test
 ./internal/refractor/...` (all green, full package tree — the change's blast radius is contained
 to `internal/refractor`, no cross-component caller exists).
 
+**→ The re-decision this checkpoint asks for is now written: [§13](#13-increment-2-re-decision--the-scope-predicate-and-the-false-drift-mechanism-the-revert-exposed)
+(📐 awaiting-Andrew, 2026-07-29). It re-shapes the predicate AND fixes a second defect this
+checkpoint's root cause did not reach (§13.1). Build Increment 2 from §13.9, not from the paragraph
+below — which is retained as the evidence record.**
+
 **🏗️ CHECKPOINT — next increment (Fire 1 Increment 2), REVISED after a reverted attempt
 (2026-07-28):** a full build of the §4.2-§4.6 validation seam (footprint capture exposed from the
 engine, `actorAggregate ∧ projection.IsAuthPlane` scope predicate, verify/re-execute/requeue wired
@@ -412,3 +430,342 @@ mechanism as specified not buildable and not sufficient"* — accepted, and §4 
   honest cost table + perf gate.
 - **#10/#11/#12:** census rows 2 and 6 added; the cross-document `ReadAndMerge` blend noted as
   an explicit out-of-scope residual (§3).
+
+---
+
+## 13. Increment 2 re-decision — the scope predicate, and the false-drift mechanism the revert exposed
+
+**Status: 📐 awaiting-Andrew (ratification).** Author: Winston (Designer fire, 2026-07-29).
+Raised by §10.1's own hand-off: *"this is itself a design decision… flagged for `lattice-designer`
+to ground and re-decide before Increment 2 is re-attempted; the Steward should not re-guess it."*
+The Steward was right to stop. Increment 2 stays **build-blocked** until this section is ratified.
+
+### For Andrew (one-look ratification block)
+
+**What it does (two lines).** Increment 2's scope predicate stops being a *bucket* test and becomes
+a **property of the lens's own cypher**: a lens is footprint-validated iff some value-tuple it emits
+conjoins fields read from **more than one graph binding** — derived at compile time, never declared
+by an author. And the footprint stops comparing whole *adjacency documents* and starts comparing
+**only the edges the walk actually followed**, so a sibling write of an unrelated relation to a
+shared hub node no longer reads as drift.
+
+**The one thing to understand before ratifying.** The revert (§10.1) was diagnosed as *one* defect —
+an over-broad predicate that caught the harmless `capabilityRoles`. Re-grounding this fire found
+**two**, and fixing only the first would have shipped Increment 2 with the same starvation still
+live, just no longer standing on an assertion: `capabilityEphemeral` — census **row 1**, the lens
+the whole mechanism exists for — traverses `(identity)-[:holdsRole]->(role)<-[:queuedFor]-(task3)`
+(`orchestration-base/lenses.go` role-queue branch), so **it footprints the same role adjacency
+document** that a package install bumps ten times in a few seconds. Narrowing the predicate removes
+`capabilityRoles` from the blast radius; it does **not** remove the blast radius. §13.4 is the half
+that does, and it is the half a predicate-only re-attempt would have missed.
+
+**Fork — how a lens is classified. RESOLVED: derived, not declared (Option A).** §10.1 floated two
+shapes; I am recommending the first and rejecting the second outright:
+- **A. Derived from the cypher (recommended).** The compiler walks the RETURN clause and computes,
+  per emitted value-tuple, how many distinct bindings its fields come from. Nothing to declare,
+  nothing to forget, and row 4 is exempt *by construction* — which is precisely the property §10.1
+  demanded. Cost: a classifier that is now security-relevant, mitigated by fail-closed defaults
+  (§13.3) and a test that pins all four census verdicts.
+- **B. An explicit opt-in flag on the three known lenses (rejected).** This is **default-open**: the
+  next auth-plane lens author who forgets the flag ships a silent combination-grant, and nothing
+  errors. That is the exact failure direction the D1 read-path pass caught in my own work
+  (`no authzAnchor ⇒ public-read`). A security boundary whose omission grants is not a boundary.
+  Rejected even though it is the smaller build.
+
+**Frozen-contract change: NONE.** Contract #6 §6.2/§6.13 are built to, not edited. No board-visible
+scope change either: this is still Fire 1 / Increment 2 of the ratified design, re-shaped.
+
+**Also for your attention (not a fork).** §13.9 asks the Steward to write the fan-in stress test
+**first, and watch it go red**, before either fix lands. The reverted attempt passed every unit gate
+and was caught only by a stack gate that happened to assert on the affected lens; the regression
+deserves a test that fails for the right reason, at the tier that can see it.
+
+### 13.1 What the revert actually proved — two defects, not one
+
+§10.1's root cause is correct and stands. What it under-states is the **generality** of the
+mechanism it found. Separating them matters because they have different fixes:
+
+| | Defect | Who it hits | Fix |
+|---|---|---|---|
+| **1** | The predicate validates a lens the census already cleared. Row 4 (`capabilityRoles`) emits `{operationType, scope, lanes}` all off one `perm` key — a torn *set* mixes individually-real entries, i.e. ordinary bounded staleness. Validating it buys nothing and costs everything, because a package install *legitimately* changes its answer ten times in a row. | Row 4 only | §13.3 — narrow the predicate |
+| **2** | The footprint compares **whole adjacency documents**. `adj.<nodeId>` bundles *every* relation incident on that node, so any write to any relation invalidates every walk that touched the node — including walks that never follow that relation. A shared hub (a role, a building, an op-meta) under normal write pressure therefore drifts every evaluation that passes near it. | Rows **1–3** — the lenses that must keep validating | §13.4 — scope the comparison |
+
+**Defect 2, demonstrated on the lens the mechanism exists for.** `capabilityEphemeral`'s role-queue
+branch walks `(identity)-[:holdsRole]->(role:role)<-[:queuedFor]-(task3:task)`, so its footprint
+contains `adj.<roleId>`. The service-location install grants ten permissions to one role in a tight
+loop; each is a `grantedBy` link whose adjacency build bumps `adj.<roleId>`. `capabilityEphemeral`
+follows **`queuedFor`** on that node and never looks at `grantedBy` — yet under whole-document
+comparison every one of those writes is drift. Same install, same node, same starvation, different
+lens. It did not break the build only because nothing asserts on `cap.ephemeral.*` during a package
+install (no tasks exist yet); a stack with live queued work would have failed the same way, and
+`ErrEvalDrift` → `CatTransient` → retry-queue → `MaxAttempts` → DLQ means the failure mode is an
+auth doc that stops advancing, not merely one that lags.
+
+This is the general shape of it: **the auth-plane lenses are exactly the lenses that walk through
+shared, high-degree hub vertices** — roles, op-metas, locations. Whole-document adjacency comparison
+is therefore not a small imprecision on this plane; it is anti-correlated with the workload.
+
+### 13.2 Grounding ledger (verified `file:line` this fire)
+
+| Fact | Where |
+|---|---|
+| The reverted predicate, verbatim | `da1b4641` → `evaluate.go` `needsFootprintValidation()`: `(p.envelopeFn != nil \|\| p.multiEnvelopeFn != nil) && p.authPlane` |
+| `IsAuthPlane` is a pure bucket/target test — no cypher input, by design | `internal/refractor/projection/plan.go:97-104` (`nats_kv ∧ capability-kv`, or `postgres ∧ GrantTable`) |
+| The full engine **retains its AST** on the compiled artifact — so a compile-time cypher analysis needs no re-parse and no new plumbing | `internal/refractor/ruleengine/full/ast.go:247` (`CompiledRule{Query *Query}`); node types `Return`/`ProjectionItem`/`MapLiteral`/`FunctionCall`/`VariableRef`/`PropertyAccess`/`PatternComprehension`/`CaseExpr`/`ListLiteral`/`BinaryOp` all present and ANTLR-free |
+| The relation selector **is in hand at the adjacency read site** — the traversal filters `e.Name != rel.Type` and `directionMatches(e.Direction, rel.Direction)` immediately after `fetchEdges` | `full/executor.go:643-653` |
+| The edge memo + revisions Increment 1 shipped are keyed by adjacency node id, the exact unit §13.4 refines | `full/executor.go:576-589` (`ex.edges` / `ex.edgeRevisions`) |
+| `EdgeEntry` carries `EdgeID`, `Name`, `Direction`, `OtherNodeID` — enough to compare a relation-scoped edge set without re-deriving anything | `internal/refractor/adjacency/builder.go:21-28` |
+| Row 4's entry is genuinely single-binding | `packages/rbac-domain/lenses.go:80-92` — `{operationType: perm.data.…, scope: perm.data.…, lanes: perm.data.…}` |
+| Row 1's entry is genuinely 3-binding | `packages/orchestration-base/lenses.go` `capabilityEphemeralSpec` RETURN — `{taskKey: task.key, operationType: op.data.operationType, target: tgt.key, expiresAt: task.data.expiresAt}` |
+| Row 2's entry is genuinely 2-binding before its comprehension is even counted | `packages/service-location/lenses.go` `capabilityServiceAccessSpec` — `{service: svc.key, resolvedVia: [loc.key], allowedOperations: [(svc)-[:permitsOperation]->(op) …]}` |
+| `ErrEvalDrift` routes `CatTransient` → the actor-reproject retry closure (backoff, then DLQ at `MaxAttempts`) — so sustained drift is a *stalled auth doc*, not just latency | `da1b4641` → `failure/classify.go` §1.5, `failure/eval_drift.go`, `pipeline.go` `dispositionEvalErr(…, enumeratedActors)` |
+| **Adversarial probe on the row-4 exemption:** nothing conjoins `doc.Roles` with `platformPermissions` on an authorizing path — `Roles` is read **only** on the denial path, for FR22 `actorRoles` response construction | `internal/processor/step3_auth_capability.go:280-284`; `internal/capabilitykv/read.go:73` unions the two arrays independently |
+
+### 13.3 D-A — the scope predicate: a conjunct-unit classifier, derived at compile time
+
+**The predicate becomes three-way:**
+
+```
+needsFootprintValidation  ⟺  actorAggregate  ∧  IsAuthPlane  ∧  hasMultiBindingConjunctUnit(rule)
+```
+
+The first two conjuncts are unchanged and still deliberate (§4.4): `IsAuthPlane` keeps business
+lenses out, `actorAggregate` keeps the unanchored grant scans out (whole-evaluation validation is
+vacuous there — §4.5, Fire 2). The third is new, and it is the one derived from the lens itself.
+
+**Conjunct unit — the definition.** A *conjunct unit* is one value-tuple a consumer matches as a
+whole. Computed from the RETURN clause:
+
+- **U₀** = the set of bindings referenced by all **top-level, non-aggregate** projection items.
+  (Aggregate/collection items are excluded here — they contribute their own entry units instead.)
+- **Uᵢ** = for every `MapLiteral` appearing anywhere inside an aggregate expression (`collect(…)`,
+  including through `+` concatenation of several collects, `CASE` arms and list literals), the set
+  of bindings referenced by its field expressions.
+- A binding is contributed by a `VariableRef`, or by the root `VariableRef` of a `PropertyAccess`
+  chain. `Literal` and `ParameterRef` (`$now`, `$projectedAt`, `$actorKey`) contribute **nothing** —
+  they are evaluation-constant, and counting them would classify every lens as multi-binding.
+- A `PatternComprehension` contributes the bindings of its **outer** anchor plus its own internal
+  bindings to the unit that contains it (row 2's `allowedOperations` is inside the same map literal
+  as `service`, so that map is already multi-binding on `svc`+`loc` before the comprehension counts).
+
+`hasMultiBindingConjunctUnit` is true iff **any** unit references ≥2 distinct bindings.
+
+**Reproducing the ratified census — the classifier's acceptance criteria:**
+
+| Census row | Lens | Units | Verdict | Matches §3? |
+|---|---|---|---|---|
+| 1 | `capabilityEphemeral` | entry `{task, op, tgt}` ×3 branches | **validate** | ✓ HARMFUL |
+| 2 | `capabilityServiceAccess` | entry `{svc, loc, (op)}` | **validate** | ✓ HARMFUL |
+| 3 | grant tables (`staffReadGrants`) | U₀ = `{identity, building}` | **validate** | ✓ HARMFUL |
+| 4 | `capabilityRoles` | U₀ = `{identity}`; entry `{perm}`; entry `{role}` | **exempt** | ✓ safe |
+| — | `capabilityRoleIndex` | U₀ = `{perm}`; entry `{role}` | **exempt** | ✓ (keyed by operationType, unguarded, documented safe) |
+
+Row 4 falls out cleanly and needs **no anchor-column special case**: `identity.key AS actorKey` is
+its only top-level scalar, and its two collections each carry single-binding entries. That is the
+"exempt by construction, not merely by practice" §10.1 asked for.
+
+**Fail-closed defaults — the classifier defaults to VALIDATE, never to exempt.** Getting this
+backwards is a silent combination-grant, so every uncertainty resolves toward cost, not toward risk:
+
+- No RETURN clause found, or the compiled artifact is not the full engine's → **validate**.
+- Any expression form the walker does not recognise (a function call it cannot see through, a
+  nested subquery, a future AST node) → **validate**.
+- A projection item aliased through a `WITH` whose provenance cannot be traced back to bindings →
+  **validate**.
+- **Multiple RETURN branches** (engine `UNION`, if the shared-keyspace design lands — §13.10) →
+  classify each branch and **union the verdicts**; an unclassifiable branch validates the whole.
+
+**Where it lives.** `projection.Compile` already receives the `lens.Rule` with `CompiledRule`
+attached and already computes `AuthPlane` (`plan.go:97-121`); the classifier is one more derived
+field on `ProjectionPlan` (`RequiresFootprintValidation bool`), wired to the pipeline through the
+existing `SetAuthPlane`-shaped seam. This is the smallest extension of machinery that already
+exists — no new lifecycle, no new registration, no author-facing surface.
+
+**No lint gate ships with this, and that is deliberate — stated so a reviewer knows it was
+considered, not forgotten.** The house rule is that a design establishing a *convention* must ship
+the gate that binds the next author, because a migration clears today's debt and nothing stops
+tomorrow's. Here the design establishes **no author convention**: there is no idiom to write
+correctly, no annotation to remember, and therefore nothing for a gate to default-deny. The
+derivation *is* the gate. What ships instead is an **activation-time record** (each auth-plane
+lens's derived verdict is logged and surfaced on its health entry, so an operator can see which
+lenses are paying validation) and a **unit test pinning all five verdicts above**, so a cypher edit
+that flips a lens's class shows up as a failing test in review rather than as a silent change in
+security posture.
+
+**The one direction a flip is safe in.** If an author later denormalises a validated lens into
+single-binding entries — §7 alternative 4, "data-model colocation" — the classifier exempts it, and
+that exemption is *correct*: colocation removes the tear at the source. The classifier rewards the
+better data model instead of taxing it.
+
+**Residual, named not buried.** The unit is the emitted value-tuple's *field* provenance. A tuple
+whose **membership** was gated by a WHERE/pattern read at a different instant than its fields is
+**not** counted as multi-binding. That is not an oversight: it is the ratified census's own line
+between the two classes — *staleness serves a real past state; tearing fabricates a never-real one*
+(§3 row 4's reasoning, which Andrew ratified). Counting membership provenance would classify every
+lens as multi-binding (every traversal spans bindings) and put us straight back at the reverted
+predicate. If that line is ever revisited, the classifier gains a rule — it does not need a
+different shape.
+
+### 13.4 D-B — the footprint compares the edges the walk followed, not the document that holds them
+
+**The change.** Increment 1 memoizes, per adjacency node, `ex.edges[nodeID]` (the edge list) and
+`ex.edgeRevisions[nodeID]` (the document revision). Validation currently re-reads and compares the
+revision. Instead:
+
+1. During traversal, record per adjacency node the **selectors consulted** — the
+   `(rel.Type, rel.Direction)` pairs the walk filtered on, which `executor.go:648-653` already has
+   in hand at that exact line. One node may accumulate several selectors across hops; keep the set.
+2. The footprint entry for that node becomes the **selector set plus the identities of the edges
+   that passed it** — `EdgeID` (globally unique: a Contract #1 link key) plus its `isDeleted`
+   disposition, from the `EdgeEntry` fields already persisted.
+3. Validation re-reads the adjacency document once (same single `KVGet` as today — **no extra
+   reads**), re-applies the recorded selectors, and compares the resulting edge-identity set. Equal
+   ⇒ no drift. Different ⇒ drift, exactly as before.
+
+**Fail-closed fallbacks — any of these reverts that node to whole-document revision comparison:**
+an untyped hop (`rel.Type == ""`, which consumes every edge on the node), a variable-length hop
+whose expansion cannot be attributed to a single relation name, or any read of the node's edge list
+that did not go through the selector-recording path. Coarser is always the safe direction here, and
+the fallback is one branch.
+
+**Why this is the right size.** It rides entirely on primitives Increment 1 already shipped, adds
+zero KV round-trips, and removes the dominant false-drift class outright: `capabilityEphemeral`'s
+footprint of `adj.<roleId>` becomes *"the `queuedFor` inbound edges"*, and ten `grantedBy` edges
+landing on that node change nothing it recorded. Verified against the exact regression that caused
+the revert.
+
+**What it deliberately does not do.** It does not make row 4's drift go away, and it must not:
+`capabilityRoles` follows `grantedBy` on that same node, so during an install its answer *genuinely*
+changes and any honest comparison reports drift. Row 4's problem is that validation is pointless for
+it — which is §13.3's job, not this one. **The two fixes are orthogonal and both are required**;
+shipping either alone leaves a live starvation path (§13.1).
+
+### 13.5 Alternatives considered — and why each loses to the pair above
+
+1. **Raise `maxFootprintRetries` above 1.** Rejected: the churn outlasts the retries by design (an
+   install burst is seconds; drift retries are inline), so this multiplies the doubled read cost
+   without changing the outcome. It treats a precision defect as a patience defect.
+2. **Quiesce validation during package install.** Rejected on the "no expedient-but-wrong-long-term
+   option" rule: an install is just writes, and production churn on a shared role looks identical.
+   A mode that is safe only because nothing is watching becomes the precedent every later agent
+   copies.
+3. **Per-column read attribution (validate only the keys whose values flow into a conjunct).** This
+   is strictly more precise than §13.4 and it is exactly §4.5's Fire 2 problem, which the ratified
+   design already established is **ill-defined at the read chokepoint** (seed scans attribute to the
+   root scope; the memo hides first-readers; bindings clone and fold through grouping). Rejected as
+   the wrong increment, not the wrong idea — §13.4 captures most of its benefit with a filter.
+4. **Compare output instead of revisions** (re-execute; write if both executions agree). Tempting,
+   and it converges beautifully under benign churn — but two executions agreeing does not establish
+   that either was untorn, only that the tear was stable, and it doubles evaluation cost on the
+   hottest path rather than doubling *read* cost. Rejected: weaker guarantee, higher price.
+5. **Author opt-in flag (§10.1's Option B).** Rejected in the For-Andrew block: default-open.
+
+### 13.6 Reconciliation with the existing mental model
+
+- **"Didn't §10.1 already say what to do?"** It named the *symptom* precisely (row 4 over-caught)
+  and correctly refused to guess the *shape*. It did not have §13.1's second defect, which is why
+  it could not have been implemented as written without re-shipping the starvation.
+- **"Doesn't a cypher-derived predicate contradict 'never route off the canonical name'?"** No — it
+  is the same principle one level deeper. `RequiresGuard`/`IsAuthPlane` are already derived from the
+  compiled plan rather than from a name list (`plan.go:56-104`); this derives from the compiled
+  *query*. Deriving from the artifact is the house pattern; declaring is the deviation.
+- **"Does this add new state?"** None durable. The classifier's verdict is a compile-time boolean on
+  `ProjectionPlan`; the selector sets live inside one evaluation, in the memo Increment 1 already
+  allocates.
+- **"Does exempting a lens weaken Increment 1?"** No. Increment 1's edge memo and revision capture
+  are unconditional and stay unconditional — repeatable-read within an evaluation is a correctness
+  property for *every* lens. Only the post-evaluation validation is scoped.
+- **"Is the census being re-opened?"** No. §13.3's acceptance criteria are that the classifier
+  **reproduces** the ratified §3 verdicts, row for row. If it disagreed with the census, the
+  classifier would be wrong — not the census.
+
+### 13.7 Contract surface
+
+**No frozen-contract edits, and none staged.** Contract #6 §6.2 (monotonic write guard) and §6.13
+(actor-aggregate projection plan) are built to. The classifier reads the compiled cypher, which is
+package-authored content, not contracted vocabulary — a package author gains no new field, no new
+keyword, and no new obligation.
+
+### 13.8 Test strategy
+
+Extends §9; the additions are what the reverted attempt lacked.
+
+- **Classifier unit (new, `projection`):** all five verdicts of §13.3's table pinned against the
+  **real** shipped specs (import the package lens definitions — a hand-written cypher fixture would
+  prove only itself). Plus the fail-closed vectors: no RETURN → validate; unknown expression node →
+  validate; `$param`-only tuple → not multi-binding; two RETURN branches → union.
+- **Selector-scoped footprint unit (new, `full`):** a walk following `queuedFor` on a node, an
+  unrelated `grantedBy` edge added to that node mid-evaluation ⇒ **no drift**; a `queuedFor` edge
+  added ⇒ **drift**; an untyped hop on the same node ⇒ falls back to revision comparison and drifts
+  on either. Assert on the drift verdict, not on the final projection — a passing projection would
+  also pass if validation never ran (the negative-test false-pass discipline).
+- **Fan-in stress vector (new, the tier the revert needed) — write it FIRST and watch it go red.**
+  N rapid `grantedBy` grants to one role, with a live queued task so `capabilityEphemeral` is
+  non-trivially projecting, asserting *both* auth docs converge within the same window the stack
+  gate allows. On unmodified `main` + the reverted Increment 2 it must fail; with §13.3 alone it must
+  still fail (that is the proof defect 2 is real and independent); with both it passes. It belongs
+  at the tier that can see it — the `verify-package-service-location`-shaped stack gate is what
+  caught this, and `make verify-package-service-location` returning green is the acceptance signal.
+- **Retained from §9 unchanged:** the executor memo units, the injected mid-evaluation commit
+  vectors, the `capabilityEphemeral` role-queue e2e tear, the `capabilityServiceAccess`
+  NOT-predicate vector, and the perf gate (now with the honest expectation that `capabilityRoles`
+  pays **zero** validation cost, which is most of the §5 table's predicted regression).
+
+### 13.9 Build order for the Steward (one fire, internal order)
+
+Increment 2 re-attempts as **one fire** — the two fixes are correctness-coupled (§13.4 alone leaves
+row 4 over-validated; §13.3 alone leaves rows 1–3 starving) and neither is independently shippable
+as a behaviour change. Internal order:
+
+1. **The fan-in stress vector, red.** Before any fix. Its failure is the specification.
+2. **§13.3 the classifier** + its unit table + the activation-time record. Stress vector still red.
+3. **§13.4 selector-scoped footprint** + its unit vectors. Stress vector goes green.
+4. Re-land the reverted seam (`ExecuteWithFootprint`, the validation/re-execute/requeue path, the
+   `evalDriftRetries`/`evalDriftRequeues` counters, the pause hook, the §8.5 doc paragraph) from
+   `da1b4641` — it was sound; only its predicate and its comparison granularity were wrong. Recover
+   it from the reverted commit rather than rewriting it.
+5. Gates: the standard set, **plus** `make verify-package-service-location` and the full
+   `stack-gates` job — the unit tier demonstrably cannot see this class.
+
+Fresh worktree per the convention; `da1b4641`/`b709a62c` are the recovery source, not a base.
+
+### 13.10 Risks, residuals, and cross-design coupling
+
+- **The classifier is now security-relevant.** An under-detection is a silent combination-grant.
+  Mitigated by fail-closed-on-unknown (§13.3), by the census-reproduction test, and by the fact that
+  the only realistic drift — an author simplifying a lens toward colocation — flips it in the safe
+  direction. Accepted, and named as the design's sharpest edge.
+- **Selector-scoping narrows what counts as drift.** By construction it only ignores edges the walk
+  never read, so it cannot mask a change the evaluation depended on — but it does move the fallback
+  question into the executor, where an unattributed read path must default coarse. The
+  untyped-hop/variable-length fallbacks are load-bearing, not hygiene.
+- **Cross-design coupling — engine `UNION`** ([shared-keyspace arbitration](refractor-shared-keyspace-arbitration-design.md)
+  §3.2, currently 🚧 blocked). It introduces multi-branch RETURN, which the classifier must handle;
+  §13.3 specifies branch-union-with-fail-closed so the two can land in either order. Flagged so
+  whichever ships second does not discover it.
+- **Cross-design coupling — the actor-enumeration gap** (`reportsTo`-inherited grants, filed by this
+  design's own §10 and still open on the board). Fixing it *widens* `capabilityEphemeral`'s fan-out,
+  which raises validation load on exactly the hot path §5 priced. Not a blocker in either direction;
+  worth sequencing after this so the counters measure the wider fan-out honestly.
+- **Unchanged residuals:** §4.5's interim exposure on the unanchored grant scans (Fire 2), and §3's
+  cross-document `ReadAndMerge` blend. Neither is touched by this re-decision.
+
+### 13.11 Adversarial pass
+
+Run **in-fire and self-directed** (no independent reviewer was available to this fire — stated
+plainly rather than implied). Four probes, all grounded in code, all folded above:
+
+1. *"Does exempting row 4 open a real hole through its `roles` array?"* — probed
+   `step3_auth_capability.go:280-284` and `capabilitykv/read.go:73`: `doc.Roles` is consumed **only**
+   on the denial path for FR22 `actorRoles`, never conjoined with `platformPermissions` to
+   authorize. The census verdict survives the probe. (Ledger, §13.2.)
+2. *"Does narrowing the predicate actually fix the regression?"* — it fixes the **assertion**, not
+   the **mechanism**. This probe produced §13.1's defect 2 and is the reason this section is not a
+   one-line predicate change.
+3. *"Is the classifier's exemption forgeable by an author?"* — an author can flip a lens to exempt
+   only by making its entries single-binding, which is the colocation fix (§7 alternative 4). The
+   safe direction. Conversely, nothing an author writes can *accidentally* exempt: the default is
+   validate.
+4. *"Does the anchor/key column need a special case?"* — no, and the probe is why the unit rule
+   splits top-level scalars from collection entries instead of exempting a named column. A special
+   case for the anchor would have been a rule to get wrong later.

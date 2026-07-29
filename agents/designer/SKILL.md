@@ -167,6 +167,23 @@ tombstones. **Capability KV is a lens projection** (projection correctness = aut
   on a representation, **re-derive from "what does it need"** — don't defend the prior shape with fresh
   rationalizations, which is what I did for a round before the NanoID landed.)
 
+- **A reported root cause names the instance something happened to be ASSERTING on — before you design its
+  fix, ask whether the same mechanism reaches consumers nobody was watching.** When a build/CI failure is
+  handed to you already root-caused ("the predicate caught lens X, which broke gate Y"), the diagnosis is
+  usually correct *and* scoped to whatever the harness observed. Gates assert on a handful of things; the
+  defect does not know that. So run the generalization probe explicitly: **take the mechanism, not the
+  instance, and enumerate every other consumer it touches** — if the mechanism is "shared node N is written
+  often", grep who else reads N; if it is "field F is compared coarsely", grep every comparer. A fix built
+  from the reported instance alone ships the mechanism intact, and the second victim surfaces later with no
+  gate to catch it. (Trialed 2026-07-29, evaluation-consistency Inc 2: the revert was root-caused as one
+  defect — an over-broad scope predicate validating the harmless `capabilityRoles`, which broke
+  `verify-package-service-location`. Narrowing the predicate would have fixed the *assertion*. The mechanism
+  was whole-**adjacency-document** drift comparison on a shared hub, and `capabilityEphemeral` — the lens the
+  whole design exists for — walks the same role node, so it starved identically; it just broke no gate,
+  because no assertion covers `cap.ephemeral.*` during an install. Two orthogonal fixes were required and a
+  predicate-only re-attempt would have re-shipped the starvation.) The tell: a root cause whose evidence is
+  *"gate G failed"* rather than *"consumers A, B and C are affected, and G is the one that noticed."*
+
 - **"Resolved from the row / from context / from X" is not a mechanism — NAME the transport and verify it
   carries the data in code.** When a design routes data to a downstream consumer through an orchestration hop
   (Loom pattern → externalTask → instanceOp; a trigger → a handler; an event → a projector), do not write
