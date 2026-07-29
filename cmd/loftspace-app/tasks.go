@@ -30,7 +30,10 @@ type myTasksRow struct {
 // inbox renders a human label without a second read.
 // scopedTo is the entity the granted op acts on (for a userTask the §10.5
 // invariant holds: assignee == scopedTo == the subject), so completion targets
-// it. expiresAt is the grant horizon.
+// it. expiresAt is the grant horizon. queuedRole names the role a task is
+// queued to (FR28 role-queue fan-out) when it has no direct assignee yet —
+// null/absent for an ordinary direct assignment; present only for a role-queued
+// row the signed-in identity may ClaimTask (lenses.go:242-267).
 type openTaskRow struct {
 	TaskKey              string `json:"taskKey"`
 	Assignee             string `json:"assignee"`
@@ -39,11 +42,13 @@ type openTaskRow struct {
 	OperationDescription string `json:"operationDescription"`
 	ScopedTo             string `json:"scopedTo"`
 	ExpiresAt            string `json:"expiresAt"`
+	QueuedRole           string `json:"queuedRole"`
 }
 
 // taskRow is the inbox shape the FE renders: one open task with its self-describing
 // op label, the entity it is scoped to, and the expiry. operation is the bound op
 // meta-vertex key; operationName / operationDescription are its human label.
+// queuedRole is set only for a role-queued, not-yet-claimed row.
 type taskRow struct {
 	TaskKey              string `json:"taskKey"`
 	Assignee             string `json:"assignee"`
@@ -52,6 +57,7 @@ type taskRow struct {
 	OperationDescription string `json:"operationDescription,omitempty"`
 	ScopedTo             string `json:"scopedTo,omitempty"`
 	ExpiresAt            string `json:"expiresAt,omitempty"`
+	QueuedRole           string `json:"queuedRole,omitempty"`
 }
 
 // tasksFromRow flattens ONE identity's open tasks out of a decoded `my-tasks`
@@ -73,6 +79,7 @@ func tasksFromRow(mt myTasksRow) []taskRow {
 			OperationDescription: t.OperationDescription,
 			ScopedTo:             t.ScopedTo,
 			ExpiresAt:            t.ExpiresAt,
+			QueuedRole:           t.QueuedRole,
 		})
 	}
 	sort.Slice(rows, func(i, j int) bool {

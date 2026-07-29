@@ -81,6 +81,9 @@ main { padding: 18px; max-width: 1180px; margin: 0 auto; }
 .filter-bar #q-search { min-width: 200px; }
 .filter-bar #q-maxrent { width: 100px; }
 
+.inline-form { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; flex: 1; }
+.inline-form #ri-summary { min-width: 260px; flex: 1; }
+
 input, select, button { font-family: inherit; }
 
 input[type="date"], input[type="number"], input[type="text"], select {

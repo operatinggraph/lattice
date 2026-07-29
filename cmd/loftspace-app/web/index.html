@@ -81,6 +81,17 @@
 
     <!-- Tasks -->
     <section id="view-tasks" role="tabpanel" aria-labelledby="tab-tasks" hidden>
+      <div id="report-issue" class="panel-controls" hidden>
+        <form id="report-issue-form" class="inline-form">
+          <input id="ri-summary" type="text" placeholder="What's wrong? (e.g. Kitchen tap is dripping)" required aria-label="Issue summary" />
+          <select id="ri-priority" aria-label="Priority">
+            <option value="normal" selected>Normal</option>
+            <option value="low">Low</option>
+            <option value="urgent">Urgent</option>
+          </select>
+          <button type="submit">Report an issue</button>
+        </form>
+      </div>
       <div class="panel-controls">
         <button id="reload-tasks" class="ghost">Refresh</button>
         <span id="tasks-summary" class="summary"></span>

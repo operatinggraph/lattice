@@ -163,6 +163,23 @@ const COMPLETIONS = {
     submitLabel: "Decline renewal",
     extraReads: (target) => ({ optionalReads: [target + ".renewalSignature"] }),
   },
+  // ResolveWorkOrder (maintenance-domain) is the op an FR28 role-queued task
+  // grants its claimant — the claimant holds no STANDING ResolveWorkOrder
+  // grant (permissions.go: "operator ONLY... the whole point rather than an
+  // oversight"), so taskLeg submits it under the task's own ephemeral grant
+  // (authContext.task) rather than the standing-grant path every other entry
+  // here uses. The Processor's §10.6 auto-complete then closes the task on
+  // the same commit — no separate CompleteTask call (the claimant holds no
+  // standing grant for that either).
+  ResolveWorkOrder: {
+    title: "Resolve work order",
+    klass: "workorder",
+    targetField: "workOrderKey",
+    taskLeg: true,
+    fields: [{ name: "notes", label: "What did you do?", required: true }],
+    submitLabel: "Mark resolved",
+    extraReads: (target) => ({ optionalReads: [target + ".resolution"] }),
+  },
 };
 
 // renewsLinkKey / applicationForLinkKey reconstruct the renewal-cycle
@@ -830,6 +847,25 @@ function isLandlord() {
   return Array.isArray(state.anchors) && state.anchors.some((a) => a && a.relation === "manages");
 }
 
+// isStaff marks a session with a `worksAt` anchor — the same self-anchor
+// maintenance-domain's ReportIssue op-meta resolves as `{me.workplace}`
+// (packages/maintenance-domain/permissions.go). Distinct from isLandlord:
+// the showcase's maintenance tech and front-desk personas worksAt a building
+// but hold no `manages` link, so they render in the applicant nav, not the
+// landlord one — this only gates the Report-an-issue panel within Tasks.
+function isStaff() {
+  return Array.isArray(state.anchors) && state.anchors.some((a) => a && a.relation === "worksAt");
+}
+
+// workplaceAnchor returns the signed-in identity's own worksAt location key,
+// or null for a session with none — mirroring the platform's own fail-closed
+// rule for this op-meta: "an identity with no workplace cannot answer it and
+// the client declines to offer the op."
+function workplaceAnchor() {
+  const a = (state.anchors || []).find((x) => x && x.relation === "worksAt");
+  return a ? a.key : null;
+}
+
 // landlordSubmit is the opts a landlord-hat write carries: acting as themselves,
 // which is what their scope=self grant authorizes and what each op's `manages`
 // ownership guard binds to the unit under the write. A session with no `manages`
@@ -858,6 +894,8 @@ function applyHatGating() {
   const np = $("#new-applicant");
   if (np) np.hidden = !landlord;
   if (!landlord && state.mode === "landlord") state.mode = "applicant";
+  const reportIssuePanel = $("#report-issue");
+  if (reportIssuePanel) reportIssuePanel.hidden = !isStaff();
   renderSignedInAs();
   applyMode();
 }
@@ -2049,13 +2087,22 @@ function renderTaskCard(t) {
   actions.className = "card-actions";
   const badge = document.createElement("span");
   badge.className = "badge pending";
-  badge.textContent = "open";
   const btn = document.createElement("button");
-  const canComplete = !!COMPLETIONS[t.operationName];
-  btn.textContent = canComplete ? "Complete" : "Complete in Loupe";
-  btn.disabled = !canComplete;
-  btn.title = canComplete ? "" : "This task type isn't completable in this app yet — use Loupe's Submit Op.";
-  if (canComplete) btn.addEventListener("click", () => openComplete(t));
+  if (t.queuedRole) {
+    // Role-queued, not yet assigned (lenses.go:242-267's qtask branch) — the
+    // FIRST step is ClaimTask, not completion; COMPLETIONS never applies
+    // until the claim lands and a later /api/tasks load shows it assigned.
+    badge.textContent = "queued";
+    btn.textContent = "Claim";
+    btn.addEventListener("click", () => claimTask(t.taskKey));
+  } else {
+    badge.textContent = "open";
+    const canComplete = !!COMPLETIONS[t.operationName];
+    btn.textContent = canComplete ? "Complete" : "Complete in Loupe";
+    btn.disabled = !canComplete;
+    btn.title = canComplete ? "" : "This task type isn't completable in this app yet — use Loupe's Submit Op.";
+    if (canComplete) btn.addEventListener("click", () => openComplete(t));
+  }
   actions.append(badge, btn);
 
   card.append(title);
@@ -2064,6 +2111,85 @@ function renderTaskCard(t) {
   if (meta.textContent) card.append(meta);
   card.append(actions);
   return card;
+}
+
+// claimTask submits orchestration-base's ClaimTask for a role-queued task —
+// the same op cmd/facet/web/app.js dispatches for its own inbox, mirrored
+// here so a role-queue holder signed into this app (e.g. the backOfHouse
+// maintenance tech) can claim it too. No authContext: authority is the
+// standing role grant (ClaimTask → operator/frontOfHouse/backOfHouse), and
+// the script takes the claimant from the trusted envelope actor, not a
+// payload field.
+async function claimTask(taskKey) {
+  const actorId = bareId(state.applicant);
+  const taskId = bareId(taskKey);
+  if (!actorId || !taskId) {
+    toast("Cannot claim: not signed in.", "err");
+    return;
+  }
+  try {
+    const reply = await submitOp({
+      operationType: "ClaimTask",
+      class: "task",
+      payload: { taskKey },
+      reads: [taskKey],
+      // Optional: probes whether THIS actor already claimed it (idempotent
+      // re-claim vs. TaskAlreadyClaimed by someone else) — legitimately
+      // absent on a first claim.
+      optionalReads: ["lnk.task." + taskId + ".assignedTo.identity." + actorId],
+    });
+    if (reply && reply.status === "rejected") {
+      const msg = reply.error ? `${reply.error.code}: ${reply.error.message}` : "rejected";
+      toast("Could not claim — " + msg, "err");
+      return;
+    }
+    toast("Claimed", "ok");
+    loadTasks();
+  } catch (e) {
+    toast("Could not claim: " + e.message, "err");
+  }
+}
+
+// reportIssue submits maintenance-domain's ReportIssue at the signed-in
+// staff identity's own workplace (isStaff/workplaceAnchor above) — the
+// standing-grant path (operator/frontOfHouse/backOfHouse), mirroring how the
+// op-meta's `{me.workplace}` self-anchor already resolves it for an
+// edge-manifest client. No task/claim step: this MINTS the work order a
+// later ResolveWorkOrder task gets queued against.
+async function reportIssue(ev) {
+  ev.preventDefault();
+  const loc = workplaceAnchor();
+  if (!loc) {
+    toast("No workplace on file — cannot report an issue.", "err");
+    return;
+  }
+  const summary = ($("#ri-summary").value || "").trim();
+  if (!summary) {
+    toast("Describe what's wrong.", "err");
+    return;
+  }
+  const priority = ($("#ri-priority") && $("#ri-priority").value) || "normal";
+  const btn = ev.target.querySelector("button[type=submit]");
+  if (btn) btn.disabled = true;
+  try {
+    const reply = await submitOp({
+      operationType: "ReportIssue",
+      class: "workorder",
+      reads: [loc],
+      payload: { summary, priority, location: loc },
+    });
+    if (reply && reply.status === "rejected") {
+      const msg = reply.error ? `${reply.error.code}: ${reply.error.message}` : "rejected";
+      toast("Could not report — " + msg, "err");
+      return;
+    }
+    $("#ri-summary").value = "";
+    toast("Issue reported.", "ok");
+  } catch (e) {
+    toast("Could not report: " + e.message, "err");
+  } finally {
+    if (btn) btn.disabled = false;
+  }
 }
 
 // ---- Complete task modal ----
@@ -2177,25 +2303,34 @@ async function submitComplete(ev) {
   const submit = $("#complete-submit");
   submit.disabled = true;
   try {
+    const opts = desc.landlordLeg
+      ? landlordSubmit()
+      : desc.taskLeg
+      ? { authContext: { task: task.taskKey } }
+      : undefined;
     const reply = await submitOp({
       operationType: task.operationName,
       class: desc.klass,
       reads,
       optionalReads,
       payload,
-    }, desc.landlordLeg ? landlordSubmit() : undefined);
+    }, opts);
     if (reply && reply.status === "rejected") {
       const msg = reply.error ? `${reply.error.code}: ${reply.error.message}` : "rejected";
       toast("Could not complete — " + msg, "err");
       return;
     }
-    // The bound op closed the gap; now retire the task. This app submits under
-    // the signed-in identity's own standing grant, NOT via the task's ephemeral
-    // grant, so the Processor's task-path auto-complete (Contract #10 §10.7) does
-    // not fire — we close the task ourselves through the contract's retained
-    // out-of-band CompleteTask path. A benign rejection (the task already closed,
-    // e.g. a double-submit) is non-fatal: the bound op already committed.
-    await completeTask(task.taskKey);
+    // The bound op closed the gap; now retire the task — UNLESS it was
+    // submitted under the task's own ephemeral grant (taskLeg), in which case
+    // the Processor's §10.6 auto-complete already closed it on the same
+    // commit (and the claimant holds no standing CompleteTask grant to call
+    // it explicitly anyway). Every other entry here submits under the signed-
+    // in identity's own standing grant, so the Processor's task-path auto-
+    // complete (Contract #10 §10.7) does not fire — retire it ourselves
+    // through the contract's retained out-of-band CompleteTask path. A benign
+    // rejection (the task already closed, e.g. a double-submit) is non-fatal:
+    // the bound op already committed.
+    if (!desc.taskLeg) await completeTask(task.taskKey);
     // Signing the lease needs no client follow-up for the executed-lease
     // artifact: the platform converges it automatically (the docGen external
     // vendor renders + stores it and Weaver anchors it to the application).
@@ -2203,6 +2338,8 @@ async function submitComplete(ev) {
     toast(desc.title + " — done.", "ok");
     if (desc.klass === "renewal") {
       loadRenewals();
+    } else if (desc.klass === "workorder") {
+      loadTasks();
     } else {
       loadTasks();
       loadApplications();
@@ -3973,6 +4110,7 @@ function init() {
   $("#tab-account").addEventListener("click", () => showView("account"));
   $("#reload-apps").addEventListener("click", loadApplications);
   $("#reload-tasks").addEventListener("click", loadTasks);
+  $("#report-issue-form").addEventListener("submit", reportIssue);
   $("#reload-renewals").addEventListener("click", loadRenewals);
   $("#reload-docs").addEventListener("click", loadDocsView);
   $("#reload-account").addEventListener("click", loadAccount);

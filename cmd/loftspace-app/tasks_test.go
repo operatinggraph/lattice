@@ -41,6 +41,29 @@ func TestTasksFromRow_FlattensAndSkipsDegenerate(t *testing.T) {
 	}
 }
 
+// TestTasksFromRow_QueuedRoleThreadsThrough: a role-queued, not-yet-assigned
+// row (lenses.go:242-267's qtask branch — assignee null, queuedRole set) must
+// keep queuedRole through tasksFromRow, so the FE can offer Claim instead of
+// silently rendering it as an ordinary (and un-completable) assigned task.
+func TestTasksFromRow_QueuedRoleThreadsThrough(t *testing.T) {
+	var mt myTasksRow
+	raw := `{"key":"my-tasks.identity.theo","assignee":"vtx.identity.theo","openTasks":[` +
+		`{"taskKey":"vtx.task.wo1","assignee":null,"forOperation":"vtx.meta.resolve","operationName":"ResolveWorkOrder","operationDescription":"Resolve a work order","scopedTo":"vtx.workorder.wo1","expiresAt":"2026-09-01T00:00:00Z","queuedRole":"vtx.role.backOfHouse"}]}`
+	if err := json.Unmarshal([]byte(raw), &mt); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	rows := tasksFromRow(mt)
+	if len(rows) != 1 {
+		t.Fatalf("want 1 task, got %d (%+v)", len(rows), rows)
+	}
+	if rows[0].QueuedRole != "vtx.role.backOfHouse" {
+		t.Errorf("queuedRole should survive tasksFromRow: got %+v", rows[0])
+	}
+	if rows[0].Assignee != "" {
+		t.Errorf("a role-queued row has no assignee yet: got %q", rows[0].Assignee)
+	}
+}
+
 func TestTasksFromRow_EmptyOpenTasks(t *testing.T) {
 	var mt myTasksRow
 	if err := json.Unmarshal([]byte(`{"key":"my-tasks.identity.carol","assignee":"vtx.identity.carol","openTasks":[{"taskKey":null}]}`), &mt); err != nil {
