@@ -335,7 +335,7 @@ func (rl *reloader) update(_, newLens *lens.Rule, kind lens.UpdateKind) {
 				}
 			}
 		}
-		entry.pipeline.UseFullEngine(rl.fullEngine, newLens.CompiledRule)
+		entry.pipeline.UseFullEngineBranches(rl.fullEngine, newLens.CompiledRule, newLens.CompiledBranches)
 		rl.logger.Info("lens MATCH hot-reloaded", "lensId", newLens.ID)
 		entry.reporter.SetRuleSequence(newLens.Sequence)
 		entry.reporter.SetRuleEngine(newLens.ResolvedEngine)

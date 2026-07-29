@@ -13,6 +13,7 @@ import (
 
 	"github.com/operatinggraph/lattice/internal/refractor/adapter"
 	"github.com/operatinggraph/lattice/internal/refractor/ruleengine"
+	"github.com/operatinggraph/lattice/internal/refractor/ruleengine/full"
 	"github.com/operatinggraph/lattice/internal/substrate"
 )
 
@@ -121,7 +122,13 @@ type LensSpec struct {
 	TargetType    string          `json:"targetType"`    // "postgres" | "nats_kv" | "nats_subject"
 	TargetConfig  json.RawMessage `json:"targetConfig"`  // adapter-specific JSON object
 	CypherRule    string          `json:"cypherRule"`    // openCypher MATCH/RETURN
-	OutputSchema  json.RawMessage `json:"outputSchema"`  // JSON schema for projection rows (passthrough)
+	// CypherBranches carries a multi-walk Personal lens's N independently-
+	// compiled queries (pkgmgr LensSpec.SpecBranches,
+	// refractor-shared-keyspace-arbitration-design.md §13.2). When non-
+	// empty, CypherRule is ignored and each branch is compiled and evaluated
+	// independently, merged by output key. Empty for every other lens.
+	CypherBranches []string        `json:"cypherBranches,omitempty"`
+	OutputSchema   json.RawMessage `json:"outputSchema"` // JSON schema for projection rows (passthrough)
 	// Engine is the explicit engine selector. "" (absent) triggers the
 	// simple-then-full fallback. Set to "full" on primordial Capability
 	// Lens specs so the full engine is used without falling back to simple.
@@ -582,13 +589,21 @@ func translateSpec(spec *LensSpec) (*Rule, error) {
 		return nil, fmt.Errorf("lens spec: id required")
 	}
 
-	if strings.TrimSpace(spec.CypherRule) == "" {
+	multiBranch := len(spec.CypherBranches) > 0
+	if multiBranch && strings.TrimSpace(spec.CypherRule) != "" {
+		return nil, fmt.Errorf("lens %q: cypherRule and cypherBranches are mutually exclusive", spec.ID)
+	}
+	if !multiBranch && strings.TrimSpace(spec.CypherRule) == "" {
 		return nil, fmt.Errorf("lens %q: cypherRule required", spec.ID)
 	}
 
+	match := spec.CypherRule
+	if multiBranch {
+		match = spec.CypherBranches[0]
+	}
 	r := &Rule{
 		ID:             spec.ID,
-		Match:          spec.CypherRule,
+		Match:          match,
 		RuleEngine:     spec.Engine,
 		CanonicalName:  spec.CanonicalName,
 		ProjectionKind: spec.ProjectionKind,
@@ -750,6 +765,39 @@ func translateSpec(spec *LensSpec) (*Rule, error) {
 	}
 	r.ResolvedEngine = attempted[len(attempted)-1]
 	r.CompiledRule = compiled
+
+	if multiBranch {
+		branches := make([]ruleengine.CompiledRule, len(spec.CypherBranches))
+		branches[0] = compiled
+		for i := 1; i < len(spec.CypherBranches); i++ {
+			_, bc, battempted, berr := defaultRegistry.SelectForLens(ruleengine.LensDefinition{
+				ID:         fmt.Sprintf("%s#branch%d", r.ID, i),
+				RuleBody:   spec.CypherBranches[i],
+				RuleEngine: r.RuleEngine,
+			})
+			if berr != nil {
+				return nil, fmt.Errorf("lens %q: branch %d engine selection: %w", spec.ID, i, berr)
+			}
+			if battempted[len(battempted)-1] != r.ResolvedEngine {
+				return nil, fmt.Errorf("lens %q: branch %d resolved to engine %q, branch 0 resolved to %q — every branch of one lens must compile on the same engine",
+					spec.ID, i, battempted[len(battempted)-1], r.ResolvedEngine)
+			}
+			branches[i] = bc
+		}
+		fullBranches := make([]*full.CompiledRule, len(branches))
+		for i, b := range branches {
+			fb, ok := b.(*full.CompiledRule)
+			if !ok {
+				return nil, fmt.Errorf("lens %q: branch %d compiled on engine %q, not full — "+
+					"a multi-walk Personal lens's branches must all be full-engine compiled rules", spec.ID, i, r.ResolvedEngine)
+			}
+			fullBranches[i] = fb
+		}
+		if _, err := full.ClassifyBranchReturnColumns(fullBranches); err != nil {
+			return nil, fmt.Errorf("lens %q: %w", spec.ID, err)
+		}
+		r.CompiledBranches = branches
+	}
 	return r, nil
 }
 

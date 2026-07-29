@@ -442,12 +442,7 @@ func (p *Pipeline) executeFullForActorOnce(ctx context.Context, actorKey string,
 		"now":         now.Format(time.RFC3339),
 		"projectedAt": projectedAt,
 	}
-	out, footprint, err := p.fullEngine.ExecuteWithFootprint(ctx, p.fullCR,
-		ruleengine.EventContext{
-			NodeKey:    actorKey,
-			NodeProps:  nodeProps,
-			Parameters: params,
-		}, p.adjKV, p.coreKV)
+	out, footprint, err := p.executeBranches(ctx, actorKey, nodeProps, params)
 	if err != nil {
 		return nil, ruleengine.EvalFootprint{}, err
 	}

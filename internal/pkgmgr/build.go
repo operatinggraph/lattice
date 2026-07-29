@@ -478,6 +478,9 @@ func lensSpecBody(lensID string, l LensSpec) map[string]any {
 		"cypherRule":    l.Spec,
 		"engine":        l.Engine,
 	}
+	if len(l.SpecBranches) > 0 {
+		spec["cypherBranches"] = l.SpecBranches
+	}
 	if l.ProjectionKind != "" {
 		spec["projectionKind"] = l.ProjectionKind
 	}

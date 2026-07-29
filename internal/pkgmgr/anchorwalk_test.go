@@ -155,15 +155,14 @@ func TestExpandReadGrantWalks_RenamesACollidingSuffixVariable(t *testing.T) {
 
 // --- Fire U1: multiple Walks declared on ONE lens -------------------------
 
-// TestExpandReadGrantWalks_MultiWalkLensComposesCoalescedAnchor proves the
-// core Fire U1 composition primitive: two Walks entries on ONE lens, reaching
-// the SAME anchor kind via independent paths, compose into one prelude where
-// each walk's copy of the shared AnchorVar is scoped to a walk-local name and
-// a WITH clause coalesces them back to the declared name — the anchor is
-// reachable via EITHER path, not just where both happen to land on one
-// vertex. Every other variable a walk binds (here "w") is unique to that walk
-// by the cross-walk guard, so it passes through the WITH unrenamed.
-func TestExpandReadGrantWalks_MultiWalkLensComposesCoalescedAnchor(t *testing.T) {
+// TestExpandReadGrantWalks_MultiWalkLensComposesIndependentBranches proves
+// the §13.2 composition primitive: two Walks entries on ONE lens, reaching
+// the SAME anchor kind via independent paths, compose into N independent
+// queries — one per walk, each the walk's own OPTIONAL MATCH chain plus the
+// shared tail, unrenamed — rather than one concatenated query. The anchor is
+// reachable via EITHER path because Refractor evaluates and merges the
+// branches, not because a single query's coalesce folds them.
+func TestExpandReadGrantWalks_MultiWalkLensComposesIndependentBranches(t *testing.T) {
 	def := Definition{
 		Name:             "fixture",
 		Version:          "1.0.0",
@@ -192,17 +191,37 @@ func TestExpandReadGrantWalks_MultiWalkLensComposesCoalescedAnchor(t *testing.T)
 	if err != nil {
 		t.Fatalf("ExpandReadGrantWalks: %v", err)
 	}
-	got := expanded.Lenses[0].Spec
-	want := "\n" + anchorWalkHead + "\n" +
-		"OPTIONAL MATCH (identity)<-[:assignedTo]-(t_w0:task)\n" +
-		"OPTIONAL MATCH (identity)-[:worksAt]->(w)\n" +
-		"OPTIONAL MATCH (w)<-[:queuedFor]-(t_w1:task)\n" +
-		"WITH coalesce(t_w0, t_w1) AS t, identity, w\n" +
-		"RETURN t.key AS anchor\n"
-	if got != want {
-		t.Errorf("composed spec mismatch:\ngot:\n%s\nwant:\n%s", got, want)
+	if got := expanded.Lenses[0].Spec; got != "" {
+		t.Errorf("Spec must be empty for a multi-walk lens, got %q", got)
+	}
+	got := expanded.Lenses[0].SpecBranches
+	want := []string{
+		"\n" + anchorWalkHead + "\n" +
+			"OPTIONAL MATCH (identity)<-[:assignedTo]-(t:task)\n" +
+			"RETURN t.key AS anchor\n",
+		"\n" + anchorWalkHead + "\n" +
+			"OPTIONAL MATCH (identity)-[:worksAt]->(w)\n" +
+			"OPTIONAL MATCH (w)<-[:queuedFor]-(t:task)\n" +
+			"RETURN t.key AS anchor\n",
+	}
+	if len(got) != len(want) {
+		t.Fatalf("branch count mismatch: got %d, want %d\ngot: %#v", len(got), len(want), got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("branch %d mismatch:\ngot:\n%s\nwant:\n%s", i, got[i], want[i])
+		}
 	}
 }
+
+// A tail column that combines a variable owned by one walk with a variable
+// owned by another (e.g. "g.name + w.name AS mixed") is NOT rejected here —
+// pkgmgr only composes the N branch strings; Refractor's translateSpec
+// classifies each RETURN column via full.ClassifyBranchReturnColumns and
+// refuses the lens at compile time (internal/refractor/lens's
+// branchspec_translate_test.go covers that refusal; pkgmgr cannot import the
+// full engine's package in production code without an import cycle through
+// its own test corpus — see composeDataLensSpec's doc comment).
 
 // TestExpandReadGrantWalks_RejectsMismatchedAnchorAcrossWalks pins §3.1's
 // "every walk in one lens must share the lens's anchor type/var" rule —

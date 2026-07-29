@@ -720,8 +720,19 @@ type LensSpec struct {
 
 	// Spec is the cypher source for the lens body. Empty for an eventStream
 	// lens (Source non-nil) — an event lens has no Core-KV vertex to MATCH;
-	// the event payload is the only data.
+	// the event payload is the only data. Also empty when SpecBranches is
+	// set (a multi-walk Personal lens compiles to N independent queries
+	// instead of one).
 	Spec string
+
+	// SpecBranches carries a multi-walk Personal lens's N independently-
+	// compiled queries — one per Walks entry, each the walk's own OPTIONAL
+	// MATCH chain plus the lens's shared tail
+	// (refractor-shared-keyspace-arbitration-design.md §13.2). Refractor
+	// evaluates each branch independently per actor and merges the row sets
+	// by output key. Empty for every single-walk or walkless lens, which
+	// keep using Spec exactly as before.
+	SpecBranches []string
 
 	// Source is the optional lens-source descriptor (the Chronicler's
 	// `eventStream` primitive, orchestration-history-read-model-design.md

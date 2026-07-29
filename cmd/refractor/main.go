@@ -681,7 +681,7 @@ func main() {
 					return
 				}
 			}
-			p.UseFullEngine(fullEngine, r.CompiledRule)
+			p.UseFullEngineBranches(fullEngine, r.CompiledRule, r.CompiledBranches)
 		}
 
 		// Fire 3 (negative-filter-retraction-projection-design.md §2.4): a plain

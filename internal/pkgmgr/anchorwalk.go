@@ -110,7 +110,13 @@ func (def Definition) ExpandReadGrantWalks() (Definition, error) {
 		if err != nil {
 			return Definition{}, err
 		}
-		l.Spec = composeDataLensSpec(pws)
+		branches := composeDataLensSpec(pws)
+		if len(branches) == 1 {
+			l.Spec = branches[0]
+		} else {
+			l.Spec = ""
+			l.SpecBranches = branches
+		}
 		for _, pw := range pws {
 			members[pw.walk.GrantDomain] = append(members[pw.walk.GrantDomain], pw)
 		}
@@ -416,93 +422,51 @@ func validateWalkTail(pw *parsedWalk) error {
 	return nil
 }
 
-// composeDataLensSpec is the data-side compilation: the actor head, one
-// OPTIONAL MATCH per chain clause of every walk in declaration order, then
-// the shared tail.
+// composeDataLensSpec is the data-side compilation: for each walk, the actor
+// head + that walk's own OPTIONAL MATCH clauses + the lens's shared tail,
+// unrenamed. A single walk yields a length-1 slice — byte-identical to every
+// lens shipped before multi-walk composition existed. Two or more walks
+// yield one query PER WALK (refractor-shared-keyspace-arbitration-design.md
+// §13.2's composition re-decision, replacing increment 2's rename+coalesce
+// fold): Refractor compiles and evaluates each branch independently and
+// merges the row sets by output key, rather than concatenating every walk's
+// clauses into one query.
 //
-// A single walk compiles verbatim (original variable names — the
-// hand-authored tail references them directly): the anchor is bound exactly
-// once, so no composition is needed.
-//
-// Two or more walks share one AnchorVar by construction (parseWalks), and the
-// engine treats a variable already bound by an earlier OPTIONAL MATCH —
-// including one only null-bound because that walk's path failed — as a
-// same-node JOIN constraint on re-reference, never a fresh scan
-// (executor.go's matchPath/traverseRel). Emitting every walk's copy of the
-// anchor verbatim would therefore silently turn "reachable via ANY walk" into
-// "reachable only where every walk lands on the same vertex" (usually never).
-// The fix scopes each walk's copy of the anchor to a walk-local name
-// (mirroring generateProducerSpec's variable-renaming, but here applied
-// unconditionally to the one variable every walk is required to share), then
-// a WITH clause folds them back to the walk-declared AnchorVar via
-// coalesce(...) — the row's actual anchor is whichever walk's copy is
-// non-null, and existing null-skip/realness handling in the tail covers a
-// row no walk reached. Every other variable a walk binds is, by parseWalks'
-// cross-walk guard, unique to that walk, so it passes through the WITH
-// unrenamed.
+// A walk's own variables are simply never bound in a sibling walk's branch —
+// referencing them in the shared tail evaluates to null there (the full
+// engine's variable lookup returns null for a name no binding introduced,
+// executor.go's evalExpr `*VariableRef` case), which is exactly "the other
+// branches carry it null by construction." Refractor's translateSpec (lens
+// package) classifies each RETURN column via full.ClassifyBranchReturnColumns
+// and refuses at lens-compile time any column whose expression cannot be
+// attributed to the shared anchor alone or to exactly one walk — such a
+// column would silently evaluate to null in EVERY branch rather than merge
+// to a real value in any of them. Not done here: pkgmgr must not import the
+// full engine's package in production code — its own test corpus imports a
+// real package (packages/identity-hygiene) that imports pkgmgr, which would
+// cycle back through it.
 //
 // Every clause compiles as OPTIONAL MATCH, including for a walk whose lens
 // previously fused the chain into a required MATCH: a degenerate unmatched row
 // is declined by the Personal-lens envelope, and any filter that rode the
 // required MATCH belongs in the tail, where presentation filters live.
-func composeDataLensSpec(pws []*parsedWalk) string {
-	var b strings.Builder
-	b.WriteString("\n")
-	b.WriteString(anchorWalkHead)
-	b.WriteString("\n")
-
-	if len(pws) == 1 {
-		for _, lp := range pws[0].clauses {
+func composeDataLensSpec(pws []*parsedWalk) []string {
+	branches := make([]string, len(pws))
+	for i, pw := range pws {
+		var b strings.Builder
+		b.WriteString("\n")
+		b.WriteString(anchorWalkHead)
+		b.WriteString("\n")
+		for _, lp := range pw.clauses {
 			b.WriteString("OPTIONAL MATCH ")
 			b.WriteString(lp.src)
 			b.WriteString("\n")
 		}
-		b.WriteString(pws[0].tail)
+		b.WriteString(pw.tail)
 		b.WriteString("\n")
-		return b.String()
+		branches[i] = b.String()
 	}
-
-	anchorVar := pws[0].walk.AnchorVar
-	taken := map[string]bool{anchorWalkActorVar: true}
-	for _, pw := range pws {
-		for _, v := range patternVarNames(pw.clauses) {
-			taken[v] = true
-		}
-	}
-
-	scoped := make([]string, len(pws))
-	carrySeen := map[string]bool{anchorWalkActorVar: true, anchorVar: true}
-	carry := []string{anchorWalkActorVar}
-	for wi, pw := range pws {
-		nn := scopedVarName(anchorVar, wi, taken)
-		taken[nn] = true
-		scoped[wi] = nn
-		rename := map[string]string{anchorVar: nn}
-		for _, lp := range pw.clauses {
-			b.WriteString("OPTIONAL MATCH ")
-			b.WriteString(lp.render(rename))
-			b.WriteString("\n")
-		}
-		for _, v := range patternVarNames(pw.clauses) {
-			if !carrySeen[v] {
-				carrySeen[v] = true
-				carry = append(carry, v)
-			}
-		}
-	}
-
-	b.WriteString("WITH coalesce(")
-	b.WriteString(strings.Join(scoped, ", "))
-	b.WriteString(") AS ")
-	b.WriteString(anchorVar)
-	for _, v := range carry {
-		b.WriteString(", ")
-		b.WriteString(v)
-	}
-	b.WriteString("\n")
-	b.WriteString(pws[0].tail)
-	b.WriteString("\n")
-	return b.String()
+	return branches
 }
 
 // generateProducerLens compiles one domain's member walks into the single

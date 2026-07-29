@@ -159,8 +159,19 @@ type Rule struct {
 
 	// CompiledRule is the engine-specific compiled artifact produced by
 	// Parse() via the registry's SelectForLens. Passed to the full engine's
-	// Execute path — see startPipeline in cmd/refractor.
+	// Execute path — see startPipeline in cmd/refractor. For a multi-branch
+	// Personal lens (CompiledBranches non-empty) this is CompiledBranches[0],
+	// kept populated so any single-field consumer still sees a valid rule.
 	CompiledRule ruleengine.CompiledRule `yaml:"-"`
+
+	// CompiledBranches carries a multi-walk Personal lens's N independently-
+	// compiled query branches (refractor-shared-keyspace-arbitration-
+	// design.md §13.2) — one per pkgmgr Walks entry, each compiled the same
+	// way CompiledRule is. Empty for every single-query lens (everything
+	// authored via YAML, and every pkgmgr lens with 0 or 1 Walks entries),
+	// which keep using CompiledRule alone. The pipeline evaluates each
+	// branch independently per actor and merges the row sets by output key.
+	CompiledBranches []ruleengine.CompiledRule `yaml:"-"`
 
 	// AttemptedEngines is the ordered list of engines consulted during
 	// selection. Populated by Parse() for log/health surfaces.

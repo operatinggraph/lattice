@@ -50,6 +50,15 @@ type Pipeline struct {
 	fullCR     ruleengine.CompiledRule
 	envelopeFn EnvelopeFn
 
+	// fullCRBranches carries a multi-walk Personal lens's N independently-
+	// compiled branches (refractor-shared-keyspace-arbitration-design.md
+	// §13.2) — nil for every other lens, which keep evaluating fullCR alone.
+	// fullCR is always set to branches[0] too when this is populated, so any
+	// single-field consumer (the plain-reprojection anchor helpers, which
+	// never run on a Personal lens's actor-enumerator path) still sees a
+	// valid compiled rule.
+	fullCRBranches []ruleengine.CompiledRule
+
 	// multiEnvelopeFn is envelopeFn's per-entry sibling (§4.1 of
 	// cap-read-per-anchor-grant-keys-design.md). Mutually exclusive with
 	// envelopeFn — SetEnvelopeFn / SetMultiEnvelopeFn each clear the other, so
@@ -324,20 +333,58 @@ func New(
 // openCypher engine. cr must be the *full.CompiledRule that lens.Parse /
 // corekv_source produced for this rule. Must be called before Run.
 func (p *Pipeline) UseFullEngine(eng *full.Engine, cr ruleengine.CompiledRule) {
+	p.useFullEngineBranches(eng, cr, nil)
+}
+
+// UseFullEngineBranches is UseFullEngine's multi-walk sibling
+// (refractor-shared-keyspace-arbitration-design.md §13.2): branches carries
+// a Personal lens's N independently-compiled query branches (lens.Rule.
+// CompiledBranches), cr must be branches[0]. Nil/single-element branches
+// behaves exactly like UseFullEngine. Must be called before Run.
+func (p *Pipeline) UseFullEngineBranches(eng *full.Engine, cr ruleengine.CompiledRule, branches []ruleengine.CompiledRule) {
+	p.useFullEngineBranches(eng, cr, branches)
+}
+
+func (p *Pipeline) useFullEngineBranches(eng *full.Engine, cr ruleengine.CompiledRule, branches []ruleengine.CompiledRule) {
 	p.engineKind = ruleengine.EngineFull
 	p.fullEngine = eng
 	p.fullCR = cr
+	if len(branches) > 1 {
+		p.fullCRBranches = branches
+	}
 	// Pin the vertex types this lens's patterns can bind, so the plain
 	// aspect/link reprojection arms skip events on types the lens cannot
 	// read (an unbounded label set — unlabeled node pattern or var-length
-	// relationship — disables the skip; every event reprojects).
+	// relationship — disables the skip; every event reprojects). Union
+	// across every branch for a multi-walk lens: each branch's own clauses
+	// bind only that walk's types, but the plain-reprojection arms reason
+	// about the lens as a whole.
 	p.plainReprojectLabels = nil
 	p.plainReprojectAll = true
-	if fullCR, isFull := cr.(*full.CompiledRule); isFull {
-		if labels, exhaustive := fullCR.ReferencedLabels(); exhaustive {
-			p.plainReprojectLabels = labels
-			p.plainReprojectAll = false
+	all := []ruleengine.CompiledRule{cr}
+	if len(branches) > 1 {
+		all = branches
+	}
+	labels := map[string]struct{}{}
+	exhaustive := true
+	for _, c := range all {
+		fullCR, isFull := c.(*full.CompiledRule)
+		if !isFull {
+			exhaustive = false
+			break
 		}
+		ls, ok := fullCR.ReferencedLabels()
+		if !ok {
+			exhaustive = false
+			break
+		}
+		for l := range ls {
+			labels[l] = struct{}{}
+		}
+	}
+	if exhaustive {
+		p.plainReprojectLabels = labels
+		p.plainReprojectAll = false
 	}
 }
 
