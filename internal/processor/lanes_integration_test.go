@@ -76,8 +76,26 @@ func TestLaneSpecs_PerLaneBacklogIsolation(t *testing.T) {
 		return info.NumPending
 	}
 
+	// NumPending on a fresh consumer converges shortly after a store-acked
+	// publish, not necessarily within it — under host contention the first
+	// read can observe a partially-applied count. Poll instead of reading
+	// once, so the check is deterministic rather than racing the server.
+	waitForPending := func(durable string, want uint64) uint64 {
+		t.Helper()
+		const pollEvery = 5 * time.Millisecond
+		deadline := time.Now().Add(5 * time.Second)
+		var got uint64
+		for {
+			got = pending(durable)
+			if got == want || time.Now().After(deadline) {
+				return got
+			}
+			time.Sleep(pollEvery)
+		}
+	}
+
 	// default carries the whole backlog…
-	if got := pending(durables["default"]); got != n {
+	if got := waitForPending(durables["default"], n); got != n {
 		t.Fatalf("processor-default NumPending = %d, want %d", got, n)
 	}
 	// …and the backlog does NOT leak to any other lane (isolation).
