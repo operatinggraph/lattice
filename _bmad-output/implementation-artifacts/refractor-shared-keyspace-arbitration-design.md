@@ -960,3 +960,58 @@ No `packages/**` DDL touched, so no `make verify-package-*` run.
   cleanly if `AttemptedEngines`-per-branch ever needs surfacing.
 - **The producer's own cross-product is untouched** (§13.1/§13.7 — already named, unaffected by
   this fire; `cap-read.*` grants were never wrong and stay that way).
+
+## 15. Build note — build order (b): sessions unification (Lattice Steward, 2026-07-29)
+
+`packages/edge-manifest`'s `edgeEntitySessions` (residence-chain path, `domainBase`) and
+`edgeInstructorSessions` (own-instructor path, `domainProvider`) gain a single lens: a second
+`AnchorWalk` on `edgeEntitySessions`, `edgeInstructorSessions` retired. This is the retry of §12's
+halted increment-3 attempt, now against (a)'s corrected N-branch-merge primitive instead of the
+withdrawn coalesce shape.
+
+- **Lens declaration** (`lenses.go`): `edgeEntitySessions.Walks` gains a second entry —
+  `GrantDomain: domainProvider, AnchorType: "session", AnchorVar: "sess", Chain:
+  ["(identity)<-[:identifiedBy]-(instr:instructor)<-[:ledBy]-(sess:session)"]` — verbatim the
+  former `edgeInstructorSessions` walk. `parseWalks`' cross-walk disjointness guard passes cleanly:
+  walk 0 (domainBase) binds `{home, container, studio}`, walk 1 (domainProvider) binds `{instr}`,
+  no overlap.
+- **Shared tail** (`edgeSessionsTail`, replacing both `edgeEntitySessionsTail` and
+  `edgeInstructorSessionsTail`): carries BOTH bridging clauses unconditionally —
+  `OPTIONAL MATCH (sess)-[:atStudio]->(studio:studio)` and
+  `OPTIONAL MATCH (sess)-[:ledBy]->(instr:instructor)` — rather than one clause per walk. Each
+  compiled branch re-derives whichever counterpart var its own walk didn't bind; for the var its
+  walk DID bind, the tail's OPTIONAL MATCH is a harmless re-match (Cypher's already-bound-variable-
+  is-a-join-constraint semantics, `executor.go`'s "constrained-target case" — confirmed against the
+  executor before writing the tail, not assumed). This keeps the tail single and
+  branch-order-independent, rather than requiring per-walk tail variants.
+- **Consumers updated:** `package.go`/`manifest.yaml` (seventeen lenses, description + version
+  0.14.9→0.14.10), `docs/components/edge-manifest.md`, `scripts/verify-package-edge-manifest.go`
+  (`emExpectedLenses` drops the entry; the `cypherRule`-literal check now falls back to
+  `cypherBranches` when `cypherRule` is empty — the first live consumer of that field). No FE
+  change: both retired and surviving lenses already wrote the identical `manifest.ent.<sessionId>`
+  key, so `app.js` never distinguished them by lens name.
+- **Tests:** package-level helpers gained `emComposedSpecBranch` (one branch by index) and
+  `emSpecTexts` (every branch, for lens-wide structural checks) alongside the existing
+  single-spec `emComposedSpec`. The two pre-existing per-lens session tests
+  (`lens_cypher_test.go`) now select branch 0 / branch 1 of the merged lens instead of two
+  separate lenses; row-shape assertions are unchanged (byte-identical RETURN, as designed). The
+  provider-persona coverage test (`coverage_proof_test.go`) exercises branch 1 in place of the
+  retired lens's spec.
+- **Live verification:** `make reinstall-package PKG=packages/edge-manifest` diff-applied onto
+  the running dev stack (fromVersion 0.14.8→0.14.10); `go run ./scripts/verify-package-edge-manifest.go`
+  passed 86/86 assertions, confirming the installed `edgeEntitySessions` aspect carries
+  `cypherBranches` with both branches' `manifest.ent` literal. Refractor's live `pipeline: processed`
+  log for the lens's own ruleId shows zero errors across the reinstall's CDC cascade — the first
+  real install of a `SpecBranches` lens, proving (a)'s primitive end-to-end, not just in unit tests.
+
+**Gates:** `go build ./...`, `make vet`, `golangci-lint run` (`packages/edge-manifest`, `scripts`),
+`STRICT=1 lint-conventions.go`, `lint-package-standard.go`, `lint-package-version.go`,
+`lint-lens-anchors.go`, `lint-facet-discovery.go`, full `go test ./... -p 4`, plus the live
+`verify-package-edge-manifest` run above.
+
+**Residuals, honestly named:**
+- **(c) catalog and (d) tasks remain unbuilt** — the filed defect (catalog) and the tasks pair,
+  same build order, per §13.7. Catalog's columns are NOT byte-identical (divergent `viaServices`/
+  `viaRoles`), so its merge exercises the classifier's mixed-walk-column refusal path this
+  increment's byte-identical case never touched — the next fire should ground that path against a
+  real compile, not assume it from the unit tests in (a).
