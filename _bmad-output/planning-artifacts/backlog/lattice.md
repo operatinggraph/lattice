@@ -46,7 +46,6 @@ Open items only (shipped ones are in the Done log). Grouped by component tag.
 
 | Item | What it is | Imp | Size | State |
 |---|---|---|---|---|
-| **[Bootstrap] 5 aspect-type meta roots carry no `protected` flag** | `seedAspectTypeMeta` builds them with empty data while every other kernel root sets `protected: true`, so the step-8 guard does not cover them — a package upgrade/uninstall could update or tombstone a kernel DDL. | ★★ | XS | 📋 ready · [why](../../implementation-artifacts/kernel-seed-reconcile-design.md) §5 |
 | **[Bootstrap] `bootstrap verify` reports a stale kernel as fresh** | It asserts presence + envelope shape, never content, so `make up`'s reuse short-circuit prints "kernel already up" over DDL scripts this binary no longer builds. `KernelDrift` now makes the assertion cheap; wiring it in makes `make up` self-healing. | ★★ | S | 📋 ready · [why](../../implementation-artifacts/kernel-seed-reconcile-design.md) §8 |
 | **[Bootstrap] Reconcile creates + updates but never removes a retired kernel key** | A kernel entity the current binary no longer builds survives forever in an old bucket; needs an authoritative kernel-owned key enumeration separable from package-written `vtx.meta.*`. | ★ | S–M | 📋 ready · [why](../../implementation-artifacts/kernel-seed-reconcile-design.md) §8 |
 | **[Refractor] Cold bring-up replay debt reads as hours of lens lag** | After a fresh-world bring-up every lens + capability reported `consumerLag` ≈ activation-to-head distance (~2000–2500) while every read model was verifiably complete (seeded rows present; manifests, worklists, authz all live). The measured consumer drains ~50 msg/min, so the hosted Loupe wears YELLOW "80 degraded" for hours after each nightly reset — a false staleness alarm. Ground which consumer the gauge reads vs the path that projected. | ★★ | M | 📋 ready · demo-box evidence in the filing commit |
@@ -224,6 +223,7 @@ Real but low-value; do **not** spend design or build effort here unless Andrew g
 
 One line per shipped item (`date · SHA · [tag] title`). Oldest roll to `archive/` past ~25.
 
+- 2026-07-29 · `2177c60d` · [Bootstrap] the 5 aspect-type meta roots now carry `data.protected: true`, closing the commit-time guard gap [kernel-seed-reconcile-design](../../implementation-artifacts/kernel-seed-reconcile-design.md) §5 named
 - 2026-07-28 · `3aa45a5a` · [Refractor] every package-generated cap-read.* NATS-KV producer is now shred-nullified — dynamic TargetLister discovers by declared descriptor field, static base-lens floor keeps a boot-window regression closed
 - 2026-07-28 · `533a0b71` · [Edge] hydrationComplete boot-gate now matches the hydrate RPC's own target revision, not the first (possibly stale-replayed) marker seen
 - 2026-07-28 · `6c720482` · [chronicler,orchestration-base] eventStream ColumnMapping gains ClearOn — a Loom re-dispatch's patternStarted no longer carries the prior run's ended_at/failure_reason onto the new running row
