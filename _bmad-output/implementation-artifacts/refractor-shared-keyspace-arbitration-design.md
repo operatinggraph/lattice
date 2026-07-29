@@ -13,11 +13,12 @@ disposition of all findings, including the withdrawn ones).
 Author: Winston (Designer fires, 2026-07-27 · 2026-07-29) · Lattice lane (Stream 2, [Refractor] /
 [Pkgmgr]). Backlog row: *"Two lenses sharing one IntoKey race per column"*.
 
-**§13 — the composition re-decision — 📐 awaiting-Andrew (2026-07-29).** U1's *compilation* was
+**§13 — the composition re-decision — ✅ Andrew-ratified (2026-07-29).** U1's *compilation* was
 wrong three increments running (§10–§12); §13 replaces it (one query per walk, merged by output
 key) and rewrites §3.1's compilation bullet and §2.3's catalog/tasks factoring in place. The
 ratified shape, the census verdict, Fires U2/G/A3 and the no-escape-hatch policy are **unchanged**.
-**Build §13.7's order, not §3.1's compilation bullet.**
+**Build §13.7's order, not §3.1's compilation bullet** — §13.9 carries the worked cypher for both
+shapes.
 
 > **Ratified shape (Andrew, 2026-07-27), two lines.** Same-target-same-key multi-writer is not a
 > pattern to arbitrate — it is a shape to **eliminate**: (U1) pkgmgr lenses gain **multiple
@@ -512,7 +513,9 @@ instructor-led sessions); no code from this fire landed.
 
 ## 13. The composition re-decision — §12's fork is false; both roads need one missing primitive
 
-**Status: 📐 awaiting-Andrew (ratification).** Author: Winston (Designer fire, 2026-07-29), at
+**Status: ✅ Andrew-ratified (2026-07-29)** — approved as recommended: N compiled queries per lens
+(Option 2), the merge as the missing primitive, U2 unchanged and independent. Worked cypher for
+both shapes folded in at §13.9 on ratification. Author: Winston (Designer fire, 2026-07-29), at
 Andrew's direction after §12 halted increment 3 and flagged `lattice-designer`. Nothing from
 increments 1–2 is withdrawn; §3.1's *compilation* text is rewritten in place (below), and §2.3's
 catalog/tasks factoring is corrected — both rested on the same false premise §12 disproved.
@@ -723,3 +726,141 @@ Run in-fire and self-directed (no independent reviewer available; stated plainly
 5. *"Does this strand increment 2's shipped work?"* — `coalesce()` stays (a legitimate general engine
    function, independently tested). Only `composeDataLensSpec`'s multi-walk branch is replaced, and
    its test asserts a spec string that is supposed to change.
+
+### 13.9 Worked examples — the two shapes side by side
+
+Folded in at Andrew's request (2026-07-29) as a build aid. Both are **real shipped lenses**, quoted
+from the tree, not illustrative inventions. The first is **Fire U2's** (§3.2) and appears here only
+because the contrast is what collapsed §12's fork: *disjoint keys → concatenate; overlapping keys
+with per-branch columns → merge.*
+
+#### A. Where UNION is the whole answer — `one-bill` (Fire U2, plain lenses)
+
+Two lenses into one bucket today, because the engine rejects UNION —
+`packages/one-bill/lenses.go:12-25` states the reason in its own doc comment:
+
+```cypher
+-- oneBillRentEntries
+MATCH (t:transaction)
+MATCH (t)-[:postedTo]->(a:account)
+MATCH (a)-[:heldFor]->(l:leaseapp)
+RETURN t.key AS key, t.key AS transactionKey, a.key AS accountKey, l.key AS leaseAppKey,
+       t.entry.data.type AS type, t.entry.data.amountCents AS amountCents,
+       t.entry.data.memo AS memo, t.entry.data.postedAt AS postedAt, 'rent' AS source
+
+-- oneBillCafeEntries — identical RETURN aliases, different anchor classes
+MATCH (t:cafetransaction)
+MATCH (t)-[:postedTo]->(a:cafeaccount)
+MATCH (a)-[:heldFor]->(l:leaseapp)
+RETURN t.key AS key, …same aliases…, 'cafe' AS source
+```
+
+Under U2 these collapse to **one lens**, the two bodies joined by `UNION`. §3.2's fail-closed
+activation constraint (identical RETURN alias lists across branches) is already satisfied by hand
+here, so the collapse is mechanical.
+
+**Why concatenation suffices and no merge is needed:** the branches produce **disjoint keys** —
+`vtx.transaction.<id>` vs `vtx.cafetransaction.<id>` — so no row is ever produced twice. **This is
+the property the catalog pair does not have, and it is the entire line between the two demands.**
+
+**Precondition (§3.3's residual):** both branches are authored by **one** package. `one-bill` is a
+dedicated composition package owning no vertex types, links or permissions, declaring both ledgers
+as dependencies and matching both their class labels in its own cypher; the ledgers write their own
+separate buckets. A Lens spec belongs to exactly one package, so U2 can only ever union what one
+package already authors — see §3.3 for the cross-package case.
+
+#### B. Where a merge is required — `edgeCatalog` (this design, Personal lenses)
+
+**Today:** two lenses, two walks, two hand-synchronised tails, one `manifest.op.<id>` key space —
+`edgeCatalog` (`domainBase`: residence → `availableAt` template → `permitsOperation`) and
+`edgeCatalogRoles` (`domainStaff`: `holdsRole` → `grantedBy` permission → `forOperation`). Whichever
+re-derives last wins the whole body, so `app.js:775`'s `viaRoleName` grouping collapses for a
+multi-hat actor whenever `edgeCatalog` lands last (§1).
+
+**Unified declaration** — one lens, two walks, **one tail**:
+
+```go
+CanonicalName: "edgeCatalog",  Personal: true,  IntoKey: []string{"__actor","ns","entityId"},
+Walks: []pkgmgr.AnchorWalk{
+  {GrantDomain: domainBase,  AnchorType: "meta", AnchorVar: "op",
+   Chain: []string{chainResidence, chainAvailableTemplates,
+                   "(tpl)-[:permitsOperation]->(op:meta)"}},
+  {GrantDomain: domainStaff, AnchorType: "meta", AnchorVar: "op",
+   Chain: []string{chainHeldRoles,
+                   "(role)<-[:grantedBy]-(perm:permission)-[:forOperation]->(op:meta)"}},
+},
+Spec: edgeCatalogTail,   // ONE shared tail — §13.2's determinism rests on this
+```
+
+**What §13.2 compiles it to — two complete queries**, each `anchorWalkHead` + that walk's chains +
+the shared tail:
+
+```cypher
+-- branch 0 (domainBase)
+MATCH (identity:identity {key: $actorKey})
+OPTIONAL MATCH (identity)-[:residesIn]->(home)-[:containedIn*0..]->(container)
+OPTIONAL MATCH (container)<-[:availableAt]-(tpl:service)
+OPTIONAL MATCH (tpl)-[:permitsOperation]->(op:meta)
+WITH op
+WHERE op.key <> null
+RETURN
+  op.key AS anchor,
+  "manifest.op" AS ns,
+  nanoIdFromKey(op.key) AS entityId,
+  op.key AS opMetaKey,
+  op.data.operationType AS operationType,
+  op.presentation.data.title AS title,
+  op.presentation.data.shortLabel AS shortLabel,
+  op.presentation.data.description AS description,
+  op.presentation.data.icon AS icon,
+  op.presentation.data.tone AS tone,
+  op.presentation.data.submitLabel AS submitLabel,
+  op.presentation.data.group AS group,
+  op.inputSchema.data.schema AS inputSchema,
+  op.fieldDescriptions.data.fieldDescriptions AS fieldDescriptions,
+  op.dispatch.data.class AS dispatchClass,
+  op.dispatch.data.authContext AS dispatchAuthContext,
+  op.dispatch.data.targetField AS dispatchTargetField,
+  op.dispatch.data.targetType AS dispatchTargetType,
+  op.dispatch.data.contextParams AS dispatchContextParams,
+  op.dispatch.data.reads AS dispatchReads,
+  op.dispatch.data.optionalReads AS dispatchOptionalReads,
+  op.dispatch.data.visibleWhen AS dispatchVisibleWhen,
+  op.sensitive.data.value AS sensitive,
+  [(op)<-[:permitsOperation]-(svc:service) | svc.key] AS viaServices,
+  null AS viaRoles
+```
+
+```cypher
+-- branch 1 (domainStaff)
+MATCH (identity:identity {key: $actorKey})
+OPTIONAL MATCH (identity)-[:holdsRole]->(role:role)
+OPTIONAL MATCH (role)<-[:grantedBy]-(perm:permission)-[:forOperation]->(op:meta)
+WITH op, role
+WHERE op.key <> null
+RETURN
+  …the same 24 columns, byte-identical, through `viaServices`…,
+  collect(DISTINCT {key: role.key, name: role.canonicalName.data.value}) AS viaRoles
+```
+
+**Column classification (§13.2's merge rule) for this pair:**
+
+| Columns | Class | Merge behaviour |
+|---|---|---|
+| `anchor`, `entityId`, `opMetaKey`, `operationType`, the 7 `op.presentation.*`, `inputSchema`, `fieldDescriptions`, the 8 `op.dispatch.*`, `sensitive` (23) | anchor-derived (`ns` is a constant) | Both branches read the same `op` vertex ⇒ must agree; disagreement raises, never picks |
+| `viaServices` | **anchor-derived** — a pattern comprehension off `op` alone, not off `tpl` | Identical in both branches **by construction**. This is exactly what 0.14.3/0.14.4 hand-maintained across two tails (§1); one shared tail makes it structural |
+| `viaRoles` | **walk-owned by walk 1** — `role` is introduced by walk 1 only | Taken from branch 1; branch 0 carries null |
+
+**Result per key:**
+
+| Op reachable via | Row |
+|---|---|
+| services only | branch 0 as-is, `viaRoles` empty |
+| **roles only** | branch 1 as-is — **the row §12's `coalesce` silently dropped** |
+| both | one row: the 24 anchor-derived columns agree, `viaRoles` from branch 1 |
+
+**One mechanic left to the build increment, deliberately:** whether a non-owning branch projects
+`null AS viaRoles` (as written) or omits the column and lets the merge supply it. Both satisfy
+§13.3's identical-alias-list requirement; it is mechanics, not shape. `null` parses as a `Literal`
+today (the `<> null` idiom is used throughout these tails), so the written form needs no engine
+change — confirm before relying on it.
