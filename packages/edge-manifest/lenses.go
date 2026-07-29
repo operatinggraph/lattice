@@ -2,19 +2,20 @@ package edgemanifest
 
 import "github.com/operatinggraph/lattice/internal/pkgmgr"
 
-// Lenses returns the package's seventeen Personal-Lens declarations
+// Lenses returns the package's sixteen Personal-Lens declarations
 // (edge-showcase-app-design.md §3.2; the manifest.ent entity lenses per
-// facet-entity-browse-design.md; the staff siblings edgeCatalogRoles +
-// edgeTasksQueued + edgeStaffWorkOrders per facet-staff-worlds-design.md
-// §3.3; the provider-hat siblings edgeProviderSchedule + edgeProviderQueue
-// per persona-worlds-design.md Fire W0 — edgeEntitySessions itself carries
-// the third, the instructor-led-session path, as its own second Walk
-// (refractor-shared-keyspace-arbitration-design.md §13.7 build order (b):
-// the multi-walk merge retiring the former edgeInstructorSessions sibling);
-// the edgeStaffPanes descriptor lens per facet-discovery-restoration-design.md
+// facet-entity-browse-design.md; the staff siblings edgeTasksQueued +
+// edgeStaffWorkOrders per facet-staff-worlds-design.md §3.3; the
+// provider-hat siblings edgeProviderSchedule + edgeProviderQueue per
+// persona-worlds-design.md Fire W0 — edgeEntitySessions and edgeCatalog
+// each carry a second reachability path as their own second Walk rather
+// than a sibling lens (refractor-shared-keyspace-arbitration-design.md
+// §13.7 build orders (b) and (c): the multi-walk merges retiring the
+// former sibling lenses edgeInstructorSessions and edgeCatalogRoles); the
+// edgeStaffPanes descriptor lens per facet-discovery-restoration-design.md
 // §2.1) — the repo's first `nats-subject` / Personal Lens package.
 //
-// Sixteen of the seventeen are NON-SELF-ANCHORED: each keys its rows on a
+// Fifteen of the sixteen are NON-SELF-ANCHORED: each keys its rows on a
 // vertex other than the recipient identity (a service template, an op meta, a
 // task, an instance, a session, a provider, a booking, a tab, a studio, a menu
 // item, a work order, an appointment). Refractor's D1 gate (internal/refractor/projection/personal.go
@@ -59,14 +60,14 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 // label instead of a bare NanoID; the location TYPE segment is still not
 // synthesized into the row (the engine has no vertex-type-from-key function
 // outside nanoIdFromKey, and no string concatenation to build one), so the
-// renderer derives type from the key client-side; edgeCatalog covers the
-// service-permitsOperation reachability path and edgeTasks the direct
-// `assignedTo` one, with their role-derived counterparts split into the sibling
-// lenses edgeCatalogRoles + edgeTasksQueued rather than folded in (this engine
-// has no UNION, so a second independent path in one cypher cross-products it).
-// Still deferred: the open-task-forOperation catalog path — a task's own bound
-// op already rides inline on its edgeTasks row, so that gap is "browse all my
-// ops," never "complete my task."
+// renderer derives type from the key client-side; edgeTasks' role-derived
+// counterpart is still split into the sibling lens edgeTasksQueued rather
+// than folded in as a second Walk (unlike edgeCatalog, whose role path IS a
+// second Walk — see edgeCatalogTail's own doc comment for why tasks hasn't
+// followed yet: §13.7 build order (d) is unbuilt). Still deferred: the
+// open-task-forOperation catalog path — a task's own bound op already rides
+// inline on its edgeTasks row, so that gap is "browse all my ops," never
+// "complete my task."
 func Lenses() []pkgmgr.LensSpec {
 	return []pkgmgr.LensSpec{
 		{
@@ -106,16 +107,27 @@ func Lenses() []pkgmgr.LensSpec {
 			Personal:      true,
 			Engine:        "full",
 			IntoKey:       []string{"__actor", "ns", "entityId"},
-			Walks: []pkgmgr.AnchorWalk{{
-				GrantDomain: domainBase,
-				AnchorType:  "meta",
-				AnchorVar:   "op",
-				Chain: []string{
-					chainResidence,
-					chainAvailableTemplates,
-					"(tpl)-[:permitsOperation]->(op:meta)",
+			Walks: []pkgmgr.AnchorWalk{
+				{
+					GrantDomain: domainBase,
+					AnchorType:  "meta",
+					AnchorVar:   "op",
+					Chain: []string{
+						chainResidence,
+						chainAvailableTemplates,
+						"(tpl)-[:permitsOperation]->(op:meta)",
+					},
 				},
-			}},
+				{
+					GrantDomain: domainStaff,
+					AnchorType:  "meta",
+					AnchorVar:   "op",
+					Chain: []string{
+						chainHeldRoles,
+						"(role)<-[:grantedBy]-(perm:permission)-[:forOperation]->(op:meta)",
+					},
+				},
+			},
 			Spec: edgeCatalogTail,
 		},
 		{
@@ -279,26 +291,6 @@ func Lenses() []pkgmgr.LensSpec {
 				},
 			}},
 			Spec: edgeEntityMenuItemsTail,
-		},
-		{
-			CanonicalName: "edgeCatalogRoles",
-			Class:         "meta.lens",
-			Adapter:       "nats-subject",
-			SubjectPrefix: manifestSubjectPrefix,
-			Stream:        manifestStream,
-			Personal:      true,
-			Engine:        "full",
-			IntoKey:       []string{"__actor", "ns", "entityId"},
-			Walks: []pkgmgr.AnchorWalk{{
-				GrantDomain: domainStaff,
-				AnchorType:  "meta",
-				AnchorVar:   "op",
-				Chain: []string{
-					chainHeldRoles,
-					"(role)<-[:grantedBy]-(perm:permission)-[:forOperation]->(op:meta)",
-				},
-			}},
-			Spec: edgeCatalogRolesTail,
 		},
 		{
 			CanonicalName: "edgeTasksQueued",
@@ -571,21 +563,40 @@ RETURN
   via.presentation.data.name AS resolvedViaLabel
 `
 
-// edgeCatalogTail presents one `manifest.op.<opMetaId>` row per op meta the
-// walk reaches through a service template (§3.3's descriptor vocabulary, read
-// back off the op meta's optional aspects — an op meta that never adopted the
-// vocabulary still projects a row, just with those fields null, per §3.3 "ops
-// without descriptors still render, degraded").
+// edgeCatalogTail presents one `manifest.op.<opMetaId>` row per op meta
+// either of edgeCatalog's two Walks reaches: the service-template path
+// (`domainBase` — an op offered through a service the actor's residence
+// reaches) and the held-role path (`domainStaff` — an op a permission grants
+// through a role the actor holds, staff-worlds F2's "browse all my ops").
+// Both Walks anchor on the same `op:meta`
+// (refractor-shared-keyspace-arbitration-design.md §13.7 build order (c) —
+// the merge that retires the former sibling lens edgeCatalogRoles, whose
+// role-derived columns this tail folds in), so an op reachable both ways
+// projects one row under one key instead of flapping between whichever
+// sibling lens re-derived last (§1's original defect). §3.3's descriptor
+// vocabulary is read back off the op meta's optional aspects — an op meta
+// that never adopted it still projects a row, just with those fields null.
 //
-// viaServices answers "which service(s) offer this op" without a WITH/collect
-// grouping stage — it reuses the pattern-comprehension-in-RETURN form
-// service-location/lenses.go's `allowedOperations` already proves parses under
-// this engine, just walked in the reverse direction from `op`. This is
-// presentation only (design §4.5: the manifest affects visibility, never
-// permission), so a global (not actor-scoped) permitsOperation fan-in is an
-// acceptable v1 narrowing, same class as the other named scope-downs above.
+// The role Walk's last hop is the install-time edge pkgmgr mints beside
+// `grantedBy` (internal/pkgmgr/build.go): without it the walk dead-ends at
+// perm.data.operationType, a STRING this engine cannot join to a vertex.
+//
+// viaServices answers "which service(s) offer this op" via a pattern
+// comprehension off `op` alone (service-location/lenses.go's
+// `allowedOperations` already proves the form parses under this engine,
+// walked in the reverse direction here) — anchor-derived, so it computes
+// identically regardless of which Walk reached `op` and needs no per-branch
+// variant. viaRole/viaRoleName are walk-owned by the role Walk alone: `role`
+// is bound only by that Walk's own chain, so the base-path branch's copy of
+// this tail references an unbound `role` and evaluates it null by
+// construction (the executor's ordinary unbound-VariableRef behavior,
+// mirrored throughout every OPTIONAL MATCH in this package) rather than by
+// any special-cased null literal. This is presentation only (design §4.5:
+// the manifest affects visibility, never permission), so a global
+// (not actor-scoped) permitsOperation fan-in is an acceptable v1 narrowing,
+// same class as the other named scope-downs above.
 const edgeCatalogTail = `
-WITH op
+WITH op, role
 WHERE op.key <> null
 RETURN
   op.key AS anchor,
@@ -611,7 +622,9 @@ RETURN
   op.dispatch.data.optionalReads AS dispatchOptionalReads,
   op.dispatch.data.visibleWhen AS dispatchVisibleWhen,
   op.sensitive.data.value AS sensitive,
-  [(op)<-[:permitsOperation]-(svc:service) | svc.key] AS viaServices
+  [(op)<-[:permitsOperation]-(svc:service) | svc.key] AS viaServices,
+  role.key AS viaRole,
+  role.canonicalName.data.value AS viaRoleName
 `
 
 // edgeTasksTail presents one `manifest.task.<taskId>` row per task directly
@@ -691,9 +704,11 @@ RETURN
 // the merge that retired the former sibling lens edgeInstructorSessions,
 // whose RETURN this tail is byte-identical to), so a resident who is ALSO
 // the instructor of a session reachable by both paths projects the
-// identical row under the identical key — an LWW-idempotent overlap, the
-// same pattern edgeCatalogRolesTail already proves for a dual-reachable op
-// meta. `entityType` is a literal stamped per walk, exactly as edgeIdentity's
+// identical row under the identical key — an LWW-idempotent overlap, since
+// unlike edgeCatalogTail's dual-reachable op meta (whose two Walks project
+// genuinely different columns, requiring the real walk-owned merge) both of
+// this tail's Walks compute byte-identical columns for the same session.
+// `entityType` is a literal stamped per walk, exactly as edgeIdentity's
 // selfAnchors stamps its type — the engine has no vertex-type-from-key
 // function, and the type is a declaration of what the walk means. The
 // schedule instant projects as `startsAt`, not the design's `when` — WHEN is
@@ -924,60 +939,6 @@ RETURN
   item.price.data.name AS title,
   container.presentation.data.name AS subtitle,
   item.price.data.priceCents AS priceCents
-`
-
-// edgeCatalogRolesTail presents one `manifest.op.<opMetaId>` row per op meta the
-// actor reaches through a ROLE they hold, rather than through a service
-// template (staff-worlds F2). The walk's last hop is the install-time edge
-// pkgmgr mints beside `grantedBy` (internal/pkgmgr/build.go): without it the
-// walk dead-ends at perm.data.operationType, a STRING this engine cannot join
-// to a vertex.
-//
-// A sibling lens rather than more branches on edgeCatalog, for the same reason
-// the entity lenses are siblings: this engine has no UNION, so folding a second
-// independent reachability path into one cypher cross-products it. Same `ns`
-// and same RETURN shape as edgeCatalog means the renderer needs to know nothing
-// about which path a row arrived by, and an op reachable BOTH ways projects the
-// identical row under the identical key — an LWW-idempotent overlap, noted
-// rather than feared.
-//
-// This is the lens that makes the staff catalog honest: it derives visibility
-// from the grant topology the Processor actually authorizes against, so the
-// catalog cannot drift into offering ops step 3 will deny. It also closes the
-// named "browse all my ops" gap for ordinary residents, whose consumer-role
-// grants project through exactly the same walk.
-const edgeCatalogRolesTail = `
-WITH op, role
-WHERE op.key <> null
-OPTIONAL MATCH (op)<-[:permitsOperation]-(psvc:service)
-WITH op, role, collect(DISTINCT psvc.key) AS viaSvcKeys
-RETURN
-  op.key AS anchor,
-  "manifest.op" AS ns,
-  nanoIdFromKey(op.key) AS entityId,
-  op.key AS opMetaKey,
-  op.data.operationType AS operationType,
-  op.presentation.data.title AS title,
-  op.presentation.data.shortLabel AS shortLabel,
-  op.presentation.data.description AS description,
-  op.presentation.data.icon AS icon,
-  op.presentation.data.tone AS tone,
-  op.presentation.data.submitLabel AS submitLabel,
-  op.presentation.data.group AS group,
-  op.inputSchema.data.schema AS inputSchema,
-  op.fieldDescriptions.data.fieldDescriptions AS fieldDescriptions,
-  op.dispatch.data.class AS dispatchClass,
-  op.dispatch.data.authContext AS dispatchAuthContext,
-  op.dispatch.data.targetField AS dispatchTargetField,
-  op.dispatch.data.targetType AS dispatchTargetType,
-  op.dispatch.data.contextParams AS dispatchContextParams,
-  op.dispatch.data.reads AS dispatchReads,
-  op.dispatch.data.optionalReads AS dispatchOptionalReads,
-  op.dispatch.data.visibleWhen AS dispatchVisibleWhen,
-  op.sensitive.data.value AS sensitive,
-  role.key AS viaRole,
-  role.canonicalName.data.value AS viaRoleName,
-  viaSvcKeys AS viaServices
 `
 
 // edgeTasksQueuedTail presents one `manifest.task.<taskId>` row per OPEN task

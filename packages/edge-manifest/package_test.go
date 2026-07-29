@@ -33,9 +33,9 @@ func TestPackage_NoDDLsOrPermissions(t *testing.T) {
 	}
 }
 
-// manifestLensNames are the sixteen Personal Lenses (edge-showcase-app-
+// manifestLensNames are the fifteen Personal Lenses (edge-showcase-app-
 // design.md §3.2; the five manifest.ent entity lenses per
-// facet-entity-browse-design.md; the staff siblings per
+// facet-entity-browse-design.md; the staff sibling per
 // facet-staff-worlds-design.md §3.3; the workplace-spine work-order lens per
 // its §6 F5; the three provider-hat siblings per persona-worlds-design.md
 // Fire W0). readGrantLensNames are their read-grant
@@ -49,7 +49,7 @@ var manifestLensNames = map[string]bool{
 	"edgeEntitySessions": true, "edgeEntityProviders": true,
 	"edgeEntityBookings": true, "edgeEntityTabs": true, "edgeEntityMenuItems": true,
 	"edgeEntityStudios": true,
-	"edgeCatalogRoles":   true, "edgeTasksQueued": true,
+	"edgeTasksQueued":   true,
 	"edgeStaffWorkOrders":  true,
 	"edgeProviderSchedule": true, "edgeProviderQueue": true,
 }
@@ -67,9 +67,9 @@ var readGrantLensNames = map[string]bool{
 	"edgeManifestProviderReadGrants": true,
 }
 
-func TestPackage_TwentyLenses(t *testing.T) {
-	if got := len(emComposedLenses(t)); got != 20 {
-		t.Fatalf("expected 20 lenses (17 manifest + 3 read-grant producers), got %d", got)
+func TestPackage_NineteenLenses(t *testing.T) {
+	if got := len(emComposedLenses(t)); got != 19 {
+		t.Fatalf("expected 19 lenses (16 manifest + 3 read-grant producers), got %d", got)
 	}
 	names := map[string]bool{}
 	for _, l := range emComposedLenses(t) {
@@ -184,12 +184,13 @@ func TestPackage_LensRowKeysAreManifestNamespaced(t *testing.T) {
 		"edgeEntityTabs":      `"manifest.ent" AS ns`,
 		"edgeEntityStudios":   `"manifest.ent" AS ns`,
 		"edgeEntityMenuItems": `"manifest.ent" AS ns`,
-		// The staff siblings share their non-staff counterpart's namespace on
-		// purpose: same ns + same entityId means an op or task reachable by
-		// both paths projects the identical row under the identical key, and
-		// the renderer never learns which path a row arrived by.
-		"edgeCatalogRoles": `"manifest.op" AS ns`,
-		"edgeTasksQueued":  `"manifest.task" AS ns`,
+		// The staff sibling shares its non-staff counterpart's namespace on
+		// purpose: same ns + same entityId means a task reachable by both
+		// paths projects the identical row under the identical key, and the
+		// renderer never learns which path a row arrived by. edgeCatalog's
+		// own staff path no longer needs this — it is the SAME lens's second
+		// Walk now, not a sibling (§13.7 build order (c)).
+		"edgeTasksQueued": `"manifest.task" AS ns`,
 		// The work-order lens is its own namespace: it answers "what work
 		// exists at my workplace", not "what has been handed to me".
 		"edgeStaffWorkOrders": `"manifest.work" AS ns`,

@@ -15,7 +15,7 @@
 
 ## Overview
 
-`edge-manifest` is the world manifest the Facet edge app (design §4) renders from: **seventeen Personal
+`edge-manifest` is the world manifest the Facet edge app (design §4) renders from: **sixteen Personal
 Lenses** (`packages/edge-manifest/lenses.go`) re-projecting data other packages already own — identity,
 orchestration-base's tasks, service-domain's templates/instances, service-location's residence graph,
 wellness/clinic/café domain state, role-standing grants, maintenance work orders, and the provider-hat
@@ -30,14 +30,14 @@ It is the **first production package** to use the `nats-subject`/Personal Lens a
 shipped latent in Fire 0 (proven only by inline e2e tests, `internal/refractor/personal_lens_pl*_e2e_test.go`)
 with zero real `packages/*` consumers until this one.
 
-Sixteen of the seventeen Personal Lenses are **non-self-anchored**: each keys its rows on a vertex other
+Fifteen of the sixteen Personal Lenses are **non-self-anchored**: each keys its rows on a vertex other
 than the recipient identity (a service template, an op meta, a task, an instance, a session, a provider, a
 booking, a tab, a studio, a menu item, a work order, an appointment, a pane meta). Refractor's D1 gate
 (`internal/refractor/projection/personal.go` → `capabilityread.IsReadable`) drops such a row unless the
 actor's unioned `cap-read.<domain>.<actor>` slices list the anchor's bare NanoID — silently, fail-closed, by
 design (Contract #6 §6.14 Path B). Each such lens declares its actor→anchor reachability ONCE, as one or
-more `AnchorWalk`s (`lenses.go`'s `Walks` field — `edgeEntitySessions` carries two, one per reachability
-path to the same `session` anchor kind, compiled to independent branches and merged by output key,
+more `AnchorWalk`s (`lenses.go`'s `Walks` field — `edgeEntitySessions` and `edgeCatalog` each carry two, one
+per reachability path to the same anchor kind, compiled to independent branches and merged by output key,
 refractor-shared-keyspace-arbitration-design.md §13), and `pkgmgr` compiles both the lens's own cypher and
 the read-grant producer that grants the anchors, from that declaration.
 
@@ -55,7 +55,7 @@ already have on the nats-kv side).
 |---|---|---|
 | `edgeIdentity` | `manifest.me` | the actor's own identity (self-anchored) — display name, claimed status, roles, residence/workplace anchors, the `{me.<type>}` self-anchor set (leaseapp/workplace/provider/instructor/serviceprovider) |
 | `edgeServices` | `manifest.svc.<tplId>` | service templates reachable via the actor's residence → `containedIn*` → `availableAt` chain |
-| `edgeCatalog` | `manifest.op.<opMetaId>` | op metas reachable via a reachable service template's `permitsOperation` link; carries `viaServices`, the list of service keys that permit it |
+| `edgeCatalog` | `manifest.op.<opMetaId>` | op metas reachable via a reachable service template's `permitsOperation` link; carries `viaServices`, the list of service keys that permit it — **or** via a held role's `grantedBy` permission → `forOperation` (the role-standing-grant catalog path, a second `Walk` in the `edgeManifestStaff` domain; see below) |
 | `edgeTasks` | `manifest.task.<taskId>` | open tasks directly `assignedTo` the actor |
 | `edgeInstances` | `manifest.inst.<instId>` | service instances `providedTo` the actor ("my orders") |
 | `edgeEntitySessions` | `manifest.ent.<sessionId>` | wellness class sessions reachable via residence → the studio's `locatedAt` place (`entityType: "session"`, a `dispatch.targetType: "session"` browse target) — **or** via the actor's own bound instructor's `ledBy`-inverse sessions (the provider-hat "my classes to teach" path, a second `Walk` in the `edgeManifestProvider` domain; see below) |
@@ -69,7 +69,7 @@ already have on the nats-kv side).
 
 | Lens | Key | Anchors on |
 |---|---|---|
-| `edgeCatalogRoles` | `manifest.op.<opMetaId>` | op metas reachable via a held role's `grantedBy` permission → `forOperation` — the role-standing-grant catalog path (same row shape as `edgeCatalog`; an op reachable both ways projects an idempotent duplicate) |
+| `edgeCatalog` (2nd `Walk`) | `manifest.op.<opMetaId>` | op metas reachable via a held role's `grantedBy` permission → `forOperation` — the role-standing-grant catalog path; this domain's member is `edgeCatalog`'s second `AnchorWalk`, not a standalone lens (formerly the sibling `edgeCatalogRoles`, folded in per refractor-shared-keyspace-arbitration-design.md §13.7 build order (c) — `viaServices` is anchor-derived so both branches compute it identically, `viaRole`/`viaRoleName` are walk-owned by this branch alone; an op reachable both ways projects one merged row) |
 | `edgeTasksQueued` | `manifest.task.<taskId>` | open tasks `queuedFor` a role the actor holds (FR28) — carries `queuedRole`/`queuedRoleName`; claiming one (`ClaimTask`) moves it to `edgeTasks` |
 | `edgeStaffPanes` | `manifest.pane.<paneMetaId>` | pane meta-vertices reachable over `holdsRole` → `offeredTo` — `{paneId, title, icon, sections}`, the server-pane DESCRIPTOR (not pane rows; see "Server panes" below) |
 | `edgeStaffWorkOrders` | `manifest.work.<workOrderId>` | maintenance work orders at a place the actor `worksAt` (or a place contained in it) — domain-state view, independent of whether a task was ever queued for it |
@@ -107,7 +107,7 @@ a hardcoded client-side type map.
 This page + `lenses.go` are the normative as-built row shapes (design §3.2's JSON is the semantic
 reference — as-built rows flatten its nesting, per its 2026-07-16 amendment; the `vocab` stamp is not
 yet projected and activates at the vocabulary freeze). See design §3.3 for
-the descriptor-vocabulary fields `edgeCatalog`/`edgeCatalogRoles` read back off each op meta's optional
+the descriptor-vocabulary fields `edgeCatalog` (both `Walk`s) read back off each op meta's optional
 `.presentation`/`.inputSchema`/`.fieldDescriptions`/`.dispatch`/`.sensitive` aspects (`pkgmgr.OpMetaSpec`,
 `edge-manifest Fire 1 increment 1`) — an op meta that never adopted the vocabulary still projects a row,
 just with those fields null (design §3.3: "ops without descriptors still render, degraded").
@@ -120,7 +120,7 @@ read-model sections a staff client renders — table, projected columns, filter,
 as DATA (`pkgmgr.PaneSpec`), so the edge client's HOST executes panes generically against the RLS-confined
 Postgres read models (`read_landlord_lease_applications`, `read_clinic_appointments`, `read_visit_series`),
 and a new staff workflow ships as a descriptor edit with zero app change. This is **Path A / RLS**, not the
-Personal-Lens/`nats-subject` mechanism the seventeen lenses above use — `edgeStaffPanes` (in the lens table)
+Personal-Lens/`nats-subject` mechanism the sixteen lenses above use — `edgeStaffPanes` (in the lens table)
 projects only the pane's DESCRIPTOR (id/title/icon/sections) so the client can discover and render it; the
 actual pane ROWS are read separately by the host from Postgres, confined by the reader's workplace grants.
 One pane ships today: `staffWorklist` (front-desk applications-to-review + today's clinic schedule +
@@ -136,12 +136,12 @@ narrowings, each a reasonable v1 cut rather than a correctness gap in what IS bu
 - **`edgeIdentity`'s `anchors`/`roles` arrays** carry no human-readable location TYPE segment (there is no
   vertex-type-from-key function beyond `nanoIdFromKey`, and no string concatenation to synthesize one from
   the key's type segment) — the renderer derives type from the key client-side.
-- **`edgeCatalog`/`edgeTasks`** cover only the service-`permitsOperation` / direct-`assignedTo` reachability
-  paths; their role-derived counterparts are **shipped as sibling lenses** (`edgeCatalogRoles`,
-  `edgeTasksQueued`) rather than folded into the same cypher — this engine has no UNION, so a second
-  independent path in one query would cross-product it. **Still deferred:** the open-task-`forOperation`
-  catalog path — a task's own bound op already rides inline on its `edgeTasks`/`edgeTasksQueued` row, so
-  that gap is "browse all my ops," never "complete my task."
+- **`edgeTasks`** covers only the direct-`assignedTo` reachability path; its role-derived counterpart is
+  **still shipped as a sibling lens** (`edgeTasksQueued`) rather than folded in as a second `Walk` the way
+  `edgeCatalog`'s role path now is (see the Staff lenses table above) — the same multi-`Walk` merge applies,
+  just not yet built (refractor-shared-keyspace-arbitration-design.md §13.7 build order (d), unbuilt).
+  **Still deferred:** the open-task-`forOperation` catalog path — a task's own bound op already rides inline
+  on its `edgeTasks`/`edgeTasksQueued` row, so that gap is "browse all my ops," never "complete my task."
 
 A degenerate `collect(DISTINCT {…})` entry (e.g. `{key:null,name:null}` when an identity holds no role)
 is expected, not a bug — the renderer obligation is the same one `my-tasks.*` rows already carry (design

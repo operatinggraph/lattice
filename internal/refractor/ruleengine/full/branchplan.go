@@ -139,7 +139,6 @@ func ClassifyBranchReturnColumns(branches []*CompiledRule) ([]ReturnColumnPlan, 
 			if commonVars[v] {
 				continue
 			}
-			anchorOnly = false
 			owner := -1
 			for i, own := range branchOwn {
 				if own[v] {
@@ -147,7 +146,22 @@ func ClassifyBranchReturnColumns(branches []*CompiledRule) ([]ReturnColumnPlan, 
 					break
 				}
 			}
-			if owner == -1 || (ownerBranch != -1 && ownerBranch != owner) {
+			if owner == -1 {
+				// v is bound by no branch's own MATCH/OPTIONAL MATCH clauses
+				// at all — it cannot be a walk's provenance var (every real
+				// walk-bound name appears in at least that walk's branchOwn),
+				// so it must be a name scoped entirely to this expression
+				// itself: a pattern comprehension's own freshly-matched node
+				// (e.g. `svc` in `[(op)<-[:permitsOperation]-(svc:service) |
+				// svc.key]`, where `op` is the real, common dependency and
+				// `svc` never exists outside the comprehension). Not an
+				// external dependency, so it contributes nothing to this
+				// column's ownership — same treatment CollectVariableRefs
+				// already gives a *Literal/*ParameterRef leaf.
+				continue
+			}
+			anchorOnly = false
+			if ownerBranch != -1 && ownerBranch != owner {
 				ambiguous = true
 				break
 			}

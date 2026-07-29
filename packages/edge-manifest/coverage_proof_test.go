@@ -176,7 +176,7 @@ func TestManifestAnchorCoverage_ResidentWorld(t *testing.T) {
 	f.assertAnchorsCovered(t, f.key("resident"),
 		[]dataLens{
 			{"edgeServices", emComposedSpec(t, "edgeServices")},
-			{"edgeCatalog", emComposedSpec(t, "edgeCatalog")},
+			{"edgeCatalog", emComposedSpecBranch(t, "edgeCatalog", 0)},
 			{"edgeTasks", emComposedSpec(t, "edgeTasks")},
 			{"edgeInstances", emComposedSpec(t, "edgeInstances")},
 			{"edgeEntitySessions", emComposedSpecBranch(t, "edgeEntitySessions", 0)},
@@ -315,7 +315,7 @@ func TestManifestAnchorCoverage_StaffWorld(t *testing.T) {
 	f.assertAnchorsCovered(t, f.key("tech"),
 		[]dataLens{
 			{"edgeStaffWorkOrders", emComposedSpec(t, "edgeStaffWorkOrders")},
-			{"edgeCatalogRoles", emComposedSpec(t, "edgeCatalogRoles")},
+			{"edgeCatalog (role branch)", emComposedSpecBranch(t, "edgeCatalog", 1)},
 			{"edgeTasksQueued", emComposedSpec(t, "edgeTasksQueued")},
 			{"edgeEntityStudios", emComposedSpec(t, "edgeEntityStudios")},
 		},
