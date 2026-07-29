@@ -972,3 +972,38 @@ consumer on the same identity/role graph in the SAME test (mirroring
 proved works rather than that test's `Reproject`-driven determinism), then drive the same real `ClaimIdentity`
 op. If it still projects cleanly, the remaining live-stack-only candidate (1) needs direct instrumentation of
 the demo box's Refractor instance during a real claim — not another local harness.
+
+## 13.5 Candidate (3) is disproven — a second live consumer/lens does not break the projection either (Winston, 2026-07-29)
+
+**Built `TestRefractor_CapabilityLens_RealClaimIdentityOp_WithEphemeralConsumer_E2E`**
+(`internal/refractor/refractor_claim_batch_real_op_with_ephemeral_e2e_test.go`), the exact combination §13.4's
+checkpoint named: wired identically to §13.4's harness, then added `orchestration-base`'s
+`capabilityEphemeral` lens as a SECOND live, CDC-driven pipeline (`RunOn`/`Run`, not `Reproject`) anchored on
+`identity` — the same anchor type as `capabilityRoles` — so it reacts to the same claimed identity's
+`holdsRole` write and competes for the same adjacency bootstrapper + Core KV read path during the real
+`ClaimIdentity` op. `capabilityEphemeral`'s LensSpec is pulled directly via `orchestration-base.Lenses()`
+(mirroring `refractor_capability_faninstress_e2e_test.go` — the package need not be pkgmgr-installed for its
+Rule to compile and run as a pipeline), so no task/role fixture was needed to get it reacting to the claim.
+
+**Result: it projects, reliably (4/4 runs, `cap.roles.<claimedIdentity>` gains the consumer role within
+milliseconds every time), unaffected by the second live consumer.** This closes candidate (3): a competing
+consumer/lens reacting to the same `holdsRole` link is not the gap either. Combined with §13.2–§13.4, **five
+independent harnesses now all correctly project this exact write**: bare NATS delivery, sequential Put
+through the live pipeline, hand-built atomic-batch commit through the live pipeline, the real op script alone
+through the live pipeline, and now the real op script alongside a second live competing consumer.
+
+**What this narrows the gap to.** Every locally-reproducible candidate (NATS delivery, atomic-batch envelope,
+the real script's own mutation encoding, a second live consumer on the same graph) is now eliminated. The
+only remaining candidate is **(1) production load/timing** — something the demo box's live Refractor instance
+has that no local harness can construct: many rules/consumers reacting to the same CDC stream concurrently
+under real request volume, a warm JetStream with real consumer-group redelivery history, or GC/scheduler
+pressure a single-test-process embedded server never exerts.
+
+**Checkpoint — next fire:** this needs **direct instrumentation of the demo box's live Refractor instance**
+during a real claim, not another local harness — five have now cleared every candidate a local harness can
+even construct. Concretely: add temporary structured logging (or a Health-KV counter) around
+`capabilityRoles`' fan-out enumeration + envelope write for a `holdsRole` grant on the demo box, trigger a
+real claim there, and read back what actually happens to the write (does it fan out at all? does it fan out
+but the KV write itself fail/get overwritten? does it never even reach the pipeline?) — the local harnesses
+prove the *mechanism* is sound, so the gap is now in something about the *live deployment's* runtime
+conditions, which only the live deployment can surface.
