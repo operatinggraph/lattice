@@ -15,21 +15,31 @@
 // binary.
 //
 // Targets are configured explicitly (RuleID + the Into.Key field the
-// identityKey maps to) rather than auto-discovered: Refractor has no
-// registry of lenses by source-vertex-type (lens MATCH clauses are opaque
-// compiled cypher, not a declared field), so an explicit, reviewable
-// allowlist is the grounded mechanism — precedented by how targets are
-// configured elsewhere in this codebase, not inferred by parsing queries.
+// identityKey maps to) rather than discovered by parsing lens MATCH clauses:
+// those are opaque compiled cypher, not a declared field, so an explicit,
+// reviewable allowlist is the grounded mechanism for a lens in general. A
+// cap-read.* PerEntry producer is the one carve-out (SetTargetLister below):
+// its Output descriptor's OutputKeyPattern + EntryKeyColumn ARE declared
+// fields (the same ones sweepEnrolment/ApplyTruncateScope already key
+// structural decisions off), so discovering those targets by pattern is
+// reading declared metadata, not inferring intent from a query — a
+// per-package-generated producer (install-time NanoID RuleID, unknown at
+// binary build time) would otherwise need hand-editing this static list on
+// every package that ships one, and reliably does not (cap-read-per-anchor-
+// grant-keys-design.md's Fire 2 follow-on).
+//
 // A SECURE lens (secureColumns) needs no entry here: its piiKey-CDC-triggered
 // reprojection already scrubs a shredded identity's secure columns to NULL in
 // place (pipeline/secure.go), the stronger guarantee. This allowlist is for
 // plain lenses whose rows should be DELETED outright on a shred. A plain lens
 // only ever projects a sensitive aspect as its ciphertext envelope (general
 // lenses never decrypt), so an un-listed plain lens holds garbage ciphertext
-// after a shred — hygiene, not a plaintext leak. The bootstrap capabilityRead
-// base lens is the first opt-in (a perEntry target, cmd/refractor/main.go);
-// an empty Targets list elsewhere still makes this a harmless no-op consumer
-// that exercises the event, the counters, and the failure-tier path.
+// after a shred — hygiene, not a plaintext leak. Every cap-read.* producer
+// (the bootstrap capabilityRead base lens + every package-generated
+// AnchorWalk producer) is a PerEntry target found via TargetLister, wired in
+// cmd/refractor/main.go; an empty Targets list and a nil TargetLister
+// elsewhere still make this a harmless no-op consumer that exercises the
+// event, the counters, and the failure-tier path.
 //
 // On a nullification failure this raises the privacy-critical failure tier
 // (failure.PrivacyCritical): the affected lens is paused via the control
@@ -47,6 +57,7 @@ import (
 	"log/slog"
 	"math"
 	"strconv"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -108,7 +119,8 @@ type Config struct {
 	// its Pauser/RowNullifier against (cmd/refractor's controlSvc).
 	Control *control.Service
 	// Targets is the explicit, reviewable list of lenses to nullify on shred.
-	// Empty is valid (a no-op sweep) — see package doc.
+	// Empty is valid (a no-op sweep) — see package doc. Additive to whatever
+	// SetTargetLister supplies; neither list replaces the other.
 	Targets []NullifyTarget
 	Logger  *slog.Logger
 
@@ -132,6 +144,42 @@ type Config struct {
 type Manager struct {
 	cfg     Config
 	handled atomic.Uint64
+
+	mu           sync.Mutex
+	targetLister func() []NullifyTarget
+}
+
+// SetTargetLister registers a function returning additional NullifyTarget
+// entries, evaluated fresh on every shred event rather than fixed at
+// construction — the shape a target set needs when it changes as packages
+// install cap-read.* producer lenses at runtime (lens hot-reload, no
+// Refractor restart, install-time NanoID RuleIDs unknown at binary build
+// time). Thread-safe; may be called at any time; a nil fn clears it. Additive
+// to cfg.Targets — never replaces it, so a plain lens's static entry keeps
+// working exactly as before.
+func (m *Manager) SetTargetLister(fn func() []NullifyTarget) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.targetLister = fn
+}
+
+// effectiveTargets returns cfg.Targets plus whatever the current
+// TargetLister reports, without mutating either.
+func (m *Manager) effectiveTargets() []NullifyTarget {
+	m.mu.Lock()
+	lister := m.targetLister
+	m.mu.Unlock()
+	if lister == nil {
+		return m.cfg.Targets
+	}
+	dynamic := lister()
+	if len(dynamic) == 0 {
+		return m.cfg.Targets
+	}
+	out := make([]NullifyTarget, 0, len(m.cfg.Targets)+len(dynamic))
+	out = append(out, m.cfg.Targets...)
+	out = append(out, dynamic...)
+	return out
 }
 
 // New constructs a Manager, applying defaults for the omitted fields.
@@ -210,9 +258,11 @@ func (m *Manager) handleKeyShredded(ctx context.Context, msg substrate.Message) 
 		return substrate.Term
 	}
 
+	targets := m.effectiveTargets()
+
 	notRegistered := false
 	allClean := true
-	for _, target := range m.cfg.Targets {
+	for _, target := range targets {
 		// projectionSeq: a GUARDED nats_kv target (adapter/natskv.go's H4
 		// no-resurrect guard, opted in per-lens via SetGuarded — e.g.
 		// capabilityEphemeral/myTasks) drops a write whose projectionSeq is <=
@@ -309,7 +359,7 @@ func (m *Manager) handleKeyShredded(ctx context.Context, msg substrate.Message) 
 	}
 
 	m.cfg.Logger.Info("refractor keyshredded: identity's projected rows nullified",
-		"identityKey", ev.Payload.IdentityKey, "targets", len(m.cfg.Targets))
+		"identityKey", ev.Payload.IdentityKey, "targets", len(targets))
 	m.handled.Add(1)
 	return substrate.Ack
 }

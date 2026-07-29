@@ -12,6 +12,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -97,6 +98,33 @@ type pipelineEntry struct {
 	// against this — not against the last-seen spec — so a refused update
 	// cannot poison the baseline and wedge the lens.
 	secureColumns []lens.SecureColumn
+}
+
+// capReadShredTargets returns a keyshredded.NullifyTarget for every currently
+// running lens whose Output descriptor is a cap-read.* NATS-KV PerEntry
+// producer — the base capabilityRead lens and every package-generated
+// AnchorWalk producer alike (cap-read-per-anchor-grant-keys-design.md's Fire
+// 2 follow-on). The two fields checked, EntryKeyColumn and OutputKeyPattern,
+// are the same declared descriptor fields sweepEnrolment and
+// ApplyTruncateScope already key structural per-lens decisions off, not a
+// parse of the lens's compiled cypher. Pure over its input so it is testable
+// without a live registry mutex; the caller holds the lock.
+//
+// A hand-authored Postgres GrantTable cap-read producer (e.g.
+// packages/clinic-domain's grant_source lenses) carries no Output descriptor
+// and so is never returned here — a distinct gap this fire does not close.
+func capReadShredTargets(registry map[string]*pipelineEntry) []keyshredded.NullifyTarget {
+	var targets []keyshredded.NullifyTarget
+	for id, entry := range registry {
+		if entry.output == nil || entry.output.EntryKeyColumn == "" {
+			continue
+		}
+		if !strings.HasPrefix(entry.output.OutputKeyPattern, "cap-read.") {
+			continue
+		}
+		targets = append(targets, keyshredded.NullifyTarget{RuleID: id, PerEntry: true})
+	}
+	return targets
 }
 
 func main() {
@@ -199,13 +227,29 @@ func main() {
 	// The KeyShredded nullification listener (vault-crypto-shredding-design.md
 	// §2.4, Fire 4a) — the Refractor half of crypto-shredding's async
 	// finalization; internal/privacyworker (in cmd/processor) is the other,
-	// independent consumer of the same event. The bootstrap capabilityRead
-	// base lens is a perEntry target (cap-read-per-anchor-grant-keys-design.md
-	// §6): a shredded identity's own per-anchor grant children
-	// (cap-read.identity.<id>.<anchorId>) must be enumerated and nullified,
-	// not just their retired legacy parent document (which the base-lens
-	// flip's own per-actor evaluation already tombstones, paired separately).
-	// The privacy service actor (Fire 4b finalization recording) is
+	// independent consumer of the same event. Every cap-read.* NATS-KV
+	// PerEntry producer — the bootstrap capabilityRead base lens and every
+	// package-generated AnchorWalk producer alike — is a perEntry target
+	// (cap-read-per-anchor-grant-keys-design.md §6, Fire 2 follow-on): a
+	// shredded identity's own per-anchor grant children
+	// (cap-read.<domain>.identity.<id>.<anchorId>) must be enumerated and
+	// nullified, not just a retired legacy parent document (which the
+	// producer's own per-actor evaluation already tombstones, paired
+	// separately). SetTargetLister below discovers package-generated
+	// producers dynamically once the lens registry exists. The base lens
+	// stays ALSO listed statically here — deliberately redundant with what
+	// the lister would eventually find — as a floor: it guarantees
+	// effectiveTargets() is never empty at cold boot, so a shred event
+	// redelivered before the lens registry has loaded (Run starts before
+	// bootstrapper.Ready()/src.Start below) correctly hits
+	// ErrRuleNotRegistered → NakWithDelay and retries, instead of an empty
+	// target list vacuously Acking + recording the identity as clean with
+	// nothing actually checked (an adversarial-review-caught regression this
+	// fire must not reintroduce). Hand-authored Postgres GrantTable cap-read
+	// producers (packages/clinic-domain's four) carry no Output descriptor and
+	// so are reached by neither this static entry nor the lister — a distinct,
+	// unclosed gap, not this fire's scope (filed on the board separately). The
+	// privacy service actor (Fire 4b finalization recording) is
 	// graph-discovered — absent on a pre-v15 kernel, which disables recording
 	// without disabling nullification.
 	privacyCtx, privacyCancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -251,17 +295,27 @@ func main() {
 
 	hb.KeyShreddedHandledTotalProvider = keyShredded.HandledTotal
 	hb.VaultCallsTotalProvider = vaultCalls.Load
-	go func() {
-		if err := keyShredded.Run(ctx); err != nil && ctx.Err() == nil {
-			logger.Error("keyshredded listener exited with error", "err", err)
-		}
-	}()
 
 	var (
 		mu       sync.Mutex
 		registry = make(map[string]*pipelineEntry)
 		wg       sync.WaitGroup
 	)
+
+	// capReadShredTargets is re-derived from the live registry on every shred
+	// event (not computed once here) so a package installed after this line
+	// runs still gets its cap-read.* producer nullified — see its doc.
+	keyShredded.SetTargetLister(func() []keyshredded.NullifyTarget {
+		mu.Lock()
+		defer mu.Unlock()
+		return capReadShredTargets(registry)
+	})
+
+	go func() {
+		if err := keyShredded.Run(ctx); err != nil && ctx.Err() == nil {
+			logger.Error("keyshredded listener exited with error", "err", err)
+		}
+	}()
 
 	// Registry size for the heartbeater's metrics.lensesRegistered
 	// (lens-registry-restart-integrity-design.md §4 Fire B step 1) — the

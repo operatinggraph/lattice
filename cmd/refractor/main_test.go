@@ -202,3 +202,83 @@ func TestHotReloadKeyColumns_MatchesActivation(t *testing.T) {
 		}
 	}
 }
+
+// TestCapReadShredTargets proves the discovery filter matches exactly a
+// cap-read.* PerEntry producer — the base capabilityRead lens's shape and a
+// package-generated AnchorWalk producer's shape alike — and excludes every
+// adjacent shape a live registry can hold: a non-cap-read PerEntry lens
+// (e.g. a future entryKeyColumn adopter elsewhere), a cap-read.* lens that
+// is NOT PerEntry (impossible today but not structurally ruled out), a
+// plain doc-mode lens with no Output descriptor at all, a lens whose
+// OutputKeyPattern merely contains "cap-read." without it being the prefix
+// (must not false-positive on a substring match), and a lens whose pattern
+// starts with the literal "cap-read" but not the "cap-read." separator (must
+// not false-positive on a prefix check that dropped the trailing dot).
+func TestCapReadShredTargets(t *testing.T) {
+	registry := map[string]*pipelineEntry{
+		"base-lens": {
+			output: &lens.OutputDescriptorSpec{
+				OutputKeyPattern: "cap-read.{actorSuffix}",
+				EntryKeyColumn:   "anchorId",
+			},
+		},
+		"edge-manifest-producer": {
+			output: &lens.OutputDescriptorSpec{
+				OutputKeyPattern: "cap-read.edgeManifestReadGrants.{actorSuffix}",
+				EntryKeyColumn:   "anchorId",
+			},
+		},
+		"unrelated-perentry-lens": {
+			output: &lens.OutputDescriptorSpec{
+				OutputKeyPattern: "cap.ephemeral.{actorSuffix}",
+				EntryKeyColumn:   "anchorId",
+			},
+		},
+		"capread-not-perentry": {
+			output: &lens.OutputDescriptorSpec{
+				OutputKeyPattern: "cap-read.legacy.{actorSuffix}",
+			},
+		},
+		"doc-mode-no-output": {},
+		"substring-not-prefix": {
+			output: &lens.OutputDescriptorSpec{
+				OutputKeyPattern: "unroutedTasks.cap-read.{actorSuffix}",
+				EntryKeyColumn:   "anchorId",
+			},
+		},
+		"no-separator-after-cap-read": {
+			output: &lens.OutputDescriptorSpec{
+				OutputKeyPattern: "cap-readable.{actorSuffix}",
+				EntryKeyColumn:   "anchorId",
+			},
+		},
+	}
+
+	targets := capReadShredTargets(registry)
+
+	got := make(map[string]bool, len(targets))
+	for _, tgt := range targets {
+		if !tgt.PerEntry {
+			t.Fatalf("target %q must be PerEntry", tgt.RuleID)
+		}
+		got[tgt.RuleID] = true
+	}
+	want := map[string]bool{"base-lens": true, "edge-manifest-producer": true}
+	if len(got) != len(want) {
+		t.Fatalf("got %v, want exactly %v", got, want)
+	}
+	for id := range want {
+		if !got[id] {
+			t.Fatalf("expected %q to be discovered, got %v", id, got)
+		}
+	}
+}
+
+// TestCapReadShredTargets_Empty proves an empty registry (nothing activated
+// yet, e.g. very early boot) yields nil rather than panicking or erroring —
+// SetTargetLister's caller treats an empty result as a vacuous no-op.
+func TestCapReadShredTargets_Empty(t *testing.T) {
+	if got := capReadShredTargets(map[string]*pipelineEntry{}); len(got) != 0 {
+		t.Fatalf("expected no targets from an empty registry, got %v", got)
+	}
+}

@@ -138,6 +138,96 @@ func TestNew_NilControl_Panics(t *testing.T) {
 	})
 }
 
+// TestHandleKeyShredded_TargetLister_DynamicTargetNullified proves a target
+// supplied only by SetTargetLister (nothing in the static Targets config) is
+// attempted exactly like a configured one — the discovery path a
+// package-generated cap-read.* producer's install-time NanoID RuleID needs,
+// since it cannot be hand-listed at Manager construction.
+func TestHandleKeyShredded_TargetLister_DynamicTargetNullified(t *testing.T) {
+	svc := control.NewService()
+	rowSetNullifier := &fakeRowSetNullifier{}
+	svc.RegisterRowSetNullifier("lens-dynamic", rowSetNullifier)
+	m := newTestManager(t, svc, nil)
+	m.SetTargetLister(func() []NullifyTarget {
+		return []NullifyTarget{{RuleID: "lens-dynamic", PerEntry: true}}
+	})
+
+	decision := m.handleKeyShredded(context.Background(), keyShreddedMsg(t, "vtx.identity.AAAAAAAAAAAAAAAAAAAA"))
+
+	require.Equal(t, substrate.Ack, decision)
+	require.Equal(t, []string{"vtx.identity.AAAAAAAAAAAAAAAAAAAA"}, rowSetNullifier.calls)
+}
+
+// TestHandleKeyShredded_TargetLister_AdditiveToStaticTargets proves the
+// dynamic list supplements, never replaces, the static Targets config — a
+// plain lens's explicit entry is still attempted alongside whatever the
+// lister supplies.
+func TestHandleKeyShredded_TargetLister_AdditiveToStaticTargets(t *testing.T) {
+	svc := control.NewService()
+	staticNullifier := &fakeNullifier{}
+	dynamicNullifier := &fakeRowSetNullifier{}
+	svc.RegisterRowNullifier("lens-static", staticNullifier)
+	svc.RegisterRowSetNullifier("lens-dynamic", dynamicNullifier)
+	m := newTestManager(t, svc, []NullifyTarget{{RuleID: "lens-static", KeyField: "identityKey"}})
+	m.SetTargetLister(func() []NullifyTarget {
+		return []NullifyTarget{{RuleID: "lens-dynamic", PerEntry: true}}
+	})
+
+	decision := m.handleKeyShredded(context.Background(), keyShreddedMsg(t, "vtx.identity.AAAAAAAAAAAAAAAAAAAA"))
+
+	require.Equal(t, substrate.Ack, decision)
+	require.Len(t, staticNullifier.calls, 1, "the static target must still be attempted")
+	require.Len(t, dynamicNullifier.calls, 1, "the TargetLister target must also be attempted")
+}
+
+// TestHandleKeyShredded_TargetLister_ReEvaluatedPerEvent proves the lister is
+// called fresh on every event rather than cached at SetTargetLister time —
+// the property that lets a package installed AFTER Manager construction
+// start getting nullified without any Refractor restart.
+func TestHandleKeyShredded_TargetLister_ReEvaluatedPerEvent(t *testing.T) {
+	svc := control.NewService()
+	nullifier := &fakeRowSetNullifier{}
+	m := newTestManager(t, svc, nil)
+	installed := false
+	m.SetTargetLister(func() []NullifyTarget {
+		if !installed {
+			return nil
+		}
+		return []NullifyTarget{{RuleID: "lens-late", PerEntry: true}}
+	})
+
+	decision := m.handleKeyShredded(context.Background(), keyShreddedMsg(t, "vtx.identity.AAAAAAAAAAAAAAAAAAAA"))
+	require.Equal(t, substrate.Ack, decision, "an empty lister result is a vacuous no-op, not a failure")
+
+	svc.RegisterRowSetNullifier("lens-late", nullifier)
+	installed = true
+	decision = m.handleKeyShredded(context.Background(), keyShreddedMsg(t, "vtx.identity.BBBBBBBBBBBBBBBBBBBB"))
+
+	require.Equal(t, substrate.Ack, decision)
+	require.Equal(t, []string{"vtx.identity.BBBBBBBBBBBBBBBBBBBB"}, nullifier.calls, "the second event must reach the just-installed lens")
+}
+
+// TestHandleKeyShredded_TargetLister_EmptyDuringBoot_StaticFloorStillNaks
+// pins a regression an adversarial review caught: cmd/refractor keeps a
+// static base-lens Targets entry ALONGSIDE the dynamic TargetLister
+// specifically because the lens registry a TargetLister reads is empty for a
+// window at process start (before the lens source's initial catch-up). If a
+// deployment relied on the lister alone, a shred event delivered in that
+// window would see zero targets and Ack + record finalization having
+// nullified nothing. With the static entry present, the effective target
+// list can never be empty, so an unregistered lens correctly forces
+// NakWithDelay instead.
+func TestHandleKeyShredded_TargetLister_EmptyDuringBoot_StaticFloorStillNaks(t *testing.T) {
+	svc := control.NewService() // the base lens has not registered yet — boot window
+	m := newTestManager(t, svc, []NullifyTarget{{RuleID: "base-lens", PerEntry: true}})
+	m.SetTargetLister(func() []NullifyTarget { return nil }) // registry still empty
+
+	decision := m.handleKeyShredded(context.Background(), keyShreddedMsg(t, "vtx.identity.AAAAAAAAAAAAAAAAAAAA"))
+
+	require.Equal(t, substrate.NakWithDelay, decision, "an empty dynamic result must not let the static floor's own not-yet-registered target Ack as clean")
+	require.Equal(t, uint64(0), m.HandledTotal(), "nothing was actually nullified; this must not count as handled")
+}
+
 // TestHandleKeyShredded_NullifyFails_RaisesPrivacyCriticalPausesNoRetry is the
 // failure-tier proof (vault-crypto-shredding-design.md §6 "a forced
 // nullification failure raises the privacy-critical tier — lens halts, no
