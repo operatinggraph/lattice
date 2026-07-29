@@ -299,7 +299,9 @@ func TestClinicPatientsRead_ProjectsContactEnvelopesWhole(t *testing.T) {
 // identifiedBy link (never given contact, or created before Fire 5b-iii's
 // re-model) still projects its roster row: identity_key/email/phone all null,
 // never a dropped row or an engine error (mirrors
-// TestLandlordLeaseApplicationsRead_ContactlessApplicantStillProjects).
+// TestLandlordLeaseApplicationsRead_ContactlessApplicantStillProjects). A
+// patient with no appointments also has an empty workplace fan-out, so
+// authz_anchors carries only the patient's own self-anchor.
 func TestClinicPatientsRead_NoIdentityLinkStillProjects(t *testing.T) {
 	if testing.Short() {
 		t.Skip("requires NATS")
@@ -315,6 +317,38 @@ func TestClinicPatientsRead_NoIdentityLinkStillProjects(t *testing.T) {
 	require.Nil(t, v["identity_key"])
 	require.Nil(t, v["email"])
 	require.Nil(t, v["phone"])
+	require.Equal(t, []string{f.ids["alice"]}, anchorStrings(t, v["authz_anchors"]),
+		"no appointments -> empty workplace fan-out, self-anchor only")
+}
+
+// TestClinicPatientsRead_ProjectsWorkplaceAnchor — the fix for the front-desk
+// empty-roster bug (verticals.md "Front desk can't read the patient roster"):
+// authz_anchors carries the patient's own NanoID plus the practicesAt building
+// of every provider the patient has an appointment with, mirroring
+// clinicAppointmentsReadSpec's own anchor one hop further out. This is what
+// lets service-location's staffReadGrants (cap-read.staff, anchored on the
+// building a front-desk actor worksAt) match a roster row, not only the
+// reserved WildcardAnchor holder.
+func TestClinicPatientsRead_ProjectsWorkplaceAnchor(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newLensFixture(t)
+	f.vtx(t, "alice", "patient")
+	f.aspect(t, "alice", "demographics", "patientDemographics", map[string]any{"fullName": "Alice Rivera"})
+	f.vtx(t, "appt", "appointment")
+	f.vtx(t, "drsam", "provider")
+	f.vtx(t, "riverside", "building")
+	f.edge(t, "forPatient", "appt", "alice")
+	f.edge(t, "withProvider", "appt", "drsam")
+	f.edge(t, "practicesAt", "drsam", "riverside")
+
+	rows := f.project(t, clinicPatientsReadSpec)
+	require.Len(t, rows, 1, "exactly one roster row per patient regardless of appointment count")
+	v := rows[0].Values
+
+	require.ElementsMatch(t, []string{f.ids["alice"], f.ids["riverside"]}, anchorStrings(t, v["authz_anchors"]),
+		"authz_anchors must carry the patient's own NanoID plus the workplace building of a provider it has an appointment with")
 }
 
 // TestClinicPatientReadGrants_SelfAnchorsEachPatient — the cap-read.clinic.patient

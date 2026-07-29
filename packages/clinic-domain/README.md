@@ -21,7 +21,7 @@ Design: [`_bmad-output/implementation-artifacts/clinic-domain-design.md`](../../
 | **Aspect types** (9) | `patientDemographics`, `patientBookingGuard`, `providerProfile`, `providerBookingGuard`, `providerHours`, `providerTimeOff`, `appointmentSchedule`, `appointmentStatus`, `appointmentEncounter` |
 | **Links** (3) | `forPatient` (appointment → patient), `withProvider` (appointment → provider), `identifiedBy` (patient → identity, optional — links a pre-minted `vtx.identity` carrying sensitive contact) |
 | **Operations** (12) | `CreatePatient` · `TombstonePatient` · `CreateProvider` · `TombstoneProvider` · `SetProviderProfile` · `SetProviderHours` · `SetProviderTimeOff` · `CreateAppointment` · `RescheduleAppointment` · `SetAppointmentStatus` · `RecordEncounter` · `TombstoneAppointment` |
-| **Projection lenses** (6) | `clinicAppointments` → `clinic-appointments` · `clinicProviders` → `clinic-providers` · `clinicPatients` → `clinic-patients` (all `nats-kv`, `full` engine) · `clinicAppointmentsRead` / `providerAppointmentsRead` / `clinicPatientsRead` (all `postgres`, `full` engine, **Protected** — Contract #6 §6.14 RLS, D1.5: patient-self / provider-self / staff-wildcard-only) |
+| **Projection lenses** (6) | `clinicAppointments` → `clinic-appointments` · `clinicProviders` → `clinic-providers` · `clinicPatients` → `clinic-patients` (all `nats-kv`, `full` engine) · `clinicAppointmentsRead` / `providerAppointmentsRead` / `clinicPatientsRead` (all `postgres`, `full` engine, **Protected** — Contract #6 §6.14 RLS, D1.5: patient-self / provider-self / patient-self-plus-workplace-plus-staff-wildcard) |
 
 Every op is granted to the `operator` role at `scope: any` (`permissions.go`) — no new capability
 surface; the trusted-tool operator already holds standing permission, identical to `loftspace-domain`.
@@ -181,11 +181,16 @@ app-layer filter).
   projection needed).
 - **`providerAppointmentsRead`** → `read_provider_appointments`. **Provider-self** audience ("My Schedule") —
   `withProvider` is the REQUIRED anchor walk, mirroring `clinicAppointmentsRead`.
-- **`clinicPatientsRead`** → `read_clinic_patients`. Clinic-wide patient-context switcher, **staff-wildcard-only**
-  (no per-patient self-anchor — the whole roster has no single-row owner). `email`/`phone` are **Secure-Lens**
-  columns (Contract #3 §3.10, Vault Fire 5, mirroring `landlordLeaseApplicationsRead`): decrypted at projection
-  from the patient's optional `identifiedBy` identity, null for a patient with no linked identity or a
-  shredded one — display enrichment only, never a row gate.
+- **`clinicPatientsRead`** → `read_clinic_patients`. Clinic-wide patient-context switcher. Each row anchors on
+  its own patient NanoID (its self-anchor — the whole ROSTER still has no single-row owner) plus every
+  workplace building a provider practises at, for a provider this patient has an appointment with — mirroring
+  `clinicAppointmentsRead`'s own `practicesAt` anchor one hop further out. A worksAt-anchored front-desk actor
+  therefore reads every patient touching its building via service-location's `staffReadGrants`
+  (`cap-read.staff`), a WildcardAnchor holder reads the whole roster, and a patient reads only their own row
+  (`patientIdentityReadGrants`). `email`/`phone` are **Secure-Lens** columns (Contract #3 §3.10, Vault Fire 5,
+  mirroring `landlordLeaseApplicationsRead`): decrypted at projection from the patient's optional
+  `identifiedBy` identity, null for a patient with no linked identity or a shredded one — display enrichment
+  only, never a row gate.
 
 ## Reminders, recurring schedules, and the sibling package
 
