@@ -1113,3 +1113,76 @@ multi-walk lenses, not just edge-manifest), plus the live `verify-package-edge-m
   if a future engine feature introduces a NEW way to bind a name without a top-level `MATCH` clause
   — the fix's reasoning (`owner == -1` ⟺ expression-local) would need re-grounding against that
   feature, not assumed to still hold.
+
+## 17. Build note — build order (d): tasks unification (Lattice Steward, 2026-07-29)
+
+`packages/edge-manifest`'s `edgeTasks` (direct-`assignedTo` path, `domainBase`) and
+`edgeTasksQueued` (role-`queuedFor` path, `domainStaff`) gain a single lens: a second `AnchorWalk`
+on `edgeTasks`, `edgeTasksQueued` retired. Same shape as (c) — a real, divergent-column, walk-owned
+merge, no new primitive — with one correction the worked examples didn't carry over verbatim.
+
+- **`assignee` cannot reuse the head-bound `identity`.** Every branch binds `identity` to the fixed
+  actor (`$actorKey`), regardless of which Walk reached the task — so the pre-merge `edgeTasks`
+  tail's `identity.key AS assignee` would, unmerged, silently misreport the viewer as a task's
+  assignee on the QUEUED branch, where the task is only claimable, not assigned. Fixed: `assignee`
+  is re-derived via its own `OPTIONAL MATCH (task)-[:assignedTo]->(assignee:identity)` off the
+  anchor `task` — anchor-derived by construction (both branches re-match the same edge identically),
+  correct on both: the real assignee once claimed, null while still queued. `queuedRole`/
+  `queuedRoleName` are `ColumnWalkOwned` by the queued branch exactly as `viaRole`/`viaRoleName` are
+  in (c) — `role` bound only by that Walk's `chainHeldRoles` chain, null-by-unbound-evaluation on
+  the direct-assign branch.
+- **The two paths are mutually exclusive by construction**, unlike (c)'s catalog (where one op can
+  legitimately be reachable both ways at once): `ClaimTask`'s atomic `queuedFor`→`assignedTo` swap
+  means a task is never bound by both links simultaneously, and `queuedFor` is 1:1 task→role (a
+  task queues to exactly one role), so — unlike catalog's `grantedBy`/`permitsOperation` fan-out —
+  the queued branch's own cypher execution can never yield two rows for one task anchor. Checked
+  against the live install (below): the shared merge code that (c) exposed a real defect in
+  (§ residuals) has no reachable trigger here.
+- **Test fallout from the new columns:** the merge's per-key JSON-equality migration tests
+  (`composed_test.go`) compared full row shapes against pre-conversion frozen fixtures; both
+  `assignee` (now present on the queued branch, absent from the retired `edgeTasksQueued`'s frozen
+  spec) and `queuedRole`/`queuedRoleName` (now present on the direct-assign branch, absent from
+  `edgeTasks`' own frozen spec) are real column additions a single-lens frozen fixture can't
+  express. Both `frozenEdgeTasksSpec` and `frozenEdgeTasksQueuedSpec` are removed; the two
+  migration subtests fall back to content assertions (open task projects, closed task is excluded
+  by the hoisted status filter, `assignee` resolves on the direct-assign branch) instead of full
+  row-set equality — the same substitution (c) did not need only because catalog's column set
+  happened to be unchanged by the merge.
+- **Consumers updated:** `package.go`/`manifest.yaml` (fifteen lenses, description + version
+  0.14.11→0.14.12), `docs/components/edge-manifest.md`, `packages/edge-manifest/{package_test.go,
+  coverage_proof_test.go,composed_test.go}`, `packages/maintenance-domain/integration_test.go`
+  (comment only). `scripts/verify-package-edge-manifest.go`'s `emExpectedLenses` never listed
+  `edgeTasksQueued`, so no change needed there — a pre-existing gap in that map's coverage (it
+  omits several other shipped lenses too), unrelated to this fire.
+- **Live verification:** `make reinstall-package PKG=packages/edge-manifest` diff-applied onto the
+  running dev stack (fromVersion 0.14.11→0.14.12, 6 tombstoned / 6 updated); `go run
+  ./scripts/verify-package-edge-manifest.go` passed 88/88 assertions, confirming the installed
+  `edgeTasks` aspect carries `cypherBranches` with both branches projecting `manifest.task`.
+  Refractor's log shows zero errors for `edgeTasks`' own ruleId across the reinstall's CDC-cascade
+  window (`lens MATCH hot-reloaded` confirms the hot-reload path, no restart).
+
+**Gates:** `go build ./...`, `make vet`, `golangci-lint run` (`packages/edge-manifest`,
+`packages/maintenance-domain`, `internal/refractor/adapter`, `internal/refractor/control`,
+`internal/edge/store`), `STRICT=1 lint-conventions.go`, `lint-package-standard.go`,
+`lint-package-version.go`, `lint-lens-anchors.go`, `lint-facet-discovery.go`, full `go test ./...
+-p 4` (113 packages green), plus the live `verify-package-edge-manifest` run above.
+
+**Found live, filed, NOT this fire's defect.** While reading Refractor's log to confirm a clean
+CDC-cascade window for this fire's own `edgeTasks` ruleId, `edgeCatalog`'s ruleId
+(`ZvZ3EmZvEvM6X9XPZvZ3`) was continuously emitting `pipeline: branch merge: column "viaRole"
+disagrees across walks` errors — first occurrence `2026-07-29T05:51:52`, well before this fire's
+`07:33` install, so pre-existing and unrelated to tasks. Root cause (read, not guessed): the merge
+code (a)/(c) built assumes a `ColumnWalkOwned` column is single-valued per anchor per branch, which
+holds for `edgeTasks`' queued branch (§ above) but not for `edgeCatalog`'s role branch — a
+multi-hat actor holding 2+ roles that each `grantedBy` the SAME op (via 2 different permissions)
+makes that ONE branch's own cypher execution yield 2 rows for one op anchor with 2 different
+`role` values, which the merge (correctly, per its own contract) refuses rather than picks one of.
+Filed as its own board row rather than fixed here — the shared merge primitive is security/
+capability-plane-adjacent and deserves its own grounding pass, not a hot-fix appended to an
+unrelated feature's commit.
+
+**Residuals, honestly named:**
+- **(b)/(c)/(d) are all now shipped** — every row of §13.7's build order is built; the shared
+  keyspace item closes.
+- **The `edgeCatalog` multi-hat merge defect above** is filed to `lattice.md`, not fixed in this
+  fire.
