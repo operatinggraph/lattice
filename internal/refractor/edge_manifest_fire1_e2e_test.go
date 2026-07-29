@@ -184,7 +184,8 @@ func activateEdgeManifestLenses(t *testing.T, h *pl2Harness) {
 		require.NoError(t, err)
 
 		spec := lens.LensSpec{
-			ID: lensID, CanonicalName: ls.CanonicalName, TargetType: "nats_subject", CypherRule: ls.Spec,
+			ID: lensID, CanonicalName: ls.CanonicalName, TargetType: "nats_subject",
+			CypherRule: ls.Spec, CypherBranches: ls.SpecBranches,
 			TargetConfig: json.RawMessage(`{"subjectPrefix":"` + subjectPrefix + `","stream":"` + syncStream +
 				`","personal":true,"key":` + string(keyJSON) + `}`),
 		}
