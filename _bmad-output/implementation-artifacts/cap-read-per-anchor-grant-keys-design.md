@@ -539,6 +539,46 @@ run ./...` (0 issues), `STRICT=1 lint-conventions.go`, `lint-lens-anchors.go`, `
 `STRICT=1 lint-package-standard.go`, `lint-package-version.go`, full `go test ./...` (113 packages, 0
 failures).
 
+**Fire 4 (2026-07-28, worktree `.claude/worktrees/cap-read-shred-nullify-producers`, merged to main
+`3aa45a5a`): shred-nullify dynamic discovery — shipped.** Closed the residual Fire 2 named at its own
+completion (§ above): every package-generated `cap-read.*` NATS-KV producer's grants were never wired
+into `keyshredded`'s `NullifyTarget` list, since a package-generated lens ID is an install-time NanoID
+unreachable by a static, hand-authored config entry. `keyshredded.Manager` gained `SetTargetLister(func()
+[]NullifyTarget)` — mutex-guarded, evaluated fresh on every shred event, additive to the existing static
+`Targets`. `cmd/refractor/main.go` wires a pure `capReadShredTargets(registry)` as the lister: it scans
+the live lens registry (already the file's source of truth elsewhere — `LensCountProvider`,
+`registeredLensIDs`) for any lens whose declared Output descriptor carries `EntryKeyColumn` set and an
+`OutputKeyPattern` prefixed `cap-read.` — the same declared fields `sweepEnrolment`/`ApplyTruncateScope`
+already key structural decisions off, not a parse of the lens's opaque compiled cypher (the reason the
+package doc gives for NOT auto-discovering lenses in general does not apply to an already-declared
+field). A future package's cap-read producer now needs zero keyshredded wiring.
+
+3-layer adversarial review (opus) caught one real regression before merge: removing the static base-lens
+`Targets` entry entirely (in favor of 100%-dynamic discovery) let a shred event redelivered before the
+lens registry populates (`keyShredded.Run` starts before `bootstrapper.Ready()`/`src.Start`) see an
+EMPTY effective target list and Ack + record `RecordShredFinalization{projectionsNullified}` having
+nullified nothing — worse than the prior behavior, which correctly forced `NakWithDelay` via
+`ErrRuleNotRegistered`. Fixed by keeping the base lens ALSO listed statically as a floor: `Targets` is
+explicitly additive to the lister, so the effective list can never be empty, restoring the fail-closed
+retry. Pinned by `TestHandleKeyShredded_TargetLister_EmptyDuringBoot_StaticFloorStillNaks`. A second,
+lower-severity finding (mutation-testing survived a "drop the trailing dot" mutant on the prefix check)
+was also closed with an added test fixture.
+
+**Named, not fixed — two residuals, both filed as their own board rows (Security & trust boundary):**
+hand-authored Postgres GrantTable `cap-read.*` producers (`packages/clinic-domain`'s four `grant_source`
+lenses) carry no `Output` descriptor, so neither the static floor nor the lister reaches them — a
+shredded identity's `actor_read_grants` rows from those survive, a distinct transport/gap from this
+fire's NATS-KV scope. And a latent one: `capReadShredTargets` filters on the descriptor only, not on
+adapter capability — a future `cap-read.*` PerEntry lens targeting Postgres (unreachable today,
+`anchorwalk.go` hardcodes `nats-kv`) would hit `DeleteAllForActor`'s non-`ErrRuleNotRegistered` error path
+and pause the auth-plane lens (an outage), a risk the removed static-list operator gate previously made
+structurally impossible.
+
+Gates green: `go build ./...`, `make vet`, `golangci-lint run ./...` (0 issues), `STRICT=1
+lint-conventions.go`, `go test -race ./internal/refractor/keyshredded/... ./cmd/refractor/...`, full `go
+test ./...` (one pre-existing unrelated flake in `packages/lease-signing`, confirmed by 3x isolated
+re-run — the documented Starlark-250ms-wall-budget-under-parallel-load flake, not touched by this fire).
+
 **Author:** Winston (Designer fire, 2026-07-25); increment 2 built by Winston (Lattice Steward fire, 2026-07-27);
 increment 3 built by Winston (Lattice Steward fire, 2026-07-27); increment 4 built by Winston (Lattice
 Steward fire, 2026-07-28); increment 5 built by Winston (Lattice Steward fire, 2026-07-28); increment 6
@@ -546,7 +586,7 @@ built by Winston (Lattice Steward fire, 2026-07-28); increment 7 built by Winsto
 2026-07-28); increment 8 built by Winston (Lattice Steward fire, 2026-07-28); increment 9 built by
 Winston (Lattice Steward fire, 2026-07-28); increment 9 deployed live by Winston (Lattice Steward fire,
 2026-07-28); Fire 2 built by Winston (Lattice Steward fire, 2026-07-28); Fire 3 built by Winston (Lattice
-Steward fire, 2026-07-28)
+Steward fire, 2026-07-28); Fire 4 built by Winston (Lattice Steward fire, 2026-07-28)
 **Backlog:** Stream-2 Security & trust boundary — *[Refractor] A `cap-read` document has no size bound* (★★, M)
 **Owning components:** `internal/refractor/{projection,pipeline,adapter,capabilityread,keyshredded}` (mechanism), `internal/bootstrap/lenses.go` + `internal/pkgmgr/anchorwalk.go` (producers), `packages/edge-manifest` (+ any package shipping a `cap-read.*` NATS-KV producer). Docs: `docs/contracts/06-capability-kv.md` §6.13/§6.14 (edit prepared uncommitted in the working tree), `docs/components/refractor.md`.
 

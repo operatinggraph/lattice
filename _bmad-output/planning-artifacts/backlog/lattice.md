@@ -131,26 +131,28 @@ designed-through, but the *fork decision* + the *contract commit* are Andrew's.
 > next ready security/trust-boundary item is **[appsession] co-hosted-page session fixation**
 > (★ S–M, dev/demo only). The **script live-read
 > budget** (★★ M) is now **✅ shipped** 2026-07-28 (Done log) — kv.Read/kv.Links share a
-> per-execution round-trip ceiling. The **cap-read per-anchor grant keys** fix (★★ L) is also
-> **✅ shipped** — Fires 1-3 all landed 2026-07-28 (Done log); the shred-nullify follow-on for
-> package-generated producers is its own filed row below. `appsession`'s OIDC design stays
+> per-execution round-trip ceiling. The **cap-read per-anchor grant keys** initiative is now fully
+> **✅ shipped** — Fires 1-4 all landed 2026-07-28 (Done log), incl. the shred-nullify dynamic-discovery
+> follow-on; two narrower residuals it surfaced (Postgres GrantTable producers, a latent non-NATS-KV
+> pause risk) are freshly filed rows above. `appsession`'s OIDC design stays
 > 🗄️ **shelved** (revive: first real-IdP deployment) — unrelated to the showcase.
 > Every `✅ ratified` row is done or driver-blocked; the rest are Whetstone's or parking-lot.
 > A stale callout starves the lane — whoever ships next renames this.
 >
 > 📎 **Refractor is drained.** All seven buildable rows shipped 2026-07-25 against
 > [refractor-open-rows-fire-briefs.md](../../implementation-artifacts/refractor-open-rows-fire-briefs.md);
-> the cap-read row above (now build-ready) and the HA-NATS-blocked rollup are what remain.
+> the two freshly-filed cap-read residuals above and the HA-NATS-blocked rollup are what remain.
 
 ### Security & trust boundary
 | Item | What it is | Imp | Size | State |
 |---|---|---|---|---|
 | **[Processor] Whole-set `state` exposure remains an existence oracle for sensitive classes** | A guard keyed on consumption still splits on a surplus sensitive declared read when the script takes a whole-set exposure (`items()`/`values()`/rendering `state`) — the flip is correct, so only read-scope validation of the declared set closes it. | ★ | S | 🚧 seq behind read-path auth (D1) · [design §2.2](../../implementation-artifacts/sensitive-read-tracker-consumption-design.md) · no live victim (no package script does it) |
+| **[Refractor] Postgres GrantTable `cap-read.*` producers are not shred-nullified** | `packages/clinic-domain`'s four `grant_source` lenses carry no Output descriptor, so `keyshredded` (static or dynamic) never reaches them — a shredded identity's `actor_read_grants` rows survive. Distinct transport from the NATS-KV per-anchor mechanism. | ★★ | S–M | 📋 ready · [design](../../implementation-artifacts/cap-read-per-anchor-grant-keys-design.md) Fire 4 |
+| **[Refractor] A cap-read.\* PerEntry lens on a non-NATS-KV target would pause on shred** | `capReadShredTargets` discovers by descriptor only, not adapter capability — only `NatsKVAdapter` implements `PrefixKeyLister`. A future Postgres PerEntry producer would hit a non-`ErrRuleNotRegistered` error and pause the auth-plane lens. Unreachable today (`anchorwalk.go` hardcodes `nats-kv`). | ★ | S | 📋 ready · [design](../../implementation-artifacts/cap-read-per-anchor-grant-keys-design.md) Fire 4 |
 | **[appsession] A co-hosted page can plant a session cookie (fixation)** | Cookies ignore port, so a sibling localhost app's page can `document.cookie` an ABSENT session cookie (HttpOnly blocks overwrite, not create) and the shared dev key makes it verify — the victim browses as an attacker-chosen identity. The origin gate cannot reach it (no request made); `__Host-` or a cookie-bound token closes it. | ★ | S–M | 📋 ready · dev/demo only (shared key) · [kit](../../../docs/components/appsession.md) |
 | **[Processor] step6's own instanceOf-chain DDL resolution reads live Core KV with no shared budget** | `connInstanceOfReader.LiveInstanceOfTargets` (step6_resolve_ddl.go) issues its own prefix-list + per-key GETs, up to `maxInstanceOfHops`=4 chain hops per mutation — a separate live-read surface from the kv.Read/kv.Links budget (script-live-read-budget fire), not covered by it. Already soft-bounded by the hop cap + the atomic-batch mutation ceiling, not unbounded, but worth its own accounting pass. | ★ | S | 📋 ready · found reviewing the script-live-read-budget fix |
 | **[packages] ~20 read-posture comments assert hydration-time fatality** | `packages/*` DDL comments + two READMEs still say a declared-but-absent read faults "before the script runs" (identity-domain, service-domain, privacy-base, objects-base, orchestration-base, clinic/loftspace READMEs), as does `docs/contracts/10-orchestration-substrate.md:238`. Doc-only sweep. | ★ | S | 📋 ready |
 | **Starlark 250ms wall budget fails installs under parallel test load** | `go test ./...` at default `-p` reds a different package-install test each run with `ScriptTimeout: script exceeded wall budget 250ms` — reproduced on unmodified `main`, so it predates any one fire. Costs every fire an investigation to rule out its own change. | ★★ | S–M | 📋 ready |
-| **[Refractor] A package-generated `cap-read.*` producer's grants are not shred-nullified** | Only the base lens is wired into `keyshredded`'s `NullifyTarget` list — a shredded identity's package-domain grants (e.g. edge-manifest's) survive. Needs per-producer `NullifyTarget` wiring (lens IDs are install-time NanoIDs, not a static list). | ★★ | S–M | 📋 ready · [design](../../implementation-artifacts/cap-read-per-anchor-grant-keys-design.md) |
 | **[appsession] The production IdP posture cannot open a session** | `setCookie` runs only under a non-nil `Signer`, so with `_JWT_PUBLIC_KEY`/`_ISSUER` set nothing can issue the cookie — the verify-only posture is unreachable (401 everywhere), and `/api/session/refresh` 404s so every FE write path dies with it. Design: the kit becomes the OIDC code-flow RP. | ★★ | L | 🗄️ shelved (revive: first real-IdP deployment) · ✅ design Andrew-ratified 2026-07-25 · [design](../../implementation-artifacts/appsession-oidc-production-signin-design.md) |
 | **Multi-hat `scope=any`+`scope=self` first-match over-confines** | `matchPlatformPermission` returns on the first operationType match regardless of scope, and `capabilityRoles` collects roles unordered — so a consumer+staff identity (e.g. seed-showcase `seedSamMultiHat`) can authorize their OWN cafe tab as scope=any, losing the self exemption. Fail-closed; bites a multi-hat who works and lives in different buildings. | ★ | S–M | 📋 ready · no live victim (showcase multi-hat has no leaseapp) |
 | **NATS write restriction — Fire 4 (production mTLS)** | Fires 1–3 closed the fabricated-KV-write surface at the account level; the remaining fire binds subject permissions to client certificates instead of NKeys, which only matters off the dev stack. | ★ now / ★★ prod | M | 🗄️ shelved (revive: production deployment) · [design](../../implementation-artifacts/nats-account-write-restriction-design.md) §Fire-3-status |
@@ -222,6 +224,7 @@ Real but low-value; do **not** spend design or build effort here unless Andrew g
 
 One line per shipped item (`date · SHA · [tag] title`). Oldest roll to `archive/` past ~25.
 
+- 2026-07-28 · `3aa45a5a` · [Refractor] every package-generated cap-read.* NATS-KV producer is now shred-nullified — dynamic TargetLister discovers by declared descriptor field, static base-lens floor keeps a boot-window regression closed
 - 2026-07-28 · `533a0b71` · [Edge] hydrationComplete boot-gate now matches the hydrate RPC's own target revision, not the first (possibly stale-replayed) marker seen
 - 2026-07-28 · `6c720482` · [chronicler,orchestration-base] eventStream ColumnMapping gains ClearOn — a Loom re-dispatch's patternStarted no longer carries the prior run's ended_at/failure_reason onto the new running row
 - 2026-07-28 · `c08c28be` · [Processor] sensitive predicate now covers instanceOf-chained classes; pkgmgr rejects Sensitive on a non-aspectType DDL, closing the link/event gap by construction
