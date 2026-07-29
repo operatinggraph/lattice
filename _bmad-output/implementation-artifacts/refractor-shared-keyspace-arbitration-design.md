@@ -1009,6 +1009,20 @@ withdrawn coalesce shape.
 `lint-lens-anchors.go`, `lint-facet-discovery.go`, full `go test ./... -p 4`, plus the live
 `verify-package-edge-manifest` run above.
 
+**CI caught a real gap the local suite and the live-stack check both missed:**
+`internal/refractor/edge_manifest_fire1_e2e_test.go`'s `activateEdgeManifestLenses` hand-constructs
+each `lens.LensSpec` from the composed `pkgmgr.LensSpec` (its own embedded-NATS harness, not the
+installer path `make reinstall-package` exercises) and only ever copied `CypherRule: ls.Spec` —
+for `edgeEntitySessions` that field is now empty (`ls.SpecBranches` carries it), so `translateSpec`
+correctly refused with "cypherRule required" and the test hung to its 20s deadline before failing.
+Neither the package-level tests (which go through `pkgmgr.ExpandReadGrantWalks` +
+`emComposedSpecBranch` directly) nor the live `reinstall-package` verification (which goes through
+the real installer's `build.go` marshal) exercise this SPECIFIC hand-rolled activation helper — it
+is `internal/refractor`'s own fixture, a second, independent place a `pkgmgr.LensSpec` gets copied
+into a `lens.LensSpec`. Fixed by also copying `CypherBranches: ls.SpecBranches` (`502bc421`). Worth
+naming for (c)/(d): grep for other hand-rolled `lens.LensSpec{...}` fixtures before assuming the
+package + live-install checks are exhaustive — they were not, here.
+
 **Residuals, honestly named:**
 - **(c) catalog and (d) tasks remain unbuilt** — the filed defect (catalog) and the tasks pair,
   same build order, per §13.7. Catalog's columns are NOT byte-identical (divergent `viaServices`/
