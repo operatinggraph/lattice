@@ -2306,7 +2306,7 @@ async function submitComplete(ev) {
     const opts = desc.landlordLeg
       ? landlordSubmit()
       : desc.taskLeg
-      ? { authContext: { task: task.taskKey } }
+      ? { authContext: { task: task.taskKey, target: target } }
       : undefined;
     const reply = await submitOp({
       operationType: task.operationName,
