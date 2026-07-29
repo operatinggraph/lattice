@@ -173,7 +173,7 @@ const COMPLETIONS = {
   // standing grant for that either).
   ResolveWorkOrder: {
     title: "Resolve work order",
-    klass: "workorder",
+    klass: "workOrder",
     targetField: "workOrderKey",
     taskLeg: true,
     fields: [{ name: "notes", label: "What did you do?", required: true }],
@@ -2174,7 +2174,7 @@ async function reportIssue(ev) {
   try {
     const reply = await submitOp({
       operationType: "ReportIssue",
-      class: "workorder",
+      class: "workOrder",
       reads: [loc],
       payload: { summary, priority, location: loc },
     });
@@ -2338,7 +2338,7 @@ async function submitComplete(ev) {
     toast(desc.title + " — done.", "ok");
     if (desc.klass === "renewal") {
       loadRenewals();
-    } else if (desc.klass === "workorder") {
+    } else if (desc.klass === "workOrder") {
       loadTasks();
     } else {
       loadTasks();
