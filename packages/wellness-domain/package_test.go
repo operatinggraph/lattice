@@ -42,10 +42,10 @@ func TestPackage_StructurePins(t *testing.T) {
 	if got, want := len(Package.DDLs), 13; got != want {
 		t.Errorf("DDLs: got %d, want %d", got, want)
 	}
-	if got, want := len(Package.Lenses), 6; got != want {
+	if got, want := len(Package.Lenses), 7; got != want {
 		t.Errorf("Lenses: got %d, want %d", got, want)
 	}
-	if got, want := len(Package.Permissions), 13; got != want {
+	if got, want := len(Package.Permissions), 14; got != want {
 		t.Errorf("Permissions: got %d, want %d", got, want)
 	}
 	if got, want := len(Package.OpMetas), 7; got != want {
@@ -54,7 +54,7 @@ func TestPackage_StructurePins(t *testing.T) {
 	if got, want := len(Package.Roles), 0; got != want {
 		t.Errorf("Roles: got %d, want %d", got, want)
 	}
-	if got, want := len(Package.WeaverTargets), 0; got != want {
+	if got, want := len(Package.WeaverTargets), 1; got != want {
 		t.Errorf("WeaverTargets: got %d, want %d", got, want)
 	}
 	if got, want := len(Package.LoomPatterns), 0; got != want {
@@ -88,7 +88,7 @@ func TestPackage_StructurePins(t *testing.T) {
 			t.Errorf("DDLs[%d]: got %s/%s, want %s/%s", i, got.CanonicalName, got.Class, want.name, want.class)
 		}
 	}
-	for i, want := range []string{"wellnessStudios", "wellnessSessions", "wellnessBookings", "wellnessInstructors", "wellnessMembers", "wellnessIdentitiesRead"} {
+	for i, want := range []string{"wellnessStudios", "wellnessSessions", "wellnessBookings", "wellnessInstructors", "wellnessMembers", "wellnessIdentitiesRead", "wellnessOrphanedBookingSettlement"} {
 		if i >= len(Package.Lenses) {
 			break
 		}
@@ -116,6 +116,7 @@ func TestPackage_StructurePins(t *testing.T) {
 		{"CreateInstructor", "any", operatorOnly}, {"TombstoneInstructor", "any", operatorOnly},
 		{"SetInstructorProfile", "any", []string{"operator", "provider"}},
 		{"BindInstructorIdentity", "any", operatorOnly},
+		{"ReleaseOrphanedBooking", "any", operatorOnly},
 	}
 	if got := len(Package.Permissions); got != len(wantPerms) {
 		t.Errorf("Permissions: got %d, want %d", got, len(wantPerms))

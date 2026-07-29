@@ -34,11 +34,18 @@ const WellnessInstructorsBucket = "wellness-instructors"
 // bucket, never Core KV. The Refractor auto-creates the bucket on lens load.
 const WellnessMembersBucket = "wellness-members"
 
-// Lenses returns the package's five flat projection lenses plus
-// wellnessIdentitiesRead, the one protected Postgres/RLS layer this package
-// carries. No aggregation (no WITH), so OPTIONAL-matched neighbour bindings
-// are live directly in RETURN — the same §4-B1 no-WITH-drop shape
-// clinic-domain's lenses use.
+// OrphanedBookingSettlementTarget is the §10.8 TargetID ==
+// wellnessOrphanedBookingSettlement's OutputKeyPattern prefix — the §10.2↔§10.8
+// binding Weaver reads (targets.go).
+const OrphanedBookingSettlementTarget = "wellnessOrphanedBookingSettlement"
+
+// Lenses returns the package's five flat projection lenses,
+// wellnessIdentitiesRead (the one protected Postgres/RLS layer this package
+// carries), and wellnessOrphanedBookingSettlement (the missing_release
+// convergence lens targets.go's WeaverTargets dispatches
+// ReleaseOrphanedBooking over). No aggregation (no WITH) on the five flat
+// ones, so OPTIONAL-matched neighbour bindings are live directly in RETURN —
+// the same §4-B1 no-WITH-drop shape clinic-domain's lenses use.
 func Lenses() []pkgmgr.LensSpec {
 	return []pkgmgr.LensSpec{
 		{
@@ -117,6 +124,23 @@ func Lenses() []pkgmgr.LensSpec {
 			},
 			SecureColumns: []pkgmgr.SecureColumn{
 				{Column: "name", IdentityKeyColumn: "identity_key", Field: "value"},
+			},
+		},
+		{
+			CanonicalName:  OrphanedBookingSettlementTarget,
+			Class:          "meta.lens",
+			Adapter:        "nats-kv",
+			Bucket:         "weaver-targets",
+			Engine:         "full",
+			Spec:           orphanedBookingSettlementSpec,
+			ProjectionKind: "actorAggregate",
+			Output: &pkgmgr.OutputDescriptorSpec{
+				AnchorType:       "booking",
+				OutputKeyPattern: OrphanedBookingSettlementTarget + ".{actorSuffix}",
+				BodyColumns:      []string{"violating", "missing_release", "entityKey", "bookingKey", "sessionKey", "status"},
+				EmptyBehavior:    "delete",
+				KeyColumn:        "entityId",
+				Freshness:        "auto",
 			},
 		},
 	}
@@ -295,6 +319,50 @@ RETURN
   se.schedule.data.startsAt AS startsAt,
   se.schedule.data.endsAt AS endsAt,
   id.key AS bookerKey`
+
+// orphanedBookingSettlementSpec is the one-row-per-booking convergence
+// cypher: TombstoneSession deliberately does not cascade (package.go), so a
+// called-off class otherwise leaves its live bookings, claimed seat cells and
+// double-book guards stranded forever. `sessionKey` is read off the
+// booking's OWN .status aspect (the single-anchor idiom CreateBooking now
+// stamps there, ddls.go), not walked via forSession — the walk is exactly
+// what CAN'T answer this question, since a tombstoned target vertex simply
+// drops the OPTIONAL MATCH edge (se null), leaving no way to tell "session
+// legitimately absent" apart from "session tombstoned"; the aspect field
+// survives the session's own tombstone because it lives on the booking, not
+// the session.
+//
+//   - `missing_release` — the booking is still in `booked` status, carries a
+//     session anchor, and that session is no longer LIVE (`se` null via the
+//     OPTIONAL MATCH — the forSession link itself is untouched by
+//     TombstoneSession, only the session vertex is gone). Weaver dispatches
+//     ReleaseOrphanedBooking{bookingKey} (targets.go), which re-reads and
+//     re-confirms the session is dead before releasing anything — the lens
+//     row is a candidate, not a trusted command. Once released the booking
+//     itself is tombstoned, so the anchor row (`b:booking`) stops existing
+//     and the gap converges by the row disappearing, the same
+//     EmptyBehavior:"delete" shape every actorAggregate target here uses.
+//
+// A booking already attended/noShow, or one whose session is still live,
+// never violates — SetBookingAttendance and CancelBooking are the paths that
+// own those, this lens only ever answers for a class that was called off out
+// from under a still-`booked` seat.
+const orphanedBookingSettlementSpec = `MATCH (b:booking {key: $actorKey})
+OPTIONAL MATCH (b)-[:forSession]->(se:session)
+WITH
+  b.key AS entityKey,
+  b.status.data.value AS status,
+  b.status.data.session AS sessionKey,
+  se.key AS liveSessionKey
+RETURN
+  entityKey AS actorKey,
+  entityKey,
+  entityKey AS bookingKey,
+  sessionKey,
+  status,
+  ((status = 'booked') AND (sessionKey <> null) AND (liveSessionKey = null)) AS missing_release,
+  ((status = 'booked') AND (sessionKey <> null) AND (liveSessionKey = null)) AS violating
+`
 
 // wellnessIdentitiesReadSpec projects one row per NAMED identity — the
 // roster wellness-app resolves the signed-in actor's own name against. The

@@ -83,6 +83,7 @@ func domainCapDoc() *processor.CapabilityDoc {
 			{OperationType: "CreateBooking", Scope: "any"},
 			{OperationType: "CancelBooking", Scope: "any"},
 			{OperationType: "SetBookingAttendance", Scope: "any"},
+			{OperationType: "ReleaseOrphanedBooking", Scope: "any"},
 		},
 		ServiceAccess:   []processor.ServiceAccessEntry{},
 		EphemeralGrants: []processor.EphemeralGrant{},
@@ -1045,6 +1046,126 @@ func TestTombstoneSession_ReleasesStudioSlotCells(t *testing.T) {
 	_, outcome := createSession(t, ctx, conn, cp, cons, "wdcreatesessio000010", studioKey, "Power Sculpt", "2026-07-08T09:00:00Z", "2026-07-08T09:30:00Z", 20)
 	if outcome != processor.OutcomeAccepted {
 		t.Fatalf("CreateSession on freed cells outcome = %v, want Accepted", outcome)
+	}
+}
+
+// TestReleaseOrphanedBooking_ReleasesSeatAndGuardAfterSessionTombstoned proves
+// the convergence-target op TombstoneSession's deliberate no-cascade
+// (package.go) leaves for Weaver: once a session is tombstoned out from under
+// a still-`booked` booking, ReleaseOrphanedBooking{bookingKey} — no session
+// param, unlike CancelBooking — reads the booking's own .status.session
+// anchor, releases the seat cell and the per-(session, booker) double-book
+// guard, and soft-deletes the booking, the same footprint CancelBooking
+// leaves. The guard release is proven positively: the SAME booker can book a
+// brand-new session afterward, which would DoubleBook-reject if the guard
+// (keyed only on booker id, not session) had leaked across sessions — it
+// isn't, so this also confirms the guard was scoped to the dead session's own
+// key, not the booker's alone.
+func TestReleaseOrphanedBooking_ReleasesSeatAndGuardAfterSessionTombstoned(t *testing.T) {
+	ctx, conn := setupDomainEnv(t)
+	cp, cons := newDomainPipeline(t, ctx, conn, "orphanrelease")
+
+	studioKey := createStudio(t, ctx, conn, cp, cons, "wdorphanstudio000001", "Flow Room")
+	sessionKey, _ := createSession(t, ctx, conn, cp, cons, "wdorphansessio000001", studioKey, "Vinyasa Flow", "2026-07-08T09:00:00Z", "2026-07-08T09:30:00Z", 1)
+	bookerKey := seedIdentity(t, ctx, conn, "BBWELLBKERURP1HJKMNP")
+	bookingKey, bookingOutcome := createBooking(t, ctx, conn, cp, cons, "wdorphanbookin000001", sessionKey, bookerKey, "")
+	if bookingOutcome != processor.OutcomeAccepted {
+		t.Fatalf("CreateBooking outcome = %v, want Accepted", bookingOutcome)
+	}
+
+	tombstoneReqID := testutil.GenReqID("wdorphantombst000001")
+	tombstoneEnv := &processor.OperationEnvelope{
+		RequestID:     tombstoneReqID,
+		Lane:          processor.LaneDefault,
+		OperationType: "TombstoneSession",
+		Actor:         domainActorKey,
+		SubmittedAt:   "2026-07-07T12:10:00Z",
+		Class:         "session",
+		Payload:       json.RawMessage(`{"sessionKey":"` + sessionKey + `","studio":"` + studioKey + `"}`),
+		ContextHint: &processor.ContextHint{Reads: []string{
+			sessionKey, sessionKey + ".schedule",
+			atStudioLnkKey(t, sessionKey, studioKey),
+		}},
+	}
+	testutil.PublishOp(t, conn, tombstoneEnv)
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
+
+	// The booking is left live and still `booked` — exactly the leak this op
+	// exists to drain.
+	if !keyExists(t, ctx, conn, bookingKey) {
+		t.Fatalf("booking must still be live immediately after TombstoneSession (no cascade)")
+	}
+
+	releaseReqID := testutil.GenReqID("wdorphanreleas000001")
+	releaseEnv := &processor.OperationEnvelope{
+		RequestID:     releaseReqID,
+		Lane:          processor.LaneDefault,
+		OperationType: "ReleaseOrphanedBooking",
+		Actor:         domainActorKey,
+		SubmittedAt:   "2026-07-07T12:15:00Z",
+		Class:         "booking",
+		Payload:       json.RawMessage(`{"bookingKey":"` + bookingKey + `"}`),
+		ContextHint: &processor.ContextHint{Reads: []string{
+			bookingKey, bookingKey + ".status", sessionKey,
+		}},
+	}
+	testutil.PublishOp(t, conn, releaseEnv)
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
+
+	if keyExists(t, ctx, conn, bookingKey) {
+		t.Fatalf("booking must be tombstoned after ReleaseOrphanedBooking")
+	}
+	if keyExists(t, ctx, conn, sessionKey+".seat1") {
+		t.Fatalf("seat1 must be released after ReleaseOrphanedBooking")
+	}
+
+	// Positive proof the double-book guard released too: the same booker,
+	// booking a DIFFERENT session, is accepted (DoubleBooked would reject
+	// only if the guard leaked past the dead session).
+	otherSessionKey, _ := createSession(t, ctx, conn, cp, cons, "wdorphansessio000002", studioKey, "Power Sculpt", "2026-07-09T09:00:00Z", "2026-07-09T09:30:00Z", 1)
+	_, outcome := createBooking(t, ctx, conn, cp, cons, "wdorphanbookin000002", otherSessionKey, bookerKey, "")
+	if outcome != processor.OutcomeAccepted {
+		t.Fatalf("same booker on a different session after release outcome = %v, want Accepted", outcome)
+	}
+}
+
+// TestReleaseOrphanedBooking_RejectsWhenSessionStillLive proves the
+// defense-in-depth re-check: ReleaseOrphanedBooking trusts nothing about why
+// it was dispatched and independently confirms the booking's session is
+// genuinely dead before releasing anything. A live session must go through
+// CancelBooking instead.
+func TestReleaseOrphanedBooking_RejectsWhenSessionStillLive(t *testing.T) {
+	ctx, conn := setupDomainEnv(t)
+	cp, cons := newDomainPipeline(t, ctx, conn, "orphanstilllive")
+
+	studioKey := createStudio(t, ctx, conn, cp, cons, "wdorphanstudio000002", "Flow Room")
+	sessionKey, _ := createSession(t, ctx, conn, cp, cons, "wdorphansessio000003", studioKey, "Vinyasa Flow", "2026-07-08T09:00:00Z", "2026-07-08T09:30:00Z", 1)
+	bookerKey := seedIdentity(t, ctx, conn, "BBWELLBKERURP2HJKMNP")
+	bookingKey, _ := createBooking(t, ctx, conn, cp, cons, "wdorphanbookin000003", sessionKey, bookerKey, "")
+
+	releaseReqID := testutil.GenReqID("wdorphanreleas000002")
+	releaseEnv := &processor.OperationEnvelope{
+		RequestID:     releaseReqID,
+		Lane:          processor.LaneDefault,
+		OperationType: "ReleaseOrphanedBooking",
+		Actor:         domainActorKey,
+		SubmittedAt:   "2026-07-07T12:15:00Z",
+		Class:         "booking",
+		Payload:       json.RawMessage(`{"bookingKey":"` + bookingKey + `"}`),
+		ContextHint: &processor.ContextHint{Reads: []string{
+			bookingKey, bookingKey + ".status", sessionKey,
+		}},
+	}
+	testutil.PublishOp(t, conn, releaseEnv)
+	outcome := testutil.DriveOne(t, ctx, cp, cons, "")
+	if outcome != processor.OutcomeRejected {
+		t.Fatalf("ReleaseOrphanedBooking against a live session outcome = %v, want Rejected (SessionStillLive)", outcome)
+	}
+	if !keyExists(t, ctx, conn, bookingKey) {
+		t.Fatalf("booking must remain live — the release must not have applied")
+	}
+	if !keyExists(t, ctx, conn, sessionKey+".seat1") {
+		t.Fatalf("seat1 must remain claimed — the release must not have applied")
 	}
 }
 

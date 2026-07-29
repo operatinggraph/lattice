@@ -615,13 +615,19 @@ async function renderMyClasses() {
   });
 }
 
+// A null sessionName means the class was called off (TombstoneSession kills
+// the session vertex; wellnessOrphanedBookingSettlement/ReleaseOrphanedBooking
+// (wellness-domain) then drains the booking itself, so this only ever renders
+// in the brief window before that convergence catches up — the Cancel button
+// still works meanwhile, it just has nothing useful left to release.
 function myClassCard(b) {
   const id = domId(b.bookingKey);
+  const cancelled = !b.sessionName;
   return (
     '<div class="card">' +
     '<span class="badge ' + (b.rate === "resident" ? "posted" : "open") + '">' + esc(b.rate || "standard") + "</span>" +
-    '<div class="who">' + esc(b.sessionName || "?") + "</div>" +
-    '<div class="meta">' + esc(fmtRange(b.startsAt, b.endsAt)) + "</div>" +
+    '<div class="who">' + (cancelled ? "Class cancelled" : esc(b.sessionName)) + "</div>" +
+    '<div class="meta">' + (cancelled ? "The studio called off this class." : esc(fmtRange(b.startsAt, b.endsAt))) + "</div>" +
     '<div class="card-actions"><button id="mycancel-' + id + '" class="danger">Cancel</button></div>' +
     "</div>"
   );

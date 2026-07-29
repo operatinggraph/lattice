@@ -132,5 +132,11 @@ func Permissions() []pkgmgr.PermissionSpec {
 			Note:          "Grants the operator alone the right to bind an existing instructor to its login identity. The bind mints the identity-domain `provider` role; it is operator-only to match its precondition CreateInstructor (also operator-only) and to keep the role-minting ceremony off the front-desk grant, mirroring clinic-domain BindProviderIdentity.",
 			GrantsTo:      []string{"operator"},
 		},
+		{
+			OperationType: "ReleaseOrphanedBooking",
+			Scope:         "any",
+			Note:          "Grants the operator alone the right to release a booking orphaned by a called-off class. The Weaver service actor holds the operator role (bootstrap primordial grant) — this is the ONLY grant its wellnessOrphanedBookingSettlement directOp dispatch (targets.go) needs; no consumer/front-of-house path exists because the op carries no caller-supplied session to bind a self- or workplace-scope guard to.",
+			GrantsTo:      []string{"operator"},
+		},
 	}
 }
