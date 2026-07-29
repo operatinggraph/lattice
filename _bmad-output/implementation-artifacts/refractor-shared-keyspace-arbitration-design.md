@@ -10,8 +10,14 @@ and `sharesKeyspaceWith` declaration are **WITHDRAWN** — they were arbitration
 workaround. Body rewritten to the surviving shape below (banner-rewrites-body rule); the
 first-draft adversarial pass **✅ RUN** — its surviving findings shaped §3.3/§3.4 (§9 records the
 disposition of all findings, including the withdrawn ones).
-Author: Winston (Designer fire, 2026-07-27) · Lattice lane (Stream 2, [Refractor] / [Pkgmgr]).
-Backlog row: *"Two lenses sharing one IntoKey race per column"*.
+Author: Winston (Designer fires, 2026-07-27 · 2026-07-29) · Lattice lane (Stream 2, [Refractor] /
+[Pkgmgr]). Backlog row: *"Two lenses sharing one IntoKey race per column"*.
+
+**§13 — the composition re-decision — 📐 awaiting-Andrew (2026-07-29).** U1's *compilation* was
+wrong three increments running (§10–§12); §13 replaces it (one query per walk, merged by output
+key) and rewrites §3.1's compilation bullet and §2.3's catalog/tasks factoring in place. The
+ratified shape, the census verdict, Fires U2/G/A3 and the no-escape-hatch policy are **unchanged**.
+**Build §13.7's order, not §3.1's compilation bullet.**
 
 > **Ratified shape (Andrew, 2026-07-27), two lines.** Same-target-same-key multi-writer is not a
 > pattern to arbitrate — it is a shape to **eliminate**: (U1) pkgmgr lenses gain **multiple
@@ -99,8 +105,8 @@ a UNION workaround, disjoint only by vertex-type prefixes in the key values.
 | Pair | What it actually is | The requirement-free factoring |
 |---|---|---|
 | Sessions | Byte-identical bodies; only reachability/grant domain differs | **One projection lens, two walks** (U1). The split was pure vocabulary artifact |
-| Catalog | An enrichment: one row per op, columns from two paths | **One lens**: both paths as OPTIONAL MATCH + `collect(DISTINCT …)` aggregation — expressible since `1b9852f2` fixed composed-collect dedup; U1 supplies the two grant domains |
-| Tasks | State-disjoint rows (`assignedTo` xor `queuedFor`) | **One lens, two chains**, branch-specific nullable columns (`assignee` null when queued, `queuedRole` null when assigned); one evaluation observes one state (per-key memo + the ratified evaluation-consistency design's edge memo) |
+| Catalog | An enrichment: one row per op, columns from two paths | **One lens**, ~~both paths as OPTIONAL MATCH + `collect(DISTINCT …)` aggregation~~ → **one query per walk, rows merged by output key** (corrected by §13.4: aggregation absorbs a cross-product's duplicates, it does not turn a join into a union). U1 supplies the two grant domains |
+| Tasks | State-disjoint rows (`assignedTo` xor `queuedFor`) | **One lens, two walks** (~~two chains in one query~~ — same §13.4 correction), branch-specific nullable columns (`assignee` null when queued, `queuedRole` null when assigned) resolved as walk-owned at merge; one evaluation observes one state (per-key memo + the ratified evaluation-consistency design's edge memo) |
 
 Cross-target composition (Postgres SQL join; Edge client joining two key namespaces) remains the
 sanctioned reader-side union — Andrew's model, unchanged. **Within one target, disjoint keys,
@@ -130,10 +136,15 @@ migrated mechanically — the fire's call). Semantics:
   `ReadGrantDomains`, as today) and its own chains; **all walks in one lens must share the
   lens's anchor type/var** — a lens still projects one entity kind (Contract #6's one-RETURN
   -shape policy), fail-closed at expansion.
-- The compiled prelude is the actor head + **every** chain as `OPTIONAL MATCH`; the anchor is
-  reachable via *any* walk; the existing null-skip/realness handling covers path-less rows. The
-  tail aggregates per path with `collect(DISTINCT …)` — the discipline `1b9852f2` made sound
-  and the A3a audit enforces corpus-wide.
+- **Compilation — SUPERSEDED by §13.2. Do not build the text struck below.**
+  ~~The compiled prelude is the actor head + **every** chain as `OPTIONAL MATCH`; the anchor is
+  reachable via *any* walk.~~ False: the engine composes clauses as a **nested-loop join**, so a
+  second walk can only filter the first walk's anchors (shared var) or cross-product with them
+  (renamed + `coalesce`) — either way an anchor reachable *only* via walk 2 is dropped. Proved by
+  increments 1–3 (§10, §11, §12); the analysis is §13.1. **Each walk compiles as its own query
+  with the lens's shared tail, and Refractor merges the branches' rows by output key** (§13.2).
+  The tail still aggregates per path with `collect(DISTINCT …)` — the discipline `1b9852f2` made
+  sound and the A3a audit enforces corpus-wide.
 - Per-domain grant producers: unchanged (already per-domain, §2.1).
 
 **Unification (same fire, edge-manifest release):** catalog pair → one `edgeCatalog` (walks:
@@ -483,3 +494,219 @@ Steward build increment. **Board:** `lattice.md`'s shared-keyspace row moves to 
 this correction — *not* `🏗️ building` a pair — until §12 resolves. The sessions-pair worktree was
 discarded (clean `go build`, but shipping it would have silently dropped a dual-hat actor's
 instructor-led sessions); no code from this fire landed.
+
+---
+
+## 13. The composition re-decision — §12's fork is false; both roads need one missing primitive
+
+**Status: 📐 awaiting-Andrew (ratification).** Author: Winston (Designer fire, 2026-07-29), at
+Andrew's direction after §12 halted increment 3 and flagged `lattice-designer`. Nothing from
+increments 1–2 is withdrawn; §3.1's *compilation* text is rewritten in place (below), and §2.3's
+catalog/tasks factoring is corrected — both rested on the same false premise §12 disproved.
+
+### For Andrew (one-look ratification block)
+
+**What it does (two lines).** A multi-walk Personal lens stops compiling to **one query with N
+`OPTIONAL MATCH` chains** and starts compiling to **N queries, one per walk — each byte-identical
+to the sibling lens that ships and works today** — which Refractor evaluates independently and
+**merges by output key** before the write path. The anchor set becomes the union of the walks'
+anchor sets (§12's dropped rows), and each RETURN column is taken from the walk that owns it.
+
+**The one thing to understand before ratifying.** §12 offers a fork — *real UNION for Personal
+lenses* vs *N queries merged by the caller* — and it is a **false fork**: both roads need the same
+thing, and neither road is the thing. UNION **concatenates** row sets; it does not **merge** them.
+Run the catalog pair through UNION and an op reachable via both a service and a role emits **two
+rows under one IntoKey** — one carrying `viaServices`, one carrying `viaRoles` — which is precisely
+the intra-lens duplicate §3.4's A3b guard exists to catch and precisely the last-writer-wins column
+flap this whole row was filed for. The missing primitive is not a union operator; it is a
+**deterministic per-key row merge**. Once that is built, *where* the N branches execute is a
+plumbing choice, and the cheap plumbing wins.
+
+**Fork — where the N branches execute. RESOLVED: N compiled queries per lens (Option 2).**
+- **Option 2 (recommended).** Each walk compiles as its own complete query with the lens's shared
+  tail. Zero grammar, zero visitor, zero new engine construct. Each branch is *exactly the query
+  shape that ships today as a sibling lens*, so the evaluation half is proven by the running
+  system and only the merge is new. Cost goes from **multiplicative to additive** — it deletes the
+  N×M cross-product §2.2 already names as the expensive workaround.
+- **Option 1 (rejected).** UNION inside one compiled rule for Personal lenses would **reverse
+  §3.2's ratified scope-down** ("a Personal tail carrying UNION is refused — declare `Walks`
+  instead"), add visitor/executor surface, *and still need the merge*. Worse on every axis.
+
+**I was wrong last turn and am correcting it.** I suggested building **Fire U2 first** so Option 1
+would become a scope-widening of existing machinery. Grounding killed it: U2's UNION serves
+*genuine row-set unions* — `one-bill`'s heterogeneous anchors with **disjoint keys and no merge**.
+Personal walk composition is an *anchor-set union with a per-key column merge*. Different problem,
+different primitive. **U2 stays exactly as ratified, independent, buildable any time, unblocked and
+unblocking.** No sequencing dependency in either direction.
+
+**Frozen-contract change: NONE.** No author-facing vocabulary change either — `Walks` is unchanged;
+only what it compiles to changes. Package authors write what they write today.
+
+### 13.1 Why no single query can express this (the premise §3.1 and §2.3 both assumed)
+
+The engine's clause composition is a **nested-loop join**: `applyMatch`
+(`internal/refractor/ruleengine/full/executor.go:169-208`) expands *every* binding from the prior
+clause through the next. Two walks that depend only on the actor therefore cross-product. Given
+walk 0 reaching ops {A, B} and walk 1 reaching {B, C}, the correct answer is **three rows**
+(A service-only, B both, C role-only), and no single-query shape produces it:
+
+| Shape | Result | Why |
+|---|---|---|
+| Shared anchor var (inc 1, §3.1 as written) | A, B — **C lost** | A re-referenced variable is a same-node join constraint, never a fresh scan (`matchPath` :306-326, `traverseRel` :668-679). Walk 1 can only *filter* walk 0's anchors. **Loud** — fails anchor coverage. |
+| Per-walk rename + `coalesce` (inc 2, shipped) | A, B — **C lost** | 2×2 cross-product; both branches non-null on every row once both walks match anything, so `coalesce` returns branch 0 every time. **Silent** — plausible non-empty rows, just short. This is §12. |
+| `UNWIND (collect(w0) + collect(w1))` | would work | `UNWIND` is explicitly refused at the visitor (`visitor.go:145-146`), so this is engine work of the same order as UNION — and still leaves the provenance tail to re-derive per anchor. Rejected. |
+| Real UNION branches | A, B, B, C | Correct anchor set, **two rows for B**. Concatenation, not merge. §13's premise. |
+
+The producer side is untouched and stays correct: `generateProducerSpec` emits
+`collect(DISTINCT {…}) + collect(DISTINCT {…})` per branch in one RETURN, so the cross-product's
+duplicates are absorbed by `DISTINCT` and every real anchor from every walk lands in
+`readableAnchors`. **`cap-read.*` grants were never affected by any of this** — the defect is
+confined to the data lens's row projection. Do not "fix" the producer; its cross-product is a cost
+note (§13.7), not a correctness one.
+
+### 13.2 The shape — per-walk compilation + a merge at the result seam
+
+**Compilation (pkgmgr, `composeDataLensSpec`).** Single walk: unchanged, byte-identical, all 17
+shipped lenses keep their exact spec string. Two or more walks: emit **one spec per walk** — the
+walk's own `OPTIONAL MATCH` chains plus **the lens's shared tail** — replacing increment 2's
+rename+`coalesce` fold. `LensSpec` carries N specs where it carried one.
+
+The tail sharing is not a new constraint to enforce: `composeDataLensSpec` already writes
+`pws[0].tail` for every walk (`internal/pkgmgr/anchorwalk.go:494-508`), so **an identical RETURN
+alias list across branches is structural, not a rule an author can violate.** That is what makes
+the merge deterministic.
+
+**Evaluation (Refractor).** The pipeline's compiled rule becomes a slice; a Personal lens's
+per-actor evaluation runs each branch through the existing single-query machinery and merges the
+combined result set before it reaches the envelope/write path — the same seam
+`multiEntryRetractions` already post-processes at (`pipeline/evaluate.go`, the `reprojectActors`
+→ `executeFullForActor` return). Branch evaluation is independent: no shared bindings, no
+cross-product, cost additive.
+
+**The merge rule — no arbitration, by construction.** For rows sharing one output key, each RETURN
+column is resolved by **which walk's variables it derives from**, classified at compile time:
+
+- **Walk-owned** — the column's expression references variables introduced by exactly one walk
+  (`viaServices`, `viaRoles`, `assignee`, `queuedRole`). Value taken from that walk's branch; the
+  other branches carry its empty/null by construction.
+- **Anchor-derived** — the column references only the shared anchor (the 24 catalog columns:
+  `op.data.*`). Every branch computes it from the same vertex, so every branch **must** agree;
+  disagreement is a real defect and **fails the evaluation loudly** rather than picking a winner.
+- **Unclassifiable** — the column cannot be attributed to one walk or to the anchor alone. The
+  lens is **refused at expansion time** (install), never merged at runtime.
+
+This is emphatically **not** the withdrawn per-source body merge. That one arbitrated between two
+independently-authored lenses with genuinely divergent bodies. This one operates **inside one
+lens**, across **its own declared walks**, through **one shared tail**, and **forbids conflict
+instead of resolving it** — the same no-escape-hatch posture §3.3 enforces at the keyspace level.
+
+**Reuse, don't reinvent:** the binding-provenance walk this classification needs is the same AST
+analysis ratified for the auth-plane conjunct classifier
+([evaluation-consistency §13.3](refractor-evaluation-consistency-design.md)) — one helper over
+`full.CompiledRule.Query`, two callers. Whichever fire lands second reuses it; neither blocks the
+other.
+
+### 13.3 Fail-closed posture
+
+Every uncertainty refuses at **install**, where an author can act on it — never at runtime, where
+it would be a silent short row (the §12 failure shape this exists to end):
+
+- A column that cannot be attributed to one walk or to the anchor → expansion refuses the lens,
+  naming the column and the lens.
+- Branch RETURN alias lists that are not identical → refuse. (Structurally impossible today; the
+  check makes it impossible after a future refactor too.)
+- Anchor-derived columns disagreeing across branches at runtime → a typed evaluation failure on
+  the existing transient/DLQ channels, never a silent pick.
+- Single-walk lenses take none of this: one rule, no merge, no classification, no new failure mode.
+
+`parseWalks`' cross-walk variable-collision guard loses its reason under per-walk compilation
+(separate queries cannot accidentally join), but **relaxing it is not required by this design** and
+should not ride along silently — if a build increment relaxes it, that is its own decision to state.
+
+### 13.4 What this unblocks, and what it corrects
+
+Unblocks **all three** §3.1 pair unifications — every one of them has the two-walks-either-of-which-
+multi-matches shape, so all three were blocked, not just sessions:
+
+| Pair | Blocked because | After |
+|---|---|---|
+| Sessions | A dual-hat actor's instructor-led sessions silently dropped (§12's halted attempt) | Byte-identical bodies; merge is a no-op beyond key union |
+| **Catalog** (the filed defect) | An op reachable only via a held role never projects | `viaServices` walk-owned by walk 0, `viaRoles` by walk 1, 24 columns anchor-derived |
+| Tasks | An actor with both directly-assigned and role-queued tasks loses one set | `assignee`/`queuedRole` walk-owned, nullable exactly as ratified |
+
+**§2.3's census factoring is corrected in place** for catalog and tasks: "both paths as OPTIONAL
+MATCH + `collect(DISTINCT …)` aggregation" is true of the *producer* and false of the *data lens* —
+aggregation absorbs a cross-product's duplicates, it does not turn a join into a union. The
+one-lens conclusion stands; the compilation named to reach it does not.
+
+### 13.5 Alternatives considered
+
+1. **UNION for Personal lenses (§12 direction 1)** — rejected in the For-Andrew block: reverses a
+   ratified scope-down, adds engine surface, still needs the merge.
+2. **Add `UNWIND` to the engine** — the one single-query shape that would work. Rejected: visitor +
+   executor work comparable to UNION, and the provenance tail would have to re-traverse per anchor
+   to rebuild `viaServices`/`viaRoles`, which is the cross-product back again by another door.
+3. **Keep sibling lenses; fix only the runtime collision guard (A3b) to detect the flap** — rejected:
+   detection is not correction, and it leaves the N-writers shape this whole design exists to
+   eliminate, with the guard terminal-failing six live lenses (§1).
+4. **Merge in the adapter instead of the pipeline** — rejected: the adapter sees one row at a time
+   and has no notion of an evaluation's result set; merging there would mean read-modify-write per
+   row against a live target, reintroducing a race in the layer that currently has none.
+5. **Require authors to hand-write one query per pair** — rejected: that *is* today's sibling-lens
+   shape, i.e. the defect.
+
+### 13.6 Test strategy
+
+- **The §12 repro is the acceptance test, and it is written first, red.** One actor, walk 0 with
+  ≥2 real matches, walk 1 with ≥1 real match on a *different* anchor; assert the union of anchors
+  projects, not branch 0's subset. Executor-level (the scratch repro §12 already describes) and
+  pipeline-level (assert on the adapter call log, not final state — a passing projection would also
+  pass if the merge never ran).
+- **Merge units:** walk-owned column takes its owner's value; anchor-derived agreement; anchor-derived
+  *disagreement* raises rather than picks; unclassifiable column refused at expansion, naming it.
+- **Single-walk byte-identical regression** across all 17 shipped lenses — the increment-1 property
+  that must survive (its existing spec-string assertions are the guard).
+- **Per-pair D1-gate regressions** in the unification increments: a multi-hat actor sees the union
+  of both paths with correct `viaRoles` grouping (`app.js:769-784` is the live consumer); the
+  retired sibling's mirror attributions prune at hydrate under R2's dead-lens set.
+- **Producer non-regression:** `cap-read.*` output byte-identical before/after — the producer path
+  is untouched and must be pinned as such.
+
+### 13.7 Risks, residuals, sequencing
+
+- **The merge is new correctness surface on the read path.** Bounded: Personal data rows only; the
+  grant/producer plane is untouched (§13.1), so a merge bug is a wrong browse row, never a wrong
+  grant. Stated so the blast radius is not overestimated either.
+- **Cost:** N branch evaluations replace one N×M cross-product — additive instead of multiplicative,
+  the same argument §2.2 already makes for UNION over stacked `OPTIONAL MATCH`. Expected cheaper at
+  every real fan-out; measured, not assumed, in the first unification increment.
+- **The producer's own cross-product survives** (correct but wasteful, `executor.go:930-935`'s
+  inflation warning). Not this fire's scope; named here so it is not rediscovered as a bug.
+- **Sequencing unchanged from §3:** this replaces U1's composition step. **U2 is independent and
+  stays so.** Fire G (the disjoint-key guard) still lands *after* the unifications empty the census,
+  blocking, no warn-first — unchanged.
+- **Build order:** (a) the composition primitive + merge + classifier, no package changes;
+  (b) sessions; (c) catalog — the filed defect; (d) tasks. Each of (b)–(d) is a package release with
+  its own version bump, verify-script and D1-gate updates. (a) is one fire; (b)–(d) are one fire each
+  or one combined release, the Steward's call on the release mechanics — but **not** (a) combined
+  with any of them.
+
+### 13.8 Adversarial pass
+
+Run in-fire and self-directed (no independent reviewer available; stated plainly). Probes:
+
+1. *"Does UNION actually solve it?"* — the probe that collapsed the fork. It fixes the anchor set and
+   leaves two rows under one key for the catalog pair. Both §12 directions inherit the merge
+   requirement; only one also inherits engine work.
+2. *"Is the merge the withdrawn per-source arbitration wearing a new hat?"* — no, and the difference
+   is checkable: one lens, one author, one shared tail (`anchorwalk.go:494-508`), and conflict is
+   **refused** rather than resolved. If it arbitrated, it would be the withdrawn shape.
+3. *"Is the producer really immune, or is that inherited from §12 unverified?"* — verified: both
+   branches' `collect(DISTINCT …)` sit in one RETURN, so cross-product duplicates collapse and every
+   walk's anchors survive. Grants were never wrong.
+4. *"Is sessions really blocked, given byte-identical bodies?"* — yes. Identical *bodies* do not
+   help when the *anchor set* is truncated; a dual-hat actor loses instructor-led sessions. All three
+   pairs were blocked, which §12 states for sessions and this design generalizes.
+5. *"Does this strand increment 2's shipped work?"* — `coalesce()` stays (a legitimate general engine
+   function, independently tested). Only `composeDataLensSpec`'s multi-walk branch is replaced, and
+   its test asserts a spec string that is supposed to change.
