@@ -1171,6 +1171,18 @@ func seedStaffWorklistApplication(ctx context.Context, conn *substrate.Conn, adm
 				"region": "CA", "postal": "92501"},
 			&processor.ContextHint{Reads: []string{unit3Key}})
 	}
+	// DecideLeaseApplication's first approve reads the unit's .listing to
+	// compute .tenancy (availableFrom/leaseTermMonths) and rejects
+	// (NoListing) without one — the staff worklist beat is not actually
+	// decidable to completion without this, mirroring unit4's listing below.
+	if !alive(ctx, conn, unit3Key+".listing") {
+		submitOp(ctx, conn, adminKey, "SetListing", "loftspaceListing",
+			map[string]any{"unit": unit3Key, "rentAmount": 2100, "rentCurrency": "USD",
+				"bedrooms": 1, "bathrooms": 1, "sqft": 640, "leaseTermMonths": 12,
+				"availableFrom": time.Now().UTC().AddDate(0, 0, 30).Format(time.RFC3339),
+				"status":        "available"},
+			&processor.ContextHint{Reads: []string{unit3Key}})
+	}
 	if !alive(ctx, conn, leaseApp3Key) {
 		salt, err := substrate.NewNanoID()
 		must(err, "generate applicant claim-key salt")
@@ -1234,7 +1246,7 @@ func seedLandlordWorld(ctx context.Context, conn *substrate.Conn, adminKey, cons
 		submitOp(ctx, conn, adminKey, "SetListing", "loftspaceListing",
 			map[string]any{"unit": unit4Key, "rentAmount": 2400, "rentCurrency": "USD",
 				"bedrooms": 2, "bathrooms": 1, "sqft": 880, "leaseTermMonths": 12,
-				"availableFrom": time.Now().UTC().AddDate(0, 0, 45).Format("2006-01-02"),
+				"availableFrom": time.Now().UTC().AddDate(0, 0, 45).Format(time.RFC3339),
 				"status":        "available"},
 			&processor.ContextHint{Reads: []string{unit4Key}})
 	}
