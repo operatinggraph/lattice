@@ -346,6 +346,22 @@ greenfield redesign. Cover, as the feature warrants:
     (TTL / lease / cap), not the headline number. Where the design hedges with an "interim/fallback," **check
     whether a stronger committed stance is cleaner** before defaulting to optionality or incrementalism —
     especially on the security plane, where a forgeable interim that gets reworked is worse than doing it once.
+  - **A handed-down FORK may be a false fork — before you weigh the branches, check whether they all
+    need the same missing primitive.** When a build note, a prior design, or your own earlier turn hands
+    you "direction 1 vs direction 2", the framing has already assumed each branch *would work*. Test that
+    first: **trace each branch end-to-end against the named consumer and ask what it actually delivers.**
+    If every branch is incomplete in the *same* way, the fork is downstream of the real decision — name
+    the shared missing primitive, design *that*, and the branches collapse into a plumbing choice you
+    settle on cost. (Trialed 2026-07-29, shared-keyspace §13: §12 offered "real UNION for Personal
+    lenses" vs "N queries merged by the caller". UNION **concatenates** row sets; it does not **merge**
+    them — so for the pair that filed the row it emits two rows under one IntoKey, which is the exact
+    last-writer-wins flap the design exists to remove. Both directions needed a per-key row merge; only
+    one also needed engine work. The real design was the merge, and the fork answered itself.)
+    **Corollary — an off-the-cuff sequencing recommendation is a hypothesis, say so.** In the same
+    initiative I told Andrew that building the UNION fire first would turn one branch into a
+    scope-widening; grounding killed it (that UNION serves disjoint-key row unions needing no merge —
+    a different problem). Reporting a *block* is cheap and safe; recommending a *sequence* is a design
+    claim, and it needs the same grounding as one or it must be labelled a guess.
   - **The dead-scaffolding test (the checkable form of "don't ship a half-done interim" — my single
     most-repeated blind spot: I default to "build the inert machinery now").** For any increment you propose
     building *before* its dependency or consumer exists, ask the yes/no question: **"Does this increment
