@@ -1029,3 +1029,87 @@ package + live-install checks are exhaustive — they were not, here.
   `viaRoles`), so its merge exercises the classifier's mixed-walk-column refusal path this
   increment's byte-identical case never touched — the next fire should ground that path against a
   real compile, not assume it from the unit tests in (a).
+
+## 16. Build note — build order (c): catalog unification (Lattice Steward, 2026-07-29)
+
+`packages/edge-manifest`'s `edgeCatalog` (service-`permitsOperation` path, `domainBase`) and
+`edgeCatalogRoles` (held-role `grantedBy`→`forOperation` path, `domainStaff`) gain a single lens: a
+second `AnchorWalk` on `edgeCatalog`, `edgeCatalogRoles` retired. This is (b)'s residual — the one
+build (a)'s unit tests never exercised: a real, divergent-column, walk-owned merge.
+
+- **A real classifier gap, found by grounding before writing the tail** (not assumed from (a)'s
+  unit tests, per the residual above). `ClassifyBranchReturnColumns` (`internal/refractor/
+  ruleengine/full/branchplan.go`) walked a `viaServices` pattern comprehension
+  (`[(op)<-[:permitsOperation]-(svc:service) | svc.key]`, already shipped in `edgeCatalogTail`
+  pre-merge) and added the comprehension's own freshly-matched local node (`svc`) to the column's
+  external-dependency set alongside the real dependency (`op`) — `svc` is bound by no branch's own
+  top-level `MATCH`/`OPTIONAL MATCH` clauses (it exists only inside the comprehension), so the
+  ownership loop found no owning branch and refused the column as ambiguous. Fixed: a referenced
+  name bound by NO branch at all cannot be a walk's provenance var (every real walk-bound name
+  appears in at least that walk's `branchOwn`), so it is now skipped — the same treatment
+  `CollectVariableRefs` already gives a `*Literal`/`*ParameterRef` leaf — rather than forcing
+  `ambiguous = true`. Verified empirically before touching the package (a throwaway probe test
+  against the real classifier reproduced the refusal, then confirmed the fix), and pinned as a
+  permanent regression test (`TestClassifyBranchReturnColumns_PatternComprehensionLocalVarIsNotADependency`).
+- **The merge shape:** `viaServices` stays exactly as shipped — a pattern comprehension off `op`
+  alone — now correctly classified `ColumnAnchorDerived` (both branches compute it identically by
+  construction, no per-branch variant needed). `viaRole`/`viaRoleName` (folded in from the retired
+  `edgeCatalogRolesTail`, kept as the existing SCALAR column names rather than switching to a
+  `collect`-based `viaRoles` list) are `ColumnWalkOwned` by the role branch: `role` is bound only by
+  that branch's own chain, so the service branch's copy of the shared tail references an unbound
+  `role` and evaluates it null by the executor's ordinary `VariableRef`/`PropertyAccess` nil-on-
+  unbound behavior (`full/executor.go`'s `evalExpr`/`resolveProperty`/`propertyOf` — verified by
+  reading, not assumed) — no per-branch tail variant, no special-cased null literal. This is a
+  **deliberate departure from §13.9's illustrative worked example**, which sketched a
+  `collect(DISTINCT {key, name})`-based `viaRoles` list: that shape aggregates over whatever rows
+  exist before the `RETURN`, and for the service branch (where `role` is never matched by anything,
+  not even an `OPTIONAL MATCH`) it does not evaluate to an empty list — it evaluates to one
+  degenerate `{key:null,name:null}` entry per pre-aggregation row, which is not the same shape as a
+  clean `null`/`[]`. The scalar form sidesteps this entirely (no aggregation, no grouping, no
+  fan-out risk) and matches the FE's existing contract byte-for-byte (`app.js`'s
+  `o.data.viaRoleName || o.data.viaRole` and `o.data.viaServices` reads) — §13.9's own closing note
+  named the exact shape as "mechanics, not shape... left to the build increment, deliberately."
+- **The "harmless re-match" trick (b) used for `studio`/`instr` does NOT apply here.** Restating the
+  role-reachability chain as a shared-tail `OPTIONAL MATCH` off `identity`/`op` (both common vars)
+  would make `role` bound in every branch, reclassifying `viaRole`/`viaRoleName` as anchor-derived
+  instead of walk-owned — collapsing exactly the merge surface (b)'s residual said this fire should
+  exercise for real. Kept walk-owned on purpose, sourced from the role Walk's own pre-existing
+  chain.
+- **Consumers updated:** `package.go`/`manifest.yaml` (sixteen lenses, description + version
+  0.14.10→0.14.11), `docs/components/edge-manifest.md`, the four `packages/edge-manifest/*_test.go`
+  files that referenced the retired lens by name (`composed_test.go`, `coverage_proof_test.go`,
+  `lens_cypher_test.go`, `package_test.go` — each switched to `emComposedSpecBranch(t, "edgeCatalog",
+  N)`, the same helper (b) built). `TestManifestAnchorCoverage_ResidentWorld`'s pre-existing
+  `emComposedSpec(t, "edgeCatalog")` call (unrelated to this fire's own new assertions) would have
+  broken the moment `edgeCatalog` went multi-walk — found by running the suite, not by inspection;
+  worth naming for (d): grep every bare `emComposedSpec(t, "<name>")` call, not just the ones the
+  fire's own diff touches, before assuming a lens's conversion is consumer-complete.
+- **Live verification:** `make cycle-refractor` (rebuilds `bin/refractor` from `main`, relaunches
+  against the running stack — this fire also touched the shared `ruleengine/full` classifier, so
+  the running Refractor was stale on more than the package), then `make reinstall-package
+  PKG=packages/edge-manifest` diff-applied onto the running dev stack (fromVersion
+  0.14.10→0.14.11, 6 tombstoned / 6 updated); `go run ./scripts/verify-package-edge-manifest.go`
+  passed 87/87 assertions, confirming the installed `edgeCatalog` aspect carries `cypherBranches`
+  with BOTH branches projecting `manifest.op`. Refractor's log shows zero `ERROR`/panic entries in
+  the reinstall's CDC-cascade window. `make cycle-loupe` also rebuilt/relaunched (reaches both
+  touched packages via `go list -deps`).
+
+**Gates:** `go build ./...`, `make vet`, `golangci-lint run` (`internal/refractor/ruleengine/full`,
+`packages/edge-manifest`), `STRICT=1 lint-conventions.go`, `lint-package-standard.go`,
+`lint-package-version.go`, `lint-lens-anchors.go`, `lint-facet-discovery.go`, full `go test ./...
+-p 4` (wide blast radius — a shared classifier in `ruleengine/full` reaches every consumer of
+multi-walk lenses, not just edge-manifest), plus the live `verify-package-edge-manifest` run above.
+
+**Residuals, honestly named:**
+- **(d) tasks remains unbuilt** — same build order, per §13.7: `edgeTasks`/`edgeTasksQueued` fold
+  the same way, `assignee`/`queuedRole` walk-owned exactly as ratified. No new primitive needed —
+  (a)'s composition + merge + (c)'s classifier fix together are sufficient; (d) is pure application
+  of the now-proven pattern.
+- **The classifier fix widens what compiles, which is the intended direction** (fail-CLOSED stays
+  intact — an expression referencing a name bound in exactly one branch, or in more than one, is
+  still refused exactly as before; only a name bound in NO branch changed from "refuse" to "ignore,"
+  and such a name can only arise from an expression-local binding form like a pattern comprehension
+  or a future list/map comprehension, never from a real cross-walk variable). Worth a second pass
+  if a future engine feature introduces a NEW way to bind a name without a top-level `MATCH` clause
+  — the fix's reasoning (`owner == -1` ⟺ expression-local) would need re-grounding against that
+  feature, not assumed to still hold.
