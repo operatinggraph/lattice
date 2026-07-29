@@ -177,7 +177,7 @@ func TestManifestAnchorCoverage_ResidentWorld(t *testing.T) {
 		[]dataLens{
 			{"edgeServices", emComposedSpec(t, "edgeServices")},
 			{"edgeCatalog", emComposedSpecBranch(t, "edgeCatalog", 0)},
-			{"edgeTasks", emComposedSpec(t, "edgeTasks")},
+			{"edgeTasks", emComposedSpecBranch(t, "edgeTasks", 0)},
 			{"edgeInstances", emComposedSpec(t, "edgeInstances")},
 			{"edgeEntitySessions", emComposedSpecBranch(t, "edgeEntitySessions", 0)},
 			{"edgeEntityProviders", emComposedSpec(t, "edgeEntityProviders")},
@@ -316,7 +316,7 @@ func TestManifestAnchorCoverage_StaffWorld(t *testing.T) {
 		[]dataLens{
 			{"edgeStaffWorkOrders", emComposedSpec(t, "edgeStaffWorkOrders")},
 			{"edgeCatalog (role branch)", emComposedSpecBranch(t, "edgeCatalog", 1)},
-			{"edgeTasksQueued", emComposedSpec(t, "edgeTasksQueued")},
+			{"edgeTasks (queued branch)", emComposedSpecBranch(t, "edgeTasks", 1)},
 			{"edgeEntityStudios", emComposedSpec(t, "edgeEntityStudios")},
 		},
 		[]string{emComposedSpec(t, "edgeManifestStaffReadGrants")})

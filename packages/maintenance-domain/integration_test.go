@@ -239,8 +239,8 @@ func mdSeedWorld(t *testing.T, ctx context.Context, conn *substrate.Conn) {
 // mdSeedQueuedTask seeds the FR28 role-queued task orchestration-base's
 // CreateTask would mint: open, queuedFor the maintenance role, forOperation
 // the ResolveWorkOrder op-meta, scopedTo the work order. The links are not
-// what this package's ops read — they are what the §10.6 auto-complete and the
-// edgeTasksQueued projection read — so seeding them directly keeps the vector
+// what this package's ops read — they are what the §10.6 auto-complete and
+// edgeTasks' role-queued Walk read — so seeding them directly keeps the vector
 // about maintenance-domain rather than about CreateTask's own routing, which
 // orchestration-base already proves.
 func mdSeedQueuedTask(t *testing.T, ctx context.Context, conn *substrate.Conn, workOrderKey string) {

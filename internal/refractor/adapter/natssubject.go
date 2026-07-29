@@ -50,8 +50,7 @@ type deltaEnvelope struct {
 	// Lens is the producing lens's rule ID (personal-lens-retraction-
 	// design.md §3.1, R1) — set on "upsert" and "keyset" envelopes so the
 	// Edge client can attribute a key to the lens that asserts it. A same
-	// key can be projected by more than one lens (e.g. edgeTasksQueued and
-	// edgeTasks both project manifest.task.<id>); attribution is what lets
+	// key can be projected by more than one lens; attribution is what lets
 	// the client refcount survive one lens retracting while another still
 	// asserts.
 	Lens string `json:"lens,omitempty"`

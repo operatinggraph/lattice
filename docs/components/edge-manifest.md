@@ -15,7 +15,7 @@
 
 ## Overview
 
-`edge-manifest` is the world manifest the Facet edge app (design §4) renders from: **sixteen Personal
+`edge-manifest` is the world manifest the Facet edge app (design §4) renders from: **fifteen Personal
 Lenses** (`packages/edge-manifest/lenses.go`) re-projecting data other packages already own — identity,
 orchestration-base's tasks, service-domain's templates/instances, service-location's residence graph,
 wellness/clinic/café domain state, role-standing grants, maintenance work orders, and the provider-hat
@@ -30,7 +30,7 @@ It is the **first production package** to use the `nats-subject`/Personal Lens a
 shipped latent in Fire 0 (proven only by inline e2e tests, `internal/refractor/personal_lens_pl*_e2e_test.go`)
 with zero real `packages/*` consumers until this one.
 
-Fifteen of the sixteen Personal Lenses are **non-self-anchored**: each keys its rows on a vertex other
+Fourteen of the fifteen Personal Lenses are **non-self-anchored**: each keys its rows on a vertex other
 than the recipient identity (a service template, an op meta, a task, an instance, a session, a provider, a
 booking, a tab, a studio, a menu item, a work order, an appointment, a pane meta). Refractor's D1 gate
 (`internal/refractor/projection/personal.go` → `capabilityread.IsReadable`) drops such a row unless the
@@ -70,7 +70,7 @@ already have on the nats-kv side).
 | Lens | Key | Anchors on |
 |---|---|---|
 | `edgeCatalog` (2nd `Walk`) | `manifest.op.<opMetaId>` | op metas reachable via a held role's `grantedBy` permission → `forOperation` — the role-standing-grant catalog path; this domain's member is `edgeCatalog`'s second `AnchorWalk`, not a standalone lens (formerly the sibling `edgeCatalogRoles`, folded in per refractor-shared-keyspace-arbitration-design.md §13.7 build order (c) — `viaServices` is anchor-derived so both branches compute it identically, `viaRole`/`viaRoleName` are walk-owned by this branch alone; an op reachable both ways projects one merged row) |
-| `edgeTasksQueued` | `manifest.task.<taskId>` | open tasks `queuedFor` a role the actor holds (FR28) — carries `queuedRole`/`queuedRoleName`; claiming one (`ClaimTask`) moves it to `edgeTasks` |
+| `edgeTasks` (2nd `Walk`) | `manifest.task.<taskId>` | open tasks `queuedFor` a role the actor holds (FR28) — carries `queuedRole`/`queuedRoleName`; this domain's member is `edgeTasks`' second `AnchorWalk`, not a standalone lens (formerly the sibling `edgeTasksQueued`, folded in per refractor-shared-keyspace-arbitration-design.md §13.7 build order (d) — `assignee` is re-derived via its own `assignedTo` OPTIONAL MATCH off the task so it stays anchor-derived, `queuedRole`/`queuedRoleName` are walk-owned by this branch alone); claiming one (`ClaimTask`) swaps its `queuedFor` for `assignedTo`, so the same row's `assignee` resolves and `queuedRole` goes null |
 | `edgeStaffPanes` | `manifest.pane.<paneMetaId>` | pane meta-vertices reachable over `holdsRole` → `offeredTo` — `{paneId, title, icon, sections}`, the server-pane DESCRIPTOR (not pane rows; see "Server panes" below) |
 | `edgeStaffWorkOrders` | `manifest.work.<workOrderId>` | maintenance work orders at a place the actor `worksAt` (or a place contained in it) — domain-state view, independent of whether a task was ever queued for it |
 
@@ -120,7 +120,7 @@ read-model sections a staff client renders — table, projected columns, filter,
 as DATA (`pkgmgr.PaneSpec`), so the edge client's HOST executes panes generically against the RLS-confined
 Postgres read models (`read_landlord_lease_applications`, `read_clinic_appointments`, `read_visit_series`),
 and a new staff workflow ships as a descriptor edit with zero app change. This is **Path A / RLS**, not the
-Personal-Lens/`nats-subject` mechanism the sixteen lenses above use — `edgeStaffPanes` (in the lens table)
+Personal-Lens/`nats-subject` mechanism the fifteen lenses above use — `edgeStaffPanes` (in the lens table)
 projects only the pane's DESCRIPTOR (id/title/icon/sections) so the client can discover and render it; the
 actual pane ROWS are read separately by the host from Postgres, confined by the reader's workplace grants.
 One pane ships today: `staffWorklist` (front-desk applications-to-review + today's clinic schedule +
@@ -136,12 +136,8 @@ narrowings, each a reasonable v1 cut rather than a correctness gap in what IS bu
 - **`edgeIdentity`'s `anchors`/`roles` arrays** carry no human-readable location TYPE segment (there is no
   vertex-type-from-key function beyond `nanoIdFromKey`, and no string concatenation to synthesize one from
   the key's type segment) — the renderer derives type from the key client-side.
-- **`edgeTasks`** covers only the direct-`assignedTo` reachability path; its role-derived counterpart is
-  **still shipped as a sibling lens** (`edgeTasksQueued`) rather than folded in as a second `Walk` the way
-  `edgeCatalog`'s role path now is (see the Staff lenses table above) — the same multi-`Walk` merge applies,
-  just not yet built (refractor-shared-keyspace-arbitration-design.md §13.7 build order (d), unbuilt).
-  **Still deferred:** the open-task-`forOperation` catalog path — a task's own bound op already rides inline
-  on its `edgeTasks`/`edgeTasksQueued` row, so that gap is "browse all my ops," never "complete my task."
+- **Still deferred:** the open-task-`forOperation` catalog path — a task's own bound op already rides inline
+  on its `edgeTasks` row, so that gap is "browse all my ops," never "complete my task."
 
 A degenerate `collect(DISTINCT {…})` entry (e.g. `{key:null,name:null}` when an identity holds no role)
 is expected, not a bug — the renderer obligation is the same one `my-tasks.*` rows already carry (design

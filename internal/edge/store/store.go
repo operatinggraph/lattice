@@ -63,11 +63,10 @@ type Entry struct {
 	// Sources maps each Personal Lens rule ID currently asserting this key to
 	// the revision at which it last did so (personal-lens-retraction-
 	// design.md §3.3) — the refcount that lets one lens's keyset frame retract
-	// its own attribution while a same-key overlapping lens (e.g.
-	// edgeTasksQueued / edgeTasks both projecting manifest.task.<id>) still
-	// asserts the key. Nil/empty for an upsert applied with an empty lens
-	// (pre-R2 wire back-compat) — such a key is never attribution-tracked and
-	// can only be retracted by an explicit ApplyDelete, exactly as before.
+	// its own attribution while a same-key overlapping lens still asserts the
+	// key. Nil/empty for an upsert applied with an empty lens (pre-R2 wire
+	// back-compat) — such a key is never attribution-tracked and can only be
+	// retracted by an explicit ApplyDelete, exactly as before.
 	Sources map[string]uint64 `json:"sources,omitempty"`
 }
 

@@ -2,16 +2,17 @@ package edgemanifest
 
 import "github.com/operatinggraph/lattice/internal/pkgmgr"
 
-// Lenses returns the package's sixteen Personal-Lens declarations
+// Lenses returns the package's fifteen Personal-Lens declarations
 // (edge-showcase-app-design.md §3.2; the manifest.ent entity lenses per
-// facet-entity-browse-design.md; the staff siblings edgeTasksQueued +
-// edgeStaffWorkOrders per facet-staff-worlds-design.md §3.3; the
+// facet-entity-browse-design.md; the staff sibling edgeStaffWorkOrders per
+// facet-staff-worlds-design.md §3.3; the
 // provider-hat siblings edgeProviderSchedule + edgeProviderQueue per
-// persona-worlds-design.md Fire W0 — edgeEntitySessions and edgeCatalog
-// each carry a second reachability path as their own second Walk rather
-// than a sibling lens (refractor-shared-keyspace-arbitration-design.md
-// §13.7 build orders (b) and (c): the multi-walk merges retiring the
-// former sibling lenses edgeInstructorSessions and edgeCatalogRoles); the
+// persona-worlds-design.md Fire W0 — edgeEntitySessions, edgeCatalog and
+// edgeTasks each carry a second reachability path as their own second Walk
+// rather than a sibling lens (refractor-shared-keyspace-arbitration-design.md
+// §13.7 build orders (b), (c) and (d): the multi-walk merges retiring the
+// former sibling lenses edgeInstructorSessions, edgeCatalogRoles and
+// edgeTasksQueued); the
 // edgeStaffPanes descriptor lens per facet-discovery-restoration-design.md
 // §2.1) — the repo's first `nats-subject` / Personal Lens package.
 //
@@ -60,11 +61,7 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 // label instead of a bare NanoID; the location TYPE segment is still not
 // synthesized into the row (the engine has no vertex-type-from-key function
 // outside nanoIdFromKey, and no string concatenation to build one), so the
-// renderer derives type from the key client-side; edgeTasks' role-derived
-// counterpart is still split into the sibling lens edgeTasksQueued rather
-// than folded in as a second Walk (unlike edgeCatalog, whose role path IS a
-// second Walk — see edgeCatalogTail's own doc comment for why tasks hasn't
-// followed yet: §13.7 build order (d) is unbuilt). Still deferred: the
+// renderer derives type from the key client-side. Still deferred: the
 // open-task-forOperation catalog path — a task's own bound op already rides
 // inline on its edgeTasks row, so that gap is "browse all my ops," never
 // "complete my task."
@@ -139,12 +136,23 @@ func Lenses() []pkgmgr.LensSpec {
 			Personal:      true,
 			Engine:        "full",
 			IntoKey:       []string{"__actor", "ns", "entityId"},
-			Walks: []pkgmgr.AnchorWalk{{
-				GrantDomain: domainBase,
-				AnchorType:  "task",
-				AnchorVar:   "task",
-				Chain:       []string{"(identity)<-[:assignedTo]-(task:task)"},
-			}},
+			Walks: []pkgmgr.AnchorWalk{
+				{
+					GrantDomain: domainBase,
+					AnchorType:  "task",
+					AnchorVar:   "task",
+					Chain:       []string{"(identity)<-[:assignedTo]-(task:task)"},
+				},
+				{
+					GrantDomain: domainStaff,
+					AnchorType:  "task",
+					AnchorVar:   "task",
+					Chain: []string{
+						chainHeldRoles,
+						"(role)<-[:queuedFor]-(task:task)",
+					},
+				},
+			},
 			Spec: edgeTasksTail,
 		},
 		{
@@ -291,26 +299,6 @@ func Lenses() []pkgmgr.LensSpec {
 				},
 			}},
 			Spec: edgeEntityMenuItemsTail,
-		},
-		{
-			CanonicalName: "edgeTasksQueued",
-			Class:         "meta.lens",
-			Adapter:       "nats-subject",
-			SubjectPrefix: manifestSubjectPrefix,
-			Stream:        manifestStream,
-			Personal:      true,
-			Engine:        "full",
-			IntoKey:       []string{"__actor", "ns", "entityId"},
-			Walks: []pkgmgr.AnchorWalk{{
-				GrantDomain: domainStaff,
-				AnchorType:  "task",
-				AnchorVar:   "task",
-				Chain: []string{
-					chainHeldRoles,
-					"(role)<-[:queuedFor]-(task:task)",
-				},
-			}},
-			Spec: edgeTasksQueuedTail,
 		},
 		{
 			// edgeStaffPanes delivers server-pane DESCRIPTORS (never pane
@@ -627,12 +615,31 @@ RETURN
   role.canonicalName.data.value AS viaRoleName
 `
 
-// edgeTasksTail presents one `manifest.task.<taskId>` row per task directly
-// assignedTo the actor and still open (Contract #10 §10.1 link-sourced shape,
-// mirrored from orchestration-base's myTasksSpec). The open-status filter is a
-// PRESENTATION narrowing, not a reachability one — the walk grants the task
-// anchor regardless of status, which is the correct asymmetry (grant ⊇
-// projection).
+// edgeTasksTail presents one `manifest.task.<taskId>` row per OPEN task
+// either of edgeTasks' two Walks reaches: the direct-assignment path
+// (`domainBase` — a task `assignedTo` the actor) and the role-queued path
+// (`domainStaff` — an open task `queuedFor` a role the actor holds, not yet
+// claimed, FR28's "browse my role's queue"). Both Walks anchor on the same
+// `task:task` (refractor-shared-keyspace-arbitration-design.md §13.7 build
+// order (d) — the merge that retires the former sibling lens
+// edgeTasksQueued, whose role-derived columns this tail folds in), so a
+// task reachable both ways projects one row instead of flapping between
+// whichever sibling re-derived last (§1's original defect, same class as
+// edgeCatalogTail's) — though the two paths are mutually exclusive in
+// practice: `ClaimTask`'s atomic `queuedFor`→`assignedTo` swap means a task
+// is never bound by both links at once.
+//
+// The open-status filter is a PRESENTATION narrowing, not a reachability
+// one — either walk grants the task anchor regardless of status, which is
+// the correct asymmetry (grant ⊇ projection).
+//
+// assignee is re-derived via its own `[:assignedTo]` OPTIONAL MATCH off the
+// anchor `task`, not the head-bound `identity` — the actor binds `identity`
+// in every branch regardless of which Walk reached the task, so reusing it
+// here would misreport the viewer as the assignee of a task they only hold
+// a queued claim on. Re-matching keeps the column anchor-derived (task
+// alone, no per-branch variant) and correct for both: null on a still-queued
+// task, the real assignee once claimed.
 //
 // scopedName projects the display name of the task's scoped target
 // (class-4 relational label, display-name-convention-design.md §2), from
@@ -646,24 +653,35 @@ RETURN
 // scoped and its summary is declared PII-free (D3 forbids plaintext identity
 // PII on the SYNC plane, which is why NO name arrives this way). Null when
 // the target is neither, and the renderer falls to its typed floor.
+//
+// queuedRole/queuedRoleName are walk-owned by the role Walk alone: `role` is
+// bound only by that Walk's chain, so the direct-assign branch's copy of
+// this tail references an unbound `role` and evaluates it null by
+// construction (the same executor unbound-VariableRef behavior
+// edgeCatalogTail's viaRole relies on). queuedRole names the governing role,
+// which is what distinguishes a still-queued row from an assigned one: the
+// renderer's claim affordance submits the shipped `ClaimTask`.
 const edgeTasksTail = `
+OPTIONAL MATCH (task)-[:assignedTo]->(assignee:identity)
 OPTIONAL MATCH (task)-[:forOperation]->(op)
 OPTIONAL MATCH (task)-[:scopedTo]->(tgt)
 OPTIONAL MATCH (tgt)-[:appliesToUnit]->(scopedUnit:unit)
-WITH task, identity, op, tgt, scopedUnit
+WITH task, assignee, op, tgt, scopedUnit, role
 WHERE task.data.status = "open"
 RETURN
   task.key AS anchor,
   "manifest.task" AS ns,
   nanoIdFromKey(task.key) AS entityId,
   task.key AS taskKey,
-  identity.key AS assignee,
+  assignee.key AS assignee,
   op.key AS forOperationKey,
   op.data.operationType AS operationType,
   tgt.key AS scopedTo,
   (CASE WHEN scopedUnit.presentation.data.name <> null THEN scopedUnit.presentation.data.name
         ELSE tgt.report.data.summary END) AS scopedName,
-  task.data.expiresAt AS expiresAt
+  task.data.expiresAt AS expiresAt,
+  role.key AS queuedRole,
+  role.canonicalName.data.value AS queuedRoleName
 `
 
 // edgeInstancesTail presents one `manifest.inst.<instId>` row per service
@@ -941,46 +959,14 @@ RETURN
   item.price.data.priceCents AS priceCents
 `
 
-// edgeTasksQueuedTail presents one `manifest.task.<taskId>` row per OPEN task
-// queued to a role the actor holds (FR28). The walk
-// (identity)-[:holdsRole]->(role)<-[:queuedFor]-(task) is the one
-// orchestration-base's my-tasks aggregate already runs verbatim; this re-emits
-// it per-row over the personal SYNC transport a Facet device mirrors.
-//
-// queuedRole names the governing role, which is what distinguishes these rows
-// from edgeTasks' directly-assigned ones: a queued task is CLAIMABLE, not yet
-// owned. The renderer's claim affordance submits the shipped ClaimTask, whose
-// atomic queuedFor→assignedTo swap then stops this branch matching for every
-// non-claimant and materializes the edgeTasks row for the winner — so the whole
-// claim beat is existing machinery, reached over a new projection.
-const edgeTasksQueuedTail = `
-OPTIONAL MATCH (task)-[:forOperation]->(op)
-OPTIONAL MATCH (task)-[:scopedTo]->(tgt)
-OPTIONAL MATCH (tgt)-[:appliesToUnit]->(scopedUnit:unit)
-WITH task, op, tgt, scopedUnit, role
-WHERE task.data.status = "open"
-RETURN
-  task.key AS anchor,
-  "manifest.task" AS ns,
-  nanoIdFromKey(task.key) AS entityId,
-  task.key AS taskKey,
-  op.key AS forOperationKey,
-  op.data.operationType AS operationType,
-  tgt.key AS scopedTo,
-  (CASE WHEN scopedUnit.presentation.data.name <> null THEN scopedUnit.presentation.data.name
-        ELSE tgt.report.data.summary END) AS scopedName,
-  task.data.expiresAt AS expiresAt,
-  role.key AS queuedRole,
-  role.canonicalName.data.value AS queuedRoleName
-`
-
 // edgeStaffWorkOrdersTail presents one `manifest.work.<workOrderId>` row per
 // maintenance work order at a place the actor worksAt — FORK-S1 A's per-row
 // domain worklist, the half of a staff world that is MIRROR rather than
 // server-pane.
 //
-// Why this is a different lens from edgeTasksQueued rather than a column on
-// it: a task row exists only because somebody queued a task. A work order at
+// Why this is a different lens from edgeTasks' role-queued Walk rather than
+// a column on it: a task row exists only because somebody queued a task. A
+// work order at
 // your building with no task on it — unqueued, claimed by a colleague, or
 // already resolved — is domain state your world should still show, and it is
 // what §3.6 means by "what work exists at my workplace" as opposed to "what

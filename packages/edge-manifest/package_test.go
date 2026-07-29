@@ -33,10 +33,9 @@ func TestPackage_NoDDLsOrPermissions(t *testing.T) {
 	}
 }
 
-// manifestLensNames are the fifteen Personal Lenses (edge-showcase-app-
+// manifestLensNames are the fourteen Personal Lenses (edge-showcase-app-
 // design.md §3.2; the five manifest.ent entity lenses per
-// facet-entity-browse-design.md; the staff sibling per
-// facet-staff-worlds-design.md §3.3; the workplace-spine work-order lens per
+// facet-entity-browse-design.md; the workplace-spine work-order lens per
 // its §6 F5; the three provider-hat siblings per persona-worlds-design.md
 // Fire W0). readGrantLensNames are their read-grant
 // producers (nats-kv, actorAggregate) — a structurally different class (never
@@ -48,8 +47,7 @@ var manifestLensNames = map[string]bool{
 	"edgeTasks": true, "edgeInstances": true,
 	"edgeEntitySessions": true, "edgeEntityProviders": true,
 	"edgeEntityBookings": true, "edgeEntityTabs": true, "edgeEntityMenuItems": true,
-	"edgeEntityStudios": true,
-	"edgeTasksQueued":   true,
+	"edgeEntityStudios":    true,
 	"edgeStaffWorkOrders":  true,
 	"edgeProviderSchedule": true, "edgeProviderQueue": true,
 }
@@ -67,9 +65,9 @@ var readGrantLensNames = map[string]bool{
 	"edgeManifestProviderReadGrants": true,
 }
 
-func TestPackage_NineteenLenses(t *testing.T) {
-	if got := len(emComposedLenses(t)); got != 19 {
-		t.Fatalf("expected 19 lenses (16 manifest + 3 read-grant producers), got %d", got)
+func TestPackage_EighteenLenses(t *testing.T) {
+	if got := len(emComposedLenses(t)); got != 18 {
+		t.Fatalf("expected 18 lenses (15 manifest + 3 read-grant producers), got %d", got)
 	}
 	names := map[string]bool{}
 	for _, l := range emComposedLenses(t) {
@@ -184,13 +182,6 @@ func TestPackage_LensRowKeysAreManifestNamespaced(t *testing.T) {
 		"edgeEntityTabs":      `"manifest.ent" AS ns`,
 		"edgeEntityStudios":   `"manifest.ent" AS ns`,
 		"edgeEntityMenuItems": `"manifest.ent" AS ns`,
-		// The staff sibling shares its non-staff counterpart's namespace on
-		// purpose: same ns + same entityId means a task reachable by both
-		// paths projects the identical row under the identical key, and the
-		// renderer never learns which path a row arrived by. edgeCatalog's
-		// own staff path no longer needs this — it is the SAME lens's second
-		// Walk now, not a sibling (§13.7 build order (c)).
-		"edgeTasksQueued": `"manifest.task" AS ns`,
 		// The work-order lens is its own namespace: it answers "what work
 		// exists at my workplace", not "what has been handed to me".
 		"edgeStaffWorkOrders": `"manifest.work" AS ns`,
@@ -223,25 +214,18 @@ func TestPackage_LensRowKeysAreManifestNamespaced(t *testing.T) {
 // scopedName resolves from, because losing either one silently regresses the
 // renderer's display-name floor to a bare NanoID (display-name-convention-
 // design.md §2): a lease task names its applied-for unit, and a maintenance
-// task names its work order's own report summary. Both task lenses must carry
-// both — edgeTasksQueued shows the work before it is claimed, edgeTasks after.
+// task names its work order's own report summary. edgeTasks shows both a
+// queued task (not yet claimed) and an assigned one under the shared tail, so
+// one lens must carry both.
 func TestPackage_TaskLensesNameBothScopedSubjects(t *testing.T) {
-	for _, name := range []string{"edgeTasks", "edgeTasksQueued"} {
-		var spec string
-		for _, l := range emComposedLenses(t) {
-			if l.CanonicalName == name {
-				spec = l.Spec
-			}
-		}
-		if spec == "" {
-			t.Fatalf("%s: lens not found", name)
-		}
+	l := emComposedLens(t, "edgeTasks")
+	for _, spec := range emSpecTexts(l) {
 		for _, lit := range []string{
 			"scopedUnit.presentation.data.name",
 			"tgt.report.data.summary",
 		} {
 			if !strings.Contains(spec, lit) {
-				t.Errorf("%s: scopedName no longer resolves %q — the renderer falls back to a bare NanoID", name, lit)
+				t.Errorf("edgeTasks: scopedName no longer resolves %q — the renderer falls back to a bare NanoID", lit)
 			}
 		}
 	}

@@ -252,7 +252,7 @@ type Service struct {
 	// design.md §3.5, Fire PL.4). Empty until RegisterPersonalHydrator is
 	// called; the op fails closed while empty. A deployment installs one
 	// Personal Lens pipeline per nats_subject rule (edge-manifest alone ships
-	// ten — edgeTasksQueued, edgeTasks, edgeCatalog, …), so — like
+	// over a dozen — edgeTasks, edgeCatalog, …), so — like
 	// reprojectorByRuleID — this is a per-ruleID registry: the "hydrate" op
 	// fans out to every registered pipeline for the requesting identity, not
 	// just whichever rule happened to register last.

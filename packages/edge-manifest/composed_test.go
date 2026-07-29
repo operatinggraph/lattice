@@ -10,11 +10,14 @@ package edgemanifest
 // the shapes pkgmgr composes are not a verbatim splice of what a hand author
 // wrote before:
 //
-//   - five lenses fused their chain into a REQUIRED `MATCH` with an inline
+//   - several lenses fused their chain into a REQUIRED `MATCH` with an inline
 //     `WHERE`; the compiler normalizes every chain clause to OPTIONAL MATCH and
 //     the filter moves to the tail. A filter lost in that move would be
 //     invisible to Refractor's D1 gate (the anchors are granted either way), so
-//     it is pinned here by row-set equality against the pre-conversion cypher.
+//     it is pinned here by row-set equality against the pre-conversion cypher,
+//     for whichever of those lenses a later multi-Walk merge hasn't since given
+//     a column a single frozen fixture can't express (checked by content there
+//     instead — see edgeTasks below).
 //   - the staff producer fused `holdsRole` into its head as a required MATCH,
 //     so an identity with a workplace but NO role got no staff slice at all and
 //     had its edgeStaffWorkOrders rows silently dropped. The generated producer
@@ -37,7 +40,7 @@ import (
 	"github.com/operatinggraph/lattice/internal/refractor/ruleengine"
 )
 
-// emComposedLenses returns the package's composed lens specs — the sixteen
+// emComposedLenses returns the package's composed lens specs — the fifteen
 // data lenses with their compiled reachability prefixes plus the three
 // generated read-grant producers, in install order.
 func emComposedLenses(t *testing.T) []pkgmgr.LensSpec {
@@ -115,7 +118,7 @@ func (f *emFixture) emProjectedRowSet(t *testing.T, spec, actorKey string) []str
 
 // --- Migration assertion 1: per-lens data row-set equality -------------------
 
-// TestMigration_RewrittenLensesProjectTheSameRows pins the five lenses whose
+// TestMigration_RewrittenLensesProjectTheSameRows pins the lenses whose
 // chain was fused into a required MATCH with an inline WHERE: the composed
 // all-OPTIONAL cypher with the filter hoisted into the tail must project
 // exactly the rows the pre-conversion cypher did. This is the one hazard D1
@@ -135,34 +138,33 @@ func TestMigration_RewrittenLensesProjectTheSameRows(t *testing.T) {
 		f.edge(t, "assignedTo", "doneTask", "resident")
 
 		actor := f.key("resident")
-		for _, c := range []struct {
-			name        string
-			frozen      string
-			composedFor string
-		}{
-			{"edgeTasks", frozenEdgeTasksSpec, "edgeTasks"},
-			{"edgeInstances", frozenEdgeInstancesSpec, "edgeInstances"},
-		} {
-			before := f.emProjectedRowSet(t, c.frozen, actor)
-			after := f.emProjectedRowSet(t, emComposedSpec(t, c.composedFor), actor)
-			require.NotEmpty(t, before, "%s: the frozen cypher projected nothing — the equality claim would be vacuous", c.name)
-			require.Equal(t, before, after, "%s: composed cypher changed the projected row set", c.name)
-		}
 
-		// The closed task must be absent from both — the positive vector
-		// above already proves the lens projects, so this is a real negative.
+		// edgeTasks' direct-assign branch (branch 0) has no frozen row-set
+		// comparison: its shared tail carries `queuedRole`/`queuedRoleName`
+		// (null here — `role` is unbound on this branch), columns a
+		// single-lens frozen fixture can't express. Checked by content
+		// instead, below.
+		instBefore := f.emProjectedRowSet(t, frozenEdgeInstancesSpec, actor)
+		instAfter := f.emProjectedRowSet(t, emComposedSpec(t, "edgeInstances"), actor)
+		require.NotEmpty(t, instBefore, "edgeInstances: the frozen cypher projected nothing — the equality claim would be vacuous")
+		require.Equal(t, instBefore, instAfter, "edgeInstances: composed cypher changed the projected row set")
+
+		// The closed task must be absent — the hoisted status filter
+		// carries over from the pre-merge tail unchanged.
 		openID := f.ids["openTask"]
 		doneID := f.ids["doneTask"]
-		rows := emRowsByEntity(f.project(t, emComposedSpec(t, "edgeTasks"), actor))
+		rows := emRowsByEntity(f.project(t, emComposedSpecBranch(t, "edgeTasks", 0), actor))
 		require.Contains(t, rows, openID, "the open task must project")
 		require.NotContains(t, rows, doneID, "the hoisted status filter must still exclude a closed task")
+		require.Equal(t, f.key("resident"), rows[openID]["assignee"],
+			"assignee must still resolve on the direct-assign branch")
 	})
 
 	t.Run("staff", func(t *testing.T) {
 		f := emStaffWorldFull(t)
-		// A CLOSED queued task makes edgeTasksQueued's hoisted status filter
-		// load-bearing: with only an open task seeded, deleting the filter
-		// would leave both cyphers projecting the identical row.
+		// A CLOSED queued task makes edgeTasks' queued-branch hoisted status
+		// filter load-bearing: with only an open task seeded, deleting the
+		// filter would leave both cyphers projecting the identical row.
 		f.vtxData(t, "doneQueued", "task", map[string]any{"status": "done"})
 		f.edge(t, "queuedFor", "doneQueued", "maintRole")
 		// A scopedTo work order routes scopedName's non-null branch through the
@@ -174,7 +176,6 @@ func TestMigration_RewrittenLensesProjectTheSameRows(t *testing.T) {
 
 		actor := f.key("tech")
 		for _, c := range []struct{ name, frozen string }{
-			{"edgeTasksQueued", frozenEdgeTasksQueuedSpec},
 			{"edgeStaffWorkOrders", frozenEdgeStaffWorkOrdersSpec},
 		} {
 			before := f.emProjectedRowSet(t, c.frozen, actor)
@@ -191,7 +192,14 @@ func TestMigration_RewrittenLensesProjectTheSameRows(t *testing.T) {
 		require.NotEmpty(t, catalogBefore, "edgeCatalog role branch: the frozen cypher projected nothing — the equality claim would be vacuous")
 		require.Equal(t, catalogBefore, catalogAfter, "edgeCatalog role branch: composed cypher changed the projected row set")
 
-		queued := emRowsByEntity(f.project(t, emComposedSpec(t, "edgeTasksQueued"), actor))
+		// edgeTasks' queued Walk (branch 1, §13.7 build order (d)) replaces
+		// the retired edgeTasksQueued sibling. Unlike edgeCatalog's role
+		// branch above, the column set is NOT identical to the frozen
+		// pre-merge spec — the shared tail now also re-derives `assignee`
+		// (null here; no task is ever both queued and assigned) — so this
+		// checks projected content, not full row-set equality against the
+		// frozen spec.
+		queued := emRowsByEntity(f.project(t, emComposedSpecBranch(t, "edgeTasks", 1), actor))
 		require.Contains(t, queued, f.ids["queuedTask"], "the open queued task must project")
 		require.NotContains(t, queued, f.ids["doneQueued"],
 			"the hoisted status filter must still exclude a closed queued task")
@@ -217,12 +225,16 @@ func TestMigration_DegenerateRowIsSuppressed(t *testing.T) {
 	f.vtx(t, "bareRole", "role")
 	f.edge(t, "holdsRole", "bare", "bareRole")
 
-	for _, name := range []string{"edgeTasks", "edgeInstances", "edgeTasksQueued"} {
+	for _, name := range []string{"edgeInstances"} {
 		require.Emptyf(t, f.project(t, emComposedSpec(t, name), f.key("bare")),
 			"%s: an unreached actor must project no row, not a degenerate all-null one", name)
 	}
 	require.Emptyf(t, f.project(t, emComposedSpecBranch(t, "edgeCatalog", 1), f.key("bare")),
 		"edgeCatalog role branch: an unreached actor must project no row, not a degenerate all-null one")
+	require.Emptyf(t, f.project(t, emComposedSpecBranch(t, "edgeTasks", 0), f.key("bare")),
+		"edgeTasks direct-assign branch: an unreached actor must project no row, not a degenerate all-null one")
+	require.Emptyf(t, f.project(t, emComposedSpecBranch(t, "edgeTasks", 1), f.key("bare")),
+		"edgeTasks queued branch: an unreached actor must project no row, not a degenerate all-null one")
 }
 
 // --- Migration assertion 2: producer document equality minus `via` -----------
@@ -378,29 +390,9 @@ func TestMigration_StaffSliceNoLongerRequiresARole(t *testing.T) {
 
 // --- frozen pre-conversion cypher (migration fixtures) ----------------------
 //
-// The five lenses whose chain was a required MATCH, and the three
+// The lenses whose chain was a required MATCH, and the three
 // hand-authored producers, exactly as they read before the walk conversion.
 // They exist only as the comparison side of the assertions above.
-
-const frozenEdgeTasksSpec = `
-MATCH (identity:identity {key: $actorKey})<-[:assignedTo]-(task:task)
-WHERE task.data.status = "open"
-OPTIONAL MATCH (task)-[:forOperation]->(op)
-OPTIONAL MATCH (task)-[:scopedTo]->(tgt)
-OPTIONAL MATCH (tgt)-[:appliesToUnit]->(scopedUnit:unit)
-RETURN
-  task.key AS anchor,
-  "manifest.task" AS ns,
-  nanoIdFromKey(task.key) AS entityId,
-  task.key AS taskKey,
-  identity.key AS assignee,
-  op.key AS forOperationKey,
-  op.data.operationType AS operationType,
-  tgt.key AS scopedTo,
-  (CASE WHEN scopedUnit.presentation.data.name <> null THEN scopedUnit.presentation.data.name
-        ELSE tgt.report.data.summary END) AS scopedName,
-  task.data.expiresAt AS expiresAt
-`
 
 const frozenEdgeInstancesSpec = `
 MATCH (identity:identity {key: $actorKey})<-[:providedTo]-(inst:service)
@@ -452,27 +444,6 @@ RETURN
   role.key AS viaRole,
   role.canonicalName.data.value AS viaRoleName,
   viaSvcKeys AS viaServices
-`
-
-const frozenEdgeTasksQueuedSpec = `
-MATCH (identity:identity {key: $actorKey})-[:holdsRole]->(role:role)<-[:queuedFor]-(task:task)
-WHERE task.data.status = "open"
-OPTIONAL MATCH (task)-[:forOperation]->(op)
-OPTIONAL MATCH (task)-[:scopedTo]->(tgt)
-OPTIONAL MATCH (tgt)-[:appliesToUnit]->(scopedUnit:unit)
-RETURN
-  task.key AS anchor,
-  "manifest.task" AS ns,
-  nanoIdFromKey(task.key) AS entityId,
-  task.key AS taskKey,
-  op.key AS forOperationKey,
-  op.data.operationType AS operationType,
-  tgt.key AS scopedTo,
-  (CASE WHEN scopedUnit.presentation.data.name <> null THEN scopedUnit.presentation.data.name
-        ELSE tgt.report.data.summary END) AS scopedName,
-  task.data.expiresAt AS expiresAt,
-  role.key AS queuedRole,
-  role.canonicalName.data.value AS queuedRoleName
 `
 
 const frozenEdgeStaffWorkOrdersSpec = `
