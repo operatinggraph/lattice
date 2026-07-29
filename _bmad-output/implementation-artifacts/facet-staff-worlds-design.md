@@ -903,3 +903,42 @@ doesn't (timing, load, a second lens/consumer interaction) — instrument the li
 does NOT project, the harness has just captured the bug's minimal repro; bisect from there (start by removing
 the unconditioned-update sibling mutation to isolate #1's self-apply-adjacency guard from the aspect-fanout
 interaction named above).
+
+## 13.3 The live-CDC harness reproduces the claim batch's exact shape and it projects fine (Winston, 2026-07-29)
+
+**Built `TestRefractor_CapabilityLens_ClaimBatchAtomicUnconditionedLink_E2E`**
+(`internal/refractor/refractor_claim_batch_atomic_unconditioned_link_e2e_test.go`), wired identically to the
+already-green `TestRefractor_CapabilityLens_LinkFanOut_E2E` (live adjacency bootstrapper + a real
+`capabilityRoles` pipeline driven by `RunOn`/`Run`, the actual CDC-consuming path, not `Reproject`) so the
+**only** variable is the write mechanism: a pre-existing role+permission+`grantedBy` (static, mirroring
+production), then ONE `substrate.Conn.AtomicBatch` call carrying the claim's exact 3-member shape —
+`.state` UPDATE conditioned on its prior revision, `.claimKey` TOMBSTONE conditioned on its prior revision,
+and the `holdsRole` link written with **neither** `CreateOnly` nor `HasRevision` (step8_commit.go:207-214's
+shape for a first-ever grant link) — all as siblings of the same batch.
+
+**Result: it projects, reliably (3/3 runs, `cap.roles.<target>` populated with the granted permission within
+milliseconds every time).** This closes the "does the atomic-batch envelope itself, combined with the live
+CDC-driven pipeline dispatch, break the unconditioned member's fan-out" question — it does not. Combined with
+§13.2's disproven pure-NATS-delivery hypothesis and the pre-existing sequential-Put sibling test, **three
+independent harnesses now all correctly project this exact write shape**: bare NATS delivery, sequential Put
+through the live pipeline, and atomic-batch commit through the live pipeline.
+
+**What this narrows the gap to.** Per §13.2's own fallback: *"the gap is specific to something the live stack
+has that this harness doesn't."* Candidates now: (1) genuine **production load/timing** — a live stack has
+many rules/consumers reacting to the same CDC stream concurrently, and cap-read/cap-ephemeral/personal-lens
+consumers all compete for the same adjacency bootstrapper + Core KV read path this harness runs alone; (2) the
+**real `ClaimIdentity` Starlark script's exact mutation encoding** differs from this test's hand-built batch
+in some way not yet isolated — this fire mirrored step8_commit.go's *conditioning* rules exactly but did not
+drive the real op script (no Processor/CommitPath in this test); (3) an interaction with **another
+consumer/lens also reacting to the same `holdsRole` link** (e.g. `capabilityEphemeral`,
+`edgeCatalog`) that only manifests when both are running against the real package set, not just
+`capabilityRoles` in isolation.
+
+**Checkpoint — next fire:** drive the **real `ClaimIdentity` op** (via `testutil.CapabilityPipeline` +
+`InstallPhase1Packages`, the exact machinery `packages/identity-domain/claim_test.go` already uses) alongside
+a live `capabilityRoles` pipeline in the SAME test — candidate (2), the one this fire's hand-built batch could
+not rule out, since it never executed the real op script. If that still projects cleanly, escalate to
+candidate (3): add `capabilityEphemeral` as a second live consumer on the same identity/role graph (mirroring
+`refractor_capability_faninstress_e2e_test.go`'s multi-lens wiring) before running the same op. If both stay
+green, the remaining live-stack-only candidates (1) need direct instrumentation of the demo box's Refractor
+instance during a real claim, not another local harness.
