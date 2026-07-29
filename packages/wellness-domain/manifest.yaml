@@ -1,5 +1,5 @@
 name: wellness-domain
-version: 0.17.6
+version: 0.18.0
 description: |
   Wellness bookable domain: studio / session / booking / instructor vertex
   types + their aspects and links, written by Create*/Tombstone*/Cancel*/Bind*
@@ -43,7 +43,12 @@ description: |
   with the edge-manifest descriptor vocabulary (presentation/inputSchema/
   dispatch, edge-showcase-app-design.md §3.3, Fire 5 adoption) — metadata
   only; a client still needs a service-catalog path (permitsOperation) to
-  discover these ops.
+  discover these ops. TombstoneSession does not cascade to bookings, so
+  ReleaseOrphanedBooking (operator-only, Weaver-dispatched, no op-meta)
+  drains a still-booked booking whose session was tombstoned — the
+  wellnessOrphanedBookingSettlement convergence lens/target computes the
+  missing_release gap it fires on, mirroring clinic-ledger's no-show
+  settlement idiom.
 depends:
   - lease-signing
 declares:
@@ -98,6 +103,10 @@ declares:
     - canonicalName: wellnessIdentitiesRead
       adapter: postgres
       engine: full
+    - canonicalName: wellnessOrphanedBookingSettlement
+      adapter: nats-kv
+      bucket: weaver-targets
+      engine: full
   permissions:
     - operationType: CreateStudio
       scope: any
@@ -138,6 +147,12 @@ declares:
     - operationType: BindInstructorIdentity
       scope: any
       grantsTo: [operator]
+    - operationType: ReleaseOrphanedBooking
+      scope: any
+      grantsTo: [operator]
+  weaverTargets:
+    - targetId: wellnessOrphanedBookingSettlement
+      lensRef: wellnessOrphanedBookingSettlement
   opMetas:
     - operationType: CreateBooking
     - operationType: CancelBooking

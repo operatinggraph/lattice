@@ -1,0 +1,42 @@
+package wellnessdomain
+
+import "github.com/operatinggraph/lattice/internal/pkgmgr"
+
+// WeaverTargets returns the package's meta.weaverTarget playbook (Contract
+// #10 §10.8): a single missing_release → directOp(ReleaseOrphanedBooking)
+// gap, mirroring clinic-ledger/targets.go's shape but self-contained inside
+// wellness-domain — it already owns both the booking DDL and the session
+// DDL, so no cross-package dependency is needed.
+//
+// Class pins the "booking" DDL: ReleaseOrphanedBooking is unique to this
+// package today, but an unpinned directOp fails closed (MissingClass)
+// forever the moment any OTHER installed package ever claims the same
+// operationType, so it is pinned regardless (the same defensive shape
+// clinic-ledger/cafe-domain already use for their own unambiguous ops).
+//
+// Reads declares exactly what ReleaseOrphanedBooking's Starlark reads
+// (ddls.go): the booking vertex itself (row.bookingKey — vertex_alive's
+// UnknownBooking check), its own .status aspect (row.bookingKey.status, the
+// row.<column>.<literalSuffix> template — strategist.go's ONE templating
+// relaxation beyond an exact row.<column> lookup), and the session vertex
+// itself (row.sessionKey, a plain full-key column already on the row) so the
+// script's own SessionStillLive re-check has something to read. Params
+// carries only bookingKey — ReleaseOrphanedBooking takes no session param,
+// unlike CancelBooking, so there is nothing else to template.
+func WeaverTargets() []pkgmgr.WeaverTargetSpec {
+	return []pkgmgr.WeaverTargetSpec{
+		{
+			TargetID: OrphanedBookingSettlementTarget,
+			LensRef:  OrphanedBookingSettlementTarget,
+			Gaps: map[string]pkgmgr.GapActionSpec{
+				"missing_release": {
+					Action:    "directOp",
+					Operation: "ReleaseOrphanedBooking",
+					Class:     "booking",
+					Params:    map[string]string{"bookingKey": "row.bookingKey"},
+					Reads:     []string{"row.bookingKey", "row.bookingKey.status", "row.sessionKey"},
+				},
+			},
+		},
+	}
+}

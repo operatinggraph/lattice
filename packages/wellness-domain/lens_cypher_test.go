@@ -110,6 +110,52 @@ func wdRowByKey(rows []ruleengine.ProjectionResult, key string) map[string]any {
 	return nil
 }
 
+// tombstoneVtx marks a previously-seeded vertex isDeleted — TombstoneSession's
+// own footprint (ddls.go's make_tombstone), so a test can put a booking's
+// forSession target into exactly the state ReleaseOrphanedBooking's
+// convergence target is meant to find.
+func (f *wdFixture) tombstoneVtx(t *testing.T, name string) {
+	t.Helper()
+	id := f.ids[name]
+	key := "vtx." + f.types[id] + "." + id
+	body := map[string]any{"key": key, "class": f.types[id], "isDeleted": true, "data": map[string]any{}}
+	raw, _ := json.Marshal(body)
+	_, err := f.coreKV.Put(context.Background(), key, raw)
+	require.NoError(t, err)
+}
+
+// projectOrphanBookingAt runs the anchored wellnessOrphanedBookingSettlement
+// spec for one booking, mirroring clinic-ledger's projectAt.
+func (f *wdFixture) projectOrphanBookingAt(t *testing.T, bookingName string) []ruleengine.ProjectionResult {
+	t.Helper()
+	now := time.Now().UTC().Format(time.RFC3339)
+	eng := full.New()
+	cr, err := eng.Parse(orphanedBookingSettlementSpec)
+	require.NoError(t, err, "wellnessOrphanedBookingSettlement cypher must parse on the full engine")
+	bookingKey := "vtx." + f.types[f.ids[bookingName]] + "." + f.ids[bookingName]
+	out, err := eng.ExecuteWith(context.Background(), cr, ruleengine.EventContext{Parameters: map[string]any{
+		"actorKey":    bookingKey,
+		"now":         now,
+		"projectedAt": now,
+	}}, f.adjKV, f.coreKV)
+	require.NoError(t, err)
+	return out
+}
+
+// mkOrphanBooking seeds a booking vtx + .status aspect (value, session anchor)
+// and, when session is non-empty, forSession + a live session vertex — the
+// booking-side shape CreateBooking's ddls.go writes.
+func (f *wdFixture) mkOrphanBooking(t *testing.T, name, status, sessionName string) {
+	t.Helper()
+	f.vtx(t, name, "booking")
+	statusData := map[string]any{"value": status}
+	if sessionName != "" {
+		statusData["session"] = "vtx." + f.types[f.ids[sessionName]] + "." + f.ids[sessionName]
+		f.edge(t, "forSession", name, sessionName)
+	}
+	f.aspect(t, name, "status", "bookingStatus", statusData)
+}
+
 // TestWellnessStudios_RostersNamedStudios proves the studio picker projects
 // one row per NAMED studio, excluding a studio with no .profile aspect (the
 // WHERE presence filter), mirroring clinicProviders.
@@ -621,4 +667,82 @@ func TestWellnessIdentitiesRead_ExcludesUnnamedAndPlaintextShapedIdentities(t *t
 	rows := f.project(t, wellnessIdentitiesReadSpec)
 	require.Len(t, rows, 1, "only the ciphertext-named identity projects")
 	require.Equal(t, bobKey, rows[0].Values["identity_key"])
+}
+
+// TestWellnessOrphanedBookingSettlement_BookedLiveSession_NotViolating proves
+// a booking on a session that hasn't been called off never violates — the
+// common case, the positive vector proving the gap doesn't fire spuriously.
+func TestWellnessOrphanedBookingSettlement_BookedLiveSession_NotViolating(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newWdFixture(t)
+	f.vtx(t, "livesess", "session")
+	f.mkOrphanBooking(t, "livebooking", "booked", "livesess")
+
+	v := f.projectOrphanBookingAt(t, "livebooking")[0].Values
+	require.Equal(t, "booked", v["status"])
+	require.NotNil(t, v["sessionKey"], "the .status.session anchor is present")
+	require.Equal(t, false, v["missing_release"], "the session is still live — nothing to release")
+	require.Equal(t, false, v["violating"])
+}
+
+// TestWellnessOrphanedBookingSettlement_BookedSessionTombstoned_MissingRelease
+// proves the actual gap: TombstoneSession leaves the session vertex dead but
+// the forSession link untouched, so the OPTIONAL MATCH to a LIVE session
+// drops (se null) while .status.session (read straight off the booking's own
+// aspect, not walked) still names it — exactly the condition
+// ReleaseOrphanedBooking exists to drain.
+func TestWellnessOrphanedBookingSettlement_BookedSessionTombstoned_MissingRelease(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newWdFixture(t)
+	f.vtx(t, "deadsess", "session")
+	f.mkOrphanBooking(t, "orphanbooking", "booked", "deadsess")
+	f.tombstoneVtx(t, "deadsess")
+
+	v := f.projectOrphanBookingAt(t, "orphanbooking")[0].Values
+	require.Equal(t, "booked", v["status"])
+	require.Equal(t, "vtx.session."+f.ids["deadsess"], v["sessionKey"], "the anchor survives the session's own tombstone")
+	require.Equal(t, true, v["missing_release"], "still booked, session anchor present, session no longer live")
+	require.Equal(t, true, v["violating"])
+}
+
+// TestWellnessOrphanedBookingSettlement_AttendedSessionTombstoned_NotViolating
+// proves the gap is scoped to `booked` only: a booking already marked
+// attended/noShow before (or after) its session is called off is
+// SetBookingAttendance's/history's record, not a leak this convergence lens
+// should touch.
+func TestWellnessOrphanedBookingSettlement_AttendedSessionTombstoned_NotViolating(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newWdFixture(t)
+	f.vtx(t, "pastsess", "session")
+	f.mkOrphanBooking(t, "attendedbooking", "attended", "pastsess")
+	f.tombstoneVtx(t, "pastsess")
+
+	v := f.projectOrphanBookingAt(t, "attendedbooking")[0].Values
+	require.Equal(t, "attended", v["status"])
+	require.Equal(t, false, v["missing_release"], "not `booked` — SetBookingAttendance already owns this booking's history")
+	require.Equal(t, false, v["violating"])
+}
+
+// TestWellnessOrphanedBookingSettlement_NoSessionAnchor_NotViolating proves
+// the null-guard on sessionKey: a legacy booking created before CreateBooking
+// stamped .status.session (or any malformed row missing the anchor) never
+// violates rather than crashing ReleaseOrphanedBooking on a nil session.
+func TestWellnessOrphanedBookingSettlement_NoSessionAnchor_NotViolating(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newWdFixture(t)
+	f.mkOrphanBooking(t, "legacybooking", "booked", "")
+
+	v := f.projectOrphanBookingAt(t, "legacybooking")[0].Values
+	require.Equal(t, "booked", v["status"])
+	require.Nil(t, v["sessionKey"], "no session anchor stamped")
+	require.Equal(t, false, v["missing_release"], "no anchor to release against")
+	require.Equal(t, false, v["violating"])
 }

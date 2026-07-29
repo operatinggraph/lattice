@@ -51,6 +51,13 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 // auto-fill CancelBooking already uses — the instructor names neither, and
 // types only who showed. Its `status` field is therefore the one genuinely
 // user-entered value in the whole set.
+//
+// ReleaseOrphanedBooking carries none deliberately, the cafe-ledger
+// CreateAccount/DebitAccount precedent: it is granted at scope=any to
+// `operator` alone (permissions.go) and dispatched only by the
+// wellnessOrphanedBookingSettlement Weaver target (targets.go) — no human or
+// client ever submits it, so there is no presentation/inputSchema/dispatch
+// surface to describe.
 func OpMetas() []pkgmgr.OpMetaSpec {
 	return []pkgmgr.OpMetaSpec{
 		{
