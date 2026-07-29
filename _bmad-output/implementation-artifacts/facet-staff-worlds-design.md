@@ -942,3 +942,33 @@ candidate (3): add `capabilityEphemeral` as a second live consumer on the same i
 `refractor_capability_faninstress_e2e_test.go`'s multi-lens wiring) before running the same op. If both stay
 green, the remaining live-stack-only candidates (1) need direct instrumentation of the demo box's Refractor
 instance during a real claim, not another local harness.
+
+## 13.4 Candidate (2) is disproven — the real op's own mutation encoding is not the gap (Winston, 2026-07-29)
+
+**Built `TestRefractor_CapabilityLens_RealClaimIdentityOp_E2E`**
+(`internal/refractor/refractor_claim_batch_real_op_e2e_test.go`), the exact combination §13.3's checkpoint
+named: `testutil.InstallPhase1Packages` installs rbac-domain + identity-domain for real (the `ClaimIdentity`
+Starlark script + its op-meta, and the `capabilityRoles` lens spec, all landing in Core KV via real
+`InstallPackage` ops), a live `capabilityRoles` pipeline runs the actual CDC-consuming path (`RunOn`/`Run`,
+wired identically to §13.3's), and a real `testutil.CapabilityPipeline` drives a real `CreateUnclaimedIdentity`
+then a real `ClaimIdentity` op through the actual Processor/Starlark path (`PublishOp`/`DriveOne`, the same
+machinery `packages/identity-domain/claim_test.go` uses) — no hand-built batch anywhere in this test.
+
+**Result: it projects, reliably (4/4 runs, `cap.roles.<claimedIdentity>` gains the consumer role within
+milliseconds every time).** This closes candidate (2): the real `ClaimIdentity` script's exact mutation
+encoding is not the gap. Combined with §13.2 (NATS layer cleared) and §13.3 (hand-built atomic batch through
+the live pipeline projects fine), **four independent harnesses now all correctly project this exact
+write**: bare NATS delivery, sequential Put through the live pipeline, hand-built atomic-batch commit through
+the live pipeline, and now the real op script itself through the live pipeline.
+
+**What this narrows the gap to.** Per §13.3's own fallback, now with candidate (2) eliminated too:
+candidates (1) production load/timing and (3) a second consumer/lens reacting to the same `holdsRole` link
+(e.g. `capabilityEphemeral`, `edgeCatalog`) remain open — this fire's harness ran `capabilityRoles` alone,
+with no other consumer competing for the same adjacency bootstrapper + Core KV read path.
+
+**Checkpoint — next fire:** escalate to **candidate (3)** — add `capabilityEphemeral` as a second live
+consumer on the same identity/role graph in the SAME test (mirroring
+`refractor_capability_faninstress_e2e_test.go`'s multi-lens wiring, but keeping the live CDC pump this fire
+proved works rather than that test's `Reproject`-driven determinism), then drive the same real `ClaimIdentity`
+op. If it still projects cleanly, the remaining live-stack-only candidate (1) needs direct instrumentation of
+the demo box's Refractor instance during a real claim — not another local harness.
