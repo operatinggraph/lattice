@@ -864,3 +864,99 @@ RETURN
 §13.3's identical-alias-list requirement; it is mechanics, not shape. `null` parses as a `Literal`
 today (the `<> null` idiom is used throughout these tails), so the written form needs no engine
 change — confirm before relying on it.
+
+## 14. Build note — build order (a): the composition primitive + merge + classifier (Lattice Steward, 2026-07-29, `69119818`)
+
+**Shipped, no package changes** (per §13.7's build order — sessions/catalog/tasks (b)–(d) are
+separate, unbuilt fires):
+
+- **pkgmgr composition** (`internal/pkgmgr/anchorwalk.go`): `composeDataLensSpec` now returns
+  `[]string` — a single walk still yields exactly the byte-identical one-element slice it always
+  did; two or more walks yield one query PER WALK (head + that walk's own OPTIONAL MATCH clauses,
+  **unrenamed** + the shared tail, unchanged), replacing increment 2's scoped-rename+`coalesce`
+  fold entirely. `LensSpec` gained `SpecBranches []string` (`Spec` stays empty for a multi-walk
+  lens); `build.go` marshals `cypherBranches` (new, `omitempty`) alongside the existing
+  `cypherRule`.
+- **Wire + compile** (`internal/refractor/lens`): `LensSpec.CypherBranches []string` (mutually
+  exclusive with `CypherRule`); `translateSpec` compiles each branch independently via the
+  existing `SelectForLens` engine-selection path (no engine change) and refuses if any branch
+  resolves to a different engine than branch 0. `Rule.CompiledBranches []ruleengine.CompiledRule`
+  carries the N results; `Rule.CompiledRule` stays `= CompiledBranches[0]` so every existing
+  single-field consumer (key-column threading, `AnchorDeleteResult`/`AnchorProjectionKey` — both
+  dead code on a Personal lens's actor-enumerator path anyway) keeps working unchanged.
+- **Pipeline execution + merge** (`internal/refractor/pipeline`): `Pipeline.fullCRBranches`
+  (nil for every non-multi-walk lens). `executeFullForActorOnce` now calls
+  `executeBranches`, which runs each branch's `ExecuteWithFootprint` independently per actor,
+  **merges the raw `ProjectionResult` rows by output Key**, and unions the footprints —
+  strictly BEFORE the existing envelope/collision-guard/`multiEntryRetractions` post-processing,
+  which is otherwise untouched. The merge (`branchmerge.go`) is **uniform, not ownership-typed**:
+  for a key shared by 2+ branches, every column's value is "the single distinct non-null value
+  found across the sharing rows" — a walk-owned column naturally has at most one non-null value by
+  construction (parseWalks' cross-walk variable-disjointness guard), an anchor-derived column is
+  naturally identical in every branch, and either shape merges correctly with the SAME code path.
+  Two distinct non-null values fails the actor's evaluation loudly (a typed error propagated up
+  through the normal error-return path — no new failure channel). This is a **simplification from
+  §13.2's text**, not a different behavior: the design describes classifying columns to decide
+  *how* to merge; the shipped merge doesn't need the classification to decide that at runtime,
+  because "coalesce non-null, error on disagreement" is what both classes reduce to.
+- **Classifier** (`internal/refractor/ruleengine/full`): `CollectVariableRefs` (new file,
+  `bindings.go`) is a fresh AST-walk over `full.Expr` — the **same technique**
+  `hasMultiBindingConjunctUnit` (evaluation-consistency §13.3, `internal/refractor/projection`)
+  already uses, not a shared function (each package's classifier now evolves against its own
+  fail-closed default independently, as its own doc comment states). `ClassifyBranchReturnColumns`
+  (new file, `branchplan.go`) classifies every RETURN column of N compiled branches as
+  anchor-derived or walk-owned-by-exactly-one, refusing (naming the column) when a column mixes
+  two walks' variables or is otherwise unclassifiable. It needs **no explicit actor/anchor input**:
+  the "common" variable set is derived as the intersection of every branch's own MATCH-bound
+  variables — exact because parseWalks already forbids two walks from binding the same non-anchor
+  name, so only the fixed actor binding and the lens's one shared AnchorVar can appear in every
+  branch.
+
+**Deviation from §13.3's text — WHERE the refusal fires.** §13.3 says "expansion refuses the
+lens (install)," read at design time as pkgmgr's `ExpandReadGrantWalks`. Building it there turned
+out to need `internal/pkgmgr` to import `internal/refractor/ruleengine/full` in **production**
+code — which cycles: `full`'s own test corpus (`parse_test.go`) imports a real package
+(`packages/identity-hygiene`) that imports `pkgmgr`, closing the loop back through `full`. The
+classifier is called instead from **Refractor's `translateSpec`**, at lens-compile time (the
+moment a multi-walk spec is first dispatched — package install for a live stack, or any
+`ExpandReadGrantWalks`-consuming test that goes through real compilation). This is a **later**
+gate than originally intended (a live CDC-watch compile error, not a `go build`/`go test` failure
+inside pkgmgr itself), but still strictly before any row is ever merged — no unclassifiable lens
+can reach runtime. `internal/pkgmgr/anchorwalk_test.go`'s composition tests no longer assert the
+refusal (moved to `internal/refractor/lens/branchspec_translate_test.go`, which now owns it) —
+`composeDataLensSpec`'s doc comment states why. Future increments (b)–(d), and anyone touching
+this seam, should verify their new multi-walk lens compiles cleanly against a real Refractor
+before assuming pkgmgr alone would have caught an unclassifiable column.
+
+**Tests:** `full` package — `CollectVariableRefs` unit tests (variable ref, property chain,
+literal/parameter-contribute-nothing, binary-op union, unrecognised-form fail-closed) +
+`ClassifyBranchReturnColumns` (walk-owned/anchor-derived agreement, mixed-walk-vars refused,
+mismatched alias lists refused, <2 branches refused). `pkgmgr` — the Fire U1 multi-walk
+composition test rewritten for the N-branch shape (byte-for-byte per branch, no `coalesce`).
+`internal/refractor/lens` — `translateSpec` compiles N branches independently, `CypherRule`/
+`CypherBranches` mutual exclusivity, a branch parse error names its index, the mixed-walk-column
+refusal (moved from pkgmgr, above). `internal/refractor/pipeline` — **the §12 repro is the
+acceptance test, and it is the load-bearing one**: one actor, walk 0 reaching 2 real anchors
+(via a service), walk 1 reaching 1 real anchor on a genuinely different anchor (via a role);
+asserts the merged result set carries all 3, where the withdrawn `coalesce` shape (§12) silently
+dropped the role-only anchor. Plus: a single-branch lens is provably unaffected (no merge
+machinery engages), and the merge's own anchor-derived-disagreement backstop fails closed
+(exercised directly against `mergeBranchRows`, independent of the compile-time classifier).
+
+**Gates:** `go build ./...`, `make vet`, `golangci-lint run` (the four touched packages + `full`),
+`STRICT=1 lint-conventions.go`, full `go test ./... -p 4` (113 packages green — wide blast radius:
+touches `ruleengine/full`, `pkgmgr`, `refractor/lens`, `refractor/pipeline`, `cmd/refractor`).
+No `packages/**` DDL touched, so no `make verify-package-*` run.
+
+**Residuals, honestly named:**
+- **(b)–(d) are unbuilt.** Sessions, catalog (the originally-filed defect), and tasks each still
+  need their own fire: convert the pair of sibling lenses to one multi-`Walks` lens and retire the
+  sibling, per §13.4/§13.7's build order. This primitive is necessary but not sufficient for any
+  of the three — no live lens uses `SpecBranches` yet.
+- **`translateSpec`'s per-branch engine-selection loop** (`corekv_source.go`) calls
+  `defaultRegistry.SelectForLens` once per extra branch with a synthetic `ID` suffix
+  (`"<id>#branch<N>"`) purely for engine-selection logging/attempted-engines bookkeeping — cosmetic,
+  not a correctness concern; a future refactor could thread the real branch index through more
+  cleanly if `AttemptedEngines`-per-branch ever needs surfacing.
+- **The producer's own cross-product is untouched** (§13.1/§13.7 — already named, unaffected by
+  this fire; `cap-read.*` grants were never wrong and stay that way).
