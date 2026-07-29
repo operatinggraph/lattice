@@ -32,6 +32,27 @@ type AdjValue struct {
 	Edges []EdgeEntry `json:"edges"`
 }
 
+// DirectionMatches compares an EdgeEntry.Direction string ("outbound" /
+// "inbound", the vocabulary this package's Build/Neighbors persist) against
+// want, in the engine-neutral "out"/"in"/"both" vocabulary
+// full.Direction.String() produces (ruleengine stays engine-neutral and must
+// not import the full engine's Direction type — see
+// ruleengine.EdgeSelector's doc comment). "out" wants outbound; "in" wants
+// inbound; "both" wants either; any other value matches nothing (fail-closed
+// on an unrecognised want, mirroring the executor's own former
+// directionMatches switch default).
+func DirectionMatches(edgeDir, want string) bool {
+	switch want {
+	case "out":
+		return edgeDir == "outbound"
+	case "in":
+		return edgeDir == "inbound"
+	case "both":
+		return true
+	}
+	return false
+}
+
 // CoreKVEvent is the parsed payload of an incoming Core KV edge event.
 //
 // OtherType mirrors EdgeEntry.OtherType — see that comment. The

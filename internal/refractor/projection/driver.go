@@ -354,6 +354,8 @@ func InstallActorAggregate(
 		return false
 	}
 	authPlane := plan.AuthPlane
+	p.SetAuthPlane(authPlane)
+	p.SetRequiresFootprintValidation(plan.RequiresFootprintValidation)
 
 	// A perEntry descriptor (entryKeyColumn set) projects through
 	// EntryEnvelopeFn's per-anchor keys instead of EnvelopeFn's one document
@@ -441,7 +443,7 @@ func InstallActorAggregate(
 	logger.Info("actor-aggregate envelope + fan-out + delete-key + latency installed",
 		"lensId", r.ID, "lensDefKey", lensDefKey,
 		"anchorType", desc.AnchorType, "guarded", guarded, "authPlane", authPlane,
-		"perEntry", desc.EntryKeyColumn != "")
+		"perEntry", desc.EntryKeyColumn != "", "footprintValidated", plan.RequiresFootprintValidation)
 	return true
 }
 

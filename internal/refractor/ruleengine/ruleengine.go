@@ -62,6 +62,60 @@ type ProjectionResult struct {
 	Delete bool
 }
 
+// EvalFootprint is the read-surface certificate one full-engine ExecuteWith
+// call produces: every Core KV key (vertex or aspect) and every adjacency
+// node the evaluation read, each paired with the KV revision observed (0 for
+// a key that was absent). A validating caller re-reads every entry after the
+// evaluation and compares revisions to detect a mid-evaluation write to any
+// key the row depended on — an absence flipping to present (or the reverse)
+// counts as a moved revision, since 0 is itself a recorded value, not a
+// missing map entry.
+type EvalFootprint struct {
+	// NodeRevisions maps a Core KV vertex or aspect key to the revision it
+	// was read at.
+	NodeRevisions map[string]uint64
+	// EdgeRevisions maps an adjacency NodeID to the revision its edge
+	// document was read at.
+	EdgeRevisions map[string]uint64
+	// EdgeSelectors maps an adjacency NodeID (same keyspace as EdgeRevisions)
+	// to the selector-scoped read-surface record §13.4 adds: which
+	// (relation type, direction) pairs the walk consulted on that node, and
+	// which edge identities passed each selector. A validating caller
+	// re-applies the recorded selectors to a fresh read instead of comparing
+	// the whole document's revision, so a write to an UNRELATED relation on
+	// a shared hub node (a role, an op-meta, a location) no longer reads as
+	// drift. EdgeRevisions is unchanged and still the fallback comparison
+	// for any node whose entry here has Fallback set (or is altogether
+	// absent — a defensive case, since every fetchEdges call goes through
+	// traverseRel's recording).
+	EdgeSelectors map[string]EdgeSelectorFootprint
+}
+
+// EdgeSelector is one (relation type, direction) pair a traversal filtered
+// an adjacency node's edge list by. Direction uses the SAME vocabulary
+// full.Direction.String() already produces ("out"/"in"/"both") — represented
+// here as a plain string, not full.Direction, because this package is
+// engine-neutral and must not import the full engine's AST types.
+type EdgeSelector struct {
+	RelType   string
+	Direction string
+}
+
+// EdgeSelectorFootprint is the selector-scoped read-surface record for one
+// adjacency node: which (type,direction) selectors the walk consulted on it,
+// and which edge identities passed each selector.
+//
+// Fallback is set when any hop on this node used an untyped selector
+// (RelType == "") that consumes every edge regardless of type, or a
+// variable-length hop whose expansion cannot be attributed to a single
+// relation name — validation then falls back to comparing the node's whole-
+// document revision (EvalFootprint.EdgeRevisions) instead of this narrower
+// selector-scoped comparison, coarser being the always-safe direction.
+type EdgeSelectorFootprint struct {
+	Fallback bool
+	Matched  map[EdgeSelector]map[string]struct{} // selector -> matched EdgeIDs
+}
+
 // ParseError carries a structured failure from an engine's Parse() call so
 // the selection-logic can report which engine(s) rejected the rule body.
 type ParseError struct {
