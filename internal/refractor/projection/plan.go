@@ -63,6 +63,19 @@ type ProjectionPlan struct {
 	// AuthPlane reports whether the lens projects into the capability-kv bucket
 	// (an authorization surface).
 	AuthPlane bool
+	// RequiresFootprintValidation reports whether this lens's compiled cypher
+	// emits at least one value-tuple conjoining fields from more than one
+	// graph binding (hasMultiBindingConjunctUnit, §13.3) — the third conjunct
+	// of the footprint-validation scope predicate, alongside AuthPlane and
+	// actorAggregate. A lens whose every tuple is single-binding (e.g.
+	// capabilityRoles: `{operationType, scope, lanes}` all off one `perm`
+	// key) is exempt by construction: an ordinary bounded-staleness torn set
+	// there mixes individually-real entries, so validating it buys nothing
+	// and costs everything under write pressure on a shared hub node.
+	// Derived at compile time from the compiled cypher, never declared by a
+	// package author. Defaults to true (validate) whenever the compiled
+	// artifact is not the full engine's — see Compile.
+	RequiresFootprintValidation bool
 }
 
 // IsActorAggregate reports whether a lens rule opts into the actor-aggregate
@@ -116,13 +129,32 @@ func Compile(r *lens.Rule) (*ProjectionPlan, error) {
 	}
 
 	return &ProjectionPlan{
-		CanonicalName: r.CanonicalName,
-		Output:        desc,
-		AuthPlane:     IsAuthPlane(r),
+		CanonicalName:               r.CanonicalName,
+		Output:                      desc,
+		AuthPlane:                   IsAuthPlane(r),
+		RequiresFootprintValidation: requiresFootprintValidation(r),
 		Execution: ExecutionPlan{
 			Engine:       r.ResolvedEngine,
 			CompiledRule: r.CompiledRule,
 			AnchorType:   desc.AnchorType,
 		},
 	}, nil
+}
+
+// requiresFootprintValidation derives the §13.3 third conjunct from r's
+// compiled cypher: the full engine's own compiled AST, walked by
+// hasMultiBindingConjunctUnit. Fail-closed (validate) when r resolved to
+// anything other than the full engine, or its CompiledRule is not the full
+// engine's compiled artifact — mirroring hasMultiBindingConjunctUnit's own
+// "compiled artifact is not the full engine's" fail-closed condition, one
+// layer up where the concrete type is actually known.
+func requiresFootprintValidation(r *lens.Rule) bool {
+	if r.ResolvedEngine != ruleengine.EngineFull {
+		return true
+	}
+	cr, ok := r.CompiledRule.(*full.CompiledRule)
+	if !ok {
+		return true
+	}
+	return hasMultiBindingConjunctUnit(cr)
 }

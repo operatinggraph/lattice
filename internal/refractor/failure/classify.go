@@ -150,6 +150,14 @@ func Classify(err error) Category {
 		return CatPrivacyCritical
 	}
 
+	// 1.5. Eval-drift: an auth-plane evaluation whose read surface moved and
+	// did not converge after one re-execution. Explicit rather than relying
+	// on the default fallthrough below, so a future default-category change
+	// cannot silently reclassify it.
+	if errors.Is(err, ErrEvalDrift) {
+		return CatTransient
+	}
+
 	// 2. Infrastructure: NATS transport-level failures (server unreachable, connection lost).
 	if substrate.IsConnectionError(err) {
 		return CatInfra

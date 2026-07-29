@@ -98,6 +98,25 @@ type Pipeline struct {
 	// non-secure lens — rows pass through untouched.
 	secureDecryptor *SecureDecryptor
 
+	// authPlane reports whether this lens projects an authorization surface
+	// (projection.IsAuthPlane). Combined with actorAggregate (envelopeFn or
+	// multiEnvelopeFn installed) and requiresFootprintValidation, it is the
+	// scope predicate for footprint validation (executeFullForActor,
+	// refractor-evaluation-consistency-design.md §13.3): only a lens
+	// matching all three pays the re-read cost. False by default — every
+	// lens installed without SetAuthPlane gets no validation.
+	authPlane bool
+
+	// requiresFootprintValidation reports whether this lens's compiled cypher
+	// emits at least one multi-binding conjunct unit (projection.Compile's
+	// derived ProjectionPlan.RequiresFootprintValidation,
+	// refractor-evaluation-consistency-design.md §13.3) — the third conjunct
+	// of the footprint-validation scope predicate. A lens installed without
+	// SetRequiresFootprintValidation defaults to false, i.e. no validation —
+	// callers outside projection.InstallActorAggregate that want validation
+	// must set it explicitly, mirroring authPlane's own default.
+	requiresFootprintValidation bool
+
 	// latencyBuf captures the (CDC → projection-write) latency per event
 	// so the heartbeat can compute mean/p95/p99 per Lens. Nil disables.
 	latencyBuf *LatencyRingBuffer
@@ -410,6 +429,23 @@ func (p *Pipeline) SetActorDeleteKey(fn func(actorKey string) string) {
 // (Contract #3 §3.10). Pass nil to clear. Must be called before Run.
 func (p *Pipeline) SetSecureDecryptor(d *SecureDecryptor) {
 	p.secureDecryptor = d
+}
+
+// SetAuthPlane records whether this lens projects an authorization surface
+// (projection.IsAuthPlane). Combined with actorAggregate and
+// requiresFootprintValidation, it gates footprint validation (see the
+// authPlane field doc). Must be called before Run.
+func (p *Pipeline) SetAuthPlane(v bool) {
+	p.authPlane = v
+}
+
+// SetRequiresFootprintValidation records whether this lens's compiled cypher
+// emits a multi-binding conjunct unit (projection.ProjectionPlan's derived
+// field, see the requiresFootprintValidation field doc). Combined with
+// authPlane and actorAggregate, it gates footprint validation. Must be
+// called before Run.
+func (p *Pipeline) SetRequiresFootprintValidation(v bool) {
+	p.requiresFootprintValidation = v
 }
 
 // SetLatencyBuffer installs the per-Lens latency ring buffer.
@@ -882,7 +918,7 @@ func (p *Pipeline) handle(ctx context.Context, msg substrate.Message) (substrate
 		slog.Error("pipeline: evaluate",
 			"ruleId", p.ruleID, "entityId", key,
 			"stage", "traversal", "adapter", p.adapterName, "err", err)
-		return p.dispositionEvalErr(ctx, msg, key, "traversal", err)
+		return p.dispositionEvalErr(ctx, msg, key, "traversal", err, enumeratedActors)
 	}
 
 	// Write each result through the shared write path (failure classification,
@@ -916,10 +952,10 @@ func (p *Pipeline) evalLinkFanOut(ctx context.Context, msg substrate.Message, ke
 	if err != nil {
 		slog.Error("pipeline: link fan-out: evaluate",
 			"ruleId", p.ruleID, "entityId", key, "stage", "traversal", "err", err)
-		return p.dispositionEvalErr(ctx, msg, key, "traversal", err)
+		return p.dispositionEvalErr(ctx, msg, key, "traversal", err, enumeratedActors)
 	}
 	if err := p.applySecureDecrypt(ctx, results); err != nil {
-		return p.dispositionEvalErr(ctx, msg, key, "traversal", err)
+		return p.dispositionEvalErr(ctx, msg, key, "traversal", err, enumeratedActors)
 	}
 
 	return p.writeResults(ctx, msg, key, results, enumeratedActors)
@@ -951,7 +987,7 @@ func (p *Pipeline) evalPlainAspectReprojection(ctx context.Context, msg substrat
 	if err != nil {
 		slog.Error("pipeline: plain aspect reprojection: evaluate",
 			"ruleId", p.ruleID, "entityId", key, "stage", "traversal", "err", err)
-		return p.dispositionEvalErr(ctx, msg, key, "traversal", err)
+		return p.dispositionEvalErr(ctx, msg, key, "traversal", err, nil)
 	}
 	return p.writeResults(ctx, msg, key, results, nil)
 }
@@ -996,7 +1032,7 @@ func (p *Pipeline) evalPlainLinkReprojection(ctx context.Context, msg substrate.
 			slog.Error("pipeline: plain link reprojection: unmarshal payload",
 				"ruleId", p.ruleID, "entityId", key, "err", err)
 			return p.dispositionEvalErr(ctx, msg, key, "decode",
-				failure.Terminal(fmt.Errorf("pipeline: plain link reprojection: unmarshal %q: %w", key, err)))
+				failure.Terminal(fmt.Errorf("pipeline: plain link reprojection: unmarshal %q: %w", key, err)), nil)
 		}
 		isDeleted, _ = linkProps["isDeleted"].(bool)
 	}
@@ -1009,7 +1045,7 @@ func (p *Pipeline) evalPlainLinkReprojection(ctx context.Context, msg substrate.
 		if err := adjacency.Build(ctx, p.adjKV, evt); err != nil {
 			slog.Error("pipeline: plain link reprojection: adjacency build",
 				"ruleId", p.ruleID, "entityId", key, "err", err)
-			return p.dispositionEvalErr(ctx, msg, key, "traversal", err)
+			return p.dispositionEvalErr(ctx, msg, key, "traversal", err, nil)
 		}
 	}
 	endpoints := []struct {
@@ -1030,7 +1066,7 @@ func (p *Pipeline) evalPlainLinkReprojection(ctx context.Context, msg substrate.
 			slog.Error("pipeline: plain link reprojection: evaluate",
 				"ruleId", p.ruleID, "entityId", key, "endpoint", ep.vtx,
 				"stage", "traversal", "err", err)
-			return p.dispositionEvalErr(ctx, msg, key, "traversal", err)
+			return p.dispositionEvalErr(ctx, msg, key, "traversal", err, nil)
 		}
 		for _, r := range results {
 			id := dedupeKeyFor(r)
@@ -1094,10 +1130,10 @@ func (p *Pipeline) evalAspectFanOut(ctx context.Context, msg substrate.Message, 
 	if err != nil {
 		slog.Error("pipeline: aspect fan-out: evaluate",
 			"ruleId", p.ruleID, "entityId", key, "stage", "traversal", "err", err)
-		return p.dispositionEvalErr(ctx, msg, key, "traversal", err)
+		return p.dispositionEvalErr(ctx, msg, key, "traversal", err, enumeratedActors)
 	}
 	if err := p.applySecureDecrypt(ctx, results); err != nil {
-		return p.dispositionEvalErr(ctx, msg, key, "traversal", err)
+		return p.dispositionEvalErr(ctx, msg, key, "traversal", err, enumeratedActors)
 	}
 
 	return p.writeResults(ctx, msg, key, results, enumeratedActors)
@@ -1108,7 +1144,21 @@ func (p *Pipeline) evalAspectFanOut(ctx context.Context, msg substrate.Message, 
 // pipeline applied: Infra/Structural leave the message pending (return the error
 // so the supervisor pauses); Terminal publishes a DLQ entry and acks; Transient
 // naks for redelivery.
-func (p *Pipeline) dispositionEvalErr(ctx context.Context, msg substrate.Message, key, stage string, err error) (substrate.Decision, error) {
+//
+// A footprint-validation drift (failure.ErrEvalDrift, evaluation-consistency-
+// design.md §4.3) is Transient like any other, but a bare Nak would only
+// redeliver the SAME triggering message — re-running the exact evaluation
+// that just drifted, with no backoff and no health signal. When this
+// pipeline is actor-aggregate (an envelope wrapper installed, the only shape
+// ErrEvalDrift can ever come from — needsFootprintValidation gates on it) and
+// a retry queue is configured, the failing actor(s) are enqueued through the
+// same re-evaluate-and-write closure the write-path transient-failure branch
+// already uses (enqueueActorReprojectRetry), so the drift gets the queue's
+// backoff/DLQ/health machinery instead of an un-backed-off redelivery loop.
+// enumeratedActors is nil for a plain lens (which can never produce
+// ErrEvalDrift — needsFootprintValidation always false) and for the actor's
+// own vertex re-evaluating itself, where key IS the actor key.
+func (p *Pipeline) dispositionEvalErr(ctx context.Context, msg substrate.Message, key, stage string, err error, enumeratedActors []string) (substrate.Decision, error) {
 	cat := failure.Classify(err)
 	if cat == failure.CatInfra || cat == failure.CatStructural {
 		// Do NOT dispose — leave pending for redelivery when the pipeline resumes.
@@ -1116,6 +1166,17 @@ func (p *Pipeline) dispositionEvalErr(ctx context.Context, msg substrate.Message
 	}
 	if cat == failure.CatTerminal {
 		p.publishTerminalDLQ(ctx, msg.Body, key, stage, err)
+		return substrate.Ack, nil
+	}
+	if errors.Is(err, failure.ErrEvalDrift) && p.retryQueue != nil && p.retryMaxAttempts > 0 &&
+		(p.envelopeFn != nil || p.multiEnvelopeFn != nil) && p.actorEnumerator != nil {
+		actors := enumeratedActors
+		if len(actors) == 0 {
+			actors = []string{key}
+		}
+		for _, actor := range actors {
+			p.enqueueActorReprojectRetry(msg.Body, actor)
+		}
 		return substrate.Ack, nil
 	}
 	return substrate.Nak, nil

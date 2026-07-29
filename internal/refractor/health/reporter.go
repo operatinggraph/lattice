@@ -235,6 +235,43 @@ func (r *Reporter) RecordError(ctx context.Context, errMsg string) error {
 	return nil
 }
 
+// RecordEvalDriftRetry increments EvalDriftRetries. Called once per inline
+// footprint-validation re-execution attempt an auth-plane evaluation's
+// drifted read surface triggers (refractor-evaluation-consistency-design.md
+// §4.6). Thread-safe; serialized via writeMu to prevent lost-update races
+// with concurrent RecordError/RecordEvalDriftRequeue calls.
+func (r *Reporter) RecordEvalDriftRetry(ctx context.Context) error {
+	r.writeMu.Lock()
+	defer r.writeMu.Unlock()
+
+	existing, err := r.readExisting(ctx)
+	if err != nil {
+		return fmt.Errorf("health: RecordEvalDriftRetry read: %w", err)
+	}
+	existing.EvalDriftRetries++
+	existing.LastUpdated = time.Now().UTC().Format(time.RFC3339)
+	existing.RuleID = r.ruleID
+	return r.put(ctx, existing)
+}
+
+// RecordEvalDriftRequeue increments EvalDriftRequeues. Called once when an
+// auth-plane evaluation's read surface still diverges after the inline
+// re-execution and the pipeline requeues it as failure.ErrEvalDrift instead
+// of landing a possibly-torn row. Thread-safe; serialized via writeMu.
+func (r *Reporter) RecordEvalDriftRequeue(ctx context.Context) error {
+	r.writeMu.Lock()
+	defer r.writeMu.Unlock()
+
+	existing, err := r.readExisting(ctx)
+	if err != nil {
+		return fmt.Errorf("health: RecordEvalDriftRequeue read: %w", err)
+	}
+	existing.EvalDriftRequeues++
+	existing.LastUpdated = time.Now().UTC().Format(time.RFC3339)
+	existing.RuleID = r.ruleID
+	return r.put(ctx, existing)
+}
+
 // Delete removes the health KV entry for this rule (FR39 — rule deletion cleanup).
 // After Delete, subsequent GetStatus calls return the default active zero Entry
 // (ErrKeyNotFound path in readExisting). Safe to call when no entry exists —

@@ -95,6 +95,18 @@ type executor struct {
 	// validating caller compares after evaluation.
 	edges         map[string][]adjacency.EdgeEntry
 	edgeRevisions map[string]uint64
+
+	// edgeSelectors records, per adjacency node, the selector-scoped read
+	// surface §13.4 adds: which (relation type, direction) pairs traverseRel
+	// consulted on that node, and which edge identities passed each one —
+	// the narrower unit footprintValid compares against instead of the
+	// node's whole-document revision, so a write to an unrelated relation on
+	// a shared hub node no longer reads as drift. Populated alongside edges/
+	// edgeRevisions; never populated for a node this evaluation never
+	// traversed a typed relationship through (fetchEdges alone, with no
+	// traverseRel selector recording, leaves no entry here — footprint()
+	// falls back to whole-document comparison for it, same as Fallback).
+	edgeSelectors map[string]*ruleengine.EdgeSelectorFootprint
 }
 
 // ExecuteWith runs cr against the given Core and Adjacency KVs, binding
@@ -102,18 +114,38 @@ type executor struct {
 // CDC event on the full-engine path.
 //
 // Returns one ProjectionResult per result row. Empty result => zero rows.
+// ExecuteWithFootprint is the sibling entry point that also returns the
+// evaluation's read-surface footprint; ExecuteWith exists unchanged so every
+// pre-existing caller (package lens tests across packages/*, and any
+// production caller uninterested in footprint validation) keeps compiling
+// against the same two-return shape.
 func (e *Engine) ExecuteWith(
 	ctx context.Context,
 	cr ruleengine.CompiledRule,
 	ec ruleengine.EventContext,
 	adjKV, coreKV *substrate.KV,
 ) ([]ruleengine.ProjectionResult, error) {
+	results, _, err := e.ExecuteWithFootprint(ctx, cr, ec, adjKV, coreKV)
+	return results, err
+}
+
+// ExecuteWithFootprint runs cr exactly as ExecuteWith does, additionally
+// returning this evaluation's read-surface footprint (every vertex/aspect key
+// and adjacency node it read, with the revision observed) — the certificate a
+// validating caller (executeFullForActor in package pipeline) compares
+// against current KV state after evaluation to detect a mid-evaluation write.
+func (e *Engine) ExecuteWithFootprint(
+	ctx context.Context,
+	cr ruleengine.CompiledRule,
+	ec ruleengine.EventContext,
+	adjKV, coreKV *substrate.KV,
+) ([]ruleengine.ProjectionResult, ruleengine.EvalFootprint, error) {
 	compiled, ok := cr.(*CompiledRule)
 	if !ok {
-		return nil, fmt.Errorf("full engine: expected *CompiledRule, got %T", cr)
+		return nil, ruleengine.EvalFootprint{}, fmt.Errorf("full engine: expected *CompiledRule, got %T", cr)
 	}
 	if compiled.Query == nil {
-		return nil, errors.New("full engine: compiled rule has nil query")
+		return nil, ruleengine.EvalFootprint{}, errors.New("full engine: compiled rule has nil query")
 	}
 
 	ex := &executor{
@@ -125,6 +157,7 @@ func (e *Engine) ExecuteWith(
 		nodes:         map[string]*nodeRef{},
 		edges:         map[string][]adjacency.EdgeEntry{},
 		edgeRevisions: map[string]uint64{},
+		edgeSelectors: map[string]*ruleengine.EdgeSelectorFootprint{},
 	}
 
 	bindings := []binding{{}}
@@ -135,13 +168,13 @@ func (e *Engine) ExecuteWith(
 		case *Match:
 			next, err := ex.applyMatch(bindings, c)
 			if err != nil {
-				return nil, err
+				return nil, ruleengine.EvalFootprint{}, err
 			}
 			bindings = next
 		case *With:
 			next, err := ex.applyWith(bindings, c)
 			if err != nil {
-				return nil, err
+				return nil, ruleengine.EvalFootprint{}, err
 			}
 			bindings = next
 		case *Return:
@@ -150,9 +183,42 @@ func (e *Engine) ExecuteWith(
 	}
 
 	if lastReturn == nil {
-		return nil, errors.New("full engine: query missing RETURN clause")
+		return nil, ruleengine.EvalFootprint{}, errors.New("full engine: query missing RETURN clause")
 	}
-	return ex.applyReturn(bindings, lastReturn)
+	results, err := ex.applyReturn(bindings, lastReturn)
+	if err != nil {
+		return nil, ruleengine.EvalFootprint{}, err
+	}
+	footprint := ex.footprint()
+	if hook := footprintCapturedHook(ctx); hook != nil {
+		hook()
+	}
+	return results, footprint, nil
+}
+
+// footprint returns the read-surface certificate this evaluation observed —
+// every Core KV key it read (via the node memo, absent = revision 0) and
+// every adjacency node it read (via the edge memo, absent = revision 0). Both
+// memos are already populated for the life of the evaluation (see the nodes/
+// edges field docs), so building the footprint costs no extra reads.
+func (ex *executor) footprint() ruleengine.EvalFootprint {
+	nodeRevs := make(map[string]uint64, len(ex.nodes))
+	for key, ref := range ex.nodes {
+		if ref == nil {
+			nodeRevs[key] = 0
+			continue
+		}
+		nodeRevs[key] = ref.revision
+	}
+	edgeRevs := make(map[string]uint64, len(ex.edgeRevisions))
+	for nodeID, rev := range ex.edgeRevisions {
+		edgeRevs[nodeID] = rev
+	}
+	edgeSelectors := make(map[string]ruleengine.EdgeSelectorFootprint, len(ex.edgeSelectors))
+	for nodeID, sel := range ex.edgeSelectors {
+		edgeSelectors[nodeID] = *sel
+	}
+	return ruleengine.EvalFootprint{NodeRevisions: nodeRevs, EdgeRevisions: edgeRevs, EdgeSelectors: edgeSelectors}
 }
 
 // Execute satisfies ruleengine.RuleEngine. It is the single-row convenience
@@ -588,6 +654,61 @@ func (ex *executor) fetchEdges(adjNodeID string) ([]adjacency.EdgeEntry, error) 
 	return edges, nil
 }
 
+// recordEdgeSelector records, for adjNodeID, the (rel.Type, rel.Direction)
+// selector this hop consulted against edges — the selector-scoped read-
+// surface unit (§13.4) a validating caller later re-applies to a fresh read
+// instead of comparing adjNodeID's whole adjacency-document revision, so a
+// write to an unrelated relation on a shared hub node no longer reads as
+// drift.
+//
+// An untyped selector (rel.Type == "") consumes every edge on the node
+// regardless of type — it marks the node's entry Fallback instead of
+// recording a Matched set, since whole-document revision comparison already
+// covers (and is the only sound comparison for) an untyped read. Once a
+// node's entry is Fallback, a later typed hop on the same node records
+// nothing further: the coarser comparison already subsumes it.
+//
+// Called once per (node, hop-iteration) from traverseRel's per-node edge
+// loop; a node revisited via the same selector later in the same evaluation
+// (a variable-length walk crossing it twice, or two separate MATCH clauses)
+// just unions into the same Matched set — idempotent, no special-casing
+// needed.
+func (ex *executor) recordEdgeSelector(adjNodeID string, rel RelPattern, edges []adjacency.EdgeEntry) {
+	if ex.edgeSelectors == nil {
+		return
+	}
+	entry := ex.edgeSelectors[adjNodeID]
+	if entry == nil {
+		entry = &ruleengine.EdgeSelectorFootprint{}
+		ex.edgeSelectors[adjNodeID] = entry
+	}
+	if rel.Type == "" {
+		entry.Fallback = true
+		return
+	}
+	if entry.Fallback {
+		return
+	}
+	sel := ruleengine.EdgeSelector{RelType: rel.Type, Direction: rel.Direction.String()}
+	ids := entry.Matched[sel]
+	if ids == nil {
+		ids = map[string]struct{}{}
+		if entry.Matched == nil {
+			entry.Matched = map[ruleengine.EdgeSelector]map[string]struct{}{}
+		}
+		entry.Matched[sel] = ids
+	}
+	for _, e := range edges {
+		if e.Name != rel.Type {
+			continue
+		}
+		if !adjacency.DirectionMatches(e.Direction, rel.Direction.String()) {
+			continue
+		}
+		ids[e.EdgeID] = struct{}{}
+	}
+}
+
 // traverseRel expands one relationship hop (possibly variable-length).
 func (ex *executor) traverseRel(b binding, from *nodeRef, rel RelPattern, to NodePattern) ([]binding, error) {
 	minHops := rel.MinHops
@@ -644,11 +765,12 @@ func (ex *executor) traverseRel(b binding, from *nodeRef, rel RelPattern, to Nod
 			if err != nil {
 				return nil, fmt.Errorf("full engine: neighbors(%s): %w", adjLookupID, err)
 			}
+			ex.recordEdgeSelector(adjLookupID, rel, edges)
 			for _, e := range edges {
 				if rel.Type != "" && e.Name != rel.Type {
 					continue
 				}
-				if !directionMatches(e.Direction, rel.Direction) {
+				if !adjacency.DirectionMatches(e.Direction, rel.Direction.String()) {
 					continue
 				}
 				// Reconstruct the OTHER endpoint's Core KV key. If the edge
@@ -725,23 +847,6 @@ func (ex *executor) traverseRel(b binding, from *nodeRef, rel RelPattern, to Nod
 		out = append(out, nb)
 	}
 	return out, nil
-}
-
-// directionMatches compares an Adjacency edge direction string against the
-// AST's Direction. The Adjacency builder records each edge under both
-// endpoints with direction="outbound" on the source side and "inbound" on
-// the target side. DirOut wants outbound; DirIn wants inbound; DirBoth wants
-// either.
-func directionMatches(adjDir string, want Direction) bool {
-	switch want {
-	case DirOut:
-		return adjDir == "outbound"
-	case DirIn:
-		return adjDir == "inbound"
-	case DirBoth:
-		return true
-	}
-	return false
 }
 
 // --- WITH ---
