@@ -222,14 +222,22 @@ func Lenses() []pkgmgr.LensSpec {
 			// handleStaffPatients replaces that vector, reading THIS table as a
 			// JWT-authenticated actor.
 			//
-			// Each row anchors on its own patient's NanoID, so exactly two kinds
-			// of actor match it: one holding the reserved WildcardAnchor grant
-			// (D1 design §3.4 M5, internal/refractor/adapter.WildcardAnchor) —
-			// the front desk, who needs the whole roster — and, via
-			// patientIdentityReadGrants, the signed-in identity the row's own
-			// patient is identifiedBy. The roster as a WHOLE still has no owner
-			// but a single row does, and a person being able to find their own
-			// record is what lets a patient session know which patient it is.
+			// Each row anchors on its own patient's NanoID plus every WORKPLACE
+			// building a provider practises at, for a provider the patient has
+			// an appointment with (mirrors clinicAppointmentsRead's own
+			// practicesAt anchor exactly, one hop further out from patient to
+			// appointment to provider) — service-location's staffReadGrants
+			// (cap-read.staff) grants a front-desk actor a token per building
+			// they worksAt, so a worksAt-anchored front-desk identity now
+			// matches every patient whose care touches its building, not only
+			// the reserved WildcardAnchor holder. Three kinds of actor match a
+			// row: the WildcardAnchor holder (the whole roster), a
+			// worksAt-anchored front-desk actor for a shared building (this
+			// fix), and, via patientIdentityReadGrants, the signed-in identity
+			// the row's own patient is identifiedBy. The roster as a WHOLE
+			// still has no owner but a single row does, and a person being
+			// able to find their own record is what lets a patient session
+			// know which patient it is.
 			//
 			// NAME comes straight off .demographics (non-sensitive). email/phone
 			// are SECURE columns (Contract #3 §3.10, Vault Fire 5 — the
@@ -238,11 +246,12 @@ func Lenses() []pkgmgr.LensSpec {
 			// exactly): the OPTIONAL-matched identifiedBy identity's sensitive
 			// .email/.phone aspects are RETURNed as ciphertext envelopes whole
 			// (id.<aspect>.data) and decrypted at projection into this table.
-			// Decrypted contact therefore reaches exactly two readers, and the
-			// self-anchor above does not widen that: the WildcardAnchor holder,
-			// who is the front desk this contact belongs to operationally, and
-			// the person the row is about, reading their own email and phone.
-			// A patient with no
+			// Decrypted contact therefore reaches the same three readers as
+			// the row itself: the WildcardAnchor holder, a worksAt-anchored
+			// front-desk actor sharing a workplace building with the
+			// patient's care — both the front desk this contact belongs to
+			// operationally — and the person the row is about, reading their
+			// own email and phone. A patient with no
 			// identifiedBy link (identityKey null) or a shredded identity
 			// projects null email/phone — never an error (right-to-erasure and
 			// the pre-Vault/no-backfill posture both fall through the same
@@ -532,10 +541,26 @@ RETURN
 // clinic-wide patient roster (D1.5, the staff-wildcard increment; Vault Fire 5
 // added the identifiedBy contact columns). Same WHERE guard as
 // clinicPatientsSpec (only NAMED patients project). authz_anchors carries the
-// row's own patient NanoID, so exactly two kinds of actor match: the reserved
-// WildcardAnchor grant (the whole roster), and, via patientIdentityReadGrants
-// below, the signed-in identity that patient is identifiedBy (its own row
-// only — see clinicPatientsRead's doc comment).
+// row's own patient NanoID plus the WORKPLACE token of every building a
+// provider practises at, for a provider this patient has an appointment with
+// — mirroring clinicAppointmentsReadSpec's own `[(pr)-[:practicesAt]->(b) |
+// ...]` idiom one hop further out (patient -> appointment -> provider ->
+// building), so a front-desk actor's cap-read.staff grant (service-location's
+// staffReadGrants, anchored on the building it worksAt) now matches every
+// patient whose care touches that building, not only the reserved
+// WildcardAnchor holder. Three kinds of actor match: the WildcardAnchor grant
+// (the whole roster), a worksAt-anchored front-desk actor for a shared
+// building, and, via patientIdentityReadGrants below, the signed-in identity
+// that patient is identifiedBy (its own row only — see clinicPatientsRead's
+// doc comment).
+//
+// The workplace fan-out is a pattern COMPREHENSION anchored on `p` (mirrors
+// wellnessMembersSpec's coveringLocations idiom), not a separate MATCH: a
+// MATCH binding the appointment/provider hops in the query body would fan a
+// multi-appointment patient into one row per appointment, colliding on the
+// single-valued patient_id IntoKey. The comprehension keeps the row
+// one-per-patient regardless of how many appointments or providers it walks,
+// yielding [] (never a null element) for a patient with none.
 //
 // identifiedBy is OPTIONAL — a patient created before its contact was minted,
 // or one with no contact at all, has no linked identity, so identityKey /
@@ -556,7 +581,8 @@ RETURN
   id.key                       AS identity_key,
   id.email.data                AS email,
   id.phone.data                AS phone,
-  [nanoIdFromKey(p.key)]       AS authz_anchors
+  [nanoIdFromKey(p.key)] + [(p)<-[:forPatient]-(a:appointment)-[:withProvider]->(pr:provider)-[:practicesAt]->(b:building) | nanoIdFromKey(b.key)]
+                               AS authz_anchors
 `
 
 // clinicAppointmentsReadSpec is the PATIENT-anchored protected Postgres read

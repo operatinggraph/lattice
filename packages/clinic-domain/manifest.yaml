@@ -1,5 +1,5 @@
 name: clinic-domain
-version: 0.28.11
+version: 0.28.12
 depends:
   - location-domain
 description: |
@@ -17,8 +17,8 @@ description: |
   ever claim a given identity, so two DIFFERENT patients can never both wire
   the same identityKey. Display rides clinicPatientsRead's email/phone
   Secure-Lens columns (Vault Fire 5): decrypted at projection from the linked
-  identity for the staff-wildcard audience, null for a patient with no
-  identifiedBy link or a shredded identity.
+  identity for the workplace-anchored and wildcard staff audiences, null for a
+  patient with no identifiedBy link or a shredded identity.
   RecordEncounter captures the post-visit clinical record (.encounter — RAW PHI
   {summary, assessment, plan} never projected, plus operational documentation /
   follow-up signals the lens does project). Six projection lenses
