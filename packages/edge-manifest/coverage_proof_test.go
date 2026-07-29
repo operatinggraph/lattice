@@ -179,7 +179,7 @@ func TestManifestAnchorCoverage_ResidentWorld(t *testing.T) {
 			{"edgeCatalog", emComposedSpec(t, "edgeCatalog")},
 			{"edgeTasks", emComposedSpec(t, "edgeTasks")},
 			{"edgeInstances", emComposedSpec(t, "edgeInstances")},
-			{"edgeEntitySessions", emComposedSpec(t, "edgeEntitySessions")},
+			{"edgeEntitySessions", emComposedSpecBranch(t, "edgeEntitySessions", 0)},
 			{"edgeEntityProviders", emComposedSpec(t, "edgeEntityProviders")},
 			{"edgeEntityBookings", emComposedSpec(t, "edgeEntityBookings")},
 			{"edgeEntityTabs", emComposedSpec(t, "edgeEntityTabs")},
@@ -388,15 +388,16 @@ func emProviderWorld(t *testing.T) *emFixture {
 
 // TestManifestAnchorCoverage_ProviderWorld asserts edgeManifestProviderReadGrants
 // covers every anchor the three provider-hat lenses project (own appointments,
-// own service queue, own led sessions) — the slice persona-worlds Fire W0 added
-// alongside its lenses so D1 would not silently drop every provider-hat row.
+// own service queue, own led sessions — the last now edgeEntitySessions'
+// domainProvider branch) — the slice persona-worlds Fire W0 added alongside
+// its lenses so D1 would not silently drop every provider-hat row.
 func TestManifestAnchorCoverage_ProviderWorld(t *testing.T) {
 	f := emProviderWorld(t)
 	f.assertAnchorsCovered(t, f.key("providerId"),
 		[]dataLens{
 			{"edgeProviderSchedule", emComposedSpec(t, "edgeProviderSchedule")},
 			{"edgeProviderQueue", emComposedSpec(t, "edgeProviderQueue")},
-			{"edgeInstructorSessions", emComposedSpec(t, "edgeInstructorSessions")},
+			{"edgeEntitySessions (provider branch)", emComposedSpecBranch(t, "edgeEntitySessions", 1)},
 		},
 		[]string{emComposedSpec(t, "edgeManifestProviderReadGrants")})
 }

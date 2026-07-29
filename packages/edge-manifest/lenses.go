@@ -2,16 +2,19 @@ package edgemanifest
 
 import "github.com/operatinggraph/lattice/internal/pkgmgr"
 
-// Lenses returns the package's eighteen Personal-Lens declarations
+// Lenses returns the package's seventeen Personal-Lens declarations
 // (edge-showcase-app-design.md §3.2; the manifest.ent entity lenses per
 // facet-entity-browse-design.md; the staff siblings edgeCatalogRoles +
 // edgeTasksQueued + edgeStaffWorkOrders per facet-staff-worlds-design.md
-// §3.3; the provider-hat siblings edgeProviderSchedule + edgeProviderQueue +
-// edgeInstructorSessions per persona-worlds-design.md Fire W0; the
-// edgeStaffPanes descriptor lens per facet-discovery-restoration-design.md
+// §3.3; the provider-hat siblings edgeProviderSchedule + edgeProviderQueue
+// per persona-worlds-design.md Fire W0 — edgeEntitySessions itself carries
+// the third, the instructor-led-session path, as its own second Walk
+// (refractor-shared-keyspace-arbitration-design.md §13.7 build order (b):
+// the multi-walk merge retiring the former edgeInstructorSessions sibling);
+// the edgeStaffPanes descriptor lens per facet-discovery-restoration-design.md
 // §2.1) — the repo's first `nats-subject` / Personal Lens package.
 //
-// Seventeen of the eighteen are NON-SELF-ANCHORED: each keys its rows on a
+// Sixteen of the seventeen are NON-SELF-ANCHORED: each keys its rows on a
 // vertex other than the recipient identity (a service template, an op meta, a
 // task, an instance, a session, a provider, a booking, a tab, a studio, a menu
 // item, a work order, an appointment). Refractor's D1 gate (internal/refractor/projection/personal.go
@@ -158,17 +161,27 @@ func Lenses() []pkgmgr.LensSpec {
 			Personal:      true,
 			Engine:        "full",
 			IntoKey:       []string{"__actor", "ns", "entityId"},
-			Walks: []pkgmgr.AnchorWalk{{
-				GrantDomain: domainBase,
-				AnchorType:  "session",
-				AnchorVar:   "sess",
-				Chain: []string{
-					chainResidence,
-					"(container)<-[:locatedAt]-(studio:studio)",
-					"(studio)<-[:atStudio]-(sess:session)",
+			Walks: []pkgmgr.AnchorWalk{
+				{
+					GrantDomain: domainBase,
+					AnchorType:  "session",
+					AnchorVar:   "sess",
+					Chain: []string{
+						chainResidence,
+						"(container)<-[:locatedAt]-(studio:studio)",
+						"(studio)<-[:atStudio]-(sess:session)",
+					},
 				},
-			}},
-			Spec: edgeEntitySessionsTail,
+				{
+					GrantDomain: domainProvider,
+					AnchorType:  "session",
+					AnchorVar:   "sess",
+					Chain: []string{
+						"(identity)<-[:identifiedBy]-(instr:instructor)<-[:ledBy]-(sess:session)",
+					},
+				},
+			},
+			Spec: edgeSessionsTail,
 		},
 		{
 			CanonicalName: "edgeEntityProviders",
@@ -390,25 +403,6 @@ func Lenses() []pkgmgr.LensSpec {
 				},
 			}},
 			Spec: edgeProviderQueueTail,
-		},
-		{
-			CanonicalName: "edgeInstructorSessions",
-			Class:         "meta.lens",
-			Adapter:       "nats-subject",
-			SubjectPrefix: manifestSubjectPrefix,
-			Stream:        manifestStream,
-			Personal:      true,
-			Engine:        "full",
-			IntoKey:       []string{"__actor", "ns", "entityId"},
-			Walks: []pkgmgr.AnchorWalk{{
-				GrantDomain: domainProvider,
-				AnchorType:  "session",
-				AnchorVar:   "sess",
-				Chain: []string{
-					"(identity)<-[:identifiedBy]-(instr:instructor)<-[:ledBy]-(sess:session)",
-				},
-			}},
-			Spec: edgeInstructorSessionsTail,
 		},
 	}
 }
@@ -684,25 +678,55 @@ RETURN
   inst.outcome.data.completedAt AS completedAt
 `
 
-// edgeEntitySessionsTail presents one `manifest.ent.<sessionId>` row per
-// wellness class session the residence walk reaches — the browse rows that give
-// a declared `dispatch.targetType: "session"` something to resolve against
-// (facet-entity-browse-design.md §3 F2). The walk reaches them through
-// wellness-domain's authZ-free `studio locatedAt location` link off the same
-// containment spine edgeServices uses (NEVER availableAt — that edge is
-// service-access authZ, §3 F1). `entityType` is a literal stamped per walk,
-// exactly as edgeIdentity's selfAnchors stamps its type — the engine has no
-// vertex-type-from-key function, and the type is a declaration of what the walk
-// means. One lens per entity kind: the engine has no UNION, and a row-per-entity
-// cypher carrying two unrelated kinds would cross-product. The schedule instant
-// projects as `startsAt`, not the design's `when` — WHEN is a CASE keyword in
-// this engine's lexer and an alias by that name fails to parse. `instructorKey`
-// is a tail-local OPTIONAL MATCH (never an aspect read off a walk-prefix var —
-// a KEY is safe from either origin, but this one genuinely needs its own
-// binding since the residence walk never reaches an instructor): app.js's
-// crossHatMismatch compares it against `{me.instructor}` so an op that
-// administers "the session I lead" isn't offered against a session somebody
-// else leads merely because both share the entityType.
+// edgeSessionsTail presents one `manifest.ent.<sessionId>` row per wellness
+// class session either of edgeEntitySessions' two Walks reaches: the
+// residence path (wellness-domain's authZ-free `studio locatedAt location`
+// link off the same containment spine edgeServices uses — NEVER
+// availableAt, that edge is service-access authZ, facet-entity-browse-
+// design.md §3 F1) and the provider path (the actor's own bound instructor
+// via `identifiedBy`, then that instructor's `ledBy`-inverse sessions —
+// persona-worlds-design.md Fire W0's "my classes to teach" queue). Both
+// Walks anchor on the same `sess:session`
+// (refractor-shared-keyspace-arbitration-design.md §13.7 build order (b) —
+// the merge that retired the former sibling lens edgeInstructorSessions,
+// whose RETURN this tail is byte-identical to), so a resident who is ALSO
+// the instructor of a session reachable by both paths projects the
+// identical row under the identical key — an LWW-idempotent overlap, the
+// same pattern edgeCatalogRolesTail already proves for a dual-reachable op
+// meta. `entityType` is a literal stamped per walk, exactly as edgeIdentity's
+// selfAnchors stamps its type — the engine has no vertex-type-from-key
+// function, and the type is a declaration of what the walk means. The
+// schedule instant projects as `startsAt`, not the design's `when` — WHEN is
+// a CASE keyword in this engine's lexer and an alias by that name fails to
+// parse. Both bridging vars are tail-local OPTIONAL MATCHes rather than
+// walk-chain vars — `studio` for the provider-path branch, `instr` for the
+// residence-path branch, and (harmlessly redundant, Cypher's already-bound-
+// variable-is-a-join-constraint semantics) both for either branch: neither
+// walk's own chain reaches the other's counterpart, and a KEY is safe to
+// re-derive this way regardless of origin (reference_lens_tail_binding_
+// rules.md). `instructorKey` is what app.js's crossHatMismatch compares
+// against `{me.instructor}`, so an op that administers "the session I lead"
+// isn't offered against a session somebody else leads merely because both
+// share the entityType.
+const edgeSessionsTail = `
+OPTIONAL MATCH (sess)-[:atStudio]->(studio:studio)
+OPTIONAL MATCH (sess)-[:ledBy]->(instr:instructor)
+WITH sess, studio, instr
+WHERE sess.key <> null
+RETURN
+  sess.key AS anchor,
+  "manifest.ent" AS ns,
+  nanoIdFromKey(sess.key) AS entityId,
+  sess.key AS entityKey,
+  "session" AS entityType,
+  "Class session" AS typeLabel,
+  sess.schedule.data.name AS title,
+  studio.profile.data.name AS subtitle,
+  studio.key AS studioKey,
+  sess.schedule.data.startsAt AS startsAt,
+  instr.key AS instructorKey
+`
+
 // edgeStaffPanesTail projects one `manifest.pane.<paneMetaId>` row per pane
 // meta reachable over holdsRole → offeredTo: the pane's id, presentation, and
 // its section descriptors (a JSON string, the inputSchema convention). The
@@ -720,24 +744,6 @@ RETURN
   pane.paneDescriptor.data.title AS title,
   pane.paneDescriptor.data.icon AS icon,
   pane.paneDescriptor.data.sections AS sections
-`
-
-const edgeEntitySessionsTail = `
-OPTIONAL MATCH (sess)-[:ledBy]->(instr:instructor)
-WITH sess, studio, instr
-WHERE sess.key <> null
-RETURN
-  sess.key AS anchor,
-  "manifest.ent" AS ns,
-  nanoIdFromKey(sess.key) AS entityId,
-  sess.key AS entityKey,
-  "session" AS entityType,
-  "Class session" AS typeLabel,
-  sess.schedule.data.name AS title,
-  studio.profile.data.name AS subtitle,
-  studio.key AS studioKey,
-  sess.schedule.data.startsAt AS startsAt,
-  instr.key AS instructorKey
 `
 
 // edgeEntityProvidersTail presents one `manifest.ent.<providerId>` row per
@@ -778,7 +784,7 @@ RETURN
 // cancelled booking tombstones its own vertex, so the row self-clears with no
 // status filter. `instructorKey` (the booking's own session's `ledBy`
 // instructor, one hop further) rides along for the same reason
-// edgeEntitySessionsTail's does: SetBookingAttendance's `{me.instructor}`
+// edgeSessionsTail's does: SetBookingAttendance's `{me.instructor}`
 // param is not by itself proof the viewer leads THIS booking's class, and
 // app.js's crossHatMismatch needs this row's own answer to check it against.
 const edgeEntityBookingsTail = `
@@ -1120,41 +1126,4 @@ RETURN
   (CASE WHEN inst.outcome.data.status <> null THEN inst.outcome.data.status ELSE "open" END) AS subtitle,
   tpl.key AS templateKey,
   sp.key AS serviceproviderKey
-`
-
-// edgeInstructorSessionsTail presents one `manifest.ent.<sessionId>` row per
-// wellness session the actor's OWN bound instructor leads — the provider-hat
-// "my classes to teach" queue (persona-worlds-design.md Fire W0). The walk goes
-// through the actor's own inbound `identifiedBy` binding to an instructor, then
-// that instructor's `ledBy`-inverse sessions, NOT the residence spine
-// edgeEntitySessions uses: an instructor teaches wherever they're assigned, not
-// only where they happen to live.
-//
-// The RETURN is byte-identical to edgeEntitySessionsTail's (same aliases,
-// same title/subtitle/startsAt expressions, same entityType "session") on
-// purpose: a resident who is ALSO the instructor of a session reachable by
-// BOTH walks projects the identical row under the identical key — an
-// LWW-idempotent overlap, the same pattern edgeCatalogRolesTail already
-// proves for a dual-reachable op meta. `instructorKey` (this tail's own walk
-// var, already bound before the tail even starts) rides along for the same
-// reason `studioKey` does: a client-side ownership check (app.js
-// crossHatMismatch) needs to tell "the instructor this session is led by"
-// from "the instructor viewing it", which the entityType/targetType match
-// alone cannot.
-const edgeInstructorSessionsTail = `
-OPTIONAL MATCH (sess)-[:atStudio]->(studio:studio)
-WITH sess, studio, instr
-WHERE sess.key <> null
-RETURN
-  sess.key AS anchor,
-  "manifest.ent" AS ns,
-  nanoIdFromKey(sess.key) AS entityId,
-  sess.key AS entityKey,
-  "session" AS entityType,
-  "Class session" AS typeLabel,
-  sess.schedule.data.name AS title,
-  studio.profile.data.name AS subtitle,
-  studio.key AS studioKey,
-  sess.schedule.data.startsAt AS startsAt,
-  instr.key AS instructorKey
 `

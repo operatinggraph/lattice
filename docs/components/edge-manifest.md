@@ -15,7 +15,7 @@
 
 ## Overview
 
-`edge-manifest` is the world manifest the Facet edge app (design §4) renders from: **eighteen Personal
+`edge-manifest` is the world manifest the Facet edge app (design §4) renders from: **seventeen Personal
 Lenses** (`packages/edge-manifest/lenses.go`) re-projecting data other packages already own — identity,
 orchestration-base's tasks, service-domain's templates/instances, service-location's residence graph,
 wellness/clinic/café domain state, role-standing grants, maintenance work orders, and the provider-hat
@@ -30,14 +30,16 @@ It is the **first production package** to use the `nats-subject`/Personal Lens a
 shipped latent in Fire 0 (proven only by inline e2e tests, `internal/refractor/personal_lens_pl*_e2e_test.go`)
 with zero real `packages/*` consumers until this one.
 
-Seventeen of the eighteen Personal Lenses are **non-self-anchored**: each keys its rows on a vertex other
+Sixteen of the seventeen Personal Lenses are **non-self-anchored**: each keys its rows on a vertex other
 than the recipient identity (a service template, an op meta, a task, an instance, a session, a provider, a
 booking, a tab, a studio, a menu item, a work order, an appointment, a pane meta). Refractor's D1 gate
 (`internal/refractor/projection/personal.go` → `capabilityread.IsReadable`) drops such a row unless the
 actor's unioned `cap-read.<domain>.<actor>` slices list the anchor's bare NanoID — silently, fail-closed, by
-design (Contract #6 §6.14 Path B). Each such lens declares its actor→anchor reachability ONCE, as an
-`AnchorWalk` (`lenses.go`'s `Walk` field), and `pkgmgr` compiles both the lens's own cypher and the
-read-grant producer that grants the anchors, from that one declaration.
+design (Contract #6 §6.14 Path B). Each such lens declares its actor→anchor reachability ONCE, as one or
+more `AnchorWalk`s (`lenses.go`'s `Walks` field — `edgeEntitySessions` carries two, one per reachability
+path to the same `session` anchor kind, compiled to independent branches and merged by output key,
+refractor-shared-keyspace-arbitration-design.md §13), and `pkgmgr` compiles both the lens's own cypher and
+the read-grant producer that grants the anchors, from that declaration.
 
 ## The lenses (row schemas)
 
@@ -56,7 +58,7 @@ already have on the nats-kv side).
 | `edgeCatalog` | `manifest.op.<opMetaId>` | op metas reachable via a reachable service template's `permitsOperation` link; carries `viaServices`, the list of service keys that permit it |
 | `edgeTasks` | `manifest.task.<taskId>` | open tasks directly `assignedTo` the actor |
 | `edgeInstances` | `manifest.inst.<instId>` | service instances `providedTo` the actor ("my orders") |
-| `edgeEntitySessions` | `manifest.ent.<sessionId>` | wellness class sessions reachable via residence → the studio's `locatedAt` place (`entityType: "session"`, a `dispatch.targetType: "session"` browse target) |
+| `edgeEntitySessions` | `manifest.ent.<sessionId>` | wellness class sessions reachable via residence → the studio's `locatedAt` place (`entityType: "session"`, a `dispatch.targetType: "session"` browse target) — **or** via the actor's own bound instructor's `ledBy`-inverse sessions (the provider-hat "my classes to teach" path, a second `Walk` in the `edgeManifestProvider` domain; see below) |
 | `edgeEntityProviders` | `manifest.ent.<providerId>` | clinic providers `practicesAt` a reachable location (`entityType: "provider"`) |
 | `edgeEntityBookings` | `manifest.ent.<bookingId>` | wellness bookings the actor themself made (`bookedBy`, NOT residence-scoped — inherently private) |
 | `edgeEntityTabs` | `manifest.ent.<tabId>` | the actor's own OPEN café tabs, via their lease's `openFor` link (inherently private) |
@@ -79,7 +81,7 @@ reachable via the actor's own inbound `identifiedBy` binding to a provider-arche
 |---|---|---|
 | `edgeProviderSchedule` | `manifest.ent.<appointmentId>` | a bound clinic provider's own appointments (`withProvider`) — "my schedule" |
 | `edgeProviderQueue` | `manifest.ent.<instanceId>` | a bound service provider's own instance queue (`providedBy` → `instanceOf`) — "what runs do I need to complete" |
-| `edgeInstructorSessions` | `manifest.ent.<sessionId>` | a bound instructor's own led sessions (`ledBy`) — "my classes to teach" |
+| `edgeEntitySessions` (2nd `Walk`) | `manifest.ent.<sessionId>` | a bound instructor's own led sessions (`ledBy`) — "my classes to teach"; this domain's member is `edgeEntitySessions`' second `AnchorWalk`, not a standalone lens (formerly the sibling `edgeInstructorSessions`, folded in per refractor-shared-keyspace-arbitration-design.md §13.7 build order (b) — same anchor kind, byte-identical RETURN, a resident who is ALSO the instructor of a session reachable both ways projects one idempotent row) |
 
 **Generated read-grant producers** — one `actorAggregate` lens per `ReadGrantDomain`, compiled by `pkgmgr`
 from the `Walk` declarations above rather than hand-written (`lenses.go`'s `ReadGrantDomains()`); without
@@ -118,7 +120,7 @@ read-model sections a staff client renders — table, projected columns, filter,
 as DATA (`pkgmgr.PaneSpec`), so the edge client's HOST executes panes generically against the RLS-confined
 Postgres read models (`read_landlord_lease_applications`, `read_clinic_appointments`, `read_visit_series`),
 and a new staff workflow ships as a descriptor edit with zero app change. This is **Path A / RLS**, not the
-Personal-Lens/`nats-subject` mechanism the eighteen lenses above use — `edgeStaffPanes` (in the lens table)
+Personal-Lens/`nats-subject` mechanism the seventeen lenses above use — `edgeStaffPanes` (in the lens table)
 projects only the pane's DESCRIPTOR (id/title/icon/sections) so the client can discover and render it; the
 actual pane ROWS are read separately by the host from Postgres, confined by the reader's workplace grants.
 One pane ships today: `staffWorklist` (front-desk applications-to-review + today's clinic schedule +

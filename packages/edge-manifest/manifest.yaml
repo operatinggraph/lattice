@@ -1,11 +1,13 @@
 name: edge-manifest
-version: 0.14.9
+version: 0.14.10
 description: |
-  The Facet edge app's world manifest: eighteen Personal Lenses (edgeIdentity/
+  The Facet edge app's world manifest: seventeen Personal Lenses (edgeIdentity/
   edgeServices/edgeCatalog/edgeCatalogRoles/edgeTasks/edgeTasksQueued/
   edgeInstances/edgeEntitySessions/edgeEntityProviders/edgeEntityBookings/
   edgeEntityTabs/edgeEntityStudios/edgeEntityMenuItems/edgeStaffPanes/
-  edgeStaffWorkOrders/edgeProviderSchedule/edgeProviderQueue/edgeInstructorSessions) projecting identity (incl. the
+  edgeStaffWorkOrders/edgeProviderSchedule/edgeProviderQueue —
+  edgeEntitySessions itself carries a second Walk for the instructor-led-
+  session path, folding the former edgeInstructorSessions sibling in) projecting identity (incl. the
   provider/instructor/serviceprovider self-anchors for {me.<type>} dispatch,
   and the same bindings
   relation-stamped and named in anchors so the renderer can group a person's
@@ -87,9 +89,6 @@ declares:
       adapter: nats-subject
       engine: full
     - canonicalName: edgeProviderQueue
-      adapter: nats-subject
-      engine: full
-    - canonicalName: edgeInstructorSessions
       adapter: nats-subject
       engine: full
     - canonicalName: edgeManifestStaffReadGrants

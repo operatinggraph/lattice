@@ -52,7 +52,6 @@ var manifestLensNames = map[string]bool{
 	"edgeCatalogRoles":   true, "edgeTasksQueued": true,
 	"edgeStaffWorkOrders":  true,
 	"edgeProviderSchedule": true, "edgeProviderQueue": true,
-	"edgeInstructorSessions": true,
 }
 
 const readGrantLensName = "edgeManifestReadGrants"
@@ -69,8 +68,8 @@ var readGrantLensNames = map[string]bool{
 }
 
 func TestPackage_TwentyLenses(t *testing.T) {
-	if got := len(emComposedLenses(t)); got != 21 {
-		t.Fatalf("expected 21 lenses (18 manifest + 3 read-grant producers), got %d", got)
+	if got := len(emComposedLenses(t)); got != 20 {
+		t.Fatalf("expected 20 lenses (17 manifest + 3 read-grant producers), got %d", got)
 	}
 	names := map[string]bool{}
 	for _, l := range emComposedLenses(t) {
@@ -199,10 +198,9 @@ func TestPackage_LensRowKeysAreManifestNamespaced(t *testing.T) {
 		// staff siblings: same ns + same entityId means a row reachable by
 		// both a provider binding and residence/staff reachability projects
 		// the identical row under the identical key.
-		"edgeStaffPanes":         `"manifest.pane" AS ns`,
-		"edgeProviderSchedule":   `"manifest.ent" AS ns`,
-		"edgeProviderQueue":      `"manifest.ent" AS ns`,
-		"edgeInstructorSessions": `"manifest.ent" AS ns`,
+		"edgeStaffPanes":       `"manifest.pane" AS ns`,
+		"edgeProviderSchedule": `"manifest.ent" AS ns`,
+		"edgeProviderQueue":    `"manifest.ent" AS ns`,
 	}
 	for _, l := range emComposedLenses(t) {
 		if readGrantLensNames[l.CanonicalName] {
@@ -212,8 +210,10 @@ func TestPackage_LensRowKeysAreManifestNamespaced(t *testing.T) {
 		if !ok {
 			t.Fatalf("unexpected lens %q", l.CanonicalName)
 		}
-		if !strings.Contains(l.Spec, lit) {
-			t.Errorf("%s: spec missing %q", l.CanonicalName, lit)
+		for _, spec := range emSpecTexts(l) {
+			if !strings.Contains(spec, lit) {
+				t.Errorf("%s: spec missing %q", l.CanonicalName, lit)
+			}
 		}
 	}
 }
@@ -255,8 +255,10 @@ func TestPackage_TaskLensesNameBothScopedSubjects(t *testing.T) {
 func TestPackage_SpecsParseUnderFullEngine(t *testing.T) {
 	eng := full.New()
 	for _, l := range emComposedLenses(t) {
-		if _, err := eng.Parse(l.Spec); err != nil {
-			t.Errorf("%s: cypher failed to parse under the full engine: %v\nspec:\n%s", l.CanonicalName, err, l.Spec)
+		for _, spec := range emSpecTexts(l) {
+			if _, err := eng.Parse(spec); err != nil {
+				t.Errorf("%s: cypher failed to parse under the full engine: %v\nspec:\n%s", l.CanonicalName, err, spec)
+			}
 		}
 	}
 }
@@ -267,9 +269,11 @@ func TestPackage_SpecsParseUnderFullEngine(t *testing.T) {
 // semantic-contracts/lenses.go:61 for the same guard elsewhere).
 func TestPackage_SpecsUseNullTestNotIsNull(t *testing.T) {
 	for _, l := range emComposedLenses(t) {
-		upper := strings.ToUpper(l.Spec)
-		if strings.Contains(upper, "IS NULL") || strings.Contains(upper, "IS NOT NULL") {
-			t.Errorf("%s: spec uses unsupported IS [NOT] NULL — use = null / <> null instead", l.CanonicalName)
+		for _, spec := range emSpecTexts(l) {
+			upper := strings.ToUpper(spec)
+			if strings.Contains(upper, "IS NULL") || strings.Contains(upper, "IS NOT NULL") {
+				t.Errorf("%s: spec uses unsupported IS [NOT] NULL — use = null / <> null instead", l.CanonicalName)
+			}
 		}
 	}
 }

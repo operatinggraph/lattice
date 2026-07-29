@@ -47,17 +47,43 @@ func emComposedLenses(t *testing.T) []pkgmgr.LensSpec {
 	return expanded.Lenses
 }
 
-// emComposedSpec returns one composed lens's cypher by canonical name.
+// emComposedSpec returns one composed lens's cypher by canonical name — for a
+// single-walk lens. A multi-walk lens (SpecBranches set, Spec empty) fails
+// this assertion; use emComposedSpecBranch for one of those.
 func emComposedSpec(t *testing.T, canonicalName string) string {
 	t.Helper()
 	for _, l := range emComposedLenses(t) {
 		if l.CanonicalName == canonicalName {
-			require.NotEmpty(t, l.Spec, "%s composed to an empty spec", canonicalName)
+			require.NotEmpty(t, l.Spec, "%s composed to an empty spec (multi-walk? use emComposedSpecBranch)", canonicalName)
 			return l.Spec
 		}
 	}
 	t.Fatalf("no composed lens named %q", canonicalName)
 	return ""
+}
+
+// emComposedSpecBranch returns one branch of a multi-walk lens's composed
+// cypher, in Walks declaration order (branch 0 is the first-declared Walk).
+func emComposedSpecBranch(t *testing.T, canonicalName string, branch int) string {
+	t.Helper()
+	for _, l := range emComposedLenses(t) {
+		if l.CanonicalName == canonicalName {
+			require.NotEmptyf(t, l.SpecBranches, "%s composed to a single spec, not branches", canonicalName)
+			require.Greaterf(t, len(l.SpecBranches), branch, "%s has only %d branch(es), no branch %d", canonicalName, len(l.SpecBranches), branch)
+			return l.SpecBranches[branch]
+		}
+	}
+	t.Fatalf("no composed lens named %q", canonicalName)
+	return ""
+}
+
+// emSpecTexts returns every executable cypher text a composed lens carries —
+// its single Spec, or every SpecBranches entry for a multi-walk lens.
+func emSpecTexts(l pkgmgr.LensSpec) []string {
+	if len(l.SpecBranches) > 0 {
+		return l.SpecBranches
+	}
+	return []string{l.Spec}
 }
 
 // emComposedLens returns one composed LensSpec by canonical name.

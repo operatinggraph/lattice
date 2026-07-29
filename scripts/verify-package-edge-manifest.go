@@ -52,9 +52,11 @@ var emExpectedLenses = map[string]string{
 	"edgeEntitySessions":  "manifest.ent",
 	"edgeEntityProviders": "manifest.ent",
 	// The provider-hat siblings (persona-worlds-design.md Fire W0).
-	"edgeProviderSchedule":   "manifest.ent",
-	"edgeProviderQueue":      "manifest.ent",
-	"edgeInstructorSessions": "manifest.ent",
+	// edgeEntitySessions itself carries the third — a second Walk folding in
+	// the former edgeInstructorSessions sibling
+	// (refractor-shared-keyspace-arbitration-design.md §13.7 build order (b)).
+	"edgeProviderSchedule": "manifest.ent",
+	"edgeProviderQueue":    "manifest.ent",
 }
 
 func main() {
@@ -189,12 +191,24 @@ func main() {
 			}
 		}
 
-		cypherRule, _ := data["cypherRule"].(string)
 		wantLiteral := `"` + ns + `" AS ns`
-		if !strings.Contains(cypherRule, wantLiteral) {
-			fail(specKey+" cypherRule", fmt.Sprintf("missing %q", wantLiteral))
+		cypherTexts := []string{}
+		if cypherRule, _ := data["cypherRule"].(string); cypherRule != "" {
+			cypherTexts = append(cypherTexts, cypherRule)
+		}
+		for _, b := range pkgverify.ToStringSlice(data["cypherBranches"]) {
+			cypherTexts = append(cypherTexts, b)
+		}
+		if len(cypherTexts) == 0 {
+			fail(specKey+" cypherRule", "neither cypherRule nor cypherBranches is present")
 		} else {
-			ok(fmt.Sprintf("%s cypherRule projects %s", specKey, ns))
+			for i, text := range cypherTexts {
+				if !strings.Contains(text, wantLiteral) {
+					fail(specKey+" cypherRule", fmt.Sprintf("branch %d missing %q", i, wantLiteral))
+				} else {
+					ok(fmt.Sprintf("%s cypherRule branch %d projects %s", specKey, i, ns))
+				}
+			}
 		}
 
 		if err := pkgverify.CheckAspectEnvelope(env, specKey, lensKey, "spec"); err != nil {
