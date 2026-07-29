@@ -58,6 +58,10 @@ func TestSelfDescription_KernelDDLsHaveAllFiveAspects(t *testing.T) {
 		if doc["class"] != "meta.ddl.aspectType" {
 			t.Errorf("%s class = %v, want meta.ddl.aspectType", vtxKey, doc["class"])
 		}
+		data, _ := doc["data"].(map[string]any)
+		if protected, _ := data["protected"].(bool); !protected {
+			t.Errorf("%s data.protected = %v, want true (every other kernel meta root sets it)", vtxKey, data["protected"])
+		}
 
 		// Each of the 5 self-description aspects must be present.
 		for _, asp := range selfDescAspects {

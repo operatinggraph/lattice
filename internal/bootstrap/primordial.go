@@ -1025,7 +1025,7 @@ func seedAspectTypeMeta(entries *[]kvEntry, add func(string, []byte, error) erro
 	}
 
 	for _, d := range defs {
-		vtxVal, vtxErr := MakeVertexEnvelope(d.key, "meta.ddl.aspectType", map[string]any{})
+		vtxVal, vtxErr := MakeVertexEnvelope(d.key, "meta.ddl.aspectType", map[string]any{"protected": true})
 		if err := add(d.key, vtxVal, vtxErr); err != nil {
 			return err
 		}
