@@ -53,7 +53,7 @@ Open items only (shipped ones are in the Done log). Grouped by component tag.
 | **[Loom] Guardless-step recovery check-before-act probe** | On total `loom-state` loss + a re-triggered `StartLoomPattern`, a fresh instance replays guards from cursor 0 (re-runs an already-applied guarded step). | ★ | S–M | 🗄️ shelved-backup (Andrew: no new engine Core-KV reads) |
 | **[Processor] Tombstone-with-document warn→reject flip (Fire 2)** | Fire 1 (emitter sweep + parser warn) shipped `6b68fde4`; flip the warn to a reject once warn sightings are clean (stale stored scripts clear via world recreation). | ★★ | XS | 🚧 seq behind clean warn-window · [design](../../implementation-artifacts/tombstone-body-preservation-design.md) §6 · stale stored scripts now clear via `make reseed-kernel` |
 | **[Pkgmgr] `OpMetaSpec` has no vocabulary for a client-mint-and-reveal-secret ceremony** | identity-domain's 5 `[no-op-meta:]`-exempt ops ([standard §8](../../implementation-artifacts/vertical-package-standard.md)) need 3 new primitives (computed-hash directive, mint-then-reveal UX, raw `AuthContext`) no existing field configures — every past extension shipped one declarative idea, never this. Consumer: [verticals.md](verticals.md) 5-ops row. | ★★ | M | 📋 designer · ground `internal/pkgmgr/definition.go:437-530` + `cmd/facet/credentials.go:242-252` |
-| **[Refractor] A live (non-deactivated) lens's Health KV entry can freeze forever, pinning rollup yellow** | `isDeleted=false` here, unlike the just-fixed row: lens `ZdEvei26RWsXY16mZdEv` froze at Refractor's own boot (10:51) and never advanced — lens-registry-restart-integrity §4 Fire B's pattern (a pipeline the boot never registered). Investigate whether registration silently drops lenses on some boots. | ★★ | S–M | 📋 ready · found 2026-07-30 verifying the deactivated-lens fix |
+| **[Refractor] Lens activation has no retry on a transient NATS error — permanently strands the lens** | `build adapter`/`ensure audit stream`/adjacency `KVGet` fail-terminal on one `context deadline exceeded` during a boot/hot-reload burst; live repro `ZdEvei26RWsXY16mZdEv`, `4szbxnCN6duFwJLP4szb`. | ★★ | S–M | 📋 ready · found investigating the frozen-Health-KV row · [design](../../implementation-artifacts/refractor-lens-registry-restart-integrity-design.md) |
 
 ### Survey log (round-robin rotation)
 
@@ -213,6 +213,7 @@ Real but low-value; do **not** spend design or build effort here unless Andrew g
 
 One line per shipped item (`date · SHA · [tag] title`). Oldest roll to `archive/` past ~25.
 
+- 2026-07-30 · `4e85358c` · [Lattice-CLI] `health summary`'s refractor/processor rows now escalate on issues[] — a live LensRegistryIncomplete sat "green" for 2.5h
 - 2026-07-30 · `e384f34a` · [Refractor] deactivated lens's frozen Health KV entry no longer pins rollup yellow — isLensDeleted probe drops the row
 - 2026-07-30 · `e8349678` · [Loom] per-instance redrive — resumes a FAILED instance at its recorded cursor, never restarts; unblocks Loupe Flows "act on it"
 - 2026-07-30 · `b9b9cad3` · [Refractor,Substrate] SYNC stream now caps per-subject retention (`MaxMsgsPerSubject: 10,000`) — finishes the retention posture [design §3.2](../../implementation-artifacts/personal-secure-lens-design.md)
