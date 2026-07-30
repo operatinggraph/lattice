@@ -18,7 +18,7 @@ import (
 )
 
 // fakeEngine satisfies the unexported engineControl interface structurally — it
-// implements the five methods with the exact signatures *loom.Engine has, so
+// implements the six methods with the exact signatures *loom.Engine has, so
 // control.NewService accepts it. No real *loom.Engine is needed here
 // (internal/loom's own tests cover the real engine wiring).
 type fakeEngine struct {
@@ -85,6 +85,10 @@ func (f *fakeEngine) PauseConsumer(_ context.Context, name string) (string, erro
 
 func (f *fakeEngine) ResumeConsumer(_ context.Context, name string) error {
 	return f.record("resume", name)
+}
+
+func (f *fakeEngine) RedriveInstance(_ context.Context, instanceID string) error {
+	return f.record("redrive", instanceID)
 }
 
 func (f *fakeEngine) record(op, name string) error {
@@ -367,6 +371,34 @@ func TestControl_Pause_RelayDeadlineRejected(t *testing.T) {
 			assert.Nil(t, resp.Pause)
 		})
 	}
+}
+
+// --- redrive -----------------------------------------------------------------
+
+func TestControl_Redrive_HappyPath(t *testing.T) {
+	nc := startTestServer(t)
+	eng := newFakeEngine()
+	startService(t, nc, eng, control.NewStubCapabilityChecker(nil))
+
+	resp := sendRequest(t, nc, control.NameSubject("inst1", "redrive"))
+	require.Empty(t, resp.Error)
+	require.NotNil(t, resp.Redrive)
+	assert.True(t, resp.Redrive.Redriven)
+	assert.Equal(t, []string{"redrive:inst1"}, eng.callLog())
+}
+
+// TestControl_Redrive_NotFailed proves the engine's not-failed guard surfaces as
+// a structured error reply, not a panic or a bare timeout.
+func TestControl_Redrive_NotFailed(t *testing.T) {
+	nc := startTestServer(t)
+	eng := newFakeEngine()
+	eng.errOn["redrive:inst1"] = errors.New(`loom: instance is not in a failed state: "inst1" (status=running)`)
+	startService(t, nc, eng, control.NewStubCapabilityChecker(nil))
+
+	resp := sendRequest(t, nc, control.NameSubject("inst1", "redrive"))
+	assert.NotEmpty(t, resp.Error)
+	assert.Contains(t, resp.Error, "not in a failed state")
+	assert.Nil(t, resp.Redrive)
 }
 
 // --- crafted subjects / names -----------------------------------------------

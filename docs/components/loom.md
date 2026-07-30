@@ -247,7 +247,7 @@ the userTask-symmetric deadline are implemented in `internal/loom` (Contract #10
 | Path | Role |
 |------|------|
 | `internal/loom/` | Engine: pattern source (durable Core-KV subscription), Sensorium (per-domain + trigger consumers), Transition Engine (cursor advance + guard eval), Actuator (the command-outbox relay: `outbox.<token>` → `core-operations`), deadline watcher (timeout backstop), pattern interpreter |
-| `internal/loom/control/` | Control plane — the operator-facing `lattice.ctrl.loom.*` micro-service (`list` / `consumers` / `inspect` / `pause` / `resume`), reading `loom-state` and the supervisor's pause state (analogous to `internal/refractor/control`); driven by the `lattice loom` CLI |
+| `internal/loom/control/` | Control plane — the operator-facing `lattice.ctrl.loom.*` micro-service (`list` / `consumers` / `inspect` / `pause` / `resume` / `redrive`), reading `loom-state` and the supervisor's pause state (analogous to `internal/refractor/control`); driven by the `lattice loom` CLI |
 | `cmd/loom/` | Binary entry point (extractable later; shares only `substrate/*`) |
 
 **Engine vs package:** the interpreter, Sensorium, Transition Engine, Actuator are **engine
@@ -430,8 +430,12 @@ the **bridge** (`docs/components/bridge.md`) and awaits its result; this is the 
 placement (Contract #10 §10.3/§10.8).
 
 **Built (Phase 3).** The operator-facing control plane (`internal/loom/control`): the
-`lattice.ctrl.loom.*` micro-service — `list` / `consumers` / `inspect` / `pause` / `resume` — reading
-`loom-state` and the supervisor's pause state, driven by the `lattice loom` CLI. The Starlark guard
+`lattice.ctrl.loom.*` micro-service — `list` / `consumers` / `inspect` / `pause` / `resume` /
+`redrive` — reading `loom-state` and the supervisor's pause state, driven by the `lattice loom` CLI.
+`redrive` resumes a FAILED instance at its recorded cursor — never restarts it under a fresh id, which
+would re-execute every step the failed run already committed (§10.3's terminal-batch pin deletion means
+`redrive` re-pins from the CURRENT live pattern, refusing rather than misindexing if the pattern's step
+count changed since the failure). The Starlark guard
 escape hatch (`{reads, starlark}`, loom-starlark-guards-design.md Fire 2) — parse-time compile-check
 + eval against the shared verified-pure sandbox (`internal/starlarksandbox`, Fire 1), for a predicate
 the declarative grammar can't express.
@@ -439,5 +443,6 @@ the declarative grammar can't express.
 **Deferred (Phase 3+).**
 
 - A durable `loom.*` read model beyond the control plane's live `loom-state` reads — the
-  operator-facing control API (`lattice.ctrl.loom.*`: list / consumers / inspect / pause / resume) ships
-  today; a Refractor lens over the `loom.*` event stream for a queryable historical read model is future work.
+  operator-facing control API (`lattice.ctrl.loom.*`: list / consumers / inspect / pause / resume /
+  redrive) ships today; a Refractor lens over the `loom.*` event stream for a queryable historical
+  read model is future work.

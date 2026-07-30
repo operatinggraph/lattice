@@ -26,13 +26,18 @@ var WeaverOps = map[string]OpMeta{
 }
 
 // LoomOps mirrors internal/loom/control/service.go's exactOps/nameOps
-// (list, consumers, inspect, pause, resume).
+// (list, consumers, inspect, pause, resume, redrive). redrive carries its own
+// verb rather than reusing resume's — it is a strictly stronger operation (it
+// resumes a FAILED instance's business flow, not a paused consumer), so
+// folding it under resume's verb would grant the wider capability to every
+// actor that needs only the narrower one.
 var LoomOps = map[string]OpMeta{
 	"list":      {Verb: "read", Read: true},
 	"consumers": {Verb: "read", Read: true},
 	"inspect":   {Verb: "read", Read: true},
 	"pause":     {Verb: "pause", Read: false},
 	"resume":    {Verb: "resume", Read: false},
+	"redrive":   {Verb: "redrive", Read: false},
 }
 
 // RefractorOps mirrors internal/refractor/control/service.go's supportedOps

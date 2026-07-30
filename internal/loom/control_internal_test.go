@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/nats-io/nats.go/jetstream"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/operatinggraph/lattice/internal/natsfixture"
@@ -380,6 +381,184 @@ func TestPauseResumeConsumer_ValidateThenToggle(t *testing.T) {
 	require.True(t, names[triggerDurable])
 	require.True(t, names[relayDurable])
 	require.True(t, names[deadlineDurable])
+}
+
+// --- Redrive -----------------------------------------------------------------
+
+// registerPattern injects pat directly into the engine's live pattern source
+// (bypassing the CDC watch, which these tests never start) so RedriveInstance
+// can re-pin against it — mirroring how putInstance/putPin bypass the normal
+// write paths to craft state directly.
+func registerPattern(e *Engine, pat Pattern) {
+	e.source.mu.Lock()
+	e.source.known[pat.PatternID] = &pat
+	e.source.mu.Unlock()
+}
+
+// TestRedriveInstance_HappyPath_ResumesAtCursor proves the core mechanism:
+// resume-at-cursor, not restart. A FAILED instance at cursor 1 (pin already
+// deleted, as production leaves it at terminal) is redriven — the pin is
+// re-created from the CURRENT live pattern, status flips back to running, and
+// the step AT CURSOR 1 (never step 0) is re-submitted.
+func TestRedriveInstance_HappyPath_ResumesAtCursor(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	conn, ctx := newControlTestConn(t)
+	e := newControlEngine(conn)
+
+	pat := Pattern{PatternID: "p1", SubjectType: "widget", MetaKey: "vtx.meta.p1", Steps: []Step{
+		{Kind: StepKindSystemOp, Operation: "StepA"},
+		{Kind: StepKindSystemOp, Operation: "StepB"},
+	}}
+	registerPattern(e, pat)
+	putInstance(t, ctx, conn, Instance{
+		InstanceID: "inst1", PatternRef: "vtx.meta.p1", SubjectKey: "vtx.widget.w1",
+		Cursor: 1, Status: StatusFailed, RetryCount: 1,
+	})
+
+	err := e.RedriveInstance(ctx, "inst1")
+	require.NoError(t, err)
+
+	got, err := e.state.getInstance(ctx, "inst1")
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	assert.Equal(t, StatusRunning, got.Status)
+	assert.Equal(t, 1, got.Cursor, "resumes AT the recorded cursor, never restarts at 0")
+	assert.NotEmpty(t, got.PendingToken, "the step at cursor 1 (StepB) must be re-submitted")
+
+	rePinned, err := e.state.getPinnedPattern(ctx, "inst1")
+	require.NoError(t, err, "the pin must be re-created — it was deleted in the original terminal batch")
+	assert.Equal(t, "p1", rePinned.PatternID)
+}
+
+// TestRedriveInstance_NotFound proves a missing instance is a not-found error.
+func TestRedriveInstance_NotFound(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	conn, ctx := newControlTestConn(t)
+	e := newControlEngine(conn)
+
+	err := e.RedriveInstance(ctx, "ghost")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "not found")
+}
+
+// TestRedriveInstance_NotFailed proves Redrive refuses a non-failed instance
+// (running is already progressing; complete has nothing to resume).
+func TestRedriveInstance_NotFailed(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	for _, status := range []string{StatusRunning, StatusComplete} {
+		status := status
+		t.Run(status, func(t *testing.T) {
+			conn, ctx := newControlTestConn(t)
+			e := newControlEngine(conn)
+			putInstance(t, ctx, conn, Instance{InstanceID: "inst1", PatternRef: "vtx.meta.p1", SubjectKey: "vtx.widget.w1", Cursor: 0, Status: status})
+
+			err := e.RedriveInstance(ctx, "inst1")
+			require.Error(t, err)
+			require.ErrorIs(t, err, errInstanceNotFailed)
+		})
+	}
+}
+
+// TestRedriveInstance_PatternNotLoaded proves Redrive refuses when the
+// instance's pattern is not (or no longer) registered in the live source —
+// there is nothing to re-pin against (the failed instance's own pin was
+// already deleted at its terminal transition).
+func TestRedriveInstance_PatternNotLoaded(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	conn, ctx := newControlTestConn(t)
+	e := newControlEngine(conn)
+	putInstance(t, ctx, conn, Instance{InstanceID: "inst1", PatternRef: "vtx.meta.pGone", SubjectKey: "vtx.widget.w1", Cursor: 0, Status: StatusFailed})
+
+	err := e.RedriveInstance(ctx, "inst1")
+	require.Error(t, err)
+	require.ErrorIs(t, err, errPatternNotLoaded)
+}
+
+// TestRedriveInstance_CursorOutOfRange proves Redrive refuses rather than
+// misindex when the pattern was edited (steps removed) since the instance
+// failed, so its recorded cursor no longer indexes a step in the CURRENT
+// definition.
+func TestRedriveInstance_CursorOutOfRange(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	conn, ctx := newControlTestConn(t)
+	e := newControlEngine(conn)
+
+	pat := Pattern{PatternID: "p1", SubjectType: "widget", MetaKey: "vtx.meta.p1", Steps: []Step{
+		{Kind: StepKindSystemOp, Operation: "StepA"},
+	}}
+	registerPattern(e, pat)
+	putInstance(t, ctx, conn, Instance{
+		InstanceID: "inst1", PatternRef: "vtx.meta.p1", SubjectKey: "vtx.widget.w1",
+		Cursor: 3, Status: StatusFailed,
+	})
+
+	err := e.RedriveInstance(ctx, "inst1")
+	require.Error(t, err)
+	require.ErrorIs(t, err, errCursorOutOfRange)
+}
+
+// TestRedriveInstance_SecondCallRefused proves a redriven instance cannot be
+// redriven again while running: the status precondition alone stops a naive
+// double-call. The genuine concurrent-race guard (two redrives that both read
+// the SAME failed snapshot before either commits) is the pin's CreateOnly
+// write, covered directly at the stateStore level by
+// TestStateStore_Redrive_ConcurrentPinCreateOnlyRejectsLoser.
+func TestRedriveInstance_SecondCallRefused(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	conn, ctx := newControlTestConn(t)
+	e := newControlEngine(conn)
+
+	pat := Pattern{PatternID: "p1", SubjectType: "widget", MetaKey: "vtx.meta.p1", Steps: []Step{
+		{Kind: StepKindSystemOp, Operation: "StepA"},
+	}}
+	registerPattern(e, pat)
+	putInstance(t, ctx, conn, Instance{InstanceID: "inst1", PatternRef: "vtx.meta.p1", SubjectKey: "vtx.widget.w1", Cursor: 0, Status: StatusFailed})
+
+	require.NoError(t, e.RedriveInstance(ctx, "inst1"))
+	err := e.RedriveInstance(ctx, "inst1")
+	require.Error(t, err)
+	require.ErrorIs(t, err, errInstanceNotFailed)
+}
+
+// TestStateStore_Redrive_ConcurrentPinCreateOnlyRejectsLoser proves the actual
+// race guard: two redrives that both read the same failed instance BEFORE
+// either commits (both flip Status to running in memory, mirroring
+// RedriveInstance's read-then-write) race the SAME state.redrive call. Only
+// the first's CreateOnly pin write can land; the second is rejected — never a
+// silent double-submit of the resumed step.
+func TestStateStore_Redrive_ConcurrentPinCreateOnlyRejectsLoser(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	conn, ctx := newControlTestConn(t)
+	store := newStateStore(conn, "loom-state")
+
+	pat := &Pattern{PatternID: "p1", SubjectType: "widget", Steps: []Step{{Kind: StepKindSystemOp, Operation: "StepA"}}}
+	winner := &Instance{InstanceID: "inst1", PatternRef: "vtx.meta.p1", SubjectKey: "vtx.widget.w1", Cursor: 0, Status: StatusRunning}
+	loser := &Instance{InstanceID: "inst1", PatternRef: "vtx.meta.p1", SubjectKey: "vtx.widget.w1", Cursor: 0, Status: StatusRunning}
+
+	require.NoError(t, store.redrive(ctx, winner, pat))
+	err := store.redrive(ctx, loser, pat)
+	require.Error(t, err, "the second racer's CreateOnly pin write must be rejected")
 }
 
 // waitForCond polls cond until true or the deadline.

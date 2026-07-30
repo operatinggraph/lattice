@@ -1,10 +1,11 @@
 // Package control implements the Loom control plane: a NATS Services
-// responder exposing list/consumers/inspect/pause/resume operator commands for
-// Loom instances and managed consumers, plus the cmd/lattice/loom CLI's server
-// side. Depends on internal/loom only for the five engineControl methods and the
-// loom summary types — internal/loom never imports this package (one-way
-// dependency, mirrors internal/weaver/control being a sibling of internal/weaver
-// and internal/refractor/control a sibling of internal/refractor/{pipeline,...}).
+// responder exposing list/consumers/inspect/pause/resume/redrive operator
+// commands for Loom instances and managed consumers, plus the cmd/lattice/loom
+// CLI's server side. Depends on internal/loom only for the six engineControl
+// methods and the loom summary types — internal/loom never imports this package
+// (one-way dependency, mirrors internal/weaver/control being a sibling of
+// internal/weaver and internal/refractor/control a sibling of
+// internal/refractor/{pipeline,...}).
 package control
 
 import (
@@ -35,15 +36,16 @@ type engineControl interface {
 	InspectInstance(ctx context.Context, instanceID string) (loom.InstanceDetail, error)
 	PauseConsumer(ctx context.Context, name string) (string, error)
 	ResumeConsumer(ctx context.Context, name string) error
+	RedriveInstance(ctx context.Context, instanceID string) error
 }
 
 // subjectPrefix is the subject namespace the control endpoints are registered
 // under. "list" and "consumers" are registered on the exact subjects
-// subjectPrefix+".list" / subjectPrefix+".consumers"; inspect/pause/resume are
-// registered on subjectPrefix+".*.<op>" — a single-token wildcard for the
-// instance/consumer name lets one endpoint handler serve every name, since Loom
-// does not know the full set of instance ids / consumer names at registration
-// time.
+// subjectPrefix+".list" / subjectPrefix+".consumers"; inspect/pause/resume/
+// redrive are registered on subjectPrefix+".*.<op>" — a single-token wildcard
+// for the instance/consumer name lets one endpoint handler serve every name,
+// since Loom does not know the full set of instance ids / consumer names at
+// registration time.
 const subjectPrefix = "lattice.ctrl.loom"
 
 // handlerTimeout bounds each control handler's engine call so a blocked KV op
@@ -58,6 +60,7 @@ const handlerTimeout = 5 * time.Second
 // On success (inspect op): Instance is present.
 // On success (pause op): Pause is present.
 // On success (resume op): Resume is present.
+// On success (redrive op): Redrive is present.
 // On error: only Error is present.
 type ControlResponse struct {
 	Instances []loom.InstanceSummary `json:"instances,omitempty"`
@@ -65,6 +68,7 @@ type ControlResponse struct {
 	Instance  *loom.InstanceDetail   `json:"instance,omitempty"`
 	Pause     *PauseResult           `json:"pause,omitempty"`
 	Resume    *ResumeResult          `json:"resume,omitempty"`
+	Redrive   *RedriveResult         `json:"redrive,omitempty"`
 	Error     string                 `json:"error,omitempty"`
 }
 
@@ -85,14 +89,21 @@ type ResumeResult struct {
 	Resumed bool `json:"resumed"`
 }
 
+// RedriveResult is the synchronous acknowledgement returned by the "redrive"
+// op. Redriven is always true when the op succeeds.
+type RedriveResult struct {
+	Redriven bool `json:"redriven"`
+}
+
 // The op tokens registered as NATS Services endpoints. list and consumers are
-// exact-subject; inspect/pause/resume are per-name wildcard-subject ops.
+// exact-subject; inspect/pause/resume/redrive are per-name wildcard-subject ops.
 const (
 	opList      = "list"
 	opConsumers = "consumers"
 	opInspect   = "inspect"
 	opPause     = "pause"
 	opResume    = "resume"
+	opRedrive   = "redrive"
 )
 
 // exactOps enumerates the exact-subject ops registered under
@@ -101,7 +112,7 @@ var exactOps = []string{opList, opConsumers}
 
 // nameOps enumerates the per-name (wildcard-subject) ops registered under
 // subjectPrefix+".*.<op>".
-var nameOps = []string{opInspect, opPause, opResume}
+var nameOps = []string{opInspect, opPause, opResume, opRedrive}
 
 // Service is the Loom control-plane NATS responder. It wraps an engineControl
 // (in production, *loom.Engine) and a CapabilityChecker. Production wires the
@@ -158,8 +169,8 @@ func (s *Service) resolveActor(ctx context.Context, req micro.Request) (string, 
 // StartNATSListener registers the Loom control plane as a NATS micro-service
 // named "loom-control". Endpoints: "list" and "consumers" on the exact subjects
 // subjectPrefix+".list" / subjectPrefix+".consumers", and "inspect"/"pause"/
-// "resume" on the wildcard subjectPrefix+".*.<op>" so a single handler instance
-// serves every instance id / consumer name without prior knowledge.
+// "resume"/"redrive" on the wildcard subjectPrefix+".*.<op>" so a single handler
+// instance serves every instance id / consumer name without prior knowledge.
 //
 // All endpoints share the default queue group ("q") so multiple Loom instances
 // distribute load. The service framework auto-registers the standard
@@ -299,6 +310,12 @@ func (s *Service) dispatchEndpoint(op string, req micro.Request) {
 			return
 		}
 		s.respondMicro(req, ControlResponse{Resume: &ResumeResult{Resumed: true}})
+	case opRedrive:
+		if err := s.engine.RedriveInstance(ctx, name); err != nil {
+			s.respondMicro(req, ControlResponse{Error: err.Error()})
+			return
+		}
+		s.respondMicro(req, ControlResponse{Redrive: &RedriveResult{Redriven: true}})
 	default:
 		// Unreachable — nameOps gates the endpoint registration.
 		s.respondMicro(req, ControlResponse{Error: fmt.Sprintf("unknown operation: %s", op)})
@@ -356,7 +373,8 @@ func ConsumersSubject() string {
 }
 
 // NameSubject returns the canonical request subject for the given instance id /
-// consumer name + op (inspect/pause/resume). Exposed for tests and tooling.
+// consumer name + op (inspect/pause/resume/redrive). Exposed for tests and
+// tooling.
 func NameSubject(name, op string) string {
 	return subjectPrefix + "." + name + "." + op
 }

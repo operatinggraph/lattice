@@ -152,7 +152,7 @@ func TestPackage_EveryOpGrantsOnlyToConsoleOperatorScopeAny(t *testing.T) {
 		"ShredIdentityKey", "RevokeActor", "UnrevokeActor", "AttachObject", "DetachObject",
 		"ctrl.weaver.read", "ctrl.weaver.disable", "ctrl.weaver.enable", "ctrl.weaver.revoke",
 		"ctrl.weaver.resetConfidence",
-		"ctrl.loom.read", "ctrl.loom.pause", "ctrl.loom.resume",
+		"ctrl.loom.read", "ctrl.loom.pause", "ctrl.loom.resume", "ctrl.loom.redrive",
 		"ctrl.refractor.read", "ctrl.refractor.rebuild", "ctrl.refractor.pause", "ctrl.refractor.resume",
 		"ctrl.refractor.delete", "ctrl.refractor.reproject", "ctrl.refractor.requesthydration",
 		"ctrl.refractor.register", "ctrl.refractor.deregister", "ctrl.refractor.hydrate",

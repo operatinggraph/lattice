@@ -73,6 +73,7 @@ package. **A client's allow-list must mirror this set** — see [Drift guard](#d
 | `inspect` | `lattice.ctrl.loom.<instanceId>.inspect` | read (per-entity) | one instance's detail |
 | `pause` | `lattice.ctrl.loom.<consumer>.pause` | mutate | pause a consumer (sticky across restart, health-kv backed) |
 | `resume` | `lattice.ctrl.loom.<consumer>.resume` | mutate | resume a paused consumer |
+| `redrive` | `lattice.ctrl.loom.<instanceId>.redrive` | mutate | resume a FAILED instance at its recorded cursor (never restarts under a fresh id — that would re-execute committed side effects) |
 
 ### Weaver — `internal/weaver/control`
 
@@ -117,7 +118,7 @@ Every plane replies with a JSON `ControlResponse` object. The invariant across a
 
 | Plane | Success fields (by op) | Error field |
 |---|---|---|
-| Loom | `instances` (list) · `consumers` (consumers) · `instance` (inspect) · `pause:{paused,note}` · `resume:{resumed}` | `error` |
+| Loom | `instances` (list) · `consumers` (consumers) · `instance` (inspect) · `pause:{paused,note}` · `resume:{resumed}` · `redrive:{redriven}` | `error` |
 | Weaver | `targets` (list) · `disable:{disabled}` · `enable:{enabled}` · `revoke:{revoked}` | `error` |
 | Refractor | health.Entry fields (health) · `validate:{sampleSize,fieldReports,warnings}` · `rebuild:{started}` · `pause:{paused}` · `resume:{resumed}` · `delete:{deleted}` | `error` |
 
