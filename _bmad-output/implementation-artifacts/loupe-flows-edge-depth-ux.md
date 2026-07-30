@@ -214,17 +214,23 @@ the retention period grants.
 identities-by-their-worst-device, not one flat worst-first list; the help text says that rather than
 claiming the API's order. Grouping stays because the identity is what the sibling question is about.
 
-### 3.2 The action needs a platform seam
+### 3.2 The action needs a platform seam — SHIPPED
 
 Triggering a warm resume means asking a device to consume `personal.hydrate` — but the design's
 own premise is that **edge nodes cannot self-report and no connection state is observable**.
 The console cannot push to a device it cannot see. What it *could* do is mark a device for
 hydration on its next appearance, which is a durable per-device flag nothing owns today.
 
-**Cross-lane ask (lattice.md):** an operator-initiated **hydration request** for a registered
-device — durable, consumed on the device's next SYNC attach, idempotent. Loupe's Edge tab is
-the named consumer. Until it exists, F24.1/F24.2 make the tab a triage surface, and the tab
-should say plainly that remediation is the device's own next attach.
+**F-EDGE-HYDRATE-REQUEST — SHIPPED.** A durable `HydrationRequestedAt` field on the Interest
+Set's `registrationDoc` (`internal/refractor/personalinterest/interest.go`), set by a new
+operator-only `requesthydration` control op (NOT identity-bound — it targets a device that
+belongs to someone else, gated by `ctrl.refractor.requesthydration`, granted only to
+`control-operator`/`consoleOperator`) and consumed on the device's own next warm-resume attach:
+`personal.syncgap`'s response now carries a `hydrationRequested` bit alongside `gapped`, and
+`internal/edge/sync.ensureFresh` re-hydrates on either signal. A completed hydrate
+(`SetRevisionCursor`) clears the flag, so it cannot loop. Loupe's Edge tab
+(`cmd/loupe/edge.go` `handleEdgeHydrateRequest`, `POST /api/edge/hydrate?key=`) is the
+consumer — the one write action on an otherwise read-only tab.
 
 ---
 

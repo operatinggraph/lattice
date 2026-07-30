@@ -154,7 +154,6 @@ designed-through, but the *fork decision* + the *contract commit* are Andrew's.
 | Item | What it is | Imp | Size | State |
 |---|---|---|---|---|
 | **[Loom] No per-instance redrive** | `failed` is terminal, `RetryCount` only counts it, pause/resume are consumer-scoped (and the relay/deadline consumers are refused outright), and `StartLoomPattern` is idempotent on instanceId — so a failed flow cannot be resumed or safely re-run. Needs the double-execution question answered by design: resume at cursor, or restart under a new id with the old tombstoned. | ★★ | M | 📋 ready · consumer: Loupe Flows "act on it" · [why](../../implementation-artifacts/loupe-flows-edge-depth-ux.md) §2.2 |
-| **[Personal Lens] No operator-initiated device hydration** | A gapped device is fixed by a warm resume, but edge nodes cannot self-report and no connection state is observable, so nothing can push one. A durable per-device hydration flag, consumed on the device's next SYNC attach, is the only shape the asymmetry allows. | ★★ | M | 📋 ready · consumer: Loupe Edge fleet · [why](../../implementation-artifacts/loupe-flows-edge-depth-ux.md) §3.2 |
 
 ### Privacy / Vault
 | Item | What it is | Imp | Size | State |
@@ -216,6 +215,7 @@ Real but low-value; do **not** spend design or build effort here unless Andrew g
 
 One line per shipped item (`date · SHA · [tag] title`). Oldest roll to `archive/` past ~25.
 
+- 2026-07-30 · `2edba1f3` · [Refractor,Edge,Loupe] operator-initiated device hydration request — durable per-device flag consumed on next SYNC attach [§3.2](../../implementation-artifacts/loupe-flows-edge-depth-ux.md)
 - 2026-07-30 · `b097f1a4` · [Refractor,Loupe] cold bring-up replay debt no longer reads as staleness — a draining `consumerLag` renders green until its `lagProgressAt` clock stalls 2min, closing the demo box's hours-long false YELLOW
 - 2026-07-30 · `a7284b8a` · [Processor] wall-budget test flake — `PROCESSOR_SCRIPT_WALL_MS` now wired + widened for `-p 4` test runs, production 250ms NFR-P4 default untouched
 - 2026-07-30 · `3deda37c` · [Refractor] Postgres GrantTable cap-read producers now shred-nullified — closes Fire 4's first residual [design §Fire 5](../../implementation-artifacts/cap-read-per-anchor-grant-keys-design.md)

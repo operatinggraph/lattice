@@ -38,7 +38,6 @@ fire order: [loupe-flows-edge-depth-ux.md](../../implementation-artifacts/loupe-
 
 | Item | What it is | Imp | Size | State |
 | **Flows stays read-only until Loom can redrive an instance** | Loom exposes no retry: `failed` is terminal, `RetryCount` only counts, pause/resume are consumer-scoped, and `StartLoomPattern` is idempotent on instanceId. A console button minting a fresh instance would double-execute every committed side effect. | ★★ | S | 🚧 blocked-on: Loom per-instance redrive (lattice) · [§2.2](../../implementation-artifacts/loupe-flows-edge-depth-ux.md) |
-| **Edge cannot trigger the remedy it names** | The tab tells the operator a warm resume fixes a gapped device and cannot start one — edge nodes cannot self-report and no connection state is observable, so the console can only mark a device for hydration on its next attach. | ★★ | S | 🚧 blocked-on: operator-initiated device hydration (lattice) · [§3.2](../../implementation-artifacts/loupe-flows-edge-depth-ux.md) |
 
 ## Component maintenance
 
@@ -78,6 +77,7 @@ fire order: [loupe-flows-edge-depth-ux.md](../../implementation-artifacts/loupe-
 
 One line per shipped item (`date · SHA · [tag] title`). Oldest roll to `archive/` past ~25.
 
+- 2026-07-30 · `2edba1f3` · [Loupe/Edge] gapped device panel gets its one write action — "Request hydration on next attach", the lattice cross-lane primitive's console consumer. Lead self-review
 - 2026-07-25 · `6ac1523e` · [Loupe/F24.1+F24.2] Edge fleet triage — worst-first order, retention headroom in messages + time, in-place Interest Set, `#/edge/<key>` device panel. 3-layer review fixed forward, live-verified
 - 2026-07-25 · `1551f31b` · [Loupe/F23.1] Flow detail — `#/flows/<id>` step sequence off the pinned pattern + the instance cursor; history/engine/pattern kept separable, disagreement stated. Lead self-review, live-verified
 - 2026-07-25 · `f5eb461c` · [Loupe/F23.0+F23.2] Flows badge reads Loom's status not its memory — terminal-aware liveness + `stale-history`; pattern names resolved, grouped, exception-first. Lead self-review, live-verified
