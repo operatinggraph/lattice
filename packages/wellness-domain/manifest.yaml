@@ -1,5 +1,5 @@
 name: wellness-domain
-version: 0.18.0
+version: 0.18.1
 description: |
   Wellness bookable domain: studio / session / booking / instructor vertex
   types + their aspects and links, written by Create*/Tombstone*/Cancel*/Bind*
@@ -19,11 +19,15 @@ description: |
   to a real login identity via the identity-domain `provider` archetype role
   (persona-worlds-design.md Fire W0), mirroring clinic-domain's
   BindProviderIdentity; a bound instructor's TombstoneSession grant is
-  confined, in-script, to sessions they lead. SetBookingAttendance moves a
+  confined, in-script, to sessions they lead. CancelBooking rejects once the
+  session has begun (SessionStarted, the mirror of SetBookingAttendance's
+  SessionNotStarted) or once attendance is already recorded
+  (AttendanceRecorded — a marked booking can no longer be self-cancelled).
+  SetBookingAttendance moves a
   booking's .status.value from booked to attended or noShow, carrying rate /
-  seat / booker forward on an OCC upsert of the aspect's own revision so
-  CancelBooking can still release the correct seat cell and per-(session,
-  booker) guard afterwards; either value corrects the other, a class that has
+  seat / booker forward on an OCC upsert of the aspect's own revision (those
+  fields now only matter to ReleaseOrphanedBooking, since a marked booking is
+  no longer CancelBooking-eligible); either value corrects the other, a class that has
   not begun is rejected (SessionNotStarted, the mirror of SessionInPast), and
   the same standing guard confines a bound instructor to bookings on sessions
   they lead. Five plain projection lenses

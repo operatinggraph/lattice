@@ -193,7 +193,7 @@ func wcCancelBookingAs(t *testing.T, ctx context.Context, conn *substrate.Conn,
 		Class:         "booking",
 		Payload:       payload,
 		ContextHint: &processor.ContextHint{
-			Reads:         []string{bookingKey, bookingKey + ".status"},
+			Reads:         []string{bookingKey, bookingKey + ".status", sessionKey + ".schedule"},
 			OptionalReads: []string{forSessionLnkKey(t, bookingKey, sessionKey)},
 		},
 	}

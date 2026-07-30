@@ -388,13 +388,13 @@ func attendanceStatus(t *testing.T, ctx context.Context, conn *substrate.Conn, b
 	return data
 }
 
-// TestSetBookingAttendance_CarriesSeatAndBookerThroughToCancel is the load-
-// bearing one. The attendance write replaces .status, and CancelBooking reads
-// .status.seat to release the seat cell and .status.booker to release the
-// per-(session, booker) double-book guard. A write that stored `value` alone
-// would strip both: the booking would fail to cancel, and its guard would
-// survive, locking the booker out of ever re-booking that session.
-func TestSetBookingAttendance_CarriesSeatAndBookerThroughToCancel(t *testing.T) {
+// TestSetBookingAttendance_CarriesFieldsForwardThenBlocksCancel is the load-
+// bearing one. The attendance write replaces .status, carrying rate / seat /
+// booker forward unchanged so ReleaseOrphanedBooking's convergence lens can
+// still find them — but once attendance is recorded, CancelBooking must
+// reject (AttendanceRecorded): a no-show is no longer member-erasable by
+// cancelling the booking that recorded it.
+func TestSetBookingAttendance_CarriesFieldsForwardThenBlocksCancel(t *testing.T) {
 	ctx, conn := setupDomainEnv(t)
 	cp, cons := newDomainPipeline(t, ctx, conn, "attendcarry")
 
@@ -421,8 +421,7 @@ func TestSetBookingAttendance_CarriesSeatAndBookerThroughToCancel(t *testing.T) 
 		}
 	}
 
-	// The whole point: a marked booking still cancels, releasing both the seat
-	// cell and the guard, so the booker can re-book.
+	// A marked booking can no longer be cancelled — the guard this fix adds.
 	cancelEnv := &processor.OperationEnvelope{
 		RequestID:     testutil.GenReqID("wdattendcancel000001"),
 		Lane:          processor.LaneDefault,
@@ -432,19 +431,24 @@ func TestSetBookingAttendance_CarriesSeatAndBookerThroughToCancel(t *testing.T) 
 		Class:         "booking",
 		Payload:       json.RawMessage(`{"bookingKey":"` + bookingKey + `","session":"` + sessionKey + `"}`),
 		ContextHint: &processor.ContextHint{Reads: []string{
-			bookingKey, bookingKey + ".status",
+			bookingKey, bookingKey + ".status", sessionKey + ".schedule",
 			forSessionLnkKey(t, bookingKey, sessionKey),
 		}},
 	}
-	testutil.PublishOp(t, conn, cancelEnv)
-	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
+	outcome2, reply := testutil.SubmitAndAwaitReply(t, ctx, conn, cp, cons, cancelEnv)
+	if outcome2 != processor.OutcomeRejected {
+		t.Fatalf("CancelBooking on a marked booking outcome = %v, want Rejected", outcome2)
+	}
+	if reply.Error == nil || !strings.Contains(reply.Error.Message, "AttendanceRecorded") {
+		t.Errorf("CancelBooking rejection should be AttendanceRecorded, got %+v", reply.Error)
+	}
 
-	if keyExists(t, ctx, conn, sessionKey+".seat1") {
-		t.Errorf("seat1 must be released after cancelling a marked booking")
+	if !keyExists(t, ctx, conn, sessionKey+".seat1") {
+		t.Errorf("seat1 must NOT be released by a rejected CancelBooking")
 	}
 	_, bookerID, _ := substrate.ParseVertexKey(bookerKey)
-	if keyExists(t, ctx, conn, sessionKey+".bkr"+bookerID) {
-		t.Errorf("the double-book guard must be released after cancelling a marked booking")
+	if !keyExists(t, ctx, conn, sessionKey+".bkr"+bookerID) {
+		t.Errorf("the double-book guard must NOT be released by a rejected CancelBooking")
 	}
 }
 
@@ -864,7 +868,7 @@ func TestCancelBooking_ReleasesSeatForNextClaimant(t *testing.T) {
 		Class:         "booking",
 		Payload:       json.RawMessage(`{"bookingKey":"` + bookingKey + `","session":"` + sessionKey + `"}`),
 		ContextHint: &processor.ContextHint{Reads: []string{
-			bookingKey, bookingKey + ".status",
+			bookingKey, bookingKey + ".status", sessionKey + ".schedule",
 			forSessionLnkKey(t, bookingKey, sessionKey),
 		}},
 	}
@@ -994,7 +998,7 @@ func TestCancelBooking_ReleasesGuardForRebook(t *testing.T) {
 		Class:         "booking",
 		Payload:       json.RawMessage(`{"bookingKey":"` + bookingKey + `","session":"` + sessionKey + `"}`),
 		ContextHint: &processor.ContextHint{Reads: []string{
-			bookingKey, bookingKey + ".status",
+			bookingKey, bookingKey + ".status", sessionKey + ".schedule",
 			forSessionLnkKey(t, bookingKey, sessionKey),
 		}},
 	}
@@ -1267,7 +1271,7 @@ func TestCancelBooking_ConsumerSelfScope_Allowed(t *testing.T) {
 		Class:         "booking",
 		Payload:       json.RawMessage(`{"bookingKey":"` + bookingKey + `","session":"` + sessionKey + `"}`),
 		ContextHint: &processor.ContextHint{
-			Reads:         []string{bookingKey, bookingKey + ".status", forSessionLnkKey(t, bookingKey, sessionKey)},
+			Reads:         []string{bookingKey, bookingKey + ".status", sessionKey + ".schedule", forSessionLnkKey(t, bookingKey, sessionKey)},
 			OptionalReads: []string{bookedByLnk},
 		},
 		AuthContext: &processor.AuthContext{Target: domainConsumerKey},
@@ -1487,7 +1491,7 @@ func TestCancelBooking_ConsumerSelfScope_SessionProbeRevealsNothing(t *testing.T
 			// the script runs, so the submitter simply declares it optional and
 			// the in-script order becomes the only guard.
 			ContextHint: &processor.ContextHint{
-				Reads: []string{bookingKey, bookingKey + ".status"},
+				Reads: []string{bookingKey, bookingKey + ".status", guessKey + ".schedule"},
 				OptionalReads: []string{
 					"lnk.booking." + bookingID + ".forSession.session." + guessKey[len("vtx.session."):],
 					"lnk.booking." + bookingID + ".bookedBy.identity." + domainConsumerID,
@@ -1553,7 +1557,7 @@ func TestCancelBooking_ConsumerSelfScope_RejectedForOthersBooking(t *testing.T) 
 		Class:         "booking",
 		Payload:       json.RawMessage(`{"bookingKey":"` + bookingKey + `","session":"` + sessionKey + `"}`),
 		ContextHint: &processor.ContextHint{
-			Reads:         []string{bookingKey, bookingKey + ".status", forSessionLnkKey(t, bookingKey, sessionKey)},
+			Reads:         []string{bookingKey, bookingKey + ".status", sessionKey + ".schedule", forSessionLnkKey(t, bookingKey, sessionKey)},
 			OptionalReads: []string{bookedByLnk},
 		},
 		AuthContext: &processor.AuthContext{Target: domainConsumerKey},

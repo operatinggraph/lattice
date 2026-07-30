@@ -335,13 +335,19 @@ func bookingVertexTypeDDL() pkgmgr.DDLSpec {
 			"hard failure, it falls through to rate=standard (a booker " +
 			"naming a lease they don't hold never over-grants the discount, but is still allowed to book). " +
 			"CancelBooking validates the booking is alive + class=booking and the supplied session is its actual " +
-			"session (via the forSession link), reads the booking's own .status.seat (stored at create time — no " +
-			"stored back-reference needed to recompute it), then releases that seat cell and soft-deletes the " +
-			"booking. SetBookingAttendance records who actually showed: it moves .status.value from booked to " +
+			"session (via the forSession link), rejects once .status.value is no longer booked (AttendanceRecorded " +
+			"— a marked booking is no longer cancellable, so a no-show cannot be self-erased) and once the " +
+			"session's own .schedule.startsAt has passed (SessionStarted, the mirror of SetBookingAttendance's " +
+			"SessionNotStarted; checked second because a marked booking's class has necessarily already begun, so " +
+			"AttendanceRecorded is the more specific rejection whenever both would apply), then reads the " +
+			"booking's own .status.seat (stored at create time — no stored " +
+			"back-reference needed to recompute it) and releases that seat cell and soft-deletes the booking. " +
+			"SetBookingAttendance records who actually showed: it moves .status.value from booked to " +
 			"attended or noShow, carrying rate / seat / booker forward unchanged (an OCC upsert on the aspect's " +
-			"own revision) so CancelBooking can still release the correct seat cell and per-(session, booker) " +
-			"guard afterwards. It is re-markable — attended and noShow correct each other — and rejects a session " +
-			"that has not begun (SessionNotStarted, the mirror of CreateBooking's SessionInPast). Its standing " +
+			"own revision) — those fields now only matter for ReleaseOrphanedBooking, since a marked booking is " +
+			"no longer CancelBooking-eligible. It is re-markable — attended and noShow correct each other — and " +
+			"rejects a session that has not begun (SessionNotStarted, the mirror of CreateBooking's " +
+			"SessionInPast). Its standing " +
 			"guard mirrors TombstoneSession's: the operator passes unconditionally; a bound instructor may mark " +
 			"only a booking on a class THEY lead, the caller supplying the instructor param and the script " +
 			"requiring BOTH lnk.instructor.<iid>.identifiedBy.identity.<actor> AND " +
@@ -2242,13 +2248,34 @@ def execute(state, op):
         if not workplace_exempt():
             require_workplace(session_locations(session), "cannot cancel a seat on " + session)
 
-        # read-posture: (a) declared reads at CancelBooking dispatch.
+        # read-posture: (a) declared reads at CancelBooking dispatch. Checked
+        # before the past-class guard below: attendance can only ever be
+        # recorded once a class has begun (SetBookingAttendance's own
+        # SessionNotStarted), so a marked booking would always also trip
+        # SessionStarted — checking AttendanceRecorded first gives the more
+        # specific, more useful rejection in that overlap.
         status = kv.Read(book_key + ".status")
         if status == None or status.isDeleted:
             fail("InvalidState: " + book_key + ".status is missing; cannot cancel")
+        if status.data.get("value") != "booked":
+            fail("AttendanceRecorded: " + book_key + " attendance is already recorded (" + str(status.data.get("value")) + "); cannot cancel")
         seat_n = status.data.get("seat")
         if seat_n == None:
             fail("InvalidState: " + book_key + ".status.seat is missing; cannot cancel")
+
+        # read-posture: (a) declared reads at CancelBooking dispatch — a
+        # booking can only be cancelled before its class begins, the mirror
+        # of SetBookingAttendance's SessionNotStarted. Both sides are
+        # rfc3339-normalized UTC, so lexically == chronologically.
+        sched = kv.Read(session + ".schedule")
+        if sched == None or sched.isDeleted:
+            fail("InvalidState: " + session + ".schedule is missing; cannot cancel")
+        starts_at = sched.data.get("startsAt")
+        if starts_at == None:
+            fail("InvalidState: " + session + ".schedule.startsAt is missing; cannot cancel")
+        submitted = time.rfc3339_utc(op.submittedAt)
+        if submitted >= starts_at:
+            fail("SessionStarted: session " + session + " started at " + str(starts_at) + ", cannot cancel a booking once the class has begun (submitted " + submitted + ")")
 
         mutations = [
             make_tombstone(book_key),

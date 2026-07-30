@@ -109,7 +109,7 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 			OperationType: "CancelBooking",
 			Presentation: &pkgmgr.OpPresentationSpec{
 				Title:       "Cancel booking",
-				Description: "Cancel this booking and release your seat.",
+				Description: "Cancel this booking and release your seat. Only available before the class begins and before attendance is recorded.",
 				Icon:        "cancel",
 				Tone:        "destructive",
 				SubmitLabel: "Cancel booking",
@@ -137,9 +137,16 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 				// The booking's own .status aspect is REQUIRED, not optional:
 				// the script reads the seat index it carries to rebuild the
 				// seat cell it releases, so its absence is a correctness
-				// error. The targetField fallback declares the booking vertex
-				// but never its aspects.
-				Reads: []string{"{payload.bookingKey}", "{payload.bookingKey}.status"},
+				// error. The session's .schedule is required for the same
+				// reason — the script rejects once the class has begun
+				// (SessionStarted, the mirror of SetBookingAttendance's
+				// SessionNotStarted requirement below). The targetField
+				// fallback declares the booking vertex but never its aspects.
+				Reads: []string{
+					"{payload.bookingKey}",
+					"{payload.bookingKey}.status",
+					"{payload.session}.schedule",
+				},
 				// The session-match and self-scope ownership probes. Absence
 				// of either is a meaningful rejection the script renders
 				// (WrongSession / AuthDenied), not a correctness error — the

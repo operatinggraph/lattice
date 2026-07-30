@@ -601,7 +601,7 @@ async function renderMyClasses() {
         // optionalReads — the script checks it names THIS booker (ddls.go).
         const optionalReads = ["lnk.booking." + idOf(b.bookingKey) + ".bookedBy.identity." + idOf(identityKey())];
         await opOrThrow(
-          { operationType: "CancelBooking", class: "booking", reads: [b.bookingKey, b.bookingKey + ".status", forSessionLnk], optionalReads, payload: { bookingKey: b.bookingKey, session: b.sessionKey } },
+          { operationType: "CancelBooking", class: "booking", reads: [b.bookingKey, b.bookingKey + ".status", b.sessionKey + ".schedule", forSessionLnk], optionalReads, payload: { bookingKey: b.bookingKey, session: b.sessionKey } },
           "cancel the booking",
           true,
         );
@@ -620,15 +620,24 @@ async function renderMyClasses() {
 // (wellness-domain) then drains the booking itself, so this only ever renders
 // in the brief window before that convergence catches up — the Cancel button
 // still works meanwhile, it just has nothing useful left to release.
+//
+// Cancel is disabled once the class has begun or attendance is recorded —
+// CancelBooking (wellness-domain ddls.go) rejects both server-side
+// (SessionStarted / AttendanceRecorded), so a member no longer sees an
+// offer the op will refuse.
 function myClassCard(b) {
   const id = domId(b.bookingKey);
   const cancelled = !b.sessionName;
+  const mark = ATTENDANCE_MARKS[b.status];
+  const started = !cancelled && b.startsAt && new Date(b.startsAt).getTime() <= Date.now();
+  const cancelDisabled = cancelled || !!mark || started;
   return (
     '<div class="card">' +
     '<span class="badge ' + (b.rate === "resident" ? "posted" : "open") + '">' + esc(b.rate || "standard") + "</span>" +
+    (mark ? '<span class="badge ' + mark.badge + '">' + mark.label + "</span>" : "") +
     '<div class="who">' + (cancelled ? "Class cancelled" : esc(b.sessionName)) + "</div>" +
     '<div class="meta">' + (cancelled ? "The studio called off this class." : esc(fmtRange(b.startsAt, b.endsAt))) + "</div>" +
-    '<div class="card-actions"><button id="mycancel-' + id + '" class="danger">Cancel</button></div>' +
+    '<div class="card-actions"><button id="mycancel-' + id + '" class="danger"' + (cancelDisabled ? " disabled" : "") + ">Cancel</button></div>" +
     "</div>"
   );
 }
@@ -738,8 +747,11 @@ async function renderRoster() {
   const started = !!(se && se.startsAt && new Date(se.startsAt).getTime() <= Date.now());
 
   summary.textContent = bookings.length + " booked";
+  // Release seat mirrors CancelBooking's own SessionStarted guard
+  // (wellness-domain ddls.go) — once the class has begun, attendance is the
+  // record of what happened and a seat is no longer front-desk-releasable.
   body.innerHTML = bookings.length
-    ? '<div class="grid">' + bookings.map((b) => rosterCard(b, isLeader && started, isStaff())).join("") + "</div>"
+    ? '<div class="grid">' + bookings.map((b) => rosterCard(b, isLeader && started, isStaff() && !started)).join("") + "</div>"
     : '<div class="empty">No one has booked this session yet.</div>';
   if (isLeader && !started && bookings.length) {
     summary.textContent += " — attendance opens when the class starts";
@@ -933,8 +945,11 @@ async function cancelSeat(bookingKey, sessionKey) {
       operationType: "CancelBooking",
       class: "booking",
       // The booking's own .status is an (a)-declared REQUIRED read: the script
-      // rebuilds the seat cell it releases from the seat index it carries.
-      reads: [bookingKey, bookingKey + ".status"],
+      // rebuilds the seat cell it releases from the seat index it carries, and
+      // rejects a booking whose attendance is already recorded. The session's
+      // .schedule is required for the same reason — the script also rejects
+      // once the class has begun.
+      reads: [bookingKey, bookingKey + ".status", sessionKey + ".schedule"],
       // The session-match probe. An absent link is a meaningful WrongSession
       // rejection, not a correctness error — and it must answer BEFORE the
       // workplace guard, since the session this names is what carries the
