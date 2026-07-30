@@ -799,6 +799,7 @@ above).
   "ruleEngine": "<engineName>",
   "lastProjectedAt": "<RFC3339>",
   "projectionLag": <uint64>,
+  "lagProgressAt": "<RFC3339>",
   "sweepCursor": "<anchorVertexKey>",
   "sweepReconciled": <uint64>
 }
@@ -809,7 +810,19 @@ above).
 lens's last successful target write — `""` until its first projection (design:
 lens-projection-liveness-design.md §3.2); a freshness signal, never an alert input on its own
 (a genuinely quiet, no-match lens naturally has an old value). `projectionLag` is the
-operator-facing alias of `consumerLag` (same NumPending value under both names).
+operator-facing alias of `consumerLag` (same NumPending value under both names). `lagProgressAt`
+is when `consumerLag` was last observed to decrease — stamped at the lens's first lag poll too,
+and re-stamped on every fall, never on a plateau or an uptick (mirrors the rebuild-progress clock
+`internal/refractor/pipeline`'s `recordRebuildProgress` uses for the same purpose). `""` before the
+lens's first poll. A freshly-activated consumer reads against a bucket-wide Core KV filter, so on a
+cold bring-up it must skip every key of every type it does not match before its own backlog reaches
+0 — a real, multi-hour `consumerLag` that is harmless as long as it keeps falling ("cold bring-up
+replay debt"). `lagProgressAt` is what lets a reader (`lattice health summary`, Loupe) distinguish
+that from a genuine stall: `consumerLag > 0` renders yellow only once `lagProgressAt` has gone
+longer than the reader's stall window (2 minutes) without advancing; an absent or unparseable
+`lagProgressAt` — a Refractor instance that predates this field, or a lens whose first poll hasn't
+landed — carries no evidence of active draining and renders yellow immediately, matching the
+pre-existing `consumerLag > 0` behavior.
 `sweepCursor` / `sweepReconciled` are the auth-plane convergence sweep's round-robin
 position and cumulative heal count; both are omitted for a lens that does not sweep. They
 live on this existing entry rather than in new state, so a restarted Refractor resumes the
@@ -854,8 +867,8 @@ Default: `60s`. Configurable via:
 
 | Status | Meaning |
 |---|---|
-| **green** | All non-event-driven components have a health entry fresher than `--stale-threshold`; no active alerts; `consumerLag=0` for all lenses |
-| **yellow** | Any component entry is stale (age > threshold) OR `consumerLag > 0` for any lens; OR any active warning-severity alert |
+| **green** | All non-event-driven components have a health entry fresher than `--stale-threshold`; no active alerts; every lens has `consumerLag=0`, or a nonzero `consumerLag` still draining (its `lagProgressAt` clock has not gone stalled — see `lagStalled` below) |
+| **yellow** | Any component entry is stale (age > threshold) OR any lens's `consumerLag > 0` AND its lag has stopped falling (`lagStalled`); OR any active warning-severity alert |
 | **red** | Any error-severity alert; any health entry absent (not just stale); any phase gate expected to have passed but not present |
 
 ### Component rollup algorithm
@@ -867,7 +880,10 @@ Default: `60s`. Configurable via:
 2. **Per-lens keys** (bare NanoID): check `status` field.
    - `"paused"` → yellow
    - `"rebuilding"` → yellow
-   - `"active"` → check `consumerLag` (> 0 → yellow) and `errorCount` for detail
+   - `"active"` → check `consumerLag` (> 0 AND `lagStalled` — its `lagProgressAt` clock has gone
+     longer than the 2-minute stall window without falling — → yellow; a large but still-falling
+     `consumerLag`, e.g. cold bring-up replay debt on a bucket-wide filter, stays green) and
+     `errorCount` for detail
    - Independent of `status`: extract `lastUpdated`; `age > staleThreshold` → status
      `"stale"`, yellow at minimum (worst-of with whatever the status branch above already
      computed) — an unregistered pipeline's reporter entry freezes at its last-written

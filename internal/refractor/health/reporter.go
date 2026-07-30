@@ -310,13 +310,15 @@ func (r *Reporter) SetConsumerLag(ctx context.Context, lag uint64) error {
 
 // SetProjectionProgress reads the existing entry, updates ConsumerLag/
 // ProjectionLag (the same NumPending value under both the legacy and
-// operator-facing names) and, when lastProjectedAt is non-zero, LastProjectedAt,
-// then writes (lens-projection-liveness-design.md §3.2). Called by the
-// LagPoller on its existing 5s cycle in place of SetConsumerLag — one
-// read-modify-write, no new goroutine. A zero lastProjectedAt (no projection
-// yet this process) leaves the existing stored value untouched rather than
-// blanking it.
-func (r *Reporter) SetProjectionProgress(ctx context.Context, lag uint64, lastProjectedAt time.Time) error {
+// operator-facing names), LagProgressAt (when non-zero), and, when
+// lastProjectedAt is non-zero, LastProjectedAt, then writes
+// (lens-projection-liveness-design.md §3.2). Called by the LagPoller on its
+// existing 5s cycle in place of SetConsumerLag — one read-modify-write, no
+// new goroutine. A zero lastProjectedAt (no projection yet this process)
+// leaves the existing stored value untouched rather than blanking it; a zero
+// lagProgressAt does the same (the LagPoller stamps it from its first poll
+// onward, so zero here only happens before that poller has run at all).
+func (r *Reporter) SetProjectionProgress(ctx context.Context, lag uint64, lastProjectedAt, lagProgressAt time.Time) error {
 	r.mu.RLock()
 	seq := r.activeSequence
 	r.mu.RUnlock()
@@ -332,6 +334,9 @@ func (r *Reporter) SetProjectionProgress(ctx context.Context, lag uint64, lastPr
 	existing.ProjectionLag = lag
 	if !lastProjectedAt.IsZero() {
 		existing.LastProjectedAt = lastProjectedAt.UTC().Format(time.RFC3339)
+	}
+	if !lagProgressAt.IsZero() {
+		existing.LagProgressAt = lagProgressAt.UTC().Format(time.RFC3339)
 	}
 	existing.ActiveSequence = seq
 	existing.LastUpdated = time.Now().UTC().Format(time.RFC3339)

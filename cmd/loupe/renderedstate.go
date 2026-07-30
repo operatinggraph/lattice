@@ -4,7 +4,36 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 )
+
+// lagStallWindow bounds how long a lens's ConsumerLag may go without falling
+// before it counts as genuinely stuck rather than still draining a legitimate
+// backlog. A newly-activated consumer reads against a bucket-wide filter, so
+// on a fresh bring-up it must skip every key of every type it does not match
+// before its own NumPending reaches 0 — a real, multi-hour backlog that is
+// harmless as long as it keeps falling (cold bring-up replay debt). The
+// window is chosen well below that multi-hour drain so a lens that is
+// actually stuck — not merely draining slowly — is still caught promptly.
+const lagStallWindow = 2 * time.Minute
+
+// lagStalled reports whether a lens's lag has gone this long without falling,
+// per its LagPoller-maintained lagProgressAt clock (health-kv-schema.md
+// consumerLag semantics). An absent or unparseable clock — a Refractor
+// instance that predates this field, or a lens whose first poll hasn't
+// landed — carries no evidence of active draining, so it reads as stalled
+// rather than silently suppressing the lagging state.
+func lagStalled(doc map[string]any) bool {
+	raw, _ := doc["lagProgressAt"].(string)
+	if raw == "" {
+		return true
+	}
+	t, err := time.Parse(time.RFC3339, raw)
+	if err != nil {
+		return true
+	}
+	return time.Since(t) > lagStallWindow
+}
 
 // The shared lens status vocabulary (loupe-2-ux-design.md §4.2): one
 // server-derived renderedState per lens, joined from its Health-KV reporter
@@ -32,6 +61,11 @@ const (
 //     "structural" (an "infra" pause, a malformed reason) renders "paused" —
 //     not "unknown" — since the pause itself is certain even when its
 //     attribution is not.
+//   - an active lens with consumerLag > 0 renders "lagging" only once its lag
+//     has stopped falling for lagStallWindow (lagStalled) — a large-but-
+//     draining backlog (cold bring-up replay debt) still surfaces as an
+//     issue line, but does not flip the lens (or the rollup) yellow while it
+//     is actively catching up.
 //
 // pending-readpath is a paused protected/grant-table Postgres lens — the
 // fail-closed verify-and-pause activation gate. The Refractor re-probes it on
@@ -74,7 +108,7 @@ func lensRenderedState(doc map[string]any, spec lensSpecInfo) (state string, iss
 		return lensStatePaused, issues, sevYellow
 	case status == "rebuilding":
 		return lensStateRebuilding, issues, sevYellow
-	case status == "active" && consumerLag > 0:
+	case status == "active" && consumerLag > 0 && lagStalled(doc):
 		return lensStateLagging, issues, sevYellow
 	case status == "active":
 		return lensStateProjecting, issues, sevGreen

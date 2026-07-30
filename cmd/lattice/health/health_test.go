@@ -90,6 +90,79 @@ func TestHealthSummary_Rollup_AllGreen(t *testing.T) {
 	}
 }
 
+// TestLagStalled pins the cold-bring-up-replay-debt distinction: a lens with
+// no evidence of active draining (absent/unparseable lagProgressAt, or one
+// past lagStallWindow) reads as stalled; one whose lag is still falling
+// within the window does not.
+func TestLagStalled(t *testing.T) {
+	cases := []struct {
+		name string
+		doc  map[string]any
+		want bool
+	}{
+		{"absent clock", map[string]any{}, true},
+		{"unparseable clock", map[string]any{"lagProgressAt": "garbage"}, true},
+		{"within the window", map[string]any{"lagProgressAt": time.Now().Add(-time.Second).Format(time.RFC3339)}, false},
+		{"past the window", map[string]any{"lagProgressAt": time.Now().Add(-lagStallWindow - 5*time.Second).Format(time.RFC3339)}, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := lagStalled(tc.doc); got != tc.want {
+				t.Errorf("lagStalled(%v) = %v, want %v", tc.doc, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestHealthSummary_Rollup_DrainingLensNotYellow pins the cold-bring-up
+// replay-debt fix at the rollup level: a lens with a large but actively
+// falling consumerLag (lagProgressAt within the window) must not turn the
+// summary yellow, while one whose lag has stopped falling still does.
+func TestHealthSummary_Rollup_DrainingLensNotYellow(t *testing.T) {
+	now := time.Now().UTC()
+	drainingLens := "lensdraining00000"
+	stalledLens := "lensstalled000000"
+
+	bootstrapDoc := map[string]any{"status": "complete", "completedAt": now.Format(time.RFC3339)}
+
+	docs := map[string]map[string]any{
+		drainingLens: {
+			"ruleId":        drainingLens,
+			"status":        "active",
+			"consumerLag":   float64(2483),
+			"lagProgressAt": now.Add(-5 * time.Second).Format(time.RFC3339),
+			"lastUpdated":   now.Format(time.RFC3339),
+		},
+		"health.bootstrap.complete": bootstrapDoc,
+	}
+	readFn := func(k string) (map[string]any, bool) { d, ok := docs[k]; return d, ok }
+	rollup, overallLevel := computeSummaryRollup([]string{drainingLens, "health.bootstrap.complete"}, readFn, 60*time.Second)
+	if overallLevel != rollupGreen {
+		t.Errorf("draining lens: overall = %v, want GREEN", overallLevel)
+	}
+	if rollup.Components[0].Status != "active" {
+		t.Errorf("draining lens: status = %q, want \"active\"", rollup.Components[0].Status)
+	}
+
+	docs = map[string]map[string]any{
+		stalledLens: {
+			"ruleId":        stalledLens,
+			"status":        "active",
+			"consumerLag":   float64(2483),
+			"lagProgressAt": now.Add(-5 * time.Minute).Format(time.RFC3339),
+			"lastUpdated":   now.Format(time.RFC3339),
+		},
+		"health.bootstrap.complete": bootstrapDoc,
+	}
+	rollup, overallLevel = computeSummaryRollup([]string{stalledLens, "health.bootstrap.complete"}, readFn, 60*time.Second)
+	if overallLevel != rollupYellow {
+		t.Errorf("stalled lens: overall = %v, want YELLOW", overallLevel)
+	}
+	if rollup.Components[0].Status != "yellow" {
+		t.Errorf("stalled lens: status = %q, want \"yellow\"", rollup.Components[0].Status)
+	}
+}
+
 // TestHealthSummary_Rollup_StaleYellow exercises the rollup logic when a
 // processor heartbeat is older than the stale threshold.
 func TestHealthSummary_Rollup_StaleYellow(t *testing.T) {

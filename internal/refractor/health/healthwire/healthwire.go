@@ -46,6 +46,15 @@ type Entry struct {
 	// ProjectionLag is the operator-facing alias of ConsumerLag (same NumPending
 	// value, named for what it means to an operator: events behind).
 	ProjectionLag uint64 `json:"projectionLag"`
+	// LagProgressAt is when ConsumerLag was last observed to decrease (stamped
+	// at first observation too) — RFC3339 UTC; "" before the lens's first lag
+	// poll. A newly-activated consumer on a bucket-wide filter can carry a
+	// large ConsumerLag purely from skipping types it does not match (cold
+	// bring-up replay debt) — that backlog is real but harmless as long as it
+	// keeps falling. This is the "still actively draining" clock a reader
+	// checks before treating ConsumerLag as staleness: only a backlog that has
+	// stopped falling for a while is a genuine signal.
+	LagProgressAt string `json:"lagProgressAt,omitempty"`
 	// SweepCursor is the auth-plane convergence sweep's round-robin position —
 	// the last anchor vertex key its deep pass verified
 	// (capability-projection-reconciliation-design.md §3.2). It lives on the

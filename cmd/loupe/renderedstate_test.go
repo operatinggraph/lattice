@@ -19,7 +19,10 @@ func TestLensRenderedState(t *testing.T) {
 		wantLevel int
 	}{
 		{"active clean → projecting", map[string]any{"status": "active"}, plainKV, lensStateProjecting, sevGreen},
-		{"active with lag → lagging", map[string]any{"status": "active", "consumerLag": float64(3)}, plainKV, lensStateLagging, sevYellow},
+		{"active with lag, no lagProgressAt → lagging (pre-fix / never-polled reporter)", map[string]any{"status": "active", "consumerLag": float64(3)}, plainKV, lensStateLagging, sevYellow},
+		{"active with lag, freshly draining → projecting, not lagging", map[string]any{"status": "active", "consumerLag": float64(2483), "lagProgressAt": time.Now().Add(-5 * time.Second).Format(time.RFC3339)}, plainKV, lensStateProjecting, sevGreen},
+		{"active with lag, stalled past the window → lagging", map[string]any{"status": "active", "consumerLag": float64(2483), "lagProgressAt": time.Now().Add(-5 * time.Minute).Format(time.RFC3339)}, plainKV, lensStateLagging, sevYellow},
+		{"active with lag, unparseable lagProgressAt → lagging", map[string]any{"status": "active", "consumerLag": float64(3), "lagProgressAt": "not-a-time"}, plainKV, lensStateLagging, sevYellow},
 		{"errors → fault even while active", map[string]any{"status": "active", "errorCount": float64(2), "lastError": "boom"}, plainKV, lensStateFault, sevYellow},
 		{"structural pause → fault", map[string]any{"status": "paused", "pauseReason": "structural"}, plainKV, lensStateFault, sevYellow},
 		{"manual pause → paused (operator), even on a protected lens", map[string]any{"status": "paused", "pauseReason": "manual"}, protectedPG, lensStatePaused, sevYellow},
@@ -42,6 +45,30 @@ func TestLensRenderedState(t *testing.T) {
 			state, _, level := lensRenderedState(tc.doc, tc.spec)
 			if state != tc.wantState || level != tc.wantLevel {
 				t.Errorf("lensRenderedState = (%q, level %d), want (%q, %d)", state, level, tc.wantState, tc.wantLevel)
+			}
+		})
+	}
+}
+
+// lagStalled: absent/unparseable clocks read as stalled (no evidence of
+// draining); a clock stamped within the window reads as still draining; one
+// older than the window reads as stalled.
+func TestLagStalled(t *testing.T) {
+	cases := []struct {
+		name string
+		doc  map[string]any
+		want bool
+	}{
+		{"absent clock", map[string]any{}, true},
+		{"unparseable clock", map[string]any{"lagProgressAt": "garbage"}, true},
+		{"within the window", map[string]any{"lagProgressAt": time.Now().Add(-time.Second).Format(time.RFC3339)}, false},
+		{"just under the window", map[string]any{"lagProgressAt": time.Now().Add(-lagStallWindow + 5*time.Second).Format(time.RFC3339)}, false},
+		{"past the window", map[string]any{"lagProgressAt": time.Now().Add(-lagStallWindow - 5*time.Second).Format(time.RFC3339)}, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := lagStalled(tc.doc); got != tc.want {
+				t.Errorf("lagStalled(%v) = %v, want %v", tc.doc, got, tc.want)
 			}
 		})
 	}

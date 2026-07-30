@@ -137,6 +137,53 @@ func TestLagPoller_UpdatesHealthKV(t *testing.T) {
 	}, 2*time.Second, 25*time.Millisecond, "health KV must be updated by LagPoller")
 }
 
+// TestLagPoller_UpdatesLagProgressAt verifies that each poll cycle threads the
+// poller's lag-progress clock (recordLagProgress) into the health KV entry via
+// SetProjectionProgress, and that it keeps advancing as a source lag value
+// keeps falling (health-kv-schema.md consumerLag / lagProgressAt semantics).
+func TestLagPoller_UpdatesLagProgressAt(t *testing.T) {
+	env := startLagServer(t)
+
+	health.MetricsInterval = 30 * time.Millisecond
+	defer func() { health.MetricsInterval = 5 * time.Second }()
+
+	const ruleID = "rule-lag-progress"
+	reporter := health.New(env.healthKV, ruleID)
+	require.NoError(t, reporter.SetActive(context.Background()))
+
+	var mu sync.Mutex
+	lag := uint64(2500)
+	fallingLag := func(context.Context) (uint64, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		if lag > 0 {
+			lag -= 100
+		}
+		return lag, nil
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	lp := health.NewLagPoller(env.conn, fallingLag, reporter, ruleID)
+	_ = startPoller(lp, ctx)
+
+	require.Eventually(t, func() bool {
+		entry, err := reporter.GetStatus(context.Background())
+		return err == nil && entry.LagProgressAt != ""
+	}, 2*time.Second, 10*time.Millisecond, "lagProgressAt must be published once the poller has run")
+
+	first, err := reporter.GetStatus(context.Background())
+	require.NoError(t, err)
+
+	// A source that keeps falling must keep re-stamping the clock forward.
+	require.Eventually(t, func() bool {
+		entry, err := reporter.GetStatus(context.Background())
+		return err == nil && entry.LagProgressAt != "" && entry.LagProgressAt >= first.LagProgressAt &&
+			entry.ConsumerLag < first.ConsumerLag
+	}, 2*time.Second, 10*time.Millisecond, "lagProgressAt must keep advancing while lag keeps falling")
+}
+
 // TestLagPoller_PerRuleIsolation verifies that two pollers publish only to their own
 // lattice.refractor.metrics.<lensId> subjects with no cross-contamination (NFR13, AC3).
 func TestLagPoller_PerRuleIsolation(t *testing.T) {

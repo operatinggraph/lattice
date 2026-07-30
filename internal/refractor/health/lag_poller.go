@@ -53,6 +53,17 @@ type LagPoller struct {
 	// lastProjectedAt is then left at whatever it already held (see
 	// Reporter.SetProjectionProgress).
 	progress ProgressFunc
+
+	// lagOutstanding / lagProgressAt track whether ConsumerLag is actively
+	// draining, mirroring Pipeline's rebuild-progress clock
+	// (recordRebuildProgress/RebuildProgress): stamped at the first poll and
+	// re-stamped whenever lag DECREASES from the previous poll. A backlog that
+	// keeps falling — even slowly, as on a cold bring-up replay against a
+	// bucket-wide consumer filter — is legitimate catch-up, not staleness; a
+	// backlog that has stopped falling for a while is what a reader should
+	// treat as the real signal. Single dedicated goroutine (Start), so no lock.
+	lagOutstanding uint64
+	lagProgressAt  time.Time
 }
 
 // SetProgressFunc attaches the pipeline's projection-progress source. Must be
@@ -117,6 +128,7 @@ func (lp *LagPoller) poll(ctx context.Context) {
 		}
 		return
 	}
+	lp.recordLagProgress(lag)
 
 	msg := LagMetric{
 		RuleID:      lp.ruleID,
@@ -141,11 +153,23 @@ func (lp *LagPoller) poll(ctx context.Context) {
 		if lp.progress != nil {
 			lastProjectedAt = lp.progress()
 		}
-		if err := lp.reporter.SetProjectionProgress(ctx, lag, lastProjectedAt); err != nil {
+		if err := lp.reporter.SetProjectionProgress(ctx, lag, lastProjectedAt, lp.lagProgressAt); err != nil {
 			if ctx.Err() == nil {
 				slog.Warn("lag poller: SetProjectionProgress failed",
 					"ruleId", lp.ruleID, "err", err)
 			}
 		}
 	}
+}
+
+// recordLagProgress stamps lagProgressAt at the first observation and
+// whenever lag has fallen since the previous poll — mirroring
+// pipeline.Pipeline.recordRebuildProgress. A momentary uptick between polls
+// (a concurrent write growing the backlog while it is otherwise draining)
+// does not reset the clock; only a lag that stops falling ages it.
+func (lp *LagPoller) recordLagProgress(lag uint64) {
+	if lp.lagProgressAt.IsZero() || lag < lp.lagOutstanding {
+		lp.lagProgressAt = time.Now()
+	}
+	lp.lagOutstanding = lag
 }

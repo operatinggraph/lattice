@@ -156,6 +156,30 @@ func parseTimestamp(doc map[string]any, key string) (time.Time, bool) {
 	return t, err == nil
 }
 
+// lagStallWindow bounds how long a lens's consumerLag may go without falling
+// before it counts as genuinely stuck rather than still draining a legitimate
+// backlog. A newly-activated consumer reads against a bucket-wide filter, so
+// on a fresh bring-up it must skip every key of every type it does not match
+// before its own NumPending reaches 0 — a real, multi-hour backlog that is
+// harmless as long as it keeps falling (cold bring-up replay debt). The
+// window is chosen well below that multi-hour drain so a lens that is
+// actually stuck — not merely draining slowly — is still caught promptly.
+const lagStallWindow = 2 * time.Minute
+
+// lagStalled reports whether a lens's lag has gone this long without
+// falling, per its LagPoller-maintained lagProgressAt clock
+// (health-kv-schema.md consumerLag semantics). An absent or unparseable
+// clock — a Refractor instance that predates this field, or a lens whose
+// first poll hasn't landed — carries no evidence of active draining, so it
+// reads as stalled rather than silently suppressing the yellow.
+func lagStalled(doc map[string]any) bool {
+	t, ok := parseTimestamp(doc, "lagProgressAt")
+	if !ok {
+		return true
+	}
+	return time.Since(t) > lagStallWindow
+}
+
 // issueSeverities extracts the severity of each entry in a heartbeat doc's
 // inline issues[] array (Contract #5 §5.2). Malformed entries are skipped.
 func issueSeverities(doc map[string]any) []string {
@@ -315,7 +339,7 @@ func computeSummaryRollup(allKeys []string, readEntry func(string) (map[string]a
 			row.Details = fmt.Sprintf("consumerLag=%.0f errorCount=%.0f", consumerLag, errorCount)
 			switch status {
 			case "active":
-				if consumerLag > 0 {
+				if consumerLag > 0 && lagStalled(doc) {
 					row.Status = "yellow"
 					row.level = rollupYellow
 				} else {
