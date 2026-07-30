@@ -17,8 +17,8 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 // grant authorizes every non-mutating op that component exposes (weaver
 // `list`; loom `list`/`consumers`/`inspect`; refractor `health`/`validate`),
 // while every mutating verb (disable/enable/revoke, pause/resume,
-// rebuild/delete/register/deregister/hydrate/sessionkey/syncgap) is granted to
-// no one here and is therefore denied.
+// rebuild/delete/register/deregister/hydrate/sessionkey/syncgap/
+// requesthydration) is granted to no one here and is therefore denied.
 //
 // This package grants NO write op — not the default-lane console ops
 // (ShredIdentityKey/RevokeActor/UnrevokeActor/AttachObject/DetachObject), not

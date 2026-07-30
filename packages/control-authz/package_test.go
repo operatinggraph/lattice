@@ -59,8 +59,8 @@ func TestPackage_DeclaresControlOperatorRoleDistinctFromPrimordialOperator(t *te
 	}
 }
 
-// TestPackage_EveryControlOpHasExpectedGrantees pins the full 17-permission
-// ctrl.<component>.<verb> surface (4 weaver + 3 loom + 10 refractor —
+// TestPackage_EveryControlOpHasExpectedGrantees pins the full 18-permission
+// ctrl.<component>.<verb> surface (4 weaver + 3 loom + 11 refractor —
 // internal/controlauth's WeaverOps/LoomOps/RefractorOps): every op grants
 // scope=any, and every op grants to control-operator ALONE except the five
 // identity-bound Personal Lens ops
@@ -69,14 +69,17 @@ func TestPackage_DeclaresControlOperatorRoleDistinctFromPrimordialOperator(t *te
 // backOfHouse, and provider (§3.4-confined — see personalLensPermissions). A
 // role missing from that set cannot register Personal Lens interest at all,
 // so its holders' clients sync nothing; this test is where that omission
-// surfaces.
+// surfaces. requesthydration is sole-control-operator, not identity-bound: it
+// targets a DIFFERENT identity's device (an operator-initiated warm resume),
+// so dispatchEndpoint never rebinds its body.IdentityID the way it does for
+// the personal-lens five.
 func TestPackage_EveryControlOpHasExpectedGrantees(t *testing.T) {
 	wantSoleControlOperator := []string{
 		"ctrl.weaver.read", "ctrl.weaver.disable", "ctrl.weaver.enable", "ctrl.weaver.revoke",
 		"ctrl.weaver.resetConfidence",
 		"ctrl.loom.read", "ctrl.loom.pause", "ctrl.loom.resume",
 		"ctrl.refractor.read", "ctrl.refractor.rebuild", "ctrl.refractor.pause", "ctrl.refractor.resume",
-		"ctrl.refractor.delete", "ctrl.refractor.reproject",
+		"ctrl.refractor.delete", "ctrl.refractor.reproject", "ctrl.refractor.requesthydration",
 	}
 	wantPersonalLensGrantees := []string{"control-operator", "consumer", "frontOfHouse", "backOfHouse", "provider"}
 	wantControlOperatorAndConsumer := []string{

@@ -138,6 +138,7 @@ func (s *server) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/gateway/revocations", s.handleGatewayRevocations)
 	mux.HandleFunc("/api/edge/fleet", s.handleEdgeFleet)
 	mux.HandleFunc("/api/edge/device", s.handleEdgeDevice)
+	mux.HandleFunc("/api/edge/hydrate", s.handleEdgeHydrateRequest)
 	mux.HandleFunc("/api/vault/shreds", s.handleVaultShreds)
 	mux.HandleFunc("/api/vault/decrypt", s.handleVaultDecrypt)
 	mux.HandleFunc("/api/review/", s.handleReview)
@@ -541,6 +542,24 @@ func (s *server) controlRequest(ctx context.Context, conn *substrate.Conn, subje
 		actorHeader = s.operatorActorToken
 	}
 	reply, err := conn.NATS().RequestMsgWithContext(ctx, controlauth.NewActorRequestMsg(subject, actorHeader))
+	if err != nil {
+		return nil, err
+	}
+	return json.RawMessage(reply.Data), nil
+}
+
+// controlRequestBody is controlRequest's body-carrying sibling — every
+// mutateOps call in control.go targets a bodyless op (pause/resume/delete/…),
+// so this exists for the handful of Personal Lens control ops that carry a
+// JSON payload (e.g. "requesthydration"'s identityId/deviceId target).
+func (s *server) controlRequestBody(ctx context.Context, conn *substrate.Conn, subject string, body []byte) (json.RawMessage, error) {
+	actorHeader := s.operatorActorKey
+	if s.operatorActorToken != "" {
+		actorHeader = s.operatorActorToken
+	}
+	msg := controlauth.NewActorRequestMsg(subject, actorHeader)
+	msg.Data = body
+	reply, err := conn.NATS().RequestMsgWithContext(ctx, msg)
 	if err != nil {
 		return nil, err
 	}

@@ -216,6 +216,10 @@ type PersonalSessionKeyResult = controlwire.PersonalSessionKeyResult
 // PersonalSyncGapResult is the answer returned by the "syncgap" op.
 type PersonalSyncGapResult = controlwire.PersonalSyncGapResult
 
+// PersonalRequestHydrationResult is the acknowledgement returned by the
+// "requesthydration" op.
+type PersonalRequestHydrationResult = controlwire.PersonalRequestHydrationResult
+
 // ValidateResult is returned by the "validate" op.
 type ValidateResult = controlwire.ValidateResult
 
@@ -631,7 +635,7 @@ const controlSubjectPrefix = controlwire.SubjectPrefix
 // supportedOps enumerates the per-op endpoint suffixes registered under
 // the NATS Services framework. The op name is taken from the trailing
 // subject token; see opFromSubject.
-var supportedOps = []string{"health", "validate", "rebuild", "pause", "resume", "delete", "register", "deregister", "hydrate", "sessionkey", "syncgap", "reproject"}
+var supportedOps = []string{"health", "validate", "rebuild", "pause", "resume", "delete", "register", "deregister", "hydrate", "sessionkey", "syncgap", "reproject", "requesthydration"}
 
 // StartNATSListener registers the Refractor control plane as a NATS
 // micro-service named "refractor-control". One endpoint is added per
@@ -796,6 +800,8 @@ func (s *Service) dispatchEndpoint(op string, req micro.Request) {
 		sgCtx, sgCancel := context.WithTimeout(context.Background(), syncGapTimeout)
 		defer sgCancel()
 		s.respondMicro(req, s.personalSyncGap(sgCtx, body))
+	case "requesthydration":
+		s.respondMicro(req, s.personalRequestHydration(context.Background(), body))
 	case "reproject":
 		rpCtx, rpCancel := context.WithTimeout(context.Background(), reprojectTimeout)
 		defer rpCancel()
@@ -1135,6 +1141,7 @@ func (s *Service) readPiiKeyEnvelope(ctx context.Context, identityKey string) (v
 func (s *Service) personalSyncGap(ctx context.Context, body ControlRequest) ControlResponse {
 	s.mu.Lock()
 	firstSeqFn := s.syncFirstSeq
+	kv := s.personalInterestKV
 	s.mu.Unlock()
 	if firstSeqFn == nil {
 		return ControlResponse{Error: "syncgap: stream state not configured"}
@@ -1143,7 +1150,52 @@ func (s *Service) personalSyncGap(ctx context.Context, body ControlRequest) Cont
 	if err != nil {
 		return ControlResponse{Error: fmt.Sprintf("syncgap: read stream state: %s", err.Error())}
 	}
-	return ControlResponse{PersonalSyncGap: &PersonalSyncGapResult{Gapped: body.Cursor < firstSeq}}
+	// Piggybacks the pending-hydration-request check onto the same round trip
+	// every warm-resume attach already makes (ensureFresh calls syncgap
+	// whenever the cursor is not cold) — a device that never gaps would
+	// otherwise never learn an operator asked for a re-hydrate. Best-effort:
+	// a check failure logs and reports false rather than failing the gap
+	// answer, since this is a bandwidth hint, not the correctness gate.
+	hydrationRequested := false
+	if kv != nil && body.DeviceID != "" {
+		hydrationRequested, err = personalinterest.HydrationRequested(ctx, kv, body.IdentityID, body.DeviceID)
+		if err != nil {
+			slog.Warn("control: syncgap: check hydration request", "identityId", body.IdentityID, "deviceId", body.DeviceID, "err", err)
+			hydrationRequested = false
+		}
+	}
+	return ControlResponse{PersonalSyncGap: &PersonalSyncGapResult{
+		Gapped:             body.Cursor < firstSeq,
+		HydrationRequested: hydrationRequested,
+	}}
+}
+
+// personalRequestHydration durably marks a device for hydration on its next
+// SYNC attach (loupe-flows-edge-depth-ux.md §3.2): an operator-initiated warm
+// resume for a device the platform cannot push to — edge nodes cannot
+// self-report and no connection state is observable, so this is the only way
+// to ask one. Unlike register/deregister/hydrate/sessionkey/syncgap, this op
+// is NOT bound to the caller's own identity (dispatchEndpoint's identity-
+// binding switch deliberately excludes it): the caller is an operator acting
+// on someone else's device, authorized by the ctrl.refractor.requesthydration
+// capability grant, not by owning the target identity. Fails closed if
+// SetPersonalInterestKV hasn't been called, if identityId/deviceId are
+// missing, or if the target device has no existing registration.
+func (s *Service) personalRequestHydration(ctx context.Context, body ControlRequest) ControlResponse {
+	s.mu.Lock()
+	kv := s.personalInterestKV
+	s.mu.Unlock()
+	if kv == nil {
+		return ControlResponse{Error: "requesthydration: personal-lens-interest KV not configured"}
+	}
+	if body.IdentityID == "" || body.DeviceID == "" {
+		return ControlResponse{Error: "requesthydration: identityId and deviceId are required"}
+	}
+	if err := personalinterest.RequestHydration(ctx, kv, body.IdentityID, body.DeviceID,
+		time.Now().UTC().Format(time.RFC3339)); err != nil {
+		return ControlResponse{Error: err.Error()}
+	}
+	return ControlResponse{PersonalRequestHydration: &PersonalRequestHydrationResult{Requested: true}}
 }
 
 // validateRule reports that field-level validation is not available. It

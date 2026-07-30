@@ -106,6 +106,49 @@ func TestManager_EnsureFresh_WarmGappedTrueHydrates(t *testing.T) {
 	assert.Contains(t, tr.requests, "hydrate", "gapped=true must re-hydrate")
 }
 
+// TestManager_EnsureFresh_HydrationRequestedTrueHydratesEvenWhenNotGapped
+// proves an operator-initiated hydration request (loupe-flows-edge-depth-
+// ux.md §3.2) triggers a re-hydrate on the device's next warm-resume attach
+// even when the cursor is not gapped — the platform cannot push to a device
+// it cannot see, so this consumption point (not gap detection) is what
+// fulfills the request.
+func TestManager_EnsureFresh_HydrationRequestedTrueHydratesEvenWhenNotGapped(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	tr := &fakeControlTransport{reply: func(op string, _ controlwire.ControlRequest) (controlwire.ControlResponse, error) {
+		switch op {
+		case "syncgap":
+			return controlwire.ControlResponse{PersonalSyncGap: &controlwire.PersonalSyncGapResult{
+				Gapped: false, HydrationRequested: true,
+			}}, nil
+		case "register":
+			return controlwire.ControlResponse{PersonalRegister: &controlwire.PersonalRegisterResult{Registered: true}}, nil
+		case "hydrate":
+			return controlwire.ControlResponse{PersonalHydrate: &controlwire.PersonalHydrateResult{Hydrated: true, Revision: 1}}, nil
+		default:
+			return controlwire.ControlResponse{Error: "unexpected op " + op}, nil
+		}
+	}}
+	mgr := newFakeManager(t, tr, 5, true)
+
+	require.NoError(t, mgr.ensureFresh(ctx))
+	assert.Equal(t, "syncgap", tr.requests[0], "warm resume asks syncgap first")
+	assert.Contains(t, tr.requests, "hydrate", "a pending hydration request must re-hydrate even though the cursor is not gapped")
+}
+
+// TestManager_EnsureFresh_NeitherGappedNorRequestedSkipsHydrate proves the
+// ordinary warm-resume no-op is untouched: gapped=false and
+// hydrationRequested=false together must not re-hydrate.
+func TestManager_EnsureFresh_NeitherGappedNorRequestedSkipsHydrate(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	tr := &fakeControlTransport{reply: happyControlReply(false)}
+	mgr := newFakeManager(t, tr, 5, true)
+
+	require.NoError(t, mgr.ensureFresh(ctx))
+	assert.NotContains(t, tr.requests, "hydrate", "neither gapped nor a pending hydration request must not re-hydrate")
+}
+
 // TestManager_EnsureFresh_AbsentSyncGapResultErrors is the silent-data-loss
 // guard (edge-syncgap-control-rpc-design.md §3.3): a decodable response whose
 // personalSyncGap is absent must be an ERROR, never defaulted to

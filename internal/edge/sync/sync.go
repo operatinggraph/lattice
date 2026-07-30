@@ -235,14 +235,22 @@ func (m *Manager) ensureFresh(ctx context.Context) error {
 		return fmt.Errorf("read cursor: %w", err)
 	}
 	if ok {
-		gapped, err := m.gapped(ctx, cursor)
+		gapped, hydrationRequested, err := m.gapped(ctx, cursor)
 		if err != nil {
 			return fmt.Errorf("check gap: %w", err)
 		}
-		if !gapped {
+		if !gapped && !hydrationRequested {
 			return nil
 		}
-		m.logger.Info("edge/sync: retention gap detected, re-hydrating", "cursor", cursor)
+		if gapped {
+			m.logger.Info("edge/sync: retention gap detected, re-hydrating", "cursor", cursor)
+		} else {
+			// An operator marked this device for hydration
+			// (loupe-flows-edge-depth-ux.md §3.2) — the platform cannot push
+			// to a device it cannot see, so this is consumed here, on the
+			// device's own next attach.
+			m.logger.Info("edge/sync: operator-requested hydration pending, re-hydrating", "cursor", cursor)
+		}
 	} else {
 		m.logger.Info("edge/sync: cold start, hydrating")
 	}
@@ -252,21 +260,23 @@ func (m *Manager) ensureFresh(ctx context.Context) error {
 // gapped reports whether cursor (the last stream sequence this node applied)
 // has fallen behind the SYNC stream's current retention window — i.e.
 // retention pruned messages between cursor and the earliest still-retained
-// message, so a plain durable resume would silently skip them. Answered by
-// the identity-bound personal.syncgap control RPC
-// (edge-syncgap-control-rpc-design.md): the Edge grant no longer speaks any
-// $JS.API.STREAM.* verb, so the earliest-retained sequence is compared to the
-// cursor server-side by the control host on its own full-grant read. A
-// transient control-plane unavailability (boot-order window, §7) is retried
-// with bounded backoff; a persistent failure fails closed (never resume
-// unverified).
-func (m *Manager) gapped(ctx context.Context, cursor uint64) (bool, error) {
+// message, so a plain durable resume would silently skip them — and whether
+// an operator has separately marked this device for hydration
+// (loupe-flows-edge-depth-ux.md §3.2). Answered by the identity-bound
+// personal.syncgap control RPC (edge-syncgap-control-rpc-design.md): the Edge
+// grant no longer speaks any $JS.API.STREAM.* verb, so the earliest-retained
+// sequence is compared to the cursor server-side by the control host on its
+// own full-grant read, which also carries the hydration-request bit as a
+// hitchhiker on the same round trip. A transient control-plane
+// unavailability (boot-order window, §7) is retried with bounded backoff; a
+// persistent failure fails closed (never resume unverified).
+func (m *Manager) gapped(ctx context.Context, cursor uint64) (gapped bool, hydrationRequested bool, err error) {
 	var lastErr error
 	backoff := syncGapRetryBaseBackoff
 	for attempt := 1; attempt <= syncGapMaxAttempts; attempt++ {
-		gapped, err := m.syncGapOnce(ctx, cursor)
+		g, hr, err := m.syncGapOnce(ctx, cursor)
 		if err == nil {
-			return gapped, nil
+			return g, hr, nil
 		}
 		lastErr = err
 		if attempt == syncGapMaxAttempts {
@@ -276,12 +286,12 @@ func (m *Manager) gapped(ctx context.Context, cursor uint64) (bool, error) {
 		select {
 		case <-ctx.Done():
 			timer.Stop()
-			return false, ctx.Err()
+			return false, false, ctx.Err()
 		case <-timer.C:
 		}
 		backoff *= 2
 	}
-	return false, fmt.Errorf("after %d attempts: %w", syncGapMaxAttempts, lastErr)
+	return false, false, fmt.Errorf("after %d attempts: %w", syncGapMaxAttempts, lastErr)
 }
 
 // syncGapOnce issues one personal.syncgap control RPC and decodes its answer.
@@ -290,23 +300,25 @@ func (m *Manager) gapped(ctx context.Context, cursor uint64) (bool, error) {
 // absent PersonalSyncGap result must be an error, never defaulted to false —
 // nil→false is the silent-data-loss direction (a warm node that should
 // re-hydrate would instead resume its durable and skip the pruned deltas
-// forever, edge-syncgap-control-rpc-design.md §3.3).
-func (m *Manager) syncGapOnce(ctx context.Context, cursor uint64) (bool, error) {
+// forever, edge-syncgap-control-rpc-design.md §3.3). hydrationRequested has
+// no such stakes — it is a bandwidth hint, not a correctness gate — so it
+// defaults to false with the rest of the tuple on any error path.
+func (m *Manager) syncGapOnce(ctx context.Context, cursor uint64) (gapped bool, hydrationRequested bool, err error) {
 	resp, err := m.controlRequest(ctx, "syncgap", controlwire.ControlRequest{
 		IdentityID: m.cfg.IdentityID,
 		DeviceID:   m.cfg.DeviceID,
 		Cursor:     cursor,
 	})
 	if err != nil {
-		return false, err
+		return false, false, err
 	}
 	if resp.Error != "" {
-		return false, fmt.Errorf("%s", resp.Error)
+		return false, false, fmt.Errorf("%s", resp.Error)
 	}
 	if resp.PersonalSyncGap == nil {
-		return false, fmt.Errorf("control plane returned no syncgap result")
+		return false, false, fmt.Errorf("control plane returned no syncgap result")
 	}
-	return resp.PersonalSyncGap.Gapped, nil
+	return resp.PersonalSyncGap.Gapped, resp.PersonalSyncGap.HydrationRequested, nil
 }
 
 // hydrate registers the device's Interest Set, then runs the cold bulk

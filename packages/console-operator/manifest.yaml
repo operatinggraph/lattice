@@ -1,5 +1,5 @@
 name: console-operator
-version: 0.6.0
+version: 0.6.1
 description: |
   Declares a scoped consoleOperator role and grants it the default-lane
   console ops (ShredIdentityKey, RevokeActor, UnrevokeActor, AttachObject,
@@ -98,6 +98,9 @@ declares:
       scope: any
       grantsTo: [consoleOperator]
     - operationType: ctrl.refractor.syncgap
+      scope: any
+      grantsTo: [consoleOperator]
+    - operationType: ctrl.refractor.requesthydration
       scope: any
       grantsTo: [consoleOperator]
     - operationType: InstallPackage

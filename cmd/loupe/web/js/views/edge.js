@@ -4,11 +4,13 @@
 //
 // All decision logic lives in logic/edge.js (goja-tested); this file is the
 // DOM binding. Every identity is a keyLink into the Graph explorer (design
-// §1.2 — no dead ends). Read-only throughout: the remedy for a gapped device
-// is its own next attach, and the tab says so rather than offering a button
-// the platform cannot honour (loupe-flows-edge-depth-ux.md §3.2).
+// §1.2 — no dead ends). The remedy for a gapped device is still its own next
+// SYNC attach — the console cannot push to a device it cannot see — but an
+// operator can durably mark it for hydration on that next attach
+// (loupe-flows-edge-depth-ux.md §3.2, "requesthydration"), which is the one
+// write action this otherwise read-only tab offers.
 
-import { $, el, api, setStatus } from "../api.js";
+import { $, el, api, demoHide, setStatus } from "../api.js";
 import { keyLinkEl } from "../render.js";
 import { navigate } from "../router.js";
 import {
@@ -226,12 +228,16 @@ async function loadDevice(key) {
 
   (body.notes || []).forEach((n) => panel.appendChild(el("div", "card-issue", n)));
   if (v.state === "gapped") {
-    // The one place this panel must not overstate itself: there is no
-    // operator-initiated hydration, so the remedy is named as the device's own.
-    panel.appendChild(el("div", "card-issue",
+    // The remedy still runs on the device's own next attach — the console
+    // cannot push to a device it cannot see — but it can durably mark this
+    // device so that next attach consumes the request (loupe-flows-edge-
+    // depth-ux.md §3.2).
+    const issue = el("div", "card-issue",
       "Deltas this device had not consumed have aged out, so a warm resume would silently miss them — it needs a " +
-      "cold personal.hydrate, which only the device itself can start on its next attach. The console cannot " +
-      "trigger one: edge nodes cannot self-report and no connection state is observable."));
+      "cold personal.hydrate on its next attach. The console cannot trigger one directly (edge nodes cannot " +
+      "self-report and no connection state is observable), but it can mark this device so its next attach hydrates.");
+    issue.appendChild(hydrateRequestButton(d));
+    panel.appendChild(issue);
   }
   if (d.unreadable) {
     panel.appendChild(el("div", "card-issue",
@@ -251,6 +257,34 @@ async function loadDevice(key) {
   panel.appendChild(positionPanel(d, body));
   panel.appendChild(interestPanel(d));
   panel.appendChild(siblingPanel(body));
+}
+
+// hydrateRequestButton is the one write action this otherwise read-only tab
+// offers: durably mark d for hydration on its next SYNC attach. Disabled
+// while in flight so a double-click cannot fire two requests, and the button
+// stays disabled after a successful request — a second click before the
+// device's next attach would only re-stamp the same pending marker.
+function hydrateRequestButton(d) {
+  const wrap = el("div");
+  const btn = demoHide(el("button", "linkish", "Request hydration on next attach"));
+  const result = el("div", "small muted");
+  btn.addEventListener("click", async () => {
+    btn.disabled = true;
+    btn.textContent = "requesting…";
+    const resp = await api("/api/edge/hydrate?key=" + encodeURIComponent(d.key), { method: "POST" });
+    if (resp.error) {
+      btn.disabled = false;
+      btn.textContent = "Request hydration on next attach";
+      result.classList.add("error-text");
+      result.textContent = "hydration request failed: " + resp.error;
+      return;
+    }
+    btn.textContent = "hydration requested — will run on this device's next attach";
+    result.textContent = "";
+  });
+  wrap.appendChild(btn);
+  wrap.appendChild(result);
+  return wrap;
 }
 
 // registeredAgo appends the elapsed time to a registration timestamp. A raw

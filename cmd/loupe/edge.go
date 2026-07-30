@@ -662,3 +662,44 @@ func (s *server) handleEdgeDevice(w http.ResponseWriter, r *http.Request) {
 		Notes:      append(rd.notes, rd.faults()...),
 	})
 }
+
+// handleEdgeHydrateRequest implements POST /api/edge/hydrate?key=<identityId>.
+// <deviceId>: durably marks the device for hydration on its next SYNC attach
+// (loupe-flows-edge-depth-ux.md §3.2) via the Refractor control plane's
+// "requesthydration" op. The console cannot push to a device it cannot see —
+// edge nodes cannot self-report and no connection state is observable — so
+// this only records the request; the remedy still runs on the device's own
+// next attach. The reply is forwarded raw, same as every other control
+// mutation Loupe proxies (control.go).
+func (s *server) handleEdgeHydrateRequest(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		s.writeError(w, http.StatusBadRequest, "POST required")
+		return
+	}
+	key := strings.TrimSpace(r.URL.Query().Get("key"))
+	identityID, deviceID, ok := splitInterestKey(key)
+	if !ok {
+		s.writeError(w, http.StatusBadRequest, "expected ?key=<identityId>.<deviceId>")
+		return
+	}
+	conn, connOK := s.requireConn(w)
+	if !connOK {
+		return
+	}
+	ctx, cancel := s.reqContext(r)
+	defer cancel()
+
+	body, err := json.Marshal(map[string]string{"identityId": identityID, "deviceId": deviceID})
+	if err != nil {
+		s.writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	raw, err := s.controlRequestBody(ctx, conn, "lattice.ctrl.refractor.personal.requesthydration", body)
+	if err != nil {
+		s.writeError(w, http.StatusBadGateway, err.Error())
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(raw)
+}

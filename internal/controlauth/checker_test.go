@@ -174,7 +174,7 @@ func TestPerComponentOpTables_ReadVsMutateCoverage(t *testing.T) {
 	}{
 		{"weaver", WeaverOps, []string{"list"}, []string{"disable", "enable", "revoke", "resetConfidence"}},
 		{"loom", LoomOps, []string{"list", "consumers", "inspect"}, []string{"pause", "resume"}},
-		{"refractor", RefractorOps, []string{"health", "validate", "syncgap"}, []string{"rebuild", "pause", "resume", "delete", "register", "deregister", "hydrate", "sessionkey"}},
+		{"refractor", RefractorOps, []string{"health", "validate", "syncgap"}, []string{"rebuild", "pause", "resume", "delete", "register", "deregister", "hydrate", "sessionkey", "requesthydration"}},
 	}
 	for _, tc := range cases {
 		for _, op := range tc.wantRead {

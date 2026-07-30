@@ -85,19 +85,20 @@ type ControlRequest struct {
 // On success (delete op): Delete field is present; Entry fields are absent.
 // On error: only "error" field is present.
 type ControlResponse struct {
-	*healthwire.Entry                            // embedded; nil on non-health ops → fields absent in JSON
-	Error              string                    `json:"error,omitempty"`
-	Validate           *ValidateResult           `json:"validate,omitempty"`           // present only for "validate" op
-	Rebuild            *RebuildResult            `json:"rebuild,omitempty"`            // present only for "rebuild" op
-	Pause              *PauseResult              `json:"pause,omitempty"`              // present only for "pause" op
-	Resume             *ResumeResult             `json:"resume,omitempty"`             // present only for "resume" op
-	Delete             *DeleteResult             `json:"delete,omitempty"`             // present only for "delete" op
-	PersonalRegister   *PersonalRegisterResult   `json:"personalRegister,omitempty"`   // present only for "register" op
-	PersonalDeregister *PersonalDeregisterResult `json:"personalDeregister,omitempty"` // present only for "deregister" op
-	PersonalHydrate    *PersonalHydrateResult    `json:"personalHydrate,omitempty"`    // present only for "hydrate" op
-	PersonalSessionKey *PersonalSessionKeyResult `json:"personalSessionKey,omitempty"` // present only for "sessionkey" op
-	PersonalSyncGap    *PersonalSyncGapResult    `json:"personalSyncGap,omitempty"`    // present only for "syncgap" op
-	Reproject          *ReprojectResult          `json:"reproject,omitempty"`          // present only for "reproject" op
+	*healthwire.Entry                                        // embedded; nil on non-health ops → fields absent in JSON
+	Error                    string                          `json:"error,omitempty"`
+	Validate                 *ValidateResult                 `json:"validate,omitempty"`                 // present only for "validate" op
+	Rebuild                  *RebuildResult                  `json:"rebuild,omitempty"`                  // present only for "rebuild" op
+	Pause                    *PauseResult                    `json:"pause,omitempty"`                    // present only for "pause" op
+	Resume                   *ResumeResult                   `json:"resume,omitempty"`                   // present only for "resume" op
+	Delete                   *DeleteResult                   `json:"delete,omitempty"`                   // present only for "delete" op
+	PersonalRegister         *PersonalRegisterResult         `json:"personalRegister,omitempty"`         // present only for "register" op
+	PersonalDeregister       *PersonalDeregisterResult       `json:"personalDeregister,omitempty"`       // present only for "deregister" op
+	PersonalHydrate          *PersonalHydrateResult          `json:"personalHydrate,omitempty"`          // present only for "hydrate" op
+	PersonalSessionKey       *PersonalSessionKeyResult       `json:"personalSessionKey,omitempty"`       // present only for "sessionkey" op
+	PersonalSyncGap          *PersonalSyncGapResult          `json:"personalSyncGap,omitempty"`          // present only for "syncgap" op
+	PersonalRequestHydration *PersonalRequestHydrationResult `json:"personalRequestHydration,omitempty"` // present only for "requesthydration" op
+	Reproject                *ReprojectResult                `json:"reproject,omitempty"`                // present only for "reproject" op
 }
 
 // ReprojectResult is the synchronous acknowledgement returned by the
@@ -188,6 +189,21 @@ type PersonalSessionKeyResult struct {
 // without a wire change; the watermark is extracted, not handed out.
 type PersonalSyncGapResult struct {
 	Gapped bool `json:"gapped"`
+	// HydrationRequested reports an operator-initiated hydration request
+	// pending for this device (loupe-flows-edge-depth-ux.md §3.2,
+	// personalinterest.RequestHydration) — a bandwidth hint alongside Gapped,
+	// not a correctness signal: the client's own gap decision stays
+	// authoritative, this only asks it to also re-hydrate when otherwise it
+	// would have stayed warm.
+	HydrationRequested bool `json:"hydrationRequested,omitempty"`
+}
+
+// PersonalRequestHydrationResult is the synchronous acknowledgement returned
+// by the "requesthydration" op (loupe-flows-edge-depth-ux.md §3.2): an
+// operator has durably marked the target device for hydration on its next
+// SYNC attach.
+type PersonalRequestHydrationResult struct {
+	Requested bool `json:"requested"`
 }
 
 // ValidateResult is returned by the "validate" op. It contains a best-effort

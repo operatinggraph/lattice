@@ -30,6 +30,14 @@ type registrationDoc struct {
 	Anchors        []string `json:"anchors,omitempty"`
 	RegisteredAt   string   `json:"registeredAt"`
 	RevisionCursor uint64   `json:"revisionCursor,omitempty"` // populated by Fire PL.4 (hydration); unused here
+	// HydrationRequestedAt is an operator-initiated warm-resume request
+	// (loupe-flows-edge-depth-ux.md §3.2): edge nodes cannot self-report and
+	// no connection state is observable, so this durable flag is the only way
+	// to ask a device to re-hydrate on its own next SYNC attach. Cleared by
+	// SetRevisionCursor — a completed hydrate always fulfills any pending
+	// request, whether or not that particular cycle was the one that
+	// consumed it.
+	HydrationRequestedAt string `json:"hydrationRequestedAt,omitempty"`
 }
 
 // Key builds the personal-lens-interest bucket key for a device's
@@ -98,6 +106,7 @@ func SetRevisionCursor(ctx context.Context, kv *substrate.KV, identityID, device
 			return fmt.Errorf("personalinterest: get %q: %w", key, getErr)
 		}
 		doc.RevisionCursor = revision
+		doc.HydrationRequestedAt = ""
 		body, merr := json.Marshal(doc)
 		if merr != nil {
 			return fmt.Errorf("personalinterest: marshal cursor update for %q: %w", key, merr)
@@ -116,6 +125,69 @@ func SetRevisionCursor(ctx context.Context, kv *substrate.KV, identityID, device
 		}
 		return fmt.Errorf("personalinterest: put %q: %w", key, casErr)
 	}
+}
+
+// RequestHydration marks a registered device for hydration on its next SYNC
+// attach (loupe-flows-edge-depth-ux.md §3.2) — an operator-initiated warm
+// resume for a device the platform cannot push to directly. CAS retry loop,
+// same shape as SetRevisionCursor. Fails if the device has no existing
+// registration: there is nothing to mark, and creating a phantom entry would
+// put a device that never registered onto the Interest Set roster.
+func RequestHydration(ctx context.Context, kv *substrate.KV, identityID, deviceID, requestedAt string) error {
+	key, err := Key(identityID, deviceID)
+	if err != nil {
+		return err
+	}
+	for {
+		entry, getErr := kv.Get(ctx, key)
+		if getErr != nil {
+			if errors.Is(getErr, substrate.ErrKeyNotFound) {
+				return fmt.Errorf("personalinterest: device %q is not registered", key)
+			}
+			return fmt.Errorf("personalinterest: get %q: %w", key, getErr)
+		}
+		var doc registrationDoc
+		if uerr := json.Unmarshal(entry.Value, &doc); uerr != nil {
+			return fmt.Errorf("personalinterest: unmarshal existing %q: %w", key, uerr)
+		}
+		doc.HydrationRequestedAt = requestedAt
+		body, merr := json.Marshal(doc)
+		if merr != nil {
+			return fmt.Errorf("personalinterest: marshal hydration request for %q: %w", key, merr)
+		}
+		if _, casErr := kv.Update(ctx, key, body, entry.Revision); casErr != nil {
+			if errors.Is(casErr, substrate.ErrRevisionConflict) {
+				continue
+			}
+			return fmt.Errorf("personalinterest: put %q: %w", key, casErr)
+		}
+		return nil
+	}
+}
+
+// HydrationRequested reports whether an operator has marked deviceID for
+// hydration on its next SYNC attach (RequestHydration) and the request has
+// not yet been consumed by a completed hydrate (SetRevisionCursor clears it).
+// No registration, or a read failure, reports false rather than erroring —
+// this is a bandwidth hint consulted from personalSyncGap (an extra push
+// alongside the ordinary gap check), never a correctness gate.
+func HydrationRequested(ctx context.Context, kv *substrate.KV, identityID, deviceID string) (bool, error) {
+	key, err := Key(identityID, deviceID)
+	if err != nil {
+		return false, err
+	}
+	entry, err := kv.Get(ctx, key)
+	if err != nil {
+		if errors.Is(err, substrate.ErrKeyNotFound) {
+			return false, nil
+		}
+		return false, fmt.Errorf("personalinterest: get %q: %w", key, err)
+	}
+	var doc registrationDoc
+	if err := json.Unmarshal(entry.Value, &doc); err != nil {
+		return false, fmt.Errorf("personalinterest: unmarshal %q: %w", key, err)
+	}
+	return doc.HydrationRequestedAt != "", nil
 }
 
 // Deregister removes a device's Interest Set. Idempotent — deregistering an

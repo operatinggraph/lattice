@@ -57,7 +57,7 @@ func Permissions() []pkgmgr.PermissionSpec {
 	}
 	perms = append(perms, componentPermissions("weaver", []string{"read", "disable", "enable", "revoke", "resetConfidence"})...)
 	perms = append(perms, componentPermissions("loom", []string{"read", "pause", "resume"})...)
-	perms = append(perms, componentPermissions("refractor", []string{"read", "rebuild", "pause", "resume", "delete", "reproject", "register", "deregister", "hydrate", "sessionkey", "syncgap"})...)
+	perms = append(perms, componentPermissions("refractor", []string{"read", "rebuild", "pause", "resume", "delete", "reproject", "register", "deregister", "hydrate", "sessionkey", "syncgap", "requesthydration"})...)
 	perms = append(perms, pkgLifecyclePermissions()...)
 	return perms
 }

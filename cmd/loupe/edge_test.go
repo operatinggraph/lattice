@@ -526,3 +526,30 @@ func TestHandleEdgeDevice_Validation(t *testing.T) {
 		}
 	}
 }
+
+func TestHandleEdgeHydrateRequest_Validation(t *testing.T) {
+	mux := testServer()
+
+	cases := []struct {
+		method, path string
+		want         int
+	}{
+		// Method + key validation run BEFORE requireConn (testServer has a nil
+		// conn), so a malformed request answers 400 rather than a misleading 502.
+		{"GET", "/api/edge/hydrate?key=AAAAAAAAAAAAAAAAAAAA.phone", http.StatusBadRequest},
+		{"POST", "/api/edge/hydrate", http.StatusBadRequest},
+		{"POST", "/api/edge/hydrate?key=", http.StatusBadRequest},
+		{"POST", "/api/edge/hydrate?key=nodot", http.StatusBadRequest},
+		{"POST", "/api/edge/hydrate?key=.leading", http.StatusBadRequest},
+		{"POST", "/api/edge/hydrate?key=trailing.", http.StatusBadRequest},
+		// A well-formed key with no NATS gets the honest upstream answer.
+		{"POST", "/api/edge/hydrate?key=AAAAAAAAAAAAAAAAAAAA.phone", http.StatusBadGateway},
+	}
+	for _, c := range cases {
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, httptest.NewRequest(c.method, c.path, nil))
+		if rec.Code != c.want {
+			t.Errorf("%s %s: status = %d, want %d", c.method, c.path, rec.Code, c.want)
+		}
+	}
+}

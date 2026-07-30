@@ -11,7 +11,7 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 //
 //	ctrl.weaver.{read,disable,enable,revoke,resetConfidence}         → control-operator
 //	ctrl.loom.{read,pause,resume}                                     → control-operator
-//	ctrl.refractor.{read,rebuild,pause,resume,delete,reproject}       → control-operator
+//	ctrl.refractor.{read,rebuild,pause,resume,delete,reproject,requesthydration} → control-operator
 //	ctrl.refractor.{register,deregister,hydrate,sessionkey,syncgap}   → control-operator, consumer, frontOfHouse, backOfHouse, provider
 //
 // The op→verb tables here MUST stay in lockstep with
@@ -27,11 +27,17 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 // unconditionally binds these ops' body.IdentityID to the caller's own
 // verified actor, confining the effect to the caller's own identity
 // regardless of capability scope — see personalLensPermissions.
+//
+// requesthydration is deliberately NOT in that identity-bound set: it targets
+// a device that belongs to someone ELSE (an operator marking a fleet
+// member's device for its next warm resume), so dispatchEndpoint does not
+// bind its body.IdentityID — it stays a plain control-operator-only grant
+// via componentPermissions, same as rebuild/pause/resume/delete.
 func Permissions() []pkgmgr.PermissionSpec {
 	perms := []pkgmgr.PermissionSpec{}
 	perms = append(perms, componentPermissions("weaver", []string{"read", "disable", "enable", "revoke", "resetConfidence"})...)
 	perms = append(perms, componentPermissions("loom", []string{"read", "pause", "resume"})...)
-	perms = append(perms, componentPermissions("refractor", []string{"read", "rebuild", "pause", "resume", "delete", "reproject"})...)
+	perms = append(perms, componentPermissions("refractor", []string{"read", "rebuild", "pause", "resume", "delete", "reproject", "requesthydration"})...)
 	perms = append(perms, personalLensPermissions("register", "deregister", "hydrate", "sessionkey", "syncgap")...)
 	return perms
 }
