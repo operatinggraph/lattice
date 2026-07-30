@@ -2,10 +2,12 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"log/slog"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/nats-io/nats.go/jetstream"
 	"github.com/stretchr/testify/assert"
@@ -20,6 +22,7 @@ import (
 	"github.com/operatinggraph/lattice/internal/refractor/reloadpin"
 	"github.com/operatinggraph/lattice/internal/refractor/ruleengine"
 	"github.com/operatinggraph/lattice/internal/refractor/ruleengine/full"
+	"github.com/operatinggraph/lattice/internal/refractor/subjects"
 	"github.com/operatinggraph/lattice/internal/substrate"
 )
 
@@ -755,4 +758,190 @@ func TestPinnedFieldsMatchTheRefusalSet(t *testing.T) {
 		assert.NotEmpty(t, hotReloadRefusal(runningEntry(), newLens),
 			"reloadpin warns that %q is not hot-reloadable, so this package must actually refuse it", name)
 	}
+}
+
+// ---------------------------------------------------------------------------
+// MatchChange — an accepted edit reprojects the existing corpus, not just
+// future events (Component maintenance: "a lens spec change re-compiles but
+// never re-projects").
+// ---------------------------------------------------------------------------
+
+// matchChangeEnv wires a real running pipeline against embedded NATS — Core
+// KV, a target NATS-KV bucket and a health bucket — so an accepted MATCH
+// hot-reload can be proven to actually rescan the pre-existing corpus, not
+// just log that it swapped the compiled rule.
+type matchChangeEnv struct {
+	conn   *substrate.Conn
+	adjKV  *substrate.KV
+	coreKV *substrate.KV
+	target *substrate.KV
+}
+
+func startMatchChangeEnv(t *testing.T) *matchChangeEnv {
+	t.Helper()
+	if testing.Short() {
+		t.Skip("skipping NATS integration test in short mode")
+	}
+	_, nc := natsfixture.Server(t)
+
+	js, err := jetstream.New(nc)
+	require.NoError(t, err)
+	ctx := context.Background()
+
+	for _, bucket := range []string{"CORE", "ADJ", "TARGET-mc", "HEALTH-lens-mc"} {
+		_, err := js.CreateKeyValue(ctx, jetstream.KeyValueConfig{Bucket: bucket})
+		require.NoError(t, err)
+	}
+
+	conn, err := substrate.Wrap(nc)
+	require.NoError(t, err)
+	adjKV, err := conn.OpenKV(ctx, "ADJ")
+	require.NoError(t, err)
+	coreKV, err := conn.OpenKV(ctx, "CORE")
+	require.NoError(t, err)
+	target, err := conn.OpenKV(ctx, "TARGET-mc")
+	require.NoError(t, err)
+
+	return &matchChangeEnv{conn: conn, adjKV: adjKV, coreKV: coreKV, target: target}
+}
+
+// mcCompile parses query against a fresh full engine and threads keyFields
+// onto the compiled rule, mirroring internal/refractor/pipeline's
+// compileFullRule (unexported to that package's own test, so restated here).
+func mcCompile(t *testing.T, eng *full.Engine, query string, keyFields []string) *full.CompiledRule {
+	t.Helper()
+	cr, err := eng.Parse(query)
+	require.NoError(t, err)
+	fullCR, ok := cr.(*full.CompiledRule)
+	require.True(t, ok)
+	fullCR.KeyColumns = keyFields
+	require.NoError(t, fullCR.ValidateKeyColumns())
+	return fullCR
+}
+
+// mcPollUntil retries check every 20ms until it returns true or timeout expires.
+func mcPollUntil(t *testing.T, timeout time.Duration, check func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if check() {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatal("condition not met within timeout")
+}
+
+func TestReloaderUpdate_AcceptedMatchChangeReprojectsExistingEntries(t *testing.T) {
+	env := startMatchChangeEnv(t)
+	ctx := context.Background()
+
+	fullEngine := full.New()
+	oldCR := mcCompile(t, fullEngine,
+		"MATCH (a:agreement {key: $actorKey}) RETURN a.stableId AS agreementId, a.id AS marker",
+		[]string{"agreementId"})
+
+	adpt, err := adapter.New(env.target, []string{"agreementId"}, adapter.DeleteModeHard)
+	require.NoError(t, err)
+
+	healthKV, err := env.conn.OpenKV(ctx, "HEALTH-lens-mc")
+	require.NoError(t, err)
+	reporter := health.New(healthKV, "lens-mc")
+
+	p, err := pipeline.New("lens-mc", "nats_kv", "CORE", env.adjKV, env.coreKV, adpt, reporter)
+	require.NoError(t, err)
+	p.UseFullEngine(fullEngine, oldCR)
+
+	p.RunOn(env.conn, substrate.ConsumerSpec{
+		Name:          "refractor-lens-mc",
+		Stream:        subjects.CoreKVStream("CORE"),
+		FilterSubject: subjects.CoreKVFilter("CORE"),
+		DeliverPolicy: substrate.DeliverLastPerSubject,
+		DeliverGroup:  "refractor-lens-mc",
+		AckWait:       2 * time.Second,
+	})
+	runCtx, cancel := context.WithCancel(ctx)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		p.Run(runCtx)
+	}()
+	t.Cleanup(func() {
+		cancel()
+		<-done
+	})
+
+	// Seed one agreement — the corpus a hot-reload must reach, not just
+	// events arriving after it.
+	putProps := map[string]any{
+		"stableId":       "STABLE1",
+		"id":             "OLD-VALUE",
+		"altId":          "NEW-VALUE",
+		"isDeleted":      false,
+		"createdAt":      "2026-01-01T00:00:00Z",
+		"lastModifiedAt": "2026-01-01T00:00:00Z",
+	}
+	body, err := json.Marshal(putProps)
+	require.NoError(t, err)
+	_, err = env.coreKV.Put(ctx, "vtx.agreement.Tsnt1McAgreementAaaa", body)
+	require.NoError(t, err)
+
+	// The old rule projects the pre-existing entry under its OLD marker.
+	mcPollUntil(t, 3*time.Second, func() bool {
+		entry, err := env.target.Get(ctx, "STABLE1")
+		if err != nil {
+			return false
+		}
+		var got map[string]any
+		if json.Unmarshal(entry.Value, &got) != nil {
+			return false
+		}
+		return got["marker"] == "OLD-VALUE"
+	})
+
+	// A MATCH-only edit: same key, different source column for `marker`.
+	newCR := mcCompile(t, fullEngine,
+		"MATCH (a:agreement {key: $actorKey}) RETURN a.stableId AS agreementId, a.altId AS marker",
+		[]string{"agreementId"})
+	newLens := &lens.Rule{
+		ID:             "lens-mc",
+		ResolvedEngine: ruleengine.EngineFull,
+		CompiledRule:   newCR,
+		Sequence:       7,
+		Into:           lens.IntoConfig{Target: "nats_kv", Key: lens.KeyField{"agreementId"}},
+	}
+
+	entry := &pipelineEntry{
+		target:   "nats_kv",
+		pipeline: p,
+		reporter: reporter,
+	}
+	rl := &reloader{
+		ctx:        ctx,
+		logger:     discardLogger(),
+		lookup:     func(string) (*pipelineEntry, bool) { return entry, true },
+		fullEngine: fullEngine,
+	}
+
+	oldLens := &lens.Rule{ID: "lens-mc", Into: lens.IntoConfig{Target: "nats_kv", Key: lens.KeyField{"agreementId"}}}
+	rl.update(oldLens, newLens, lens.MatchChange)
+
+	status, err := reporter.GetStatus(ctx)
+	require.NoError(t, err)
+	assert.Zero(t, status.ErrorCount, "an accepted MATCH change must not record a refusal")
+
+	// The already-stored entry must reproject under the NEW rule without any
+	// new Core KV event — proving the accepted swap triggered a rescan of the
+	// existing corpus, not just a change in behavior for future events.
+	mcPollUntil(t, 3*time.Second, func() bool {
+		entry, err := env.target.Get(ctx, "STABLE1")
+		if err != nil {
+			return false
+		}
+		var got map[string]any
+		if json.Unmarshal(entry.Value, &got) != nil {
+			return false
+		}
+		return got["marker"] == "NEW-VALUE"
+	})
 }

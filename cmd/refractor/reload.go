@@ -339,5 +339,19 @@ func (rl *reloader) update(_, newLens *lens.Rule, kind lens.UpdateKind) {
 		rl.logger.Info("lens MATCH hot-reloaded", "lensId", newLens.ID)
 		entry.reporter.SetRuleSequence(newLens.Sequence)
 		entry.reporter.SetRuleEngine(newLens.ResolvedEngine)
+		// The swap above only changes which rule FUTURE events evaluate against.
+		// A MATCH edit can change which already-stored Core KV entries should be
+		// projected, so the existing corpus needs the same rescan an operator's
+		// "rebuild" control op performs — otherwise a package-driven MATCH change
+		// silently "succeeds" while already-projected rows drift from the new
+		// rule until someone notices and restarts Refractor. Async, mirroring
+		// control.Service.rebuildRule: Reset() is a network round trip, and this
+		// runs on CoreKVSource's single dispatch goroutine, which every other
+		// lens's spec reload also shares.
+		go func() {
+			if err := entry.pipeline.Rebuild(rl.ctx, false); err != nil {
+				rl.logger.Error("MATCH hot-reload: trigger rebuild", "lensId", newLens.ID, "err", err)
+			}
+		}()
 	}
 }
