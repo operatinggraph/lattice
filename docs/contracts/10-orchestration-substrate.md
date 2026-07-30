@@ -144,6 +144,17 @@ key:  deadline.<instanceId>           value: { setAt }   with a per-key TTL = th
   terminal — never a silent fallback to the live source. Disaster recovery (total `loom-state`
   loss → fresh `StartLoomPattern`) re-binds to the **current** definition; this is re-convergence
   under today's truth, not a regression of the pin (see `docs/components/loom.md`).
+- **`failed` is terminal for every automatic path, but not unconditionally one-way**: the
+  `lattice.ctrl.loom.<instanceId>.redrive` operator command (`internal/loom` `Engine.RedriveInstance`,
+  `docs/components/control-plane.md`) is the one sanctioned `failed → running` transition. It resumes
+  **at the instance's recorded `cursor`** — never restarts at a fresh id/cursor 0, which would
+  re-execute every step the failed run already committed. Because the pin was already deleted in the
+  failure's terminal batch, redrive re-pins `instance.<id>.pattern` from the **CURRENT** live pattern
+  (not the one the instance originally ran against) in the same `AtomicBatch` that flips `status` back
+  to `running` — the pin's `CreateOnly` write is both the re-pin and the concurrency guard for two
+  racing redrives of the same instance. If the current definition's step count no longer covers the
+  recorded `cursor` (the pattern was edited since the failure), redrive refuses rather than resume
+  against a misindexed step.
 - The `pendingToken → instance` correlation is a **durable co-located reverse index** (the `token.`
   pointer), resolved by a **direct GET** on completion — **not** an in-memory index. This is
   **multi-instance-safe**: any engine replica resolves any token via the bucket.
