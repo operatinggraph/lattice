@@ -247,6 +247,7 @@ func main() {
 		landlordKey := seedLandlordWorld(ctx, conn, adminKey, consumerRoleKey)
 		fmt.Printf("==> landlord:        %s (%s) manages Unit 4, holds consumer\n", landlordKey, landlordName)
 		fmt.Println("LOFTSPACE_LANDLORD_NANOID=" + strings.TrimPrefix(landlordKey, "vtx.identity."))
+		healApprovedLeaseApplications(ctx, conn, adminKey)
 		maintKey := seedMaintenanceBeat(ctx, conn, adminKey, consumerRoleKey)
 		fmt.Println("FACET_MAINT_NANOID=" + strings.TrimPrefix(maintKey, "vtx.identity."))
 
@@ -372,6 +373,7 @@ func main() {
 
 	landlordKey := seedLandlordWorld(ctx, conn, adminKey, consumerRoleKey)
 	fmt.Printf("==> landlord:        %s (%s) manages Unit 4, holds consumer\n", landlordKey, landlordName)
+	healApprovedLeaseApplications(ctx, conn, adminKey)
 
 	// Cold-start race guard (verticals.md "Facet cold-start races the cap
 	// projection", ef45e83): wait for both tenants' consumer role grant to
@@ -1409,6 +1411,65 @@ func assignUnitOwner(ctx context.Context, conn *substrate.Conn, adminKey, landlo
 			Reads:         []string{landlordKey, unit4Key},
 			OptionalReads: []string{linkKey(landlordKey, "manages", unit4Key)},
 		})
+}
+
+// healApprovedLeaseApplications drives RecordIdentityPII for any approved
+// lease application whose applicant has not yet supplied it.
+// DecideLeaseApplication's Approve-readiness floor only requires a signature
+// (scripts.go's own comment: the full applicantApproved gate — ssn + a fresh
+// bgcheck + payment — is deliberately left to the convergence lens, not
+// re-checked at approve time), so a landlord can approve before the
+// applicant finishes onboarding. missing_bgcheck itself only opens once
+// ssnVal is non-null (lenses.go's readinessWithItems), so an applicant who
+// never submits PII strands the application forever: bgcheck never
+// dispatches, qualified never becomes true, and missing_listingLeased never
+// opens — the unit sits available indefinitely despite an approved decision.
+// Nothing else in the live demo completes that step on the applicant's
+// behalf, so this heals it the same way ensureLandlord heals a broken
+// manages link: idempotent, rerun-safe, and driven off live Core KV (not the
+// two fixed showcase IDs) so it also catches an application a visitor
+// created and approved through the console.
+func healApprovedLeaseApplications(ctx context.Context, conn *substrate.Conn, adminKey string) {
+	js := conn.JetStream()
+	coreKV, err := js.KeyValue(ctx, bootstrap.CoreKVBucket)
+	must(err, "open core-kv")
+	allKeys, err := pkgverify.ListAllKeys(ctx, coreKV)
+	must(err, "list core-kv keys")
+
+	for key := range allKeys {
+		if !strings.HasPrefix(key, "vtx.leaseapp.") || !strings.HasSuffix(key, ".decision") {
+			continue
+		}
+		env, err := pkgverify.GetEnvelope(ctx, coreKV, key)
+		if err != nil {
+			must(err, "read "+key)
+		}
+		if del, _ := env["isDeleted"].(bool); del {
+			continue
+		}
+		data, _ := env["data"].(map[string]any)
+		if data == nil || data["value"] != "approved" {
+			continue
+		}
+
+		appKey := strings.TrimSuffix(key, ".decision")
+		applicantPrefix := "lnk." + strings.TrimPrefix(appKey, "vtx.") + ".applicationFor.identity."
+		var applicantKey string
+		for lk := range allKeys {
+			if strings.HasPrefix(lk, applicantPrefix) {
+				applicantKey = "vtx.identity." + strings.TrimPrefix(lk, applicantPrefix)
+				break
+			}
+		}
+		if applicantKey == "" || alive(ctx, conn, applicantKey+".ssn") {
+			continue
+		}
+
+		submitOp(ctx, conn, adminKey, "RecordIdentityPII", "identity",
+			map[string]any{"identityKey": applicantKey, "ssn": "123456789", "dob": "1990-01-01"},
+			&processor.ContextHint{Reads: []string{applicantKey}})
+		fmt.Println("==> healed:          " + applicantKey + " submitted PII, unblocking " + appKey + "'s bgcheck dispatch")
+	}
 }
 
 // retireLegacyTemplates soft-deletes the two backgroundCheck-classed
