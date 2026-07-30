@@ -1,6 +1,17 @@
 # Done log archive — lattice (older shipped items, newest first)
 
 
+- 2026-07-28 · `ea3f3852` · [Refractor] evaluation-consistency Fire 1 Inc 1 — edge memo + node/edge revisions, the footprint-validation primitives; item continues 🏗️
+- 2026-07-28 · `e8fee3b0` · [Processor] script live-read budget — kv.Read/kv.Links share a per-execution round-trip ceiling (charged at the clamped page limit, race-safe), sized + pinned against MergeIdentity's own worst case
+- 2026-07-28 · `76c9629e` · [cap-read] Fire 3 legacy-shape purge — one-shot tool tombstones any surviving legacy doc, IsReadable drops the dual-read union; item closes (Fires 1-3 all shipped)
+- 2026-07-28 · `3d950442` · [weaver,loftspace-ledger] DebitAccount derives amountCents from the clause's own .terms — never a Weaver-copied row value — closing the census row 5 money-provenance gap
+- 2026-07-28 · `101b01fd` · [cap-read] Fire 2 producer flips — every generated cap-read producer (edge-manifest's three) now emits per-anchor grant keys; validateGrantDomainName hardened
+- 2026-07-27 · `d8bdf7fe` · [identity-hygiene] MergeIdentity's dead link-collision check now fires — rewritten-key optionalReads declared, so a real collision migrates as a duplicate instead of rejecting the whole merge
+- 2026-07-27 · `8981a8b0` · [CI] lease-convergence drain budget — the 3 15s outliers join the suite's 30s convention; the chain converged microseconds late on CI, and the window ceiling the old comment claimed was measured from the wrong instant
+- 2026-07-27 · `e8d78278` · [Refractor] evaluation-scoped read memo — one cypher run observes one value per key, so a commit landing mid-evaluation can no longer split an anchor into two rows and drop the projection
+- 2026-07-26 · — · [Packages] Conformance-sweep row closes as overtaken — Standard Inc 1–6 (verticals) drained it: `s1Debt`/`s6Debt` empty, 29 pkgs, no exemptions; `readTemplateDebt` (2) has its own verticals row
+- 2026-07-26 · `6cacb337` · [CI] embedded-server ctor sweep — 97 `RunServer` fixtures routed through `natsfixture`, ctor gate now anchors both construction routes; net -480 lines
+- 2026-07-26 · `f9a86e45` · [CI] bare-connect sweep — 84 embedded dials routed through `natsfixture.Connect`, the 6 that must fail fast declared via `// nats-connect:`; linter hook-mode path bug fixed
 - 2026-07-26 · `7ac54ce1` · [CI] embedded-NATS handshake flake root-caused — 42 hand-rolled fixtures each inherited nats.go's single-shot 2s handshake deadline; `internal/natsfixture` owns it, lint blocks regressions, no assertion loosened
 - 2026-07-26 · `0a409757` · [bootstrap] kernel-seed reconcile — a seeded Core KV picks up kernel-DDL fixes instead of freezing at the binary that seeded it; verify-kernel now asserts content
 - 2026-07-25 · `1a1379f7` · [CI] Refractor sweep-count flake root-caused — the test read a per-pass aggregate mid-pass; 4-in-6 failing → 10/10 green, no assertion loosened

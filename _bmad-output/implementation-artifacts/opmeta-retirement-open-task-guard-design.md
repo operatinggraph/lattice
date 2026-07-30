@@ -1,7 +1,9 @@
 # Design — Op-meta retirement with open task referents (authorship-time disposition)
 
-**Status: 🗄️ shelved (Andrew, 2026-07-27 ratification) — low priority; revive on a zombie-task
-recurrence or the first package move that must preserve in-flight work.**
+**Status: ✅ shipped (Steward, 2026-07-30, `7381ace2`) — the surviving shape (§2) built as
+ratified.** The 2026-07-27 shelve's revive trigger (recurrence) fired live 2026-07-28 (12
+orphaned tasks from one package upgrade); §3's two deferred items (`RebindTaskOperation`,
+`MovedOps` execution) stay deferred — neither has a named consumer yet.
 
 > **Ratification outcome (Andrew, 2026-07-27).** The original draft proposed a three-fire build
 > centered on an authoritative step-8 commit-time guard. Andrew rejected that shape on three
@@ -24,7 +26,7 @@ recurrence or the first package move that must preserve in-flight work.**
 > and hides the prod refusal.
 
 **Backlog row:** `[Pkgmgr] An op-meta tombstone orphans the open tasks that reference it`
-(lattice.md, Component maintenance · ★★ → shelved). Live repro 2026-07-27
+(lattice.md, Done log · ★★ → shipped). Live repro 2026-07-27
 ([facet-discovery-restoration §6](facet-discovery-restoration-design.md)): a package move
 tombstoned `RecordIdentityPII`'s op-meta while an open task linked it `forOperation`; the task
 became undispatchable; operator `CancelTask` healed it.

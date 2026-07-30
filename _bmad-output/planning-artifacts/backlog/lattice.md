@@ -47,7 +47,6 @@ Open items only (shipped ones are in the Done log). Grouped by component tag.
 | Item | What it is | Imp | Size | State |
 |---|---|---|---|---|
 | **[Bootstrap] Reconcile creates + updates but never removes a retired kernel key** | A kernel entity the current binary no longer builds survives forever in an old bucket; needs an authoritative kernel-owned key enumeration separable from package-written `vtx.meta.*`. | ★ | S–M | 📋 ready · [why](../../implementation-artifacts/kernel-seed-reconcile-design.md) §8 |
-| **[Pkgmgr] An op-meta tombstone orphans the open tasks that reference it** | A package upgrade/uninstall that drops an op-meta strands open `forOperation` referents (grant projects null → undispatchable; inbox row loses its op). Designed shape: pkgmgr preflight + author-declared disposition (cancel now, MovedOps/rebind reserved) — no Processor scan. | ★★ | S–M | 🔭 flag-for-Andrew · revive trigger MET: recurrence observed live 2026-07-28, 12 orphaned open tasks · [design](../../implementation-artifacts/opmeta-retirement-open-task-guard-design.md) |
 | **[orchestration-base] A closed task's ephemeral grant stays exercisable until expiry** | `capabilityEphemeral`'s three branches filter only `expiresAt > $now` (lenses.go:284-308) and step-3 matches taskKey+opType+target+expiry — status never checked — so CancelTask/CompleteTask do not revoke the grant; a cancelled task's op stays submittable until `expiresAt`. Lens-side `status='open'` filter is the likely shape (myTasks already has it). | ★ | S | 🗄️ shelved (Andrew 2026-07-27: deprioritized; revive: a long-TTL task class or observed misuse) |
 | **[Refractor] A live claim's own consumer grant never projects into Capability KV** | `ClaimIdentity`'s R2 grant lands in Core KV (verified) but `cap.roles.<target>` never appears — no DLQ, absent past a completed sweep. Repro `make test-claim-ceremony` (2/3 live runs, demo box). | ★★★ | M | 🚧 Andrew driving directly (dedicated session) · [design §13.7](../../implementation-artifacts/facet-staff-worlds-design.md) |
 | **[Loom] Guardless-step recovery check-before-act probe** | On total `loom-state` loss + a re-triggered `StartLoomPattern`, a fresh instance replays guards from cursor 0 (re-runs an already-applied guarded step). | ★ | S–M | 🗄️ shelved-backup (Andrew: no new engine Core-KV reads) |
@@ -213,6 +212,7 @@ Real but low-value; do **not** spend design or build effort here unless Andrew g
 
 One line per shipped item (`date · SHA · [tag] title`). Oldest roll to `archive/` past ~25.
 
+- 2026-07-30 · `7381ace2` · [Pkgmgr] op-meta tombstone now refuses an undeclared drop and cancels open referents when RetireCancelsOpenTasks is declared [design](../../implementation-artifacts/opmeta-retirement-open-task-guard-design.md)
 - 2026-07-30 · `4e85358c` · [Lattice-CLI] `health summary`'s refractor/processor rows now escalate on issues[] — a live LensRegistryIncomplete sat "green" for 2.5h
 - 2026-07-30 · `e384f34a` · [Refractor] deactivated lens's frozen Health KV entry no longer pins rollup yellow — isLensDeleted probe drops the row
 - 2026-07-30 · `e8349678` · [Loom] per-instance redrive — resumes a FAILED instance at its recorded cursor, never restarts; unblocks Loupe Flows "act on it"
@@ -229,7 +229,6 @@ One line per shipped item (`date · SHA · [tag] title`). Oldest roll to `archiv
 - 2026-07-29 · `9d5e2348` · [Refractor] shared-keyspace composition (d) — tasks merged into one multi-walk lens, verified live [design §17](../../implementation-artifacts/refractor-shared-keyspace-arbitration-design.md)
 - 2026-07-29 · `4186479a` · [Refractor] shared-keyspace composition (c) — catalog merged into one multi-walk lens, classifier gap fixed, verified live [design §16](../../implementation-artifacts/refractor-shared-keyspace-arbitration-design.md)
 - 2026-07-29 · `bcf52101` · [Refractor] shared-keyspace composition (b) — sessions merged into one multi-walk lens, verified live [design §15](../../implementation-artifacts/refractor-shared-keyspace-arbitration-design.md)
-
 - 2026-07-29 · `69119818` · [Refractor] shared-keyspace composition (a) — N branches per multi-walk lens, merged by key [design §14](../../implementation-artifacts/refractor-shared-keyspace-arbitration-design.md)
 - 2026-07-29 · `c80bfa00` · [Refractor] evaluation-consistency Fire 1 Inc 2 — conjunct-unit classifier + selector-scoped footprint, fan-in stress test [design §14](../../implementation-artifacts/refractor-evaluation-consistency-design.md)
 - 2026-07-29 · `2177c60d` · [Bootstrap] the 5 aspect-type meta roots now carry `data.protected: true`, closing the commit-time guard gap [kernel-seed-reconcile-design](../../implementation-artifacts/kernel-seed-reconcile-design.md) §5 named
@@ -237,15 +236,4 @@ One line per shipped item (`date · SHA · [tag] title`). Oldest roll to `archiv
 - 2026-07-28 · `533a0b71` · [Edge] hydrationComplete boot-gate now matches the hydrate RPC's own target revision, not the first (possibly stale-replayed) marker seen
 - 2026-07-28 · `6c720482` · [chronicler,orchestration-base] eventStream ColumnMapping gains ClearOn — a Loom re-dispatch's patternStarted no longer carries the prior run's ended_at/failure_reason onto the new running row
 - 2026-07-28 · `c08c28be` · [Processor] sensitive predicate now covers instanceOf-chained classes; pkgmgr rejects Sensitive on a non-aspectType DDL, closing the link/event gap by construction
-- 2026-07-28 · `ea3f3852` · [Refractor] evaluation-consistency Fire 1 Inc 1 — edge memo + node/edge revisions, the footprint-validation primitives; item continues 🏗️
-- 2026-07-28 · `e8fee3b0` · [Processor] script live-read budget — kv.Read/kv.Links share a per-execution round-trip ceiling (charged at the clamped page limit, race-safe), sized + pinned against MergeIdentity's own worst case
-- 2026-07-28 · `76c9629e` · [cap-read] Fire 3 legacy-shape purge — one-shot tool tombstones any surviving legacy doc, IsReadable drops the dual-read union; item closes (Fires 1-3 all shipped)
-- 2026-07-28 · `3d950442` · [weaver,loftspace-ledger] DebitAccount derives amountCents from the clause's own .terms — never a Weaver-copied row value — closing the census row 5 money-provenance gap
-- 2026-07-28 · `101b01fd` · [cap-read] Fire 2 producer flips — every generated cap-read producer (edge-manifest's three) now emits per-anchor grant keys; validateGrantDomainName hardened
-- 2026-07-27 · `d8bdf7fe` · [identity-hygiene] MergeIdentity's dead link-collision check now fires — rewritten-key optionalReads declared, so a real collision migrates as a duplicate instead of rejecting the whole merge
-- 2026-07-27 · `8981a8b0` · [CI] lease-convergence drain budget — the 3 15s outliers join the suite's 30s convention; the chain converged microseconds late on CI, and the window ceiling the old comment claimed was measured from the wrong instant
-- 2026-07-27 · `e8d78278` · [Refractor] evaluation-scoped read memo — one cypher run observes one value per key, so a commit landing mid-evaluation can no longer split an anchor into two rows and drop the projection
-- 2026-07-26 · — · [Packages] Conformance-sweep row closes as overtaken — Standard Inc 1–6 (verticals) drained it: `s1Debt`/`s6Debt` empty, 29 pkgs, no exemptions; `readTemplateDebt` (2) has its own verticals row
-- 2026-07-26 · `6cacb337` · [CI] embedded-server ctor sweep — 97 `RunServer` fixtures routed through `natsfixture`, ctor gate now anchors both construction routes; net -480 lines
-- 2026-07-26 · `f9a86e45` · [CI] bare-connect sweep — 84 embedded dials routed through `natsfixture.Connect`, the 6 that must fail fast declared via `// nats-connect:`; linter hook-mode path bug fixed
-- *(older entries rolled to [archive/lattice-done.md](archive/lattice-done.md); newest rolled entry `7ac54ce1`)*
+- *(older entries rolled to [archive/lattice-done.md](archive/lattice-done.md); newest rolled entry `ea3f3852`)*
