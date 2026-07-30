@@ -322,8 +322,7 @@ func (rl *reloader) update(_, newLens *lens.Rule, kind lens.UpdateKind) {
 			// rejects every write, forever.
 			keyCols, threaded := hotReloadKeyColumns(newLens)
 			if threaded {
-				cr.KeyColumns = keyCols
-				if err := cr.ValidateKeyColumns(); err != nil {
+				if err := projection.ThreadKeyColumns(cr, newLens.CompiledBranches, keyCols); err != nil {
 					rl.refuse(entry, newLens.ID, "full engine key-column validation (MATCH update)", "err", err)
 					return
 				}

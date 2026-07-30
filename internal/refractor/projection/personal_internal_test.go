@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"log/slog"
+	"slices"
 	"testing"
 	"time"
 
@@ -161,6 +162,70 @@ func TestInstallPersonalLens_RequireReadGate_NoCapKV_Refuses(t *testing.T) {
 	ok := InstallPersonalLens(p, r, nil, nil, nil, nil /*capKV*/, true /*requireReadGate*/, discardTestLogger())
 	if ok {
 		t.Fatalf("requireReadGate=true with a nil capKV must refuse installation (a personal lens must never run open in production)")
+	}
+}
+
+// TestInstallPersonalLens_MultiBranch_ThreadsKeyColumnsOnAllBranches
+// reproduces the live 2026-07-30 edgeCatalog/edgeTasks/edgeEntitySessions
+// bug: a multi-branch Personal lens (refractor-shared-keyspace-arbitration-
+// design.md §13.2, one *full.CompiledRule per pkgmgr Walks entry) must have
+// its business KeyColumns threaded onto EVERY branch, not just branch 0 —
+// else a branch beyond 0 falls back to keying by its first RETURN alias
+// alone and drops every other declared business key from the keys map the
+// adapter receives.
+func TestInstallPersonalLens_MultiBranch_ThreadsKeyColumnsOnAllBranches(t *testing.T) {
+	r := personalTestRule(t, personalMatch, lens.KeyField{adapter.PersonalActorKeyField, "anchor", "kind"})
+
+	eng := full.New()
+	branch2, err := eng.Parse(`
+MATCH (identity:identity {key: $actorKey})<-[:ownedBy]-(task:task)
+RETURN task.key AS anchor, "otherKind" AS kind
+`)
+	if err != nil {
+		t.Fatalf("parse branch2: %v", err)
+	}
+	r.CompiledBranches = []ruleengine.CompiledRule{r.CompiledRule, branch2}
+
+	p := newPersonalPipeline(t)
+	if ok := InstallPersonalLens(p, r, nil, nil, nil, nil, false, discardTestLogger()); !ok {
+		t.Fatalf("a well-formed multi-branch personal lens must install")
+	}
+
+	want := []string{"anchor", "kind"}
+	for i, b := range r.CompiledBranches {
+		cr, ok := b.(*full.CompiledRule)
+		if !ok {
+			t.Fatalf("branch %d: not a *full.CompiledRule", i)
+		}
+		if !slices.Equal(cr.KeyColumns, want) {
+			t.Fatalf("branch %d KeyColumns = %v, want %v (an unthreaded branch reproduces the live bug: its rows key by only the first RETURN alias, and the adapter rejects every write missing the other declared business keys)", i, cr.KeyColumns, want)
+		}
+	}
+}
+
+// TestInstallPersonalLens_MultiBranch_KeyColumnNotReturnAliasInSecondBranch_Refuses
+// is the failure-mode mirror: a second branch whose RETURN clause lacks one
+// of the declared business key columns must fail installation, not silently
+// install with that branch's rows missing the key. Before the fix this
+// passed incorrectly — ValidateKeyColumns no-ops on an unthreaded (nil)
+// KeyColumns, so a branch that could never produce a business key went
+// unvalidated.
+func TestInstallPersonalLens_MultiBranch_KeyColumnNotReturnAliasInSecondBranch_Refuses(t *testing.T) {
+	r := personalTestRule(t, personalMatch, lens.KeyField{adapter.PersonalActorKeyField, "anchor", "kind"})
+
+	eng := full.New()
+	branch2, err := eng.Parse(`
+MATCH (identity:identity {key: $actorKey})<-[:ownedBy]-(task:task)
+RETURN task.key AS anchor
+`)
+	if err != nil {
+		t.Fatalf("parse branch2: %v", err)
+	}
+	r.CompiledBranches = []ruleengine.CompiledRule{r.CompiledRule, branch2}
+
+	p := newPersonalPipeline(t)
+	if ok := InstallPersonalLens(p, r, nil, nil, nil, nil, false, discardTestLogger()); ok {
+		t.Fatalf("a second branch missing a declared business key column's RETURN alias must refuse installation")
 	}
 }
 

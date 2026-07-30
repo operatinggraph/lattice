@@ -10,6 +10,7 @@ import (
 	"github.com/operatinggraph/lattice/internal/refractor/lens"
 	"github.com/operatinggraph/lattice/internal/refractor/personalinterest"
 	"github.com/operatinggraph/lattice/internal/refractor/pipeline"
+	"github.com/operatinggraph/lattice/internal/refractor/ruleengine"
 	"github.com/operatinggraph/lattice/internal/refractor/ruleengine/full"
 	"github.com/operatinggraph/lattice/internal/substrate"
 )
@@ -51,6 +52,36 @@ func PersonalBusinessKeys(r *lens.Rule) []string {
 	return businessKeys
 }
 
+// ThreadKeyColumns sets keyCols as cr's projection output key and, for a
+// multi-branch Personal lens, every branch in branches — not just cr.
+// refractor-shared-keyspace-arbitration-design.md §13.2 compiles each
+// pkgmgr Walks entry as an independently-allocated *full.CompiledRule;
+// branches[0] shares cr's pointer (setting it again is a harmless no-op),
+// but branches 1..N are distinct objects. Threading KeyColumns onto cr alone
+// leaves those distinct objects nil, which drops their executor to the
+// first-RETURN-item fallback key — every row a non-zero branch produces then
+// carries a keys map missing whichever business key isn't that first alias,
+// and the adapter rejects the write with "key field %q absent from keys map"
+// (live 2026-07-30: edgeCatalog/edgeTasks/edgeEntitySessions's role-walk
+// branch dropping "ns"). Returns the first validation failure, if any.
+func ThreadKeyColumns(cr *full.CompiledRule, branches []ruleengine.CompiledRule, keyCols []string) error {
+	cr.KeyColumns = keyCols
+	if err := cr.ValidateKeyColumns(); err != nil {
+		return err
+	}
+	for _, b := range branches {
+		bcr, ok := b.(*full.CompiledRule)
+		if !ok {
+			continue
+		}
+		bcr.KeyColumns = keyCols
+		if err := bcr.ValidateKeyColumns(); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // InstallPersonalLens wires the Fire 2 personal pipeline
 // (personal-secure-lens-design.md §3.3): the existing ActorEnumerator
 // (actorType "identity") drives per-recipient re-execution of the lens
@@ -90,8 +121,7 @@ func InstallPersonalLens(p *pipeline.Pipeline, r *lens.Rule, adjKV, coreKV, inte
 	}
 
 	businessKeys := PersonalBusinessKeys(r)
-	cr.KeyColumns = businessKeys
-	if err := cr.ValidateKeyColumns(); err != nil {
+	if err := ThreadKeyColumns(cr, r.CompiledBranches, businessKeys); err != nil {
 		logger.Error("personal lens key-column validation", "lensId", r.ID, "err", err)
 		return false
 	}
