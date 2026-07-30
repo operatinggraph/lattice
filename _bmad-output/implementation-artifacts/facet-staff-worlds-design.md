@@ -1007,3 +1007,63 @@ real claim there, and read back what actually happens to the write (does it fan 
 but the KV write itself fail/get overwritten? does it never even reach the pipeline?) — the local harnesses
 prove the *mechanism* is sound, so the gap is now in something about the *live deployment's* runtime
 conditions, which only the live deployment can surface.
+
+## 13.6 BREAKTHROUGH — reproduced live on the demo box: the real two-actor ceremony drops the TARGET's grant while the ACTOR's own grant, moments apart, projects fine (Winston, 2026-07-30)
+
+**A live probe using the raw `lattice identity claim` CLI first surfaced a DIFFERENT, real bug** (fixed
+separately, see the CLI's own commit `be2172fe`): the CLI never declared `ContextHint.Reads`, so every claim
+through it failed generically as `ClaimKeyInvalid` regardless of validity — a false trail that cost most of
+this fire. Once fixed and retried by hand (a single staff-minted identity + a single freshly-provisioned
+consumer actor, each op submitted as a separate CLI invocation seconds apart), the claim's own `holdsRole`
+grant **projected cleanly** — a sixth clean harness, seemingly closing candidate (1) too.
+
+**It is not closed.** The board's own named repro, `make test-claim-ceremony`
+(`scripts/verify-claim-ceremony.go`), was never run — it requires the real Gateway + `LATTICE_AUTH_MODE=
+capability`, unavailable to a bare `go test`. Cross-compiled it for `linux/amd64`, deployed it to the demo box
+(`/opt/lattice` already runs `bin/gateway` under `GATEWAY_DEV_MODE=true` with `LATTICE_AUTH_MODE=capability`
+on the Processor — every precondition already live), and ran it against `NATS_URL=nats://localhost:4222`,
+`GATEWAY_URL=http://127.0.0.1:8080`. Unlike every prior harness (including the hand-run CLI probe above),
+this ceremony does the thing production's `cmd/facet/claim.go` actually does: a **brand-new device D's own
+pre-flight `ProvisionConsumerIdentity`, then D's `ClaimIdentity` targeting a DIFFERENT identity U, submitted
+as two sequential Processor ops inside ONE Gateway HTTP request** — back-to-back, not seconds apart.
+
+**Result, 2 of 3 runs, identical failure shape:**
+
+```
+OK   device ClaimIdentity (first touch, self-target): accepted (HTTP 200)
+OK   U: state = "claimed"
+OK   U.claimKey: tombstoned
+FAIL InitiateCredentialLink never appeared in cap.roles.identity.<U> within 5s
+OK   D: InitiateCredentialLink projected into cap.roles.identity.<D> (rev=429782)
+OK   device D was auto-provisioned by the pre-flight and independently holds consumer
+FAIL second device re-claiming an already-claimed identity: want HTTP 400, got HTTP 403
+```
+
+**U's `cap.roles` grant — the claimed identity's OWN post-claim role, the thing this whole item is about —
+never appears. D's `cap.roles` grant, written moments earlier/later by the SAME request's pre-flight op,
+projects fine, reliably.** The 3rd run failed even earlier (D's own `ClaimIdentity` submission never cleared
+the bounded `isTransientAuthLag` retry — a more severe manifestation of the same async-projection-lag family,
+not a different mechanism), consistent with live conditions varying run to run rather than a fixed threshold.
+
+**What this narrows the gap to.** Every prior harness — including this fire's own hand-run CLI probe — issued
+the pre-flight and the claim as **separate, independently-timed submissions** (a full request-reply round
+trip apart, at minimum). The ceremony script is the first to fire them **back-to-back within one Gateway
+handler**, and it is the first to reproduce the defect. The mechanism is very likely specific to that
+adjacency: **two `holdsRole` writes to two DIFFERENT identities (D and U), submitted in immediate succession
+by the same request**, racing something shared between their two `capabilityRoles` fan-out reprojections —
+the adjacency bootstrapper, an actor-enumeration in-flight dedup, or a consumer-redelivery ordering issue
+that a single, isolated claim (this fire's five prior harnesses, and the sixth hand-run CLI probe) can never
+exercise, because none of them ever wrote two DIFFERENT actors' `holdsRole` grants within milliseconds of
+each other.
+
+**Checkpoint — next fire (design, not a quick build):** construct a LOCAL harness that reproduces this exact
+shape — two live, CDC-driven `capabilityRoles` reprojections for two DIFFERENT identities, triggered by two
+`holdsRole` writes submitted back-to-back (no wall-clock gap, mirroring the Gateway's own two-sequential-op
+handler) — and confirm it drops one of the two projections the way the live ceremony does. If it reproduces
+locally, the fix is a Refractor-side race in fan-out/reprojection under near-simultaneous multi-actor writes
+(candidate: the adjacency bootstrapper or actor-enumeration coalescing/dropping the second in-flight
+enumeration). If it does NOT reproduce locally even with zero wall-clock gap, the gap is Gateway-specific
+(candidate: something about how `cmd/facet/claim.go`'s two-op HTTP handler sequences the two `PublishOp`
+calls, or a Gateway-side response race) — instrument the Gateway's op-dispatch path directly next, not
+Refractor again. Either way, this is genuinely new investigation scope, not a continuation of the local-
+harness sweep §13.2–§13.5 already closed out.
