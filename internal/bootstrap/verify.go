@@ -251,6 +251,24 @@ func VerifyKernel(ctx context.Context, conn *substrate.Conn) []string {
 		}
 	}
 
+	// Kernel freshness. Every check above asserts that a key is present and
+	// well-formed, which a bucket seeded by an older binary satisfies while
+	// running superseded DDL scripts. This compares stored content against
+	// what this binary builds, so `make up`'s reuse short-circuit (which
+	// calls this function) stops treating a stale kernel as fresh.
+	missing, stale, err := KernelDrift(ctx, coreKV)
+	switch {
+	case err != nil:
+		failures = append(failures, fmt.Sprintf("CANNOT compare kernel content: %v", err))
+	default:
+		for _, k := range missing {
+			failures = append(failures, fmt.Sprintf("KERNEL ENTRY MISSING: %s (run `make reseed-kernel`)", k))
+		}
+		for _, k := range stale {
+			failures = append(failures, fmt.Sprintf("KERNEL ENTRY STALE: %s holds a body this binary no longer builds (run `make reseed-kernel`)", k))
+		}
+	}
+
 	return failures
 }
 

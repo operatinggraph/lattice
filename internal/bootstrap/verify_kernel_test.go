@@ -148,6 +148,28 @@ func TestVerifyKernel_DetectsAspectClassMismatch(t *testing.T) {
 	require.Condition(t, containsSubstring(failures, "CLASS MISMATCH for aspect "+aspectKey))
 }
 
+func TestVerifyKernel_DetectsStaleContent(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	conn := seededKernelConn(ctx, t)
+
+	// A stale script is present with a valid envelope — every presence/shape
+	// assertion above this passes it clean. Only content comparison against
+	// what this binary builds can see it, which is the gap this fire closes:
+	// `make up`'s reuse short-circuit calls VerifyKernel and must stop
+	// treating a kernel like this as fresh.
+	key := substrate.AspectKey(bootstrap.UpgradePackageDDLKey, "script")
+	staleVal, err := bootstrap.MakeAspectEnvelope(key, bootstrap.UpgradePackageDDLKey, "script", "script",
+		map[string]any{"source": "def execute(state, op):\n    fail(\"an older binary\")\n"})
+	require.NoError(t, err)
+	_, err = conn.KVPut(ctx, bootstrap.CoreKVBucket, key, staleVal)
+	require.NoError(t, err)
+
+	failures := bootstrap.VerifyKernel(ctx, conn)
+	require.NotEmpty(t, failures)
+	require.Condition(t, containsSubstring(failures, "KERNEL ENTRY STALE: "+key))
+}
+
 func TestVerifyKernel_DetectsMissingHealthReadinessSignal(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
