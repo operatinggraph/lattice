@@ -2,7 +2,7 @@ package controlauthz
 
 import "github.com/operatinggraph/lattice/internal/pkgmgr"
 
-// Permissions returns the 18 ctrl.<component>.<verb> platform permissions,
+// Permissions returns the 19 ctrl.<component>.<verb> platform permissions,
 // each granting `scope: any` (v1 — the only working platform scope,
 // control-plane-capability-authz-design.md §2(a)) to the control-operator
 // role.
@@ -10,7 +10,7 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 // Grant matrix:
 //
 //	ctrl.weaver.{read,disable,enable,revoke,resetConfidence}         → control-operator
-//	ctrl.loom.{read,pause,resume}                                     → control-operator
+//	ctrl.loom.{read,pause,resume,redrive}                             → control-operator
 //	ctrl.refractor.{read,rebuild,pause,resume,delete,reproject,requesthydration} → control-operator
 //	ctrl.refractor.{register,deregister,hydrate,sessionkey,syncgap}   → control-operator, consumer, frontOfHouse, backOfHouse, provider
 //
@@ -36,7 +36,7 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 func Permissions() []pkgmgr.PermissionSpec {
 	perms := []pkgmgr.PermissionSpec{}
 	perms = append(perms, componentPermissions("weaver", []string{"read", "disable", "enable", "revoke", "resetConfidence"})...)
-	perms = append(perms, componentPermissions("loom", []string{"read", "pause", "resume"})...)
+	perms = append(perms, componentPermissions("loom", []string{"read", "pause", "resume", "redrive"})...)
 	perms = append(perms, componentPermissions("refractor", []string{"read", "rebuild", "pause", "resume", "delete", "reproject", "requesthydration"})...)
 	perms = append(perms, personalLensPermissions("register", "deregister", "hydrate", "sessionkey", "syncgap")...)
 	return perms

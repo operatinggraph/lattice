@@ -1,5 +1,5 @@
 name: control-authz
-version: 0.7.3
+version: 0.7.4
 description: |
   Grants ctrl.<component>.<verb> control-plane permissions (Weaver/Loom/Refractor)
   to a new control-operator role, declared in the package definition and created
@@ -56,6 +56,9 @@ declares:
       scope: any
       grantsTo: [control-operator]
     - operationType: ctrl.loom.resume
+      scope: any
+      grantsTo: [control-operator]
+    - operationType: ctrl.loom.redrive
       scope: any
       grantsTo: [control-operator]
     - operationType: ctrl.refractor.read

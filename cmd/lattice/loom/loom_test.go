@@ -55,6 +55,10 @@ func (f *fakeEngine) ResumeConsumer(_ context.Context, name string) error {
 	return f.errOn["resume:"+name]
 }
 
+func (f *fakeEngine) RedriveInstance(_ context.Context, instanceID string) error {
+	return f.errOn["redrive:"+instanceID]
+}
+
 // startLoomControlTest starts an embedded NATS server with a loom-control
 // responder backed by eng, and returns its NATS URL.
 func startLoomControlTest(t *testing.T, eng *fakeEngine) string {
@@ -261,6 +265,36 @@ func TestLoomResume_HappyPath_Table(t *testing.T) {
 	out, err := runCmd(t, cmd, []string{"resume", "loom-widget"})
 	require.NoError(t, err)
 	assert.Contains(t, out, `consumer "loom-widget" resumed`)
+}
+
+func TestLoomRedrive_HappyPath_Table(t *testing.T) {
+	eng := newFakeEngine()
+	url := startLoomControlTest(t, eng)
+
+	natsURL := url
+	outputFmt := ""
+	actorKey := ""
+	cmd := NewCommand(&natsURL, &outputFmt, &actorKey)
+
+	out, err := runCmd(t, cmd, []string{"redrive", "inst1"})
+	require.NoError(t, err)
+	assert.Contains(t, out, `instance "inst1" redriven`)
+}
+
+func TestLoomRedrive_NotFailed_JSON(t *testing.T) {
+	eng := newFakeEngine()
+	eng.errOn["redrive:inst1"] = errors.New(`loom: instance is not in a failed state: "inst1" (status=running)`)
+	url := startLoomControlTest(t, eng)
+
+	natsURL := url
+	outputFmt := "json"
+	actorKey := ""
+	cmd := NewCommand(&natsURL, &outputFmt, &actorKey)
+
+	out, err := runCmd(t, cmd, []string{"redrive", "inst1"})
+	require.Error(t, err)
+	assert.Contains(t, out, "not in a failed state")
+	assert.Contains(t, out, `"ok":false`)
 }
 
 func TestLoomPause_NotManaged_JSON(t *testing.T) {

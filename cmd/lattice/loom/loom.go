@@ -1,6 +1,7 @@
 // Package loom implements the lattice loom command group: operator
-// list/consumers/inspect/pause/resume controls for the Loom orchestration
-// engine, via the lattice.ctrl.loom.* NATS Services control plane.
+// list/consumers/inspect/pause/resume/redrive controls for the Loom
+// orchestration engine, via the lattice.ctrl.loom.* NATS Services control
+// plane.
 package loom
 
 import (
@@ -39,13 +40,14 @@ func validateName(kind, name string) error {
 func NewCommand(natsURL, outputFmt, defaultActor *string) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "loom",
-		Short: "Operate the Loom engine (list/consumers/inspect/pause/resume)",
+		Short: "Operate the Loom engine (list/consumers/inspect/pause/resume/redrive)",
 	}
 	cmd.AddCommand(newListCommand(natsURL, outputFmt, defaultActor))
 	cmd.AddCommand(newConsumersCommand(natsURL, outputFmt, defaultActor))
 	cmd.AddCommand(newInspectCommand(natsURL, outputFmt, defaultActor))
 	cmd.AddCommand(newPauseCommand(natsURL, outputFmt, defaultActor))
 	cmd.AddCommand(newResumeCommand(natsURL, outputFmt, defaultActor))
+	cmd.AddCommand(newRedriveCommand(natsURL, outputFmt, defaultActor))
 	return cmd
 }
 
@@ -315,6 +317,48 @@ func newResumeCommand(natsURL, outputFmt, defaultActor *string) *cobra.Command {
 				return output.PrintJSON(resp.Resume)
 			}
 			fmt.Printf("consumer %q resumed\n", name)
+			return nil
+		},
+	}
+	addActorFlag(cmd, &actor, &actorToken)
+	return cmd
+}
+
+func newRedriveCommand(natsURL, outputFmt, defaultActor *string) *cobra.Command {
+	var actor string
+	var actorToken string
+	cmd := &cobra.Command{
+		Use:   "redrive <instanceId>",
+		Short: "Resume a FAILED instance at its recorded cursor (never restarts it)",
+		Long: "Resume a FAILED instance at its recorded cursor — the only step it never completed. " +
+			"This never restarts the instance under a fresh id: doing so would re-execute every step " +
+			"the failed run already committed. Refuses (typed error) if the instance is not failed, its " +
+			"pattern is no longer loaded, or its cursor no longer indexes a step in the current pattern " +
+			"definition (the pattern was edited since the failure).",
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if actor == "" {
+				actor = *defaultActor
+			}
+			instanceID := args[0]
+			if err := validateName("instanceId", instanceID); err != nil {
+				if *outputFmt == "json" {
+					return output.PrintJSONError("ControlError", err.Error())
+				}
+				return err
+			}
+			resp, err := request(*natsURL, control.NameSubject(instanceID, "redrive"), resolveActorHeader(actor, actorToken))
+			if err != nil {
+				if *outputFmt == "json" {
+					return output.PrintJSONError("ControlError", err.Error())
+				}
+				return err
+			}
+
+			if *outputFmt == "json" {
+				return output.PrintJSON(resp.Redrive)
+			}
+			fmt.Printf("instance %q redriven\n", instanceID)
 			return nil
 		},
 	}

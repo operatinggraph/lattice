@@ -52,6 +52,22 @@ type InstanceDetail struct {
 // command that did nothing.
 var errConsumerNotManaged = errors.New("consumer not managed")
 
+// errInstanceNotFailed reports that a Redrive target is not in the failed
+// state — the only state Redrive accepts (running is already progressing;
+// complete has nothing to resume).
+var errInstanceNotFailed = errors.New("instance is not in a failed state")
+
+// errPatternNotLoaded reports that a Redrive target's pattern is not (or no
+// longer) registered in the live source — nothing to re-pin against.
+var errPatternNotLoaded = errors.New("pattern not loaded")
+
+// errCursorOutOfRange reports that a Redrive target's cursor no longer indexes
+// a step in the CURRENT pattern definition — the pattern was edited (steps
+// added/removed) since this instance failed, so resuming at the recorded
+// cursor would misindex. Redrive never falls back to guessing a new cursor;
+// the operator must resolve the pattern drift first.
+var errCursorOutOfRange = errors.New("instance cursor is out of range for the current pattern definition")
+
 // errConsumerPauseForbidden reports that a Pause target is a dispatch/crash-safety
 // critical consumer the control surface refuses to pause. Pausing the outbox relay
 // halts ALL op dispatch (in-flight steps stall; deadlines re-arm forever); pausing
@@ -259,5 +275,83 @@ func (e *Engine) ResumeConsumer(ctx context.Context, name string) error {
 		return fmt.Errorf("loom: %w: %q", errConsumerNotManaged, name)
 	}
 	e.logger.Info("loom: consumer resumed", "consumer", name)
+	return nil
+}
+
+// RedriveInstance manually resumes a FAILED instance AT ITS RECORDED CURSOR —
+// never restarts it under a fresh id. Restarting would re-run every step from
+// 0, re-executing side effects the failed run already committed; resuming at
+// cursor re-submits (or re-evaluates the guard of) only the step that never
+// completed, exactly the recovery `resumeStepZero` already performs for a
+// crash before step 0 — this generalizes that same mechanism to any cursor
+// and to an operator-triggered redrive rather than a redelivered trigger.
+//
+// Preconditions, each a distinct typed error so the operator sees why a
+// redrive was refused rather than a generic failure:
+//   - the instance must exist (not-found error);
+//   - status must be exactly StatusFailed (errInstanceNotFailed) — running is
+//     already progressing, complete has nothing to resume;
+//   - the instance's pattern must still be loaded in the live source
+//     (errPatternNotLoaded) — the FAILED instance's own pin was deleted in the
+//     terminal batch (§10.3), so redrive re-pins from the CURRENT live
+//     definition, not the one it originally ran against;
+//   - the recorded cursor must index a real step in that CURRENT definition
+//     (errCursorOutOfRange) — if the pattern was edited (steps
+//     added/removed/reordered) since the failure, resuming at the old cursor
+//     could run the wrong step; redrive refuses rather than guess.
+//
+// On success: state.redrive re-pins the pattern and flips status back to
+// running in one AtomicBatch (the pin's CreateOnly is the race guard for two
+// concurrent redrives), domain consumers are reconciled for the pin's
+// completion domain, and the step at the cursor is evaluated exactly like a
+// fresh trigger's step 0 — guard-skip straight to completion if every
+// remaining guard is now false, otherwise re-submit it.
+func (e *Engine) RedriveInstance(ctx context.Context, instanceID string) error {
+	inst, err := e.state.getInstance(ctx, instanceID)
+	if err != nil {
+		return err
+	}
+	if inst == nil {
+		return fmt.Errorf("loom: instance %q not found", instanceID)
+	}
+	if inst.Status != StatusFailed {
+		return fmt.Errorf("loom: %w: %q (status=%s)", errInstanceNotFailed, instanceID, inst.Status)
+	}
+
+	patternID := patternIDFromRef(inst.PatternRef)
+	pattern, ok := e.source.get(patternID)
+	if !ok {
+		return fmt.Errorf("loom: %w: %q (pattern %q)", errPatternNotLoaded, instanceID, inst.PatternRef)
+	}
+	if inst.Cursor < 0 || inst.Cursor >= len(pattern.Steps) {
+		return fmt.Errorf("loom: %w: instance %q cursor %d, pattern %q has %d steps",
+			errCursorOutOfRange, instanceID, inst.Cursor, inst.PatternRef, len(pattern.Steps))
+	}
+
+	inst.Status = StatusRunning
+	// PendingToken is already "" — fail() cleared it on the terminal transition.
+	if err := e.state.redrive(ctx, inst, pattern); err != nil {
+		return err
+	}
+	e.logger.Info("loom: instance redriven", "instanceId", instanceID, "cursor", inst.Cursor, "patternId", pattern.PatternID)
+	e.ensureDomainConsumers(pattern)
+
+	runCursor, completed, err := e.advanceToRunnableStep(ctx, inst, pattern)
+	if err != nil {
+		return fmt.Errorf("loom: redrive %q: guard evaluation: %w", instanceID, err)
+	}
+	inst.Cursor = runCursor
+	if completed {
+		if err := e.complete(ctx, inst, pattern, ""); err != nil {
+			return fmt.Errorf("loom: redrive %q: complete: %w", instanceID, err)
+		}
+		e.logger.Info("loom instance completed on redrive (all remaining guards skipped)",
+			"instanceId", instanceID, "patternId", pattern.PatternID)
+		return nil
+	}
+	if err := e.submitStep(ctx, inst, pattern, ""); err != nil {
+		return fmt.Errorf("loom: redrive %q: submit step: %w", instanceID, err)
+	}
+	e.logger.Info("loom instance resumed on redrive", "instanceId", instanceID, "cursor", inst.Cursor, "patternId", pattern.PatternID)
 	return nil
 }

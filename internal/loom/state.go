@@ -420,6 +420,34 @@ func (s *stateStore) transition(ctx context.Context, inst *Instance, newToken, o
 	return nil
 }
 
+// redrive re-pins pattern and flips inst.Status back to running in one
+// AtomicBatch, for a manual operator redrive of a failed instance
+// (Engine.RedriveInstance). The pin — deleted in the terminal batch that
+// recorded the failure — is recreated CreateOnly: that doubles as the race
+// guard for two concurrent redrives of the same instance (the loser's batch is
+// rejected here), mirroring how createInstance's CreateOnly pin/instance pair
+// guards concurrent triggers. The instance PUT itself carries no
+// expectedRevision check, same as transition() — the pin's CreateOnly is the
+// sole concurrency guard, consistent with the rest of this store.
+func (s *stateStore) redrive(ctx context.Context, inst *Instance, pattern *Pattern) error {
+	body, err := json.Marshal(inst)
+	if err != nil {
+		return fmt.Errorf("loom: marshal instance %q: %w", inst.InstanceID, err)
+	}
+	pinBody, err := json.Marshal(pattern)
+	if err != nil {
+		return fmt.Errorf("loom: marshal pattern pin %q: %w", inst.InstanceID, err)
+	}
+	ops := []substrate.BatchOp{
+		{Bucket: s.bucket, Key: instanceKey(inst.InstanceID), Value: body},
+		{Bucket: s.bucket, Key: patternPinKey(inst.InstanceID), Value: pinBody, CreateOnly: true},
+	}
+	if _, err := s.conn.AtomicBatch(ctx, ops); err != nil {
+		return fmt.Errorf("loom: redrive instance %q: %w", inst.InstanceID, err)
+	}
+	return nil
+}
+
 // outboxExists reports whether the command-outbox record for token is still
 // present (i.e. the relay has not yet published + deleted it). Used by the
 // step-deadline-exceeded probe to distinguish "not yet relayed" from "rejected"

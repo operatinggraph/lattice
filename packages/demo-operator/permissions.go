@@ -16,7 +16,7 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 // is exactly the inspect-only control surface: a single ctrl.<component>.read
 // grant authorizes every non-mutating op that component exposes (weaver
 // `list`; loom `list`/`consumers`/`inspect`; refractor `health`/`validate`),
-// while every mutating verb (disable/enable/revoke, pause/resume,
+// while every mutating verb (disable/enable/revoke, pause/resume/redrive,
 // rebuild/delete/register/deregister/hydrate/sessionkey/syncgap/
 // requesthydration) is granted to no one here and is therefore denied.
 //
