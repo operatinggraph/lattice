@@ -46,7 +46,6 @@ Open items only (shipped ones are in the Done log). Grouped by component tag.
 
 | Item | What it is | Imp | Size | State |
 |---|---|---|---|---|
-| **[Bootstrap] `bootstrap verify` reports a stale kernel as fresh** | It asserts presence + envelope shape, never content, so `make up`'s reuse short-circuit prints "kernel already up" over DDL scripts this binary no longer builds. `KernelDrift` now makes the assertion cheap; wiring it in makes `make up` self-healing. | ★★ | S | 📋 ready · [why](../../implementation-artifacts/kernel-seed-reconcile-design.md) §8 |
 | **[Bootstrap] Reconcile creates + updates but never removes a retired kernel key** | A kernel entity the current binary no longer builds survives forever in an old bucket; needs an authoritative kernel-owned key enumeration separable from package-written `vtx.meta.*`. | ★ | S–M | 📋 ready · [why](../../implementation-artifacts/kernel-seed-reconcile-design.md) §8 |
 | **[Refractor] Cold bring-up replay debt reads as hours of lens lag** | After a fresh-world bring-up every lens + capability reported `consumerLag` ≈ activation-to-head distance (~2000–2500) while every read model was verifiably complete (seeded rows present; manifests, worklists, authz all live). The measured consumer drains ~50 msg/min, so the hosted Loupe wears YELLOW "80 degraded" for hours after each nightly reset — a false staleness alarm. Ground which consumer the gauge reads vs the path that projected. | ★★ | M | 📋 ready · demo-box evidence in the filing commit |
 | **[Pkgmgr] An op-meta tombstone orphans the open tasks that reference it** | A package upgrade/uninstall that drops an op-meta strands open `forOperation` referents (grant projects null → undispatchable; inbox row loses its op). Designed shape: pkgmgr preflight + author-declared disposition (cancel now, MovedOps/rebind reserved) — no Processor scan. | ★★ | S–M | 🔭 flag-for-Andrew · revive trigger MET: recurrence observed live 2026-07-28, 12 orphaned open tasks · [design](../../implementation-artifacts/opmeta-retirement-open-task-guard-design.md) |
@@ -221,6 +220,7 @@ Real but low-value; do **not** spend design or build effort here unless Andrew g
 
 One line per shipped item (`date · SHA · [tag] title`). Oldest roll to `archive/` past ~25.
 
+- 2026-07-30 · `7628070e` · [Bootstrap] VerifyKernel now compares kernel content, not just presence/shape — closes the gap where `bootstrap verify` (and the `up` target's reuse short-circuit) passed a stale kernel clean
 - 2026-07-30 · `60778733` · [Refractor] a Personal lens's KeyColumns now threads onto every compiled branch, not just branch 0 — fixes the live `key field "ns" absent from keys map` write failures (edgeCatalog/edgeTasks/edgeEntitySessions)
 - 2026-07-30 · `a43f9fcf` · [Refractor] a walk-owned column's own multi-row fan-out (multi-hat actor, 2+ roles reaching one op) now resolves deterministically per owner branch instead of refusing the merge
 - 2026-07-30 · `de806ee4` · [Refractor] an accepted MATCH hot-reload now triggers Pipeline.Rebuild, reprojecting the existing corpus instead of only future events
@@ -246,14 +246,4 @@ One line per shipped item (`date · SHA · [tag] title`). Oldest roll to `archiv
 - 2026-07-26 · — · [Packages] Conformance-sweep row closes as overtaken — Standard Inc 1–6 (verticals) drained it: `s1Debt`/`s6Debt` empty, 29 pkgs, no exemptions; `readTemplateDebt` (2) has its own verticals row
 - 2026-07-26 · `6cacb337` · [CI] embedded-server ctor sweep — 97 `RunServer` fixtures routed through `natsfixture`, ctor gate now anchors both construction routes; net -480 lines
 - 2026-07-26 · `f9a86e45` · [CI] bare-connect sweep — 84 embedded dials routed through `natsfixture.Connect`, the 6 that must fail fast declared via `// nats-connect:`; linter hook-mode path bug fixed
-- 2026-07-26 · `7ac54ce1` · [CI] embedded-NATS handshake flake root-caused — 42 hand-rolled fixtures each inherited nats.go's single-shot 2s handshake deadline; `internal/natsfixture` owns it, lint blocks regressions, no assertion loosened
-- 2026-07-26 · `0a409757` · [bootstrap] kernel-seed reconcile — a seeded Core KV picks up kernel-DDL fixes instead of freezing at the binary that seeded it; verify-kernel now asserts content
-- 2026-07-25 · `1a1379f7` · [CI] Refractor sweep-count flake root-caused — the test read a per-pass aggregate mid-pass; 4-in-6 failing → 10/10 green, no assertion loosened
-- 2026-07-25 · `a0a4bb34` · [pkgmgr,refractor] an upgrade that cannot take effect says so where the operator is — `reloadpin` predicts the refusal at apply time; `ReactivationRequired` + drift guard
-- 2026-07-25 · `e5268c2f` · [refractor] a business lens heals its own hole and leaves its neighbours alone — real-substrate e2e: enrolled, scoped, healed, siblings pinned by revision
-- 2026-07-25 · `7f183d69` · [refractor] a rebuild owns the signal the stall detector deferred to — outstanding + last-decreased published; a wedged rebuild escalates, a draining one stays exempt
-- 2026-07-25 · `33a6cc61` · [refractor] the sweep lists roots at the substrate and pays for what it examines — `vtx.<type>.*` filter + budgeted anchorLive walk, cursor keeps the tail reachable
-- 2026-07-25 · `4de52240` · [refractor] the un-truncatable rebuild is the grant table's repair, and now says so — premise disproven: absent rows re-derive through the ON CONFLICT arm; warning corrected
-- 2026-07-25 · `90d79ff8` · [refractor] a rebuild truncates what the lens owns, not the bucket it borrows — prefix-scoped `Truncate` bound to the rule, closing the shared-bucket auth wipe
-- 2026-07-25 · `043608a5` · [processor] a declared read set is bounded, and a repeated key is one read — summed `MaxDeclaredReads` ceiling at the envelope + `distinctKeys` in all three hydration loops; Contract #2 §2.5 edit staged uncommitted
-- *(older entries rolled to [archive/lattice-done.md](archive/lattice-done.md); includes `94c8224` hello-lattice NFR-P3 flake fix)*
+- *(older entries rolled to [archive/lattice-done.md](archive/lattice-done.md); newest rolled entry `7ac54ce1`)*

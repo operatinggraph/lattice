@@ -254,7 +254,10 @@ package's DDL), so it is filed as its own row rather than guessed at here.
 next time the kernel drops an entity, that bucket keeps a live orphan the binary no longer knows about.
 Nobody is blocked on it today; the kernel has not shrunk since the RoleMgmt move.
 
-### `bootstrap verify` still reports a stale kernel as fresh
+### `bootstrap verify` still reports a stale kernel as fresh — ✅ shipped `7628070e`
+
+`VerifyKernel` now calls `KernelDrift` and fails on `missing`/`stale`, mirroring what `scripts/verify-kernel.go`
+already did — the freshness probe `make up` reuses is self-healing. Left below for context.
 
 `VerifyKernel` (`internal/bootstrap/verify.go`) asserts presence, envelope shape, `isDeleted`, `class` and
 `vertexKey` — never content. `make up`'s reuse short-circuit calls it (§7), so `make up` will keep printing

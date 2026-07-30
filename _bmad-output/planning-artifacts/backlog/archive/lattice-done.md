@@ -1,6 +1,16 @@
 # Done log archive — lattice (older shipped items, newest first)
 
 
+- 2026-07-26 · `7ac54ce1` · [CI] embedded-NATS handshake flake root-caused — 42 hand-rolled fixtures each inherited nats.go's single-shot 2s handshake deadline; `internal/natsfixture` owns it, lint blocks regressions, no assertion loosened
+- 2026-07-26 · `0a409757` · [bootstrap] kernel-seed reconcile — a seeded Core KV picks up kernel-DDL fixes instead of freezing at the binary that seeded it; verify-kernel now asserts content
+- 2026-07-25 · `1a1379f7` · [CI] Refractor sweep-count flake root-caused — the test read a per-pass aggregate mid-pass; 4-in-6 failing → 10/10 green, no assertion loosened
+- 2026-07-25 · `a0a4bb34` · [pkgmgr,refractor] an upgrade that cannot take effect says so where the operator is — `reloadpin` predicts the refusal at apply time; `ReactivationRequired` + drift guard
+- 2026-07-25 · `e5268c2f` · [refractor] a business lens heals its own hole and leaves its neighbours alone — real-substrate e2e: enrolled, scoped, healed, siblings pinned by revision
+- 2026-07-25 · `7f183d69` · [refractor] a rebuild owns the signal the stall detector deferred to — outstanding + last-decreased published; a wedged rebuild escalates, a draining one stays exempt
+- 2026-07-25 · `33a6cc61` · [refractor] the sweep lists roots at the substrate and pays for what it examines — `vtx.<type>.*` filter + budgeted anchorLive walk, cursor keeps the tail reachable
+- 2026-07-25 · `4de52240` · [refractor] the un-truncatable rebuild is the grant table's repair, and now says so — premise disproven: absent rows re-derive through the ON CONFLICT arm; warning corrected
+- 2026-07-25 · `90d79ff8` · [refractor] a rebuild truncates what the lens owns, not the bucket it borrows — prefix-scoped `Truncate` bound to the rule, closing the shared-bucket auth wipe
+- 2026-07-25 · `043608a5` · [processor] a declared read set is bounded, and a repeated key is one read — summed `MaxDeclaredReads` ceiling at the envelope + `distinctKeys` in all three hydration loops; Contract #2 §2.5 edit staged uncommitted
 - 2026-07-25 · `34b13ffd` · [refractor] every actor-aggregate lens gets the healer, gated on what it can prove it owns — ownership-scoped listing + three-part install gate; business verdicts warning-only
 - 2026-07-25 · `298ef8ed` · [refractor] the hot-reload path decides in the open, and says so — refusal set extracted + testable, Output/grantTable/protected pinned (guard sources closed), refusals recorded on health
 - 2026-07-25 · `f630efc3` · [refractor] the grant family's guard is real, so the pipeline is told about it — `SeqGuarded` on the read-grant adapter closes an unordered seq-0 grant INSERT on the adj-watch path
