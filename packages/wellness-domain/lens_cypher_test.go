@@ -669,6 +669,58 @@ func TestWellnessIdentitiesRead_ExcludesUnnamedAndPlaintextShapedIdentities(t *t
 	require.Equal(t, bobKey, rows[0].Values["identity_key"])
 }
 
+// TestWellnessIdentitiesRead_WorkplaceAnchorFanOut proves a member identity's
+// authz_anchors carries every building that covers their own lease's unit —
+// the wellness console gap: a worksAt-anchored staffer's cap-read.staff grant
+// token is one of these building keys, not the member's own NanoID, so
+// without this fan-out a real front-desk/instructor actor matched no row but
+// its own. Mirrors TestWellnessMembers_JoinsMemberAndCoveringLocations'
+// containedIn chain, walked from the identity side via applicationFor
+// (leaseapp -> identity, Contract #1 §1.1: the later-arriving leaseapp is the
+// source) — the same fan-out cafe-domain's cafeIdentitiesRead already proved
+// for its own front desk.
+func TestWellnessIdentitiesRead_WorkplaceAnchorFanOut(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newWdFixture(t)
+	aliceKey := f.vtx(t, "alice", "identity")
+	f.aspect(t, "alice", "name", "name", envelopeData())
+	f.vtx(t, "lease", "leaseapp")
+	f.vtx(t, "unit4b", "location")
+	f.vtx(t, "building", "location")
+	f.edge(t, "applicationFor", "lease", "alice")
+	f.edge(t, "appliesToUnit", "lease", "unit4b")
+	f.edge(t, "containedIn", "unit4b", "building")
+
+	rows := f.project(t, wellnessIdentitiesReadSpec)
+	require.Len(t, rows, 1)
+	require.Equal(t, aliceKey, rows[0].Values["identity_key"])
+	require.ElementsMatch(t, []any{f.ids["alice"], f.ids["unit4b"], f.ids["building"]}, rows[0].Values["authz_anchors"],
+		"authz_anchors must carry the self-anchor PLUS the bare NanoID of the unit and every building covering it")
+}
+
+// TestWellnessIdentitiesRead_NoLeaseKeepsSelfAnchorOnly proves an identity
+// with no leaseapp application at all (e.g. an instructor or staffer with no
+// residence of their own) still projects — the self-anchor survives on its
+// own, and the variable-length walk finding no leaseapp yields an empty
+// fan-out rather than dropping the row or erroring, the same posture
+// wellnessMembersSpec's own *0.. hop takes for an unwired lease
+// (TestWellnessMembers_NoUnitEmptyCovering).
+func TestWellnessIdentitiesRead_NoLeaseKeepsSelfAnchorOnly(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newWdFixture(t)
+	f.vtx(t, "staffonly", "identity")
+	f.aspect(t, "staffonly", "name", "name", envelopeData())
+
+	rows := f.project(t, wellnessIdentitiesReadSpec)
+	require.Len(t, rows, 1)
+	require.ElementsMatch(t, []any{f.ids["staffonly"]}, rows[0].Values["authz_anchors"],
+		"no lease application means no fan-out, but the self-anchor must still be present")
+}
+
 // TestWellnessOrphanedBookingSettlement_BookedLiveSession_NotViolating proves
 // a booking on a session that hasn't been called off never violates — the
 // common case, the positive vector proving the gap doesn't fire spuriously.

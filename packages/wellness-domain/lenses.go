@@ -108,7 +108,15 @@ func Lenses() []pkgmgr.LensSpec {
 			// (loftspace-domain/lenses.go), not clinic's indirect two-lens
 			// patientIdentityReadGrants (there is no business vertex between
 			// the row and the login identity to route through — the anchor
-			// IS the identity). A staffer holding the reserved WildcardAnchor
+			// IS the identity). Each row ALSO carries every workplace
+			// building that covers the identity's own lease
+			// (applicationFor -> appliesToUnit -> containedIn*0..7, the same
+			// walk wellnessMembersSpec's own coveringLocations column runs
+			// and cafe-domain's cafeIdentitiesRead precedent), so a
+			// worksAt-anchored front-desk/instructor actor (permissions.go's
+			// worksAt_covers confinement) can resolve the name of every
+			// member whose lease their workplace covers, not only
+			// themselves. A staffer holding the reserved WildcardAnchor
 			// grant still reads every row.
 			CanonicalName: "wellnessIdentitiesRead",
 			Class:         "meta.lens",
@@ -369,14 +377,26 @@ RETURN
 // WHERE keeps only identities carrying a `.name` aspect via ciphertext
 // presence (`i.name.data.ct <> null` — there is no plaintext `value` field
 // at rest), mirroring loftspace-domain's applicantRosterReadSpec.
-// authz_anchors carries the identity's OWN bare NanoID — see the Lenses()
-// declaration above for why that self-anchor (not an empty wildcard-only
-// set) is the right shape here.
+// authz_anchors carries the identity's OWN bare NanoID (see the Lenses()
+// declaration above for why that self-anchor is the right shape here) PLUS
+// the workplace fan-out below.
+//
+// The fan-out is a pattern comprehension anchored on `i`, one hop further
+// out than wellnessMembersSpec's own coveringLocations walk:
+// identity -> leaseapp -> unit -> building. `applicationFor` runs
+// leaseapp -> identity (Contract #1 §1.1: the later-arriving leaseapp is the
+// source), so the walk reads `(i)<-[:applicationFor]-(l:leaseapp)`; the
+// `*0..7` containedIn bound matches wellnessMembersSpec's own upper bound, so
+// a worksAt-anchored staffer's confinement (permissions.go's
+// worksAt_covers) resolves the name of any member whose lease that building
+// covers — the same gap cafe-domain's cafeIdentitiesRead already closed for
+// its front desk.
 const wellnessIdentitiesReadSpec = `MATCH (i:identity)
 WHERE i.name.data.ct <> null
 RETURN
   nanoIdFromKey(i.key)   AS identity_id,
   i.key                  AS identity_key,
   i.name.data            AS name,
-  [nanoIdFromKey(i.key)] AS authz_anchors
+  [nanoIdFromKey(i.key)] + [(i)<-[:applicationFor]-(l:leaseapp)-[:appliesToUnit]->(u)-[:containedIn*0..7]->(c) | nanoIdFromKey(c.key)]
+                         AS authz_anchors
 `

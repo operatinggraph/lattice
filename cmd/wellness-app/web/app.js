@@ -821,7 +821,7 @@ async function renderBookMember(se, bookings, generation) {
       // The value carries BOTH keys: the lease is what CreateBooking checks
       // for the resident rate, and a member holding two leases is two rows.
       opt.value = m.bookerKey + "|" + m.leaseAppKey;
-      opt.textContent = shortKey(m.bookerKey) + " — lease " + shortKey(m.leaseAppKey);
+      opt.textContent = nameForIdentity(idOf(m.bookerKey)) + " — lease " + shortKey(m.leaseAppKey);
       select.appendChild(opt);
     }
   }
@@ -1111,7 +1111,7 @@ function rosterCard(b, markable, cancellable) {
     '<div class="card">' +
     '<span class="badge ' + (b.rate === "resident" ? "posted" : "open") + '">' + esc(b.rate || "standard") + "</span>" +
     (mark ? '<span class="badge ' + mark.badge + '">' + mark.label + "</span>" : "") +
-    '<div class="who">' + esc(shortKey(b.bookerKey)) + "</div>" +
+    '<div class="who">' + esc(nameForIdentity(idOf(b.bookerKey))) + "</div>" +
     (markable ? attendanceActions(b) : "") +
     (cancellable ? seatCancelAction(b) : "") +
     "</div>"
