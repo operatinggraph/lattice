@@ -291,7 +291,16 @@ func (rl *reloader) update(_, newLens *lens.Rule, kind lens.UpdateKind) {
 	}
 	switch kind {
 	case lens.IntoOnly:
-		newAdpt, err := rl.buildAdapter(newLens)
+		// Same transient-NATS-blip retry as activation's buildRuleAdapter
+		// call (main.go's startPipeline) — a hot-reload burst hits the
+		// identical adapter-build RTT, and refusing on one blip leaves the
+		// lens running its stale spec until another edit happens to arrive.
+		var newAdpt adapter.Adapter
+		err := retryTransientBoot(rl.ctx, func() error {
+			var buildErr error
+			newAdpt, buildErr = rl.buildAdapter(newLens)
+			return buildErr
+		})
 		if err != nil {
 			rl.refuse(entry, newLens.ID, "build new adapter", "err", err)
 			return

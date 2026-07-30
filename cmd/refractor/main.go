@@ -683,7 +683,16 @@ func main() {
 			return
 		}
 
-		adpt, err := buildRuleAdapter(r)
+		// A transient NATS RTT (context deadline exceeded, connection blip)
+		// during a boot/hot-reload burst must not permanently strand the
+		// lens — buildRuleAdapter's own error path has no way to tell a
+		// blip apart from a real config error, so the retry sits here.
+		var adpt adapter.Adapter
+		err := retryTransientBoot(ctx, func() error {
+			var buildErr error
+			adpt, buildErr = buildRuleAdapter(r)
+			return buildErr
+		})
 		if err != nil {
 			logger.Error("build adapter", "lensId", r.ID, "err", err)
 			return
@@ -908,7 +917,7 @@ func main() {
 		// Per-rule audit trail: append an entry to lattice.refractor.audit.<lensId>
 		// on every successful write (docs/components/refractor-failure-tiers.md).
 		aw := health.NewAuditWriter(conn, r.ID)
-		if err := aw.EnsureStream(ctx); err != nil {
+		if err := retryTransientBoot(ctx, func() error { return aw.EnsureStream(ctx) }); err != nil {
 			logger.Error("ensure audit stream", "lensId", r.ID, "err", err)
 			return
 		}
