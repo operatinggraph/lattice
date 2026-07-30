@@ -564,20 +564,47 @@ retry. Pinned by `TestHandleKeyShredded_TargetLister_EmptyDuringBoot_StaticFloor
 lower-severity finding (mutation-testing survived a "drop the trailing dot" mutant on the prefix check)
 was also closed with an added test fixture.
 
-**Named, not fixed — two residuals, both filed as their own board rows (Security & trust boundary):**
-hand-authored Postgres GrantTable `cap-read.*` producers (`packages/clinic-domain`'s four `grant_source`
-lenses) carry no `Output` descriptor, so neither the static floor nor the lister reaches them — a
-shredded identity's `actor_read_grants` rows from those survive, a distinct transport/gap from this
-fire's NATS-KV scope. And a latent one: `capReadShredTargets` filters on the descriptor only, not on
-adapter capability — a future `cap-read.*` PerEntry lens targeting Postgres (unreachable today,
-`anchorwalk.go` hardcodes `nats-kv`) would hit `DeleteAllForActor`'s non-`ErrRuleNotRegistered` error path
-and pause the auth-plane lens (an outage), a risk the removed static-list operator gate previously made
-structurally impossible.
+**Named, not fixed at the time — two residuals, both filed as their own board rows (Security & trust
+boundary):** hand-authored Postgres GrantTable `cap-read.*` producers (`packages/clinic-domain`'s four
+`grant_source` lenses) carry no `Output` descriptor, so neither the static floor nor the lister reaches
+them — a shredded identity's `actor_read_grants` rows from those survive, a distinct transport/gap from
+Fire 4's NATS-KV scope. **Closed by Fire 5** (below). And a latent one, still open: `capReadShredTargets`
+filters on the descriptor only, not on adapter capability — a future `cap-read.*` PerEntry lens targeting
+Postgres (unreachable today, `anchorwalk.go` hardcodes `nats-kv`) would hit `DeleteAllForActor`'s
+non-`ErrRuleNotRegistered` error path and pause the auth-plane lens (an outage), a risk the removed
+static-list operator gate previously made structurally impossible.
 
 Gates green: `go build ./...`, `make vet`, `golangci-lint run ./...` (0 issues), `STRICT=1
 lint-conventions.go`, `go test -race ./internal/refractor/keyshredded/... ./cmd/refractor/...`, full `go
 test ./...` (one pre-existing unrelated flake in `packages/lease-signing`, confirmed by 3x isolated
 re-run — the documented Starlark-250ms-wall-budget-under-parallel-load flake, not touched by this fire).
+
+**Fire 5 (2026-07-30, worktree `.claude/worktrees/cap-read-granttable-shred-nullify`): Postgres GrantTable
+shred-nullify — the first Fire 4 residual, closed.** `actor_read_grants` is shared across every
+grant_source producer, so a bulk revoke needs to reach every source for the shredded actor, not one lens's
+own rows the way `Delete`/`ListKeys` are deliberately scoped. Added
+`PostgresGrantWriter.RevokeAllGrantsForActor(actorID, projectionSeq)` (rls.go): a single guarded `UPDATE …
+WHERE actor_id = $1 AND projection_seq < $2`, unscoped by `grant_source` (actor_id alone cannot touch
+another actor's rows, so the isolation `checkSource` enforces elsewhere has nothing to protect against
+here). `keyshredded.Manager` gained a second, parallel discovery mechanism alongside `NullifyTarget`/
+`SetTargetLister`: a `GrantTableRevoker` interface + `Config.GrantRevokers` + `SetGrantRevokerLister`,
+called every shred event and attempted independently of the per-RuleID targets loop — required because
+`actor_read_grants` is not owned by any single lens's RuleID the way `NullifyRow`/`NullifyActor`'s
+registered nullifiers are, so it cannot route through `Control`. A failure here raises the privacy-critical
+tier and marks the delivery unclean (skips finalization) but pauses no lens — there is no single rule to
+pause. `cmd/refractor/main.go` wires `grantTableShredRevokers(registry)`: scans the live pipeline registry
+for `entry.grantTable` (a field already tracked per running pipeline) and its `entry.dsn`, deduped since
+every grant lens across every package writes the one shared table, reusing `poolManager.Acquire`'s
+per-DSN cache so no new connection opens beyond what the grant lens's own activation already made.
+Symmetric limitation to `RevokeGrant`'s own design: unlike a per-row revoke, a bulk actor-level revoke has
+no fixed (anchor_id, grant_source) set to pre-guard with a placeholder tombstone, so a grant projected for
+the actor at a higher seq after this call is not preemptively guarded — best-effort, matching the
+package's own Phase-A framing, not a new gap this fire introduces.
+
+Gates green: `go build ./...`, `make vet`, `golangci-lint run ./...` (0 issues), `STRICT=1
+lint-conventions.go`, `go test -race ./internal/refractor/adapter/... ./internal/refractor/keyshredded/...
+./cmd/refractor/...` (incl. a live-Postgres integration test,
+`TestRLS_RevokeAllGrantsForActor_Integration`), full `go test ./...`.
 
 **Author:** Winston (Designer fire, 2026-07-25); increment 2 built by Winston (Lattice Steward fire, 2026-07-27);
 increment 3 built by Winston (Lattice Steward fire, 2026-07-27); increment 4 built by Winston (Lattice
@@ -586,7 +613,8 @@ built by Winston (Lattice Steward fire, 2026-07-28); increment 7 built by Winsto
 2026-07-28); increment 8 built by Winston (Lattice Steward fire, 2026-07-28); increment 9 built by
 Winston (Lattice Steward fire, 2026-07-28); increment 9 deployed live by Winston (Lattice Steward fire,
 2026-07-28); Fire 2 built by Winston (Lattice Steward fire, 2026-07-28); Fire 3 built by Winston (Lattice
-Steward fire, 2026-07-28); Fire 4 built by Winston (Lattice Steward fire, 2026-07-28)
+Steward fire, 2026-07-28); Fire 4 built by Winston (Lattice Steward fire, 2026-07-28); Fire 5 built by
+Winston (Lattice Steward fire, 2026-07-30)
 **Backlog:** Stream-2 Security & trust boundary — *[Refractor] A `cap-read` document has no size bound* (★★, M)
 **Owning components:** `internal/refractor/{projection,pipeline,adapter,capabilityread,keyshredded}` (mechanism), `internal/bootstrap/lenses.go` + `internal/pkgmgr/anchorwalk.go` (producers), `packages/edge-manifest` (+ any package shipping a `cap-read.*` NATS-KV producer). Docs: `docs/contracts/06-capability-kv.md` §6.13/§6.14 (edit prepared uncommitted in the working tree), `docs/components/refractor.md`.
 
