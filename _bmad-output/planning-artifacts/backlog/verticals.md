@@ -23,6 +23,8 @@ the row is `🚧 blocked-on:` it (a missing *lens* is package work, built here).
 | **A class's instructor and time are frozen at creation** | No op reassigns `ledBy` or moves a session — `CreateSession` binds both once. 11 of 17 live sessions carry no instructor, so `SetBookingAttendance`'s ledBy+identifiedBy guard leaves them permanently unmarkable and no instructor can call them off. The only recourse for a sub or a moved class is `TombstoneSession`, which releases every booking — covering a teacher cancels the class on its members. | Wellness | pkg | ★★ | M | 📋 ready |
 | **A wellness studio can't take money** | `CreateBooking` classifies `rate: standard\|resident` and writes the `residentRate` link its own DDL calls the audit link "a future billing composition lens can walk" — but there is no wellness ledger (café/clinic/loftspace each have one), so the rate is a badge and nothing more: no class price, no pass or membership, no no-show charge (clinic already posts one). | Wellness | pkg | ★★ | L | 📋 ready |
 | **The schedule isn't a schedule** | Unfiltered: today it renders 17 cards with exactly one live `Book` (12 past classes disabled "Started"), the summary reads "17 sessions" while the empty-state copy already claims "No upcoming sessions", and `fmtRange` concatenates raw RFC3339 UTC where clinic-app formats locally. Wants upcoming-only + day grouping + local times; Facet's Nearby already hides past-start (`566d710a`). | Wellness | FE | ★★ | S | 📋 ready |
+| **An approved lease never leases the unit** | All 3 seeded worlds hold a landlord-approved application (`.decision` + `.tenancy` stamped) with zero leaseServiceInstance links — bgcheck/payment/onboarding never dispatch, so `qualified` stays false, `missing_listingLeased` never opens, and all 3 units sit `available` on public Browse 1–8 days post-approval. The console renders no Approve/Decline at all (`app.js` gates on `a.qualified`); `internal/leaseconvergence` proves the flip in-process, so nothing catches the live world. | LoftSpace | pkg | ★★★ | M | 📋 ready |
+| **The LoftSpace console names nobody** | `applicantRosterRead` projects empty `authz_anchors`, so `/api/staff/identities` returns `count:0` for every human hat (live: landlord, staffer, 2 applicants — `*` is held by 7 root/system actors only). It is `state.identities`' sole source, so `nameFor()` falls to a NanoID in "Signed in as", the by-unit decision console (`applicantName:""` live) and the walk-in picker, while the scoped `/api/landlord/applications` already carries the name. Mirror café `92439169` / clinic `a9c1e7c0`. | LoftSpace | pkg + FE | ★★ | S | 📋 ready |
 | **A tab shows a total and nothing else** | Self-order shipped, so the app is now the ordering surface — but a resident's only feedback is the running `totalCents`: no line items on the tab, no memo on the posted ledger debit (live — two identical $2.75 self-orders render "$5.50", the ledger reads "+$5.50" unlabelled), so nobody can check what was ordered or whether a second tap registered. `cafe-domain`'s README parks itemization as YAGNI "no demand row asks for it yet"; this is that row. | Café | pkg + FE | ★★ | M | 📋 ready |
 
 **Explicitly descoped (ambitious-PO pass, 2026-07-09):** structured diagnosis/procedure coding (ICD/CPT),
@@ -43,10 +45,9 @@ dated run-logs live in git history. Rotate LoftSpace ↔ Clinic ↔ Café ↔ We
 **Wellness joined** 2026-07-09 (`cmd/wellness-app` shipped, live on :7802) — fold it into rotation; see
 [agents/vertical-po/SKILL.md](../../../agents/vertical-po/SKILL.md) §1.
 
-- **Rotation to date:** LoftSpace ×17, Clinic ×16, Café ×7, Wellness ×4.
+- **Rotation to date:** LoftSpace ×18, Clinic ×16, Café ×7, Wellness ×4.
 - **Method:** reuse the already-up shared stack (detect NATS :4222 / app :7788/:7799/:7801/:7802), drive the real flow via `/api/op` + the lens projections as the product owner, file scored items. All four apps exist + are exercisable live (`:7788` / `:7799` / `:7801` / `:7802`).
 - **Live-stack note:** a stale bootstrap JSON vs. a recreated Core KV was a recurring dev-loop trap (2026-07-03, 2026-07-04) that silently emptied reads; `make up` now self-heals it (`109f59a`, 2026-07-05) — re-verify empty-read reports as a real product bug first.
-- **2026-07-23:** Clinic — drove staff visit-series + Care→Wellness referral live; found `StartVisitSeries` has no active-series dedup guard, confirmed via 2 live duplicate series, filed pkg fix.
 - **2026-07-27:** Clinic (Andrew-directed) — repro'd a reported patient/NanoID display leak live; root-caused to an unscoped localStorage key + no self-booking write path (403, Checkpoint unfiled) + a "Signed in as" name-resolution gap confirmed cross-vertical (3 of 4 apps, LoftSpace the exception); filed 4.
 - **2026-07-28:** Café — drove self-order + staff POS live; the picker offers items `Charge` refuses, the POS has no catalog, tabs aren't itemized; filed 4.
 - **2026-07-28:** Wellness — drove member/staff/instructor hats live; the schedule's Book is mostly dead, a called-off class tells nobody, attendance is invisible + member-erasable; filed 3.
@@ -54,7 +55,8 @@ dated run-logs live in git history. Rotate LoftSpace ↔ Clinic ↔ Café ↔ We
 - **2026-07-29:** Clinic — drove patient, provider, front-desk + root hats live; the front desk renders a staff console it can't read a roster into; filed 3.
 - **2026-07-29:** Café — drove self-order + front-desk hats live; the demo world seeds no menu, the composition layer is installed by nothing, front of house can't name anyone; filed 3.
 - **2026-07-30:** Wellness — drove member, instructor + front-desk hats live; the staff console names nobody, a class's teacher and time are frozen, nothing charges; filed 4.
-- **Next:** LoftSpace.
+- **2026-07-30:** LoftSpace — drove landlord, staff + 2 applicant hats live; an approved lease never leases the unit and the roster names nobody; filed 2.
+- **Next:** Clinic.
 
 ## Done log — verticals (newest first)
 
