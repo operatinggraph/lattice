@@ -174,7 +174,6 @@ designed-through, but the *fork decision* + the *contract commit* are Andrew's.
 ### Edge & personal lenses
 | Item | What it is | Imp | Size | State |
 |---|---|---|---|---|
-| **[Edge] The per-actor SYNC subject retains delta history unboundedly** | The cold-reconnect boot-gate race was a *symptom* of unbounded per-actor subject growth (now fixed, Done log) — every delta + every prior hydrate burst a device ever received stays replayable, and the growth itself is still unbounded; a retention/compaction posture on the subject is the underlying fix. | ★★ | S–M | 📋 ready |
 | **Personal Lens — multicast fan-out dedup** | Fires 1–5 shipped and PL.6's WS half is subsumed by EDGE.5; what remains is deduping identical per-identity deltas across subscribers, which only pays back at subscriber counts no cell has yet. | ★ | M | 🗄️ shelved (revive: a bandwidth trigger) · [design](../../implementation-artifacts/personal-secure-lens-design.md) |
 
 ### AI-native
@@ -215,6 +214,7 @@ Real but low-value; do **not** spend design or build effort here unless Andrew g
 
 One line per shipped item (`date · SHA · [tag] title`). Oldest roll to `archive/` past ~25.
 
+- 2026-07-30 · `b9b9cad3` · [Refractor,Substrate] SYNC stream now caps per-subject retention (`MaxMsgsPerSubject: 10,000`) — finishes the retention posture [design §3.2](../../implementation-artifacts/personal-secure-lens-design.md)
 - 2026-07-30 · `2edba1f3` · [Refractor,Edge,Loupe] operator-initiated device hydration request — durable per-device flag consumed on next SYNC attach [§3.2](../../implementation-artifacts/loupe-flows-edge-depth-ux.md)
 - 2026-07-30 · `b097f1a4` · [Refractor,Loupe] cold bring-up replay debt no longer reads as staleness — a draining `consumerLag` renders green until its `lagProgressAt` clock stalls 2min, closing the demo box's hours-long false YELLOW
 - 2026-07-30 · `a7284b8a` · [Processor] wall-budget test flake — `PROCESSOR_SCRIPT_WALL_MS` now wired + widened for `-p 4` test runs, production 250ms NFR-P4 default untouched
