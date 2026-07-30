@@ -22,6 +22,9 @@ type StreamSpec struct {
 	Subjects []string
 	// MaxAge bounds message retention by age. Zero means no age limit.
 	MaxAge time.Duration
+	// MaxMsgsPerSubject bounds retained messages per subject. Zero means no
+	// per-subject limit.
+	MaxMsgsPerSubject int64
 }
 
 // EnsureStream creates or updates the stream described by spec (idempotent —
@@ -34,11 +37,12 @@ func (c *Conn) EnsureStream(ctx context.Context, spec StreamSpec) error {
 		return fmt.Errorf("substrate: EnsureStream: Name required")
 	}
 	cfg := jetstream.StreamConfig{
-		Name:      spec.Name,
-		Subjects:  spec.Subjects,
-		Storage:   jetstream.FileStorage,
-		Retention: jetstream.LimitsPolicy,
-		MaxAge:    spec.MaxAge,
+		Name:              spec.Name,
+		Subjects:          spec.Subjects,
+		Storage:           jetstream.FileStorage,
+		Retention:         jetstream.LimitsPolicy,
+		MaxAge:            spec.MaxAge,
+		MaxMsgsPerSubject: spec.MaxMsgsPerSubject,
 	}
 	if _, err := c.js.CreateOrUpdateStream(ctx, cfg); err != nil {
 		return fmt.Errorf("substrate: EnsureStream %q: %w", spec.Name, err)

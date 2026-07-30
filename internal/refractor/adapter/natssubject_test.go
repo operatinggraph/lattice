@@ -61,6 +61,7 @@ func TestNewNatsSubjectAdapter_EnsuresStream(t *testing.T) {
 	s, err := js.Stream(context.Background(), "SYNC")
 	assert.NoError(t, err, "SYNC stream must exist after construction")
 	assert.Equal(t, 24*time.Hour, s.CachedInfo().Config.MaxAge, "SYNC stream must retain the designed 24h MaxAge (personal-secure-lens-design.md §3.2)")
+	assert.Equal(t, int64(10_000), s.CachedInfo().Config.MaxMsgsPerSubject, "SYNC stream must cap per-subject retention (personal-secure-lens-design.md §3.2)")
 }
 
 func TestNewNatsSubjectAdapter_RejectsMissingConfig(t *testing.T) {

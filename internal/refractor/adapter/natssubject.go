@@ -111,6 +111,15 @@ func NewNatsSubjectAdapter(ctx context.Context, conn *substrate.Conn, ruleID, su
 // personal.hydrate call instead of replaying a long backlog.
 const syncStreamMaxAge = 24 * time.Hour
 
+// syncStreamMaxMsgsPerSubject backstops syncStreamMaxAge for a high-volume
+// actor: MaxAge alone bounds retention by time, not by count, so an actor
+// whose anchors mutate often within the window can still accumulate
+// unbounded messages on their subject (personal-secure-lens-design.md §3.2:
+// "MaxAge: 24h, per-subject MaxMsgsPerSubject cap"). A device that falls
+// behind this many deltas hits the same gap → personal.hydrate re-projection
+// path as falling behind MaxAge.
+const syncStreamMaxMsgsPerSubject = 10_000
+
 // ensureSyncStream provisions the backing stream, unioning subjectPrefix's
 // wildcard into any subjects the stream already carries rather than
 // replacing them outright. JetStream's CreateOrUpdateStream (substrate's
@@ -127,12 +136,13 @@ func ensureSyncStream(ctx context.Context, conn *substrate.Conn, stream, subject
 		return err
 	}
 	if slices.Contains(existingSubjects, wildcard) {
-		return conn.EnsureStream(ctx, substrate.StreamSpec{Name: stream, Subjects: existingSubjects, MaxAge: syncStreamMaxAge})
+		return conn.EnsureStream(ctx, substrate.StreamSpec{Name: stream, Subjects: existingSubjects, MaxAge: syncStreamMaxAge, MaxMsgsPerSubject: syncStreamMaxMsgsPerSubject})
 	}
 	return conn.EnsureStream(ctx, substrate.StreamSpec{
-		Name:     stream,
-		Subjects: append(existingSubjects, wildcard),
-		MaxAge:   syncStreamMaxAge,
+		Name:              stream,
+		Subjects:          append(existingSubjects, wildcard),
+		MaxAge:            syncStreamMaxAge,
+		MaxMsgsPerSubject: syncStreamMaxMsgsPerSubject,
 	})
 }
 
