@@ -27,6 +27,18 @@ import (
 // target type, it is returned as a singleton — the pipeline still
 // re-executes the cypher against it.
 //
+// The BFS stops at the first actor it reaches on any path — once an
+// actor is found, capability is computed from that actor's own outbound
+// topology, and continuing past it unrestricted would double-count
+// actors via shared neighbours (e.g. two actors in the same location).
+// The one addition to that rule: every found actor also gets a single,
+// non-recursive, directional hop along actorHierarchyRelation (reportsTo)
+// to the actor it reports to, since `capabilityEphemeral`'s reportsTo
+// 2-hop branch means that actor's own projection depends on this one's
+// direct assignments too. This mirrors the cypher exactly — it is one
+// fixed hop, not a chain — so a report's report (if any) is never pulled
+// in on that report's account.
+//
 // Caps:
 //   - maxDepth: BFS depth bound. Per Decision #3 the default mirrors the
 //     executor's variable-length traversal cap (10).
@@ -54,6 +66,10 @@ const DefaultActorMaxDepth = 10
 // DefaultActorMaxSet is the default cap on the affected-actor set per
 // Decision #3 / scope guard. Above this we log a warning and proceed.
 const DefaultActorMaxSet = 10_000
+
+// actorHierarchyRelation is the link name a found actor gets one extra
+// outbound hop along, per the ActorEnumerator doc comment above.
+const actorHierarchyRelation = "reportsTo"
 
 // NewActorEnumerator constructs an enumerator with the given KV handles
 // and target actor type (e.g. "identity").
@@ -109,6 +125,39 @@ func (e *ActorEnumerator) Enumerate(ctx context.Context, eventVertexKey, eventVe
 	frontier := []frontierEntry{{nodeID: eventID, nodeType: eventVertexType, depth: 0}}
 	truncated := false
 
+	// addActor records id (already known to be e.actorType) in actors,
+	// honoring the cap. Returns false when the cap was hit (id not added).
+	addActor := func(id string) bool {
+		actorKey := substrate.VertexPrefix + "." + e.actorType + "." + id
+		if _, exists := actors[actorKey]; exists {
+			return true
+		}
+		if len(actors) >= e.maxActors {
+			truncated = true
+			return false
+		}
+		actors[actorKey] = struct{}{}
+		return true
+	}
+
+	// addHierarchyManager looks up reportID's own adjacency and adds every
+	// actor it reports to (an outbound actorHierarchyRelation edge) — the
+	// single, non-recursive hop the type doc comment describes. It does not
+	// itself call addHierarchyManager on what it finds.
+	addHierarchyManager := func(reportID string) error {
+		edges, _, err := adjacency.Neighbors(ctx, e.adjKV, reportID)
+		if err != nil {
+			return fmt.Errorf("pipeline: actor enumerator: hierarchy neighbours of %q: %w", reportID, err)
+		}
+		for _, edge := range edges {
+			if edge.Name != actorHierarchyRelation || edge.Direction != "outbound" || edge.OtherType != e.actorType {
+				continue
+			}
+			addActor(edge.OtherNodeID)
+		}
+		return nil
+	}
+
 	for len(frontier) > 0 {
 		cur := frontier[0]
 		frontier = frontier[1:]
@@ -134,19 +183,13 @@ func (e *ActorEnumerator) Enumerate(ctx context.Context, eventVertexKey, eventVe
 			visited[other] = struct{}{}
 
 			if otherType == e.actorType {
-				actorKey := substrate.VertexPrefix + "." + otherType + "." + other
-				if _, exists := actors[actorKey]; !exists {
-					if len(actors) >= e.maxActors {
-						truncated = true
-						continue
+				if addActor(other) {
+					if err := addHierarchyManager(other); err != nil {
+						return nil, err
 					}
-					actors[actorKey] = struct{}{}
 				}
-				// We don't traverse THROUGH actors — once we hit an
-				// actor, capability is computed from that actor's own
-				// outbound topology. Continuing past it would double-
-				// count actors via shared neighbours (e.g. two actors
-				// in the same location).
+				// No further traversal from an actor beyond the single
+				// hierarchy hop just above — see the type doc comment.
 				continue
 			}
 
