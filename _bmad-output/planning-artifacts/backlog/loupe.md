@@ -29,16 +29,6 @@ buildable-first; F11–F13 gated on lattice cross-lane asks (§6 there).
 |---|---|---|---|---|
 | **F13 — Chronicler Time Machine (L2-full + L3)** | L1 is satisfied by the shipped Flows tab and L2 v1 by the flow-liveness scrubber; scrubbing past the live window and browsing the ledger both need history Loupe cannot read yet. | ★★★ | L | 🚧 blocked-on: Chronicler archive mode (lattice, Andrew-deferred) · [UX §4](../../implementation-artifacts/loupe-platform-edges-ux.md) |
 
-## Flows + Edge depth — 2026-07-25 PO pass
-
-Both tabs render tiles and stop. PO assessment, the two live defects it turned up, and the
-fire order: [loupe-flows-edge-depth-ux.md](../../implementation-artifacts/loupe-flows-edge-depth-ux.md)
-(adjudicated inline, Winston). The act-on-it half is blocked on two platform seams filed to
-[lattice.md](lattice.md); everything else is buildable in-lane.
-
-| Item | What it is | Imp | Size | State |
-| **Flows "act on it" — wire a Retry button to Loom's redrive op** | `lattice.ctrl.loom.<id>.redrive` resumes a FAILED instance at its cursor (lattice.md, shipped). Needs UX (Sally) + FE Engineer: add `redrive` to Loupe's control allow-list (`cmd/loupe/control.go`), wire the button, verify live. | ★★ | S | 📋 ready · UX-then-FE · [§2.2](../../implementation-artifacts/loupe-flows-edge-depth-ux.md) |
-
 ## Component maintenance
 
 | Item | What it is | Imp | Size | State |
@@ -77,6 +67,7 @@ fire order: [loupe-flows-edge-depth-ux.md](../../implementation-artifacts/loupe-
 
 One line per shipped item (`date · SHA · [tag] title`). Oldest roll to `archive/` past ~25.
 
+- 2026-07-30 · `7984e32c` · [Loupe/Flows] Retry button wired to Loom's redrive — the second (and last) of the two 2026-07-25 act-on-it rows; `#/flows` is no longer read-only
 - 2026-07-30 · `2edba1f3` · [Loupe/Edge] gapped device panel gets its one write action — "Request hydration on next attach", the lattice cross-lane primitive's console consumer. Lead self-review
 - 2026-07-25 · `6ac1523e` · [Loupe/F24.1+F24.2] Edge fleet triage — worst-first order, retention headroom in messages + time, in-place Interest Set, `#/edge/<key>` device panel. 3-layer review fixed forward, live-verified
 - 2026-07-25 · `1551f31b` · [Loupe/F23.1] Flow detail — `#/flows/<id>` step sequence off the pinned pattern + the instance cursor; history/engine/pattern kept separable, disagreement stated. Lead self-review, live-verified
