@@ -155,8 +155,9 @@
           and each identity's devices worst-first — most data lost, then unmeasured, then tightest
           remaining headroom. This is who is <strong>registered</strong>, not who is connected: a device's
           <em>last acked</em> time is the closest thing to liveness here, and it says the device consumed
-          a delta at some point, never that it is attached now. Remediation is the device's own next
-          attach — the console cannot start a hydration for it.</p>
+          a delta at some point, never that it is attached now. Remediation still runs on the device's own next
+          attach — the console cannot push to a device it cannot see — but a gapped device's panel can mark it
+          for hydration on that next attach.</p>
         <p class="muted small" id="edge-retention"></p>
         <p class="small" id="edge-triage"></p>
         <div id="edge-notes"></div>
