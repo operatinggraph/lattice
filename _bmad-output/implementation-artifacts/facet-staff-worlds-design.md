@@ -1067,3 +1067,49 @@ enumeration). If it does NOT reproduce locally even with zero wall-clock gap, th
 calls, or a Gateway-side response race) — instrument the Gateway's op-dispatch path directly next, not
 Refractor again. Either way, this is genuinely new investigation scope, not a continuation of the local-
 harness sweep §13.2–§13.5 already closed out.
+
+## 13.7 The zero-gap local repro does NOT reproduce it (15/15 clean) — the mechanism needs the real distributed environment, not just "no wall-clock gap" (Winston, 2026-07-30)
+
+**Built `TestRefractor_CapabilityLens_TwoActorClaimCeremony_MultiActorRace_E2E`**
+(`internal/refractor/refractor_claim_batch_real_op_multiactor_e2e_test.go`), §13.6's checkpoint: the real
+two-op sequence (`ProvisionConsumerIdentity` for D, immediately followed by `ClaimIdentity` claiming U as D,
+zero sleep between them) against a single live, CDC-driven `capabilityRoles` pipeline. D's own auth
+precondition is seeded directly (`cap.identity.<D>`, mirroring every prior harness's caller-permission
+seeding) rather than waited-on-live, specifically to avoid re-triggering the ALREADY-understood
+`isTransientAuthLag` race and isolate the one variable under test: does U's grant, projected by the very
+next CDC event on the same pipeline, survive right after D's own `holdsRole` write.
+
+**Result: 15/15 runs clean — both `cap.roles.<D>` and `cap.roles.<U>` project every time.** The zero-wall-
+clock-gap shape does not reproduce the defect in-process, even though the live ceremony reproduces it 2/3 on
+the demo box. This is a real negative result, not an inconclusive one: 15 consecutive clean runs against the
+exact op sequence, same lens, same zero gap, is enough to say the *bare* "two holdsRole writes to different
+actors with no artificial delay" shape is not sufficient by itself.
+
+**What this narrows the gap to.** Every difference between this harness and the live ceremony that ISN'T
+"wall-clock gap between the two writes" is now the remaining candidate space:
+- **Real network round-trips.** This harness runs Processor, Refractor, and the test all in one OS process
+  against an embedded NATS server — every KV read/write is a function call away. The live ceremony crosses
+  Gateway → Processor → NATS → Refractor as separate OS processes over real (if loopback) TCP, so genuine
+  scheduling/redelivery timing this harness cannot construct is still live.
+- **The Gateway itself.** `cmd/facet/claim.go`'s HTTP handler sequences the two `PublishOp` calls with its
+  own retry/backoff logic (`isTransientAuthLag`) wrapped around them — this harness bypassed that entirely
+  by seeding D's auth directly. The Gateway's actual code path was never exercised, only the two ops it
+  would eventually submit.
+- **Live-stack ambient load.** The demo box runs the full component set (Loom, Weaver, Bridge, chronicler,
+  Loupe, other lenses) all consuming the same Core KV CDC stream concurrently; this harness runs exactly one
+  lens with nothing else subscribed.
+
+**Checkpoint — next step is materially more invasive than anything in this design's §13 series so far: live
+instrumentation of the demo box's RUNNING Refractor process**, which means briefly restarting a shared,
+live engine other visitors/Andrew may be using — not another throwaway test-data probe. **Do not do this
+unattended or without explicit sign-off** — flag it and let Andrew decide whether/when. Concretely, once
+approved: add temporary structured logging around `evaluateLinkFanOut` → `actorEnumerator.Enumerate` →
+`reprojectActors` → the envelope write (does U ever reach the enumerated actor set for its own `holdsRole`
+event? does `executeFullForActor` run for U? does the KV `Put` succeed but get overwritten by something
+right after?), build a debug `refractor` binary, cycle it on the demo box (`pkill -x refractor && make
+orchestration`-equivalent — mirror the Makefile recipe, never a hand-rolled launch), trigger the ceremony,
+read the logs, then **revert to the clean binary before ending the session** (an instrumented binary must
+not become the box's standing state). If the live logs show U's event never even reaches the actor set,
+the gap is upstream (adjacency/CDC delivery); if it reaches `executeFullForActor` but the write is lost,
+the gap is in the write path itself (a lost/overwritten `Put`, an `expectedRevision` mismatch racing D's
+own commit). Either finding is a fix-sized scope; this fire stops at the finding.
