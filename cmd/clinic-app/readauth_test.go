@@ -1,16 +1,22 @@
 package main
 
 import (
+	"encoding/json"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/golang-jwt/jwt/v5"
+
 	"github.com/operatinggraph/lattice/internal/appsession"
+	"github.com/operatinggraph/lattice/internal/bootstrap"
 	"github.com/operatinggraph/lattice/internal/gateway/auth"
+	"github.com/operatinggraph/lattice/internal/testutil"
 )
 
 const testTimeout = 5 * time.Second
@@ -246,5 +252,171 @@ func TestSessionCookieInteroperatesWithTheSharedDevKey(t *testing.T) {
 	}
 	if actor.Subject != sub {
 		t.Errorf("subject = %q, want %q", actor.Subject, sub)
+	}
+}
+
+// staffWorkplace is the clinic building a plain staff subject `worksAt`.
+// Mirrors cmd/cafe-app's readauth_test.go fixture shape.
+const staffWorkplace = "vtx.building.A9jnKK2bGwZNrfHHkLme"
+
+// fakeGatewayActorWorkplaces stands in for the Gateway's external
+// GET /v1/actor door that resolveSubjectHats calls: it decodes the bearer's
+// JWT subject (unverified — a trusted test double, not a security boundary,
+// standing in for the Gateway which has already verified the token) and
+// reports the named `worksAt` anchors and operator role per subject. Mirrors
+// cmd/cafe-app's and cmd/wellness-app's identical fixture.
+func fakeGatewayActorWorkplaces(t *testing.T, workplaces map[string][]string, operators map[string]bool) string {
+	t.Helper()
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/actor", func(w http.ResponseWriter, r *http.Request) {
+		tok := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+		var claims jwt.RegisteredClaims
+		if _, _, err := jwt.NewParser().ParseUnverified(tok, &claims); err != nil {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		anchors := []appsession.ActorAnchor{}
+		for _, key := range workplaces[claims.Subject] {
+			anchors = append(anchors, appsession.ActorAnchor{Relation: "worksAt", Key: key, Name: "Clinic Building"})
+		}
+		var roles []string
+		if operators[claims.Subject] {
+			roles = append(roles, bootstrap.RoleOperatorKey)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"actorId":         "vtx.identity." + claims.Subject,
+			"resolvedActorId": "vtx.identity." + claims.Subject,
+			"roles":           roles,
+			"anchors":         anchors,
+		})
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	return srv.URL
+}
+
+// TestResolveSubjectHats_GatewayUnreachable_FailsClosed: the Gateway call
+// resolveSubjectHats depends on to learn the caller's anchors is down ⇒
+// refused outright, never defaulting to the unfiltered "staff" answer.
+func TestResolveSubjectHats_GatewayUnreachable_FailsClosed(t *testing.T) {
+	const id = "Hj4kPmRtw9nbCxz5vQ2y"
+	s, cookieFor := devSessionServer(t, func(s *server) { s.gatewayURL = "http://127.0.0.1:1" }) // nothing listens here
+	r := httptest.NewRequest(http.MethodGet, "/api/residents", nil)
+	r.AddCookie(cookieFor(id))
+	rec := httptest.NewRecorder()
+	ran := false
+	s.session.RequireSession(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ran = true
+		if _, err := s.resolveSubjectHats(r); err == nil {
+			t.Error("expected resolveSubjectHats to fail closed when the Gateway is unreachable")
+		}
+	})).ServeHTTP(rec, r)
+	if !ran {
+		t.Fatal("the assertion never ran — the session did not resolve, so nothing was actually tested")
+	}
+}
+
+// TestResolveSubjectHats_WorksAtConfersStaff proves the discriminating case:
+// a subject with a `worksAt` anchor is staff, one with none is not.
+func TestResolveSubjectHats_WorksAtConfersStaff(t *testing.T) {
+	const staff, patient = "Hj4kPmRtw9nbCxz5vQ2y", "Kx8mNqTwZ4bRvL2yDcHf"
+	gwURL := fakeGatewayActorWorkplaces(t, map[string][]string{staff: {staffWorkplace}}, nil)
+	s, cookieFor := devSessionServer(t, func(s *server) { s.gatewayURL = gwURL })
+
+	check := func(subject string, wantStaff bool) {
+		r := httptest.NewRequest(http.MethodGet, "/api/residents", nil)
+		r.AddCookie(cookieFor(subject))
+		rec := httptest.NewRecorder()
+		ran := false
+		s.session.RequireSession(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			ran = true
+			hats, err := s.resolveSubjectHats(r)
+			if err != nil {
+				t.Fatalf("resolveSubjectHats(%s): %v", subject, err)
+			}
+			if hats.isStaff() != wantStaff {
+				t.Errorf("subject %s: isStaff() = %v, want %v", subject, hats.isStaff(), wantStaff)
+			}
+		})).ServeHTTP(rec, r)
+		if !ran {
+			t.Fatal("the assertion never ran — the session did not resolve, so nothing was actually tested")
+		}
+	}
+	check(staff, true)
+	check(patient, false)
+}
+
+// TestResolveSubjectHats_KeylessWorksAtAnchorIsNotStaff: identityAnchors
+// stamps `relation` as a literal on every collected entry, so an identity
+// with no workplace still produces a {key:null, relation:"worksAt"} entry
+// from the unmatched OPTIONAL MATCH. A caller carrying only that entry is a
+// patient, and must not be read as staff. Mirrors cmd/cafe-app's identical
+// test.
+func TestResolveSubjectHats_KeylessWorksAtAnchorIsNotStaff(t *testing.T) {
+	const id = "Hj4kPmRtw9nbCxz5vQ2y"
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/actor", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"actorId":         "vtx.identity." + id,
+			"resolvedActorId": "vtx.identity." + id,
+			"roles":           []string{},
+			"anchors":         []appsession.ActorAnchor{{Relation: "worksAt"}},
+		})
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+
+	s, cookieFor := devSessionServer(t, func(s *server) { s.gatewayURL = srv.URL })
+	r := httptest.NewRequest(http.MethodGet, "/api/residents", nil)
+	r.AddCookie(cookieFor(id))
+	rec := httptest.NewRecorder()
+	ran := false
+	s.session.RequireSession(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ran = true
+		hats, err := s.resolveSubjectHats(r)
+		if err != nil {
+			t.Fatalf("resolveSubjectHats: %v", err)
+		}
+		if hats.isStaff() {
+			t.Error("a keyless worksAt anchor must not confer the staff hat")
+		}
+	})).ServeHTTP(rec, r)
+	if !ran {
+		t.Fatal("the assertion never ran — the session did not resolve, so nothing was actually tested")
+	}
+}
+
+// TestResolveSubjectHats_OperatorRoleExempted: the primordial operator role,
+// with NO workplace anchor at all, still resolves as staff — the same
+// exemption CreateAppointment's require_workplace gives on the write side.
+func TestResolveSubjectHats_OperatorRoleExempted(t *testing.T) {
+	testutil.EnsurePrimordials(t)
+	if bootstrap.RoleOperatorKey == "" {
+		t.Fatal("primordial ids loaded but the operator role key is empty")
+	}
+	const id = "Hj4kPmRtw9nbCxz5vQ2y"
+	gwURL := fakeGatewayActorWorkplaces(t, nil, map[string]bool{id: true})
+	s, cookieFor := devSessionServer(t, func(s *server) { s.gatewayURL = gwURL })
+	r := httptest.NewRequest(http.MethodGet, "/api/residents", nil)
+	r.AddCookie(cookieFor(id))
+	rec := httptest.NewRecorder()
+	ran := false
+	s.session.RequireSession(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ran = true
+		hats, err := s.resolveSubjectHats(r)
+		if err != nil {
+			t.Fatalf("resolveSubjectHats: %v", err)
+		}
+		if !hats.isOperator {
+			t.Error("expected the operator role to set isOperator")
+		}
+		if hats.isStaff() {
+			t.Error("the operator has no workplace anchor, so isStaff() must be false — isOperator is the separate exemption")
+		}
+	})).ServeHTTP(rec, r)
+	if !ran {
+		t.Fatal("the assertion never ran — the session did not resolve, so nothing was actually tested")
 	}
 }

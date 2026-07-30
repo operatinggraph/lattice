@@ -5,6 +5,8 @@ import (
 	"net/http"
 	"sort"
 	"strings"
+
+	"github.com/operatinggraph/lattice/internal/gateway/auth"
 )
 
 // weaverTargetsBucket is the shared cross-package Weaver convergence bucket
@@ -69,16 +71,30 @@ func computeResidents(keys []string, get kvGetter) []residentRow {
 	return rows
 }
 
-// handleResidents implements GET /api/residents — every lease applicant the
-// booking form's resident-visit lookup offers, served from the shared
-// leaseApplicationComplete convergence lens (P5). The FE matches a selected
-// patient's own identityKey against a row's bookerKey to decide whether to
-// attach leaseAppKey to CreateAppointment; a patient not tied to any lease
-// books normally, with no residentVisit link (Inc 5, mixed-use composition
-// design).
+// handleResidents implements GET /api/residents — the booking form's
+// resident-visit lookup, served from the shared leaseApplicationComplete
+// convergence lens (P5). The FE matches a selected patient's own identityKey
+// against a row's bookerKey to decide whether to attach leaseAppKey to
+// CreateAppointment; a patient not tied to any lease books normally, with no
+// residentVisit link (Inc 5, mixed-use composition design).
+//
+// Confined server-side (mirrors cmd/cafe-app's and cmd/wellness-app's
+// resolveSubjectHats): the booking form's patient picker lets front-desk /
+// operator staff select ANY patient, so staff see the full roster — the same
+// "front-desk's view" grant patients.go's protected read describes — while
+// everyone else (a bare patient session) sees only the row whose bookerKey
+// is their own signed-in identity. There is no clinic-site topology on a
+// lease application (it belongs to an unrelated LoftSpace building), so
+// unlike café/wellness this has no further per-workplace narrowing: any
+// clinic workplace anchor, or the operator role, is staff for this lookup.
 func (s *server) handleResidents(w http.ResponseWriter, r *http.Request) {
 	conn, ok := s.requireConn(w)
 	if !ok {
+		return
+	}
+	hats, err := s.resolveSubjectHats(r)
+	if err != nil {
+		s.writeError(w, http.StatusUnauthorized, "authentication required: "+err.Error())
 		return
 	}
 	ctx, cancel := s.reqContext(r)
@@ -98,5 +114,16 @@ func (s *server) handleResidents(w http.ResponseWriter, r *http.Request) {
 		return entry.Value, true
 	}
 	rows := computeResidents(keys, get)
-	s.writeJSON(w, http.StatusOK, map[string]any{"residents": rows})
+	if hats.isOperator || hats.isStaff() {
+		s.writeJSON(w, http.StatusOK, map[string]any{"residents": rows})
+		return
+	}
+	own := auth.IdentityKeyPrefix + hats.identityID
+	filtered := make([]residentRow, 0, 1)
+	for _, row := range rows {
+		if row.BookerKey == own {
+			filtered = append(filtered, row)
+		}
+	}
+	s.writeJSON(w, http.StatusOK, map[string]any{"residents": filtered})
 }

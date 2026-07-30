@@ -1,11 +1,16 @@
 package main
 
 import (
+	"context"
+	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/operatinggraph/lattice/internal/appsession"
+	"github.com/operatinggraph/lattice/internal/bootstrap"
 	"github.com/operatinggraph/lattice/internal/gateway/auth"
 )
 
@@ -49,4 +54,98 @@ func (s *server) authenticateRead(r *http.Request) (auth.VerifiedActor, error) {
 		return auth.VerifiedActor{}, fmt.Errorf("no signed-in identity (sign in at %s)", appsession.LoginPagePath)
 	}
 	return auth.VerifiedActor{ActorID: auth.IdentityKeyPrefix + subject, Subject: subject}, nil
+}
+
+const actorFetchTimeout = 10 * time.Second
+
+// subjectHats is the caller's read-boundary role for the one clinic-app read
+// that has no RLS-protected query of its own (residents.go's leaseApplicationComplete
+// lookup): workplaces holds every clinic building the caller worksAt — the
+// same anchor clinic-domain's write-side confinement keys on
+// (worksAt_covers, packages/clinic-domain/ddls.go) — and isOperator marks the
+// primordial root role, exempted the same way CreateAppointment's own
+// require_workplace exempts it.
+type subjectHats struct {
+	identityID string
+	workplaces []string
+	isOperator bool
+}
+
+// isStaff reports whether the caller carries any clinic workplace at all —
+// front-desk, not a patient looking up their own residency.
+func (h subjectHats) isStaff() bool { return len(h.workplaces) > 0 }
+
+func operatorRoleKey() string { return bootstrap.RoleOperatorKey }
+
+// resolveSubjectHats authenticates the caller and asks the Gateway's own
+// external /v1/actor door which anchors and roles the session's token
+// carries — mirrors cmd/cafe-app's and cmd/wellness-app's identical
+// resolveSubjectHats, the established precedent for scoping a read that,
+// unlike the Postgres RLS protected models above, has no actor-scoped query
+// of its own. Fails CLOSED: any error resolving the identity, the session's
+// raw token, or the Gateway call is refused outright — never defaulting to
+// the unfiltered "staff" answer.
+func (s *server) resolveSubjectHats(r *http.Request) (subjectHats, error) {
+	subject, ok := appsession.Identity(r.Context())
+	if !ok || strings.TrimSpace(subject) == "" {
+		return subjectHats{}, fmt.Errorf("no signed-in identity (sign in at %s)", appsession.LoginPagePath)
+	}
+	token := s.session.CookieToken(r)
+	if token == "" {
+		return subjectHats{}, fmt.Errorf("no session token to resolve a role from (sign in at %s)", appsession.LoginPagePath)
+	}
+	actor, err := s.fetchActorAnchors(r.Context(), token)
+	if err != nil {
+		return subjectHats{}, fmt.Errorf("resolve session role from the Gateway: %w", err)
+	}
+	hats := subjectHats{identityID: subject}
+	// The operator key is empty until bootstrap.Load has run; comparing
+	// against it then would exempt every role-less caller, so a blank key
+	// matches nothing rather than everything.
+	if opKey := operatorRoleKey(); strings.TrimSpace(opKey) != "" {
+		for _, role := range actor.Roles {
+			if strings.TrimSpace(role) == opKey {
+				hats.isOperator = true
+			}
+		}
+	}
+	for _, a := range actor.Anchors {
+		if a.Relation == "worksAt" && strings.TrimSpace(a.Key) != "" {
+			hats.workplaces = append(hats.workplaces, strings.TrimSpace(a.Key))
+		}
+	}
+	return hats, nil
+}
+
+// actorAnchorsResponse decodes the Gateway's GET /v1/actor body far enough to
+// read the anchors and roles arrays; the response also carries actorId,
+// which this read boundary does not need.
+type actorAnchorsResponse struct {
+	Anchors []appsession.ActorAnchor `json:"anchors"`
+	Roles   []string                 `json:"roles"`
+}
+
+// fetchActorAnchors asks the Gateway which workplace anchors and roles
+// token's actor carries.
+func (s *server) fetchActorAnchors(ctx context.Context, token string) (actorAnchorsResponse, error) {
+	ctx, cancel := context.WithTimeout(ctx, actorFetchTimeout)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, s.gatewayURL+"/v1/actor", nil)
+	if err != nil {
+		return actorAnchorsResponse{}, err
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return actorAnchorsResponse{}, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return actorAnchorsResponse{}, fmt.Errorf("gateway /v1/actor: HTTP %d", resp.StatusCode)
+	}
+	var body actorAnchorsResponse
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&body); err != nil {
+		return actorAnchorsResponse{}, err
+	}
+	return body, nil
 }
