@@ -153,7 +153,7 @@ designed-through, but the *fork decision* + the *contract commit* are Andrew's.
 ### Orchestration & edge — Loupe-routed (2026-07-25 PO pass)
 | Item | What it is | Imp | Size | State |
 |---|---|---|---|---|
-| **[Loom] No per-instance redrive** | `failed` is terminal, `RetryCount` only counts it, pause/resume are consumer-scoped (and the relay/deadline consumers are refused outright), and `StartLoomPattern` is idempotent on instanceId — so a failed flow cannot be resumed or safely re-run. Needs the double-execution question answered by design: resume at cursor, or restart under a new id with the old tombstoned. | ★★ | M | 📋 ready · consumer: Loupe Flows "act on it" · [why](../../implementation-artifacts/loupe-flows-edge-depth-ux.md) §2.2 |
+| **[Loom] No per-instance redrive** | `failed` is terminal, `RetryCount` only counts it, pause/resume are consumer-scoped (and the relay/deadline consumers are refused outright), and `StartLoomPattern` is idempotent on instanceId — so a failed flow cannot be resumed or safely re-run. Needs the double-execution question answered by design: resume at cursor, or restart under a new id with the old tombstoned. | ★★ | M | 🏗️ building · resume-at-cursor (never restart — avoids double-executing committed steps) · next: engine+control+CLI |
 
 ### Privacy / Vault
 | Item | What it is | Imp | Size | State |
