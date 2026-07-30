@@ -370,26 +370,40 @@ func replyError(reply *processor.OperationReply) string {
 	return string(reply.Status)
 }
 
-// submitOp publishes an op to ops.meta and waits for the Processor reply on
-// a NATS inbox, unless Submit is set (then it relays through that instead).
-// Mirrors cmd/lattice/output.SubmitOp; reproduced here so internal/pkgmgr
-// does not depend on a cmd/ package.
+// submitOp publishes a package-lifecycle op to ops.meta and waits for the
+// Processor reply on a NATS inbox, unless Submit is set (then it relays
+// through that instead — cmd/loupe/gatewayrelay.go's pkgmgrSubmit, scoped to
+// Install/Upgrade/UninstallPackage). Mirrors cmd/lattice/output.SubmitOp;
+// reproduced here so internal/pkgmgr does not depend on a cmd/ package.
 func (i *Installer) submitOp(ctx context.Context, operationType, class, requestID string, payload map[string]any) (*processor.OperationReply, error) {
 	if i.Submit != nil {
 		return i.Submit(ctx, operationType, class, requestID, payload)
 	}
+	return i.submitDirectOp(ctx, processor.LaneMeta, operationType, class, requestID, payload, nil)
+}
+
+// submitDirectOp publishes an op straight to ops.<lane> over NATS and waits
+// for the Processor's reply on a fresh inbox — the direct-NATS path every
+// submission uses, package-lifecycle or otherwise. Unlike submitOp it never
+// consults Submit: a caller that needs an op on a lane other than the
+// package-lifecycle meta lane (e.g. the op-meta retirement guard's
+// CancelTask, always on the default lane) calls this directly so the
+// Gateway-relay hook — scoped to Install/Upgrade/UninstallPackage — is never
+// asked to carry a lane it wasn't built for.
+func (i *Installer) submitDirectOp(ctx context.Context, lane processor.Lane, operationType, class, requestID string, payload map[string]any, hint *processor.ContextHint) (*processor.OperationReply, error) {
 	payloadJSON, err := json.Marshal(payload)
 	if err != nil {
 		return nil, fmt.Errorf("marshal payload: %w", err)
 	}
 	env := &processor.OperationEnvelope{
 		RequestID:     requestID,
-		Lane:          processor.LaneMeta,
+		Lane:          lane,
 		OperationType: operationType,
 		Actor:         i.AdminActor,
 		SubmittedAt:   i.Now().Format(time.RFC3339Nano),
 		Class:         class,
 		Payload:       payloadJSON,
+		ContextHint:   hint,
 	}
 	data, err := json.Marshal(env)
 	if err != nil {

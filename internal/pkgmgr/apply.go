@@ -130,6 +130,14 @@ func (i *Installer) Apply(ctx context.Context, def Definition, opts ApplyOptions
 		res.partitionKeys(mutations)
 		return res, nil
 	}
+	// The op-meta retirement guard (opmeta-retirement-open-task-guard-
+	// design.md §2) — skipped on DryRun above since a preview must never
+	// cancel a live task as a side effect.
+	if len(sum.tombstonedOpMetas) > 0 {
+		if err := i.enforceOpMetaDisposition(ctx, def, sum.tombstonedOpMetas); err != nil {
+			return nil, err
+		}
+	}
 	if err := i.submitUpgradeOp(ctx, def, existing.Version, mutations); err != nil {
 		return nil, err
 	}

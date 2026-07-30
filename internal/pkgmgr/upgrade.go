@@ -103,6 +103,16 @@ func (i *Installer) Upgrade(ctx context.Context, def Definition) (*UpgradeResult
 		return res, nil
 	}
 
+	// The op-meta retirement guard: refuse an undeclared op-meta drop, and
+	// cancel a RetireCancelsOpenTasks-declared drop's open referents before
+	// the tombstone below ever lands (opmeta-retirement-open-task-guard-
+	// design.md §2).
+	if len(sum.tombstonedOpMetas) > 0 {
+		if err := i.enforceOpMetaDisposition(ctx, def, sum.tombstonedOpMetas); err != nil {
+			return nil, err
+		}
+	}
+
 	// Step 5 — submit one UpgradePackage op.
 	if err := i.submitUpgradeOp(ctx, def, existing.Version, mutations); err != nil {
 		return nil, err
@@ -198,6 +208,39 @@ type diffSummary struct {
 	// correct and lands; what would otherwise be wrong is reporting it as
 	// success with nothing said, while the lens keeps serving its old spec.
 	reactivation []string
+	// tombstonedOpMetas names every op-meta this delta drops (recognized by
+	// the removed key's committed doc: class meta.ddl.vertexType +
+	// data.operationType) — the population the op-meta retirement guard
+	// (opmeta-retirement-open-task-guard-design.md §2) checks against the
+	// Definition's declared disposition before the mutations are submitted.
+	tombstonedOpMetas []tombstonedOpMeta
+}
+
+// tombstonedOpMeta names one op-meta a diff drops: its vertex key (so the
+// retirement guard can enumerate `forOperation` referents by op-meta id) and
+// its operationType (so it can be matched against a declared disposition).
+type tombstonedOpMeta struct {
+	Key           string
+	OperationType string
+}
+
+// opMetaOperationType reports the operationType a committed doc's op-meta
+// vertex carries, per build.go's recognizer: a non-routed meta-vertex classed
+// meta.ddl.vertexType with operationType on its own `data` (build.go:222-232).
+// Returns ("", false) for any other vertex shape.
+func opMetaOperationType(committed map[string]any) (string, bool) {
+	if committed == nil {
+		return "", false
+	}
+	if cls, _ := committed["class"].(string); cls != opMetaClass {
+		return "", false
+	}
+	data, _ := committed["data"].(map[string]any)
+	ot, _ := data["operationType"].(string)
+	if ot == "" {
+		return "", false
+	}
+	return ot, true
 }
 
 // diffManifest partitions the new create-batch against the old key set into the
@@ -310,6 +353,9 @@ func (i *Installer) diffManifest(ctx context.Context, oldKeys []string, newOps [
 			ExpectedRevision: &rev,
 		})
 		sum.tombstoned++
+		if ot, ok := opMetaOperationType(committed); ok {
+			sum.tombstonedOpMetas = append(sum.tombstonedOpMetas, tombstonedOpMeta{Key: k, OperationType: ot})
+		}
 	}
 
 	return out, sum, nil

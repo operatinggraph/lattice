@@ -196,6 +196,25 @@ type Definition struct {
 	// is compiled from the walks it grants, never hand-authored.
 	ReadGrantDomains []ReadGrantDomainSpec
 
+	// RetireCancelsOpenTasks lists operationTypes whose op-meta this package
+	// VERSION drops, with the disposition "cancel every open task that still
+	// references it" (opmeta-retirement-open-task-guard-design.md §2).
+	// Upgrade/Apply refuse a version that tombstones an op-meta whose
+	// operationType is declared in neither this nor MovedOps — even when this
+	// environment happens to hold zero open referents right now, since the
+	// declaration is authorship-time policy, not an apply-time convenience.
+	// A declared operationType that survives the version (not actually
+	// dropped) is inert.
+	RetireCancelsOpenTasks []string
+
+	// MovedOps declares operationType -> destination package name for an
+	// op-meta this version drops in favor of a successor elsewhere, reserving
+	// the vocabulary so the declaration surface does not churn when
+	// work-preserving moves land. Not implemented: Upgrade/Apply always
+	// refuse a dropped operationType found here today ("work-preserving
+	// moves are not yet supported — cancel or wait"); see the design doc §3.
+	MovedOps map[string]string
+
 	// readGrantWalksExpanded marks a Definition that already ran through
 	// ExpandReadGrantWalks and is what makes the pass idempotent. A composed
 	// lens still carries the Walks it was compiled from (only its Spec is
