@@ -13,6 +13,7 @@ func TestMutateSubject(t *testing.T) {
 	}{
 		{name: "loom pause", comp: "loom", ctlName: "loom-widget", op: "pause", want: "lattice.ctrl.loom.loom-widget.pause"},
 		{name: "loom inspect", comp: "loom", ctlName: "abc123", op: "inspect", want: "lattice.ctrl.loom.abc123.inspect"},
+		{name: "loom redrive", comp: "loom", ctlName: "inst1", op: "redrive", want: "lattice.ctrl.loom.inst1.redrive"},
 		{name: "weaver disable", comp: "weaver", ctlName: "t1", op: "disable", want: "lattice.ctrl.weaver.t1.disable"},
 		{name: "weaver revoke", comp: "weaver", ctlName: "t1", op: "revoke", want: "lattice.ctrl.weaver.t1.revoke"},
 		{name: "refractor rebuild", comp: "refractor", ctlName: "lensA", op: "rebuild", want: "lattice.ctrl.refractor.lensA.rebuild"},

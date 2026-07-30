@@ -219,6 +219,7 @@ func TestDemoAllowsControlPlaneReads(t *testing.T) {
 	for _, p := range []string{
 		"/api/control/loom/main/pause",
 		"/api/control/loom/main/resume",
+		"/api/control/loom/main/redrive",
 		"/api/control/weaver/t1/disable",
 		"/api/control/weaver/t1/enable",
 		"/api/control/weaver/t1/revoke",
