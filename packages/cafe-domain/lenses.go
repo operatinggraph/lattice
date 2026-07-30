@@ -80,8 +80,15 @@ func Lenses() []pkgmgr.LensSpec {
 			// the landlordUnitsRead idiom (loftspace-domain/lenses.go), not
 			// clinic's indirect two-lens patientIdentityReadGrants (there is
 			// no business vertex between the row and the login identity to
-			// route through — the anchor IS the identity). A staffer holding
-			// the reserved WildcardAnchor grant still reads every row.
+			// route through — the anchor IS the identity). Each row ALSO
+			// carries every workplace building that covers the identity's own
+			// lease (applicationFor -> appliesToUnit -> containedIn*0..7,
+			// mirroring cafeLeaseWorkplaces' own walk and clinicPatientsRead's
+			// practicesAt fan-out), so a worksAt-anchored front-desk actor
+			// (service-location's cap-read.staff grant) can resolve the name
+			// of every resident whose lease their workplace covers, not only
+			// themselves. A staffer holding the reserved WildcardAnchor grant
+			// still reads every row.
 			CanonicalName: "cafeIdentitiesRead",
 			Class:         "meta.lens",
 			Adapter:       "postgres",
@@ -229,13 +236,29 @@ RETURN
 // only identities carrying a `.name` aspect via ciphertext presence
 // (`i.name.data.ct <> null` — there is no plaintext `value` field at rest),
 // mirroring loftspace-domain's applicantRosterReadSpec. authz_anchors carries
-// the identity's OWN bare NanoID — see the Lenses() declaration above for why
-// that self-anchor (not an empty wildcard-only set) is the right shape here.
+// the identity's OWN bare NanoID (see the Lenses() declaration above for why
+// that self-anchor is the right shape here) PLUS the workplace fan-out below.
+//
+// The fan-out is a pattern COMPREHENSION anchored on `i` (clinicPatientsRead's
+// own idiom, one hop further out: identity -> leaseapp -> unit -> building),
+// not a separate MATCH: a MATCH binding the leaseapp/unit hops in the query
+// body would fan an identity with multiple leases into one row per lease,
+// colliding on the single-valued identity_id IntoKey. `applicationFor` runs
+// leaseapp -> identity (Contract #1 §1.1: the later-arriving leaseapp is the
+// source), so the walk reads `(i)<-[:applicationFor]-(l:leaseapp)`; the
+// `*0..7` containedIn bound is the exact depth cafeLeaseWorkplacesSpec (this
+// package) and worksAt_covers (ddls.go) both reach, so a front-desk actor's
+// cap-read.staff grant (service-location's staffReadGrants, anchored on the
+// building it worksAt) resolves the name of any resident whose lease that
+// building covers — the roster gap the read-side lease-workplace lens didn't
+// close, since /api/identities is a separate Postgres model, not the
+// cafeLeaseWorkplaces NATS-KV bucket.
 const cafeIdentitiesReadSpec = `MATCH (i:identity)
 WHERE i.name.data.ct <> null
 RETURN
   nanoIdFromKey(i.key)   AS identity_id,
   i.key                  AS identity_key,
   i.name.data            AS name,
-  [nanoIdFromKey(i.key)] AS authz_anchors
+  [nanoIdFromKey(i.key)] + [(i)<-[:applicationFor]-(l:leaseapp)-[:appliesToUnit]->(u)-[:containedIn*0..7]->(c) | nanoIdFromKey(c.key)]
+                         AS authz_anchors
 `

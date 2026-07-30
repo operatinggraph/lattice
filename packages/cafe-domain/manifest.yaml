@@ -1,5 +1,5 @@
 name: cafe-domain
-version: 0.11.6
+version: 0.11.7
 description: |
   Café house-tab POS session domain: the tab vertex type (OpenTab/Charge/
   VoidCharge/Settle, OCC-conditioned running total) + the tabStatus aspect
@@ -23,10 +23,14 @@ description: |
   lens carries each lease's covering locations — the read-side half of the
   workplace confinement this package's own require_workplace enforces on
   writes, so a staff read is scoped to the building they work at.
-  cafeIdentitiesRead is a PROTECTED, self-anchored Postgres SECURE LENS
-  (Contract #3 §3.10) resolving a signed-in identity's own name — cmd/cafe-app
-  reads it to render "Signed in as <name>" instead of a raw NanoID, mirroring
-  loftspace-domain's applicantRosterRead. Depends lease-signing + cafe-ledger.
+  cafeIdentitiesRead is a PROTECTED Postgres SECURE LENS (Contract #3 §3.10)
+  resolving a signed-in identity's own name — cmd/cafe-app reads it to render
+  "Signed in as <name>" instead of a raw NanoID, mirroring loftspace-domain's
+  applicantRosterRead. Each row anchors on its own identity NanoID PLUS every
+  workplace building that covers the identity's own lease, so a
+  worksAt-anchored front-desk actor (service-location's cap-read.staff grant)
+  can also resolve the name of any resident whose lease their workplace
+  covers, not only themselves. Depends lease-signing + cafe-ledger.
 depends:
   - lease-signing
   - cafe-ledger

@@ -534,3 +534,52 @@ func TestCafeIdentitiesRead_ExcludesUnnamedAndPlaintextShapedIdentities(t *testi
 	require.Len(t, rows, 1, "only the ciphertext-named identity projects")
 	require.Equal(t, bobKey, rows[0].Values["identity_key"])
 }
+
+// TestCafeIdentitiesRead_WorkplaceAnchorFanOut proves a resident identity's
+// authz_anchors carries every building that covers their own lease's unit —
+// the front-desk roster gap: a worksAt-anchored staffer's cap-read.staff
+// grant token is one of these building keys, not the resident's own NanoID,
+// so without this fan-out a real front-desk actor matched no row but its own.
+// Mirrors TestCafeLeaseWorkplaces_OneRowPerLease's containedIn chain, walked
+// from the identity side via applicationFor (leaseapp -> identity, Contract
+// #1 §1.1: the later-arriving leaseapp is the source).
+func TestCafeIdentitiesRead_WorkplaceAnchorFanOut(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newCdFixture(t)
+	aliceKey := f.identity(t, "alice")
+	f.aspect(t, "alice", "name", "name", envelopeData())
+	f.vtx(t, "lease", "leaseapp")
+	f.vtx(t, "unit4b", "unit")
+	f.vtx(t, "tower", "location")
+	f.edge(t, "applicationFor", "lease", "alice")
+	f.edge(t, "appliesToUnit", "lease", "unit4b")
+	f.edge(t, "containedIn", "unit4b", "tower")
+
+	rows := f.project(t, cafeIdentitiesReadSpec)
+	require.Len(t, rows, 1)
+	require.Equal(t, aliceKey, rows[0].Values["identity_key"])
+	require.ElementsMatch(t, []any{f.ids["alice"], f.ids["unit4b"], f.ids["tower"]}, rows[0].Values["authz_anchors"],
+		"authz_anchors must carry the self-anchor PLUS the bare NanoID of the unit and every building covering it")
+}
+
+// TestCafeIdentitiesRead_NoLeaseKeepsSelfAnchorOnly proves an identity with no
+// leaseapp application at all (e.g. a staffer with no residence of their own)
+// still projects — the self-anchor survives on its own, and the variable-length
+// walk finding no leaseapp yields an empty fan-out rather than dropping the row
+// or erroring, the same posture leaseWorkplacesSpec's own *0.. hop takes for an
+// unwired lease (TestCafeLeaseWorkplaces_Unwired*).
+func TestCafeIdentitiesRead_NoLeaseKeepsSelfAnchorOnly(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newCdFixture(t)
+	f.identity(t, "staffonly")
+	f.aspect(t, "staffonly", "name", "name", envelopeData())
+
+	rows := f.project(t, cafeIdentitiesReadSpec)
+	require.Len(t, rows, 1)
+	require.ElementsMatch(t, []any{f.ids["staffonly"]}, rows[0].Values["authz_anchors"],
+		"no lease application means no fan-out, but the self-anchor must still be present")
+}

@@ -88,6 +88,15 @@ actor holding the primordial `operator` role and no-op on the resident-self path
 walk (`facet-staff-worlds-design.md` §9): it projects `coveringLocations` per lease so a staff read
 boundary gets the identical answer from a set intersection, no Core-KV read needed (P5).
 
+## Front-desk identity roster
+
+`cafeIdentitiesRead` (protected Postgres Secure Lens, Contract #3 §3.10) resolves a signed-in identity's own
+name for "Signed in as <name>". Each row anchors on its own identity NanoID PLUS every workplace building
+that covers the identity's own lease (`applicationFor -> appliesToUnit -> containedIn*0..7`, the same depth
+`cafeLeaseWorkplaces` and `worksAt_covers` reach) — so a `worksAt`-anchored front-desk actor
+(service-location's `staffReadGrants`, `cap-read.staff`) resolves the name of any resident whose lease their
+workplace covers, not only themselves. A WildcardAnchor holder still reads the whole roster.
+
 ## Weaver posts the settled total, never a direct cross-package write
 
 `cafe-domain`'s own op scripts never write a `cafeaccount`/`cafetransaction` mutation directly — the
@@ -112,5 +121,7 @@ never a payload value).
 
 - **Per-item charge audit trail** — `Charge` accumulates a running total only; itemized line receipts
   are a future extension if the product needs one (YAGNI — no demand row asks for it yet).
-- **One-open-tab-per-lease exclusivity** — a resident could in principle have two concurrently open
-  tabs; no demand row requires the guard, so it is not built.
+
+One-open-tab-per-lease exclusivity IS built, not out of scope: the `cafeOpenTabGuard` aspect (Inventory
+above) is a per-lease dedup guard `OpenTab` claims and `Settle` releases, rejecting a second concurrent
+`OpenTab` on the same lease with `OpenTabAlreadyExists` (`ddls.go`).

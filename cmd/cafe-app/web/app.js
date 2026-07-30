@@ -557,12 +557,26 @@ async function loadFrontDesk() {
     (vs.visits || []).forEach((v) => { visitsByLease[v.leaseAppKey] = v; });
   } catch (_) { /* front-desk not installed / unreachable — visit badge just doesn't show */ }
 
+  // Same join, for the lease's own applicant identity — resolved to a name via
+  // the protected cafeIdentitiesRead roster (state.identities, loadIdentities),
+  // whose authz_anchors now fan out over the staffer's own workplace so this
+  // resolves for every lease their workplace covers, not only themselves.
+  // Best-effort, same degrade-to-hidden posture as above: falls back to the
+  // truncated lease key if the roster row or /api/residents itself is unreachable.
+  let residentsByLease = {};
+  try {
+    const rs = await appGet("/api/residents");
+    (rs.residents || []).forEach((r) => { residentsByLease[r.leaseAppKey] = r.bookerKey; });
+  } catch (_) { /* residents roster unreachable — the card falls back to the lease key */ }
+
   summary.textContent = tabs.length + " open tab" + (tabs.length === 1 ? "" : "s");
   if (!tabs.length) {
     grid.innerHTML = '<div class="empty">No open tabs.</div>';
     return;
   }
-  grid.innerHTML = tabs.map((t) => frontDeskCard(t, bookingsByLease[t.leaseAppKey], leaseDetailsByLease[t.leaseAppKey], visitsByLease[t.leaseAppKey])).join("");
+  grid.innerHTML = tabs
+    .map((t) => frontDeskCard(t, bookingsByLease[t.leaseAppKey], leaseDetailsByLease[t.leaseAppKey], visitsByLease[t.leaseAppKey], residentsByLease[t.leaseAppKey]))
+    .join("");
   tabs.forEach((t) => {
     const btn = document.getElementById("settle-" + t.tabKey.replace(/[^a-zA-Z0-9]/g, ""));
     if (!btn) return;
@@ -583,7 +597,7 @@ async function loadFrontDesk() {
   });
 }
 
-function frontDeskCard(t, booking, lease, visit) {
+function frontDeskCard(t, booking, lease, visit, bookerKey) {
   const id = "settle-" + t.tabKey.replace(/[^a-zA-Z0-9]/g, "");
   const classBadge = booking
     ? '<div class="meta">🧘 Booked: ' + (booking.sessionName || "class") + " · " + (booking.startsAt || "?") + "</div>"
@@ -597,10 +611,15 @@ function frontDeskCard(t, booking, lease, visit) {
   const visitBadge = visit
     ? '<div class="meta">🩺 Visit: ' + (visit.startsAt || "?") + "</div>"
     : "";
+  // The lease's applicant, resolved to a name via the protected roster
+  // (nameForIdentity) — falls back to the truncated lease key when the
+  // applicant is unknown or unresolved, the same degrade the "who" title
+  // always showed before this join existed.
+  const who = bookerKey ? nameForIdentity(idOf(bookerKey)) : shortKey(t.leaseAppKey);
   return (
     '<div class="card">' +
     '<span class="badge open">open</span>' +
-    '<div class="who">' + shortKey(t.leaseAppKey) + "</div>" +
+    '<div class="who">' + escapeHtml(who) + "</div>" +
     '<div class="amount">' + money(t.totalCents) + "</div>" +
     '<div class="meta">Opened ' + (t.openedAt || "?") + "</div>" +
     classBadge +
