@@ -5,12 +5,15 @@
 // Loom's own instance state.
 //
 // All decision logic lives in logic/flows.js (goja-tested); this file binds
-// DOM. Read-only — no control-plane op from here (Loom exposes no per-instance
-// redrive; see loupe-flows-edge-depth-ux.md §2.2).
+// DOM. Mostly read-only: the one write is a failed instance's Retry, which
+// POSTs the control plane's redrive op (loupe-flows-edge-depth-ux.md §2.2) and
+// reloads the detail on success — the engine, not this cross-reference, is
+// authoritative for whether a redrive actually applies.
 
-import { $, el, api, setStatus } from "../api.js";
+import { $, el, api, setStatus, demoHide, toast } from "../api.js";
 import { keyLinkEl } from "../render.js";
 import { navigate } from "../router.js";
+import { controlOpHidden } from "./demo.js";
 import {
   flowRows, groupFlowsByPattern, groupSummary, flowsHeadline,
   stepRows, stepSummary, engineDisagreement, flowLabel, flowKind, patternLabel,
@@ -144,6 +147,7 @@ async function loadDetail(id) {
       "Loom's own view is unavailable (" + body.engineError + "), so only the durable history is shown."));
   }
   if (row.failureReason) panel.appendChild(el("div", "card-issue bad", row.failureReason));
+  if (row.status === "failed") panel.appendChild(retrySection(row.instanceId));
 
   panel.appendChild(factRow("instance", row.instanceId));
   if (row.subjectKey) panel.appendChild(factRow("subject", keyLinkEl(row.subjectKey)));
@@ -192,6 +196,41 @@ function stepsPanel(body, row, inst) {
     box.appendChild(line);
   });
   return box;
+}
+
+// retrySection is the one write this view offers: a failed instance's only
+// path back to running is the control plane's redrive (Loom supports no other
+// retry — loupe-flows-edge-depth-ux.md §2.2), which resumes at the instance's
+// own recorded cursor rather than starting a second instance that would
+// re-execute already-committed steps. Hidden in demo mode like every other
+// mutating control button (controlOpHidden).
+function retrySection(instanceId) {
+  const box = el("div", "flow-retry");
+  const btn = el("button", "comp-ctlbtn", "Retry");
+  if (controlOpHidden("loom", "redrive")) demoHide(btn);
+  const msg = el("span", "muted small");
+  btn.addEventListener("click", () => runRedrive(instanceId, btn, msg));
+  box.appendChild(btn);
+  box.appendChild(msg);
+  return box;
+}
+
+// runRedrive POSTs the redrive op and reloads the detail on success, so the
+// page re-renders against the engine's new (running) state rather than
+// patching the stale failed row in place.
+async function runRedrive(instanceId, btn, msg) {
+  btn.disabled = true;
+  msg.className = "muted small";
+  msg.textContent = "redriving…";
+  const body = await api("/api/control/loom/" + encodeURIComponent(instanceId) + "/redrive", { method: "POST" });
+  if (!body.redrive || !body.redrive.redriven) {
+    msg.className = "card-issue bad";
+    msg.textContent = typeof body.error === "string" ? body.error : "redrive failed";
+    btn.disabled = false;
+    return;
+  }
+  toast("redriven — resuming at its recorded cursor");
+  loadDetail(instanceId);
 }
 
 function init() {

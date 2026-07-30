@@ -45,7 +45,7 @@ var controlComponents = map[string]controlComponent{
 			"list":      "lattice.ctrl.loom.list",
 			"consumers": "lattice.ctrl.loom.consumers",
 		},
-		mutateOps:   setOf("inspect", "pause", "resume"),
+		mutateOps:   setOf("inspect", "pause", "resume", "redrive"),
 		readOnlyOps: setOf("inspect"),
 	},
 	"weaver": {

@@ -187,8 +187,9 @@
         Loom's own instance state: <b>live</b> (the engine is running it), <b>history stale</b> (the
         engine considers it finished — the terminal event never reached this projection), or
         <b>orphaned</b> (the engine has no record of it at all). Neither of the last two is a leak, and
-        neither is a stuck flow; both are the history disagreeing with the engine. Read-only — Loom
-        exposes no per-instance redrive, so there is no control-plane op from here.</p>
+        neither is a stuck flow; both are the history disagreeing with the engine. A failed instance's
+        detail view offers a Retry, which resumes it at its own recorded cursor via the control plane's
+        redrive op.</p>
         <div class="cards" id="flows-cards"></div>
       </div>
       <div id="flow-detail"></div>
