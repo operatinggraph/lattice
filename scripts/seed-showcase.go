@@ -846,6 +846,17 @@ func seedClinicProvider(ctx context.Context, conn *substrate.Conn, adminKey stri
 // negative — a provider-scoped feed must show Osei's own appointments and
 // must never show Patel's). Fixed handle; per-mutation idempotent, mirroring
 // seedClinicProvider exactly. Returns Osei's identity key.
+//
+// Osei stays UNCONSTRAINED (windows=[]) by an unconditioned SetProviderHours
+// upsert run on every seed, not gated behind an alive() check — the
+// showcase's own day-rolling appointment (seedRileyClinicWorld's
+// futureDayAt(1, 14)) books ANY weekday, so a narrow .hours window set by an
+// earlier live provider-self-service probe (SetProviderHours is a standing
+// binder any identifiedBy-bound provider, not just the seed script, may
+// call) silently strands the seeded appointment with OutsideHours on every
+// day but the one the stale window still permits. An unconditioned upsert —
+// SetProviderHours has no OCC/guard aspect, config not a write-path claim
+// key — heals that stale state on every rerun instead of only a fresh world.
 func seedOseiProvider(ctx context.Context, conn *substrate.Conn, adminKey, providerRoleKey string) string {
 	if !alive(ctx, conn, oseiProviderKey) {
 		submitOp(ctx, conn, adminKey, "CreateProvider", "provider",
@@ -860,6 +871,9 @@ func seedOseiProvider(ctx context.Context, conn *substrate.Conn, adminKey, provi
 				OptionalReads: []string{practicesLnk},
 			})
 	}
+	submitOp(ctx, conn, adminKey, "SetProviderHours", "provider",
+		map[string]any{"providerKey": oseiProviderKey, "windows": []any{}},
+		&processor.ContextHint{Reads: []string{oseiProviderKey}})
 	identityKey := ensureProviderIdentity(ctx, conn, adminKey, providerRoleKey, oseiProviderKey, oseiName, oseiEmail)
 	waitForRoleGrant(ctx, conn, identityKey, "ctrl.refractor.register")
 	return identityKey
@@ -986,14 +1000,21 @@ func ensureServiceProviderIdentity(ctx context.Context, conn *substrate.Conn, ad
 }
 
 // seedRileyClinicWorld gives Riley Chen (tenant1) a clinic patient record
-// bound to their own login identity, and books one future appointment with
-// EACH clinic provider — the Osei/Patel scoping positive/negative
+// bound to their own login identity, books one future appointment with EACH
+// clinic provider — the Osei/Patel scoping positive/negative
 // (persona-worlds-design.md Fire W0): Osei's own provider-scoped feed must
-// show the Osei appointment and must NOT show the Patel one. Fixed patient
-// handle; day-derived appointment ids on the 15-minute grid, offset a whole
-// distinct days AND distinct fixed hours (futureDayAt) so neither the derived
-// id nor the patient's own slot claims can collide between the two bookings —
-// nor across a reseed a day later, when the +1-day booking lands on the +2-day
+// show the Osei appointment and must NOT show the Patel one — and opens a
+// ledger account + a recurring visit series with Osei, so Riley's own
+// patient-facing tabs (/api/my-visit-series, /api/ledger) are never empty:
+// the account and series guard aspects live on the PATIENT
+// (.ledgerAccount, .activeVisitSeriesWith<providerId>), independent of the
+// account/series vertex's own freshly-minted NanoID, so idempotency checks
+// against those guard keys (not the unpredictable child key) mirror
+// seedKaiServiceProvider's identity-guard idiom. Fixed patient handle;
+// day-derived appointment ids on the 15-minute grid, offset a whole distinct
+// days AND distinct fixed hours (futureDayAt) so neither the derived id nor
+// the patient's own slot claims can collide between the two bookings — nor
+// across a reseed a day later, when the +1-day booking lands on the +2-day
 // booking's date (distinct hours keep them off the same patient-hub slot). A
 // rerun on the same UTC day converges on the same ids (mirrors
 // seedWellnessEntities/seedMaintenanceBeat's day-derived idiom).
@@ -1043,6 +1064,22 @@ func seedRileyClinicWorld(ctx context.Context, conn *substrate.Conn, adminKey, t
 					slotClaimKeys(providerKey, patelStart, patelEnd),
 					slotClaimKeys(rileyPatientKey, patelStart, patelEnd)...),
 			})
+	}
+
+	if !alive(ctx, conn, rileyPatientKey+".ledgerAccount") {
+		submitOp(ctx, conn, adminKey, "CreateAccount", "clinicaccount",
+			map[string]any{"patientKey": rileyPatientKey},
+			&processor.ContextHint{Reads: []string{rileyPatientKey}})
+	}
+
+	seriesStart := time.Now().UTC().AddDate(0, 0, -14)
+	if !alive(ctx, conn, rileyPatientKey+".activeVisitSeriesWith"+oseiProviderID) {
+		submitOp(ctx, conn, adminKey, "StartVisitSeries", "visitseries",
+			map[string]any{
+				"patientKey": rileyPatientKey, "providerKey": oseiProviderKey,
+				"intervalDays": 30, "startAt": seriesStart.Format(time.RFC3339),
+			},
+			&processor.ContextHint{Reads: []string{rileyPatientKey, oseiProviderKey}})
 	}
 }
 
