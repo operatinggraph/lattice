@@ -395,6 +395,67 @@ func TestHealthSummary_Rollup_WeaverLoom(t *testing.T) {
 	})
 }
 
+// TestHealthSummary_Rollup_RefractorProcessorIssues pins that the bespoke
+// refractor-heartbeat / processor-heartbeat branches escalate on an inline
+// issues[] error/warning exactly like the generic component-heartbeat branch
+// does (TestHealthSummary_Rollup_WeaverLoom) — both components emit the same
+// uniform {status, heartbeatAt, issues[]} body (e.g. refractor's
+// LensRegistryIncomplete, lens-registry-restart-integrity-design.md §4 Fire
+// B) through their own case, added only for the lensLags / ops_consumed
+// Details formatting, and that case previously never read issues[] at all —
+// a live example (2026-07-30, dev stack) sat "unhealthy" with an open error
+// issue for 2.5h while `lattice health summary` printed the row "green".
+func TestHealthSummary_Rollup_RefractorProcessorIssues(t *testing.T) {
+	now := time.Now().UTC()
+	fresh := now.Add(-5 * time.Second).Format(time.RFC3339)
+
+	t.Run("RefractorErrorRed", func(t *testing.T) {
+		level := rollupOf(t, map[string]map[string]any{
+			"health.refractor.rfx-01": {"heartbeatAt": fresh, "status": "unhealthy", "issues": []any{
+				map[string]any{"severity": "error", "code": "LensRegistryIncomplete", "message": "boom"},
+			}},
+			"health.bootstrap.complete": {"status": "complete"},
+		})
+		if level != rollupRed {
+			t.Errorf("overall = %v, want RED (refractor error issue)", level)
+		}
+	})
+
+	t.Run("RefractorWarningYellow", func(t *testing.T) {
+		level := rollupOf(t, map[string]map[string]any{
+			"health.refractor.rfx-02": {"heartbeatAt": fresh, "status": "degraded", "issues": []any{
+				map[string]any{"severity": "warning", "code": "SomeWarning", "message": "hmm"},
+			}},
+			"health.bootstrap.complete": {"status": "complete"},
+		})
+		if level != rollupYellow {
+			t.Errorf("overall = %v, want YELLOW (refractor warning issue)", level)
+		}
+	})
+
+	t.Run("ProcessorErrorRed", func(t *testing.T) {
+		level := rollupOf(t, map[string]map[string]any{
+			"health.processor.proc-01": {"heartbeatAt": fresh, "status": "unhealthy", "issues": []any{
+				map[string]any{"severity": "error", "code": "SomeIssue", "message": "boom"},
+			}},
+			"health.bootstrap.complete": {"status": "complete"},
+		})
+		if level != rollupRed {
+			t.Errorf("overall = %v, want RED (processor error issue)", level)
+		}
+	})
+
+	t.Run("RefractorNoIssuesStaysGreen", func(t *testing.T) {
+		level := rollupOf(t, map[string]map[string]any{
+			"health.refractor.rfx-03":  {"heartbeatAt": fresh, "status": "healthy", "issues": []any{}},
+			"health.bootstrap.complete": {"status": "complete"},
+		})
+		if level != rollupGreen {
+			t.Errorf("overall = %v, want GREEN (no issues)", level)
+		}
+	})
+}
+
 // rollupOf computes the overall rollup level for a doc set (test helper).
 // sharedReporterComponents are components that emit through the shared healthkv
 // reporter and carry no bespoke case in classifyKey — the set the structural

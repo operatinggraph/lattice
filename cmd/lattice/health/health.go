@@ -265,6 +265,22 @@ func computeSummaryRollup(allKeys []string, readEntry func(string) (map[string]a
 				committed, _ := metrics["ops_committed_total"].(float64)
 				row.Details = fmt.Sprintf("ops_consumed=%.0f ops_committed=%.0f", consumed, committed)
 			}
+			// Inline issues[] (Contract #5 §5.5): error → red, warning → yellow.
+			// The processor's own HealthHeartbeater emits this field alongside
+			// the bespoke ops_consumed/ops_committed metrics, so it needs the
+			// same escalation the generic component-heartbeat branch applies.
+			for _, it := range issueSeverities(doc) {
+				switch it {
+				case "error":
+					row.level = worstOf(row.level, rollupRed)
+					row.Status = "error"
+				case "warning":
+					row.level = worstOf(row.level, rollupYellow)
+					if row.Status == "green" {
+						row.Status = "warning"
+					}
+				}
+			}
 			overall = worstOf(overall, row.level)
 			rows = append(rows, row)
 
@@ -293,6 +309,26 @@ func computeSummaryRollup(allKeys []string, readEntry func(string) (map[string]a
 						parts = append(parts, fmt.Sprintf("%s=%.0f", lens, lagF))
 					}
 					row.Details = "lensLags: " + strings.Join(parts, " ")
+				}
+			}
+			// Inline issues[] (Contract #5 §5.5): error → red, warning → yellow.
+			// refractor-heartbeat is its own case (for the lensLags Details
+			// formatting above) rather than falling into the generic
+			// component-heartbeat branch, but it shares the same uniform
+			// {status, heartbeatAt, issues[]} body (e.g. LensRegistryIncomplete,
+			// lens-registry-restart-integrity-design.md §4 Fire B) and must
+			// escalate on it identically — otherwise an open error-severity
+			// issue stays invisible behind a "green" row indefinitely.
+			for _, it := range issueSeverities(doc) {
+				switch it {
+				case "error":
+					row.level = worstOf(row.level, rollupRed)
+					row.Status = "error"
+				case "warning":
+					row.level = worstOf(row.level, rollupYellow)
+					if row.Status == "green" {
+						row.Status = "warning"
+					}
 				}
 			}
 			overall = worstOf(overall, row.level)
