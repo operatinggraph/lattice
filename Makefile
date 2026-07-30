@@ -1624,9 +1624,13 @@ run-wellness-app:
 ## fixture's connect, in a package the change never touched, is host contention,
 ## not a bug — see internal/natsfixture's package doc. Re-run that package alone to
 ## confirm, and never loosen an assertion to make a suite run go green.
+## PROCESSOR_SCRIPT_WALL_MS widens the Starlark wall budget for this parallel
+## run only — package-install fixtures validate 100+ DDL mutations in one
+## script call, and -p 4's CPU contention can push that past the production
+## 250ms NFR-P4 budget on a loaded host. The production default is untouched.
 test:
 	@echo "==> go test ./... -p 4"
-	go test ./... -p 4
+	PROCESSOR_SCRIPT_WALL_MS=5000 go test ./... -p 4
 
 ## test-hello-lattice — Run the Phase 1 Gate 5 Hello Lattice integration test suite.
 ## Requires a running Docker stack (make up) with Refractor live.

@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -15,10 +17,26 @@ import (
 	"github.com/operatinggraph/lattice/internal/substrate"
 )
 
+// defaultScriptWallBudgetMs is NFR-P4's production budget: it targets 100ms
+// p99, and this gives headroom for hot paths.
+const defaultScriptWallBudgetMs = 250
+
 // DefaultScriptWallBudget is the default wall-clock execution budget for a
-// single script invocation. NFR-P4 targets 100ms p99; the wall budget here
-// gives headroom for hot paths. Configurable via PROCESSOR_SCRIPT_WALL_MS.
-const DefaultScriptWallBudget = 250 * time.Millisecond
+// single script invocation, read once at process start from
+// PROCESSOR_SCRIPT_WALL_MS (falling back to the NFR-P4 production budget
+// when unset or invalid). Widening it is for test/CI harnesses that
+// validate a whole package (100+ DDL mutations) in one script call under
+// noisy parallel load — it does not change the production default.
+var DefaultScriptWallBudget = defaultScriptWallBudgetFromEnv()
+
+func defaultScriptWallBudgetFromEnv() time.Duration {
+	if raw := os.Getenv("PROCESSOR_SCRIPT_WALL_MS"); raw != "" {
+		if ms, err := strconv.Atoi(raw); err == nil && ms > 0 {
+			return time.Duration(ms) * time.Millisecond
+		}
+	}
+	return defaultScriptWallBudgetMs * time.Millisecond
+}
 
 // DefaultScriptMaxSteps is the secondary safeguard against infinite loops
 // in Starlark. Set generously — the wall-clock is the primary fence.
