@@ -2,6 +2,21 @@
 
 Rolled from `verticals.md` when its live Done log passed ~25 entries. Full detail is in git.
 
+- 2026-07-27 · `ff22c446` · `docs/components/edge-manifest.md` refreshed to its real eighteen Personal Lenses + three generated read-grant producers (was six).
+- 2026-07-27 · `1389a0e9` · A naturally-ended visit series reads "ended", not "paused" — `series_status` replaces the fused `active` boolean; Resume no longer offered. clinic-recurring-visit-series §8
+- 2026-07-27 · `ab2280ed` · Entity detail withholds a self-administer op from a row that isn't the caller's own (`crossHatMismatch`); instructorKey provenance rides 3 lenses (`df3afd75`). persona-worlds §7
+- 2026-07-27 · `ab2280ed` · Task detail routes the business op AND `ClaimTask` through `opButton`'s degrade gate via `ctx.taskKey`; a queued row is now click-through too.
+- 2026-07-27 · `56504197` · Front desk books a walk-in guest at the standard rate (`CreateBooking` already allowed it); `/api/roster-sessions` stops the roster leaking other buildings' classes.
+- 2026-07-27 · `7911ccf6` · The descriptor corpus speaks human — titles/date-widgets/auto-filled keys across 12 packages, `{me.<type>?}` optional templates, label floor; booking E2E-verified at the resident rate. facet-discovery-restoration §7
+- 2026-07-27 · `bb9fe41a` · Live-walk follow-on — pickered targets offer without ctx resolution, no label floors to a short id, the orphaned task healed; the modal's lens-race + loader gaps filed to lattice.md. facet-discovery-restoration §6
+- 2026-07-27 · `86564999` · The discovery covenant restored — panes/labels/state-conditions become descriptor data, `staff.go` dies, `lint-facet-discovery` gates cmd/facet in CI. facet-discovery-restoration-design.md
+- 2026-07-27 · `69d8ccce` · `worksAt_covers` follows the containedIn-page cursor — 9 S10-pinned copies + cafe-domain's `location_covers` sibling fixed identically; `MAX_PARENT_PAGES=4` bounds the walk, common path unchanged.
+- 2026-07-27 · `a7b1f935` · Facet resolves `patient`/`visitseries` dispatch targets via the Protected staff-worklist pane, not the mirror. facet-entity-browse-design §9
+- 2026-07-27 · `—` · 29-package census re-run vs S2-S5/S8 — S3/S4/S5/S8 clean corpus-wide (S4 now S10-gated); S2 table-format gap filed. standard §14
+- 2026-07-27 · `af302004` · `actor_holds_operator` follows the role-page cursor — 15 S10-pinned copies across 9 packages fixed identically; `MAX_ROLE_PAGES=4` bounds the walk, common path unchanged. facet-staff-worlds §12
+- 2026-07-27 · `—` (closed, not built) · Ownership-op `consumer` delegation grant — decided NOT to build (irrevocable, PII-decrypt exposure, no demand); stays operator-conferred. persona-worlds W2 Inc 5 §4
+- 2026-07-27 · `65254aee` · seed-showcase reminds instead of RevisionConflict-crashing — every `CreateUnclaimedIdentity` call declares its identityindex probes as optionalReads; ctx raised past the projection-lag window
+- 2026-07-27 · `b0c6cef4` · Self-order Charge confined to the menu item's own building — `location_covers` mirrors `worksAt_covers` against the item's `servedAt` place
 - 2026-07-27 · `2c41318b` · The instructor + serviceprovider hats get their op — two inert chips resolve; the standing guard, not the shared `provider` role, confines. facet-staff-worlds §12
 - 2026-07-27 · `5c914479` · A pre-existing identity acquires the consumer grant the Gateway promises it — bound personas reach the 20 self-service ops; absent-only, so a RevokeRole holds. facet-staff-worlds §13
 - 2026-07-27 · `526edfdf` · The claim ceremony gets a live walker — it found a live capability-projection gap the unit tests couldn't see; bug filed to lattice.md, repro `make test-claim-ceremony`. facet-staff-worlds §13.1
