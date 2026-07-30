@@ -1,13 +1,17 @@
 package identity
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"io"
+	"os"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/nats-io/nats.go/jetstream"
+	"github.com/spf13/cobra"
 
 	"github.com/operatinggraph/lattice/internal/bootstrap"
 	"github.com/operatinggraph/lattice/internal/processor"
@@ -19,7 +23,36 @@ const (
 	testActorID  = "JstffActHJKMNPQRSTUV"
 	testActorKey = "vtx.identity." + testActorID
 	testCapKey   = "cap.identity." + testActorID
+
+	testConsumerActorID  = "CnsmrActHJKMNPQRSTUV"
+	testConsumerActorKey = "vtx.identity." + testConsumerActorID
+	testConsumerCapKey   = "cap.identity." + testConsumerActorID
 )
+
+// runCmd executes cmd with args, capturing stdout. Returns stdout and the
+// command error.
+func runCmd(t *testing.T, cmd *cobra.Command, args []string) (string, error) {
+	t.Helper()
+	cmd.SetArgs(args)
+
+	oldStdout := os.Stdout
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("os.Pipe: %v", err)
+	}
+	os.Stdout = w
+
+	cmdErr := cmd.Execute()
+
+	if err := w.Close(); err != nil {
+		t.Fatalf("close pipe: %v", err)
+	}
+	os.Stdout = oldStdout
+
+	var buf bytes.Buffer
+	_, _ = io.Copy(&buf, r)
+	return buf.String(), cmdErr
+}
 
 // TestIdentityCreateUnclaimed_HappyPath verifies that a CreateUnclaimedIdentity
 // operation is submitted and accepted via NATS request-reply.
@@ -95,6 +128,104 @@ func TestIdentityClaim_EnvelopeShape(t *testing.T) {
 	}
 }
 
+// TestIdentityClaim_CLI_HappyPath drives the actual `identity create-unclaimed`
+// and `identity claim` cobra commands end to end against a real, package-
+// installed ClaimIdentity script. Regression coverage for the claim
+// subcommand never declaring ContextHint.Reads: without it, state[] hydrates
+// none of the target identity's key/.state/.claimKey aspects, and the
+// script's own absence checks reject every claim — valid secret or not —
+// with the same generic ClaimKeyInvalid code a real anti-enumeration
+// rejection uses, so a broken CLI and a broken claim were indistinguishable
+// from the caller's side.
+func TestIdentityClaim_CLI_HappyPath(t *testing.T) {
+	ctx, conn, cp, cons := setupIdentityEnv(t)
+	natsURL := conn.NATS().ConnectedUrl()
+
+	doneC := make(chan processor.MessageOutcome, 4)
+	cc, err := cons.Consume(func(m jetstream.Msg) {
+		out := cp.HandleMessage(ctx, m)
+		select {
+		case doneC <- out:
+		default:
+		}
+	})
+	if err != nil {
+		t.Fatalf("Consume: %v", err)
+	}
+	defer cc.Stop()
+
+	outputFmt := "json"
+	defaultActor := ""
+
+	createOut, err := runCmd(t, NewCommand(&natsURL, &outputFmt, &defaultActor), []string{
+		"create-unclaimed",
+		"--actor", testActorKey,
+		"--payload", `{"name":"CLI Regression Probe","email":"cli-regression-probe@example.invalid"}`,
+	})
+	if err != nil {
+		t.Fatalf("create-unclaimed: %v (output: %s)", err, createOut)
+	}
+	select {
+	case <-doneC:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for create-unclaimed to process")
+	}
+
+	var created struct {
+		PrimaryKey string `json:"primaryKey"`
+		ClaimKey   string `json:"claimKey"`
+	}
+	var createEnv struct {
+		OK   bool            `json:"ok"`
+		Data json.RawMessage `json:"data"`
+	}
+	if err := json.Unmarshal([]byte(createOut), &createEnv); err != nil {
+		t.Fatalf("unmarshal create-unclaimed envelope: %v (output: %s)", err, createOut)
+	}
+	if !createEnv.OK {
+		t.Fatalf("create-unclaimed rejected: %s", createOut)
+	}
+	if err := json.Unmarshal(createEnv.Data, &created); err != nil {
+		t.Fatalf("unmarshal create-unclaimed data: %v (output: %s)", err, createOut)
+	}
+	if created.PrimaryKey == "" || created.ClaimKey == "" {
+		t.Fatalf("create-unclaimed output missing primaryKey/claimKey: %s", createOut)
+	}
+
+	claimPayload, err := json.Marshal(map[string]string{
+		"claimKey":          created.ClaimKey,
+		"targetIdentityKey": created.PrimaryKey,
+	})
+	if err != nil {
+		t.Fatalf("marshal claim payload: %v", err)
+	}
+
+	claimOut, err := runCmd(t, NewCommand(&natsURL, &outputFmt, &defaultActor), []string{
+		"claim",
+		"--actor", testConsumerActorKey,
+		"--payload", string(claimPayload),
+	})
+	if err != nil {
+		t.Fatalf("claim: %v (output: %s)", err, claimOut)
+	}
+	select {
+	case <-doneC:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for claim to process")
+	}
+
+	var claimEnv struct {
+		OK   bool                     `json:"ok"`
+		Data processor.OperationReply `json:"data"`
+	}
+	if err := json.Unmarshal([]byte(claimOut), &claimEnv); err != nil {
+		t.Fatalf("unmarshal claim envelope: %v (output: %s)", err, claimOut)
+	}
+	if !claimEnv.OK || claimEnv.Data.Status != processor.ReplyStatusAccepted {
+		t.Fatalf("claim not accepted (output: %s)", claimOut)
+	}
+}
+
 func setupIdentityEnv(t *testing.T) (context.Context, *substrate.Conn, *processor.CommitPath, jetstream.Consumer) {
 	t.Helper()
 	ctx, conn := testutil.SetupPackageTestEnv(t)
@@ -113,6 +244,20 @@ func setupIdentityEnv(t *testing.T) (context.Context, *substrate.Conn, *processo
 		ServiceAccess:   []processor.ServiceAccessEntry{},
 		EphemeralGrants: []processor.EphemeralGrant{},
 		Roles:           []string{bootstrap.RoleOperatorKey},
+	})
+	testutil.SeedCapDoc(t, ctx, conn, &processor.CapabilityDoc{
+		Key:                    testConsumerCapKey,
+		Actor:                  testConsumerActorKey,
+		Version:                "1.0",
+		ProjectedAt:            now.Format(time.RFC3339Nano),
+		ProjectedFromRevisions: map[string]uint64{testConsumerActorKey: 1},
+		Lanes:                  []string{"default"},
+		PlatformPermissions: []processor.PlatformPermission{
+			{OperationType: "ClaimIdentity", Scope: "self"},
+		},
+		ServiceAccess:   []processor.ServiceAccessEntry{},
+		EphemeralGrants: []processor.EphemeralGrant{},
+		Roles:           []string{"vtx.role.consumer"},
 	})
 
 	cp, cons := testutil.CapabilityPipeline(t, ctx, conn, testutil.PipelineConfig{

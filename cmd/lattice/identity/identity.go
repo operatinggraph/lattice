@@ -187,6 +187,15 @@ Read payload from --payload @file.json or stdin (-).`,
 				return fmt.Errorf("payload: %w", err)
 			}
 
+			var payloadObj map[string]any
+			if err := json.Unmarshal(payloadBytes, &payloadObj); err != nil {
+				return fmt.Errorf("payload must be a JSON object: %w", err)
+			}
+			targetIdentityKey, _ := payloadObj["targetIdentityKey"].(string)
+			if targetIdentityKey == "" {
+				return fmt.Errorf("payload: targetIdentityKey is required")
+			}
+
 			requestID, err := substrate.NewNanoID()
 			if err != nil {
 				return fmt.Errorf("generate requestId: %w", err)
@@ -205,6 +214,21 @@ Read payload from --payload @file.json or stdin (-).`,
 				// of role grants (packages/identity-domain/permissions.go,
 				// claim_test.go's TestClaimIdentity_Success).
 				AuthContext: &processor.AuthContext{Target: actor},
+				// A descriptor-driven client (Facet) resolves opmetas.go's
+				// Dispatch.Reads templates client-side before submitting; this
+				// raw CLI bypasses that resolution entirely, so it must supply
+				// the same three keys itself. Without them state[] hydrates
+				// none of target_identity_key/.state/.claimKey, and the
+				// script's own absence checks reject every claim — valid or
+				// not — with the same generic ClaimKeyInvalid the anti-
+				// enumeration design intends only for a wrong secret.
+				ContextHint: &processor.ContextHint{
+					Reads: []string{
+						targetIdentityKey,
+						targetIdentityKey + ".state",
+						targetIdentityKey + ".claimKey",
+					},
+				},
 			}
 
 			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
