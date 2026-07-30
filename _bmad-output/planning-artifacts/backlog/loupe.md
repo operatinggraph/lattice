@@ -37,7 +37,7 @@ fire order: [loupe-flows-edge-depth-ux.md](../../implementation-artifacts/loupe-
 [lattice.md](lattice.md); everything else is buildable in-lane.
 
 | Item | What it is | Imp | Size | State |
-| **Flows stays read-only until Loom can redrive an instance** | Loom exposes no retry: `failed` is terminal, `RetryCount` only counts, pause/resume are consumer-scoped, and `StartLoomPattern` is idempotent on instanceId. A console button minting a fresh instance would double-execute every committed side effect. | ★★ | S | 🚧 blocked-on: Loom per-instance redrive (lattice) · [§2.2](../../implementation-artifacts/loupe-flows-edge-depth-ux.md) |
+| **Flows "act on it" — wire a Retry button to Loom's redrive op** | `lattice.ctrl.loom.<id>.redrive` resumes a FAILED instance at its cursor (lattice.md, shipped). Needs UX (Sally) + FE Engineer: add `redrive` to Loupe's control allow-list (`cmd/loupe/control.go`), wire the button, verify live. | ★★ | S | 📋 ready · UX-then-FE · [§2.2](../../implementation-artifacts/loupe-flows-edge-depth-ux.md) |
 
 ## Component maintenance
 
