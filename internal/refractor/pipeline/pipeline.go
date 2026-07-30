@@ -59,6 +59,22 @@ type Pipeline struct {
 	// valid compiled rule.
 	fullCRBranches []ruleengine.CompiledRule
 
+	// fullCRWalkOwnedColumns maps each RETURN column full.
+	// ClassifyBranchReturnColumns proved reference only one branch's own
+	// bound variables (ColumnWalkOwned) to that owning branch's index — nil
+	// for a non-multi-walk lens, or when classification fails (defensive:
+	// mergeRowGroup then falls back to requiring every column to agree,
+	// exactly as before this field existed). branchmerge.go uses it to tell a
+	// walk's own cypher fanning out per anchor (e.g. a multi-hat actor
+	// reaching one op via 2+ roles, each producing a row with a different
+	// walk-owned column value) from a genuine cross-walk disagreement (always
+	// a defect) — only the former is safe to resolve deterministically, since
+	// a walk-owned column can only ever be non-null from the one branch that
+	// owns it. The owner index (not just a bool) matters when two DIFFERENT
+	// branches each own a different walk-owned column: those columns must be
+	// resolved independently, never coupled into one shared pick.
+	fullCRWalkOwnedColumns map[string]int
+
 	// multiEnvelopeFn is envelopeFn's per-entry sibling (§4.1 of
 	// cap-read-per-anchor-grant-keys-design.md). Mutually exclusive with
 	// envelopeFn — SetEnvelopeFn / SetMultiEnvelopeFn each clear the other, so
@@ -349,8 +365,16 @@ func (p *Pipeline) useFullEngineBranches(eng *full.Engine, cr ruleengine.Compile
 	p.engineKind = ruleengine.EngineFull
 	p.fullEngine = eng
 	p.fullCR = cr
+	// Unconditional, not just the len>1 arm: a reload (cmd/refractor/reload.go)
+	// calls this on an EXISTING pipeline, so a lens edited from 2+ Walks down
+	// to a single Walk must clear both fields — leaving them set would keep
+	// evaluating a Walk the new spec no longer has.
 	if len(branches) > 1 {
 		p.fullCRBranches = branches
+		p.fullCRWalkOwnedColumns = walkOwnedColumns(branches)
+	} else {
+		p.fullCRBranches = nil
+		p.fullCRWalkOwnedColumns = nil
 	}
 	// Pin the vertex types this lens's patterns can bind, so the plain
 	// aspect/link reprojection arms skip events on types the lens cannot
