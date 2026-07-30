@@ -1332,6 +1332,113 @@ func TestCharge_SelfOrder_AcceptsMenuItemServedAtCoveringBuilding(t *testing.T) 
 	}
 }
 
+// TestCharge_Staff_CatalogItemDerivesAmount proves a staff (non-self) Charge
+// can also bind against the menuItem catalog when the caller supplies
+// menuItemKey — the same "derive, don't trust" amount source the self-order
+// path already used, now available to a staff POS Charge too.
+func TestCharge_Staff_CatalogItemDerivesAmount(t *testing.T) {
+	ctx, conn := setupDomainEnv(t)
+	cp, cons := newDomainPipeline(t, ctx, conn, "chargestaffcatalog")
+
+	leaseKey := seedLease(t, ctx, conn, "BBCAFEDMNSTFCATLEASE")
+	unitKey := seedLocation(t, ctx, conn, "BBCAFEDMNSTFCATUNPTH")
+	seedAppliesToUnit(t, ctx, conn, leaseKey, unitKey)
+	tabKey := openTab(t, ctx, conn, cp, cons, "cdstaffcatsetup00001", leaseKey)
+	itemKey := createMenuItem(t, ctx, conn, cp, cons, "cdstaffcatmenu000001", "Latte", 450, unitKey)
+
+	env := &processor.OperationEnvelope{
+		RequestID:     testutil.GenReqID("cdstaffcattab0000001"),
+		Lane:          processor.LaneDefault,
+		OperationType: "Charge",
+		Actor:         domainActorKey,
+		SubmittedAt:   "2026-07-30T12:10:00Z",
+		Class:         "tab",
+		Payload:       json.RawMessage(`{"tabKey":"` + tabKey + `","menuItemKey":"` + itemKey + `"}`),
+		ContextHint: &processor.ContextHint{
+			Reads: []string{tabKey, tabKey + ".status", itemKey, itemKey + ".price"},
+		},
+	}
+	testutil.PublishOp(t, conn, env)
+	outcome := testutil.DriveOne(t, ctx, cp, cons, "")
+	if outcome != processor.OutcomeAccepted {
+		t.Fatalf("staff Charge with menuItemKey outcome = %v, want Accepted", outcome)
+	}
+
+	statusDoc := readDoc(t, ctx, conn, tabKey+".status")
+	statusData, _ := statusDoc["data"].(map[string]any)
+	if got, _ := statusData["totalCents"].(float64); got != 450 {
+		t.Fatalf("status.totalCents = %v, want 450 (derived from the menu item's price)", got)
+	}
+}
+
+// TestCharge_Staff_HandKeyedAmountStillAccepted pins that a staff Charge with
+// no menuItemKey still hand-keys amountCents — the off-menu path (a charge
+// the catalog does not cover) is not removed by adding the catalog binding.
+func TestCharge_Staff_HandKeyedAmountStillAccepted(t *testing.T) {
+	ctx, conn := setupDomainEnv(t)
+	cp, cons := newDomainPipeline(t, ctx, conn, "chargestaffoffmenu")
+
+	leaseKey := seedLease(t, ctx, conn, "BBCAFEDMNSTFHKMLEASE")
+	tabKey := openTab(t, ctx, conn, cp, cons, "cdstaffoffsetup00001", leaseKey)
+
+	env := &processor.OperationEnvelope{
+		RequestID:     testutil.GenReqID("cdstaffofftab0000001"),
+		Lane:          processor.LaneDefault,
+		OperationType: "Charge",
+		Actor:         domainActorKey,
+		SubmittedAt:   "2026-07-30T12:10:00Z",
+		Class:         "tab",
+		Payload:       json.RawMessage(`{"tabKey":"` + tabKey + `","amountCents":999}`),
+		ContextHint:   &processor.ContextHint{Reads: []string{tabKey, tabKey + ".status"}},
+	}
+	testutil.PublishOp(t, conn, env)
+	outcome := testutil.DriveOne(t, ctx, cp, cons, "")
+	if outcome != processor.OutcomeAccepted {
+		t.Fatalf("staff off-menu Charge outcome = %v, want Accepted", outcome)
+	}
+
+	statusDoc := readDoc(t, ctx, conn, tabKey+".status")
+	statusData, _ := statusDoc["data"].(map[string]any)
+	if got, _ := statusData["totalCents"].(float64); got != 999 {
+		t.Fatalf("status.totalCents = %v, want 999 (hand-keyed off-menu amount)", got)
+	}
+}
+
+// TestCharge_Staff_RejectedForMenuItemAtAnotherBuilding proves the staff
+// catalog-charge path is location-bound the same way self-order already is:
+// a menu item served at a building unrelated to the tab's own is rejected
+// even though nothing else about the call is wrong.
+func TestCharge_Staff_RejectedForMenuItemAtAnotherBuilding(t *testing.T) {
+	ctx, conn := setupDomainEnv(t)
+	cp, cons := newDomainPipeline(t, ctx, conn, "chargestaffotherbldg")
+
+	leaseKey := seedLease(t, ctx, conn, "BBCAFEDMNSTFXBLEASEH")
+	unitKey := seedLocation(t, ctx, conn, "BBCAFEDMNSTFXBUNPTHJ")
+	seedAppliesToUnit(t, ctx, conn, leaseKey, unitKey)
+	tabKey := openTab(t, ctx, conn, cp, cons, "cdstaffxbsetup000001", leaseKey)
+
+	otherLocKey := seedLocation(t, ctx, conn, "BBCAFEDMNSTFXBBLDGHJ")
+	itemKey := createMenuItem(t, ctx, conn, cp, cons, "cdstaffxbmenu0000001", "Latte", 450, otherLocKey)
+
+	env := &processor.OperationEnvelope{
+		RequestID:     testutil.GenReqID("cdstaffxbtab00000001"),
+		Lane:          processor.LaneDefault,
+		OperationType: "Charge",
+		Actor:         domainActorKey,
+		SubmittedAt:   "2026-07-30T12:10:00Z",
+		Class:         "tab",
+		Payload:       json.RawMessage(`{"tabKey":"` + tabKey + `","menuItemKey":"` + itemKey + `"}`),
+		ContextHint: &processor.ContextHint{
+			Reads: []string{tabKey, tabKey + ".status", itemKey, itemKey + ".price"},
+		},
+	}
+	testutil.PublishOp(t, conn, env)
+	outcome := testutil.DriveOne(t, ctx, cp, cons, "")
+	if outcome != processor.OutcomeRejected {
+		t.Fatalf("staff Charge for a menu item at another building outcome = %v, want Rejected (AuthDenied)", outcome)
+	}
+}
+
 // substituteDispatch mirrors the descriptor client's template substitution
 // (cmd/facet/web/app.js substituteTemplate) so the tests below can build an
 // envelope from the SHIPPED OpMetas() declarations rather than a hand-written

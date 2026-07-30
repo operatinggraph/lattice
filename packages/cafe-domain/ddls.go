@@ -21,10 +21,11 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 // class); only cafe-ledger's own DDLs permit CreateAccount/DebitAccount for
 // those classes).
 //
-// menuItem is the catalog Charge binds a resident's self-order against: an
-// operator mints priced items (CreateMenuItem) that a self-service Charge
-// derives amountCents from (never trusting a caller-supplied number), the
-// gap the original operator-only Charge grant existed to cover.
+// menuItem is the catalog a Charge binds against: an operator mints priced
+// items (CreateMenuItem) that a self-service OR a staff POS Charge can derive
+// amountCents from (never trusting a caller-supplied number) by naming
+// menuItemKey; a staff Charge with no menuItemKey still hand-keys amountCents
+// for whatever the catalog does not cover.
 func DDLs() []pkgmgr.DDLSpec {
 	return []pkgmgr.DDLSpec{
 		tabVertexTypeDDL(),
@@ -49,14 +50,17 @@ func tabVertexTypeDDL() pkgmgr.DDLSpec {
 			"leaseAppKey} (leaseAppKey denormalized onto .status so Charge/Settle never need a second declared read " +
 			"for the link target) and BOTH tab→leaseapp links: chargedTo (permanent — where the money lands, the " +
 			"anchor cafeTabSettlement walks to reach the lease's ledger-account guard) and openFor (transient — " +
-			"that the tab is open). Charge{tabKey, amountCents} (operator) adds " +
+			"that the tab is open). Charge{tabKey, amountCents} (operator, no menuItemKey — an off-menu charge the " +
+			"catalog does not cover) adds " +
 			"a positive amount to an OPEN tab's running total — an OCC-conditioned upsert of .status keyed on the " +
 			"aspect's own current revision (the providerSlotClaim precedent: two concurrent charges racing the " +
 			"same tab must not lose an update, so totalCents is a real accumulator, not an idempotent set). A " +
-			"self-service caller instead submits Charge{tabKey, menuItemKey}: amountCents is derived from the " +
-			"referenced menuItem's own .price.priceCents, never trusted from the caller (the menuItem catalog " +
-			"this DDL's sibling exists to bound a self-submitted charge against). VoidCharge{tabKey, amountCents} " +
-			"(operator/frontOfHouse only — no self-service grant, a POS correction is a staff decision even when " +
+			"self-service OR an operator caller may instead submit Charge{tabKey, menuItemKey}: amountCents is " +
+			"derived from the referenced menuItem's own .price.priceCents, never trusted from the caller (the " +
+			"menuItem catalog this DDL's sibling exists to bound a charge against), and the item must be served at " +
+			"the tab's own building (location_covers against the item's servedAt link) whichever caller names it. " +
+			"VoidCharge{tabKey, amountCents} (operator/frontOfHouse only — no self-service grant, a POS correction " +
+			"is a staff decision even when " +
 			"reversing a resident's own self-order mis-tap) subtracts a positive amount from an OPEN tab's running " +
 			"total, same OCC-conditioned upsert as Charge, clamped at 0 rather than rejected when the void exceeds " +
 			"the current total (an over-void is a caller mistake worth correcting cleanly, not a hard failure). " +
@@ -79,8 +83,8 @@ func tabVertexTypeDDL() pkgmgr.DDLSpec {
 			`{"leaseAppKey":{"type":"string","description":"vtx.leaseapp.<NanoID> the tab is opened for (OpenTab; required, validated alive)."},` +
 			`"tabId":{"type":"string","description":"Optional bare NanoID for the new tab vertex (OpenTab); absent → minted."},` +
 			`"tabKey":{"type":"string","description":"vtx.tab.<NanoID> of an existing tab (Charge/VoidCharge/Settle; required, validated alive + open)."},` +
-			`"amountCents":{"type":"number","description":"The amount in integer cents; required for an operator Charge (added to the total) or a VoidCharge (subtracted, clamped at 0), must be > 0."},` +
-			`"menuItemKey":{"type":"string","description":"vtx.menuitem.<NanoID> of a live catalog item (self-service Charge only); amountCents is derived from it, ignoring any caller-supplied amountCents."}},` +
+			`"amountCents":{"type":"number","description":"The amount in integer cents; required for an off-menu Charge (no menuItemKey — added to the total) or a VoidCharge (subtracted, clamped at 0), must be > 0."},` +
+			`"menuItemKey":{"type":"string","description":"vtx.menuitem.<NanoID> of a live catalog item; amountCents is derived from it, ignoring any caller-supplied amountCents. Required for a self-service Charge; optional for a staff Charge (its absence means an off-menu, hand-keyed amountCents charge)."}},` +
 			`"required":[]}`,
 		OutputSchema: `{"type":"object","properties":` +
 			`{"primaryKey":{"type":"string","description":"vtx.tab.<NanoID> the operation wrote."}}}`,
@@ -88,8 +92,8 @@ func tabVertexTypeDDL() pkgmgr.DDLSpec {
 			"leaseAppKey": "Full vtx.leaseapp.<NanoID> key of the resident lease the tab is opened for (OpenTab; required, validated alive). Denormalized onto the tab's own .status aspect so Charge/Settle need no extra declared read to recover it.",
 			"tabId":       "Optional bare NanoID (no dots / key segments) for the new tab vertex (vtx.tab.<tabId>). Absent → minted with nanoid.new() (OpenTab).",
 			"tabKey":      "Full vtx.tab.<NanoID> key of an existing tab (Charge/VoidCharge/Settle; required, validated alive + class=tab + currently open).",
-			"amountCents": "The amount in integer cents; required for an operator Charge (must be a positive number, added to the tab's running .status.totalCents) or a VoidCharge (must be a positive number, subtracted from .status.totalCents and clamped at 0). Ignored for a self-service Charge — see menuItemKey.",
-			"menuItemKey": "Full vtx.menuitem.<NanoID> key of a live catalog item (self-service Charge only; required when the caller has no operator grant). amountCents is derived from the item's own .price.priceCents, never trusted from the caller.",
+			"amountCents": "The amount in integer cents; required for an off-menu Charge (must be a positive number, added to the tab's running .status.totalCents) or a VoidCharge (must be a positive number, subtracted from .status.totalCents and clamped at 0). Ignored whenever menuItemKey is present.",
+			"menuItemKey": "Full vtx.menuitem.<NanoID> key of a live catalog item, served at the tab's own building. Required for a self-service Charge; optional for a staff Charge (present → catalog-priced like self-order; absent → hand-keyed amountCents). amountCents is derived from the item's own .price.priceCents, never trusted from the caller, whichever caller names it.",
 		},
 		Examples: []pkgmgr.ExampleSpec{
 			{
@@ -102,11 +106,20 @@ func tabVertexTypeDDL() pkgmgr.DDLSpec {
 					"if the lease is absent, or OpenTabAlreadyExists if the lease already has an open tab.",
 			},
 			{
-				Name:    "Charge — ring up an item on an open tab (operator)",
+				Name:    "Charge — ring up an off-menu item on an open tab (operator)",
 				Payload: map[string]any{"tabKey": "vtx.tab.<NanoID>", "amountCents": 850},
 				ExpectedOutcome: "Validates the tab is alive + open, adds 850 to .status.totalCents (OCC-conditioned " +
 					"on the aspect's current revision). Returns primaryKey. Rejects TabNotOpen if the tab is already " +
 					"settled, or InvalidArgument if amountCents <= 0.",
+			},
+			{
+				Name:    "Charge — ring up a catalog item at the POS (staff)",
+				Payload: map[string]any{"tabKey": "vtx.tab.<NanoID>", "menuItemKey": "vtx.menuitem.<NanoID>"},
+				ExpectedOutcome: "Validates the tab is alive + open and the menu item is alive and served at the " +
+					"tab's own building, derives the amount from the item's .price.priceCents (any caller-supplied " +
+					"amountCents is ignored), adds it to .status.totalCents. Returns primaryKey. Rejects " +
+					"UnknownMenuItem if the item is absent or retired, or AuthDenied if the item is served at a " +
+					"different building.",
 			},
 			{
 				Name:    "Charge — self-order against the menu catalog (resident)",
@@ -336,9 +349,10 @@ def execute(state, op):
 // additionally declares the lease's applicationFor→identity link in
 // OptionalReads (also class-(d)) so the resident-self authorization check
 // below can confirm the lease belongs to them without a live GET. A
-// self-service Charge additionally declares menuItemKey + menuItemKey+
-// ".price" in Reads (required — every live menuItem carries a .price
-// aspect, so absence means an undeclared read, not a missing aspect).
+// A self-service OR a staff catalog Charge additionally declares menuItemKey
+// + menuItemKey + ".price" in Reads (required — every live menuItem carries
+// a .price aspect, so absence means an undeclared read, not a missing
+// aspect); a staff Charge with no menuItemKey hand-keys amountCents instead.
 const tabDDLScript = `
 def make_vtx(key, cls, data):
     return {"op": "create", "key": key,
@@ -380,6 +394,17 @@ def require_number(p, name):
     v = getattr(p, name)
     if v == None or (type(v) != type(0) and type(v) != type(0.0)):
         fail("InvalidArgument: " + name + ": required number")
+    return v
+
+def optional_string(p, name):
+    if not hasattr(p, name):
+        return None
+    v = getattr(p, name)
+    if v == None or type(v) != type(""):
+        return None
+    v = v.strip()
+    if len(v) == 0:
+        return None
     return v
 
 def bare_nanoid_or_mint(p, name):
@@ -919,9 +944,17 @@ def execute(state, op):
         # authcontext-target: (selector) picks the amount SOURCE (catalog vs
         # caller), and the stricter branch is the one presence selects.
         is_self = op.authContextTarget != ""
+        # A staff Charge accepts EITHER a menuItemKey (catalog-priced, same
+        # binding as self-order) or a hand-keyed amountCents (an off-menu
+        # charge the catalog does not cover) — the catalog is a curated
+        # subset of what a café tab may carry, not every possible charge, so
+        # the free-amount path stays available to staff.
+        menu_item_key = optional_string(p, "menuItemKey")
         if is_self:
             # Self-order: the menuItem catalog bounds the amount — a
             # self-submitted amountCents is never read, let alone trusted.
+            amount_cents = require_menu_item_price(state, p)
+        elif menu_item_key != None:
             amount_cents = require_menu_item_price(state, p)
         else:
             amount_cents = require_number(p, "amountCents")
@@ -956,15 +989,17 @@ def execute(state, op):
             if application_for == None or application_for.isDeleted:
                 fail("AuthDenied: a resident may only charge their own tab")
 
-            # Locality bound: a self-order may only name a menu item served at
-            # the tab's OWN building -- servedAt bounds what a browse walk
-            # OFFERS, but until now nothing bound what Charge would ACCEPT.
-            # Both locations are resolved from topology the caller cannot
-            # forge (the item's own servedAt link, the tab's own lease's
-            # appliesToUnit), never from a payload field.
-            menu_item_key = required_string(p, "menuItemKey")
+        # Locality bound: a catalog item -- self-ordered or staff-picked
+        # alike -- may only be charged against a tab whose own building it is
+        # served at. servedAt bounds what a browse walk OFFERS, but nothing
+        # bounded what Charge would ACCEPT until this check. Both locations
+        # are resolved from topology the caller cannot forge (the item's own
+        # servedAt link, the tab's own lease's appliesToUnit), never from a
+        # payload field. A hand-keyed amountCents (no menuItemKey) names no
+        # item, so it carries nothing to bind.
+        if menu_item_key != None:
             item_location = menu_item_served_at(menu_item_key)
-            tab_location = leaseapp_unit(lease_key)
+            tab_location = leaseapp_unit(existing.data.get("leaseAppKey"))
             if not location_covers(item_location, tab_location):
                 fail("AuthDenied: menuItemKey " + menu_item_key +
                      " is not served at tab " + tab_key + "'s building")

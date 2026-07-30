@@ -34,14 +34,14 @@ type menuItemRow struct {
 // lens read model. A row that fails to decode or carries no menuItemKey (a
 // tombstoned projection entry) is skipped.
 //
-// covering, when non-nil, confines the rows to what a self-order Charge at
-// this lease would actually accept: an item is offered only when its own
-// servedAt key appears in the set (cafe-domain's `location_covers` — the
-// tab's own building plus every containedIn ancestor covering it). An item
-// with no servedAt link is excluded rather than defaulting to visible, the
-// same fail-closed answer Charge itself gives an unresolvable item location.
-// A nil covering leaves the catalog unfiltered (the front-desk/staff view,
-// which Charge does not location-bind).
+// covering, when non-nil, confines the rows to what a Charge at this lease
+// would actually accept: an item is offered only when its own servedAt key
+// appears in the set (cafe-domain's `location_covers` — the tab's own
+// building plus every containedIn ancestor covering it). An item with no
+// servedAt link is excluded rather than defaulting to visible, the same
+// fail-closed answer Charge itself gives an unresolvable item location. A
+// nil covering leaves the catalog unfiltered (the front-desk grid view,
+// which has no single lease/tab in view to confine against).
 func computeMenu(keys []string, get kvGetter, covering map[string]bool) []menuItemRow {
 	rows := make([]menuItemRow, 0)
 	for _, k := range keys {
@@ -93,13 +93,14 @@ func (s *server) leaseCoveringLocations(ctx context.Context, leaseAppKey string)
 	return covering
 }
 
-// handleMenu implements GET /api/menu[?leaseAppKey=] — the self-order catalog
-// the Resident view's item picker renders, served from the cafe-domain
-// menuCatalog lens (P5). With no leaseAppKey the catalog is unfiltered (the
-// front-desk/staff surface, which Charge does not location-bind). With one, a
-// caller not admitted to that lease (visibleLeases, mirroring handleTabs) is
-// refused, and the catalog returned is confined to items a self-order Charge
-// against that lease would actually accept — the offer side of the same
+// handleMenu implements GET /api/menu[?leaseAppKey=] — the catalog the
+// Resident self-order picker AND the staff POS catalog picker both render,
+// served from the cafe-domain menuCatalog lens (P5). With no leaseAppKey the
+// catalog is unfiltered (the front-desk grid view, which has no single
+// lease/tab in view). With one, a caller not admitted to that lease
+// (visibleLeases, mirroring handleTabs — admits a staffer's workplace-covered
+// leases too) is refused, and the catalog returned is confined to items a
+// Charge against that lease would actually accept — the offer side of the same
 // location_covers bound Charge already enforces.
 func (s *server) handleMenu(w http.ResponseWriter, r *http.Request) {
 	conn, ok := s.requireConn(w)

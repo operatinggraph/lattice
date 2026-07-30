@@ -366,10 +366,14 @@ async function renderPos() {
     body.innerHTML = '<div class="empty">Pick a lease to open or manage its tab.</div>';
     return;
   }
-  let tabs;
+  let tabs, menu;
   try {
-    const r = await appGet("/api/tabs?leaseAppKey=" + encodeURIComponent(leaseAppKey));
-    tabs = r.tabs || [];
+    const results = await Promise.all([
+      appGet("/api/tabs?leaseAppKey=" + encodeURIComponent(leaseAppKey)),
+      appGet("/api/menu?leaseAppKey=" + encodeURIComponent(leaseAppKey)),
+    ]);
+    tabs = results[0].tabs || [];
+    menu = results[1];
   } catch (e) {
     body.innerHTML = '<div class="empty">' + e.message + "</div>";
     return;
@@ -400,7 +404,33 @@ async function renderPos() {
     });
     return;
   }
-  body.innerHTML = renderOpenTabCard(open);
+  const items = (menu && menu.menu) || [];
+  body.innerHTML = renderOpenTabCard(open, items);
+  const catalogForm = document.getElementById("pos-catalog-form");
+  if (catalogForm) {
+    catalogForm.addEventListener("submit", async (ev) => {
+      ev.preventDefault();
+      const menuItemKey = document.getElementById("pos-catalog-item").value;
+      if (!menuItemKey) { toast("Pick an item first.", false); return; }
+      const btn = document.getElementById("pos-catalog-submit");
+      btn.disabled = true;
+      try {
+        await opOrThrow(
+          {
+            operationType: "Charge", class: "tab",
+            reads: [open.tabKey, open.tabKey + ".status", menuItemKey, menuItemKey + ".price"],
+            payload: { tabKey: open.tabKey, menuItemKey },
+          },
+          "ring up the item"
+        );
+        toast("Added to the tab.", true);
+        setTimeout(renderPos, 700);
+      } catch (e) {
+        toast(e.message, false);
+        btn.disabled = false;
+      }
+    });
+  }
   document.getElementById("charge-form").addEventListener("submit", async (ev) => {
     ev.preventDefault();
     const input = document.getElementById("charge-amount");
@@ -457,14 +487,25 @@ function renderOpenTabForm() {
   );
 }
 
-function renderOpenTabCard(tab) {
+function renderOpenTabCard(tab, items) {
+  const catalog = items || [];
   return (
     '<div class="panel">' +
     "<h2>Open tab</h2>" +
     '<p class="amount">' + money(tab.totalCents) + "</p>" +
     '<p class="meta">Opened ' + (tab.openedAt || "?") + "</p>" +
+    (catalog.length
+      ? '<form id="pos-catalog-form" class="field-row" style="margin-bottom:14px;">' +
+        '<select id="pos-catalog-item">' +
+        catalog
+          .map((it) => '<option value="' + it.menuItemKey + '">' + escapeHtml(it.name) + " — " + money(it.priceCents) + "</option>")
+          .join("") +
+        "</select>" +
+        '<button id="pos-catalog-submit" type="submit">Ring Up</button>' +
+        "</form>"
+      : "") +
     '<form id="charge-form" class="field-row" style="margin-bottom:14px;">' +
-    '<input id="charge-amount" type="number" step="0.01" min="0.01" placeholder="Amount ($)" required />' +
+    '<input id="charge-amount" type="number" step="0.01" min="0.01" placeholder="Off-menu amount ($)" required />' +
     '<button id="charge-submit" type="submit">Add Charge</button>' +
     "</form>" +
     '<div class="panel-actions"><button id="settle-btn" class="danger">Settle Tab</button></div>' +
