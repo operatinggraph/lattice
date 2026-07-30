@@ -40,6 +40,18 @@ func (f *fakeRowSetNullifier) DeleteAllForActor(_ context.Context, actorKey stri
 	return f.err
 }
 
+// fakeGrantRevoker is a GrantTableRevoker test double. RevokeAllGrantsForActor
+// returns err (nil for success) and records every call.
+type fakeGrantRevoker struct {
+	err   error
+	calls []string
+}
+
+func (f *fakeGrantRevoker) RevokeAllGrantsForActor(_ context.Context, actorID string, _ uint64) error {
+	f.calls = append(f.calls, actorID)
+	return f.err
+}
+
 // fakePauser is a control.Pauser test double recording whether Pause was called.
 type fakePauser struct {
 	paused bool
@@ -323,6 +335,105 @@ func TestHandleKeyShredded_PerEntryTarget_DeleteFails_RaisesPrivacyCritical(t *t
 	require.Equal(t, substrate.Ack, decision, "a privacy-critical failure must never be retried")
 	require.True(t, pauser.paused)
 	require.Equal(t, uint64(1), m.HandledTotal())
+}
+
+// TestHandleKeyShredded_GrantRevoker_Succeeds proves a configured
+// GrantTableRevoker is invoked with the shredded identityKey and Acks.
+func TestHandleKeyShredded_GrantRevoker_Succeeds(t *testing.T) {
+	svc := control.NewService()
+	revoker := &fakeGrantRevoker{}
+	m := New(Config{Control: svc, GrantRevokers: []GrantTableRevoker{revoker}})
+
+	decision := m.handleKeyShredded(context.Background(), keyShreddedMsg(t, "vtx.identity.AAAAAAAAAAAAAAAAAAAA"))
+
+	require.Equal(t, substrate.Ack, decision)
+	require.Equal(t, []string{"vtx.identity.AAAAAAAAAAAAAAAAAAAA"}, revoker.calls)
+}
+
+// TestHandleKeyShredded_GrantRevokerLister_DynamicAndAdditive proves a
+// GrantTableRevoker supplied only by SetGrantRevokerLister is attempted
+// alongside a statically configured one — the discovery path a Postgres
+// GrantTable producer's runtime-acquired DSN needs, mirroring
+// SetTargetLister's additive contract for the NATS-KV side.
+func TestHandleKeyShredded_GrantRevokerLister_DynamicAndAdditive(t *testing.T) {
+	svc := control.NewService()
+	static := &fakeGrantRevoker{}
+	dynamic := &fakeGrantRevoker{}
+	m := New(Config{Control: svc, GrantRevokers: []GrantTableRevoker{static}})
+	m.SetGrantRevokerLister(func() []GrantTableRevoker {
+		return []GrantTableRevoker{dynamic}
+	})
+
+	decision := m.handleKeyShredded(context.Background(), keyShreddedMsg(t, "vtx.identity.AAAAAAAAAAAAAAAAAAAA"))
+
+	require.Equal(t, substrate.Ack, decision)
+	require.Len(t, static.calls, 1, "the static revoker must still be attempted")
+	require.Len(t, dynamic.calls, 1, "the GrantRevokerLister revoker must also be attempted")
+}
+
+// TestHandleKeyShredded_GrantRevokerLister_ReEvaluatedPerEvent proves the
+// lister is called fresh on every event, not cached at registration time —
+// the property that lets a Postgres GrantTable producer installed AFTER
+// Manager construction start getting revoked without a Refractor restart.
+func TestHandleKeyShredded_GrantRevokerLister_ReEvaluatedPerEvent(t *testing.T) {
+	svc := control.NewService()
+	m := New(Config{Control: svc})
+	revoker := &fakeGrantRevoker{}
+	installed := false
+	m.SetGrantRevokerLister(func() []GrantTableRevoker {
+		if !installed {
+			return nil
+		}
+		return []GrantTableRevoker{revoker}
+	})
+
+	decision := m.handleKeyShredded(context.Background(), keyShreddedMsg(t, "vtx.identity.AAAAAAAAAAAAAAAAAAAA"))
+	require.Equal(t, substrate.Ack, decision, "an empty lister result is a vacuous no-op, not a failure")
+
+	installed = true
+	decision = m.handleKeyShredded(context.Background(), keyShreddedMsg(t, "vtx.identity.BBBBBBBBBBBBBBBBBBBB"))
+
+	require.Equal(t, substrate.Ack, decision)
+	require.Equal(t, []string{"vtx.identity.BBBBBBBBBBBBBBBBBBBB"}, revoker.calls, "the second event must reach the just-installed revoker")
+}
+
+// TestHandleKeyShredded_GrantRevokerFails_PrivacyCriticalNoRetry proves a
+// real RevokeAllGrantsForActor failure Acks (never retries) — there is no
+// single lens's RuleID to pause (actor_read_grants is shared across every
+// grant-source producer), so the privacy-critical tier here is alert-only,
+// distinct from the per-lens pause a NullifyTarget failure gets.
+func TestHandleKeyShredded_GrantRevokerFails_PrivacyCriticalNoRetry(t *testing.T) {
+	svc := control.NewService()
+	boom := errors.New("grant writer: revoke all: boom")
+	revoker := &fakeGrantRevoker{err: boom}
+	m := New(Config{Control: svc, GrantRevokers: []GrantTableRevoker{revoker}})
+
+	decision := m.handleKeyShredded(context.Background(), keyShreddedMsg(t, "vtx.identity.AAAAAAAAAAAAAAAAAAAA"))
+
+	require.Equal(t, substrate.Ack, decision, "a privacy-critical failure must never be retried")
+	require.Equal(t, uint64(1), m.HandledTotal())
+	require.Len(t, revoker.calls, 1)
+}
+
+// TestHandleKeyShredded_GrantRevokerFails_OtherTargetsStillAttempted proves a
+// failing GrantTableRevoker does not skip the remaining NullifyTarget
+// entries — every target (KV and Postgres alike) is always attempted.
+func TestHandleKeyShredded_GrantRevokerFails_OtherTargetsStillAttempted(t *testing.T) {
+	svc := control.NewService()
+	nullifier := &fakeNullifier{}
+	svc.RegisterRowNullifier("lens-a", nullifier)
+	revoker := &fakeGrantRevoker{err: errors.New("boom")}
+	m := New(Config{
+		Control:       svc,
+		Targets:       []NullifyTarget{{RuleID: "lens-a", KeyField: "identityKey"}},
+		GrantRevokers: []GrantTableRevoker{revoker},
+	})
+
+	decision := m.handleKeyShredded(context.Background(), keyShreddedMsg(t, "vtx.identity.AAAAAAAAAAAAAAAAAAAA"))
+
+	require.Equal(t, substrate.Ack, decision)
+	require.Len(t, nullifier.calls, 1, "the NullifyTarget must still be attempted despite the revoker failure")
+	require.Len(t, revoker.calls, 1)
 }
 
 func TestHandleKeyShredded_EmptyBody_Acks(t *testing.T) {

@@ -127,6 +127,40 @@ func capReadShredTargets(registry map[string]*pipelineEntry) []keyshredded.Nulli
 	return targets
 }
 
+// grantTableShredRevokers returns one keyshredded.GrantTableRevoker per
+// distinct Postgres DSN among currently-running grant-table lenses
+// (packages/clinic-domain's four grant_source producers today, any future
+// package's tomorrow) — deduped, since every grant-table lens across every
+// package writes the SAME shared actor_read_grants table, so a shred needs
+// only one revoke call per distinct database, not one per lens
+// (cap-read-per-anchor-grant-keys-design.md's Postgres GrantTable residual).
+// poolManager.Acquire caches by DSN, so this opens no connection beyond what
+// the grant lens's own activation already did. Pure over its input (besides
+// the cached pool lookup) so it is testable without a live registry mutex;
+// the caller holds the lock.
+func grantTableShredRevokers(ctx context.Context, poolManager *adapter.PoolManager, registry map[string]*pipelineEntry) []keyshredded.GrantTableRevoker {
+	var out []keyshredded.GrantTableRevoker
+	seen := make(map[string]bool)
+	for _, entry := range registry {
+		if !entry.grantTable || entry.dsn == "" || seen[entry.dsn] {
+			continue
+		}
+		seen[entry.dsn] = true
+		pool, err := poolManager.Acquire(ctx, entry.dsn)
+		if err != nil {
+			// The lens's own activation already surfaces a DSN failure loudly
+			// (infra-pause probe loop); nothing more useful to do here than skip it.
+			continue
+		}
+		gw, err := adapter.NewPostgresGrantWriter(pool, 0)
+		if err != nil {
+			continue
+		}
+		out = append(out, gw)
+	}
+	return out
+}
+
 func main() {
 	natsURL := flag.String("nats-url", envOr("NATS_URL", nats.DefaultURL), "NATS server URL")
 	flag.Parse()
@@ -247,11 +281,12 @@ func main() {
 	// nothing actually checked (an adversarial-review-caught regression this
 	// fire must not reintroduce). Hand-authored Postgres GrantTable cap-read
 	// producers (packages/clinic-domain's four) carry no Output descriptor and
-	// so are reached by neither this static entry nor the lister — a distinct,
-	// unclosed gap, not this fire's scope (filed on the board separately). The
-	// privacy service actor (Fire 4b finalization recording) is
-	// graph-discovered — absent on a pre-v15 kernel, which disables recording
-	// without disabling nullification.
+	// so are reached by neither this static entry nor the lister — closed by a
+	// separate, parallel mechanism below (SetGrantRevokerLister): the shared
+	// actor_read_grants table is revoked by DSN, not by per-lens RuleID, since
+	// no single lens owns it. The privacy service actor (Fire 4b finalization
+	// recording) is graph-discovered — absent on a pre-v15 kernel, which
+	// disables recording without disabling nullification.
 	privacyCtx, privacyCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	privacyActorKey, paErr := bootstrap.PrivacyActorKey(privacyCtx, conn)
 	privacyCancel()
@@ -309,6 +344,15 @@ func main() {
 		mu.Lock()
 		defer mu.Unlock()
 		return capReadShredTargets(registry)
+	})
+	// grantTableShredRevokers is likewise re-derived from the live registry on
+	// every shred event, so a Postgres GrantTable producer (clinic-domain's
+	// four grant_source lenses today) installed after this line still gets
+	// its actor's rows revoked on shred — see its doc.
+	keyShredded.SetGrantRevokerLister(func() []keyshredded.GrantTableRevoker {
+		mu.Lock()
+		defer mu.Unlock()
+		return grantTableShredRevokers(ctx, poolManager, registry)
 	})
 
 	go func() {

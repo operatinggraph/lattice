@@ -110,6 +110,19 @@ type NullifyTarget struct {
 	PerEntry bool
 }
 
+// GrantTableRevoker revokes every actor_read_grants row for a shredded
+// identity, across every grant_source, in one call — the shared-Postgres-
+// table analog of PerEntry's NullifyActor. It cannot route through
+// NullifyTarget/Control the way every other target does: actor_read_grants
+// is one table shared across every package's grant_source producer, not
+// owned by any single lens's RuleID the way a RowNullifier/RowSetNullifier
+// is registered (cap-read-per-anchor-grant-keys-design.md's Postgres
+// GrantTable residual — filed as its own board row after Fire 4 named it).
+// Implemented by *adapter.PostgresGrantWriter.
+type GrantTableRevoker interface {
+	RevokeAllGrantsForActor(ctx context.Context, actorID string, projectionSeq uint64) error
+}
+
 // Config configures the Manager.
 type Config struct {
 	Conn         *substrate.Conn
@@ -122,7 +135,11 @@ type Config struct {
 	// Empty is valid (a no-op sweep) — see package doc. Additive to whatever
 	// SetTargetLister supplies; neither list replaces the other.
 	Targets []NullifyTarget
-	Logger  *slog.Logger
+	// GrantRevokers additionally revokes a shredded actor's rows from any
+	// configured Postgres GrantTable writer. Empty is valid (a no-op).
+	// Additive to whatever SetGrantRevokerLister supplies.
+	GrantRevokers []GrantTableRevoker
+	Logger        *slog.Logger
 
 	// ActorKey is the identity.system.privacy service-actor vertex key this
 	// listener submits RecordShredFinalization{projectionsNullified} under
@@ -145,8 +162,9 @@ type Manager struct {
 	cfg     Config
 	handled atomic.Uint64
 
-	mu           sync.Mutex
-	targetLister func() []NullifyTarget
+	mu                 sync.Mutex
+	targetLister       func() []NullifyTarget
+	grantRevokerLister func() []GrantTableRevoker
 }
 
 // SetTargetLister registers a function returning additional NullifyTarget
@@ -178,6 +196,37 @@ func (m *Manager) effectiveTargets() []NullifyTarget {
 	}
 	out := make([]NullifyTarget, 0, len(m.cfg.Targets)+len(dynamic))
 	out = append(out, m.cfg.Targets...)
+	out = append(out, dynamic...)
+	return out
+}
+
+// SetGrantRevokerLister registers a function returning additional
+// GrantTableRevoker entries, evaluated fresh on every shred event — the
+// GrantTableRevoker analog of SetTargetLister, needed for the same reason:
+// which Postgres DSNs carry a live grant-table lens is runtime state (package
+// install order), not known at construction. Thread-safe; may be called at
+// any time; a nil fn clears it. Additive to cfg.GrantRevokers.
+func (m *Manager) SetGrantRevokerLister(fn func() []GrantTableRevoker) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.grantRevokerLister = fn
+}
+
+// effectiveGrantRevokers returns cfg.GrantRevokers plus whatever the current
+// GrantRevokerLister reports, without mutating either.
+func (m *Manager) effectiveGrantRevokers() []GrantTableRevoker {
+	m.mu.Lock()
+	lister := m.grantRevokerLister
+	m.mu.Unlock()
+	if lister == nil {
+		return m.cfg.GrantRevokers
+	}
+	dynamic := lister()
+	if len(dynamic) == 0 {
+		return m.cfg.GrantRevokers
+	}
+	out := make([]GrantTableRevoker, 0, len(m.cfg.GrantRevokers)+len(dynamic))
+	out = append(out, m.cfg.GrantRevokers...)
 	out = append(out, dynamic...)
 	return out
 }
@@ -338,6 +387,21 @@ func (m *Manager) handleKeyShredded(ctx context.Context, msg substrate.Message) 
 				"ruleId", target.RuleID, "error", pauseErr)
 		}
 	}
+
+	// GrantTableRevokers address the shared actor_read_grants table directly,
+	// not through a registered RuleID — there is no single lens to pause on
+	// failure (the table is shared across every producer), so a failure here
+	// only raises the privacy-critical tier and marks the delivery unclean,
+	// same as a given-up NullifyTarget above.
+	for _, revoker := range m.effectiveGrantRevokers() {
+		if err := revoker.RevokeAllGrantsForActor(ctx, ev.Payload.IdentityKey, math.MaxInt64); err != nil {
+			allClean = false
+			pcErr := failure.PrivacyCritical(err)
+			m.cfg.Logger.Error("refractor keyshredded: grant-table revoke failed (privacy-critical, no retry)",
+				"identityKey", ev.Payload.IdentityKey, "error", pcErr)
+		}
+	}
+
 	if notRegistered {
 		return substrate.NakWithDelay
 	}

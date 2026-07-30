@@ -328,6 +328,39 @@ WHERE EXCLUDED.projection_seq > ` + `"` + GrantTable + `"` + `.projection_seq`
 	return nil
 }
 
+// RevokeAllGrantsForActor tombstones every actor_read_grants row for
+// actorID, across every grant_source, under the same monotonic-seq guard as
+// RevokeGrant. Unlike RevokeGrant and every other write path here it is NOT
+// scoped to one lens's declared grant_source: this is the crypto-shredding
+// entry point (keyshredded.GrantTableRevoker), and a shred revokes the
+// actor's OWN read grants regardless of which producer wrote them.
+// actor_id is the row's own key column, so scoping by it alone cannot touch
+// another actor's rows — the cross-producer isolation every other method
+// enforces via grant_source has nothing to protect here.
+//
+// A row this actor never had is left absent: unlike RevokeGrant, there is no
+// fixed (anchor_id, grant_source) pair to insert a guarding placeholder
+// tombstone for ahead of time — the actor's full row set is not known without
+// reading it first, and a shred is meant to be one write, not a read-then-
+// write. A grant projected for this actor at a HIGHER seq after this call
+// (a race, not the expected shred ordering) is therefore not preemptively
+// guarded — best-effort, consistent with keyshredded's own package-level
+// framing (belt-and-suspenders in Phase A, not a permanent guarantee).
+func (w *PostgresGrantWriter) RevokeAllGrantsForActor(ctx context.Context, actorID string, projectionSeq uint64) error {
+	if actorID == "" {
+		return fmt.Errorf("grant writer: revoke all: actorID must not be empty")
+	}
+	ctx, cancel := w.withTimeout(ctx)
+	defer cancel()
+	const q = `UPDATE ` + `"` + GrantTable + `"` + ` SET projection_seq = $2, is_deleted = true
+WHERE actor_id = $1 AND projection_seq < $2`
+	_, err := w.pool.Exec(ctx, q, actorID, int64(projectionSeq))
+	if err != nil {
+		return fmt.Errorf("grant writer: revoke all: %w", err)
+	}
+	return nil
+}
+
 // ListGrantsBySource returns the live (non-tombstoned) grants carrying
 // grantSource, each as an (actor_id, anchor_id, grant_source) key map. It is
 // the read half of a grant lens's DiffRetraction: the pipeline diffs this

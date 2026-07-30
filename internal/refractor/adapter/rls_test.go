@@ -217,6 +217,65 @@ func TestRLS_GrantSeqGuard_Integration(t *testing.T) {
 	assert.False(t, deletedB, "stale revoke cannot tombstone a fresher grant")
 }
 
+// TestRLS_RevokeAllGrantsForActor_Integration proves the crypto-shredding
+// entry point: a bulk revoke tombstones EVERY grant_source row for the
+// shredded actor (unlike RevokeGrant, which is scoped to one source), leaves
+// another actor's coexisting rows alone, and honors the same monotonic-seq
+// guard (a stale call cannot un-revoke a row a fresher revoke already
+// tombstoned at a higher seq).
+func TestRLS_RevokeAllGrantsForActor_Integration(t *testing.T) {
+	dsn := skipIfNoPostgres(t)
+	ctx := context.Background()
+	pool, err := pgxpool.New(ctx, dsn)
+	require.NoError(t, err)
+	t.Cleanup(pool.Close)
+
+	w := provisionGrantWriter(t, pool)
+
+	actor := "actor_" + sanitize(t.Name())
+	other := "other_" + sanitize(t.Name())
+	srcA := "cap-read.clinic.patient"
+	srcB := "cap-read.provider.clinic"
+	clear := func() {
+		_, _ = pool.Exec(context.Background(), `DELETE FROM "actor_read_grants" WHERE actor_id IN ($1, $2)`, actor, other)
+	}
+	clear()
+	t.Cleanup(clear)
+
+	// The shredded actor holds grants from two distinct producers, at two
+	// distinct anchors — a bulk revoke must reach both regardless of source.
+	require.NoError(t, w.UpsertGrant(ctx, actor, "anchorA", srcA, 5))
+	require.NoError(t, w.UpsertGrant(ctx, actor, "anchorB", srcB, 7))
+	// A different actor's row, same anchor/source shape, must survive untouched.
+	require.NoError(t, w.UpsertGrant(ctx, other, "anchorA", srcA, 5))
+
+	require.NoError(t, w.RevokeAllGrantsForActor(ctx, actor, 100))
+
+	seqA, deletedA, foundA := grantState(t, pool, actor, "anchorA", srcA)
+	require.True(t, foundA)
+	assert.True(t, deletedA, "every grant_source row for the shredded actor must be tombstoned")
+	assert.EqualValues(t, 100, seqA)
+	_, deletedB, foundB := grantState(t, pool, actor, "anchorB", srcB)
+	require.True(t, foundB)
+	assert.True(t, deletedB, "a different grant_source row for the same actor must also be tombstoned")
+	_, deletedOther, foundOther := grantState(t, pool, other, "anchorA", srcA)
+	require.True(t, foundOther)
+	assert.False(t, deletedOther, "another actor's row must not be touched")
+
+	// A stale (lower-seq) revoke-all is a no-op under the monotonic guard.
+	require.NoError(t, w.RevokeAllGrantsForActor(ctx, actor, 50))
+	seqAfter, _, _ := grantState(t, pool, actor, "anchorA", srcA)
+	assert.EqualValues(t, 100, seqAfter, "a stale revoke-all must not regress the stored seq")
+}
+
+func TestPostgresGrantWriter_RevokeAllGrantsForActor_EmptyActorID(t *testing.T) {
+	w, err := NewPostgresGrantWriter(&pgxpool.Pool{}, 0)
+	require.NoError(t, err)
+	err = w.RevokeAllGrantsForActor(context.Background(), "", 1)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "actorID must not be empty")
+}
+
 // TestRLS_RebuildReplayRederivesRowsLostOutOfBand_Integration pins the repair
 // path for a diverged actor_read_grants.
 //
