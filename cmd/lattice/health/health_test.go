@@ -12,6 +12,9 @@ import (
 	"github.com/operatinggraph/lattice/internal/testutil"
 )
 
+// noneDeleted is the isLensDeleted stub for tests with no deactivated lens.
+func noneDeleted(string) bool { return false }
+
 // TestHealthSummary_Rollup_AllGreen exercises the rollup logic when all
 // components are healthy and within the stale threshold.
 func TestHealthSummary_Rollup_AllGreen(t *testing.T) {
@@ -66,7 +69,7 @@ func TestHealthSummary_Rollup_AllGreen(t *testing.T) {
 		return d, ok
 	}
 
-	rollup, overallLevel := computeSummaryRollup(allKeys, readFn, 60*time.Second)
+	rollup, overallLevel := computeSummaryRollup(allKeys, readFn, 60*time.Second, noneDeleted)
 
 	if overallLevel != rollupGreen {
 		t.Errorf("overall = %v, want GREEN", overallLevel)
@@ -136,7 +139,7 @@ func TestHealthSummary_Rollup_DrainingLensNotYellow(t *testing.T) {
 		"health.bootstrap.complete": bootstrapDoc,
 	}
 	readFn := func(k string) (map[string]any, bool) { d, ok := docs[k]; return d, ok }
-	rollup, overallLevel := computeSummaryRollup([]string{drainingLens, "health.bootstrap.complete"}, readFn, 60*time.Second)
+	rollup, overallLevel := computeSummaryRollup([]string{drainingLens, "health.bootstrap.complete"}, readFn, 60*time.Second, noneDeleted)
 	if overallLevel != rollupGreen {
 		t.Errorf("draining lens: overall = %v, want GREEN", overallLevel)
 	}
@@ -154,7 +157,7 @@ func TestHealthSummary_Rollup_DrainingLensNotYellow(t *testing.T) {
 		},
 		"health.bootstrap.complete": bootstrapDoc,
 	}
-	rollup, overallLevel = computeSummaryRollup([]string{stalledLens, "health.bootstrap.complete"}, readFn, 60*time.Second)
+	rollup, overallLevel = computeSummaryRollup([]string{stalledLens, "health.bootstrap.complete"}, readFn, 60*time.Second, noneDeleted)
 	if overallLevel != rollupYellow {
 		t.Errorf("stalled lens: overall = %v, want YELLOW", overallLevel)
 	}
@@ -197,7 +200,7 @@ func TestHealthSummary_Rollup_StaleYellow(t *testing.T) {
 		return d, ok
 	}
 
-	rollup, overallLevel := computeSummaryRollup(allKeys, readFn, 60*time.Second)
+	rollup, overallLevel := computeSummaryRollup(allKeys, readFn, 60*time.Second, noneDeleted)
 
 	if overallLevel != rollupYellow {
 		t.Errorf("overall = %v, want YELLOW (stale heartbeat)", overallLevel)
@@ -252,7 +255,7 @@ func TestHealthSummary_Rollup_StaleLensRow(t *testing.T) {
 		return d, ok
 	}
 
-	rollup, overallLevel := computeSummaryRollup(allKeys, readFn, 60*time.Second)
+	rollup, overallLevel := computeSummaryRollup(allKeys, readFn, 60*time.Second, noneDeleted)
 
 	if overallLevel != rollupYellow {
 		t.Errorf("overall = %v, want YELLOW (a frozen lens row must escalate the rollup)", overallLevel)
@@ -272,6 +275,50 @@ func TestHealthSummary_Rollup_StaleLensRow(t *testing.T) {
 	}
 	if !found {
 		t.Error("lens row not found in rollup components")
+	}
+}
+
+// TestHealthSummary_Rollup_DeactivatedLensSuppressed pins the fix for a
+// deactivated lens's frozen Health KV entry permanently pinning the rollup
+// yellow (component-maintenance board row): `lens deactivate` tombstones the
+// meta vertex but nothing deletes the per-lens reporter's last-written
+// snapshot, so it ages past staleThreshold forever. A row whose lens the
+// isLensDeleted probe reports tombstoned must be dropped entirely rather than
+// scored stale, while an otherwise-identical frozen row for a still-live lens
+// must still escalate (TestHealthSummary_Rollup_StaleLensRow).
+func TestHealthSummary_Rollup_DeactivatedLensSuppressed(t *testing.T) {
+	deactivatedLens := "DeactivatedLensTestId"
+	staleLastUpdated := time.Now().UTC().Add(-14 * time.Hour).Format(time.RFC3339)
+
+	docs := map[string]map[string]any{
+		deactivatedLens: {
+			"ruleId":      deactivatedLens,
+			"status":      "active",
+			"consumerLag": float64(0),
+			"errorCount":  float64(0),
+			"lastUpdated": staleLastUpdated,
+		},
+		"health.bootstrap.complete": {
+			"status":      "complete",
+			"completedAt": staleLastUpdated,
+		},
+	}
+	allKeys := []string{deactivatedLens, "health.bootstrap.complete"}
+	readFn := func(k string) (map[string]any, bool) {
+		d, ok := docs[k]
+		return d, ok
+	}
+	isLensDeleted := func(lensID string) bool { return lensID == deactivatedLens }
+
+	rollup, overallLevel := computeSummaryRollup(allKeys, readFn, 60*time.Second, isLensDeleted)
+
+	if overallLevel != rollupGreen {
+		t.Errorf("overall = %v, want GREEN (a deactivated lens's frozen entry must not pin the rollup)", overallLevel)
+	}
+	for _, row := range rollup.Components {
+		if strings.Contains(row.Component, deactivatedLens) {
+			t.Errorf("deactivated lens row %+v present in rollup, want suppressed entirely", row)
+		}
 	}
 }
 
@@ -446,7 +493,7 @@ func rollupOf(t *testing.T, docs map[string]map[string]any) rollupLevel {
 		allKeys = append(allKeys, k)
 	}
 	readFn := func(k string) (map[string]any, bool) { d, ok := docs[k]; return d, ok }
-	_, level := computeSummaryRollup(allKeys, readFn, 60*time.Second)
+	_, level := computeSummaryRollup(allKeys, readFn, 60*time.Second, noneDeleted)
 	return level
 }
 

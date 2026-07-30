@@ -221,7 +221,12 @@ func heartbeatDetails(doc map[string]any) string {
 }
 
 // computeSummaryRollup evaluates all health KV entries and returns structured rollup data.
-func computeSummaryRollup(allKeys []string, readEntry func(string) (map[string]any, bool), staleThreshold time.Duration) (summaryRollup, rollupLevel) {
+// isLensDeleted reports whether a per-lens reporter key's lens (the bare NanoID
+// also naming vtx.meta.<id>) has been tombstoned; a deactivated lens's pipeline
+// stops advancing but its last-written Health KV snapshot is never cleaned up
+// (no Refractor lifecycle hook deletes it), so without this check the frozen
+// entry ages past staleThreshold and pins the rollup yellow forever.
+func computeSummaryRollup(allKeys []string, readEntry func(string) (map[string]any, bool), staleThreshold time.Duration, isLensDeleted func(lensID string) bool) (summaryRollup, rollupLevel) {
 	overall := rollupGreen
 	rows := make([]componentRow, 0)
 	alertMsgs := make([]string, 0)
@@ -331,7 +336,12 @@ func computeSummaryRollup(allKeys []string, readEntry func(string) (map[string]a
 			rows = append(rows, row)
 
 		case "lens":
-			// Per-lens reporter key (bare NanoID).
+			// Per-lens reporter key (bare NanoID). A deactivated lens leaves this
+			// entry frozen forever (no cleanup hook) — skip it entirely rather
+			// than let a tombstoned lens's stale snapshot pin the rollup.
+			if isLensDeleted(k) {
+				continue
+			}
 			row := componentRow{Component: k + " (lens)"}
 			status, _ := doc["status"].(string)
 			consumerLag, _ := doc["consumerLag"].(float64)
@@ -468,7 +478,23 @@ func newSummaryCommand(natsURL, outputFmt *string) *cobra.Command {
 				return doc, true
 			}
 
-			rollup, overallLevel := computeSummaryRollup(allKeys, readEntry, threshold)
+			isLensDeleted := func(lensID string) bool {
+				entry, err := conn.KVGet(ctx, bootstrap.CoreKVBucket, "vtx.meta."+lensID)
+				if err != nil {
+					return false
+				}
+				var doc map[string]any
+				if err := json.Unmarshal(entry.Value, &doc); err != nil {
+					return false
+				}
+				if class, _ := doc["class"].(string); class != "meta.lens" {
+					return false
+				}
+				isDeleted, _ := doc["isDeleted"].(bool)
+				return isDeleted
+			}
+
+			rollup, overallLevel := computeSummaryRollup(allKeys, readEntry, threshold, isLensDeleted)
 
 			if *outputFmt == "json" {
 				return output.PrintJSON(rollup)
