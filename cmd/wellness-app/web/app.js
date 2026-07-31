@@ -323,8 +323,30 @@ function shortKey(key) {
   return id.length > 10 ? id.slice(0, 6) + "…" + id.slice(-4) : id;
 }
 
+// fmtTime/fmtDay render a UTC instant in the browser's own local zone,
+// mirroring clinic-app's slotTimeLabel + toLocaleDateString precedent
+// (cmd/clinic-app/web/app.js) instead of the raw RFC3339 string.
+function fmtTime(iso) {
+  const d = new Date(iso);
+  if (!iso || isNaN(d.getTime())) return "?";
+  const pad = (n) => String(n).padStart(2, "0");
+  let h = d.getHours();
+  const m = pad(d.getMinutes());
+  const ap = h < 12 ? "AM" : "PM";
+  h = h % 12;
+  if (h === 0) h = 12;
+  return `${h}:${m} ${ap}`;
+}
+
+function fmtDay(iso) {
+  const d = new Date(iso);
+  if (!iso || isNaN(d.getTime())) return "";
+  return d.toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" });
+}
+
 function fmtRange(startsAt, endsAt) {
-  return (startsAt || "?") + " → " + (endsAt || "?");
+  if (!startsAt) return "?";
+  return fmtDay(startsAt) + " " + fmtTime(startsAt) + " – " + fmtTime(endsAt);
 }
 
 // ---- toast ---------------------------------------------------------
@@ -466,7 +488,13 @@ async function renderSchedule() {
     return;
   }
   if (studioKey) sessions = sessions.filter((se) => se.studioKey === studioKey);
-  summary.textContent = sessions.length + " session" + (sessions.length === 1 ? "" : "s");
+  // Upcoming-only: a started class is already disabled "Started" in
+  // scheduleCard below (CreateBooking would refuse it as SessionInPast), so
+  // it no longer earns a spot on the resident-facing grid — mirrors Facet's
+  // isUpcoming (cmd/facet/web/app.js).
+  sessions = sessions.filter((se) => !(se.startsAt && new Date(se.startsAt).getTime() <= Date.now()));
+  sessions.sort((a, b) => new Date(a.startsAt) - new Date(b.startsAt));
+  summary.textContent = sessions.length + " upcoming session" + (sessions.length === 1 ? "" : "s");
   if (!sessions.length) {
     grid.innerHTML = '<div class="empty">No upcoming sessions.</div>';
     return;
@@ -484,7 +512,7 @@ async function renderSchedule() {
     // Affordance only — worst case the button offers a class CreateBooking
     // will still correctly refuse.
   }
-  grid.innerHTML = sessions.map((se) => scheduleCard(se, bookedSessionKeys)).join("");
+  grid.innerHTML = scheduleGroups(sessions, bookedSessionKeys);
   sessions.forEach((se) => {
     const bookBtn = document.getElementById("book-" + domId(se.sessionKey));
     if (!bookBtn) return;
@@ -534,6 +562,23 @@ function domId(key) {
   return key.replace(/[^a-zA-Z0-9]/g, "");
 }
 
+// scheduleGroups breaks the (already day-sorted) upcoming sessions into local
+// calendar-day sections, a header per day, so the grid reads as a schedule
+// rather than one flat pile of cards.
+function scheduleGroups(sessions, bookedSessionKeys) {
+  let html = "";
+  let lastDay = null;
+  for (const se of sessions) {
+    const day = se.startsAt ? new Date(se.startsAt).toDateString() : "";
+    if (day !== lastDay) {
+      html += '<div class="day-header">' + esc(fmtDay(se.startsAt)) + "</div>";
+      lastDay = day;
+    }
+    html += scheduleCard(se, bookedSessionKeys);
+  }
+  return html;
+}
+
 // scheduleCard renders one class on the resident-facing Schedule grid. The
 // Book control is disabled for exactly the reasons CreateBooking would refuse
 // it — started (SessionInPast), full (SessionFull), or already booked
@@ -553,7 +598,7 @@ function scheduleCard(se, bookedSessionKeys) {
     '<div class="who">' + esc(se.name || "?") + "</div>" +
     '<div class="meta">' + esc(se.studioName || shortKey(se.studioKey)) + "</div>" +
     led +
-    '<div class="meta">' + esc(fmtRange(se.startsAt, se.endsAt)) + "</div>" +
+    '<div class="meta">' + esc(fmtTime(se.startsAt) + " – " + fmtTime(se.endsAt)) + "</div>" +
     '<div class="field-row">' +
     '<button id="book-' + id + '"' + (disabled ? " disabled" : "") + ">" + label + "</button>" +
     "</div>" +
@@ -1155,9 +1200,10 @@ function attendanceActions(b) {
 
 // toUtcInstant canonicalizes a datetime-local field ("YYYY-MM-DDTHH:MM",
 // grid-stepped) to the whole-second UTC RFC3339 instant CreateSession's grid
-// expects. The wellness grid is UTC, and the Schedule view already displays
-// session times as raw RFC3339 strings (fmtRange), so the entered wall-clock
-// is stamped ":00Z" verbatim — never shifted by the browser's local zone.
+// expects. The wellness grid is UTC, so the entered wall-clock is stamped
+// ":00Z" verbatim — never shifted by the browser's local zone; the Schedule
+// view (fmtRange/fmtTime) converts that stored UTC instant to each viewer's
+// own local zone only at display time.
 function toUtcInstant(localValue) {
   if (!localValue) return "";
   return localValue.length === 16 ? localValue + ":00Z" : localValue + "Z";

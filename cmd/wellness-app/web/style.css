@@ -123,6 +123,17 @@ button.danger:hover { background: #c94a3f; border-color: #c94a3f; }
   gap: 14px;
 }
 
+.day-header {
+  grid-column: 1 / -1;
+  font-weight: 600;
+  font-size: 13px;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  margin-top: 4px;
+}
+.day-header:first-child { margin-top: 0; }
+
 .card {
   background: var(--bg-raised);
   border: 1px solid var(--border);
