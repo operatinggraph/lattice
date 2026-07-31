@@ -36,6 +36,7 @@
   --c-consumer: #59d8ff;
   --c-front: #a78bfa;
   --c-back: #fb7ba2;
+  --c-provider: #54dd9b;
   --c-operator: #e8b45c;
 
   --grad: linear-gradient(92deg, #59d8ff 0%, #a78bfa 52%, #fb7ba2 100%);
@@ -234,6 +235,7 @@ pre.code .val { color: #ffd9a0; }
 [data-persona="resident"] .persona-tab.on { background: var(--c-consumer); border-color: var(--c-consumer); }
 [data-persona="front"] .persona-tab.on { background: var(--c-front); border-color: var(--c-front); }
 [data-persona="back"] .persona-tab.on { background: var(--c-back); border-color: var(--c-back); }
+[data-persona="provider"] .persona-tab.on { background: var(--c-provider); border-color: var(--c-provider); }
 [data-persona="operator"] .persona-tab.on { background: var(--c-operator); border-color: var(--c-operator); }
 
 .demo-main { display: grid; grid-template-columns: 1.25fr 1fr; min-height: 540px; }
@@ -260,12 +262,14 @@ pre.code .val { color: #ffd9a0; }
 [data-persona="resident"] .pcard .t::before,
 [data-persona="front"] .pcard .t::before,
 [data-persona="back"] .pcard .t::before,
+[data-persona="provider"] .pcard .t::before,
 [data-persona="operator"] .pcard .t::before {
   content: ""; width: 7px; height: 7px; border-radius: 2px; flex: none;
 }
 [data-persona="resident"] .pcard .t::before { background: var(--c-consumer); }
 [data-persona="front"] .pcard .t::before { background: var(--c-front); }
 [data-persona="back"] .pcard .t::before { background: var(--c-back); }
+[data-persona="provider"] .pcard .t::before { background: var(--c-provider); }
 [data-persona="operator"] .pcard .t::before { background: var(--c-operator); }
 .pill { font-family: var(--mono); font-size: 10.5px; padding: 2px 7px; border-radius: 5px; border: 1px solid var(--line-strong); color: var(--muted); }
 .pill.glow { color: #0a0c14; background: var(--grad); border: none; font-weight: 600; }
@@ -293,9 +297,10 @@ pre.code .val { color: #ffd9a0; }
 @keyframes tick-in { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; } }
 
 /* graph SVG nodes/links */
-.g-link { stroke: var(--line-strong); stroke-width: 1.3; }
+.g-link { stroke: var(--line-strong); stroke-width: 1.3; fill: none; }
 .g-link.dim { stroke: rgba(148, 163, 216, 0.08); }
 .g-link.emergent { stroke: var(--c-front); stroke-dasharray: 5 4; stroke-width: 1.6; }
+.g-link.binding { stroke: var(--c-provider); stroke-dasharray: 2 4; stroke-width: 1.6; }
 .g-node circle { fill: var(--surface-2); stroke: var(--faint); stroke-width: 1.4; }
 .g-node.person circle { stroke-width: 2; }
 .g-node text { fill: var(--muted); font-family: var(--body); font-size: 11.5px; font-weight: 600; }
