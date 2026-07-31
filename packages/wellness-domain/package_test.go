@@ -45,10 +45,10 @@ func TestPackage_StructurePins(t *testing.T) {
 	if got, want := len(Package.Lenses), 7; got != want {
 		t.Errorf("Lenses: got %d, want %d", got, want)
 	}
-	if got, want := len(Package.Permissions), 14; got != want {
+	if got, want := len(Package.Permissions), 15; got != want {
 		t.Errorf("Permissions: got %d, want %d", got, want)
 	}
-	if got, want := len(Package.OpMetas), 7; got != want {
+	if got, want := len(Package.OpMetas), 8; got != want {
 		t.Errorf("OpMetas: got %d, want %d", got, want)
 	}
 	if got, want := len(Package.Roles), 0; got != want {
@@ -110,6 +110,7 @@ func TestPackage_StructurePins(t *testing.T) {
 	}{
 		{"CreateStudio", "any", staff}, {"TombstoneStudio", "any", operatorOnly},
 		{"CreateSession", "any", staff}, {"TombstoneSession", "any", []string{"operator", "provider"}},
+		{"ReassignSession", "any", []string{"operator", "frontOfHouse", "provider"}},
 		{"CreateBooking", "any", staff}, {"CreateBooking", "self", []string{"consumer"}},
 		{"CancelBooking", "any", staff}, {"CancelBooking", "self", []string{"consumer"}},
 		{"SetBookingAttendance", "any", []string{"operator", "provider"}},
