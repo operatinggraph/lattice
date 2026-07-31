@@ -840,6 +840,15 @@ func seedClinicProvider(ctx context.Context, conn *substrate.Conn, adminKey stri
 				OptionalReads: []string{practicesLnk},
 			})
 	}
+	// SetSiteProfile is an unconditioned full-replace upsert (site.go), so it's
+	// called every seed run, not gated behind an alive() check — mirrors
+	// seedOseiProvider's SetProviderHours idiom. Without it the building carries
+	// no .site aspect, so clinicSites' `b.site.data.name <> null` filter never
+	// projects a row and the showcase clinic has no site for Sites / the Book
+	// filter to offer.
+	submitOp(ctx, conn, adminKey, "SetSiteProfile", "clinicSite",
+		map[string]any{"buildingKey": buildingKey, "name": "Riverside Clinic"},
+		&processor.ContextHint{Reads: []string{buildingKey}})
 }
 
 // seedOseiProvider mints the showcase's SECOND clinic provider — Dr. Amara
@@ -1072,6 +1081,89 @@ func seedRileyClinicWorld(ctx context.Context, conn *substrate.Conn, adminKey, t
 		submitOp(ctx, conn, adminKey, "CreateAccount", "clinicaccount",
 			map[string]any{"patientKey": rileyPatientKey},
 			&processor.ContextHint{Reads: []string{rileyPatientKey}})
+	}
+
+	// A third, fourth appointment carrying the demo's post-visit history: without
+	// at least one completed + documented visit and one noShow, the showcase
+	// arrives with 0 encounters, an empty Follow-ups worklist, and clinic-ledger's
+	// noShowSettlement target never converging (0 ledger transactions) — the
+	// whole post-visit half of the app is dark on a fresh world. CreateAppointment
+	// requires a future startsAt (enforce_future), so both are minted on the
+	// day+1/day+2 grid like the two above, then immediately walked to a terminal
+	// status — SetAppointmentStatus has no time gate (it's a soft creation-time-only
+	// guard), so a same-fire completed/noShow transition is exactly what the
+	// day-of-visit staff flow (cmd/clinic-app's setStatus) already does. Distinct
+	// hours off the two live bookings above keep all four appointments' 15-minute
+	// slot claims from colliding on the same provider/patient hub.
+	completedStart := futureDayAt(1, 9)
+	completedEnd := completedStart.Add(30 * time.Minute)
+	completedApptID := substrate.DeriveNanoID("showcase-appointment-osei-completed", completedStart.Format("2006-01-02"))
+	completedApptKey := "vtx.appointment." + completedApptID
+	if !alive(ctx, conn, completedApptKey) {
+		submitOp(ctx, conn, adminKey, "CreateAppointment", "appointment",
+			map[string]any{
+				"patient": rileyPatientKey, "provider": oseiProviderKey, "appointmentId": completedApptID,
+				"startsAt": completedStart.Format(time.RFC3339), "endsAt": completedEnd.Format(time.RFC3339),
+				"reason": "Follow-up: sports physical clearance",
+			},
+			&processor.ContextHint{
+				Reads: []string{rileyPatientKey, oseiProviderKey},
+				OptionalReads: append(
+					slotClaimKeys(oseiProviderKey, completedStart, completedEnd),
+					slotClaimKeys(rileyPatientKey, completedStart, completedEnd)...),
+			})
+		submitOp(ctx, conn, adminKey, "SetAppointmentStatus", "appointment",
+			map[string]any{
+				"appointmentKey": completedApptKey, "status": "completed",
+				"provider": oseiProviderKey, "patient": rileyPatientKey,
+			},
+			&processor.ContextHint{
+				Reads: []string{
+					completedApptKey, completedApptKey + ".schedule",
+					linkKey(completedApptKey, "withProvider", oseiProviderKey),
+					linkKey(completedApptKey, "forPatient", rileyPatientKey),
+				},
+				OptionalReads: []string{completedApptKey + ".status"},
+			})
+		submitOp(ctx, conn, adminKey, "RecordEncounter", "appointment",
+			map[string]any{
+				"appointmentKey":    completedApptKey,
+				"summary":           "Cleared for return to play; brace recommended for 4 weeks.",
+				"followUpRequested": true,
+			},
+			&processor.ContextHint{Reads: []string{completedApptKey}})
+	}
+
+	noShowStart := futureDayAt(2, 10)
+	noShowEnd := noShowStart.Add(30 * time.Minute)
+	noShowApptID := substrate.DeriveNanoID("showcase-appointment-patel-noshow", noShowStart.Format("2006-01-02"))
+	noShowApptKey := "vtx.appointment." + noShowApptID
+	if !alive(ctx, conn, noShowApptKey) {
+		submitOp(ctx, conn, adminKey, "CreateAppointment", "appointment",
+			map[string]any{
+				"patient": rileyPatientKey, "provider": providerKey, "appointmentId": noShowApptID,
+				"startsAt": noShowStart.Format(time.RFC3339), "endsAt": noShowEnd.Format(time.RFC3339),
+				"reason": "Annual checkup",
+			},
+			&processor.ContextHint{
+				Reads: []string{rileyPatientKey, providerKey},
+				OptionalReads: append(
+					slotClaimKeys(providerKey, noShowStart, noShowEnd),
+					slotClaimKeys(rileyPatientKey, noShowStart, noShowEnd)...),
+			})
+		submitOp(ctx, conn, adminKey, "SetAppointmentStatus", "appointment",
+			map[string]any{
+				"appointmentKey": noShowApptKey, "status": "noShow",
+				"provider": providerKey, "patient": rileyPatientKey,
+			},
+			&processor.ContextHint{
+				Reads: []string{
+					noShowApptKey, noShowApptKey + ".schedule",
+					linkKey(noShowApptKey, "withProvider", providerKey),
+					linkKey(noShowApptKey, "forPatient", rileyPatientKey),
+				},
+				OptionalReads: []string{noShowApptKey + ".status"},
+			})
 	}
 
 	seriesStart := time.Now().UTC().AddDate(0, 0, -14)
