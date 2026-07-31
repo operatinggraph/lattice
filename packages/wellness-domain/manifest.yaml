@@ -1,5 +1,5 @@
 name: wellness-domain
-version: 0.18.3
+version: 0.19.0
 description: |
   Wellness bookable domain: studio / session / booking / instructor vertex
   types + their aspects and links, written by Create*/Tombstone*/Cancel*/Bind*
@@ -19,7 +19,11 @@ description: |
   to a real login identity via the identity-domain `provider` archetype role
   (persona-worlds-design.md Fire W0), mirroring clinic-domain's
   BindProviderIdentity; a bound instructor's TombstoneSession grant is
-  confined, in-script, to sessions they lead. CancelBooking rejects once the
+  confined, in-script, to sessions they lead. ReassignSession edits a live
+  session's instructor and/or time without cancelling its bookings — a
+  substitute instructor or a moved class no longer forces the all-or-nothing
+  TombstoneSession cancel; a time move claims/releases only the symmetric
+  difference between the old and new covered studioSlotClaim cells. CancelBooking rejects once the
   session has begun (SessionStarted, the mirror of SetBookingAttendance's
   SessionNotStarted) or once attendance is already recorded
   (AttendanceRecorded — a marked booking can no longer be self-cancelled).
@@ -45,8 +49,8 @@ description: |
   workplace covers, not only themselves. Depends
   lease-signing (documentation only — CreateBooking reads its leaseapp by
   known key, no install-order requirement enforced at the Starlark level).
-  CreateBooking, CancelBooking, TombstoneSession, and SetBookingAttendance
-  each carry an op-meta
+  CreateBooking, CancelBooking, TombstoneSession, ReassignSession, and
+  SetBookingAttendance each carry an op-meta
   with the edge-manifest descriptor vocabulary (presentation/inputSchema/
   dispatch, edge-showcase-app-design.md §3.3, Fire 5 adoption) — metadata
   only; a client still needs a service-catalog path (permitsOperation) to
@@ -127,6 +131,9 @@ declares:
     - operationType: TombstoneSession
       scope: any
       grantsTo: [operator, provider]
+    - operationType: ReassignSession
+      scope: any
+      grantsTo: [operator, frontOfHouse, provider]
     - operationType: CreateBooking
       scope: any
       grantsTo: [operator, frontOfHouse]
@@ -164,6 +171,7 @@ declares:
     - operationType: CreateBooking
     - operationType: CancelBooking
     - operationType: TombstoneSession
+    - operationType: ReassignSession
     - operationType: SetBookingAttendance
     - operationType: CreateSession
     - operationType: CreateStudio

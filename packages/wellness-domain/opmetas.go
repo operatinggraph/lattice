@@ -52,6 +52,79 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 // types only who showed. Its `status` field is therefore the one genuinely
 // user-entered value in the whole set.
 //
+// ReassignSession (PROVIDER-hat standing, like TombstoneSession) covers only
+// the self-service RESCHEDULE case — moving a class's time — not the
+// newInstructor/clearInstructor substitute-instructor case, which stays a
+// staff-console-only ceremony (cmd/wellness-app) for now: there is no
+// established descriptor-vocabulary form for "pick another live instructor
+// from a list" (every self-anchor idiom in this file resolves the caller's
+// OWN record, never an arbitrary third party's), so exposing it here would
+// mean asking a person to hand-type a vtx.instructor.<NanoID>. Unlike
+// TombstoneSession's `{me.instructor}` (no `?`, so that op-meta is
+// invitation-only to a bound instructor's hat, per its own doc comment
+// above), `instructor` here is `{me.instructor?}` — OPTIONAL, the same
+// marker CreateBooking's `leaseAppKey` uses — because ReassignSession's
+// grant (permissions.go) is genuinely dual: a front-of-house viewer has no
+// instructor self-anchor, so the field is silently omitted and the
+// Starlark script's own else-branch (workplace confinement) answers;
+// a bound instructor gets it auto-filled and is confined to a class they
+// lead. One op-meta, both hats — mirroring the client-side omission
+// idiom without duplicating the presentation.
+func reassignSessionOpMeta() pkgmgr.OpMetaSpec {
+	return pkgmgr.OpMetaSpec{
+		OperationType: "ReassignSession",
+		Presentation: &pkgmgr.OpPresentationSpec{
+			Title:       "Reschedule class",
+			Description: "Move this class to a new time.",
+			Icon:        "calendar",
+			Tone:        "primary",
+			SubmitLabel: "Reschedule",
+		},
+		InputSchema: `{"type":"object","properties":` +
+			`{"sessionKey":{"type":"string","description":"vtx.session.<NanoID> of the session to reschedule — auto-filled from the session being viewed."},` +
+			`"studio":{"type":"string","title":"Studio","description":"vtx.studio.<NanoID> — must be the session's actual studio."},` +
+			`"instructor":{"type":"string","description":"vtx.instructor.<NanoID> of your own instructor record — required when rescheduling as an instructor rather than staff."},` +
+			`"startsAt":{"type":"string","format":"date-time","title":"New start","description":"The class's new start time, aligned to the 15-minute grid."},` +
+			`"endsAt":{"type":"string","format":"date-time","title":"New end","description":"The class's new end time, aligned to the 15-minute grid."}},` +
+			`"required":["sessionKey","studio","startsAt","endsAt"]}`,
+		FieldDescriptions: map[string]string{
+			"sessionKey": "The session being rescheduled — auto-filled by the client from the session being viewed (dispatch.targetField), not user-entered.",
+			"studio":     "The studio this class runs at — it must be the class's own studio, so a mismatched value is rejected.",
+			"instructor": "Your own instructor record — auto-filled from your identity's own instructor self-anchor when you have one. Omitted for a staff (front-of-house) caller, who is confined instead to a studio at a location they work at.",
+			"startsAt":   "When the class will now start. Must align to the 15-minute grid; the studio cannot already be booked for any part of the new span.",
+			"endsAt":     "When the class will now end. Must align to the 15-minute grid.",
+		},
+		Dispatch: &pkgmgr.OpDispatchSpec{
+			Class:       sessionVertexDDL,
+			AuthContext: "standing",
+			TargetField: "sessionKey",
+			TargetType:  sessionVertexDDL,
+			// `{me.instructor?}` — see the doc comment above for why this is
+			// the one OPTIONAL self-anchor in the file: it is what lets a
+			// single op-meta serve both ReassignSession's grantees.
+			// `{entity.studioKey}` mirrors TombstoneSession's identical field.
+			ContextParams: map[string]string{
+				"instructor": "{me.instructor?}",
+				"studio":     "{entity.studioKey}",
+			},
+			// The session + its schedule are REQUIRED: the script always
+			// re-reads and re-writes the schedule (carrying name/capacity
+			// forward), whether or not this call reschedules — see ddls.go's
+			// write-footprint comment on ReassignSession. The ledBy/
+			// identifiedBy pair are the OPTIONAL ownership probes for the
+			// instructor-standing path, same shape as TombstoneSession's.
+			Reads: []string{
+				"{payload.sessionKey}",
+				"{payload.sessionKey}.schedule",
+			},
+			OptionalReads: []string{
+				"lnk.session.{payload.sessionKey:id}.ledBy.instructor.{payload.instructor:id}",
+				"lnk.instructor.{payload.instructor:id}.identifiedBy.identity.{actor:id}",
+			},
+		},
+	}
+}
+
 // ReleaseOrphanedBooking carries none deliberately, the cafe-ledger
 // CreateAccount/DebitAccount precedent: it is granted at scope=any to
 // `operator` alone (permissions.go) and dispatched only by the
@@ -204,6 +277,7 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 				},
 			},
 		},
+		reassignSessionOpMeta(),
 		{
 			OperationType: "SetBookingAttendance",
 			Presentation: &pkgmgr.OpPresentationSpec{

@@ -154,7 +154,7 @@ func sessionVertexTypeDDL() pkgmgr.DDLSpec {
 	return pkgmgr.DDLSpec{
 		CanonicalName:     sessionVertexDDL,
 		Class:             "meta.ddl.vertexType",
-		PermittedCommands: []string{"CreateSession", "TombstoneSession"},
+		PermittedCommands: []string{"CreateSession", "TombstoneSession", "ReassignSession"},
 		Description: "Wellness session DDL. Vertex shape: vtx.session.<NanoID>, class=session, root data = {} " +
 			"(minimal, D5). CreateSession validates the studio is alive + class=studio, then atomically mints the " +
 			"session + the .schedule aspect {name, startsAt, endsAt, capacity} + the atStudio link " +
@@ -178,29 +178,52 @@ func sessionVertexTypeDDL() pkgmgr.DDLSpec {
 			"lead — the caller supplies the instructor param and the script requires BOTH " +
 			"lnk.session.<id>.ledBy.instructor.<iid> AND lnk.instructor.<iid>.identifiedBy.identity.<actor> to be " +
 			"alive (known keys), rejecting AuthDenied otherwise; front-of-house staff hold no TombstoneSession " +
-			"grant.",
+			"grant. ReassignSession edits a LIVE session's instructor and/or time WITHOUT cancelling its " +
+			"bookings — the gap TombstoneSession's all-or-nothing cancel otherwise forces a sub or a moved class " +
+			"through (releasing every seat). It requires sessionKey + studio (validated via atStudio, same as " +
+			"TombstoneSession) and at least one of: newInstructor (assign/replace the class's instructor — " +
+			"validated alive + class=instructor), clearInstructor=true (remove it, no replacement), or a " +
+			"startsAt+endsAt pair (move the class; re-validated against the 15-minute grid + 96-cell span cap, " +
+			"exactly like CreateSession). Instructor swap tombstones the session's current ledBy link (if any, " +
+			"found by the same bounded link-enumeration idiom studio_locations already uses in this file for a " +
+			"studio's locatedAt links — a session carries at most one) and writes a new one, mirroring identity-hygiene's " +
+			"tombstone-old+create-new link-swap idiom (ddls.go). A time move computes the OLD and NEW covered " +
+			"cell sets and mutates only the symmetric difference — cells the new span still covers are left " +
+			"untouched (no release+reclaim round-trip against itself), cells only the old span covered are " +
+			"released, and cells only the new span covers are claimed via the same CreateOnly claim_cell " +
+			"double-book guard CreateSession uses (StudioConflict on collision with another session); the " +
+			"schedule aspect's name/capacity carry forward unchanged, OCC-conditioned on its current revision. " +
+			"Standing binder mirrors the union of CreateSession's and TombstoneSession's: the operator passes " +
+			"unconditionally; a non-operator caller supplying its own bound instructor (validated via ledBy + " +
+			"identifiedBy, same as TombstoneSession) may reassign/reschedule only a class THEY currently lead; " +
+			"absent that, front-of-house staff may act workplace-confined to the studio's own location " +
+			"(enforce_workplace, same as CreateSession's staff path).",
 		Script: sessionDDLScript,
 		InputSchema: `{"type":"object","properties":` +
-			`{"studio":{"type":"string","description":"vtx.studio.<NanoID> the session runs at (CreateSession; required, validated alive + class=studio; on TombstoneSession it must be the session's actual studio, validated via the atStudio link)."},` +
+			`{"studio":{"type":"string","description":"vtx.studio.<NanoID> the session runs at (CreateSession; required, validated alive + class=studio; on TombstoneSession/ReassignSession it must be the session's actual studio, validated via the atStudio link)."},` +
 			`"name":{"type":"string","description":"The session's display name, e.g. Vinyasa Flow (CreateSession; required)."},` +
-			`"startsAt":{"type":"string","description":"Session start, RFC3339 (CreateSession; required). Aligned to the 15-minute booking grid (:00/:15/:30/:45; SlotGridViolation otherwise)."},` +
-			`"endsAt":{"type":"string","description":"Session end, RFC3339 (CreateSession; required). Aligned to the 15-minute grid; span capped at 96 cells / 24h (SessionTooLong)."},` +
+			`"startsAt":{"type":"string","description":"Session start, RFC3339 (CreateSession; required. ReassignSession; optional, must be paired with endsAt). Aligned to the 15-minute booking grid (:00/:15/:30/:45; SlotGridViolation otherwise)."},` +
+			`"endsAt":{"type":"string","description":"Session end, RFC3339 (CreateSession; required. ReassignSession; optional, must be paired with startsAt). Aligned to the 15-minute grid; span capped at 96 cells / 24h (SessionTooLong)."},` +
 			`"capacity":{"type":"integer","description":"Maximum concurrent bookings (CreateSession; required, 1..200). Bounds the seat-claim loop CreateBooking walks."},` +
-			`"instructor":{"type":"string","description":"Optional vtx.instructor.<NanoID> leading the session (CreateSession; validated alive + class=instructor; writes the ledBy link). Listed in ContextHint.Reads when supplied. On TombstoneSession, required for an instructor (non-operator) caller cancelling their OWN class — validated via ledBy + identifiedBy."},` +
+			`"instructor":{"type":"string","description":"Optional vtx.instructor.<NanoID> leading the session (CreateSession; validated alive + class=instructor; writes the ledBy link). Listed in ContextHint.Reads when supplied. On TombstoneSession/ReassignSession, required for an instructor (non-operator) caller acting on their OWN class — validated via ledBy + identifiedBy."},` +
 			`"sessionId":{"type":"string","description":"Optional bare NanoID for the new session vertex (CreateSession); absent → minted."},` +
-			`"sessionKey":{"type":"string","description":"vtx.session.<NanoID> of an existing session (TombstoneSession; required, validated alive)."}},` +
+			`"sessionKey":{"type":"string","description":"vtx.session.<NanoID> of an existing session (TombstoneSession/ReassignSession; required, validated alive)."},` +
+			`"newInstructor":{"type":"string","description":"vtx.instructor.<NanoID> to assign as the session's instructor going forward (ReassignSession; validated alive + class=instructor; mutually exclusive with clearInstructor). Replaces any existing ledBy link."},` +
+			`"clearInstructor":{"type":"boolean","description":"Remove the session's instructor with no replacement (ReassignSession; mutually exclusive with newInstructor)."}},` +
 			`"required":[]}`,
 		OutputSchema: `{"type":"object","properties":` +
 			`{"primaryKey":{"type":"string","description":"vtx.session.<NanoID> the operation wrote."}}}`,
 		FieldDescription: map[string]string{
-			"studio":     "Full vtx.studio.<NanoID> key the session runs at. CreateSession validates it is alive + class=studio, writes the atStudio link, and claims one studioSlotClaim aspect per covered 15-minute cell. TombstoneSession also requires it (the session's actual studio, validated via the atStudio link) to release the held cells.",
-			"name":       "The session's display name (CreateSession; required).",
-			"startsAt":   "Session start (RFC3339, canonical UTC). Stored on the .schedule aspect (CreateSession; required). Must align to the 15-minute grid (SlotGridViolation).",
-			"endsAt":     "Session end (RFC3339, canonical UTC). Stored on the .schedule aspect (CreateSession; required). Must align to the 15-minute grid; span capped at 96 cells / 24h (SessionTooLong).",
-			"capacity":   "Maximum concurrent bookings, an integer 1..200 (CreateSession; required). Stored on the .schedule aspect; CreateBooking reads it to bound the seat-claim loop (SessionFull once exhausted).",
-			"instructor": "Optional full vtx.instructor.<NanoID> key leading the session. CreateSession validates it is alive + class=instructor and writes the ledBy link; MUST be listed in ContextHint.Reads when supplied. TombstoneSession's standing guard requires it (plus the caller's own identifiedBy binding to it) for a non-operator, instructor-role caller to cancel their own class.",
-			"sessionId":  "Optional bare NanoID (no dots / key segments) for the new session vertex. Absent → minted with nanoid.new().",
-			"sessionKey": "Full vtx.session.<NanoID> key of an existing session (TombstoneSession releases its held studioSlotClaim cells then tombstones it).",
+			"studio":          "Full vtx.studio.<NanoID> key the session runs at. CreateSession validates it is alive + class=studio, writes the atStudio link, and claims one studioSlotClaim aspect per covered 15-minute cell. TombstoneSession/ReassignSession also require it (the session's actual studio, validated via the atStudio link) — TombstoneSession to release the held cells, ReassignSession to workplace-confine a front-of-house caller and to claim/release cells on a time move.",
+			"name":            "The session's display name (CreateSession; required).",
+			"startsAt":        "Session start (RFC3339, canonical UTC). Stored on the .schedule aspect (CreateSession; required. ReassignSession; optional — moves the class, must be paired with endsAt). Must align to the 15-minute grid (SlotGridViolation).",
+			"endsAt":          "Session end (RFC3339, canonical UTC). Stored on the .schedule aspect (CreateSession; required. ReassignSession; optional — must be paired with startsAt). Must align to the 15-minute grid; span capped at 96 cells / 24h (SessionTooLong).",
+			"capacity":        "Maximum concurrent bookings, an integer 1..200 (CreateSession; required). Stored on the .schedule aspect; CreateBooking reads it to bound the seat-claim loop (SessionFull once exhausted). Carried forward unchanged by ReassignSession.",
+			"instructor":      "Optional full vtx.instructor.<NanoID> key leading the session. CreateSession validates it is alive + class=instructor and writes the ledBy link; MUST be listed in ContextHint.Reads when supplied. TombstoneSession's/ReassignSession's standing guard requires it (plus the caller's own identifiedBy binding to it) for a non-operator, instructor-role caller to act on their own class.",
+			"sessionId":       "Optional bare NanoID (no dots / key segments) for the new session vertex. Absent → minted with nanoid.new().",
+			"sessionKey":      "Full vtx.session.<NanoID> key of an existing session. TombstoneSession releases its held studioSlotClaim cells then tombstones it. ReassignSession edits it in place.",
+			"newInstructor":   "Full vtx.instructor.<NanoID> key to assign as the session's instructor going forward (ReassignSession; validated alive + class=instructor). Replaces any existing ledBy link; mutually exclusive with clearInstructor. Omitting both newInstructor and clearInstructor leaves the instructor unchanged.",
+			"clearInstructor": "Boolean (ReassignSession). true removes the session's instructor with no replacement; mutually exclusive with newInstructor.",
 		},
 		Examples: []pkgmgr.ExampleSpec{
 			{
@@ -245,6 +268,33 @@ func sessionVertexTypeDDL() pkgmgr.DDLSpec {
 					"AND lnk.instructor.<NanoID>.identifiedBy.identity.<actor> to both be alive — rejects AuthDenied " +
 					"if the caller is not the session's own bound instructor.",
 			},
+			{
+				Name: "ReassignSession — sub in a substitute instructor",
+				Payload: map[string]any{
+					"sessionKey":    "vtx.session.<NanoID>",
+					"studio":        "vtx.studio.<NanoID>",
+					"newInstructor": "vtx.instructor.<NanoID>",
+				},
+				ExpectedOutcome: "Validates the session is alive + class=session, the supplied studio is its actual " +
+					"studio, and the new instructor is alive + class=instructor. Tombstones any existing ledBy link " +
+					"and writes the new one. Bookings, schedule, and slot claims are untouched. Returns primaryKey.",
+			},
+			{
+				Name:    "ReassignSession — move a class to a new time",
+				Payload: map[string]any{"sessionKey": "vtx.session.<NanoID>", "studio": "vtx.studio.<NanoID>", "startsAt": "2026-07-08T10:00:00Z", "endsAt": "2026-07-08T10:30:00Z"},
+				ExpectedOutcome: "Validates the new span against the 15-minute grid + 96-cell cap, releases studioSlotClaim " +
+					"cells only the OLD span held, and claims cells only the NEW span needs (StudioConflict on collision " +
+					"with another session). The .schedule aspect's startsAt/endsAt update; name/capacity/bookings carry " +
+					"forward unchanged. Returns primaryKey.",
+			},
+			{
+				Name:    "ReassignSession — an instructor reschedules their own class",
+				Payload: map[string]any{"sessionKey": "vtx.session.<NanoID>", "studio": "vtx.studio.<NanoID>", "instructor": "vtx.instructor.<NanoID>", "startsAt": "2026-07-08T11:00:00Z", "endsAt": "2026-07-08T11:30:00Z"},
+				ExpectedOutcome: "As above, plus (for a non-operator caller) requires lnk.session.<id>.ledBy.instructor.<NanoID> " +
+					"AND lnk.instructor.<NanoID>.identifiedBy.identity.<actor> to both be alive — rejects AuthDenied if " +
+					"the caller is not the class's own bound instructor. A front-of-house caller instead needs no " +
+					"instructor param but must worksAt a location covering the studio.",
+			},
 		},
 	}
 }
@@ -253,11 +303,13 @@ func sessionScheduleAspectTypeDDL() pkgmgr.DDLSpec {
 	return pkgmgr.DDLSpec{
 		CanonicalName:     sessionScheduleAspectDDL,
 		Class:             "meta.ddl.aspectType",
-		PermittedCommands: []string{"CreateSession"},
+		PermittedCommands: []string{"CreateSession", "ReassignSession"},
 		Description: "Session schedule aspect (wellness). Stored as vtx.session.<NanoID>.schedule (class " +
-			"sessionSchedule) = {name, startsAt, endsAt, capacity}. Non-sensitive. Written by CreateSession (whose " +
-			"session vertexType DDL owns the script); this aspect-type DDL is the step-6 write gate. Declaration-" +
-			"only: no op handler. CreateBooking reads capacity on demand (kv.Read) to bound its seat-claim loop.",
+			"sessionSchedule) = {name, startsAt, endsAt, capacity}. Non-sensitive. Written by CreateSession (mints) " +
+			"and ReassignSession (OCC-conditioned startsAt/endsAt update on a time move; name/capacity carried " +
+			"forward unchanged) — both owned by the session vertexType DDL's script; this aspect-type DDL is the " +
+			"step-6 write gate. Declaration-only: no op handler. CreateBooking reads capacity on demand (kv.Read) " +
+			"to bound its seat-claim loop.",
 		Script: aspectDeclarationOnlyScript,
 		InputSchema: `{"type":"object","properties":` +
 			`{"name":{"type":"string"},"startsAt":{"type":"string"},"endsAt":{"type":"string"},"capacity":{"type":"integer"}}}`,
@@ -289,14 +341,15 @@ func studioSlotClaimAspectTypeDDL() pkgmgr.DDLSpec {
 	return pkgmgr.DDLSpec{
 		CanonicalName:     studioSlotClaimAspectDDL,
 		Class:             "meta.ddl.aspectType",
-		PermittedCommands: []string{"CreateSession", "TombstoneSession"},
+		PermittedCommands: []string{"CreateSession", "TombstoneSession", "ReassignSession"},
 		Description: "Studio 15-minute slot-claim aspect (wellness). Stored as vtx.studio.<NanoID>.slot<cellcode> " +
 			"(class studioSlotClaim) = {} — a pure existence marker, no relationship field. <cellcode> is the " +
 			"cell's canonical whole-second UTC start with '-'/':' stripped and lowercased. CreateSession claims " +
 			"one per covered cell (CreateOnly — the key collision across two concurrent sessions for the same cell " +
 			"IS the double-book lock: StudioConflict on commit-time rejection); TombstoneSession tombstones all " +
-			"held cells on cancellation, freeing them. Non-sensitive; created on demand, no CreateStudio init " +
-			"needed. Declaration-only: no op handler.",
+			"held cells on cancellation, freeing them. ReassignSession's time-move path claims/releases only the " +
+			"symmetric difference between the old and new covered cells (a cell both spans cover is left alone). " +
+			"Non-sensitive; created on demand, no CreateStudio init needed. Declaration-only: no op handler.",
 		Script:       aspectDeclarationOnlyScript,
 		InputSchema:  `{"type":"object","properties":{}}`,
 		OutputSchema: `{"type":"object"}`,
@@ -1463,8 +1516,9 @@ def slot_cellcode(cell_start):
 
 def claim_cell(hub, cellcode, cls, conflict_code, who):
     key = hub + ".slot" + cellcode
-    # read-posture: (d) declared optionalReads at CreateSession dispatch — an
-    # absent cell is the common case (no existing booking), never a required read.
+    # read-posture: (d) declared optionalReads at CreateSession/ReassignSession
+    # dispatch — an absent cell is the common case (no existing booking), never
+    # a required read.
     existing = kv.Read(key)
     if existing != None and not existing.isDeleted:
         fail(conflict_code + ": " + who + " " + hub + " slot " + cellcode + " is already booked")
@@ -1475,8 +1529,9 @@ def claim_cell(hub, cellcode, cls, conflict_code, who):
 def require_matching_studio(sess_id, studio):
     _, studio_id = parts_of(studio, "studio", "studio")
     at_studio_lnk = "lnk.session." + sess_id + ".atStudio.studio." + studio_id
-    # read-posture: (a) declared reads at TombstoneSession dispatch (validation
-    # link; absence means the caller named the wrong studio — WrongStudio).
+    # read-posture: (a) declared reads at TombstoneSession/ReassignSession
+    # dispatch (validation link; absence means the caller named the wrong
+    # studio — WrongStudio).
     asl = kv.Read(at_studio_lnk)
     if asl == None or asl.isDeleted:
         fail("WrongStudio: studio " + studio + " is not the studio of session vtx.session." + sess_id)
@@ -1494,6 +1549,21 @@ def release_cells_mutations(studio, sched):
         cc = slot_cellcode(c)
         out.append(make_tombstone(studio + ".slot" + cc))
     return out
+
+def session_ledby_link(sess_key):
+    # A session carries AT MOST ONE instructor (CreateSession/ReassignSession
+    # write exactly one ledBy link), so this returns its live link key or
+    # None -- the same bounded, known-hub enumeration idiom studio_locations
+    # already uses in this file for a studio's locatedAt links.
+    if not vertex_live(sess_key):
+        return None
+    # read-posture: (e) relation=ledBy epoch=none -- a session leads to at
+    # most one instructor, never a keyspace scan.
+    page, _ = kv.Links(sess_key, "ledBy", "out")
+    for lk in page:
+        if not lk.isDeleted:
+            return lk.key
+    return None
 
 def execute(state, op):
     ot = op.operationType
@@ -1624,6 +1694,129 @@ def execute(state, op):
         mutations = [make_tombstone(sess_key)]
         mutations.extend(release_cells_mutations(studio, sched))
         events = [{"class": "wellness.sessionCancelled", "data": {"sessionKey": sess_key}}]
+        return {"mutations": mutations, "events": events, "response": {"primaryKey": sess_key}}
+
+    if ot == "ReassignSession":
+        sess_key = required_string(p, "sessionKey")
+        _, sess_id = parts_of(sess_key, "sessionKey", "session")
+        if not vertex_alive(state, sess_key):
+            fail("UnknownSession: " + sess_key)
+        cls = class_of(state, sess_key)
+        if cls != "session":
+            fail("WrongClass: sessionKey: " + sess_key + " has class " + str(cls) + ", required session")
+
+        studio = required_string(p, "studio")
+        require_matching_studio(sess_id, studio)
+
+        # Standing binder — the union of CreateSession's and TombstoneSession's:
+        # operator passes unconditionally; a bound instructor may reassign or
+        # reschedule only a class THEY currently lead (same ledBy+identifiedBy
+        # shape TombstoneSession uses); absent that, a front-of-house caller
+        # must worksAt a location covering the studio (same enforce_workplace
+        # shape CreateSession's staff path uses).
+        if not actor_holds_operator(op.actor):
+            instr_key = optional_string(p, "instructor")
+            if instr_key != None:
+                _, instr_id = parts_of(instr_key, "instructor", "instructor")
+                _, actor_id = parts_of(op.actor, "actor", "identity")
+                # read-posture: (d) declared optionalReads by ReassignSession's
+                # dispatcher for the instructor-standing path (absence is a
+                # meaningful AuthDenied, not a correctness error) — mirrors
+                # TombstoneSession's identical two reads above.
+                bound = kv.Read("lnk.instructor." + instr_id + ".identifiedBy.identity." + actor_id)
+                if bound == None or bound.isDeleted:
+                    fail("AuthDenied: " + op.actor + " is not identifiedBy-bound to instructor " + instr_key)
+                # read-posture: (d) declared optionalReads by ReassignSession's dispatcher.
+                led_by = kv.Read("lnk.session." + sess_id + ".ledBy.instructor." + instr_id)
+                if led_by == None or led_by.isDeleted:
+                    fail("AuthDenied: " + instr_key + " does not lead session " + sess_key)
+            else:
+                enforce_workplace(studio_locations(studio), "cannot reassign session " + sess_key)
+
+        new_instructor = optional_string(p, "newInstructor")
+        clear_instructor = hasattr(p, "clearInstructor") and getattr(p, "clearInstructor") == True
+        if new_instructor != None and clear_instructor:
+            fail("InvalidArgument: newInstructor and clearInstructor are mutually exclusive")
+
+        new_starts_raw = optional_string(p, "startsAt")
+        new_ends_raw = optional_string(p, "endsAt")
+        if (new_starts_raw == None) != (new_ends_raw == None):
+            fail("InvalidArgument: startsAt and endsAt must be supplied together")
+        reschedule = new_starts_raw != None
+
+        if new_instructor == None and not clear_instructor and not reschedule:
+            fail("InvalidArgument: at least one of newInstructor, clearInstructor, or startsAt+endsAt is required")
+
+        mutations = []
+
+        # Instructor swap: tombstone the CURRENT ledBy link (if any) and write
+        # the new one, mirroring identity-hygiene's tombstone-old+create-new
+        # link-swap idiom (ddls.go). clearInstructor alone tombstones with no
+        # replacement.
+        if new_instructor != None or clear_instructor:
+            cur_ledby = session_ledby_link(sess_key)
+            if cur_ledby != None:
+                mutations.append(make_tombstone(cur_ledby))
+            if new_instructor != None:
+                require_live_typed(state, new_instructor, "newInstructor", "instructor")
+                _, new_instr_id = parts_of(new_instructor, "newInstructor", "instructor")
+                mutations.append(make_link("lnk.session." + sess_id + ".ledBy.instructor." + new_instr_id,
+                                           sess_key, new_instructor, "ledBy", "ledBy", {}))
+
+        # The schedule is ALWAYS read and ALWAYS re-written (OCC-conditioned),
+        # whether or not this call reschedules: an instructor-only swap
+        # mutates only link keys (no key sharing sess_key's 3-segment vertex
+        # root), and the write-path reply-constraint (Processor
+        # commit_path.go's primaryKeyInCommit) rejects a script-named
+        # primaryKey that lies outside the mutation batch's write footprint —
+        # a link is never vertex-rooted. The schedule aspect IS vertex-rooted
+        # to sess_key, so touching it (name/capacity carried forward
+        # unchanged when this call is not a reschedule) is what keeps
+        # sess_key inside the footprint on every branch, not merely the
+        # time-move one.
+        #
+        # read-posture: (a) declared reads at ReassignSession dispatch —
+        # required to carry name/capacity forward onto the re-written
+        # schedule and, on a reschedule, to compute the OLD covered cells
+        # below.
+        sched = kv.Read(sess_key + ".schedule")
+        if sched == None or sched.isDeleted:
+            fail("UnknownSession: " + sess_key + " has no schedule")
+        cur_starts = sched.data.get("startsAt")
+        cur_ends = sched.data.get("endsAt")
+
+        # Time move: release cells only the OLD span held, claim cells only
+        # the NEW span needs, and leave a cell both spans cover untouched — a
+        # release+reclaim round-trip against itself would spuriously read its
+        # own about-to-be-released claim as a StudioConflict, since this
+        # script's own mutations have not yet been applied to the state its
+        # reads see.
+        if reschedule:
+            new_starts = time.rfc3339_utc(new_starts_raw)
+            new_ends = time.rfc3339_utc(new_ends_raw)
+            if not (new_starts < new_ends):
+                fail("InvalidArgument: endsAt: must be strictly after startsAt; got startsAt=" + new_starts + " endsAt=" + new_ends)
+            enforce_grid(new_starts, new_ends)
+            new_cells = slot_cells(new_starts, new_ends)
+
+            old_cells = []
+            if cur_starts != None and cur_ends != None:
+                old_cells = slot_cells(cur_starts, cur_ends)
+
+            for c in old_cells:
+                if c not in new_cells:
+                    mutations.append(make_tombstone(studio + ".slot" + slot_cellcode(c)))
+            for c in new_cells:
+                if c not in old_cells:
+                    mutations.append(claim_cell(studio, slot_cellcode(c), "studioSlotClaim", "StudioConflict", "studio"))
+        else:
+            new_starts = cur_starts
+            new_ends = cur_ends
+
+        new_sched = {"name": sched.data.get("name"), "startsAt": new_starts, "endsAt": new_ends, "capacity": sched.data.get("capacity")}
+        mutations.append(make_aspect_upsert_occ(sess_key, "schedule", "sessionSchedule", new_sched, sched.revision))
+
+        events = [{"class": "wellness.sessionReassigned", "data": {"sessionKey": sess_key, "studio": studio}}]
         return {"mutations": mutations, "events": events, "response": {"primaryKey": sess_key}}
 
     fail("UnknownOperation: " + ot)

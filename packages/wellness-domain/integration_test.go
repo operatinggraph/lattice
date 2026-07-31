@@ -80,6 +80,7 @@ func domainCapDoc() *processor.CapabilityDoc {
 			{OperationType: "TombstoneStudio", Scope: "any"},
 			{OperationType: "CreateSession", Scope: "any"},
 			{OperationType: "TombstoneSession", Scope: "any"},
+			{OperationType: "ReassignSession", Scope: "any"},
 			{OperationType: "CreateBooking", Scope: "any"},
 			{OperationType: "CancelBooking", Scope: "any"},
 			{OperationType: "SetBookingAttendance", Scope: "any"},
@@ -1050,6 +1051,333 @@ func TestTombstoneSession_ReleasesStudioSlotCells(t *testing.T) {
 	_, outcome := createSession(t, ctx, conn, cp, cons, "wdcreatesessio000010", studioKey, "Power Sculpt", "2026-07-08T09:00:00Z", "2026-07-08T09:30:00Z", 20)
 	if outcome != processor.OutcomeAccepted {
 		t.Fatalf("CreateSession on freed cells outcome = %v, want Accepted", outcome)
+	}
+}
+
+// reassignSessionEnv builds a ReassignSession envelope with the read posture
+// its dispatcher declares (ddls.go): the session + its schedule are required
+// reads (mirroring TombstoneSession, which always declares .schedule even
+// though only a time move actually consumes it); the atStudio validation
+// link and the instructor-standing ownership probes are optionalReads,
+// exactly like TombstoneSession's; a supplied newInstructor is a required
+// read, exactly like CreateSession's instructor field.
+func reassignSessionEnv(t *testing.T, label, sessionKey, studioKey, actorKey string, payload map[string]any, submittedAt string) *processor.OperationEnvelope {
+	t.Helper()
+	_, sessID, _ := substrate.ParseVertexKey(sessionKey)
+	reads := []string{sessionKey, sessionKey + ".schedule"}
+	optionalReads := []string{atStudioLnkKey(t, sessionKey, studioKey)}
+	if instr, ok := payload["instructor"].(string); ok && instr != "" {
+		_, instrID, _ := substrate.ParseVertexKey(instr)
+		_, actorID, _ := substrate.ParseVertexKey(actorKey)
+		optionalReads = append(optionalReads,
+			"lnk.instructor."+instrID+".identifiedBy.identity."+actorID,
+			"lnk.session."+sessID+".ledBy.instructor."+instrID)
+	}
+	if newInstr, ok := payload["newInstructor"].(string); ok && newInstr != "" {
+		reads = append(reads, newInstr)
+	}
+	payloadBytes, _ := json.Marshal(payload)
+	return &processor.OperationEnvelope{
+		RequestID:     testutil.GenReqID(label),
+		Lane:          processor.LaneDefault,
+		OperationType: "ReassignSession",
+		Actor:         actorKey,
+		SubmittedAt:   submittedAt,
+		Class:         "session",
+		Payload:       payloadBytes,
+		ContextHint:   &processor.ContextHint{Reads: reads, OptionalReads: optionalReads},
+	}
+}
+
+func sessionLedByLnkKey(t *testing.T, sessionKey, instructorKey string) string {
+	t.Helper()
+	_, sessID, _ := substrate.ParseVertexKey(sessionKey)
+	_, instrID, _ := substrate.ParseVertexKey(instructorKey)
+	return "lnk.session." + sessID + ".ledBy.instructor." + instrID
+}
+
+func TestReassignSession_SwapsInstructor(t *testing.T) {
+	ctx, conn := setupDomainEnv(t)
+	cp, cons := newDomainPipeline(t, ctx, conn, "reassigninstr")
+
+	opDoc := domainCapDoc()
+	opDoc.PlatformPermissions = append(opDoc.PlatformPermissions,
+		processor.PlatformPermission{OperationType: "CreateInstructor", Scope: "any"})
+	testutil.SeedCapDoc(t, ctx, conn, opDoc)
+
+	mkInstructor := func(label, name string) string {
+		reqID := testutil.GenReqID(label)
+		testutil.PublishOp(t, conn, &processor.OperationEnvelope{
+			RequestID: reqID, Lane: processor.LaneDefault, OperationType: "CreateInstructor",
+			Actor: domainActorKey, SubmittedAt: "2026-07-07T12:00:00Z", Class: "instructor",
+			Payload: json.RawMessage(`{"displayName":"` + name + `"}`),
+		})
+		testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
+		return "vtx.instructor." + nanoIDFromRequestID(reqID)
+	}
+	instructorA := mkInstructor("wdreassigninstra0001", "A")
+	instructorB := mkInstructor("wdreassigninstrb0001", "B")
+
+	studioKey := createStudio(t, ctx, conn, cp, cons, "wdreassignstudio0001", "Flow Room")
+	sessReqID := testutil.GenReqID("wdreassignsessio0001")
+	testutil.PublishOp(t, conn, &processor.OperationEnvelope{
+		RequestID: sessReqID, Lane: processor.LaneDefault, OperationType: "CreateSession",
+		Actor: domainActorKey, SubmittedAt: "2026-07-07T12:00:00Z", Class: "session",
+		Payload: json.RawMessage(`{"studio":"` + studioKey + `","name":"Vinyasa Flow","instructor":"` + instructorA +
+			`","startsAt":"2026-07-08T09:00:00Z","endsAt":"2026-07-08T09:30:00Z","capacity":20}`),
+		ContextHint: &processor.ContextHint{
+			Reads:         []string{studioKey, instructorA},
+			OptionalReads: wdSlotClaimKeys(t, studioKey, "2026-07-08T09:00:00Z", "2026-07-08T09:30:00Z"),
+		},
+	})
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
+	sessionKey := "vtx.session." + nanoIDFromRequestID(sessReqID)
+	if !keyExists(t, ctx, conn, sessionLedByLnkKey(t, sessionKey, instructorA)) {
+		t.Fatalf("CreateSession did not write the initial ledBy link")
+	}
+
+	outcome, _ := testutil.SubmitAndAwaitReply(t, ctx, conn, cp, cons, reassignSessionEnv(t, "wdreassignswap00001",
+		sessionKey, studioKey, domainActorKey, map[string]any{"sessionKey": sessionKey, "studio": studioKey, "newInstructor": instructorB},
+		"2026-07-08T08:00:00Z"))
+	if outcome != processor.OutcomeAccepted {
+		t.Fatalf("ReassignSession newInstructor outcome = %v, want Accepted", outcome)
+	}
+	if keyExists(t, ctx, conn, sessionLedByLnkKey(t, sessionKey, instructorA)) {
+		t.Errorf("the OLD ledBy link (instructor A) must be tombstoned after reassignment")
+	}
+	if !keyExists(t, ctx, conn, sessionLedByLnkKey(t, sessionKey, instructorB)) {
+		t.Errorf("the NEW ledBy link (instructor B) must be live after reassignment")
+	}
+}
+
+func TestReassignSession_ClearsInstructorWithNoReplacement(t *testing.T) {
+	ctx, conn := setupDomainEnv(t)
+	cp, cons := newDomainPipeline(t, ctx, conn, "reassignclear")
+
+	opDoc := domainCapDoc()
+	opDoc.PlatformPermissions = append(opDoc.PlatformPermissions,
+		processor.PlatformPermission{OperationType: "CreateInstructor", Scope: "any"})
+	testutil.SeedCapDoc(t, ctx, conn, opDoc)
+
+	reqID := testutil.GenReqID("wdreassignclrinstr01")
+	testutil.PublishOp(t, conn, &processor.OperationEnvelope{
+		RequestID: reqID, Lane: processor.LaneDefault, OperationType: "CreateInstructor",
+		Actor: domainActorKey, SubmittedAt: "2026-07-07T12:00:00Z", Class: "instructor",
+		Payload: json.RawMessage(`{"displayName":"A"}`),
+	})
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
+	instructorA := "vtx.instructor." + nanoIDFromRequestID(reqID)
+
+	studioKey := createStudio(t, ctx, conn, cp, cons, "wdreassignclrstudio1", "Flow Room")
+	sessReqID := testutil.GenReqID("wdreassignclrsessio1")
+	testutil.PublishOp(t, conn, &processor.OperationEnvelope{
+		RequestID: sessReqID, Lane: processor.LaneDefault, OperationType: "CreateSession",
+		Actor: domainActorKey, SubmittedAt: "2026-07-07T12:00:00Z", Class: "session",
+		Payload: json.RawMessage(`{"studio":"` + studioKey + `","name":"Vinyasa Flow","instructor":"` + instructorA +
+			`","startsAt":"2026-07-08T09:00:00Z","endsAt":"2026-07-08T09:30:00Z","capacity":20}`),
+		ContextHint: &processor.ContextHint{
+			Reads:         []string{studioKey, instructorA},
+			OptionalReads: wdSlotClaimKeys(t, studioKey, "2026-07-08T09:00:00Z", "2026-07-08T09:30:00Z"),
+		},
+	})
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
+	sessionKey := "vtx.session." + nanoIDFromRequestID(sessReqID)
+
+	outcome, _ := testutil.SubmitAndAwaitReply(t, ctx, conn, cp, cons, reassignSessionEnv(t, "wdreassignclr00001",
+		sessionKey, studioKey, domainActorKey, map[string]any{"sessionKey": sessionKey, "studio": studioKey, "clearInstructor": true},
+		"2026-07-08T08:00:00Z"))
+	if outcome != processor.OutcomeAccepted {
+		t.Fatalf("ReassignSession clearInstructor outcome = %v, want Accepted", outcome)
+	}
+	if keyExists(t, ctx, conn, sessionLedByLnkKey(t, sessionKey, instructorA)) {
+		t.Errorf("the ledBy link must be tombstoned after clearInstructor, with no replacement written")
+	}
+}
+
+// TestReassignSession_MovesTimeLeavingSharedCellClaimed is the core
+// regression the symmetric-difference cell logic exists for: moving
+// [09:00,09:30) to [09:15,09:45) shares cell 09:15. A naive
+// release-then-claim would tombstone 09:15 and then try to re-claim it in
+// the SAME script execution — but a script's own reads see live state as it
+// stood when the op was submitted, not its own not-yet-applied mutations, so
+// claim_cell would read the cell as still live (about to be released by a
+// mutation it cannot see yet) and reject with a spurious StudioConflict
+// against itself. Excluding the shared cell from both the release and the
+// claim set is what keeps this Accepted. It also proves an EXISTING booking
+// on the class survives the move untouched.
+func TestReassignSession_MovesTimeLeavingSharedCellClaimed(t *testing.T) {
+	ctx, conn := setupDomainEnv(t)
+	cp, cons := newDomainPipeline(t, ctx, conn, "reassignmove")
+
+	studioKey := createStudio(t, ctx, conn, cp, cons, "wdreassignmvstudio01", "Flow Room")
+	sessionKey, outcome := createSession(t, ctx, conn, cp, cons, "wdreassignmvsessio01",
+		studioKey, "Vinyasa Flow", "2026-07-08T09:00:00Z", "2026-07-08T09:30:00Z", 20)
+	if outcome != processor.OutcomeAccepted {
+		t.Fatalf("CreateSession outcome = %v, want Accepted", outcome)
+	}
+	booker := seedIdentity(t, ctx, conn, "BBWELLREASGNBKRHJKMN")
+	bookingKey, outcome := createBooking(t, ctx, conn, cp, cons, "wdreassignmvbookin01", sessionKey, booker, "")
+	if outcome != processor.OutcomeAccepted {
+		t.Fatalf("CreateBooking outcome = %v, want Accepted", outcome)
+	}
+
+	env := reassignSessionEnv(t, "wdreassignmvmove0001", sessionKey, studioKey, domainActorKey,
+		map[string]any{"sessionKey": sessionKey, "studio": studioKey, "startsAt": "2026-07-08T09:15:00Z", "endsAt": "2026-07-08T09:45:00Z"},
+		"2026-07-08T08:00:00Z")
+	outcome2, reply := testutil.SubmitAndAwaitReply(t, ctx, conn, cp, cons, env)
+	if outcome2 != processor.OutcomeAccepted {
+		msg := ""
+		if reply != nil && reply.Error != nil {
+			msg = reply.Error.Message
+		}
+		t.Fatalf("ReassignSession time move outcome = %v (%s), want Accepted", outcome2, msg)
+	}
+
+	if keyExists(t, ctx, conn, studioKey+".slot20260708t090000z") {
+		t.Errorf("cell 09:00 (only the OLD span) must be released")
+	}
+	if !keyExists(t, ctx, conn, studioKey+".slot20260708t091500z") {
+		t.Errorf("cell 09:15 (BOTH spans) must remain claimed")
+	}
+	if !keyExists(t, ctx, conn, studioKey+".slot20260708t093000z") {
+		t.Errorf("cell 09:30 (only the NEW span) must be claimed")
+	}
+
+	schedDoc := readDoc(t, ctx, conn, sessionKey+".schedule")
+	schedData, _ := schedDoc["data"].(map[string]any)
+	if got, _ := schedData["startsAt"].(string); got != "2026-07-08T09:15:00Z" {
+		t.Errorf("schedule.startsAt = %q, want the moved start", got)
+	}
+	if got, _ := schedData["endsAt"].(string); got != "2026-07-08T09:45:00Z" {
+		t.Errorf("schedule.endsAt = %q, want the moved end", got)
+	}
+	if got, _ := schedData["name"].(string); got != "Vinyasa Flow" {
+		t.Errorf("schedule.name = %q, must carry forward unchanged", got)
+	}
+	if got, _ := schedData["capacity"].(float64); got != 20 {
+		t.Errorf("schedule.capacity = %v, must carry forward unchanged", got)
+	}
+
+	if !keyExists(t, ctx, conn, bookingKey) {
+		t.Errorf("the existing booking must survive the time move untouched")
+	}
+}
+
+func TestReassignSession_RejectsCollisionWithAnotherSession(t *testing.T) {
+	ctx, conn := setupDomainEnv(t)
+	cp, cons := newDomainPipeline(t, ctx, conn, "reassigncollide")
+
+	studioKey := createStudio(t, ctx, conn, cp, cons, "wdreassigncolstudio1", "Flow Room")
+	sessionA, outcome := createSession(t, ctx, conn, cp, cons, "wdreassigncolsessa01",
+		studioKey, "Morning Flow", "2026-07-08T09:00:00Z", "2026-07-08T09:30:00Z", 20)
+	if outcome != processor.OutcomeAccepted {
+		t.Fatalf("CreateSession A outcome = %v, want Accepted", outcome)
+	}
+	_, outcome = createSession(t, ctx, conn, cp, cons, "wdreassigncolsessb01",
+		studioKey, "Power Sculpt", "2026-07-08T10:00:00Z", "2026-07-08T10:30:00Z", 20)
+	if outcome != processor.OutcomeAccepted {
+		t.Fatalf("CreateSession B outcome = %v, want Accepted", outcome)
+	}
+
+	env := reassignSessionEnv(t, "wdreassigncolmove001", sessionA, studioKey, domainActorKey,
+		map[string]any{"sessionKey": sessionA, "studio": studioKey, "startsAt": "2026-07-08T10:00:00Z", "endsAt": "2026-07-08T10:30:00Z"},
+		"2026-07-08T08:00:00Z")
+	outcome2, reply := testutil.SubmitAndAwaitReply(t, ctx, conn, cp, cons, env)
+	if outcome2 != processor.OutcomeRejected {
+		t.Fatalf("ReassignSession moving session A onto session B's slot = %v, want Rejected (StudioConflict)", outcome2)
+	}
+	if reply.Error == nil || !strings.Contains(reply.Error.Message, "StudioConflict") {
+		t.Errorf("rejection should be StudioConflict, got %+v", reply.Error)
+	}
+	// The rejected move must not have partially released session A's own cells.
+	if !keyExists(t, ctx, conn, studioKey+".slot20260708t090000z") {
+		t.Errorf("session A's own cells must survive a rejected move")
+	}
+}
+
+func TestReassignSession_InstructorConfinedToTheirOwnClass(t *testing.T) {
+	ctx, conn := setupDomainEnv(t)
+	cp, cons := newDomainPipeline(t, ctx, conn, "reassignconfine")
+
+	opDoc := domainCapDoc()
+	opDoc.PlatformPermissions = append(opDoc.PlatformPermissions,
+		processor.PlatformPermission{OperationType: "CreateInstructor", Scope: "any"})
+	testutil.SeedCapDoc(t, ctx, conn, opDoc)
+
+	const instructorActorID = "BBWELLREASGNSTRACTRK"
+	instructorActorKey := "vtx.identity." + instructorActorID
+	testutil.SeedCapDoc(t, ctx, conn, &processor.CapabilityDoc{
+		Key:                    "cap.identity." + instructorActorID,
+		Actor:                  instructorActorKey,
+		Version:                "1.0",
+		ProjectedAt:            time.Now().UTC().Format(time.RFC3339Nano),
+		ProjectedFromRevisions: map[string]uint64{instructorActorKey: 1},
+		Lanes:                  []string{"default"},
+		PlatformPermissions: []processor.PlatformPermission{
+			{OperationType: "ReassignSession", Scope: "any"},
+		},
+		ServiceAccess:   []processor.ServiceAccessEntry{},
+		EphemeralGrants: []processor.EphemeralGrant{},
+		Roles:           []string{"vtx.role." + pkgmgr.RoleID("identity-domain", "provider")},
+	})
+
+	mkInstructor := func(label, name string) string {
+		reqID := testutil.GenReqID(label)
+		testutil.PublishOp(t, conn, &processor.OperationEnvelope{
+			RequestID: reqID, Lane: processor.LaneDefault, OperationType: "CreateInstructor",
+			Actor: domainActorKey, SubmittedAt: "2026-07-07T12:00:00Z", Class: "instructor",
+			Payload: json.RawMessage(`{"displayName":"` + name + `"}`),
+		})
+		testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
+		return "vtx.instructor." + nanoIDFromRequestID(reqID)
+	}
+	mineKey := mkInstructor("wdreassignconfinstr1", "Mine")
+	theirsKey := mkInstructor("wdreassignconfinstr2", "Theirs")
+
+	_, mineID, _ := substrate.ParseVertexKey(mineKey)
+	seedLink(t, ctx, conn, "lnk.instructor."+mineID+".identifiedBy.identity."+instructorActorID,
+		mineKey, instructorActorKey, "identifiedBy", "identifiedBy")
+
+	ledSession := func(label, studioLabel, instructorKey, startsAt, endsAt string) string {
+		studioKey := createStudio(t, ctx, conn, cp, cons, studioLabel, studioLabel)
+		reqID := testutil.GenReqID(label)
+		testutil.PublishOp(t, conn, &processor.OperationEnvelope{
+			RequestID: reqID, Lane: processor.LaneDefault, OperationType: "CreateSession",
+			Actor: domainActorKey, SubmittedAt: "2026-07-07T12:00:00Z", Class: "session",
+			Payload: json.RawMessage(`{"studio":"` + studioKey + `","name":"Class","instructor":"` + instructorKey +
+				`","startsAt":"` + startsAt + `","endsAt":"` + endsAt + `","capacity":4}`),
+			ContextHint: &processor.ContextHint{
+				Reads:         []string{studioKey, instructorKey},
+				OptionalReads: wdSlotClaimKeys(t, studioKey, startsAt, endsAt),
+			},
+		})
+		testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
+		return "vtx.session." + nanoIDFromRequestID(reqID)
+	}
+	mySession := ledSession("wdreassignconfsess01", "wdreassignconfstd01", mineKey, "2026-07-08T09:00:00Z", "2026-07-08T09:30:00Z")
+	theirSession := ledSession("wdreassignconfsess02", "wdreassignconfstd02", theirsKey, "2026-07-08T09:00:00Z", "2026-07-08T09:30:00Z")
+
+	// The instructor reschedules the class they lead.
+	myStudioKey := "vtx.studio." + nanoIDFromRequestID(testutil.GenReqID("wdreassignconfstd01"))
+	theirStudioKey := "vtx.studio." + nanoIDFromRequestID(testutil.GenReqID("wdreassignconfstd02"))
+	outcome, _ := testutil.SubmitAndAwaitReply(t, ctx, conn, cp, cons, reassignSessionEnv(t, "wdreassignconfmine01",
+		mySession, myStudioKey, instructorActorKey,
+		map[string]any{"sessionKey": mySession, "studio": myStudioKey, "instructor": mineKey, "startsAt": "2026-07-08T10:00:00Z", "endsAt": "2026-07-08T10:30:00Z"},
+		"2026-07-08T08:05:00Z"))
+	if outcome != processor.OutcomeAccepted {
+		t.Fatalf("a bound instructor must be able to reschedule their own class, got %v", outcome)
+	}
+
+	// The same instructor, another instructor's class.
+	outcome, reply := testutil.SubmitAndAwaitReply(t, ctx, conn, cp, cons, reassignSessionEnv(t, "wdreassignconfthr01",
+		theirSession, theirStudioKey, instructorActorKey,
+		map[string]any{"sessionKey": theirSession, "studio": theirStudioKey, "instructor": mineKey, "startsAt": "2026-07-08T10:00:00Z", "endsAt": "2026-07-08T10:30:00Z"},
+		"2026-07-08T08:05:00Z"))
+	if outcome != processor.OutcomeRejected {
+		t.Fatalf("reassigning another instructor's class = %v, want Rejected", outcome)
+	}
+	if reply.Error == nil || !strings.Contains(reply.Error.Message, "does not lead session") {
+		t.Fatalf("rejection should be the ledBy denial, got %+v", reply.Error)
 	}
 }
 

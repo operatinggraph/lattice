@@ -30,6 +30,15 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 // returns early on `op.authTargetValidated`, so a member still books and
 // cancels their own seat while holding no `worksAt` link at all.
 //
+// ReassignSession grants [operator, frontOfHouse, provider] — the union of
+// CreateSession's staff-scheduling grant and TombstoneSession's bound-
+// instructor grant, since editing a live session in place is the same
+// administrative surface as either half of cancel-and-recreate. A
+// front-of-house caller is workplace-confined exactly like CreateSession
+// (worksAt a location the studio sits at); a provider-role caller is
+// confined by the script to a session it is ledBy-bound to, exactly like
+// TombstoneSession.
+//
 // TombstoneSession additionally grants `provider` at scope=any (widening the
 // EXISTING scope=any row's GrantsTo, never a second row — a permission's
 // identity is its (operationType, scope) pair, Contract #8 §8.1, mirroring
@@ -87,6 +96,12 @@ func Permissions() []pkgmgr.PermissionSpec {
 			Scope:         "any",
 			Note:          "Grants the operator the right to submit TombstoneSession operations, and a bound instructor the right to cancel a class THEY lead (the script's standing guard confines a non-operator caller to the session it is ledBy-bound to via its own instructor identifiedBy binding).",
 			GrantsTo:      []string{"operator", "provider"},
+		},
+		{
+			OperationType: "ReassignSession",
+			Scope:         "any",
+			Note:          "Grants the operator and front-of-house staff the right to submit ReassignSession (edits a live class's instructor and/or time without cancelling its bookings), and a bound instructor the right to reassign/reschedule a class THEY lead — the script confines a non-operator, non-front-of-house caller to the session it is ledBy-bound to via its own instructor identifiedBy binding, and a front-of-house caller to a studio at a location they worksAt.",
+			GrantsTo:      []string{"operator", "frontOfHouse", "provider"},
 		},
 		{
 			OperationType: "CreateBooking",
