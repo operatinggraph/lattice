@@ -376,7 +376,7 @@ func TestResolveGoverningDDL_MetaTargetNonVertexType(t *testing.T) {
 // never into a wrong DDL.
 type errLinkReader struct{}
 
-func (errLinkReader) LiveInstanceOfTargets(context.Context, string) ([]instanceOfEdge, error) {
+func (errLinkReader) LiveInstanceOfTargets(context.Context, string, *liveReadBudgetTracker) ([]instanceOfEdge, error) {
 	return nil, errors.New("injected read fault")
 }
 
@@ -451,5 +451,45 @@ func TestResolveGoverningDDL_AspectMutationWalksParent(t *testing.T) {
 	var ddlErr *DDLViolation
 	if !errors.As(err, &ddlErr) || ddlErr.ViolatedConstraint != "permittedCommands" {
 		t.Fatalf("aspect mutation non-admitted op should violate permittedCommands, got %T: %v", err, err)
+	}
+}
+
+// E8 — a successful on-demand instanceOf resolution charges its round trips
+// (the prefix list + its per-key GET) against the shared live-read budget —
+// closing the gap where this reader's live reads sat outside the SAME budget
+// kv.Read/kv.Links draw from (the "found reviewing the script-live-read-budget
+// fix" backlog item).
+func TestResolveGoverningDDL_OnDemandReadChargesLiveReadBudget(t *testing.T) {
+	t.Parallel()
+	v, ctx, conn := buildWidgetValidator(t)
+	seedCommittedLink(t, ctx, conn,
+		fmt.Sprintf("lnk.widget.%s.instanceOf.meta.%s", instID, svcTypeID), false)
+	env := newTestEnvelope(testNanoID1)
+	env.OperationType = "CreateWidgetInstance"
+	result := ScriptResult{Mutations: []MutationOp{instanceVertexMut("create", instID)}}
+	tracker := &liveReadBudgetTracker{budget: DefaultLiveReadBudget}
+	state := HydratedState{Context: ScriptContext{LiveReads: tracker}}
+	if err := v.Validate(ctx, env, result, state); err != nil {
+		t.Fatalf("admitted op via on-demand instanceOf resolution should PASS: %v", err)
+	}
+	if tracker.spent == 0 {
+		t.Fatalf("on-demand instanceOf resolution must charge the shared live-read budget, spent = 0")
+	}
+}
+
+// E9 — an execution already out of live-read budget fails the on-demand
+// instanceOf read open to the permissive default, same as any other read
+// fault at this seam (E5) — never a partial or wrong resolution.
+func TestResolveGoverningDDL_LiveReadBudgetExhaustedFailsOpen(t *testing.T) {
+	t.Parallel()
+	v, ctx, conn := buildWidgetValidator(t)
+	seedCommittedLink(t, ctx, conn,
+		fmt.Sprintf("lnk.widget.%s.instanceOf.meta.%s", instID, svcTypeID), false)
+	env := newTestEnvelope(testNanoID1)
+	env.OperationType = "DeleteWidgetInstance" // not admitted by widget
+	result := ScriptResult{Mutations: []MutationOp{instanceVertexMut("create", instID)}}
+	state := HydratedState{Context: ScriptContext{LiveReads: &liveReadBudgetTracker{budget: 0}}}
+	if err := v.Validate(ctx, env, result, state); err != nil {
+		t.Fatalf("exhausted live-read budget must fail open to permissive, got: %v", err)
 	}
 }

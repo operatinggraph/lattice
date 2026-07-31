@@ -31,6 +31,14 @@ type instanceOfEdge struct {
 	target  string
 }
 
+// errInstanceOfLiveReadBudgetExceeded is returned by the on-demand instanceOf
+// readers when charging their round trips against the shared live-read budget
+// (Contract #2 §2.5 "What the ceiling does not cover") pushes the execution
+// over it. It reaches instanceOfTargetOf / classOf as an ordinary read error,
+// so it fails open to the permissive default exactly like any other read fault
+// — never a wrong DDL, never a partial resolution.
+var errInstanceOfLiveReadBudgetExceeded = errors.New("step 6 instanceOf: live-read budget exceeded")
+
 // instanceOfTargetReader enumerates a vertex's live instanceOf-link targets from
 // committed Core KV — the on-demand fallback used only when the link is in
 // neither the in-flight batch nor the hydrated working set. A single bounded
@@ -42,7 +50,9 @@ type instanceOfTargetReader interface {
 	// LiveInstanceOfTargets returns every live instanceOf edge sourced at
 	// vtxRoot, sorted by link key for a deterministic selection. Tombstoned,
 	// unparseable, or (between list and get) hard-deleted links are skipped.
-	LiveInstanceOfTargets(ctx context.Context, vtxRoot string) ([]instanceOfEdge, error)
+	// liveReads charges the prefix list + each per-key GET against the same
+	// shared budget kv.Read/kv.Links draw from (nil-safe: unlimited).
+	LiveInstanceOfTargets(ctx context.Context, vtxRoot string, liveReads *liveReadBudgetTracker) ([]instanceOfEdge, error)
 }
 
 // connInstanceOfReader is the production instanceOfTargetReader, backed by the
@@ -54,15 +64,21 @@ type connInstanceOfReader struct {
 	coreBucket string
 }
 
-func (r *connInstanceOfReader) LiveInstanceOfTargets(ctx context.Context, vtxRoot string) ([]instanceOfEdge, error) {
+func (r *connInstanceOfReader) LiveInstanceOfTargets(ctx context.Context, vtxRoot string, liveReads *liveReadBudgetTracker) ([]instanceOfEdge, error) {
 	vt, id, ok := substrate.ParseVertexKey(vtxRoot)
 	if !ok {
 		return nil, nil
+	}
+	if !liveReads.charge(1) {
+		return nil, errInstanceOfLiveReadBudgetExceeded
 	}
 	prefix := "lnk." + vt + "." + id + "." + instanceOfRelation + "."
 	keys, err := r.conn.KVListKeysPrefix(ctx, r.coreBucket, prefix)
 	if err != nil {
 		return nil, err
+	}
+	if !liveReads.charge(len(keys)) {
+		return nil, errInstanceOfLiveReadBudgetExceeded
 	}
 	var edges []instanceOfEdge
 	for _, k := range keys {
@@ -124,8 +140,10 @@ type ddlResolver struct {
 
 // vertexClassReader reads only a committed vertex's class field — the
 // minimal live-read classOf needs, never the full decrypt-aware VertexDoc.
+// liveReads charges the GET against the same shared budget kv.Read/kv.Links
+// draw from (nil-safe: unlimited).
 type vertexClassReader interface {
-	ClassOf(ctx context.Context, key string) (class string, ok bool, err error)
+	ClassOf(ctx context.Context, key string, liveReads *liveReadBudgetTracker) (class string, ok bool, err error)
 }
 
 // connVertexClassReader is the production vertexClassReader, backed by the
@@ -136,7 +154,10 @@ type connVertexClassReader struct {
 	coreBucket string
 }
 
-func (r *connVertexClassReader) ClassOf(ctx context.Context, key string) (string, bool, error) {
+func (r *connVertexClassReader) ClassOf(ctx context.Context, key string, liveReads *liveReadBudgetTracker) (string, bool, error) {
+	if !liveReads.charge(1) {
+		return "", false, errInstanceOfLiveReadBudgetExceeded
+	}
 	entry, err := r.conn.KVGet(ctx, r.coreBucket, key)
 	if err != nil {
 		if errors.Is(err, substrate.ErrKeyNotFound) {
@@ -238,7 +259,7 @@ func (r *ddlResolver) instanceOfTargetOf(ctx context.Context, vtxRoot string, re
 		return soleTarget(edges)
 	}
 	if r.linkReader != nil {
-		edges, err := r.linkReader.LiveInstanceOfTargets(ctx, vtxRoot)
+		edges, err := r.linkReader.LiveInstanceOfTargets(ctx, vtxRoot, state.Context.LiveReads)
 		if err != nil {
 			// Fail-open to the permissive default — never resolve into a wrong
 			// DDL on a read fault. A read error degrades to today's behavior.
@@ -354,7 +375,7 @@ func (r *ddlResolver) classOf(ctx context.Context, targetKey string, result Scri
 		return doc.Class, true
 	}
 	if r.classReader != nil {
-		if class, ok, err := r.classReader.ClassOf(ctx, targetKey); err == nil && ok {
+		if class, ok, err := r.classReader.ClassOf(ctx, targetKey, state.Context.LiveReads); err == nil && ok {
 			return class, true
 		}
 	}
