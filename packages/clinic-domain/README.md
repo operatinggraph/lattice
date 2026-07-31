@@ -96,7 +96,8 @@ half-open overlap tests and the convergence lens's `remindAt` compare rely on.
   `.status{scheduled}` + the forPatient/withProvider links + the two hub-sourced `hasBooking` links, and
   bumps both `.bookingGuard` epochs OCC-guarded.
   **The caller must declare `<provider>.bookingGuard` and `<patient>.bookingGuard` in `contextHint.reads`** —
-  the OCC serialization points; a declared read of an absent key is a fatal `HydrationMiss`.
+  the OCC serialization points; a declared read of an absent key faults `HydrationMiss` the moment
+  the script touches it — deferred past hydration, not immediate.
 - **`RescheduleAppointment`** — `{appointmentKey, provider, patient, startsAt, endsAt, reason?}`. Rewrites
   the `.schedule` with new times (re-deriving `remindAt` so the `@at` reminder re-arms). `provider` and
   `patient` are **required and validated** to be the appointment's actual endpoints (via the

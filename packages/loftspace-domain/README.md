@@ -65,7 +65,8 @@ data) lives on the identity side, owned by `lease-signing` / `identity-domain`, 
 - **`AssignUnitOwner`** — `{landlord, unit}`. Validates the landlord is an alive `vtx.identity` and the
   unit an alive `class=location` unit (both in `ContextHint.Reads`), reads the deterministic
   `manages` link key **on demand** (`kv.Read` — it may not exist, so a declared read would
-  `HydrationMiss`), and creates it (absent), revives it via CAS (tombstoned by a prior
+  `HydrationMiss` on first touch, deferred past hydration), and creates it (absent), revives it via
+  CAS (tombstoned by a prior
   `RemoveUnitOwner`), or no-ops (already live). Returns `primaryKey` (the link), omitted on no-op.
 - **`RemoveUnitOwner`** — `{landlord, unit}`. Reconstructs the link key, reads it on demand, and
   tombstones it — idempotent (absent / already-tombstoned → clean no-op). Does not require the unit to

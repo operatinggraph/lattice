@@ -214,8 +214,8 @@ func clinicSiteAssignmentVertexTypeDDL() pkgmgr.DDLSpec {
 // RemoveProviderSite. The provider + building are validated by the keys the
 // caller lists in ContextHint.Reads (AssignProviderSite); the per-pair
 // practicesAt link is read ON DEMAND (kv.Read) — it may not exist yet, so a
-// declared read would HydrationMiss (mirrors loftspace-domain's
-// loftspaceOwnershipDDLScript exactly).
+// declared read would HydrationMiss on first touch, deferred past hydration
+// (mirrors loftspace-domain's loftspaceOwnershipDDLScript exactly).
 const clinicSiteAssignmentDDLScript = `
 def make_link(key, source, target, cls, local_name, data):
     return {"op": "create", "key": key,

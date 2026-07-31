@@ -282,7 +282,8 @@ func Lenses() []pkgmgr.LensSpec {
 //     ALSO requires ssnVal <> null (onboarding already done): the backgroundCheck
 //     pattern's params subject-template .name/.dob (sensitive-param-egress-design
 //     §7, the live subject-PII adapter consumer), and Loom's egressReads
-//     hydration is fail-closed like reads (missing key ⇒ HydrationMiss) — without
+//     hydration is fail-closed like reads (missing key ⇒ HydrationMiss on
+//     first touch, same deferred semantics as reads) — without
 //     this gate Weaver would race missing_bgcheck against missing_onboarding
 //     (both open on a fresh application) and could dispatch the pattern before
 //     RecordIdentityPII ever wrote .dob, permanently HydrationMiss-rejecting the

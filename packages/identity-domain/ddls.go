@@ -39,7 +39,8 @@ var consumerRoleKey = "vtx.role." + pkgmgr.RoleID("identity-domain", "consumer")
 // ProvisionConsumerIdentity's read-before-create existence check and its
 // consumerRoleKey validity check use kv.Read instead (Contract #2 §2.5):
 // both keys may legitimately be absent, and a declared-but-absent
-// ContextHint read faults (HydrationMiss) before the script runs.
+// ContextHint read faults (HydrationMiss) the first time the script touches
+// it — not at hydration, which only records the absence.
 // RecordIdentityPII's role-confinement check (a non-operator caller without a
 // validated target naming the identity may write only on an unclaimed one —
 // facet-staff-worlds-design.md §3.2)

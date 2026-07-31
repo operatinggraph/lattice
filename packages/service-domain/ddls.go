@@ -93,7 +93,9 @@ def execute(state, op):
 //   - RecordServiceOutcome: the instance (vtx.service.<id>) — its envelope
 //     class is the discriminator. The vtx.service.<id>.outcome aspect is
 //     listed ONLY when it already exists (a retry against an already-recorded
-//     instance) — listing a not-yet-written key is a hydration miss. The
+//     instance) — listing a not-yet-written key would HydrationMiss the
+//     moment the script touched it (deferred to first touch, not hydration
+//     itself). The
 //     once-only guarantee does NOT depend on the caller listing it: the
 //     .outcome aspect is written CreateOnly, so a second record with a
 //     different requestId conflicts and is rejected regardless. Listing it

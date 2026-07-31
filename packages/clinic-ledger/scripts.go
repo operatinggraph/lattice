@@ -79,7 +79,8 @@ def execute(state, op):
         # the guard key in contextHint.reads (a repeat/racing caller checking
         # before it retries); the FIRST CreateAccount for a patient declares
         # only patientKey (the guard doesn't exist yet — declaring an
-        # as-yet-absent key in reads hard-fails hydration), so on that path the
+        # as-yet-absent key in reads would HydrationMiss on first touch,
+        # deferred past hydration), so on that path the
         # guard aspect's own create-only write is the actual uniqueness
         # enforcement: a genuine race's loser hits a raw substrate conflict
         # here rather than this clean rejection.

@@ -80,7 +80,8 @@ def execute(state, op):
         # contextHint.reads (a repeat/racing caller checking before it
         # retries); the FIRST CreateAccount for a lease declares only
         # leaseAppKey (the guard doesn't exist yet — declaring an
-        # as-yet-absent key in reads hard-fails hydration), so on that path
+        # as-yet-absent key in reads would HydrationMiss on first touch,
+        # deferred past hydration), so on that path
         # the guard aspect's own create-only write is the actual uniqueness
         # enforcement: a genuine race's loser hits a raw substrate conflict
         # here rather than this clean rejection.

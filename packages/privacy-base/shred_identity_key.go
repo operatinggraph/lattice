@@ -44,7 +44,8 @@ const keyShreddedEventDDL = "privacy.keyShredded"
 // the piiKey aspect via ContextHint.OptionalReads = [identityKey + ".piiKey"]
 // (read-posture class (d), §2.5/§13) — declared-absence-tolerant since the
 // identity may never have received a sensitive write; a declared `reads` entry
-// would fault hydration fatally (HydrationMiss) on that legitimate absence.
+// would fault HydrationMiss the first time the script touched that legitimate
+// absence (deferred past hydration, not on hydration itself).
 //
 // ShredIdentityKey also erases the identity's live dedup-hygiene footprint in
 // the SAME atomic batch as the shred intent (dedup-over-encrypted-pii-design.md
@@ -322,8 +323,9 @@ def execute(state, op):
         # RevisionConflict retry instead of a whole-document last-writer-wins
         # that silently loses one flag. ShredIdentityKey ALWAYS durably writes
         # an envelope before its keyShredded event exists, so a declared-but-
-        # absent piiKey fails hydration (HydrationMiss) -- the same "no shred
-        # to record" rejection the in-script guards express.
+        # absent piiKey would HydrationMiss the moment the script touches it --
+        # deferred past hydration, but still the same "no shred to record"
+        # rejection the in-script guards express.
         pii_key_key = identity_key + ".piiKey"
         if pii_key_key not in state:
             fail("NotFound: " + pii_key_key + " is absent -- RecordShredFinalization requires a prior ShredIdentityKey")

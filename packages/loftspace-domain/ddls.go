@@ -340,7 +340,9 @@ def require_manages(unit_key, what):
     # read-posture: (d) declared optionalReads at SetListingStatus dispatch on
     # the landlord path. optionalReads, not reads: absence IS the denial this
     # probe exists to produce, so hydrating it as required would turn every
-    # unauthorized call into a HydrationMiss before the guard could answer.
+    # unauthorized call into a HydrationMiss the instant the guard's own
+    # kv.Read named it — still fatal, just not pre-empting the guard from
+    # hydration itself.
     lnk = kv.Read("lnk.identity." + actor_parts[2] + ".manages.unit." + unit_id)
     if lnk == None or lnk.isDeleted:
         # The unit key is deliberately NOT named: the caller reached here with a

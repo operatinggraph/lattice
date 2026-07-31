@@ -99,7 +99,8 @@ func loftspaceOwnershipVertexDDL() pkgmgr.DDLSpec {
 // landlord + unit are validated by the keys the caller lists in
 // ContextHint.Reads (AssignUnitOwner); the per-pair management link is read ON
 // DEMAND (kv.Read) — it may not exist yet, so a declared read would
-// HydrationMiss (the appliedToUnit-guard idiom). No prefix scans.
+// HydrationMiss on first touch, deferred past hydration (the appliedToUnit-guard
+// idiom). No prefix scans.
 const loftspaceOwnershipDDLScript = `
 def make_link(key, source, target, cls, local_name, data):
     return {"op": "create", "key": key,

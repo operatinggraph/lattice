@@ -52,7 +52,8 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 //	object.tombstoned { objectKey, storeName? }                   — TombstoneObject (the byte-reclaim trigger)
 //
 // Caller's ContextHint.Reads MUST include (conditionally — a declared-but-absent
-// key is a fatal hydration miss, so the client lists only keys that exist):
+// key would HydrationMiss on first touch, deferred past hydration, so the
+// client lists only keys that exist):
 //   - AttachObject: the targetKey (always — it must be live); and, when they
 //     already exist, vtx.object.<oid> + vtx.object.<oid>.content + the link key
 //     (so dedup / revive / collision / idempotent-relink branch correctly); and,

@@ -24,7 +24,8 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 //   - Fire 2 (Contract #10 §10.1): CreateTask's routing additionally gates
 //     on the assignee's `availability` aspect via kv.Read — the aspect may
 //     legitimately never have been set, so it is NOT a ContextHint.Reads
-//     key (a miss there is a fatal HydrationMiss); callers declare it in
+//     key (a miss there would HydrationMiss on first touch, deferred past
+//     hydration); callers declare it in
 //     ContextHint.OptionalReads instead (Contract #2 §2.5 class (d): the
 //     read resolves at the step-4 snapshot, absent → None). Absent aspect
 //     == available, byte-compatible with pre-Fire-2 callers; an undeclared
@@ -61,7 +62,8 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 // not itself a read). CreateTask's absence-tolerant kv.Read keys — the task
 // dedup key and the assignee's `.availability` aspect — belong in
 // ContextHint.OptionalReads (§2.5 class (d)), never in Reads: both may
-// legitimately not exist, and a declared-but-absent Reads key faults. The
+// legitimately not exist, and a declared-but-absent Reads key would fault
+// on first touch, not at hydration. The
 // engine dispatchers declare them (Loom userTaskOptionalReads, Weaver's
 // assignTask plan); an undeclared caller falls back to lazy on-demand reads.
 func DDLs() []pkgmgr.DDLSpec {
@@ -299,7 +301,8 @@ def execute(state, op):
             # Fire 2 availability gate: a known-key kv.Read whose absence is
             # a legitimate branch -- declared in ContextHint.OptionalReads by
             # the engine dispatchers (Contract #2 §2.5: present → hydrated,
-            # absent → snapshot None; never in Reads, where a miss faults),
+            # absent → snapshot None; never in Reads, where a miss would
+            # fault on first touch, deferred past hydration),
             # lazy on-demand for callers that don't declare it. Absent aspect
             # == available, so a caller that never calls SetAvailability sees
             # byte-identical Fire-1 routing.
@@ -343,7 +346,8 @@ def execute(state, op):
         # this read at the task key. kv.Read — with the key declared in
         # contextHint.optionalReads by the engine dispatchers (Contract #2 §2.5:
         # the key may legitimately not exist yet, so it can never sit in reads,
-        # where a miss faults HydrationMiss; declared-optional it resolves at the
+        # where a miss would fault HydrationMiss on first touch, deferred past
+        # hydration; declared-optional it resolves at the
         # step-4 snapshot — absent → None, with a lost create race absorbed by the
         # Processor's CreateOnly-backstop retry). Undeclared callers still get the
         # lazy on-demand read. A present, ALIVE task means a duplicate dispatch:
