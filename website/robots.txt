@@ -1,0 +1,11 @@
+# operatinggraph.com — crawling is open.
+#
+# Indexing is governed by the X-Robots-Tag response header (see _headers), not
+# by this file. A Disallow here would work against that: a crawler forbidden to
+# fetch a page never reads the header telling it what to do with the page.
+#
+# Cloudflare prepends its managed content-signals block to this file at the
+# edge, so the served /robots.txt is longer than what is checked in here.
+
+User-agent: *
+Allow: /
