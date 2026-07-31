@@ -1,6 +1,6 @@
 # Design — Tombstone body preservation as posture (a tombstone may never blank a body)
 
-**Status: ✅ Andrew-ratified (2026-07-22).** Build runs through the Lattice lane (Fire 1 → Fire 2, §6).
+**Status: ✅ Andrew-ratified (2026-07-22), CLOSED — Fire 1 + Fire 2 both shipped (§6).**
 **Author: Winston (Designer fire, 2026-07-22)**
 **Backlog row:** `planning-artifacts/backlog/lattice.md` → *Component maintenance* → "[Processor] A tombstone now retains the entity body".
 **Grounded demand:** the step-8 document-preservation fix (`7e5f1e6`, 2026-07-19) made body-preservation the runtime truth; the board filed the residual posture question — *whether a tombstone may ever blank a body* — as a Contract #3 call for Andrew.
@@ -141,8 +141,19 @@ runtime posture; (f) drive-by doc fix: `docs/components/vault.md` cites contract
 `03-processor-mutation-semantics.md` — the file is `03-mutation-batch-event-list.md`. Winston
 commits the two contract edits with this fire once ratified.
 
-**Fire 2 (XS, sequenced behind a clean warn window) — flip warn→reject** with a regression vector;
-no emitter changes remain by then.
+**Fire 2 (S, shipped) — flip warn→reject.** Grounding surfaced that Fire 1's "three in-repo
+emitters" scope never covered `packages/*` DDL scripts: 11 copies of a `make_tombstone(key)`
+helper (clinic-domain ×3, wellness-domain ×4, cafe-domain, rbac-domain, service-location,
+location-domain) and 3 inline call sites in `objects-base` still built the
+`{"isDeleted": true, "data": {}}` / `{"linkEpoch": ...}` husk — always inert under step 8's
+whole-document preservation, but a live reject-time break had the flip shipped as scoped. Fire 2
+strips the `document` field from all 14 sites (mechanical, mirrors Fire 1's pattern) alongside the
+parser flip (`starlark_runner.go` `parseMutations`: the warn+drop `else if` branch now returns
+`InvalidReturnShape`), and updates the test payloads that relied on the old drop-and-pass-through
+shape (`step5_execute_test.go`, `starlark_required_absent_test.go`,
+`internal/bootstrap/upgrade_package_test.go`, `internal/pkgmgr/upgrade_test.go`). Verified clean
+via the demo box (nightly-reset, pulls latest): 0 "unhonored document" warn sightings across the
+7 days since Fire 1 shipped (`6b68fde4`, 2026-07-22).
 
 ## 7. Test strategy & migration
 
@@ -154,6 +165,8 @@ huskless wire shape end-to-end.
 
 ## 8. Risks
 
-Low. The only behavioral deltas are a new warning line and, at Fire 2, a rejection of a shape no
-in-repo emitter produces. The rejection is deliberately sequenced behind observation, so the known
-failure mode (a stale stored script on a long-lived stack) surfaces as a warning, never an outage.
+Low. Fire 1's own risk framing ("no in-repo emitter produces it") undercounted — the `packages/*`
+sweep at Fire 2 was needed precisely because 14 sites still did. With that swept, the remaining
+exposure is a stale stored script on a long-lived stack; sequencing the flip behind an observed
+clean warn window (§6) keeps that failure mode a warning-turned-reject on next world recreation,
+never a silent outage.
