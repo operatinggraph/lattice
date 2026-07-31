@@ -310,7 +310,7 @@ const feedHandlers = {
   manifest(fr) {
     if (fr.deleted) state.rows.delete(fr.key);
     else state.rows.set(fr.key, { data: fr.data, pending: !!fr.pending });
-    armSilenceFallback();
+    armBootGate();
     if (!hasBootstrapped) renderBootProgress();
     scheduleRender();
   },
@@ -340,7 +340,7 @@ const feedHandlers = {
     if (!hasBootstrapped) {
       if (bootStartedAt === null) bootStartedAt = bootNow();
       renderBootProgress();
-      armSilenceFallback();
+      armBootGate();
       armBootTick();
     }
   },
@@ -440,24 +440,43 @@ function startFeed() {
     });
 }
 
-// The boot gate closes on silence, and silence means two opposite things.
-// After the world has arrived — `ready`, or rows a snapshot replay carried —
-// a short quiet window just says the burst is over. Before it, on a fresh
-// sign-in, the engine is mid-hydration and delivers nothing for tens of
-// seconds; releasing on the short window there paints "No residence linked
-// yet" as if it were the answer, half a minute before the rows land. So the
-// delay is a function of whether there is anything to show, and the long arm
-// is only the net a wedged host still needs — not a wait anyone should see.
-const BOOT_QUIET_MS = 3000;
-const BOOT_HYDRATING_MS = 45000;
+// The boot gate releases on SUFFICIENCY, never on silence. Its deadline is
+// armed once per mode and never pushed back by an arriving frame, because the
+// stream this gate sits in front of has no reliable quiet point: a cold
+// hydrate streams deltas continuously — tens of thousands of them for an actor
+// whose entire world landed in the first second — so any deadline re-armed per
+// frame is really a deadline on the burst ending, which can be minutes.
+//
+// The two modes say opposite things, so they carry opposite deadlines:
+//
+//   settle — rows are on screen (or `ready` already arrived). They are worth
+//            showing at once; the short wait only lets the opening burst land
+//            together so the first paint is not visibly half-built. Rows that
+//            arrive after release simply render — the reducer never stops
+//            applying frames, which is what makes releasing early safe.
+//   empty  — nothing has arrived at all. A cold engine can deliver nothing for
+//            tens of seconds, and painting "No residence linked yet" before its
+//            rows land states a falsehood, so here a spinner is the honest
+//            answer and the long deadline is only a wedged-host backstop.
+const BOOT_SETTLE_MS = 1200;
+const BOOT_EMPTY_MS = 45000;
 
 function bootGateDelay(hasWorld) {
-  return hasWorld ? BOOT_QUIET_MS : BOOT_HYDRATING_MS;
+  return hasWorld ? BOOT_SETTLE_MS : BOOT_EMPTY_MS;
 }
 
-function armSilenceFallback() {
+// bootGateMode is the mode the pending release was armed for, so the
+// no-world -> has-world transition (the first row landing) can re-arm to the
+// short deadline exactly once while every later frame is a no-op.
+let bootGateMode = null;
+
+function armBootGate() {
+  if (hasBootstrapped) return;
+  const mode = state.hydrated || state.rows.size > 0 ? "settle" : "empty";
+  if (bootGateMode === mode) return;
+  bootGateMode = mode;
   clearTimeout(sseSilenceTimer);
-  sseSilenceTimer = setTimeout(finishBoot, bootGateDelay(state.hydrated || state.rows.size > 0));
+  sseSilenceTimer = setTimeout(finishBoot, bootGateDelay(mode === "settle"));
 }
 
 // bootTickMs is how often the boot label re-renders while still hydrating —
@@ -489,10 +508,9 @@ function renderBootProgress() {
   }
 }
 
-// armBootTick reschedules itself once a second until finishBoot cancels it —
-// the same self-rescheduling shape as armSilenceFallback, so a boot stuck on
-// a quiet-but-not-silent connection still shows a visibly live clock instead
-// of copy that reads as frozen even though the tab is not.
+// armBootTick reschedules itself once a second until finishBoot cancels it, so
+// a boot held on the empty-mode deadline still shows a visibly live clock
+// instead of copy that reads as frozen even though the tab is not.
 function armBootTick() {
   clearTimeout(bootTickTimer);
   bootTickTimer = setTimeout(() => {
