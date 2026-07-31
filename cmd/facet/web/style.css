@@ -87,6 +87,37 @@ button, input, select, textarea { font-family: inherit; }
 .topbar .brand { font-weight: 700; font-size: 16px; }
 .topbar .identity-name { color: var(--text-dim); font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 40vw; }
 .topbar .spacer { flex: 1; }
+
+/* Sync status pill — the top bar's standing answer to "is this live, and is
+   it caught up". Colour carries the same precedence the label does: red is a
+   lost connection, yellow is connected-but-not-applying, blue is working,
+   green is caught up. */
+.sync-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--text-dim);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 4px 10px;
+  white-space: nowrap;
+  cursor: default;
+}
+.sync-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--text-dim); flex: none; }
+.sync-dot.synced { background: var(--green); }
+.sync-dot.syncing { background: var(--accent); animation: sync-pulse 1.4s ease-in-out infinite; }
+.sync-dot.stale { background: var(--yellow); }
+.sync-dot.offline { background: var(--red); }
+.sync-status.offline { color: var(--red); border-color: var(--red); }
+.sync-status.stale { color: var(--yellow); border-color: var(--yellow); }
+@keyframes sync-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
+
+/* The identity name is the first thing to give up width when the pill and the
+   buttons crowd a narrow screen — the status is the smaller, denser signal. */
+@media (max-width: 420px) {
+  .topbar .identity-name { max-width: 22vw; }
+}
 .outbox-btn {
   position: relative;
   background: transparent; border: 1px solid var(--border); color: var(--text);

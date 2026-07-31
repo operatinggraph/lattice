@@ -226,6 +226,16 @@ const state = {
   // the cost of guessing wrong that way is a spinner and the cost of the other
   // way is painting an empty world as if it were the answer.
   hydrated: false,
+  // The connectivity frame's second axis: the socket is healthy but the sync
+  // manager is in restart-backoff, so rows render while new deltas never
+  // apply. Held here as well as in its banner because the status pill states
+  // one combined verdict and has to be able to tell "stale" from "offline".
+  syncDegraded: false,
+  // When the last manifest frame landed, as epoch ms — the evidence behind
+  // "synced <n> ago". Null until the first row: an engine that has never
+  // delivered has no freshness to claim, which is different from one whose
+  // last delta happens to be old.
+  lastFrameAt: null,
 };
 
 const maxOutboxHistory = 50;
@@ -310,6 +320,7 @@ const feedHandlers = {
   manifest(fr) {
     if (fr.deleted) state.rows.delete(fr.key);
     else state.rows.set(fr.key, { data: fr.data, pending: !!fr.pending });
+    state.lastFrameAt = bootNow();
     armBootGate();
     if (!hasBootstrapped) renderBootProgress();
     scheduleRender();
@@ -334,6 +345,7 @@ const feedHandlers = {
     // unavailable, and the mirror-backed work orders are fine and still
     // actionable — so a single global banner cannot carry it.
     state.connected = !!fr.connected;
+    state.syncDegraded = !!fr.syncDegraded;
     scheduleRender();
   },
   open() {
@@ -528,6 +540,22 @@ function finishBoot() {
   $("boot").hidden = true;
   $("app").hidden = false;
   renderView(state.view);
+  armSyncStatusRefresh();
+}
+
+// SYNC_STATUS_REFRESH_MS re-dates the status pill on a quiet connection. The
+// reducer re-renders on every frame, but the age it shows keeps advancing when
+// no frame arrives — which is exactly the case (a stalled or offline feed)
+// where a frozen "last change 4s ago" would be most misleading.
+const SYNC_STATUS_REFRESH_MS = 30000;
+let syncStatusTimer = null;
+
+function armSyncStatusRefresh() {
+  clearTimeout(syncStatusTimer);
+  syncStatusTimer = setTimeout(() => {
+    renderSyncStatus();
+    armSyncStatusRefresh();
+  }, SYNC_STATUS_REFRESH_MS);
 }
 
 function setBootLabel(text, showProgress) {
@@ -619,7 +647,58 @@ function renderView(view) {
   else if (view === "me") renderMe();
 }
 
+// syncStatus folds the three independent signals the feed carries — host↔NATS
+// connectivity, sync-manager health, and whether catch-up finished — into the
+// one verdict the top bar states. The order below is a precedence, not a
+// preference: each condition is worse than the ones under it and would be
+// misdescribed by them.
+//
+//   offline  — the host lost NATS. Rows still render from the mirror, which is
+//              the offline-first promise working, so this is a freshness claim
+//              ("what you see is as of then"), never an error.
+//   stale    — connected, but the sync manager is in restart-backoff. The
+//              distinction from offline matters: the socket is fine, so
+//              nothing looks wrong, yet new deltas never apply.
+//   syncing  — connected and healthy, still catching up. The only transient
+//              state; everything on screen is real, just incomplete.
+//   synced   — caught up, and `since` dates it.
+//
+// `since` is the last delta's arrival, not a projection clock: it answers "how
+// current is what I am looking at", which is the question a person asks.
+function syncStatus(s) {
+  const since = s.lastFrameAt;
+  if (!s.connected) return { kind: "offline", label: "Offline", since };
+  if (s.syncDegraded) return { kind: "stale", label: "Not syncing", since };
+  if (!s.hydrated) return { kind: "syncing", label: "Syncing…", since };
+  return { kind: "synced", label: "Synced", since };
+}
+
+// syncStatusDetail dates a status for the tooltip/subtext. A status with no
+// delta behind it says so rather than implying a freshness it cannot support.
+function syncStatusDetail(st, now) {
+  if (st.since === null || st.since === undefined) {
+    return st.kind === "syncing" ? "Waiting for your first rows" : "No data received yet";
+  }
+  const secs = Math.max(0, Math.round((now - st.since) / 1000));
+  const ago = secs < 60 ? `${secs}s ago` : relativeTime(new Date(st.since).toISOString());
+  return st.kind === "synced" ? `Up to date · last change ${ago}` : `Last change ${ago}`;
+}
+
+function renderSyncStatus() {
+  const st = syncStatus(state);
+  const el = $("sync-status");
+  const dot = $("sync-status-dot");
+  const label = $("sync-status-label");
+  label.textContent = st.label;
+  dot.className = "sync-dot " + st.kind;
+  el.className = "sync-status " + st.kind;
+  el.title = syncStatusDetail(st, bootNow());
+  el.hidden = false;
+}
+
 function updateBadges() {
+  renderSyncStatus();
+
   const nonTerminal = [...state.outbox.values()].filter((e) => e.state !== "confirmed").length;
   const ob = $("outbox-count");
   if (nonTerminal > 0) { ob.textContent = String(nonTerminal); ob.hidden = false; } else ob.hidden = true;
