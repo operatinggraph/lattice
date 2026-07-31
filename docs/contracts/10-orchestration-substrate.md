@@ -246,8 +246,9 @@ value: { targetId, entityKey, gap, action, claimId?, claimedAt, leaseExpiresAt, 
   - **`assignTask` → `CreateTask`:** the task vertex lives in **Core KV**, so the `CreateTask` Starlark
     script reads the task key via **`kv.Read()`** (a declared **`contextHint.optionalReads`** key, §2.5 —
     absence-tolerant, served from the step-4 snapshot; the dispatchers declare it, and an undeclared
-    submitter degrades to the §2.5 lazy fallback. *Not* a `reads` entry, which would fatal-`HydrationMiss`
-    on the legitimately-absent key) and branches: present **and
+    submitter degrades to the §2.5 lazy fallback. *Not* a `reads` entry, which would `HydrationMiss` on
+    first touch of the legitimately-absent key — deferred past hydration, not raised at hydration itself)
+    and branches: present **and
     alive** (`task != None and not task.isDeleted`) → empty mutations **and** empty events (a coherent
     silent no-op); absent → create as normal (the `CreateOnly` mutation is the narrow concurrent-dispatch
     backstop); present **and** logically-deleted → **revive**, an `update` mutation conditioned on the
