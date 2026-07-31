@@ -18,7 +18,7 @@ Design: [`_bmad-output/implementation-artifacts/clinic-domain-design.md`](../../
 | Kind | Canonical names |
 |---|---|
 | **Vertex types** (3) | `patient`, `provider`, `appointment` |
-| **Aspect types** (9) | `patientDemographics`, `patientBookingGuard`, `providerProfile`, `providerBookingGuard`, `providerHours`, `providerTimeOff`, `appointmentSchedule`, `appointmentStatus`, `appointmentEncounter` |
+| **Aspect types** (9) | `patientDemographics`, `providerProfile`, `providerHours`, `providerTimeOff`, `providerSlotClaim`, `patientSlotClaim`, `appointmentSchedule`, `appointmentStatus`, `appointmentEncounter` |
 | **Links** (3) | `forPatient` (appointment → patient), `withProvider` (appointment → provider), `identifiedBy` (patient → identity, optional — links a pre-minted `vtx.identity` carrying sensitive contact) |
 | **Operations** (12) | `CreatePatient` · `TombstonePatient` · `CreateProvider` · `TombstoneProvider` · `SetProviderProfile` · `SetProviderHours` · `SetProviderTimeOff` · `CreateAppointment` · `RescheduleAppointment` · `SetAppointmentStatus` · `RecordEncounter` · `TombstoneAppointment` |
 | **Projection lenses** (6) | `clinicAppointments` → `clinic-appointments` · `clinicProviders` → `clinic-providers` · `clinicPatients` → `clinic-patients` (all `nats-kv`, `full` engine) · `clinicAppointmentsRead` / `providerAppointmentsRead` / `clinicPatientsRead` (all `postgres`, `full` engine, **Protected** — Contract #6 §6.14 RLS, D1.5: patient-self / provider-self / patient-self-plus-workplace-plus-staff-wildcard) |
@@ -30,11 +30,10 @@ surface; the trusted-tool operator already holds standing permission, identical 
 
 ```
 vtx.patient.<id>      class=patient      root {}   .demographics {fullName}   (NO contact PII — see identifiedBy below)
-                                                   .bookingGuard  {epoch:int}   (the per-patient OCC serialization scalar)
 vtx.provider.<id>     class=provider     root {}   .profile  {fullName, specialty, credentials?, bio?}
-                                                   .bookingGuard {epoch:int}    (the per-provider OCC serialization scalar)
                                                    .hours    {windows:[{day 0-6 (Sun=0), openSec, closeSec}]}   (opt-in)
                                                    .timeOff  {ranges:[{from, to, reason?}]}                      (opt-in)
+                                                   .slot<cellcode> {}   (class providerSlotClaim — one per occupied 15-min cell, on demand)
 vtx.appointment.<id>  class=appointment  root {}   .schedule {startsAt, endsAt, remindAt, reason?}
                                                    .status   {value ∈ scheduled|confirmed|checkedIn|completed|cancelled|noShow, note?}
                                                    .encounter {summary, assessment?, plan? (RAW PHI, never projected);
@@ -42,18 +41,23 @@ vtx.appointment.<id>  class=appointment  root {}   .schedule {startsAt, endsAt, 
 
 lnk.appointment.<id>.forPatient.patient.<id>      (appointment → patient — the later-arriving vertex is the source, §1.1)
 lnk.appointment.<id>.withProvider.provider.<id>   (appointment → provider)
-lnk.provider.<id>.hasBooking.appointment.<id>     (provider → appointment — HUB-sourced, so lnk.provider.<id>.hasBooking.> is a bounded enumeration prefix)
-lnk.patient.<id>.hasBooking.appointment.<id>      (patient → appointment — hub-sourced)
 lnk.patient.<id>.identifiedBy.identity.<id>       (patient → identity — optional, wired by CreatePatient's identityKey)
 ```
 
-Sentences: "appointment forPatient patient", "appointment withProvider provider", "provider hasBooking
-appointment", "patient hasBooking appointment", "patient identifiedBy identity". The forPatient/withProvider link keys are deterministic
-(`CreateOnly`), so the schedule guards and reschedule re-read them by key. The booking **topology** lives
-in the hub-sourced `hasBooking` links (enumerated at write time via `kv.Links`, Contract #2 §2.5.1 — a
-bounded prefix); the `.bookingGuard` scalar is **only** the OCC serialization lock (the Contract #1-clean
-split: topology→links, lock→scalar epoch). Authoring a `hasBooking` link with the **hub as source** is the
-sanctioned §2.5.1 directional choice that keeps the enumeration bounded by the hub's degree.
+The patient hub carries the symmetric `.slot<cellcode>` claim aspect too (class `patientSlotClaim`,
+same on-demand shape, omitted above only to avoid repeating the row).
+
+Sentences: "appointment forPatient patient", "appointment withProvider provider", "patient identifiedBy
+identity". The forPatient/withProvider link keys are deterministic (`CreateOnly`), so the schedule guards
+and reschedule re-read them by key. The booking **double-book constraint** is a write-path claim, not a
+read-time enumeration: `CreateAppointment`/`RescheduleAppointment` discretize `[startsAt, endsAt)` into
+its covered 15-minute grid cells and claim a deterministic `.slot<cellcode>` aspect per cell on **both**
+the provider and patient hub (`<cellcode>` = the cell's canonical whole-second UTC start with `-`/`:`
+stripped, lowercased — e.g. `2026-07-03T09:00:00Z` → `slot20260703t090000z`). The key itself — identical
+across two competing bookings for the same cell — is the lock: `CreateOnly`/`expectedRevision`
+conditioning at commit rejects the loser (`RevisionConflict` → re-hydrate → re-read → fail closed), so
+there is no serialization epoch and no bounded-prefix enumeration to maintain
+(`clinic-booking-write-path-slot-claims-design.md`).
 
 Root data is minimal (D5: `{}` on every root); all business data lives in aspects, all relationships
 in links. Instants are normalized to **canonical whole-second UTC** (`time.rfc3339_utc`, a pure
@@ -65,17 +69,18 @@ half-open overlap tests and the convergence lens's `remindAt` compare rely on.
 ### Patient
 
 - **`CreatePatient`** — `{fullName, identityKey?, patientId?}`. Mints `vtx.patient.<id>` +
-  `.demographics {fullName}` + a **`.bookingGuard {epoch:0}`** (initialized so the declared key is always
-  present — see *Conflict detection* below). An optional `identityKey` (validated alive + class=identity,
-  via `contextHint.reads`) wires the `identifiedBy` link to a pre-minted `vtx.identity` carrying the
-  patient's sensitive contact — no contact PII lives on `.demographics` itself. Returns `primaryKey`.
+  `.demographics {fullName}`. No slot-claim init needed — a `.slot<cellcode>` claim is created on demand
+  per booking (see *Conflict detection* below), never pre-seeded. An optional `identityKey` (validated
+  alive + class=identity, via `contextHint.reads`) wires the `identifiedBy` link to a pre-minted
+  `vtx.identity` carrying the patient's sensitive contact — no contact PII lives on `.demographics`
+  itself. Returns `primaryKey`.
 - **`TombstonePatient`** — `{patientKey}`. Soft-deletes the patient **root only** (no cascade — see
   *Tombstone semantics*).
 
 ### Provider
 
 - **`CreateProvider`** — `{fullName, specialty, credentials?, bio?, providerId?}`. Mints
-  `vtx.provider.<id>` + `.profile` + a **`.bookingGuard {epoch:0}`**. Returns `primaryKey`.
+  `vtx.provider.<id>` + `.profile`. Returns `primaryKey`.
 - **`SetProviderProfile`** — `{providerKey, fullName, specialty, credentials?, bio?}`. Full-replace
   upsert of the whole `.profile` (the editor seeds the form from `clinicProviders`, which projects
   every editable field). `fullName` + `specialty` stay required so the provider never drops out of the
@@ -93,17 +98,18 @@ half-open overlap tests and the convergence lens's `remindAt` compare rely on.
 - **`CreateAppointment`** — `{patient, provider, startsAt, endsAt, reason?, appointmentId?}`. Validates
   both endpoints alive + correctly typed, runs the full guard chain (below), then mints
   `vtx.appointment.<id>` + `.schedule` (with a precomputed `remindAt = startsAt − 24h`) +
-  `.status{scheduled}` + the forPatient/withProvider links + the two hub-sourced `hasBooking` links, and
-  bumps both `.bookingGuard` epochs OCC-guarded.
-  **The caller must declare `<provider>.bookingGuard` and `<patient>.bookingGuard` in `contextHint.reads`** —
-  the OCC serialization points; a declared read of an absent key faults `HydrationMiss` the moment
-  the script touches it — deferred past hydration, not immediate.
+  `.status{scheduled}` + the forPatient/withProvider links, and claims a `.slot<cellcode>` aspect per
+  covered 15-minute cell on both the provider and patient hub. No `contextHint.reads` declaration is
+  needed for the slot claims — each cell's `kv.Read` is **lazy** (§2.5): it only picks the mutation verb
+  (create / CAS-revive / reject); the safety property is the atomic batch's `CreateOnly`/`expectedRevision`
+  conditioning at commit, not the read.
 - **`RescheduleAppointment`** — `{appointmentKey, provider, patient, startsAt, endsAt, reason?}`. Rewrites
   the `.schedule` with new times (re-deriving `remindAt` so the `@at` reminder re-arms). `provider` and
   `patient` are **required and validated** to be the appointment's actual endpoints (via the
   deterministic link keys) so the move is conflict-checked against the right books — without them a move
-  could silently land in an occupied slot, bypassing the double-book defense. Same `contextHint.reads`
-  requirement as create.
+  could silently land in an occupied slot, bypassing the double-book defense. Releases the grid cells the
+  appointment no longer needs and claims the newly-covered ones in the same atomic batch — a rejected
+  claim leaves the original booking's cells fully intact.
 - **`SetAppointmentStatus`** — `{appointmentKey, status, note?}`. Upserts `.status`. `status` ∈
   `scheduled|confirmed|checkedIn|completed|cancelled|noShow`. `note` is an optional audit reason
   (cancel / no-show, for billing + records), distinct from the `.schedule` visit `reason`; an omitted
@@ -118,29 +124,34 @@ half-open overlap tests and the convergence lens's `remindAt` compare rely on.
 
 ## Conflict detection & availability (Capability-KV §06 — "the operation's own Starlark logic")
 
-`CreateAppointment` and `RescheduleAppointment` enforce four guards at op time, in order, before any
+`CreateAppointment` and `RescheduleAppointment` enforce five guards at op time, in order, before any
 mutation. Capability-KV §06 (FROZEN) explicitly defers temporal availability and double-book rejection
-to "a Phase 2 mechanism or the operation's own Starlark logic" — these guards are that logic. The double-
-book guards enumerate the hub's `hasBooking` links via the **one sanctioned bounded enumeration**
-`kv.Links` (Contract #2 §2.5.1) — not a raw prefix scan: `TestPackage_NoScans` still forbids the raw scan
-helpers, and every other read is a known-key `kv.Read` (§2.5).
+to "a Phase 2 mechanism or the operation's own Starlark logic" — these guards are that logic. The clinic's
+booking grid is a **mandatory 15-minute cadence** (`:00`/`:15`/`:30`/`:45`), which turns double-book
+detection from a range-overlap problem into a finite set of write-path key claims — no enumeration, no
+serialization epoch (see `clinic-booking-write-path-slot-claims-design.md`, which superseded an earlier
+`hasBooking`-link + `.bookingGuard`-epoch design; `TestPackage_NoScans` still forbids raw prefix scans, and
+every guard read here is a known-key `kv.Read`, §2.5).
 
 | Guard | Rejects with | How |
 |---|---|---|
-| **Future** | `ScheduleInPast` | `startsAt > op.submittedAt`. A **soft** guard — `submittedAt` is caller-supplied (the host clock is intentionally not exposed to Starlark), appropriate to the trusted single-identity posture. Also guards `endsAt > startsAt` (`InvalidArgument`). |
+| **Grid alignment** | `SlotGridViolation` | `startsAt`/`endsAt` must each be a canonical whole-second UTC instant landing on a 15-minute boundary. |
+| **Future** | `ScheduleInPast` | `startsAt > op.submittedAt`. A **soft** guard — `submittedAt` is caller-supplied (the host clock is intentionally not exposed to Starlark), appropriate to the trusted single-identity posture. Also guards `endsAt > startsAt` (`InvalidArgument`); span capped at 96 cells / 24h (`AppointmentTooLong`). |
 | **Business hours** | `OutsideHours` | The booking `[start, end]` must sit inside **one** `.hours` window on its UTC weekday (`time.weekday`, `time.seconds_of_day` — pure builtins). Opt-in: no `.hours` ⇒ unrestricted. |
 | **Time-off** | `ProviderUnavailable` | The booking's half-open `[start, end)` must not overlap any `.timeOff` blackout range — enforced **even inside** the weekly hours (a booking must satisfy both layers). Opt-in. |
-| **Provider double-book** | `SlotConflict` | The provider's `hasBooking` links are enumerated (`kv.Links`, paged); each live link's target appointment vertex + status + schedule is read via `kv.Read`; a link-tombstoned, terminal (`cancelled`/`completed`/`noShow`), or vertex-tombstoned candidate is skipped and doesn't block; a still-live overlap (half-open `[start, end)`, back-to-back allowed) is a conflict. |
-| **Patient double-book** | `PatientDoubleBook` | The symmetric check enumerating the patient's `hasBooking` links — catches a patient booked with **two different providers** at the same instant (a per-provider enumeration alone cannot). |
+| **Provider double-book** | `SlotConflict` | `[startsAt, endsAt)` is discretized into its covered 15-minute cells; each cell claims `vtx.provider.<id>.slot<cellcode>` (`CreateOnly`/CAS-revive if the prior claim there is tombstoned) — a still-live claim on any covered cell is a conflict. |
+| **Patient double-book** | `PatientDoubleBook` | The symmetric claim against `vtx.patient.<id>.slot<cellcode>` — catches a patient booked with **two different providers** at the same instant (a per-provider claim set alone cannot). |
 
-The `.bookingGuard` epochs are the **concurrency serialization points**: each is bumped under its snapshot
-revision (`make_aspect_upsert_occ`), so two simultaneous bookings for the same provider (or patient) both
-snapshot the epoch at the same revision and the second commit `RevisionConflict`s → re-hydrates →
-re-enumerates the now-committed `hasBooking` link → catches the overlap — fail-closed, never a silent
-double-book. **Bound-maintenance:** a terminal transition / `TombstoneAppointment` eagerly tombstones the
-appointment's `hasBooking` links, so the guard's `isDeleted` fast-skip bounds the per-op `kv.Read` fan-out
-to the **live** book. (The tombstoned link keys persist — true keyspace reclaim awaits a hard-delete
-mutation verb, a separate platform follow-on; live correctness does not depend on it.)
+The write-path claim **is** the lock: two concurrent `CreateAppointment`s for the same provider+cell both
+observe the cell absent, both attempt `CreateOnly` on the same key, and the commit accepts exactly one —
+the loser's whole batch rejects `RevisionConflict`, the Processor retries, and the retry's `kv.Read` now
+sees the winner's live claim → fails closed with `SlotConflict`/`PatientDoubleBook`. There is no
+serialization epoch to bump and nothing to enumerate. `RescheduleAppointment` releases the cells the
+appointment no longer needs and claims the newly-covered ones in the **same atomic batch**, so a rejected
+move leaves the original booking's claims fully intact. `SetAppointmentStatus`'s terminal transitions
+(`cancelled`/`completed`/`noShow`) and `TombstoneAppointment` release all cells the appointment held, by
+recomputing the cell set from `.schedule` + the deterministic `forPatient`/`withProvider` link keys (three
+point reads, not an enumeration) — freeing them for a later booking.
 
 ## Projection lenses (P5 — the only application query surface)
 
