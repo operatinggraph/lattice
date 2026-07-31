@@ -48,8 +48,8 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 // Package is the static, install-time bundle.
 var Package = pkgmgr.Definition{
 	Name:        "loftspace-domain",
-	Version:     "0.10.4",
-	Description: "LoftSpace listing economics: the .listing + .address aspects on a location unit (SetListing / SetUnitAddress / SetListingStatus) + the landlord→unit management link (AssignUnitOwner / RemoveUnitOwner). Depends on location-domain; introduces no vertex type. Three projection lenses (availableListings, applicantRosterRead, landlordUnitsRead); applicantRosterRead is a PROTECTED Postgres identity roster (Contract #6 §6.14 RLS, D1.5, staff-wildcard-only) and a SECURE LENS (Contract #3 §3.10: the sensitive identity name decrypts at projection time into the RLS-protected table); landlordUnitsRead is a PROTECTED, landlord-anchored Postgres model of every unit a landlord manages, independent of any lease application (portfolio-pulse occupancy).",
+	Version:     "0.10.5",
+	Description: "LoftSpace listing economics: the .listing + .address aspects on a location unit (SetListing / SetUnitAddress / SetListingStatus) + the landlord→unit management link (AssignUnitOwner / RemoveUnitOwner). Depends on location-domain; introduces no vertex type. Three projection lenses (availableListings, applicantRosterRead, landlordUnitsRead); applicantRosterRead is a PROTECTED Postgres identity roster (Contract #6 §6.14 RLS, D1.5) and a SECURE LENS (Contract #3 §3.10: the sensitive identity name decrypts at projection time into the RLS-protected table) — each row's authz_anchors carries the identity's own NanoID plus the managing landlord and covering buildings of any unit it has a live lease application against (mirroring cafe-domain's cafeIdentitiesRead and lease-signing's landlordLeaseApplicationsRead anchor shape), on top of the reserved WildcardAnchor grant; landlordUnitsRead is a PROTECTED, landlord-anchored Postgres model of every unit a landlord manages, independent of any lease application (portfolio-pulse occupancy).",
 	Depends:     []string{"location-domain"},
 	DDLs:        DDLs(),
 	Lenses:      Lenses(),

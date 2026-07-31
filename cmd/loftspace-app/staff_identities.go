@@ -13,11 +13,12 @@ import (
 // (Contract #3 §3.10), so an unauthenticated full-name roster (a system-wide
 // membership disclosure) cannot exist.
 //
-// Like the clinic patient roster there is no per-identity self-anchor to carve
-// out — "the whole roster" has no single-row owner — so every row projects an
-// EMPTY authz_anchors set: only an actor holding the reserved WildcardAnchor
-// grant ever matches. A session without it therefore reads an empty roster, and
-// the surfaces that decorate keys with names fall back to the keys.
+// Every row's authz_anchors carries the identity's own NanoID (a signed-in
+// actor always resolves their own name) plus the managing landlord and
+// covering buildings of any unit it has a live lease application against
+// (packages/loftspace-domain/lenses.go), plus the reserved WildcardAnchor
+// grant. A session matching none of these reads an empty roster, and the
+// surfaces that decorate keys with names fall back to the keys.
 
 // protectedIdentityRow is one row of the applicantRosterRead protected
 // Postgres read model, as scanned from the RLS-scoped read. NAME + STATE

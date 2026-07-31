@@ -13,8 +13,9 @@ const LoftspaceListingsBucket = "loftspace-listings"
 // listed-unit projection) and `applicantRosterRead` (the protected Postgres
 // identity roster — the ONLY roster surface: D1.5's picker reads it as an
 // authenticated actor, and cmd/loftspace-app's server-side name resolution
-// (unit_applications.go, lease_document.go) reads it as the app's own admin
-// actor; there is no unprotected NATS-KV roster, because the identity `name`
+// (unit_applications.go, lease_document.go) reads it as the SIGNED-IN
+// caller, RLS-scoped by the lens's own authz_anchors; there is no
+// unprotected NATS-KV roster, because the identity `name`
 // is a sensitive aspect and a Secure Lens may only decrypt into an
 // RLS-protected Postgres model, Contract #3 §3.10). availableListings
 // projects one row per LISTED unit — a location unit carrying a `.listing`
@@ -37,16 +38,22 @@ func Lenses() []pkgmgr.LensSpec {
 			// applicantRosterRead — the protected Postgres read model for the
 			// applicant-identity picker (D1.5) and for the app's server-side
 			// name resolution. Reading it requires an authenticated actor:
-			// every row projects an EMPTY authz_anchors set ("the whole
-			// roster" has no single-row owner), so only an actor holding the
-			// reserved WildcardAnchor grant (D1 design §3.4 M5,
-			// internal/refractor/adapter.WildcardAnchor) ever matches a row —
-			// mirroring clinic-domain's clinicPatientsRead. The picker still
-			// works before any applicant has selected who they are: the app
-			// mints its own fixed-subject staff token (s.adminActor, the same
-			// root-equivalent identity the app already connects to NATS as),
-			// so the client never needs a prior login to bootstrap identity
-			// selection.
+			// every row's authz_anchors carries the identity's OWN bare NanoID
+			// (a signed-in actor always resolves their own name) PLUS the bare
+			// NanoID of every landlord managing a unit the identity has a live
+			// lease application against, PLUS every building covering that unit
+			// (applicationFor -> appliesToUnit -> manages / containedIn*1..,
+			// mirroring cafe-domain's cafeIdentitiesRead self+fan-out and
+			// lease-signing's landlordLeaseApplicationsRead anchor shape) — so
+			// the SAME managing landlord and worksAt-anchored staffer whose
+			// cap-read grant already resolves /api/landlord/applications also
+			// resolves the roster. The reserved WildcardAnchor grant (D1 design
+			// §3.4 M5, internal/refractor/adapter.WildcardAnchor) still matches
+			// every row on top of these. The picker still works before any
+			// applicant has selected who they are: the app mints its own
+			// fixed-subject staff token (s.adminActor, the same root-equivalent
+			// identity the app already connects to NATS as), so the client never
+			// needs a prior login to bootstrap identity selection.
 			//
 			// SECURE LENS (Contract #3 §3.10, Vault Phase B): the identity
 			// `name` is a sensitive aspect, so Core KV holds only its
@@ -156,9 +163,22 @@ RETURN
 // whole (`i.name.data AS name`) for the Secure-Lens decryptor, which projects
 // the decrypted object's `value` field per the SecureColumns declaration;
 // `identity_key` doubles as the decryptor's key-custody column. authz_anchors
-// is EMPTY — the roster has no per-row owner, so only the reserved
-// WildcardAnchor grant ever matches (mirrors clinic-domain's
-// clinicPatientsReadSpec).
+// carries the identity's OWN bare NanoID (a signed-in actor always resolves
+// its own name) PLUS the bare NanoID of every landlord managing a unit the
+// identity has a live lease application against, PLUS every building
+// covering that unit — a walk anchored on `i` via PATTERN COMPREHENSION (not
+// a separate MATCH: a bound leaseapp/unit hop in the query body would fan an
+// identity with multiple applications into one row per application,
+// colliding on the single-valued identity_id IntoKey), mirroring
+// cafe-domain's cafeIdentitiesRead self+fan-out idiom and reusing
+// lease-signing's landlordLeaseApplicationsRead anchor shape
+// (`[landlordKey] + [containedIn*1.. building tokens]`) one hop further in
+// (identity -> leaseapp -> unit, not leaseapp -> unit). The reserved
+// WildcardAnchor grant still matches every row on top of these (mirrors
+// clinic-domain's clinicPatientsReadSpec). An identity with no leaseapp at
+// all (e.g. a staffer with no lease of their own) still projects — the
+// variable-length walk finds no match and the fan-out is simply empty, the
+// self-anchor survives on its own.
 const applicantRosterReadSpec = `MATCH (i:identity)
 WHERE i.name.data.ct <> null
 RETURN
@@ -167,7 +187,8 @@ RETURN
   i.key                 AS identity_key,
   i.name.data           AS name,
   i.state.data.value    AS state,
-  []                    AS authz_anchors
+  [nanoIdFromKey(i.key)] + [(i)<-[:applicationFor]-(la:leaseapp)-[:appliesToUnit]->(ua:unit)<-[:manages]-(landlord:identity) | nanoIdFromKey(landlord.key)] + [(i)<-[:applicationFor]-(lb:leaseapp)-[:appliesToUnit]->(ub:unit)-[:containedIn*1..]->(b:building) | nanoIdFromKey(b.key)]
+                        AS authz_anchors
 `
 
 // landlordUnitsReadSpec projects one row per (unit, managing landlord) pair —

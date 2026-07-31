@@ -1,5 +1,5 @@
 name: loftspace-domain
-version: 0.10.4
+version: 0.10.5
 description: |
   LoftSpace listing economics. Adds the leasable facets of a unit — the
   .listing aspect (rent / term / availability) and the .address aspect — on
@@ -10,12 +10,18 @@ description: |
   management link (cap-read.residence's ownership relationship, D1.3). Depends on
   location-domain (which owns vtx.unit). Three projection lenses: availableListings
   (listed units), applicantRosterRead — the PROTECTED Postgres identity roster
-  (Contract #6 §6.14 RLS, D1.5, mirroring clinic-domain's clinicPatientsRead) and
-  a SECURE LENS (Contract #3 §3.10): the identity name is a sensitive aspect that
-  Refractor decrypts at projection time into this RLS-protected table, the only
-  roster surface — cmd/loftspace-app reads it as an authenticated actor via the
-  reserved WildcardAnchor grant, both for the identity picker and for server-side
-  name resolution; and landlordUnitsRead — a PROTECTED, landlord-anchored Postgres
+  (Contract #6 §6.14 RLS, D1.5) and a SECURE LENS (Contract #3 §3.10): the identity
+  name is a sensitive aspect that Refractor decrypts at projection time into this
+  RLS-protected table, the only roster surface. Each row's authz_anchors carries
+  the identity's own NanoID plus the managing landlord and covering buildings of
+  any unit it has a live lease application against (applicationFor -> appliesToUnit
+  -> manages / containedIn*1.., mirroring cafe-domain's cafeIdentitiesRead and
+  lease-signing's landlordLeaseApplicationsRead), so the same landlord / staffer
+  who already resolves /api/landlord/applications also resolves the roster —
+  the reserved WildcardAnchor grant still matches every row on top of these.
+  cmd/loftspace-app reads it as the signed-in caller, both for the identity
+  picker and for server-side name resolution; and landlordUnitsRead — a
+  PROTECTED, landlord-anchored Postgres
   model of every unit a landlord manages (portfolio-pulse occupancy), independent
   of any lease application.
 depends:

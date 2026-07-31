@@ -29,6 +29,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/operatinggraph/lattice/internal/lenstest"
+	"github.com/operatinggraph/lattice/internal/refractor/adjacency"
 	"github.com/operatinggraph/lattice/internal/refractor/ruleengine"
 	"github.com/operatinggraph/lattice/internal/refractor/ruleengine/full"
 	"github.com/operatinggraph/lattice/internal/substrate"
@@ -37,19 +38,28 @@ import (
 type lensFixture struct {
 	adjKV, coreKV *substrate.KV
 	ids           map[string]string // logicalName -> bare NanoID
+	types         map[string]string // bare NanoID -> vertex type
 }
 
 func newLensFixture(t *testing.T) *lensFixture {
 	adjKV, coreKV := lenstest.KVs(t)
-	return &lensFixture{adjKV: adjKV, coreKV: coreKV, ids: map[string]string{}}
+	return &lensFixture{adjKV: adjKV, coreKV: coreKV, ids: map[string]string{}, types: map[string]string{}}
 }
 
 func (f *lensFixture) identity(t *testing.T, name string) string {
 	t.Helper()
+	return f.vtx(t, name, "identity")
+}
+
+// vtx mints a bare vertex of the given type, tracked by logical name for
+// aspect()/edge() to look up later.
+func (f *lensFixture) vtx(t *testing.T, name, typ string) string {
+	t.Helper()
 	id := lenstest.NanoID(name)
 	f.ids[name] = id
-	key := "vtx.identity." + id
-	body := map[string]any{"key": key, "class": "identity", "isDeleted": false, "data": map[string]any{}}
+	f.types[id] = typ
+	key := "vtx." + typ + "." + id
+	body := map[string]any{"key": key, "class": typ, "isDeleted": false, "data": map[string]any{}}
 	raw, _ := json.Marshal(body)
 	_, err := f.coreKV.Put(context.Background(), key, raw)
 	require.NoError(t, err)
@@ -58,12 +68,29 @@ func (f *lensFixture) identity(t *testing.T, name string) string {
 
 func (f *lensFixture) aspect(t *testing.T, ownerName, local, class string, data map[string]any) {
 	t.Helper()
-	owner := "vtx.identity." + f.ids[ownerName]
+	owner := "vtx." + f.types[f.ids[ownerName]] + "." + f.ids[ownerName]
 	key := owner + "." + local
 	body := map[string]any{"key": key, "class": class, "vertexKey": owner, "localName": local, "isDeleted": false, "data": data}
 	raw, _ := json.Marshal(body)
 	_, err := f.coreKV.Put(context.Background(), key, raw)
 	require.NoError(t, err)
+}
+
+// edge wires a bidirectional adjacency link between two vtx()-minted nodes,
+// mirroring cafe-domain's lens_cypher_test.go fixture (adjacency.Build,
+// both directions — the rule engine's pattern-comprehension walks need the
+// inbound edge too).
+func (f *lensFixture) edge(t *testing.T, name, fromName, toName string) {
+	t.Helper()
+	ctx := context.Background()
+	fromID, toID := f.ids[fromName], f.ids[toName]
+	fromType, toType := f.types[fromID], f.types[toID]
+	linkKey := "lnk." + fromType + "." + fromID + "." + name + "." + toType + "." + toID
+	edgeID := name + "_" + fromID + "_" + toID
+	require.NoError(t, adjacency.Build(ctx, f.adjKV, adjacency.CoreKVEvent{
+		CoreKvKey: linkKey, EdgeID: edgeID, Name: name, Direction: "outbound", NodeID: fromID, OtherNodeID: toID, OtherType: toType}))
+	require.NoError(t, adjacency.Build(ctx, f.adjKV, adjacency.CoreKVEvent{
+		CoreKvKey: linkKey, EdgeID: edgeID, Name: name, Direction: "inbound", NodeID: toID, OtherNodeID: fromID, OtherType: fromType}))
 }
 
 func (f *lensFixture) project(t *testing.T) []ruleengine.ProjectionResult {
@@ -90,7 +117,7 @@ func envelopeData() map[string]any {
 // TestApplicantRosterRead_ProjectsEnvelopeWholeForNamedIdentity proves a named
 // identity (ciphertext-enveloped .name + .state) projects one row: the name
 // column is the envelope MAP (for the secure decryptor), identity_key doubles
-// as the key-custody column, authz_anchors is empty.
+// as the key-custody column, authz_anchors carries at least the self-anchor.
 func TestApplicantRosterRead_ProjectsEnvelopeWholeForNamedIdentity(t *testing.T) {
 	if testing.Short() {
 		t.Skip("requires NATS")
@@ -112,7 +139,42 @@ func TestApplicantRosterRead_ProjectsEnvelopeWholeForNamedIdentity(t *testing.T)
 	require.Equal(t, "3q2+7w==", name["ct"], "the envelope reaches the decryptor whole")
 	anchors, ok := v["authz_anchors"].([]any)
 	require.True(t, ok, "authz_anchors must be a list, got %T", v["authz_anchors"])
-	require.Empty(t, anchors, "the roster has no per-row owner; only the WildcardAnchor grant reads it")
+	require.ElementsMatch(t, []any{f.ids["alice"]}, anchors,
+		"no lease application means no fan-out, but the self-anchor must still be present")
+}
+
+// TestApplicantRosterRead_LandlordAndBuildingFanOut proves an applicant
+// identity's authz_anchors carries the self-anchor PLUS the managing
+// landlord's bare NanoID PLUS every building covering the unit they applied
+// to — the roster gap: a landlord's cap-read.residence grant token is the
+// landlord's own NanoID (mirroring landlordLeaseApplicationsRead's
+// `[landlordKey] + [containedIn building tokens]`), and a worksAt-anchored
+// staffer's grant token is one of the building keys, neither of which is the
+// applicant's own NanoID, so without this fan-out a real landlord/staffer
+// session matched no row but its own.
+func TestApplicantRosterRead_LandlordAndBuildingFanOut(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newLensFixture(t)
+	aliceKey := f.identity(t, "alice")
+	f.aspect(t, "alice", "name", "name", envelopeData())
+	f.vtx(t, "landlord", "identity")
+	f.vtx(t, "app", "leaseapp")
+	f.vtx(t, "unit4b", "unit")
+	f.vtx(t, "tower", "building")
+	f.edge(t, "applicationFor", "app", "alice")
+	f.edge(t, "appliesToUnit", "app", "unit4b")
+	f.edge(t, "manages", "landlord", "unit4b")
+	f.edge(t, "containedIn", "unit4b", "tower")
+
+	rows := f.project(t)
+	require.Len(t, rows, 1)
+	require.Equal(t, aliceKey, rows[0].Values["identity_key"])
+	require.ElementsMatch(t,
+		[]any{f.ids["alice"], f.ids["landlord"], f.ids["tower"]},
+		rows[0].Values["authz_anchors"],
+		"authz_anchors must carry the self-anchor PLUS the managing landlord and every building covering the applied-to unit")
 }
 
 // TestApplicantRosterRead_ExcludesUnnamedAndPlaintextShapedIdentities proves

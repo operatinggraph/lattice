@@ -87,9 +87,12 @@ Both are flat (no `WITH`/aggregation) `full`-engine projections.
   sensitive `name` aspect holds only an envelope at rest) — the human-readable picker so a person selects
   themselves by name instead of a raw `vtx.identity.<id>` key. A **secure lens** (Contract #3 §3.10):
   Refractor decrypts the name envelope under the owning identity's DEK at projection time, so plaintext
-  exists only in the RLS-protected table; a shredded identity's name projects NULL. Rows carry an EMPTY
-  `authz_anchors` set, so only the reserved WildcardAnchor grant reads them — `cmd/loftspace-app` reads
-  the table as its own admin actor, for the picker and for server-side name resolution alike.
+  exists only in the RLS-protected table; a shredded identity's name projects NULL. Each row's
+  `authz_anchors` carries the identity's own bare NanoID plus the managing landlord and covering
+  buildings of any unit it has a live lease application against (`applicationFor -> appliesToUnit ->
+  manages` / `containedIn*1..`, mirroring `cafe-domain`'s `cafeIdentitiesRead` and `lease-signing`'s
+  `landlordLeaseApplicationsRead` anchor shape), plus the reserved WildcardAnchor grant — `cmd/loftspace-app`
+  reads the table as the SIGNED-IN caller, for the picker and for server-side name resolution alike.
 
 ## Out of scope (owned elsewhere / deferred)
 
