@@ -100,15 +100,23 @@ type pipelineEntry struct {
 	secureColumns []lens.SecureColumn
 }
 
+// isPerEntryCapReadOutput reports whether output describes a cap-read.*
+// PerEntry producer — EntryKeyColumn set and OutputKeyPattern prefixed
+// "cap-read." — the same two declared descriptor fields sweepEnrolment and
+// ApplyTruncateScope already key structural per-lens decisions off, not a
+// parse of the lens's compiled cypher. Factored out of capReadShredTargets so
+// lens activation (validatePerEntryCapReadAdapter) applies the identical test
+// before a misconfigured lens ever reaches the registry.
+func isPerEntryCapReadOutput(output *lens.OutputDescriptorSpec) bool {
+	return output != nil && output.EntryKeyColumn != "" && strings.HasPrefix(output.OutputKeyPattern, "cap-read.")
+}
+
 // capReadShredTargets returns a keyshredded.NullifyTarget for every currently
 // running lens whose Output descriptor is a cap-read.* NATS-KV PerEntry
 // producer — the base capabilityRead lens and every package-generated
 // AnchorWalk producer alike (cap-read-per-anchor-grant-keys-design.md's Fire
-// 2 follow-on). The two fields checked, EntryKeyColumn and OutputKeyPattern,
-// are the same declared descriptor fields sweepEnrolment and
-// ApplyTruncateScope already key structural per-lens decisions off, not a
-// parse of the lens's compiled cypher. Pure over its input so it is testable
-// without a live registry mutex; the caller holds the lock.
+// 2 follow-on). Pure over its input so it is testable without a live registry
+// mutex; the caller holds the lock.
 //
 // A hand-authored Postgres GrantTable cap-read producer (e.g.
 // packages/clinic-domain's grant_source lenses) carries no Output descriptor
@@ -116,15 +124,35 @@ type pipelineEntry struct {
 func capReadShredTargets(registry map[string]*pipelineEntry) []keyshredded.NullifyTarget {
 	var targets []keyshredded.NullifyTarget
 	for id, entry := range registry {
-		if entry.output == nil || entry.output.EntryKeyColumn == "" {
-			continue
-		}
-		if !strings.HasPrefix(entry.output.OutputKeyPattern, "cap-read.") {
+		if !isPerEntryCapReadOutput(entry.output) {
 			continue
 		}
 		targets = append(targets, keyshredded.NullifyTarget{RuleID: id, PerEntry: true})
 	}
 	return targets
+}
+
+// validatePerEntryCapReadAdapter refuses a PerEntry cap-read.* lens whose
+// adapter cannot enumerate keys by prefix. keyshredded's PerEntry
+// nullification path (pipeline.DeleteAllForActor) requires
+// adapter.PrefixKeyLister, which only NatsKVAdapter implements today
+// (anchorwalk.go hardcodes "nats-kv"); capReadShredTargets discovers PerEntry
+// targets by descriptor alone, so a future non-NATS-KV producer (e.g.
+// Postgres) would otherwise reach the registry undetected and only fail at
+// the first live shred event — pausing the whole auth-plane lens
+// (privacy-critical, no retry) as a side effect of an unrelated identity's
+// shred, an outage the removed static-Targets operator gate previously made
+// structurally impossible. Catching the same gap here, at activation, refuses
+// only the misconfigured lens itself
+// (cap-read-per-anchor-grant-keys-design.md's Fire 4 residual).
+func validatePerEntryCapReadAdapter(r *lens.Rule, adpt adapter.Adapter) error {
+	if !isPerEntryCapReadOutput(r.Output) {
+		return nil
+	}
+	if _, ok := adpt.(adapter.PrefixKeyLister); !ok {
+		return fmt.Errorf("lens %q: perEntry cap-read.* lens targets adapter %T, which cannot enumerate keys by prefix (required for keyshredded nullification)", r.ID, adpt)
+	}
+	return nil
 }
 
 // grantTableShredRevokers returns one keyshredded.GrantTableRevoker per
@@ -695,6 +723,11 @@ func main() {
 		})
 		if err != nil {
 			logger.Error("build adapter", "lensId", r.ID, "err", err)
+			return
+		}
+
+		if err := validatePerEntryCapReadAdapter(r, adpt); err != nil {
+			logger.Error("perEntry cap-read lens activation refused", "lensId", r.ID, "err", err)
 			return
 		}
 

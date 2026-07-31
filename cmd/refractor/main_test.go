@@ -1,8 +1,10 @@
 package main
 
 import (
+	"context"
 	"testing"
 
+	"github.com/operatinggraph/lattice/internal/refractor/adapter"
 	"github.com/operatinggraph/lattice/internal/refractor/lens"
 	"github.com/operatinggraph/lattice/internal/refractor/projection"
 )
@@ -280,5 +282,83 @@ func TestCapReadShredTargets(t *testing.T) {
 func TestCapReadShredTargets_Empty(t *testing.T) {
 	if got := capReadShredTargets(map[string]*pipelineEntry{}); len(got) != 0 {
 		t.Fatalf("expected no targets from an empty registry, got %v", got)
+	}
+}
+
+// bareAdapter implements adapter.Adapter and nothing else — the shape a
+// future non-NATS-KV PerEntry producer (e.g. Postgres) would take today,
+// since anchorwalk.go hardcodes "nats-kv" for every real producer.
+type bareAdapter struct{}
+
+func (bareAdapter) Upsert(context.Context, map[string]any, map[string]any, uint64) error { return nil }
+func (bareAdapter) Delete(context.Context, map[string]any, uint64) error                 { return nil }
+func (bareAdapter) Probe(context.Context) error                                          { return nil }
+func (bareAdapter) Close() error                                                         { return nil }
+
+// prefixListingAdapter additionally implements adapter.PrefixKeyLister — the
+// capability NatsKVAdapter has today.
+type prefixListingAdapter struct{ bareAdapter }
+
+func (prefixListingAdapter) ListKeysPrefix(context.Context, string) ([]map[string]any, error) {
+	return nil, nil
+}
+
+var _ adapter.Adapter = bareAdapter{}
+var _ adapter.Adapter = prefixListingAdapter{}
+var _ adapter.PrefixKeyLister = prefixListingAdapter{}
+
+// TestValidatePerEntryCapReadAdapter proves the activation-time guard refuses
+// a PerEntry cap-read.* lens whose adapter cannot enumerate keys by prefix —
+// closing cap-read-per-anchor-grant-keys-design.md's Fire 4 residual, where
+// such a lens would otherwise only fail at the first live shred event,
+// pausing the whole auth-plane lens rather than just refusing to activate.
+func TestValidatePerEntryCapReadAdapter(t *testing.T) {
+	tests := []struct {
+		name    string
+		rule    *lens.Rule
+		adpt    adapter.Adapter
+		wantErr bool
+	}{
+		{
+			name:    "perEntry cap-read on a non-lister adapter is refused",
+			rule:    &lens.Rule{ID: "future-postgres-producer", Output: &lens.OutputDescriptorSpec{OutputKeyPattern: "cap-read.{actorSuffix}", EntryKeyColumn: "anchorId"}},
+			adpt:    bareAdapter{},
+			wantErr: true,
+		},
+		{
+			name:    "perEntry cap-read on a PrefixKeyLister adapter is allowed",
+			rule:    &lens.Rule{ID: "base-lens", Output: &lens.OutputDescriptorSpec{OutputKeyPattern: "cap-read.{actorSuffix}", EntryKeyColumn: "anchorId"}},
+			adpt:    prefixListingAdapter{},
+			wantErr: false,
+		},
+		{
+			name:    "doc-mode cap-read (no EntryKeyColumn) is untouched by this guard",
+			rule:    &lens.Rule{ID: "cap-ephemeral", Output: &lens.OutputDescriptorSpec{OutputKeyPattern: "cap-read.legacy.{actorSuffix}"}},
+			adpt:    bareAdapter{},
+			wantErr: false,
+		},
+		{
+			name:    "non-cap-read PerEntry lens is untouched by this guard",
+			rule:    &lens.Rule{ID: "unroutedTasks", Output: &lens.OutputDescriptorSpec{OutputKeyPattern: "unroutedTasks.{actorSuffix}", EntryKeyColumn: "anchorId"}},
+			adpt:    bareAdapter{},
+			wantErr: false,
+		},
+		{
+			name:    "nil Output (non-actor-aggregate lens) is untouched by this guard",
+			rule:    &lens.Rule{ID: "plain-lens"},
+			adpt:    bareAdapter{},
+			wantErr: false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validatePerEntryCapReadAdapter(tt.rule, tt.adpt)
+			if tt.wantErr && err == nil {
+				t.Fatalf("expected an error, got nil")
+			}
+			if !tt.wantErr && err != nil {
+				t.Fatalf("expected no error, got %v", err)
+			}
+		})
 	}
 }
