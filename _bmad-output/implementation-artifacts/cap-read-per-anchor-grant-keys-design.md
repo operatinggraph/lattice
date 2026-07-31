@@ -568,11 +568,14 @@ was also closed with an added test fixture.
 boundary):** hand-authored Postgres GrantTable `cap-read.*` producers (`packages/clinic-domain`'s four
 `grant_source` lenses) carry no `Output` descriptor, so neither the static floor nor the lister reaches
 them — a shredded identity's `actor_read_grants` rows from those survive, a distinct transport/gap from
-Fire 4's NATS-KV scope. **Closed by Fire 5** (below). And a latent one, still open: `capReadShredTargets`
-filters on the descriptor only, not on adapter capability — a future `cap-read.*` PerEntry lens targeting
-Postgres (unreachable today, `anchorwalk.go` hardcodes `nats-kv`) would hit `DeleteAllForActor`'s
-non-`ErrRuleNotRegistered` error path and pause the auth-plane lens (an outage), a risk the removed
-static-list operator gate previously made structurally impossible.
+Fire 4's NATS-KV scope. **Closed by Fire 5** (below). And a latent one — `capReadShredTargets`
+filtered on the descriptor only, not on adapter capability, so a future `cap-read.*` PerEntry lens
+targeting Postgres (unreachable today, `anchorwalk.go` hardcodes `nats-kv`) would have hit
+`DeleteAllForActor`'s non-`ErrRuleNotRegistered` error path and paused the auth-plane lens (an outage), a
+risk the removed static-list operator gate previously made structurally impossible — **closed
+2026-07-31 (`b4aae06f`)**: `validatePerEntryCapReadAdapter` applies the same descriptor test at lens
+activation and refuses just the misconfigured lens if its adapter doesn't implement
+`adapter.PrefixKeyLister`, so the failure mode above can no longer reach the registry.
 
 Gates green: `go build ./...`, `make vet`, `golangci-lint run ./...` (0 issues), `STRICT=1
 lint-conventions.go`, `go test -race ./internal/refractor/keyshredded/... ./cmd/refractor/...`, full `go
