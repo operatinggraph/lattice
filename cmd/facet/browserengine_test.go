@@ -80,7 +80,7 @@ func TestBrowserEngine_ServesWasmAndShellAssets(t *testing.T) {
 func TestBrowserEngine_InjectsBootConfigForCookieSession(t *testing.T) {
 	priv, err := rsa.GenerateKey(rand.Reader, 2048)
 	require.NoError(t, err)
-	signer := appsession.NewSigner(priv, "test", appsession.DevTokenTTL, time.Now)
+	signer := appsession.NewSigner(priv, "test", appsession.DevTokenTTL, time.Now, "")
 	authn, err := buildTestVerifier(&priv.PublicKey, "test")
 	require.NoError(t, err)
 

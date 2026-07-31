@@ -27,7 +27,7 @@ func testDevSigner(t *testing.T) *appsession.Signer {
 	t.Helper()
 	priv, err := rsa.GenerateKey(rand.Reader, 2048)
 	require.NoError(t, err)
-	return appsession.NewSigner(priv, "test", appsession.DevTokenTTL, time.Now)
+	return appsession.NewSigner(priv, "test", appsession.DevTokenTTL, time.Now, "")
 }
 
 func testNanoID(t *testing.T) string {

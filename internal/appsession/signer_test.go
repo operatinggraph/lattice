@@ -198,6 +198,44 @@ func TestNewAuthenticators_DevPosture_RevocationCheckerWired(t *testing.T) {
 	require.ErrorIs(t, err, auth.ErrTokenRevoked)
 }
 
+// TestNewAuthenticators_DevPosture_TokenScopedToMintingApp pins the fix for
+// appsession.md's co-hosted-page session-fixation gap: every dev-auth adopter
+// trusts the same checked-in key, so a sibling app's page can plant an absent
+// session cookie via document.cookie (HttpOnly blocks overwrite, not create).
+// Without an app-scoped audience, that planted token — minted legitimately by
+// the attacker signing in to THEIR OWN app — would also verify for the victim
+// app. Binding Mint's aud and NewAuthenticators' Audience to the same
+// envPrefix means a token minted for one app is refused by another's
+// verifier, on both the strict and refresh authenticators, even though both
+// apps share the identical dev signing key.
+func TestNewAuthenticators_DevPosture_TokenScopedToMintingApp(t *testing.T) {
+	devKeyEnv(t, "APPA")
+	devKeyEnv(t, "APPB")
+	t.Setenv("APPA_DEV_AUTH", "1")
+	t.Setenv("APPB_DEV_AUTH", "1")
+
+	signerA, err := NewDevSigner(slog.Default(), "APPA", true)
+	require.NoError(t, err)
+	require.NotNil(t, signerA)
+
+	strictB, refreshB, err := NewAuthenticators(slog.Default(), "APPB", signerA, nil)
+	require.NoError(t, err)
+
+	tokenForA, _, err := signerA.Mint(testNanoID(t))
+	require.NoError(t, err)
+
+	_, err = strictB.Authenticate(t.Context(), tokenForA)
+	require.ErrorIs(t, err, auth.ErrWrongAudience, "a token minted for APPA must not verify as APPB's session")
+	_, err = refreshB.Authenticate(t.Context(), tokenForA)
+	require.ErrorIs(t, err, auth.ErrWrongAudience, "the refresh verifier must enforce the same app scoping")
+
+	// The same-app path must still work: APPA's own authenticators accept it.
+	strictA, _, err := NewAuthenticators(slog.Default(), "APPA", signerA, nil)
+	require.NoError(t, err)
+	_, err = strictA.Authenticate(t.Context(), tokenForA)
+	require.NoError(t, err, "a token must still verify for the app that minted it")
+}
+
 // TestNewAuthenticators_IdPPosture_RejectsUnsupportedKeyType pins that a PKIX
 // key the verifier cannot use — Ed25519, since Verify accepts only RS*/ES*
 // signatures — is refused at startup rather than accepted into a verifier that

@@ -37,27 +37,40 @@ type Signer struct {
 	kid  string
 	ttl  time.Duration
 	now  func() time.Time
+	// aud is embedded as the minted token's `aud` claim when non-empty — the
+	// minting app's own envPrefix (NewDevSigner). Every dev-auth adopter
+	// shares one signing key and verifier config, so nothing else stops a
+	// token minted for one app's cookie from also verifying as another's;
+	// binding mint and verify (NewAuthenticators) to the same envPrefix
+	// closes that cross-app cookie-planting path (appsession.md's
+	// co-hosted-page session-fixation gap).
+	aud string
 }
 
 // NewSigner builds a Signer over an explicit key — the seam tests use to sign
-// with a throwaway key instead of the shared dev one.
-func NewSigner(priv *rsa.PrivateKey, kid string, ttl time.Duration, now func() time.Time) *Signer {
+// with a throwaway key instead of the shared dev one. aud is the app-scoping
+// audience Mint embeds; empty omits the claim.
+func NewSigner(priv *rsa.PrivateKey, kid string, ttl time.Duration, now func() time.Time, aud string) *Signer {
 	if now == nil {
 		now = time.Now
 	}
-	return &Signer{priv: priv, kid: kid, ttl: ttl, now: now}
+	return &Signer{priv: priv, kid: kid, ttl: ttl, now: now, aud: aud}
 }
 
 // Mint signs a bearer token for subject and reports when it expires.
 func (s *Signer) Mint(subject string) (string, time.Time, error) {
 	now := s.now()
 	exp := now.Add(s.ttl)
-	tok := jwt.NewWithClaims(jwt.SigningMethodRS256, jwt.RegisteredClaims{
+	claims := jwt.RegisteredClaims{
 		Subject:   subject,
 		IssuedAt:  jwt.NewNumericDate(now),
 		NotBefore: jwt.NewNumericDate(now),
 		ExpiresAt: jwt.NewNumericDate(exp),
-	})
+	}
+	if s.aud != "" {
+		claims.Audience = jwt.ClaimStrings{s.aud}
+	}
+	tok := jwt.NewWithClaims(jwt.SigningMethodRS256, claims)
 	tok.Header["kid"] = s.kid
 	signed, err := tok.SignedString(s.priv)
 	if err != nil {
@@ -83,7 +96,7 @@ func NewDevSigner(logger *slog.Logger, envPrefix string, loopback bool) (*Signer
 		return nil, fmt.Errorf("dev-auth: load shared dev signing key: %w", err)
 	}
 	logger.Warn(envPrefix + "_DEV_AUTH ENABLED: this process mints demo JWTs in-process (NOT for production)")
-	return NewSigner(priv, auth.DevKeyID, DevTokenTTL, time.Now), nil
+	return NewSigner(priv, auth.DevKeyID, DevTokenTTL, time.Now, envPrefix), nil
 }
 
 // NewAuthenticators builds the verifiers session cookies are checked against,
@@ -120,11 +133,18 @@ func NewAuthenticators(logger *slog.Logger, envPrefix string, signer *Signer, re
 		return nil, nil, fmt.Errorf("dev-auth: load shared dev trust key: %w", err)
 	}
 	keyInfo := auth.KeyInfoFromSpecs(trustedSpecs)
-	verifier, err := auth.NewVerifier(auth.Config{Keys: trustedKeys, KeyInfo: keyInfo})
+	// Audience: envPrefix pins verification to the same app the Signer minted
+	// for (NewDevSigner passes the identical envPrefix into NewSigner's aud).
+	// Every dev-auth adopter trusts the same checked-in key, so without this a
+	// token minted by any one of them would also verify for every other — the
+	// gap that lets a co-hosted sibling page plant an absent session cookie
+	// (document.cookie, HttpOnly blocks overwrite but not create) that then
+	// verifies when the victim later visits this app.
+	verifier, err := auth.NewVerifier(auth.Config{Keys: trustedKeys, KeyInfo: keyInfo, Audience: envPrefix})
 	if err != nil {
 		return nil, nil, fmt.Errorf("dev-auth: build session verifier: %w", err)
 	}
-	refreshVerifier, err := auth.NewVerifier(auth.Config{Keys: trustedKeys, KeyInfo: keyInfo, ClockSkew: RefreshGrace})
+	refreshVerifier, err := auth.NewVerifier(auth.Config{Keys: trustedKeys, KeyInfo: keyInfo, ClockSkew: RefreshGrace, Audience: envPrefix})
 	if err != nil {
 		return nil, nil, fmt.Errorf("dev-auth: build session refresh verifier: %w", err)
 	}
