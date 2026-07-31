@@ -252,8 +252,8 @@ session" read as time, not studio, given the row's `SetBookingAttendance`/no-ins
 
 ## Next (this design doc's checkpoint)
 
-- **`ReassignSession` FE wiring** (🏗️, this section) — staff console "Reassign" control in
-  `cmd/wellness-app`, consumer named above.
+- **`ReassignSession` FE wiring** — shipped (`b7f845d5`): staff console "Reassign" control in
+  `cmd/wellness-app`'s Roster panel, consumer named above.
 - **Inc 2 — thin FE shipped** (`cmd/wellness-app`, `a7f5b52`). Live-data browser verify is pending the
   one-time NATS reload noted above (a stack-infra step, not a code gap).
 - **Mixed-use composition surfaces** (verticals.md, gated "after Wellness") — front-desk / operations
