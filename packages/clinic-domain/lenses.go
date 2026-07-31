@@ -482,8 +482,17 @@ RETURN
 // with timeOff and the provider's existing appointments) to compute and suggest
 // the open slots for a chosen date. The op (enforce_hours) stays the authority;
 // this is the display surface only.
+//
+// identifiedBy is OPTIONAL — a provider with no bound login (BindProviderIdentity
+// never ran) projects a null identityKey. Unlike clinicPatientsRead's identical
+// walk, this is the OPEN (unprotected) lens: a provider's identity binding is not
+// PHI (the directory already projects their real name/specialty/bio publicly), so
+// it needs no RLS — the FE reads it to resolve a signed-in provider session's own
+// name (renderSignedInAs) exactly as clinicPatientsRead's identityKey lets a
+// signed-in patient session resolve its own.
 const clinicProvidersSpec = `MATCH (pr:provider)
 WHERE pr.profile.data.fullName <> null
+OPTIONAL MATCH (pr)-[:identifiedBy]->(id:identity)
 RETURN
   pr.key AS key,
   pr.key AS providerKey,
@@ -492,7 +501,8 @@ RETURN
   pr.profile.data.credentials AS credentials,
   pr.profile.data.bio AS bio,
   pr.timeOff.data.ranges AS timeOff,
-  pr.hours.data.windows AS hours`
+  pr.hours.data.windows AS hours,
+  id.key AS identityKey`
 
 // clinicPatientsSpec projects one row per NAMED patient by OPAQUE KEY only — no
 // name. This open (unauthenticated) roster carries patient keys for key-based

@@ -39,6 +39,11 @@ type hoursWindow struct {
 // renders these as the provider picker; TimeOff carries the provider's declared
 // blackout ranges and Hours its availability windows (null/empty when none) so the
 // manager UI can edit them and the booking slot picker can suggest open slots.
+// IdentityKey (nil for a provider with no BindProviderIdentity bind) is what lets
+// the FE resolve a signed-in provider session's own name — mirrors patientRow's
+// IdentityKey, except this field is public (the directory already projects the
+// provider's real name/specialty/bio; a provider is staff, not a PHI-bearing
+// patient), so it rides the plain clinicProviders lens rather than a Protected one.
 type providerRow struct {
 	ProviderKey string         `json:"providerKey"`
 	Name        string         `json:"name"`
@@ -47,6 +52,7 @@ type providerRow struct {
 	Bio         string         `json:"bio,omitempty"`
 	TimeOff     []timeOffRange `json:"timeOff,omitempty"`
 	Hours       []hoursWindow  `json:"hours,omitempty"`
+	IdentityKey *string        `json:"identityKey,omitempty"`
 }
 
 // computeProviders assembles the provider roster from the `clinicProviders` lens

@@ -148,7 +148,7 @@ func TestPackage_NoCommandOverlapAcrossVertexTypes(t *testing.T) {
 // EXISTING row, never adding a second one at the same scope. Four postures
 // are distinguished and each is load-bearing:
 //
-//   - operator-only (scope any) — the clinical + roster surface.
+//   - operator-only (scope any) — the roster admin surface.
 //   - operator + frontOfHouse + provider, all on the SAME scope=any row
 //     (SetProviderHours/SetProviderTimeOff/RescheduleAppointment/
 //     SetAppointmentStatus) — the front-desk schedule beat, widened so a
@@ -156,6 +156,9 @@ func TestPackage_NoCommandOverlapAcrossVertexTypes(t *testing.T) {
 //     (confined in-script to the caller's own identifiedBy-bound provider).
 //     BindProviderIdentity (the role-minting bind ceremony) stays
 //     operator-only — it is not provider- or front-desk-reachable.
+//   - operator + provider, on the SAME scope=any row (RecordEncounter) — the
+//     one clinical verb a clinician owns, confined in-script to the caller's
+//     own identifiedBy-bound provider's appointments, same as above.
 //   - consumer (scope self) — patient self-booking / self-reschedule /
 //     self-cancel.
 //
@@ -184,7 +187,7 @@ func TestPackage_Permissions(t *testing.T) {
 		// The staff-widened front-desk ops — now also widened to the bound provider.
 		"RescheduleAppointment": {{scope: "any", grantsTo: []string{"operator", "frontOfHouse", "provider"}}, {scope: "self", grantsTo: []string{"consumer"}}},
 		"SetAppointmentStatus":  {{scope: "any", grantsTo: []string{"operator", "frontOfHouse", "provider"}}, {scope: "self", grantsTo: []string{"consumer"}}},
-		"RecordEncounter":       operatorOnly(), "TombstoneAppointment": operatorOnly(),
+		"RecordEncounter":       op("operator", "provider"), "TombstoneAppointment": operatorOnly(),
 		"SetSiteProfile": operatorOnly(), "AssignProviderSite": operatorOnly(), "RemoveProviderSite": operatorOnly(),
 		"BindProviderIdentity": {{scope: "any", grantsTo: []string{"operator"}}},
 	}
@@ -289,8 +292,8 @@ func TestPackage_Permissions(t *testing.T) {
 	if got := len(Package.WeaverTargets); got != 0 {
 		t.Fatalf("expected 0 weaverTargets, got %d", got)
 	}
-	if got := len(Package.OpMetas); got != 6 {
-		t.Errorf("OpMetas: got %d, want 6", got)
+	if got := len(Package.OpMetas); got != 7 {
+		t.Errorf("OpMetas: got %d, want 7", got)
 	}
 	if got := len(Package.LoomPatterns); got != 0 {
 		t.Fatalf("expected 0 loomPatterns, got %d", got)
@@ -346,6 +349,7 @@ func TestPackage_ScriptGuards(t *testing.T) {
 		`make_aspect_upsert(appt_key, "encounter", "appointmentEncounter"`, // RecordEncounter upserts .encounter
 		`clinic.appointmentEncounterRecorded`,                              // RecordEncounter event
 		`"documentedAt": time.rfc3339_utc(op.submittedAt)`,                 // operational documentedAt derived from submittedAt
+		`cannot record encounter on appointment `,                          // RecordEncounter's standing provider-binding guard
 	} {
 		if !strings.Contains(appointmentDDLScript, want) {
 			t.Errorf("appointment script must reference %q", want)

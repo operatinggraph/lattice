@@ -43,9 +43,11 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 // CreateOnly guards on BOTH sides make a bind mutually exclusive regardless of
 // who submits it (persona-worlds-design.md Fire W0 §3.2).
 //
-// SetProviderHours, SetProviderTimeOff, SetAppointmentStatus, and
-// RescheduleAppointment additionally grant `provider` at scope=any: a bound
-// provider manages their OWN availability and their OWN appointments. Scope
+// SetProviderHours, SetProviderTimeOff, SetAppointmentStatus,
+// RescheduleAppointment, and RecordEncounter additionally grant `provider` at
+// scope=any: a bound provider manages their OWN availability, their OWN
+// appointments, and documents their OWN visits — the one clinical verb a
+// clinician owns. Scope
 // stays `any` (there is no scope=self equivalent for a non-identity target
 // vertex like provider/appointment), so the Starlark script itself confines
 // a provider-role, non-operator, non-workplace caller to the SPECIFIC
@@ -130,7 +132,12 @@ func Permissions() []pkgmgr.PermissionSpec {
 			Note:          "Grants a consumer the right to cancel THEIR OWN appointment (status=cancelled only; the appointment's forPatient must be a patient linked, via identifiedBy, to the caller's own identity).",
 			GrantsTo:      []string{"consumer"},
 		},
-		mk("RecordEncounter"),
+		{
+			OperationType: "RecordEncounter",
+			Scope:         "any",
+			Note:          "Grants the operator the right to submit RecordEncounter operations, and a bound provider the right to document THEIR OWN appointment's visit (the script's standing guard confines a non-operator, non-workplace caller to appointments withProvider the provider it is identifiedBy-bound to).",
+			GrantsTo:      []string{"operator", "provider"},
+		},
 		mk("TombstoneAppointment"),
 		mk("SetSiteProfile"),
 		mk("AssignProviderSite"),

@@ -1,5 +1,5 @@
 name: clinic-domain
-version: 0.28.14
+version: 0.28.15
 depends:
   - location-domain
 description: |
@@ -80,9 +80,9 @@ description: |
   BindProviderIdentity binds a provider to a login identity: it mints the provider's identifiedBy link, claims a
   CreateOnly guard aspect on EACH side (.identityClaim on the provider, .providerClaim on the identity) so the bind
   is mutually exclusive, and idempotently grants the identity-domain `provider` role via holdsRole. SetProviderHours,
-  SetProviderTimeOff, SetAppointmentStatus, and RescheduleAppointment additionally grant `provider` scope=any: the
-  script confines a bound, non-operator, non-workplace caller to the SPECIFIC provider it is identifiedBy-bound to
-  (persona-worlds-design.md Fire W0). providerIdentityReadGrants and patientIdentityReadGrants are the
+  SetProviderTimeOff, SetAppointmentStatus, RescheduleAppointment, and RecordEncounter additionally grant `provider`
+  scope=any: the script confines a bound, non-operator, non-workplace caller to the SPECIFIC provider it is
+  identifiedBy-bound to (persona-worlds-design.md Fire W0). providerIdentityReadGrants and patientIdentityReadGrants are the
   cap-read.provider.clinic / cap-read.patient.clinic GrantTable producers (mirroring service-location's
   staffReadGrants shape) that let a signed-in login inherit the read anchors of the clinic entity it is bound to —
   a bound provider and an identifiedBy-bound patient respectively. They are what make a person's LOGIN the principal
@@ -210,7 +210,7 @@ declares:
       grantsTo: [consumer]
     - operationType: RecordEncounter
       scope: any
-      grantsTo: [operator]
+      grantsTo: [operator, provider]
     - operationType: TombstoneAppointment
       scope: any
       grantsTo: [operator]
@@ -232,4 +232,5 @@ declares:
     - operationType: SetAppointmentStatus
     - operationType: SetProviderHours
     - operationType: SetProviderTimeOff
+    - operationType: RecordEncounter
     - operationType: CreatePatient

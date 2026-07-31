@@ -97,7 +97,7 @@ var clinicOpGrants = map[string][]permGrant{
 	"CreateAppointment":     {{"any", "operator"}, {"any", "frontOfHouse"}, {"self", "consumer"}},
 	"RescheduleAppointment": {{"any", "operator"}, {"any", "frontOfHouse"}, {"any", "provider"}, {"self", "consumer"}},
 	"SetAppointmentStatus":  {{"any", "operator"}, {"any", "frontOfHouse"}, {"any", "provider"}, {"self", "consumer"}},
-	"RecordEncounter":       {{"any", "operator"}},
+	"RecordEncounter":       {{"any", "operator"}, {"any", "provider"}},
 	"TombstoneAppointment":  {{"any", "operator"}},
 	"SetSiteProfile":        {{"any", "operator"}},
 	"AssignProviderSite":    {{"any", "operator"}},

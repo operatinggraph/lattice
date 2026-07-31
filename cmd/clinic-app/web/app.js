@@ -34,6 +34,7 @@ const state = {
   highlight: null,
   rescheduling: null, // the appointment row being rescheduled (modal context)
   reschedulingAsSelf: false, // whether the open reschedule modal belongs to the signed-in patient's own record
+  reschedulingOnDone: null, // reload callback for the grid the reschedule was opened from (loadAppts / loadMySchedule)
   documenting: null, // { a, onDone } for the Document-visit (RecordEncounter) modal
   wellnessBooking: null, // { a, identityKey, sessions } for the Care→Wellness referral modal
   schedView: "week", // Schedule tab calendar mode: "week" | "day"
@@ -201,17 +202,22 @@ function startSessionKeepalive() {
 const whoamiRetryBackoffsMs = [200, 500, 1200];
 
 // nameForIdentity resolves the signed-in identity's bare NanoID to its human
-// name via the already-loaded patient roster (state.patients carries
-// identityKey per row as a FULL vtx.identity.<NanoID> key — the same
-// PROTECTED, RLS-scoped clinicPatientsRead projection nameForPatient reads —
-// so the match runs through bareId(), the same comparison actingAsSelf
-// already uses), falling back to the short key when the roster hasn't
-// loaded yet or the signed-in identity isn't a patient (front-desk staff,
-// whose own name has no row there) — mirrors loftspace-app's
+// name, checking the already-loaded patient roster first (state.patients
+// carries identityKey per row as a FULL vtx.identity.<NanoID> key — the same
+// PROTECTED, RLS-scoped clinicPatientsRead projection nameForPatient reads),
+// then the provider roster (state.providers carries identityKey the same way,
+// from the OPEN clinicProviders lens — a provider directory entry is already
+// public, so no RLS is needed there), each matched through bareId() — falling
+// back to the short key when neither roster has loaded yet or the signed-in
+// identity is neither a patient nor a bound provider (front-desk staff, whose
+// own name has no row in either) — mirrors loftspace-app's
 // nameFor/renderSignedInAs (cmd/loftspace-app/web/app.js).
 function nameForIdentity(key) {
-  const m = state.patients.find((p) => bareId(p.identityKey) === key);
-  return m && m.name ? m.name : shortKey(key);
+  const patient = state.patients.find((p) => bareId(p.identityKey) === key);
+  if (patient && patient.name) return patient.name;
+  const provider = state.providers.find((p) => bareId(p.identityKey) === key);
+  if (provider && provider.name) return provider.name;
+  return shortKey(key);
 }
 
 // renderSignedInAs shows who the session belongs to, resolved to a name once
@@ -787,13 +793,18 @@ async function loadProviders() {
   populateSpecialtySelect();
   populateProviderSelect("#provider", bookFilterOpts());
   populateProviderSelect("#sched-provider", { includeAll: true });
-  populateProviderSelect("#avail-provider");
+  // A provider hat (not front desk) reaches Availability locked to their OWN
+  // entry — the picker, Add-provider, and profile editor stay staff-only
+  // (applyHatGating hides them); onlyKey filters the roster + auto-selects +
+  // disables the select so there is nothing else to pick.
+  populateProviderSelect("#avail-provider", isProvider() && !isFrontDesk() ? { onlyKey: myProviderKey() } : undefined);
   populateProviderSelect("#series-provider");
   populateProviderSelect("#assign-provider");
   refreshBookEnabled();
   renderSlotCalendar();
   renderAvailEditors();
   renderSoonest();
+  renderSignedInAs();
 }
 
 // bookFilterOpts reads the Book form's specialty + site filters, for both the
@@ -1108,16 +1119,23 @@ const SCHED_ALL = "__all__";
 // actually help at the chosen site, instead of a flat list the patient has to
 // already know a name to navigate. Site membership comes from the separate
 // providerSites join (a provider may practice at many sites), not the
-// providers roster itself.
+// providers roster itself. opts.onlyKey narrows the roster to a single
+// provider and disables the select — the Availability tab's provider-hat
+// lock (loadProviders), so a bound provider sees only their own entry with
+// nothing else to pick.
 function populateProviderSelect(sel, opts) {
   const el = $(sel);
   if (!el) return;
   const prev = el.value;
   el.innerHTML = "";
+  el.disabled = !!(opts && opts.onlyKey);
   let roster = opts && opts.specialty ? state.providers.filter((p) => p.specialty === opts.specialty) : state.providers;
   if (opts && opts.site) {
     const atSite = new Set(state.providerSites.filter((ps) => ps.siteKey === opts.site).map((ps) => ps.providerKey));
     roster = roster.filter((p) => atSite.has(p.providerKey));
+  }
+  if (opts && opts.onlyKey) {
+    roster = roster.filter((p) => p.providerKey === opts.onlyKey);
   }
   if (sel === "#provider" && state.providerSearch) {
     const q = state.providerSearch.toLowerCase();
@@ -1148,7 +1166,9 @@ function populateProviderSelect(sel, opts) {
     el.append(o);
   }
   const values = roster.map((p) => p.providerKey);
-  if (prev === SCHED_ALL && opts && opts.includeAll) {
+  if (opts && opts.onlyKey) {
+    el.value = values.includes(opts.onlyKey) ? opts.onlyKey : "";
+  } else if (prev === SCHED_ALL && opts && opts.includeAll) {
     el.value = SCHED_ALL;
   } else {
     el.value = values.includes(prev) ? prev : "";
@@ -2321,8 +2341,13 @@ function renderMySchedule() {
     head.textContent = `${label} · ${rows.length}`;
     grid.append(head);
     // showProvider:false → the card's title is the patient (this is the provider's
-    // own day); cancelable:false → read-only, no lifecycle buttons here.
-    for (const a of rows) grid.append(renderApptCard(a, { showProvider: false, cancelable: false }));
+    // own day); cancelable:true → the same reschedule/cancel/status-transition/
+    // document-visit affordances the staff Schedule tab offers, gated identically
+    // (renderApptCard's opts.cancelable), now that RescheduleAppointment /
+    // SetAppointmentStatus / RecordEncounter all grant the bound provider role.
+    // onDone: loadMySchedule → an action taken here reloads THIS grid, not the
+    // staff/patient My Appointments list renderApptCard defaults to.
+    for (const a of rows) grid.append(renderApptCard(a, { showProvider: false, cancelable: true, onDone: loadMySchedule }));
   };
   section("Today", today);
   section("Upcoming", upcoming);
@@ -3502,22 +3527,27 @@ function renderApptCard(a, opts) {
   badge.textContent = a.status || "—";
   actions.append(badge);
 
+  // onDone reloads whichever grid this card is rendering into — My
+  // Appointments/staff Schedule (loadAppts, the historical default) or, when a
+  // caller passes one (renderMySchedule), the provider's own My Schedule grid.
+  const onDone = opts.onDone || loadAppts;
+
   if (opts.cancelable && ACTIVE_STATUSES.includes(a.status)) {
     const btns = document.createElement("span");
     btns.className = "card-btns";
 
-    if (!opts.asSelf) btns.append(lifecycleButtons(a, loadAppts));
+    if (!opts.asSelf) btns.append(lifecycleButtons(a, onDone));
 
     const reschedule = document.createElement("button");
     reschedule.className = "ghost";
     reschedule.textContent = "Reschedule";
-    reschedule.addEventListener("click", () => openReschedule(a, { asSelf: opts.asSelf }));
+    reschedule.addEventListener("click", () => openReschedule(a, { asSelf: opts.asSelf, onDone }));
     btns.append(reschedule);
 
     const cancel = document.createElement("button");
     cancel.className = "ghost danger";
     cancel.textContent = "Cancel";
-    cancel.addEventListener("click", () => setStatus(a, "cancelled", loadAppts, { asSelf: opts.asSelf }));
+    cancel.addEventListener("click", () => setStatus(a, "cancelled", onDone, { asSelf: opts.asSelf }));
     btns.append(cancel);
 
     actions.append(btns);
@@ -3526,14 +3556,15 @@ function renderApptCard(a, opts) {
   // A completed visit can be documented (or its documentation corrected — the op is
   // a re-runnable upsert). The clinical note lives behind the modal; only the
   // "documented" + follow-up signals show on the card. Clinical documentation
-  // stays staff-only — never offered in the self-service view.
+  // stays staff-only — never offered in the self-service (asSelf) patient view; a
+  // bound provider (opts.asSelf unset) reaches it from My Schedule too.
   if (opts.cancelable && !opts.asSelf && (a.status || "").toLowerCase() === "completed") {
     const btns = document.createElement("span");
     btns.className = "card-btns";
     const doc = document.createElement("button");
     doc.className = "ghost";
     doc.textContent = a.documentedAt ? "Edit documentation" : "Document visit";
-    doc.addEventListener("click", () => openEncounter(a, loadAppts));
+    doc.addEventListener("click", () => openEncounter(a, onDone));
     btns.append(doc);
     // Care→Wellness referral: only offered when the patient has a linked
     // identity (CreateBooking.booker requires one — see identityKeyForPatient).
@@ -3682,6 +3713,7 @@ function lifecycleButtons(a, onDone) {
 function openReschedule(a, opts) {
   state.rescheduling = a;
   state.reschedulingAsSelf = !!(opts && opts.asSelf);
+  state.reschedulingOnDone = (opts && opts.onDone) || loadAppts;
   const who = a.providerName || shortKey(a.providerKey);
   $("#reschedule-context").textContent = `${who} · currently ${fmtWhen(a.startsAt, a.endsAt)}`;
   $("#rs-startsAt").value = toLocalInputValue(a.startsAt);
@@ -3698,6 +3730,7 @@ function closeReschedule() {
   $("#reschedule-overlay").hidden = true;
   state.rescheduling = null;
   state.reschedulingAsSelf = false;
+  state.reschedulingOnDone = null;
 }
 
 async function submitReschedule(ev) {
@@ -3724,6 +3757,7 @@ async function submitReschedule(ev) {
   const payload = { appointmentKey: a.appointmentKey, provider: a.providerKey, patient: a.patientKey, startsAt, endsAt };
   if (a.reason) payload.reason = a.reason; // round-trip the existing reason (omitted → cleared)
   const asSelf = !!state.reschedulingAsSelf;
+  const onDone = state.reschedulingOnDone || loadAppts; // captured before closeReschedule() clears it
 
   const submit = $("#reschedule-submit");
   submit.disabled = true;
@@ -3761,7 +3795,7 @@ async function submitReschedule(ev) {
     delete state.slotPatientApptCache[a.patientKey];
     closeReschedule();
     toast("Appointment rescheduled.", "ok");
-    loadAppts();
+    onDone();
   } catch (e) {
     toast("Could not reschedule: " + e.message, "err");
   } finally {
@@ -3995,9 +4029,26 @@ function isProvider() {
   );
 }
 
+// myProviderKey returns the signed-in session's OWN provider key (the same
+// identifiedBy anchor isProvider() probes), or null when the session isn't a
+// bound provider — the seam that locks the Availability tab's provider picker
+// to self instead of the staff-wide roster.
+function myProviderKey() {
+  const a =
+    Array.isArray(state.anchors) &&
+    state.anchors.find(
+      (a) => a && a.relation === "identifiedBy" && typeof a.key === "string" && a.key.startsWith("vtx.provider."),
+    );
+  return a ? a.key : null;
+}
+
 // viewAllowed keeps a stray cross-link (or a stale active tab) from surfacing a
 // hat's view to a session that lacks it: showView routes a disallowed view to Book.
+// "availability" is the one STAFF_VIEWS tab a bound provider also reaches (locked
+// to their own entry — see applyHatGating / loadProviders's onlyKey), so it takes
+// the OR of both hats rather than STAFF_VIEWS's plain front-desk-only rule.
 function viewAllowed(view) {
+  if (view === "availability") return isFrontDesk() || isProvider();
   if (STAFF_VIEWS.includes(view)) return isFrontDesk();
   if (PROVIDER_VIEWS.includes(view)) return isProvider();
   return true;
@@ -4008,8 +4059,15 @@ function viewAllowed(view) {
 // anchor, the provider tabs behind the identifiedBy-provider anchor — and bounces
 // the active view to Book if it just became disallowed. Idempotent; re-run
 // whenever whoami resolves.
+//
+// Availability is shared: a bound provider (prov, not fd) reaches the tab too,
+// but only its self-service half — Add-provider (CreateProvider) and the profile
+// editor (SetProviderProfile) stay operator/front-desk-only, since neither op
+// grants the provider role; loadProviders's onlyKey locks #avail-provider to her
+// own entry so #avail-hours / #avail-timeoff are the only reachable editors.
 function applyHatGating() {
   const fd = isFrontDesk();
+  const prov = isProvider();
   const search = $("#patient-search");
   const select = $("#patient");
   const selfName = $("#patient-self-name");
@@ -4018,9 +4076,13 @@ function applyHatGating() {
   if (selfName) selfName.hidden = fd;
   for (const v of STAFF_VIEWS) {
     const tab = $("#tab-" + v);
-    if (tab) tab.hidden = !fd;
+    if (!tab) continue;
+    tab.hidden = v === "availability" ? !(fd || prov) : !fd;
   }
-  const prov = isProvider();
+  const addProvider = $("#add-provider");
+  if (addProvider) addProvider.hidden = !fd;
+  const availProfile = $("#avail-profile");
+  if (availProfile) availProfile.hidden = !fd;
   for (const v of PROVIDER_VIEWS) {
     const tab = $("#tab-" + v);
     if (tab) tab.hidden = !prov;

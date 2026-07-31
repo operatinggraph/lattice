@@ -2651,12 +2651,26 @@ def execute(state, op):
 
     if ot == "RecordEncounter":
         appt_key = required_string(p, "appointmentKey")
-        parts_of(appt_key, "appointmentKey", "appointment")
+        _, appt_id = parts_of(appt_key, "appointmentKey", "appointment")
         if not vertex_alive(state, appt_key):
             fail("UnknownAppointment: " + appt_key)
         cls = class_of(state, appt_key)
         if cls != "appointment":
             fail("WrongClass: appointmentKey: " + appt_key + " has class " + str(cls) + ", required appointment")
+
+        # Standing provider-binding guard, mirroring RescheduleAppointment /
+        # SetAppointmentStatus: a bound provider may document THEIR OWN
+        # appointment; anyone else falls back to the workplace walk, which a
+        # provider (carrying no worksAt anchor) never clears, so an unbound
+        # caller is denied rather than merely unconfined.
+        # workplace-exempt: (ownership-bound) RecordEncounter carries no
+        # self-service consumer grant, so op.authTargetValidated is never true
+        # here; workplace_exempt() reduces to the operator check.
+        if not workplace_exempt():
+            standing_provider = appointment_provider(appt_id)
+            if not actor_bound_to_appointment_provider(op.actor, standing_provider):
+                require_workplace(appointment_sites(appt_id), "cannot record encounter on appointment " + appt_key)
+
         # RAW clinical record — PHI, captured plaintext-for-now (the .demographics
         # discipline), NEVER projected (the lens projects only the operational fields
         # below; the deferred Vault plane owns clinical-content display). summary is

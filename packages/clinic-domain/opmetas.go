@@ -8,11 +8,12 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 // SetAppointmentStatus — mirroring service-domain's RequestService op-meta,
 // the only other package to adopt the vocabulary so far (Fire 5,
 // edge-showcase-app-design.md §7 "adoption across clinic/café/wellness
-// consumer-shaped ops") — plus SetProviderHours and SetProviderTimeOff, the
-// PROVIDER-hat standing (AuthContext "standing", not "self") ops
-// persona-worlds-design.md Fire W0 adds: granted-but-meta-less ops are
-// invisible to a descriptor-driven client (forOperation links mint only with
-// a meta), so a bound provider's own availability/time-off ops need one too.
+// consumer-shaped ops") — plus SetProviderHours, SetProviderTimeOff, and
+// RecordEncounter, the PROVIDER-hat standing (AuthContext "standing", not
+// "self") ops persona-worlds-design.md Fire W0 adds: granted-but-meta-less
+// ops are invisible to a descriptor-driven client (forOperation links mint
+// only with a meta), so a bound provider's own availability/time-off/
+// documentation ops need one too.
 //
 // Each InputSchema below is the narrow, consumer/provider-facing slice of the
 // DDL's full merged schema (appointmentVertexTypeDDL's / providerVertexTypeDDL's
@@ -35,7 +36,7 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 // wiring has descriptors to link to.
 //
 // Dispatch.Class on each entry is the owning vertexType DDL's own
-// CanonicalName ("appointment" for the three appointment ops, "provider" for
+// CanonicalName ("appointment" for the four appointment ops, "provider" for
 // SetProviderHours/SetProviderTimeOff — providerVertexDDL), the Contract #2
 // §2.1 envelope `class` DDL-hint (mirrors service-domain's RequestService
 // op-meta doc comment: Dispatch.Class = the owning DDL's CanonicalName, never
@@ -194,6 +195,38 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 				AuthContext: "standing",
 				TargetField: "providerKey",
 				TargetType:  "provider",
+			},
+		},
+		{
+			OperationType: "RecordEncounter",
+			Presentation: &pkgmgr.OpPresentationSpec{
+				Title:       "Document visit",
+				Description: "Record the clinical note for your completed visit.",
+				Icon:        "clipboard",
+				Tone:        "primary",
+				SubmitLabel: "Save documentation",
+			},
+			InputSchema: `{"type":"object","properties":` +
+				`{"appointmentKey":{"type":"string","description":"vtx.appointment.<NanoID> of the appointment to document — auto-filled from the appointment being viewed."},` +
+				`"summary":{"type":"string","title":"Summary","description":"Visit summary / clinical note. Required."},` +
+				`"assessment":{"type":"string","title":"Assessment","description":"Optional clinical assessment / diagnosis."},` +
+				`"plan":{"type":"string","title":"Plan","description":"Optional treatment plan / orders."},` +
+				`"followUpRequested":{"type":"boolean","title":"Follow-up needed","description":"Whether the visit calls for a follow-up."},` +
+				`"followUpDate":{"type":"string","format":"date","title":"Follow-up date","description":"Suggested follow-up date, when a follow-up is requested."}},` +
+				`"required":["appointmentKey","summary"]}`,
+			FieldDescriptions: map[string]string{
+				"appointmentKey":    "The appointment being documented — auto-filled by the client from the appointment being viewed (dispatch.targetField), not user-entered.",
+				"summary":           "Required visit summary / clinical note. RAW clinical content — captured, never projected into a read model.",
+				"assessment":        "Optional clinical assessment / diagnosis. RAW PHI — captured, never projected.",
+				"plan":              "Optional treatment plan / orders. RAW PHI — captured, never projected.",
+				"followUpRequested": "Whether this visit calls for a follow-up. OPERATIONAL, non-PHI — projected.",
+				"followUpDate":      "Suggested follow-up date, when followUpRequested is true. OPERATIONAL, non-PHI — projected.",
+			},
+			Dispatch: &pkgmgr.OpDispatchSpec{
+				Class:       "appointment",
+				AuthContext: "standing",
+				TargetField: "appointmentKey",
+				TargetType:  "appointment",
 			},
 		},
 		{
