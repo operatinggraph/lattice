@@ -1,5 +1,5 @@
 name: cafe-ledger
-version: 0.3.7
+version: 0.3.8
 description: |
   Café house-tab payment ledger: the cafeaccount vertex type (CreateAccount,
   independently-minted id, one per lease via a .cafeLedgerAccount guard
