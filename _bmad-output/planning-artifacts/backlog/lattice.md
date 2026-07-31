@@ -122,8 +122,10 @@ designed-through, but the *fork decision* + the *contract commit* are Andrew's.
 > residuals it surfaced) are all **✅ shipped** (Done log). `[appsession] co-hosted-page session
 > fixation` also shipped 2026-07-31. The whole-set-exposure row stays seq-blocked behind read-path
 > auth (D1); `appsession`'s OIDC design stays 🗄️ **shelved** (revive: first real-IdP deployment).
-> Next ready security/trust-boundary items: the step6 instanceOf-chain live-read accounting pass
-> and the read-posture-comments doc sweep (both ★ S).
+> The read-posture-comments doc sweep shipped 2026-07-31 (Done log); its one `docs/contracts/*`
+> site (`10-orchestration-substrate.md:249`) is fixed **uncommitted in `main`**, flagged for Andrew
+> (non-substantive — aligns a stray cross-reference with Contract #2 §2.5's already-ratified text).
+> Next ready security/trust-boundary item: the step6 instanceOf-chain live-read accounting pass (★ S).
 > Every `✅ ratified` row is done or driver-blocked; the rest are Whetstone's or parking-lot.
 > A stale callout starves the lane — whoever ships next renames this.
 >
@@ -136,7 +138,6 @@ designed-through, but the *fork decision* + the *contract commit* are Andrew's.
 |---|---|---|---|---|
 | **[Processor] Whole-set `state` exposure remains an existence oracle for sensitive classes** | A guard keyed on consumption still splits on a surplus sensitive declared read when the script takes a whole-set exposure (`items()`/`values()`/rendering `state`) — the flip is correct, so only read-scope validation of the declared set closes it. | ★ | S | 🚧 seq behind read-path auth (D1) · [design §2.2](../../implementation-artifacts/sensitive-read-tracker-consumption-design.md) · no live victim (no package script does it) |
 | **[Processor] step6's own instanceOf-chain DDL resolution reads live Core KV with no shared budget** | `connInstanceOfReader.LiveInstanceOfTargets` (step6_resolve_ddl.go) issues its own prefix-list + per-key GETs, up to `maxInstanceOfHops`=4 chain hops per mutation — a separate live-read surface from the kv.Read/kv.Links budget (script-live-read-budget fire), not covered by it. Already soft-bounded by the hop cap + the atomic-batch mutation ceiling, not unbounded, but worth its own accounting pass. | ★ | S | 📋 ready · found reviewing the script-live-read-budget fix |
-| **[packages] ~20 read-posture comments assert hydration-time fatality** | `packages/*` DDL comments + two READMEs still say a declared-but-absent read faults "before the script runs" (identity-domain, service-domain, privacy-base, objects-base, orchestration-base, clinic/loftspace READMEs), as does `docs/contracts/10-orchestration-substrate.md:238`. Doc-only sweep. | ★ | S | 📋 ready |
 | **[appsession] The production IdP posture cannot open a session** | `setCookie` runs only under a non-nil `Signer`, so with `_JWT_PUBLIC_KEY`/`_ISSUER` set nothing can issue the cookie — the verify-only posture is unreachable (401 everywhere), and `/api/session/refresh` 404s so every FE write path dies with it. Design: the kit becomes the OIDC code-flow RP. | ★★ | L | 🗄️ shelved (revive: first real-IdP deployment) · ✅ design Andrew-ratified 2026-07-25 · [design](../../implementation-artifacts/appsession-oidc-production-signin-design.md) |
 | **NATS write restriction — Fire 4 (production mTLS)** | Fires 1–3 closed the fabricated-KV-write surface at the account level; the remaining fire binds subject permissions to client certificates instead of NKeys, which only matters off the dev stack. | ★ now / ★★ prod | M | 🗄️ shelved (revive: production deployment) · [design](../../implementation-artifacts/nats-account-write-restriction-design.md) §Fire-3-status |
 | **Keyed identity-index hashes (HMAC)** | Unkeyed `sha256NanoID` contact hashes are dictionary-testable with substrate access and persist in JetStream history post-shred; a Vault-keyed HMAC bounds it but needs a MAC primitive + key custody at every hash computer, and must migrate ALL index consumers (identityindex, provision probe, dedup) in one stroke. | ★ now / ★★ prod | M | 🗄️ shelved (revive: production threat model) · [analysis](../../implementation-artifacts/dedup-over-encrypted-pii-design.md) §9.1/§10-C |
@@ -204,6 +205,7 @@ Real but low-value; do **not** spend design or build effort here unless Andrew g
 
 One line per shipped item (`date · SHA · [tag] title`). Oldest roll to `archive/` past ~25.
 
+- 2026-07-31 · `fbc783ca` · [packages] ~19 read-posture comments no longer claim hydration-time fatality — HydrationMiss is deferred to first touch (Contract #2 §2.5), doc-only
 - 2026-07-31 · `b4aae06f` · [Refractor] a PerEntry cap-read lens on a non-prefix-listing adapter is now refused at activation, not at first shred [design](../../implementation-artifacts/cap-read-per-anchor-grant-keys-design.md)
 - 2026-07-31 · `4e3fd70c` · [appsession] dev-minted session tokens now carry an app-scoped `aud` claim — closes the co-hosted-page cookie-fixation gap across all 5 adopters
 - 2026-07-31 · stale row closed — multi-hat scope=any/self ordering was already fixed `4790992b` (2026-07-25, LoftSpace landlord-hat fire); `TestCapabilityAuthorizer_DualScope_*` proves it, no build needed
