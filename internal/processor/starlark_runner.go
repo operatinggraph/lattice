@@ -3,7 +3,6 @@ package processor
 import (
 	"context"
 	"fmt"
-	"log/slog"
 	"os"
 	"strconv"
 	"strings"
@@ -376,11 +375,10 @@ func parseMutations(d *starlarklib.Dict, rid string) ([]MutationOp, error) {
 				m.Document = starlarkDictToGoMap(dd)
 			}
 		} else if _, hasDoc, _ := md.Get(starlarklib.String("document")); hasDoc {
-			// A tombstone carries no document (Contract #3 §3.3) — one supplied
-			// is not honored. Warn today; Fire 2 flips this to a reject once
-			// warn sightings are clean (tombstone-body-preservation-design.md §5).
-			slog.Default().Warn("tombstone mutation carries an unhonored document",
-				"requestId", rid, "mutationIndex", i, "key", key)
+			// A tombstone carries no document (Contract #3 §3.3).
+			return nil, &ScriptError{Code: "InvalidReturnShape",
+				Message:            fmt.Sprintf("mutations[%d]: tombstone must not carry a document", i),
+				OperationRequestID: rid}
 		}
 		// Extract optional expectedRevision integer so step8_commit.go can
 		// propagate the revision assertion to AtomicBatch.

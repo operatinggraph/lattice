@@ -59,7 +59,7 @@ func TestUpgradePackage_MixedBatchPassesThroughWithCounts(t *testing.T) {
 		"mutations": [
 			{"op": "update",    "key": "` + updKey + `",  "document": {"class": "meta.lens", "isDeleted": false, "data": {}}},
 			{"op": "create",    "key": "` + crtKey + `",  "document": {"class": "meta.ddl.vertexType", "isDeleted": false, "data": {}}},
-			{"op": "tombstone", "key": "` + tombKey + `", "document": {"isDeleted": true, "data": {}}}
+			{"op": "tombstone", "key": "` + tombKey + `"}
 		]
 	}`
 

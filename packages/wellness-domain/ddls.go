@@ -752,8 +752,7 @@ def make_link(key, source, target, cls, local_name, data):
                          "localName": local_name, "data": data}}
 
 def make_tombstone(key):
-    return {"op": "tombstone", "key": key,
-            "document": {"isDeleted": True, "data": {}}}
+    return {"op": "tombstone", "key": key}
 
 def required_string(p, name):
     if not hasattr(p, name):
@@ -1105,8 +1104,7 @@ def make_link(key, source, target, cls, local_name, data):
                          "localName": local_name, "data": data}}
 
 def make_tombstone(key):
-    return {"op": "tombstone", "key": key,
-            "document": {"isDeleted": True, "data": {}}}
+    return {"op": "tombstone", "key": key}
 
 def required_string(p, name):
     if not hasattr(p, name):
@@ -1661,8 +1659,7 @@ def make_link(key, source, target, cls, local_name, data):
                          "localName": local_name, "data": data}}
 
 def make_tombstone(key):
-    return {"op": "tombstone", "key": key,
-            "document": {"isDeleted": True, "data": {}}}
+    return {"op": "tombstone", "key": key}
 
 def required_string(p, name):
     if not hasattr(p, name):
@@ -2472,8 +2469,7 @@ def make_link(key, source, target, cls, local_name, data):
                          "localName": local_name, "data": data}}
 
 def make_tombstone(key):
-    return {"op": "tombstone", "key": key,
-            "document": {"isDeleted": True, "data": {}}}
+    return {"op": "tombstone", "key": key}
 
 def required_string(p, name):
     if not hasattr(p, name):

@@ -175,8 +175,7 @@ def grant_link(state, key, source, target, cls, local_name):
     return [make_link(key, source, target, cls, local_name, {})]
 
 def make_tombstone(key):
-    return {"op": "tombstone", "key": key,
-            "document": {"isDeleted": True, "data": {}}}
+    return {"op": "tombstone", "key": key}
 
 def parts_of(key, name, want_type):
     parts = key.split(".")

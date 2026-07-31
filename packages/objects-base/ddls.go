@@ -556,8 +556,7 @@ def attach_object(state, p):
         old_link = "lnk.object." + replace_oid + "." + link_name + "." + tgt_type + "." + tgt_id
         old_obj_key = "vtx.object." + replace_oid
         if alive(state, old_link):
-            mutations.append({"op": "tombstone", "key": old_link,
-                              "document": {"class": link_name, "data": {}}})
+            mutations.append({"op": "tombstone", "key": old_link})
             if present(state, old_obj_key):
                 mutations.append(write_vertex(state, old_obj_key, cur_live_links(state, old_obj_key) - 1))
             events.append({"class": "object.detached",
@@ -589,8 +588,7 @@ def detach_object(state, p):
     if not alive(state, link_key):
         fail("UnknownLink: " + link_key + " is not a live link")
 
-    mutations = [{"op": "tombstone", "key": link_key,
-                  "document": {"class": link_name, "data": {}}}]
+    mutations = [{"op": "tombstone", "key": link_key}]
     # OCC-touch the object vertex so its revision tracks the link-set change and
     # its liveLinks count drops by one (the lag-free orphan signal — at zero the
     # objectLiveness lens flags the object for reclaim).
@@ -648,18 +646,16 @@ def tombstone_object(state, p):
 
     # Soft-delete the object vertex, self-OCC on the hydrated revision so a
     # re-link landing between hydrate and commit (which moves the revision)
-    # aborts. linkEpoch is preserved so it stays monotonic across a revive.
-    tomb_data = {}
-    if cur_epoch != None:
-        tomb_data = {"linkEpoch": cur_epoch}
+    # aborts. The Processor preserves the stored document whole on tombstone
+    # (Contract #3 §3.3), so linkEpoch stays monotonic across a revive with
+    # no document needed on the mutation itself.
     # The .content aspect is tombstoned unconditionally (it always exists for a
     # live object; a tombstone mutation needs no hydration). It rides the vertex
     # tombstone's atomic batch, so a concurrent revive that aborts the vertex
     # OCC aborts this too — they commit or fail together.
     mutations = [
         {"op": "tombstone", "key": obj_key,
-         "expectedRevision": revision_of(state, obj_key),
-         "document": {"class": "object", "data": tomb_data}},
+         "expectedRevision": revision_of(state, obj_key)},
         {"op": "tombstone", "key": content_key},
     ]
 

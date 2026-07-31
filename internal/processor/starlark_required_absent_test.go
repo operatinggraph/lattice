@@ -143,9 +143,14 @@ func TestRequiredAbsent_MutationFaults(t *testing.T) {
 	for _, op := range []string{"update", "tombstone"} {
 		t.Run(op, func(t *testing.T) {
 			sc, _ := requiredAbsentContext(key)
+			mutation := `{"op": "` + op + `", "key": "` + key + `"`
+			if op != "tombstone" {
+				mutation += `, "document": {"class": "task"}`
+			}
+			mutation += `}`
 			_, err := runKVScript(t, sc, `
 def execute(state, op):
-    return {"mutations": [{"op": "`+op+`", "key": "`+key+`", "document": {"class": "task"}}], "events": []}
+    return {"mutations": [`+mutation+`], "events": []}
 `)
 			assertDeferredMiss(t, err, key)
 		})

@@ -380,7 +380,6 @@ func TestUpgrade_RaceOnTombstonedKeyRejected(t *testing.T) {
 		"toVersion":   "0.2.0",
 		"mutations": []map[string]any{
 			{"op": "tombstone", "key": permKey,
-				"document":         map[string]any{"isDeleted": true, "data": map[string]any{}},
 				"expectedRevision": staleRev},
 		},
 	}

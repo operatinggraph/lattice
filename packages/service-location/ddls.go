@@ -191,8 +191,7 @@ def revive_link(key, source, target, cls, local_name, data):
             "document": link_document(source, target, cls, local_name, data)}
 
 def make_tombstone(key):
-    return {"op": "tombstone", "key": key,
-            "document": {"isDeleted": True, "data": {}}}
+    return {"op": "tombstone", "key": key}
 
 def split_key(k):
     return k.split(".")

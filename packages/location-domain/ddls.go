@@ -163,8 +163,7 @@ def make_link(key, source, target, cls, local_name, data):
                          "localName": local_name, "data": data}}
 
 def make_tombstone(key):
-    return {"op": "tombstone", "key": key,
-            "document": {"isDeleted": True, "data": {}}}
+    return {"op": "tombstone", "key": key}
 
 def split_key(k):
     return k.split(".")
