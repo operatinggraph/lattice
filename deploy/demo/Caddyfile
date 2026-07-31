@@ -6,6 +6,11 @@
 # the automatic cert with the CDN's origin certificate via a `tls` directive.
 {$DEMO_HOST} {
 	encode zstd gzip
+	# The demo world is reseeded nightly, so anything a crawler indexes here is
+	# stale by morning and competes with the real site for the same terms. The
+	# marketing site links this host prominently, so the header is what keeps
+	# those links from carrying an ephemeral login page into the index.
+	header X-Robots-Tag "noindex, nofollow"
 	# /api/feed is SSE — stream unbuffered.
 	reverse_proxy 127.0.0.1:7810 {
 		flush_interval -1

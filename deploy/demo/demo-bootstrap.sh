@@ -61,6 +61,9 @@ if [[ -n "$DEMO_LOUPE_HOST" ]]; then
 
 ${DEMO_LOUPE_HOST} {
 	encode zstd gzip
+	# Same reasoning as the Facet vhost: a nightly-reset console behind a login
+	# is nothing a search index should carry.
+	header X-Robots-Tag "noindex, nofollow"
 	# /api/events/stream is SSE — stream unbuffered.
 	reverse_proxy 127.0.0.1:7778 {
 		flush_interval -1
