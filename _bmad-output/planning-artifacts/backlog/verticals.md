@@ -62,7 +62,7 @@ dated run-logs live in git history. Rotate LoftSpace ↔ Clinic ↔ Café ↔ We
 
 One line per shipped item (`date · SHA · title`). Oldest roll to `archive/` past ~25.
 
-- 2026-07-31 · `b7f845d5` · Staff console can now reassign a class's instructor and/or time — Roster panel's "Reassign" control wires the already-shipped ReassignSession op, mirroring CreateSession/TombstoneSession's staff-only affordance idiom
+- 2026-07-31 · `f7d744d8` · Staff console can now reassign a class's instructor and/or time — Roster panel's "Reassign" control wires the already-shipped ReassignSession op, mirroring CreateSession/TombstoneSession's staff-only affordance idiom
 - 2026-07-31 · `4ede405e` · Wellness Schedule filters to upcoming-only, groups by day, renders local times — mirrors Facet's isUpcoming + clinic-app's local formatting
 - 2026-07-31 · `5280967a` · Console can now name landlords/staffers/applicants — `applicantRosterRead` authz_anchors gets self+landlord+building fan-out, mirroring café/clinic. loftspace-domain 0.10.5
 - 2026-07-30 · `d51a22aa` · An approved lease now actually leases the unit — `seed-showcase.go` heals a stalled application by driving `RecordIdentityPII`, unblocking bgcheck dispatch; verified live, all 3 units flipped to leased
