@@ -1,5 +1,5 @@
 name: rbac-domain
-version: 0.3.3
+version: 0.3.4
 description: |
   Role, permission, and grant management operations. Provides CreateRole,
   UpdateRole, TombstoneRole, CreatePermission, UpdatePermission,
