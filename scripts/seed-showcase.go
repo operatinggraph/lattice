@@ -96,10 +96,24 @@ const (
 	tenant1Email = "riley.chen@showcase.dev.lattice.local"
 	tenant2Name  = "Sam Okafor"
 	tenant2Email = "sam.okafor@showcase.dev.lattice.local"
-	staffName    = "Dana Whitfield"
-	staffEmail   = "dana.whitfield@showcase.dev.lattice.local"
-	maintName    = "Theo Marsh"
-	maintEmail   = "theo.marsh@showcase.dev.lattice.local"
+
+	// The two residents' OWN tenancies: seedTenant wires residesIn directly (a
+	// showcase shortcut, its own doc comment) rather than the real
+	// apply→sign→decide ceremony, so neither tenant1 nor tenant2 starts with a
+	// leaseapp — which means front-desk/lenses.go's leaseDetailsSpec has
+	// nothing to project, and clinic/wellness's residentVisit/residentRate
+	// links (both gated on a leaseapp carrying .tenancy) can never be written
+	// for them either. seedResidentTenancies backfills the ceremony for their
+	// own units — findApplicantLeaseApp discovers a live self-applied one
+	// first (a hands-on drive of the real apply flow may have already created
+	// it); these fixed ids are only the from-scratch fallback, mirroring
+	// leaseApp3ID/leaseApp4ID above.
+	leaseApp1ID = "tayGXnPkmfGJL8NjuEbK"
+	leaseApp2ID = "QWzGT68fdCThq3P4P1Qk"
+	staffName   = "Dana Whitfield"
+	staffEmail  = "dana.whitfield@showcase.dev.lattice.local"
+	maintName   = "Theo Marsh"
+	maintEmail  = "theo.marsh@showcase.dev.lattice.local"
 
 	// The staff-worklist beat: a vacant third unit + a walk-in applicant whose
 	// signed lease application sits undecided on the staff persona's worklist
@@ -255,8 +269,10 @@ func main() {
 		fmt.Printf("==> provider (bound): %s (%s) practicesAt building, identifiedBy %s\n", oseiProviderKey, oseiName, oseiIdentityKey)
 		fmt.Println("FACET_PROVIDER_NANOID=" + strings.TrimPrefix(oseiIdentityKey, "vtx.identity."))
 
+		tenant1LeaseAppKey, tenant2LeaseAppKey := seedResidentTenancies(ctx, conn, adminKey, tenant1Key, tenant2Key)
+
 		if tenant1Key != "" {
-			seedRileyClinicWorld(ctx, conn, adminKey, tenant1Key)
+			seedRileyClinicWorld(ctx, conn, adminKey, tenant1Key, tenant1LeaseAppKey)
 			fmt.Println("==> patient:         " + rileyPatientKey + " (" + tenant1Name + ") identifiedBy tenant1, booked with Osei + Patel")
 		}
 
@@ -265,7 +281,7 @@ func main() {
 			fmt.Printf("==> serviceprovider (bound): %s (%s) providedBy laundry template, identifiedBy %s\n", kaiServiceProviderKey, kaiBusinessName, kaiIdentityKey)
 			fmt.Println("FACET_LAUNDRY_NANOID=" + strings.TrimPrefix(kaiIdentityKey, "vtx.identity."))
 
-			seedSamMultiHat(ctx, conn, adminKey, tenant2Key, frontOfHouseRoleKey, providerRoleKey)
+			seedSamMultiHat(ctx, conn, adminKey, tenant2Key, frontOfHouseRoleKey, providerRoleKey, sessKey, tenant2LeaseAppKey)
 			fmt.Printf("==> multi-hat:       %s (%s) gains frontOfHouse (worksAt building) + instructor (teachesAt studio, ledBy Evening Flow)\n", tenant2Key, tenant2Name)
 		}
 		return
@@ -396,13 +412,15 @@ func main() {
 	oseiIdentityKey := seedOseiProvider(ctx, conn, adminKey, providerRoleKey)
 	fmt.Printf("==> provider (bound): %s (%s) practicesAt building, identifiedBy %s\n", oseiProviderKey, oseiName, oseiIdentityKey)
 
-	seedRileyClinicWorld(ctx, conn, adminKey, tenant1Key)
+	tenant1LeaseAppKey, tenant2LeaseAppKey := seedResidentTenancies(ctx, conn, adminKey, tenant1Key, tenant2Key)
+
+	seedRileyClinicWorld(ctx, conn, adminKey, tenant1Key, tenant1LeaseAppKey)
 	fmt.Println("==> patient:         " + rileyPatientKey + " (" + tenant1Name + ") identifiedBy tenant1, booked with Osei + Patel")
 
 	kaiIdentityKey := seedKaiServiceProvider(ctx, conn, adminKey, providerRoleKey, tenant2Key)
 	fmt.Printf("==> serviceprovider (bound): %s (%s) providedBy laundry template, identifiedBy %s\n", kaiServiceProviderKey, kaiBusinessName, kaiIdentityKey)
 
-	seedSamMultiHat(ctx, conn, adminKey, tenant2Key, frontOfHouseRoleKey, providerRoleKey)
+	seedSamMultiHat(ctx, conn, adminKey, tenant2Key, frontOfHouseRoleKey, providerRoleKey, sessKey, tenant2LeaseAppKey)
 	fmt.Printf("==> multi-hat:       %s (%s) gains frontOfHouse (worksAt building) + instructor (teachesAt studio, ledBy Evening Flow)\n", tenant2Key, tenant2Name)
 
 	fmt.Println()
@@ -1010,6 +1028,117 @@ func ensureServiceProviderIdentity(ctx context.Context, conn *substrate.Conn, ad
 	return identityKey
 }
 
+// findApplicantLeaseApp scans Core KV for a live leaseapp whose
+// applicationFor link names applicantKey and whose appliesToUnit link names
+// unitKey. A resident may already have self-applied for their own unit
+// through the real apply flow (a hands-on drive of Facet's own apply screen
+// does this — confirmed live on the showcase world this loader found: both
+// tenants already carry a live appliedToUnit guard link), and a blind
+// CreateLeaseApplication would collide with that application's
+// per-(applicant, unit) guard link (DuplicateApplication). Returns "" when
+// none is found, mirroring recoverTenants' own not-found convention.
+func findApplicantLeaseApp(ctx context.Context, conn *substrate.Conn, applicantKey, unitKey string) string {
+	js := conn.JetStream()
+	coreKV, err := js.KeyValue(ctx, bootstrap.CoreKVBucket)
+	must(err, "open core-kv")
+	allKeys, err := pkgverify.ListAllKeys(ctx, coreKV)
+	must(err, "list core-kv keys")
+
+	prefix := "lnk.leaseapp."
+	suffix := ".applicationFor." + strings.TrimPrefix(applicantKey, "vtx.")
+	for key := range allKeys {
+		if !strings.HasPrefix(key, prefix) || !strings.HasSuffix(key, suffix) {
+			continue
+		}
+		env, err := pkgverify.GetEnvelope(ctx, coreKV, key)
+		if err != nil {
+			must(err, "read "+key)
+		}
+		if del, _ := env["isDeleted"].(bool); del {
+			continue
+		}
+		appKey := "vtx.leaseapp." + strings.TrimSuffix(strings.TrimPrefix(key, prefix), suffix)
+		if alive(ctx, conn, linkKey(appKey, "appliesToUnit", unitKey)) {
+			return appKey
+		}
+	}
+	return ""
+}
+
+// seedResidentTenancies gives each showcase resident a live, APPROVED lease
+// on their own unit — front-desk/lenses.go's leaseDetailsSpec (the 🏠 badge)
+// and clinic/wellness's residentVisit/residentRate confinement (the 🩺/🧘
+// badges) both anchor on a leaseapp carrying .tenancy, and neither tenant has
+// ever had one via this seed. findApplicantLeaseApp adopts a live self-applied
+// application first; absent one, this mints a fixed-id application, mirroring
+// seedStaffWorklistApplication/seedLandlordWorld for units 3/4 — except
+// decided straight through to approved rather than left on a worklist:
+// nothing else in this seed ever visits units 1/2 to decide them, so an
+// undecided application here would leave the front desk permanently unable to
+// compose either resident's rent/term badge. adminKey submits every step,
+// including the decide — it is the bootstrap operator (actor_holds_operator),
+// which require_manages / enforce_workplace both exempt unconditionally, the
+// same standing grant this script already relies on for AssignUnitOwner et
+// al. moveInDate is 2 months back so a freshly-minted .tenancy reads as an
+// ALREADY-ACTIVE tenancy, not a future one (a discovered application keeps
+// its own real moveInDate). Per-mutation idempotent; safe on every rerun.
+// Returns each resident's leaseapp key ("" for an empty/unresolved tenant).
+func seedResidentTenancies(ctx context.Context, conn *substrate.Conn, adminKey, tenant1Key, tenant2Key string) (string, string) {
+	moveIn := time.Now().UTC().AddDate(0, -2, 0)
+	results := make([]string, 2)
+	for i, t := range []struct {
+		unitKey, fixedLeaseAppID, applicantKey, line1 string
+		rent                                          int
+	}{
+		{unit1Key, leaseApp1ID, tenant1Key, "10 Riverside Walk", 1900},
+		{unit2Key, leaseApp2ID, tenant2Key, "20 Riverside Walk", 1750},
+	} {
+		if t.applicantKey == "" {
+			continue
+		}
+		if !alive(ctx, conn, t.unitKey+".address") {
+			submitOp(ctx, conn, adminKey, "SetUnitAddress", "loftspaceListing",
+				map[string]any{"unit": t.unitKey, "line1": t.line1, "city": "Riverside",
+					"region": "CA", "postal": "92501"},
+				&processor.ContextHint{Reads: []string{t.unitKey}})
+		}
+		if !alive(ctx, conn, t.unitKey+".listing") {
+			submitOp(ctx, conn, adminKey, "SetListing", "loftspaceListing",
+				map[string]any{"unit": t.unitKey, "rentAmount": t.rent, "rentCurrency": "USD",
+					"bedrooms": 1, "bathrooms": 1, "sqft": 620, "leaseTermMonths": 12,
+					"availableFrom": moveIn.Format(time.RFC3339), "status": "available"},
+				&processor.ContextHint{Reads: []string{t.unitKey}})
+		}
+
+		leaseAppKey := findApplicantLeaseApp(ctx, conn, t.applicantKey, t.unitKey)
+		if leaseAppKey == "" {
+			leaseAppKey = "vtx.leaseapp." + t.fixedLeaseAppID
+			submitOp(ctx, conn, adminKey, "CreateLeaseApplication", "leaseapp",
+				map[string]any{"applicant": t.applicantKey, "unit": t.unitKey, "leaseAppId": t.fixedLeaseAppID,
+					"moveInDate": moveIn.Format("2006-01-02"), "leaseTermMonths": 12, "requestedRent": t.rent},
+				&processor.ContextHint{Reads: []string{t.applicantKey, t.unitKey}})
+		}
+		if !alive(ctx, conn, leaseAppKey+".signature") {
+			submitOp(ctx, conn, adminKey, "SignLease", "leaseapp",
+				map[string]any{"leaseAppKey": leaseAppKey},
+				&processor.ContextHint{Reads: []string{leaseAppKey}})
+		}
+		if !alive(ctx, conn, leaseAppKey+".tenancy") {
+			submitOp(ctx, conn, adminKey, "DecideLeaseApplication", "leaseapp",
+				map[string]any{"leaseAppKey": leaseAppKey, "decision": "approved"},
+				&processor.ContextHint{
+					Reads: []string{leaseAppKey},
+					OptionalReads: []string{
+						leaseAppKey + ".decision", leaseAppKey + ".signature", leaseAppKey + ".tenancy",
+					},
+				})
+		}
+		fmt.Println("==> tenancy:         " + leaseAppKey + " (" + t.unitKey + ", approved)")
+		results[i] = leaseAppKey
+	}
+	return results[0], results[1]
+}
+
 // seedRileyClinicWorld gives Riley Chen (tenant1) a clinic patient record
 // bound to their own login identity, books one future appointment with EACH
 // clinic provider — the Osei/Patel scoping positive/negative
@@ -1029,7 +1158,7 @@ func ensureServiceProviderIdentity(ctx context.Context, conn *substrate.Conn, ad
 // booking's date (distinct hours keep them off the same patient-hub slot). A
 // rerun on the same UTC day converges on the same ids (mirrors
 // seedWellnessEntities/seedMaintenanceBeat's day-derived idiom).
-func seedRileyClinicWorld(ctx context.Context, conn *substrate.Conn, adminKey, tenant1Key string) {
+func seedRileyClinicWorld(ctx context.Context, conn *substrate.Conn, adminKey, tenant1Key, tenant1LeaseAppKey string) {
 	if !alive(ctx, conn, rileyPatientKey) {
 		submitOp(ctx, conn, adminKey, "CreatePatient", "patient",
 			map[string]any{"fullName": tenant1Name, "patientId": rileyPatientID, "identityKey": tenant1Key},
@@ -1055,6 +1184,33 @@ func seedRileyClinicWorld(ctx context.Context, conn *substrate.Conn, adminKey, t
 				OptionalReads: append(
 					slotClaimKeys(oseiProviderKey, oseiStart, oseiEnd),
 					slotClaimKeys(rileyPatientKey, oseiStart, oseiEnd)...),
+			})
+	}
+
+	// A dedicated resident-visit appointment: oseiAppt/patelAppt above predate
+	// tenant1LeaseAppKey on any world seeded before this increment, and
+	// CreateAppointment's residentVisit link is written only at CREATE time
+	// (no retrofit op exists), so healing them is impossible — a fresh
+	// appointment under its own id namespace is the only way to guarantee one
+	// carries the link. Distinct hour off every other appointment on this day
+	// so slot claims never collide.
+	residentApptStart := futureDayAt(1, 11)
+	residentApptEnd := residentApptStart.Add(30 * time.Minute)
+	residentApptID := substrate.DeriveNanoID("showcase-appointment-osei-resident", residentApptStart.Format("2006-01-02"))
+	residentApptKey := "vtx.appointment." + residentApptID
+	if tenant1LeaseAppKey != "" && !alive(ctx, conn, residentApptKey) {
+		submitOp(ctx, conn, adminKey, "CreateAppointment", "appointment",
+			map[string]any{
+				"patient": rileyPatientKey, "provider": oseiProviderKey, "appointmentId": residentApptID,
+				"startsAt": residentApptStart.Format(time.RFC3339), "endsAt": residentApptEnd.Format(time.RFC3339),
+				"reason": "Follow-up: brace check", "leaseAppKey": tenant1LeaseAppKey,
+			},
+			&processor.ContextHint{
+				Reads: []string{rileyPatientKey, oseiProviderKey},
+				OptionalReads: append(
+					append(slotClaimKeys(oseiProviderKey, residentApptStart, residentApptEnd),
+						slotClaimKeys(rileyPatientKey, residentApptStart, residentApptEnd)...),
+					tenant1LeaseAppKey, tenant1LeaseAppKey+".tenancy"),
 			})
 	}
 
@@ -1187,11 +1343,14 @@ func seedRileyClinicWorld(ctx context.Context, conn *substrate.Conn, adminKey, t
 // offsets above, for the same collision-free reason), so it is always minted
 // fresh on the first run of this increment: the existing day-rolled Vinyasa
 // Flow session was created with no instructor and cannot be re-wired after
-// the fact. Per-mutation idempotent; safe to call on every run once
-// ensureStaff/ensureMaintenanceTech's hardening (above) is in place, since
-// Sam then also holds frontOfHouse — the very ambiguity that hardening
-// exists to resolve.
-func seedSamMultiHat(ctx context.Context, conn *substrate.Conn, adminKey, tenant2Key, frontOfHouseRoleKey, providerRoleKey string) {
+// the fact. It also books Sam as a MEMBER into bookableSessionKey (the
+// caller's already-seeded Vinyasa Flow session, distinct from Sam's own
+// taught one) carrying tenant2's own leaseapp key, qualifying for
+// rate=resident and the residentRate link the front desk's 🧘 badge composes
+// on. Per-mutation idempotent; safe to call on every run once ensureStaff/
+// ensureMaintenanceTech's hardening (above) is in place, since Sam then also
+// holds frontOfHouse — the very ambiguity that hardening exists to resolve.
+func seedSamMultiHat(ctx context.Context, conn *substrate.Conn, adminKey, tenant2Key, frontOfHouseRoleKey, providerRoleKey, bookableSessionKey, tenant2LeaseAppKey string) {
 	frontOfHouseLnk := linkKey(tenant2Key, "holdsRole", frontOfHouseRoleKey)
 	if !alive(ctx, conn, frontOfHouseLnk) {
 		submitOp(ctx, conn, adminKey, "AssignRole", "",
@@ -1244,6 +1403,21 @@ func seedSamMultiHat(ctx context.Context, conn *substrate.Conn, adminKey, tenant
 				Reads:         []string{studioKey, samInstructorKey},
 				OptionalReads: slotClaimKeys(studioKey, start, end),
 			})
+	}
+
+	if bookableSessionKey != "" && tenant2LeaseAppKey != "" {
+		bookingGuardKey := bookableSessionKey + ".bkr" + strings.TrimPrefix(tenant2Key, "vtx.identity.")
+		if !alive(ctx, conn, bookingGuardKey) {
+			submitOp(ctx, conn, adminKey, "CreateBooking", "booking",
+				map[string]any{"session": bookableSessionKey, "booker": tenant2Key, "leaseAppKey": tenant2LeaseAppKey},
+				&processor.ContextHint{
+					Reads: []string{bookableSessionKey, tenant2Key},
+					OptionalReads: []string{
+						bookingGuardKey, tenant2LeaseAppKey, tenant2LeaseAppKey + ".tenancy",
+						linkKey(tenant2LeaseAppKey, "applicationFor", tenant2Key),
+					},
+				})
+		}
 	}
 }
 
