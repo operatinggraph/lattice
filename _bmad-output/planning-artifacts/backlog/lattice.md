@@ -211,6 +211,7 @@ Real but low-value; do **not** spend design or build effort here unless Andrew g
 
 One line per shipped item (`date · SHA · [tag] title`). Oldest roll to `archive/` past ~25.
 
+- 2026-07-30 · `098423e0` · [Substrate] consumer reopen retry now backs off exponentially with jitter (100ms→5s cap) instead of a fixed 100ms interval, so a sustained outage doesn't hammer the server every consumer on a connection retries against
 - 2026-07-30 · `646d1ac1` · [Refractor] lens activation + hot-reload now retry a transient NATS blip (adapter build, audit-stream ensure) instead of permanently stranding the lens
 - 2026-07-30 · `7381ace2` · [Pkgmgr] op-meta tombstone now refuses an undeclared drop and cancels open referents when RetireCancelsOpenTasks is declared [design](../../implementation-artifacts/opmeta-retirement-open-task-guard-design.md)
 - 2026-07-30 · `4e85358c` · [Lattice-CLI] `health summary`'s refractor/processor rows now escalate on issues[] — a live LensRegistryIncomplete sat "green" for 2.5h
