@@ -374,6 +374,32 @@ func TestSupervisor_Remove_DeletesDurable_StopPreserves(t *testing.T) {
 	}
 }
 
+// TestPumpState_NextReopenDelay_GrowsAndCaps proves consecutive failures
+// double the delay bound up to reopenBackoffCap, and a reset drops back to
+// the first-failure bound.
+func TestPumpState_NextReopenDelay_GrowsAndCaps(t *testing.T) {
+	st := newPumpState()
+
+	wantBound := reopenBackoff
+	for i := 0; i < 10; i++ {
+		d := st.nextReopenDelay()
+		if d < 0 || d > wantBound {
+			t.Fatalf("attempt %d: delay %v exceeds bound %v", i, d, wantBound)
+		}
+		if wantBound < reopenBackoffCap {
+			wantBound *= 2
+			if wantBound > reopenBackoffCap {
+				wantBound = reopenBackoffCap
+			}
+		}
+	}
+
+	st.resetReopenBackoff()
+	if d := st.nextReopenDelay(); d > reopenBackoff {
+		t.Fatalf("delay after reset = %v, want <= first-failure bound %v", d, reopenBackoff)
+	}
+}
+
 func waitFor(t *testing.T, timeout time.Duration, cond func() bool, msg string) {
 	t.Helper()
 	deadline := time.After(timeout)

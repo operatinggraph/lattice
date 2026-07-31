@@ -2,15 +2,27 @@ package substrate
 
 import (
 	"context"
+	"math/rand/v2"
 	"sync"
 	"time"
 
 	"github.com/nats-io/nats.go/jetstream"
 )
 
-// reopenBackoff is the short delay before re-opening a consumer iterator after a
-// transient open failure (e.g. the brief window of an in-flight Reset).
+// reopenBackoff is the base delay before re-opening a consumer iterator after
+// a transient open failure (e.g. the brief window of an in-flight Reset).
+// pumpState.nextReopenDelay grows this exponentially — capped at
+// reopenBackoffCap, with jitter — across consecutive failures on the same
+// consumer, so a sustained outage backs off instead of retrying at a fixed
+// interval indefinitely.
 const reopenBackoff = 100 * time.Millisecond
+
+// reopenBackoffCap bounds that growth: a sustained outage settles into a
+// slow, steady retry rate instead of climbing forever — important when many
+// consumers on one connection are retrying concurrently, where a fixed short
+// interval multiplies into sustained heavy load on the server they're all
+// trying to reach.
+const reopenBackoffCap = 5 * time.Second
 
 // fanOutPullMaxMessages bounds how many messages a single worker's pull iterator
 // buffers when a consumer runs more than one worker (Workers > 1). The
@@ -54,6 +66,11 @@ type pumpState struct {
 	// reopenTrigger signals the pump to drop its current iterator and re-open
 	// against a recreated durable (Reset).
 	reopenTrigger chan struct{}
+
+	// reopenFailures counts consecutive open failures since the last
+	// successful open, driving nextReopenDelay's exponential growth. Reset to
+	// 0 once the consumer and its message iterator both open successfully.
+	reopenFailures int
 }
 
 func newPumpState() *pumpState {
@@ -110,6 +127,37 @@ func (st *pumpState) operatorResume() {
 }
 
 func (st *pumpState) requestReopen() { nonBlockingSend(st.reopenTrigger) }
+
+// nextReopenDelay returns the delay before the next open attempt and records
+// the attempt: reopenBackoff on the first failure since the last successful
+// open, doubling on each consecutive failure up to reopenBackoffCap, with
+// full jitter (uniform over [0, delay]) so consumers that failed together —
+// e.g. every consumer on one connection, after a single connection drop —
+// spread out across the window instead of retrying in lockstep.
+func (st *pumpState) nextReopenDelay() time.Duration {
+	st.mu.Lock()
+	shift := st.reopenFailures
+	st.reopenFailures++
+	st.mu.Unlock()
+
+	const maxShift = 6 // reopenBackoff<<6 = 6.4s already exceeds reopenBackoffCap
+	if shift > maxShift {
+		shift = maxShift
+	}
+	d := reopenBackoff * (1 << uint(shift))
+	if d > reopenBackoffCap {
+		d = reopenBackoffCap
+	}
+	return time.Duration(rand.Int64N(int64(d) + 1))
+}
+
+// resetReopenBackoff clears the consecutive-failure count once the consumer
+// and its message iterator are open again.
+func (st *pumpState) resetReopenBackoff() {
+	st.mu.Lock()
+	st.reopenFailures = 0
+	st.mu.Unlock()
+}
 
 func (st *pumpState) hasReason(reason PauseReason) bool {
 	st.mu.Lock()
@@ -201,10 +249,12 @@ func (s *ConsumerSupervisor) runPump(ctx context.Context, spec ConsumerSpec, st 
 			}
 			// A not-found here is usually the brief window of an in-flight Reset
 			// (delete-then-recreate); retry on a short backoff so the pump picks
-			// up the recreated durable promptly.
+			// up the recreated durable promptly. A sustained failure (e.g. NATS
+			// itself unreachable) grows that backoff instead of retrying at a
+			// fixed interval indefinitely.
 			logger.Warn("substrate: ConsumerSupervisor: open consumer, retrying",
 				"consumer", spec.Name, "error", err)
-			if waitOrDone(ctx, reopenBackoff) {
+			if waitOrDone(ctx, st.nextReopenDelay()) {
 				return
 			}
 			continue
@@ -217,12 +267,13 @@ func (s *ConsumerSupervisor) runPump(ctx context.Context, spec ConsumerSpec, st 
 			}
 			logger.Error("substrate: ConsumerSupervisor: open messages iterator",
 				"consumer", spec.Name, "error", err)
-			if waitOrDone(ctx, reopenBackoff) {
+			if waitOrDone(ctx, st.nextReopenDelay()) {
 				return
 			}
 			continue
 		}
 
+		st.resetReopenBackoff()
 		class, drainErr := s.drain(ctx, spec, st, mc)
 		s.handleDrainOutcome(ctx, spec, st, class, drainErr)
 	}
