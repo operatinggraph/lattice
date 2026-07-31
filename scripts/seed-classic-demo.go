@@ -23,7 +23,12 @@
 // not the Gateway.
 //
 // NOT idempotent: mints fresh vertices on every run (no dedup key), matching
-// seed-edge-demo.go's own dev-loop convention.
+// seed-edge-demo.go's own dev-loop convention — EXCEPT the clinic patient and
+// provider, which use fixed, checked-in handles (patientID / providerID
+// below, mirroring seed-showcase.go's idempotency seam) because they land in
+// a roster shared across every run: an unpinned id let a rerun mint a second
+// "Dr. Classic Demo" / "Classic Demo Patient" that the booking picker and
+// patient roster then rendered as an indistinguishable duplicate.
 //
 // Run via: make seed-classic-demo (== go run ./scripts/seed-classic-demo.go)
 package main
@@ -44,6 +49,15 @@ import (
 	"github.com/operatinggraph/lattice/internal/processor"
 	"github.com/operatinggraph/lattice/internal/substrate"
 	"github.com/operatinggraph/lattice/scripts/pkgverify"
+)
+
+// Fixed, checked-in handles (Contract #1 — valid 20-char canonical NanoIDs,
+// generated once via substrate.NewNanoID and pinned here) — the idempotency
+// seam for the two clinic entities every run must converge on rather than
+// duplicate, mirroring seed-showcase.go's convention.
+const (
+	patientID  = "rQ7RnR5XWyZP2BSropUD"
+	providerID = "zJjptLYizx4vDU6KRt9i"
 )
 
 func main() {
@@ -131,32 +145,49 @@ func main() {
 
 	// --- Clinic: patient + provider + appointment ----------------------------
 
-	patientReply := submitOp(ctx, conn, adminKey, "CreatePatient", "patient",
-		map[string]any{"fullName": "Classic Demo Patient"}, nil)
-	patientKey := patientReply.PrimaryKey
+	patientKey := "vtx.patient." + patientID
+	if !alive(ctx, conn, patientKey) {
+		submitOp(ctx, conn, adminKey, "CreatePatient", "patient",
+			map[string]any{"fullName": "Classic Demo Patient", "patientId": patientID}, nil)
+	}
 	fmt.Printf("==> patient:         %s\n", patientKey)
 
-	providerReply := submitOp(ctx, conn, adminKey, "CreateProvider", "provider",
-		map[string]any{"fullName": "Dr. Classic Demo", "specialty": "Family Medicine"}, nil)
-	providerKey := providerReply.PrimaryKey
+	providerKey := "vtx.provider." + providerID
+	if !alive(ctx, conn, providerKey) {
+		submitOp(ctx, conn, adminKey, "CreateProvider", "provider",
+			map[string]any{"fullName": "Dr. Classic Demo", "specialty": "Family Medicine", "providerId": providerID}, nil)
+	}
 	fmt.Printf("==> provider:        %s\n", providerKey)
 
-	// 24h out, truncated to the clinic's mandatory 15-minute booking grid
-	// (:00/:15/:30/:45 — Unix-epoch-aligned truncation lands on a grid cell).
-	startsAt := time.Now().UTC().Add(24 * time.Hour).Truncate(15 * time.Minute)
+	// Fixed hour on the day 24h out (on the clinic's mandatory 15-minute grid,
+	// :00/:15/:30/:45) rather than time.Now() truncated — deterministic per
+	// day, mirroring seed-showcase.go's futureDayAt idiom, so a same-day
+	// rerun derives the SAME appointmentId and converges via the alive()
+	// guard instead of double-booking the now-fixed provider (SlotConflict).
+	apptDay := time.Now().UTC().Add(24 * time.Hour).Truncate(24 * time.Hour)
+	startsAt := apptDay.Add(14 * time.Hour)
 	endsAt := startsAt.Add(30 * time.Minute)
-
-	apptReply := submitOp(ctx, conn, adminKey, "CreateAppointment", "appointment",
-		map[string]any{
-			"patient":     patientKey,
-			"provider":    providerKey,
-			"startsAt":    startsAt.Format(time.RFC3339),
-			"endsAt":      endsAt.Format(time.RFC3339),
-			"reason":      "Annual checkup",
-			"leaseAppKey": leaseAppKey,
-		},
-		&processor.ContextHint{Reads: []string{patientKey, providerKey}})
-	fmt.Printf("==> appointment:     %s (%s)\n", apptReply.PrimaryKey, startsAt.Format(time.RFC3339))
+	apptID := substrate.DeriveNanoID("classic-demo-appointment", apptDay.Format("2006-01-02"))
+	apptKey := "vtx.appointment." + apptID
+	if !alive(ctx, conn, apptKey) {
+		submitOp(ctx, conn, adminKey, "CreateAppointment", "appointment",
+			map[string]any{
+				"patient":       patientKey,
+				"provider":      providerKey,
+				"appointmentId": apptID,
+				"startsAt":      startsAt.Format(time.RFC3339),
+				"endsAt":        endsAt.Format(time.RFC3339),
+				"reason":        "Annual checkup",
+				"leaseAppKey":   leaseAppKey,
+			},
+			&processor.ContextHint{
+				Reads: []string{patientKey, providerKey},
+				OptionalReads: append(
+					slotClaimKeys(providerKey, startsAt, endsAt),
+					slotClaimKeys(patientKey, startsAt, endsAt)...),
+			})
+	}
+	fmt.Printf("==> appointment:     %s (%s)\n", apptKey, startsAt.Format(time.RFC3339))
 
 	// --- Café: tab opened against the same lease ------------------------------
 
@@ -214,7 +245,7 @@ func main() {
 	fmt.Printf("    landlord:    %s\n", landlordKey)
 	fmt.Printf("    lease app:   %s\n", leaseAppKey)
 	fmt.Printf("    listing:     %s\n", unitKey)
-	fmt.Printf("    appointment: %s\n", apptReply.PrimaryKey)
+	fmt.Printf("    appointment: %s\n", apptKey)
 	fmt.Printf("    tab:         %s\n", tabReply.PrimaryKey)
 	fmt.Printf("    studio:      %s\n", studioKey)
 	fmt.Printf("    session:     %s\n", sessionReply.PrimaryKey)
@@ -239,6 +270,24 @@ func slotClaimKeys(hub string, start, end time.Time) []string {
 		keys = append(keys, hub+".slot"+code)
 	}
 	return keys
+}
+
+// alive reports whether key names a live (non-tombstoned) Core KV document —
+// a direct Core KV read, sanctioned here only because this is a dev/ops
+// loader tool, not a P5 vertical-app read path (mirrors seed-showcase.go's
+// helper of the same name).
+func alive(ctx context.Context, conn *substrate.Conn, key string) bool {
+	entry, err := conn.KVGet(ctx, bootstrap.CoreKVBucket, key)
+	if err != nil {
+		return false
+	}
+	var doc struct {
+		IsDeleted bool `json:"isDeleted"`
+	}
+	if err := json.Unmarshal(entry.Value, &doc); err != nil {
+		return false
+	}
+	return !doc.IsDeleted
 }
 
 // submitOp submits an operation as actorKey over NATS (the bootstrap-actor
