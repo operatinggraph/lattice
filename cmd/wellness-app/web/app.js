@@ -805,6 +805,7 @@ async function renderRoster() {
   if (isStaff() && bookings.length) bindSeatCancels(sessionKey);
   await renderBookMember(se, bookings, generation);
   renderCancelClass(sessionKey);
+  await renderReassignControl(se, generation);
 }
 
 // renderBookMember shows the front desk's book-a-member control (and the
@@ -1138,6 +1139,123 @@ async function cancelOwnClass(se, mine) {
       payload: { sessionKey: se.sessionKey, studio: se.studioKey, instructor: mine },
     },
     "call off the class",
+    false,
+  );
+}
+
+// renderReassignControl appends the front desk's "Reassign" control — sub in
+// or clear the instructor, and/or move the class's time — for a session this
+// staffer's workplace covers. This is deliberately the staff-only path:
+// ReassignSession's OTHER grantee, a bound instructor rescheduling their own
+// class, already reaches the op through Facet's "Reschedule class" op-meta
+// self-service surface (packages/wellness-domain/opmetas.go); the gap this
+// closes is that front-of-house staff had no UI path at all for either edit.
+// The server re-derives the workplace confinement this hides the control on,
+// and the Starlark guard (ddls.go's ReassignSession) re-derives it again at
+// submit — this is the affordance, not the authority.
+//
+// `generation` is renderRoster's own render token (see renderBookMember for
+// the same guard): this awaits a fetch, so a stale render must not append a
+// control for a class the staffer has already navigated away from.
+async function renderReassignControl(se, generation) {
+  if (!se || !isStaff()) return;
+  let instructors = [];
+  try {
+    instructors = await loadInstructors();
+  } catch (e) {
+    // Falls back to an instructor-less form (clear/time-move still work)
+    // rather than hiding the whole control over a picker-only failure.
+  }
+  if (generation !== rosterGeneration) return;
+
+  const wrap = document.createElement("div");
+  wrap.className = "card-actions";
+  wrap.innerHTML =
+    '<button id="reassign-toggle" class="ghost">Reassign</button>' +
+    '<div id="reassign-form" class="session-form" hidden>' +
+    '<div class="field"><label>Instructor</label><select id="reassign-instructor">' +
+    '<option value="">(no change)</option>' +
+    '<option value="__clear__">(remove instructor)</option>' +
+    instructors.map((i) => '<option value="' + esc(i.instructorKey) + '">' + esc(i.displayName) + "</option>").join("") +
+    "</select></div>" +
+    '<div class="field"><label>New start</label><input type="datetime-local" id="reassign-starts" step="900" /></div>' +
+    '<div class="field"><label>New end</label><input type="datetime-local" id="reassign-ends" step="900" /></div>' +
+    '<button id="reassign-submit">Save</button>' +
+    "</div>";
+  document.getElementById("roster-body").appendChild(wrap);
+
+  const select = document.getElementById("reassign-instructor");
+  if (se.instructorKey) select.value = se.instructorKey;
+
+  document.getElementById("reassign-toggle").addEventListener("click", () => {
+    const form = document.getElementById("reassign-form");
+    form.hidden = !form.hidden;
+  });
+  document.getElementById("reassign-submit").addEventListener("click", async () => {
+    const btn = document.getElementById("reassign-submit");
+    btn.disabled = true;
+    try {
+      await reassignSession(se);
+      toast("Class reassigned.", true);
+      staffSessionsCache = null;
+      document.getElementById("roster-session").dataset.loaded = "";
+      setTimeout(loadRoster, 700);
+    } catch (e) {
+      toast(e.message, false);
+      btn.disabled = false;
+    }
+  });
+}
+
+// reassignSession submits ReassignSession for the front desk's instructor
+// swap/clear and/or time-move edits above. It carries NO authContext.target
+// and NO `instructor` standing param — that field is the OTHER grantee's
+// binding (a bound instructor acting on their own class, packages/
+// wellness-domain/ddls.go); a staff submit is confined by the workplace walk
+// instead (enforce_workplace, mirroring CreateSession's staff path in this
+// same file). `newInstructor`/`clearInstructor` name the swap itself, which
+// is orthogonal to that standing check.
+async function reassignSession(se) {
+  const sessId = idOf(se.sessionKey);
+  const select = document.getElementById("reassign-instructor");
+  const startsAt = toUtcInstant(document.getElementById("reassign-starts").value);
+  const endsAt = toUtcInstant(document.getElementById("reassign-ends").value);
+
+  const payload = { sessionKey: se.sessionKey, studio: se.studioKey };
+  const reads = [se.sessionKey, se.sessionKey + ".schedule"];
+  // The atStudio link is required on every branch — require_matching_studio
+  // runs before any of the edits below (ddls.go).
+  const optionalReads = ["lnk.session." + sessId + ".atStudio.studio." + idOf(se.studioKey)];
+
+  if (select.value === "__clear__") {
+    payload.clearInstructor = true;
+  } else if (select.value && select.value !== se.instructorKey) {
+    payload.newInstructor = select.value;
+    // (a)-declared required read — require_live_typed validates it alive +
+    // class=instructor before the swap (mirrors CreateSession's `instructor`
+    // field convention in this same file).
+    reads.push(select.value);
+  }
+
+  if (startsAt || endsAt) {
+    if (!(startsAt && endsAt)) throw new Error("A time move needs both a new start and a new end.");
+    if (!(Date.parse(startsAt) < Date.parse(endsAt))) throw new Error("End time must be after start time.");
+    payload.startsAt = startsAt;
+    payload.endsAt = endsAt;
+    // Every cell either span could touch is a (d)-declared optionalRead —
+    // the script releases what only the OLD span held and claims what only
+    // the NEW span needs (mirrors CreateSession's slotCellKeys usage).
+    optionalReads.push(...slotCellKeys(se.studioKey, se.startsAt, se.endsAt));
+    optionalReads.push(...slotCellKeys(se.studioKey, startsAt, endsAt));
+  }
+
+  if (payload.clearInstructor === undefined && payload.newInstructor === undefined && payload.startsAt === undefined) {
+    throw new Error("Pick a new instructor or a new time.");
+  }
+
+  await opOrThrow(
+    { operationType: "ReassignSession", class: "session", reads, optionalReads, payload },
+    "reassign the class",
     false,
   );
 }
