@@ -191,8 +191,69 @@ surfacing change beyond the `optionalReads` declaration. Booking a class that ha
 ended* is rejected too (the guard is `startsAt`-based, mirroring clinic) — an in-progress class is not a
 sensible booking and the live repro's class had fully ended.
 
+## Fire brief — `ReassignSession` op (build note, 2026-07-31)
+
+**1 · Scope sentence (verbatim, verticals.md):** *"No op reassigns or moves a session — `CreateSession`
+binds both once. 11 of 17 live sessions carry no instructor, so `SetBookingAttendance`'s ledBy+identifiedBy
+guard leaves them permanently unmarkable and no instructor can call them off. The only recourse for a sub
+or a moved class is `TombstoneSession`, which releases every booking — covering a teacher cancels the
+class on its members."*
+
+**2 · Verified touch-list:**
+- `packages/wellness-domain/ddls.go` — `sessionVertexTypeDDL` gains `ReassignSession` in
+  `PermittedCommands` + description + `InputSchema`/`FieldDescription`/`Examples`;
+  `sessionScheduleAspectDDL` and `studioSlotClaimAspectDDL` gain it in `PermittedCommands` too (both
+  are step-6 write gates the op's mutations touch). `sessionDDLScript`: new `session_ledby_link` helper
+  (bounded `kv.Links` enumeration, mirrors `studio_locations`' idiom exactly) + a new `ReassignSession`
+  branch in `execute()`.
+- `packages/wellness-domain/permissions.go` — new `ReassignSession`/`any` row, `GrantsTo: [operator,
+  frontOfHouse, provider]` — the union of `CreateSession`'s staff grant and `TombstoneSession`'s
+  bound-instructor grant.
+- `packages/wellness-domain/opmetas.go` — new `reassignSessionOpMeta()`, PROVIDER-hat standing shape
+  mirroring `TombstoneSession`'s, covering the RESCHEDULE (time-move) case only.
+- `packages/wellness-domain/integration_test.go` — 5 new tests (instructor swap, clear, time move with
+  a shared cell, cross-session collision, instructor self-confinement) + `domainCapDoc()` gains the grant.
+- `packages/wellness-domain/package.go` / `manifest.yaml` / `package_test.go` — version 0.18.3 → 0.19.0,
+  manifest permissions/opMetas lists + pin counts updated to match.
+
+**3 · Precedents mirrored:** `CreateSession`'s ledBy link-write + per-cell `claim_cell` claim loop;
+`TombstoneSession`'s operator/bound-instructor auth split + `release_cells_mutations`; identity-hygiene's
+tombstone-old+create-new link-swap idiom (`ddls.go`) for the instructor reassignment; `studio_locations`'
+bounded-`kv.Links`-off-a-known-hub idiom for `session_ledby_link`; `CreateBooking`'s `leaseAppKey:
+"{me.leaseapp?}"` optional-self-anchor idiom for the op-meta's `instructor: "{me.instructor?}"`.
+
+**4 · Two design decisions made in-fire (Winston, §0 — pure implementation, no contract/fork):**
+- **Cell symmetric-difference on a time move.** A script's own reads see live state as submitted, not
+  its own not-yet-applied mutations — so a naive release-then-claim over the FULL new span would read a
+  cell the OLD span also held as "still claimed" (the release hasn't landed yet) and self-reject
+  `StudioConflict`. Fixed by computing `old_cells`/`new_cells` and mutating only the symmetric
+  difference; a cell both spans cover is left untouched. Proven by
+  `TestReassignSession_MovesTimeLeavingSharedCellClaimed`.
+- **Write-footprint touch.** The Processor's reply-constraint (`commit_path.go`'s `primaryKeyInCommit`)
+  rejects a script-named `primaryKey` outside the mutation batch's footprint, and a link mutation is
+  never vertex-rooted — so an instructor-only swap (link mutations only) left `sess_key` unreachable as
+  `primaryKey`. Fixed by always reading + always OCC-re-writing `.schedule` (name/capacity carried
+  forward unchanged when not rescheduling), which is vertex-rooted on every branch.
+
+**5 · Scope-diff gate: PASS.** Both instructor-reassignment and time-move trace verbatim to the scope
+sentence; no narrowing. `newInstructor` + `clearInstructor` were added as distinct payload fields (not
+overloading `TombstoneSession`'s existing `instructor` auth-only field) — a deliberate, in-scope
+disambiguation, not scope creep.
+
+**6 · Non-goals / deferred tail (named consumer, not a bare "no UX yet"):** the op is NOT yet wired into
+`cmd/wellness-app`'s staff console (`web/app.js`'s `scheduleCard`/Studios-admin views, mirroring
+`renderCancelClass`'s dispatch idiom) — front-of-house staff cannot yet sub in a substitute instructor or
+move a class time from the UI; only a direct op submission (or Facet's op-meta-driven "Reschedule class"
+self-service surface for a bound instructor) reaches it today. **Consumer: `cmd/wellness-app/web/app.js`
+staff Studios/Sessions admin view** — the next Vertical Steward fire on this row should wire a "Reassign"
+control there before this item moves to Done. No studio change is supported (moving a class to a
+*different* studio, not just a different time) — out of scope per the filed row's own wording ("moves a
+session" read as time, not studio, given the row's `SetBookingAttendance`/no-instructor framing).
+
 ## Next (this design doc's checkpoint)
 
+- **`ReassignSession` FE wiring** (🏗️, this section) — staff console "Reassign" control in
+  `cmd/wellness-app`, consumer named above.
 - **Inc 2 — thin FE shipped** (`cmd/wellness-app`, `a7f5b52`). Live-data browser verify is pending the
   one-time NATS reload noted above (a stack-infra step, not a code gap).
 - **Mixed-use composition surfaces** (verticals.md, gated "after Wellness") — front-desk / operations
