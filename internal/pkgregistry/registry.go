@@ -42,6 +42,7 @@ import (
 	servicedomain "github.com/operatinggraph/lattice/packages/service-domain"
 	servicelocation "github.com/operatinggraph/lattice/packages/service-location"
 	wellnessdomain "github.com/operatinggraph/lattice/packages/wellness-domain"
+	wellnessledger "github.com/operatinggraph/lattice/packages/wellness-ledger"
 )
 
 // registry maps a package's manifest name — which is also its directory name
@@ -75,6 +76,7 @@ var registry = map[string]pkgmgr.Definition{
 	"console-operator":       consoleoperator.Package,
 	"demo-operator":          demooperator.Package,
 	"wellness-domain":        wellnessdomain.Package,
+	"wellness-ledger":        wellnessledger.Package,
 	"maintenance-domain":     maintenancedomain.Package,
 }
 

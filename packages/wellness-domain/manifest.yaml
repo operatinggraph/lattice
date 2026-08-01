@@ -1,5 +1,5 @@
 name: wellness-domain
-version: 0.19.0
+version: 0.19.1
 description: |
   Wellness bookable domain: studio / session / booking / instructor vertex
   types + their aspects and links, written by Create*/Tombstone*/Cancel*/Bind*
@@ -34,7 +34,12 @@ description: |
   no longer CancelBooking-eligible); either value corrects the other, a class that has
   not begun is rejected (SessionNotStarted, the mirror of SessionInPast), and
   the same standing guard confines a bound instructor to bookings on sessions
-  they lead. Five plain projection lenses
+  they lead. Transitioning to noShow also stores a noShowFeeCents amount
+  (caller-supplied or a 2500 default, mirroring clinic-domain's
+  SetAppointmentStatus) that wellness-ledger's wellnessNoShowSettlement
+  Weaver playbook reads to auto-charge the booker's ledger account; the field
+  is dropped on a later re-mark to attended, though a posted charge stands.
+  Five plain projection lenses
   (wellnessStudios, wellnessSessions, wellnessBookings, wellnessInstructors,
   wellnessMembers) are the P5 read models a wellness FE reads; wellnessMembers
   carries each member's covering locations so the front desk's book-a-member
