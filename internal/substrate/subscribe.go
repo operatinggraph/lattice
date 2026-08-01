@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sort"
 	"strings"
 	"time"
 
@@ -245,6 +246,70 @@ func (c *Conn) DeleteDurable(ctx context.Context, bucket, durableName string) er
 		return fmt.Errorf("substrate: DeleteDurable: delete %q on %q: %w", durableName, streamName, err)
 	}
 	return nil
+}
+
+// DeleteOrphanDurables deletes every durable JetStream consumer on the named
+// KV bucket's backing stream (KV_<bucket>) that orphaned reports true for,
+// and returns the names it deleted, sorted.
+//
+// It is the reconciliation counterpart to PruneStaleDurables: that one asks
+// "is this durable of my per-boot family and idle?", this one hands the whole
+// question to the caller, because the owner of a durable family is the only
+// thing that can say whether a given name still has a live owner. The caller's
+// predicate therefore carries the entire safety burden — it must answer false
+// for any name it does not positively recognize as its own AND orphaned, since
+// a true answer deletes a server-side consumer along with its ack floor.
+//
+// Deletion is best-effort per name: a consumer-not-found error (a concurrent
+// deletion won the race) is success, any other delete error is logged and the
+// pass continues, so one undeletable consumer never aborts the reconciliation.
+// A failure to LIST, by contrast, is returned — an empty or partial listing
+// must never read as "nothing to do".
+func (c *Conn) DeleteOrphanDurables(ctx context.Context, bucket string, orphaned func(name string) bool, logger *slog.Logger) ([]string, error) {
+	if logger == nil {
+		logger = slog.Default()
+	}
+	streamName := "KV_" + bucket
+	stream, err := c.js.Stream(ctx, streamName)
+	if err != nil {
+		return nil, fmt.Errorf("substrate: DeleteOrphanDurables: get stream %q: %w", streamName, err)
+	}
+
+	// Drain the listing fully before consulting the predicate: orphaned may do
+	// its own I/O to reach a verdict, and running it inside the range would
+	// hold the lister's paging subscription open across every one of those
+	// round trips.
+	var names []string
+	lister := stream.ConsumerNames(ctx)
+	for name := range lister.Name() {
+		names = append(names, name)
+	}
+	if err := lister.Err(); err != nil {
+		return nil, fmt.Errorf("substrate: DeleteOrphanDurables: list consumers on %q: %w", streamName, err)
+	}
+
+	var candidates []string
+	for _, name := range names {
+		if orphaned(name) {
+			candidates = append(candidates, name)
+		}
+	}
+	sort.Strings(candidates)
+
+	var deleted []string
+	for _, name := range candidates {
+		if err := c.js.DeleteConsumer(ctx, streamName, name); err != nil {
+			if errors.Is(err, jetstream.ErrConsumerNotFound) {
+				continue
+			}
+			logger.Warn("substrate: DeleteOrphanDurables: delete orphan durable failed",
+				"stream", streamName, "durable", name, "err", err)
+			continue
+		}
+		logger.Info("substrate: deleted orphan durable", "stream", streamName, "durable", name)
+		deleted = append(deleted, name)
+	}
+	return deleted, nil
 }
 
 // DeleteStreamConsumer removes a single named durable consumer from an event

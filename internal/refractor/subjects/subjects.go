@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+
+	"github.com/operatinggraph/lattice/internal/substrate/keys"
 )
 
 // validateToken panics if s is empty or contains NATS-reserved characters
@@ -59,6 +61,51 @@ func PersonalSync(prefix, actorID string) string {
 	}
 	validateToken("actorID", actorID)
 	return prefix + "." + actorID
+}
+
+// lensDurablePrefix is the common prefix of every durable JetStream consumer
+// the Refractor creates on the Core KV stream. It is deliberately shared with
+// names that are NOT per-lens durables — the adjacency bootstrapper's
+// `refractor-adjacency` and the lens source's
+// `refractor-lens-source-<instance>-<nonce>` — so the prefix alone never
+// identifies a lens durable. ParseLensDurable is the discriminator.
+const lensDurablePrefix = "refractor-"
+
+// LensDurable returns the durable JetStream consumer name for the lens
+// pipeline projecting ruleID. It is the single constructor of that name: the
+// activation path and the reconciliation that deletes orphaned durables
+// (health.DurableJanitor) must agree on it by construction, because a drift
+// between "what we create" and "what we recognize as ours" would have the
+// janitor delete a live lens's consumer.
+//
+// Unlike the subject builders above this does not validate ruleID, because a
+// lens's rule ID is its spec body's `id` — author-supplied and checked only
+// for non-emptiness (lens.translateSpec) — so a token violation here is
+// ordinary bad input from one lens, not a programming error in the caller.
+// Rejecting it by panic would take the whole process down over a single
+// malformed spec; a name NATS refuses fails just that lens's activation, and
+// ParseLensDurable declines to recognize it, so no reconciliation ever acts
+// on it.
+func LensDurable(ruleID string) string {
+	return lensDurablePrefix + ruleID
+}
+
+// ParseLensDurable extracts the lens rule ID from a durable consumer name
+// produced by LensDurable, reporting false for any name that is not one.
+//
+// The NanoID check is what makes the answer safe rather than merely
+// prefix-shaped: a lens rule ID is the `vtx.meta.<NanoID>` id (Contract #1),
+// so `refractor-adjacency` and `refractor-lens-source-<instance>-<nonce>`
+// both fail it and are never mistaken for a lens's durable. Anything the
+// Refractor did not create through LensDurable is likewise rejected, which is
+// the direction that matters: the caller deleting on a true answer must never
+// get one for a consumer it does not own.
+func ParseLensDurable(name string) (string, bool) {
+	id, ok := strings.CutPrefix(name, lensDurablePrefix)
+	if !ok || !keys.IsValidNanoID(id) {
+		return "", false
+	}
+	return id, true
 }
 
 // CoreKVStream returns the JetStream stream name for the given NATS KV bucket.

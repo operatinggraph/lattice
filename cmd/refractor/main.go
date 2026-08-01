@@ -1003,12 +1003,12 @@ func main() {
 		// never computed two different ways.
 		filterSubjects, filterSubject := p.ConsumerFilter()
 		p.RunOn(conn, substrate.ConsumerSpec{
-			Name:           "refractor-" + r.ID,
+			Name:           subjects.LensDurable(r.ID),
 			Stream:         subjects.CoreKVStream(coreKVBucket),
 			FilterSubjects: filterSubjects,
 			FilterSubject:  filterSubject,
 			DeliverPolicy:  substrate.DeliverLastPerSubject,
-			DeliverGroup:   "refractor-" + r.ID,
+			DeliverGroup:   subjects.LensDurable(r.ID),
 			AckWait:        lensAckWait,
 			InitialPause:   initialPause,
 		})
@@ -1166,6 +1166,15 @@ func main() {
 	registryProbe := health.NewRegistryProbe(conn, coreKVBucket, registeredLensIDs, logger)
 	go registryProbe.Run(ctx)
 	hb.RegistryReconciliationProvider = registryProbe.Missing
+
+	// The inverse reconciliation: a per-lens durable whose lens no longer
+	// exists in Core KV. The tombstone-triggered reap (remover, above) needs
+	// a live pipeline and a delivered tombstone event, so a lens removed
+	// while this process was down — or one whose delete call failed — leaves
+	// its durable holding an ack floor forever. See health.DurableJanitor for
+	// why deleting on this keep-set is safe.
+	go health.NewDurableJanitor(conn, coreKVBucket, registeredLensIDs,
+		[]string{lens.BootstrapLensID}, logger).Run(ctx)
 
 	// Bootstrap lens (env-gated). Activates only if no meta-lens has loaded
 	// after a short grace window AND the env var is set. Decision #7.

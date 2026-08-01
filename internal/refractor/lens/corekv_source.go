@@ -578,9 +578,18 @@ func (s *CoreKVSource) dispatchSpec(lensID string, body []byte, revision uint64)
 		s.logger.Error("lens spec unmarshal failed", "lensId", lensID, "err", err)
 		return
 	}
-	if spec.ID == "" {
-		spec.ID = lensID
+	// The lens's identity is its meta-vertex key, not a field in the body it
+	// carries (Contract #1: a lens IS `vtx.meta.<NanoID>`). A spec body may
+	// restate it, but a body that disagrees with the key it was read from does
+	// not get to rename the lens: everything keyed off the rule ID downstream —
+	// the registry entry, the health entry, the durable consumer name — would
+	// then refer to an identity Core KV has no record of, and nothing
+	// reconciling those against Core KV could match them back.
+	if spec.ID != "" && spec.ID != lensID {
+		s.logger.Warn("lens spec id disagrees with its meta-vertex key; using the key",
+			"lensId", lensID, "specId", spec.ID)
 	}
+	spec.ID = lensID
 	rule, err := translateSpec(&spec)
 	if err != nil {
 		s.logger.Error("lens spec translation failed", "lensId", lensID, "err", err)
