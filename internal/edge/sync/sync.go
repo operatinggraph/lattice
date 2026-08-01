@@ -27,8 +27,28 @@ import (
 	"github.com/operatinggraph/lattice/internal/refractor/subjects"
 )
 
+// DefaultStream is the JetStream stream a Personal Lens publishes its deltas
+// to, and the one a Manager's durable consumer binds to when Config.Stream is
+// empty. Exported because a host that reaps its own durable outside the
+// Manager's lifetime (cmd/facet's sign-out purge) must name the same stream.
+const DefaultStream = "SYNC"
+
+// DurableName is the JetStream durable-consumer name a device's delta feed
+// binds to. The name is STABLE per identity+device (unlike Loom's
+// per-boot-nonce pattern): the Sync Manager wants JetStream's native
+// ack-floor resume across restarts, not full replay every boot — so a host
+// that hands a fresh device id to every engine it builds orphans one durable
+// per build, each pinned at the SYNC stream's per-subject retention cap.
+//
+// The format is load-bearing beyond this package: the Gateway's NATS
+// auth-callout grants exactly this name's consumer subjects
+// (internal/gateway/natsauth's PermissionsFor), so a host reaping its own
+// durable must derive the name here rather than re-spelling it.
+func DurableName(identityID, deviceID string) string {
+	return "edge-sync-" + identityID + "-" + deviceID
+}
+
 const (
-	defaultStream        = "SYNC"
 	defaultSubjectPrefix = "lattice.sync.user"
 
 	// syncGapMaxAttempts bounds the warm-resume gap check's retry of the
@@ -153,7 +173,7 @@ func New(tr Transport, st store.Store, cfg Config) (*Manager, error) {
 	}
 	stream := cfg.Stream
 	if stream == "" {
-		stream = defaultStream
+		stream = DefaultStream
 	}
 	prefix := cfg.SubjectPrefix
 	if prefix == "" {
@@ -165,10 +185,7 @@ func New(tr Transport, st store.Store, cfg Config) (*Manager, error) {
 		cfg:    cfg,
 		stream: stream,
 		prefix: prefix,
-		// Stable per-device name (unlike Loom's per-boot-nonce pattern):
-		// the Sync Manager wants JetStream's native ack-floor resume across
-		// restarts, not full replay every boot.
-		durable: "edge-sync-" + cfg.IdentityID + "-" + cfg.DeviceID,
+		durable: DurableName(cfg.IdentityID, cfg.DeviceID),
 		logger:  logger,
 	}, nil
 }

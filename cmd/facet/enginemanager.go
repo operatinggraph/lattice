@@ -3,12 +3,15 @@ package main
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"sync"
 	"time"
 
 	"github.com/operatinggraph/lattice/internal/appsession"
+	"github.com/operatinggraph/lattice/internal/edge/store"
+	edgesync "github.com/operatinggraph/lattice/internal/edge/sync"
 	"github.com/operatinggraph/lattice/internal/substrate"
 )
 
@@ -114,10 +117,6 @@ func (m *engineManager) Acquire(identityID string) (*engine, error) {
 	if m.deps.Signer == nil {
 		return nil, fmt.Errorf("no credential minter configured (FACET_DEV_AUTH not set) — cannot start %s's engine", identityID)
 	}
-	deviceID, err := substrate.NewNanoID()
-	if err != nil {
-		return nil, fmt.Errorf("generate device id: %w", err)
-	}
 	token, _, err := m.deps.Signer.Mint(identityID)
 	if err != nil {
 		return nil, fmt.Errorf("mint engine credential: %w", err)
@@ -126,7 +125,11 @@ func (m *engineManager) Acquire(identityID string) (*engine, error) {
 		t, _, err := m.deps.Signer.Mint(identityID)
 		return t, err
 	}
-	eng, err := newEngine(m.baseCtx, m.deps.engineConfig, identityID, deviceID, token, tokenSource)
+	// Empty device id: newEngine resolves this host's stable, store-persisted
+	// one for identityID, so a rebuild after an idle reap (or a process
+	// restart) re-binds the durable the last engine left rather than
+	// orphaning it and starting a new one.
+	eng, err := newEngine(m.baseCtx, m.deps.engineConfig, identityID, "", token, tokenSource)
 	if err != nil {
 		return nil, err
 	}
@@ -234,7 +237,12 @@ func (m *engineManager) Purge(identityID string) error {
 	}
 	m.mu.Unlock()
 
+	// A live engine already carries the id; taking it from there means the
+	// common sign-out (an SSE holder keeps the engine up) never contends for
+	// the mirror's file lock at all.
+	deviceID := ""
 	if ok {
+		deviceID = e.eng.deviceID
 		e.eng.Close()
 	}
 	// Delete the mirror even when no engine was live: an already-reaped
@@ -242,10 +250,92 @@ func (m *engineManager) Purge(identityID string) error {
 	// the point of the purge is that nothing of this identity survives
 	// locally, not merely that the running copy stops.
 	storePath := filepath.Join(m.deps.StoreDir, identityID+".db")
+	// The device id dies with the mirror, so the durable it names would
+	// outlive its last reader — reap it while the id is still known. Runs
+	// after the engine is closed (bbolt is single-writer) and before the
+	// file is removed.
+	m.reapSyncDurable(identityID, deviceID, storePath)
 	if err := os.Remove(storePath); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("purge local mirror %q: %w", storePath, err)
 	}
 	return nil
+}
+
+// reapDurableTimeout bounds the whole connect-and-delete round trip a purge
+// makes. Sign-out is a synchronous user action, so an unreachable NATS must
+// not hold it open.
+const reapDurableTimeout = 5 * time.Second
+
+// reapSyncDurable deletes the SYNC durable consumer identityID was feeding,
+// over a short-lived connection of its own (the engine's is already closed by
+// the time a purge reaches here). An empty deviceID is read back from the
+// mirror at storePath — the no-engine-was-live path.
+//
+// Every failure is logged and swallowed: a purge must never fail the
+// sign-out it is part of, and its load-bearing half — the local mirror —
+// is deleted by the caller regardless. A revoked credential in particular
+// CANNOT complete this — the auth callout refuses the connection, which is
+// the correct outcome for revocation. What that leaves behind is one
+// durable, unreachable from this host ever after: the id naming it is in the
+// mirror the caller is about to delete.
+func (m *engineManager) reapSyncDurable(identityID, deviceID, storePath string) {
+	if m.deps.Signer == nil {
+		return // boot-env fallback: no minter, so no connection to reap over
+	}
+	logger := m.deps.Logger
+	if logger == nil {
+		logger = slog.Default()
+	}
+	if deviceID == "" {
+		st, err := store.Open(storePath)
+		if err != nil {
+			logger.Warn("facet purge: local mirror unreadable; leaving the sync durable in place", "identityId", identityID, "err", err)
+			return
+		}
+		id, ok, err := readDeviceID(st)
+		_ = st.Close()
+		if err != nil {
+			logger.Warn("facet purge: device id unreadable; leaving the sync durable in place", "identityId", identityID, "err", err)
+			return
+		}
+		if !ok {
+			return // never opened an engine on this host — nothing named, nothing to reap
+		}
+		deviceID = id
+	}
+
+	token, _, err := m.deps.Signer.Mint(identityID)
+	if err != nil {
+		logger.Warn("facet purge: mint failed; leaving the sync durable in place", "identityId", identityID, "err", err)
+		return
+	}
+	base := m.baseCtx
+	if base == nil {
+		base = context.Background()
+	}
+	ctx, cancel := context.WithTimeout(base, reapDurableTimeout)
+	defer cancel()
+	conn, err := substrate.Connect(ctx, substrate.ConnectOpts{
+		URL: m.deps.NATSURL,
+		// The same bare device id the engine connected under: natsauth
+		// grants $JS.API.CONSUMER.DELETE.SYNC.<durable> for exactly the
+		// durable this CONNECT name spells (natsauth's PermissionsFor), so
+		// any other name here would be denied.
+		Name:        deviceID,
+		Token:       token,
+		InboxPrefix: "_INBOX.edge." + identityID,
+	})
+	if err != nil {
+		logger.Warn("facet purge: connect failed; leaving the sync durable in place", "identityId", identityID, "err", err)
+		return
+	}
+	defer conn.Close()
+	durable := edgesync.DurableName(identityID, deviceID)
+	if err := conn.DeleteStreamConsumer(ctx, edgesync.DefaultStream, durable); err != nil {
+		logger.Warn("facet purge: sync durable not reaped", "identityId", identityID, "durable", durable, "err", err)
+		return
+	}
+	logger.Info("facet purge: sync durable reaped", "identityId", identityID, "durable", durable)
 }
 
 // engineFleetSnapshot is a read-only point-in-time summary of every engine

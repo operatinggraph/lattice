@@ -6,9 +6,11 @@ import (
 	"encoding/json"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 	"go.etcd.io/bbolt"
+	bbolterrors "go.etcd.io/bbolt/errors"
 
 	"github.com/operatinggraph/lattice/internal/edge/store"
 	"github.com/operatinggraph/lattice/internal/edge/store/storetest"
@@ -130,4 +132,33 @@ func TestOpen_PurgesMirrorOnSchemaMismatch(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, ok, "a stable-version reopen must not re-purge an entry written after migration")
 	require.Equal(t, uint64(1), entry.Revision)
+}
+
+// TestOpen_SecondHolderFailsRatherThanHanging pins the bounded file lock.
+// bbolt's default is to wait forever, which turns a second opener of one
+// identity's mirror — two concurrent engine builds, or a sign-out purge
+// racing a re-login — into a permanently stuck caller instead of a failed
+// one. The host must get an error it can log and move past.
+func TestOpen_SecondHolderFailsRatherThanHanging(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "mirror.db")
+	first, err := store.Open(path)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = first.Close() })
+
+	done := make(chan error, 1)
+	go func() {
+		second, err := store.Open(path)
+		if err == nil {
+			_ = second.Close()
+		}
+		done <- err
+	}()
+
+	select {
+	case err := <-done:
+		require.ErrorIs(t, err, bbolterrors.ErrTimeout, "a contended mirror must time out, not block")
+	case <-time.After(30 * time.Second):
+		t.Fatal("store.Open blocked on the file lock instead of timing out")
+	}
 }

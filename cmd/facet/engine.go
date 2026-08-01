@@ -53,6 +53,15 @@ type engine struct {
 // + agent drain loop. ctx bounds the engine's background goroutines; callers
 // must call Close to stop them and release the store/connection.
 //
+// deviceID names the durable consumer this engine's delta feed resumes from.
+// An EMPTY deviceID means "this host is the device": one is resolved from —
+// and persisted into — identityID's own local store, so every engine this
+// host ever builds for that identity binds the SAME durable. That is the
+// server-hosted mirror of what the in-page engine already does with
+// localStorage (web/boot.mjs's resolveDeviceId). A caller that supplies one
+// (enginemanager.Seed, from EDGE_DEVICE_ID) owns the id and it is used
+// verbatim.
+//
 // tokenSource, when non-nil, re-mints a fresh credential for identityID on
 // every NATS (re)connect attempt and every Gateway submit — the engine can
 // outlive the login-time JWT's TTL (engineManager's warm-resume idle window
@@ -70,6 +79,13 @@ func newEngine(ctx context.Context, cfg engineConfig, identityID, deviceID, toke
 	st, err := store.Open(storePath)
 	if err != nil {
 		return nil, err
+	}
+	if deviceID == "" {
+		deviceID, err = resolveDeviceID(st)
+		if err != nil {
+			_ = st.Close()
+			return nil, err
+		}
 	}
 
 	connOpts := substrate.ConnectOpts{

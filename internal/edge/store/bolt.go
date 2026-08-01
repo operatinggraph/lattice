@@ -7,6 +7,7 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
+	"time"
 
 	"go.etcd.io/bbolt"
 	bbolterrors "go.etcd.io/bbolt/errors"
@@ -47,9 +48,18 @@ type BoltStore struct {
 
 var _ Store = (*BoltStore)(nil)
 
+// openLockTimeout bounds how long Open waits for the file lock bbolt takes on
+// the mirror. bbolt's default is to block FOREVER, which turns any second
+// opener of one identity's mirror — two concurrent first-time engine builds,
+// or a sign-out purge racing a re-login — into a permanently hung caller
+// rather than a failed one. A host request must fail loudly instead.
+const openLockTimeout = 2 * time.Second
+
 // Open opens (creating if absent) the bbolt-backed local VAL store at path.
+// Only one holder at a time: a mirror already open (in this process or
+// another) fails with bbolt/errors.ErrTimeout after openLockTimeout.
 func Open(path string) (*BoltStore, error) {
-	db, err := bbolt.Open(path, 0o600, nil)
+	db, err := bbolt.Open(path, 0o600, &bbolt.Options{Timeout: openLockTimeout})
 	if err != nil {
 		return nil, fmt.Errorf("edge/store: open %q: %w", path, err)
 	}

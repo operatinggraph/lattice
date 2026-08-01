@@ -197,7 +197,7 @@ func newSyncTestConn(t *testing.T, ctx context.Context) *substrate.Conn {
 	require.NoError(t, err)
 	t.Cleanup(conn.Close)
 	require.NoError(t, conn.EnsureStream(ctx, substrate.StreamSpec{
-		Name:     defaultStream,
+		Name:     DefaultStream,
 		Subjects: []string{defaultSubjectPrefix + ".>"},
 	}))
 	return conn
@@ -258,7 +258,7 @@ func startControlService(t *testing.T, ctx context.Context, conn *substrate.Conn
 	// on the control host's own connection, mirroring cmd/refractor's
 	// IsPersonalLens wiring — so gapped() gets a real gap answer over the RPC.
 	svc.SetSyncFirstSeq(func(ctx context.Context) (uint64, error) {
-		s, err := conn.JetStream().Stream(ctx, defaultStream)
+		s, err := conn.JetStream().Stream(ctx, DefaultStream)
 		if err != nil {
 			return 0, err
 		}
@@ -345,7 +345,7 @@ func TestManager_EnsureFresh_WarmCursorSkipsHydrate(t *testing.T) {
 	conn := newSyncTestConn(t, ctx)
 	interestKV := openInterestKV(t, ctx, conn)
 
-	s, err := conn.JetStream().Stream(ctx, defaultStream)
+	s, err := conn.JetStream().Stream(ctx, DefaultStream)
 	require.NoError(t, err)
 	firstSeq := s.CachedInfo().State.FirstSeq
 
@@ -376,7 +376,7 @@ func TestManager_EnsureFresh_GapTriggersHydrate(t *testing.T) {
 	// publishes deterministically advances FirstSeq past an old cursor —
 	// no need to wait out a MaxAge timer.
 	_, err = conn.JetStream().CreateOrUpdateStream(ctx, jetstream.StreamConfig{
-		Name:     defaultStream,
+		Name:     DefaultStream,
 		Subjects: []string{defaultSubjectPrefix + ".>"},
 		MaxMsgs:  1,
 	})
