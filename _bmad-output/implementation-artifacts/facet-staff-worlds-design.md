@@ -1113,3 +1113,33 @@ not become the box's standing state). If the live logs show U's event never even
 the gap is upstream (adjacency/CDC delivery); if it reaches `executeFullForActor` but the write is lost,
 the gap is in the write path itself (a lost/overwritten `Put`, an `expectedRevision` mismatch racing D's
 own commit). Either finding is a fix-sized scope; this fire stops at the finding.
+
+## 13.8 RESOLVED — nothing is dropped: the grant projects on the first evaluation that RUNS after the link lands, and the 5s assertion loses to the lens's queue depth (Winston, 2026-08-01)
+
+The §13.7 invasive-instrumentation step was never needed — standard `pipeline: processed` logs plus
+Capability-KV reads on the demo box (redeployed to `e1299696` the same morning: AckWait 5min + the
+footprint campaign; Refractor RSS 57 MB, box quiet) settled it.
+
+**Live evidence, `make test-claim-ceremony` ×5 on the box (2026-08-01 ~21:47–21:51Z), 4 FAIL / 1 PASS
+on the U-grant step — and every "failed" grant was PRESENT in `capability-kv` minutes later.** Nothing
+was ever lost; the 07-29 "never appears" was the same lag observed through a 5-second window, storm-era
+deep. Run-1 timeline (`vtx.identity.HA3XT8wvWN9QSSXfRRJC`): 66 sibling pipelines processed U's
+`holdsRole` link event at 21:48:50; `capabilityRoles` (7VGR…) — which intakes the broad Core-KV stream
+and evaluated ~2 events/sec through the ceremony's own burst — reached it at 21:49:04 (+14s), and U's
+grant materialized on the first U-evaluation past the link write (~T+11s). Run-5 passed with the SAME
++18s link-event lag because an earlier U-aspect evaluation happened to run (wall-clock) after the link
+write and the walk read the link from Core KV directly: **grant visibility = first evaluation after the
+link lands, not processing of the link event itself.** That single sentence also explains the D/U
+asymmetry (a brand-new D's vertex/aspect events all follow its link, so any of them projects the grant
+in-window) and §13.7's 15/15-clean local harness (one lens, ~30 events, no ambient churn — the queue
+never gets 5s deep).
+
+**Disposition.** The "a live claim's own consumer grant never projects" premise is disproven — closed
+as a projection-latency characteristic, not a defect. What it leaves behind, filed separately: (1) the
+real product question — post-claim auth-grant latency is 5–20s on demo-box hardware because auth-plane
+actorAggregate lenses intake the full broad stream serially (D1 narrowing deliberately excludes them);
+bounding that needs a designed intake/priority change, not a bug fix; (2) `verify-claim-ceremony.go`
+should poll to convergence and REPORT the latency instead of asserting a 5s SLA the platform never
+promised; (3) the constant re-claim drift (want 400, got 403 — auth now rejects before the business
+rule) is its own small item. The one genuine defect this fire produced remains the CLI
+`ContextHint.Reads` fix (`be2172fe`).
