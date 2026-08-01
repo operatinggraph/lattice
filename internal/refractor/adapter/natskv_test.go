@@ -144,6 +144,59 @@ func TestNatsKVAdapter_Upsert_Idempotent(t *testing.T) {
 	assert.Equal(t, "second", got["value"], "expected latest value after two upserts")
 }
 
+// TestNatsKVAdapter_UpsertWithOutcome_IdenticalRowSkipsWrite proves the
+// unguarded skip-if-identical optimization: a second upsert carrying the same
+// marshaled row content as what's already stored is reported as skipped and
+// never bumps the target key's revision (no Put issued).
+func TestNatsKVAdapter_UpsertWithOutcome_IdenticalRowSkipsWrite(t *testing.T) {
+	kv := startKV(t)
+	a := newAdapter(t, kv, []string{"id"})
+	ctx := context.Background()
+	keys := map[string]any{"id": "e1"}
+
+	outcome, err := a.UpsertWithOutcome(ctx, keys, map[string]any{"value": "first"}, 0)
+	require.NoError(t, err)
+	assert.True(t, outcome.Wrote, "first upsert of a new key must write")
+
+	entry1, err := kv.Get(ctx, "e1")
+	require.NoError(t, err)
+
+	outcome, err = a.UpsertWithOutcome(ctx, keys, map[string]any{"value": "first"}, 0)
+	require.NoError(t, err)
+	assert.False(t, outcome.Wrote, "identical row content must be reported as skipped")
+
+	entry2, err := kv.Get(ctx, "e1")
+	require.NoError(t, err)
+	assert.Equal(t, entry1.Revision, entry2.Revision, "identical upsert must not bump the stored revision")
+}
+
+// TestNatsKVAdapter_UpsertWithOutcome_ChangedRowWrites is the companion
+// positive case: a row whose content actually changed must write and bump
+// the revision, and must be reported as such.
+func TestNatsKVAdapter_UpsertWithOutcome_ChangedRowWrites(t *testing.T) {
+	kv := startKV(t)
+	a := newAdapter(t, kv, []string{"id"})
+	ctx := context.Background()
+	keys := map[string]any{"id": "e2"}
+
+	outcome, err := a.UpsertWithOutcome(ctx, keys, map[string]any{"value": "first"}, 0)
+	require.NoError(t, err)
+	require.True(t, outcome.Wrote)
+	entry1, err := kv.Get(ctx, "e2")
+	require.NoError(t, err)
+
+	outcome, err = a.UpsertWithOutcome(ctx, keys, map[string]any{"value": "second"}, 0)
+	require.NoError(t, err)
+	assert.True(t, outcome.Wrote, "changed row content must write")
+
+	entry2, err := kv.Get(ctx, "e2")
+	require.NoError(t, err)
+	assert.Greater(t, entry2.Revision, entry1.Revision, "changed upsert must bump the stored revision")
+	var got map[string]any
+	require.NoError(t, json.Unmarshal(entry2.Value, &got))
+	assert.Equal(t, "second", got["value"])
+}
+
 func TestNatsKVAdapter_Upsert_AbsentKeyField(t *testing.T) {
 	kv := startKV(t)
 	a := newAdapter(t, kv, []string{"id", "account_id"})
@@ -309,6 +362,53 @@ func TestNatsKVAdapter_Guarded_EqualSeqIsNoOp(t *testing.T) {
 	var got map[string]any
 	require.NoError(t, json.Unmarshal(entry.Value, &got))
 	require.Equal(t, "first", got["v"], "equal-seq write must be a no-op")
+}
+
+// TestNatsKVAdapter_Guarded_IdenticalRowStillAdvancesWatermark pins the hard
+// invariant that separates the guarded path from the unguarded
+// skip-if-identical optimization: a guarded upsert must keep writing —
+// including advancing the stored projectionSeq watermark — even when the row
+// content is byte-identical to what's already stored. A guarded write's job
+// is the watermark, not the row; skipping it here would leave the watermark
+// behind, letting a later stale replay of a DIFFERENT row at a lower
+// (but still-unseen) seq pass the monotonic guard.
+func TestNatsKVAdapter_Guarded_IdenticalRowStillAdvancesWatermark(t *testing.T) {
+	kv := startKV(t)
+	a := guardedAdapter(t, kv, []string{"key"})
+	ctx := context.Background()
+	keys := map[string]any{"key": "cap.ephemeral.identity.F"}
+
+	require.NoError(t, a.Upsert(ctx, keys, map[string]any{"grants": "same"}, 5))
+	require.NoError(t, a.Upsert(ctx, keys, map[string]any{"grants": "same"}, 9))
+
+	entry, err := kv.Get(ctx, "cap.ephemeral.identity.F")
+	require.NoError(t, err)
+	var got map[string]any
+	require.NoError(t, json.Unmarshal(entry.Value, &got))
+	assert.Equal(t, float64(9), got["projectionSeq"], "identical-content guarded upsert must still advance the watermark")
+}
+
+// TestNatsKVAdapter_Guarded_UpsertWithOutcome_AlwaysReportsWrote pins the
+// other half of the same invariant at the OutcomeUpserter surface: the
+// guarded path always reports Wrote:true, even through guardedWrite's own
+// internal watermark no-op (an equal-or-lower-seq replay) — that no-op is
+// about seq ordering, never about row content, so it must not be conflated
+// with the unguarded path's content-identical skip.
+func TestNatsKVAdapter_Guarded_UpsertWithOutcome_AlwaysReportsWrote(t *testing.T) {
+	kv := startKV(t)
+	a := guardedAdapter(t, kv, []string{"key"})
+	ctx := context.Background()
+	keys := map[string]any{"key": "cap.ephemeral.identity.G"}
+
+	outcome, err := a.UpsertWithOutcome(ctx, keys, map[string]any{"grants": "x"}, 5)
+	require.NoError(t, err)
+	assert.True(t, outcome.Wrote)
+
+	// Equal seq: guardedWrite's own idempotent no-op branch (unrelated to row
+	// content) — still reported as Wrote:true.
+	outcome, err = a.UpsertWithOutcome(ctx, keys, map[string]any{"grants": "x"}, 5)
+	require.NoError(t, err)
+	assert.True(t, outcome.Wrote, "guarded path always reports Wrote:true, even on its own seq-watermark no-op")
 }
 
 func TestNatsKVAdapter_Unguarded_IgnoresProjectionSeq(t *testing.T) {

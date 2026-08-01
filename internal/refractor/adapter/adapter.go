@@ -111,3 +111,54 @@ type HydrationMarkerPublisher interface {
 type KeySetPublisher interface {
 	PublishKeySet(ctx context.Context, actorID string, keys []map[string]any, revision uint64) error
 }
+
+// UpsertOutcome reports what one OutcomeUpserter.UpsertWithOutcome call
+// actually did to the target store.
+type UpsertOutcome struct {
+	// Wrote is true when the call performed a real write (a Put, or — for a
+	// guarded adapter — the guardedWrite CAS path, which always reports true
+	// regardless of its own internal watermark no-op branches). False only
+	// when an unguarded write was skipped because the marshaled row was
+	// already byte-identical to what's currently stored.
+	Wrote bool
+}
+
+// OutcomeUpserter is an optional interface for adapters whose Upsert can
+// report, as part of the same call, whether the write actually landed or was
+// skipped as a content-identical no-op. Implemented by NatsKVAdapter: its
+// unguarded path reads the current value back before writing and skips the
+// Put when nothing changed (natskv.go's upsert) — an unanchored lens rewrites
+// its full row set on every trigger, and most of those rewrites touch no
+// actual row content, so the skip saves a Put plus that Put's CDC fan-out
+// (the target bucket's watchers re-notifying) whenever it fires.
+//
+// The pipeline's write-audit step (writeResults) type-asserts for this and
+// skips WriteAudit when Wrote is false: an unchanged row is not a new audit
+// fact. An adapter that does not implement it — or a Delete, which this
+// interface deliberately does not cover — is always treated as having
+// written, the historical behavior every caller already gets from plain
+// Upsert.
+//
+// This is a sibling method rather than a stateful "last write" flag read back
+// off the adapter after the fact: NatsKVAdapter is shared between the
+// pipeline's main consumer goroutine and the RetryQueue's own dedicated
+// goroutine (failure.RetryQueue.Run runs on exactly one goroutine, separate
+// from the consumer's), and either can call Upsert on the same adapter
+// concurrently for a different key. A flag set inside one call and read back
+// by its caller afterward could be clobbered by the other goroutine's call in
+// between, misattributing the outcome to the wrong write. Returning the
+// outcome from the call itself has no such window.
+//
+// Go-embedding trap for a test double: a type that embeds *NatsKVAdapter to
+// promote its other methods (GetRow, ListKeysPrefix, Guarded, …) and
+// overrides only Upsert to inject test behavior will still have
+// UpsertWithOutcome promoted straight through to the embedded adapter — it is
+// a separate method, so overriding one does not touch the other. A caller
+// that prefers UpsertWithOutcome (writeResults does) would then silently
+// bypass the override. A test double that overrides Upsert must override
+// UpsertWithOutcome the same way (see pipeline's perEntryRetryAdapter /
+// partialFailAdapter for the pattern: both route through one shared
+// unexported method).
+type OutcomeUpserter interface {
+	UpsertWithOutcome(ctx context.Context, keys map[string]any, row map[string]any, projectionSeq uint64) (UpsertOutcome, error)
+}

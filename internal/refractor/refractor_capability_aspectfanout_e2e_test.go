@@ -121,6 +121,16 @@ func TestRefractor_CapabilityLens_AspectFanOut_E2E(t *testing.T) {
 	rolesDesc := descFromPkgSpec(t, rolesSpec)
 	capAdpt, err := adapter.New(capTargetKV, []string{"key"}, adapter.DeleteModeHard)
 	require.NoError(t, err)
+	// capabilityRoles is an AuthPlane lens (targets capability-kv), so
+	// production always guards its writes (projection.InstallActorAggregate /
+	// EnableProjectionGuard) — mirrored here rather than left the default
+	// unguarded, since this test's whole observability technique is the
+	// revision bump on a reprojection whose CONTENT never changes (see the
+	// file doc comment): only a guarded write's Contract #6 §6.2 watermark
+	// advance writes unconditionally on every real trigger regardless of row
+	// content; an unguarded write would correctly skip the identical rewrite
+	// (natskv.go's upsert) and the revision would never bump.
+	capAdpt.SetGuarded(true)
 
 	const rolesLensID = "AspFanRolesLens00001"
 	capP, err := pipeline.New(rolesLensID, "nats_kv",

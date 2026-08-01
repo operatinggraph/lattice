@@ -1,6 +1,7 @@
 package adapter
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -19,6 +20,7 @@ var _ KeyLister = (*NatsKVAdapter)(nil)
 var _ PrefixKeyLister = (*NatsKVAdapter)(nil)
 var _ RowReader = (*NatsKVAdapter)(nil)
 var _ SeqGuarded = (*NatsKVAdapter)(nil)
+var _ OutcomeUpserter = (*NatsKVAdapter)(nil)
 
 // guardCASMaxAttempts caps the conditional-write retry loop a guarded adapter
 // runs when a concurrent writer (the retry-queue goroutine) collides on the
@@ -128,28 +130,69 @@ func (a *NatsKVAdapter) buildKey(keys map[string]any) (string, error) {
 }
 
 // Upsert serializes row to JSON and writes it to the KV bucket under the
-// constructed key. An unguarded adapter writes unconditionally (idempotent
-// last-writer-wins, ignoring projectionSeq). A guarded adapter writes
-// conditionally: it drops the write as an idempotent no-op when a write with an
-// equal-or-higher projectionSeq already landed, and otherwise stamps
-// projectionSeq into the persisted body and commits via a CAS loop so a lower-seq
-// replay can never overwrite a newer projection (Contract #6 §6.2).
+// constructed key. An unguarded adapter writes conditionally on row content
+// (see upsert). A guarded adapter writes conditionally on the projectionSeq
+// watermark instead: it drops the write as an idempotent no-op when a write
+// with an equal-or-higher projectionSeq already landed, and otherwise stamps
+// projectionSeq into the persisted body and commits via a CAS loop so a
+// lower-seq replay can never overwrite a newer projection (Contract #6 §6.2).
 func (a *NatsKVAdapter) Upsert(ctx context.Context, keys map[string]any, row map[string]any, projectionSeq uint64) error {
+	_, err := a.upsert(ctx, keys, row, projectionSeq)
+	return err
+}
+
+// UpsertWithOutcome is Upsert plus a report of whether the call actually
+// wrote (adapter.OutcomeUpserter) — the pipeline's write-audit step
+// (writeResults) type-asserts for this so an unchanged row skips WriteAudit
+// too, since an unchanged row is not a new audit fact.
+func (a *NatsKVAdapter) UpsertWithOutcome(ctx context.Context, keys map[string]any, row map[string]any, projectionSeq uint64) (UpsertOutcome, error) {
+	return a.upsert(ctx, keys, row, projectionSeq)
+}
+
+// upsert is the shared implementation behind Upsert and UpsertWithOutcome.
+func (a *NatsKVAdapter) upsert(ctx context.Context, keys map[string]any, row map[string]any, projectionSeq uint64) (UpsertOutcome, error) {
 	key, err := a.buildKey(keys)
 	if err != nil {
-		return fmt.Errorf("natskv upsert: %w", err)
+		return UpsertOutcome{}, fmt.Errorf("natskv upsert: %w", err)
 	}
 	if a.guarded {
-		return a.guardedWrite(ctx, key, row, projectionSeq, false)
+		// Always reports Wrote:true, even through guardedWrite's own internal
+		// no-op branches (a stale-or-equal stored seq, or the sequence-less
+		// fail-closed drop): advancing — or deliberately holding — the
+		// projectionSeq watermark is this path's job on every call regardless
+		// of row content, so it must never gain a row-content skip the way the
+		// unguarded path below has. An identical-row skip that also skipped
+		// the watermark write would leave the stored seq behind, and a later
+		// stale replay of a DIFFERENT row at a lower (but still-unseen-by-this-
+		// key) seq could then pass the monotonic guard that watermark exists
+		// to block.
+		if err := a.guardedWrite(ctx, key, row, projectionSeq, false); err != nil {
+			return UpsertOutcome{}, err
+		}
+		return UpsertOutcome{Wrote: true}, nil
 	}
 	data, err := json.Marshal(row)
 	if err != nil {
-		return fmt.Errorf("natskv upsert: marshal row: %w", err)
+		return UpsertOutcome{}, fmt.Errorf("natskv upsert: marshal row: %w", err)
+	}
+	// Read-before-write: one extra KV read on every unguarded upsert, spent to
+	// possibly avoid a Put — which also skips that Put's CDC fan-out (the
+	// target bucket's watchers, e.g. Weaver, re-notifying) and, via
+	// UpsertOutcome, the pipeline's audit publish. This pays off exactly when
+	// an unanchored lens rewrites its full row set on a trigger that left this
+	// particular row's content unchanged. json.Marshal sorts map keys
+	// (guaranteed since Go 1.12), so two calls carrying logically-equal rows
+	// always marshal to the same bytes. A failed or absent read
+	// (ErrKeyNotFound, or any other error) can't prove identity either way, so
+	// it falls through to the unconditional Put — the same behavior this
+	// method had before it compared anything.
+	if current, getErr := a.kv.Get(ctx, key); getErr == nil && bytes.Equal(current.Value, data) {
+		return UpsertOutcome{Wrote: false}, nil
 	}
 	if _, err := a.kv.Put(ctx, key, data); err != nil {
-		return fmt.Errorf("natskv upsert: put %s: %w", key, err)
+		return UpsertOutcome{}, fmt.Errorf("natskv upsert: put %s: %w", key, err)
 	}
-	return nil
+	return UpsertOutcome{Wrote: true}, nil
 }
 
 // Delete projects a Core KV deletion into the target KV bucket. The behavior is

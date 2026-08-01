@@ -25,6 +25,17 @@ import (
 // Rows whose operationType is null/empty are dropped (ErrSkipProjection) —
 // the executor's `collect` over zero MATCH bindings produces such rows
 // when the CDC event doesn't touch a role/permission grant.
+//
+// projectedAt here is the triggering event's provenance timestamp
+// (evaluate.go's $projectedAt param, derived from whichever vertex committed
+// and caused this particular re-evaluation) rather than a property of the
+// row's own content, so it differs across most triggers even when
+// operationType/roles didn't change — defeating NatsKVAdapter's
+// byte-identical-row skip (natskv.go's upsert) for this lens. This is this
+// lens's own unguarded target (cap.role-by-operation.* is keyed by
+// operationType, not by actor, so Contract #6 §6.2/§6.3 don't require the
+// guard) writing on every real trigger rather than only on an actual
+// roles-list change — a missed optimization, not a correctness issue.
 func NewRoleIndexWrapper() pipeline.EnvelopeFn {
 	return func(row map[string]any, keys map[string]any, params map[string]any) (map[string]any, map[string]any, error) {
 		op, _ := row["operationType"].(string)

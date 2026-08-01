@@ -1307,6 +1307,9 @@ func (p *Pipeline) dispositionEvalErr(ctx context.Context, msg substrate.Message
 // the write it is supposed to describe.
 func (p *Pipeline) writeResults(ctx context.Context, msg substrate.Message, key string, results []ruleengine.EvalResult, enumeratedActors []string) (substrate.Decision, error) {
 	adpt := p.currentAdapter()
+	// Resolved once per call — adpt itself is captured once above, so whether
+	// it reports upsert outcomes cannot change across this call's loop.
+	outcomeAdpt, reportsOutcome := adpt.(adapter.OutcomeUpserter)
 	var retryResults []ruleengine.EvalResult
 	var terminalErrs []error
 	transientActorRetry := false
@@ -1319,8 +1322,13 @@ func (p *Pipeline) writeResults(ctx context.Context, msg substrate.Message, key 
 	}
 	for _, result := range results {
 		var writeErr error
+		wrote := true
 		if result.Delete {
 			writeErr = adpt.Delete(ctx, result.Keys, result.ProjectionSeq)
+		} else if reportsOutcome {
+			var outcome adapter.UpsertOutcome
+			outcome, writeErr = outcomeAdpt.UpsertWithOutcome(ctx, result.Keys, result.Row, result.ProjectionSeq)
+			wrote = outcome.Wrote
 		} else {
 			writeErr = adpt.Upsert(ctx, result.Keys, result.Row, result.ProjectionSeq)
 		}
@@ -1377,7 +1385,9 @@ func (p *Pipeline) writeResults(ctx context.Context, msg substrate.Message, key 
 		}
 
 		p.recordProjected()
-		p.writeAudit(ctx, key, result)
+		if wrote {
+			p.writeAudit(ctx, key, result)
+		}
 	}
 
 	for _, terr := range terminalErrs {

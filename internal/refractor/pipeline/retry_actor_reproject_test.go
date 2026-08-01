@@ -16,11 +16,16 @@ import (
 )
 
 // perEntryRetryAdapter wraps a real guarded multi-entry target adapter,
-// failing the FIRST Upsert call with a transient error and delegating every
+// failing the FIRST upsert call with a transient error and delegating every
 // call after that to the embedded adapter. Embeds the CONCRETE
 // *adapter.NatsKVAdapter (not the adapter.Adapter interface) so GetRow /
-// ListKeysPrefix / Guarded promote automatically — only Upsert is overridden.
-// Records every Upsert call's (keys, seq) for inspection.
+// ListKeysPrefix / Guarded promote automatically. Upsert AND UpsertWithOutcome
+// are both overridden — one Go-embedding pitfall this fixture must avoid: they
+// are two separate promoted methods, so overriding only Upsert would leave
+// UpsertWithOutcome (adapter.OutcomeUpserter) promoted straight through to the
+// embedded adapter, silently skipping the injected failure for any caller —
+// writeResults included — that prefers UpsertWithOutcome when available.
+// Records every upsert call's (keys, seq) for inspection.
 type perEntryRetryAdapter struct {
 	*adapter.NatsKVAdapter
 	mu         sync.Mutex
@@ -29,15 +34,24 @@ type perEntryRetryAdapter struct {
 }
 
 func (a *perEntryRetryAdapter) Upsert(ctx context.Context, keys, row map[string]any, seq uint64) error {
+	_, err := a.upsertRecording(ctx, keys, row, seq)
+	return err
+}
+
+func (a *perEntryRetryAdapter) UpsertWithOutcome(ctx context.Context, keys, row map[string]any, seq uint64) (adapter.UpsertOutcome, error) {
+	return a.upsertRecording(ctx, keys, row, seq)
+}
+
+func (a *perEntryRetryAdapter) upsertRecording(ctx context.Context, keys, row map[string]any, seq uint64) (adapter.UpsertOutcome, error) {
 	a.mu.Lock()
 	a.upserts = append(a.upserts, recordedWrite{keys: keys, row: row, seq: seq})
 	first := !a.failedOnce
 	a.failedOnce = true
 	a.mu.Unlock()
 	if first {
-		return errors.New("injected: transient upsert failure")
+		return adapter.UpsertOutcome{}, errors.New("injected: transient upsert failure")
 	}
-	return a.NatsKVAdapter.Upsert(ctx, keys, row, seq)
+	return a.NatsKVAdapter.UpsertWithOutcome(ctx, keys, row, seq)
 }
 
 // TestWriteResults_PerEntryLens_TransientFailure_ReevaluatesActorNotRawReplay
@@ -232,8 +246,12 @@ func TestReproject_PerEntryLens_NoLongerRefusedAsNotActorAggregate(t *testing.T)
 }
 
 // partialFailAdapter wraps a real guarded multi-entry target adapter,
-// failing every Upsert call whose key equals alwaysFailKey and delegating
-// every other call to the embedded adapter.
+// failing every upsert call whose key equals alwaysFailKey and delegating
+// every other call to the embedded adapter. Upsert AND UpsertWithOutcome are
+// both overridden for the same reason perEntryRetryAdapter overrides both:
+// they promote independently from the embedded *adapter.NatsKVAdapter, so a
+// caller preferring UpsertWithOutcome would otherwise bypass this fixture's
+// fault injection entirely.
 type partialFailAdapter struct {
 	*adapter.NatsKVAdapter
 	alwaysFailKey string
@@ -242,13 +260,22 @@ type partialFailAdapter struct {
 }
 
 func (a *partialFailAdapter) Upsert(ctx context.Context, keys, row map[string]any, seq uint64) error {
+	_, err := a.upsertRecording(ctx, keys, row, seq)
+	return err
+}
+
+func (a *partialFailAdapter) UpsertWithOutcome(ctx context.Context, keys, row map[string]any, seq uint64) (adapter.UpsertOutcome, error) {
+	return a.upsertRecording(ctx, keys, row, seq)
+}
+
+func (a *partialFailAdapter) upsertRecording(ctx context.Context, keys, row map[string]any, seq uint64) (adapter.UpsertOutcome, error) {
 	a.mu.Lock()
 	a.upserts = append(a.upserts, recordedWrite{keys: keys, row: row, seq: seq})
 	a.mu.Unlock()
 	if k, _ := keys["key"].(string); k == a.alwaysFailKey {
-		return errors.New("injected: deterministic upsert failure")
+		return adapter.UpsertOutcome{}, errors.New("injected: deterministic upsert failure")
 	}
-	return a.NatsKVAdapter.Upsert(ctx, keys, row, seq)
+	return a.NatsKVAdapter.UpsertWithOutcome(ctx, keys, row, seq)
 }
 
 // TestReproject_PartialFailure_AttemptsAllAndJoinsErrors proves the §4.3 fix

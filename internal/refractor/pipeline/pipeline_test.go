@@ -54,6 +54,7 @@ const (
 	sentinelAgreementMp2    = "TsntPagreementMp2222" // was node_agreement_mp2
 	sentinelAgreementRi1    = "TsntQagreementRi1111" // was node_agreement_ri1
 	sentinelAgreementRbp1   = "TsntRagreementRbp111"
+	sentinelAgreementSame1  = "TsntSagreementSame11"
 )
 
 // pipelineEnv holds all resources for a pipeline integration test.
@@ -1056,6 +1057,99 @@ func TestPipeline_NoAuditEntry_OnWriteFailure(t *testing.T) {
 	info, err := stream.Info(context.Background())
 	require.NoError(t, err)
 	assert.Equal(t, uint64(0), info.State.Msgs, "audit stream must be empty when all writes fail")
+}
+
+// TestPipeline_WriteAudit_SkipsIdenticalUpsertButAuditsOnChange exercises the
+// full write path end to end against a real unguarded NatsKVAdapter and a
+// real audit stream (adapter.OutcomeUpserter wired through writeResults). A
+// content-identical re-upsert — the shape an unanchored lens's full-row-set
+// rewrite produces on a trigger that never actually touched this particular
+// row — must publish no second audit entry and must not bump the target
+// key's revision. A subsequent upsert that actually changes the row's
+// content must write and audit normally.
+func TestPipeline_WriteAudit_SkipsIdenticalUpsertButAuditsOnChange(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping NATS integration test in short mode")
+	}
+	env := startPipelineEnv(t)
+	ctx := context.Background()
+
+	const ruleID = "audit-identical-rule"
+	eng, cr := compileFullRule(t,
+		"MATCH (n:agreement {key: $actorKey}) RETURN n.id AS agreement_id, n.status AS status",
+		[]string{"agreement_id"})
+	targetKV, adpt := newTargetKV(t, env, "TARGET-AUDIT-IDENTICAL", []string{"agreement_id"})
+
+	p, err := pipeline.New(ruleID, "nats_kv", coreKVBucket,
+		env.adjKV, env.coreKV, adpt, nil)
+	require.NoError(t, err)
+	p.UseFullEngine(eng, cr)
+
+	require.NoError(t, health.EnsureAuditStream(ctx, env.conn))
+	p.SetAuditWriter(health.NewAuditWriter(env.conn, ruleID))
+
+	startPipeline(t, env, p, ruleID)
+
+	auditCons, err := env.js.CreateOrUpdateConsumer(ctx, health.AuditStreamName, jetstream.ConsumerConfig{
+		Name:          "pipeline-audit-identical-test-consumer",
+		FilterSubject: subjects.Audit(ruleID),
+		DeliverPolicy: jetstream.DeliverAllPolicy,
+		AckPolicy:     jetstream.AckNonePolicy,
+	})
+	require.NoError(t, err)
+
+	// First put: a fresh row must write and audit.
+	putNode(t, env.coreKV, "vtx.agreement."+sentinelAgreementSame1, map[string]any{"id": "same1", "status": "open"})
+	pollUntil(t, 3*time.Second, func() bool {
+		return p.Progress().LastAppliedSeq > 0
+	})
+	seqAfterFirst := p.Progress().LastAppliedSeq
+
+	msg, err := auditCons.Next(jetstream.FetchMaxWait(3 * time.Second))
+	require.NoError(t, err, "first upsert must publish an audit entry")
+	var entry health.AuditEntry
+	require.NoError(t, json.Unmarshal(msg.Data(), &entry))
+	assert.Equal(t, "upsert", entry.Operation)
+
+	entryAfterFirst, err := targetKV.Get(ctx, "same1")
+	require.NoError(t, err)
+
+	// Second put: the SAME node body. Core KV bumps revision and publishes a
+	// fresh CDC event on every Put regardless of content, so this triggers a
+	// second, independent pipeline evaluation projecting the identical row.
+	putNode(t, env.coreKV, "vtx.agreement."+sentinelAgreementSame1, map[string]any{"id": "same1", "status": "open"})
+	pollUntil(t, 3*time.Second, func() bool {
+		return p.Progress().LastAppliedSeq > seqAfterFirst
+	})
+	seqAfterSecond := p.Progress().LastAppliedSeq
+
+	entryAfterSecond, err := targetKV.Get(ctx, "same1")
+	require.NoError(t, err)
+	assert.Equal(t, entryAfterFirst.Revision, entryAfterSecond.Revision,
+		"identical second upsert must not bump the target key's revision")
+
+	_, err = auditCons.Next(jetstream.FetchMaxWait(500 * time.Millisecond))
+	require.Error(t, err, "identical second upsert must not publish a second audit entry")
+
+	// Third put: an actual content change (status flips) on the SAME target
+	// key must write and audit again.
+	putNode(t, env.coreKV, "vtx.agreement."+sentinelAgreementSame1, map[string]any{"id": "same1", "status": "closed"})
+	pollUntil(t, 3*time.Second, func() bool {
+		return p.Progress().LastAppliedSeq > seqAfterSecond
+	})
+
+	entryAfterThird, err := targetKV.Get(ctx, "same1")
+	require.NoError(t, err)
+	assert.Greater(t, entryAfterThird.Revision, entryAfterSecond.Revision,
+		"changed row content must bump the target key's revision")
+	var gotRow map[string]any
+	require.NoError(t, json.Unmarshal(entryAfterThird.Value, &gotRow))
+	assert.Equal(t, "closed", gotRow["status"])
+
+	msg, err = auditCons.Next(jetstream.FetchMaxWait(3 * time.Second))
+	require.NoError(t, err, "changed upsert must publish a new audit entry")
+	require.NoError(t, json.Unmarshal(msg.Data(), &entry))
+	assert.Equal(t, "upsert", entry.Operation)
 }
 
 // TestPipeline_SetLagPoller_StartsMetricsPublishing verifies that when SetLagPoller is
