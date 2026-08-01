@@ -326,6 +326,28 @@ tombstones. **Capability KV is a lens projection** (projection correctness = aut
   just without Y"* or *"just project it per-row"* — every one of those is a hypothesis about a mechanism
   you have not opened.
 
+- **A soundness claim is only as good as the MATCHER you read — never call a narrowing "provable" from
+  the AST alone, and never cite a comment as a ledger fact.** When a design's safety rests on *"an event
+  on X can never reach Y"*, the authority is the code that **decides** reachability at runtime, not the
+  declaration you derived the set from. Three faces of the same slip, all caught in one adversarial pass
+  (2026-08-01, the auth-plane-latency design): (1) I proved "a label outside the referenced set cannot
+  bind" from **key shapes**, but `executor.go`'s `nodeMatches` also admits a vertex whose **body**
+  `class`/`label` equals the pattern label — the key type is not the only binder. (2) I trusted
+  `ReferencedLabels`' `exhaustive` flag as "one derivation, not independently fallible", but it collects
+  labeled variables **globally** while the executor drops unprojected variables at every `WITH` — so a
+  drop-and-re-reference reports exhaustive while re-seeding through an any-type scan. (3) My grounding
+  ledger cited a **doc comment** (`sweep.go`'s "every non-auth-plane lens") that `driver.go` contradicts,
+  and a whole §-level argument rested on it. **The checks:** for any "can only be reached via" claim, open
+  the matcher/binder and enumerate *every* branch that admits; for any derived set, ask *what does the
+  consumer do that the deriver doesn't model*; and pin every ledger row to the code that **does** the
+  thing, never the comment that describes it. Corollary for any index or gate you introduce: the language
+  usually allows the same construct in **other syntactic positions** (a relationship hop inside
+  `WHERE NOT (…)` or a RETURN pattern-comprehension, not just in `MATCH`) — build the index over every
+  source the existing derivation already walks, and make "not found" distinguishable from "not indexable"
+  with an explicit `complete` flag, or the skip silently under-approximates. When the invariant turns out
+  to be real-but-unenforced, the gate ships in the same design (the lint doctrine above) — and say plainly
+  that the shipped mechanism you are extending has been assuming it too.
+
 **Run the pre-build gates you write into your own designs — "ratified" ≠ "build-ready."** If a design
 self-flags a pre-build adversarial / `bmad-party-mode` pass (a deferred gate), that pass is a **Designer-lane
 obligation**: run it and **record it as run** before the design is build-ready. Do not leave it dangling for
