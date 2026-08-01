@@ -38,7 +38,7 @@ func Lenses() []pkgmgr.LensSpec {
 			Output: &pkgmgr.OutputDescriptorSpec{
 				AnchorType:       "tab",
 				OutputKeyPattern: TabSettlementTarget + ".{actorSuffix}",
-				BodyColumns:      []string{"violating", "missing_account", "missing_charge", "entityKey", "tabKey", "leaseAppKey", "accountKey", "totalCents", "status", "openedAt", "settledAt"},
+				BodyColumns:      []string{"violating", "missing_account", "missing_charge", "entityKey", "tabKey", "leaseAppKey", "accountKey", "totalCents", "itemsMemo", "status", "openedAt", "settledAt"},
 				EmptyBehavior:    "delete",
 				KeyColumn:        "entityId",
 				Freshness:        "auto",
@@ -184,12 +184,19 @@ RETURN
 //   - `missing_charge` — the tab is settled, owes money, the account exists,
 //     and no cafetransaction `settles` this tab yet (count(tx.key) collapses
 //     the fan to a single existence check — the objectLiveness/clauseSatisfaction
-//     idiom). Weaver dispatches DebitAccount{accountKey, amountCents, tabRef}
+//     idiom). Weaver dispatches DebitAccount{accountKey, amountCents, memo, tabRef}
 //     (cafe-ledger, targets.go) — the tabRef extension writes the settles
 //     audit link this OPTIONAL MATCH walks, so once posted the gap converges
 //     and stays converged (a tab is settled exactly once — Settle rejects a
 //     second call with TabNotOpen — so there is no re-open path to guard,
 //     unlike semantic-contracts' recurring-clause freshness lane).
+//
+// `itemsMemo` is a plain scalar pass-through of `t.status.data.itemsMemo`
+// (ddls.go's tab DDL builds it, comma-joined, as Charge/VoidCharge run) —
+// the row column targets.go's missing_charge Params templates straight into
+// DebitAccount's memo field, and cmd/cafe-app renders the same column on the
+// open-tab card, so what a resident sees ordering and what lands on the
+// house-tab ledger entry are the identical string.
 //
 // A tab with totalCents=0 (opened and settled with nothing charged) never
 // violates either gap — no house-tab posting is needed for a zero-amount
@@ -208,6 +215,7 @@ WITH
   t.key AS entityKey,
   t.status.data.value AS status,
   t.status.data.totalCents AS totalCents,
+  t.status.data.itemsMemo AS itemsMemo,
   t.status.data.openedAt AS openedAt,
   t.status.data.settledAt AS settledAt,
   l.key AS leaseAppKey,
@@ -220,6 +228,7 @@ RETURN
   leaseAppKey,
   accountKey,
   totalCents,
+  itemsMemo,
   status,
   openedAt,
   settledAt,

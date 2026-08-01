@@ -15,8 +15,9 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 //     on Target injection (Target only ever sets AuthContext.Target for
 //     auth-path scoping, it is NEVER merged into the op payload).
 //   - missing_charge → directOp(DebitAccount) (cafe-ledger) over the now-real
-//     account, posting the tab's total with the tabRef back-link so the
-//     lens's settles OPTIONAL MATCH converges the gap.
+//     account, posting the tab's total (+ its itemsMemo as the ledger entry's
+//     memo, lenses.go) with the tabRef back-link so the lens's settles
+//     OPTIONAL MATCH converges the gap.
 func WeaverTargets() []pkgmgr.WeaverTargetSpec {
 	return []pkgmgr.WeaverTargetSpec{
 		{
@@ -40,7 +41,7 @@ func WeaverTargets() []pkgmgr.WeaverTargetSpec {
 					// DebitAccount is claimed by 4 installed ledger DDLs — pin the
 					// vertexType DDL this target dispatches to (see missing_account).
 					Class:  "cafetransaction",
-					Params: map[string]string{"accountKey": "row.accountKey", "amountCents": "row.totalCents", "tabRef": "row.tabKey"},
+					Params: map[string]string{"accountKey": "row.accountKey", "amountCents": "row.totalCents", "memo": "row.itemsMemo", "tabRef": "row.tabKey"},
 					Reads:  []string{"row.accountKey", "row.tabKey"},
 				},
 			},

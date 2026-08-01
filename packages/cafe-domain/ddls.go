@@ -59,13 +59,19 @@ func tabVertexTypeDDL() pkgmgr.DDLSpec {
 			"derived from the referenced menuItem's own .price.priceCents, never trusted from the caller (the " +
 			"menuItem catalog this DDL's sibling exists to bound a charge against), and the item must be served at " +
 			"the tab's own building (location_covers against the item's servedAt link) whichever caller names it. " +
+			"Every Charge also appends the charged item's name (the menu item's own .price.name, or the caller's " +
+			"optional description for an off-menu charge, defaulting to \"Off-menu charge\") to .status.itemsMemo, a " +
+			"comma-joined running line so a tab (open or settled) shows what was actually rung up, not just the " +
+			"total; a repeated identical name in the memo is exactly what a duplicate tap looks like. " +
 			"VoidCharge{tabKey, amountCents} (operator/frontOfHouse only — no self-service grant, a POS correction " +
 			"is a staff decision even when " +
 			"reversing a resident's own self-order mis-tap) subtracts a positive amount from an OPEN tab's running " +
 			"total, same OCC-conditioned upsert as Charge, clamped at 0 rather than rejected when the void exceeds " +
-			"the current total (an over-void is a caller mistake worth correcting cleanly, not a hard failure). " +
+			"the current total (an over-void is a caller mistake worth correcting cleanly, not a hard failure), and " +
+			"appends \"Void correction\" to itemsMemo when it actually reduced the total (a void against an " +
+			"already-0 tab appends nothing — there was no charge to correct). " +
 			"Settle{tabKey} closes an " +
-			"OPEN tab (.status.value → settled, settledAt stamped, totalCents frozen), also OCC-conditioned, and " +
+			"OPEN tab (.status.value → settled, settledAt stamped, totalCents AND itemsMemo frozen), also OCC-conditioned, and " +
 			"tombstones both the lease's cafeOpenTabGuard (so a later OpenTab can claim it again) and the tab's own " +
 			"openFor link (so the tab leaves every resident's edgeEntityTabs read grant, which walks that hop and " +
 			"cannot see the .status aspect the lens tail filters on). chargedTo is deliberately left standing — the " +
@@ -84,7 +90,8 @@ func tabVertexTypeDDL() pkgmgr.DDLSpec {
 			`"tabId":{"type":"string","description":"Optional bare NanoID for the new tab vertex (OpenTab); absent → minted."},` +
 			`"tabKey":{"type":"string","description":"vtx.tab.<NanoID> of an existing tab (Charge/VoidCharge/Settle; required, validated alive + open)."},` +
 			`"amountCents":{"type":"number","description":"The amount in integer cents; required for an off-menu Charge (no menuItemKey — added to the total) or a VoidCharge (subtracted, clamped at 0), must be > 0."},` +
-			`"menuItemKey":{"type":"string","description":"vtx.menuitem.<NanoID> of a live catalog item; amountCents is derived from it, ignoring any caller-supplied amountCents. Required for a self-service Charge; optional for a staff Charge (its absence means an off-menu, hand-keyed amountCents charge)."}},` +
+			`"menuItemKey":{"type":"string","description":"vtx.menuitem.<NanoID> of a live catalog item; amountCents is derived from it, ignoring any caller-supplied amountCents. Required for a self-service Charge; optional for a staff Charge (its absence means an off-menu, hand-keyed amountCents charge)."},` +
+			`"description":{"type":"string","description":"Optional free-text name for an off-menu Charge's line in .status.itemsMemo (no menuItemKey — a catalog item's own name is used instead). Defaults to \"Off-menu charge\" when omitted."}},` +
 			`"required":[]}`,
 		OutputSchema: `{"type":"object","properties":` +
 			`{"primaryKey":{"type":"string","description":"vtx.tab.<NanoID> the operation wrote."}}}`,
@@ -94,30 +101,33 @@ func tabVertexTypeDDL() pkgmgr.DDLSpec {
 			"tabKey":      "Full vtx.tab.<NanoID> key of an existing tab (Charge/VoidCharge/Settle; required, validated alive + class=tab + currently open).",
 			"amountCents": "The amount in integer cents; required for an off-menu Charge (must be a positive number, added to the tab's running .status.totalCents) or a VoidCharge (must be a positive number, subtracted from .status.totalCents and clamped at 0). Ignored whenever menuItemKey is present.",
 			"menuItemKey": "Full vtx.menuitem.<NanoID> key of a live catalog item, served at the tab's own building. Required for a self-service Charge; optional for a staff Charge (present → catalog-priced like self-order; absent → hand-keyed amountCents). amountCents is derived from the item's own .price.priceCents, never trusted from the caller, whichever caller names it.",
+			"description": "Optional free-text line name for an off-menu Charge (no menuItemKey) — appended to .status.itemsMemo instead of a catalog item's own name. Defaults to \"Off-menu charge\" when omitted. Ignored whenever menuItemKey is present (the item's own name is used).",
 		},
 		Examples: []pkgmgr.ExampleSpec{
 			{
 				Name:    "OpenTab — start a house tab for a resident",
 				Payload: map[string]any{"leaseAppKey": "vtx.leaseapp.<NanoID>"},
 				ExpectedOutcome: "Validates the lease is alive. Mints vtx.tab.<NanoID> (root {}) + .status " +
-					"{value: open, totalCents: 0, openedAt, leaseAppKey} + the chargedTo and openFor links " +
+					"{value: open, totalCents: 0, itemsMemo: \"\", openedAt, leaseAppKey} + the chargedTo and openFor links " +
 					"(both tab→leaseapp) + claims " +
 					"the lease's cafeOpenTabGuard. Returns primaryKey (the tab key). Rejects UnknownLeaseApplication " +
 					"if the lease is absent, or OpenTabAlreadyExists if the lease already has an open tab.",
 			},
 			{
 				Name:    "Charge — ring up an off-menu item on an open tab (operator)",
-				Payload: map[string]any{"tabKey": "vtx.tab.<NanoID>", "amountCents": 850},
+				Payload: map[string]any{"tabKey": "vtx.tab.<NanoID>", "amountCents": 850, "description": "Late checkout fee"},
 				ExpectedOutcome: "Validates the tab is alive + open, adds 850 to .status.totalCents (OCC-conditioned " +
-					"on the aspect's current revision). Returns primaryKey. Rejects TabNotOpen if the tab is already " +
-					"settled, or InvalidArgument if amountCents <= 0.",
+					"on the aspect's current revision), appends \"Late checkout fee\" to .status.itemsMemo (or " +
+					"\"Off-menu charge\" if description is omitted). Returns primaryKey. Rejects TabNotOpen if the tab " +
+					"is already settled, or InvalidArgument if amountCents <= 0.",
 			},
 			{
 				Name:    "Charge — ring up a catalog item at the POS (staff)",
 				Payload: map[string]any{"tabKey": "vtx.tab.<NanoID>", "menuItemKey": "vtx.menuitem.<NanoID>"},
 				ExpectedOutcome: "Validates the tab is alive + open and the menu item is alive and served at the " +
 					"tab's own building, derives the amount from the item's .price.priceCents (any caller-supplied " +
-					"amountCents is ignored), adds it to .status.totalCents. Returns primaryKey. Rejects " +
+					"amountCents is ignored), adds it to .status.totalCents and appends the item's own name to " +
+					".status.itemsMemo. Returns primaryKey. Rejects " +
 					"UnknownMenuItem if the item is absent or retired, or AuthDenied if the item is served at a " +
 					"different building.",
 			},
@@ -126,14 +136,16 @@ func tabVertexTypeDDL() pkgmgr.DDLSpec {
 				Payload: map[string]any{"tabKey": "vtx.tab.<NanoID>", "menuItemKey": "vtx.menuitem.<NanoID>"},
 				ExpectedOutcome: "Validates the tab is alive + open and the menu item is alive, derives the amount " +
 					"from the item's .price.priceCents (any caller-supplied amountCents is ignored), adds it to " +
-					".status.totalCents. Returns primaryKey. Rejects UnknownMenuItem if the item is absent or " +
+					".status.totalCents and appends the item's own name to .status.itemsMemo. Returns primaryKey. " +
+					"Rejects UnknownMenuItem if the item is absent or " +
 					"retired, or AuthDenied if the tab's lease is not identified-by the caller.",
 			},
 			{
 				Name:    "VoidCharge — correct a mis-tapped charge (operator/frontOfHouse only)",
 				Payload: map[string]any{"tabKey": "vtx.tab.<NanoID>", "amountCents": 450},
 				ExpectedOutcome: "Validates the tab is alive + open, subtracts 450 from .status.totalCents " +
-					"(OCC-conditioned on the aspect's current revision), clamped at 0 rather than going negative. " +
+					"(OCC-conditioned on the aspect's current revision), clamped at 0 rather than going negative, " +
+					"and appends \"Void correction\" to .status.itemsMemo when the total actually decreased. " +
 					"Returns primaryKey. Rejects TabNotOpen if the tab is already settled, or InvalidArgument if " +
 					"amountCents <= 0.",
 			},
@@ -141,7 +153,7 @@ func tabVertexTypeDDL() pkgmgr.DDLSpec {
 				Name:    "Settle — close a tab for house-account posting",
 				Payload: map[string]any{"tabKey": "vtx.tab.<NanoID>"},
 				ExpectedOutcome: "Validates the tab is alive + open, sets .status.value to settled and stamps " +
-					"settledAt (OCC-conditioned; totalCents/leaseAppKey carried over unchanged), and tombstones the " +
+					"settledAt (OCC-conditioned; totalCents/itemsMemo/leaseAppKey carried over unchanged), and tombstones the " +
 					"lease's cafeOpenTabGuard + the tab's openFor link (chargedTo stays — settlement anchors on it). " +
 					"Emits tab.settled" +
 					"{tabKey, leaseAppKey, totalCents}. Returns primaryKey. Rejects TabNotOpen if already settled.",
@@ -160,18 +172,21 @@ func tabStatusAspectTypeDDL() pkgmgr.DDLSpec {
 		Class:             "meta.ddl.aspectType",
 		PermittedCommands: []string{"OpenTab", "Charge", "VoidCharge", "Settle"},
 		Description: "Tab status aspect (café). Stored as vtx.tab.<NanoID>.status (class tabStatus) = " +
-			"{value: open|settled, totalCents, openedAt, leaseAppKey, settledAt?}. Non-sensitive. Written by OpenTab " +
-			"(mints, value=open, totalCents=0), Charge (OCC-conditioned accumulate onto totalCents), VoidCharge " +
-			"(OCC-conditioned decrement of totalCents, clamped at 0), and Settle " +
-			"(OCC-conditioned close, value=settled, settledAt stamped) — all owned by the tab vertexType DDL's script. " +
+			"{value: open|settled, totalCents, itemsMemo, openedAt, leaseAppKey, settledAt?}. Non-sensitive. Written by OpenTab " +
+			"(mints, value=open, totalCents=0, itemsMemo=\"\"), Charge (OCC-conditioned accumulate onto totalCents, " +
+			"appends the charged item's name to itemsMemo), VoidCharge " +
+			"(OCC-conditioned decrement of totalCents, clamped at 0, appends \"Void correction\" to itemsMemo when the " +
+			"total actually decreased), and Settle " +
+			"(OCC-conditioned close, value=settled, settledAt stamped, totalCents/itemsMemo carried over frozen) — all owned by the tab vertexType DDL's script. " +
 			"Declaration-only: no op handler of its own.",
 		Script: aspectDeclarationOnlyScript,
 		InputSchema: `{"type":"object","properties":` +
-			`{"value":{"type":"string","enum":["open","settled"]},"totalCents":{"type":"number"},"openedAt":{"type":"string"},"leaseAppKey":{"type":"string"},"settledAt":{"type":"string"}}}`,
+			`{"value":{"type":"string","enum":["open","settled"]},"totalCents":{"type":"number"},"itemsMemo":{"type":"string"},"openedAt":{"type":"string"},"leaseAppKey":{"type":"string"},"settledAt":{"type":"string"}}}`,
 		OutputSchema: `{"type":"object"}`,
 		FieldDescription: map[string]string{
 			"value":       "open | settled.",
 			"totalCents":  "The tab's running total in integer cents, accumulated by Charge.",
+			"itemsMemo":   "A comma-joined, running line of what was charged — each Charge appends the item's own name (or an off-menu charge's caller-supplied/default description), each qualifying VoidCharge appends \"Void correction\". Empty string on a fresh tab. Frozen by Settle (never rewritten after).",
 			"openedAt":    "When the tab was opened (RFC3339, = OpenTab's op.submittedAt).",
 			"leaseAppKey": "The resident lease this tab belongs to (denormalized from OpenTab's payload).",
 			"settledAt":   "When the tab was settled (RFC3339, = Settle's op.submittedAt). Absent while open.",
@@ -179,8 +194,8 @@ func tabStatusAspectTypeDDL() pkgmgr.DDLSpec {
 		Examples: []pkgmgr.ExampleSpec{
 			{
 				Name:            "tab status aspect",
-				Payload:         map[string]any{"value": "open", "totalCents": 850, "openedAt": "2026-07-07T12:00:00Z", "leaseAppKey": "vtx.leaseapp.<NanoID>"},
-				ExpectedOutcome: "Stored as vtx.tab.<NanoID>.status; written by OpenTab/Charge/Settle.",
+				Payload:         map[string]any{"value": "open", "totalCents": 850, "itemsMemo": "Latte, Croissant", "openedAt": "2026-07-07T12:00:00Z", "leaseAppKey": "vtx.leaseapp.<NanoID>"},
+				ExpectedOutcome: "Stored as vtx.tab.<NanoID>.status; written by OpenTab/Charge/VoidCharge/Settle.",
 			},
 		},
 	}
@@ -809,7 +824,8 @@ def require_menu_item_price(state, p):
     #
     # The locality bound lives in the Charge branch below (location_covers
     # against menu_item_served_at), not here — this function only derives the
-    # amount; it does not decide whether the item may be charged at all.
+    # amount (+ the item's own name, for itemsMemo); it does not decide
+    # whether the item may be charged at all.
     menu_item_key = required_string(p, "menuItemKey")
     parts_of(menu_item_key, "menuItemKey", "menuitem")
     if not vertex_alive(state, menu_item_key):
@@ -822,7 +838,14 @@ def require_menu_item_price(state, p):
     price = state[price_key]
     if price == None or (hasattr(price, "isDeleted") and price.isDeleted):
         fail("UnknownMenuItem: " + menu_item_key + ": no .price aspect")
-    return price.data.get("priceCents")
+    return price.data.get("priceCents"), price.data.get("name")
+
+def append_items_memo(existing_memo, line):
+    # The running itemsMemo accumulator Charge/VoidCharge both append to —
+    # comma-joined, empty-string-safe (a fresh tab's itemsMemo is "").
+    if existing_memo == None or existing_memo == "":
+        return line
+    return existing_memo + ", " + line
 
 def execute(state, op):
     ot = op.operationType
@@ -917,7 +940,7 @@ def execute(state, op):
         mutations = [
             make_vtx(tab_key, "tab", {}),
             make_aspect(tab_key, "status", "tabStatus",
-                        {"value": "open", "totalCents": 0, "openedAt": opened_at, "leaseAppKey": lease_key}),
+                        {"value": "open", "totalCents": 0, "itemsMemo": "", "openedAt": opened_at, "leaseAppKey": lease_key}),
             make_link(charged_to_lnk, tab_key, lease_key, "chargedTo", "chargedTo", {}),
             make_link(open_for_lnk, tab_key, lease_key, "openFor", "openFor", {}),
             guard_mut,
@@ -952,13 +975,16 @@ def execute(state, op):
         if is_self:
             # Self-order: the menuItem catalog bounds the amount — a
             # self-submitted amountCents is never read, let alone trusted.
-            amount_cents = require_menu_item_price(state, p)
+            amount_cents, item_name = require_menu_item_price(state, p)
         elif menu_item_key != None:
-            amount_cents = require_menu_item_price(state, p)
+            amount_cents, item_name = require_menu_item_price(state, p)
         else:
             amount_cents = require_number(p, "amountCents")
             if amount_cents <= 0:
                 fail("InvalidArgument: amountCents: required positive number")
+            item_name = optional_string(p, "description")
+            if item_name == None or item_name == "":
+                item_name = "Off-menu charge"
 
         existing = require_open_status(state, tab_key)
 
@@ -1004,7 +1030,8 @@ def execute(state, op):
                      " is not served at tab " + tab_key + "'s building")
 
         new_total = existing.data.get("totalCents") + amount_cents
-        status_data = {"value": "open", "totalCents": new_total,
+        new_memo = append_items_memo(existing.data.get("itemsMemo", ""), item_name)
+        status_data = {"value": "open", "totalCents": new_total, "itemsMemo": new_memo,
                         "openedAt": existing.data.get("openedAt"),
                         "leaseAppKey": existing.data.get("leaseAppKey")}
         mutations = [make_aspect_upsert_occ(tab_key, "status", "tabStatus", status_data, existing.revision)]
@@ -1045,10 +1072,17 @@ def execute(state, op):
         # current running total) is a caller mistake worth correcting
         # cleanly to 0, not a hard failure that leaves the wrong total
         # standing.
-        new_total = existing.data.get("totalCents") - amount_cents
+        old_total = existing.data.get("totalCents")
+        new_total = old_total - amount_cents
         if new_total < 0:
             new_total = 0
-        status_data = {"value": "open", "totalCents": new_total,
+        # Only a void that actually reduced the total gets an itemsMemo line —
+        # an over-void against an already-0 tab corrected nothing, so there is
+        # no correction to name.
+        new_memo = existing.data.get("itemsMemo", "")
+        if new_total < old_total:
+            new_memo = append_items_memo(new_memo, "Void correction")
+        status_data = {"value": "open", "totalCents": new_total, "itemsMemo": new_memo,
                         "openedAt": existing.data.get("openedAt"),
                         "leaseAppKey": existing.data.get("leaseAppKey")}
         mutations = [make_aspect_upsert_occ(tab_key, "status", "tabStatus", status_data, existing.revision)]
@@ -1095,7 +1129,7 @@ def execute(state, op):
             if application_for == None or application_for.isDeleted:
                 fail("AuthDenied: a resident may only settle their own tab")
 
-        status_data = {"value": "settled", "totalCents": total_cents,
+        status_data = {"value": "settled", "totalCents": total_cents, "itemsMemo": existing.data.get("itemsMemo", ""),
                         "openedAt": existing.data.get("openedAt"),
                         "leaseAppKey": lease_key, "settledAt": settled_at}
         # Two releases, both unconditioned, mirroring clinic-domain's slot-cell

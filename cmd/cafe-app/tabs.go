@@ -21,6 +21,7 @@ type tabSettlementProjection struct {
 	LeaseAppKey    string   `json:"leaseAppKey"`
 	AccountKey     string   `json:"accountKey"`
 	TotalCents     *float64 `json:"totalCents"`
+	ItemsMemo      string   `json:"itemsMemo"`
 	Status         string   `json:"status"`
 	OpenedAt       string   `json:"openedAt"`
 	SettledAt      string   `json:"settledAt"`
@@ -35,6 +36,7 @@ type tabRow struct {
 	LeaseAppKey string `json:"leaseAppKey"`
 	AccountKey  string `json:"accountKey,omitempty"`
 	TotalCents  int64  `json:"totalCents"`
+	ItemsMemo   string `json:"itemsMemo,omitempty"`
 	Status      string `json:"status"`
 	OpenedAt    string `json:"openedAt"`
 	SettledAt   string `json:"settledAt,omitempty"`
@@ -79,6 +81,7 @@ func computeTabs(keys []string, get kvGetter, leaseAppKey string) []tabRow {
 			LeaseAppKey: p.LeaseAppKey,
 			AccountKey:  p.AccountKey,
 			TotalCents:  total,
+			ItemsMemo:   p.ItemsMemo,
 			Status:      p.Status,
 			OpenedAt:    p.OpenedAt,
 			SettledAt:   p.SettledAt,

@@ -23,7 +23,7 @@ confinement described below (facet-staff-worlds-design.md §3.5, §9).
 | Kind | Canonical names |
 |---|---|
 | **Vertex types** (2) | `tab` (root `{}`, D5, `.status` aspect) · `menuitem` (root `{}`, D5, `.price` aspect) |
-| **Aspect types** (3) | `tabStatus` — `vtx.tab.<id>.status`, `{value, totalCents, openedAt, leaseAppKey, settledAt?}` · `cafeOpenTabGuard` — `vtx.leaseapp.<id>.cafeOpenTab`, `{tabKey}` (per-lease open-tab dedup guard) · `menuItemPrice` — `vtx.menuitem.<id>.price`, `{name, priceCents}` |
+| **Aspect types** (3) | `tabStatus` — `vtx.tab.<id>.status`, `{value, totalCents, itemsMemo, openedAt, leaseAppKey, settledAt?}` · `cafeOpenTabGuard` — `vtx.leaseapp.<id>.cafeOpenTab`, `{tabKey}` (per-lease open-tab dedup guard) · `menuItemPrice` — `vtx.menuitem.<id>.price`, `{name, priceCents}` |
 | **Links** (3) | `chargedTo` (tab → leaseapp, permanent) · `openFor` (tab → leaseapp, released by `Settle`) · `servedAt` (menuitem → location, permanent — what makes an item reachable) |
 | **Operations** (6) | `OpenTab` · `Charge` · `VoidCharge` · `Settle` · `CreateMenuItem` · `RetireMenuItem` |
 | **Lenses** (3) | `cafeTabSettlement` (convergence, one row per tab, `missing_account`/`missing_charge`) → `weaver-targets` (`nats-kv`, `full` engine, actorAggregate) · `menuCatalog` (plain projection, one row per live menuitem) → `cafe-menu-catalog` (`nats-kv`) · `cafeLeaseWorkplaces` (one row per lease, `coveringLocations`) → `cafe-lease-workplaces` (`nats-kv`) — the read-side half of workplace confinement |
@@ -40,7 +40,7 @@ front-desk decision.
 
 ```
 vtx.tab.<id>                 class=tab             root {} (D5)
-vtx.tab.<id>.status          class=tabStatus       {value ∈ open|settled, totalCents, openedAt, leaseAppKey, settledAt?}
+vtx.tab.<id>.status          class=tabStatus       {value ∈ open|settled, totalCents, itemsMemo, openedAt, leaseAppKey, settledAt?}
 vtx.leaseapp.<id>.cafeOpenTab class=cafeOpenTabGuard {tabKey} (claimed by OpenTab, tombstoned by Settle)
 vtx.menuitem.<id>            class=menuitem        root {} (D5)
 vtx.menuitem.<id>.price      class=menuItemPrice   {name, priceCents}
@@ -63,6 +63,14 @@ OCC-conditioned on its own current revision (the `providerSlotClaim` precedent):
 staff decision even to reverse a resident's own self-order mis-tap. `Settle` freezes `totalCents`,
 flips `value` to `settled`, and stamps `settledAt` — also OCC-conditioned. All three reject a tab that
 is not currently `open` (`TabNotOpen`).
+
+Alongside `totalCents`, every `Charge`/qualifying `VoidCharge` also appends a plain-text line to
+`.status.itemsMemo` — a comma-joined running summary (a menu item's own `.price.name`, an off-menu
+`Charge`'s caller-supplied `description` or the `"Off-menu charge"` default, or `"Void correction"`)
+so a tab (open or settled) shows what was actually rung up, not just the sum — the `cafeTabSettlement`
+lens projects it verbatim and the Weaver-dispatched `DebitAccount` posts the same string as the
+settled ledger entry's `memo`. It is a summary line, not a structured per-item ledger — see Out of
+scope.
 
 ## Self-order menu catalog
 
@@ -108,7 +116,7 @@ DDLs permit `CreateAccount`/`DebitAccount` for those classes. Instead, `Settle` 
   (`l.cafeLedgerAccount.data.accountKey` null). Weaver dispatches `CreateAccount{leaseAppKey}`
   (`cafe-ledger`) — "opening one via `CreateAccount` on first use."
 - **`missing_charge`** — true once the account exists but no `cafetransaction` `settles` this tab yet.
-  Weaver dispatches `DebitAccount{accountKey, amountCents, tabRef}` (`cafe-ledger`) — the `tabRef`
+  Weaver dispatches `DebitAccount{accountKey, amountCents, memo, tabRef}` (`cafe-ledger`) — the `tabRef`
   extension writes the `settles` audit link back to the tab, which is exactly what the lens's
   `OPTIONAL MATCH (t)<-[:settles]-(tx:cafetransaction)` reads to converge the gap.
 
@@ -119,8 +127,11 @@ never a payload value).
 
 ## Out of scope
 
-- **Per-item charge audit trail** — `Charge` accumulates a running total only; itemized line receipts
-  are a future extension if the product needs one (YAGNI — no demand row asks for it yet).
+- **Structured per-item ledger** — `.status.itemsMemo` is a comma-joined text summary (name only, no
+  per-line price/quantity), built by `Charge`/`VoidCharge` and frozen by `Settle`; it is not a
+  structured array of `{menuItemKey, priceCents, chargedAt}` rows. A future structured itemization
+  (e.g. for a printable receipt) is a distinct extension if the product needs one — the running text
+  summary was the itemization gap verticals.md's Café row asked for.
 
 One-open-tab-per-lease exclusivity IS built, not out of scope: the `cafeOpenTabGuard` aspect (Inventory
 above) is a per-lease dedup guard `OpenTab` claims and `Settle` releases, rejecting a second concurrent

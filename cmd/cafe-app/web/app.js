@@ -181,6 +181,13 @@ function money(cents) {
   return "$" + n.toFixed(2);
 }
 
+// itemsMemoLine renders a tab's running itemsMemo (cafe-domain's tabStatus
+// aspect — comma-joined names, "" on a fresh tab) as its own meta line, or
+// nothing at all when there is nothing charged yet to show.
+function itemsMemoLine(memo) {
+  return memo ? '<p class="meta">Items: ' + escapeHtml(memo) + "</p>" : "";
+}
+
 // parseDollars turns a user-entered dollar string ("4.50") into integer
 // cents, or null when it isn't a positive amount.
 function parseDollars(s) {
@@ -494,6 +501,7 @@ function renderOpenTabCard(tab, items) {
     "<h2>Open tab</h2>" +
     '<p class="amount">' + money(tab.totalCents) + "</p>" +
     '<p class="meta">Opened ' + (tab.openedAt || "?") + "</p>" +
+    itemsMemoLine(tab.itemsMemo) +
     (catalog.length
       ? '<form id="pos-catalog-form" class="field-row" style="margin-bottom:14px;">' +
         '<select id="pos-catalog-item">' +
@@ -622,6 +630,7 @@ function frontDeskCard(t, booking, lease, visit, bookerKey) {
     '<div class="who">' + escapeHtml(who) + "</div>" +
     '<div class="amount">' + money(t.totalCents) + "</div>" +
     '<div class="meta">Opened ' + (t.openedAt || "?") + "</div>" +
+    itemsMemoLine(t.itemsMemo) +
     classBadge +
     leaseLine +
     visitBadge +
@@ -687,7 +696,8 @@ async function renderResident() {
   if (open) {
     parts.push(
       '<div class="panel"><h2>Open tab</h2><p class="amount">' + money(open.totalCents) +
-      '</p><p class="meta">Opened ' + (open.openedAt || "?") + " — not yet settled</p></div>" +
+      '</p><p class="meta">Opened ' + (open.openedAt || "?") + " — not yet settled</p>" +
+      itemsMemoLine(open.itemsMemo) + "</div>" +
       (selfMode ? '<div class="panel-actions" style="margin-top:-8px;"><button id="resident-settle-btn" class="danger">Settle My Tab</button></div>' : "")
     );
     if (selfMode) {
@@ -720,7 +730,8 @@ async function renderResident() {
   if (pendingSettled) {
     parts.push(
       '<div class="panel"><h2>Pending posting</h2><p class="amount">' + money(pendingSettled.totalCents) +
-      '</p><p class="meta">Settled ' + (pendingSettled.settledAt || "?") + " — posting to the ledger shortly</p></div>"
+      '</p><p class="meta">Settled ' + (pendingSettled.settledAt || "?") + " — posting to the ledger shortly</p>" +
+      itemsMemoLine(pendingSettled.itemsMemo) + "</div>"
     );
   }
   const rows = ledger.transactions || [];

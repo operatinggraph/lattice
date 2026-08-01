@@ -316,6 +316,9 @@ func TestOpenTab_MintsTabOpenForLease(t *testing.T) {
 	if got, _ := statusData["totalCents"].(float64); got != 0 {
 		t.Fatalf("status.totalCents = %v, want 0", got)
 	}
+	if got, _ := statusData["itemsMemo"].(string); got != "" {
+		t.Fatalf("status.itemsMemo = %q, want empty on a fresh tab", got)
+	}
 	if got, _ := statusData["leaseAppKey"].(string); got != leaseKey {
 		t.Fatalf("status.leaseAppKey = %q, want %q", got, leaseKey)
 	}
@@ -378,6 +381,9 @@ func TestCharge_AccumulatesTotalCents(t *testing.T) {
 	}
 	if got, _ := statusData["value"].(string); got != "open" {
 		t.Fatalf("status.value = %q, want open (still charging)", got)
+	}
+	if got, want := statusData["itemsMemo"].(string), "Off-menu charge, Off-menu charge"; got != want {
+		t.Fatalf("status.itemsMemo = %q, want %q (default off-menu line per Charge, comma-joined)", got, want)
 	}
 }
 
@@ -443,6 +449,9 @@ func TestVoidCharge_SubtractsFromTotalCents(t *testing.T) {
 	if got, _ := statusData["value"].(string); got != "open" {
 		t.Fatalf("status.value = %q, want open (voiding does not close the tab)", got)
 	}
+	if got, want := statusData["itemsMemo"].(string), "Off-menu charge, Void correction"; got != want {
+		t.Fatalf("status.itemsMemo = %q, want %q (a real void appends a correction line)", got, want)
+	}
 }
 
 // TestVoidCharge_ClampsAtZero proves an over-void — subtracting more than the
@@ -485,6 +494,9 @@ func TestVoidCharge_ClampsAtZero(t *testing.T) {
 	statusData, _ := statusDoc["data"].(map[string]any)
 	if got, _ := statusData["totalCents"].(float64); got != 0 {
 		t.Fatalf("status.totalCents = %v, want 0 (clamped, not negative)", got)
+	}
+	if got, want := statusData["itemsMemo"].(string), "Off-menu charge, Void correction"; got != want {
+		t.Fatalf("status.itemsMemo = %q, want %q (a clamped void still actually reduced the total)", got, want)
 	}
 }
 
@@ -632,6 +644,9 @@ func TestSettle_ClosesTabFreezesTotal(t *testing.T) {
 	}
 	if got, _ := statusData["totalCents"].(float64); got != 1200 {
 		t.Fatalf("status.totalCents = %v, want 1200 (frozen)", got)
+	}
+	if got, want := statusData["itemsMemo"].(string), "Off-menu charge"; got != want {
+		t.Fatalf("status.itemsMemo = %q, want %q (carried over frozen from the Charge, same as totalCents)", got, want)
 	}
 	if _, ok := statusData["settledAt"]; !ok {
 		t.Fatalf("status.settledAt must be stamped on settle")
@@ -1169,6 +1184,9 @@ func TestCharge_SelfOrder_DerivesAmountFromMenuItem(t *testing.T) {
 	if got, _ := statusData["totalCents"].(float64); got != 450 {
 		t.Fatalf("status.totalCents = %v, want 450 (derived from the menu item's price)", got)
 	}
+	if got, want := statusData["itemsMemo"].(string), "Latte"; got != want {
+		t.Fatalf("status.itemsMemo = %q, want %q (the menu item's own name)", got, want)
+	}
 }
 
 // TestCharge_SelfOrder_RejectedForOthersTab proves a consumer satisfying
@@ -1369,6 +1387,9 @@ func TestCharge_Staff_CatalogItemDerivesAmount(t *testing.T) {
 	if got, _ := statusData["totalCents"].(float64); got != 450 {
 		t.Fatalf("status.totalCents = %v, want 450 (derived from the menu item's price)", got)
 	}
+	if got, want := statusData["itemsMemo"].(string), "Latte"; got != want {
+		t.Fatalf("status.itemsMemo = %q, want %q (the menu item's own name)", got, want)
+	}
 }
 
 // TestCharge_Staff_HandKeyedAmountStillAccepted pins that a staff Charge with
@@ -1388,7 +1409,7 @@ func TestCharge_Staff_HandKeyedAmountStillAccepted(t *testing.T) {
 		Actor:         domainActorKey,
 		SubmittedAt:   "2026-07-30T12:10:00Z",
 		Class:         "tab",
-		Payload:       json.RawMessage(`{"tabKey":"` + tabKey + `","amountCents":999}`),
+		Payload:       json.RawMessage(`{"tabKey":"` + tabKey + `","amountCents":999,"description":"Lost key fob"}`),
 		ContextHint:   &processor.ContextHint{Reads: []string{tabKey, tabKey + ".status"}},
 	}
 	testutil.PublishOp(t, conn, env)
@@ -1401,6 +1422,9 @@ func TestCharge_Staff_HandKeyedAmountStillAccepted(t *testing.T) {
 	statusData, _ := statusDoc["data"].(map[string]any)
 	if got, _ := statusData["totalCents"].(float64); got != 999 {
 		t.Fatalf("status.totalCents = %v, want 999 (hand-keyed off-menu amount)", got)
+	}
+	if got, want := statusData["itemsMemo"].(string), "Lost key fob"; got != want {
+		t.Fatalf("status.itemsMemo = %q, want %q (the caller-supplied off-menu description)", got, want)
 	}
 }
 
