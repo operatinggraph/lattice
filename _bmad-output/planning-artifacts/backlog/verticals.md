@@ -25,6 +25,10 @@ the row is `🚧 blocked-on:` it (a missing *lens* is package work, built here).
 | **A booked class never reminds anyone** | wellness-domain carries no reminder lens or notification at all, while clinic ships a whole `clinic-reminders` package (`appointmentReminders` + `followUpReminders` + `notifications.go`) — a member who books a week out hears nothing until the no-show mark lands. | Wellness | pkg | ★★ | M | 📋 ready |
 | **No way to demonstrate that Facet survives going offline** | Offline-first is the Edge's headline claim and nothing lets a viewer see it — the mirror only serves a disconnected world during a real NATS outage nobody can stage. Per [UX §6](../../implementation-artifacts/facet-app-ux.md) the honest offline story is a host↔NATS drop, not the browser going offline, so a truthful toggle disconnects the host engine: reads keep serving from bbolt, writes queue and drain on reconnect. | Cross-vertical | Sally + FE + platform | ★★ | M | 📋 designer · needs a fenced control surface |
 | **A café credit renders as `$-21.59`** | `money()` (`app.js:179-182`) prefixes a sign-carrying amount, and the ledger pane never says whether a negative café balance is money owed or money held — live, Riley's account reads `Balance: $-21.59` after two counter payments. | Café | FE | ★ | XS | 📋 ready |
+| **A booked visit never says which clinic to go to** | `CreateAppointment`'s `site` param validates the provider practices there and writes an `atSite` link (confirmed live), but neither protected lens walks it (`lenses.go:618`, `:650`), so no patient / front-desk / provider row carries a site — the Book tab's site select is an input filter, discarded on submit. Precedent: wellness `f9a6a55e`. | Clinic | pkg + FE | ★★ | S | 📋 ready |
+| **Every provider offers zero bookable slots** | All 4 live providers carry `hours.windows: []`, so `computeOpenSlots` returns nothing and `findSoonestSlots` skips every provider (`app.js:1611`, `:1892`) — the slot picker + soonest-opening panel are unreachable and every booking is a hand-typed datetime. seed-showcase clears Osei's hours deliberately (`seed-showcase.go:886`) so its day-rolling appointment never strands on OutsideHours; the ask is windows wide enough to survive that roll. | Clinic | pkg | ★★ | S | 📋 ready |
+| **A past visit sits open forever, unbilled** | 12 of 21 live appointments are past their `endsAt` and still `scheduled`/`confirmed`; the no-show fee posts only once a human hand-marks it. Follow-ups and Series each get an urgency-bucketed staff queue — a past-due-open visit gets only a `.past` CSS class (`app.js:3303`) scattered across the calendar. Transport is in-house: Weaver `@at`, already driving `appointmentReminders`. | Clinic | pkg + FE | ★★ | M | 📋 ready |
+| **A no-show charge doesn't say what it's for** | `clinicNoShowSettlement`'s directOp passes only `accountKey`/`amountCents`/`appointmentRef` (`clinic-ledger/targets.go:28`) — live, Riley's ledger reads as two bare `$25.00` debits. `memo` already runs end-to-end (op param → `.entry` aspect → `ledgerHistory` column → FE renders it); only the auto-charge omits one. Precedent: café `3e081e95`. | Clinic | pkg | ★★ | XS | 📋 ready |
 | **clinic-domain's README still under-documents 4 shipped op surfaces** | The README's Operations/Inventory never mention `BindProviderIdentity` (+ its `identityClaim`/`providerClaim` guard aspects) or `CreatePatient`'s `identityClaim`/`patientClaim` guard, and the appointment op docs omit `CreateAppointment`'s `leaseAppKey`/`site` params and `SetAppointmentStatus`'s `noShowFeeCents` + terminal-status finality rule (all confirmed live in `ddls.go`). | Clinic | pkg | ★ | S | 📋 ready |
 
 **Explicitly descoped (ambitious-PO pass, 2026-07-09):** structured diagnosis/procedure coding (ICD/CPT),
@@ -45,10 +49,9 @@ dated run-logs live in git history. Rotate LoftSpace ↔ Clinic ↔ Café ↔ We
 **Wellness joined** 2026-07-09 (`cmd/wellness-app` shipped, live on :7802) — fold it into rotation; see
 [agents/vertical-po/SKILL.md](../../../agents/vertical-po/SKILL.md) §1.
 
-- **Rotation to date:** LoftSpace ×19, Clinic ×17, Café ×8, Wellness ×5.
+- **Rotation to date:** LoftSpace ×19, Clinic ×18, Café ×8, Wellness ×5.
 - **Method:** reuse the already-up shared stack (detect NATS :4222 / app :7788/:7799/:7801/:7802), drive the real flow via `/api/op` + the lens projections as the product owner, file scored items. All four apps exist + are exercisable live (`:7788` / `:7799` / `:7801` / `:7802`).
 - **Live-stack note:** a stale bootstrap JSON vs. a recreated Core KV was a recurring dev-loop trap (2026-07-03, 2026-07-04) that silently emptied reads; `make up` now self-heals it (`109f59a`, 2026-07-05) — re-verify empty-read reports as a real product bug first.
-- **2026-07-29:** Clinic — drove patient, provider, front-desk + root hats live; the front desk renders a staff console it can't read a roster into; filed 3.
 - **2026-07-29:** Café — drove self-order + front-desk hats live; the demo world seeds no menu, the composition layer is installed by nothing, front of house can't name anyone; filed 3.
 - **2026-07-30:** Wellness — drove member, instructor + front-desk hats live; the staff console names nobody, a class's teacher and time are frozen, nothing charges; filed 4.
 - **2026-07-30:** LoftSpace — drove landlord, staff + 2 applicant hats live; an approved lease never leases the unit and the roster names nobody; filed 2.
@@ -56,7 +59,8 @@ dated run-logs live in git history. Rotate LoftSpace ↔ Clinic ↔ Café ↔ We
 - **2026-07-31:** Café — drove resident self-order/settle + front-desk hats live; the front desk composes nothing and one-bill has no reader; filed 4 (1 → lattice).
 - **2026-08-01:** Wellness — drove member, instructor + front-desk hats live; My Classes hides the studio, and there is no waitlist, recurrence or reminder; filed 5.
 - **2026-08-01:** LoftSpace — drove tenant, landlord + front-desk hats live; browsable inventory is seven copies of one flat, rent never bills, six duplicate staff; filed 4 + broadened 1.
-- **Next:** Clinic.
+- **2026-08-01:** Clinic — drove patient, provider + front-desk hats live; a booked visit hides its site, no provider is bookable, past visits never close out; filed 4.
+- **Next:** Café.
 
 ## Done log — verticals (newest first)
 
