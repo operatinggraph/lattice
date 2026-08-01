@@ -302,14 +302,39 @@ today's `ActorEnumerator` BFS**, unchanged. Same conservative posture `Reference
 already takes, and the fallback is the shipped code path, so a derivation bug degrades to current
 behavior rather than to silence.
 
-**Relationship to §D2 Phase 2.** `refractor-footprint-reduction-design.md` §D2 Phase 2 describes this
-same reverse-chain derivation for the **plain**-lens corpus, and its named trigger is currently
-**unmeasured** (the board row records that the §7 crawl attributed to it was an actorAggregate AckWait
-live-lock, since fixed). This design therefore does **not** absorb Phase 2 and does not build the plain
-arm: it builds the derivation as a standalone unit under `pipeline/` (usable by both), wires only the
-actor-aware arms — the corpus with **measured** demand — and leaves Phase 2 as "wire the same primitive
-into the plain arm" if and when its trigger is measured. One primitive, one consumer today, no dead
-scaffolding.
+**Relationship to §D2 Phase 2 — and the shadow measurement that decides it** *(added post-ratification,
+2026-08-01, agreed with Andrew in the ratification session)*. `refractor-footprint-reduction-design.md`
+§D2 Phase 2 describes this same reverse-chain derivation for the **plain**-lens corpus. Its named
+trigger is **unmeasured**: the one prior attribution was wrong (the §7 crawl was an actorAggregate
+AckWait live-lock, since fixed), and two shipped fires push the true ratio in opposite directions — D1
+raised the *neighbor share* of a plain lens's deliveries (it now receives only its referenced labels, so
+a 3-label/1-anchor lens is neighbor-labeled on two of three), while Fire 2 lowered the *cost* of each
+neighbor recompute (the corpus rescan is prefix-scoped, not whole-bucket, `executor.go:654`). Guessing
+between them is exactly what produced the wrong attribution the first time.
+
+Note what this is **not**: the classic dead-scaffolding case. Phase 2's consumer *exists* — every plain
+lens is live and every neighbor event rescans its anchor corpus today (`seedAnchorFor` returns "" for a
+non-anchor label, `pipeline.go:488`), so Phase 2 would return value on day one. The reason to hold it is
+narrower and worth stating exactly: **it is a narrowing on a correctness-critical path, and without a
+before-number there is no acceptance criterion.** Under-approximation means a stale projected row; the
+cost of being wrong is identical in the plain and actor-aware corpora, and only the actor-aware benefit
+is measured. Build cost is not the argument — riding this derivation, Phase 2 is S.
+
+So Increment 3 carries the measurement, and it is close to free because the derivation is already there:
+
+- **Shadow mode on the plain arm.** Run the derivation for plain-lens events, compare the derived
+  affected-anchor set against the anchor corpus the full recompute would rescan, count the delta per
+  lens — and **act on neither**. No behavior change, no correctness risk, and it yields the exact
+  per-lens ratio Phase 2's trigger asks for.
+- **Sampled**, 1-in-N, so the instrumentation cannot cost the path it is measuring. The builder sizes N
+  against the plain arm's own budget; the adjacency reads the shadow walk performs are the thing to
+  bound.
+- **It doubles as the differential test** §9 already requires for the actor-aware build — same
+  comparison, run offline against the corpus instead of in-process.
+
+Phase 2 then reduces to reading the ratio and flipping the plain arm from shadow to acting, with a
+before-and-after. This design still does not absorb it: one primitive, one acting consumer, plus a
+measurement that makes the second consumer a data-driven decision rather than a standing research task.
 
 ## 5. Read path / write path / orchestration
 
@@ -468,7 +493,7 @@ Each increment is independently shippable and green on its own.
 | **0 — Harden the shipped derivation** | 0a: `WITH`-scope `labeledVars` in `ruleengine/full/labels.go` so a dropped-and-re-referenced variable sets `exhaustive = false`. 0b: `scripts/lint-conventions.go` default-denies a `packages/**` vertex body whose bare-token `class`/`label` differs from the key's type segment, with a declared-exception annotation. Units per §9 | S | Valuable standalone — hardens narrowing already live for ~90 plain lenses. Full `-p 4` suite (shared derivation). **Build first** |
 | **1 — Relevance-gate the actor-aware arms** | §4.2's five conjuncts wired at `projection/driver.go` / `projection/personal.go` (all defaulting broad); the three arms at `pipeline.go:1186/:1197/:1243` consult one shared gate; fix the stale `:1207-1209` comment; units + e2e (a)/(b) | M | Client-side only, delivery untouched, revert is symmetric. Ship and measure before touching delivery |
 | **2 — Narrow the eligible actor-aware consumers** | `NarrowedFilterEligible` swaps `actorEnumerator != nil` for the shared predicate; rewrite the `:550-561` comment (§4.6); e2e (c). Everything else is D1's shipped machinery | S | Full `-p 4` suite. Measurable alone: `capabilityRoles` intake drops to 9 subjects. Rollback is `Rebuild`, **not** a code revert (§8.3) |
-| **3 — Pattern-directed affected-anchor derivation** | New unit under `pipeline/` deriving the affected-anchor set from the compiled pattern + the changed element (3a edge-seeded, 3b node-seeded), hop index over **every** pattern source with a `complete` flag, superset invariant + fallback to the shipped BFS; wire the three actor-aware arms; differential test; e2e (a) tightened to co-holder-revision-unchanged, plus (d) | M–L | Full `-p 4` suite. Built as a standalone unit so §D2 Phase 2 can wire the plain arm later without a second derivation |
+| **3 — Pattern-directed affected-anchor derivation** | New unit under `pipeline/` deriving the affected-anchor set from the compiled pattern + the changed element (3a edge-seeded, 3b node-seeded), hop index over **every** pattern source with a `complete` flag, superset invariant + fallback to the shipped BFS; wire the three actor-aware arms; **plus the sampled plain-arm shadow measurement (§4.7) — derive, compare, count, act on neither**; differential test; e2e (a) tightened to co-holder-revision-unchanged, plus (d) | M–L | Full `-p 4` suite. Built as a standalone unit so §D2 Phase 2 can wire the plain arm later without a second derivation. The shadow counters are what turn Phase 2 into a flag flip with a before-and-after |
 
 Deliberately **not** in scope: the plain-arm wiring of §D2 Phase 2 (trigger unmeasured — §4.7); any
 change to the enumerator's caps or its `reportsTo` hop; `verify-claim-ceremony.go`'s convergence poll
