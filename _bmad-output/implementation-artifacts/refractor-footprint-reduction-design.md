@@ -62,8 +62,8 @@ listers — each in-flight full-bucket listing is a live server-side consumer).
 | **4 — Skip-if-identical unguarded writes** | `NatsKVAdapter.Upsert` unguarded path: Get + byte-compare, skip identical Puts (the sweep's precedent, made universal). Audit skips with the write. Guarded/personal paths untouched. Postgres `IS DISTINCT FROM` optional follow-up. | S–M | 📋 |
 | **5 — One audit stream** | Single `REFRACTOR_AUDIT` stream over `lattice.refractor.audit.>` with MaxAge 7d + MaxBytes ceiling; per-process ensure; stop creating `AUDIT_<ruleID>`; delete the 95 existing (dev history, Andrew-approved direction). | S–M | 📋 |
 | **6 — Reap durable on lens delete** | Lens tombstone currently strands `refractor-<ruleID>` durables forever (lifecycle step 9); delete the durable when the lens is removed. | S | 📋 |
-| **D1 — Server-side filter subjects** | Per-lens durable `FilterSubjects` derived from referenced labels (`$KV.core-kv.vtx.<label>.>`, `lnk.<label>.>`, `lnk.*.*.*.<label>.>`); broad filter kept for non-exhaustive label sets. **Gate: vendor-verify multi-filter × DeliverLastPerSubject on the NATS 2.14 pin, and filter-edit vs recreate semantics on an existing durable.** | M | 📋 gated on vendor check |
-| **D2 — Event-seeded delta evaluation** | Anchor-label event → single-anchor recompute; non-anchor referenced-type event → affected anchors via adjacency reverse walk, per-anchor recompute. `DiffRetraction` lenses exempt (unanchored by design). Must compose with `CompiledBranches` (multi-walk), the per-anchor presence-check retraction, and the DeliverLastPerSubject initial projection. **Detailed design lands as §D2 in this doc before build; Andrew ratifies in-session.** | L | 📋 design pending |
+| **D1 — Server-side filter subjects** | Per-lens durable `FilterSubjects` derived from referenced labels (`$KV.core-kv.vtx.<label>.>`, `lnk.<label>.>`, `lnk.*.*.*.<label>.>`); broad filter kept for non-exhaustive label sets. **Vendor gate CLEARED against the pinned `nats-server v2.14.0` source:** last-per-subject validation admits plural `FilterSubjects` (`server/consumer.go:912-920`), pending is per-filter (`NumPendingMulti`, `:5534-5538`), and filters are editable on a live consumer (`:2577+`) — with the caveat that an update never resets the cursor, so a **widened** label set must ride `Pipeline.Rebuild` (consumer reset); narrowing needs nothing. Overlapping filters on one consumer are rejected — dedupe labels. Needs `substrate.ConsumerSpec.FilterSubjects []string`. | M | 📋 ready |
+| **D2 — Event-seeded delta evaluation** | §D2 below. Phase 1: anchor-labeled events recompute one anchor. Phase 2 (measured need only): reverse anchor enumeration for neighbor events. | M (P1) | 📐 §D2 — ratify before build |
 
 Deliberately **not** in scope: a single shared demux consumer replacing per-lens durables
 (the per-lens ack floor *is* the per-lens resume/rebuild mechanism — load-bearing); any
@@ -85,6 +85,62 @@ the CLAUDE.md triage rule (one scoped re-run, never loosen).
 Measurement (task-tracked): re-pull `jsz`/`docker stats`/RSS after each wave; final proof is
 a deliberate Refractor restart on the calm stack — drain time, consumer count, RSS, and the
 absence of the deadline-exceeded storm.
+
+## §D2 — Event-seeded delta evaluation (detailed design)
+
+**Grounded premises** (verified in code): `ExecuteWithFootprint` consumes only `ec.Parameters`
+— `EventContext.NodeKey` seeds nothing today, so an unanchored query full-scans on every
+evaluation. Multi-walk branch merging (`branchmerge.go` `executeBranches`) is a Personal-lens
+mechanism — those pipelines are already per-actor. So delta evaluation concerns exactly the
+**plain, single-branch, non-DiffRetraction full-engine lenses** — the unanchored business-lens
+corpus that dominates the census.
+
+**Eligibility** (computed once at activation, alongside `plainReactsTo`): plain pipeline
+(`actorEnumerator == nil`, no envelope fns), single compiled branch, `DiffRetraction` off,
+and the compiled rule exposes its anchor label (the first MATCH node's label — the same
+derivation `AnchorDeleteResult`/`AnchorProjectionKey` already use). Ineligible lenses behave
+byte-identically to today.
+
+**Phase 1 — anchor-event seeding (build now):**
+
+- `ruleengine.EventContext` gains `SeedAnchor string` (the event vertex key). Inside the
+  executor, the **first MATCH clause's anchor pattern** consumes it: when set, the pattern is
+  labeled with the seed's own type, and the pattern carries no `key` property of its own, the
+  candidate set is `{fetchNode(SeedAnchor)}` instead of the `seedNodes` scan. OPTIONAL MATCH
+  and later clauses are untouched.
+- Pipeline threading, per arm: the vertex arm sets `SeedAnchor = entry.CoreKVKey` when the
+  event label equals the anchor label; the aspect arm seeds the **owner** vertex on the same
+  condition; the link arm seeds the endpoint(s) whose type equals the anchor label and falls
+  back to a full recompute for a non-anchor endpoint (two-endpoint dedup unchanged).
+- A **neighbor** (non-anchor referenced-label) event takes today's full recompute — freshness
+  semantics are exactly preserved; only anchor-labeled events narrow. Every mutation of an
+  anchor arrives as that anchor's own event, so per-anchor recompute composes with per-key
+  CDC delivery, including the DeliverLastPerSubject initial projection (per-key events become
+  per-anchor evaluations).
+- Retraction compatibility: the filter-retraction presence check is already scoped to the
+  event anchor (`AnchorProjectionKey` + `resultsContainKeys`), so a seeded single-anchor
+  result set answers it identically. `DiffRetraction` lenses are ineligible by definition.
+  Multi-row-per-anchor lenses still produce their full per-anchor row set (seeding constrains
+  the anchor binding, not pattern expansion).
+- Write-side effect: results carry only the event anchor's rows — sibling anchors' rows are
+  no longer rewritten at all (today they are rewritten identically on every trigger; Fire 4
+  merely suppressed the redundant Put — Phase 1 removes the redundant *evaluation*).
+
+**Phase 2 — reverse anchor enumeration (build only on measured need):** for a neighbor event,
+derive affected anchors by walking the compiled pattern's relationship chain **reversed** from
+the event label to the anchor label via `adjacency.Neighbors` (direction flipped, link-name
+filtered per hop), then run per-anchor seeded recomputes. Derivation is attempted only for
+linear chains (the `composeDataLensSpec` shape); var-length links, pattern comprehensions, or
+multiple paths to the label fall back to full recompute — the same conservative posture as
+`ReferencedLabels` exhaustiveness. The named trigger for building Phase 2: post-Phase-1
+measurement showing neighbor-event full recomputes still dominating boot replay or steady
+CPU (the plain-lens analog of the capability `ActorEnumerator`, derived from the AST instead
+of hand-configured).
+
+**Test obligations:** per-arm units plus an e2e proving (a) an anchor event rewrites only its
+own row — sibling row revisions unchanged; (b) a neighbor event still refreshes dependent
+rows; (c) a WHERE-flip on a seeded anchor still retracts; (d) a DiffRetraction lens's behavior
+is byte-identical.
 
 ## 5. Reconciliation with the existing mental model
 
