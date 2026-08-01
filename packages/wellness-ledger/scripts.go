@@ -192,12 +192,24 @@ def post_entry(state, op, entry_type, event_class, allow_booking_ref):
 
     booking_key = None
     booking_id = None
+    price_booking_key = None
+    price_booking_id = None
     if allow_booking_ref:
         booking_key = optional_string(p, "bookingRef")
         if booking_key != None:
             _, booking_id = parts_of(booking_key, "bookingRef", "booking")
             if not vertex_alive(state, booking_key):
                 fail("UnknownBooking: " + booking_key)
+
+        # priceBookingRef is independent of bookingRef — a DebitAccount may
+        # carry either, both, or neither. Same validation shape, a DISTINCT
+        # settlesClassPrice link below so the no-show and class-price
+        # settlement gaps never collide in a count().
+        price_booking_key = optional_string(p, "priceBookingRef")
+        if price_booking_key != None:
+            _, price_booking_id = parts_of(price_booking_key, "priceBookingRef", "booking")
+            if not vertex_alive(state, price_booking_key):
+                fail("UnknownBooking: " + price_booking_key)
 
     amount_cents = require_number(p, "amountCents")
     if amount_cents <= 0:
@@ -233,6 +245,16 @@ def post_entry(state, op, entry_type, event_class, allow_booking_ref):
     if booking_key != None:
         settles_lnk = "lnk.wellnesstransaction." + tx_id + ".settles.booking." + booking_id
         mutations.append(make_link(settles_lnk, tx_key, booking_key, "settles", "settles", {}))
+
+    # settlesClassPrice: the transaction (later-arriving) is the source, the
+    # pre-existing booking is the target (Contract #1 §1.1). A DISTINCT
+    # relation from settles — only written when the caller supplied
+    # priceBookingRef, independent of bookingRef/settles above. The
+    # wellnessClassPriceSettlement lens walks this link to converge the
+    # class-price gap once posted.
+    if price_booking_key != None:
+        settles_price_lnk = "lnk.wellnesstransaction." + tx_id + ".settlesClassPrice.booking." + price_booking_id
+        mutations.append(make_link(settles_price_lnk, tx_key, price_booking_key, "settlesClassPrice", "settlesClassPrice", {}))
 
     events = [{"class": event_class,
                "data": {"accountKey": acct_key, "transactionKey": tx_key, "amountCents": amount_cents}}]

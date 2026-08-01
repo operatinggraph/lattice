@@ -307,6 +307,7 @@ RETURN
   se.schedule.data.startsAt AS startsAt,
   se.schedule.data.endsAt AS endsAt,
   se.schedule.data.capacity AS capacity,
+  se.schedule.data.priceCents AS priceCents,
   s.key AS studioKey,
   s.profile.data.name AS studioName,
   i.key AS instructorKey,
@@ -337,6 +338,7 @@ RETURN
   se.schedule.data.name AS sessionName,
   se.schedule.data.startsAt AS startsAt,
   se.schedule.data.endsAt AS endsAt,
+  se.schedule.data.priceCents AS priceCents,
   s.key AS studioKey,
   s.profile.data.name AS studioName,
   id.key AS bookerKey`

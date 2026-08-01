@@ -1,7 +1,8 @@
 // Package wellnessledger is the Wellness member payment ledger: a per-member
-// financial account that records charges (no-show fees today; class/pass
-// pricing is a future extension of the same primitive) and payments as an
-// append-only transaction history, never a mutable running total.
+// financial account that records charges (no-show fees and class-price
+// charges today; a pass/membership product is a future extension of the same
+// primitive, out of scope here) and payments as an append-only transaction
+// history, never a mutable running total.
 //
 // It declares:
 //
@@ -19,13 +20,17 @@
 //     names; its deterministic, identity-anchored key is the uniqueness guard.
 //
 //   - The `wellnesstransaction` vertex type (DDL `wellnesstransaction`) —
-//     DebitAccount (a charge: a no-show fee today) and CreditAccount (a
-//     payment received) each mint vtx.wellnesstransaction.<NanoID> (root data
-//     {} per D5) with a .entry aspect {type, amountCents, memo?, postedAt},
-//     linked to the account via postedTo. The ledger is append-only: a
-//     balance is derived by summing entries (the wellnessLedgerHistory lens),
-//     never stored as a mutable aspect — so concurrent debits/credits never
-//     race a read-modify-write.
+//     DebitAccount (a charge: a no-show fee and/or a class-price charge) and
+//     CreditAccount (a payment received) each mint vtx.wellnesstransaction.<NanoID>
+//     (root data {} per D5) with a .entry aspect {type, amountCents, memo?, postedAt},
+//     linked to the account via postedTo. DebitAccount independently accepts
+//     bookingRef (no-show settlement, writes settles) and priceBookingRef
+//     (class-price settlement, writes settlesClassPrice) — either, both, or
+//     neither, two distinct relations so the two settlement gaps never
+//     collide in a count(). The ledger is append-only: a balance is derived
+//     by summing entries (the wellnessLedgerHistory lens), never stored as a
+//     mutable aspect — so concurrent debits/credits never race a
+//     read-modify-write.
 //
 //   - The `wellnessLedgerHistory` lens (one row per transaction) the
 //     billing-history FE reads (P5).
@@ -45,6 +50,18 @@
 //     shape (clinicNoShowSettlement), self-contained in this one package (no
 //     new cross-package dependency, same rationale as clinic-ledger's own
 //     placement — clinic-noshow-fee-design.md §"Package boundary").
+//
+//   - The `wellnessClassPriceSettlement` actorAggregate lens + its Weaver
+//     playbook (targets.go): the OTHER wellness billing gap — a session
+//     carrying a priceCents (set by wellness-domain's CreateSession)
+//     converges via a directOp DebitAccount{accountKey, amountCents,
+//     priceBookingRef} once the booker's account exists, UNCONDITIONAL on
+//     attendance (a class price is owed for the seat, not for showing up).
+//     DebitAccount's optional priceBookingRef writes the settlesClassPrice
+//     audit link (transaction→booking, a relation distinct from the
+//     no-show settlement's settles) the lens reads to detect the gap is
+//     closed — so the two settlement gaps never collide in a count() or
+//     double-charge each other.
 //
 // Mirrors packages/clinic-ledger, with the account held for the booker's
 // identity directly rather than a domain-specific patient/lease vertex —
@@ -70,13 +87,15 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 // Package is the static, install-time bundle.
 var Package = pkgmgr.Definition{
 	Name:    "wellness-ledger",
-	Version: "0.1.1",
+	Version: "0.2.0",
 	Description: "Wellness member payment ledger: the wellnessaccount vertex type (CreateAccount, independently-minted " +
 		"id, one per member identity via a .wellnessLedgerAccount guard aspect on the identity) + the wellnesstransaction " +
 		"vertex type (DebitAccount/CreditAccount, append-only entries linked to the account via postedTo, DebitAccount " +
-		"taking an optional bookingRef back-ref) + the wellnessLedgerHistory read-model lens (one row per transaction) + " +
-		"the wellnessMemberAccounts lens (member identity -> account key lookup) + the wellnessNoShowSettlement Weaver " +
-		"playbook (no-show fee auto-charge). Depends wellness-domain.",
+		"independently taking optional bookingRef (no-show settlement, writes settles) and priceBookingRef (class-price " +
+		"settlement, writes settlesClassPrice) back-refs) + the wellnessLedgerHistory read-model lens (one row per " +
+		"transaction) + the wellnessMemberAccounts lens (member identity -> account key lookup) + the " +
+		"wellnessNoShowSettlement Weaver playbook (no-show fee auto-charge) + the wellnessClassPriceSettlement Weaver " +
+		"playbook (class-price auto-charge, unconditional on attendance). Depends wellness-domain.",
 	Depends:       []string{"wellness-domain"},
 	DDLs:          DDLs(),
 	Lenses:        Lenses(),

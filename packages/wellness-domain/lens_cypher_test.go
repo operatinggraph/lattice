@@ -225,6 +225,23 @@ func TestWellnessSessions_NoStudioNullSafe(t *testing.T) {
 	require.Nil(t, rows[0].Values["studioName"])
 }
 
+// TestWellnessSessions_ProjectsPriceCents proves priceCents is projected off
+// the .schedule aspect, same as capacity.
+func TestWellnessSessions_ProjectsPriceCents(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newWdFixture(t)
+	f.vtx(t, "priced", "session")
+	f.aspect(t, "priced", "schedule", "sessionSchedule", map[string]any{
+		"name": "Vinyasa Flow", "startsAt": "2026-07-08T09:00:00Z", "endsAt": "2026-07-08T09:30:00Z", "capacity": 20.0, "priceCents": 1500.0,
+	})
+
+	rows := f.project(t, wellnessSessionsSpec)
+	require.Len(t, rows, 1)
+	require.Equal(t, 1500.0, rows[0].Values["priceCents"])
+}
+
 // TestWellnessBookings_JoinsSessionAndBooker proves the roster / my-classes
 // join: one row per booking, with both the session neighbour (sessionName,
 // startsAt/endsAt) and booker neighbour (bookerKey) resolved.
@@ -255,6 +272,26 @@ func TestWellnessBookings_JoinsSessionAndBooker(t *testing.T) {
 	require.Equal(t, "2026-07-08T09:00:00Z", v["startsAt"])
 	require.Equal(t, "2026-07-08T09:30:00Z", v["endsAt"])
 	require.Equal(t, bookerKey, v["bookerKey"])
+}
+
+// TestWellnessBookings_ProjectsPriceCents proves priceCents is projected off
+// the joined session's .schedule aspect, same as sessionName/startsAt/endsAt.
+func TestWellnessBookings_ProjectsPriceCents(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newWdFixture(t)
+	f.vtx(t, "booking2", "booking")
+	f.vtx(t, "priced2", "session")
+	f.aspect(t, "priced2", "schedule", "sessionSchedule", map[string]any{
+		"name": "Vinyasa Flow", "startsAt": "2026-07-08T09:00:00Z", "endsAt": "2026-07-08T09:30:00Z", "capacity": 20.0, "priceCents": 1500.0,
+	})
+	f.aspect(t, "booking2", "status", "bookingStatus", map[string]any{"value": "booked", "rate": "standard", "seat": 1.0})
+	f.edge(t, "forSession", "booking2", "priced2")
+
+	rows := f.project(t, wellnessBookingsSpec)
+	require.Len(t, rows, 1)
+	require.Equal(t, 1500.0, rows[0].Values["priceCents"])
 }
 
 // TestWellnessSessions_JoinsInstructor proves the ledBy hop the instructor

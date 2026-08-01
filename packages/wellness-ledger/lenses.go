@@ -28,6 +28,16 @@ const MemberAccountsBucket = "wellness-member-accounts"
 // lens's OutputKeyPattern prefix — the §10.2↔§10.8 binding Weaver reads.
 const NoShowSettlementTarget = "wellnessNoShowSettlement"
 
+// ClassPriceSettlementTarget is the §10.8 TargetID == the
+// wellnessClassPriceSettlement lens's OutputKeyPattern prefix — the
+// §10.2↔§10.8 binding Weaver reads. A separate target from
+// NoShowSettlementTarget: a class price is owed regardless of attendance
+// outcome (unconditional on booking .status), whereas the no-show fee gates
+// on status='noShow' — two independent gaps over the same booking, converged
+// by two independent settlesClassPrice/settles links so neither's count()
+// sees the other's transaction.
+const ClassPriceSettlementTarget = "wellnessClassPriceSettlement"
+
 // Lenses returns the package's Lens declarations: wellnessLedgerHistory (one
 // row per posted transaction, flattening the .entry aspect + the account/
 // identity it posted to into a query-optimized read-model row — the FE
@@ -35,8 +45,11 @@ const NoShowSettlementTarget = "wellnessNoShowSettlement"
 // debit, negative for credit, over rows for a given identityKey/accountKey;
 // the ledger itself never stores a mutable running total), wellnessMemberAccounts
 // (the member -> account key lookup, since the account key is no longer
-// derivable), and wellnessNoShowSettlement (the missing_charge convergence
-// lens targets.go's WeaverTargets dispatches DebitAccount over). Prefixed
+// derivable), wellnessNoShowSettlement (the missing_charge convergence
+// lens targets.go's WeaverTargets dispatches DebitAccount over), and
+// wellnessClassPriceSettlement (the missing_price_charge convergence lens —
+// the OTHER wellness billing gap, a class's booking price, converged
+// unconditionally on attendance rather than gated on a noShow). Prefixed
 // like the package's DDLs (ddls.go): a Lens canonicalName is global across
 // every installed package, and loftspace-ledger already owns the bare
 // `ledgerHistory` name.
@@ -70,6 +83,23 @@ func Lenses() []pkgmgr.LensSpec {
 				AnchorType:       "booking",
 				OutputKeyPattern: NoShowSettlementTarget + ".{actorSuffix}",
 				BodyColumns:      []string{"violating", "missing_charge", "entityKey", "bookingKey", "identityKey", "accountKey", "feeCents", "status", "maxretries_charge"},
+				EmptyBehavior:    "delete",
+				KeyColumn:        "entityId",
+				Freshness:        "auto",
+			},
+		},
+		{
+			CanonicalName:  ClassPriceSettlementTarget,
+			Class:          "meta.lens",
+			Adapter:        "nats-kv",
+			Bucket:         "weaver-targets",
+			Engine:         "full",
+			Spec:           classPriceSettlementSpec,
+			ProjectionKind: "actorAggregate",
+			Output: &pkgmgr.OutputDescriptorSpec{
+				AnchorType:       "booking",
+				OutputKeyPattern: ClassPriceSettlementTarget + ".{actorSuffix}",
+				BodyColumns:      []string{"violating", "missing_price_charge", "entityKey", "bookingKey", "identityKey", "accountKey", "priceCents", "sessionName", "maxretries_price"},
 				EmptyBehavior:    "delete",
 				KeyColumn:        "entityId",
 				Freshness:        "auto",
@@ -128,6 +158,63 @@ RETURN
   ((status = 'noShow') AND (feeCents <> null) AND (feeCents > 0) AND (accountKey <> null) AND (txCount = 0)) AS violating,
   %d AS maxretries_charge
 `, maxChargeRetries)
+
+// classPriceSettlementSpec is the one-row-per-booking convergence cypher for
+// the OTHER wellness billing gap: a session carrying a positive priceCents
+// needs its class-price charge posted onto the booker's wellness-ledger
+// account, once — regardless of attendance outcome. Unlike
+// noShowSettlementSpec, this is UNCONDITIONAL on booking .status: a class
+// price is owed for booking the seat, not for showing up or not, so there is
+// no status filter here at all (the mirror omission of noShowSettlementSpec's
+// `status = 'noShow'` clause).
+//
+//   - `missing_price_charge` — the booking's session carries a priceCents > 0,
+//     the booker has a ledger account, and no wellnesstransaction
+//     `settlesClassPrice` this booking yet (count(tx.key) collapses the fan to
+//     a single existence check, the same objectLiveness/clauseSatisfaction
+//     idiom noShowSettlementSpec uses). Weaver dispatches
+//     DebitAccount{accountKey, amountCents, priceBookingRef} (targets.go) —
+//     the priceBookingRef extension writes the settlesClassPrice audit link
+//     this OPTIONAL MATCH walks (a DISTINCT relation from settles, so this
+//     lens's count() never sees a no-show-fee transaction and vice versa), so
+//     once posted the gap converges and stays converged.
+//
+// `MATCH (bk:booking {key: $actorKey})` alone (no isDeleted clause) is enough
+// to exclude a cancelled/soft-deleted booking — the full engine's Core-KV
+// reads filter isDeleted per Contract #1 (executor.go), so a tombstoned
+// booking simply stops matching, mirroring noShowSettlementSpec's identical
+// MATCH. A booking whose session carries no priceCents (or 0 — a free class)
+// never violates (priceCents null/0); one whose booker has no
+// wellnessaccount yet never violates either (accountKey null) — same
+// non-goals as noShowSettlementSpec, not gaps this lens converges.
+// classPriceSettlementSpec is built once at package init: the retry cap
+// (maxPriceChargeRetries) bakes into the constant maxretries_price column,
+// the same §10.2 "the policy lives in the cypher" convention
+// noShowSettlementSpec follows. The cypher carries no literal '%'.
+var classPriceSettlementSpec = fmt.Sprintf(`MATCH (bk:booking {key: $actorKey})
+MATCH (bk)-[:forSession]->(se:session)
+MATCH (bk)-[:bookedBy]->(id:identity)
+OPTIONAL MATCH (id)<-[:heldFor]-(a:wellnessaccount)
+OPTIONAL MATCH (bk)<-[:settlesClassPrice]-(tx:wellnesstransaction)
+WITH
+  bk.key AS entityKey,
+  se.schedule.data.priceCents AS priceCents,
+  se.schedule.data.name AS sessionName,
+  id.key AS identityKey,
+  a.key AS accountKey,
+  count(tx.key) AS txCount
+RETURN
+  entityKey AS actorKey,
+  entityKey,
+  entityKey AS bookingKey,
+  identityKey,
+  accountKey,
+  priceCents,
+  sessionName,
+  ((priceCents <> null) AND (priceCents > 0) AND (accountKey <> null) AND (txCount = 0)) AS missing_price_charge,
+  ((priceCents <> null) AND (priceCents > 0) AND (accountKey <> null) AND (txCount = 0)) AS violating,
+  %d AS maxretries_price
+`, maxPriceChargeRetries)
 
 // ledgerHistorySpec projects one row per transaction, walking postedTo to the
 // account and heldFor to the identity so the FE can filter/group by

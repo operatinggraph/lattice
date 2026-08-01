@@ -1,10 +1,11 @@
 package wellnessledger
 
-// Rule-engine proof of the wellnessNoShowSettlement convergence lens, driven
-// through the `full` engine (engine:"full") against an embedded NATS
-// Core/Adjacency KV — the same harness clinic-ledger / cafe-domain /
-// semantic-contracts use.
+// Rule-engine proof of the wellnessNoShowSettlement and
+// wellnessClassPriceSettlement convergence lenses, driven through the `full`
+// engine (engine:"full") against an embedded NATS Core/Adjacency KV — the
+// same harness clinic-ledger / cafe-domain / semantic-contracts use.
 //
+// wellnessNoShowSettlement (noShowSettlementSpec):
 //   - BOOKED: a booked (non-noShow) booking never violates, regardless of
 //     fee/account state.
 //   - NOSHOW_NO_FEE: a noShow booking with no noShowFeeCents (set before this
@@ -16,6 +17,19 @@ package wellnessledger
 //     wellnesstransaction settles this booking yet — missing_charge true.
 //   - NOSHOW_CHARGED: noShow, carries a fee, account exists, a
 //     wellnesstransaction settles this booking — converged.
+//
+// wellnessClassPriceSettlement (classPriceSettlementSpec) — the OTHER
+// wellness billing gap, UNCONDITIONAL on booking .status:
+//   - NO_PRICE: a booking whose session carries no priceCents (or 0) never
+//     violates, regardless of attendance/account state.
+//   - PRICED_NO_ACCOUNT: session priced, the booker has no wellness-ledger
+//     account yet — never violates (no missing_account gap, mirrors the
+//     no-show lens's identical rationale).
+//   - PRICED_ACCOUNT_NO_CHARGE: session priced, account exists, no
+//     wellnesstransaction settlesClassPrice this booking yet —
+//     missing_price_charge true.
+//   - PRICED_CHARGED: session priced, account exists, a wellnesstransaction
+//     settlesClassPrice this booking — converged.
 
 import (
 	"context"
@@ -106,6 +120,42 @@ func (f *wlFixture) mkBooking(t *testing.T, name string, status string, feeCents
 		statusData["noShowFeeCents"] = feeCents
 	}
 	f.aspect(t, name, "status", "bookingStatus", statusData)
+	f.vtx(t, name+"_identity", "identity")
+	f.edge(t, "bookedBy", name, name+"_identity")
+}
+
+// projectClassPriceAt runs the anchored wellnessClassPriceSettlement spec for
+// one booking — the classPriceSettlementSpec counterpart to projectAt.
+func (f *wlFixture) projectClassPriceAt(t *testing.T, bookingName string) []ruleengine.ProjectionResult {
+	t.Helper()
+	now := time.Now().UTC().Format(time.RFC3339)
+	eng := full.New()
+	cr, err := eng.Parse(classPriceSettlementSpec)
+	require.NoError(t, err, "wellnessClassPriceSettlement cypher must parse on the full engine")
+	bookingKey := "vtx.booking." + f.ids[bookingName]
+	out, err := eng.ExecuteWith(context.Background(), cr, ruleengine.EventContext{Parameters: map[string]any{
+		"actorKey":    bookingKey,
+		"now":         now,
+		"projectedAt": now,
+	}}, f.adjKV, f.coreKV)
+	require.NoError(t, err)
+	return out
+}
+
+// mkPricedBooking seeds one booking forSession a session carrying the given
+// (optional, nil to omit) priceCents, and bookedBy a fresh identity —
+// classPriceSettlementSpec's counterpart to mkBooking. Status is
+// deliberately NOT set: the class-price gap is unconditional on attendance.
+func (f *wlFixture) mkPricedBooking(t *testing.T, name string, priceCents any) {
+	t.Helper()
+	f.vtx(t, name, "booking")
+	f.vtx(t, name+"_session", "session")
+	schedData := map[string]any{"name": "Vinyasa Flow", "startsAt": "2026-07-08T09:00:00Z", "endsAt": "2026-07-08T09:30:00Z", "capacity": 20.0}
+	if priceCents != nil {
+		schedData["priceCents"] = priceCents
+	}
+	f.aspect(t, name+"_session", "schedule", "sessionSchedule", schedData)
+	f.edge(t, "forSession", name, name+"_session")
 	f.vtx(t, name+"_identity", "identity")
 	f.edge(t, "bookedBy", name, name+"_identity")
 }
@@ -204,4 +254,100 @@ func TestWellnessNoShowSettlement_NoShowCharged_Converged(t *testing.T) {
 	v := f.projectAt(t, "chargedbkg")[0].Values
 	require.Equal(t, false, v["missing_charge"], "a wellnesstransaction settles this booking — converged")
 	require.Equal(t, false, v["violating"])
+}
+
+func TestWellnessClassPriceSettlement_NoPrice_NotViolating(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newWlFixture(t)
+	f.mkPricedBooking(t, "freebkg", nil)
+
+	v := f.projectClassPriceAt(t, "freebkg")[0].Values
+	require.Equal(t, "vtx.booking."+f.ids["freebkg"], v["entityKey"])
+	require.Nil(t, v["priceCents"], "no priceCents set — a free class")
+	require.Equal(t, false, v["missing_price_charge"], "no price to charge — never violates")
+	require.Equal(t, false, v["violating"])
+}
+
+func TestWellnessClassPriceSettlement_ZeroPrice_NotViolating(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newWlFixture(t)
+	f.mkPricedBooking(t, "zerobkg", 0.0)
+
+	v := f.projectClassPriceAt(t, "zerobkg")[0].Values
+	require.Equal(t, 0.0, v["priceCents"])
+	require.Equal(t, false, v["missing_price_charge"], "priceCents=0 — a free class — never violates")
+	require.Equal(t, false, v["violating"])
+}
+
+func TestWellnessClassPriceSettlement_PricedNoAccount_NotViolating(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newWlFixture(t)
+	f.mkPricedBooking(t, "noacctpbkg", 1500.0)
+
+	v := f.projectClassPriceAt(t, "noacctpbkg")[0].Values
+	require.Nil(t, v["accountKey"], "booker has no wellness-ledger account yet")
+	require.Equal(t, false, v["missing_price_charge"], "no account to charge yet — this gap doesn't gate (no missing_account gap)")
+	require.Equal(t, false, v["violating"])
+}
+
+func TestWellnessClassPriceSettlement_PricedWithAccountNoCharge_MissingPriceCharge(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newWlFixture(t)
+	f.mkPricedBooking(t, "unchargedpbkg", 1500.0)
+	f.vtx(t, "unchargedpbkg_acct", "wellnessaccount")
+	f.edge(t, "heldFor", "unchargedpbkg_acct", "unchargedpbkg_identity")
+
+	v := f.projectClassPriceAt(t, "unchargedpbkg")[0].Values
+	require.Equal(t, "vtx.wellnessaccount."+f.ids["unchargedpbkg_acct"], v["accountKey"])
+	require.Equal(t, 1500.0, v["priceCents"])
+	require.Equal(t, "Vinyasa Flow", v["sessionName"])
+	require.Equal(t, true, v["missing_price_charge"], "no wellnesstransaction settlesClassPrice this booking yet — violating")
+	require.Equal(t, true, v["violating"])
+	requireIntColumn(t, v, "maxretries_price", maxPriceChargeRetries)
+}
+
+func TestWellnessClassPriceSettlement_PricedCharged_Converged(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newWlFixture(t)
+	f.mkPricedBooking(t, "chargedpbkg", 1500.0)
+	f.vtx(t, "chargedpbkg_acct", "wellnessaccount")
+	f.edge(t, "heldFor", "chargedpbkg_acct", "chargedpbkg_identity")
+	f.vtx(t, "chargedpbkg_tx", "wellnesstransaction")
+	f.edge(t, "settlesClassPrice", "chargedpbkg_tx", "chargedpbkg")
+
+	v := f.projectClassPriceAt(t, "chargedpbkg")[0].Values
+	require.Equal(t, false, v["missing_price_charge"], "a wellnesstransaction settlesClassPrice this booking — converged")
+	require.Equal(t, false, v["violating"])
+}
+
+// TestWellnessClassPriceSettlement_NoShowSettlesLinkDoesNotConverge proves
+// the two settlement gaps are genuinely independent: a `settles` link (the
+// no-show fee's relation) does NOT satisfy classPriceSettlementSpec's
+// `settlesClassPrice`-keyed OPTIONAL MATCH — the class-price gap stays
+// violating even though a (differently-purposed) transaction already
+// references this booking.
+func TestWellnessClassPriceSettlement_NoShowSettlesLinkDoesNotConverge(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newWlFixture(t)
+	f.mkPricedBooking(t, "crossedbkg", 1500.0)
+	f.vtx(t, "crossedbkg_acct", "wellnessaccount")
+	f.edge(t, "heldFor", "crossedbkg_acct", "crossedbkg_identity")
+	f.vtx(t, "crossedbkg_tx", "wellnesstransaction")
+	f.edge(t, "settles", "crossedbkg_tx", "crossedbkg")
+
+	v := f.projectClassPriceAt(t, "crossedbkg")[0].Values
+	require.Equal(t, true, v["missing_price_charge"], "a settles (no-show) link must not satisfy the settlesClassPrice gap")
+	require.Equal(t, true, v["violating"])
 }

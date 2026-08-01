@@ -105,8 +105,9 @@ func transactionDDL() pkgmgr.DDLSpec {
 		Class:             "meta.ddl.vertexType",
 		PermittedCommands: []string{"DebitAccount", "CreditAccount"},
 		Description: "Ledger transaction DDL. Vertex shape: vtx.wellnesstransaction.<NanoID>, class=wellnesstransaction, root data = {} " +
-			"(minimal, D5 — the entry detail is a .entry aspect). DebitAccount{accountKey, amountCents, memo?, bookingRef?} " +
-			"records a charge (a no-show fee); CreditAccount{accountKey, amountCents, memo?} records a payment received. " +
+			"(minimal, D5 — the entry detail is a .entry aspect). DebitAccount{accountKey, amountCents, memo?, bookingRef?, " +
+			"priceBookingRef?} records a charge (a no-show fee or a class-price charge); CreditAccount{accountKey, " +
+			"amountCents, memo?} records a payment received. " +
 			"Each mints a fresh vtx.wellnesstransaction.<NanoID> + a .entry aspect {type (debit|credit), amountCents, memo?, " +
 			"postedAt} + the postedTo link (transaction→account, the transaction is the later-arriving vertex so it is the " +
 			"source — Contract #1 §1.1). The ledger is APPEND-ONLY — no balance is stored or mutated on the account; the " +
@@ -116,21 +117,29 @@ func transactionDDL() pkgmgr.DDLSpec {
 			"UnknownBooking otherwise): when present, writes a settles audit link (transaction→booking) that the " +
 			"wellnessNoShowSettlement lens (targets.go) walks to converge the no-show-fee gap once posted. A plain " +
 			"human-submitted DebitAccount (no bookingRef) is unaffected — the field mirrors clinic-ledger's appointmentRef " +
-			"shape (itself mirroring cafe-ledger's tabRef).",
+			"shape (itself mirroring cafe-ledger's tabRef). DebitAccount separately and independently accepts an optional " +
+			"priceBookingRef (vtx.booking.<NanoID>, validated alive when supplied — UnknownBooking otherwise): when " +
+			"present, writes a DISTINCT settlesClassPrice audit link (transaction→booking) that the " +
+			"wellnessClassPriceSettlement lens (lenses.go/targets.go) walks to converge the class-price gap once posted — " +
+			"a separate relation from settles/bookingRef so the two settlement gaps (no-show fee vs. class price) never " +
+			"collide in a count(). A DebitAccount may carry bookingRef, priceBookingRef, both, or neither — the two are " +
+			"independent, no mutual exclusion.",
 		Script: transactionDDLScript,
 		InputSchema: `{"type":"object","properties":` +
 			`{"accountKey":{"type":"string","description":"vtx.wellnessaccount.<NanoID> the transaction posts to (DebitAccount/CreditAccount; required, validated alive)."},` +
 			`"amountCents":{"type":"number","description":"The transaction amount in integer cents; required, must be > 0. A debit is a charge (increases what the member owes); a credit is a payment (decreases it)."},` +
 			`"memo":{"type":"string","description":"Optional free-text description of the charge or payment (e.g. \"No-show fee — Vinyasa Flow\", \"Front-desk payment\"). Optional."},` +
-			`"bookingRef":{"type":"string","description":"DebitAccount only; optional vtx.booking.<NanoID> back-reference to the no-show booking this charge settles. When supplied, validated alive (UnknownBooking otherwise) and a settles audit link (transaction→booking) is written — the wellnessNoShowSettlement lens reads it to converge the gap. Mirrors clinic-ledger's appointmentRef."}},` +
+			`"bookingRef":{"type":"string","description":"DebitAccount only; optional vtx.booking.<NanoID> back-reference to the no-show booking this charge settles. When supplied, validated alive (UnknownBooking otherwise) and a settles audit link (transaction→booking) is written — the wellnessNoShowSettlement lens reads it to converge the gap. Mirrors clinic-ledger's appointmentRef."},` +
+			`"priceBookingRef":{"type":"string","description":"DebitAccount only; optional vtx.booking.<NanoID> back-reference to the booking this charge settles the CLASS PRICE for. Independent of bookingRef (a DebitAccount may carry either, both, or neither). When supplied, validated alive (UnknownBooking otherwise) and a settlesClassPrice audit link (transaction→booking) is written — the wellnessClassPriceSettlement lens reads it to converge the gap."}},` +
 			`"required":["accountKey","amountCents"]}`,
 		OutputSchema: `{"type":"object","properties":` +
 			`{"primaryKey":{"type":"string","description":"vtx.wellnesstransaction.<NanoID> of the minted transaction (the operation's principal key)."}}}`,
 		FieldDescription: map[string]string{
-			"accountKey":  "Full vtx.wellnessaccount.<NanoID> key the transaction posts to. DebitAccount/CreditAccount validate it is alive and write the postedTo link (transaction→account) the wellnessLedgerHistory lens walks.",
-			"amountCents": "The transaction amount in integer cents; required, must be a positive number. Stored on the .entry aspect and projected verbatim by the wellnessLedgerHistory lens.",
-			"memo":        "Optional free-text description of the charge or payment. Stored on the .entry aspect when supplied; projected by the wellnessLedgerHistory lens.",
-			"bookingRef":  "DebitAccount only: optional full vtx.booking.<NanoID> key of the no-show booking this charge settles. Validated alive when supplied (UnknownBooking otherwise); writes a settles link (transaction→booking) the wellnessNoShowSettlement lens walks to converge the gap.",
+			"accountKey":      "Full vtx.wellnessaccount.<NanoID> key the transaction posts to. DebitAccount/CreditAccount validate it is alive and write the postedTo link (transaction→account) the wellnessLedgerHistory lens walks.",
+			"amountCents":     "The transaction amount in integer cents; required, must be a positive number. Stored on the .entry aspect and projected verbatim by the wellnessLedgerHistory lens.",
+			"memo":            "Optional free-text description of the charge or payment. Stored on the .entry aspect when supplied; projected by the wellnessLedgerHistory lens.",
+			"bookingRef":      "DebitAccount only: optional full vtx.booking.<NanoID> key of the no-show booking this charge settles. Validated alive when supplied (UnknownBooking otherwise); writes a settles link (transaction→booking) the wellnessNoShowSettlement lens walks to converge the gap.",
+			"priceBookingRef": "DebitAccount only: optional full vtx.booking.<NanoID> key of the booking this charge settles the class price for. Independent of bookingRef. Validated alive when supplied (UnknownBooking otherwise); writes a settlesClassPrice link (transaction→booking) the wellnessClassPriceSettlement lens walks to converge the gap.",
 		},
 		Examples: []pkgmgr.ExampleSpec{
 			{
@@ -148,6 +157,15 @@ func transactionDDL() pkgmgr.DDLSpec {
 					"and writes lnk.wellnesstransaction.<id>.settles.booking.<id> (transaction→booking). This is the shape " +
 					"wellness-ledger's own wellnessNoShowSettlement Weaver target dispatches — a human-submitted DebitAccount " +
 					"simply omits bookingRef and gets the plain charge shape above.",
+			},
+			{
+				Name: "DebitAccount — Weaver-dispatched class-price settlement (priceBookingRef)",
+				Payload: map[string]any{"accountKey": "vtx.wellnessaccount.<NanoID>", "amountCents": 1500, "priceBookingRef": "vtx.booking.<NanoID>"},
+				ExpectedOutcome: "Same as the plain charge, plus validates priceBookingRef is alive (UnknownBooking otherwise) " +
+					"and writes lnk.wellnesstransaction.<id>.settlesClassPrice.booking.<id> (transaction→booking) — a distinct " +
+					"relation from settles/bookingRef, so the no-show and class-price gaps never collide in a count(). This is " +
+					"the shape wellness-ledger's own wellnessClassPriceSettlement Weaver target dispatches; bookingRef and " +
+					"priceBookingRef may both be supplied on the same call (independent, no mutual exclusion).",
 			},
 			{
 				Name:    "CreditAccount — record a payment",

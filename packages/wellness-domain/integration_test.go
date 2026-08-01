@@ -309,6 +309,38 @@ func createSession(t *testing.T, ctx context.Context, conn *substrate.Conn, cp *
 	return "vtx.session." + nanoIDFromRequestID(reqID), outcome
 }
 
+// createSessionPriced is createSession plus an optional priceCents — nil
+// omits the field entirely (the free-class default), any other value
+// (including a negative int, to exercise the rejection path) is sent
+// verbatim.
+func createSessionPriced(t *testing.T, ctx context.Context, conn *substrate.Conn, cp *processor.CommitPath, cons jetstream.Consumer, label, studioKey, name, startsAt, endsAt string, capacity int, priceCents any) (string, processor.MessageOutcome) {
+	t.Helper()
+	reqID := testutil.GenReqID(label)
+	payloadMap := map[string]any{
+		"studio": studioKey, "name": name, "startsAt": startsAt, "endsAt": endsAt, "capacity": capacity,
+	}
+	if priceCents != nil {
+		payloadMap["priceCents"] = priceCents
+	}
+	payload, _ := json.Marshal(payloadMap)
+	env := &processor.OperationEnvelope{
+		RequestID:     reqID,
+		Lane:          processor.LaneDefault,
+		OperationType: "CreateSession",
+		Actor:         domainActorKey,
+		SubmittedAt:   "2026-07-07T12:00:00Z",
+		Class:         "session",
+		Payload:       payload,
+		ContextHint: &processor.ContextHint{
+			Reads:         []string{studioKey},
+			OptionalReads: wdSlotClaimKeys(t, studioKey, startsAt, endsAt),
+		},
+	}
+	testutil.PublishOp(t, conn, env)
+	outcome := testutil.DriveOne(t, ctx, cp, cons, "")
+	return "vtx.session." + nanoIDFromRequestID(reqID), outcome
+}
+
 func createBooking(t *testing.T, ctx context.Context, conn *substrate.Conn, cp *processor.CommitPath, cons jetstream.Consumer, label, sessionKey, bookerKey, leaseAppKey string) (string, processor.MessageOutcome) {
 	t.Helper()
 	reqID := testutil.GenReqID(label)
@@ -714,6 +746,57 @@ func TestCreateSession_RejectsStudioDoubleBook(t *testing.T) {
 	_, second := createSession(t, ctx, conn, cp, cons, "wdcreatesessio000003", studioKey, "Power Sculpt", "2026-07-08T09:15:00Z", "2026-07-08T09:45:00Z", 20)
 	if second != processor.OutcomeRejected {
 		t.Fatalf("overlapping CreateSession outcome = %v, want Rejected (StudioConflict)", second)
+	}
+}
+
+// TestCreateSession_StoresPriceCentsOnSchedule proves an explicit priceCents
+// is stored on .schedule alongside capacity.
+func TestCreateSession_StoresPriceCentsOnSchedule(t *testing.T) {
+	ctx, conn := setupDomainEnv(t)
+	cp, cons := newDomainPipeline(t, ctx, conn, "sessionprice")
+
+	studioKey := createStudio(t, ctx, conn, cp, cons, "wdcreatestudioprc001", "Flow Room")
+	sessionKey, outcome := createSessionPriced(t, ctx, conn, cp, cons, "wdcreatesessioprc001", studioKey, "Vinyasa Flow", "2026-07-08T09:00:00Z", "2026-07-08T09:30:00Z", 20, 1500)
+	if outcome != processor.OutcomeAccepted {
+		t.Fatalf("CreateSession outcome = %v, want Accepted", outcome)
+	}
+
+	schedDoc := readDoc(t, ctx, conn, sessionKey+".schedule")
+	schedData, _ := schedDoc["data"].(map[string]any)
+	if got, _ := schedData["priceCents"].(float64); got != 1500 {
+		t.Fatalf("schedule.priceCents = %v, want 1500", got)
+	}
+}
+
+// TestCreateSession_OmittedPriceCentsIsFree proves an omitted priceCents
+// leaves the key absent from .schedule — a free class, not a stored zero.
+func TestCreateSession_OmittedPriceCentsIsFree(t *testing.T) {
+	ctx, conn := setupDomainEnv(t)
+	cp, cons := newDomainPipeline(t, ctx, conn, "sessionpricefree")
+
+	studioKey := createStudio(t, ctx, conn, cp, cons, "wdcreatestudioprc002", "Flow Room")
+	sessionKey, outcome := createSession(t, ctx, conn, cp, cons, "wdcreatesessioprc002", studioKey, "Vinyasa Flow", "2026-07-08T09:00:00Z", "2026-07-08T09:30:00Z", 20)
+	if outcome != processor.OutcomeAccepted {
+		t.Fatalf("CreateSession outcome = %v, want Accepted", outcome)
+	}
+
+	schedDoc := readDoc(t, ctx, conn, sessionKey+".schedule")
+	schedData, _ := schedDoc["data"].(map[string]any)
+	if _, present := schedData["priceCents"]; present {
+		t.Fatalf("schedule.priceCents must be absent when omitted, got %v", schedData["priceCents"])
+	}
+}
+
+// TestCreateSession_RejectsNegativePriceCents proves a negative priceCents is
+// InvalidArgument, not silently clamped or accepted.
+func TestCreateSession_RejectsNegativePriceCents(t *testing.T) {
+	ctx, conn := setupDomainEnv(t)
+	cp, cons := newDomainPipeline(t, ctx, conn, "sessionpriceneg")
+
+	studioKey := createStudio(t, ctx, conn, cp, cons, "wdcreatestudioprc003", "Flow Room")
+	_, outcome := createSessionPriced(t, ctx, conn, cp, cons, "wdcreatesessioprc003", studioKey, "Vinyasa Flow", "2026-07-08T09:00:00Z", "2026-07-08T09:30:00Z", 20, -100)
+	if outcome != processor.OutcomeRejected {
+		t.Fatalf("CreateSession with priceCents=-100 outcome = %v, want Rejected (InvalidArgument)", outcome)
 	}
 }
 
@@ -1150,6 +1233,48 @@ func TestReassignSession_SwapsInstructor(t *testing.T) {
 	}
 }
 
+// TestReassignSession_CarriesPriceCentsForwardOnInstructorSwap proves an
+// instructor swap leaves .schedule.priceCents untouched, exactly like
+// name/capacity.
+func TestReassignSession_CarriesPriceCentsForwardOnInstructorSwap(t *testing.T) {
+	ctx, conn := setupDomainEnv(t)
+	cp, cons := newDomainPipeline(t, ctx, conn, "reassignpriceinstr")
+
+	opDoc := domainCapDoc()
+	opDoc.PlatformPermissions = append(opDoc.PlatformPermissions,
+		processor.PlatformPermission{OperationType: "CreateInstructor", Scope: "any"})
+	testutil.SeedCapDoc(t, ctx, conn, opDoc)
+
+	reqID := testutil.GenReqID("wdreassignprcinstr01")
+	testutil.PublishOp(t, conn, &processor.OperationEnvelope{
+		RequestID: reqID, Lane: processor.LaneDefault, OperationType: "CreateInstructor",
+		Actor: domainActorKey, SubmittedAt: "2026-07-07T12:00:00Z", Class: "instructor",
+		Payload: json.RawMessage(`{"displayName":"B"}`),
+	})
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
+	instructorB := "vtx.instructor." + nanoIDFromRequestID(reqID)
+
+	studioKey := createStudio(t, ctx, conn, cp, cons, "wdreassignprcstudio1", "Flow Room")
+	sessionKey, outcome := createSessionPriced(t, ctx, conn, cp, cons, "wdreassignprcsessio1",
+		studioKey, "Vinyasa Flow", "2026-07-08T09:00:00Z", "2026-07-08T09:30:00Z", 20, 1500)
+	if outcome != processor.OutcomeAccepted {
+		t.Fatalf("CreateSession outcome = %v, want Accepted", outcome)
+	}
+
+	outcome2, _ := testutil.SubmitAndAwaitReply(t, ctx, conn, cp, cons, reassignSessionEnv(t, "wdreassignprcswap001",
+		sessionKey, studioKey, domainActorKey, map[string]any{"sessionKey": sessionKey, "studio": studioKey, "newInstructor": instructorB},
+		"2026-07-08T08:00:00Z"))
+	if outcome2 != processor.OutcomeAccepted {
+		t.Fatalf("ReassignSession newInstructor outcome = %v, want Accepted", outcome2)
+	}
+
+	schedDoc := readDoc(t, ctx, conn, sessionKey+".schedule")
+	schedData, _ := schedDoc["data"].(map[string]any)
+	if got, _ := schedData["priceCents"].(float64); got != 1500 {
+		t.Errorf("schedule.priceCents = %v, must carry forward unchanged on an instructor swap", got)
+	}
+}
+
 func TestReassignSession_ClearsInstructorWithNoReplacement(t *testing.T) {
 	ctx, conn := setupDomainEnv(t)
 	cp, cons := newDomainPipeline(t, ctx, conn, "reassignclear")
@@ -1260,6 +1385,38 @@ func TestReassignSession_MovesTimeLeavingSharedCellClaimed(t *testing.T) {
 
 	if !keyExists(t, ctx, conn, bookingKey) {
 		t.Errorf("the existing booking must survive the time move untouched")
+	}
+}
+
+// TestReassignSession_CarriesPriceCentsForwardOnTimeMove proves a time move
+// leaves .schedule.priceCents untouched, exactly like name/capacity.
+func TestReassignSession_CarriesPriceCentsForwardOnTimeMove(t *testing.T) {
+	ctx, conn := setupDomainEnv(t)
+	cp, cons := newDomainPipeline(t, ctx, conn, "reassignpricemove")
+
+	studioKey := createStudio(t, ctx, conn, cp, cons, "wdreassignprcmvstd01", "Flow Room")
+	sessionKey, outcome := createSessionPriced(t, ctx, conn, cp, cons, "wdreassignprcmvsess1",
+		studioKey, "Vinyasa Flow", "2026-07-08T09:00:00Z", "2026-07-08T09:30:00Z", 20, 1500)
+	if outcome != processor.OutcomeAccepted {
+		t.Fatalf("CreateSession outcome = %v, want Accepted", outcome)
+	}
+
+	env := reassignSessionEnv(t, "wdreassignprcmvmove1", sessionKey, studioKey, domainActorKey,
+		map[string]any{"sessionKey": sessionKey, "studio": studioKey, "startsAt": "2026-07-08T09:15:00Z", "endsAt": "2026-07-08T09:45:00Z"},
+		"2026-07-08T08:00:00Z")
+	outcome2, reply := testutil.SubmitAndAwaitReply(t, ctx, conn, cp, cons, env)
+	if outcome2 != processor.OutcomeAccepted {
+		msg := ""
+		if reply != nil && reply.Error != nil {
+			msg = reply.Error.Message
+		}
+		t.Fatalf("ReassignSession time move outcome = %v (%s), want Accepted", outcome2, msg)
+	}
+
+	schedDoc := readDoc(t, ctx, conn, sessionKey+".schedule")
+	schedData, _ := schedDoc["data"].(map[string]any)
+	if got, _ := schedData["priceCents"].(float64); got != 1500 {
+		t.Errorf("schedule.priceCents = %v, must carry forward unchanged on a time move", got)
 	}
 }
 
