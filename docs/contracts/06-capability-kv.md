@@ -118,7 +118,7 @@ decomposition.
     "vtx.identity.Hj4kPmRtw9nbCxz5vQ2y": 47,
     "vtx.meta.capabilityLensDefinition": 12,
     "vtx.unit.penthouse-Lk2Pn6mQrtwzKbcXvP3T": 8,
-    "vtx.lease.Op4Nb2mPq6rTwzKxVyP7": 3,
+    "vtx.lease.op4Nb2mPq6rTwzKxVyP7": 3,
     "vtx.role.penthouseResident": 5
   },
   "lanes": ["default"],
@@ -146,7 +146,7 @@ decomposition.
     },
     {
       "service": "vtx.service.payRent-NanoID",
-      "resolvedVia": ["vtx.lease.Op4Nb2mPq6rTwzKxVyP7"],
+      "resolvedVia": ["vtx.lease.op4Nb2mPq6rTwzKxVyP7"],
       "allowedOperations": [
         { "operationType": "InitiatePayment" },
         { "operationType": "ViewBalance" },

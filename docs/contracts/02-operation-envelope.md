@@ -369,7 +369,7 @@ reads the path-specific disjoint key via the registered hook. Full shape: Contra
 // Task-derived (manager approves lease application)
 "authContext": {
   "task": "vtx.task.Rm7q3pntwzkfbcxv5p9j",
-  "target": "vtx.lease.Op4Nb2mPq6rTwzKxVyP7"
+  "target": "vtx.lease.op4Nb2mPq6rTwzKxVyP7"
 }
 
 // Self-scoped platform operation (resident updates own email)
