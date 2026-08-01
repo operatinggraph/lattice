@@ -254,7 +254,7 @@ func main() {
 		fmt.Println("==> provider: " + providerKey + " practicesAt building")
 		seedLocationPresentation(ctx, conn, adminKey)
 		frontOfHouseRoleKey := "vtx.role." + pkgmgr.RoleID("identity-domain", "frontOfHouse")
-		staffKey := ensureStaff(ctx, conn, adminKey, frontOfHouseRoleKey, consumerRoleKey, buildingKey, staffName, staffEmail)
+		staffKey := ensureStaff(ctx, conn, adminKey, frontOfHouseRoleKey, buildingKey, staffName, staffEmail)
 		fmt.Printf("==> staff:           %s (%s) worksAt building, holds frontOfHouse\n", staffKey, staffName)
 		seedStaffWorklistApplication(ctx, conn, adminKey, staffKey)
 		fmt.Println("FACET_STAFF_NANOID=" + strings.TrimPrefix(staffKey, "vtx.identity."))
@@ -262,7 +262,7 @@ func main() {
 		fmt.Printf("==> landlord:        %s (%s) manages Unit 4, holds consumer\n", landlordKey, landlordName)
 		fmt.Println("LOFTSPACE_LANDLORD_NANOID=" + strings.TrimPrefix(landlordKey, "vtx.identity."))
 		healApprovedLeaseApplications(ctx, conn, adminKey)
-		maintKey := seedMaintenanceBeat(ctx, conn, adminKey, consumerRoleKey)
+		maintKey := seedMaintenanceBeat(ctx, conn, adminKey)
 		fmt.Println("FACET_MAINT_NANOID=" + strings.TrimPrefix(maintKey, "vtx.identity."))
 
 		oseiIdentityKey := seedOseiProvider(ctx, conn, adminKey, providerRoleKey)
@@ -320,7 +320,7 @@ func main() {
 	// --- one staff persona, working at the building (not residing in a unit) --
 
 	frontOfHouseRoleKey := "vtx.role." + pkgmgr.RoleID("identity-domain", "frontOfHouse")
-	staffKey := ensureStaff(ctx, conn, adminKey, frontOfHouseRoleKey, consumerRoleKey, buildingKey, staffName, staffEmail)
+	staffKey := ensureStaff(ctx, conn, adminKey, frontOfHouseRoleKey, buildingKey, staffName, staffEmail)
 	fmt.Printf("==> staff:           %s (%s) worksAt building, holds frontOfHouse\n", staffKey, staffName)
 
 	// --- two service templates, correct families, both availableAt the building --
@@ -407,7 +407,7 @@ func main() {
 
 	retireLegacyTemplates(ctx, conn)
 
-	maintKey := seedMaintenanceBeat(ctx, conn, adminKey, consumerRoleKey)
+	maintKey := seedMaintenanceBeat(ctx, conn, adminKey)
 
 	oseiIdentityKey := seedOseiProvider(ctx, conn, adminKey, providerRoleKey)
 	fmt.Printf("==> provider (bound): %s (%s) practicesAt building, identifiedBy %s\n", oseiProviderKey, oseiName, oseiIdentityKey)
@@ -453,9 +453,9 @@ func main() {
 // the same ids (per-mutation idempotent, like every seeder here).
 //
 // Returns the tech's identity key.
-func seedMaintenanceBeat(ctx context.Context, conn *substrate.Conn, adminKey, consumerRoleKey string) string {
+func seedMaintenanceBeat(ctx context.Context, conn *substrate.Conn, adminKey string) string {
 	backOfHouseRoleKey := "vtx.role." + pkgmgr.RoleID("identity-domain", "backOfHouse")
-	techKey := ensureMaintenanceTech(ctx, conn, adminKey, backOfHouseRoleKey, consumerRoleKey)
+	techKey := ensureMaintenanceTech(ctx, conn, adminKey, backOfHouseRoleKey)
 	fmt.Printf("==> maintenance:     %s (%s) worksAt building, holds backOfHouse\n", techKey, maintName)
 
 	day := time.Now().UTC().Format("2006-01-02")
@@ -496,18 +496,19 @@ func seedMaintenanceBeat(ctx context.Context, conn *substrate.Conn, adminKey, co
 // absent — the same revive path ensureStaff needed once a retraction vector had
 // unwired its persona.
 //
-// consumerRoleKey excludes any candidate that ALSO holds consumer (§3.4's Sam
+// The lookup excludes any candidate that resides in a unit (§3.4's Sam
 // Okafor, once he gains frontOfHouse/backOfHouse alongside his existing
-// consumer hat, must never be resolved as the canonical staff-only persona —
-// Theo, like Dana, is deliberately staff-only; see ensureStaff).
-func ensureMaintenanceTech(ctx context.Context, conn *substrate.Conn, adminKey, roleKey, consumerRoleKey string) string {
+// resident hat, must never be resolved as the canonical staff-only persona —
+// Theo, like Dana, is deliberately staff-only; see ensureStaff for why
+// residesIn, not holding consumer, is the discriminator).
+func ensureMaintenanceTech(ctx context.Context, conn *substrate.Conn, adminKey, roleKey string) string {
 	js := conn.JetStream()
 	coreKV, err := js.KeyValue(ctx, bootstrap.CoreKVBucket)
 	must(err, "open core-kv")
 	allKeys, err := pkgverify.ListAllKeys(ctx, coreKV)
 	must(err, "list core-kv keys")
 
-	existing, _ := findLinkedIdentity(ctx, coreKV, allKeys, "holdsRole", roleKey, consumerRoleKey)
+	existing, _ := findLinkedIdentity(ctx, coreKV, allKeys, "holdsRole", roleKey, "residesIn")
 	if existing == "" {
 		return seedStaff(ctx, conn, adminKey, roleKey, buildingKey, maintName, maintEmail)
 	}
@@ -574,23 +575,25 @@ func seedTenant(ctx context.Context, conn *substrate.Conn, adminKey, consumerRol
 // silently resolve to the WRONG identity. Mirrors ensureMaintenanceTech's own
 // role-scoped lookup, added when that ambiguity first appeared.
 //
-// consumerRoleKey excludes any candidate that ALSO holds consumer: the seed
+// The lookup excludes any candidate that resides in a unit: the seed
 // invariant is that Dana is deliberately staff-only (seedStaff's own doc
-// comment above), so once a SECOND frontOfHouse holder exists who is ALSO a
-// consumer (§3.4's Sam Okafor, granted frontOfHouse on top of his existing
-// resident hat), a bare holdsRole(frontOfHouse) scan can resolve to either —
-// the 35ca90f5 mis-resolution one level up from the worksAt-only bug above.
-// Filtering the consumer-holding candidate out of contention is what keeps
-// FACET_STAFF_NANOID pinned to the pure-staff persona regardless of how many
-// other identities pick up the same role.
-func ensureStaff(ctx context.Context, conn *substrate.Conn, adminKey, roleKey, consumerRoleKey, buildingKey, name, email string) string {
+// comment above), so once a SECOND frontOfHouse holder exists (§3.4's Sam
+// Okafor, granted frontOfHouse on top of his existing resident hat), a bare
+// holdsRole(frontOfHouse) scan can resolve to either — the 35ca90f5
+// mis-resolution one level up from the worksAt-only bug above. Filtering by
+// residesIn, not by holding consumer, is what keeps FACET_STAFF_NANOID
+// pinned to the pure-staff persona: every signed-in identity earns consumer
+// via the Gateway's provisioning pre-flight regardless of hat, so excluding
+// on it stopped discriminating Dana from Sam the moment Dana first signed
+// in — residesIn is the trait that actually never applies to staff.
+func ensureStaff(ctx context.Context, conn *substrate.Conn, adminKey, roleKey, buildingKey, name, email string) string {
 	js := conn.JetStream()
 	coreKV, err := js.KeyValue(ctx, bootstrap.CoreKVBucket)
 	must(err, "open core-kv")
 	allKeys, err := pkgverify.ListAllKeys(ctx, coreKV)
 	must(err, "list core-kv keys")
 
-	existing, _ := findLinkedIdentity(ctx, coreKV, allKeys, "holdsRole", roleKey, consumerRoleKey)
+	existing, _ := findLinkedIdentity(ctx, coreKV, allKeys, "holdsRole", roleKey, "residesIn")
 	if existing == "" {
 		return seedStaff(ctx, conn, adminKey, roleKey, buildingKey, name, email)
 	}
@@ -1849,7 +1852,7 @@ func findResidentOf(ctx context.Context, coreKV jetstream.KeyValue, allKeys map[
 // identity id happens to sort first (the 35ca90f5 mis-resolution). Pass "" to
 // opt out (residence recovery, findResidentOf, legitimately targets consumer
 // holders and must never exclude them).
-func findLinkedIdentity(ctx context.Context, coreKV jetstream.KeyValue, allKeys map[string]struct{}, relation, targetKey, excludeIfHoldsRoleKey string) (string, bool) {
+func findLinkedIdentity(ctx context.Context, coreKV jetstream.KeyValue, allKeys map[string]struct{}, relation, targetKey, excludeIfRelation string) (string, bool) {
 	suffix := "." + relation + "." + strings.TrimPrefix(targetKey, "vtx.")
 	candidates := make([]string, 0, 4)
 	for k := range allKeys {
@@ -1879,17 +1882,34 @@ func findLinkedIdentity(ctx context.Context, coreKV jetstream.KeyValue, allKeys 
 			}
 			continue
 		}
-		if excludeIfHoldsRoleKey != "" {
-			excludedEnv, excludedErr := pkgverify.GetEnvelope(ctx, coreKV, linkKey(src, "holdsRole", excludeIfHoldsRoleKey))
-			if excludedErr == nil {
-				if excludedDel, _ := excludedEnv["isDeleted"].(bool); !excludedDel {
-					continue
-				}
-			}
+		if excludeIfRelation != "" && hasAliveOutgoingLink(ctx, coreKV, allKeys, src, excludeIfRelation) {
+			continue
 		}
 		return src, true
 	}
 	return tombstoned, false
+}
+
+// hasAliveOutgoingLink reports whether src holds any alive
+// lnk.identity.<src>.<relation>.* edge, regardless of target. Used to exclude
+// a candidate by a structural trait (e.g. "resides in some unit") rather than
+// a single fixed target — the trait a caller actually needs to test may hold
+// against any of several targets (residesIn unit1 vs unit2).
+func hasAliveOutgoingLink(ctx context.Context, coreKV jetstream.KeyValue, allKeys map[string]struct{}, src, relation string) bool {
+	prefix := "lnk." + strings.TrimPrefix(src, "vtx.") + "." + relation + "."
+	for k := range allKeys {
+		if !strings.HasPrefix(k, prefix) {
+			continue
+		}
+		env, err := pkgverify.GetEnvelope(ctx, coreKV, k)
+		if err != nil {
+			continue
+		}
+		if del, _ := env["isDeleted"].(bool); !del {
+			return true
+		}
+	}
+	return false
 }
 
 // findBoundIdentity scans for a lnk.<type>.<id>.identifiedBy.identity.<id>
