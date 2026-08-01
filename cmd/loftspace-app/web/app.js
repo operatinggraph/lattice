@@ -1567,7 +1567,7 @@ function renderProtectedApplicationCard(row, highlight) {
   if (terms) card.append(terms);
 
   if (row.landlordApproved && row.unitStatus === "leased" && row.entityKey) {
-    card.append(renderLedgerPanel(row.entityKey, false));
+    card.append(renderStatementPanel(row.entityKey));
   }
 
   const note = document.createElement("div");
@@ -1695,7 +1695,7 @@ function renderApplicationCard(row, highlight) {
   // Payment ledger — read-only for the tenant, once the lease is fully executed
   // (the landlord's console is where charges/payments are recorded).
   if (row.landlordApproved && row.unitStatus === "leased" && row.entityKey) {
-    card.append(renderLedgerPanel(row.entityKey, false));
+    card.append(renderStatementPanel(row.entityKey));
   }
 
   const actions = document.createElement("div");
@@ -2655,6 +2655,84 @@ async function refreshLedgerBody(body, leaseAppKey, canRecord) {
   }
 
   if (canRecord) body.append(renderLedgerRecordForm(leaseAppKey, data.accountKey, body, canRecord));
+}
+
+// ---- One-bill statement (read-only, combined rent + café) ----
+//
+// One row of the shared `one-bill-history` lens bucket (packages/one-bill,
+// Café Inc 3) per posted transaction — rent AND café charges on the same
+// lease statement, tagged by source. Read via GET /api/one-bill?leaseAppKey=
+// (P5). Tenant-facing only: the landlord's record-charge console still uses
+// renderLedgerPanel/handleLedger (rent only — café charges post through the
+// café POS, not this console).
+
+// renderStatementPanel builds a collapsible combined-statement section,
+// mirroring renderLedgerPanel's toggle/lazy-load shape.
+function renderStatementPanel(leaseAppKey) {
+  const wrap = document.createElement("div");
+  wrap.className = "ledger-panel";
+
+  const toggle = document.createElement("button");
+  toggle.className = "ghost ledger-toggle";
+  toggle.textContent = "🧾 Statement";
+  const body = document.createElement("div");
+  body.className = "ledger-body";
+  body.hidden = true;
+
+  toggle.addEventListener("click", () => {
+    body.hidden = !body.hidden;
+    if (body.hidden || body.dataset.loaded) return;
+    body.dataset.loaded = "1";
+    refreshStatementBody(body, leaseAppKey);
+  });
+
+  wrap.append(toggle, body);
+  return wrap;
+}
+
+// refreshStatementBody loads and renders the combined statement: the running
+// balance across both ledgers and the transaction list (oldest first), each
+// entry tagged by its source ledger.
+async function refreshStatementBody(body, leaseAppKey) {
+  body.textContent = "Loading…";
+  let data;
+  try {
+    data = await appGet("/api/one-bill?leaseAppKey=" + encodeURIComponent(leaseAppKey));
+  } catch (e) {
+    body.textContent = "Could not load statement: " + e.message;
+    return;
+  }
+  body.innerHTML = "";
+
+  const balance = document.createElement("div");
+  balance.className = "ledger-balance";
+  const owed = data.balanceCents || 0;
+  if (owed > 0) balance.textContent = "Balance owed: " + moneyAmount(owed / 100);
+  else if (owed < 0) balance.textContent = "Credit balance: " + moneyAmount(-owed / 100);
+  else balance.textContent = "Balance: $0.00 (paid in full)";
+  body.append(balance);
+
+  const entries = data.entries || [];
+  if (entries.length === 0) {
+    const none = document.createElement("div");
+    none.className = "applicant-none";
+    none.textContent = "No charges or payments recorded yet.";
+    body.append(none);
+  } else {
+    const list = document.createElement("ul");
+    list.className = "ledger-list";
+    for (const e of entries) {
+      const li = document.createElement("li");
+      li.className = "ledger-entry " + e.type;
+      const sign = e.type === "debit" ? "+" : "−";
+      const badge = e.source === "cafe" ? "☕ Café" : "🏠 Rent";
+      li.textContent =
+        fmtDate(e.postedAt) + " · " + badge + " · " + sign + moneyAmount(e.amountCents / 100) +
+        (e.memo ? " — " + e.memo : "");
+      list.append(li);
+    }
+    body.append(list);
+  }
 }
 
 // renderLedgerRecordForm builds the landlord's inline "record a charge or
