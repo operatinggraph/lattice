@@ -392,8 +392,7 @@ func sessionSeriesVertexTypeDDL() pkgmgr.DDLSpec {
 			`"occurrenceCount":{"type":"integer","description":"How many occurrences to mint, first included (required, 2..52 — for a single class use CreateSession instead)."}},` +
 			`"required":["studio","name","startsAt","endsAt","capacity","intervalDays","occurrenceCount"]}`,
 		OutputSchema: `{"type":"object","properties":` +
-			`{"primaryKey":{"type":"string","description":"vtx.sessionseries.<NanoID> the operation wrote."},` +
-			`"sessionKeys":{"type":"array","items":{"type":"string"},"description":"The occurrenceCount vtx.session.<NanoID> keys minted, in order."}}}`,
+			`{"primaryKey":{"type":"string","description":"vtx.sessionseries.<NanoID> the operation wrote. The occurrenceCount minted session keys are NOT returned — the op envelope's response permits only primaryKey (InvalidReturnShape otherwise); the occurrences show up on the studio's own wellnessSessions schedule grid same as any CreateSession."}}}`,
 		FieldDescription: map[string]string{
 			"studio":          "Full vtx.studio.<NanoID> key every occurrence runs at. Validated alive + class=studio; the whole series claims one studioSlotClaim set per occurrence on it.",
 			"name":            "The display name every occurrence shares.",
@@ -416,9 +415,9 @@ func sessionSeriesVertexTypeDDL() pkgmgr.DDLSpec {
 				ExpectedOutcome: "Mints vtx.sessionseries.<NanoID> (root {}) + .definition + its atStudio link, plus " +
 					"8 vtx.session.<NanoID> occurrences one week apart, each with its own .schedule/atStudio/" +
 					"atLocation/studioSlotClaim mutations (identical to 8 separate CreateSession calls) and a partOf " +
-					"link back to the series. Returns primaryKey (the series key) and sessionKeys (the 8 session " +
-					"keys, in order). Rejects StudioConflict — the WHOLE series, no partial commit — if any single " +
-					"occurrence's cells collide with an existing booking.",
+					"link back to the series. Returns primaryKey (the series key only — the 8 session keys are not in " +
+					"the response; they appear on the studio's own schedule grid). Rejects StudioConflict — the WHOLE " +
+					"series, no partial commit — if any single occurrence's cells collide with an existing booking.",
 			},
 			{
 				Name: "CreateSessionSeries — an instructor-led priced series",
@@ -1970,10 +1969,15 @@ def execute(state, op):
                 cc = slot_cellcode(c)
                 mutations.append(claim_cell(studio, cc, "studioSlotClaim", "StudioConflict", "studio"))
 
+        # response permits ONLY primaryKey (InvalidReturnShape otherwise) — the
+        # occurrenceCount session keys go on the event instead, mirroring how
+        # every other multi-mutation op here surfaces only its primary key
+        # and leaves detail to the projection lenses / event stream.
         events = [{"class": "wellness.sessionSeriesCreated",
-                   "data": {"seriesKey": series_key, "studio": studio, "occurrenceCount": occurrence_count}}]
+                   "data": {"seriesKey": series_key, "studio": studio, "occurrenceCount": occurrence_count,
+                             "sessionKeys": session_keys}}]
         return {"mutations": mutations, "events": events,
-                "response": {"primaryKey": series_key, "sessionKeys": session_keys}}
+                "response": {"primaryKey": series_key}}
 
     if ot == "TombstoneSession":
         sess_key = required_string(p, "sessionKey")
