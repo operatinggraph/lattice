@@ -17,8 +17,17 @@ import (
 	"github.com/operatinggraph/lattice/internal/refractor/health"
 	"github.com/operatinggraph/lattice/internal/refractor/ruleengine"
 	"github.com/operatinggraph/lattice/internal/refractor/ruleengine/full"
+	"github.com/operatinggraph/lattice/internal/refractor/subjects"
 	"github.com/operatinggraph/lattice/internal/substrate"
 )
+
+// maxNarrowedFilterLabels caps how many referenced labels ConsumerFilter will
+// derive a narrowed FilterSubjects set from. Each label expands to up to 3
+// filter-subject forms (subjects.CoreKVNarrowedFilters), so this bounds how
+// large the FilterSubjects slice JetStream evaluates per delivered message
+// gets before the broad filter — simpler, and just as fail-safe — is the
+// better choice.
+const maxNarrowedFilterLabels = 8
 
 // ProbeInterval is the delay between consecutive probe attempts during an infrastructure pause.
 // Exported so tests can override it to a short value for fast recovery detection.
@@ -452,6 +461,59 @@ func (p *Pipeline) plainVertexRelevant(vertexType string) bool {
 	return ok
 }
 
+// NarrowedFilterEligible reports whether this pipeline's Core KV consumer may
+// be scoped to a narrowed, server-side FilterSubjects set instead of the
+// broad $KV.<bucket>.> filter, and if so the exhaustive set of vertex-type
+// labels to derive it from — the SAME plainReprojectLabels/plainReprojectAll
+// useFullEngineBranches already computed from every compiled branch's
+// ReferencedLabels(), not a second derivation.
+//
+// Eligible only when every condition the plain aspect/link/vertex
+// reprojection arms already gate CORRECTNESS on also holds:
+// actorEnumerator == nil (the exact check the KindVertex handler makes
+// before consulting plainVertexRelevant — an actor-aware pipeline's fan-out
+// is not bounded by its own MATCH labels, so it must keep the broad filter),
+// engineKind == EngineFull (plainReactsTo/plainVertexRelevant have no label
+// data for any other engine), and an EXHAUSTIVE referenced-label set
+// (!plainReprojectAll). A narrowed consumer can therefore never be delivered
+// an event the client-side gates would not already have ack-and-skipped as
+// irrelevant: server-side filtering here is strictly more conservative than
+// plainVertexRelevant/plainReactsTo, computed from the exact same data those
+// gates already trust — never a second, independently-fallible judgment.
+func (p *Pipeline) NarrowedFilterEligible() (labels map[string]struct{}, ok bool) {
+	if p.actorEnumerator != nil || p.engineKind != ruleengine.EngineFull || p.plainReprojectAll {
+		return nil, false
+	}
+	return p.plainReprojectLabels, true
+}
+
+// ConsumerFilter derives this lens's Core KV consumer filter from its CURRENT
+// compiled rule: a narrowed, server-side FilterSubjects set when the lens
+// qualifies (NarrowedFilterEligible, and the deduped label count at or under
+// maxNarrowedFilterLabels), or the broad $KV.<bucket>.> FilterSubject
+// otherwise. Exactly one of the two return values is non-empty.
+//
+// Pure over the pipeline's current state, not cached, so every caller
+// recomputes the identical value from the identical inputs with nothing to
+// keep in sync: the initial activation (RunOn's caller builds the spec from
+// this) and a later Rebuild both call it. Rebuild MUST call it again rather
+// than reuse whatever filter activation chose — a MATCH hot-reload's
+// UseFullEngineBranches call can widen or narrow the referenced-label set
+// before the next rebuild, and a stale filter left in place would silently
+// under-deliver forever (a JetStream filter update never resets the
+// consumer's cursor — nats-server v2.14.0).
+func (p *Pipeline) ConsumerFilter() (filterSubjects []string, filterSubject string) {
+	labels, ok := p.NarrowedFilterEligible()
+	if !ok || len(labels) == 0 || len(labels) > maxNarrowedFilterLabels {
+		return nil, subjects.CoreKVFilter(p.coreKVBucket)
+	}
+	labelList := make([]string, 0, len(labels))
+	for l := range labels {
+		labelList = append(labelList, l)
+	}
+	return subjects.CoreKVNarrowedFilters(p.coreKVBucket, labelList), ""
+}
+
 // SetEnvelopeFn installs the on-wire envelope wrapper. Pass nil to clear.
 // Clears any installed MultiEnvelopeFn — the two are alternatives, never both
 // active on the same pipeline. Must be called before Run.
@@ -685,6 +747,39 @@ func (p *Pipeline) HotReloadInto(newAdpt adapter.Adapter) error {
 	return nil
 }
 
+// registerWithFilterFallback runs register — the supervisor call that
+// (re)creates this lens's Core KV durable (supervisor.Add for the initial
+// Run, supervisor.Reset for a Rebuild) — and, if it fails while filterSubjects
+// is non-empty (a narrowed consumer was attempted), falls back to the broad
+// Core KV filter: logs loudly, records the fact on the lens's own health
+// entry (RecordError — the same per-lens errorCount/lastError surface
+// `lattice health summary` and Lamplighter's Health KV read already
+// classify, docs/observability/health-kv-schema.md's per-lens
+// reporter-status entry — reused rather than a parallel signal), applies the
+// broad filter via applyBroad, and retries register once.
+//
+// A narrowed filter is strictly an optimization over the broad one
+// (ConsumerFilter's doc); it must never be the reason a lens goes dark or
+// loses its durable, whatever the underlying registration error actually
+// was — a JetStream rejection this package's own derivation did not
+// anticipate is exactly the case this exists for.
+func (p *Pipeline) registerWithFilterFallback(ctx context.Context, filterSubjects []string, applyBroad func(), register func() error) error {
+	err := register()
+	if err == nil || len(filterSubjects) == 0 {
+		return err
+	}
+	slog.Error("pipeline: narrowed Core KV consumer registration failed — retrying with the broad filter",
+		"ruleId", p.ruleID, "filterSubjects", filterSubjects, "err", err)
+	if p.reporter != nil {
+		msg := fmt.Sprintf("narrowed Core KV filter registration failed, fell back to the broad filter: %v", err)
+		if recErr := p.reporter.RecordError(ctx, msg); recErr != nil {
+			slog.Error("pipeline: record narrowed-filter fallback health signal", "ruleId", p.ruleID, "err", recErr)
+		}
+	}
+	applyBroad()
+	return register()
+}
+
 // Run starts the supervised consumer for this rule on the configured supervisor
 // (via RunOn) and blocks until ctx is cancelled. The supervisor owns the pump
 // skeleton — restore persisted paused state on startup (NFR4), pump, classify,
@@ -713,7 +808,12 @@ func (p *Pipeline) Run(ctx context.Context) {
 		spec.ProbeInterval = ProbeInterval
 	}
 
-	if err := p.supervisor.Add(ctx, spec); err != nil {
+	narrowedFilters := spec.FilterSubjects
+	err := p.registerWithFilterFallback(ctx, narrowedFilters, func() {
+		spec.FilterSubjects = nil
+		spec.FilterSubject = subjects.CoreKVFilter(p.coreKVBucket)
+	}, func() error { return p.supervisor.Add(ctx, spec) })
+	if err != nil {
 		slog.Error("pipeline: supervisor add", "ruleId", p.ruleID, "err", err)
 		return
 	}
@@ -809,12 +909,29 @@ func (p *Pipeline) Rebuild(ctx context.Context, truncate bool) error {
 		}
 	}
 
-	// 3. Reset the durable via the supervisor (delete-recreate-swap).
+	// 3. Recompute the Core KV filter from the CURRENT compiled rule (see
+	// ConsumerFilter's doc: a MATCH hot-reload's UseFullEngineBranches call may
+	// have already changed the referenced-label set by the time a rebuild
+	// reaches here — activation's filter must not ride forward unexamined) and
+	// reset the durable via the supervisor (delete-recreate-swap) with it.
 	if p.supervisor == nil {
 		p.rebuildInFlight.Store(false)
 		return fmt.Errorf("pipeline: rebuild: no supervisor configured")
 	}
-	if err := p.supervisor.Reset(ctx, p.consumerCfg.Name); err != nil {
+	filterSubjects, filterSubject := p.ConsumerFilter()
+	resetWithFilter := func() error {
+		if err := p.supervisor.UpdateSpec(p.consumerCfg.Name, func(spec *substrate.ConsumerSpec) {
+			spec.FilterSubjects = filterSubjects
+			spec.FilterSubject = filterSubject
+		}); err != nil {
+			return err
+		}
+		return p.supervisor.Reset(ctx, p.consumerCfg.Name)
+	}
+	if err := p.registerWithFilterFallback(ctx, filterSubjects, func() {
+		filterSubjects = nil
+		filterSubject = subjects.CoreKVFilter(p.coreKVBucket)
+	}, resetWithFilter); err != nil {
 		p.rebuildInFlight.Store(false)
 		return fmt.Errorf("pipeline: rebuild: reset consumer: %w", err)
 	}

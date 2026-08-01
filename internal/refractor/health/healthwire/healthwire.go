@@ -31,7 +31,7 @@ type Entry struct {
 	PauseReason    *string `json:"pauseReason"`    // null when active; "infra", "structural", or "manual" when paused
 	ActiveSequence uint64  `json:"activeSequence"` // NATS sequence of the active rule version
 	ConsumerLag    uint64  `json:"consumerLag"`    // current consumer lag; updated by Story 4.2
-	ErrorCount     uint64  `json:"errorCount"`     // cumulative DLQ writes; preserved across restarts
+	ErrorCount     uint64  `json:"errorCount"`     // cumulative RecordError calls (DLQ writes, hot-reload refusals, consumer-registration fallbacks, ...); preserved across restarts
 	LastError      *string `json:"lastError"`      // null when no error; non-nil with latest error message
 	LastUpdated    string  `json:"lastUpdated"`    // RFC3339 UTC
 	// RuleEngine is the engine name that successfully parsed this rule's match

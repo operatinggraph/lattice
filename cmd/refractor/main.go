@@ -952,13 +952,22 @@ func main() {
 		if r.Into.Protected || r.Into.GrantTable {
 			initialPause = substrate.PauseInfra
 		}
+		// D1 (refractor-footprint-reduction-design.md): a plain, full-engine
+		// lens with an exhaustive referenced-label set gets a narrowed,
+		// server-side FilterSubjects consumer instead of the broad
+		// $KV.<bucket>.> filter — ConsumerFilter is the single derivation
+		// both this activation call and Pipeline.Rebuild (on a later
+		// MATCH hot-reload) share, so eligibility and the label set are
+		// never computed two different ways.
+		filterSubjects, filterSubject := p.ConsumerFilter()
 		p.RunOn(conn, substrate.ConsumerSpec{
-			Name:          "refractor-" + r.ID,
-			Stream:        subjects.CoreKVStream(coreKVBucket),
-			FilterSubject: subjects.CoreKVFilter(coreKVBucket),
-			DeliverPolicy: substrate.DeliverLastPerSubject,
-			DeliverGroup:  "refractor-" + r.ID,
-			InitialPause:  initialPause,
+			Name:           "refractor-" + r.ID,
+			Stream:         subjects.CoreKVStream(coreKVBucket),
+			FilterSubjects: filterSubjects,
+			FilterSubject:  filterSubject,
+			DeliverPolicy:  substrate.DeliverLastPerSubject,
+			DeliverGroup:   "refractor-" + r.ID,
+			InitialPause:   initialPause,
 		})
 
 		// Per-lens lag metrics: read pending from the supervised consumer by

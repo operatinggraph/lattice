@@ -1,9 +1,11 @@
 package subjects
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestDLQ(t *testing.T) {
@@ -108,4 +110,130 @@ func TestCoreKVStream(t *testing.T) {
 func TestCoreKVFilter(t *testing.T) {
 	assert.Equal(t, "$KV.core.>", CoreKVFilter("core"))
 	assert.Equal(t, "$KV.my-bucket.>", CoreKVFilter("my-bucket"))
+}
+
+func TestCoreKVVertexFilter(t *testing.T) {
+	assert.Equal(t, "$KV.core-kv.vtx.book.>", CoreKVVertexFilter("core-kv", "book"))
+}
+
+func TestCoreKVVertexFilter_InvalidInputPanics(t *testing.T) {
+	assert.Panics(t, func() { CoreKVVertexFilter("core-kv", "") })
+	assert.Panics(t, func() { CoreKVVertexFilter("core-kv", "book.thing") })
+	assert.Panics(t, func() { CoreKVVertexFilter("core-kv", "book*") })
+	assert.Panics(t, func() { CoreKVVertexFilter("core-kv", "book>") })
+}
+
+func TestCoreKVLinkSourceFilter(t *testing.T) {
+	assert.Equal(t, "$KV.core-kv.lnk.book.>", CoreKVLinkSourceFilter("core-kv", "book"))
+}
+
+func TestCoreKVLinkSourceFilter_InvalidInputPanics(t *testing.T) {
+	assert.Panics(t, func() { CoreKVLinkSourceFilter("core-kv", "") })
+	assert.Panics(t, func() { CoreKVLinkSourceFilter("core-kv", "a.b") })
+}
+
+func TestCoreKVLinkTargetFilter(t *testing.T) {
+	assert.Equal(t, "$KV.core-kv.lnk.*.*.*.book.>", CoreKVLinkTargetFilter("core-kv", "book"))
+}
+
+func TestCoreKVLinkTargetFilter_InvalidInputPanics(t *testing.T) {
+	assert.Panics(t, func() { CoreKVLinkTargetFilter("core-kv", "") })
+	assert.Panics(t, func() { CoreKVLinkTargetFilter("core-kv", "a b") })
+}
+
+func TestCoreKVNarrowedFilters(t *testing.T) {
+	got := CoreKVNarrowedFilters("core-kv", []string{"author", "book"})
+	want := []string{
+		"$KV.core-kv.vtx.author.>", "$KV.core-kv.lnk.author.>", "$KV.core-kv.lnk.*.*.*.author.>",
+		"$KV.core-kv.vtx.book.>", "$KV.core-kv.lnk.book.>", "$KV.core-kv.lnk.*.*.*.book.>",
+	}
+	assert.Equal(t, want, got, "labels are sorted and each expands to its 3 forms in a stable order")
+}
+
+func TestCoreKVNarrowedFilters_DedupesLabels(t *testing.T) {
+	got := CoreKVNarrowedFilters("core-kv", []string{"book", "book", "book"})
+	want := []string{"$KV.core-kv.vtx.book.>", "$KV.core-kv.lnk.book.>", "$KV.core-kv.lnk.*.*.*.book.>"}
+	assert.Equal(t, want, got)
+}
+
+func TestCoreKVNarrowedFilters_Empty(t *testing.T) {
+	assert.Empty(t, CoreKVNarrowedFilters("core-kv", nil))
+}
+
+// isSubsetMatch mirrors nats-server v2.14.0's isSubsetMatchTokenized
+// (github.com/nats-io/nats-server/v2@v2.14.0, server/sublist.go:1457 — the
+// pinned version per docs/vendors.md), the predicate the server's consumer
+// FilterSubjects overlap check (server/consumer.go:876-886, calling
+// subjectIsSubsetMatch at :882) uses to reject a filter set: subject is a
+// "subset" of test when every concrete subject "subject" can select is also
+// selected by "test". Reimplemented here (not imported — nats-server is not
+// a production dependency of this module, only nats.go the client is) so
+// this test proves CoreKVNarrowedFilters' output against the server's own
+// rejection rule rather than merely against string equality.
+func isSubsetMatch(subject, test []string) bool {
+	for i, t2 := range test {
+		if i >= len(subject) {
+			return false
+		}
+		if t2 == ">" {
+			return true
+		}
+		t1 := subject[i]
+		if t1 == ">" {
+			return false
+		}
+		if t1 == "*" {
+			if t2 != "*" {
+				return false
+			}
+			continue
+		}
+		if t2 != "*" && t1 != t2 {
+			return false
+		}
+	}
+	return len(subject) == len(test)
+}
+
+func tokenize(subject string) []string {
+	return strings.Split(subject, ".")
+}
+
+// TestCoreKVNarrowedFilters_PairwiseNonSubset proves the claim
+// CoreKVNarrowedFilters' doc makes: across 2+ labels, no two of the derived
+// filter forms are ever a subset of one another (in either direction) —
+// exactly the shape nats-server's consumer-creation overlap check would
+// reject. Covers same-label pairs (vertex/source/target forms of ONE label)
+// and cross-label pairs alike, since the doc claims both are safe.
+func TestCoreKVNarrowedFilters_PairwiseNonSubset(t *testing.T) {
+	filters := CoreKVNarrowedFilters("core-kv", []string{"book", "author", "leaseapp"})
+	require.Len(t, filters, 9, "3 labels x 3 forms")
+
+	for i, a := range filters {
+		for j, b := range filters {
+			if i == j {
+				continue
+			}
+			if isSubsetMatch(tokenize(a), tokenize(b)) {
+				t.Fatalf("filter[%d]=%q is a subset of filter[%d]=%q — nats-server would reject this pair as overlapping",
+					i, a, j, b)
+			}
+		}
+	}
+}
+
+// TestCoreKVNarrowedFilters_SameLabelFormsNonSubset isolates the same-label
+// case: a link from a label to ITSELF matches both that label's source and
+// target forms, so the non-overlap proof must hold even when L1 == L2 — the
+// general pairwise test already covers this (three of its nine filters share
+// "book"), this pins it as an explicit, minimal example.
+func TestCoreKVNarrowedFilters_SameLabelFormsNonSubset(t *testing.T) {
+	v := tokenize(CoreKVVertexFilter("core-kv", "book"))
+	s := tokenize(CoreKVLinkSourceFilter("core-kv", "book"))
+	tgt := tokenize(CoreKVLinkTargetFilter("core-kv", "book"))
+	pairs := [][2][]string{{v, s}, {v, tgt}, {s, tgt}}
+	for _, p := range pairs {
+		assert.False(t, isSubsetMatch(p[0], p[1]), "%v must not be a subset of %v", p[0], p[1])
+		assert.False(t, isSubsetMatch(p[1], p[0]), "%v must not be a subset of %v", p[1], p[0])
+	}
 }

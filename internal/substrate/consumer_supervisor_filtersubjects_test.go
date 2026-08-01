@@ -3,6 +3,7 @@ package substrate
 import (
 	"context"
 	"sort"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -72,6 +73,87 @@ func TestSupervisor_FilterSubjects_MultiSubjectDelivery(t *testing.T) {
 	sort.Strings(seen)
 	if len(seen) != 2 || seen[0] != "ops.default" || seen[1] != "ops.meta" {
 		t.Fatalf("delivered subjects = %v, want [ops.default ops.meta]", seen)
+	}
+}
+
+// TestSupervisor_FilterSubjects_ConsumerConfigShowsThem proves a spec
+// configured with FilterSubjects creates a durable whose server-side config
+// carries that exact set (and an empty FilterSubject) — the config-shape half
+// of the FilterSubjects contract, complementing
+// TestSupervisor_FilterSubjects_MultiSubjectDelivery's delivery-behavior half.
+func TestSupervisor_FilterSubjects_ConsumerConfigShowsThem(t *testing.T) {
+	t.Parallel()
+	c, ctx := newTestConn(t)
+	stream := "ops-filtersubjects-config"
+	if err := c.EnsureStream(ctx, StreamSpec{Name: stream, Subjects: []string{"ops.>"}}); err != nil {
+		t.Fatalf("EnsureStream: %v", err)
+	}
+
+	sup := NewConsumerSupervisor(c)
+	t.Cleanup(sup.Stop)
+
+	want := []string{"ops.default", "ops.meta", "ops.urgent"}
+	spec := ConsumerSpec{
+		Name:           "sup-filtersubjects-config",
+		Stream:         stream,
+		FilterSubjects: want,
+		Handler:        func(_ context.Context, _ Message) (Decision, error) { return Ack, nil },
+	}
+	if err := sup.Add(ctx, spec); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+
+	info := consumerInfoByName(ctx, t, c, stream, "sup-filtersubjects-config")
+	if info.Config.FilterSubject != "" {
+		t.Fatalf("Config.FilterSubject = %q, want empty when FilterSubjects is set", info.Config.FilterSubject)
+	}
+	got := append([]string(nil), info.Config.FilterSubjects...)
+	sort.Strings(got)
+	sortedWant := append([]string(nil), want...)
+	sort.Strings(sortedWant)
+	if len(got) != len(sortedWant) {
+		t.Fatalf("Config.FilterSubjects = %v, want %v", got, sortedWant)
+	}
+	for i := range got {
+		if got[i] != sortedWant[i] {
+			t.Fatalf("Config.FilterSubjects = %v, want %v", got, sortedWant)
+		}
+	}
+}
+
+// TestSupervisor_Add_FilterSubjectAndFilterSubjectsMutuallyExclusive proves
+// validateSpec's fail-loud guard: a spec setting both FilterSubject and
+// FilterSubjects is rejected before any consumer is created, rather than
+// silently letting one win (the multi-filter form takes precedence in
+// createConsumer, which would otherwise make a caller's FilterSubject typo
+// silently vanish instead of erroring).
+func TestSupervisor_Add_FilterSubjectAndFilterSubjectsMutuallyExclusive(t *testing.T) {
+	t.Parallel()
+	c, ctx := newTestConn(t)
+	stream := "ops-filtersubjects-exclusive"
+	if err := c.EnsureStream(ctx, StreamSpec{Name: stream, Subjects: []string{"ops.>"}}); err != nil {
+		t.Fatalf("EnsureStream: %v", err)
+	}
+
+	sup := NewConsumerSupervisor(c)
+	t.Cleanup(sup.Stop)
+
+	spec := ConsumerSpec{
+		Name:           "sup-filtersubjects-exclusive",
+		Stream:         stream,
+		FilterSubject:  "ops.default",
+		FilterSubjects: []string{"ops.meta", "ops.urgent"},
+		Handler:        func(_ context.Context, _ Message) (Decision, error) { return Ack, nil },
+	}
+	err := sup.Add(ctx, spec)
+	if err == nil {
+		t.Fatal("Add with both FilterSubject and FilterSubjects set must fail, got nil error")
+	}
+	if !strings.Contains(err.Error(), "mutually exclusive") {
+		t.Fatalf("Add error = %q, want it to name the mutual-exclusion violation", err.Error())
+	}
+	if sup.IsManaged("sup-filtersubjects-exclusive") {
+		t.Fatal("a spec that fails validation must never become managed")
 	}
 }
 

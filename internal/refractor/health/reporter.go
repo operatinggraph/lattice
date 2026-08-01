@@ -211,9 +211,16 @@ func (r *Reporter) SetRebuilding(ctx context.Context) error {
 	return nil
 }
 
-// RecordError increments ErrorCount and records the most recent error message.
-// Called by pipeline after each DLQ publish (terminal failure or retry exhaustion) per AC3.
-// Thread-safe; serialized via writeMu to prevent lost-update races with concurrent DLQ writes.
+// RecordError increments ErrorCount and records the most recent error
+// message — the lens's general-purpose fault counter, surfaced in
+// `lattice health summary` / Lamplighter's Health KV read
+// (docs/observability/health-kv-schema.md's per-lens reporter-status entry)
+// without a status transition, so a lens that is still running correctly
+// stays "active" rather than reading as paused. Callers: pipeline after each
+// DLQ publish (terminal failure or retry exhaustion, per AC3), a refused
+// hot-reload edit, and a narrowed Core KV consumer registration falling back
+// to the broad filter. Thread-safe; serialized via writeMu to prevent
+// lost-update races with concurrent callers.
 func (r *Reporter) RecordError(ctx context.Context, errMsg string) error {
 	r.writeMu.Lock()
 	defer r.writeMu.Unlock()
