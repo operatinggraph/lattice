@@ -305,6 +305,27 @@ tombstones. **Capability KV is a lens projection** (projection correctness = aut
   goes green and the missing declaration surfaces first in prod. (Same precedent-transfer
   failure class as the RLS-anchor lesson: same word — "guard" — different job.)
 
+- **Before proposing that existing machinery run in a RESTRICTED or RESHAPED mode, verify the machinery can
+  BE restricted/reshaped — read the mechanism, don't assume the knob.** The assumed-producer /
+  assumed-transport / assumed-retraction reflexes above all ask *"does the channel exist?"*. This one asks
+  *"can the thing I'm reusing be **bent** the way I need?"* — and the answer lives in one file, always.
+  (Trialed 2026-08-01, the client-ceremony design; **both** of its adversarial-pass blockers were this one
+  failure, in two different subsystems.) (1) I proposed a "KV-less" Starlark pre-pass that reuses the DDL's
+  own script with the `kv` module **unbound** — but `starlarksandbox` resolves every global at **compile**
+  time (`sandbox.go:110`, an unbound name is a compile-time `SandboxViolation`), so unbinding `kv` fails to
+  compile the whole 960-line module and kills every op on that DDL. Purity had to come from **fail-closed
+  stubs that error when called**, not from absence. I had also budgeted it as a cheap extra *call* when
+  `Budget.Wall` excludes compile and `Init` re-runs the module's whole top level — a cost model I asserted
+  without reading `sandbox.go:26-29`. (2) I classified "project one row per bound credential" as ordinary
+  package work under **P5** — but the set is a variable-length array inside an *encrypted* aspect and the
+  rule engine explicitly refuses fan-out (`ruleengine/full/visitor.go:146`: "UNWIND is not supported"), so
+  no DDL can express it. **The corollary sharpens P5:** *"a missing lens/read-model is package work, not a
+  platform gap"* holds only when **the engine can express the projection**. Check expressibility before
+  classifying a read-model gap as package work — otherwise you hand the Steward a fire whose first act is
+  discovering it needs an engine primitive. The tell for both: a design sentence of the form *"the same X,
+  just without Y"* or *"just project it per-row"* — every one of those is a hypothesis about a mechanism
+  you have not opened.
+
 **Run the pre-build gates you write into your own designs — "ratified" ≠ "build-ready."** If a design
 self-flags a pre-build adversarial / `bmad-party-mode` pass (a deferred gate), that pass is a **Designer-lane
 obligation**: run it and **record it as run** before the design is build-ready. Do not leave it dangling for
