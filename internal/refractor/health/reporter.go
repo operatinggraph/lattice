@@ -242,6 +242,50 @@ func (r *Reporter) RecordError(ctx context.Context, errMsg string) error {
 	return nil
 }
 
+// ClearLastError nils LastError while preserving ErrorCount and every other
+// field on the entry — Status and PauseReason included, which this method
+// never reads for a decision and never writes. Its one caller is
+// pipeline.registerWithFilterFallback: a lens's Core KV consumer
+// (re)registration that succeeds cleanly (no narrowed-to-broad fallback) is
+// this process proving the lens healthy right now, but nothing else ever
+// revisits a LastError an earlier boot's fallback recorded — a restart alone
+// does not touch health KV, and RecordError only ever appends — so without
+// this call the message outlives every process that could still explain it
+// and keeps the lens rendering "fault" (cmd/loupe/renderedstate.go's fault
+// conjunct requires a live LastError, not just a nonzero cumulative
+// ErrorCount) long after the condition is gone.
+//
+// Deliberately narrower than SetActive, which also writes Status: "active"
+// and PauseReason: nil unconditionally — exactly the pair
+// substrate.ConsumerSupervisor's restoreState reads at startup, from the pump
+// goroutine Add spawns concurrently with registerWithFilterFallback's caller,
+// to decide whether to honor a persisted pause. A durable's registration can
+// succeed while the lens is manually or structurally paused, so a setter that
+// touches Status/PauseReason here would race that restore and risk
+// clobbering the pause open; nil-ing only LastError cannot, whichever
+// goroutine runs first. Thread-safe, serialized via writeMu like every other
+// setter. A no-op (no KV write) when LastError is already nil.
+func (r *Reporter) ClearLastError(ctx context.Context) error {
+	r.writeMu.Lock()
+	defer r.writeMu.Unlock()
+
+	existing, err := r.readExisting(ctx)
+	if err != nil {
+		return fmt.Errorf("health: ClearLastError read: %w", err)
+	}
+	if existing.LastError == nil {
+		return nil
+	}
+	existing.LastError = nil
+	existing.LastUpdated = time.Now().UTC().Format(time.RFC3339)
+	existing.RuleID = r.ruleID
+	if err := r.put(ctx, existing); err != nil {
+		return err
+	}
+	slog.Info("health: stale error cleared", "ruleId", r.ruleID, "errorCount", existing.ErrorCount)
+	return nil
+}
+
 // RecordEvalDriftRetry increments EvalDriftRetries. Called once per inline
 // footprint-validation re-execution attempt an auth-plane evaluation's
 // drifted read surface triggers (refractor-evaluation-consistency-design.md

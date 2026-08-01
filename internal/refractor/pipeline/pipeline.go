@@ -830,9 +830,31 @@ func (p *Pipeline) HotReloadInto(newAdpt adapter.Adapter) error {
 // loses its durable, whatever the underlying registration error actually
 // was — a JetStream rejection this package's own derivation did not
 // anticipate is exactly the case this exists for.
+//
+// A clean FIRST attempt (register succeeds with no fallback fired) instead
+// clears any stale LastError an earlier process's fallback left on this same
+// health entry (Reporter.ClearLastError) — the fallback path below is the
+// only writer of that latch, and nothing else ever revisits it, so left
+// alone it survives every restart even once the lens is provably healthy
+// again. The clear is scoped to LastError alone precisely so it cannot race
+// the supervisor's startup restore of a persisted pause (this doc's own
+// caller, Pipeline.Run: "restore persisted paused state on startup (NFR4)";
+// substrate.ConsumerSupervisor's restoreState, run once from the pump
+// goroutine Run's Add spawns, concurrently with Run itself — Rebuild's Reset
+// call re-signals that same already-running pump instead of restarting it,
+// so it never re-triggers restoreState) — see ClearLastError's own doc for
+// why SetActive is the wrong tool here.
 func (p *Pipeline) registerWithFilterFallback(ctx context.Context, filterSubjects []string, applyBroad func(), register func() error) error {
 	err := register()
-	if err == nil || len(filterSubjects) == 0 {
+	if err == nil {
+		if p.reporter != nil {
+			if clrErr := p.reporter.ClearLastError(ctx); clrErr != nil {
+				slog.Error("pipeline: clear stale health signal after clean registration", "ruleId", p.ruleID, "err", clrErr)
+			}
+		}
+		return nil
+	}
+	if len(filterSubjects) == 0 {
 		return err
 	}
 	slog.Error("pipeline: narrowed Core KV consumer registration failed — retrying with the broad filter",

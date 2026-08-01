@@ -348,3 +348,65 @@ func TestReporter_ActiveSequence_ThreadSafe(t *testing.T) {
 	}
 	<-done
 }
+
+// TestReporter_ClearLastError_ClearsErrorPreservesCount verifies the core
+// contract: ClearLastError nils lastError but leaves the cumulative
+// errorCount exactly as RecordError left it — mirroring SetActive's own
+// ErrorCount-preservation contract (TestReporter_SetActive_PreservesErrorCount)
+// without SetActive's Status/PauseReason side effects.
+func TestReporter_ClearLastError_ClearsErrorPreservesCount(t *testing.T) {
+	kv := startHealthKV(t)
+	r := health.New(kv, "my-rule")
+
+	require.NoError(t, r.RecordError(context.Background(), "narrowed Core KV filter registration failed, fell back to the broad filter: stale rejection"))
+	require.NoError(t, r.RecordError(context.Background(), "second stale error"))
+
+	require.NoError(t, r.ClearLastError(context.Background()))
+
+	entry, err := r.GetStatus(context.Background())
+	require.NoError(t, err)
+	assert.Nil(t, entry.LastError, "lastError must be nil after ClearLastError")
+	assert.Equal(t, uint64(2), entry.ErrorCount, "errorCount must survive ClearLastError")
+	assert.Equal(t, "active", entry.Status, "ClearLastError must not touch status")
+}
+
+// TestReporter_ClearLastError_PreservesPausedStatus verifies item 3 of FIRE 2:
+// ClearLastError never reads or writes Status/PauseReason, so a persisted
+// pause survives the call untouched — the exact guarantee that lets
+// registerWithFilterFallback call it at boot without racing (or fighting) the
+// supervisor's restore-paused-on-startup path (substrate.ConsumerSupervisor's
+// restoreState, Pipeline.Run's doc comment).
+func TestReporter_ClearLastError_PreservesPausedStatus(t *testing.T) {
+	kv := startHealthKV(t)
+	r := health.New(kv, "my-rule")
+
+	require.NoError(t, r.RecordError(context.Background(), "first error"))
+	require.NoError(t, r.SetPaused(context.Background(), health.PauseReasonStructural, "escalated failure"))
+
+	require.NoError(t, r.ClearLastError(context.Background()))
+
+	entry, err := r.GetStatus(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, "paused", entry.Status, "ClearLastError must not flip a persisted pause active")
+	require.NotNil(t, entry.PauseReason)
+	assert.Equal(t, health.PauseReasonStructural, *entry.PauseReason, "ClearLastError must not touch pauseReason")
+	assert.Nil(t, entry.LastError, "lastError must still clear even while paused")
+	assert.Equal(t, uint64(1), entry.ErrorCount, "errorCount must survive")
+}
+
+// TestReporter_ClearLastError_NoOpWhenAlreadyNil verifies ClearLastError skips
+// the KV write entirely when there is nothing to clear — a fresh lens that has
+// never recorded an error must not gain a health entry (or a bumped
+// LastUpdated) merely from a clean boot's registration.
+func TestReporter_ClearLastError_NoOpWhenAlreadyNil(t *testing.T) {
+	kv := startHealthKV(t)
+	r := health.New(kv, "my-rule")
+
+	require.NoError(t, r.ClearLastError(context.Background()))
+
+	entry, err := r.GetStatus(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, "active", entry.Status)
+	assert.Nil(t, entry.LastError)
+	assert.Empty(t, entry.LastUpdated, "a no-op clear must never have written an entry")
+}

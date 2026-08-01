@@ -3,20 +3,27 @@ package pipeline
 // D1 (refractor-footprint-reduction-design.md): narrowed Core KV
 // FilterSubjects eligibility/derivation (NarrowedFilterEligible,
 // ConsumerFilter) and the registration-error fallback
-// (registerWithFilterFallback) — pure-function coverage, independent of any
-// real compiled rule or supervisor. The e2e proof that a narrowed consumer
-// actually narrows delivery, and that a real registration failure recovers
-// end-to-end with a health signal recorded, lives in
-// narrowed_filter_e2e_test.go (package pipeline_test).
+// (registerWithFilterFallback), including its health-signal side effects
+// (RecordError on fallback, ClearLastError on a clean first attempt) —
+// coverage independent of any real compiled rule or supervisor, using
+// registerWithFilterFallback's own register/applyBroad callback hooks rather
+// than a live consumer. The e2e proof that a narrowed consumer actually
+// narrows delivery, and that a real registration failure recovers end-to-end
+// against a real nats-server rejection, lives in narrowed_filter_e2e_test.go
+// (package pipeline_test).
 
 import (
 	"context"
 	"errors"
 	"testing"
 
+	"github.com/nats-io/nats.go/jetstream"
 	"github.com/stretchr/testify/require"
 
+	"github.com/operatinggraph/lattice/internal/natsfixture"
+	"github.com/operatinggraph/lattice/internal/refractor/health"
 	"github.com/operatinggraph/lattice/internal/refractor/ruleengine"
+	"github.com/operatinggraph/lattice/internal/substrate"
 )
 
 // TestNarrowedFilterEligible_Table pins NarrowedFilterEligible's contract
@@ -221,4 +228,107 @@ func TestRegisterWithFilterFallback_BroadFilterNeverRetried(t *testing.T) {
 	require.ErrorIs(t, err, errFirst)
 	require.Equal(t, 1, calls)
 	require.False(t, broadApplied)
+}
+
+// newFallbackHealthReporter stands up an in-memory NATS server with a single
+// HEALTH KV bucket and returns a Reporter for ruleID — the minimal fixture the
+// tests below need to observe registerWithFilterFallback's real
+// RecordError/ClearLastError effects, with no Core/Adj KV, no supervisor, and
+// no real consumer (mirrors output_collision_test.go's newCollisionKVs).
+func newFallbackHealthReporter(t *testing.T, ruleID string) *health.Reporter {
+	t.Helper()
+	if testing.Short() {
+		t.Skip("skipping NATS-backed test in short mode")
+	}
+	_, nc := natsfixture.Server(t)
+	js, err := jetstream.New(nc)
+	require.NoError(t, err)
+	conn, err := substrate.Wrap(nc)
+	require.NoError(t, err)
+	_, err = js.CreateKeyValue(context.Background(), jetstream.KeyValueConfig{Bucket: "HEALTH"})
+	require.NoError(t, err)
+	kv, err := conn.OpenKV(context.Background(), "HEALTH")
+	require.NoError(t, err)
+	return health.New(kv, ruleID)
+}
+
+// TestRegisterWithFilterFallback_CleanSuccessClearsStaleFault proves item 1 of
+// FIRE 2: a clean first attempt (register succeeds, no fallback fired) clears
+// a stale LastError an EARLIER boot's narrowed-filter fallback latched on this
+// same health entry, while the cumulative ErrorCount survives untouched
+// (health-kv-schema.md's "preserved across restarts" contract).
+func TestRegisterWithFilterFallback_CleanSuccessClearsStaleFault(t *testing.T) {
+	reporter := newFallbackHealthReporter(t, "rwff-clear")
+	require.NoError(t, reporter.RecordError(context.Background(),
+		"narrowed Core KV filter registration failed, fell back to the broad filter: injected stale rejection"))
+	require.NoError(t, reporter.RecordError(context.Background(), "second stale error"))
+
+	p := &Pipeline{ruleID: "rwff-clear", reporter: reporter}
+	calls := 0
+	err := p.registerWithFilterFallback(context.Background(), []string{"a.>"}, func() {
+		t.Fatal("applyBroad must not be called on a clean first-attempt success")
+	}, func() error {
+		calls++
+		return nil
+	})
+	require.NoError(t, err)
+	require.Equal(t, 1, calls)
+
+	entry, gerr := reporter.GetStatus(context.Background())
+	require.NoError(t, gerr)
+	require.Nil(t, entry.LastError, "a clean registration must clear the stale latch")
+	require.Equal(t, uint64(2), entry.ErrorCount, "errorCount must survive the clear")
+}
+
+// TestRegisterWithFilterFallback_FallbackSuccessKeepsFreshError is the
+// counter-case (item 2): when the narrowed attempt itself fails and the
+// broad retry is what succeeds, the fallback's own fresh error must survive —
+// only a clean FIRST-attempt success clears, never a recovered fallback.
+func TestRegisterWithFilterFallback_FallbackSuccessKeepsFreshError(t *testing.T) {
+	reporter := newFallbackHealthReporter(t, "rwff-keeps-fresh")
+
+	p := &Pipeline{ruleID: "rwff-keeps-fresh", reporter: reporter}
+	calls := 0
+	broadApplied := false
+	err := p.registerWithFilterFallback(context.Background(), []string{"a.>", "b.>"}, func() { broadApplied = true }, func() error {
+		calls++
+		if calls == 1 {
+			return errors.New("injected overlapping-filter rejection")
+		}
+		return nil
+	})
+	require.NoError(t, err)
+	require.Equal(t, 2, calls)
+	require.True(t, broadApplied)
+
+	entry, gerr := reporter.GetStatus(context.Background())
+	require.NoError(t, gerr)
+	require.NotNil(t, entry.LastError, "the fallback's fresh error must survive — the clear must not fire")
+	require.Contains(t, *entry.LastError, "injected overlapping-filter rejection")
+	require.Equal(t, uint64(1), entry.ErrorCount)
+}
+
+// TestRegisterWithFilterFallback_CleanSuccessDoesNotUnpauseAPersistedPause
+// proves item 3: the clear-on-success call is scoped to LastError alone and
+// never touches Status/PauseReason, so a persisted pause survives a clean
+// registration exactly as it did before this call existed — the hazard a
+// SetActive call here would have created (Pipeline.Run's doc comment: the
+// supervisor's restoreState reads Status/PauseReason at startup to decide
+// whether to honor a persisted pause, from the pump goroutine Add/Reset
+// spawns concurrently with registerWithFilterFallback's caller).
+func TestRegisterWithFilterFallback_CleanSuccessDoesNotUnpauseAPersistedPause(t *testing.T) {
+	reporter := newFallbackHealthReporter(t, "rwff-paused")
+	require.NoError(t, reporter.SetPaused(context.Background(), health.PauseReasonStructural, "bucket not found"))
+
+	p := &Pipeline{ruleID: "rwff-paused", reporter: reporter}
+	err := p.registerWithFilterFallback(context.Background(), []string{"a.>"}, func() {
+		t.Fatal("applyBroad must not be called on a clean first-attempt success")
+	}, func() error { return nil })
+	require.NoError(t, err)
+
+	entry, gerr := reporter.GetStatus(context.Background())
+	require.NoError(t, gerr)
+	require.Equal(t, "paused", entry.Status, "a clean durable registration must not flip a persisted pause active")
+	require.NotNil(t, entry.PauseReason)
+	require.Equal(t, health.PauseReasonStructural, *entry.PauseReason)
 }
