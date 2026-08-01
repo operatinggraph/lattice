@@ -265,19 +265,26 @@ because every personal lens shares one SYNC stream" reasoning.
 **"Does this introduce new state?"** No. The position is derived, and the only persisted value is the
 cursor the store already keeps.
 
-**"What about the sibling row — the leaked durables?"** *"[Edge] Every engine build leaks a durable SYNC
-consumer"* (★★, S–M, 📋 ready) and this row share one mechanism and split cleanly:
+**"What about the sibling row — the leaked durables?"** The leaked-durable row and this one share one
+mechanism and split cleanly:
 
 - That row's clause *"each new durable also re-reads the whole retained subject"* is **subsumed here** —
-  after Fire 2 a fresh durable starts at the hydration point and reads nothing historical, and the "9
-  durables each pinned at the 10k per-subject cap" observation becomes "each pinned at ~0 pending".
-- What that row still owns on its own is the **count**: `engineManager.Acquire` minting a fresh device
-  id per engine build, and nothing reaping the durable. The fix there is device-id reuse (the store is
-  already per-identity) or an `InactiveThreshold` on the Go host's durable — the browser shell already
-  sets one (`shell.mjs`, `defaultInactiveThresholdMs`).
+  after Fire 2 a fresh durable starts at the hydration point and reads nothing historical, and the
+  "durables pinned at the 10k per-subject cap" observation becomes "pinned at ~0 pending".
+- What that row owns on its own is the **count**, and that half **shipped** (`0b6879dc`): the device id
+  is persisted per identity and the durable is reaped on sign-out.
 
-**Recommended order: this initiative first, then re-scope that row to the count alone.** The reverse
-order leaves the amplification in place; this order shrinks that row rather than colliding with it.
+That leaves §1.3's frequency premise **narrower than measured**. The 2,049-frame reading was taken when
+*every* engine rebuild minted a fresh device id, so every idle-reap and every process restart was a cold
+start; a rebuild now resumes the durable it left. What remains cold is a genuinely new device — and the
+reaped-then-recreated durable the browser host's `InactiveThreshold` produces on every return. The
+amplification per cold start is unchanged, so the fork below stands on its own; only its blast radius is
+smaller than the number that motivated it.
+
+That `InactiveThreshold` is also why the Go host still has no server-side backstop for an orphan a purge
+cannot reach (a revoked credential, a crashed host). The browser's 30-minute value cannot simply be
+copied over: on a long-lived Go host it would convert routine next-day sign-ins into exactly the cold
+start this initiative is about. **The fork below sets that value** — the backstop is sequenced behind it.
 No other in-flight design touches `RunDurableConsumer`, the sync seam, or the personal control ops
 (grepped across `_bmad-output/implementation-artifacts/`).
 

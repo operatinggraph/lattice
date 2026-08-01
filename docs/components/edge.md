@@ -30,9 +30,12 @@ package, built incrementally per the design's §7 Steward decomposition (EDGE.1 
   write applies iff its revision is ≥ the currently-stored one, so a stale/duplicate/reordered delta
   (JetStream is at-least-once and can reorder) is dropped, never applied out of order. A `Cursor`/
   `SetCursor` pair persists the Sync Manager's last-applied stream sequence across restarts. A separate
-  `local:` namespace (`PutLocal`/`GetLocal`) scaffolds the design's **sovereign, device-only** entries —
+  `local:` namespace (`PutLocal`/`GetLocal`) holds the design's **sovereign, device-only** entries —
   ones a user creates locally that are never uploaded — kept in its own bucket/object store so the
-  mirror's apply path can never reach it.
+  mirror's apply path can never reach it. It also carries the Go host's own **device id**
+  (`facet.deviceId`), which is why the mirror is the *only* thing a purge deletes: the durable named
+  by that id dies with it. A mirror is single-holder — `store.Open` takes bbolt's file lock with a
+  bounded timeout, so a second opener fails rather than blocking forever.
 
   `Store` is an **interface with two engines**, because the same semantics run on two hosts:
 
@@ -128,7 +131,9 @@ the injected page is `Cache-Control: no-store` and rides the same ≤15 m authz 
 NATS connection (this is the mode's inherent trade for dropping the local binary; the shipped Go host,
 flag unset, keeps the token HttpOnly and is byte-for-byte unchanged). (2) The **device id is
 browser-local** (localStorage, `boot.mjs`'s `resolveDeviceId`), not injected — persisted so a reload
-resumes the same durable consumer instead of orphaning one per load.
+resumes the same durable consumer instead of orphaning one per load. The Go host persists its own the
+same way, in the identity's mirror rather than localStorage (`cmd/facet/deviceid.go`), and reaps the
+durable on sign-out because a purge takes the id with it.
 
 **The browser-build boundary.** The engine's semantics packages compile under `GOOS=js GOARCH=wasm` and
 reach **no NATS client** — CI asserts both (a build check, and a `go list -deps` assertion over the same

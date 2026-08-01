@@ -1,6 +1,7 @@
 # Done log archive — lattice (older shipped items, newest first)
 
 
+- 2026-07-29 · `4186479a` · [Refractor] shared-keyspace composition (c) — catalog merged into one multi-walk lens, classifier gap fixed, verified live [design §16](../../implementation-artifacts/refractor-shared-keyspace-arbitration-design.md)
 - 2026-07-29 · `bcf52101` · [Refractor] shared-keyspace composition (b) — sessions merged into one multi-walk lens, verified live [design §15](../../implementation-artifacts/refractor-shared-keyspace-arbitration-design.md)
 - 2026-07-29 · `69119818` · [Refractor] shared-keyspace composition (a) — N branches per multi-walk lens, merged by key [design §14](../../implementation-artifacts/refractor-shared-keyspace-arbitration-design.md)
 - 2026-07-29 · `c80bfa00` · [Refractor] evaluation-consistency Fire 1 Inc 2 — conjunct-unit classifier + selector-scoped footprint, fan-in stress test [design §14](../../implementation-artifacts/refractor-evaluation-consistency-design.md)
