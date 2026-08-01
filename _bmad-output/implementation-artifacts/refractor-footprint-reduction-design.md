@@ -136,6 +136,17 @@ measurement showing neighbor-event full recomputes still dominating boot replay 
 CPU (the plain-lens analog of the capability `ActorEnumerator`, derived from the AST instead
 of hand-configured).
 
+**The derivation itself is specified in
+[auth-plane-projection-latency-design.md](auth-plane-projection-latency-design.md) §4.7 — build
+to that, not to the paragraph above.** That design builds the same reverse walk as a standalone
+unit for the actor-aware corpus (which has the measured demand Phase 2 still lacks), and its spec
+is strictly more precise on two points the paragraph above gets wrong: the hop index must be built
+over **every** pattern source — a relationship reachable only through `WHERE NOT (…)` or a RETURN
+pattern comprehension is a real dependency, not a fallback trigger — and **multiple matched
+positions union their back-walks** rather than falling back. Phase 2 then reduces to wiring that
+unit into the plain arm's `SeedAnchor` injection point; its own eligibility gate
+(`seedAnchorFor`) and its unmeasured-trigger obligation are unchanged.
+
 **Test obligations:** per-arm units plus an e2e proving (a) an anchor event rewrites only its
 own row — sibling row revisions unchanged; (b) a neighbor event still refreshes dependent
 rows; (c) a WHERE-flip on a seeded anchor still retracts; (d) a DiffRetraction lens's behavior
