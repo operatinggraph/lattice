@@ -2,6 +2,16 @@
 
 Rolled from `verticals.md` when its live Done log passed ~25 entries. Full detail is in git.
 
+- 2026-07-28 · `e21e374c` · Schedule's Book button now mirrors `renderBookMember`'s started/full gate + adds an own-bookings DoubleBooked check — no longer offers a class `CreateBooking` will refuse
+- 2026-07-28 · `a0414185` · clinic-domain/clinic-app self-anchor doc comments corrected + `staff_patients_rls_test.go` now seeds the real per-patient `authz_anchors` shape (confirmed to fail pre-fix)
+- 2026-07-28 · `c98871b0` · Patient self-booking re-verified live (write path already worked; "still 403s" was stale) — Book Appointment now locks "Select patient" to the signed-in patient's own record
+- 2026-07-28 · `e1900307` · Book Appointment no longer leaks a prior identity's raw patient NanoID — a persisted `clinic.patient` key not in the current identity's roster is evicted, not `shortKey()`-rendered; cleared on sign-out too
+- 2026-07-28 · `67f87379` · The 10 prose-format packages' `permissions.go` gets identity-domain's tabular `Grant matrix:` doc block (S2); each package version-bumped alongside. standard §14
+- 2026-07-27 · `c6294007` · The 24×-duplicated lens_cypher_test.go harness (embedded-NATS KVs + NanoID) collapses onto `internal/lenstest`; per-package vtx/aspect/edge fixtures untouched. standard §9
+- 2026-07-27 · `5d26f215` · `rbac-domain`/`privacy-base`/`augur`'s hand-rolled vertex-key parsers converge onto the S10-pinned `parts_of` body.
+- 2026-07-27 · `90a51b17` · `ClaimIdentity`'s `claimKey` gets a per-field `x-sensitive` mask; `targetIdentityKey` stays plain/prefillable — `RecordServiceOutcome`'s stale demand row (already closed by `7911ccf6`) also cleared.
+- 2026-07-27 · `a8054fe8` · `cafe-domain` README inventory refreshed past Increment 2 — self-order catalog, workplace confinement, shipped FE + Inc 3 one-bill now documented.
+- 2026-07-27 · `52e24218` · `actor_holds_operator`'s role-page cursor gets a 51-role fixture (operator on page 2) — retires the untested-multi-page-branch risk.
 - 2026-07-27 · `ff22c446` · `docs/components/edge-manifest.md` refreshed to its real eighteen Personal Lenses + three generated read-grant producers (was six).
 - 2026-07-27 · `1389a0e9` · A naturally-ended visit series reads "ended", not "paused" — `series_status` replaces the fused `active` boolean; Resume no longer offered. clinic-recurring-visit-series §8
 - 2026-07-27 · `ab2280ed` · Entity detail withholds a self-administer op from a row that isn't the caller's own (`crossHatMismatch`); instructorKey provenance rides 3 lenses (`df3afd75`). persona-worlds §7
