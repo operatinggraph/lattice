@@ -62,7 +62,7 @@ dated run-logs live in git history. Rotate LoftSpace ↔ Clinic ↔ Café ↔ We
 
 One line per shipped item (`date · SHA · title`). Oldest roll to `archive/` past ~25.
 
-- 2026-08-01 · `6ebe953e` · A weekly class no longer needs N separate creates — CreateSessionSeries mints occurrenceCount occurrences in one atomic op. wellness-domain 0.19.5
+- 2026-08-01 · `4870977c` · A weekly class no longer needs N separate creates — CreateSessionSeries mints occurrenceCount occurrences in one atomic op. wellness-domain 0.19.6
 - 2026-08-01 · `58af30ef` · A wellness class booking now has a price — CreateSession's priceCents + a new wellnessClassPriceSettlement Weaver target auto-charge the booker. wellness-domain 0.19.4, wellness-ledger 0.2.0
 - 2026-08-01 · `d53640f1` · Convergence targets declare §10.3 retry budgets — maxretries_<gap>=3 on all four weaver targets; orchestration-base 0.7.7, wellness-domain 0.19.3, wellness-ledger 0.1.1
 - 2026-08-01 · `d7668f43` · A task orphaned by a tombstoned op now self-cancels — new orphanedTaskGrants Weaver convergence target dispatches CancelTask, mirroring wellness's ReleaseOrphanedBooking; orchestration-base 0.7.6
