@@ -1,5 +1,5 @@
 name: wellness-domain
-version: 0.19.4
+version: 0.19.5
 description: |
   Wellness bookable domain: studio / session / booking / instructor vertex
   types + their aspects and links, written by Create*/Tombstone*/Cancel*/Bind*
@@ -73,6 +73,8 @@ declares:
       class: meta.ddl.vertexType
     - canonicalName: session
       class: meta.ddl.vertexType
+    - canonicalName: sessionseries
+      class: meta.ddl.vertexType
     - canonicalName: booking
       class: meta.ddl.vertexType
     - canonicalName: instructor
@@ -94,6 +96,8 @@ declares:
     - canonicalName: instructorIdentityClaim
       class: meta.ddl.aspectType
     - canonicalName: identityInstructorClaim
+      class: meta.ddl.aspectType
+    - canonicalName: sessionSeriesDefinition
       class: meta.ddl.aspectType
   lenses:
     - canonicalName: wellnessStudios
@@ -131,6 +135,9 @@ declares:
       scope: any
       grantsTo: [operator]
     - operationType: CreateSession
+      scope: any
+      grantsTo: [operator, frontOfHouse]
+    - operationType: CreateSessionSeries
       scope: any
       grantsTo: [operator, frontOfHouse]
     - operationType: TombstoneSession
@@ -179,5 +186,6 @@ declares:
     - operationType: ReassignSession
     - operationType: SetBookingAttendance
     - operationType: CreateSession
+    - operationType: CreateSessionSeries
     - operationType: CreateStudio
     - operationType: SetInstructorProfile

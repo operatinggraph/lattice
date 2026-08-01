@@ -33,22 +33,22 @@ func TestPackage_ManifestMatchesDefinition(t *testing.T) {
 // rather than reaching an install, where the same change is a silent capability
 // or read-model shift.
 //
-// Five of the thirteen DDLs are CreateOnly claim aspects (S4) — the slot, seat,
+// Five of the fifteen DDLs are CreateOnly claim aspects (S4) — the slot, seat,
 // booker, and the two instructor-binding claims. Each is the sole thing making
 // its uniqueness constraint hold, and none is reachable from a lens, so dropping
 // one would not break a read: it would silently re-admit double-booking. That is
 // why they are pinned by name rather than counted.
 func TestPackage_StructurePins(t *testing.T) {
-	if got, want := len(Package.DDLs), 13; got != want {
+	if got, want := len(Package.DDLs), 15; got != want {
 		t.Errorf("DDLs: got %d, want %d", got, want)
 	}
 	if got, want := len(Package.Lenses), 7; got != want {
 		t.Errorf("Lenses: got %d, want %d", got, want)
 	}
-	if got, want := len(Package.Permissions), 15; got != want {
+	if got, want := len(Package.Permissions), 16; got != want {
 		t.Errorf("Permissions: got %d, want %d", got, want)
 	}
-	if got, want := len(Package.OpMetas), 8; got != want {
+	if got, want := len(Package.OpMetas), 9; got != want {
 		t.Errorf("OpMetas: got %d, want %d", got, want)
 	}
 	if got, want := len(Package.Roles), 0; got != want {
@@ -67,6 +67,7 @@ func TestPackage_StructurePins(t *testing.T) {
 	wantDDLs := []struct{ name, class string }{
 		{"studio", "meta.ddl.vertexType"},
 		{"session", "meta.ddl.vertexType"},
+		{"sessionseries", "meta.ddl.vertexType"},
 		{"booking", "meta.ddl.vertexType"},
 		{"instructor", "meta.ddl.vertexType"},
 		{"studioProfile", "meta.ddl.aspectType"},
@@ -78,6 +79,7 @@ func TestPackage_StructurePins(t *testing.T) {
 		{"instructorProfile", "meta.ddl.aspectType"},
 		{"instructorIdentityClaim", "meta.ddl.aspectType"},
 		{"identityInstructorClaim", "meta.ddl.aspectType"},
+		{"sessionSeriesDefinition", "meta.ddl.aspectType"},
 	}
 	for i, want := range wantDDLs {
 		if i >= len(Package.DDLs) {
@@ -109,7 +111,8 @@ func TestPackage_StructurePins(t *testing.T) {
 		grantsTo  []string
 	}{
 		{"CreateStudio", "any", staff}, {"TombstoneStudio", "any", operatorOnly},
-		{"CreateSession", "any", staff}, {"TombstoneSession", "any", []string{"operator", "provider"}},
+		{"CreateSession", "any", staff}, {"CreateSessionSeries", "any", staff},
+		{"TombstoneSession", "any", []string{"operator", "provider"}},
 		{"ReassignSession", "any", []string{"operator", "frontOfHouse", "provider"}},
 		{"CreateBooking", "any", staff}, {"CreateBooking", "self", []string{"consumer"}},
 		{"CancelBooking", "any", staff}, {"CancelBooking", "self", []string{"consumer"}},

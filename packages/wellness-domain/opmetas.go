@@ -5,7 +5,7 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 // OpMetas declares descriptor-vocabulary metadata (edge-showcase-app-design.md
 // §3.3, edge-manifest Fire 1) for wellness-domain's client-invocable ops — the
 // two consumer (scope=self) ones, CreateBooking and CancelBooking; the staff
-// standing ones, CreateStudio and CreateSession; and the provider-hat standing
+// standing ones, CreateStudio, CreateSession and CreateSessionSeries; and the provider-hat standing
 // ones, TombstoneSession, SetBookingAttendance and SetInstructorProfile —
 // mirroring clinic-domain's adoption (Fire 5 Inc 1) and service-domain's
 // original RequestService op-meta.
@@ -376,6 +376,52 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 				// RevisionConflict rather than the script's StudioConflict. It
 				// fails closed either way, and the ceiling stays the same
 				// CreateOnly conditioning; what is lost is the better error.
+				OptionalReads: []string{"{payload.instructor}"},
+			},
+		},
+		{
+			OperationType: "CreateSessionSeries",
+			Presentation: &pkgmgr.OpPresentationSpec{
+				Title:       "Schedule a recurring class",
+				Description: "Put a whole run of the same class on a studio's grid at once — weekly, biweekly, whatever the cadence.",
+				Icon:        "repeat",
+				Tone:        "primary",
+				SubmitLabel: "Schedule series",
+			},
+			InputSchema: `{"type":"object","properties":` +
+				`{"studio":{"type":"string","description":"vtx.studio.<NanoID> every occurrence runs at — auto-filled from the studio being viewed."},` +
+				`"name":{"type":"string","title":"Name","description":"What every occurrence is called, e.g. Vinyasa Flow."},` +
+				`"startsAt":{"type":"string","format":"date-time","title":"First class starts","description":"First occurrence's start, aligned to the 15-minute grid."},` +
+				`"endsAt":{"type":"string","format":"date-time","title":"First class ends","description":"First occurrence's end, aligned to the 15-minute grid."},` +
+				`"capacity":{"type":"integer","title":"Capacity","minimum":1,"maximum":200,"description":"How many people may book a seat, shared by every occurrence."},` +
+				`"intervalDays":{"type":"integer","title":"Repeat every (days)","minimum":1,"maximum":365,"description":"Days between occurrences — 7 for weekly."},` +
+				`"occurrenceCount":{"type":"integer","title":"Number of occurrences","minimum":2,"maximum":52,"description":"How many classes to schedule, first included."},` +
+				`"instructor":{"type":"string","title":"Instructor","description":"vtx.instructor.<NanoID> leading every occurrence."}},` +
+				`"required":["studio","name","startsAt","endsAt","capacity","intervalDays","occurrenceCount"]}`,
+			FieldDescriptions: map[string]string{
+				"studio":          "The studio every occurrence runs in — auto-filled by the client from the studio being viewed (dispatch.targetField), not user-entered. A front-desk caller may only schedule at a studio in a building they work at.",
+				"name":            "What every occurrence is called, as members will see it.",
+				"startsAt":        "When the first occurrence starts. Must align to the 15-minute grid; the studio cannot already be booked for any part of ANY occurrence's span.",
+				"endsAt":          "When the first occurrence ends. Must align to the 15-minute grid and be at most 24 hours after the start.",
+				"capacity":        "How many seats each occurrence has, 1 to 200, shared by the whole series.",
+				"intervalDays":    "How many days apart each occurrence falls — 7 for a weekly class, 14 for biweekly.",
+				"occurrenceCount": "How many occurrences to schedule at once, first included (2 to 52). For a single class, use Schedule a class instead.",
+				"instructor":      "Optional. The instructor leading every occurrence. Omitted leaves the series unassigned.",
+			},
+			Dispatch: &pkgmgr.OpDispatchSpec{
+				Class:       sessionSeriesVertexDDL,
+				AuthContext: "standing",
+				TargetField: "studio",
+				TargetType:  studioVertexDDL,
+				// Same undeclarable-read shape as CreateSession's own op-meta,
+				// multiplied by occurrenceCount: the per-cell slot claims of
+				// EVERY occurrence are data-derived from startsAt/endsAt/
+				// intervalDays by arithmetic the template vocabulary has no
+				// form for. The hand-written dispatcher (cmd/wellness-app/web/
+				// app.js) enumerates them all; a descriptor-driven caller
+				// leaves them to the script's own read (RevisionConflict
+				// instead of StudioConflict on collision — fails closed
+				// either way).
 				OptionalReads: []string{"{payload.instructor}"},
 			},
 		},
