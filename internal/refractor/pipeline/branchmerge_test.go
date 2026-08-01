@@ -66,7 +66,7 @@ func TestExecuteFullForActor_MultiBranch_UnionsAnchorsAcrossWalks(t *testing.T) 
 	}
 
 	nodeProps := map[string]any{"lastModifiedAt": "2026-05-15T10:00:00Z"}
-	results, err := p.executeFullForActor(ctx, identityKey, nodeProps)
+	results, err := p.executeFullForActor(ctx, identityKey, nodeProps, "")
 	require.NoError(t, err)
 
 	gotAnchors := map[string]string{}
@@ -108,7 +108,7 @@ func TestExecuteFullForActor_MultiBranch_SingleBranchIsUnaffected(t *testing.T) 
 	}
 
 	nodeProps := map[string]any{"lastModifiedAt": "2026-05-15T10:00:00Z"}
-	results, err := p.executeFullForActor(ctx, identityKey, nodeProps)
+	results, err := p.executeFullForActor(ctx, identityKey, nodeProps, "")
 	require.NoError(t, err)
 	require.Len(t, results, 1)
 	require.Equal(t, identityKey, results[0].Row["actorKey"])
@@ -230,7 +230,7 @@ func TestExecuteFullForActor_MultiBranch_WalkOwnedFanOutResolvesDeterministicall
 		"viaService is owned by branch0 (svc), viaRole/viaRoleName by branch1 (role) — 2 distinct owners")
 
 	nodeProps := map[string]any{"lastModifiedAt": "2026-05-15T10:00:00Z"}
-	results, err := p.executeFullForActor(ctx, identityKey, nodeProps)
+	results, err := p.executeFullForActor(ctx, identityKey, nodeProps, "")
 	require.NoError(t, err, "a walk-owned column's own multi-role fan-out must resolve, not fail the merge")
 
 	byAnchor := map[string]map[string]any{}

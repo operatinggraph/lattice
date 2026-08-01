@@ -60,6 +60,19 @@ type executor struct {
 	params     map[string]any
 	keyColumns []string
 
+	// seedAnchor is the Core KV vertex key the anchor pattern's candidate set
+	// narrows to for this evaluation (EventContext.SeedAnchor), armed only
+	// when seedAnchorFor proved the query's anchor pattern can be point-seeded
+	// by it. Empty means every pattern scans as usual.
+	//
+	// It is consumed exactly once — takeSeedAnchor clears it at the first
+	// candidate set this evaluation builds by scan, which is the anchor by
+	// construction (the first MATCH clause's first node is the first pattern
+	// any evaluation seeds). Clearing is what keeps a later MATCH clause, an
+	// OPTIONAL MATCH, or a sibling comma-separated pattern of the same label
+	// from also collapsing to the event vertex.
+	seedAnchor string
+
 	// nodes memoizes fetchNode by Core KV key for the life of ONE evaluation,
 	// giving the executor repeatable-read semantics: every access to a given
 	// key inside one Execute observes the same value, whatever commits land
@@ -154,6 +167,7 @@ func (e *Engine) ExecuteWithFootprint(
 		coreKV:        coreKV,
 		params:        ec.Parameters,
 		keyColumns:    compiled.KeyColumns,
+		seedAnchor:    seedAnchorFor(compiled.Query, ec.SeedAnchor),
 		nodes:         map[string]*nodeRef{},
 		edges:         map[string][]adjacency.EdgeEntry{},
 		edgeRevisions: map[string]uint64{},
@@ -515,11 +529,17 @@ func (ex *executor) propsAllMatch(b binding, ref *nodeRef, n NodePattern) (bool,
 }
 
 // seedNodes returns all Core KV vertices matching n's label + properties.
-// For property predicates that include "key" with a literal/parameter, we
-// short-circuit to a point lookup. Otherwise we list candidates — a labeled
-// pattern via a server-side "vtx.<label>." prefix filter bounded by that
-// type's own vertex count, an unlabeled one via the whole bucket since any
-// type may bind it — then filter by shape, label, and properties.
+// Three ways to build that candidate set, in order:
+//
+//   - a "key" property with a resolvable expression → a point lookup;
+//   - an armed anchor seed (EventContext.SeedAnchor) on the anchor pattern →
+//     a point lookup on the event vertex, since the caller has proved the
+//     event is a mutation of that anchor and no other anchor's rows can have
+//     changed with it;
+//   - otherwise a listing — a labeled pattern via a server-side "vtx.<label>."
+//     prefix filter bounded by that type's own vertex count, an unlabeled one
+//     via the whole bucket since any type may bind it — filtered by shape,
+//     label, and properties.
 func (ex *executor) seedNodes(b binding, n NodePattern) ([]*nodeRef, error) {
 	// Fast path: property "key" with a resolvable expression → point read.
 	if keyExpr, ok := n.Properties["key"]; ok {
@@ -531,24 +551,16 @@ func (ex *executor) seedNodes(b binding, n NodePattern) ([]*nodeRef, error) {
 		if !ok {
 			return nil, fmt.Errorf("full engine: node property 'key' must resolve to string, got %T", val)
 		}
-		ref, err := ex.fetchNode(s)
-		if err != nil {
-			return nil, err
-		}
-		if ref == nil {
-			return nil, nil
-		}
-		if !ex.nodeMatches(ref, n) {
-			return nil, nil
-		}
-		ok, err = ex.propsAllMatch(b, ref, n)
-		if err != nil {
-			return nil, err
-		}
-		if !ok {
-			return nil, nil
-		}
-		return []*nodeRef{ref}, nil
+		return ex.pointCandidate(b, n, s)
+	}
+
+	// Anchor seeding: take (and clear) the armed seed at the first candidate
+	// set built by scan — the anchor pattern. The seedAnchorBinds re-check is
+	// defensive: arming already proved this exact pattern point-seedable, and
+	// a seed that somehow reached a pattern it cannot bind falls back to the
+	// scan below rather than narrowing the wrong pattern.
+	if seed := ex.takeSeedAnchor(); seed != "" && seedAnchorBinds(n, seed) {
+		return ex.pointCandidate(b, n, seed)
 	}
 
 	// Generic path: list candidates, then filter by shape, label, and
@@ -611,6 +623,81 @@ func (ex *executor) seedNodes(b binding, n NodePattern) ([]*nodeRef, error) {
 		refs = append(refs, ref)
 	}
 	return refs, nil
+}
+
+// pointCandidate builds the candidate set for a pattern narrowed to ONE Core
+// KV key — shared by the `{key: …}` fast path and the anchor-seeded path. A
+// missing or soft-deleted vertex, a key whose vertex does not carry the
+// pattern's label, or a property predicate the vertex fails all yield zero
+// candidates: exactly what a scan that matched nothing yields, so a narrowed
+// pattern is never distinguishable from a scanned one by its result.
+func (ex *executor) pointCandidate(b binding, n NodePattern, key string) ([]*nodeRef, error) {
+	ref, err := ex.fetchNode(key)
+	if err != nil {
+		return nil, err
+	}
+	if ref == nil {
+		return nil, nil
+	}
+	if !ex.nodeMatches(ref, n) {
+		return nil, nil
+	}
+	ok, err := ex.propsAllMatch(b, ref, n)
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		return nil, nil
+	}
+	return []*nodeRef{ref}, nil
+}
+
+// takeSeedAnchor returns the armed anchor seed and clears it, so exactly one
+// pattern can consume it. Taken unconditionally by the first scan-seeded
+// pattern (see executor.seedAnchor) rather than only when it applies: a seed
+// that outlived its own pattern must be spent, never left armed for the next
+// one.
+func (ex *executor) takeSeedAnchor() string {
+	seed := ex.seedAnchor
+	ex.seedAnchor = ""
+	return seed
+}
+
+// seedAnchorFor reports the vertex key this evaluation's anchor pattern may
+// narrow to, or "" when the seed does not apply and every pattern scans as
+// usual. Only the query's ANCHOR — the first MATCH clause's first node
+// pattern, the same derivation AnchorProjectionKey uses — is ever seedable;
+// later MATCH clauses, OPTIONAL MATCH clauses, and sibling comma-separated
+// patterns keep their own candidate sets whatever the event was.
+func seedAnchorFor(q *Query, seedKey string) string {
+	if seedKey == "" || q == nil {
+		return ""
+	}
+	n, ok := anchorPattern(q)
+	if !ok || !seedAnchorBinds(n, seedKey) {
+		return ""
+	}
+	return seedKey
+}
+
+// seedAnchorBinds reports whether one vertex key can stand in for pattern n's
+// entire candidate set. Two structural conditions:
+//
+//   - n is labeled with the key's own Contract #1 vertex type. An unlabeled
+//     pattern binds any type (so one vertex is not its candidate set), and a
+//     pattern labeled with a DIFFERENT type is not the event's pattern at all
+//     — a neighbor-type event says nothing about which anchors changed.
+//   - n carries no `key` property. Such a pattern already resolves to a point
+//     read of its own key, which the seed must not silently displace.
+func seedAnchorBinds(n NodePattern, seedKey string) bool {
+	if n.Label == "" {
+		return false
+	}
+	if _, keyed := n.Properties["key"]; keyed {
+		return false
+	}
+	vtype, _, ok := substrate.ParseVertexKey(seedKey)
+	return ok && vtype == n.Label
 }
 
 // fetchNode reads a Core KV vertex, returning nil for missing or soft-deleted.

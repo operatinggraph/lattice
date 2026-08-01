@@ -62,11 +62,18 @@ func walkOwnedColumns(branches []ruleengine.CompiledRule) map[string]int {
 // multi-walk Personal lens (refractor-shared-keyspace-arbitration-
 // design.md §13.2). Factored out of executeFullForActorOnce so the single-
 // branch path stays exactly what it was before branch merging existed.
+//
+// seedAnchor rides the EventContext into the single-branch call only. A
+// multi-walk lens never receives one — seedAnchorFor's eligibility excludes it
+// (seedAnchorLabel is cleared for multi-walk installs, and a Personal lens
+// carries an ActorEnumerator besides) — so the branch loop passes the unseeded
+// context and every branch builds its own anchor candidate set by scan.
 func (p *Pipeline) executeBranches(
-	ctx context.Context, actorKey string, nodeProps map[string]any, params map[string]any,
+	ctx context.Context, actorKey string, nodeProps map[string]any, params map[string]any, seedAnchor string,
 ) ([]ruleengine.ProjectionResult, ruleengine.EvalFootprint, error) {
 	ec := ruleengine.EventContext{NodeKey: actorKey, NodeProps: nodeProps, Parameters: params}
 	if len(p.fullCRBranches) <= 1 {
+		ec.SeedAnchor = seedAnchor
 		return p.fullEngine.ExecuteWithFootprint(ctx, p.fullCR, ec, p.adjKV, p.coreKV)
 	}
 

@@ -98,6 +98,24 @@ type Pipeline struct {
 	plainReprojectLabels map[string]struct{}
 	plainReprojectAll    bool
 
+	// seedAnchorLabel is this lens's anchor vertex type
+	// (full.CompiledRule.AnchorLabel — the first MATCH clause's first node's
+	// label), derived once per engine install alongside plainReprojectLabels.
+	// An event on this type is a mutation of the anchor itself, so the
+	// evaluation it triggers can be narrowed to that one anchor instead of
+	// recomputing every anchor's rows (refractor-footprint-reduction-design.md
+	// §D2 Phase 1). Empty disables seeding entirely: a multi-walk lens (whose
+	// branches' anchors need not agree), a non-full engine, or an unlabeled
+	// anchor pattern (which no event type identifies).
+	//
+	// It holds the AST-derived half of eligibility only. The pipeline-SHAPE
+	// half (no ActorEnumerator, no envelope, DiffRetraction off) is evaluated
+	// per event in seedAnchorFor, because activation installs those components
+	// AFTER UseFullEngine (cmd/refractor/main.go) — a snapshot taken here
+	// would read every one of them unset and arm seeding for lenses that must
+	// never have it.
+	seedAnchorLabel string
+
 	// diffRetraction opts a plain lens into Fire 3's neighbor-driven / multi-row
 	// target-diff retraction (negative-filter-retraction-projection-design.md
 	// §2.4): when Fire 2's read-free AnchorProjectionKey check cannot derive a
@@ -417,6 +435,55 @@ func (p *Pipeline) useFullEngineBranches(eng *full.Engine, cr ruleengine.Compile
 		p.plainReprojectLabels = labels
 		p.plainReprojectAll = false
 	}
+	// Pin the anchor label an anchor-labeled event can seed the evaluation
+	// with. Unconditional like the label set above, and for the same reason: a
+	// reload must never leave a previous rule body's anchor armed. A multi-walk
+	// lens is excluded outright — branch merging evaluates N independent
+	// queries, each with its own anchor, and one seed cannot speak for all of
+	// them.
+	p.seedAnchorLabel = ""
+	if len(branches) <= 1 {
+		if fullCR, isFull := cr.(*full.CompiledRule); isFull {
+			if label, ok := fullCR.AnchorLabel(); ok {
+				p.seedAnchorLabel = label
+			}
+		}
+	}
+}
+
+// seedAnchorFor returns the vertex key an event on (eventLabel, eventKey) may
+// seed this lens's evaluation with — narrowing it to that one anchor — or ""
+// when the evaluation must recompute the lens's whole row set as it always
+// has. It is the pipeline half of refractor-footprint-reduction-design.md
+// §D2's eligibility; the engine independently re-derives that the key's own
+// type matches the compiled anchor pattern's label before narrowing anything.
+//
+// Every conjunct is a correctness requirement, not a heuristic:
+//
+//   - eventLabel == seedAnchorLabel — only a mutation of the anchor ITSELF
+//     bounds the change to one anchor. A neighbor (referenced non-anchor type)
+//     event can affect any number of anchors through the walk, and deriving
+//     which ones is §D2 Phase 2; it keeps the full recompute.
+//   - no ActorEnumerator and no envelope — an actor-aware/personal evaluation
+//     is already scoped to one actor, and its "anchor" is that actor, not the
+//     event vertex; seeding it with an event key would evaluate the wrong
+//     entity.
+//   - DiffRetraction off — that retraction diffs the target's FULL live key
+//     set against the evaluation's row set, so a single-anchor row set would
+//     read as "every other anchor's rows are gone" and retract them all. This
+//     conjunct is what makes applyDiffRetraction unreachable from a seeded
+//     evaluation.
+func (p *Pipeline) seedAnchorFor(eventLabel, eventKey string) string {
+	if p.seedAnchorLabel == "" || eventKey == "" || eventLabel != p.seedAnchorLabel {
+		return ""
+	}
+	if p.actorEnumerator != nil || p.envelopeFn != nil || p.multiEnvelopeFn != nil {
+		return ""
+	}
+	if p.diffRetraction {
+		return ""
+	}
+	return eventKey
 }
 
 // plainReactsTo reports whether the plain aspect/link reprojection arms should

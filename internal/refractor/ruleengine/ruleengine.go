@@ -39,6 +39,20 @@ type EventContext struct {
 	// May be nil/empty — engines must tolerate missing maps and return a
 	// typed MissingParameterError when an unbound parameter is referenced.
 	Parameters map[string]any
+	// SeedAnchor narrows the evaluation to ONE anchor: the Core KV vertex key
+	// the query's anchor pattern — the first MATCH clause's first node — binds
+	// to, instead of scanning every vertex of that pattern's type. Set by a
+	// caller that knows the event is a mutation of the anchor itself, so the
+	// evaluation only needs to re-derive that anchor's own rows
+	// (refractor-footprint-reduction-design.md §D2).
+	//
+	// Empty (the zero value) means no seeding: the anchor pattern builds its
+	// candidate set by scan. An engine that cannot prove the
+	// seed key binds the anchor pattern (an unlabeled anchor, a label the key's
+	// own vertex type does not match, an anchor already carrying a `key`
+	// property) ignores it and scans, so a seed can only ever narrow an
+	// evaluation the caller has already proved narrowable.
+	SeedAnchor string
 }
 
 // MissingParameterError indicates a `$name` reference in the rule body was

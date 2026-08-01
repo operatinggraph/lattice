@@ -244,7 +244,7 @@ func TestExecuteFullForActor_MultiRowPerAnchor_GuardFires(t *testing.T) {
 	}
 
 	nodeProps := map[string]any{"lastModifiedAt": "2026-05-15T10:00:00Z"}
-	_, err = p.executeFullForActor(ctx, identityKey, nodeProps)
+	_, err = p.executeFullForActor(ctx, identityKey, nodeProps, "")
 	require.Error(t, err, "two open tasks must collide on the anchor-derived key — the guard must fire")
 	require.Equal(t, failure.CatTerminal, failure.Classify(err))
 	require.Contains(t, err.Error(), "roster.identity."+identityID)
@@ -293,7 +293,7 @@ func TestExecuteFullForActor_OneRowPerAnchor_NoGuard(t *testing.T) {
 	}
 
 	nodeProps := map[string]any{"lastModifiedAt": "2026-05-15T10:00:00Z"}
-	results, err := p.executeFullForActor(ctx, identityKey, nodeProps)
+	results, err := p.executeFullForActor(ctx, identityKey, nodeProps, "")
 	require.NoError(t, err, "a single matched task is one row per anchor — the guard must not fire")
 	require.Len(t, results, 1)
 	require.Equal(t, "roster.identity."+identityID, results[0].Keys["key"])

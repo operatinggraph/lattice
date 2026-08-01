@@ -234,22 +234,53 @@ func exprReferencesOnlyVariable(e Expr, allowed string) bool {
 	}
 }
 
-// anchorNode returns the variable + label of the first MATCH clause's first
-// node — the lens's anchor. ok is false when the query has no MATCH or its
-// first pattern carries no node (neither occurs for a compiled lens).
-func anchorNode(q *Query) (variable, label string, ok bool) {
+// AnchorLabel reports the vertex type of this rule's anchor — the label on the
+// first MATCH clause's first node pattern. It is the same derivation
+// AnchorProjectionKey/AnchorDeleteResult use to decide whether an event vertex
+// IS this rule's anchor, exposed for a caller that needs the label alone: the
+// pipeline's event-seeding eligibility (refractor-footprint-reduction-design.md
+// §D2) arms seeding only for events on this type.
+//
+// ok is false when the query has no MATCH clause, its first pattern carries no
+// node, or the anchor pattern is unlabeled — an unlabeled anchor binds any
+// vertex type, so no event type identifies it.
+func (cr *CompiledRule) AnchorLabel() (string, bool) {
+	if cr == nil || cr.Query == nil {
+		return "", false
+	}
+	n, found := anchorPattern(cr.Query)
+	if !found || n.Label == "" {
+		return "", false
+	}
+	return n.Label, true
+}
+
+// anchorPattern returns the first MATCH clause's first node pattern — the
+// lens's anchor, and the single derivation every anchor-scoped mechanism
+// shares (retraction key resolution, engine event seeding, the pipeline's
+// seeding eligibility). ok is false when the query has no MATCH or its first
+// pattern carries no node (neither occurs for a compiled lens).
+func anchorPattern(q *Query) (NodePattern, bool) {
 	for _, c := range q.Clauses {
 		m, isMatch := c.(*Match)
 		if !isMatch {
 			continue
 		}
 		if len(m.Patterns) == 0 || len(m.Patterns[0].Nodes) == 0 {
-			return "", "", false
+			return NodePattern{}, false
 		}
-		n := m.Patterns[0].Nodes[0]
-		return n.Variable, n.Label, true
+		return m.Patterns[0].Nodes[0], true
 	}
-	return "", "", false
+	return NodePattern{}, false
+}
+
+// anchorNode returns the variable + label of the lens's anchor pattern.
+func anchorNode(q *Query) (variable, label string, ok bool) {
+	n, found := anchorPattern(q)
+	if !found {
+		return "", "", false
+	}
+	return n.Variable, n.Label, true
 }
 
 // firstReturnItem returns the first projection item of the RETURN clause — the

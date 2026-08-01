@@ -163,7 +163,16 @@ func (p *Pipeline) evaluateForEntryRaw(ctx context.Context, entry ruleengine.Nod
 		}
 	}
 
-	results, err := p.executeFullForActor(ctx, entry.CoreKVKey, entry.Properties)
+	// An event on the anchor's own type narrows the evaluation to that one
+	// anchor (seedAnchorFor's contract); every other event — and every lens
+	// that is not seed-eligible — recomputes the lens's whole row set. This
+	// is the single seeding decision for all three plain arms:
+	// the vertex arm's entry IS the event vertex, and the aspect/link arms both
+	// reach here through evaluatePlainFromVertex with the owner/endpoint vertex
+	// as the entry, so each arm seeds precisely when its own vertex is an
+	// anchor.
+	results, err := p.executeFullForActor(ctx, entry.CoreKVKey, entry.Properties,
+		p.seedAnchorFor(entry.NodeLabel, entry.CoreKVKey))
 	if err != nil {
 		return nil, nil, err
 	}
@@ -221,9 +230,15 @@ const maxFootprintRetries = 1
 // executeFullForActorAttempt). nodeProps is the actor vertex's stored Core KV
 // body; it's used only to derive projectedAt (the engine itself always reads
 // the graph fresh, memoized per evaluation).
-func (p *Pipeline) executeFullForActor(ctx context.Context, actorKey string, nodeProps map[string]any) ([]ruleengine.EvalResult, error) {
+//
+// seedAnchor, when non-empty, narrows the evaluation's anchor pattern to that
+// one vertex instead of scanning its whole type (refractor-footprint-
+// reduction-design.md §D2). Only a caller that has proved the triggering event
+// is a mutation of that anchor may pass it — pipeline.seedAnchorFor is that
+// proof; "" is always the safe, whole-row-set evaluation.
+func (p *Pipeline) executeFullForActor(ctx context.Context, actorKey string, nodeProps map[string]any, seedAnchor string) ([]ruleengine.EvalResult, error) {
 	start := time.Now()
-	results, err := p.executeFullForActorAttempt(ctx, actorKey, nodeProps, 0)
+	results, err := p.executeFullForActorAttempt(ctx, actorKey, nodeProps, seedAnchor, 0)
 	if err != nil {
 		return nil, err
 	}
@@ -259,8 +274,8 @@ func (p *Pipeline) executeFullForActor(ctx context.Context, actorKey string, nod
 // rows" (design §4.3). The caller's existing transient-failure handling
 // (dispositionEvalErr's retry-enqueue, the sweep's repair-failure accounting)
 // takes it from there.
-func (p *Pipeline) executeFullForActorAttempt(ctx context.Context, actorKey string, nodeProps map[string]any, attempt int) ([]ruleengine.EvalResult, error) {
-	results, footprint, err := p.executeFullForActorOnce(ctx, actorKey, nodeProps)
+func (p *Pipeline) executeFullForActorAttempt(ctx context.Context, actorKey string, nodeProps map[string]any, seedAnchor string, attempt int) ([]ruleengine.EvalResult, error) {
+	results, footprint, err := p.executeFullForActorOnce(ctx, actorKey, nodeProps, seedAnchor)
 	if err != nil {
 		return nil, err
 	}
@@ -297,7 +312,7 @@ func (p *Pipeline) executeFullForActorAttempt(ctx context.Context, actorKey stri
 	if ferr != nil {
 		return nil, fmt.Errorf("pipeline: re-fetch %q after drift: %w", actorKey, ferr)
 	}
-	return p.executeFullForActorAttempt(ctx, actorKey, freshProps, attempt+1)
+	return p.executeFullForActorAttempt(ctx, actorKey, freshProps, seedAnchor, attempt+1)
 }
 
 // needsFootprintValidation reports whether this pipeline's evaluations must
@@ -430,7 +445,7 @@ func (p *Pipeline) currentNodeRevision(ctx context.Context, key string) (uint64,
 // executeFullForActor so the footprint-validation retry
 // (executeFullForActorAttempt) can re-run exactly this step against fresh
 // state without duplicating the envelope/collision-guard/retraction logic.
-func (p *Pipeline) executeFullForActorOnce(ctx context.Context, actorKey string, nodeProps map[string]any) ([]ruleengine.EvalResult, ruleengine.EvalFootprint, error) {
+func (p *Pipeline) executeFullForActorOnce(ctx context.Context, actorKey string, nodeProps map[string]any, seedAnchor string) ([]ruleengine.EvalResult, ruleengine.EvalFootprint, error) {
 	now := time.Now().UTC()
 	projectedAt, perr := projectedAtFromProvenance(nodeProps)
 	if perr != nil {
@@ -441,7 +456,7 @@ func (p *Pipeline) executeFullForActorOnce(ctx context.Context, actorKey string,
 		"now":         now.Format(time.RFC3339),
 		"projectedAt": projectedAt,
 	}
-	out, footprint, err := p.executeBranches(ctx, actorKey, nodeProps, params)
+	out, footprint, err := p.executeBranches(ctx, actorKey, nodeProps, params, seedAnchor)
 	if err != nil {
 		return nil, ruleengine.EvalFootprint{}, err
 	}
@@ -866,7 +881,10 @@ func (p *Pipeline) reprojectActors(ctx context.Context, actorKeys []string) ([]r
 			})
 			continue
 		}
-		res, err := p.executeFullForActor(ctx, actorKey, entryProps)
+		// Never seeded: an actor reprojection re-derives that actor's whole
+		// capability set from its own vertex, which is not an anchor-labeled
+		// CDC event and carries no proof that only one anchor's rows moved.
+		res, err := p.executeFullForActor(ctx, actorKey, entryProps, "")
 		if err != nil {
 			return nil, err
 		}
