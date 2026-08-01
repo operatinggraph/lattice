@@ -48,11 +48,11 @@ func TestShredStatusLens_ProjectsOnlyShreddedIdentities(t *testing.T) {
 	adjKV, coreKV := lenstest.KVs(t)
 
 	// In-flight shred: shredded, neither finalization step recorded yet.
-	inflightKey := putShredVtx(t, coreKV, "AAshredInFlightAAAAA", map[string]any{
+	inflightKey := putShredVtx(t, coreKV, "AAshredPendingAAAAAA", map[string]any{
 		"wrappedDEK": "abc", "shredded": true, "shreddedAt": "2026-07-02T10:10:00Z",
 	})
 	// Fully finalized shred: both steps recorded.
-	doneKey := putShredVtx(t, coreKV, "AAshredFinalizedAAAA", map[string]any{
+	doneKey := putShredVtx(t, coreKV, "AAshredFinishedAAAAA", map[string]any{
 		"wrappedDEK": "def", "shredded": true, "shreddedAt": "2026-07-02T10:11:00Z",
 		"vaultKeyDestroyed": true, "vaultKeyDestroyedAt": "2026-07-02T10:12:00Z",
 		"projectionsNullified": true, "projectionsNullifiedAt": "2026-07-02T10:13:00Z",
@@ -100,12 +100,12 @@ func TestShredStatusLens_ProjectsOnlyShreddedIdentities(t *testing.T) {
 func TestPiiKeyEnvelopeLens_ProjectsOnlyIdentitiesWithAnEnvelope(t *testing.T) {
 	adjKV, coreKV := lenstest.KVs(t)
 
-	realKey := putShredVtx(t, coreKV, "AArealEnvelopeAAAAAA", map[string]any{
-		"wrappedDEK": "d2FyID09PT0=", "keyId": "vtx.identity.AArealEnvelopeAAAAAA",
+	realKey := putShredVtx(t, coreKV, "AArea1Enve1opeAAAAAA", map[string]any{
+		"wrappedDEK": "d2FyID09PT0=", "keyId": "vtx.identity.AArea1Enve1opeAAAAAA",
 		"kekVersion": "v1", "alg": "AES-256-GCM", "shredded": false,
 	})
-	placeholderKey := putShredVtx(t, coreKV, "AAplaceholderAAAAAAA", map[string]any{
-		"wrappedDEK": "", "keyId": "vtx.identity.AAplaceholderAAAAAAA",
+	placeholderKey := putShredVtx(t, coreKV, "AAp1aceho1derAAAAAAA", map[string]any{
+		"wrappedDEK": "", "keyId": "vtx.identity.AAp1aceho1derAAAAAAA",
 		"kekVersion": "", "alg": "", "shredded": true,
 	})
 	putShredVtx(t, coreKV, "AAnoPiiKeyAAAAAAAAAA", nil)

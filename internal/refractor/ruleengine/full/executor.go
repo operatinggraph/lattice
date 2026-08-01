@@ -516,7 +516,10 @@ func (ex *executor) propsAllMatch(b binding, ref *nodeRef, n NodePattern) (bool,
 
 // seedNodes returns all Core KV vertices matching n's label + properties.
 // For property predicates that include "key" with a literal/parameter, we
-// short-circuit to a point lookup. Otherwise we scan the bucket and filter.
+// short-circuit to a point lookup. Otherwise we list candidates — a labeled
+// pattern via a server-side "vtx.<label>." prefix filter bounded by that
+// type's own vertex count, an unlabeled one via the whole bucket since any
+// type may bind it — then filter by shape, label, and properties.
 func (ex *executor) seedNodes(b binding, n NodePattern) ([]*nodeRef, error) {
 	// Fast path: property "key" with a resolvable expression → point read.
 	if keyExpr, ok := n.Properties["key"]; ok {
@@ -548,20 +551,44 @@ func (ex *executor) seedNodes(b binding, n NodePattern) ([]*nodeRef, error) {
 		return []*nodeRef{ref}, nil
 	}
 
-	// Generic path: scan the Core KV bucket. Filters by label first when set.
-	// A list failure MUST surface, not degrade to zero seeds: downstream, the
+	// Generic path: list candidates, then filter by shape, label, and
+	// properties. A labeled pattern only ever binds vertices of that exact
+	// type, so listing is scoped to the "vtx.<label>." prefix — a
+	// server-side JetStream subject filter (ListKeysPrefix) bounded by that
+	// type's own vertex count — instead of every key in the bucket; an
+	// unlabeled pattern can bind any type and still lists everything. A list
+	// failure MUST surface, not degrade to zero seeds: downstream, the
 	// filter-retraction presence check treats an anchor's absence from the
 	// derived row set as authoritative and emits a Delete, so a swallowed
 	// error here would retract live rows on a transient substrate blip. An
-	// empty bucket returns an empty slice with no error and seeds nothing.
-	keys, err := ex.coreKV.ListKeys(ex.ctx)
+	// empty bucket/prefix returns an empty slice with no error and seeds
+	// nothing.
+	var keys []string
+	var err error
+	if n.Label != "" {
+		keys, err = ex.coreKV.ListKeysPrefix(ex.ctx, substrate.VertexPrefix+"."+n.Label+".")
+	} else {
+		keys, err = ex.coreKV.ListKeys(ex.ctx)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("full engine: seed scan: %w", err)
 	}
 	var refs []*nodeRef
 	for _, k := range keys {
-		// Filter early when key is a Contract #1 shape: only KindVertex.
-		if cls := substrate.ClassifyKey(k); cls != substrate.KindVertex && cls != substrate.KindUnknown {
+		cls := substrate.ClassifyKey(k)
+		if n.Label != "" {
+			// The label-scoped prefix also matches 4-segment aspect keys
+			// sharing the same string prefix (vtx.<label>.<id>.<localName>)
+			// and, for a malformed id, a KindUnknown key that merely starts
+			// with the right tokens — only a true vertex key is a candidate.
+			if cls != substrate.KindVertex {
+				continue
+			}
+		} else if cls != substrate.KindVertex && cls != substrate.KindUnknown {
+			// The whole-bucket scan additionally admits KindUnknown: an
+			// unlabeled pattern matches any key shape nodeMatches accepts,
+			// including a non-Contract#1 key carrying a matching body
+			// "class"/"label" property.
 			continue
 		}
 		ref, err := ex.fetchNode(k)

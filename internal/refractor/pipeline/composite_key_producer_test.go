@@ -37,7 +37,7 @@ func TestEvaluateForEntry_CompositeKeyProducer_DeliversAllKeyColumns(t *testing.
 	coreKV, adjKV, _ := newCollisionKVs(t)
 	ctx := context.Background()
 
-	const identityID = "Tidentity01aaaaaaaaa"
+	const identityID = "Tidentity91aaaaaaaaa"
 	identityKey := "vtx.identity." + identityID
 	writeCollisionVertex(t, coreKV, identityKey, "identity", map[string]any{"name": "alice"})
 
