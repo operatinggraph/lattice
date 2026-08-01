@@ -203,10 +203,10 @@ A new adapter `internal/refractor/adapter/natssubject.go` implementing the 4-met
   ```json
   {
     "op": "upsert",
-    "key": "vtx.lease.Op4Nb2mPq6rTwzKxVyP7.terms",
+    "key": "vtx.lease.op4Nb2mPq6rTwzKxVyP7.terms",
     "kind": "aspect",
     "class": "lease.terms",
-    "anchor": "lease.Op4Nb2mPq6rTwzKxVyP7",
+    "anchor": "lease.op4Nb2mPq6rTwzKxVyP7",
     "revision": 10481,
     "projectionSeq": 10481,
     "encrypted": false,

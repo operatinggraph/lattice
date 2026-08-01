@@ -198,7 +198,7 @@ reverse-traversal invalidation, the `projectionSeq` guard, the soft-tombstone, a
     "readableAnchors": [
       { "anchorType": "identity", "anchorId": "Hj4kPmRtw9nbCxz5vQ2y", "via": ["self"] },
       { "anchorType": "unit",     "anchorId": "Lk2Pn6mQrtwzKbcXvP3T", "via": ["residesIn"] },
-      { "anchorType": "lease",    "anchorId": "Op4Nb2mPq6rTwzKxVyP7", "via": ["leases"] }
+      { "anchorType": "lease",    "anchorId": "op4Nb2mPq6rTwzKxVyP7", "via": ["leases"] }
     ]
   }
   ```
