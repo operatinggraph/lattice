@@ -46,6 +46,20 @@ const lensSourceDurablePrefix = "refractor-lens-source"
 // The callback is called outside the source's mutex, after the rule is indexed and ACK'd.
 type UpdateCallback func(old, new *Rule, kind UpdateKind)
 
+// RemoveCallback is called when a previously-loaded rule is tombstoned — its
+// parent vtx.meta.<id> vertex deleted, or its .spec aspect deleted
+// (docs/components/refractor.md's Lens lifecycle step 9). old is the last-loaded
+// snapshot of the removed rule.
+//
+// Only ever called for an ID that previously reached the load callback — a
+// tombstone for an ID CoreKVSource never successfully loaded (a buffered
+// pending spec, or a spec that failed translateSpec) has nothing to tear down
+// and is not reported. Never called for a spec UPDATE (see UpdateCallback):
+// handle only invokes this from the two IsDeleted branches, dispatchSpec's
+// update path invokes UpdateCallback instead, so the two cannot be confused
+// structurally. Called outside the source's mutex, mirroring UpdateCallback.
+type RemoveCallback func(old *Rule)
+
 // CoreKVSource is the lens-definition source. It subscribes to Core KV under
 // `vtx.meta.>` via a Lattice-native durable JetStream consumer
 // (substrate.SubscribeKVChanges) and routes only those updates whose envelope
@@ -67,6 +81,7 @@ type CoreKVSource struct {
 	instance string
 	loadCB   func(*Rule)
 	updateCB UpdateCallback
+	removeCB RemoveCallback
 	logger   *slog.Logger
 	mu       sync.RWMutex
 	known    map[string]*Rule // lensId → last-loaded Rule
@@ -345,6 +360,10 @@ func (s *CoreKVSource) SetLoadCallback(fn func(*Rule)) { s.loadCB = fn }
 // SetUpdateCallback registers the update callback. Must be set before Start.
 func (s *CoreKVSource) SetUpdateCallback(fn UpdateCallback) { s.updateCB = fn }
 
+// SetRemoveCallback registers the removal (tombstone) callback. Must be set
+// before Start.
+func (s *CoreKVSource) SetRemoveCallback(fn RemoveCallback) { s.removeCB = fn }
+
 // Get returns the last-loaded Rule for ruleID and whether it was found.
 // Satisfies the control.RuleGetter interface so the validate control op can
 // inspect the active rule state without importing internal/lens.
@@ -454,12 +473,15 @@ func (s *CoreKVSource) handle(evt substrate.KVEvent) {
 		if evt.IsDeleted {
 			s.mu.Lock()
 			delete(s.lensVertices, lensID)
-			_, existed := s.known[lensID]
+			old, existed := s.known[lensID]
 			delete(s.known, lensID)
 			delete(s.pendingSpecs, lensID)
 			s.mu.Unlock()
 			if existed {
 				s.logger.Info("lens removed", "lensId", lensID)
+				if s.removeCB != nil {
+					s.removeCB(old)
+				}
 			}
 			return
 		}
@@ -497,12 +519,15 @@ func (s *CoreKVSource) handle(evt substrate.KVEvent) {
 		if evt.IsDeleted {
 			// Spec deletion = lens removed.
 			s.mu.Lock()
-			_, existed := s.known[lensID]
+			old, existed := s.known[lensID]
 			delete(s.known, lensID)
 			delete(s.pendingSpecs, lensID)
 			s.mu.Unlock()
 			if existed {
 				s.logger.Info("lens removed (spec deleted)", "lensId", lensID)
+				if s.removeCB != nil {
+					s.removeCB(old)
+				}
 			}
 			return
 		}

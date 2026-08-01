@@ -100,8 +100,13 @@ type Rebuilder interface {
 
 // Deleter is implemented by any component that can cleanly stop a rule and remove
 // its associated NATS resources. Typically implemented as an orchestrator closure that:
-//  1. Cancels the pipeline's run context and waits for Run() to return.
-//  2. Removes the rule's durable consumer (the pipeline's supervisor owns it).
+//  1. Removes the rule's durable consumer (the pipeline's supervisor owns it) —
+//     BEFORE cancelling the run context: Pipeline.Run's own shutdown stops its
+//     supervisor, which clears the supervisor's managed-consumer registry
+//     without deleting anything (a durable's persisted position is the point
+//     of its durability), so removing the durable after that point silently
+//     no-ops and leaves it stranded.
+//  2. Cancels the pipeline's run context and waits for Run() to return.
 //  3. Calls health.Reporter.Delete(ctx) to remove the health KV entry.
 //
 // Defined here so internal/control does not import internal/pipeline (architecture boundary).
@@ -426,8 +431,11 @@ func (s *Service) Register(ruleID string, r Resumer, reporter *health.Reporter) 
 }
 
 // Unregister removes all registry entries (Resumer, Pauser, Rebuilder, Deleter,
-// RowNullifier, RowSetNullifier, Reporter) for ruleID. No-op for any map that
-// does not contain ruleID.
+// RowNullifier, RowSetNullifier, Reporter, Reprojector, personal Hydrator) for
+// ruleID. No-op for any map that does not contain ruleID. The Hydrator entry
+// matters beyond hygiene: the "hydrate" op fans out to every registered
+// personal pipeline, so a deleted lens left registered would fail whole
+// hydrate calls against its cancelled pipeline.
 func (s *Service) Unregister(ruleID string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -438,6 +446,8 @@ func (s *Service) Unregister(ruleID string) {
 	delete(s.rowNullifierByRuleID, ruleID)
 	delete(s.rowSetNullifierByRuleID, ruleID)
 	delete(s.reporters, ruleID)
+	delete(s.reprojectorByRuleID, ruleID)
+	delete(s.personalHydratorByRuleID, ruleID)
 }
 
 // RegisterRebuilder records a Rebuilder for the given ruleID.

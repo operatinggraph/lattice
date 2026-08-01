@@ -1007,6 +1007,12 @@ func main() {
 		controlSvc.RegisterRebuilder(r.ID, p)
 		controlSvc.RegisterRowNullifier(r.ID, p)
 		controlSvc.RegisterRowSetNullifier(r.ID, p)
+		// Every lens, regardless of kind, has a pipeline + durable consumer +
+		// health entry to tear down — the operator "delete" control RPC
+		// (control.Service.deleteRule) dispatches to this. remover.remove
+		// (below) drives the SAME pipelineDeleter automatically on a Core KV
+		// tombstone, so the two triggers share one removal mechanism.
+		controlSvc.RegisterDeleter(r.ID, pipelineDeleter{ruleID: r.ID, entry: entry})
 		// Per-actor reconciliation is defined only for actor-aggregate lenses
 		// (capability-projection-reconciliation-design.md §3.1); the pipeline
 		// refuses structurally besides, so the registry is the routing gate
@@ -1035,12 +1041,31 @@ func main() {
 		return entry, ok
 	}
 
+	// takeEntry looks up and removes a registry entry in the same locked
+	// step (single-flight against a redelivered or double tombstone) — the
+	// remover's counterpart to lookupEntry's read-only lookup.
+	takeEntry := func(lensID string) (*pipelineEntry, bool) {
+		mu.Lock()
+		defer mu.Unlock()
+		entry, ok := registry[lensID]
+		if ok {
+			delete(registry, lensID)
+		}
+		return entry, ok
+	}
+
 	rl := &reloader{
 		ctx:          ctx,
 		logger:       logger,
 		lookup:       lookupEntry,
 		buildAdapter: buildRuleAdapter,
 		fullEngine:   fullEngine,
+	}
+
+	rm := &remover{
+		logger:     logger,
+		take:       takeEntry,
+		unregister: controlSvc.Unregister,
 	}
 
 	// Wait for adjacency bootstrap before activating any lens.
@@ -1063,6 +1088,7 @@ func main() {
 		}
 	})
 	src.SetUpdateCallback(rl.update)
+	src.SetRemoveCallback(rm.remove)
 	controlSvc.SetRuleGetter(src)
 	if err := src.Start(ctx); err != nil {
 		logger.Error("start core kv lens source", "err", err)

@@ -1581,6 +1581,38 @@ func (p *Pipeline) Resume(ctx context.Context) {
 	p.supervisor.Resume(ctx, p.consumerCfg.Name)
 }
 
+// RemoveConsumer stops this pipeline's supervised consumer and deletes its
+// server-side durable — the JetStream state a lens tombstone or an operator
+// "delete" must not strand (docs/components/refractor.md's Lens lifecycle
+// step 9; control.Deleter). Waits (briefly) for Run to have registered the
+// consumer first — the same awaitStarted race guard Pause/Resume use — so a
+// removal issued in the narrow window right after Run starts is not silently
+// dropped. No-op if the consumer never started or RunOn was never called.
+//
+// MUST be called BEFORE the pipeline's run context is cancelled. Run's own
+// shutdown calls the supervisor's Stop on ctx.Done, and Stop — by substrate
+// doctrine — clears the supervisor's managed-consumer registry WITHOUT
+// deleting anything (a durable's persisted ack floor is the point of its
+// durability). A removal attempted after that point finds nothing registered
+// and silently no-ops, leaving the durable stranded — exactly the leak this
+// method exists to close. Calling it first, while Run is still alive and the
+// supervisor's registry still holds the entry, avoids that; the supervisor's
+// Remove already stops the pump before deleting the durable, so no live pull
+// loop is fetching against a consumer that is about to disappear (no
+// delete-out-from-under-a-live-loop error noise).
+//
+// Safe to call from any goroutine; idempotent — removing an already-gone
+// consumer is a no-op, matching every other substrate Delete*/Remove call.
+func (p *Pipeline) RemoveConsumer(ctx context.Context) error {
+	if p.supervisor == nil {
+		return nil
+	}
+	if !p.awaitStarted(ctx) {
+		return nil
+	}
+	return p.supervisor.Remove(ctx, p.consumerCfg.Name)
+}
+
 // Delete removes this rule's projected row for keys, via the currently-active
 // adapter (adapter.Delete — the same hard/soft-delete path a vertex tombstone
 // takes, adapter/postgres.go and adapter/natskv.go). Used by the Refractor

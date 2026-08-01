@@ -94,6 +94,214 @@ func TestCoreKVSource_LoadsLensFromAspect(t *testing.T) {
 	}, 3*time.Second, 50*time.Millisecond, "update callback not invoked")
 }
 
+// TestCoreKVSource_VertexTombstone_FiresRemoveCallback verifies that deleting
+// a lens's parent vtx.meta.<id> vertex fires the removal callback exactly
+// once, with the last-loaded Rule, and that CoreKVSource no longer serves the
+// lens afterward (docs/components/refractor.md's Lens lifecycle step 9).
+func TestCoreKVSource_VertexTombstone_FiresRemoveCallback(t *testing.T) {
+	s := natsfixture.StartServer(t)
+
+	nc := natsfixture.Connect(t, s.ClientURL())
+	defer nc.Close()
+
+	conn, err := substrate.Wrap(nc)
+	require.NoError(t, err)
+	defer conn.Close()
+
+	js, err := jetstream.New(nc)
+	require.NoError(t, err)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	kv, err := js.CreateKeyValue(ctx, jetstream.KeyValueConfig{Bucket: "core-kv"})
+	require.NoError(t, err)
+
+	src := lens.NewCoreKVSource(conn, "core-kv", "test", slog.New(slog.NewTextHandler(os.Stderr, nil)))
+	loaded := make(chan *lens.Rule, 4)
+	src.SetLoadCallback(func(r *lens.Rule) { loaded <- r })
+	src.SetUpdateCallback(func(_, _ *lens.Rule, _ lens.UpdateKind) {})
+	removed := make(chan *lens.Rule, 4)
+	src.SetRemoveCallback(func(old *lens.Rule) { removed <- old })
+	require.NoError(t, src.Start(ctx))
+
+	vtxKey := "vtx.meta.VtxTombstoneLensAA11"
+	require.NoError(t, putJSON(ctx, kv, vtxKey, map[string]any{"id": "VtxTombstoneLensAA11", "class": "meta.lens"}))
+	spec := lens.LensSpec{
+		ID:            "VtxTombstoneLensAA11",
+		CanonicalName: "lens.vertex-tombstone",
+		TargetType:    "nats_kv",
+		CypherRule:    "MATCH (c:contract) RETURN c.id AS contract_id",
+		TargetConfig:  json.RawMessage(`{"bucket":"vertex_tombstone_view","key":["contract_id"]}`),
+	}
+	specJSON, err := json.Marshal(spec)
+	require.NoError(t, err)
+	require.NoError(t, putJSON(ctx, kv, vtxKey+".spec", specJSON))
+
+	select {
+	case r := <-loaded:
+		require.Equal(t, "VtxTombstoneLensAA11", r.ID)
+	case <-time.After(3 * time.Second):
+		t.Fatal("load callback not invoked within 3s")
+	}
+
+	// Tombstone the parent vertex.
+	require.NoError(t, kv.Delete(ctx, vtxKey))
+
+	select {
+	case old := <-removed:
+		require.Equal(t, "VtxTombstoneLensAA11", old.ID)
+		require.Equal(t, "lens.vertex-tombstone", old.CanonicalName)
+	case <-time.After(3 * time.Second):
+		t.Fatal("remove callback not invoked within 3s of the vertex tombstone")
+	}
+
+	_, ok := src.Get("VtxTombstoneLensAA11")
+	require.False(t, ok, "CoreKVSource must no longer serve a tombstoned lens")
+}
+
+// TestCoreKVSource_SpecTombstone_FiresRemoveCallback verifies the second of
+// the two tombstone shapes step 9 describes: deleting only the .spec aspect
+// (parent vertex left in place) also fires the removal callback.
+func TestCoreKVSource_SpecTombstone_FiresRemoveCallback(t *testing.T) {
+	s := natsfixture.StartServer(t)
+
+	nc := natsfixture.Connect(t, s.ClientURL())
+	defer nc.Close()
+
+	conn, err := substrate.Wrap(nc)
+	require.NoError(t, err)
+	defer conn.Close()
+
+	js, err := jetstream.New(nc)
+	require.NoError(t, err)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	kv, err := js.CreateKeyValue(ctx, jetstream.KeyValueConfig{Bucket: "core-kv"})
+	require.NoError(t, err)
+
+	src := lens.NewCoreKVSource(conn, "core-kv", "test", slog.New(slog.NewTextHandler(os.Stderr, nil)))
+	loaded := make(chan *lens.Rule, 4)
+	src.SetLoadCallback(func(r *lens.Rule) { loaded <- r })
+	src.SetUpdateCallback(func(_, _ *lens.Rule, _ lens.UpdateKind) {})
+	removed := make(chan *lens.Rule, 4)
+	src.SetRemoveCallback(func(old *lens.Rule) { removed <- old })
+	require.NoError(t, src.Start(ctx))
+
+	vtxKey := "vtx.meta.SpecTombstonLensAA11"
+	require.NoError(t, putJSON(ctx, kv, vtxKey, map[string]any{"id": "SpecTombstonLensAA11", "class": "meta.lens"}))
+	spec := lens.LensSpec{
+		ID:            "SpecTombstonLensAA11",
+		CanonicalName: "lens.spec-tombstone",
+		TargetType:    "nats_kv",
+		CypherRule:    "MATCH (c:contract) RETURN c.id AS contract_id",
+		TargetConfig:  json.RawMessage(`{"bucket":"spec_tombstone_view","key":["contract_id"]}`),
+	}
+	specJSON, err := json.Marshal(spec)
+	require.NoError(t, err)
+	require.NoError(t, putJSON(ctx, kv, vtxKey+".spec", specJSON))
+
+	select {
+	case r := <-loaded:
+		require.Equal(t, "SpecTombstonLensAA11", r.ID)
+	case <-time.After(3 * time.Second):
+		t.Fatal("load callback not invoked within 3s")
+	}
+
+	// Tombstone the spec aspect only — the parent vertex is left in place.
+	require.NoError(t, kv.Delete(ctx, vtxKey+".spec"))
+
+	select {
+	case old := <-removed:
+		require.Equal(t, "SpecTombstonLensAA11", old.ID)
+	case <-time.After(3 * time.Second):
+		t.Fatal("remove callback not invoked within 3s of the spec tombstone")
+	}
+
+	_, ok := src.Get("SpecTombstonLensAA11")
+	require.False(t, ok, "CoreKVSource must no longer serve a lens whose spec was tombstoned")
+}
+
+// TestCoreKVSource_SpecUpdate_DoesNotFireRemoveCallback proves the update and
+// removal paths cannot be confused: an in-place spec UPDATE (a live PUT, not
+// a tombstone — the package-upgrade hot-reload path) must fire the update
+// callback and must NEVER fire the removal callback. A lens definition edited
+// in place is not the lens being uninstalled.
+func TestCoreKVSource_SpecUpdate_DoesNotFireRemoveCallback(t *testing.T) {
+	s := natsfixture.StartServer(t)
+
+	nc := natsfixture.Connect(t, s.ClientURL())
+	defer nc.Close()
+
+	conn, err := substrate.Wrap(nc)
+	require.NoError(t, err)
+	defer conn.Close()
+
+	js, err := jetstream.New(nc)
+	require.NoError(t, err)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	kv, err := js.CreateKeyValue(ctx, jetstream.KeyValueConfig{Bucket: "core-kv"})
+	require.NoError(t, err)
+
+	src := lens.NewCoreKVSource(conn, "core-kv", "test", slog.New(slog.NewTextHandler(os.Stderr, nil)))
+	loaded := make(chan *lens.Rule, 4)
+	src.SetLoadCallback(func(r *lens.Rule) { loaded <- r })
+	updated := make(chan *lens.Rule, 4)
+	src.SetUpdateCallback(func(_, n *lens.Rule, _ lens.UpdateKind) { updated <- n })
+	removed := make(chan *lens.Rule, 4)
+	src.SetRemoveCallback(func(old *lens.Rule) { removed <- old })
+	require.NoError(t, src.Start(ctx))
+
+	vtxKey := "vtx.meta.SpecUpdatNoRemoveAA1"
+	require.NoError(t, putJSON(ctx, kv, vtxKey, map[string]any{"id": "SpecUpdatNoRemoveAA1", "class": "meta.lens"}))
+	spec := lens.LensSpec{
+		ID:            "SpecUpdatNoRemoveAA1",
+		CanonicalName: "lens.spec-update-no-remove",
+		TargetType:    "nats_kv",
+		CypherRule:    "MATCH (c:contract) RETURN c.id AS contract_id",
+		TargetConfig:  json.RawMessage(`{"bucket":"spec_update_no_remove_view","key":["contract_id"]}`),
+	}
+	specJSON, err := json.Marshal(spec)
+	require.NoError(t, err)
+	require.NoError(t, putJSON(ctx, kv, vtxKey+".spec", specJSON))
+
+	select {
+	case r := <-loaded:
+		require.Equal(t, "SpecUpdatNoRemoveAA1", r.ID)
+	case <-time.After(3 * time.Second):
+		t.Fatal("load callback not invoked within 3s")
+	}
+
+	// A MATCH-changing update (package upgrade editing the spec in place) —
+	// still a live PUT, never a tombstone.
+	spec.CypherRule = "MATCH (c:contract) RETURN c.id AS contract_id, c.name AS name"
+	specJSON, err = json.Marshal(spec)
+	require.NoError(t, err)
+	require.NoError(t, putJSON(ctx, kv, vtxKey+".spec", specJSON))
+
+	select {
+	case r := <-updated:
+		require.Equal(t, "SpecUpdatNoRemoveAA1", r.ID)
+	case <-time.After(3 * time.Second):
+		t.Fatal("update callback not invoked within 3s")
+	}
+
+	select {
+	case old := <-removed:
+		t.Fatalf("remove callback must not fire for a spec update, got lensId %q", old.ID)
+	case <-time.After(300 * time.Millisecond):
+		// Expected: nothing arrives.
+	}
+
+	_, ok := src.Get("SpecUpdatNoRemoveAA1")
+	require.True(t, ok, "CoreKVSource must still serve a lens that was updated, not removed")
+}
+
 // TestCoreKVSource_LoadsLensFromAspect_SpecBeforeParent verifies the
 // spec-before-parent buffering path: CDC ordering is not guaranteed, so a
 // `.spec` aspect can arrive before its `vtx.meta.<id>` parent vertex. The
