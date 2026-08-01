@@ -1,6 +1,10 @@
 # Done log archive — lattice (older shipped items, newest first)
 
 
+- 2026-07-30 · `3deda37c` · [Refractor] Postgres GrantTable cap-read producers now shred-nullified — closes Fire 4's first residual [design §Fire 5](../../implementation-artifacts/cap-read-per-anchor-grant-keys-design.md)
+- 2026-07-30 · `da1eb1b6` · [Refractor] actor enumeration now hops `reportsTo` once (directional, non-recursive) so a manager's `cap.ephemeral.*` refreshes on a report's task mutation, matching capabilityEphemeral's fixed 2-hop cypher
+- 2026-07-30 · `7628070e` · [Bootstrap] VerifyKernel now compares kernel content, not just presence/shape — closes the gap where `bootstrap verify` (and the `up` target's reuse short-circuit) passed a stale kernel clean
+- 2026-07-30 · `60778733` · [Refractor] a Personal lens's KeyColumns now threads onto every compiled branch, not just branch 0 — fixes the live `key field "ns" absent from keys map` write failures (edgeCatalog/edgeTasks/edgeEntitySessions)
 - 2026-07-30 · `a43f9fcf` · [Refractor] a walk-owned column's own multi-row fan-out (multi-hat actor, 2+ roles reaching one op) now resolves deterministically per owner branch instead of refusing the merge
 - 2026-07-30 · `de806ee4` · [Refractor] an accepted MATCH hot-reload now triggers Pipeline.Rebuild, reprojecting the existing corpus instead of only future events
 - 2026-07-29 · `9d5e2348` · [Refractor] shared-keyspace composition (d) — tasks merged into one multi-walk lens, verified live [design §17](../../implementation-artifacts/refractor-shared-keyspace-arbitration-design.md)

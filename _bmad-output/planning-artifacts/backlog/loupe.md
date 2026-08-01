@@ -67,6 +67,7 @@ buildable-first; F11–F13 gated on lattice cross-lane asks (§6 there).
 
 One line per shipped item (`date · SHA · [tag] title`). Oldest roll to `archive/` past ~25.
 
+- 2026-08-01 · `f73d8928` · [Loupe/Lens] Contents panel scopes to the lens's own key prefix (shared buckets stop showing sibling rows) and badges guarded soft-tombstones as retracted
 - 2026-07-30 · `7984e32c` · [Loupe/Flows] Retry button wired to Loom's redrive — the second (and last) of the two 2026-07-25 act-on-it rows; `#/flows` is no longer read-only
 - 2026-07-30 · `2edba1f3` · [Loupe/Edge] gapped device panel gets its one write action — "Request hydration on next attach", the lattice cross-lane primitive's console consumer. Lead self-review
 - 2026-07-25 · `6ac1523e` · [Loupe/F24.1+F24.2] Edge fleet triage — worst-first order, retention headroom in messages + time, in-place Interest Set, `#/edge/<key>` device panel. 3-layer review fixed forward, live-verified
