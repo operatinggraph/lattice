@@ -1,6 +1,14 @@
 # Done log archive — lattice (older shipped items, newest first)
 
 
+- 2026-07-29 · `bcf52101` · [Refractor] shared-keyspace composition (b) — sessions merged into one multi-walk lens, verified live [design §15](../../implementation-artifacts/refractor-shared-keyspace-arbitration-design.md)
+- 2026-07-29 · `69119818` · [Refractor] shared-keyspace composition (a) — N branches per multi-walk lens, merged by key [design §14](../../implementation-artifacts/refractor-shared-keyspace-arbitration-design.md)
+- 2026-07-29 · `c80bfa00` · [Refractor] evaluation-consistency Fire 1 Inc 2 — conjunct-unit classifier + selector-scoped footprint, fan-in stress test [design §14](../../implementation-artifacts/refractor-evaluation-consistency-design.md)
+- 2026-07-29 · `2177c60d` · [Bootstrap] the 5 aspect-type meta roots now carry `data.protected: true`, closing the commit-time guard gap [kernel-seed-reconcile-design](../../implementation-artifacts/kernel-seed-reconcile-design.md) §5 named
+- 2026-07-28 · `3aa45a5a` · [Refractor] every package-generated cap-read.* NATS-KV producer is now shred-nullified — dynamic TargetLister discovers by declared descriptor field, static base-lens floor keeps a boot-window regression closed
+- 2026-07-28 · `533a0b71` · [Edge] hydrationComplete boot-gate now matches the hydrate RPC's own target revision, not the first (possibly stale-replayed) marker seen
+- 2026-07-28 · `6c720482` · [chronicler,orchestration-base] eventStream ColumnMapping gains ClearOn — a Loom re-dispatch's patternStarted no longer carries the prior run's ended_at/failure_reason onto the new running row
+- 2026-07-28 · `c08c28be` · [Processor] sensitive predicate now covers instanceOf-chained classes; pkgmgr rejects Sensitive on a non-aspectType DDL, closing the link/event gap by construction
 - 2026-07-28 · `ea3f3852` · [Refractor] evaluation-consistency Fire 1 Inc 1 — edge memo + node/edge revisions, the footprint-validation primitives; item continues 🏗️
 - 2026-07-28 · `e8fee3b0` · [Processor] script live-read budget — kv.Read/kv.Links share a per-execution round-trip ceiling (charged at the clamped page limit, race-safe), sized + pinned against MergeIdentity's own worst case
 - 2026-07-28 · `76c9629e` · [cap-read] Fire 3 legacy-shape purge — one-shot tool tombstones any surviving legacy doc, IsReadable drops the dual-read union; item closes (Fires 1-3 all shipped)
