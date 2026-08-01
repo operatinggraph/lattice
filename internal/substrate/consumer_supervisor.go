@@ -431,8 +431,52 @@ func (s *ConsumerSupervisor) createConsumer(ctx context.Context, spec ConsumerSp
 	}
 	cons, err := s.conn.js.CreateOrUpdateConsumer(ctx, spec.Stream, cfg)
 	if err != nil {
+		// The client rejects a create/update response whose echoed config lacks
+		// the requested plural FilterSubjects, inferring "server too old" — but
+		// that inference can be wrong: the server can have stored the filters
+		// while only the response echo (or its parse) glitched, observed under
+		// a boot burst against a 2.14 server that handles plural filters
+		// correctly when probed directly. The server is the authority on what
+		// was stored, so on exactly this error, read the consumer back: if the
+		// stored config carries the requested filter set, the create succeeded
+		// and the handle is served as such — otherwise the error stands and the
+		// caller's broad-filter fallback proceeds.
+		if len(cfg.FilterSubjects) > 0 && errors.Is(err, jetstream.ErrConsumerMultipleFilterSubjectsNotSupported) {
+			if verified, verr := s.verifyStoredFilterSubjects(ctx, spec.Stream, spec.Name, cfg.FilterSubjects); verr == nil && verified != nil {
+				return verified, nil
+			}
+		}
 		return nil, fmt.Errorf("substrate: ConsumerSupervisor: create consumer %q on %q: %w",
 			spec.Name, spec.Stream, err)
+	}
+	return cons, nil
+}
+
+// verifyStoredFilterSubjects reads consumer name on stream back from the
+// server and returns its handle iff the stored config's FilterSubjects match
+// want exactly (order-insensitive). Returns (nil, nil) on a clean mismatch —
+// the caller's original error stands.
+func (s *ConsumerSupervisor) verifyStoredFilterSubjects(ctx context.Context, stream, name string, want []string) (jetstream.Consumer, error) {
+	cons, err := s.conn.js.Consumer(ctx, stream, name)
+	if err != nil {
+		return nil, err
+	}
+	info, err := cons.Info(ctx)
+	if err != nil {
+		return nil, err
+	}
+	got := info.Config.FilterSubjects
+	if len(got) != len(want) {
+		return nil, nil
+	}
+	wantSet := make(map[string]struct{}, len(want))
+	for _, w := range want {
+		wantSet[w] = struct{}{}
+	}
+	for _, g := range got {
+		if _, ok := wantSet[g]; !ok {
+			return nil, nil
+		}
 	}
 	return cons, nil
 }

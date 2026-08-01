@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/nats-io/nats.go"
+	"github.com/nats-io/nats.go/jetstream"
 )
 
 // TestSupervisor_FilterSubjects_MultiSubjectDelivery proves a spec configured
@@ -218,5 +219,47 @@ func TestSupervisor_Message_HeaderReplyInbox(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatalf("message with reply-inbox header not delivered")
+	}
+}
+
+// TestVerifyStoredFilterSubjects pins the self-heal read-back createConsumer
+// runs when the client library rejects a create/update response as
+// "multiple filter subjects not supported": the server is the authority on
+// what was stored, so a stored config carrying exactly the requested filter
+// set serves the consumer handle, and any mismatch leaves the original error
+// standing (nil, nil).
+func TestVerifyStoredFilterSubjects(t *testing.T) {
+	t.Parallel()
+	c, ctx := newTestConn(t)
+	stream := "ops-verifyfs"
+	if err := c.EnsureStream(ctx, StreamSpec{Name: stream, Subjects: []string{"vfs.>"}}); err != nil {
+		t.Fatalf("EnsureStream: %v", err)
+	}
+	sup := NewConsumerSupervisor(c)
+	t.Cleanup(sup.Stop)
+
+	want := []string{"vfs.a.>", "vfs.b.>"}
+	if _, err := c.js.CreateOrUpdateConsumer(ctx, stream, jetstream.ConsumerConfig{
+		Durable: "vfs-probe", AckPolicy: jetstream.AckExplicitPolicy, FilterSubjects: want,
+	}); err != nil {
+		t.Fatalf("create probe consumer: %v", err)
+	}
+
+	cons, err := sup.verifyStoredFilterSubjects(ctx, stream, "vfs-probe", want)
+	if err != nil {
+		t.Fatalf("verify matching set: %v", err)
+	}
+	if cons == nil {
+		t.Fatal("stored config matches the requested set — the create succeeded server-side and must be accepted")
+	}
+
+	cons, err = sup.verifyStoredFilterSubjects(ctx, stream, "vfs-probe", []string{"vfs.a.>", "vfs.c.>"})
+	if err != nil || cons != nil {
+		t.Fatalf("mismatched stored set must yield (nil, nil); got cons=%v err=%v", cons, err)
+	}
+
+	cons, err = sup.verifyStoredFilterSubjects(ctx, stream, "vfs-probe", []string{"vfs.a.>"})
+	if err != nil || cons != nil {
+		t.Fatalf("shorter requested set must yield (nil, nil); got cons=%v err=%v", cons, err)
 	}
 }

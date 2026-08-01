@@ -46,6 +46,19 @@ const (
 	adjacencyKVBucket        = "refractor-adjacency"
 	personalInterestKVBucket = "personal-lens-interest"
 	defaultHeartbeatEvery    = 10 * time.Second
+	// lensAckWait bounds how long JetStream waits for a lens pipeline to ack a
+	// delivered CDC event before redelivering it. The JetStream default (30s)
+	// is shorter than a heavy fan-out evaluation under load, and a redelivery
+	// issued mid-evaluation repeats the work while the first attempt is still
+	// running — under sustained pressure the consumer live-locks: every
+	// in-flight message is a redelivery and the ack floor stops advancing
+	// (measured on a swap-bound host: floors advanced ~16 messages/hour while
+	// the process burned full CPU). Redelivery exists to recover from a DEAD
+	// consumer, not a slow one, so the window is sized far above any sane
+	// evaluation; a crashed process's messages redeliver to the restarted
+	// pipeline after this wait, which projection freshness tolerates (the
+	// sweeps backstop staleness).
+	lensAckWait = 5 * time.Minute
 )
 
 // reservedActivationBuckets mirrors internal/pkgmgr's reservedBucketNames
@@ -967,6 +980,7 @@ func main() {
 			FilterSubject:  filterSubject,
 			DeliverPolicy:  substrate.DeliverLastPerSubject,
 			DeliverGroup:   "refractor-" + r.ID,
+			AckWait:        lensAckWait,
 			InitialPause:   initialPause,
 		})
 
