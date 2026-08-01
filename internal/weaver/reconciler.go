@@ -741,6 +741,11 @@ func (s *sweeper) deleteMark(ctx context.Context, key string, revision uint64,
 			e.logger.Warn("weaver sweep: effect close record failed",
 				"targetId", targetID, "entityId", entityID, "gap", gapColumn, "err", cErr)
 		}
+		// The gap's standing issue (GapBudgetExhausted, or a surface alert)
+		// retires with the close: the issue is keyed per (target, gap), and
+		// for a row that has gone quiet this leg is the only one that will
+		// ever observe the close. Idempotent when none stands.
+		e.issues.clear(issueKeyGap(targetID, gapColumn))
 	} else {
 		e.logger.Warn("weaver sweep: mark reclaimed", logArgs...)
 	}

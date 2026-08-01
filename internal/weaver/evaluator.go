@@ -672,12 +672,15 @@ func (e *Engine) clearClosedMarks(ctx context.Context, target *Target, targetID,
 		if row != nil && e.boolColumn(targetID, row, col) {
 			continue
 		}
+		// A closed gap retires its standing issue (GapBudgetExhausted, or a
+		// surface alert) along with its bookkeeping: the issue is keyed per
+		// (target, gap), and a row that stopped reporting the column closed
+		// it — a retraction tombstone included, whose body carries no gap
+		// columns at all. Idempotent when none stands.
+		e.issues.clear(issueKeyGap(targetID, col))
 		if ga, isSurface := target.Gaps[col]; isSurface && ga.Action == actionSurface {
 			// A surface gap never creates a mark (dispatchGap returns before
-			// e.marks.get) — clear its issue directly and skip the mark/
-			// dispatch-count/effect-close bookkeeping below, which has nothing
-			// to clear for this column.
-			e.issues.clear(issueKeyGap(targetID, col))
+			// e.marks.get) — nothing further to clear for this column.
 			continue
 		}
 		rec, markRev, found, gErr := e.marks.get(ctx, targetID, entityID, col)

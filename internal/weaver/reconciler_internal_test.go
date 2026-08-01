@@ -1909,3 +1909,42 @@ func TestSweep_CountKeySurvives(t *testing.T) {
 	}
 	h.requireNoOp(t)
 }
+
+// TestSweep_GapClosedMarkRetiresStandingIssue proves the sweep's
+// level-reconciled gap-close (the row is gone from weaver-targets — deleted,
+// or never projected) retires the gap's standing issue along with the mark:
+// for a row with no further CDC deliveries the sweep is the only leg that
+// will ever observe the close, so without this the issue stands until a
+// process restart.
+func TestSweep_GapClosedMarkRetiresStandingIssue(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	h := newSweepHarness(t, ctx)
+	h.agePastWarmup()
+
+	const targetID = "fixtureIssueRetire"
+	h.seedTarget(&Target{
+		TargetID: targetID,
+		Gaps:     map[string]GapAction{"missing_x": {Action: actionDirectOp, Operation: "FixX"}},
+	})
+	entityID := testNanoID(t)
+	key := markKey(targetID, entityID, "missing_x")
+	h.putMark(t, ctx, key, fixtureMark(targetID, entityID, "missing_x", "directOp", pastLease()))
+	h.engine.issues.set(issueKeyGap(targetID, "missing_x"), "warning", "GapBudgetExhausted",
+		"target "+targetID+": row column missing_x has exhausted the engine's default retry budget")
+	// No weaver-targets row seeded: the row-gone branch is the close.
+
+	h.pass(ctx)
+	h.requireNoOp(t)
+
+	if _, _, found, err := h.engine.marks.get(ctx, targetID, entityID, "missing_x"); err != nil || found {
+		t.Fatalf("gap-closed mark must be deleted (found=%v err=%v)", found, err)
+	}
+	if hasIssueCode(h.engine.issues.snapshot(), "GapBudgetExhausted") {
+		t.Fatal("a gap-closed mark delete must retire the gap's standing issue")
+	}
+}

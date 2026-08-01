@@ -999,3 +999,36 @@ func TestHandleRow_SurfaceGap(t *testing.T) {
 		t.Fatal("expected UnroutedTasks issue to clear once the gap closes")
 	}
 }
+
+// TestHandleRow_RetractionTombstoneRetiresExhaustedIssue proves a standing
+// GapBudgetExhausted issue clears when the gap closes by RETRACTION: the
+// lens tombstones the row (guarded delete — the body is {isDeleted:true}
+// with no gap columns at all), lane-1 delivers it, and clearClosedMarks
+// retires the issue alongside the mark — a dispatched (non-surface) gap,
+// where the issue would otherwise stand until a process restart.
+func TestHandleRow_RetractionTombstoneRetiresExhaustedIssue(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	h := newHandlerHarness(t, ctx)
+
+	const targetID = "fixtureExhaustRetire"
+	h.seedTarget(&Target{
+		TargetID: targetID,
+		Gaps:     map[string]GapAction{"missing_x": {Action: actionDirectOp, Operation: "FixX"}},
+	})
+	entityID := testNanoID(t)
+	h.engine.issues.set(issueKeyGap(targetID, "missing_x"), "warning", "GapBudgetExhausted",
+		"target "+targetID+": row column missing_x has exhausted the engine's default retry budget")
+
+	tombstone := map[string]any{"isDeleted": true}
+	if dec := h.engine.handleRow(ctx, h.rowMessage(t, targetID, entityID, tombstone, 1, 1)); dec != substrate.Ack {
+		t.Fatalf("tombstone delivery must Ack, got %v", dec)
+	}
+	if hasIssueCode(h.engine.issues.snapshot(), "GapBudgetExhausted") {
+		t.Fatal("a retraction tombstone closes the gap; its standing GapBudgetExhausted issue must retire with it")
+	}
+}
