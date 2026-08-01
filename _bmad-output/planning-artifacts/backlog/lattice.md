@@ -121,33 +121,6 @@ ratified). Everything here needs design and is fair game **except** 🚧 Andrew-
 **forks** (Gateway, read-path auth, Vault, multi-cell, HA-NATS) and **frozen-contract** changes are
 designed-through, but the *fork decision* + the *contract commit* are Andrew's.
 
-> **Build-ready now (2026-08-01):** no `✅ Andrew-ratified` design in this lane is buildable — every one
-> is Andrew-gated (global-identity), driver-blocked (multi-cell, HA-NATS, historical-state-query), or
-> shelved (appsession OIDC). The ready queue is what the fleet draws from; the top of it is D2 Phase 2
-> (reverse anchor enumeration) and the staging-`WITH` grouping-key cost. Whoever ships next renames this.
->
-> **Showcase-period priority LIFTED (2026-07-27).** The 2026-07-25 Andrew directive that gave the
-> Verticals stream build priority "until the showcase is done" no longer applies: Facet's
-> archetype-world rendering is shipped end-to-end except the iOS-native increment, which is blocked on
-> host Xcode tooling, not on lane priority ([verticals.md](verticals.md)'s Edge showcase app row —
-> "every non-iOS increment shipped"). The Lattice lane no longer caps picks at S-sized or yields the
-> shared build lock on that basis — select by importance × readiness as normal (§2 above).
-> **Build-ready now (2026-07-31):** the sensitive-predicate instanceOf-chain gap, the script
-> live-read budget, and the **cap-read per-anchor grant keys** initiative (Fires 1-5 + both
-> residuals it surfaced) are all **✅ shipped** (Done log). `[appsession] co-hosted-page session
-> fixation` also shipped 2026-07-31. The whole-set-exposure row stays seq-blocked behind read-path
-> auth (D1); `appsession`'s OIDC design stays 🗄️ **shelved** (revive: first real-IdP deployment).
-> The read-posture-comments doc sweep shipped 2026-07-31 (Done log); its one `docs/contracts/*`
-> site (`10-orchestration-substrate.md:249`) is fixed **uncommitted in `main`**, flagged for Andrew
-> (non-substantive — aligns a stray cross-reference with Contract #2 §2.5's already-ratified text).
-> The step6 instanceOf-chain live-read accounting pass also shipped 2026-07-31 (Done log). No other
-> ready security/trust-boundary item remains — the rest are seq-blocked or shelved (above).
-> Every `✅ ratified` row is done or driver-blocked; the rest are Whetstone's or parking-lot.
-> A stale callout starves the lane — whoever ships next renames this.
->
-> 📎 **Refractor is drained.** All seven buildable rows shipped 2026-07-25 against
-> [refractor-open-rows-fire-briefs.md](../../implementation-artifacts/refractor-open-rows-fire-briefs.md);
-> the two freshly-filed cap-read residuals above and the HA-NATS-blocked rollup are what remain.
 
 ### Security & trust boundary
 | Item | What it is | Imp | Size | State |
