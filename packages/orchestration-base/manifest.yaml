@@ -1,5 +1,5 @@
 name: orchestration-base
-version: 0.7.6
+version: 0.7.7
 description: |
   Generic task substrate (task DDL + CreateTask/ClaimTask/SetAvailability,
   FR28 role-queue + fallback: assignee-or-queue routing gated on the

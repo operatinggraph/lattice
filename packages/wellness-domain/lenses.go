@@ -1,6 +1,10 @@
 package wellnessdomain
 
-import "github.com/operatinggraph/lattice/internal/pkgmgr"
+import (
+	"fmt"
+
+	"github.com/operatinggraph/lattice/internal/pkgmgr"
+)
 
 // WellnessStudiosBucket is the NATS-KV read model the wellnessStudios lens
 // projects into — the **P5 query surface** for "which studios exist": the
@@ -145,7 +149,7 @@ func Lenses() []pkgmgr.LensSpec {
 			Output: &pkgmgr.OutputDescriptorSpec{
 				AnchorType:       "booking",
 				OutputKeyPattern: OrphanedBookingSettlementTarget + ".{actorSuffix}",
-				BodyColumns:      []string{"violating", "missing_release", "entityKey", "bookingKey", "sessionKey", "status"},
+				BodyColumns:      []string{"violating", "missing_release", "entityKey", "bookingKey", "sessionKey", "status", "maxretries_release"},
 				EmptyBehavior:    "delete",
 				KeyColumn:        "entityId",
 				Freshness:        "auto",
@@ -364,7 +368,11 @@ RETURN
 // never violates — SetBookingAttendance and CancelBooking are the paths that
 // own those, this lens only ever answers for a class that was called off out
 // from under a still-`booked` seat.
-const orphanedBookingSettlementSpec = `MATCH (b:booking {key: $actorKey})
+// orphanedBookingSettlementSpec is built once at package init: the retry cap
+// (maxReleaseRetries) bakes into the constant maxretries_release column, the
+// §10.2 "the policy lives in the cypher" convention lease-signing's
+// leaseApplicationCompleteSpec established. The cypher carries no literal '%'.
+var orphanedBookingSettlementSpec = fmt.Sprintf(`MATCH (b:booking {key: $actorKey})
 OPTIONAL MATCH (b)-[:forSession]->(se:session)
 WITH
   b.key AS entityKey,
@@ -378,8 +386,9 @@ RETURN
   sessionKey,
   status,
   ((status = 'booked') AND (sessionKey <> null) AND (liveSessionKey = null)) AS missing_release,
-  ((status = 'booked') AND (sessionKey <> null) AND (liveSessionKey = null)) AS violating
-`
+  ((status = 'booked') AND (sessionKey <> null) AND (liveSessionKey = null)) AS violating,
+  %d AS maxretries_release
+`, maxReleaseRetries)
 
 // wellnessIdentitiesReadSpec projects one row per NAMED identity — the
 // roster wellness-app resolves the signed-in actor's own name against. The

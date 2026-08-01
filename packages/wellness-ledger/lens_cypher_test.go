@@ -166,6 +166,28 @@ func TestWellnessNoShowSettlement_NoShowWithAccountNoCharge_MissingCharge(t *tes
 	require.Equal(t, 2500.0, v["feeCents"])
 	require.Equal(t, true, v["missing_charge"], "no wellnesstransaction settles this booking yet — violating")
 	require.Equal(t, true, v["violating"])
+	requireIntColumn(t, v, "maxretries_charge", maxChargeRetries)
+}
+
+// requireIntColumn asserts a lens-projected column is present and equals want
+// as an integer. The full engine returns a numeric literal as int64 (the
+// cypher parser's strconv.ParseInt path), so accept int/int64/float64 alike —
+// what matters is the integer value, mirroring lease-signing's own
+// requireIntColumn (lens_cypher_test.go).
+func requireIntColumn(t *testing.T, v map[string]any, col string, want int) {
+	t.Helper()
+	got, ok := v[col]
+	require.Truef(t, ok, "row must carry the %s column", col)
+	switch n := got.(type) {
+	case int:
+		require.Equalf(t, want, n, "%s", col)
+	case int64:
+		require.Equalf(t, want, int(n), "%s", col)
+	case float64:
+		require.Equalf(t, want, int(n), "%s", col)
+	default:
+		t.Fatalf("%s is %T, not a numeric cap", col, got)
+	}
 }
 
 func TestWellnessNoShowSettlement_NoShowCharged_Converged(t *testing.T) {

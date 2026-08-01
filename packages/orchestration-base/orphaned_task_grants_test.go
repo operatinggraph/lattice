@@ -85,6 +85,7 @@ func TestOrphanedTaskGrants_OpenWithTombstonedOp_Violating(t *testing.T) {
 	v := f.projectOrphanedAt(t, "task1", unrNow)[0].Values
 	require.Equal(t, true, v["missing_operation"], "the bound op-meta was tombstoned out from under an open task")
 	require.Equal(t, true, v["violating"])
+	requireIntColumn(t, v, "maxretries_operation", maxOperationRetries)
 }
 
 func TestOrphanedTaskGrants_OpenWithNoForOperationLink_Violating(t *testing.T) {

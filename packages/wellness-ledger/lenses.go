@@ -1,6 +1,10 @@
 package wellnessledger
 
-import "github.com/operatinggraph/lattice/internal/pkgmgr"
+import (
+	"fmt"
+
+	"github.com/operatinggraph/lattice/internal/pkgmgr"
+)
 
 // LedgerHistoryBucket is the NATS-KV read model the ledgerHistory lens projects
 // into. It is the **P5 query surface** for "what charges/payments has this
@@ -65,7 +69,7 @@ func Lenses() []pkgmgr.LensSpec {
 			Output: &pkgmgr.OutputDescriptorSpec{
 				AnchorType:       "booking",
 				OutputKeyPattern: NoShowSettlementTarget + ".{actorSuffix}",
-				BodyColumns:      []string{"violating", "missing_charge", "entityKey", "bookingKey", "identityKey", "accountKey", "feeCents", "status"},
+				BodyColumns:      []string{"violating", "missing_charge", "entityKey", "bookingKey", "identityKey", "accountKey", "feeCents", "status", "maxretries_charge"},
 				EmptyBehavior:    "delete",
 				KeyColumn:        "entityId",
 				Freshness:        "auto",
@@ -97,7 +101,11 @@ func Lenses() []pkgmgr.LensSpec {
 // (accountKey null); one with no noShowFeeCents (a noShow set before this
 // lens existed) never violates either — both are non-goals for v1, not a
 // gap this lens is meant to converge.
-const noShowSettlementSpec = `MATCH (bk:booking {key: $actorKey})
+// noShowSettlementSpec is built once at package init: the retry cap
+// (maxChargeRetries) bakes into the constant maxretries_charge column, the
+// §10.2 "the policy lives in the cypher" convention lease-signing's
+// leaseApplicationCompleteSpec established. The cypher carries no literal '%'.
+var noShowSettlementSpec = fmt.Sprintf(`MATCH (bk:booking {key: $actorKey})
 MATCH (bk)-[:bookedBy]->(id:identity)
 OPTIONAL MATCH (id)<-[:heldFor]-(a:wellnessaccount)
 OPTIONAL MATCH (bk)<-[:settles]-(tx:wellnesstransaction)
@@ -117,8 +125,9 @@ RETURN
   feeCents,
   status,
   ((status = 'noShow') AND (feeCents <> null) AND (feeCents > 0) AND (accountKey <> null) AND (txCount = 0)) AS missing_charge,
-  ((status = 'noShow') AND (feeCents <> null) AND (feeCents > 0) AND (accountKey <> null) AND (txCount = 0)) AS violating
-`
+  ((status = 'noShow') AND (feeCents <> null) AND (feeCents > 0) AND (accountKey <> null) AND (txCount = 0)) AS violating,
+  %d AS maxretries_charge
+`, maxChargeRetries)
 
 // ledgerHistorySpec projects one row per transaction, walking postedTo to the
 // account and heldFor to the identity so the FE can filter/group by

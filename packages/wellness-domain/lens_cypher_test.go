@@ -759,6 +759,28 @@ func TestWellnessOrphanedBookingSettlement_BookedSessionTombstoned_MissingReleas
 	require.Equal(t, "vtx.session."+f.ids["deadsess"], v["sessionKey"], "the anchor survives the session's own tombstone")
 	require.Equal(t, true, v["missing_release"], "still booked, session anchor present, session no longer live")
 	require.Equal(t, true, v["violating"])
+	requireIntColumn(t, v, "maxretries_release", maxReleaseRetries)
+}
+
+// requireIntColumn asserts a lens-projected column is present and equals want
+// as an integer. The full engine returns a numeric literal as int64 (the
+// cypher parser's strconv.ParseInt path), so accept int/int64/float64 alike —
+// what matters is the integer value, mirroring lease-signing's own
+// requireIntColumn (lens_cypher_test.go).
+func requireIntColumn(t *testing.T, v map[string]any, col string, want int) {
+	t.Helper()
+	got, ok := v[col]
+	require.Truef(t, ok, "row must carry the %s column", col)
+	switch n := got.(type) {
+	case int:
+		require.Equalf(t, want, n, "%s", col)
+	case int64:
+		require.Equalf(t, want, int(n), "%s", col)
+	case float64:
+		require.Equalf(t, want, int(n), "%s", col)
+	default:
+		t.Fatalf("%s is %T, not a numeric cap", col, got)
+	}
 }
 
 // TestWellnessOrphanedBookingSettlement_AttendedSessionTombstoned_NotViolating

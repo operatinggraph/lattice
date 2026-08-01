@@ -1,6 +1,10 @@
 package orchestrationbase
 
-import "github.com/operatinggraph/lattice/internal/pkgmgr"
+import (
+	"fmt"
+
+	"github.com/operatinggraph/lattice/internal/pkgmgr"
+)
 
 // Lenses returns the package's Lens declarations. The single
 // `capabilityEphemeral` lens projects FR56 ephemeral task grants to the
@@ -69,7 +73,7 @@ func Lenses() []pkgmgr.LensSpec {
 			Output: &pkgmgr.OutputDescriptorSpec{
 				AnchorType:       "task",
 				OutputKeyPattern: "unroutedTasks.{actorSuffix}",
-				BodyColumns:      []string{"violating", "missing_claim", "entityKey", "queuedRole", "expiresAt", "freshUntil"},
+				BodyColumns:      []string{"violating", "missing_claim", "entityKey", "queuedRole", "expiresAt", "freshUntil", "maxretries_claim"},
 				EmptyBehavior:    "delete",
 				KeyColumn:        "entityId",
 			},
@@ -85,7 +89,7 @@ func Lenses() []pkgmgr.LensSpec {
 			Output: &pkgmgr.OutputDescriptorSpec{
 				AnchorType:       "task",
 				OutputKeyPattern: "orphanedTaskGrants.{actorSuffix}",
-				BodyColumns:      []string{"violating", "missing_operation", "entityKey", "taskKey"},
+				BodyColumns:      []string{"violating", "missing_operation", "entityKey", "taskKey", "maxretries_operation"},
 				EmptyBehavior:    "delete",
 				KeyColumn:        "entityId",
 			},
@@ -185,7 +189,11 @@ var loomFlowHistorySource = &pkgmgr.SourceConfig{
 // $now, the same lexical-compare idiom capabilityEphemeral/myTasks use); it
 // goes null once violating (the row's own CDC delivery drives re-evaluation
 // from there, like every other target).
-const unroutedTasksSpec = `
+// unroutedTasksSpec is built once at package init: the retry cap
+// (maxClaimRetries) bakes into the constant maxretries_claim column, the
+// §10.2 "the policy lives in the cypher" convention lease-signing's
+// leaseApplicationCompleteSpec established. The cypher carries no literal '%'.
+var unroutedTasksSpec = fmt.Sprintf(`
 MATCH (t:task {key: $actorKey})-[:queuedFor]->(role:role)
 WHERE t.data.status = 'open'
 RETURN
@@ -196,8 +204,9 @@ RETURN
   t.data.expiresAt AS expiresAt,
   ($now > t.data.expiresAt) AS missing_claim,
   ($now > t.data.expiresAt) AS violating,
-  (CASE WHEN ($now > t.data.expiresAt) THEN null ELSE t.data.expiresAt END) AS freshUntil
-`
+  (CASE WHEN ($now > t.data.expiresAt) THEN null ELSE t.data.expiresAt END) AS freshUntil,
+  %d AS maxretries_claim
+`, maxClaimRetries)
 
 // orphanedTaskGrantsSpec is the convergence target for a task whose granted
 // operation died out from under it: `forOperation` is REQUIRED at CreateTask
@@ -220,7 +229,10 @@ RETURN
 // (targets.go), the task leaves 'open' and this row's WHERE stops matching
 // on the next reprojection — EmptyBehavior:"delete" removes it, mirroring
 // unroutedTasksSpec's own close-by-disappearing shape above.
-const orphanedTaskGrantsSpec = `
+// orphanedTaskGrantsSpec is built once at package init: the retry cap
+// (maxOperationRetries) bakes into the constant maxretries_operation column,
+// mirroring unroutedTasksSpec above. The cypher carries no literal '%'.
+var orphanedTaskGrantsSpec = fmt.Sprintf(`
 MATCH (t:task {key: $actorKey})
   WHERE t.data.status = 'open'
 OPTIONAL MATCH (t)-[:forOperation]->(op)
@@ -233,8 +245,9 @@ RETURN
   nanoIdFromKey(entityKey) AS entityId,
   entityKey AS taskKey,
   (opKey = null) AS missing_operation,
-  (opKey = null) AS violating
-`
+  (opKey = null) AS violating,
+  %d AS maxretries_operation
+`, maxOperationRetries)
 
 // MyTasksBucket is the package-owned output bucket for the my-tasks lens.
 // Provisioned at package-install time (NOT primordial), mirroring
