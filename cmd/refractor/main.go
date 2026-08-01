@@ -10,6 +10,8 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
+	"net/http"
+	_ "net/http/pprof"
 	"os"
 	"os/signal"
 	"strings"
@@ -211,6 +213,20 @@ func main() {
 
 	instance := "rfx-" + randHex(6)
 	logger.Info("refractor starting", "instance", instance, "natsURL", *natsURL)
+
+	// Live introspection (heap/goroutine/CPU profiles) on a loopback listener,
+	// enabled only when REFRACTOR_PPROF_ADDR is set — a runaway process can be
+	// asked what it is holding (`go tool pprof http://<addr>/debug/pprof/heap`)
+	// instead of being killed blind. The operator sets a loopback address;
+	// nothing binds by default.
+	if pprofAddr := os.Getenv("REFRACTOR_PPROF_ADDR"); pprofAddr != "" {
+		go func() {
+			logger.Info("pprof listener", "addr", pprofAddr)
+			if err := http.ListenAndServe(pprofAddr, nil); err != nil {
+				logger.Error("pprof listener exited", "addr", pprofAddr, "err", err)
+			}
+		}()
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()

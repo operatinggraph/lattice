@@ -11,6 +11,10 @@ export PATH="/usr/local/go/bin:$PATH"
 # systemd runs the demo units with no HOME; Go derives GOPATH/GOMODCACHE/GOCACHE
 # from it, so an unset HOME kills every `go build` in the up chain.
 export HOME="${HOME:-/root}"
+# The demo box is small (2 cores / ~4 GB); cap Refractor's Go heap well below
+# physical memory so an evaluation burst degrades to harder GC, never to the
+# OOM killer taking the stack down.
+export REFRACTOR_GOMEMLIMIT="${REFRACTOR_GOMEMLIMIT:-2GiB}"
 
 make up-full
 make provision-gateway-identity-provisioner
