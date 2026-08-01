@@ -1,11 +1,22 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
+	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"strings"
 	"testing"
+	"time"
+
+	"github.com/nats-io/nats.go/jetstream"
+
+	"github.com/operatinggraph/lattice/internal/bootstrap"
+	"github.com/operatinggraph/lattice/internal/natsfixture"
+	"github.com/operatinggraph/lattice/internal/substrate"
 )
 
 // specEnv wraps a lens spec data object into the Core KV aspect envelope shape
@@ -23,6 +34,7 @@ func TestReadLensFullSpec(t *testing.T) {
 			"targetType":   "nats_kv",
 			"outputSchema": map[string]any{"type": "object"},
 			"targetConfig": map[string]any{"bucket": "weaver-targets", "key": []any{"key"}},
+			"output":       map[string]any{"outputKeyPattern": "orphanedTaskGrants.{actorSuffix}"},
 		}),
 		"vtx.meta.L2.spec": specEnv(map[string]any{
 			"engine":         "full",
@@ -40,12 +52,20 @@ func TestReadLensFullSpec(t *testing.T) {
 	if !s1.Found || s1.Engine != "full" || s1.TargetType != "nats_kv" || s1.CypherRule == "" {
 		t.Errorf("L1 spec = %+v", s1)
 	}
+	if s1.OutputKeyPattern != "orphanedTaskGrants.{actorSuffix}" {
+		t.Errorf("L1 OutputKeyPattern = %q", s1.OutputKeyPattern)
+	}
 	if s1.specInfo() != (lensSpecInfo{TargetType: "nats_kv"}) {
 		t.Errorf("L1 specInfo = %+v", s1.specInfo())
 	}
 	s2 := readLensFullSpec(get, "L2")
 	if !s2.Found || s2.ProjectionKind != "actorAggregate" {
 		t.Errorf("L2 spec = %+v", s2)
+	}
+	// L2 carries no `output` object (no Output descriptor) — OutputKeyPattern
+	// stays empty rather than panicking on the missing field.
+	if s2.OutputKeyPattern != "" {
+		t.Errorf("L2 OutputKeyPattern = %q, want empty (no output descriptor)", s2.OutputKeyPattern)
 	}
 	if info := s2.specInfo(); !info.Protected || info.TargetType != "postgres" {
 		t.Errorf("L2 specInfo = %+v", info)
@@ -301,6 +321,82 @@ func TestSelectLensRows(t *testing.T) {
 	}
 }
 
+// TestLensOutputKeyPrefix pins the CONTENTS listing's scoping key: the
+// literal text up to the {actorSuffix} placeholder for a normally-shaped
+// pattern (the fire's own repro example), and "" (fall back to a full-bucket
+// listing) for every pattern KeyPrefix refuses — no placeholder at all, a
+// pattern starting with the placeholder, and no Output descriptor at all
+// (empty pattern).
+func TestLensOutputKeyPrefix(t *testing.T) {
+	cases := []struct {
+		pattern, want string
+	}{
+		{"orphanedTaskGrants.{actorSuffix}", "orphanedTaskGrants."},
+		{"cap-read.loftspace-domain.{actorSuffix}", "cap-read.loftspace-domain."},
+		{"{actorSuffix}", ""},      // starts with the placeholder — no static prefix
+		{"cap.roles.identity", ""}, // no placeholder at all
+		{"cap{actorSuffix}", ""},   // static text doesn't end on a "." boundary
+		{"", ""},                   // no Output descriptor (operation-aggregate lens)
+	}
+	for _, tc := range cases {
+		if got := lensOutputKeyPrefix(tc.pattern); got != tc.want {
+			t.Errorf("lensOutputKeyPrefix(%q) = %q, want %q", tc.pattern, got, tc.want)
+		}
+	}
+}
+
+// TestIsLensTombstoneRow pins the guarded soft-tombstone classification
+// (internal/refractor/adapter/natskv.go guardedBody's delete branch):
+// isDeleted + projectionSeq and nothing else is retracted; anything carrying
+// even one more field — including a live row that happens to carry its own
+// "isDeleted" business column — is left classified as live, since the
+// three-field marker is the ONLY shape a guarded retraction ever writes.
+func TestIsLensTombstoneRow(t *testing.T) {
+	cases := []struct {
+		name string
+		doc  map[string]any
+		want bool
+	}{
+		{
+			name: "guarded tombstone",
+			doc:  map[string]any{"isDeleted": true, "projectedAt": "2026-07-30T00:00:00Z", "projectionSeq": float64(7)},
+			want: true,
+		},
+		{
+			name: "live row, no isDeleted",
+			doc:  map[string]any{"key": "cap.actor1", "actor": "vtx.identity.actor1", "projectionSeq": float64(3)},
+			want: false,
+		},
+		{
+			name: "live row that itself has an isDeleted business column",
+			doc:  map[string]any{"isDeleted": true, "actor": "vtx.identity.actor1", "projectionSeq": float64(3), "widget": "live"},
+			want: false,
+		},
+		{
+			name: "isDeleted true but no projectionSeq (legacy pre-guard doc)",
+			doc:  map[string]any{"isDeleted": true, "projectedAt": "2026-07-30T00:00:00Z"},
+			want: false,
+		},
+		{
+			name: "isDeleted false",
+			doc:  map[string]any{"isDeleted": false, "projectionSeq": float64(1)},
+			want: false,
+		},
+		{
+			name: "empty doc",
+			doc:  map[string]any{},
+			want: false,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isLensTombstoneRow(tc.doc); got != tc.want {
+				t.Errorf("isLensTombstoneRow(%+v) = %v, want %v", tc.doc, got, tc.want)
+			}
+		})
+	}
+}
+
 // TestLensRowsTarget pins the CONTENTS panel's target decision: nats_kv is
 // bucket-browsable, postgres routes to the read seam, nats_subject is a
 // per-actor delta stream with no stored rows by design, and a blank or
@@ -383,5 +479,101 @@ func TestHandleLens_Routing(t *testing.T) {
 				t.Errorf("%s %s = %d, want %d (body %s)", tc.method, tc.path, rec.Code, tc.want, rec.Body.String())
 			}
 		})
+	}
+}
+
+// TestLensRows_ScopesToOwnPrefixAndFlagsTombstones pins both live-fixed
+// defects in the Contents listing (GET /api/lens/<id>/rows) against a real
+// embedded NATS-KV bucket: a lens whose Output descriptor's OutputKeyPattern
+// yields a static prefix sees only ITS OWN rows out of a bucket a sibling
+// lens shares — not the sibling's — and a guarded soft-tombstone row (the key
+// a retraction never removes, internal/refractor/adapter/natskv.go
+// guardedBody) is flagged retracted rather than rendered as live state.
+func TestLensRows_ScopesToOwnPrefixAndFlagsTombstones(t *testing.T) {
+	ns := natsfixture.StartServer(t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	conn, err := substrate.Connect(ctx, substrate.ConnectOpts{URL: ns.ClientURL(), Name: "loupe-test"})
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer conn.Close()
+
+	// A shared target bucket, mirroring weaver-targets carrying several
+	// lenses' rows in production.
+	const bucket = "shared-targets-test"
+	if _, err := conn.JetStream().CreateOrUpdateKeyValue(ctx, jetstream.KeyValueConfig{Bucket: bucket}); err != nil {
+		t.Fatalf("create bucket: %v", err)
+	}
+	if _, err := conn.JetStream().CreateOrUpdateKeyValue(ctx, jetstream.KeyValueConfig{Bucket: bootstrap.CoreKVBucket}); err != nil {
+		t.Fatalf("create core-kv bucket: %v", err)
+	}
+
+	put := func(b, key string, value []byte) {
+		t.Helper()
+		if _, err := conn.KVPut(ctx, b, key, value); err != nil {
+			t.Fatalf("put %s/%s: %v", b, key, err)
+		}
+	}
+
+	// myLens's own rows: one live, one a guarded tombstone left by a past
+	// retraction (the key stays; only its body changed).
+	put(bucket, "myLens.actor1", []byte(`{"key":"myLens.actor1","actor":"vtx.identity.actor1","projectionSeq":3,"widget":"live"}`))
+	put(bucket, "myLens.actor2", []byte(`{"isDeleted":true,"projectedAt":"2026-07-30T00:00:00Z","projectionSeq":7}`))
+	// A sibling lens's row sharing the SAME bucket — must never appear in
+	// myLens's Contents listing (the defect this fire fixes).
+	put(bucket, "siblingLens.actor9", []byte(`{"key":"siblingLens.actor9","actor":"vtx.identity.actor9","projectionSeq":1}`))
+
+	put(bootstrap.CoreKVBucket, "vtx.meta.L1.spec", specEnv(map[string]any{
+		"engine":       "full",
+		"cypherRule":   "MATCH (n) RETURN n.key AS key",
+		"targetType":   "nats_kv",
+		"targetConfig": map[string]any{"bucket": bucket, "key": []any{"key"}},
+		"output":       map[string]any{"outputKeyPattern": "myLens.{actorSuffix}"},
+	}))
+
+	srv := &server{conn: conn, logger: slog.New(slog.NewTextHandler(io.Discard, nil)), natsTimeout: 5 * time.Second}
+	mux := http.NewServeMux()
+	srv.registerRoutes(mux)
+	hs := httptest.NewServer(mux)
+	defer hs.Close()
+
+	res, err := hs.Client().Get(hs.URL + "/api/lens/L1/rows")
+	if err != nil {
+		t.Fatalf("GET: %v", err)
+	}
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d", res.StatusCode)
+	}
+	var body struct {
+		Bucket string `json:"bucket"`
+		Total  int    `json:"total"`
+		Rows   []struct {
+			Key       string `json:"key"`
+			Retracted bool   `json:"retracted"`
+		} `json:"rows"`
+	}
+	if err := json.NewDecoder(res.Body).Decode(&body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+
+	if body.Total != 2 || len(body.Rows) != 2 {
+		t.Fatalf("rows = %+v (total %d), want exactly myLens's 2 keys — the sibling must be excluded", body.Rows, body.Total)
+	}
+	byKey := map[string]bool{}
+	for _, r := range body.Rows {
+		if strings.HasPrefix(r.Key, "siblingLens.") {
+			t.Fatalf("sibling lens's key %q leaked into myLens's Contents listing", r.Key)
+		}
+		byKey[r.Key] = r.Retracted
+	}
+	if retracted, ok := byKey["myLens.actor1"]; !ok || retracted {
+		t.Errorf("live row myLens.actor1: present=%v retracted=%v, want present and NOT retracted", ok, retracted)
+	}
+	if retracted, ok := byKey["myLens.actor2"]; !ok || !retracted {
+		t.Errorf("tombstoned row myLens.actor2: present=%v retracted=%v, want present and retracted", ok, retracted)
 	}
 }

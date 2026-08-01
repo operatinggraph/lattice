@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/operatinggraph/lattice/internal/bootstrap"
+	"github.com/operatinggraph/lattice/internal/refractor/projection"
 )
 
 // The Lens page backend (loupe-2-ux-design.md §6): GET /api/lens/<id>
@@ -40,6 +41,12 @@ type lensFullSpec struct {
 	TargetType     string
 	OutputSchema   any
 	Target         map[string]any
+
+	// OutputKeyPattern is the actor-aggregate §6.13 Output descriptor's key
+	// template (e.g. "orphanedTaskGrants.{actorSuffix}"), read from the spec's
+	// `output` object. Empty for a lens with no Output descriptor — an
+	// operation-aggregate lens, or a plain (non-actor-aggregate) projection.
+	OutputKeyPattern string
 }
 
 // readLensFullSpec parses the spec aspect's data document. A missing or
@@ -61,6 +68,9 @@ func readLensFullSpec(get kvGetter, id string) lensFullSpec {
 	}
 	if cfg, ok := d["targetConfig"].(map[string]any); ok {
 		spec.Target = cfg
+	}
+	if out, ok := d["output"].(map[string]any); ok {
+		spec.OutputKeyPattern, _ = out["outputKeyPattern"].(string)
 	}
 	return spec
 }
@@ -368,6 +378,61 @@ func selectLensRows(keys []string, q string, limit int) (selected []string, tota
 	return selected, total, total > len(selected)
 }
 
+// lensOutputKeyPrefix derives the static key prefix every row a lens writes
+// shares, from its Output descriptor's OutputKeyPattern — the nats_kv
+// CONTENTS listing's scoping key. It reuses Refractor's own
+// OutputDescriptor.KeyPrefix() (internal/refractor/projection), the same
+// literal-prefix logic the projection driver and the convergence sweep
+// already scope a shared-target listing by, rather than a second parse of
+// the pattern grammar. KeyPrefix reads only the OutputKeyPattern field, so a
+// bare descriptor carrying just that one field behaves identically to a
+// fully-parsed one for this purpose.
+//
+// Several lenses commonly write into one shared bucket (weaver-targets
+// carries 13+ lenses' rows), so without this every lens's Contents view
+// would list every sibling lens's rows too. Returns "" — meaning "list the
+// whole bucket" — for a lens with no Output descriptor at all (an
+// operation-aggregate lens), or an actor-aggregate lens whose pattern has no
+// derivable static prefix: it starts with the {actorSuffix} placeholder,
+// carries no placeholder at all, or its literal prefix doesn't end on a "."
+// segment boundary or contains a NATS wildcard token — all KeyPrefix's
+// documented refusal cases.
+func lensOutputKeyPrefix(outputKeyPattern string) string {
+	prefix, ok := (projection.OutputDescriptor{OutputKeyPattern: outputKeyPattern}).KeyPrefix()
+	if !ok {
+		return ""
+	}
+	return prefix
+}
+
+// lensTombstoneFields is the exact field set of a guarded soft-tombstone body
+// (internal/refractor/adapter/natskv.go's guardedBody, delete branch): the
+// projected key is intentionally never removed on retraction, so a retracted
+// row's most recent write is this three-field marker rather than a live
+// projected document.
+var lensTombstoneFields = map[string]bool{"isDeleted": true, "projectedAt": true, "projectionSeq": true}
+
+// isLensTombstoneRow reports whether a CONTENTS row's decoded document is a
+// guarded soft-tombstone rather than a live row: isDeleted is true,
+// projectionSeq (the guard's watermark) rode along, and no other field is
+// present. The "no other field" check is what keeps a live row that happens
+// to carry its own isDeleted business column from being misclassified — such
+// a row still carries fields outside the tombstone's three and fails here.
+func isLensTombstoneRow(doc map[string]any) bool {
+	if isDeleted, _ := doc["isDeleted"].(bool); !isDeleted {
+		return false
+	}
+	if _, ok := doc["projectionSeq"]; !ok {
+		return false
+	}
+	for k := range doc {
+		if !lensTombstoneFields[k] {
+			return false
+		}
+	}
+	return true
+}
+
 // The CONTENTS panel's target decision: a nats_kv target browses its bucket,
 // a postgres target routes to the read seam (pg.go — real rows with a
 // configured LOUPE_PG_DSN, the pg-pending shape without one), a nats_subject
@@ -513,7 +578,22 @@ func (s *server) lensRows(w http.ResponseWriter, r *http.Request, id string) {
 		return
 	}
 
-	keys, err := conn.KVListKeys(ctx, bucket)
+	// Prefix-scope the listing to this lens's own keys when its Output
+	// descriptor's pattern yields one — several lenses commonly share one
+	// nats_kv target (weaver-targets carries 13+ lenses' rows), and an
+	// unscoped listing would show every sibling lens's rows in THIS lens's
+	// Contents panel. A lens with no derivable static prefix (no Output
+	// descriptor, or a pattern with no usable static prefix) lists the whole
+	// bucket, exactly as every other target does.
+	var (
+		keys []string
+		err  error
+	)
+	if prefix := lensOutputKeyPrefix(spec.OutputKeyPattern); prefix == "" {
+		keys, err = conn.KVListKeys(ctx, bucket)
+	} else {
+		keys, err = conn.KVListKeysPrefix(ctx, bucket, prefix)
+	}
 	if err != nil {
 		s.writeError(w, http.StatusBadGateway, "list "+bucket+": "+err.Error())
 		return
@@ -529,6 +609,15 @@ func (s *server) lensRows(w http.ResponseWriter, r *http.Request, id string) {
 			row["error"] = err.Error()
 		case json.Valid(entry.Value):
 			row["doc"] = json.RawMessage(entry.Value)
+			// A guarded soft-tombstone key is never removed on retraction
+			// (internal/refractor/adapter/natskv.go guardedWrite), so its
+			// body persists indistinguishably from a live row unless flagged
+			// here — the CONTENTS panel dims it and badges it "retracted"
+			// rather than rendering it as live state.
+			var doc map[string]any
+			if json.Unmarshal(entry.Value, &doc) == nil && isLensTombstoneRow(doc) {
+				row["retracted"] = true
+			}
 		}
 		rows = append(rows, row)
 	}

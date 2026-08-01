@@ -421,15 +421,24 @@ function contentsPanel(lens) {
       return;
     }
     const rows = body.rows || [];
+    const retractedCount = rows.filter((r) => r.retracted).length;
     status.textContent = rows.length + " of " + body.total + " row(s)" +
       (body.bucket ? " · bucket " + body.bucket : "") +
-      (body.table ? " · table " + body.table : "") + (body.truncated ? " · truncated" : "");
+      (body.table ? " · table " + body.table : "") + (body.truncated ? " · truncated" : "") +
+      (retractedCount ? " · " + retractedCount + " retracted" : "");
     if (!rows.length) { rowsBox.appendChild(el("div", "muted", "(no rows)")); return; }
     rows.forEach((r) => {
-      const row = el("details", "lens-row");
-      row.appendChild(el("summary", "cid", r.key));
+      // A retracted row is a guarded soft-tombstone left behind on purpose
+      // (the key is never removed) — dim it and badge it rather than
+      // rendering it indistinguishably from a live row.
+      const row = el("details", "lens-row" + (r.retracted ? " tombstone" : ""));
+      const summary = el("summary", "cid");
+      summary.appendChild(el("span", null, r.key));
+      if (r.retracted) summary.appendChild(el("span", "deleted-flag", "retracted"));
+      row.appendChild(summary);
       // Every key-shaped string in the document walks back into the graph —
-      // the read-path story told in one click.
+      // the read-path story told in one click. The raw body (with its
+      // projectionSeq watermark) stays visible on expand even when retracted.
       if (r.error) row.appendChild(el("div", "error-text small", "fetch failed: " + r.error));
       else row.appendChild(renderDoc(r.doc === undefined ? undefined : r.doc));
       rowsBox.appendChild(row);
