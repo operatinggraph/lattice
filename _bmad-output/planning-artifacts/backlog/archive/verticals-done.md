@@ -2,6 +2,7 @@
 
 Rolled from `verticals.md` when its live Done log passed ~25 entries. Full detail is in git.
 
+- 2026-07-28 · `20893d56` · `menuCatalog` projects each item's `servedAt`; self-order `/api/menu?leaseAppKey=` now offers only what that lease's Charge would accept, mirroring `location_covers`. cafe-domain 0.11.4
 - 2026-07-28 · `e21e374c` · Schedule's Book button now mirrors `renderBookMember`'s started/full gate + adds an own-bookings DoubleBooked check — no longer offers a class `CreateBooking` will refuse
 - 2026-07-28 · `a0414185` · clinic-domain/clinic-app self-anchor doc comments corrected + `staff_patients_rls_test.go` now seeds the real per-patient `authz_anchors` shape (confirmed to fail pre-fix)
 - 2026-07-28 · `c98871b0` · Patient self-booking re-verified live (write path already worked; "still 403s" was stale) — Book Appointment now locks "Select patient" to the signed-in patient's own record
