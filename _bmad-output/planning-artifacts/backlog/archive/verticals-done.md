@@ -2,6 +2,16 @@
 
 Rolled from `verticals.md` when its live Done log passed ~25 entries. Full detail is in git.
 
+- 2026-07-30 · `96c353a4` · Riley's showcase clinic patient now opens a ledger account + visit series; Osei's stale `.hours` window (unrelated blocker hit live) reset unconstrained every seed run
+- 2026-07-30 · `29a98f1f` · `/api/residents` no longer leaks the whole lease-applicant roster to a bare patient session — `resolveSubjectHats` scopes it to the caller's own row or staff, mirroring cafe-app/wellness-app
+- 2026-07-29 · `2b693874` · LoftSpace can now work its maintenance queue — Claim/Resolve wired in Tasks, staff can Report an issue
+- 2026-07-29 · `b7ec7655` · Café composition layer now installs — `install-front-desk`/`install-one-bill` join `install-showcase-domains`, mirroring `install-maintenance`
+- 2026-07-29 · `ccd24300` · A showcase resident can now order something — `seed-showcase.go` seeds Latte + Croissant servedAt the building, idempotent per-item, mirroring `seedCafeTemplate`. cafe self-order menu no longer empty
+- 2026-07-29 · `a9c1e7c0` · Front desk can now read the patient roster — `clinicPatientsRead` anchors on the practicesAt workplace of a patient's appointment providers, not just the patient self-anchor + wildcard. clinic-domain 0.28.12
+- 2026-07-29 · `b3458cb5` · All 3 seeded LoftSpace worlds can now reach a lease decision — 3 seed-script bugs fixed + verified live (`.tenancy` now stamps)
+- 2026-07-28 · `a8c4eee9` · A called-off class no longer strands its bookings — `wellnessOrphanedBookingSettlement` Weaver target releases the seat + guard; My Classes shows "Class cancelled" not `? → ?`. wellness-domain 0.18.0
+- 2026-07-28 · `1f1f5ca0` · cafe-app + wellness-app "Signed in as" resolves a name via self-anchored Secure Lenses; all four vertical apps now resolve one
+- 2026-07-28 · `bb190dab` · clinic-app's "Signed in as" resolves a name via the existing `clinicPatientsRead` roster, mirroring loftspace-app's nameFor/renderSignedInAs
 - 2026-07-28 · `20893d56` · `menuCatalog` projects each item's `servedAt`; self-order `/api/menu?leaseAppKey=` now offers only what that lease's Charge would accept, mirroring `location_covers`. cafe-domain 0.11.4
 - 2026-07-28 · `e21e374c` · Schedule's Book button now mirrors `renderBookMember`'s started/full gate + adds an own-bookings DoubleBooked check — no longer offers a class `CreateBooking` will refuse
 - 2026-07-28 · `a0414185` · clinic-domain/clinic-app self-anchor doc comments corrected + `staff_patients_rls_test.go` now seeds the real per-patient `authz_anchors` shape (confirmed to fail pre-fix)
