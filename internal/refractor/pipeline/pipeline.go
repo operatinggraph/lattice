@@ -425,6 +425,33 @@ func (p *Pipeline) plainReactsTo(vertexType string) bool {
 	return ok
 }
 
+// plainVertexRelevant reports whether a plain (non-actor-aware) lens's
+// KindVertex handling should evaluate a vertex-root event of the given type,
+// or skip-and-Ack it as irrelevant. It shares plainReactsTo's label data but
+// NOT its default: plainReactsTo's false case only tells the aspect/link
+// arms not to run their OWN special-cased reprojection, which is always safe
+// because the caller has no other write path to lose — whereas this gate's
+// false case drops the vertex-root CDC event outright, with no fallback. A
+// wrong "irrelevant" here would blind the lens to real writes, so every
+// uncertain case must default to relevant: a non-full engine (plainReactsTo
+// itself only exists for the full engine's label data, so an engine that
+// isn't full has none to trust), an empty/unrecognized vertex type, or a
+// non-exhaustive referenced-label set (plainReprojectAll) all fall through
+// to evaluation — this gate only ever narrows a full-engine lens's exhaustive
+// label set, it never re-scopes what any other lens evaluates. Only a
+// full-engine lens with an exhaustive label set that provably excludes
+// vertexType is skipped.
+func (p *Pipeline) plainVertexRelevant(vertexType string) bool {
+	if p.engineKind != ruleengine.EngineFull {
+		return true
+	}
+	if p.plainReprojectAll || vertexType == "" {
+		return true
+	}
+	_, ok := p.plainReprojectLabels[vertexType]
+	return ok
+}
+
 // SetEnvelopeFn installs the on-wire envelope wrapper. Pass nil to clear.
 // Clears any installed MultiEnvelopeFn — the two are alternatives, never both
 // active on the same pipeline. Must be called before Run.
@@ -965,6 +992,18 @@ func (p *Pipeline) handle(ctx context.Context, msg substrate.Message) (substrate
 
 	// Edge events carry a non-empty "nodeId" field — adjacency builder handles these.
 	if nodeID, _ := props["nodeId"].(string); nodeID != "" {
+		return substrate.Ack, nil
+	}
+
+	// A plain lens whose compiled patterns provably cannot bind this vertex
+	// type skips the re-execute outright — the KindVertex counterpart of the
+	// aspect/link arms' plainReactsTo skip. Unlike those arms, KindVertex has
+	// no per-type dispatch of its own (every vertex-root event runs the same
+	// full evaluate below), so every vertex write in the system would
+	// otherwise fan into a full evaluation on every plain lens regardless of
+	// type. The actor-aware pipeline has its own
+	// fan-out semantics (evaluateFanOut's actorType routing) and is untouched.
+	if p.actorEnumerator == nil && !p.plainVertexRelevant(label) {
 		return substrate.Ack, nil
 	}
 
