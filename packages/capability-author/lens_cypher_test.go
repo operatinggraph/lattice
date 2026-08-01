@@ -81,7 +81,7 @@ func TestCapabilityProposals_FullEpisodeProjects(t *testing.T) {
 		t.Skip("requires NATS")
 	}
 	adjKV, coreKV := lenstest.KVs(t)
-	key := "vtx.capabilityproposal.capPropOneHJKMNPQRST"
+	key := "vtx.capabilityproposal.capProponeHJKMNPQRST"
 	putVertex(t, coreKV, key, "capabilityproposal")
 	putAspect(t, coreKV, key, "request", "capabilityProposalRequest", map[string]any{
 		"requesterId": "vtx.identity.op1", "intent": "a lens listing active providers", "contextRef": "ctx-1",
