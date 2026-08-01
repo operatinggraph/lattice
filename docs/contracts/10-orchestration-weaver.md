@@ -73,7 +73,13 @@ means Weaver watches all rows under its prefix and **acts only on `violating == 
   dispatch-count is bounded by). Both are read to alter dispatch, **not** gaps — they never carry the
   `missing_` prefix, so the gap scan ignores them; an absent/non-bool `inflight_<g>` and an
   absent/non-positive `maxretries_<g>` both read to the **safe (dispatchable)** side, so a missing or
-  garbled input never silently wedges a real gap. See §10.8 (dispatch suppression) and §10.3 (`__count`).
+  garbled input never silently wedges a real gap. One bounded exception: a **`directOp`** gap whose row
+  declares **neither** companion falls back to the engine's default retry budget (3 dispatches), then
+  raises the §10.8 `GapBudgetExhausted` standing issue — a loud stop, never a silent park (reclaim is
+  otherwise unpaced for `directOp`, so an undeclared budget would re-fire a rejected op every lease
+  expiry forever). A declared `maxretries_<g>`, however small, always wins; a gap declaring
+  `inflight_<g>` alone keeps its own §10.3 pacing; other actions are untouched.
+  See §10.8 (dispatch suppression) and §10.3 (`__count`).
 - **param columns** (free-form, e.g. `applicant`) — whatever the §10.8 playbook templates reference
   (`row.<field>`); the Lens **must project every column the playbook templates name**.
 - **`freshUntil`** (optional, engine-recognized convention) — an RFC3339 instant the target cypher

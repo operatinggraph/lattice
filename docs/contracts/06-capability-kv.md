@@ -522,9 +522,11 @@ convergence lens projectable through Refractor's actorAggregate path.
 
 The change is **additive and opt-in by value shape**: existing roster lenses (`my-tasks`,
 `capabilityEphemeral`, the bootstrap `capability`) declare list body columns and are **unaffected**
-(byte-for-byte identical projections + delete-when-empty). The empty-actor delete path is preserved: a
-convergence lens that disappears (its required anchor MATCH yields no row) still retracts via the
-actor-disappearance delete at `BuildKey(actorKey)`; a lens that designates a **scalar** `realnessFilter`
+(byte-for-byte identical projections + delete-when-empty). The empty-actor delete paths are distinct per
+cause: an anchor that is **tombstoned** retracts via the actor-disappearance delete at
+`BuildKey(actorKey)`; a **live** anchor whose required MATCH stops yielding a row retracts via the
+doc-mode zero-row retraction (a clean zero-row evaluation of an `emptyBehavior: delete`/`softDelete`
+lens tombstones its positively-confirmed-live key); a lens that designates a **scalar** `realnessFilter`
 column (e.g. `entityKey` non-null = anchor alive) still drives the `emptyBehavior` retract when that scalar
 is absent. Landed in Refractor's Epic-12 Output-descriptor machinery
 (`internal/refractor/projection/driver.go` `EnvelopeFn`); no frozen-contract widening.
