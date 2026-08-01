@@ -261,6 +261,39 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Retires the superseded per-lens "AUDIT_<ruleID>" stream layout —
+	// idempotent (an already-cleaned deployment no-ops) and self-healing, so
+	// no environment needs a manual sweep. Must run BEFORE EnsureAuditStream
+	// below: each legacy stream's subject (lattice.refractor.audit.<ruleID>)
+	// is a literal subset of the consolidated stream's wildcard
+	// (lattice.refractor.audit.>), and JetStream permanently refuses to
+	// create a stream whose subjects overlap an existing one's
+	// (JSStreamSubjectOverlapErr) — so on any deployment that still has
+	// legacy streams, creating REFRACTOR_AUDIT first would fail every boot
+	// until they were removed by hand. Best-effort: a failure here leaves
+	// stray legacy streams for the next boot to retry — EnsureAuditStream's
+	// own overlap error is the fail-closed backstop if one survives.
+	var legacyAuditStreamsDeleted int
+	cleanupErr := retryTransientBoot(ctx, func() error {
+		n, err := health.CleanupLegacyAuditStreams(ctx, conn)
+		legacyAuditStreamsDeleted = n
+		return err
+	})
+	if cleanupErr != nil {
+		logger.Error("cleanup legacy audit streams", "err", cleanupErr)
+	} else if legacyAuditStreamsDeleted > 0 {
+		logger.Info("retired legacy per-lens audit streams", "count", legacyAuditStreamsDeleted)
+	}
+
+	// The consolidated Refractor audit trail (docs/components/refractor.md's
+	// Audit row): one JetStream stream shared by every lens, ensured once
+	// here rather than per lens in startPipeline — every lens's AuditWriter
+	// below publishes into it under its own subject.
+	if err := retryTransientBoot(ctx, func() error { return health.EnsureAuditStream(ctx, conn) }); err != nil {
+		logger.Error("ensure audit stream", "err", err)
+		os.Exit(1)
+	}
+
 	bootstrapper := consumer.NewBootstrapper(conn, coreKVBucket, adjKV)
 	go func() {
 		if err := bootstrapper.Run(ctx); err != nil && ctx.Err() == nil {
@@ -949,12 +982,9 @@ func main() {
 
 		// Per-rule audit trail: append an entry to lattice.refractor.audit.<lensId>
 		// on every successful write (docs/components/refractor-failure-tiers.md).
-		aw := health.NewAuditWriter(conn, r.ID)
-		if err := retryTransientBoot(ctx, func() error { return aw.EnsureStream(ctx) }); err != nil {
-			logger.Error("ensure audit stream", "lensId", r.ID, "err", err)
-			return
-		}
-		p.SetAuditWriter(aw)
+		// The backing stream (health.AuditStreamName, shared by every lens) is
+		// ensured once at process startup, not here.
+		p.SetAuditWriter(health.NewAuditWriter(conn, r.ID))
 
 		lensCtx, cancel := context.WithCancel(ctx)
 		done := make(chan struct{})

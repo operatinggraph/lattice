@@ -29,10 +29,17 @@ func Metrics(lensID string) string {
 	return fmt.Sprintf("lattice.refractor.metrics.%s", lensID)
 }
 
-// Audit returns the NATS subject for the Refractor per-lens audit stream.
+// Audit returns the NATS subject a lens publishes its audit entries on.
 func Audit(lensID string) string {
 	validateToken("lensID", lensID)
 	return fmt.Sprintf("lattice.refractor.audit.%s", lensID)
+}
+
+// AuditFilter returns the wildcard NATS subject covering every lens's audit
+// subject — the subject filter for the single consolidated audit stream all
+// lenses share.
+func AuditFilter() string {
+	return "lattice.refractor.audit.>"
 }
 
 func AdjKey(nodeID string) string {

@@ -7,14 +7,34 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/operatinggraph/lattice/internal/refractor/subjects"
 	"github.com/operatinggraph/lattice/internal/substrate"
 )
 
-// auditStreamMaxAge is the default retention period for audit stream messages.
+// auditStreamMaxAge is the retention period for audit stream messages.
 const auditStreamMaxAge = 7 * 24 * time.Hour
+
+// auditStreamMaxBytes bounds the consolidated audit stream to a fixed
+// audit-forensics storage budget — 512 MiB — independent of how many lenses
+// a deployment activates. The per-lens stream layout this replaced carried
+// no byte cap at all; on one measured dev stack that grew to 95 streams /
+// 20.4M messages / 5.6 GB (93% of the whole JetStream store) and contributed
+// to a NATS OOM.
+const auditStreamMaxBytes = 512 << 20
+
+// AuditStreamName is the JetStream stream every lens's audit entries share.
+// Entries are distinguished by subject (lattice.refractor.audit.<lensId>,
+// via subjects.Audit), never by stream — one physical stream regardless of
+// how many lenses a deployment activates.
+const AuditStreamName = "REFRACTOR_AUDIT"
+
+// auditStreamLegacyPrefix is the JetStream stream-name prefix the retired
+// per-lens audit layout used: one stream per rule, "AUDIT_<ruleID>".
+// CleanupLegacyAuditStreams deletes every stream still matching it.
+const auditStreamLegacyPrefix = "AUDIT_"
 
 // AuditEntry is the JSON payload appended to lattice.refractor.audit.<lensId> on each
 // successful write. All field names are camelCase per FR21 convention.
@@ -25,9 +45,10 @@ type AuditEntry struct {
 	Timestamp     string `json:"timestamp"`     // RFC3339 UTC
 }
 
-// AuditWriter appends audit entries to the per-rule JetStream audit stream after
-// each successful write operation. The stream is append-only (LimitsPolicy, 7-day
-// MaxAge). Call EnsureStream once at startup before WriteAudit.
+// AuditWriter appends one rule's audit entries to the shared AuditStreamName
+// JetStream stream, addressed by that rule's own subject
+// (lattice.refractor.audit.<lensId>). EnsureAuditStream must be called once
+// at process startup — not per writer — before any WriteAudit.
 type AuditWriter struct {
 	conn   *substrate.Conn
 	ruleID string
@@ -45,20 +66,61 @@ func NewAuditWriter(conn *substrate.Conn, ruleID string) *AuditWriter {
 	return &AuditWriter{conn: conn, ruleID: ruleID}
 }
 
-// EnsureStream creates or updates the JetStream audit stream for this rule.
-// Idempotent — safe to call on every process startup. Must be called before WriteAudit.
-// Stream name: "AUDIT_<ruleID>"; subject: lattice.refractor.audit.<lensId>.
-// Retention: LimitsPolicy with 7-day MaxAge (NFR6 — not instantly purgeable).
-func (a *AuditWriter) EnsureStream(ctx context.Context) error {
-	if err := a.conn.EnsureStream(ctx, substrate.StreamSpec{
-		Name:     auditStreamName(a.ruleID),
-		Subjects: []string{subjects.Audit(a.ruleID)},
+// EnsureAuditStream creates or updates the single JetStream stream backing
+// every lens's audit trail (AuditStreamName, subject filter
+// subjects.AuditFilter()). Idempotent — safe to call once on every process
+// startup, before any AuditWriter.WriteAudit. Retention: LimitsPolicy with a
+// 7-day MaxAge (NFR6 — not instantly purgeable) and a 512 MiB MaxBytes
+// ceiling so the diagnostic trail cannot grow to exhaust the shared
+// JetStream store no matter how many lenses a deployment activates.
+//
+// Call CleanupLegacyAuditStreams first. A surviving legacy per-lens stream's
+// subject (lattice.refractor.audit.<ruleID>) is a literal subset of this
+// stream's wildcard subject, and JetStream permanently refuses to create a
+// stream whose subjects overlap an existing one's — so this call fails on
+// any deployment that still has legacy streams until they are removed.
+func EnsureAuditStream(ctx context.Context, conn *substrate.Conn) error {
+	if err := conn.EnsureStream(ctx, substrate.StreamSpec{
+		Name:     AuditStreamName,
+		Subjects: []string{subjects.AuditFilter()},
 		MaxAge:   auditStreamMaxAge,
+		MaxBytes: auditStreamMaxBytes,
 	}); err != nil {
-		return fmt.Errorf("health: AuditWriter.EnsureStream %s: %w", a.ruleID, err)
+		return fmt.Errorf("health: EnsureAuditStream: %w", err)
 	}
-	slog.Info("health: audit stream ready", "ruleId", a.ruleID, "stream", auditStreamName(a.ruleID))
+	slog.Info("health: audit stream ready", "stream", AuditStreamName, "subjects", subjects.AuditFilter())
 	return nil
+}
+
+// CleanupLegacyAuditStreams deletes every JetStream stream left over from the
+// retired per-lens audit layout (one stream per rule, "AUDIT_<ruleID>"),
+// superseded by the single AuditStreamName stream. Idempotent: an
+// environment with no legacy streams left runs this as a no-op, so it is
+// safe to call unconditionally on every startup — self-healing every
+// environment, including ones already cleaned up by hand. Returns the
+// number of streams deleted.
+//
+// Call this before EnsureAuditStream, not after: each legacy stream's
+// subject is a literal subset of the consolidated stream's wildcard
+// subject, and JetStream refuses to create a stream whose subjects overlap
+// an existing one's, so a surviving legacy stream would otherwise fail
+// every EnsureAuditStream call.
+func CleanupLegacyAuditStreams(ctx context.Context, conn *substrate.Conn) (int, error) {
+	names, err := conn.StreamNames(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("health: CleanupLegacyAuditStreams: list streams: %w", err)
+	}
+	var deleted int
+	for _, name := range names {
+		if name == AuditStreamName || !strings.HasPrefix(name, auditStreamLegacyPrefix) {
+			continue
+		}
+		if err := conn.DeleteStream(ctx, name); err != nil {
+			return deleted, fmt.Errorf("health: CleanupLegacyAuditStreams: delete %q: %w", name, err)
+		}
+		deleted++
+	}
+	return deleted, nil
 }
 
 // WriteAudit publishes one audit entry for a committed successful write.
@@ -80,11 +142,6 @@ func (a *AuditWriter) WriteAudit(ctx context.Context, entityID, op string, row m
 		return fmt.Errorf("health: AuditWriter.WriteAudit publish %s: %w", entityID, err)
 	}
 	return nil
-}
-
-// auditStreamName returns the JetStream stream name for the given ruleID.
-func auditStreamName(ruleID string) string {
-	return "AUDIT_" + ruleID
 }
 
 // rowHash computes a deterministic SHA-256 hex digest of the written row for upsert

@@ -77,6 +77,10 @@ func TestAudit(t *testing.T) {
 	}
 }
 
+func TestAuditFilter(t *testing.T) {
+	assert.Equal(t, "lattice.refractor.audit.>", AuditFilter())
+}
+
 func TestPersonalSync(t *testing.T) {
 	tests := []struct {
 		prefix, actorID, want string

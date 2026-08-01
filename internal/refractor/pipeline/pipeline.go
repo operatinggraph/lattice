@@ -555,9 +555,11 @@ func (p *Pipeline) SetLagPoller(lp *health.LagPoller) {
 	p.lagPoller = lp
 }
 
-// SetAuditWriter attaches an AuditWriter that appends entries to the per-rule
-// JetStream audit stream on every successful write.
-// Must be called before Run. EnsureStream must have been called on aw before Run.
+// SetAuditWriter attaches an AuditWriter that appends this rule's entries to
+// the shared JetStream audit stream (health.AuditStreamName) on every
+// successful write.
+// Must be called before Run. health.EnsureAuditStream must have been called
+// once at process startup before Run.
 func (p *Pipeline) SetAuditWriter(aw *health.AuditWriter) {
 	p.auditWriter = aw
 }

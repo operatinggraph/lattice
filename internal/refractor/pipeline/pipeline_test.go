@@ -990,19 +990,20 @@ func TestPipeline_AuditEntry_WrittenOnSuccess(t *testing.T) {
 	require.NoError(t, err)
 	p.UseFullEngine(eng, cr)
 
-	// Create the audit stream and attach the writer.
-	aw := health.NewAuditWriter(env.conn, ruleID)
-	require.NoError(t, aw.EnsureStream(context.Background()))
-	p.SetAuditWriter(aw)
+	// Create the shared audit stream and attach the writer.
+	require.NoError(t, health.EnsureAuditStream(context.Background(), env.conn))
+	p.SetAuditWriter(health.NewAuditWriter(env.conn, ruleID))
 
 	startPipeline(t, env, p, ruleID)
 
 	// Put a node into Core KV — this triggers an upsert.
 	putNode(t, env.coreKV, "vtx.agreement."+sentinelAgreementEnt1, map[string]any{"id": "ent1", "status": "active"})
 
-	// Read the audit entry from the JetStream stream.
-	cons, err := env.js.CreateOrUpdateConsumer(context.Background(), "AUDIT_"+ruleID, jetstream.ConsumerConfig{
+	// Read the audit entry from the shared JetStream stream, filtered to
+	// this rule's own subject.
+	cons, err := env.js.CreateOrUpdateConsumer(context.Background(), health.AuditStreamName, jetstream.ConsumerConfig{
 		Name:          "pipeline-audit-test-consumer",
+		FilterSubject: subjects.Audit(ruleID),
 		DeliverPolicy: jetstream.DeliverAllPolicy,
 		AckPolicy:     jetstream.AckNonePolicy,
 	})
@@ -1037,10 +1038,9 @@ func TestPipeline_NoAuditEntry_OnWriteFailure(t *testing.T) {
 	require.NoError(t, err)
 	p.UseFullEngine(eng, cr)
 
-	// Create the audit stream and attach the writer.
-	aw := health.NewAuditWriter(env.conn, ruleID)
-	require.NoError(t, aw.EnsureStream(context.Background()))
-	p.SetAuditWriter(aw)
+	// Create the shared audit stream and attach the writer.
+	require.NoError(t, health.EnsureAuditStream(context.Background(), env.conn))
+	p.SetAuditWriter(health.NewAuditWriter(env.conn, ruleID))
 
 	startPipeline(t, env, p, ruleID)
 
@@ -1051,7 +1051,7 @@ func TestPipeline_NoAuditEntry_OnWriteFailure(t *testing.T) {
 	time.Sleep(300 * time.Millisecond)
 
 	// The audit stream must remain empty — no successful writes occurred.
-	stream, err := env.js.Stream(context.Background(), "AUDIT_"+ruleID)
+	stream, err := env.js.Stream(context.Background(), health.AuditStreamName)
 	require.NoError(t, err)
 	info, err := stream.Info(context.Background())
 	require.NoError(t, err)
