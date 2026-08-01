@@ -1,6 +1,7 @@
 # Done log archive — lattice (older shipped items, newest first)
 
 
+- 2026-07-30 · `a43f9fcf` · [Refractor] a walk-owned column's own multi-row fan-out (multi-hat actor, 2+ roles reaching one op) now resolves deterministically per owner branch instead of refusing the merge
 - 2026-07-30 · `de806ee4` · [Refractor] an accepted MATCH hot-reload now triggers Pipeline.Rebuild, reprojecting the existing corpus instead of only future events
 - 2026-07-29 · `9d5e2348` · [Refractor] shared-keyspace composition (d) — tasks merged into one multi-walk lens, verified live [design §17](../../implementation-artifacts/refractor-shared-keyspace-arbitration-design.md)
 - 2026-07-29 · `4186479a` · [Refractor] shared-keyspace composition (c) — catalog merged into one multi-walk lens, classifier gap fixed, verified live [design §16](../../implementation-artifacts/refractor-shared-keyspace-arbitration-design.md)
