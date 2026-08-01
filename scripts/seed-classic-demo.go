@@ -23,12 +23,16 @@
 // not the Gateway.
 //
 // NOT idempotent: mints fresh vertices on every run (no dedup key), matching
-// seed-edge-demo.go's own dev-loop convention — EXCEPT the clinic patient and
-// provider, which use fixed, checked-in handles (patientID / providerID
-// below, mirroring seed-showcase.go's idempotency seam) because they land in
-// a roster shared across every run: an unpinned id let a rerun mint a second
-// "Dr. Classic Demo" / "Classic Demo Patient" that the booking picker and
-// patient roster then rendered as an indistinguishable duplicate.
+// seed-edge-demo.go's own dev-loop convention — EXCEPT the entities that land
+// in a roster or browsable inventory shared across every run, which use
+// fixed, checked-in handles (patientID / providerID / unitID / studioID
+// below, mirroring seed-showcase.go's idempotency seam): an unpinned id let a
+// rerun mint a second "Dr. Classic Demo" / "Classic Demo Patient" /
+// "12 Classic Demo Ave" / "Classic Demo Studio" that the booking picker,
+// patient roster, LoftSpace inventory, or /api/studios then rendered as an
+// indistinguishable duplicate. The appointment and (below) the session stay
+// day-derived rather than fixed, so a same-day rerun still converges without
+// permanently pinning a single calendar slot.
 //
 // Run via: make seed-classic-demo (== go run ./scripts/seed-classic-demo.go)
 package main
@@ -53,11 +57,17 @@ import (
 
 // Fixed, checked-in handles (Contract #1 — valid 20-char canonical NanoIDs,
 // generated once via substrate.NewNanoID and pinned here) — the idempotency
-// seam for the two clinic entities every run must converge on rather than
-// duplicate, mirroring seed-showcase.go's convention.
+// seam entities shared across every run must converge on rather than
+// duplicate, mirroring seed-showcase.go's convention. unitID/studioID join
+// patientID/providerID for the same reason: an unpinned CreateLocation /
+// CreateStudio mints a fresh vertex every rerun, and LoftSpace's browsable
+// inventory + /api/studios both rendered the resulting pile of
+// indistinguishable "12 Classic Demo Ave" / "Classic Demo Studio" duplicates.
 const (
 	patientID  = "rQ7RnR5XWyZP2BSropUD"
 	providerID = "zJjptLYizx4vDU6KRt9i"
+	unitID     = "7mRGqbqxmZqPV9HY12T2"
+	studioID   = "neEA76zkT84xv8tc6CNX"
 )
 
 func main() {
@@ -78,21 +88,27 @@ func main() {
 
 	// --- LoftSpace: unit + listing + consumer + lease application -----------
 
-	unitReply := submitOp(ctx, conn, adminKey, "CreateLocation", "location",
-		map[string]any{"locationType": "unit",
-			"presentation": map[string]any{"name": "Unit 1", "icon": "door"}}, nil)
-	unitKey := unitReply.PrimaryKey
+	unitKey := "vtx.unit." + unitID
+	if !alive(ctx, conn, unitKey) {
+		submitOp(ctx, conn, adminKey, "CreateLocation", "location",
+			map[string]any{"locationType": "unit", "locationId": unitID,
+				"presentation": map[string]any{"name": "Unit 1", "icon": "door"}}, nil)
+	}
 	fmt.Printf("==> unit:            %s\n", unitKey)
 
-	submitOp(ctx, conn, adminKey, "SetUnitAddress", "loftspaceListing",
-		map[string]any{"unit": unitKey, "line1": "12 Classic Demo Ave", "city": "Springfield", "region": "OR", "postal": "97477"},
-		&processor.ContextHint{Reads: []string{unitKey}})
+	if !alive(ctx, conn, unitKey+".address") {
+		submitOp(ctx, conn, adminKey, "SetUnitAddress", "loftspaceListing",
+			map[string]any{"unit": unitKey, "line1": "12 Classic Demo Ave", "city": "Springfield", "region": "OR", "postal": "97477"},
+			&processor.ContextHint{Reads: []string{unitKey}})
+	}
 	fmt.Println("==> wired:           unit address")
 
-	submitOp(ctx, conn, adminKey, "SetListing", "loftspaceListing",
-		map[string]any{"unit": unitKey, "rentAmount": 2200, "rentCurrency": "USD", "bedrooms": 1,
-			"availableFrom": "2026-08-01T00:00:00Z", "leaseTermMonths": 12, "status": "available"},
-		&processor.ContextHint{Reads: []string{unitKey}})
+	if !alive(ctx, conn, unitKey+".listing") {
+		submitOp(ctx, conn, adminKey, "SetListing", "loftspaceListing",
+			map[string]any{"unit": unitKey, "rentAmount": 2200, "rentCurrency": "USD", "bedrooms": 1,
+				"availableFrom": "2026-08-01T00:00:00Z", "leaseTermMonths": 12, "status": "available"},
+			&processor.ContextHint{Reads: []string{unitKey}})
+	}
 	fmt.Printf("==> listing:         %s (available)\n", unitKey)
 
 	// DecideLeaseApplication's self-scoped grant is authorized off the
@@ -212,32 +228,41 @@ func main() {
 
 	// --- Wellness: studio + bookable session ---------------------------------
 
-	studioReply := submitOp(ctx, conn, adminKey, "CreateStudio", "studio",
-		map[string]any{"name": "Classic Demo Studio", "location": unitKey},
-		&processor.ContextHint{Reads: []string{unitKey}})
-	studioKey := studioReply.PrimaryKey
+	studioKey := "vtx.studio." + studioID
+	if !alive(ctx, conn, studioKey) {
+		submitOp(ctx, conn, adminKey, "CreateStudio", "studio",
+			map[string]any{"name": "Classic Demo Studio", "studioId": studioID, "location": unitKey},
+			&processor.ContextHint{Reads: []string{unitKey}})
+	}
 	fmt.Printf("==> studio:          %s\n", studioKey)
 
 	// Same 15-minute grid the clinic's appointment uses; the wellness DDL
-	// rejects an unaligned span with SlotGridViolation.
+	// rejects an unaligned span with SlotGridViolation. Day-derived like the
+	// appointment's apptID above, so a same-day rerun converges on the same
+	// session instead of double-booking the now-fixed studio.
 	sessionStart := time.Now().UTC().Add(24 * time.Hour).Truncate(15 * time.Minute)
 	sessionEnd := sessionStart.Add(time.Hour)
+	sessionID := substrate.DeriveNanoID("classic-demo-session", sessionStart.Format("2006-01-02"))
+	sessionKey := "vtx.session." + sessionID
 
-	sessionReply := submitOp(ctx, conn, adminKey, "CreateSession", "session",
-		map[string]any{
-			"studio":   studioKey,
-			"name":     "Vinyasa Flow",
-			"startsAt": sessionStart.Format(time.RFC3339),
-			"endsAt":   sessionEnd.Format(time.RFC3339),
-			"capacity": 12,
-		},
-		&processor.ContextHint{
-			Reads: []string{studioKey},
-			// The studio's per-cell slot claims: absent until something books
-			// the cell, so optional (Contract #2 §2.5 read-before-create).
-			OptionalReads: slotClaimKeys(studioKey, sessionStart, sessionEnd),
-		})
-	fmt.Printf("==> session:         %s (%s, capacity 12)\n", sessionReply.PrimaryKey, sessionStart.Format(time.RFC3339))
+	if !alive(ctx, conn, sessionKey) {
+		submitOp(ctx, conn, adminKey, "CreateSession", "session",
+			map[string]any{
+				"studio":    studioKey,
+				"sessionId": sessionID,
+				"name":      "Vinyasa Flow",
+				"startsAt":  sessionStart.Format(time.RFC3339),
+				"endsAt":    sessionEnd.Format(time.RFC3339),
+				"capacity":  12,
+			},
+			&processor.ContextHint{
+				Reads: []string{studioKey},
+				// The studio's per-cell slot claims: absent until something
+				// books the cell, so optional (Contract #2 §2.5 read-before-create).
+				OptionalReads: slotClaimKeys(studioKey, sessionStart, sessionEnd),
+			})
+	}
+	fmt.Printf("==> session:         %s (%s, capacity 12)\n", sessionKey, sessionStart.Format(time.RFC3339))
 
 	fmt.Println()
 	fmt.Println("==> classic vertical demo data seeded.")
@@ -248,7 +273,7 @@ func main() {
 	fmt.Printf("    appointment: %s\n", apptKey)
 	fmt.Printf("    tab:         %s\n", tabReply.PrimaryKey)
 	fmt.Printf("    studio:      %s\n", studioKey)
-	fmt.Printf("    session:     %s\n", sessionReply.PrimaryKey)
+	fmt.Printf("    session:     %s\n", sessionKey)
 }
 
 // linkKey builds the deterministic 6-segment link key (Contract #1 §1) for a
