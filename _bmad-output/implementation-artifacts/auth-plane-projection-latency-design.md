@@ -1,6 +1,7 @@
 # Bounding auth-plane projection latency — relevance-gate and pattern-direct the actor-aware fan-out
 
-**Status: 📐 awaiting-Andrew (ratification)** — Designer fire, Winston, 2026-08-01.
+**Status: ✅ Andrew-ratified 2026-08-01** — build-ready; increments in §10 order.
+Designer fire, Winston, 2026-08-01.
 Owning component: **Refractor** (`internal/refractor/pipeline`, `internal/refractor/projection`,
 `internal/refractor/ruleengine/full`).
 Board row: `backlog/lattice.md` → *[Refractor] Post-claim auth-grant latency is unbounded by design*.
@@ -25,12 +26,13 @@ type. Neither has a live instance in today's corpus, and both are load-bearing t
 narrowed. **Increment 0 closes them and hardens what already shipped** — it is worth building even if
 you reject everything else here.
 
-**No architectural fork forced, but one product question is yours** (§8.1): should the platform offer a
-*read-your-own-grant* guarantee (the Gateway blocking on grant convergence after `ClaimIdentity`), or
-stay eventually-consistent with the client-side retry Facet already ships? **My recommendation: stay
-eventually-consistent.** A convergence wait puts a lens round-trip on the authentication hot path and
-converts a latency problem into an availability one; the fires below remove the two *unbounded* terms,
-which is the actual defect. Options + trade-offs in §8.1.
+**The read-your-own-grant fork (§8.1) resolved to Option A — eventually-consistent + client retry.**
+Recorded as settled by the ratification itself, not by a separate instruction: Option A *is* "ship this
+decomposition and change nothing else", whereas B (Gateway blocks on convergence) and C (a contract-level
+SLA) each require work §10 does not contain, so ratifying §10 entails A. Option B remains available as a
+**sequenced** follow-on if the post-Increment-3 measurement shows the p99 is still poor for a real
+product surface — with data behind it. If that reading of the ratification is wrong, this paragraph is
+the one to correct.
 
 **No frozen-contract change.** Contract #6 states no projection-latency promise and none of its
 semantics move (§7). Nothing is staged uncommitted.
