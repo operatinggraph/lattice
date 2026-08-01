@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -97,6 +98,33 @@ func (h *sweepHarness) putMark(t *testing.T, ctx context.Context, key string, re
 }
 
 func (h *sweepHarness) pass(ctx context.Context) { h.engine.sweep.pass(ctx) }
+
+// reexpireMark rewrites an already-reclaimed mark's ClaimedAt (pushed back,
+// fixtureMark's own "-2h" convention) and LeaseExpiresAt (past) — simulating
+// that time has passed since the mark's last reclaim, so the NEXT sweep pass
+// treats it as an expired lease again regardless of any configured reclaim
+// backoff. Drives a mark through several successive reclaims in one test
+// without a real wall-clock wait.
+func (h *sweepHarness) reexpireMark(t *testing.T, ctx context.Context, key string) {
+	t.Helper()
+	entry, err := h.conn.KVGet(ctx, "weaver-state", key)
+	if err != nil {
+		t.Fatalf("read mark %q to re-expire: %v", key, err)
+	}
+	var rec mark
+	if err := json.Unmarshal(entry.Value, &rec); err != nil {
+		t.Fatalf("unmarshal mark %q to re-expire: %v", key, err)
+	}
+	rec.ClaimedAt = substrate.FormatTimestamp(time.Now().Add(-2 * time.Hour))
+	rec.LeaseExpiresAt = pastLease()
+	body, err := json.Marshal(rec)
+	if err != nil {
+		t.Fatalf("marshal re-expired mark %q: %v", key, err)
+	}
+	if _, err := h.conn.KVPut(ctx, "weaver-state", key, body); err != nil {
+		t.Fatalf("put re-expired mark %q: %v", key, err)
+	}
+}
 
 // agePastWarmup rewinds the sweeper's start anchor so the orphan legs'
 // warm-up window reads as elapsed.
@@ -1029,6 +1057,74 @@ func TestSweep_ControlMarkerSurvives(t *testing.T) {
 	h.requireNoOp(t)
 }
 
+// TestSweep_DisabledTargetExpiredMarkNotReclaimed proves the freeze gate
+// sweepMark consults ahead of reclaim (isTargetDisabled, reconciler.go): a
+// disabled target's expired-lease mark over a STILL-VIOLATING gap is left
+// standing — no reclaim, no op fires, the sweepReclaims metric stays at 0 —
+// while a DIFFERENT mark on the very same disabled target whose gap has
+// already closed still clears via the unconditional level-reconciled pass
+// (disabling suppresses only re-dispatch, never the bookkeeping clears —
+// docs/components/weaver.md "Dispatch-skip marker and in-memory cache").
+func TestSweep_DisabledTargetExpiredMarkNotReclaimed(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	h := newSweepHarness(t, ctx)
+	h.agePastWarmup()
+
+	const targetID = "fixtureDisabledReclaim"
+	h.seedTarget(&Target{
+		TargetID: targetID,
+		Gaps:     map[string]GapAction{"missing_x": {Action: actionDirectOp, Operation: "FixX"}},
+	})
+	// Mirrors Engine.Disable's in-memory half directly (the harness never runs
+	// Start/seedDisabledTargets) — isTargetDisabled reads only this set.
+	h.engine.disabled.set(targetID, true)
+
+	// (1) Still violating, expired lease: must NOT be reclaimed while disabled.
+	openEntity := testNanoID(t)
+	openKey := markKey(targetID, openEntity, "missing_x")
+	openRev := h.putMark(t, ctx, openKey, fixtureMark(targetID, openEntity, "missing_x", "directOp", pastLease()))
+	h.putRow(t, ctx, targetID, openEntity, map[string]any{
+		"entityKey": "vtx.leaseApp." + openEntity, "violating": true, "missing_x": true,
+	})
+
+	// (2) Gap already closed, expired lease: must still clear (bookkeeping
+	// runs regardless of the freeze — only re-dispatch is gated).
+	closedEntity := testNanoID(t)
+	closedKey := markKey(targetID, closedEntity, "missing_x")
+	h.putMark(t, ctx, closedKey, fixtureMark(targetID, closedEntity, "missing_x", "directOp", pastLease()))
+	h.putRow(t, ctx, targetID, closedEntity, map[string]any{
+		"entityKey": "vtx.leaseApp." + closedEntity, "violating": false, "missing_x": false,
+	})
+
+	h.pass(ctx)
+
+	entry, err := h.conn.KVGet(ctx, "weaver-state", openKey)
+	if err != nil || entry.Revision != openRev {
+		t.Fatalf("a disabled target's expired-lease mark over a still-open gap must be left untouched (err=%v)", err)
+	}
+	if h.markExists(t, ctx, closedKey) {
+		t.Fatalf("a disabled target's gap-closed mark must still clear (cleanup, not new dispatch)")
+	}
+	if reclaims, _, _, _, _ := h.engine.sweep.metrics(); reclaims != 0 {
+		t.Fatalf("sweepReclaims = %d, want 0 (the target is disabled)", reclaims)
+	}
+	h.requireNoOp(t)
+
+	// Enabling the target resumes reclaim for whatever is still violating —
+	// nothing about the mark is lost across the freeze.
+	h.engine.disabled.set(targetID, false)
+	h.pass(ctx)
+	h.nextOp(t)
+	if reclaims, _, _, _, _ := h.engine.sweep.metrics(); reclaims != 1 {
+		t.Fatalf("sweepReclaims = %d, want 1 (re-enabling must resume the deferred reclaim)", reclaims)
+	}
+}
+
 // TestConfigClamps proves the withDefaults invariants that keep the sweep's
 // reclaim leg reachable: SweepInterval is clamped to MarkLease (an expired
 // mark must be observed before its 2×lease TTL deletes it unseen) and
@@ -1267,6 +1363,186 @@ func TestSweep_ExhaustedBudgetGapEscalatesToAugur(t *testing.T) {
 	}
 	if reclaims, _, _, _, _ := h.engine.sweep.metrics(); reclaims != 0 {
 		t.Fatalf("sweepReclaims = %d, want 0 (the escalation is not a reclaim of the original mark)", reclaims)
+	}
+}
+
+// TestSweep_DirectOpDefaultBudgetEscalates proves the default retry bound
+// end-to-end: a "directOp" gap whose row declares NEITHER
+// maxretries_<g> NOR inflight_<g> — orphanedTaskGrants/ReleaseOrphanedBooking's
+// exact shape — reclaim-dispatches up to defaultDirectOpRetryBudget times
+// (standing in for "boot + reclaims": each loop iteration is a genuine fresh
+// dispatch that bumps the chain's dispatch-count, mirroring
+// TestSweep_ReclaimIncrementsBudget) and then, instead of a 4th
+// reclaim-dispatch, the sweep raises the standing GapBudgetExhausted Health
+// issue — naming the engine default so an operator can tell it apart from a
+// declared cap — and stops dispatching.
+func TestSweep_DirectOpDefaultBudgetEscalates(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	h := newSweepHarness(t, ctx)
+	h.agePastWarmup()
+
+	const targetID = "fixtureDirectOpDefault"
+	h.seedTarget(&Target{
+		TargetID: targetID,
+		Gaps:     map[string]GapAction{"missing_x": {Action: actionDirectOp, Operation: "FixX"}},
+	})
+	entityID := testNanoID(t)
+	key := markKey(targetID, entityID, "missing_x")
+	h.putMark(t, ctx, key, fixtureMark(targetID, entityID, "missing_x", "directOp", pastLease()))
+	// No maxretries_x, no inflight_x declared.
+	h.putRow(t, ctx, targetID, entityID, map[string]any{
+		"entityKey": "vtx.leaseApp." + entityID, "violating": true, "missing_x": true,
+	})
+
+	for i := 0; i < defaultDirectOpRetryBudget; i++ {
+		h.pass(ctx)
+		h.nextOp(t)
+		h.reexpireMark(t, ctx, key)
+	}
+	if got, err := h.engine.marks.getDispatchCount(ctx, targetID, entityID, "missing_x"); err != nil || got != defaultDirectOpRetryBudget {
+		t.Fatalf("dispatch-count after %d reclaims = %d (err=%v), want %d", defaultDirectOpRetryBudget, got, err, defaultDirectOpRetryBudget)
+	}
+	if hasIssueCode(h.engine.issues.snapshot(), "GapBudgetExhausted") {
+		t.Fatalf("must not exhaust before the engine default %d is reached", defaultDirectOpRetryBudget)
+	}
+
+	// The next pass: the engine-default budget is spent. Escalate; do not
+	// reclaim-dispatch a 4th time.
+	h.pass(ctx)
+	h.requireNoOp(t)
+
+	issues := h.engine.issues.snapshot()
+	if sev := issueSeverity(issues, "GapBudgetExhausted"); sev != "warning" {
+		t.Fatalf("expected a GapBudgetExhausted warning issue, got severity %q (issues: %+v)", sev, issues)
+	}
+	var msg string
+	for _, iss := range issues {
+		if iss.Code == "GapBudgetExhausted" {
+			msg = iss.Message
+		}
+	}
+	if !strings.Contains(msg, "engine's default retry budget") {
+		t.Fatalf("the GapBudgetExhausted message must name the engine default so an operator can tell it from a declared cap, got %q", msg)
+	}
+	if reclaims, _, _, _, _ := h.engine.sweep.metrics(); reclaims != defaultDirectOpRetryBudget {
+		t.Fatalf("sweepReclaims = %d, want %d (no 4th reclaim)", reclaims, defaultDirectOpRetryBudget)
+	}
+}
+
+// TestSweep_DeclaredMaxRetriesKeepsOwnBudget proves the row's own
+// maxretries_<g> always wins over defaultDirectOpRetryBudget when present,
+// even when the declared cap is LARGER than the engine default: a directOp
+// gap declaring maxretries_x above defaultDirectOpRetryBudget must still
+// reclaim PAST the engine default's own threshold — proving the default never
+// leaks in behind a declared cap — and only escalates once its OWN declared
+// cap is reached.
+func TestSweep_DeclaredMaxRetriesKeepsOwnBudget(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	h := newSweepHarness(t, ctx)
+	h.agePastWarmup()
+
+	const targetID = "fixtureDeclaredCapBeatsDefault"
+	const cap = defaultDirectOpRetryBudget + 2 // strictly ABOVE the engine default
+	h.seedTarget(&Target{
+		TargetID: targetID,
+		Gaps:     map[string]GapAction{"missing_x": {Action: actionDirectOp, Operation: "FixX"}},
+	})
+	entityID := testNanoID(t)
+	key := markKey(targetID, entityID, "missing_x")
+	h.putMark(t, ctx, key, fixtureMark(targetID, entityID, "missing_x", "directOp", pastLease()))
+	h.putRow(t, ctx, targetID, entityID, map[string]any{
+		"entityKey": "vtx.leaseApp." + entityID, "violating": true, "missing_x": true,
+		"maxretries_x": cap,
+	})
+
+	// Drive every reclaim through the DECLARED cap, including past the engine
+	// default's own (smaller) threshold: each of these must still reclaim —
+	// proving the declared column governs, never silently overridden.
+	for i := 0; i < cap; i++ {
+		h.pass(ctx)
+		h.nextOp(t)
+		if hasIssueCode(h.engine.issues.snapshot(), "GapBudgetExhausted") {
+			t.Fatalf("must not exhaust before the DECLARED cap %d (reclaim %d)", cap, i+1)
+		}
+		h.reexpireMark(t, ctx, key)
+	}
+	if got, err := h.engine.marks.getDispatchCount(ctx, targetID, entityID, "missing_x"); err != nil || got != cap {
+		t.Fatalf("dispatch-count = %d (err=%v), want the declared cap %d", got, err, cap)
+	}
+
+	// The NEXT pass: the declared cap is spent — escalate, no reclaim.
+	h.pass(ctx)
+	h.requireNoOp(t)
+	if sev := issueSeverity(h.engine.issues.snapshot(), "GapBudgetExhausted"); sev != "warning" {
+		t.Fatalf("expected GapBudgetExhausted once the DECLARED cap %d is reached, got severity %q", cap, sev)
+	}
+	if reclaims, _, _, _, _ := h.engine.sweep.metrics(); reclaims != cap {
+		t.Fatalf("sweepReclaims = %d, want exactly the declared cap %d (no extra reclaim)", reclaims, cap)
+	}
+}
+
+// TestSweep_UserTaskReclaimNeverCappedByEngineDefault proves
+// defaultDirectOpRetryBudget is consulted ONLY for a "directOp" gap: a
+// triggerLoom gap declaring NEITHER maxretries_<g> NOR inflight_<g> — the
+// same "declares nothing" row shape as an uncapped directOp target — keeps
+// reclaiming PAST the engine default's own threshold with no
+// GapBudgetExhausted escalation. assignTask/triggerLoom rely solely on the
+// Option-D backoff-only pacing (reconciler.go's collapseOnlyReclaim) for
+// their repeat-reclaim hygiene, never a hard retry cap.
+func TestSweep_UserTaskReclaimNeverCappedByEngineDefault(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	// A negligible backoff base: this test isolates the CAP behavior, not the
+	// backoff pacing (already proven by reclaim_backoff_internal_test.go) —
+	// reexpireMark pushes ClaimedAt back 2h every iteration regardless, but a
+	// tiny base keeps the (irrelevant here) backoff interval far below that.
+	h := newSweepHarness(t, ctx, func(c *Config) { c.ReclaimBackoffBase = time.Millisecond })
+	h.agePastWarmup()
+
+	const targetID = "fixtureUserTaskUncapped"
+	h.seedTarget(&Target{
+		TargetID: targetID,
+		Gaps:     map[string]GapAction{"missing_x": {Action: actionTriggerLoom, Pattern: "ghostFlow", Subject: "row.entityKey"}},
+	})
+	h.engine.source.mu.Lock()
+	h.engine.source.patternMeta["ghostFlow"] = "vtx.meta." + testNanoID(t)
+	h.engine.source.mu.Unlock()
+
+	entityID := testNanoID(t)
+	key := markKey(targetID, entityID, "missing_x")
+	h.putMark(t, ctx, key, fixtureMark(targetID, entityID, "missing_x", "triggerLoom", pastLease()))
+	h.putRow(t, ctx, targetID, entityID, map[string]any{
+		"entityKey": "vtx.leaseApp." + entityID, "violating": true, "missing_x": true,
+	})
+
+	const attempts = defaultDirectOpRetryBudget + 2
+	for i := 0; i < attempts; i++ {
+		h.pass(ctx)
+		h.nextOp(t)
+		h.reexpireMark(t, ctx, key)
+	}
+	if hasIssueCode(h.engine.issues.snapshot(), "GapBudgetExhausted") {
+		t.Fatalf("a triggerLoom gap must never be capped by defaultDirectOpRetryBudget")
+	}
+	if got, err := h.engine.marks.getDispatchCount(ctx, targetID, entityID, "missing_x"); err != nil || got != attempts {
+		t.Fatalf("dispatch-count = %d (err=%v), want %d (every reclaim above must have fired, uncapped)", got, err, attempts)
+	}
+	if reclaims, _, _, _, _ := h.engine.sweep.metrics(); reclaims != attempts {
+		t.Fatalf("sweepReclaims = %d, want %d", reclaims, attempts)
 	}
 }
 

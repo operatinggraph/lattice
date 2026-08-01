@@ -113,20 +113,26 @@ func (e *Engine) handleRow(ctx context.Context, msg substrate.Message) substrate
 	nak := false
 	delayed := false
 	for _, col := range e.openGapColumns(targetID, row) {
-		if suppressed, exhausted := e.gapSuppressed(ctx, targetID, entityID, row, col); suppressed {
+		// The static playbook action for this gap (zero value "" when the
+		// column has no gaps entry at all — the "no playbook entry" dead-end
+		// dispatchGap below handles separately): gapSuppressed's cap-fallback
+		// term only ever engages for a literal "directOp" entry.
+		action := target.Gaps[col].Action
+		if suppressed, exhausted, budgetIsDefault := e.gapSuppressed(ctx, targetID, entityID, row, col, action); suppressed {
 			// A remediation is in flight (inflight_<g>): ordinary in-progress
 			// state, never escalated — the gap stays violating but must NOT be
 			// (re-)dispatched. Skip it — mark-clearing already ran above, so a
 			// stale mark does not linger.
 			//
-			// The retry budget is spent (maxretries_<g> reached): a decision
-			// point, not a park (Contract #10 §10.8 Planner extension: "budget
-			// exhaustion... raises a standing Health issue at the suppression
-			// site, never a silent park") — escalateExhaustedGap redirects to
-			// the Augur AI tier if the target opts "exhausted" into its augur
-			// block, else raises that standing issue itself.
+			// The retry budget is spent (a declared maxretries_<g>, or the
+			// engine's defaultDirectOpRetryBudget when none is declared): a
+			// decision point, not a park (Contract #10 §10.8 Planner extension:
+			// "budget exhaustion... raises a standing Health issue at the
+			// suppression site, never a silent park") — escalateExhaustedGap
+			// redirects to the Augur AI tier if the target opts "exhausted"
+			// into its augur block, else raises that standing issue itself.
 			if exhausted {
-				switch e.escalateExhaustedGap(ctx, target, targetID, entityID, entityKey, col, row, msg.Sequence) {
+				switch e.escalateExhaustedGap(ctx, target, targetID, entityID, entityKey, col, row, msg.Sequence, budgetIsDefault) {
 				case substrate.Nak:
 					nak = true
 				case substrate.NakWithDelay:
@@ -822,14 +828,33 @@ func (e *Engine) intColumn(targetID string, row map[string]any, col string) (int
 	}
 }
 
+// defaultDirectOpRetryBudget is the engine-owned retry cap a "directOp" gap
+// falls back to when its row declares NO usable maxretries_<g> AND no
+// inflight_<g> companion either — Contract #10 §10.3's external-gap bound
+// ("directOp likewise" bounded by inflight_<g> + maxretries_<g>") assumed
+// every directOp package author declares it; a target declaring NEITHER
+// column (orchestration-base's orphanedTaskGrants, wellness-domain's
+// ReleaseOrphanedBooking) would otherwise reclaim a hard-failing op every
+// sweep interval forever, because collapseOnlyReclaim deliberately never
+// backs off a directOp reclaim (it IS the intended bounded retry, so nothing
+// else paces it). This is a safety net, not a package-authoring substitute: a
+// row's own maxretries_<g>, however small, always wins (gapSuppressed checks
+// it first), and a gap that DOES declare inflight_<g> — even absent
+// maxretries_<g> — is left alone too, since that lens has already opted into
+// the §10.3 external-gap contract and its pacing is its own call. assignTask/
+// triggerLoom/proposedOp are unaffected regardless (they keep the Option-D
+// backoff path, reconciler.go's collapseOnlyReclaim) — this constant is
+// consulted for a "directOp" action only.
+const defaultDirectOpRetryBudget = 3
+
 // gapSuppressed reports whether gap column gapCol (a missing_<g>) must NOT be
 // (re-)dispatched, and — when suppressed — WHY: its inflight_<g> companion is
 // true (a remediation is legitimately in flight, `exhausted` false) OR its
-// weaver-state dispatch-count has reached the row's maxretries_<g> cap (the
-// retry budget is spent — §E mechanism B, `exhausted` true). It is the dispatch
-// gate read by BOTH dispatch legs — the lane-1 loop and the sweep's reclaim —
-// so a suppressed gap is neither freshly dispatched nor reclaimed while it
-// stays violating. The two suppression reasons are NOT interchangeable for the
+// weaver-state dispatch-count has reached its retry cap (the retry budget is
+// spent — §E mechanism B, `exhausted` true). It is the dispatch gate read by
+// BOTH dispatch legs — the lane-1 loop and the sweep's reclaim — so a
+// suppressed gap is neither freshly dispatched nor reclaimed while it stays
+// violating. The two suppression reasons are NOT interchangeable for the
 // caller: inflight is ordinary in-progress state that must always be left
 // alone, while exhausted is a decision point (Contract #10 §10.8 Planner
 // extension: "budget exhaustion... raises a standing Health issue at the
@@ -838,26 +863,43 @@ func (e *Engine) intColumn(targetID string, row map[string]any, col string) (int
 //
 // inflight is authoritative and read first (a true inflight short-circuits the
 // KV read, and is never `exhausted`). An absent/non-bool inflight reads false
-// via boolColumn (which surfaces a non-bool as a RowDataError); an
-// absent/garbled maxretries reads 0 via intColumn, and a count-read failure
-// logs and is treated as NOT-suppressing on the cap term — the safe side in
-// every case is to dispatch, so a missing/garbled companion or a transient KV
-// error never silently wedges a real gap. A gapCol without the missing_ prefix
-// has no companions, so it is never suppressed.
-func (e *Engine) gapSuppressed(ctx context.Context, targetID, entityID string, row map[string]any, gapCol string) (suppressed, exhausted bool) {
+// via boolColumn (which surfaces a non-bool as a RowDataError). action is the
+// gap's resolved dispatch contract type (the caller's target.Gaps[col].Action,
+// or the mark's own recorded Action for a reclaim) — consulted ONLY to decide
+// the cap-fallback below; it never affects the inflight term. A gapCol without
+// the missing_ prefix has no companions, so it is never suppressed.
+//
+// The cap term: a row-declared maxretries_<g> always wins when present and
+// positive (package policy always beats the engine). Absent that, a
+// "directOp" gap whose row also does NOT declare inflight_<g> falls back to
+// defaultDirectOpRetryBudget instead of reading "no cap" — every other
+// action, and every directOp that DOES declare inflight_<g>, is unaffected
+// (no usable cap → the budget term never suppresses). A count-read
+// failure logs and is treated as NOT-suppressing — the safe side in every
+// case is to dispatch, so a missing/garbled companion or a transient KV error
+// never silently wedges a real gap. budgetIsDefault reports (only when
+// exhausted) whether the spent budget was this engine default rather than a
+// declared cap, so the caller's escalation message can say which.
+func (e *Engine) gapSuppressed(ctx context.Context, targetID, entityID string, row map[string]any, gapCol, action string) (suppressed, exhausted, budgetIsDefault bool) {
 	g, ok := strings.CutPrefix(gapCol, gapColumnPrefix)
 	if !ok {
-		return false, false
+		return false, false, false
 	}
 	if e.boolColumn(targetID, row, inflightColumnPrefix+g) {
-		return true, false
+		return true, false, false
 	}
 	capN, ok := e.intColumn(targetID, row, maxretriesColumnPrefix+g)
 	if !ok || capN <= 0 {
-		// No usable cap on the row → the budget term cannot suppress (only
-		// inflight, already checked, can). A non-positive cap means "no budget
-		// configured for this gap" — never auto-suppress on it.
-		return false, false
+		if _, declaresInflight := row[inflightColumnPrefix+g]; action != actionDirectOp || declaresInflight {
+			// No usable cap on the row, and either this isn't a directOp gap
+			// (assignTask/triggerLoom/proposedOp keep their Option-D backoff
+			// path instead of a hard cap) or the row already declares
+			// inflight_<g> (a lens that has adopted the §10.3 external-gap
+			// contract; its own pacing, not this engine's to second-guess) —
+			// never auto-suppress.
+			return false, false, false
+		}
+		capN, budgetIsDefault = defaultDirectOpRetryBudget, true
 	}
 	count, err := e.marks.getDispatchCount(ctx, targetID, entityID, gapCol)
 	if err != nil {
@@ -866,12 +908,12 @@ func (e *Engine) gapSuppressed(ctx context.Context, targetID, entityID string, r
 		// evaluation re-reads the count.
 		e.logger.Warn("weaver: dispatch-count read failed; not suppressing on the cap term",
 			"targetId", targetID, "entityId", entityID, "gap", gapCol, "err", err)
-		return false, false
+		return false, false, false
 	}
 	if count >= capN {
-		return true, true
+		return true, true, budgetIsDefault
 	}
-	return false, false
+	return false, false, false
 }
 
 // escalateExhaustedGap redirects a gap whose retry budget is spent
@@ -895,13 +937,20 @@ func (e *Engine) gapSuppressed(ctx context.Context, targetID, entityID string, r
 // under its own deterministic instanceKey (deriveAugurHandle) inside
 // CreateAugurReasoningClaim's own anti-storm mark. Callable from both lane-1
 // (handleRow) and the sweep (reclaim) — the shared suppression site both use.
+// budgetIsDefault (gapSuppressed's verdict) only shapes the un-escalated
+// alert's wording below — it never changes the escalation/alert branch taken.
 func (e *Engine) escalateExhaustedGap(ctx context.Context, target *Target, targetID, entityID, entityKey, gapColumn string,
-	row map[string]any, rowRevision uint64) substrate.Decision {
+	row map[string]any, rowRevision uint64, budgetIsDefault bool) substrate.Decision {
 
 	esc, escalated := augurEscalation(e.source, target, escalateExhausted, targetID, entityID, entityKey, gapColumn)
 	if !escalated {
+		budget := "its declared retry budget"
+		if budgetIsDefault {
+			g, _ := strings.CutPrefix(gapColumn, gapColumnPrefix)
+			budget = fmt.Sprintf("the engine's default retry budget (%d; no maxretries_%s declared)", defaultDirectOpRetryBudget, g)
+		}
 		e.alert(issueKeyGap(targetID, gapColumn), "warning", "GapBudgetExhausted",
-			"target "+targetID+": row column "+gapColumn+" has exhausted its retry budget with no augur escalation configured for \"exhausted\"")
+			"target "+targetID+": row column "+gapColumn+" has exhausted "+budget+" with no augur escalation configured for \"exhausted\"")
 		return substrate.Ack
 	}
 	e.issues.clear(issueKeyGap(targetID, gapColumn))

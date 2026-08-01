@@ -328,8 +328,10 @@ func TestHandleRow_MalformedAnchorDegradesNotErrors(t *testing.T) {
 // dispatch-count of zero: a gap is suppressed iff inflight_<g> reads true, while
 // an absent/non-bool inflight, an absent/non-positive maxretries, and a column
 // without the missing_ prefix all read NOT-suppressed (dispatch proceeds — the
-// safe default). The cap term firing on a non-zero count is covered by
-// TestGapSuppressed_BudgetCap.
+// safe default). Every case passes a non-"directOp" action (actionAssignTask)
+// so this proves the GENERAL mechanism independent of defaultDirectOpRetryBudget
+// (whose own fallback is TestGapSuppressed_DirectOpDefaultBudget); the cap term
+// firing on a non-zero count is covered by TestGapSuppressed_BudgetCap.
 func TestGapSuppressed_Companions(t *testing.T) {
 	t.Parallel()
 	if testing.Short() {
@@ -356,9 +358,12 @@ func TestGapSuppressed_Companions(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got, gotExhausted := h.engine.gapSuppressed(ctx, "t1", entityID, tc.row, tc.col)
+			got, gotExhausted, gotDefault := h.engine.gapSuppressed(ctx, "t1", entityID, tc.row, tc.col, actionAssignTask)
 			if got != tc.want || gotExhausted != tc.wantExhausted {
 				t.Fatalf("gapSuppressed(%v, %q) = (%v, %v), want (%v, %v)", tc.row, tc.col, got, gotExhausted, tc.want, tc.wantExhausted)
+			}
+			if gotDefault {
+				t.Fatalf("a non-directOp action must never report budgetIsDefault=true")
 			}
 		})
 	}
@@ -369,7 +374,10 @@ func TestGapSuppressed_Companions(t *testing.T) {
 // weaver-state dispatch-count for (target, entity, gap) has REACHED the cap. The
 // count is seeded via the real markStore (incrementDispatchCount), and a gap-close
 // reset (deleteDispatchCount) drops it back below the cap → dispatchable again
-// (the reset that B exists for, at the gate level).
+// (the reset that B exists for, at the gate level). Uses a "directOp" action
+// throughout to also prove the row's OWN declared cap always wins over
+// defaultDirectOpRetryBudget when present — budgetIsDefault stays false at
+// every step (the fallback-only case is TestGapSuppressed_DirectOpDefaultBudget).
 func TestGapSuppressed_BudgetCap(t *testing.T) {
 	t.Parallel()
 	if testing.Short() {
@@ -384,8 +392,8 @@ func TestGapSuppressed_BudgetCap(t *testing.T) {
 	row := map[string]any{"missing_x": true, "maxretries_x": 3}
 
 	// Zero count: under cap → not suppressed.
-	if suppressed, exhausted := h.engine.gapSuppressed(ctx, targetID, entityID, row, "missing_x"); suppressed || exhausted {
-		t.Fatalf("a zero dispatch-count under the cap must not suppress (got suppressed=%v exhausted=%v)", suppressed, exhausted)
+	if suppressed, exhausted, isDefault := h.engine.gapSuppressed(ctx, targetID, entityID, row, "missing_x", actionDirectOp); suppressed || exhausted || isDefault {
+		t.Fatalf("a zero dispatch-count under the cap must not suppress (got suppressed=%v exhausted=%v isDefault=%v)", suppressed, exhausted, isDefault)
 	}
 	// Drive the count to cap-1: still under → not suppressed.
 	for i := 0; i < 2; i++ {
@@ -393,24 +401,100 @@ func TestGapSuppressed_BudgetCap(t *testing.T) {
 			t.Fatalf("increment dispatch-count: %v", err)
 		}
 	}
-	if suppressed, exhausted := h.engine.gapSuppressed(ctx, targetID, entityID, row, "missing_x"); suppressed || exhausted {
-		t.Fatalf("a dispatch-count of cap-1 must not suppress (one more attempt allowed) (got suppressed=%v exhausted=%v)", suppressed, exhausted)
+	if suppressed, exhausted, isDefault := h.engine.gapSuppressed(ctx, targetID, entityID, row, "missing_x", actionDirectOp); suppressed || exhausted || isDefault {
+		t.Fatalf("a dispatch-count of cap-1 must not suppress (one more attempt allowed) (got suppressed=%v exhausted=%v isDefault=%v)", suppressed, exhausted, isDefault)
 	}
 	// One more → count == cap: suppressed AND exhausted (the escalation-eligible
-	// reason, distinct from inflight).
+	// reason, distinct from inflight) — via the row's OWN declared cap, not the
+	// engine default.
 	if _, err := h.engine.marks.incrementDispatchCount(ctx, targetID, entityID, "missing_x"); err != nil {
 		t.Fatalf("increment dispatch-count: %v", err)
 	}
-	if suppressed, exhausted := h.engine.gapSuppressed(ctx, targetID, entityID, row, "missing_x"); !suppressed || !exhausted {
-		t.Fatalf("a dispatch-count at the cap must suppress AND report exhausted=true (budget spent) (got suppressed=%v exhausted=%v)", suppressed, exhausted)
+	if suppressed, exhausted, isDefault := h.engine.gapSuppressed(ctx, targetID, entityID, row, "missing_x", actionDirectOp); !suppressed || !exhausted || isDefault {
+		t.Fatalf("a dispatch-count at the cap must suppress AND report exhausted=true via the DECLARED cap (got suppressed=%v exhausted=%v isDefault=%v)", suppressed, exhausted, isDefault)
 	}
 	// The gap-close reset deletes the count → dispatchable again (fresh budget).
 	if err := h.engine.marks.deleteDispatchCount(ctx, targetID, entityID, "missing_x"); err != nil {
 		t.Fatalf("delete dispatch-count: %v", err)
 	}
-	if suppressed, exhausted := h.engine.gapSuppressed(ctx, targetID, entityID, row, "missing_x"); suppressed || exhausted {
-		t.Fatalf("after the gap-close reset the budget must be fresh → not suppressed (got suppressed=%v exhausted=%v)", suppressed, exhausted)
+	if suppressed, exhausted, isDefault := h.engine.gapSuppressed(ctx, targetID, entityID, row, "missing_x", actionDirectOp); suppressed || exhausted || isDefault {
+		t.Fatalf("after the gap-close reset the budget must be fresh → not suppressed (got suppressed=%v exhausted=%v isDefault=%v)", suppressed, exhausted, isDefault)
 	}
+}
+
+// TestGapSuppressed_DirectOpDefaultBudget unit-tests the cap-fallback at the
+// gapSuppressed level: a "directOp" gap whose row declares NEITHER
+// maxretries_<g> NOR inflight_<g> falls back to defaultDirectOpRetryBudget
+// instead of reading "no cap" forever (Option D's ratified directOp-never-
+// backs-off reclaim assumed every directOp declares a §10.3 bound; this is the
+// engine's safety net for a target — orchestration-base's orphanedTaskGrants,
+// wellness-domain's ReleaseOrphanedBooking — that declares neither column).
+// The fallback is narrowly scoped: a non-"directOp" action never gets it
+// regardless of count, and a "directOp" gap that DOES declare inflight_<g>
+// (even absent maxretries_<g>) is left uncapped too — that lens has already
+// opted into the §10.3 external-gap contract, whose pacing is its own call.
+func TestGapSuppressed_DirectOpDefaultBudget(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	h := newHandlerHarness(t, ctx)
+
+	t.Run("neither column declared: caps at the engine default", func(t *testing.T) {
+		const targetID = "tDirectOpDefault"
+		entityID := testNanoID(t)
+		row := map[string]any{"missing_x": true}
+
+		for i := 0; i < defaultDirectOpRetryBudget-1; i++ {
+			if _, err := h.engine.marks.incrementDispatchCount(ctx, targetID, entityID, "missing_x"); err != nil {
+				t.Fatalf("increment dispatch-count: %v", err)
+			}
+			if suppressed, exhausted, isDefault := h.engine.gapSuppressed(ctx, targetID, entityID, row, "missing_x", actionDirectOp); suppressed || exhausted || isDefault {
+				t.Fatalf("dispatch-count %d must stay under the engine default %d (got suppressed=%v exhausted=%v isDefault=%v)",
+					i+1, defaultDirectOpRetryBudget, suppressed, exhausted, isDefault)
+			}
+		}
+		if _, err := h.engine.marks.incrementDispatchCount(ctx, targetID, entityID, "missing_x"); err != nil {
+			t.Fatalf("increment dispatch-count: %v", err)
+		}
+		suppressed, exhausted, isDefault := h.engine.gapSuppressed(ctx, targetID, entityID, row, "missing_x", actionDirectOp)
+		if !suppressed || !exhausted || !isDefault {
+			t.Fatalf("dispatch-count at the engine default %d must suppress, report exhausted, AND flag budgetIsDefault (got suppressed=%v exhausted=%v isDefault=%v)",
+				defaultDirectOpRetryBudget, suppressed, exhausted, isDefault)
+		}
+	})
+
+	t.Run("declares inflight_<g> but no maxretries: default never applies", func(t *testing.T) {
+		const targetID = "tDirectOpInflightOnly"
+		entityID := testNanoID(t)
+		row := map[string]any{"missing_x": true, "inflight_x": false}
+
+		for i := 0; i < defaultDirectOpRetryBudget+2; i++ {
+			if _, err := h.engine.marks.incrementDispatchCount(ctx, targetID, entityID, "missing_x"); err != nil {
+				t.Fatalf("increment dispatch-count: %v", err)
+			}
+		}
+		if suppressed, exhausted, isDefault := h.engine.gapSuppressed(ctx, targetID, entityID, row, "missing_x", actionDirectOp); suppressed || exhausted || isDefault {
+			t.Fatalf("a directOp gap declaring inflight_<g> (even absent maxretries_<g>) must never fall back to the engine default, got suppressed=%v exhausted=%v isDefault=%v", suppressed, exhausted, isDefault)
+		}
+	})
+
+	t.Run("non-directOp action: no engine default regardless of count", func(t *testing.T) {
+		const targetID = "tAssignTaskUncapped"
+		entityID := testNanoID(t)
+		row := map[string]any{"missing_x": true}
+
+		for i := 0; i < defaultDirectOpRetryBudget+2; i++ {
+			if _, err := h.engine.marks.incrementDispatchCount(ctx, targetID, entityID, "missing_x"); err != nil {
+				t.Fatalf("increment dispatch-count: %v", err)
+			}
+		}
+		if suppressed, exhausted, isDefault := h.engine.gapSuppressed(ctx, targetID, entityID, row, "missing_x", actionAssignTask); suppressed || exhausted || isDefault {
+			t.Fatalf("assignTask must never be capped by the directOp engine default, got suppressed=%v exhausted=%v isDefault=%v", suppressed, exhausted, isDefault)
+		}
+	})
 }
 
 // TestHandleRow_InflightSuppressesDispatch proves skip site 1 (the lane-1 dispatch

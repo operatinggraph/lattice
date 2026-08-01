@@ -212,10 +212,20 @@ func (s *sweeper) pass(ctx context.Context) {
 //	(b) row gone, or missing_<gapColumn> not currently true → delete (the
 //	    sweep leg of §10.3 level-reconciled clearing — a mark may only stand
 //	    for a currently-true column). An UNPARSEABLE row leaves the mark:
-//	    never delete on unreadable evidence (the lease/TTL backstop bounds it);
+//	    never delete on unreadable evidence (the lease/TTL backstop bounds it).
+//	    Runs regardless of the target's __control freeze: closing an
+//	    already-satisfied gap is cleanup, never new dispatch;
 //	(c) column true and lease unexpired → leave, the episode is in flight;
-//	(d) column true and lease expired (or absent — a lease-less mark carries
-//	    no TTL either and would otherwise be immortal) → reclaim.
+//	(d) column true, lease expired (or absent — a lease-less mark carries no
+//	    TTL either and would otherwise be immortal), target DISABLED (the
+//	    __control marker) → leave untouched, no reclaim: an operator freeze
+//	    (or the oscillation auto-freeze, freezeOscillatingPair) stops NEW
+//	    dispatch, and reclaim — a fresh episode, fresh lease, fresh requestId —
+//	    is dispatch. The mark's own per-key TTL (markTTLBackstopFactor × lease,
+//	    state.go, re-armed only on a reclaim that never runs while frozen)
+//	    keeps counting down unrefreshed regardless, so a frozen target's marks
+//	    still self-bound without this leg's help — never immortal;
+//	(e) column true, lease expired, target active → reclaim.
 //
 // Every delete is revision-conditioned at the revision read THIS pass: a
 // CAS-create racing the sweep (a fresh episode) must never be deleted blind.
@@ -274,6 +284,23 @@ func (s *sweeper) sweepMark(ctx context.Context, key string) {
 
 	if leaseLive(rec.LeaseExpiresAt, time.Now()) {
 		// The episode is in flight.
+		return
+	}
+	if e.isTargetDisabled(targetID) {
+		// The operator __control freeze (Engine.Disable/Revoke) or the
+		// oscillation auto-freeze (freezeOscillatingPair) stops NEW dispatch —
+		// handleRow's lane-1 Ack-skip (evaluator.go) already honors it, and a
+		// reclaim is dispatch too (a fresh lease, a fresh requestId, a real op
+		// fire), so it must be gated the same way. Leave the mark exactly as
+		// found: the level-reconciled clears above already ran unconditionally
+		// (a frozen target's closed gaps still clean up), only the re-dispatch
+		// is gated here. The mark is not left immortal — its own per-key TTL
+		// (markTTLBackstopFactor × lease, state.go) was armed at its last
+		// create/replace and keeps counting down un-refreshed while frozen
+		// (re-arming happens only on a reclaim, which does not run here), so it
+		// self-removes on schedule even though this leg never touches it again.
+		e.logger.Debug("weaver sweep: target disabled; leaving expired mark unreclaimed",
+			"targetId", targetID, "entityId", entityID, "gap", gapColumn)
 		return
 	}
 	s.reclaim(ctx, key, entry.Revision, &rec, targetID, entityID, gapColumn, row, rowEntry.Revision)
@@ -458,7 +485,7 @@ func (s *sweeper) reclaim(ctx context.Context, key string, markRev uint64, rec *
 		return
 	}
 
-	if suppressed, exhausted := e.gapSuppressed(ctx, targetID, entityID, row, gapColumn); suppressed {
+	if suppressed, exhausted, budgetIsDefault := e.gapSuppressed(ctx, targetID, entityID, row, gapColumn, ga.Action); suppressed {
 		// Mirrors lane-1's dispatch-suppression gate: a gap with inflight_<g> set
 		// must NOT be re-dispatched. This is the LOAD-BEARING skip — the
 		// mark-lease expiry → reclaim is the actual re-dispatch path for a
@@ -467,15 +494,18 @@ func (s *sweeper) reclaim(ctx context.Context, key string, markRev uint64, rec *
 		// the gap closes, and the TTL backstop bounds it if not. The gap stays
 		// violating throughout — only re-dispatch is suppressed.
 		//
-		// A gap whose retry budget is spent (maxretries_<g>) is different: the
-		// sweep is the ONLY dispatch leg that still visits a row with no fresh
-		// CDC deliveries, so it is this site — not lane-1 — that must actually
-		// close the §10.8 "never a silent park" promise for a row that has gone
-		// quiet. escalateExhaustedGap either fires a fresh Augur escalation
-		// episode or raises the standing Health issue; it never touches this
-		// gap's own (already-exhausted, possibly already-expired) mark.
+		// A gap whose retry budget is spent (a declared maxretries_<g>, or the
+		// engine's defaultDirectOpRetryBudget when a "directOp" gap declares
+		// neither maxretries_<g> nor inflight_<g> — gapSuppressed) is different:
+		// the sweep is the ONLY dispatch leg that still visits a row with no
+		// fresh CDC deliveries, so it is this site — not lane-1 — that must
+		// actually close the §10.8 "never a silent park" promise for a row that
+		// has gone quiet. escalateExhaustedGap either fires a fresh Augur
+		// escalation episode or raises the standing Health issue; it never
+		// touches this gap's own (already-exhausted, possibly already-expired)
+		// mark.
 		if exhausted {
-			if e.escalateExhaustedGap(ctx, target, targetID, entityID, entityKey, gapColumn, row, rowRevision) != substrate.Ack {
+			if e.escalateExhaustedGap(ctx, target, targetID, entityID, entityKey, gapColumn, row, rowRevision, budgetIsDefault) != substrate.Ack {
 				e.logger.Warn("weaver sweep: exhausted-gap escalation dispatch did not complete cleanly; will retry",
 					"targetId", targetID, "entityId", entityID, "gap", gapColumn)
 			}
