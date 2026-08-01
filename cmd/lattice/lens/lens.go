@@ -104,42 +104,12 @@ func newListCommand(natsURL, outputFmt *string) *cobra.Command {
 			}
 			defer conn.Close()
 
-			allKeys, err := conn.KVListKeys(ctx, bootstrap.CoreKVBucket)
+			lenses, err := collectLenses(ctx, conn)
 			if err != nil {
 				if *outputFmt == "json" {
 					return output.PrintJSONError("ListError", err.Error())
 				}
-				return fmt.Errorf("list core KV keys: %w", err)
-			}
-
-			var lenses []lensEntry
-			for _, k := range allKeys {
-				if !strings.HasPrefix(k, "vtx.meta.") {
-					continue
-				}
-				// Only top-level meta-vertex keys (3 segments).
-				parts := strings.Split(k, ".")
-				if len(parts) != 3 {
-					continue
-				}
-				entry, err := conn.KVGet(ctx, bootstrap.CoreKVBucket, k)
-				if err != nil {
-					continue
-				}
-				var doc map[string]interface{}
-				if err := json.Unmarshal(entry.Value, &doc); err != nil {
-					continue
-				}
-				class, _ := doc["class"].(string)
-				if class != "meta.lens" {
-					continue
-				}
-				isDeleted, _ := doc["isDeleted"].(bool)
-				lenses = append(lenses, lensEntry{
-					Key:           k,
-					CanonicalName: canonicalNameFromDoc(doc),
-					IsDeleted:     isDeleted,
-				})
+				return err
 			}
 
 			if *outputFmt == "json" {
@@ -154,14 +124,72 @@ func newListCommand(natsURL, outputFmt *string) *cobra.Command {
 	}
 }
 
-// canonicalNameFromDoc extracts the canonicalName from a vertex data map.
-func canonicalNameFromDoc(doc map[string]interface{}) string {
-	if data, ok := doc["data"].(map[string]interface{}); ok {
-		if cn, ok := data["canonicalName"].(string); ok {
-			return cn
-		}
+// collectLenses enumerates every installed Lens: each `vtx.meta.<id>` vertex
+// root whose envelope class is `meta.lens`, paired with the canonical name
+// read from its own aspect.
+func collectLenses(ctx context.Context, conn *substrate.Conn) ([]lensEntry, error) {
+	allKeys, err := conn.KVListKeys(ctx, bootstrap.CoreKVBucket)
+	if err != nil {
+		return nil, fmt.Errorf("list core KV keys: %w", err)
 	}
-	return ""
+
+	var lenses []lensEntry
+	for _, k := range allKeys {
+		if !strings.HasPrefix(k, "vtx.meta.") {
+			continue
+		}
+		// Only top-level meta-vertex keys (3 segments).
+		parts := strings.Split(k, ".")
+		if len(parts) != 3 {
+			continue
+		}
+		entry, err := conn.KVGet(ctx, bootstrap.CoreKVBucket, k)
+		if err != nil {
+			continue
+		}
+		var doc map[string]interface{}
+		if err := json.Unmarshal(entry.Value, &doc); err != nil {
+			continue
+		}
+		class, _ := doc["class"].(string)
+		if class != "meta.lens" {
+			continue
+		}
+		isDeleted, _ := doc["isDeleted"].(bool)
+		lenses = append(lenses, lensEntry{
+			Key:           k,
+			CanonicalName: canonicalName(ctx, conn, k),
+			IsDeleted:     isDeleted,
+		})
+	}
+	return lenses, nil
+}
+
+// canonicalName reads a meta-vertex's canonical name from its
+// `<vertexKey>.canonicalName` aspect, whose body is the standard envelope
+// carrying the name at `data.value` — the shape the DDL cache and pkgmgr's
+// collision check both read (Contract #1: a meta-vertex is
+// `vtx.meta.<NanoID>` and its name lives on a separate aspect, never on the
+// vertex root, whose own `data` is empty).
+//
+// Returns "" when the aspect is absent, unreadable, tombstoned, or carries no
+// name — the name is display metadata here, so a lens is always listed, named
+// or not.
+func canonicalName(ctx context.Context, conn *substrate.Conn, vertexKey string) string {
+	entry, err := conn.KVGet(ctx, bootstrap.CoreKVBucket, vertexKey+".canonicalName")
+	if err != nil {
+		return ""
+	}
+	var aspect struct {
+		IsDeleted bool `json:"isDeleted"`
+		Data      struct {
+			Value string `json:"value"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(entry.Value, &aspect); err != nil || aspect.IsDeleted {
+		return ""
+	}
+	return aspect.Data.Value
 }
 
 func newActivateCommand(natsURL, outputFmt, defaultActor *string) *cobra.Command {

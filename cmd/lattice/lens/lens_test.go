@@ -12,84 +12,113 @@ import (
 	"github.com/operatinggraph/lattice/internal/testutil"
 )
 
-// TestLensList_HappyPath verifies that the list logic correctly identifies
-// meta.lens class vertices among Core KV keys.
-func TestLensList_HappyPath(t *testing.T) {
+// seedMetaVertex writes a meta-vertex root in the shape the Processor
+// actually commits: an envelope whose `data` is empty, with the canonical
+// name on its own `.canonicalName` aspect carrying `data.value`
+// (Contract #1). A fixture that puts the name on the root instead proves only
+// itself — no such document exists in Core KV.
+func seedMetaVertex(ctx context.Context, t *testing.T, conn *substrate.Conn, id, class, name string, deleted bool) string {
+	t.Helper()
+	key := "vtx.meta." + id
+	root, _ := json.Marshal(map[string]interface{}{
+		"key":       key,
+		"class":     class,
+		"isDeleted": deleted,
+		"data":      map[string]interface{}{},
+	})
+	if _, err := conn.KVPut(ctx, bootstrap.CoreKVBucket, key, root); err != nil {
+		t.Fatalf("KVPut %s: %v", key, err)
+	}
+	if name == "" {
+		return key
+	}
+	aspect, _ := json.Marshal(map[string]interface{}{
+		"key":       key + ".canonicalName",
+		"class":     "canonicalName",
+		"isDeleted": false,
+		"data":      map[string]interface{}{"value": name},
+	})
+	if _, err := conn.KVPut(ctx, bootstrap.CoreKVBucket, key+".canonicalName", aspect); err != nil {
+		t.Fatalf("KVPut %s.canonicalName: %v", key, err)
+	}
+	return key
+}
+
+func findLens(lenses []lensEntry, key string) *lensEntry {
+	for i := range lenses {
+		if lenses[i].Key == key {
+			return &lenses[i]
+		}
+	}
+	return nil
+}
+
+// TestLensList_NamesEachLensFromItsAspect exercises the production listing
+// path, not a copy of it: a lens is identified by envelope class and named
+// from its canonicalName aspect.
+func TestLensList_NamesEachLensFromItsAspect(t *testing.T) {
 	ctx, conn := setupLensEnv(t)
 
-	// Seed a meta.lens vertex.
-	lensKey := "vtx.meta.testLensNanoID0001234"
-	lensDoc := map[string]interface{}{
-		"key":       lensKey,
-		"class":     "meta.lens",
-		"isDeleted": false,
-		"data": map[string]interface{}{
-			"canonicalName": "testLens",
-		},
-	}
-	data, _ := json.Marshal(lensDoc)
-	if _, err := conn.KVPut(ctx, bootstrap.CoreKVBucket, lensKey, data); err != nil {
-		t.Fatalf("KVPut lens: %v", err)
-	}
+	lensKey := seedMetaVertex(ctx, t, conn, "AbCdEfGhJkMnPqRsTuVw", "meta.lens", "lens.contract-view", false)
+	ddlKey := seedMetaVertex(ctx, t, conn, "BcDeFgHjKmNpQrStUvWx", "meta.ddl", "ddl.contract", false)
 
-	// Seed a non-lens vertex (should be excluded).
-	roleKey := "vtx.role.testRoLeNanoiD999991"
-	roleDoc := map[string]interface{}{
-		"key":   roleKey,
-		"class": "role",
-	}
-	roleData, _ := json.Marshal(roleDoc)
-	if _, err := conn.KVPut(ctx, bootstrap.CoreKVBucket, roleKey, roleData); err != nil {
+	// A non-meta vertex — excluded by prefix, not by class.
+	roleDoc, _ := json.Marshal(map[string]interface{}{"key": "vtx.role.CdEfGhJkMnPqRsTuVwXy", "class": "role"})
+	if _, err := conn.KVPut(ctx, bootstrap.CoreKVBucket, "vtx.role.CdEfGhJkMnPqRsTuVwXy", roleDoc); err != nil {
 		t.Fatalf("KVPut role: %v", err)
 	}
 
-	allKeys, err := conn.KVListKeys(ctx, bootstrap.CoreKVBucket)
+	lenses, err := collectLenses(ctx, conn)
 	if err != nil {
-		t.Fatalf("KVListKeys: %v", err)
+		t.Fatalf("collectLenses: %v", err)
 	}
 
-	// Replicate the list filter logic.
-	var found []lensEntry
-	for _, k := range allKeys {
-		if !strings.HasPrefix(k, "vtx.meta.") {
-			continue
-		}
-		parts := strings.Split(k, ".")
-		if len(parts) != 3 {
-			continue
-		}
-		entry, err := conn.KVGet(ctx, bootstrap.CoreKVBucket, k)
-		if err != nil {
-			continue
-		}
-		var doc map[string]interface{}
-		if err := json.Unmarshal(entry.Value, &doc); err != nil {
-			continue
-		}
-		class, _ := doc["class"].(string)
-		if class != "meta.lens" {
-			continue
-		}
-		isDeleted, _ := doc["isDeleted"].(bool)
-		found = append(found, lensEntry{
-			Key:           k,
-			CanonicalName: canonicalNameFromDoc(doc),
-			IsDeleted:     isDeleted,
-		})
-	}
-
-	var match *lensEntry
-	for i := range found {
-		if found[i].Key == lensKey {
-			match = &found[i]
-			break
-		}
-	}
+	match := findLens(lenses, lensKey)
 	if match == nil {
-		t.Fatalf("test-created lens %q not found among %d lenses", lensKey, len(found))
+		t.Fatalf("test-created lens %q not found among %d lenses", lensKey, len(lenses))
 	}
-	if match.CanonicalName != "testLens" {
-		t.Errorf("canonicalName = %q, want testLens", match.CanonicalName)
+	if match.CanonicalName != "lens.contract-view" {
+		t.Errorf("canonicalName = %q, want lens.contract-view", match.CanonicalName)
+	}
+	if match.IsDeleted {
+		t.Error("lens must not report as deleted")
+	}
+	if findLens(lenses, ddlKey) != nil {
+		t.Error("a meta.ddl vertex must not be listed as a lens")
+	}
+}
+
+// TestLensList_UnnamedLensStillListed pins the fallback: the canonical name
+// is display metadata, so a lens whose aspect is missing or tombstoned is
+// still listed — just unnamed.
+func TestLensList_UnnamedLensStillListed(t *testing.T) {
+	ctx, conn := setupLensEnv(t)
+
+	noAspect := seedMetaVertex(ctx, t, conn, "AbCdEfGhJkMnPqRsTuVw", "meta.lens", "", false)
+	tombstoned := seedMetaVertex(ctx, t, conn, "BcDeFgHjKmNpQrStUvWx", "meta.lens", "lens.retired", false)
+	deadAspect, _ := json.Marshal(map[string]interface{}{
+		"key":       tombstoned + ".canonicalName",
+		"class":     "canonicalName",
+		"isDeleted": true,
+		"data":      map[string]interface{}{"value": "lens.retired"},
+	})
+	if _, err := conn.KVPut(ctx, bootstrap.CoreKVBucket, tombstoned+".canonicalName", deadAspect); err != nil {
+		t.Fatalf("KVPut tombstoned aspect: %v", err)
+	}
+
+	lenses, err := collectLenses(ctx, conn)
+	if err != nil {
+		t.Fatalf("collectLenses: %v", err)
+	}
+
+	for _, key := range []string{noAspect, tombstoned} {
+		match := findLens(lenses, key)
+		if match == nil {
+			t.Fatalf("lens %q must still be listed without a name", key)
+		}
+		if match.CanonicalName != "" {
+			t.Errorf("%s: canonicalName = %q, want empty", key, match.CanonicalName)
+		}
 	}
 }
 
