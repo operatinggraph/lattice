@@ -1,6 +1,8 @@
 # Done log archive — lattice (older shipped items, newest first)
 
 
+- 2026-07-30 · `de806ee4` · [Refractor] an accepted MATCH hot-reload now triggers Pipeline.Rebuild, reprojecting the existing corpus instead of only future events
+- 2026-07-29 · `9d5e2348` · [Refractor] shared-keyspace composition (d) — tasks merged into one multi-walk lens, verified live [design §17](../../implementation-artifacts/refractor-shared-keyspace-arbitration-design.md)
 - 2026-07-29 · `4186479a` · [Refractor] shared-keyspace composition (c) — catalog merged into one multi-walk lens, classifier gap fixed, verified live [design §16](../../implementation-artifacts/refractor-shared-keyspace-arbitration-design.md)
 - 2026-07-29 · `bcf52101` · [Refractor] shared-keyspace composition (b) — sessions merged into one multi-walk lens, verified live [design §15](../../implementation-artifacts/refractor-shared-keyspace-arbitration-design.md)
 - 2026-07-29 · `69119818` · [Refractor] shared-keyspace composition (a) — N branches per multi-walk lens, merged by key [design §14](../../implementation-artifacts/refractor-shared-keyspace-arbitration-design.md)
