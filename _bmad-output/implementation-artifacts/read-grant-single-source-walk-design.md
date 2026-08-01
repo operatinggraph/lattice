@@ -140,7 +140,8 @@ type AnchorWalk struct {
     // linear relationship pattern (≥1 relationship; no commas; every node
     // variable either bound by an earlier clause / "identity", or fresh and
     // connected within the clause). Compiled as one OPTIONAL MATCH per
-    // clause — verbatim on the data side, var-renamed on the producer side.
+    // clause — verbatim in both artifacts: the data lens's reachability
+    // prefix, and the walk's own staged branch in the producer.
     Chain []string
 }
 ```
@@ -204,20 +205,25 @@ composed output the runtime installs. It emits:
      "identity"`, `OutputKeyPattern: "cap-read.<Name>.{actorSuffix}"`, `BodyColumns:
      ["readableAnchors"]`, `EmptyBehavior: "delete"`, `Freshness: "auto"`, `Lanes: ["default"]` —
      **plus** the realness filter on `anchorId` so empty-delete actually fires (For-Andrew #2),
-   - spec = the shared head + the member walks' `Chain` clauses + one generated
-     `collect(DISTINCT {anchorType: '<AnchorType>', anchorId: nanoIdFromKey(<AnchorVar>.key),
-     via: [<derived>]})` branch per walk, `+`-concatenated into `readableAnchors` — the exact
-     multi-branch shape the engine is proven on (`edgeManifestReadGrantsSpec`'s doc comment,
-     lenses.go:888-897).
-   - **Deterministic shared-prefix factoring within a domain:** walks whose leading `Chain` entries
-     are textually identical share those clauses (and their variable bindings) once; only the
-     divergent suffixes get walk-scoped renames. This reproduces today's hand shape (the resident
-     producer binds `residesIn→containedIn*` once for four branches, and `availableAt` once for
-     services+catalog) and is what keeps the fan-out at today's level (§5). Non-identical clause
-     text simply doesn't share — fail-soft: correctness never depends on factoring, only fan-out.
-   - **Variable renaming is positional on the parsed pattern** (node/relationship variable
-     positions), never textual regex — `wo`/`work` coexist with label `workorder` and relation
-     `worksAt` in one clause today; a regex rename on the security artifact is not acceptable.
+   - spec = the shared head + **one STAGE per member walk** — that walk's `Chain` clauses, then a
+     `WITH identity, <prior slices>, collect(DISTINCT {anchorType: '<AnchorType>',
+     anchorId: nanoIdFromKey(<AnchorVar>.key), via: [<derived>]}) AS grantSliceN` — and a final
+     `RETURN identity.key AS actorKey, grantSlice0 + grantSlice1 + … AS readableAnchors`.
+   - **Per-walk staging is what bounds the binding set.** A domain's walks are independent
+     reachability paths off one actor, each consumed only by its own `collect(DISTINCT …)`. Emitted
+     as one flat run of OPTIONAL MATCH clauses they are nonetheless a single row set, so their
+     fan-outs MULTIPLY — the cross-branch product §5 accepted, which reached 1,000,001 rows on one
+     live event and was refused by the engine's binding cap, stalling the domain's grant refresh.
+     A `WITH` after each walk collapses that walk's rows to one before the next expands, so peak
+     rows are the **largest single walk's fan-out**, not the product of all of them.
+   - **Each walk emits its whole chain; nothing is factored or renamed.** A shared prefix (four
+     resident walks all opening on the residence chain) is re-walked per stage, which costs no KV
+     reads: the executor memoizes every node and adjacency read for the life of an evaluation, so a
+     re-walk replays memo hits over the same read surface. Staging also makes cross-walk
+     variable scoping structural — a walk's variables die at its own `WITH`, which projects only the
+     actor and the accumulated slices, so two walks binding `place` can no longer join through that
+     name. `validateGrantSliceVarNames` fails the package build closed if a walk variable collides
+     with a generated accumulator name.
    - `via` = the relation names of the walk's full chain, in order (kills the third hand-typed
      copy; audit-only, For-Andrew #1).
 
@@ -225,6 +231,10 @@ Contract #6 §6.1's "one RETURN per lens; multi-output = additional Lenses" rule
 construction: the single declaration still compiles to **two distinct lens vertices**.
 
 ### 3.3 Validation (fail-closed, at expansion time)
+
+Includes `validateGrantSliceVarNames`: a walk variable named like one of the producer's generated
+per-walk accumulators (`grantSlice<N>`) fails the package build, because the staging `WITH` would
+join that walk's pattern against the accumulated list instead of binding it fresh.
 
 The expansion pass validates before emitting — the S1 lint logic promoted from advisory script to
 hard package-build failure:
@@ -315,20 +325,24 @@ only expressible one.
   per-actor `cap-read.*` docs ~4×, and `IsReadable` lists + unions every slice per projected row —
   a per-row read-path cost increase to save compiler work. Rejected; domains stay the §6.14 grouping
   and blast-radius unit.
-- **Fully independent per-walk chains (no factoring).** The naive generation. Honest bound (the
-  adversarial pass corrected an earlier undercount): in the resident domain **four** walks share the
-  `residesIn→containedIn*` prefix and two also share the `availableAt` hop, so independent renaming
-  multiplies intermediate rows by ≈ C³·T (C = containment-chain size 2–4, T = reachable templates,
-  potentially tens) — 10⁴–10⁵ extra intermediate rows per identity per re-execution on the auth
-  plane, on top of the cross-branch product the hand shape already has. Rejected in favor of the
-  deterministic textual prefix factoring in §3.2, which reproduces today's fan-out exactly and stays
-  single-source; if a domain ever measures hot beyond that, the remedy remains splitting the domain
-  (the established §6.14 move — exactly why staff/provider are separate slices today).
+- **Fully independent per-walk chains in ONE flat row set (no factoring, no staging).** The naive
+  generation, and genuinely worse than factoring: in the resident domain **four** walks share the
+  `residesIn→containedIn*` prefix and two also share the `availableAt` hop, so independent chains
+  multiply intermediate rows by ≈ C³·T (C = containment-chain size 2–4, T = reachable templates,
+  potentially tens) on top of the cross-branch product — all of it in one row set. Rejected.
+
+  Note what BOTH this and the factoring it lost to leave standing: **the cross-branch product
+  itself.** Factoring only stops a shared prefix being re-walked; independent OPTIONAL branches in
+  one row set still multiply. §3.2's per-walk `WITH` staging is the shape that removes the product
+  rather than trimming its base, and it makes re-walking a shared prefix free (memoized reads), so
+  the reason to factor disappears with it. If a domain ever measures hot beyond a single walk's
+  fan-out, the remedy remains splitting the domain (the established §6.14 move — exactly why
+  staff/provider are separate slices today).
 
 ## 6. Test strategy
 
 - **Compiler golden tests** (`internal/pkgmgr`): walk → composed data spec; domain → generated
-  producer spec (head, factored prefixes, positional renames, collect branches, derived `via`,
+  producer spec (head, per-walk stages with their `WITH` folds, collect branches, derived `via`,
   field-for-field Output); a Walk-less Personal lens compiles unchanged.
 - **Validation-failure tests**: missing Walk on a non-self Personal lens; undeclared domain; empty
   domain; multi-pattern / comma clause; disconnected clause; unbound chain head / anchor var;
@@ -383,7 +397,7 @@ fewer-larger-fires, and taking them separately would land a green-but-inert comp
 cadence with no value realized. Internal build order, each step leaving the tree green:
 
 1. **The primitive.** `AnchorWalk` + `ReadGrantDomains` on `internal/pkgmgr/definition.go`; the
-   exported expansion pass (composition + validation + prefix factoring + positional renaming) wired
+   exported expansion pass (composition + validation + producer emission) wired
    before every `validateAll`/`VerifyManifest` site; compiler golden + validation-failure tests.
 2. **The migration.** edge-manifest's 13 lenses gain `Walk`s + tails (the 5 required-MATCH lenses'
    inline `WHERE`s hoisted per §3.2); the 3 hand-authored producer specs deleted; `ReadGrantDomains`
@@ -545,3 +559,74 @@ transitive-inheritance, whole-chain-shared and repeated-clause cases); unrooted-
 a chain; cypher injection through `AnchorType`/`AnchorVar`/relation names; an unexpanded Definition
 reaching a write path (every `def.Lenses` reader traced); and output determinism (no map iteration
 reaches emitted text).
+
+## 12. Producer staging (2026-08-01)
+
+The generated producer emits **one stage per walk** (§3.2), replacing the flat single-row-set
+emission §10 shipped. §3.2 and §5 are rewritten to the staged shape; §9–§11 stand as dated records
+of the 2026-07-24 build, so their references to shared-prefix factoring and positional renaming
+describe the emission this section supersedes, not the one in the tree.
+
+**Why.** Independent OPTIONAL branches in one row set multiply. §5 accepted that cross-branch
+product and reasoned only about the shared-prefix re-walk on top of it; factoring trims the
+product's base, never the product. On the live cell `edgeManifestReadGrants`' nine base walks
+reached **1,000,001 binding rows on a single `lnk.session.*.atLocation.*` event** — the label-level
+D1 narrowing routes that event to the producer legitimately, because the base domain references the
+`session` label. The engine's binding cap refused the evaluation and redelivered it, so the whole
+domain's read grants stopped refreshing. Nothing was over- or under-granted; the slice simply went
+stale, which for a fail-closed read gate degrades into rows silently dropped as the graph moves on.
+
+**Shape.** Each walk's chain, then `WITH identity, <prior slices>, collect(DISTINCT {…}) AS
+grantSliceN`; finally `RETURN identity.key AS actorKey, grantSlice0 + … AS readableAnchors`. Peak
+rows become the largest single walk's fan-out rather than the product of all of them. No walk
+declaration, no `Output` descriptor, no key shape, and no runtime path changes — this is the
+producer's emission strategy only.
+
+**Why re-walking a shared prefix is free.** The executor memoizes every node and adjacency read for
+the life of an evaluation, so a stage re-walking `residesIn→containedIn*` replays memo hits, and
+`ex.footprint()` is built from those same memos, so the certified read surface is the same set (a
+mechanism argument — no test compares the two forms' footprints). That is what
+removes §5's reason to factor: the cost factoring avoided was never KV reads, and the row
+multiplication it did not avoid is what actually hurt.
+
+**Proof.** `internal/refractor/ruleengine/full/read_grant_producer_staging_test.go` executes the
+REAL generated staged producer and a literal of the exact pre-change flat artifact against one
+seeded corpus and asserts the granted anchor sets are **equal as (anchorType, anchorId, via)
+sets** — the load-bearing assertion, since a divergence either direction changes who can read what.
+On that corpus the flat form measures 331,824 rows and the staged form 33; what the test *pins* is
+the cap outcome at `WithMaxBindings(50_000)` (flat refused, staged succeeds), not the counts
+themselves. It also pins that two walks binding the same variable name are staged apart at runtime
+rather than joined. `validateGrantSliceVarNames` fails the build closed on a walk variable named
+like an accumulator (§3.3).
+
+**Equivalence was also checked beyond the pinned corpus.** The review pass reconstructed the old
+generator in an overlay and ran 60 randomized actor-rooted corpora × all three real domains — 180
+comparisons, no divergence in either direction — with adversarial sharing (a `worksAt` place equal
+to a residence location, studios reachable by both the residence and staff walks, multi-parent
+`containedIn`, zero-hop `*0..`, randomly-empty branches).
+
+**The classifier had to learn about `WITH` (found by review, before ship).** Staging moved every
+`collect(MapLiteral)` out of the RETURN and behind an accumulator name, so
+`projection/footprint_classifier.go`'s `classifyReturn` — which inspected RETURN items only — saw
+`grantSlice0 + … AS readableAnchors` as a top-level NON-aggregate item and folded all nine names
+into U₀. U₀ ≥ 2 flipped `hasMultiBindingConjunctUnit` from false to **true** for all three
+producers, which turns on `needsFootprintValidation` (`plan.go` → `evaluate.go`): every evaluation
+re-reads its whole read surface, and under churn returns `ErrEvalDrift` and never writes the grant
+document. That is the *same user-visible symptom* — grants stop refreshing — this fire exists to
+remove, arrived at by a different route, and no test would have caught it (the pinned census had no
+generated-producer row).
+
+`hasMultiBindingConjunctUnit` now resolves a RETURN name back through the `WITH` items that defined
+it and classifies the resolved expression, so a staged producer is judged on its real per-walk
+single-binding `MapLiteral` units. Resolution builds a fresh tree (the compiled rule is shared, never
+mutated), skips bare pass-through items so `grantSlice0` resolves to stage 0's `collect` rather than
+a later stage's restatement of the name, and fails **closed** on a self-reference cycle or a depth
+cap. The three real generated producers are added to the pinned census at `false`, and a
+staged-vs-flat parity test asserts the two forms classify identically. A `WITH` alias that genuinely
+conjoins two bindings still validates — resolution does not launder a real multi-binding unit.
+
+**Gate gap closed with it.** `lint-package-version` only watched `packages/` content, so a change to
+the *generator* altered every walk-declaring package's installed lens while leaving its files
+untouched — an unchanged version no-ops install, so the fix would never have reached a running
+stack. The gate now treats a change to `internal/pkgmgr/anchorwalk.go` as content for every package
+declaring a `ReadGrantDomain` (today: `edge-manifest`, bumped 0.14.12 → 0.14.13).

@@ -95,8 +95,9 @@ them Refractor's D1 `readableAnchors` gate silently drops every row the correspo
 
 Three domains rather than one: §6.14 unions every cap-read slice into the actor's effective readable set, so
 a reachability path not every actor has (staff role-standing grants, provider-hat bindings) lives in its own
-slice and its branches never join the base producer's cross-branch fan-out. An identity with no such binding
-simply gets an empty slice, deleted by the generated producer's `EmptyBehavior` + realness filter.
+slice — the §6.14 blast-radius unit, so a path most actors never take neither grows nor invalidates the
+base slice every actor holds. An identity with no such binding simply gets an empty slice, deleted by the
+generated producer's `EmptyBehavior` + realness filter.
 
 Vocabulary additions riding the op rows: `dispatchVisibleWhen` (`{field, equals}`, nullable) gates
 OFFERING an op against the resolved target row's state — the state-machine-pair seam (pause/resume)
