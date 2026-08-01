@@ -1,0 +1,48 @@
+name: wellness-ledger
+version: 0.1.0
+description: |
+  Wellness member payment ledger: the wellnessaccount vertex type (CreateAccount,
+  independently-minted id, one per member identity via a .wellnessLedgerAccount
+  guard aspect on the identity) + the wellnesstransaction vertex type
+  (DebitAccount/CreditAccount, append-only entries linked to the account via
+  postedTo, DebitAccount taking an optional bookingRef back-ref) + the
+  wellnessLedgerHistory read-model lens (one row per transaction) + the
+  wellnessMemberAccounts lens (member identity -> account key lookup) + the
+  wellnessNoShowSettlement Weaver playbook (no-show fee auto-charge). Depends
+  wellness-domain.
+depends:
+  - wellness-domain
+declares:
+  ddls:
+    - canonicalName: wellnessaccount
+      class: meta.ddl.vertexType
+    - canonicalName: wellnessLedgerAccountGuard
+      class: meta.ddl.aspectType
+    - canonicalName: wellnesstransaction
+      class: meta.ddl.vertexType
+  lenses:
+    - canonicalName: wellnessLedgerHistory
+      adapter: nats-kv
+      bucket: wellness-ledger-history
+      engine: full
+    - canonicalName: wellnessMemberAccounts
+      adapter: nats-kv
+      bucket: wellness-member-accounts
+      engine: full
+    - canonicalName: wellnessNoShowSettlement
+      adapter: nats-kv
+      bucket: weaver-targets
+      engine: full
+  permissions:
+    - operationType: CreateAccount
+      scope: any
+      grantsTo: [operator]
+    - operationType: DebitAccount
+      scope: any
+      grantsTo: [operator]
+    - operationType: CreditAccount
+      scope: any
+      grantsTo: [operator]
+  weaverTargets:
+    - targetId: wellnessNoShowSettlement
+      lensRef: wellnessNoShowSettlement

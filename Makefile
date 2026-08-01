@@ -1116,9 +1116,10 @@ install-cafe:
 
 ## install-wellness — Install the Wellness vertical onto a running up-full stack,
 ## in dependency order: orchestration-base → service-domain → lease-signing →
-## wellness-domain (identity-domain is already installed by
+## wellness-domain → wellness-ledger (identity-domain is already installed by
 ## install-packages/up-full; wellness-domain's only cross-package read is
-## lease-signing's leaseapp applicationFor link, by known key). Drive it via
+## lease-signing's leaseapp applicationFor link, by known key; wellness-ledger
+## adds the member payment ledger, depends wellness-domain). Drive it via
 ## the wellness-app, the lattice CLI, or Loupe.
 install-wellness:
 	@echo "==> Building lattice-pkg..."
@@ -1131,7 +1132,9 @@ install-wellness:
 	NATS_URL=$(NATS_URL) NATS_NKEY=$(NKEY_LATTICE_PKG) BOOTSTRAP_JSON_PATH=$(BOOTSTRAP_JSON) ./bin/lattice-pkg install packages/lease-signing
 	@echo "==> Installing wellness-domain..."
 	NATS_URL=$(NATS_URL) NATS_NKEY=$(NKEY_LATTICE_PKG) BOOTSTRAP_JSON_PATH=$(BOOTSTRAP_JSON) ./bin/lattice-pkg install packages/wellness-domain
-	@echo "==> Wellness vertical installed (lease-signing + wellness-domain). Drive it via the wellness-app, the lattice CLI, or Loupe."
+	@echo "==> Installing wellness-ledger..."
+	NATS_URL=$(NATS_URL) NATS_NKEY=$(NKEY_LATTICE_PKG) BOOTSTRAP_JSON_PATH=$(BOOTSTRAP_JSON) ./bin/lattice-pkg install packages/wellness-ledger
+	@echo "==> Wellness vertical installed (lease-signing + wellness-domain + wellness-ledger). Drive it via the wellness-app, the lattice CLI, or Loupe."
 
 ## install-showcase-domains — the four vertical domain packages the cross-vertical
 ## showcase seed (seed-showcase) writes data across. up-full installs only the
@@ -1494,6 +1497,7 @@ refresh-wellness:
 	NATS_URL=$(NATS_URL) NATS_NKEY=$(NKEY_LATTICE_PKG) BOOTSTRAP_JSON_PATH=$(BOOTSTRAP_JSON) ./bin/lattice-pkg install --force packages/identity-domain
 	NATS_URL=$(NATS_URL) NATS_NKEY=$(NKEY_LATTICE_PKG) BOOTSTRAP_JSON_PATH=$(BOOTSTRAP_JSON) ./bin/lattice-pkg install --force packages/lease-signing
 	NATS_URL=$(NATS_URL) NATS_NKEY=$(NKEY_LATTICE_PKG) BOOTSTRAP_JSON_PATH=$(BOOTSTRAP_JSON) ./bin/lattice-pkg install --force packages/wellness-domain
+	NATS_URL=$(NATS_URL) NATS_NKEY=$(NKEY_LATTICE_PKG) BOOTSTRAP_JSON_PATH=$(BOOTSTRAP_JSON) ./bin/lattice-pkg install --force packages/wellness-ledger
 	@$(MAKE) provision-wellness-role
 	@$(MAKE) provision-readpath
 	@echo "==> Rebuilding wellness-app binary..."

@@ -398,7 +398,14 @@ func bookingVertexTypeDDL() pkgmgr.DDLSpec {
 			"SetBookingAttendance records who actually showed: it moves .status.value from booked to " +
 			"attended or noShow, carrying rate / seat / booker forward unchanged (an OCC upsert on the aspect's " +
 			"own revision) — those fields now only matter for ReleaseOrphanedBooking, since a marked booking is " +
-			"no longer CancelBooking-eligible. It is re-markable — attended and noShow correct each other — and " +
+			"no longer CancelBooking-eligible. Transitioning to noShow also stores a noShowFeeCents amount on " +
+			".status — caller-supplied (must be positive) or a 2500 default when omitted, the same idiom " +
+			"clinic-domain's SetAppointmentStatus uses — that wellness-ledger's wellnessNoShowSettlement lens " +
+			"reads to post a DebitAccount charge against the booker's ledger account. It is re-markable — " +
+			"attended and noShow correct each other — and noShowFeeCents is NOT in the carry-forward field set " +
+			"(only rate/seat/booker/session are), so re-marking a noShow booking back to attended silently drops " +
+			"it; a charge already posted before that re-mark stands (the settles audit link makes it permanent " +
+			"history, never reversed by a later status correction). It also " +
 			"rejects a session that has not begun (SessionNotStarted, the mirror of CreateBooking's " +
 			"SessionInPast). Its standing " +
 			"guard mirrors TombstoneSession's: the operator passes unconditionally; a bound instructor may mark " +
@@ -423,7 +430,8 @@ func bookingVertexTypeDDL() pkgmgr.DDLSpec {
 			`"bookingId":{"type":"string","description":"Optional bare NanoID for the new booking vertex (CreateBooking); absent → minted."},` +
 			`"bookingKey":{"type":"string","description":"vtx.booking.<NanoID> of an existing booking (CancelBooking / SetBookingAttendance / ReleaseOrphanedBooking; required, validated alive)."},` +
 			`"status":{"type":"string","description":"attended | noShow (SetBookingAttendance; required). Re-markable — either value corrects the other."},` +
-			`"instructor":{"type":"string","description":"vtx.instructor.<NanoID> the caller is bound to (SetBookingAttendance; required for an instructor (non-operator) caller marking a booking on their OWN class — validated via identifiedBy + ledBy)."}},` +
+			`"instructor":{"type":"string","description":"vtx.instructor.<NanoID> the caller is bound to (SetBookingAttendance; required for an instructor (non-operator) caller marking a booking on their OWN class — validated via identifiedBy + ledBy)."},` +
+			`"noShowFeeCents":{"type":"number","description":"Optional no-show fee in integer cents, only meaningful when status is noShow (SetBookingAttendance; optional, must be > 0 when supplied). Defaults to 2500 when omitted. Stored on .status; wellness-ledger's wellnessNoShowSettlement lens reads it to post a DebitAccount charge against the booker's ledger account."}},` +
 			`"required":[]}`,
 		OutputSchema: `{"type":"object","properties":` +
 			`{"primaryKey":{"type":"string","description":"vtx.booking.<NanoID> the operation wrote."}}}`,
@@ -435,6 +443,7 @@ func bookingVertexTypeDDL() pkgmgr.DDLSpec {
 			"bookingKey":  "Full vtx.booking.<NanoID> key of an existing booking to cancel (CancelBooking), record attendance on (SetBookingAttendance), or release (ReleaseOrphanedBooking, Weaver-dispatched only).",
 			"status":      "attended | noShow (SetBookingAttendance). Replaces .status.value; rate, seat and booker are carried forward unchanged.",
 			"instructor":  "Full vtx.instructor.<NanoID> key the caller claims to be. Required for a non-operator SetBookingAttendance caller: the script requires the caller's own identifiedBy binding to it AND the session's ledBy link to it, so a forged value only fails closed.",
+			"noShowFeeCents": "Optional no-show fee in integer cents (SetBookingAttendance, only meaningful when status is noShow; must be > 0 when supplied, defaults to 2500 when omitted). Stored on the .status aspect; read by wellness-ledger's wellnessNoShowSettlement lens to post a DebitAccount charge. NOT carried forward on a later re-mark to attended (only rate/seat/booker/session are).",
 		},
 		Examples: []pkgmgr.ExampleSpec{
 			{
@@ -471,6 +480,17 @@ func bookingVertexTypeDDL() pkgmgr.DDLSpec {
 				ExpectedOutcome: "Requires the caller's identifiedBy binding to the named instructor and that instructor's " +
 					"ledBy link to the session, then moves .status.value to attended with rate / seat / booker unchanged. " +
 					"SessionNotStarted before the class begins; AuthDenied for any other instructor's class.",
+			},
+			{
+				Name: "SetBookingAttendance — mark a no-show",
+				Payload: map[string]any{
+					"bookingKey": "vtx.booking.<NanoID>",
+					"session":    "vtx.session.<NanoID>",
+					"status":     "noShow",
+				},
+				ExpectedOutcome: "As the attended case, but upserts .status {value: noShow, noShowFeeCents: 2500, " +
+					"...} (the default, since noShowFeeCents was omitted) — wellness-ledger's wellnessNoShowSettlement " +
+					"lens reads it to post a DebitAccount charge against the booker's ledger account once one exists.",
 			},
 			{
 				Name:    "ReleaseOrphanedBooking — drain a booking whose class was called off",
@@ -568,10 +588,11 @@ func bookingStatusAspectTypeDDL() pkgmgr.DDLSpec {
 		Class:             "meta.ddl.aspectType",
 		PermittedCommands: []string{"CreateBooking", "SetBookingAttendance"},
 		Description: "Booking status aspect (wellness). Stored as vtx.booking.<NanoID>.status (class " +
-			"bookingStatus) = {value: booked|attended|noShow, rate: standard|resident, seat, booker, session}. " +
-			"Non-sensitive. Written by CreateBooking (value=booked) and SetBookingAttendance (value=attended|" +
-			"noShow, an OCC upsert carrying rate / seat / booker / session forward untouched) — the booking " +
-			"vertexType DDL owns both scripts; this aspect-type DDL is the step-6 " +
+			"bookingStatus) = {value: booked|attended|noShow, rate: standard|resident, seat, booker, session, " +
+			"noShowFeeCents?}. Non-sensitive. Written by CreateBooking (value=booked) and SetBookingAttendance " +
+			"(value=attended|noShow, an OCC upsert carrying rate / seat / booker / session forward untouched, and — " +
+			"only when transitioning to noShow — a noShowFeeCents amount: caller-supplied or a 2500 default) — the " +
+			"booking vertexType DDL owns both scripts; this aspect-type DDL is the step-6 " +
 			"write gate. seat + booker + session are internal bookkeeping (the claimed seat index, the booker's " +
 			"identity key, the session key) CancelBooking (seat, booker) and ReleaseOrphanedBooking (session, " +
 			"seat, booker) read to recompute which vtx.session.<s>.seat<n> cell and vtx.session.<s>.bkr<b> " +
@@ -579,17 +600,21 @@ func bookingStatusAspectTypeDDL() pkgmgr.DDLSpec {
 			"booker relationship stays the bookedBy link, the session relationship stays the forSession link, " +
 			"Contract #1). session is what lets ReleaseOrphanedBooking find a booking's session AFTER " +
 			"TombstoneSession has killed it — the forSession link survives but the OPTIONAL MATCH lens walk to it " +
-			"would not (a tombstoned target simply drops from the join). Declaration-only: no op handler.",
+			"would not (a tombstoned target simply drops from the join). noShowFeeCents is NOT in the " +
+			"carry-forward field set (only rate/seat/booker/session are), so re-marking a noShow booking to " +
+			"attended drops it — wellness-ledger's wellnessNoShowSettlement lens reads it to post a DebitAccount " +
+			"charge against the booker's ledger account. Declaration-only: no op handler.",
 		Script: aspectDeclarationOnlyScript,
 		InputSchema: `{"type":"object","properties":` +
-			`{"value":{"type":"string","enum":["booked","attended","noShow"]},"rate":{"type":"string","enum":["standard","resident"]},"seat":{"type":"integer"},"booker":{"type":"string"},"session":{"type":"string"}}}`,
+			`{"value":{"type":"string","enum":["booked","attended","noShow"]},"rate":{"type":"string","enum":["standard","resident"]},"seat":{"type":"integer"},"booker":{"type":"string"},"session":{"type":"string"},"noShowFeeCents":{"type":"number"}}}`,
 		OutputSchema: `{"type":"object"}`,
 		FieldDescription: map[string]string{
-			"value":   "Booking status: booked at create time; attended | noShow once SetBookingAttendance records who showed.",
-			"rate":    "standard | resident, derived by CreateBooking from the optional leaseAppKey residency check.",
-			"seat":    "The claimed seat index on the session (internal bookkeeping; CancelBooking / ReleaseOrphanedBooking read it to release the correct seat cell).",
-			"booker":  "The booker's full vtx.identity.<NanoID> key (internal bookkeeping; CancelBooking / ReleaseOrphanedBooking read it to release the correct per-(session, booker) double-book guard). A single anchor, not a relationship — the bookedBy link carries the relationship.",
-			"session": "The full vtx.session.<NanoID> key this booking is for (internal bookkeeping, the same single-anchor idiom as booker). ReleaseOrphanedBooking reads it to find and re-confirm the session's liveness after TombstoneSession has killed the vertex the forSession link points to. Not a relationship — the forSession link carries the relationship.",
+			"value":          "Booking status: booked at create time; attended | noShow once SetBookingAttendance records who showed.",
+			"rate":           "standard | resident, derived by CreateBooking from the optional leaseAppKey residency check.",
+			"seat":           "The claimed seat index on the session (internal bookkeeping; CancelBooking / ReleaseOrphanedBooking read it to release the correct seat cell).",
+			"booker":         "The booker's full vtx.identity.<NanoID> key (internal bookkeeping; CancelBooking / ReleaseOrphanedBooking read it to release the correct per-(session, booker) double-book guard). A single anchor, not a relationship — the bookedBy link carries the relationship.",
+			"session":        "The full vtx.session.<NanoID> key this booking is for (internal bookkeeping, the same single-anchor idiom as booker). ReleaseOrphanedBooking reads it to find and re-confirm the session's liveness after TombstoneSession has killed the vertex the forSession link points to. Not a relationship — the forSession link carries the relationship.",
+			"noShowFeeCents": "Optional no-show fee in integer cents, present only when value is noShow (caller-supplied positive number, or a 2500 default when omitted). Read by wellness-ledger's wellnessNoShowSettlement lens to post a DebitAccount charge.",
 		},
 		Examples: []pkgmgr.ExampleSpec{
 			{
@@ -1873,6 +1898,14 @@ def optional_string(p, name):
         return None
     return v
 
+def optional_number(p, name):
+    if not hasattr(p, name):
+        return None
+    v = getattr(p, name)
+    if v == None or (type(v) != type(0) and type(v) != type(0.0)):
+        return None
+    return v
+
 def bare_nanoid_or_mint(p, name):
     if not hasattr(p, name):
         return nanoid.new()
@@ -2569,6 +2602,22 @@ def execute(state, op):
             carried = status.data.get(field)
             if carried != None:
                 merged[field] = carried
+
+        # No-show fee (billing consequence for a missed class): only meaningful
+        # when transitioning TO noShow. Caller-supplied noShowFeeCents (must be
+        # positive) or a default placeholder (2500) when omitted — mirrors
+        # clinic-domain's SetAppointmentStatus exactly. Deliberately NOT in the
+        # carry-forward loop above: a later re-mark to attended drops it (the
+        # field only matters while the booking IS a noShow), and a charge
+        # already posted before that re-mark stands regardless (the settles
+        # audit link makes it permanent, wellness-ledger-design.md).
+        if value == "noShow":
+            fee_cents = optional_number(p, "noShowFeeCents")
+            if fee_cents == None:
+                fee_cents = 2500
+            elif fee_cents <= 0:
+                fail("InvalidArgument: noShowFeeCents: must be a positive number")
+            merged["noShowFeeCents"] = fee_cents
 
         # The OCC upsert is keyed on the status aspect's own revision, so two
         # markers racing the same booking commit exactly one. Either value
