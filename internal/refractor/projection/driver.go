@@ -389,6 +389,16 @@ func InstallActorAggregate(
 		p.SetMultiEnvelopeFn(desc.EntryEnvelopeFn())
 	} else {
 		p.SetEnvelopeFn(desc.EnvelopeFn(lensDefKey, projectionRevision))
+		// Zero-row retraction (evaluate.go's executeFullForActorOnce): a
+		// doc-mode descriptor whose empty behavior tombstones needs it
+		// because a filtering WHERE on the anchor match itself makes the
+		// cypher return no row at all once the anchor stops matching — the
+		// per-row envelope callback above only ever runs on a produced row,
+		// so it never sees that case. A perEntry lens (the other branch of
+		// this if) retracts through its own prefix-diff instead.
+		if desc.RequiresGuardedTombstone() {
+			p.SetZeroRowRetraction(true)
+		}
 	}
 	p.SetActorEnumerator(pipeline.NewActorEnumerator(adjKV, coreKV, desc.AnchorType))
 	p.SetActorDeleteKey(desc.BuildKey)
@@ -443,7 +453,8 @@ func InstallActorAggregate(
 	logger.Info("actor-aggregate envelope + fan-out + delete-key + latency installed",
 		"lensId", r.ID, "lensDefKey", lensDefKey,
 		"anchorType", desc.AnchorType, "guarded", guarded, "authPlane", authPlane,
-		"perEntry", desc.EntryKeyColumn != "", "footprintValidated", plan.RequiresFootprintValidation)
+		"perEntry", desc.EntryKeyColumn != "", "footprintValidated", plan.RequiresFootprintValidation,
+		"zeroRowRetraction", p.ZeroRowRetractionArmed())
 	return true
 }
 

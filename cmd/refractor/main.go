@@ -877,18 +877,27 @@ func main() {
 		}
 
 		// Convergence-lens no-filtering-WHERE activation guard
-		// (negative-filter-retraction-projection-design.md's review carry-out;
+		// (negative-filter-retraction-projection-design.md;
 		// docs/components/refractor.md's authoring invariant). A plain
 		// (non-actorAggregate) lens projecting into the shared weaver-targets
-		// bucket must carry no filtering WHERE — Fire 2's presence-check
-		// retraction would emit a Delete on a WHERE-dropped anchor, which
-		// Weaver reads as "entity gone," not "stopped violating." actorAggregate
-		// lenses (e.g. unroutedTasks) are exempt: their retraction runs through
-		// the envelope's EmptyBehavior, not this path, so a filtering WHERE
-		// there is safe and already shipped. Data-driven, not
-		// canonical-name-keyed — a brand-new convergence lens is checked for
-		// free. Simple-engine lenses have no CompiledRule of this shape and are
-		// silently out of scope (they express matching differently).
+		// bucket must carry no filtering WHERE — the plain path's presence-check
+		// retraction would emit a Delete on a WHERE-dropped anchor, which Weaver
+		// reads as "entity gone," not "stopped violating." actorAggregate lenses
+		// (e.g. unroutedTasks, orphanedTaskGrants) are exempt from this guard:
+		// their retraction never runs through the plain path's presence check,
+		// so a filtering WHERE there is always safe, regardless of which of the
+		// following actually retracts it — a row-producing lens (an OPTIONAL
+		// MATCH secondary pattern, RealnessFilter set) through the envelope's
+		// per-row realness-filter callback (projection/driver.go's EnvelopeFn);
+		// a lens whose filtering WHERE sits on the anchor match itself, so the
+		// cypher returns no row at all once it stops matching, through the
+		// zero-row-retraction transport (pipeline.Pipeline.zeroRowRetraction,
+		// armed by projection.InstallActorAggregate); a perEntry lens through
+		// its own prefix-diff (multiEntryRetractions); or the actor's own
+		// vertex tombstone through the anchor-tombstone shortcut. Data-driven,
+		// not canonical-name-keyed — a brand-new convergence lens is checked
+		// for free. Simple-engine lenses have no CompiledRule of this shape and
+		// are silently out of scope (they express matching differently).
 		if r.Into.Target == "nats_kv" && r.Into.Bucket == bootstrap.WeaverTargetsBucket && !projection.IsActorAggregate(r) {
 			if cr, ok := r.CompiledRule.(*full.CompiledRule); ok {
 				if err := cr.ValidateNoFilteringWhereForConvergence(); err != nil {

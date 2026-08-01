@@ -398,10 +398,18 @@ let its presence-check retraction emit a Delete Weaver would misread as "entity 
 instead of "stopped violating." **actorAggregate convergence lenses are exempt** — the
 presence check only ever runs for `p.actorEnumerator == nil && p.envelopeFn == nil`, so
 it structurally cannot fire for an envelope lens regardless of `WHERE`; their zero-match
-case already resolves safely through the envelope's `EmptyBehavior` (a missing row and a
-live `violating: false` row are handled identically by Weaver's evaluator) — proven live
-by `unroutedTasks` (`packages/orchestration-base/lenses.go`), the one shipped convergence
-lens with a required `WHERE` on its anchor match.
+case instead retracts through one of two envelope-level transports, chosen by where the
+filtering `WHERE` sits. A lens whose anchor MATCH always succeeds and only an
+OPTIONAL-MATCH secondary pattern is conditional (`RealnessFilter` set) retracts through
+the per-row envelope callback once the row's realness columns come back empty
+(`projection/driver.go`'s `EnvelopeFn`) — proven live by `unroutedTasks`
+(`packages/orchestration-base/lenses.go`). A doc-mode `emptyBehavior: delete|softDelete`
+lens whose filtering `WHERE` sits on the anchor match itself — so the cypher returns no
+row at all once it stops matching — retracts through the zero-row-retraction transport
+(`pipeline.Pipeline.zeroRowRetraction`, armed by `projection.InstallActorAggregate`) —
+proven live by `orphanedTaskGrants` (`packages/orchestration-base/lenses.go`). Either
+way, a missing row and a live `violating: false` row are handled identically by
+Weaver's evaluator.
 
 **Neighbor-driven / multi-row retraction (target-diff, opt-in).** A neighbor-keyed
 composite lens whose presence check structurally falls through (above) can opt into

@@ -143,6 +143,18 @@ type Pipeline struct {
 	// back to capabilityKeyForActor (cap.<actor>), the primary lens's shape.
 	actorDeleteKey func(actorKey string) string
 
+	// zeroRowRetraction arms the doc-mode zero-row retraction transport
+	// (executeFullForActorOnce): an actor whose evaluation succeeds and
+	// yields zero result rows synthesizes the same delete EvalResult the
+	// tombstone shortcut emits, guarded by a live presence check against the
+	// current adapter (zeroRowDeleteKey). Set by
+	// projection.InstallActorAggregate for a doc-mode (EntryKeyColumn=="")
+	// descriptor whose empty behavior is delete/softDelete
+	// (OutputDescriptor.RequiresGuardedTombstone) — false for every other
+	// lens, which leaves its existing behavior untouched. A perEntry lens
+	// retracts through its own prefix-diff (multiEntryRetractions) instead.
+	zeroRowRetraction bool
+
 	// secureDecryptor decrypts a Secure Lens's declared secure columns after
 	// evaluation, before any write path (Contract #3 §3.10). Nil for every
 	// non-secure lens — rows pass through untouched.
@@ -648,6 +660,25 @@ func (p *Pipeline) SetActorEnumerator(en *ActorEnumerator) {
 // Must be called before Run.
 func (p *Pipeline) SetActorDeleteKey(fn func(actorKey string) string) {
 	p.actorDeleteKey = fn
+}
+
+// SetZeroRowRetraction arms the doc-mode zero-row retraction transport (see
+// the zeroRowRetraction field doc): a filtering WHERE on the anchor match
+// itself — not merely an OPTIONAL MATCH secondary pattern — makes the cypher
+// return no row at all once the anchor stops matching, which starves the
+// per-row envelope callback (EmptyBehavior's other transport,
+// projection/driver.go's EnvelopeFn) of anything to decline. Must be called
+// before Run.
+func (p *Pipeline) SetZeroRowRetraction(v bool) {
+	p.zeroRowRetraction = v
+}
+
+// ZeroRowRetractionArmed reports whether the doc-mode zero-row retraction
+// transport is armed, exposed for callers (installation-time wiring checks,
+// tests) that need to observe the setting without exercising the live
+// evaluation path — the same reasoning IsPerEntry documents for its own flag.
+func (p *Pipeline) ZeroRowRetractionArmed() bool {
+	return p.zeroRowRetraction
 }
 
 // SetSecureDecryptor installs the Secure-Lens decrypt-at-projection transform

@@ -59,9 +59,14 @@ shipped as `(*full.CompiledRule).ValidateNoFilteringWhereForConvergence`, called
 (non-actorAggregate) lens targeting `weaver-targets` now fails to activate if it carries a filtering
 (non-optional `MATCH`, or any `WITH`) `WHERE`. Grounding found the stated invariant was false as
 literally written — `unroutedTasks` (`packages/orchestration-base`) is a live, tested convergence lens
-with a required `WHERE` — but it's `actorAggregate`, whose zero-match case resolves safely through the
-envelope's `EmptyBehavior` (Weaver treats a missing row and a live `violating: false` row identically),
-so the guard scopes to plain lenses only and `unroutedTasks` is correctly exempt, not broken.
+with a required `WHERE` — but it's `actorAggregate`, whose zero-match case retracts through the
+envelope's transports rather than the plain path's presence check: the per-row realness-filter
+callback for a row-producing lens whose anchor MATCH always succeeds and only an OPTIONAL-MATCH
+secondary pattern is conditional (`unroutedTasks`'s shape), or the zero-row-retraction transport
+(`pipeline.Pipeline.zeroRowRetraction`) for a lens whose filtering `WHERE` sits on the anchor match
+itself, so the cypher returns no row at all once it stops matching (`orphanedTaskGrants`'s shape) —
+either way Weaver treats a missing row and a live `violating: false` row identically, so the guard
+scopes to plain lenses only and `unroutedTasks` is correctly exempt, not broken.
 `docs/components/refractor.md`'s authoring-invariant prose corrected to match.
 
 **Fire 3 CHECKPOINT (2026-07-02, Lattice Steward, full 3-layer review).** Shipped as a **lens-wide**

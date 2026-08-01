@@ -285,11 +285,18 @@ func TestRefractor_KeyColumnLens_ProjectsBareNanoIDKey(t *testing.T) {
 	require.Equal(t, 1, strings.Count(bareKey, "."),
 		"keyColumn key must have exactly one dot after the targetId: %q", bareKey)
 
-	// --- DELETE PATH (the Q1 proof): closing the task reprojects to zero rows →
-	// emptyBehavior:delete drives the delete. BuildKey is wired on the delete path
-	// with ONLY the actorKey (no row); if the key were row-sourced it would target
-	// a different key and the bare-NanoID row would never retract. Assert the
-	// delete lands on the SAME bareKey. ---
+	// --- DELETE PATH (the Q1 proof): this lens's WHERE sits on the OPTIONAL
+	// MATCH secondary pattern, not the anchor, so closing the task still leaves
+	// the anchor MATCH bound and the cypher still returns exactly one row —
+	// its roster's one collect entry is now the degenerate {taskKey: null}
+	// OPTIONAL-MATCH artifact. RealnessFilter ("taskKey") empties it, so the
+	// per-row envelope callback's ErrDeleteProjection (RealnessFilter != "")
+	// drives the delete, not the zero-row-retraction transport (which never
+	// engages here, since the cypher never returns zero rows for this lens).
+	// BuildKey is wired on the delete path with ONLY the actorKey (no row); if
+	// the key were row-sourced it would target a different key and the
+	// bare-NanoID row would never retract. Assert the delete lands on the SAME
+	// bareKey. ---
 	writeVertex(taskKey, "task", map[string]any{"status": "complete"})
 	require.Eventually(t, func() bool {
 		entry, gErr := convKV.Get(ctx, bareKey)

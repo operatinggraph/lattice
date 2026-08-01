@@ -505,6 +505,28 @@ func (p *Pipeline) executeFullForActorOnce(ctx context.Context, actorKey string,
 			Row:    row,
 		})
 	}
+	// Zero-row retraction (doc-mode EmptyBehavior delete/softDelete): a
+	// filtering WHERE on the anchor match itself — as opposed to an OPTIONAL
+	// MATCH secondary pattern — makes the cypher above return no row at all
+	// once the anchor stops matching, so `out` (and therefore `results`) is
+	// empty and the per-row envelope callback above never runs to decline
+	// anything. p.zeroRowRetraction is armed only for a doc-mode descriptor
+	// whose empty behavior actually tombstones
+	// (projection.InstallActorAggregate), so this is inert for every other
+	// lens shape — a perEntry lens retracts through multiEntryRetractions
+	// below instead, and a skip/emptyDoc doc-mode lens must never have its
+	// existing key touched by this. zeroRowDeleteKey's own presence check is
+	// what keeps this from manufacturing a tombstone for an anchor that never
+	// held a row (e.g. activation replay walking every anchor subject).
+	if p.zeroRowRetraction && len(results) == 0 {
+		if key, ok := p.zeroRowDeleteKey(ctx, actorKey); ok {
+			results = append(results, ruleengine.EvalResult{
+				Delete: true,
+				Keys:   map[string]any{"key": key},
+				Row:    nil,
+			})
+		}
+	}
 	// An actor-aggregate lens (envelope installed) derives its output key from the
 	// anchor, not the row, so every non-delete row for one actor carries the same
 	// key. If the cypher returns 2+ such rows, the write loop would overwrite them
@@ -1051,6 +1073,31 @@ func (p *Pipeline) actorDeleteKeyFor(actorKey string) string {
 		return p.actorDeleteKey(actorKey)
 	}
 	return capabilityKeyForActor(actorKey)
+}
+
+// zeroRowDeleteKey reports actorKey's delete key when a doc-mode zero-row-
+// retraction lens's evaluation produced no rows, but ONLY when the current
+// adapter positively confirms that key is presently live. executeFullForActorOnce
+// reaches this on EVERY zero-row evaluation for an armed lens, including an
+// anchor whose filtering WHERE has never once matched — activation replay
+// walks every anchor subject (DeliverLastPerSubject), so without this check a
+// never-projected anchor would manufacture a guarded tombstone key on its very
+// first evaluation, durably growing the target for a row that never existed.
+// Mirrors Reproject's own presence check (reproject.go, RowReader.GetRow): an
+// adapter that cannot read its own rows back, a failed read, or a confirmed
+// absence all decline the emit (fail-safe, the current behavior) — only a
+// positively confirmed live row earns the delete.
+func (p *Pipeline) zeroRowDeleteKey(ctx context.Context, actorKey string) (string, bool) {
+	reader, ok := p.currentAdapter().(adapter.RowReader)
+	if !ok {
+		return "", false
+	}
+	key := p.actorDeleteKeyFor(actorKey)
+	_, present, err := reader.GetRow(ctx, map[string]any{"key": key})
+	if err != nil || !present {
+		return "", false
+	}
+	return key, true
 }
 
 // capabilityKeyForActor derives the Capability KV target key
