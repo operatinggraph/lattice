@@ -2069,7 +2069,7 @@ function renderTaskCard(t) {
 
   const title = document.createElement("div");
   title.className = "addr";
-  title.textContent = t.operationName || shortKey(t.operation) || "Task";
+  title.textContent = t.operationName || shortKey(t.forOperation) || "Task";
 
   const desc = document.createElement("div");
   desc.className = "addr-sub";

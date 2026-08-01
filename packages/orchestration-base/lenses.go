@@ -75,6 +75,22 @@ func Lenses() []pkgmgr.LensSpec {
 			},
 		},
 		{
+			CanonicalName:  "orphanedTaskGrants",
+			Class:          "meta.lens",
+			Adapter:        "nats-kv",
+			Bucket:         "weaver-targets",
+			Engine:         "full",
+			Spec:           orphanedTaskGrantsSpec,
+			ProjectionKind: "actorAggregate",
+			Output: &pkgmgr.OutputDescriptorSpec{
+				AnchorType:       "task",
+				OutputKeyPattern: "orphanedTaskGrants.{actorSuffix}",
+				BodyColumns:      []string{"violating", "missing_operation", "entityKey", "taskKey"},
+				EmptyBehavior:    "delete",
+				KeyColumn:        "entityId",
+			},
+		},
+		{
 			CanonicalName: "loomFlowHistory",
 			Class:         "meta.lens",
 			Adapter:       "nats-kv",
@@ -181,6 +197,43 @@ RETURN
   ($now > t.data.expiresAt) AS missing_claim,
   ($now > t.data.expiresAt) AS violating,
   (CASE WHEN ($now > t.data.expiresAt) THEN null ELSE t.data.expiresAt END) AS freshUntil
+`
+
+// orphanedTaskGrantsSpec is the convergence target for a task whose granted
+// operation died out from under it: `forOperation` is REQUIRED at CreateTask
+// (ddls.go — "required":["forOperation","scopedTo","expiresAt"]), so an open
+// task's `op` binding going null via the OPTIONAL MATCH below can only mean
+// the op-meta it pointed at was tombstoned after the fact (a package upgrade
+// retiring an op-meta without declaring RetireCancelsOpenTasks —
+// internal/pkgmgr/opmetaretirement.go handles that path only at
+// upgrade-time, for the upgrading package's own metas; this lens is the
+// standing sweep that also catches every other route to the same dangling
+// state). Left alone, myTasksSpec keeps projecting the task with a null
+// operationName (Contract #10 §10.1's own doc comment already calls that
+// combination "null-safe" — safe to render, not safe to leave actionable
+// forever) and a task-inbox FE has no button to offer for it (the reported
+// case: cmd/loftspace-app's task card falls through to a bare "Task" title
+// and a permanently-disabled complete button).
+//
+// The status='open' gate excludes a task already complete/cancelled — those
+// have nothing left to converge. Once Weaver dispatches CancelTask{taskKey}
+// (targets.go), the task leaves 'open' and this row's WHERE stops matching
+// on the next reprojection — EmptyBehavior:"delete" removes it, mirroring
+// unroutedTasksSpec's own close-by-disappearing shape above.
+const orphanedTaskGrantsSpec = `
+MATCH (t:task {key: $actorKey})
+  WHERE t.data.status = 'open'
+OPTIONAL MATCH (t)-[:forOperation]->(op)
+WITH
+  t.key AS entityKey,
+  op.key AS opKey
+RETURN
+  entityKey AS actorKey,
+  entityKey,
+  nanoIdFromKey(entityKey) AS entityId,
+  entityKey AS taskKey,
+  (opKey = null) AS missing_operation,
+  (opKey = null) AS violating
 `
 
 // MyTasksBucket is the package-owned output bucket for the my-tasks lens.
