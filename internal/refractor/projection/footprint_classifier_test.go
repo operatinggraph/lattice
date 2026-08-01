@@ -7,6 +7,7 @@ import (
 
 	"github.com/operatinggraph/lattice/internal/pkgmgr"
 	"github.com/operatinggraph/lattice/internal/refractor/ruleengine/full"
+	edgemanifest "github.com/operatinggraph/lattice/packages/edge-manifest"
 	orchestrationbase "github.com/operatinggraph/lattice/packages/orchestration-base"
 	rbacdomain "github.com/operatinggraph/lattice/packages/rbac-domain"
 	servicelocation "github.com/operatinggraph/lattice/packages/service-location"
@@ -91,6 +92,117 @@ func TestHasMultiBindingConjunctUnit_PinnedCensus(t *testing.T) {
 }
 
 // --- fail-closed vectors (§13.3) ---
+
+// TestHasMultiBindingConjunctUnit_GeneratedActorAggregateProducers exercises
+// the REAL generated cap-read producers (internal/pkgmgr/anchorwalk.go's
+// ExpandReadGrantWalks, packages/edge-manifest's ReadGrantDomains) — the
+// staged-WITH shape this file's WITH-resolution logic exists for. Every
+// grant entry in every one of these producers is a single-binding MapLiteral
+// (one anchor per walk), so all three must classify false, exactly like the
+// hand-authored producers above.
+func TestHasMultiBindingConjunctUnit_GeneratedActorAggregateProducers(t *testing.T) {
+	expanded, err := edgemanifest.Package.ExpandReadGrantWalks()
+	require.NoError(t, err, "edge-manifest's read-grant walks must compile")
+
+	for _, name := range []string{
+		"edgeManifestReadGrants",
+		"edgeManifestStaffReadGrants",
+		"edgeManifestProviderReadGrants",
+	} {
+		t.Run(name, func(t *testing.T) {
+			spec := specByName(t, expanded.Lenses, name)
+			cr := compileSpec(t, spec)
+			require.False(t, hasMultiBindingConjunctUnit(cr),
+				"%s: every grant entry is a single-binding MapLiteral scoped to its own walk", name)
+		})
+	}
+}
+
+// TestHasMultiBindingConjunctUnit_StagedVsFlatParity pins the fix's
+// correctness target directly: a staged producer (one WITH per walk, folding
+// that walk's collect(...) into its own grantSliceN before the RETURN
+// concatenates them — internal/pkgmgr/anchorwalk.go's generateProducerSpec)
+// must classify IDENTICALLY to the flat equivalent (every OPTIONAL MATCH in
+// one run, `collect(...) + collect(...)` inline in the RETURN).
+func TestHasMultiBindingConjunctUnit_StagedVsFlatParity(t *testing.T) {
+	staged := `
+MATCH (identity:identity {key: $actorKey})
+OPTIONAL MATCH (identity)-[:worksAt]->(loc:location)
+WITH identity,
+  collect(DISTINCT {anchorType: 'location', anchorId: nanoIdFromKey(loc.key), via: ['worksAt']}) AS grantSlice0
+OPTIONAL MATCH (identity)-[:holdsRole]->(role:role)-[:offeredTo]->(pane:pane)
+WITH identity, grantSlice0,
+  collect(DISTINCT {anchorType: 'pane', anchorId: nanoIdFromKey(pane.key), via: ['holdsRole', 'offeredTo']}) AS grantSlice1
+RETURN
+  identity.key AS actorKey,
+  grantSlice0 + grantSlice1 AS readableAnchors
+`
+	flat := `
+MATCH (identity:identity {key: $actorKey})
+OPTIONAL MATCH (identity)-[:worksAt]->(loc:location)
+OPTIONAL MATCH (identity)-[:holdsRole]->(role:role)-[:offeredTo]->(pane:pane)
+RETURN
+  identity.key AS actorKey,
+  collect(DISTINCT {anchorType: 'location', anchorId: nanoIdFromKey(loc.key), via: ['worksAt']}) +
+  collect(DISTINCT {anchorType: 'pane', anchorId: nanoIdFromKey(pane.key), via: ['holdsRole', 'offeredTo']}) AS readableAnchors
+`
+	stagedVerdict := hasMultiBindingConjunctUnit(compileSpec(t, staged))
+	flatVerdict := hasMultiBindingConjunctUnit(compileSpec(t, flat))
+	require.False(t, stagedVerdict, "staged producer: every grant entry is single-binding")
+	require.Equal(t, flatVerdict, stagedVerdict, "staged and flat forms of the same producer must classify identically")
+}
+
+// TestHasMultiBindingConjunctUnit_WithAlias_GenuineMultiBinding_StillValidates
+// confirms WITH resolution does not launder a REAL multi-binding unit through
+// an alias: a WITH item that combines two distinct bindings into one
+// non-aggregate expression, referenced by the RETURN, must still validate —
+// exactly the shape hasMultiBindingConjunctUnit exists to catch, just one
+// hop away through a WITH instead of written directly in the RETURN.
+func TestHasMultiBindingConjunctUnit_WithAlias_GenuineMultiBinding_StillValidates(t *testing.T) {
+	spec := `
+MATCH (a:foo)
+MATCH (b:bar)
+WITH a.x + b.y AS combined
+RETURN combined AS result
+`
+	require.True(t, hasMultiBindingConjunctUnit(compileSpec(t, spec)))
+}
+
+// TestHasMultiBindingConjunctUnit_ReturnUnresolvedByAnyWith_OrdinaryMultiBinding
+// confirms WITH resolution is a no-op for names no WITH clause defines — the
+// existing ordinary-binding classification must keep working when a RETURN
+// references two plain bindings that were never routed through a WITH alias
+// at all (or through one that doesn't mention them).
+func TestHasMultiBindingConjunctUnit_ReturnUnresolvedByAnyWith_OrdinaryMultiBinding(t *testing.T) {
+	spec := `
+MATCH (a:foo)
+MATCH (b:bar)
+WITH a
+RETURN a AS x, b AS y
+`
+	require.True(t, hasMultiBindingConjunctUnit(compileSpec(t, spec)))
+}
+
+// TestHasMultiBindingConjunctUnit_FailClosed_WithAliasCycle pins the
+// resolveWithAliases recursion-depth cap: two WITH aliases defined in terms
+// of each other (x's definition names y, y's definition names x) can never be
+// fully resolved. Built directly on the AST — real Cypher's scoping rules
+// couldn't produce this shape through the parser — the same way the other
+// fail-closed vectors in this file construct a *full.CompiledRule by hand.
+func TestHasMultiBindingConjunctUnit_FailClosed_WithAliasCycle(t *testing.T) {
+	cr := &full.CompiledRule{Query: &full.Query{Clauses: []full.Clause{
+		&full.With{Items: []full.ProjectionItem{
+			{Expr: &full.VariableRef{Name: "y"}, Alias: "x"},
+		}},
+		&full.With{Items: []full.ProjectionItem{
+			{Expr: &full.VariableRef{Name: "x"}, Alias: "y"},
+		}},
+		&full.Return{Items: []full.ProjectionItem{
+			{Expr: &full.VariableRef{Name: "x"}, Alias: "result"},
+		}},
+	}}}
+	require.True(t, hasMultiBindingConjunctUnit(cr))
+}
 
 func TestHasMultiBindingConjunctUnit_FailClosed_NilCompiledRule(t *testing.T) {
 	require.True(t, hasMultiBindingConjunctUnit(nil))

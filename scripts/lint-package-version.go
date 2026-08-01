@@ -32,6 +32,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
@@ -78,6 +79,13 @@ func main() {
 		}
 		contentChanged[pkg]++
 	}
+	generatorDriven := map[string]bool{}
+	for _, pkg := range walkGeneratorConsumers(changed) {
+		if contentChanged[pkg] == 0 {
+			generatorDriven[pkg] = true
+		}
+		contentChanged[pkg]++
+	}
 	if len(contentChanged) == 0 {
 		fmt.Println("lint-package-version: clean — no packages/ content changes.")
 		return
@@ -117,7 +125,11 @@ func main() {
 			continue
 		}
 		if headVer == baseVer {
-			fmt.Printf("lint-package-version: packages/%s content changed (%d file(s)) but manifest.yaml version is unchanged at %s\n", pkg, contentChanged[pkg], headVer)
+			if generatorDriven[pkg] {
+				fmt.Printf("lint-package-version: packages/%s declares ReadGrantDomains and %s changed, so its GENERATED read-grant producer lens may differ, but manifest.yaml version is unchanged at %s\n", pkg, walkGeneratorDir, headVer)
+			} else {
+				fmt.Printf("lint-package-version: packages/%s content changed (%d file(s)) but manifest.yaml version is unchanged at %s\n", pkg, contentChanged[pkg], headVer)
+			}
 			fmt.Printf("  bump %s `version:` (+ package.go Definition.Version — parity is test-pinned);\n", manifest)
 			fmt.Printf("  an unchanged version no-ops plain install, so this change never reaches a running stack.\n")
 			violations++
@@ -275,4 +287,74 @@ func gitLines(args ...string) []string {
 		}
 	}
 	return lines
+}
+
+// walkGeneratorDir holds the compiler that turns a package's declared
+// AnchorWalks into its cap-read read-grant producer lens. The producer is never
+// written in packages/ — pkgmgr emits it — so a change here alters the installed
+// lens content of every package that declares a ReadGrantDomain while leaving
+// that package's own files untouched. The whole directory is the trigger, not
+// one file: splitting the generator across files must not reopen the gap.
+const walkGeneratorDir = "internal/pkgmgr/"
+
+// readGrantDomainDecl is the declaration that makes a package a consumer of the
+// walk generator.
+const readGrantDomainDecl = "ReadGrantDomains"
+
+// walkGeneratorConsumers lists the packages whose generated producer lens the
+// changed set puts in doubt: empty unless the generator itself changed, and
+// then every package declaring a ReadGrantDomain. Those packages need a version
+// bump exactly as an in-package edit would, because the content that reaches a
+// running stack changed for them too.
+func walkGeneratorConsumers(changed []string) []string {
+	touched := false
+	for _, path := range changed {
+		if strings.HasPrefix(path, walkGeneratorDir) && strings.HasSuffix(path, ".go") &&
+			!strings.HasSuffix(path, "_test.go") {
+			touched = true
+			break
+		}
+	}
+	if !touched {
+		return nil
+	}
+
+	entries, err := os.ReadDir("packages")
+	if err != nil {
+		return nil
+	}
+	var out []string
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		if packageDeclaresReadGrantDomains(filepath.Join("packages", e.Name())) {
+			out = append(out, e.Name())
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// packageDeclaresReadGrantDomains reports whether any non-test Go file in dir
+// declares a ReadGrantDomain.
+func packageDeclaresReadGrantDomains(dir string) bool {
+	files, err := os.ReadDir(dir)
+	if err != nil {
+		return false
+	}
+	for _, f := range files {
+		name := f.Name()
+		if f.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		src, err := os.ReadFile(filepath.Join(dir, name))
+		if err != nil {
+			continue
+		}
+		if strings.Contains(string(src), readGrantDomainDecl) {
+			return true
+		}
+	}
+	return false
 }

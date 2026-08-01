@@ -40,8 +40,9 @@ type AnchorWalk struct {
 	// Chain is the walk as ordered pattern clauses. Each entry is a SINGLE
 	// linear relationship pattern (at least one relationship; no commas; at
 	// least one node variable already bound by an earlier clause or by the
-	// actor variable `identity`). Compiled as one OPTIONAL MATCH per clause —
-	// verbatim on the data side, variable-renamed on the producer side.
+	// actor variable `identity`). Compiled verbatim as one OPTIONAL MATCH per
+	// clause in both artifacts — on the data side as the lens's reachability
+	// prefix, on the producer side as the walk's own staged branch.
 	Chain []string
 }
 
@@ -128,6 +129,9 @@ func (def Definition) ExpandReadGrantWalks() (Definition, error) {
 			return Definition{}, fmt.Errorf(
 				"pkgmgr: ReadGrantDomain %q is declared but no lens Walk names it — "+
 					"an empty producer projects an always-empty grant slice", d.Name)
+		}
+		if err := validateGrantSliceVarNames(d.Name, ms); err != nil {
+			return Definition{}, err
 		}
 		lenses = append(lenses, generateProducerLens(d, ms))
 	}
@@ -503,107 +507,98 @@ func generateProducerLens(d ReadGrantDomainSpec, walks []*parsedWalk) LensSpec {
 	}
 }
 
-// generateProducerSpec emits the producer cypher: the actor head, the member
-// walks' chain clauses with deterministic shared-prefix factoring, and one
-// collect branch per walk concatenated into readableAnchors.
+// generateProducerSpec emits the producer cypher: the actor head, then one
+// STAGE per member walk — the walk's own chain clauses followed by a `WITH`
+// that folds them into that walk's grant slice — and a final RETURN
+// concatenating every slice into readableAnchors.
 //
-// Factoring: walks whose leading clauses are textually identical share those
-// clauses — and their variable bindings — once. That reproduces the shape a
-// hand author writes (a residence prefix bound once for four branches) and is
-// what keeps the cross-branch fan-out at its current level. Correctness never
-// depends on it: a walk that shares nothing simply emits its whole chain.
+// Staging is what bounds the binding set. A domain's walks are independent
+// reachability paths off one actor, and each is consumed only by its own
+// `collect(DISTINCT …)`. Emitted as one flat run of OPTIONAL MATCH clauses,
+// they are nonetheless a single row set, so their fan-outs MULTIPLY: nine base
+// walks over a populated cell reached a 1,000,001-row cross product on one
+// event, all of it discarded by the collects. A `WITH identity, <prior
+// slices>, collect(DISTINCT …) AS gN` after each walk collapses that walk's
+// rows back to one before the next walk expands, so the peak row count is the
+// LARGEST SINGLE WALK's fan-out rather than the product of all of them.
 //
-// Renaming: a variable a walk first binds in its UNSHARED suffix, whose name
-// another walk already bound, is renamed positionally on the parsed pattern
-// (never by textual substitution — variable names, labels and relation types
-// overlap freely in one clause, and a regex rename on the security artifact is
-// not acceptable). Without it two walks' unrelated variables would silently
-// join.
+// Each walk therefore emits its whole chain, sharing nothing with its
+// siblings. A shared prefix (four resident walks all opening on the residence
+// chain) is re-walked per stage, which costs no KV reads — the executor memoizes
+// every node and adjacency read for the life of an evaluation, so a re-walk
+// replays memo hits and certifies the identical footprint.
+//
+// Staging also makes cross-walk variable scoping structural: a walk's variables
+// die at its own `WITH`, which projects only the actor and the accumulated
+// slices. Two walks that independently bind `place` can no longer join through
+// that name, so nothing needs renaming.
 func generateProducerSpec(walks []*parsedWalk) string {
-	type prior struct {
-		chain   []string
-		clauses []*linearPattern
-		rename  map[string]string
-	}
-
-	var emitted []string
-	var branches []string
-	var priors []prior
-	globalBound := map[string]bool{anchorWalkActorVar: true}
-
-	for wi, pw := range walks {
-		bestLen, bestIdx := 0, -1
-		for pi := range priors {
-			n := commonClausePrefix(priors[pi].chain, pw.walk.Chain)
-			if n > bestLen {
-				bestLen, bestIdx = n, pi
-			}
-		}
-
-		// walkBound is what THIS walk has already bound — the shared prefix's
-		// variables plus the actor plus everything its own earlier clauses
-		// bound. A reference to one of those is the walk's own binding and is
-		// never renamed; only a variable this walk binds FRESH, whose name
-		// another walk already took, is scoped away.
-		rename := map[string]string{}
-		walkBound := map[string]bool{anchorWalkActorVar: true}
-		if bestIdx >= 0 {
-			for _, v := range patternVarNames(priors[bestIdx].clauses[:bestLen]) {
-				walkBound[v] = true
-				if nn, ok := priors[bestIdx].rename[v]; ok {
-					rename[v] = nn
-				}
-			}
-		}
-
-		for ci := bestLen; ci < len(pw.clauses); ci++ {
-			lp := pw.clauses[ci]
-			for _, v := range patternVarNames([]*linearPattern{lp}) {
-				if walkBound[v] {
-					continue
-				}
-				walkBound[v] = true
-				if globalBound[v] {
-					nn := scopedVarName(v, wi, globalBound)
-					rename[v] = nn
-					globalBound[nn] = true
-					continue
-				}
-				globalBound[v] = true
-			}
-			emitted = append(emitted, lp.render(rename))
-		}
-
-		anchorVar := pw.walk.AnchorVar
-		if nn, ok := rename[anchorVar]; ok {
-			anchorVar = nn
-		}
-		branches = append(branches, collectBranch(pw.walk.AnchorType, anchorVar, pw.relNames))
-		priors = append(priors, prior{chain: pw.walk.Chain, clauses: pw.clauses, rename: rename})
-	}
-
 	var b strings.Builder
 	b.WriteString("\n")
 	b.WriteString(anchorWalkHead)
 	b.WriteString("\n")
-	for _, c := range emitted {
-		b.WriteString("OPTIONAL MATCH ")
-		b.WriteString(c)
+
+	slices := make([]string, len(walks))
+	for wi, pw := range walks {
+		for _, lp := range pw.clauses {
+			b.WriteString("OPTIONAL MATCH ")
+			b.WriteString(lp.render(nil))
+			b.WriteString("\n")
+		}
+		slices[wi] = grantSliceVar(wi)
+		b.WriteString("WITH ")
+		b.WriteString(anchorWalkActorVar)
+		for _, prior := range slices[:wi] {
+			b.WriteString(", ")
+			b.WriteString(prior)
+		}
+		b.WriteString(",\n  ")
+		b.WriteString(collectBranch(pw.walk.AnchorType, pw.walk.AnchorVar, pw.relNames))
+		b.WriteString(" AS ")
+		b.WriteString(slices[wi])
 		b.WriteString("\n")
 	}
+
 	b.WriteString("RETURN\n  ")
 	b.WriteString(anchorWalkActorVar)
-	b.WriteString(".key AS actorKey,\n")
-	for i, br := range branches {
-		b.WriteString("  ")
-		b.WriteString(br)
-		if i < len(branches)-1 {
-			b.WriteString(" +")
-		}
-		b.WriteString("\n")
-	}
-	b.WriteString("  AS readableAnchors\n")
+	b.WriteString(".key AS actorKey,\n  ")
+	b.WriteString(strings.Join(slices, " + "))
+	b.WriteString(" AS readableAnchors\n")
 	return b.String()
+}
+
+// grantSliceVar names the accumulator carrying walk wi's collected grant slice
+// across the remaining stages.
+func grantSliceVar(wi int) string {
+	return grantSliceVarPrefix + strconv.Itoa(wi)
+}
+
+// grantSliceVarPrefix opens every accumulator name. A walk variable colliding
+// with one would be joined against the accumulator by the staging WITH instead
+// of bound fresh, so validateGrantSliceVarNames refuses the package build
+// rather than letting the producer bind a slice list as if it were a node.
+const grantSliceVarPrefix = "grantSlice"
+
+// validateGrantSliceVarNames refuses a domain whose member walks bind a
+// variable named like a generated accumulator.
+func validateGrantSliceVarNames(domain string, walks []*parsedWalk) error {
+	reserved := make(map[string]bool, len(walks))
+	for wi := range walks {
+		reserved[grantSliceVar(wi)] = true
+	}
+	for _, pw := range walks {
+		for _, v := range patternVarNames(pw.clauses) {
+			if reserved[v] {
+				return fmt.Errorf(
+					"pkgmgr: ReadGrantDomain %q: lens %q binds variable %q, which is the name the "+
+						"generated producer gives one of its own per-walk grant-slice accumulators — "+
+						"the staging WITH would join the walk's pattern against the accumulated list "+
+						"instead of binding it fresh; rename the walk variable",
+					domain, pw.lensName, v)
+			}
+		}
+	}
+	return nil
 }
 
 // collectBranch renders one walk's grant branch. `via` is the walk's full
@@ -620,15 +615,6 @@ func collectBranch(anchorType, anchorVar string, relNames []string) string {
 		anchorType, anchorVar, strings.Join(quoted, ", "))
 }
 
-// commonClausePrefix counts the leading clauses two chains declare identically.
-func commonClausePrefix(a, b []string) int {
-	n := 0
-	for n < len(a) && n < len(b) && a[n] == b[n] {
-		n++
-	}
-	return n
-}
-
 // patternVarNames lists every variable the given clauses bind, in order.
 func patternVarNames(clauses []*linearPattern) []string {
 	var out []string
@@ -641,21 +627,6 @@ func patternVarNames(clauses []*linearPattern) []string {
 		}
 	}
 	return out
-}
-
-// scopedVarName derives a collision-free walk-scoped name for a variable two
-// walks bind independently.
-func scopedVarName(v string, walkIdx int, taken map[string]bool) string {
-	base := v + "_w" + strconv.Itoa(walkIdx)
-	if !taken[base] {
-		return base
-	}
-	for i := 2; ; i++ {
-		cand := base + "_" + strconv.Itoa(i)
-		if !taken[cand] {
-			return cand
-		}
-	}
 }
 
 // --- pattern parsing -------------------------------------------------------

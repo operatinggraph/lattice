@@ -16,37 +16,238 @@ type bindingSet map[string]struct{}
 // its own unit. The verdict is true iff any unit references two or more
 // distinct bindings.
 //
+// A RETURN item can name a WITH alias rather than an aggregate directly — a
+// staged actorAggregate producer (internal/pkgmgr/anchorwalk.go) folds each
+// walk's collect(...) into its own `WITH … AS grantSliceN` before the final
+// RETURN concatenates the slices (`grantSlice0 + grantSlice1 + …`). Classifying
+// that RETURN expression as written would miss every MapLiteral (they live in
+// the WITH items, not the RETURN) and misclassify the whole producer as one
+// shared multi-binding unit. So before classification, every RETURN item's
+// expression is resolved through the query's WITH clauses: each `*full.
+// VariableRef` naming a WITH alias is substituted with that alias's defining
+// expression, recursively, walking `cr.Query.Clauses` in order so a later WITH's
+// alias shadows an earlier one. A bare pass-through (`WITH identity, grantSlice0,
+// …` restating a binding without redefining it) does not shadow — it resolves to
+// whatever defined that name earlier, which is what lets grantSlice0 resolve all
+// the way back to its collect(...). The compiled AST itself is never mutated;
+// resolution builds a fresh expression tree.
+//
 // Defaults to VALIDATE (true), never to exempt, on every uncertain shape:
-// a nil/queryless compiled rule, a query with no RETURN clause, and any
-// expression form the walker does not recognise. Getting this backwards
-// would silently exempt a lens from the auth-plane read-consistency check
-// it needs — a combination-grant that never gets caught, not a lens that
-// merely pays an avoidable validation cost. See plan.go's Compile for the
-// caller-side fail-closed conjunct (not the full engine's compiled
-// artifact, or the artifact assertion fails → validate as well).
+// a nil/queryless compiled rule, a query with no RETURN clause, any
+// expression form the walker does not recognise, and a WITH-alias resolution
+// that hits its recursion-depth cap (a genuine alias cycle or pathological
+// chain). Getting this backwards would silently exempt a lens from the
+// auth-plane read-consistency check it needs — a combination-grant that
+// never gets caught, not a lens that merely pays an avoidable validation
+// cost. See plan.go's Compile for the caller-side fail-closed conjunct (not
+// the full engine's compiled artifact, or the artifact assertion fails →
+// validate as well).
 func hasMultiBindingConjunctUnit(cr *full.CompiledRule) bool {
 	if cr == nil || cr.Query == nil {
 		return true
 	}
-	var returns []*full.Return
+	defs := map[string]full.Expr{}
+	sawReturn := false
+	verdict := false
 	for _, c := range cr.Query.Clauses {
-		if r, ok := c.(*full.Return); ok {
-			returns = append(returns, r)
+		switch clause := c.(type) {
+		case *full.With:
+			mergeWithAliasDefs(defs, clause)
+		case *full.Return:
+			sawReturn = true
+			resolved, unknown := resolveReturn(clause, defs)
+			if unknown || classifyReturn(resolved) {
+				verdict = true
+			}
 		}
 	}
-	if len(returns) == 0 {
+	if !sawReturn {
 		return true
 	}
-	// Multiple RETURN branches (engine UNION, not in this grammar today):
-	// classify each and OR the verdicts — an unclassifiable branch
-	// validates the whole.
-	verdict := false
-	for _, r := range returns {
-		if classifyReturn(r) {
-			verdict = true
-		}
-	}
 	return verdict
+}
+
+// withItemAlias computes one WITH/RETURN projection item's effective output
+// name — the engine's own alias rule (full's unexported projectionAutoAlias,
+// mirrored here since this package cannot reach it): an explicit AS wins; a
+// bare *full.VariableRef auto-aliases to its own name; a *full.PropertyAccess
+// auto-aliases to its property key; anything else gets a positional name no
+// later clause can reference by name, so it reports ok=false.
+func withItemAlias(item full.ProjectionItem) (string, bool) {
+	if item.Alias != "" {
+		return item.Alias, true
+	}
+	switch x := item.Expr.(type) {
+	case *full.VariableRef:
+		return x.Name, true
+	case *full.PropertyAccess:
+		return x.Key, true
+	default:
+		return "", false
+	}
+}
+
+// mergeWithAliasDefs folds one WITH clause's items into defs, in place. A bare
+// pass-through item (its expression is a *full.VariableRef naming the SAME
+// alias it projects under — exactly `WITH identity, grantSlice0, …`) carries a
+// binding forward without redefining it, so it must not clobber an earlier
+// stage's real definition; it is skipped. Every other item is a genuine
+// (re)definition and overwrites whatever defs already held for that alias.
+func mergeWithAliasDefs(defs map[string]full.Expr, w *full.With) {
+	for _, item := range w.Items {
+		alias, ok := withItemAlias(item)
+		if !ok {
+			continue
+		}
+		if vr, isVar := item.Expr.(*full.VariableRef); isVar && vr.Name == alias {
+			continue
+		}
+		defs[alias] = item.Expr
+	}
+}
+
+// resolveReturn builds a fresh *full.Return with every item's expression
+// resolved through defs (resolveWithAliases), leaving r untouched. unknown is
+// true when any item's resolution hit the recursion-depth cap; the caller
+// must treat that as an uncertain shape (validate) rather than classify a
+// partially-resolved tree.
+func resolveReturn(r *full.Return, defs map[string]full.Expr) (result *full.Return, unknown bool) {
+	items := make([]full.ProjectionItem, len(r.Items))
+	for i, it := range r.Items {
+		resolved, unk := resolveWithAliases(it.Expr, defs, 0)
+		if unk {
+			return nil, true
+		}
+		items[i] = full.ProjectionItem{Expr: resolved, Alias: it.Alias}
+	}
+	return &full.Return{Distinct: r.Distinct, Items: items}, false
+}
+
+// maxAliasResolveDepth bounds resolveWithAliases's recursion. A genuine cycle
+// between WITH aliases (or any pathologically deep chain) hits this cap
+// instead of looping forever; hitting it is itself an uncertain shape, so the
+// caller fails closed (validate) rather than trust a truncated resolution.
+const maxAliasResolveDepth = 64
+
+// resolveWithAliases returns e with every *full.VariableRef whose name is a
+// key of defs substituted for that alias's defining expression, recursively,
+// building an entirely new tree — e and everything defs points into are never
+// mutated. unknown is true once depth exceeds maxAliasResolveDepth, or for any
+// expression form this walker does not recognise (mirroring collectBindingsInto's
+// own fail-closed default below).
+//
+// A name whose definition is a bare *full.VariableRef of the SAME name (the
+// pass-through mergeWithAliasDefs normally keeps out of defs in the first
+// place) resolves to itself rather than recursing again — a defensive guard
+// against a trivial one-step self-reference reaching this far.
+func resolveWithAliases(e full.Expr, defs map[string]full.Expr, depth int) (full.Expr, bool) {
+	if depth > maxAliasResolveDepth {
+		return nil, true
+	}
+	switch x := e.(type) {
+	case nil:
+		return nil, false
+	case *full.Literal, *full.ParameterRef:
+		return e, false
+	case *full.VariableRef:
+		def, ok := defs[x.Name]
+		if !ok {
+			return e, false
+		}
+		if vr, isVar := def.(*full.VariableRef); isVar && vr.Name == x.Name {
+			return e, false
+		}
+		return resolveWithAliases(def, defs, depth+1)
+	case *full.PropertyAccess:
+		target, unk := resolveWithAliases(x.Target, defs, depth+1)
+		if unk {
+			return nil, true
+		}
+		return &full.PropertyAccess{Target: target, Key: x.Key}, false
+	case *full.BinaryOp:
+		l, u1 := resolveWithAliases(x.Left, defs, depth+1)
+		r, u2 := resolveWithAliases(x.Right, defs, depth+1)
+		if u1 || u2 {
+			return nil, true
+		}
+		return &full.BinaryOp{Op: x.Op, Left: l, Right: r}, false
+	case *full.AndOr:
+		operands := make([]full.Expr, len(x.Operands))
+		for i, op := range x.Operands {
+			r, unk := resolveWithAliases(op, defs, depth+1)
+			if unk {
+				return nil, true
+			}
+			operands[i] = r
+		}
+		return &full.AndOr{Op: x.Op, Operands: operands}, false
+	case *full.Not:
+		operand, unk := resolveWithAliases(x.Operand, defs, depth+1)
+		if unk {
+			return nil, true
+		}
+		return &full.Not{Operand: operand}, false
+	case *full.PatternExpr:
+		// A pattern's own node/rel variables are fresh bindings, not references
+		// to an outer WITH alias — nothing inside it to substitute.
+		return e, false
+	case *full.FunctionCall:
+		args := make([]full.Expr, len(x.Args))
+		for i, a := range x.Args {
+			r, unk := resolveWithAliases(a, defs, depth+1)
+			if unk {
+				return nil, true
+			}
+			args[i] = r
+		}
+		return &full.FunctionCall{Namespace: x.Namespace, Name: x.Name, Distinct: x.Distinct, Args: args}, false
+	case *full.MapLiteral:
+		values := make(map[string]full.Expr, len(x.Values))
+		for _, k := range x.Keys {
+			r, unk := resolveWithAliases(x.Values[k], defs, depth+1)
+			if unk {
+				return nil, true
+			}
+			values[k] = r
+		}
+		return &full.MapLiteral{Keys: x.Keys, Values: values}, false
+	case *full.ListLiteral:
+		elements := make([]full.Expr, len(x.Elements))
+		for i, el := range x.Elements {
+			r, unk := resolveWithAliases(el, defs, depth+1)
+			if unk {
+				return nil, true
+			}
+			elements[i] = r
+		}
+		return &full.ListLiteral{Elements: elements}, false
+	case *full.PatternComprehension:
+		where, u1 := resolveWithAliases(x.Where, defs, depth+1)
+		proj, u2 := resolveWithAliases(x.Projection, defs, depth+1)
+		if u1 || u2 {
+			return nil, true
+		}
+		return &full.PatternComprehension{Variable: x.Variable, Pattern: x.Pattern, Where: where, Projection: proj}, false
+	case *full.CaseExpr:
+		alts := make([]full.CaseWhenThen, len(x.Alternatives))
+		for i, alt := range x.Alternatives {
+			when, u1 := resolveWithAliases(alt.When, defs, depth+1)
+			then, u2 := resolveWithAliases(alt.Then, defs, depth+1)
+			if u1 || u2 {
+				return nil, true
+			}
+			alts[i] = full.CaseWhenThen{When: when, Then: then}
+		}
+		els, u3 := resolveWithAliases(x.Else, defs, depth+1)
+		if u3 {
+			return nil, true
+		}
+		return &full.CaseExpr{Alternatives: alts, Else: els}, false
+	default:
+		// A future AST node type this walker was never updated for — signal
+		// unknown up the call chain rather than resolving through it blind.
+		return nil, true
+	}
 }
 
 // classifyReturn implements one RETURN clause's verdict: U₀ (the union of

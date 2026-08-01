@@ -414,10 +414,11 @@ const (
 	manifestStream        = "SYNC"
 )
 
-// Chain clauses several walks share. Prefix factoring in the generated producer
-// keys on TEXTUAL identity of leading clauses, so sharing a named constant is
-// what keeps four resident walks binding the residence chain once instead of
-// four times — a fan-out difference, not a correctness one.
+// Chain clauses several walks share. Sharing a named constant keeps the walks
+// that traverse one spine reading as one spine; it carries no fan-out meaning,
+// since the generated producer stages each walk independently and the data lens
+// compiles one branch per walk. Both re-walk a shared prefix, which costs no KV
+// reads — the executor memoizes every read for the life of an evaluation.
 const (
 	// chainResidence is the resident reachability spine: residesIn to a
 	// location, then an unbounded (possibly zero-hop) containedIn walk up the

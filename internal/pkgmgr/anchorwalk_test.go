@@ -95,28 +95,44 @@ func TestExpandReadGrantWalks_GeneratesOneProducerPerDomain(t *testing.T) {
 			"key emission (Fire 2)", p.Output.EntryKeyColumn)
 	}
 
-	// The shared leading clause is emitted ONCE (with its bindings), and each
-	// walk contributes one collect branch whose `via` is its full chain.
+	// Each walk gets its own STAGE: the walk's own chain clauses (the
+	// residence prefix is re-walked per stage rather than factored — staging
+	// shares nothing textually between walks), then a `WITH` that folds them
+	// into that walk's grant slice before the next walk's clauses run. The
+	// final RETURN concatenates every slice.
 	want := `
 MATCH (identity:identity {key: $actorKey})
 OPTIONAL MATCH (identity)-[:residesIn]->(home)-[:containedIn*0..]->(container)
 OPTIONAL MATCH (container)<-[:availableAt]-(tpl:service)
+WITH identity,
+  collect(DISTINCT {anchorType: 'service', anchorId: nanoIdFromKey(tpl.key), via: ['residesIn', 'containedIn', 'availableAt']}) AS grantSlice0
+OPTIONAL MATCH (identity)-[:residesIn]->(home)-[:containedIn*0..]->(container)
 OPTIONAL MATCH (container)<-[:practicesAt]-(prov:provider)
+WITH identity, grantSlice0,
+  collect(DISTINCT {anchorType: 'provider', anchorId: nanoIdFromKey(prov.key), via: ['residesIn', 'containedIn', 'practicesAt']}) AS grantSlice1
 RETURN
   identity.key AS actorKey,
-  collect(DISTINCT {anchorType: 'service', anchorId: nanoIdFromKey(tpl.key), via: ['residesIn', 'containedIn', 'availableAt']}) +
-  collect(DISTINCT {anchorType: 'provider', anchorId: nanoIdFromKey(prov.key), via: ['residesIn', 'containedIn', 'practicesAt']})
-  AS readableAnchors
+  grantSlice0 + grantSlice1 AS readableAnchors
 `
 	if p.Spec != want {
 		t.Errorf("generated producer mismatch\n got:%s\nwant:%s", p.Spec, want)
 	}
 }
 
-// TestExpandReadGrantWalks_RenamesACollidingSuffixVariable is the guard that
-// keeps two walks' unrelated variables from silently joining in the producer:
-// both bind `x` in their own unshared clause, so the second is scoped away.
-func TestExpandReadGrantWalks_RenamesACollidingSuffixVariable(t *testing.T) {
+// TestExpandReadGrantWalks_CollidingWalkVariablesAreStagedApart is the guard
+// that keeps two walks' unrelated variables from silently joining in the
+// producer. Two lenses in one domain both bind `x` — one to a task, the other
+// to a booking. A single flat query concatenating both walks' OPTIONAL MATCHes
+// into one row stream would treat the second `(x:booking)` as a join
+// constraint on whatever `x` the first clause already bound, silently turning
+// "task OR booking" into "the one vertex both walks happen to agree on" (here,
+// none — a task is never a booking). Staging closes that off structurally: each
+// walk's `x` dies at its own `WITH`, so the emitted cypher must read as walk 0's
+// clauses + its own `WITH … AS grantSlice0`, THEN walk 1's clauses (a fresh `x`,
+// unconstrained by walk 0's) + its own `WITH … AS grantSlice1` — never one
+// flat run where both `(x:task)` and `(x:booking)` MATCH under a single shared
+// scope.
+func TestExpandReadGrantWalks_CollidingWalkVariablesAreStagedApart(t *testing.T) {
 	def := Definition{
 		Name: "fixture", Version: "1.0.0",
 		ReadGrantDomains: []ReadGrantDomainSpec{{Name: "fx"}},
@@ -136,20 +152,64 @@ func TestExpandReadGrantWalks_RenamesACollidingSuffixVariable(t *testing.T) {
 		t.Fatalf("expand: %v", err)
 	}
 	spec := exp.Lenses[2].Spec
-	if !strings.Contains(spec, "(x_w1:booking)") {
-		t.Errorf("second walk's colliding variable was not scoped away:%s", spec)
+
+	stage0 := "OPTIONAL MATCH (identity)<-[:assignedTo]-(x:task)\n" +
+		"WITH identity,\n" +
+		"  collect(DISTINCT {anchorType: 'task', anchorId: nanoIdFromKey(x.key), via: ['assignedTo']}) AS grantSlice0\n"
+	stage1 := "OPTIONAL MATCH (identity)<-[:bookedBy]-(x:booking)\n" +
+		"WITH identity, grantSlice0,\n" +
+		"  collect(DISTINCT {anchorType: 'booking', anchorId: nanoIdFromKey(x.key), via: ['bookedBy']}) AS grantSlice1\n"
+
+	i0 := strings.Index(spec, stage0)
+	if i0 < 0 {
+		t.Fatalf("walk 0's clause + its own WITH…AS grantSlice0 (reading `x:task` inside its own stage) not found verbatim:\n%s", spec)
 	}
-	if !strings.Contains(spec, "nanoIdFromKey(x_w1.key)") {
-		t.Errorf("the renamed variable must be what the collect branch reads:%s", spec)
+	i1 := strings.Index(spec, stage1)
+	if i1 < 0 {
+		t.Fatalf("walk 1's clause + its own WITH…AS grantSlice1 (reading `x:booking` inside its own stage) not found verbatim:\n%s", spec)
 	}
-	if !strings.Contains(spec, "(x:task)") || !strings.Contains(spec, "nanoIdFromKey(x.key)") {
-		t.Errorf("the first walk's binding must be untouched:%s", spec)
+	if i1 < i0+len(stage0) {
+		t.Errorf("walk 1's stage must come entirely AFTER walk 0's own WITH closes it — got them overlapping/out of order:\n%s", spec)
+	}
+	if !strings.Contains(spec, "grantSlice0 + grantSlice1 AS readableAnchors") {
+		t.Errorf("final RETURN must concatenate both walks' staged slices:%s", spec)
 	}
 
-	// The DATA lenses keep their own variable names — renaming is
+	// The DATA lenses keep their own variable names — staging is
 	// producer-local, so each hand-authored tail still resolves.
 	if !strings.Contains(exp.Lenses[1].Spec, "(x:booking)") {
-		t.Errorf("data lens variables must not be renamed:%s", exp.Lenses[1].Spec)
+		t.Errorf("data lens variables must be untouched:%s", exp.Lenses[1].Spec)
+	}
+}
+
+// TestExpandReadGrantWalks_RejectsAWalkVariableNamedLikeAnAccumulator pins
+// validateGrantSliceVarNames: a walk that binds a variable literally named
+// `grantSlice0` would have its own pattern silently JOINED against the
+// generated accumulator by the staging `WITH` (the accumulator is already in
+// scope from an earlier stage) instead of binding fresh — the same class of
+// silent-join hazard the staged-apart guard above closes for cross-walk
+// collisions, but against the producer's OWN reserved names.
+func TestExpandReadGrantWalks_RejectsAWalkVariableNamedLikeAnAccumulator(t *testing.T) {
+	def := Definition{
+		Name: "fixture", Version: "1.0.0",
+		ReadGrantDomains: []ReadGrantDomainSpec{{Name: "fx"}},
+		Lenses: []LensSpec{
+			personalLens("a", oneWalk(AnchorWalk{
+				GrantDomain: "fx", AnchorType: "task", AnchorVar: "t",
+				Chain: []string{"(identity)<-[:assignedTo]-(t:task)"},
+			}), "\nRETURN t.key AS anchor\n"),
+			personalLens("b", oneWalk(AnchorWalk{
+				GrantDomain: "fx", AnchorType: "booking", AnchorVar: "grantSlice0",
+				Chain: []string{"(identity)<-[:bookedBy]-(grantSlice0:booking)"},
+			}), "\nRETURN grantSlice0.key AS anchor\n"),
+		},
+	}
+	_, err := def.ExpandReadGrantWalks()
+	if err == nil {
+		t.Fatal("expected rejection — a walk variable named like a generated grant-slice accumulator")
+	}
+	if !strings.Contains(err.Error(), "accumulator") {
+		t.Errorf("error %q does not name the accumulator collision", err.Error())
 	}
 }
 
