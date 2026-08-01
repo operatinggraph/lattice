@@ -232,7 +232,7 @@ func taskKeyOf(t *testing.T, res processor.ScriptResult) string {
 // TestCreateTask_SuppliedTaskId_UsedVerbatim: a caller-supplied bare-NanoID
 // taskId mints vtx.task.<thatId> verbatim (the write-ahead seam, AC#3).
 func TestCreateTask_SuppliedTaskId_UsedVerbatim(t *testing.T) {
-	const suppliedID = "BBsuppliedHJKMNPQRST"
+	const suppliedID = "BBsuppLiedHJKMNPQRST"
 	res, err := runCreateTaskWith(t, map[string]any{
 		"assignee":     tsAssignee,
 		"forOperation": tsForOp,
@@ -253,7 +253,7 @@ func TestCreateTask_SuppliedTaskId_UsedVerbatim(t *testing.T) {
 // returns EMPTY mutations AND EMPTY events — a coherent no-op, so no duplicate
 // task and no phantom taskCreated event.
 func TestCreateTask_PreexistingLiveTask_NoOp(t *testing.T) {
-	const suppliedID = "BBsuppliedHJKMNPQRST"
+	const suppliedID = "BBsuppLiedHJKMNPQRST"
 	taskKey := "vtx.task." + suppliedID
 	reader := taskKVReader{present: map[string]processor.VertexDoc{
 		taskKey: {Key: taskKey, Class: "task", IsDeleted: false, Data: map[string]any{"status": "open"}},
@@ -283,7 +283,7 @@ func TestCreateTask_PreexistingLiveTask_NoOp(t *testing.T) {
 // write history and RevisionConflict at commit — see create_task_test.go's
 // TestCreateTask_DeletedTask_ReviveCommits for the full-pipeline proof).
 func TestCreateTask_DeletedTask_SelfHeals(t *testing.T) {
-	const suppliedID = "BBsuppliedHJKMNPQRST"
+	const suppliedID = "BBsuppLiedHJKMNPQRST"
 	taskKey := "vtx.task." + suppliedID
 	reader := taskKVReader{present: map[string]processor.VertexDoc{
 		taskKey: {Key: taskKey, Class: "task", IsDeleted: true, Data: map[string]any{}, Revision: 7},

@@ -148,11 +148,11 @@ func TestResolve_NoSignerNoFallbackFallsClosed(t *testing.T) {
 }
 
 func TestResolve_FallbackWhenNoCookie(t *testing.T) {
-	m := newTestManager(t, func(c *Config) { c.FallbackIdentityID = "bootid12345678901234" })
+	m := newTestManager(t, func(c *Config) { c.FallbackIdentityID = "bootid12345678991234" })
 	r := httptest.NewRequest(http.MethodGet, WhoamiPath, nil)
 	si, ok := m.resolve(r)
 	require.True(t, ok)
-	require.Equal(t, "bootid12345678901234", si.identityID)
+	require.Equal(t, "bootid12345678991234", si.identityID)
 	require.False(t, si.viaCookie, "the boot fallback is not a proven cookie session")
 }
 
@@ -162,7 +162,7 @@ func TestResolve_VerifiedCookieWinsOverFallback(t *testing.T) {
 	require.NoError(t, err)
 	m := newTestManager(t, func(c *Config) {
 		c.Authn = authn
-		c.FallbackIdentityID = "bootid12345678901234"
+		c.FallbackIdentityID = "bootid12345678991234"
 	})
 
 	loggedIn := testNanoID(t)
@@ -187,7 +187,7 @@ func TestResolve_PresentButInvalidCookieFailsClosed(t *testing.T) {
 	require.NoError(t, err)
 	m := newTestManager(t, func(c *Config) {
 		c.Authn = authn
-		c.FallbackIdentityID = "bootid12345678901234"
+		c.FallbackIdentityID = "bootid12345678991234"
 	})
 
 	r := httptest.NewRequest(http.MethodGet, WhoamiPath, nil)
@@ -316,7 +316,7 @@ func TestHandleWhoami_ForwardsActorHatsForCookieSession(t *testing.T) {
 }
 
 func TestHandleWhoami_BootFallbackReportsNoHats(t *testing.T) {
-	m := newTestManager(t, func(c *Config) { c.FallbackIdentityID = "bootid12345678901234" })
+	m := newTestManager(t, func(c *Config) { c.FallbackIdentityID = "bootid12345678991234" })
 	ww := httptest.NewRecorder()
 	m.handleWhoami(ww, httptest.NewRequest(http.MethodGet, WhoamiPath, nil))
 	require.Equal(t, http.StatusOK, ww.Code)
@@ -436,11 +436,11 @@ func TestHandleWhoami_NoSession(t *testing.T) {
 }
 
 func TestHandleWhoami_Fallback(t *testing.T) {
-	m := newTestManager(t, func(c *Config) { c.FallbackIdentityID = "bootid12345678901234" })
+	m := newTestManager(t, func(c *Config) { c.FallbackIdentityID = "bootid12345678991234" })
 	w := httptest.NewRecorder()
 	m.handleWhoami(w, httptest.NewRequest(http.MethodGet, WhoamiPath, nil))
 	require.Equal(t, http.StatusOK, w.Code)
-	require.JSONEq(t, `{"loggedIn":true,"identityId":"bootid12345678901234","canSignOut":false}`, w.Body.String())
+	require.JSONEq(t, `{"loggedIn":true,"identityId":"bootid12345678991234","canSignOut":false}`, w.Body.String())
 }
 
 func TestHandleLogout_ClearsCookie(t *testing.T) {
@@ -514,7 +514,7 @@ func TestRequireSession_NoIdentityBrowserNavRedirectsToLogin(t *testing.T) {
 }
 
 func TestRequireSession_ResolvedIdentityReachesHandlerInContext(t *testing.T) {
-	m := newTestManager(t, func(c *Config) { c.FallbackIdentityID = "bootid12345678901234" })
+	m := newTestManager(t, func(c *Config) { c.FallbackIdentityID = "bootid12345678991234" })
 	var gotID string
 	var gotOK, gotViaCookie bool
 	inner := http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
@@ -523,7 +523,7 @@ func TestRequireSession_ResolvedIdentityReachesHandlerInContext(t *testing.T) {
 	})
 	m.RequireSession(inner).ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/api/feed", nil))
 	require.True(t, gotOK)
-	require.Equal(t, "bootid12345678901234", gotID)
+	require.Equal(t, "bootid12345678991234", gotID)
 	require.False(t, gotViaCookie)
 }
 

@@ -206,7 +206,7 @@ func TestHandleWhoami_TriggersProvisioningPreflight(t *testing.T) {
 		return &processor.OperationReply{RequestID: env.RequestID, Status: processor.ReplyStatusAccepted}, nil
 	}
 	s := newTestServer(t, authn, fake)
-	s.ConfigureProvisioning("vtx.identity.GATEWAYSYSTEM000000", "vtx.role.consumerROLE00000000")
+	s.ConfigureProvisioning("vtx.identity.GATEWAYSYSTEM000000", "vtx.role.consumerRoLE99999999")
 
 	w := doWhoami(t, s, token)
 	if w.Code != http.StatusOK {
@@ -234,7 +234,7 @@ func TestHandleWhoami_Probe_HintFound(t *testing.T) {
 	authn := testAuthenticator(t, priv, "k1")
 	token := signTokenWithEmail(t, priv, "k1", "NcxqoP292Z4a7uPKftM6", "  Person@Example.Test  ", true)
 	s := newTestServer(t, authn, nil)
-	resolver := &fakeIdentityIndexHintResolver{identityKey: "vtx.identity.STAFFCREATED00000001", found: true}
+	resolver := &fakeIdentityIndexHintResolver{identityKey: "vtx.identity.STAFFCREATED99999991", found: true}
 	s.ConfigureIdentityIndexHint(resolver)
 
 	w := doWhoamiProbe(t, s, token)
@@ -304,7 +304,7 @@ func TestHandleWhoami_Probe_NoVerifiedEmail_SkipsLookup(t *testing.T) {
 	authn := testAuthenticator(t, priv, "k1")
 	token := signTokenWithEmail(t, priv, "k1", "NcxqoP292Z4a7uPKftM6", "person@example.test", false)
 	s := newTestServer(t, authn, nil)
-	resolver := &fakeIdentityIndexHintResolver{identityKey: "vtx.identity.STAFFCREATED00000001", found: true}
+	resolver := &fakeIdentityIndexHintResolver{identityKey: "vtx.identity.STAFFCREATED99999991", found: true}
 	s.ConfigureIdentityIndexHint(resolver)
 
 	w := doWhoamiProbe(t, s, token)
@@ -328,7 +328,7 @@ func TestHandleWhoami_NoProbeParam_OmitsHint(t *testing.T) {
 	authn := testAuthenticator(t, priv, "k1")
 	token := signTokenWithEmail(t, priv, "k1", "NcxqoP292Z4a7uPKftM6", "person@example.test", true)
 	s := newTestServer(t, authn, nil)
-	resolver := &fakeIdentityIndexHintResolver{identityKey: "vtx.identity.STAFFCREATED00000001", found: true}
+	resolver := &fakeIdentityIndexHintResolver{identityKey: "vtx.identity.STAFFCREATED99999991", found: true}
 	s.ConfigureIdentityIndexHint(resolver)
 
 	w := doWhoami(t, s, token)
@@ -376,7 +376,7 @@ func TestHandleWhoami_RolesAnchors_Present(t *testing.T) {
 	token := signToken(t, priv, "k1", "NcxqoP292Z4a7uPKftM6")
 	s := newTestServer(t, authn, nil)
 	resolver := &fakeRolesAnchorsResolver{
-		roles: []string{"vtx.role.frontOfHouse00000001"},
+		roles: []string{"vtx.role.frontofHouse99999991"},
 		anchors: []rolesanchors.Anchor{
 			{Key: "vtx.location.workplace00000001", Name: "Building A", Relation: "worksAt"},
 		},
@@ -391,8 +391,8 @@ func TestHandleWhoami_RolesAnchors_Present(t *testing.T) {
 	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	if len(resp.Roles) != 1 || resp.Roles[0] != "vtx.role.frontOfHouse00000001" {
-		t.Fatalf("roles = %v, want [vtx.role.frontOfHouse00000001]", resp.Roles)
+	if len(resp.Roles) != 1 || resp.Roles[0] != "vtx.role.frontofHouse99999991" {
+		t.Fatalf("roles = %v, want [vtx.role.frontofHouse99999991]", resp.Roles)
 	}
 	if len(resp.Anchors) != 1 || resp.Anchors[0].Relation != "worksAt" {
 		t.Fatalf("anchors = %+v, want one worksAt anchor", resp.Anchors)

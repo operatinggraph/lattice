@@ -179,8 +179,8 @@ func TestRefractor_FanInStress_CapabilityRolesAndEphemeral_ConvergeUnderRoleGran
 	ephCR, err := fullEngine.Parse(ephLensSpec.Spec)
 	require.NoError(t, err, "capabilityEphemeral spec must parse")
 
-	const rolesLensID = "FanInRolesLensId0001" // 20-char synthetic id
-	const ephLensID = "FanInEphLensId000001"   // 20-char synthetic id
+	const rolesLensID = "FaninRoLesLensid9991" // 20-char synthetic id
+	const ephLensID = "FaninEphLensid999991"   // 20-char synthetic id
 	rolesRule := ruleFromPkgSpec(t, rolesLensSpec, rolesCR, rolesLensID)
 	ephRule := ruleFromPkgSpec(t, ephLensSpec, ephCR, ephLensID)
 

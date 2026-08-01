@@ -68,7 +68,7 @@ func TestServiceActor_AuthParity_PlatformPath(t *testing.T) {
 	const (
 		loomID   = "LoomSvcActorAaBbCcDd"
 		weaverID = "WeaverSvcActAaBbCcDd"
-		humanID  = "HumanOperatorAaBbCcD"
+		humanID  = "HumanoperatorAaBbCcD"
 	)
 	authz := authorizerFor(t,
 		rootEquivalentDoc(loomID),
@@ -154,7 +154,7 @@ func TestServiceActor_AuthParity_IdenticalDecisionToHuman(t *testing.T) {
 // class shape but NO holdsRole topology (hence NO cap.* projection) is denied
 // — capability comes from topology, not from class or the actor key shape.
 func TestServiceActor_ClassDoesNotGate_NoTopologyNoCap(t *testing.T) {
-	const imposterID = "ImposterLoomAaBbCcDd"
+	const imposterID = "imposterLoomAaBbCcDd"
 	// Authorizer with NO cap doc seeded for the imposter → absence = denial.
 	authz := authorizerFor(t)
 

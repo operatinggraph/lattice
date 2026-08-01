@@ -89,7 +89,7 @@ func TestFireEpisode_StaleReclaim_ConflictSkipsDispatch(t *testing.T) {
 	defer cancel()
 	h := newSweepHarness(t, ctx)
 
-	const targetID = "fixtureStaleConflict"
+	const targetID = "fixtureStaLeConfLict"
 	target := &Target{
 		TargetID: targetID,
 		Gaps:     map[string]GapAction{"missing_x": {Action: actionDirectOp, Operation: "FixX"}},
@@ -252,7 +252,7 @@ func TestBumpDispatchCount_LogsWarnOnFailure(t *testing.T) {
 	defer cancel()
 	h := newSweepHarness(t, ctx)
 
-	const targetID = "fixtureBumpCountFail"
+	const targetID = "fixtureBumpCountFaiL"
 	entityID := testNanoID(t)
 	key := countKey(targetID, entityID, "missing_x")
 	if _, err := h.conn.KVCreate(ctx, "weaver-state", key, []byte("{not json")); err != nil {

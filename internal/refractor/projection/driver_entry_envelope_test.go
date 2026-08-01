@@ -305,7 +305,7 @@ func TestDriver_EntryEnvelope_ActorFieldCollision_Errors(t *testing.T) {
 	row := map[string]any{
 		"actorKey": entryActor,
 		"readableAnchors": []any{
-			map[string]any{"anchorId": anchorUnit1, "anchorType": "unit", "actor": "vtx.identity.forgedforgedforged00"},
+			map[string]any{"anchorId": anchorUnit1, "anchorType": "unit", "actor": "vtx.identity.forgedforgedforged99"},
 		},
 	}
 	_, err := fn(row, nil, map[string]any{"projectedAt": "2026-07-25T14:32:18.142Z"})

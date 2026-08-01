@@ -1239,7 +1239,7 @@ func TestCharge_SelfOrder_UnknownMenuItemRejected(t *testing.T) {
 	seedIdentity(t, ctx, conn, domainConsumerID)
 	leaseKey := seedLeaseWithApplicant(t, ctx, conn, "BBCAFEDMNCHGUNKLEASE", domainConsumerID)
 	tabKey := openTab(t, ctx, conn, cp, cons, "cdselfchargeunksetup1", leaseKey)
-	absentItemKey := "vtx.menuitem.BBABSENTMENUITEMHJKM"
+	absentItemKey := "vtx.menuitem.BBABSENTMENUiTEMHJKM"
 	applicationForLnk := "lnk.leaseapp.BBCAFEDMNCHGUNKLEASE.applicationFor.identity." + domainConsumerID
 
 	env := &processor.OperationEnvelope{

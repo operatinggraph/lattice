@@ -381,7 +381,7 @@ func TestDenialBuilder_MultipleRoles(t *testing.T) {
 // requests a denial for actor-A and asserts no actor-B data leaks.
 
 func TestDenialBuilder_NFRS6_NoOtherActorLeak(t *testing.T) {
-	const otherActorID = "OtherActorXXXXXXXXXX"
+	const otherActorID = "otherActorXXXXXXXXXX"
 	const otherActorKey = "vtx.identity." + otherActorID
 
 	// Index only contains public role names — no per-actor data.

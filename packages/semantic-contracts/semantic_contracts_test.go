@@ -28,7 +28,7 @@ import (
 )
 
 const (
-	scActorID  = "BBSEMANTICACTRHJKMNP"
+	scActorID  = "BBSEMANTiCACTRHJKMNP"
 	scActorKey = "vtx.identity." + scActorID
 	scCapKey   = "cap.identity." + scActorID
 

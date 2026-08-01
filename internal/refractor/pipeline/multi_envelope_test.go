@@ -287,7 +287,7 @@ func TestExecuteFullForActor_MultiEnvelopeFn_Retraction_AlreadyTombstonedSkipped
 	coreKV, adjKV, _ := newCollisionKVs(t)
 	ctx := context.Background()
 
-	const identityID = "Tcc3JdentityIiiiiiii"
+	const identityID = "Tcc3Jdentityiiiiiiii"
 	identityKey := "vtx.identity." + identityID
 	writeCollisionVertex(t, coreKV, identityKey, "identity", map[string]any{})
 
@@ -436,7 +436,7 @@ func TestExecuteFullForActor_MultiEnvelopeFn_Retraction_AlreadyTombstonedLegacyP
 	coreKV, adjKV, _ := newCollisionKVs(t)
 	ctx := context.Background()
 
-	const identityID = "Tcc3JdentityLllllll1"
+	const identityID = "Tcc3JdentityLLLLLLL1"
 	identityKey := "vtx.identity." + identityID
 	writeCollisionVertex(t, coreKV, identityKey, "identity", map[string]any{})
 

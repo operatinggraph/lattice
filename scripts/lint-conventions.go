@@ -149,6 +149,18 @@
 //     there closes an import cycle — it stays on the direct call.
 //     `bootstrap.Load` (read-only, no globals repopulation) is un-gated:
 //     hellolattice's live-stack load and one-shot scripts are legitimate.
+//   - NanoID-alphabet in test seed data (internal/substrate/keys.Alphabet,
+//     Contract #1; BLOCKING). A *_test.go string literal embedded in a
+//     vtx./lnk. key — vtx.<type>.<id>[.<localName>], or a fully-inlined
+//     6-segment lnk.<typeA>.<idA>.<relation>.<typeB>.<idB> — or a bare 20-char
+//     literal assigned to an id-suffixed identifier (the seed-ID call-site
+//     convention: `ctClaimantID = "…"`, concatenated into a key elsewhere in
+//     the file), whose 20-char id contains a character outside the canonical
+//     alphabet (excludes I, l, O, 0) silently drops the fixture from any
+//     labeled-prefix seed scan that validates the alphabet (KindUnknown) —
+//     invisible until something downstream stops tolerating it. Declare
+//     `// nanoid-alphabet: (reject) <why>` for a deliberately-invalid id used
+//     to prove key/id validation rejects it.
 //
 // Markdown/docs are intentionally out of scope: they discuss the conventions
 // (e.g. "never an asp.* prefix") and would false-positive. The 6-segment link
@@ -231,7 +243,69 @@ var (
 	// fingers-crossed state this gate exists to end.
 	starlarkDef          = regexp.MustCompile(`^(\s*)def\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(`)
 	workplaceExemptShape = regexp.MustCompile(`#\s*workplace-exempt:\s*\(([a-z-]+)\)(.*)$`)
+	// NanoID-alphabet enforcement in test seed data (internal/substrate/keys.
+	// Alphabet, Contract #1). vtxEmbeddedID anchors the id at segment 3 of a
+	// "vtx.<type>.<id>[.<localName>]" literal — always right after
+	// "vtx.<type>.", so a later aspect localName (any length) is never
+	// mistaken for the id even when it happens to be exactly 20 characters.
+	vtxEmbeddedID = regexp.MustCompile(`"vtx\.[A-Za-z][A-Za-z0-9]*\.([A-Za-z0-9]{20})(?:[".])`)
+	// lnkEmbeddedID anchors both ids of a fully-inlined 6-segment
+	// "lnk.<typeA>.<idA>.<relation>.<typeB>.<idB>" literal (Contract #1). The
+	// concatenated form (`"lnk.task." + id1 + ".assignedTo.identity." + id2`)
+	// is caught instead via idSeedAssign, on each id's own seed declaration.
+	lnkEmbeddedID = regexp.MustCompile(`"lnk\.[A-Za-z][A-Za-z0-9]*\.([A-Za-z0-9]{20})\.[A-Za-z][A-Za-z0-9]*\.[A-Za-z][A-Za-z0-9]*\.([A-Za-z0-9]{20})"`)
+	// idSeedAssign anchors a const/var/short-var assignment of a bare 20-char
+	// literal to an identifier (captured whole — a regex character class
+	// can't require "ends in id" on a name that may be exactly two
+	// characters, e.g. the bare identifier `id`, so the suffix test runs in
+	// Go code). This is the seed-ID call-site convention (`ctClaimantID =
+	// "…"`, `taskID := "…"`) used to build a key via concatenation elsewhere
+	// in the file. Deliberately narrower than "any 20-char literal": a
+	// struct-literal field (`id: "…"`, a table-driven test row) is not an
+	// assignment and is out of scope — that is exactly the shape a
+	// validator's own negative-test vectors use
+	// (internal/substrate/keys/nanoid_test.go's TestIsValidNanoID), so they
+	// need no annotation to pass clean.
+	idSeedAssign        = regexp.MustCompile(`\b([A-Za-z_][A-Za-z0-9_]*)\s*:?=\s*"([A-Za-z0-9]{20})"`)
+	nanoidAlphabetShape = regexp.MustCompile(`//\s*nanoid-alphabet:\s*\(([a-z-]+)\)(.*)$`)
 )
+
+// nanoidAlphabetShapes are the declarable exceptions to the NanoID-alphabet
+// gate: (reject) is the only one — a deliberately invalid id used to prove
+// key/id validation rejects it, mirroring nats-connect's (reject) class.
+var nanoidAlphabetShapes = map[string]bool{
+	"reject": true,
+}
+
+// forbiddenNanoIDChars are the visually-ambiguous characters the canonical
+// NanoID alphabet excludes (internal/substrate/keys.Alphabet, Contract #1:
+// A-Z, a-z, 0-9 minus I, l, O, 0). Every id candidate checkNanoIDAlphabet
+// extracts is pre-filtered to [A-Za-z0-9] by its own regex, so these four
+// characters are the only way one can be invalid.
+const forbiddenNanoIDChars = "IlO0"
+
+// invalidNanoIDChars returns the distinct forbidden characters in id, in
+// order of first appearance, or nil if id is alphabet-compliant.
+func invalidNanoIDChars(id string) []byte {
+	var bad []byte
+	for i := 0; i < len(id); i++ {
+		c := id[i]
+		if strings.IndexByte(forbiddenNanoIDChars, c) < 0 {
+			continue
+		}
+		dup := false
+		for _, b := range bad {
+			if b == c {
+				dup = true
+				break
+			}
+		}
+		if !dup {
+			bad = append(bad, c)
+		}
+	}
+	return bad
+}
 
 // workplaceExemptShapes are the ways a call site may discharge §3.4.1: the op
 // admits no legitimately-validated target at all, a downstream ownership proof
@@ -575,6 +649,14 @@ func scanSource(path string, data []byte) []finding {
 		!strings.HasPrefix(slash, "internal/bootstrap/") &&
 		!strings.HasPrefix(slash, "internal/testutil/") &&
 		slash != loadOrGenerateExemptFile
+	// nanoidScoped — the NanoID-alphabet gate applies to *_test.go seed data
+	// only; shipped (non-test) code generates ids via keys.NewNanoID(), never
+	// hand-writes them.
+	nanoidScoped := isTest
+	var nanoidAt map[int]annotation
+	if nanoidScoped {
+		nanoidAt = annotationSpans(strings.Split(string(data), "\n"), nanoidAlphabetShape)
+	}
 	// The file's own validated-target exemption helpers, derived from the
 	// script text rather than a hardcoded name list (see exemptionHelpers).
 	var exemptHelpers map[string]bool
@@ -621,6 +703,9 @@ func scanSource(path string, data []byte) []finding {
 		}
 		if loadOrGenerateScoped && loadOrGenerateCall.MatchString(line) {
 			out = append(out, finding{file: path, line: ln, msg: "per-test bootstrap.LoadOrGenerate — re-populates internal/bootstrap's globals per test, which races under t.Parallel(); use testutil.EnsurePrimordials(t) instead (bootstrap-primordial-globals-race-design.md §4)"})
+		}
+		if nanoidScoped {
+			out = append(out, checkNanoIDAlphabet(path, ln, line, nanoidAt[ln])...)
 		}
 		if postureScoped {
 			out = append(out, checkReadPosture(path, ln, line, postureAt[ln], fileMutates)...)
@@ -936,6 +1021,68 @@ func checkWorkplaceExempt(path string, ln int, line string, declared annotation,
 	return nil
 }
 
+// checkNanoIDAlphabet flags a *_test.go string literal used to build a
+// vtx./lnk. key — embedded directly, or a bare literal assigned to an
+// id-suffixed identifier that seeds one via concatenation elsewhere in the
+// file — whose 20-char id contains a character outside the canonical NanoID
+// alphabet (all findings BLOCKING). Such an id silently drops out of any
+// labeled-prefix seed scan that validates the alphabet (KindUnknown) —
+// invisible until something downstream stops tolerating it (bit twice
+// 2026-08-01: composite_key_producer_test.go's "…01aaaaaaaaa" and four
+// mnemonic ids in packages/privacy-base/lens_cypher_test.go). declared is the
+// `// nanoid-alphabet:` annotation covering this line (annotationSpans).
+func checkNanoIDAlphabet(path string, ln int, line string, declared annotation) []finding {
+	if isCommentLine(line) {
+		return nil
+	}
+	var candidates []string
+	for _, m := range vtxEmbeddedID.FindAllStringSubmatch(line, -1) {
+		candidates = append(candidates, m[1])
+	}
+	for _, m := range lnkEmbeddedID.FindAllStringSubmatch(line, -1) {
+		candidates = append(candidates, m[1], m[2])
+	}
+	if m := idSeedAssign.FindStringSubmatch(line); m != nil && strings.HasSuffix(strings.ToLower(m[1]), "id") {
+		candidates = append(candidates, m[2])
+	}
+	var badIDs []string
+	for _, id := range candidates {
+		if len(invalidNanoIDChars(id)) > 0 {
+			badIDs = append(badIDs, id)
+		}
+	}
+	if len(badIDs) == 0 {
+		return nil
+	}
+	shape, why := declared.shape, declared.why
+	switch {
+	case shape == "":
+		var out []finding
+		for _, id := range badIDs {
+			out = append(out, finding{file: path, line: ln, msg: fmt.Sprintf(
+				"nanoid-alphabet: id %q contains %s outside the canonical alphabet (internal/substrate/keys.Alphabet excludes I, l, O, 0 — Contract #1); a labeled-prefix seed scan silently drops this fixture as KindUnknown. Fix the id, or declare `// nanoid-alphabet: (reject) <why>` if it deliberately tests rejection",
+				id, quoteBytes(invalidNanoIDChars(id)))})
+		}
+		return out
+	case !nanoidAlphabetShapes[shape]:
+		return []finding{{file: path, line: ln, msg: "nanoid-alphabet: unknown shape (" + shape + ") — the only declarable exception is (reject): a deliberately invalid id used to prove key/id validation rejects it"}}
+	case strings.TrimSpace(why) == "":
+		return []finding{{file: path, line: ln, msg: "nanoid-alphabet: a (reject) declaration must state its `<why>`"}}
+	default:
+		return nil
+	}
+}
+
+// quoteBytes renders a byte slice as a comma-separated, single-quoted list
+// for a finding message, e.g. []byte("l0") -> "'l', '0'".
+func quoteBytes(bs []byte) string {
+	parts := make([]string, len(bs))
+	for i, b := range bs {
+		parts[i] = "'" + string(b) + "'"
+	}
+	return strings.Join(parts, ", ")
+}
+
 // selfTest exercises the authcontext-target gate against fixtures and returns
 // one message per behaviour that did not hold. It runs on every non-hook
 // invocation (so CI's STRICT run covers it) and is deliberately in-memory: the
@@ -1082,6 +1229,35 @@ func selfTest() []string {
 		{"unknown workplace-exempt shape is denied", fixture,
 			helperDef + "\t# workplace-exempt: (trusted) staff are fine\n\tif not workplace_exempt():\n",
 			"unknown shape (trusted)"},
+		{"an embedded vtx key with an invalid char is denied", "packages/self-test/ddls_test.go",
+			"\tctClaimant = \"vtx.identity.BBclaimantHJKMNPQRST\"\n",
+			"nanoid-alphabet: id \"BBclaimantHJKMNPQRST\" contains 'l'"},
+		{"an embedded vtx key that is fully alphabet-compliant passes", "packages/self-test/ddls_test.go",
+			"\tctOK = \"vtx.identity.ABCDEFGHJKLMNPQRSTUV\"\n", ""},
+		{"an embedded lnk key with an invalid char in idB is denied", "packages/self-test/ddls_test.go",
+			"\tctLink = \"lnk.identity.ABCDEFGHJKLMNPQRSTUV.holdsRole.role.BBclaimantHJKMNPQRST\"\n",
+			"nanoid-alphabet: id \"BBclaimantHJKMNPQRST\" contains 'l'"},
+		{"an id-suffixed seed assignment with an invalid char is denied", "packages/self-test/ddls_test.go",
+			"\tctClaimantID = \"BBclaimantHJKMNPQRST\"\n",
+			"nanoid-alphabet: id \"BBclaimantHJKMNPQRST\" contains 'l'"},
+		{"a short-var id-suffixed seed assignment is denied the same way", "packages/self-test/ddls_test.go",
+			"\trid := \"systemAdmin000000001\"\n",
+			"nanoid-alphabet:"},
+		{"a struct-literal test row is not a seed-id assignment", "packages/self-test/ddls_test.go",
+			"\t\t{\"contains I\", \"IHj4kPmRtw9nbCxz5vQ2\", false},\n", ""},
+		{"a declared (reject) exception on an invalid embedded key passes", "packages/self-test/ddls_test.go",
+			"\t// nanoid-alphabet: (reject) proves the key parser rejects a malformed id\n" +
+				"\tbadKey := \"vtx.identity.BBclaimantHJKMNPQRST\"\n", ""},
+		{"a declared (reject) exception without a why is denied", "packages/self-test/ddls_test.go",
+			"\t// nanoid-alphabet: (reject)\n" +
+				"\tbadKey := \"vtx.identity.BBclaimantHJKMNPQRST\"\n",
+			"must state its `<why>`"},
+		{"an unknown nanoid-alphabet shape is denied", "packages/self-test/ddls_test.go",
+			"\t// nanoid-alphabet: (trusted) staff wrote it by hand\n" +
+				"\tbadKey := \"vtx.identity.BBclaimantHJKMNPQRST\"\n",
+			"unknown shape (trusted)"},
+		{"the nanoid-alphabet gate is scoped to _test.go files", "packages/self-test/ddls.go",
+			"\tctClaimant = \"vtx.identity.BBclaimantHJKMNPQRST\"\n", ""},
 	}
 	var failures []string
 	for _, tc := range cases {
@@ -1090,7 +1266,8 @@ func selfTest() []string {
 		for _, fd := range scanSource(tc.path, []byte(tc.src)) {
 			if !strings.HasPrefix(fd.msg, "authcontext-target:") &&
 				!strings.HasPrefix(fd.msg, "workplace-exempt:") &&
-				!strings.HasPrefix(fd.msg, "read-posture:") {
+				!strings.HasPrefix(fd.msg, "read-posture:") &&
+				!strings.HasPrefix(fd.msg, "nanoid-alphabet:") {
 				continue
 			}
 			hits++

@@ -16,10 +16,10 @@ import (
 )
 
 const (
-	ctQueueRole   = "vtx.role.BBqueueroleHJKMNPQRS"
-	ctQueueRoleID = "BBqueueroleHJKMNPQRS"
-	ctClaimant    = "vtx.identity.BBclaimantHJKMNPQRST"
-	ctClaimantID  = "BBclaimantHJKMNPQRST"
+	ctQueueRole   = "vtx.role.BBqueueroLeHJKMNPQRS"
+	ctQueueRoleID = "BBqueueroLeHJKMNPQRS"
+	ctClaimant    = "vtx.identity.BBcLaimantHJKMNPQRST"
+	ctClaimantID  = "BBcLaimantHJKMNPQRST"
 	ctTaskID      = "BBqueuedtaskHJKMNPQR"
 	ctTaskKey     = "vtx.task." + ctTaskID
 	ctQueuedLnk   = "lnk.task." + ctTaskID + ".queuedFor.role." + ctQueueRoleID

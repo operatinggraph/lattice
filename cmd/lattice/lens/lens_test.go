@@ -33,7 +33,7 @@ func TestLensList_HappyPath(t *testing.T) {
 	}
 
 	// Seed a non-lens vertex (should be excluded).
-	roleKey := "vtx.role.testRoleNanoID000001"
+	roleKey := "vtx.role.testRoLeNanoiD999991"
 	roleDoc := map[string]interface{}{
 		"key":   roleKey,
 		"class": "role",

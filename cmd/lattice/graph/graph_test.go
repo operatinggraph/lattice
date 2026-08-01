@@ -16,7 +16,7 @@ import (
 func TestGraphRead_HappyPath(t *testing.T) {
 	ctx, conn := setupGraphEnv(t)
 
-	testKey := "vtx.identity.testGraphReadKey0001"
+	testKey := "vtx.identity.testGraphReadKey9991"
 	testVal := map[string]interface{}{
 		"key":       testKey,
 		"class":     "identity",

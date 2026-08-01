@@ -87,7 +87,7 @@ func TestPersonalSync(t *testing.T) {
 	tests := []struct {
 		prefix, actorID, want string
 	}{
-		{"lattice.sync.user", "Op4Nb2mPq6rTwzKxVyP7", "lattice.sync.user.Op4Nb2mPq6rTwzKxVyP7"},
+		{"lattice.sync.user", "op4Nb2mPq6rTwzKxVyP7", "lattice.sync.user.op4Nb2mPq6rTwzKxVyP7"},
 		{"lattice.sync.user", "identityA", "lattice.sync.user.identityA"},
 	}
 	for _, tt := range tests {

@@ -109,7 +109,7 @@ func TestRefractor_CapabilityLens_TwoActorClaimCeremony_MultiActorRace_E2E(t *te
 	capAdpt, err := adapter.New(capabilityKV, []string{"key"}, adapter.DeleteModeHard)
 	require.NoError(t, err)
 
-	const rolesLensID = "MultiActorRaceLensId"
+	const rolesLensID = "MuLtiActorRaceLensid"
 	capP, err := pipeline.New(rolesLensID, "nats_kv",
 		bootstrap.CoreKVBucket, adjKV, coreKV, capAdpt, nil)
 	require.NoError(t, err)

@@ -428,7 +428,7 @@ func TestLocation_WireRejectsDeadEndpoint(t *testing.T) {
 
 	unitKey := createLocation(t, ctx, conn, cp, cons, "unit")
 
-	deadBldgID := "LDdeadbuildHJKMNPQRS"
+	deadBldgID := "LDdeadbuiLdHJKMNPQRS"
 	deadBldgKey := "vtx.building." + deadBldgID
 	seedDeletedVertex(t, ctx, conn, deadBldgKey, "location")
 

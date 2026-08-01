@@ -40,7 +40,7 @@ func newVaultRPCConn(t *testing.T) (*substrate.Conn, *nats.Conn, context.Context
 func sampleEnvelope() vault.Envelope {
 	return vault.Envelope{
 		WrappedDEK: []byte{0xDE, 0xAD, 0xBE, 0xEF},
-		KeyID:      "vtx.identity.I1AAAAAAAAAAAAAAAAAA",
+		KeyID:      "vtx.identity.i1AAAAAAAAAAAAAAAAAA",
 		KEKVersion: "kek-v1",
 		Alg:        ContentEncryptionAlgo,
 	}
@@ -52,7 +52,7 @@ func sampleEnvelope() vault.Envelope {
 func TestWrapKey_RoundTrip(t *testing.T) {
 	conn, nc, ctx := newVaultRPCConn(t)
 
-	identityKey := "vtx.identity.I1AAAAAAAAAAAAAAAAAA"
+	identityKey := "vtx.identity.i1AAAAAAAAAAAAAAAAAA"
 	env := sampleEnvelope()
 	cek := bytes.Repeat([]byte{0x11}, CEKSize)
 	wantCT := vault.Ciphertext{CT: []byte{9, 8, 7}, Nonce: []byte{1, 2, 3, 4}, KeyID: identityKey}
@@ -94,7 +94,7 @@ func TestWrapKey_RoundTrip(t *testing.T) {
 func TestUnwrapKey_RoundTrip(t *testing.T) {
 	conn, nc, ctx := newVaultRPCConn(t)
 
-	identityKey := "vtx.identity.I1AAAAAAAAAAAAAAAAAA"
+	identityKey := "vtx.identity.i1AAAAAAAAAAAAAAAAAA"
 	env := sampleEnvelope()
 	wrapped := vault.Ciphertext{CT: []byte{9, 8, 7}, Nonce: []byte{1, 2, 3, 4}, KeyID: identityKey}
 	wantKey := bytes.Repeat([]byte{0x22}, CEKSize)
@@ -143,7 +143,7 @@ func TestWrapKey_VaultErrorSurfaced(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = sub.Unsubscribe() })
 
-	got, err := WrapKey(ctx, conn, "vtx.identity.I1AAAAAAAAAAAAAAAAAA", sampleEnvelope(), bytes.Repeat([]byte{0x11}, CEKSize))
+	got, err := WrapKey(ctx, conn, "vtx.identity.i1AAAAAAAAAAAAAAAAAA", sampleEnvelope(), bytes.Repeat([]byte{0x11}, CEKSize))
 	if err == nil {
 		t.Fatalf("WrapKey returned nil error on a Vault error reply; got ciphertext %+v", got)
 	}
@@ -166,7 +166,7 @@ func TestUnwrapKey_VaultErrorSurfaced(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = sub.Unsubscribe() })
 
-	got, err := UnwrapKey(ctx, conn, "vtx.identity.I1AAAAAAAAAAAAAAAAAA", sampleEnvelope(), vault.Ciphertext{CT: []byte{1}, Nonce: []byte{2}})
+	got, err := UnwrapKey(ctx, conn, "vtx.identity.i1AAAAAAAAAAAAAAAAAA", sampleEnvelope(), vault.Ciphertext{CT: []byte{1}, Nonce: []byte{2}})
 	if err == nil {
 		t.Fatalf("UnwrapKey returned nil error on a Vault error reply; got key %v", got)
 	}
@@ -183,7 +183,7 @@ func TestWrapKey_TransportError(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
 	defer cancel()
 
-	if _, err := WrapKey(ctx, conn, "vtx.identity.I1AAAAAAAAAAAAAAAAAA", sampleEnvelope(), bytes.Repeat([]byte{0x11}, CEKSize)); err == nil {
+	if _, err := WrapKey(ctx, conn, "vtx.identity.i1AAAAAAAAAAAAAAAAAA", sampleEnvelope(), bytes.Repeat([]byte{0x11}, CEKSize)); err == nil {
 		t.Fatal("WrapKey with no Vault responder must fail")
 	}
 }
@@ -194,7 +194,7 @@ func TestUnwrapKey_TransportError(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
 	defer cancel()
 
-	if _, err := UnwrapKey(ctx, conn, "vtx.identity.I1AAAAAAAAAAAAAAAAAA", sampleEnvelope(), vault.Ciphertext{CT: []byte{1}, Nonce: []byte{2}}); err == nil {
+	if _, err := UnwrapKey(ctx, conn, "vtx.identity.i1AAAAAAAAAAAAAAAAAA", sampleEnvelope(), vault.Ciphertext{CT: []byte{1}, Nonce: []byte{2}}); err == nil {
 		t.Fatal("UnwrapKey with no Vault responder must fail")
 	}
 }
@@ -212,7 +212,7 @@ func TestWrapKey_MalformedReply(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = sub.Unsubscribe() })
 
-	if _, err := WrapKey(ctx, conn, "vtx.identity.I1AAAAAAAAAAAAAAAAAA", sampleEnvelope(), bytes.Repeat([]byte{0x11}, CEKSize)); err == nil {
+	if _, err := WrapKey(ctx, conn, "vtx.identity.i1AAAAAAAAAAAAAAAAAA", sampleEnvelope(), bytes.Repeat([]byte{0x11}, CEKSize)); err == nil {
 		t.Fatal("WrapKey with a malformed reply must fail")
 	}
 }
@@ -229,7 +229,7 @@ func TestUnwrapKey_MalformedReply(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = sub.Unsubscribe() })
 
-	if _, err := UnwrapKey(ctx, conn, "vtx.identity.I1AAAAAAAAAAAAAAAAAA", sampleEnvelope(), vault.Ciphertext{CT: []byte{1}, Nonce: []byte{2}}); err == nil {
+	if _, err := UnwrapKey(ctx, conn, "vtx.identity.i1AAAAAAAAAAAAAAAAAA", sampleEnvelope(), vault.Ciphertext{CT: []byte{1}, Nonce: []byte{2}}); err == nil {
 		t.Fatal("UnwrapKey with a malformed reply must fail")
 	}
 }

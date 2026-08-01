@@ -125,7 +125,7 @@ func TestVerifyKernel_DetectsWrongCreatedBy(t *testing.T) {
 	conn := seededKernelConn(ctx, t)
 
 	mutateEnvelope(ctx, t, conn, bootstrap.CoreKVBucket, bootstrap.MetaRootKey, func(env map[string]any) {
-		env["createdBy"] = "vtx.identity.someImposter00000001"
+		env["createdBy"] = "vtx.identity.someimposter99999991"
 	})
 
 	failures := bootstrap.VerifyKernel(ctx, conn)

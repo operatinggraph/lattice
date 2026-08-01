@@ -346,7 +346,7 @@ func TestShredIdentityKey_NonOperatorActor_Denied(t *testing.T) {
 
 	identityKey := createIdentity(t, ctx, conn, cp, cons, "ShredDeny")
 
-	const nonOpActorID = "BBshrdNonOpHJKMNPQRS"
+	const nonOpActorID = "BBshrdNonopHJKMNPQRS"
 	const nonOpActorKey = "vtx.identity." + nonOpActorID
 	const nonOpCapKey = "cap.identity." + nonOpActorID
 	now := time.Now().UTC()

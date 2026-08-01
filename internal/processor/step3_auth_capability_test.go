@@ -34,7 +34,7 @@ const (
 	capTestActorSvc   = "cap.svc.identity." + capTestActorID       // disjoint service-access key
 	capTestServiceKey = "vtx.service.executive-cleaning-NanoID"
 	capTestTaskKey    = "vtx.task.Rm7q3pntwzkfbcxv5p9j"
-	capTestTargetKey  = "vtx.lease.Op4Nb2mPq6rTwzKxVyP7"
+	capTestTargetKey  = "vtx.lease.op4Nb2mPq6rTwzKxVyP7"
 )
 
 type fakeClock struct {

@@ -13,7 +13,7 @@ import (
 // toMap's own success/error branches don't depend on real primordial IDs.
 func requireBootstrapActorKeys(t *testing.T) {
 	t.Helper()
-	bootstrap.BootstrapIdentityKey = "vtx.identity.testActor00000000000"
+	bootstrap.BootstrapIdentityKey = "vtx.identity.testActor99999999999"
 	bootstrap.BootstrapOpKey = "vtx.op.testOpTracker000000000000"
 }
 

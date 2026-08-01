@@ -160,7 +160,7 @@ func TestFootprintValid_EdgeSelector_UnrelatedEdgeAdded_NoDrift(t *testing.T) {
 	coreKV, adjKV, _ := newCollisionKVs(t)
 	ctx := context.Background()
 
-	const roleID = "Tfp6RoleAaaaaaaaaaaa"
+	const roleID = "Tfp6RoLeAaaaaaaaaaaa"
 	buildCollisionEdge(t, adjKV, "queuedFor", "task", "Tfp6TaskAaaaaaaaaaaa", "role", roleID)
 	edges, rev, err := adjacency.Neighbors(ctx, adjKV, roleID)
 	require.NoError(t, err)
@@ -204,7 +204,7 @@ func TestFootprintValid_EdgeSelector_RelatedEdgeAdded_Drift(t *testing.T) {
 	coreKV, adjKV, _ := newCollisionKVs(t)
 	ctx := context.Background()
 
-	const roleID = "Tfp7RoleAaaaaaaaaaaa"
+	const roleID = "Tfp7RoLeAaaaaaaaaaaa"
 	buildCollisionEdge(t, adjKV, "queuedFor", "task", "Tfp7TaskAaaaaaaaaaaa", "role", roleID)
 	edges, rev, err := adjacency.Neighbors(ctx, adjKV, roleID)
 	require.NoError(t, err)
@@ -248,7 +248,7 @@ func TestFootprintValid_EdgeSelector_Fallback_DriftsOnEither(t *testing.T) {
 	coreKV, adjKV, _ := newCollisionKVs(t)
 	ctx := context.Background()
 
-	const roleID = "Tfp8RoleAaaaaaaaaaaa"
+	const roleID = "Tfp8RoLeAaaaaaaaaaaa"
 	buildCollisionEdge(t, adjKV, "queuedFor", "task", "Tfp8TaskAaaaaaaaaaaa", "role", roleID)
 	_, rev, err := adjacency.Neighbors(ctx, adjKV, roleID)
 	require.NoError(t, err)
@@ -283,7 +283,7 @@ func TestFootprintValid_EdgeSelector_AbsentFromSelectors_FallsBack(t *testing.T)
 	coreKV, adjKV, _ := newCollisionKVs(t)
 	ctx := context.Background()
 
-	const roleID = "Tfp9RoleAaaaaaaaaaaa"
+	const roleID = "Tfp9RoLeAaaaaaaaaaaa"
 	buildCollisionEdge(t, adjKV, "queuedFor", "task", "Tfp9TaskAaaaaaaaaaaa", "role", roleID)
 	_, rev, err := adjacency.Neighbors(ctx, adjKV, roleID)
 	require.NoError(t, err)

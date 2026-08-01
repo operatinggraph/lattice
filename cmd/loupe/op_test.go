@@ -12,7 +12,7 @@ import (
 func TestBuildEnvelope(t *testing.T) {
 	now := time.Date(2026, 6, 18, 12, 0, 0, 0, time.UTC)
 	const actor = "vtx.identity.admin1"
-	const reqID = "RequestIDexample0000"
+	const reqID = "RequestiDexampLe9999"
 
 	t.Run("full request", func(t *testing.T) {
 		req := opRequest{

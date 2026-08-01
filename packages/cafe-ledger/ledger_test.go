@@ -240,7 +240,7 @@ func TestCreateAccount_GuardDoesNotCollideWithLoftspaceLedger(t *testing.T) {
 	cp, cons := newLedgerPipeline(t, ctx, conn, "guardcollision")
 
 	leaseKey := seedLease(t, ctx, conn, "BBCAFEDUALGUARDHJKMN")
-	otherLedgerAcctKey := "vtx.account.BBOTHERLEDGERACCTHJK"
+	otherLedgerAcctKey := "vtx.account.BBoTHERLEDGERACCTHJK"
 	seedVertex(t, ctx, conn, otherLedgerAcctKey, "account", map[string]any{})
 	// Simulate loftspace-ledger's own guard aspect already present on this
 	// same leaseapp, at its bare (non-prefixed) local name.

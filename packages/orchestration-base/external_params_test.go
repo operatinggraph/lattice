@@ -10,7 +10,7 @@ import (
 	orchestrationbase "github.com/operatinggraph/lattice/packages/orchestration-base"
 )
 
-const epReqID = "BBresolveHJKMNPQRSTU"
+const epReqID = "BBresoLveHJKMNPQRSTU"
 const epSubject = "vtx.identity.BBsubjectHJKMNPQRS"
 
 // epWrapperScript embeds the shared resolver helper and exposes its output as a

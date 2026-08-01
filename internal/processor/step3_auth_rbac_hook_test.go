@@ -75,7 +75,7 @@ func platformEnvLane(actor, op string, lane Lane) *OperationEnvelope {
 func TestRbacHook_OrdinaryActorReadsRolesKey(t *testing.T) {
 	const ordinaryID = "ordinaryActor00000001"
 	doc := rolesDoc(ordinaryID, PlatformPermission{OperationType: "CreateTask", Scope: "any"})
-	a := rbacAuthorizer(t, []string{"vtx.identity.systemAdmin000000001"}, doc)
+	a := rbacAuthorizer(t, []string{"vtx.identity.systemAdmin999999991"}, doc)
 
 	dec, err := a.Authorize(context.Background(), platformEnv("vtx.identity."+ordinaryID, "CreateTask"))
 	if err != nil {
@@ -123,7 +123,7 @@ func TestRbacHook_SystemActorUnion_PackageOpOnSystemLane(t *testing.T) {
 // granted only by the anchor) on the meta lane still authorizes even with
 // cap.roles present.
 func TestRbacHook_SystemActorUnion_FloorOpStillGrants(t *testing.T) {
-	const systemID = "systemAdmin000000001"
+	const systemID = "systemAdmin999999991"
 	systemActor := "vtx.identity." + systemID
 	anchor := anchorDoc(systemID, PlatformPermission{OperationType: "InstallPackage", Scope: "any"})
 	roles := rolesDoc(systemID, PlatformPermission{OperationType: "CreateTask", Scope: "any"})
@@ -146,7 +146,7 @@ func TestRbacHook_SystemActorUnion_FloorOpStillGrants(t *testing.T) {
 // degradation (design §6.3): mid rbac-domain-install, cap.roles is absent —
 // the floor op still allows, and a package op denies (not a crash).
 func TestRbacHook_SystemActorUnion_RolesAbsentFloorSurvives(t *testing.T) {
-	const systemID = "systemAdmin000000002"
+	const systemID = "systemAdmin999999992"
 	systemActor := "vtx.identity." + systemID
 	anchor := anchorDoc(systemID, PlatformPermission{OperationType: "InstallPackage", Scope: "any"})
 	a := rbacAuthorizer(t, []string{systemActor}, anchor) // cap.roles NOT seeded
@@ -172,7 +172,7 @@ func TestRbacHook_SystemActorUnion_RolesAbsentFloorSurvives(t *testing.T) {
 // (design §6.4): every union member missing denies with the path's
 // absentKeyCode, never a panic or a silent allow.
 func TestRbacHook_SystemActorUnion_BothAbsentDenies(t *testing.T) {
-	const systemID = "systemAdmin000000003"
+	const systemID = "systemAdmin999999993"
 	systemActor := "vtx.identity." + systemID
 	a := rbacAuthorizer(t, []string{systemActor}) // no docs seeded at all
 
@@ -192,7 +192,7 @@ func TestRbacHook_SystemActorUnion_BothAbsentDenies(t *testing.T) {
 // (design §6.6): an op present in neither slice denies, and the system lane
 // for an actor whose merged Lanes lacks it denies with LaneUnauthorized.
 func TestRbacHook_SystemActorUnion_DenyClosed(t *testing.T) {
-	const systemID = "systemAdmin000000004"
+	const systemID = "systemAdmin999999994"
 	systemActor := "vtx.identity." + systemID
 	anchor := anchorDoc(systemID, PlatformPermission{OperationType: "InstallPackage", Scope: "any"})
 	roles := rolesDoc(systemID, PlatformPermission{OperationType: "CreateTask", Scope: "any"})
@@ -214,7 +214,7 @@ func TestRbacHook_SystemActorUnion_DenyClosed(t *testing.T) {
 // Lanes union is still deny-closed: a lane neither source grants denies with
 // LaneUnauthorized, even though the op itself is granted.
 func TestRbacHook_SystemActorUnion_LaneNotInMergedSetDenies(t *testing.T) {
-	const systemID = "systemAdmin000000005"
+	const systemID = "systemAdmin999999995"
 	systemActor := "vtx.identity." + systemID
 	// A degenerate anchor granting only "default" (no privileged lanes) — not
 	// the real primordial anchor's shape, but isolates the lane-merge assertion.
@@ -242,7 +242,7 @@ func TestRbacHook_SystemActorUnion_LaneNotInMergedSetDenies(t *testing.T) {
 // whose cap.roles.<actor> doc is absent denies by absence (Contract #6 §6.8) —
 // the rbac-absent / no-grant degradation.
 func TestRbacHook_OrdinaryActorDeniesWhenRolesKeyAbsent(t *testing.T) {
-	a := rbacAuthorizer(t, []string{"vtx.identity.systemAdmin000000001"}) // no docs seeded
+	a := rbacAuthorizer(t, []string{"vtx.identity.systemAdmin999999991"}) // no docs seeded
 	dec, err := a.Authorize(context.Background(), platformEnv("vtx.identity.ordinaryActor00000001", "CreateTask"))
 	if err != nil {
 		t.Fatalf("Authorize: %v", err)

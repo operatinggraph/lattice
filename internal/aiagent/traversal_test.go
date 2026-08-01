@@ -199,7 +199,7 @@ func TestReadCapability_MergesCoreAndRoles(t *testing.T) {
 		},
 		"serviceAccess":   []any{},
 		"ephemeralGrants": []any{},
-		"roles":           []string{"vtx.role.OperatorRoleID000001"},
+		"roles":           []string{"vtx.role.operatorRoLeiD999991"},
 	})
 
 	doc, err := tr.ReadCapability(ctx, actorID)
@@ -219,7 +219,7 @@ func TestReadCapability_MergesCoreAndRoles(t *testing.T) {
 			t.Errorf("merged capability doc missing %q (platformPermissions: %+v)", op, doc.PlatformPermissions)
 		}
 	}
-	if len(doc.Roles) != 1 || doc.Roles[0] != "vtx.role.OperatorRoleID000001" {
+	if len(doc.Roles) != 1 || doc.Roles[0] != "vtx.role.operatorRoLeiD999991" {
 		t.Errorf("merged capability doc lost roles: %+v", doc.Roles)
 	}
 	wantLanes := map[string]bool{"default": true, "meta": true, "urgent": true, "system": true}

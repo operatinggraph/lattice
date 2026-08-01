@@ -70,7 +70,7 @@ func TestBuildEnvelope_StampsVerifiedActor_IgnoresBodyActor(t *testing.T) {
 	// even a body containing a raw "actor" key never influences the built
 	// envelope (the field simply isn't bound during unmarshal).
 	var req operationRequest
-	if err := json.Unmarshal([]byte(`{"operationType":"PingPlatform","actor":"vtx.identity.EVILACTOR00000000000"}`), &req); err != nil {
+	if err := json.Unmarshal([]byte(`{"operationType":"PingPlatform","actor":"vtx.identity.EViLACToR99999999999"}`), &req); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
 

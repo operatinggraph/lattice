@@ -132,7 +132,7 @@ func TestRefractor_CapabilityLens_AspectFanOut_E2E(t *testing.T) {
 	// (natskv.go's upsert) and the revision would never bump.
 	capAdpt.SetGuarded(true)
 
-	const rolesLensID = "AspFanRolesLens00001"
+	const rolesLensID = "AspFanRoLesLens99991"
 	capP, err := pipeline.New(rolesLensID, "nats_kv",
 		bootstrap.CoreKVBucket, adjKV, coreKV, capAdpt, nil)
 	require.NoError(t, err)

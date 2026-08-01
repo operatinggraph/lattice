@@ -9,46 +9,46 @@ import (
 func TestBuildOpGroups(t *testing.T) {
 	store := map[string][]byte{
 		// A multi-command DDL meta (a "service").
-		"vtx.meta.rbac0000000000000000":                   []byte(`{"class":"meta.ddl.vertexType","data":{"note":"x"}}`),
-		"vtx.meta.rbac0000000000000000.permittedCommands": []byte(`{"data":{"commands":["CreateRole","UpdateRole"]}}`),
-		"vtx.meta.rbac0000000000000000.canonicalName":     []byte(`{"data":{"value":"rbac"}}`),
-		"vtx.meta.rbac0000000000000000.description":       []byte(`{"data":{"value":"role-based access control"}}`),
-		"vtx.meta.rbac0000000000000000.inputSchema":       []byte(`{"data":{"schema":"{\"type\":\"object\",\"properties\":{\"name\":{\"type\":\"string\"}}}"}}`),
+		"vtx.meta.rbac9999999999999999":                   []byte(`{"class":"meta.ddl.vertexType","data":{"note":"x"}}`),
+		"vtx.meta.rbac9999999999999999.permittedCommands": []byte(`{"data":{"commands":["CreateRole","UpdateRole"]}}`),
+		"vtx.meta.rbac9999999999999999.canonicalName":     []byte(`{"data":{"value":"rbac"}}`),
+		"vtx.meta.rbac9999999999999999.description":       []byte(`{"data":{"value":"role-based access control"}}`),
+		"vtx.meta.rbac9999999999999999.inputSchema":       []byte(`{"data":{"schema":"{\"type\":\"object\",\"properties\":{\"name\":{\"type\":\"string\"}}}"}}`),
 		// A single-command meta.
-		"vtx.meta.inst0000000000000000":                   []byte(`{"class":"meta.ddl.vertexType","data":{}}`),
-		"vtx.meta.inst0000000000000000.permittedCommands": []byte(`{"data":{"commands":["InstallPackage"]}}`),
-		"vtx.meta.inst0000000000000000.canonicalName":     []byte(`{"data":{"value":"InstallPackage"}}`),
+		"vtx.meta.inst9999999999999999":                   []byte(`{"class":"meta.ddl.vertexType","data":{}}`),
+		"vtx.meta.inst9999999999999999.permittedCommands": []byte(`{"data":{"commands":["InstallPackage"]}}`),
+		"vtx.meta.inst9999999999999999.canonicalName":     []byte(`{"data":{"value":"InstallPackage"}}`),
 		// A lens meta — no permittedCommands → not a submittable op, must be dropped.
-		"vtx.meta.lens0000000000000000": []byte(`{"class":"meta.lens","data":{}}`),
+		"vtx.meta.Lens9999999999999999": []byte(`{"class":"meta.lens","data":{}}`),
 		// A commands-bearing meta with NO canonicalName → falls back to the id.
-		"vtx.meta.noname00000000000000":                   []byte(`{"class":"meta.ddl.vertexType","data":{}}`),
-		"vtx.meta.noname00000000000000.permittedCommands": []byte(`{"data":{"commands":["DoThing"]}}`),
+		"vtx.meta.noname99999999999999":                   []byte(`{"class":"meta.ddl.vertexType","data":{}}`),
+		"vtx.meta.noname99999999999999.permittedCommands": []byte(`{"data":{"commands":["DoThing"]}}`),
 		// A meta whose inputSchema is malformed → InputSchema must be dropped.
-		"vtx.meta.bad00000000000000000":                   []byte(`{"class":"meta.ddl.vertexType","data":{}}`),
-		"vtx.meta.bad00000000000000000.permittedCommands": []byte(`{"data":{"commands":["BadOp"]}}`),
-		"vtx.meta.bad00000000000000000.canonicalName":     []byte(`{"data":{"value":"badschema"}}`),
-		"vtx.meta.bad00000000000000000.inputSchema":       []byte(`{"data":{"schema":"{not json"}}`),
+		"vtx.meta.bad99999999999999999":                   []byte(`{"class":"meta.ddl.vertexType","data":{}}`),
+		"vtx.meta.bad99999999999999999.permittedCommands": []byte(`{"data":{"commands":["BadOp"]}}`),
+		"vtx.meta.bad99999999999999999.canonicalName":     []byte(`{"data":{"value":"badschema"}}`),
+		"vtx.meta.bad99999999999999999.inputSchema":       []byte(`{"data":{"schema":"{not json"}}`),
 		// An aspectType DDL that re-lists CreateRole (owned by the rbac vertexType)
 		// only as a class-inference target → its single command is a duplicate, so
 		// the whole group must be dropped.
-		"vtx.meta.dup00000000000000000":                   []byte(`{"class":"meta.ddl.aspectType","data":{}}`),
-		"vtx.meta.dup00000000000000000.permittedCommands": []byte(`{"data":{"commands":["CreateRole"]}}`),
-		"vtx.meta.dup00000000000000000.canonicalName":     []byte(`{"data":{"value":"dupAspect"}}`),
+		"vtx.meta.dup99999999999999999":                   []byte(`{"class":"meta.ddl.aspectType","data":{}}`),
+		"vtx.meta.dup99999999999999999.permittedCommands": []byte(`{"data":{"commands":["CreateRole"]}}`),
+		"vtx.meta.dup99999999999999999.canonicalName":     []byte(`{"data":{"value":"dupAspect"}}`),
 		// An aspectType DDL whose op no vertexType owns → it must survive.
-		"vtx.meta.uniq0000000000000000":                   []byte(`{"class":"meta.ddl.aspectType","data":{}}`),
-		"vtx.meta.uniq0000000000000000.permittedCommands": []byte(`{"data":{"commands":["UniqueOp"]}}`),
-		"vtx.meta.uniq0000000000000000.canonicalName":     []byte(`{"data":{"value":"uniqueAspect"}}`),
+		"vtx.meta.uniq9999999999999999":                   []byte(`{"class":"meta.ddl.aspectType","data":{}}`),
+		"vtx.meta.uniq9999999999999999.permittedCommands": []byte(`{"data":{"commands":["UniqueOp"]}}`),
+		"vtx.meta.uniq9999999999999999.canonicalName":     []byte(`{"data":{"value":"uniqueAspect"}}`),
 	}
 	get := func(key string) ([]byte, bool) { b, ok := store[key]; return b, ok }
 
 	metaKeys := []string{
-		"vtx.meta.rbac0000000000000000",
-		"vtx.meta.inst0000000000000000",
-		"vtx.meta.lens0000000000000000",
-		"vtx.meta.noname00000000000000",
-		"vtx.meta.bad00000000000000000",
-		"vtx.meta.dup00000000000000000",
-		"vtx.meta.uniq0000000000000000",
+		"vtx.meta.rbac9999999999999999",
+		"vtx.meta.inst9999999999999999",
+		"vtx.meta.Lens9999999999999999",
+		"vtx.meta.noname99999999999999",
+		"vtx.meta.bad99999999999999999",
+		"vtx.meta.dup99999999999999999",
+		"vtx.meta.uniq9999999999999999",
 		"vtx.identity.notameta0000000", // not a meta → filtered out
 	}
 
@@ -90,7 +90,7 @@ func TestBuildOpGroups(t *testing.T) {
 	}
 
 	// canonicalName fallback: a meta with none takes its id suffix as the name.
-	if _, ok := byName["noname00000000000000"]; !ok {
+	if _, ok := byName["noname99999999999999"]; !ok {
 		t.Errorf("expected id-fallback group name; groups: %+v", groups)
 	}
 

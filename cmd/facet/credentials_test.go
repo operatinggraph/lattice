@@ -34,7 +34,7 @@ func withBootSession(r *http.Request, identityID string) *http.Request {
 // hands the process's identity to whoever connects), so an off-loopback boot
 // deployment must not expose, or let anyone mutate, its bound credentials.
 func TestCredentialSurfaces_RefuseTheBootFallbackSession(t *testing.T) {
-	const id = "tenantnano0123456789"
+	const id = "tenantnano9123456789"
 	srv := &server{logger: slog.Default(), devSigner: testDevSigner(t)}
 
 	w := httptest.NewRecorder()
@@ -61,7 +61,7 @@ func TestHandleCredentials_RequiresSession(t *testing.T) {
 func TestHandleCredentials_ReportsUnconfiguredReadModel(t *testing.T) {
 	srv := &server{logger: slog.Default()}
 	w := httptest.NewRecorder()
-	r := withSession(httptest.NewRequest(http.MethodGet, "/api/credentials", nil), "tenantnano0123456789")
+	r := withSession(httptest.NewRequest(http.MethodGet, "/api/credentials", nil), "tenantnano9123456789")
 	srv.handleCredentials(w, r)
 	require.Equal(t, http.StatusBadGateway, w.Code)
 	require.Contains(t, w.Body.String(), "FACET_PG_DSN")
@@ -91,7 +91,7 @@ func TestHandleCredentialsLink_RequiresSessionAndDevSigner(t *testing.T) {
 	// as /api/claim.
 	srv := &server{logger: slog.Default()}
 	w := httptest.NewRecorder()
-	r := withSession(httptest.NewRequest(http.MethodPost, "/api/credentials/link", nil), "tenantnano0123456789")
+	r := withSession(httptest.NewRequest(http.MethodPost, "/api/credentials/link", nil), "tenantnano9123456789")
 	srv.handleCredentialsLink(w, r)
 	require.Equal(t, http.StatusNotFound, w.Code)
 
@@ -130,7 +130,7 @@ func TestHandleCredentialsLink_RunsInitiateThenCompleteAsDistinctActors(t *testi
 	}))
 	defer gw.Close()
 
-	const uID = "tenantnano0123456789"
+	const uID = "tenantnano9123456789"
 	srv := &server{logger: slog.Default(), devSigner: testDevSigner(t), gatewayURL: gw.URL}
 	w := httptest.NewRecorder()
 	r := withSession(httptest.NewRequest(http.MethodPost, "/api/credentials/link", nil), uID)
@@ -192,7 +192,7 @@ func TestHandleCredentialsLink_StopsWhenInitiateRejected(t *testing.T) {
 
 	srv := &server{logger: slog.Default(), devSigner: testDevSigner(t), gatewayURL: gw.URL}
 	w := httptest.NewRecorder()
-	r := withSession(httptest.NewRequest(http.MethodPost, "/api/credentials/link", nil), "tenantnano0123456789")
+	r := withSession(httptest.NewRequest(http.MethodPost, "/api/credentials/link", nil), "tenantnano9123456789")
 	srv.handleCredentialsLink(w, r)
 	require.Equal(t, http.StatusUnprocessableEntity, w.Code)
 	require.Equal(t, 1, calls, "a rejected Initiate must not proceed to Complete")
@@ -213,7 +213,7 @@ func TestHandleCredentialsUnlink_SubmitsAsSelf(t *testing.T) {
 	}))
 	defer gw.Close()
 
-	const uID = "tenantnano0123456789"
+	const uID = "tenantnano9123456789"
 	srv := &server{logger: slog.Default(), devSigner: testDevSigner(t), gatewayURL: gw.URL}
 	w := httptest.NewRecorder()
 	r := withSession(
@@ -255,18 +255,18 @@ func TestHandleCredentialsUnlink_TargetsOnlyTheSession(t *testing.T) {
 	r := withSession(
 		httptest.NewRequest(http.MethodPost, "/api/credentials/unlink",
 			strings.NewReader(`{"credentialActorKey":"vtx.identity.victimcred000000000","identityId":"victimnano0123456789"}`)),
-		"tenantnano0123456789")
+		"tenantnano9123456789")
 	srv.handleCredentialsUnlink(w, r)
 
 	require.Equal(t, http.StatusOK, w.Code)
-	require.Equal(t, "vtx.identity.tenantnano0123456789", gotEnv.AuthContext.Target,
+	require.Equal(t, "vtx.identity.tenantnano9123456789", gotEnv.AuthContext.Target,
 		"the unlink target must come from the session, never from the request body")
 }
 
 func TestHandleCredentialsUnlink_RequiresCredentialActorKey(t *testing.T) {
 	srv := &server{logger: slog.Default(), devSigner: testDevSigner(t)}
 	w := httptest.NewRecorder()
-	r := withSession(httptest.NewRequest(http.MethodPost, "/api/credentials/unlink", strings.NewReader(`{}`)), "tenantnano0123456789")
+	r := withSession(httptest.NewRequest(http.MethodPost, "/api/credentials/unlink", strings.NewReader(`{}`)), "tenantnano9123456789")
 	srv.handleCredentialsUnlink(w, r)
 	require.Equal(t, http.StatusBadRequest, w.Code)
 }

@@ -116,7 +116,7 @@ func TestAuthTargetValidated_FromRealAuthorizerDecisions(t *testing.T) {
 		{
 			name:    "scope=any with a forged target",
 			opType:  "PingPlatform",
-			ac:      &AuthContext{Target: "vtx.lease.someoneElsesLeaseKey"},
+			ac:      &AuthContext{Target: "vtx.lease.someoneELsesLeaseKey"},
 			want:    false,
 			wantWhy: "scope=any authorizes without ever inspecting target — the forgery this primitive exists to defeat",
 		},

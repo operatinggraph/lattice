@@ -92,7 +92,7 @@ func TestRefractor_MyTasksLens_AssignedToTrigger_E2E(t *testing.T) {
 	require.NoError(t, err)
 	adpt.SetGuarded(true)
 
-	const lensID = "MyTasksAsgnLensId001"
+	const lensID = "MyTasksAsgnLensid991"
 	p, err := pipeline.New(lensID, "nats_kv", bootstrap.CoreKVBucket, adjKV, coreKV, adpt, nil)
 	require.NoError(t, err)
 	p.UseFullEngine(fullEngine, cr)

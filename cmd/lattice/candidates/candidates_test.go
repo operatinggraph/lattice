@@ -88,7 +88,7 @@ func TestCandidatesMerge_EnumeratesSecondaryEdgesExcludingPairEvidence(t *testin
 	_ = cons
 
 	primaryID := "primryIDCandidatMrg01"
-	secondaryID := "secndryIDCandidMrg01"
+	secondaryID := "secndryiDCandidMrg91"
 	primaryKey := "vtx.identity." + primaryID
 	secondaryKey := "vtx.identity." + secondaryID
 
@@ -137,7 +137,7 @@ func TestCandidatesMerge_EnumeratesSecondaryEdgesExcludingPairEvidence(t *testin
 // self-loop after rewrite (both endpoints become primary) is skipped — the
 // script never probes state[new_key] for that case.
 func TestRewrittenEdgeKeys_RewritesSecondaryEndpointsAndSkipsSelfLoops(t *testing.T) {
-	primaryID := "primaryIDRewrite0001"
+	primaryID := "primaryiDRewrite9991"
 	secondaryID := "secondryIDRewrite01"
 	otherID := "otherIDRewriteEdge1"
 

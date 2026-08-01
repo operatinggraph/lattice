@@ -131,7 +131,7 @@ func TestBuildPlan_AssignTask_OptionalReadsMatchPayload(t *testing.T) {
 	if perr != nil {
 		t.Fatalf("buildPlan: %v", perr)
 	}
-	const claimID = "AAclaimHJKMNPQRSTUVW"
+	const claimID = "AAcLaimHJKMNPQRSTUVW"
 	payload := pl.payload(claimID)
 	taskID, _ := payload["taskId"].(string)
 	if taskID == "" {

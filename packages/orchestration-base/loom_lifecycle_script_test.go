@@ -12,7 +12,7 @@ import (
 	orchestrationbase "github.com/operatinggraph/lattice/packages/orchestration-base"
 )
 
-const llReqID = "BBloomreqHJKMNPQRSTU"
+const llReqID = "BBLoomreqHJKMNPQRSTU"
 
 func loomLifecycleScript(t *testing.T) string {
 	t.Helper()
@@ -54,7 +54,7 @@ func runStartLoomPattern(t *testing.T, payload map[string]any) processor.ScriptR
 // instanceId (Weaver's claimId-seeded id, §10.3) is emitted verbatim on
 // loom.patternStarted, so a re-dispatch collapses on Loom's existing instance.
 func TestStartLoomPattern_SuppliedInstanceId_UsedVerbatim(t *testing.T) {
-	const stableID = "BBstableInstHJKMNPQR"
+	const stableID = "BBstabLeinstHJKMNPQR"
 	res := runStartLoomPattern(t, map[string]any{
 		"patternRef": "vtx.meta.BBonboardHJKMNPQRST",
 		"subjectKey": "vtx.identity.BBsubjectHJKMNPQRS",

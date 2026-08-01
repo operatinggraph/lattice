@@ -304,7 +304,7 @@ func TestConformance_PrimaryKeyMustBeCommitted(t *testing.T) {
 func TestConformance_PrimaryKeyInCommit_RootFallback(t *testing.T) {
 	muts := []MutationOp{
 		{Op: "update", Key: "vtx.identity.AbCdEfGhJkLmNpQrStUv.state"},
-		{Op: "create", Key: "lnk.role.RrRrRrRrRrRrRrRrRrRr.assigned.identity.IiIiIiIiIiIiIiIiIiIi"},
+		{Op: "create", Key: "lnk.role.RrRrRrRrRrRrRrRrRrRr.assigned.identity.AaAaAaAaAaAaAaAaAaAa"},
 	}
 	cases := []struct {
 		key  string
@@ -312,7 +312,7 @@ func TestConformance_PrimaryKeyInCommit_RootFallback(t *testing.T) {
 	}{
 		{"vtx.identity.AbCdEfGhJkLmNpQrStUv.state", true},                              // direct mutation aspect
 		{"vtx.identity.AbCdEfGhJkLmNpQrStUv", true},                                    // 3-seg root of a mutation aspect
-		{"lnk.role.RrRrRrRrRrRrRrRrRrRr.assigned.identity.IiIiIiIiIiIiIiIiIiIi", true}, // direct mutation link
+		{"lnk.role.RrRrRrRrRrRrRrRrRrRr.assigned.identity.AaAaAaAaAaAaAaAaAaAa", true}, // direct mutation link
 		{"vtx.identity.ZzZzZzZzZzZzZzZzZzZz", false},                                   // unrelated vertex
 		{"vtx.identity.AbCdEfGhJkLmNpQrStUv.email", false},                             // sibling aspect not in the mutation set
 		{"", false}, // empty

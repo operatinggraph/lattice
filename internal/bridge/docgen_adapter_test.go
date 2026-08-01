@@ -59,8 +59,8 @@ func docGenRawParams(t *testing.T, leaseAppKey string, doc map[string]any) json.
 func fullDoc() map[string]any {
 	return map[string]any{
 		"tenantName":           "Alice Smith",
-		"applicant":            "vtx.identity.AAliceIdentity123456",
-		"unitKey":              "vtx.unit.UUnitNanoID123456789",
+		"applicant":            "vtx.identity.AALiceidentity123456",
+		"unitKey":              "vtx.unit.UUnitNanoiD123456789",
 		"unitAddress":          "123 Loft St",
 		"unitCity":             "San Francisco",
 		"unitRegion":           "CA",
@@ -96,7 +96,7 @@ func TestFakeDocGen_RendersStoresAndReturnsPointer(t *testing.T) {
 	conn := startDocGenStore(t)
 	a := bridge.NewFakeDocGen(conn, docGenTestBucket, 1<<20)
 
-	leaseAppKey := "vtx.leaseapp.LLeaseAppNanoID12345"
+	leaseAppKey := "vtx.leaseapp.LLeaseAppNanoiD12345"
 	d, err := a.Execute(context.Background(), bridge.Request{
 		IdempotencyKey: "docgen-happy-1",
 		Subject:        "docgen-happy-1",
@@ -126,7 +126,7 @@ func TestFakeDocGen_RendersStoresAndReturnsPointer(t *testing.T) {
 	require.EqualValues(t, ptr.Size, len(content), "the pointer size matches the stored bytes")
 	require.Contains(t, content, "RESIDENTIAL LEASE AGREEMENT")
 	require.Contains(t, content, "Alice Smith", "the tenant renders by name")
-	require.Contains(t, content, "vtx.identity.AAliceIdentity123456", "the tenant id line accompanies a named tenant")
+	require.Contains(t, content, "vtx.identity.AALiceidentity123456", "the tenant id line accompanies a named tenant")
 	require.Contains(t, content, "123 Loft St, San Francisco, CA", "the premises join address, city, region")
 	require.Contains(t, content, "$2400 (applicant offered 2300)", "the rent notes a differing applicant offer")
 	require.Contains(t, content, "12 months", "the lease term renders in months")
@@ -142,11 +142,11 @@ func TestFakeDocGen_RenderDegradesWithoutOptionalFields(t *testing.T) {
 	conn := startDocGenStore(t)
 	a := bridge.NewFakeDocGen(conn, docGenTestBucket, 1<<20)
 
-	leaseAppKey := "vtx.leaseapp.MMinimalLease1234567"
+	leaseAppKey := "vtx.leaseapp.MMinimaLLease1234567"
 	d, err := a.Execute(context.Background(), bridge.Request{
 		IdempotencyKey: "docgen-minimal-1",
 		RawParams: docGenRawParams(t, leaseAppKey, map[string]any{
-			"applicant": "vtx.identity.BBareKeyApplicant123",
+			"applicant": "vtx.identity.BBareKeyAppLicant123",
 			"signedAt":  "2026-07-02T09:00:00Z",
 		}),
 	})
@@ -158,7 +158,7 @@ func TestFakeDocGen_RenderDegradesWithoutOptionalFields(t *testing.T) {
 	}
 	require.NoError(t, json.Unmarshal([]byte(d.Result.Detail), &ptr))
 	content := readStoredDoc(t, conn, ptr.StoreName)
-	require.Contains(t, content, "vtx.identity.BBareKeyApplicant123", "an unnamed applicant renders by bare key")
+	require.Contains(t, content, "vtx.identity.BBareKeyAppLicant123", "an unnamed applicant renders by bare key")
 	require.NotContains(t, content, "Tenant ID", "no separate id line when the tenant IS the bare key")
 	require.NotContains(t, content, "Premises", "absent fields emit no blank lines")
 	require.NotContains(t, content, "Monthly rent")
@@ -171,7 +171,7 @@ func TestFakeDocGen_IdempotentPerKey(t *testing.T) {
 	conn := startDocGenStore(t)
 	a := bridge.NewFakeDocGen(conn, docGenTestBucket, 1<<20)
 
-	leaseAppKey := "vtx.leaseapp.IIdemLeaseApp1234567"
+	leaseAppKey := "vtx.leaseapp.iidemLeaseApp1234567"
 	req := bridge.Request{
 		IdempotencyKey: "docgen-idem-1",
 		RawParams:      docGenRawParams(t, leaseAppKey, fullDoc()),

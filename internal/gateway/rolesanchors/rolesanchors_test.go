@@ -51,7 +51,7 @@ func (f *fakeAnchorsKV) Get(_ context.Context, key string) (*substrate.KVEntry, 
 // identity-anchors bucket.
 func TestResolve_RolesAndAnchorsPresent(t *testing.T) {
 	capReader := &fakeCapabilityReader{entry: &substrate.KVEntry{
-		Value: []byte(`{"roles":["vtx.role.frontOfHouse00000001"]}`),
+		Value: []byte(`{"roles":["vtx.role.frontofHouse99999991"]}`),
 	}}
 	anchorsKV := &fakeAnchorsKV{entry: &substrate.KVEntry{
 		Value: []byte(`{"anchors":[{"key":"vtx.location.workplace00000001","name":"Building A","container":"","containerName":"","relation":"worksAt"}]}`),
@@ -60,8 +60,8 @@ func TestResolve_RolesAndAnchorsPresent(t *testing.T) {
 
 	roles, anchors := r.Resolve(context.Background(), testActorKey)
 
-	if len(roles) != 1 || roles[0] != "vtx.role.frontOfHouse00000001" {
-		t.Errorf("roles = %v, want [vtx.role.frontOfHouse00000001]", roles)
+	if len(roles) != 1 || roles[0] != "vtx.role.frontofHouse99999991" {
+		t.Errorf("roles = %v, want [vtx.role.frontofHouse99999991]", roles)
 	}
 	if len(anchors) != 1 || anchors[0].Key != "vtx.location.workplace00000001" || anchors[0].Relation != "worksAt" {
 		t.Errorf("anchors = %+v, want one worksAt anchor", anchors)

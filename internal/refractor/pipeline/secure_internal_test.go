@@ -144,7 +144,7 @@ func TestSecureDecryptor_ShreddedPlaceholderEnvelopeProjectsNull(t *testing.T) {
 	// via the durable placeholder envelope's Shredded flag — the Fire-3
 	// restart-survival property, exercised here at the projection surface.
 	v := newTestVault(t)
-	const idKey = "vtx.identity.SecUnitPlaceholderAA"
+	const idKey = "vtx.identity.SecUnitPLacehoLderAA"
 	ctMap, _ := mintIdentityPII(t, v, idKey, map[string]any{"value": "X"})
 	placeholderDoc, err := json.Marshal(map[string]any{
 		"class": "piiKey", "vertexKey": idKey, "localName": "piiKey", "isDeleted": false,
@@ -200,7 +200,7 @@ func TestSecureDecryptor_NonEnvelopeValueIsTerminal(t *testing.T) {
 
 func TestSecureDecryptor_MissingIdentityKeyIsTerminal(t *testing.T) {
 	v := newTestVault(t)
-	const idKey = "vtx.identity.SecUnitNoIdColAAAAAA"
+	const idKey = "vtx.identity.SecUnitNoidCoLAAAAAA"
 	ctMap, piiKeyDoc := mintIdentityPII(t, v, idKey, map[string]any{"value": "Alice"})
 
 	dec, err := NewSecureDecryptor(v, fakeCoreKV{idKey + ".piiKey": piiKeyDoc}, []SecureColumn{
@@ -219,7 +219,7 @@ func TestSecureDecryptor_SoftDeletedPiiKeyIsTerminal(t *testing.T) {
 	v := newTestVault(t)
 	const idKey = "vtx.identity.SecUnitDelPiiKeyAAA"
 	ctMap, _ := mintIdentityPII(t, v, idKey, map[string]any{"value": "Alice"})
-	env, err := v.CreateIdentityKey(context.Background(), "vtx.identity.SecUnitOtherAAAAAAAA")
+	env, err := v.CreateIdentityKey(context.Background(), "vtx.identity.SecUnitotherAAAAAAAA")
 	require.NoError(t, err)
 	deletedDoc, err := json.Marshal(map[string]any{
 		"class": "piiKey", "vertexKey": idKey, "localName": "piiKey",

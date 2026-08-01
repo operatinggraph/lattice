@@ -20,7 +20,7 @@ func TestNanoIDFromVertexKey(t *testing.T) {
 		wantErr bool
 	}{
 		{"plain vertex", "vtx.identity.Lk2Pn6mQrtwzKbcXvP3T", "Lk2Pn6mQrtwzKbcXvP3T", false},
-		{"meta vertex", "vtx.meta.Qz7Rp2mNabc0DEFghijk", "Qz7Rp2mNabc0DEFghijk", false},
+		{"meta vertex", "vtx.meta.Qz7Rp2mNabc9DEFghijk", "Qz7Rp2mNabc9DEFghijk", false},
 		{"nanoid with hyphen+underscore", "vtx.unit.a-B_c1d2e3", "a-B_c1d2e3", false},
 		// Aspect key — four segments, also vtx-prefixed: must NOT extract the
 		// localName as if it were a NanoID.

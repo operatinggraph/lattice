@@ -134,7 +134,7 @@ func TestRefractor_CapabilityLens_RealClaimIdentityOp_E2E(t *testing.T) {
 	capAdpt, err := adapter.New(capabilityKV, []string{"key"}, adapter.DeleteModeHard)
 	require.NoError(t, err)
 
-	const rolesLensID = "RealClaimRolesLensId"
+	const rolesLensID = "ReaLCLaimRoLesLensid"
 	capP, err := pipeline.New(rolesLensID, "nats_kv",
 		bootstrap.CoreKVBucket, adjKV, coreKV, capAdpt, nil)
 	require.NoError(t, err)

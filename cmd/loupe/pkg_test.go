@@ -15,44 +15,44 @@ func pkgStore(store map[string][]byte) kvGetter {
 
 func TestComputePackage(t *testing.T) {
 	store := map[string][]byte{
-		"vtx.package.pkg00000000000000000": []byte(`{"class":"package","createdAt":"2026-07-01T00:00:00Z","data":{}}`),
-		"vtx.package.pkg00000000000000000.manifest": []byte(`{"class":"manifest","data":{
+		"vtx.package.pkg99999999999999999": []byte(`{"class":"package","createdAt":"2026-07-01T00:00:00Z","data":{}}`),
+		"vtx.package.pkg99999999999999999.manifest": []byte(`{"class":"manifest","data":{
 			"name":"demo-domain","version":"1.2.0","description":"a demo",
 			"declaredKeys":[
-				"vtx.meta.ddl00000000000000000",
-				"vtx.meta.ddl00000000000000000.canonicalName",
-				"vtx.meta.ddl00000000000000000.script",
-				"vtx.meta.asp00000000000000000",
-				"vtx.meta.asp00000000000000000.canonicalName",
-				"vtx.meta.opm00000000000000000",
-				"vtx.meta.lens0000000000000000",
-				"vtx.meta.lens0000000000000000.canonicalName",
-				"vtx.meta.wvt00000000000000000",
-				"vtx.role.role0000000000000000",
-				"vtx.role.role0000000000000000.canonicalName",
+				"vtx.meta.ddL99999999999999999",
+				"vtx.meta.ddL99999999999999999.canonicalName",
+				"vtx.meta.ddL99999999999999999.script",
+				"vtx.meta.asp99999999999999999",
+				"vtx.meta.asp99999999999999999.canonicalName",
+				"vtx.meta.opm99999999999999999",
+				"vtx.meta.Lens9999999999999999",
+				"vtx.meta.Lens9999999999999999.canonicalName",
+				"vtx.meta.wvt99999999999999999",
+				"vtx.role.roLe9999999999999999",
+				"vtx.role.roLe9999999999999999.canonicalName",
 				"vtx.roleindex.ri0000000000000",
 				"vtx.permission.perm0000000000",
-				"lnk.permission.perm0000000000.grantedBy.role.role0000000000000000",
-				"vtx.meta.gone0000000000000000",
+				"lnk.permission.perm0000000000.grantedBy.role.roLe9999999999999999",
+				"vtx.meta.gone9999999999999999",
 				"vtx.orphanaspectparent.x0000!bad",
-				"vtx.meta.orphanparent00000000.detail"
+				"vtx.meta.orphanparent99999999.detail"
 			]}}`),
-		"vtx.meta.ddl00000000000000000":                                     []byte(`{"class":"meta.ddl.vertexType","data":{}}`),
-		"vtx.meta.ddl00000000000000000.canonicalName":                       []byte(`{"data":{"value":"booking"}}`),
-		"vtx.meta.asp00000000000000000":                                     []byte(`{"class":"meta.ddl.aspectType","data":{}}`),
-		"vtx.meta.asp00000000000000000.canonicalName":                       []byte(`{"data":{"value":"contactInfo"}}`),
-		"vtx.meta.opm00000000000000000":                                     []byte(`{"class":"meta.ddl.vertexType","data":{"operationType":"CreateBooking"}}`),
-		"vtx.meta.lens0000000000000000":                                     []byte(`{"class":"meta.lens","data":{}}`),
-		"vtx.meta.lens0000000000000000.canonicalName":                       []byte(`{"data":{"value":"bookings-by-day"}}`),
-		"vtx.meta.wvt00000000000000000":                                     []byte(`{"class":"meta.weaverTarget","data":{}}`),
-		"vtx.role.role0000000000000000":                                     []byte(`{"class":"role","data":{}}`),
-		"vtx.role.role0000000000000000.canonicalName":                       []byte(`{"data":{"value":"receptionist"}}`),
+		"vtx.meta.ddL99999999999999999":                                     []byte(`{"class":"meta.ddl.vertexType","data":{}}`),
+		"vtx.meta.ddL99999999999999999.canonicalName":                       []byte(`{"data":{"value":"booking"}}`),
+		"vtx.meta.asp99999999999999999":                                     []byte(`{"class":"meta.ddl.aspectType","data":{}}`),
+		"vtx.meta.asp99999999999999999.canonicalName":                       []byte(`{"data":{"value":"contactInfo"}}`),
+		"vtx.meta.opm99999999999999999":                                     []byte(`{"class":"meta.ddl.vertexType","data":{"operationType":"CreateBooking"}}`),
+		"vtx.meta.Lens9999999999999999":                                     []byte(`{"class":"meta.lens","data":{}}`),
+		"vtx.meta.Lens9999999999999999.canonicalName":                       []byte(`{"data":{"value":"bookings-by-day"}}`),
+		"vtx.meta.wvt99999999999999999":                                     []byte(`{"class":"meta.weaverTarget","data":{}}`),
+		"vtx.role.roLe9999999999999999":                                     []byte(`{"class":"role","data":{}}`),
+		"vtx.role.roLe9999999999999999.canonicalName":                       []byte(`{"data":{"value":"receptionist"}}`),
 		"vtx.roleindex.ri0000000000000":                                     []byte(`{"class":"roleindex","data":{}}`),
 		"vtx.permission.perm0000000000":                                     []byte(`{"class":"permission","data":{"name":"booking.create"}}`),
-		"lnk.permission.perm0000000000.grantedBy.role.role0000000000000000": []byte(`{"class":"grantedBy","data":{}}`),
-		// vtx.meta.gone0000000000000000 intentionally absent (uninstalled remnant).
+		"lnk.permission.perm0000000000.grantedBy.role.roLe9999999999999999": []byte(`{"class":"grantedBy","data":{}}`),
+		// vtx.meta.gone9999999999999999 intentionally absent (uninstalled remnant).
 	}
-	got := computePackage("vtx.package.pkg00000000000000000", pkgStore(store))
+	got := computePackage("vtx.package.pkg99999999999999999", pkgStore(store))
 
 	if got["error"] != nil {
 		t.Fatalf("unexpected error: %v", got["error"])
@@ -95,7 +95,7 @@ func TestComputePackage(t *testing.T) {
 		t.Errorf("operations = %+v", ops)
 	}
 	lenses := byKind["lenses"]
-	if len(lenses) != 1 || lenses[0].Name != "bookings-by-day" || lenses[0].LensID != "lens0000000000000000" {
+	if len(lenses) != 1 || lenses[0].Name != "bookings-by-day" || lenses[0].LensID != "Lens9999999999999999" {
 		t.Errorf("lenses = %+v", lenses)
 	}
 	if orch := byKind["orchestration"]; len(orch) != 1 {

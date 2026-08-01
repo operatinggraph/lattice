@@ -118,7 +118,7 @@ func TestRefractor_CapabilityLens_LinkFanOut_E2E(t *testing.T) {
 	capAdpt, err := adapter.New(capTargetKV, []string{"key"}, adapter.DeleteModeHard)
 	require.NoError(t, err)
 
-	const rolesLensID = "LinkFanRolesLens0001"
+	const rolesLensID = "LinkFanRoLesLens9991"
 	capP, err := pipeline.New(rolesLensID, "nats_kv",
 		bootstrap.CoreKVBucket, adjKV, coreKV, capAdpt, nil)
 	require.NoError(t, err)

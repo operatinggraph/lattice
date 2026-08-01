@@ -13,7 +13,7 @@ func TestSetCredential_CreatesFile(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("XDG_CONFIG_HOME", dir)
 
-	if err := writeCredential("vtx.identity.testActor00000000001", "nats://localhost:4222"); err != nil {
+	if err := writeCredential("vtx.identity.testActor99999999991", "nats://localhost:4222"); err != nil {
 		t.Fatalf("writeCredential: %v", err)
 	}
 
@@ -30,7 +30,7 @@ func TestSetCredential_CreatesFile(t *testing.T) {
 	if len(cf.Credentials) != 1 {
 		t.Fatalf("expected 1 credential, got %d", len(cf.Credentials))
 	}
-	if cf.Credentials[0].ActorKey != "vtx.identity.testActor00000000001" {
+	if cf.Credentials[0].ActorKey != "vtx.identity.testActor99999999991" {
 		t.Errorf("actorKey = %q", cf.Credentials[0].ActorKey)
 	}
 	if cf.Credentials[0].NATSURL != "nats://localhost:4222" {

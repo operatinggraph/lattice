@@ -1001,7 +1001,7 @@ func TestSweep_ControlMarkerSurvives(t *testing.T) {
 	h := newSweepHarness(t, ctx)
 	h.agePastWarmup()
 
-	const targetID = "fixtureControlMarker"
+	const targetID = "fixtureControLMarker"
 	h.seedTarget(&Target{
 		TargetID: targetID,
 		Gaps:     map[string]GapAction{"missing_x": {Action: actionDirectOp, Operation: "FixX"}},
@@ -1137,7 +1137,7 @@ func TestSweep_InflightGapNotReclaimed(t *testing.T) {
 	h := newSweepHarness(t, ctx)
 	h.agePastWarmup()
 
-	const targetID = "fixtureInflightSweep"
+	const targetID = "fixtureinfLightSweep"
 	h.seedTarget(&Target{
 		TargetID: targetID,
 		Gaps:     map[string]GapAction{"missing_x": {Action: actionDirectOp, Operation: "FixX"}},
@@ -1285,7 +1285,7 @@ func TestSweep_ReclaimIncrementsBudget(t *testing.T) {
 	h := newSweepHarness(t, ctx)
 	h.agePastWarmup()
 
-	const targetID = "fixtureReclaimBudget"
+	const targetID = "fixtureRecLaimBudget"
 	h.seedTarget(&Target{
 		TargetID: targetID,
 		Gaps:     map[string]GapAction{"missing_x": {Action: actionDirectOp, Operation: "FixX"}},
@@ -1324,7 +1324,7 @@ func TestSweep_ReclaimRecordsEffectDispatch(t *testing.T) {
 	h := newSweepHarness(t, ctx)
 	h.agePastWarmup()
 
-	const targetID = "fixtureReclaimEffect"
+	const targetID = "fixtureRecLaimEffect"
 	h.seedTarget(&Target{
 		TargetID: targetID,
 		Gaps:     map[string]GapAction{"missing_x": {Action: actionDirectOp, Operation: "FixX"}},
@@ -1456,7 +1456,7 @@ func TestSweep_OrphanDeleteCreditsNoEffectClose(t *testing.T) {
 	h := newSweepHarness(t, ctx)
 	h.agePastWarmup()
 
-	const targetID = "fixtureOrphanNoClose"
+	const targetID = "fixtureorphanNoCLose"
 	const gap = "missing_x"
 	// The target is installed but its playbook no longer names the gap column:
 	// the mark is an orphanColumn delete, not a close.

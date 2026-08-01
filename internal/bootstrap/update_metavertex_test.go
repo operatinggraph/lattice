@@ -26,7 +26,7 @@ import (
 )
 
 // ddlMetaKey is a stable meta-vertex key used across the Update tests.
-const ddlMetaKey = "vtx.meta.UpdMetaVtxTest000001"
+const ddlMetaKey = "vtx.meta.UpdMetaVtxTest999991"
 
 // makeUpdateCtx builds a ScriptContext for an UpdateMetaVertex op with the
 // supplied payload and hydrated prior state.

@@ -141,7 +141,7 @@ func TestRefractor_CapabilityLens_MultiIdentity_E2E(t *testing.T) {
 	rolesDesc := descFromPkgSpec(t, rolesLensSpec)
 	capAdpt, err := adapter.New(capTargetKV, []string{"key"}, adapter.DeleteModeHard)
 	require.NoError(t, err)
-	const rolesLensID = "RolesLensId000000001" // synthetic 20-char id for the consumer
+	const rolesLensID = "RoLesLensid999999991" // synthetic 20-char id for the consumer
 	capP, err := pipeline.New(rolesLensID, "nats_kv",
 		bootstrap.CoreKVBucket, adjKV, coreKV, capAdpt, nil)
 	require.NoError(t, err)
@@ -163,7 +163,7 @@ func TestRefractor_CapabilityLens_MultiIdentity_E2E(t *testing.T) {
 	require.NoError(t, err)
 	idxAdpt, err := adapter.New(idxTargetKV, []string{"operationType"}, adapter.DeleteModeHard)
 	require.NoError(t, err)
-	const roleIndexLensID = "RoleIdxLensId0000001" // synthetic 20-char id for the consumer
+	const roleIndexLensID = "RoLeidxLensid9999991" // synthetic 20-char id for the consumer
 	idxP, err := pipeline.New(roleIndexLensID, "nats_kv",
 		bootstrap.CoreKVBucket, adjKV, coreKV, idxAdpt, nil)
 	require.NoError(t, err)
@@ -195,7 +195,7 @@ func TestRefractor_CapabilityLens_MultiIdentity_E2E(t *testing.T) {
 	// DEFAULT HARD delete: no deleteMode override.
 	ephAdpt, err := adapter.New(ephTargetKV, []string{"key"}, adapter.DeleteModeHard)
 	require.NoError(t, err)
-	const ephLensID = "EphLensId00000000001" // synthetic 20-char id for the consumer
+	const ephLensID = "EphLensid99999999991" // synthetic 20-char id for the consumer
 	ephP, err := pipeline.New(ephLensID, "nats_kv",
 		bootstrap.CoreKVBucket, adjKV, coreKV, ephAdpt, nil)
 	require.NoError(t, err)
