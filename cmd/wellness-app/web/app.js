@@ -1441,6 +1441,8 @@ function studioCard(s) {
     '<div class="field"><label>Ends</label><input type="datetime-local" id="sess-ends-' + id + '" step="900" /></div>' +
     '<div class="field"><label>Capacity</label><input type="number" id="sess-cap-' + id + '" min="1" max="200" value="20" /></div>' +
     '<div class="field"><label>Led by</label><select id="sess-instr-' + id + '"></select></div>' +
+    '<div class="field"><label>Repeat every (days)</label><input type="number" id="sess-interval-' + id + '" min="1" max="365" value="7" /></div>' +
+    '<div class="field"><label>Number of classes</label><input type="number" id="sess-repeat-' + id + '" min="1" max="52" value="1" /></div>' +
     '<button id="sess-create-' + id + '">Schedule class</button>' +
     "</div>" +
     "</div>"
@@ -1480,9 +1482,30 @@ function wireStudioCard(s) {
       ends: document.getElementById("sess-ends-" + id),
       capacity: document.getElementById("sess-cap-" + id),
       instructor: instrSelect,
+      intervalDays: document.getElementById("sess-interval-" + id),
+      repeatCount: document.getElementById("sess-repeat-" + id),
       submit: document.getElementById("sess-create-" + id),
     });
   });
+}
+
+// occurrenceCellKeys mirrors slotCellKeys across a CreateSessionSeries batch
+// — one occurrence's worth of cells per i in [0, occurrenceCount), each
+// offset by i*intervalDays days from the first occurrence's span. Kept
+// separate from slotCellKeys rather than parameterizing it: the two shapes
+// (single span vs. a batch of offset spans) diverge enough that threading
+// one through the other would obscure both.
+function occurrenceCellKeys(studioKey, startsAt, endsAt, intervalDays, occurrenceCount) {
+  const stepMs = intervalDays * 24 * 60 * 60 * 1000;
+  const start = Date.parse(startsAt);
+  const end = Date.parse(endsAt);
+  const keys = [];
+  for (let i = 0; i < occurrenceCount; i++) {
+    const occStart = new Date(start + i * stepMs).toISOString().slice(0, 19) + "Z";
+    const occEnd = new Date(end + i * stepMs).toISOString().slice(0, 19) + "Z";
+    keys.push(...slotCellKeys(studioKey, occStart, occEnd));
+  }
+  return keys;
 }
 
 async function createSession(studioKey, els) {
@@ -1495,8 +1518,19 @@ async function createSession(studioKey, els) {
   if (!(capacity >= 1 && capacity <= 200)) { toast("Capacity must be 1–200.", false); return; }
   if (!(Date.parse(startsAt) < Date.parse(endsAt))) { toast("End time must be after start time.", false); return; }
   const instructor = els.instructor ? els.instructor.value : "";
+  // repeatCount 1 (the default) is a plain single CreateSession, unchanged.
+  // > 1 schedules the whole run as one CreateSessionSeries batch instead —
+  // "every occurrence of a weekly class is hand-created" (verticals.md).
+  const repeatCount = els.repeatCount ? parseInt(els.repeatCount.value, 10) || 1 : 1;
+  const intervalDays = els.intervalDays ? parseInt(els.intervalDays.value, 10) || 7 : 7;
+  if (repeatCount > 1 && !(intervalDays >= 1 && intervalDays <= 365)) {
+    toast("Repeat interval must be 1–365 days.", false);
+    return;
+  }
+  if (!(repeatCount >= 1 && repeatCount <= 52)) { toast("Number of classes must be 1–52.", false); return; }
   els.submit.disabled = true;
   try {
+    const isSeries = repeatCount > 1;
     const payload = { studio: studioKey, name, startsAt, endsAt, capacity };
     // The instructor endpoint is validated alive + typed by the script
     // (require_live_typed), so it is an (a)-declared REQUIRED read whenever
@@ -1506,22 +1540,32 @@ async function createSession(studioKey, els) {
       payload.instructor = instructor;
       reads.push(instructor);
     }
-    // A staff submit carries NO authContext.target: CreateSession's
-    // frontOfHouse grant is scope=any, confined in-script by the caller's own
-    // worksAt walk rather than by a caller-supplied target.
+    let optionalReads;
+    if (isSeries) {
+      payload.intervalDays = intervalDays;
+      payload.occurrenceCount = repeatCount;
+      optionalReads = occurrenceCellKeys(studioKey, startsAt, endsAt, intervalDays, repeatCount);
+    } else {
+      optionalReads = slotCellKeys(studioKey, startsAt, endsAt);
+    }
+    // A staff submit carries NO authContext.target: CreateSession's and
+    // CreateSessionSeries's frontOfHouse grant is scope=any, confined
+    // in-script by the caller's own worksAt walk rather than by a
+    // caller-supplied target.
     await opOrThrow(
       {
-        operationType: "CreateSession",
-        class: "session",
+        operationType: isSeries ? "CreateSessionSeries" : "CreateSession",
+        class: isSeries ? "sessionseries" : "session",
         reads,
-        optionalReads: slotCellKeys(studioKey, startsAt, endsAt),
+        optionalReads,
         payload,
       },
-      "schedule the class",
+      isSeries ? "schedule the class series" : "schedule the class",
       false,
     );
-    toast("Class scheduled.", true);
+    toast(isSeries ? repeatCount + " classes scheduled." : "Class scheduled.", true);
     els.name.value = "";
+    if (els.repeatCount) els.repeatCount.value = "1";
     staffSessionsCache = null;
     document.getElementById("roster-session").dataset.loaded = "";
     setTimeout(renderStudiosAdmin, 700);

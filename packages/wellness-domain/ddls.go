@@ -21,35 +21,42 @@ var instructorRoleKey = "vtx.role." + pkgmgr.RoleID("identity-domain", "provider
 // drops an op claimed by two, so no overlap is allowed there). Aspect-type
 // DDLs are step-6 write gates only, mirroring clinic-domain's split.
 const (
-	studioVertexDDL     = "studio"
-	sessionVertexDDL    = "session"
-	bookingVertexDDL    = "booking"
-	instructorVertexDDL = "instructor"
+	studioVertexDDL        = "studio"
+	sessionVertexDDL       = "session"
+	sessionSeriesVertexDDL = "sessionseries"
+	bookingVertexDDL       = "booking"
+	instructorVertexDDL    = "instructor"
 
-	studioProfileAspectDDL      = "studioProfile"
-	sessionScheduleAspectDDL    = "sessionSchedule"
-	studioSlotClaimAspectDDL    = "studioSlotClaim"
-	sessionSeatClaimAspectDDL   = "sessionSeatClaim"
-	sessionBookerClaimAspectDDL = "sessionBookerClaim"
-	bookingStatusAspectDDL      = "bookingStatus"
+	studioProfileAspectDDL           = "studioProfile"
+	sessionScheduleAspectDDL         = "sessionSchedule"
+	studioSlotClaimAspectDDL         = "studioSlotClaim"
+	sessionSeatClaimAspectDDL        = "sessionSeatClaim"
+	sessionBookerClaimAspectDDL      = "sessionBookerClaim"
+	bookingStatusAspectDDL           = "bookingStatus"
+	sessionSeriesDefinitionAspectDDL = "sessionSeriesDefinition"
 
 	instructorProfileAspectDDL       = "instructorProfile"
 	instructorIdentityClaimAspectDDL = "instructorIdentityClaim"
 	identityInstructorClaimAspectDDL = "identityInstructorClaim"
 )
 
-// DDLs returns the package's thirteen DDL meta-vertex declarations:
+// DDLs returns the package's fifteen DDL meta-vertex declarations:
 //
 //   - studio (vertexType) — owns CreateStudio + TombstoneStudio.
-//   - session (vertexType) — owns CreateSession + TombstoneSession.
+//   - session (vertexType) — owns CreateSession + TombstoneSession +
+//     ReassignSession + CreateSessionSeries (the eager-batch recurrence op;
+//     it shares this DDL's write gate for the session vertices/aspects it
+//     mints alongside its own sessionseries DDL below).
+//   - sessionseries (vertexType) — owns CreateSessionSeries, the studio's
+//     recurring-class parent record (§ sessionSeriesVertexTypeDDL).
 //   - booking (vertexType) — owns CreateBooking + CancelBooking.
 //   - instructor (vertexType) — owns CreateInstructor + TombstoneInstructor +
 //     BindInstructorIdentity (the provider-archetype binding,
 //     persona-worlds-design.md Fire W0).
 //   - studioProfile / sessionSchedule / studioSlotClaim / sessionSeatClaim /
 //     sessionBookerClaim / bookingStatus / instructorProfile /
-//     instructorIdentityClaim / identityInstructorClaim (aspectType) —
-//     step-6 write gates.
+//     instructorIdentityClaim / identityInstructorClaim /
+//     sessionSeriesDefinition (aspectType) — step-6 write gates.
 //
 // Architectural rules (binding — the known-key discipline of clinic-domain /
 // loftspace-domain): the scripts read ONLY by known key. No prefix scans, no
@@ -58,6 +65,7 @@ func DDLs() []pkgmgr.DDLSpec {
 	return []pkgmgr.DDLSpec{
 		studioVertexTypeDDL(),
 		sessionVertexTypeDDL(),
+		sessionSeriesVertexTypeDDL(),
 		bookingVertexTypeDDL(),
 		instructorVertexTypeDDL(),
 		studioProfileAspectTypeDDL(),
@@ -69,6 +77,7 @@ func DDLs() []pkgmgr.DDLSpec {
 		instructorProfileAspectTypeDDL(),
 		instructorIdentityClaimAspectTypeDDL(),
 		identityInstructorClaimAspectTypeDDL(),
+		sessionSeriesDefinitionAspectTypeDDL(),
 	}
 }
 
@@ -154,7 +163,7 @@ func sessionVertexTypeDDL() pkgmgr.DDLSpec {
 	return pkgmgr.DDLSpec{
 		CanonicalName:     sessionVertexDDL,
 		Class:             "meta.ddl.vertexType",
-		PermittedCommands: []string{"CreateSession", "TombstoneSession", "ReassignSession"},
+		PermittedCommands: []string{"CreateSession", "TombstoneSession", "ReassignSession", "CreateSessionSeries"},
 		Description: "Wellness session DDL. Vertex shape: vtx.session.<NanoID>, class=session, root data = {} " +
 			"(minimal, D5). CreateSession validates the studio is alive + class=studio, then atomically mints the " +
 			"session + the .schedule aspect {name, startsAt, endsAt, capacity, priceCents?} + the atStudio link " +
@@ -203,7 +212,11 @@ func sessionVertexTypeDDL() pkgmgr.DDLSpec {
 			"unconditionally; a non-operator caller supplying its own bound instructor (validated via ledBy + " +
 			"identifiedBy, same as TombstoneSession) may reassign/reschedule only a class THEY currently lead; " +
 			"absent that, front-of-house staff may act workplace-confined to the studio's own location " +
-			"(enforce_workplace, same as CreateSession's staff path).",
+			"(enforce_workplace, same as CreateSession's staff path). CreateSessionSeries (dispatched under the " +
+			"sessionseries DDL below, sessionSeriesVertexTypeDDL) mints occurrenceCount session vertices on a " +
+			"cadence — this DDL's PermittedCommands lists it too because every session/schedule/slot-claim mutation " +
+			"it emits is still governed, per mutation, by ITS OWN class's write gate (step6_validate.go), regardless " +
+			"of which DDL's script executed the op.",
 		Script: sessionDDLScript,
 		InputSchema: `{"type":"object","properties":` +
 			`{"studio":{"type":"string","description":"vtx.studio.<NanoID> the session runs at (CreateSession; required, validated alive + class=studio; on TombstoneSession/ReassignSession it must be the session's actual studio, validated via the atStudio link)."},` +
@@ -322,15 +335,116 @@ func sessionVertexTypeDDL() pkgmgr.DDLSpec {
 	}
 }
 
+// sessionSeriesVertexTypeDDL declares the studio recurring-class series
+// parent — CreateSession run occurrenceCount times on a fixed intervalDays
+// cadence, eagerly, in one atomic op ("Every occurrence of a weekly class is
+// hand-created", verticals.md). Mirrors clinic-reminders' visitSeries family
+// in spirit (a rolling recurrence definition) but NOT its mechanism: a
+// visitSeries only tracks a rolling "next due" deadline for a human to act
+// on later (its AdvanceVisitSeries writes no appointment), whereas a
+// wellness class series must exist AHEAD of time so a member can browse and
+// book it — there is nothing to wait on, every occurrence's shape (name,
+// studio, capacity, price, instructor) is fully known at series-creation
+// time. So this stays a bounded, eager batch (CreateSession's own
+// mutation-building extended over a loop) rather than a lens + Weaver
+// directOp rolling series: no new engine primitive, no unbounded background
+// materialization to design. (The @every/ScheduleEvery schedule primitive
+// — the backlog row's other cited precedent — is engine-internal only,
+// internal/weaver's own temporal sweep; no package script can invoke it,
+// confirmed by grep across packages/.) Extending an open-ended series later
+// (more occurrences past occurrenceCount) is a deliberate non-goal this
+// increment — re-run CreateSessionSeries anchored on the last occurrence's
+// end.
+func sessionSeriesVertexTypeDDL() pkgmgr.DDLSpec {
+	return pkgmgr.DDLSpec{
+		CanonicalName:     sessionSeriesVertexDDL,
+		Class:             "meta.ddl.vertexType",
+		PermittedCommands: []string{"CreateSessionSeries"},
+		Description: "Wellness recurring-class series DDL. Vertex shape: vtx.sessionseries.<NanoID>, " +
+			"class=sessionseries, root data = {} (minimal, D5 — the data lives in the .definition aspect). " +
+			"CreateSessionSeries validates the studio alive + class=studio and, when supplied, the instructor alive " +
+			"+ class=instructor — ONCE, shared by every occurrence — applies the same staff-standing workplace " +
+			"confinement CreateSession uses (require_workplace off the studio's own location, operator-exempt), then " +
+			"for each occurrence i in [0, occurrenceCount): mints vtx.session.<NanoID> with .schedule {name, " +
+			"startsAt: startsAt + i·intervalDays days, endsAt: endsAt + i·intervalDays days, capacity, priceCents?} " +
+			"(identical shape to CreateSession's own), the atStudio + per-location atLocation links, the optional " +
+			"ledBy instructor link, one studioSlotClaim per covered 15-minute cell (StudioConflict on any " +
+			"occurrence's collision rejects the WHOLE series atomically — no partial series left behind), and a " +
+			"partOf link back to the series (lnk.session.<id>.partOf.sessionseries.<sid>, sentence \"session partOf " +
+			"sessionseries\" — Contract #1 §1.1: the series is the pre-existing anchor its occurrences point at, " +
+			"mirroring atStudio's own studio-is-target direction). Mints the sessionseries vertex + its .definition " +
+			"aspect {name, capacity, priceCents?, intervalDays, occurrenceCount, firstStartsAt, firstEndsAt} once, " +
+			"plus its own atStudio link. occurrenceCount is bounded [2, 52] (a single class is CreateSession's job; " +
+			"52 is a generous year-of-weekly backstop, not an expected ceiling, mirroring MAX_SLOT_CELLS' own " +
+			"backstop framing) and intervalDays [1, 365]. Every minted occurrence remains an ordinary vtx.session — " +
+			"ReassignSession/TombstoneSession still edit or cancel any ONE of them individually afterward; there is " +
+			"no TombstoneSessionSeries (cancelling the whole series at once is out of scope this increment).",
+		Script: sessionDDLScript,
+		InputSchema: `{"type":"object","properties":` +
+			`{"studio":{"type":"string","description":"vtx.studio.<NanoID> every occurrence runs at (required, validated alive + class=studio, shared by the whole series)."},` +
+			`"name":{"type":"string","description":"The display name every occurrence shares, e.g. Evening Flow with Sam (required)."},` +
+			`"startsAt":{"type":"string","description":"First occurrence's start, RFC3339 (required). Aligned to the 15-minute booking grid; later occurrences offset by i*intervalDays days preserve alignment automatically."},` +
+			`"endsAt":{"type":"string","description":"First occurrence's end, RFC3339 (required). Aligned to the 15-minute grid; span capped at 96 cells / 24h per occurrence (SessionTooLong)."},` +
+			`"capacity":{"type":"integer","description":"Maximum concurrent bookings, shared by every occurrence (required, 1..200)."},` +
+			`"priceCents":{"type":"integer","description":"Optional per-occurrence class price in integer cents (optional, >= 0 when supplied). 0 or omitted means every occurrence is free."},` +
+			`"instructor":{"type":"string","description":"Optional vtx.instructor.<NanoID> leading every occurrence (validated alive + class=instructor; writes each occurrence's ledBy link). Listed in ContextHint.Reads when supplied."},` +
+			`"intervalDays":{"type":"integer","description":"Days between occurrences, e.g. 7 for weekly (required, 1..365)."},` +
+			`"occurrenceCount":{"type":"integer","description":"How many occurrences to mint, first included (required, 2..52 — for a single class use CreateSession instead)."}},` +
+			`"required":["studio","name","startsAt","endsAt","capacity","intervalDays","occurrenceCount"]}`,
+		OutputSchema: `{"type":"object","properties":` +
+			`{"primaryKey":{"type":"string","description":"vtx.sessionseries.<NanoID> the operation wrote."},` +
+			`"sessionKeys":{"type":"array","items":{"type":"string"},"description":"The occurrenceCount vtx.session.<NanoID> keys minted, in order."}}}`,
+		FieldDescription: map[string]string{
+			"studio":          "Full vtx.studio.<NanoID> key every occurrence runs at. Validated alive + class=studio; the whole series claims one studioSlotClaim set per occurrence on it.",
+			"name":            "The display name every occurrence shares.",
+			"startsAt":        "First occurrence's start (RFC3339, canonical UTC). Must align to the 15-minute grid (SlotGridViolation).",
+			"endsAt":          "First occurrence's end (RFC3339, canonical UTC). Must align to the 15-minute grid; span capped at 96 cells / 24h per occurrence (SessionTooLong).",
+			"capacity":        "Maximum concurrent bookings, an integer 1..200, shared by every occurrence.",
+			"priceCents":      "Optional per-occurrence class price in integer cents (>= 0). Omitted or 0 means every occurrence is free.",
+			"instructor":      "Optional full vtx.instructor.<NanoID> key leading every occurrence. Validated alive + class=instructor; MUST be listed in ContextHint.Reads when supplied.",
+			"intervalDays":    "Days between occurrences (1..365), e.g. 7 for weekly, 14 for biweekly.",
+			"occurrenceCount": "How many occurrences to mint including the first (2..52).",
+		},
+		Examples: []pkgmgr.ExampleSpec{
+			{
+				Name: "CreateSessionSeries — a weekly class for 8 weeks",
+				Payload: map[string]any{
+					"studio": "vtx.studio.<NanoID>", "name": "Evening Flow with Sam",
+					"startsAt": "2026-08-03T18:00:00Z", "endsAt": "2026-08-03T19:00:00Z",
+					"capacity": 20, "intervalDays": 7, "occurrenceCount": 8,
+				},
+				ExpectedOutcome: "Mints vtx.sessionseries.<NanoID> (root {}) + .definition + its atStudio link, plus " +
+					"8 vtx.session.<NanoID> occurrences one week apart, each with its own .schedule/atStudio/" +
+					"atLocation/studioSlotClaim mutations (identical to 8 separate CreateSession calls) and a partOf " +
+					"link back to the series. Returns primaryKey (the series key) and sessionKeys (the 8 session " +
+					"keys, in order). Rejects StudioConflict — the WHOLE series, no partial commit — if any single " +
+					"occurrence's cells collide with an existing booking.",
+			},
+			{
+				Name: "CreateSessionSeries — an instructor-led priced series",
+				Payload: map[string]any{
+					"studio": "vtx.studio.<NanoID>", "instructor": "vtx.instructor.<NanoID>",
+					"name": "Evening Flow with Sam", "startsAt": "2026-08-03T18:00:00Z", "endsAt": "2026-08-03T19:00:00Z",
+					"capacity": 20, "priceCents": 1500, "intervalDays": 7, "occurrenceCount": 8,
+				},
+				ExpectedOutcome: "As above, plus each occurrence validates the instructor alive + class=instructor, " +
+					"writes its own ledBy link, and carries priceCents:1500 on its .schedule — wellness-ledger's " +
+					"wellnessClassPriceSettlement lens converges a charge per booking on each occurrence independently.",
+			},
+		},
+	}
+}
+
 func sessionScheduleAspectTypeDDL() pkgmgr.DDLSpec {
 	return pkgmgr.DDLSpec{
 		CanonicalName:     sessionScheduleAspectDDL,
 		Class:             "meta.ddl.aspectType",
-		PermittedCommands: []string{"CreateSession", "ReassignSession"},
+		PermittedCommands: []string{"CreateSession", "ReassignSession", "CreateSessionSeries"},
 		Description: "Session schedule aspect (wellness). Stored as vtx.session.<NanoID>.schedule (class " +
 			"sessionSchedule) = {name, startsAt, endsAt, capacity, priceCents?}. Non-sensitive. Written by " +
-			"CreateSession (mints, priceCents omitted or 0 for a free class) and ReassignSession (OCC-conditioned " +
-			"startsAt/endsAt update on a time move; name/capacity/priceCents carried forward unchanged) — both owned " +
+			"CreateSession (mints, priceCents omitted or 0 for a free class), ReassignSession (OCC-conditioned " +
+			"startsAt/endsAt update on a time move; name/capacity/priceCents carried forward unchanged), and " +
+			"CreateSessionSeries (mints one per occurrence, same shape as CreateSession's) — all owned " +
 			"by the session vertexType DDL's script; this aspect-type DDL is the step-6 write gate. Declaration-only: " +
 			"no op handler. CreateBooking reads capacity on demand (kv.Read) to bound its seat-claim loop; " +
 			"wellness-ledger's wellnessClassPriceSettlement lens reads priceCents to auto-charge the booker.",
@@ -360,6 +474,47 @@ func sessionScheduleAspectTypeDDL() pkgmgr.DDLSpec {
 	}
 }
 
+// sessionSeriesDefinitionAspectTypeDDL declares the .definition aspect —
+// the series' shared template, written once by CreateSessionSeries.
+func sessionSeriesDefinitionAspectTypeDDL() pkgmgr.DDLSpec {
+	return pkgmgr.DDLSpec{
+		CanonicalName:     sessionSeriesDefinitionAspectDDL,
+		Class:             "meta.ddl.aspectType",
+		PermittedCommands: []string{"CreateSessionSeries"},
+		Description: "Session-series definition aspect (wellness). Stored as vtx.sessionseries.<NanoID>.definition " +
+			"(class sessionSeriesDefinition) = {name, capacity, priceCents?, intervalDays, occurrenceCount, " +
+			"firstStartsAt, firstEndsAt}. Non-sensitive. Written ONCE by CreateSessionSeries (whose sessionseries " +
+			"vertexType DDL owns the script); this aspect-type DDL is the step-6 write gate. Declaration-only: no op " +
+			"handler. No op ever edits it — extending a series is out of scope this increment (re-run " +
+			"CreateSessionSeries anchored on the last occurrence's end).",
+		Script: aspectDeclarationOnlyScript,
+		InputSchema: `{"type":"object","properties":` +
+			`{"name":{"type":"string"},"capacity":{"type":"integer"},"priceCents":{"type":"integer"},` +
+			`"intervalDays":{"type":"integer"},"occurrenceCount":{"type":"integer"},` +
+			`"firstStartsAt":{"type":"string"},"firstEndsAt":{"type":"string"}}}`,
+		OutputSchema: `{"type":"object"}`,
+		FieldDescription: map[string]string{
+			"name":            "The series' class name, shared by every occurrence.",
+			"capacity":        "The series' seat capacity, shared by every occurrence.",
+			"priceCents":      "The series' per-occurrence price in integer cents, when set.",
+			"intervalDays":    "Days between occurrences.",
+			"occurrenceCount": "How many session occurrences this series minted.",
+			"firstStartsAt":   "RFC3339 start of the first occurrence.",
+			"firstEndsAt":     "RFC3339 end of the first occurrence.",
+		},
+		Examples: []pkgmgr.ExampleSpec{
+			{
+				Name: "session series definition",
+				Payload: map[string]any{
+					"name": "Evening Flow with Sam", "capacity": 20, "intervalDays": 7, "occurrenceCount": 8,
+					"firstStartsAt": "2026-08-03T18:00:00Z", "firstEndsAt": "2026-08-03T19:00:00Z",
+				},
+				ExpectedOutcome: "Stored as vtx.sessionseries.<NanoID>.definition; written by CreateSessionSeries.",
+			},
+		},
+	}
+}
+
 // studioSlotClaimAspectTypeDDL declares the .slot<cellcode> aspect (class
 // studioSlotClaim) — a deterministic per-15-minute-cell existence marker on
 // the studio hub. The step-6 write gate for CreateSession / TombstoneSession
@@ -371,7 +526,7 @@ func studioSlotClaimAspectTypeDDL() pkgmgr.DDLSpec {
 	return pkgmgr.DDLSpec{
 		CanonicalName:     studioSlotClaimAspectDDL,
 		Class:             "meta.ddl.aspectType",
-		PermittedCommands: []string{"CreateSession", "TombstoneSession", "ReassignSession"},
+		PermittedCommands: []string{"CreateSession", "TombstoneSession", "ReassignSession", "CreateSessionSeries"},
 		Description: "Studio 15-minute slot-claim aspect (wellness). Stored as vtx.studio.<NanoID>.slot<cellcode> " +
 			"(class studioSlotClaim) = {} — a pure existence marker, no relationship field. <cellcode> is the " +
 			"cell's canonical whole-second UTC start with '-'/':' stripped and lowercased. CreateSession claims " +
@@ -379,7 +534,9 @@ func studioSlotClaimAspectTypeDDL() pkgmgr.DDLSpec {
 			"IS the double-book lock: StudioConflict on commit-time rejection); TombstoneSession tombstones all " +
 			"held cells on cancellation, freeing them. ReassignSession's time-move path claims/releases only the " +
 			"symmetric difference between the old and new covered cells (a cell both spans cover is left alone). " +
-			"Non-sensitive; created on demand, no CreateStudio init needed. Declaration-only: no op handler.",
+			"CreateSessionSeries claims one set per occurrence (the whole batch rejects StudioConflict together if " +
+			"any occurrence collides — no partial series). Non-sensitive; created on demand, no CreateStudio init " +
+			"needed. Declaration-only: no op handler.",
 		Script:       aspectDeclarationOnlyScript,
 		InputSchema:  `{"type":"object","properties":{}}`,
 		OutputSchema: `{"type":"object"}`,
@@ -1715,6 +1872,108 @@ def execute(state, op):
             mutations.append(claim_cell(studio, cc, "studioSlotClaim", "StudioConflict", "studio"))
         events = [{"class": "wellness.sessionCreated", "data": {"sessionKey": sess_key, "studio": studio}}]
         return {"mutations": mutations, "events": events, "response": {"primaryKey": sess_key}}
+
+    if ot == "CreateSessionSeries":
+        # CreateSession, run occurrenceCount times on a fixed intervalDays
+        # cadence, eagerly, in one atomic op — see sessionSeriesVertexTypeDDL's
+        # doc comment for why this stays a bounded batch rather than a
+        # rolling lens+directOp series (every occurrence's shape is fully
+        # known up front; there is nothing to wait on).
+        studio = required_string(p, "studio")
+        _, studio_id = parts_of(studio, "studio", "studio")
+        require_live_typed(state, studio, "studio", "studio")
+
+        # Same staff-standing confinement as CreateSession, checked ONCE —
+        # the whole series shares one studio.
+        # workplace-exempt: (no-validated-path) CreateSessionSeries is granted
+        # scope=any to operator + frontOfHouse only (permissions.go) and no task
+        # mints it, so nothing but the operator escape reaches the exemption.
+        if not workplace_exempt():
+            require_workplace(studio_locations(studio), "cannot create a session series at studio " + studio)
+        studio_locs = studio_locations(studio)
+
+        name = required_string(p, "name")
+        starts_at = time.rfc3339_utc(required_string(p, "startsAt"))
+        ends_at = time.rfc3339_utc(required_string(p, "endsAt"))
+        if not (starts_at < ends_at):
+            fail("InvalidArgument: endsAt: must be strictly after startsAt; got startsAt=" + starts_at + " endsAt=" + ends_at)
+        capacity = required_int(p, "capacity", 1, 200)
+        price_cents = optional_int(p, "priceCents", 0)
+        interval_days = required_int(p, "intervalDays", 1, 365)
+        occurrence_count = required_int(p, "occurrenceCount", 2, 52)
+        enforce_grid(starts_at, ends_at)
+
+        # Validated ONCE, shared by every occurrence — CreateSession's own
+        # per-call validation, hoisted above the loop.
+        instructor = optional_string(p, "instructor")
+        instructor_id = None
+        if instructor != None:
+            require_live_typed(state, instructor, "instructor", "instructor")
+            _, instructor_id = parts_of(instructor, "instructor", "instructor")
+
+        series_id = nanoid.new()
+        series_key = "vtx.sessionseries." + series_id
+        series_def = {
+            "name": name, "capacity": capacity, "intervalDays": interval_days,
+            "occurrenceCount": occurrence_count, "firstStartsAt": starts_at, "firstEndsAt": ends_at,
+        }
+        if price_cents != None:
+            series_def["priceCents"] = price_cents
+
+        mutations = [
+            make_vtx(series_key, "sessionseries", {}),
+            make_aspect(series_key, "definition", "sessionSeriesDefinition", series_def),
+            make_link("lnk.sessionseries." + series_id + ".atStudio.studio." + studio_id,
+                       series_key, studio, "atStudio", "atStudio", {}),
+        ]
+
+        # Each occurrence offsets the FIRST occurrence's startsAt/endsAt by
+        # i*intervalDays days — a whole number of hours (a multiple of 24),
+        # itself a multiple of the 15-minute grid step, so grid alignment
+        # (already enforced above on the first occurrence) carries forward
+        # without re-checking every occurrence.
+        offset_hours_step = interval_days * 24
+        occ_starts = starts_at
+        occ_ends = ends_at
+        session_keys = []
+        for i in range(occurrence_count):
+            if i > 0:
+                occ_starts = time.rfc3339_add(occ_starts, str(offset_hours_step) + "h")
+                occ_ends = time.rfc3339_add(occ_ends, str(offset_hours_step) + "h")
+            cells = slot_cells(occ_starts, occ_ends)
+
+            sess_id = nanoid.new()
+            sess_key = "vtx.session." + sess_id
+            session_keys.append(sess_key)
+
+            sched = {"name": name, "startsAt": occ_starts, "endsAt": occ_ends, "capacity": capacity}
+            if price_cents != None:
+                sched["priceCents"] = price_cents
+
+            mutations.append(make_vtx(sess_key, "session", {}))
+            mutations.append(make_aspect(sess_key, "schedule", "sessionSchedule", sched))
+            mutations.append(make_link("lnk.session." + sess_id + ".atStudio.studio." + studio_id,
+                                       sess_key, studio, "atStudio", "atStudio", {}))
+            for loc in studio_locs:
+                ltype, lid = parts_of(loc, "location", "")
+                mutations.append(make_link("lnk.session." + sess_id + ".atLocation." + ltype + "." + lid,
+                                           sess_key, loc, "atLocation", "atLocation", {}))
+            if instructor != None:
+                mutations.append(make_link("lnk.session." + sess_id + ".ledBy.instructor." + instructor_id,
+                                           sess_key, instructor, "ledBy", "ledBy", {}))
+            # "session partOf sessionseries" (Contract #1 §1.1) — the series
+            # is the pre-existing anchor its occurrences point at, mirroring
+            # atStudio's own studio-is-target direction.
+            mutations.append(make_link("lnk.session." + sess_id + ".partOf.sessionseries." + series_id,
+                                       sess_key, series_key, "partOf", "partOf", {}))
+            for c in cells:
+                cc = slot_cellcode(c)
+                mutations.append(claim_cell(studio, cc, "studioSlotClaim", "StudioConflict", "studio"))
+
+        events = [{"class": "wellness.sessionSeriesCreated",
+                   "data": {"seriesKey": series_key, "studio": studio, "occurrenceCount": occurrence_count}}]
+        return {"mutations": mutations, "events": events,
+                "response": {"primaryKey": series_key, "sessionKeys": session_keys}}
 
     if ot == "TombstoneSession":
         sess_key = required_string(p, "sessionKey")

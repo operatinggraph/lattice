@@ -15,9 +15,10 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 // booking's booker IS an identity directly, not a business vertex a linked
 // identity must resolve through.
 //
-// CreateStudio, CreateSession, CreateBooking and CancelBooking additionally
-// grant `frontOfHouse` at scope=any — the studio front-desk beat: opening a
-// studio, scheduling a class, booking a member in, and releasing a member's
+// CreateStudio, CreateSession, CreateSessionSeries, CreateBooking and
+// CancelBooking additionally grant `frontOfHouse` at scope=any — the studio
+// front-desk beat: opening a studio, scheduling a class (or a whole
+// recurring series of them), booking a member in, and releasing a member's
 // seat. scope=any carries no platform-checked target, so each of those scripts
 // binds the standing path itself with the workplace walk (`require_workplace`):
 // a non-operator caller must hold a `worksAt` link covering a location the
@@ -89,6 +90,12 @@ func Permissions() []pkgmgr.PermissionSpec {
 			OperationType: "CreateSession",
 			Scope:         "any",
 			Note:          "Grants the operator and front-of-house staff the right to submit CreateSession (schedules a class on a studio's grid) — the studio front-desk beat.",
+			GrantsTo:      []string{"operator", "frontOfHouse"},
+		},
+		{
+			OperationType: "CreateSessionSeries",
+			Scope:         "any",
+			Note:          "Grants the operator and front-of-house staff the right to submit CreateSessionSeries (schedules occurrenceCount occurrences of a recurring class on a studio's grid in one atomic op) — the same studio front-desk beat as CreateSession, confined by the same in-script workplace walk.",
 			GrantsTo:      []string{"operator", "frontOfHouse"},
 		},
 		{
