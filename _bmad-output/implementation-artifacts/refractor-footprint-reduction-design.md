@@ -1,15 +1,14 @@
 # Refractor footprint reduction — kill the amplifiers
 
-**Status: ✅ Andrew-ratified (in-session, 2026-08-01)** — Andrew directed the campaign live
-("drive this whole refactor project to completion") after reviewing the measured cost model.
-The D2 delta-evaluation fire carries its own detailed design section (§D2) and is ratified
-separately once written; everything else builds against this doc.
+**Status: ✅ SHIPPED (all 8 fires on `main`, CI green, 2026-08-01)** — Andrew ratified and
+directed the campaign in-session; §7 records the post-ship measurement. The one open build
+item is §D2 **Phase 2** (reverse anchor enumeration), whose named trigger — neighbor-event
+full recomputes dominating a backlog drain — was measured live at the closing restart (§7).
 
 **For Andrew:** Refractor's memory/CPU footprint — and the substrate load it induces — is
 almost entirely *amplification*, not data: an 11 MB graph producing 6 GB of JetStream exhaust
-and saturating NATS during boot/rebuild. Five measured amplifiers, seven fires. Quick wins
-(Fires 1–5) are behavior-preserving constant-factor cuts; D1/D2 are the structural fixes.
-No contract changes. One open vendor question gates D1 (§D1).
+and saturating NATS during boot/rebuild. Five measured amplifiers, eight fires, no contract
+changes.
 
 ---
 
@@ -56,14 +55,14 @@ listers — each in-flight full-bucket listing is a live server-side consumer).
 
 | Fire | Scope | Size | State |
 |---|---|---|---|
-| **1 — Delete the dead adjacency watch** | Remove `runAdjWatch`/`drainAdjWatch`/`handleAdjUpdate`/`handleAdjNode`, the `runAdjWatch` launch, `SkipsAdjWatchWrite` + guarded-skip arms, `adj_watch_internal_test.go`; ADR-16 supersession note in `docs/components/refractor.md` + bootstrapper comments; fix the stale "until the adjacency watch heals it" comment. Keep bucket + bootstrapper + `Neighbors` (the executor's index). | S | 📋 |
-| **2 — Label-prefix seed scan** | `seedNodes` generic path uses `ListKeysPrefix("vtx.<label>.")` when the pattern has a label (keep the KindVertex shape filter — the prefix also matches aspect keys); unlabeled patterns keep the full scan. | S | 📋 |
-| **3 — Relevance-gate plain vertex events** | In `handle`'s KindVertex branch: plain lenses (`actorEnumerator == nil`) ack-and-skip when `!plainReactsTo(label)`. Anchor-label tombstones still pass by construction; non-exhaustive label sets keep reproject-all; actor-aware pipelines untouched. | S | 📋 |
-| **4 — Skip-if-identical unguarded writes** | `NatsKVAdapter.Upsert` unguarded path: Get + byte-compare, skip identical Puts (the sweep's precedent, made universal). Audit skips with the write. Guarded/personal paths untouched. Postgres `IS DISTINCT FROM` optional follow-up. | S–M | 📋 |
-| **5 — One audit stream** | Single `REFRACTOR_AUDIT` stream over `lattice.refractor.audit.>` with MaxAge 7d + MaxBytes ceiling; per-process ensure; stop creating `AUDIT_<ruleID>`; delete the 95 existing (dev history, Andrew-approved direction). | S–M | 📋 |
-| **6 — Reap durable on lens delete** | Lens tombstone currently strands `refractor-<ruleID>` durables forever (lifecycle step 9); delete the durable when the lens is removed. | S | 📋 |
-| **D1 — Server-side filter subjects** | Per-lens durable `FilterSubjects` derived from referenced labels (`$KV.core-kv.vtx.<label>.>`, `lnk.<label>.>`, `lnk.*.*.*.<label>.>`); broad filter kept for non-exhaustive label sets. **Vendor gate CLEARED against the pinned `nats-server v2.14.0` source:** last-per-subject validation admits plural `FilterSubjects` (`server/consumer.go:912-920`), pending is per-filter (`NumPendingMulti`, `:5534-5538`), and filters are editable on a live consumer (`:2577+`) — with the caveat that an update never resets the cursor, so a **widened** label set must ride `Pipeline.Rebuild` (consumer reset); narrowing needs nothing. Overlapping filters on one consumer are rejected — dedupe labels. Needs `substrate.ConsumerSpec.FilterSubjects []string`. | M | 📋 ready |
-| **D2 — Event-seeded delta evaluation** | §D2 below. Phase 1: anchor-labeled events recompute one anchor. Phase 2 (measured need only): reverse anchor enumeration for neighbor events. | M (P1) | ✅ Andrew-ratified (in-session 2026-08-01) |
+| **1 — Delete the dead adjacency watch** | Remove `runAdjWatch`/`drainAdjWatch`/`handleAdjUpdate`/`handleAdjNode`, the `runAdjWatch` launch, `SkipsAdjWatchWrite` + guarded-skip arms, `adj_watch_internal_test.go`; ADR-16 supersession note in `docs/components/refractor.md` + bootstrapper comments; fix the stale "until the adjacency watch heals it" comment. Keep bucket + bootstrapper + `Neighbors` (the executor's index). | S | ✅ shipped |
+| **2 — Label-prefix seed scan** | `seedNodes` generic path uses `ListKeysPrefix("vtx.<label>.")` when the pattern has a label (keep the KindVertex shape filter — the prefix also matches aspect keys); unlabeled patterns keep the full scan. | S | ✅ shipped |
+| **3 — Relevance-gate plain vertex events** | In `handle`'s KindVertex branch: plain lenses (`actorEnumerator == nil`) ack-and-skip when `!plainReactsTo(label)`. Anchor-label tombstones still pass by construction; non-exhaustive label sets keep reproject-all; actor-aware pipelines untouched. | S | ✅ shipped |
+| **4 — Skip-if-identical unguarded writes** | `NatsKVAdapter.Upsert` unguarded path: Get + byte-compare, skip identical Puts (the sweep's precedent, made universal). Audit skips with the write. Guarded/personal paths untouched. Postgres `IS DISTINCT FROM` optional follow-up. | S–M | ✅ shipped |
+| **5 — One audit stream** | Single `REFRACTOR_AUDIT` stream over `lattice.refractor.audit.>` with MaxAge 7d + MaxBytes ceiling; per-process ensure; stop creating `AUDIT_<ruleID>`; delete the 95 existing (dev history, Andrew-approved direction). | S–M | ✅ shipped |
+| **6 — Reap durable on lens delete** | Lens tombstone currently strands `refractor-<ruleID>` durables forever (lifecycle step 9); delete the durable when the lens is removed. | S | ✅ shipped |
+| **D1 — Server-side filter subjects** | Per-lens durable `FilterSubjects` derived from referenced labels (`$KV.core-kv.vtx.<label>.>`, `lnk.<label>.>`, `lnk.*.*.*.<label>.>`); broad filter kept for non-exhaustive label sets. **Vendor gate CLEARED against the pinned `nats-server v2.14.0` source:** last-per-subject validation admits plural `FilterSubjects` (`server/consumer.go:912-920`), pending is per-filter (`NumPendingMulti`, `:5534-5538`), and filters are editable on a live consumer (`:2577+`) — with the caveat that an update never resets the cursor, so a **widened** label set must ride `Pipeline.Rebuild` (consumer reset); narrowing needs nothing. Overlapping filters on one consumer are rejected — dedupe labels. Needs `substrate.ConsumerSpec.FilterSubjects []string`. | M | ✅ shipped |
+| **D2 — Event-seeded delta evaluation** | §D2 below. Phase 1: anchor-labeled events recompute one anchor. Phase 2 (measured need only): reverse anchor enumeration for neighbor events. | M (P1) | ✅ Phase 1 shipped · Phase 2 trigger MEASURED (§7) |
 
 Deliberately **not** in scope: a single shared demux consumer replacing per-lens durables
 (the per-lens ack floor *is* the per-lens resume/rebuild mechanism — load-bearing); any
@@ -154,3 +153,36 @@ is byte-identical.
 - *Is the adjacency watch load-bearing anywhere?* No — its productive arm is structurally
   unreachable (bare-NanoID Get), and both link arms pre-apply adjacency before evaluating.
   Freshness is carried by the stream-path arms + sweeps + rebuilds.
+
+## 7. Post-ship measurement (closing restart, 2026-08-01 01:19 PT)
+
+Binary rebuilt at all 8 fires; deliberate restart on the live dev stack (host under 12.7/13.3 GB
+swap throughout — every number below is a floor, not a ceiling).
+
+| Metric | Storm baseline | Post-ship |
+|---|---|---|
+| NATS RAM / CPU | 5.75 GB / 104% sustained, ~1400% burst | ~1.0 GB / draining-burst only |
+| Slow consumers | 84 | **0** |
+| JetStream streams | 142–147 | **50** (98 legacy `AUDIT_*` retired at boot) |
+| JetStream store | 6.0 GB | 0.37 GB |
+| Audit layout | 95 uncapped streams, 20.4 M msgs/7d | one `REFRACTOR_AUDIT`, 7d + 512 MiB cap |
+| Boot to all 95 lenses started | ~50 lenses lagging, `context deadline exceeded`, no convergence | **22 s**, zero errors |
+| Adjacency-watch consumers | ~95 standing + churn | 0 (mechanism deleted) |
+
+The restart inherited a **~115k-message storm-era backlog** the old binary had made no visible
+progress on (2.8% CPU while holding it). Within minutes the new binary had **54 of 100 lens
+consumers fully drained**; the remainder split three ways, none a campaign regression:
+
+- **6 pipelines infra-paused** (verify-and-pause probes failing on this host — environmental;
+  their frozen pending is by design and surfaces on the existing health/pause plane).
+- **One heavy `weaver-targets` convergence lens** crawling with AckWait redeliveries: its
+  per-event evaluations are neighbor-shaped full recomputes, slower than AckWait under swap.
+  **This is §D2 Phase 2's named trigger, measured** — reverse anchor enumeration is what
+  removes this class. Phase 2 is now demand-justified (board row).
+- A working band draining normally near the stream head.
+
+Residual notes (no fires filed): `capabilityRoleIndex` projects raw `$projectedAt`, so Fire 4's
+identical-skip rarely helps that one lens (documented at its envelope); a plain lens whose
+anchor-derived key is not unique per anchor could cross-delete on the seeded WHERE-flip path —
+the identical hazard already exists on the shipped anchor-tombstone path, no live lens has the
+shape, and closing it needs a key-uniqueness notion the platform lacks today.
