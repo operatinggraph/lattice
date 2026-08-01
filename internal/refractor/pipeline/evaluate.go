@@ -65,9 +65,8 @@ func projectedAtFromProvenance(nodeProps map[string]any) (string, error) {
 // is rewritten before being handed to the adapter. When a SecureDecryptor is
 // installed (a Secure Lens), each row's declared secure columns are decrypted
 // before the results reach any write path — this wrapper is the single choke
-// point both the stream consumer (handle) and the adjacency watch
-// (handleAdjUpdate) flow through, so no plain-lens evaluation path can bypass
-// it.
+// point the stream consumer (handle) flows through, so no plain-lens
+// evaluation path can bypass it.
 // The second return value is the enumerated-actor list (full vertex keys) —
 // non-nil only for an actor-aware pipeline (personal-lens-retraction-
 // design.md §3.2, R1: the frame-emission caller needs the complete
@@ -87,10 +86,10 @@ func (p *Pipeline) evaluateForEntry(ctx context.Context, entry ruleengine.NodeEn
 
 // applySecureDecrypt runs the installed SecureDecryptor over results; a no-op
 // when none is installed. Every evaluation path that can reach a write must
-// call this (evaluateForEntry covers the stream consumer + adjacency watch;
-// the actor fan-out handlers call it explicitly) — a validated Secure Lens is
-// always a plain projection lens, so the fan-out coverage is defense in depth
-// against a future wiring that combines an enumerator with a decryptor.
+// call this (evaluateForEntry covers the stream consumer; the actor fan-out
+// handlers call it explicitly) — a validated Secure Lens is always a plain
+// projection lens, so the fan-out coverage is defense in depth against a
+// future wiring that combines an enumerator with a decryptor.
 func (p *Pipeline) applySecureDecrypt(ctx context.Context, results []ruleengine.EvalResult) error {
 	if p.secureDecryptor == nil {
 		return nil

@@ -46,10 +46,10 @@ var (
 // has its guard turned on by projection.RequiresGuard, which answers false for
 // any lens that is not an actorAggregate — which is every grant lens — so the
 // guard-aware paths would otherwise treat writes the storage layer is ordering
-// as last-writer-wins. The adjacency-watch path is the one that matters most:
-// it carries no stream sequence, so it writes at the sentinel seq 0, and
-// against an absent row that INSERT lands — an unordered live read grant in
-// the table every protected table's RLS policy consults.
+// as last-writer-wins. A non-stream-sequenced write is what this guards
+// against: it would carry the sentinel seq 0, and against an absent row that
+// INSERT lands — an unordered live read grant in the table every protected
+// table's RLS policy consults.
 func (g *GrantWriterAdapter) Guarded() bool { return true }
 
 // NewGrantWriterAdapter wraps a non-nil PostgresGrantWriter. source is the
@@ -278,9 +278,10 @@ func (p *ProtectedAdapter) Probe(ctx context.Context) error {
 func (p *ProtectedAdapter) Close() error { return p.inner.Close() }
 
 // Guarded reports the inner adapter's guard state (always true — see
-// NewProtectedAdapter). The pipeline's adjacency-watch path checks this via
-// the `interface{ Guarded() bool }` assertion to skip a sentinel-seq (0) write
-// on a guarded adapter, the same protection the KV-guarded lenses already get.
+// NewProtectedAdapter). The pipeline's rebuild path checks this via the
+// `interface{ Guarded() bool }` assertion to force a truncate before
+// rescanning a guarded adapter, the same protection the KV-guarded lenses
+// already get.
 func (p *ProtectedAdapter) Guarded() bool { return p.inner.Guarded() }
 
 // Truncate delegates to the base adapter so a protected read model still

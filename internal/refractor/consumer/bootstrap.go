@@ -23,8 +23,10 @@ const (
 // Bootstrapper drives the dedicated adjacency consumer on the Core KV stream
 // until its pending message count reaches zero, then closes the Ready channel.
 // It continues running thereafter to keep the adjacency index current (ADR-7, ADR-8).
-// After adjacency is updated for a node, rule pipelines are notified via their
-// adjacency KV watch (ADR-16) — no writes to Core KV are required.
+// The index serves the cypher executor's Neighbors reads (adjacency.Neighbors);
+// a pipeline that reacts to link events pre-applies the link to the index
+// itself before evaluating, so its re-execute always reads a consistent edge
+// set without depending on this bootstrapper's own build for the same edge.
 type Bootstrapper struct {
 	conn         *substrate.Conn
 	streamName   string
@@ -166,8 +168,8 @@ func (b *Bootstrapper) processMsg(ctx context.Context, msg substrate.Message) su
 		return substrate.Nak
 	}
 
-	// Rule pipelines are notified of the adjacency update via their adjKV watch
-	// (ADR-16) — no write to Core KV is required here.
+	// The cypher executor reads this index directly (adjacency.Neighbors) — no
+	// write to Core KV is required here.
 	return substrate.Ack
 }
 

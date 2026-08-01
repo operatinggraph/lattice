@@ -78,10 +78,10 @@ func NewPostgresAdapter(pool *pgxpool.Pool, table string, keyOrder []string, que
 func (a *PostgresAdapter) SetGuarded(guarded bool) { a.guarded = guarded }
 
 // Guarded reports whether the projection_seq write guard is enabled. The
-// pipeline's adjacency-watch path (pipeline.go) checks this via the
-// `interface{ Guarded() bool }` assertion to skip a sentinel-seq (0) write
-// that would otherwise be unconditionally dropped by the guard clause below —
-// mirroring NatsKVAdapter.Guarded.
+// pipeline's rebuild path (pipeline.go) checks this via the `interface{
+// Guarded() bool }` assertion to force a truncate before rescanning a
+// guarded target, since its monotonic watermark would otherwise reject a
+// lower-seq historical replay — mirroring NatsKVAdapter.Guarded.
 func (a *PostgresAdapter) Guarded() bool { return a.guarded }
 
 // quoteIdent wraps a Postgres identifier in double-quotes and escapes any

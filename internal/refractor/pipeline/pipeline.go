@@ -20,8 +20,6 @@ import (
 	"github.com/operatinggraph/lattice/internal/substrate"
 )
 
-const reconnectDelay = 5 * time.Second
-
 // ProbeInterval is the delay between consecutive probe attempts during an infrastructure pause.
 // Exported so tests can override it to a short value for fast recovery detection.
 var ProbeInterval = 10 * time.Second
@@ -676,11 +674,6 @@ func (p *Pipeline) Run(ctx context.Context) {
 		go p.lagPoller.Start(ctx)
 	}
 
-	// Start adjacency KV watcher (ADR-16). When adj.<nodeId> is written by the
-	// bootstrapper, re-evaluate the corresponding Core KV node so the pipeline
-	// produces output with up-to-date adjacency without writing back to Core KV.
-	go p.runAdjWatch(ctx)
-
 	spec := p.consumerCfg
 	spec.Handler = p.handleTracked
 	spec.Classify = classifyForSupervisor
@@ -1076,9 +1069,9 @@ func (p *Pipeline) evalPlainAspectReprojection(ctx context.Context, msg substrat
 // Like the actor-aware link fan-out, the link is first idempotently applied
 // to adjKV (both directional entries, the link key as EdgeID — matching the
 // dedicated adjacency consumer's events exactly): the two consumers observe
-// the same CDC event with no cross-consumer ordering guarantee, and without
-// this a tombstone's re-execute could still see the removed edge and miss the
-// retraction until the adjacency watch heals it.
+// the same CDC event with no cross-consumer ordering guarantee, so applying
+// it here first is what guarantees the re-execute always reads a consistent
+// edge set — a tombstone's re-execute can never still see the removed edge.
 func (p *Pipeline) evalPlainLinkReprojection(ctx context.Context, msg substrate.Message, key string) (substrate.Decision, error) {
 	type1, id1, linkName, type2, id2, ok := substrate.ParseLinkKey(key)
 	if !ok {
@@ -1678,193 +1671,5 @@ func (p *Pipeline) writeAudit(ctx context.Context, entityID string, result rulee
 			slog.Warn("pipeline: audit write failed",
 				"ruleId", p.ruleID, "entityId", entityID, "op", op, "err", err)
 		}
-	}
-}
-
-// runAdjWatch watches the Refractor adjacency KV for new or updated
-// entries. When adj.<nodeId> is committed by the bootstrapper, the pipeline
-// fetches the corresponding Core KV node (read-only) and re-evaluates it so
-// that output reflects the now-current adjacency without any write to Core KV
-// (ADR-16). The watcher reconnects automatically on transient failures.
-// Runs for the full lifetime of ctx — cancelled when the pipeline stops.
-func (p *Pipeline) runAdjWatch(ctx context.Context) {
-	for {
-		if ctx.Err() != nil {
-			return
-		}
-		updates, err := p.adjKV.WatchUpdates(ctx)
-		if err != nil {
-			if ctx.Err() != nil {
-				return
-			}
-			slog.Error("pipeline: adj watch: create watcher", "ruleId", p.ruleID, "err", err)
-			select {
-			case <-ctx.Done():
-				return
-			case <-time.After(reconnectDelay):
-			}
-			continue
-		}
-		p.drainAdjWatch(ctx, updates)
-	}
-}
-
-// drainAdjWatch reads adjacency-change events until the channel closes (the
-// watcher stopped — runAdjWatch reconnects) or ctx is done. The substrate watch
-// already filters the end-of-replay nil sentinel, so every event is a real
-// mutation.
-func (p *Pipeline) drainAdjWatch(ctx context.Context, updates <-chan substrate.KVEvent) {
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case evt, ok := <-updates:
-			if !ok {
-				// Channel closed — watcher stopped; runAdjWatch will reconnect.
-				return
-			}
-			p.handleAdjUpdate(ctx, evt.Key)
-		}
-	}
-}
-
-// handleAdjUpdate processes one adjacency KV change keyed by adjKey. It strips
-// the "adj." prefix to recover the Core KV node key, fetches the node value
-// directly (read-only), and hands off to handleAdjNode for parsing,
-// re-evaluation, and write.
-func (p *Pipeline) handleAdjUpdate(ctx context.Context, adjKey string) {
-	const adjPrefix = "adj."
-	nodeKey := strings.TrimPrefix(adjKey, adjPrefix)
-	if nodeKey == adjKey {
-		// Key does not start with "adj." — unexpected format, skip.
-		return
-	}
-
-	// Point-read the Core KV node. Refractor is a pure consumer of Core KV —
-	// this is a read, not a write (ADR-16).
-	coreEntry, err := p.coreKV.Get(ctx, nodeKey)
-	if err != nil {
-		if errors.Is(err, substrate.ErrKeyNotFound) {
-			// Node hasn't arrived in Core KV yet. When it does, the normal stream
-			// consumer will evaluate it with adjacency already in place.
-			return
-		}
-		if ctx.Err() != nil {
-			return
-		}
-		slog.Warn("pipeline: adj watch: core KV get",
-			"ruleId", p.ruleID, "key", nodeKey, "err", err)
-		return
-	}
-
-	data := coreEntry.Value
-	if len(data) == 0 {
-		// Tombstone — node was deleted; skip (the normal consumer handles deletes).
-		return
-	}
-
-	p.handleAdjNode(ctx, nodeKey, data)
-}
-
-// handleAdjNode parses a Core KV node body fetched by handleAdjUpdate and
-// re-evaluates it through the normal evaluate-and-write path. Split out of
-// handleAdjUpdate so the parse/evaluate/write arms below are reachable
-// without a seeded Core KV read.
-func (p *Pipeline) handleAdjNode(ctx context.Context, nodeKey string, data []byte) {
-	label, _, ok := substrate.ParseVertexKey(nodeKey)
-	if !ok {
-		return
-	}
-
-	var props map[string]any
-	if err := json.Unmarshal(data, &props); err != nil {
-		slog.Warn("pipeline: adj watch: unmarshal",
-			"ruleId", p.ruleID, "key", nodeKey, "err", err)
-		return
-	}
-
-	// Skip edge events — the bootstrapper processes these; pipelines handle nodes only.
-	if nodeID, _ := props["nodeId"].(string); nodeID != "" {
-		return
-	}
-
-	isDeleted, _ := props["isDeleted"].(bool)
-	entry := ruleengine.NodeEntry{
-		CoreKVKey:  nodeKey,
-		NodeLabel:  label,
-		IsDeleted:  isDeleted,
-		Properties: props,
-	}
-
-	results, _, err := p.evaluateForEntry(ctx, entry)
-	if err != nil {
-		if ctx.Err() != nil {
-			return
-		}
-		slog.Warn("pipeline: adj watch: evaluate",
-			"ruleId", p.ruleID, "key", nodeKey, "err", err)
-		return
-	}
-
-	adpt := p.currentAdapter()
-	// A guarded watermark may be advanced or cleared ONLY by a stream-sequenced
-	// write (Contract #6 §6.2). The adjacency-watch path is not message-driven —
-	// it carries no JetStream stream sequence — and it is redundant for the
-	// guarded lenses: every link/aspect CDC event that an adjacency update
-	// reflects also flows through the stream consumer's evalLinkFanOut /
-	// evalAspectFanOut, which reproject the same affected actors with the
-	// triggering message's stream sequence. Writing here with a sentinel seq of 0
-	// would either be unconditionally dropped or could resurrect a tombstoned /
-	// absent guarded key. So skip guarded-key writes on this path entirely and
-	// log, leaving the watermark to the stream-sequenced reprojection.
-	if g, ok := adpt.(interface{ Guarded() bool }); ok && g.Guarded() {
-		if len(results) > 0 {
-			slog.Info("pipeline: adj watch: skipping guarded-key write (stream consumer owns the watermark)",
-				"ruleId", p.ruleID, "key", nodeKey, "results", len(results))
-		}
-		return
-	}
-	// The Edge SYNC adapter (natssubject) feeds an untrusted device that orders
-	// deltas by revision; a sentinel-seq (0) adjacency-watch write reaches it
-	// unordered and can transiently resurrect a tombstone / drop an upsert
-	// (edge-lattice-full-design.md §8.1 RR-1). It is redundant with the
-	// real-seq stream-consumer fan-out that reprojects the same actors, so skip
-	// it here — the Edge must never receive an unordered rev-0 delta.
-	if s, ok := adpt.(interface{ SkipsAdjWatchWrite() bool }); ok && s.SkipsAdjWatchWrite() {
-		if len(results) > 0 {
-			slog.Info("pipeline: adj watch: skipping edge-sync write (real-seq fan-out owns delivery)",
-				"ruleId", p.ruleID, "key", nodeKey, "results", len(results))
-		}
-		return
-	}
-	for _, result := range results {
-		var writeErr error
-		if result.Delete {
-			writeErr = adpt.Delete(ctx, result.Keys, 0)
-		} else {
-			writeErr = adpt.Upsert(ctx, result.Keys, result.Row, 0)
-		}
-		if writeErr != nil {
-			if ctx.Err() != nil {
-				return
-			}
-			cat := failure.Classify(writeErr)
-			slog.Error("pipeline: adj watch: write",
-				"ruleId", p.ruleID, "key", nodeKey, "err", writeErr, "category", cat)
-			if p.reporter != nil {
-				if recErr := p.reporter.RecordError(ctx, writeErr.Error()); recErr != nil {
-					slog.Error("pipeline: adj watch: update health errorCount",
-						"ruleId", p.ruleID, "err", recErr)
-				}
-			}
-			// Continue — remaining results are independent; adapter writes are idempotent.
-			// Adj-watch events are not replayable from JetStream, so we do not pause here,
-			// but the error is recorded in health KV for operator visibility.
-			continue
-		}
-		p.recordProjected()
-		slog.Info("pipeline: adj watch: re-evaluated",
-			"ruleId", p.ruleID, "entityId", nodeKey,
-			"stage", "pipeline", "adapter", p.adapterName)
 	}
 }

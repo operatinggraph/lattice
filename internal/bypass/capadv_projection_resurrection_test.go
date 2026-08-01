@@ -2,14 +2,14 @@
 // Capability Lens security plane — assemblies that don't reduce to one
 // mechanism's colocated white-box test.
 //
-// The adjacency-watch resurrection vector below: the adjacency-watch path
-// (handleAdjUpdate) writes guarded keys with no stream sequence, so an
-// adjacency reprojection firing after a close could in principle resurrect a
-// revoked ephemeral grant. Defense (Story 12.1a): every guarded per-actor
-// write carries projectionSeq = the JetStream stream sequence of the
-// triggering CDC message; the adjacency-watch path's sequence-less write
-// (seq 0) is dropped unconditionally as a fail-closed no-op against any real
-// tombstone watermark (Contract #6 §6.2, §6.8).
+// The sequence-less-write resurrection vector below: a guarded per-actor
+// write carrying no real stream sequence (projectionSeq 0 — no triggering
+// CDC message behind it) could in principle resurrect a revoked ephemeral
+// grant if it landed after a close. Defense (Story 12.1a): every guarded
+// per-actor write carries projectionSeq = the JetStream stream sequence of
+// the triggering CDC message, and a sequence-less write (seq 0) is dropped
+// unconditionally as a fail-closed no-op against any real tombstone
+// watermark (Contract #6 §6.2, §6.8).
 package bypass
 
 import (
@@ -21,8 +21,8 @@ import (
 	"github.com/operatinggraph/lattice/internal/substrate"
 )
 
-// resurrectionEphKey is the disjoint ephemeral key the adjacency-watch vector
-// targets (Contract #1 / §6.6 key shape).
+// resurrectionEphKey is the disjoint ephemeral key the sequence-less-write
+// vector targets (Contract #1 / §6.6 key shape).
 const resurrectionEphKey = "cap.ephemeral.identity." + capadvNanoID6
 
 // openGrantRow is the open-era projection body: a live ephemeral grant present
@@ -63,15 +63,14 @@ func liveGrantResurrected(t *testing.T, ctx context.Context, kv *substrate.KV) b
 	return len(grants) > 0
 }
 
-// TestCapAdv_V5_AdjWatch_CannotAdvanceWatermark proves the adjacency-watch
-// resurrection vector is closed. The adjacency-watch path is not
-// message-driven (no stream sequence). A guarded write attempted there would
-// carry seq 0, which the guard drops unconditionally as a fail-closed no-op —
-// a sequence-less write carries no ordering, so it can neither overwrite a
-// close-era tombstone nor create a clobberable seq-0 key. The pipeline
-// additionally skips guarded-key writes on the adjacency-watch path entirely
-// (the stream consumer owns the watermark); the adapter-level seq-0 drop is
-// the backstop.
+// TestCapAdv_V5_AdjWatch_CannotAdvanceWatermark proves the sequence-less-write
+// resurrection vector is closed. A guarded write carrying seq 0 — no real
+// stream sequence behind it — is dropped unconditionally by the KV
+// projection guard as a fail-closed no-op: a sequence-less write carries no
+// ordering, so it can neither overwrite a close-era tombstone nor create a
+// clobberable seq-0 key. This is the adapter-level backstop: whatever caller
+// might ever supply a sequence-less write, the guard — not the caller — is
+// what keeps a revoked grant revoked.
 func TestCapAdv_V5_AdjWatch_CannotAdvanceWatermark(t *testing.T) {
 	ctx, conn := setupCapAdvHarness(t)
 	kv, err := conn.OpenKV(ctx, capadvCapBucket)
@@ -90,14 +89,14 @@ func TestCapAdv_V5_AdjWatch_CannotAdvanceWatermark(t *testing.T) {
 	if err := adpt.Delete(ctx, keys, 50); err != nil {
 		t.Fatalf("v5 adj: close delete: %v", err)
 	}
-	// An adjacency-watch reprojection would write with seq 0 (no stream message).
-	// The guard must reject it against the seq-50 tombstone.
+	// A sequence-less write (no real stream message behind it) writes with seq
+	// 0. The guard must reject it against the seq-50 tombstone.
 	if err := adpt.Upsert(ctx, keys, openGrantRow(), 0); err != nil {
 		t.Fatalf("v5 adj: seq-0 upsert returned error (should be a silent no-op): %v", err)
 	}
 
 	if liveGrantResurrected(t, ctx, kv) {
-		t.Fatalf("v5 adj: a seq-0 (adjacency-watch) write must NOT resurrect a tombstoned guarded key")
+		t.Fatalf("v5 adj: a sequence-less (seq-0) write must NOT resurrect a tombstoned guarded key")
 	}
-	t.Logf("v5 adj-watch: a non-stream-sequenced (seq 0) write cannot advance or clear a guarded watermark")
+	t.Logf("v5: a non-stream-sequenced (seq 0) write cannot advance or clear a guarded watermark")
 }

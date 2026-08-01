@@ -105,9 +105,10 @@ func (a *NatsKVAdapter) SetKeyPrefix(prefix string) { a.keyPrefix = prefix }
 func (a *NatsKVAdapter) KeyPrefix() string { return a.keyPrefix }
 
 // Guarded reports whether the projection-write guard is enabled. The pipeline
-// consults it to decide whether the non-stream-sequenced adjacency-watch path
-// may write this adapter's keys (a guarded watermark may only be advanced or
-// cleared by a stream-sequenced write).
+// consults it — e.g. Rebuild forces a truncate before rescanning a guarded
+// target, since its monotonic watermark would otherwise reject a lower-seq
+// historical replay — because a guarded watermark may only be advanced or
+// cleared by a stream-sequenced write.
 func (a *NatsKVAdapter) Guarded() bool { return a.guarded }
 
 // buildKey concatenates key field values in keyOrder order, joined with ".".
@@ -213,10 +214,9 @@ func (a *NatsKVAdapter) Delete(ctx context.Context, keys map[string]any, project
 // re-compare, bounded by guardCASMaxAttempts; on exhaustion it returns a plain
 // error (routed transient) after a warn naming the key.
 //
-// A guarded write always carries a real JetStream stream sequence (≥ 1); the
-// only way to reach here with incomingSeq == 0 is a non-stream caller (the
-// adjacency-watch path, which already skips guarded keys) or a failed metadata
-// read. Such a write carries no ordering and is dropped as a fail-closed no-op
+// A guarded write always carries a real JetStream stream sequence (≥ 1); a
+// caller supplying incomingSeq == 0 has no real ordering token behind the
+// write. Such a write carries no ordering and is dropped as a fail-closed no-op
 // so it can neither create a clobberable seq-0 key nor no-op a real update.
 func (a *NatsKVAdapter) guardedWrite(ctx context.Context, key string, row map[string]any, incomingSeq uint64, delete bool) error {
 	if incomingSeq == 0 {

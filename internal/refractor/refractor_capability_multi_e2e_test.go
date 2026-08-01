@@ -337,8 +337,8 @@ func TestRefractor_CapabilityLens_MultiIdentity_E2E(t *testing.T) {
 	// 3.2b link bridge. We require all three identity-adjacent nodes
 	// AND the role/location nodes that the cypher walks through, so
 	// the first projection on identity vertex write produces the
-	// expected populated capability set without relying on adj-watch
-	// re-convergence (which slows the assertion loop).
+	// expected populated capability set directly, with no later
+	// reprojection needed to fill it in.
 	require.Eventually(t, func() bool {
 		ea, _ := adjacencyNeighborsLocal(adjKV, identityAID)
 		eb, _ := adjacencyNeighborsLocal(adjKV, identityBID)

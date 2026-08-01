@@ -20,7 +20,8 @@ type EvalResult struct {
 	// ProjectionSeq is the JetStream stream sequence of the CDC message that
 	// triggered this evaluation. It is the monotonic ordering token a guarded
 	// adapter uses to reject a lower-seq replay. Zero means unguarded/unknown
-	// (no triggering stream message, e.g. the adjacency-watch path).
+	// (no triggering stream message, e.g. a reconciliation Reproject on a
+	// pipeline that has not yet applied any event).
 	ProjectionSeq uint64
 	// FailClosed marks a result whose write must never be silently skipped
 	// while its batch siblings still land (cap-read-per-anchor-grant-keys-
