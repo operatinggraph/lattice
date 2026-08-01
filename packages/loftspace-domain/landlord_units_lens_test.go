@@ -17,10 +17,22 @@ package loftspacedomain
 //   - TestLandlordUnitsRead_FansOutPerLandlordForCoManagedUnit: a unit managed
 //     by two landlords projects two rows, one per landlord, each anchored to
 //     only that landlord.
+//   - TestLandlordUnitsRead_BuildingFanOut: a managed unit covered by a
+//     building projects authz_anchors = [landlord, building] — the same
+//     `[landlordKey] + [containedIn*1.. building tokens]` shape
+//     landlordLeaseApplicationsRead already anchors on, so a front-desk
+//     staffer's worksAt-building grant resolves this model too (the
+//     portfolio-pulse composition gap: landlordUnitsRead used to be
+//     landlord-self-anchored only).
+//   - TestLandlordUnitsRead_UsesComprehensionNotLiteralElement: the workplace
+//     token must be a pattern comprehension (yields [] when absent), never a
+//     literal array element (yields a null element that fails the whole row's
+//     Protected-adapter upsert — see lease-signing's identical guard).
 
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -77,6 +89,23 @@ func (f *luFixture) manages(t *testing.T, landlordName, unitName string) {
 		CoreKvKey: linkKey, EdgeID: edgeID, Name: "manages", Direction: "outbound", NodeID: landlordID, OtherNodeID: unitID, OtherType: unitType}))
 	require.NoError(t, adjacency.Build(ctx, f.adjKV, adjacency.CoreKVEvent{
 		CoreKvKey: linkKey, EdgeID: edgeID, Name: "manages", Direction: "inbound", NodeID: unitID, OtherNodeID: landlordID, OtherType: landlordType}))
+}
+
+// containedIn mirrors manages: it must read luFixture's OWN types map (the
+// field luFixture declares, shadowing the embedded lensFixture.types), the
+// same map vtx()/manages() populate — the inherited lensFixture.edge() reads
+// the embedded map instead and silently resolves empty types here.
+func (f *luFixture) containedIn(t *testing.T, unitName, buildingName string) {
+	t.Helper()
+	ctx := context.Background()
+	unitID, buildingID := f.ids[unitName], f.ids[buildingName]
+	unitType, buildingType := f.types[unitID], f.types[buildingID]
+	linkKey := "lnk." + unitType + "." + unitID + ".containedIn." + buildingType + "." + buildingID
+	edgeID := "containedIn_" + unitID + "_" + buildingID
+	require.NoError(t, adjacency.Build(ctx, f.adjKV, adjacency.CoreKVEvent{
+		CoreKvKey: linkKey, EdgeID: edgeID, Name: "containedIn", Direction: "outbound", NodeID: unitID, OtherNodeID: buildingID, OtherType: buildingType}))
+	require.NoError(t, adjacency.Build(ctx, f.adjKV, adjacency.CoreKVEvent{
+		CoreKvKey: linkKey, EdgeID: edgeID, Name: "containedIn", Direction: "inbound", NodeID: buildingID, OtherNodeID: unitID, OtherType: unitType}))
 }
 
 func (f *luFixture) projectUnits(t *testing.T) []ruleengine.ProjectionResult {
@@ -160,4 +189,45 @@ func TestLandlordUnitsRead_FansOutPerLandlordForCoManagedUnit(t *testing.T) {
 	}
 	require.Equal(t, []any{f.ids["larry"]}, byLandlord["vtx.identity."+f.ids["larry"]])
 	require.Equal(t, []any{f.ids["linda"]}, byLandlord["vtx.identity."+f.ids["linda"]])
+}
+
+func TestLandlordUnitsRead_BuildingFanOut(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newLuFixture(t)
+	f.vtx(t, "larry", "identity")
+	f.vtx(t, "u1", "unit")
+	f.vtx(t, "tower", "building")
+	f.manages(t, "larry", "u1")
+	f.containedIn(t, "u1", "tower")
+	f.unitAspect(t, "u1", "listing", "listing", map[string]any{"status": "leased"})
+
+	rows := f.projectUnits(t)
+	require.Len(t, rows, 1)
+	anchors, ok := rows[0].Values["authz_anchors"].([]any)
+	require.True(t, ok, "authz_anchors must be a list, got %T", rows[0].Values["authz_anchors"])
+	require.ElementsMatch(t, []any{f.ids["larry"], f.ids["tower"]}, anchors,
+		"authz_anchors must carry the managing landlord PLUS every building covering the unit, mirroring landlordLeaseApplicationsRead")
+}
+
+// TestLandlordUnitsRead_UsesComprehensionNotLiteralElement mirrors
+// lease-signing's TestWorkplaceAnchor_UsesComprehensionNotLiteralElement: a
+// literal array element (not a pattern comprehension) yields a null element
+// for a building-less unit, which the Protected adapter's toStringSlice
+// rejects — failing the row's entire upsert and losing it for the landlord
+// too. A missing building must cost the row its staff visibility, never its
+// existence.
+func TestLandlordUnitsRead_UsesComprehensionNotLiteralElement(t *testing.T) {
+	spec := landlordUnitsReadSpec
+
+	if !strings.Contains(spec, "[(u)-[:containedIn*1..]->(b:building) | nanoIdFromKey(b.key)]") {
+		t.Fatal("the workplace anchor must be a pattern comprehension (yields [] when absent), not an array element (yields a null element)")
+	}
+	if !strings.Contains(spec, "[nanoIdFromKey(landlord.key)] +") {
+		t.Error("the landlord anchor must remain the first, unconditional element — staff visibility is additive to it, never a replacement")
+	}
+	if strings.Contains(spec, "[nanoIdFromKey(landlord.key), nanoIdFromKey(") {
+		t.Error("two-element array literal reintroduces the null-element hazard: a building-less unit would fail the whole row's upsert")
+	}
 }

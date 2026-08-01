@@ -1,5 +1,5 @@
 name: loftspace-domain
-version: 0.10.6
+version: 0.10.7
 description: |
   LoftSpace listing economics. Adds the leasable facets of a unit — the
   .listing aspect (rent / term / availability) and the .address aspect — on
@@ -21,9 +21,11 @@ description: |
   the reserved WildcardAnchor grant still matches every row on top of these.
   cmd/loftspace-app reads it as the signed-in caller, both for the identity
   picker and for server-side name resolution; and landlordUnitsRead — a
-  PROTECTED, landlord-anchored Postgres
-  model of every unit a landlord manages (portfolio-pulse occupancy), independent
-  of any lease application.
+  PROTECTED Postgres model of every unit a landlord manages (portfolio-pulse
+  occupancy), independent of any lease application, anchored on the managing
+  landlord plus every covering building (mirroring
+  landlordLeaseApplicationsRead) so a front-desk staffer's building grant
+  resolves it too.
 depends:
   - location-domain
 declares:

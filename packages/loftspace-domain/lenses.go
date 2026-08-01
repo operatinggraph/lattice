@@ -193,9 +193,11 @@ RETURN
 
 // landlordUnitsReadSpec projects one row per (unit, managing landlord) pair —
 // see the Lenses() declaration above for the shape rationale. authz_anchors
-// carries exactly the managing landlord's bare NanoID (the primordial
-// cap-read self-grant + §6.14 set-membership RLS policy scope the row to
-// that landlord alone, mirroring landlordLeaseApplicationsRead).
+// carries the managing landlord's bare NanoID PLUS every building covering
+// the unit, the same `[landlordKey] + [containedIn*1.. building tokens]`
+// shape landlordLeaseApplicationsRead already anchors on — a front-desk
+// staffer's worksAt-building grant resolves both models identically, so a
+// portfolio card composed from the two never goes half-populated.
 const landlordUnitsReadSpec = `MATCH (u:unit)<-[:manages]-(landlord:identity)
 RETURN
   nanoIdFromKey(u.key)          AS unit_id,
@@ -208,5 +210,5 @@ RETURN
   u.listing.data.status         AS unit_status,
   u.listing.data.rentAmount     AS unit_rent,
   u.listing.data.rentCurrency   AS unit_currency,
-  [nanoIdFromKey(landlord.key)] AS authz_anchors
+  [nanoIdFromKey(landlord.key)] + [(u)-[:containedIn*1..]->(b:building) | nanoIdFromKey(b.key)] AS authz_anchors
 `
