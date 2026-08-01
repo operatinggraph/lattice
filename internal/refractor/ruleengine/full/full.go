@@ -13,11 +13,30 @@ import (
 	"github.com/operatinggraph/lattice/internal/refractor/ruleengine/full/cypher"
 )
 
+// defaultMaxBindings caps the binding set any one stage of a single evaluation
+// may materialize. It is a runaway backstop, not a workload limit: a per-anchor
+// lens binds a handful of rows and a corpus lens thousands, so a legitimate
+// projection never approaches it, while an unanchored scan feeding a cross
+// product can otherwise grow until the host dies.
+const defaultMaxBindings = 1_000_000
+
 // Engine is the v2 engine. Satisfies ruleengine.RuleEngine.
-type Engine struct{}
+type Engine struct {
+	maxBindings int
+}
 
 // New returns a ready-to-register full engine.
-func New() *Engine { return &Engine{} }
+func New() *Engine { return &Engine{maxBindings: defaultMaxBindings} }
+
+// WithMaxBindings returns a copy of the engine whose per-evaluation
+// binding-set cap is n; a value <= 0 disables the cap. The receiver is
+// unchanged, so an engine shared across lenses cannot be reconfigured by a
+// caller derived from it.
+func (e *Engine) WithMaxBindings(n int) *Engine {
+	c := *e
+	c.maxBindings = n
+	return &c
+}
 
 // Name implements ruleengine.RuleEngine.
 func (*Engine) Name() string { return ruleengine.EngineFull }

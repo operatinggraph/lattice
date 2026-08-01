@@ -9,10 +9,12 @@ import (
 	"github.com/operatinggraph/lattice/internal/refractor/ruleengine"
 )
 
-// reduceExtreme is the pure max()/min() fold. It must drop nulls, fold empty /
-// all-null input to null, order numbers numerically and strings lexicographically
-// (so canonical-UTC RFC3339 timestamps reduce chronologically).
-func TestReduceExtreme(t *testing.T) {
+// extremeFold is the running max()/min() reduction. It must drop nulls, fold
+// empty / all-null input to null, order numbers numerically and strings
+// lexicographically (so canonical-UTC RFC3339 timestamps reduce
+// chronologically) — and reach the same value whatever order the rows arrive
+// in, since it now folds each row as the executor produces it.
+func TestExtremeFold(t *testing.T) {
 	type tc struct {
 		name   string
 		op     string
@@ -35,15 +37,17 @@ func TestReduceExtreme(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			got, err := reduceExtreme(c.op, c.inputs)
-			require.NoError(t, err)
-			require.Equal(t, c.want, got)
+			f := extremeFold{op: c.op}
+			for _, in := range c.inputs {
+				require.NoError(t, f.add(in))
+			}
+			require.Equal(t, c.want, f.value())
 		})
 	}
 }
 
 // TestExec_WithMaxMinAggregator drives max()/min() through the real WITH-clause
-// grouping path (projectItems → finalizeAggregator), mirroring the lease-signing
+// grouping path (projectItems → the per-row fold), mirroring the lease-signing
 // freshUntil reduction: one anchor with several neighbours folds to a single row
 // carrying the chronological extreme, never one row per neighbour.
 func TestExec_WithMaxMinAggregator(t *testing.T) {

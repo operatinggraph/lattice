@@ -14,6 +14,7 @@ import (
 	_ "net/http/pprof"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -751,6 +752,18 @@ func main() {
 	// Share a single full.Engine across all full-engine lenses — the engine
 	// is stateless; per-rule state lives in the CompiledRule passed to UseFullEngine.
 	fullEngine := full.New()
+	// REFRACTOR_MAX_BINDINGS raises or disables (<=0) the per-evaluation
+	// binding-set cap without a rebuild, for the case where a legitimate query
+	// outgrows the default backstop.
+	if v := os.Getenv("REFRACTOR_MAX_BINDINGS"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil {
+			logger.Error("invalid REFRACTOR_MAX_BINDINGS; keeping the default", "value", v, "err", err)
+		} else {
+			fullEngine = fullEngine.WithMaxBindings(n)
+			logger.Info("binding-set cap overridden", "cap", n)
+		}
+	}
 
 	// projectionRevision reads the current Core KV revision for an arbitrary
 	// key. The actor-aggregate envelope uses it to populate

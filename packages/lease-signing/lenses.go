@@ -444,7 +444,7 @@ func Lenses() []pkgmgr.LensSpec {
 //     drops. Picking the LATEST (max, not min/first) is required: the @at re-open
 //     timer must not fire while a later-expiring fresh bgcheck still counts toward
 //     missing_bgcheck. max() over canonical-UTC RFC3339 strings is lexicographic =
-//     chronological (ruleengine/full executor.go reduceExtreme → compareAny).
+//     chronological (ruleengine/full aggregate.go extremeFold → compareAny).
 //
 // DISPATCH SUPPRESSION — the per-gap inflight_<g> companion + maxretries_<g> cap.
 //

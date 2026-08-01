@@ -15,6 +15,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"sort"
 	"strconv"
 	"strings"
@@ -120,6 +121,66 @@ type executor struct {
 	// traverseRel selector recording, leaves no entry here — footprint()
 	// falls back to whole-document comparison for it, same as Fallback).
 	edgeSelectors map[string]*ruleengine.EdgeSelectorFootprint
+
+	// maxBindings caps the binding set any one stage of this evaluation may
+	// materialize; 0 disables the cap. steps counts checkpoint calls so the
+	// context check can be sampled rather than paid per row.
+	maxBindings int
+	steps       int
+}
+
+// cancelCheckInterval is how many checkpoint calls pass between context
+// cancellation checks. A runaway evaluation is runaway because of its row
+// count, so sampling bounds shutdown latency without paying a mutex-guarded
+// ctx.Err() on every row of every stage.
+const cancelCheckInterval = 1024
+
+// checkCancelled reports the evaluation's context cancellation, sampled every
+// cancelCheckInterval calls.
+//
+// Every read this evaluation makes is memoized, so once the candidate set is
+// built a large MATCH + aggregation pass issues no further KV calls and is
+// pure in-process work. Without a checkpoint inside it, a runaway evaluation
+// runs to completion (or takes the host down) after SIGTERM: the consumer
+// supervisor's Stop and the process's final WaitGroup both block on the
+// in-flight handler, so nothing can exit until the evaluation finishes on its
+// own. Aborting here surfaces as an evaluation error, which the pipeline
+// disposes as a redelivery — never as an empty result set, so no projection
+// target is retracted on the way down.
+func (ex *executor) checkCancelled() error {
+	ex.steps++
+	if ex.steps%cancelCheckInterval != 0 {
+		return nil
+	}
+	if err := ex.ctx.Err(); err != nil {
+		return fmt.Errorf("full engine: evaluation cancelled: %w", err)
+	}
+	return nil
+}
+
+// checkBindings is the per-stage checkpoint: cancellation plus the binding-set
+// cap, called wherever a stage's materialized binding slice has just grown.
+// Each such slice is resident for the stage's life, so capping every one of
+// them is what bounds the evaluation's heap.
+//
+// It errors rather than truncating. A truncated binding set silently produces
+// a WRONG projection row — a short count(), a partial collect() — and writes it
+// to the read model, where nothing downstream can tell it from a correct one.
+// A refused evaluation is redelivered and visible. (This is the opposite call
+// from the actor enumerator's cap, which truncates-and-warns because it bounds
+// who gets notified, not the content of a row.)
+func (ex *executor) checkBindings(rows int) error {
+	if err := ex.checkCancelled(); err != nil {
+		return err
+	}
+	if ex.maxBindings <= 0 || rows <= ex.maxBindings {
+		return nil
+	}
+	slog.Warn("full engine: binding-set cap exceeded; evaluation refused",
+		"rows", rows, "cap", ex.maxBindings)
+	return fmt.Errorf(
+		"full engine: binding set reached %d rows, over the cap of %d (raise REFRACTOR_MAX_BINDINGS if this query is legitimate)",
+		rows, ex.maxBindings)
 }
 
 // ExecuteWith runs cr against the given Core and Adjacency KVs, binding
@@ -172,6 +233,7 @@ func (e *Engine) ExecuteWithFootprint(
 		edges:         map[string][]adjacency.EdgeEntry{},
 		edgeRevisions: map[string]uint64{},
 		edgeSelectors: map[string]*ruleengine.EdgeSelectorFootprint{},
+		maxBindings:   e.maxBindings,
 	}
 
 	bindings := []binding{{}}
@@ -303,6 +365,9 @@ func (ex *executor) applyMatch(bindings []binding, m *Match) ([]binding, error) 
 			passing = filtered
 		}
 		out = append(out, passing...)
+		if err := ex.checkBindings(len(out)); err != nil {
+			return nil, err
+		}
 	}
 	return out, nil
 }
@@ -383,9 +448,12 @@ func (ex *executor) matchPatterns(b binding, patterns []PathPattern, optional bo
 			if len(expansions) == 0 && optional {
 				// Null-bind every new variable introduced by this path.
 				next = append(next, nullBindNewVars(cb, []PathPattern{p}))
-				continue
+			} else {
+				next = append(next, expansions...)
 			}
-			next = append(next, expansions...)
+			if err := ex.checkBindings(len(next)); err != nil {
+				return nil, err
+			}
 		}
 		current = next
 	}
@@ -437,6 +505,9 @@ func (ex *executor) matchPath(b binding, p PathPattern) ([]binding, error) {
 				nb[first.Variable] = s
 			}
 			heads = append(heads, nb)
+			if err := ex.checkBindings(len(heads)); err != nil {
+				return nil, err
+			}
 		}
 	}
 
@@ -454,6 +525,9 @@ func (ex *executor) matchPath(b binding, p PathPattern) ([]binding, error) {
 				return nil, err
 			}
 			next = append(next, reached...)
+			if err := ex.checkBindings(len(next)); err != nil {
+				return nil, err
+			}
 		}
 		heads = next
 	}
@@ -1009,6 +1083,9 @@ func (ex *executor) projectItems(bindings []binding, items []ProjectionItem) ([]
 	if !anyAggregating {
 		out := make([]binding, 0, len(bindings))
 		for _, b := range bindings {
+			if err := ex.checkCancelled(); err != nil {
+				return nil, err
+			}
 			nb := binding{}
 			for i, it := range items {
 				v, err := ex.evalExpr(b, it.Expr)
@@ -1022,15 +1099,21 @@ func (ex *executor) projectItems(bindings []binding, items []ProjectionItem) ([]
 		return out, nil
 	}
 
-	// Group: compute the grouping key per row.
+	// Group: compute the grouping key per row, folding each aggregating item
+	// into its group as the row is visited. Only the running result is held —
+	// the rows' argument values are never accumulated, so a count() or max()
+	// over a large MATCH costs a scalar per group rather than one boxed value
+	// per binding row.
 	type groupAcc struct {
-		key       string
-		row       binding
-		aggInputs [][]any // per-item input values across the group
+		row  binding
+		aggs []aggFold // indexed by item; nil for a non-aggregating item
 	}
 	groups := map[string]*groupAcc{}
 	var order []string
 	for _, b := range bindings {
+		if err := ex.checkCancelled(); err != nil {
+			return nil, err
+		}
 		// Build grouping key
 		keyParts := make([]string, 0, len(items))
 		groupVals := map[int]any{}
@@ -1048,38 +1131,41 @@ func (ex *executor) projectItems(bindings []binding, items []ProjectionItem) ([]
 		k := strings.Join(keyParts, "|")
 		g, ok := groups[k]
 		if !ok {
-			g = &groupAcc{
-				key:       k,
-				row:       binding{},
-				aggInputs: make([][]any, len(items)),
-			}
+			g = &groupAcc{row: binding{}, aggs: make([]aggFold, len(items))}
 			for i, v := range groupVals {
 				g.row[itemAlias(i)] = v
+			}
+			for i, it := range items {
+				if !itemAggregating[i] {
+					continue
+				}
+				f, err := newAggFold(it.Expr)
+				if err != nil {
+					return nil, err
+				}
+				g.aggs[i] = f
 			}
 			groups[k] = g
 			order = append(order, k)
 		}
-		// Accumulate aggregating items' inputs.
-		for i, it := range items {
+		for i := range items {
 			if !itemAggregating[i] {
 				continue
 			}
-			vals, err := ex.evalAggregatorArgs(b, it.Expr)
-			if err != nil {
+			if err := g.aggs[i].add(ex, b); err != nil {
 				return nil, err
 			}
-			g.aggInputs[i] = append(g.aggInputs[i], vals...)
 		}
 	}
 
 	out := make([]binding, 0, len(order))
 	for _, k := range order {
 		g := groups[k]
-		for i, it := range items {
+		for i := range items {
 			if !itemAggregating[i] {
 				continue
 			}
-			v, err := ex.finalizeAggregator(it.Expr, g.aggInputs[i])
+			v, err := g.aggs[i].value()
 			if err != nil {
 				return nil, err
 			}
@@ -1127,180 +1213,6 @@ func containsAggregator(e Expr) bool {
 		}
 	})
 	return found
-}
-
-// dedupeInputs drops repeats from one aggregator's inputs, keeping the first
-// occurrence of each value so the result order stays the binding order.
-// Equality is normalizeForKey's canonical rendering — the same identity basis
-// the grouping key uses, so a map value (the shape every read-grant branch
-// collects) compares by content rather than by Go reference.
-func dedupeInputs(inputs []any) []any {
-	seen := make(map[string]struct{}, len(inputs))
-	out := make([]any, 0, len(inputs))
-	for _, v := range inputs {
-		sig := normalizeForKey(v)
-		if _, dup := seen[sig]; dup {
-			continue
-		}
-		seen[sig] = struct{}{}
-		out = append(out, v)
-	}
-	return out
-}
-
-// evalAggregatorArgs collects the argument values for ONE row.
-// For an outer FunctionCall it returns evalExpr of each argument.
-// For a BinaryOp (e.g. collect(..) + collect(..)) it returns the per-row
-// concatenation of the inner aggregators' inputs, signaling that the binary
-// operator is applied during finalize.
-func (ex *executor) evalAggregatorArgs(b binding, e Expr) ([]any, error) {
-	switch x := e.(type) {
-	case *FunctionCall:
-		if len(x.Args) == 0 {
-			return nil, nil
-		}
-		v, err := ex.evalExpr(b, x.Args[0])
-		if err != nil {
-			return nil, err
-		}
-		return []any{v}, nil
-	case *BinaryOp:
-		// Treated as two independent aggregations to be concatenated; here we
-		// emit a tagged composite the finalize step recognizes.
-		left, err := ex.evalAggregatorArgs(b, x.Left)
-		if err != nil {
-			return nil, err
-		}
-		right, err := ex.evalAggregatorArgs(b, x.Right)
-		if err != nil {
-			return nil, err
-		}
-		return []any{composite{op: x.Op, left: left, right: right}}, nil
-	}
-	return nil, nil
-}
-
-type composite struct {
-	op    string
-	left  []any
-	right []any
-}
-
-// finalizeAggregator folds one aggregator's collected inputs to its value.
-//
-// DISTINCT binds HERE, on the aggregator call that carries it, rather than on
-// the RETURN item as a whole. An item is often a composition — `collect(...) +
-// collect(...)`, the shape every generated read-grant producer takes — where
-// each call carries its own DISTINCT and the item itself carries none. Reading
-// the flag off the item would silently drop every one of those, and because the
-// branches of such a query are independent OPTIONAL MATCHes whose bindings are
-// their cross product, each branch's list would then be inflated by the product
-// of all the others' cardinalities.
-func (ex *executor) finalizeAggregator(e Expr, inputs []any) (any, error) {
-	switch x := e.(type) {
-	case *FunctionCall:
-		if x.Distinct {
-			inputs = dedupeInputs(inputs)
-		}
-		if strings.EqualFold(x.Name, "collect") {
-			// Drop nulls (Cypher semantics).
-			out := make([]any, 0, len(inputs))
-			for _, v := range inputs {
-				if v == nil {
-					continue
-				}
-				out = append(out, v)
-			}
-			return out, nil
-		}
-		if strings.EqualFold(x.Name, "count") {
-			n := 0
-			for _, v := range inputs {
-				if v != nil {
-					n++
-				}
-			}
-			return int64(n), nil
-		}
-		if strings.EqualFold(x.Name, "max") || strings.EqualFold(x.Name, "min") {
-			if len(x.Args) != 1 {
-				return nil, fmt.Errorf("full engine: %s takes exactly 1 argument, got %d", strings.ToLower(x.Name), len(x.Args))
-			}
-			op := ">"
-			if strings.EqualFold(x.Name, "min") {
-				op = "<"
-			}
-			return reduceExtreme(op, inputs)
-		}
-		return nil, fmt.Errorf("full engine: unsupported aggregator %q", x.Name)
-	case *BinaryOp:
-		// Each input is a `composite` carrying per-row left/right slices.
-		var leftAll, rightAll []any
-		for _, in := range inputs {
-			c, ok := in.(composite)
-			if !ok {
-				continue
-			}
-			leftAll = append(leftAll, c.left...)
-			rightAll = append(rightAll, c.right...)
-		}
-		leftVal, err := ex.finalizeAggregator(x.Left, leftAll)
-		if err != nil {
-			return nil, err
-		}
-		rightVal, err := ex.finalizeAggregator(x.Right, rightAll)
-		if err != nil {
-			return nil, err
-		}
-		if x.Op == "+" {
-			ll, lok := leftVal.([]any)
-			rr, rok := rightVal.([]any)
-			if !lok || !rok {
-				// The '+' aggregator-op path concatenates two collect() lists.
-				// A scalar child (max/min) is not a list — arithmetic over
-				// scalar aggregators (max(a)+max(b)) is not supported; fail
-				// loudly rather than silently returning an empty list.
-				return nil, fmt.Errorf("full engine: aggregator op %q requires list (collect) operands, got %T and %T", x.Op, leftVal, rightVal)
-			}
-			out := make([]any, 0, len(ll)+len(rr))
-			out = append(out, ll...)
-			out = append(out, rr...)
-			return out, nil
-		}
-		return nil, fmt.Errorf("full engine: unsupported aggregator op %q", x.Op)
-	}
-	return nil, errors.New("full engine: finalizeAggregator: unsupported expression")
-}
-
-// reduceExtreme folds the aggregator inputs to a single max (op ">") or min
-// (op "<") using the engine's own ordering (compareAny: numeric when both
-// sides are numeric, otherwise lexicographic on strings — so ISO-8601
-// timestamps reduce chronologically). Nulls are dropped (Cypher semantics);
-// all-null / empty input yields null. Incomparable values follow compareAny
-// (no swap), matching how the engine orders them in WHERE.
-func reduceExtreme(op string, inputs []any) (any, error) {
-	var acc any
-	have := false
-	for _, v := range inputs {
-		if v == nil {
-			continue
-		}
-		if !have {
-			acc, have = v, true
-			continue
-		}
-		swap, err := compareAny(op, v, acc)
-		if err != nil {
-			return nil, err
-		}
-		if swap {
-			acc = v
-		}
-	}
-	if !have {
-		return nil, nil
-	}
-	return acc, nil
 }
 
 // --- RETURN ---
@@ -1491,7 +1403,7 @@ func (ex *executor) evalExpr(b binding, e Expr) (any, error) {
 
 func (ex *executor) evalFunctionCall(b binding, fc *FunctionCall) (any, error) {
 	// During projection without grouping, collect()/count() are evaluated
-	// row-locally by projectItems → finalizeAggregator. Outside that path
+	// row-locally by projectItems → the per-row aggregate fold. Outside that path
 	// (e.g. inside another expression) treat collect as a no-op wrapper that
 	// returns the single arg's value wrapped in a list.
 	name := strings.ToLower(fc.Name)
@@ -1513,7 +1425,7 @@ func (ex *executor) evalFunctionCall(b binding, fc *FunctionCall) (any, error) {
 	case "max", "min":
 		// Row-local (no grouping, or nested inside another expression):
 		// the extreme of a single row's value is that value. Grouping goes
-		// through projectItems → finalizeAggregator instead. max/min are
+		// through projectItems → the per-row aggregate fold instead. max/min are
 		// unary aggregators; a multi-arg call is a query error, not a silent
 		// "use the first arg".
 		if len(fc.Args) != 1 {

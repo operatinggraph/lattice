@@ -81,6 +81,12 @@ REFRACTOR_GOMEMLIMIT ?= 4GiB
 # inspection (empty = disabled). Dev launches enable it so a misbehaving
 # process can be asked what it is holding instead of being killed blind.
 REFRACTOR_PPROF_ADDR ?= 127.0.0.1:6070
+# REFRACTOR_MAX_BINDINGS — per-evaluation cap on the binding set a lens query
+# may materialize at any one stage; the executor refuses an evaluation past it
+# rather than truncating to a wrong row. Empty keeps the engine default (1M),
+# which no legitimate lens approaches; raise it only for a query proven
+# legitimate, or set <=0 to disable the backstop entirely.
+REFRACTOR_MAX_BINDINGS ?=
 NKEY_BOOTSTRAP ?= $(NKEY_DIR)/bootstrap.nk
 NKEY_PROCESSOR ?= $(NKEY_DIR)/processor.nk
 NKEY_REFRACTOR ?= $(NKEY_DIR)/refractor.nk
@@ -209,7 +215,7 @@ up: assert-main-checkout
 		NATS_URL=$(NATS_URL) NATS_NKEY=$(NKEY_BOOTSTRAP) BOOTSTRAP_JSON_PATH=$(BOOTSTRAP_JSON) ./bin/bootstrap -skip-ready-wait; \
 		$(MAKE) provision-vault-kek; \
 		echo "==> Starting refractor in background..."; \
-		NATS_URL=$(NATS_URL) NATS_NKEY=$(NKEY_REFRACTOR) REFRACTOR_PG_DSN="postgres://lattice:lattice_dev@localhost:5432/lattice?sslmode=disable" LATTICE_VAULT_MASTER_KEK_FILE=$(VAULT_KEK_FILE) GOMEMLIMIT=$(REFRACTOR_GOMEMLIMIT) REFRACTOR_PPROF_ADDR=$(REFRACTOR_PPROF_ADDR) ./bin/refractor >refractor.log 2>&1 </dev/null & \
+		NATS_URL=$(NATS_URL) NATS_NKEY=$(NKEY_REFRACTOR) REFRACTOR_PG_DSN="postgres://lattice:lattice_dev@localhost:5432/lattice?sslmode=disable" LATTICE_VAULT_MASTER_KEK_FILE=$(VAULT_KEK_FILE) GOMEMLIMIT=$(REFRACTOR_GOMEMLIMIT) REFRACTOR_PPROF_ADDR=$(REFRACTOR_PPROF_ADDR) REFRACTOR_MAX_BINDINGS=$(REFRACTOR_MAX_BINDINGS) ./bin/refractor >refractor.log 2>&1 </dev/null & \
 		echo "==> Running bootstrap (readiness gate — blocks until admin + Loom + Weaver + Bridge + objmgr + privacy cap.* projections land)..."; \
 		NATS_URL=$(NATS_URL) NATS_NKEY=$(NKEY_BOOTSTRAP) BOOTSTRAP_JSON_PATH=$(BOOTSTRAP_JSON) ./bin/bootstrap; \
 		echo "==> Building processor binary..."; \
@@ -233,7 +239,7 @@ cycle-refractor: assert-main-checkout
 	@echo "==> Rebuilding bin/refractor..."
 	go build -o bin/refractor ./cmd/refractor
 	@echo "==> Starting refractor in background..."
-	@NATS_URL=$(NATS_URL) NATS_NKEY=$(NKEY_REFRACTOR) REFRACTOR_PG_DSN="postgres://lattice:lattice_dev@localhost:5432/lattice?sslmode=disable" LATTICE_VAULT_MASTER_KEK_FILE=$(VAULT_KEK_FILE) GOMEMLIMIT=$(REFRACTOR_GOMEMLIMIT) REFRACTOR_PPROF_ADDR=$(REFRACTOR_PPROF_ADDR) ./bin/refractor >>refractor.log 2>&1 </dev/null & \
+	@NATS_URL=$(NATS_URL) NATS_NKEY=$(NKEY_REFRACTOR) REFRACTOR_PG_DSN="postgres://lattice:lattice_dev@localhost:5432/lattice?sslmode=disable" LATTICE_VAULT_MASTER_KEK_FILE=$(VAULT_KEK_FILE) GOMEMLIMIT=$(REFRACTOR_GOMEMLIMIT) REFRACTOR_PPROF_ADDR=$(REFRACTOR_PPROF_ADDR) REFRACTOR_MAX_BINDINGS=$(REFRACTOR_MAX_BINDINGS) ./bin/refractor >>refractor.log 2>&1 </dev/null & \
 	  sleep 2; pgrep -x refractor >/dev/null && echo "==> refractor running (PID $$(pgrep -x refractor))" || { echo "!! refractor failed to start — see refractor.log"; exit 1; }
 
 ## cycle-loupe — Rebuild bin/loupe from the current tree and relaunch it against
