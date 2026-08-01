@@ -314,8 +314,15 @@ RETURN
 // carries no display name of its own; a consuming FE scopes "my classes" by
 // comparing bookerKey to the logged-in actor's own identity key, the same
 // bare-key scoping cmd/loftspace-app's applicant views use.
+//
+// studioKey/studioName walk one further hop off the session, mirroring
+// wellnessSessionsSpec's own atStudio walk above — My Classes otherwise names
+// a class with no place to show up at. Both are null once sessionKey is
+// (session tombstoned, or the studio link absent), same as the session-side
+// projection.
 const wellnessBookingsSpec = `MATCH (b:booking)
 OPTIONAL MATCH (b)-[:forSession]->(se:session)
+OPTIONAL MATCH (se)-[:atStudio]->(s:studio)
 OPTIONAL MATCH (b)-[:bookedBy]->(id:identity)
 RETURN
   b.key AS key,
@@ -326,6 +333,8 @@ RETURN
   se.schedule.data.name AS sessionName,
   se.schedule.data.startsAt AS startsAt,
   se.schedule.data.endsAt AS endsAt,
+  s.key AS studioKey,
+  s.profile.data.name AS studioName,
   id.key AS bookerKey`
 
 // orphanedBookingSettlementSpec is the one-row-per-booking convergence

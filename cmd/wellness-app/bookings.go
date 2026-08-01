@@ -23,6 +23,8 @@ type bookingProjection struct {
 	SessionName string `json:"sessionName"`
 	StartsAt    string `json:"startsAt"`
 	EndsAt      string `json:"endsAt"`
+	StudioKey   string `json:"studioKey"`
+	StudioName  string `json:"studioName"`
 	BookerKey   string `json:"bookerKey"`
 }
 
@@ -37,6 +39,8 @@ type bookingRow struct {
 	SessionName string `json:"sessionName"`
 	StartsAt    string `json:"startsAt"`
 	EndsAt      string `json:"endsAt"`
+	StudioKey   string `json:"studioKey"`
+	StudioName  string `json:"studioName"`
 	BookerKey   string `json:"bookerKey"`
 }
 
