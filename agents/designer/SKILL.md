@@ -393,6 +393,24 @@ tombstones. **Capability KV is a lens projection** (projection correctness = aut
   Every sentence of the form *"just pass X in"* / *"the same Y without Z"* / *"reuse it for W"* is an
   unopened mechanism until you have opened the file.
 
+- **A handed-down MEASUREMENT is a claim about a quantity — check WHICH quantity before it becomes a
+  premise, and count the instances the bad outcome needs.** The "ground the failure mechanism in code"
+  reflex above catches a misstated *mechanism*; this one catches a correctly-measured number whose
+  **units** you assumed. A filed row's figure arrives without its definition, and the definition is what
+  decides which alternatives are justified. (Trialed 2026-08-02, the grouping-key design: the row read
+  *"3.3 s / 7.2 GB alloc … while peak rows sat at 0.3% of the cap"*. **7.2 GB is cumulative
+  *allocation*, not resident heap** — the process was never near an OOM, so the harm is CPU/GC/throughput
+  and a cost-based evaluation governor loses its "the process was at risk" premise entirely; and **0.3% of
+  the cap is not a loose bound but an orthogonal quantity**, so anyone "fixing" it by lowering the cap
+  refuses legitimate evaluations and does not touch the term. Both readings would have justified building
+  authoritative machinery on a premise that does not survive grounding.) **Corollary — when the bad
+  outcome requires N ≥ 2 of something, go count how many the real consumer has.** Before designing a
+  guard, ask whether the consumer can even *express* the failure: the mis-grouping this design risks is an
+  over-grant only if two groups can merge, and every generated read-grant producer's head is
+  `MATCH (identity {key: $actorKey})` — exactly one actor, exactly one group, whatever the key is. That is
+  a *structural* fail-closed for the one lens class where a mistake would be a security defect, and it is
+  worth a paragraph in "For Andrew"; it is also much stronger than "the algorithm is careful."
+
 **Run the pre-build gates you write into your own designs — "ratified" ≠ "build-ready."** If a design
 self-flags a pre-build adversarial / `bmad-party-mode` pass (a deferred gate), that pass is a **Designer-lane
 obligation**: run it and **record it as run** before the design is build-ready. Do not leave it dangling for
