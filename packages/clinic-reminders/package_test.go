@@ -231,8 +231,8 @@ func TestClinicReminders_PlaybookColumnsMatchLens(t *testing.T) {
 	for _, l := range Package.Lenses {
 		lensByName[l.CanonicalName] = l
 	}
-	if len(Package.WeaverTargets) != 3 {
-		t.Fatalf("expected 3 weaverTargets, got %d", len(Package.WeaverTargets))
+	if len(Package.WeaverTargets) != 4 {
+		t.Fatalf("expected 4 weaverTargets, got %d", len(Package.WeaverTargets))
 	}
 	for _, wt := range Package.WeaverTargets {
 		lens, ok := lensByName[wt.LensRef]

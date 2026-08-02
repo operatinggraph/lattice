@@ -1,12 +1,14 @@
 // Package clinicreminders is the clinic vertical's first ORCHESTRATION — @at
-// convergences over clinic-domain's appointment/patient/provider. Three
+// convergences over clinic-domain's appointment/patient/provider. Four
 // convergences: the ~24h-ahead appointment reminder ("remind before the visit"),
 // the at-the-date follow-up reminder ("a documented visit's requested follow-up is
-// due") so a follow-up does not silently fall through, and the recurring visit
+// due") so a follow-up does not silently fall through, the recurring visit
 // series ("a patient's next standing check-in is due") — a rolling generalization
 // of the one-shot follow-up that re-arms its own next deadline instead of firing
 // once (visitseries.go; no @every, no per-entity substrate schedule — see
-// _bmad-output/implementation-artifacts/clinic-recurring-visit-series-design.md).
+// _bmad-output/implementation-artifacts/clinic-recurring-visit-series-design.md)
+// — and pastDueAppointments ("a visit ended with no staff status update") so a
+// past-due appointment does not sit open, and unbilled, forever (pastdue.go).
 //
 // It is the convergence sibling of the projection-only clinic-domain (the
 // location-domain → lease-signing layering): clinic-domain owns the appointment +
@@ -29,6 +31,10 @@
 //	op StartVisitSeries / PauseVisitSeries / ResumeVisitSeries / AdvanceVisitSeries
 //	lens visitSeriesDue (weaver-target, full)  (freshUntil = .progress.nextDueAt; re-arms forward on every advance, never converges to a permanent close)
 //	playbook missing_series_advance → directOp(AdvanceVisitSeries, dueFor: row.nextDueAt, intervalDays: row.intervalDays, occurrenceCount: row.occurrenceCount)
+//
+//	op MarkPastDueNoShow{appointmentKey}  (clinic-domain — this package's ONLY caller; writes .status{noShow} + releases cells)
+//	lens pastDueAppointments (weaver-target, full)  (freshUntil = .schedule.endsAt DIRECTLY; status non-terminal AND endsAt <= $now gate; pastdue.go)
+//	playbook missing_noshow_transition → directOp(MarkPastDueNoShow, appointmentKey: row.entityKey)
 //
 // The reminder mechanism INVERTS lease-signing's freshness re-open. lease projects
 // freshUntil to RE-OPEN a converged gap at a deadline; these project freshUntil = a
@@ -53,8 +59,9 @@
 // _bmad-output/implementation-artifacts/clinic-reminders-notification-adapter-design.md.
 //
 // Depends clinic-domain (the appointment/patient/provider vertex types + the
-// appointment's .schedule.remindAt / .encounter.followUpDate) + orchestration-base
-// (MarkExpired / the freshnessExpiry marker the @at firing writes). Install via
+// appointment's .schedule.remindAt / .schedule.endsAt / .encounter.followUpDate /
+// the MarkPastDueNoShow op) + orchestration-base (MarkExpired / the
+// freshnessExpiry marker the @at firing writes). Install via
 // `lattice-pkg install packages/clinic-reminders` after both.
 package clinicreminders
 
@@ -63,17 +70,20 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 // Package is the static, install-time bundle.
 var Package = pkgmgr.Definition{
 	Name:    "clinic-reminders",
-	Version: "0.7.2",
-	Description: "Clinic appointment & follow-up reminders + recurring visit series (the clinic vertical's " +
-		"orchestration): the .reminder / .followUpReminder marker aspects + RecordAppointmentReminder / " +
+	Version: "0.7.3",
+	Description: "Clinic appointment & follow-up reminders + recurring visit series + the auto no-show closer (the " +
+		"clinic vertical's orchestration): the .reminder / .followUpReminder marker aspects + RecordAppointmentReminder / " +
 		"RecordFollowUpReminder ops, the appointmentReminders + followUpReminders weaver-target convergence lenses " +
 		"(freshUntil = the .schedule.remindAt / .encounter.followUpDate deadline arms the @at timer; the gap opens " +
-		"at the deadline); and the visitseries vertex type + Start/Pause/Resume/AdvanceVisitSeries ops + the " +
+		"at the deadline); the visitseries vertex type + Start/Pause/Resume/AdvanceVisitSeries ops + the " +
 		"visitSeriesDue rolling convergence lens (freshUntil re-arms forward on every advance instead of clearing " +
-		"to a permanent close) — the §10.8 playbooks dispatch each gap's directOp. Inverts lease-signing's " +
-		"freshness re-open. Both reminder ops also fire external.notification off their own outbox to the bridge's " +
-		"\"notification\" adapter; RecordAppointmentReminderNotification / RecordFollowUpReminderNotification " +
-		"record the outcome. Depends clinic-domain + orchestration-base.",
+		"to a permanent close); and the pastDueAppointments convergence lens, which binds freshUntil DIRECTLY to " +
+		"clinic-domain's .schedule.endsAt (no derived deadline) and dispatches clinic-domain's MarkPastDueNoShow " +
+		"once a non-terminal appointment's endsAt passes with no staff status update — the §10.8 playbooks dispatch " +
+		"each gap's directOp. Inverts lease-signing's freshness re-open. Both reminder ops also fire " +
+		"external.notification off their own outbox to the bridge's \"notification\" adapter; " +
+		"RecordAppointmentReminderNotification / RecordFollowUpReminderNotification record the outcome. Depends " +
+		"clinic-domain + orchestration-base.",
 	Depends:       []string{"clinic-domain", "orchestration-base"},
 	DDLs:          DDLs(),
 	Lenses:        Lenses(),

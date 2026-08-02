@@ -138,6 +138,12 @@ func Permissions() []pkgmgr.PermissionSpec {
 			Note:          "Grants the operator the right to submit RecordEncounter operations, and a bound provider the right to document THEIR OWN appointment's visit (the script's standing guard confines a non-operator, non-workplace caller to appointments withProvider the provider it is identifiedBy-bound to).",
 			GrantsTo:      []string{"operator", "provider"},
 		},
+		{
+			OperationType: "MarkPastDueNoShow",
+			Scope:         "any",
+			Note:          "Grants the operator the right to submit MarkPastDueNoShow operations (orchestration-internal: clinic-reminders' pastDueAppointments directOp playbook, dispatched by Weaver's service actor once a non-terminal appointment's endsAt passes unattended — the RecordAppointmentReminder grant idiom).",
+			GrantsTo:      []string{"operator"},
+		},
 		mk("TombstoneAppointment"),
 		mk("SetSiteProfile"),
 		mk("AssignProviderSite"),

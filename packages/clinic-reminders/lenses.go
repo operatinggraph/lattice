@@ -8,13 +8,17 @@ const AppointmentRemindersTarget = "appointmentReminders"
 
 // Lenses returns the package's weaver-target convergence lenses: appointmentReminders
 // (the ~24h-ahead appointment reminder), followUpReminders (the at-the-date
-// follow-up reminder, followups.go), and visitSeriesDue (the rolling recurring
-// visit-series deadline, visitseries.go). The first two invert lease-signing's
+// follow-up reminder, followups.go), visitSeriesDue (the rolling recurring
+// visit-series deadline, visitseries.go), and pastDueAppointments (the auto
+// no-show closer, pastdue.go). The first two invert lease-signing's
 // freshness re-open — where lease projects freshUntil to RE-OPEN a converged gap at
 // a deadline, these project freshUntil = the deadline to OPEN the reminder gap when
 // it passes (see appointmentRemindersSpec / followUpRemindersSpec). visitSeriesDue
 // applies the same inversion but never converges to a permanent close — each
 // AdvanceVisitSeries re-arms a NEW future freshUntil, rolling the series forward.
+// pastDueAppointments applies the same inversion a THIRD way: it binds freshUntil
+// DIRECTLY to a mutable business timestamp (.schedule.endsAt) rather than a
+// derived lead-offset deadline (the unroutedTasks idiom, orchestration-base).
 func Lenses() []pkgmgr.LensSpec {
 	return []pkgmgr.LensSpec{
 		{
@@ -36,6 +40,7 @@ func Lenses() []pkgmgr.LensSpec {
 		followUpRemindersLens(),
 		visitSeriesDueLens(),
 		visitSeriesReadLens(),
+		pastDueAppointmentsLens(),
 	}
 }
 

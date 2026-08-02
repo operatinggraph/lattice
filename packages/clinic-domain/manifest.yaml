@@ -1,5 +1,5 @@
 name: clinic-domain
-version: 0.28.16
+version: 0.28.17
 depends:
   - location-domain
 description: |
@@ -211,6 +211,9 @@ declares:
     - operationType: RecordEncounter
       scope: any
       grantsTo: [operator, provider]
+    - operationType: MarkPastDueNoShow
+      scope: any
+      grantsTo: [operator]
     - operationType: TombstoneAppointment
       scope: any
       grantsTo: [operator]

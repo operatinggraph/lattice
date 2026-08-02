@@ -397,7 +397,7 @@ func appointmentVertexTypeDDL() pkgmgr.DDLSpec {
 	return pkgmgr.DDLSpec{
 		CanonicalName:     appointmentVertexDDL,
 		Class:             "meta.ddl.vertexType",
-		PermittedCommands: []string{"CreateAppointment", "RescheduleAppointment", "SetAppointmentStatus", "RecordEncounter", "TombstoneAppointment"},
+		PermittedCommands: []string{"CreateAppointment", "RescheduleAppointment", "SetAppointmentStatus", "MarkPastDueNoShow", "RecordEncounter", "TombstoneAppointment"},
 		Description: "Clinic appointment DDL. Vertex shape: vtx.appointment.<NanoID>, class=appointment, root data = " +
 			"{} (minimal, D5). CreateAppointment validates the patient (class=patient) + provider (class=provider) " +
 			"are alive, then atomically mints the appointment + the .schedule aspect {startsAt, endsAt, remindAt, reason?} + " +
@@ -446,7 +446,18 @@ func appointmentVertexTypeDDL() pkgmgr.DDLSpec {
 			"a provider not assigned to that site is REJECTED (UnknownSite / NotALocation / ProviderNotAtSite; unlike " +
 			"leaseAppKey this is a hard requirement once supplied, not a silent fall-through), and an atSite link " +
 			"(appointment→building) is written. Omitted site records no site (backward-compatible; does not yet gate " +
-			"hours — a follow-up design decision, per the multi-site design note).",
+			"hours — a follow-up design decision, per the multi-site design note). MarkPastDueNoShow{appointmentKey} is " +
+			"the orchestration-internal SetAppointmentStatus(noShow) counterpart clinic-reminders' pastDueAppointments " +
+			"Weaver target dispatches once a non-terminal appointment's .schedule.endsAt passes with no staff status " +
+			"update: a no-op if the appointment already reached a terminal status by dispatch time (an at-least-once " +
+			"race, never clobbers a legitimate completed/cancelled outcome), otherwise the SAME .status upsert + " +
+			"noShowFeeCents default (2500) + held-cell release as SetAppointmentStatus's terminal branch. It resolves " +
+			"provider/patient LIVE off the appointment's own withProvider/forPatient links (the bounded, exactly-one-link " +
+			"read appointment_provider/appointment_patient already use elsewhere in this script) rather than requiring " +
+			"them as caller-supplied + link-validated params like SetAppointmentStatus does — Weaver's directOp dispatch " +
+			"can only template row.<column> / row.<column>.<aspect> keys into ContextHint.Reads (Contract #10 §10.8), " +
+			"which cannot express the withProvider/forPatient LINK read SetAppointmentStatus's caller-supplied path " +
+			"requires, so this op has no human caller to supply them.",
 		Script: appointmentDDLScript,
 		InputSchema: `{"type":"object","properties":` +
 			`{"patient":{"type":"string","description":"vtx.patient.<NanoID> the appointment is for (CreateAppointment / RescheduleAppointment; required; on create validated alive + class=patient, on reschedule/terminal-SetAppointmentStatus/TombstoneAppointment it must be the appointment's actual patient, validated via the forPatient link)."},` +
@@ -457,7 +468,7 @@ func appointmentVertexTypeDDL() pkgmgr.DDLSpec {
 			`"leaseAppKey":{"type":"string","description":"Optional vtx.leaseapp.<NanoID> the patient claims residency under (CreateAppointment; optional). Checked against the lease's applicationFor link matching the patient's identifiedBy identity — a mismatch falls through with no residentVisit link, never a hard failure."},` +
 			`"site":{"type":"string","description":"Optional vtx.building.<NanoID> clinic site the appointment is booked at (CreateAppointment). When supplied, validated alive + class=location AND that the provider practicesAt it (clinicSiteAssignment) — a mismatch is REJECTED, not a silent fall-through. Writes an atSite link (appointment→building)."},` +
 			`"appointmentId":{"type":"string","description":"Optional bare NanoID for the new appointment vertex (CreateAppointment); absent → minted."},` +
-			`"appointmentKey":{"type":"string","description":"vtx.appointment.<NanoID> of an existing appointment (RescheduleAppointment / SetAppointmentStatus / TombstoneAppointment; required, validated alive)."},` +
+			`"appointmentKey":{"type":"string","description":"vtx.appointment.<NanoID> of an existing appointment (RescheduleAppointment / SetAppointmentStatus / MarkPastDueNoShow / TombstoneAppointment; required, validated alive)."},` +
 			`"status":{"type":"string","enum":["scheduled","confirmed","checkedIn","completed","cancelled","noShow"],"description":"New status (SetAppointmentStatus; required). Transitioning TO a terminal value (completed/cancelled/noShow) for the first time also requires provider + patient (to release the held slot-claim cells; omitted on a non-terminal transition or an idempotent same-value re-set)."},` +
 			`"note":{"type":"string","description":"Optional audit note for the transition, e.g. a cancel / no-show reason (SetAppointmentStatus; optional). Stored on .status, distinct from the .schedule visit reason; an omitted note carries none."},` +
 			`"noShowFeeCents":{"type":"number","description":"Optional no-show fee in integer cents, only meaningful when status is noShow (SetAppointmentStatus; optional, must be > 0 when supplied). Defaults to 2500 when omitted. Stored on .status; clinic-ledger's clinicNoShowSettlement lens reads it to post a DebitAccount charge against the patient's ledger account."},` +
@@ -478,7 +489,7 @@ func appointmentVertexTypeDDL() pkgmgr.DDLSpec {
 			"leaseAppKey":       "Optional full vtx.leaseapp.<NanoID> key the patient claims residency under (CreateAppointment). Verified via the lease's applicationFor link matching the patient's own identifiedBy identity before writing a residentVisit link (appointment→leaseapp); a mismatch or absent lease silently omits the link.",
 			"site":              "Optional full vtx.building.<NanoID> clinic site key (CreateAppointment). Validated alive + class=location AND that the provider practicesAt it (clinicSiteAssignment link) — rejected (UnknownSite / NotALocation / ProviderNotAtSite) if either check fails, not a silent fall-through. Writes an atSite link (appointment→building); omitted → no site recorded.",
 			"appointmentId":     "Optional bare NanoID (no dots / key segments) for the new appointment vertex. Absent → minted with nanoid.new().",
-			"appointmentKey":    "Full vtx.appointment.<NanoID> key of an existing appointment (RescheduleAppointment rewrites its .schedule; SetAppointmentStatus validates it alive + class=appointment; TombstoneAppointment validates it alive).",
+			"appointmentKey":    "Full vtx.appointment.<NanoID> key of an existing appointment (RescheduleAppointment rewrites its .schedule; SetAppointmentStatus / MarkPastDueNoShow validate it alive + class=appointment; TombstoneAppointment validates it alive).",
 			"status":            "New appointment status, one of {scheduled, confirmed, checkedIn, completed, cancelled, noShow} (SetAppointmentStatus; required). The first transition to a terminal value also requires provider + patient.",
 			"note":              "Optional audit note recorded with a SetAppointmentStatus transition (e.g. a cancel / no-show reason). Stored on the .status aspect, distinct from the .schedule visit reason; omitted → no note.",
 			"noShowFeeCents":    "Optional no-show fee in integer cents (SetAppointmentStatus, only meaningful when status is noShow; must be > 0 when supplied, defaults to 2500 when omitted). Stored on the .status aspect; read by clinic-ledger's clinicNoShowSettlement lens to post a DebitAccount charge.",
@@ -543,6 +554,19 @@ func appointmentVertexTypeDDL() pkgmgr.DDLSpec {
 					"was omitted) and releases the appointment's held slot-claim cells. Emits clinic.appointmentStatusSet. " +
 					"clinic-ledger's clinicNoShowSettlement lens picks up the fee and posts a DebitAccount charge once the " +
 					"patient has a ledger account. Returns primaryKey.",
+			},
+			{
+				Name:    "MarkPastDueNoShow — Weaver-dispatched auto no-show (pastDueAppointments target)",
+				Payload: map[string]any{"appointmentKey": "vtx.appointment.<NanoID>"},
+				ExpectedOutcome: "Validates the appointment is alive + class=appointment. If it already reached a terminal " +
+					"status (completed/cancelled/noShow) by dispatch time, no-ops (a legitimate at-least-once race — never " +
+					"clobbers a real outcome). Otherwise resolves provider/patient LIVE off the appointment's own " +
+					"withProvider/forPatient links, upserts the .status aspect {value: noShow, note: \"Auto no-show: " +
+					"appointment ended without a status update\", noShowFeeCents: 2500}, and releases the held slot-claim " +
+					"cells — the same effect as a staff-submitted SetAppointmentStatus(noShow), minus the caller-supplied " +
+					"provider/patient params a human dispatcher would send. Emits clinic.appointmentStatusSet{auto: true}. " +
+					"Submitted under Weaver's service-actor authority only (clinic-reminders' pastDueAppointments target); " +
+					"no human/consumer caller.",
 			},
 			{
 				Name: "RecordEncounter — document a completed visit",
@@ -665,20 +689,22 @@ func scheduleAspectTypeDDL() pkgmgr.DDLSpec {
 }
 
 // statusAspectTypeDDL declares the .status aspect (class appointmentStatus) — the
-// step-6 write gate for CreateAppointment (initial) AND SetAppointmentStatus
-// (transitions). Declaration-only; NON-sensitive.
+// step-6 write gate for CreateAppointment (initial), SetAppointmentStatus
+// (staff transitions), and MarkPastDueNoShow (the Weaver-dispatched auto
+// no-show). Declaration-only; NON-sensitive.
 func statusAspectTypeDDL() pkgmgr.DDLSpec {
 	return pkgmgr.DDLSpec{
 		CanonicalName:     statusAspectDDL,
 		Class:             "meta.ddl.aspectType",
-		PermittedCommands: []string{"CreateAppointment", "SetAppointmentStatus"},
+		PermittedCommands: []string{"CreateAppointment", "SetAppointmentStatus", "MarkPastDueNoShow"},
 		Description: "Appointment status aspect (clinic). Stored as vtx.appointment.<NanoID>.status (class " +
 			"appointmentStatus) = {value ∈ scheduled|confirmed|checkedIn|completed|cancelled|noShow, note?, " +
-			"noShowFeeCents?}. Non-sensitive. Written by CreateAppointment (initial scheduled) and SetAppointmentStatus " +
+			"noShowFeeCents?}. Non-sensitive. Written by CreateAppointment (initial scheduled), SetAppointmentStatus " +
 			"(transitions, with an optional audit note — a cancel / no-show reason, distinct from the .schedule visit " +
 			"reason — and, only when transitioning to noShow, a noShowFeeCents amount: caller-supplied or a 2500 " +
-			"default) — whose appointment vertexType DDL owns the script; this aspect-type DDL is the step-6 write " +
-			"gate. Declaration-only: no op handler.",
+			"default), and MarkPastDueNoShow (the same noShow transition, Weaver-dispatched once a non-terminal " +
+			"appointment's endsAt passes unattended, always the 2500 default fee) — whose appointment vertexType DDL " +
+			"owns both scripts; this aspect-type DDL is the step-6 write gate. Declaration-only: no op handler.",
 		Script: aspectDeclarationOnlyScript,
 		InputSchema: `{"type":"object","properties":` +
 			`{"value":{"type":"string","enum":["scheduled","confirmed","checkedIn","completed","cancelled","noShow"]},"note":{"type":"string"},"noShowFeeCents":{"type":"number"}}}`,
@@ -701,8 +727,8 @@ func statusAspectTypeDDL() pkgmgr.DDLSpec {
 // providerSlotClaimAspectTypeDDL declares the .slot<cellcode> aspect (class
 // providerSlotClaim) — a deterministic per-15-minute-cell existence marker on the
 // provider hub. The step-6 write gate for CreateAppointment / RescheduleAppointment /
-// SetAppointmentStatus / TombstoneAppointment (create / release / re-claim).
-// Declaration-only; NON-sensitive.
+// SetAppointmentStatus / MarkPastDueNoShow / TombstoneAppointment (create / release /
+// re-claim). Declaration-only; NON-sensitive.
 // One aspect per occupied grid cell, created ON DEMAND — never pre-seeded by
 // CreateProvider, so there is no "must exist before declared read" constraint (a
 // claim aspect need not pre-exist for any provider). Its data is {} — a pure
@@ -715,16 +741,17 @@ func providerSlotClaimAspectTypeDDL() pkgmgr.DDLSpec {
 	return pkgmgr.DDLSpec{
 		CanonicalName:     providerSlotClaimAspectDDL,
 		Class:             "meta.ddl.aspectType",
-		PermittedCommands: []string{"CreateAppointment", "RescheduleAppointment", "SetAppointmentStatus", "TombstoneAppointment"},
+		PermittedCommands: []string{"CreateAppointment", "RescheduleAppointment", "SetAppointmentStatus", "MarkPastDueNoShow", "TombstoneAppointment"},
 		Description: "Provider 15-minute slot-claim aspect (clinic). Stored as vtx.provider.<NanoID>.slot<cellcode> " +
 			"(class providerSlotClaim) = {} — a pure existence marker, no relationship field. <cellcode> is the cell's " +
 			"canonical whole-second UTC start with '-'/':' stripped and lowercased (e.g. 2026-07-03T09:00:00Z → " +
 			"slot20260703t090000z). CreateAppointment claims one per covered cell (CreateOnly — the key collision across " +
 			"two concurrent bookings for the same cell IS the double-book lock: SlotConflict on commit-time rejection); " +
 			"RescheduleAppointment releases cells the move no longer needs and claims the newly-covered ones in the same " +
-			"atomic batch; SetAppointmentStatus tombstones all held cells on a terminal transition (cancelled/completed/" +
-			"noShow), freeing them; TombstoneAppointment tombstones all held cells on a hard delete, regardless of " +
-			"status. Non-sensitive; created on demand, no CreateProvider init needed. Declaration-only: no op handler.",
+			"atomic batch; SetAppointmentStatus / MarkPastDueNoShow tombstone all held cells on a terminal transition " +
+			"(cancelled/completed/noShow), freeing them; TombstoneAppointment tombstones all held cells on a hard " +
+			"delete, regardless of status. Non-sensitive; created on demand, no CreateProvider init needed. " +
+			"Declaration-only: no op handler.",
 		Script:       aspectDeclarationOnlyScript,
 		InputSchema:  `{"type":"object","properties":{}}`,
 		OutputSchema: `{"type":"object"}`,
@@ -828,7 +855,7 @@ func patientSlotClaimAspectTypeDDL() pkgmgr.DDLSpec {
 	return pkgmgr.DDLSpec{
 		CanonicalName:     patientSlotClaimAspectDDL,
 		Class:             "meta.ddl.aspectType",
-		PermittedCommands: []string{"CreateAppointment", "RescheduleAppointment", "SetAppointmentStatus", "TombstoneAppointment"},
+		PermittedCommands: []string{"CreateAppointment", "RescheduleAppointment", "SetAppointmentStatus", "MarkPastDueNoShow", "TombstoneAppointment"},
 		Description: "Patient 15-minute slot-claim aspect (clinic). Stored as vtx.patient.<NanoID>.slot<cellcode> " +
 			"(class patientSlotClaim) = {} — a pure existence marker, no relationship field. Same cellcode derivation, " +
 			"claim/release lifecycle, and CreateOnly-is-the-lock property as providerSlotClaim, contended on the patient " +
@@ -1819,6 +1846,19 @@ def appointment_provider(appt_id):
             provider = lk.targetVertex
     return provider
 
+def appointment_patient(appt_id):
+    # Symmetric analog of appointment_provider over the forPatient link — used by
+    # MarkPastDueNoShow, which has no caller-supplied patient to validate (its only
+    # caller is Weaver's directOp dispatch, never a human).
+    # read-posture: (e) relation=forPatient epoch=none -- an appointment carries
+    # exactly one forPatient link, so this is never a keyspace scan.
+    ppage, _ = kv.Links("vtx.appointment." + appt_id, "forPatient", "out")
+    patient = None
+    for lk in ppage:
+        if not lk.isDeleted:
+            patient = lk.targetVertex
+    return patient
+
 def vertex_live(key):
     # Is this vertex present AND not tombstoned? The standalone form of the
     # vertex test worksAt_covers performs inline at every node of its bounded
@@ -2646,6 +2686,60 @@ def execute(state, op):
             mutations = mutations + release_cells_mutations(provider, patient, kv.Read(appt_key + ".schedule"))
         events = [{"class": "clinic.appointmentStatusSet",
                    "data": {"appointmentKey": appt_key, "status": status}}]
+        return {"mutations": mutations, "events": events,
+                "response": {"primaryKey": appt_key}}
+
+    if ot == "MarkPastDueNoShow":
+        # The Weaver-dispatched counterpart to SetAppointmentStatus(noShow) —
+        # clinic-reminders' pastDueAppointments target's ONLY caller, once a
+        # non-terminal appointment's .schedule.endsAt passes with no staff status
+        # update. Deliberately its own operationType rather than a directOp against
+        # SetAppointmentStatus itself: that op requires provider + patient as
+        # CALLER-SUPPLIED params validated against the withProvider/forPatient LINKS
+        # (require_matching_provider/patient), and Weaver's directOp dispatch can only
+        # template row.<column> / row.<column>.<aspect> keys into ContextHint.Reads
+        # (Contract #10 §10.8) — it cannot express that link read. This op instead
+        # resolves provider/patient LIVE (appointment_provider/appointment_patient,
+        # the same bounded read-posture (e) already used for the standing
+        # provider-binding guard above), since it has no human caller to supply them.
+        appt_key = required_string(p, "appointmentKey")
+        _, appt_id = parts_of(appt_key, "appointmentKey", "appointment")
+        if not vertex_alive(state, appt_key):
+            fail("UnknownAppointment: " + appt_key)
+        cls = class_of(state, appt_key)
+        if cls != "appointment":
+            fail("WrongClass: appointmentKey: " + appt_key + " has class " + str(cls) + ", required appointment")
+
+        # Idempotent no-op if the appointment already reached a terminal status by
+        # dispatch time — a legitimate race under Weaver's at-least-once dispatch
+        # (e.g. staff completed/cancelled it between the lens's last projection and
+        # this dispatch): never clobber an already-final outcome with noShow.
+        cur_val = None
+        # read-posture: (a) declared in contextHint.reads — unlike
+        # SetAppointmentStatus's human dispatcher, this op's only caller (the
+        # pastDueAppointments playbook) always needs this read, so it is required,
+        # not optional (Weaver's directOp carries no OptionalReads channel).
+        cur_status = kv.Read(appt_key + ".status")
+        if cur_status != None and not cur_status.isDeleted:
+            cur_val = cur_status.data.get("value")
+        if cur_val in TERMINAL_STATUSES:
+            # No mutation this pass, so primaryKey must stay OUT of response — the
+            # write-footprint reply constraint (commit_path.go) rejects a
+            # script-named primaryKey with no matching mutation.
+            return {"mutations": [], "events": [], "response": {}}
+
+        provider = appointment_provider(appt_id)
+        patient = appointment_patient(appt_id)
+        if provider == None or patient == None:
+            fail("MissingBinding: appointment " + appt_key + " has no bound provider/patient; cannot auto no-show")
+
+        status_data = {"value": "noShow", "note": "Auto no-show: appointment ended without a status update", "noShowFeeCents": 2500}
+        mutations = [make_aspect_upsert(appt_key, "status", "appointmentStatus", status_data)]
+        # read-posture: (a) declared in contextHint.reads — same key SetAppointmentStatus's
+        # terminal branch reads, always needed here (MarkPastDueNoShow is always terminal).
+        mutations = mutations + release_cells_mutations(provider, patient, kv.Read(appt_key + ".schedule"))
+        events = [{"class": "clinic.appointmentStatusSet",
+                   "data": {"appointmentKey": appt_key, "status": "noShow", "auto": True}}]
         return {"mutations": mutations, "events": events,
                 "response": {"primaryKey": appt_key}}
 

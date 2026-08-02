@@ -46,7 +46,7 @@ func TestPackage_DDLs(t *testing.T) {
 	vertexCmds := map[string][]string{
 		"patient":              {"CreatePatient", "TombstonePatient"},
 		"provider":             {"CreateProvider", "TombstoneProvider", "SetProviderProfile", "SetProviderHours", "SetProviderTimeOff", "BindProviderIdentity"},
-		"appointment":          {"CreateAppointment", "RescheduleAppointment", "SetAppointmentStatus", "RecordEncounter", "TombstoneAppointment"},
+		"appointment":          {"CreateAppointment", "RescheduleAppointment", "SetAppointmentStatus", "MarkPastDueNoShow", "RecordEncounter", "TombstoneAppointment"},
 		"clinicSite":           {"SetSiteProfile"},
 		"clinicSiteAssignment": {"AssignProviderSite", "RemoveProviderSite"},
 	}
@@ -79,11 +79,11 @@ func TestPackage_DDLs(t *testing.T) {
 		"patientDemographics":   {"CreatePatient"},
 		"providerProfile":       {"CreateProvider", "SetProviderProfile"},
 		"appointmentSchedule":   {"CreateAppointment", "RescheduleAppointment"},
-		"appointmentStatus":     {"CreateAppointment", "SetAppointmentStatus"},
+		"appointmentStatus":     {"CreateAppointment", "SetAppointmentStatus", "MarkPastDueNoShow"},
 		"providerHours":         {"SetProviderHours"},
 		"providerTimeOff":       {"SetProviderTimeOff"},
-		"providerSlotClaim":     {"CreateAppointment", "RescheduleAppointment", "SetAppointmentStatus", "TombstoneAppointment"},
-		"patientSlotClaim":      {"CreateAppointment", "RescheduleAppointment", "SetAppointmentStatus", "TombstoneAppointment"},
+		"providerSlotClaim":     {"CreateAppointment", "RescheduleAppointment", "SetAppointmentStatus", "MarkPastDueNoShow", "TombstoneAppointment"},
+		"patientSlotClaim":      {"CreateAppointment", "RescheduleAppointment", "SetAppointmentStatus", "MarkPastDueNoShow", "TombstoneAppointment"},
 		"appointmentEncounter":  {"RecordEncounter"},
 		"identityPatientClaim":  {"CreatePatient"},
 		"clinicSiteProfile":     {"SetSiteProfile"},
@@ -190,6 +190,9 @@ func TestPackage_Permissions(t *testing.T) {
 		"RecordEncounter":       op("operator", "provider"), "TombstoneAppointment": operatorOnly(),
 		"SetSiteProfile": operatorOnly(), "AssignProviderSite": operatorOnly(), "RemoveProviderSite": operatorOnly(),
 		"BindProviderIdentity": {{scope: "any", grantsTo: []string{"operator"}}},
+		// Weaver-only auto no-show (clinic-reminders' pastDueAppointments target's
+		// only caller) — operator authority, the RecordAppointmentReminder idiom.
+		"MarkPastDueNoShow": operatorOnly(),
 	}
 	wantCount := 0
 	for _, grants := range wantPerms {

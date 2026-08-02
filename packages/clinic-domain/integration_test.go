@@ -55,7 +55,7 @@ const (
 var clinicOps = []string{
 	"CreatePatient", "TombstonePatient",
 	"CreateProvider", "TombstoneProvider", "SetProviderProfile", "SetProviderHours", "SetProviderTimeOff",
-	"CreateAppointment", "RescheduleAppointment", "SetAppointmentStatus", "RecordEncounter", "TombstoneAppointment",
+	"CreateAppointment", "RescheduleAppointment", "SetAppointmentStatus", "MarkPastDueNoShow", "RecordEncounter", "TombstoneAppointment",
 	"SetSiteProfile", "AssignProviderSite", "RemoveProviderSite",
 	// location-domain ops the multi-site tests need to mint a building directly
 	// (mirrors loftspace-domain's setupLoftspaceEnv installing location-domain
@@ -793,6 +793,81 @@ func TestClinic_NoShowFee(t *testing.T) {
 	st2, _ := status2["data"].(map[string]any)
 	if _, present := st2["noShowFeeCents"]; present {
 		t.Fatalf("a completed transition must never set noShowFeeCents, got %v", st2["noShowFeeCents"])
+	}
+}
+
+// TestClinic_MarkPastDueNoShow proves the Weaver-only auto no-show op: given
+// only appointmentKey (no caller-supplied provider/patient — clinic-reminders'
+// pastDueAppointments playbook has none to supply), it resolves both LIVE off
+// the appointment's own links, upserts .status{noShow, the auto note,
+// noShowFeeCents: 2500}, and releases the held slot-claim cells — the same
+// effect as a staff SetAppointmentStatus(noShow), minus the caller-supplied
+// params.
+func TestClinic_MarkPastDueNoShow(t *testing.T) {
+	t.Parallel()
+	ctx, conn := setupClinicEnv(t)
+	cp, cons := newClinicPipeline(t, ctx, conn, "status-pastdue")
+
+	patientKey := createPatient(t, ctx, conn, cp, cons, "mkpat0020", "PastDue Patient")
+	providerKey := createProvider(t, ctx, conn, cp, cons, "mkprv0020", "Dr. PastDue", "Cardiology")
+	apptID := clSubmit(t, ctx, conn, cp, cons, "mkappt0020", "CreateAppointment", "appointment",
+		`{"patient":"`+patientKey+`","provider":"`+providerKey+`","startsAt":"2026-07-20T09:00:00Z","endsAt":"2026-07-20T09:30:00Z"}`,
+		[]string{patientKey, providerKey}, processor.OutcomeAccepted)
+	apptKey := "vtx.appointment." + apptID
+	clAssertSlotClaimLive(t, ctx, conn, providerKey, "2026-07-20T09:00:00Z")
+	clAssertSlotClaimLive(t, ctx, conn, patientKey, "2026-07-20T09:00:00Z")
+
+	clSubmit(t, ctx, conn, cp, cons, "pastdue001", "MarkPastDueNoShow", "appointment",
+		`{"appointmentKey":"`+apptKey+`"}`,
+		[]string{apptKey, apptKey + ".schedule", apptKey + ".status"}, processor.OutcomeAccepted)
+
+	status := clReadDoc(t, ctx, conn, apptKey+".status")
+	st, _ := status["data"].(map[string]any)
+	if st["value"] != "noShow" {
+		t.Fatalf("status = %v, want noShow", st["value"])
+	}
+	if got, _ := st["noShowFeeCents"].(float64); got != 2500 {
+		t.Fatalf("noShowFeeCents = %v, want default 2500", st["noShowFeeCents"])
+	}
+	if st["note"] != "Auto no-show: appointment ended without a status update" {
+		t.Fatalf("note = %v, want the auto no-show note", st["note"])
+	}
+	clAssertSlotClaimReleased(t, ctx, conn, providerKey, "2026-07-20T09:00:00Z")
+	clAssertSlotClaimReleased(t, ctx, conn, patientKey, "2026-07-20T09:00:00Z")
+}
+
+// TestClinic_MarkPastDueNoShowSkipsAlreadyTerminal proves the idempotent race
+// guard: a dispatch that lands after the appointment ALREADY reached a terminal
+// status (e.g. staff completed it between the lens's last projection and this
+// dispatch, or a prior at-least-once retry already converged it) is a silent
+// no-op — it must never clobber a legitimate outcome with noShow.
+func TestClinic_MarkPastDueNoShowSkipsAlreadyTerminal(t *testing.T) {
+	t.Parallel()
+	ctx, conn := setupClinicEnv(t)
+	cp, cons := newClinicPipeline(t, ctx, conn, "status-pastdue-terminal")
+
+	patientKey := createPatient(t, ctx, conn, cp, cons, "mkpat0021", "Already Done Patient")
+	providerKey := createProvider(t, ctx, conn, cp, cons, "mkprv0021", "Dr. Done", "Cardiology")
+	apptID := clSubmit(t, ctx, conn, cp, cons, "mkappt0021", "CreateAppointment", "appointment",
+		`{"patient":"`+patientKey+`","provider":"`+providerKey+`","startsAt":"2026-07-21T09:00:00Z","endsAt":"2026-07-21T09:30:00Z"}`,
+		[]string{patientKey, providerKey}, processor.OutcomeAccepted)
+	apptKey := "vtx.appointment." + apptID
+
+	clSubmit(t, ctx, conn, cp, cons, "setcompl021", "SetAppointmentStatus", "appointment",
+		`{"appointmentKey":"`+apptKey+`","status":"completed","provider":"`+providerKey+`","patient":"`+patientKey+`"}`,
+		[]string{apptKey}, processor.OutcomeAccepted)
+
+	clSubmit(t, ctx, conn, cp, cons, "pastdue021", "MarkPastDueNoShow", "appointment",
+		`{"appointmentKey":"`+apptKey+`"}`,
+		[]string{apptKey, apptKey + ".schedule", apptKey + ".status"}, processor.OutcomeAccepted)
+
+	status := clReadDoc(t, ctx, conn, apptKey+".status")
+	st, _ := status["data"].(map[string]any)
+	if st["value"] != "completed" {
+		t.Fatalf("status = %v, want completed (MarkPastDueNoShow must not clobber a terminal status)", st["value"])
+	}
+	if _, present := st["noShowFeeCents"]; present {
+		t.Fatalf("a skipped no-op must never set noShowFeeCents, got %v", st["noShowFeeCents"])
 	}
 }
 
