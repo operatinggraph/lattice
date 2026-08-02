@@ -80,6 +80,12 @@ func Permissions() []pkgmgr.PermissionSpec {
 			GrantsTo:      []string{"consumer"},
 		},
 		{
+			OperationType: "SettleStaleTab",
+			Scope:         "any",
+			Note:          "Grants the operator the right to submit SettleStaleTab (orchestration-internal: cafeStaleTabSettlement's missing_settle directOp playbook, dispatched by Weaver's service actor once an open tab's own staleAt deadline passes unattended -- the MarkPastDueNoShow grant idiom, clinic-domain).",
+			GrantsTo:      []string{"operator"},
+		},
+		{
 			OperationType: "CreateMenuItem",
 			Scope:         "any",
 			Note:          "Grants the operator the right to add an item to the self-order menu catalog.",

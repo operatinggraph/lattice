@@ -40,7 +40,7 @@ func tabVertexTypeDDL() pkgmgr.DDLSpec {
 	return pkgmgr.DDLSpec{
 		CanonicalName:     "tab",
 		Class:             "meta.ddl.vertexType",
-		PermittedCommands: []string{"OpenTab", "Charge", "VoidCharge", "Settle"},
+		PermittedCommands: []string{"OpenTab", "Charge", "VoidCharge", "Settle", "SettleStaleTab"},
 		Description: "Café house-tab session DDL. Vertex shape: vtx.tab.<NanoID>, class=tab, root data = {} " +
 			"(minimal, D5 — the running total lives on the .status aspect). OpenTab{leaseAppKey} validates the lease " +
 			"is alive, rejects OpenTabAlreadyExists if the lease already has an open tab (the per-lease " +
@@ -48,7 +48,9 @@ func tabVertexTypeDDL() pkgmgr.DDLSpec {
 			"optionalReads dedup — create the guard fresh on a lease's first-ever tab, OCC-revive it from its prior " +
 			"tombstone on a later one), mints the tab, writes .status {value: open, totalCents: 0, openedAt, " +
 			"leaseAppKey} (leaseAppKey denormalized onto .status so Charge/Settle never need a second declared read " +
-			"for the link target) and BOTH tab→leaseapp links: chargedTo (permanent — where the money lands, the " +
+			"for the link target) plus staleAt = openedAt + 24h (precomputed — the cypher engine has no date-arithmetic " +
+			"builtin, so the auto-settle deadline below must be derived at write time, not read time) and BOTH " +
+			"tab→leaseapp links: chargedTo (permanent — where the money lands, the " +
 			"anchor cafeTabSettlement walks to reach the lease's ledger-account guard) and openFor (transient — " +
 			"that the tab is open). Charge{tabKey, amountCents} (operator, no menuItemKey — an off-menu charge the " +
 			"catalog does not cover) adds " +
@@ -83,12 +85,19 @@ func tabVertexTypeDDL() pkgmgr.DDLSpec {
 			"total is frozen and already dispatched to the ledger, so it cannot be charged, voided, or settled again. " +
 			"OpenTab, Charge, and Settle all grant scope=self to consumer: a resident may open, " +
 			"self-order on, or settle a tab for their OWN lease only, verified via the lease's " +
-			"applicationFor→identity link (AuthDenied otherwise).",
+			"applicationFor→identity link (AuthDenied otherwise). " +
+			"SettleStaleTab{tabKey} (operator only, orchestration-internal — no human dispatches it) is the " +
+			"auto-settle twin of Settle, dispatched by cafeStaleTabSettlement (lenses.go) once an OPEN tab's own " +
+			"staleAt deadline passes with no staff Settle; it no-ops cleanly (rather than rejecting TabNotOpen) if a " +
+			"staff Settle already won the race. A dedicated operationType rather than a directOp against Settle " +
+			"itself, because Settle's chargedTo-backfill branch reads a LINK key a Weaver GapActionSpec's Reads " +
+			"cannot template (row.<column> only) — SettleStaleTab confirms chargedTo via a bounded kv.Links read " +
+			"instead of a declared one.",
 		Script: tabDDLScript,
 		InputSchema: `{"type":"object","properties":` +
 			`{"leaseAppKey":{"type":"string","description":"vtx.leaseapp.<NanoID> the tab is opened for (OpenTab; required, validated alive)."},` +
 			`"tabId":{"type":"string","description":"Optional bare NanoID for the new tab vertex (OpenTab); absent → minted."},` +
-			`"tabKey":{"type":"string","description":"vtx.tab.<NanoID> of an existing tab (Charge/VoidCharge/Settle; required, validated alive + open)."},` +
+			`"tabKey":{"type":"string","description":"vtx.tab.<NanoID> of an existing tab (Charge/VoidCharge/Settle/SettleStaleTab; required, validated alive + open)."},` +
 			`"amountCents":{"type":"number","description":"The amount in integer cents; required for an off-menu Charge (no menuItemKey — added to the total) or a VoidCharge (subtracted, clamped at 0), must be > 0."},` +
 			`"menuItemKey":{"type":"string","description":"vtx.menuitem.<NanoID> of a live catalog item; amountCents is derived from it, ignoring any caller-supplied amountCents. Required for a self-service Charge; optional for a staff Charge (its absence means an off-menu, hand-keyed amountCents charge)."},` +
 			`"description":{"type":"string","description":"Optional free-text name for an off-menu Charge's line in .status.itemsMemo (no menuItemKey — a catalog item's own name is used instead). Defaults to \"Off-menu charge\" when omitted."}},` +
@@ -98,7 +107,7 @@ func tabVertexTypeDDL() pkgmgr.DDLSpec {
 		FieldDescription: map[string]string{
 			"leaseAppKey": "Full vtx.leaseapp.<NanoID> key of the resident lease the tab is opened for (OpenTab; required, validated alive). Denormalized onto the tab's own .status aspect so Charge/Settle need no extra declared read to recover it.",
 			"tabId":       "Optional bare NanoID (no dots / key segments) for the new tab vertex (vtx.tab.<tabId>). Absent → minted with nanoid.new() (OpenTab).",
-			"tabKey":      "Full vtx.tab.<NanoID> key of an existing tab (Charge/VoidCharge/Settle; required, validated alive + class=tab + currently open).",
+			"tabKey":      "Full vtx.tab.<NanoID> key of an existing tab (Charge/VoidCharge/Settle/SettleStaleTab; required, validated alive + class=tab + currently open).",
 			"amountCents": "The amount in integer cents; required for an off-menu Charge (must be a positive number, added to the tab's running .status.totalCents) or a VoidCharge (must be a positive number, subtracted from .status.totalCents and clamped at 0). Ignored whenever menuItemKey is present.",
 			"menuItemKey": "Full vtx.menuitem.<NanoID> key of a live catalog item, served at the tab's own building. Required for a self-service Charge; optional for a staff Charge (present → catalog-priced like self-order; absent → hand-keyed amountCents). amountCents is derived from the item's own .price.priceCents, never trusted from the caller, whichever caller names it.",
 			"description": "Optional free-text line name for an off-menu Charge (no menuItemKey) — appended to .status.itemsMemo instead of a catalog item's own name. Defaults to \"Off-menu charge\" when omitted. Ignored whenever menuItemKey is present (the item's own name is used).",
@@ -158,6 +167,14 @@ func tabVertexTypeDDL() pkgmgr.DDLSpec {
 					"Emits tab.settled" +
 					"{tabKey, leaseAppKey, totalCents}. Returns primaryKey. Rejects TabNotOpen if already settled.",
 			},
+			{
+				Name:    "SettleStaleTab — auto-settle a tab nobody closed (orchestration-internal)",
+				Payload: map[string]any{"tabKey": "vtx.tab.<NanoID>"},
+				ExpectedOutcome: "Validates the tab is alive, closes it exactly like Settle (settled, settledAt stamped, " +
+					"the lease's cafeOpenTabGuard + openFor released), confirming chargedTo via a bounded live link check " +
+					"rather than a declared read. Returns primaryKey. No-ops cleanly (empty mutations/events) if the tab " +
+					"is already settled — a staff Settle raced this dispatch and won.",
+			},
 		},
 	}
 }
@@ -170,32 +187,34 @@ func tabStatusAspectTypeDDL() pkgmgr.DDLSpec {
 	return pkgmgr.DDLSpec{
 		CanonicalName:     "tabStatus",
 		Class:             "meta.ddl.aspectType",
-		PermittedCommands: []string{"OpenTab", "Charge", "VoidCharge", "Settle"},
+		PermittedCommands: []string{"OpenTab", "Charge", "VoidCharge", "Settle", "SettleStaleTab"},
 		Description: "Tab status aspect (café). Stored as vtx.tab.<NanoID>.status (class tabStatus) = " +
-			"{value: open|settled, totalCents, itemsMemo, openedAt, leaseAppKey, settledAt?}. Non-sensitive. Written by OpenTab " +
-			"(mints, value=open, totalCents=0, itemsMemo=\"\"), Charge (OCC-conditioned accumulate onto totalCents, " +
-			"appends the charged item's name to itemsMemo), VoidCharge " +
+			"{value: open|settled, totalCents, itemsMemo, openedAt, staleAt, leaseAppKey, settledAt?}. Non-sensitive. Written by OpenTab " +
+			"(mints, value=open, totalCents=0, itemsMemo=\"\", staleAt=openedAt+24h), Charge (OCC-conditioned accumulate onto totalCents, " +
+			"appends the charged item's name to itemsMemo, carries staleAt forward unchanged), VoidCharge " +
 			"(OCC-conditioned decrement of totalCents, clamped at 0, appends \"Void correction\" to itemsMemo when the " +
-			"total actually decreased), and Settle " +
-			"(OCC-conditioned close, value=settled, settledAt stamped, totalCents/itemsMemo carried over frozen) — all owned by the tab vertexType DDL's script. " +
+			"total actually decreased, carries staleAt forward unchanged), and Settle/SettleStaleTab " +
+			"(OCC-conditioned close, value=settled, settledAt stamped, totalCents/itemsMemo carried over frozen, staleAt dropped — " +
+			"no longer meaningful once settled) — all owned by the tab vertexType DDL's script. " +
 			"Declaration-only: no op handler of its own.",
 		Script: aspectDeclarationOnlyScript,
 		InputSchema: `{"type":"object","properties":` +
-			`{"value":{"type":"string","enum":["open","settled"]},"totalCents":{"type":"number"},"itemsMemo":{"type":"string"},"openedAt":{"type":"string"},"leaseAppKey":{"type":"string"},"settledAt":{"type":"string"}}}`,
+			`{"value":{"type":"string","enum":["open","settled"]},"totalCents":{"type":"number"},"itemsMemo":{"type":"string"},"openedAt":{"type":"string"},"staleAt":{"type":"string"},"leaseAppKey":{"type":"string"},"settledAt":{"type":"string"}}}`,
 		OutputSchema: `{"type":"object"}`,
 		FieldDescription: map[string]string{
 			"value":       "open | settled.",
 			"totalCents":  "The tab's running total in integer cents, accumulated by Charge.",
 			"itemsMemo":   "A comma-joined, running line of what was charged — each Charge appends the item's own name (or an off-menu charge's caller-supplied/default description), each qualifying VoidCharge appends \"Void correction\". Empty string on a fresh tab. Frozen by Settle (never rewritten after).",
 			"openedAt":    "When the tab was opened (RFC3339, = OpenTab's op.submittedAt).",
+			"staleAt":     "RFC3339, = openedAt + 24h (OpenTab). The cafeStaleTabSettlement convergence lens (lenses.go) auto-dispatches SettleStaleTab once this passes with the tab still open. Carried forward unchanged by Charge/VoidCharge; dropped by Settle/SettleStaleTab once settled.",
 			"leaseAppKey": "The resident lease this tab belongs to (denormalized from OpenTab's payload).",
 			"settledAt":   "When the tab was settled (RFC3339, = Settle's op.submittedAt). Absent while open.",
 		},
 		Examples: []pkgmgr.ExampleSpec{
 			{
 				Name:            "tab status aspect",
-				Payload:         map[string]any{"value": "open", "totalCents": 850, "itemsMemo": "Latte, Croissant", "openedAt": "2026-07-07T12:00:00Z", "leaseAppKey": "vtx.leaseapp.<NanoID>"},
-				ExpectedOutcome: "Stored as vtx.tab.<NanoID>.status; written by OpenTab/Charge/VoidCharge/Settle.",
+				Payload:         map[string]any{"value": "open", "totalCents": 850, "itemsMemo": "Latte, Croissant", "openedAt": "2026-07-07T12:00:00Z", "staleAt": "2026-07-08T12:00:00Z", "leaseAppKey": "vtx.leaseapp.<NanoID>"},
+				ExpectedOutcome: "Stored as vtx.tab.<NanoID>.status; written by OpenTab/Charge/VoidCharge/Settle/SettleStaleTab.",
 			},
 		},
 	}
@@ -912,6 +931,14 @@ def execute(state, op):
         tab_id = bare_nanoid_or_mint(p, "tabId")
         tab_key = "vtx.tab." + tab_id
         opened_at = time.rfc3339_utc(op.submittedAt)
+        # Precomputed at write time, not derived at read time — the cypher
+        # engine has no date-arithmetic builtin (clinic-reminders/
+        # visitseries.go's own finding), so this is the tab's own version of
+        # every other deadline column in this codebase (remindAt,
+        # followUpDate). cafeStaleTabSettlement (lenses.go) arms a one-shot
+        # @at at this instant and auto-dispatches SettleStaleTab once it
+        # passes with the tab still open.
+        stale_at = time.rfc3339_add(opened_at, "24h")
 
         # Two links, because a tab holds two facts about its lease that expire
         # at different times. Both put the later-arriving tab in the source
@@ -940,7 +967,7 @@ def execute(state, op):
         mutations = [
             make_vtx(tab_key, "tab", {}),
             make_aspect(tab_key, "status", "tabStatus",
-                        {"value": "open", "totalCents": 0, "itemsMemo": "", "openedAt": opened_at, "leaseAppKey": lease_key}),
+                        {"value": "open", "totalCents": 0, "itemsMemo": "", "openedAt": opened_at, "staleAt": stale_at, "leaseAppKey": lease_key}),
             make_link(charged_to_lnk, tab_key, lease_key, "chargedTo", "chargedTo", {}),
             make_link(open_for_lnk, tab_key, lease_key, "openFor", "openFor", {}),
             guard_mut,
@@ -1033,6 +1060,7 @@ def execute(state, op):
         new_memo = append_items_memo(existing.data.get("itemsMemo", ""), item_name)
         status_data = {"value": "open", "totalCents": new_total, "itemsMemo": new_memo,
                         "openedAt": existing.data.get("openedAt"),
+                        "staleAt": existing.data.get("staleAt"),
                         "leaseAppKey": existing.data.get("leaseAppKey")}
         mutations = [make_aspect_upsert_occ(tab_key, "status", "tabStatus", status_data, existing.revision)]
         events = [{"class": "tab.charged", "data": {"tabKey": tab_key, "amountCents": amount_cents, "totalCents": new_total}}]
@@ -1084,6 +1112,7 @@ def execute(state, op):
             new_memo = append_items_memo(new_memo, "Void correction")
         status_data = {"value": "open", "totalCents": new_total, "itemsMemo": new_memo,
                         "openedAt": existing.data.get("openedAt"),
+                        "staleAt": existing.data.get("staleAt"),
                         "leaseAppKey": existing.data.get("leaseAppKey")}
         mutations = [make_aspect_upsert_occ(tab_key, "status", "tabStatus", status_data, existing.revision)]
         events = [{"class": "tab.chargeVoided", "data": {"tabKey": tab_key, "amountCents": amount_cents, "totalCents": new_total}}]
@@ -1165,6 +1194,73 @@ def execute(state, op):
         if not vertex_alive(state, charged_to_lnk):
             mutations.append(make_link(charged_to_lnk, tab_key, lease_key, "chargedTo", "chargedTo", {}))
         events = [{"class": "tab.settled", "data": {"tabKey": tab_key, "leaseAppKey": lease_key, "totalCents": total_cents}}]
+        return {"mutations": mutations, "events": events,
+                "response": {"primaryKey": tab_key}}
+
+    if ot == "SettleStaleTab":
+        # Orchestration-internal auto-settle: cafeStaleTabSettlement (lenses.go)
+        # dispatches this once an OPEN tab's own staleAt deadline passes with no
+        # staff Settle. A DEDICATED operationType, not a directOp against Settle
+        # itself, for the same mechanical reason clinic-domain's
+        # MarkPastDueNoShow exists: Settle's chargedTo-backfill branch reads a
+        # LINK key (a composite of the tab's own id + its lease's id) via
+        # ContextHint.OptionalReads, and a Weaver GapActionSpec's Reads can only
+        # template a single row.<column>[.<literalSuffix>] — it cannot express a
+        # link key. A Weaver-dispatched Settle would therefore see chargedTo as
+        # unconditionally absent (never in the undeclared read's snapshot) and
+        # try to recreate an already-live link on every normally-opened tab,
+        # failing every single dispatch. This op confirms chargedTo via a
+        # bounded kv.Links read instead (read-posture (e), the
+        # menu_item_served_at idiom, above), never a declared one.
+        tab_key = required_string(p, "tabKey")
+        _, tab_id = parts_of(tab_key, "tabKey", "tab")
+        if not vertex_alive(state, tab_key):
+            fail("UnknownTab: " + tab_key)
+        if class_of(state, tab_key) != "tab":
+            fail("WrongClass: tabKey: " + tab_key)
+
+        status_key = tab_key + ".status"
+        if status_key not in state:
+            fail("InvalidArgument: tabKey: caller must declare " + status_key + " in contextHint.reads")
+        existing = state[status_key]
+        if existing == None or (hasattr(existing, "isDeleted") and existing.isDeleted):
+            fail("UnknownTab: " + tab_key + ": no .status aspect")
+        if existing.data.get("value") != "open":
+            # A staff Settle raced this dispatch and won — no-op cleanly
+            # rather than reject (MarkPastDueNoShow's own defensive re-check
+            # against this exact race, clinic-domain).
+            return {"mutations": [], "events": [], "response": {}}
+
+        settled_at = time.rfc3339_utc(op.submittedAt)
+        total_cents = existing.data.get("totalCents")
+        lease_key = existing.data.get("leaseAppKey")
+        _, lease_id = parts_of(lease_key, "leaseAppKey", "leaseapp")
+
+        status_data = {"value": "settled", "totalCents": total_cents, "itemsMemo": existing.data.get("itemsMemo", ""),
+                        "openedAt": existing.data.get("openedAt"),
+                        "leaseAppKey": lease_key, "settledAt": settled_at}
+        mutations = [
+            make_aspect_upsert_occ(tab_key, "status", "tabStatus", status_data, existing.revision),
+            make_tombstone(lease_key + ".cafeOpenTab"),
+            make_tombstone("lnk.tab." + tab_id + ".openFor.leaseapp." + lease_id),
+        ]
+
+        # A normally-opened tab always carries chargedTo (OpenTab writes it
+        # unconditionally), so this only ever fires for a schema-gap tab that
+        # predates that guarantee — the same rare case Settle's own backfill
+        # exists for.
+        charged_to_lnk = "lnk.tab." + tab_id + ".chargedTo.leaseapp." + lease_id
+        has_charged_to = False
+        # read-posture: (e) relation=chargedTo epoch=none -- mirrors
+        # menu_item_served_at above; a tab carries at most one chargedTo link.
+        page, _ = kv.Links(tab_key, "chargedTo", "out", None, 1)
+        for lk in page:
+            if not lk.isDeleted:
+                has_charged_to = True
+        if not has_charged_to:
+            mutations.append(make_link(charged_to_lnk, tab_key, lease_key, "chargedTo", "chargedTo", {}))
+
+        events = [{"class": "tab.settled", "data": {"tabKey": tab_key, "leaseAppKey": lease_key, "totalCents": total_cents, "reason": "stale"}}]
         return {"mutations": mutations, "events": events,
                 "response": {"primaryKey": tab_key}}
 

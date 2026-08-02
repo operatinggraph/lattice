@@ -301,6 +301,113 @@ func TestCafeTabSettlement_OpenTabWithoutChargedToStillAnchors(t *testing.T) {
 	require.Equal(t, false, v["violating"])
 }
 
+// projectStaleAt runs the anchored cafeStaleTabSettlement spec for one tab at
+// an explicit `now` — unlike projectAt (wall-clock time.Now()), the tests
+// below need to pin deterministic points on either side of a tab's own
+// staleAt deadline.
+func (f *cdFixture) projectStaleAt(t *testing.T, tabName, now string) []ruleengine.ProjectionResult {
+	t.Helper()
+	eng := full.New()
+	cr, err := eng.Parse(staleTabSettlementSpec)
+	require.NoError(t, err, "cafeStaleTabSettlement cypher must parse on the full engine")
+	tabKey := "vtx.tab." + f.ids[tabName]
+	out, err := eng.ExecuteWith(context.Background(), cr, ruleengine.EventContext{Parameters: map[string]any{
+		"actorKey":    tabKey,
+		"now":         now,
+		"projectedAt": now,
+	}}, f.adjKV, f.coreKV)
+	require.NoError(t, err)
+	return out
+}
+
+func (f *cdFixture) valuesAtStale(t *testing.T, tabName, now string) map[string]any {
+	t.Helper()
+	rows := f.projectStaleAt(t, tabName, now)
+	require.Len(t, rows, 1, "cafeStaleTabSettlement must project exactly one row per tab")
+	return rows[0].Values
+}
+
+// TestCafeStaleTabSettlement_OpenAndFresh_ArmsFreshUntilNotViolating proves
+// the one-shot @at arms at staleAt while the deadline is still ahead — the
+// pastDueAppointments idiom (clinic-reminders), never violating this early.
+func TestCafeStaleTabSettlement_OpenAndFresh_ArmsFreshUntilNotViolating(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newCdFixture(t)
+	f.vtx(t, "freshtab", "tab")
+	f.aspect(t, "freshtab", "status", "tabStatus", map[string]any{
+		"value": "open", "totalCents": 850.0, "openedAt": "2026-07-07T12:00:00Z", "staleAt": "2026-07-08T12:00:00Z",
+	})
+
+	v := f.valuesAtStale(t, "freshtab", "2026-07-08T00:00:00Z")
+	require.Equal(t, "open", v["status"])
+	require.Equal(t, "2026-07-08T12:00:00Z", v["staleAt"])
+	require.Equal(t, "2026-07-08T12:00:00Z", v["freshUntil"], "still ahead of now — arms the one-shot @at")
+	require.Equal(t, false, v["missing_settle"])
+	require.Equal(t, false, v["violating"])
+}
+
+// TestCafeStaleTabSettlement_OpenAndPastDue_Violating proves the gate opens
+// once staleAt passes with the tab still open — the violating row itself
+// drives dispatch from there, not a repeated timer wake-up.
+func TestCafeStaleTabSettlement_OpenAndPastDue_Violating(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newCdFixture(t)
+	f.vtx(t, "pastduetab", "tab")
+	f.aspect(t, "pastduetab", "status", "tabStatus", map[string]any{
+		"value": "open", "totalCents": 850.0, "openedAt": "2026-07-07T12:00:00Z", "staleAt": "2026-07-08T12:00:00Z",
+	})
+
+	v := f.valuesAtStale(t, "pastduetab", "2026-07-08T13:00:00Z")
+	require.Nil(t, v["freshUntil"], "past the deadline — freshUntil goes null, the gap-dispatch path owns it now")
+	require.Equal(t, true, v["missing_settle"])
+	require.Equal(t, true, v["violating"])
+}
+
+// TestCafeStaleTabSettlement_Settled_NeverViolatesRegardlessOfStaleAt proves
+// a legitimate staff Settle at any point permanently converges the gate:
+// Settle's status_data rewrite drops staleAt entirely (ddls.go), and
+// status='open' is the only terminal-state check this spec needs (unlike an
+// appointment's three-way status, a tab is only ever open or settled).
+func TestCafeStaleTabSettlement_Settled_NeverViolatesRegardlessOfStaleAt(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newCdFixture(t)
+	f.vtx(t, "settledstaletab", "tab")
+	f.aspect(t, "settledstaletab", "status", "tabStatus", map[string]any{
+		"value": "settled", "totalCents": 850.0, "openedAt": "2026-07-07T12:00:00Z", "settledAt": "2026-07-07T13:00:00Z",
+	})
+
+	v := f.valuesAtStale(t, "settledstaletab", "2026-09-01T00:00:00Z")
+	require.Nil(t, v["staleAt"], "Settle drops staleAt from the rewritten aspect")
+	require.Nil(t, v["freshUntil"])
+	require.Equal(t, false, v["missing_settle"])
+	require.Equal(t, false, v["violating"])
+}
+
+// TestCafeStaleTabSettlement_LegacyTabWithNoStaleAt_NeverViolates covers a
+// tab seeded without staleAt (the pre-this-fire shape, or any residual
+// showcase data predating it): compareAny (full engine) treats a null
+// operand as incomparable, so both '>' and '<=' against $now resolve false —
+// such a tab is simply never auto-chased, not a script error.
+func TestCafeStaleTabSettlement_LegacyTabWithNoStaleAt_NeverViolates(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newCdFixture(t)
+	f.mkTab(t, "legacytab", "open", 500)
+
+	v := f.valuesAtStale(t, "legacytab", "2026-12-01T00:00:00Z")
+	require.Nil(t, v["staleAt"])
+	require.Nil(t, v["freshUntil"])
+	require.Equal(t, false, v["missing_settle"], "null staleAt compares false both ways — never auto-chased")
+	require.Equal(t, false, v["violating"])
+}
+
 // project runs an UNANCHORED spec (cafeLeaseWorkplaces takes no $actorKey,
 // unlike the tab-anchored convergence lens projectAt drives).
 func (f *cdFixture) project(t *testing.T, spec string) []ruleengine.ProjectionResult {

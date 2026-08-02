@@ -51,6 +51,16 @@
 // semantic-contracts clauseRef precedent, additive and byte-for-byte
 // unaffected for a plain human-submitted DebitAccount.
 //
+//   - The `cafeStaleTabSettlement` actorAggregate convergence lens, the
+//     clinic-reminders/pastDueAppointments idiom applied to café's own tab
+//     shape: an OPEN tab whose own staleAt deadline (openedAt + 24h,
+//     precomputed at OpenTab write time) has passed with no staff Settle
+//     opens missing_settle. The §10.8 playbook dispatches directOp
+//     (SettleStaleTab) — a dedicated operationType on the tab vertexType
+//     DDL, not a directOp against Settle itself, since Settle's own
+//     chargedTo-backfill branch needs a LINK read a GapActionSpec's Reads
+//     cannot template (ddls.go).
+//
 //   - The `menuItem` vertex type (DDL `menuItem`) + `menuItemPrice` aspect
 //     type — an operator-only self-order catalog (CreateMenuItem mints an
 //     item + its .price {name, priceCents} aspect + a `servedAt` link to the
@@ -78,11 +88,14 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 // Package is the static, install-time bundle.
 var Package = pkgmgr.Definition{
 	Name:    "cafe-domain",
-	Version: "0.11.10",
-	Description: "Café house-tab POS session domain: the tab vertex type (OpenTab/Charge/VoidCharge/Settle, " +
-		"OCC-conditioned running total) + the tabStatus aspect type + the cafeTabSettlement actorAggregate " +
-		"convergence lens (missing_account/missing_charge) + the §10.8 playbook dispatching directOp(CreateAccount)/" +
-		"directOp(DebitAccount) (cafe-ledger) to post a settled tab onto the resident's house-tab account + " +
+	Version: "0.11.11",
+	Description: "Café house-tab POS session domain: the tab vertex type (OpenTab/Charge/VoidCharge/Settle/" +
+		"SettleStaleTab, OCC-conditioned running total) + the tabStatus aspect type + the cafeTabSettlement " +
+		"actorAggregate convergence lens (missing_account/missing_charge) + the §10.8 playbook dispatching " +
+		"directOp(CreateAccount)/directOp(DebitAccount) (cafe-ledger) to post a settled tab onto the resident's " +
+		"house-tab account + the cafeStaleTabSettlement actorAggregate convergence lens (missing_settle, " +
+		"auto-closes an OPEN tab once its own staleAt deadline passes unattended, orchestration-internal " +
+		"directOp(SettleStaleTab)) + " +
 		"edge-manifest descriptor metadata (OpenTab/Settle, Fire 5 Inc 4) so the two self-scope ops are " +
 		"Facet-renderable + the menuItem catalog (CreateMenuItem/RetireMenuItem, the menuCatalog lens) a " +
 		"Charge — self-service OR staff POS alike — can bind against by naming menuItemKey, deriving " +

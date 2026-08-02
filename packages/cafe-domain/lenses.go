@@ -1,10 +1,19 @@
 package cafedomain
 
-import "github.com/operatinggraph/lattice/internal/pkgmgr"
+import (
+	"fmt"
+
+	"github.com/operatinggraph/lattice/internal/pkgmgr"
+)
 
 // TabSettlementTarget is the §10.8 TargetID == the cafeTabSettlement lens's
 // OutputKeyPattern prefix — the §10.2↔§10.8 binding Weaver reads.
 const TabSettlementTarget = "cafeTabSettlement"
+
+// StaleTabSettlementTarget is the §10.8 TargetID == the
+// cafeStaleTabSettlement lens's OutputKeyPattern prefix — the §10.2↔§10.8
+// binding Weaver reads (targets.go).
+const StaleTabSettlementTarget = "cafeStaleTabSettlement"
 
 // LeaseWorkplacesBucket is the NATS-KV read model the cafeLeaseWorkplaces
 // lens projects into — one row per lease, carrying the set of locations that
@@ -21,9 +30,11 @@ const LeaseWorkplacesBucket = "cafe-lease-workplaces"
 const MenuCatalogBucket = "cafe-menu-catalog"
 
 // Lenses returns the package's Lens declarations: the `cafeTabSettlement`
-// actorAggregate convergence lens (§10.2) anchored on tab, the plain
-// `menuCatalog` projection (mirrors loftspace-domain's availableListings)
-// listing every live menuItem for the Resident view's self-order picker, and
+// actorAggregate convergence lens (§10.2) anchored on tab, the
+// `cafeStaleTabSettlement` sibling convergence lens (also anchored on tab)
+// that auto-chases a tab nobody ever settles, the plain `menuCatalog`
+// projection (mirrors loftspace-domain's availableListings) listing every
+// live menuItem for the Resident view's self-order picker, and
 // `cafeLeaseWorkplaces`, the read-side half of workplace confinement.
 func Lenses() []pkgmgr.LensSpec {
 	return []pkgmgr.LensSpec{
@@ -39,6 +50,23 @@ func Lenses() []pkgmgr.LensSpec {
 				AnchorType:       "tab",
 				OutputKeyPattern: TabSettlementTarget + ".{actorSuffix}",
 				BodyColumns:      []string{"violating", "missing_account", "missing_charge", "entityKey", "tabKey", "leaseAppKey", "accountKey", "totalCents", "itemsMemo", "status", "openedAt", "settledAt"},
+				EmptyBehavior:    "delete",
+				KeyColumn:        "entityId",
+				Freshness:        "auto",
+			},
+		},
+		{
+			CanonicalName:  StaleTabSettlementTarget,
+			Class:          "meta.lens",
+			Adapter:        "nats-kv",
+			Bucket:         "weaver-targets",
+			Engine:         "full",
+			Spec:           staleTabSettlementSpec,
+			ProjectionKind: "actorAggregate",
+			Output: &pkgmgr.OutputDescriptorSpec{
+				AnchorType:       "tab",
+				OutputKeyPattern: StaleTabSettlementTarget + ".{actorSuffix}",
+				BodyColumns:      []string{"violating", "missing_settle", "entityKey", "tabKey", "status", "openedAt", "staleAt", "maxretries_settle"},
 				EmptyBehavior:    "delete",
 				KeyColumn:        "entityId",
 				Freshness:        "auto",
@@ -254,6 +282,44 @@ RETURN
     OR ((status = 'settled') AND (totalCents > 0) AND (accountKey <> null) AND (txCount = 0))
   ) AS violating
 `
+
+// staleTabSettlementSpec is the auto-settle convergence lens: an OPEN tab
+// nobody ever settles sits unbilled indefinitely (verticals.md — Riley's ran
+// 2026-07-28 → 07-31 with nobody nudged), the café-domain analog of
+// clinic-reminders' pastDueAppointments. Unlike an appointment (whose own
+// .schedule.endsAt already IS the staleness threshold), a tab carries no
+// pre-existing business timestamp to bind to, so staleAt is PRECOMPUTED at
+// OpenTab write time (time.rfc3339_add(openedAt, "24h"), ddls.go — the cypher
+// engine has no date-arithmetic builtin, clinic-reminders/visitseries.go's
+// own finding) and carried forward unchanged by Charge/VoidCharge.
+//
+// freshUntil arms a one-shot @at at staleAt while the tab is still open and
+// the deadline is still ahead; once it passes, missing_settle opens — the
+// violating row itself drives dispatch from there, the pastDueAppointments
+// idiom, not a repeated timer wake-up. `status = 'open'` is the only
+// terminal-state check needed: unlike an appointment's three-way status, a
+// tab is only ever open or settled, and Settle/SettleStaleTab both flip it
+// the same way, so a legitimate staff Settle at any point (even racing the
+// @at fire) permanently converges the gate — SettleStaleTab's own defensive
+// re-check (ddls.go) guards the same race a heartbeat later.
+//
+// maxretries_settle bakes the retry cap (maxSettleRetries, retry_budget.go)
+// into the row as a constant, the wellness-domain/lenses.go precedent
+// (orphanedBookingSettlementSpec) — built once at package init via
+// fmt.Sprintf, no literal '%' in the cypher body.
+var staleTabSettlementSpec = fmt.Sprintf(`MATCH (t:tab {key: $actorKey})
+RETURN
+  t.key AS actorKey,
+  t.key AS entityKey,
+  t.key AS tabKey,
+  t.status.data.value AS status,
+  t.status.data.openedAt AS openedAt,
+  t.status.data.staleAt AS staleAt,
+  CASE WHEN (t.status.data.value = 'open') AND (t.status.data.staleAt > $now) THEN t.status.data.staleAt ELSE null END AS freshUntil,
+  ((t.status.data.value = 'open') AND (t.status.data.staleAt <= $now)) AS missing_settle,
+  ((t.status.data.value = 'open') AND (t.status.data.staleAt <= $now)) AS violating,
+  %d AS maxretries_settle
+`, maxSettleRetries)
 
 // cafeIdentitiesReadSpec projects one row per NAMED identity — the roster
 // cafe-app resolves the signed-in actor's own name against. The WHERE keeps

@@ -87,6 +87,7 @@ func domainCapDoc() *processor.CapabilityDoc {
 			{OperationType: "Charge", Scope: "any"},
 			{OperationType: "VoidCharge", Scope: "any"},
 			{OperationType: "Settle", Scope: "any"},
+			{OperationType: "SettleStaleTab", Scope: "any"},
 			{OperationType: "CreateMenuItem", Scope: "any"},
 			{OperationType: "RetireMenuItem", Scope: "any"},
 		},
@@ -796,6 +797,139 @@ func TestSettle_RejectsDoubleSettle(t *testing.T) {
 	}
 	testutil.PublishOp(t, conn, settleTwice)
 	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeRejected)
+}
+
+// TestOpenTab_WritesStaleAtTwentyFourHoursAhead pins the auto-settle
+// deadline OpenTab derives (ddls.go's time.rfc3339_add(openedAt, "24h")) —
+// cafeStaleTabSettlement (lenses.go) arms its one-shot @at against exactly
+// this value.
+func TestOpenTab_WritesStaleAtTwentyFourHoursAhead(t *testing.T) {
+	ctx, conn := setupDomainEnv(t)
+	cp, cons := newDomainPipeline(t, ctx, conn, "opentabstaleat")
+
+	leaseKey := seedLease(t, ctx, conn, "BBCAFEDMNSTLLEASEHJK")
+	tabKey := openTab(t, ctx, conn, cp, cons, "cdopentabstale000001", leaseKey)
+
+	statusDoc := readDoc(t, ctx, conn, tabKey+".status")
+	statusData, _ := statusDoc["data"].(map[string]any)
+	if got, want := statusData["openedAt"].(string), "2026-07-07T12:00:00Z"; got != want {
+		t.Fatalf("status.openedAt = %q, want %q", got, want)
+	}
+	if got, want := statusData["staleAt"].(string), "2026-07-08T12:00:00Z"; got != want {
+		t.Fatalf("status.staleAt = %q, want %q (openedAt + 24h)", got, want)
+	}
+}
+
+// TestSettleStaleTab_ClosesTabAndBackfillsChargedTo mirrors
+// TestSettle_ClosesTabFreezesTotal / TestSettle_BackfillsChargedToWhenMissing
+// but through the auto-settle op — proving SettleStaleTab needs no declared
+// OptionalReads for chargedTo (unlike Settle) because it confirms the link
+// via a bounded LIVE kv.Links read instead (ddls.go), the mechanical reason
+// this op exists as a dedicated operationType rather than a directOp against
+// Settle itself (a Weaver GapActionSpec's Reads cannot template a link key).
+func TestSettleStaleTab_ClosesTabAndBackfillsChargedTo(t *testing.T) {
+	ctx, conn := setupDomainEnv(t)
+	cp, cons := newDomainPipeline(t, ctx, conn, "staletabsettle")
+
+	leaseKey := seedLease(t, ctx, conn, "BBCAFEDMNAUTLEASEHJK")
+	tabKey := openTab(t, ctx, conn, cp, cons, "cdopentabauto0000001", leaseKey)
+
+	chargeEnv := &processor.OperationEnvelope{
+		RequestID:     testutil.GenReqID("cdchargeauto00000001"),
+		Lane:          processor.LaneDefault,
+		OperationType: "Charge",
+		Actor:         domainActorKey,
+		SubmittedAt:   "2026-07-07T12:05:00Z",
+		Class:         "tab",
+		Payload:       json.RawMessage(`{"tabKey":"` + tabKey + `","amountCents":900}`),
+		ContextHint:   &processor.ContextHint{Reads: []string{tabKey, tabKey + ".status"}},
+	}
+	testutil.PublishOp(t, conn, chargeEnv)
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
+
+	staleEnv := &processor.OperationEnvelope{
+		RequestID:     testutil.GenReqID("cdsettlestale0000001"),
+		Lane:          processor.LaneDefault,
+		OperationType: "SettleStaleTab",
+		Actor:         domainActorKey,
+		SubmittedAt:   "2026-07-08T12:00:01Z",
+		Class:         "tab",
+		Payload:       json.RawMessage(`{"tabKey":"` + tabKey + `"}`),
+		ContextHint:   &processor.ContextHint{Reads: []string{tabKey, tabKey + ".status"}},
+	}
+	testutil.PublishOp(t, conn, staleEnv)
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
+
+	statusDoc := readDoc(t, ctx, conn, tabKey+".status")
+	statusData, _ := statusDoc["data"].(map[string]any)
+	if got, _ := statusData["value"].(string); got != "settled" {
+		t.Fatalf("status.value = %q, want settled", got)
+	}
+	if got, _ := statusData["totalCents"].(float64); got != 900 {
+		t.Fatalf("status.totalCents = %v, want 900 (frozen)", got)
+	}
+
+	tabID := tabKey[len("vtx.tab."):]
+	leaseID := leaseKey[len("vtx.leaseapp."):]
+	if keyExists(t, ctx, conn, "lnk.tab."+tabID+".openFor.leaseapp."+leaseID) {
+		t.Fatalf("SettleStaleTab must tombstone openFor, same as Settle")
+	}
+	if !keyExists(t, ctx, conn, "lnk.tab."+tabID+".chargedTo.leaseapp."+leaseID) {
+		t.Fatalf("SettleStaleTab must LEAVE chargedTo alive — cafeTabSettlement anchors on it")
+	}
+	if keyExists(t, ctx, conn, leaseKey+".cafeOpenTab") {
+		t.Fatalf("SettleStaleTab must release the lease's open-tab guard, unblocking the next OpenTab")
+	}
+}
+
+// TestSettleStaleTab_NoOpsIfAlreadySettled proves the race guard: a staff
+// Settle that beat the Weaver dispatch must not make SettleStaleTab reject
+// (which would burn a retry-budget slot for nothing) — it no-ops cleanly,
+// mirroring clinic-domain's MarkPastDueNoShow defensive re-check.
+func TestSettleStaleTab_NoOpsIfAlreadySettled(t *testing.T) {
+	ctx, conn := setupDomainEnv(t)
+	cp, cons := newDomainPipeline(t, ctx, conn, "staletabraced")
+
+	leaseKey := seedLease(t, ctx, conn, "BBCAFEDMNRACLEASEHJK")
+	tabKey := openTab(t, ctx, conn, cp, cons, "cdopentabrace0000001", leaseKey)
+
+	settleEnv := &processor.OperationEnvelope{
+		RequestID:     testutil.GenReqID("cdsettleraced0000001"),
+		Lane:          processor.LaneDefault,
+		OperationType: "Settle",
+		Actor:         domainActorKey,
+		SubmittedAt:   "2026-07-08T11:59:59Z",
+		Class:         "tab",
+		Payload:       json.RawMessage(`{"tabKey":"` + tabKey + `"}`),
+		ContextHint: &processor.ContextHint{
+			Reads:         []string{tabKey, tabKey + ".status"},
+			OptionalReads: []string{chargedToOptionalRead(tabKey, leaseKey)},
+		},
+	}
+	testutil.PublishOp(t, conn, settleEnv)
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
+
+	staleEnv := &processor.OperationEnvelope{
+		RequestID:     testutil.GenReqID("cdsettlestalerc00001"),
+		Lane:          processor.LaneDefault,
+		OperationType: "SettleStaleTab",
+		Actor:         domainActorKey,
+		SubmittedAt:   "2026-07-08T12:00:01Z",
+		Class:         "tab",
+		Payload:       json.RawMessage(`{"tabKey":"` + tabKey + `"}`),
+		ContextHint:   &processor.ContextHint{Reads: []string{tabKey, tabKey + ".status"}},
+	}
+	testutil.PublishOp(t, conn, staleEnv)
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
+
+	statusDoc := readDoc(t, ctx, conn, tabKey+".status")
+	statusData, _ := statusDoc["data"].(map[string]any)
+	if got, _ := statusData["value"].(string); got != "settled" {
+		t.Fatalf("status.value = %q, want settled", got)
+	}
+	if got, want := statusData["settledAt"].(string), "2026-07-08T11:59:59Z"; got != want {
+		t.Fatalf("status.settledAt = %q, want %q (the staff Settle's own timestamp, untouched by the no-op)", got, want)
+	}
 }
 
 func TestCharge_RejectsAfterSettle(t *testing.T) {

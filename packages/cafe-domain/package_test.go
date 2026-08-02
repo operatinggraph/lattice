@@ -40,10 +40,10 @@ func TestPackage_StructurePins(t *testing.T) {
 	if got, want := len(Package.DDLs), 5; got != want {
 		t.Errorf("DDLs: got %d, want %d", got, want)
 	}
-	if got, want := len(Package.Lenses), 4; got != want {
+	if got, want := len(Package.Lenses), 5; got != want {
 		t.Errorf("Lenses: got %d, want %d", got, want)
 	}
-	if got, want := len(Package.Permissions), 9; got != want {
+	if got, want := len(Package.Permissions), 10; got != want {
 		t.Errorf("Permissions: got %d, want %d", got, want)
 	}
 	if got, want := len(Package.OpMetas), 4; got != want {
@@ -52,7 +52,7 @@ func TestPackage_StructurePins(t *testing.T) {
 	if got, want := len(Package.Roles), 0; got != want {
 		t.Errorf("Roles: got %d, want %d", got, want)
 	}
-	if got, want := len(Package.WeaverTargets), 1; got != want {
+	if got, want := len(Package.WeaverTargets), 2; got != want {
 		t.Errorf("WeaverTargets: got %d, want %d", got, want)
 	}
 	if got, want := len(Package.LoomPatterns), 0; got != want {
@@ -84,7 +84,7 @@ func TestPackage_StructurePins(t *testing.T) {
 			t.Errorf("DDLs[%d]: got %s/%s, want %s/%s", i, got.CanonicalName, got.Class, want.name, want.class)
 		}
 	}
-	for i, want := range []string{"cafeTabSettlement", "menuCatalog", "cafeLeaseWorkplaces"} {
+	for i, want := range []string{"cafeTabSettlement", "cafeStaleTabSettlement", "menuCatalog", "cafeLeaseWorkplaces"} {
 		if i >= len(Package.Lenses) {
 			break
 		}
@@ -97,6 +97,7 @@ func TestPackage_StructurePins(t *testing.T) {
 		{"Charge", "any"}, {"Charge", "self"},
 		{"VoidCharge", "any"},
 		{"Settle", "any"}, {"Settle", "self"},
+		{"SettleStaleTab", "any"},
 		{"CreateMenuItem", "any"}, {"RetireMenuItem", "any"},
 	}
 	for i, want := range wantPerms {
