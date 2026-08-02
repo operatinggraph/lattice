@@ -3,9 +3,9 @@ package clinicledger
 import "github.com/operatinggraph/lattice/internal/pkgmgr"
 
 // DDLs returns the package's DDL meta-vertex declarations: `clinicaccount`
-// (CreateAccount), `clinictransaction` (DebitAccount, CreditAccount), and the
+// (ClinicCreateAccount), `clinictransaction` (DebitAccount, CreditAccount), and the
 // `clinicLedgerAccountGuard` aspect-type declaration (the patient-anchored
-// uniqueness guard CreateAccount writes). Vertical-prefixed: a DDL
+// uniqueness guard ClinicCreateAccount writes). Vertical-prefixed: a DDL
 // canonicalName is global across every installed package
 // (internal/pkgmgr/installer.go checkCanonicalNameCollision), and
 // loftspace-ledger already owns the bare `account` / `transaction` names.
@@ -21,27 +21,27 @@ func accountDDL() pkgmgr.DDLSpec {
 	return pkgmgr.DDLSpec{
 		CanonicalName:     "clinicaccount",
 		Class:             "meta.ddl.vertexType",
-		PermittedCommands: []string{"CreateAccount"},
+		PermittedCommands: []string{"ClinicCreateAccount"},
 		Description: "Ledger account DDL. Vertex shape: vtx.clinicaccount.<NanoID>, class=clinicaccount, root data = {} " +
-			"(minimal, D5 — the balance is LENS-derived by summing transactions, never stored). CreateAccount{patientKey} " +
+			"(minimal, D5 — the balance is LENS-derived by summing transactions, never stored). ClinicCreateAccount{patientKey} " +
 			"mints the account under its OWN independently-generated NanoID (never reused from the patient — Core KV NanoIDs " +
 			"are unique platform-wide identifiers, not scoped per vertex type). \"One account per patient\" is enforced by a " +
 			"deterministic create-only guard aspect on the PATIENT (patientKey+\".ledgerAccount\", " +
-			"clinicLedgerAccountGuard DDL) instead: a second CreateAccount for the same patient conflicts on that " +
+			"clinicLedgerAccountGuard DDL) instead: a second ClinicCreateAccount for the same patient conflicts on that " +
 			"already-existing aspect key. Writes the heldFor link (account→patient, the account is the later-arriving " +
 			"vertex so it is the source — Contract #1 §1.1). Requires the patientKey be a live patient (no orphan accounts).",
 		Script: accountDDLScript,
 		InputSchema: `{"type":"object","properties":` +
-			`{"patientKey":{"type":"string","description":"vtx.patient.<NanoID> of the patient this account is for (CreateAccount; required, validated alive). The account gets its own independently-minted NanoID; uniqueness (one account per patient) is enforced via the patient's .ledgerAccount guard aspect, not the account's own id."}},` +
+			`{"patientKey":{"type":"string","description":"vtx.patient.<NanoID> of the patient this account is for (ClinicCreateAccount; required, validated alive). The account gets its own independently-minted NanoID; uniqueness (one account per patient) is enforced via the patient's .ledgerAccount guard aspect, not the account's own id."}},` +
 			`"required":["patientKey"]}`,
 		OutputSchema: `{"type":"object","properties":` +
 			`{"primaryKey":{"type":"string","description":"vtx.clinicaccount.<NanoID> of the created account (the operation's principal key) — the caller must read this from the ACCEPTED reply, since the id can no longer be derived from patientKey."}}}`,
 		FieldDescription: map[string]string{
-			"patientKey": "Full vtx.patient.<NanoID> key of the patient the account is opened for. CreateAccount validates it is alive, mints the account under a fresh independent NanoID, writes the patient's .ledgerAccount guard aspect (one account per patient) and the heldFor link (account→patient).",
+			"patientKey": "Full vtx.patient.<NanoID> key of the patient the account is opened for. ClinicCreateAccount validates it is alive, mints the account under a fresh independent NanoID, writes the patient's .ledgerAccount guard aspect (one account per patient) and the heldFor link (account→patient).",
 		},
 		Examples: []pkgmgr.ExampleSpec{
 			{
-				Name:    "CreateAccount — open the ledger account for a registered patient",
+				Name:    "ClinicCreateAccount — open the ledger account for a registered patient",
 				Payload: map[string]any{"patientKey": "vtx.patient.<NanoID>"},
 				ExpectedOutcome: "Validates the patient is alive. Atomically commits vtx.clinicaccount.<freshNanoID> (root data {} — D5) " +
 					"+ the patient's .ledgerAccount guard aspect + the heldFor link (account→patient). Emits " +
@@ -56,19 +56,19 @@ func accountDDL() pkgmgr.DDLSpec {
 }
 
 // accountGuardAspectTypeDDL declares the .ledgerAccount aspect (class
-// clinicLedgerAccountGuard) CreateAccount writes on the PATIENT — the
+// clinicLedgerAccountGuard) ClinicCreateAccount writes on the PATIENT — the
 // deterministic create-only key that enforces "at most one ledger account per
 // patient" now that the account itself carries an independent NanoID (not the
-// patient's own). Declaration-only: the aspect is written by CreateAccount,
+// patient's own). Declaration-only: the aspect is written by ClinicCreateAccount,
 // never has its own operationType.
 func accountGuardAspectTypeDDL() pkgmgr.DDLSpec {
 	return pkgmgr.DDLSpec{
 		CanonicalName:     "clinicLedgerAccountGuard",
 		Class:             "meta.ddl.aspectType",
-		PermittedCommands: []string{"CreateAccount"},
+		PermittedCommands: []string{"ClinicCreateAccount"},
 		Description: "Per-patient ledger-account uniqueness guard aspect. Stored as vtx.patient.<NanoID>.ledgerAccount " +
 			"(class clinicLedgerAccountGuard) = {accountKey: <vtx.clinicaccount.<NanoID>>}. Non-sensitive. Created " +
-			"exactly once by CreateAccount, atomically alongside the account vertex it names — a second CreateAccount for " +
+			"exactly once by ClinicCreateAccount, atomically alongside the account vertex it names — a second ClinicCreateAccount for " +
 			"the same patient that declares this key in contextHint.reads sees the clean AccountAlreadyExists domain " +
 			"rejection; one that does not (the normal first-ever-call shape, since the key doesn't exist yet to declare) " +
 			"instead relies on this aspect's own create-only write to fail a genuine concurrent race. Declaration-only: no " +
@@ -83,14 +83,14 @@ func accountGuardAspectTypeDDL() pkgmgr.DDLSpec {
 			{
 				Name:            "patient ledger-account guard aspect",
 				Payload:         map[string]any{"accountKey": "vtx.clinicaccount.<NanoID>"},
-				ExpectedOutcome: "Stored as vtx.patient.<NanoID>.ledgerAccount; created once by CreateAccount alongside the account vertex it names.",
+				ExpectedOutcome: "Stored as vtx.patient.<NanoID>.ledgerAccount; created once by ClinicCreateAccount alongside the account vertex it names.",
 			},
 		},
 	}
 }
 
 // aspectDeclarationOnlyScript is the declaration-only Starlark for
-// clinicLedgerAccountGuard — written by CreateAccount's own op handler, never
+// clinicLedgerAccountGuard — written by ClinicCreateAccount's own op handler, never
 // dispatched as an operation in its own right.
 const aspectDeclarationOnlyScript = `
 def execute(state, op):

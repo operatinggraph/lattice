@@ -50,7 +50,7 @@ func ledgerCapDoc() *processor.CapabilityDoc {
 		Lanes:                  []string{"default"},
 		PlatformPermissions: []processor.PlatformPermission{
 			{OperationType: "CreateLeaseApplication", Scope: "any"},
-			{OperationType: "CreateAccount", Scope: "any"},
+			{OperationType: "LoftspaceCreateAccount", Scope: "any"},
 			{OperationType: "DebitAccount", Scope: "any"},
 			{OperationType: "CreditAccount", Scope: "any"},
 		},
@@ -80,6 +80,11 @@ func setupLedgerEnv(t *testing.T) (context.Context, *substrate.Conn) {
 		t.Fatalf("install loftspace-ledger: %v", err)
 	}
 	testutil.SeedCapDoc(t, ctx, conn, ledgerCapDoc())
+	// LoftspaceCreateAccount's workplace guard asks the GRAPH whether its
+	// caller is root, so the cap doc's Roles claim is not enough on its own —
+	// without the link this actor reads as an unprivileged caller with no
+	// worksAt anywhere (testutil.SeedHoldsRole's doc comment).
+	testutil.SeedHoldsRole(t, ctx, conn, ledgerActorKey, bootstrap.RoleOperatorKey)
 	return ctx, conn
 }
 
@@ -146,7 +151,7 @@ func seedLease(t *testing.T, ctx context.Context, conn *substrate.Conn, id strin
 	return key
 }
 
-// createAccount submits CreateAccount{leaseAppKey} and returns the account key
+// createAccount submits LoftspaceCreateAccount{leaseAppKey} and returns the account key
 // — the account's own independently-minted NanoID, matching the deterministic
 // nanoid.new() seed the test harness uses for the transaction DDL (never
 // derived from the lease's own id).
@@ -156,7 +161,7 @@ func createAccount(t *testing.T, ctx context.Context, conn *substrate.Conn, cp *
 	env := &processor.OperationEnvelope{
 		RequestID:     reqID,
 		Lane:          processor.LaneDefault,
-		OperationType: "CreateAccount",
+		OperationType: "LoftspaceCreateAccount",
 		Actor:         ledgerActorKey,
 		SubmittedAt:   "2026-07-01T12:00:00Z",
 		Class:         "account",
@@ -168,12 +173,12 @@ func createAccount(t *testing.T, ctx context.Context, conn *substrate.Conn, cp *
 	return "vtx.account." + nanoIDFromRequestID(reqID)
 }
 
-// TestCreateAccount_MintsAccountHeldForLease (test 1). CreateAccount mints
+// TestLoftspaceCreateAccount_MintsAccountHeldForLease (test 1). LoftspaceCreateAccount mints
 // vtx.account.<freshId> (root {} — D5, an id independent of the lease's own)
 // + the leaseapp's .ledgerAccount guard aspect + the heldFor link; a second
 // call for the same lease that declares the guard aspect in reads conflicts
 // on it (AccountAlreadyExists).
-func TestCreateAccount_MintsAccountHeldForLease(t *testing.T) {
+func TestLoftspaceCreateAccount_MintsAccountHeldForLease(t *testing.T) {
 	ctx, conn := setupLedgerEnv(t)
 	cp, cons := newLedgerPipeline(t, ctx, conn, "create")
 
@@ -182,7 +187,7 @@ func TestCreateAccount_MintsAccountHeldForLease(t *testing.T) {
 	guardKey := leaseKey + ".ledgerAccount"
 
 	if keyExists(t, ctx, conn, guardKey) {
-		t.Fatalf("guard aspect must not exist before CreateAccount")
+		t.Fatalf("guard aspect must not exist before LoftspaceCreateAccount")
 	}
 
 	acctKey := createAccount(t, ctx, conn, cp, cons, "createacct0000001", leaseKey)
@@ -207,13 +212,13 @@ func TestCreateAccount_MintsAccountHeldForLease(t *testing.T) {
 		t.Fatalf("heldFor link must exist: %s", heldForLnk)
 	}
 
-	// A second CreateAccount for the SAME lease, declaring the now-existing
+	// A second LoftspaceCreateAccount for the SAME lease, declaring the now-existing
 	// guard aspect in reads, conflicts on it (AccountAlreadyExists — the
 	// create-only write is the guard).
 	dup := &processor.OperationEnvelope{
 		RequestID:     testutil.GenReqID("createacct0000002"),
 		Lane:          processor.LaneDefault,
-		OperationType: "CreateAccount",
+		OperationType: "LoftspaceCreateAccount",
 		Actor:         ledgerActorKey,
 		SubmittedAt:   "2026-07-01T12:05:00Z",
 		Class:         "account",
@@ -224,16 +229,16 @@ func TestCreateAccount_MintsAccountHeldForLease(t *testing.T) {
 	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeRejected)
 }
 
-// TestCreateAccount_UnknownLease rejects an account opened against a
+// TestLoftspaceCreateAccount_UnknownLease rejects an account opened against a
 // non-existent lease (no-orphan invariant).
-func TestCreateAccount_UnknownLease(t *testing.T) {
+func TestLoftspaceCreateAccount_UnknownLease(t *testing.T) {
 	ctx, conn := setupLedgerEnv(t)
 	cp, cons := newLedgerPipeline(t, ctx, conn, "unknownlease")
 
 	env := &processor.OperationEnvelope{
 		RequestID:     testutil.GenReqID("createacctunknown01"),
 		Lane:          processor.LaneDefault,
-		OperationType: "CreateAccount",
+		OperationType: "LoftspaceCreateAccount",
 		Actor:         ledgerActorKey,
 		SubmittedAt:   "2026-07-01T12:00:00Z",
 		Class:         "account",

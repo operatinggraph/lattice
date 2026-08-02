@@ -47,7 +47,7 @@ func TestPackage_StructurePins(t *testing.T) {
 	if got, want := len(Package.LoomPatterns), 0; got != want {
 		t.Errorf("LoomPatterns: got %d, want %d", got, want)
 	}
-	if got, want := len(Package.OpMetas), 0; got != want {
+	if got, want := len(Package.OpMetas), 1; got != want {
 		t.Errorf("OpMetas: got %d, want %d", got, want)
 	}
 
@@ -58,7 +58,7 @@ func TestPackage_StructurePins(t *testing.T) {
 		}
 	}
 
-	wantPerms := []struct{ op, scope string }{{"CreateAccount", "any"}, {"DebitAccount", "any"}, {"CreditAccount", "any"}}
+	wantPerms := []struct{ op, scope string }{{"LoftspaceCreateAccount", "any"}, {"DebitAccount", "any"}, {"CreditAccount", "any"}}
 	for i, want := range wantPerms {
 		if i >= len(Package.Permissions) {
 			break

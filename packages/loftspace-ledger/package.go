@@ -4,7 +4,7 @@
 //
 // It declares:
 //
-//   - The `account` vertex type (DDL `account`) — CreateAccount mints
+//   - The `account` vertex type (DDL `account`) — LoftspaceCreateAccount mints
 //     vtx.account.<NanoID> (root data {} per D5) with its OWN
 //     independently-minted NanoID (never reused from the lease — Core KV
 //     NanoIDs are unique platform-wide identifiers, not scoped per vertex
@@ -14,7 +14,7 @@
 //
 //   - The `ledgerAccountGuard` aspect type (DDL `ledgerAccountGuard`) —
 //     vtx.leaseapp.<NanoID>.ledgerAccount = {accountKey}, written once by
-//     CreateAccount alongside the account it names; its deterministic,
+//     LoftspaceCreateAccount alongside the account it names; its deterministic,
 //     lease-anchored key is the uniqueness guard.
 //
 //   - The `transaction` vertex type (DDL `transaction`) — DebitAccount (a
@@ -54,8 +54,8 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 // Package is the static, install-time bundle.
 var Package = pkgmgr.Definition{
 	Name:    "loftspace-ledger",
-	Version: "0.4.4",
-	Description: "Loftspace tenant payment ledger: the account vertex type (CreateAccount, independently-minted " +
+	Version: "0.4.5",
+	Description: "Loftspace tenant payment ledger: the account vertex type (LoftspaceCreateAccount, independently-minted " +
 		"id, one per lease via a .ledgerAccount guard aspect on the leaseapp) + the transaction vertex type " +
 		"(DebitAccount/CreditAccount, append-only entries linked to the account via postedTo; DebitAccount's " +
 		"optional clauseRef writes the authorizedBy audit link + updates the clause status: completed one-time, " +
@@ -66,4 +66,5 @@ var Package = pkgmgr.Definition{
 	DDLs:        DDLs(),
 	Lenses:      Lenses(),
 	Permissions: Permissions(),
+	OpMetas:     OpMetas(),
 }

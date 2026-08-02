@@ -1,6 +1,6 @@
 package clinicledger
 
-// accountDDLScript handles CreateAccount. The account gets its OWN
+// accountDDLScript handles ClinicCreateAccount. The account gets its OWN
 // independently-minted NanoID — vertex NanoIDs are unique identifiers across
 // all of Core KV, never reused across vertex types, even deliberately (a
 // prior revision minted the account under the patient's own bare NanoID;
@@ -10,7 +10,7 @@ package clinicledger
 // adjacency-shared-nanoid-collision-design.md). "One account per patient" is
 // instead enforced by a deterministic CREATE-ONLY guard aspect on the
 // PRE-EXISTING patient (patientKey + ".ledgerAccount") — a second
-// CreateAccount for the same patient conflicts on that already-existing
+// ClinicCreateAccount for the same patient conflicts on that already-existing
 // aspect key, the same "let the key shape be the uniqueness guard" idiom, just
 // anchored on the pre-existing parent instead of a freshly-minted sibling.
 // Root data stays {} on the account (D5): the balance is derived by the
@@ -65,7 +65,7 @@ def execute(state, op):
     ot = op.operationType
     p = op.payload
 
-    if ot == "CreateAccount":
+    if ot == "ClinicCreateAccount":
         patient_key = required_string(p, "patientKey")
         _, patient_id = parts_of(patient_key, "patientKey", "patient")
 
@@ -77,7 +77,7 @@ def execute(state, op):
         # PATIENT (not the account — the account's own id is independent and
         # unknown until minted below). Only meaningful when the caller declared
         # the guard key in contextHint.reads (a repeat/racing caller checking
-        # before it retries); the FIRST CreateAccount for a patient declares
+        # before it retries); the FIRST ClinicCreateAccount for a patient declares
         # only patientKey (the guard doesn't exist yet — declaring an
         # as-yet-absent key in reads would HydrationMiss on first touch,
         # deferred past hydration), so on that path the

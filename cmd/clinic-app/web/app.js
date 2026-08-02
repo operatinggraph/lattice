@@ -2697,7 +2697,7 @@ function renderLedger(data) {
   }
 }
 
-// openLedgerAccount opens the patient's ledger account (CreateAccount) and
+// openLedgerAccount opens the patient's ledger account (ClinicCreateAccount) and
 // returns its freshly-minted key. The account carries its OWN independent
 // NanoID (never derived from the patient's — Core KV NanoIDs are unique
 // platform-wide, not reused across vertex types), so the ONLY reliable
@@ -2707,7 +2707,7 @@ function renderLedger(data) {
 // a contextHint.reads key that doesn't exist (HydrationMiss), so declaring it
 // here would make account-opening impossible rather than idempotent.
 async function openLedgerAccount(patientKey) {
-  const reply = await submitOp("CreateAccount", "clinicaccount", { patientKey }, [patientKey]);
+  const reply = await submitOp("ClinicCreateAccount", "clinicaccount", { patientKey }, [patientKey]);
   if (reply && reply.status === "accepted" && reply.primaryKey) {
     return reply.primaryKey;
   }

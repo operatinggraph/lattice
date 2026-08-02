@@ -43,7 +43,7 @@ func ledgerCapDoc() *processor.CapabilityDoc {
 			{OperationType: "CreateProvider", Scope: "any"},
 			{OperationType: "CreateAppointment", Scope: "any"},
 			{OperationType: "SetAppointmentStatus", Scope: "any"},
-			{OperationType: "CreateAccount", Scope: "any"},
+			{OperationType: "ClinicCreateAccount", Scope: "any"},
 			{OperationType: "DebitAccount", Scope: "any"},
 			{OperationType: "CreditAccount", Scope: "any"},
 		},
@@ -142,7 +142,7 @@ func createPatient(t *testing.T, ctx context.Context, conn *substrate.Conn, cp *
 	return "vtx.patient." + nanoIDFromRequestID(reqID)
 }
 
-// createAccount submits CreateAccount{patientKey} and returns the account key
+// createAccount submits ClinicCreateAccount{patientKey} and returns the account key
 // — the account's own independently-minted NanoID, matching the deterministic
 // nanoid.new() seed the test harness uses for the transaction DDL (never
 // derived from the patient's own id).
@@ -152,7 +152,7 @@ func createAccount(t *testing.T, ctx context.Context, conn *substrate.Conn, cp *
 	env := &processor.OperationEnvelope{
 		RequestID:     reqID,
 		Lane:          processor.LaneDefault,
-		OperationType: "CreateAccount",
+		OperationType: "ClinicCreateAccount",
 		Actor:         ledgerActorKey,
 		SubmittedAt:   "2026-07-01T12:00:00Z",
 		Class:         "clinicaccount",
@@ -164,12 +164,12 @@ func createAccount(t *testing.T, ctx context.Context, conn *substrate.Conn, cp *
 	return "vtx.clinicaccount." + nanoIDFromRequestID(reqID)
 }
 
-// TestCreateAccount_MintsAccountHeldForPatient (test 1). CreateAccount mints
+// TestClinicCreateAccount_MintsAccountHeldForPatient (test 1). ClinicCreateAccount mints
 // vtx.clinicaccount.<freshId> (root {} — D5, an id independent of the
 // patient's own) + the patient's .ledgerAccount guard aspect + the heldFor
 // link; a second call for the same patient that declares the guard aspect in
 // reads conflicts on it (AccountAlreadyExists).
-func TestCreateAccount_MintsAccountHeldForPatient(t *testing.T) {
+func TestClinicCreateAccount_MintsAccountHeldForPatient(t *testing.T) {
 	ctx, conn := setupLedgerEnv(t)
 	cp, cons := newLedgerPipeline(t, ctx, conn, "create")
 
@@ -178,7 +178,7 @@ func TestCreateAccount_MintsAccountHeldForPatient(t *testing.T) {
 	guardKey := patientKey + ".ledgerAccount"
 
 	if keyExists(t, ctx, conn, guardKey) {
-		t.Fatalf("guard aspect must not exist before CreateAccount")
+		t.Fatalf("guard aspect must not exist before ClinicCreateAccount")
 	}
 
 	acctKey := createAccount(t, ctx, conn, cp, cons, "createacct0000001", patientKey)
@@ -203,13 +203,13 @@ func TestCreateAccount_MintsAccountHeldForPatient(t *testing.T) {
 		t.Fatalf("heldFor link must exist: %s", heldForLnk)
 	}
 
-	// A second CreateAccount for the SAME patient, declaring the now-existing
+	// A second ClinicCreateAccount for the SAME patient, declaring the now-existing
 	// guard aspect in reads, conflicts on it (AccountAlreadyExists — the
 	// create-only write is the guard).
 	dup := &processor.OperationEnvelope{
 		RequestID:     testutil.GenReqID("createacct0000002"),
 		Lane:          processor.LaneDefault,
-		OperationType: "CreateAccount",
+		OperationType: "ClinicCreateAccount",
 		Actor:         ledgerActorKey,
 		SubmittedAt:   "2026-07-01T12:05:00Z",
 		Class:         "clinicaccount",
@@ -220,16 +220,16 @@ func TestCreateAccount_MintsAccountHeldForPatient(t *testing.T) {
 	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeRejected)
 }
 
-// TestCreateAccount_UnknownPatient rejects an account opened against a
+// TestClinicCreateAccount_UnknownPatient rejects an account opened against a
 // non-existent patient (no-orphan invariant).
-func TestCreateAccount_UnknownPatient(t *testing.T) {
+func TestClinicCreateAccount_UnknownPatient(t *testing.T) {
 	ctx, conn := setupLedgerEnv(t)
 	cp, cons := newLedgerPipeline(t, ctx, conn, "unknownpatient")
 
 	env := &processor.OperationEnvelope{
 		RequestID:     testutil.GenReqID("createacctunknown01"),
 		Lane:          processor.LaneDefault,
-		OperationType: "CreateAccount",
+		OperationType: "ClinicCreateAccount",
 		Actor:         ledgerActorKey,
 		SubmittedAt:   "2026-07-01T12:00:00Z",
 		Class:         "clinicaccount",

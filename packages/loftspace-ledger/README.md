@@ -15,11 +15,15 @@ onto a running stack).
 | **Vertex types** (2) | `account` (root `{}`, D5) · `transaction` (root `{}`, D5, `.entry` aspect) |
 | **Aspect types** (1) | `ledgerAccountGuard` — `vtx.leaseapp.<id>.ledgerAccount`, the per-lease create-only uniqueness guard |
 | **Links** (2) | `heldFor` (account → leaseapp) · `postedTo` (transaction → account) |
-| **Operations** (3) | `CreateAccount` · `DebitAccount` · `CreditAccount` |
+| **Operations** (3) | `LoftspaceCreateAccount` · `DebitAccount` · `CreditAccount` |
 | **Projection lenses** (2) | `ledgerHistory` (one row per transaction) → `loftspace-ledger-history` · `leaseAccounts` (lease → account key lookup) → `loftspace-lease-accounts` (both `nats-kv`, `full` engine) |
 
-Every op is granted to the `operator` role at `scope: any` (`permissions.go`) — the trusted
-single-identity model, no new capability surface, identical to `clinic-ledger`.
+`DebitAccount`/`CreditAccount` are granted to `operator` only at `scope: any` (`permissions.go`) —
+the trusted single-identity model. `LoftspaceCreateAccount` also grants `frontOfHouse`,
+**workplace-confined** to the lease's own building (`scripts.go`'s `require_workplace` on the
+lease's `appliesToUnit` topology — unlike `clinic-ledger`'s identical create op, a leaseapp sits at
+a unit, so this one cannot be granted unconfined) — the front desk opens a lease's ledger account
+directly from the browser.
 
 ## Key shapes (Contract #1)
 
@@ -35,11 +39,11 @@ lnk.transaction.<id>.postedTo.account.<id>    (transaction → account; transact
 
 ## Independent account NanoID + guard aspect
 
-`CreateAccount` mints the account under its **own independently-generated NanoID** — never reused
+`LoftspaceCreateAccount` mints the account under its **own independently-generated NanoID** — never reused
 from the lease, since Core KV NanoIDs are unique platform-wide identifiers, not scoped per vertex
 type. "At most one account per lease" is enforced by the deterministic create-only
 `ledgerAccountGuard` aspect on the **leaseapp** (`leaseAppKey + ".ledgerAccount"`) instead of a
-shared/derived key: a second `CreateAccount` for the same lease conflicts on that already-existing
+shared/derived key: a second `LoftspaceCreateAccount` for the same lease conflicts on that already-existing
 aspect key. This mirrors `clinic-ledger`'s account/patient shape (the account held for a lease
 instead of a patient); see
 [`adjacency-shared-nanoid-collision-design.md`](../../_bmad-output/implementation-artifacts/adjacency-shared-nanoid-collision-design.md)

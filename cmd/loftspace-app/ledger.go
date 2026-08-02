@@ -90,7 +90,7 @@ func computeLedgerHistory(keys []string, get kvGetter, leaseAppKey string) ([]le
 }
 
 // leaseAccountProjection is one row of the loftspace-ledger `leaseAccounts`
-// lens — one per lease, AccountKey empty until CreateAccount has opened one.
+// lens — one per lease, AccountKey empty until LoftspaceCreateAccount has opened one.
 // The account carries its OWN independently-minted NanoID (never derived
 // from the lease's — see packages/loftspace-ledger/scripts.go), so this lens
 // read is the only way to resolve it.

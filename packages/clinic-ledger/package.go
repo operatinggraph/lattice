@@ -4,7 +4,7 @@
 //
 // It declares:
 //
-//   - The `clinicaccount` vertex type (DDL `clinicaccount`) — CreateAccount
+//   - The `clinicaccount` vertex type (DDL `clinicaccount`) — ClinicCreateAccount
 //     mints vtx.clinicaccount.<NanoID> (root data {} per D5) with its OWN
 //     independently-minted NanoID (never reused from the patient — Core KV
 //     NanoIDs are unique platform-wide identifiers, not scoped per vertex
@@ -14,7 +14,7 @@
 //
 //   - The `clinicLedgerAccountGuard` aspect type (DDL
 //     `clinicLedgerAccountGuard`) — vtx.patient.<NanoID>.ledgerAccount =
-//     {accountKey}, written once by CreateAccount alongside the account it
+//     {accountKey}, written once by ClinicCreateAccount alongside the account it
 //     names; its deterministic, patient-anchored key is the uniqueness guard.
 //
 //   - The `clinictransaction` vertex type (DDL `clinictransaction`) —
@@ -65,8 +65,8 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 // Package is the static, install-time bundle.
 var Package = pkgmgr.Definition{
 	Name:    "clinic-ledger",
-	Version: "0.2.3",
-	Description: "Clinic patient payment ledger: the clinicaccount vertex type (CreateAccount, independently-minted " +
+	Version: "0.2.4",
+	Description: "Clinic patient payment ledger: the clinicaccount vertex type (ClinicCreateAccount, independently-minted " +
 		"id, one per patient via a .ledgerAccount guard aspect on the patient) + the clinictransaction vertex type " +
 		"(DebitAccount/CreditAccount, append-only entries linked to the account via postedTo, DebitAccount taking an " +
 		"optional appointmentRef back-ref) + the clinicLedgerHistory read-model lens (one row per transaction) + the " +
@@ -77,4 +77,5 @@ var Package = pkgmgr.Definition{
 	Lenses:        Lenses(),
 	Permissions:   Permissions(),
 	WeaverTargets: WeaverTargets(),
+	OpMetas:       OpMetas(),
 }

@@ -15,11 +15,13 @@ running stack).
 | **Vertex types** (2) | `clinicaccount` (root `{}`, D5) · `clinictransaction` (root `{}`, D5, `.entry` aspect incl. a debit-only payer dimension) |
 | **Aspect types** (1) | `clinicLedgerAccountGuard` — `vtx.patient.<id>.ledgerAccount`, the per-patient create-only uniqueness guard |
 | **Links** (2) | `heldFor` (account → patient) · `postedTo` (transaction → account) |
-| **Operations** (3) | `CreateAccount` · `DebitAccount` · `CreditAccount` |
+| **Operations** (3) | `ClinicCreateAccount` · `DebitAccount` · `CreditAccount` |
 | **Projection lenses** (2) | `clinicLedgerHistory` (one row per transaction) → `clinic-ledger-history` · `clinicPatientAccounts` (patient → account key lookup) → `clinic-patient-accounts` (both `nats-kv`, `full` engine) |
 
-Every op is granted to the `operator` role at `scope: any` (`permissions.go`) — the trusted
-single-identity model, no new capability surface, identical to `loftspace-ledger`.
+`DebitAccount`/`CreditAccount` are granted to `operator` only at `scope: any` (`permissions.go`) —
+the trusted single-identity model. `ClinicCreateAccount` also grants `frontOfHouse`, unconfined (a
+patient carries no building to workplace-confine to) — the front desk opens a patient's ledger
+account directly from the browser.
 
 ## Key shapes (Contract #1)
 
@@ -42,11 +44,11 @@ otherwise both install onto one kernel.
 
 ## Independent account NanoID + guard aspect
 
-`CreateAccount` mints the account under its **own independently-generated NanoID** — never reused
+`ClinicCreateAccount` mints the account under its **own independently-generated NanoID** — never reused
 from the patient, since Core KV NanoIDs are unique platform-wide identifiers, not scoped per vertex
 type. "At most one account per patient" is enforced by the deterministic create-only
 `clinicLedgerAccountGuard` aspect on the **patient** (`patientKey + ".ledgerAccount"`) instead of a
-shared/derived key: a second `CreateAccount` for the same patient conflicts on that already-existing
+shared/derived key: a second `ClinicCreateAccount` for the same patient conflicts on that already-existing
 aspect key. This mirrors `loftspace-ledger`'s account/lease shape (the account held for a patient
 instead of a lease — a patient may have many appointments/encounters, and billing tracks a single
 running balance across all of them); see

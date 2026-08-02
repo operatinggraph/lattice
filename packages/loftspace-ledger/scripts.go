@@ -11,7 +11,7 @@ import "fmt"
 // leaseServiceReplyDDLScript.
 const recurringChargePeriod = "720h"
 
-// accountDDLScript handles CreateAccount. The account gets its OWN
+// accountDDLScript handles LoftspaceCreateAccount. The account gets its OWN
 // independently-minted NanoID — vertex NanoIDs are unique identifiers across
 // all of Core KV, never reused across vertex types, even deliberately (a
 // prior revision minted the account under the lease's own bare NanoID;
@@ -21,11 +21,15 @@ const recurringChargePeriod = "720h"
 // adjacency-shared-nanoid-collision-design.md). "One account per lease" is
 // instead enforced by a deterministic CREATE-ONLY guard aspect on the
 // PRE-EXISTING leaseapp (leaseAppKey + ".ledgerAccount") — a second
-// CreateAccount for the same lease conflicts on that already-existing aspect
+// LoftspaceCreateAccount for the same lease conflicts on that already-existing aspect
 // key, the same "let the key shape be the uniqueness guard" idiom, just
 // anchored on the pre-existing parent instead of a freshly-minted sibling.
 // Root data stays {} on the account (D5): the balance is derived by the
-// ledgerHistory lens, never stored here.
+// ledgerHistory lens, never stored here. Granted to operator + frontOfHouse
+// (permissions.go) — frontOfHouse is confined to the lease's own building via
+// the workplace-confinement guard below (a leaseapp sits at a unit, unlike
+// clinic-ledger/wellness-ledger's practice-wide patient/member, so this
+// create op cannot go unconfined the way theirs did).
 const accountDDLScript = `
 def make_vtx(key, cls, data):
     return {"op": "create", "key": key,
@@ -72,11 +76,173 @@ def vertex_alive(state, key):
         return False
     return True
 
+# --- workplace write confinement (facet-staff-worlds-design.md §3.5) ---------
+#
+# A staff actor may write only inside the location it worksAt. Mirrors
+# lease-signing's DecideLeaseApplication / cafe-ledger's CreditCafeAccount
+# guard verbatim (Starlark has no cross-package import, so each package that
+# grants a staff role a confined op carries its own copy). Three properties
+# make this sound; each is a trap a simpler form falls into.
+#
+# 1. The exemption is ROLE-derived, never worksAt-derived. Exempting "an actor
+#    with no worksAt link" would be perverse: UnwireWorksAt would WIDEN a staff
+#    member's write surface from one building to everywhere. The exemption is
+#    holding the primordial 'operator' role, so an actor that is genuinely
+#    root necessarily has it. Everyone else is confined, and an actor holding
+#    no roles at all is confined to nothing.
+#
+# 2. A tombstoned link is ABSENT. kv.Read returns the tombstone DOCUMENT
+#    rather than None, and UnwireWorksAt tombstones rather than deletes, so a
+#    plain '== None' test would let a moved-on staff member keep writing.
+#
+# 3. The location is resolved from the TARGET's own topology, never from a
+#    payload field — a caller cannot forge which building it is writing at.
+ROLE_PAGE_LIMIT = 50
+MAX_ROLE_PAGES = 4
+WORKPLACE_PARENT_PAGE_LIMIT = 20
+MAX_PARENT_PAGES = 4
+WORKPLACE_MAX_DEPTH = 8
+WORKPLACE_MAX_NODES = 64
+
+def actor_holds_operator(actor_key):
+    # Resolved from the GRAPH, not a compile-time constant (see lease-signing's
+    # identical resolver for why). Paginated and fail-closed: exhausting the
+    # page budget still denies rather than assuming the role is absent.
+    cursor = None
+    for _page in range(MAX_ROLE_PAGES):
+        # read-posture: (e) relation=holdsRole epoch=none -- an identity holds
+        # few roles, so this is never a keyspace scan.
+        page, cursor = kv.Links(actor_key, "holdsRole", "out", cursor, ROLE_PAGE_LIMIT)
+        for lk in page:
+            if lk.isDeleted:
+                continue
+            # read-posture: (e) per-candidate follow-up read off the
+            # enumeration above (data-derived key -- the role is unknown
+            # until it resolves).
+            cn = kv.Read(lk.targetVertex + ".canonicalName")
+            if cn != None and not cn.isDeleted and cn.data.get("value") == "operator":
+                return True
+        if cursor == None:
+            return False
+    return False
+
+def worksAt_covers(actor_id, location_key):
+    # Answers "does this actor worksAt this location, or any LIVE location
+    # that contains it?" — a breadth-first walk up containedIn, tested on
+    # EVERY node (the starting one included) so a dead ancestor confers
+    # nothing but a dead starting location confers everything. Bounded three
+    # ways (depth/page/node budget) so an op-time guard cannot fan out;
+    # exhausting a bound falls through to the final denial, never an escape.
+    if location_key == None:
+        return False
+    frontier = [location_key]
+    seen = [location_key]
+    for _ in range(WORKPLACE_MAX_DEPTH):
+        if len(frontier) == 0:
+            return False
+        parents = []
+        for cur in frontier:
+            parts = cur.split(".")
+            if len(parts) != 3:
+                continue
+            # read-posture: (e) per-candidate follow-up read off the
+            # containedIn enumeration below -- the location VERTEX, so a
+            # tombstoned one neither confers a match nor is walked through.
+            node = kv.Read(cur)
+            if node == None or node.isDeleted:
+                continue
+            # read-posture: (e) per-candidate follow-up read off the same
+            # enumeration (data-derived key -- the ancestor chain is not
+            # knowable client-side, so it cannot be pre-declared).
+            lnk = kv.Read("lnk.identity." + actor_id + ".worksAt." + parts[1] + "." + parts[2])
+            if lnk != None and not lnk.isDeleted:
+                return True
+            cursor = None
+            for _page in range(MAX_PARENT_PAGES):
+                # read-posture: (e) relation=containedIn epoch=none -- a
+                # location has at most a few parents; containment is
+                # provisioned topology, not written concurrently with this op.
+                page, cursor = kv.Links(cur, "containedIn", "out", cursor, WORKPLACE_PARENT_PAGE_LIMIT)
+                for lk in page:
+                    if lk.isDeleted:
+                        continue
+                    nxt = lk.targetVertex
+                    if nxt in seen:
+                        continue
+                    if len(seen) >= WORKPLACE_MAX_NODES:
+                        continue
+                    seen.append(nxt)
+                    parents.append(nxt)
+                if cursor == None:
+                    break
+        frontier = parents
+    return False
+
+def workplace_exempt():
+    # The cheap half of require_workplace, callable BEFORE lease_unit runs --
+    # require_workplace(lease_unit(x), ...) would walk lease topology even for
+    # root. Call sites gate on this; require_workplace re-checks it anyway, so
+    # forgetting the gate is still correct, only slower.
+    return op.authTargetValidated or actor_holds_operator(op.actor)
+
+def require_workplace(location_keys, what):
+    # Binds the STANDING path only (operator/frontOfHouse via scope=any).
+    # LoftspaceCreateAccount declares no scope=self grant, so
+    # op.authTargetValidated is never legitimately true here -- this is
+    # belt-and-suspenders with workplace_exempt's own check, not a live branch.
+    if op.authTargetValidated:
+        return
+    enforce_workplace(location_keys, what)
+
+def enforce_workplace(location_keys, what):
+    # location_keys is a LIST -- covering ANY ONE of them authorizes the
+    # write. An empty/all-None list denies anyone but an operator, so an
+    # unwired topology fails closed rather than falling open.
+    if actor_holds_operator(op.actor):
+        return
+    _, actor_id = parts_of(op.actor, "actor", "identity")
+    for loc in location_keys:
+        if loc != None and worksAt_covers(actor_id, loc):
+            return
+    fail("AuthDenied: " + op.actor + " does not worksAt any location covering " +
+         str(location_keys) + "; " + what)
+
+def vertex_live(key):
+    # Is this vertex present AND not tombstoned? Distinct from
+    # vertex_alive(state, key): lease_unit's hop is DATA-derived (resolved
+    # from a link mid-walk), so unknowable client-side and undeclarable --
+    # only a live read can see it.
+    if key == None:
+        return False
+    # read-posture: (e) one bounded read; the key is data-derived, resolved
+    # from a kv.Links enumeration mid-walk.
+    node = kv.Read(key)
+    return node != None and not node.isDeleted
+
+def lease_unit(lease_key):
+    # A lease's location is its unit, one platform-written hop away
+    # (appliesToUnit, required at CreateLeaseApplication) — unlike
+    # cafe-ledger's account_unit this resolves straight from the payload's
+    # OWN leaseAppKey (already validated alive above), not via an
+    # account-side heldFor hop, since at LoftspaceCreateAccount time the
+    # account does not exist yet to hold one.
+    # read-posture: (e) relation=appliesToUnit epoch=none -- a leaseapp
+    # carries exactly one appliesToUnit link, so this is never a keyspace
+    # scan.
+    page, _ = kv.Links(lease_key, "appliesToUnit", "out")
+    unit = None
+    for lk in page:
+        if not lk.isDeleted:
+            unit = lk.targetVertex
+    if not vertex_live(unit):
+        return None
+    return unit
+
 def execute(state, op):
     ot = op.operationType
     p = op.payload
 
-    if ot == "CreateAccount":
+    if ot == "LoftspaceCreateAccount":
         lease_key = required_string(p, "leaseAppKey")
         _, lease_id = parts_of(lease_key, "leaseAppKey", "leaseapp")
 
@@ -84,12 +250,29 @@ def execute(state, op):
         if not vertex_alive(state, lease_key):
             fail("UnknownLeaseApplication: " + lease_key)
 
+        # Staff-standing confinement: the location comes from the LEASE's own
+        # appliesToUnit topology, never from the payload, so it cannot be
+        # forged. Mirrors DecideLeaseApplication/CreditCafeAccount -- a
+        # leaseapp sits at a building, unlike clinic/wellness's practice-wide
+        # patient/member, so (unlike those two packages' CreateAccount) this
+        # one cannot be granted unconfined.
+        # workplace-exempt: (no-validated-path) LoftspaceCreateAccount
+        # declares one scope=any grant, to [operator, frontOfHouse]
+        # (permissions.go), and no package mints a task forOperation it -- so
+        # op.authTargetValidated is never legitimately true and only an
+        # operator reaches the exemption. The frontOfHouse half is bound by
+        # require_workplace instead. Adding a scope=self grant, or a task,
+        # makes this claim false and needs a matching exemption here.
+        if not workplace_exempt():
+            require_workplace([lease_unit(lease_key)],
+                               "cannot open ledger account for lease " + lease_key)
+
         # One account per lease, guarded by a deterministic aspect on the
         # PRE-EXISTING leaseapp (not the account — the account's own id is
         # independent and unknown until minted below). Only meaningful when
         # the caller declared the guard key in contextHint.reads (a
         # repeat/racing caller checking before it retries); the FIRST
-        # CreateAccount for a lease declares only leaseAppKey (the guard
+        # LoftspaceCreateAccount for a lease declares only leaseAppKey (the guard
         # doesn't exist yet — declaring an as-yet-absent key in reads would
         # HydrationMiss on first touch, deferred past hydration), so on that
         # path the guard aspect's own
@@ -124,7 +307,7 @@ def execute(state, op):
 `
 
 // aspectDeclarationOnlyScript is the declaration-only Starlark for
-// ledgerAccountGuard — written by CreateAccount's own op handler, never
+// ledgerAccountGuard — written by LoftspaceCreateAccount's own op handler, never
 // dispatched as an operation in its own right.
 const aspectDeclarationOnlyScript = `
 def execute(state, op):

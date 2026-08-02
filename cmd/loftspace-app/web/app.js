@@ -2534,7 +2534,7 @@ function openRenewalAction(row, operationName) {
   });
 }
 
-// openLedgerAccount opens the lease's ledger account (CreateAccount) and
+// openLedgerAccount opens the lease's ledger account (LoftspaceCreateAccount) and
 // returns its freshly-minted key. The account carries its OWN independent
 // NanoID (never derived from the lease's — Core KV NanoIDs are unique
 // platform-wide, not reused across vertex types), so the ONLY reliable
@@ -2545,7 +2545,7 @@ function openRenewalAction(row, operationName) {
 // here would make account-opening impossible rather than idempotent.
 async function openLedgerAccount(leaseAppKey) {
   const reply = await submitOp({
-    operationType: "CreateAccount",
+    operationType: "LoftspaceCreateAccount",
     class: "account",
     reads: [leaseAppKey],
     payload: { leaseAppKey },

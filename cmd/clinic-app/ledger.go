@@ -85,7 +85,7 @@ func computeLedgerHistory(keys []string, get kvGetter, patientKey string) ([]led
 
 // patientAccountProjection is one row of the clinic-ledger
 // `clinicPatientAccounts` lens — one per patient, AccountKey empty until
-// CreateAccount has opened one. The account carries its OWN
+// ClinicCreateAccount has opened one. The account carries its OWN
 // independently-minted NanoID (never derived from the patient's — see
 // packages/clinic-ledger/scripts.go), so this lens read is the only way to
 // resolve it.
