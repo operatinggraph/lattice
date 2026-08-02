@@ -212,8 +212,19 @@ Increment 0 is independently valuable and independently shippable: it hardens na
 - **`projectedFromRevisions` — benign, and named so it is not re-discovered.** The row is stamped with
   the lens's own `vtx.meta.<ruleID>` revision (`projection/freshness.go:23-47`, `driver.go:118`, `:368`)
   — a `meta` key in no auth lens's label set. It changes only when the lens definition changes, which
-  rides hot-reload → `Rebuild` → consumer reset; and a `vtx.meta.*` event reaches no actor through the
-  BFS today either, so narrowing changes nothing about it.
+  rides hot-reload → `Rebuild` → consumer reset.
+
+  **Correction (Increment 1 build, 2026-08-02).** The original second half of this bullet claimed *"a
+  `vtx.meta.*` event reaches no actor through the BFS today either"*. That is **false**: `Enumerate` is
+  relation- and type-blind (`pipeline/actor_enumerator.go:24-52`) and meta vertices are linked into the
+  graph (`permission forOperation meta`), so a meta write does reach identities via
+  `meta → permission → role → identity` and does drive a `capabilityRoles` recompute today. The
+  conclusion survives on a different footing: `capabilityRoles` reads no meta **property**, and
+  `ContributingSources` stamps the row from a revision *lookup* rather than from a delivered event, so
+  the skip changes no projected value. The real effect is that `projectedFromRevisions` on
+  already-written rows goes stale until the sweep's deep verify reaches that anchor — and
+  `freshness.go:14-19` records that this datum is coherence provenance, **not** the write-ordering
+  guard (`projectionSeq` is), so it carries no auth risk. Do not reuse the original premise.
 
 ### 4.5 Increment 1 — relevance-gate the actor-aware arms (client-side)
 
@@ -742,3 +753,81 @@ AssignRole still projects U's grant with the gate armed.
 Increments 2–3 (`NarrowedFilterEligible`'s eligibility swap and the `:550-561` comment rewrite; the
 pattern-directed derivation); the enumerator's caps and its `reportsTo` hop; any change to what the
 fan-out does once it runs; `verify-claim-ceremony.go`. Nothing staged uncommitted.
+
+### 14.7 Eligibility census — the gate arms ~10× wider than §4.6 discusses
+
+§4.6 is about **Increment 2's** filter subjects and names two lenses. Increment 1's *client* gate arms
+for every lens satisfying §4.2, which this fire enumerated over the whole installed corpus (all
+`packages/**` actor-aggregate + personal lenses via `pkgregistry`, plus the four kernel lenses). **17
+lenses narrow**, not two:
+
+- **Auth-plane (4):** `capabilityRoles` `{identity, role, permission}` · kernel `capability`
+  `{identity, role}` · kernel `capabilityRead` `{identity}` · the generated
+  `edgeManifestProviderReadGrants` (a D1 `cap-read` grant producer) — the last stays exhaustive only
+  because the generated staging `WITH` carries the anchor as a bare variable, which is exactly the case
+  Increment 0a's `carryLabeled` keeps labeled.
+- **Business convergence (13):** `unroutedTasks`, `leaseExpiry`, `renewalComplete`, `cafeTabSettlement`,
+  `cafeStaleTabSettlement`, `clinicNoShowSettlement`, `wellnessNoShowSettlement`,
+  `wellnessClassPriceSettlement`, `wellnessOrphanedBookingSettlement`, `wellnessBookingReminders`,
+  `appointmentReminders`, `followUpReminders`, `visitSeriesDue`, `pastDueAppointments`,
+  `capabilityAuthorPending`, `augurDispatchPending`.
+
+Correctly staying broad: `capabilityEphemeral`, `myTasks`, `orphanedTaskGrants`,
+`capabilityServiceAccess`, `clauseSatisfaction`, `leaseApplicationComplete`, `identityAnchors`,
+`objectLiveness`, `objectAttachments`, `edgeManifestReadGrants`, `edgeManifestStaffReadGrants`, and
+every personal lens.
+
+**The `$now` question the business lenses raise, answered.** Those lenses depend on wall-clock flips, and
+the worry is that narrowing filters away whatever re-triggers them. It does not: the re-touch is
+Weaver's `MarkExpired` writing `vtx.<type>.<id>.freshnessExpiry` **on the entity from the projected row's
+own `entityKey`** (`packages/orchestration-base/mark_expired.go:23-25`; `internal/weaver/temporal.go:132`,
+`:292`) — i.e. on the anchor. The aspect arm parses the marker's parent type, which is therefore the
+anchor type, which `anchorType ∈ labels` makes a conjunct. The freshness plane is structurally
+un-skippable, not accidentally safe. Weaver's `freshUntil` timer likewise runs off the projected row, not
+off a Refractor recompute.
+
+`internal/refractor/auth_plane_narrowing_census_test.go` pins the verdict for the auth-plane lenses
+against their **shipped** cypher, so a future cypher edit that changes a verdict fails there rather than
+in Capability KV.
+
+### 14.8 Deviation from the ratified design, recorded not hidden
+
+§4.1 says the soundness claim holds *"given Increment 0's two gates, and unsound without them"*.
+**Increment 0 shipped 0a only** — §13.4 falsified 0b's premise and re-scoped its mechanism back to the
+Designer — so the `nodeMatches` body-`class` binding path (`executor.go:554-573`) is live and ungated,
+with a real in-tree violation (`packages/location-domain/ddls.go:182,187,318`, where `unit`/`building`/
+`property` all carry `class: "location"`).
+
+**Shipping anyway, deliberately.** The exposure is not created here: shipped D1 already rests on the same
+invariant for ~90 plain lenses. No lens in the corpus labels a pattern node `:location` or any other
+class-only token, so there is no live victim on either plane. What Increment 1 does is **widen the blast
+radius of an existing latent hazard to the auth plane**, where its consequence changes from a stale read
+model to a grant that never updates and never retracts. The board row for the 0b re-scope is raised to
+★★★ and now names the auth plane as its consumer.
+
+### 14.9 Adversarial review — three findings folded, two recorded
+
+Two independent read-only reviewers (soundness; blast-radius + house rules). Neither could break the gate
+on the live corpus. The soundness pass independently reproduced §14.7's census and hand-verified all four
+auth-plane lenses sound; it also cleared the link arm's lost adjacency pre-apply (for an exhaustive
+pattern-closed lens every pattern edge has both endpoints in-labels, so a skipped edge can only shrink
+the BFS, and the last hop into the anchor always carries the anchor type). Folded:
+
+1. **The units and e2e never touched the real derivation** — both hand-assigned a label set, and the e2e
+   asserted 2 of 6 conjuncts, so a `ReferencedLabels` regression would have left it passing
+   byte-identically. → `ActorAwareNarrowingLabels` is exported, the e2e now asserts the derived verdict
+   and set, and §14.7's census test drives the shipped cyphers.
+2. **A pre-existing test's claim was falsified by this change** —
+   `TestHandle_VertexEvent_ActorAwarePipelineIgnoresTheGate` asserted "the gate never applies to an
+   actor-aware pipeline", which is precisely what Increment 1 stops being true. It still passes (its
+   fixture is ineligible), so it was a documentation defect, not a false pass. → renamed to
+   `…IgnoresThePlainGate` and scoped to the plain gate.
+3. **Two history-narrating comments** (CLAUDE.md's most-violated rule) → removed; a third instance the
+   reviewer missed was removed with them.
+
+Recorded rather than fixed: the decryptor conjunct is **unreachable** in the shipped corpus (secure +
+actorAggregate is rejected at translate time, and a secure personal lens is already ineligible), and
+`hasSweepPlan` proves *enrolment*, not that a sweep is turning. Both are now stated at the code site. A
+third — `plainReprojectLabels` is written by MATCH hot-reload unsynchronized against the consumer
+goroutine, which this change makes actor-aware pipelines read too — is filed as its own board row: every
+interleaving lands broad (fail-closed), and it pre-dates this fire on the plain corpus.
