@@ -1286,3 +1286,63 @@ a.pulse-derived-text:hover { color: var(--text); }
    platform's grants are the enforcement — so an unmarked affordance is a
    blemish, not a hole. */
 body.demo-mode [data-demo-hide] { display: none !important; }
+
+/* ---------------------------------------------------------------------------
+   Weaver Target Studio — Observe (#/weaver). The roster/map/drill share one
+   badge vocabulary (.wchip), scoped rather than global so it cannot collide
+   with the older per-view chip classes above.
+   --------------------------------------------------------------------------- */
+#weaver-list, #weaver-target, #weaver-entity { display: none; }
+#weaver-list.visible, #weaver-target.visible, #weaver-entity.visible { display: block; }
+
+.wchip {
+  font-size: 10px; padding: 1px 7px; border-radius: 10px;
+  border: 1px solid var(--border); color: var(--text-dim);
+  white-space: nowrap; letter-spacing: 0.2px;
+}
+.wchip.ok { color: var(--green); border-color: var(--green); }
+.wchip.warn { color: var(--yellow); border-color: var(--yellow); }
+.wchip.bad { color: var(--red); border-color: var(--red); }
+.wchip.info { color: var(--accent); border-color: var(--accent-dim); }
+.wchip.muted { color: var(--text-dim); }
+
+.weaver-card-head { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-bottom: 4px; }
+.weaver-card-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.weaver-sep { color: var(--text-dim); }
+.weaver-target-name, .weaver-entity-id, .weaver-gap-name { font-size: 13px; font-weight: 600; word-break: break-word; }
+.weaver-target-card.orphan { border-left-color: var(--yellow); opacity: 0.85; cursor: default; }
+.weaver-link { color: var(--accent); }
+
+.weaver-detail-head { margin-bottom: 14px; }
+.weaver-panel { margin-top: 18px; }
+.weaver-panel h3 { font-size: 12px; text-transform: uppercase; letter-spacing: 0.6px; color: var(--text-dim); margin: 0 0 6px; }
+
+/* The definition diagram. It scrolls inside its own box: the layout widens
+   with the longest action label, and the page body must never scroll sideways. */
+.weaver-map { overflow-x: auto; margin: 12px 0; border: 1px solid var(--border); border-radius: 6px; padding: 6px; }
+.weaver-map-svg { display: block; }
+.weaver-node rect { fill: var(--bg-input); stroke: var(--border); }
+.weaver-node.ok rect { stroke: var(--green); }
+.weaver-node.warn rect { stroke: var(--yellow); }
+.weaver-node.bad rect { stroke: var(--red); }
+.weaver-node.unbound rect { stroke: var(--text-dim); stroke-dasharray: 4 3; }
+.weaver-node.disabled rect { opacity: 0.6; }
+.weaver-node.clickable { cursor: pointer; }
+.weaver-node.clickable:hover rect { stroke: var(--accent); }
+.weaver-node-label { fill: var(--text); font-size: 12px; font-weight: 600; }
+.weaver-node-sub { fill: var(--text-dim); font-size: 10px; }
+.weaver-edge { fill: none; stroke: var(--border); stroke-width: 1.5; }
+.weaver-edge-label { fill: var(--text-dim); font-size: 9px; }
+
+.weaver-gap-card { margin-bottom: 10px; }
+.weaver-action { border-left: 2px solid var(--border); padding-left: 8px; margin-top: 8px; }
+.weaver-action-head { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.weaver-action-kind { font-size: 12px; font-weight: 600; }
+.weaver-binding { font-size: 10px; padding: 1px 5px; border-radius: 3px; background: var(--bg-input); margin-left: 6px; }
+.weaver-mark, .weaver-artifact { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 8px; }
+.weaver-issue { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 6px 0; border-bottom: 1px solid var(--border); }
+.weaver-policy { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 8px; }
+.weaver-policy-box { border: 1px solid var(--border); border-radius: 6px; padding: 6px 8px; }
+.weaver-policy-name { font-size: 10px; text-transform: uppercase; letter-spacing: 0.5px; color: var(--text-dim); }
+.weaver-policy-body { font-size: 11px; margin: 4px 0 0; white-space: pre-wrap; word-break: break-word; }
+.comp-maplink { font-size: 10px; color: var(--accent); white-space: nowrap; }

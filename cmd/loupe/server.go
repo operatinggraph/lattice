@@ -132,6 +132,7 @@ func (s *server) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/events/stream", s.handleEventStream)
 	mux.HandleFunc("/api/lens/", s.handleLens)
 	mux.HandleFunc("/api/tasks", s.handleTasks)
+	mux.HandleFunc("/api/weaver/", s.handleWeaver)
 	mux.HandleFunc("/api/flows", s.handleFlows)
 	mux.HandleFunc("/api/flows/", s.handleFlowDetail)
 	mux.HandleFunc("/api/history/timeline", s.handleHistoryTimeline)

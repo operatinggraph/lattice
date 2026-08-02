@@ -300,6 +300,17 @@ function renderPlannerEffects(col, p) {
   });
 }
 
+// targetMapLink is the F18 panel's way out into the Weaver Target Studio: an
+// exception names a target, and the map is where that target's structure, live
+// gap state and per-entity drill are. The exception lists stay exactly as they
+// were — this only stops each one being a dead end.
+function targetMapLink(targetId) {
+  const a = el("a", "comp-maplink", "map \u2192");
+  a.href = "#/weaver/" + encodeURIComponent(targetId);
+  a.title = "open " + targetId + " in the Weaver Target Studio";
+  return a;
+}
+
 // renderPlannerContraction renders the contraction trajectories exception-first:
 // diverging targets are named loudly, shrinking ones quietly, and the steady
 // majority collapses to a count.
@@ -311,7 +322,12 @@ function renderPlannerContraction(col, p) {
     const box = el("div", "card degraded");
     box.appendChild(el("div", "warn-text",
       c.diverging.length + " diverging — open gaps only grow; remediation is losing ground"));
-    c.diverging.forEach((id) => box.appendChild(el("div", "cid", id)));
+    c.diverging.forEach((id) => {
+      const row = el("div", "control-item");
+      row.appendChild(el("span", "cid", id));
+      row.appendChild(targetMapLink(id));
+      box.appendChild(row);
+    });
     col.appendChild(box);
   }
   const quiet = [];
@@ -350,6 +366,7 @@ function renderPlannerShadow(col, p) {
   rows.forEach((r) => {
     const row = el("div", "control-item");
     row.appendChild(el("span", "cid", r.targetId));
+    row.appendChild(targetMapLink(r.targetId));
     row.appendChild(el("span", "state-tag", pctLabel({ pct: r.rate }) + " diverging"));
     row.appendChild(el("span", "muted small", r.agree + " agree / " + r.diverge + " diverge"));
     col.appendChild(row);
@@ -504,6 +521,9 @@ function renderControlLists(rowsBox, page, out, refresh) {
 function controlRow(comp, id, row, ops, out, refresh) {
   const line = el("div", "control-item");
   line.appendChild(el("span", "cid", id || "(no id)"));
+  // A Weaver control row names a targetId, so it gets the same way out into
+  // the target map the planner exceptions have.
+  if (comp === "weaver" && id) line.appendChild(targetMapLink(id));
   const rowState = row.state || row.status || "";
   if (rowState) line.appendChild(el("span", "state-tag", String(rowState)));
   ops.forEach((op) => {

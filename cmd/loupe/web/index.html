@@ -15,6 +15,7 @@
       <a class="tab" data-tab="tasks" href="#/tasks">Tasks</a>
       <a class="tab" data-tab="edge" href="#/edge">Edge</a>
       <a class="tab" data-tab="flows" href="#/flows">Flows</a>
+      <a class="tab" data-tab="weaver" href="#/weaver">Weaver</a>
       <a class="tab" data-tab="packages" href="#/packages">Packages</a>
       <a class="tab" data-tab="files" href="#/files">Files</a>
       <a class="tab" data-tab="review" href="#/review">Review<span class="review-badge" id="review-badge"></span></a>
@@ -193,6 +194,28 @@
         <div class="cards" id="flows-cards"></div>
       </div>
       <div id="flow-detail"></div>
+    </section>
+
+    <!-- Weaver Target Studio — Observe (#/weaver, #/weaver/<targetId>, #/weaver/<targetId>/<entityId>) -->
+    <section class="panel" id="panel-weaver">
+      <div class="panel-controls">
+        <button id="weaver-reload">Refresh</button>
+        <span class="muted" id="weaver-status-msg"></span>
+      </div>
+      <div id="weaver-list" class="visible">
+        <p class="muted small">The convergence plane, target-shaped. A target declares what must hold (a
+          violation lens projecting one row per candidate entity) and what closes each gap (a playbook);
+          the Weaver converges reality onto it. This roster is exception-first: oscillation-frozen targets
+          (the runtime detector has stopped remediating a fighting pair), then <b>diverging</b> ones (open
+          gaps only grow), then disabled ones, then anything carrying a standing issue. A target absent
+          from the contraction trend has not been sampled yet — which is not the same as steady. Drill into
+          a target for its gap-by-gap map with live state on it, and into a candidate for its per-gap
+          episode. Read-only; the control-plane actions live on the
+          <a href="#/component/weaver">Weaver component page</a>.</p>
+        <div class="cards" id="weaver-cards"></div>
+      </div>
+      <div id="weaver-target"></div>
+      <div id="weaver-entity"></div>
     </section>
 
     <!-- Component page (drill-through: #/component/<id>) -->

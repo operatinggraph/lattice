@@ -13,6 +13,7 @@ import * as graph from "./views/graph.js";
 import * as tasks from "./views/tasks.js";
 import * as edge from "./views/edge.js";
 import * as flows from "./views/flows.js";
+import * as weaver from "./views/weaver.js";
 import * as component from "./views/component.js";
 import * as packages from "./views/packages.js";
 import * as pkg from "./views/package.js";
@@ -32,6 +33,7 @@ const routes = {
   tasks:     { panel: "tasks",     view: tasks,     crumb: "Tasks" },
   edge:      { panel: "edge",      view: edge,      crumb: "Edge" },
   flows:     { panel: "flows",     view: flows,     crumb: "Flows" },
+  weaver:    { panel: "weaver",    view: weaver,    crumb: "Weaver" },
   component: { panel: "component", view: component, crumb: "System Map", nav: "systemmap", crumbHref: "#/map" },
   lens:      { panel: "lens",      view: lens,      crumb: "Refractor", nav: "systemmap", crumbHref: "#/component/refractor" },
   packages:  { panel: "packages",  view: packages,  crumb: "Packages" },
@@ -112,6 +114,26 @@ function renderCrumbs(route, entry) {
     return;
   }
 
+  // A Weaver arg is "targetId[/entityId]" — "/"-joined like Review's, not the
+  // "."-joined vertex-key shape, and the targetId half links back to its own
+  // map so the entity drill crumbs through the target rather than straight to
+  // the roster.
+  if (route.view === "weaver") {
+    const parts = route.arg.split("/");
+    const box = el("span", "crumb-key");
+    if (parts[1]) {
+      const a = el("a", "crumb", parts[0]);
+      a.href = "#/weaver/" + encodeURIComponent(parts[0]);
+      box.appendChild(a);
+      box.appendChild(el("span", "crumb-dot", "\u203a"));
+      box.appendChild(el("span", null, parts[1]));
+    } else {
+      box.appendChild(el("span", null, parts[0]));
+    }
+    bar.appendChild(box);
+    return;
+  }
+
   // An Edge arg is a personal-lens-interest KEY, not a Core KV vertex key: it
   // splits identity/device on the FIRST dot, and the device half may itself
   // contain dots. Walking it with the vertex-key decomposition below would
@@ -159,6 +181,7 @@ graph.init();
 tasks.init();
 edge.init();
 flows.init();
+weaver.init();
 component.init();
 lens.init();
 packages.init();

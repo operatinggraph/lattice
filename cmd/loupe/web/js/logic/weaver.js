@@ -1,0 +1,307 @@
+// Pure Weaver Target Studio shaping (weaver-target-studio-design.md §4, the
+// Observe stage): the target roster's worst-first order, the target map's
+// layered node/edge layout, the gap and entity badge vocabulary, and the entity
+// drill's per-gap state line. No DOM, no fetch — goja-tested via
+// cmd/loupe/web_logic_weaver_test.go (strip-export load, ES6-conservative).
+//
+// The console's honesty convention governs throughout: a signal the platform
+// does not carry reads as unknown, never as a clean zero or a green. Three
+// places that matters here — a contraction class absent from every heartbeat
+// means "not sampled yet", not "steady"; a gap column no live row has ever
+// carried is "never observed", not "missing" (a lens with no candidate
+// entities legitimately has no rows); and a retry budget nothing declares is
+// unbounded, so a dispatch count under it can never read as "exhausted".
+
+// contractionLabel renders a trajectory class. "" is the absent case — the
+// Weaver omits a target from the trajectory map until its ring has samples.
+// "mixed" is Loupe's own class for two live instances disagreeing (the ring is
+// per-process and a restart zeroes it), which is a real state, not a fault.
+function contractionLabel(v) {
+  switch (v) {
+    case "diverging": return { text: "diverging", cls: "bad", title: "open gaps only grow — remediating slower than falling behind" };
+    case "shrinking": return { text: "shrinking", cls: "ok", title: "open gaps trending down" };
+    case "steady": return { text: "steady", cls: "muted", title: "open-gap count flat across the sampled window" };
+    case "mixed": return { text: "mixed", cls: "warn", title: "live Weaver instances disagree — the trajectory ring is per-process and resets on restart" };
+    default: return null;
+  }
+}
+
+// targetRank orders the roster worst-first: oscillation-frozen (the engine has
+// stopped remediating), then diverging, then disabled (inert on purpose, but
+// worth seeing above the quiet ones), then anything carrying issues.
+function targetRank(t) {
+  if (t.frozen) return 0;
+  if (t.contraction === "diverging") return 1;
+  if (t.state === "disabled") return 2;
+  if (t.issues > 0) return 3;
+  return 4;
+}
+
+// targetRows normalizes and orders the roster. Orphan `__control` markers are
+// folded in as first-class rows: nothing engine-side sweeps one, and a stale
+// marker silently disables a future target installed under that id, so it
+// belongs in the operator's list rather than in a footnote.
+function targetRows(body) {
+  var rows = [];
+  var list = (body && body.targets) || [];
+  for (var i = 0; i < list.length; i++) {
+    var t = list[i] || {};
+    rows.push({
+      targetId: String(t.targetId || ""),
+      lensRef: String(t.lensRef || ""),
+      gaps: typeof t.gaps === "number" ? t.gaps : 0,
+      state: String(t.state || ""),
+      contraction: String(t.contraction || ""),
+      frozen: !!t.frozen,
+      issues: typeof t.issues === "number" ? t.issues : 0,
+      registered: true,
+      orphan: false,
+    });
+  }
+  var orphans = (body && body.orphanControl) || [];
+  for (var j = 0; j < orphans.length; j++) {
+    rows.push({
+      targetId: String(orphans[j]),
+      lensRef: "",
+      gaps: 0,
+      state: "disabled",
+      contraction: "",
+      frozen: false,
+      issues: 0,
+      registered: false,
+      orphan: true,
+    });
+  }
+  rows.sort(function (a, b) {
+    // An orphan marker sorts with the disabled band, not above the frozen
+    // ones — it is a cleanup item, not an outage.
+    var ra = a.orphan ? 2 : targetRank(a);
+    var rb = b.orphan ? 2 : targetRank(b);
+    if (ra !== rb) return ra - rb;
+    return a.targetId < b.targetId ? -1 : a.targetId > b.targetId ? 1 : 0;
+  });
+  return rows;
+}
+
+// rosterHeadline states what the list is showing, exception-first. A control
+// plane that did not answer is said so outright — an empty roster and a silent
+// engine are different facts.
+function rosterHeadline(body, rows) {
+  if (body && body.listError) return "weaver control plane did not answer: " + body.listError;
+  var registered = 0, frozen = 0, disabled = 0, diverging = 0, orphan = 0;
+  for (var i = 0; i < rows.length; i++) {
+    var r = rows[i];
+    if (r.orphan) { orphan++; continue; }
+    registered++;
+    if (r.frozen) frozen++;
+    if (r.state === "disabled") disabled++;
+    if (r.contraction === "diverging") diverging++;
+  }
+  var parts = [registered + (registered === 1 ? " target" : " targets")];
+  if (frozen) parts.push(frozen + " frozen");
+  if (diverging) parts.push(diverging + " diverging");
+  if (disabled) parts.push(disabled + " disabled");
+  if (orphan) parts.push(orphan + " orphan __control marker" + (orphan === 1 ? "" : "s"));
+  if (body && body.stateError) parts.push("orphan scan unavailable: " + body.stateError);
+  return parts.join(" · ");
+}
+
+// gapBadges renders one gap node's live-state chips. A count of zero is shown
+// only for `open` — the number an operator is watching converge — while
+// in-flight and exhausted stay absent at zero rather than adding two quiet
+// "0"s to every healthy gap.
+function gapBadges(g) {
+  var out = [{ text: g.open + " open", cls: g.open > 0 ? "warn" : "ok" }];
+  if (g.inflight > 0) out.push({ text: g.inflight + " in flight", cls: "info" });
+  if (g.exhausted > 0) out.push({ text: g.exhausted + " budget-exhausted", cls: "bad" });
+  if (!g.observed) {
+    out.push({
+      text: "column never observed",
+      cls: "warn",
+      title: "no scanned row carries this column — either the lens does not project it, or the lens has no candidate entities yet",
+    });
+  }
+  return out;
+}
+
+// dispatchLabel names how a gap resolves. The explicit action always wins over
+// candidates (internal/weaver: candidates are consulted only when action is
+// empty), so the label is the resolution order, not a list of what is present.
+function dispatchLabel(g) {
+  switch (g.dispatch) {
+    case "action": return (g.action && g.action.action) || "action";
+    case "candidates": return "planner · " + ((g.candidates || []).length) + " candidates";
+    case "goal": return "planner · goal over " + ((g.actions || []).length) + " actions";
+    default: return "(no dispatch bound)";
+  }
+}
+
+// actionSummary is the one-line rendering of a dispatch binding.
+function actionSummary(a) {
+  if (!a) return "";
+  switch (a.action) {
+    case "triggerLoom": return "pattern " + (a.pattern || "?") + " on " + (a.subject || "?");
+    case "assignTask": return (a.operation || "?") + " → " + (a.assignee || "?");
+    case "directOp": return (a.operation || "?") + (a.target ? " on " + a.target : "");
+    case "surface": return "raise " + (a.issueCode || "?") + " (" + (a.issueSeverity || "warning") + ")";
+    case "proposedOp": return "row-carried proposed action";
+    default: return a.action || "";
+  }
+}
+
+// unboundBindings lists the `row.<column>` references an action makes that no
+// scanned row carries. Reported as unbound, not as broken: absence of evidence
+// over an empty candidate set is not evidence of a missing column, which is why
+// the caller words it "not observed in the scanned rows".
+function unboundBindings(a) {
+  var out = [];
+  var list = (a && a.bindings) || [];
+  for (var i = 0; i < list.length; i++) {
+    if (!list[i].observed) out.push(list[i]);
+  }
+  return out;
+}
+
+// --- the target map layout ---------------------------------------------
+
+var MAP_COL_X = [20, 210, 430, 660];
+var MAP_NODE_W = [160, 190, 210, 250];
+var MAP_ROW_H = 64;
+var MAP_NODE_H = 44;
+var MAP_TOP = 20;
+
+// mapLayout lays the target's definition out as four layers — lens → target →
+// gap → what the gap dispatches — and returns plain geometry so the renderer
+// stays a dumb SVG binding. Gaps drive the vertical extent; the lens and target
+// nodes centre against them.
+function mapLayout(detail) {
+  var gaps = (detail && detail.gaps) || [];
+  var rows = Math.max(gaps.length, 1);
+  var height = MAP_TOP * 2 + rows * MAP_ROW_H;
+  var mid = MAP_TOP + (rows * MAP_ROW_H) / 2 - MAP_NODE_H / 2;
+  var nodes = [];
+  var edges = [];
+
+  var lensLabel = (detail && (detail.lensName || detail.lensRef)) || "(no lens ref)";
+  nodes.push({
+    id: "lens", kind: "lens", x: MAP_COL_X[0], y: mid, w: MAP_NODE_W[0], h: MAP_NODE_H,
+    label: lensLabel,
+    sub: "violation lens",
+    cls: detail && detail.lensRef ? "" : "unbound",
+    href: detail && detail.lensRef ? "#/lens/" + detail.lensRef : "",
+  });
+  nodes.push({
+    id: "target", kind: "target", x: MAP_COL_X[1], y: mid, w: MAP_NODE_W[1], h: MAP_NODE_H,
+    label: (detail && detail.targetId) || "",
+    sub: (detail && detail.state) || (detail && detail.registered ? "active" : "not registered"),
+    cls: detail && detail.state === "disabled" ? "disabled" : "",
+    href: "",
+  });
+  edges.push({ from: "lens", to: "target", label: "projects rows" });
+
+  for (var i = 0; i < gaps.length; i++) {
+    var g = gaps[i];
+    var y = MAP_TOP + i * MAP_ROW_H;
+    var gid = "gap:" + g.column;
+    nodes.push({
+      id: gid, kind: "gap", x: MAP_COL_X[2], y: y, w: MAP_NODE_W[2], h: MAP_NODE_H,
+      label: g.column,
+      sub: g.open + " open" + (g.inflight ? " · " + g.inflight + " in flight" : ""),
+      cls: gapNodeCls(g),
+      href: "",
+    });
+    edges.push({ from: "target", to: gid, label: "" });
+
+    var aid = "act:" + g.column;
+    nodes.push({
+      id: aid, kind: "action", x: MAP_COL_X[3], y: y, w: MAP_NODE_W[3], h: MAP_NODE_H,
+      label: dispatchLabel(g),
+      sub: g.dispatch === "action" ? actionSummary(g.action) : "",
+      cls: g.dispatch === "none" ? "unbound" : "",
+      href: g.dispatch === "action" && g.action && g.action.patternKnown ? "#/graph/" + g.action.patternRef : "",
+    });
+    edges.push({ from: gid, to: aid, label: g.dispatch === "action" ? "" : "planner" });
+  }
+
+  return { width: MAP_COL_X[3] + MAP_NODE_W[3] + 20, height: height, nodes: nodes, edges: edges };
+}
+
+// gapNodeCls picks a gap node's severity class. Budget exhaustion outranks
+// open count: a gap with open rows is converging, a gap that has spent its
+// budget has stopped.
+function gapNodeCls(g) {
+  if (g.exhausted > 0) return "bad";
+  if (!g.observed) return "unbound";
+  if (g.open > 0) return "warn";
+  return "ok";
+}
+
+// --- entity roster + drill ---------------------------------------------
+
+// entityBadges renders one candidate row's chips on the target map's roster.
+function entityBadges(e) {
+  var out = [];
+  if (e.exhausted && e.exhausted.length) out.push({ text: e.exhausted.length + " exhausted", cls: "bad" });
+  if (e.open && e.open.length) out.push({ text: e.open.length + " open", cls: "warn" });
+  if (e.inflight && e.inflight.length) out.push({ text: e.inflight.length + " in flight", cls: "info" });
+  if (!out.length) out.push({ text: e.violating ? "violating · no open gap" : "converged", cls: e.violating ? "warn" : "ok" });
+  return out;
+}
+
+// rosterNote states what the entity list under a target map is, and whether
+// the counts above it are totals. A truncated scan says so — a partial count
+// presented as a total is the false-green this surface exists to avoid.
+function rosterNote(detail) {
+  var d = detail || {};
+  var shown = ((d.entities || []).length);
+  var base = shown + " of " + (d.rows || 0) + " candidate rows · " + (d.violating || 0) + " violating";
+  if (d.truncated) return base + " — scan capped, counts are over the scanned rows only, not the whole target";
+  return base;
+}
+
+// gapStateLine renders one gap's state in the entity drill: the state word, its
+// class, and the budget line. A gap with no declared ceiling reports its
+// dispatch count with no denominator rather than inventing one.
+function gapStateLine(g) {
+  var cls = { open: "warn", inflight: "info", exhausted: "bad", closed: "ok" }[g.state] || "muted";
+  var budget = "";
+  if (g.budgetKnown) budget = (g.dispatches || 0) + " / " + g.budget + " dispatches";
+  else if (g.dispatches) budget = g.dispatches + " dispatches (no declared budget)";
+  return { state: g.state, cls: cls, budget: budget };
+}
+
+// markLine renders an in-flight mark's lease facts. claimId is the open-episode
+// identity the dispatched artifact's id is seeded on, so it is shown rather
+// than hidden — it is the join an operator would otherwise have to make by
+// hand.
+function markLine(m) {
+  if (!m) return null;
+  return {
+    action: String(m.action || "(unrecorded)"),
+    claimId: String(m.claimId || ""),
+    claimedAt: String(m.claimedAt || ""),
+    leaseExpiresAt: String(m.leaseExpiresAt || ""),
+    heldBy: String(m.heldBy || ""),
+  };
+}
+
+// artifactLine labels the dispatched artifact a live mark points at. `live` is
+// about the ENGINE's own state, not about the link: a Loom instance that has
+// terminated while its gap stayed open is a real and interesting state, and
+// the Chronicler's flow history outlives Loom's live record, so the link stays
+// offered and the label carries the caveat.
+function artifactLine(a) {
+  if (!a) return null;
+  var kind = a.kind === "flow" ? "Loom instance" : "task";
+  return {
+    kind: kind,
+    id: String(a.id || ""),
+    href: String(a.href || ""),
+    live: !!a.live,
+    note: a.live
+      ? "live in the engine"
+      : "not in the engine's live state — it has terminated, or this id derivation no longer matches the engine's",
+  };
+}
+
+export { contractionLabel, targetRank, targetRows, rosterHeadline, gapBadges, dispatchLabel, actionSummary, unboundBindings, mapLayout, gapNodeCls, entityBadges, rosterNote, gapStateLine, markLine, artifactLine };
