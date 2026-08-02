@@ -191,6 +191,17 @@ function money(cents) {
   return "$" + n.toFixed(2);
 }
 
+// ledgerBalanceLine renders a signed balanceCents (debits − credits) as
+// owed/credit/paid-in-full, mirroring loftspace-app's refreshLedgerBody —
+// money() alone reads a negative balance as "$-21.59", which says nothing
+// about whether it's money owed or money already paid ahead.
+function ledgerBalanceLine(balanceCents) {
+  const cents = balanceCents || 0;
+  if (cents > 0) return "Balance owed: " + money(cents);
+  if (cents < 0) return "Credit balance: " + money(-cents);
+  return "Balance: $0.00 (paid in full)";
+}
+
 // itemsMemoLine renders a tab's running itemsMemo (cafe-domain's tabStatus
 // aspect — comma-joined names, "" on a fresh tab) as its own meta line, or
 // nothing at all when there is nothing charged yet to show.
@@ -789,7 +800,7 @@ async function renderResident() {
   parts.push(
     '<div class="panel" style="max-width:640px;">' +
     "<h2>Café ledger</h2>" +
-    '<p class="ledger-balance">Balance: ' + money(ledger.balanceCents) + "</p>" +
+    '<p class="ledger-balance">' + ledgerBalanceLine(ledger.balanceCents) + "</p>" +
     (rows.length
       ? '<ul class="ledger-list">' +
         rows
