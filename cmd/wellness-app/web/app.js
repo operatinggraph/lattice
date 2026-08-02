@@ -362,6 +362,30 @@ function fmtRange(startsAt, endsAt) {
   return fmtDay(startsAt) + " " + fmtTime(startsAt) + " – " + fmtTime(endsAt);
 }
 
+// money renders integer cents as a fixed-2-decimal dollar string, mirroring
+// cafe-app's money() (cmd/cafe-app/web/app.js) — the fix for the
+// toLocaleString()-with-no-fraction-digits bug that once rendered a balance
+// as "$-21.59"-shaped surprises.
+function money(cents) {
+  const n = (cents || 0) / 100;
+  return "$" + n.toFixed(2);
+}
+
+// priceLabel renders a class's priceCents for a schedule/roster card: "Free"
+// for 0/absent, otherwise the dollar amount.
+function priceLabel(cents) {
+  return cents > 0 ? money(cents) : "Free";
+}
+
+// ledgerBalanceLine mirrors cafe-app's own helper of the same name — the
+// owed/credit/paid-in-full split, never a raw signed cents value.
+function ledgerBalanceLine(balanceCents) {
+  const cents = balanceCents || 0;
+  if (cents > 0) return "Balance owed: " + money(cents);
+  if (cents < 0) return "Credit balance: " + money(-cents);
+  return "Balance: $0.00 (paid in full)";
+}
+
 // ---- toast ---------------------------------------------------------
 
 let toastTimer = null;
@@ -635,6 +659,7 @@ function scheduleCard(se, myStatusBySession) {
     '<div class="meta">' + esc(se.studioName || shortKey(se.studioKey)) + "</div>" +
     led +
     '<div class="meta">' + esc(fmtTime(se.startsAt) + " – " + fmtTime(se.endsAt)) + "</div>" +
+    '<div class="meta">' + esc(priceLabel(se.priceCents)) + "</div>" +
     '<div class="field-row">' +
     '<button id="book-' + id + '" data-action="' + action + '"' + (disabled ? " disabled" : "") + ">" + label + "</button>" +
     "</div>" +
@@ -652,11 +677,30 @@ async function loadMyClasses() {
   await renderMyClasses();
 }
 
+// renderMyBalance loads and renders the signed-in member's own wellness
+// ledger balance (GET /api/ledger, self-scoped) — the no-show-fee / class-price
+// billing wellness-ledger posts. A blank accountKey (no ledger account opened
+// yet) renders as a plain "no charges yet" note rather than an error: today
+// only a root-submitted CreateAccount can open one (verticals.md — the
+// browser has no grant to call it itself), so this is the normal state for
+// most members, not a fault.
+async function renderMyBalance() {
+  const el = document.getElementById("myclasses-balance");
+  if (!el) return;
+  try {
+    const data = await appGet("/api/ledger");
+    el.textContent = data.accountKey ? ledgerBalanceLine(data.balanceCents) : "No charges yet.";
+  } catch (_) {
+    el.textContent = "";
+  }
+}
+
 async function renderMyClasses() {
   const body = document.getElementById("myclasses-body");
   const summary = document.getElementById("myclasses-summary");
   body.innerHTML = "";
   summary.textContent = "";
+  renderMyBalance();
   let bookings;
   try {
     const r = await appGet("/api/bookings");
@@ -727,6 +771,7 @@ function myClassCard(b) {
     '<div class="who">' + (cancelled ? "Class cancelled" : esc(b.sessionName)) + "</div>" +
     (cancelled ? "" : '<div class="meta">' + esc(b.studioName || shortKey(b.studioKey)) + "</div>") +
     '<div class="meta">' + (cancelled ? "The studio called off this class." : esc(fmtRange(b.startsAt, b.endsAt))) + "</div>" +
+    (cancelled ? "" : '<div class="meta">' + esc(priceLabel(b.priceCents)) + "</div>") +
     '<div class="card-actions"><button id="mycancel-' + id + '" class="danger"' + (cancelDisabled ? " disabled" : "") + ">" + (waitlisted ? "Leave waitlist" : "Cancel") + "</button></div>" +
     "</div>"
   );
@@ -1499,6 +1544,7 @@ function studioCard(s) {
     '<div class="field"><label>Starts</label><input type="datetime-local" id="sess-starts-' + id + '" step="900" /></div>' +
     '<div class="field"><label>Ends</label><input type="datetime-local" id="sess-ends-' + id + '" step="900" /></div>' +
     '<div class="field"><label>Capacity</label><input type="number" id="sess-cap-' + id + '" min="1" max="200" value="20" /></div>' +
+    '<div class="field"><label>Price ($, optional)</label><input type="number" id="sess-price-' + id + '" min="0" step="0.01" placeholder="Free" /></div>' +
     '<div class="field"><label>Led by</label><select id="sess-instr-' + id + '"></select></div>' +
     '<div class="field"><label>Repeat every (days)</label><input type="number" id="sess-interval-' + id + '" min="1" max="365" value="7" /></div>' +
     '<div class="field"><label>Number of classes</label><input type="number" id="sess-repeat-' + id + '" min="1" max="52" value="1" /></div>' +
@@ -1540,6 +1586,7 @@ function wireStudioCard(s) {
       starts: document.getElementById("sess-starts-" + id),
       ends: document.getElementById("sess-ends-" + id),
       capacity: document.getElementById("sess-cap-" + id),
+      price: document.getElementById("sess-price-" + id),
       instructor: instrSelect,
       intervalDays: document.getElementById("sess-interval-" + id),
       repeatCount: document.getElementById("sess-repeat-" + id),
@@ -1576,6 +1623,12 @@ async function createSession(studioKey, els) {
   if (!startsAt || !endsAt) { toast("Pick a start and end time.", false); return; }
   if (!(capacity >= 1 && capacity <= 200)) { toast("Capacity must be 1–200.", false); return; }
   if (!(Date.parse(startsAt) < Date.parse(endsAt))) { toast("End time must be after start time.", false); return; }
+  // Price is optional — a blank field means a free class (CreateSession's
+  // priceCents is itself optional, ddls.go). A malformed/negative entry is
+  // treated as blank rather than silently coerced, so "abc" or "-5" reads as
+  // "no price set" instead of a confusing NaN/negative op rejection.
+  const priceDollars = els.price ? Number(els.price.value) : NaN;
+  const priceCents = Number.isFinite(priceDollars) && priceDollars > 0 ? Math.round(priceDollars * 100) : 0;
   const instructor = els.instructor ? els.instructor.value : "";
   // repeatCount 1 (the default) is a plain single CreateSession, unchanged.
   // > 1 schedules the whole run as one CreateSessionSeries batch instead —
@@ -1591,6 +1644,7 @@ async function createSession(studioKey, els) {
   try {
     const isSeries = repeatCount > 1;
     const payload = { studio: studioKey, name, startsAt, endsAt, capacity };
+    if (priceCents > 0) payload.priceCents = priceCents;
     // The instructor endpoint is validated alive + typed by the script
     // (require_live_typed), so it is an (a)-declared REQUIRED read whenever
     // one is named — omitted entirely when the class has no instructor.
@@ -1624,6 +1678,7 @@ async function createSession(studioKey, els) {
     );
     toast(isSeries ? repeatCount + " classes scheduled." : "Class scheduled.", true);
     els.name.value = "";
+    if (els.price) els.price.value = "";
     if (els.repeatCount) els.repeatCount.value = "1";
     staffSessionsCache = null;
     document.getElementById("roster-session").dataset.loaded = "";

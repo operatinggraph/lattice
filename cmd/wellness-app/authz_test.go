@@ -21,6 +21,7 @@ import (
 	"github.com/operatinggraph/lattice/internal/substrate"
 	"github.com/operatinggraph/lattice/internal/testutil"
 	wellnessdomain "github.com/operatinggraph/lattice/packages/wellness-domain"
+	wellnessledger "github.com/operatinggraph/lattice/packages/wellness-ledger"
 )
 
 const testTimeout = 5 * time.Second
@@ -95,6 +96,8 @@ func newTestConn(t *testing.T) *substrate.Conn {
 		wellnessdomain.WellnessBookingsBucket,
 		wellnessdomain.WellnessInstructorsBucket,
 		wellnessdomain.WellnessMembersBucket,
+		wellnessledger.LedgerHistoryBucket,
+		wellnessledger.MemberAccountsBucket,
 	} {
 		if _, err := conn.JetStream().CreateOrUpdateKeyValue(ctx, jetstream.KeyValueConfig{Bucket: bucket}); err != nil {
 			t.Fatalf("create %s bucket: %v", bucket, err)
@@ -353,7 +356,7 @@ func TestPublicReads_AnswerWithNoSession(t *testing.T) {
 
 func TestPerUserReads_RefuseWithNoSession(t *testing.T) {
 	s, _ := devSessionServer(t)
-	for _, path := range []string{"/api/bookings", "/api/my-residency"} {
+	for _, path := range []string{"/api/bookings", "/api/my-residency", "/api/ledger"} {
 		rec := muxGET(s, path, nil)
 		if rec.Code != http.StatusUnauthorized {
 			t.Errorf("GET %s with no session = %d, want 401", path, rec.Code)

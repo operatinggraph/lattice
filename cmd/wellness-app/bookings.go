@@ -24,6 +24,7 @@ type bookingProjection struct {
 	SessionName  string   `json:"sessionName"`
 	StartsAt     string   `json:"startsAt"`
 	EndsAt       string   `json:"endsAt"`
+	PriceCents   *float64 `json:"priceCents"`
 	StudioKey    string   `json:"studioKey"`
 	StudioName   string   `json:"studioName"`
 	BookerKey    string   `json:"bookerKey"`
@@ -43,6 +44,7 @@ type bookingRow struct {
 	SessionName  string   `json:"sessionName"`
 	StartsAt     string   `json:"startsAt"`
 	EndsAt       string   `json:"endsAt"`
+	PriceCents   int64    `json:"priceCents"`
 	StudioKey    string   `json:"studioKey"`
 	StudioName   string   `json:"studioName"`
 	BookerKey    string   `json:"bookerKey"`
@@ -70,10 +72,24 @@ func computeBookings(keys []string, get kvGetter, sessionKey, bookerKey string) 
 		if bookerKey != "" && p.BookerKey != bookerKey {
 			continue
 		}
-		// The rendered row mirrors the projection field-for-field; the two stay
-		// separate types so a future lens column is a deliberate decision to
-		// expose rather than an automatic one.
-		rows = append(rows, bookingRow(p))
+		var priceCents int64
+		if p.PriceCents != nil {
+			priceCents = int64(*p.PriceCents)
+		}
+		rows = append(rows, bookingRow{
+			BookingKey:   p.BookingKey,
+			Status:       p.Status,
+			Rate:         p.Rate,
+			WaitlistSlot: p.WaitlistSlot,
+			SessionKey:   p.SessionKey,
+			SessionName:  p.SessionName,
+			StartsAt:     p.StartsAt,
+			EndsAt:       p.EndsAt,
+			PriceCents:   priceCents,
+			StudioKey:    p.StudioKey,
+			StudioName:   p.StudioName,
+			BookerKey:    p.BookerKey,
+		})
 	}
 	sort.Slice(rows, func(i, j int) bool {
 		if rows[i].StartsAt != rows[j].StartsAt {

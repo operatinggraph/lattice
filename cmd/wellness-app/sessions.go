@@ -15,6 +15,7 @@ type sessionProjection struct {
 	StartsAt       string   `json:"startsAt"`
 	EndsAt         string   `json:"endsAt"`
 	Capacity       *float64 `json:"capacity"`
+	PriceCents     *float64 `json:"priceCents"`
 	StudioKey      string   `json:"studioKey"`
 	StudioName     string   `json:"studioName"`
 	InstructorKey  string   `json:"instructorKey"`
@@ -37,6 +38,7 @@ type sessionRow struct {
 	StartsAt       string `json:"startsAt"`
 	EndsAt         string `json:"endsAt"`
 	Capacity       int64  `json:"capacity"`
+	PriceCents     int64  `json:"priceCents"`
 	StudioKey      string `json:"studioKey"`
 	StudioName     string `json:"studioName"`
 	InstructorKey  string `json:"instructorKey"`
@@ -64,12 +66,17 @@ func computeSessions(keys []string, get kvGetter, bookedCounts map[string]int) [
 		if p.Capacity != nil {
 			capacity = int64(*p.Capacity)
 		}
+		var priceCents int64
+		if p.PriceCents != nil {
+			priceCents = int64(*p.PriceCents)
+		}
 		rows = append(rows, sessionRow{
 			SessionKey:     p.SessionKey,
 			Name:           p.Name,
 			StartsAt:       p.StartsAt,
 			EndsAt:         p.EndsAt,
 			Capacity:       capacity,
+			PriceCents:     priceCents,
 			StudioKey:      p.StudioKey,
 			StudioName:     p.StudioName,
 			InstructorKey:  p.InstructorKey,
@@ -172,12 +179,17 @@ func computeRosterSessions(keys []string, get kvGetter, bookedCounts map[string]
 		if p.Capacity != nil {
 			capacity = int64(*p.Capacity)
 		}
+		var priceCents int64
+		if p.PriceCents != nil {
+			priceCents = int64(*p.PriceCents)
+		}
 		rows = append(rows, sessionRow{
 			SessionKey:     p.SessionKey,
 			Name:           p.Name,
 			StartsAt:       p.StartsAt,
 			EndsAt:         p.EndsAt,
 			Capacity:       capacity,
+			PriceCents:     priceCents,
 			StudioKey:      p.StudioKey,
 			StudioName:     p.StudioName,
 			InstructorKey:  p.InstructorKey,

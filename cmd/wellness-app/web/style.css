@@ -84,6 +84,7 @@ main { padding: 18px; max-width: 1000px; margin: 0 auto; }
 }
 .panel-controls label { color: var(--text-dim); font-size: 13px; }
 .summary { color: var(--text-dim); font-size: 13px; margin-left: auto; }
+.ledger-balance { font-weight: 600; font-size: 15px; margin: 8px 0 4px; }
 
 input, select, button, textarea { font-family: inherit; }
 
