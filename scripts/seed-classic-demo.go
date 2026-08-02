@@ -175,6 +175,22 @@ func main() {
 	}
 	fmt.Printf("==> provider:        %s\n", providerKey)
 
+	// Unconditioned SetProviderHours upsert (no OCC/guard aspect, config not a
+	// write-path claim key) — one window per UTC weekday, 08:00-18:00, wide
+	// enough to always cover the 14:00 appointment below regardless of which
+	// weekday it lands on. Without it the provider carries no .hours aspect;
+	// CreateAppointment still accepts the booking (enforce_hours treats an
+	// absent aspect as unconstrained), but the FE slot picker
+	// (computeOpenSlots, cmd/clinic-app/web/app.js) only ever proposes slots
+	// from an explicit window, so it would offer none for this provider.
+	hoursWindows := make([]any, 0, 7)
+	for day := 0; day < 7; day++ {
+		hoursWindows = append(hoursWindows, map[string]any{"day": day, "openSec": 8 * 3600, "closeSec": 18 * 3600})
+	}
+	submitOp(ctx, conn, adminKey, "SetProviderHours", "provider",
+		map[string]any{"providerKey": providerKey, "windows": hoursWindows},
+		&processor.ContextHint{Reads: []string{providerKey}})
+
 	// Fixed hour on the day 24h out (on the clinic's mandatory 15-minute grid,
 	// :00/:15/:30/:45) rather than time.Now() truncated — deterministic per
 	// day, mirroring seed-showcase.go's futureDayAt idiom, so a same-day

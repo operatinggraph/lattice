@@ -844,6 +844,31 @@ func seedWellnessEntities(ctx context.Context, conn *substrate.Conn, adminKey st
 	return sessKey
 }
 
+// allWeekProviderHoursWindows returns one .hours window per UTC weekday
+// (day 0=Sun..6=Sat, SetProviderHours' own schema), open..close every day —
+// wide enough that any day-derived appointment offset (futureDayAt) lands
+// inside it regardless of which weekday `time.Now()` rolls onto next. A
+// per-weekday window is required for the FE picker: computeOpenSlots
+// (cmd/clinic-app/web/app.js) only ever proposes slots from an explicit
+// .hours window, so an absent aspect or windows=[] — "unconstrained" to the
+// booking op itself (enforce_hours, clinic-domain/ddls.go) — still leaves
+// the picker and findSoonestSlots with nothing to offer.
+func allWeekProviderHoursWindows(openSec, closeSec int) []any {
+	windows := make([]any, 0, 7)
+	for day := 0; day < 7; day++ {
+		windows = append(windows, map[string]any{"day": day, "openSec": openSec, "closeSec": closeSec})
+	}
+	return windows
+}
+
+// showcaseProviderHoursWindows is the showcase clinic providers' shared
+// availability shape — 08:00-18:00 UTC every day, wide enough to cover every
+// appointment hour seedRileyClinicWorld books (9, 10, 11, 14, 16) regardless
+// of which weekday the day-derived offsets land on.
+func showcaseProviderHoursWindows() []any {
+	return allWeekProviderHoursWindows(8*3600, 18*3600)
+}
+
 // seedClinicProvider mints the showcase clinic provider and assigns it to
 // practice at the showcase building — the practicesAt link the provider
 // browse walk (edgeEntityProviders) resolves through. Fixed handle;
@@ -874,6 +899,13 @@ func seedClinicProvider(ctx context.Context, conn *substrate.Conn, adminKey stri
 	submitOp(ctx, conn, adminKey, "SetSiteProfile", "clinicSite",
 		map[string]any{"buildingKey": buildingKey, "name": "Riverside Clinic"},
 		&processor.ContextHint{Reads: []string{buildingKey}})
+	// Unconditioned SetProviderHours upsert, mirroring seedOseiProvider's idiom
+	// below — an absent .hours aspect books fine (enforce_hours treats it as
+	// unconstrained) but leaves the FE slot picker permanently empty for
+	// Patel, so every showcase clinic provider needs an explicit window set.
+	submitOp(ctx, conn, adminKey, "SetProviderHours", "provider",
+		map[string]any{"providerKey": providerKey, "windows": showcaseProviderHoursWindows()},
+		&processor.ContextHint{Reads: []string{providerKey}})
 }
 
 // seedOseiProvider mints the showcase's SECOND clinic provider — Dr. Amara
@@ -883,16 +915,17 @@ func seedClinicProvider(ctx context.Context, conn *substrate.Conn, adminKey stri
 // must never show Patel's). Fixed handle; per-mutation idempotent, mirroring
 // seedClinicProvider exactly. Returns Osei's identity key.
 //
-// Osei stays UNCONSTRAINED (windows=[]) by an unconditioned SetProviderHours
-// upsert run on every seed, not gated behind an alive() check — the
-// showcase's own day-rolling appointment (seedRileyClinicWorld's
-// futureDayAt(1, 14)) books ANY weekday, so a narrow .hours window set by an
-// earlier live provider-self-service probe (SetProviderHours is a standing
-// binder any identifiedBy-bound provider, not just the seed script, may
-// call) silently strands the seeded appointment with OutsideHours on every
-// day but the one the stale window still permits. An unconditioned upsert —
-// SetProviderHours has no OCC/guard aspect, config not a write-path claim
-// key — heals that stale state on every rerun instead of only a fresh world.
+// Osei's .hours is set to showcaseProviderHoursWindows() — one wide window
+// per UTC weekday — by an unconditioned SetProviderHours upsert run on every
+// seed, not gated behind an alive() check. A per-weekday window (rather than
+// the narrower windows=[] this used to carry) is what actually survives the
+// showcase's day-rolling appointment (seedRileyClinicWorld's
+// futureDayAt(1, 14)): every weekday is covered, so no future re-seed can
+// roll the appointment onto a day the window excludes, and — unlike
+// windows=[] — the FE picker (computeOpenSlots) has real hours to propose
+// slots from. An unconditioned upsert — SetProviderHours has no OCC/guard
+// aspect, config not a write-path claim key — heals stale state on every
+// rerun instead of only a fresh world.
 func seedOseiProvider(ctx context.Context, conn *substrate.Conn, adminKey, providerRoleKey string) string {
 	if !alive(ctx, conn, oseiProviderKey) {
 		submitOp(ctx, conn, adminKey, "CreateProvider", "provider",
@@ -908,7 +941,7 @@ func seedOseiProvider(ctx context.Context, conn *substrate.Conn, adminKey, provi
 			})
 	}
 	submitOp(ctx, conn, adminKey, "SetProviderHours", "provider",
-		map[string]any{"providerKey": oseiProviderKey, "windows": []any{}},
+		map[string]any{"providerKey": oseiProviderKey, "windows": showcaseProviderHoursWindows()},
 		&processor.ContextHint{Reads: []string{oseiProviderKey}})
 	identityKey := ensureProviderIdentity(ctx, conn, adminKey, providerRoleKey, oseiProviderKey, oseiName, oseiEmail)
 	waitForRoleGrant(ctx, conn, identityKey, "ctrl.refractor.register")
