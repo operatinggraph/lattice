@@ -326,6 +326,25 @@ tombstones. **Capability KV is a lens projection** (projection correctness = aut
   just without Y"* or *"just project it per-row"* — every one of those is a hypothesis about a mechanism
   you have not opened.
 
+- **Before claiming a recomputed value is COMPARABLE to a stored one, enumerate the evaluation's PARAMS —
+  a fact about the write path is not a fact about the inputs.** Any design that says *"recompute it and
+  compare"* (an audit, a drift check, a reconciliation, a cache validation) rests on the recompute being
+  reproducible. The reflex is to prove that from the **write** path — "the row reaches the adapter
+  verbatim", "nothing stamps it", "the adapter marshals it as-is" — and every one of those can be true
+  while the value still varies, because the variation lives in what the evaluation was **handed**. So open
+  the call that builds the parameter map and ask, per param: *does this vary with the DATA, or with the
+  CALLER?* A param that varies with the caller makes the value unreproducible from a different caller, and
+  the design is dead on arrival for every consumer that binds it. (Trialed 2026-08-01, the
+  projection-divergence audit: I proved plain-lens rows are written verbatim and checked only `$now`,
+  missing that `projectedAtFromProvenance` reads provenance off *the props it is handed* — the **event**
+  vertex's, which for the aspect/link arms is a **neighbor** of the anchor. A seeded audit necessarily
+  supplies the anchor's props, so any lens returning `$projectedAt` whose row was last written by a
+  neighbor event would have read divergent forever, on every pass, for the life of the deployment.) The two
+  carve-outs are usually wall-clock and *caller-derived provenance*; find both before you write
+  "deterministic". Corollary: when you do carve one out, refuse on the **param reference**, not on the
+  output column name — an alias defeats a column-name filter, and a name list defeats itself the first time
+  someone adds a lens.
+
 - **A soundness claim is only as good as the MATCHER you read — never call a narrowing "provable" from
   the AST alone, and never cite a comment as a ledger fact.** When a design's safety rests on *"an event
   on X can never reach Y"*, the authority is the code that **decides** reachability at runtime, not the
