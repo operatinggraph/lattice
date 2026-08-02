@@ -521,3 +521,90 @@ change to the enumerator's caps or its `reportsTo` hop; `verify-claim-ceremony.g
   correction in §6, and Increment 2's asymmetric rollback (§8.3). One finding was accepted without a
   design change (`addHierarchyManager` further amplifies Term B — added to §2/§3 as supporting evidence).
 - No further deferred gate. This design is build-ready on Andrew's ratification.
+
+---
+
+## 13. Increment 0 fire brief (build note, 2026-08-02)
+
+**Scope sentence (§10, verbatim).** *"0a: `WITH`-scope `labeledVars` in `ruleengine/full/labels.go` so a
+dropped-and-re-referenced variable sets `exhaustive = false`. 0b: `scripts/lint-conventions.go`
+default-denies a `packages/**` vertex body whose bare-token `class`/`label` differs from the key's type
+segment, with a declared-exception annotation. Units per §9."*
+
+**Shipped this fire: 0a. 0b is NOT shipped — its premise is falsified (below).**
+
+### 13.1 Verified touch-list (checked live)
+
+| File | Anchor | What |
+|---|---|---|
+| `ruleengine/full/labels.go:15-145` | `ReferencedLabels` | `labeledVars` scoped per `WITH` segment; a `carryLabeled` step keeps a label only for a bare-variable projection item, under the name the `WITH` gives it |
+| `pipeline/filter_retraction_internal_test.go:487` | `TestReferencedLabels_Contract` | unchanged; new sibling `TestReferencedLabels_WithScoping` beside it |
+
+Design citations re-verified, all live: `labels.go:22-60` (global collection), `executor.go:1085-1098`
+(`projectItems` rebuilds bindings from projection aliases), `executor.go:654-679` (unlabeled seed scan),
+`executor.go:1193-1201` (`projectionAutoAlias` — the alias rule the carry step mirrors),
+`pipeline/pipeline.go:437` (the only non-test caller).
+
+### 13.2 The carry rule
+
+A `WITH` rebuilds every binding from its projection items alone, so the label survives only when the item
+**is** the node binding: `WITH a` and `WITH a AS b` carry it (under `a` / `b` respectively, mirroring
+`projectionAutoAlias`); `WITH a.key AS a` does not — that name now holds a scalar, and a later `(a)`
+re-seeds through the whole-bucket scan. Everything else is unchanged, including the within-segment
+re-reference rule and the variable-length-relationship clause.
+
+### 13.3 Corpus census — no live lens's classification moves
+
+Run this fire over **every** shipped lens: the 98 `full`-engine specs reachable from `pkgregistry`
+(**after** `ExpandReadGrantWalks`, so the generated read-grant producers and their staged `WITH`s are
+included) plus the four `internal/bootstrap` kernel lenses. The `(exhaustive, labels)` output is
+**byte-identical** before and after — 68 exhaustive, same label sets.
+
+Two shapes were the risk and both survive: `wellness-ledger`'s `memberAccountsSpec` (`lenses.go:249-251`)
+carries its variable through (`WITH DISTINCT id`), and the generated producer stages
+(`pkgmgr/anchorwalk.go:534-565`) carry the labeled actor (`anchorWalkHead`, `anchorwalk.go:72`) through
+every stage. Both are pinned as test cases so a future authoring change cannot silently un-pin them.
+
+### 13.4 0b — the premise is falsified; not built, re-scoped
+
+§4.3's census concluded *"package-built vertices set `class` equal to their key type … So the invariant
+**holds** — it is simply unwritten"*, and on that basis specified a **blocking-from-day-one** gate over a
+zero-debt tree. The tree is not zero-debt:
+
+- `packages/location-domain/ddls.go:182,187,318` — `LOCATION_TYPES = ["unit", "building", "property"]`
+  and `LOCATION_CLASS = "location"`: all three vertex key types carry a **bare-token class differing from
+  their key type segment**, deliberately and documented (`ddls.go:28-33`: *"the type is the key segment,
+  the class is the shared discriminator"*). `loftspace-domain` guards on it (`ddls.go:29-31,54,64`).
+- The §4.3 census generalized from `pkgmgr/build.go:847-851` — which covers **pkgmgr-built** vertices
+  (roles, permissions, meta). Op-created business vertices are a different population and were not in it.
+
+The mechanism is also wrong for this corpus, independently of the debt: package Starlark writes the class
+as a **variable** (`make_vtx(loc_key, LOCATION_CLASS, {})`; `{"class": cls, …}` at
+`clinic-domain/ddls.go:938`, `loftspace-domain/ddls.go:235`), and `lint-conventions.go` is line-based
+regex with no AST or Starlark evaluation. A literal-pair gate would therefore report the tree **clean
+while missing the one real violation in it** — precisely the fingers-crossed state §4.3 says the fire
+exists to end.
+
+**Still no live victim:** no lens in `packages/**` or `internal/bootstrap` labels a pattern node
+`:location`, so nothing binds a `unit`/`building`/`property` vertex through the body-class path today.
+The hazard §4.3 names is unchanged and latent.
+
+**Re-scope (filed, not silently dropped).** The enforcement point should follow the threat: the unsound
+step is a **lens pattern label** that names a class-only token, since that is where the narrowing decision
+is taken and it is statically decidable from the cypher plus the installed type vocabulary — not the
+class write, which is neither statically visible nor actually invariant. That is a change to a ratified
+design's mechanism, so it goes back through the Designer rather than being improvised here; the board row
+carries it.
+
+### 13.5 Gates run
+
+`go build ./...` · `make vet` · `golangci-lint run ./...` (cache-cleaned, 0 issues) · `make verify-kernel`
+· all six `scripts/lint-*.go` gates under `STRICT=1` · the **full `go test ./... -p 4`** suite (§9's
+requirement for this increment — a derivation every plain lens consumes), green. The new negative case was
+confirmed to **fail** against the pre-change derivation, so it pins the fix rather than the shape.
+
+### 13.6 Non-goals
+
+Increments 1–3 (the relevance gate, the eligibility swap, the pattern-directed derivation); the enumerator's
+caps and its `reportsTo` hop; `verify-claim-ceremony.go`'s convergence poll (its own row); any Contract
+amendment. Nothing is staged uncommitted.
