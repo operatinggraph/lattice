@@ -459,6 +459,21 @@ tombstones. **Capability KV is a lens projection** (projection correctness = aut
   had force-wiped exactly that population long ago. A demand case resting on "these are still out there"
   is a hypothesis about every clearing mechanism you have not read.
 
+- **A row's "no live consumer" / "no live victim" is a HYPOTHESIS about a census nobody ran — run it
+  before you let it shape the design.** A filed row's *negative* claims arrive with the same authority as
+  its positive facts, but they are claims about **every** consumer of the mechanism, and the filer checked
+  the one the harness surfaced. The census is nearly always mechanical (a grep, a 20-line script over
+  `packages/**`) and must key on the **mechanism**, not the instance the row names. Run it **before** the
+  dead-scaffolding test, because the dead-scaffolding test's input *is* this answer. (Trialed 2026-08-02,
+  *the executor still materializes the whole binding set*: the row read `📋 designer · no live consumer`,
+  grounded on the one lens that ever hit the 1M binding cap having been closed by producer staging.
+  Staging fixed the **generator**; a stage-partitioned scan of every cypher literal found **fourteen**
+  hand-authored lenses paying the same cross product — including `capabilityEphemeral`, the
+  ephemeral-grant document, where a refused evaluation freezes a revocation, and `myTasks`, every
+  operator's inbox. Taking the row at its word would have produced a shelf design for a live
+  security-plane defect.) This is the root-cause-names-the-asserted-instance probe pointed at a
+  *negative* claim; when the census comes back non-empty, **correct the row** as part of the fire.
+
 **Run the pre-build gates you write into your own designs — "ratified" ≠ "build-ready."** If a design
 self-flags a pre-build adversarial / `bmad-party-mode` pass (a deferred gate), that pass is a **Designer-lane
 obligation**: run it and **record it as run** before the design is build-ready. Do not leave it dangling for
