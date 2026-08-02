@@ -495,6 +495,31 @@ async function renderPos() {
       btn.disabled = false;
     }
   });
+  document.getElementById("void-form").addEventListener("submit", async (ev) => {
+    ev.preventDefault();
+    const input = document.getElementById("void-amount");
+    const cents = parseDollars(input.value);
+    if (cents === null) { toast("Enter a void amount greater than $0.", false); return; }
+    const btn = document.getElementById("void-submit");
+    btn.disabled = true;
+    try {
+      await opOrThrow(
+        {
+          operationType: "VoidCharge", class: "tab",
+          reads: [open.tabKey, open.tabKey + ".status"],
+          payload: { tabKey: open.tabKey, amountCents: cents },
+        },
+        "void the charge"
+      );
+      toast("Voided " + money(cents) + ".", true);
+      input.value = "";
+      setTimeout(renderPos, 700);
+    } catch (e) {
+      toast(e.message, false);
+    } finally {
+      btn.disabled = false;
+    }
+  });
   document.getElementById("settle-btn").addEventListener("click", async () => {
     const btn = document.getElementById("settle-btn");
     btn.disabled = true;
@@ -548,6 +573,10 @@ function renderOpenTabCard(tab, items) {
     '<form id="charge-form" class="field-row" style="margin-bottom:14px;">' +
     '<input id="charge-amount" type="number" step="0.01" min="0.01" placeholder="Off-menu amount ($)" required />' +
     '<button id="charge-submit" type="submit">Add Charge</button>' +
+    "</form>" +
+    '<form id="void-form" class="field-row" style="margin-bottom:14px;">' +
+    '<input id="void-amount" type="number" step="0.01" min="0.01" placeholder="Void amount ($)" required />' +
+    '<button id="void-submit" type="submit" class="ghost">Void Charge</button>' +
     "</form>" +
     '<div class="panel-actions"><button id="settle-btn" class="danger">Settle Tab</button></div>' +
     "</div>"
