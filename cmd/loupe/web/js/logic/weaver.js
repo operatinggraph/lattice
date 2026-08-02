@@ -341,4 +341,57 @@ function artifactLine(a) {
   };
 }
 
-export { fitLabel, contractionLabel, targetRank, targetRows, rosterHeadline, gapBadges, dispatchLabel, actionSummary, unboundBindings, mapLayout, gapNodeCls, entityBadges, rosterNote, gapStateLine, markLine, artifactLine };
+// --- F25.2 Verify -------------------------------------------------------
+
+// checksSummary states the Checks panel headline, exception-first: no
+// findings reads as an explicit clean pass, never as silence about nothing
+// having run. "blocking" counts severity "bad" — an install-time reject the
+// engine would actually enforce, versus a "warn" advisory/observed finding.
+function checksSummary(checks) {
+  var list = checks || [];
+  if (!list.length) return "no issues found by the static / install-verdict checks";
+  var v1 = 0, v2 = 0, bad = 0;
+  for (var i = 0; i < list.length; i++) {
+    if (list[i].tier === "v2") v2++; else v1++;
+    if (list[i].severity === "bad") bad++;
+  }
+  var parts = [list.length + (list.length === 1 ? " check flagged" : " checks flagged")];
+  if (bad) parts.push(bad + " blocking");
+  parts.push(v1 + " structural");
+  if (v2) parts.push(v2 + " install-verdict");
+  return parts.join(" · ");
+}
+
+// opCoverageNote states V3's honesty framing plainly: interference can only
+// ever be found among ops that declare `.effects`, so the corpus's coverage
+// is shown alongside every finding rather than implied by its absence.
+function opCoverageNote(cov) {
+  var c = cov || {};
+  var referenced = c.referencedOps || 0;
+  var declared = c.declaredEffectsOps || 0;
+  var unanalyzable = (c.unanalyzableOps || []).length;
+  if (!referenced) return "no installed target dispatches an operation-bound action";
+  var note = declared + " of " + referenced + " referenced ops declare .effects";
+  if (unanalyzable) note += " — " + unanalyzable + " unanalyzable (advisory nudge to declare them)";
+  return note;
+}
+
+// interferenceHeadline states the V3 join's result count, or its clean-pass
+// absence — the runtime oscillation detector stays authoritative either way.
+function interferenceHeadline(list) {
+  var n = (list || []).length;
+  if (!n) return "no aspect path is asserted by two or more installed targets' declared effects";
+  return n + (n === 1 ? " aspect path" : " aspect paths") + " asserted by two or more targets — advisory, not a gate";
+}
+
+// rejectedIssueLabel names the vertex a TargetRejected issue belongs to: its
+// current targetId when that vertex is (again) registered, or the bare meta
+// vertex id when it is not — the message names the vertex, never the
+// targetId a rejected spec merely claimed.
+function rejectedIssueLabel(iss) {
+  var i = iss || {};
+  if (i.targetId) return i.targetId + " (vtx.meta." + i.metaId + ")";
+  return "vtx.meta." + (i.metaId || "?") + " — not currently registered under any targetId";
+}
+
+export { fitLabel, contractionLabel, targetRank, targetRows, rosterHeadline, gapBadges, dispatchLabel, actionSummary, unboundBindings, mapLayout, gapNodeCls, entityBadges, rosterNote, gapStateLine, markLine, artifactLine, checksSummary, opCoverageNote, interferenceHeadline, rejectedIssueLabel };

@@ -408,6 +408,60 @@ func TestWeaverMarkLine(t *testing.T) {
 	}
 }
 
+func TestWeaverChecksSummary(t *testing.T) {
+	vm := logicVM(t, "weaver.js")
+	if got := call(t, vm, "checksSummary", []any{}); got != "no issues found by the static / install-verdict checks" {
+		t.Errorf("checksSummary(empty) = %v", got)
+	}
+	got := call(t, vm, "checksSummary", []any{
+		map[string]any{"tier": "v1", "severity": "warn"},
+		map[string]any{"tier": "v1", "severity": "bad"},
+		map[string]any{"tier": "v2", "severity": "bad"},
+	})
+	s := got.(string)
+	if !containsSub(s, "3 checks flagged") || !containsSub(s, "2 blocking") ||
+		!containsSub(s, "2 structural") || !containsSub(s, "1 install-verdict") {
+		t.Errorf("checksSummary = %q", s)
+	}
+}
+
+func TestWeaverOpCoverageNote(t *testing.T) {
+	vm := logicVM(t, "weaver.js")
+	if got := call(t, vm, "opCoverageNote", map[string]any{"referencedOps": float64(0)}); got != "no installed target dispatches an operation-bound action" {
+		t.Errorf("opCoverageNote(none referenced) = %v", got)
+	}
+	got := call(t, vm, "opCoverageNote", map[string]any{
+		"referencedOps": float64(5), "declaredEffectsOps": float64(1),
+		"unanalyzableOps": []any{"a", "b", "c", "d"},
+	}).(string)
+	if !containsSub(got, "1 of 5") || !containsSub(got, "4 unanalyzable") {
+		t.Errorf("opCoverageNote = %q", got)
+	}
+}
+
+func TestWeaverInterferenceHeadline(t *testing.T) {
+	vm := logicVM(t, "weaver.js")
+	if got := call(t, vm, "interferenceHeadline", []any{}); !containsSub(got.(string), "no aspect path") {
+		t.Errorf("interferenceHeadline(empty) = %v", got)
+	}
+	got := call(t, vm, "interferenceHeadline", []any{map[string]any{"path": "subject.data.x"}})
+	if !containsSub(got.(string), "1 aspect path") {
+		t.Errorf("interferenceHeadline(one) = %v", got)
+	}
+}
+
+func TestWeaverRejectedIssueLabel(t *testing.T) {
+	vm := logicVM(t, "weaver.js")
+	resolved := call(t, vm, "rejectedIssueLabel", map[string]any{"metaId": "tAAA", "targetId": "leaseComplete"}).(string)
+	if !containsSub(resolved, "leaseComplete") || !containsSub(resolved, "tAAA") {
+		t.Errorf("rejectedIssueLabel(resolved) = %q", resolved)
+	}
+	unresolved := call(t, vm, "rejectedIssueLabel", map[string]any{"metaId": "tAAA"}).(string)
+	if !containsSub(unresolved, "not currently registered") {
+		t.Errorf("rejectedIssueLabel(unresolved) = %q", unresolved)
+	}
+}
+
 func containsSub(s, sub string) bool {
 	return len(sub) == 0 || indexOf(s, sub) >= 0
 }

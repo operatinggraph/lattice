@@ -21,16 +21,26 @@ import {
   gapBadges, dispatchLabel, actionSummary, unboundBindings,
   mapLayout, entityBadges, rosterNote,
   gapStateLine, markLine, artifactLine,
+  checksSummary, opCoverageNote, interferenceHeadline, rejectedIssueLabel,
 } from "../logic/weaver.js";
 
 const SVG_NS = "http://www.w3.org/2000/svg";
 
-const state = { loaded: false, arg: "" };
+const state = { loaded: false, verifyLoaded: false, arg: "" };
 
+// "#/weaver/verify" is a reserved top-level route (F25.2), checked before the
+// generic single-segment targetId branch — a target literally named "verify"
+// would collide, an accepted convention the same way "targets" already is on
+// the API side.
 function enter(route) {
   const arg = (route && route.arg) || "";
   state.arg = arg;
   const parts = arg ? arg.split("/") : [];
+  if (parts.length === 1 && parts[0] === "verify") {
+    showOnly("weaver-verify");
+    loadVerify();
+    return;
+  }
   if (parts.length >= 2) { showOnly("weaver-entity"); loadEntity(parts[0], parts[1]); return; }
   if (parts.length === 1) { showOnly("weaver-target"); loadTarget(parts[0]); return; }
   showOnly("weaver-list");
@@ -40,7 +50,7 @@ function enter(route) {
 }
 
 function showOnly(id) {
-  ["weaver-list", "weaver-target", "weaver-entity"].forEach((s) => {
+  ["weaver-list", "weaver-target", "weaver-entity", "weaver-verify"].forEach((s) => {
     $("#" + s).classList.toggle("visible", s === id);
   });
 }
@@ -48,7 +58,8 @@ function showOnly(id) {
 function init() {
   $("#weaver-reload").addEventListener("click", () => {
     const parts = state.arg ? state.arg.split("/") : [];
-    if (parts.length >= 2) loadEntity(parts[0], parts[1]);
+    if (parts.length === 1 && parts[0] === "verify") loadVerify();
+    else if (parts.length >= 2) loadEntity(parts[0], parts[1]);
     else if (parts.length === 1) loadTarget(parts[0]);
     else loadRoster();
   });
@@ -111,10 +122,30 @@ async function loadTarget(targetId) {
 
   box.appendChild(targetHeader(body));
   box.appendChild(mapSvg(body));
+  box.appendChild(checksPanel(body.checks));
   box.appendChild(gapPanel(body));
   if (body.unhandled && body.unhandled.length) box.appendChild(unhandledPanel(body));
   if (body.issues && body.issues.length) box.appendChild(issuePanel(body.issues));
   box.appendChild(entityPanel(body));
+}
+
+// checksPanel renders F25.2's per-target Verify findings (V1 structural + V2
+// TargetRejected attribution) — exception-first: an empty list states the
+// clean pass explicitly rather than rendering nothing at all.
+function checksPanel(checks) {
+  const box = el("div", "weaver-panel");
+  box.appendChild(el("h3", null, "Checks"));
+  box.appendChild(el("div", "muted small", checksSummary(checks)));
+  (checks || []).forEach((c) => box.appendChild(checkRow(c)));
+  return box;
+}
+
+function checkRow(c) {
+  const row = el("div", "weaver-issue");
+  row.appendChild(chip(c.tier, "muted", ""));
+  row.appendChild(chip(c.code, c.severity === "bad" ? "bad" : "warn", "evidence: " + c.evidence));
+  row.appendChild(el("span", null, c.message));
+  return row;
 }
 
 function targetHeader(d) {
@@ -242,8 +273,11 @@ function gapCard(d, g) {
   card.appendChild(el("div", "muted small", dispatchLabel(g)));
 
   if (g.action) card.appendChild(actionBox(g.action));
-  (g.candidates || []).forEach((c) => card.appendChild(actionBox(c, "candidate")));
-  (g.actions || []).forEach((c) => card.appendChild(actionBox(c, "catalog")));
+  // Ranked by the server (Cost ascending, Ref lexicographic on ties — the
+  // planner's own tie-break, F25.2 V2): the ordinal shown here is that rank,
+  // never a live pick — the studio never dispatches.
+  (g.candidates || []).forEach((c, i) => card.appendChild(actionBox(c, "candidate #" + (i + 1))));
+  (g.actions || []).forEach((c, i) => card.appendChild(actionBox(c, "catalog #" + (i + 1))));
   if (g.goal) {
     const goal = el("details", "weaver-goal");
     goal.appendChild(el("summary", "muted small", "goal (guard body — read-only)"));
@@ -275,7 +309,19 @@ function actionBox(a, tag) {
     unbound.forEach((b) => line.appendChild(el("code", "weaver-binding", b.param + " → row." + b.column)));
     box.appendChild(line);
   }
+  // Pre/Effects (F25.2 V2): the planner-facing triple a candidate or catalog
+  // entry carries — rendered structurally, same as the goal block, never
+  // re-evaluated here.
+  if (a.pre) box.appendChild(guardDetails("pre (eligibility guard)", a.pre));
+  if (a.effects && a.effects.length) box.appendChild(guardDetails("effects (declared commit)", a.effects));
   return box;
+}
+
+function guardDetails(label, body) {
+  const details = el("details", "weaver-goal");
+  details.appendChild(el("summary", "muted small", label + " — read-only"));
+  details.appendChild(el("pre", "weaver-policy-body", JSON.stringify(body, null, 2)));
+  return details;
 }
 
 function unhandledPanel(d) {
@@ -404,6 +450,77 @@ function entityGapCard(g) {
     card.appendChild(box);
   }
   return card;
+}
+
+// --- F25.2 lane-wide Verify (#/weaver/verify) -----------------------------
+
+async function loadVerify() {
+  const box = $("#weaver-verify");
+  box.innerHTML = "";
+  box.appendChild(el("div", "muted", "loading verify summary…"));
+  const body = await api("/api/weaver/verify");
+  box.innerHTML = "";
+  if (body.error) { box.appendChild(el("div", "error", body.error)); return; }
+
+  box.appendChild(el("p", "muted small",
+    "Read-only, view-time checks — a static/structural pass over every installed target's body (V1), " +
+    "the TargetRejected roundup (V2), and the static twin of the runtime oscillation detector's join over " +
+    "declared op effects (V3, advisory — the runtime detector stays authoritative)."));
+
+  box.appendChild(verifyTargetsPanel(body));
+  box.appendChild(verifyRejectedPanel(body.rejectedIssues));
+  box.appendChild(verifyInterferencePanel(body.interference, body.opCoverage));
+}
+
+function verifyTargetsPanel(body) {
+  const box = el("div", "weaver-panel");
+  box.appendChild(el("h3", null, "V1 — structural, per target"));
+  const targets = body.targets || [];
+  if (!targets.length) { box.appendChild(el("div", "muted", "(no installed targets)")); return box; }
+  targets.forEach((t) => box.appendChild(verifyTargetRow(t)));
+  return box;
+}
+
+function verifyTargetRow(t) {
+  const card = el("div", "card weaver-target-card drillable");
+  const head = el("div", "weaver-card-head");
+  head.appendChild(el("span", "weaver-target-name", t.targetId));
+  if (!t.registered) head.appendChild(chip("not registered", "warn", ""));
+  head.appendChild(el("span", "muted small", checksSummary(t.checks)));
+  card.appendChild(head);
+  card.addEventListener("click", () => navigate("/weaver/" + encodeURIComponent(t.targetId)));
+  return card;
+}
+
+function verifyRejectedPanel(issues) {
+  const box = el("div", "weaver-panel");
+  box.appendChild(el("h3", null, "V2 — TargetRejected roundup"));
+  const list = issues || [];
+  if (!list.length) { box.appendChild(el("div", "muted", "no standing TargetRejected issue on any live instance")); return box; }
+  list.forEach((iss) => {
+    const row = el("div", "weaver-issue bad");
+    row.appendChild(chip("TargetRejected", "bad", ""));
+    row.appendChild(el("span", null, rejectedIssueLabel(iss)));
+    row.appendChild(el("span", "muted small", iss.message));
+    if (iss.instance) row.appendChild(el("span", "muted small", "@" + iss.instance));
+    box.appendChild(row);
+  });
+  return box;
+}
+
+function verifyInterferencePanel(interference, opCoverage) {
+  const box = el("div", "weaver-panel");
+  box.appendChild(el("h3", null, "V3 — interference (advisory)"));
+  box.appendChild(el("div", "muted small", opCoverageNote(opCoverage)));
+  box.appendChild(el("div", "muted small", interferenceHeadline(interference)));
+  (interference || []).forEach((row) => {
+    const line = el("div", "weaver-issue warn");
+    line.appendChild(chip(row.path, "warn", "the concrete aspect path two or more targets' declared effects both assert"));
+    line.appendChild(el("span", "muted small", "targets: " + (row.targets || []).join(", ")));
+    line.appendChild(el("span", "muted small", "ops: " + (row.ops || []).join(", ")));
+    box.appendChild(line);
+  });
+  return box;
 }
 
 function chip(text, cls, title) {

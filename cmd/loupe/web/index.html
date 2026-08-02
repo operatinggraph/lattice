@@ -196,10 +196,12 @@
       <div id="flow-detail"></div>
     </section>
 
-    <!-- Weaver Target Studio — Observe (#/weaver, #/weaver/<targetId>, #/weaver/<targetId>/<entityId>) -->
+    <!-- Weaver Target Studio — Observe + Verify (#/weaver, #/weaver/verify,
+         #/weaver/<targetId>, #/weaver/<targetId>/<entityId>) -->
     <section class="panel" id="panel-weaver">
       <div class="panel-controls">
         <button id="weaver-reload">Refresh</button>
+        <a href="#/weaver/verify">Verify</a>
         <span class="muted" id="weaver-status-msg"></span>
       </div>
       <div id="weaver-list" class="visible">
@@ -216,6 +218,7 @@
       </div>
       <div id="weaver-target"></div>
       <div id="weaver-entity"></div>
+      <div id="weaver-verify"></div>
     </section>
 
     <!-- Component page (drill-through: #/component/<id>) -->

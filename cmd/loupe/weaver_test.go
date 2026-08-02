@@ -351,7 +351,7 @@ func TestBuildTargetDetailJoin(t *testing.T) {
 		Gaps: []string{"missing_bgcheck", "missing_notify", "missing_signature"}}
 
 	d := buildTargetDetail("leaseComplete", body, "vtx.meta.tAAAAAAAAAAAAAAAAAAA", "leaseViolations",
-		summary, scan, state, counts, map[string]string{"backgroundCheck": "vtx.meta.pAAA"}, nil)
+		summary, scan, state, counts, map[string]string{"backgroundCheck": "vtx.meta.pAAA"}, nil, nil)
 
 	if !d.Registered || d.State != "active" || d.Mode != "planned" {
 		t.Errorf("header = %+v", d)
@@ -393,7 +393,7 @@ func TestBuildTargetDetailJoin(t *testing.T) {
 func TestBuildTargetDetailUnregisteredWithControlMarker(t *testing.T) {
 	scan := scanWeaverRows(nil, nil, false)
 	state := splitWeaverStateKeys("ghost", []string{"ghost.__control"})
-	d := buildTargetDetail("ghost", nil, "", "", nil, scan, state, nil, nil, nil)
+	d := buildTargetDetail("ghost", nil, "", "", nil, scan, state, nil, nil, nil, nil)
 	if d.Registered {
 		t.Error("Registered must be false with no control-plane summary")
 	}
@@ -408,7 +408,7 @@ func TestBuildTargetDetailFallsBackToSummaryGaps(t *testing.T) {
 	docs := map[string]map[string]any{"aaaaaaaaaaaaaaaaaaaa": {"missing_x": true}}
 	scan := scanWeaverRows(docs, []string{"aaaaaaaaaaaaaaaaaaaa"}, false)
 	summary := &weaverTargetSummary{TargetID: "t", State: "active", Gaps: []string{"missing_x"}}
-	d := buildTargetDetail("t", nil, "", "", summary, scan, weaverStateKeys{}, nil, nil, nil)
+	d := buildTargetDetail("t", nil, "", "", summary, scan, weaverStateKeys{}, nil, nil, nil, nil)
 	if len(d.Gaps) != 1 || d.Gaps[0].Column != "missing_x" || d.Gaps[0].Dispatch != "none" {
 		t.Errorf("gaps = %+v, want one structure-less node", d.Gaps)
 	}

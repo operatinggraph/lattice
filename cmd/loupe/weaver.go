@@ -103,6 +103,12 @@ type weaverAction struct {
 	Reads         []string          `json:"reads,omitempty"`
 	Cost          int               `json:"cost,omitempty"`
 	Bindings      []weaverBinding   `json:"bindings,omitempty"`
+	// Pre/Effects are the planner-facing triple a candidate or catalog entry
+	// carries (§10.8 Planner extension) — an explicit gap action has neither.
+	// Passed through verbatim (F25.2 V2): they are guard-grammar documents,
+	// and rendering them structurally is this stage's job, same as Goal.
+	Pre     json.RawMessage   `json:"pre,omitempty"`
+	Effects []json.RawMessage `json:"effects,omitempty"`
 }
 
 // weaverGap is one gap node of the target map: the playbook entry, how it
@@ -169,6 +175,11 @@ type weaverTargetDetail struct {
 	Entities []weaverEntityRow `json:"entities"`
 
 	Issues []weaverIssue `json:"issues"`
+
+	// Checks is F25.2's Verify stage: read-only, view-time V1 (structural) and
+	// V2 (install-verdict surfacing) findings over this one target — never a
+	// stored verdict. See weaververify.go.
+	Checks []weaverCheck `json:"checks"`
 }
 
 // weaverIssue is one Weaver heartbeat issue attributed to a target or entity.
@@ -472,6 +483,11 @@ type weaverActionContract struct {
 	Params        map[string]string `json:"params,omitempty"`
 	Reads         []string          `json:"reads,omitempty"`
 	Cost          int               `json:"cost,omitempty"`
+	// Pre/Effects are set only on a GapCandidate/ActionCatalogEntry (§10.8
+	// Planner extension) — an explicit GapAction carries neither field at all,
+	// so both decode as nil there, exactly mirroring the engine's Go shapes.
+	Pre     json.RawMessage   `json:"pre,omitempty"`
+	Effects []json.RawMessage `json:"effects,omitempty"`
 }
 
 // dispatchKind classifies how the strategist resolves a gap. The explicit
@@ -508,6 +524,8 @@ func renderAction(a weaverActionContract, observed map[string]bool, patterns map
 		Params:        a.Params,
 		Reads:         a.Reads,
 		Cost:          a.Cost,
+		Pre:           a.Pre,
+		Effects:       a.Effects,
 	}
 	if a.Pattern != "" {
 		if ref, ok := patterns[a.Pattern]; ok {
@@ -594,6 +612,13 @@ type weaverRowScan struct {
 	// Budgets maps entityId → gapColumn → the row's declared maxretries_<g>
 	// (absent when the row declares none).
 	Budgets map[string]map[string]int
+	// Samples holds the first observed string value per column, across
+	// scanned rows in order — F25.2 V1's evidence for a `row.<column>` subject
+	// binding's TYPE (the classified vertex type of the sampled key), since no
+	// column carries a declared type anywhere in the playbook. One sample is
+	// weak evidence (a lens can legitimately mix key shapes across rows only
+	// if the playbook itself is wrong), never proof — the caller labels it so.
+	Samples map[string]string
 }
 
 // scanWeaverRows folds one target's rows into the aggregate the target map
@@ -606,6 +631,7 @@ func scanWeaverRows(docs map[string]map[string]any, order []string, truncated bo
 		Columns:   map[string]bool{},
 		OpenByGap: map[string]int{},
 		Budgets:   map[string]map[string]int{},
+		Samples:   map[string]string{},
 	}
 	for _, id := range order {
 		doc := docs[id]
@@ -622,6 +648,11 @@ func scanWeaverRows(docs map[string]map[string]any, order []string, truncated bo
 		}
 		for col, v := range doc {
 			scan.Columns[col] = true
+			if s, ok := v.(string); ok && s != "" {
+				if _, have := scan.Samples[col]; !have {
+					scan.Samples[col] = s
+				}
+			}
 			if gapCol, ok := strings.CutPrefix(col, "maxretries_"); ok {
 				if n, ok := numericField(v); ok && n > 0 {
 					putNestedInt(scan.Budgets, id, "missing_"+gapCol, n)
@@ -687,6 +718,7 @@ func buildTargetDetail(
 	state weaverStateKeys,
 	counts map[string]map[string]int,
 	patterns map[string]string,
+	patternSubject map[string]string,
 	hbs []weaverHeartbeat,
 ) weaverTargetDetail {
 	d := weaverTargetDetail{
@@ -782,6 +814,12 @@ func buildTargetDetail(
 			for _, c := range g.Actions {
 				view.Actions = append(view.Actions, renderAction(c, observed, patterns))
 			}
+			// F25.2 V2 — "candidates ranked with their pres": Cost ascending,
+			// Ref lexicographic on ties, the same canonical tie-break
+			// internal/weaver/planner applies (planner.Action.Ref doc).
+			// Structural display only — the studio never ranks a live pick.
+			rankActionsByCostThenRef(view.Candidates)
+			rankActionsByCostThenRef(view.Actions)
 			d.Gaps = append(d.Gaps, view)
 		}
 	} else if summary != nil {
@@ -842,6 +880,7 @@ func buildTargetDetail(
 	if d.Issues == nil {
 		d.Issues = []weaverIssue{}
 	}
+	d.Checks = computeTargetChecks(d, scan, patternSubject, hbs)
 	return d
 }
 
@@ -1112,13 +1151,15 @@ func (s *server) handleWeaver(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case len(parts) == 1 && parts[0] == "targets":
 		s.weaverTargets(w, r)
+	case len(parts) == 1 && parts[0] == "verify":
+		s.weaverVerify(w, r)
 	case len(parts) == 2 && parts[0] == "target":
 		s.weaverTargetMap(w, r, parts[1])
 	case len(parts) == 4 && parts[0] == "target" && parts[2] == "entity":
 		s.weaverEntity(w, r, parts[1], parts[3])
 	default:
 		s.writeError(w, http.StatusBadRequest,
-			"expected GET /api/weaver/targets, /api/weaver/target/<targetId>, or /api/weaver/target/<targetId>/entity/<entityId>")
+			"expected GET /api/weaver/targets, /api/weaver/verify, /api/weaver/target/<targetId>, or /api/weaver/target/<targetId>/entity/<entityId>")
 	}
 }
 
@@ -1246,6 +1287,10 @@ type weaverMetaIndex struct {
 	Targets  map[string]string
 	Bodies   map[string]*weaverTargetBody
 	Patterns map[string]string
+	// PatternSubject maps a pattern's vtx.meta.<id> key to its declared
+	// subjectType (internal/loom's Pattern.SubjectType) — F25.2 V1's structural
+	// twin of the engine's own dispatch-time subject-type check.
+	PatternSubject map[string]string
 }
 
 // buildWeaverMetaIndex indexes exactly the metas that carry a `spec` aspect —
@@ -1255,9 +1300,10 @@ type weaverMetaIndex struct {
 // body — no second read to open the playbook).
 func buildWeaverMetaIndex(metaKeys []string, get kvGetter) weaverMetaIndex {
 	index := weaverMetaIndex{
-		Targets:  map[string]string{},
-		Bodies:   map[string]*weaverTargetBody{},
-		Patterns: map[string]string{},
+		Targets:        map[string]string{},
+		Bodies:         map[string]*weaverTargetBody{},
+		Patterns:       map[string]string{},
+		PatternSubject: map[string]string{},
 	}
 	for _, k := range metaKeys {
 		root, ok := strings.CutSuffix(k, ".spec")
@@ -1275,6 +1321,9 @@ func buildWeaverMetaIndex(metaKeys []string, get kvGetter) weaverMetaIndex {
 			// "pattern not installed".
 			putIfAbsent(index.Patterns, patternID, root)
 			putIfAbsent(index.Patterns, strings.TrimPrefix(root, "vtx.meta."), root)
+			if subjectType, _ := d["subjectType"].(string); subjectType != "" {
+				index.PatternSubject[root] = subjectType
+			}
 			continue
 		}
 		targetID, _ := d["targetId"].(string)
@@ -1380,7 +1429,7 @@ func (s *server) weaverTargetMap(w http.ResponseWriter, r *http.Request, targetI
 	}
 	hbs := readWeaverHeartbeats(healthKeys, readEntry)
 
-	detail := buildTargetDetail(targetID, body, metaKey, lensName, summary, scan, state, counts, index.Patterns, hbs)
+	detail := buildTargetDetail(targetID, body, metaKey, lensName, summary, scan, state, counts, index.Patterns, index.PatternSubject, hbs)
 	if !detail.Registered && body == nil && detail.Rows == 0 && !state.Control {
 		s.writeError(w, http.StatusNotFound,
 			"target "+targetID+" not found (not registered, no meta-vertex, no rows, no control marker)")
