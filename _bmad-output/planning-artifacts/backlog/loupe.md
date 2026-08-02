@@ -37,7 +37,7 @@ Build order F25.1 → F25.2 → F25.3a → F25.3b (design §13); UX per fire (Sa
 
 | Item | What it is | Imp | Size | State |
 |---|---|---|---|---|
-| **F25 — Weaver Target Studio (observe → verify → author)** | Target-shaped console for the convergence plane: per-target structure + live-state overlay + entity drill; structural/install/interference checks over declared op effects; operator-authored target/lens artifacts through the capability review lane with a born-disabled dev-stack trial. | ★★★ | XL | ✅ Andrew-ratified · [design](../../implementation-artifacts/weaver-target-studio-design.md) |
+| **F25 — Weaver Target Studio (observe → verify → author)** | Target-shaped console for the convergence plane: per-target structure + live-state overlay + entity drill; structural/install/interference checks over declared op effects; operator-authored target/lens artifacts through the capability review lane with a born-disabled dev-stack trial. | ★★★ | XL | 🏗️ F25.1 shipped; next F25.2 (verify) · [design](../../implementation-artifacts/weaver-target-studio-design.md) |
 | **F25.3b — propose + trial** | The studio's submit step + born-disabled dev-stack trial; severable tail of F25. | ★★★ | M | 🚧 blocked-on: `SubmitCapabilityProposal` ([lattice → AI-native](lattice.md)) · [design §6.4](../../implementation-artifacts/weaver-target-studio-design.md) |
 
 ## Component maintenance
@@ -78,6 +78,7 @@ Build order F25.1 → F25.2 → F25.3a → F25.3b (design §13); UX per fire (Sa
 
 One line per shipped item (`date · SHA · [tag] title`). Oldest roll to `archive/` past ~25.
 
+- 2026-08-02 · `d0b879d8` · [Loupe/F25.1] Weaver Target Studio — Observe: roster + definition map + entity drill (`#/weaver`) joining playbook · rows · marks · control · heartbeat. Lead self-review, live-verified
 - 2026-08-01 · `f73d8928` · [Loupe/Lens] Contents panel scopes to the lens's own key prefix (shared buckets stop showing sibling rows) and badges guarded soft-tombstones as retracted
 - 2026-07-30 · `7984e32c` · [Loupe/Flows] Retry button wired to Loom's redrive — the second (and last) of the two 2026-07-25 act-on-it rows; `#/flows` is no longer read-only
 - 2026-07-30 · `2edba1f3` · [Loupe/Edge] gapped device panel gets its one write action — "Request hydration on next attach", the lattice cross-lane primitive's console consumer. Lead self-review

@@ -318,6 +318,41 @@ on the dev stack per lane discipline (headless-first).
 Order fixed (each consumes its predecessor's module); one FE fire at a time per lane rules; Sally UX
 pass opens each fire.
 
+### 🏗️ Build checkpoint — F25.1 SHIPPED 2026-08-02 (`d0b879d8`), next is F25.2
+
+The shared target-model module landed in `cmd/loupe/weaver.go` and is what F25.2 reads: three routes
+(`/api/weaver/targets`, `/api/weaver/target/<targetId>`, `.../entity/<entityId>`), the `weaverTargetBody`
+parse of §10.8, `scanWeaverRows`, `splitWeaverStateKeys`, `buildWeaverMetaIndex` and the row/mark/count
+joins. View logic is `web/js/logic/weaver.js` (goja-tested), DOM in `web/js/views/weaver.js`.
+
+Three grounding corrections the live stack forced, which F25.2's checks must build ON rather than
+rediscover:
+
+1. **Targets and patterns are indexed off their SPEC BODY's `targetId` / `patternId`, never
+   canonicalName.** A `meta.weaverTarget` carries no `canonicalName` aspect at all, and the violation
+   lens a target binds routinely carries the *target's* name (`leaseApplicationComplete` is the lens's
+   canonicalName on the dev stack). This is the same keying the engine's registry uses
+   (`targetOwner` / `patternMeta`). V1's "pattern refs resolve to installed `meta.loomPattern`s" must
+   use `weaverMetaIndex.Patterns`, which also aliases the vertex NanoID (the engine resolves either).
+2. **`reads` accepts a derived-aspect form `row.<column>.<aspect>`** — the column resolves to a vertex
+   root key and the aspect is joined on (`strategist.go` `resolveReadKey`). Params / subject / assignee
+   / target are EXACT column lookups. V1's "templated params reference columns the rows actually carry"
+   check must keep that asymmetry or it will flag working playbooks.
+3. **Column observation is evidence, not proof.** A gap column absent from every scanned row means the
+   lens does not project it *or* the lens has no candidate entities yet — two live targets
+   (`capabilityAuthorDispatch`, `clauseSatisfaction`) have zero rows today. V1 is specified as
+   observed-evidence for exactly this reason; keep the evidence class on the verdict.
+
+Also available to F25.2 and unused so far: the retry-budget rule (`gapBudget` — declared
+`maxretries_<g>` wins, `directOp` falls back to the engine's 3, everything else is UNKNOWN not zero) and
+`issuesNaming`, the whole-token message match that attributes heartbeat issues to a target (the
+`issueCache` key carrying the targetId is not published, so text is the only attribution available —
+label verdicts accordingly).
+
+F25.1 deliberately did NOT surface `TargetRejected` — that is V2's "install-verdict surfacing", and its
+message names the meta vertex (`vtx.meta.<id>`), not the targetId, so it will not come through
+`issuesNaming`; V2 needs its own attribution path.
+
 ## 14. For Andrew (ratification)
 
 **What:** a Loupe program (F25) giving the convergence plane a target-shaped console — observe
