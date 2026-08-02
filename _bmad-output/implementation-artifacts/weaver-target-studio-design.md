@@ -318,6 +318,21 @@ on the dev stack per lane discipline (headless-first).
 Order fixed (each consumes its predecessor's module); one FE fire at a time per lane rules; Sally UX
 pass opens each fire.
 
+### 🏗️ Build checkpoint — F25.2 SHIPPED 2026-08-02 (`e9408470`), next is F25.3a
+
+The Checks panel (target map) + `#/weaver/verify` (lane-wide) landed in `cmd/loupe/weaververify.go`.
+V1/V2 read fields F25.1's `buildTargetDetail` already computes (`Observed`, `Unhandled`,
+`PatternKnown`, `Bindings[].Observed`) plus two additions to that module: `weaverRowScan.Samples`
+(first observed string value per column, for a best-effort subjectType cross-check) and
+`weaverMetaIndex.PatternSubject` (a pattern's declared `subjectType`, read off the same spec GET
+`buildWeaverMetaIndex` already does). V3 mirrors `internal/weaver/registry.go`'s
+`indexOpMeta`/`indexOpEffects`/`effectLeafPaths` join Loupe-side (`buildOpEffectsIndex`) rather than
+importing the engine, per §5. Live-verified against the real 20-target dev stack: `/api/weaver/verify`
+found `leaseApplicationComplete`'s pre-existing `missing_decision` GapWithoutPlaybook (a genuine live
+finding, not a fixture artifact) and reported the honest op-effects coverage (2 of 19 referenced ops
+declare `.effects` today, 17 unanalyzable — matching this doc's "only `packages/lease-signing`
+declares Effects" baseline plus one more op declared since). No cross-lane ask; lead self-review.
+
 ### 🏗️ Build checkpoint — F25.1 SHIPPED 2026-08-02 (`d0b879d8`), next is F25.2
 
 The shared target-model module landed in `cmd/loupe/weaver.go` and is what F25.2 reads: three routes
