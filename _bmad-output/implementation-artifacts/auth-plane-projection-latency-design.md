@@ -555,15 +555,25 @@ re-reference rule and the variable-length-relationship clause.
 
 ### 13.3 Corpus census — no live lens's classification moves
 
-Run this fire over **every** shipped lens: the 98 `full`-engine specs reachable from `pkgregistry`
+Run this fire over **every** shipped lens: the 97 `full`-engine specs reachable from `pkgregistry`
 (**after** `ExpandReadGrantWalks`, so the generated read-grant producers and their staged `WITH`s are
 included) plus the four `internal/bootstrap` kernel lenses. The `(exhaustive, labels)` output is
-**byte-identical** before and after — 68 exhaustive, same label sets.
+**byte-identical** before and after, all 101 rows.
 
 Two shapes were the risk and both survive: `wellness-ledger`'s `memberAccountsSpec` (`lenses.go:249-251`)
 carries its variable through (`WITH DISTINCT id`), and the generated producer stages
 (`pkgmgr/anchorwalk.go:534-565`) carry the labeled actor (`anchorWalkHead`, `anchorwalk.go:72`) through
 every stage. Both are pinned as test cases so a future authoring change cannot silently un-pin them.
+
+That census is what makes the deploy free of a transition step, and the transition is the part worth
+naming for whoever lands a lens that *does* take a WITH-drop shape: a verdict change reaches a live
+consumer by two different routes, and only one of them backfills. A MATCH hot-reload recomputes the labels
+and then runs `Pipeline.Rebuild` (`cmd/refractor/reload.go:346,359-362`; `pipeline.go:1031-1041`), which
+re-derives `ConsumerFilter` and resets the consumer. A bare process restart re-derives the filter too
+(`cmd/refractor/main.go:1009-1013`) but lands it through `CreateOrUpdateConsumer`
+(`substrate/consumer_supervisor.go:407-449`), which updates `FilterSubjects` in place **without** moving
+the delivery cursor — so it corrects future events and never repairs rows that projected under the old,
+wrongly-exhaustive verdict. A future lens whose verdict actually moves needs a `Rebuild`, not a restart.
 
 ### 13.4 0b — the premise is falsified; not built, re-scoped
 
@@ -596,14 +606,44 @@ class write, which is neither statically visible nor actually invariant. That is
 design's mechanism, so it goes back through the Designer rather than being improvised here; the board row
 carries it.
 
-### 13.5 Gates run
+### 13.5 Adversarial review — one finding was in the fire's own change
+
+Two independent read-only reviewers ran against the diff (soundness; blast-radius + house rules). The
+blast-radius pass was clean and independently reproduced the census result. The soundness pass landed one
+finding **in the new code**, folded before merge:
+
+- **The closing `WITH`'s own `WHERE` was judged in the pre-`WITH` scope.** `applyWith`
+  (`executor.go:1042-1060`) projects *first* and filters the projected rows *second*, so a variable the
+  `WITH` drops is already unbound when its own `WHERE` runs — and a pattern there naming that variable
+  re-seeds through the whole-bucket scan exactly as one in a following `MATCH` does. The first cut
+  swapped the scope only *after* walking the `WHERE`, so `WITH p WHERE (a)-[:heldBy]->(b:identity)`
+  still reported `exhaustive = true`. The carry now lands before the `WHERE` walk, and the case is a
+  pinned test (confirmed to fail against the un-fixed ordering).
+
+Two further findings are **pre-existing and out of this increment's scope**, both filed as rows:
+
+- Pass 1 is forward-looking within a segment, so a label reaching a variable only from an **OPTIONAL
+  MATCH** or a **negated/disjunctive `WHERE` pattern** still excuses an earlier unlabeled sighting —
+  neither position constrains the surviving binding, so the executor seeds it whole-bucket. A required
+  `MATCH` later in the segment *does* constrain it, and stays sound.
+- `nodeMatches`' body-`class` fallback (already §13.4's row).
+
+**Live-victim census for the first:** a detector was written for the precise shape — a variable whose
+first pattern sighting is unlabeled and whose only later label sits in an OPTIONAL MATCH or a `WHERE`
+pattern — self-checked against both unsound shapes *and* against the sound required-`MATCH` shape, then
+swept over all 101 specs. **Zero lenses flagged.** Latent, no live victim. (A blunter probe — stripping
+every OPTIONAL/`WHERE` label source at once — flips 9 lenses, but that over-approximates: those lenses
+label a variable on its *first* sighting inside an OPTIONAL MATCH, which is a binding position, not a
+re-reference. The blunt number is not the victim count.)
+
+### 13.6 Gates run
 
 `go build ./...` · `make vet` · `golangci-lint run ./...` (cache-cleaned, 0 issues) · `make verify-kernel`
 · all six `scripts/lint-*.go` gates under `STRICT=1` · the **full `go test ./... -p 4`** suite (§9's
 requirement for this increment — a derivation every plain lens consumes), green. The new negative case was
 confirmed to **fail** against the pre-change derivation, so it pins the fix rather than the shape.
 
-### 13.6 Non-goals
+### 13.7 Non-goals
 
 Increments 1–3 (the relevance gate, the eligibility swap, the pattern-directed derivation); the enumerator's
 caps and its `reportsTo` hop; `verify-claim-ceremony.go`'s convergence poll (its own row); any Contract
