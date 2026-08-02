@@ -141,6 +141,7 @@ designed-through, but the *fork decision* + the *contract commit* are Andrew's.
 ### Privacy / Vault
 | Item | What it is | Imp | Size | State |
 |---|---|---|---|---|
+| **[Vault] Sensitive aspects are identity-anchored, so event-scoped PHI has no home** | All are person-scoped + single-valued on `vtx.identity`; step 6 rejects any other parent (`sensitiveAspectScope`). One note per visit can't be an identity aspect, so clinic `.encounter` PHI sits plaintext in Core KV, unprojectable, and outlives a crypto-shred. Needs subject-anchored aspects plus a retention posture: a lease or `backgroundCheck` result stays auditable (~7y) past erasure, a different policy from right-to-be-forgotten. | ★★★ | L | 📋 needs design · consumer: clinic notes |
 
 ### External-I/O maturity (bridge follow-ons)
 | Item | What it is | Imp | Size | State |
