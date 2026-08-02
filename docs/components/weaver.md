@@ -36,6 +36,14 @@ Weaver is an **internal service actor** at root-equivalent capability. It **subm
 through the Processor** (never writes Core KV directly). Its only direct write is to the
 `weaver-state` bucket (dispatch/bookkeeping marks, Contract #10 §10.3).
 
+**The liveness invariant** (Contract #10 §10.8 Flow & anti-storm) is Weaver's operating law, stated
+once: every violating row is eventually **discharged** (the Lens re-projects it clean), **excluded**
+(target disabled/revoked — operator verb or the oscillation freeze — or the row superseded), or
+**escalated** (budget exhaustion → `surface`/Augur). The reconciler sweep, retry budgets, contraction
+monitor, oscillation detector, and admission fairness (Fires 7–8) are jointly this invariant's
+enforcement — one law, several mechanisms — and a target under which a gap can stay open forever
+without escalating is a target-authoring bug.
+
 ---
 
 ## Pipeline
@@ -118,6 +126,16 @@ deletion. (True "emit-only-when-violating" + Refractor negative/filter-retractio
 The freshness rule lives **in the target cypher**, not the engine: `missing_bgcheck = NOT
 EXISTS(check WHERE date > now − window)`, and the cypher projects the next deadline as the optional
 `freshUntil` column the temporal lane arms a timer from (below).
+
+**Obligations from occurrences (authoring guidance).** A target predicate can only read what the
+graph holds *now* — the platform deliberately keeps no run-history memory. When an obligation follows
+from something that **happened** rather than a state that **holds** (an approval challenged, a
+re-check demanded, a document re-requested — "X occurred, so Y must happen again"), the op performing
+the occurrence must leave it in the graph as a domain fact (an aspect or link on the subject), and
+the target Lens reads that fact like any other: `missing_resign = distrustRaisedAt > signedAt`, in
+whatever domain terms the package owns. Don't reach for a side-channel or a generic lifecycle marker —
+the occurrence is business state and lands in Core KV as such. Tasks are the platform's own precedent:
+an open task vertex *is* a materialized obligation.
 
 **A bespoke, package-defined obligation is a sanctioned target shape, not a new mechanism.**
 "Executable Paper" clauses (`vtx.clause` — a prose obligation with a Starlark/cypher predicate and a

@@ -1,6 +1,12 @@
 # Weaver Target Studio — observe, verify, author convergence targets in Loupe — design
 
-**Status: 📐 awaiting-Andrew (ratification)** — drafted 2026-08-02 (Winston, Designer fire; Andrew's
+**Status: ✅ Andrew-ratified (2026-08-02)** — all three §14 forks accepted per recommendation:
+**Fork 1** authoring width = the capability-materializer's restricted subset (planner surfaces render
+read-only; widening is its own ratification); **Fork 2** trial arming = explicit `enable` only, never
+auto-arm; **Fork 3** `SubmitCapabilityProposal` ratified with the program (lattice-lane row filed,
+AI-native section — it gates F25.3b only). The paired §8-adjacent doc/contract edits (Contract #10's
+liveness invariant + weaver.md's obligations-from-occurrences guidance) were ratified in the same
+decision and committed with this status. Drafted 2026-08-02 (Winston, Designer fire; Andrew's
 chat-scoped brief — his scoping is the brief, no Surveyor row precedes this). Adversarial pass run and
 folded the same fire (§15).
 **Component:** Loupe (`cmd/loupe` Go handlers + `web/` UI) — read-side joins over the convergence plane;

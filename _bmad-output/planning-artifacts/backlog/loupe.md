@@ -31,14 +31,14 @@ buildable-first; F11–F13 gated on lattice cross-lane asks (§6 there).
 
 ## Weaver Target Studio — F25 (the program)
 
-Chat-scoped program (Andrew, 2026-08-02); design:
-[weaver-target-studio-design.md](../../implementation-artifacts/weaver-target-studio-design.md).
-**Ratification: Andrew** — his direct request; overrides this lane's delegated-adjudication default for
-this program. Build order F25.1 → F25.2 → F25.3a → F25.3b (design §13).
+Chat-scoped program (Andrew, 2026-08-02); design **✅ Andrew-ratified 2026-08-02** (all three forks per
+recommendation): [weaver-target-studio-design.md](../../implementation-artifacts/weaver-target-studio-design.md).
+Build order F25.1 → F25.2 → F25.3a → F25.3b (design §13); UX per fire (Sally drafts, Winston adjudicates).
 
 | Item | What it is | Imp | Size | State |
 |---|---|---|---|---|
-| **F25 — Weaver Target Studio (observe → verify → author)** | Target-shaped console for the convergence plane: per-target structure + live-state overlay + entity drill; structural/install/interference checks over declared op effects; operator-authored target/lens artifacts through the capability review lane with a born-disabled dev-stack trial. F25.3b alone carries the program's one cross-lane ask (the operator-submission op). | ★★★ | XL | 📐 awaiting-Andrew (ratification) · [design](../../implementation-artifacts/weaver-target-studio-design.md) |
+| **F25 — Weaver Target Studio (observe → verify → author)** | Target-shaped console for the convergence plane: per-target structure + live-state overlay + entity drill; structural/install/interference checks over declared op effects; operator-authored target/lens artifacts through the capability review lane with a born-disabled dev-stack trial. | ★★★ | XL | ✅ Andrew-ratified · [design](../../implementation-artifacts/weaver-target-studio-design.md) |
+| **F25.3b — propose + trial** | The studio's submit step + born-disabled dev-stack trial; severable tail of F25. | ★★★ | M | 🚧 blocked-on: `SubmitCapabilityProposal` ([lattice → AI-native](lattice.md)) · [design §6.4](../../implementation-artifacts/weaver-target-studio-design.md) |
 
 ## Component maintenance
 

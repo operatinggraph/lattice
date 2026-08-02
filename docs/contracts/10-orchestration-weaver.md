@@ -258,6 +258,14 @@ in-flight**, the Strategist looks up `gaps[col]` and the Actuator executes:
   (`missing_bgcheck = onboarded AND NOT EXISTS(recent check)`). A dependent gap simply isn't `true`
   until its prerequisite closes, so parallel firing is always safe. Weaver stays a generic parallel
   dispatcher; ordering is declarative.
+- **Liveness invariant (the engine's operating law).** No violating row may sit indefinitely with
+  nothing owed on it: every `violating` row is eventually **discharged** (its Lens re-projects it
+  clean), **excluded** (its target disabled/revoked — operator verb or the oscillation freeze — or
+  the row superseded/deleted), or **escalated** (budget exhaustion → `surface`/Augur: a human now
+  owns it). The reconciler sweep, per-gap retry budgets, contraction trajectory, oscillation
+  detector, and admission fairness are jointly the *enforcement* of this one invariant, not
+  independent features. A target shape under which a gap can stay open forever without escalating is
+  a target-authoring bug, not an engine tolerance.
 
 Target + playbook are **package data**; the Weaver engine is a generic dispatcher.
 
