@@ -64,7 +64,7 @@ func Lenses() []pkgmgr.LensSpec {
 			Output: &pkgmgr.OutputDescriptorSpec{
 				AnchorType:       "appointment",
 				OutputKeyPattern: NoShowSettlementTarget + ".{actorSuffix}",
-				BodyColumns:      []string{"violating", "missing_charge", "entityKey", "appointmentKey", "patientKey", "accountKey", "feeCents", "status"},
+				BodyColumns:      []string{"violating", "missing_charge", "entityKey", "appointmentKey", "patientKey", "accountKey", "feeCents", "status", "memo"},
 				EmptyBehavior:    "delete",
 				KeyColumn:        "entityId",
 				Freshness:        "auto",
@@ -114,6 +114,7 @@ RETURN
   accountKey,
   feeCents,
   status,
+  'No-show fee' AS memo,
   ((status = 'noShow') AND (feeCents <> null) AND (feeCents > 0) AND (accountKey <> null) AND (txCount = 0)) AS missing_charge,
   ((status = 'noShow') AND (feeCents <> null) AND (feeCents > 0) AND (accountKey <> null) AND (txCount = 0)) AS violating
 `

@@ -26,8 +26,8 @@ func WeaverTargets() []pkgmgr.WeaverTargetSpec {
 					// DebitAccount is claimed by 4 installed ledger DDLs — pin the
 					// vertexType DDL this target dispatches to (MissingClass otherwise).
 					Class:  "clinictransaction",
-					Params: map[string]string{"accountKey": "row.accountKey", "amountCents": "row.feeCents", "appointmentRef": "row.appointmentKey"},
-					Reads:  []string{"row.accountKey", "row.appointmentKey"},
+					Params: map[string]string{"accountKey": "row.accountKey", "amountCents": "row.feeCents", "appointmentRef": "row.appointmentKey", "memo": "row.memo"},
+					Reads:  []string{"row.accountKey", "row.appointmentKey", "row.memo"},
 				},
 			},
 		},
