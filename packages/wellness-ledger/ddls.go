@@ -3,9 +3,9 @@ package wellnessledger
 import "github.com/operatinggraph/lattice/internal/pkgmgr"
 
 // DDLs returns the package's DDL meta-vertex declarations: `wellnessaccount`
-// (CreateAccount), `wellnesstransaction` (DebitAccount, CreditAccount), and
+// (WellnessCreateAccount), `wellnesstransaction` (DebitAccount, CreditAccount), and
 // the `wellnessLedgerAccountGuard` aspect-type declaration (the
-// identity-anchored uniqueness guard CreateAccount writes). Vertical-prefixed:
+// identity-anchored uniqueness guard WellnessCreateAccount writes). Vertical-prefixed:
 // a DDL canonicalName is global across every installed package
 // (internal/pkgmgr/installer.go checkCanonicalNameCollision), and
 // loftspace-ledger already owns the bare `account` / `transaction` names.
@@ -21,27 +21,27 @@ func accountDDL() pkgmgr.DDLSpec {
 	return pkgmgr.DDLSpec{
 		CanonicalName:     "wellnessaccount",
 		Class:             "meta.ddl.vertexType",
-		PermittedCommands: []string{"CreateAccount"},
+		PermittedCommands: []string{"WellnessCreateAccount"},
 		Description: "Ledger account DDL. Vertex shape: vtx.wellnessaccount.<NanoID>, class=wellnessaccount, root data = {} " +
-			"(minimal, D5 — the balance is LENS-derived by summing transactions, never stored). CreateAccount{identityKey} " +
+			"(minimal, D5 — the balance is LENS-derived by summing transactions, never stored). WellnessCreateAccount{identityKey} " +
 			"mints the account under its OWN independently-generated NanoID (never reused from the identity — Core KV " +
 			"NanoIDs are unique platform-wide identifiers, not scoped per vertex type). \"One account per member\" is " +
 			"enforced by a deterministic create-only guard aspect on the IDENTITY (identityKey+\".wellnessLedgerAccount\", " +
-			"wellnessLedgerAccountGuard DDL) instead: a second CreateAccount for the same identity conflicts on that " +
+			"wellnessLedgerAccountGuard DDL) instead: a second WellnessCreateAccount for the same identity conflicts on that " +
 			"already-existing aspect key. Writes the heldFor link (account→identity, the account is the later-arriving " +
 			"vertex so it is the source — Contract #1 §1.1). Requires the identityKey be a live identity (no orphan accounts).",
 		Script: accountDDLScript,
 		InputSchema: `{"type":"object","properties":` +
-			`{"identityKey":{"type":"string","description":"vtx.identity.<NanoID> of the member this account is for (CreateAccount; required, validated alive). The account gets its own independently-minted NanoID; uniqueness (one account per member) is enforced via the identity's .wellnessLedgerAccount guard aspect, not the account's own id."}},` +
+			`{"identityKey":{"type":"string","description":"vtx.identity.<NanoID> of the member this account is for (WellnessCreateAccount; required, validated alive). The account gets its own independently-minted NanoID; uniqueness (one account per member) is enforced via the identity's .wellnessLedgerAccount guard aspect, not the account's own id."}},` +
 			`"required":["identityKey"]}`,
 		OutputSchema: `{"type":"object","properties":` +
 			`{"primaryKey":{"type":"string","description":"vtx.wellnessaccount.<NanoID> of the created account (the operation's principal key) — the caller must read this from the ACCEPTED reply, since the id can no longer be derived from identityKey."}}}`,
 		FieldDescription: map[string]string{
-			"identityKey": "Full vtx.identity.<NanoID> key of the member the account is opened for. CreateAccount validates it is alive, mints the account under a fresh independent NanoID, writes the identity's .wellnessLedgerAccount guard aspect (one account per member) and the heldFor link (account→identity).",
+			"identityKey": "Full vtx.identity.<NanoID> key of the member the account is opened for. WellnessCreateAccount validates it is alive, mints the account under a fresh independent NanoID, writes the identity's .wellnessLedgerAccount guard aspect (one account per member) and the heldFor link (account→identity).",
 		},
 		Examples: []pkgmgr.ExampleSpec{
 			{
-				Name:    "CreateAccount — open the ledger account for a member",
+				Name:    "WellnessCreateAccount — open the ledger account for a member",
 				Payload: map[string]any{"identityKey": "vtx.identity.<NanoID>"},
 				ExpectedOutcome: "Validates the identity is alive. Atomically commits vtx.wellnessaccount.<freshNanoID> (root data {} — D5) " +
 					"+ the identity's .wellnessLedgerAccount guard aspect + the heldFor link (account→identity). Emits " +
@@ -56,19 +56,19 @@ func accountDDL() pkgmgr.DDLSpec {
 }
 
 // accountGuardAspectTypeDDL declares the .wellnessLedgerAccount aspect (class
-// wellnessLedgerAccountGuard) CreateAccount writes on the IDENTITY — the
+// wellnessLedgerAccountGuard) WellnessCreateAccount writes on the IDENTITY — the
 // deterministic create-only key that enforces "at most one ledger account per
 // member" now that the account itself carries an independent NanoID (not the
-// identity's own). Declaration-only: the aspect is written by CreateAccount,
+// identity's own). Declaration-only: the aspect is written by WellnessCreateAccount,
 // never has its own operationType.
 func accountGuardAspectTypeDDL() pkgmgr.DDLSpec {
 	return pkgmgr.DDLSpec{
 		CanonicalName:     "wellnessLedgerAccountGuard",
 		Class:             "meta.ddl.aspectType",
-		PermittedCommands: []string{"CreateAccount"},
+		PermittedCommands: []string{"WellnessCreateAccount"},
 		Description: "Per-member ledger-account uniqueness guard aspect. Stored as vtx.identity.<NanoID>.wellnessLedgerAccount " +
 			"(class wellnessLedgerAccountGuard) = {accountKey: <vtx.wellnessaccount.<NanoID>>}. Non-sensitive. Created " +
-			"exactly once by CreateAccount, atomically alongside the account vertex it names — a second CreateAccount for " +
+			"exactly once by WellnessCreateAccount, atomically alongside the account vertex it names — a second WellnessCreateAccount for " +
 			"the same identity that declares this key in contextHint.reads sees the clean AccountAlreadyExists domain " +
 			"rejection; one that does not (the normal first-ever-call shape, since the key doesn't exist yet to declare) " +
 			"instead relies on this aspect's own create-only write to fail a genuine concurrent race. Prefixed distinctly " +
@@ -85,14 +85,14 @@ func accountGuardAspectTypeDDL() pkgmgr.DDLSpec {
 			{
 				Name:            "member ledger-account guard aspect",
 				Payload:         map[string]any{"accountKey": "vtx.wellnessaccount.<NanoID>"},
-				ExpectedOutcome: "Stored as vtx.identity.<NanoID>.wellnessLedgerAccount; created once by CreateAccount alongside the account vertex it names.",
+				ExpectedOutcome: "Stored as vtx.identity.<NanoID>.wellnessLedgerAccount; created once by WellnessCreateAccount alongside the account vertex it names.",
 			},
 		},
 	}
 }
 
 // aspectDeclarationOnlyScript is the declaration-only Starlark for
-// wellnessLedgerAccountGuard — written by CreateAccount's own op handler,
+// wellnessLedgerAccountGuard — written by WellnessCreateAccount's own op handler,
 // never dispatched as an operation in its own right.
 const aspectDeclarationOnlyScript = `
 def execute(state, op):

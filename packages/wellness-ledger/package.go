@@ -6,7 +6,7 @@
 //
 // It declares:
 //
-//   - The `wellnessaccount` vertex type (DDL `wellnessaccount`) — CreateAccount
+//   - The `wellnessaccount` vertex type (DDL `wellnessaccount`) — WellnessCreateAccount
 //     mints vtx.wellnessaccount.<NanoID> (root data {} per D5) with its OWN
 //     independently-minted NanoID (never reused from the member's identity —
 //     Core KV NanoIDs are unique platform-wide identifiers, not scoped per
@@ -16,7 +16,7 @@
 //
 //   - The `wellnessLedgerAccountGuard` aspect type (DDL
 //     `wellnessLedgerAccountGuard`) — vtx.identity.<NanoID>.wellnessLedgerAccount
-//     = {accountKey}, written once by CreateAccount alongside the account it
+//     = {accountKey}, written once by WellnessCreateAccount alongside the account it
 //     names; its deterministic, identity-anchored key is the uniqueness guard.
 //
 //   - The `wellnesstransaction` vertex type (DDL `wellnesstransaction`) —
@@ -87,8 +87,8 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 // Package is the static, install-time bundle.
 var Package = pkgmgr.Definition{
 	Name:    "wellness-ledger",
-	Version: "0.2.0",
-	Description: "Wellness member payment ledger: the wellnessaccount vertex type (CreateAccount, independently-minted " +
+	Version: "0.2.1",
+	Description: "Wellness member payment ledger: the wellnessaccount vertex type (WellnessCreateAccount, independently-minted " +
 		"id, one per member identity via a .wellnessLedgerAccount guard aspect on the identity) + the wellnesstransaction " +
 		"vertex type (DebitAccount/CreditAccount, append-only entries linked to the account via postedTo, DebitAccount " +
 		"independently taking optional bookingRef (no-show settlement, writes settles) and priceBookingRef (class-price " +
@@ -101,4 +101,5 @@ var Package = pkgmgr.Definition{
 	Lenses:        Lenses(),
 	Permissions:   Permissions(),
 	WeaverTargets: WeaverTargets(),
+	OpMetas:       OpMetas(),
 }

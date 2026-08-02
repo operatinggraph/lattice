@@ -1,7 +1,7 @@
 name: wellness-ledger
-version: 0.2.0
+version: 0.2.1
 description: |
-  Wellness member payment ledger: the wellnessaccount vertex type (CreateAccount,
+  Wellness member payment ledger: the wellnessaccount vertex type (WellnessCreateAccount,
   independently-minted id, one per member identity via a .wellnessLedgerAccount
   guard aspect on the identity) + the wellnesstransaction vertex type
   (DebitAccount/CreditAccount, append-only entries linked to the account via
@@ -40,10 +40,12 @@ declares:
       adapter: nats-kv
       bucket: weaver-targets
       engine: full
+  opMetas:
+    - operationType: WellnessCreateAccount
   permissions:
-    - operationType: CreateAccount
+    - operationType: WellnessCreateAccount
       scope: any
-      grantsTo: [operator]
+      grantsTo: [operator, frontOfHouse]
     - operationType: DebitAccount
       scope: any
       grantsTo: [operator]

@@ -1,12 +1,12 @@
 package wellnessledger
 
-// accountDDLScript handles CreateAccount. The account gets its OWN
+// accountDDLScript handles WellnessCreateAccount. The account gets its OWN
 // independently-minted NanoID — vertex NanoIDs are unique identifiers across
 // all of Core KV, never reused across vertex types, even deliberately (see
 // clinic-ledger/scripts.go's adjacency-shared-nanoid-collision-design.md
 // note, which this mirrors exactly). "One account per member" is instead
 // enforced by a deterministic CREATE-ONLY guard aspect on the PRE-EXISTING
-// identity (identityKey + ".wellnessLedgerAccount") — a second CreateAccount
+// identity (identityKey + ".wellnessLedgerAccount") — a second WellnessCreateAccount
 // for the same identity conflicts on that already-existing aspect key, the
 // same "let the key shape be the uniqueness guard" idiom, just anchored on
 // the pre-existing parent instead of a freshly-minted sibling. Root data
@@ -62,7 +62,7 @@ def execute(state, op):
     ot = op.operationType
     p = op.payload
 
-    if ot == "CreateAccount":
+    if ot == "WellnessCreateAccount":
         identity_key = required_string(p, "identityKey")
         _, identity_id = parts_of(identity_key, "identityKey", "identity")
 
@@ -74,7 +74,7 @@ def execute(state, op):
         # IDENTITY (not the account — the account's own id is independent and
         # unknown until minted below). Only meaningful when the caller declared
         # the guard key in contextHint.reads (a repeat/racing caller checking
-        # before it retries); the FIRST CreateAccount for an identity declares
+        # before it retries); the FIRST WellnessCreateAccount for an identity declares
         # only identityKey (the guard doesn't exist yet — declaring an
         # as-yet-absent key in reads would HydrationMiss on first touch,
         # deferred past hydration), so on that path the

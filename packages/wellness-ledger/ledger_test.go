@@ -45,7 +45,7 @@ func ledgerCapDoc() *processor.CapabilityDoc {
 			{OperationType: "CreateStudio", Scope: "any"},
 			{OperationType: "CreateSession", Scope: "any"},
 			{OperationType: "CreateBooking", Scope: "any"},
-			{OperationType: "CreateAccount", Scope: "any"},
+			{OperationType: "WellnessCreateAccount", Scope: "any"},
 			{OperationType: "DebitAccount", Scope: "any"},
 			{OperationType: "CreditAccount", Scope: "any"},
 		},
@@ -155,7 +155,7 @@ func createAccount(t *testing.T, ctx context.Context, conn *substrate.Conn, cp *
 	env := &processor.OperationEnvelope{
 		RequestID:     reqID,
 		Lane:          processor.LaneDefault,
-		OperationType: "CreateAccount",
+		OperationType: "WellnessCreateAccount",
 		Actor:         ledgerActorKey,
 		SubmittedAt:   "2026-07-01T12:00:00Z",
 		Class:         "wellnessaccount",
@@ -212,7 +212,7 @@ func TestCreateAccount_MintsAccountHeldForIdentity(t *testing.T) {
 	dup := &processor.OperationEnvelope{
 		RequestID:     testutil.GenReqID("createacct0000002"),
 		Lane:          processor.LaneDefault,
-		OperationType: "CreateAccount",
+		OperationType: "WellnessCreateAccount",
 		Actor:         ledgerActorKey,
 		SubmittedAt:   "2026-07-01T12:05:00Z",
 		Class:         "wellnessaccount",
@@ -232,7 +232,7 @@ func TestCreateAccount_UnknownIdentity(t *testing.T) {
 	env := &processor.OperationEnvelope{
 		RequestID:     testutil.GenReqID("createacctunknown01"),
 		Lane:          processor.LaneDefault,
-		OperationType: "CreateAccount",
+		OperationType: "WellnessCreateAccount",
 		Actor:         ledgerActorKey,
 		SubmittedAt:   "2026-07-01T12:00:00Z",
 		Class:         "wellnessaccount",
