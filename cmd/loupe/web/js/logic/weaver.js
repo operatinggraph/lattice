@@ -219,7 +219,12 @@ function mapLayout(detail) {
     cls: detail && detail.state === "disabled" ? "disabled" : "",
     href: "",
   });
-  edges.push({ from: "lens", to: "target", label: "projects rows" });
+  // Edges carry no labels: the column gap between two nodes is 20-30px, so a
+  // label centred there is clipped by both boxes (it rendered as "jects ro" on
+  // the first live pass). Both relations the labels carried are already on the
+  // nodes themselves — the lens node's own "violation lens" subtitle, and the
+  // planner's involvement in the action node's dispatch label.
+  edges.push({ from: "lens", to: "target" });
 
   for (var i = 0; i < gaps.length; i++) {
     var g = gaps[i];
@@ -234,7 +239,7 @@ function mapLayout(detail) {
       cls: gapNodeCls(g),
       href: "",
     });
-    edges.push({ from: "target", to: gid, label: "" });
+    edges.push({ from: "target", to: gid });
 
     var aid = "act:" + g.column;
     var actLabel = dispatchLabel(g);
@@ -247,7 +252,7 @@ function mapLayout(detail) {
       cls: g.dispatch === "none" ? "unbound" : "",
       href: g.dispatch === "action" && g.action && g.action.patternKnown ? "#/graph/" + g.action.patternRef : "",
     });
-    edges.push({ from: gid, to: aid, label: g.dispatch === "action" ? "" : "planner" });
+    edges.push({ from: gid, to: aid });
   }
 
   return { width: MAP_COL_X[3] + MAP_NODE_W[3] + 20, height: height, nodes: nodes, edges: edges };

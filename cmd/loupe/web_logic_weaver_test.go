@@ -214,11 +214,15 @@ func TestWeaverMapLayout(t *testing.T) {
 		byID[m["id"].(string)] = m
 	}
 	// Every edge endpoint must name a real node — a dangling edge would paint
-	// a line to nowhere.
+	// a line to nowhere. Edges carry no label: the inter-column gap is 20-30px,
+	// so a centred label is clipped by both boxes.
 	for _, e := range edges {
 		m := e.(map[string]any)
 		if byID[m["from"].(string)] == nil || byID[m["to"].(string)] == nil {
 			t.Fatalf("edge %v names a node that does not exist", m)
+		}
+		if _, labelled := m["label"]; labelled {
+			t.Errorf("edge %v carries a label; there is no room to draw one", m)
 		}
 	}
 	if byID["lens"]["label"] != "leaseViolations" {

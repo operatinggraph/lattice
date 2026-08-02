@@ -181,15 +181,6 @@ function mapSvg(d) {
     path.setAttribute("d", "M" + x1 + " " + y1 + " C" + mx + " " + y1 + " " + mx + " " + y2 + " " + x2 + " " + y2);
     path.setAttribute("class", "weaver-edge");
     svg.appendChild(path);
-    if (e.label) {
-      const t = document.createElementNS(SVG_NS, "text");
-      t.setAttribute("x", String(mx));
-      t.setAttribute("y", String((y1 + y2) / 2 - 4));
-      t.setAttribute("class", "weaver-edge-label");
-      t.setAttribute("text-anchor", "middle");
-      t.textContent = e.label;
-      svg.appendChild(t);
-    }
   });
   layout.nodes.forEach((n) => svg.appendChild(mapNode(n)));
   wrap.appendChild(svg);

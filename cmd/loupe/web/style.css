@@ -1332,7 +1332,6 @@ body.demo-mode [data-demo-hide] { display: none !important; }
 .weaver-node-label { fill: var(--text); font-size: 12px; font-weight: 600; }
 .weaver-node-sub { fill: var(--text-dim); font-size: 10px; }
 .weaver-edge { fill: none; stroke: var(--border); stroke-width: 1.5; }
-.weaver-edge-label { fill: var(--text-dim); font-size: 9px; }
 
 .weaver-gap-card { margin-bottom: 10px; }
 .weaver-action { border-left: 2px solid var(--border); padding-left: 8px; margin-top: 8px; }
