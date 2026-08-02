@@ -12,6 +12,16 @@ package full
 // not a re-reference to a variable labeled elsewhere binds any type, and a
 // variable-length relationship traverses intermediate nodes of arbitrary
 // type. Conservative by construction — when in doubt, reproject.
+//
+// Re-reference is scoped to the WITH segment, because the executor's binding
+// scope is: a WITH rebuilds every binding from its projection items alone
+// (executor.projectItems),
+// so a variable the WITH does not carry is unbound downstream and an unlabeled
+// pattern node re-using that name re-seeds through the whole-bucket scan, which
+// admits any type. Only a variable carried through as itself — `WITH a` or
+// `WITH a AS b`, never `WITH a.x AS a` — keeps its label downstream, under the
+// name the WITH gives it. `WITH *` carries no items through the visitor, so it
+// carries no label either, which matches an executor that projects nothing.
 func (cr *CompiledRule) ReferencedLabels() (labels map[string]struct{}, exhaustive bool) {
 	if cr == nil || cr.Query == nil {
 		return nil, false
@@ -19,9 +29,10 @@ func (cr *CompiledRule) ReferencedLabels() (labels map[string]struct{}, exhausti
 	labels = make(map[string]struct{})
 	exhaustive = true
 
-	// Pass 1: every variable that carries a label ANYWHERE in the query —
-	// an unlabeled `(u)` later is a re-reference to that binding, not a new
-	// any-type node (`MATCH (u:unit)` … `MATCH (u)<-[:manages]-(l:identity)`).
+	// Pass 1: every variable that carries a label anywhere in the CURRENT WITH
+	// segment — an unlabeled `(u)` later in that segment is a re-reference to
+	// that binding, not a new any-type node
+	// (`MATCH (u:unit)` … `MATCH (u)<-[:manages]-(l:identity)`).
 	labeledVars := make(map[string]struct{})
 	collectVars := func(p PathPattern) {
 		for _, n := range p.Nodes {
@@ -50,13 +61,27 @@ func (cr *CompiledRule) ReferencedLabels() (labels map[string]struct{}, exhausti
 			collectVarsExpr(x.Right)
 		}
 	}
-	for _, c := range cr.Query.Clauses {
-		if m, isMatch := c.(*Match); isMatch {
-			for _, p := range m.Patterns {
-				collectVars(p)
+	// carryLabeled returns the labeled variables that survive a WITH, under the
+	// names the WITH gives them. An item that is not a bare variable reference
+	// projects a value, not the node binding, so it carries no label — and a
+	// labeled variable the WITH omits stops counting as labeled downstream.
+	carryLabeled := func(w *With) map[string]struct{} {
+		next := make(map[string]struct{})
+		for _, it := range w.Items {
+			vr, isVar := it.Expr.(*VariableRef)
+			if !isVar {
+				continue
 			}
-			collectVarsExpr(m.Where)
+			if _, wasLabeled := labeledVars[vr.Name]; !wasLabeled {
+				continue
+			}
+			name := it.Alias
+			if name == "" {
+				name = vr.Name
+			}
+			next[name] = struct{}{}
 		}
+		return next
 	}
 
 	// Pass 2: build the label set; an unlabeled node is exhaustive only as a
@@ -123,23 +148,61 @@ func (cr *CompiledRule) ReferencedLabels() (labels map[string]struct{}, exhausti
 			addExpr(x.Else)
 		}
 	}
-	for _, c := range cr.Query.Clauses {
-		switch cl := c.(type) {
-		case *Match:
-			for _, p := range cl.Patterns {
-				addPattern(p)
+	// Both passes run per WITH segment, in source order: pass 1 must see the
+	// whole segment before pass 2 judges any of its unlabeled nodes (a label
+	// may appear on a later clause of the same segment), and pass 2 must run
+	// before the segment's own labeled set is replaced by what its closing WITH
+	// carries forward.
+	clauses := cr.Query.Clauses
+	for start := 0; start < len(clauses); {
+		end := start
+		for end < len(clauses) {
+			if _, isWith := clauses[end].(*With); isWith {
+				break
 			}
-			addExpr(cl.Where)
-		case *With:
-			for _, it := range cl.Items {
-				addExpr(it.Expr)
-			}
-			addExpr(cl.Where)
-		case *Return:
-			for _, it := range cl.Items {
-				addExpr(it.Expr)
+			end++
+		}
+		segment := clauses[start:end]
+		var closing *With
+		if end < len(clauses) {
+			closing = clauses[end].(*With)
+		}
+
+		for _, c := range segment {
+			if m, isMatch := c.(*Match); isMatch {
+				for _, p := range m.Patterns {
+					collectVars(p)
+				}
+				collectVarsExpr(m.Where)
 			}
 		}
+		for _, c := range segment {
+			switch cl := c.(type) {
+			case *Match:
+				for _, p := range cl.Patterns {
+					addPattern(p)
+				}
+				addExpr(cl.Where)
+			case *Return:
+				for _, it := range cl.Items {
+					addExpr(it.Expr)
+				}
+			}
+		}
+		if closing == nil {
+			break
+		}
+		// The WITH's items are evaluated over the bindings the segment produced,
+		// so they are judged in the segment's scope; its WHERE filters the
+		// already-projected rows (executor.applyWith), so it is judged in the
+		// carried scope — a variable this WITH drops is unbound by the time its
+		// own WHERE runs.
+		for _, it := range closing.Items {
+			addExpr(it.Expr)
+		}
+		labeledVars = carryLabeled(closing)
+		addExpr(closing.Where)
+		start = end + 1
 	}
 	return labels, exhaustive
 }

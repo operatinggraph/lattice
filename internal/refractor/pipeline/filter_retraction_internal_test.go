@@ -514,6 +514,128 @@ func TestReferencedLabels_Contract(t *testing.T) {
 	require.Contains(t, labels, "svctemplate", "labels inside WHERE pattern expressions count")
 }
 
+// TestReferencedLabels_WithScoping pins that a variable's label survives a WITH
+// only when the WITH carries the binding itself. A WITH rebuilds every binding
+// from its projection items alone, so a dropped variable is unbound afterwards
+// and an unlabeled pattern node re-using its name re-seeds through the
+// whole-bucket scan — which binds types no label in the query names. Reporting
+// that set as exhaustive would narrow a lens's FilterSubjects past what its
+// executor really reads.
+func TestReferencedLabels_WithScoping(t *testing.T) {
+	eng := full.New()
+	parseFull := func(spec string) *full.CompiledRule {
+		cr, err := eng.Parse(spec)
+		require.NoError(t, err)
+		fullCR, isFull := cr.(*full.CompiledRule)
+		require.True(t, isFull)
+		return fullCR
+	}
+
+	_, exhaustive := parseFull(`
+MATCH (a:role)-[:grants]->(p:permission)
+WITH p
+MATCH (a)-[:heldBy]->(b:identity)
+RETURN b.key AS key`).ReferencedLabels()
+	require.False(t, exhaustive,
+		"a variable the WITH drops is unbound downstream, so re-using its name binds any type")
+
+	labels, exhaustive := parseFull(`
+MATCH (a:role)-[:grants]->(p:permission)
+WITH DISTINCT a
+MATCH (a)-[:heldBy]->(b:identity)
+RETURN b.key AS key`).ReferencedLabels()
+	require.True(t, exhaustive, "a variable carried through the WITH keeps its label")
+	require.Equal(t, map[string]struct{}{
+		"role": {}, "permission": {}, "identity": {},
+	}, labels)
+
+	labels, exhaustive = parseFull(`
+MATCH (a:role)-[:grants]->(p:permission)
+WITH a AS r
+MATCH (r)-[:heldBy]->(b:identity)
+RETURN b.key AS key`).ReferencedLabels()
+	require.True(t, exhaustive, "a renamed carry keeps the label under the new name")
+	require.Equal(t, map[string]struct{}{
+		"role": {}, "permission": {}, "identity": {},
+	}, labels)
+
+	_, exhaustive = parseFull(`
+MATCH (a:role)-[:grants]->(p:permission)
+WITH a.key AS a
+MATCH (a)-[:heldBy]->(b:identity)
+RETURN b.key AS key`).ReferencedLabels()
+	require.False(t, exhaustive,
+		"a projected value carried under the node's own name is not the node binding")
+
+	_, exhaustive = parseFull(`
+MATCH (a:role)-[:grants]->(p:permission)
+WITH a AS r
+MATCH (a)-[:heldBy]->(b:identity)
+RETURN b.key AS key`).ReferencedLabels()
+	require.False(t, exhaustive, "an alias carry moves the label to the new name, it does not duplicate it")
+
+	// A WITH's own WHERE filters the already-projected rows, so it reads the
+	// carried scope — a pattern there naming a variable the WITH dropped seeds
+	// through the whole-bucket scan exactly as one in a following MATCH does.
+	_, exhaustive = parseFull(`
+MATCH (a:role)-[:grants]->(p:permission)
+WITH p
+WHERE (a)-[:heldBy]->(b:identity)
+RETURN p.key AS key`).ReferencedLabels()
+	require.False(t, exhaustive, "a WITH's own WHERE is judged in the scope the WITH carries")
+
+	labels, exhaustive = parseFull(`
+MATCH (a:role)-[:grants]->(p:permission)
+WITH a
+WHERE (a)-[:heldBy]->(b:identity)
+RETURN a.key AS key`).ReferencedLabels()
+	require.True(t, exhaustive, "a carried variable is still a re-reference inside the WITH's WHERE")
+	require.Equal(t, map[string]struct{}{
+		"role": {}, "permission": {}, "identity": {},
+	}, labels)
+
+	_, exhaustive = parseFull(`
+MATCH (a:role)-[:grants]->(p:permission)
+WITH a, p
+WITH p
+MATCH (a)-[:heldBy]->(b:identity)
+RETURN b.key AS key`).ReferencedLabels()
+	require.False(t, exhaustive, "consecutive WITHs compose: the second drops what the first carried")
+
+	// The shipped corpus's only MATCH-after-WITH shape (wellness-ledger
+	// memberAccountsSpec) carries its variable through, and stays exhaustive.
+	labels, exhaustive = parseFull(`MATCH (bk:booking)-[:bookedBy]->(id:identity)
+WITH DISTINCT id
+OPTIONAL MATCH (id)<-[:heldFor]-(a:wellnessaccount)
+RETURN
+  id.key AS key,
+  id.key AS identityKey,
+  a.key AS accountKey`).ReferencedLabels()
+	require.True(t, exhaustive)
+	require.Equal(t, map[string]struct{}{
+		"booking": {}, "identity": {}, "wellnessaccount": {},
+	}, labels)
+
+	// A read-grant producer stages each walk behind its own WITH, carrying the
+	// labeled actor and the accumulated slices; every stage's re-reference to
+	// the actor is a genuine carry, so the producer stays exhaustive.
+	labels, exhaustive = parseFull(`
+MATCH (identity:identity {key: $actorKey})
+OPTIONAL MATCH (identity)-[:residesIn]->(u0:unit)
+WITH identity,
+  collect(DISTINCT u0.key) AS grantSlice0
+OPTIONAL MATCH (identity)-[:worksAt]->(b1:building)
+WITH identity, grantSlice0,
+  collect(DISTINCT b1.key) AS grantSlice1
+RETURN
+  identity.key AS actorKey,
+  grantSlice0 + grantSlice1 AS readableAnchors`).ReferencedLabels()
+	require.True(t, exhaustive, "a staged producer re-references the actor the WITH carries")
+	require.Equal(t, map[string]struct{}{
+		"identity": {}, "unit": {}, "building": {},
+	}, labels)
+}
+
 // TestAnchorProjectionKey_Contract table-tests the shared read-free key
 // derivation directly: ok iff the event vertex is the anchor label and every
 // key column resolves read-free from the anchor to a scalar.
