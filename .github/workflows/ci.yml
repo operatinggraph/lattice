@@ -394,7 +394,7 @@ jobs:
           ./packages/console-operator/... ./packages/demo-operator/... ./packages/edge-manifest/... ./packages/front-desk/...
           ./packages/loftspace-domain/... ./packages/privacy-base/...
           ./packages/rbac-domain/... ./packages/semantic-contracts/...
-          ./packages/service-location/... ./scripts/...
+          ./packages/service-location/... ./packages/wellness-reminders/... ./scripts/...
 
   edge-browser-store:
     runs-on: ubuntu-latest
@@ -478,7 +478,7 @@ jobs:
             ./packages/console-operator/... ./packages/demo-operator/... ./packages/edge-manifest/... ./packages/front-desk/... \
             ./packages/loftspace-domain/... ./packages/privacy-base/... \
             ./packages/rbac-domain/... ./packages/semantic-contracts/... \
-            ./packages/service-location/... ./scripts/... \
+            ./packages/service-location/... ./packages/wellness-reminders/... ./scripts/... \
             | sort -u > /tmp/sharded.txt
           diff /tmp/all.txt /tmp/sharded.txt && echo "OK: shards cover exactly go list ./..."
 
