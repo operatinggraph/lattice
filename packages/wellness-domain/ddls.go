@@ -31,6 +31,7 @@ const (
 	sessionScheduleAspectDDL         = "sessionSchedule"
 	studioSlotClaimAspectDDL         = "studioSlotClaim"
 	sessionSeatClaimAspectDDL        = "sessionSeatClaim"
+	sessionWaitlistClaimAspectDDL    = "sessionWaitlistClaim"
 	sessionBookerClaimAspectDDL      = "sessionBookerClaim"
 	bookingStatusAspectDDL           = "bookingStatus"
 	sessionSeriesDefinitionAspectDDL = "sessionSeriesDefinition"
@@ -49,18 +50,21 @@ const (
 //     mints alongside its own sessionseries DDL below).
 //   - sessionseries (vertexType) — owns CreateSessionSeries, the studio's
 //     recurring-class parent record (§ sessionSeriesVertexTypeDDL).
-//   - booking (vertexType) — owns CreateBooking + CancelBooking.
+//   - booking (vertexType) — owns CreateBooking + CancelBooking + JoinWaitlist.
 //   - instructor (vertexType) — owns CreateInstructor + TombstoneInstructor +
 //     BindInstructorIdentity (the provider-archetype binding,
 //     persona-worlds-design.md Fire W0).
 //   - studioProfile / sessionSchedule / studioSlotClaim / sessionSeatClaim /
-//     sessionBookerClaim / bookingStatus / instructorProfile /
-//     instructorIdentityClaim / identityInstructorClaim /
+//     sessionWaitlistClaim / sessionBookerClaim / bookingStatus /
+//     instructorProfile / instructorIdentityClaim / identityInstructorClaim /
 //     sessionSeriesDefinition (aspectType) — step-6 write gates.
 //
 // Architectural rules (binding — the known-key discipline of clinic-domain /
-// loftspace-domain): the scripts read ONLY by known key. No prefix scans, no
-// kv.Links enumeration, no raw adjacency lookups.
+// loftspace-domain): the scripts read ONLY by known key or by the bounded,
+// paginated kv.Links enumeration idiom (Contract #2 §2.5.1, category (e) —
+// the operator-role walk, the workplace-confinement walk, and
+// find_promotion_candidate below all use it). No prefix scans, no raw
+// adjacency lookups, no unbounded scan.
 func DDLs() []pkgmgr.DDLSpec {
 	return []pkgmgr.DDLSpec{
 		studioVertexTypeDDL(),
@@ -72,6 +76,7 @@ func DDLs() []pkgmgr.DDLSpec {
 		sessionScheduleAspectTypeDDL(),
 		studioSlotClaimAspectTypeDDL(),
 		sessionSeatClaimAspectTypeDDL(),
+		sessionWaitlistClaimAspectTypeDDL(),
 		sessionBookerClaimAspectTypeDDL(),
 		bookingStatusAspectTypeDDL(),
 		instructorProfileAspectTypeDDL(),
@@ -556,7 +561,7 @@ func bookingVertexTypeDDL() pkgmgr.DDLSpec {
 	return pkgmgr.DDLSpec{
 		CanonicalName:     bookingVertexDDL,
 		Class:             "meta.ddl.vertexType",
-		PermittedCommands: []string{"CreateBooking", "CancelBooking", "SetBookingAttendance", "ReleaseOrphanedBooking"},
+		PermittedCommands: []string{"CreateBooking", "CancelBooking", "JoinWaitlist", "SetBookingAttendance", "ReleaseOrphanedBooking"},
 		Description: "Wellness booking DDL. Vertex shape: vtx.booking.<NanoID>, class=booking, root data = {} " +
 			"(minimal, D5). CreateBooking validates the session is alive + class=session and the booker is alive " +
 			"+ class=identity, reads the session's .schedule.capacity, and claims the first free " +
@@ -564,7 +569,23 @@ func bookingVertexTypeDDL() pkgmgr.DDLSpec {
 			"CreateOnly/expectedRevision write-path idiom studioSlotClaim uses, applied over an enumerated seat-" +
 			"index dimension instead of a time-cell dimension (Capability-KV §06). It then atomically mints the " +
 			"booking + the .status aspect {value: booked, rate, seat} + the forSession link (booking→session) + " +
-			"the bookedBy link (booking→identity). Resident-rate: an optional leaseAppKey, when supplied, " +
+			"the bookedBy link (booking→identity). JoinWaitlist shares every one of those checks (factored into " +
+			"prepare_booking_common, ddls.go) but claims the SAME CreateOnly idiom over a SEPARATE " +
+			"vtx.session.<s>.wl<n> dimension instead (WaitlistFull once MAX_WAITLIST_SIZE=200 is exhausted) and " +
+			"mints .status {value: waitlisted, rate, waitlistSlot} — a caller may hold at most one LIVE claim per " +
+			"session regardless of which state it is in, since both ops claim the identical sessionBookerClaim " +
+			"guard (DoubleBooked either way). CancelBooking, beyond releasing the cancelling booking's own seat, " +
+			"now ALSO runs find_promotion_candidate — a bounded kv.Links walk over the session's inbound " +
+			"forSession links picking the live waitlisted booking with the LOWEST waitlistSlot — and if one is " +
+			"found, hands it the just-freed seat directly (an OCC upsert of ITS OWN .status to " +
+			"value=booked/seat=<the freed index>, plus tombstoning its .wl<n> slot) INSTEAD of tombstoning the " +
+			"seat cell back open: the seat-claim aspect is a pure existence marker with no owner field, so " +
+			"reassigning ownership is just flipping the winning booking's own .status, and doing it in the SAME " +
+			"mutation batch as the cancellation closes the race a two-step release-then-reclaim would leave open " +
+			"for an unrelated new CreateBooking caller to win the seat instead. Exhausting the bounded walk " +
+			"degrades softly (no promotion this round, same as before this feature existed) rather than failing " +
+			"the cancellation — a member must always be able to cancel their own seat regardless of how much " +
+			"waitlist history a popular session has accumulated. Resident-rate: an optional leaseAppKey, when supplied, " +
 			"qualifies for rate=resident only when ALL THREE hold: the leaseapp is alive, its .tenancy aspect " +
 			"is present (CreateOnly-stamped on the leaseapp's FIRST DecideLeaseApplication approve — the only " +
 			"signal an application actually became an active tenancy, not merely pending or declined), and " +
@@ -600,20 +621,23 @@ func bookingVertexTypeDDL() pkgmgr.DDLSpec {
 			"lnk.session.<sid>.ledBy.instructor.<iid> to be alive (known keys), rejecting AuthDenied otherwise; " +
 			"front-of-house staff hold no SetBookingAttendance grant. ReleaseOrphanedBooking is the Weaver-only " +
 			"counterpart to TombstoneSession's deliberate no-cascade (package.go): TombstoneSession soft-deletes " +
-			"only the session root, so a called-off class otherwise leaves its live bookings, claimed seat cells " +
-			"and double-book guards stranded forever. ReleaseOrphanedBooking{bookingKey} — operator-only, no " +
-			"session param — reads the booking's own .status.session anchor (stored by CreateBooking, carried " +
-			"forward by SetBookingAttendance), confirms that session is genuinely dead (SessionStillLive " +
-			"otherwise — a live session must go through CancelBooking), then releases the seat cell and " +
-			"double-book guard and soft-deletes the booking exactly as CancelBooking does. Dispatched by the " +
-			"wellnessOrphanedBookingSettlement Weaver target (targets.go) against the missing_release gap its " +
-			"convergence lens computes; never client-invoked.",
+			"only the session root, so a called-off class otherwise leaves its live bookings, claimed seat/waitlist " +
+			"cells and double-book guards stranded forever. ReleaseOrphanedBooking{bookingKey} — operator-only, no " +
+			"session param — reads the booking's own .status.session anchor (stored by CreateBooking/JoinWaitlist, " +
+			"carried forward by SetBookingAttendance), confirms that session is genuinely dead (SessionStillLive " +
+			"otherwise — a live session must go through CancelBooking), then releases whichever cell its OWN " +
+			"status.value names — .status.seat's cell when still booked, .status.waitlistSlot's cell when still " +
+			"waitlisted, never both — and the double-book guard, soft-deleting the booking exactly as CancelBooking " +
+			"does (minus any promotion attempt: the session is dead, so there is no seat left to hand anyone). " +
+			"Dispatched by the wellnessOrphanedBookingSettlement Weaver target (targets.go) against the " +
+			"missing_release gap its convergence lens computes (now matching status=booked OR status=waitlisted, " +
+			"lenses.go); never client-invoked.",
 		Script: bookingDDLScript,
 		InputSchema: `{"type":"object","properties":` +
-			`{"session":{"type":"string","description":"vtx.session.<NanoID> being booked (CreateBooking; required, validated alive + class=session; on CancelBooking and SetBookingAttendance it must be the booking's actual session, validated via the forSession link)."},` +
-			`"booker":{"type":"string","description":"vtx.identity.<NanoID> making the booking (CreateBooking; required, validated alive + class=identity)."},` +
-			`"leaseAppKey":{"type":"string","description":"Optional vtx.leaseapp.<NanoID> the booker claims residency under (CreateBooking; optional). Checked against the lease's applicationFor link — a mismatch falls through to the standard rate, never a hard failure."},` +
-			`"bookingId":{"type":"string","description":"Optional bare NanoID for the new booking vertex (CreateBooking); absent → minted."},` +
+			`{"session":{"type":"string","description":"vtx.session.<NanoID> being booked or waitlisted (CreateBooking / JoinWaitlist; required, validated alive + class=session; on CancelBooking and SetBookingAttendance it must be the booking's actual session, validated via the forSession link)."},` +
+			`"booker":{"type":"string","description":"vtx.identity.<NanoID> making the booking or joining the waitlist (CreateBooking / JoinWaitlist; required, validated alive + class=identity)."},` +
+			`"leaseAppKey":{"type":"string","description":"Optional vtx.leaseapp.<NanoID> the booker claims residency under (CreateBooking / JoinWaitlist; optional). Checked against the lease's applicationFor link — a mismatch falls through to the standard rate, never a hard failure."},` +
+			`"bookingId":{"type":"string","description":"Optional bare NanoID for the new booking vertex (CreateBooking / JoinWaitlist); absent → minted."},` +
 			`"bookingKey":{"type":"string","description":"vtx.booking.<NanoID> of an existing booking (CancelBooking / SetBookingAttendance / ReleaseOrphanedBooking; required, validated alive)."},` +
 			`"status":{"type":"string","description":"attended | noShow (SetBookingAttendance; required). Re-markable — either value corrects the other."},` +
 			`"instructor":{"type":"string","description":"vtx.instructor.<NanoID> the caller is bound to (SetBookingAttendance; required for an instructor (non-operator) caller marking a booking on their OWN class — validated via identifiedBy + ledBy)."},` +
@@ -622,9 +646,9 @@ func bookingVertexTypeDDL() pkgmgr.DDLSpec {
 		OutputSchema: `{"type":"object","properties":` +
 			`{"primaryKey":{"type":"string","description":"vtx.booking.<NanoID> the operation wrote."}}}`,
 		FieldDescription: map[string]string{
-			"session":     "Full vtx.session.<NanoID> key being booked. CreateBooking validates it is alive + class=session, reads its capacity, claims a free seat, and writes the forSession link — and now also stores this key on the booking's own .status aspect (single anchor, not a relationship — the forSession link carries the relationship), the same idiom .status.booker already uses, so a later cleanup can find the session even after it is gone. CancelBooking also requires it (the booking's actual session, validated via the forSession link) to release the held seat. SetBookingAttendance requires it to resolve the class's start time and, for an instructor caller, the ledBy binding.",
-			"booker":      "Full vtx.identity.<NanoID> key of the person booking. CreateBooking validates it is alive + class=identity and writes the bookedBy link.",
-			"leaseAppKey": "Optional full vtx.leaseapp.<NanoID> key the booker claims residency under (CreateBooking). Verified via the lease's applicationFor link before granting rate=resident; a mismatch or absent lease silently falls back to rate=standard.",
+			"session":     "Full vtx.session.<NanoID> key being booked or waitlisted. CreateBooking validates it is alive + class=session, reads its capacity, claims a free seat, and writes the forSession link; JoinWaitlist runs the identical validation but claims a waitlist slot instead — both now also store this key on the booking's own .status aspect (single anchor, not a relationship — the forSession link carries the relationship), the same idiom .status.booker already uses, so a later cleanup can find the session even after it is gone. CancelBooking also requires it (the booking's actual session, validated via the forSession link) to release the held seat. SetBookingAttendance requires it to resolve the class's start time and, for an instructor caller, the ledBy binding.",
+			"booker":      "Full vtx.identity.<NanoID> key of the person booking or waitlisting. CreateBooking / JoinWaitlist validate it is alive + class=identity and write the bookedBy link.",
+			"leaseAppKey": "Optional full vtx.leaseapp.<NanoID> key the booker claims residency under (CreateBooking / JoinWaitlist). Verified via the lease's applicationFor link before granting rate=resident; a mismatch or absent lease silently falls back to rate=standard.",
 			"bookingId":   "Optional bare NanoID (no dots / key segments) for the new booking vertex. Absent → minted with nanoid.new().",
 			"bookingKey":  "Full vtx.booking.<NanoID> key of an existing booking to cancel (CancelBooking), record attendance on (SetBookingAttendance), or release (ReleaseOrphanedBooking, Weaver-dispatched only).",
 			"status":      "attended | noShow (SetBookingAttendance). Replaces .status.value; rate, seat and booker are carried forward unchanged.",
@@ -651,9 +675,18 @@ func bookingVertexTypeDDL() pkgmgr.DDLSpec {
 					"leaseAppKey belonging to a DIFFERENT identity falls through to rate=standard, never rejected.",
 			},
 			{
+				Name:    "JoinWaitlist — a full class",
+				Payload: map[string]any{"session": "vtx.session.<NanoID>", "booker": "vtx.identity.<NanoID>"},
+				ExpectedOutcome: "Same session/booker/rate validation as CreateBooking, but claims the first free " +
+					"vtx.session.<s>.wl<n> slot instead of a seat (WaitlistFull once MAX_WAITLIST_SIZE=200 is " +
+					"exhausted) and commits vtx.booking.<NanoID> (root {}) + .status {value: waitlisted, " +
+					"rate: standard, waitlistSlot} + forSession + bookedBy links. Rejected DoubleBooked if the " +
+					"booker already holds a live booking OR waitlist slot on this session. Returns primaryKey.",
+			},
+			{
 				Name:            "CancelBooking — release a seat",
 				Payload:         map[string]any{"bookingKey": "vtx.booking.<NanoID>", "session": "vtx.session.<NanoID>"},
-				ExpectedOutcome: "Validates the booking is alive + class=booking and the supplied session is its actual session, releases the held seat, and soft-deletes the booking. Returns primaryKey.",
+				ExpectedOutcome: "Validates the booking is alive + class=booking and the supplied session is its actual session, releases the held seat, and soft-deletes the booking. If the session carries a live waitlisted booking, the LOWEST-waitlistSlot one is handed the freed seat directly (its own .status flips to booked, its .wl<n> slot is released) instead of the seat cell being freed for ordinary first-come booking. Returns primaryKey.",
 			},
 			{
 				Name: "SetBookingAttendance — an instructor marks their own class",
@@ -682,8 +715,9 @@ func bookingVertexTypeDDL() pkgmgr.DDLSpec {
 				Name:    "ReleaseOrphanedBooking — drain a booking whose class was called off",
 				Payload: map[string]any{"bookingKey": "vtx.booking.<NanoID>"},
 				ExpectedOutcome: "Operator (Weaver) only. Reads the booking's own .status.session anchor, confirms " +
-					"that session is genuinely tombstoned (SessionStillLive otherwise), then releases the seat cell " +
-					"and double-book guard and soft-deletes the booking — the same footprint CancelBooking leaves, " +
+					"that session is genuinely tombstoned (SessionStillLive otherwise), then releases whichever cell " +
+					"its .status.value names (seat if still booked, waitlist slot if still waitlisted) and the " +
+					"double-book guard and soft-deletes the booking — the same footprint CancelBooking leaves, " +
 					"minus the caller-supplied session cross-check CancelBooking needs and this dispatch doesn't.",
 			},
 		},
@@ -772,41 +806,56 @@ func bookingStatusAspectTypeDDL() pkgmgr.DDLSpec {
 	return pkgmgr.DDLSpec{
 		CanonicalName:     bookingStatusAspectDDL,
 		Class:             "meta.ddl.aspectType",
-		PermittedCommands: []string{"CreateBooking", "SetBookingAttendance"},
+		PermittedCommands: []string{"CreateBooking", "JoinWaitlist", "CancelBooking", "SetBookingAttendance"},
 		Description: "Booking status aspect (wellness). Stored as vtx.booking.<NanoID>.status (class " +
-			"bookingStatus) = {value: booked|attended|noShow, rate: standard|resident, seat, booker, session, " +
-			"noShowFeeCents?}. Non-sensitive. Written by CreateBooking (value=booked) and SetBookingAttendance " +
-			"(value=attended|noShow, an OCC upsert carrying rate / seat / booker / session forward untouched, and — " +
-			"only when transitioning to noShow — a noShowFeeCents amount: caller-supplied or a 2500 default) — the " +
-			"booking vertexType DDL owns both scripts; this aspect-type DDL is the step-6 " +
-			"write gate. seat + booker + session are internal bookkeeping (the claimed seat index, the booker's " +
-			"identity key, the session key) CancelBooking (seat, booker) and ReleaseOrphanedBooking (session, " +
-			"seat, booker) read to recompute which vtx.session.<s>.seat<n> cell and vtx.session.<s>.bkr<b> " +
+			"bookingStatus) = {value: booked|waitlisted|attended|noShow, rate: standard|resident, seat?, " +
+			"waitlistSlot?, booker, session, noShowFeeCents?}. Non-sensitive. Written by CreateBooking " +
+			"(value=booked, seat), JoinWaitlist (value=waitlisted, waitlistSlot — the mirror-image write, sharing " +
+			"every other field with CreateBooking via prepare_booking_common, ddls.go), CancelBooking (an OCC " +
+			"upsert on a PROMOTED waitlisted booking ONLY: value flips waitlisted→booked, waitlistSlot is dropped, " +
+			"seat is set to the seat the cancelling booking just vacated — CancelBooking's own booking is " +
+			"tombstoned outright, not upserted), and SetBookingAttendance (value=attended|noShow, an OCC upsert " +
+			"carrying rate / seat / booker / session forward untouched, and — only when transitioning to noShow — " +
+			"a noShowFeeCents amount: caller-supplied or a 2500 default) — the booking vertexType DDL owns all " +
+			"four scripts; this aspect-type DDL is the step-6 write gate. seat / waitlistSlot / booker / session " +
+			"are internal bookkeeping (the claimed seat or waitlist-slot index, the booker's identity key, the " +
+			"session key) CancelBooking (seat, booker, and — for its promotion target — waitlistSlot) and " +
+			"ReleaseOrphanedBooking (session, booker, and whichever of seat/waitlistSlot value names) read to " +
+			"recompute which vtx.session.<s>.seat<n> / vtx.session.<s>.wl<n> cell and vtx.session.<s>.bkr<b> " +
 			"double-book guard to release — a single anchor each, NOT a stored relationship-as-key-list (the " +
 			"booker relationship stays the bookedBy link, the session relationship stays the forSession link, " +
-			"Contract #1). session is what lets ReleaseOrphanedBooking find a booking's session AFTER " +
-			"TombstoneSession has killed it — the forSession link survives but the OPTIONAL MATCH lens walk to it " +
-			"would not (a tombstoned target simply drops from the join). noShowFeeCents is NOT in the " +
-			"carry-forward field set (only rate/seat/booker/session are), so re-marking a noShow booking to " +
-			"attended drops it — wellness-ledger's wellnessNoShowSettlement lens reads it to post a DebitAccount " +
-			"charge against the booker's ledger account. Declaration-only: no op handler.",
+			"Contract #1). A booking is never both booked and waitlisted at once — seat and waitlistSlot are " +
+			"mutually exclusive by construction (CreateBooking writes only the former, JoinWaitlist only the " +
+			"latter; a promotion upsert adds seat and drops waitlistSlot in the same write). session is what lets " +
+			"ReleaseOrphanedBooking find a booking's session AFTER TombstoneSession has killed it — the " +
+			"forSession link survives but the OPTIONAL MATCH lens walk to it would not (a tombstoned target simply " +
+			"drops from the join). noShowFeeCents is NOT in the carry-forward field set (only " +
+			"rate/seat/waitlistSlot/booker/session are), so re-marking a noShow booking to attended drops it — " +
+			"wellness-ledger's wellnessNoShowSettlement lens reads it to post a DebitAccount charge against the " +
+			"booker's ledger account. Declaration-only: no op handler.",
 		Script: aspectDeclarationOnlyScript,
 		InputSchema: `{"type":"object","properties":` +
-			`{"value":{"type":"string","enum":["booked","attended","noShow"]},"rate":{"type":"string","enum":["standard","resident"]},"seat":{"type":"integer"},"booker":{"type":"string"},"session":{"type":"string"},"noShowFeeCents":{"type":"number"}}}`,
+			`{"value":{"type":"string","enum":["booked","waitlisted","attended","noShow"]},"rate":{"type":"string","enum":["standard","resident"]},"seat":{"type":"integer"},"waitlistSlot":{"type":"integer"},"booker":{"type":"string"},"session":{"type":"string"},"noShowFeeCents":{"type":"number"}}}`,
 		OutputSchema: `{"type":"object"}`,
 		FieldDescription: map[string]string{
-			"value":          "Booking status: booked at create time; attended | noShow once SetBookingAttendance records who showed.",
-			"rate":           "standard | resident, derived by CreateBooking from the optional leaseAppKey residency check.",
-			"seat":           "The claimed seat index on the session (internal bookkeeping; CancelBooking / ReleaseOrphanedBooking read it to release the correct seat cell).",
+			"value":          "Booking status: booked at CreateBooking time, waitlisted at JoinWaitlist time; attended | noShow once SetBookingAttendance records who showed; a waitlisted booking transitions straight to booked if CancelBooking promotes it (never through attended/noShow).",
+			"rate":           "standard | resident, derived by CreateBooking / JoinWaitlist from the optional leaseAppKey residency check, and carried forward unchanged on promotion.",
+			"seat":           "The claimed seat index on the session (internal bookkeeping; present once value is booked, absent while waitlisted). CancelBooking / ReleaseOrphanedBooking read it to release the correct seat cell.",
+			"waitlistSlot":   "The claimed waitlist-slot index on the session (internal bookkeeping; present once value is waitlisted, absent once booked). CancelBooking's promotion walk / ReleaseOrphanedBooking read it to release the correct vtx.session.<s>.wl<n> cell.",
 			"booker":         "The booker's full vtx.identity.<NanoID> key (internal bookkeeping; CancelBooking / ReleaseOrphanedBooking read it to release the correct per-(session, booker) double-book guard). A single anchor, not a relationship — the bookedBy link carries the relationship.",
 			"session":        "The full vtx.session.<NanoID> key this booking is for (internal bookkeeping, the same single-anchor idiom as booker). ReleaseOrphanedBooking reads it to find and re-confirm the session's liveness after TombstoneSession has killed the vertex the forSession link points to. Not a relationship — the forSession link carries the relationship.",
 			"noShowFeeCents": "Optional no-show fee in integer cents, present only when value is noShow (caller-supplied positive number, or a 2500 default when omitted). Read by wellness-ledger's wellnessNoShowSettlement lens to post a DebitAccount charge.",
 		},
 		Examples: []pkgmgr.ExampleSpec{
 			{
-				Name:            "booking status aspect",
+				Name:            "booking status aspect — booked",
 				Payload:         map[string]any{"value": "booked", "rate": "resident", "seat": 3, "booker": "vtx.identity.MQsmTTAgNkngkdEjQz9L", "session": "vtx.session.QsmTTAgNkngkdEjQz9LM"},
 				ExpectedOutcome: "Stored as vtx.booking.<NanoID>.status; written by CreateBooking.",
+			},
+			{
+				Name:            "booking status aspect — waitlisted",
+				Payload:         map[string]any{"value": "waitlisted", "rate": "standard", "waitlistSlot": 2, "booker": "vtx.identity.MQsmTTAgNkngkdEjQz9L", "session": "vtx.session.QsmTTAgNkngkdEjQz9LM"},
+				ExpectedOutcome: "Stored as vtx.booking.<NanoID>.status; written by JoinWaitlist. Flips to booked (seat set, waitlistSlot dropped) if CancelBooking's promotion walk later picks this booking.",
 			},
 		},
 	}
@@ -848,32 +897,78 @@ func sessionSeatClaimAspectTypeDDL() pkgmgr.DDLSpec {
 	}
 }
 
+// sessionWaitlistClaimAspectTypeDDL declares the .wl<n> aspect (class
+// sessionWaitlistClaim) — a deterministic per-waitlist-slot-index existence
+// marker on the session hub. The SAME CreateOnly key-collision mechanism
+// sessionSeatClaim uses, applied over its own bounded index dimension
+// (waitlist position, MAX_WAITLIST_SIZE=200) instead of the seat dimension —
+// kept separate from seat so a full waitlist never contends with seat-
+// capacity math, and so a promoted booking's slot number (recorded on its
+// OWN .status.waitlistSlot) stays a stable handle CancelBooking's promotion
+// walk can release even after the booking itself has flipped to booked.
+// Declaration-only; NON-sensitive.
+func sessionWaitlistClaimAspectTypeDDL() pkgmgr.DDLSpec {
+	return pkgmgr.DDLSpec{
+		CanonicalName:     sessionWaitlistClaimAspectDDL,
+		Class:             "meta.ddl.aspectType",
+		PermittedCommands: []string{"JoinWaitlist", "CancelBooking", "ReleaseOrphanedBooking"},
+		Description: "Session waitlist-claim aspect (wellness). Stored as vtx.session.<NanoID>.wl<n> (class " +
+			"sessionWaitlistClaim) = {} — a pure existence marker, no relationship field. <n> is a 1-based " +
+			"waitlist-slot index, 1..MAX_WAITLIST_SIZE (200) — unbounded by session capacity, since a waitlist has " +
+			"no seat-count ceiling of its own. JoinWaitlist walks n=1..200 in a bounded loop and claims the FIRST " +
+			"cell it reads absent (CreateOnly — the identical race-safety property claim_first_free_seat relies " +
+			"on, ddls.go), storing the claimed n on the new booking's own .status.waitlistSlot. CancelBooking " +
+			"tombstones the ONE waitlist cell recorded on whichever booking its promotion walk (ddls.go, " +
+			"find_promotion_candidate) picks, freeing that slot the instant the booking it belonged to is handed " +
+			"a real seat. ReleaseOrphanedBooking tombstones it instead of a seat cell when the booking it is " +
+			"draining was still waitlisted (never booked) at the moment its session was called off. Non-sensitive; " +
+			"created on demand, no CreateSession init needed. Declaration-only: no op handler.",
+		Script:       aspectDeclarationOnlyScript,
+		InputSchema:  `{"type":"object","properties":{}}`,
+		OutputSchema: `{"type":"object"}`,
+		FieldDescription: map[string]string{
+			"data": "Always {} — a pure existence marker. The claim's job is done by the KEY (session hub + waitlist-slot index), never by a field in data.",
+		},
+		Examples: []pkgmgr.ExampleSpec{
+			{
+				Name:            "session waitlist-claim aspect",
+				Payload:         map[string]any{},
+				ExpectedOutcome: "Stored as vtx.session.<NanoID>.wl<n>; claimed by JoinWaitlist, released by CancelBooking (on promotion) or ReleaseOrphanedBooking (on a called-off class).",
+			},
+		},
+	}
+}
+
 // sessionBookerClaimAspectTypeDDL declares the .bkr<bookerId> aspect (class
 // sessionBookerClaim) — a deterministic per-(session, booker) existence marker
-// on the session hub that enforces at-most-one live booking per booker per
-// session. The exact repeatable-session uniqueness idiom cafe-domain's
-// cafeOpenTabGuard uses (create-only on a lease's first tab, OCC-revived from a
-// prior settled+tombstoned guard) and clinic-domain's patientSlotClaim (a
-// per-actor guard aspect with a dimension-encoded localName) — here the
-// dimension is the booker id. CreateBooking claims it (a second live booking by
-// the same booker on the same session collides at revision 0 → DoubleBooked);
-// CancelBooking tombstones it, so a later re-book OCC-revives it. Declaration-
-// only; NON-sensitive; created on demand, no CreateSession init needed.
+// on the session hub that enforces at-most-one LIVE CLAIM (booked OR
+// waitlisted) per booker per session. The exact repeatable-session uniqueness
+// idiom cafe-domain's cafeOpenTabGuard uses (create-only on a lease's first
+// tab, OCC-revived from a prior settled+tombstoned guard) and clinic-domain's
+// patientSlotClaim (a per-actor guard aspect with a dimension-encoded
+// localName) — here the dimension is the booker id. CreateBooking AND
+// JoinWaitlist both claim the identical key (a booker cannot hold a seat AND
+// a waitlist slot on the same session, nor two of either — DoubleBooked
+// either way); CancelBooking tombstones it, so a later re-book OCC-revives
+// it. Declaration-only; NON-sensitive; created on demand, no CreateSession
+// init needed.
 func sessionBookerClaimAspectTypeDDL() pkgmgr.DDLSpec {
 	return pkgmgr.DDLSpec{
 		CanonicalName:     sessionBookerClaimAspectDDL,
 		Class:             "meta.ddl.aspectType",
-		PermittedCommands: []string{"CreateBooking", "CancelBooking"},
+		PermittedCommands: []string{"CreateBooking", "JoinWaitlist", "CancelBooking"},
 		Description: "Session booker-claim guard aspect (wellness). Stored as vtx.session.<NanoID>.bkr<bookerId> " +
 			"(class sessionBookerClaim) = {} — a pure existence marker, no relationship field (the booker " +
 			"relationship stays the bookedBy link, Contract #1). <bookerId> is the booking booker's bare " +
-			"Contract #1 identity id, so the KEY ITSELF is the (session, booker) lock: CreateBooking claims it " +
-			"CreateOnly and a SECOND live booking by the same booker on the same session collides at revision 0 " +
-			"and is rejected (DoubleBooked), while a booker booking a DIFFERENT session claims a different key and " +
-			"is unaffected. Repeatable, mirroring cafe-domain's cafeOpenTabGuard: CancelBooking tombstones the " +
-			"guard (unconditioned — a stale-tombstone race can only free it early, re-earnable on the next book), " +
-			"so a later re-book OCC-revives it from its prior revision. Non-sensitive; created on demand, no " +
-			"CreateSession init needed. Declaration-only: no op handler.",
+			"Contract #1 identity id, so the KEY ITSELF is the (session, booker) lock: CreateBooking AND " +
+			"JoinWaitlist both claim it CreateOnly, and a SECOND live claim (booked or waitlisted) by the same " +
+			"booker on the same session collides at revision 0 and is rejected (DoubleBooked) regardless of which " +
+			"op tries it, while a booker acting on a DIFFERENT session claims a different key and is unaffected. " +
+			"Repeatable, mirroring cafe-domain's cafeOpenTabGuard: CancelBooking tombstones the guard for the " +
+			"booking it cancels (unconditioned — a stale-tombstone race can only free it early, re-earnable on " +
+			"the next book) — the guard belonging to a booking CancelBooking's promotion walk PROMOTES stays " +
+			"untouched, since that booker's claim is still live, just upgraded from waitlisted to booked. Non-" +
+			"sensitive; created on demand, no CreateSession init needed. Declaration-only: no op handler.",
 		Script:       aspectDeclarationOnlyScript,
 		InputSchema:  `{"type":"object","properties":{}}`,
 		OutputSchema: `{"type":"object"}`,
@@ -884,7 +979,7 @@ func sessionBookerClaimAspectTypeDDL() pkgmgr.DDLSpec {
 			{
 				Name:            "session booker-claim guard aspect",
 				Payload:         map[string]any{},
-				ExpectedOutcome: "Stored as vtx.session.<NanoID>.bkr<bookerId>; claimed by CreateBooking, released by CancelBooking. A second live booking by the same booker on the same session is rejected.",
+				ExpectedOutcome: "Stored as vtx.session.<NanoID>.bkr<bookerId>; claimed by CreateBooking or JoinWaitlist, released by CancelBooking. A second live claim by the same booker on the same session is rejected.",
 			},
 		},
 	}
@@ -2347,6 +2442,82 @@ def claim_first_free_seat(session_key, capacity):
             return n, make_aspect_upsert_occ(session_key, "seat" + str(n), "sessionSeatClaim", {}, existing.revision)
     fail("SessionFull: " + session_key + " has no open seats (capacity " + str(capacity) + ")")
 
+MAX_WAITLIST_SIZE = 200
+
+def claim_first_free_waitlist_slot(session_key):
+    # SAME enumerate-then-CreateOnly-claim idiom as claim_first_free_seat
+    # above, over its OWN bounded index dimension (waitlist position) instead
+    # of the seat dimension — unbounded by session capacity, since a waitlist
+    # has no seat-count ceiling of its own.
+    for n in range(1, MAX_WAITLIST_SIZE + 1):
+        slot_key = session_key + ".wl" + str(n)
+        # read-posture: (d) declared optionalReads at JoinWaitlist dispatch
+        # (first-free-slot claim; an absent slot is the common case).
+        existing = kv.Read(slot_key)
+        if existing == None:
+            return n, make_aspect(session_key, "wl" + str(n), "sessionWaitlistClaim", {})
+        if existing.isDeleted:
+            return n, make_aspect_upsert_occ(session_key, "wl" + str(n), "sessionWaitlistClaim", {}, existing.revision)
+    fail("WaitlistFull: " + session_key + " has no open waitlist slots (max " + str(MAX_WAITLIST_SIZE) + ")")
+
+WAITLIST_PROMOTION_PAGE_LIMIT = 50
+MAX_WAITLIST_PROMOTION_PAGES = 4
+
+def find_promotion_candidate(session_key):
+    # CancelBooking's promotion lookup: a bounded, paginated kv.Links "in"
+    # walk off forSession (the session is the link's TARGET, the booking its
+    # SOURCE, Contract #1 §1.1) — the identical shape identity-hygiene's
+    # identity_has_open_tasks uses (packages/identity-hygiene/ddls.go),
+    # picking the LOWEST live waitlistSlot instead of a boolean match. A
+    # session's forSession-in set covers every booking ever made against
+    # THIS ONE class occurrence (booked, cancelled, attended, noShow,
+    # waitlisted alike) — bounded by real usage of a single session, not by
+    # the whole package's history, so the same bound identity_has_open_tasks
+    # trusts for "how many tasks can one identity accumulate" is the right
+    # order of magnitude here too.
+    #
+    # Unlike identity_has_open_tasks, exhausting the bound degrades SOFTLY
+    # (returns no candidate) rather than fail-closed: CancelBooking's own
+    # cancellation must never be held hostage by how much history a popular
+    # session has accumulated — a session with more churn than the bound
+    # covers just leaves its freed seat open to ordinary first-come booking
+    # this round, exactly the behavior that existed before this feature.
+    best_book_key = None
+    best_slot = None
+    best_rate = None
+    best_booker = None
+    best_revision = None
+    cursor = None
+    for _page in range(MAX_WAITLIST_PROMOTION_PAGES):
+        # read-posture: (e) relation=forSession epoch=none (a single class
+        # occurrence's own booking history — bounded real-world churn, never
+        # a keyspace scan; a booking created concurrently with this cancel
+        # slips past and is picked up by a later cancellation instead).
+        links, cursor = kv.Links(session_key, "forSession", "in", cursor, WAITLIST_PROMOTION_PAGE_LIMIT)
+        for lk in links:
+            if lk.isDeleted:
+                continue
+            # read-posture: (e) per-candidate follow-up read off the
+            # enumeration above (data-derived key — the booking is unknown
+            # until it resolves from the link).
+            cand_status = kv.Read(lk.sourceVertex + ".status")
+            if cand_status == None or cand_status.isDeleted:
+                continue
+            if cand_status.data.get("value") != "waitlisted":
+                continue
+            slot = cand_status.data.get("waitlistSlot")
+            if slot == None:
+                continue
+            if best_slot == None or slot < best_slot:
+                best_book_key = lk.sourceVertex
+                best_slot = slot
+                best_rate = cand_status.data.get("rate")
+                best_booker = cand_status.data.get("booker")
+                best_revision = cand_status.revision
+        if cursor == None:
+            break
+    return best_book_key, best_slot, best_rate, best_booker, best_revision
+
 # --- workplace write confinement (facet-staff-worlds-design.md §3.5) ---------
 #
 # A staff actor may write only inside the location it worksAt. Three properties
@@ -2608,116 +2779,136 @@ def session_locations(session_key):
             out.append(lk.targetVertex)
     return out
 
+def prepare_booking_common(state, op, p):
+    # Shared CreateBooking / JoinWaitlist validation + guard/rate computation
+    # — both mint a booking vertex anchored to a session, differing only in
+    # which claim dimension (seat vs waitlist slot) they occupy. Factored so
+    # the self-scope check, workplace confinement, past-class guard,
+    # double-book guard and resident-rate lookup can never drift between the
+    # two entry points. Returns (session, sess_id, booker, booker_id, sched,
+    # rate, lease_key, booker_guard_mut) — capacity is deliberately NOT read
+    # here: only CreateBooking needs it (to bound claim_first_free_seat),
+    # JoinWaitlist's own claim dimension has no capacity ceiling.
+    session = required_string(p, "session")
+    _, sess_id = parts_of(session, "session", "session")
+    require_live_typed(state, session, "session", "session")
+
+    booker = required_string(p, "booker")
+    _, booker_id = parts_of(booker, "booker", "identity")
+    require_live_typed(state, booker, "booker", "identity")
+
+    # Consumer self-scope (scope=self grant only): step 3 authorizes via
+    # authContext.target == actor (Contract #6); the payload.booker field
+    # IS the identity making the booking (no patient-style indirection
+    # needed here, unlike clinic-domain's CreateAppointment), so the
+    # script closes the gap with a direct field compare — no extra kv.Read.
+    # Empty for the standing operator grant (scope=any never sets
+    # authContext), so this check is a no-op there.
+    # authcontext-target: (payload-bind) the target must equal payload.booker;
+    # on a CREATE there is no bookedBy link to probe yet, so a forged target
+    # only narrows who the caller may book for.
+    if op.authContextTarget != "" and op.authContextTarget != booker:
+        fail("AuthDenied: a consumer may only book a class for themselves")
+
+    # Staff-standing confinement: the location comes from the SESSION's own
+    # topology (session -atStudio-> studio -locatedAt-> location), never
+    # from a payload field, so a staffer books a member into a class at a
+    # place they work and nowhere else. A session whose studio is wired to
+    # no location is operator-only by construction (an empty candidate list
+    # denies). It answers before the schedule read below, so a staffer at
+    # another building cannot use capacity or start-time errors as an
+    # oracle on a class they may not touch.
+    # workplace-exempt: (resource-bind) the consumer scope=self path is the
+    # only validated one, and the compare directly above binds that target
+    # to payload.booker -- the field that decides whose booking this is --
+    # so an exempted caller is booking for itself.
+    if not workplace_exempt():
+        require_workplace(session_locations(session), "cannot book a seat on " + session)
+
+    # read-posture: (a) declared reads at CreateBooking/JoinWaitlist dispatch.
+    sched = kv.Read(session + ".schedule")
+    if sched == None or sched.isDeleted:
+        fail("InvalidState: " + session + ".schedule is missing; cannot book")
+
+    # Soft past-time guard (Capability-KV §06 — the op's own Starlark logic),
+    # mirroring clinic-domain's enforce_future: the session MUST start strictly
+    # after op.submittedAt, so a booking on an already-started or already-ended
+    # class is rejected. submittedAt is caller-supplied (the host clock is not
+    # exposed to Starlark), so this is a soft guard appropriate to the trusted
+    # single-identity model. Normalize submittedAt to canonical whole-second
+    # UTC (time.rfc3339_utc — pure, no clock read); startsAt is already stored
+    # canonical UTC (sessionSchedule), and canonical-UTC RFC3339 compares
+    # lexically == chronologically.
+    starts_at = sched.data.get("startsAt")
+    if starts_at == None:
+        fail("InvalidState: " + session + ".schedule.startsAt is missing; cannot book")
+    submitted = time.rfc3339_utc(op.submittedAt)
+    if not (submitted < starts_at):
+        fail("SessionInPast: session " + session + " starts at " + str(starts_at) + ", not in the future (submitted " + submitted + ")")
+
+    # Double-book guard (Capability-KV §06): a deterministic per-(session,
+    # booker) existence marker on the session hub, the SAME create-only +
+    # OCC-revive idiom cafe-domain's cafeOpenTabGuard uses. The KEY alone is
+    # the lock — a second LIVE claim (booked OR waitlisted) by this booker on
+    # this session collides at revision 0 (DoubleBooked); a booker acting on a
+    # different session claims a different key. Present+alive → reject;
+    # present+tombstoned (a prior claim was cancelled and released it) →
+    # OCC-revive keyed on its own revision; absent → mint fresh. read-posture:
+    # (d) declared optionalReads at CreateBooking/JoinWaitlist dispatch (the
+    # guard hydrates into state).
+    booker_guard_local = "bkr" + booker_id
+    booker_guard_key = session + "." + booker_guard_local
+    if booker_guard_key in state:
+        if vertex_alive(state, booker_guard_key):
+            fail("DoubleBooked: " + booker + " already holds a live booking or waitlist slot on " + session)
+        booker_guard_mut = make_aspect_upsert_occ(session, booker_guard_local, "sessionBookerClaim", {}, state[booker_guard_key].revision)
+    else:
+        booker_guard_mut = make_aspect(session, booker_guard_local, "sessionBookerClaim", {})
+
+    rate = "standard"
+    lease_key = optional_string(p, "leaseAppKey")
+    if lease_key != None:
+        _, lease_id = parts_of(lease_key, "leaseAppKey", "leaseapp")
+        # read-posture: (d) declared optionalReads at CreateBooking/
+        # JoinWaitlist dispatch (resident-rate lookup; absent → falls through
+        # to standard rate, never a hard failure).
+        lease_doc = kv.Read(lease_key)
+        lease_alive = lease_doc != None and not lease_doc.isDeleted
+        # .tenancy is stamped CreateOnly on a leaseapp's FIRST
+        # DecideLeaseApplication approve (lease-signing/scripts.go) — its
+        # presence is the only signal that this application actually
+        # became an active tenancy, not merely a pending or declined one.
+        # Without this check a pending or declined applicant (the
+        # applicationFor link stays live in both cases) would wrongly
+        # qualify for the resident rate.
+        # read-posture: (d) declared optionalReads at CreateBooking/JoinWaitlist dispatch.
+        tenancy_doc = kv.Read(lease_key + ".tenancy")
+        tenancy_present = tenancy_doc != None and not tenancy_doc.isDeleted
+        # read-posture: (d) declared optionalReads at CreateBooking/JoinWaitlist dispatch.
+        app_for_lnk = kv.Read("lnk.leaseapp." + lease_id + ".applicationFor.identity." + booker_id)
+        link_live = app_for_lnk != None and not app_for_lnk.isDeleted
+        if lease_alive and tenancy_present and link_live:
+            rate = "resident"
+
+    return session, sess_id, booker, booker_id, sched, rate, lease_key, booker_guard_mut
+
 def execute(state, op):
     ot = op.operationType
     p = op.payload
 
     if ot == "CreateBooking":
-        session = required_string(p, "session")
-        _, sess_id = parts_of(session, "session", "session")
-        require_live_typed(state, session, "session", "session")
+        # workplace-exempt: (resource-bind) prepare_booking_common's internal
+        # workplace_exempt() call is discharged by ITS OWN authContextTarget
+        # == payload.booker compare -- the consumer scope=self path is the
+        # only validated one, and that compare binds the target to
+        # payload.booker, the field that decides whose booking this is, so an
+        # exempted caller is booking for itself.
+        session, sess_id, booker, booker_id, sched, rate, lease_key, booker_guard_mut = prepare_booking_common(state, op, p)
 
-        booker = required_string(p, "booker")
-        _, booker_id = parts_of(booker, "booker", "identity")
-        require_live_typed(state, booker, "booker", "identity")
-
-        # Consumer self-scope (scope=self grant only): step 3 authorizes via
-        # authContext.target == actor (Contract #6); the payload.booker field
-        # IS the identity making the booking (no patient-style indirection
-        # needed here, unlike clinic-domain's CreateAppointment), so the
-        # script closes the gap with a direct field compare — no extra kv.Read.
-        # Empty for the standing operator grant (scope=any never sets
-        # authContext), so this check is a no-op there.
-        # authcontext-target: (payload-bind) the target must equal payload.booker;
-        # on a CREATE there is no bookedBy link to probe yet, so a forged target
-        # only narrows who the caller may book for.
-        if op.authContextTarget != "" and op.authContextTarget != booker:
-            fail("AuthDenied: a consumer may only book a class for themselves")
-
-        # Staff-standing confinement: the location comes from the SESSION's own
-        # topology (session -atStudio-> studio -locatedAt-> location), never
-        # from a payload field, so a staffer books a member into a class at a
-        # place they work and nowhere else. A session whose studio is wired to
-        # no location is operator-only by construction (an empty candidate list
-        # denies). It answers before the schedule read below, so a staffer at
-        # another building cannot use capacity or start-time errors as an
-        # oracle on a class they may not touch.
-        # workplace-exempt: (resource-bind) the consumer scope=self path is the
-        # only validated one, and the compare directly above binds that target
-        # to payload.booker -- the field that decides whose booking this is --
-        # so an exempted caller is booking for itself.
-        if not workplace_exempt():
-            require_workplace(session_locations(session), "cannot book a seat on " + session)
-
-        # read-posture: (a) declared reads at CreateBooking dispatch.
-        sched = kv.Read(session + ".schedule")
-        if sched == None or sched.isDeleted:
-            fail("InvalidState: " + session + ".schedule is missing; cannot book")
         capacity = sched.data.get("capacity")
         if capacity == None:
             fail("InvalidState: " + session + ".schedule.capacity is missing; cannot book")
-
-        # Soft past-time guard (Capability-KV §06 — the op's own Starlark logic),
-        # mirroring clinic-domain's enforce_future: the session MUST start strictly
-        # after op.submittedAt, so a booking on an already-started or already-ended
-        # class is rejected. submittedAt is caller-supplied (the host clock is not
-        # exposed to Starlark), so this is a soft guard appropriate to the trusted
-        # single-identity model. Normalize submittedAt to canonical whole-second
-        # UTC (time.rfc3339_utc — pure, no clock read); startsAt is already stored
-        # canonical UTC (sessionSchedule), and canonical-UTC RFC3339 compares
-        # lexically == chronologically.
-        starts_at = sched.data.get("startsAt")
-        if starts_at == None:
-            fail("InvalidState: " + session + ".schedule.startsAt is missing; cannot book")
-        submitted = time.rfc3339_utc(op.submittedAt)
-        if not (submitted < starts_at):
-            fail("SessionInPast: session " + session + " starts at " + str(starts_at) + ", not in the future (submitted " + submitted + ")")
-
-        # Double-book guard (Capability-KV §06): a deterministic per-(session,
-        # booker) existence marker on the session hub, the SAME create-only +
-        # OCC-revive idiom cafe-domain's cafeOpenTabGuard uses. The KEY alone is
-        # the lock — a second LIVE booking by this booker on this session collides
-        # at revision 0 (DoubleBooked); a booker booking a different session claims
-        # a different key. Present+alive → reject; present+tombstoned (a prior
-        # booking was cancelled and released it) → OCC-revive keyed on its own
-        # revision; absent → mint fresh. read-posture: (d) declared optionalReads
-        # at CreateBooking dispatch (the guard hydrates into state).
-        booker_guard_local = "bkr" + booker_id
-        booker_guard_key = session + "." + booker_guard_local
-        if booker_guard_key in state:
-            if vertex_alive(state, booker_guard_key):
-                fail("DoubleBooked: " + booker + " already holds a live booking on " + session)
-            booker_guard_mut = make_aspect_upsert_occ(session, booker_guard_local, "sessionBookerClaim", {}, state[booker_guard_key].revision)
-        else:
-            booker_guard_mut = make_aspect(session, booker_guard_local, "sessionBookerClaim", {})
-
         seat_n, seat_mutation = claim_first_free_seat(session, capacity)
-
-        rate = "standard"
-        resident_mutation = None
-        lease_key = optional_string(p, "leaseAppKey")
-        if lease_key != None:
-            _, lease_id = parts_of(lease_key, "leaseAppKey", "leaseapp")
-            # read-posture: (d) declared optionalReads at CreateBooking
-            # dispatch (resident-rate lookup; absent → falls through to
-            # standard rate, never a hard failure).
-            lease_doc = kv.Read(lease_key)
-            lease_alive = lease_doc != None and not lease_doc.isDeleted
-            # .tenancy is stamped CreateOnly on a leaseapp's FIRST
-            # DecideLeaseApplication approve (lease-signing/scripts.go) — its
-            # presence is the only signal that this application actually
-            # became an active tenancy, not merely a pending or declined one.
-            # Without this check a pending or declined applicant (the
-            # applicationFor link stays live in both cases) would wrongly
-            # qualify for the resident rate.
-            # read-posture: (d) declared optionalReads at CreateBooking dispatch.
-            tenancy_doc = kv.Read(lease_key + ".tenancy")
-            tenancy_present = tenancy_doc != None and not tenancy_doc.isDeleted
-            # read-posture: (d) declared optionalReads at CreateBooking dispatch.
-            app_for_lnk = kv.Read("lnk.leaseapp." + lease_id + ".applicationFor.identity." + booker_id)
-            link_live = app_for_lnk != None and not app_for_lnk.isDeleted
-            if lease_alive and tenancy_present and link_live:
-                rate = "resident"
 
         book_id = bare_nanoid_or_mint(p, "bookingId")
         book_key = "vtx.booking." + book_id
@@ -2734,10 +2925,44 @@ def execute(state, op):
             booker_guard_mut,
         ]
         if rate == "resident":
+            _, lease_id = parts_of(lease_key, "leaseAppKey", "leaseapp")
             resident_rate_lnk = "lnk.booking." + book_id + ".residentRate.leaseapp." + lease_id
             mutations.append(make_link(resident_rate_lnk, book_key, lease_key, "residentRate", "residentRate", {}))
 
         events = [{"class": "wellness.bookingCreated", "data": {"bookingKey": book_key, "session": session, "booker": booker, "rate": rate}}]
+        return {"mutations": mutations, "events": events, "response": {"primaryKey": book_key}}
+
+    if ot == "JoinWaitlist":
+        # workplace-exempt: (resource-bind) prepare_booking_common's internal
+        # workplace_exempt() call is discharged by ITS OWN authContextTarget
+        # == payload.booker compare, identical to CreateBooking's discharge
+        # above -- the consumer scope=self path is the only validated one,
+        # and that compare binds the target to payload.booker, the field
+        # that decides whose waitlist slot this is.
+        session, sess_id, booker, booker_id, sched, rate, lease_key, booker_guard_mut = prepare_booking_common(state, op, p)
+
+        slot_n, slot_mutation = claim_first_free_waitlist_slot(session)
+
+        book_id = bare_nanoid_or_mint(p, "bookingId")
+        book_key = "vtx.booking." + book_id
+
+        for_session_lnk = "lnk.booking." + book_id + ".forSession.session." + sess_id
+        booked_by_lnk = "lnk.booking." + book_id + ".bookedBy.identity." + booker_id
+
+        mutations = [
+            make_vtx(book_key, "booking", {}),
+            make_aspect(book_key, "status", "bookingStatus", {"value": "waitlisted", "rate": rate, "waitlistSlot": slot_n, "booker": booker, "session": session}),
+            make_link(for_session_lnk, book_key, session, "forSession", "forSession", {}),
+            make_link(booked_by_lnk, book_key, booker, "bookedBy", "bookedBy", {}),
+            slot_mutation,
+            booker_guard_mut,
+        ]
+        if rate == "resident":
+            _, lease_id = parts_of(lease_key, "leaseAppKey", "leaseapp")
+            resident_rate_lnk = "lnk.booking." + book_id + ".residentRate.leaseapp." + lease_id
+            mutations.append(make_link(resident_rate_lnk, book_key, lease_key, "residentRate", "residentRate", {}))
+
+        events = [{"class": "wellness.waitlistJoined", "data": {"bookingKey": book_key, "session": session, "booker": booker, "rate": rate}}]
         return {"mutations": mutations, "events": events, "response": {"primaryKey": book_key}}
 
     if ot == "CancelBooking":
@@ -2797,15 +3022,15 @@ def execute(state, op):
         # recorded once a class has begun (SetBookingAttendance's own
         # SessionNotStarted), so a marked booking would always also trip
         # SessionStarted — checking AttendanceRecorded first gives the more
-        # specific, more useful rejection in that overlap.
+        # specific, more useful rejection in that overlap. A waitlisted
+        # booking is equally cancellable (a member leaving the waitlist) —
+        # only attended/noShow are terminal.
         status = kv.Read(book_key + ".status")
         if status == None or status.isDeleted:
             fail("InvalidState: " + book_key + ".status is missing; cannot cancel")
-        if status.data.get("value") != "booked":
-            fail("AttendanceRecorded: " + book_key + " attendance is already recorded (" + str(status.data.get("value")) + "); cannot cancel")
-        seat_n = status.data.get("seat")
-        if seat_n == None:
-            fail("InvalidState: " + book_key + ".status.seat is missing; cannot cancel")
+        value = status.data.get("value")
+        if value != "booked" and value != "waitlisted":
+            fail("AttendanceRecorded: " + book_key + " attendance is already recorded (" + str(value) + "); cannot cancel")
 
         # read-posture: (a) declared reads at CancelBooking dispatch — a
         # booking can only be cancelled before its class begins, the mirror
@@ -2821,23 +3046,55 @@ def execute(state, op):
         if submitted >= starts_at:
             fail("SessionStarted: session " + session + " started at " + str(starts_at) + ", cannot cancel a booking once the class has begun (submitted " + submitted + ")")
 
-        mutations = [
-            make_tombstone(book_key),
-            make_tombstone(session + ".seat" + str(seat_n)),
-        ]
+        if value == "booked":
+            seat_n = status.data.get("seat")
+            if seat_n == None:
+                fail("InvalidState: " + book_key + ".status.seat is missing; cannot cancel")
+
+            # find_promotion_candidate (ddls.go): a bounded, paginated walk
+            # over this session's waitlist looking for the earliest live
+            # candidate. Handing it the just-freed seat DIRECTLY, in the SAME
+            # mutation batch, instead of tombstoning the seat cell back open,
+            # closes the race a two-step release-then-reclaim would leave for
+            # an unrelated new CreateBooking caller to win the seat instead —
+            # the seat-claim aspect is a pure existence marker with no owner
+            # field, so reassigning ownership is just flipping the winning
+            # booking's own .status.
+            promo_book_key, promo_slot, promo_rate, promo_booker, promo_revision = find_promotion_candidate(session)
+
+            mutations = [make_tombstone(book_key)]
+            events = [{"class": "wellness.bookingCancelled", "data": {"bookingKey": book_key}}]
+            if promo_book_key != None:
+                mutations.append(make_tombstone(session + ".wl" + str(promo_slot)))
+                mutations.append(make_aspect_upsert_occ(promo_book_key, "status", "bookingStatus",
+                    {"value": "booked", "rate": promo_rate, "seat": seat_n, "booker": promo_booker, "session": session},
+                    promo_revision))
+                events.append({"class": "wellness.waitlistPromoted", "data": {"bookingKey": promo_book_key, "session": session, "seat": seat_n}})
+            else:
+                mutations.append(make_tombstone(session + ".seat" + str(seat_n)))
+        else:
+            # A waitlisted booking cancelling itself frees nothing for anyone
+            # else to be promoted into — it never held a seat — so this is
+            # just its own .wl<n> slot releasing, no promotion walk needed.
+            slot_n = status.data.get("waitlistSlot")
+            if slot_n == None:
+                fail("InvalidState: " + book_key + ".status.waitlistSlot is missing; cannot cancel")
+            mutations = [make_tombstone(book_key), make_tombstone(session + ".wl" + str(slot_n))]
+            events = [{"class": "wellness.waitlistLeft", "data": {"bookingKey": book_key}}]
+
         # Release the per-(session, booker) double-book guard so this booker can
         # re-book the session (cafe-domain's Settle→cafeOpenTabGuard release,
         # unconditioned: a stale-tombstone race can only free it early, and the
         # guard is re-earnable on the next book). The booker is read off the
-        # booking's own .status.booker (stored by CreateBooking) — CancelBooking's
-        # operator path carries no authContext.target, so it cannot derive the
-        # booker from authorization. A legacy booking predating this field (and
-        # thus predating the guard) has no guard to release, so skip cleanly.
+        # booking's own .status.booker (stored by CreateBooking/JoinWaitlist) —
+        # CancelBooking's operator path carries no authContext.target, so it
+        # cannot derive the booker from authorization. A legacy booking
+        # predating this field (and thus predating the guard) has no guard to
+        # release, so skip cleanly.
         booker = status.data.get("booker")
         if booker != None:
             _, guard_booker_id = parts_of(booker, "booker", "identity")
             mutations.append(make_tombstone(session + ".bkr" + guard_booker_id))
-        events = [{"class": "wellness.bookingCancelled", "data": {"bookingKey": book_key}}]
         return {"mutations": mutations, "events": events, "response": {"primaryKey": book_key}}
 
     if ot == "SetBookingAttendance":
@@ -2968,8 +3225,9 @@ def execute(state, op):
         status = kv.Read(book_key + ".status")
         if status == None or status.isDeleted:
             fail("InvalidState: " + book_key + ".status is missing; nothing to release")
-        if status.data.get("value") != "booked":
-            fail("InvalidState: " + book_key + " is not in booked status; nothing to release")
+        value = status.data.get("value")
+        if value != "booked" and value != "waitlisted":
+            fail("InvalidState: " + book_key + " is not in booked or waitlisted status; nothing to release")
         session = status.data.get("session")
         if session == None:
             fail("InvalidState: " + book_key + ".status carries no session anchor; nothing to release")
@@ -2977,25 +3235,31 @@ def execute(state, op):
         # A LIVE session must go through CancelBooking instead. This op exists
         # only to drain a booking whose session TombstoneSession already
         # killed -- wellness-domain deliberately does not cascade tombstones
-        # (package.go), so nothing else releases the seat / double-book guard
-        # a called-off class leaves claimed; re-checking liveness here, rather
-        # than trusting the dispatching lens row, keeps a stale gap evaluation
-        # from ever touching a booking on a class that is still on.
+        # (package.go), so nothing else releases the seat/waitlist cell +
+        # double-book guard a called-off class leaves claimed; re-checking
+        # liveness here, rather than trusting the dispatching lens row, keeps
+        # a stale gap evaluation from ever touching a booking on a class that
+        # is still on.
         # read-posture: (a) declared reads at ReleaseOrphanedBooking dispatch.
         sess_doc = kv.Read(session)
         if sess_doc != None and not sess_doc.isDeleted:
             fail("SessionStillLive: " + session + " has not been cancelled; use CancelBooking instead")
 
-        seat_n = status.data.get("seat")
-        if seat_n == None:
-            fail("InvalidState: " + book_key + ".status.seat is missing; cannot release")
-
-        mutations = [
-            make_tombstone(book_key),
-            make_tombstone(session + ".seat" + str(seat_n)),
-        ]
+        mutations = [make_tombstone(book_key)]
+        if value == "booked":
+            seat_n = status.data.get("seat")
+            if seat_n == None:
+                fail("InvalidState: " + book_key + ".status.seat is missing; cannot release")
+            mutations.append(make_tombstone(session + ".seat" + str(seat_n)))
+        else:
+            slot_n = status.data.get("waitlistSlot")
+            if slot_n == None:
+                fail("InvalidState: " + book_key + ".status.waitlistSlot is missing; cannot release")
+            mutations.append(make_tombstone(session + ".wl" + str(slot_n)))
         # Release the per-(session, booker) double-book guard, the same
-        # unconditioned release CancelBooking performs.
+        # unconditioned release CancelBooking performs. The session is
+        # already confirmed dead above, so there is no seat left to promote
+        # anyone into here (unlike CancelBooking's live-session path).
         booker = status.data.get("booker")
         if booker != None:
             _, guard_booker_id = parts_of(booker, "booker", "identity")

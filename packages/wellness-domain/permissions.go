@@ -4,22 +4,24 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 
 // Permissions grants every wellness-domain op to the `operator` role (scope
 // any) — the trusted-tool operator already holds standing permission, no new
-// capability surface. CreateBooking and CancelBooking ALSO grant `consumer`,
-// scope=self (real-actor-write-auth-e2e idiom, clinic-domain's
-// CreateAppointment/RescheduleAppointment/SetAppointmentStatus precedent): a
-// real resident books or cancels their OWN class through the Gateway.
-// `authContext.target == actor` is checked at step 3 (Contract #6); the
-// Starlark script separately requires the booking's actual booker (CreateBooking's
-// payload.booker; CancelBooking's bookedBy link) to BE that target identity —
-// simpler than clinic's patient/identifiedBy indirection, since a wellness
-// booking's booker IS an identity directly, not a business vertex a linked
-// identity must resolve through.
+// capability surface. CreateBooking, JoinWaitlist and CancelBooking ALSO
+// grant `consumer`, scope=self (real-actor-write-auth-e2e idiom, clinic-
+// domain's CreateAppointment/RescheduleAppointment/SetAppointmentStatus
+// precedent): a real resident books, joins a waitlist for, or cancels their
+// OWN class through the Gateway. `authContext.target == actor` is checked at
+// step 3 (Contract #6); the Starlark script separately requires the
+// booking's actual booker (CreateBooking's/JoinWaitlist's payload.booker;
+// CancelBooking's bookedBy link) to BE that target identity — simpler than
+// clinic's patient/identifiedBy indirection, since a wellness booking's
+// booker IS an identity directly, not a business vertex a linked identity
+// must resolve through.
 //
-// CreateStudio, CreateSession, CreateSessionSeries, CreateBooking and
-// CancelBooking additionally grant `frontOfHouse` at scope=any — the studio
-// front-desk beat: opening a studio, scheduling a class (or a whole
-// recurring series of them), booking a member in, and releasing a member's
-// seat. scope=any carries no platform-checked target, so each of those scripts
+// CreateStudio, CreateSession, CreateSessionSeries, CreateBooking,
+// JoinWaitlist and CancelBooking additionally grant `frontOfHouse` at
+// scope=any — the studio front-desk beat: opening a studio, scheduling a
+// class (or a whole recurring series of them), booking a member in or
+// waitlisting them, and releasing a member's seat. scope=any carries no
+// platform-checked target, so each of those scripts
 // binds the standing path itself with the workplace walk (`require_workplace`):
 // a non-operator caller must hold a `worksAt` link covering a location the
 // TARGET sits at — the studio's own `locatedAt` for a studio-scoped op, and
@@ -123,15 +125,27 @@ func Permissions() []pkgmgr.PermissionSpec {
 			GrantsTo:      []string{"consumer"},
 		},
 		{
+			OperationType: "JoinWaitlist",
+			Scope:         "any",
+			Note:          "Grants the operator and front-of-house staff the right to join a member onto a full class's waitlist — the same session-workplace confinement CreateBooking's any-scope grant carries (prepare_booking_common, ddls.go).",
+			GrantsTo:      []string{"operator", "frontOfHouse"},
+		},
+		{
+			OperationType: "JoinWaitlist",
+			Scope:         "self",
+			Note:          "Grants a consumer the right to join a full class's waitlist for THEMSELVES (the waitlisted booking's booker must be the caller's own identity) — the mirror of CreateBooking's self-scope grant.",
+			GrantsTo:      []string{"consumer"},
+		},
+		{
 			OperationType: "CancelBooking",
 			Scope:         "any",
-			Note:          "Grants the operator and front-of-house staff the right to cancel a member's seat — the script confines a non-operator caller to a session whose studio sits at a location they worksAt, after binding the supplied session to the booking.",
+			Note:          "Grants the operator and front-of-house staff the right to cancel a member's seat OR waitlist slot — the script confines a non-operator caller to a session whose studio sits at a location they worksAt, after binding the supplied session to the booking. Cancelling a booked seat may promote the session's earliest waitlisted booking into it.",
 			GrantsTo:      []string{"operator", "frontOfHouse"},
 		},
 		{
 			OperationType: "CancelBooking",
 			Scope:         "self",
-			Note:          "Grants a consumer the right to cancel THEIR OWN booking (the booking's bookedBy identity must be the caller's own identity).",
+			Note:          "Grants a consumer the right to cancel THEIR OWN booking or waitlist slot (the booking's bookedBy identity must be the caller's own identity).",
 			GrantsTo:      []string{"consumer"},
 		},
 		{
