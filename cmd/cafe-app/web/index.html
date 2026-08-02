@@ -12,6 +12,7 @@
   <nav class="tabs" role="tablist">
     <button class="tab active" data-view="pos" id="tab-pos" role="tab" aria-selected="true">POS</button>
     <button class="tab" data-view="frontdesk" id="tab-frontdesk" role="tab" aria-selected="false">Front Desk</button>
+    <button class="tab" data-view="menu" id="tab-menu" role="tab" aria-selected="false">Manage Menu</button>
     <button class="tab" data-view="resident" id="tab-resident" role="tab" aria-selected="false">Resident</button>
   </nav>
 </header>
@@ -38,6 +39,33 @@
       <span class="summary" id="frontdesk-summary"></span>
     </div>
     <div id="frontdesk-grid" class="grid" aria-live="polite"></div>
+  </section>
+
+  <section id="view-menu" role="tabpanel" hidden>
+    <div class="panel-controls">
+      <button id="menu-refresh" class="ghost">Refresh</button>
+      <span class="summary" id="menu-summary"></span>
+    </div>
+    <div class="panel">
+      <h2>Add a menu item</h2>
+      <p class="lead">Price is fixed at creation — to change a price, retire the item below and add it again.</p>
+      <form id="add-menu-item-form">
+        <div class="field-row">
+          <div class="field">
+            <label for="mi-name">Name</label>
+            <input type="text" id="mi-name" placeholder="Cappuccino" />
+          </div>
+          <div class="field">
+            <label for="mi-price">Price</label>
+            <input type="text" id="mi-price" inputmode="decimal" placeholder="4.50" />
+          </div>
+        </div>
+        <div class="panel-actions">
+          <button type="submit" id="add-menu-item-submit">Add item</button>
+        </div>
+      </form>
+    </div>
+    <div id="menu-body"></div>
   </section>
 
   <section id="view-resident" role="tabpanel" hidden>

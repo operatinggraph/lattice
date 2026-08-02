@@ -317,13 +317,15 @@ function signOut() {
     .finally(() => location.replace("/login"));
 }
 
-// applyHatGating hides the staff-only tabs (POS, Front Desk) from a session
-// that lacks the worksAt anchor, and bounces the active view to Resident if
-// it just became disallowed. Idempotent; re-run whenever whoami resolves.
+// applyHatGating hides the staff-only tabs (POS, Front Desk, Manage Menu)
+// from a session that lacks the worksAt anchor, and bounces the active view
+// to Resident if it just became disallowed. Idempotent; re-run whenever
+// whoami resolves.
 function applyHatGating() {
   const fd = isFrontDesk();
   document.getElementById("tab-pos").hidden = !fd;
   document.getElementById("tab-frontdesk").hidden = !fd;
+  document.getElementById("tab-menu").hidden = !fd;
   refreshMeBar();
   const active = document.querySelector(".tab.active");
   if (active && active.hidden) showView("resident");
@@ -332,7 +334,7 @@ function applyHatGating() {
 // ---- view routing -------------------------------------------------
 
 function showView(view) {
-  if ((view === "pos" || view === "frontdesk") && !isFrontDesk()) view = "resident";
+  if ((view === "pos" || view === "frontdesk" || view === "menu") && !isFrontDesk()) view = "resident";
   document.querySelectorAll("[role=tabpanel]").forEach((s) => {
     s.hidden = s.id !== "view-" + view;
   });
@@ -343,6 +345,7 @@ function showView(view) {
   });
   if (view === "pos") loadPos();
   else if (view === "frontdesk") loadFrontDesk();
+  else if (view === "menu") loadManageMenu();
   else if (view === "resident") loadResident();
 }
 
@@ -700,6 +703,69 @@ function frontDeskCard(t, booking, lease, visit, bookerKey) {
   );
 }
 
+// ---- Manage Menu view (staff only) ---------------------------------
+
+// workplaceLocationKey returns the staffer's own worksAt location — the
+// only servedAt anchor a staff session can name for a new item without a
+// building picker this app has no roster for. Mirrors isFrontDesk()'s own
+// anchors walk. Returns "" when the session carries no worksAt anchor.
+function workplaceLocationKey() {
+  const a = Array.isArray(state.anchors) && state.anchors.find((x) => x && x.relation === "worksAt");
+  return (a && a.key) || "";
+}
+
+function menuItemCard(it) {
+  return (
+    '<div class="card">' +
+    '<div class="who">' + escapeHtml(it.name) + "</div>" +
+    '<div class="amount">' + money(it.priceCents) + "</div>" +
+    '<div class="card-actions"><button type="button" class="danger" data-retire="' +
+    escapeHtml(it.menuItemKey) +
+    '">Retire</button></div>' +
+    "</div>"
+  );
+}
+
+async function loadManageMenu() {
+  const summary = document.getElementById("menu-summary");
+  const body = document.getElementById("menu-body");
+  summary.textContent = "";
+  body.innerHTML = "";
+  let items;
+  try {
+    const data = await appGet("/api/menu");
+    items = data.menu || [];
+  } catch (e) {
+    body.innerHTML = '<div class="empty">' + e.message + "</div>";
+    return;
+  }
+  summary.textContent = items.length + " item" + (items.length === 1 ? "" : "s");
+  body.innerHTML = items.length
+    ? '<div class="grid">' + items.map(menuItemCard).join("") + "</div>"
+    : '<div class="empty">No menu items yet — add one above.</div>';
+  body.querySelectorAll("[data-retire]").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      const menuItemKey = btn.dataset.retire;
+      btn.disabled = true;
+      try {
+        await opOrThrow(
+          {
+            operationType: "RetireMenuItem", class: "menuitem",
+            reads: [menuItemKey],
+            payload: { menuItemKey },
+          },
+          "retire the item"
+        );
+        toast("Item retired.", true);
+        setTimeout(loadManageMenu, 700);
+      } catch (e) {
+        toast(e.message, false);
+        btn.disabled = false;
+      }
+    });
+  });
+}
+
 // ---- Resident view ------------------------------------------------
 //
 // A resident's own lease is resolved from /api/leases, which the server
@@ -957,6 +1023,38 @@ function init() {
   document.getElementById("pos-lease").addEventListener("change", renderPos);
   document.getElementById("pos-refresh").addEventListener("click", () => { leasesCache = null; loadPos(); });
   document.getElementById("frontdesk-refresh").addEventListener("click", loadFrontDesk);
+  document.getElementById("menu-refresh").addEventListener("click", loadManageMenu);
+  document.getElementById("add-menu-item-form").addEventListener("submit", async (ev) => {
+    ev.preventDefault();
+    const nameInput = document.getElementById("mi-name");
+    const priceInput = document.getElementById("mi-price");
+    const name = nameInput.value.trim();
+    const cents = parseDollars(priceInput.value);
+    if (!name) { toast("Enter a name for the item.", false); return; }
+    if (cents === null) { toast("Enter a price greater than $0.", false); return; }
+    const locationKey = workplaceLocationKey();
+    if (!locationKey) { toast("Your session carries no workplace to serve this item from.", false); return; }
+    const btn = document.getElementById("add-menu-item-submit");
+    btn.disabled = true;
+    try {
+      await opOrThrow(
+        {
+          operationType: "CreateMenuItem", class: "menuitem",
+          reads: [locationKey],
+          payload: { name, priceCents: cents, locationKey },
+        },
+        "add the item"
+      );
+      toast("Added " + name + ".", true);
+      nameInput.value = "";
+      priceInput.value = "";
+      setTimeout(loadManageMenu, 700);
+    } catch (e) {
+      toast(e.message, false);
+    } finally {
+      btn.disabled = false;
+    }
+  });
   document.getElementById("resident-lease").addEventListener("change", renderResident);
   document.getElementById("resident-refresh").addEventListener("click", () => { leasesCache = null; loadResident(); });
   document.getElementById("sign-out").addEventListener("click", signOut);
