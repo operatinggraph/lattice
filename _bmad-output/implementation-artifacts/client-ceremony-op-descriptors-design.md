@@ -1,16 +1,48 @@
 # Client-ceremony ops become descriptor-driven — script-derived reads, a mint-and-reveal descriptor, and the credential-scoped actor
 
-**Status: 📐 awaiting-Andrew (ratification)** — drafted 2026-08-01 (Winston, Designer fire); adversarial pass
+**Status: ✅ Andrew-ratified (2026-08-02).** Drafted 2026-08-01 (Winston, Designer fire); adversarial pass
 run and folded the same fire (§10).
+
+> **Ratification decisions (Andrew, 2026-08-02):**
+> 1. **Design ratified.** Inc 1 and Inc 3 are build-ready. Inc 4 stays designed-not-built — no live
+>    consumer (§4.4).
+> 2. **Decision (2) — the credential↔identity binding becomes a first-class link.** Emit
+>    `lnk.identity.<credentialId>.boundTo.identity.<ownerId>`, which is what Contract #1 requires of a
+>    relationship anyway, and which makes the per-credential Protected row a plain `MATCH` fan-out needing
+>    no new engine primitive. Inc 2 is unblocked. *Road not taken:* a platform array-fanout projection
+>    primitive — a larger speculative build whose only consumer is this row.
+>    **Recorded cost, corrected at ratification:** the draft's "adds the reverse edge, not the correlation
+>    itself" holds for a *targeted lookup* and not for *enumeration*. `credentialindex` answers "which
+>    owner?" only to a caller who already holds the credential key; the reverse edge lets a caller walking
+>    the link keyspace enumerate an owner's whole credential set knowing nothing first. Accepted because
+>    reaching it requires **substrate access** — the same threat model under which the keyed
+>    identity-index HMAC row is already `🗄️ shelved (revive: production threat model)`. It joins that
+>    shelf's accepted exposure; it does not open a new class, and it is not to be re-litigated per-fire.
+> 3. **Inc 1 carries priority: the contract landed ahead of the build.** Contract #2 §2.5 is **already
+>    committed** — Andrew committed it as `4965b28a` *"(doc) contract updates - ratified"* (2026-08-01),
+>    not staged-uncommitted as this doc first recorded. Nothing implements it: `derive_reads` appears
+>    nowhere in `internal/`, so the contract currently documents a step-4 mechanism the Processor does not
+>    run, and a package author following the contract would get it **silently ignored** — landing in the
+>    two failure modes §1 catalogues. No package has adopted it yet (verified at ratification), so the
+>    window is clean; Inc 1 closes it.
+> 4. **"Wear the other hat" — this item owns its vertical-lane tails; the consumer row is deleted.**
+>    The verticals.md row *"Five identity ceremony ops stay undiscoverable"* is **removed**, not left
+>    blocked: its whole scope is the client-side consumer migration this design already carries
+>    (§9 — the four hand-ported derivations, Facet ceremony support, the `signInMethods` pane section).
+>    Those are `cmd/**` FE/app tails of a Lattice item, and per `agents/steward/SKILL.md` §2 the Lattice
+>    Steward **builds them in this item, in the Lattice lane** — invoking `owner`/`fe-engineer` against
+>    the vertical app — rather than filing them across boards. §9 names the lane tails explicitly so the
+>    routing is not re-derived per fire.
+
 **Backlog row:** lattice.md *Component maintenance* — "[Pkgmgr] `OpMetaSpec` has no vocabulary for a
-client-mint-and-reveal-secret ceremony". **Consumer row:** verticals.md — "Five identity ceremony ops stay
-undiscoverable".
+client-mint-and-reveal-secret ceremony". *(Consumer row on verticals.md removed at ratification —
+decision 4.)*
 **Extends:** [vertical-package-standard.md](vertical-package-standard.md) §2 S1 + §8 (Inc 5 build note),
 [facet-discovery-restoration-design.md](facet-discovery-restoration-design.md) (the generic pane executor),
 [edge-showcase-app-design.md](edge-showcase-app-design.md) §3.3 (the descriptor vocabulary),
 [multi-credential-identity-linking-design.md](multi-credential-identity-linking-design.md) §3/§8.
 **Contracts:** builds to #1/#8/#9/#11; **frozen-contract change: Contract #2 §2.5** (one new declared-read
-class — the edit is staged **UNCOMMITTED** in `main`).
+class — **committed** `4965b28a`, 2026-08-01; see decision 3).
 
 ---
 
@@ -23,9 +55,10 @@ descriptor field (so a client mints the secret instead of asking a human to type
 the two link-ceremony ops exempt with corrected reasons, and sequences their closure behind a real
 two-device consumer.
 
-**Two decisions want your eye.**
+**Two decisions wanted Andrew's eye. Both are decided (2026-08-02) — see the banner; kept here for the
+reasoning that produced them.**
 
-**(1) A second, KV-less Starlark pre-pass per op.** Inc 1 adds `derive_reads(op)` at the head of commit
+**(1) A second, KV-less Starlark pre-pass per op. RATIFIED.** Inc 1 adds `derive_reads(op)` at the head of commit
 step 4; its returned exact keys join the declared read set. I recommend it over the alternatives
 (§8-A1/A2: a client-side `{sha256NanoID(…)}` template vocabulary; a Gateway-side derivation) because the
 derivation is **package semantics, not platform semantics** — identity-domain's index keys are
@@ -37,7 +70,8 @@ documents twice. The alternatives keep those ports alive; the pre-pass deletes t
 after the adversarial pass corrected me: it is a compile+Init+Call of the *same* ~960-line module, not a
 cheap call — so it requires a shared compiled-program cache to be affordable (§4.1, §8-R1).
 
-**(2) Does the credential↔identity binding become a first-class link?** This is a genuine fork the
+**(2) Does the credential↔identity binding become a first-class link? DECIDED: yes — emit the link
+(Andrew, 2026-08-02).** This was a genuine fork the
 adversarial pass surfaced, and it is the one thing in this design that changes a shipped data model. Inc 2
 (`UnlinkCredential` becomes descriptor-driven) needs one Protected row **per bound credential**; the bound
 set today is a variable-length array inside an *encrypted* aspect (`packages/identity-domain/lenses.go:43-52`),
@@ -48,10 +82,16 @@ makes the per-credential row a plain `MATCH` fan-out needing no new engine primi
 privacy surface:** the owner→credentials direction becomes enumerable in the plaintext link keyspace. The
 credential→identity direction is *already* there via `vtx.credentialindex.<sha256(credKey)>`, so this adds
 the reverse edge, not the correlation itself. The alternative — a platform array-fanout projection
-primitive — is a larger, more speculative build with this as its only consumer. **Your call; Inc 2's build
-is sequenced behind it** (§4.2).
+primitive — is a larger, more speculative build with this as its only consumer.
 
-**Frozen-contract change — Contract #2 §2.5, staged UNCOMMITTED in `main`.** One new row in the read-class
+*Corrected at ratification:* "adds the reverse edge, not the correlation itself" is true of a **targeted
+lookup** and false of **enumeration** — `credentialindex` requires the caller to already hold the credential
+key, whereas the reverse edge lets a link-keyspace walk enumerate an owner's whole credential set from
+nothing. The cost is accepted, not absent: reaching it needs **substrate access**, the same threat model
+that already shelved the keyed identity-index HMAC row. Banner decision 2 records it as a known cost on
+that shelf. **Inc 2 is unblocked** (§4.2).
+
+**Frozen-contract change — Contract #2 §2.5, COMMITTED (`4965b28a`, 2026-08-01).** One new row in the read-class
 table — **(g) script-derived exact-key** — plus the paragraph defining `derive_reads`' contract
 (deterministic, fail-closed stubs for the impure modules, Contract #1 key-grammar validated, weakest-wins
 merge precedence, the `egressReads` exclusion re-checked over the merged set, counted in the 1000-key
@@ -59,9 +99,14 @@ ceiling). No existing class changes; every op whose DDL declares no `derive_read
 Affected consumers: the Processor (step 4 + the DDL cache), `lint-conventions`' read-posture classifier, and
 the Edge predictability rule (which the change strengthens — §5).
 
-**What ratification unlocks.** Inc 1 and Inc 3 are build-ready on your sign-off. Inc 2 is build-ready on
-your sign-off **plus** decision (2). Inc 4 is designed through and deliberately **not** build-ready: it has
-no live consumer (§4.4) — the dead-scaffolding test, not a gap.
+**What ratification unlocked.** Inc 1, Inc 2, and Inc 3 are all build-ready (Inc 2 by decision (2)); build
+order **1 → 3**, with **2** after Inc 1 (§9). Inc 4 is designed through and deliberately **not**
+build-ready: it has no live consumer (§4.4) — the dead-scaffolding test, not a gap.
+
+**Inc 1 is the one to start**, and not only because everything sequences behind it: Contract #2 §2.5 is
+already committed and **nothing implements it**, so the contract presently describes a step-4 mechanism the
+Processor does not run (banner decision 3). That is a fail-open gap against a frozen contract, and Inc 1 is
+what closes it.
 
 ---
 
@@ -272,7 +317,7 @@ rather than a second lens per entry"), `SecureColumns` decrypt happens at projec
 fanout (`internal/refractor/ruleengine/full/visitor.go:146`: "UNWIND is not supported"), and the pane
 executor's row model is one map per SQL row (`pane.go:230-248`).
 
-**Recommended shape (Andrew's call — For-Andrew decision (2)): make the binding a link.** Emit
+**Shape — RATIFIED (Andrew, 2026-08-02; For-Andrew decision (2)): make the binding a link.** Emit
 `lnk.identity.<credentialId>.boundTo.identity.<ownerId>` on the paths that bind (`CompleteCredentialLink`,
 `ClaimIdentity`) and tombstone it on `UnlinkCredential`. Then the per-credential Protected lens is a plain
 `MATCH` fan-out — one row per link, columns `identity_key`, `credential_actor_key`, `bound_at`, the same
@@ -565,9 +610,26 @@ unchanged".
 | **3** | `OpCeremonySpec` + Facet client ceremony support + `CreateUnclaimedIdentity` / `RotateClaimKey` descriptors + **G1** (incl. the six note rewrites + `package_test.go`); two exemptions removed | M | Inc 1 (Create's probes) |
 | **4** | `credential` authContext + `RevealWith`/`PairedCodeField` + the two link descriptors | M | **a real two-device link consumer** — do not start (§4.4) |
 
-Build order: **1 → 3**, with **2** after decision (2) and Inc 1. Inc 1 grew from M to M–L on the adversarial
-pass (the compile-cache and cache-flag work is not optional); Inc 2 grew from S–M to M and lost its
-independence. Each increment remains independently shippable and green.
+Build order: **1 → 3**, with **2** after Inc 1 (decision (2) is ratified). Inc 1 grew from M to M–L on the
+adversarial pass (the compile-cache and cache-flag work is not optional); Inc 2 grew from S–M to M and lost
+its independence. Each increment remains independently shippable and green.
+
+**Lane routing — this item owns its `cmd/**` tails; do not file them to `verticals.md`.** Several
+increments end in vertical-app work rather than `internal/*`. Per `agents/steward/SKILL.md` §2 ("wear the
+other hat"), the **Lattice** Steward builds these inside this item, invoking `owner` / `fe-engineer`
+against the vertical app exactly as it does for its own lane. They are the application of a ratified
+pattern, not new design, so none of them routes back through the Designer. Named here so the routing is
+settled once:
+
+| Inc | Vertical-lane tail (`cmd/**`) | Hat |
+|---|---|---|
+| **1** | delete the two browser-JS `sha256NanoID` PCG-128 ports — `cmd/loftspace-app/web/app.js:945-1020` (+ `credentials_link.go:137-155`) and `cmd/clinic-app/web/app.js:654-660,706-714`; plus `cmd/facet/credentials.go:150-160,244-277`. (`cmd/lattice/identity/identity.go:32,278-303` is the CLI — already Lattice's own.) | `fe-engineer` ×2, `owner` ×1 |
+| **2** | the `signInMethods` pane section over the new per-credential Protected lens | `fe-engineer` |
+| **3** | Facet client ceremony support (the mint-and-reveal executor) — `cmd/facet` | `owner` |
+
+The verticals.md consumer row *"Five identity ceremony ops stay undiscoverable"* was **deleted at
+ratification** (banner decision 4): its entire scope is the table above, and a blocked row on the other
+board would only re-import the ping-pong this rule exists to kill.
 
 ## 10. Adversarial pass (run this fire — findings folded)
 

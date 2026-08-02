@@ -46,8 +46,12 @@ greenfield.
 - **S1 — Every user-facing op is self-describing.** A full `OpMetaSpec` (Presentation + InputSchema +
   FieldDescriptions + Dispatch with `TargetType`) for every op a human may trigger; the audience-slice
   schema may be narrower than the DDL's merged schema (clinic `CreateAppointment` idiom). Engine/reply/
-  lifecycle ops are exempt but the exemption is stated in the permission Note. **Amended by Inc 5 (§8),
-  flagged for Andrew:** a second exempt class exists — a **client-side ceremony** op, which a person *does*
+  lifecycle ops are exempt but the exemption is stated in the permission Note. **Amended by Inc 5 (§8);
+  the amendment is ratified as part of
+  [client-ceremony-op-descriptors-design.md](client-ceremony-op-descriptors-design.md) (Andrew,
+  2026-08-02), which narrows the class from identity-domain's five ops to two** (the link-ceremony pair —
+  the other three become descriptor-driven via `derive_reads` + mint-and-reveal): a second exempt class
+  exists — a **client-side ceremony** op, which a person *does*
   trigger but no rendered form can submit, because the client must mint a secret and keep the plaintext,
   submit as a different actor than it authenticated as, or name a key nothing projects. The exemption is
   admissible only with the *specific* mechanical reason in the Note (identity-domain's five are the worked
