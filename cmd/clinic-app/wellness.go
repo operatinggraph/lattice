@@ -24,6 +24,7 @@ type wellnessSessionProjection struct {
 // client-of-the-lens aggregation idiom cmd/wellness-app/sessions.go uses.
 type wellnessBookingProjection struct {
 	BookingKey string `json:"bookingKey"`
+	Status     string `json:"status"`
 	SessionKey string `json:"sessionKey"`
 }
 
@@ -39,9 +40,14 @@ type wellnessSessionRow struct {
 	BookedCount int    `json:"bookedCount"`
 }
 
-// computeWellnessBookedCounts tallies live wellnessBookings rows per
-// sessionKey. A row that fails to decode or carries no bookingKey (a
-// tombstoned projection entry) is skipped.
+// computeWellnessBookedCounts tallies booked (occupying-a-seat) wellnessBookings
+// rows per sessionKey. A waitlisted booking holds no seat cell — a claim on a
+// disjoint waitlist-slot dimension entirely (wellness-domain ddls.go) — so it
+// is excluded here, the same fix cmd/wellness-app/sessions.go's own
+// countBookingsBySession carries, else this referral picker would offer a
+// session as fuller than its seats actually are the moment anyone joins its
+// waitlist. A row that fails to decode or carries no bookingKey (a tombstoned
+// projection entry) is skipped.
 func computeWellnessBookedCounts(keys []string, get kvGetter) map[string]int {
 	counts := make(map[string]int)
 	for _, k := range keys {
@@ -51,6 +57,9 @@ func computeWellnessBookedCounts(keys []string, get kvGetter) map[string]int {
 		}
 		var p wellnessBookingProjection
 		if json.Unmarshal(raw, &p) != nil || p.BookingKey == "" {
+			continue
+		}
+		if p.Status == "waitlisted" {
 			continue
 		}
 		counts[p.SessionKey]++
