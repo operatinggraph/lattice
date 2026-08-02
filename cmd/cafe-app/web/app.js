@@ -345,7 +345,25 @@ async function loadLeases() {
   return leasesCache;
 }
 
-function fillLeaseSelect(select, leases) {
+// loadLeasePickerContext resolves each lease to its resident's name
+// (/api/residents) and unit address (/api/frontdesk-lease-details) for the
+// staff-facing lease pickers (POS + front desk's resident-view picker) — the
+// same best-effort, degrade-to-lease-key join frontDeskCard already does.
+async function loadLeasePickerContext() {
+  let residentsByLease = {};
+  try {
+    const rs = await appGet("/api/residents");
+    (rs.residents || []).forEach((r) => { residentsByLease[r.leaseAppKey] = r.bookerKey; });
+  } catch (_) { /* residents roster unreachable — picker falls back to the lease key */ }
+  let leaseDetailsByLease = {};
+  try {
+    const ld = await appGet("/api/frontdesk-lease-details");
+    (ld.leaseDetails || []).forEach((d) => { leaseDetailsByLease[d.leaseAppKey] = d; });
+  } catch (_) { /* front-desk not installed / unreachable — unit address just doesn't show */ }
+  return { residentsByLease, leaseDetailsByLease };
+}
+
+function fillLeaseSelect(select, leases, residentsByLease, leaseDetailsByLease) {
   const prev = select.value;
   select.innerHTML = "";
   if (!leases.length) {
@@ -358,7 +376,11 @@ function fillLeaseSelect(select, leases) {
   for (const l of leases) {
     const opt = document.createElement("option");
     opt.value = l.leaseAppKey;
-    opt.textContent = shortKey(l.leaseAppKey) + (l.accountKey ? "" : " (no café account yet)");
+    const bookerKey = residentsByLease && residentsByLease[l.leaseAppKey];
+    const who = bookerKey ? nameForIdentity(idOf(bookerKey)) : shortKey(l.leaseAppKey);
+    const detail = leaseDetailsByLease && leaseDetailsByLease[l.leaseAppKey];
+    const unit = detail && detail.unitAddress ? " — " + detail.unitAddress : "";
+    opt.textContent = who + unit + (l.accountKey ? "" : " (no café account yet)");
     select.appendChild(opt);
   }
   if (prev && leases.some((l) => l.leaseAppKey === prev)) select.value = prev;
@@ -368,8 +390,8 @@ function fillLeaseSelect(select, leases) {
 
 async function loadPos() {
   const select = document.getElementById("pos-lease");
-  const leases = await loadLeases();
-  fillLeaseSelect(select, leases);
+  const [leases, ctx] = await Promise.all([loadLeases(), loadLeasePickerContext()]);
+  fillLeaseSelect(select, leases, ctx.residentsByLease, ctx.leaseDetailsByLease);
   await renderPos();
 }
 
@@ -558,15 +580,6 @@ async function loadFrontDesk() {
     (br.bookings || []).forEach((b) => { bookingsByLease[b.leaseAppKey] = b; });
   } catch (_) { /* front-desk not installed / unreachable — badges just don't show */ }
 
-  // Same join, for the resident's applied-to unit rent/term — every open
-  // tab's lease, not just those with a booked class (best-effort, same
-  // degrade-to-hidden posture as bookingsByLease above).
-  let leaseDetailsByLease = {};
-  try {
-    const ld = await appGet("/api/frontdesk-lease-details");
-    (ld.leaseDetails || []).forEach((d) => { leaseDetailsByLease[d.leaseAppKey] = d; });
-  } catch (_) { /* front-desk not installed / unreachable — lease details just don't show */ }
-
   // Same join, for the resident's own upcoming clinic visit — existence +
   // time only, never the visit reason (front-desk's frontDeskVisits lens
   // never projects it). Best-effort, same degrade-to-hidden posture as above.
@@ -576,17 +589,9 @@ async function loadFrontDesk() {
     (vs.visits || []).forEach((v) => { visitsByLease[v.leaseAppKey] = v; });
   } catch (_) { /* front-desk not installed / unreachable — visit badge just doesn't show */ }
 
-  // Same join, for the lease's own applicant identity — resolved to a name via
-  // the protected cafeIdentitiesRead roster (state.identities, loadIdentities),
-  // whose authz_anchors now fan out over the staffer's own workplace so this
-  // resolves for every lease their workplace covers, not only themselves.
-  // Best-effort, same degrade-to-hidden posture as above: falls back to the
-  // truncated lease key if the roster row or /api/residents itself is unreachable.
-  let residentsByLease = {};
-  try {
-    const rs = await appGet("/api/residents");
-    (rs.residents || []).forEach((r) => { residentsByLease[r.leaseAppKey] = r.bookerKey; });
-  } catch (_) { /* residents roster unreachable — the card falls back to the lease key */ }
+  // Same resident-name/unit-address join the lease pickers use
+  // (loadLeasePickerContext) — the card's "who" + rent/term lines.
+  const { residentsByLease, leaseDetailsByLease } = await loadLeasePickerContext();
 
   summary.textContent = tabs.length + " open tab" + (tabs.length === 1 ? "" : "s");
   if (!tabs.length) {
@@ -671,7 +676,8 @@ async function loadResident() {
   if (isFrontDesk()) {
     label.hidden = false;
     select.hidden = false;
-    fillLeaseSelect(select, leases);
+    const ctx = await loadLeasePickerContext();
+    fillLeaseSelect(select, leases, ctx.residentsByLease, ctx.leaseDetailsByLease);
   } else {
     label.hidden = true;
     select.hidden = true;
