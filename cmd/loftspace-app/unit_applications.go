@@ -228,8 +228,21 @@ func (s *server) handleUnitApplications(w http.ResponseWriter, r *http.Request) 
 		}
 	}
 
-	getter := func(bucket string) (kvGetter, []string, error) {
-		keys, err := conn.KVListKeys(ctx, bucket)
+	// getter lists a bucket's keys and returns a KVGet closure over it. prefix
+	// scopes the list server-side (KVListKeysPrefix) to the caller's own key
+	// space within a bucket shared by other targets — weaver-targets holds every
+	// convergence lens's rows, not just leaseApplicationComplete's, so an
+	// unscoped KVListKeys would read every sibling target's rows on every
+	// request. loftspace-listings is this app's own dedicated bucket, so its
+	// call passes no prefix.
+	getter := func(bucket, prefix string) (kvGetter, []string, error) {
+		var keys []string
+		var err error
+		if prefix != "" {
+			keys, err = conn.KVListKeysPrefix(ctx, bucket, prefix)
+		} else {
+			keys, err = conn.KVListKeys(ctx, bucket)
+		}
 		if err != nil {
 			return nil, nil, err
 		}
@@ -243,13 +256,13 @@ func (s *server) handleUnitApplications(w http.ResponseWriter, r *http.Request) 
 		return get, keys, nil
 	}
 
-	appGet, appKeys, err := getter(bootstrap.WeaverTargetsBucket)
+	appGet, appKeys, err := getter(bootstrap.WeaverTargetsBucket, applicationKeyPrefix)
 	if err != nil {
 		s.writeError(w, http.StatusBadGateway,
 			"list "+bootstrap.WeaverTargetsBucket+": "+err.Error()+" (is lease-signing installed and the Refractor projecting?)")
 		return
 	}
-	listGet, listKeys, err := getter(loftspacedomain.LoftspaceListingsBucket)
+	listGet, listKeys, err := getter(loftspacedomain.LoftspaceListingsBucket, "")
 	if err != nil {
 		s.writeError(w, http.StatusBadGateway,
 			"list "+loftspacedomain.LoftspaceListingsBucket+": "+err.Error()+" (is loftspace-domain installed and the Refractor projecting?)")
