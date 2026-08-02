@@ -17,8 +17,10 @@
 
 **Frozen-contract change: NONE.**
 
-**FORK-1 — where the descriptor vocabulary lives. DECIDED: B (Andrew, 2026-07-11).** Ship it as `docs/components/edge-manifest.md` (build-to spec, versioned `vocab: 1`); freeze as a contract when the **second renderer** (iOS/SwiftUI, Fire 5) proves client-neutrality — the freeze trigger is named, not open-ended.
+**FORK-1 — where the descriptor vocabulary lives. DECIDED: B (Andrew, 2026-07-11); freeze trigger RETARGETED (Andrew, 2026-08-02).** Ship it as `docs/components/edge-manifest.md` (build-to spec, versioned `vocab: 1`); freeze as a contract when the **second renderer renders the full field vocabulary that shipped op-metas actually exercise**.
 - *Road not taken — A:* freeze now as a new Contract #12. Rejected for v1: freezing v0 guesses before a second renderer exists invites amendment churn.
+- **Why the trigger moved off "a literal iOS build" (2026-08-02).** The original trigger was "the second renderer (iOS/SwiftUI, Fire 5) proves client-neutrality", which §7.10–§7.12 then read as requiring a literal iOS build — an environment this host cannot provide. That conflates two different properties. SwiftUI-on-macOS and SwiftUI-on-iOS share the **entire** manifest-consuming path; the delta is OS chrome and packaging, which touches no part of the vocabulary. A literal iOS build proves *platform packaging*, not *client-neutrality*, so it is the wrong gate for freezing a vocabulary doc.
+  The right gate is **vocabulary completeness**, and by that measure the freeze is genuinely not earned yet: §7.12 narrowed `DescriptorForm.swift` to free-text + string-enum on the stated grounds that no op-meta exercised the PWA's richer kinds. That was true on 2026-07-18 and is **false now** — `x-entityRef` (`87010105` 2026-07-26 café, `0badf04e` 2026-07-27 clinic), money (`cafe-domain`, `cafe-ledger`), boolean (`clinic-domain`) and date (`clinic-domain`, `identity-domain`, `wellness-domain`) all ship today, and the PWA renders every one ([`cmd/facet/web/app.js`](../../cmd/facet/web/app.js) `renderField`). Freezing now would freeze four clauses that have one implementation and one renderer ignoring them. The freeze waits on closing that, not on Xcode.
 
 **FORK-2 — the browser engine. DECIDED: A (Andrew, 2026-07-11) — mechanism corrected by the ratified EDGE.5 design (FORK-W A′, Andrew, 2026-07-16).** A's intent stands: one engine, LWW/overlay/queue semantics single-sourced in Go/wasm, store → IndexedDB. A's "transport → WebSocket" half was falsified by vendor grounding — **`nats.go` has no js/wasm/browser transport** (raw TCP dials; upstream requests open since 2021; the vendor's browser client is `nats.js`). As ratified in [edge-browser-node-design.md](edge-browser-node-design.md), the engine splits at a **transport seam**: wasm semantics core + a thin JS transport shell (WS connect, durable consume, control RPCs) over vendored `nats.js`. Executes as EDGE.5 fires W1–W4.
 - *Road not taken — B:* the protocol-parity TypeScript mini-engine stays the **pre-approved tripwire fallback** (EDGE.5's named tripwire: >~2× the measured 1.3 MB-gz baseline, or the JS↔wasm bridge proves unworkable). *C (REST-only thin client):* rejected — a second read plane that abandons the offline-first store.
@@ -453,6 +455,11 @@ exactly the kind of final-architecture call that goes to Andrew, not something a
 Flagging as a candidate for Andrew's call once a literal iOS build exists (needs a machine with full
 Xcode) or Andrew judges this macOS proof sufficient on its own.
 
+> **ANSWERED (Andrew, 2026-08-02): neither.** The freeze trigger was retargeted off "a literal iOS
+> build" — that proves platform packaging, not client-neutrality (FORK-1's note above). The freeze now
+> waits on the second renderer covering the full shipped op-meta field vocabulary. The literal iOS
+> build is shelved on its own row, `revive: a machine with full Xcode`.
+
 Fire 5 residual now: the second-renderer spike continues — a literal iOS build (needs full Xcode
 elsewhere), then the write path (`enqueue`), then the acceptance-demo green bar (§ overview: "wire a
 brand-new service... watch it appear in both renderers with zero app change").
@@ -507,6 +514,13 @@ field kinds every shipped op-meta actually uses (free-text string, string enum) 
 fuller vocabulary (date/money/entity-ref/boolean), which no op-meta exercises yet. `ContentView`'s
 Catalog rows now open `DescriptorFormSheet` — a real form — instead of Inc 2's blind empty-payload
 Enqueue button; `ManifestStore` grew `submitDescriptorForm` alongside the existing `enqueue`.
+
+> **SUPERSEDED in part (2026-08-02).** "which no op-meta exercises yet" was accurate on 2026-07-18 and
+> is not accurate now: `x-entityRef`, money, boolean and date all ship in op-metas today (see FORK-1's
+> retarget note above for the commits). The narrowing is therefore no longer a scoping choice but a
+> **live gap** — the second renderer cannot draw shipped café/clinic ops — and closing it is the
+> retargeted FORK-1 freeze trigger. Filed on `verticals.md`; buildable on this host (`swift build`
+> works; only `swift test` needs full Xcode).
 
 **A real platform gap found and closed in the same fire, not papered over.** `cafe-domain`'s `OpenTab`
 op-meta had no `Dispatch.Reads` declared — §7.11's live test only succeeded because the throwaway
