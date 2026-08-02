@@ -90,10 +90,13 @@ function buildTargetContent(draft) {
 }
 
 // buildLensContent builds the pkgmgr.LensArtifactContent-shaped object.
+// canonicalName defaults to the target's lensRef when the operator has not
+// typed one — the field the view itself displays as a placeholder default,
+// kept in lockstep so Check/Export never diverge from what's shown on screen.
 function buildLensContent(draft) {
   const l = draft.lens || emptyLens();
   return {
-    canonicalName: l.canonicalName || "",
+    canonicalName: l.canonicalName || draft.lensRef || "",
     adapter: l.adapter || "nats-kv",
     bucket: l.bucket || "",
     table: l.table || "",
@@ -108,23 +111,25 @@ function buildLensContent(draft) {
 // no IntoKey (pkgmgr's nats-kv default, build.go), so the composite
 // `<targetId>.<entityId>` key the §10.2 row convention requires is produced
 // directly in the RETURN, not via any field this restricted artifact kind
-// lacks. gapKeys should be sorted for a deterministic template.
+// lacks. gapKeys are the target's OWN gaps map keys — already full
+// `missing_<gap>` column names (pkgmgr's WeaverTarget gaps-key convention,
+// orchestrationguard.go: "gaps key %q does not match the missing_<gap> column
+// convention" — the key is the column, not a bare suffix this template would
+// need to re-prefix), sorted for a deterministic template.
 function scaffoldLensSpec(targetId, gapKeys) {
   const id = targetId || "<targetId>";
-  const missingCols = gapKeys.length
-    ? gapKeys.map((g) => "missing_" + g).join(" OR ")
-    : "<at least one missing_<gap> expression>";
+  const missingCols = gapKeys.length ? gapKeys.join(" OR ") : "<at least one missing_<gap> expression>";
   const lines = [];
   lines.push("// Scaffold — §10.2 convergence row over one candidate entity per match.");
   lines.push("// Fill in the MATCH/WHERE for this target's candidate set, then the");
-  lines.push("// missing_<gap> boolean expression for each declared gap.");
+  lines.push("// boolean expression for each declared gap column.");
   lines.push("MATCH (e:<entityType>)");
   lines.push("WHERE <candidacy filter>");
   lines.push("RETURN '" + id + ".' + nanoIdFromKey(e.key) AS key,");
   lines.push("       (" + missingCols + ") AS violating,");
-  (gapKeys.length ? gapKeys : ["<gap>"]).forEach((g, i) => {
+  (gapKeys.length ? gapKeys : ["<missing_gap>"]).forEach((g, i) => {
     const sep = i === gapKeys.length - 1 || !gapKeys.length ? "" : ",";
-    lines.push("       <missing " + g + " expr> AS missing_" + g + sep);
+    lines.push("       <" + g + " expr> AS " + g + sep);
   });
   lines.push("       e.key AS entityKey");
   return lines.join("\n");

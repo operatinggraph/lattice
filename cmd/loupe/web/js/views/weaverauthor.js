@@ -55,7 +55,7 @@ function targetFieldsBox() {
   box.appendChild(el("h3", null, "Target"));
   const row = el("div", "op-fields author-row");
   row.appendChild(labeledInput("targetId", draft.targetId, (v) => { draft.targetId = v; }));
-  row.appendChild(labeledInput("lensRef (the paired lens's canonicalName)", draft.lensRef, (v) => { draft.lensRef = v; draft.lens.canonicalName = v; render(); }));
+  row.appendChild(labeledInput("lensRef (the paired lens's canonicalName)", draft.lensRef, (v) => { draft.lensRef = v; }));
   box.appendChild(row);
   return box;
 }
@@ -70,7 +70,7 @@ function gapsBox() {
   const addRow = el("div", "author-add-row");
   const addInput = document.createElement("input");
   addInput.type = "text";
-  addInput.placeholder = "gap column name (e.g. signature, for missing_signature)";
+  addInput.placeholder = "gap key — the full missing_<gap> column name, e.g. missing_signature";
   addRow.appendChild(addInput);
   const addBtn = el("button", null, "Add gap");
   addBtn.addEventListener("click", () => {
@@ -129,7 +129,10 @@ function lensBox() {
   box.appendChild(head);
 
   const row = el("div", "op-fields author-row");
-  row.appendChild(labeledInput("canonicalName", l.canonicalName, (v) => { l.canonicalName = v; }));
+  // Defaults to lensRef until the operator types their own — matched by
+  // buildLensContent's own fallback, so Check/Export agree with what's shown
+  // even before this field gains a keystroke.
+  row.appendChild(labeledInput("canonicalName", l.canonicalName || draft.lensRef, (v) => { l.canonicalName = v; }));
   row.appendChild(labeledInput("adapter", l.adapter, (v) => { l.adapter = v; }));
   row.appendChild(labeledInput("bucket", l.bucket, (v) => { l.bucket = v; }));
   row.appendChild(labeledInput("table (postgres only)", l.table, (v) => { l.table = v; }));

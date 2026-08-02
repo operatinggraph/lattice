@@ -90,13 +90,39 @@ func TestWeaverAuthorBuildLensContentDefaultsAdapter(t *testing.T) {
 	}
 }
 
+// TestWeaverAuthorBuildLensContentCanonicalNameFallsBackToLensRef pins the
+// view's own displayed default (weaverauthor.js's lensBox): an untouched
+// canonicalName field must resolve identically here, so Check/Export never
+// diverge from what's shown on screen.
+func TestWeaverAuthorBuildLensContentCanonicalNameFallsBackToLensRef(t *testing.T) {
+	vm := logicVM(t, "weaverauthor.js")
+	got := call(t, vm, "buildLensContent", map[string]any{
+		"lensRef": "leaseViolations",
+		"lens":    map[string]any{"canonicalName": "", "bucket": "weaver-targets"},
+	}).(map[string]any)
+	if got["canonicalName"] != "leaseViolations" {
+		t.Errorf("canonicalName = %v, want the lensRef fallback", got["canonicalName"])
+	}
+	// An explicit canonicalName always wins over the fallback.
+	got = call(t, vm, "buildLensContent", map[string]any{
+		"lensRef": "leaseViolations",
+		"lens":    map[string]any{"canonicalName": "customName", "bucket": "weaver-targets"},
+	}).(map[string]any)
+	if got["canonicalName"] != "customName" {
+		t.Errorf("canonicalName = %v, want the explicit value to win", got["canonicalName"])
+	}
+}
+
 // TestWeaverAuthorScaffoldLensSpec pins §10.2's plain-lens key convention:
 // the RETURN's own `AS key` produces the <targetId>.<entityId> composite —
 // no ProjectionKind/Output descriptor, which the restricted lens artifact
-// kind cannot express at all.
+// kind cannot express at all. gapKeys are already full missing_<gap> column
+// names (pkgmgr's WeaverTarget gaps-key convention — the map key IS the
+// column, orchestrationguard.go) — the template must use them as-is, never
+// re-prefixing into missing_missing_x.
 func TestWeaverAuthorScaffoldLensSpec(t *testing.T) {
 	vm := logicVM(t, "weaverauthor.js")
-	spec := call(t, vm, "scaffoldLensSpec", "leaseComplete", []any{"bgcheck", "signature"}).(string)
+	spec := call(t, vm, "scaffoldLensSpec", "leaseComplete", []any{"missing_bgcheck", "missing_signature"}).(string)
 	for _, want := range []string{
 		"'leaseComplete.' + nanoIdFromKey(e.key) AS key",
 		"AS missing_bgcheck",
@@ -107,6 +133,9 @@ func TestWeaverAuthorScaffoldLensSpec(t *testing.T) {
 		if !containsSub(spec, want) {
 			t.Errorf("scaffoldLensSpec missing %q in:\n%s", want, spec)
 		}
+	}
+	if containsSub(spec, "missing_missing_") {
+		t.Errorf("scaffoldLensSpec double-prefixed an already-full gap key:\n%s", spec)
 	}
 }
 
