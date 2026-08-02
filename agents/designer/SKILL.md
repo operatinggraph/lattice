@@ -367,6 +367,32 @@ tombstones. **Capability KV is a lens projection** (projection correctness = aut
   to be real-but-unenforced, the gate ships in the same design (the lint doctrine above) — and say plainly
   that the shipped mechanism you are extending has been assuming it too.
 
+- **When you design an automatic recovery loop, find the clock that actually RE-TESTS the verdict — it is
+  almost never the clock you are setting.** Any design that says *"probe, resume, and if it is still broken it
+  re-pauses"* has a hidden second timer: the one that redelivers the work whose failure produces the re-pause.
+  Open it. If the failing message is left **un-acked** (the standard "pause, don't dispose" posture), the
+  re-test waits for **AckWait**, not for your probe interval — and in between, the component publishes
+  *healthy* while doing nothing. (Trialed 2026-08-01, the structural-pause design: I budgeted a
+  three-relapse latch at "≈30 s" off `ProbeInterval` = 10 s. `processMsg` returns `disposed=false` on a
+  structural failure and never Naks, and Refractor's `lensAckWait` is **5 minutes** — so the real latch was
+  ~15 minutes and the lens read `active` for ~97% of every cycle, a strictly *worse* operator signal than the
+  honest `paused` it replaced. The fix was a Nak-with-delay so the verdict re-tests on the probe's clock; the
+  adversarial pass found it, and it reshaped the increment.) **The check:** for every auto-recovery loop,
+  write down the three clocks — detect, re-test, give-up — and cite the code that sets each. A give-up bound
+  expressed in *attempts* is meaningless until you know what paces an attempt. And ask what the health/status
+  surface says during the gap: an optimistic status published before the re-test is a lie with a duration.
+
+- **A blind spot you have already been corrected on will recur in a NEW subsystem — the check must be run as
+  a checklist item, not recalled as a memory.** The same 2026-08-01 pass returned a second blocker that was
+  purely the *"verify a mechanism can BE restricted/reshaped"* reflex two entries above, in a subsystem that
+  reflex had never been applied to: I proposed completing a probe by "plumbing the lens's declared body
+  columns" into the plain Postgres adapter, and `lens/schema.go:79` says `Columns` is **protected-only** — a
+  plain lens declares none, so the completed probe would still have been key-columns-only and still incapable
+  of refusing the error it existed to refuse. The reflex was in the skill, freshly added, and I still shipped
+  the draft. **So: before finalizing, walk §2's reflex list against the draft explicitly, one at a time.**
+  Every sentence of the form *"just pass X in"* / *"the same Y without Z"* / *"reuse it for W"* is an
+  unopened mechanism until you have opened the file.
+
 **Run the pre-build gates you write into your own designs — "ratified" ≠ "build-ready."** If a design
 self-flags a pre-build adversarial / `bmad-party-mode` pass (a deferred gate), that pass is a **Designer-lane
 obligation**: run it and **record it as run** before the design is build-ready. Do not leave it dangling for
