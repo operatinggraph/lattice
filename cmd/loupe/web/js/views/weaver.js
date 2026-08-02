@@ -199,6 +199,13 @@ function mapSvg(d) {
 function mapNode(n) {
   const g = document.createElementNS(SVG_NS, "g");
   g.setAttribute("class", "weaver-node weaver-node-" + n.kind + (n.cls ? " " + n.cls : ""));
+  // The layout ellipses a label that would overrun its box (SVG text neither
+  // wraps nor clips), so the untruncated text lives on a hover title.
+  if (n.full && n.full !== n.label) {
+    const title = document.createElementNS(SVG_NS, "title");
+    title.textContent = n.full;
+    g.appendChild(title);
+  }
   const rect = document.createElementNS(SVG_NS, "rect");
   rect.setAttribute("x", String(n.x));
   rect.setAttribute("y", String(n.y));

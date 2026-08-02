@@ -169,6 +169,25 @@ var MAP_NODE_W = [160, 190, 210, 250];
 var MAP_ROW_H = 64;
 var MAP_NODE_H = 44;
 var MAP_TOP = 20;
+// Approximate advance width of the node label/sub fonts (12px / 10px semibold
+// in the console's stack). SVG text does not wrap or clip to its box, so a long
+// label runs straight over the next column — a target and its like-named lens
+// collided on the first live render. Truncation happens HERE, in the layout, so
+// the geometry stays testable without a DOM.
+var MAP_LABEL_CHAR_W = 6.9;
+var MAP_SUB_CHAR_W = 5.6;
+var MAP_NODE_PAD = 20;
+
+// fitLabel truncates text to what fits in width, ellipsing when it cuts. Text
+// that already fits comes back untouched.
+function fitLabel(text, width, charW) {
+  var s = String(text == null ? "" : text);
+  var max = Math.floor((width - MAP_NODE_PAD) / charW);
+  if (max < 1) return "";
+  if (s.length <= max) return s;
+  if (max <= 1) return "\u2026";
+  return s.slice(0, max - 1) + "\u2026";
+}
 
 // mapLayout lays the target's definition out as four layers — lens → target →
 // gap → what the gap dispatches — and returns plain geometry so the renderer
@@ -185,14 +204,17 @@ function mapLayout(detail) {
   var lensLabel = (detail && (detail.lensName || detail.lensRef)) || "(no lens ref)";
   nodes.push({
     id: "lens", kind: "lens", x: MAP_COL_X[0], y: mid, w: MAP_NODE_W[0], h: MAP_NODE_H,
-    label: lensLabel,
+    label: fitLabel(lensLabel, MAP_NODE_W[0], MAP_LABEL_CHAR_W),
+    full: lensLabel,
     sub: "violation lens",
     cls: detail && detail.lensRef ? "" : "unbound",
     href: detail && detail.lensRef ? "#/lens/" + detail.lensRef : "",
   });
+  var targetLabel = (detail && detail.targetId) || "";
   nodes.push({
     id: "target", kind: "target", x: MAP_COL_X[1], y: mid, w: MAP_NODE_W[1], h: MAP_NODE_H,
-    label: (detail && detail.targetId) || "",
+    label: fitLabel(targetLabel, MAP_NODE_W[1], MAP_LABEL_CHAR_W),
+    full: targetLabel,
     sub: (detail && detail.state) || (detail && detail.registered ? "active" : "not registered"),
     cls: detail && detail.state === "disabled" ? "disabled" : "",
     href: "",
@@ -203,20 +225,25 @@ function mapLayout(detail) {
     var g = gaps[i];
     var y = MAP_TOP + i * MAP_ROW_H;
     var gid = "gap:" + g.column;
+    var gapSub = g.open + " open" + (g.inflight ? " · " + g.inflight + " in flight" : "");
     nodes.push({
       id: gid, kind: "gap", x: MAP_COL_X[2], y: y, w: MAP_NODE_W[2], h: MAP_NODE_H,
-      label: g.column,
-      sub: g.open + " open" + (g.inflight ? " · " + g.inflight + " in flight" : ""),
+      label: fitLabel(g.column, MAP_NODE_W[2], MAP_LABEL_CHAR_W),
+      full: g.column,
+      sub: fitLabel(gapSub, MAP_NODE_W[2], MAP_SUB_CHAR_W),
       cls: gapNodeCls(g),
       href: "",
     });
     edges.push({ from: "target", to: gid, label: "" });
 
     var aid = "act:" + g.column;
+    var actLabel = dispatchLabel(g);
+    var actSub = g.dispatch === "action" ? actionSummary(g.action) : "";
     nodes.push({
       id: aid, kind: "action", x: MAP_COL_X[3], y: y, w: MAP_NODE_W[3], h: MAP_NODE_H,
-      label: dispatchLabel(g),
-      sub: g.dispatch === "action" ? actionSummary(g.action) : "",
+      label: fitLabel(actLabel, MAP_NODE_W[3], MAP_LABEL_CHAR_W),
+      full: actLabel + (actSub ? " \u2014 " + actSub : ""),
+      sub: fitLabel(actSub, MAP_NODE_W[3], MAP_SUB_CHAR_W),
       cls: g.dispatch === "none" ? "unbound" : "",
       href: g.dispatch === "action" && g.action && g.action.patternKnown ? "#/graph/" + g.action.patternRef : "",
     });
@@ -265,8 +292,13 @@ function rosterNote(detail) {
 function gapStateLine(g) {
   var cls = { open: "warn", inflight: "info", exhausted: "bad", closed: "ok" }[g.state] || "muted";
   var budget = "";
-  if (g.budgetKnown) budget = (g.dispatches || 0) + " / " + g.budget + " dispatches";
-  else if (g.dispatches) budget = g.dispatches + " dispatches (no declared budget)";
+  var n = g.dispatches || 0;
+  // A closed gap that never dispatched has no episode to report a budget
+  // against — the mark and its count are deleted on close, so "0 / 3" there is
+  // a denominator against nothing rather than a fact about this entity.
+  if (g.state === "closed" && !n) budget = "";
+  else if (g.budgetKnown) budget = n + " / " + g.budget + " dispatches";
+  else if (n) budget = n + " dispatches (no declared budget)";
   return { state: g.state, cls: cls, budget: budget };
 }
 
@@ -304,4 +336,4 @@ function artifactLine(a) {
   };
 }
 
-export { contractionLabel, targetRank, targetRows, rosterHeadline, gapBadges, dispatchLabel, actionSummary, unboundBindings, mapLayout, gapNodeCls, entityBadges, rosterNote, gapStateLine, markLine, artifactLine };
+export { fitLabel, contractionLabel, targetRank, targetRows, rosterHeadline, gapBadges, dispatchLabel, actionSummary, unboundBindings, mapLayout, gapNodeCls, entityBadges, rosterNote, gapStateLine, markLine, artifactLine };

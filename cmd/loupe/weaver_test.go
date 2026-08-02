@@ -549,8 +549,8 @@ func TestBuildWeaverMetaIndexKeysOffTheSpecBody(t *testing.T) {
 		"vtx.meta.pAAAAAAAAAAAAAAAAAAA.spec": `{"data":{"patternId":"backgroundCheck","steps":[]}}`,
 		// The lens sharing the target's name — indexed by neither, because a
 		// lens spec carries no targetId and no patternId.
-		"vtx.meta.lAAAAAAAAAAAAAAAAAAA.spec":          `{"data":{"engine":"cypher","cypherRule":"MATCH …"}}`,
-		"vtx.meta.lAAAAAAAAAAAAAAAAAAA.canonicalName": `{"data":{"value":"leaseComplete"}}`,
+		"vtx.meta.vAAAAAAAAAAAAAAAAAAA.spec":          `{"data":{"engine":"cypher","cypherRule":"MATCH …"}}`,
+		"vtx.meta.vAAAAAAAAAAAAAAAAAAA.canonicalName": `{"data":{"value":"leaseComplete"}}`,
 	}
 	get := func(k string) ([]byte, bool) {
 		v, ok := envelopes[k]
@@ -559,7 +559,7 @@ func TestBuildWeaverMetaIndexKeysOffTheSpecBody(t *testing.T) {
 	index := buildWeaverMetaIndex([]string{
 		// The lens is listed FIRST, so a name-keyed index would have resolved
 		// the target id to it.
-		"vtx.meta.lAAAAAAAAAAAAAAAAAAA.spec",
+		"vtx.meta.vAAAAAAAAAAAAAAAAAAA.spec",
 		"vtx.meta.tAAAAAAAAAAAAAAAAAAA.spec",
 		"vtx.meta.pAAAAAAAAAAAAAAAAAAA.spec",
 		// A meta with no spec aspect never costs a read.

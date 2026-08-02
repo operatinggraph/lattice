@@ -246,6 +246,53 @@ func TestWeaverMapLayout(t *testing.T) {
 	}
 }
 
+// SVG text neither wraps nor clips to its box, so a label wider than its node
+// runs straight over the next column — a target and its like-named violation
+// lens collided on the first live render. The layout ellipses instead.
+func TestWeaverFitLabel(t *testing.T) {
+	vm := logicVM(t, "weaver.js")
+	// Fits → untouched.
+	if got := call(t, vm, "fitLabel", "short", 200, 6.9); got != "short" {
+		t.Errorf("fitLabel(short) = %v, want it untouched", got)
+	}
+	long := call(t, vm, "fitLabel", "leaseApplicationCompleteAndThenSome", 160, 6.9).(string)
+	if len(long) >= len("leaseApplicationCompleteAndThenSome") {
+		t.Errorf("fitLabel did not truncate: %q", long)
+	}
+	if !containsSub(long, "\u2026") {
+		t.Errorf("truncated label %q carries no ellipsis", long)
+	}
+	// A box too narrow for any glyph yields empty text, never a crash or a
+	// negative slice.
+	if got := call(t, vm, "fitLabel", "anything", 10, 6.9); got != "" {
+		t.Errorf("fitLabel(narrow) = %v, want \"\"", got)
+	}
+	if got := call(t, vm, "fitLabel", nil, 200, 6.9); got != "" {
+		t.Errorf("fitLabel(nil) = %v, want \"\"", got)
+	}
+}
+
+func TestWeaverMapLayoutTruncatesAndKeepsFullText(t *testing.T) {
+	vm := logicVM(t, "weaver.js")
+	l := call(t, vm, "mapLayout", map[string]any{
+		"targetId": "aTargetIdFarTooLongForItsOwnBox",
+		"lensName": "aLensNameFarTooLongForItsOwnBox",
+		"lensRef":  "lensAAA",
+		"gaps":     []any{},
+	}).(map[string]any)
+	for _, n := range l["nodes"].([]any) {
+		m := n.(map[string]any)
+		label := m["label"].(string)
+		full, _ := m["full"].(string)
+		if full == "" {
+			t.Errorf("node %v carries no full text for its tooltip", m["id"])
+		}
+		if len(label) >= len(full) && label != full {
+			t.Errorf("node %v label %q is not a truncation of %q", m["id"], label, full)
+		}
+	}
+}
+
 func TestWeaverEntityBadgesAndRosterNote(t *testing.T) {
 	vm := logicVM(t, "weaver.js")
 	worst := call(t, vm, "entityBadges", map[string]any{
@@ -300,6 +347,22 @@ func TestWeaverGapStateLine(t *testing.T) {
 	quiet := call(t, vm, "gapStateLine", map[string]any{"state": "closed", "budgetKnown": false}).(map[string]any)
 	if quiet["budget"] != "" || quiet["cls"] != "ok" {
 		t.Errorf("closed line = %v, want no budget text", quiet)
+	}
+	// A CLOSED gap that never dispatched has no episode to report against —
+	// its mark and count are deleted on close, so "0 / 3" would be a
+	// denominator against nothing rather than a fact about this entity.
+	closedKnown := call(t, vm, "gapStateLine", map[string]any{
+		"state": "closed", "dispatches": 0, "budget": 3, "budgetKnown": true,
+	}).(map[string]any)
+	if closedKnown["budget"] != "" {
+		t.Errorf("closed-with-no-dispatch line = %v, want no denominator", closedKnown)
+	}
+	// A closed gap that DID dispatch still reports what it spent.
+	closedSpent := call(t, vm, "gapStateLine", map[string]any{
+		"state": "closed", "dispatches": 2, "budget": 3, "budgetKnown": true,
+	}).(map[string]any)
+	if closedSpent["budget"] != "2 / 3 dispatches" {
+		t.Errorf("closed-after-dispatch line = %v", closedSpent)
 	}
 }
 
