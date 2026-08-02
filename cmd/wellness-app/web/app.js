@@ -1524,6 +1524,8 @@ function slotCellKeys(studioKey, startsAt, endsAt) {
 async function loadStudiosAdmin() {
   renderNewStudioForm();
   await renderStudiosAdmin();
+  await renderNewInstructorForm();
+  await renderInstructorsAdmin();
 }
 
 // renderNewStudioForm shows where the new studio will be opened, or hides the
@@ -1665,6 +1667,157 @@ function wireStudioCard(s) {
   });
 }
 
+// ---- Instructors (staff) ---------------------------------------------
+//
+// CreateInstructor/SetInstructorProfile are operator-only in
+// packages/wellness-domain/permissions.go (no frontOfHouse grant, unlike
+// CreateStudio) — but this FE's staff session submits as operator-equivalent
+// (same standing as clinic-app's CreateProvider precedent), so the form needs
+// no workplace-confinement gate: isStaff() already decides whether this tab
+// is reachable at all.
+
+// renderNewInstructorForm populates the optional studio picker with the
+// studios already loaded for this view, so opening the form never issues its
+// own fetch.
+async function renderNewInstructorForm() {
+  const select = document.getElementById("instructor-new-studio");
+  let studios = [];
+  try {
+    studios = await loadStudios();
+  } catch (e) {
+    // renderStudiosAdmin already surfaced the read failure; leave the picker
+    // showing only "— none —" rather than duplicating the toast.
+  }
+  select.innerHTML = '<option value="">— none —</option>';
+  for (const s of studios) {
+    const opt = document.createElement("option");
+    opt.value = s.studioKey;
+    opt.textContent = s.name || shortKey(s.studioKey);
+    select.appendChild(opt);
+  }
+}
+
+async function createInstructor() {
+  const nameEl = document.getElementById("instructor-new-name");
+  const studioEl = document.getElementById("instructor-new-studio");
+  const submit = document.getElementById("instructor-new-create");
+  const name = nameEl.value.trim();
+  const studio = studioEl.value;
+  if (!name) { toast("Enter an instructor name.", false); return; }
+  submit.disabled = true;
+  try {
+    const payload = { displayName: name };
+    const reads = [];
+    // studio is a class-(a) required read (require_live_typed) only when
+    // supplied — the DDL's own contract (ddls.go instructorVertexTypeDDL).
+    if (studio) {
+      payload.studio = studio;
+      reads.push(studio);
+    }
+    await opOrThrow(
+      { operationType: "CreateInstructor", class: "instructor", reads, payload },
+      "add the instructor",
+      false,
+    );
+    toast("Instructor added.", true);
+    nameEl.value = "";
+    studioEl.value = "";
+    document.getElementById("instructor-new-form").hidden = true;
+    instructorsCache = null;
+    setTimeout(renderInstructorsAdmin, 700);
+  } catch (e) {
+    toast(e.message, false);
+  } finally {
+    submit.disabled = false;
+  }
+}
+
+async function renderInstructorsAdmin() {
+  const grid = document.getElementById("instructors-grid");
+  const summary = document.getElementById("instructors-summary");
+  grid.innerHTML = "";
+  summary.textContent = "";
+  let instructors;
+  try {
+    instructors = await loadInstructors();
+    await loadStudios();
+  } catch (e) {
+    grid.innerHTML = '<div class="empty">' + esc(e.message) + "</div>";
+    return;
+  }
+  summary.textContent = instructors.length + " instructor" + (instructors.length === 1 ? "" : "s");
+  if (!instructors.length) {
+    grid.innerHTML = '<div class="empty">No instructors yet.</div>';
+    return;
+  }
+  grid.innerHTML = instructors.map(instructorCard).join("");
+  instructors.forEach(wireInstructorCard);
+}
+
+// instructorStudioName resolves a studioKey to its name from the
+// already-loaded studiosCache, falling back to the short key when the studio
+// isn't (yet) cached — mirrors studioCard's own shortKey fallback rather
+// than fetching.
+function instructorStudioName(studioKey) {
+  const s = (studiosCache || []).find((x) => x.studioKey === studioKey);
+  return s ? s.name || shortKey(s.studioKey) : shortKey(studioKey);
+}
+
+function instructorCard(i) {
+  const id = domId(i.instructorKey);
+  return (
+    '<div class="card">' +
+    '<div class="who">' + esc(i.displayName || "?") + "</div>" +
+    '<div class="meta">' + esc(shortKey(i.instructorKey)) +
+    (i.studioKey ? " · " + esc(instructorStudioName(i.studioKey)) : "") + "</div>" +
+    '<div class="card-actions"><button id="instr-edit-toggle-' + id + '" class="ghost">Edit</button></div>' +
+    '<div id="instr-edit-form-' + id + '" class="session-form" hidden>' +
+    '<div class="field"><label>Display name</label><input type="text" id="instr-edit-name-' + id + '" value="' + esc(i.displayName || "") + '" maxlength="120" /></div>' +
+    '<button id="instr-edit-save-' + id + '">Save</button>' +
+    "</div>" +
+    "</div>"
+  );
+}
+
+function wireInstructorCard(i) {
+  const id = domId(i.instructorKey);
+  const form = document.getElementById("instr-edit-form-" + id);
+  document.getElementById("instr-edit-toggle-" + id).addEventListener("click", () => {
+    form.hidden = !form.hidden;
+  });
+  document.getElementById("instr-edit-save-" + id).addEventListener("click", async () => {
+    const nameEl = document.getElementById("instr-edit-name-" + id);
+    const submit = document.getElementById("instr-edit-save-" + id);
+    const name = nameEl.value.trim();
+    if (!name) { toast("Enter an instructor name.", false); return; }
+    submit.disabled = true;
+    try {
+      // instructorKey is auto-filled from the instructor being edited, never
+      // user-entered (ddls.go FieldDescription: "auto-filled by the client
+      // from the instructor being viewed"). reads = [i.instructorKey]: the
+      // script's vertex_alive/class_of pair is a class-(a) required read.
+      await opOrThrow(
+        {
+          operationType: "SetInstructorProfile",
+          class: "instructor",
+          reads: [i.instructorKey],
+          payload: { instructorKey: i.instructorKey, displayName: name },
+        },
+        "update the instructor",
+        false,
+      );
+      toast("Instructor updated.", true);
+      form.hidden = true;
+      instructorsCache = null;
+      setTimeout(renderInstructorsAdmin, 700);
+    } catch (e) {
+      toast(e.message, false);
+    } finally {
+      submit.disabled = false;
+    }
+  });
+}
+
 // occurrenceCellKeys mirrors slotCellKeys across a CreateSessionSeries batch
 // — one occurrence's worth of cells per i in [0, occurrenceCount), each
 // offset by i*intervalDays days from the first occurrence's span. Kept
@@ -1800,6 +1953,16 @@ function init() {
     form.hidden = !form.hidden;
   });
   document.getElementById("studio-new-create").addEventListener("click", createStudio);
+  document.getElementById("instructors-refresh").addEventListener("click", () => {
+    instructorsCache = null;
+    renderInstructorsAdmin();
+  });
+  document.getElementById("instructor-new-toggle").addEventListener("click", async () => {
+    const form = document.getElementById("instructor-new-form");
+    form.hidden = !form.hidden;
+    if (!form.hidden) await renderNewInstructorForm();
+  });
+  document.getElementById("instructor-new-create").addEventListener("click", createInstructor);
   document.getElementById("sign-out").addEventListener("click", signOut);
 
   // Who signed in decides every derived affordance (which hats, which tabs),
