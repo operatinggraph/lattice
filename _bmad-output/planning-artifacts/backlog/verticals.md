@@ -22,6 +22,11 @@ the row is `🚧 blocked-on:` it (a missing *lens* is package work, built here).
 | **Five identity ceremony ops stay undiscoverable** | `CreateUnclaimedIdentity`, `RotateClaimKey`, `InitiateCredentialLink`, `CompleteCredentialLink`, `UnlinkCredential` carry stated `[no-op-meta:]` exemptions ([§8](../../implementation-artifacts/vertical-package-standard.md)). Consumer is 3 hardcoded in Facet (`cmd/facet/credentials.go`) + 2 in staff web apps/the CLI, not "Facet, all five" as first filed. | Cross-vertical | pkg | ★★ | M | 🚧 blocked-on: 3 new OpMetaSpec vocabulary primitives, no precedent to mirror — [lattice.md](lattice.md) |
 | **No way to demonstrate that Facet survives going offline** | Offline-first is the Edge's headline claim and nothing lets a viewer see it — the mirror only serves a disconnected world during a real NATS outage nobody can stage. Per [UX §6](../../implementation-artifacts/facet-app-ux.md) the honest offline story is a host↔NATS drop, not the browser going offline, so a truthful toggle disconnects the host engine: reads keep serving from bbolt, writes queue and drain on reconnect. | Cross-vertical | Sally + FE + platform | ★★ | M | 📋 designer · needs a fenced control surface |
 | **clinic-domain's README still under-documents 4 shipped op surfaces** | The README's Operations/Inventory never mention `BindProviderIdentity` (+ its `identityClaim`/`providerClaim` guard aspects) or `CreatePatient`'s `identityClaim`/`patientClaim` guard, and the appointment op docs omit `CreateAppointment`'s `leaseAppKey`/`site` params and `SetAppointmentStatus`'s `noShowFeeCents` + terminal-status finality rule (all confirmed live in `ddls.go`). | Clinic | pkg | ★ | S | 📋 ready |
+| **An assignee can never retire their own task** | `CompleteTask` grants only `operator` (orchestration-base `permissions.go:68`), so a signed lease leaves its "Sign lease" userTask `open` forever while the FE's `completeTask()` swallows the `AuthDenied` into a `console.warn`. Fix shape has precedent: a `scope: "self"` grant plus a script-side assignee guard (clinic-domain `permissions.go:107`). | Cross-vertical | pkg | ★★★ | S | 📋 ready |
+| **Portfolio pulse counts landlords, not units** | `summarizePortfolioPulse` folds `read_landlord_units` rows, but that lens fans a co-managed unit out to one row per manager by its own doc — the Riverside front desk reads "100% occupied (8/8 leased)" over 2 distinct units, and `available` is structurally 0 while `/api/listings` shows 8 available. | LoftSpace | FE | ★★ | S | 📋 ready |
+| **A leased unit with no manager falls out of every staff view** | Riverside Unit 1 carries no `manages` link, so its signed, rent-paying resident is absent from `read_landlord_units` / `read_landlord_lease_applications` and therefore from search, unit-applications, landlord applications and portfolio pulse — and nothing flags the unmanaged unit. | LoftSpace | pkg | ★★ | M | 📋 ready |
+| **The renewal machinery can't fire in the live demo** | The seeded tenancy runs to 2027-09-08 with `renewalOpensAt` 2027-07-10, so `leaseExpiry` never violates, no cycle opens, and the Renewals tab is empty for every hat — the goal-authored `renewalComplete` target is reachable only under the `leaseshortwindow` build tag. | LoftSpace | pkg | ★★ | S | 📋 ready |
+| **A tenant can see rent owed but can't pay it** | `/api/ledger` shows the resident $1,900 outstanding, yet `renderLedgerRecordForm` is gated on the landlord's `canRecord`, so no tenant-side payment exists — café already ships the resident-side counterpart ("Settle My Tab", `cafe-app/web/app.js:829`). | LoftSpace | FE + pkg | ★★ | M | 📋 ready |
 | **The café's Manage Menu panel AuthDenies its own staff** | The shipped staff tab cannot work: both menu-catalog ops grant `operator` only, while cafe-app submits as the signed-in actor. | Café | pkg | ★★ | S | ✅ ratified 2026-08-02 · grant `frontOfHouse`, workplace-confined in `menuItemDDLScript` (loftspace-ledger idiom; both helpers already in `tabDDLScript`) |
 
 **Explicitly descoped (ambitious-PO pass, 2026-07-09):** structured diagnosis/procedure coding (ICD/CPT),
@@ -42,10 +47,9 @@ dated run-logs live in git history. Rotate LoftSpace ↔ Clinic ↔ Café ↔ We
 **Wellness joined** 2026-07-09 (`cmd/wellness-app` shipped, live on :7802) — fold it into rotation; see
 [agents/vertical-po/SKILL.md](../../../agents/vertical-po/SKILL.md) §1.
 
-- **Rotation to date:** LoftSpace ×19, Clinic ×18, Café ×9, Wellness ×6.
+- **Rotation to date:** LoftSpace ×20, Clinic ×18, Café ×9, Wellness ×6.
 - **Method:** reuse the already-up shared stack (detect NATS :4222 / app :7788/:7799/:7801/:7802), drive the real flow via `/api/op` + the lens projections as the product owner, file scored items. All four apps exist + are exercisable live (`:7788` / `:7799` / `:7801` / `:7802`).
 - **Live-stack note:** a stale bootstrap JSON vs. a recreated Core KV was a recurring dev-loop trap (2026-07-03, 2026-07-04) that silently emptied reads; `make up` now self-heals it (`109f59a`, 2026-07-05) — re-verify empty-read reports as a real product bug first.
-- **2026-07-30:** LoftSpace — drove landlord, staff + 2 applicant hats live; an approved lease never leases the unit and the roster names nobody; filed 2.
 - **2026-07-31:** Clinic — drove patient, provider + front-desk hats live; no seeded visit ever completes and the provider hat can act on nothing; filed 4.
 - **2026-07-31:** Café — drove resident self-order/settle + front-desk hats live; the front desk composes nothing and one-bill has no reader; filed 4 (1 → lattice).
 - **2026-08-01:** Wellness — drove member, instructor + front-desk hats live; My Classes hides the studio, and there is no waitlist, recurrence or reminder; filed 5.
@@ -53,7 +57,8 @@ dated run-logs live in git history. Rotate LoftSpace ↔ Clinic ↔ Café ↔ We
 - **2026-08-01:** Clinic — drove patient, provider + front-desk hats live; a booked visit hides its site, no provider is bookable, past visits never close out; filed 4.
 - **2026-08-02:** Café — drove resident self-order/void/settle + front-desk hats live; two leases are permanently unsettleable, void + menu curation reach no UI; filed 5.
 - **2026-08-02:** Wellness — drove member, instructor + front-desk hats live; the ledger is dormant and the slot lock guards only the room; filed 3.
-- **Next:** LoftSpace.
+- **2026-08-02:** LoftSpace — drove tenant, landlord + front-desk hats live; pulse counts landlords not units, a done task never retires, an unmanaged unit vanishes; filed 5.
+- **Next:** Clinic.
 
 ## Done log — verticals (newest first)
 
