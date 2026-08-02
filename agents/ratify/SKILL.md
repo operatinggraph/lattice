@@ -29,7 +29,23 @@ The designs may have been authored by a different model/session. Re-verify, don'
   `docs/vendors.md`, never memory.
 - **Staleness**: the repo moves fast — re-grep "is this already built?", check the Done logs, check
   whether a dependency shipped since the design was written (a cleared gate strengthens ratification;
-  a shipped sibling may subsume it).
+  a shipped sibling may subsume it). **Re-date every "nothing uses X yet" / "no consumer exercises Y"
+  claim** — those are the most perishable statements a design contains and they *read* like permanent
+  scoping decisions: grep the subject, then `git log -S` the hits to date them against the doc.
+- **Is the stated blocker the BINDING constraint?** A `🚧` blocker can be perfectly TRUE and still gate
+  nothing. Ask "if this vanished tomorrow, would the item ship?" — if no, find the real gate and re-file
+  against it; if yes but it still wouldn't be *finished*, that's two rows (a ready fire + a
+  `🗄️ shelved (revive: …)` one). **Environment blockers are the prime suspects** — unarguably true, so
+  nobody re-examines what sits behind them. And when a doc names a trigger for freezing a contract,
+  check the trigger tests the property being frozen (a vocabulary freeze needs vocabulary evidence).
+- **Contract-edit state is a claim, not a fact.** A design saying its edit is "staged UNCOMMITTED"
+  may be stale — Andrew commits contract edits himself, sometimes batched. `git log -S'<new symbol>'
+  -- docs/contracts/` before presenting. **If it landed, grep `internal/` + `packages/` for an
+  implementation**: a committed clause with no runtime behind it is **fail-open** (the contract asserts
+  behavior in the present tense; an author building to it is silently ignored), which makes the
+  implementing increment top-priority, not a footnote. Grep `packages/` for premature adopters too — one
+  turns it from a scheduling question into a live bug. If the build genuinely can't happen soon, the
+  answer is a transitional note on the clause, never silence.
 - **Banner-vs-build**: when a design's DEMAND cites shipped code, check that code against the
   ratification banner of the design that shipped it — a demand grounded on a banner-withdrawn shape is
   a SYMPTOM (the hard-delete/hasBooking case). Read banners FIRST; they supersede bodies.
