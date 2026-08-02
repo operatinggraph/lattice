@@ -178,6 +178,19 @@ function seatKeys(sessionKey, capacity) {
   return keys;
 }
 
+// waitlistSlotKeys enumerates every waitlist-slot key JoinWaitlist's
+// claim_first_free_waitlist_slot (wellness-domain ddls.go) might read.
+// Unlike seatKeys, there is no session-specific capacity to bound the walk —
+// the waitlist has no seat-count ceiling of its own — so this always covers
+// the package's fixed MAX_WAITLIST_SIZE (200), the widest range the script
+// can possibly touch before it fails WaitlistFull.
+const MAX_WAITLIST_SIZE = 200;
+function waitlistSlotKeys(sessionKey) {
+  const keys = [];
+  for (let n = 1; n <= MAX_WAITLIST_SIZE; n++) keys.push(sessionKey + ".wl" + n);
+  return keys;
+}
+
 // ---- session (whoami + hat gating) ---------------------------------
 
 // whoamiRetryBackoffsMs bounds loadWhoami's retry: a transient failure at
@@ -500,39 +513,46 @@ async function renderSchedule() {
     return;
   }
   const leaseAppKey = await ownLeaseAppKey();
-  // The signed-in member's own live bookings — CreateBooking's DoubleBooked
-  // guard (ddls.go) stays keyed alive until CancelBooking releases it, and a
-  // tombstoned booking drops out of this same GET (computeBookings skips it),
-  // so "appears here" and "guard is alive" agree.
-  let bookedSessionKeys = new Set();
+  // The signed-in member's own live bookings, keyed by status — CreateBooking
+  // / JoinWaitlist's shared DoubleBooked guard (ddls.go) stays keyed alive
+  // until CancelBooking releases it, and a tombstoned booking drops out of
+  // this same GET (computeBookings skips it), so "appears here" and "guard
+  // is alive" agree. The status (not just presence) is what lets the card
+  // tell "already booked" from "already waitlisted".
+  let myStatusBySession = new Map();
   try {
     const r = await appGet("/api/bookings");
-    bookedSessionKeys = new Set((r.bookings || []).map((b) => b.sessionKey));
+    (r.bookings || []).forEach((b) => myStatusBySession.set(b.sessionKey, b.status));
   } catch (_) {
-    // Affordance only — worst case the button offers a class CreateBooking
-    // will still correctly refuse.
+    // Affordance only — worst case the button offers a class CreateBooking /
+    // JoinWaitlist will still correctly refuse.
   }
-  grid.innerHTML = scheduleGroups(sessions, bookedSessionKeys);
+  grid.innerHTML = scheduleGroups(sessions, myStatusBySession);
   sessions.forEach((se) => {
-    const bookBtn = document.getElementById("book-" + domId(se.sessionKey));
-    if (!bookBtn) return;
-    bookBtn.addEventListener("click", async () => {
-      bookBtn.disabled = true;
+    const btn = document.getElementById("book-" + domId(se.sessionKey));
+    if (!btn) return;
+    const action = btn.dataset.action;
+    btn.addEventListener("click", async () => {
+      btn.disabled = true;
       try {
-        // A member books for THEMSELVES — the booker is the signed-in
-        // identity, and nothing in the page can name anyone else.
+        // A member books/waitlists for THEMSELVES — the booker is the
+        // signed-in identity, and nothing in the page can name anyone else.
         const bookerKey = identityKey();
         const payload = { session: se.sessionKey, booker: bookerKey };
         if (leaseAppKey) payload.leaseAppKey = leaseAppKey;
         // Resident-rate lookup (leaseapp + .tenancy + applicationFor link) is
         // (d)-declared optionalReads — absence just falls through to the
-        // standard rate (ddls.go, script-read-posture-design.md §13).
-        const optionalReads = seatKeys(se.sessionKey, se.capacity);
-        // The per-(session, booker) double-book guard (ddls.go). It MUST be
-        // declared, not merely relied on via CreateOnly-at-commit like the
-        // seats: the script reads its current state to tell absent (mint) from
-        // tombstoned (OCC-revive a re-book) from alive (clean DoubleBooked
-        // reject). Absence is the common case (first book), hence optionalReads.
+        // standard rate (ddls.go, script-read-posture-design.md §13). Both
+        // ops share prepare_booking_common, so this read-set is identical;
+        // only the first-free-slot claim dimension differs (seat vs. wl<n>).
+        const optionalReads = action === "waitlist" ? waitlistSlotKeys(se.sessionKey) : seatKeys(se.sessionKey, se.capacity);
+        // The per-(session, booker) double-book guard (ddls.go), shared by
+        // both ops — a booker may hold at most one live claim per session,
+        // booked or waitlisted. It MUST be declared, not merely relied on via
+        // CreateOnly-at-commit like the seat/slot: the script reads its
+        // current state to tell absent (mint) from tombstoned (OCC-revive a
+        // re-book) from alive (clean DoubleBooked reject). Absence is the
+        // common case (first book/join), hence optionalReads.
         optionalReads.push(se.sessionKey + ".bkr" + idOf(bookerKey));
         if (leaseAppKey) {
           optionalReads.push(
@@ -542,17 +562,18 @@ async function renderSchedule() {
           );
         }
         // booker is an (a)-declared required read (require_live_typed, ddls.go)
-        // — CreateBooking fails UnknownEndpoint without it.
+        // — both ops fail UnknownEndpoint without it.
+        const operationType = action === "waitlist" ? "JoinWaitlist" : "CreateBooking";
         await opOrThrow(
-          { operationType: "CreateBooking", class: "booking", reads: [se.sessionKey, se.sessionKey + ".schedule", bookerKey], optionalReads, payload },
-          "book the class",
+          { operationType, class: "booking", reads: [se.sessionKey, se.sessionKey + ".schedule", bookerKey], optionalReads, payload },
+          action === "waitlist" ? "join the waitlist" : "book the class",
           true,
         );
-        toast("Booked.", true);
+        toast(action === "waitlist" ? "Added to the waitlist." : "Booked.", true);
         setTimeout(renderSchedule, 700);
       } catch (e) {
         toast(e.message, false);
-        bookBtn.disabled = false;
+        btn.disabled = false;
       }
     });
   });
@@ -565,7 +586,7 @@ function domId(key) {
 // scheduleGroups breaks the (already day-sorted) upcoming sessions into local
 // calendar-day sections, a header per day, so the grid reads as a schedule
 // rather than one flat pile of cards.
-function scheduleGroups(sessions, bookedSessionKeys) {
+function scheduleGroups(sessions, myStatusBySession) {
   let html = "";
   let lastDay = null;
   for (const se of sessions) {
@@ -574,23 +595,38 @@ function scheduleGroups(sessions, bookedSessionKeys) {
       html += '<div class="day-header">' + esc(fmtDay(se.startsAt)) + "</div>";
       lastDay = day;
     }
-    html += scheduleCard(se, bookedSessionKeys);
+    html += scheduleCard(se, myStatusBySession);
   }
   return html;
 }
 
 // scheduleCard renders one class on the resident-facing Schedule grid. The
-// Book control is disabled for exactly the reasons CreateBooking would refuse
-// it — started (SessionInPast), full (SessionFull), or already booked
-// (DoubleBooked) — mirroring renderBookMember's started/full gate below so
-// the button is never offered only to fail closed.
-function scheduleCard(se, bookedSessionKeys) {
+// control is disabled for exactly the reasons CreateBooking/JoinWaitlist
+// would refuse it — started (SessionInPast), already booked or already
+// waitlisted (DoubleBooked, shared guard) — mirroring renderBookMember's
+// started/full gate below so it is never offered only to fail closed. A full
+// class with no existing claim offers "Join waitlist" instead of a dead-end
+// disabled "Full" — the seat freed by any cancellation promotes the lowest
+// waitlistSlot automatically (CancelBooking, ddls.go), never first-come.
+function scheduleCard(se, myStatusBySession) {
   const id = domId(se.sessionKey);
   const full = se.bookedCount >= se.capacity;
   const started = !!(se.startsAt && new Date(se.startsAt).getTime() <= Date.now());
-  const alreadyBooked = !!(bookedSessionKeys && bookedSessionKeys.has(se.sessionKey));
-  const disabled = full || started || alreadyBooked;
-  const label = alreadyBooked ? "Booked" : started ? "Started" : full ? "Full" : "Book";
+  const myStatus = myStatusBySession && myStatusBySession.get(se.sessionKey);
+  const alreadyBooked = myStatus === "booked";
+  const alreadyWaitlisted = myStatus === "waitlisted";
+  let action, label, disabled;
+  if (alreadyBooked) {
+    action = "book"; label = "Booked"; disabled = true;
+  } else if (alreadyWaitlisted) {
+    action = "waitlist"; label = "Waitlisted"; disabled = true;
+  } else if (started) {
+    action = "book"; label = "Started"; disabled = true;
+  } else if (full) {
+    action = "waitlist"; label = "Join waitlist"; disabled = false;
+  } else {
+    action = "book"; label = "Book"; disabled = false;
+  }
   const led = se.instructorName ? '<div class="meta">with ' + esc(se.instructorName) + "</div>" : "";
   return (
     '<div class="card">' +
@@ -600,7 +636,7 @@ function scheduleCard(se, bookedSessionKeys) {
     led +
     '<div class="meta">' + esc(fmtTime(se.startsAt) + " – " + fmtTime(se.endsAt)) + "</div>" +
     '<div class="field-row">' +
-    '<button id="book-' + id + '"' + (disabled ? " disabled" : "") + ">" + label + "</button>" +
+    '<button id="book-' + id + '" data-action="' + action + '"' + (disabled ? " disabled" : "") + ">" + label + "</button>" +
     "</div>" +
     "</div>"
   );
@@ -645,12 +681,13 @@ async function renderMyClasses() {
         // The self-cancel guard needs the bookedBy link as a (d)-declared
         // optionalReads — the script checks it names THIS booker (ddls.go).
         const optionalReads = ["lnk.booking." + idOf(b.bookingKey) + ".bookedBy.identity." + idOf(identityKey())];
+        const wasWaitlisted = b.status === "waitlisted";
         await opOrThrow(
           { operationType: "CancelBooking", class: "booking", reads: [b.bookingKey, b.bookingKey + ".status", b.sessionKey + ".schedule", forSessionLnk], optionalReads, payload: { bookingKey: b.bookingKey, session: b.sessionKey } },
-          "cancel the booking",
+          wasWaitlisted ? "leave the waitlist" : "cancel the booking",
           true,
         );
-        toast("Booking cancelled.", true);
+        toast(wasWaitlisted ? "Removed from the waitlist." : "Booking cancelled.", true);
         setTimeout(renderMyClasses, 700);
       } catch (e) {
         toast(e.message, false);
@@ -668,22 +705,29 @@ async function renderMyClasses() {
 //
 // Cancel is disabled once the class has begun or attendance is recorded —
 // CancelBooking (wellness-domain ddls.go) rejects both server-side
-// (SessionStarted / AttendanceRecorded), so a member no longer sees an
-// offer the op will refuse.
+// (SessionStarted / AttendanceRecorded) for a booked OR a waitlisted booking
+// alike (the SessionStarted check runs before the booked/waitlisted branch),
+// so a member no longer sees an offer the op will refuse — including "leave
+// the waitlist" once the class they never got promoted into has begun.
 function myClassCard(b) {
   const id = domId(b.bookingKey);
   const cancelled = !b.sessionName;
+  const waitlisted = b.status === "waitlisted";
   const mark = ATTENDANCE_MARKS[b.status];
   const started = !cancelled && b.startsAt && new Date(b.startsAt).getTime() <= Date.now();
   const cancelDisabled = cancelled || !!mark || started;
+  const waitlistBadge = waitlisted && b.waitlistSlot != null
+    ? '<span class="badge open">Waitlisted — #' + Math.trunc(b.waitlistSlot) + "</span>"
+    : "";
   return (
     '<div class="card">' +
     '<span class="badge ' + (b.rate === "resident" ? "posted" : "open") + '">' + esc(b.rate || "standard") + "</span>" +
+    waitlistBadge +
     (mark ? '<span class="badge ' + mark.badge + '">' + mark.label + "</span>" : "") +
     '<div class="who">' + (cancelled ? "Class cancelled" : esc(b.sessionName)) + "</div>" +
     (cancelled ? "" : '<div class="meta">' + esc(b.studioName || shortKey(b.studioKey)) + "</div>") +
     '<div class="meta">' + (cancelled ? "The studio called off this class." : esc(fmtRange(b.startsAt, b.endsAt))) + "</div>" +
-    '<div class="card-actions"><button id="mycancel-' + id + '" class="danger"' + (cancelDisabled ? " disabled" : "") + ">Cancel</button></div>" +
+    '<div class="card-actions"><button id="mycancel-' + id + '" class="danger"' + (cancelDisabled ? " disabled" : "") + ">" + (waitlisted ? "Leave waitlist" : "Cancel") + "</button></div>" +
     "</div>"
   );
 }
@@ -792,7 +836,13 @@ async function renderRoster() {
   const isLeader = !!(se && mine && se.instructorKey === mine);
   const started = !!(se && se.startsAt && new Date(se.startsAt).getTime() <= Date.now());
 
-  summary.textContent = bookings.length + " booked";
+  // bookings.length counts every live row on this session, booked and
+  // waitlisted alike — split them so the summary and staff seat gate below
+  // don't read a waitlist entry as an occupied seat (waitlisted holds no
+  // seat cell, wellness-domain ddls.go).
+  const bookedCount = bookings.filter((b) => b.status !== "waitlisted").length;
+  const waitlistedCount = bookings.length - bookedCount;
+  summary.textContent = bookedCount + " booked" + (waitlistedCount ? " · " + waitlistedCount + " waitlisted" : "");
   // Release seat mirrors CancelBooking's own SessionStarted guard
   // (wellness-domain ddls.go) — once the class has begun, attendance is the
   // record of what happened and a seat is no longer front-desk-releasable.
@@ -839,7 +889,11 @@ async function renderBookMember(se, bookings, generation) {
   const form = document.getElementById("roster-book");
   const select = document.getElementById("roster-book-member");
   const started = !!(se && se.startsAt && new Date(se.startsAt).getTime() <= Date.now());
-  const full = !!(se && se.capacity && bookings.length >= se.capacity);
+  // se.bookedCount (wellnessSessions + countBookingsBySession, sessions.go)
+  // already excludes waitlisted rows — bookings.length would not, and would
+  // hide this control the moment a full class's waitlist alone reached
+  // capacity even with real seats still open.
+  const full = !!(se && se.capacity && se.bookedCount >= se.capacity);
   if (!isStaff() || !se || started || full) {
     form.hidden = true;
     return;
@@ -1271,9 +1325,14 @@ const ATTENDANCE_MARKS = {
 
 function rosterCard(b, markable, cancellable) {
   const mark = ATTENDANCE_MARKS[b.status];
+  const waitlisted = b.status === "waitlisted";
+  const waitlistBadge = waitlisted && b.waitlistSlot != null
+    ? '<span class="badge open">Waitlisted — #' + Math.trunc(b.waitlistSlot) + "</span>"
+    : "";
   return (
     '<div class="card">' +
     '<span class="badge ' + (b.rate === "resident" ? "posted" : "open") + '">' + esc(b.rate || "standard") + "</span>" +
+    waitlistBadge +
     (mark ? '<span class="badge ' + mark.badge + '">' + mark.label + "</span>" : "") +
     '<div class="who">' + esc(nameForIdentity(idOf(b.bookerKey))) + "</div>" +
     (markable ? attendanceActions(b) : "") +
@@ -1282,13 +1341,13 @@ function rosterCard(b, markable, cancellable) {
   );
 }
 
-// seatCancelAction is the front desk's per-seat release. It is its own row
-// rather than a third button beside Attended / No-show: those two correct each
-// other and this one removes the booking they are about, so pairing them would
-// put a destructive control one mis-click from a corrective one.
+// seatCancelAction is the front desk's per-row release — a seat for a booked
+// row, a waitlist slot for a waitlisted one (CancelBooking dispatches on the
+// booking's own stored status either way, ddls.go).
 function seatCancelAction(b) {
+  const label = b.status === "waitlisted" ? "Remove from waitlist" : "Release seat";
   return '<div class="card-actions"><button class="danger" data-cancel-seat="' +
-    esc(b.bookingKey) + '">Release seat</button></div>';
+    esc(b.bookingKey) + '">' + label + "</button></div>";
 }
 
 // attendanceActions renders the two marks as a pair, with the one already

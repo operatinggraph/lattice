@@ -16,32 +16,36 @@ import (
 
 // bookingProjection is one row of the wellness-domain `wellnessBookings` lens.
 type bookingProjection struct {
-	BookingKey  string `json:"bookingKey"`
-	Status      string `json:"status"`
-	Rate        string `json:"rate"`
-	SessionKey  string `json:"sessionKey"`
-	SessionName string `json:"sessionName"`
-	StartsAt    string `json:"startsAt"`
-	EndsAt      string `json:"endsAt"`
-	StudioKey   string `json:"studioKey"`
-	StudioName  string `json:"studioName"`
-	BookerKey   string `json:"bookerKey"`
+	BookingKey   string   `json:"bookingKey"`
+	Status       string   `json:"status"`
+	Rate         string   `json:"rate"`
+	WaitlistSlot *float64 `json:"waitlistSlot"`
+	SessionKey   string   `json:"sessionKey"`
+	SessionName  string   `json:"sessionName"`
+	StartsAt     string   `json:"startsAt"`
+	EndsAt       string   `json:"endsAt"`
+	StudioKey    string   `json:"studioKey"`
+	StudioName   string   `json:"studioName"`
+	BookerKey    string   `json:"bookerKey"`
 }
 
 // bookingRow is the roster / my-classes row a view renders. Status carries
-// booked | attended | noShow so the roster can show who the instructor has
-// already marked, and offer the correcting mark for who they have not.
+// booked | waitlisted | attended | noShow so the roster can show who the
+// instructor has already marked, and My Classes can show a waitlisted
+// booker's place in line. WaitlistSlot is only set when Status is
+// "waitlisted".
 type bookingRow struct {
-	BookingKey  string `json:"bookingKey"`
-	Status      string `json:"status"`
-	Rate        string `json:"rate"`
-	SessionKey  string `json:"sessionKey"`
-	SessionName string `json:"sessionName"`
-	StartsAt    string `json:"startsAt"`
-	EndsAt      string `json:"endsAt"`
-	StudioKey   string `json:"studioKey"`
-	StudioName  string `json:"studioName"`
-	BookerKey   string `json:"bookerKey"`
+	BookingKey   string   `json:"bookingKey"`
+	Status       string   `json:"status"`
+	Rate         string   `json:"rate"`
+	WaitlistSlot *float64 `json:"waitlistSlot"`
+	SessionKey   string   `json:"sessionKey"`
+	SessionName  string   `json:"sessionName"`
+	StartsAt     string   `json:"startsAt"`
+	EndsAt       string   `json:"endsAt"`
+	StudioKey    string   `json:"studioKey"`
+	StudioName   string   `json:"studioName"`
+	BookerKey    string   `json:"bookerKey"`
 }
 
 // computeBookings decodes every wellnessBookings row, optionally filtered to

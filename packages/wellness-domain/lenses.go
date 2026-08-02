@@ -334,6 +334,7 @@ RETURN
   b.key AS bookingKey,
   b.status.data.value AS status,
   b.status.data.rate AS rate,
+  b.status.data.waitlistSlot AS waitlistSlot,
   se.key AS sessionKey,
   se.schedule.data.name AS sessionName,
   se.schedule.data.startsAt AS startsAt,

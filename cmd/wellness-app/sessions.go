@@ -44,12 +44,11 @@ type sessionRow struct {
 	BookedCount    int    `json:"bookedCount"`
 }
 
-// computeSessions decodes every wellnessSessions row, joins each to its live
-// booking count (from bookingKeys, one entry per live booking's sessionKey —
-// CancelBooking's tombstone drops the booking row entirely, so a plain count
-// of live rows is correct with no status filter needed), and sorts by
-// startsAt for a chronological schedule grid. A row that fails to decode or
-// carries no sessionKey (a tombstoned projection entry) is skipped.
+// computeSessions decodes every wellnessSessions row, joins each to its
+// booked seat count (from bookedCounts, which already excludes waitlisted
+// rows — see countBookingsBySession), and sorts by startsAt for a
+// chronological schedule grid. A row that fails to decode or carries no
+// sessionKey (a tombstoned projection entry) is skipped.
 func computeSessions(keys []string, get kvGetter, bookedCounts map[string]int) []sessionRow {
 	rows := make([]sessionRow, 0, len(keys))
 	for _, k := range keys {
@@ -87,9 +86,13 @@ func computeSessions(keys []string, get kvGetter, bookedCounts map[string]int) [
 	return rows
 }
 
-// countBookingsBySession tallies live wellnessBookings rows per sessionKey. A
-// row that fails to decode or carries no bookingKey (a tombstoned projection
-// entry) is skipped.
+// countBookingsBySession tallies booked (occupying-a-seat) wellnessBookings
+// rows per sessionKey. A waitlisted booking holds no seat cell — it is a
+// claim on a waitlist slot, a disjoint dimension entirely (wellness-domain
+// ddls.go) — so it is deliberately excluded here; counting it would make the
+// schedule grid report a session as fuller than its seats actually are the
+// moment anyone joins the waitlist. A row that fails to decode or carries no
+// bookingKey (a tombstoned projection entry) is skipped.
 func countBookingsBySession(keys []string, get kvGetter) map[string]int {
 	counts := make(map[string]int)
 	for _, k := range keys {
@@ -99,6 +102,9 @@ func countBookingsBySession(keys []string, get kvGetter) map[string]int {
 		}
 		var p bookingProjection
 		if json.Unmarshal(raw, &p) != nil || p.BookingKey == "" {
+			continue
+		}
+		if p.Status == "waitlisted" {
 			continue
 		}
 		counts[p.SessionKey]++
