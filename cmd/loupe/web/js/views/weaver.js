@@ -23,15 +23,16 @@ import {
   gapStateLine, markLine, artifactLine,
   checksSummary, opCoverageNote, interferenceHeadline, rejectedIssueLabel,
 } from "../logic/weaver.js";
+import { enterAuthor } from "./weaverauthor.js";
 
 const SVG_NS = "http://www.w3.org/2000/svg";
 
 const state = { loaded: false, verifyLoaded: false, arg: "" };
 
-// "#/weaver/verify" is a reserved top-level route (F25.2), checked before the
-// generic single-segment targetId branch — a target literally named "verify"
-// would collide, an accepted convention the same way "targets" already is on
-// the API side.
+// "#/weaver/verify" and "#/weaver/author" are reserved top-level routes
+// (F25.2, F25.3a), checked before the generic single-segment targetId
+// branch — a target literally named "verify" or "author" would collide, an
+// accepted convention the same way "targets" already is on the API side.
 function enter(route) {
   const arg = (route && route.arg) || "";
   state.arg = arg;
@@ -39,6 +40,11 @@ function enter(route) {
   if (parts.length === 1 && parts[0] === "verify") {
     showOnly("weaver-verify");
     loadVerify();
+    return;
+  }
+  if (parts.length === 1 && parts[0] === "author") {
+    showOnly("weaver-author");
+    enterAuthor();
     return;
   }
   if (parts.length >= 2) { showOnly("weaver-entity"); loadEntity(parts[0], parts[1]); return; }
@@ -50,7 +56,7 @@ function enter(route) {
 }
 
 function showOnly(id) {
-  ["weaver-list", "weaver-target", "weaver-entity", "weaver-verify"].forEach((s) => {
+  ["weaver-list", "weaver-target", "weaver-entity", "weaver-verify", "weaver-author"].forEach((s) => {
     $("#" + s).classList.toggle("visible", s === id);
   });
 }
@@ -59,6 +65,7 @@ function init() {
   $("#weaver-reload").addEventListener("click", () => {
     const parts = state.arg ? state.arg.split("/") : [];
     if (parts.length === 1 && parts[0] === "verify") loadVerify();
+    else if (parts.length === 1 && parts[0] === "author") return; // local draft — nothing to re-fetch
     else if (parts.length >= 2) loadEntity(parts[0], parts[1]);
     else if (parts.length === 1) loadTarget(parts[0]);
     else loadRoster();

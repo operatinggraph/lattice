@@ -1292,8 +1292,11 @@ body.demo-mode [data-demo-hide] { display: none !important; }
    badge vocabulary (.wchip), scoped rather than global so it cannot collide
    with the older per-view chip classes above.
    --------------------------------------------------------------------------- */
-#weaver-list, #weaver-target, #weaver-entity { display: none; }
-#weaver-list.visible, #weaver-target.visible, #weaver-entity.visible { display: block; }
+/* weaver-verify (F25.2) and weaver-author (F25.3a) belong in this hide/show
+   set too — a div left off it renders unconditionally once populated, even
+   while a sibling mode is active (the bug this full listing avoids). */
+#weaver-list, #weaver-target, #weaver-entity, #weaver-verify, #weaver-author { display: none; }
+#weaver-list.visible, #weaver-target.visible, #weaver-entity.visible, #weaver-verify.visible, #weaver-author.visible { display: block; }
 
 .wchip {
   font-size: 10px; padding: 1px 7px; border-radius: 10px;
@@ -1345,3 +1348,16 @@ body.demo-mode [data-demo-hide] { display: none !important; }
 .weaver-policy-name { font-size: 10px; text-transform: uppercase; letter-spacing: 0.5px; color: var(--text-dim); }
 .weaver-policy-body { font-size: 11px; margin: 4px 0 0; white-space: pre-wrap; word-break: break-word; }
 .comp-maplink { font-size: 10px; color: var(--accent); white-space: nowrap; }
+
+/* F25.3a — Author: the draft target/lens form. Reuses .op-field/.op-fields
+   (op.js's schema-driven form) for individual inputs; these classes are only
+   the layout around them. */
+.author-row { flex-direction: row; flex-wrap: wrap; }
+.author-row .op-field { flex: 1 1 180px; }
+.author-gap-card { margin-bottom: 12px; }
+.author-remove { margin-left: auto; font-size: 11px; }
+.author-add-row { display: flex; gap: 8px; margin-top: 8px; }
+.author-add-row input { flex: 1; }
+.author-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+.author-actions .op-field { flex: 1 1 260px; }
+.author-validation-row { display: flex; gap: 8px; margin-bottom: 8px; }
