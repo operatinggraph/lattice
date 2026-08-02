@@ -185,8 +185,14 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 				// declares the resident's own lease anchor — a caller naming
 				// someone else's tab simply won't have the matching composite
 				// key hydrated, and the script's kv.Read fails it closed.
+				// The chargedTo link is the class-(d) dedup read for Settle's
+				// own backfill (ddls.go) — it declares the SAME lease anchor
+				// as the ownership probe above, since the descriptor client's
+				// self path only ever settles its own tab, so `{me.leaseapp}`
+				// is that tab's real lease.
 				OptionalReads: []string{
 					"lnk.leaseapp.{me.leaseapp:id}.applicationFor.identity.{actor:id}",
+					"lnk.tab.{payload.tabKey:id}.chargedTo.leaseapp.{me.leaseapp:id}",
 				},
 			},
 		},

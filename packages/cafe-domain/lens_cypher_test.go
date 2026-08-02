@@ -275,6 +275,32 @@ func TestCafeTabSettlement_OpenForAloneDoesNotAnchor(t *testing.T) {
 		"chargedTo is the settlement anchor; openFor must not stand in for it")
 }
 
+// TestCafeTabSettlement_OpenTabWithoutChargedToStillAnchors is the mirror of
+// OpenForAloneDoesNotAnchor for the one case openFor legitimately DOES
+// anchor: a tab that is still OPEN and predates the chargedTo write
+// entirely. Without this fallback such a tab has no row at all — invisible
+// to every reader, its lease's open-tab guard claimed forever. Settle
+// backfills chargedTo unconditionally (ddls.go), so this state is transient:
+// the row exists just long enough for a surface to find the tab and close it.
+func TestCafeTabSettlement_OpenTabWithoutChargedToStillAnchors(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newCdFixture(t)
+	f.vtx(t, "predatestab", "tab")
+	f.aspect(t, "predatestab", "status", "tabStatus", map[string]any{
+		"value": "open", "totalCents": 650.0, "openedAt": "2026-07-20T10:00:00Z"})
+	f.vtx(t, "predatestab_lease", "leaseapp")
+	f.edge(t, "openFor", "predatestab", "predatestab_lease")
+
+	v := f.valuesAt(t, "predatestab")
+	require.Equal(t, "vtx.leaseapp."+f.ids["predatestab_lease"], v["leaseAppKey"],
+		"openFor must resolve the lease while the tab is still open and chargedTo is absent")
+	require.Equal(t, false, v["missing_account"], "still open — never violates")
+	require.Equal(t, false, v["missing_charge"], "still open — never violates")
+	require.Equal(t, false, v["violating"])
+}
+
 // project runs an UNANCHORED spec (cafeLeaseWorkplaces takes no $actorKey,
 // unlike the tab-anchored convergence lens projectAt drives).
 func (f *cdFixture) project(t *testing.T, spec string) []ruleengine.ProjectionResult {

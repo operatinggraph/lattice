@@ -219,6 +219,34 @@ func seedLink(t *testing.T, ctx context.Context, conn *substrate.Conn, key, sour
 	}
 }
 
+// seedAspect writes an aspect document directly, the shape ddls.go's
+// make_aspect builds — used to construct a vertex's state in one write
+// rather than through the op that would normally produce it (a legacy
+// pre-existing shape, e.g., a tab predating a since-added link write).
+func seedAspect(t *testing.T, ctx context.Context, conn *substrate.Conn, vertexKey, localName, class string, data map[string]any) {
+	t.Helper()
+	doc := map[string]any{
+		"class": class, "isDeleted": false,
+		"vertexKey": vertexKey, "localName": localName, "data": data,
+	}
+	b, _ := json.Marshal(doc)
+	key := vertexKey + "." + localName
+	if _, err := conn.KVPut(ctx, testutil.HarnessCoreBucket, key, b); err != nil {
+		t.Fatalf("seed aspect %s: %v", key, err)
+	}
+}
+
+// chargedToOptionalRead returns Settle's class-(d) dedup read for its own
+// chargedTo backfill (ddls.go): every Settle submission must declare whether
+// the tab already carries the link, or the script cannot tell "declared
+// absent" from "undeclared" and a tab that already has one fails CreateOnly
+// when Settle tries to write it again.
+func chargedToOptionalRead(tabKey, leaseKey string) string {
+	tabID := strings.TrimPrefix(tabKey, "vtx.tab.")
+	leaseID := strings.TrimPrefix(leaseKey, "vtx.leaseapp.")
+	return "lnk.tab." + tabID + ".chargedTo.leaseapp." + leaseID
+}
+
 // tombstoneLink soft-deletes a link the way an unwiring op does — the document
 // stays in Core KV with isDeleted:true. This is the case a `kv.Read(k) == None`
 // ownership guard silently passes, because a tombstone hydrates as a DOCUMENT,
@@ -538,7 +566,10 @@ func TestVoidCharge_RejectsAfterSettle(t *testing.T) {
 		SubmittedAt:   "2026-07-22T13:00:00Z",
 		Class:         "tab",
 		Payload:       json.RawMessage(`{"tabKey":"` + tabKey + `"}`),
-		ContextHint:   &processor.ContextHint{Reads: []string{tabKey, tabKey + ".status"}},
+		ContextHint: &processor.ContextHint{
+			Reads:         []string{tabKey, tabKey + ".status"},
+			OptionalReads: []string{chargedToOptionalRead(tabKey, leaseKey)},
+		},
 	}
 	testutil.PublishOp(t, conn, settleEnv)
 	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
@@ -632,7 +663,10 @@ func TestSettle_ClosesTabFreezesTotal(t *testing.T) {
 		SubmittedAt:   "2026-07-07T13:00:00Z",
 		Class:         "tab",
 		Payload:       json.RawMessage(`{"tabKey":"` + tabKey + `"}`),
-		ContextHint:   &processor.ContextHint{Reads: []string{tabKey, tabKey + ".status"}},
+		ContextHint: &processor.ContextHint{
+			Reads:         []string{tabKey, tabKey + ".status"},
+			OptionalReads: []string{chargedToOptionalRead(tabKey, leaseKey)},
+		},
 	}
 	testutil.PublishOp(t, conn, settleEnv)
 	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
@@ -668,6 +702,62 @@ func TestSettle_ClosesTabFreezesTotal(t *testing.T) {
 	}
 }
 
+// TestSettle_BackfillsChargedToWhenMissing proves Settle heals a tab that
+// predates the chargedTo write entirely — seeded directly rather than
+// through OpenTab, the exact shape a historical write-path gap leaves
+// behind: an open tab with only the transient openFor hop wired. Without the
+// backfill, such a tab has no lens row to find its tabKey through
+// (cafeTabSettlement's required chargedTo match) and its lease's
+// .cafeOpenTab guard is claimed forever — permanently unsettleable, and the
+// next OpenTab for that lease rejects OpenTabAlreadyExists with no way out.
+func TestSettle_BackfillsChargedToWhenMissing(t *testing.T) {
+	ctx, conn := setupDomainEnv(t)
+	cp, cons := newDomainPipeline(t, ctx, conn, "backfillchargedto")
+
+	leaseKey := seedLease(t, ctx, conn, "BBCAFEDMNBKFLLEASEHJ")
+	tabKey := "vtx.tab.BBCAFEDMNBKFLTABHJKM"
+	tabID := tabKey[len("vtx.tab."):]
+	leaseID := leaseKey[len("vtx.leaseapp."):]
+
+	seedVertex(t, ctx, conn, tabKey, "tab", map[string]any{})
+	seedAspect(t, ctx, conn, tabKey, "status", "tabStatus", map[string]any{
+		"value": "open", "totalCents": 650.0, "itemsMemo": "", "openedAt": "2026-07-20T10:00:00Z", "leaseAppKey": leaseKey,
+	})
+	seedLink(t, ctx, conn, "lnk.tab."+tabID+".openFor.leaseapp."+leaseID, tabKey, leaseKey, "openFor", "openFor")
+	seedAspect(t, ctx, conn, leaseKey, "cafeOpenTab", "cafeOpenTabGuard", map[string]any{"tabKey": tabKey})
+
+	chargedToKey := "lnk.tab." + tabID + ".chargedTo.leaseapp." + leaseID
+	if keyExists(t, ctx, conn, chargedToKey) {
+		t.Fatalf("test setup: chargedTo must start absent to model the historical gap")
+	}
+
+	settleEnv := &processor.OperationEnvelope{
+		RequestID:     testutil.GenReqID("cdsettlebkfl00000001"),
+		Lane:          processor.LaneDefault,
+		OperationType: "Settle",
+		Actor:         domainActorKey,
+		SubmittedAt:   "2026-07-31T09:00:00Z",
+		Class:         "tab",
+		Payload:       json.RawMessage(`{"tabKey":"` + tabKey + `"}`),
+		ContextHint: &processor.ContextHint{
+			Reads:         []string{tabKey, tabKey + ".status"},
+			OptionalReads: []string{chargedToKey},
+		},
+	}
+	testutil.PublishOp(t, conn, settleEnv)
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
+
+	if !keyExists(t, ctx, conn, chargedToKey) {
+		t.Fatalf("Settle must backfill the missing chargedTo link")
+	}
+	if keyExists(t, ctx, conn, "lnk.tab."+tabID+".openFor.leaseapp."+leaseID) {
+		t.Fatalf("Settle must still tombstone openFor")
+	}
+	if keyExists(t, ctx, conn, leaseKey+".cafeOpenTab") {
+		t.Fatalf("Settle must still release the lease's open-tab guard, unblocking the next OpenTab")
+	}
+}
+
 func TestSettle_RejectsDoubleSettle(t *testing.T) {
 	ctx, conn := setupDomainEnv(t)
 	cp, cons := newDomainPipeline(t, ctx, conn, "doublesettle")
@@ -683,7 +773,10 @@ func TestSettle_RejectsDoubleSettle(t *testing.T) {
 		SubmittedAt:   "2026-07-07T13:00:00Z",
 		Class:         "tab",
 		Payload:       json.RawMessage(`{"tabKey":"` + tabKey + `"}`),
-		ContextHint:   &processor.ContextHint{Reads: []string{tabKey, tabKey + ".status"}},
+		ContextHint: &processor.ContextHint{
+			Reads:         []string{tabKey, tabKey + ".status"},
+			OptionalReads: []string{chargedToOptionalRead(tabKey, leaseKey)},
+		},
 	}
 	testutil.PublishOp(t, conn, settleOnce)
 	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
@@ -696,7 +789,10 @@ func TestSettle_RejectsDoubleSettle(t *testing.T) {
 		SubmittedAt:   "2026-07-07T13:05:00Z",
 		Class:         "tab",
 		Payload:       json.RawMessage(`{"tabKey":"` + tabKey + `"}`),
-		ContextHint:   &processor.ContextHint{Reads: []string{tabKey, tabKey + ".status"}},
+		ContextHint: &processor.ContextHint{
+			Reads:         []string{tabKey, tabKey + ".status"},
+			OptionalReads: []string{chargedToOptionalRead(tabKey, leaseKey)},
+		},
 	}
 	testutil.PublishOp(t, conn, settleTwice)
 	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeRejected)
@@ -717,7 +813,10 @@ func TestCharge_RejectsAfterSettle(t *testing.T) {
 		SubmittedAt:   "2026-07-07T13:00:00Z",
 		Class:         "tab",
 		Payload:       json.RawMessage(`{"tabKey":"` + tabKey + `"}`),
-		ContextHint:   &processor.ContextHint{Reads: []string{tabKey, tabKey + ".status"}},
+		ContextHint: &processor.ContextHint{
+			Reads:         []string{tabKey, tabKey + ".status"},
+			OptionalReads: []string{chargedToOptionalRead(tabKey, leaseKey)},
+		},
 	}
 	testutil.PublishOp(t, conn, settleEnv)
 	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
@@ -777,7 +876,10 @@ func TestOpenTab_AllowsReopenAfterSettle(t *testing.T) {
 		SubmittedAt:   "2026-07-07T13:00:00Z",
 		Class:         "tab",
 		Payload:       json.RawMessage(`{"tabKey":"` + firstTabKey + `"}`),
-		ContextHint:   &processor.ContextHint{Reads: []string{firstTabKey, firstTabKey + ".status"}},
+		ContextHint: &processor.ContextHint{
+			Reads:         []string{firstTabKey, firstTabKey + ".status"},
+			OptionalReads: []string{chargedToOptionalRead(firstTabKey, leaseKey)},
+		},
 	}
 	testutil.PublishOp(t, conn, settleEnv)
 	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
@@ -939,7 +1041,7 @@ func TestSettle_ConsumerSelfScope_Allowed(t *testing.T) {
 		Payload:       json.RawMessage(`{"tabKey":"` + tabKey + `"}`),
 		ContextHint: &processor.ContextHint{
 			Reads:         []string{tabKey, tabKey + ".status"},
-			OptionalReads: []string{applicationForLnk},
+			OptionalReads: []string{applicationForLnk, chargedToOptionalRead(tabKey, leaseKey)},
 		},
 		AuthContext: &processor.AuthContext{Target: domainConsumerKey},
 	}
@@ -977,7 +1079,7 @@ func TestSettle_ConsumerSelfScope_RejectedForOthersTab(t *testing.T) {
 		Payload:       json.RawMessage(`{"tabKey":"` + tabKey + `"}`),
 		ContextHint: &processor.ContextHint{
 			Reads:         []string{tabKey, tabKey + ".status"},
-			OptionalReads: []string{wrongApplicationForLnk},
+			OptionalReads: []string{wrongApplicationForLnk, chargedToOptionalRead(tabKey, leaseKey)},
 		},
 		AuthContext: &processor.AuthContext{Target: domainConsumerKey},
 	}

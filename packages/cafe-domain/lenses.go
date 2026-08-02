@@ -202,14 +202,25 @@ RETURN
 // violates either gap — no house-tab posting is needed for a zero-amount
 // visit.
 //
-// The lease hop is `chargedTo`, the tab's PERMANENT link, not the `openFor`
-// one Settle retracts (ddls.go). Both gaps only ever open on a SETTLED tab, so
-// a required match on a hop that disappears at settlement would project no row
-// exactly when one is owed — and with EmptyBehavior "delete" the target row
-// would vanish and Weaver would dispatch nothing. Which link this walks is
-// therefore a money question, not a naming one.
+// The lease hop prefers `chargedTo`, the tab's PERMANENT link, over the
+// `openFor` one Settle retracts (ddls.go): both money gaps only ever open on
+// a SETTLED tab, and settlement is exactly when openFor is gone, so a SETTLED
+// row anchors on chargedTo alone — that's what lets the row survive past
+// settlement rather than vanishing (EmptyBehavior "delete") right when a
+// posting is owed, and it's why a settled tab that somehow still lacks
+// chargedTo projects NO row rather than one with a null leaseAppKey Weaver
+// could dispatch against blind (TestCafeTabSettlement_OpenForAloneDoesNotAnchor
+// pins this: openFor must never paper over a missing permanent link once a
+// tab is settled). openFor is admitted ONLY while the tab is still OPEN, and
+// only as a fallback when chargedTo is absent (Settle backfills it
+// unconditionally the moment the tab closes — ddls.go) — this is what makes a
+// tab that predates the chargedTo write discoverable and settleable at all,
+// instead of stranding it invisible to every reader forever. A tab carrying
+// both resolves to chargedTo (coalesce's first argument), so a normally
+// opened tab's row is identical whichever branch a reader imagines.
 const tabSettlementSpec = `MATCH (t:tab {key: $actorKey})
-MATCH (t)-[:chargedTo]->(l:leaseapp)
+OPTIONAL MATCH (t)-[:chargedTo]->(cl:leaseapp)
+OPTIONAL MATCH (t)-[:openFor]->(ol:leaseapp)
 OPTIONAL MATCH (t)<-[:settles]-(tx:cafetransaction)
 WITH
   t.key AS entityKey,
@@ -218,9 +229,13 @@ WITH
   t.status.data.itemsMemo AS itemsMemo,
   t.status.data.openedAt AS openedAt,
   t.status.data.settledAt AS settledAt,
-  l.key AS leaseAppKey,
-  l.cafeLedgerAccount.data.accountKey AS accountKey,
+  (CASE WHEN t.status.data.value = 'open' THEN coalesce(cl, ol) ELSE cl END) AS l,
   count(tx.key) AS txCount
+WHERE l.key <> null
+WITH
+  entityKey, status, totalCents, itemsMemo, openedAt, settledAt, txCount,
+  l.key AS leaseAppKey,
+  l.cafeLedgerAccount.data.accountKey AS accountKey
 RETURN
   entityKey AS actorKey,
   entityKey,

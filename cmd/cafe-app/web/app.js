@@ -174,6 +174,16 @@ function applicationForOptionalRead(leaseAppKey) {
   return "lnk.leaseapp." + idOf(leaseAppKey) + ".applicationFor.identity." + idOf(state.identityId);
 }
 
+// chargedToOptionalRead returns Settle's class-(d) dedup read for its own
+// chargedTo backfill (packages/cafe-domain/ddls.go): every Settle submission
+// declares whether the tab already carries its permanent chargedTo link, so
+// the script can create it without a live GET when a tab is missing it —
+// keeping cafeTabSettlement's post-settlement money-gap anchor always
+// present.
+function chargedToOptionalRead(tabKey, leaseAppKey) {
+  return "lnk.tab." + idOf(tabKey) + ".chargedTo.leaseapp." + idOf(leaseAppKey);
+}
+
 // ---- formatting --------------------------------------------------------
 
 function money(cents) {
@@ -471,6 +481,7 @@ async function renderPos() {
         {
           operationType: "Settle", class: "tab",
           reads: [open.tabKey, open.tabKey + ".status"],
+          optionalReads: [chargedToOptionalRead(open.tabKey, leaseAppKey)],
           payload: { tabKey: open.tabKey },
         },
         "settle the tab"
@@ -592,7 +603,12 @@ async function loadFrontDesk() {
       btn.disabled = true;
       try {
         await opOrThrow(
-          { operationType: "Settle", class: "tab", reads: [t.tabKey, t.tabKey + ".status"], payload: { tabKey: t.tabKey } },
+          {
+            operationType: "Settle", class: "tab",
+            reads: [t.tabKey, t.tabKey + ".status"],
+            optionalReads: [chargedToOptionalRead(t.tabKey, t.leaseAppKey)],
+            payload: { tabKey: t.tabKey },
+          },
           "settle the tab"
         );
         toast("Tab settled.", true);
@@ -835,7 +851,7 @@ async function renderResident() {
               operationType: "Settle",
               class: "tab",
               reads: [open.tabKey, open.tabKey + ".status"],
-              optionalReads: [applicationForOptionalRead(leaseAppKey)],
+              optionalReads: [applicationForOptionalRead(leaseAppKey), chargedToOptionalRead(open.tabKey, leaseAppKey)],
               payload: { tabKey: open.tabKey },
             },
             "settle the tab",

@@ -1149,6 +1149,21 @@ def execute(state, op):
             make_tombstone(lease_key + ".cafeOpenTab"),
             make_tombstone("lnk.tab." + tab_id + ".openFor.leaseapp." + lease_id),
         ]
+
+        # Settle GUARANTEES the tab carries a chargedTo link before it closes —
+        # a class-(d) read-before-create dedup (Contract #2 §2.5) declared in
+        # ContextHint.OptionalReads, same idiom as the .cafeOpenTab guard
+        # above. OpenTab always writes chargedTo today, so this is a no-op for
+        # every normally-opened tab; it only fires for a tab whose chargedTo
+        # link is absent for any reason (a schema gap the write path once had,
+        # or any other drift), which cafeTabSettlement's required MATCH on
+        # chargedTo would otherwise strand invisibly and unsettleably forever
+        # (lenses.go — no lens row means no tabKey any surface can act on).
+        # Backfilling here, rather than at read time, keeps the money-gap
+        # anchor a real, permanent write, not a read-side workaround.
+        charged_to_lnk = "lnk.tab." + tab_id + ".chargedTo.leaseapp." + lease_id
+        if not vertex_alive(state, charged_to_lnk):
+            mutations.append(make_link(charged_to_lnk, tab_key, lease_key, "chargedTo", "chargedTo", {}))
         events = [{"class": "tab.settled", "data": {"tabKey": tab_key, "leaseAppKey": lease_key, "totalCents": total_cents}}]
         return {"mutations": mutations, "events": events,
                 "response": {"primaryKey": tab_key}}
