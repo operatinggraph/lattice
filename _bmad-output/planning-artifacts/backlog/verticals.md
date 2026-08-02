@@ -17,7 +17,6 @@ the row is `🚧 blocked-on:` it (a missing *lens* is package work, built here).
 
 | Item | What it is (PO view) | Vertical | Owner | Imp | Size | State |
 |---|---|---|---|---|---|---|
-| **unit_applications lists the whole weaver-targets bucket** | `cmd/loftspace-app` (applicationsource.go + unit_applications.go:231-244) KVListKeys the entire shared bucket per request, then filters client-side by prefix — every sibling target's rows read each time. `KVListKeysPrefix` is the shape (Loupe's lens Contents now scopes this way). | LoftSpace | FE Engineer | ★ | XS–S | 📋 ready |
 | **Edge showcase app (Facet)** | Discovery-driven personal client on the Edge foundation: hardcodes only IdP login + connect; services, ops, forms, tasks, panes arrive as data via `edge-manifest` personal lenses + a descriptor vocabulary (#52/#54/#55). PWA-first. Covenant structurally enforced by `lint-facet-discovery` (CI). | Cross-vertical | Sally + FE Engineer + pkg | ★★★ | XL | 🚧 blocked-on: full Xcode (this host has CommandLineTools only) · [design §7.12](../../implementation-artifacts/edge-showcase-app-design.md) · every non-iOS increment shipped |
 | **Clinical notes are write-only** | `RecordEncounter` PHI (`ddls.go:333-336`) captured, never projected. The cited `clinicPatientsRead` Secure-Lens precedent does NOT extend — that decrypts identity-anchored Vault ciphertext; this is raw plaintext on a non-identity vertex, and that exact shortcut was already REJECTED pre-Vault (`vault-crypto-shredding-design.md` ratification decision #2). | Clinic | pkg | ★★★ | M | 🚧 blocked-on: Vault extended to non-identity content (architectural fork, Andrew) |
 | **Five identity ceremony ops stay undiscoverable** | `CreateUnclaimedIdentity`, `RotateClaimKey`, `InitiateCredentialLink`, `CompleteCredentialLink`, `UnlinkCredential` carry stated `[no-op-meta:]` exemptions ([§8](../../implementation-artifacts/vertical-package-standard.md)). Consumer is 3 hardcoded in Facet (`cmd/facet/credentials.go`) + 2 in staff web apps/the CLI, not "Facet, all five" as first filed. | Cross-vertical | pkg | ★★ | M | 🚧 blocked-on: 3 new OpMetaSpec vocabulary primitives, no precedent to mirror — [lattice.md](lattice.md) |
@@ -60,6 +59,7 @@ dated run-logs live in git history. Rotate LoftSpace ↔ Clinic ↔ Café ↔ We
 
 One line per shipped item (`date · SHA · title`). Oldest roll to `archive/` past ~25.
 
+- 2026-08-02 · `ad20e036` · unit-applications' weaver-targets read scoped to its own prefix — KVListKeysPrefix, not a whole-bucket list + client-side filter. loftspace-app
 - 2026-08-02 · `11c50fd4` · A café credit balance no longer renders as `$-21.59` — ledgerBalanceLine mirrors loftspace-app's owed/credit/paid-in-full split. cafe-app
 - 2026-08-02 · `dc7d1983` · POS can now void a mis-tapped charge — Void Charge form wired to VoidCharge, mirroring the off-menu Charge form/handler. cafe-app
 - 2026-08-02 · `82613032` · POS lease picker now names the resident, not the raw key — fillLeaseSelect joins /api/residents + /api/frontdesk-lease-details, mirroring frontDeskCard's own join. cafe-app
