@@ -1133,11 +1133,12 @@ install-cafe:
 
 ## install-wellness — Install the Wellness vertical onto a running up-full stack,
 ## in dependency order: orchestration-base → service-domain → lease-signing →
-## wellness-domain → wellness-ledger (identity-domain is already installed by
-## install-packages/up-full; wellness-domain's only cross-package read is
-## lease-signing's leaseapp applicationFor link, by known key; wellness-ledger
-## adds the member payment ledger, depends wellness-domain). Drive it via
-## the wellness-app, the lattice CLI, or Loupe.
+## wellness-domain → wellness-ledger → wellness-reminders (identity-domain is
+## already installed by install-packages/up-full; wellness-domain's only
+## cross-package read is lease-signing's leaseapp applicationFor link, by known
+## key; wellness-ledger adds the member payment ledger, depends wellness-domain;
+## wellness-reminders adds the ~24h-ahead class reminder, depends wellness-domain
+## + orchestration-base). Drive it via the wellness-app, the lattice CLI, or Loupe.
 install-wellness:
 	@echo "==> Building lattice-pkg..."
 	go build -o bin/lattice-pkg ./cmd/lattice-pkg
@@ -1151,7 +1152,9 @@ install-wellness:
 	NATS_URL=$(NATS_URL) NATS_NKEY=$(NKEY_LATTICE_PKG) BOOTSTRAP_JSON_PATH=$(BOOTSTRAP_JSON) ./bin/lattice-pkg install packages/wellness-domain
 	@echo "==> Installing wellness-ledger..."
 	NATS_URL=$(NATS_URL) NATS_NKEY=$(NKEY_LATTICE_PKG) BOOTSTRAP_JSON_PATH=$(BOOTSTRAP_JSON) ./bin/lattice-pkg install packages/wellness-ledger
-	@echo "==> Wellness vertical installed (lease-signing + wellness-domain + wellness-ledger). Drive it via the wellness-app, the lattice CLI, or Loupe."
+	@echo "==> Installing wellness-reminders..."
+	NATS_URL=$(NATS_URL) NATS_NKEY=$(NKEY_LATTICE_PKG) BOOTSTRAP_JSON_PATH=$(BOOTSTRAP_JSON) ./bin/lattice-pkg install packages/wellness-reminders
+	@echo "==> Wellness vertical installed (lease-signing + wellness-domain + wellness-ledger + wellness-reminders). Drive it via the wellness-app, the lattice CLI, or Loupe."
 
 ## install-showcase-domains — the four vertical domain packages the cross-vertical
 ## showcase seed (seed-showcase) writes data across. up-full installs only the
@@ -1515,6 +1518,7 @@ refresh-wellness:
 	NATS_URL=$(NATS_URL) NATS_NKEY=$(NKEY_LATTICE_PKG) BOOTSTRAP_JSON_PATH=$(BOOTSTRAP_JSON) ./bin/lattice-pkg install --force packages/lease-signing
 	NATS_URL=$(NATS_URL) NATS_NKEY=$(NKEY_LATTICE_PKG) BOOTSTRAP_JSON_PATH=$(BOOTSTRAP_JSON) ./bin/lattice-pkg install --force packages/wellness-domain
 	NATS_URL=$(NATS_URL) NATS_NKEY=$(NKEY_LATTICE_PKG) BOOTSTRAP_JSON_PATH=$(BOOTSTRAP_JSON) ./bin/lattice-pkg install --force packages/wellness-ledger
+	NATS_URL=$(NATS_URL) NATS_NKEY=$(NKEY_LATTICE_PKG) BOOTSTRAP_JSON_PATH=$(BOOTSTRAP_JSON) ./bin/lattice-pkg install --force packages/wellness-reminders
 	@$(MAKE) provision-wellness-role
 	@$(MAKE) provision-readpath
 	@echo "==> Rebuilding wellness-app binary..."

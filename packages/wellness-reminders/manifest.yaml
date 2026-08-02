@@ -1,0 +1,49 @@
+name: wellness-reminders
+version: 0.1.0
+description: |
+  Wellness class reminder — the wellness vertical's first orchestration. A
+  one-shot @at convergence over wellness-domain's booking: the .reminder
+  aspect + RecordBookingReminder op, the wellnessBookingReminders
+  weaver-target lens (freshUntil = the booking's session .schedule.remindAt,
+  which wellness-domain precomputes = startsAt − 24h). The gap dispatches a
+  directOp via the §10.8 playbook; inverts lease-signing's freshness re-open
+  (open-at-deadline instead of reopen-at-expiry), mirroring
+  clinic-reminders' appointmentReminders exactly, anchored on booking instead
+  of appointment since one session has many bookers. The op also fires
+  external.notification off its own outbox to the bridge's "notification"
+  adapter; RecordBookingReminderNotification records the outcome as an
+  audit-only aspect (does not gate the convergence lens above).
+  Depends on wellness-domain (the booking/session vertex types +
+  .schedule.remindAt) and orchestration-base (MarkExpired re-touch at the
+  @at firing).
+depends:
+  - wellness-domain
+  - orchestration-base
+declares:
+  ddls:
+    - canonicalName: bookingReminderOp
+      class: meta.ddl.vertexType
+    - canonicalName: bookingReminder
+      class: meta.ddl.aspectType
+    - canonicalName: bookingReminderNotificationOp
+      class: meta.ddl.vertexType
+    - canonicalName: bookingReminderNotification
+      class: meta.ddl.aspectType
+  lenses:
+    - canonicalName: wellnessBookingReminders
+      adapter: nats-kv
+      bucket: weaver-targets
+      engine: full
+  permissions:
+    - operationType: RecordBookingReminder
+      scope: any
+      grantsTo: [operator]
+    - operationType: RecordBookingReminderNotification
+      scope: any
+      grantsTo: [operator]
+  weaverTargets:
+    - targetId: wellnessBookingReminders
+      lensRef: wellnessBookingReminders
+  opMetas:
+    - operationType: RecordBookingReminder
+    - operationType: RecordBookingReminderNotification

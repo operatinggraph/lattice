@@ -445,16 +445,18 @@ func sessionScheduleAspectTypeDDL() pkgmgr.DDLSpec {
 		Class:             "meta.ddl.aspectType",
 		PermittedCommands: []string{"CreateSession", "ReassignSession", "CreateSessionSeries"},
 		Description: "Session schedule aspect (wellness). Stored as vtx.session.<NanoID>.schedule (class " +
-			"sessionSchedule) = {name, startsAt, endsAt, capacity, priceCents?}. Non-sensitive. Written by " +
+			"sessionSchedule) = {name, startsAt, endsAt, capacity, priceCents?, remindAt}. Non-sensitive. Written by " +
 			"CreateSession (mints, priceCents omitted or 0 for a free class), ReassignSession (OCC-conditioned " +
-			"startsAt/endsAt update on a time move; name/capacity/priceCents carried forward unchanged), and " +
-			"CreateSessionSeries (mints one per occurrence, same shape as CreateSession's) — all owned " +
+			"startsAt/endsAt update on a time move; name/capacity/priceCents carried forward unchanged, remindAt " +
+			"re-derived), and CreateSessionSeries (mints one per occurrence, same shape as CreateSession's) — all owned " +
 			"by the session vertexType DDL's script; this aspect-type DDL is the step-6 write gate. Declaration-only: " +
 			"no op handler. CreateBooking reads capacity on demand (kv.Read) to bound its seat-claim loop; " +
-			"wellness-ledger's wellnessClassPriceSettlement lens reads priceCents to auto-charge the booker.",
+			"wellness-ledger's wellnessClassPriceSettlement lens reads priceCents to auto-charge the booker; " +
+			"wellness-reminders' wellnessBookingReminders lens reads remindAt (mirroring clinic-domain's " +
+			"remindAt on the appointment .schedule aspect) to arm the ~24h-ahead class reminder.",
 		Script: aspectDeclarationOnlyScript,
 		InputSchema: `{"type":"object","properties":` +
-			`{"name":{"type":"string"},"startsAt":{"type":"string"},"endsAt":{"type":"string"},"capacity":{"type":"integer"},"priceCents":{"type":"integer"}}}`,
+			`{"name":{"type":"string"},"startsAt":{"type":"string"},"endsAt":{"type":"string"},"capacity":{"type":"integer"},"priceCents":{"type":"integer"},"remindAt":{"type":"string"}}}`,
 		OutputSchema: `{"type":"object"}`,
 		FieldDescription: map[string]string{
 			"name":       "The session's display name.",
@@ -462,6 +464,7 @@ func sessionScheduleAspectTypeDDL() pkgmgr.DDLSpec {
 			"endsAt":     "Session end (RFC3339).",
 			"capacity":   "Maximum concurrent bookings (integer 1..200).",
 			"priceCents": "Optional class price in integer cents (>= 0). Omitted or 0 means a free class.",
+			"remindAt":   "Precomputed reminder deadline (RFC3339, canonical UTC) = startsAt − 24h. Derived by CreateSession/CreateSessionSeries/ReassignSession, not a caller input; wellness-reminders' convergence lens projects it as freshUntil to arm the @at class-reminder timer.",
 		},
 		Examples: []pkgmgr.ExampleSpec{
 			{
@@ -1928,7 +1931,13 @@ def execute(state, op):
 
         at_studio_lnk = "lnk.session." + sess_id + ".atStudio.studio." + studio_id
 
-        sched = {"name": name, "startsAt": starts_at, "endsAt": ends_at, "capacity": capacity}
+        # remindAt = startsAt − 24h, precomputed the same way clinic-domain
+        # derives an appointment's .schedule.remindAt: wellness-reminders'
+        # convergence lens has no date arithmetic of its own (the constrained
+        # rule engine), so the deadline must be baked in at write time.
+        remind_at = time.rfc3339_add(starts_at, "-24h")
+
+        sched = {"name": name, "startsAt": starts_at, "endsAt": ends_at, "capacity": capacity, "remindAt": remind_at}
         if price_cents != None:
             sched["priceCents"] = price_cents
 
@@ -2040,7 +2049,8 @@ def execute(state, op):
             sess_key = "vtx.session." + sess_id
             session_keys.append(sess_key)
 
-            sched = {"name": name, "startsAt": occ_starts, "endsAt": occ_ends, "capacity": capacity}
+            occ_remind_at = time.rfc3339_add(occ_starts, "-24h")
+            sched = {"name": name, "startsAt": occ_starts, "endsAt": occ_ends, "capacity": capacity, "remindAt": occ_remind_at}
             if price_cents != None:
                 sched["priceCents"] = price_cents
 
@@ -2247,7 +2257,13 @@ def execute(state, op):
             new_starts = cur_starts
             new_ends = cur_ends
 
-        new_sched = {"name": sched.data.get("name"), "startsAt": new_starts, "endsAt": new_ends, "capacity": sched.data.get("capacity")}
+        # Re-derive remindAt = new_starts − 24h unconditionally: on a genuine
+        # reschedule this moves the deadline (re-arming wellness-reminders'
+        # gate, mirroring clinic-domain's RescheduleAppointment); when nothing
+        # moved (new_starts == cur_starts) it recomputes the same value, so no
+        # branch is needed either way.
+        new_remind_at = time.rfc3339_add(new_starts, "-24h")
+        new_sched = {"name": sched.data.get("name"), "startsAt": new_starts, "endsAt": new_ends, "capacity": sched.data.get("capacity"), "remindAt": new_remind_at}
         # priceCents carries forward UNCHANGED, exactly like name/capacity — a
         # session created before this field existed (or created free) simply
         # has none to carry, so the key stays omitted rather than being
