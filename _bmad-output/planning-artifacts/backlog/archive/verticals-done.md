@@ -2,6 +2,16 @@
 
 Rolled from `verticals.md` when its live Done log passed ~25 entries. Full detail is in git.
 
+- 2026-07-31 · `7630e28c` · A provider can now act in her own clinic — RecordEncounter grants provider (guarded); My Schedule + Availability unlock self-scoped; her name resolves. clinic-domain 0.28.15
+- 2026-07-31 · `12b155cd` · Showcase seed now completes a visit + names its site — fills Follow-ups, noShowSettlement, clinicSites on a fresh world
+- 2026-07-31 · `f7d744d8` · Staff console can now reassign a class's instructor and/or time — Roster panel's "Reassign" control wires the already-shipped ReassignSession op, mirroring CreateSession/TombstoneSession's staff-only affordance idiom
+- 2026-07-31 · `4ede405e` · Wellness Schedule filters to upcoming-only, groups by day, renders local times — mirrors Facet's isUpcoming + clinic-app's local formatting
+- 2026-07-31 · `5280967a` · Console can now name landlords/staffers/applicants — `applicantRosterRead` authz_anchors gets self+landlord+building fan-out, mirroring café/clinic. loftspace-domain 0.10.5
+- 2026-07-30 · `d51a22aa` · An approved lease now actually leases the unit — `seed-showcase.go` heals a stalled application by driving `RecordIdentityPII`, unblocking bgcheck dispatch; verified live, all 3 units flipped to leased
+- 2026-07-30 · `5ddd6a73` · Staff console can now name its members — `wellnessIdentitiesRead`'s authz_anchors fan out over the staffer's own workplace, mirroring café's front desk. wellness-domain 0.18.2
+- 2026-07-30 · `21d45f85` · My Classes shows the attended/no-show badge + disables Cancel once started/marked; CancelBooking rejects both server-side, incl. front-desk Release-seat. wellness-domain 0.18.1
+- 2026-07-30 · `92439169` · Front desk can now name its customers — `cafeIdentitiesRead` fans authz_anchors out over the staffer's own workplace buildings; front-desk grid resolves it via `/api/residents`. cafe-domain 0.11.7
+- 2026-07-30 · `5d2440d8` · Staff POS Charge now accepts menuItemKey too (catalog-priced + location-bound like self-order), keeping amountCents for off-menu; POS view renders the confined catalog picker. cafe-domain 0.11.6
 - 2026-07-30 · `96c353a4` · Riley's showcase clinic patient now opens a ledger account + visit series; Osei's stale `.hours` window (unrelated blocker hit live) reset unconstrained every seed run
 - 2026-07-30 · `29a98f1f` · `/api/residents` no longer leaks the whole lease-applicant roster to a bare patient session — `resolveSubjectHats` scopes it to the caller's own row or staff, mirroring cafe-app/wellness-app
 - 2026-07-29 · `2b693874` · LoftSpace can now work its maintenance queue — Claim/Resolve wired in Tasks, staff can Report an issue
