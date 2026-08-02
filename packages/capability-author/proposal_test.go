@@ -56,11 +56,10 @@ func (fullCypherParser) Parse(ruleBody string) error {
 	return err
 }
 
-// staffCapDoc grants the staff actor RequestCapabilityAuthoring +
-// CreateAuthoringClaim + RecordCapabilityProposal + ReviewCapabilityProposal +
-// MarkCapabilityProposalApplied — modeled here as an operator-equivalent
-// staff actor standing in for the human requester, Loom's relay actor, the
-// human reviewer, and the applying operator, mirroring augur's staffCapDoc.
+// staffCapDoc grants the staff actor every one of the package's ops — modeled
+// here as an operator-equivalent staff actor standing in for the human
+// requester, Loom's relay actor, the human artifact author, the human reviewer,
+// and the applying operator, mirroring augur's staffCapDoc.
 func staffCapDoc() *processor.CapabilityDoc {
 	now := time.Now().UTC()
 	return &processor.CapabilityDoc{
@@ -73,6 +72,7 @@ func staffCapDoc() *processor.CapabilityDoc {
 		PlatformPermissions: []processor.PlatformPermission{
 			{OperationType: "RequestCapabilityAuthoring", Scope: "any"},
 			{OperationType: "CreateAuthoringClaim", Scope: "any"},
+			{OperationType: "SubmitCapabilityProposal", Scope: "any"},
 			{OperationType: "RecordCapabilityProposal", Scope: "any"},
 			{OperationType: "ReviewCapabilityProposal", Scope: "any"},
 			{OperationType: "MarkCapabilityProposalApplied", Scope: "any"},

@@ -23,10 +23,10 @@ func TestPackage_StructurePins(t *testing.T) {
 	if got, want := len(Package.Lenses), 3; got != want {
 		t.Errorf("Lenses: got %d, want %d", got, want)
 	}
-	if got, want := len(Package.Permissions), 5; got != want {
+	if got, want := len(Package.Permissions), 6; got != want {
 		t.Errorf("Permissions: got %d, want %d", got, want)
 	}
-	if got, want := len(Package.OpMetas), 5; got != want {
+	if got, want := len(Package.OpMetas), 6; got != want {
 		t.Errorf("OpMetas: got %d, want %d", got, want)
 	}
 	if got, want := len(Package.Roles), 0; got != want {
@@ -60,8 +60,8 @@ func TestPackage_StructurePins(t *testing.T) {
 	}
 	wantPerms := []struct{ op, scope string }{
 		{"RequestCapabilityAuthoring", "any"}, {"CreateAuthoringClaim", "any"},
-		{"RecordCapabilityProposal", "any"}, {"ReviewCapabilityProposal", "any"},
-		{"MarkCapabilityProposalApplied", "any"},
+		{"SubmitCapabilityProposal", "any"}, {"RecordCapabilityProposal", "any"},
+		{"ReviewCapabilityProposal", "any"}, {"MarkCapabilityProposalApplied", "any"},
 	}
 	for i, want := range wantPerms {
 		if i >= len(Package.Permissions) {

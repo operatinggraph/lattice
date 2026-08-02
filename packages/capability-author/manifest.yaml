@@ -1,5 +1,5 @@
 name: capability-author
-version: 0.7.1
+version: 0.8.0
 description: |
   AI-authored capabilities — Fire 1 capture + escalation dispatch + review lenses, Fire 2
   review + apply + a CLI review-and-apply affordance, Fire 3 weaverTarget/loomPattern
@@ -17,7 +17,11 @@ description: |
   existing, unmodified F-004 InstallPackage/UpgradePackage op); the capabilityAuthorPending
   weaver-target lens + capabilityAuthor Loom pattern that drive the dispatch; and the
   capabilityProposals / capabilityAuthorContext P5 read-model lenses (the operator review
-  surface + the installed-DDL self-description catalog). The AI proposes; a human decides;
+  surface + the installed-DDL self-description catalog); and SubmitCapabilityProposal
+  (weaver-target-studio-design.md §6.4 — a second, HUMAN authoring lane: an operator submits
+  an artifact they composed themselves in one op, no authoring claim, the same §5 boundary
+  deciding pending | invalid, and a declared provenance.source of 'ai' | 'operator' telling
+  the two lanes apart). The AI or an operator proposes; a human decides;
   the operator applies via F-004; the Processor stays sole writer.
 depends:
   - orchestration-base
@@ -47,6 +51,9 @@ declares:
     - operationType: CreateAuthoringClaim
       scope: any
       grantsTo: [operator]
+    - operationType: SubmitCapabilityProposal
+      scope: any
+      grantsTo: [operator]
     - operationType: RecordCapabilityProposal
       scope: any
       grantsTo: [operator]
@@ -65,6 +72,7 @@ declares:
   opMetas:
     - operationType: RequestCapabilityAuthoring
     - operationType: CreateAuthoringClaim
+    - operationType: SubmitCapabilityProposal
     - operationType: RecordCapabilityProposal
     - operationType: ReviewCapabilityProposal
     - operationType: MarkCapabilityProposalApplied

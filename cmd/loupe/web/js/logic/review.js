@@ -41,11 +41,22 @@ function reviewStateClass(displayState) {
   return reviewStateClassMap[displayState] || "review-state unknown";
 }
 
+// hasConfidenceScore reports whether a row carries a real 0..1 model
+// confidence. A proposal with no model behind it — one an operator authored
+// directly, or one whose reasoning result failed to decode — records the -1.0
+// absent-sentinel rather than a fabricated score, and a sentinel is not a
+// score to render.
+function hasConfidenceScore(score) {
+  return typeof score === "number" && !isNaN(score) && score >= 0 && score <= 1;
+}
+
 // confidenceBand buckets a 0..1 confidence score into low/med/high for the
 // red→amber→green ramp (§5); an undefined/out-of-range score bands "unknown"
-// (rendered dim, never a false-confident color).
+// (rendered dim, never a false-confident color). The out-of-range arm is what
+// keeps the -1.0 absent-sentinel from reading as a red "low confidence"
+// verdict on a proposal nothing ever scored.
 function confidenceBand(score) {
-  if (typeof score !== "number" || isNaN(score)) return "unknown";
+  if (!hasConfidenceScore(score)) return "unknown";
   if (score < 0.5) return "low";
   if (score < 0.8) return "med";
   return "high";
@@ -225,4 +236,4 @@ function opRejected(reply) {
   return !!(reply && reply.status === "rejected");
 }
 
-export { kindGlyph, proposalDisplayState, reviewStateClass, confidenceBand, isActionable, agoFrom, proposalRows, pendingCount, augurDisplayState, augurProposalRows, applyOutcome, opRejected, errorText };
+export { kindGlyph, proposalDisplayState, reviewStateClass, confidenceBand, hasConfidenceScore, isActionable, agoFrom, proposalRows, pendingCount, augurDisplayState, augurProposalRows, applyOutcome, opRejected, errorText };

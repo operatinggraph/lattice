@@ -65,6 +65,24 @@ func projectCapAuthor(t *testing.T, adjKV, coreKV *substrate.KV, spec string) []
 	return out
 }
 
+// projectCapAuthorAnchored drives a SELF-ANCHORED lens (one that binds
+// $actorKey) against a single anchor, the shape the actorAggregate projection
+// kind executes with.
+func projectCapAuthorAnchored(t *testing.T, adjKV, coreKV *substrate.KV, spec, actorKey string) []ruleengine.ProjectionResult {
+	t.Helper()
+	now := time.Now().UTC().Format(time.RFC3339)
+	eng := full.New()
+	cr, err := eng.Parse(spec)
+	require.NoError(t, err, "capability-author lens cypher must parse on the full engine")
+	out, err := eng.ExecuteWith(context.Background(), cr, ruleengine.EventContext{Parameters: map[string]any{
+		"now":         now,
+		"projectedAt": now,
+		"actorKey":    actorKey,
+	}}, adjKV, coreKV)
+	require.NoError(t, err)
+	return out
+}
+
 func rowByCapAuthorKey(rows []ruleengine.ProjectionResult, key string) map[string]any {
 	for _, r := range rows {
 		if r.Values["key"] == key {
@@ -72,6 +90,61 @@ func rowByCapAuthorKey(rows []ruleengine.ProjectionResult, key string) map[strin
 		}
 	}
 	return nil
+}
+
+// TestCapabilityAuthorPending_OpensOnlyForAnUnauthoredProposal pins the
+// escalation-dispatch gap predicate on BOTH of its arms.
+//
+// The gap must open for the AI lane's write-ahead request (nothing authored
+// yet, no claim minted) and must NOT open for a proposal that already carries
+// an artifact. The second case is the human lane: SubmitCapabilityProposal
+// mints .request + .artifact and deliberately no .claim, so a claim-only
+// predicate would read it as "reasoning not yet dispatched" and fire the
+// capabilityAuthor Loom pattern at it — an unrequested reasoning call whose
+// RecordCapabilityProposal reply could never commit against the create-only
+// aspects the submit already wrote.
+func TestCapabilityAuthorPending_OpensOnlyForAnUnauthoredProposal(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+
+	// AI lane, pre-dispatch: .request only → the gap is open.
+	adjKV, coreKV := lenstest.KVs(t)
+	awaiting := "vtx.capabilityproposal.capPropAwaitHJKMNPQR"
+	putVertex(t, coreKV, awaiting, "capabilityproposal")
+	putAspect(t, coreKV, awaiting, "request", "capabilityProposalRequest", map[string]any{
+		"requesterId": "vtx.identity.op1", "intent": "a lens listing active providers",
+	})
+	rows := projectCapAuthorAnchored(t, adjKV, coreKV, capabilityAuthorPendingSpec, awaiting)
+	require.Len(t, rows, 1)
+	v := rows[0].Values // the dispatch lens echoes its anchor as entityKey, not key
+	require.Equal(t, awaiting, v["entityKey"])
+	require.Equal(t, true, v["violating"], "no claim and no artifact → the authoring gap is open")
+	require.Equal(t, true, v["missing_authoring"])
+
+	// AI lane, dispatched: .claim present → the gap closes.
+	adjKV2, coreKV2 := lenstest.KVs(t)
+	claimed := "vtx.capabilityproposal.capPropDsptHJKMNPQRS"
+	putVertex(t, coreKV2, claimed, "capabilityproposal")
+	putAspect(t, coreKV2, claimed, "request", "capabilityProposalRequest", map[string]any{"requesterId": "vtx.identity.op1"})
+	putAspect(t, coreKV2, claimed, "claim", "capabilityProposalClaim", map[string]any{"claimedAt": "2026-08-02T10:00:00Z"})
+	rows2 := projectCapAuthorAnchored(t, adjKV2, coreKV2, capabilityAuthorPendingSpec, claimed)
+	require.Len(t, rows2, 1)
+	require.Equal(t, false, rows2[0].Values["violating"], "a minted claim closes the gap")
+
+	// HUMAN lane: .request + .artifact, no claim → the gap must stay SHUT.
+	adjKV3, coreKV3 := lenstest.KVs(t)
+	submitted := "vtx.capabilityproposal.capPropHumanHJKMNPQR"
+	putVertex(t, coreKV3, submitted, "capabilityproposal")
+	putAspect(t, coreKV3, submitted, "request", "capabilityProposalRequest", map[string]any{"requesterId": "vtx.identity.op1"})
+	putAspect(t, coreKV3, submitted, "artifact", "capabilityProposalArtifact", map[string]any{"kind": "lens", "content": "{...}"})
+	putAspect(t, coreKV3, submitted, "provenance", "capabilityProposalProvenance", map[string]any{"source": "operator"})
+	rows3 := projectCapAuthorAnchored(t, adjKV3, coreKV3, capabilityAuthorPendingSpec, submitted)
+	require.Len(t, rows3, 1)
+	v3 := rows3[0].Values
+	require.Equal(t, false, v3["violating"],
+		"an operator-authored proposal has no authoring gap — it must never trigger the AI dispatch")
+	require.Equal(t, false, v3["missing_authoring"])
 }
 
 // TestCapabilityProposals_FullEpisodeProjects proves every aspect the capture
@@ -92,7 +165,7 @@ func TestCapabilityProposals_FullEpisodeProjects(t *testing.T) {
 	putAspect(t, coreKV, key, "rationale", "capabilityProposalRationale", map[string]any{"text": "no existing lens surfaces this"})
 	putAspect(t, coreKV, key, "confidence", "capabilityProposalConfidence", map[string]any{"score": 0.86})
 	putAspect(t, coreKV, key, "validation", "capabilityProposalValidation", map[string]any{"state": "valid", "checkedAt": "2026-07-04T10:00:01Z"})
-	putAspect(t, coreKV, key, "provenance", "capabilityProposalProvenance", map[string]any{"model": "claude-opus-4-8", "reasonedAt": "2026-07-04T10:00:00Z"})
+	putAspect(t, coreKV, key, "provenance", "capabilityProposalProvenance", map[string]any{"source": "ai", "model": "claude-opus-4-8", "reasonedAt": "2026-07-04T10:00:00Z"})
 	putAspect(t, coreKV, key, "review", "capabilityProposalReview", map[string]any{"state": "pending"})
 
 	rows := projectCapAuthor(t, adjKV, coreKV, capabilityProposalsSpec)
@@ -108,6 +181,42 @@ func TestCapabilityProposals_FullEpisodeProjects(t *testing.T) {
 	require.Equal(t, 0.86, v["confidence"])
 	require.Equal(t, "valid", v["validationState"])
 	require.Equal(t, "claude-opus-4-8", v["model"])
+	require.Equal(t, "ai", v["source"])
+	require.Equal(t, "pending", v["reviewState"])
+}
+
+// TestCapabilityProposals_OperatorSourceProjects proves the review queue can
+// badge an operator-authored proposal from a DECLARED column rather than
+// inferring origin from the absence of model-shaped provenance: a proposal
+// SubmitCapabilityProposal wrote carries source='operator' with every model
+// field empty, and the -1.0 confidence sentinel (no model scored it) projects
+// as itself rather than as a plausible-looking score.
+func TestCapabilityProposals_OperatorSourceProjects(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	adjKV, coreKV := lenstest.KVs(t)
+	key := "vtx.capabilityproposal.capPropFourHJKMNPQRS"
+	putVertex(t, coreKV, key, "capabilityproposal")
+	putAspect(t, coreKV, key, "request", "capabilityProposalRequest", map[string]any{
+		"requesterId": "vtx.identity.op1", "intent": "a specialty cut of the on-call roster", "contextRef": "",
+	})
+	putAspect(t, coreKV, key, "artifact", "capabilityProposalArtifact", map[string]any{"kind": "lens", "content": "{...}"})
+	putAspect(t, coreKV, key, "confidence", "capabilityProposalConfidence", map[string]any{"score": -1.0})
+	putAspect(t, coreKV, key, "validation", "capabilityProposalValidation", map[string]any{"state": "valid"})
+	putAspect(t, coreKV, key, "provenance", "capabilityProposalProvenance", map[string]any{
+		"source": "operator", "model": "", "promptHash": "", "catalogHash": "", "reasonedAt": "",
+	})
+	putAspect(t, coreKV, key, "review", "capabilityProposalReview", map[string]any{"state": "pending"})
+
+	rows := projectCapAuthor(t, adjKV, coreKV, capabilityProposalsSpec)
+	require.Len(t, rows, 1)
+	v := rowByCapAuthorKey(rows, key)
+	require.NotNil(t, v)
+	require.Equal(t, "operator", v["source"])
+	require.Equal(t, "", v["model"], "no model authored this proposal")
+	require.Equal(t, -1.0, v["confidence"], "the absent-confidence sentinel, not a score")
+	require.Nil(t, v["claimedAt"], "a directly-submitted proposal has no authoring claim")
 	require.Equal(t, "pending", v["reviewState"])
 }
 

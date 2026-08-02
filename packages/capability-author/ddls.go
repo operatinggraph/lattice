@@ -51,11 +51,33 @@ import (
 //     non-object result) or status=failed (a modeled refusal) NEVER fail()s the
 //     op — the bridge has already Ack'd the external event, so a reject would
 //     wedge the episode with no record; both store the proposal review.state=
-//     invalid instead (auditable, never dispatchable). The KERNEL step-8
-//     protected-key guard at APPLY time (a later increment's F-004 op
-//     submission) remains the authoritative, independent backstop regardless
-//     (design §5 point 4) — this op only ever produces a `pending`-or-`invalid`
-//     PROPOSAL, never a write to any other vertex.
+//     invalid instead (auditable, never dispatchable). Either way this op only
+//     ever produces a `pending`-or-`invalid` PROPOSAL, never a write to any
+//     other vertex. Note what the kernel's step-8 protected-key guard does and
+//     does not cover at APPLY time: it refuses an update/tombstone of a root
+//     carrying data.protected, and SKIPS creates — so it is not a check on a
+//     proposed grant's SCOPE, which installs new permission vertices. The
+//     independent re-check of a submitted verdict is the APPROVE-time
+//     re-validation (cmd/loupe's freshCapabilityVerdict, cmd/lattice/
+//     capability's freshApprovalVerdict), which re-runs
+//     pkgmgr.ValidateCapabilityArtifact server-side and, for kind=grant, reads
+//     the requester's LIVE held permissions.
+//   - SubmitCapabilityProposal is the HUMAN authoring lane
+//     (weaver-target-studio-design.md §6.4) — the single-op counterpart to that
+//     whole three-op capture pair. An operator who composed the artifact
+//     themselves has no reasoning call to dispatch, so there is no claim to
+//     correlate and no write-ahead request to require: one op mints the
+//     proposal vertex and every aspect the pair would have written, taking
+//     {proposalId, kind, content, target, rationale, validation, intent?} as
+//     ordinary top-level fields. The requester is still op.actor, the same §5
+//     boundary decides pending vs invalid (minus the confidence range — a human
+//     produces no model score, so .confidence.score carries the -1.0 absent
+//     sentinel), and .provenance.source is stamped 'operator' where the AI lane
+//     stamps 'ai'. It reads nothing at all: a duplicate proposalId is refused by
+//     the commit batch's CreateOnly conditioning, not by a read-before-create
+//     probe. Unlike RecordCapabilityProposal it DOES fail() a malformed payload
+//     — there is no bridge Ack to protect, so the operator is told
+//     synchronously and nothing is written.
 //   - ReviewCapabilityProposal is the human verdict op (design §3.3): a
 //     capability-authorized operator flips a PENDING proposal to approved or
 //     rejected, addressed directly by its proposalId (no claim indirection).
@@ -67,8 +89,9 @@ import (
 //
 // Architectural rules (binding — same known-key discipline as augur /
 // orchestration-base / lease-signing):
-//   - Both ops read ONLY by known key (kv.Read of the proposal's own aspects).
-//     No prefix scans, no adjacency lookups, no lens reads.
+//   - Every op reads ONLY by known key (kv.Read of the proposal's own aspects);
+//     SubmitCapabilityProposal reads nothing at all. No prefix scans, no
+//     adjacency lookups, no lens reads.
 //   - No-orphan invariant (FR29/P4): RecordCapabilityProposal REQUIRES the
 //     proposal's .request aspect to be live (the RequestCapabilityAuthoring op
 //     must have committed write-ahead) and rejects (structured ScriptError) if
@@ -78,20 +101,22 @@ import (
 //     identity discipline augur's ReviewProposal reviewer uses.
 //   - The proposal is idempotent on redelivery: both ops write their aspects
 //     create-only, so a redelivered op conflicts (Contract #4 tracker collapse
-//     backstop) rather than double-recording.
+//     backstop) rather than double-recording. The same create-only conditioning
+//     is what stops a SubmitCapabilityProposal from overwriting a live proposal
+//     whose id it reuses.
 //
 // Proposal shape (Contract #1 key shapes; D5 — minimal root, business data in
 // aspects; design §3.1):
 //
 //	vtx.capabilityproposal.<id>   root data = {}
-//	  .request     { requesterId, intent, contextRef }            RequestCapabilityAuthoring
+//	  .request     { requesterId, intent, contextRef }            RequestCapabilityAuthoring | SubmitCapabilityProposal
 //	  .claim       { claimedAt, claimKey }                        CreateAuthoringClaim (write-ahead marker)
-//	  .artifact    { kind, content }                              RecordCapabilityProposal
-//	  .target      { mode, packageName, baseVersion, newVersion } RecordCapabilityProposal
-//	  .rationale   { text }                                       RecordCapabilityProposal
-//	  .confidence  { score }                                      RecordCapabilityProposal
-//	  .validation  { state, report, deltaPreview, checkedAt }     RecordCapabilityProposal
-//	  .provenance  { model, promptHash, catalogHash, reasonedAt } RecordCapabilityProposal
+//	  .artifact    { kind, content }                              Record | SubmitCapabilityProposal
+//	  .target      { mode, packageName, baseVersion, newVersion } Record | SubmitCapabilityProposal
+//	  .rationale   { text }                                       Record | SubmitCapabilityProposal
+//	  .confidence  { score }                                      Record | SubmitCapabilityProposal (-1.0 = no model score)
+//	  .validation  { state, report, deltaPreview, checkedAt }     Record | SubmitCapabilityProposal
+//	  .provenance  { source, model, promptHash, catalogHash, reasonedAt } Record ('ai') | SubmitCapabilityProposal ('operator')
 //	  .review      { state, invalidReason, reviewedAt, appliedAt, appliedByOp }  RecordCapabilityProposal + ReviewCapabilityProposal (appliedAt/appliedByOp remain empty until the apply increment)
 //	lnk.capabilityproposal.<id>.requestedBy.<type>.<requesterId>  proposal requestedBy requester
 //	lnk.capabilityproposal.<id>.reviewedBy.<type>.<reviewerId>    proposal reviewedBy reviewer (ReviewCapabilityProposal)
@@ -114,15 +139,18 @@ func capabilityProposalDDL() pkgmgr.DDLSpec {
 	return pkgmgr.DDLSpec{
 		CanonicalName:     "capabilityproposal",
 		Class:             "meta.ddl.vertexType",
-		PermittedCommands: []string{"RequestCapabilityAuthoring", "RecordCapabilityProposal", "ReviewCapabilityProposal", "MarkCapabilityProposalApplied"},
+		PermittedCommands: []string{"RequestCapabilityAuthoring", "SubmitCapabilityProposal", "RecordCapabilityProposal", "ReviewCapabilityProposal", "MarkCapabilityProposalApplied"},
 		Description: "AI-authored capability proposal DDL — Increment 1 (design §3.1/§3.3): the capture " +
 			"pair for one authoring episode. Vertex shape: vtx.capabilityproposal.<id>, class=capabilityproposal, " +
 			"root data = {} (D5); business data in aspects: .request {requesterId, intent, contextRef} (the " +
 			"RequestCapabilityAuthoring instanceOp's write-ahead context), .artifact {kind, content}, " +
 			".target {mode, packageName, baseVersion, newVersion}, .rationale {text}, .confidence {score}, " +
-			".validation {state, report, deltaPreview, checkedAt}, .provenance {model, promptHash, catalogHash, " +
-			"reasonedAt} (RecordCapabilityProposal's model-derived data + the §5 deterministic-validation " +
-			"verdict). Relationship: requestedBy (proposal→requester identity), a LINK. " +
+			".validation {state, report, deltaPreview, checkedAt}, .provenance {source, model, promptHash, " +
+			"catalogHash, reasonedAt} (RecordCapabilityProposal's model-derived data + the §5 deterministic-validation " +
+			"verdict). `source` declares which lane authored the proposal — 'ai' for the bridge-recorded reasoning " +
+			"path, 'operator' for a human's direct SubmitCapabilityProposal — so a review queue badges origin from a " +
+			"declared field rather than inferring it from the presence of model-shaped provenance. " +
+			"Relationship: requestedBy (proposal→requester identity), a LINK. " +
 			"RequestCapabilityAuthoring mints the proposal vertex write-ahead with the .request aspect + the " +
 			"requestedBy link (no-orphan by construction — the requester is op.actor, the trusted submitting " +
 			"actor). RecordCapabilityProposal is the bridge replyOp (payload {externalRef, status, result}, " +
@@ -141,8 +169,34 @@ func capabilityProposalDDL() pkgmgr.DDLSpec {
 			"not itself run the openCypher parser or validateAll (no parser/registry access from Starlark) — it " +
 			"trusts the decoded validation verdict from this op's privileged submitter (the bridge in the full " +
 			"design), computed by pkgmgr.ValidateCapabilityArtifact before submission; the kernel's F-004 " +
-			"apply-time step-8 guard (a later increment) remains the authoritative, independent backstop " +
-			"regardless. ReviewCapabilityProposal is the human verdict op (design §3.3, mirrors augur's " +
+			"apply-time step-8 guard refuses an update/tombstone of a protected root but skips creates, so it " +
+			"is not itself a scope check on a proposed grant; the independent re-check is the approve-time " +
+			"re-validation, which re-runs the materializer server-side against the requester's live held " +
+			"permissions. SubmitCapabilityProposal is the human-authored counterpart to that whole capture pair: " +
+			"a capability-gated operator submits an artifact they composed themselves (the Weaver Target Studio's " +
+			"canvas, weaver-target-studio-design.md §6.4) directly, in ONE op, with no claim indirection — there is " +
+			"no reasoning call to dispatch, so no RequestCapabilityAuthoring write-ahead and no " +
+			"vtx.capabilityauthorclaim handle stand between the author and the proposal. It mints the proposal " +
+			"vertex plus every aspect the capture pair would have written, taking {proposalId, kind, content, " +
+			"target{mode,packageName,baseVersion,newVersion}, rationale, validation{state,report,deltaPreview}, " +
+			"intent?} as ordinary top-level payload fields (never a JSON result blob — there is no adapter Detail " +
+			"to unwrap here). The submitter is the TRUSTED actor (op.actor, never a payload field): it becomes " +
+			".request.requesterId and the requestedBy link target, so the no-orphan invariant the capture pair " +
+			"establishes holds identically. The SAME §5 record-time boundary decides the verdict — review.state = " +
+			"pending only when kind is an enabled artifact kind AND the caller-supplied validation.state is " +
+			"'valid' (the operator's client runs pkgmgr.ValidateCapabilityArtifact before submitting, exactly as " +
+			"the bridge and ReviewCapabilityProposal's approve leg both do); otherwise the proposal is recorded " +
+			"review.state=invalid with an auditable invalidReason, never dropped. The confidence-range check does " +
+			"NOT apply — a human author produces no model confidence — so .confidence.score is the -1.0 " +
+			"absent-sentinel a decode-failed record already writes, and .provenance carries source='operator' " +
+			"with the four model fields empty. Unlike RecordCapabilityProposal, a malformed payload here DOES " +
+			"fail() the op: that op must never fail post-Ack because the bridge has already acknowledged the " +
+			"external event, whereas an operator submitting directly gets the rejection synchronously and has " +
+			"written nothing. A repeated proposalId cannot overwrite a live proposal — every mutation is a " +
+			"create, and the commit batch's CreateOnly conditioning rejects the whole op (Contract #3 §3.2), the " +
+			"same duplicate-id posture RequestCapabilityAuthoring already has. Review/approve/apply are " +
+			"unchanged: an operator-authored proposal enters the identical queue and passes the identical human " +
+			"gate, so the studio can never bypass review. ReviewCapabilityProposal is the human verdict op (design §3.3, mirrors augur's " +
 			"ReviewProposal): a capability-authorized operator flips a PENDING proposal to approved or " +
 			"rejected, addressed directly by its own proposalId (no claim indirection — unlike " +
 			"RecordCapabilityProposal's Loom-minted opaque handle, a human reviewer already names the real " +
@@ -172,27 +226,35 @@ func capabilityProposalDDL() pkgmgr.DDLSpec {
 			"validation + human-approval invariant already held before either op ran; a redelivered " +
 			"MarkCapabilityProposalApplied is collapsed by the Contract #4 requestId tracker like any other op.",
 		Script: capabilityProposalDDLScript,
-		InputSchema: `{"type":"object","description":"RequestCapabilityAuthoring{proposalId,intent,contextRef?} | RecordCapabilityProposal — the bridge replyOp {externalRef,status,result} — | ReviewCapabilityProposal{proposalId,verdict,validation?}. The artifact/target/rationale/confidence/validation/provenance fields on a RecordCapabilityProposal are decoded from a single JSON result blob, never top-level payload fields.","properties":` +
-			`{"proposalId":{"type":"string","description":"RequestCapabilityAuthoring or ReviewCapabilityProposal — bare NanoID (no dots/wildcards/whitespace) naming vtx.capabilityproposal.<proposalId>. Caller-supplied."},` +
-			`"intent":{"type":"string","description":"RequestCapabilityAuthoring only — the plain-language capability request, e.g. 'a lens listing active providers by specialty'."},` +
+		InputSchema: `{"type":"object","description":"RequestCapabilityAuthoring{proposalId,intent,contextRef?} | SubmitCapabilityProposal{proposalId,kind,content,target,rationale,validation,intent?} | RecordCapabilityProposal — the bridge replyOp {externalRef,status,result} — | ReviewCapabilityProposal{proposalId,verdict,validation?}. The artifact/target/rationale/confidence/validation/provenance fields on a RecordCapabilityProposal are decoded from a single JSON result blob, never top-level payload fields; on a SubmitCapabilityProposal the equivalents ARE top-level fields (a human author has no adapter Detail to unwrap).","properties":` +
+			`{"proposalId":{"type":"string","description":"RequestCapabilityAuthoring, SubmitCapabilityProposal or ReviewCapabilityProposal — bare NanoID (no dots/wildcards/whitespace) naming vtx.capabilityproposal.<proposalId>. Caller-supplied."},` +
+			`"intent":{"type":"string","description":"RequestCapabilityAuthoring — the plain-language capability request, e.g. 'a lens listing active providers by specialty'. SubmitCapabilityProposal — optional; the queue's row label, defaulting to the rationale text when omitted."},` +
+			`"kind":{"type":"string","description":"SubmitCapabilityProposal only — the artifact kind: 'lens', 'grant', 'weaverTarget', 'loomPattern', 'vertexTypeDDL' or 'opMeta'. Any other value records the proposal review.state=invalid (auditable, never a hard reject)."},` +
+			`"content":{"type":"string","description":"SubmitCapabilityProposal only — the artifact body the operator composed, the same JSON string shape RecordCapabilityProposal's result.content carries for that kind."},` +
+			`"target":{"type":"object","description":"SubmitCapabilityProposal only — where the artifact lands: {mode, packageName?, baseVersion?, newVersion?}, the same shape RecordCapabilityProposal decodes from its result blob. mode is REQUIRED and non-empty: unlike the bridge replyOp (which can never fail post-Ack and so records an empty target invalid), this op rejects the submission outright."},` +
+			`"rationale":{"type":"string","description":"SubmitCapabilityProposal only — the operator's own justification for the artifact, stored verbatim on .rationale.text (the human counterpart to the model's rationale)."},` +
 			`"contextRef":{"type":"string","description":"RequestCapabilityAuthoring only — an optional pointer to bounded context the reasoning call hydrates (opaque to this DDL)."},` +
 			`"externalRef":{"type":"string","description":"RecordCapabilityProposal only — the bare Loom instanceKey handle CreateAuthoringClaim minted; the op resolves the real proposal vertex via vtx.capabilityauthorclaim.<externalRef>.target (never treated as the proposal's own id)."},` +
 			`"status":{"type":"string","description":"RecordCapabilityProposal only — the adapter's terminal outcome: completed (the model proposed an artifact) or failed (a modeled refusal — stored invalid, never dispatchable)."},` +
 			`"result":{"type":"string","description":"RecordCapabilityProposal only — the model's structured-output proposal as a JSON string {kind, content, target:{mode,packageName,baseVersion?,newVersion?}, rationale, confidence, validation:{state,report?,deltaPreview?}, provenance:{model?,promptHash?,catalogHash?,reasonedAt?}} — the opaque adapter Detail. Required when status=completed; carried verbatim as the rationale on a refusal. validation.state is the ALREADY-COMPUTED §5 verdict (pkgmgr.ValidateCapabilityArtifact, run by the trusted caller before submission — the script does not itself re-run the parser/validateAll). kind enables 'lens', 'grant', 'weaverTarget', 'loomPattern', 'vertexTypeDDL', or 'opMeta'; any other value, or a validation.state other than 'valid', or an out-of-range confidence, or an undecodable result stores the proposal review.state=invalid (auditable, never a hard reject)."},` +
 			`"verdict":{"type":"string","description":"ReviewCapabilityProposal only — the operator's verdict on a pending proposal: 'approve' (re-validated against the §5 boundary via the fresh validation payload field, fail-closing to invalid if it no longer validates) or 'reject'. The reviewer is the trusted submitting actor (op.actor) and the stamp is the envelope submit time; neither is a payload field."},` +
-			`"validation":{"type":"object","description":"ReviewCapabilityProposal, approve verdict only — the FRESH §5 verdict {state,report?} the caller computed by re-running pkgmgr.ValidateCapabilityArtifact against the CURRENT catalog/registry immediately before submitting (record-time and approve-time can drift). state must be exactly 'valid' or the approve fail-closes to invalid; ignored on a reject verdict."},` +
+			`"validation":{"type":"object","description":"ReviewCapabilityProposal (approve verdict only) and SubmitCapabilityProposal — the §5 verdict {state,report?,deltaPreview?} the trusted caller computed by running pkgmgr.ValidateCapabilityArtifact against the CURRENT catalog/registry immediately before submitting (the script has no parser/registry access of its own). state must be exactly 'valid': on an approve a missing/stale verdict fail-closes to invalid, and on a submit the proposal is recorded review.state=invalid. Ignored on a reject verdict."},` +
 			`"packageKey":{"type":"string","description":"MarkCapabilityProposalApplied only — the vtx.package.<id> the caller's separate F-004 Installer.Apply produced (pkgmgr.ApplyResult.PackageKey). Verified live (a .manifest aspect must exist) and its recorded name must match this proposal's own target.packageName before it is recorded as the appliedAs link target."},` +
 			`"installRequestId":{"type":"string","description":"MarkCapabilityProposalApplied only — a caller-supplied audit pointer to the install/upgrade op that applied the artifact (opaque to this DDL). Stored verbatim as appliedByOp."}},` +
 			`"required":["proposalId"]}`,
 		OutputSchema: `{"type":"object","properties":{"primaryKey":{"type":"string","description":"vtx.capabilityproposal.<id> of the created/updated/reviewed/applied proposal. The recorded review.state (pending|invalid|approved|rejected|applied) is read from the proposal's .review aspect, not the op response."}}}`,
 		FieldDescription: map[string]string{
-			"proposalId":       "Bare NanoID naming the proposal vertex (RequestCapabilityAuthoring, ReviewCapabilityProposal, MarkCapabilityProposalApplied).",
-			"intent":           "The plain-language capability request (RequestCapabilityAuthoring).",
+			"proposalId":       "Bare NanoID naming the proposal vertex (RequestCapabilityAuthoring, SubmitCapabilityProposal, ReviewCapabilityProposal, MarkCapabilityProposalApplied).",
+			"intent":           "The plain-language capability request (RequestCapabilityAuthoring); the optional queue row label defaulting to the rationale (SubmitCapabilityProposal).",
+			"kind":             "The artifact kind the operator composed: lens, grant, weaverTarget, loomPattern, vertexTypeDDL or opMeta (SubmitCapabilityProposal).",
+			"content":          "The artifact body the operator composed, same shape as the model's result.content for that kind (SubmitCapabilityProposal).",
+			"target":           "Where the artifact lands: {mode, packageName?, baseVersion?, newVersion?}; mode is required and non-empty (SubmitCapabilityProposal).",
+			"rationale":        "The operator's own justification for the artifact (SubmitCapabilityProposal).",
 			"externalRef":      "The bare Loom instanceKey handle CreateAuthoringClaim minted; resolved to the real proposal vertex via the claim's .target aspect (RecordCapabilityProposal).",
 			"status":           "The bridge's terminal outcome: completed or failed (RecordCapabilityProposal).",
 			"result":           "The model's proposal as a JSON string, decoded for kind/content/target/rationale/confidence/validation*/provenance* (RecordCapabilityProposal).",
 			"verdict":          "The operator's verdict on a pending proposal: approve or reject (ReviewCapabilityProposal).",
-			"validation":       "The fresh §5 re-validation verdict {state,report?} computed by the caller before submission; required for an approve to succeed (ReviewCapabilityProposal).",
+			"validation":       "The §5 verdict {state,report?} computed by the caller before submission; must be 'valid' for an approve to succeed (ReviewCapabilityProposal) or for a submitted proposal to enter pending (SubmitCapabilityProposal).",
 			"packageKey":       "The vtx.package.<id> the caller's separate F-004 apply produced; verified live + name-matched against target.packageName before being recorded as the appliedAs link target (MarkCapabilityProposalApplied).",
 			"installRequestId": "A caller-supplied audit pointer to the install/upgrade op that applied the artifact; stored verbatim as appliedByOp (MarkCapabilityProposalApplied).",
 		},
@@ -205,6 +267,22 @@ func capabilityProposalDDL() pkgmgr.DDLSpec {
 				},
 				ExpectedOutcome: "Mints vtx.capabilityproposal.capPropOneHJKMNPQRST with root {} (D5), the .request " +
 					"aspect {requesterId: op.actor, intent, contextRef}, and the requestedBy link. No .artifact/.review yet.",
+			},
+			{
+				Name: "SubmitCapabilityProposal — an operator submits a lens they composed in the studio",
+				Payload: map[string]any{
+					"proposalId": "capPropStudioHJKMNPQ",
+					"kind":       "lens",
+					"content":    `{"canonicalName":"activeProvidersBySpecialty","adapter":"nats-kv","bucket":"active-providers","spec":"MATCH (p:provider) RETURN p.key AS key"}`,
+					"target":     map[string]any{"mode": "newPackage"},
+					"rationale":  "the on-call roster needs a specialty cut no installed lens projects",
+					"validation": map[string]any{"state": "valid"},
+				},
+				ExpectedOutcome: "Mints vtx.capabilityproposal.capPropStudioHJKMNPQ with every aspect the capture pair writes, " +
+					"in one op and with no claim indirection: .request {requesterId: op.actor, intent: the rationale}, the requestedBy " +
+					"link, .artifact/.target/.rationale, .confidence.score = -1.0 (no model confidence), .validation, " +
+					".provenance {source: 'operator'}, and review.state = pending. An unenabled kind or a non-'valid' " +
+					"validation records review.state = invalid instead; a proposalId already in use rejects the whole op.",
 			},
 			{
 				Name: "RecordCapabilityProposal — a valid lens artifact (already §5-validated by the caller)",
@@ -261,7 +339,9 @@ func capabilityProposalDDL() pkgmgr.DDLSpec {
 // capabilityProposalDDLScript handles the matched pair
 // RequestCapabilityAuthoring (mints the proposal write-ahead) +
 // RecordCapabilityProposal (records a proposed artifact + its
-// already-computed §5 verdict). Known-key reads only.
+// already-computed §5 verdict), the single-op human counterpart
+// SubmitCapabilityProposal, and the review/apply verdict ops. Known-key reads
+// only; SubmitCapabilityProposal reads nothing at all.
 const capabilityProposalDDLScript = `
 def make_vtx(key, cls, data):
     return {"op": "create", "key": key,
@@ -378,6 +458,104 @@ def execute(state, op):
         events = [
             {"class": "capabilityAuthor.requested",
              "data": {"proposalKey": proposal_key, "requesterId": requester, "intent": intent}},
+        ]
+        return {"mutations": mutations, "events": events, "response": {"primaryKey": proposal_key}}
+
+    if ot == "SubmitCapabilityProposal":
+        # The human-authored counterpart to the RequestCapabilityAuthoring /
+        # RecordCapabilityProposal capture pair (weaver-target-studio-design.md
+        # §6.4): a capability-gated operator submits an artifact they composed
+        # themselves, in ONE op. There is no reasoning call to dispatch, so
+        # there is no claim handle to resolve and no write-ahead request to
+        # require — this op mints the proposal vertex and every aspect the pair
+        # would have written between them. It performs NO kv.Read of any kind:
+        # a proposalId already in use is refused by the commit batch's
+        # CreateOnly conditioning on the vertex create (Contract #3 §3.2), not
+        # by a read-before-create probe, so there is nothing to declare in
+        # contextHint.reads/optionalReads.
+        proposal_id = required_bare_id(p, "proposalId")
+        kind = required_string(p, "kind")
+        content = required_string(p, "content")
+        rationale = required_string(p, "rationale")
+
+        target = {}
+        if hasattr(p, "target") and p.target != None and type(p.target) == type({}):
+            target = p.target
+        # Where the artifact lands is not optional. RecordCapabilityProposal
+        # tolerates an empty target because it must never fail() post-Ack — it
+        # records the proposal invalid instead. This op CAN reject, so it does:
+        # an empty target.mode would otherwise mint a proposal that only fails
+        # later, at review or apply, with nothing naming the omission.
+        target_mode = proposal_string(target, "mode")
+        if len(target_mode.strip()) == 0:
+            fail("InvalidArgument: target.mode: required non-empty string (where the artifact lands)")
+        validation = {}
+        if hasattr(p, "validation") and p.validation != None and type(p.validation) == type({}):
+            validation = p.validation
+
+        # The review queue labels every row from .request.intent regardless of
+        # which lane authored it. An operator's rationale IS their statement of
+        # intent, so it stands in when no explicit intent is supplied.
+        intent = optional_string_attr(p, "intent").strip()
+        if intent == "":
+            intent = rationale
+
+        author = op.actor
+        author_type, author_id = parts_of(author, "actor", "")
+        proposal_key = "vtx.capabilityproposal." + proposal_id
+        requestedby_lnk = "lnk.capabilityproposal." + proposal_id + ".requestedBy." + author_type + "." + author_id
+
+        validation_state = proposal_string(validation, "state")
+        validation_report = proposal_string(validation, "report")
+
+        # The SAME §5 boundary RecordCapabilityProposal applies, minus the
+        # confidence range: a human author produces no model confidence, so
+        # .confidence.score carries the -1.0 absent-sentinel that op's
+        # decode-failure path already writes rather than a fabricated score.
+        # Unlike that op, a malformed payload here fail()s outright (the
+        # required_* checks above) — there is no bridge Ack to protect, and the
+        # operator learns synchronously with nothing written.
+        review_state = "pending"
+        invalid_reason = ""
+        if kind not in ENABLED_KINDS:
+            review_state = "invalid"
+            invalid_reason = "artifact kind not enabled in this increment: " + kind
+        elif validation_state != "valid":
+            review_state = "invalid"
+            if validation_report != "":
+                invalid_reason = "materializer validation failed: " + validation_report
+            else:
+                invalid_reason = "materializer validation failed: no valid verdict supplied"
+
+        mutations = [
+            make_vtx(proposal_key, "capabilityproposal", {}),
+            make_aspect(proposal_key, "request", "capabilityAuthor.request",
+                        {"requesterId": author, "intent": intent, "contextRef": ""}),
+            make_link(requestedby_lnk, proposal_key, author, "requestedBy", "requestedBy", {}),
+            make_aspect(proposal_key, "artifact", "capabilityAuthor.artifact",
+                        {"kind": kind, "content": content}),
+            make_aspect(proposal_key, "target", "capabilityAuthor.target",
+                        {"mode": target_mode,
+                         "packageName": proposal_string(target, "packageName"),
+                         "baseVersion": proposal_string(target, "baseVersion"),
+                         "newVersion": proposal_string(target, "newVersion")}),
+            make_aspect(proposal_key, "rationale", "capabilityAuthor.rationale", {"text": rationale}),
+            make_aspect(proposal_key, "confidence", "capabilityAuthor.confidence", {"score": -1.0}),
+            make_aspect(proposal_key, "validation", "capabilityAuthor.validation",
+                        {"state": validation_state, "report": validation_report,
+                         "deltaPreview": proposal_string(validation, "deltaPreview"),
+                         "checkedAt": op.submittedAt}),
+            make_aspect(proposal_key, "provenance", "capabilityAuthor.provenance",
+                        {"source": "operator", "model": "", "promptHash": "",
+                         "catalogHash": "", "reasonedAt": ""}),
+            make_aspect(proposal_key, "review", "capabilityAuthor.review",
+                        {"state": review_state, "invalidReason": invalid_reason,
+                         "reviewedAt": "", "appliedAt": "", "appliedByOp": ""}),
+        ]
+        events = [
+            {"class": "capabilityAuthor.proposalRecorded",
+             "data": {"proposalKey": proposal_key, "kind": kind,
+                      "reviewState": review_state, "source": "operator"}},
         ]
         return {"mutations": mutations, "events": events, "response": {"primaryKey": proposal_key}}
 
@@ -506,7 +684,7 @@ def execute(state, op):
                         {"state": validation_state, "report": validation_report,
                          "deltaPreview": validation_delta_preview, "checkedAt": op.submittedAt}),
             make_aspect(proposal_key, "provenance", "capabilityAuthor.provenance",
-                        {"model": model, "promptHash": prompt_hash,
+                        {"source": "ai", "model": model, "promptHash": prompt_hash,
                          "catalogHash": catalog_hash, "reasonedAt": reasoned_at}),
             make_aspect(proposal_key, "review", "capabilityAuthor.review",
                         {"state": review_state, "invalidReason": invalid_reason,

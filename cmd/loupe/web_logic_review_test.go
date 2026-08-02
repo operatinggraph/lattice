@@ -62,6 +62,8 @@ func TestConfidenceBand(t *testing.T) {
 	}{
 		{nil, "unknown"},
 		{"0.9", "unknown"}, // a non-number never bands as a real confidence
+		{-1.0, "unknown"},  // the absent-sentinel is not a low-confidence verdict
+		{1.5, "unknown"},   // nor is an out-of-range score a high-confidence one
 		{0.0, "low"},
 		{0.49, "low"},
 		{0.5, "med"},

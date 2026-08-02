@@ -24,13 +24,25 @@ const CapabilityAuthorContextBucket = "capability-author-context"
 // neighbor-projected: it anchors on ONE capabilityproposal vertex per
 // reprojection ($actorKey), the same single-anchor no-hop shape
 // packages/augur's augurDispatchPending lens uses. missing_authoring is true
-// while the proposal's OWN .claim aspect is absent (CreateAuthoringClaim
-// hasn't run yet) — a null-safe `= null` presence test (the full engine's
-// documented null-test form; never IS NULL, per packages/lease-signing's
-// lenses.go note). Once CreateAuthoringClaim writes the create-only .claim
-// aspect, the SAME row reprojects missing_authoring=false, closing the gap —
-// no negative/filter-retraction primitive needed (a single-row column
-// overwrite, mirroring augurDispatchPending's approved→dispatched flip).
+// while the proposal has NEITHER a .claim aspect (CreateAuthoringClaim hasn't
+// run) NOR a .artifact aspect (nobody has authored one) — null-safe `= null`
+// presence tests (the full engine's documented null-test form; never IS NULL,
+// per packages/lease-signing's lenses.go note). Once CreateAuthoringClaim
+// writes the create-only .claim aspect, the SAME row reprojects
+// missing_authoring=false, closing the gap — no negative/filter-retraction
+// primitive needed (a single-row column overwrite, mirroring
+// augurDispatchPending's approved→dispatched flip).
+//
+// The .artifact half of that conjunction is what keeps the HUMAN authoring
+// lane out of the AI lane's dispatch. A SubmitCapabilityProposal proposal is
+// born with .request and .artifact but deliberately no .claim — on a
+// claim-only predicate it is indistinguishable from "reasoning not yet
+// dispatched", so this target would trigger the capabilityAuthor Loom pattern
+// against it: an unrequested reasoning call carrying the operator's own
+// rationale as the prompt, whose RecordCapabilityProposal reply would then
+// fail forever (its create-only aspect writes collide with the ones the
+// submit already committed). A proposal that already carries an artifact has
+// no authoring gap by definition, whoever wrote it.
 //
 // capabilityProposals is the FLAT operator review lens (design §3.5, the
 // Fire-1 checkpoint's remaining P5 read model) — one row per
@@ -100,17 +112,23 @@ const capabilityAuthorPendingSpec = `
 MATCH (p:capabilityproposal {key: $actorKey})
 RETURN
   p.key AS entityKey,
-  (p.claim.data.claimedAt = null) AS missing_authoring,
-  (p.claim.data.claimedAt = null) AS violating
+  ((p.claim.data.claimedAt = null) AND (p.artifact.data.kind = null)) AS missing_authoring,
+  ((p.claim.data.claimedAt = null) AND (p.artifact.data.kind = null)) AS violating
 `
 
 // capabilityProposalsSpec projects one row per capabilityproposal vertex,
 // keyed by the proposal's own key (the IntoKey default). Every aspect the
-// capture pair (RequestCapabilityAuthoring / RecordCapabilityProposal) can
-// write is surfaced so an operator sees the full episode lifecycle — a
-// request with no artifact yet (reasoning in flight) projects cleanly with
-// null artifact/review columns, the same claim-in-flight shape
-// augurProposals documents.
+// capture pair (RequestCapabilityAuthoring / RecordCapabilityProposal) or the
+// single-op human path (SubmitCapabilityProposal) can write is surfaced so an
+// operator sees the full episode lifecycle — a request with no artifact yet
+// (reasoning in flight) projects cleanly with null artifact/review columns,
+// the same claim-in-flight shape augurProposals documents.
+//
+// `source` is what a review queue badges origin from: 'ai' for the
+// bridge-recorded lane, 'operator' for a directly-submitted human artifact. It
+// projects null for a proposal recorded before the field existed and for one
+// whose reasoning is still in flight — in both cases no artifact has been
+// authored yet or the only author available was the AI.
 const capabilityProposalsSpec = `MATCH (p:capabilityproposal)
 RETURN
   p.key AS key,
@@ -131,6 +149,7 @@ RETURN
   p.validation.data.report AS validationReport,
   p.validation.data.deltaPreview AS validationDeltaPreview,
   p.validation.data.checkedAt AS validationCheckedAt,
+  p.provenance.data.source AS source,
   p.provenance.data.model AS model,
   p.provenance.data.promptHash AS promptHash,
   p.provenance.data.catalogHash AS catalogHash,

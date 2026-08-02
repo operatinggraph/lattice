@@ -12,7 +12,7 @@ import { $, el, demoHide, api, setStatus, toast } from "../api.js";
 import { replaceRoute } from "../router.js";
 import { renderDoc, keyLinkEl } from "../render.js";
 import {
-  kindGlyph, reviewStateClass, confidenceBand, agoFrom,
+  kindGlyph, reviewStateClass, confidenceBand, hasConfidenceScore, agoFrom,
   proposalRows, proposalDisplayState, augurProposalRows, augurDisplayState,
   applyOutcome, opRejected, errorText,
 } from "../logic/review.js";
@@ -130,7 +130,7 @@ function capabilityQueueCard(row) {
     meta.appendChild(el("span", null, row.targetMode + " " + row.targetPackageName +
       (row.targetNewVersion ? "@" + row.targetNewVersion : "")));
   }
-  if (typeof row.confidence === "number") {
+  if (hasConfidenceScore(row.confidence)) {
     const band = confidenceBand(row.confidence);
     meta.appendChild(el("span", "confidence-band " + band, "conf " + row.confidence.toFixed(2)));
   }
@@ -157,7 +157,7 @@ function augurQueueCard(row) {
   meta.appendChild(el("span", reviewStateClass(displayState), displayState));
   if (row.trigger) meta.appendChild(el("span", "review-glyph", row.trigger));
   if (row.proposedAction) meta.appendChild(el("span", null, row.proposedAction));
-  if (typeof row.confidence === "number") {
+  if (hasConfidenceScore(row.confidence)) {
     const band = confidenceBand(row.confidence);
     meta.appendChild(el("span", "confidence-band " + band, "conf " + row.confidence.toFixed(2)));
   }
@@ -542,7 +542,7 @@ function proposedOpSection(p) {
   }
   const meta = el("div", "review-card-meta");
   meta.appendChild(el("span", "review-glyph", p.proposedAction));
-  if (typeof p.confidence === "number") {
+  if (hasConfidenceScore(p.confidence)) {
     const band = confidenceBand(p.confidence);
     meta.appendChild(el("span", "confidence-band " + band, "conf " + p.confidence.toFixed(2)));
   }

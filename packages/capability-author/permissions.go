@@ -4,9 +4,9 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 
 // Permissions returns the package's permission vertices + grants.
 //
-// All three ops are granted to `operator` at scope:any — the same
-// operator-grant idiom augur/orchestration-base/lease-signing use for their
-// instanceOp/replyOp pairs:
+// Every op is granted to `operator` at scope:any — the same operator-grant
+// idiom augur/orchestration-base/lease-signing use for their instanceOp/replyOp
+// pairs:
 //
 //   - RequestCapabilityAuthoring — a human operator submits this. The design's
 //     standing posture narrows this to a distinct `identity.ai.*` agent's own
@@ -16,6 +16,12 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 //     action; it is the AI's narrower grant that remains to be seeded).
 //   - CreateAuthoringClaim — Loom's relay actor (operator-equivalent), the same
 //     idiom lease-signing's CreateLeaseServiceInstance uses.
+//   - SubmitCapabilityProposal — a human operator submits an artifact they
+//     composed themselves (the Weaver Target Studio's canvas), having run the
+//     §5 materializer client-side first. Same trust posture as
+//     RecordCapabilityProposal: this grant lets a caller put an artifact into
+//     the review queue, never through it — ReviewCapabilityProposal's human
+//     gate is unchanged and unbypassable from here.
 //   - RecordCapabilityProposal — the trusted submitter that has already run the
 //     §5 materializer (the bridge, in the full design); modeled here as
 //     operator-equivalent, mirroring augur's RecordProposal.
@@ -38,6 +44,12 @@ func Permissions() []pkgmgr.PermissionSpec {
 			OperationType: "CreateAuthoringClaim",
 			Scope:         "any",
 			Note:          "Authorizes Loom's relay actor to submit the escalation-dispatch instanceOp (design §3.4).",
+			GrantsTo:      []string{"operator"},
+		},
+		{
+			OperationType: "SubmitCapabilityProposal",
+			Scope:         "any",
+			Note:          "Authorizes a human operator to submit a capability artifact they composed themselves into the review queue, with no authoring-claim indirection (weaver-target-studio-design.md §6.4). The submitted §5 verdict is self-attested (the submitter is also the party a grant-kind scope check constrains), so the containment that matters is the APPROVE-time re-validation: cmd/loupe's freshCapabilityVerdict and cmd/lattice/capability's freshApprovalVerdict re-run pkgmgr.ValidateCapabilityArtifact server-side and, for kind=grant, read the requester's LIVE held permissions — which for this op is op.actor, the real submitter. The kernel's protected-key guard is NOT that backstop: it skips creates, and a grant artifact installs new vertices.",
 			GrantsTo:      []string{"operator"},
 		},
 		{
@@ -70,6 +82,7 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 	return []pkgmgr.OpMetaSpec{
 		{OperationType: "RequestCapabilityAuthoring"},
 		{OperationType: "CreateAuthoringClaim"},
+		{OperationType: "SubmitCapabilityProposal"},
 		{OperationType: "RecordCapabilityProposal"},
 		{OperationType: "ReviewCapabilityProposal"},
 		{OperationType: "MarkCapabilityProposalApplied"},
