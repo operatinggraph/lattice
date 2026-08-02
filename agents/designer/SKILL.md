@@ -432,6 +432,33 @@ tombstones. **Capability KV is a lens projection** (projection correctness = aut
   a *structural* fail-closed for the one lens class where a mistake would be a security defect, and it is
   worth a paragraph in "For Andrew"; it is also much stronger than "the algorithm is careful."
 
+- **A removal signal is only meaningful at the granularity every CONSUMER checks it — go read what each
+  one tests `isDeleted` ON.** The retraction reflex above asks *"does a retraction transport exist?"*.
+  This one asks the next question: *"does the consumer OBSERVE it at the granularity I am emitting?"* —
+  and it is the difference between a fix and a **converged-but-wrong state with a success signal on it**,
+  which is strictly worse than the defect it replaces. (Trialed 2026-08-02, the kernel-orphan retirement
+  design: I designed per-**aspect** tombstoning and called partial shrink "the more common shape". It is
+  — and it is the one granularity nothing honours. `processor/ddl_cache.go:191` tests `isDeleted` on the
+  meta **root** only, then reads `.script` / `.permittedCommands` / `.sensitive` into anonymous structs
+  with **no `isDeleted` field**; because a Lattice tombstone deliberately **preserves the body**
+  (`step8_commit.go:414-418`), a "retired" script still unmarshals and keeps executing forever, while
+  reconcile converges and `verify-kernel` reports clean. Worse, `refractor/health/registry_probe.go:201`
+  counts a lens declared from its **root** while `lens/corekv_source.go:519-528` removes the lens on a
+  `.spec` tombstone — so the aspect-level design would have *created* the latched red health card
+  (`d040e00a`) it cited as a reaper it composed with.) **The check:** for every entity you propose
+  tombstoning/retracting/disabling, list its consumers and, per consumer, cite the line that reads the
+  flag and the granularity it reads it at. Where a body-preserving tombstone meets a reader that never
+  looks at the flag, the signal is invisible — narrow the design to the granularity they all honour, and
+  file the consumer fix as the trigger that unblocks the rest. Two corollaries from the same fire:
+  (1) **check what a partial-removal design does on a ROUTINE edit, not just the removal you have in
+  mind** — a conditional built set (`primordial.go:1094-1114` branches a lens's aspects on its adapter)
+  meant an ordinary `nats-kv → postgres` migration would have tombstoned live aspects of a live lens;
+  (2) **a claimed surviving POPULATION must be checked against whatever forces an environment reset** — I
+  asserted Story 4.7's retired DDLs were still sitting in long-lived buckets without opening
+  `nanoid.go:461-471`, whose version gate refuses to boot and sends the operator to `make down`, which
+  had force-wiped exactly that population long ago. A demand case resting on "these are still out there"
+  is a hypothesis about every clearing mechanism you have not read.
+
 **Run the pre-build gates you write into your own designs — "ratified" ≠ "build-ready."** If a design
 self-flags a pre-build adversarial / `bmad-party-mode` pass (a deferred gate), that pass is a **Designer-lane
 obligation**: run it and **record it as run** before the design is build-ready. Do not leave it dangling for
