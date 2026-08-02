@@ -1671,10 +1671,16 @@ function wireStudioCard(s) {
 //
 // CreateInstructor/SetInstructorProfile are operator-only in
 // packages/wellness-domain/permissions.go (no frontOfHouse grant, unlike
-// CreateStudio) — but this FE's staff session submits as operator-equivalent
-// (same standing as clinic-app's CreateProvider precedent), so the form needs
-// no workplace-confinement gate: isStaff() already decides whether this tab
-// is reachable at all.
+// CreateStudio): every write submits under the signed-in session's OWN
+// token (submitOp, above), so a front-desk-only (frontOfHouse) session gets
+// AuthDenied here by design — this surface reaches the Gateway op the same
+// way CreateStudio does, but only an operator-held session can actually
+// clear it. That mirrors clinic-domain's CreateProvider, which the package
+// header there deliberately keeps operator-only too ("front-desk cannot
+// create the provider entity a bind would target, so the grant would add
+// only attack surface"). No workplace-confinement gate is needed either way:
+// isStaff() decides whether this TAB is reachable, not whether the op
+// succeeds.
 
 // renderNewInstructorForm populates the optional studio picker with the
 // studios already loaded for this view, so opening the form never issues its
