@@ -393,6 +393,27 @@ tombstones. **Capability KV is a lens projection** (projection correctness = aut
   Every sentence of the form *"just pass X in"* / *"the same Y without Z"* / *"reuse it for W"* is an
   unopened mechanism until you have opened the file.
 
+- **A container-level default applies at instance CREATE/UPDATE time — so the pre-existing population is
+  exactly the one your policy cannot reach, and that population is usually the one the design exists
+  for.** When a design's fix is "declare the policy once on the container and let every instance inherit
+  it" (a stream limit inherited by consumers, a bucket default inherited by keys, a schema default
+  inherited by rows, a config default inherited by processes), the inheritance is almost always evaluated
+  **when the instance is created or updated** — never retroactively swept over instances that already
+  exist. Go read the update path and confirm which it is; do not infer it from the fact that the
+  container-level setter exists. (Trialed 2026-08-02, the edge-sync orphan design: the draft was ONE
+  increment — set `ConsumerLimits.InactiveThreshold` on the SYNC stream and every durable inherits a
+  bounded lifetime. `nats-server@v2.14.0` `stream.go:2417-2441` proved a limits change only *validates*
+  that no existing consumer **exceeds** the new limit; a consumer sitting at `0` does not exceed, passes,
+  and keeps `0` forever. A live client re-attaches and inherits — but an **orphan by definition never
+  re-attaches**, so the draft's single increment provably could not reach the orphan population it was
+  written for. A second, non-destructive backfill increment exists only because that one file was
+  opened.) The tell is a design sentence of the form *"set it once and everything inherits"* — ask
+  **"everything, or everything from now on?"**, and if it is the latter, name the pre-existing set and
+  say whether it is the target. Corollary: a **backfill that only makes instances CAPABLE of expiring**
+  (an update) is categorically safer than one that decides which are dead (a delete) — it has no verdict
+  to get wrong and no state to lose, so none of the enumeration-trust hazard that governs a delete-sweep
+  applies. Prefer that shape whenever the container can be made the authority.
+
 - **A handed-down MEASUREMENT is a claim about a quantity — check WHICH quantity before it becomes a
   premise, and count the instances the bad outcome needs.** The "ground the failure mechanism in code"
   reflex above catches a misstated *mechanism*; this one catches a correctly-measured number whose
