@@ -16,8 +16,15 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 // is what the browser needs to do before My Classes can show a real balance
 // instead of "no charges yet" — a front-desk (or self-service) act, so it
 // grants frontOfHouse and needs a descriptor a client can render. The voice
-// is STAFF-standing (AuthContext "standing"), mirroring cafe-ledger's
-// CreditCafeAccount.
+// modeled here is STAFF-standing (AuthContext "standing"), mirroring
+// cafe-ledger's CreditCafeAccount — the staff-facing case, where a
+// front-desk actor opens the account for a MEMBER BEING VIEWED
+// (dispatch.targetField). The op ALSO carries a scope=self grant
+// (permissions.go) for wellness-app's own hand-coded FE (which submits
+// directly via submitOp, not through this descriptor) to open a member's OWN
+// account at self-service booking time; no descriptor-driven client exists
+// for wellness yet, so a second self-scope OpMeta variant isn't added here
+// until one does.
 func OpMetas() []pkgmgr.OpMetaSpec {
 	return []pkgmgr.OpMetaSpec{
 		{

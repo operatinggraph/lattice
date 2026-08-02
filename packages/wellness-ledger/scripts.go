@@ -66,6 +66,17 @@ def execute(state, op):
         identity_key = required_string(p, "identityKey")
         _, identity_id = parts_of(identity_key, "identityKey", "identity")
 
+        # Consumer self-scope (scope=self grant only): step 3 authorizes via
+        # authContext.target == actor (Contract #6); payload.identityKey IS
+        # the identity the account is opened for, so the script closes the
+        # gap with a direct field compare — no extra kv.Read, mirroring
+        # wellness-domain's CreateBooking/payload.booker check. Empty for
+        # the standing operator/frontOfHouse grant (scope=any never sets
+        # authContext), so this check is a no-op there.
+        # authcontext-target: (payload-bind) the target must equal payload.identityKey
+        if op.authContextTarget != "" and op.authContextTarget != identity_key:
+            fail("AuthDenied: a consumer may only open their OWN ledger account")
+
         # No-orphan invariant: the identity MUST be alive.
         if not vertex_alive(state, identity_key):
             fail("UnknownIdentity: " + identity_key)

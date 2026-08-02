@@ -15,6 +15,17 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 // anchored on a member identity, which carries no building, so there is no
 // location to workplace-confine front-desk staff to.
 //
+// WellnessCreateAccount ALSO grants `consumer` at scope=self (real-actor-
+// write-auth-e2e idiom, wellness-domain's CreateBooking self-scope
+// precedent): most bookings are self-service (Schedule's own Book button,
+// not a front-desk walk-in), so the account has to open at the SAME moment
+// a self-service booker's booking is created — the any-scope front-desk
+// grant alone would leave the majority of bookers without one.
+// `authContext.target == actor` is checked at step 3 (Contract #6); the
+// script separately requires payload.identityKey to BE that target
+// (scripts.go), the same gap CreateBooking's script closes for
+// payload.booker.
+//
 // Named WellnessCreateAccount rather than the bare CreateAccount every other
 // ledger package's CreateAccount uses: a standing grant matches on
 // operationType STRING EQUALITY alone (Contract #6 §240;
@@ -34,6 +45,12 @@ func Permissions() []pkgmgr.PermissionSpec {
 			Scope:         "any",
 			Note:          "Grants the operator and front-of-house staff the right to submit WellnessCreateAccount (opens the ledger account for a member). Unconfined: see package doc.",
 			GrantsTo:      []string{"operator", "frontOfHouse"},
+		},
+		{
+			OperationType: "WellnessCreateAccount",
+			Scope:         "self",
+			Note:          "Grants a consumer the right to open their OWN ledger account (identityKey must be the caller's own identity) — mirrors wellness-domain's CreateBooking self-scope grant.",
+			GrantsTo:      []string{"consumer"},
 		},
 		{
 			OperationType: "DebitAccount",

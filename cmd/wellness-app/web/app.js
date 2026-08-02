@@ -386,6 +386,40 @@ function ledgerBalanceLine(balanceCents) {
   return "Balance: $0.00 (paid in full)";
 }
 
+// ensureLedgerAccount best-effort opens a member's wellness ledger account
+// (WellnessCreateAccount) right after a booking succeeds — the earliest
+// moment a no-show fee or class-price charge could ever come due
+// (wellness-ledger's settlement targets read the member's account off a
+// lens join, so a charge with no account to post against never fires; see
+// permissions.go). selfScoped mirrors the booking call it follows: true for
+// the member's own self-service Book/waitlist button (consumer scope=self),
+// false for the front desk's assisted booking (frontOfHouse scope=any).
+//
+// Deliberately fire-and-forget from the caller's perspective: the booking
+// itself already succeeded, opening the account is a side effect the caller
+// never needs to observe, and AccountAlreadyExists (every booking after the
+// member's first) is the expected steady state, not a fault. Any rejection
+// or network error is swallowed — surfacing it would turn a successful
+// booking into a confusing error toast about a ledger the booker never asked
+// to see.
+async function ensureLedgerAccount(memberIdentityKey, selfScoped) {
+  try {
+    await opOrThrow(
+      {
+        operationType: "WellnessCreateAccount",
+        class: "wellnessaccount",
+        reads: [memberIdentityKey],
+        payload: { identityKey: memberIdentityKey },
+      },
+      "open the ledger account",
+      selfScoped,
+    );
+  } catch (_) {
+    // AccountAlreadyExists (the common case) or any other rejection — the
+    // booking already succeeded, so there is nothing for the caller to do.
+  }
+}
+
 // ---- toast ---------------------------------------------------------
 
 let toastTimer = null;
@@ -593,6 +627,7 @@ async function renderSchedule() {
           action === "waitlist" ? "join the waitlist" : "book the class",
           true,
         );
+        ensureLedgerAccount(bookerKey, true);
         toast(action === "waitlist" ? "Added to the waitlist." : "Booked.", true);
         setTimeout(renderSchedule, 700);
       } catch (e) {
@@ -1058,6 +1093,7 @@ async function bookMemberIn(se, bookerKey, leaseAppKey) {
     "book the member in",
     false,
   );
+  ensureLedgerAccount(bookerKey, false);
 }
 
 // bindSeatCancels wires the front desk's release-a-seat control. CancelBooking

@@ -1,5 +1,5 @@
 name: wellness-ledger
-version: 0.2.1
+version: 0.2.2
 description: |
   Wellness member payment ledger: the wellnessaccount vertex type (WellnessCreateAccount,
   independently-minted id, one per member identity via a .wellnessLedgerAccount
@@ -46,6 +46,9 @@ declares:
     - operationType: WellnessCreateAccount
       scope: any
       grantsTo: [operator, frontOfHouse]
+    - operationType: WellnessCreateAccount
+      scope: self
+      grantsTo: [consumer]
     - operationType: DebitAccount
       scope: any
       grantsTo: [operator]
