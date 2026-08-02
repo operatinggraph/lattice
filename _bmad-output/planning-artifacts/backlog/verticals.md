@@ -25,6 +25,11 @@ the row is `🚧 blocked-on:` it (a missing *lens* is package work, built here).
 | **A café credit renders as `$-21.59`** | `money()` (`app.js:179-182`) prefixes a sign-carrying amount, and the ledger pane never says whether a negative café balance is money owed or money held — live, Riley's account reads `Balance: $-21.59` after two counter payments. | Café | FE | ★ | XS | 📋 ready |
 | **A past visit sits open forever, unbilled** | 12 of 21 live appointments are past their `endsAt` and still `scheduled`/`confirmed`; the no-show fee posts only once a human hand-marks it. Follow-ups and Series each get an urgency-bucketed staff queue — a past-due-open visit gets only a `.past` CSS class (`app.js:3303`) scattered across the calendar. Transport is in-house: Weaver `@at`, already driving `appointmentReminders`. | Clinic | pkg + FE | ★★ | M | 📋 ready |
 | **clinic-domain's README still under-documents 4 shipped op surfaces** | The README's Operations/Inventory never mention `BindProviderIdentity` (+ its `identityClaim`/`providerClaim` guard aspects) or `CreatePatient`'s `identityClaim`/`patientClaim` guard, and the appointment op docs omit `CreateAppointment`'s `leaseAppKey`/`site` params and `SetAppointmentStatus`'s `noShowFeeCents` + terminal-status finality rule (all confirmed live in `ddls.go`). | Clinic | pkg | ★ | S | 📋 ready |
+| **A house tab can end up permanently unsettleable** | Two live leases (`XaFUBiTiyq6QPzk9YWUR`, `eMxUgBsMNcoKTw3zFjab`) hold a `.cafeOpenTab` guard for a tab open since 2026-07-20 that `cafeTabSettlement` can never project — its required `MATCH (t)-[:chargedTo]->(l:leaseapp)` (`lenses.go:211-212`) postdates those tabs, which carry only `openFor`. `OpenTab` then refuses `OpenTabAlreadyExists` forever, and only `Settle` clears the guard — which no surface can reach. | Café | pkg + FE | ★★ | M | 📋 ready |
+| **The console can't correct a mis-tapped charge** | `VoidCharge` has shipped since 2026-07-22 (operator/frontOfHouse only, `ddls.go:43`) with zero front-end reach — no occurrence in `cmd/cafe-app/web/app.js`. cafe-domain's own DDL names the duplicate tap as the motivating case (`ddls.go:65`), yet the only correction on offer is settling the wrong total and crediting it back. | Café | FE | ★★ | XS–S | 📋 ready |
+| **Nothing ever chases a tab left open** | cafe-domain ships one Weaver target (settlement) and no temporal convergence, so a house tab sits open and unbilled indefinitely — Riley's ran 2026-07-28 → 07-31 with nobody nudged. The in-house `@at` transport is already proven twice next door (`clinic-reminders`, `wellness-reminders`). | Café | pkg | ★★ | M | 📋 ready |
+| **The POS lease picker names nobody** | `fillLeaseSelect` (`app.js:338-353`) labels every option `shortKey(leaseAppKey)`, so the barista rings a customer up against `Lh1ry1…tSrm`. The front-desk grid already resolves those same leases to a resident name (`/api/residents`) and a unit address (`/api/frontdesk-lease-details`); the picker just never joins them. | Café | FE | ★★ | XS | 📋 ready |
+| **The café can't curate its own menu** | `CreateMenuItem` / `RetireMenuItem` (`ddls.go:265`) reach no UI anywhere, so the catalog exists only because `scripts/seed-showcase.go` mints it — adding a pastry or retiring one takes a code change. Price is immutable by design (a change is retire + re-create), which the pane has to make legible. | Café | FE | ★ | S | 📋 ready |
 
 **Explicitly descoped (ambitious-PO pass, 2026-07-09):** structured diagnosis/procedure coding (ICD/CPT),
 vitals, and e-prescribing were considered and deliberately NOT filed — a certified EHR is out of scope for a
@@ -44,10 +49,9 @@ dated run-logs live in git history. Rotate LoftSpace ↔ Clinic ↔ Café ↔ We
 **Wellness joined** 2026-07-09 (`cmd/wellness-app` shipped, live on :7802) — fold it into rotation; see
 [agents/vertical-po/SKILL.md](../../../agents/vertical-po/SKILL.md) §1.
 
-- **Rotation to date:** LoftSpace ×19, Clinic ×18, Café ×8, Wellness ×5.
+- **Rotation to date:** LoftSpace ×19, Clinic ×18, Café ×9, Wellness ×5.
 - **Method:** reuse the already-up shared stack (detect NATS :4222 / app :7788/:7799/:7801/:7802), drive the real flow via `/api/op` + the lens projections as the product owner, file scored items. All four apps exist + are exercisable live (`:7788` / `:7799` / `:7801` / `:7802`).
 - **Live-stack note:** a stale bootstrap JSON vs. a recreated Core KV was a recurring dev-loop trap (2026-07-03, 2026-07-04) that silently emptied reads; `make up` now self-heals it (`109f59a`, 2026-07-05) — re-verify empty-read reports as a real product bug first.
-- **2026-07-29:** Café — drove self-order + front-desk hats live; the demo world seeds no menu, the composition layer is installed by nothing, front of house can't name anyone; filed 3.
 - **2026-07-30:** Wellness — drove member, instructor + front-desk hats live; the staff console names nobody, a class's teacher and time are frozen, nothing charges; filed 4.
 - **2026-07-30:** LoftSpace — drove landlord, staff + 2 applicant hats live; an approved lease never leases the unit and the roster names nobody; filed 2.
 - **2026-07-31:** Clinic — drove patient, provider + front-desk hats live; no seeded visit ever completes and the provider hat can act on nothing; filed 4.
@@ -55,7 +59,8 @@ dated run-logs live in git history. Rotate LoftSpace ↔ Clinic ↔ Café ↔ We
 - **2026-08-01:** Wellness — drove member, instructor + front-desk hats live; My Classes hides the studio, and there is no waitlist, recurrence or reminder; filed 5.
 - **2026-08-01:** LoftSpace — drove tenant, landlord + front-desk hats live; browsable inventory is seven copies of one flat, rent never bills, six duplicate staff; filed 4 + broadened 1.
 - **2026-08-01:** Clinic — drove patient, provider + front-desk hats live; a booked visit hides its site, no provider is bookable, past visits never close out; filed 4.
-- **Next:** Café.
+- **2026-08-02:** Café — drove resident self-order/void/settle + front-desk hats live; two leases are permanently unsettleable, void + menu curation reach no UI; filed 5.
+- **Next:** Wellness.
 
 ## Done log — verticals (newest first)
 
