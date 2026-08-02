@@ -648,3 +648,97 @@ confirmed to **fail** against the pre-change derivation, so it pins the fix rath
 Increments 1–3 (the relevance gate, the eligibility swap, the pattern-directed derivation); the enumerator's
 caps and its `reportsTo` hop; `verify-claim-ceremony.go`'s convergence poll (its own row); any Contract
 amendment. Nothing is staged uncommitted.
+
+---
+
+## 14. Increment 1 fire brief (build note, 2026-08-02)
+
+**Scope sentence (§10, verbatim).** *"§4.2's five conjuncts wired at `projection/driver.go` /
+`projection/personal.go` (all defaulting broad); the three arms at `pipeline.go:1186/:1197/:1243` consult
+one shared gate; fix the stale `:1207-1209` comment; units + e2e (a)/(b)."*
+
+### 14.1 Verified touch-list (checked live; the §4/§10 line numbers had drifted)
+
+| File | Anchor (live) | What |
+|---|---|---|
+| `pipeline/pipeline.go` | new field beside `secureDecryptor:161`; new predicate beside `plainVertexRelevant:516-541` | `patternClosedOutput bool` (defaults **false**) + `SetPatternClosedOutput`; `actorAwareNarrowingLabels()` evaluating §4.2's conjunction; `actorAwareFanOutRelevant(types…)`; `vertexEventRelevant` |
+| `pipeline/pipeline.go:1174-1189` | aspect arm (`p.actorEnumerator != nil` → `evalAspectFanOut`) | ack-and-skip when eligible and the `ParseAspectKey` parent type ∉ labels |
+| `pipeline/pipeline.go:1190-1200` | link arm (→ `evalLinkFanOut`) | ack-and-skip when eligible and **neither** `ParseLinkKey` endpoint type ∈ labels |
+| `pipeline/pipeline.go:1243` | `if p.actorEnumerator == nil && !p.plainVertexRelevant(label)` | replaced by the shared `vertexEventRelevant(label)` |
+| `pipeline/pipeline.go:1207-1209` | stale comment on the empty-body `tombstone` ack | rewritten — the actor-aware pipeline does **not** emit a cap Delete here; the retraction path is the soft-delete (`evaluate.go:131-148`) |
+| `projection/driver.go:403-405` | `InstallActorAggregate` | `p.SetPatternClosedOutput(true)` beside `SetActorEnumerator` |
+| `projection/personal.go:129-130` | `InstallPersonalLens` | **no edit** — never setting the field is what keeps every personal lens broad (§14.2) |
+| `pipeline/actor_aware_relevance_internal_test.go` | new | conjunct table + per-arm skip/no-skip units |
+| `refractor/refractor_capability_relevance_gate_e2e_test.go` | new | e2e (a)/(b) with the gate **armed** through the real install gate |
+
+Design citations re-verified live: `useFullEngineBranches` at `pipeline.go:401-464` ✓ ·
+`NarrowedFilterEligible` at `:543-567` ✓ · `evaluateLinkFanOut`'s both-endpoint union at
+`evaluate.go:786-800` ✓ and its adjacency pre-apply at `:768-784` ✓ · `sweepEnrolment`'s three refusals at
+`driver.go:309-324` ✓ · `SetSweepPlan`/`Sweeper()` at `sweep.go:256-266` ✓ ·
+`IsPersonalLens` at `personal.go:26-28` ✓ · `SecureDecryptor.readPiiKeyEnvelope`'s
+`identityKey + ".piiKey"` at `secure.go:194-196` ✓. The arms sit at **:1174/:1190/:1243**, not
+:1186/:1197/:1243.
+
+### 14.2 The one narrowing, and why (scope-diff gate)
+
+The scope sentence says the conjuncts are *"wired at `driver.go` / `personal.go`"*, and §6 calls them
+*"four booleans on the pipeline set at installation"*. **Built instead as one lazily-evaluated predicate
+reading live pipeline fields, with exactly one new field (`patternClosedOutput`) set at `driver.go`.** Same
+conjunction, same fail-closed defaults — only the evaluation moment moves, so this narrows rather than
+substitutes.
+
+It has to move: activation order is `UseFullEngineBranches` (`cmd/refractor/main.go:845`) →
+`InstallActorAggregate` (`:920`) → **`SetSecureDecryptor` (`:989`)**. A snapshot taken inside
+`InstallActorAggregate` would read `secureDecryptor == nil` for **every** Secure Lens and narrow the one
+class §4.2 makes a conjunct to protect. `seedAnchorLabel` already documents this exact hazard
+(`pipeline.go:111-116`) and `seedAnchorFor` (`:488-499`) is the shipped lazy-evaluation precedent this
+mirrors. `personal.go` therefore needs no edit at all: `patternClosedOutput` defaults false, so a personal
+lens is broad because nothing ever set it — the fail-closed default doing its job rather than an
+easily-deleted negative assignment.
+
+`anchorType` is read from `p.actorEnumerator.actorType` (same package; the value
+`InstallActorAggregate` passes is `desc.AnchorType`, `driver.go:403`). `hasSweepPlan` is `p.sweeper != nil`.
+The secure conjunct pins the literal type `identity` — the decryptor's read is
+`vtx.identity.<id>.piiKey` (`secure.go:195`) and step 6's `sensitiveAspectScope` admits no other parent.
+
+**e2e (a) is the untightened form here.** §9's (a) ends *"and leaves every co-holder's row revision
+unchanged — the direct proof of Term B+C"*, which Increment 1 cannot deliver: a `holdsRole` link has both
+endpoint types in `capabilityRoles`' label set, so the gate keeps the full fan-out. §10 confirms it —
+Increment 3 is where (a) is *"tightened to co-holder-revision-unchanged"*. At Increment 1 (a) asserts
+AssignRole still projects U's grant with the gate armed.
+
+### 14.3 Increment order + green checks
+
+1. Predicate + field + setter, no call sites → `go build ./...`
+2. Units (conjunct table; personal lens never narrows) →
+   `go test ./internal/refractor/pipeline/ -run 'ActorAware' -count=1`
+3. Three arms + the stale comment → `go test ./internal/refractor/... -count=1`
+4. e2e (a)/(b)+skip → `go test ./internal/refractor/ -run RelevanceGate -count=1`
+5. Full suite (capability-plane change, wide blast radius) → `go test ./... -p 4`
+
+### 14.4 In-scope gotchas
+
+- **Fail-open on a parse failure.** A key that fails `ParseAspectKey`/`ParseLinkKey` must fall through to
+  the fan-out (which raises the real error), never be skipped.
+- **Empty vertex type ⇒ relevant**, mirroring `plainVertexRelevant:536`.
+- **The link arm's adjacency pre-apply is lost on a skip, and that is sound**: it is an ordering heal for
+  this pipeline's own reprojection (`evaluate.go:752-760`); the authoritative build is the dedicated
+  whole-stream adjacency consumer (`consumer/bootstrap.go:23-29`). No reprojection ⇒ nothing to order.
+- **Review depth**: capability-plane change ⇒ full 3-layer adversarial before admit, regardless of size.
+- No DDL/package/key change ⇒ no `verify-package-*`, no version bump, no `provision-readpath`.
+
+### 14.5 Adjacent finds
+
+- The three hand-wired capability e2es (`refractor_capability_{aspect,link}fanout_e2e_test.go`,
+  `ruleengine/full/bootstrap_e2e_test.go`) wire the pipeline field-by-field and never call
+  `InstallActorAggregate`, so the gate does **not** arm in them. Not a defect and not filed: it is the
+  fail-closed default demonstrating itself, and it is why 14.1 adds a *new* e2e that installs through the
+  real gate rather than retrofitting one of those.
+- No new board rows. The two soundness rows §13.5 filed (`ReferencedLabels` OPTIONAL/negated-`WHERE`
+  pass-1; the `nodeMatches` body-`class` label gate) remain the standing residuals and are untouched here.
+
+### 14.6 Non-goals
+
+Increments 2–3 (`NarrowedFilterEligible`'s eligibility swap and the `:550-561` comment rewrite; the
+pattern-directed derivation); the enumerator's caps and its `reportsTo` hop; any change to what the
+fan-out does once it runs; `verify-claim-ceremony.go`. Nothing staged uncommitted.
