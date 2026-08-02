@@ -3887,6 +3887,11 @@ async function submitWellnessBooking(ev) {
   submit.disabled = true;
   try {
     const optionalReads = session && session.capacity > 0 ? seatKeysFor(sessionKey, session.capacity) : [];
+    // Booker cells (wellness-domain's bookerSlotClaim, ddls.go) — the same
+    // per-covered-cell claim on the booker's own identity hub CreateBooking
+    // now claims everywhere, declared here the same way this file already
+    // declares its own providerSlotClaim/patientSlotClaim cells.
+    if (session) optionalReads.push(...slotClaimKeys(ctx.identityKey, session.startsAt, session.endsAt));
     const reply = await submitOp(
       "CreateBooking",
       "booking",

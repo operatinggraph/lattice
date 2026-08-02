@@ -33,13 +33,15 @@ func TestPackage_ManifestMatchesDefinition(t *testing.T) {
 // rather than reaching an install, where the same change is a silent capability
 // or read-model shift.
 //
-// Six of the sixteen DDLs are CreateOnly claim aspects (S4) — the slot, seat,
-// waitlist, booker, and the two instructor-binding claims. Each is the sole thing making
-// its uniqueness constraint hold, and none is reachable from a lens, so dropping
+// Eight of the eighteen DDLs are CreateOnly claim aspects (S4) — the studio,
+// instructor, and booker slot claims, the seat and waitlist claims, the
+// per-session booker guard, and the two instructor-binding claims. Each is
+// the sole thing making its uniqueness constraint hold, and none is
+// reachable from a lens, so dropping
 // one would not break a read: it would silently re-admit double-booking. That is
 // why they are pinned by name rather than counted.
 func TestPackage_StructurePins(t *testing.T) {
-	if got, want := len(Package.DDLs), 16; got != want {
+	if got, want := len(Package.DDLs), 18; got != want {
 		t.Errorf("DDLs: got %d, want %d", got, want)
 	}
 	if got, want := len(Package.Lenses), 7; got != want {
@@ -73,6 +75,8 @@ func TestPackage_StructurePins(t *testing.T) {
 		{"studioProfile", "meta.ddl.aspectType"},
 		{"sessionSchedule", "meta.ddl.aspectType"},
 		{"studioSlotClaim", "meta.ddl.aspectType"},
+		{"instructorSlotClaim", "meta.ddl.aspectType"},
+		{"bookerSlotClaim", "meta.ddl.aspectType"},
 		{"sessionSeatClaim", "meta.ddl.aspectType"},
 		{"sessionWaitlistClaim", "meta.ddl.aspectType"},
 		{"sessionBookerClaim", "meta.ddl.aspectType"},

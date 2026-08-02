@@ -685,9 +685,15 @@ func TestSetBookingAttendance_InstructorConfinedToTheirOwnClass(t *testing.T) {
 	mySession := ledSession("wdattendsessio000005", "wdattendstudio000005", "Mine Room", mineKey, "2026-07-08T09:00:00Z", "2026-07-08T09:30:00Z")
 	theirSession := ledSession("wdattendsessio000006", "wdattendstudio000006", "Their Room", theirsKey, "2026-07-08T09:00:00Z", "2026-07-08T09:30:00Z")
 
+	// Two DISTINCT bookers — mySession and theirSession run the exact same
+	// overlapping span at different studios (the fixture's point is testing
+	// instructor confinement, not booker uniqueness), and one booker claimed
+	// into both would now legitimately collide on bookerSlotClaim
+	// (BookerConflict, ddls.go).
 	booker := seedIdentity(t, ctx, conn, "BBWELLATTNDCNFHJKMNP")
+	theirBooker := seedIdentity(t, ctx, conn, "BBWELLATTNDCNFHJKMNQ")
 	myBooking, _ := createBooking(t, ctx, conn, cp, cons, "wdattendbookin000005", mySession, booker, "")
-	theirBooking, _ := createBooking(t, ctx, conn, cp, cons, "wdattendbookin000006", theirSession, booker, "")
+	theirBooking, _ := createBooking(t, ctx, conn, cp, cons, "wdattendbookin000006", theirSession, theirBooker, "")
 
 	// The instructor marks a booking on the class they lead.
 	testutil.PublishOp(t, conn, attendanceEnv(t, "wdattendmine00000001", myBooking, mySession, "attended", mineKey, instructorActorKey, "2026-07-08T09:05:00Z"))
@@ -2584,5 +2590,317 @@ func TestReleaseOrphanedBooking_ReleasesWaitlistSlotAfterSessionTombstoned(t *te
 	_, outcome := createBooking(t, ctx, conn, cp, cons, "wdwlbooking000005", otherSessionKey, bookerTwoKey, "")
 	if outcome != processor.OutcomeAccepted {
 		t.Fatalf("same booker on a different session after release outcome = %v, want Accepted", outcome)
+	}
+}
+
+// mkWdInstructor mints a bare CreateInstructor vertex, granting the caller's
+// capability doc CreateInstructor first — the shape TestReassignSession_
+// SwapsInstructor and TestSetBookingAttendance_InstructorConfinedToTheirOwnClass
+// each already duplicate locally; factored here for the instructorSlotClaim
+// tests below.
+func mkWdInstructor(t *testing.T, ctx context.Context, conn *substrate.Conn, cp *processor.CommitPath, cons jetstream.Consumer, label, name string) string {
+	t.Helper()
+	reqID := testutil.GenReqID(label)
+	testutil.PublishOp(t, conn, &processor.OperationEnvelope{
+		RequestID: reqID, Lane: processor.LaneDefault, OperationType: "CreateInstructor",
+		Actor: domainActorKey, SubmittedAt: "2026-07-07T12:00:00Z", Class: "instructor",
+		Payload: json.RawMessage(`{"displayName":"` + name + `"}`),
+	})
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
+	return "vtx.instructor." + nanoIDFromRequestID(reqID)
+}
+
+// createSessionWithInstructor mirrors createSession but names an instructor —
+// the raw-envelope shape TestReassignSession_SwapsInstructor already uses
+// inline, factored here for reuse.
+func createSessionWithInstructor(t *testing.T, ctx context.Context, conn *substrate.Conn, cp *processor.CommitPath, cons jetstream.Consumer, label, studioKey, instructorKey, name, startsAt, endsAt string, capacity int) (string, processor.MessageOutcome, *processor.OperationReply) {
+	t.Helper()
+	reqID := testutil.GenReqID(label)
+	payload, _ := json.Marshal(map[string]any{
+		"studio": studioKey, "instructor": instructorKey, "name": name,
+		"startsAt": startsAt, "endsAt": endsAt, "capacity": capacity,
+	})
+	env := &processor.OperationEnvelope{
+		RequestID:     reqID,
+		Lane:          processor.LaneDefault,
+		OperationType: "CreateSession",
+		Actor:         domainActorKey,
+		SubmittedAt:   "2026-07-07T12:00:00Z",
+		Class:         "session",
+		Payload:       payload,
+		ContextHint: &processor.ContextHint{
+			Reads: []string{studioKey, instructorKey},
+			OptionalReads: append(
+				wdSlotClaimKeys(t, studioKey, startsAt, endsAt),
+				wdSlotClaimKeys(t, instructorKey, startsAt, endsAt)...,
+			),
+		},
+	}
+	outcome, reply := testutil.SubmitAndAwaitReply(t, ctx, conn, cp, cons, env)
+	return "vtx.session." + nanoIDFromRequestID(reqID), outcome, reply
+}
+
+// TestCreateSession_RejectsInstructorDoubleBook proves instructorSlotClaim
+// (the providerSlotClaim mirror, verticals.md "One instructor can teach two
+// classes at once") catches the exact gap studioSlotClaim alone cannot: the
+// SAME instructor named at TWO DIFFERENT studios for an overlapping span.
+func TestCreateSession_RejectsInstructorDoubleBook(t *testing.T) {
+	ctx, conn := setupDomainEnv(t)
+	cp, cons := newDomainPipeline(t, ctx, conn, "instrdoublebook")
+
+	opDoc := domainCapDoc()
+	opDoc.PlatformPermissions = append(opDoc.PlatformPermissions,
+		processor.PlatformPermission{OperationType: "CreateInstructor", Scope: "any"})
+	testutil.SeedCapDoc(t, ctx, conn, opDoc)
+
+	instructorKey := mkWdInstructor(t, ctx, conn, cp, cons, "wdinstrdblinstr0001", "Solo")
+	studioA := createStudio(t, ctx, conn, cp, cons, "wdinstrdblstudioa001", "Room A")
+	studioB := createStudio(t, ctx, conn, cp, cons, "wdinstrdblstudiob001", "Room B")
+
+	_, first, _ := createSessionWithInstructor(t, ctx, conn, cp, cons, "wdinstrdblsessa0001",
+		studioA, instructorKey, "Morning Flow", "2026-07-08T09:00:00Z", "2026-07-08T09:30:00Z", 20)
+	if first != processor.OutcomeAccepted {
+		t.Fatalf("first CreateSession outcome = %v, want Accepted", first)
+	}
+
+	_, second, reply := createSessionWithInstructor(t, ctx, conn, cp, cons, "wdinstrdblsessb0001",
+		studioB, instructorKey, "Power Sculpt", "2026-07-08T09:15:00Z", "2026-07-08T09:45:00Z", 20)
+	if second != processor.OutcomeRejected {
+		t.Fatalf("same instructor at a DIFFERENT studio, overlapping span, outcome = %v, want Rejected (InstructorConflict)", second)
+	}
+	if reply.Error == nil || !strings.Contains(reply.Error.Message, "InstructorConflict") {
+		t.Errorf("rejection should be InstructorConflict, got %+v", reply.Error)
+	}
+}
+
+// TestTombstoneSession_ReleasesInstructorSlotCells proves TombstoneSession
+// releases the CURRENT instructor's slot cells too, not just the studio's —
+// read fresh via session_ledby_link (ddls.go), independent of whichever
+// standing path authorized the cancellation.
+func TestTombstoneSession_ReleasesInstructorSlotCells(t *testing.T) {
+	ctx, conn := setupDomainEnv(t)
+	cp, cons := newDomainPipeline(t, ctx, conn, "instrtombstone")
+
+	opDoc := domainCapDoc()
+	opDoc.PlatformPermissions = append(opDoc.PlatformPermissions,
+		processor.PlatformPermission{OperationType: "CreateInstructor", Scope: "any"})
+	testutil.SeedCapDoc(t, ctx, conn, opDoc)
+
+	instructorKey := mkWdInstructor(t, ctx, conn, cp, cons, "wdinstrtmbinstr0001", "Solo")
+	_, instructorID, _ := substrate.ParseVertexKey(instructorKey)
+	studioA := createStudio(t, ctx, conn, cp, cons, "wdinstrtmbstudioa001", "Room A")
+
+	sessionKey, outcome, _ := createSessionWithInstructor(t, ctx, conn, cp, cons, "wdinstrtmbsessa0001",
+		studioA, instructorKey, "Morning Flow", "2026-07-08T09:00:00Z", "2026-07-08T09:30:00Z", 20)
+	if outcome != processor.OutcomeAccepted {
+		t.Fatalf("CreateSession outcome = %v, want Accepted", outcome)
+	}
+	if !keyExists(t, ctx, conn, instructorKey+".slot20260708t090000z") {
+		t.Fatalf("expected instructorSlotClaim at 09:00")
+	}
+
+	tombstoneEnv := &processor.OperationEnvelope{
+		RequestID:     testutil.GenReqID("wdinstrtmbcancel001"),
+		Lane:          processor.LaneDefault,
+		OperationType: "TombstoneSession",
+		Actor:         domainActorKey,
+		SubmittedAt:   "2026-07-07T12:10:00Z",
+		Class:         "session",
+		Payload:       json.RawMessage(`{"sessionKey":"` + sessionKey + `","studio":"` + studioA + `"}`),
+		ContextHint: &processor.ContextHint{Reads: []string{
+			sessionKey, sessionKey + ".schedule",
+			atStudioLnkKey(t, sessionKey, studioA),
+			"lnk.session." + sessionKey[len("vtx.session."):] + ".ledBy.instructor." + instructorID,
+		}},
+	}
+	testutil.PublishOp(t, conn, tombstoneEnv)
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
+
+	if keyExists(t, ctx, conn, instructorKey+".slot20260708t090000z") {
+		t.Fatalf("instructorSlotClaim at 09:00 must be released after TombstoneSession")
+	}
+
+	// The freed instructor cells are re-bookable at a DIFFERENT studio, the
+	// same overlapping span.
+	studioB := createStudio(t, ctx, conn, cp, cons, "wdinstrtmbstudiob001", "Room B")
+	_, outcome2, reply := createSessionWithInstructor(t, ctx, conn, cp, cons, "wdinstrtmbsessb0001",
+		studioB, instructorKey, "Power Sculpt", "2026-07-08T09:00:00Z", "2026-07-08T09:30:00Z", 20)
+	if outcome2 != processor.OutcomeAccepted {
+		msg := ""
+		if reply != nil && reply.Error != nil {
+			msg = reply.Error.Message
+		}
+		t.Fatalf("CreateSession on freed instructor cells outcome = %v (%s), want Accepted", outcome2, msg)
+	}
+}
+
+// TestReassignSession_MigratesInstructorSlotClaimOnSwap proves an instructor
+// swap RELEASES the old instructor's cells (they become bookable elsewhere at
+// the same span) and CLAIMS the new instructor's (a second overlapping class
+// naming them now collides) — the hub-can-change generalization of the
+// studio cell handling ReassignSession already does for a time move.
+func TestReassignSession_MigratesInstructorSlotClaimOnSwap(t *testing.T) {
+	ctx, conn := setupDomainEnv(t)
+	cp, cons := newDomainPipeline(t, ctx, conn, "instrreassignswap")
+
+	opDoc := domainCapDoc()
+	opDoc.PlatformPermissions = append(opDoc.PlatformPermissions,
+		processor.PlatformPermission{OperationType: "CreateInstructor", Scope: "any"})
+	testutil.SeedCapDoc(t, ctx, conn, opDoc)
+
+	instructorA := mkWdInstructor(t, ctx, conn, cp, cons, "wdinstrswpinstra001", "A")
+	instructorB := mkWdInstructor(t, ctx, conn, cp, cons, "wdinstrswpinstrb001", "B")
+	studioA := createStudio(t, ctx, conn, cp, cons, "wdinstrswpstudioa001", "Room A")
+
+	sessionKey, outcome, _ := createSessionWithInstructor(t, ctx, conn, cp, cons, "wdinstrswpsessa0001",
+		studioA, instructorA, "Vinyasa Flow", "2026-07-08T09:00:00Z", "2026-07-08T09:30:00Z", 20)
+	if outcome != processor.OutcomeAccepted {
+		t.Fatalf("CreateSession outcome = %v, want Accepted", outcome)
+	}
+	if !keyExists(t, ctx, conn, instructorA+".slot20260708t090000z") {
+		t.Fatalf("expected instructorA's slot claim at 09:00")
+	}
+
+	env := reassignSessionEnv(t, "wdinstrswpreassign1", sessionKey, studioA, domainActorKey,
+		map[string]any{"sessionKey": sessionKey, "studio": studioA, "newInstructor": instructorB},
+		"2026-07-08T08:00:00Z")
+	outcome2, reply := testutil.SubmitAndAwaitReply(t, ctx, conn, cp, cons, env)
+	if outcome2 != processor.OutcomeAccepted {
+		msg := ""
+		if reply != nil && reply.Error != nil {
+			msg = reply.Error.Message
+		}
+		t.Fatalf("ReassignSession newInstructor outcome = %v (%s), want Accepted", outcome2, msg)
+	}
+	if keyExists(t, ctx, conn, instructorA+".slot20260708t090000z") {
+		t.Errorf("instructorA's OLD slot claim at 09:00 must be released after the swap")
+	}
+	if !keyExists(t, ctx, conn, instructorB+".slot20260708t090000z") {
+		t.Errorf("instructorB's NEW slot claim at 09:00 must be claimed after the swap")
+	}
+
+	// instructorA is now free to lead an overlapping class elsewhere.
+	studioB := createStudio(t, ctx, conn, cp, cons, "wdinstrswpstudiob001", "Room B")
+	_, outcomeA, replyA := createSessionWithInstructor(t, ctx, conn, cp, cons, "wdinstrswpsessa0002",
+		studioB, instructorA, "Power Sculpt", "2026-07-08T09:00:00Z", "2026-07-08T09:30:00Z", 20)
+	if outcomeA != processor.OutcomeAccepted {
+		msg := ""
+		if replyA != nil && replyA.Error != nil {
+			msg = replyA.Error.Message
+		}
+		t.Fatalf("freed instructorA outcome = %v (%s), want Accepted", outcomeA, msg)
+	}
+
+	// instructorB is now blocked from a SECOND overlapping class.
+	studioC := createStudio(t, ctx, conn, cp, cons, "wdinstrswpstudioc001", "Room C")
+	_, outcomeB, replyB := createSessionWithInstructor(t, ctx, conn, cp, cons, "wdinstrswpsessb0002",
+		studioC, instructorB, "Restorative", "2026-07-08T09:00:00Z", "2026-07-08T09:30:00Z", 20)
+	if outcomeB != processor.OutcomeRejected {
+		t.Fatalf("instructorB double-booked after the swap outcome = %v, want Rejected (InstructorConflict)", outcomeB)
+	}
+	if replyB.Error == nil || !strings.Contains(replyB.Error.Message, "InstructorConflict") {
+		t.Errorf("rejection should be InstructorConflict, got %+v", replyB.Error)
+	}
+}
+
+// TestCreateBooking_RejectsBookerAcrossOverlappingSessions proves
+// bookerSlotClaim (the patientSlotClaim mirror, verticals.md) catches the
+// gap sessionBookerClaim alone cannot see: the SAME booker claimed into TWO
+// DIFFERENT overlapping sessions.
+func TestCreateBooking_RejectsBookerAcrossOverlappingSessions(t *testing.T) {
+	ctx, conn := setupDomainEnv(t)
+	cp, cons := newDomainPipeline(t, ctx, conn, "bookerdoublebook")
+
+	studioA := createStudio(t, ctx, conn, cp, cons, "wdbkrdblstudioa00001", "Room A")
+	studioB := createStudio(t, ctx, conn, cp, cons, "wdbkrdblstudiob00001", "Room B")
+	sessionA, outcome := createSession(t, ctx, conn, cp, cons, "wdbkrdblsessa000001", studioA, "Morning Flow", "2026-07-08T09:00:00Z", "2026-07-08T09:30:00Z", 20)
+	if outcome != processor.OutcomeAccepted {
+		t.Fatalf("CreateSession A outcome = %v, want Accepted", outcome)
+	}
+	sessionB, outcome := createSession(t, ctx, conn, cp, cons, "wdbkrdblsessb000001", studioB, "Power Sculpt", "2026-07-08T09:15:00Z", "2026-07-08T09:45:00Z", 20)
+	if outcome != processor.OutcomeAccepted {
+		t.Fatalf("CreateSession B outcome = %v, want Accepted", outcome)
+	}
+
+	booker := seedIdentity(t, ctx, conn, "BBWELLBKRDBLHJKMNPQR")
+	_, first := createBooking(t, ctx, conn, cp, cons, "wdbkrdblbookina0001", sessionA, booker, "")
+	if first != processor.OutcomeAccepted {
+		t.Fatalf("first CreateBooking outcome = %v, want Accepted", first)
+	}
+
+	reqID := testutil.GenReqID("wdbkrdblbookinb0001")
+	payload, _ := json.Marshal(map[string]any{"session": sessionB, "booker": booker})
+	env := &processor.OperationEnvelope{
+		RequestID:     reqID,
+		Lane:          processor.LaneDefault,
+		OperationType: "CreateBooking",
+		Actor:         domainActorKey,
+		SubmittedAt:   "2026-07-07T12:00:00Z",
+		Class:         "booking",
+		Payload:       payload,
+		ContextHint: &processor.ContextHint{
+			Reads:         []string{sessionB, sessionB + ".schedule", booker},
+			OptionalReads: append(wdSeatKeys(sessionB, 20), wdSlotClaimKeys(t, booker, "2026-07-08T09:15:00Z", "2026-07-08T09:45:00Z")...),
+		},
+	}
+	outcome2, reply := testutil.SubmitAndAwaitReply(t, ctx, conn, cp, cons, env)
+	if outcome2 != processor.OutcomeRejected {
+		t.Fatalf("same booker into a DIFFERENT overlapping session outcome = %v, want Rejected (BookerConflict)", outcome2)
+	}
+	if reply.Error == nil || !strings.Contains(reply.Error.Message, "BookerConflict") {
+		t.Errorf("rejection should be BookerConflict, got %+v", reply.Error)
+	}
+}
+
+// TestCancelBooking_ReleasesBookerSlotCells proves CancelBooking releases the
+// booker's bookerSlotClaim cells too, not just the per-session guard — the
+// booker can then book a DIFFERENT, overlapping session.
+func TestCancelBooking_ReleasesBookerSlotCells(t *testing.T) {
+	ctx, conn := setupDomainEnv(t)
+	cp, cons := newDomainPipeline(t, ctx, conn, "bookercancelrelease")
+
+	studioA := createStudio(t, ctx, conn, cp, cons, "wdbkrcxlstudioa00001", "Room A")
+	studioB := createStudio(t, ctx, conn, cp, cons, "wdbkrcxlstudiob00001", "Room B")
+	sessionA, outcome := createSession(t, ctx, conn, cp, cons, "wdbkrcxlsessa000001", studioA, "Morning Flow", "2026-07-08T09:00:00Z", "2026-07-08T09:30:00Z", 20)
+	if outcome != processor.OutcomeAccepted {
+		t.Fatalf("CreateSession A outcome = %v, want Accepted", outcome)
+	}
+	sessionB, outcome := createSession(t, ctx, conn, cp, cons, "wdbkrcxlsessb000001", studioB, "Power Sculpt", "2026-07-08T09:00:00Z", "2026-07-08T09:30:00Z", 20)
+	if outcome != processor.OutcomeAccepted {
+		t.Fatalf("CreateSession B outcome = %v, want Accepted", outcome)
+	}
+
+	booker := seedIdentity(t, ctx, conn, "BBWELLBKRCXLHJKMNPQR")
+	bookingKey, outcome := createBooking(t, ctx, conn, cp, cons, "wdbkrcxlbookina0001", sessionA, booker, "")
+	if outcome != processor.OutcomeAccepted {
+		t.Fatalf("CreateBooking outcome = %v, want Accepted", outcome)
+	}
+	if !keyExists(t, ctx, conn, booker+".slot20260708t090000z") {
+		t.Fatalf("expected bookerSlotClaim at 09:00")
+	}
+
+	cancelEnv := &processor.OperationEnvelope{
+		RequestID:     testutil.GenReqID("wdbkrcxlcancel00001"),
+		Lane:          processor.LaneDefault,
+		OperationType: "CancelBooking",
+		Actor:         domainActorKey,
+		SubmittedAt:   "2026-07-08T08:30:00Z",
+		Class:         "booking",
+		Payload:       json.RawMessage(`{"bookingKey":"` + bookingKey + `","session":"` + sessionA + `"}`),
+		ContextHint: &processor.ContextHint{Reads: []string{
+			bookingKey, bookingKey + ".status", sessionA + ".schedule",
+			forSessionLnkKey(t, bookingKey, sessionA),
+		}},
+	}
+	testutil.PublishOp(t, conn, cancelEnv)
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
+
+	if keyExists(t, ctx, conn, booker+".slot20260708t090000z") {
+		t.Fatalf("bookerSlotClaim at 09:00 must be released after CancelBooking")
+	}
+
+	_, outcome2 := createBooking(t, ctx, conn, cp, cons, "wdbkrcxlbookinb0001", sessionB, booker, "")
+	if outcome2 != processor.OutcomeAccepted {
+		t.Fatalf("same booker into a different overlapping session after release outcome = %v, want Accepted", outcome2)
 	}
 }

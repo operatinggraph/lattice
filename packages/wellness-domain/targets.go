@@ -18,11 +18,15 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 // (ddls.go): the booking vertex itself (row.bookingKey — vertex_alive's
 // UnknownBooking check), its own .status aspect (row.bookingKey.status, the
 // row.<column>.<literalSuffix> template — strategist.go's ONE templating
-// relaxation beyond an exact row.<column> lookup), and the session vertex
-// itself (row.sessionKey, a plain full-key column already on the row) so the
-// script's own SessionStillLive re-check has something to read. Params
-// carries only bookingKey — ReleaseOrphanedBooking takes no session param,
-// unlike CancelBooking, so there is nothing else to template.
+// relaxation beyond an exact row.<column> lookup), the session vertex itself
+// (row.sessionKey, a plain full-key column already on the row) so the
+// script's own SessionStillLive re-check has something to read, and the
+// session's .schedule aspect (row.sessionKey.schedule) so the script can
+// compute the booker's bookerSlotClaim cells to release — TombstoneSession
+// never cascades onto the schedule aspect (package.go's "no cascade"
+// doctrine), so it is still readable even though the session vertex itself
+// is dead. Params carries only bookingKey — ReleaseOrphanedBooking takes no
+// session param, unlike CancelBooking, so there is nothing else to template.
 func WeaverTargets() []pkgmgr.WeaverTargetSpec {
 	return []pkgmgr.WeaverTargetSpec{
 		{
@@ -34,7 +38,7 @@ func WeaverTargets() []pkgmgr.WeaverTargetSpec {
 					Operation: "ReleaseOrphanedBooking",
 					Class:     "booking",
 					Params:    map[string]string{"bookingKey": "row.bookingKey"},
-					Reads:     []string{"row.bookingKey", "row.bookingKey.status", "row.sessionKey"},
+					Reads:     []string{"row.bookingKey", "row.bookingKey.status", "row.sessionKey", "row.sessionKey.schedule"},
 				},
 			},
 		},

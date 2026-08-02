@@ -612,6 +612,10 @@ async function renderSchedule() {
         // re-book) from alive (clean DoubleBooked reject). Absence is the
         // common case (first book/join), hence optionalReads.
         optionalReads.push(se.sessionKey + ".bkr" + idOf(bookerKey));
+        // Booker cells (bookerSlotClaim, ddls.go) — catches THIS booker
+        // already claimed into a different overlapping session, which the
+        // per-session guard above cannot see.
+        optionalReads.push(...slotCellKeys(bookerKey, se.startsAt, se.endsAt));
         if (leaseAppKey) {
           optionalReads.push(
             leaseAppKey,
@@ -760,6 +764,9 @@ async function renderMyClasses() {
         // The self-cancel guard needs the bookedBy link as a (d)-declared
         // optionalReads — the script checks it names THIS booker (ddls.go).
         const optionalReads = ["lnk.booking." + idOf(b.bookingKey) + ".bookedBy.identity." + idOf(identityKey())];
+        // Booker cells released (bookerSlotClaim, ddls.go) — the same span
+        // CreateBooking/JoinWaitlist claimed on this booker's own hub.
+        optionalReads.push(...slotCellKeys(identityKey(), b.startsAt, b.endsAt));
         const wasWaitlisted = b.status === "waitlisted";
         await opOrThrow(
           { operationType: "CancelBooking", class: "booking", reads: [b.bookingKey, b.bookingKey + ".status", b.sessionKey + ".schedule", forSessionLnk], optionalReads, payload: { bookingKey: b.bookingKey, session: b.sessionKey } },
@@ -933,7 +940,7 @@ async function renderRoster() {
     summary.textContent += " — attendance opens when the class starts";
   }
   if (isLeader && started) bindAttendance(sessionKey, mine);
-  if (isStaff() && bookings.length) bindSeatCancels(sessionKey);
+  if (isStaff() && bookings.length) bindSeatCancels(sessionKey, se);
   await renderBookMember(se, bookings, generation);
   renderCancelClass(sessionKey);
   await renderReassignControl(se, generation);
@@ -1073,6 +1080,8 @@ async function bookSelectedMember() {
 async function bookMemberIn(se, bookerKey, leaseAppKey) {
   const optionalReads = seatKeys(se.sessionKey, se.capacity);
   optionalReads.push(se.sessionKey + ".bkr" + idOf(bookerKey));
+  // Booker cells (bookerSlotClaim, ddls.go) — mirrors the self-service path.
+  optionalReads.push(...slotCellKeys(bookerKey, se.startsAt, se.endsAt));
   const payload = { session: se.sessionKey, booker: bookerKey };
   if (leaseAppKey) {
     payload.leaseAppKey = leaseAppKey;
@@ -1100,13 +1109,13 @@ async function bookMemberIn(se, bookerKey, leaseAppKey) {
 // grants frontOfHouse at scope=any and the script confines it to a session
 // whose studio sits at a location the caller worksAt — so an instructor, who
 // holds no such grant, never sees the control even on their own roster.
-function bindSeatCancels(sessionKey) {
+function bindSeatCancels(sessionKey, se) {
   const buttons = document.querySelectorAll("#roster-body [data-cancel-seat]");
   buttons.forEach((btn) => {
     btn.addEventListener("click", async () => {
       buttons.forEach((b) => { b.disabled = true; });
       try {
-        await cancelSeat(btn.dataset.cancelSeat, sessionKey);
+        await cancelSeat(btn.dataset.cancelSeat, btn.dataset.booker, sessionKey, se);
         toast("Seat released.", true);
         setTimeout(renderRoster, 700);
       } catch (e) {
@@ -1121,7 +1130,16 @@ function bindSeatCancels(sessionKey) {
 // carries NO authContext.target — that field is the CONSUMER path's binding
 // (the booking's own bookedBy identity), and a staffer releasing someone
 // else's seat is never that identity; the workplace walk binds them instead.
-async function cancelSeat(bookingKey, sessionKey) {
+// `se` is the roster's own session object (startsAt/endsAt) — undefined only
+// if the roster's own lookup missed it, in which case the booker cells are
+// simply not declared (optionalReads, never a correctness requirement).
+async function cancelSeat(bookingKey, bookerKey, sessionKey, se) {
+  const optionalReads = [
+    "lnk.booking." + idOf(bookingKey) + ".forSession.session." + idOf(sessionKey),
+  ];
+  // Booker cells released (bookerSlotClaim, ddls.go) — mirrors the
+  // self-service cancel path.
+  if (bookerKey && se) optionalReads.push(...slotCellKeys(bookerKey, se.startsAt, se.endsAt));
   await opOrThrow(
     {
       operationType: "CancelBooking",
@@ -1136,9 +1154,7 @@ async function cancelSeat(bookingKey, sessionKey) {
       // rejection, not a correctness error — and it must answer BEFORE the
       // workplace guard, since the session this names is what carries the
       // confinement (packages/wellness-domain/ddls.go).
-      optionalReads: [
-        "lnk.booking." + idOf(bookingKey) + ".forSession.session." + idOf(sessionKey),
-      ],
+      optionalReads,
       payload: { bookingKey, session: sessionKey },
     },
     "release the seat",
@@ -1267,10 +1283,14 @@ async function cancelOwnClass(se, mine) {
       // session's, and the two ownership probes are (d)-declared: an absent
       // link is a meaningful AuthDenied, not a correctness error.
       reads: [se.sessionKey, se.sessionKey + ".schedule"],
+      // Instructor cells released mirror the studio's (instructorSlotClaim,
+      // ddls.go) — `mine` is this class's actual ledBy instructor (checked
+      // by renderCancelClass before this control ever renders).
       optionalReads: [
         "lnk.session." + sessId + ".atStudio.studio." + idOf(se.studioKey),
         "lnk.session." + sessId + ".ledBy.instructor." + idOf(mine),
         "lnk.instructor." + idOf(mine) + ".identifiedBy.identity." + idOf(identityKey()),
+        ...slotCellKeys(mine, se.startsAt, se.endsAt),
       ],
       payload: { sessionKey: se.sessionKey, studio: se.studioKey, instructor: mine },
     },
@@ -1385,6 +1405,20 @@ async function reassignSession(se) {
     optionalReads.push(...slotCellKeys(se.studioKey, startsAt, endsAt));
   }
 
+  // Instructor cells (instructorSlotClaim, ddls.go) — the script migrates
+  // the claim on a swap/clear (release ALL of the old instructor's cells,
+  // claim ALL of the new one's) and, when the instructor is unchanged, only
+  // the symmetric difference on a time move, exactly like the studio cells
+  // above but over a hub that can itself change. Declare both the old
+  // instructor's cells on the OLD span and whichever instructor ends up
+  // bound on the FINAL span — over-declaring the unused side of a
+  // non-change costs nothing (optionalReads).
+  const finalInstructor = payload.clearInstructor ? null : payload.newInstructor || se.instructorKey;
+  const finalStartsAt = payload.startsAt || se.startsAt;
+  const finalEndsAt = payload.endsAt || se.endsAt;
+  if (se.instructorKey) optionalReads.push(...slotCellKeys(se.instructorKey, se.startsAt, se.endsAt));
+  if (finalInstructor) optionalReads.push(...slotCellKeys(finalInstructor, finalStartsAt, finalEndsAt));
+
   if (payload.clearInstructor === undefined && payload.newInstructor === undefined && payload.startsAt === undefined) {
     throw new Error("Pick a new instructor or a new time.");
   }
@@ -1428,7 +1462,7 @@ function rosterCard(b, markable, cancellable) {
 function seatCancelAction(b) {
   const label = b.status === "waitlisted" ? "Remove from waitlist" : "Release seat";
   return '<div class="card-actions"><button class="danger" data-cancel-seat="' +
-    esc(b.bookingKey) + '">' + label + "</button></div>";
+    esc(b.bookingKey) + '" data-booker="' + esc(b.bookerKey) + '">' + label + "</button></div>";
 }
 
 // attendanceActions renders the two marks as a pair, with the one already
@@ -1696,6 +1730,16 @@ async function createSession(studioKey, els) {
       optionalReads = occurrenceCellKeys(studioKey, startsAt, endsAt, intervalDays, repeatCount);
     } else {
       optionalReads = slotCellKeys(studioKey, startsAt, endsAt);
+    }
+    // Instructor cells mirror the studio's own (instructorSlotClaim,
+    // ddls.go) — claimed only when an instructor is named, same condition
+    // as the required read above.
+    if (instructor) {
+      optionalReads = optionalReads.concat(
+        isSeries
+          ? occurrenceCellKeys(instructor, startsAt, endsAt, intervalDays, repeatCount)
+          : slotCellKeys(instructor, startsAt, endsAt),
+      );
     }
     // A staff submit carries NO authContext.target: CreateSession's and
     // CreateSessionSeries's frontOfHouse grant is scope=any, confined

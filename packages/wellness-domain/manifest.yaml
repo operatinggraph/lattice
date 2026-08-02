@@ -1,5 +1,5 @@
 name: wellness-domain
-version: 0.20.0
+version: 0.21.0
 description: |
   Wellness bookable domain: studio / session / booking / instructor vertex
   types + their aspects and links, written by Create*/Tombstone*/Cancel*/Bind*
@@ -90,6 +90,10 @@ declares:
     - canonicalName: sessionSchedule
       class: meta.ddl.aspectType
     - canonicalName: studioSlotClaim
+      class: meta.ddl.aspectType
+    - canonicalName: instructorSlotClaim
+      class: meta.ddl.aspectType
+    - canonicalName: bookerSlotClaim
       class: meta.ddl.aspectType
     - canonicalName: sessionSeatClaim
       class: meta.ddl.aspectType

@@ -30,6 +30,8 @@ const (
 	studioProfileAspectDDL           = "studioProfile"
 	sessionScheduleAspectDDL         = "sessionSchedule"
 	studioSlotClaimAspectDDL         = "studioSlotClaim"
+	instructorSlotClaimAspectDDL     = "instructorSlotClaim"
+	bookerSlotClaimAspectDDL         = "bookerSlotClaim"
 	sessionSeatClaimAspectDDL        = "sessionSeatClaim"
 	sessionWaitlistClaimAspectDDL    = "sessionWaitlistClaim"
 	sessionBookerClaimAspectDDL      = "sessionBookerClaim"
@@ -41,7 +43,7 @@ const (
 	identityInstructorClaimAspectDDL = "identityInstructorClaim"
 )
 
-// DDLs returns the package's fifteen DDL meta-vertex declarations:
+// DDLs returns the package's seventeen DDL meta-vertex declarations:
 //
 //   - studio (vertexType) — owns CreateStudio + TombstoneStudio.
 //   - session (vertexType) — owns CreateSession + TombstoneSession +
@@ -54,9 +56,10 @@ const (
 //   - instructor (vertexType) — owns CreateInstructor + TombstoneInstructor +
 //     BindInstructorIdentity (the provider-archetype binding,
 //     persona-worlds-design.md Fire W0).
-//   - studioProfile / sessionSchedule / studioSlotClaim / sessionSeatClaim /
-//     sessionWaitlistClaim / sessionBookerClaim / bookingStatus /
-//     instructorProfile / instructorIdentityClaim / identityInstructorClaim /
+//   - studioProfile / sessionSchedule / studioSlotClaim / instructorSlotClaim /
+//     bookerSlotClaim / sessionSeatClaim / sessionWaitlistClaim /
+//     sessionBookerClaim / bookingStatus / instructorProfile /
+//     instructorIdentityClaim / identityInstructorClaim /
 //     sessionSeriesDefinition (aspectType) — step-6 write gates.
 //
 // Architectural rules (binding — the known-key discipline of clinic-domain /
@@ -75,6 +78,8 @@ func DDLs() []pkgmgr.DDLSpec {
 		studioProfileAspectTypeDDL(),
 		sessionScheduleAspectTypeDDL(),
 		studioSlotClaimAspectTypeDDL(),
+		instructorSlotClaimAspectTypeDDL(),
+		bookerSlotClaimAspectTypeDDL(),
 		sessionSeatClaimAspectTypeDDL(),
 		sessionWaitlistClaimAspectTypeDDL(),
 		sessionBookerClaimAspectTypeDDL(),
@@ -555,6 +560,92 @@ func studioSlotClaimAspectTypeDDL() pkgmgr.DDLSpec {
 				Name:            "studio slot-claim aspect",
 				Payload:         map[string]any{},
 				ExpectedOutcome: "Stored as vtx.studio.<NanoID>.slot<cellcode>; claimed by CreateSession, released by TombstoneSession.",
+			},
+		},
+	}
+}
+
+// instructorSlotClaimAspectTypeDDL declares the .slot<cellcode> aspect (class
+// instructorSlotClaim) — a deterministic per-15-minute-cell existence marker
+// on the instructor hub, the exact clinic-domain providerSlotClaim mirror the
+// backlog names ("One instructor can teach two classes at once" —
+// verticals.md): studioSlotClaim alone only locks the ROOM, so a live probe
+// scheduled one instructor into two overlapping classes at two different
+// studios. The step-6 write gate for CreateSession / CreateSessionSeries /
+// TombstoneSession / ReassignSession (create / release). Declaration-only;
+// NON-sensitive. One aspect per occupied grid cell, created ON DEMAND, and
+// only when a session actually names an instructor — a session with no
+// instructor claims none.
+func instructorSlotClaimAspectTypeDDL() pkgmgr.DDLSpec {
+	return pkgmgr.DDLSpec{
+		CanonicalName:     instructorSlotClaimAspectDDL,
+		Class:             "meta.ddl.aspectType",
+		PermittedCommands: []string{"CreateSession", "TombstoneSession", "ReassignSession", "CreateSessionSeries"},
+		Description: "Instructor 15-minute slot-claim aspect (wellness). Stored as vtx.instructor.<NanoID>.slot<cellcode> " +
+			"(class instructorSlotClaim) = {} — a pure existence marker, no relationship field. <cellcode> is the " +
+			"cell's canonical whole-second UTC start with '-'/':' stripped and lowercased. CreateSession claims " +
+			"one per covered cell for the session's optional instructor (CreateOnly — the key collision across two " +
+			"concurrent sessions naming the same instructor for an overlapping span IS the double-book lock: " +
+			"InstructorConflict on commit-time rejection); TombstoneSession tombstones all held cells on " +
+			"cancellation, freeing them. ReassignSession migrates the claim on an instructor swap/clear (release " +
+			"the old instructor's cells for whatever span it held, claim the new instructor's for whatever span " +
+			"applies now) and, when the instructor is unchanged, claims/releases only the symmetric difference " +
+			"between the old and new covered cells on a time move — the same two mechanisms studioSlotClaim uses, " +
+			"applied to a hub that can itself change. CreateSessionSeries claims one set per occurrence sharing " +
+			"the series' single instructor (the whole batch rejects InstructorConflict together if any occurrence " +
+			"collides — no partial series). Non-sensitive; created on demand only when a session names an " +
+			"instructor. Declaration-only: no op handler.",
+		Script:       aspectDeclarationOnlyScript,
+		InputSchema:  `{"type":"object","properties":{}}`,
+		OutputSchema: `{"type":"object"}`,
+		FieldDescription: map[string]string{
+			"data": "Always {} — a pure existence marker. The claim's job is done by the KEY (hub + deterministic cellcode), never by a field in data.",
+		},
+		Examples: []pkgmgr.ExampleSpec{
+			{
+				Name:            "instructor slot-claim aspect",
+				Payload:         map[string]any{},
+				ExpectedOutcome: "Stored as vtx.instructor.<NanoID>.slot<cellcode>; claimed by CreateSession/CreateSessionSeries, released by TombstoneSession or migrated by ReassignSession.",
+			},
+		},
+	}
+}
+
+// bookerSlotClaimAspectTypeDDL declares the .slot<cellcode> aspect (class
+// bookerSlotClaim) — a deterministic per-15-minute-cell existence marker on
+// the booker's OWN identity hub, the clinic-domain patientSlotClaim mirror
+// (verticals.md): the existing sessionBookerClaim only catches a booker
+// double-booking the SAME session twice, never a booker booked into two
+// DIFFERENT overlapping sessions — which the same live probe found ("booked
+// the same member into both"). The step-6 write gate for CreateBooking /
+// JoinWaitlist / CancelBooking / ReleaseOrphanedBooking (create / release).
+// Declaration-only; NON-sensitive. One aspect per occupied grid cell, created
+// ON DEMAND.
+func bookerSlotClaimAspectTypeDDL() pkgmgr.DDLSpec {
+	return pkgmgr.DDLSpec{
+		CanonicalName:     bookerSlotClaimAspectDDL,
+		Class:             "meta.ddl.aspectType",
+		PermittedCommands: []string{"CreateBooking", "JoinWaitlist", "CancelBooking", "ReleaseOrphanedBooking"},
+		Description: "Booker 15-minute slot-claim aspect (wellness). Stored as vtx.identity.<NanoID>.slot<cellcode> " +
+			"(class bookerSlotClaim) = {} — a pure existence marker, no relationship field. <cellcode> is the " +
+			"cell's canonical whole-second UTC start with '-'/':' stripped and lowercased, computed from the " +
+			"BOOKED SESSION's [startsAt, endsAt) span. CreateBooking and JoinWaitlist each claim one per covered " +
+			"cell on the booker's own identity hub (CreateOnly — the key collision across two overlapping " +
+			"sessions IS the double-book lock: BookerConflict on commit-time rejection); CancelBooking tombstones " +
+			"all held cells for the cancelled booking's session on release; ReleaseOrphanedBooking does the same " +
+			"for a booking whose session TombstoneSession already killed (a called-off class does not cascade). " +
+			"Non-sensitive; created on demand, no CreateBooking init needed. Declaration-only: no op handler.",
+		Script:       aspectDeclarationOnlyScript,
+		InputSchema:  `{"type":"object","properties":{}}`,
+		OutputSchema: `{"type":"object"}`,
+		FieldDescription: map[string]string{
+			"data": "Always {} — a pure existence marker. The claim's job is done by the KEY (hub + deterministic cellcode), never by a field in data.",
+		},
+		Examples: []pkgmgr.ExampleSpec{
+			{
+				Name:            "booker slot-claim aspect",
+				Payload:         map[string]any{},
+				ExpectedOutcome: "Stored as vtx.identity.<NanoID>.slot<cellcode>; claimed by CreateBooking/JoinWaitlist, released by CancelBooking or ReleaseOrphanedBooking.",
 			},
 		},
 	}
@@ -1873,18 +1964,22 @@ def release_cells_mutations(studio, sched):
 
 def session_ledby_link(sess_key):
     # A session carries AT MOST ONE instructor (CreateSession/ReassignSession
-    # write exactly one ledBy link), so this returns its live link key or
-    # None -- the same bounded, known-hub enumeration idiom studio_locations
-    # already uses in this file for a studio's locatedAt links.
+    # write exactly one ledBy link), so this returns its live (link key,
+    # instructor vertex key) or (None, None) -- the same bounded, known-hub
+    # enumeration idiom studio_locations already uses in this file for a
+    # studio's locatedAt links. The target vertex is what TombstoneSession /
+    # ReassignSession need to release or migrate the instructor's
+    # instructorSlotClaim cells; the link key is what they tombstone to drop
+    # the ledBy edge itself.
     if not vertex_live(sess_key):
-        return None
+        return None, None
     # read-posture: (e) relation=ledBy epoch=none -- a session leads to at
     # most one instructor, never a keyspace scan.
     page, _ = kv.Links(sess_key, "ledBy", "out")
     for lk in page:
         if not lk.isDeleted:
-            return lk.key
-    return None
+            return lk.key, lk.targetVertex
+    return None, None
 
 def execute(state, op):
     ot = op.operationType
@@ -1973,6 +2068,15 @@ def execute(state, op):
         for c in cells:
             cc = slot_cellcode(c)
             mutations.append(claim_cell(studio, cc, "studioSlotClaim", "StudioConflict", "studio"))
+        # Instructor slot-claim (providerSlotClaim mirror, verticals.md): the
+        # studio's cell lock alone only guards the ROOM -- naming the same
+        # instructor at two different studios for an overlapping span must
+        # collide too. Claimed only when an instructor is named; a session
+        # with no instructor claims none.
+        if instructor != None:
+            for c in cells:
+                cc = slot_cellcode(c)
+                mutations.append(claim_cell(instructor, cc, "instructorSlotClaim", "InstructorConflict", "instructor"))
         events = [{"class": "wellness.sessionCreated", "data": {"sessionKey": sess_key, "studio": studio}}]
         return {"mutations": mutations, "events": events, "response": {"primaryKey": sess_key}}
 
@@ -2073,6 +2177,15 @@ def execute(state, op):
             for c in cells:
                 cc = slot_cellcode(c)
                 mutations.append(claim_cell(studio, cc, "studioSlotClaim", "StudioConflict", "studio"))
+            # Instructor slot-claim per occurrence, sharing the series' single
+            # validated instructor (providerSlotClaim mirror, verticals.md) --
+            # the whole batch rejects InstructorConflict together if any
+            # occurrence collides, no partial series, mirroring studio's own
+            # all-or-nothing claim above.
+            if instructor != None:
+                for c in cells:
+                    cc = slot_cellcode(c)
+                    mutations.append(claim_cell(instructor, cc, "instructorSlotClaim", "InstructorConflict", "instructor"))
 
         # response permits ONLY primaryKey (InvalidReturnShape otherwise) — the
         # occurrenceCount session keys go on the event instead, mirroring how
@@ -2137,6 +2250,15 @@ def execute(state, op):
         sched = kv.Read(sess_key + ".schedule")
         mutations = [make_tombstone(sess_key)]
         mutations.extend(release_cells_mutations(studio, sched))
+        # The session's CURRENT instructor (regardless of which standing path
+        # authorized this call), read fresh here rather than trusting the
+        # caller-supplied instructor param used only above for the
+        # instructor-standing auth branch -- an operator call carries no such
+        # param at all. Releases that instructor's instructorSlotClaim cells
+        # too, the same providerSlotClaim-mirror lock CreateSession claimed.
+        _, cur_instructor = session_ledby_link(sess_key)
+        if cur_instructor != None:
+            mutations.extend(release_cells_mutations(cur_instructor, sched))
         events = [{"class": "wellness.sessionCancelled", "data": {"sessionKey": sess_key}}]
         return {"mutations": mutations, "events": events, "response": {"primaryKey": sess_key}}
 
@@ -2193,12 +2315,22 @@ def execute(state, op):
 
         mutations = []
 
+        # Read the session's CURRENT instructor unconditionally — needed below
+        # to migrate instructorSlotClaim cells even on a reschedule-only call
+        # that never touches newInstructor/clearInstructor.
+        cur_ledby, old_instructor = session_ledby_link(sess_key)
+        if new_instructor != None:
+            new_instructor_final = new_instructor
+        elif clear_instructor:
+            new_instructor_final = None
+        else:
+            new_instructor_final = old_instructor
+
         # Instructor swap: tombstone the CURRENT ledBy link (if any) and write
         # the new one, mirroring identity-hygiene's tombstone-old+create-new
         # link-swap idiom (ddls.go). clearInstructor alone tombstones with no
         # replacement.
         if new_instructor != None or clear_instructor:
-            cur_ledby = session_ledby_link(sess_key)
             if cur_ledby != None:
                 mutations.append(make_tombstone(cur_ledby))
             if new_instructor != None:
@@ -2257,6 +2389,36 @@ def execute(state, op):
             new_starts = cur_starts
             new_ends = cur_ends
 
+        # Instructor slot-claim migration (providerSlotClaim mirror,
+        # verticals.md), the instructor-hub twin of the studio cell handling
+        # above — but the HUB itself can also change here, which studio's
+        # never does. Same hub, span moved: release only the symmetric
+        # difference, exactly like studio (avoids self-conflicting against a
+        # cell this script is about to release). Hub genuinely changed
+        # (swap/newly-assigned/cleared): release ALL of the old hub's cells
+        # and claim ALL of the new hub's — no self-conflict risk since they
+        # are different keys.
+        old_instr_cells = []
+        if old_instructor != None and cur_starts != None and cur_ends != None:
+            old_instr_cells = slot_cells(cur_starts, cur_ends)
+        new_instr_cells = []
+        if new_instructor_final != None:
+            new_instr_cells = slot_cells(new_starts, new_ends)
+
+        if old_instructor == new_instructor_final:
+            if old_instructor != None:
+                for c in old_instr_cells:
+                    if c not in new_instr_cells:
+                        mutations.append(make_tombstone(old_instructor + ".slot" + slot_cellcode(c)))
+                for c in new_instr_cells:
+                    if c not in old_instr_cells:
+                        mutations.append(claim_cell(new_instructor_final, slot_cellcode(c), "instructorSlotClaim", "InstructorConflict", "instructor"))
+        else:
+            for c in old_instr_cells:
+                mutations.append(make_tombstone(old_instructor + ".slot" + slot_cellcode(c)))
+            for c in new_instr_cells:
+                mutations.append(claim_cell(new_instructor_final, slot_cellcode(c), "instructorSlotClaim", "InstructorConflict", "instructor"))
+
         # Re-derive remindAt = new_starts − 24h unconditionally: on a genuine
         # reschedule this moves the deadline (re-arming wellness-reminders'
         # gate, mirroring clinic-domain's RescheduleAppointment); when nothing
@@ -2310,6 +2472,41 @@ def make_link(key, source, target, cls, local_name, data):
 
 def make_tombstone(key):
     return {"op": "tombstone", "key": key}
+
+# GRID_STEP/MAX_SLOT_CELLS/slot_cells/slot_cellcode/claim_cell mirror
+# sessionDDLScript's identical functions (ddls.go) byte-for-byte — this
+# script's own copy, the same cross-script duplication providerSlotClaim/
+# patientSlotClaim's claim_cell already uses across clinic-domain's DDL
+# scripts. Grid alignment itself was already enforced when the session's
+# startsAt/endsAt were written (CreateSession's enforce_grid), so this script
+# only discretizes, never re-validates the grid.
+GRID_STEP = "15m"
+MAX_SLOT_CELLS = 96  # 24h of 15-minute cells -- a generous backstop, not an expected ceiling
+
+def slot_cells(starts_at, ends_at):
+    cells = []
+    cur = starts_at
+    for _i in range(MAX_SLOT_CELLS + 1):
+        if not (cur < ends_at):
+            return cells
+        cells.append(cur)
+        cur = time.rfc3339_add(cur, GRID_STEP)
+    fail("SessionTooLong: session spans more than " + str(MAX_SLOT_CELLS) + " 15-minute slots (24h); shorten the interval")
+
+def slot_cellcode(cell_start):
+    return cell_start.replace("-", "").replace(":", "").lower()
+
+def claim_cell(hub, cellcode, cls, conflict_code, who):
+    key = hub + ".slot" + cellcode
+    # read-posture: (d) declared optionalReads at CreateBooking/JoinWaitlist
+    # dispatch — an absent cell is the common case (no existing booking),
+    # never a required read.
+    existing = kv.Read(key)
+    if existing != None and not existing.isDeleted:
+        fail(conflict_code + ": " + who + " " + hub + " slot " + cellcode + " is already booked")
+    if existing != None and existing.isDeleted:
+        return make_aspect_upsert_occ(hub, "slot" + cellcode, cls, {}, existing.revision)
+    return make_aspect(hub, "slot" + cellcode, cls, {})
 
 def required_string(p, name):
     if not hasattr(p, name):
@@ -2862,6 +3059,21 @@ def prepare_booking_common(state, op, p):
     if not (submitted < starts_at):
         fail("SessionInPast: session " + session + " starts at " + str(starts_at) + ", not in the future (submitted " + submitted + ")")
 
+    # Booker slot-claim (patientSlotClaim mirror, verticals.md): the
+    # per-SESSION sessionBookerClaim guard below only catches the same
+    # session booked twice — it cannot see a booker claimed into two
+    # DIFFERENT overlapping sessions, since each session's cells are disjoint
+    # keys. Claiming one instructorSlotClaim-shaped cell per covered
+    # 15-minute grid cell on the booker's OWN identity hub closes that gap;
+    # the collision (BookerConflict) is what a probe found ("booked the same
+    # member into both").
+    ends_at = sched.data.get("endsAt")
+    if ends_at == None:
+        fail("InvalidState: " + session + ".schedule.endsAt is missing; cannot book")
+    booker_cell_muts = []
+    for c in slot_cells(starts_at, ends_at):
+        booker_cell_muts.append(claim_cell(booker, slot_cellcode(c), "bookerSlotClaim", "BookerConflict", "booker"))
+
     # Double-book guard (Capability-KV §06): a deterministic per-(session,
     # booker) existence marker on the session hub, the SAME create-only +
     # OCC-revive idiom cafe-domain's cafeOpenTabGuard uses. The KEY alone is
@@ -2906,7 +3118,7 @@ def prepare_booking_common(state, op, p):
         if lease_alive and tenancy_present and link_live:
             rate = "resident"
 
-    return session, sess_id, booker, booker_id, sched, rate, lease_key, booker_guard_mut
+    return session, sess_id, booker, booker_id, sched, rate, lease_key, booker_guard_mut, booker_cell_muts
 
 def execute(state, op):
     ot = op.operationType
@@ -2919,7 +3131,7 @@ def execute(state, op):
         # only validated one, and that compare binds the target to
         # payload.booker, the field that decides whose booking this is, so an
         # exempted caller is booking for itself.
-        session, sess_id, booker, booker_id, sched, rate, lease_key, booker_guard_mut = prepare_booking_common(state, op, p)
+        session, sess_id, booker, booker_id, sched, rate, lease_key, booker_guard_mut, booker_cell_muts = prepare_booking_common(state, op, p)
 
         capacity = sched.data.get("capacity")
         if capacity == None:
@@ -2940,6 +3152,7 @@ def execute(state, op):
             seat_mutation,
             booker_guard_mut,
         ]
+        mutations.extend(booker_cell_muts)
         if rate == "resident":
             _, lease_id = parts_of(lease_key, "leaseAppKey", "leaseapp")
             resident_rate_lnk = "lnk.booking." + book_id + ".residentRate.leaseapp." + lease_id
@@ -2955,7 +3168,7 @@ def execute(state, op):
         # above -- the consumer scope=self path is the only validated one,
         # and that compare binds the target to payload.booker, the field
         # that decides whose waitlist slot this is.
-        session, sess_id, booker, booker_id, sched, rate, lease_key, booker_guard_mut = prepare_booking_common(state, op, p)
+        session, sess_id, booker, booker_id, sched, rate, lease_key, booker_guard_mut, booker_cell_muts = prepare_booking_common(state, op, p)
 
         slot_n, slot_mutation = claim_first_free_waitlist_slot(session)
 
@@ -2973,6 +3186,7 @@ def execute(state, op):
             slot_mutation,
             booker_guard_mut,
         ]
+        mutations.extend(booker_cell_muts)
         if rate == "resident":
             _, lease_id = parts_of(lease_key, "leaseAppKey", "leaseapp")
             resident_rate_lnk = "lnk.booking." + book_id + ".residentRate.leaseapp." + lease_id
@@ -3111,6 +3325,17 @@ def execute(state, op):
         if booker != None:
             _, guard_booker_id = parts_of(booker, "booker", "identity")
             mutations.append(make_tombstone(session + ".bkr" + guard_booker_id))
+            # Release the booker's bookerSlotClaim cells too (patientSlotClaim
+            # mirror, verticals.md) — the SAME span CreateBooking/JoinWaitlist
+            # claimed on the booker's own identity hub, freeing them to book an
+            # overlapping class elsewhere. ends_at is already validated present
+            # on this session's schedule (CreateSession requires it); a legacy
+            # booking predating the guard field above already skipped that
+            # branch, so this stays inside it too.
+            ends_at = sched.data.get("endsAt")
+            if ends_at != None:
+                for c in slot_cells(starts_at, ends_at):
+                    mutations.append(make_tombstone(booker + ".slot" + slot_cellcode(c)))
         return {"mutations": mutations, "events": events, "response": {"primaryKey": book_key}}
 
     if ot == "SetBookingAttendance":
@@ -3280,6 +3505,20 @@ def execute(state, op):
         if booker != None:
             _, guard_booker_id = parts_of(booker, "booker", "identity")
             mutations.append(make_tombstone(session + ".bkr" + guard_booker_id))
+            # Release the booker's bookerSlotClaim cells too (patientSlotClaim
+            # mirror, verticals.md). TombstoneSession tombstones only the
+            # session's vertex ROOT, never cascading onto its .schedule aspect
+            # (package.go's "no cascade" doctrine) — the same reason this op
+            # exists at all — so the span is still readable here even though
+            # the session itself is now dead.
+            # read-posture: (a) declared reads at ReleaseOrphanedBooking dispatch.
+            sess_sched = kv.Read(session + ".schedule")
+            if sess_sched != None and not sess_sched.isDeleted:
+                sess_starts = sess_sched.data.get("startsAt")
+                sess_ends = sess_sched.data.get("endsAt")
+                if sess_starts != None and sess_ends != None:
+                    for c in slot_cells(sess_starts, sess_ends):
+                        mutations.append(make_tombstone(booker + ".slot" + slot_cellcode(c)))
         events = [{"class": "wellness.bookingCancelled", "data": {"bookingKey": book_key, "session": session}}]
         return {"mutations": mutations, "events": events, "response": {"primaryKey": book_key}}
 
