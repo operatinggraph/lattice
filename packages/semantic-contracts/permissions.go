@@ -21,7 +21,7 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 // Permissions returns the package's permission vertices + grants. The
 // trusted-tool app submits CreateClause when a landlord/operator installs a
 // bespoke provision on a signed lease — the same operator-grant idiom
-// loftspace-ledger's CreateAccount uses. SupersedeClause (Fire V4
+// loftspace-ledger's LoftspaceCreateAccount uses. SupersedeClause (Fire V4
 // self-amendment) is the same operator-grant idiom.
 func Permissions() []pkgmgr.PermissionSpec {
 	return []pkgmgr.PermissionSpec{

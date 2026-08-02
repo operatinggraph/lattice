@@ -50,7 +50,7 @@ func bcCapDoc() *processor.CapabilityDoc {
 		ProjectedFromRevisions: map[string]uint64{scActorKey: 1},
 		Lanes:                  []string{"default"},
 		PlatformPermissions: []processor.PlatformPermission{
-			{OperationType: "CreateAccount", Scope: "any"},
+			{OperationType: "LoftspaceCreateAccount", Scope: "any"},
 			{OperationType: "DebitAccount", Scope: "any"},
 			{OperationType: "CreditAccount", Scope: "any"},
 			{OperationType: "CreateClause", Scope: "any"},
@@ -86,6 +86,11 @@ func setupBcEnv(t *testing.T) (context.Context, *substrate.Conn) {
 		t.Fatalf("install semantic-contracts: %v", err)
 	}
 	testutil.SeedCapDoc(t, ctx, conn, bcCapDoc())
+	// LoftspaceCreateAccount's workplace guard asks the GRAPH whether its
+	// caller is root, so the cap doc's Roles claim is not enough on its own —
+	// without the link this actor reads as an unprivileged caller with no
+	// worksAt anywhere (testutil.SeedHoldsRole's doc comment).
+	testutil.SeedHoldsRole(t, ctx, conn, scActorKey, bootstrap.RoleOperatorKey)
 	return ctx, conn
 }
 
@@ -164,7 +169,7 @@ func createAccount(t *testing.T, ctx context.Context, conn *substrate.Conn, cp *
 	env := &processor.OperationEnvelope{
 		RequestID:     reqID,
 		Lane:          processor.LaneDefault,
-		OperationType: "CreateAccount",
+		OperationType: "LoftspaceCreateAccount",
 		Actor:         scActorKey,
 		SubmittedAt:   "2026-07-02T12:00:00Z",
 		Class:         "account",

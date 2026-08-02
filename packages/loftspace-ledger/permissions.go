@@ -32,9 +32,10 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 // clinic-ledger's/cafe-ledger's identically-named (operator-only) op, none
 // of which intend it (lint-package-standard S9; cafe-ledger's
 // CreditCafeAccount and wellness-ledger's WellnessCreateAccount are the
-// same idiom). Nothing else references "CreateAccount" in this package (no
-// seed script, no Weaver target), so this is a straight rename, not an
-// additive alias.
+// same idiom). No Weaver target references it, but two external callers did
+// and are renamed alongside this package: scripts/seed-showcase.go and
+// packages/semantic-contracts (its own CreateClause/DebitAccount tests open
+// a lease account first) — a straight rename, not an additive alias.
 func Permissions() []pkgmgr.PermissionSpec {
 	return []pkgmgr.PermissionSpec{
 		{

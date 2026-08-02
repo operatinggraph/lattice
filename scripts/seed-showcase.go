@@ -1274,19 +1274,22 @@ func seedRileyClinicWorld(ctx context.Context, conn *substrate.Conn, adminKey, t
 	}
 
 	if !alive(ctx, conn, rileyPatientKey+".ledgerAccount") {
-		submitOp(ctx, conn, adminKey, "CreateAccount", "clinicaccount",
+		submitOp(ctx, conn, adminKey, "ClinicCreateAccount", "clinicaccount",
 			map[string]any{"patientKey": rileyPatientKey},
 			&processor.ContextHint{Reads: []string{rileyPatientKey}})
 	}
 
-	// Riley's RENT account: loftspace-ledger's CreateAccount is separate from
-	// clinic-ledger's above (heldFor a leaseapp, not a patient) — without it
-	// the one-bill statement's rent half never has an account to charge, so
-	// it stays 100% café. Gated on the same lease's .ledgerAccount guard as
-	// CreateAccount itself writes, so a rerun mints neither the account nor a
-	// second rent charge.
+	// Riley's RENT account: loftspace-ledger's LoftspaceCreateAccount is
+	// separate from clinic-ledger's above (heldFor a leaseapp, not a patient)
+	// — without it the one-bill statement's rent half never has an account to
+	// charge, so it stays 100% café. Gated on the same lease's .ledgerAccount
+	// guard as LoftspaceCreateAccount itself writes, so a rerun mints
+	// neither the account nor a second rent charge. adminKey holds the
+	// operator role, so LoftspaceCreateAccount's workplace-confinement guard
+	// (scripts.go) is exempt here the same way it is for every other
+	// admin-submitted op in this script.
 	if tenant1LeaseAppKey != "" && !alive(ctx, conn, tenant1LeaseAppKey+".ledgerAccount") {
-		reply := submitOp(ctx, conn, adminKey, "CreateAccount", "account",
+		reply := submitOp(ctx, conn, adminKey, "LoftspaceCreateAccount", "account",
 			map[string]any{"leaseAppKey": tenant1LeaseAppKey},
 			&processor.ContextHint{Reads: []string{tenant1LeaseAppKey}})
 		submitOp(ctx, conn, adminKey, "DebitAccount", "transaction",
