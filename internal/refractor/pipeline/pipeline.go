@@ -160,6 +160,20 @@ type Pipeline struct {
 	// non-secure lens — rows pass through untouched.
 	secureDecryptor *SecureDecryptor
 
+	// patternClosedOutput reports whether this lens's row for an anchor is a
+	// function solely of the subgraph its compiled pattern binds from that
+	// anchor — the soundness precondition for skipping an event on a type the
+	// pattern cannot bind (auth-plane-projection-latency-design.md §4.1). Only
+	// projection.InstallActorAggregate sets it: a Personal Lens consults two
+	// inputs outside the compiled pattern (the D1 read gate cap-read.<domain>.
+	// <actor> and the Interest Set, projection/personal.go), so an actor whose
+	// grants widen must keep receiving the role event that widened them.
+	//
+	// False by default, which is the unsafe-side value on purpose: a pipeline
+	// installed through any path that does not assert pattern-closure keeps
+	// today's broad behavior rather than silently narrowing.
+	patternClosedOutput bool
+
 	// authPlane reports whether this lens projects an authorization surface
 	// (projection.IsAuthPlane). Combined with actorAggregate (envelopeFn or
 	// multiEnvelopeFn installed) and requiresFootprintValidation, it is the
@@ -539,6 +553,128 @@ func (p *Pipeline) plainVertexRelevant(vertexType string) bool {
 	_, ok := p.plainReprojectLabels[vertexType]
 	return ok
 }
+
+// secureIdentityKeyType is the vertex type SecureDecryptor resolves key custody
+// against: readPiiKeyEnvelope point-reads vtx.identity.<id>.piiKey (secure.go),
+// and step 6's sensitiveAspectScope admits no other parent for a sensitive
+// aspect. A narrowed lens that cannot see this type would never be delivered a
+// shred and would keep projecting decrypted plaintext.
+//
+// The literal is a fact about the Processor's sensitive-aspect scope, not about
+// the decryptor, which resolves custody from an arbitrary lens-declared RETURN
+// alias. It is also unreachable in the shipped corpus — a secure lens and an
+// actorAggregate projection are mutually exclusive at translate time, and a
+// secure PERSONAL lens is already ineligible for want of pattern-closure — so
+// the conjunct is a standing guard for a combination that cannot exist yet, and
+// whoever lifts that ban owns re-deriving this type rather than inheriting it.
+const secureIdentityKeyType = "identity"
+
+// ActorAwareNarrowingLabels reports whether this actor-aware pipeline's fan-out
+// arms may skip an event whose vertex types its compiled patterns provably
+// cannot bind, and if so the exhaustive label set to judge against. It is the
+// conjunction in auth-plane-projection-latency-design.md §4.2, and every
+// conjunct is fail-closed: any one of them failing yields the pipeline's
+// existing unconditional fan-out.
+//
+// It is evaluated per event rather than snapshotted at installation, mirroring
+// seedAnchorFor. Activation installs these components in stages —
+// UseFullEngineBranches, then projection.InstallActorAggregate, then
+// SetSecureDecryptor (cmd/refractor/main.go) — so a snapshot taken during
+// installation would read a later stage's component as absent. For the
+// decryptor conjunct specifically that would narrow every Secure Lens, which is
+// the one case the conjunct exists to refuse.
+func (p *Pipeline) ActorAwareNarrowingLabels() (map[string]struct{}, bool) {
+	// Not actor-aware: the plain arms own their own gates.
+	if p.actorEnumerator == nil {
+		return nil, false
+	}
+	// ReferencedLabels only exists for the full engine, and only an exhaustive
+	// set proves a type cannot bind.
+	if p.engineKind != ruleengine.EngineFull || p.plainReprojectAll {
+		return nil, false
+	}
+	// An input outside the compiled pattern breaks the closure claim.
+	if !p.patternClosedOutput {
+		return nil, false
+	}
+	// Narrowing removes an incidental reprojection that today happens to heal a
+	// lost row. The convergence sweep is the standing healer that replaces it,
+	// and sweepEnrolment may refuse with only a warning (projection/driver.go),
+	// so a lens without a plan must not also lose the accident.
+	//
+	// This proves the plan is INSTALLED, not that a healer is turning: the sweep
+	// runs only where the host also calls RunSweep (cmd/refractor does). A host
+	// that installs lenses without starting sweeps gets narrowing with no
+	// standing healer, and Sweeper.suppressed additionally idles the tick while
+	// the lens is non-active or rebuilding.
+	if p.sweeper == nil {
+		return nil, false
+	}
+	// The anchor's own soft-delete arrives as a vertex event of the anchor's
+	// type. A lens that cannot see that type would never retract the anchor's
+	// row, and on the auth plane a missed retraction is an over-grant.
+	if _, ok := p.plainReprojectLabels[p.actorEnumerator.actorType]; !ok {
+		return nil, false
+	}
+	// The decryptor resolves key custody off a RETURN column, not off a node
+	// the executor bound, so the identity type is not implied by the pattern.
+	if p.secureDecryptor != nil {
+		if _, ok := p.plainReprojectLabels[secureIdentityKeyType]; !ok {
+			return nil, false
+		}
+	}
+	return p.plainReprojectLabels, true
+}
+
+// actorAwareFanOutRelevant reports whether the actor-aware fan-out arms must run
+// for an event touching the given vertex types — the counterpart of
+// plainReactsTo/plainVertexRelevant for the arms D1 and Fire 3 excluded. An
+// event is relevant when ANY of the types it touches is in the label set, so a
+// link is skipped only when NEITHER endpoint can bind.
+//
+// Every uncertain case defaults to relevant: an ineligible pipeline, an empty
+// or unparsed type, or no types at all.
+func (p *Pipeline) actorAwareFanOutRelevant(types ...string) bool {
+	if len(types) == 0 {
+		return true
+	}
+	labels, ok := p.ActorAwareNarrowingLabels()
+	if !ok {
+		return true
+	}
+	for _, t := range types {
+		if t == "" {
+			return true
+		}
+		if _, in := labels[t]; in {
+			return true
+		}
+	}
+	return false
+}
+
+// vertexEventRelevant is the single gate the KindVertex arm consults for both
+// pipeline shapes: a plain lens judges by plainVertexRelevant, an actor-aware
+// one by §4.2's conjunction.
+func (p *Pipeline) vertexEventRelevant(vertexType string) bool {
+	if p.actorEnumerator != nil {
+		return p.actorAwareFanOutRelevant(vertexType)
+	}
+	return p.plainVertexRelevant(vertexType)
+}
+
+// SetPatternClosedOutput declares that this lens's row for an anchor is a
+// function solely of the subgraph its compiled pattern binds from that anchor.
+// Called by projection.InstallActorAggregate; see the field's doc for why every
+// other installation path leaves it false.
+func (p *Pipeline) SetPatternClosedOutput(v bool) {
+	p.patternClosedOutput = v
+}
+
+// PatternClosedOutput reports what SetPatternClosedOutput declared, so a test
+// can pin which installation paths assert pattern-closure without reaching into
+// the pipeline's internals.
+func (p *Pipeline) PatternClosedOutput() bool { return p.patternClosedOutput }
 
 // NarrowedFilterEligible reports whether this pipeline's Core KV consumer may
 // be scoped to a narrowed, server-side FilterSubjects set instead of the
@@ -1184,6 +1320,14 @@ func (p *Pipeline) handle(ctx context.Context, msg substrate.Message) (substrate
 		// keyed-aspect deletion), retracting its row via the evaluate path's
 		// filter-retraction presence check.
 		if p.actorEnumerator != nil {
+			// An eligible actor-aware lens skips an aspect whose parent vertex
+			// type its patterns cannot bind. A key that fails to parse falls
+			// through so the fan-out raises the real error rather than being
+			// silently dropped here.
+			if _, parentType, _, _, pok := substrate.ParseAspectKey(key); pok &&
+				!p.actorAwareFanOutRelevant(parentType) {
+				return substrate.Ack, nil
+			}
 			return p.evalAspectFanOut(ctx, msg, key)
 		}
 		return p.evalPlainAspectReprojection(ctx, msg, key)
@@ -1195,6 +1339,16 @@ func (p *Pipeline) handle(ctx context.Context, msg substrate.Message) (substrate
 		// link-derived rows and retracting an endpoint anchor that a
 		// required-link removal drops from the matched set.
 		if p.actorEnumerator != nil {
+			// Skipped only when NEITHER endpoint type can bind. The fan-out's
+			// idempotent adjacency pre-apply is lost with the skip and that is
+			// sound: it exists to stop THIS pipeline's reprojection racing ahead
+			// of its own trigger edge (evaluateLinkFanOut), and the
+			// authoritative adjacency write is the dedicated whole-stream
+			// consumer's, not this one's. No reprojection, nothing to order.
+			if t1, _, _, t2, _, pok := substrate.ParseLinkKey(key); pok &&
+				!p.actorAwareFanOutRelevant(t1, t2) {
+				return substrate.Ack, nil
+			}
 			return p.evalLinkFanOut(ctx, msg, key, tombstone)
 		}
 		return p.evalPlainLinkReprojection(ctx, msg, key)
@@ -1204,9 +1358,11 @@ func (p *Pipeline) handle(ctx context.Context, msg substrate.Message) (substrate
 		return substrate.Ack, nil
 	}
 
-	// KindVertex. A vertex tombstone (empty body) is handled below by the
-	// normal evaluate path (the actor-aware pipeline emits a cap Delete);
-	// for other lenses an empty body carries no props, so ack and skip.
+	// KindVertex. An empty body carries no props for any lens shape, so it is
+	// acked and skipped unconditionally — the actor-aware pipeline included.
+	// The event that actually retracts an actor is the SOFT delete
+	// (isDeleted: true on a non-empty vertex root), which reaches the evaluate
+	// path below and emits the cap Delete from there.
 	if tombstone {
 		return substrate.Ack, nil
 	}
@@ -1232,15 +1388,15 @@ func (p *Pipeline) handle(ctx context.Context, msg substrate.Message) (substrate
 		return substrate.Ack, nil
 	}
 
-	// A plain lens whose compiled patterns provably cannot bind this vertex
-	// type skips the re-execute outright — the KindVertex counterpart of the
-	// aspect/link arms' plainReactsTo skip. Unlike those arms, KindVertex has
-	// no per-type dispatch of its own (every vertex-root event runs the same
-	// full evaluate below), so every vertex write in the system would
-	// otherwise fan into a full evaluation on every plain lens regardless of
-	// type. The actor-aware pipeline has its own
-	// fan-out semantics (evaluateFanOut's actorType routing) and is untouched.
-	if p.actorEnumerator == nil && !p.plainVertexRelevant(label) {
+	// A lens whose compiled patterns provably cannot bind this vertex type
+	// skips the re-execute outright — the KindVertex counterpart of the
+	// aspect/link arms' relevance skip. Unlike those arms, KindVertex has no
+	// per-type dispatch of its own (every vertex-root event runs the same full
+	// evaluate below), so every vertex write in the system would otherwise fan
+	// into a full evaluation regardless of type. Both pipeline shapes consult
+	// the one gate: a plain lens through plainVertexRelevant, an actor-aware one
+	// through §4.2's conjunction.
+	if !p.vertexEventRelevant(label) {
 		return substrate.Ack, nil
 	}
 

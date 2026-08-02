@@ -370,3 +370,61 @@ func TestPersonalEnvelopeFn_SecurityWinsOverRelevance(t *testing.T) {
 		t.Fatalf("an unreadable anchor must be denied even when the device's Interest Set finds it relevant, got %v", err)
 	}
 }
+
+// TestPatternClosure_OnlyActorAggregateAssertsIt pins the wiring seam the
+// actor-aware relevance gate rests on
+// (auth-plane-projection-latency-design.md §4.2/§4.4): an actor-aggregate lens
+// declares its output pattern-closed, and a Personal Lens never does, because it
+// also consults the D1 read gate (cap-read.<domain>.<actor>) and the Interest
+// Set. Without this a role event that widens an actor's read grants could be
+// filtered away from the very lens whose rows it widens.
+func TestPatternClosure_OnlyActorAggregateAssertsIt(t *testing.T) {
+	personalRule := personalTestRule(t, personalMatch,
+		lens.KeyField{adapter.PersonalActorKeyField, "anchor"})
+	personalPipe := newPersonalPipeline(t)
+	if !InstallPersonalLens(personalPipe, personalRule, nil, nil, nil, nil, false, discardTestLogger()) {
+		t.Fatalf("the personal fixture must install, or the assertion below is vacuous")
+	}
+	if personalPipe.PatternClosedOutput() {
+		t.Fatalf("a personal lens must never be narrowed — its read gate and Interest Set are outside the compiled pattern")
+	}
+
+	eng := full.New()
+	cr, err := eng.Parse(`
+MATCH (identity:identity {key: $actorKey})
+OPTIONAL MATCH (identity)-[:holdsRole]->(role:role)
+RETURN identity.key AS actorKey, collect(role.key) AS roles
+`)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	aggRule := &lens.Rule{
+		ID:             "pattern-closure-test",
+		CanonicalName:  "patternClosure",
+		ProjectionKind: ActorAggregateKind,
+		ResolvedEngine: ruleengine.EngineFull,
+		CompiledRule:   cr,
+		Into:           lens.IntoConfig{Target: "nats_kv", Bucket: "capability-kv", Key: lens.KeyField{"key"}},
+		Output: &lens.OutputDescriptorSpec{
+			AnchorType:       "identity",
+			OutputKeyPattern: "patternClosure.{actorSuffix}",
+			BodyColumns:      []string{"roles"},
+			EmptyBehavior:    string(EmptyDelete),
+			Freshness:        "auto",
+		},
+	}
+	adpt, err := adapter.New(nil, []string{"key"}, adapter.DeleteModeHard)
+	if err != nil {
+		t.Fatalf("adapter.New: %v", err)
+	}
+	aggPipe, err := pipeline.New(aggRule.ID, "nats_kv", "CORE", nil, nil, adpt, nil)
+	if err != nil {
+		t.Fatalf("pipeline.New: %v", err)
+	}
+	if !InstallActorAggregate(aggPipe, adpt, aggRule, func(string) uint64 { return 0 }, nil, nil, discardTestLogger()) {
+		t.Fatalf("the actor-aggregate fixture must install, or the assertion below is vacuous")
+	}
+	if !aggPipe.PatternClosedOutput() {
+		t.Fatalf("an actor-aggregate lens's row is a function of its compiled pattern alone")
+	}
+}

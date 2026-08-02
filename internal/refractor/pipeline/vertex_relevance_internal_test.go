@@ -265,14 +265,19 @@ RETURN u.key AS key
 	require.NoError(t, err, "a non-exhaustive label set must evaluate on every vertex type")
 }
 
-// TestHandle_VertexEvent_ActorAwarePipelineIgnoresTheGate proves the
-// KindVertex gate is scoped to plain pipelines only. An actor-aware pipeline
-// keeps its own fan-out routing (evaluateFanOut) regardless of
-// plainVertexRelevant — proven here by manually forcing a referenced-label
-// set that EXCLUDES the triggering type ("role"), so a gate that ran
-// unconditionally would wrongly Ack-skip this event; the actor-aware
-// fan-out must still reach and project the identity actor's row.
-func TestHandle_VertexEvent_ActorAwarePipelineIgnoresTheGate(t *testing.T) {
+// TestHandle_VertexEvent_ActorAwarePipelineIgnoresThePlainGate proves the
+// KindVertex arm never judges an actor-aware pipeline by plainVertexRelevant.
+// Forcing a referenced-label set that EXCLUDES the triggering type ("role")
+// makes the plain gate say "skip", and the fan-out must still reach and project
+// the identity actor's row.
+//
+// The claim is scoped to the PLAIN gate. An actor-aware pipeline has a gate of
+// its own (ActorAwareNarrowingLabels, §4.2), and this fixture is ineligible for
+// it — it declares no pattern-closed output and installs no sweep plan — so the
+// event reaches the fan-out here whichever gate is asked. What the actor-aware
+// gate does to an ELIGIBLE pipeline is pinned in
+// actor_aware_relevance_internal_test.go.
+func TestHandle_VertexEvent_ActorAwarePipelineIgnoresThePlainGate(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping NATS-backed test in short mode")
 	}
@@ -295,7 +300,7 @@ func TestHandle_VertexEvent_ActorAwarePipelineIgnoresTheGate(t *testing.T) {
 		envelopeFn:   evalDriftEnvelopeFn,
 		// Deliberately excludes "role": if plainVertexRelevant gated this
 		// path, this event would be skipped. actorEnumerator below is what
-		// must save it — proving the gate never applies to an actor-aware
+		// must save it — the plain gate never applies to an actor-aware
 		// pipeline.
 		plainReprojectLabels: map[string]struct{}{"identity": {}},
 		plainReprojectAll:    false,

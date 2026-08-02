@@ -401,6 +401,14 @@ func InstallActorAggregate(
 		}
 	}
 	p.SetActorEnumerator(pipeline.NewActorEnumerator(adjKV, coreKV, desc.AnchorType))
+	// An actor-aggregate lens's row is a function of the subgraph its compiled
+	// pattern binds and nothing else — the soundness precondition for the
+	// fan-out arms' relevance gate (auth-plane-projection-latency-design.md
+	// §4.1/§4.2). InstallPersonalLens deliberately does not assert this: a
+	// Personal Lens also consults the D1 read gate (cap-read.<domain>.<actor>)
+	// and the Interest Set, so an event outside its pattern can still change
+	// what it projects.
+	p.SetPatternClosedOutput(true)
 	p.SetActorDeleteKey(desc.BuildKey)
 	p.SetLatencyBuffer(pipeline.NewLatencyRingBuffer(pipeline.DefaultLatencyBufferSize))
 
