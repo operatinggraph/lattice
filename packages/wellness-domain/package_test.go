@@ -33,22 +33,22 @@ func TestPackage_ManifestMatchesDefinition(t *testing.T) {
 // rather than reaching an install, where the same change is a silent capability
 // or read-model shift.
 //
-// Five of the fifteen DDLs are CreateOnly claim aspects (S4) — the slot, seat,
-// booker, and the two instructor-binding claims. Each is the sole thing making
+// Six of the sixteen DDLs are CreateOnly claim aspects (S4) — the slot, seat,
+// waitlist, booker, and the two instructor-binding claims. Each is the sole thing making
 // its uniqueness constraint hold, and none is reachable from a lens, so dropping
 // one would not break a read: it would silently re-admit double-booking. That is
 // why they are pinned by name rather than counted.
 func TestPackage_StructurePins(t *testing.T) {
-	if got, want := len(Package.DDLs), 15; got != want {
+	if got, want := len(Package.DDLs), 16; got != want {
 		t.Errorf("DDLs: got %d, want %d", got, want)
 	}
 	if got, want := len(Package.Lenses), 7; got != want {
 		t.Errorf("Lenses: got %d, want %d", got, want)
 	}
-	if got, want := len(Package.Permissions), 16; got != want {
+	if got, want := len(Package.Permissions), 18; got != want {
 		t.Errorf("Permissions: got %d, want %d", got, want)
 	}
-	if got, want := len(Package.OpMetas), 9; got != want {
+	if got, want := len(Package.OpMetas), 10; got != want {
 		t.Errorf("OpMetas: got %d, want %d", got, want)
 	}
 	if got, want := len(Package.Roles), 0; got != want {
@@ -74,6 +74,7 @@ func TestPackage_StructurePins(t *testing.T) {
 		{"sessionSchedule", "meta.ddl.aspectType"},
 		{"studioSlotClaim", "meta.ddl.aspectType"},
 		{"sessionSeatClaim", "meta.ddl.aspectType"},
+		{"sessionWaitlistClaim", "meta.ddl.aspectType"},
 		{"sessionBookerClaim", "meta.ddl.aspectType"},
 		{"bookingStatus", "meta.ddl.aspectType"},
 		{"instructorProfile", "meta.ddl.aspectType"},
@@ -115,6 +116,7 @@ func TestPackage_StructurePins(t *testing.T) {
 		{"TombstoneSession", "any", []string{"operator", "provider"}},
 		{"ReassignSession", "any", []string{"operator", "frontOfHouse", "provider"}},
 		{"CreateBooking", "any", staff}, {"CreateBooking", "self", []string{"consumer"}},
+		{"JoinWaitlist", "any", staff}, {"JoinWaitlist", "self", []string{"consumer"}},
 		{"CancelBooking", "any", staff}, {"CancelBooking", "self", []string{"consumer"}},
 		{"SetBookingAttendance", "any", []string{"operator", "provider"}},
 		{"CreateInstructor", "any", operatorOnly}, {"TombstoneInstructor", "any", operatorOnly},

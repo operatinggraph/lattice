@@ -82,6 +82,7 @@ func domainCapDoc() *processor.CapabilityDoc {
 			{OperationType: "TombstoneSession", Scope: "any"},
 			{OperationType: "ReassignSession", Scope: "any"},
 			{OperationType: "CreateBooking", Scope: "any"},
+			{OperationType: "JoinWaitlist", Scope: "any"},
 			{OperationType: "CancelBooking", Scope: "any"},
 			{OperationType: "SetBookingAttendance", Scope: "any"},
 			{OperationType: "ReleaseOrphanedBooking", Scope: "any"},
@@ -285,6 +286,18 @@ func wdSeatKeys(sessionKey string, capacity int) []string {
 	return keys
 }
 
+// wdWaitlistKeys enumerates a session's waitlist-claim aspect keys up to n,
+// mirroring claim_first_free_waitlist_slot's bounded loop (ddls.go). Tests
+// pass a small n (not the full MAX_WAITLIST_SIZE=200) since the fixtures
+// here never approach that bound.
+func wdWaitlistKeys(sessionKey string, n int) []string {
+	keys := make([]string, 0, n)
+	for i := 1; i <= n; i++ {
+		keys = append(keys, sessionKey+".wl"+strconv.Itoa(i))
+	}
+	return keys
+}
+
 func createSession(t *testing.T, ctx context.Context, conn *substrate.Conn, cp *processor.CommitPath, cons jetstream.Consumer, label, studioKey, name, startsAt, endsAt string, capacity int) (string, processor.MessageOutcome) {
 	t.Helper()
 	reqID := testutil.GenReqID(label)
@@ -368,6 +381,40 @@ func createBooking(t *testing.T, ctx context.Context, conn *substrate.Conn, cp *
 		RequestID:     reqID,
 		Lane:          processor.LaneDefault,
 		OperationType: "CreateBooking",
+		Actor:         domainActorKey,
+		SubmittedAt:   "2026-07-07T12:00:00Z",
+		Class:         "booking",
+		Payload:       payload,
+		ContextHint:   &processor.ContextHint{Reads: reads, OptionalReads: optionalReads},
+	}
+	testutil.PublishOp(t, conn, env)
+	outcome := testutil.DriveOne(t, ctx, cp, cons, "")
+	return "vtx.booking." + nanoIDFromRequestID(reqID), outcome
+}
+
+// joinWaitlist mirrors createBooking's dispatch shape exactly (same declared
+// reads/optionalReads pattern, JoinWaitlist shares prepare_booking_common
+// with CreateBooking) but declares wdWaitlistKeys instead of wdSeatKeys and
+// dispatches JoinWaitlist.
+func joinWaitlist(t *testing.T, ctx context.Context, conn *substrate.Conn, cp *processor.CommitPath, cons jetstream.Consumer, label, sessionKey, bookerKey, leaseAppKey string) (string, processor.MessageOutcome) {
+	t.Helper()
+	reqID := testutil.GenReqID(label)
+	payloadMap := map[string]any{"session": sessionKey, "booker": bookerKey}
+	reads := []string{sessionKey, sessionKey + ".schedule", bookerKey}
+	optionalReads := wdWaitlistKeys(sessionKey, 20)
+	_, bookerID, _ := substrate.ParseVertexKey(bookerKey)
+	optionalReads = append(optionalReads, sessionKey+".bkr"+bookerID)
+	if leaseAppKey != "" {
+		payloadMap["leaseAppKey"] = leaseAppKey
+		_, leaseID, _ := substrate.ParseVertexKey(leaseAppKey)
+		optionalReads = append(optionalReads, leaseAppKey, leaseAppKey+".tenancy",
+			"lnk.leaseapp."+leaseID+".applicationFor.identity."+bookerID)
+	}
+	payload, _ := json.Marshal(payloadMap)
+	env := &processor.OperationEnvelope{
+		RequestID:     reqID,
+		Lane:          processor.LaneDefault,
+		OperationType: "JoinWaitlist",
 		Actor:         domainActorKey,
 		SubmittedAt:   "2026-07-07T12:00:00Z",
 		Class:         "booking",
@@ -2296,5 +2343,246 @@ func TestSetInstructorProfile_OperatorPassesUnbound(t *testing.T) {
 	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
 	if got := instructorDisplayName(t, ctx, conn, instructorKey); got != "After" {
 		t.Fatalf("an operator bound to no instructor must pass: displayName = %q", got)
+	}
+}
+
+// TestJoinWaitlist_ClaimsSlotWhenFull proves the mirror-image write:
+// JoinWaitlist claims a sessionWaitlistClaim slot instead of a seat, stamping
+// .status {value: waitlisted, waitlistSlot}, never a seat field.
+func TestJoinWaitlist_ClaimsSlotWhenFull(t *testing.T) {
+	ctx, conn := setupDomainEnv(t)
+	cp, cons := newDomainPipeline(t, ctx, conn, "waitlistjoin")
+
+	studioKey := createStudio(t, ctx, conn, cp, cons, "wdwlstudio000001", "Small Studio")
+	sessionKey, _ := createSession(t, ctx, conn, cp, cons, "wdwlsession000001", studioKey, "Intro Class", "2026-07-08T09:00:00Z", "2026-07-08T09:30:00Z", 1)
+
+	bookerOneKey := seedIdentity(t, ctx, conn, "BBWELLBKERWL1AHJKMNP")
+	_, firstOutcome := createBooking(t, ctx, conn, cp, cons, "wdwlbooking000001", sessionKey, bookerOneKey, "")
+	if firstOutcome != processor.OutcomeAccepted {
+		t.Fatalf("CreateBooking outcome = %v, want Accepted", firstOutcome)
+	}
+
+	bookerTwoKey := seedIdentity(t, ctx, conn, "BBWELLBKERWL2AHJKMNP")
+	waitlistKey, outcome := joinWaitlist(t, ctx, conn, cp, cons, "wdwljoin000001", sessionKey, bookerTwoKey, "")
+	if outcome != processor.OutcomeAccepted {
+		t.Fatalf("JoinWaitlist outcome = %v, want Accepted", outcome)
+	}
+
+	statusDoc := readDoc(t, ctx, conn, waitlistKey+".status")
+	statusData, _ := statusDoc["data"].(map[string]any)
+	if got, _ := statusData["value"].(string); got != "waitlisted" {
+		t.Fatalf("status.value = %q, want waitlisted", got)
+	}
+	if got, _ := statusData["waitlistSlot"].(float64); got != 1 {
+		t.Fatalf("status.waitlistSlot = %v, want 1 (first claimed slot)", got)
+	}
+	if _, hasSeat := statusData["seat"]; hasSeat {
+		t.Fatalf("a waitlisted booking must not carry a seat field: %v", statusData)
+	}
+	if !keyExists(t, ctx, conn, sessionKey+".wl1") {
+		t.Fatalf("expected sessionWaitlistClaim at wl1")
+	}
+}
+
+// TestCancelBooking_PromotesEarliestWaitlistedBooking is the load-bearing
+// promotion test: cancelling a booked seat with two waitlisted candidates
+// must promote the EARLIEST (lowest waitlistSlot) one, hand it the freed
+// seat directly (seat cell stays claimed, never tombstoned), and leave the
+// later candidate untouched — proving find_promotion_candidate's ordering,
+// not just that promotion happens at all.
+func TestCancelBooking_PromotesEarliestWaitlistedBooking(t *testing.T) {
+	ctx, conn := setupDomainEnv(t)
+	cp, cons := newDomainPipeline(t, ctx, conn, "waitlistpromote")
+
+	studioKey := createStudio(t, ctx, conn, cp, cons, "wdwlstudio000002", "Small Studio")
+	sessionKey, _ := createSession(t, ctx, conn, cp, cons, "wdwlsession000002", studioKey, "Intro Class", "2026-07-08T09:00:00Z", "2026-07-08T09:30:00Z", 1)
+
+	bookerOneKey := seedIdentity(t, ctx, conn, "BBWELLBKERWL1BHJKMNP")
+	bookingOneKey, bkOutcome := createBooking(t, ctx, conn, cp, cons, "wdwlbooking000002", sessionKey, bookerOneKey, "")
+	if bkOutcome != processor.OutcomeAccepted {
+		t.Fatalf("CreateBooking outcome = %v, want Accepted", bkOutcome)
+	}
+
+	bookerTwoKey := seedIdentity(t, ctx, conn, "BBWELLBKERWL2BHJKMNP")
+	waitlistTwoKey, wl2Outcome := joinWaitlist(t, ctx, conn, cp, cons, "wdwljoin000002", sessionKey, bookerTwoKey, "")
+	if wl2Outcome != processor.OutcomeAccepted {
+		t.Fatalf("first JoinWaitlist outcome = %v, want Accepted", wl2Outcome)
+	}
+
+	bookerThreeKey := seedIdentity(t, ctx, conn, "BBWELLBKERWL3BHJKMNP")
+	waitlistThreeKey, wl3Outcome := joinWaitlist(t, ctx, conn, cp, cons, "wdwljoin000003", sessionKey, bookerThreeKey, "")
+	if wl3Outcome != processor.OutcomeAccepted {
+		t.Fatalf("second JoinWaitlist outcome = %v, want Accepted", wl3Outcome)
+	}
+
+	cancelReqID := testutil.GenReqID("wdwlcancel000001")
+	cancelEnv := &processor.OperationEnvelope{
+		RequestID:     cancelReqID,
+		Lane:          processor.LaneDefault,
+		OperationType: "CancelBooking",
+		Actor:         domainActorKey,
+		SubmittedAt:   "2026-07-07T12:10:00Z",
+		Class:         "booking",
+		Payload:       json.RawMessage(`{"bookingKey":"` + bookingOneKey + `","session":"` + sessionKey + `"}`),
+		ContextHint: &processor.ContextHint{Reads: []string{
+			bookingOneKey, bookingOneKey + ".status", sessionKey + ".schedule",
+			forSessionLnkKey(t, bookingOneKey, sessionKey),
+		}},
+	}
+	testutil.PublishOp(t, conn, cancelEnv)
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
+
+	if keyExists(t, ctx, conn, bookingOneKey) {
+		t.Fatalf("cancelled booking must be tombstoned")
+	}
+
+	// bookerTwo (earliest, wl1) must be promoted: booked, holding the freed
+	// seat1, wl1 released.
+	twoStatus := readDoc(t, ctx, conn, waitlistTwoKey+".status")
+	twoData, _ := twoStatus["data"].(map[string]any)
+	if got, _ := twoData["value"].(string); got != "booked" {
+		t.Fatalf("bookerTwo status.value = %q, want booked (promoted)", got)
+	}
+	if got, _ := twoData["seat"].(float64); got != 1 {
+		t.Fatalf("bookerTwo status.seat = %v, want 1 (the freed seat)", got)
+	}
+	if keyExists(t, ctx, conn, sessionKey+".wl1") {
+		t.Fatalf("wl1 must be released once bookerTwo is promoted")
+	}
+	if !keyExists(t, ctx, conn, sessionKey+".seat1") {
+		t.Fatalf("seat1 must remain claimed — handed to the promoted booking, never released back open")
+	}
+
+	// bookerThree (wl2, later) must remain waitlisted and untouched.
+	threeStatus := readDoc(t, ctx, conn, waitlistThreeKey+".status")
+	threeData, _ := threeStatus["data"].(map[string]any)
+	if got, _ := threeData["value"].(string); got != "waitlisted" {
+		t.Fatalf("bookerThree status.value = %q, want waitlisted (not yet promoted)", got)
+	}
+	if !keyExists(t, ctx, conn, sessionKey+".wl2") {
+		t.Fatalf("wl2 must remain claimed — bookerThree was not the promoted candidate")
+	}
+}
+
+// TestCancelBooking_WaitlistedBookerLeavesWaitlist proves the other
+// CancelBooking branch: a waitlisted booking cancelling itself just releases
+// its own waitlist slot — it never held a seat, so no promotion runs and the
+// live booked seat is left untouched.
+func TestCancelBooking_WaitlistedBookerLeavesWaitlist(t *testing.T) {
+	ctx, conn := setupDomainEnv(t)
+	cp, cons := newDomainPipeline(t, ctx, conn, "waitlistleave")
+
+	studioKey := createStudio(t, ctx, conn, cp, cons, "wdwlstudio000003", "Small Studio")
+	sessionKey, _ := createSession(t, ctx, conn, cp, cons, "wdwlsession000003", studioKey, "Intro Class", "2026-07-08T09:00:00Z", "2026-07-08T09:30:00Z", 1)
+
+	bookerOneKey := seedIdentity(t, ctx, conn, "BBWELLBKERWL1CHJKMNP")
+	_, bkOutcome := createBooking(t, ctx, conn, cp, cons, "wdwlbooking000003", sessionKey, bookerOneKey, "")
+	if bkOutcome != processor.OutcomeAccepted {
+		t.Fatalf("CreateBooking outcome = %v, want Accepted", bkOutcome)
+	}
+
+	bookerTwoKey := seedIdentity(t, ctx, conn, "BBWELLBKERWL2CHJKMNP")
+	waitlistKey, wlOutcome := joinWaitlist(t, ctx, conn, cp, cons, "wdwljoin000004", sessionKey, bookerTwoKey, "")
+	if wlOutcome != processor.OutcomeAccepted {
+		t.Fatalf("JoinWaitlist outcome = %v, want Accepted", wlOutcome)
+	}
+
+	cancelReqID := testutil.GenReqID("wdwlcancel000002")
+	cancelEnv := &processor.OperationEnvelope{
+		RequestID:     cancelReqID,
+		Lane:          processor.LaneDefault,
+		OperationType: "CancelBooking",
+		Actor:         domainActorKey,
+		SubmittedAt:   "2026-07-07T12:10:00Z",
+		Class:         "booking",
+		Payload:       json.RawMessage(`{"bookingKey":"` + waitlistKey + `","session":"` + sessionKey + `"}`),
+		ContextHint: &processor.ContextHint{Reads: []string{
+			waitlistKey, waitlistKey + ".status", sessionKey + ".schedule",
+			forSessionLnkKey(t, waitlistKey, sessionKey),
+		}},
+	}
+	testutil.PublishOp(t, conn, cancelEnv)
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
+
+	if keyExists(t, ctx, conn, waitlistKey) {
+		t.Fatalf("waitlisted booking must be tombstoned after cancelling")
+	}
+	if keyExists(t, ctx, conn, sessionKey+".wl1") {
+		t.Fatalf("wl1 must be released once the waitlisted booker cancels")
+	}
+	if !keyExists(t, ctx, conn, sessionKey+".seat1") {
+		t.Fatalf("seat1 (bookerOne's live seat) must be untouched — a waitlisted cancel promotes nobody")
+	}
+}
+
+// TestReleaseOrphanedBooking_ReleasesWaitlistSlotAfterSessionTombstoned
+// proves the missing_release gap's waitlisted branch (lenses.go): a
+// waitlisted booking left behind by a called-off class releases its .wl<n>
+// slot, not a seat cell — the ReleaseOrphanedBooking else-branch (ddls.go).
+func TestReleaseOrphanedBooking_ReleasesWaitlistSlotAfterSessionTombstoned(t *testing.T) {
+	ctx, conn := setupDomainEnv(t)
+	cp, cons := newDomainPipeline(t, ctx, conn, "waitlistorphan")
+
+	studioKey := createStudio(t, ctx, conn, cp, cons, "wdwlstudio000004", "Flow Room")
+	sessionKey, _ := createSession(t, ctx, conn, cp, cons, "wdwlsession000004", studioKey, "Vinyasa Flow", "2026-07-08T09:00:00Z", "2026-07-08T09:30:00Z", 1)
+
+	bookerOneKey := seedIdentity(t, ctx, conn, "BBWELLBKERWL1DHJKMNP")
+	_, bkOutcome := createBooking(t, ctx, conn, cp, cons, "wdwlbooking000004", sessionKey, bookerOneKey, "")
+	if bkOutcome != processor.OutcomeAccepted {
+		t.Fatalf("CreateBooking outcome = %v, want Accepted", bkOutcome)
+	}
+
+	bookerTwoKey := seedIdentity(t, ctx, conn, "BBWELLBKERWL2DHJKMNP")
+	waitlistKey, wlOutcome := joinWaitlist(t, ctx, conn, cp, cons, "wdwljoin000005", sessionKey, bookerTwoKey, "")
+	if wlOutcome != processor.OutcomeAccepted {
+		t.Fatalf("JoinWaitlist outcome = %v, want Accepted", wlOutcome)
+	}
+
+	tombstoneReqID := testutil.GenReqID("wdwltombstone00001")
+	tombstoneEnv := &processor.OperationEnvelope{
+		RequestID:     tombstoneReqID,
+		Lane:          processor.LaneDefault,
+		OperationType: "TombstoneSession",
+		Actor:         domainActorKey,
+		SubmittedAt:   "2026-07-07T12:10:00Z",
+		Class:         "session",
+		Payload:       json.RawMessage(`{"sessionKey":"` + sessionKey + `","studio":"` + studioKey + `"}`),
+		ContextHint: &processor.ContextHint{Reads: []string{
+			sessionKey, sessionKey + ".schedule",
+			atStudioLnkKey(t, sessionKey, studioKey),
+		}},
+	}
+	testutil.PublishOp(t, conn, tombstoneEnv)
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
+
+	releaseReqID := testutil.GenReqID("wdwlrelease000001")
+	releaseEnv := &processor.OperationEnvelope{
+		RequestID:     releaseReqID,
+		Lane:          processor.LaneDefault,
+		OperationType: "ReleaseOrphanedBooking",
+		Actor:         domainActorKey,
+		SubmittedAt:   "2026-07-07T12:15:00Z",
+		Class:         "booking",
+		Payload:       json.RawMessage(`{"bookingKey":"` + waitlistKey + `"}`),
+		ContextHint: &processor.ContextHint{Reads: []string{
+			waitlistKey, waitlistKey + ".status", sessionKey,
+		}},
+	}
+	testutil.PublishOp(t, conn, releaseEnv)
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
+
+	if keyExists(t, ctx, conn, waitlistKey) {
+		t.Fatalf("waitlisted booking must be tombstoned after ReleaseOrphanedBooking")
+	}
+	if keyExists(t, ctx, conn, sessionKey+".wl1") {
+		t.Fatalf("wl1 must be released after ReleaseOrphanedBooking")
+	}
+
+	// Positive proof the double-book guard released too: the same booker,
+	// booking a DIFFERENT session, is accepted.
+	otherSessionKey, _ := createSession(t, ctx, conn, cp, cons, "wdwlsession000005", studioKey, "Power Sculpt", "2026-07-09T09:00:00Z", "2026-07-09T09:30:00Z", 1)
+	_, outcome := createBooking(t, ctx, conn, cp, cons, "wdwlbooking000005", otherSessionKey, bookerTwoKey, "")
+	if outcome != processor.OutcomeAccepted {
+		t.Fatalf("same booker on a different session after release outcome = %v, want Accepted", outcome)
 	}
 }

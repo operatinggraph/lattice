@@ -4,11 +4,12 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 
 // OpMetas declares descriptor-vocabulary metadata (edge-showcase-app-design.md
 // §3.3, edge-manifest Fire 1) for wellness-domain's client-invocable ops — the
-// two consumer (scope=self) ones, CreateBooking and CancelBooking; the staff
-// standing ones, CreateStudio, CreateSession and CreateSessionSeries; and the provider-hat standing
-// ones, TombstoneSession, SetBookingAttendance and SetInstructorProfile —
-// mirroring clinic-domain's adoption (Fire 5 Inc 1) and service-domain's
-// original RequestService op-meta.
+// three consumer (scope=self) ones, CreateBooking, JoinWaitlist and
+// CancelBooking; the staff standing ones, CreateStudio, CreateSession and
+// CreateSessionSeries; and the provider-hat standing ones, TombstoneSession,
+// SetBookingAttendance and SetInstructorProfile — mirroring clinic-domain's
+// adoption (Fire 5 Inc 1) and service-domain's original RequestService
+// op-meta.
 //
 // Dispatch.Class on each entry is "booking" — the booking DDL's own
 // CanonicalName (bookingVertexDDL), the Contract #2 §2.1 envelope `class`
@@ -173,6 +174,43 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 				// reject) — an undeclared guard would fail the re-book-after-
 				// cancel path. booker = {actor} here, so {actor:id} is its bare
 				// id. Absence is the common case (first book), hence optional.
+				OptionalReads: []string{
+					"vtx.session.{payload.session:id}.bkr{actor:id}",
+				},
+			},
+		},
+		{
+			// JoinWaitlist mirrors CreateBooking's op-meta shape exactly —
+			// same self-anchored booker, same optional resident-rate lease,
+			// same declared booker-guard optionalRead (the guard is shared
+			// between the two ops, ddls.go's sessionBookerClaim) — only the
+			// presentation strings and title differ, since the offered
+			// affordance is "join the waitlist" not "book".
+			OperationType: "JoinWaitlist",
+			Presentation: &pkgmgr.OpPresentationSpec{
+				Title:       "Join the waitlist",
+				Description: "This class is full — join the waitlist and get the next open seat automatically.",
+				Icon:        "calendar",
+				Tone:        "secondary",
+				SubmitLabel: "Join waitlist",
+			},
+			InputSchema: `{"type":"object","properties":` +
+				`{"session":{"type":"string","description":"vtx.session.<NanoID> of the session to waitlist for — auto-filled from the session being viewed."},` +
+				`"leaseAppKey":{"type":"string","description":"Optional vtx.leaseapp.<NanoID> if you hold a residency you'd like the resident rate for once promoted."}},` +
+				`"required":["session"]}`,
+			FieldDescriptions: map[string]string{
+				"session":     "The session to join the waitlist for — auto-filled by the client from the session being viewed (dispatch.targetField), not user-entered.",
+				"leaseAppKey": "Booked at the resident rate automatically when you live here, once you're promoted off the waitlist.",
+			},
+			Dispatch: &pkgmgr.OpDispatchSpec{
+				Class:       "booking",
+				AuthContext: "self",
+				TargetField: "session",
+				TargetType:  "session",
+				ContextParams: map[string]string{
+					"booker":      "{actor}",
+					"leaseAppKey": "{me.leaseapp?}",
+				},
 				OptionalReads: []string{
 					"vtx.session.{payload.session:id}.bkr{actor:id}",
 				},

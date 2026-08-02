@@ -355,21 +355,27 @@ RETURN
 // survives the session's own tombstone because it lives on the booking, not
 // the session.
 //
-//   - `missing_release` — the booking is still in `booked` status, carries a
-//     session anchor, and that session is no longer LIVE (`se` null via the
-//     OPTIONAL MATCH — the forSession link itself is untouched by
-//     TombstoneSession, only the session vertex is gone). Weaver dispatches
-//     ReleaseOrphanedBooking{bookingKey} (targets.go), which re-reads and
-//     re-confirms the session is dead before releasing anything — the lens
-//     row is a candidate, not a trusted command. Once released the booking
-//     itself is tombstoned, so the anchor row (`b:booking`) stops existing
-//     and the gap converges by the row disappearing, the same
+//   - `missing_release` — the booking is still in `booked` OR `waitlisted`
+//     status, carries a session anchor, and that session is no longer LIVE
+//     (`se` null via the OPTIONAL MATCH — the forSession link itself is
+//     untouched by TombstoneSession, only the session vertex is gone).
+//     Weaver dispatches ReleaseOrphanedBooking{bookingKey} (targets.go),
+//     which re-reads and re-confirms the session is dead before releasing
+//     anything (whichever of seat/waitlistSlot its OWN status names) — the
+//     lens row is a candidate, not a trusted command. Once released the
+//     booking itself is tombstoned, so the anchor row (`b:booking`) stops
+//     existing and the gap converges by the row disappearing, the same
 //     EmptyBehavior:"delete" shape every actorAggregate target here uses.
+//     `waitlisted` joined this condition alongside `booked` (ddls.go) — a
+//     waitlisted booking whose class was called off out from under it is
+//     exactly as orphaned as a booked one; without it a JoinWaitlist entry on
+//     a tombstoned session would hold its .wl<n> slot and double-book guard
+//     forever, invisible to this convergence lens.
 //
 // A booking already attended/noShow, or one whose session is still live,
 // never violates — SetBookingAttendance and CancelBooking are the paths that
 // own those, this lens only ever answers for a class that was called off out
-// from under a still-`booked` seat.
+// from under a still-`booked`/`waitlisted` seat or slot.
 // orphanedBookingSettlementSpec is built once at package init: the retry cap
 // (maxReleaseRetries) bakes into the constant maxretries_release column, the
 // §10.2 "the policy lives in the cypher" convention lease-signing's
@@ -387,8 +393,8 @@ RETURN
   entityKey AS bookingKey,
   sessionKey,
   status,
-  ((status = 'booked') AND (sessionKey <> null) AND (liveSessionKey = null)) AS missing_release,
-  ((status = 'booked') AND (sessionKey <> null) AND (liveSessionKey = null)) AS violating,
+  (((status = 'booked') OR (status = 'waitlisted')) AND (sessionKey <> null) AND (liveSessionKey = null)) AS missing_release,
+  (((status = 'booked') OR (status = 'waitlisted')) AND (sessionKey <> null) AND (liveSessionKey = null)) AS violating,
   %d AS maxretries_release
 `, maxReleaseRetries)
 
