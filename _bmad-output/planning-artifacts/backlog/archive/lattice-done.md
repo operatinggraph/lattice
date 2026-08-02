@@ -1,6 +1,8 @@
 # Done log archive — lattice (older shipped items, newest first)
 
 
+- 2026-07-30 · `b097f1a4` · [Refractor,Loupe] cold bring-up replay debt no longer reads as staleness — a draining `consumerLag` renders green until its `lagProgressAt` clock stalls 2min, closing the demo box's hours-long false YELLOW
+- 2026-07-30 · `a7284b8a` · [Processor] wall-budget test flake — `PROCESSOR_SCRIPT_WALL_MS` now wired + widened for `-p 4` test runs, production 250ms NFR-P4 default untouched
 - 2026-07-30 · `3deda37c` · [Refractor] Postgres GrantTable cap-read producers now shred-nullified — closes Fire 4's first residual [design §Fire 5](../../implementation-artifacts/cap-read-per-anchor-grant-keys-design.md)
 - 2026-07-30 · `da1eb1b6` · [Refractor] actor enumeration now hops `reportsTo` once (directional, non-recursive) so a manager's `cap.ephemeral.*` refreshes on a report's task mutation, matching capabilityEphemeral's fixed 2-hop cypher
 - 2026-07-30 · `7628070e` · [Bootstrap] VerifyKernel now compares kernel content, not just presence/shape — closes the gap where `bootstrap verify` (and the `up` target's reuse short-circuit) passed a stale kernel clean

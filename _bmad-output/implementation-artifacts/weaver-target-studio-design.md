@@ -318,6 +318,30 @@ on the dev stack per lane discipline (headless-first).
 Order fixed (each consumes its predecessor's module); one FE fire at a time per lane rules; Sally UX
 pass opens each fire.
 
+### Build note — the §6.4 cross-lane ask SHIPPED 2026-08-02 (`6d2614fb`, lattice lane)
+
+`SubmitCapabilityProposal` is live in `packages/capability-author` (v0.8.0), so **F25.3b is unblocked**.
+Four things F25.3b should build ON rather than rediscover:
+
+1. **The wire shape is top-level fields, not a result blob:** `{proposalId, kind, content, target{mode,…},
+   rationale, validation{state,report?,deltaPreview?}, intent?}`. `target.mode` is required non-empty and a
+   malformed payload is rejected synchronously (unlike `RecordCapabilityProposal`, which can never fail
+   post-Ack). `validation` is the studio's own Check-stage verdict — the op records it, never recomputes it.
+2. **The badge reads `source`, a real lens column now** (`capabilityProposals` → `provenance.source`,
+   `'ai' | 'operator'`). `cmd/loupe/review.go`'s `capabilityProposalCols` still has no `Source` field, so
+   adding it is F25.3b's first move; a proposal recorded before v0.8.0 projects `source` null.
+3. **Do not render a confidence for an operator proposal.** There is no model score, so `.confidence.score`
+   carries the `-1.0` absent-sentinel. `logic/review.js` now exports `hasConfidenceScore`, which the band and
+   all three render sites gate on — reuse it rather than testing `typeof === "number"`.
+4. **The trial step's precondition is intact but sharper than it reads.** A submitted proposal deliberately
+   carries no `.claim`, and the `capabilityAuthorPending` gap was narrowed to `no claim AND no artifact` so
+   Weaver does not fire the AI authoring pattern at it. Any future change to that lens must keep the artifact
+   arm, or every operator submission triggers an unrequested reasoning call whose reply can never commit.
+
+The grant-kind scope containment is **not** established by the submitted verdict (the submitter is also the
+party it constrains) — it is the approve-time re-validation in `freshCapabilityVerdict`, which re-reads the
+requester's live held permissions. For a submitted proposal that requester is `op.actor`, the real submitter.
+
 ### 🏗️ Build checkpoint — F25.2 SHIPPED 2026-08-02 (`e9408470`), next is F25.3a
 
 The Checks panel (target map) + `#/weaver/verify` (lane-wide) landed in `cmd/loupe/weaververify.go`.
