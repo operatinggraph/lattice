@@ -150,6 +150,8 @@ type protectedAppointmentRow struct {
 	ProviderKey            *string `json:"providerKey,omitempty"`
 	ProviderName           *string `json:"providerName,omitempty"`
 	ProviderSpecialty      *string `json:"providerSpecialty,omitempty"`
+	SiteKey                *string `json:"siteKey,omitempty"`
+	SiteName               *string `json:"siteName,omitempty"`
 	ReminderSentAt         *string `json:"reminderSentAt,omitempty"`
 	FollowUpReminderSentAt *string `json:"followUpReminderSentAt,omitempty"`
 	DocumentedAt           *string `json:"documentedAt,omitempty"`
@@ -172,6 +174,7 @@ type protectedAppointmentRow struct {
 const selectMyAppointmentsSQL = `
 SELECT entity_key, COALESCE(starts_at, ''), ends_at, reason, COALESCE(status, ''), status_note,
        patient_key, patient_name, provider_key, provider_name, provider_specialty,
+       site_key, site_name,
        reminder_sent_at, follow_up_reminder_sent_at, documented_at,
        COALESCE(follow_up_requested, false), follow_up_date
 FROM read_clinic_appointments
@@ -210,6 +213,7 @@ func queryMyAppointments(ctx context.Context, pool pgxBeginner, actorID string) 
 		if err := rows.Scan(
 			&row.EntityKey, &row.StartsAt, &row.EndsAt, &row.Reason, &row.Status, &row.StatusNote,
 			&row.PatientKey, &row.PatientName, &row.ProviderKey, &row.ProviderName, &row.ProviderSpecialty,
+			&row.SiteKey, &row.SiteName,
 			&row.ReminderSentAt, &row.FollowUpReminderSentAt, &row.DocumentedAt,
 			&row.FollowUpRequested, &row.FollowUpDate,
 		); err != nil {
@@ -272,6 +276,7 @@ func (s *server) handleMyAppointments(w http.ResponseWriter, r *http.Request) {
 const selectMyProviderScheduleSQL = `
 SELECT entity_key, COALESCE(starts_at, ''), ends_at, reason, COALESCE(status, ''), status_note,
        COALESCE(patient_key, ''), patient_name, provider_key, provider_name, provider_specialty,
+       site_key, site_name,
        reminder_sent_at, follow_up_reminder_sent_at, documented_at,
        COALESCE(follow_up_requested, false), follow_up_date
 FROM read_provider_appointments
@@ -305,6 +310,7 @@ func queryMyProviderSchedule(ctx context.Context, pool pgxBeginner, actorID stri
 		if err := rows.Scan(
 			&row.EntityKey, &row.StartsAt, &row.EndsAt, &row.Reason, &row.Status, &row.StatusNote,
 			&row.PatientKey, &row.PatientName, &row.ProviderKey, &row.ProviderName, &row.ProviderSpecialty,
+			&row.SiteKey, &row.SiteName,
 			&row.ReminderSentAt, &row.FollowUpReminderSentAt, &row.DocumentedAt,
 			&row.FollowUpRequested, &row.FollowUpDate,
 		); err != nil {

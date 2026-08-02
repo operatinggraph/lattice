@@ -153,6 +153,8 @@ func Lenses() []pkgmgr.LensSpec {
 				{Name: "provider_key", Type: "text"},
 				{Name: "provider_name", Type: "text"},
 				{Name: "provider_specialty", Type: "text"},
+				{Name: "site_key", Type: "text"},
+				{Name: "site_name", Type: "text"},
 				{Name: "reminder_sent_at", Type: "text"},
 				{Name: "follow_up_reminder_sent_at", Type: "text"},
 				{Name: "documented_at", Type: "text"},
@@ -204,6 +206,8 @@ func Lenses() []pkgmgr.LensSpec {
 				{Name: "provider_key", Type: "text"},
 				{Name: "provider_name", Type: "text"},
 				{Name: "provider_specialty", Type: "text"},
+				{Name: "site_key", Type: "text"},
+				{Name: "site_name", Type: "text"},
 				{Name: "reminder_sent_at", Type: "text"},
 				{Name: "follow_up_reminder_sent_at", Type: "text"},
 				{Name: "documented_at", Type: "text"},
@@ -439,6 +443,7 @@ func Lenses() []pkgmgr.LensSpec {
 const clinicAppointmentsSpec = `MATCH (a:appointment)
 OPTIONAL MATCH (a)-[:forPatient]->(p:patient)
 OPTIONAL MATCH (a)-[:withProvider]->(pr:provider)
+OPTIONAL MATCH (a)-[:atSite]->(site:building)
 RETURN
   a.key AS key,
   a.key AS appointmentKey,
@@ -451,6 +456,8 @@ RETURN
   pr.key AS providerKey,
   pr.profile.data.fullName AS providerName,
   pr.profile.data.specialty AS providerSpecialty,
+  site.key AS siteKey,
+  site.site.data.name AS siteName,
   a.reminder.data.sentAt AS reminderSentAt,
   a.followUpReminder.data.sentAt AS followUpReminderSentAt,
   a.encounter.data.documentedAt AS documentedAt,
@@ -618,6 +625,7 @@ RETURN
 const clinicAppointmentsReadSpec = `MATCH (a:appointment)
 MATCH (a)-[:forPatient]->(p:patient)
 OPTIONAL MATCH (a)-[:withProvider]->(pr:provider)
+OPTIONAL MATCH (a)-[:atSite]->(site:building)
 RETURN
   nanoIdFromKey(a.key)               AS appointment_id,
   a.key                              AS entity_key,
@@ -631,6 +639,8 @@ RETURN
   pr.key                             AS provider_key,
   pr.profile.data.fullName           AS provider_name,
   pr.profile.data.specialty          AS provider_specialty,
+  site.key                           AS site_key,
+  site.site.data.name                AS site_name,
   a.reminder.data.sentAt             AS reminder_sent_at,
   a.followUpReminder.data.sentAt     AS follow_up_reminder_sent_at,
   a.encounter.data.documentedAt      AS documented_at,
@@ -650,6 +660,7 @@ RETURN
 const providerAppointmentsReadSpec = `MATCH (a:appointment)
 MATCH (a)-[:withProvider]->(pr:provider)
 OPTIONAL MATCH (a)-[:forPatient]->(p:patient)
+OPTIONAL MATCH (a)-[:atSite]->(site:building)
 RETURN
   nanoIdFromKey(a.key)               AS appointment_id,
   a.key                              AS entity_key,
@@ -663,6 +674,8 @@ RETURN
   pr.key                             AS provider_key,
   pr.profile.data.fullName           AS provider_name,
   pr.profile.data.specialty          AS provider_specialty,
+  site.key                           AS site_key,
+  site.site.data.name                AS site_name,
   a.reminder.data.sentAt             AS reminder_sent_at,
   a.followUpReminder.data.sentAt     AS follow_up_reminder_sent_at,
   a.encounter.data.documentedAt      AS documented_at,

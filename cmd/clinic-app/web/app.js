@@ -3493,6 +3493,10 @@ function renderApptCard(a, opts) {
   when.className = "when";
   when.textContent = fmtWhen(a.startsAt, a.endsAt);
 
+  const site = document.createElement("div");
+  site.className = "meta";
+  site.textContent = a.siteName ? "📍 " + a.siteName : "";
+
   const reason = document.createElement("div");
   reason.className = "meta";
   reason.textContent = a.reason || "";
@@ -3581,6 +3585,7 @@ function renderApptCard(a, opts) {
   card.append(title);
   if (sub.textContent) card.append(sub);
   card.append(when);
+  if (site.textContent) card.append(site);
   if (reason.textContent) card.append(reason);
   if (statusNote.textContent) card.append(statusNote);
   if (reminder.textContent) card.append(reminder);

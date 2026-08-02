@@ -126,6 +126,8 @@ func TestReadBoundary_RLS_Enforcement(t *testing.T) {
 		{Name: "provider_key", Type: "text"},
 		{Name: "provider_name", Type: "text"},
 		{Name: "provider_specialty", Type: "text"},
+		{Name: "site_key", Type: "text"},
+		{Name: "site_name", Type: "text"},
 		{Name: "reminder_sent_at", Type: "text"},
 		{Name: "follow_up_reminder_sent_at", Type: "text"},
 		{Name: "documented_at", Type: "text"},
