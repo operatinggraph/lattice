@@ -761,7 +761,13 @@ for every lens satisfying §4.2, which this fire enumerated over the whole insta
 `packages/**` actor-aggregate + personal lenses via `pkgregistry`, plus the four kernel lenses). **17
 lenses narrow**, not two:
 
-- **Auth-plane (4):** `capabilityRoles` `{identity, role, permission}` · kernel `capability`
+- **Corrected 2026-08-03 (Increment 2's review re-derived this census).** The counts below did not add up:
+the header said 17, the business bullet was labelled 13, and the bullet lists **16** names. The correct
+total is **20** — 4 auth-plane + 16 business-convergence. It matters more at Increment 2 than it did
+here, because Increment 2 turns each of those client-side skips into a **server-side non-delivery**:
+§4.6 discusses two lenses by name, and ~20 are affected.
+
+**Auth-plane (4):** `capabilityRoles` `{identity, role, permission}` · kernel `capability`
   `{identity, role}` · kernel `capabilityRead` `{identity}` · the generated
   `edgeManifestProviderReadGrants` (a D1 `cap-read` grant producer) — the last stays exhaustive only
   because the generated staging `WITH` carries the anchor as a bare variable, which is exactly the case
@@ -842,13 +848,33 @@ machinery."*
 
 | File | Anchor (live) | What |
 |---|---|---|
-| `pipeline/pipeline.go:698-703` | `NarrowedFilterEligible` | actor-aware pipelines delegate to `ActorAwareNarrowingLabels()`; the plain branch is unchanged |
-| `pipeline/pipeline.go:679-697` | its doc comment | rewritten per §4.6 — the exclusion conflated "which actors does the fan-out reach" with "can any actor be affected at all" |
-| `pipeline/pipeline.go:705-719` | `ConsumerFilter`'s doc | records that this is the one *snapshot* of a predicate documented as per-event, and therefore the activation-order requirement it depends on |
+| `pipeline/pipeline.go:716-724` | `NarrowedFilterEligible` | actor-aware pipelines delegate to `ActorAwareNarrowingLabels()`; the plain branch is unchanged |
+| `pipeline/pipeline.go:679-715` | its doc comment | states the two questions §4.6 separates — how far a *fan-out* reaches (adjacency, unbounded by labels) vs whether *any* actor can be affected (bounded by the label set once §4.2 holds) — plus the label-set-to-subject alignment that makes "the same data" exact |
+| `pipeline/pipeline.go:726-763` | `ConsumerFilter`'s doc | the one *snapshot* of a per-event predicate, the activation-order requirement it rests on, and §15.6's recovery procedure stated where it is needed |
 | `cmd/refractor/main.go:1006-1013` | the D1 comment above the activation `ConsumerFilter()` call | states the ordering requirement the snapshot rests on |
-| `pipeline/narrowed_filter_internal_test.go:34-81` | `TestNarrowedFilterEligible_Table` | the "actor-aware is never eligible" case is now false; replaced by the eligible + each-conjunct-broad cases |
-| `pipeline/narrowed_filter_e2e_test.go` | new case | an eligible actor-aware pipeline's `ConsumerFilter()` narrows and delivery excludes a foreign type |
-| `refractor/refractor_capability_relevance_gate_e2e_test.go` | new case | e2e (c) — real `capabilityRoles` through `InstallActorAggregate`, narrowed consumer, unrelated business write never delivered |
+| `pipeline/narrowed_filter_internal_test.go` | `TestNarrowedFilterEligible_Table:34-88` + two new siblings at `:90-172` | the actor-aware case is re-stated as "the plain conditions alone are not sufficient"; `…_ActorAwareIsTheFanOutGate` asserts server-side eligibility **is** the client gate's verdict and that each conjunct falls all the way back to the broad filter; `…_EligibleActorAwareNarrowsToEveryForm` pins the three-forms-per-label expansion |
+| `refractor/refractor_capability_relevance_gate_e2e_test.go:329-527` | new case + `waitGateConsumerSettled` helper | e2e (c) — real `capabilityRoles` through `InstallActorAggregate`, narrowed consumer, unrelated business write never delivered; a half-in-label link still is |
+
+**Increment 2a's touch-list** (§15.7 — built, then REVERTED; the worktree carries Increment 2 only.
+Kept here as the map for the next fire, which must also cover the delete path and the CAS loop):
+
+| File | Anchor | What |
+|---|---|---|
+| `adapter/adapter.go` | new `ReconcileUpserter` beside `SeqGuarded`/`RowReader` | the optional interface a guarded adapter implements to accept a write at the stored row's own token |
+| `adapter/natskv.go` | `guardedWrite` → `guardedWriteAt(…, admitEqualSeq)`; new `UpsertReconcile` | the tie rule made explicit and selected by caller; `>` still rejects under both |
+| `pipeline/reproject.go` | the `canRead` block's write | a **present**, read-back-divergent row writes under the reconciliation rule |
+| `pipeline/reproject.go` | `Reproject`'s doc | the tie now resolves toward the reconciliation, and why |
+| `pipeline/sweep.go` | the `ErrNoOrderingToken` abandon branch | *"every Core KV event"* → every event the consumer's **own filter** admits |
+| `pipeline/pipeline.go` | `lastAppliedSeq`'s field doc | a frozen value is not a wedge signal on a narrowed consumer |
+| `adapter/natskv_internal_test.go` | `TestGuardedWrite_TieRuleDiffersByCaller` + `TestUpsertReconcile_UnguardedTargetWritesThrough` | 6-case table: equal-seq lands only under the reconcile rule, higher-seq rejects under both |
+| `pipeline/reproject_token_test.go` | two new cases | a divergent row at a tied token asks for the reconcile rule; a converged one still writes nothing |
+
+**One test the plan named and this fire did not write.** The plan carried a second e2e in
+`pipeline/narrowed_filter_e2e_test.go` — a synthetic actor-aware pipeline proving `ConsumerFilter()`
+narrows and a foreign type is not delivered. e2e (c) above proves the same property against the **real**
+`capabilityRoles` spec installed through the real `InstallActorAggregate`, which is strictly stronger, so
+the synthetic sibling would only re-assert a weaker form of a property already held. Dropped deliberately,
+not overlooked. Recorded here because a touch-list that over-claims is worse than a short one.
 
 Design citations re-verified live: `NarrowedFilterEligible` at `:679-703` (§4.6 says `:562-567`) ·
 `ActorAwareNarrowingLabels` at `:586-627` · `CoreKVNarrowedFilters`' pairwise non-subset proof at
@@ -857,7 +883,15 @@ Design citations re-verified live: `NarrowedFilterEligible` at `:679-703` (§4.6
 `cmd/refractor/main.go:1013-1023` · adjacency's own whole-stream consumer at
 `consumer/bootstrap.go:23-29`.
 
-### 15.2 The soundness argument, restated for the server side
+### 15.2 Corpus effect — 20 lenses, not the two §4.6 names
+
+§4.6 states the effect as *"`capabilityRoles` → 9 filter subjects; `unroutedTasks` → 6"*. The eligibility
+predicate is the §14.7 census's, so what actually narrows **delivery** is that census's whole narrow-set:
+4 auth-plane lenses + 16 business-convergence lenses across the clinic / café / wellness / lease
+verticals (§14.7, count corrected there). Recorded rather than left implicit — it is why §9 requires the
+full `-p 4` suite for this increment, and it is the population §15.7's defect rides on.
+
+### 15.3 The soundness argument, restated for the server side
 
 Increment 1's client gate already ack-and-skips **before** the fan-out — the aspect arm at
 `pipeline.go:1327-1330`, the link arm at `:1348-1351`, the vertex arm at `:1399-1401`. The narrowed
@@ -877,7 +911,7 @@ Two alignments worth stating because they are what makes "same data" true rather
 The enumerator is unaffected: it reads adjacency, and adjacency is written by its own dedicated
 whole-stream consumer, not by this pipeline's deliveries.
 
-### 15.3 The one in-scope gotcha — a per-event predicate, snapshotted once
+### 15.4 The one in-scope gotcha — a per-event predicate, snapshotted once
 
 `ActorAwareNarrowingLabels` is deliberately lazy (§14.2): activation installs its inputs in stages, so a
 snapshot taken mid-installation would read a later stage's component as absent. `ConsumerFilter()` is the
@@ -894,7 +928,7 @@ so is unreachable; the requirement is recorded at both code sites rather than le
 Restructuring `RunOn` to derive its own filter would remove the ordering dependency structurally, but
 that widens the ratified scope and is not taken here.
 
-### 15.4 Increment order + green checks
+### 15.5 Increment order + green checks
 
 1. `NarrowedFilterEligible` delegation + comment rewrites → `go build ./...`
 2. Unit table updated (eligible actor-aware narrows; each conjunct forces broad) →
@@ -904,15 +938,98 @@ that widens the ratified scope and is not taken here.
    `make verify-kernel` · full `-p 4` suite (§9 requires it for Increment 2 — delivery changes for a
    class of lenses)
 
-### 15.5 Rollback procedure (§8.3, asymmetric — not a code revert)
+### 15.6 Rollback procedure (§8.3, asymmetric — not a code revert)
 
 A JetStream filter update never rewinds the consumer cursor (nats-server v2.14.0), so reverting this
 commit leaves a lens that already narrowed with the events it skipped still skipped. Recovery from a bad
 narrow is `Pipeline.Rebuild` (consumer reset + re-projection) or the convergence sweep — which is why
 `hasSweepPlan` is a conjunct, and why Increment 1 (symmetric revert) shipped and was measured first.
 
-### 15.6 Non-goals
+**Stated at the code site, not only here** (`ConsumerFilter`'s doc, `pipeline.go:753-763`). A rollback
+procedure that lives only in a design doc is one an operator reaches for the code without: the site that
+derives the filter is the site that has to say a revert does not undo it.
+
+### 15.7 Increment 2a — the healer's ordering token: found, attempted, REVERTED, now a contract proposal
+
+Two independent adversarial reviewers landed on the same defect, and it is one **this increment
+activates**: narrowing starves the convergence sweep's ordering token, which is the healer §4.2 names as
+the reason narrowing is safe at all.
+
+**The mechanism, verified live.** `handleTracked` advances `lastAppliedSeq` on every ack including
+ack-and-skip (`pipeline.go:1322-1324`), and `Reproject` uses that value as its guarded-write token
+(`reproject.go:129`). The §6.2 guard drops a write whose stored watermark is `>=` the incoming one
+(`adapter/natskv.go:293`) and returns `nil`, which `Reproject` books as `Wrote: true` and the sweep logs
+as *"healed a divergent projection"*. Under the broad filter the equality is a millisecond window — any
+write anywhere in the graph lifts the token. Under a narrowed consumer the token advances only on the
+lens's own labels, so on a quiet auth plane it **rests on the sequence that wrote the newest row**, and
+that row's divergence is unrepairable while every tick reports it repaired.
+
+**It is reachable by an ordinary operation, not just by a fault.** `projectedFromRevisions` includes the
+lens-definition key `vtx.meta.<lensID>` and reads its live revision per evaluation
+(`projection/freshness.go:28-45`), `volatileEnvelopeFields` is `{"projectedAt"}` alone so that field
+**is** compared (`reproject.go:62-69`), and `vtx.meta.*` is in no narrowed filter set. A lens-definition
+write that leaves the MATCH unchanged reprojects nothing and rebuilds nothing (`lens/update.go:20-27`),
+yet diverges every row.
+
+**A fix was built, reviewed, and reverted — the review is why this is a proposal and not a commit.** The
+attempt made the guard's tie rule caller-selected (`guardedWriteAt(..., admitEqualSeq)`, exposed as
+`adapter.ReconcileUpserter`), keeping `stored > incoming` rejecting under both rules and moving only the
+equal case, for a caller holding read-back evidence. A third adversarial pass over that delta returned
+three findings that together make it unshippable, and all three were verified against the code:
+
+1. **It is a FROZEN-CONTRACT change.** Contract #6 §6.2 states the rule as `≤`-rejects and names a
+   reconciliation write *"a subordinate token … can never outrank real stream truth"*, closing with
+   *"Any further non-CDC write class requires a contract change, not a new ad-hoc token."* Preparing that
+   change is the correct move; committing it is not mine (CLAUDE.md).
+2. **It fixed the wrong half.** The retraction direction still latched: a guarded `Delete` runs through
+   the CDC rule, so a **revocation** at a tied watermark is still dropped while `Reprojection.Deleted`/
+   `Wrote` report it healed. That is the over-grant direction — the one §6.2 exists for.
+3. **It was unsound under concurrency.** The divergence evidence is read at `GetRow`, but the CAS loop
+   re-reads and re-applies the relaxed rule without re-proving divergence, so two reconcilers holding the
+   same token resolve last-writer-wins rather than by recency — and `seedAppliedSeqFromAckFloor` seeds
+   every queue-group replica from the *same* ack floor, which manufactures exactly that tie.
+
+**The corrected shape is now staged as the contract proposal** (`docs/contracts/06-capability-kv.md`
+§6.2, UNCOMMITTED in `main` — the diff is the proposal): the tie may resolve toward a reconciliation only
+with read-back evidence, only with the CAS conditioned on **the revision at which divergence was
+observed**, only when a conflicting revision **re-proves** divergence before retrying, and only if the
+**retraction** direction is covered identically — with a reported failure, never a silent `nil`, when any
+of those cannot hold.
+
+**One more asymmetry the next fire owns.** The reconcile path is reached only through `RowReader`, which
+only the NATS-KV adapter implements, so a guarded **SQL** target (`actor_read_grants` included) keeps the
+CDC tie rule whatever 2a does. Decide explicitly whether that is intended scope rather than inheriting it.
+
+**Build order for the next fire.** 2a lands first, against the ratified contract shape; Increment 2's
+narrowing follows it. The narrowing's code is complete and green in the worktree and is held **only** on
+this, because a narrowing whose named healer is starved is not what §4.6 ratified.
+
+### 15.8 Non-goals
 
 Increment 3's pattern-directed derivation and its plain-arm shadow measurement; any change to the
 enumerator, its caps, or its `reportsTo` hop; the ≤8-label cap; `verify-claim-ceremony.go`'s convergence
 poll (its own row); the §14.8 `nodeMatches` body-`class` residual (its own row, ★★★); any contract edit.
+
+### 15.9 CHECKPOINT (2026-08-03) — Increment 2 complete and green, held on a contract proposal
+
+**Worktree:** `/Users/andrewsolgan/Documents/GitHub/lattice-wt-authlat-inc2`, branch
+`fire/auth-latency-inc2`, based on `2a96cfcd`. Nothing merged to `main` from it.
+
+**Done.** Increment 2's narrowing is built, reviewed by three adversarial passes, and green on the full
+`-p 4` suite (115 packages, twice): `NarrowedFilterEligible` delegates to §4.2's conjunction; the
+activation-order requirement and the asymmetric-rollback procedure are stated at both code sites; units
+cover eligible-narrows plus each conjunct forcing broad; e2e (c) drives the real `capabilityRoles`
+through `InstallActorAggregate` and asserts on the JetStream delivery count, with a half-in-label link
+proving the either-endpoint alignment end to end. The negative was falsified deliberately — forcing the
+broad filter fails it by exactly the count of the excluded writes.
+
+**Held on.** The §6.2 tie-rule amendment (§15.7), staged UNCOMMITTED in `main` for Andrew. Increment 2
+must not land before it: narrowing starves the sweep, and the sweep is the conjunct that makes narrowing
+safe.
+
+**Next fire.** (1) Andrew ratifies or redirects the §6.2 amendment. (2) Build 2a to the ratified shape —
+revision-conditioned CAS, divergence re-proved on conflict, retraction path covered, loud failure instead
+of a silent `nil`. (3) Merge the worktree's Increment 2 behind it. (4) Increment 3 as ratified.
+
+**Do not** merge the worktree first "since it is green." It is green and correct in isolation; what it is
+missing is the healer its own eligibility predicate assumes.
