@@ -235,10 +235,21 @@ consumer's current filter no longer admits, so those 600 are stranded ack-pendin
 where it is. The client-side gate never gets the chance the prediction gave it; its value is for a lens
 that keeps a broader filter than its relation set would allow (§3.5), not as a residual drain.
 
-The drain is therefore an explicit durable reset — `lattice lens rebuild clinicProviders`, which is
-exactly the operation whose inability to complete was this row's original symptom. That is filed as its
-own row rather than run blind inside this fire, because a rebuild reprojects the whole lens and deserves
-to be watched.
+The drain is therefore an explicit durable reset — `lattice lens rebuild`, which is exactly the
+operation whose inability to complete was this row's original symptom. **Run live at 11:31 UTC, and it
+is the end-to-end proof the fix works:**
+
+```
+before   ackpend 600   flr_s 4,287    dlv_c 27,295   pend 0
++12s     ackpend 1     flr_s 5,535    dlv_c 115      pend 324
++48s     ackpend 0     flr_s 47,026   dlv_c 439      pend 0
+```
+
+Under a minute, from a cold cursor to the head of the stream, on **439 total deliveries** — against the
+27,295 the relation-blind consumer had accumulated without ever reaching a drained state. `lattice lens
+health` reports `status active`, `consumerLag 0`, and the `clinic-providers` read model carries all
+7 provider rows. The board row that opened this — *"a lens consumer's ack floor freezes, so its rebuild
+can never drain"* — is closed by a rebuild that drained.
 
 ## 7. Build note — fire 2026-08-03
 
