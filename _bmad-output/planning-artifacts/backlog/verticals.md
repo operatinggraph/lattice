@@ -27,6 +27,11 @@ the row is `🚧 blocked-on:` it (a missing *lens* is package work, built here).
 | **The renewal machinery can't fire in the live demo** | The seeded tenancy runs to 2027-09-08 with `renewalOpensAt` 2027-07-10, so `leaseExpiry` never violates, no cycle opens, and the Renewals tab is empty for every hat — the goal-authored `renewalComplete` target is reachable only under the `leaseshortwindow` build tag. | LoftSpace | pkg | ★★ | S | 📋 ready |
 | **A tenant can see rent owed but can't pay it** | `/api/ledger` shows the resident $1,900 outstanding, yet `renderLedgerRecordForm` is gated on the landlord's `canRecord`, so no tenant-side payment exists — café already ships the resident-side counterpart ("Settle My Tab", `cafe-app/web/app.js:829`). | LoftSpace | FE + pkg | ★★ | M | 📋 ready |
 | **The café's Manage Menu panel AuthDenies its own staff** | The shipped staff tab cannot work: both menu-catalog ops grant `operator` only, while cafe-app submits as the signed-in actor. | Café | pkg | ★★ | S | ✅ ratified 2026-08-02 · grant `frontOfHouse`, workplace-confined in `menuItemDDLScript` (loftspace-ledger idiom; both helpers already in `tabDDLScript`) |
+| **Every clinic appointment view is empty — patient, provider and front desk alike** | `read_clinic_appointments` / `read_provider_appointments` hold 0 rows against 34 live appointments: both lenses sit `pauseReason:structural` since the `atSite` MATCH change hot-reloaded, truncated the guarded tables, then faulted on a missing `site_key` column. A patient can book a visit and still be told they have none. | Clinic | pkg | ★★★ | M | 🚧 blocked-on: [lattice.md](lattice.md) *structurally-paused lens has no resume path* · then re-provision + resume |
+| **The auto no-show bills nothing** | `clinicNoShowSettlement` is `diverging` — 15 of 35 rows violating, every one retry-exhausted, `LensEffectMismatch` "last 20 dispatches recorded zero observed closes" — while the registered spec and each row are well-formed; $375 of $625 in fees never post, and the target declares no `maxretries_<gap>`. | Clinic | pkg | ★★★ | M | 📋 ready |
+| **A no-show fee for a patient with no ledger account evaporates silently** | The settlement lens converges only once a `clinicaccount` exists (no `missing_account` gap by design) and 8 of 10 patients have none, so their fees produce no gap, no flag and no revenue — café opens the account inside its own settlement chain. | Clinic | pkg | ★★ | S | 📋 ready |
+| **An empty protected read is indistinguishable from a dead one** | `/api/my-appointments` answers `{"appointments":[],"count":0,"scope":"rls"}` whether the patient truly has no visits or the projection is structurally paused, so the FE renders "no upcoming visits" over 25 real ones. Every vertical's protected reads share the shape. | Cross-vertical | FE + pkg | ★★ | S | 📋 ready |
+| **Five of the clinic's seven providers are unbookable duplicates** | Five providers all read "Dr. Classic Demo", none carries hours or a `practicesAt` site, and all five are offered in the patient's booking picker — `adbf2571` pinned the seed's provider id but nothing reaps the pre-pin duplicates. | Clinic | pkg | ★ | S | 📋 ready |
 
 **Explicitly descoped (ambitious-PO pass, 2026-07-09):** structured diagnosis/procedure coding (ICD/CPT),
 vitals, and e-prescribing were considered and deliberately NOT filed — a certified EHR is out of scope for a
@@ -46,7 +51,7 @@ dated run-logs live in git history. Rotate LoftSpace ↔ Clinic ↔ Café ↔ We
 **Wellness joined** 2026-07-09 (`cmd/wellness-app` shipped, live on :7802) — fold it into rotation; see
 [agents/vertical-po/SKILL.md](../../../agents/vertical-po/SKILL.md) §1.
 
-- **Rotation to date:** LoftSpace ×20, Clinic ×18, Café ×9, Wellness ×6.
+- **Rotation to date:** LoftSpace ×20, Clinic ×19, Café ×9, Wellness ×6.
 - **Method:** reuse the already-up shared stack (detect NATS :4222 / app :7788/:7799/:7801/:7802), drive the real flow via `/api/op` + the lens projections as the product owner, file scored items. All four apps exist + are exercisable live (`:7788` / `:7799` / `:7801` / `:7802`).
 - **Live-stack note:** a stale bootstrap JSON vs. a recreated Core KV was a recurring dev-loop trap (2026-07-03, 2026-07-04) that silently emptied reads; `make up` now self-heals it (`109f59a`, 2026-07-05) — re-verify empty-read reports as a real product bug first.
 - **2026-07-31:** Clinic — drove patient, provider + front-desk hats live; no seeded visit ever completes and the provider hat can act on nothing; filed 4.
@@ -57,7 +62,8 @@ dated run-logs live in git history. Rotate LoftSpace ↔ Clinic ↔ Café ↔ We
 - **2026-08-02:** Café — drove resident self-order/void/settle + front-desk hats live; two leases are permanently unsettleable, void + menu curation reach no UI; filed 5.
 - **2026-08-02:** Wellness — drove member, instructor + front-desk hats live; the ledger is dormant and the slot lock guards only the room; filed 3.
 - **2026-08-02:** LoftSpace — drove tenant, landlord + front-desk hats live; pulse counts landlords not units, a done task never retires, an unmanaged unit vanishes; filed 5.
-- **Next:** Clinic.
+- **2026-08-02:** Clinic — drove patient, provider + front-desk hats live; no appointment view resolves at all and the no-show never bills; filed 5.
+- **Next:** Café.
 
 ## Done log — verticals (newest first)
 
