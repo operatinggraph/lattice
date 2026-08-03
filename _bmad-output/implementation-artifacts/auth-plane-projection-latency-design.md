@@ -1027,7 +1027,10 @@ broad filter fails it by exactly the count of the excluded writes.
 must not land before it: narrowing starves the sweep, and the sweep is the conjunct that makes narrowing
 safe.
 
-**Next fire.** (1) Andrew ratifies or redirects the §6.2 amendment. (2) Build 2a to the ratified shape —
+**The board row is 🚧 blocked-on-Andrew, not 🏗️** (set 2026-08-03 at Andrew's instruction), so no fire
+resumes this item on the in-flight rule. The worktree stays; ratification is what unblocks it.
+
+**Next fire, once unblocked.** (1) Andrew ratifies or redirects the §6.2 amendment. (2) Build 2a to the ratified shape —
 revision-conditioned CAS, divergence re-proved on conflict, retraction path covered, loud failure instead
 of a silent `nil`. (3) Merge the worktree's Increment 2 behind it. (4) Increment 3 as ratified.
 
