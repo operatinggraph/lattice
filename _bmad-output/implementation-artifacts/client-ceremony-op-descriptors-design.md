@@ -220,10 +220,11 @@ rendered.
 
 ```python
 def derive_reads(op):
-    # op: {"operationType": str, "actor": str, "payload": dict}
+    # op is a struct: op.operationType, op.actor, op.payload (also a struct --
+    # attribute access, not subscript; see `deriveReadsOpValue`)
     # returns {"reads": [key, ...], "optionalReads": [key, ...]}  (both optional)
-    name = op["payload"].get("name")
-    if not name:
+    name = getattr(op.payload, "name", None)
+    if name == None or type(name) != type("") or len(name.strip()) == 0:
         return {}
     normalized = " ".join(name.lower().split())
     return {"optionalReads": ["vtx.identityindex." + crypto.sha256NanoID("name:" + normalized)]}
@@ -812,3 +813,101 @@ know that before it ships.
 
 Ordering matters: (2) must land **after** (1) is installed, or the submitters lose a derivation nothing
 yet supplies.
+
+## 12. Increment 1b fire brief (build note, 2026-08-03)
+
+**Scope sentence (this fire).** identity-domain declares its four derived keys in a `derive_reads(op)`
+(version bump included), the five hand-ported derivations that computed the same keys client-side are
+deleted, and **G2** ships blocking over the then-clean tree — the `substrate.SHA256NanoID` call-site ban in
+`scripts/lint-conventions.go` plus the new `scripts/lint-web.go` for the JavaScript half — with the
+equivalence vectors and the declares-nothing `dedup_test.go` e2e that pin the agreement.
+
+**Scope-diff gate against §9's Inc 1 row + the §11.7 checkpoint, item by item.** (1) identity-domain
+declares ✓ · version bump ✓ · (2) the hand-ported deletions ✓ · (3) G2 + `lint-web.go` ✓ · (4) equivalence
+vectors + dedup e2e ✓. **Narrow-only, one correction to the checkpoint's count:** the checkpoint says *four*
+hand-ported derivations; the live census finds **five** call sites across four files (`cmd/lattice/identity`
+carries three `SHA256NanoID` calls in one helper, and both `credentials_link.go` and `cmd/facet` carry a
+credentialindex probe). The set of *files* is the checkpoint's; the count is corrected, not widened.
+**Explicitly NOT in this fire:** `UnlinkCredential`'s `vtx.credentialindex.*` tombstone key (§4.2 assigns it
+to Inc 2 — it is a *mutation* key committed unconditioned today, and declaring it changes that op's OCC
+conditioning, which is Inc 2's own increment with its own test); **G1** and the `[no-op-meta:]` vocabulary
+(Inc 3); anything in Inc 2/3/4.
+
+### 12.1 Verified touch-list (checked live at `08565480`)
+
+| Site | What it is now | What 1b does |
+|---|---|---|
+| `packages/identity-domain/ddls.go:539-1499` | `identityDDLScriptTemplate`; helpers at :540-649, `execute(state, op)` at :651 | insert `derive_reads(op)` + shared normalizers before `execute`; `execute` calls the same normalizers |
+| `ddls.go:680-696,715-728` | `CreateUnclaimedIdentity` normalizes email/phone/name inline, then builds three `vtx.identityindex.*` keys | the normalization moves to top-level helpers both passes call — agreement by construction, not by test |
+| `ddls.go:961,1189` | `ClaimIdentity` / `CompleteCredentialLink` build `vtx.credentialindex.<sha256NanoID(op.actor)>` | derived from `op.actor`, which `derive_reads` receives |
+| `packages/identity-domain/package.go:33` + `manifest.yaml:2` | `Version: "0.10.4"` in both | bump both — a same-version package edit no-ops (`lint-package-version` gates it) |
+| `cmd/lattice/identity/identity.go:103,283-307` | `identityIndexProbeKeys` (3 `SHA256NanoID` calls) feeds `ContextHint.OptionalReads` | delete the helper; the op declares nothing |
+| `cmd/loftspace-app/web/app.js:960-1001,1008-1023,1047` | `sha256NanoID` PCG-128 port + `identityIndexProbeKeys` + its `optionalReads` use | delete all three; **`sha256Hex` (:945) STAYS** — it hashes the client-minted claim secret, not a read key |
+| `cmd/clinic-app/web/app.js:660-695,702-717,738` | the same three, byte-identical | same; `sha256Hex` (:640) stays |
+| `cmd/loftspace-app/credentials_link.go:152` | one `credentialindex` entry inside `OptionalReads` | drop that entry only; the other three declared keys stay |
+| `cmd/facet/credentials.go:274` | same shape | same |
+| `scripts/lint-conventions.go:388-426,864-907,1307-1319` | `annotationSpans` + the `authcontext-target` default-deny gate to mirror; `git ls-files "*.go"` discovery | add the G2 Go gate in that idiom |
+| `scripts/lint-facet-discovery.go:113` | the one existing script that reads `.js`/`.mjs` | precedent for `lint-web.go`'s file walk |
+
+### 12.2 Two implementation decisions, recorded (Winston, §0)
+
+**(a) The normalizers become shared top-level helpers, not a copy inside `derive_reads`.** §8's A4 rejects a
+declarative field because "a Starlark function calling the same `crypto.sha256NanoID` builtin the main
+script calls is the only shape where *these two keys agree* is true by construction." A `derive_reads` that
+re-types the normalization would reintroduce exactly the divergence hazard one file lower down. So
+`normalize_name` / `normalize_email` / `normalize_phone` / `identity_index_key` / `credential_index_key`
+become top-level defs, and **`execute` is rewritten to call them** — the two passes then cannot disagree
+without a compile error.
+
+**(b) G2's JavaScript half fingerprints the hash-to-NanoID *conjunction*, not the function name.** A
+name-only scan (`sha256NanoID`) is defeated by a rename, and an alphabet-only scan flags
+`cmd/facet/web/boot.mjs:28`, which uses the same NanoID alphabet to mint a **random** device id — a
+legitimate use that `// derived-key:` would mislabel. The gate therefore flags a JS/MJS file under `cmd/**`
+that contains the NanoID alphabet literal **and** a SHA-256 digest call: that conjunction *is* the re-port.
+Verified live: the two `app.js` files hold 2 and 4 digest calls; `boot.mjs` and `feed_source.test.mjs` hold
+zero, so they pass unannotated after the deletion and the gate ships blocking over a genuinely clean tree.
+
+### 12.3 Increment order + green checks
+
+1. `derive_reads` + shared normalizers in `ddls.go`, `execute` re-pointed at them, both versions bumped —
+   `go test ./packages/identity-domain/`
+2. the equivalence vectors (the three `identityindex` keys byte-identical across `derive_reads`,
+   `execute`'s own path, and `substrate.SHA256NanoID`) + the `dedup_test.go` e2e whose submitter declares
+   nothing — same
+3. the five submitter deletions — `go build ./...`, `go test ./cmd/...`
+4. G2: the `lint-conventions.go` gate + `scripts/lint-web.go` + the Makefile/CI wiring + annotations on the
+   object-id sites — `STRICT=1 go run ./scripts/lint-conventions.go`, `STRICT=1 go run ./scripts/lint-web.go`
+5. full `go build ./...`, `make vet`, `golangci-lint run ./...`, every `scripts/lint-*.go` gate, `go test ./...`
+
+### 12.4 In-scope gotchas
+
+- **`op.payload` is a `starlarkstruct.Struct`, not a dict** (`derive_reads.go:140-154`). §4.1's illustrative
+  `op["payload"].get("name")` does not run against the shipped primitive; the real access is
+  `getattr(op.payload, "name", None)` / `hasattr`, exactly as `execute` already reads `p`. §4.1's example is
+  corrected in the same commit so the next author does not copy a form that cannot work.
+- **`nanoid` is a fail-closed stub in the pre-pass.** The normalizers must not reach it. They don't — they
+  are string ops plus `crypto.sha256NanoID`, which is bound for real.
+- **A derivation must not `fail()` on a payload `execute` would reject.** `derive_reads` runs *before* the
+  op's validation, so raising on a missing/short name turns an `InvalidArgument` the script reports cleanly
+  into a `DeriveReadsFailed` hydration fault. Every branch returns `{}` instead when the payload is not
+  shaped for a key.
+- **Weakest-wins makes the deletions safe in either order at runtime, but not the install.** A submitter
+  that still declares the key merely collides with the derived one and keeps its own (weaker) disposition —
+  harmless. The real ordering constraint is the install: the deletions must not ship to a stack still
+  running 0.10.4.
+
+### 12.5 Adjacent finds — filed now, not built here
+
+- `UnlinkCredential`'s `vtx.credentialindex.*` **tombstone** commits unconditioned (`ddls.go:1335`;
+  `applyHydratedRevisions` skips un-hydrated keys). Already owned by Inc 2 (§4.2) — named here so the
+  census is honest, not re-filed as a new row.
+- The **three `_test.go` object-id sites** (`cmd/loupe/objects_crypto_e2e_test.go:95`,
+  `cmd/loftspace-app/objects_crypto_test.go:233,397`) are inside G2's `git ls-files "*.go"` reach, so the
+  gate covers **seven** sites, not §6's "six". Tests get the annotation too rather than an exemption: a
+  test is exactly where a re-port would otherwise be reintroduced.
+
+### 12.6 Non-goals
+
+Inc 2 / 3 / 4 in full; G1 and the `[no-op-meta:]` closed vocabulary; any change to the `derive_reads`
+primitive itself, the live-read budget, or the sensitive-read tracker; any contract edit (§2.5 class (g) is
+committed at `4965b28a` and this fire builds to it).
