@@ -210,6 +210,7 @@ Real but low-value; do **not** spend design or build effort here unless Andrew g
 
 One line per shipped item (`date · SHA · [tag] title`). Oldest roll to `archive/` past ~25.
 
+- 2026-08-03 · `9c00567f` · [identity-domain,identity-hygiene,privacy-base] client-ceremony Inc 2a — the boundTo link + its per-credential Protected lens; three class-(g) keys derived, the double-write and the erasure gap fixed
 - 2026-08-03 · `79cbcdb4` · [pkgmgr,identity-domain,facet] OpCeremonySpec — mint-and-reveal becomes descriptor vocabulary; two S1 exemptions retired, the marker becomes a closed expiring vocabulary
 - 2026-08-03 · `fdf841a2` · [identity-domain] derive_reads adoption — the package derives its 4 index keys, 6 client re-ports deleted, G2 blocking in both halves
 - 2026-08-03 · `8aaea2b9` · [Processor] `derive_reads` — Contract #2 §2.5 class (g) built; the contract had described a step-4 mechanism nothing ran
