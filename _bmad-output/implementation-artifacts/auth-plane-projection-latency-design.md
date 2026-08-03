@@ -831,3 +831,88 @@ actorAggregate is rejected at translate time, and a secure personal lens is alre
 third — `plainReprojectLabels` is written by MATCH hot-reload unsynchronized against the consumer
 goroutine, which this change makes actor-aware pipelines read too — is filed as its own board row: every
 interleaving lands broad (fail-closed), and it pre-dates this fire on the plain corpus.
+
+## 15. Increment 2 fire brief (build note, 2026-08-03)
+
+**Scope sentence (§10, verbatim).** *"`NarrowedFilterEligible` swaps `actorEnumerator != nil` for the
+shared predicate; rewrite the `:550-561` comment (§4.6); e2e (c). Everything else is D1's shipped
+machinery."*
+
+### 15.1 Verified touch-list (checked live; §4.6's line numbers had drifted)
+
+| File | Anchor (live) | What |
+|---|---|---|
+| `pipeline/pipeline.go:698-703` | `NarrowedFilterEligible` | actor-aware pipelines delegate to `ActorAwareNarrowingLabels()`; the plain branch is unchanged |
+| `pipeline/pipeline.go:679-697` | its doc comment | rewritten per §4.6 — the exclusion conflated "which actors does the fan-out reach" with "can any actor be affected at all" |
+| `pipeline/pipeline.go:705-719` | `ConsumerFilter`'s doc | records that this is the one *snapshot* of a predicate documented as per-event, and therefore the activation-order requirement it depends on |
+| `cmd/refractor/main.go:1006-1013` | the D1 comment above the activation `ConsumerFilter()` call | states the ordering requirement the snapshot rests on |
+| `pipeline/narrowed_filter_internal_test.go:34-81` | `TestNarrowedFilterEligible_Table` | the "actor-aware is never eligible" case is now false; replaced by the eligible + each-conjunct-broad cases |
+| `pipeline/narrowed_filter_e2e_test.go` | new case | an eligible actor-aware pipeline's `ConsumerFilter()` narrows and delivery excludes a foreign type |
+| `refractor/refractor_capability_relevance_gate_e2e_test.go` | new case | e2e (c) — real `capabilityRoles` through `InstallActorAggregate`, narrowed consumer, unrelated business write never delivered |
+
+Design citations re-verified live: `NarrowedFilterEligible` at `:679-703` (§4.6 says `:562-567`) ·
+`ActorAwareNarrowingLabels` at `:586-627` · `CoreKVNarrowedFilters`' pairwise non-subset proof at
+`subjects/subjects.go:151-187` · `registerWithFilterFallback`'s broad fallback and `Rebuild`'s
+`ConsumerFilter()` recompute at `pipeline.go:1177-1193` · the single `RunOn` call site at
+`cmd/refractor/main.go:1013-1023` · adjacency's own whole-stream consumer at
+`consumer/bootstrap.go:23-29`.
+
+### 15.2 The soundness argument, restated for the server side
+
+Increment 1's client gate already ack-and-skips **before** the fan-out — the aspect arm at
+`pipeline.go:1327-1330`, the link arm at `:1348-1351`, the vertex arm at `:1399-1401`. The narrowed
+filter set is built by `CoreKVNarrowedFilters` from *the same* label set those gates judge against, so
+server-side filtering can only remove events the client already discarded. That is D1's own argument
+(`NarrowedFilterEligible`'s doc: "strictly more conservative … computed from the exact same data those
+gates already trust"), now resting on §4.2's conjunction instead of `actorEnumerator == nil`.
+
+Two alignments worth stating because they are what makes "same data" true rather than nearly true:
+
+- The vertex form `$KV.<bucket>.vtx.<label>.>` covers a label's **aspect** keys too (Contract #1's
+  4-segment `vtx.<type>.<id>.<localName>`), which is exactly what the aspect arm's parent-type gate
+  judges. No separate aspect form is needed or missing.
+- The link forms are source-pinned **and** target-pinned per label, so a link is admitted when *either*
+  endpoint type is in the set — the link arm skips only when **neither** is. Same predicate.
+
+The enumerator is unaffected: it reads adjacency, and adjacency is written by its own dedicated
+whole-stream consumer, not by this pipeline's deliveries.
+
+### 15.3 The one in-scope gotcha — a per-event predicate, snapshotted once
+
+`ActorAwareNarrowingLabels` is deliberately lazy (§14.2): activation installs its inputs in stages, so a
+snapshot taken mid-installation would read a later stage's component as absent. `ConsumerFilter()` is the
+one caller that *must* snapshot it — a JetStream consumer filter is set at registration. The snapshot is
+sound only because the activation order is `UseFullEngineBranches` (`main.go:845`) →
+`InstallActorAggregate` (`:920`, which sets pattern-closure, the enumerator and the sweep plan) →
+`SetSecureDecryptor` (`:989`) → `ConsumerFilter()` (`:1013`) → `RunOn` (`:1014`).
+
+Every way that order can be wrong fails **closed** — an input not yet installed reads as absent, a
+conjunct fails, and the lens keeps the broad filter — with one exception that must stay stated: moving
+`SetSecureDecryptor` *after* `ConsumerFilter()` would make a secure actorAggregate lens narrow without
+the decryptor conjunct ever being evaluated. That combination is rejected at translate time today and
+so is unreachable; the requirement is recorded at both code sites rather than left to be rediscovered.
+Restructuring `RunOn` to derive its own filter would remove the ordering dependency structurally, but
+that widens the ratified scope and is not taken here.
+
+### 15.4 Increment order + green checks
+
+1. `NarrowedFilterEligible` delegation + comment rewrites → `go build ./...`
+2. Unit table updated (eligible actor-aware narrows; each conjunct forces broad) →
+   `go test ./internal/refractor/pipeline/ -run 'NarrowedFilter|ConsumerFilter'`
+3. e2e (c) + the pipeline-package narrowed-delivery case → `go test ./internal/refractor/...`
+4. Gates: `make vet` · `golangci-lint run ./...` · `STRICT=1 go run ./scripts/lint-conventions.go` ·
+   `make verify-kernel` · full `-p 4` suite (§9 requires it for Increment 2 — delivery changes for a
+   class of lenses)
+
+### 15.5 Rollback procedure (§8.3, asymmetric — not a code revert)
+
+A JetStream filter update never rewinds the consumer cursor (nats-server v2.14.0), so reverting this
+commit leaves a lens that already narrowed with the events it skipped still skipped. Recovery from a bad
+narrow is `Pipeline.Rebuild` (consumer reset + re-projection) or the convergence sweep — which is why
+`hasSweepPlan` is a conjunct, and why Increment 1 (symmetric revert) shipped and was measured first.
+
+### 15.6 Non-goals
+
+Increment 3's pattern-directed derivation and its plain-arm shadow measurement; any change to the
+enumerator, its caps, or its `reportsTo` hop; the ≤8-label cap; `verify-claim-ceremony.go`'s convergence
+poll (its own row); the §14.8 `nodeMatches` body-`class` residual (its own row, ★★★); any contract edit.
