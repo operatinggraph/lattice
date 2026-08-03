@@ -2,6 +2,7 @@
 
 Rolled from `verticals.md` when its live Done log passed ~25 entries. Full detail is in git.
 
+- 2026-07-31 · `adbf2571` · `seed-classic-demo` patient + provider now pin fixed handles (alive()-guarded); appointment id derived per-day so reruns converge instead of duplicating the shared booking picker/roster
 - 2026-07-31 · `7630e28c` · A provider can now act in her own clinic — RecordEncounter grants provider (guarded); My Schedule + Availability unlock self-scoped; her name resolves. clinic-domain 0.28.15
 - 2026-07-31 · `12b155cd` · Showcase seed now completes a visit + names its site — fills Follow-ups, noShowSettlement, clinicSites on a fresh world
 - 2026-07-31 · `f7d744d8` · Staff console can now reassign a class's instructor and/or time — Roster panel's "Reassign" control wires the already-shipped ReassignSession op, mirroring CreateSession/TombstoneSession's staff-only affordance idiom
