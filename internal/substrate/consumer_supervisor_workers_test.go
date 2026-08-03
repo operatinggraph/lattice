@@ -31,7 +31,7 @@ func provisionWorkStream(ctx context.Context, t *testing.T, c *Conn) string {
 // duplicate delivery, no lost message). The handler blocks the first arrival
 // until a SECOND worker arrives concurrently, so the test deterministically
 // proves at least two workers process simultaneously — impossible with a single
-// pump. Bounded prefetch (fanOutPullMaxMessages) keeps any one worker from
+// pump. Bounded prefetch (pumpPullMaxMessages) keeps any one worker from
 // hoarding the whole burst, which is exactly what makes the fan-out real.
 func TestSupervisor_Workers_FanOutConcurrency(t *testing.T) {
 	t.Parallel()
@@ -40,7 +40,7 @@ func TestSupervisor_Workers_FanOutConcurrency(t *testing.T) {
 
 	const (
 		workers   = 4
-		published = 64 // >> fanOutPullMaxMessages so no single worker can hoard
+		published = 64 // >> pumpPullMaxMessages so no single worker can hoard
 	)
 
 	var (
@@ -128,22 +128,19 @@ func TestSupervisor_Workers_FanOutConcurrency(t *testing.T) {
 	}
 }
 
-// TestSupervisor_SingleWorker_DefaultPrefetch proves the single-worker path
-// (Workers 0 or 1, every Loom/Weaver/Refractor consumer) is unchanged: one pump
-// drains the whole backlog, no prefetch bound applied. A guard against the
-// fan-out change leaking into the default path.
-func TestSupervisor_SingleWorker_DefaultPrefetch(t *testing.T) {
-	for _, w := range []int{0, 1} {
-		if got := (ConsumerSpec{Workers: w}).Workers; got != w {
-			t.Fatalf("Workers=%d preserved as %d", w, got)
-		}
-		opts := messagesOpts(ConsumerSpec{Workers: w})
-		if len(opts) != 1 {
-			t.Fatalf("Workers=%d: messagesOpts len = %d, want 1 (heartbeat only, no prefetch bound)", w, len(opts))
-		}
+// TestSupervisor_PrefetchBoundAlwaysApplied proves the prefetch bound is not
+// conditional on the worker count. Leaving the single-worker path on nats.go's
+// DefaultMaxMessages (500) is what let a lens consumer buffer hundreds of
+// messages whose AckWait clock was already running, and the worker count has
+// nothing to do with it: every worker's drain loop is serial, so every worker
+// needs the same bound.
+func TestSupervisor_PrefetchBoundAlwaysApplied(t *testing.T) {
+	if pumpPullMaxMessages != 1 {
+		t.Fatalf("pumpPullMaxMessages = %d, want 1 — a serial worker must not hold work it has not started", pumpPullMaxMessages)
 	}
-	// A fan-out spec adds the prefetch bound.
-	if got := len(messagesOpts(ConsumerSpec{Workers: 3})); got != 2 {
-		t.Fatalf("Workers=3: messagesOpts len = %d, want 2 (heartbeat + prefetch bound)", got)
+	// Heartbeat + prefetch bound, for every spec: messagesOpts takes no spec at
+	// all now, which is the point — there is no path that opts out.
+	if got := len(messagesOpts()); got != 2 {
+		t.Fatalf("messagesOpts len = %d, want 2 (heartbeat + prefetch bound)", got)
 	}
 }

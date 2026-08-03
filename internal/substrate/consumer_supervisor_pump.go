@@ -24,26 +24,36 @@ const reopenBackoff = 100 * time.Millisecond
 // trying to reach.
 const reopenBackoffCap = 5 * time.Second
 
-// fanOutPullMaxMessages bounds how many messages a single worker's pull iterator
-// buffers when a consumer runs more than one worker (Workers > 1). The
-// JetStream default (DefaultMaxMessages = 500) lets the first iterator to issue a
-// pull request grab a whole finite burst, starving the other workers — so an
-// N-worker lane would process a bounded backlog effectively serially. A small
-// per-worker buffer lets the server fairly distribute pending messages across all
-// the bound iterators (the pull-consumer equivalent of a queue group). The
-// single-worker default path keeps the JetStream default untouched, so every
-// existing Loom/Weaver/Refractor consumer is byte-identical.
-const fanOutPullMaxMessages = 8
+// pumpPullMaxMessages is how many messages one worker's pull iterator may hold.
+//
+// A worker's drain loop is strictly serial: it takes one message from the
+// iterator, runs the handler to completion, applies the ack, and only then asks
+// for the next. Anything the iterator buffers beyond that one message is work
+// the worker has not started — but JetStream starts the AckWait clock at
+// DELIVERY, so a buffered message is burning its window while the worker is N
+// messages away from looking at it. With prefetch N and handler latency L, the
+// back of the buffer waits N*L; once N*L exceeds AckWait the server redelivers
+// it into the same buffer and the worker owes strictly more work than arrived.
+// The ack floor then freezes, redeliveries climb, and — because nothing errors —
+// no pause is entered and no signal is published.
+//
+// L is unbounded for a projection handler, so no static value above 1 satisfies
+// "never hold a message you cannot start within AckWait". One per worker makes
+// forward progress a property of the pump rather than of handler speed, and it
+// is also the fairest split across a fan-out lane's workers (the pull-consumer
+// equivalent of a queue group). The cost is that nats.go issues its next pull
+// from inside Next, so the round trip no longer overlaps the handler — a
+// loopback request/reply against work that is a Starlark execution or a
+// full-engine projection.
+const pumpPullMaxMessages = 1
 
-// messagesOpts builds the pull-iterator options for a worker. Every worker sets a
-// heartbeat; a fan-out worker (Workers > 1) additionally bounds its prefetch so
-// the server can balance delivery across the lane's workers.
-func messagesOpts(spec ConsumerSpec) []jetstream.PullMessagesOpt {
-	opts := []jetstream.PullMessagesOpt{jetstream.PullHeartbeat(5 * time.Second)}
-	if spec.Workers > 1 {
-		opts = append(opts, jetstream.PullMaxMessages(fanOutPullMaxMessages))
+// messagesOpts builds the pull-iterator options for a worker: a heartbeat, and a
+// prefetch bounded to what a serial worker can honor within AckWait.
+func messagesOpts() []jetstream.PullMessagesOpt {
+	return []jetstream.PullMessagesOpt{
+		jetstream.PullHeartbeat(5 * time.Second),
+		jetstream.PullMaxMessages(pumpPullMaxMessages),
 	}
-	return opts
 }
 
 // pumpState is the live pause/probe/reopen machinery for one supervised
@@ -260,7 +270,7 @@ func (s *ConsumerSupervisor) runPump(ctx context.Context, spec ConsumerSpec, st 
 			continue
 		}
 
-		mc, err := cons.Messages(messagesOpts(spec)...)
+		mc, err := cons.Messages(messagesOpts()...)
 		if err != nil {
 			if ctx.Err() != nil {
 				return
@@ -347,7 +357,9 @@ func (s *ConsumerSupervisor) drain(ctx context.Context, spec ConsumerSpec, st *p
 // infra/structural failure: the message is intentionally left pending and the
 // caller must pause.
 func (s *ConsumerSupervisor) processMsg(ctx context.Context, spec ConsumerSpec, msg jetstream.Msg) (FailureClass, error, bool) {
+	stopHeartbeat := keepAckAlive(msg, spec)
 	decision, herr := spec.Handler(ctx, newMessage(msg))
+	stopHeartbeat()
 	if herr != nil {
 		class := classify(spec, herr)
 		if class == ClassInfra || class == ClassStructural {
@@ -357,6 +369,57 @@ func (s *ConsumerSupervisor) processMsg(ctx context.Context, spec ConsumerSpec, 
 	}
 	applyDecision(decision, msg, spec.Name, spec.RedeliveryDelay, specLogger(spec))
 	return ClassTransient, nil, true
+}
+
+// jetStreamDefaultAckWait is JetStream's AckWait when a consumer does not set
+// one. It is not exported by nats.go, so the effective window a spec with no
+// AckWait runs under has to be named here to derive a heartbeat interval from.
+const jetStreamDefaultAckWait = 30 * time.Second
+
+// keepAckAlive holds the in-flight message's ack window open for as long as the
+// handler runs, and returns the function that releases it.
+//
+// Bounding the prefetch (pumpPullMaxMessages) stops UN-STARTED work from aging
+// out; this stops STARTED work from aging out. Without it a handler slower than
+// AckWait loses its own window and the server redelivers the message underneath
+// it — bounded duplicate work, but forever, for any handler whose latency sits
+// above the wait. A projection handler's latency is unbounded by design, so the
+// pump must not let AckWait bound it.
+//
+// InProgress sends +WPI, which is the one ack type that does NOT mark the
+// message acked, so it may be sent repeatedly; a heartbeat that races the
+// handler's own Ack fails with ErrMsgAlreadyAckd and is dropped. The returned
+// stop is idempotent and must be called before the decision is applied.
+func keepAckAlive(msg jetstream.Msg, spec ConsumerSpec) func() {
+	wait := spec.AckWait
+	if wait <= 0 {
+		wait = jetStreamDefaultAckWait
+	}
+	// Half the window: one missed tick still leaves a full interval of margin.
+	interval := wait / 2
+	if interval <= 0 {
+		return func() {}
+	}
+
+	done := make(chan struct{})
+	var once sync.Once
+	go func() {
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-done:
+				return
+			case <-ticker.C:
+				if err := msg.InProgress(); err != nil {
+					// The message is already disposed, or the connection is
+					// gone; either way there is no window left to hold open.
+					return
+				}
+			}
+		}
+	}()
+	return func() { once.Do(func() { close(done) }) }
 }
 
 // handleDrainOutcome maps a drain result to the pause state machine. On infra it

@@ -106,10 +106,17 @@ func TestSupervisor_PendingForConsumer(t *testing.T) {
 // drain-detection contract: a delivered-but-unacked message leaves NumPending,
 // so PendingForConsumer alone reads a mid-processing consumer as drained;
 // OutstandingForConsumer adds NumAckPending and keeps counting every message
-// until it is acked. The handler holds deliveries in flight (un-acked) behind a
-// gate while MaxAckPending keeps part of the backlog undelivered, so both terms
-// of the sum are non-zero at once; releasing the gate acks everything and the
-// count drains to zero.
+// until it is acked. The handler holds its delivery in flight (un-acked) behind
+// a gate while the rest of the backlog stays undelivered, so both terms of the
+// sum are non-zero at once; releasing the gate acks everything and the count
+// drains to zero.
+//
+// The in-flight term is exactly one. A pump's drain loop is serial and its
+// iterator prefetch is bound to match (pumpPullMaxMessages), so one blocked
+// handler holds one message — the whole point of that bound is that a message
+// the pump has not started must not be sitting delivered with its AckWait
+// clock running. MaxAckPending here is a server-side ceiling well above that,
+// left in place to show the pump's own bound is what limits in-flight work.
 func TestSupervisor_OutstandingForConsumer_CountsUnackedInFlight(t *testing.T) {
 	t.Parallel()
 	c, ctx := newTestConn(t)
@@ -118,6 +125,8 @@ func TestSupervisor_OutstandingForConsumer_CountsUnackedInFlight(t *testing.T) {
 	const (
 		published     = 4
 		maxAckPending = 2
+		// One serial pump inside one blocked handler holds exactly one message.
+		inFlight = 1
 	)
 	gate := make(chan struct{})
 	acked := make(chan struct{}, published)
@@ -134,6 +143,12 @@ func TestSupervisor_OutstandingForConsumer_CountsUnackedInFlight(t *testing.T) {
 	}
 	sup := NewConsumerSupervisor(c)
 	t.Cleanup(sup.Stop)
+	// Registered after sup.Stop so it runs BEFORE it (cleanups are LIFO): a
+	// failing assertion must not leave the pump parked in the handler with Stop
+	// waiting on it, which turns one bad assert into a whole-package timeout.
+	var releaseOnce sync.Once
+	releaseGate := func() { releaseOnce.Do(func() { close(gate) }) }
+	t.Cleanup(releaseGate)
 	if err := sup.Add(ctx, spec); err != nil {
 		t.Fatalf("Add: %v", err)
 	}
@@ -143,9 +158,9 @@ func TestSupervisor_OutstandingForConsumer_CountsUnackedInFlight(t *testing.T) {
 		}
 	}
 
-	// Converge to the held state: maxAckPending messages delivered (in flight,
-	// un-acked) and the rest still pending. The state then holds until the gate
-	// opens — no ack can land while the handler is blocked.
+	// Converge to the held state: one message delivered (in flight, un-acked)
+	// and the rest still pending. The state then holds until the gate opens —
+	// no ack can land while the handler is blocked.
 	waitFor(t, 10*time.Second, func() bool {
 		pending, err := sup.PendingForConsumer(ctx, spec.Name)
 		if err != nil {
@@ -155,8 +170,8 @@ func TestSupervisor_OutstandingForConsumer_CountsUnackedInFlight(t *testing.T) {
 		if err != nil {
 			return false
 		}
-		return pending == published-maxAckPending && outstanding == published
-	}, "did not converge to the held state (pending=2, outstanding=4) with deliveries un-acked")
+		return pending == published-inFlight && outstanding == published
+	}, "did not converge to the held state (pending=3, outstanding=4) with the delivery un-acked")
 
 	// The key drain-detection vector, read at the stable held state: pending
 	// under-counts by exactly the un-acked in-flight messages; outstanding does
@@ -193,7 +208,7 @@ func TestSupervisor_OutstandingForConsumer_CountsUnackedInFlight(t *testing.T) {
 	}
 
 	// Release the gate: every message acks and the consumer truly drains.
-	close(gate)
+	releaseGate()
 	for i := 0; i < published; i++ {
 		select {
 		case <-acked:
