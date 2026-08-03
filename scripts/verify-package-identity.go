@@ -6,7 +6,7 @@
 // identity-domain package has been correctly installed. Asserts:
 //
 //	1 identity DDL meta-vertex (vtx.meta.<NanoID>) with class=meta.ddl.vertexType
-//	8 DDL aspects: .canonicalName=identity, .permittedCommands (9 ops),
+//	8 DDL aspects: .canonicalName=identity, .permittedCommands (10 ops),
 //	               .description, .script,
 //	               .inputSchema, .outputSchema, .fieldDescription, .examples
 //	  Each aspect also validated for correct vertexKey + localName envelope fields.
@@ -87,18 +87,20 @@ var identityExpectedOps = []string{
 	"InitiateCredentialLink",
 	"CompleteCredentialLink",
 	"UnlinkCredential",
+	"ReconcileCredentialBinding",
 }
 
 var identityOpScopes = map[string]string{
-	"CreateUnclaimedIdentity":   "any",
-	"UpdateIdentityState":       "any",
-	"ClaimIdentity":             "self",
-	"RotateClaimKey":            "any",
-	"RecordIdentityPII":         "any",
-	"ProvisionConsumerIdentity": "any",
-	"InitiateCredentialLink":    "self",
-	"CompleteCredentialLink":    "self",
-	"UnlinkCredential":          "self",
+	"CreateUnclaimedIdentity":    "any",
+	"UpdateIdentityState":        "any",
+	"ClaimIdentity":              "self",
+	"RotateClaimKey":             "any",
+	"RecordIdentityPII":          "any",
+	"ProvisionConsumerIdentity":  "any",
+	"InitiateCredentialLink":     "self",
+	"CompleteCredentialLink":     "self",
+	"UnlinkCredential":           "self",
+	"ReconcileCredentialBinding": "any",
 }
 
 // userFacingRoles are seeded by identity-domain's PreInstall hook.
