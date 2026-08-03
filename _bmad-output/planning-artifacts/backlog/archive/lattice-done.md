@@ -1,5 +1,9 @@
 # Done log archive — lattice (older shipped items, newest first)
 
+- 2026-08-01 · `0b6879dc` · [Edge] one SYNC durable per identity, not one per engine build — facet persists its device id in the mirror and reaps the durable on sign-out
+- 2026-08-01 · `99720950` · [Pkgmgr] `edgeManifestReadGrants` no longer cross-products: generated producers stage each walk behind its own `WITH` fold, peak rows drop to the largest single walk, anchor set proven identical
+- 2026-08-01 · `5527e0e2` · [Refractor] aggregates fold per row (peak heap 122→78 MB at 102k rows), plus a sampled cancellation checkpoint and a refuse-not-truncate binding cap
+- 2026-08-01 · `787ac1c1` · [Refractor] D2 Phase 1 — anchor-labeled events recompute one anchor, not the corpus [design §D2](../../implementation-artifacts/refractor-footprint-reduction-design.md)
 - 2026-08-01 · `3c7bf182` · [Refractor] D1 — eligible lens consumers narrow FilterSubjects to their referenced labels, broad fallback + health signal [design](../../implementation-artifacts/refractor-footprint-reduction-design.md)
 - 2026-08-01 · `0ee30f6f` · [Refractor] unguarded NATS-KV upserts skip byte-identical rows, audits skip with them (guarded watermark advance pinned)
 - 2026-08-01 · `714cefd6` · [Refractor] a lens tombstone now stops its pipeline and deletes its durable; also wires the previously-dead operator delete RPC

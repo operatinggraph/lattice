@@ -1360,3 +1360,64 @@ retirement are all 2b-2. Removing the bespoke `/api/credentials` handlers stays 
 (§4.2's closing paragraph). The filed row *"a credential whose identity vertex was never provisioned
 projects no binding row"* binds on 2b-2's pane, not here — the reconcile writes the edge whether or not a
 lens can anchor it.
+
+### 15.6 Review — two adversarial lanes on a frozen tree; both found the same blocker
+
+Two read-only reviewers (security, correctness) ran independently against the frozen build commit. They
+converged, from different directions, on one blocker — which is the strongest signal the pass produced,
+because neither could have been anchoring on the other.
+
+**The op would have undone an erasure.** privacy-base's `ShredIdentityKey` tombstones every `boundTo` link
+touching an erased identity, on the stated ground that the link names — in plaintext, in the key itself —
+which sign-in credential belonged to which person. It does **not** tombstone the `credentialindex` vertex.
+So an erased person leaves exactly the pair of facts this op was built to repair: a live index and no live
+edge. The brief's own premise — *the index is the authority* — was drawn from `UnlinkCredential`, which
+tombstones both in one batch, and generalized to a second retraction path that behaves differently. The
+driver's test file pinned the wrong behaviour explicitly, as case D.
+
+The correction separates two things the brief had conflated. The index is authoritative over the edge's
+**content** — who owns the credential, when it was bound — and over nothing else. Whether an edge *should*
+exist is answered by the edge: an existing tombstone is a retraction somebody made, and this op does not
+overturn one. The writable case is the **absent** link alone, which is the only case it was ever built to
+reach.
+
+**The index was read and forgotten.** Only mutation keys carry their hydrated revision into the commit
+condition, so nothing guarded the index revision the decision rested on. An `UnlinkCredential` committing
+between hydrate and commit would tombstone index and link, and this batch would then publish the edge live
+on top of it — and that state is unrecoverable rather than merely stale, because a later `UnlinkCredential`
+rejects `not-found` once the array entry is gone. The lens would project a credential the person removed,
+permanently. The index now joins the committed footprint, conditioned on the revision it was read at, so
+the race sends the op back through the OCC retry and it rejects `not-bound` on re-hydration.
+
+**A test that passed for the wrong reason.** `SelfLoopRejects` named an owner that has no index vertex, so
+`not-bound` caught it and the assertion held with the self-loop guard deleted. Every rejection test now
+asserts the script's own outcome word through `SubmitAndAwaitReply`, and each guard was falsified by
+deleting it and watching the test go red.
+
+**Three smaller ones, all from the correctness lane.** A merge writes an index vertex for the primary's own
+implicit self-credential before reaching its self-loop guard, so a merged corpus would earn a rejection on
+every run and the migration could never report clean — the driver skips that shape. The link read treated
+any `KVGet` error as "no edge", silently turning an infra fault into work. And JSON mode exited 0 on a run
+that rejected everything.
+
+**Filed, not fixed:** the `credentialindex` vertex survives a shred carrying `{actorKey, identityKey}` in
+plaintext — the same correlation the `boundTo` tombstone exists to destroy. This op no longer acts on it,
+but the vertex is still readable, and that is an erasure gap independent of this increment. Also filed: an
+identity whose only sign-in is a raw actor `ProvisionConsumerIdentity` minted has no index vertex at all,
+so no reconcile reaches it and `identityCredentialBindingsRead` cannot list it — which binds on 2b-2's pane.
+
+### 15.7 CHECKPOINT — Inc 2b-1 shipped; Inc 2b-2 is next
+
+**Shipped** `5d464007` + `be513dbe`: the `ReconcileCredentialBinding` op, the `lattice identity
+reconcile-bindings` driver, nine tests, and the review above. Worktree removed — 2b-2 takes a fresh one.
+Live on the dev stack: identity-domain 0.13.1 → 0.14.0 diff-applied, the migration run, **0 → 6 `boundTo`
+edges** (7 index vertices scanned, 1 tombstoned and correctly skipped), a re-run reporting 6
+`alreadyLinked` / 0 submitted, and `verify-package-identity` green at 99 assertions.
+
+**Next: Inc 2b-2** — the `signInMethods` pane section over `identityCredentialBindingsRead`,
+`UnlinkCredential`'s `OpMetaSpec`, and the `unprojected-input` exemption retirement (the descriptor and the
+exemption removal must land together; S1 fails an op that carries both). §7's ordering rule is now
+satisfied. Note for that fire: there is **no consumer-facing `PaneSpec` today** — `staffWorklist` is offered
+to `frontOfHouse` only — so the section needs a new pane offered to `consumer`, and the pane lens projects
+over `holdsRole → offeredTo`. Both filed rows above bind on that pane: a person the reconcile cannot reach
+sees an incomplete list, not an empty one, which is the harder failure to notice.
