@@ -250,6 +250,39 @@ function rowsByNs(ns) {
 }
 function services() { return rowsByNs("manifest.svc"); }
 function ops() { return rowsByNs("manifest.op"); }
+
+// standingOps lists the ops whose authority names no record and which no
+// other surface in this client can offer. Three declared facts, each doing
+// its own work:
+//
+//   authContext "standing" — the authority IS the role grant, so the envelope
+//     carries no authContext object. A "self" op is about the caller's own
+//     record and belongs to the Me screen, which serves the one there is
+//     through its own state-gated card; "service" and "task" ops name a
+//     context this screen cannot build, and authContextBuildable would
+//     rightly degrade every one of them into noise.
+//   no dispatchTargetType — no entity, pane, hat or task row matches it, so
+//     none of those surfaces lists it.
+//   no viaServices — no service detail lists it either.
+//
+// The last two are a REACHABILITY statement, not a provenance one. Such a row
+// always arrives via the manifest's role Walk and always carries viaRole —
+// the base Walk reaches an op only through the `permitsOperation` edge that
+// `viaServices` itself comprehends — but filtering on viaRole would say
+// "role-granted" where the gap is "unreachable", and would drop the op the
+// day it becomes reachable both ways. viaRoleName is used for GROUPING only,
+// so a person wearing two hats is told which authority each action comes
+// from; it is never what decides whether the op is listed. Nor is the
+// viaServices term redundant beside the standing one because no standing op
+// happens to be service-wired today: a service-wired op is offered on the
+// service's own detail whatever authority it names, and stating that fact
+// here is what keeps this section from doubling it.
+function standingOps() {
+  return ops().filter((o) =>
+    o.data.dispatchAuthContext === "standing" &&
+    !o.data.dispatchTargetType &&
+    !(o.data.viaServices || []).length);
+}
 function tasks() { return rowsByNs("manifest.task").filter((t) => !isExpired(t.data.expiresAt)); }
 function instances() { return rowsByNs("manifest.inst"); }
 function entities() { return rowsByNs("manifest.ent"); }
@@ -789,6 +822,46 @@ function bindingChipRow(bindings) {
   }).join("")}</div>`;
 }
 
+// standingOpsHTML renders the standing ops as their own home section,
+// grouped under the role that grants them — the same statement bindingChipRow
+// makes about a hat, for an authority that has no record to hang a chip on.
+//
+// Home is where it belongs because home is the only screen every actor has.
+// The Work tab would have been the narrower home, but its visibility is keyed
+// on a `worksAt` anchor — the same link `staffReadGrants` keys the Protected
+// pane grant on — and a standing grant is `scope=any`: an operator holding
+// one need have no workplace at all, and would then hold the op, project the
+// row, and have no screen to find it on. Leaving that predicate alone keeps
+// the tab saying exactly what it says today.
+//
+// Every card goes through opButton, so a standing op that still cannot be
+// submitted from here degrades in the one place that knows why.
+function standingOpsHTML(list) {
+  if (!list.length) return "";
+  const byRole = new Map();
+  for (const o of list) {
+    const role = o.data.viaRoleName || o.data.viaRole;
+    const label = role ? titleCase(prettify(role)) : "Operations";
+    if (!byRole.has(label)) byRole.set(label, []);
+    byRole.get(label).push(o);
+  }
+  let html = "";
+  for (const [role, group] of byRole) {
+    // A card renders as "" when the op is not offered here at all — a
+    // dispatchVisibleWhen with no row to read against — so a heading is
+    // emitted only once its own group has something under it, and the
+    // section is dropped entirely when none of them do.
+    const cards = group.map((o) => opButton(o, {})).join("");
+    if (cards) html += `<h3 class="category-heading">${esc(role)}</h3>${cards}`;
+  }
+  return html
+    ? `<section>
+      <h2 class="section-title">What I can do</h2>
+      ${html}
+    </section>`
+    : "";
+}
+
 function renderHome() {
   const m = me() || {};
   const { homes, workplaces, bindings } = splitAnchors(m);
@@ -811,6 +884,7 @@ function renderHome() {
       <h2 class="section-title">What I provide</h2>
       ${bindingChipRow(bindings)}
     </section>` : ""}
+    ${standingOpsHTML(standingOps())}
     <section>
       <h2 class="section-title">Services ${svcs.length > 4 ? `<a class="see-all" data-goto="services">See all &rarr;</a>` : ""}</h2>
       ${svcs.length ? `<div class="strip">${svcs.slice(0, 4).map(serviceCard).join("")}</div>` : `<div class="empty">No services available yet.</div>`}
