@@ -1279,3 +1279,84 @@ commit), the `signInMethods` pane section over it, `UnlinkCredential`'s `OpMetaS
 has run. Note for that fire: the backfill's enumerable source is the `credentialindex` keyspace, whose
 vertices already carry `{actorKey, identityKey, boundAt}` in plaintext — no decryption of the sensitive
 array is needed to reconstruct the edge set.
+
+## 15. Increment 2b-1 fire brief (build note, 2026-08-03)
+
+Inc 2b splits again, at the ordering rule §7 states: **2b-1 is the reconciliation that makes the link
+plane complete; 2b-2 is the surface that reads it** (the `signInMethods` pane section,
+`UnlinkCredential`'s `OpMetaSpec`, the `unprojected-input` exemption retirement). The pane cannot ship
+first — an identity bound before `217769cc` has a live credential and no edge, so the section would render
+an authoritative-looking empty list for exactly the people who have most to lose by believing it.
+
+### 15.1 Verified touch-list (checked live at `e0ac7f86`)
+
+| Site | What it is today | 2b-1 |
+|---|---|---|
+| `packages/identity-domain/ddls.go:55-65` (`identity` `PermittedCommands`) | nine ops | + `ReconcileCredentialBinding` |
+| `packages/identity-domain/ddls.go` (`identityDDLScript` `execute`) | one `if ot == …` branch per op | + the reconcile branch |
+| `packages/identity-domain/ddls.go:729-851` (`derive_reads`) | Create / Claim+Complete / Unlink branches | + the reconcile branch (index key + link key) |
+| `packages/identity-domain/permissions.go:44-99` | nine entries | + `ReconcileCredentialBinding` scope=any → `operator` |
+| `packages/identity-domain/package.go:33` | `0.13.1` | version bump (a same-version edit no-ops) |
+| `cmd/lattice/identity/identity.go:36-44` | `create-unclaimed`, `claim` | + `reconcile-bindings` |
+
+### 15.2 The scope-diff gate — one deviation, narrow-only
+
+§7 ratified *"a one-shot backfill op over the existing `credentialBinding` arrays."* This builds a
+**re-runnable reconcile op over the `credentialindex` vertex**, driven by a CLI enumerator. §14.6 already
+re-grounded the source: the index vertex carries `{actorKey, identityKey, boundAt}` in **plaintext**, so
+the edge set reconstructs without ever decrypting a sensitive aspect. The deviation is narrowing on both
+axes that matter — a smaller read (no decrypt) and a smaller authority (the op reads one key it derives
+itself, rather than a person's whole bound set) — and the output edge set is identical, because
+`credential_index_mutation` and `credential_bound_to_mutation` are written in the same batch by all four
+2a writers.
+
+It is named `ReconcileCredentialBinding`, not `Backfill*`: the op is permanently useful. It converges the
+link plane onto the index for one credential, which is the repair verb for any future divergence, not a
+verb whose meaning expires the moment it has run once.
+
+### 15.3 Why the index vertex is the authority, and what that buys
+
+The payload names `credentialActorKey` **and** `identityKey`, because `derive_reads` runs before hydration
+and the link key needs both halves. That makes the owner client-supplied — so the script does not trust
+it. It hydrates `vtx.credentialindex.<sha256NanoID(credentialActorKey)>`, requires it live, and requires
+`data.identityKey` to equal the payload's; a mismatched pair is rejected rather than written. Forging an
+edge therefore requires an index vertex that already says what the forgery claims, which is the edge
+itself.
+
+Three properties fall out of the same choice, none of which the encrypted array would have given:
+
+- **A deliberately-unlinked credential is not revived.** `UnlinkCredential` tombstones the index vertex and
+  the link in one batch, so a tombstoned index makes the reconcile reject. Reading the array instead would
+  have re-derived the entry only if the array were also authoritative — and it is the array that
+  `UnlinkCredential` rewrites last.
+- **`boundAt` is the original**, read off the index, never `observedAt`. A reconcile that stamped its own
+  run time would rewrite provenance to say every historical credential was bound the day the backfill ran.
+- **Idempotent by construction.** The write is `credential_bound_to_mutation`'s `update` — the same revive
+  posture §14.2 measured — conditioned on the revision the derived key hydrated at.
+
+Both derived keys are `optionalReads`, never `reads`: the index can race away between the CLI's list and
+the submit, and that must reject with a named domain outcome rather than fault `HydrationMiss`.
+
+### 15.4 Increment order + green checks
+
+1. The op: `PermittedCommands` + the `execute` branch + the `derive_reads` branch + the DDL description.
+2. The permission (scope=any → `operator`; outside S1 by `userFacing`, same class as `UpdateIdentityState`).
+3. Version bump.
+4. The CLI driver: `lattice identity reconcile-bindings [--dry-run]` — `KVListKeysPrefix` over
+   `vtx.credentialindex.` in `bootstrap.CoreKVBucket`, skip tombstoned index vertices, skip a credential
+   whose live `boundTo` link is already present, submit one op per remaining credential.
+5. Tests: a pre-existing index with no link yields exactly one live link with the index's `boundAt`; a
+   tombstoned index rejects; an owner mismatch rejects; a self-loop rejects; a second run over an
+   already-linked credential is a no-op at the CLI and a byte-identical document at the op.
+
+Gates: `go build ./...`, `make vet`, `golangci-lint run ./...`, `STRICT=1 go run ./scripts/lint-conventions.go`,
+`go run ./scripts/lint-package-standard.go`, `make verify-package-identity-domain`, the identity-domain and
+`cmd/lattice` package tests.
+
+### 15.5 Non-goals (2b-1)
+
+The `signInMethods` pane section, `UnlinkCredential`'s `OpMetaSpec`, and the `unprojected-input` exemption
+retirement are all 2b-2. Removing the bespoke `/api/credentials` handlers stays out of Inc 2 entirely
+(§4.2's closing paragraph). The filed row *"a credential whose identity vertex was never provisioned
+projects no binding row"* binds on 2b-2's pane, not here — the reconcile writes the edge whether or not a
+lens can anchor it.
