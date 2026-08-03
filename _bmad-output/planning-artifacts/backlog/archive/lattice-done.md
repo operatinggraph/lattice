@@ -1,6 +1,11 @@
 # Done log archive — lattice (older shipped items, newest first)
 
 
+- 2026-07-30 · `4e85358c` · [Lattice-CLI] `health summary`'s refractor/processor rows now escalate on issues[] — a live LensRegistryIncomplete sat "green" for 2.5h
+- 2026-07-30 · `e384f34a` · [Refractor] deactivated lens's frozen Health KV entry no longer pins rollup yellow — isLensDeleted probe drops the row
+- 2026-07-30 · `e8349678` · [Loom] per-instance redrive — resumes a FAILED instance at its recorded cursor, never restarts; unblocks Loupe Flows "act on it"
+- 2026-07-30 · `b9b9cad3` · [Refractor,Substrate] SYNC stream now caps per-subject retention (`MaxMsgsPerSubject: 10,000`) — finishes the retention posture [design §3.2](../../implementation-artifacts/personal-secure-lens-design.md)
+- 2026-07-30 · `2edba1f3` · [Refractor,Edge,Loupe] operator-initiated device hydration request — durable per-device flag consumed on next SYNC attach [§3.2](../../implementation-artifacts/loupe-flows-edge-depth-ux.md)
 - 2026-07-30 · `b097f1a4` · [Refractor,Loupe] cold bring-up replay debt no longer reads as staleness — a draining `consumerLag` renders green until its `lagProgressAt` clock stalls 2min, closing the demo box's hours-long false YELLOW
 - 2026-07-30 · `a7284b8a` · [Processor] wall-budget test flake — `PROCESSOR_SCRIPT_WALL_MS` now wired + widened for `-p 4` test runs, production 250ms NFR-P4 default untouched
 - 2026-07-30 · `3deda37c` · [Refractor] Postgres GrantTable cap-read producers now shred-nullified — closes Fire 4's first residual [design §Fire 5](../../implementation-artifacts/cap-read-per-anchor-grant-keys-design.md)

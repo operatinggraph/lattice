@@ -735,3 +735,80 @@ increment exists to close.
 
 Everything in 1b above; Inc 2/3/4; any change to `kv.Read`'s live fallthrough, the live-read budget, or the
 sensitive-read tracker; any contract edit (§2.5 class (g) is already committed and this fire builds to it).
+
+### 11.6 Review — two adversarial passes launched, both killed; the audit was done by hand
+
+Two opus adversarial reviewers (security/egress lens, correctness/lifecycle lens) were launched over
+the diff and **both were stopped after running well past a reasonable window** for a ~600-line change.
+The correctness reviewer's last words name a cause worth carrying forward: *"the tree appears to be
+mutating under me"* — the fire had committed and rebased the worktree while a read-only reviewer was
+mid-snapshot. **A review fan-out needs a frozen tree**; freeze before launching, or hand the reviewer a
+SHA rather than a working directory.
+
+The review was therefore completed inline, and the two findings it produced are in the shipped commit:
+
+1. **The stub set was complete but not drift-proof** (fixed). `failingModule` takes a hand-written
+   member list, verified here against the real modules' own sets — `kv` = `{Read, Links}`
+   (`starlark_kv.go:238-239`), `nanoid` = `{new, short}` (`starlark_builtins.go:55-56`). A future
+   builtin added to either would have landed **unstubbed**, and because the pre-pass shares the main
+   pass's compiled program that is not a loud unbound name — the member is simply absent from the
+   struct. `TestDeriveReads_StubsCoverEveryRealMember` now compares against `AttrNames()`.
+2. **A dead compile-failure branch** (removed). `deriveReads` handled a compile error that
+   `hasDeriveReads` had already made unreachable. Collapsed into one `deriveReadsProgram()` answering
+   "is there a derivation, and what runs it?" in a single call, so there is no state between the
+   question and the answer and no second path for a compile failure to take.
+
+**Verified and NOT found (the refuted list — the part a findings-only report would hide):**
+
+- **Program reuse is safe by construction, not by assumption.** `Program.Init` allocates a fresh
+  `Function` + `Module` per call, with `globals: make([]Value, ...)` and freshly materialized
+  `constants`, writing nothing back to the program
+  (`go.starlark.net@v0.0.0-20260326113308/starlark/eval.go:437-445, 498-529` — the pinned version, per
+  the vendor rule). Repeated **and** concurrent Init are both safe, and no top-level-defined value can
+  leak from one operation into another.
+- **No existence oracle.** Every derivation fault — `DeriveReadsFailed`, `DeriveReadsInvalid`,
+  `DeriveReadsEgressConflict`, `DeclaredReadCeilingExceeded` — is decided **before any Core KV GET**, so
+  none of them can carry key-existence information. The keys are script-computed, not attacker-chosen,
+  and the one that reaches the caller (`MissingKey` on the egress conflict) is a key the caller
+  **already declared in `egressReads`** — that is how the collision arose.
+- **Sensitive/PII parity.** A derived key runs the identical `decryptSensitiveDoc(..., false, tracker,
+  rid)` path a declared read runs, charges the same `sensitiveReadTracker`, and is seen by step 6's
+  external-egress guard identically. A derivation cannot produce an `egressReads` key at all (closed
+  return shape), and a collision with one faults.
+- **No new reach.** A script can already `kv.Read` any key at step 5 as a class-(b)/(c) live read, so
+  pre-hydrating a derived key grants no reach the script lacked — it only moves the read into the
+  declared, snapshotted, OCC-conditioned class, which is the whole point.
+- **No live-read-budget bypass.** Declared reads have never been charged against `LiveReads` (that
+  budget is execution-time); the derived set is bounded by the same 1000-key declared-read ceiling,
+  enforced over the merged distinct union.
+- **No behaviour change for shipping ops.** No package declares `derive_reads`, the entrypoint is
+  resolved off the compiled program, and the full `-p 4` suite is green across 115 packages.
+
+**One residual, accepted and named.** A derivation fault's message reaches the submitter through
+`handleStubFailure`'s `err.Error()`, which for `DeriveReadsInvalid` includes the malformed key the
+script returned. It is derived from the submitter's own payload and appears only on a terminal reject,
+so it discloses nothing about another subject — but it is the one place a package's internal derivation
+becomes caller-visible, and a package whose derivation could embed something non-payload-derived should
+know that before it ships.
+
+### 11.7 CHECKPOINT — Inc 1a shipped; Inc 1b is the adoption half
+
+**Shipped** `8aaea2b9` (2026-08-03): the platform primitive, gates green, full suite green.
+
+**Inc 1b — the adoption half, unstarted.** Worktree `lattice-wt-derivereads` (branch
+`fire/derive-reads-inc1a`) is merged and reusable. Remaining, per §9's Inc 1 row:
+
+1. identity-domain declares its four derived keys in a `derive_reads` — **with the package version
+   bump**, since a same-version package edit no-ops.
+2. Delete the four hand-ported derivations: `cmd/loftspace-app/web/app.js:945-1020` (+
+   `credentials_link.go:137-155`), `cmd/clinic-app/web/app.js:654-660,706-714`,
+   `cmd/facet/credentials.go:150-160,244-277`, `cmd/lattice/identity/identity.go:278-303`. These are the
+   §9 lane tails this item owns — build them here, do not file them to `verticals.md`.
+3. **G2** — the default-deny call-site ban, incl. the new `scripts/lint-web.go` for the JS half, shipping
+   **blocking** over the then-clean tree, with the six object-id sites annotated.
+4. The §7 equivalence vectors (the three `identityindex` keys byte-identical across `derive_reads`,
+   `ddls.go:715-728`, and `cmd/lattice/identity`) and the `dedup_test.go` e2e with a submitter that
+   declares nothing.
+
+Ordering matters: (2) must land **after** (1) is installed, or the submitters lose a derivation nothing
+yet supplies.
