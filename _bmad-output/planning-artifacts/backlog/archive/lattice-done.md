@@ -1,5 +1,15 @@
 # Done log archive — lattice (older shipped items, newest first)
 
+- 2026-08-01 · `3c7bf182` · [Refractor] D1 — eligible lens consumers narrow FilterSubjects to their referenced labels, broad fallback + health signal [design](../../implementation-artifacts/refractor-footprint-reduction-design.md)
+- 2026-08-01 · `0ee30f6f` · [Refractor] unguarded NATS-KV upserts skip byte-identical rows, audits skip with them (guarded watermark advance pinned)
+- 2026-08-01 · `714cefd6` · [Refractor] a lens tombstone now stops its pipeline and deletes its durable; also wires the previously-dead operator delete RPC
+- 2026-08-01 · `f87a0541` · [Refractor,Substrate] one consolidated REFRACTOR_AUDIT stream (7d + 512 MiB) replaces 95 uncapped per-lens AUDIT_ streams; boot retires legacy streams before the ensure
+- 2026-08-01 · `99c9dae9` · [Refractor] plain lenses skip vertex events their patterns cannot bind — the KindVertex relevance gate the aspect/link arms already had
+- 2026-08-01 · `317e25ca` · [Refractor] labeled seed scans list one type's prefix, not the whole bucket (plus two invalid-NanoID fixture repairs it exposed)
+- 2026-08-01 · `0c3fc635` · [Refractor] deleted the per-pipeline adjacency watch (handler could never resolve; −95 consumers) [design](../../implementation-artifacts/refractor-footprint-reduction-design.md)
+- 2026-07-31 · `cc1bddc8` · [Processor] step6 instanceOf on-demand reads (connInstanceOfReader, connVertexClassReader) now charge the shared live-read budget, closing the accounting gap kv.Read/kv.Links already had
+- 2026-07-31 · `fbc783ca` · [packages] ~19 read-posture comments no longer claim hydration-time fatality — HydrationMiss is deferred to first touch (Contract #2 §2.5), doc-only
+- 2026-07-31 · `b4aae06f` · [Refractor] a PerEntry cap-read lens on a non-prefix-listing adapter is now refused at activation, not at first shred [design](../../implementation-artifacts/cap-read-per-anchor-grant-keys-design.md)
 - 2026-07-31 · `4e3fd70c` · [appsession] dev-minted session tokens now carry an app-scoped `aud` claim — closes the co-hosted-page cookie-fixation gap across all 5 adopters
 - 2026-07-31 · stale row closed — multi-hat scope=any/self ordering was already fixed `4790992b` (2026-07-25, LoftSpace landlord-hat fire); `TestCapabilityAuthorizer_DualScope_*` proves it, no build needed
 - 2026-07-31 · `cbd0f244` · [Processor] tombstone-with-document now rejected, not warned — Fire 2 flip, swept 14 packages/* sites Fire 1 missed [design §6](../../implementation-artifacts/tombstone-body-preservation-design.md)

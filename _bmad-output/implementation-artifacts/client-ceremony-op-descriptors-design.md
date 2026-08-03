@@ -1071,3 +1071,62 @@ Inc 2 (`boundTo`/`UnlinkCredential`), Inc 4 (`credential` authContext, `RevealWi
 `InitiateCredentialLink`/`CompleteCredentialLink` descriptor, AI-authorability of `Ceremony`
 (`capabilitymaterializer_starlark.go`'s artifact allow-lists deliberately untouched — the same posture
 `Sensitive` already has), and any change to `derive_reads`.
+
+### 13.5 Review — three adversarial passes on a frozen tree; the brief's own deviation was wrong
+
+Security/leakage, edge-case, and acceptance-vs-ratified-scope, all read-only against a frozen
+`79cbcdb4`. The security pass **refuted** eleven leak hypotheses by tracing them to code — the plaintext
+never enters the payload, storage, a log, a URL, an attribute, or the outbox history; `Duplicate`→
+`confirmed` is a redelivery of the identical envelope, so revealing on it is correct; and the mint/hash
+is byte-identical to what `ddls.go` compares. What the three converged on instead was worth the pass:
+
+1. **§13.2's deviation (2) was FALSE, and its fix made things worse.** The claim that `resolveTargetKey`
+   falls back to the submitter's own identity does not hold — `selfAnchorKey` answers only the six anchor
+   types `edgeIdentitySpec` stamps, and `identity` is not among them. The premise was inherited from
+   `ClaimIdentity`'s own comment, which has been wrong since it was written, and this fire propagated it
+   into a second descriptor, a test rationale, and a commit message. **Corrected in both directions:**
+   `RotateClaimKey` now declares `TargetField`/`TargetType` — which is what lets `opButton`'s gate withhold
+   it honestly while nothing projects an identity — and keeps the `x-entityRef` picker so it becomes
+   completable the moment one does. `ClaimIdentity`'s comment is corrected at its source, conclusion intact,
+   mechanism replaced.
+2. **The vocabulary's own expiry property was unexercised, and one code was wrong.** `ceremony-mint` stayed
+   valid in the commit that shipped `OpCeremonySpec`, and `UnlinkCredential` was filed under `lifecycle-op`
+   — a code whose meaning it does not match — because the ratified set had no code for its actual blocker.
+   `ceremony-mint` is now **retired** (the first real exercise of "a code dies when its mechanism ships"),
+   `unprojected-input` added, and the gate now also fails an op carrying **both** a valid exemption and a
+   full descriptor — the drift G1 exists to catch, previously pinned only per-package.
+3. **A `Ceremony` with an empty or misspelled `MintedSecretHashField` failed OPEN**, and `build.go`'s
+   comment claimed a client-side rule covered it. It does not: the client cannot tell an empty field name
+   from "no ceremony", so it renders the hash as a text input. The check now lives in S1's descriptor
+   completeness, where the author is; the false comment is corrected.
+4. **Two writes, one survivor.** The submit had no in-flight guard, so a double-click minted twice — and
+   `showModal` replaces wholesale, so the second reveal destroyed the first. `CreateUnclaimedIdentity` does
+   not reject a duplicate; it creates a second identity. Guarded, and the reveal now shows every
+   un-dismissed secret rather than the latest.
+5. Smaller, all fixed: the `async` conversion turned every pre-enqueue throw into a silent unhandled
+   rejection; a `rejected` settle left the person waiting on a modal that would never come; `signOut` did
+   not purge held plaintexts; the settle ran before the outbox bookkeeping and dropped the secret before
+   rendering it; an overlay click could dismiss a once-only secret; `ceremonySupported` did not check
+   `TextEncoder`, which `mintSecret` uses.
+
+**§7's missing assertion, now written.** "The minted-hash field is present in the submitted payload" had no
+test — the highest-consequence coupling in the increment, since a divergence hands over a secret that does
+not match the stored hash and makes the identity permanently unclaimable, silently. The write path is now a
+named seam (`enqueueOperation`) and the test asserts the submitted hash **is the sha256 of the plaintext
+that gets revealed**, plus that the plaintext appears nowhere in the request.
+
+### 13.6 CHECKPOINT — Inc 3 shipped; Inc 2 is next
+
+**Shipped** `39b77d59` + `ea73d5f1` + `79cbcdb4` + the review pass (2026-08-03): the ceremony vocabulary,
+its lens columns, two descriptors, G1 as a closed *expiring* vocabulary, and Facet's mint-and-reveal
+executor. Exemptions 5 → 3.
+
+**Named residuals, filed as rows** (not claimed closed): no Facet surface offers a **standing** staff op,
+so both new descriptors are unreachable until one exists — pre-existing, and the reason these ops had no
+descriptor, but Inc 3 is what makes it binding; nothing projects an `identity` entity, so the picker has no
+candidates; and a durably-queued ceremony write outlives the plaintext it minted when the tab reloads
+offline.
+
+**Next: Inc 2** (§4.2) — the `boundTo` link, its one-shot backfill, the per-credential Protected lens, the
+`signInMethods` pane section, and `UnlinkCredential`'s descriptor, which retires the `unprojected-input`
+exemption. Inc 4 stays designed-not-built: still no two-device consumer (§4.4).
