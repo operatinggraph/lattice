@@ -503,6 +503,34 @@ tombstones. **Capability KV is a lens projection** (projection correctness = aut
   instances lived.) Corollary for the test you mandate off that census: check that the harness sees the
   same population — a registry snapshot of *un-expanded* specs pins the wrong artifact.
 
+- **A guarantee that HOLDS today may hold only by accident of the corpus's SHAPE — find what DERIVES
+  it, and ask whether your change still satisfies the deriver.** The reflexes above ask whether a
+  channel exists, survives, or can be bent. This one asks the opposite question: *the mechanism works
+  today — **why**?* A guarantee enforced by a **derived** set (labels collected from a query, columns
+  read off a spec, types inferred from a pattern) is only as wide as whatever the deriver walks, and
+  every shipped consumer may satisfy it **incidentally**, through a shape convention nobody wrote down.
+  Change the shape and the guarantee evaporates with **no error, no gate, and a success signal on the
+  operation that lost it**. (Trialed 2026-08-02, the subject-anchored-sensitive-aspects design: I wrote
+  "`ShredIdentityKey` reaches the aspect with no new machinery at all" — true of the *cryptography* and
+  false of the *projection surface*, where the plaintext actually lives. A Secure Lens is scrubbed on
+  shred only because the `piiKey` CDC event is judged relevant, and relevance runs off
+  `ReferencedLabels`, which collects labels from **node patterns only** (`labels.go:31-43`). Every
+  shipped secure lens binds `(id:identity)` as a node, so `identity` is in its label set *by accident of
+  shape*; expressing custody as a property chain (`appt.encounter.subjectKey`) contributes no label, and
+  the event is then dropped **twice** — the consumer never subscribes (`NarrowedFilterEligible`,
+  `pipeline.go:698`, has no secure-lens conjunct) and the plain aspect arm ack-drops it
+  (`plainReactsTo`). A projected, decrypted clinical note would have outlived erasure while the erasure
+  reported success — strictly worse than the plaintext-at-rest it replaced.) **The checks:** for every
+  guarantee you inherit, name the code that *decides* it and the set it decides over; then ask **"do all
+  N shipped consumers satisfy this structurally, or do they merely happen to?"** — and grep the corpus to
+  find out, because "it works today" is evidence about the corpus, not about the mechanism. Two
+  corollaries: a guarantee that is **shape-dependent** must become **mechanism-dependent** in the same
+  design (an authoring convention with a silent failure mode is not a fix — see §9.4 of that design);
+  and when the code you are about to cite as the guard *documents its own successor obligation* ("whoever
+  lifts this ban owns re-deriving it"), check that the guard is even **on the path your consumer takes**
+  before congratulating yourself for re-deriving it — I re-derived the one conjunct structurally
+  unreachable for secure lenses and left the two live gates unexamined.
+
 **Run the pre-build gates you write into your own designs — "ratified" ≠ "build-ready."** If a design
 self-flags a pre-build adversarial / `bmad-party-mode` pass (a deferred gate), that pass is a **Designer-lane
 obligation**: run it and **record it as run** before the design is build-ready. Do not leave it dangling for
