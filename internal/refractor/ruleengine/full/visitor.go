@@ -275,7 +275,20 @@ func (v *astVisitor) visitRelPattern(ctx cypher.IOC_RelationshipPatternContext) 
 		}
 		if rts := detail.OC_RelationshipTypes(); rts != nil {
 			names := rts.AllOC_RelTypeName()
-			if len(names) > 0 {
+			// At most ONE type. A RelPattern carries a single Type and the
+			// executor traverses that one, so an alternation's remaining types
+			// have nowhere to go: taking names[0] and discarding the rest runs
+			// `-[:a|b]->` as `-[:a]->` — silently the wrong query, and a
+			// referenced-relation set that under-declares what the lens reacts
+			// to. pkgmgr's anchor-walk parser refuses alternation for the same
+			// reason (anchorwalk.go's rel); this is the openCypher path
+			// refusing what it equally cannot execute.
+			if len(names) > 1 {
+				v.fail("a relationship pattern must name at most ONE type — an alternation " +
+					"(`-[:a|b]->`) would execute as its first type alone; write one pattern per relation")
+				return rp
+			}
+			if len(names) == 1 {
 				if sn := names[0].OC_SchemaName(); sn != nil {
 					rp.Type = sn.GetText()
 				}

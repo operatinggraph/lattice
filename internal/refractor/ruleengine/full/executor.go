@@ -1222,14 +1222,21 @@ func (ex *executor) applyReturn(bindings []binding, r *Return) ([]ruleengine.Pro
 	if err != nil {
 		return nil, err
 	}
-	// Deduplicate rows when RETURN DISTINCT is specified. Rows are compared by
-	// their JSON-serialised content; order is preserved (first occurrence wins).
+	// Deduplicate rows when RETURN DISTINCT is specified; order is preserved
+	// (first occurrence wins).
+	//
+	// Rows are compared by the same injective rendering the grouping path keys
+	// on, NOT by json.Marshal. A node-valued column holds a *nodeRef, whose
+	// fields are all unexported, so it marshals to `{}` — two rows differing
+	// only in which node they bound would render identically and collapse into
+	// one. normalizeForKey renders a node as its key, and every leaf carries a
+	// type tag, so distinct rows stay distinct. It also cannot fail, which
+	// retires a dropped marshal error on a path that has no way to report one.
 	if r.Distinct {
 		seen := make(map[string]struct{}, len(rows))
 		deduped := rows[:0]
 		for _, row := range rows {
-			b, _ := json.Marshal(row)
-			key := string(b)
+			key := normalizeForKey(map[string]any(row))
 			if _, exists := seen[key]; !exists {
 				seen[key] = struct{}{}
 				deduped = append(deduped, row)
