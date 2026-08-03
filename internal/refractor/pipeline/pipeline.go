@@ -1077,6 +1077,7 @@ func (p *Pipeline) Run(ctx context.Context) {
 	// Signal that the supervised consumer is registered so Pause/Resume issued
 	// immediately after Run starts (in a goroutine) act on a live consumer.
 	close(p.started)
+	p.resumeInterruptedRebuild(ctx)
 
 	<-ctx.Done()
 	// Stop the pump without deleting the durable — its persisted position is the
@@ -1201,6 +1202,48 @@ func (p *Pipeline) Rebuild(ctx context.Context, truncate bool) error {
 	}
 
 	return nil
+}
+
+// resumeInterruptedRebuild re-arms the rebuilding → active transition for a
+// lens whose persisted health entry still reads "rebuilding" when this process
+// starts. The watcher Rebuild launches lives only as long as the process that
+// armed it; the rescan it watches outlives that process, because the rebuild
+// IS the durable's reset cursor and JetStream keeps it. So after a crash or an
+// ordinary cycle the drain carries on with nothing left to declare it
+// finished, and the status reads "rebuilding" for the rest of the lens's life.
+//
+// That is not a cosmetic mislabel: the capability convergence sweep suppresses
+// itself on a rebuilding lens, so a latched status quietly retires the auth
+// plane's only projection-convergence check while every liveness signal stays
+// green.
+//
+// Re-arming rather than clearing is the point. An interrupted rebuild whose
+// backlog has not drained is genuinely still rebuilding, and writing "active"
+// over it would be exactly the premature transition watchRebuildCompletion's
+// outstanding-not-backlog check exists to prevent. One poll answers both
+// cases: it clears on the first tick when the drain already finished, and
+// holds an honest "rebuilding" while it has not.
+func (p *Pipeline) resumeInterruptedRebuild(ctx context.Context) {
+	if p.reporter == nil {
+		return
+	}
+	entry, err := p.reporter.GetStatus(ctx)
+	if err != nil {
+		slog.Warn("pipeline: could not read health status to resume an interrupted rebuild",
+			"ruleId", p.ruleID, "err", err)
+		return
+	}
+	if entry.Status != health.StatusRebuilding {
+		return
+	}
+	// Losing this swap means a rebuild is already in flight in THIS process —
+	// a control-plane Rebuild that arrived while Run was still starting — and
+	// it already owns a watcher.
+	if !p.rebuildInFlight.CompareAndSwap(false, true) {
+		return
+	}
+	slog.Info("pipeline: resuming the watch for a rebuild interrupted by a restart", "ruleId", p.ruleID)
+	go p.watchRebuildCompletion(ctx)
 }
 
 // watchRebuildCompletion polls the supervised consumer's outstanding count at

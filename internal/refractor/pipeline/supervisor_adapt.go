@@ -63,7 +63,7 @@ func (h *healthSink) Load(ctx context.Context) (substrate.HealthStatus, substrat
 	if err != nil {
 		return substrate.StatusActive, "", err
 	}
-	if entry.Status != "paused" {
+	if entry.Status != health.StatusPaused {
 		// "active", "rebuilding" (interrupted), or unknown — treat as active.
 		return substrate.StatusActive, "", nil
 	}

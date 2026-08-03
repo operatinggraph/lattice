@@ -18,6 +18,16 @@ const (
 	PauseReasonManual     = "manual"
 )
 
+// Status values used in health KV entries. The vocabulary is closed, so a
+// reader branches on these rather than on a literal: every branch that exists
+// treats an unrecognized status as the benign default, which makes a mistyped
+// literal silent.
+const (
+	StatusActive     = "active"
+	StatusPaused     = "paused"
+	StatusRebuilding = "rebuilding"
+)
+
 // Entry is the full health KV value schema. All field names are camelCase per
 // architecture convention. The KV key is the ruleID; the KV bucket is
 // configured via config.HealthKVBucket.

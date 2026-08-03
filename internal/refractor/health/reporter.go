@@ -30,6 +30,13 @@ const (
 	PauseReasonManual     = healthwire.PauseReasonManual
 )
 
+// Status values used in health KV entries.
+const (
+	StatusActive     = healthwire.StatusActive
+	StatusPaused     = healthwire.StatusPaused
+	StatusRebuilding = healthwire.StatusRebuilding
+)
+
 // Entry is the full health KV value schema. The KV key is the ruleID; the KV
 // bucket is configured via config.HealthKVBucket.
 type Entry = healthwire.Entry
@@ -102,7 +109,7 @@ func (r *Reporter) SetActive(ctx context.Context) error {
 	}
 	entry := Entry{
 		RuleID:         r.ruleID,
-		Status:         "active",
+		Status:         StatusActive,
 		PauseReason:    nil, // JSON null
 		ActiveSequence: seq,
 		ConsumerLag:    existing.ConsumerLag,
@@ -147,7 +154,7 @@ func (r *Reporter) SetPaused(ctx context.Context, reason, lastError string) erro
 	switch {
 	case lastError != "":
 		lastErrPtr = &lastError
-	case existing.Status == "paused" && existing.LastError != nil:
+	case existing.Status == StatusPaused && existing.LastError != nil:
 		// An empty cause means "no new cause", not "forget the old one". A lens
 		// already paused carries the diagnosis of whatever put it there, and a
 		// second pause raised over it — an operator Pause on a structurally
@@ -156,7 +163,7 @@ func (r *Reporter) SetPaused(ctx context.Context, reason, lastError string) erro
 	}
 	entry := Entry{
 		RuleID:         r.ruleID,
-		Status:         "paused",
+		Status:         StatusPaused,
 		PauseReason:    &reason, // non-nil *string
 		ActiveSequence: seq,
 		ConsumerLag:    existing.ConsumerLag,
@@ -198,7 +205,7 @@ func (r *Reporter) SetRebuilding(ctx context.Context) error {
 	}
 	entry := Entry{
 		RuleID:         r.ruleID,
-		Status:         "rebuilding",
+		Status:         StatusRebuilding,
 		PauseReason:    nil, // JSON null — rebuilding is not a pause
 		ActiveSequence: seq,
 		ConsumerLag:    existing.ConsumerLag,
@@ -452,7 +459,7 @@ func (r *Reporter) readExisting(ctx context.Context) (Entry, error) {
 	e, err := r.kv.Get(ctx, r.ruleID)
 	if err != nil {
 		if errors.Is(err, substrate.ErrKeyNotFound) {
-			return Entry{Status: "active", RuleID: r.ruleID}, nil
+			return Entry{Status: StatusActive, RuleID: r.ruleID}, nil
 		}
 		return Entry{}, fmt.Errorf("health: read existing %s: %w", r.ruleID, err)
 	}

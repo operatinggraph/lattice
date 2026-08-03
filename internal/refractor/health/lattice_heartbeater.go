@@ -693,13 +693,13 @@ func (h *LatticeHeartbeater) evalCapabilityLenses(now time.Time) (map[string]map
 			h.resetLagState(name)
 		} else {
 			switch s.Status {
-			case "paused":
+			case StatusPaused:
 				alert = "paused"
 				paused = append(paused, pausedLabel(name, s.PauseReason, s.LastError))
 				// A paused lens is a hard error; its lag debounce is irrelevant and
 				// must not carry a stale streak into the next active cycle.
 				h.resetLagState(name)
-			case "active":
+			case StatusActive:
 				if h.evalLagHysteresis(name, s.ConsumerLag, threshold, clearThreshold, int(raiseCycles)) {
 					alert = "lagging"
 					lagging = append(lagging, fmt.Sprintf("%s (lag %d)", name, s.ConsumerLag))
@@ -769,7 +769,7 @@ func (h *LatticeHeartbeater) evalCapabilityLenses(now time.Time) (map[string]map
 		case s.SweepInterval <= 0 || stallAfter <= 0:
 			// No sweeper installed (or a window so large it overflowed): there is
 			// no cadence to be late against.
-		case s.Status == "paused":
+		case s.Status == StatusPaused:
 			h.rebaseSweepClock(name, now)
 		default:
 			stalledFor, isStalled = h.evalSweepStall(name, now, s.SweepLastPassAt, stallAfter)
@@ -784,7 +784,7 @@ func (h *LatticeHeartbeater) evalCapabilityLenses(now time.Time) (map[string]map
 			case !explained:
 				detail += ", no suppression recorded — the sweep is not ticking"
 				stallSeverity = "error"
-			case s.Status == "rebuilding":
+			case s.Status == StatusRebuilding:
 				detail += ", suppressed: " + s.SweepSuppression
 				// How long a rebuild may legitimately run is the rebuild's own
 				// signal to own, and now it owns one. A rebuild still draining
@@ -825,7 +825,7 @@ func (h *LatticeHeartbeater) evalCapabilityLenses(now time.Time) (map[string]map
 			"sweepLastPassAt":  lastPassAt,
 			"sweepSuppression": s.SweepSuppression,
 		}
-		if s.Status == "rebuilding" && !s.RebuildProgressAt.IsZero() {
+		if s.Status == StatusRebuilding && !s.RebuildProgressAt.IsZero() {
 			// Only while one is running: a finished rebuild's last count is not a
 			// fact about the lens now, and publishing it would read as a rebuild
 			// permanently stuck at whatever it ended on.
@@ -1123,11 +1123,11 @@ func (h *LatticeHeartbeater) evalLenses(now time.Time) (map[string]map[string]an
 			continue
 		}
 		switch s.Status {
-		case "paused":
+		case StatusPaused:
 			alert = "paused"
 			paused = append(paused, pausedLabel(name, s.PauseReason, s.LastError))
 			h.resetLensLagState(name)
-		case "active":
+		case StatusActive:
 			if h.evalLensLagHysteresis(name, s.ProjectionLag, threshold, clearThreshold, int(raiseCycles)) {
 				alert = "lagging"
 				lagging = append(lagging, fmt.Sprintf("%s (lag %d)", name, s.ProjectionLag))
@@ -1289,7 +1289,7 @@ func (h *LatticeHeartbeater) evalLensSweep(
 		// listing), or a window so large it overflowed: no cadence to be late
 		// against.
 		return alert
-	case s.Status == "paused":
+	case s.Status == StatusPaused:
 		// Suppression while paused is deliberate and indefinite, and the pause
 		// is already an issue of its own. Rebasing also stops a resumed lens
 		// starting out stalled for the length of its pause.
