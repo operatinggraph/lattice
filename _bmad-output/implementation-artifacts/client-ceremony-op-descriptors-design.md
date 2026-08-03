@@ -1654,3 +1654,72 @@ Increments 1a, 1b, 3, 2a, 2b-1, 2b-2 and this confirmation are shipped. **Inc 4 
 designed-not-built** on its original ratification ground — there is still no two-device consumer, which
 is the specific thing whose arrival revives it. The two completeness rows (§16.6) still bind on the pane
 and still have no live victim on this corpus. The worktree for this item is retired.
+
+## 18. Standing-staff-op surface fire brief (build note, 2026-08-03)
+
+The §13.6 residual *"no Facet surface offers a **standing** staff op, so both new descriptors are
+unreachable until one exists"*, filed as its own lane row. This brief is that row's build note; the
+ceremony item itself stays closed.
+
+**Scope sentence.** Facet renders a role-granted op that names no dispatch target and rides no service —
+today the only op class the client discovers and then shows nowhere.
+
+### 18.1 The residual is half the size the row states, and the other half is a different row
+
+Checked live at `1cb07983`:
+
+| Descriptor | `dispatchClass` | `dispatchTargetType` | Reachable after this fire? |
+|---|---|---|---|
+| `CreateUnclaimedIdentity` (`identity-domain/opmetas.go:84-96`) | `identity` | *(none)* | **yes** |
+| `RotateClaimKey` (`identity-domain/opmetas.go:139-169`) | `identity` | `identity` | no — needs an `identity` entity row |
+
+`RotateClaimKey` gained `TargetField`/`TargetType`/`VisibleWhen` in Inc 3's own review pass, so it is no
+longer targetless: it is target-typed and **withheld honestly** by `opButton`'s target gate until the
+filed identity-entity projection exists. It is therefore that row's consumer, not this one's. The board
+row's "two descriptors" premise is corrected on ship rather than built to.
+
+### 18.2 Verified touch-list (`file:line` checked live at `1cb07983`)
+
+| Site | What it is today | This fire |
+|---|---|---|
+| `cmd/facet/web/app.js:252` (`ops()`) | every `manifest.op` row from the mirror | + `standingOps()` beside it |
+| `cmd/facet/web/app.js:932` (`openServiceDetail`) | filters `viaServices` ∋ `serviceKey` | unchanged — the reachability fact this fire complements |
+| `cmd/facet/web/app.js:115-121` (`hatOps`), `:1133` (`openEntityDetail`), `:1509` (`paneRowOps`), `:1573` (`openTaskDetail`) | all filter on `dispatchTargetType` | unchanged — same |
+| `cmd/facet/web/app.js:977-1052` (`opButton`) | withholds on `!dispatchClass`, ceremony, authContext, target, self-anchor, hat, column | unchanged — the new section renders **through** it |
+| `cmd/facet/web/app.js:1289-1296` (`renderWorklist`) | work orders + Protected panes | + the standing-ops section, first |
+| `cmd/facet/web/app.js:745-748` (`updateBadges`) | Work tab hidden unless `isStaff()`; `loadIdlePanes()` on the same test | tab widens to *workplace **or** standing op*; `loadIdlePanes()` stays on `isStaff()` alone |
+| `cmd/facet/web/app.js:1174-1176` (`isStaffMe`) | pure me-row workplace test | unchanged — the pane/grant honesty invariant keeps its own predicate |
+
+### 18.3 The two decisions, recorded (Winston, §0)
+
+**(1) The filter is a *reachability* statement, not a role test.** A row is unreachable exactly when no
+other surface can offer it: no `dispatchTargetType` (so no entity, pane, hat or task surface matches) and
+no `viaServices` entry (so no service detail matches). `viaRole` is **not** in the predicate even though
+every such row carries one — the base Walk reaches an op only through a `permitsOperation` edge, which is
+the same edge `viaServices` comprehends, so "no `viaServices`" already implies "role-reached". Filtering
+on `viaRole` would state a *provenance* condition where the defect is a *coverage* one, and would go
+silently wrong the day an op is reachable both ways. `viaRoleName` is still what the section groups by —
+mirroring `openHatDetail:953-975`, which already tells a two-hat person which authority each action
+comes from.
+
+**(2) The Work tab's predicate widens; the pane machinery's does not.** `worksAt` gates the Work tab
+today because the tab existed only to show workplace-anchored rows, and `staffReadGrants` keys the
+Protected grant on the same link — the stated honesty invariant. A standing grant is the counter-case the
+invariant never contemplated: `CreateUnclaimedIdentity` is granted `scope=any` to `operator` as well as
+to the front/back-of-house roles, and an operator with no `worksAt` link would hold the op, project the
+row, and still have no tab to find it on. So the **tab** appears when the manifest carries a workplace
+*or* a standing op, while `loadIdlePanes()` and every pane read stay keyed on `isStaffMe` alone. Both
+predicates remain pure functions of the manifest and both still vanish with their data; they are now two
+statements instead of one because the screen serves two kinds of row.
+
+### 18.4 Increment order + green checks
+
+One increment. `node --test cmd/facet/web/` (the renderer vectors, incl. the new
+`standing_ops.test.mjs`), `node --check cmd/facet/web/app.js`, `go build ./...`, `make vet`,
+`golangci-lint run ./...`, `STRICT=1 go run ./scripts/lint-conventions.go`, `go test ./packages/... ./cmd/facet/...`.
+
+### 18.5 Non-goals
+
+No lens change (`edgeCatalogTail` already projects `viaRole`/`viaRoleName`/`dispatchTargetType`), no
+descriptor change, no new nav tab, no `identity` entity projection, no Go handler change — the rows ride
+the mirror the client already holds.
