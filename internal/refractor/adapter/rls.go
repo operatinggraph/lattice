@@ -209,7 +209,53 @@ func BuildProtectedTableDDL(table string, keyCols []string, body []ColumnDef) ([
 		pol, qt, quoteIdent(GrantTable), quoteIdent(GrantTable),
 	)
 
-	return []string{createTable, enableRLS, forceRLS, dropPolicy, createPolicy}, nil
+	// CREATE TABLE IF NOT EXISTS is a no-op on a table that already exists —
+	// INCLUDING when the lens has since declared a new column. So a lens that
+	// gains one is "provisioned" onto a table that will never have it, and the
+	// first projection after the change fails its upsert with SQLSTATE 42703.
+	// That is not a slow read model: the adapter reports a STRUCTURAL failure,
+	// the consumer pauses until an explicit resume, and the pause survives a
+	// process cycle. The read model ends up frozen with no operable recovery,
+	// from a package edit whose author had every reason to believe the emitted
+	// DDL covered them.
+	//
+	// So the emitted DDL CONVERGES the table rather than only creating it: one
+	// idempotent ADD COLUMN IF NOT EXISTS per declared column, after the
+	// create. On a fresh table each is a no-op; on an existing one they are the
+	// difference between a working lens and a paused one.
+	//
+	// Additive only. A column the lens no longer declares is left in place, and
+	// a changed type is left alone — dropping or rewriting a column is data
+	// loss this path must never perform unasked. Both remaining cases stay
+	// loud: an undeclared column is simply never written, and a genuinely
+	// incompatible type still fails the upsert, which is exactly the case that
+	// should reach a human.
+	// Key columns are NOT converged here, and the omission is deliberate: they
+	// are the PRIMARY KEY, so a table missing one is not an older version of
+	// this table, it is a different table — and ADD COLUMN cannot make an
+	// existing row's new key column NOT NULL anyway. A changed key set is a
+	// migration a human owns.
+	alters := make([]string, 0, len(body)+4)
+	addColumn := func(name, typ string) {
+		alters = append(alters, fmt.Sprintf("ALTER TABLE %s ADD COLUMN IF NOT EXISTS %s %s",
+			qt, quoteIdent(name), typ))
+	}
+	for _, c := range body {
+		addColumn(c.Name, c.Type)
+	}
+	// The platform's own four, converged by the same pass so a table
+	// provisioned before any one of them was introduced picks it up too.
+	addColumn("authz_anchors", "text[] NOT NULL DEFAULT '{}'")
+	addColumn("projection_seq", "bigint NOT NULL DEFAULT 0")
+	addColumn("is_deleted", "boolean NOT NULL DEFAULT false")
+	addColumn("deleted_at", "timestamptz")
+
+	stmts := make([]string, 0, 5+len(alters))
+	stmts = append(stmts, createTable)
+	stmts = append(stmts, alters...)
+	// RLS and the policy come after the columns exist, so a policy that
+	// references a newly added one compiles.
+	return append(stmts, enableRLS, forceRLS, dropPolicy, createPolicy), nil
 }
 
 // BuildGrantTableDDL generates the DDL for the shared actor_read_grants table

@@ -20,9 +20,37 @@ func TestBuildProtectedTableDDL_Shape(t *testing.T) {
 		[]ColumnDef{{Name: "unit", Type: "text"}, {Name: "status", Type: "text"}},
 	)
 	require.NoError(t, err)
-	require.Len(t, stmts, 5, "create table, enable rls, force rls, drop policy, create policy")
+	// create table, one converging ADD COLUMN per body column, the platform's
+	// own four, then enable rls, force rls, drop policy, create policy.
+	require.Len(t, stmts, 1+2+4+4)
 
-	create, enable, force, dropPol, createPol := stmts[0], stmts[1], stmts[2], stmts[3], stmts[4]
+	create := stmts[0]
+	alters := stmts[1 : len(stmts)-4]
+	tail := stmts[len(stmts)-4:]
+	enable, force, dropPol, createPol := tail[0], tail[1], tail[2], tail[3]
+
+	// The converging half: CREATE TABLE IF NOT EXISTS is a no-op on a table
+	// that already exists, so a lens that GAINS a column would otherwise be
+	// provisioned onto a table that never gets it — and the next projection
+	// pauses the consumer structurally on SQLSTATE 42703. Every declared body
+	// column is re-asserted idempotently.
+	assert.Equal(t, []string{
+		`ALTER TABLE "read_lease_applications" ADD COLUMN IF NOT EXISTS "unit" text`,
+		`ALTER TABLE "read_lease_applications" ADD COLUMN IF NOT EXISTS "status" text`,
+		`ALTER TABLE "read_lease_applications" ADD COLUMN IF NOT EXISTS "authz_anchors" text[] NOT NULL DEFAULT '{}'`,
+		`ALTER TABLE "read_lease_applications" ADD COLUMN IF NOT EXISTS "projection_seq" bigint NOT NULL DEFAULT 0`,
+		`ALTER TABLE "read_lease_applications" ADD COLUMN IF NOT EXISTS "is_deleted" boolean NOT NULL DEFAULT false`,
+		`ALTER TABLE "read_lease_applications" ADD COLUMN IF NOT EXISTS "deleted_at" timestamptz`,
+	}, alters)
+	// The KEY column is deliberately absent: it is the PRIMARY KEY, so a table
+	// lacking it is a different table, not an older revision of this one, and
+	// ADD COLUMN could not make it NOT NULL over existing rows regardless.
+	for _, a := range alters {
+		assert.NotContains(t, a, `"application_id"`)
+	}
+	// Ordering is load-bearing: the policy is dropped and recreated AFTER the
+	// columns exist, so a policy referencing a newly added one compiles.
+	assert.Less(t, len(alters), len(stmts)-1)
 
 	assert.Contains(t, create, `CREATE TABLE IF NOT EXISTS "read_lease_applications"`)
 	assert.Contains(t, create, `"application_id" text NOT NULL`)
