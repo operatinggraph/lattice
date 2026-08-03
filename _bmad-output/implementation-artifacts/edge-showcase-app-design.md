@@ -17,7 +17,7 @@
 
 **Frozen-contract change: NONE.**
 
-**FORK-1 — where the descriptor vocabulary lives. DECIDED: B (Andrew, 2026-07-11); freeze trigger RETARGETED (Andrew, 2026-08-02).** Ship it as `docs/components/edge-manifest.md` (build-to spec, versioned `vocab: 1`); freeze as a contract when the **second renderer renders the full field vocabulary that shipped op-metas actually exercise**.
+**FORK-1 — where the descriptor vocabulary lives. DECIDED: B (Andrew, 2026-07-11); freeze trigger RETARGETED (Andrew, 2026-08-02); trigger CLOSED (Winston, 2026-08-03, §7.13) — the freeze itself is a separate future step, not implied.** Ship it as `docs/components/edge-manifest.md` (build-to spec, versioned `vocab: 1`); freeze as a contract when the **second renderer renders the full field vocabulary that shipped op-metas actually exercise**.
 - *Road not taken — A:* freeze now as a new Contract #12. Rejected for v1: freezing v0 guesses before a second renderer exists invites amendment churn.
 - **Why the trigger moved off "a literal iOS build" (2026-08-02).** The original trigger was "the second renderer (iOS/SwiftUI, Fire 5) proves client-neutrality", which §7.10–§7.12 then read as requiring a literal iOS build — an environment this host cannot provide. That conflates two different properties. SwiftUI-on-macOS and SwiftUI-on-iOS share the **entire** manifest-consuming path; the delta is OS chrome and packaging, which touches no part of the vocabulary. A literal iOS build proves *platform packaging*, not *client-neutrality*, so it is the wrong gate for freezing a vocabulary doc.
   The right gate is **vocabulary completeness**, and by that measure the freeze is genuinely not earned yet: §7.12 narrowed `DescriptorForm.swift` to free-text + string-enum on the stated grounds that no op-meta exercised the PWA's richer kinds. That was true on 2026-07-18 and is **false now** — `x-entityRef` (`87010105` 2026-07-26 café, `0badf04e` 2026-07-27 clinic), money (`cafe-domain`, `cafe-ledger`), boolean (`clinic-domain`) and date (`clinic-domain`, `identity-domain`, `wellness-domain`) all ship today, and the PWA renders every one ([`cmd/facet/web/app.js`](../../cmd/facet/web/app.js) `renderField`). Freezing now would freeze four clauses that have one implementation and one renderer ignoring them. The freeze waits on closing that, not on Xcode.
@@ -567,6 +567,54 @@ named as an open vocabulary gap, not silently worked around.
 Fire 5 residual now: only the literal iOS build (needs full Xcode elsewhere) remains before the
 acceptance-demo green bar. The `OpDispatchSpec.OptionalReads` vocabulary gap (above) is closed by
 `753637ca`.
+
+### 7.13 FORK-1 freeze-trigger closed (Winston, 2026-08-03) — descriptor vocabulary parity + a structural drift gate
+
+Closes the retargeted FORK-1 freeze trigger (§ Andrew-block, 2026-08-02): `DescriptorFieldKind`
+(`FacetManifestKit/DescriptorForm.swift`) gains `.boolean`, `.money`, `.date`, `.dateTime`, and
+`.entityRef(type:)`, detected in the same order `app.js`'s `renderField` checks them (boolean →
+enum → money → date → date-time → entity-ref → text), and `buildSubmission` type-coerces each on
+the wire the same way `submitDescriptorForm` does: a boolean is always sent explicit `true`/`false`
+(never omitted the way an untouched text field is), a money field's typed dollars-and-cents convert
+to integer cents. `DescriptorFormSheet` grew matching SwiftUI controls (`Toggle`, a decimal
+`TextField`, two `DatePicker`s). Real shipped op-metas exercise every new kind:
+`cafe-domain.VoidCharge` (money), `clinic-domain.RecordEncounter` (boolean + date),
+`clinic-domain.RescheduleAppointment` (date-time + `x-entityRef` on a field that is NOT the dispatch
+target, proving entity-ref detection is independent of the targetField exclusion).
+
+**Scoped deliberately: entity-ref renders as a plain labeled text field, not the PWA's
+search-and-pick affordance.** `entityRefCandidates` (`app.js`) reads local `manifest.ent.*` rows,
+which `ManifestStore` does not track at all today — building the picker is a real, separate FE
+increment (adding entity-row tracking to the store, then a search UI), not a one-line vocabulary
+add. A plain text field is still a fully real, submittable form for every op that carries an
+`x-entityRef` field — the freeze trigger is *type detection*, not picker parity — so this is named
+as the honest next residual, not silently folded into "done": **the Facet entity-ref candidate
+picker** (`ManifestStore` tracks `manifest.ent.*`, `DescriptorFormSheet` gets a search-and-pick
+control mirroring `app.js`'s), filed to `verticals.md`.
+
+**`scripts/lint-facet-renderer-drift.go`** (Makefile `lint-facet-renderer-drift`, CI STRICT) is the
+new structural guard the retargeted trigger asked for: it substring-checks that both
+`cmd/facet/web/app.js` and `DescriptorForm.swift` carry the literal detection marker for each
+vocabulary member, failing the build the moment one renderer gains (or loses) a field kind the
+other doesn't. This is what makes vocabulary parity a build-time property instead of something the
+next fire has to remember to re-check by hand.
+
+**Verified, headless-first (this host still has CommandLineTools only, no `swift test`; same gap
+§7.10–§7.12 already named).** `swift build` clean, zero warnings, on both `FacetManifestKit` and
+`FacetSwiftUISpike`. `DescriptorFormTests.swift` gained real-fixture assertions for all four new
+kinds (19 new/changed assertions); verified via the same throwaway `swift run` executable mirroring
+technique §7.12 established — all pass, then removed before commit (never checked in). Go side:
+`go build ./...`, `make vet`, `STRICT=1 lint-conventions`, `STRICT=1 lint-facet-discovery`,
+`STRICT=1 lint-facet-renderer-drift`, `STRICT=1 lint-board`, `golangci-lint run ./...` all clean.
+The browser was not opened this fire (no rendered surface changed — SwiftUI has no headless render
+check available here; the PWA side of the vocabulary was already shipped and unchanged).
+
+**FORK-1 status:** the freeze trigger (vocabulary completeness across two renderers) is now
+structurally enforced, not just asserted in prose. The freeze itself — promoting
+`docs/components/edge-manifest.md` to a frozen Contract #12 — remains a separate, deliberate step
+(§ FORK-1 "Road not taken — A": freezing invites amendment churn until it's actually needed) and is
+not implied by this fire; flagging so a future fire doesn't read "trigger closed" as "contract
+frozen."
 
 ## 8. Non-goals (v1)
 
