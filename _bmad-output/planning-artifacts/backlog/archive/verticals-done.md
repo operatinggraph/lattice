@@ -2,6 +2,18 @@
 
 Rolled from `verticals.md` when its live Done log passed ~25 entries. Full detail is in git.
 
+- 2026-08-01 · `58af30ef` · A wellness class booking now has a price — CreateSession's priceCents + a new wellnessClassPriceSettlement Weaver target auto-charge the booker. wellness-domain 0.19.4, wellness-ledger 0.2.0
+- 2026-08-01 · `d53640f1` · Convergence targets declare §10.3 retry budgets — maxretries_<gap>=3 on all four weaver targets; orchestration-base 0.7.7, wellness-domain 0.19.3, wellness-ledger 0.1.1
+- 2026-08-01 · `d7668f43` · A task orphaned by a tombstoned op now self-cancels — new orphanedTaskGrants Weaver convergence target dispatches CancelTask, mirroring wellness's ReleaseOrphanedBooking; orchestration-base 0.7.6
+- 2026-08-01 · `b5563815` · Portfolio card no longer half-populates — `landlordUnitsRead` anchors on covering buildings too, mirroring `landlordLeaseApplicationsRead`; loftspace-domain 0.10.7
+- 2026-08-01 · `2cb54ee0` · A signed lease now actually bills — seed-showcase opens Riley's rent account + posts one rent debit; one-bill statement is no longer 100% café (superseded 2026-08-03 `a52a3422` — semantic-contracts' leaseRentSettlement target now bootstraps it for every lease)
+- 2026-08-01 · `b0cf3d62` · seed-classic-demo now pins the unit + studio (unitID/studioID) so reruns stop minting duplicate inventory rows
+- 2026-08-01 · `f5551e87` · Staff seed guard no longer self-defeats after sign-in — ensureStaff/ensureMaintenanceTech exclude by residesIn, not consumer; reruns now reuse the same Dana/Theo
+- 2026-08-01 · `f9a6a55e` · My Classes now names the studio to show up at — wellnessBookings walks se→atStudio→studio; wellness-domain 0.19.2
+- 2026-08-01 · `16becb24` · A wellness no-show now actually costs the member money — new wellness-ledger package + noShowFeeCents auto-charge; wellness-domain 0.19.1
+- 2026-07-31 · `3e081e95` · A café tab now shows what was rung up, not just a total — Charge/VoidCharge append a running itemsMemo line the tab card AND the settled ledger entry's memo both render; cafe-domain 0.11.9
+- 2026-07-31 · `00cfd10d` · loftspace-app's tenant view now reads the one-bill statement — combined rent+café charges, self-anchored via the protected applications RLS rows; Inc 3's payoff finally reaches a user
+- 2026-07-31 · `30f0b467` · Front desk can now compose all three badges for both showcase residents — each tenant gets a backfilled approved lease, a residentVisit appointment, and a resident-rate booking
 - 2026-07-31 · `adbf2571` · `seed-classic-demo` patient + provider now pin fixed handles (alive()-guarded); appointment id derived per-day so reruns converge instead of duplicating the shared booking picker/roster
 - 2026-07-31 · `df76a401` · clinic-domain README now documents the live write-path slot-claim booking mechanism instead of the retired `.bookingGuard`/`hasBooking` design
 - 2026-07-31 · `7630e28c` · A provider can now act in her own clinic — RecordEncounter grants provider (guarded); My Schedule + Availability unlock self-scoped; her name resolves. clinic-domain 0.28.15
