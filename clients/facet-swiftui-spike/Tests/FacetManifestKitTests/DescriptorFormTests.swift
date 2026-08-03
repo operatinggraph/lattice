@@ -129,4 +129,76 @@ final class DescriptorFormTests: XCTestCase {
         let submission = DescriptorForm.buildSubmission(op: op, fieldValues: [:], ctx: ctx)
         XCTAssertEqual(submission.payload["booker"]?.stringValue, "vtx.identity.BOOKER000000000001")
     }
+
+    // MARK: cafe-domain VoidCharge (packages/cafe-domain/opmetas.go) — the
+    // `Cents$` money convention (no shipped op-meta declares `x-format`, so
+    // the name suffix IS the vocabulary's only money signal, mirroring
+    // `app.js`'s `renderField`).
+
+    func testVoidChargeDetectsMoneyAndConvertsDollarsToCents() {
+        let op = opRow(
+            operationType: "VoidCharge",
+            inputSchema: #"{"type":"object","properties":{"tabKey":{"type":"string"},"amountCents":{"type":"integer","title":"Amount","minimum":1}},"required":["tabKey","amountCents"]}"#,
+            dispatchAuthContext: "standing", dispatchTargetField: "tabKey"
+        )
+        let fields = DescriptorForm.fields(for: op)
+        XCTAssertEqual(fields.map(\.name), ["amountCents"])
+        XCTAssertEqual(fields[0].kind, .money)
+
+        let submission = DescriptorForm.buildSubmission(op: op, fieldValues: ["amountCents": "4.50"], ctx: DescriptorContext(actorIdentityKey: nil))
+        XCTAssertEqual(submission.payload["amountCents"], .number(450))
+    }
+
+    // MARK: clinic-domain RecordEncounter (packages/clinic-domain/opmetas.go)
+    // — boolean `followUpRequested` alongside plain-date `followUpDate`,
+    // proving both new kinds render AND submit correctly from the same op.
+
+    func testRecordEncounterDetectsBooleanAndDate() {
+        let op = opRow(
+            operationType: "RecordEncounter",
+            inputSchema: #"{"type":"object","properties":{"appointmentKey":{"type":"string"},"summary":{"type":"string"},"followUpRequested":{"type":"boolean","title":"Follow-up needed"},"followUpDate":{"type":"string","format":"date","title":"Follow-up date"}},"required":["appointmentKey","summary"]}"#,
+            dispatchAuthContext: "standing", dispatchTargetField: "appointmentKey"
+        )
+        let fields = DescriptorForm.fields(for: op)
+        XCTAssertEqual(fields.map(\.name), ["followUpDate", "followUpRequested", "summary"])
+        XCTAssertEqual(fields.first { $0.name == "followUpRequested" }?.kind, .boolean)
+        XCTAssertEqual(fields.first { $0.name == "followUpDate" }?.kind, .date)
+
+        // An untouched (never-toggled) boolean still submits explicit false, never absence.
+        let untouched = DescriptorForm.buildSubmission(op: op, fieldValues: ["summary": "Routine visit"], ctx: DescriptorContext(actorIdentityKey: nil))
+        XCTAssertEqual(untouched.payload["followUpRequested"], .bool(false))
+        XCTAssertNil(untouched.payload["followUpDate"])
+
+        let withFollowUp = DescriptorForm.buildSubmission(
+            op: op, fieldValues: ["summary": "Routine visit", "followUpRequested": "true", "followUpDate": "2026-09-01"],
+            ctx: DescriptorContext(actorIdentityKey: nil))
+        XCTAssertEqual(withFollowUp.payload["followUpRequested"], .bool(true))
+        XCTAssertEqual(withFollowUp.payload["followUpDate"], .string("2026-09-01"))
+    }
+
+    // MARK: clinic-domain RescheduleAppointment (packages/clinic-domain/opmetas.go)
+    // — date-time `startsAt`/`endsAt` plus an `x-entityRef` `provider` field
+    // that is NOT the dispatch target, proving entity-ref detection is
+    // independent of the targetField exclusion.
+
+    func testRescheduleAppointmentDetectsDateTimeAndEntityRef() {
+        let op = opRow(
+            operationType: "RescheduleAppointment",
+            inputSchema: #"{"type":"object","properties":{"appointmentKey":{"type":"string"},"provider":{"type":"string","title":"Provider","x-entityRef":"provider"},"startsAt":{"type":"string","format":"date-time","title":"New start"},"endsAt":{"type":"string","format":"date-time","title":"New end"}},"required":["appointmentKey","provider","startsAt","endsAt"]}"#,
+            dispatchAuthContext: "self", dispatchTargetField: "appointmentKey"
+        )
+        let fields = DescriptorForm.fields(for: op)
+        XCTAssertEqual(fields.map(\.name), ["endsAt", "provider", "startsAt"])
+        XCTAssertEqual(fields.first { $0.name == "provider" }?.kind, .entityRef(type: "provider"))
+        XCTAssertEqual(fields.first { $0.name == "startsAt" }?.kind, .dateTime)
+        XCTAssertEqual(fields.first { $0.name == "endsAt" }?.kind, .dateTime)
+
+        let submission = DescriptorForm.buildSubmission(
+            op: op,
+            fieldValues: ["provider": "vtx.provider.PROVIDER000000001", "startsAt": "2026-09-01T14:00:00Z", "endsAt": "2026-09-01T14:30:00Z"],
+            ctx: DescriptorContext(actorIdentityKey: "vtx.identity.PATIENT0000000001"))
+        XCTAssertEqual(submission.payload["provider"]?.stringValue, "vtx.provider.PROVIDER000000001")
+        XCTAssertEqual(submission.payload["startsAt"]?.stringValue, "2026-09-01T14:00:00Z")
+        XCTAssertEqual(submission.payload["endsAt"]?.stringValue, "2026-09-01T14:30:00Z")
+    }
 }

@@ -5,15 +5,24 @@ import Foundation
 /// `renderDescriptorForm`/`renderField`/`submitDescriptorForm`
 /// (facet-app-ux.md §3.6): a client renders + submits any op with zero
 /// hardcoded per-operation knowledge, same as the read side's `JSONValue`
-/// posture. Narrowed to the field kinds every shipped op-meta actually uses
-/// today — free-text string and string enum (`OpenTab`'s `leaseAppKey`,
-/// `SetAppointmentStatus`'s fixed `status` enum) — not the PWA's fuller
-/// vocabulary (date/money/entity-ref/boolean/textarea), which no op-meta
-/// exercises yet; extending `DescriptorFieldKind` when one does is cheap,
-/// building it unused today is not (no op-meta ships those types).
+/// posture. Covers every field kind a shipped op-meta actually exercises —
+/// free-text string, string enum (`SetAppointmentStatus`'s fixed `status`),
+/// boolean (`RecordEncounter`'s `followUpRequested`), money
+/// (`VoidCharge`'s `amountCents`), date (`RecordEncounter`'s
+/// `followUpDate`), date-time (`CreateAppointment`'s `startsAt`) and
+/// entity-ref (`RescheduleAppointment`'s `provider`) — kept in step with
+/// `app.js`'s vocabulary by `scripts/lint-facet-renderer-drift.go` (CI,
+/// STRICT). `textarea` and `x-sensitive` are PWA presentation choices over
+/// the SAME `.text` value (a bigger control / a masked one), not a distinct
+/// submission shape, so they carry no case here.
 public enum DescriptorFieldKind: Equatable {
     case text
     case enumOptions([String])
+    case boolean
+    case money
+    case date
+    case dateTime
+    case entityRef(type: String)
 }
 
 public struct DescriptorField: Identifiable, Equatable {
@@ -82,14 +91,40 @@ public enum DescriptorForm {
         return props.keys.filter { !contextParamKeys.contains($0) && $0 != targetField }.sorted().map { name in
             let propSchema = props[name] ?? .object([:])
             let title = propSchema["title"]?.stringValue ?? name
-            let kind: DescriptorFieldKind
-            if let enumVals = propSchema["enum"]?.arrayValue, !enumVals.isEmpty {
-                kind = .enumOptions(enumVals.compactMap { $0.stringValue })
-            } else {
-                kind = .text
-            }
-            return DescriptorField(name: name, title: title, help: fieldDescs[name]?.stringValue, required: requiredSet.contains(name), kind: kind)
+            return DescriptorField(name: name, title: title, help: fieldDescs[name]?.stringValue, required: requiredSet.contains(name), kind: fieldKind(name: name, schema: propSchema))
         }
+    }
+
+    /// Mirrors `app.js`'s `renderField` type-branch order exactly (boolean →
+    /// enum → money → date → date-time → entity-ref → text): a schema could
+    /// in principle satisfy more than one clause (an enum'd string with a
+    /// `date` format, say), and the two renderers must agree on which one
+    /// wins, not just on the vocabulary each supports.
+    private static func fieldKind(name: String, schema: JSONValue) -> DescriptorFieldKind {
+        let schemaType = schema["type"]?.stringValue
+        if schemaType == "boolean" {
+            return .boolean
+        }
+        if let enumVals = schema["enum"]?.arrayValue, !enumVals.isEmpty {
+            return .enumOptions(enumVals.compactMap { $0.stringValue })
+        }
+        if schemaType == "integer" || schemaType == "number" {
+            if schema["x-format"]?.stringValue == "money" || name.hasSuffix("Cents") {
+                return .money
+            }
+            return .text
+        }
+        if schemaType == "string" {
+            switch schema["format"]?.stringValue {
+            case "date": return .date
+            case "date-time": return .dateTime
+            default: break
+            }
+            if let refType = schema["x-entityRef"]?.stringValue {
+                return .entityRef(type: refType)
+            }
+        }
+        return .text
     }
 
     /// Assembles the Contract #2 envelope pieces for one submission —
@@ -101,11 +136,28 @@ public enum DescriptorForm {
     /// the actor's own key — all unconditionally, since under-reading fails
     /// the request and over-reading is harmless).
     public static func buildSubmission(op: JSONValue, fieldValues: [String: String], ctx: DescriptorContext) -> DescriptorSubmission {
-        let fieldNames = fields(for: op).map(\.name)
+        let formFields = fields(for: op)
         var payload: [String: JSONValue] = [:]
-        for name in fieldNames {
-            if let v = fieldValues[name], !v.isEmpty {
-                payload[name] = .string(v)
+        for field in formFields {
+            let v = fieldValues[field.name]
+            switch field.kind {
+            case .boolean:
+                // Mirrors app.js's submitDescriptorForm: a toggle is ALWAYS
+                // sent, on or off, never omitted the way an empty text field
+                // is — "untouched" and "explicitly false" must both reach
+                // the script as false, never as absence.
+                payload[field.name] = .bool(v == "true")
+            case .money:
+                // The typed-in value is dollars-and-cents text (e.g. "4.50"),
+                // same as the PWA's `data-money-field` input; the wire payload
+                // is always integer cents.
+                if let v, let dollars = Double(v) {
+                    payload[field.name] = .number((dollars * 100).rounded())
+                }
+            default:
+                if let v, !v.isEmpty {
+                    payload[field.name] = .string(v)
+                }
             }
         }
 
