@@ -27,7 +27,14 @@ func WeaverTargets() []pkgmgr.WeaverTargetSpec {
 					// vertexType DDL this target dispatches to (MissingClass otherwise).
 					Class:  "clinictransaction",
 					Params: map[string]string{"accountKey": "row.accountKey", "amountCents": "row.feeCents", "appointmentRef": "row.appointmentKey", "memo": "row.memo"},
-					Reads:  []string{"row.accountKey", "row.appointmentKey", "row.memo"},
+					// Reads only the two bare vertex keys the DDL's vertex_alive() checks
+					// hydrate (accountKey, appointmentKey) — memo is free text ('No-show
+					// fee', never a vtx.* key) and belongs in Params only. Declaring it
+					// here made every dispatch fail at step4 hydrate (`KV get
+					// core-kv/No-show fee: nats: invalid key`), so DebitAccount never
+					// executed and the gap never closed — confirmed live in processor.log
+					// against every one of this target's dispatches.
+					Reads: []string{"row.accountKey", "row.appointmentKey"},
 				},
 			},
 		},

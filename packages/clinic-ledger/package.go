@@ -65,7 +65,7 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 // Package is the static, install-time bundle.
 var Package = pkgmgr.Definition{
 	Name:    "clinic-ledger",
-	Version: "0.2.4",
+	Version: "0.2.5",
 	Description: "Clinic patient payment ledger: the clinicaccount vertex type (ClinicCreateAccount, independently-minted " +
 		"id, one per patient via a .ledgerAccount guard aspect on the patient) + the clinictransaction vertex type " +
 		"(DebitAccount/CreditAccount, append-only entries linked to the account via postedTo, DebitAccount taking an " +
