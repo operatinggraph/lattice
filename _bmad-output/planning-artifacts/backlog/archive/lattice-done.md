@@ -1,5 +1,10 @@
 # Done log archive — lattice (older shipped items, newest first)
 
+- 2026-08-03 · `9c00567f` · [identity-domain,identity-hygiene,privacy-base] client-ceremony Inc 2a — the boundTo link + its per-credential Protected lens; three class-(g) keys derived, the double-write and the erasure gap fixed
+- 2026-08-03 · `79cbcdb4` · [pkgmgr,identity-domain,facet] OpCeremonySpec — mint-and-reveal becomes descriptor vocabulary; two S1 exemptions retired, the marker becomes a closed expiring vocabulary
+- 2026-08-03 · `fdf841a2` · [identity-domain] derive_reads adoption — the package derives its 4 index keys, 6 client re-ports deleted, G2 blocking in both halves
+- 2026-08-03 · `8aaea2b9` · [Processor] `derive_reads` — Contract #2 §2.5 class (g) built; the contract had described a step-4 mechanism nothing ran
+- 2026-08-02 · `7dafd097` · [Refractor] auth-plane latency Inc 0a — a variable's label is scoped to its WITH segment, so a dropped-then-re-referenced node stops claiming exhaustive; 0b premise falsified, re-scoped
 - 2026-08-01 · `d040e00a` · [Refractor] a clean consumer registration clears a stale latched lens fault — un-latches the 31 red cards earlier boots' narrowed-filter burst left behind
 - 2026-08-01 · `ddaeafd7` · [lattice-CLI] `lens list` names each lens from its `.canonicalName` aspect, not the vertex root; the fixture that invented the root shape is gone
 - 2026-08-01 · `73050cc5` · [Refractor] orphan-durable janitor — a lens durable is judged on its own `vtx.meta.<id>` read, never a set difference; one durable-name constructor + discriminator

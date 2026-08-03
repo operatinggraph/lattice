@@ -1,6 +1,7 @@
 # A lens subscribes to every link touching a referenced type, not to the relations it traverses
 
-**Status:** 📐 Winston-ratified — build-ready. No fork, no contract change.
+**Status:** ✅ SHIPPED 2026-08-03 (`a322256b` + `4336978b`). No fork, no contract change.
+Verified live: the `clinicProviders` consumer's filter subjects now pin `identifiedBy` (§6).
 **Board row:** `[Refractor] A lens consumer's ack floor freezes, so its rebuild can never drain`
 (`backlog/lattice.md`) — this is the answer to that row's open question, and its fix.
 **Owning code:** `internal/refractor/{subjects,pipeline,ruleengine/full}`.
@@ -89,11 +90,20 @@ dimension is the same derivation on `PathPattern.Rels` and rides the same gates.
 
 **3.1 `full.CompiledRule.ReferencedRelations() (map[string]struct{}, bool)`** — mirrors
 `ReferencedLabels`, walking the identical clause/expression tree (`Match` patterns and `WHERE`,
-`PatternExpr`, `PatternComprehension`, `Return` items, each `With`'s items and `WHERE`) and collecting
-`RelPattern.Type`. `exhaustive = false` when any traversed relationship is untyped (`Type == ""`) or
-variable-length (`MinHops != 1 || MaxHops != 1`, whose intermediate hops traverse arbitrary relations).
-An **empty** set with `exhaustive == true` is meaningful and is the common case: a lens with no
-relationship pattern at all (`clinicPatients`, `clinicSites`) can be affected by **no link whatsoever**.
+`PatternExpr`, `PatternComprehension`, `Return` items, each `With`'s items and `WHERE`, **and both
+patterns' property maps** — see §4.1) and collecting `RelPattern.Type`. `exhaustive = false` when any
+traversed relationship is untyped (`Type == ""`). An **empty** set with `exhaustive == true` is
+meaningful and is the common case: a lens with no relationship pattern at all (`clinicPatients`,
+`clinicSites`) can be affected by **no link whatsoever**.
+
+A **variable-length hop costs nothing here**, which is where this parts company with
+`ReferencedLabels`. That derivation must give up on `*1..3` because the intermediate *nodes* bind
+arbitrary types; the relation is different, because `traverseRel` re-applies the same `rel.Type` at
+every hop of the walk (`executor.go`'s `rel.Type != "" && e.Name != rel.Type`, inside the hop loop). So
+`-[:containedIn*0..7]->` traverses `containedIn` and nothing else. This is not a detail: `containedIn`
+is the only relation the corpus ever walks variable-length, and the 16 lenses that do it are the
+location-hierarchy walks most likely to sit on a hub — copying the label rule here would have forfeited
+most of the fire's benefit on exactly them.
 
 **3.2 Pipeline state.** `plainReprojectRelations` / `plainReprojectAllRelations`, derived in
 `useFullEngineBranches` beside the label set, unioned across branches, non-exhaustive if any branch is —
@@ -143,8 +153,41 @@ including the adjacency pre-apply, whose authoritative writer is the dedicated w
 consumer, not any lens pipeline.
 
 Every widening path is preserved by defaulting to relevant: a non-full engine, a non-exhaustive relation
-set, an untyped or variable-length relationship, a multi-branch lens with one non-exhaustive branch, or a
-subject budget overrun all fall back to a filter at least as broad as today's.
+set, an untyped relationship, a multi-branch lens with one non-exhaustive branch, or a subject-budget
+overrun all fall back to a filter at least as broad as today's.
+
+### 4.1 What the adversarial review found (and what it could not refute)
+
+A three-axis adversarial pass could not refute the claim. Two findings were real and are fixed in
+`4336978b`; the rest are recorded here because they are live risks, not resolved ones.
+
+- **A pattern nested in a node's or relationship's PROPERTY MAP was executed but never walked.** Those
+  maps are `map[string]Expr` and the executor really evaluates them (`propsAllMatch` → `evalExpr` →
+  `evalPatternComprehension` → `matchPath`), so
+  `MATCH (b:book {owners: [(b)-[:borrowedBy]->(a:author) | a.key]})` would have reported an exhaustive
+  EMPTY relation set and never been told its `borrowedBy` link changed. **This was a regression this
+  design created**: `ReferencedLabels` had the identical blind spot, but the relation-blind link forms
+  covered it by accident, and pinning the relation removed the cover. Both derivations now descend into
+  both property maps. No corpus lens carries a pattern in a property map, so nothing live moved.
+- **Relationship-type alternation `[:a|b]` is silently truncated to the first type** by the visitor.
+  Pre-existing and *consistent* — the executor only knows the first type too, so the narrowing adds no
+  new divergence; the query was already mis-executed. Zero corpus occurrences. `pkgmgr`'s anchor-walk
+  parser rejects alternation outright for this reason; the general Cypher path does not.
+- **A relation token now reaches `subjects.validateToken`, which panics on `.`/`*`/`>`/whitespace,** and
+  openCypher admits an escaped `` [:`a.b`] ``. Same class already existed for labels via
+  `CoreKVVertexFilter`; this widens the hazard rather than creating it.
+- **Plain lenses narrow without a standing healer, which the actor-aware path explicitly refuses to do.**
+  `ActorAwareNarrowingLabels` will not narrow unless `sweeper != nil`, on the grounds that narrowing
+  removes an incidental reprojection that today happens to heal a lost row. `NarrowedFilterEligible` has
+  no such conjunct, and `SetSweepPlan`'s only caller is `InstallActorAggregate` — so **every** plain lens
+  has `sweeper == nil` by construction and requiring one would disable plain narrowing entirely. This is
+  the pre-existing posture of the label narrowing, not something this design introduces; it is recorded
+  because the asymmetry is real and undocumented, and because 17 zero-relationship lenses (three of them
+  auth-plane `GrantTable` producers, one Protected/RLS) now heal only on `vtx.<label>.>` traffic. Their
+  rows do derive from the anchor vertex alone, so the claim holds — but it is now load-bearing where it
+  used to have a cushion.
+- **The two new fields join `plainReprojectLabels`/`plainReprojectAll` in an unsynchronized
+  write against a concurrent reader.** Already a filed row; that row now names these fields too.
 
 ## 5. Non-goals
 
@@ -152,8 +195,8 @@ subject budget overrun all fall back to a filter at least as broad as today's.
   neighbour event recomputes*; this narrows *which neighbour events exist at all*. Complementary, and
   this one is unblocked. §1's measurement is the demand trigger that row records as unmeasured.
 - **The redelivery-cadence question** (§1, last paragraph).
-- **Draining the existing 647.** A JetStream filter update does not retract already-pending messages;
-  §7 records what cycling actually does to them.
+- **Draining the messages already ack-pending when the filter narrows.** §6 records what cycling
+  actually did to them, and it is not what was predicted.
 - **actorAggregate / Secure lens fan-out.** §3.5.
 
 ## 6. Verification
@@ -165,8 +208,37 @@ subject budget overrun all fall back to a filter at least as broad as today's.
 - Unit, `pipeline`: `ConsumerFilter`'s three-step degradation; `plainLinkReactsTo`'s default-relevant
   cases; a hot-reload re-deriving both sets together.
 - Full `go test ./...` — `ConsumerFilter` is read by activation and by Rebuild.
-- **Live:** the shipped `clinicProviders` consumer's filter subjects carry `identifiedBy`, and
-  `lnk.service.*.providedTo.identity.*` no longer reaches it.
+**Live, after cycling `bin/refractor` from `main` at 11:21 UTC 2026-08-03.** The consumer's own
+JetStream config now reads:
+
+```
+$KV.core-kv.vtx.identity.>        $KV.core-kv.vtx.provider.>
+$KV.core-kv.lnk.identity.*.identifiedBy.>   $KV.core-kv.lnk.provider.*.identifiedBy.>
+$KV.core-kv.lnk.*.*.identifiedBy.identity.> $KV.core-kv.lnk.*.*.identifiedBy.provider.>
+```
+
+`lnk.service.<id>.providedTo.identity.<id>` no longer matches any of them, and the pump has processed
+none since the cycle (the last was 11:19 UTC, one minute before it).
+
+### 6.1 The residual, and the prediction that was wrong
+
+**Predicted:** the ~600 messages already ack-pending when the filter narrowed would keep being
+redelivered (a filter update does not retract the server's pending map, and `getNextMsg`'s redelivery
+branch loads by stream sequence), and the new client-side `plainLinkReactsTo` gate would ack each in
+microseconds instead of driving a re-execute — so the floor would drain fast.
+
+**Observed:** it does not drain at all. Sampled every 20s for the 5.5 minutes after the cycle — past a
+full 5-minute AckWait expiry cycle, the interval that had been releasing a burst — `num_ack_pending` sits at exactly 600,
+`ack_floor.stream_seq` at 4,287, `delivered.consumer_seq` at 27,295, `num_pending` 0 — every counter
+frozen, no deliveries whatever. The server declines to redeliver a pending message whose subject the
+consumer's current filter no longer admits, so those 600 are stranded ack-pending and hold the floor
+where it is. The client-side gate never gets the chance the prediction gave it; its value is for a lens
+that keeps a broader filter than its relation set would allow (§3.5), not as a residual drain.
+
+The drain is therefore an explicit durable reset — `lattice lens rebuild clinicProviders`, which is
+exactly the operation whose inability to complete was this row's original symptom. That is filed as its
+own row rather than run blind inside this fire, because a rebuild reprojects the whole lens and deserves
+to be watched.
 
 ## 7. Build note — fire 2026-08-03
 
