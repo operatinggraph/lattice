@@ -45,6 +45,16 @@ type MetaVertexRef struct {
 	// Hydrator surfaces this verbatim to the Executor; empty for DDLs
 	// without an attached script.
 	ScriptSource string
+	// Script is ScriptSource's lazily-compiled program, shared by every
+	// operation on this DDL and by both passes over it — the step-4
+	// `derive_reads` pre-pass (Contract #2 §2.5 class (g)) and step 5's
+	// `execute` call. Nil when the DDL declares no script.
+	//
+	// A pointer, so the value copy Lookup hands out still shares ONE
+	// compile; rebuilt rather than mutated whenever the entry is rebuilt, so
+	// an edited script can never keep serving the program its previous
+	// source compiled to.
+	Script *CompiledScript
 }
 
 // DDLCache is the Processor's in-memory map from canonicalName to
@@ -277,6 +287,7 @@ func (c *DDLCache) loadMetaVertex(ctx context.Context, root string, _ []string) 
 	} else if !errors.Is(err, substrate.ErrKeyNotFound) {
 		return ref, false, fmt.Errorf("read script %s: %w", root, err)
 	}
+	ref.Script = newCompiledScript(ref.ScriptSource)
 
 	return ref, true, nil
 }

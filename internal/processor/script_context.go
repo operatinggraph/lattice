@@ -64,7 +64,12 @@ type ScriptContext struct {
 	DeferredMiss *deferredMissTracker
 	DDLLookup    map[string]MetaVertex
 	ScriptSource string
-	ScriptClass  string
+	// Compiled is ScriptSource's shared compiled program, carried from step 4
+	// so step 5 does not re-compile what the `derive_reads` pre-pass already
+	// compiled. Optional: when nil the runner compiles ScriptSource itself,
+	// which is what every caller that builds a ScriptContext by hand does.
+	Compiled    *CompiledScript
+	ScriptClass string
 	KVReader     ScriptKVReader
 	// LinkLister backs the script's `kv.Links()` builtin (Contract #2 §2.5.1) —
 	// the bounded, paged op-time enumeration of a hub vertex's canonical links.

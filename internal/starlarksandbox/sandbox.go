@@ -9,6 +9,7 @@ import (
 	"time"
 
 	starlarklib "go.starlark.net/starlark"
+	"go.starlark.net/syntax"
 )
 
 // loadColonRe matches go.starlark.net's "load: <reason>" resolve-time error
@@ -93,24 +94,108 @@ func ContextFromThread(thread *starlarklib.Thread, fallback context.Context) con
 // the same posture as its always-disabled `load`.
 func discardPrint(*starlarklib.Thread, string) {}
 
-// Execute compiles source with globals as both the predeclared-name set
-// (resolve time) and the initial global bindings (Init time), looks up
-// entrypoint among the names Init defines, and calls it with args.
-// `load` is always disabled: go.starlark.net's SourceProgram resolves
-// every name against globals.Has before a single statement runs, so a
-// reference to a name absent from globals is a compile-time
-// SandboxViolation, and the Thread built here carries no Load hook, so a
-// `load(...)` statement always fails at runtime.
+// Program is a compiled Starlark module plus the set of names its top-level
+// statements bind. A compiled program holds no execution state, so one
+// Program serves many Runs, on many threads, with different globals — which
+// is what lets a caller pay a single compile for two passes over the same
+// source.
 //
-// Zero internal deps: Execute takes no Lattice-specific globals itself —
-// the caller supplies everything a script can see, pure or impure alike,
-// via globals.
-func Execute(ctx context.Context, source, entrypoint string, args starlarklib.Tuple, globals starlarklib.StringDict, budget Budget) (starlarklib.Value, *SandboxError) {
+// The predeclared-name set is fixed at compile: go.starlark.net resolves
+// every global reference against isPredeclared before a statement runs.
+// Every Run of a Program MUST therefore supply globals whose KEY SET is the
+// one Compile resolved against. A Run with a different set is a resolve
+// mismatch that surfaces as an obscure runtime failure, not as a clean
+// "unknown name" — so a caller running two passes derives both key sets from
+// one declaration rather than writing them out twice.
+type Program struct {
+	prog     *starlarklib.Program
+	topLevel map[string]struct{}
+}
+
+// DefinesTopLevel reports whether the script's top-level statements bind
+// name — a `def name(...)` or a bare `name = ...` assignment.
+//
+// It answers the question Run cannot answer cheaply: whether an OPTIONAL
+// entrypoint is present. Run has to Init the whole module before it can look
+// a name up among the defined globals, so a caller probing for an optional
+// entrypoint by calling Run would pay the module's entire top level just to
+// be told the name is absent. Reading it off the compiled syntax costs
+// nothing beyond the compile the caller already paid for.
+//
+// Assignment counts, not only `def`: a script binding the name to a lambda or
+// to another function would otherwise be reported as not defining it, and a
+// caller would silently skip an entrypoint the script does provide.
+func (p *Program) DefinesTopLevel(name string) bool {
+	_, ok := p.topLevel[name]
+	return ok
+}
+
+// Compile resolves and compiles source against isPredeclared, the
+// predeclared-name probe (typically a globals StringDict's Has method).
+//
+// `load` is always disabled: go.starlark.net's SourceProgram resolves every
+// name against isPredeclared before a single statement runs, so a reference
+// to a name outside that set is a compile-time SandboxViolation, and the
+// Thread Run builds carries no Load hook, so a `load(...)` statement always
+// fails at runtime.
+func Compile(source string, isPredeclared func(string) bool) (*Program, *SandboxError) {
 	//nolint:staticcheck // SA1019: SourceProgramOptions migration deferred; current API verified safe for the sandboxed use case
-	_, prog, err := starlarklib.SourceProgram("<script>", source, globals.Has)
+	file, prog, err := starlarklib.SourceProgram("<script>", source, isPredeclared)
 	if err != nil {
 		return nil, classify(err)
 	}
+	return &Program{prog: prog, topLevel: topLevelNames(file)}, nil
+}
+
+// topLevelNames collects the names a module's top-level statements bind.
+func topLevelNames(file *syntax.File) map[string]struct{} {
+	names := map[string]struct{}{}
+	if file == nil {
+		return names
+	}
+	for _, stmt := range file.Stmts {
+		switch s := stmt.(type) {
+		case *syntax.DefStmt:
+			if s.Name != nil {
+				names[s.Name.Name] = struct{}{}
+			}
+		case *syntax.AssignStmt:
+			// Only a plain `name = ...` binds a fresh global. An augmented
+			// assignment (`name += ...`) requires the name to be bound
+			// already, and a tuple/index target is not a function
+			// definition — neither is an entrypoint a caller could call.
+			if s.Op != syntax.EQ {
+				continue
+			}
+			if ident, ok := s.LHS.(*syntax.Ident); ok {
+				names[ident.Name] = struct{}{}
+			}
+		}
+	}
+	return names
+}
+
+// Execute compiles source with globals as both the predeclared-name set
+// (resolve time) and the initial global bindings (Init time), looks up
+// entrypoint among the names Init defines, and calls it with args.
+//
+// Zero internal deps: Execute takes no Lattice-specific globals itself —
+// the caller supplies everything a script can see, pure or impure alike,
+// via globals. A caller running the SAME source more than once compiles once
+// with Compile and calls Run directly, rather than paying a compile per pass.
+func Execute(ctx context.Context, source, entrypoint string, args starlarklib.Tuple, globals starlarklib.StringDict, budget Budget) (starlarklib.Value, *SandboxError) {
+	prog, sErr := Compile(source, globals.Has)
+	if sErr != nil {
+		return nil, sErr
+	}
+	return Run(ctx, prog, entrypoint, args, globals, budget)
+}
+
+// Run initializes prog with globals as the initial global bindings, looks up
+// entrypoint among the names Init defines, and calls it with args. globals
+// MUST carry the same key set Compile resolved prog against (see Program).
+func Run(ctx context.Context, program *Program, entrypoint string, args starlarklib.Tuple, globals starlarklib.StringDict, budget Budget) (starlarklib.Value, *SandboxError) {
+	prog := program.prog
 
 	execCtx := ctx
 	if budget.Wall > 0 {
@@ -190,11 +275,11 @@ func Execute(ctx context.Context, source, entrypoint string, args starlarklib.Tu
 // / ScriptTimeout), plus InvalidReturnShape for a missing/wrong-arity/
 // non-callable entrypoint.
 func Validate(source, entrypoint string, nParams int, globals starlarklib.StringDict, budget Budget) *SandboxError {
-	//nolint:staticcheck // SA1019: SourceProgramOptions migration deferred; current API verified safe for the sandboxed use case
-	_, prog, err := starlarklib.SourceProgram("<script>", source, globals.Has)
-	if err != nil {
-		return classify(err)
+	program, sErr := Compile(source, globals.Has)
+	if sErr != nil {
+		return sErr
 	}
+	prog := program.prog
 
 	ctx := context.Background()
 	if budget.Wall > 0 {

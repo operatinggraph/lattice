@@ -8,7 +8,6 @@ import (
 	"strings"
 	"time"
 
-	starlarkjson "go.starlark.net/lib/json"
 	starlarklib "go.starlark.net/starlark"
 	"go.starlark.net/starlarkstruct"
 
@@ -96,43 +95,27 @@ func (r *StarlarkRunner) Run(ctx context.Context, sc ScriptContext) (ScriptResul
 	stateVal := vertexMapToStarlarkWithHydrated(sc)
 	opVal := operationEnvelopeToStarlark(sc.Operation)
 
-	// Build globals.
-	globals := starlarklib.StringDict{
-		"state":  stateVal,
-		"op":     opVal,
-		"ddl":    ddlMapToStarlark(sc.DDLLookup),
-		"nanoid": nanoidModule(rid),
-		// crypto.sha256(s) — pure SHA-256 hash builtin. Deterministic,
-		// side-effect-free: safe under sandbox principles.
-		"crypto": cryptoModule(),
-		// time.rfc3339_utc(s) — parse + normalize an RFC3339 timestamp to
-		// canonical UTC whole-second form. Pure: no wall-clock read, output
-		// is a function of the input only. Lets ops validate + normalize
-		// caller-supplied timestamps so lexical comparisons against the
-		// Refractor's `$now` are sound. Does NOT expose the host clock.
-		"time": timeModule(),
-		// json.decode(s) / json.encode(v) — standard Starlark JSON module.
-		// Pure (no I/O, deterministic): safe under sandbox principles.
-		// Used by MetaRootDDLScript's meta.lens branch to parse the spec
-		// payload field into a structured dict for the .spec aspect data.
-		"json": starlarkjson.Module,
-		// kv.Read(key) — Contract #2 §2.5 lazy on-demand Core KV read. Unlike the
-		// pure modules above this is the ONE builtin that performs (potentially)
-		// a NATS round-trip AND is intentionally NON-deterministic: it serves
-		// contextHint-prefetched keys from the hydrated cache and otherwise reads
-		// LIVE Core KV state. A hard-deleted/absent key reads as None; a
-		// logically-deleted key (isDeleted=true) reads as a present doc carrying
-		// the flag. The opt-in read seam for the read-before-create idempotency
-		// pattern — not a read model (P5). It reads its execution-scoped context
-		// via starlarksandbox.ContextFromThread (see starlark_kv.go), so a slow
-		// round-trip counts against the same wall budget Execute enforces.
-		"kv": kvModule(sc),
-	}
+	// Build globals. The KEY SET is scriptGlobalNames by construction —
+	// scriptGlobals owns the dict, and the compiled program below was
+	// resolved against that same list.
+	globals := scriptGlobals(sc, stateVal, opVal)
+	budget := starlarksandbox.Budget{Wall: r.WallBudget, MaxSteps: r.MaxSteps}
 
-	out, sErr := starlarksandbox.Execute(ctx, sc.ScriptSource, "execute", starlarklib.Tuple{stateVal, opVal}, globals, starlarksandbox.Budget{
-		Wall:     r.WallBudget,
-		MaxSteps: r.MaxSteps,
-	})
+	// Reuse step 4's compiled program when it was compiled from the source
+	// this context names: the derive_reads pre-pass and this call are two
+	// passes over ONE source, and identity-domain's is ~960 lines. A
+	// ScriptContext built by hand (no step 4), or one whose ScriptSource was
+	// swapped after hydration, compiles here instead — exactly as before.
+	compiled := compiledFor(sc.Compiled, sc.ScriptSource)
+	var (
+		out  starlarklib.Value
+		sErr *starlarksandbox.SandboxError
+	)
+	if prog, cErr := compiled.program(); cErr != nil {
+		sErr = cErr
+	} else {
+		out, sErr = starlarksandbox.Run(ctx, prog, "execute", starlarklib.Tuple{stateVal, opVal}, globals, budget)
+	}
 	// A required-absent declared read the script touched outranks whatever
 	// Starlark error carried it out: the caller must see the HydrationMiss step
 	// 4 deferred, not a ScriptError naming an internal abort message. Checked on
@@ -502,7 +485,7 @@ func (s *stateMapValue) String() string {
 	return s.d.String()
 }
 
-func (s *stateMapValue) Type() string { return "state" }
+func (s *stateMapValue) Type() string            { return "state" }
 func (s *stateMapValue) Freeze()                 { s.d.Freeze() }
 func (s *stateMapValue) Truth() starlarklib.Bool { return s.d.Truth() }
 func (s *stateMapValue) Hash() (uint32, error)   { return 0, fmt.Errorf("state is not hashable") }

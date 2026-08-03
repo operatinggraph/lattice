@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"strings"
 
+	"github.com/operatinggraph/lattice/internal/starlarksandbox"
 	"github.com/operatinggraph/lattice/internal/substrate"
 	"github.com/operatinggraph/lattice/internal/vault"
 )
@@ -34,6 +35,12 @@ type HydratorImpl struct {
 	CoreBucket string
 	DDLs       *DDLCache
 	Logger     *slog.Logger
+	// DeriveBudget bounds one `derive_reads` pre-pass (Contract #2 §2.5
+	// class (g)). It is sized against the SAME Init the step-5 pass pays,
+	// not "well under" it: the pre-pass runs the module's whole top level,
+	// because that is where the script's own helper functions are defined.
+	// Zero uses the step-5 defaults.
+	DeriveBudget starlarksandbox.Budget
 	// Vault backs decrypt-on-read for sensitive aspects pulled into the
 	// Starlark context (Contract #3 §3.10, the step-6.5 encrypt hook's read
 	// counterpart). Nil disables decryption: a hydrated sensitive aspect's
@@ -65,6 +72,19 @@ func NewHydratorWithCache(conn *substrate.Conn, coreBucket string, cache *DDLCac
 	return &HydratorImpl{Conn: conn, CoreBucket: coreBucket, DDLs: cache, Logger: logger}
 }
 
+// deriveBudget is the pre-pass's execution budget, defaulting to the step-5
+// budgets when unset.
+func (h *HydratorImpl) deriveBudget() starlarksandbox.Budget {
+	b := h.DeriveBudget
+	if b.Wall <= 0 {
+		b.Wall = DefaultScriptWallBudget
+	}
+	if b.MaxSteps <= 0 {
+		b.MaxSteps = DefaultScriptMaxSteps
+	}
+	return b
+}
+
 // Hydrate implements Hydrator.
 func (h *HydratorImpl) Hydrate(ctx context.Context, env *OperationEnvelope) (HydratedState, error) {
 	rid := env.RequestID
@@ -80,9 +100,10 @@ func (h *HydratorImpl) Hydrate(ctx context.Context, env *OperationEnvelope) (Hyd
 	// 2. Resolve DDL meta-vertex: prefer the DDL cache when wired.
 	// Falls back to the shadow-key read so tests without a cache work.
 	var (
-		ddlKey  string
-		metaVtx MetaVertex
-		source  string
+		ddlKey   string
+		metaVtx  MetaVertex
+		source   string
+		compiled *CompiledScript
 	)
 	if h.DDLs != nil {
 		ref, ok := h.DDLs.Lookup(class)
@@ -103,6 +124,10 @@ func (h *HydratorImpl) Hydrate(ctx context.Context, env *OperationEnvelope) (Hyd
 				Code: "NoScriptForClass", MissingKey: ref.MetaVertexKey + ".script", OperationRequestID: rid,
 			}
 		}
+		// The cache-held compiled program: compiled at most once per cache
+		// generation and shared by the derive_reads pre-pass below AND by
+		// step 5's execute call.
+		compiled = ref.Script
 	} else {
 		// Fallback: Story-1.6 shadow-key path.
 		ddlKey = metaVertexKeyForClass(class)
@@ -149,6 +174,25 @@ func (h *HydratorImpl) Hydrate(ctx context.Context, env *OperationEnvelope) (Hyd
 				Code: "EmptyScript", MissingKey: scriptKey, OperationRequestID: rid,
 			}
 		}
+		// No cache to hold the program, so it is compiled per operation — the
+		// cost step 5 already paid before the program was shareable. Both
+		// passes still share this one, so the compile count does not rise.
+		compiled = newCompiledScript(source)
+	}
+
+	// 3. Run the DDL's optional `derive_reads(op)` — Contract #2 §2.5 class
+	// (g). It runs HERE: after step-3 authorization, before the first Core KV
+	// GET, so a derived key is hydrated, snapshotted and OCC-conditioned
+	// exactly like one the submitter declared. A DDL that declares none is
+	// untouched — the entrypoint is read off the already-compiled program, so
+	// the check costs no invocation.
+	declared := declaredReadsFromEnvelope(env)
+	if prog, ok := compiled.deriveReadsProgram(); ok {
+		derived, err := deriveReads(ctx, prog, env, h.deriveBudget())
+		if err != nil {
+			return HydratedState{}, err
+		}
+		declared = derived
 	}
 
 	// 4. Hydrate contextHint.reads (fail-closed) + contextHint.optionalReads
@@ -192,95 +236,94 @@ func (h *HydratorImpl) Hydrate(ctx context.Context, env *OperationEnvelope) (Hyd
 	}
 	tracker := &sensitiveReadTracker{}
 	var egressKeys map[string]struct{}
-	if env.ContextHint != nil {
-		for _, key := range distinctKeys(env.ContextHint.Reads) {
-			entry, err := h.Conn.KVGet(ctx, h.CoreBucket, key)
-			if err != nil {
-				if errors.Is(err, substrate.ErrKeyNotFound) {
-					markRequiredAbsent(key)
-					continue
-				}
-				return HydratedState{}, fmt.Errorf("step4: read %s: %w", key, err)
+	for _, key := range distinctKeys(declared.Reads) {
+		entry, err := h.Conn.KVGet(ctx, h.CoreBucket, key)
+		if err != nil {
+			if errors.Is(err, substrate.ErrKeyNotFound) {
+				markRequiredAbsent(key)
+				continue
 			}
-			doc, err := parseVertexDoc(entry.Value, key)
-			if err != nil {
-				return HydratedState{}, fmt.Errorf("step4: parse %s: %w", key, err)
-			}
-			doc.Revision = entry.Revision
-			if err := decryptSensitiveDoc(ctx, h.Conn, h.CoreBucket, h.DDLs, h.Vault, &doc, false, tracker, rid); err != nil {
-				return HydratedState{}, fmt.Errorf("step4: decrypt %s: %w", key, err)
-			}
-			markHydrated(key, doc)
+			return HydratedState{}, fmt.Errorf("step4: read %s: %w", key, err)
 		}
-		for _, key := range distinctKeys(env.ContextHint.OptionalReads) {
-			// A key in both lists keeps the fail-closed `reads` semantics: it
-			// either hydrated above or was recorded required-absent, so it is
-			// never demoted to absence-tolerant by a duplicate optionalReads
-			// entry — a demotion would let the weaker declaration decide, and
-			// `optionalReads` must never soften a read the op depends on
-			// (Contract #2 §2.5 authoring rule).
-			if _, ok := hydrated[key]; ok {
-				continue
-			}
-			if _, ok := requiredAbsent[key]; ok {
-				continue
-			}
-			// A duplicate optionalReads entry already probed absent: skip the
-			// second live GET (nil-map read is safe).
-			if _, ok := knownAbsent[key]; ok {
-				continue
-			}
-			entry, err := h.Conn.KVGet(ctx, h.CoreBucket, key)
-			if err != nil {
-				if errors.Is(err, substrate.ErrKeyNotFound) {
-					if knownAbsent == nil {
-						knownAbsent = map[string]struct{}{}
-					}
-					knownAbsent[key] = struct{}{}
-					continue
-				}
-				return HydratedState{}, fmt.Errorf("step4: read %s: %w", key, err)
-			}
-			doc, err := parseVertexDoc(entry.Value, key)
-			if err != nil {
-				return HydratedState{}, fmt.Errorf("step4: parse %s: %w", key, err)
-			}
-			doc.Revision = entry.Revision
-			if err := decryptSensitiveDoc(ctx, h.Conn, h.CoreBucket, h.DDLs, h.Vault, &doc, false, tracker, rid); err != nil {
-				return HydratedState{}, fmt.Errorf("step4: decrypt %s: %w", key, err)
-			}
-			markHydrated(key, doc)
+		doc, err := parseVertexDoc(entry.Value, key)
+		if err != nil {
+			return HydratedState{}, fmt.Errorf("step4: parse %s: %w", key, err)
 		}
-		for _, key := range distinctKeys(env.ContextHint.EgressReads) {
-			if egressKeys == nil {
-				egressKeys = map[string]struct{}{}
-			}
-			egressKeys[key] = struct{}{}
-			// ParseEnvelope already rejects a key declared under egressReads
-			// AND EITHER reads or optionalReads, so this cannot re-hydrate an
-			// already-cached read (plaintext or known-absent) under a
-			// weaker/conflicting disposition.
-			if _, ok := hydrated[key]; ok {
+		doc.Revision = entry.Revision
+		if err := decryptSensitiveDoc(ctx, h.Conn, h.CoreBucket, h.DDLs, h.Vault, &doc, false, tracker, rid); err != nil {
+			return HydratedState{}, fmt.Errorf("step4: decrypt %s: %w", key, err)
+		}
+		markHydrated(key, doc)
+	}
+	for _, key := range distinctKeys(declared.OptionalReads) {
+		// A key in both lists keeps the fail-closed `reads` semantics: it
+		// either hydrated above or was recorded required-absent, so it is
+		// never demoted to absence-tolerant by a duplicate optionalReads
+		// entry — a demotion would let the weaker declaration decide, and
+		// `optionalReads` must never soften a read the op depends on
+		// (Contract #2 §2.5 authoring rule).
+		if _, ok := hydrated[key]; ok {
+			continue
+		}
+		if _, ok := requiredAbsent[key]; ok {
+			continue
+		}
+		// A duplicate optionalReads entry already probed absent: skip the
+		// second live GET (nil-map read is safe).
+		if _, ok := knownAbsent[key]; ok {
+			continue
+		}
+		entry, err := h.Conn.KVGet(ctx, h.CoreBucket, key)
+		if err != nil {
+			if errors.Is(err, substrate.ErrKeyNotFound) {
+				if knownAbsent == nil {
+					knownAbsent = map[string]struct{}{}
+				}
+				knownAbsent[key] = struct{}{}
 				continue
 			}
-			entry, err := h.Conn.KVGet(ctx, h.CoreBucket, key)
-			if err != nil {
-				if errors.Is(err, substrate.ErrKeyNotFound) {
-					markRequiredAbsent(key)
-					continue
-				}
-				return HydratedState{}, fmt.Errorf("step4: read %s: %w", key, err)
-			}
-			doc, err := parseVertexDoc(entry.Value, key)
-			if err != nil {
-				return HydratedState{}, fmt.Errorf("step4: parse %s: %w", key, err)
-			}
-			doc.Revision = entry.Revision
-			if err := decryptSensitiveDoc(ctx, h.Conn, h.CoreBucket, h.DDLs, h.Vault, &doc, true, tracker, rid); err != nil {
-				return HydratedState{}, fmt.Errorf("step4: decrypt %s: %w", key, err)
-			}
-			markHydrated(key, doc)
+			return HydratedState{}, fmt.Errorf("step4: read %s: %w", key, err)
 		}
+		doc, err := parseVertexDoc(entry.Value, key)
+		if err != nil {
+			return HydratedState{}, fmt.Errorf("step4: parse %s: %w", key, err)
+		}
+		doc.Revision = entry.Revision
+		if err := decryptSensitiveDoc(ctx, h.Conn, h.CoreBucket, h.DDLs, h.Vault, &doc, false, tracker, rid); err != nil {
+			return HydratedState{}, fmt.Errorf("step4: decrypt %s: %w", key, err)
+		}
+		markHydrated(key, doc)
+	}
+	for _, key := range distinctKeys(declared.EgressReads) {
+		if egressKeys == nil {
+			egressKeys = map[string]struct{}{}
+		}
+		egressKeys[key] = struct{}{}
+		// ParseEnvelope already rejects a key declared under egressReads
+		// AND EITHER reads or optionalReads, and mergeDerivedReads re-runs
+		// that exclusion over the derived keys parse could not see, so this
+		// cannot re-hydrate an already-cached read (plaintext or
+		// known-absent) under a weaker/conflicting disposition.
+		if _, ok := hydrated[key]; ok {
+			continue
+		}
+		entry, err := h.Conn.KVGet(ctx, h.CoreBucket, key)
+		if err != nil {
+			if errors.Is(err, substrate.ErrKeyNotFound) {
+				markRequiredAbsent(key)
+				continue
+			}
+			return HydratedState{}, fmt.Errorf("step4: read %s: %w", key, err)
+		}
+		doc, err := parseVertexDoc(entry.Value, key)
+		if err != nil {
+			return HydratedState{}, fmt.Errorf("step4: parse %s: %w", key, err)
+		}
+		doc.Revision = entry.Revision
+		if err := decryptSensitiveDoc(ctx, h.Conn, h.CoreBucket, h.DDLs, h.Vault, &doc, true, tracker, rid); err != nil {
+			return HydratedState{}, fmt.Errorf("step4: decrypt %s: %w", key, err)
+		}
+		markHydrated(key, doc)
 	}
 
 	h.Logger.Info("step 4: hydrated",
@@ -302,6 +345,7 @@ func (h *HydratorImpl) Hydrate(ctx context.Context, env *OperationEnvelope) (Hyd
 			DDLLookup:      map[string]MetaVertex{class: metaVtx},
 			ScriptSource:   source,
 			ScriptClass:    class,
+			Compiled:       compiled,
 			// Back the script's lazy kv.Read() (§2.5) with a single-key reader
 			// over the same Conn + Core bucket used for hydration. A read of a
 			// key not pre-fetched via contextHint falls through to this.
