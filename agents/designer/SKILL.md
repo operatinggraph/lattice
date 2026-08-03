@@ -531,6 +531,24 @@ tombstones. **Capability KV is a lens projection** (projection correctness = aut
   before congratulating yourself for re-deriving it — I re-derived the one conjunct structurally
   unreachable for secure lenses and left the two live gates unexamined.
 
+- **A census YOU produce sizes the work, so check what the grep COUNTS — and run §2's reflex list against
+  the draft BEFORE the adversarial pass, not instead of it.** Two failures from one fire (2026-08-03,
+  read-scope authorization), both cheap to have caught alone. (1) I sized the migration off
+  `grep -c "PermissionSpec{"` and wrote "46 permission specs → ~35 ops, **mostly transcription**"; that
+  pattern counts **slice literals**, not entries — the corpus is **105** distinct permissioned
+  operationTypes, and the wrong figure had already propagated into the size label, into "the migration
+  leaves zero debt", and into the decision to ship the gate blocking. Before a count sizes anything, name
+  the unit (entries vs containers vs files vs call sites) and **re-derive it a second way** — count
+  distinct values, not matching lines — and if the census feeds a *client-side* corpus, grep the clients
+  too (that design assumed op-meta descriptors were the read-set source while four vertical apps
+  hand-build theirs in JavaScript). (2) Three of the four blockers the reviewers returned were the
+  *"verify a mechanism can BE restricted/reshaped"* reflex already sitting in this list — memoizing into
+  the Starlark state dict (rejected during iteration), reusing `ScriptContext.KVReader` (a one-method
+  interface whose use would re-read and break the OCC snapshot), and decrypting inside `Get` (no
+  `*Thread`, so the call escapes the wall budget). **The adversarial pass is not a substitute for the
+  checklist** — it is far more expensive and it arrives after the draft has hardened. Walk the reflexes
+  yourself first; hand the reviewers the findings that need a second mind.
+
 **Run the pre-build gates you write into your own designs — "ratified" ≠ "build-ready."** If a design
 self-flags a pre-build adversarial / `bmad-party-mode` pass (a deferred gate), that pass is a **Designer-lane
 obligation**: run it and **record it as run** before the design is build-ready. Do not leave it dangling for
