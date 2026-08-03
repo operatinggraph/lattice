@@ -611,6 +611,9 @@ RETURN
   op.dispatch.data.optionalReads AS dispatchOptionalReads,
   op.dispatch.data.visibleWhen AS dispatchVisibleWhen,
   op.sensitive.data.value AS sensitive,
+  op.ceremony.data.mintedSecretHashField AS ceremonyMintedSecretHashField,
+  op.ceremony.data.revealTitle AS ceremonyRevealTitle,
+  op.ceremony.data.revealHelp AS ceremonyRevealHelp,
   [(op)<-[:permitsOperation]-(svc:service) | svc.key] AS viaServices,
   role.key AS viaRole,
   role.canonicalName.data.value AS viaRoleName

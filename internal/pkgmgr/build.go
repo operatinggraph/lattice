@@ -261,6 +261,10 @@ func (i *Installer) buildInstallBatch(
 			addCreate(opMetaKey+".sensitive", docAspect(opMetaKey, "sensitive", "sensitive",
 				map[string]any{"value": true}))
 		}
+		if o.Ceremony != nil {
+			addCreate(opMetaKey+".ceremony", docAspect(opMetaKey, "ceremony", "ceremony",
+				opCeremonyBody(o.Ceremony)))
+		}
 	}
 
 	// Pane meta-vertices (facet-discovery-restoration-design.md §2.1): a
@@ -634,6 +638,25 @@ func opDispatchBody(d *OpDispatchSpec) map[string]any {
 			"field":  d.VisibleWhen.Field,
 			"equals": d.VisibleWhen.Equals,
 		}
+	}
+	return body
+}
+
+// opCeremonyBody emits an op meta's `.ceremony` aspect body, including only
+// the fields the author populated. A client reads MintedSecretHashField to
+// know which field it fills rather than renders, so an emitted body missing
+// it declares a ceremony the client cannot perform — the client's own
+// fail-closed rule (do not offer the op) is what covers that.
+func opCeremonyBody(c *OpCeremonySpec) map[string]any {
+	body := map[string]any{}
+	if c.MintedSecretHashField != "" {
+		body["mintedSecretHashField"] = c.MintedSecretHashField
+	}
+	if c.RevealTitle != "" {
+		body["revealTitle"] = c.RevealTitle
+	}
+	if c.RevealHelp != "" {
+		body["revealHelp"] = c.RevealHelp
 	}
 	return body
 }

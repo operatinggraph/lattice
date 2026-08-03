@@ -393,6 +393,15 @@ func TestMigration_StaffSliceNoLongerRequiresARole(t *testing.T) {
 // The lenses whose chain was a required MATCH, and the three
 // hand-authored producers, exactly as they read before the walk conversion.
 // They exist only as the comparison side of the assertions above.
+//
+// What is frozen is the WALK — the required-MATCH / standalone-sibling shape
+// the conversion replaced. A descriptor column added to the live tail is
+// mirrored here rather than left out, because the equality assertion is
+// total: a column the frozen side omits turns `require.Equal` on the row maps
+// into a guaranteed failure, and dropping to content-spotting to avoid that
+// would retire a live gate to accommodate new vocabulary. A column evaluated
+// off the same bound `op` on both sides cannot mask a walk regression, which
+// is the only thing these fixtures exist to catch.
 
 const frozenEdgeInstancesSpec = `
 MATCH (identity:identity {key: $actorKey})<-[:providedTo]-(inst:service)
@@ -441,6 +450,9 @@ RETURN
   op.dispatch.data.optionalReads AS dispatchOptionalReads,
   op.dispatch.data.visibleWhen AS dispatchVisibleWhen,
   op.sensitive.data.value AS sensitive,
+  op.ceremony.data.mintedSecretHashField AS ceremonyMintedSecretHashField,
+  op.ceremony.data.revealTitle AS ceremonyRevealTitle,
+  op.ceremony.data.revealHelp AS ceremonyRevealHelp,
   role.key AS viaRole,
   role.canonicalName.data.value AS viaRoleName,
   viaSvcKeys AS viaServices

@@ -602,6 +602,88 @@ func TestBuildInstallBatch_EffectsAspectEmittedOnlyWhenDeclared(t *testing.T) {
 	}
 }
 
+// TestBuildInstallBatch_CeremonyAspectEmittedOnlyWhenDeclared pins the
+// mint-and-reveal vocabulary (client-ceremony-op-descriptors-design.md §4.3):
+// an op meta declaring a Ceremony gets a sibling `.ceremony` aspect carrying
+// the field name and the reveal copy; an op meta without one emits no such
+// aspect, so every install predating this vocabulary is byte-identical.
+//
+// The negative half is the load-bearing one. A client's whole fail-closed
+// rule is "a descriptor carrying a ceremony is not offered unless I can
+// perform it" — if the aspect leaked onto ops that never declared one, every
+// such op would go dark on a ceremony-capable client instead.
+func TestBuildInstallBatch_CeremonyAspectEmittedOnlyWhenDeclared(t *testing.T) {
+	def := Definition{
+		Name:    "ceremony-test-pkg",
+		Version: "0.0.1",
+		DDLs:    []DDLSpec{minimalDDL("identity", "meta.ddl.vertexType", false)},
+		OpMetas: []OpMetaSpec{
+			{
+				OperationType: "CreateUnclaimedIdentity",
+				Ceremony: &OpCeremonySpec{
+					MintedSecretHashField: "claimKeyHash",
+					RevealTitle:           "Claim secret",
+					RevealHelp:            "Hand this to them now — it is shown once.",
+				},
+			},
+			{OperationType: "ClaimIdentity"},
+		},
+	}
+
+	inst := &Installer{}
+	pkgKey := PackageVertexPrefix + EntityNanoIDForTest(def.Name, "package")
+	ddlIDs := []string{EntityNanoIDForTest(def.Name, "ddl:identity")}
+	opMetaIDs := []string{
+		EntityNanoIDForTest(def.Name, "opMeta:CreateUnclaimedIdentity"),
+		EntityNanoIDForTest(def.Name, "opMeta:ClaimIdentity"),
+	}
+	ops, _, err := inst.buildInstallBatch(def, pkgKey, ddlIDs, nil, nil, nil, nil, nil, opMetaIDs, nil)
+	if err != nil {
+		t.Fatalf("buildInstallBatch: %v", err)
+	}
+
+	ceremonyKey := metaVertexPrefix + opMetaIDs[0]
+	plainKey := metaVertexPrefix + opMetaIDs[1]
+
+	op, ok := findOp(ops, ceremonyKey+".ceremony")
+	if !ok {
+		t.Fatalf("CreateUnclaimedIdentity op-meta: no %s aspect emitted", ceremonyKey+".ceremony")
+	}
+	if got := op.Document["class"]; got != "ceremony" {
+		t.Errorf("ceremony aspect class = %v, want \"ceremony\"", got)
+	}
+	data, _ := op.Document["data"].(map[string]any)
+	if got := data["mintedSecretHashField"]; got != "claimKeyHash" {
+		t.Errorf("mintedSecretHashField = %v, want claimKeyHash", got)
+	}
+	if got := data["revealTitle"]; got != "Claim secret" {
+		t.Errorf("revealTitle = %v, want \"Claim secret\"", got)
+	}
+	if got := data["revealHelp"]; got != "Hand this to them now — it is shown once." {
+		t.Errorf("revealHelp = %v, want the declared help", got)
+	}
+
+	if _, ok := findOp(ops, plainKey+".ceremony"); ok {
+		t.Errorf("ClaimIdentity declares no Ceremony; want no %s aspect", plainKey+".ceremony")
+	}
+}
+
+// TestOpCeremonyBody_OmitsUnpopulatedFields pins the sparse-body idiom every
+// sibling builder follows: a field the author left empty is absent from the
+// wire body rather than present-and-empty, so a client can tell "not declared"
+// from "declared as an empty string".
+func TestOpCeremonyBody_OmitsUnpopulatedFields(t *testing.T) {
+	body := opCeremonyBody(&OpCeremonySpec{MintedSecretHashField: "linkKeyHash"})
+	if got := body["mintedSecretHashField"]; got != "linkKeyHash" {
+		t.Errorf("mintedSecretHashField = %v, want linkKeyHash", got)
+	}
+	for _, absent := range []string{"revealTitle", "revealHelp"} {
+		if _, present := body[absent]; present {
+			t.Errorf("%s: unpopulated field must be omitted, got %v", absent, body[absent])
+		}
+	}
+}
+
 // TestBuildInstallBatch_PermissionForOperationLink pins the
 // `permission forOperation meta` edge (staff-worlds F2): a permission whose
 // operationType matches an op meta declared in the same package links to it, so

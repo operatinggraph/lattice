@@ -501,6 +501,40 @@ type OpMetaSpec struct {
 	// Defaults false; emits `.sensitive` only when true (mirrors DDLSpec's
 	// own Sensitive field).
 	Sensitive bool
+
+	// Ceremony declares the one thing a descriptor-driven client must DO
+	// rather than ask — mint a secret, submit only its hash, reveal the
+	// plaintext once. Nil emits no `.ceremony` aspect.
+	Ceremony *OpCeremonySpec
+}
+
+// OpCeremonySpec declares a mint-and-reveal ceremony
+// (client-ceremony-op-descriptors-design.md §4.3): the client mints a secret
+// the platform must never learn, submits only its hash, and shows the
+// plaintext to the person exactly once.
+//
+// It exists because a form cannot express this. The alternative a descriptor
+// without it degrades into is a text input asking a human to type a 64-char
+// hash whose preimage nobody holds — an accepted submission that arms a
+// secret no one can ever present.
+//
+// The client contract is three rules, all fail-closed. A client that does not
+// implement ceremonies MUST NOT offer an op whose descriptor carries one — it
+// degrades exactly as it degrades an unresolvable TargetType, and never falls
+// back to rendering the hash field. MintedSecretHashField is removed from the
+// rendered form and filled by the client from the platform CSPRNG. The
+// plaintext is displayed once on acceptance and dropped without display on
+// any other outcome: a secret for a write that did not land is not a secret
+// anybody should be handed.
+type OpCeremonySpec struct {
+	// MintedSecretHashField names the InputSchema field carrying the
+	// lowercase-hex sha256 of a client-minted 256-bit secret.
+	MintedSecretHashField string
+
+	// RevealTitle and RevealHelp are the copy for the one-time
+	// post-acceptance display of the plaintext.
+	RevealTitle string
+	RevealHelp  string
 }
 
 // OpPresentationSpec is an op meta's client-facing display metadata
