@@ -14,6 +14,17 @@ import (
 
 // ── Pure DDL-generation tests (no database) ──────────────────────────────────
 
+// ddlWithoutPolicy is everything BuildProtectedTableDDL emits except the
+// DROP/CREATE POLICY pair it always ends with — the fixture shape the
+// fail-closed tests need (a table with RLS enabled and forced, and no policy).
+//
+// Counted from the END, never the front: the emitter also converges the
+// table's columns, so the number of statements before the policy depends on
+// how many columns the lens declares. A `stmts[:3]` slice silently stopped
+// including ENABLE/FORCE ROW LEVEL SECURITY when those were added, which made
+// a fail-closed test pass for the wrong reason.
+func ddlWithoutPolicy(stmts []string) []string { return stmts[:len(stmts)-2] }
+
 func TestBuildProtectedTableDDL_Shape(t *testing.T) {
 	stmts, err := BuildProtectedTableDDL("read_lease_applications",
 		[]string{"application_id"},
@@ -423,7 +434,7 @@ func TestRLS_ForceRLS_DenyAll_Integration(t *testing.T) {
 	// 2. Table created WITHOUT a policy (ENABLE+FORCE only) — the H3 fail-closed case.
 	nopolicy, err := BuildProtectedTableDDL(nopolicyTbl, []string{"id"}, []ColumnDef{{Name: "body", Type: "text"}})
 	require.NoError(t, err)
-	for _, s := range nopolicy[:3] { // create table, enable rls, force rls — skip the policy
+	for _, s := range ddlWithoutPolicy(nopolicy) {
 		_, err = pool.Exec(ctx, s)
 		require.NoError(t, err, "exec: %s", s)
 	}

@@ -113,11 +113,11 @@ func TestVerifyProtectedTable_PermissivePolicy_Fails(t *testing.T) {
 	clean()
 	t.Cleanup(clean)
 
-	// create + enable + force (stmts[:3]), then a permissive policy under the
+	// Everything but the policy pair, then a permissive policy under the
 	// deterministic name instead of the §6.14 membership policy.
 	stmts, err := BuildProtectedTableDDL(tbl, []string{"id"}, body)
 	require.NoError(t, err)
-	for _, s := range stmts[:3] {
+	for _, s := range ddlWithoutPolicy(stmts) {
 		_, err = pool.Exec(ctx, s)
 		require.NoError(t, err, "exec: %s", s)
 	}
@@ -186,10 +186,11 @@ func TestVerifyProtectedTable_NoPolicy_Fails(t *testing.T) {
 	clean()
 	t.Cleanup(clean)
 
-	// Run create + enable + force, but SKIP the policy (stmts[3], stmts[4]).
+	// Run everything but the policy pair, so the table has RLS forced and no
+	// policy at all — the H3 fail-closed case.
 	stmts, err := BuildProtectedTableDDL(tbl, []string{"id"}, body)
 	require.NoError(t, err)
-	for _, s := range stmts[:3] {
+	for _, s := range ddlWithoutPolicy(stmts) {
 		_, err = pool.Exec(ctx, s)
 		require.NoError(t, err, "exec: %s", s)
 	}
