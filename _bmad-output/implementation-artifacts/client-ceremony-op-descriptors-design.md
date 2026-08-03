@@ -1130,3 +1130,74 @@ offline.
 **Next: Inc 2** (§4.2) — the `boundTo` link, its one-shot backfill, the per-credential Protected lens, the
 `signInMethods` pane section, and `UnlinkCredential`'s descriptor, which retires the `unprojected-input`
 exemption. Inc 4 stays designed-not-built: still no two-device consumer (§4.4).
+
+## 14. Increment 2 fire brief (build note, 2026-08-03)
+
+Inc 2 splits at a real seam: **2a is the write path + the read model**, **2b is the migration + the
+surface**. The split is forced by §7's own ordering rule — *"the pane section ships only once the backfill
+has run"* — so the pane, the descriptor and the exemption retirement cannot land in the same unit as the
+link they read. 2a is what makes a backfill expressible at all.
+
+### 14.1 Verified touch-list (checked live at `40d343ca`)
+
+| Site | What it is today | 2a |
+|---|---|---|
+| `packages/identity-domain/ddls.go:1100-1131` (`ClaimIdentity` mutations) | writes `credentialBinding`, `state`, tombstones `claimKey`, upserts `credentialindex` + the `holdsRole` grant | + emit `boundTo` |
+| `packages/identity-domain/ddls.go:1326-1355` (`CompleteCredentialLink`) | upserts `credentialindex`, appends to `credentials[]` | + emit `boundTo` |
+| `packages/identity-domain/ddls.go:1441-1447` (`UnlinkCredential`) | tombstones `credentialindex`, rewrites `credentials[]` | + tombstone `boundTo` |
+| `packages/identity-hygiene/ddls.go:564-570` (`MergeIdentity` credential repoint) | repoints each `credentialindex` to the primary | + repoint `boundTo` (tombstone secondary, emit primary) |
+| `packages/identity-domain/ddls.go:729-766` (`derive_reads`) | declares the three `identityindex` probes + the `credentialindex` probe for Claim/Complete | + the `boundTo` key on all three ops, + `credentialindex` for `UnlinkCredential`, + `ClaimIdentity`'s `consumer_grant_key` |
+| `packages/identity-domain/ddls.go:450-497` (link-type DDLs) | `indexes`, `duplicateOf` | + `boundTo` |
+| `packages/identity-domain/lenses.go` | `identityCredentialsRead` (whole encrypted array in one jsonb column) | + `identityCredentialBindingsRead`, one row per link |
+
+**`MergeIdentity` is the writer the ratified body did not name.** §4.2 lists `CompleteCredentialLink` and
+`ClaimIdentity` as the paths that bind and `UnlinkCredential` as the path that unbinds. It is silent on
+merge — which repoints every `credentialindex` in `cred_set` to the primary and unions the arrays
+(`identity-hygiene/ddls.go:564-579`). A `boundTo` left un-repointed there would outlive its own premise:
+the lens would keep projecting the merged-away secondary as the credential's owner, and the RLS anchor
+would confine the row to an identity that is now `state=merged`. The link is repointed in the same batch,
+by the same `cred_set` loop, under the same unconditioned-blind-Put idiom that loop already uses.
+
+### 14.2 Two implementation decisions, recorded (Winston, §0)
+
+**(1) `bound_at` is not a column, because the engine cannot project a relationship.** §4.2 specifies the
+lens columns as `identity_key`, `credential_actor_key`, `bound_at`. The first two come from the pattern's
+node endpoints; the third would have to come from the link's own `data`, and **no relationship variable is
+ever bound**: `traverseRel` (`internal/refractor/ruleengine/full/executor.go:900-1000`) extends the binding
+with the *neighbour node* only, and while `RelPattern.Variable` is parsed (`visitor.go:274`) nothing in the
+executor writes it into a binding. So `MATCH (c)-[b:boundTo]->(u) RETURN b.data.boundAt` has no meaning
+today. The link still carries `data.boundAt` — it is the provenance the graph should hold, and it is what a
+projection would read once the engine can — but the 2a lens ships two columns, and the missing third is
+**filed as its own row** with this lens named as its consumer, rather than papered over by re-reading the
+encrypted array the link exists to replace.
+
+**(2) The `boundTo` key joins the declared read set, so its write is CAS'd rather than blind.** The
+ratified body treats the link purely as an emit. But it is a deterministic key derived from
+`op.actor` + a payload field under package semantics — the exact definition of Contract #2 §2.5 class (g),
+which Inc 1 just built. Declaring it in `derive_reads` costs three lines and buys the revive-on-CAS the
+`credentialindex` writer already has (`credential_index_mutation`): a credential unlinked and later
+re-bound to the same identity must revive a tombstoned link, and a create-only writer would brick exactly
+that path. It is declared `optionalReads`, never `reads` — absence is the ordinary case on every bind.
+
+**The same three lines close a filed board row.** `ClaimIdentity`'s `consumer_grant_key` (the
+`holdsRole` link it upserts unconditioned) is a class-(g) key in the *same function*, filed as its own
+★★ row precisely because "browser clients cannot compute the deterministic role key a declared read would
+require" — verbatim the blocker class (g) removes. It is derived here too, and the row closes.
+
+### 14.3 Increment order + green checks
+
+1. `boundTo` link-type DDL + the key/mutation helpers + `derive_reads` (identity-domain), version bump.
+2. Emit/tombstone at the three identity-domain paths; repoint at `MergeIdentity`, version bump.
+3. `identityCredentialBindingsRead` Protected lens.
+4. Tests: one row per link + RLS confinement; unlink retracts the row; a re-bind revives a tombstoned link;
+   merge repoints the row to the primary; the derived key set is byte-identical to what the scripts write.
+
+Gates: `go build ./...`, `make vet`, `golangci-lint run ./...`, `STRICT=1 go run ./scripts/lint-conventions.go`,
+`go run ./scripts/lint-package-standard.go`, `make verify-package-identity-domain`, the identity-domain /
+identity-hygiene / refractor package tests.
+
+### 14.4 Non-goals (2a)
+
+The backfill, the `signInMethods` pane section, `UnlinkCredential`'s `OpMetaSpec`, and the
+`unprojected-input` exemption retirement — all 2b, all gated on the backfill by §7. Removing the bespoke
+`/api/credentials` handlers stays out of Inc 2 entirely (§4.2's closing paragraph).
