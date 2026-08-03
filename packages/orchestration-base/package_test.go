@@ -51,8 +51,8 @@ func TestPackage_DDLsLensesPermissions(t *testing.T) {
 			t.Fatalf("missing lens %q (have %v)", want, lensNames)
 		}
 	}
-	if got := len(Package.Permissions); got != 10 {
-		t.Fatalf("expected 10 permissions, got %d", got)
+	if got := len(Package.Permissions); got != 11 {
+		t.Fatalf("expected 11 permissions, got %d", got)
 	}
 	// ClaimTask is the one op here a person triggers, so it is the one that
 	// owes a descriptor (S1). Losing the meta would show up only as an op
@@ -205,9 +205,11 @@ func TestPackage_TaskDDLLifecycleCommands(t *testing.T) {
 }
 
 // TestPackage_LifecycleOpsGrantedToOperator pins the grantee role for every
-// lifecycle op (A3/A6).
+// lifecycle op (A3/A6). CompleteTask carries a SECOND, self-scope grant (its
+// own assignee) and is pinned separately by
+// TestPackage_CompleteTaskGrantedToOperatorAndSelfAssignee.
 func TestPackage_LifecycleOpsGrantedToOperator(t *testing.T) {
-	want := map[string]bool{"CreateTask": false, "ReAssignTask": false, "CompleteTask": false, "CancelTask": false}
+	want := map[string]bool{"CreateTask": false, "ReAssignTask": false, "CancelTask": false}
 	for _, p := range Package.Permissions {
 		if _, ok := want[p.OperationType]; !ok {
 			continue // lifecycle ops are checked in TestPackage_LoomLifecycleOps
@@ -221,6 +223,42 @@ func TestPackage_LifecycleOpsGrantedToOperator(t *testing.T) {
 		if !seen {
 			t.Fatalf("missing permission for op %q", op)
 		}
+	}
+}
+
+// TestPackage_CompleteTaskGrantedToOperatorAndSelfAssignee pins CompleteTask's
+// two grants: scope=any to operator (unchanged), plus a scope=self grant to
+// every role a task can legitimately be assignedTo — an assignee retiring
+// their own task (mirrors control-authz's personalLensPermissions role list).
+func TestPackage_CompleteTaskGrantedToOperatorAndSelfAssignee(t *testing.T) {
+	var anySeen, selfSeen bool
+	wantSelfRoles := []string{"consumer", "frontOfHouse", "backOfHouse", "provider"}
+	for _, p := range Package.Permissions {
+		if p.OperationType != "CompleteTask" {
+			continue
+		}
+		switch p.Scope {
+		case "any":
+			anySeen = true
+			if len(p.GrantsTo) != 1 || p.GrantsTo[0] != "operator" {
+				t.Fatalf("CompleteTask scope=any grantsTo = %v, want [operator]", p.GrantsTo)
+			}
+		case "self":
+			selfSeen = true
+			if len(p.GrantsTo) != len(wantSelfRoles) {
+				t.Fatalf("CompleteTask scope=self grantsTo = %v, want %v", p.GrantsTo, wantSelfRoles)
+			}
+			for i, role := range wantSelfRoles {
+				if p.GrantsTo[i] != role {
+					t.Fatalf("CompleteTask scope=self grantsTo = %v, want %v", p.GrantsTo, wantSelfRoles)
+				}
+			}
+		default:
+			t.Fatalf("CompleteTask: unexpected scope %q", p.Scope)
+		}
+	}
+	if !anySeen || !selfSeen {
+		t.Fatalf("CompleteTask: anySeen=%v selfSeen=%v, want both", anySeen, selfSeen)
 	}
 }
 

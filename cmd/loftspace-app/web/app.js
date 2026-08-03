@@ -2298,6 +2298,10 @@ async function submitComplete(ev) {
 
 // completeTask submits an explicit CompleteTask(taskKey) — the Contract #10 §10.7
 // out-of-band completion path — to retire the task whose bound op just committed.
+// The signed-in identity is always the task's own assignee (tasks.go: assignee ==
+// scopedTo == the subject), so authContext.target names it, matching CompleteTask's
+// scope=self grant (orchestration-base permissions.go) — without it a non-operator
+// caller has no standing grant at all and every self-completion 403s.
 // Best-effort: a rejection (the task already closed) or a transport error is logged,
 // never surfaced, because the gap-closing op has already succeeded.
 async function completeTask(taskKey) {
@@ -2308,7 +2312,7 @@ async function completeTask(taskKey) {
       class: "task",
       reads: [taskKey],
       payload: { taskKey },
-    });
+    }, state.applicant ? { authContext: { target: state.applicant } } : undefined);
     if (reply && reply.status === "rejected" && reply.error) {
       console.warn("CompleteTask not applied:", reply.error.code, reply.error.message);
     }
