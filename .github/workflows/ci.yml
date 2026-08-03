@@ -150,6 +150,15 @@ jobs:
         # cannot widen the surface without editing the gate in the same diff.
         run: STRICT=1 go run ./scripts/lint-facet-discovery.go
 
+      - name: Facet renderer-drift lint (descriptor vocabulary parity)
+        # FORK-1's freeze trigger is vocabulary completeness across BOTH
+        # renderers (edge-showcase-app-design.md FORK-1) — the PWA
+        # (app.js's renderField) and the second renderer (FacetManifestKit's
+        # DescriptorForm) must detect the same field kinds. This fails the
+        # build the moment one renderer gains a kind the other silently
+        # falls back to free-text for.
+        run: STRICT=1 go run ./scripts/lint-facet-renderer-drift.go
+
       - name: Board lint (the backlog is an index, not a journal)
         # Backstop on code commits (board-only commits hit board-lint.yml,
         # which the main paths-ignore skips): fails on an over-budget row, a

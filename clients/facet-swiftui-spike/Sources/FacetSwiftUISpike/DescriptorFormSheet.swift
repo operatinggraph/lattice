@@ -67,12 +67,66 @@ struct DescriptorFormSheet: View {
                 Text("Choose…").tag("")
                 ForEach(options, id: \.self) { Text($0).tag($0) }
             }
+        case .boolean:
+            Toggle(field.title, isOn: boolBinding(for: field.name))
+        case .money:
+            TextField(field.title, text: binding(for: field.name))
+                #if canImport(UIKit)
+                .keyboardType(.decimalPad)
+                #endif
+        case .date:
+            DatePicker(field.title, selection: dateBinding(for: field.name, formatter: Self.dateOnlyFormatter), displayedComponents: .date)
+        case .dateTime:
+            DatePicker(field.title, selection: dateBinding(for: field.name, formatter: Self.dateTimeFormatter), displayedComponents: [.date, .hourAndMinute])
+        case .entityRef(let type):
+            // No candidate picker yet (would need ManifestStore to track
+            // `manifest.ent.*` rows, which it does not today) — a plain,
+            // labeled text field is still a real, submittable form, just
+            // without the PWA's search-and-pick affordance.
+            TextField("vtx.\(type).<id>", text: binding(for: field.name))
+                #if canImport(UIKit)
+                .autocapitalization(.none)
+                #endif
+                .disableAutocorrection(true)
         }
     }
 
     private func binding(for name: String) -> Binding<String> {
         Binding(get: { values[name] ?? "" }, set: { values[name] = $0 })
     }
+
+    private func boolBinding(for name: String) -> Binding<Bool> {
+        Binding(get: { values[name] == "true" }, set: { values[name] = $0 ? "true" : "false" })
+    }
+
+    /// Round-trips through the SAME string form `DescriptorForm.buildSubmission`
+    /// expects for `.date`/`.dateTime` (plain-date "yyyy-MM-dd" / RFC3339,
+    /// passed through unchanged) — `DatePicker` deals natively in `Date`
+    /// (an absolute instant), so unlike `app.js`'s raw `datetime-local` text
+    /// input, no local→UTC conversion step is needed on this side; the
+    /// formatter alone is the wire format.
+    private func dateBinding(for name: String, formatter: DateFormatter) -> Binding<Date> {
+        Binding(
+            get: { values[name].flatMap(formatter.date(from:)) ?? Date() },
+            set: { values[name] = formatter.string(from: $0) }
+        )
+    }
+
+    private static let dateOnlyFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.dateFormat = "yyyy-MM-dd"
+        f.timeZone = TimeZone(identifier: "UTC")
+        f.calendar = Calendar(identifier: .gregorian)
+        return f
+    }()
+
+    private static let dateTimeFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.dateFormat = "yyyy-MM-dd'T'HH:mm:ss'Z'"
+        f.timeZone = TimeZone(identifier: "UTC")
+        f.calendar = Calendar(identifier: .gregorian)
+        return f
+    }()
 
     private func submit() {
         submitting = true

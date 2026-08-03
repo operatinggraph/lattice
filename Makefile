@@ -123,7 +123,7 @@ LATTICE_PROCESSOR_AUTH_MODE ?= capability
 # Load .env if it exists (ignored by git).
 -include .env
 
-.PHONY: assert-main-checkout up up-full up-full-capability dev-seed-staff provision-gateway-identity-provisioner test-real-actor-auth test-claim-ceremony up-loftspace orchestration install-packages install-loftspace run-loupe run-gateway run-loftspace-app down verify-kernel verify-package-rbac verify-package-identity verify-package-identity-hygiene verify-package-objects-base verify-package-location-domain verify-package-loftspace-domain verify-package-clinic-domain verify-package-clinic-reminders up-clinic install-clinic refresh-clinic refresh-loftspace provision-loftspace-role provision-clinic-role provision-cafe-role provision-wellness-role provision-gateway-role provision-readpath provision-vault-kek reinstall-package verify-package-service-location verify-package-edge-manifest install-edge-manifest install-ai seed-edge-demo seed-classic-demo seed-showcase install-showcase-domains install-maintenance install-front-desk install-one-bill up-facet up-facet-edge run-facet provision-facet-role verify-package-augur verify-conformance build vet lint-conventions lint-web lint-board lint-package-version lint-lens-anchors lint-package-standard lint-facet-discovery install-skills test test-rollback test-lease-convergence test-object-gc test-edge-idb-conformance test-crypto-shred test-system-actor-capability test-control-plane-authz test-augur-convergence test-unrouted-convergence test-cli test-hello-lattice test-health-completeness processor run-processor clean logs ps
+.PHONY: assert-main-checkout up up-full up-full-capability dev-seed-staff provision-gateway-identity-provisioner test-real-actor-auth test-claim-ceremony up-loftspace orchestration install-packages install-loftspace run-loupe run-gateway run-loftspace-app down verify-kernel verify-package-rbac verify-package-identity verify-package-identity-hygiene verify-package-objects-base verify-package-location-domain verify-package-loftspace-domain verify-package-clinic-domain verify-package-clinic-reminders up-clinic install-clinic refresh-clinic refresh-loftspace provision-loftspace-role provision-clinic-role provision-cafe-role provision-wellness-role provision-gateway-role provision-readpath provision-vault-kek reinstall-package verify-package-service-location verify-package-edge-manifest install-edge-manifest install-ai seed-edge-demo seed-classic-demo seed-showcase install-showcase-domains install-maintenance install-front-desk install-one-bill up-facet up-facet-edge run-facet provision-facet-role verify-package-augur verify-conformance build vet lint-conventions lint-web lint-board lint-package-version lint-lens-anchors lint-package-standard lint-facet-discovery lint-facet-renderer-drift install-skills test test-rollback test-lease-convergence test-object-gc test-edge-idb-conformance test-crypto-shred test-system-actor-capability test-control-plane-authz test-augur-convergence test-unrouted-convergence test-cli test-hello-lattice test-health-completeness processor run-processor clean logs ps
 
 ## assert-main-checkout — Refuse stack lifecycle from anywhere but the main working
 ## tree. docker-compose.yml mounts deploy/nats-server.conf by a RELATIVE path, so a
@@ -1979,6 +1979,15 @@ lint-package-version:
 lint-facet-discovery:
 	@echo "==> Linting Facet's discovery covenant..."
 	go run ./scripts/lint-facet-discovery.go
+
+## lint-facet-renderer-drift — FORK-1 vocabulary-parity guard
+## (edge-showcase-app-design.md FORK-1): cmd/facet/web/app.js's `renderField`
+## and FacetManifestKit's `DescriptorForm.fieldKind` must detect the same
+## descriptor-form field kinds. Widening one without the other is drift the
+## freeze trigger (vocabulary completeness) depends on staying at zero.
+lint-facet-renderer-drift:
+	@echo "==> Linting Facet descriptor-vocabulary parity..."
+	go run ./scripts/lint-facet-renderer-drift.go
 
 ## install-skills — Symlink the canonical agentic-ops role-skills from agents/
 ## into the (gitignored) .claude/skills/ where the harness discovers them. A
