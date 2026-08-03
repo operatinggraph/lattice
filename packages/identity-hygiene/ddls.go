@@ -473,14 +473,23 @@ def execute(state, op):
     # duplicateOf tombstones: 1 mutation each. indexes repoints: up to 3
     # mutations each (tombstone old link + update index vertex + create new
     # link; the create is skipped if primary already owns the same index).
-    # Credential repoint: 1 credentialindex update per credential in
-    # cred_set, always exactly 1 primary.credentialBinding union write
-    # (cred_set is never empty), plus 1 secondary.credentialBinding
-    # tombstone iff that aspect was present.
+    # Credential repoint: 3 mutations per credential in cred_set (the
+    # credentialindex update, the old boundTo tombstone, the new boundTo
+    # write), less the one tombstone the secondary's own implicit
+    # self-credential does not need; always exactly 1
+    # primary.credentialBinding union write (cred_set is never empty), plus 1
+    # secondary.credentialBinding tombstone iff that aspect was present.
+    #
+    # This count must track the loop below exactly. It is the whole reason the
+    # guard exists: the substrate's own 1000-message pre-flight rejects an
+    # over-large batch as a TERMINAL BatchTooLarge that must never be retried,
+    # so an undercount here turns a clean, actionable MergeBatchTooLarge into
+    # an opaque unmergeable identity.
     cred_secondary_tombstone_muts = 1 if sec_binding != None else 0
+    cred_muts = len(cred_set) * 3 - 1
     total_muts = (link_count_full * 2 + link_count_self + 2 + acr_count +
                   len(dup_links_to_tombstone) + len(idx_repoints) * 3 +
-                  len(cred_set) + 1 + cred_secondary_tombstone_muts)
+                  cred_muts + 1 + cred_secondary_tombstone_muts)
     if total_muts > 999:
         fail("MergeBatchTooLarge: " + str(total_muts))
 
@@ -596,6 +605,17 @@ def execute(state, op):
             # a real credential of the secondary has an old edge to retire.
             mutations.append({"op": "tombstone",
                 "key": "lnk.identity." + cred_id + ".boundTo.identity." + secondary[len("vtx.identity."):]})
+        if cred_id == primary_id:
+            # Same self-loop guard the generic link rekey above applies: the
+            # PRIMARY can itself be a credential of the secondary, and
+            # rewriting that edge's target onto the primary would point it at
+            # its own source. The row it would project lists a person as their
+            # own sign-in method, and in Inc 2b becomes an UnlinkCredential
+            # target that can never succeed -- the key is not an array entry.
+            # The tombstone above still stands: that edge really did exist.
+            # cred_muts overcounts by one here, which is the safe direction
+            # for a cap.
+            continue
         mutations.append({"op": "update",
             "key": "lnk.identity." + cred_id + ".boundTo.identity." + primary[len("vtx.identity."):],
             "document": {"class": "boundTo", "isDeleted": False,

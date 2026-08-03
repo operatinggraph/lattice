@@ -53,7 +53,11 @@ const keyShreddedEventDDL = "privacy.keyShredded"
 // inbound "indexes" links — linkage is ownership, so this needs no decryption)
 // are tombstoned along with those links, and every duplicateOf pair link
 // touching the identity (enumerated in BOTH directions — the identity may be
-// the newer or the older side of a pair) is tombstoned. This is why the shred
+// the newer or the older side of a pair) is tombstoned, as is every boundTo
+// link (also both directions — the identity is the target of every credential
+// bound to it, and the source when it is itself a credential of another),
+// which names in plaintext which sign-in credential belonged to the erased
+// person. This is why the shred
 // erase needs no separate worker step and no ordering window against
 // Vault.ShredKey: the decrypt window the async privacy-worker races is closed
 // the instant this commit lands (envelope.Shredded is checked before
@@ -225,6 +229,41 @@ def collect_duplicate_of_links(identity_key):
     # identities matched against, target) -- both directions are enumerated.
     return collect_duplicate_of_direction(identity_key, "out") + collect_duplicate_of_direction(identity_key, "in")
 
+BOUND_TO_PAGE_LIMIT = 256
+MAX_BOUND_TO_PAGES = 64
+
+def collect_bound_to_direction(identity_key, direction):
+    hits = []
+    cursor = None
+    for _page in range(MAX_BOUND_TO_PAGES):
+        # read-posture: (e) relation=boundTo epoch=none (read-only guard: a
+        # boundTo link created concurrently with the shred slips past --
+        # accepted, same posture as the enumerations above)
+        links, cursor = kv.Links(identity_key, "boundTo", direction, cursor, BOUND_TO_PAGE_LIMIT)
+        for lk in links:
+            if lk.isDeleted:
+                continue
+            hits.append(lk)
+        if cursor == None:
+            return hits
+    fail("IdentityBoundToFanoutTooLarge: " + identity_key + " has too many boundTo links (" + direction + ") to enumerate at shred time")
+
+def collect_bound_to_links(identity_key):
+    # identity-domain's boundTo link names, in plaintext and in the key itself,
+    # which sign-in credential belongs to which person. That is the same class
+    # of plaintext derivative the indexes and duplicateOf enumerations above
+    # exist to erase: the sensitive credentialBinding aspect it mirrors becomes
+    # unreadable the moment the DEK dies, but a live link outlives the key and
+    # answers the question anyway -- decrypt-free, and graph-traversable.
+    #
+    # Both directions, for the same reason duplicateOf enumerates both: the
+    # identity is the TARGET of every credential bound to it, and is itself the
+    # SOURCE when it is a credential of someone else -- a merged-away identity
+    # folded into the survivor as its implicit self-credential
+    # (identity-hygiene's MergeIdentity), or a Scenario-B identity later
+    # linked to another.
+    return collect_bound_to_direction(identity_key, "in") + collect_bound_to_direction(identity_key, "out")
+
 def execute(state, op):
     ot = op.operationType
     p = op.payload
@@ -277,14 +316,16 @@ def execute(state, op):
         # links are already tombstoned from the first shred).
         idx_hits = collect_owned_indexes(identity_key)
         dup_hits = collect_duplicate_of_links(identity_key)
+        bound_hits = collect_bound_to_links(identity_key)
 
         # Pre-flight batch-size cap (mirrors identity-hygiene's MergeIdentity
         # MergeBatchTooLarge guard): 1 (piiKey) + 2 per owned index (vertex +
-        # link) + 1 per duplicateOf link. A right-to-erasure op must never
-        # silently drop the erasure half -- fail loud and early rather than
-        # let step8_commit's BatchTooLarge (itself terminal on redelivery)
-        # surface as an opaque, unshreddable identity.
-        total_muts = 1 + len(idx_hits) * 2 + len(dup_hits)
+        # link) + 1 per duplicateOf link + 1 per boundTo link. A
+        # right-to-erasure op must never silently drop the erasure half --
+        # fail loud and early rather than let step8_commit's BatchTooLarge
+        # (itself terminal on redelivery) surface as an opaque, unshreddable
+        # identity.
+        total_muts = 1 + len(idx_hits) * 2 + len(dup_hits) + len(bound_hits)
         if total_muts > 999:
             fail("ShredBatchTooLarge: " + identity_key + " has too large a dedup-hygiene footprint (" + str(total_muts) + " mutations) to erase in one shred commit")
 
@@ -304,6 +345,10 @@ def execute(state, op):
             dup_class = getattr(lk, "class") if hasattr(lk, "class") else "duplicateOf"
             mutations.append({"op": "update", "key": lk.key,
                 "document": {"class": dup_class, "isDeleted": True, "data": lk.data}})
+
+        for lk in bound_hits:
+            mutations.append({"op": "update", "key": lk.key,
+                "document": {"class": "boundTo", "isDeleted": True, "data": lk.data}})
 
         events = [{"class": "privacy.keyShredded", "data": {"identityKey": identity_key}}]
         return {"mutations": mutations, "events": events, "response": {"primaryKey": identity_key}}

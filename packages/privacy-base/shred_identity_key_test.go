@@ -707,3 +707,79 @@ func TestShredIdentityKey_PostShredCreate_FreshIndexNoLinkToShredded(t *testing.
 		t.Fatalf("a duplicateOf link was created against the shredded owner — the revived index must not be treated as a live duplicate")
 	}
 }
+
+// pbBoundToLinkKey mirrors identity-domain's boundTo key: the credential
+// (source) to the identity it is bound to (target).
+func pbBoundToLinkKey(credentialActorKey, ownerIdentityKey string) string {
+	return "lnk.identity." + strings.TrimPrefix(credentialActorKey, "vtx.identity.") +
+		".boundTo.identity." + strings.TrimPrefix(ownerIdentityKey, "vtx.identity.")
+}
+
+func seedBoundToLink(t *testing.T, ctx context.Context, conn *substrate.Conn, credentialActorKey, ownerIdentityKey string) string {
+	t.Helper()
+	key := pbBoundToLinkKey(credentialActorKey, ownerIdentityKey)
+	doc := map[string]any{
+		"class": "boundTo", "isDeleted": false,
+		"sourceVertex": credentialActorKey, "targetVertex": ownerIdentityKey,
+		"localName": "boundTo", "data": map[string]any{"boundAt": "2026-01-01T00:00:00Z"},
+	}
+	b, err := json.Marshal(doc)
+	if err != nil {
+		t.Fatalf("marshal boundTo doc: %v", err)
+	}
+	if _, err := conn.KVPut(ctx, testutil.HarnessCoreBucket, key, b); err != nil {
+		t.Fatalf("seed boundTo link %s: %v", key, err)
+	}
+	return key
+}
+
+// TestShredIdentityKey_ErasesBoundToLinks_BothDirections — the boundTo link
+// names, in plaintext and in the key itself, which sign-in credential belonged
+// to which person. Killing the DEK makes the credentialBinding aspect that
+// mirrors it unreadable; a surviving link answers the same question anyway,
+// decrypt-free and graph-traversable, which is exactly what this op's
+// dedup-hygiene erasure exists to prevent. Both sibling link classes in the
+// identity plane (indexes, duplicateOf) are erased here; boundTo is the third.
+//
+// Both directions, because the erased identity sits on either side: it is the
+// TARGET of every credential bound to it, and the SOURCE when it is itself a
+// credential of someone else — the shape MergeIdentity leaves behind when it
+// folds a merged-away identity into the survivor as its self-credential.
+func TestShredIdentityKey_ErasesBoundToLinks_BothDirections(t *testing.T) {
+	ctx, conn := setupShredEnv(t)
+	v := testutil.TestVault(t)
+	cp, cons := newDefaultPipeline(t, ctx, conn, "shred-boundto", v)
+
+	subjectKey, _ := createUnclaimedWithProbe(t, ctx, conn, cp, cons,
+		"Bound Subject", "boundto-shred@example.com", strings.Repeat("7", 64), "BoundToShredSub", nil)
+	otherKey, _ := createUnclaimedWithProbe(t, ctx, conn, cp, cons,
+		"Bound Other", "boundto-other@example.com", strings.Repeat("8", 64), "BoundToShredOth", nil)
+
+	credKey := "vtx.identity." + testutil.GenReqID("BoundToShredCred")
+
+	// The subject as OWNER (in) and as CREDENTIAL of someone else (out).
+	inbound := seedBoundToLink(t, ctx, conn, credKey, subjectKey)
+	outbound := seedBoundToLink(t, ctx, conn, subjectKey, otherKey)
+	// A third link touching neither side of the subject — the erasure must be
+	// scoped, not a sweep of the boundTo keyspace.
+	bystander := seedBoundToLink(t, ctx, conn, credKey, otherKey)
+
+	for _, k := range []string{inbound, outbound, bystander} {
+		if readIsDeleted(t, ctx, conn, k) {
+			t.Fatalf("precondition: %s already tombstoned", k)
+		}
+	}
+
+	urgentCP, urgentCons := newUrgentPipeline(t, ctx, conn, "shred-boundto-urgent", v)
+	submitShred(t, ctx, conn, urgentCP, urgentCons, subjectKey, "BoundToShredDo", processor.OutcomeAccepted)
+
+	if !readIsDeleted(t, ctx, conn, inbound) {
+		t.Fatalf("boundTo naming the shredded identity as OWNER survived the shred — the credential↔person link outlives the key it was supposed to die with")
+	}
+	if !readIsDeleted(t, ctx, conn, outbound) {
+		t.Fatalf("boundTo naming the shredded identity as CREDENTIAL survived the shred")
+	}
+	if readIsDeleted(t, ctx, conn, bystander) {
+		t.Fatalf("a boundTo link touching neither side of the shredded identity was tombstoned — the erasure must be scoped to the subject")
+	}
+}

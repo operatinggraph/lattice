@@ -105,6 +105,17 @@ func TestCandidatesMerge_EnumeratesSecondaryEdgesExcludingPairEvidence(t *testin
 	indexesLink := "lnk.identityindex.someHash0000000001.indexes.identity." + secondaryID
 	seedEdgeVertex(t, ctx, conn, indexesLink)
 
+	// boundTo is excluded for a structural reason rather than a semantic one:
+	// MergeIdentity repoints it in its own credential loop, off the decrypted
+	// credential set. Letting it through here would hand the SAME two keys to
+	// the generic link-migration loop as well — two conflicting conditioned
+	// writes on one subject inside one atomic batch, plus a plain `create` on
+	// a rewritten key the credential loop deliberately revives from a
+	// tombstone. Every merge of a credential-holding secondary goes through
+	// this path, so the exclusion is load-bearing, not hygiene.
+	boundToLink := "lnk.identity.credentiaLIDCandMrg1.boundTo.identity." + secondaryID
+	seedEdgeVertex(t, ctx, conn, boundToLink)
+
 	edges, err := enumerateSecondaryEdges(ctx, conn, secondaryID)
 	if err != nil {
 		t.Fatalf("enumerateSecondaryEdges: %v", err)
@@ -123,9 +134,10 @@ func TestCandidatesMerge_EnumeratesSecondaryEdgesExcludingPairEvidence(t *testin
 	for _, excluded := range []string{
 		"lnk.identity." + secondaryID + ".duplicateOf.identity." + primaryID,
 		indexesLink,
+		boundToLink,
 	} {
 		if got[excluded] {
-			t.Errorf("pair-evidence link %s must be excluded from the merge edge set, got %v", excluded, edges)
+			t.Errorf("script-handled link %s must be excluded from the merge edge set, got %v", excluded, edges)
 		}
 	}
 }

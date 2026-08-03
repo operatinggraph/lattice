@@ -281,8 +281,17 @@ maintained by the script itself (both declared, not part of the edge list).`,
 // design.md §3.3), which are not business edges and were never part of a
 // merge's edge migration. Both filters are server-side-bounded by the
 // secondary's degree in that direction, never the keyspace.
+//
+// boundTo is excluded for the same structural reason, not the semantic one:
+// MergeIdentity repoints it in its own credential loop, off the decrypted
+// credential set. A class the script handles itself must never also arrive in
+// `edges`, or the generic link-migration loop writes the same two keys the
+// dedicated loop does — two conflicting conditioned publishes to one subject
+// inside one atomic batch — and its plain `create` on the rewritten key dies
+// on a RevisionConflict whenever that key is a tombstone the credential loop
+// deliberately revives.
 func enumerateSecondaryEdges(ctx context.Context, conn *substrate.Conn, secondaryID string) ([]string, error) {
-	excludedClass := map[string]bool{"duplicateOf": true, "indexes": true}
+	excludedClass := map[string]bool{"duplicateOf": true, "indexes": true, "boundTo": true}
 	var edges []string
 	for _, filter := range []string{
 		"lnk.identity." + secondaryID + ".>",

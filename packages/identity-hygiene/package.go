@@ -15,7 +15,7 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 // this variable when dispatching `install identity-hygiene`.
 var Package = pkgmgr.Definition{
 	Name:        "identity-hygiene",
-	Version:     "0.3.0",
+	Version:     "0.3.1",
 	Description: "Duplicate-identity detection + operator-approved merge.",
 	Depends:     []string{"identity-domain"},
 	DDLs:        DDLs(),

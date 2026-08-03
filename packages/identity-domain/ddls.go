@@ -503,7 +503,9 @@ func DDLs() []pkgmgr.DDLSpec {
 				"(lnk.identity.<credentialId>.boundTo.identity.<ownerId>): the identity the Gateway " +
 				"provisioned for a raw sign-in, bound to the business identity it proved control of. " +
 				"The later-arriving credential is the source. Emitted by ClaimIdentity (first credential) " +
-				"and CompleteCredentialLink (Nth); tombstoned by UnlinkCredential; repointed to the " +
+				"and CompleteCredentialLink (Nth); tombstoned by UnlinkCredential, and by privacy-base's " +
+				"ShredIdentityKey in both directions — it names in plaintext which credential belonged to " +
+				"an erased person, so it must not outlive the key; repointed to the " +
 				"primary by identity-hygiene's MergeIdentity. Carries the same {actorKey, boundAt} pair " +
 				"the credentialBinding aspect's array entry does — as a link, so the set is projectable " +
 				"one row per credential without decrypting a sensitive aspect (Contract #1: a " +
