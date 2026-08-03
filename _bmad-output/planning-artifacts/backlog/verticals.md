@@ -31,6 +31,11 @@ the row is `🚧 blocked-on:` it (a missing *lens* is package work, built here).
 | **The café catalog is eight copies of two items** | `seed-classic-demo.go:237` mints Latte + Croissant with no pinned id and no `alive()` guard, so every rerun duplicates them — the staff Manage Menu grid and the unscoped POS picker show 8 identical "Croissant" rows nobody can tell apart or safely retire. The per-lease `servedAt` filter masks it from residents only. | Café | pkg | ★★ | S | 📋 ready |
 | **An off-menu charge can never be named** | `Charge`'s `description` param is shipped (cafe-domain `ddls.go:103`, and the seeded "Table repair fee" line proves it works), but no UI reaches it — the POS form is amount-only — so every hand-keyed charge posts to the resident's ledger and one-bill as the literal "Off-menu charge". | Café | FE | ★★ | S | 📋 ready |
 | **A tab can't produce an itemized receipt** | Charges accumulate into a scalar `totalCents` plus a comma-joined `itemsMemo` string carrying no per-line price, and `VoidCharge` names no line — a live $3.50 tab reads "Croissant, Croissant, Void correction", which no resident disputing the bill can reconcile. | Café | pkg + FE | ★★ | M | 📋 ready |
+| **A past class never closes out** | Ten of eleven live bookings sit on classes that already ended and every one still reads `booked` — nothing dispatches `SetBookingAttendance`, so `wellnessNoShowSettlement` and its 2500¢ default fee have no producer at all. Clinic ships the analog (clinic-reminders' `pastDueAppointments` → Weaver-only `MarkPastDueNoShow`). | Wellness | pkg | ★★ | S | 📋 ready |
+| **My Classes buries the member's next class under weeks of history** | `renderMyClasses` renders the server's ascending list flat (`wellness-app/web/app.js:756`), so five already-past classes lead and the one upcoming class sorts last; clinic-app already sections Upcoming/Past (`clinic-app/web/app.js:2179`). | Wellness | FE | ★★ | S | 📋 ready |
+| **A studio can never be retired** | `TombstoneStudio` ships (wellness-domain `ddls.go:98`, `permissions.go:90`) but reaches no UI, so the staff Studios tab and the member's Schedule filter both offer 11 studios — seven pre-pin "Classic Demo Studio" duplicates plus three agent-verify leftovers, none reapable. | Wellness | FE + pkg | ★★ | S | 📋 ready |
+| **A member sees a balance nobody can settle** | My Classes renders a balance panel, but `CreditAccount` stays operator-only by design (`wellness-ledger/frontdesk_grant_test.go:16`) and reaches no UI, so neither the member nor the front desk can record a payment — café ships the counterpart (`CreditCafeAccount`, `cafe-app/web/app.js:829`). | Wellness | FE + pkg | ★★ | M | 📋 ready |
+| **Cancelling a priced class never refunds it** | `wellnessClassPriceSettlement` charges unconditionally at booking (`wellness-ledger/lenses.go:166`) and no convergence credits it back on `CancelBooking`, so a member who cancels a week out keeps the debit — which the row above leaves unpayable. | Wellness | pkg | ★★ | S | 📋 ready |
 
 **Explicitly descoped (ambitious-PO pass, 2026-07-09):** structured diagnosis/procedure coding (ICD/CPT),
 vitals, and e-prescribing were considered and deliberately NOT filed — a certified EHR is out of scope for a
@@ -50,11 +55,9 @@ dated run-logs live in git history. Rotate LoftSpace ↔ Clinic ↔ Café ↔ We
 **Wellness joined** 2026-07-09 (`cmd/wellness-app` shipped, live on :7802) — fold it into rotation; see
 [agents/vertical-po/SKILL.md](../../../agents/vertical-po/SKILL.md) §1.
 
-- **Rotation to date:** LoftSpace ×20, Clinic ×19, Café ×10, Wellness ×6.
+- **Rotation to date:** LoftSpace ×20, Clinic ×19, Café ×10, Wellness ×7.
 - **Method:** reuse the already-up shared stack (detect NATS :4222 / app :7788/:7799/:7801/:7802), drive the real flow via `/api/op` + the lens projections as the product owner, file scored items. All four apps exist + are exercisable live (`:7788` / `:7799` / `:7801` / `:7802`).
 - **Live-stack note:** a stale bootstrap JSON vs. a recreated Core KV was a recurring dev-loop trap (2026-07-03, 2026-07-04) that silently emptied reads; `make up` now self-heals it (`109f59a`, 2026-07-05) — re-verify empty-read reports as a real product bug first.
-- **2026-07-31:** Clinic — drove patient, provider + front-desk hats live; no seeded visit ever completes and the provider hat can act on nothing; filed 4.
-- **2026-07-31:** Café — drove resident self-order/settle + front-desk hats live; the front desk composes nothing and one-bill has no reader; filed 4 (1 → lattice).
 - **2026-08-01:** Wellness — drove member, instructor + front-desk hats live; My Classes hides the studio, and there is no waitlist, recurrence or reminder; filed 5.
 - **2026-08-01:** LoftSpace — drove tenant, landlord + front-desk hats live; browsable inventory is seven copies of one flat, rent never bills, six duplicate staff; filed 4 + broadened 1.
 - **2026-08-01:** Clinic — drove patient, provider + front-desk hats live; a booked visit hides its site, no provider is bookable, past visits never close out; filed 4.
@@ -63,7 +66,8 @@ dated run-logs live in git history. Rotate LoftSpace ↔ Clinic ↔ Café ↔ We
 - **2026-08-02:** LoftSpace — drove tenant, landlord + front-desk hats live; pulse counts landlords not units, a done task never retires, an unmanaged unit vanishes; filed 5.
 - **2026-08-02:** Clinic — drove patient, provider + front-desk hats live; no appointment view resolves at all and the no-show never bills; filed 5.
 - **2026-08-03:** Café — drove resident + front-desk hats live through open/charge/void/settle; the catalog is 8 copies of 2 items, no charge can be named or itemized, and rent never bills; filed 4.
-- **Next:** Wellness.
+- **2026-08-03:** Wellness — drove member, instructor + front-desk hats live; no past class closes out, no studio retires, no balance settles; filed 5.
+- **Next:** LoftSpace.
 
 ## Done log — verticals (newest first)
 
