@@ -911,3 +911,80 @@ zero, so they pass unannotated after the deletion and the gate ships blocking ov
 Inc 2 / 3 / 4 in full; G1 and the `[no-op-meta:]` closed vocabulary; any change to the `derive_reads`
 primitive itself, the live-read budget, or the sensitive-read tracker; any contract edit (§2.5 class (g) is
 committed at `4965b28a` and this fire builds to it).
+
+### 12.7 Review — three adversarial passes, run on a FROZEN tree
+
+§11.6 recorded that Inc 1a's two reviewers had to be killed, one of them reporting *"the tree appears to be
+mutating under me"* because the fire committed and rebased underneath them. This fire committed first
+(`ec04eca9`), handed all three reviewers that SHA, and edited nothing until every one had reported. All
+three completed. The practice works and should be the default.
+
+Three lenses — correctness/equivalence, gate soundness, security/privacy. **No blocker.** The security pass
+could not construct reach the previous state did not already grant, and the reason is worth stating because
+it reframes the increment: `contextHint.optionalReads` is unvalidated client input that nothing scope-checks
+(`internal/gateway/gateway.go` forwards it verbatim), so **any** submitter could always name these keys —
+which is exactly what the five deleted derivations did. **The ceiling is unchanged; the default flipped.**
+
+**What was actually wrong, and fixed in `fdf841a2`:**
+
+1. **`ClaimIdentity` derives a key no submitter ever sent** — so §12's scope sentence ("the same keys the
+   deleted clients computed") was false for that op. The probe was undeclared on every ClaimIdentity path,
+   so the script's read-before-create branch was **dormant**: it always read absent and always took the
+   plain `CreateOnly` create, which meant a credential whose index `UnlinkCredential` had tombstoned could
+   not re-bind at all — the create asserted revision 0 against a key with write history. The revive branch
+   `credential_index_mutation` was written for is now reachable for the first time. Intended, but it was an
+   unstated, untested semantic change, and `opmetas.go` carried a live comment asserting the key is
+   undeclared. Comment corrected; behaviour pinned by `TestClaimIdentity_RebindsAfterUnlink`, verified to
+   fail without the derivation.
+2. **The equivalence test tested nothing.** It compared two *Go* functions over an already-normalized
+   string and never executed a line of Starlark; `tc.raw` was dead. It would have passed with every
+   normalizer replaced by `return raw` — a green test over the exact property the increment exists to
+   protect. Rewritten to drive each raw contact through a real operation; verified to fail when
+   `normalize_email` stops trimming.
+3. **The credentialindex half had zero coverage**, and the file's own docstring named a test that did not
+   exist. Every pre-existing `CompleteCredentialLink` test declares the key itself, so weakest-wins made the
+   derivation a no-op in all of them — deleting the branch left the suite green.
+4. **A sixth hand-ported derivation was live.** `scripts/seed-showcase.go`, seven call sites, hashing the
+   **raw** email where the script lowercases and trims — already capable of disagreeing with the key the
+   operation probes. The census missed it (grep scoped to `cmd/` and `internal/`) and the gate's blanket
+   `scripts/` exclusion then hid it. Deleted; the exclusion is now `scripts/lint-*` only.
+5. **Both gate halves were narrower than the ban they advertised.** The Go pattern matched a
+   package-qualified literal (an alias or dot-import walks past it) and the annotation used
+   `annotationSpans`, whose indent scoping let one doc comment amnesty a whole function body. The web gate
+   matched only the alphabet *literal*, so annotating the const blinded the file permanently — a
+   reviewer-supplied bypass reusing `NANOID_ALPHABET` slipped through. Both are fixed and each hole is now
+   pinned by a self-test case.
+6. **`normalize_*` ran unbounded on an attacker-controlled field before `execute`'s `maxLen 200` check.**
+   `MAX_CONTACT_INPUT` bounds it in the shared helper **and** in `execute`, on the raw value — capping only
+   the normalizer would have resurrected the divergence this mechanism exists to end (300 leading spaces
+   plus `"Ada"` is a 303-char raw input and a 3-char name).
+7. **`mergeDerivedReads` could append into the envelope's own backing array**, contradicting the invariant
+   its file states absolutely. Cloned. `deriveReadsOpValue` is built once rather than twice per derivation
+   per OCC attempt.
+
+**One finding rejected on inspection.** `time` was reported as an unstubbed impure module. It exposes
+`rfc3339_utc` and `rfc3339_add` only — no `now()` — so binding it live is correct and stubbing it would be
+cargo cult.
+
+**§11.6's existence-oracle bullet, re-argued for ADOPTION** (it was a primitive-only argument, correctly
+challenged). The fault path still carries nothing: every derivation fault is decided before any Core KV GET.
+The *successful* path is the real channel — a hit emits `duplicateOf`, and the reply's revisions name the
+incumbent identity plus which criterion matched. That is unchanged in kind from a submitter that declared
+the key itself, and the index is deliberately global (cross-vertical dedup is what it is for). What changed
+is that the platform now performs the probe for every submitter rather than only the ones that asked. The
+underlying gap — **a declared read is never scope-checked against the actor's grant** — is pre-existing,
+untouched here, and filed as its own row, because class (g) makes the *platform* the party exercising it.
+
+**Named residuals, not claimed as closed:** a split alphabet literal and a two-module split still evade the
+web gate — a regex gate over a bundle it cannot resolve has that limit, and pretending otherwise is worse
+than recording it. `internal/gateway` and `internal/objectmanager` are submitters the Go gate does not
+cover; widening to them needs annotations on legitimate sites this fire does not own, so it is a filed row.
+
+### 12.8 CHECKPOINT — Inc 1b shipped; Inc 3 is next
+
+**Shipped** `ec04eca9` + `fdf841a2` (2026-08-03): identity-domain declares, six client derivations deleted,
+G2 blocking in both halves. Full suite green across 115 packages.
+
+**Next: Inc 3** (§9) — `OpCeremonySpec`, Facet's mint-and-reveal executor, the `CreateUnclaimedIdentity` /
+`RotateClaimKey` descriptors, and **G1** (the `[no-op-meta:]` closed vocabulary, incl. the six note
+rewrites and `package_test.go:235`). Inc 2 is also unblocked by Inc 1 but sits behind its own backfill.
