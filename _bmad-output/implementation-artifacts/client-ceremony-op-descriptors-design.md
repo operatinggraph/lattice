@@ -1678,6 +1678,20 @@ longer targetless: it is target-typed and **withheld honestly** by `opButton`'s 
 filed identity-entity projection exists. It is therefore that row's consumer, not this one's. The board
 row's "two descriptors" premise is corrected on ship rather than built to.
 
+**And the gap is four times wider than the row states.** A live census of a seeded `frontOfHouse`
+staffer's own mirror (`POST /api/dev-login` + `GET /api/feed` against the running host, 37 distinct
+`manifest.op` rows) finds **four** ops this client discovers and renders nowhere, not one:
+
+| Op | class | contextParams | why no surface has it |
+|---|---|---|---|
+| `CreateUnclaimedIdentity` | `identity` | — | the filed consumer |
+| `CreatePatient` | `patient` | — | front-desk registration |
+| `ReportIssue` | `workOrder` | `{me.workplace}` | the maintenance report verb |
+| `CreateStudio` | `studio` | `{me.workplace}` | wellness setup |
+
+A fifth targetless, service-less row — `ClaimIdentity` — is deliberately **not** one of them; §18.3(2)
+says why.
+
 ### 18.2 Verified touch-list (`file:line` checked live at `1cb07983`)
 
 | Site | What it is today | This fire |
@@ -1686,31 +1700,47 @@ row's "two descriptors" premise is corrected on ship rather than built to.
 | `cmd/facet/web/app.js:932` (`openServiceDetail`) | filters `viaServices` ∋ `serviceKey` | unchanged — the reachability fact this fire complements |
 | `cmd/facet/web/app.js:115-121` (`hatOps`), `:1133` (`openEntityDetail`), `:1509` (`paneRowOps`), `:1573` (`openTaskDetail`) | all filter on `dispatchTargetType` | unchanged — same |
 | `cmd/facet/web/app.js:977-1052` (`opButton`) | withholds on `!dispatchClass`, ceremony, authContext, target, self-anchor, hat, column | unchanged — the new section renders **through** it |
-| `cmd/facet/web/app.js:1289-1296` (`renderWorklist`) | work orders + Protected panes | + the standing-ops section, first |
-| `cmd/facet/web/app.js:745-748` (`updateBadges`) | Work tab hidden unless `isStaff()`; `loadIdlePanes()` on the same test | tab widens to *workplace **or** standing op*; `loadIdlePanes()` stays on `isStaff()` alone |
-| `cmd/facet/web/app.js:1174-1176` (`isStaffMe`) | pure me-row workplace test | unchanged — the pane/grant honesty invariant keeps its own predicate |
+| `cmd/facet/web/app.js:791-822` (`renderHome`) | places · workplaces · what I provide · services · tasks | + the standing-ops section after "What I provide" |
+| `cmd/facet/web/app.js:1739` (`renderMe`) | `m.claimed ? renderAccountPanes() : renderClaimCard()` | unchanged — and it is why `ClaimIdentity` is excluded |
+| `cmd/facet/web/standing_ops.test.mjs` | — | new: 16 renderer vectors |
 
 ### 18.3 The two decisions, recorded (Winston, §0)
 
-**(1) The filter is a *reachability* statement, not a role test.** A row is unreachable exactly when no
-other surface can offer it: no `dispatchTargetType` (so no entity, pane, hat or task surface matches) and
-no `viaServices` entry (so no service detail matches). `viaRole` is **not** in the predicate even though
-every such row carries one — the base Walk reaches an op only through a `permitsOperation` edge, which is
-the same edge `viaServices` comprehends, so "no `viaServices`" already implies "role-reached". Filtering
-on `viaRole` would state a *provenance* condition where the defect is a *coverage* one, and would go
-silently wrong the day an op is reachable both ways. `viaRoleName` is still what the section groups by —
-mirroring `openHatDetail:953-975`, which already tells a two-hat person which authority each action
-comes from.
+**(1) The section lives on Home, not on the Work tab.** The Work tab is the staff surface and would have
+been the narrower home, but its visibility is keyed on a `worksAt` anchor (`isStaffMe`,
+`app.js:1174-1176`) — the same link `staffReadGrants` keys the Protected pane grant on, which is the
+stated honesty invariant: unwire the link and the tab and the rows it fed go away together. A standing
+grant is the counter-case that invariant never contemplated. `CreateUnclaimedIdentity` is granted
+`scope=any` to `operator` as well as to the front/back-of-house roles, so an operator with no workplace
+would hold the op, project the row, and have no screen to find it on. Widening the tab predicate to
+"workplace **or** standing op" was the alternative and was rejected: it makes one tab answer two
+unrelated questions and puts a *Work* tab in front of a resident the day a consumer-role standing op
+exists. Home is the screen every actor has, and it already carries an authority-derived action surface
+next door — the hat chips under "What I provide", whose ops open through this same `opButton` seam.
 
-**(2) The Work tab's predicate widens; the pane machinery's does not.** `worksAt` gates the Work tab
-today because the tab existed only to show workplace-anchored rows, and `staffReadGrants` keys the
-Protected grant on the same link — the stated honesty invariant. A standing grant is the counter-case the
-invariant never contemplated: `CreateUnclaimedIdentity` is granted `scope=any` to `operator` as well as
-to the front/back-of-house roles, and an operator with no `worksAt` link would hold the op, project the
-row, and still have no tab to find it on. So the **tab** appears when the manifest carries a workplace
-*or* a standing op, while `loadIdlePanes()` and every pane read stay keyed on `isStaffMe` alone. Both
-predicates remain pure functions of the manifest and both still vanish with their data; they are now two
-statements instead of one because the screen serves two kinds of row.
+**(2) The predicate is three declared facts, and the third is what keeps `ClaimIdentity` out.**
+`authContext == "standing"` · no `dispatchTargetType` · no `viaServices`.
+
+The last two are a **reachability** statement, not a provenance one: such a row always arrives via the
+manifest's role Walk and always carries `viaRole`, but filtering on `viaRole` would say "role-granted"
+where the gap is "unreachable", and would drop the op the day it is reachable both ways. `viaRoleName`
+groups the section — mirroring `openHatDetail:953-975`, which already tells a two-hat person which
+authority each action comes from — and never decides whether a row is listed.
+
+The **authContext** term is what the live census forced. `ClaimIdentity` names no target and rides no
+service, so the two reachability terms alone would have listed it — and the Me screen already serves it
+through a card gated on `m.claimed`. Offering it here too hands an already-claimed person a Claim button
+with no state behind it. `"self"` means *about the caller's own record*, which is the Me screen's
+subject; `"service"`/`"task"` name a context this screen cannot build, and `authContextBuildable` would
+degrade every one of them into noise. `"standing"` is the descriptor value that means "the authority IS
+the role grant" — the exact class this section exists for.
+
+Two consequences worth stating. An op meta that **never adopted the descriptor vocabulary** now renders
+nowhere here rather than as a degraded "ask staff" card: it declares no standing authority, and listing
+it would be the client inventing a claim out of an absence. And the `viaServices` term is **not**
+redundant beside the standing one merely because no standing op happens to be service-wired on this
+corpus — a service-wired op is offered on the service's own detail whatever authority it names, and
+stating that fact here is what keeps this section from doubling it.
 
 ### 18.4 Increment order + green checks
 
@@ -1723,3 +1753,20 @@ One increment. `node --test cmd/facet/web/` (the renderer vectors, incl. the new
 No lens change (`edgeCatalogTail` already projects `viaRole`/`viaRoleName`/`dispatchTargetType`), no
 descriptor change, no new nav tab, no `identity` entity projection, no Go handler change — the rows ride
 the mirror the client already holds.
+
+### 18.6 Live confirmation (2026-08-03)
+
+Cycled `bin/facet` from `main` (`make cycle-facet`, the target this fire added — the component had a
+launch recipe only inside `up-facet`, which also provisions and reseeds, so landing a new binary on a
+running showcase world had no recipe of its own) and signed in as the seeded `frontOfHouse` staffer
+Dana Whitfield.
+
+Home renders **WHAT I CAN DO → FRONT OF HOUSE → Register · Create identity · Report it · Open studio** —
+four live submit buttons where the screen previously held nothing. `Create identity` opens the
+descriptor-driven form: Full name (required), Email, Phone, and **no `claimKeyHash` field**, which is the
+ceremony withholding the minted-secret input exactly as §4.3 specifies. Not submitted — the form opening
+is what this fire had to prove; arming a real claim secret in the demo world is not.
+
+`ReportIssue` and `CreateStudio` render as buttons rather than degraded cards because this actor's
+`{me.workplace}` anchor resolves; a role holder who works nowhere gets the existing self-anchor degrade,
+pinned by its own vector.
