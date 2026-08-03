@@ -102,6 +102,7 @@ func Lenses() []pkgmgr.LensSpec {
 				{Name: "entity_key", Type: "text"},
 				{Name: "identity_key", Type: "text"},
 				{Name: "credential_actor_key", Type: "text"},
+				{Name: "row_kind", Type: "text"},
 			},
 		},
 		{
@@ -160,13 +161,22 @@ RETURN
 // identity that never claimed. The row id is the credential's own NanoID: the
 // one-credential-≤-one-identity guard (ClaimIdentity / CompleteCredentialLink)
 // makes it unique across the table.
+//
+// `row_kind` is a constant, and it is what an op descriptor gates on. A
+// credential actor IS an `vtx.identity.<NanoID>` vertex, so a dispatch
+// targetType of "identity" cannot tell one of these rows from a person — any
+// identity-targeted op would be offered here by type alone. The column gives
+// a descriptor something to name, so an op is offered on a credential-binding
+// row by DECLARATION rather than by there happening to be no other
+// identity-typed rows in the corpus.
 const identityCredentialBindingsReadSpec = `MATCH (c:identity)-[:boundTo]->(u:identity)
 RETURN
-  nanoIdFromKey(c.key)   AS binding_id,
-  c.key                  AS entity_key,
-  u.key                  AS identity_key,
-  c.key                  AS credential_actor_key,
-  [nanoIdFromKey(u.key)] AS authz_anchors`
+  nanoIdFromKey(c.key)     AS binding_id,
+  c.key                    AS entity_key,
+  u.key                    AS identity_key,
+  c.key                    AS credential_actor_key,
+  "credentialBinding"      AS row_kind,
+  [nanoIdFromKey(u.key)]   AS authz_anchors`
 
 // identityIndexHintSpec projects one row per live identityindex vertex,
 // keyed by its own derived-hash key (the IntoKey default, `["key"]`) — the

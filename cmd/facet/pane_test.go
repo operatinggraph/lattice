@@ -45,8 +45,22 @@ func TestPaneSQL_CarriesNoWorkplacePredicate(t *testing.T) {
 	for _, sec := range shippedPaneSections(t) {
 		sql, _ := compileSectionSQL(sec)
 		lower := strings.ToLower(sql)
-		for _, banned := range []string{"actor", "landlord_id", "building", "workplace", "works_at", "clinic_id", "lattice.actor_id"} {
-			require.NotContains(t, lower, banned,
+		// The session variable is never a legitimate identifier in a pane
+		// query — not in the predicate, not in the projection.
+		require.NotContains(t, lower, "lattice.actor_id",
+			"a pane query must never name the RLS session variable itself")
+		// Scanned over the PREDICATE, not the whole statement. A projected
+		// column may legitimately be named for an actor —
+		// `credential_actor_key` is signInMethods' dispatch target — and
+		// reading one is not scoping by one. A confinement expressed as a
+		// filter can only live after WHERE: compileSectionSQL emits no joins
+		// and no subqueries.
+		predicate := ""
+		if i := strings.Index(lower, " where "); i >= 0 {
+			predicate = lower[i:]
+		}
+		for _, banned := range []string{"actor", "landlord_id", "building", "workplace", "works_at", "clinic_id"} {
+			require.NotContains(t, predicate, banned,
 				"a pane query must not filter by actor or workplace — RLS is the boundary (%q)", banned)
 		}
 	}

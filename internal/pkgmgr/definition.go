@@ -678,8 +678,42 @@ type PaneSpec struct {
 	Title string
 	Icon  string
 
+	// Surface names WHICH screen of a client the pane belongs on. A renderer
+	// names no table, no column and no operation; where a pane lives is the
+	// same class of fact, and declaring it is what lets a pane be offered to
+	// an audience that has no work surface at all.
+	//
+	// "" and "work" are the work surface — the staff screen whose visibility
+	// derives from a workplace anchor. "account" is the signed-in identity's
+	// own settings screen, which every claimed identity has. A client that
+	// does not implement a named surface renders the pane NOWHERE; it never
+	// falls back to another screen, because a pane placed by guess is a
+	// Protected read drawn somewhere its reader never asked for it.
+	Surface string
+
 	// Sections is the pane's section-descriptor array as a JSON string.
 	Sections string
+}
+
+// The surfaces a PaneSpec may name. The set is closed and validated at
+// install: an unknown value would install a descriptor every client draws
+// nowhere, which reads on the board as "the pane shipped" and to its audience
+// as "the pane is missing."
+const (
+	// PaneSurfaceWork is the staff work screen, whose own visibility derives
+	// from a workplace anchor. It is the zero value, so every pane predating
+	// this vocabulary keeps its placement.
+	PaneSurfaceWork = "work"
+
+	// PaneSurfaceAccount is the signed-in identity's own settings screen,
+	// which every claimed identity has regardless of what it holds.
+	PaneSurfaceAccount = "account"
+)
+
+// IsPaneSurface reports whether s names a known surface. The empty string is
+// PaneSurfaceWork.
+func IsPaneSurface(s string) bool {
+	return s == "" || s == PaneSurfaceWork || s == PaneSurfaceAccount
 }
 
 // RoleSpec is one user-facing role a package declares. The installer

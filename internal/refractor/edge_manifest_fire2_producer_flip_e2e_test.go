@@ -106,10 +106,11 @@ func TestEdgeManifest_Fire2_E2E_ProducerFlip_AdmitRevokeLegacyDrain(t *testing.T
 	defer metaCC.Stop()
 
 	installer := pkgmgr.NewInstaller(conn, bootstrap.BootstrapIdentityKey)
-	installer.RoleIDs = map[string]string{
-		"operator":     bootstrap.RoleOperatorID,
-		"frontOfHouse": pkgmgr.RoleID("identity-domain", "frontOfHouse"),
-	}
+	// Every identity-domain role, derived from the package itself rather than
+	// listed by hand: edge-manifest offers panes to roles this fixture does
+	// not otherwise care about, and a hand-listed subset fails the install the
+	// moment a pane names one more.
+	installer.RoleIDs = testutil.StandardRoleIDs()
 	_, err = installer.Install(ctx, edgemanifest.Package)
 	require.NoError(t, err, "installing edge-manifest must succeed")
 

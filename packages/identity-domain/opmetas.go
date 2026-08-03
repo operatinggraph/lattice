@@ -9,14 +9,14 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 // written once the vocabulary has settled against the corpus rather than ahead
 // of it.
 //
-// Four ops carry a descriptor; three carry a stated `[no-op-meta: <code> — …]`
+// Five ops carry a descriptor; two carry a stated `[no-op-meta: <code> — …]`
 // exemption in their permission Note (permissions.go) instead. That split is
 // not a shortcut: a descriptor is a machine-readable PROMISE that a client
 // holding only these fields can build a valid Contract #2 envelope, and an op
 // that cannot honour it must decline rather than ship a form that fails in
 // ways the descriptor itself claims are impossible.
 //
-// Two of the ops that could not honour it now can, and the reason each was
+// Three of the ops that could not honour it now can, and the reason each was
 // exempt is the reason it no longer is. CreateUnclaimedIdentity and
 // RotateClaimKey were client-side CEREMONIES — the caller mints a secret,
 // submits only its sha256, and keeps the plaintext to hand over — plus, for
@@ -25,12 +25,14 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 // it, and derive_reads (Contract #2 §2.5 class (g)) has the DDL declare the
 // probes from the same normalizers the main script uses. Neither op ever
 // needed a form for those; it needed a client that knew to DO them.
+// UnlinkCredential's one input named a credential nothing projected as a
+// client-resolvable row; the boundTo link and its per-credential Protected
+// lens now project exactly that row, and the op's target is filled from it.
 //
-// The three that remain exempt are exempt for reasons a ceremony field does
-// not touch: two submit as a different actor than the client authenticated
-// as, and one names a key nothing projects.
+// The two that remain exempt are exempt for reasons a ceremony field does not
+// touch: both submit as a different actor than the client authenticated as.
 //
-// Dispatch.Class is "identity" on all four — the owning vertexType DDL's own
+// Dispatch.Class is "identity" on all five — the owning vertexType DDL's own
 // CanonicalName, never a vertical name.
 //
 // Each Reads list is the live dispatcher's, verified against the script branch
@@ -139,6 +141,20 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 				AuthContext: "standing",
 				TargetField: "identityKey",
 				TargetType:  "identity",
+				// Withheld until a row says it is an UNCLAIMED identity.
+				// Without this the op is offered against any identity-typed
+				// row by type alone — including a credential-binding row,
+				// where "re-issue this person's claim secret" is offered
+				// against one of their own sign-in methods and denies at the
+				// script's unclaimed-only guard. Fail-closed on every row in
+				// the corpus today, and live the moment the filed
+				// identity-entity projection carries the field: the same
+				// projection the comment above names as this descriptor's
+				// consumer, now depended on rather than merely mentioned.
+				VisibleWhen: &pkgmgr.OpVisibleWhenSpec{
+					Field:  "unclaimed",
+					Equals: true,
+				},
 				// The script branch's own reads: the target vertex, its state
 				// (the unclaimed-only guard), and the .claimKey aspect it
 				// rewrites. .mergedInto is absent for the reason
@@ -287,6 +303,71 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 				Reads: []string{
 					"{payload.identityKey}",
 					"{payload.identityKey}.state",
+				},
+			},
+		},
+		{
+			OperationType: "UnlinkCredential",
+			Presentation: &pkgmgr.OpPresentationSpec{
+				Title:       "Remove this sign-in method",
+				ShortLabel:  "Remove",
+				Description: "Stop this way of signing in from working. Your other sign-in methods keep working, and you always keep at least one.",
+				Icon:        "key",
+				Tone:        "danger",
+				SubmitLabel: "Remove",
+				Group:       "Identity",
+			},
+			// One input, and it is never asked for: the dispatch resolves it
+			// from the row the person acted on. That is the whole reason this
+			// op was exempt as `unprojected-input` until now — a form asking
+			// someone to hand-type a vtx.identity.<NanoID> is not a form, and
+			// the descriptor would have been promising something it could not
+			// keep.
+			InputSchema: `{"type":"object","properties":` +
+				`{"credentialActorKey":{"type":"string","title":"Sign-in method","description":"The bound credential to remove. Filled from the row you chose."}},` +
+				`"required":["credentialActorKey"]}`,
+			FieldDescriptions: map[string]string{
+				"credentialActorKey": "Which sign-in method to remove. Filled from the row you chose; you never type it.",
+			},
+			Dispatch: &pkgmgr.OpDispatchSpec{
+				Class: "identity",
+				// "self", and the two values genuinely differ: the envelope's
+				// authContext target is the SESSION identity (the person doing
+				// the removing, which is what scope=self is checked against),
+				// while the payload's credentialActorKey is the credential
+				// named by the row. A client that conflated them would submit
+				// its own identity as the credential to remove and take the
+				// script's not-found branch every time.
+				AuthContext: "self",
+				TargetField: "credentialActorKey",
+				TargetType:  "identity",
+				// A credential actor IS a vtx.identity vertex, so targetType
+				// alone would offer this op against any identity-typed row —
+				// a person's, not a credential's. The section's constant
+				// row_kind is what narrows it to the rows it means, by
+				// declaration rather than by the corpus happening to project
+				// no other identity-typed rows today.
+				VisibleWhen: &pkgmgr.OpVisibleWhenSpec{
+					Field:  "row_kind",
+					Equals: "credentialBinding",
+				},
+				// The live dispatcher's own list (cmd/facet/credentials.go's
+				// hand-built envelope), verified against the script branch:
+				// U and U.state are required, and U.credentialBinding is
+				// absence-TOLERANT because its absence is the implicit
+				// self-credential case, which the script folds into the
+				// ordinary not-found outcome rather than a fault.
+				//
+				// The index vertex and the boundTo link this op tombstones
+				// are NOT here: they are class-(g) script-derived keys, so
+				// the DDL's own derive_reads declares them and no submitter
+				// can or should.
+				Reads: []string{
+					"{actor}",
+					"{actor}.state",
+				},
+				OptionalReads: []string{
+					"{actor}.credentialBinding",
 				},
 			},
 		},

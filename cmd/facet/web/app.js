@@ -207,7 +207,6 @@ const state = {
   // doesn't grow this unboundedly.
   outboxHistory: [],
   view: "home",
-  credentials: null, // null = not yet loaded; array once GET /api/credentials resolves
   // panes holds each SERVER-PANE's fetched state, keyed by paneId
   // (facet-staff-worlds-design.md §3.4) — deliberately NOT in `rows`, because
   // those mirror onto the device and this must not: pane rows are
@@ -583,7 +582,10 @@ function signOut() {
   if (activeSource) { activeSource.close(); activeSource = null; }
   state.rows.clear();
   state.outbox.clear();
-  state.credentials = null;
+  // Pane state is another identity's Protected data the moment the cookie
+  // changes hands, so it purges with the mirror rather than lingering until
+  // the next fetch replaces it.
+  state.panes.clear();
   purgeCeremonyReveals();
   fetch("/api/logout", { method: "POST" })
     .catch(() => {})
@@ -594,6 +596,16 @@ function applyOutboxFrame(e) {
   if (!e) return;
   state.outbox.set(e.requestId, e);
   if (e.state === "confirmed") {
+    // A confirmed write is the earliest moment a pane's Protected model can
+    // have moved — and it is still not the moment it HAS, because projection
+    // is asynchronous, which is what the bounded poll is for. Fired here
+    // rather than at enqueue: an intent that queued offline confirms whenever
+    // it drains, and that is the drain the reader is waiting on.
+    //
+    // Every pane, not the one that was acted on: the client does not know
+    // which models an op writes, and pretending to would be knowledge the
+    // descriptor never gave it.
+    if (paneRows().length) refreshPanesUntilChanged();
     setTimeout(() => {
       const cur = state.outbox.get(e.requestId);
       if (cur && cur.state === "confirmed") {
@@ -980,6 +992,16 @@ function opButton(o, ctx) {
   if (ceremonyField(d) && !ceremonySupported()) {
     return `<div class="degraded-card">${esc(d.title || prettifyOpType(d.operationType))} — This needs a secure connection to complete safely; it can't be started here.</div>`;
   }
+  // An op whose declared authContext cannot be BUILT from this context is not
+  // offered. `task` reads ctx.taskKey/ctx.scopedTo and `service` reads
+  // ctx.serviceKey; a surface carrying neither — a pane row, say — would send
+  // {task: undefined, target: undefined} and be denied at step 3, after the
+  // person clicked. This is the same rule as the target gate below, applied
+  // to the other half of the envelope: it is not enough that the op resolves
+  // a TARGET here, the authority it names has to be reachable here too.
+  if (!authContextBuildable(d, ctx)) {
+    return `<div class="degraded-card">${esc(d.title || prettifyOpType(d.operationType))} — This can't be started from here; open it from the ${esc(d.dispatchAuthContext === "service" ? "service" : "task")} it belongs to.</div>`;
+  }
   // An op whose declared dispatch.targetType can't be resolved from this
   // context is not submittable from here — offering it anyway is how an op
   // once reached the Processor with the actor's vtx.identity where another
@@ -1168,6 +1190,24 @@ function paneRows() {
   return rowsByNs("manifest.pane").filter((p) => p.data && p.data.paneId);
 }
 
+// The surfaces this client draws. A pane naming anything else renders
+// NOWHERE, deliberately: a descriptor is its author's claim about where a
+// Protected read belongs, and a client that guessed would put somebody's data
+// on a screen nobody placed it on. An unrecognized surface is a client too old
+// for that pane — a missing feature. A guessed one is a disclosure.
+const paneSurfaceWork = "work";
+const paneSurfaceAccount = "account";
+
+// A descriptor predating the surface vocabulary carries none, and the work
+// surface is the placement it always had.
+function paneSurfaceOf(pane) {
+  return (pane && pane.surface) || paneSurfaceWork;
+}
+
+function paneRowsForSurface(surface) {
+  return paneRows().filter((p) => paneSurfaceOf(p.data) === surface);
+}
+
 function paneStateFor(paneId) {
   return state.panes.get(paneId) || { status: "idle", sections: [] };
 }
@@ -1187,6 +1227,45 @@ function reloadPanes() {
   for (const p of paneRows()) {
     if (paneStateFor(p.data.paneId).status !== "loading") loadPane(p.data.paneId);
   }
+}
+
+// refreshPanesUntilChanged re-reads every pane until one of them actually
+// moves. A pane is a live Protected read fed by ASYNC CDC projection, so a
+// re-read fired the instant an op is accepted still sees the pre-mutation
+// rows: the write landed, the projection has not. Without this, acting on a
+// pane row leaves the row you just changed sitting on screen until the next
+// navigation, which reads as "it didn't work" and invites doing it twice.
+//
+// Bounded, and it stops on the FIRST change rather than waiting for all of
+// them: an op writes to one model, and continuing to poll after that model
+// moved is spending requests to observe panes nobody touched. An unchanged
+// run simply ends — the pane is still correct, just not yet updated, and
+// saying nothing is better than claiming a projection that hasn't happened.
+function refreshPanesUntilChanged() {
+  const before = paneRowCounts();
+  let attempts = 0;
+  const poll = () => {
+    Promise.all(paneRows().map((p) => loadPane(p.data.paneId))).then(() => {
+      attempts++;
+      const after = paneRowCounts();
+      const changed = [...after.keys()].some((id) => after.get(id) !== before.get(id));
+      if (!changed && attempts < 8) setTimeout(poll, 300);
+    });
+  };
+  poll();
+}
+
+// paneRowCounts is the comparison "did anything move" is made against: total
+// rows per pane. It is deliberately coarse — a count, not a row diff — because
+// the question is whether the projection caught up, and a finer comparison
+// would report a change for a re-ordering the reader cannot see.
+function paneRowCounts() {
+  const counts = new Map();
+  for (const p of paneRows()) {
+    const ps = paneStateFor(p.data.paneId);
+    counts.set(p.data.paneId, (ps.sections || []).reduce((n, s) => n + ((s.rows || []).length), 0));
+  }
+  return counts;
 }
 
 function loadPane(paneId) {
@@ -1210,7 +1289,7 @@ function loadPane(paneId) {
 function renderWorklist() {
   const places = staffWorkplaces();
   const where = places.length ? places.map((p) => anchorLabel(p)).join(", ") : "";
-  const panes = paneRows();
+  const panes = paneRowsForSurface(paneSurfaceWork);
   $("view-worklist").innerHTML =
     workOrdersHTML(workOrders(), tasks(), state.connected) +
     (panes.length && where ? `<div class="section-title">${esc(where)}</div>` : "") +
@@ -1598,9 +1677,24 @@ function renderMe() {
     ${chipRow(homes, '<div class="chip-row"><span class="subtitle">None</span></div>')}
     ${workplaces.length ? `<h3 class="category-heading">Workplaces</h3>${chipRow(workplaces, "")}` : ""}
     ${bindings.length ? `<h3 class="category-heading">What I provide</h3>${bindingChipRow(bindings)}` : ""}
-    ${m.claimed ? renderCredentialsSection() : renderClaimCard()}
+    ${m.claimed ? renderAccountPanes() : renderClaimCard()}
   `;
-  if (m.claimed && state.credentials === null && !credentialsLoading && !credentialsError) loadCredentials();
+  if (m.claimed) loadIdlePanes();
+}
+
+// renderAccountPanes draws the panes whose descriptors place them on this
+// screen. It names no pane and no section: which ones appear is the grant
+// topology's answer (a pane is offeredTo a role the reader holds), and what
+// each shows is the descriptor's.
+//
+// The Link button sits below them rather than inside one. Linking is a
+// CEREMONY the host runs, not an op a descriptor can yet express — its
+// exemption is still stated, and Inc 4 is where it goes — so putting it in a
+// pane section would imply a row it does not have.
+function renderAccountPanes() {
+  const panes = paneRowsForSurface(paneSurfaceAccount);
+  return panes.map((p) => paneHTML(p.data, paneStateFor(p.data.paneId))).join("") + `
+    <button class="ghost-btn" style="margin-top:8px" data-link-credential ${linkInFlight ? "disabled" : ""}>${linkInFlight ? "Linking…" : "+ Link a new sign-in method"}</button>`;
 }
 
 // renderClaimCard is the Me screen's claim/link entry for a signed-in but
@@ -1642,86 +1736,28 @@ function submitSelfClaim() {
 // ---- Manage sign-in methods (multi-credential-identity-linking-design.md
 // §3/§8, edge-showcase-app-design.md §7.2 Inc 3) ----
 //
-// Lists the credentials bound to the signed-in identity (GET /api/credentials,
-// the identityCredentialsRead Protected Postgres lens), links a new one and
-// removes one. Facet's browser never talks to the Gateway itself, so
-// link/unlink are each ONE backend call (credentials.go runs the
-// Initiate/CompleteCredentialLink pair server-side, mirroring /api/claim's
-// own mint-a-throwaway-device shape).
-
-let credentialsLoading = false;
-
-// credentialsError holds a failed read's message. It exists so a broken read
-// model can never render as the affirmative claim "no sign-in methods" — an
-// unconfigured FACET_PG_DSN, an unreachable Postgres, or an unprojected lens
-// must look like a failure, not like an identity with zero ways to sign in
-// (which would invite linking a credential to "fix" a list that isn't
-// actually empty).
-let credentialsError = "";
-
-function loadCredentials() {
-  if (credentialsLoading) return Promise.resolve();
-  credentialsLoading = true;
-  return fetch("/api/credentials")
-    .then((r) => r.json().then((body) => ({ ok: r.ok, body })))
-    .then(({ ok, body }) => {
-      if (!ok) {
-        credentialsError = (body && body.error) || "Could not load your sign-in methods.";
-        return;
-      }
-      credentialsError = "";
-      state.credentials = body.credentials || [];
-    })
-    .catch((err) => { credentialsError = String(err); })
-    .finally(() => { credentialsLoading = false; scheduleRender(); });
-}
-
-// refreshCredentialsUntilChanged re-reads until the list actually moves.
-// /api/credentials serves the identityCredentialsRead lens, fed by ASYNC CDC
-// projection, so a read fired the instant link/unlink returns still sees the
-// pre-mutation set — the write is accepted but not yet projected. Polling to
-// a bounded ceiling keeps the "Linked."/"Removed." toast honest instead of
-// leaving the card the user just deleted sitting on screen until a reload.
-function refreshCredentialsUntilChanged(prevCount) {
-  let attempts = 0;
-  const poll = () => {
-    loadCredentials().then(() => {
-      attempts++;
-      const changed = credentialsError || (state.credentials || []).length !== prevCount;
-      if (!changed && attempts < 8) setTimeout(poll, 300);
-    });
-  };
-  poll();
-}
-
-function renderCredentialsSection() {
-  const creds = state.credentials;
-  if (credentialsError) {
-    return `<h3 class="category-heading">Sign-in methods</h3>
-      <div class="degraded-card">${esc(credentialsError)}</div>
-      <button class="ghost-btn" style="margin-top:8px" data-reload-credentials>Try again</button>`;
-  }
-  if (creds === null) {
-    return `<h3 class="category-heading">Sign-in methods</h3><div class="subtitle">Loading…</div>`;
-  }
-  return `
-    <h3 class="category-heading">Sign-in methods</h3>
-    ${creds.length ? creds.map((c) => renderCredentialCard(c, creds.length)).join("") : `<div class="empty">No sign-in methods found.</div>`}
-    <button class="ghost-btn" style="margin-top:8px" data-link-credential ${linkInFlight ? "disabled" : ""}>${linkInFlight ? "Linking…" : "+ Link a new sign-in method"}</button>
-  `;
-}
-
-function renderCredentialCard(c, totalCount) {
-  const short = lastSeg(c.actorKey || "").slice(0, 8);
-  const disabled = totalCount <= 1;
-  return `<div class="card" style="cursor:default">
-    <div class="title">Sign-in method ${esc(short)}&hellip;</div>
-    ${c.boundAt ? `<div class="subtitle">Linked ${esc(new Date(c.boundAt).toLocaleString())}</div>` : ""}
-    <div class="card-actions">
-      <button class="ghost-btn" data-unlink-credential="${esc(c.actorKey)}" ${disabled ? "disabled" : ""} title="${disabled ? "Cannot remove your last remaining sign-in method" : ""}">Remove</button>
-    </div>
-  </div>`;
-}
+// The LIST and the REMOVE affordance are no longer written here. Both are
+// descriptor-driven: the signInMethods pane declares the Protected table, the
+// columns and the dispatch target, and UnlinkCredential's op descriptor
+// declares how to submit against a row. A hand-written list and a hand-built
+// unlink envelope were the shape this screen had while a bound credential had
+// no projected row to be named by; the boundTo link gave it one.
+//
+// The three obligations the bespoke read carried are all discharged on the
+// pane path, which is what made the removal honest rather than a tidy-up:
+//
+//   - a broken read model must never render as the affirmative "no sign-in
+//     methods" — loadPane's failure sets `unavailable`, and paneHTML draws a
+//     degraded card for it rather than a section's empty copy;
+//   - the ViaCookie gate — handlePane refuses the boot-env fallback identity
+//     for exactly the reason credentials.go did;
+//   - the async-projection poll — refreshPanesUntilChanged, generic now,
+//     because every pane row action has the same lag.
+//
+// What stays is LINKING. It is a ceremony the host runs server-side (the
+// Initiate/Complete pair against a throwaway device credential), not an op a
+// descriptor can express yet — its exemption is still stated in identity-
+// domain's permission Note, and Inc 4 is where that changes.
 
 // linkInFlight serializes the link ceremony per browser. Two overlapping
 // links against the same identity corrupt each other: InitiateCredentialLink
@@ -1735,34 +1771,16 @@ let linkInFlight = false;
 function linkCredential() {
   if (linkInFlight) return;
   linkInFlight = true;
-  const prevCount = (state.credentials || []).length;
   scheduleRender();
   fetch("/api/credentials/link", { method: "POST" })
     .then((r) => r.json().then((body) => ({ ok: r.ok, body })))
     .then(({ ok, body }) => {
       if (!ok) { toast((body && body.error) || "Could not link a new sign-in method", false); return; }
       toast("New sign-in method linked.", true);
-      refreshCredentialsUntilChanged(prevCount);
+      refreshPanesUntilChanged();
     })
     .catch((err) => toast(String(err), false))
     .finally(() => { linkInFlight = false; scheduleRender(); });
-}
-
-function unlinkCredentialAction(actorKey) {
-  if (!confirm("Remove this sign-in method? It will no longer be able to sign in to this identity.")) return;
-  const prevCount = (state.credentials || []).length;
-  fetch("/api/credentials/unlink", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ credentialActorKey: actorKey }),
-  })
-    .then((r) => r.json().then((body) => ({ ok: r.ok, body })))
-    .then(({ ok, body }) => {
-      if (!ok) { toast((body && body.error) || "Could not remove sign-in method", false); return; }
-      toast("Sign-in method removed.", true);
-      refreshCredentialsUntilChanged(prevCount);
-    })
-    .catch((err) => toast(String(err), false));
 }
 
 // ------------------------------------------------------------------ modal
@@ -2252,6 +2270,24 @@ function wholeKey(k) {
   return typeof k === "string" && k !== "" && !k.includes("{") && !k.split(".").includes("");
 }
 
+// authContextBuildable reports whether this context can supply what the
+// declared authContext names. It is the offer-time counterpart of
+// buildAuthContext, and the two must stay in step: every value that reads a
+// ctx field there is checked for it here.
+//
+// "self" reads the session and "standing" sends nothing, so both are buildable
+// wherever the client is signed in. An unrecognized value is buildable too —
+// withholding an op because this client is older than its descriptor's
+// authContext vocabulary would hide an op the person legitimately holds, and
+// buildAuthContext already sends nothing for one, which the Processor judges
+// on its own terms.
+function authContextBuildable(op, ctx) {
+  const kind = op.dispatchAuthContext;
+  if (kind === "task") return !!(ctx && ctx.taskKey);
+  if (kind === "service") return !!(ctx && ctx.serviceKey);
+  return true;
+}
+
 function buildAuthContext(kind, ctx) {
   const m = me();
   if (kind === "self") return { target: m && m.identityKey };
@@ -2531,12 +2567,6 @@ function onGlobalClick(e) {
 
   const linkCred = e.target.closest("[data-link-credential]");
   if (linkCred) { linkCredential(); return; }
-
-  const reloadCreds = e.target.closest("[data-reload-credentials]");
-  if (reloadCreds) { credentialsError = ""; loadCredentials(); return; }
-
-  const unlinkCred = e.target.closest("[data-unlink-credential]");
-  if (unlinkCred) { unlinkCredentialAction(unlinkCred.dataset.unlinkCredential); return; }
 
   const openOp = e.target.closest("[data-open-op]");
   if (openOp) {

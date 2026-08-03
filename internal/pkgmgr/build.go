@@ -279,9 +279,13 @@ func (i *Installer) buildInstallBatch(
 			map[string]any{"paneId": p.CanonicalName}))
 		addCreate(paneKey+".paneDescriptor", docAspect(paneKey, "paneDescriptor", "paneDescriptor",
 			map[string]any{
-				"paneId":   p.CanonicalName,
-				"title":    p.Title,
-				"icon":     p.Icon,
+				"paneId": p.CanonicalName,
+				"title":  p.Title,
+				"icon":   p.Icon,
+				// Normalized rather than written verbatim, so a client reads
+				// one value for one placement instead of having to know that
+				// "" and "work" are the same screen.
+				"surface":  paneSurface(p.Surface),
 				"sections": p.Sections,
 			}))
 		for _, roleID := range p.OfferedToRoles {
@@ -652,6 +656,18 @@ func opDispatchBody(d *OpDispatchSpec) map[string]any {
 // the hash field as an ordinary input — fail-OPEN. The check that catches
 // that lives where the author is, in lint-package-standard's S1 descriptor
 // completeness, not here and not in the client.
+// paneSurface resolves a PaneSpec's declared surface to the value that
+// travels in the descriptor. The zero value IS the work surface, and
+// collapsing it here means every consumer compares one string rather than
+// re-deriving the default — the same reason the descriptor carries resolved
+// role NanoIDs rather than canonical names.
+func paneSurface(s string) string {
+	if s == "" {
+		return PaneSurfaceWork
+	}
+	return s
+}
+
 func opCeremonyBody(c *OpCeremonySpec) map[string]any {
 	body := map[string]any{}
 	if c.MintedSecretHashField != "" {

@@ -33,10 +33,62 @@ func Panes() []pkgmgr.PaneSpec {
 			OfferedToRoles: []string{"frontOfHouse"},
 			Title:          "Worklist",
 			Icon:           "doc",
+			Surface:        pkgmgr.PaneSurfaceWork,
 			Sections:       staffWorklistSections,
+		},
+		{
+			// The first pane offered to an audience with no work surface at
+			// all. A consumer holds no workplace anchor, so the staff screen
+			// never appears for them; the surface declaration is what puts
+			// this on the screen they DO have.
+			CanonicalName:  "signInMethods",
+			OfferedToRoles: []string{"consumer"},
+			Title:          "Sign-in methods",
+			Icon:           "key",
+			Surface:        pkgmgr.PaneSurfaceAccount,
+			Sections:       signInMethodsSections,
 		},
 	}
 }
+
+// signInMethodsSections is the account screen's bound-credential list: one row
+// per live `boundTo` edge, read from identity-domain's per-credential
+// Protected lens. RLS confines rows to the reader's own credentials (each
+// row's authz_anchor is the OWNER's NanoID), so the section declares no
+// filter — the grant IS the confinement, the same rule the staff worklist
+// states.
+//
+// `credential_actor_key` is the dispatch target, and `row_kind` is the
+// constant an op descriptor gates on: a credential actor is itself a
+// `vtx.identity.<NanoID>`, so targetType alone cannot distinguish these rows
+// from a person's. No operation is named here — which ops appear is decided
+// entirely by the descriptors the reader can already see.
+//
+// The credential's own NanoID takes the `title` role rather than a separate
+// `id` one. It is the only thing on the row that identifies WHICH sign-in
+// method this is (the link's `boundAt` lives in relationship data no lens can
+// project yet), so declaring it twice under two roles would put the same
+// column in the SELECT twice to satisfy a role neither the host nor the
+// renderer reads.
+const signInMethodsSections = `[
+  {
+    "id": "credentials",
+    "title": "Sign-in methods",
+    "emptyCopy": "No sign-in methods on record.",
+    "source": {
+      "table": "read_identity_credential_bindings",
+      "columns": [
+        {"name": "binding_id", "kind": "text", "role": "title", "fallback": "Sign-in method"},
+        {"name": "credential_actor_key", "kind": "text", "role": "target"},
+        {"name": "row_kind", "kind": "text", "role": "hidden"},
+        {"name": "identity_key", "kind": "text", "role": "hidden"}
+      ],
+      "orderBy": {"column": "binding_id"},
+      "limit": 200
+    },
+    "dispatch": {"targetColumn": "credential_actor_key", "targetType": "identity"}
+  }
+]`
 
 // staffWorklistSections is the front-desk worklist: pending lease
 // applications, today's appointment schedule, and the workplace's recurring

@@ -166,12 +166,18 @@ func TestPackage_DependsOnRbacDomain(t *testing.T) {
 // The two staff ceremony ops are "standing" for the mirror reason: both are
 // scope=any grants to frontOfHouse/backOfHouse/operator with no relationship
 // to any target, so there is no authContext for the client to populate.
+//
+// UnlinkCredential is "self", and its payload target is a DIFFERENT value from
+// its envelope target — the session identity authorizes, the row names the
+// credential. Its own shape is pinned in full below
+// (TestPackage_UnlinkCredentialIsRowDispatched).
 func TestPackage_OpMetasAreFullDescriptors(t *testing.T) {
 	wantAuthContext := map[string]string{
 		"ClaimIdentity":           "self",
 		"RecordIdentityPII":       "task",
 		"CreateUnclaimedIdentity": "standing",
 		"RotateClaimKey":          "standing",
+		"UnlinkCredential":        "self",
 	}
 	if got, want := len(Package.OpMetas), len(wantAuthContext); got != want {
 		t.Fatalf("OpMetas: got %d, want %d", got, want)
@@ -231,23 +237,24 @@ func TestPackage_OpMetasAreFullDescriptors(t *testing.T) {
 	}
 }
 
-// TestPackage_ExemptOpsStateTheirExemption pins the other half of S1. These
-// three are user-facing — a person triggers each — but their submission is
-// something the descriptor vocabulary still cannot express: a submission as a
-// different actor than the client authenticated as, a secret that has to reach
-// a SECOND device, or an input nothing projects. S1 admits that only when the
-// permission Note SAYS so, naming the missing mechanism by its code, and the
-// reason has to survive in the Note or this fails.
+// TestPackage_ExemptOpsStateTheirExemption pins the other half of S1. Both of
+// these are user-facing — a person triggers each — but their submission is
+// something the descriptor vocabulary still cannot express: each submits as a
+// different actor than the client authenticated as, one of them after carrying
+// a secret to a SECOND device. S1 admits that only when the permission Note
+// SAYS so, naming the missing mechanism by its code, and the reason has to
+// survive in the Note or this fails.
 //
 // The set is what shrinks as mechanisms land. CreateUnclaimedIdentity and
 // RotateClaimKey left it when OpCeremonySpec made minting expressible, and
-// they are asserted against the opposite half below — an op that gains a
-// mechanism must gain a descriptor, not quietly keep its amnesty.
+// UnlinkCredential left it when the boundTo link gave its one input a
+// projected row to be filled from. Each is asserted against the opposite half
+// below — an op that gains a mechanism must gain a descriptor, not quietly
+// keep its amnesty.
 func TestPackage_ExemptOpsStateTheirExemption(t *testing.T) {
 	exempt := map[string]string{
 		"InitiateCredentialLink": "paired-code",
 		"CompleteCredentialLink": "raw-credential-actor",
-		"UnlinkCredential":       "unprojected-input",
 	}
 	seen := map[string]bool{}
 	for _, p := range Package.Permissions {
@@ -323,6 +330,80 @@ func TestPackage_CeremonyOpsCarryDescriptorNotExemption(t *testing.T) {
 			t.Errorf("%s: still claims an S1 exemption while carrying a descriptor — the mechanism landed, so the amnesty must go", p.OperationType)
 		}
 	}
+}
+
+// TestPackage_UnlinkCredentialIsRowDispatched pins the three declarations that
+// make UnlinkCredential's descriptor a promise rather than a form nobody can
+// fill, each of which used to be the reason it was exempt.
+//
+// The payload target and the envelope target are DIFFERENT values, and the
+// separation is the whole mechanism: authContext "self" names the session
+// identity (what scope=self is checked against) while credentialActorKey is
+// resolved from the row. A descriptor that named one for both would submit the
+// person's own identity as the credential to remove.
+//
+// visibleWhen is the other half. A credential actor is itself a vtx.identity
+// vertex, so targetType alone offers this op against a person's row as readily
+// as a credential's; the section's constant row_kind is what narrows it.
+func TestPackage_UnlinkCredentialIsRowDispatched(t *testing.T) {
+	var m *pkgmgr.OpMetaSpec
+	for i := range Package.OpMetas {
+		if Package.OpMetas[i].OperationType == "UnlinkCredential" {
+			m = &Package.OpMetas[i]
+		}
+	}
+	if m == nil {
+		t.Fatal("UnlinkCredential: no descriptor — its unprojected-input exemption is retired, so it must carry one")
+	}
+	d := m.Dispatch
+	if d == nil {
+		t.Fatal("UnlinkCredential: no Dispatch — a descriptor with no dispatch degrades to an un-submittable card")
+	}
+	if d.AuthContext != "self" {
+		t.Errorf("AuthContext = %q, want self — scope=self is checked against the session identity", d.AuthContext)
+	}
+	if d.TargetField != "credentialActorKey" || d.TargetType != "identity" {
+		t.Errorf("target = %q/%q, want credentialActorKey/identity", d.TargetField, d.TargetType)
+	}
+	if d.VisibleWhen == nil || d.VisibleWhen.Field != "row_kind" || d.VisibleWhen.Equals != "credentialBinding" {
+		t.Errorf("VisibleWhen = %+v, want row_kind == credentialBinding — without it the op is offered on any identity-typed row", d.VisibleWhen)
+	}
+	// The dispatcher's declared reads, which must stay the live envelope's:
+	// U and U.state required, U.credentialBinding absence-tolerant. Its
+	// absence is the implicit self-credential case, which the script folds
+	// into not-found rather than faulting on.
+	if got, want := strings.Join(d.Reads, ","), "{actor},{actor}.state"; got != want {
+		t.Errorf("Reads = %q, want %q", got, want)
+	}
+	if got, want := strings.Join(d.OptionalReads, ","), "{actor}.credentialBinding"; got != want {
+		t.Errorf("OptionalReads = %q, want %q — a required credentialBinding faults HydrationMiss for an identity that has none", got, want)
+	}
+	// The class-(g) keys stay out of the submitter's declaration: the index
+	// vertex and the boundTo link are derived by the DDL, not by any client.
+	for _, r := range append(append([]string{}, d.Reads...), d.OptionalReads...) {
+		if strings.Contains(r, "credentialindex") || strings.Contains(r, "boundTo") {
+			t.Errorf("declared read %q is a script-derived key — derive_reads owns it, no submitter can compute it", r)
+		}
+	}
+}
+
+// TestPackage_RotateClaimKeyWithheldUntilUnclaimedRow: RotateClaimKey targets
+// an identity by type, and a credential-binding row is identity-typed too. Its
+// visibleWhen is what stops "re-issue this person's claim secret" being offered
+// against one of their own sign-in methods — an offer that reaches the script's
+// unclaimed-only guard and denies, after the person clicked it.
+func TestPackage_RotateClaimKeyWithheldUntilUnclaimedRow(t *testing.T) {
+	for _, m := range Package.OpMetas {
+		if m.OperationType != "RotateClaimKey" {
+			continue
+		}
+		v := m.Dispatch.VisibleWhen
+		if v == nil || v.Field != "unclaimed" || v.Equals != true {
+			t.Fatalf("RotateClaimKey VisibleWhen = %+v, want unclaimed == true", v)
+		}
+		return
+	}
+	t.Fatal("RotateClaimKey: no descriptor")
 }
 
 // TestPackage_NoDescriptorForOperatorOnlyOps: an op only a trusted tool submits

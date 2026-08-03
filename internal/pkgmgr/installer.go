@@ -229,6 +229,9 @@ func (i *Installer) buildManifestBatch(def Definition) ([]installMutation, []str
 				return nil, nil, "", fmt.Errorf("pkgmgr: Pane[%d] %q: OfferedToRoles entry %q is not a valid NanoID — role may not be installed or bootstrap JSON is missing the role ID", idx, p.CanonicalName, g)
 			}
 		}
+		if !IsPaneSurface(p.Surface) {
+			return nil, nil, "", fmt.Errorf("pkgmgr: Pane[%d] %q: Surface %q is not a known surface (%q or %q)", idx, p.CanonicalName, p.Surface, PaneSurfaceWork, PaneSurfaceAccount)
+		}
 	}
 
 	// Version-independent NanoIDs (derived from package name + entity tag,

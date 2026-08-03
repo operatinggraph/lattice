@@ -28,62 +28,22 @@ func withBootSession(r *http.Request, identityID string) *http.Request {
 	return r.WithContext(appsession.WithSession(r.Context(), identityID, false))
 }
 
-// TestCredentialSurfaces_RefuseTheBootFallbackSession — credentialBinding is
-// a SENSITIVE aspect, so every credential surface requires a caller who
-// PROVED which identity they are. The boot-env fallback proves nothing (it
-// hands the process's identity to whoever connects), so an off-loopback boot
-// deployment must not expose, or let anyone mutate, its bound credentials.
+// TestCredentialSurfaces_RefuseTheBootFallbackSession — a credential surface
+// serves only a caller who PROVED which identity they are. The boot-env
+// fallback proves nothing (it hands the process's identity to whoever
+// connects), so an off-loopback boot deployment must not be able to arm a new
+// sign-in method on it.
+//
+// The LIST and the unlink submission used to be asserted here too. Both moved
+// to the pane path, where handlePane makes the same refusal for the same
+// reason — pane_test.go pins it there.
 func TestCredentialSurfaces_RefuseTheBootFallbackSession(t *testing.T) {
 	const id = "tenantnano9123456789"
 	srv := &server{logger: slog.Default(), devSigner: testDevSigner(t)}
 
 	w := httptest.NewRecorder()
-	srv.handleCredentials(w, withBootSession(httptest.NewRequest(http.MethodGet, "/api/credentials", nil), id))
-	require.Equal(t, http.StatusForbidden, w.Code)
-
-	w = httptest.NewRecorder()
 	srv.handleCredentialsLink(w, withBootSession(httptest.NewRequest(http.MethodPost, "/api/credentials/link", nil), id))
 	require.Equal(t, http.StatusForbidden, w.Code)
-
-	w = httptest.NewRecorder()
-	srv.handleCredentialsUnlink(w, withBootSession(
-		httptest.NewRequest(http.MethodPost, "/api/credentials/unlink", strings.NewReader(`{"credentialActorKey":"vtx.identity.x"}`)), id))
-	require.Equal(t, http.StatusForbidden, w.Code)
-}
-
-func TestHandleCredentials_RequiresSession(t *testing.T) {
-	srv := &server{logger: slog.Default()}
-	w := httptest.NewRecorder()
-	srv.handleCredentials(w, httptest.NewRequest(http.MethodGet, "/api/credentials", nil))
-	require.Equal(t, http.StatusUnauthorized, w.Code)
-}
-
-func TestHandleCredentials_ReportsUnconfiguredReadModel(t *testing.T) {
-	srv := &server{logger: slog.Default()}
-	w := httptest.NewRecorder()
-	r := withSession(httptest.NewRequest(http.MethodGet, "/api/credentials", nil), "tenantnano9123456789")
-	srv.handleCredentials(w, r)
-	require.Equal(t, http.StatusBadGateway, w.Code)
-	require.Contains(t, w.Body.String(), "FACET_PG_DSN")
-}
-
-func TestCredentialBindingData_Entries(t *testing.T) {
-	// The N-credential array wins when present.
-	d := credentialBindingData{
-		ActorKey:    "vtx.identity.first0000000000000",
-		BoundAt:     "2026-07-01T00:00:00Z",
-		Credentials: []credentialEntry{{ActorKey: "vtx.identity.a1", BoundAt: "t1"}, {ActorKey: "vtx.identity.a2", BoundAt: "t2"}},
-	}
-	require.Len(t, d.entries(), 2)
-
-	// A pre-Fire-2 record (no array) folds its singular fields into one entry
-	// — mirrors the Starlark script's own read-side fallback.
-	legacy := credentialBindingData{ActorKey: "vtx.identity.only0", BoundAt: "t0"}
-	require.Equal(t, []credentialEntry{{ActorKey: "vtx.identity.only0", BoundAt: "t0"}}, legacy.entries())
-
-	// An identity that never claimed projects nothing rather than a
-	// phantom empty-key entry.
-	require.Nil(t, credentialBindingData{}.entries())
 }
 
 func TestHandleCredentialsLink_RequiresSessionAndDevSigner(t *testing.T) {
@@ -196,79 +156,6 @@ func TestHandleCredentialsLink_StopsWhenInitiateRejected(t *testing.T) {
 	srv.handleCredentialsLink(w, r)
 	require.Equal(t, http.StatusUnprocessableEntity, w.Code)
 	require.Equal(t, 1, calls, "a rejected Initiate must not proceed to Complete")
-}
-
-func TestHandleCredentialsUnlink_SubmitsAsSelf(t *testing.T) {
-	var gotEnv struct {
-		OperationType string                 `json:"operationType"`
-		Class         string                 `json:"class"`
-		Payload       json.RawMessage        `json:"payload"`
-		Reads         []string               `json:"reads"`
-		OptionalReads []string               `json:"optionalReads"`
-		AuthContext   *processor.AuthContext `json:"authContext"`
-	}
-	gw := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		require.NoError(t, json.NewDecoder(r.Body).Decode(&gotEnv))
-		_ = json.NewEncoder(w).Encode(processor.OperationReply{Status: processor.ReplyStatusAccepted})
-	}))
-	defer gw.Close()
-
-	const uID = "tenantnano9123456789"
-	srv := &server{logger: slog.Default(), devSigner: testDevSigner(t), gatewayURL: gw.URL}
-	w := httptest.NewRecorder()
-	r := withSession(
-		httptest.NewRequest(http.MethodPost, "/api/credentials/unlink",
-			strings.NewReader(`{"credentialActorKey":"vtx.identity.oldcred000000000000"}`)),
-		uID)
-	srv.handleCredentialsUnlink(w, r)
-
-	require.Equal(t, http.StatusOK, w.Code)
-	require.Equal(t, "UnlinkCredential", gotEnv.OperationType)
-	require.Equal(t, "identity", gotEnv.Class)
-	require.Equal(t, "vtx.identity."+uID, gotEnv.AuthContext.Target)
-
-	var payload struct {
-		CredentialActorKey string `json:"credentialActorKey"`
-	}
-	require.NoError(t, json.Unmarshal(gotEnv.Payload, &payload))
-	require.Equal(t, "vtx.identity.oldcred000000000000", payload.CredentialActorKey)
-	require.Contains(t, gotEnv.OptionalReads, "vtx.identity."+uID+".credentialBinding")
-}
-
-// TestHandleCredentialsUnlink_TargetsOnlyTheSession proves the handler never
-// lets a caller name WHICH identity to unlink from: the target is always the
-// session's own key, so a caller cannot strip another identity's credential
-// by passing someone else's id.
-func TestHandleCredentialsUnlink_TargetsOnlyTheSession(t *testing.T) {
-	var gotEnv struct {
-		AuthContext *processor.AuthContext `json:"authContext"`
-	}
-	gw := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		require.NoError(t, json.NewDecoder(r.Body).Decode(&gotEnv))
-		_ = json.NewEncoder(w).Encode(processor.OperationReply{Status: processor.ReplyStatusAccepted})
-	}))
-	defer gw.Close()
-
-	srv := &server{logger: slog.Default(), devSigner: testDevSigner(t), gatewayURL: gw.URL}
-	w := httptest.NewRecorder()
-	// The body names a victim identity; the session is someone else.
-	r := withSession(
-		httptest.NewRequest(http.MethodPost, "/api/credentials/unlink",
-			strings.NewReader(`{"credentialActorKey":"vtx.identity.victimcred000000000","identityId":"victimnano0123456789"}`)),
-		"tenantnano9123456789")
-	srv.handleCredentialsUnlink(w, r)
-
-	require.Equal(t, http.StatusOK, w.Code)
-	require.Equal(t, "vtx.identity.tenantnano9123456789", gotEnv.AuthContext.Target,
-		"the unlink target must come from the session, never from the request body")
-}
-
-func TestHandleCredentialsUnlink_RequiresCredentialActorKey(t *testing.T) {
-	srv := &server{logger: slog.Default(), devSigner: testDevSigner(t)}
-	w := httptest.NewRecorder()
-	r := withSession(httptest.NewRequest(http.MethodPost, "/api/credentials/unlink", strings.NewReader(`{}`)), "tenantnano9123456789")
-	srv.handleCredentialsUnlink(w, r)
-	require.Equal(t, http.StatusBadRequest, w.Code)
 }
 
 func TestMintLinkSecret_IsRandomAndHashMatches(t *testing.T) {

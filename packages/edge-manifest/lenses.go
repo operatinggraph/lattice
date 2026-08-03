@@ -770,6 +770,12 @@ RETURN
 // client discovers panes by this ns prefix; the HOST re-reads the same row
 // from its own mirror when executing `/api/pane` — one descriptor, two
 // consumers, zero pane knowledge in either.
+//
+// `surface` is the pane's declared placement (pkgmgr.PaneSpec.Surface). The
+// lens's name says staff because its chain is the held-role walk, but that
+// chain is role-generic — an identity holding ANY role a pane is offeredTo
+// reaches it — so a pane offered to consumers rides the same row, and the
+// surface is what tells the renderer where to draw it.
 const edgeStaffPanesTail = `
 WITH pane
 WHERE pane.key <> null
@@ -780,6 +786,7 @@ RETURN
   pane.paneDescriptor.data.paneId AS paneId,
   pane.paneDescriptor.data.title AS title,
   pane.paneDescriptor.data.icon AS icon,
+  pane.paneDescriptor.data.surface AS surface,
   pane.paneDescriptor.data.sections AS sections
 `
 
