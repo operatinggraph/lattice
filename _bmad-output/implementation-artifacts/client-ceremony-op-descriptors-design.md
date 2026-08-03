@@ -1421,3 +1421,126 @@ satisfied. Note for that fire: there is **no consumer-facing `PaneSpec` today** 
 to `frontOfHouse` only — so the section needs a new pane offered to `consumer`, and the pane lens projects
 over `holdsRole → offeredTo`. Both filed rows above bind on that pane: a person the reconcile cannot reach
 sees an incomplete list, not an empty one, which is the harder failure to notice.
+
+## 16. Increment 2b-2 fire brief (build note, 2026-08-03)
+
+2b-1 completed the link plane; 2b-2 is the surface that reads it. Grounding at `1aff2059` turned up
+three things §15.7 did not name, each of which changes what this increment has to build.
+
+### 16.1 Verified touch-list (checked live at `1aff2059`)
+
+| Site | What it is today | 2b-2 |
+|---|---|---|
+| `internal/pkgmgr/definition.go` (`PaneSpec`) | `CanonicalName/OfferedToRoles/Title/Icon/Sections` | + `Surface` |
+| `internal/pkgmgr/build.go:280` (`paneDescriptor` body) | `paneId/title/icon/sections` | + `surface` |
+| `packages/edge-manifest/lenses.go:774-783` (`edgeStaffPanesTail`) | 6 projected columns | + `surface` |
+| `packages/edge-manifest/panes.go` | one pane (`staffWorklist`, `frontOfHouse`) | + `signInMethods` (`consumer`, `Surface:"account"`) |
+| `packages/edge-manifest/package.go` | version | bump (a same-version edit no-ops) |
+| `packages/identity-domain/opmetas.go` | four descriptors | + `UnlinkCredential`; `RotateClaimKey` gains `VisibleWhen` |
+| `packages/identity-domain/permissions.go:97` | `[no-op-meta: unprojected-input …]` | Note rewritten, exemption gone |
+| `packages/identity-domain/package_test.go:250` | asserts the exemption | drops the entry |
+| `packages/identity-domain/lenses.go:163` (`identityCredentialBindingsReadSpec`) | 5 columns | + a constant `row_kind` the descriptor gates on |
+| `cmd/facet/web/app.js` | panes render only in the Work tab; bespoke credentials card | account-surface panes on Me; bespoke read retired |
+| `cmd/lattice/identity/identity.go` (`claim --actor`) | submits without a provisioning pre-flight | provisions the credential vertex first |
+
+### 16.2 Three findings the checkpoint did not name, and what each forces
+
+**(1) A `consumer`-offered pane renders nowhere.** `edgeStaffPanes` is role-generic — its chain is
+`(identity)-[:holdsRole]->(role:role)<-[:offeredTo]-(pane:meta)` and `domainStaff` is a cap-read slice
+label, not a role filter — so the descriptor row *projects* for a consumer fine. But the only render site
+is `renderWorklist`, and `worklist-nav` is hidden unless `isStaffMe(m)` (a `worksAt` anchor). A consumer
+would receive a descriptor no screen draws.
+
+The fix is placement-as-data, not a second hardcoded site: `PaneSpec.Surface` (`""`/`"work"` → the Work
+tab, `"account"` → the Me screen). The renderer already refuses to name a table, a column or an
+operation; which screen a pane belongs on is the same class of fact, and it was only ever implicit
+because there was exactly one pane offered to exactly one audience.
+
+**(2) `targetType: "identity"` cross-offers.** `paneRowOps` offers every op whose `dispatchTargetType`
+matches the section's, and `resolveTargetKey` matches by the key's own type segment — so a credential
+vertex (`vtx.identity.<credId>`) and a person are indistinguishable to it. That is not a modelling slip
+to route around: a credential actor genuinely *is* an identity vertex. Two live consequences the moment
+this pane ships:
+
+- `RotateClaimKey` (`TargetType:"identity"`, `AuthContext:"standing"`) would resolve against a
+  credential row and be offered to any staff-and-consumer reader as "Re-issue secret" on their own
+  sign-in methods. It gains `VisibleWhen{Field:"unclaimed", Equals:true}` — fail-closed on every row in
+  the corpus today, and a live gate the moment the filed identity-entity projection carries the field.
+  Its §16.1 comment already names that projection as its consumer; this makes the dependency binding
+  rather than narrative.
+- `RecordIdentityPII` declares `AuthContext:"task"`, and `buildAuthContext("task")` reads
+  `ctx.taskKey`/`ctx.scopedTo` — neither of which a pane row carries — so it would submit
+  `{task: undefined, target: undefined}` and deny at step 3. The fix is generic and belongs in
+  `opButton`, not in a descriptor: **an op whose declared `authContext` cannot be built from this
+  context is not offered.** That covers every future task- or service-scoped op that lands on a pane row.
+
+`UnlinkCredential` takes the same treatment from the other side — the lens projects a constant
+`row_kind` column and the descriptor gates on it, so the op is offered on credential-binding rows and
+nowhere else, by declaration rather than by there happening to be no other identity-typed rows.
+
+**(3) The completeness worry reduces to one path.** §15.7 warned the pane would show an incomplete
+list. Re-grounded, the two filed rows are not the same shape:
+
+- *A raw actor `ProvisionConsumerIdentity` minted.* That op writes the identity vertex, `.state`, the
+  `holdsRole` link and optionally `.idpBinding` — no `credentialBinding` aspect at all. So the **bespoke**
+  card renders "No sign-in methods found" for that person today, exactly as the pane would. The gap is
+  real and pre-existing, and it is **not** a regression this increment introduces. It is also not
+  pattern-application work: that person's credential *is* their identity vertex, so the edge would be a
+  self-loop — precisely what 2b-1's guard rejects. Whether a self-binding is representable is a modelling
+  decision, so it stays filed for the Designer rather than improvised here.
+- *A credential whose identity vertex was never provisioned* (`lattice identity claim --actor`, which
+  skips the Gateway's pre-flight). Here the array **does** carry the entry and the lens cannot anchor it,
+  so the pane really would under-report against the card it replaces. The filed fork is "provision in the
+  CLI vs re-anchor the lens"; re-anchoring does not help, because `traverseRel` reads the neighbour node
+  either way. The CLI arm is the one with a precedent to mirror — the Gateway already provisions before
+  claiming — so it is impl-level, and it is built here.
+
+With that path closed, the pane is not weaker than the list it replaces on any input, which is what
+makes the replacement (rather than a second competing list on one screen) the honest shape.
+
+### 16.3 The scope-diff gate
+
+§4.2 ratified the pane section, the descriptor, and "removes the bespoke handlers only once (b) the
+error-vs-empty distinction and (c) the projection-lag poll are demonstrated on the pane path, or leaves
+them and files the removal." Both are discharged here rather than deferred:
+
+- **(b) is already carried.** `loadPane`'s catch sets `status:"unavailable"` and `paneHTML` renders a
+  degraded card for it — the same "a broken read model must never render as the affirmative claim *no
+  sign-in methods*" rule `credentialsError` exists for, already implemented and already commented for
+  that reason.
+- **(c) is built.** A bounded post-dispatch pane re-read, the generic analogue of
+  `refreshCredentialsUntilChanged`. It is not credential-specific: any op dispatched from a pane row
+  writes to a model the pane reads over async CDC, so without it every pane row action leaves the row it
+  just changed on screen.
+
+Additions beyond the ratified body — `PaneSpec.Surface`, the `authContext`-buildability gate, the
+`RotateClaimKey` `VisibleWhen`, the CLI pre-flight — are each forced by §16.2 and each strictly
+narrowing: a new descriptor field defaulting to today's behaviour, and three gates that withhold offers
+that would otherwise deny at the Processor.
+
+### 16.4 Increment order + green checks
+
+1. `PaneSpec.Surface` + the descriptor body + the manifest tail column.
+2. The `signInMethods` pane; `row_kind` on the lens; edge-manifest + identity-domain version bumps.
+3. `UnlinkCredential`'s `OpMetaSpec` + the exemption retirement (one commit — S1 fails an op carrying
+   both a descriptor and a stated exemption); `RotateClaimKey`'s `VisibleWhen`.
+4. Facet: the account surface, the `authContext` gate, the post-dispatch refresh, the bespoke read's
+   retirement.
+5. `lattice identity claim --actor`'s provisioning pre-flight.
+6. Tests: a pane descriptor projects its surface; an account pane renders on Me and not in the Work tab;
+   a task-authContext op is withheld from a pane row; `RotateClaimKey` is withheld from a credential row;
+   `UnlinkCredential` is offered on one and resolves its target from the row while the envelope target
+   stays the session identity (§4.2's two load-bearing accidents, pinned); the CLI provisions before
+   claiming.
+
+Gates: `go build ./...`, `make vet`, `golangci-lint run ./...`, `STRICT=1 go run ./scripts/lint-conventions.go`,
+`go run ./scripts/lint-package-standard.go`, `make verify-package-identity-domain`, the identity-domain,
+edge-manifest, pkgmgr, `cmd/facet` and `cmd/lattice` package tests.
+
+### 16.5 Non-goals (2b-2)
+
+`/api/credentials/link` and its ceremony stay exactly as they are — that is Inc 4's territory, and the
+Link button keeps its place on the Me screen beside the pane. The self-credential modelling question
+(§16.2 (3), first bullet) stays filed. Nothing here touches the `[no-op-meta: paired-code]` or
+`[no-op-meta: raw-credential-actor]` exemptions; the residual after this increment is **2**, as §4.4
+predicted.
