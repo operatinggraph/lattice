@@ -1171,18 +1171,35 @@ projection would read once the engine can — but the 2a lens ships two columns,
 **filed as its own row** with this lens named as its consumer, rather than papered over by re-reading the
 encrypted array the link exists to replace.
 
-**(2) The `boundTo` key joins the declared read set, so its write is CAS'd rather than blind.** The
-ratified body treats the link purely as an emit. But it is a deterministic key derived from
-`op.actor` + a payload field under package semantics — the exact definition of Contract #2 §2.5 class (g),
-which Inc 1 just built. Declaring it in `derive_reads` costs three lines and buys the revive-on-CAS the
-`credentialindex` writer already has (`credential_index_mutation`): a credential unlinked and later
-re-bound to the same identity must revive a tombstoned link, and a create-only writer would brick exactly
-that path. It is declared `optionalReads`, never `reads` — absence is the ordinary case on every bind.
+**(2) The writer is an `update`, and the key joins the declared read set — two separate properties, not
+one.** The first is load-bearing and was measured: with the mutation flipped to `create`, the re-bind of a
+credential that was unlinked earlier is **rejected** (`TestBoundTo_RelinkRevivesTombstonedLink` fails on
+outcome), because the create asserts revision 0 against a key that already has write history. So the
+revive posture `credential_index_mutation` already carries is required here too.
+
+The declaration is a *different* property, and the same falsification showed it is not what buys the
+revive: with the derived key removed from `derive_reads`, that test still passes — an unconditioned Put
+over a tombstone simply overwrites it. What declaring the key buys is **OCC**: the write commits
+conditioned on the revision it was read at instead of last-writer-wins. It is kept anyway, on the ground
+the increment chain is built on — a deterministic package-derived key is exactly Contract #2 §2.5
+class (g), and a blind Put on one is the undeclared posture class (g) exists to retire — not on a
+correctness claim it does not support. `optionalReads`, never `reads`: absence is the ordinary case on
+every bind.
 
 **The same three lines close a filed board row.** `ClaimIdentity`'s `consumer_grant_key` (the
 `holdsRole` link it upserts unconditioned) is a class-(g) key in the *same function*, filed as its own
 ★★ row precisely because "browser clients cannot compute the deterministic role key a declared read would
 require" — verbatim the blocker class (g) removes. It is derived here too, and the row closes.
+
+Declaring it converts a deliberately-unconditioned write into a CAS, so the question it has to survive is
+whether that can fail a ceremony whose own comment says it "must leave the person able to act at all" —
+the Gateway's `ProvisionConsumerIdentity` pre-flight writes the same key, concurrently, on any
+authenticated touch. It cannot: `commitPipeline` wraps hydrate → execute → validate → commit in a bounded
+OCC retry that re-hydrates and re-executes on a same-key revision conflict rather than bouncing
+`RevisionConflict` to the client (`internal/processor/commit_path.go`, `defaultMaxCommitAttempts = 3`). The
+CAS is therefore strictly better than the blind Put: the race is absorbed instead of silently clobbering a
+concurrent write. `TestClaimIdentity_ConsumerGrantAlreadyHeld_Succeeds` — which seeds the exact state the
+pre-flight leaves and declares nothing about the grant key — is the regression guard, and it is green.
 
 ### 14.3 Increment order + green checks
 
@@ -1201,3 +1218,62 @@ identity-hygiene / refractor package tests.
 The backfill, the `signInMethods` pane section, `UnlinkCredential`'s `OpMetaSpec`, and the
 `unprojected-input` exemption retirement — all 2b, all gated on the backfill by §7. Removing the bespoke
 `/api/credentials` handlers stays out of Inc 2 entirely (§4.2's closing paragraph).
+
+### 14.5 Review — two adversarial lanes on a frozen tree; the merge was the defect
+
+Two read-only reviewers (correctness, security) ran against the frozen build commit. Four findings landed,
+all substantiated against code rather than against a comment, all fixed in the same increment.
+
+**The merge wrote every `boundTo` edge twice — the one real defect.** `cmd/lattice`'s
+`enumerateSecondaryEdges` excludes `duplicateOf` and `indexes` from the generic `edges` payload for a
+structural reason: `MergeIdentity` repoints those classes in its own dedicated loops, and a class the
+script handles itself must never also arrive as a generic edge. `boundTo` is a third such class and did
+not get the exclusion. Every live `boundTo` edge of the secondary therefore reached the generic
+link-migration loop *and* the new credential loop, putting two conflicting conditioned publishes on one
+subject inside one atomic batch — and the generic loop's plain `create` on the rewritten key dies on a
+`RevisionConflict` whenever that key is a tombstone the credential loop deliberately revives, which is the
+unlink-then-rebind lifecycle §14.2 exists to protect. **Every merge test in the repo passes
+`edges := []string{}`, including the one written for this increment; the real CLI never does.** That is
+what hid it, so the fix ships with a `cmd/lattice` test that seeds a `boundTo` edge and asserts its
+exclusion, verified to fail without the fix.
+
+**Erasure did not erase it.** `ShredIdentityKey` tombstones the identity's `indexes` and `duplicateOf`
+links in the shred batch, because a plaintext derivative outlives the key it describes. `boundTo` names —
+in the key itself, traversably, decrypt-free — which sign-in credential belonged to which person. Both
+sibling link types in identity-domain carry shred handling *and say so in their DDL text*, so the omission
+was a break in an established invariant of the link plane, not a pre-existing residual. The reviewers split
+on this; the security lane is right, and the correctness lane's "symmetric with `credentialindex`" reading
+does not hold — `credentialindex` is a vertex and was never in that class. Enumerated both directions
+(the identity is the target of every credential bound to it, and the source when it is itself a credential
+of another) and tombstoned with the rest.
+
+**Two smaller ones.** The merge's batch-size pre-flight still counted one mutation per credential while
+the loop now emits three, so an over-large merge could clear the script's guard and hit the substrate's
+*terminal* `BatchTooLarge` instead of the clean domain error the guard exists to produce. And the
+credential loop lacked the self-loop guard the generic rekey loop 80 lines above already applies: the
+primary can itself be a credential of the secondary.
+
+**Filed, not fixed:** the lens drops any credential whose identity vertex was never provisioned — `seedNodes`
+anchors on `(c:identity)` and `readNode` returns nil for a missing key, so the row silently never appears,
+while `identityCredentialsRead` still lists the credential from the decrypted array. Reachable through
+`lattice identity claim`'s operator-supplied `--actor`, which skips the Gateway's provisioning pre-flight.
+Its own row: closing it means either provisioning in the CLI or re-anchoring the lens, and it becomes
+binding in 2b (an un-listable credential is un-unlinkable).
+
+**Checked and cleared:** the RLS anchor confines correctly and fails closed on an empty anchor list, and
+the retraction path re-evaluates both endpoints; `derive_reads` is not an enumeration oracle on
+`UnlinkCredential` (the hydrated index is never read, only tombstoned, and both keys are `optionalReads`
+so hit and miss are indistinguishable); the CAS'd grant cannot skip the grant while still transitioning
+state (one atomic batch); chain-merge U3→U2→U1 leaves exactly one live edge per credential.
+
+### 14.6 CHECKPOINT — Inc 2a shipped; Inc 2b is next
+
+**Shipped:** the `boundTo` link and its four writers, the per-credential Protected lens, three class-(g)
+derived keys, and the review pass above. Worktree `lattice-wt-ceremony-inc2`.
+
+**Next: Inc 2b** — the one-shot backfill (without it the lens projects only bindings made after this
+commit), the `signInMethods` pane section over it, `UnlinkCredential`'s `OpMetaSpec`, and the
+`unprojected-input` exemption retirement. §7's ordering rule binds: the pane ships only once the backfill
+has run. Note for that fire: the backfill's enumerable source is the `credentialindex` keyspace, whose
+vertices already carry `{actorKey, identityKey, boundAt}` in plaintext — no decryption of the sensitive
+array is needed to reconstruct the edge set.
