@@ -584,6 +584,7 @@ function signOut() {
   state.rows.clear();
   state.outbox.clear();
   state.credentials = null;
+  purgeCeremonyReveals();
   fetch("/api/logout", { method: "POST" })
     .catch(() => {})
     .finally(() => { location.replace("/login"); });
@@ -592,9 +593,6 @@ function signOut() {
 function applyOutboxFrame(e) {
   if (!e) return;
   state.outbox.set(e.requestId, e);
-  // A ceremony's minted plaintext is held until the write settles: this frame
-  // is the only place the client learns whether it landed.
-  settleCeremonyReveal(e.requestId, e.state);
   if (e.state === "confirmed") {
     setTimeout(() => {
       const cur = state.outbox.get(e.requestId);
@@ -607,6 +605,15 @@ function applyOutboxFrame(e) {
     }, 2000);
   }
   scheduleRender();
+  // Settled LAST, and defensively. This frame is the only place the client
+  // learns whether a ceremony's write landed, but the reveal touches the DOM —
+  // and it deletes the held plaintext before rendering, so a throw here would
+  // lose the secret AND (settled first) skip the outbox bookkeeping above.
+  try {
+    settleCeremonyReveal(e.requestId, e.state);
+  } catch (err) {
+    console.error("ceremony reveal failed", err);
+  }
 }
 
 function showRevocationBanner(reason) {
@@ -1798,7 +1805,8 @@ function ceremonyField(d) {
 function ceremonySupported() {
   return typeof crypto !== "undefined" &&
     typeof crypto.getRandomValues === "function" &&
-    !!crypto.subtle && typeof crypto.subtle.digest === "function";
+    !!crypto.subtle && typeof crypto.subtle.digest === "function" &&
+    typeof TextEncoder === "function"; // mintSecret hashes the encoded plaintext
 }
 
 function hexOf(bytes) {
@@ -1832,30 +1840,60 @@ function holdCeremonyReveal(requestId, reveal) {
   pendingReveals.set(requestId, reveal);
 }
 
-// settleCeremonyReveal runs off the outbox frame. Confirmed reveals; anything
-// else discards silently. Both terminal branches delete, so a plaintext
-// outlives its request by exactly one state transition.
+// purgeCeremonyReveals drops every held plaintext. Part of the §4.4 sign-out
+// purge: a minted secret is exactly the kind of thing that must not survive a
+// sign-out, and it is held outside `state` so the mirror sweep does not reach
+// it.
+function purgeCeremonyReveals() {
+  pendingReveals.clear();
+  shownReveals.length = 0;
+}
+
+// settleCeremonyReveal runs off the outbox frame. Confirmed reveals; rejected
+// discards — and SAYS so, because the submit toast promised a modal that would
+// otherwise never arrive, leaving a person waiting on a secret that no longer
+// exists. Both terminal branches delete, so a plaintext outlives its request
+// by exactly one state transition; a non-terminal state holds.
 function settleCeremonyReveal(requestId, outboxState) {
   const pending = pendingReveals.get(requestId);
   if (!pending) return;
   if (outboxState === "confirmed") {
-    pendingReveals.delete(requestId);
+    // Shown BEFORE the hold is released: if rendering throws, the plaintext is
+    // still held and the next frame for this request can still deliver it.
+    // Dropping it first would trade a render error for a lost secret.
     showCeremonyReveal(pending);
+    pendingReveals.delete(requestId);
     return;
   }
-  if (outboxState === "rejected") pendingReveals.delete(requestId);
+  if (outboxState === "rejected") {
+    pendingReveals.delete(requestId);
+    toast("That didn't go through, so no secret was issued — nothing to hand over.", false);
+  }
 }
 
-// showCeremonyReveal displays the plaintext once. Deliberately a MODAL and not
-// a toast: a toast auto-hides and the next toast() clears it, either of which
-// would destroy the only copy of the secret that will ever exist.
+// shownReveals holds every secret revealed but not yet dismissed. It exists
+// because showModal replaces #modal-root wholesale: revealing a second secret
+// would otherwise destroy the first, which is the same "the next one clears
+// it" failure that ruled out a toast in the first place. Two confirmations can
+// arrive back to back, so the modal shows the whole un-dismissed set rather
+// than the latest one.
+const shownReveals = [];
+
+// showCeremonyReveal displays a plaintext once, alongside any earlier one the
+// person has not dismissed yet. Deliberately a MODAL and not a toast: a toast
+// auto-hides and the next toast() clears it, either of which would destroy the
+// only copy of the secret that will ever exist.
 function showCeremonyReveal(pending) {
+  shownReveals.push(pending);
+  const blocks = shownReveals.map((r) => `
+    <h2>${esc(r.title || "Your secret — shown once")}</h2>
+    ${r.help ? `<p class="lead">${esc(r.help)}</p>` : ""}
+    <pre class="reveal-secret" data-reveal-secret>${esc(r.plaintext)}</pre>
+  `).join("");
   showModal(`
-    <button class="close-x" data-close>&times;</button>
-    <h2>${esc(pending.title || "Your secret — shown once")}</h2>
-    ${pending.help ? `<p class="lead">${esc(pending.help)}</p>` : ""}
-    <pre class="reveal-secret" data-reveal-secret>${esc(pending.plaintext)}</pre>
-    <button type="button" class="primary-btn" data-close>Done</button>
+    <button class="close-x" data-close data-dismiss-reveals>&times;</button>
+    ${blocks}
+    <button type="button" class="primary-btn" data-close data-dismiss-reveals>Done</button>
   `);
 }
 
@@ -2065,7 +2103,27 @@ function renderDescriptorForm(op, opKey, ctx, prefill, reviewBanner) {
   const form = $("descriptor-form");
   form.addEventListener("submit", (e) => {
     e.preventDefault();
-    submitDescriptorForm(form, op, opKey, ctx, fieldNames, props, contextParams, required);
+    // One submission per form. submitDescriptorForm awaits a mint and a round
+    // trip while this modal stays on screen, so a second click would submit
+    // the form twice — and for a ceremony op that is two writes and two
+    // secrets, of which the person can only ever be handed one (the reveal
+    // for the first is superseded by the second). CreateUnclaimedIdentity
+    // does not reject a duplicate — it creates a second identity and a
+    // duplicateOf link — so nothing downstream catches this for us.
+    if (form.dataset.submitting) return;
+    form.dataset.submitting = "1";
+    const submitBtn = form.querySelector('button[type="submit"]');
+    if (submitBtn) submitBtn.disabled = true;
+    const release = () => {
+      delete form.dataset.submitting;
+      if (submitBtn) submitBtn.disabled = false;
+    };
+    // The async conversion made every throw before the enqueue chain an
+    // unhandled rejection with no toast and a dead-looking button; this is
+    // the catch the event listener used to get for free.
+    Promise.resolve(submitDescriptorForm(form, op, opKey, ctx, fieldNames, props, contextParams, required))
+      .catch((err) => toast(String(err), false))
+      .finally(release);
   });
 }
 
@@ -2285,6 +2343,15 @@ function datetimeLocalToRFC3339(v) {
   return isNaN(d.getTime()) ? v : d.toISOString().replace(/\.\d{3}Z$/, "Z");
 }
 
+// enqueueOperation is the single write seam — POST /api/enqueue on the Go
+// host, the wasm engine's api.enqueue in-page (the W4 swap contract). Named
+// rather than inlined so the one coupling that has no other check — the
+// submitted hash being the hash OF the plaintext this same submission will
+// reveal — can be asserted against a real submission.
+function enqueueOperation(request) {
+  return activeSource.enqueue(request);
+}
+
 async function submitDescriptorForm(form, op, opKey, ctx, fieldNames, props, contextParams, required) {
   const payload = {};
   for (const name of fieldNames) {
@@ -2343,6 +2410,15 @@ async function submitDescriptorForm(form, op, opKey, ctx, fieldNames, props, con
   // rejects never mints a secret it would then have to discard.
   const minted = ceremonyField(op);
   let reveal = null;
+  if (minted && minted === op.dispatchTargetField) {
+    // A descriptor naming one field as both its dispatch target and its minted
+    // secret describes an impossible op: the mint would overwrite the resolved
+    // target key, and the target's value is pushed into `reads` unfiltered
+    // below, so a 64-hex string would be declared as a KV key. Refuse rather
+    // than submit a request that can only be rejected confusingly.
+    toast("This action is misconfigured and can't be submitted.", false);
+    return;
+  }
   if (minted) {
     if (!ceremonySupported()) {
       // Unreachable through opButton, which withholds the op — asserted here
@@ -2391,7 +2467,7 @@ async function submitDescriptorForm(form, op, opKey, ctx, fieldNames, props, con
   // enqueue through the live source — POST /api/enqueue on the Go host, the
   // wasm engine's api.enqueue in-page — so the same descriptor form drives
   // either host unchanged (the W4 swap contract).
-  return activeSource.enqueue({ operationType: op.operationType, class: op.dispatchClass || "", payload, reads, optionalReads, authContext, touchedKey })
+  return enqueueOperation({ operationType: op.operationType, class: op.dispatchClass || "", payload, reads, optionalReads, authContext, touchedKey })
     .then((body) => {
       if (body && body.error) { toast(body.error, false); return; }
       hideModal();
@@ -2496,9 +2572,25 @@ function onGlobalClick(e) {
   if (toggleHistory) { outboxHistoryExpanded = !outboxHistoryExpanded; scheduleRender(); return; }
 
   const closeBtn = e.target.closest("[data-close]");
-  if (closeBtn) { hideModal(); return; }
+  if (closeBtn) {
+    // Dismissing the reveal modal is the acknowledgement that the secrets in
+    // it have been written down — only then are they dropped. Closing any
+    // OTHER modal must not clear them, or a reveal arriving under an open
+    // entity card would be discarded by the click that closes that card.
+    if (closeBtn.hasAttribute("data-dismiss-reveals")) shownReveals.length = 0;
+    hideModal();
+    return;
+  }
 
-  if (e.target.hasAttribute("data-close-overlay")) { hideModal(); return; }
+  if (e.target.hasAttribute("data-close-overlay")) {
+    // A reveal is NOT dismissible by the stray click outside it — the easiest
+    // click to make by accident, and the secret behind it has no second
+    // showing. It takes the explicit Done, which is the only "I have written
+    // this down" this flow can ask for.
+    if (document.querySelector("[data-reveal-secret]")) return;
+    hideModal();
+    return;
+  }
 }
 
 // entityRefCandidates answers what an `x-entityRef: "<type>"` field may hold,

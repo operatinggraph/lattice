@@ -196,23 +196,27 @@ func TestPackage_OpMetasAreFullDescriptors(t *testing.T) {
 			t.Errorf("%s: authContext = %q, want %q", op, m.Dispatch.AuthContext, wantAC)
 		}
 	}
-	// ClaimIdentity must NOT name a targetType. A client resolving targetType
-	// "identity" falls back to the SUBMITTER's own identity rather than
-	// degrading, so a target it cannot really resolve would be substituted
-	// silently. RecordIdentityPII may, and only because its task context
-	// carries a scopedTo of that type, which matches before the fallback.
+	// ClaimIdentity must NOT name a targetType. Nothing projects an `identity`
+	// entity or self-anchor, so a declared TargetType "identity" resolves to
+	// nothing and offers no picker — which makes the client withhold the op
+	// entirely. Its target is transcribed from the invitation, so the field
+	// has to stay ordinary and prefillable. RecordIdentityPII may declare one,
+	// and only because its task context carries a scopedTo of that type.
 	if d := byOp["ClaimIdentity"].Dispatch; d.TargetField != "" || d.TargetType != "" {
-		t.Errorf("ClaimIdentity: declares targetField %q/targetType %q; the claim target comes from the invitation, and a declared identity targetType silently resolves to the submitter", d.TargetField, d.TargetType)
+		t.Errorf("ClaimIdentity: declares targetField %q/targetType %q; the claim target is transcribed from the invitation, and a declared identity targetType would withhold the op instead of letting it be entered", d.TargetField, d.TargetType)
 	}
-	// RotateClaimKey inherits that refusal for the same mechanism and a worse
-	// outcome: staff re-issuing against their OWN identity is the silent
-	// substitution, so identityKey is collected by an x-entityRef picker in the
-	// form rather than resolved from context.
-	if d := byOp["RotateClaimKey"].Dispatch; d.TargetField != "" || d.TargetType != "" {
-		t.Errorf("RotateClaimKey: declares targetField %q/targetType %q; an identity targetType resolving from no context substitutes the submitting staff member's own identity", d.TargetField, d.TargetType)
+	// RotateClaimKey takes the OPPOSITE call, and the pair is what makes it
+	// degrade honestly. Nothing projects an `identity` entity or self-anchor
+	// today, so declaring the target is what lets opButton's gate withhold the
+	// op behind a card; declaring only the picker would skip that gate and
+	// offer a form whose one required field can never be filled. Both halves
+	// must hold together — the picker is what lets the op become completable
+	// the moment a lens projects unclaimed identities.
+	if d := byOp["RotateClaimKey"].Dispatch; d.TargetField != "identityKey" || d.TargetType != "identity" {
+		t.Errorf("RotateClaimKey: targetField %q/targetType %q, want identityKey/identity so the offer gate can withhold it while nothing projects an identity", d.TargetField, d.TargetType)
 	}
 	if !strings.Contains(byOp["RotateClaimKey"].InputSchema, `"x-entityRef":"identity"`) {
-		t.Error("RotateClaimKey: identityKey must declare an x-entityRef picker — without it the field is neither resolvable nor pickable, and the form asks a human to hand-type a vtx.identity.<NanoID>")
+		t.Error("RotateClaimKey: identityKey must declare an x-entityRef picker — it is what makes the op completable once unclaimed identities are projected, with no change here")
 	}
 	if d := byOp["RecordIdentityPII"].Dispatch; d.TargetField == "" || d.TargetType != "identity" {
 		t.Errorf("RecordIdentityPII: targetField %q/targetType %q, want a field typed identity so the task's scopedTo fills it", d.TargetField, d.TargetType)
@@ -243,7 +247,7 @@ func TestPackage_ExemptOpsStateTheirExemption(t *testing.T) {
 	exempt := map[string]string{
 		"InitiateCredentialLink": "paired-code",
 		"CompleteCredentialLink": "raw-credential-actor",
-		"UnlinkCredential":       "lifecycle-op",
+		"UnlinkCredential":       "unprojected-input",
 	}
 	seen := map[string]bool{}
 	for _, p := range Package.Permissions {

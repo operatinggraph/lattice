@@ -156,6 +156,75 @@ test("mintSecret produces a 32-byte hex plaintext and its sha256 hex, and never 
   assert.notEqual(plaintext, second);
 });
 
+// ---- rule 2, the other half: the hash IS submitted, and it is the hash OF
+// the plaintext this submission will reveal ----
+//
+// This is the coupling with no other check anywhere. If the two ever diverge —
+// a refactor that re-mints, or reveals a stale object — the person is handed a
+// secret that does not match the stored hash and the identity becomes
+// permanently unclaimable, with no error on any surface.
+
+// submitCapture drives the real submitDescriptorForm against a stubbed write
+// seam and a stubbed form, and returns the enqueued request plus whatever was
+// revealed once the request is confirmed.
+async function submitCapture(app, op, formValues) {
+  let enqueued = null;
+  app.enqueueOperation = (req) => { enqueued = req; return Promise.resolve({ requestId: "req-capture" }); };
+  app.me = () => ({ identityKey: "vtx.identity.DDDDDDDDDDDDDDDDDDDD", selfAnchors: [] });
+  app.toast = () => {};
+  app.hideModal = () => {};
+  const shown = [];
+  app.showModal = (h) => shown.push(h);
+
+  const schema = JSON.parse(op.inputSchema);
+  const fieldNames = Object.keys(schema.properties).filter((f) => f !== app.ceremonyField(op));
+  const form = {
+    elements: { namedItem: (n) => (n in formValues ? { value: formValues[n] } : null) },
+    querySelector: () => null,
+  };
+  await app.submitDescriptorForm(form, op, "vtx.meta.AAAAAAAAAAAAAAAAAAAA", {},
+    fieldNames, schema.properties, {}, new Set(schema.required || []));
+  return { enqueued, shown };
+}
+
+test("the submitted payload carries the hash OF the plaintext that gets revealed", async () => {
+  const app = loadApp(webcrypto);
+  const { enqueued, shown } = await submitCapture(app, ceremonyOp, { name: "Ada", email: "ada@example.com" });
+
+  assert.ok(enqueued, "the form must have enqueued a request");
+  assert.equal(enqueued.operationType, "CreateUnclaimedIdentity");
+  // The ordinary fields went through...
+  assert.equal(enqueued.payload.name, "Ada");
+  // ...and the minted field is present in the PAYLOAD even though it was
+  // never in the form.
+  assert.match(enqueued.payload.claimKeyHash, /^[0-9a-f]{64}$/);
+
+  // Nothing has been revealed yet — the write has not settled.
+  assert.deepEqual(shown, []);
+  app.settleCeremonyReveal("req-capture", "confirmed");
+  assert.equal(shown.length, 1);
+
+  // The revealed plaintext must hash to exactly what was submitted. This is
+  // the assertion the whole ceremony rests on.
+  const revealed = shown[0].match(/data-reveal-secret>([0-9a-f]{64})</);
+  assert.ok(revealed, "the reveal must show a 64-hex plaintext");
+  const expected = Buffer.from(
+    await webcrypto.subtle.digest("SHA-256", new TextEncoder().encode(revealed[1]))).toString("hex");
+  assert.equal(enqueued.payload.claimKeyHash, expected,
+    "the stored hash must be the hash of the secret handed over, or the identity is unclaimable");
+
+  // And the plaintext itself never left the browser.
+  assert.ok(!JSON.stringify(enqueued).includes(revealed[1]),
+    "the minted plaintext must not appear anywhere in the enqueued request");
+});
+
+test("a descriptor naming one field as both target and minted secret is refused", async () => {
+  const app = loadApp(webcrypto);
+  const broken = { ...ceremonyOp, dispatchTargetField: "claimKeyHash", dispatchTargetType: "identity" };
+  const { enqueued } = await submitCapture(app, broken, { name: "Ada" });
+  assert.equal(enqueued, null, "the mint would overwrite the target and be declared as a read key");
+});
+
 // ---- rule 3: reveal on confirmed, discard silently on anything else ----
 
 // revealCapture swaps showModal for a recorder, so the reveal path can be
@@ -164,6 +233,9 @@ test("mintSecret produces a 32-byte hex plaintext and its sha256 hex, and never 
 function revealCapture(app) {
   const shown = [];
   app.showModal = (html) => shown.push(html);
+  // A rejected settle now TELLS the user no secret was issued, rather than
+  // leaving them waiting on a modal that will never arrive.
+  app.toast = () => {};
   return shown;
 }
 
@@ -214,6 +286,24 @@ test("an in-flight write reveals nothing until it settles", () => {
   app.settleCeremonyReveal("req-3", "confirmed");
   assert.equal(shown.length, 1);
   assert.match(shown[0], /notYet/);
+});
+
+test("a second reveal does not destroy an un-dismissed first", () => {
+  // showModal replaces #modal-root wholesale, so a naive second reveal would
+  // erase the first — the same "the next one clears it" failure that ruled
+  // out a toast. Two confirmations can land back to back (two creates, or a
+  // double submit), and the person must still be able to read both.
+  const app = loadApp(webcrypto);
+  const shown = revealCapture(app);
+
+  app.holdCeremonyReveal("req-a", { plaintext: "aaaa1111", title: "First", help: "h" });
+  app.holdCeremonyReveal("req-b", { plaintext: "bbbb2222", title: "Second", help: "h" });
+  app.settleCeremonyReveal("req-a", "confirmed");
+  app.settleCeremonyReveal("req-b", "confirmed");
+
+  const latest = shown[shown.length - 1];
+  assert.match(latest, /aaaa1111/, "the first secret must survive the second reveal");
+  assert.match(latest, /bbbb2222/);
 });
 
 test("an outbox frame for a request with no held secret is inert", () => {

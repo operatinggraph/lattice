@@ -644,9 +644,14 @@ func opDispatchBody(d *OpDispatchSpec) map[string]any {
 
 // opCeremonyBody emits an op meta's `.ceremony` aspect body, including only
 // the fields the author populated. A client reads MintedSecretHashField to
-// know which field it fills rather than renders, so an emitted body missing
-// it declares a ceremony the client cannot perform — the client's own
-// fail-closed rule (do not offer the op) is what covers that.
+// know which field it fills rather than renders.
+//
+// An emitted body MISSING that field is not covered by the client's
+// fail-closed rule, and must not be relied on to be: the client cannot
+// distinguish an empty field name from "declares no ceremony", so it renders
+// the hash field as an ordinary input — fail-OPEN. The check that catches
+// that lives where the author is, in lint-package-standard's S1 descriptor
+// completeness, not here and not in the client.
 func opCeremonyBody(c *OpCeremonySpec) map[string]any {
 	body := map[string]any{}
 	if c.MintedSecretHashField != "" {

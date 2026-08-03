@@ -48,7 +48,7 @@ var allowedVertexTypes = map[string]string{
 	"identity":        "covenant surface — session/claim machinery (edge-showcase-app-design.md §7.1/§7.2)",
 	"task":            "covenant vocabulary — the task archetype (edge-showcase-app-design.md §3.2)",
 	"meta":            "covenant vocabulary — op/pane meta keys (edge-showcase-app-design.md §3.3)",
-	"credentialindex": "ratified ceremony surface (edge-showcase-app-design.md §7.2 Inc 3); its undiscoverability is board-filed vocabulary work ('Five identity ceremony ops stay undiscoverable')",
+	"credentialindex": "ratified ceremony surface (edge-showcase-app-design.md §7.2 Inc 3); the mint-and-reveal half is now descriptor-driven (client-ceremony-op-descriptors-design.md §4.3), the link pair still awaits a two-device consumer (§4.4)",
 }
 
 // allowedSQLTables are the only read-model tables cmd/facet may name in a SQL

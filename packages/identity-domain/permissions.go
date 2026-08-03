@@ -94,7 +94,7 @@ func Permissions() []pkgmgr.PermissionSpec {
 		{
 			OperationType: "UnlinkCredential",
 			Scope:         "self",
-			Note:          "Grants the right to remove one of your own bound credentials (scope=self); the last remaining credential cannot be removed. [no-op-meta: lifecycle-op — its one input is the credential's vertex key, and bound credentials are served by a protected-lens read rather than projected as client-resolvable entities, so nothing can fill the field and a descriptor reduces to asking a person to hand-type a vtx.identity.<NanoID>. Closed by Inc 2's boundTo link and per-credential row (design §4.2).]",
+			Note:          "Grants the right to remove one of your own bound credentials (scope=self); the last remaining credential cannot be removed. [no-op-meta: unprojected-input — its one input is the credential's vertex key, and bound credentials are served by a protected-lens read rather than projected as client-resolvable entities, so nothing can fill the field and a descriptor reduces to asking a person to hand-type a vtx.identity.<NanoID>. Closed by Inc 2's boundTo link and per-credential row (design §4.2).]",
 			GrantsTo:      []string{"consumer"},
 		},
 	}

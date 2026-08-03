@@ -104,14 +104,22 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 				SubmitLabel: "Re-issue secret",
 				Group:       "Identity",
 			},
-			// identityKey carries an x-entityRef picker rather than becoming
-			// the dispatch TargetField, for the reason ClaimIdentity records
-			// below: resolveTargetKey falls back to the SUBMITTER's own
-			// identity when a target of this type resolves from no context, so
-			// a declared TargetType would silently re-issue against the staff
-			// member's own identity instead of withholding the op. As a picker
-			// the field is filled from what the client actually holds, and the
-			// form's pick-required guard fails closed when it holds none.
+			// identityKey is BOTH the dispatch target and an x-entityRef
+			// picker, and the pair is what makes this op degrade honestly.
+			//
+			// Nothing projects an `identity` entity today: the edge manifest
+			// stamps eight entityTypes and six selfAnchor types, none of them
+			// `identity` (edge-manifest/lenses.go). So `resolveTargetKey`
+			// yields nothing AND the picker has no candidates — which is
+			// exactly the state `opButton`'s target gate exists for, and it
+			// withholds the op behind a card saying so. Declaring only the
+			// picker would skip that gate and OFFER a form whose one required
+			// field can never be filled.
+			//
+			// The picker is not decoration: the moment a lens projects
+			// unclaimed identities for staff, `pickerFillsTargetField` starts
+			// answering true and this op becomes completable with no change
+			// here. That projection is the filed consumer of this descriptor.
 			InputSchema: `{"type":"object","properties":` +
 				`{"identityKey":{"type":"string","x-entityRef":"identity","title":"Identity","description":"The unclaimed identity whose secret is being re-issued."},` +
 				`"claimKeyHash":{"type":"string","title":"New claim secret hash","description":"sha256 of the new claim secret the client mints. Never typed."}},` +
@@ -129,6 +137,8 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 			Dispatch: &pkgmgr.OpDispatchSpec{
 				Class:       "identity",
 				AuthContext: "standing",
+				TargetField: "identityKey",
+				TargetType:  "identity",
 				// The script branch's own reads: the target vertex, its state
 				// (the unclaimed-only guard), and the .claimKey aspect it
 				// rewrites. .mergedInto is absent for the reason
@@ -157,12 +167,21 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 			// why this op IS descriptor-drivable where its siblings are not:
 			// nothing has to be minted or derived client-side.
 			//
-			// targetIdentityKey is deliberately NOT a targetField. It arrives
-			// with the invitation, not from an entity the client projects, and
-			// declaring TargetType "identity" would be worse than declaring
-			// nothing: the client's resolver falls back to the SUBMITTER's own
-			// identity for that type rather than degrading, so a wrong target
-			// would be substituted silently instead of the op being withheld.
+			// targetIdentityKey is deliberately NOT a targetField, and the
+			// reason is the opposite of what it might look like. Nothing
+			// projects an `identity` entity or self-anchor, so a declared
+			// TargetType "identity" resolves to nothing and offers no picker
+			// — which means `opButton`'s target gate would WITHHOLD this op
+			// permanently. The key arrives with the invitation and is meant to
+			// be transcribed, so it has to stay an ordinary, prefillable
+			// field.
+			//
+			// (An earlier version of this comment claimed the resolver falls
+			// back to the submitter's own identity for this type. It does not:
+			// `selfAnchorKey` answers only the six anchor types the edge
+			// manifest stamps, and `identity` is not among them. The
+			// conclusion was right; the stated mechanism was not, and it
+			// propagated to other descriptors before being caught.)
 			InputSchema: `{"type":"object","properties":` +
 				`{"targetIdentityKey":{"type":"string","title":"Identity to claim","description":"vtx.identity.<NanoID> of the identity being claimed — carried by the claim invitation."},` +
 				`"claimKey":{"type":"string","title":"Claim key","description":"The one-time claim secret you were given.","x-sensitive":true}},` +

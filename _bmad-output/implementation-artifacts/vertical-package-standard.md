@@ -10,7 +10,8 @@ non-binding guidance — each fire's Phase-0 brief still decides. **A `lint-pack
 mechanically-checkable subset (S1/S6/S7) is blocking in CI** (`scripts/lint-package-standard.go`) —
 normative text alone does not bind future authors; the gate is what does. It runs over
 `internal/pkgregistry`, so an unregistered package cannot escape it, and it admits two explicit escape
-hatches: an `[no-op-meta: <reason>]` permission Note for an op no human triggers (S1's own stated
+hatches: an `[no-op-meta: <code> — <reason>]` permission Note, whose code comes from a closed
+vocabulary naming the missing mechanism, for an op no human triggers or none can yet describe (S1's own stated
 exemption), and a shrink-only debt baseline enumerating the gaps §3 is scheduled to close — an entry
 that stops violating fails the gate too, so the baseline cannot become a permanent amnesty.
 **Convergence CLOSED 2026-07-26** (`dc396cb3`, Inc 6): all four §3 routes discharged and **both** the S1 and
@@ -362,7 +363,7 @@ authority and held **seven**.
 **Shipped `52711a5a` — but NOT as seven descriptors, and the difference is the finding.** The brief planned
 a full `OpMetaSpec` for all seven. An adversarial review of the drafted descriptors against the scripts and
 the client resolver disproved that plan for five of them, before anything merged. What shipped: **two
-descriptors, five stated `[no-op-meta:]` exemptions.**
+descriptors, three stated `[no-op-meta:]` exemptions.**
 
 A descriptor is a machine-readable **promise** that a client holding only those fields can build a valid
 Contract #2 envelope. Five identity ops cannot honour it, because their submission is a client-side

@@ -99,6 +99,11 @@ var exemptionShape = regexp.MustCompile(`\[no-op-meta:\s*([a-z-]+)\s*—\s*([^\]
 // — an op could stay exempt long after the reason stopped being true, which is
 // exactly what happened to the two ceremony ops a mint-and-reveal descriptor
 // now carries.
+// A code is RETIRED by deleting it here the moment its mechanism ships, which
+// is what makes the expiry real rather than a promise: the next author cannot
+// claim a reason that no longer holds, and any Note still claiming it reds the
+// gate. `ceremony-mint` was retired in the commit that shipped
+// OpCeremonySpec — the first exercise of that property.
 var exemptionCodes = map[string]string{
 	// The op is machinery, not a human action.
 	"engine-op":       "an engine/control-plane verb no person dispatches",
@@ -108,9 +113,9 @@ var exemptionCodes = map[string]string{
 
 	// The op is a human action a descriptor cannot yet express. Each of these
 	// names a specific missing mechanism, and dies when that mechanism ships.
-	"ceremony-mint":        "needs OpCeremonySpec — a secret the client mints, hashes, and reveals once",
 	"raw-credential-actor": "submits as the raw authenticated credential, not the resolved identity",
 	"paired-code":          "needs a code carried to a SECOND device and typed back",
+	"unprojected-input":    "its input names an entity no lens projects, so nothing can fill the field",
 }
 
 // opRef identifies one permission across the corpus. Scope is part of the
@@ -794,9 +799,21 @@ func checkS1(rep *report, pkg string, def pkgmgr.Definition, seen map[opRef]bool
 			continue
 		}
 		if strings.Contains(p.Note, exemptionMarker) {
+			ref := opRef{pkg, p.OperationType, p.Scope}
 			if err := exemptionError(p.Note); err != "" {
 				rep.issuef("%s: S1 — %s: %s Valid codes: %s.",
-					pkg, opRef{pkg, p.OperationType, p.Scope}, err, strings.Join(sortedExemptionCodes(), ", "))
+					pkg, ref, err, strings.Join(sortedExemptionCodes(), ", "))
+				continue
+			}
+			// An op holding BOTH a valid exemption and a full descriptor is
+			// the exemption and the promise at once — and it is the exact
+			// drift the closed vocabulary exists to catch: the mechanism
+			// landed, somebody wrote the descriptor, and nobody deleted the
+			// amnesty. Retiring a code catches the ops that never got one;
+			// this catches the ops that did.
+			if len(descriptorGaps(metas, p.OperationType)) == 0 {
+				rep.issuef("%s: S1 — %s states a [no-op-meta: …] exemption but ALSO ships a full descriptor. The reason it was exempt no longer holds — delete the exemption from the Note.",
+					pkg, ref)
 			}
 			continue
 		}
@@ -885,7 +902,40 @@ func descriptorGaps(metas map[string]pkgmgr.OpMetaSpec, op string) []string {
 	case m.Dispatch.TargetField != "" && m.Dispatch.TargetType == "":
 		gaps = append(gaps, fmt.Sprintf("names Dispatch.TargetField %q with no TargetType, so a client cannot resolve it from context", m.Dispatch.TargetField))
 	}
+	// A ceremony's minted-hash field must NAME a field the schema declares.
+	// The client keys its whole fail-closed rule on that name: an empty or
+	// misspelled one reads to it as "this op declares no ceremony", so the
+	// hash field is rendered as an ordinary text input and a person is invited
+	// to type a 64-char hash whose preimage nobody holds. That is the
+	// accepted-garbage outcome the vocabulary exists to prevent, and it is
+	// reachable by a single authoring slip — so it is caught here, where the
+	// author is, rather than trusted to a client-side rule that cannot see it.
+	if m.Ceremony != nil {
+		switch {
+		case m.Ceremony.MintedSecretHashField == "":
+			gaps = append(gaps, "declares a Ceremony with no MintedSecretHashField, which a client cannot tell from declaring no ceremony at all")
+		case !schemaDeclaresField(m.InputSchema, m.Ceremony.MintedSecretHashField):
+			gaps = append(gaps, fmt.Sprintf("names Ceremony.MintedSecretHashField %q, which its InputSchema does not declare — the client fills that field, and a name the schema does not carry is filled into nothing", m.Ceremony.MintedSecretHashField))
+		}
+	}
 	return gaps
+}
+
+// schemaDeclaresField reports whether a JSON-Schema string declares `field` as
+// a property. An unparseable schema answers false: a descriptor whose schema
+// cannot be read is not one a client can honour either.
+func schemaDeclaresField(inputSchema, field string) bool {
+	if inputSchema == "" || field == "" {
+		return false
+	}
+	var parsed struct {
+		Properties map[string]json.RawMessage `json:"properties"`
+	}
+	if err := json.Unmarshal([]byte(inputSchema), &parsed); err != nil {
+		return false
+	}
+	_, ok := parsed.Properties[field]
+	return ok
 }
 
 // checkReadTemplates rejects a read declaration that builds a key AROUND a

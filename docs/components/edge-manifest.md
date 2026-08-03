@@ -99,7 +99,10 @@ slice — the §6.14 blast-radius unit, so a path most actors never take neither
 base slice every actor holds. An identity with no such binding simply gets an empty slice, deleted by the
 generated producer's `EmptyBehavior` + realness filter.
 
-Vocabulary additions riding the op rows: `dispatchVisibleWhen` (`{field, equals}`, nullable) gates
+Vocabulary additions riding the op rows: `ceremonyMintedSecretHashField` / `ceremonyRevealTitle` /
+`ceremonyRevealHelp` (all nullable) declare a MINT-AND-REVEAL ceremony — the named field carries the
+sha256 of a secret the client mints, submits, and shows to a person once; a client that cannot
+perform the ceremony must not offer the op at all. `dispatchVisibleWhen` (`{field, equals}`, nullable) gates
 OFFERING an op against the resolved target row's state — the state-machine-pair seam (pause/resume)
 that previously forced clients to branch by op name. `manifest.ent` rows (and both session-typed hat
 lenses) carry `typeLabel`, the per-type display word the renderer's label ladder consumes instead of
