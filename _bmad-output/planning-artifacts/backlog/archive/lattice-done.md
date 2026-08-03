@@ -1,5 +1,9 @@
 # Done log archive — lattice (older shipped items, newest first)
 
+- 2026-08-01 · `d040e00a` · [Refractor] a clean consumer registration clears a stale latched lens fault — un-latches the 31 red cards earlier boots' narrowed-filter burst left behind
+- 2026-08-01 · `ddaeafd7` · [lattice-CLI] `lens list` names each lens from its `.canonicalName` aspect, not the vertex root; the fixture that invented the root shape is gone
+- 2026-08-01 · `73050cc5` · [Refractor] orphan-durable janitor — a lens durable is judged on its own `vtx.meta.<id>` read, never a set difference; one durable-name constructor + discriminator
+- 2026-08-01 · `6c0a08c7` · [Edge] swept the 74 orphaned SYNC durables the per-build device id left behind — SYNC back to 0 consumers, ~740k phantom pending gone
 - 2026-08-01 · `0b6879dc` · [Edge] one SYNC durable per identity, not one per engine build — facet persists its device id in the mirror and reaps the durable on sign-out
 - 2026-08-01 · `99720950` · [Pkgmgr] `edgeManifestReadGrants` no longer cross-products: generated producers stage each walk behind its own `WITH` fold, peak rows drop to the largest single walk, anchor set proven identical
 - 2026-08-01 · `5527e0e2` · [Refractor] aggregates fold per row (peak heap 122→78 MB at 102k rows), plus a sampled cancellation checkpoint and a refuse-not-truncate binding cap

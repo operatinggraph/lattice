@@ -1544,3 +1544,64 @@ Link button keeps its place on the Me screen beside the pane. The self-credentia
 (§16.2 (3), first bullet) stays filed. Nothing here touches the `[no-op-meta: paired-code]` or
 `[no-op-meta: raw-credential-actor]` exemptions; the residual after this increment is **2**, as §4.4
 predicted.
+
+### 16.6 The sixth item, re-grounded and NOT built — with the measurement that says why
+
+§16.2 (3) claimed the CLI provisioning pre-flight was "impl-level, mirror the Gateway precedent, built
+here." Grounding the write path falsified the cheap version of that: the credential vertex is never
+created by `ClaimIdentity` on ANY path — the Gateway's identities exist because
+`provisionActorIfNeeded` ran first, not because the ceremony writes them — so the fix is either a new
+authority requirement on the CLI actor (it would have to hold `ProvisionConsumerIdentity`, scope=any) or
+a change to the claim ceremony's own write footprint, conditioned on a key it does not declare. Neither
+is "mirror a precedent."
+
+And the live corpus says there is nothing to repair yet: **6 `boundTo` edges, 6 rows in
+`read_identity_credential_bindings`, 6 rows in `read_identity_credentials`** — the link plane, the
+per-credential lens and the encrypted array agree exactly. The under-report path is real and latent, not
+live. So it stays filed, with the arm named, rather than improvised into this commit's tail.
+
+### 16.7 What shipping it on the live stack found — a defect in this increment, now fixed
+
+Diff-applying identity-domain 0.14.0 → 0.15.0 put `identityCredentialBindingsRead` into a **structural
+pause with an empty table**, and the mechanism generalizes well past this fire:
+
+`emit-ddl` emits `CREATE TABLE IF NOT EXISTS`, which is a no-op on an existing table **including when the
+lens has since declared a new column**. So `row_kind` was "provisioned" onto a table that never got it,
+the next projection failed its upsert with SQLSTATE 42703, and the adapter classified that — correctly —
+as structural: the consumer paused until an explicit resume. Measured, not assumed: **the pause survived
+a full `make cycle-refractor`**. Registration cleared the stale *error* (`health: stale error cleared`)
+and the consumer stayed paused.
+
+Two consequences, handled differently:
+
+- **The cause is fixed** (`c2112bf1`): the emitted DDL now converges the table — one
+  `ADD COLUMN IF NOT EXISTS` per declared body column plus the platform's own four, between the create
+  and the policy so a policy naming a new column compiles. Additive only; key columns excluded, because a
+  table missing one is a different table. Any lens could have hit this on any column addition; nothing
+  about this increment was special except that it was the first to try.
+- **The live lens is still paused**, and recovering it is exactly the 📐 awaiting-Andrew
+  [structural-pause-recovery design](structural-pause-recovery-design.md): no bootstrap-class actor holds
+  `ctrl.refractor.<lensId>.resume` and no CLI subcommand wraps it. That row now has a third instance and
+  two facts it did not have — the most likely CAUSE of a structural pause is an ordinary lens column
+  addition, and a process cycle does not clear one.
+
+### 16.8 CHECKPOINT — Inc 2b-2 shipped; the pane is unverified live
+
+**Shipped** `ec87b8f4` (CI green) + `c2112bf1`: `PaneSpec.Surface` and its validation, the
+`signInMethods` pane offered to `consumer`, `UnlinkCredential`'s descriptor with the
+`unprojected-input` exemption retired, `RotateClaimKey`'s `visibleWhen`, the renderer's
+authContext-buildability gate, the account surface on Facet's Me screen with the bespoke read retired
+and a generic post-dispatch pane refresh, and the converging read-path DDL. Both packages diff-applied
+live (identity-domain → 0.15.0, edge-manifest → 0.15.0), `make provision-readpath` re-run against the
+converging emitter, Facet rebuilt and cycled, Refractor cycled.
+
+**Not verified live, and neither cause is in this increment's code:**
+`identityCredentialBindingsRead` is paused per §16.7 and cannot be resumed until that design ships, and
+`edgeStaffPanes` was still rebuilding (lag ~16k and falling) when the fire ended, so the new
+`manifest.pane` row had not yet reached a test actor — `/api/pane?key=signInMethods` answers
+*"no such pane in your world"*, which is the correct answer while the descriptor has not arrived. The
+render path itself is pinned by tests; what is unproven is the end-to-end read on this stack.
+
+**Next: Inc 2b-3** — confirm the pane end-to-end once the rebuild drains and the resume path exists,
+then decide whether the `/api/credentials/link` ceremony keeps its own button or waits for Inc 4. The two
+completeness rows (§16.6) still bind on the pane; neither has a live victim on this corpus today.
