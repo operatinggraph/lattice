@@ -32,6 +32,10 @@ the row is `🚧 blocked-on:` it (a missing *lens* is package work, built here).
 | **A no-show fee for a patient with no ledger account evaporates silently** | The settlement lens converges only once a `clinicaccount` exists (no `missing_account` gap by design) and 8 of 10 patients have none, so their fees produce no gap, no flag and no revenue — café opens the account inside its own settlement chain. | Clinic | pkg | ★★ | S | 📋 ready |
 | **An empty protected read is indistinguishable from a dead one** | `/api/my-appointments` answers `{"appointments":[],"count":0,"scope":"rls"}` whether the patient truly has no visits or the projection is structurally paused, so the FE renders "no upcoming visits" over 25 real ones. Every vertical's protected reads share the shape. | Cross-vertical | FE + pkg | ★★ | S | 📋 ready |
 | **Five of the clinic's seven providers are unbookable duplicates** | Five providers all read "Dr. Classic Demo", none carries hours or a `practicesAt` site, and all five are offered in the patient's booking picker — `adbf2571` pinned the seed's provider id but nothing reaps the pre-pin duplicates. | Clinic | pkg | ★ | S | 📋 ready |
+| **A signed lease never bills its rent** | The one-bill statement — the composition headline — reads 4 café entries + 0 rent for Priya and is entirely empty for Alex Kim; only Riley carries a rent line, hand-posted once by `seed-showcase`. semantic-contracts already ships the recurring machinery (`period=monthly` clause → `chargeValidUntil`/`freshUntil` → DebitAccount) but `weaver-targets` holds zero `clauseSatisfaction` rows, so no lease is wired to it. | Cross-vertical | pkg | ★★★ | M | 📋 ready |
+| **The café catalog is eight copies of two items** | `seed-classic-demo.go:237` mints Latte + Croissant with no pinned id and no `alive()` guard, so every rerun duplicates them — the staff Manage Menu grid and the unscoped POS picker show 8 identical "Croissant" rows nobody can tell apart or safely retire. The per-lease `servedAt` filter masks it from residents only. | Café | pkg | ★★ | S | 📋 ready |
+| **An off-menu charge can never be named** | `Charge`'s `description` param is shipped (cafe-domain `ddls.go:103`, and the seeded "Table repair fee" line proves it works), but no UI reaches it — the POS form is amount-only — so every hand-keyed charge posts to the resident's ledger and one-bill as the literal "Off-menu charge". | Café | FE | ★★ | S | 📋 ready |
+| **A tab can't produce an itemized receipt** | Charges accumulate into a scalar `totalCents` plus a comma-joined `itemsMemo` string carrying no per-line price, and `VoidCharge` names no line — a live $3.50 tab reads "Croissant, Croissant, Void correction", which no resident disputing the bill can reconcile. | Café | pkg + FE | ★★ | M | 📋 ready |
 
 **Explicitly descoped (ambitious-PO pass, 2026-07-09):** structured diagnosis/procedure coding (ICD/CPT),
 vitals, and e-prescribing were considered and deliberately NOT filed — a certified EHR is out of scope for a
@@ -51,7 +55,7 @@ dated run-logs live in git history. Rotate LoftSpace ↔ Clinic ↔ Café ↔ We
 **Wellness joined** 2026-07-09 (`cmd/wellness-app` shipped, live on :7802) — fold it into rotation; see
 [agents/vertical-po/SKILL.md](../../../agents/vertical-po/SKILL.md) §1.
 
-- **Rotation to date:** LoftSpace ×20, Clinic ×19, Café ×9, Wellness ×6.
+- **Rotation to date:** LoftSpace ×20, Clinic ×19, Café ×10, Wellness ×6.
 - **Method:** reuse the already-up shared stack (detect NATS :4222 / app :7788/:7799/:7801/:7802), drive the real flow via `/api/op` + the lens projections as the product owner, file scored items. All four apps exist + are exercisable live (`:7788` / `:7799` / `:7801` / `:7802`).
 - **Live-stack note:** a stale bootstrap JSON vs. a recreated Core KV was a recurring dev-loop trap (2026-07-03, 2026-07-04) that silently emptied reads; `make up` now self-heals it (`109f59a`, 2026-07-05) — re-verify empty-read reports as a real product bug first.
 - **2026-07-31:** Clinic — drove patient, provider + front-desk hats live; no seeded visit ever completes and the provider hat can act on nothing; filed 4.
@@ -63,7 +67,8 @@ dated run-logs live in git history. Rotate LoftSpace ↔ Clinic ↔ Café ↔ We
 - **2026-08-02:** Wellness — drove member, instructor + front-desk hats live; the ledger is dormant and the slot lock guards only the room; filed 3.
 - **2026-08-02:** LoftSpace — drove tenant, landlord + front-desk hats live; pulse counts landlords not units, a done task never retires, an unmanaged unit vanishes; filed 5.
 - **2026-08-02:** Clinic — drove patient, provider + front-desk hats live; no appointment view resolves at all and the no-show never bills; filed 5.
-- **Next:** Café.
+- **2026-08-03:** Café — drove resident + front-desk hats live through open/charge/void/settle; the catalog is 8 copies of 2 items, no charge can be named or itemized, and rent never bills; filed 4.
+- **Next:** Wellness.
 
 ## Done log — verticals (newest first)
 
