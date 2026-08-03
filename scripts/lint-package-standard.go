@@ -28,10 +28,13 @@
 //
 // Two escape hatches, both explicit, neither silent:
 //
-//   - EXEMPT BY NATURE — an engine / reply / lifecycle op no human triggers
-//     states so in its permission Note with an `[no-op-meta: <reason>]`
-//     marker (the Standard's own rule: the exemption is stated in the Note, so
-//     the next reader can tell a decision from an oversight).
+//   - EXEMPT BY NATURE — an op no human triggers, or one whose submission a
+//     descriptor cannot yet express, states so in its permission Note with an
+//     `[no-op-meta: <code> — <prose>]` marker (the Standard's own rule: the
+//     exemption is stated in the Note, so the next reader can tell a decision
+//     from an oversight). The code comes from a closed vocabulary naming the
+//     MISSING MECHANISM, so an exemption expires when that mechanism ships
+//     instead of outliving its reason; an unrecognized code fails the gate.
 //   - KNOWN DEBT — the s1Debt / s6Debt baselines below. These are the gaps the
 //     Standard's convergence program (§3) is scheduled to close, listed one by
 //     one so they are visible in CI instead of invisible in the corpus. The
@@ -76,8 +79,39 @@ var trustedToolRoles = map[string]bool{
 }
 
 // exemptionMarker is what a permission Note carries to declare its op needs no
-// descriptor — `[no-op-meta: engine control-plane, no human dispatch]`.
+// descriptor — `[no-op-meta: <code> — <prose>]`, e.g.
+// `[no-op-meta: engine-op — engine control-plane, no human dispatch]`.
 const exemptionMarker = "[no-op-meta:"
+
+// exemptionShape extracts the code and the prose from a marker. The code is
+// captured openly (`[a-z-]+`) rather than by a closed alternation so an
+// unrecognized one can be NAMED in the failure — the same shape
+// lint-conventions' `authcontext-target` gate uses, and the reason it can tell
+// "you wrote a code I don't know" apart from "you wrote no code at all".
+var exemptionShape = regexp.MustCompile(`\[no-op-meta:\s*([a-z-]+)\s*—\s*([^\]]*)\]`)
+
+// exemptionCodes is the closed vocabulary an S1 exemption may claim. Each names
+// the MECHANISM whose absence makes a descriptor undeliverable, so an exemption
+// is machine-attributable rather than prose nobody re-reads: when the mechanism
+// lands, every Note still claiming that code is a gate-enforced question.
+//
+// Prose alone was the old shape, and it could neither be re-checked nor expire
+// — an op could stay exempt long after the reason stopped being true, which is
+// exactly what happened to the two ceremony ops a mint-and-reveal descriptor
+// now carries.
+var exemptionCodes = map[string]string{
+	// The op is machinery, not a human action.
+	"engine-op":       "an engine/control-plane verb no person dispatches",
+	"reply-op":        "an async reply an adapter submits, never a caller",
+	"lifecycle-op":    "an install/retire lifecycle verb outside any client's world",
+	"client-agent-op": "a verb a client's own agent invokes on its own behalf",
+
+	// The op is a human action a descriptor cannot yet express. Each of these
+	// names a specific missing mechanism, and dies when that mechanism ships.
+	"ceremony-mint":        "needs OpCeremonySpec — a secret the client mints, hashes, and reveals once",
+	"raw-credential-actor": "submits as the raw authenticated credential, not the resolved identity",
+	"paired-code":          "needs a code carried to a SECOND device and typed back",
+}
 
 // opRef identifies one permission across the corpus. Scope is part of the
 // identity because a permission IS its (operationType, scope) pair
@@ -743,6 +777,13 @@ func sortedKeys(m map[string]pkgmgr.Definition) []string {
 // checkS1 requires a full descriptor for every user-facing op the package
 // grants, unless the permission Note declares the exemption or the pair is
 // carried in the debt baseline.
+//
+// An exemption is checked, not merely present: it must name a code from the
+// closed vocabulary and give prose after it. A marker with an unrecognized or
+// missing code is a FAILURE rather than a silent pass, because the whole value
+// of an exemption is that it names the missing mechanism — an exemption nobody
+// can re-check is indistinguishable from an op that was simply never given a
+// descriptor.
 func checkS1(rep *report, pkg string, def pkgmgr.Definition, seen map[opRef]bool) {
 	metas := make(map[string]pkgmgr.OpMetaSpec, len(def.OpMetas))
 	for _, m := range def.OpMetas {
@@ -753,6 +794,10 @@ func checkS1(rep *report, pkg string, def pkgmgr.Definition, seen map[opRef]bool
 			continue
 		}
 		if strings.Contains(p.Note, exemptionMarker) {
+			if err := exemptionError(p.Note); err != "" {
+				rep.issuef("%s: S1 — %s: %s Valid codes: %s.",
+					pkg, opRef{pkg, p.OperationType, p.Scope}, err, strings.Join(sortedExemptionCodes(), ", "))
+			}
 			continue
 		}
 		ref := opRef{pkg, p.OperationType, p.Scope}
@@ -764,9 +809,40 @@ func checkS1(rep *report, pkg string, def pkgmgr.Definition, seen map[opRef]bool
 			seen[ref] = true
 			continue
 		}
-		rep.issuef("%s: S1 — %s is granted to %s but its op-meta %s. A granted op with no descriptor is invisible to a descriptor-driven client. Give it a full OpMetaSpec (clinic-domain/opmetas.go idiom), or state the exemption in the permission Note as %s <reason>].",
-			pkg, ref, strings.Join(humanRoles(p), "+"), strings.Join(gaps, " and "), exemptionMarker)
+		rep.issuef("%s: S1 — %s is granted to %s but its op-meta %s. A granted op with no descriptor is invisible to a descriptor-driven client. Give it a full OpMetaSpec (clinic-domain/opmetas.go idiom), or state the exemption in the permission Note as %s <code> — <reason>], with a code from: %s.",
+			pkg, ref, strings.Join(humanRoles(p), "+"), strings.Join(gaps, " and "), exemptionMarker, strings.Join(sortedExemptionCodes(), ", "))
 	}
+}
+
+// exemptionError reports why a Note's `[no-op-meta: …]` marker is not a valid
+// exemption, or "" when it is. It is deliberately unforgiving about the shape:
+// a marker that does not parse is a malformed declaration, not an absent one,
+// and passing it through would restore exactly the arbitrary-prose amnesty the
+// closed vocabulary replaced.
+func exemptionError(note string) string {
+	m := exemptionShape.FindStringSubmatch(note)
+	if m == nil {
+		return "the [no-op-meta: …] exemption does not parse as `[no-op-meta: <code> — <prose>]` (an em dash separates the code from the reason)."
+	}
+	code, prose := m[1], strings.TrimSpace(m[2])
+	if _, ok := exemptionCodes[code]; !ok {
+		return "unknown exemption code (" + code + ") — an exemption has to name the mechanism whose absence blocks a descriptor, so it can be re-checked when that mechanism ships."
+	}
+	if prose == "" {
+		return "exemption code (" + code + ") carries no reason — the code says WHICH mechanism is missing, the prose says why it blocks THIS op."
+	}
+	return ""
+}
+
+// sortedExemptionCodes renders the vocabulary deterministically for a failure
+// message, each code followed by what it claims.
+func sortedExemptionCodes() []string {
+	out := make([]string, 0, len(exemptionCodes))
+	for code, meaning := range exemptionCodes {
+		out = append(out, code+" ("+meaning+")")
+	}
+	sort.Strings(out)
+	return out
 }
 
 // userFacing reports whether a person — not an admin tool — may trigger this

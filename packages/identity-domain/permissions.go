@@ -46,7 +46,7 @@ func Permissions() []pkgmgr.PermissionSpec {
 		{
 			OperationType: "CreateUnclaimedIdentity",
 			Scope:         "any",
-			Note:          "Grants the right to create an unclaimed identity vertex. [no-op-meta: client-side ceremony, not a fillable form — the caller MINTS the claim secret and submits only its sha256, keeping the plaintext to hand over, and it must declare the sha256-derived vtx.identityindex.<hash> dedup probes. The descriptor vocabulary substitutes templates rather than computing them, so neither is expressible: a descriptor-driven submission would arm an identity nobody can ever claim, and would RevisionConflict against the CreateOnly index write the moment any prior identity shares a name.]",
+			Note:          "Grants the right to create an unclaimed identity vertex.",
 			GrantsTo:      []string{"frontOfHouse", "backOfHouse", "operator"},
 		},
 		{
@@ -64,7 +64,7 @@ func Permissions() []pkgmgr.PermissionSpec {
 		{
 			OperationType: "RotateClaimKey",
 			Scope:         "any",
-			Note:          "Grants staff the right to re-issue a lost claim secret for an unclaimed identity (R4 recovery — Lattice only ever stored the hash, never the plaintext). [no-op-meta: same client-side ceremony as CreateUnclaimedIdentity — the caller mints the NEW secret and submits only its sha256. A form asking a human to type a 64-char hash cannot mint the preimage, so an accepted submission would replace a lost secret with an unknowable one.]",
+			Note:          "Grants staff the right to re-issue a lost claim secret for an unclaimed identity (R4 recovery — Lattice only ever stored the hash, never the plaintext).",
 			GrantsTo:      []string{"frontOfHouse", "backOfHouse", "operator"},
 		},
 		{
@@ -82,19 +82,19 @@ func Permissions() []pkgmgr.PermissionSpec {
 		{
 			OperationType: "InitiateCredentialLink",
 			Scope:         "self",
-			Note:          "Grants the right to arm a link secret on your own already-claimed identity (scope=self). [no-op-meta: same client-side minting ceremony — the client generates the link secret, keeps the plaintext to show on the other device, and submits only its sha256. The write is an unconditioned overwrite, so a descriptor-driven submission would silently disarm a pending link with a secret nobody holds.]",
+			Note:          "Grants the right to arm a link secret on your own already-claimed identity (scope=self). [no-op-meta: paired-code — the minting half is expressible (OpCeremonySpec), but the plaintext has to travel to a SECOND device and be typed back on the consuming op, which needs RevealWith/PairedCodeField. Without them a descriptor asks a person to hand-type an identity key and a 64-hex secret. Sequenced behind a real two-device consumer (client-ceremony-op-descriptors-design.md §4.4).]",
 			GrantsTo:      []string{"consumer"},
 		},
 		{
 			OperationType: "CompleteCredentialLink",
 			Scope:         "self",
-			Note:          "Grants the right to bind a second credential to an identity by proving a link secret (scope=self via the raw new credential). [no-op-meta: submitted as a DIFFERENT actor than the client authenticated as — the Gateway's raw-credential carve-out resolves op.actor to the new credential, so a descriptor's self authContext (which names the resolved business identity) denies at step 3. It also needs the sha256-derived credentialindex declared to revive a tombstoned entry, without which a previously unlinked credential could never be re-linked.]",
+			Note:          "Grants the right to bind a second credential to an identity by proving a link secret (scope=self via the raw new credential). [no-op-meta: raw-credential-actor — submitted as a DIFFERENT actor than the client authenticated as. The Gateway's raw-credential carve-out resolves op.actor to the new credential, so a descriptor's self authContext (which names the resolved business identity) denies at step 3; it needs the credential authContext value of §4.4. The credentialindex half is already closed by derive_reads.]",
 			GrantsTo:      []string{"consumer"},
 		},
 		{
 			OperationType: "UnlinkCredential",
 			Scope:         "self",
-			Note:          "Grants the right to remove one of your own bound credentials (scope=self); the last remaining credential cannot be removed. [no-op-meta: its one input is the credential's vertex key, and bound credentials are served by a protected-lens read rather than projected as client-resolvable entities — so no context can fill the field and a descriptor would reduce to asking a person to hand-type a vtx.identity.<NanoID>.]",
+			Note:          "Grants the right to remove one of your own bound credentials (scope=self); the last remaining credential cannot be removed. [no-op-meta: lifecycle-op — its one input is the credential's vertex key, and bound credentials are served by a protected-lens read rather than projected as client-resolvable entities, so nothing can fill the field and a descriptor reduces to asking a person to hand-type a vtx.identity.<NanoID>. Closed by Inc 2's boundTo link and per-credential row (design §4.2).]",
 			GrantsTo:      []string{"consumer"},
 		},
 	}

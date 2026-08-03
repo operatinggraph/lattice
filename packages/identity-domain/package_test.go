@@ -162,10 +162,16 @@ func TestPackage_DependsOnRbacDomain(t *testing.T) {
 // the applicant submitting lease-signing's onboarding userTask, who holds no
 // standing grant for this op at all. A standing descriptor sends no authContext
 // and step 3 refuses it.
+//
+// The two staff ceremony ops are "standing" for the mirror reason: both are
+// scope=any grants to frontOfHouse/backOfHouse/operator with no relationship
+// to any target, so there is no authContext for the client to populate.
 func TestPackage_OpMetasAreFullDescriptors(t *testing.T) {
 	wantAuthContext := map[string]string{
-		"ClaimIdentity":     "self",
-		"RecordIdentityPII": "task",
+		"ClaimIdentity":           "self",
+		"RecordIdentityPII":       "task",
+		"CreateUnclaimedIdentity": "standing",
+		"RotateClaimKey":          "standing",
 	}
 	if got, want := len(Package.OpMetas), len(wantAuthContext); got != want {
 		t.Fatalf("OpMetas: got %d, want %d", got, want)
@@ -198,6 +204,16 @@ func TestPackage_OpMetasAreFullDescriptors(t *testing.T) {
 	if d := byOp["ClaimIdentity"].Dispatch; d.TargetField != "" || d.TargetType != "" {
 		t.Errorf("ClaimIdentity: declares targetField %q/targetType %q; the claim target comes from the invitation, and a declared identity targetType silently resolves to the submitter", d.TargetField, d.TargetType)
 	}
+	// RotateClaimKey inherits that refusal for the same mechanism and a worse
+	// outcome: staff re-issuing against their OWN identity is the silent
+	// substitution, so identityKey is collected by an x-entityRef picker in the
+	// form rather than resolved from context.
+	if d := byOp["RotateClaimKey"].Dispatch; d.TargetField != "" || d.TargetType != "" {
+		t.Errorf("RotateClaimKey: declares targetField %q/targetType %q; an identity targetType resolving from no context substitutes the submitting staff member's own identity", d.TargetField, d.TargetType)
+	}
+	if !strings.Contains(byOp["RotateClaimKey"].InputSchema, `"x-entityRef":"identity"`) {
+		t.Error("RotateClaimKey: identityKey must declare an x-entityRef picker — without it the field is neither resolvable nor pickable, and the form asks a human to hand-type a vtx.identity.<NanoID>")
+	}
 	if d := byOp["RecordIdentityPII"].Dispatch; d.TargetField == "" || d.TargetType != "identity" {
 		t.Errorf("RecordIdentityPII: targetField %q/targetType %q, want a field typed identity so the task's scopedTo fills it", d.TargetField, d.TargetType)
 	}
@@ -211,41 +227,96 @@ func TestPackage_OpMetasAreFullDescriptors(t *testing.T) {
 	}
 }
 
-// TestPackage_CeremonyOpsStateTheirExemption pins the other half of S1. These
-// five are user-facing — a person triggers each — but their submission is a
-// client-side ceremony the descriptor vocabulary cannot express: a minted
-// secret whose plaintext never reaches Lattice, a submission as a different
-// actor than the client authenticated as, or an input nothing projects. S1
-// admits that only when the permission Note SAYS so, and the reason has to
-// survive in the Note or this fails.
-func TestPackage_CeremonyOpsStateTheirExemption(t *testing.T) {
-	ceremony := map[string]bool{
-		"CreateUnclaimedIdentity": true,
-		"RotateClaimKey":          true,
-		"InitiateCredentialLink":  true,
-		"CompleteCredentialLink":  true,
-		"UnlinkCredential":        true,
+// TestPackage_ExemptOpsStateTheirExemption pins the other half of S1. These
+// three are user-facing — a person triggers each — but their submission is
+// something the descriptor vocabulary still cannot express: a submission as a
+// different actor than the client authenticated as, a secret that has to reach
+// a SECOND device, or an input nothing projects. S1 admits that only when the
+// permission Note SAYS so, naming the missing mechanism by its code, and the
+// reason has to survive in the Note or this fails.
+//
+// The set is what shrinks as mechanisms land. CreateUnclaimedIdentity and
+// RotateClaimKey left it when OpCeremonySpec made minting expressible, and
+// they are asserted against the opposite half below — an op that gains a
+// mechanism must gain a descriptor, not quietly keep its amnesty.
+func TestPackage_ExemptOpsStateTheirExemption(t *testing.T) {
+	exempt := map[string]string{
+		"InitiateCredentialLink": "paired-code",
+		"CompleteCredentialLink": "raw-credential-actor",
+		"UnlinkCredential":       "lifecycle-op",
 	}
 	seen := map[string]bool{}
 	for _, p := range Package.Permissions {
-		if !ceremony[p.OperationType] {
+		code, isExempt := exempt[p.OperationType]
+		if !isExempt {
 			continue
 		}
 		seen[p.OperationType] = true
-		if !strings.Contains(p.Note, "[no-op-meta:") {
-			t.Errorf("%s: no stated exemption — S1 needs the reason in the permission Note, not just an absent descriptor", p.OperationType)
+		if !strings.Contains(p.Note, "[no-op-meta: "+code+" — ") {
+			t.Errorf("%s: Note must state the exemption as [no-op-meta: %s — <reason>]; S1's closed vocabulary is what lets the exemption expire when the mechanism ships. Got: %s",
+				p.OperationType, code, p.Note)
 		}
 	}
-	for op := range ceremony {
+	for op := range exempt {
 		if !seen[op] {
 			t.Errorf("%s: expected a permission entry to carry its exemption", op)
 		}
 	}
-	// The complement: a ceremony op must not ALSO carry a descriptor, which
+	// The complement: an exempt op must not ALSO carry a descriptor, which
 	// would be the exemption and the promise at once.
 	for _, m := range Package.OpMetas {
-		if ceremony[m.OperationType] {
+		if _, isExempt := exempt[m.OperationType]; isExempt {
 			t.Errorf("%s: exempt in its Note but also declares an op-meta", m.OperationType)
+		}
+	}
+}
+
+// TestPackage_CeremonyOpsCarryDescriptorNotExemption is the direction that can
+// regress. The two minting ops were exempt precisely because a form cannot ask
+// a person to type a hash whose preimage nobody holds; OpCeremonySpec removed
+// that reason, so each must now carry a descriptor whose Ceremony names the
+// field the client fills, AND must have surrendered its exemption. Keeping
+// both would leave a client free to render the hash as a text input — the
+// accepted-garbage outcome the exemption existed to prevent.
+func TestPackage_CeremonyOpsCarryDescriptorNotExemption(t *testing.T) {
+	wantCeremonyField := map[string]string{
+		"CreateUnclaimedIdentity": "claimKeyHash",
+		"RotateClaimKey":          "claimKeyHash",
+	}
+	seen := map[string]bool{}
+	for _, m := range Package.OpMetas {
+		field, want := wantCeremonyField[m.OperationType]
+		if !want {
+			continue
+		}
+		seen[m.OperationType] = true
+		if m.Ceremony == nil {
+			t.Errorf("%s: no Ceremony — the client would render %s as a text input", m.OperationType, field)
+			continue
+		}
+		if m.Ceremony.MintedSecretHashField != field {
+			t.Errorf("%s: Ceremony.MintedSecretHashField = %q, want %q",
+				m.OperationType, m.Ceremony.MintedSecretHashField, field)
+		}
+		if m.Ceremony.RevealTitle == "" || m.Ceremony.RevealHelp == "" {
+			t.Errorf("%s: reveal copy is required — a minted secret shown with no explanation is a string the person discards", m.OperationType)
+		}
+		if !strings.Contains(m.InputSchema, `"`+field+`"`) {
+			t.Errorf("%s: %s must be declared in InputSchema; the client fills it, and a field absent from the schema is absent from the payload",
+				m.OperationType, field)
+		}
+	}
+	for op := range wantCeremonyField {
+		if !seen[op] {
+			t.Errorf("%s: expected an op-meta now that its ceremony is expressible", op)
+		}
+	}
+	for _, p := range Package.Permissions {
+		if _, isCeremony := wantCeremonyField[p.OperationType]; !isCeremony {
+			continue
+		}
+		if strings.Contains(p.Note, "[no-op-meta:") {
+			t.Errorf("%s: still claims an S1 exemption while carrying a descriptor — the mechanism landed, so the amnesty must go", p.OperationType)
 		}
 	}
 }

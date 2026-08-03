@@ -9,27 +9,139 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 // written once the vocabulary has settled against the corpus rather than ahead
 // of it.
 //
-// Two ops carry a descriptor; the other five carry a stated `[no-op-meta: …]`
+// Four ops carry a descriptor; three carry a stated `[no-op-meta: <code> — …]`
 // exemption in their permission Note (permissions.go) instead. That split is
-// the point of this increment, and it is not a shortcut: a descriptor is a
-// machine-readable PROMISE that a client holding only these fields can build a
-// valid Contract #2 envelope. Five identity ops cannot honour that promise,
-// because their submission is a client-side CEREMONY rather than a filled form
-// — the client must mint a secret and keep the plaintext, or submit as a
-// different actor than the one it authenticated as, or name a key nothing
-// projects. Shipping a form for those would not make them discoverable; it
-// would make them fail in ways the descriptor itself claims are impossible.
-// The exemption reasons are per-op and specific, so the escape hatch stays
-// checkable rather than becoming a place to park anything inconvenient.
+// not a shortcut: a descriptor is a machine-readable PROMISE that a client
+// holding only these fields can build a valid Contract #2 envelope, and an op
+// that cannot honour it must decline rather than ship a form that fails in
+// ways the descriptor itself claims are impossible.
 //
-// Dispatch.Class is "identity" on both — the owning vertexType DDL's own
+// Two of the ops that could not honour it now can, and the reason each was
+// exempt is the reason it no longer is. CreateUnclaimedIdentity and
+// RotateClaimKey were client-side CEREMONIES — the caller mints a secret,
+// submits only its sha256, and keeps the plaintext to hand over — plus, for
+// Create, a set of dedup probes the caller cannot compute. The Ceremony spec
+// makes the minting part of the descriptor rather than a reason to abandon
+// it, and derive_reads (Contract #2 §2.5 class (g)) has the DDL declare the
+// probes from the same normalizers the main script uses. Neither op ever
+// needed a form for those; it needed a client that knew to DO them.
+//
+// The three that remain exempt are exempt for reasons a ceremony field does
+// not touch: two submit as a different actor than the client authenticated
+// as, and one names a key nothing projects.
+//
+// Dispatch.Class is "identity" on all four — the owning vertexType DDL's own
 // CanonicalName, never a vertical name.
 //
 // Each Reads list is the live dispatcher's, verified against the script branch
-// it feeds: cmd/facet/claim.go for ClaimIdentity, and the onboarding userTask
-// (packages/lease-signing/patterns.go) for RecordIdentityPII.
+// it feeds: cmd/facet/claim.go for ClaimIdentity, the onboarding userTask
+// (packages/lease-signing/patterns.go) for RecordIdentityPII, and the DDL's
+// own RotateClaimKey branch for the re-issue path.
 func OpMetas() []pkgmgr.OpMetaSpec {
 	return []pkgmgr.OpMetaSpec{
+		{
+			OperationType: "CreateUnclaimedIdentity",
+			Presentation: &pkgmgr.OpPresentationSpec{
+				Title:       "Create an identity",
+				ShortLabel:  "New identity",
+				Description: "Register someone who does not have an account yet, and hand them the one-time secret that claims it.",
+				Icon:        "user-plus",
+				Tone:        "primary",
+				SubmitLabel: "Create identity",
+				Group:       "Identity",
+			},
+			// claimKeyHash is in the schema because the payload carries it,
+			// and is removed from the RENDERED form by the ceremony below —
+			// the client fills it from the secret it mints. It is deliberately
+			// not x-sensitive: masking an input nobody types buys nothing, and
+			// the value that must not leak is the preimage, which never
+			// reaches this schema at all.
+			//
+			// claimKeyAlgo is omitted rather than rendered as an enum-of-one:
+			// the script defaults it to sha256, the only accepted value, so a
+			// control for it can only be set right or set wrong.
+			InputSchema: `{"type":"object","properties":` +
+				`{"name":{"type":"string","maxLength":200,"title":"Full name","description":"The person's display name."},` +
+				`"email":{"type":"string","title":"Email","description":"Email address. At least one of email or phone is required."},` +
+				`"phone":{"type":"string","title":"Phone","description":"Phone number. At least one of email or phone is required."},` +
+				`"claimKeyHash":{"type":"string","title":"Claim secret hash","description":"sha256 of the claim secret the client mints. Never typed."}},` +
+				`"required":["name","claimKeyHash"]}`,
+			FieldDescriptions: map[string]string{
+				"name":         "How this person's name should appear. Also used to spot an identity that already exists.",
+				"email":        "Used to reach them, and to spot a duplicate registration. At least one of email or phone.",
+				"phone":        "Used to reach them, and to spot a duplicate registration. At least one of email or phone.",
+				"claimKeyHash": "Filled by this device. Lattice only ever stores the hash — the secret itself is shown to you once and never sent.",
+			},
+			Ceremony: &pkgmgr.OpCeremonySpec{
+				MintedSecretHashField: "claimKeyHash",
+				RevealTitle:           "Their claim secret — shown once",
+				RevealHelp: "Give this to them now. Lattice stored only its hash, so this screen is " +
+					"the one and only time the secret exists; if it is lost, the identity needs a " +
+					"fresh one issued.",
+			},
+			Dispatch: &pkgmgr.OpDispatchSpec{
+				Class: "identity",
+				// "standing": a scope=any grant to frontOfHouse/backOfHouse/
+				// operator with no relationship to any target, so the client
+				// sends no authContext at all.
+				AuthContext: "standing",
+				// No Reads. The three vtx.identityindex.<hash> dedup probes
+				// are declared by the DDL's own derive_reads (Contract #2 §2.5
+				// class (g)), computed from the same normalizers the main
+				// script uses. That is the half a template vocabulary could
+				// never express — it substitutes, it does not hash — and the
+				// reason this op is descriptor-drivable at all.
+			},
+		},
+		{
+			OperationType: "RotateClaimKey",
+			Presentation: &pkgmgr.OpPresentationSpec{
+				Title:       "Re-issue a claim secret",
+				ShortLabel:  "Re-issue secret",
+				Description: "Issue a fresh one-time secret for someone whose original was lost before they could claim their identity.",
+				Icon:        "key",
+				Tone:        "neutral",
+				SubmitLabel: "Re-issue secret",
+				Group:       "Identity",
+			},
+			// identityKey carries an x-entityRef picker rather than becoming
+			// the dispatch TargetField, for the reason ClaimIdentity records
+			// below: resolveTargetKey falls back to the SUBMITTER's own
+			// identity when a target of this type resolves from no context, so
+			// a declared TargetType would silently re-issue against the staff
+			// member's own identity instead of withholding the op. As a picker
+			// the field is filled from what the client actually holds, and the
+			// form's pick-required guard fails closed when it holds none.
+			InputSchema: `{"type":"object","properties":` +
+				`{"identityKey":{"type":"string","x-entityRef":"identity","title":"Identity","description":"The unclaimed identity whose secret is being re-issued."},` +
+				`"claimKeyHash":{"type":"string","title":"New claim secret hash","description":"sha256 of the new claim secret the client mints. Never typed."}},` +
+				`"required":["identityKey","claimKeyHash"]}`,
+			FieldDescriptions: map[string]string{
+				"identityKey":  "Whose secret to replace. Only an identity that is still unclaimed can be re-issued.",
+				"claimKeyHash": "Filled by this device. The lost secret stops working the moment this lands.",
+			},
+			Ceremony: &pkgmgr.OpCeremonySpec{
+				MintedSecretHashField: "claimKeyHash",
+				RevealTitle:           "The new claim secret — shown once",
+				RevealHelp: "Give this to them now. It replaces the lost one, and like the original " +
+					"it exists only on this screen.",
+			},
+			Dispatch: &pkgmgr.OpDispatchSpec{
+				Class:       "identity",
+				AuthContext: "standing",
+				// The script branch's own reads: the target vertex, its state
+				// (the unclaimed-only guard), and the .claimKey aspect it
+				// rewrites. .mergedInto is absent for the reason
+				// RecordIdentityPII records — testing membership of a
+				// required-but-absent key faults HydrationMiss, which would
+				// reject every ordinary call.
+				Reads: []string{
+					"{payload.identityKey}",
+					"{payload.identityKey}.state",
+					"{payload.identityKey}.claimKey",
+				},
+			},
+		},
 		{
 			OperationType: "ClaimIdentity",
 			Presentation: &pkgmgr.OpPresentationSpec{

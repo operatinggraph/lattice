@@ -1,5 +1,5 @@
 name: identity-domain
-version: 0.11.0
+version: 0.12.0
 description: |
   Identity vertex creation, claim, and state-machine management. Provides
   CreateUnclaimedIdentity, UpdateIdentityState, ClaimIdentity, RotateClaimKey,
@@ -91,5 +91,7 @@ declares:
       scope: any
       grantsTo: [operator]
   opMetas:
+    - operationType: CreateUnclaimedIdentity
+    - operationType: RotateClaimKey
     - operationType: ClaimIdentity
     - operationType: RecordIdentityPII
