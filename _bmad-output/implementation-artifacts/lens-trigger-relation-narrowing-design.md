@@ -317,3 +317,41 @@ the two lock bodies removed the detector reports the race, and the tear test fai
 observing `{labels:[owner unit], relations:[bookedBy]}` — spec A's labels against spec B's relation.
 
 **Non-goals:** the other §4.1 findings, each its own row.
+
+### 8.1 What the adversarial pass added — a stale write is not self-correcting
+
+The three-axis pass could not refute the fix (the concurrency axis ran the right sensitivity check:
+stripping only the lock pairs from a copy produced 12 race reports, so its green verdict is a real
+negative). The auth-plane axis found something the fix did not cause but did **widen**, and it is now
+closed in the same change.
+
+**The chain, verified link by link.** Every result is stamped with its own message's stream sequence
+(`pipeline.go`'s `writeResults`), and a MATCH reload's rebuild replays the same messages with the *same*
+sequences — which the guarded adapter drops as an idempotent no-op (`adapter/natskv.go`,
+`storedSeq >= incomingSeq`). The rebuild's truncate is what normally clears the way for the replay, but
+it runs on the reload's own goroutine (`cmd/refractor/reload.go`'s `MatchChange` arm) while the handler
+is still mid-flight. So an in-flight evaluation can land its stale row **after** the purge and then
+swallow its own correction.
+
+On the auth plane that row is the pre-edit permission set: a MATCH edit made to **revoke** something is
+silently defeated for every actor the in-flight event touched. The convergence sweep heals it, but only
+for a lens that got a sweep plan — `projection/driver.go` refuses enrolment with a warning only — so
+that is not a bound worth relying on.
+
+**Pre-existing, but widened here.** Before the snapshot, the rule was read live at each execute call, so
+a fan-out picked up the new rule partway through; the window was one executor call. The snapshot makes
+the whole event use one rule, which is the coherence being bought — and it stretches the window to
+"handle entry → last write." Shipping a wider auth-plane over-grant window was not acceptable, so the
+snapshot now carries a **generation counter**: `writeResults` re-reads it and **Naks** rather than
+writing results derived from a rule no longer in force. Redelivery re-evaluates under the rule actually
+in force, which is what the reload wanted. It cannot loop — each Nak is answered by a redelivery that
+finds a settled rule unless another reload has landed.
+
+`TestWriteResults_SupersededRuleIsNakedNotWritten` pins it: no row reaches the target, and the
+re-evaluation under the current rule writes exactly once.
+
+**Also corrected from the reviews:** the `ruleMu` doc claimed every other field is install-time only —
+false (`adpt`/`requireGuardedAdapter` are rewritten post-`Run` under `adapterMu`, and the progress and
+rebuild counters mutate at runtime), and that sentence is the invariant a future author would trust; and
+`ruleState`'s doc justified "take it once" with a deadlock that cannot occur, since the lock is released
+before the function returns. The binding reason is coherence alone.
