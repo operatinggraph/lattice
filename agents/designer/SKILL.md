@@ -474,6 +474,35 @@ tombstones. **Capability KV is a lens projection** (projection correctness = aut
   security-plane defect.) This is the root-cause-names-the-asserted-instance probe pointed at a
   *negative* claim; when the census comes back non-empty, **correct the row** as part of the fire.
 
+- **When you add a second piece of state beside an existing one, specify its LIFETIME at every boundary the
+  existing one already has — "accumulated" without a lifetime is two implementations, one unsound and one
+  regressive.** A design that says *"add an order-accumulated set"* / *"track it as we go"* / *"cache the
+  verdict"* has named a mechanism, not a rule. The existing neighbour state has a scope discipline (reset at
+  a boundary, carried across it, ordered relative to the carry) that someone paid for; the new state needs
+  the same three answers, written down, or the builder mirrors the neighbour's *declaration site* and
+  inherits a scope that is wrong in one direction or the other. (Trialed 2026-08-02, the label-key-type
+  design: Increment 2 added an `optionalLabeled` set beside `ReferencedLabels`' `labeledVars`, saying only
+  "order-accumulated within the segment". **Both** adversarial reviewers broke it, in **opposite**
+  directions — declared once outside the segment loop (mirroring `labeledVars`) it is *unsound* (a variable
+  a `WITH` drops still gets excused and re-seeds whole-bucket); reset per segment but omitted from
+  `carryLabeled` it *regresses narrowing* for every walk-generated lens, because `pkgmgr` compiles walk
+  chains entirely as `OPTIONAL MATCH`. The sound rule needed four clauses; the draft had one.) The tell is a
+  design sentence naming a data structure where a **rule** belongs. And note the recursion hazard: this was
+  the *same* `WITH` boundary the immediately-preceding increment had just been corrected on — being freshly
+  burned on a boundary does not protect the next thing you put near it.
+
+- **A census's file GLOB is a premise, not plumbing — enumerate by the DECLARATION, not by the filename
+  convention.** A negative claim ("zero live consumers") is only as wide as the sweep that produced it, and
+  the sweep's weakest link is usually a path pattern chosen because it matched most of the corpus. Enumerate
+  by the thing being declared (every `pkgmgr.LensSpec`, every op-meta, every grant producer) and include
+  whatever a build step **generates**, which no glob over source files can see. (Trialed in the same fire: a
+  label census over `packages/*/lenses.go` missed the specs living in sibling files — `renewal_lenses.go`,
+  `visitseries.go`, `pastdue.go`, `ownership.go`, `targets.go` — and the walk-**expanded** generated lenses
+  entirely. Both omitted labels turned out to be key types so the conclusion held, but the claim to be an
+  exhaustive independent sweep did not, and the generated corpus was where the *other* increment's real
+  instances lived.) Corollary for the test you mandate off that census: check that the harness sees the
+  same population — a registry snapshot of *un-expanded* specs pins the wrong artifact.
+
 **Run the pre-build gates you write into your own designs — "ratified" ≠ "build-ready."** If a design
 self-flags a pre-build adversarial / `bmad-party-mode` pass (a deferred gate), that pass is a **Designer-lane
 obligation**: run it and **record it as run** before the design is build-ready. Do not leave it dangling for
