@@ -143,13 +143,15 @@ func (s *server) handleCompleteCredentialLink(w http.ResponseWriter, r *http.Req
 		AuthContext:   &processor.AuthContext{Target: deviceKey},
 		ContextHint: &processor.ContextHint{
 			Reads: []string{targetKey, targetKey + ".state"},
-			// Absence-tolerant: an identity linking its FIRST extra credential has
-			// no .credentialBinding yet, and the credentialindex probe is the
-			// script's own read-before-create dedup.
+			// Absence-tolerant: an identity linking its FIRST extra credential
+			// has no .credentialBinding yet. The credentialindex dedup probe is
+			// deliberately NOT declared here — it is a class-(g) key that
+			// identity-domain's own derive_reads computes from the actor
+			// (Contract #2 §2.5), so declaring it would mean re-deriving, in a
+			// second language, a key the package already produces.
 			OptionalReads: []string{
 				targetKey + ".linkKey",
 				targetKey + ".credentialBinding",
-				"vtx.credentialindex." + substrate.SHA256NanoID(deviceKey),
 			},
 		},
 	}

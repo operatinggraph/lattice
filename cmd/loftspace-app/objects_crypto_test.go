@@ -230,6 +230,8 @@ func TestHandleObjectUpload_Sensitive_SealsAndReturnsEnvelope(t *testing.T) {
 	if !ok || enc["wrappedCEK"] == "" || enc["keyId"] != applicant {
 		t.Fatalf("encryption envelope missing/malformed: %v", body)
 	}
+	// derived-key: recomputes the expected object id for the assertion below.
+	// Not a declared read.
 	wantOid := substrate.SHA256NanoID("object:" + applicant + ":" + objectcrypto.Digest(plaintext))
 	if body["oid"] != wantOid {
 		t.Fatalf("oid = %v, want identity-salted %v", body["oid"], wantOid)
@@ -394,6 +396,8 @@ func TestHandleObjectGet_Sensitive_ShreddedIdentity_PermanentlyUndecryptable(t *
 func sealAndStore(t *testing.T, ctx context.Context, conn *substrate.Conn, backend *vault.LocalBackend, governingIdentity string, env vault.Envelope, plaintext []byte) (oid string, ciphertext []byte, storeName, digest string, enc map[string]any) {
 	t.Helper()
 	digest = objectcrypto.Digest(plaintext)
+	// derived-key: recomputes the object id under a different governing
+	// identity to prove the salt changes it. Not a declared read.
 	oid = substrate.SHA256NanoID("object:" + governingIdentity + ":" + digest)
 
 	cek, err := objectcrypto.GenerateCEK()

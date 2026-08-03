@@ -648,6 +648,97 @@ def validate_state_transition(current, new):
     if targets == None or new not in targets:
         fail("InvalidStateTransition: " + str(current) + " -> " + str(new))
 
+# -- Contact normalization + index-key derivation ------------------------------
+#
+# These five helpers are the package's own semantics for turning a submitted
+# contact into an index key, and they are the SINGLE definition of it: both
+# derive_reads (below) and execute call them. That is the whole point -- the
+# derived declared read (Contract #2 §2.5 class (g)) is only worth having if it
+# names the key the operation will actually probe, and two hand-kept copies of a
+# normalization are exactly the divergence this mechanism exists to end. A
+# change here moves both passes or neither.
+#
+# Each normalizer returns None for input it cannot normalize, and NEVER fails:
+# derive_reads runs before the operation's own validation, so failing here would
+# turn a clean InvalidArgument into an opaque hydration fault.
+
+def normalize_name(raw):
+    if raw == None or type(raw) != type(""):
+        return None
+    normalized = " ".join(raw.lower().split())
+    if len(normalized) == 0:
+        return None
+    return normalized
+
+def normalize_email(raw):
+    if raw == None or type(raw) != type(""):
+        return None
+    e = raw.strip().lower()
+    if len(e) == 0:
+        return None
+    return e
+
+def normalize_phone(raw):
+    # E.164-ish: digits and a plus survive, everything else is punctuation the
+    # submitter's formatting added.
+    if raw == None or type(raw) != type(""):
+        return None
+    stripped = ""
+    for ch in raw.elems():
+        if ch >= "0" and ch <= "9":
+            stripped += ch
+        elif ch == "+":
+            stripped += ch
+    if len(stripped) == 0:
+        return None
+    return stripped
+
+def identity_index_key(contact_type, normalized):
+    return "vtx.identityindex." + crypto.sha256NanoID(contact_type + ":" + normalized)
+
+def credential_index_key(actor_key):
+    return "vtx.credentialindex." + crypto.sha256NanoID(actor_key)
+
+def derive_reads(op):
+    # Contract #2 §2.5 class (g). The Processor runs this at the head of step 4
+    # and merges what it returns into the declared read set, so a submitter no
+    # longer has to reproduce sha256NanoID and this package's contact
+    # normalization in its own language to get the dedup probes hydrated.
+    #
+    # Every key here is optionalReads and must stay that way: each one is a
+    # read-BEFORE-create probe whose absence is the ordinary case (a first-time
+    # contact, an unbound credential). Declaring one under "reads" would fault
+    # HydrationMiss on precisely the branch the probe exists to take.
+    #
+    # The op argument is a struct -- op.operationType, op.actor, op.payload
+    # (also a struct). No kv, no nanoid: both are bound to fail-closed stubs in this
+    # pass, and a derivation that reads state is a read, not a derivation.
+    ot = op.operationType
+    p = op.payload
+
+    if ot == "CreateUnclaimedIdentity":
+        keys = []
+        email = normalize_email(getattr(p, "email", None))
+        if email != None:
+            keys.append(identity_index_key("email", email))
+        phone = normalize_phone(getattr(p, "phone", None))
+        if phone != None:
+            keys.append(identity_index_key("phone", phone))
+        name = normalize_name(getattr(p, "name", None))
+        if name != None:
+            keys.append(identity_index_key("name", name))
+        if len(keys) == 0:
+            return {}
+        return {"optionalReads": keys}
+
+    if ot == "ClaimIdentity" or ot == "CompleteCredentialLink":
+        # The one-credential-<=-one-identity guard reads the index for the
+        # SUBMITTING credential, so this key derives from the actor, not the
+        # payload.
+        return {"optionalReads": [credential_index_key(op.actor)]}
+
+    return {}
+
 def execute(state, op):
     ot = op.operationType
     p = op.payload
@@ -675,25 +766,8 @@ def execute(state, op):
         if len(name) > 200:
             fail("InvalidArgument: name: required, maxLen 200")
 
-        raw_email = p.email if hasattr(p, "email") else None
-        raw_phone = p.phone if hasattr(p, "phone") else None
-
-        email = None
-        if raw_email != None and type(raw_email) == type(""):
-            e = raw_email.strip().lower()
-            if len(e) > 0:
-                email = e
-
-        phone = None
-        if raw_phone != None and type(raw_phone) == type(""):
-            stripped = ""
-            for ch in raw_phone.elems():
-                if ch >= "0" and ch <= "9":
-                    stripped += ch
-                elif ch == "+":
-                    stripped += ch
-            if len(stripped) > 0:
-                phone = stripped
+        email = normalize_email(getattr(p, "email", None))
+        phone = normalize_phone(getattr(p, "phone", None))
 
         if email == None and phone == None:
             fail("InvalidArgument: email or phone: at least one required")
@@ -712,20 +786,19 @@ def execute(state, op):
         if claim_key_algo != "sha256":
             fail("InvalidArgument: claimKeyAlgo: only sha256 is supported")
 
-        normalized_name = " ".join(name.lower().split())
-        name_index_key = "vtx.identityindex." + crypto.sha256NanoID("name:" + normalized_name)
+        name_index_key = identity_index_key("name", normalize_name(name))
 
         duplicate = False
         matched = {}
         if email != None:
-            email_index_key = "vtx.identityindex." + crypto.sha256NanoID("email:" + email)
+            email_index_key = identity_index_key("email", email)
             email_hit = state[email_index_key] if email_index_key in state else None
             if email_hit != None and (not hasattr(email_hit, "isDeleted") or not email_hit.isDeleted):
                 duplicate = True
                 incumbent_key = email_hit.data["identityKey"]
                 matched[incumbent_key] = (matched[incumbent_key] if incumbent_key in matched else []) + ["exact-email"]
         if phone != None:
-            phone_index_key = "vtx.identityindex." + crypto.sha256NanoID("phone:" + phone)
+            phone_index_key = identity_index_key("phone", phone)
             phone_hit = state[phone_index_key] if phone_index_key in state else None
             if phone_hit != None and (not hasattr(phone_hit, "isDeleted") or not phone_hit.isDeleted):
                 duplicate = True
@@ -958,7 +1031,7 @@ def execute(state, op):
             fail_claim("wrong-state")
 
         actor_key = op.actor
-        cred_index_key = "vtx.credentialindex." + crypto.sha256NanoID(actor_key)
+        cred_index_key = credential_index_key(actor_key)
         cred_index = state[cred_index_key] if cred_index_key in state else None
         if cred_index != None and not (hasattr(cred_index, "isDeleted") and cred_index.isDeleted):
             fail_claim("credential-already-bound")
@@ -1186,7 +1259,7 @@ def execute(state, op):
         # on an already-bound credential regardless of declaration (finding
         # A4, mirrored from ClaimIdentity).
         actor_key = op.actor
-        cred_index_key = "vtx.credentialindex." + crypto.sha256NanoID(actor_key)
+        cred_index_key = credential_index_key(actor_key)
         cred_index = state[cred_index_key] if cred_index_key in state else None
         if cred_index != None and not (hasattr(cred_index, "isDeleted") and cred_index.isDeleted):
             fail_link("credential-already-bound")
@@ -1332,7 +1405,7 @@ def execute(state, op):
             singular_bound = remaining[0]["boundAt"]
 
         mutations = [
-            {"op": "tombstone", "key": "vtx.credentialindex." + crypto.sha256NanoID(credential_actor_key)},
+            {"op": "tombstone", "key": credential_index_key(credential_actor_key)},
             {"op": "update", "key": binding_key,
              "document": {"class": "credentialBinding", "vertexKey": u_key, "localName": "credentialBinding",
                           "isDeleted": False,

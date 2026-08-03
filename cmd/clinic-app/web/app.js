@@ -651,71 +651,6 @@ function mintClaimSecret() {
   return Array.from(a).map((b) => b.toString(16).padStart(2, "0")).join("");
 }
 
-// sha256NanoID derives a valid 20-char Contract #1 NanoID from SHA-256(s),
-// byte-identical to internal/substrate.SHA256NanoID / the Starlark
-// crypto.sha256NanoID(s) builtin (both seed a 128-bit PCG from the digest and
-// rejection-sample the alphabet). Needed client-side so this dispatcher can
-// declare the identityindex probe keys CreateUnclaimedIdentity's script
-// derives from the same normalized email/phone/name.
-async function sha256NanoID(s) {
-  const ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz123456789";
-  const MASK64 = (1n << 64n) - 1n;
-  const MASK128 = (1n << 128n) - 1n;
-  const MUL = (2549297995355413924n << 64n) | 4865540595714422341n;
-  const INC = (6364136223846793005n << 64n) | 1442695040888963407n;
-  const CHEAP_MUL = 0xda942042e4dd58b5n;
-
-  const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(s)));
-  const beUint64 = (off) => {
-    let v = 0n;
-    for (let i = 0; i < 8; i++) v = (v << 8n) | BigInt(digest[off + i]);
-    return v;
-  };
-  let state = (beUint64(0) << 64n) | beUint64(8);
-  const nextUint64 = () => {
-    state = (state * MUL + INC) & MASK128;
-    let hi = state >> 64n;
-    const lo = state & MASK64;
-    hi ^= hi >> 32n;
-    hi = (hi * CHEAP_MUL) & MASK64;
-    hi ^= hi >> 48n;
-    hi = (hi * (lo | 1n)) & MASK64;
-    return hi;
-  };
-  let out = "";
-  while (out.length < 20) {
-    let v = nextUint64();
-    for (let i = 0; i < 10 && out.length < 20; i++) {
-      const b = Number(v & 63n);
-      v >>= 6n;
-      if (b < ALPHABET.length) out += ALPHABET[b];
-    }
-  }
-  return out;
-}
-
-// identityIndexProbeKeys computes the dedup identityindex probe keys
-// (email/phone/name) for a CreateUnclaimedIdentity payload, mirroring the
-// normalization identity-domain's script applies byte-for-byte. Declaring
-// them as optionalReads activates the dormant duplicate-flag probe and
-// avoids the RevisionConflict a duplicate contact would otherwise hit.
-async function identityIndexProbeKeys({ email, phone, name }) {
-  const keys = [];
-  if (email) {
-    const e = email.trim().toLowerCase();
-    if (e) keys.push("vtx.identityindex." + await sha256NanoID("email:" + e));
-  }
-  if (phone) {
-    const p = Array.from(phone).filter((ch) => (ch >= "0" && ch <= "9") || ch === "+").join("");
-    if (p) keys.push("vtx.identityindex." + await sha256NanoID("phone:" + p));
-  }
-  if (name) {
-    const n = name.toLowerCase().split(/\s+/).filter(Boolean).join(" ");
-    if (n) keys.push("vtx.identityindex." + await sha256NanoID("name:" + n));
-  }
-  return keys;
-}
-
 async function submitNewPatient(ev) {
   ev.preventDefault();
   const name = $("#np-name").value.trim();
@@ -735,8 +670,11 @@ async function submitNewPatient(ev) {
       const idPayload = { name, claimKeyHash };
       if (email) idPayload.email = email;
       if (phone) idPayload.phone = phone;
-      const optionalReads = await identityIndexProbeKeys(idPayload);
-      const idReply = await submitOp("CreateUnclaimedIdentity", "identity", idPayload, undefined, { optionalReads });
+      // No optionalReads: the dedup identityindex probes are class-(g) keys
+      // identity-domain's own derive_reads computes from this payload
+      // (Contract #2 §2.5), so the browser no longer ports sha256NanoID or the
+      // package's contact normalization to name them.
+      const idReply = await submitOp("CreateUnclaimedIdentity", "identity", idPayload);
       const idMsg = rejectionMessage(idReply);
       if (idMsg) {
         toast("Could not create patient — " + idMsg, "err");

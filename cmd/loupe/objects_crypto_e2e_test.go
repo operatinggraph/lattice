@@ -92,6 +92,8 @@ func putSensitiveObjectDirect(t *testing.T, ctx context.Context, conn *substrate
 	}
 
 	plaintextDigest := objectcrypto.Digest(plaintext)
+	// derived-key: recomputes the object id the handler mints, to assert the
+	// identity salt is in it. Not a declared read.
 	oid = substrate.SHA256NanoID("object:" + governingIdentity + ":" + plaintextDigest)
 
 	cek, err := objectcrypto.GenerateCEK()

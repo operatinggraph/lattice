@@ -158,6 +158,9 @@ func (s *server) handleObjectUpload(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, http.StatusBadGateway, "store object bytes: "+err.Error())
 		return
 	}
+	// derived-key: object id, content-addressed from the stored bytes. Not a
+	// declared read — the oid is minted BEFORE the anchor op exists, so no
+	// package's derive_reads could compute it from a payload.
 	oid := substrate.SHA256NanoID("object:" + info.Digest)
 	objKey := "vtx.object." + oid
 
@@ -235,6 +238,8 @@ func (s *server) handleSensitiveObjectUpload(w http.ResponseWriter, ctx context.
 	// graft one object's ciphertext/envelope onto another's oid within the
 	// same governing identity and still decrypt.
 	plaintextDigest := objectcrypto.Digest(plaintext)
+	// derived-key: object id, content-addressed from the governing identity +
+	// plaintext digest. Minted before the anchor op and never read as state.
 	oid := substrate.SHA256NanoID("object:" + governingIdentity + ":" + plaintextDigest)
 	objKey := "vtx.object." + oid
 

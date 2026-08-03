@@ -104,6 +104,14 @@ jobs:
         # history/changelog comments. STRICT=1 fails the build on any finding.
         run: STRICT=1 go run ./scripts/lint-conventions.go
 
+      - name: Web-asset derived-key lint (no client-side hash-to-NanoID port)
+        # The G2 ban's web half. A .js/.mjs file carrying the Contract #1 NanoID
+        # alphabet AND computing a SHA-256 digest has re-implemented
+        # substrate.SHA256NanoID in the browser; a key derived that way from an
+        # op payload belongs to the owning DDL's derive_reads (Contract #2 §2.5
+        # class (g)). Anything else declares `// derived-key: <reason>`.
+        run: STRICT=1 go run ./scripts/lint-web.go
+
       - name: Lens read-grant walk lint (dual-enumeration seam)
         # A Personal (nats-subject) lens that anchors on anything but the actor
         # must declare its actor→anchor `Walk`, so pkgmgr compiles the read-grant

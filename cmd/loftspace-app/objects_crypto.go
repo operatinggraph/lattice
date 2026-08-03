@@ -76,6 +76,8 @@ func (s *server) handleSensitiveObjectUpload(w http.ResponseWriter, ctx context.
 	// object is never cross-identity content-addressed. Computed before
 	// sealing so it can bind the ciphertext as AEAD associated data.
 	plaintextDigest := objectcrypto.Digest(plaintext)
+	// derived-key: object id, content-addressed from the governing identity +
+	// plaintext digest; it also binds the ciphertext as AEAD associated data.
 	oid := substrate.SHA256NanoID("object:" + governingIdentity + ":" + plaintextDigest)
 
 	env, err := fetchPiiKeyEnvelope(ctx, conn, governingIdentity)

@@ -268,6 +268,14 @@ var (
 	// need no annotation to pass clean.
 	idSeedAssign        = regexp.MustCompile(`\b([A-Za-z_][A-Za-z0-9_]*)\s*:?=\s*"([A-Za-z0-9]{20})"`)
 	nanoidAlphabetShape = regexp.MustCompile(`//\s*nanoid-alphabet:\s*\(([a-z-]+)\)(.*)$`)
+
+	// derivedKeyCall / derivedKeyShape — the G2 call-site ban
+	// (client-ceremony-op-descriptors-design.md §6). A content-addressed id
+	// derivation OUTSIDE internal/ is how a submitter used to name a key it
+	// could not otherwise express; Contract #2 §2.5 class (g) makes that the
+	// owning DDL's job, so a surviving call site must say what it derives.
+	derivedKeyCall  = regexp.MustCompile(`\bsubstrate\.SHA256NanoID\(`)
+	derivedKeyShape = regexp.MustCompile(`//\s*derived-key:(.*)$`)
 )
 
 // nanoidAlphabetShapes are the declarable exceptions to the NanoID-alphabet
@@ -657,6 +665,17 @@ func scanSource(path string, data []byte) []finding {
 	if nanoidScoped {
 		nanoidAt = annotationSpans(strings.Split(string(data), "\n"), nanoidAlphabetShape)
 	}
+	// derivedKeyScoped — G2 bans the derivation at SUBMITTER call sites, so it
+	// is scoped to everything outside internal/. internal/ is where the
+	// primitive itself lives (substrate defines it, the Processor exposes it to
+	// scripts, Loupe-adjacent managers consume it); packages/ is the DDL side,
+	// which is precisely where a derivation is supposed to happen.
+	derivedKeyScoped := !strings.HasPrefix(slash, "internal/") && !strings.HasPrefix(slash, "packages/") &&
+		!strings.HasPrefix(slash, "scripts/")
+	var derivedKeyAt map[int]annotation
+	if derivedKeyScoped {
+		derivedKeyAt = annotationSpans(strings.Split(string(data), "\n"), derivedKeyShape)
+	}
 	// The file's own validated-target exemption helpers, derived from the
 	// script text rather than a hardcoded name list (see exemptionHelpers).
 	var exemptHelpers map[string]bool
@@ -706,6 +725,9 @@ func scanSource(path string, data []byte) []finding {
 		}
 		if nanoidScoped {
 			out = append(out, checkNanoIDAlphabet(path, ln, line, nanoidAt[ln])...)
+		}
+		if derivedKeyScoped {
+			out = append(out, checkDerivedKey(path, ln, line, derivedKeyAt[ln])...)
 		}
 		if postureScoped {
 			out = append(out, checkReadPosture(path, ln, line, postureAt[ln], fileMutates)...)
@@ -1031,6 +1053,40 @@ func checkWorkplaceExempt(path string, ln int, line string, declared annotation,
 // 2026-08-01: composite_key_producer_test.go's "…01aaaaaaaaa" and four
 // mnemonic ids in packages/privacy-base/lens_cypher_test.go). declared is the
 // `// nanoid-alphabet:` annotation covering this line (annotationSpans).
+// checkDerivedKey is the G2 call-site ban
+// (client-ceremony-op-descriptors-design.md §6): default-deny a
+// content-addressed id derivation outside internal/, with an explicit
+// `// derived-key: <reason>` as the one escape.
+//
+// The rule is not "hashing is forbidden" — it is that a submitter deriving a
+// key CANNOT be doing so correctly by construction. A declared read key that
+// is a function of the payload under the *package's* semantics belongs to that
+// package's `derive_reads` (Contract #2 §2.5 class (g)); a client that
+// recomputes it has re-implemented the package's normalization in a second
+// language, where nothing makes the two agree and nothing notices when they
+// stop. What survives the ban is a derivation of something that is NOT a
+// declared read — an object id, a Contract #4 requestId — and those simply
+// have to say so, which is cheap and makes the exception re-checkable.
+//
+// _test.go files are in scope deliberately: a test is exactly where a deleted
+// re-port would be reintroduced, and an exempted test suite is a hole the
+// gate's own clean-tree claim would not survive.
+func checkDerivedKey(path string, ln int, line string, declared annotation) []finding {
+	if isCommentLine(line) || !derivedKeyCall.MatchString(line) {
+		return nil
+	}
+	if declared.text == "" {
+		return []finding{{file: path, line: ln, msg: "derived-key: undeclared substrate.SHA256NanoID outside internal/ — a key derived client-side from a payload is a class-(g) declared read the owning DDL's `derive_reads` should compute (Contract #2 §2.5); a hand-ported derivation is a second implementation of the package's normalization that nothing keeps in agreement. If this derives something that is NOT a declared read (an object id, a requestId), declare `// derived-key: <what it derives and why the package cannot>`"}}
+	}
+	// derivedKeyShape has a single capture group, so annotationSpans lands the
+	// reason in `shape`; there is no closed vocabulary here, only a required
+	// sentence.
+	if strings.TrimSpace(declared.shape) == "" {
+		return []finding{{file: path, line: ln, msg: "derived-key: declaration carries no reason — name what this derives and why it is not a declared read the owning package should compute"}}
+	}
+	return nil
+}
+
 func checkNanoIDAlphabet(path string, ln int, line string, declared annotation) []finding {
 	if isCommentLine(line) {
 		return nil
@@ -1258,6 +1314,26 @@ func selfTest() []string {
 			"unknown shape (trusted)"},
 		{"the nanoid-alphabet gate is scoped to _test.go files", "packages/self-test/ddls.go",
 			"\tctClaimant = \"vtx.identity.BBclaimantHJKMNPQRST\"\n", ""},
+
+		{"an undeclared SHA256NanoID in cmd/ is denied", "cmd/some-app/keys.go",
+			"\tk := \"vtx.identityindex.\" + substrate.SHA256NanoID(\"email:\" + e)\n",
+			"undeclared substrate.SHA256NanoID outside internal/"},
+		{"a declared derivation passes", "cmd/some-app/objects.go",
+			"\t// derived-key: object id, content-addressed; not a declared read\n" +
+				"\toid := substrate.SHA256NanoID(\"object:\" + digest)\n", ""},
+		{"an on-the-line declaration passes", "cmd/some-app/objects.go",
+			"\toid := substrate.SHA256NanoID(\"object:\" + digest) // derived-key: object id, not a read\n", ""},
+		{"a reasonless declaration is denied", "cmd/some-app/objects.go",
+			"\t// derived-key:\n" +
+				"\toid := substrate.SHA256NanoID(\"object:\" + digest)\n",
+			"declaration carries no reason"},
+		{"the derived-key gate is scoped off internal/", "internal/objectmanager/gc.go",
+			"\toid := substrate.SHA256NanoID(\"object:\" + digest)\n", ""},
+		{"the derived-key gate is scoped off packages/", "packages/objects-base/ddls.go",
+			"\toid := substrate.SHA256NanoID(\"object:\" + digest)\n", ""},
+		{"the derived-key gate covers _test.go under cmd/", "cmd/some-app/objects_test.go",
+			"\twant := substrate.SHA256NanoID(\"object:\" + digest)\n",
+			"undeclared substrate.SHA256NanoID outside internal/"},
 	}
 	var failures []string
 	for _, tc := range cases {
@@ -1267,7 +1343,8 @@ func selfTest() []string {
 			if !strings.HasPrefix(fd.msg, "authcontext-target:") &&
 				!strings.HasPrefix(fd.msg, "workplace-exempt:") &&
 				!strings.HasPrefix(fd.msg, "read-posture:") &&
-				!strings.HasPrefix(fd.msg, "nanoid-alphabet:") {
+				!strings.HasPrefix(fd.msg, "nanoid-alphabet:") &&
+				!strings.HasPrefix(fd.msg, "derived-key:") {
 				continue
 			}
 			hits++

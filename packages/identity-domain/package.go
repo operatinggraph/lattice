@@ -30,7 +30,7 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 // Package is the static, install-time bundle.
 var Package = pkgmgr.Definition{
 	Name:        "identity-domain",
-	Version:     "0.10.4",
+	Version:     "0.11.0",
 	Description: "Identity vertex creation, claim, and state-machine management, plus ProvisionConsumerIdentity — the Gateway's idempotent authenticated-touch auto-provisioning op, which mints a consumer identity for an actor it has never seen and completes the consumer grant for one whose vertex some other path already created (real-actor-write-auth-e2e Phase 1).",
 	Depends:     []string{"rbac-domain"},
 	DDLs:        DDLs(),

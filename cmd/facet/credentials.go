@@ -269,9 +269,11 @@ func (s *server) handleCredentialsLink(w http.ResponseWriter, r *http.Request) {
 		AuthContext:   &processor.AuthContext{Target: a2Key},
 		ContextHint: &processor.ContextHint{
 			Reads: []string{uKey, uKey + ".state"},
+			// The credentialindex dedup probe is a class-(g) key
+			// identity-domain's derive_reads computes from the actor
+			// (Contract #2 §2.5) — a submitter no longer names it.
 			OptionalReads: []string{
 				uKey + ".linkKey", uKey + ".credentialBinding",
-				"vtx.credentialindex." + substrate.SHA256NanoID(a2Key),
 			},
 		},
 	}

@@ -426,6 +426,8 @@ func (s *server) handleObjectUpload(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, http.StatusBadGateway, "store object bytes: "+err.Error())
 		return
 	}
+	// derived-key: object id, content-addressed from the stored bytes. Not a
+	// declared read — minted before the anchor op exists.
 	oid := substrate.SHA256NanoID("object:" + info.Digest)
 	resp := map[string]any{
 		"oid": oid, "digest": info.Digest, "storeName": storeName,

@@ -100,7 +100,6 @@ opTrackerKey, the created identity key (primaryKey), and the claim secret.`,
 				Actor:         actor,
 				SubmittedAt:   time.Now().UTC().Format(time.RFC3339),
 				Payload:       json.RawMessage(payloadBytes),
-				ContextHint:   &processor.ContextHint{OptionalReads: identityIndexProbeKeys(payloadObj)},
 			}
 
 			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -272,38 +271,6 @@ Read payload from --payload @file.json or stdin (-).`,
 	cmd.Flags().StringVar(&actor, "actor", "", "actor key (defaults to credential file actorKey)")
 	cmd.Flags().StringVar(&payload, "payload", "", "payload: @file.json for file, - for stdin, or inline JSON")
 	return cmd
-}
-
-// identityIndexProbeKeys computes the dedup identityindex probe keys
-// (email/phone/name) for a CreateUnclaimedIdentity payload, mirroring the
-// normalization identity-domain's script applies (packages/identity-domain/ddls.go)
-// byte-for-byte so the derived crypto.SHA256NanoID keys match. Declaring
-// them as optionalReads activates the dormant duplicate-flag probe and
-// avoids the RevisionConflict a duplicate contact would otherwise hit.
-func identityIndexProbeKeys(payload map[string]any) []string {
-	keys := []string{}
-	if email, ok := payload["email"].(string); ok {
-		if e := strings.ToLower(strings.TrimSpace(email)); e != "" {
-			keys = append(keys, "vtx.identityindex."+substrate.SHA256NanoID("email:"+e))
-		}
-	}
-	if phone, ok := payload["phone"].(string); ok {
-		var b strings.Builder
-		for _, ch := range phone {
-			if (ch >= '0' && ch <= '9') || ch == '+' {
-				b.WriteRune(ch)
-			}
-		}
-		if p := b.String(); p != "" {
-			keys = append(keys, "vtx.identityindex."+substrate.SHA256NanoID("phone:"+p))
-		}
-	}
-	if name, ok := payload["name"].(string); ok {
-		if n := strings.Join(strings.Fields(strings.ToLower(name)), " "); n != "" {
-			keys = append(keys, "vtx.identityindex."+substrate.SHA256NanoID("name:"+n))
-		}
-	}
-	return keys
 }
 
 // submitOp publishes an OperationEnvelope and waits for the Processor reply.
