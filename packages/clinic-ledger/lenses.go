@@ -30,8 +30,9 @@ const NoShowSettlementTarget = "clinicNoShowSettlement"
 // negative for credit, over rows for a given patientKey/accountKey; the
 // ledger itself never stores a mutable running total), clinicPatientAccounts
 // (the patient -> account key lookup, since the account key is no longer
-// derivable), and clinicNoShowSettlement (the missing_charge convergence lens
-// targets.go's WeaverTargets dispatches DebitAccount over). Prefixed like the
+// derivable), and clinicNoShowSettlement (the missing_account/missing_charge
+// convergence lens targets.go's WeaverTargets dispatches
+// ClinicCreateAccount/DebitAccount over). Prefixed like the
 // package's DDLs (ddls.go): a Lens canonicalName is global across every
 // installed package, and loftspace-ledger already owns the bare
 // `ledgerHistory` name.
@@ -64,7 +65,7 @@ func Lenses() []pkgmgr.LensSpec {
 			Output: &pkgmgr.OutputDescriptorSpec{
 				AnchorType:       "appointment",
 				OutputKeyPattern: NoShowSettlementTarget + ".{actorSuffix}",
-				BodyColumns:      []string{"violating", "missing_charge", "entityKey", "appointmentKey", "patientKey", "accountKey", "feeCents", "status", "memo"},
+				BodyColumns:      []string{"violating", "missing_account", "missing_charge", "entityKey", "appointmentKey", "patientKey", "accountKey", "feeCents", "status", "memo"},
 				EmptyBehavior:    "delete",
 				KeyColumn:        "entityId",
 				Freshness:        "auto",
@@ -75,26 +76,29 @@ func Lenses() []pkgmgr.LensSpec {
 
 // noShowSettlementSpec is the one-row-per-appointment convergence cypher: a
 // noShow appointment carrying a positive noShowFeeCents needs its charge
-// posted onto the patient's clinic-ledger account, once. missing_charge only
-// (no missing_account gap — see targets.go's doc comment): the appointment's
-// patient must already have a clinicaccount, matching clinic's existing
-// billing assumption.
+// posted onto the patient's clinic-ledger account, once — two independent
+// gaps, mirroring cafe-domain's cafeTabSettlement (lenses.go there):
 //
+//   - `missing_account` — the appointment is a noShow, carries a fee, and the
+//     patient has no clinicaccount yet (accountKey null). Weaver dispatches
+//     ClinicCreateAccount{patientKey} (targets.go), opening the account lazily
+//     on first no-show rather than requiring it pre-exist.
 //   - `missing_charge` — the appointment is a noShow, carries a fee, the
 //     patient has a ledger account, and no clinictransaction `settles` this
 //     appointment yet (count(tx.key) collapses the fan to a single existence
-//     check — the objectLiveness/clauseSatisfaction idiom, same as
-//     cafe-domain's cafeTabSettlement). Weaver dispatches
+//     check — the objectLiveness/clauseSatisfaction idiom). Weaver dispatches
 //     DebitAccount{accountKey, amountCents, appointmentRef} (targets.go) —
 //     the appointmentRef extension writes the settles audit link this
 //     OPTIONAL MATCH walks, so once posted the gap converges and stays
 //     converged (noShow is a terminal status — SetAppointmentStatus rejects
 //     transitioning away from it — so there is no re-open path to guard).
 //
-// An appointment whose patient has no clinicaccount yet never violates
-// (accountKey null); one with no noShowFeeCents (a noShow set before this
-// lens existed) never violates either — both are non-goals for v1, not a
-// gap this lens is meant to converge.
+// Once missing_account converges (ClinicCreateAccount writes the patient's
+// .ledgerAccount guard aspect), the next lens tick reads the now-real
+// accountKey and missing_charge takes over — the same lazy account-open
+// relay cafeTabSettlement uses. An appointment with no noShowFeeCents (a
+// noShow set before this lens existed) never violates either gap — a
+// non-goal for v1, not a gap this lens is meant to converge.
 const noShowSettlementSpec = `MATCH (appt:appointment {key: $actorKey})
 MATCH (appt)-[:forPatient]->(pt:patient)
 OPTIONAL MATCH (pt)<-[:heldFor]-(a:clinicaccount)
@@ -115,8 +119,12 @@ RETURN
   feeCents,
   status,
   'No-show fee' AS memo,
+  ((status = 'noShow') AND (feeCents <> null) AND (feeCents > 0) AND (accountKey = null)) AS missing_account,
   ((status = 'noShow') AND (feeCents <> null) AND (feeCents > 0) AND (accountKey <> null) AND (txCount = 0)) AS missing_charge,
-  ((status = 'noShow') AND (feeCents <> null) AND (feeCents > 0) AND (accountKey <> null) AND (txCount = 0)) AS violating
+  (
+    ((status = 'noShow') AND (feeCents <> null) AND (feeCents > 0) AND (accountKey = null))
+    OR ((status = 'noShow') AND (feeCents <> null) AND (feeCents > 0) AND (accountKey <> null) AND (txCount = 0))
+  ) AS violating
 `
 
 // ledgerHistorySpec projects one row per transaction, walking postedTo to the

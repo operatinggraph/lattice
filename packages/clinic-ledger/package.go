@@ -65,13 +65,13 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 // Package is the static, install-time bundle.
 var Package = pkgmgr.Definition{
 	Name:    "clinic-ledger",
-	Version: "0.2.5",
+	Version: "0.2.6",
 	Description: "Clinic patient payment ledger: the clinicaccount vertex type (ClinicCreateAccount, independently-minted " +
 		"id, one per patient via a .ledgerAccount guard aspect on the patient) + the clinictransaction vertex type " +
 		"(DebitAccount/CreditAccount, append-only entries linked to the account via postedTo, DebitAccount taking an " +
 		"optional appointmentRef back-ref) + the clinicLedgerHistory read-model lens (one row per transaction) + the " +
 		"clinicPatientAccounts lens (patient -> account key lookup) + the clinicNoShowSettlement Weaver playbook " +
-		"(no-show fee auto-charge). Depends clinic-domain.",
+		"(lazily opens the account via ClinicCreateAccount, then auto-charges the no-show fee). Depends clinic-domain.",
 	Depends:       []string{"clinic-domain"},
 	DDLs:          DDLs(),
 	Lenses:        Lenses(),

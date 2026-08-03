@@ -1,5 +1,5 @@
 name: clinic-ledger
-version: 0.2.5
+version: 0.2.6
 description: |
   Clinic patient payment ledger: the clinicaccount vertex type (ClinicCreateAccount,
   independently-minted id, one per patient via a .ledgerAccount guard aspect
@@ -9,8 +9,9 @@ description: |
   expectedReimbursementCents payer dimension, and an optional appointmentRef
   back-ref) + the clinicLedgerHistory read-model lens (one row per
   transaction) + the clinicPatientAccounts lens (patient -> account key
-  lookup) + the clinicNoShowSettlement Weaver playbook (no-show fee
-  auto-charge). Depends clinic-domain.
+  lookup) + the clinicNoShowSettlement Weaver playbook (lazily opens the
+  account via ClinicCreateAccount, then auto-charges the no-show fee).
+  Depends clinic-domain.
 depends:
   - clinic-domain
 declares:

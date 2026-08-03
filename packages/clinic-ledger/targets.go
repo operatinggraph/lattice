@@ -3,23 +3,37 @@ package clinicledger
 import "github.com/operatinggraph/lattice/internal/pkgmgr"
 
 // WeaverTargets returns the package's meta.weaverTarget playbook (Contract
-// #10 §10.8): a single missing_charge → directOp(DebitAccount) gap, mirroring
-// cafe-domain/targets.go's shape but self-contained inside clinic-ledger — it
-// already depends on clinic-domain (for patientKey validation) and can read
-// appointment data directly, so no separate domain-side package or
-// cross-package dependency is needed (clinic-domain-owned
-// clinic-noshow-fee-design.md §"Package boundary").
+// #10 §10.8): clinicNoShowSettlement's two independent gaps, mirroring
+// cafe-domain/targets.go's cafeTabSettlement shape (missing_account →
+// directOp(CreateAccount) then missing_charge → directOp(DebitAccount)) but
+// self-contained inside clinic-ledger — it already depends on clinic-domain
+// (for patientKey validation) and can read appointment data directly, so no
+// separate domain-side package or cross-package dependency is needed
+// (clinic-domain-owned clinic-noshow-fee-design.md §"Package boundary").
 //
-// No missing_account gap: clinic's existing billing (copay/insurance
-// charges) already assumes a registered patient's clinicaccount exists via
-// the standing ClinicCreateAccount flow; a no-show'd patient with no account yet
-// simply doesn't converge until one is opened, same as today's billing.
+//   - missing_account → directOp(ClinicCreateAccount), opening the patient's
+//     clinic-ledger account lazily on first no-show rather than requiring a
+//     registered patient's account to pre-exist (previously the only route:
+//     clinic's standing front-desk/billing ClinicCreateAccount flow, which
+//     silently starved unopened patients' no-show fees of ever converging).
+//   - missing_charge → directOp(DebitAccount) over the now-real account, same
+//     as before.
 func WeaverTargets() []pkgmgr.WeaverTargetSpec {
 	return []pkgmgr.WeaverTargetSpec{
 		{
 			TargetID: NoShowSettlementTarget,
 			LensRef:  NoShowSettlementTarget,
 			Gaps: map[string]pkgmgr.GapActionSpec{
+				"missing_account": {
+					Action:    "directOp",
+					Operation: "ClinicCreateAccount",
+					// ClinicCreateAccount is claimed by clinic-ledger's clinicaccount
+					// DDL only, but pin Class explicitly to match the missing_charge
+					// gap's convention below (MissingClass otherwise if ever shared).
+					Class:  "clinicaccount",
+					Params: map[string]string{"patientKey": "row.patientKey"},
+					Reads:  []string{"row.patientKey"},
+				},
 				"missing_charge": {
 					Action:    "directOp",
 					Operation: "DebitAccount",

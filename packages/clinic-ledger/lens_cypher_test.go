@@ -10,8 +10,8 @@ package clinicledger
 //   - NOSHOW_NO_FEE: a noShow appointment with no noShowFeeCents (set before
 //     this lens existed) never violates.
 //   - NOSHOW_NO_ACCOUNT: noShow, carries a fee, the patient has no
-//     clinic-ledger account yet — never violates (no missing_account gap;
-//     this lens only converges once an account exists).
+//     clinic-ledger account yet — missing_account true (Weaver opens one via
+//     ClinicCreateAccount).
 //   - NOSHOW_ACCOUNT_NO_CHARGE: noShow, carries a fee, account exists, no
 //     clinictransaction settles this appointment yet — missing_charge true.
 //   - NOSHOW_CHARGED: noShow, carries a fee, account exists, a
@@ -138,7 +138,7 @@ func TestClinicNoShowSettlement_NoShowNoFee_NotViolating(t *testing.T) {
 	require.Equal(t, false, v["violating"])
 }
 
-func TestClinicNoShowSettlement_NoShowNoAccount_NotViolating(t *testing.T) {
+func TestClinicNoShowSettlement_NoShowNoAccount_MissingAccount(t *testing.T) {
 	if testing.Short() {
 		t.Skip("requires NATS")
 	}
@@ -147,8 +147,9 @@ func TestClinicNoShowSettlement_NoShowNoAccount_NotViolating(t *testing.T) {
 
 	v := f.projectAt(t, "noacctappt")[0].Values
 	require.Nil(t, v["accountKey"], "patient has no clinic-ledger account yet")
-	require.Equal(t, false, v["missing_charge"], "no account to charge yet — this gap doesn't gate (no missing_account gap)")
-	require.Equal(t, false, v["violating"])
+	require.Equal(t, true, v["missing_account"], "no account yet — Weaver opens one via ClinicCreateAccount")
+	require.Equal(t, false, v["missing_charge"], "cannot charge before the account exists")
+	require.Equal(t, true, v["violating"])
 }
 
 func TestClinicNoShowSettlement_NoShowWithAccountNoCharge_MissingCharge(t *testing.T) {
