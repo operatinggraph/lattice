@@ -57,6 +57,7 @@ type capabilityProposalCols struct {
 	ValidationReport       string  `json:"validationReport"`
 	ValidationDeltaPreview any     `json:"validationDeltaPreview"`
 	ValidationCheckedAt    string  `json:"validationCheckedAt"`
+	Source                 string  `json:"source"`
 	Model                  string  `json:"model"`
 	PromptHash             string  `json:"promptHash"`
 	CatalogHash            string  `json:"catalogHash"`

@@ -6,6 +6,8 @@ import (
 	"sort"
 
 	"github.com/operatinggraph/lattice/internal/pkgmgr"
+	"github.com/operatinggraph/lattice/internal/processor"
+	"github.com/operatinggraph/lattice/internal/substrate"
 )
 
 // F25.3a — Author: draft, check, export (weaver-target-studio-design.md §6,
@@ -19,14 +21,16 @@ import (
 // pkgmgr validators). Export never touches the server at all — the browser
 // builds the downloadable bundle from the same fields.
 //
-// No propose step here — that is F25.3b, gated on SubmitCapabilityProposal
-// (packages/capability-author, shipped 6d2614fb). This fire never submits an
-// op, so it needs no capability check beyond the console-wide requireOperator
-// gate every route already sits behind (F15), and nothing here writes
-// anything a demo/read-only posture must specially suppress: the server side
-// is GET/analysis-shaped work behind a POST body, which the client hides by
-// its own affordance-suppression convention (data-demo-hide on the Author
-// nav link) and which demoReadOnly's method default-deny would 403 anyway.
+// F25.3b adds the propose step below: POST /api/weaver/author/propose is the
+// one server round-trip Propose needs beyond Check, because a proposal id is
+// a Lattice NanoID (internal/substrate/keys' 58-char custom alphabet) and
+// only Go code mints one. Both this endpoint and weaverAuthorCheck are POSTs
+// carrying no read/write of Loupe's own state, but propose DOES submit a
+// platform-mutating op (SubmitCapabilityProposal) through the Gateway, so —
+// unlike Check — it needs the console-wide requireOperator gate to have
+// resolved a real operator token; demoReadOnly's method default-deny still
+// blocks it under the demo posture, and the client additionally hides the
+// button via the same data-demo-hide convention as Check/Export.
 
 // weaverAuthorCheckRequest is POST /api/weaver/author/check's body: the two
 // artifact contents a target draft carries (§6 step 1 — "the paired
@@ -190,4 +194,100 @@ func nonNilStrings(s []string) []string {
 		return []string{}
 	}
 	return s
+}
+
+// weaverAuthorProposeArtifact is one artifact of the propose request — the
+// exact shape logic/weaverauthor.js's exportBundle already builds (target
+// and validation are carried through verbatim as the op's own wire shape
+// takes them, design §6.4 point 1), minus proposalId: the browser never
+// mints a Lattice NanoID itself, so the server mints one per artifact.
+type weaverAuthorProposeArtifact struct {
+	Kind       string          `json:"kind"`
+	Content    string          `json:"content"`
+	Target     json.RawMessage `json:"target"`
+	Rationale  string          `json:"rationale"`
+	Validation json.RawMessage `json:"validation"`
+}
+
+type weaverAuthorProposeRequest struct {
+	Artifacts []weaverAuthorProposeArtifact `json:"artifacts"`
+}
+
+// weaverAuthorProposeResult is one artifact's outcome: a minted proposalId
+// plus either the relayed reply (which itself may carry a Processor
+// rejection — the caller must check reply.status, opRejected's job) or a
+// transport-level Error. Two artifacts propose independently, so one
+// artifact's failure never blocks or unwinds the other's.
+type weaverAuthorProposeResult struct {
+	Kind       string                    `json:"kind"`
+	ProposalID string                    `json:"proposalId"`
+	Reply      *processor.OperationReply `json:"reply,omitempty"`
+	Error      string                    `json:"error,omitempty"`
+}
+
+type weaverAuthorProposeResponse struct {
+	Results []weaverAuthorProposeResult `json:"results"`
+}
+
+// weaverAuthorPropose implements POST /api/weaver/author/propose (§6 step
+// 4). Each artifact becomes its own SubmitCapabilityProposal op — the DDL
+// mints the whole proposal vertex from one op, reads nothing, and rejects
+// synchronously on a malformed payload (submit_test.go), so this handler
+// does no pre-validation of its own beyond decoding the request; the studio
+// already ran Check before enabling the button, and the op records
+// whatever validation verdict this request carries. The requester is
+// stamped by the Gateway from the caller's own verified Bearer token (never
+// asserted by this handler), so the review queue's requestedBy always names
+// the real operator regardless of what a payload might claim.
+func (s *server) weaverAuthorPropose(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		s.writeError(w, http.StatusBadRequest, "POST required")
+		return
+	}
+	var req weaverAuthorProposeRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		s.writeError(w, http.StatusBadRequest, "malformed request body: "+err.Error())
+		return
+	}
+	if len(req.Artifacts) == 0 {
+		s.writeError(w, http.StatusBadRequest, "artifacts must not be empty")
+		return
+	}
+
+	ctx, cancel := s.gatewaySubmitContext(r)
+	defer cancel()
+
+	results := make([]weaverAuthorProposeResult, 0, len(req.Artifacts))
+	for _, a := range req.Artifacts {
+		id, err := substrate.NewNanoID()
+		if err != nil {
+			results = append(results, weaverAuthorProposeResult{Kind: a.Kind, Error: "generate proposal id: " + err.Error()})
+			continue
+		}
+		payload, err := json.Marshal(map[string]any{
+			"proposalId": id,
+			"kind":       a.Kind,
+			"content":    a.Content,
+			"target":     a.Target,
+			"rationale":  a.Rationale,
+			"validation": a.Validation,
+		})
+		if err != nil {
+			results = append(results, weaverAuthorProposeResult{Kind: a.Kind, ProposalID: id, Error: "marshal payload: " + err.Error()})
+			continue
+		}
+		reply, err := submitOpViaGateway(ctx, s.gatewayURL, operatorToken(ctx), gatewayOperationRequest{
+			OperationType: "SubmitCapabilityProposal",
+			Lane:          string(processor.LaneDefault),
+			Payload:       payload,
+		})
+		res := weaverAuthorProposeResult{Kind: a.Kind, ProposalID: id}
+		if err != nil {
+			res.Error = err.Error()
+		} else {
+			res.Reply = reply
+		}
+		results = append(results, res)
+	}
+	s.writeJSON(w, http.StatusOK, weaverAuthorProposeResponse{Results: results})
 }

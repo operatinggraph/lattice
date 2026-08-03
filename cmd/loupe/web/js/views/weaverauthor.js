@@ -4,7 +4,18 @@
 // gaps/actions plus a scaffolded cypher textarea for the paired violation
 // lens; "Run checks" posts the draft to F25.2's checker + the pkgmgr
 // validators; "Export" downloads the checked artifact bundle client-side —
-// no propose step (F25.3b), no platform write of any kind.
+// no platform write of any kind.
+//
+// F25.3b (§6 steps 4-5) adds Propose — POST /api/weaver/author/propose turns
+// the same checked bundle into two SubmitCapabilityProposal ops, one per
+// artifact, entering the review queue F16 already builds/reviews/applies —
+// and the Trial panel, a guided wrapper around primitives that already exist
+// elsewhere in the console rather than new platform surface: revoke/enable
+// are the same generic /api/control/weaver/<id>/<op> relay component.js's
+// Weaver control rows already call (§6 step 5a/5e), "watch" links to F25.1's
+// own target map (§6 step 5d), and "seed fixture entities" links to the
+// generic op console (§6 step 5c) — this view adds no new op-submission path
+// for any of the three.
 
 import { $, el, api, demoHide, setStatus } from "../api.js";
 import {
@@ -16,10 +27,12 @@ import { checksSummary, interferenceHeadline, opCoverageNote } from "../logic/we
 
 let draft = emptyDraft();
 let lastCheck = null;
+let proposeResults = null;
 
 function enterAuthor() {
   draft = emptyDraft();
   lastCheck = null;
+  proposeResults = null;
   render();
 }
 
@@ -28,13 +41,15 @@ function render() {
   box.innerHTML = "";
   box.appendChild(el("p", "muted small",
     "Compose a target + its paired violation lens as a capability artifact — the same shape the AI-authored " +
-    "lane validates and the Review console applies. Browser-local until exported; nothing here writes any " +
-    "platform state. Export downloads the checked bundle; submitting it into the review queue is a later fire."));
+    "lane validates and the Review console applies. Browser-local until exported or proposed; nothing here " +
+    "writes any platform state until Propose."));
   box.appendChild(targetFieldsBox());
   box.appendChild(gapsBox());
   box.appendChild(lensBox());
   box.appendChild(actionsBox());
   if (lastCheck) box.appendChild(checkResultBox(lastCheck));
+  if (proposeResults) box.appendChild(proposeResultBox(proposeResults));
+  if (draft.targetId) box.appendChild(trialBox());
 }
 
 function labeledInput(labelText, value, onInput, opts) {
@@ -153,10 +168,24 @@ function actionsBox() {
   exportBtn.addEventListener("click", doExport);
   box.appendChild(exportBtn);
 
+  // Propose needs a passing Check on BOTH artifacts — an operator can still
+  // Export an invalid draft (a file has no review-queue consequence), but
+  // entering the queue on a verdict the operator hasn't seen would leave a
+  // predictably-invalid proposal in it. checkPassed mirrors the same
+  // {valid,errors} shape validationBadge already renders.
+  const proposeBtn = demoHide(el("button", null, "Propose"));
+  proposeBtn.disabled = !checkPassed(lastCheck);
+  proposeBtn.addEventListener("click", doPropose);
+  box.appendChild(proposeBtn);
+
   const status = el("span", "muted", "");
   status.id = "weaver-author-status";
   box.appendChild(status);
   return box;
+}
+
+function checkPassed(r) {
+  return !!(r && r.targetValidation && r.targetValidation.valid && r.lensValidation && r.lensValidation.valid);
 }
 
 async function runChecks() {
@@ -215,6 +244,123 @@ function doExport() {
   a.remove();
   URL.revokeObjectURL(url);
   setStatus("weaver-author-status", "exported " + exportFilename(draft.targetId));
+}
+
+// doPropose submits the same two-artifact bundle Export downloads (§6.4:
+// exportBundle's shape IS the wire shape SubmitCapabilityProposal needs per
+// artifact, minus proposalId, which the server mints). Both artifacts are
+// submitted regardless of whether one fails — they are independent
+// proposals in the queue, and an operator who fixed only the lens shouldn't
+// have the target's already-good submission withheld from them too.
+async function doPropose() {
+  setStatus("weaver-author-status", "proposing…");
+  const bundle = exportBundle(draft, lastCheck, draft.rationale, "install");
+  const body = await api("/api/weaver/author/propose", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(bundle),
+  });
+  if (body.error) { setStatus("weaver-author-status", body.error, true); return; }
+  proposeResults = body.results || [];
+  render();
+  const failed = proposeResults.filter((r) => proposeFailed(r)).length;
+  setStatus("weaver-author-status", failed ? failed + " of " + proposeResults.length + " proposals failed" : "proposed", !!failed);
+}
+
+// proposeFailed reports whether a propose result never entered the queue —
+// a transport-level Error, or a reply the Processor rejected outright
+// (opRejected's own distinction: a rejection is a well-formed 200 reply, not
+// an error, so branching on .error alone would report it as success).
+function proposeFailed(r) {
+  if (r.error) return true;
+  return !!(r.reply && r.reply.status === "rejected");
+}
+
+function proposeResultBox(results) {
+  const box = el("div", "weaver-panel");
+  box.appendChild(el("h3", null, "Propose result"));
+  results.forEach((r) => {
+    const row = el("div", "weaver-issue");
+    row.appendChild(chip(r.kind, proposeFailed(r) ? "bad" : "ok"));
+    if (proposeFailed(r)) {
+      const reason = r.error || (r.reply && r.reply.error && (r.reply.error.message || r.reply.error.code)) || "rejected";
+      row.appendChild(el("span", null, reason));
+    } else {
+      const link = el("a", "key-link", r.proposalId);
+      link.href = "#/review/capability/" + encodeURIComponent(r.proposalId);
+      row.appendChild(link);
+      row.appendChild(el("span", "muted small", "→ review queue"));
+    }
+    box.appendChild(row);
+  });
+  return box;
+}
+
+// trialBox is the born-disabled trial choreography (§6 step 5), a guided
+// wrapper around primitives that already exist: revoke/enable are the same
+// /api/control/weaver/<targetId>/<op> relay the Weaver component control
+// page uses, seeding fixture entities is the generic op console, and
+// watching the map light up is F25.1's own target-detail route. Nothing
+// here is gated on Propose having run — an operator revisiting a target
+// already in the queue (or already approved) can still walk the sequence.
+function trialBox() {
+  const id = draft.targetId;
+  const box = el("div", "weaver-panel");
+  box.appendChild(el("h3", null, "Trial (dev stack)"));
+  box.appendChild(el("p", "muted small",
+    "Born-disabled: revoke first so a future registration of " + id + " starts disabled, propose + let the " +
+    "review queue approve + apply it, seed a few fixture entities, watch the map, then enable when you actually " +
+    "want dispatch on this stack."));
+
+  const steps = el("div", "author-trial-steps");
+
+  const revokeRow = el("div", "weaver-issue");
+  const revokeBtn = demoHide(el("button", null, "1 · revoke (arm disabled)"));
+  revokeBtn.addEventListener("click", () => {
+    if (revokeBtn.dataset.armed !== "1") {
+      revokeBtn.dataset.armed = "1";
+      revokeBtn.textContent = "1 · revoke — sure?";
+      setTimeout(() => { revokeBtn.dataset.armed = ""; revokeBtn.textContent = "1 · revoke (arm disabled)"; }, 4000);
+      return;
+    }
+    runWeaverControl(id, "revoke", revokeRow);
+  });
+  revokeRow.appendChild(revokeBtn);
+  steps.appendChild(revokeRow);
+
+  const reviewLink = el("a", "key-link", "2 · review queue (approve + apply)");
+  reviewLink.href = "#/review/capability";
+  steps.appendChild(wrapStep(reviewLink));
+
+  const opLink = el("a", "key-link", "3 · seed fixture entities (op console)");
+  opLink.href = "#/op";
+  steps.appendChild(wrapStep(opLink));
+
+  const watchLink = el("a", "key-link", "4 · watch " + id);
+  watchLink.href = "#/weaver/" + encodeURIComponent(id);
+  steps.appendChild(wrapStep(watchLink));
+
+  const enableRow = el("div", "weaver-issue");
+  const enableBtn = demoHide(el("button", null, "5 · enable (arm live dispatch)"));
+  enableBtn.addEventListener("click", () => runWeaverControl(id, "enable", enableRow));
+  enableRow.appendChild(enableBtn);
+  steps.appendChild(enableRow);
+
+  box.appendChild(steps);
+  return box;
+}
+
+function wrapStep(linkEl) {
+  const row = el("div", "weaver-issue");
+  row.appendChild(linkEl);
+  return row;
+}
+
+async function runWeaverControl(id, op, row) {
+  const status = el("span", "muted small", " " + op + "…");
+  row.appendChild(status);
+  const body = await api("/api/control/weaver/" + encodeURIComponent(id) + "/" + op, { method: "POST" });
+  status.textContent = " " + (body.error ? op + " failed: " + body.error : op + " ok");
 }
 
 function chip(text, cls) {

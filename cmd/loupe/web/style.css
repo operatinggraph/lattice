@@ -1232,6 +1232,13 @@ a.pulse-derived-text:hover { color: var(--text); }
 .confidence-band.high { color: var(--green); border-color: var(--green); }
 .confidence-band.unknown { color: var(--text-dim); }
 
+/* review-source badges the queue's origin (F25.3b) — "operator" (the studio's
+   own SubmitCapabilityProposal) gets the accent color so a human-authored row
+   stands out among the AI lane's default; "ai" is dim, the expected case. */
+.review-source { font-size: 10px; padding: 1px 8px; border-radius: 10px; border: 1px solid var(--border); text-transform: uppercase; letter-spacing: 0.3px; }
+.review-source.operator { color: var(--accent); border-color: var(--accent-dim); }
+.review-source.ai { color: var(--text-dim); }
+
 .review-card { text-decoration: none; color: inherit; display: block; cursor: pointer; }
 .review-card:hover { border-color: var(--accent-dim); }
 .review-card-meta { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 6px; font-size: 12px; color: var(--text-dim); }
@@ -1361,3 +1368,4 @@ body.demo-mode [data-demo-hide] { display: none !important; }
 .author-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
 .author-actions .op-field { flex: 1 1 260px; }
 .author-validation-row { display: flex; gap: 8px; margin-bottom: 8px; }
+.author-trial-steps .weaver-issue:last-child { border-bottom: none; }

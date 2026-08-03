@@ -70,6 +70,19 @@ function isActionable(row) {
   return !!(row && row.reviewState === "pending");
 }
 
+// sourceLabel classifies a proposal row's declared provenance.source into
+// the review queue's origin badge (F25.3b — the studio is a second proposal
+// source into the same queue). "operator" is the only value a human's direct
+// SubmitCapabilityProposal ever stamps; everything else — the bridge-
+// recorded 'ai' lane, and the null the lens projects for a proposal recorded
+// before the field existed or whose reasoning is still in flight — reads as
+// "ai": in both null cases no human authored an artifact yet, so there is
+// nothing to badge as operator-originated. A declared field, never inferred
+// from the presence of model-shaped provenance (lenses.go's own framing).
+function sourceLabel(source) {
+  return source === "operator" ? "operator" : "ai";
+}
+
 // agoFrom renders an ISO-8601 timestamp as a coarsest-unit "ago" string
 // (mirrors cmd/loupe/health.go's humanizeAgo). nowMs is passed in rather than
 // read from Date.now() so the function stays pure and goja-testable; an
@@ -112,6 +125,7 @@ function proposalRows(list) {
       invalidReason: r.reviewInvalidReason || "",
       appliedAt: r.appliedAt || "",
       appliedByOp: r.appliedByOp || "",
+      source: sourceLabel(r.source),
       displayState: proposalDisplayState(r),
       actionable: isActionable(r),
     };
@@ -236,4 +250,4 @@ function opRejected(reply) {
   return !!(reply && reply.status === "rejected");
 }
 
-export { kindGlyph, proposalDisplayState, reviewStateClass, confidenceBand, hasConfidenceScore, isActionable, agoFrom, proposalRows, pendingCount, augurDisplayState, augurProposalRows, applyOutcome, opRejected, errorText };
+export { kindGlyph, proposalDisplayState, reviewStateClass, confidenceBand, hasConfidenceScore, isActionable, sourceLabel, agoFrom, proposalRows, pendingCount, augurDisplayState, augurProposalRows, applyOutcome, opRejected, errorText };

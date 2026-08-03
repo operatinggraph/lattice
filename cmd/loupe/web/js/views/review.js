@@ -14,7 +14,7 @@ import { renderDoc, keyLinkEl } from "../render.js";
 import {
   kindGlyph, reviewStateClass, confidenceBand, hasConfidenceScore, agoFrom,
   proposalRows, proposalDisplayState, augurProposalRows, augurDisplayState,
-  applyOutcome, opRejected, errorText,
+  applyOutcome, opRejected, errorText, sourceLabel,
 } from "../logic/review.js";
 
 const TABS = ["capability", "augur"];
@@ -123,6 +123,7 @@ function capabilityQueueCard(row) {
   card.appendChild(el("div", "card-key", row.intent || "(no intent recorded)"));
   const meta = el("div", "review-card-meta");
   meta.appendChild(el("span", reviewStateClass(displayState), displayState));
+  meta.appendChild(el("span", "review-source " + row.source, row.source));
   if (row.kind) {
     meta.appendChild(el("span", "review-glyph", (kindGlyph[row.kind] || "") + " " + row.kind));
   }
@@ -223,6 +224,8 @@ function headSection(p) {
   box.appendChild(el("h2", "comp-title", p.intent || "(no intent recorded)"));
   const displayState = proposalDisplayState(p);
   box.appendChild(el("span", reviewStateClass(displayState), displayState));
+  const source = sourceLabel(p.source);
+  box.appendChild(el("span", "review-source " + source, source));
   if (displayState === "invalid" && p.reviewInvalidReason) {
     box.appendChild(el("div", "review-invalid-reason", p.reviewInvalidReason));
   }

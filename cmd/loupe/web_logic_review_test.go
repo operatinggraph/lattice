@@ -95,6 +95,27 @@ func TestIsActionable(t *testing.T) {
 	}
 }
 
+// TestSourceLabel pins F25.3b's origin badge: "operator" is the only value a
+// human's direct SubmitCapabilityProposal ever stamps; the bridge-recorded
+// 'ai' lane AND the null the lens projects (a proposal recorded before the
+// field existed, or one still reasoning) all read as "ai" — there is no
+// third badge state.
+func TestSourceLabel(t *testing.T) {
+	vm := logicVM(t, "review.js")
+	if got := call(t, vm, "sourceLabel", "operator"); got != "operator" {
+		t.Errorf("sourceLabel(operator) = %v", got)
+	}
+	if got := call(t, vm, "sourceLabel", "ai"); got != "ai" {
+		t.Errorf("sourceLabel(ai) = %v", got)
+	}
+	if got := call(t, vm, "sourceLabel", nil); got != "ai" {
+		t.Errorf("sourceLabel(null) = %v, want ai (legacy/in-flight row)", got)
+	}
+	if got := call(t, vm, "sourceLabel", "bogus"); got != "ai" {
+		t.Errorf("sourceLabel(bogus) = %v, want ai (unrecognized never reads as operator)", got)
+	}
+}
+
 func TestAgoFrom(t *testing.T) {
 	vm := logicVM(t, "review.js")
 	// 2026-07-18T12:00:00Z in epoch ms.
@@ -217,7 +238,7 @@ func TestProposalRows(t *testing.T) {
 
 	raw := []any{
 		map[string]any{"proposalId": "old-pending", "reviewState": "pending", "kind": "lens", "reasonedAt": "2026-07-01T00:00:00Z"},
-		map[string]any{"proposalId": "new-pending", "reviewState": "pending", "kind": "lens", "reasonedAt": "2026-07-18T00:00:00Z"},
+		map[string]any{"proposalId": "new-pending", "reviewState": "pending", "kind": "lens", "reasonedAt": "2026-07-18T00:00:00Z", "source": "operator"},
 		map[string]any{"proposalId": "approved-newest", "reviewState": "approved", "kind": "lens", "reasonedAt": "2026-07-19T00:00:00Z"},
 		map[string]any{"proposalId": "authoring", "reasonedAt": "2026-07-20T00:00:00Z"},
 	}
@@ -248,6 +269,12 @@ func TestProposalRows(t *testing.T) {
 	first := byID["new-pending"]
 	if first["displayState"] != "pending" || first["actionable"] != true {
 		t.Errorf("new-pending row shape = %v", first)
+	}
+	if first["source"] != "operator" {
+		t.Errorf("new-pending source = %v, want operator carried through from the raw row", first["source"])
+	}
+	if byID["old-pending"]["source"] != "ai" {
+		t.Errorf("old-pending source = %v, want ai (no source field on the raw row)", byID["old-pending"]["source"])
 	}
 	authoring := byID["authoring"]
 	if authoring["displayState"] != "authoring" || authoring["actionable"] != false {
