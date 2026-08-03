@@ -278,6 +278,17 @@ h2.section-title { font-size: 14px; text-transform: uppercase; letter-spacing: 0
   padding: 9px 12px; font-size: 12px; border-radius: 6px; margin-bottom: 14px;
 }
 
+/* A minted secret shown exactly once. Monospaced and selectable because the
+   only thing a person can do with it is read it out or copy it, and wrapped
+   because a 64-char hex string must never be clipped by the modal's width. */
+.reveal-secret {
+  background: var(--bg-input); border: 1px solid var(--yellow);
+  padding: 12px; border-radius: 8px; margin-bottom: 14px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 13px; line-height: 1.5; word-break: break-all; white-space: pre-wrap;
+  user-select: all;
+}
+
 .field { margin-bottom: 14px; display: flex; flex-direction: column; gap: 5px; }
 .field label { font-size: 13px; font-weight: 600; }
 .field .help { color: var(--text-dim); font-size: 12px; }

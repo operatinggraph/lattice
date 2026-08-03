@@ -592,6 +592,9 @@ function signOut() {
 function applyOutboxFrame(e) {
   if (!e) return;
   state.outbox.set(e.requestId, e);
+  // A ceremony's minted plaintext is held until the write settles: this frame
+  // is the only place the client learns whether it landed.
+  settleCeremonyReveal(e.requestId, e.state);
   if (e.state === "confirmed") {
     setTimeout(() => {
       const cur = state.outbox.get(e.requestId);
@@ -962,6 +965,13 @@ function opButton(o, ctx) {
   if (!opVisibleForRow(d, ctx.row)) return "";
   if (!d.dispatchClass) {
     return `<div class="degraded-card">${esc(prettifyOpType(d.operationType))} — This isn't completable here yet — ask staff to help via the admin console.</div>`;
+  }
+  // An op whose descriptor declares a ceremony this runtime cannot perform is
+  // not offered. The alternative is rendering the minted-hash field as a text
+  // input, which accepts whatever a person types and arms a secret nobody
+  // holds — the failure the ceremony vocabulary exists to make impossible.
+  if (ceremonyField(d) && !ceremonySupported()) {
+    return `<div class="degraded-card">${esc(d.title || prettifyOpType(d.operationType))} — This needs a secure connection to complete safely; it can't be started here.</div>`;
   }
   // An op whose declared dispatch.targetType can't be resolved from this
   // context is not submittable from here — offering it anyway is how an op
@@ -1755,6 +1765,100 @@ function showModal(innerHtml) {
 }
 function hideModal() { $("modal-root").innerHTML = ""; }
 
+// ------------------------------------------- the mint-and-reveal ceremony
+//
+// Some ops cannot be submitted by filling a form: the caller has to MINT a
+// secret Lattice must never learn, submit only its hash, and show the
+// plaintext to a person exactly once. OpCeremonySpec (pkgmgr) declares that as
+// data — which field holds the hash, and the copy for the reveal — so a client
+// PERFORMS the ceremony instead of rendering a hash field as a text box asking
+// a human to type a preimage nobody holds.
+//
+// Three rules, all fail-closed:
+//
+//  1. No ceremony support ⇒ the op is NOT OFFERED, degrading exactly as an
+//     unresolvable targetType does. Falling back to rendering the field is the
+//     accepted-garbage outcome the op's old S1 exemption existed to prevent.
+//  2. The hash field is filled here, never rendered.
+//  3. The plaintext is revealed only once the write is CONFIRMED, and dropped
+//     without display on any other outcome — a secret for a write that did not
+//     land is not a secret anybody should be handed.
+
+// ceremonyField names the field a ceremony fills, or "" when the op declares
+// none — so "does this op carry a ceremony" is asked exactly one way.
+function ceremonyField(d) {
+  return (d && d.ceremonyMintedSecretHashField) || "";
+}
+
+// ceremonySupported reports whether this runtime can perform a ceremony at
+// all. crypto.subtle is absent on an insecure origin, so this is a real
+// runtime condition rather than a flag we set ourselves — which is why it has
+// to gate the OFFER rather than be discovered at submit time, once a person
+// has already filled the form.
+function ceremonySupported() {
+  return typeof crypto !== "undefined" &&
+    typeof crypto.getRandomValues === "function" &&
+    !!crypto.subtle && typeof crypto.subtle.digest === "function";
+}
+
+function hexOf(bytes) {
+  return Array.from(bytes).map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+// mintSecret returns [plaintext, sha256Hex(plaintext)] — 32 CSPRNG bytes hex
+// encoded as the plaintext, the shape every hand-rolled copy of this ceremony
+// already used (cmd/facet/credentials.go's mintLinkSecret). The plaintext is
+// returned to the caller and never logged, stored, or sent.
+async function mintSecret() {
+  const bytes = new Uint8Array(32);
+  crypto.getRandomValues(bytes);
+  const plaintext = hexOf(bytes);
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(plaintext));
+  return [plaintext, hexOf(new Uint8Array(digest))];
+}
+
+// pendingReveals holds a minted plaintext between submission and the outbox
+// frame that settles it, keyed by requestId. In memory only, never persisted:
+// a reload drops an unrevealed secret, which is the correct failure — the
+// write either landed (and the target needs a fresh secret issued) or it
+// did not.
+const pendingReveals = new Map();
+
+// holdCeremonyReveal parks a minted plaintext against the request that will
+// settle it. Paired with settleCeremonyReveal so the hold/settle lifecycle has
+// one entry and one exit rather than the map being poked at from the submit
+// path directly.
+function holdCeremonyReveal(requestId, reveal) {
+  pendingReveals.set(requestId, reveal);
+}
+
+// settleCeremonyReveal runs off the outbox frame. Confirmed reveals; anything
+// else discards silently. Both terminal branches delete, so a plaintext
+// outlives its request by exactly one state transition.
+function settleCeremonyReveal(requestId, outboxState) {
+  const pending = pendingReveals.get(requestId);
+  if (!pending) return;
+  if (outboxState === "confirmed") {
+    pendingReveals.delete(requestId);
+    showCeremonyReveal(pending);
+    return;
+  }
+  if (outboxState === "rejected") pendingReveals.delete(requestId);
+}
+
+// showCeremonyReveal displays the plaintext once. Deliberately a MODAL and not
+// a toast: a toast auto-hides and the next toast() clears it, either of which
+// would destroy the only copy of the secret that will ever exist.
+function showCeremonyReveal(pending) {
+  showModal(`
+    <button class="close-x" data-close>&times;</button>
+    <h2>${esc(pending.title || "Your secret — shown once")}</h2>
+    ${pending.help ? `<p class="lead">${esc(pending.help)}</p>` : ""}
+    <pre class="reveal-secret" data-reveal-secret>${esc(pending.plaintext)}</pre>
+    <button type="button" class="primary-btn" data-close>Done</button>
+  `);
+}
+
 function openDescriptorForm(opKey, ctx) {
   const row = state.rows.get(opKey);
   if (!row) return;
@@ -1937,7 +2041,13 @@ function renderDescriptorForm(op, opKey, ctx, prefill, reviewBanner) {
   // declared picker, it renders like any other field — the picker IS how the
   // visitor supplies the target (pickerFillsTargetField gated the offer).
   const targetInForm = targetField && !resolveTargetKey(op, ctx) && pickerFillsTargetField(op);
-  const fieldNames = Object.keys(props).filter((f) => !(f in contextParams) && (f !== targetField || targetInForm));
+  // A ceremony's minted-hash field is excluded on the same principle as a
+  // contextParam: the client supplies it, so asking for it would be asking a
+  // person for something only the machine can produce. It is added back to the
+  // PAYLOAD at submit, from the secret minted there.
+  const minted = ceremonyField(op);
+  const fieldNames = Object.keys(props).filter(
+    (f) => !(f in contextParams) && f !== minted && (f !== targetField || targetInForm));
 
   const fieldsHtml = fieldNames.map((name) => renderField(name, props[name], fieldDescs[name], required.has(name), prefill[name], op.sensitive)).join("");
 
@@ -2175,7 +2285,7 @@ function datetimeLocalToRFC3339(v) {
   return isNaN(d.getTime()) ? v : d.toISOString().replace(/\.\d{3}Z$/, "Z");
 }
 
-function submitDescriptorForm(form, op, opKey, ctx, fieldNames, props, contextParams, required) {
+async function submitDescriptorForm(form, op, opKey, ctx, fieldNames, props, contextParams, required) {
   const payload = {};
   for (const name of fieldNames) {
     const schema = props[name] || {};
@@ -2228,6 +2338,24 @@ function submitDescriptorForm(form, op, opKey, ctx, fieldNames, props, contextPa
     if (resolved) payload[op.dispatchTargetField] = resolved;
   }
 
+  // The ceremony, minted here rather than asked for. This runs AFTER every
+  // client-side check that can return early, so a submission the form itself
+  // rejects never mints a secret it would then have to discard.
+  const minted = ceremonyField(op);
+  let reveal = null;
+  if (minted) {
+    if (!ceremonySupported()) {
+      // Unreachable through opButton, which withholds the op — asserted here
+      // anyway because the fail-closed direction is the one that must hold on
+      // every path into this function, not only the offered one.
+      toast("This needs a secure connection to complete safely.", false);
+      return;
+    }
+    const [plaintext, hash] = await mintSecret();
+    payload[minted] = hash;
+    reveal = { plaintext, title: op.ceremonyRevealTitle, help: op.ceremonyRevealHelp };
+  }
+
   // Same whole-key rule as the optional half below. A REQUIRED read that failed
   // to substitute is a broken descriptor either way, but dropping it lets the
   // script answer with its own "caller must declare <key>" message instead of
@@ -2263,10 +2391,24 @@ function submitDescriptorForm(form, op, opKey, ctx, fieldNames, props, contextPa
   // enqueue through the live source — POST /api/enqueue on the Go host, the
   // wasm engine's api.enqueue in-page — so the same descriptor form drives
   // either host unchanged (the W4 swap contract).
-  activeSource.enqueue({ operationType: op.operationType, class: op.dispatchClass || "", payload, reads, optionalReads, authContext, touchedKey })
+  return activeSource.enqueue({ operationType: op.operationType, class: op.dispatchClass || "", payload, reads, optionalReads, authContext, touchedKey })
     .then((body) => {
       if (body && body.error) { toast(body.error, false); return; }
       hideModal();
+      if (reveal) {
+        // The plaintext waits on the outbox frame that settles this request:
+        // revealed on confirmed, dropped without display on rejected. Both
+        // hosts return a requestId, so no-requestId is an anomaly rather than
+        // a shape to tolerate — and it is loud, because a secret nobody can
+        // correlate is one nobody can hand over either.
+        if (body && body.requestId) {
+          holdCeremonyReveal(body.requestId, reveal);
+          toast("Submitted — the secret appears once this is confirmed", true);
+          return;
+        }
+        toast("Submitted, but the secret could not be tracked to this request — check whether it landed before retrying.", false);
+        return;
+      }
       toast("Submitted", true);
     })
     .catch((err) => toast(String(err), false));
