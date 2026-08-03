@@ -281,3 +281,39 @@ otherwise under-deliver forever (a JetStream filter update never resets the curs
 relation set is a *narrowing*, not a "no data" fallback; the two must not collapse to the same `nil`.
 
 **Non-goals:** §5.
+
+## 8. Build note — rule-swap synchronization, fire 2026-08-03
+
+**Scope sentence:** make the compiled-rule field set a MATCH hot-reload rewrites safe against the
+consumer goroutine that reads it — §4.1's last finding, filed as its own row.
+
+**The defect.** `cmd/refractor/reload.go:346` calls `UseFullEngineBranches` on a **live** pipeline from
+CoreKVSource's dispatch goroutine while the consumer goroutine is inside `handle` reading the same
+fields. Ten fields were written by separate unsynchronized stores. The label pair fails closed, but the
+relation pair does not: `plainRelationsExhaustive` is stated positively, so a reader seeing the new flag
+against the not-yet-published map judges every link against an **empty exhaustive set** and skips all of
+them. Beyond the race, the four narrowing fields could be read **torn** — one rule's labels against
+another's relations — which is a filter no MATCH ever declared.
+
+**Shape.** A `ruleMu sync.RWMutex` guards exactly the set `useFullEngineBranches` writes; that function
+now derives everything into a local `ruleState` and publishes it under one `Lock`. Readers take one
+`ruleState` **value snapshot** and thread it down, so an event is judged *and* evaluated by a single
+rule. Three entry points snapshot: `handle` (consumer), `Reproject` (sweep / control RPC / retry queue),
+`Hydrate` (personal-lens attach). Every other field on `Pipeline` is install-time only.
+
+Two constraints the shape exists to satisfy: `sync.RWMutex` does not admit recursive read locks, so the
+in-pipeline callers take `actorAwareNarrowingLabels(rs)` / `narrowedFilterEligible(rs)` rather than the
+exported wrappers; and the published maps are **copy-on-write** — fresh every call, never mutated after
+publication — which is what makes a snapshot safe to read after the lock is dropped.
+
+**`ConsumerFilter` was the live tear.** It read the label set and the relation set in two separate
+steps, so a reload between them built a filter from two different rules.
+
+**Verification.** `rule_swap_race_internal_test.go` drives a writer alternating two specs that differ in
+*both* narrowing dimensions against readers on every gate. `TestRuleSwap_ConcurrentHotReload_NoRace` is
+the `-race` verdict; `TestRuleSwap_ObservedRuleIsNeverTorn` is the assertion the detector cannot make —
+every snapshot must be a rule that actually exists. Both were proven to **fail without the fix**: with
+the two lock bodies removed the detector reports the race, and the tear test fails *without* `-race`,
+observing `{labels:[owner unit], relations:[bookedBy]}` — spec A's labels against spec B's relation.
+
+**Non-goals:** the other §4.1 findings, each its own row.
