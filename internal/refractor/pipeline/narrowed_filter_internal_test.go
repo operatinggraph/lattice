@@ -422,27 +422,27 @@ func TestPlainLinkReactsTo(t *testing.T) {
 		plainReprojectRelations:  map[string]struct{}{"identifiedBy": {}},
 		plainRelationsExhaustive: true,
 	}
-	require.True(t, narrowed.plainLinkReactsTo("identifiedBy"))
-	require.False(t, narrowed.plainLinkReactsTo("providedTo"),
+	require.True(t, narrowed.ruleState().plainLinkReactsTo("identifiedBy"))
+	require.False(t, narrowed.ruleState().plainLinkReactsTo("providedTo"),
 		"the exact live shape: a relation the lens never traverses")
-	require.True(t, narrowed.plainLinkReactsTo(""), "an unparsed relation defaults to relevant")
+	require.True(t, narrowed.ruleState().plainLinkReactsTo(""), "an unparsed relation defaults to relevant")
 
 	noRels := &Pipeline{
 		engineKind:               ruleengine.EngineFull,
 		plainRelationsExhaustive: true,
 	}
-	require.False(t, noRels.plainLinkReactsTo("anything"),
+	require.False(t, noRels.ruleState().plainLinkReactsTo("anything"),
 		"a lens with no relationship pattern reacts to no link at all")
 
 	notExhaustive := &Pipeline{
 		engineKind:              ruleengine.EngineFull,
 		plainReprojectRelations: map[string]struct{}{"identifiedBy": {}},
 	}
-	require.True(t, notExhaustive.plainLinkReactsTo("providedTo"))
+	require.True(t, notExhaustive.ruleState().plainLinkReactsTo("providedTo"))
 
 	notFull := &Pipeline{
 		plainReprojectRelations:  map[string]struct{}{"identifiedBy": {}},
 		plainRelationsExhaustive: true,
 	}
-	require.True(t, notFull.plainLinkReactsTo("providedTo"), "a non-full engine has no relation data to trust")
+	require.True(t, notFull.ruleState().plainLinkReactsTo("providedTo"), "a non-full engine has no relation data to trust")
 }

@@ -116,7 +116,7 @@ func TestExecuteFullForActor_MultiEnvelopeFn_EmitsPerEntryResults(t *testing.T) 
 	}
 
 	nodeProps := map[string]any{"lastModifiedAt": "2026-05-15T10:00:00Z"}
-	results, err := p.executeFullForActor(ctx, identityKey, nodeProps, "")
+	results, err := p.executeFullForActor(ctx, p.ruleState(), identityKey, nodeProps, "")
 	require.NoError(t, err)
 	require.Len(t, results, 3)
 	got := map[string]bool{}
@@ -158,7 +158,7 @@ func TestExecuteFullForActor_MultiEnvelopeFn_ZeroEntries_NoResultsNoError(t *tes
 	}
 
 	nodeProps := map[string]any{"lastModifiedAt": "2026-05-15T10:00:00Z"}
-	results, err := p.executeFullForActor(ctx, identityKey, nodeProps, "")
+	results, err := p.executeFullForActor(ctx, p.ruleState(), identityKey, nodeProps, "")
 	require.NoError(t, err)
 	require.Empty(t, results, "zero real entries against no prior children must write nothing and delete nothing")
 }
@@ -192,7 +192,7 @@ func TestExecuteFullForActor_MultiEnvelopeFn_SkipProjection_DropsRow(t *testing.
 	}
 
 	nodeProps := map[string]any{"lastModifiedAt": "2026-05-15T10:00:00Z"}
-	results, err := p.executeFullForActor(ctx, identityKey, nodeProps, "")
+	results, err := p.executeFullForActor(ctx, p.ruleState(), identityKey, nodeProps, "")
 	require.NoError(t, err)
 	require.Empty(t, results)
 }
@@ -225,7 +225,7 @@ func TestExecuteFullForActor_MultiEnvelopeFn_Error_FailsActorClosed(t *testing.T
 	}
 
 	nodeProps := map[string]any{"lastModifiedAt": "2026-05-15T10:00:00Z"}
-	_, err := p.executeFullForActor(ctx, identityKey, nodeProps, "")
+	_, err := p.executeFullForActor(ctx, p.ruleState(), identityKey, nodeProps, "")
 	require.Error(t, err)
 	require.ErrorContains(t, err, "boom: malformed key token")
 }
@@ -267,7 +267,7 @@ func TestExecuteFullForActor_MultiEnvelopeFn_Retraction_DropsAnchor(t *testing.T
 	}
 
 	nodeProps := map[string]any{"lastModifiedAt": "2026-05-15T10:00:00Z"}
-	results, err := p.executeFullForActor(ctx, identityKey, nodeProps, "")
+	results, err := p.executeFullForActor(ctx, p.ruleState(), identityKey, nodeProps, "")
 	require.NoError(t, err)
 	require.Len(t, results, 2)
 	require.True(t, results[0].Delete, "the dropped anchor's tombstone must be ordered ahead of the fresh upsert")
@@ -313,7 +313,7 @@ func TestExecuteFullForActor_MultiEnvelopeFn_Retraction_AlreadyTombstonedSkipped
 	}
 
 	nodeProps := map[string]any{"lastModifiedAt": "2026-05-15T10:00:00Z"}
-	results, err := p.executeFullForActor(ctx, identityKey, nodeProps, "")
+	results, err := p.executeFullForActor(ctx, p.ruleState(), identityKey, nodeProps, "")
 	require.NoError(t, err)
 	require.Len(t, results, 1, "an already-tombstoned candidate must not be rewritten")
 	require.False(t, results[0].Delete)
@@ -358,7 +358,7 @@ func TestExecuteFullForActor_MultiEnvelopeFn_Retraction_LegacyParentTombstoned(t
 	}
 
 	nodeProps := map[string]any{"lastModifiedAt": "2026-05-15T10:00:00Z"}
-	results, err := p.executeFullForActor(ctx, identityKey, nodeProps, "")
+	results, err := p.executeFullForActor(ctx, p.ruleState(), identityKey, nodeProps, "")
 	require.NoError(t, err)
 	require.Len(t, results, 2)
 	require.True(t, results[0].Delete, "the legacy parent doc's tombstone must be ordered ahead of the fresh upsert")
@@ -413,7 +413,7 @@ func TestWriteResults_FailClosedTombstoneFails_AbortsBatch_FreshUpsertNeverLands
 		{Keys: map[string]any{"key": "child.a1"}, Row: map[string]any{"key": "child.a1", "id": "a1"}},
 	}
 	msg := substrate.Message{Sequence: 42}
-	decision, err := p.writeResults(ctx, msg, "vtx.identity.x", results, nil)
+	decision, err := p.writeResults(ctx, p.ruleState(), msg, "vtx.identity.x", results, nil)
 	require.Error(t, err, "the FailClosed tombstone's failure must surface, not be swallowed")
 	require.Equal(t, substrate.Nak, decision, "a FailClosed write failure must Nak the whole message for full redelivery")
 
@@ -462,7 +462,7 @@ func TestExecuteFullForActor_MultiEnvelopeFn_Retraction_AlreadyTombstonedLegacyP
 	}
 
 	nodeProps := map[string]any{"lastModifiedAt": "2026-05-15T10:00:00Z"}
-	results, err := p.executeFullForActor(ctx, identityKey, nodeProps, "")
+	results, err := p.executeFullForActor(ctx, p.ruleState(), identityKey, nodeProps, "")
 	require.NoError(t, err)
 	require.Len(t, results, 1, "an already-tombstoned legacy parent must not be rewritten")
 	require.False(t, results[0].Delete)
@@ -544,7 +544,7 @@ func TestExecuteFullForActor_MultiEnvelopeFn_Retraction_MalformedFreshKey_FailsC
 	}
 
 	nodeProps := map[string]any{"lastModifiedAt": "2026-05-15T10:00:00Z"}
-	_, err := p.executeFullForActor(ctx, identityKey, nodeProps, "")
+	_, err := p.executeFullForActor(ctx, p.ruleState(), identityKey, nodeProps, "")
 	require.Error(t, err)
 	require.ErrorContains(t, err, `no usable "key" field`)
 }

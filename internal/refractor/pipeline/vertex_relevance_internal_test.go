@@ -85,7 +85,7 @@ func TestPlainVertexRelevant_Table(t *testing.T) {
 				plainReprojectAll:    tc.all,
 				plainReprojectLabels: tc.labels,
 			}
-			require.Equal(t, tc.want, p.plainVertexRelevant(tc.vertexType))
+			require.Equal(t, tc.want, p.ruleState().plainVertexRelevant(tc.vertexType))
 		})
 	}
 }
@@ -117,7 +117,7 @@ func TestHandle_VertexEvent_IrrelevantTypeSkipped(t *testing.T) {
 	require.NoError(t, err)
 	p.UseFullEngine(eng, cr)
 	require.False(t, p.plainReprojectAll, "servicedIdentitiesSpec has an exhaustive label set")
-	require.False(t, p.plainVertexRelevant("unit"), "unit is neither the anchor nor a referenced neighbor")
+	require.False(t, p.ruleState().plainVertexRelevant("unit"), "unit is neither the anchor nor a referenced neighbor")
 
 	svcID := vrgID(t, "svcA")
 	idID := vrgID(t, "idnA")
@@ -154,7 +154,7 @@ func TestHandle_VertexEvent_AnchorTypeEvaluated(t *testing.T) {
 	}
 	ctx := context.Background()
 	p, coreKV, adjKV, targetKV := newRetractionPipeline(t, servicedIdentitiesSpec, []string{"key"})
-	require.True(t, p.plainVertexRelevant("service"), "the anchor label must always be relevant")
+	require.True(t, p.ruleState().plainVertexRelevant("service"), "the anchor label must always be relevant")
 
 	svcID := vrgID(t, "svcB")
 	idID := vrgID(t, "idnB")
@@ -192,7 +192,7 @@ func TestHandle_VertexEvent_ReferencedNonAnchorTypeEvaluated(t *testing.T) {
 	}
 	ctx := context.Background()
 	p, coreKV, adjKV, targetKV := newRetractionPipeline(t, servicedIdentitiesSpec, []string{"key"})
-	require.True(t, p.plainVertexRelevant("identity"), "identity is referenced by the required link")
+	require.True(t, p.ruleState().plainVertexRelevant("identity"), "identity is referenced by the required link")
 
 	svcID := vrgID(t, "svcC")
 	idID := vrgID(t, "idnC")
@@ -238,7 +238,7 @@ RETURN u.key AS key
 	ctx := context.Background()
 	p, coreKV, adjKV, targetKV := newRetractionPipeline(t, unownedUnitSpec, []string{"key"})
 	require.True(t, p.plainReprojectAll, "an unlabeled node pattern must disable the exhaustive skip")
-	require.True(t, p.plainVertexRelevant("anyTypeAtAll"))
+	require.True(t, p.ruleState().plainVertexRelevant("anyTypeAtAll"))
 
 	gadgetID := vrgID(t, "gadgetE")
 	unitID := vrgID(t, "unitE")
@@ -307,7 +307,7 @@ func TestHandle_VertexEvent_ActorAwarePipelineIgnoresThePlainGate(t *testing.T) 
 		actorEnumerator:      NewActorEnumerator(adjKV, coreKV, "identity"),
 		adpt:                 adpt,
 	}
-	require.False(t, p.plainVertexRelevant("role"),
+	require.False(t, p.ruleState().plainVertexRelevant("role"),
 		"the gate itself would exclude role — the actor-aware bypass is what must save this event")
 
 	roleKey := "vtx.role." + roleID

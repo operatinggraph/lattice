@@ -106,7 +106,7 @@ func TestZeroRowRetraction_NoRowEverProjected_DoesNotManufactureATombstone(t *te
 	p := newZeroRowPipeline(t, adpt)
 	writeTaskAnchor(t, p, zeroRowTask, "closed")
 
-	results, err := p.executeFullForActor(context.Background(), zeroRowTask,
+	results, err := p.executeFullForActor(context.Background(), p.ruleState(), zeroRowTask,
 		map[string]any{"lastModifiedAt": "2026-07-25T00:00:00Z"}, "")
 	require.NoError(t, err)
 	require.Empty(t, results, "an anchor that never held a row must not manufacture a tombstone key")
@@ -125,7 +125,7 @@ func TestZeroRowRetraction_ArmedOnlyWhenTheFlagIsSet(t *testing.T) {
 	p.SetZeroRowRetraction(false)
 	writeTaskAnchor(t, p, zeroRowTask, "closed")
 
-	results, err := p.executeFullForActor(context.Background(), zeroRowTask,
+	results, err := p.executeFullForActor(context.Background(), p.ruleState(), zeroRowTask,
 		map[string]any{"lastModifiedAt": "2026-07-25T00:00:00Z"}, "")
 	require.NoError(t, err)
 	require.Empty(t, results, "an unarmed pipeline must not retract on zero rows")

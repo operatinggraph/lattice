@@ -117,7 +117,7 @@ func TestActorAwareNarrowingLabels_EveryConjunctFailsClosed(t *testing.T) {
 			labels, ok := p.ActorAwareNarrowingLabels()
 			require.False(t, ok, "a failed conjunct must restore the broad fan-out")
 			require.Nil(t, labels)
-			require.True(t, p.actorAwareFanOutRelevant("unit"),
+			require.True(t, p.actorAwareFanOutRelevant(p.ruleState(), "unit"),
 				"an ineligible pipeline treats every type as relevant")
 		})
 	}
@@ -140,19 +140,19 @@ func TestActorAwareNarrowingLabels_SecureLensNarrowsWhenItSeesIdentity(t *testin
 func TestActorAwareFanOutRelevant_Semantics(t *testing.T) {
 	p := eligiblePipeline(t)
 
-	require.True(t, p.actorAwareFanOutRelevant("identity"))
-	require.True(t, p.actorAwareFanOutRelevant("role"))
-	require.False(t, p.actorAwareFanOutRelevant("unit"))
+	require.True(t, p.actorAwareFanOutRelevant(p.ruleState(), "identity"))
+	require.True(t, p.actorAwareFanOutRelevant(p.ruleState(), "role"))
+	require.False(t, p.actorAwareFanOutRelevant(p.ruleState(), "unit"))
 
-	require.True(t, p.actorAwareFanOutRelevant("identity", "role"))
-	require.True(t, p.actorAwareFanOutRelevant("unit", "role"),
+	require.True(t, p.actorAwareFanOutRelevant(p.ruleState(), "identity", "role"))
+	require.True(t, p.actorAwareFanOutRelevant(p.ruleState(), "unit", "role"),
 		"a link is skipped only when NEITHER endpoint can bind")
-	require.True(t, p.actorAwareFanOutRelevant("identity", "unit"))
-	require.False(t, p.actorAwareFanOutRelevant("unit", "building"))
+	require.True(t, p.actorAwareFanOutRelevant(p.ruleState(), "identity", "unit"))
+	require.False(t, p.actorAwareFanOutRelevant(p.ruleState(), "unit", "building"))
 
-	require.True(t, p.actorAwareFanOutRelevant(""), "an unparsed type must never be skipped")
-	require.True(t, p.actorAwareFanOutRelevant("unit", ""))
-	require.True(t, p.actorAwareFanOutRelevant())
+	require.True(t, p.actorAwareFanOutRelevant(p.ruleState(), ""), "an unparsed type must never be skipped")
+	require.True(t, p.actorAwareFanOutRelevant(p.ruleState(), "unit", ""))
+	require.True(t, p.actorAwareFanOutRelevant(p.ruleState()))
 }
 
 // newGatedFanOutPipeline builds a live, eligible actor-aware pipeline over the
@@ -333,14 +333,15 @@ func TestVertexEventRelevant_DispatchesByPipelineShape(t *testing.T) {
 		engineKind:           ruleengine.EngineFull,
 		plainReprojectLabels: identityRoleLabels(),
 	}
-	require.True(t, plain.vertexEventRelevant("identity"))
-	require.False(t, plain.vertexEventRelevant("unit"))
-	require.True(t, plain.vertexEventRelevant(""))
+	require.True(t, plain.vertexEventRelevant(plain.ruleState(), "identity"))
+	require.False(t, plain.vertexEventRelevant(plain.ruleState(), "unit"))
+	require.True(t, plain.vertexEventRelevant(plain.ruleState(), ""))
 
 	actorAware := eligiblePipeline(t)
-	require.True(t, actorAware.vertexEventRelevant("identity"))
-	require.False(t, actorAware.vertexEventRelevant("unit"))
+	require.True(t, actorAware.vertexEventRelevant(actorAware.ruleState(), "identity"))
+	require.False(t, actorAware.vertexEventRelevant(actorAware.ruleState(), "unit"))
 
 	// A non-full engine has no label data for either shape.
-	require.True(t, (&Pipeline{}).vertexEventRelevant("unit"))
+	bare := &Pipeline{}
+	require.True(t, bare.vertexEventRelevant(bare.ruleState(), "unit"))
 }

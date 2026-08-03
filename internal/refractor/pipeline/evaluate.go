@@ -73,8 +73,8 @@ func projectedAtFromProvenance(nodeProps map[string]any) (string, error) {
 // enumerated set, not just the actors results happened to name, because an
 // actor whose evaluation surfaced zero surviving rows must still get an
 // empty retraction frame). Nil for a plain lens.
-func (p *Pipeline) evaluateForEntry(ctx context.Context, entry ruleengine.NodeEntry) ([]ruleengine.EvalResult, []string, error) {
-	results, enumeratedActors, err := p.evaluateForEntryRaw(ctx, entry)
+func (p *Pipeline) evaluateForEntry(ctx context.Context, rs ruleState, entry ruleengine.NodeEntry) ([]ruleengine.EvalResult, []string, error) {
+	results, enumeratedActors, err := p.evaluateForEntryRaw(ctx, rs, entry)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -98,8 +98,8 @@ func (p *Pipeline) applySecureDecrypt(ctx context.Context, results []ruleengine.
 }
 
 // evaluateForEntryRaw is evaluateForEntry's core, pre-decrypt.
-func (p *Pipeline) evaluateForEntryRaw(ctx context.Context, entry ruleengine.NodeEntry) ([]ruleengine.EvalResult, []string, error) {
-	if p.fullEngine == nil || p.fullCR == nil {
+func (p *Pipeline) evaluateForEntryRaw(ctx context.Context, rs ruleState, entry ruleengine.NodeEntry) ([]ruleengine.EvalResult, []string, error) {
+	if rs.engine == nil || rs.cr == nil {
 		return nil, nil, fmt.Errorf("pipeline: full engine/compiled rule unset for rule %q", p.ruleID)
 	}
 
@@ -110,7 +110,7 @@ func (p *Pipeline) evaluateForEntryRaw(ctx context.Context, entry ruleengine.Nod
 	if p.actorEnumerator != nil {
 		eventType, _, _ := substrate.ParseVertexKey(entry.CoreKVKey)
 		if eventType != p.actorEnumerator.actorType {
-			return p.evaluateFanOut(ctx, entry)
+			return p.evaluateFanOut(ctx, rs, entry)
 		}
 	}
 
@@ -157,8 +157,8 @@ func (p *Pipeline) evaluateForEntryRaw(ctx context.Context, entry ruleengine.Nod
 	// the appointment row).
 	if entry.IsDeleted && p.actorEnumerator == nil {
 		eventType, _, _ := substrate.ParseVertexKey(entry.CoreKVKey)
-		if keys, ok := p.fullEngine.AnchorDeleteResult(
-			p.fullCR, entry.CoreKVKey, eventType, entry.Properties); ok {
+		if keys, ok := rs.engine.AnchorDeleteResult(
+			rs.cr, entry.CoreKVKey, eventType, entry.Properties); ok {
 			return []ruleengine.EvalResult{{Delete: true, Keys: keys, Row: nil}}, nil, nil
 		}
 	}
@@ -171,8 +171,8 @@ func (p *Pipeline) evaluateForEntryRaw(ctx context.Context, entry ruleengine.Nod
 	// reach here through evaluatePlainFromVertex with the owner/endpoint vertex
 	// as the entry, so each arm seeds precisely when its own vertex is an
 	// anchor.
-	results, err := p.executeFullForActor(ctx, entry.CoreKVKey, entry.Properties,
-		p.seedAnchorFor(entry.NodeLabel, entry.CoreKVKey))
+	results, err := p.executeFullForActor(ctx, rs, entry.CoreKVKey, entry.Properties,
+		p.seedAnchorFor(rs, entry.NodeLabel, entry.CoreKVKey))
 	if err != nil {
 		return nil, nil, err
 	}
@@ -190,8 +190,8 @@ func (p *Pipeline) evaluateForEntryRaw(ctx context.Context, entry ruleengine.Nod
 	// check; a tombstone it could not derive keys for cannot derive them
 	// here either (same derivation).
 	if p.actorEnumerator == nil && p.envelopeFn == nil && p.multiEnvelopeFn == nil {
-		if keys, ok := p.fullEngine.AnchorProjectionKey(
-			p.fullCR, entry.CoreKVKey, entry.NodeLabel, entry.Properties); ok &&
+		if keys, ok := rs.engine.AnchorProjectionKey(
+			rs.cr, entry.CoreKVKey, entry.NodeLabel, entry.Properties); ok &&
 			!resultsContainKeys(results, keys) {
 			results = append(results, ruleengine.EvalResult{Delete: true, Keys: keys})
 		} else if !ok && p.diffRetraction {
@@ -236,9 +236,9 @@ const maxFootprintRetries = 1
 // reduction-design.md §D2). Only a caller that has proved the triggering event
 // is a mutation of that anchor may pass it — pipeline.seedAnchorFor is that
 // proof; "" is always the safe, whole-row-set evaluation.
-func (p *Pipeline) executeFullForActor(ctx context.Context, actorKey string, nodeProps map[string]any, seedAnchor string) ([]ruleengine.EvalResult, error) {
+func (p *Pipeline) executeFullForActor(ctx context.Context, rs ruleState, actorKey string, nodeProps map[string]any, seedAnchor string) ([]ruleengine.EvalResult, error) {
 	start := time.Now()
-	results, err := p.executeFullForActorAttempt(ctx, actorKey, nodeProps, seedAnchor, 0)
+	results, err := p.executeFullForActorAttempt(ctx, rs, actorKey, nodeProps, seedAnchor, 0)
 	if err != nil {
 		return nil, err
 	}
@@ -274,8 +274,8 @@ func (p *Pipeline) executeFullForActor(ctx context.Context, actorKey string, nod
 // rows" (design §4.3). The caller's existing transient-failure handling
 // (dispositionEvalErr's retry-enqueue, the sweep's repair-failure accounting)
 // takes it from there.
-func (p *Pipeline) executeFullForActorAttempt(ctx context.Context, actorKey string, nodeProps map[string]any, seedAnchor string, attempt int) ([]ruleengine.EvalResult, error) {
-	results, footprint, err := p.executeFullForActorOnce(ctx, actorKey, nodeProps, seedAnchor)
+func (p *Pipeline) executeFullForActorAttempt(ctx context.Context, rs ruleState, actorKey string, nodeProps map[string]any, seedAnchor string, attempt int) ([]ruleengine.EvalResult, error) {
+	results, footprint, err := p.executeFullForActorOnce(ctx, rs, actorKey, nodeProps, seedAnchor)
 	if err != nil {
 		return nil, err
 	}
@@ -312,7 +312,7 @@ func (p *Pipeline) executeFullForActorAttempt(ctx context.Context, actorKey stri
 	if ferr != nil {
 		return nil, fmt.Errorf("pipeline: re-fetch %q after drift: %w", actorKey, ferr)
 	}
-	return p.executeFullForActorAttempt(ctx, actorKey, freshProps, seedAnchor, attempt+1)
+	return p.executeFullForActorAttempt(ctx, rs, actorKey, freshProps, seedAnchor, attempt+1)
 }
 
 // needsFootprintValidation reports whether this pipeline's evaluations must
@@ -445,7 +445,7 @@ func (p *Pipeline) currentNodeRevision(ctx context.Context, key string) (uint64,
 // executeFullForActor so the footprint-validation retry
 // (executeFullForActorAttempt) can re-run exactly this step against fresh
 // state without duplicating the envelope/collision-guard/retraction logic.
-func (p *Pipeline) executeFullForActorOnce(ctx context.Context, actorKey string, nodeProps map[string]any, seedAnchor string) ([]ruleengine.EvalResult, ruleengine.EvalFootprint, error) {
+func (p *Pipeline) executeFullForActorOnce(ctx context.Context, rs ruleState, actorKey string, nodeProps map[string]any, seedAnchor string) ([]ruleengine.EvalResult, ruleengine.EvalFootprint, error) {
 	now := time.Now().UTC()
 	projectedAt, perr := projectedAtFromProvenance(nodeProps)
 	if perr != nil {
@@ -456,7 +456,7 @@ func (p *Pipeline) executeFullForActorOnce(ctx context.Context, actorKey string,
 		"now":         now.Format(time.RFC3339),
 		"projectedAt": projectedAt,
 	}
-	out, footprint, err := p.executeBranches(ctx, actorKey, nodeProps, params, seedAnchor)
+	out, footprint, err := p.executeBranches(ctx, rs, actorKey, nodeProps, params, seedAnchor)
 	if err != nil {
 		return nil, ruleengine.EvalFootprint{}, err
 	}
@@ -728,7 +728,7 @@ func detectOutputKeyCollision(results []ruleengine.EvalResult) (collidingKey str
 // on a non-actor vertex; enumerate affected actors and re-execute the cypher
 // per actor. Each actor's result set is appended to the returned []EvalResult
 // — the pipeline write loop handles each result row independently.
-func (p *Pipeline) evaluateFanOut(ctx context.Context, entry ruleengine.NodeEntry) ([]ruleengine.EvalResult, []string, error) {
+func (p *Pipeline) evaluateFanOut(ctx context.Context, rs ruleState, entry ruleengine.NodeEntry) ([]ruleengine.EvalResult, []string, error) {
 	eventType, _, _ := substrate.ParseVertexKey(entry.CoreKVKey)
 	actorKeys, err := p.actorEnumerator.Enumerate(ctx, entry.CoreKVKey, eventType)
 	if err != nil {
@@ -740,7 +740,7 @@ func (p *Pipeline) evaluateFanOut(ctx context.Context, entry ruleengine.NodeEntr
 	if len(actorKeys) == 0 {
 		return nil, nil, nil
 	}
-	results, err := p.reprojectActors(ctx, actorKeys)
+	results, err := p.reprojectActors(ctx, rs, actorKeys)
 	return results, actorKeys, err
 }
 
@@ -758,7 +758,7 @@ func (p *Pipeline) evaluateFanOut(ctx context.Context, entry ruleengine.NodeEntr
 // (create) / removes (tombstone) by EdgeID, so the dedicated consumer's later
 // Build for the same edge is a no-op. This guarantees the reprojection never
 // races ahead of the edge that triggered it.
-func (p *Pipeline) evaluateLinkFanOut(ctx context.Context, linkKey string, isDeleted bool) ([]ruleengine.EvalResult, []string, error) {
+func (p *Pipeline) evaluateLinkFanOut(ctx context.Context, rs ruleState, linkKey string, isDeleted bool) ([]ruleengine.EvalResult, []string, error) {
 	srcType, srcID, linkName, dstType, dstID, ok := substrate.ParseLinkKey(linkKey)
 	if !ok {
 		// ClassifyKey already gated KindLink; unreachable in practice.
@@ -807,7 +807,7 @@ func (p *Pipeline) evaluateLinkFanOut(ctx context.Context, linkKey string, isDel
 	for a := range actorSet {
 		actorKeys = append(actorKeys, a)
 	}
-	results, err := p.reprojectActors(ctx, actorKeys)
+	results, err := p.reprojectActors(ctx, rs, actorKeys)
 	return results, actorKeys, err
 }
 
@@ -822,7 +822,7 @@ func (p *Pipeline) evaluateLinkFanOut(ctx context.Context, linkKey string, isDel
 // walks adjacency to the actors that reach it. Adjacency is untouched — an
 // aspect change never alters graph topology — so, unlike the link fan-out, no
 // adjacency.Build is performed here.
-func (p *Pipeline) evaluateAspectFanOut(ctx context.Context, aspectKey string) ([]ruleengine.EvalResult, []string, error) {
+func (p *Pipeline) evaluateAspectFanOut(ctx context.Context, rs ruleState, aspectKey string) ([]ruleengine.EvalResult, []string, error) {
 	parentVtx, parentType, _, _, ok := substrate.ParseAspectKey(aspectKey)
 	if !ok {
 		// ClassifyKey already gated KindAspect; unreachable in practice.
@@ -838,7 +838,7 @@ func (p *Pipeline) evaluateAspectFanOut(ctx context.Context, aspectKey string) (
 	if len(actorKeys) == 0 {
 		return nil, nil, nil
 	}
-	results, err := p.reprojectActors(ctx, actorKeys)
+	results, err := p.reprojectActors(ctx, rs, actorKeys)
 	return results, actorKeys, err
 }
 
@@ -846,7 +846,7 @@ func (p *Pipeline) evaluateAspectFanOut(ctx context.Context, aspectKey string) (
 // returns the concatenated result set. A missing (tombstoned) actor yields a
 // Delete against its Capability KV key. Shared by the vertex fan-out
 // (evaluateFanOut) and the link fan-out (evaluateLinkFanOut).
-func (p *Pipeline) reprojectActors(ctx context.Context, actorKeys []string) ([]ruleengine.EvalResult, error) {
+func (p *Pipeline) reprojectActors(ctx context.Context, rs ruleState, actorKeys []string) ([]ruleengine.EvalResult, error) {
 	// This currentAdapter() call is independent of the one writeResults/
 	// Hydrate later capture for the actual write — safe because a
 	// HotReloadInto only ever swaps between two adapters of the SAME
@@ -906,7 +906,7 @@ func (p *Pipeline) reprojectActors(ctx context.Context, actorKeys []string) ([]r
 		// Never seeded: an actor reprojection re-derives that actor's whole
 		// capability set from its own vertex, which is not an anchor-labeled
 		// CDC event and carries no proof that only one anchor's rows moved.
-		res, err := p.executeFullForActor(ctx, actorKey, entryProps, "")
+		res, err := p.executeFullForActor(ctx, rs, actorKey, entryProps, "")
 		if err != nil {
 			return nil, err
 		}

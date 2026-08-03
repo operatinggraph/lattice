@@ -145,7 +145,7 @@ func TestEvalLinkFanOut_RoutesEvaluateErrorIntoDispositionEvalErr(t *testing.T) 
 
 	linkKey := "lnk.identity." + srcID + ".assignedTo.identity." + dstID
 	linkBody := []byte(`{"isDeleted":false}`)
-	dec, err := p.evalLinkFanOut(ctx, substrate.Message{Subject: "$KV.CORE." + linkKey, Body: linkBody}, linkKey, false)
+	dec, err := p.evalLinkFanOut(ctx, p.ruleState(), substrate.Message{Subject: "$KV.CORE." + linkKey, Body: linkBody}, linkKey, false)
 	require.NoError(t, err, "a transient-classified eval error naks with a nil error (redelivery re-runs)")
 	require.Equal(t, substrate.Nak, dec)
 }
@@ -174,7 +174,7 @@ func TestEvalAspectFanOut_RoutesEvaluateErrorIntoDispositionEvalErr(t *testing.T
 	}
 
 	aspectKey := actorKey + ".name"
-	dec, err := p.evalAspectFanOut(ctx, substrate.Message{Subject: "$KV.CORE." + aspectKey}, aspectKey)
+	dec, err := p.evalAspectFanOut(ctx, p.ruleState(), substrate.Message{Subject: "$KV.CORE." + aspectKey}, aspectKey)
 	require.NoError(t, err)
 	require.Equal(t, substrate.Nak, dec)
 }

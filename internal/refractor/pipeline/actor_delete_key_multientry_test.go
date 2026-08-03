@@ -51,7 +51,7 @@ func TestActorTombstone_MultiEnvelopeFn_TombstonesAllChildren(t *testing.T) {
 	require.NoError(t, p.adpt.Upsert(ctx, map[string]any{"key": "child.a1"}, map[string]any{"key": "child.a1", "id": "a1"}, 1))
 	require.NoError(t, p.adpt.Upsert(ctx, map[string]any{"key": "child.a2"}, map[string]any{"key": "child.a2", "id": "a2"}, 1))
 
-	results, enumerated, err := p.evaluateForEntry(ctx, ruleengine.NodeEntry{
+	results, enumerated, err := p.evaluateForEntry(ctx, p.ruleState(), ruleengine.NodeEntry{
 		CoreKVKey: deleteKeyActor,
 		NodeLabel: "identity",
 		IsDeleted: true,
@@ -65,7 +65,7 @@ func TestActorTombstone_MultiEnvelopeFn_NoChildren_NoResults(t *testing.T) {
 	ctx := context.Background()
 	p := newMultiEntryDeleteKeyPipeline(t)
 
-	results, enumerated, err := p.evaluateForEntry(ctx, ruleengine.NodeEntry{
+	results, enumerated, err := p.evaluateForEntry(ctx, p.ruleState(), ruleengine.NodeEntry{
 		CoreKVKey: deleteKeyActor,
 		NodeLabel: "identity",
 		IsDeleted: true,
@@ -85,7 +85,7 @@ func TestReprojectActors_MissingActor_MultiEnvelopeFn_TombstonesAllChildren(t *t
 	// CORE bucket), so this exercises the missing-actor branch inside
 	// reprojectActors directly (fan-out re-evaluation; sweep Reproject does
 	// not yet reach a perEntry lens — see the evaluate.go comment).
-	results, err := p.reprojectActors(ctx, []string{deleteKeyActor})
+	results, err := p.reprojectActors(ctx, p.ruleState(), []string{deleteKeyActor})
 	require.NoError(t, err)
 	require.ElementsMatch(t, []string{"child.a1", "child.a2"}, tombstoneKeys(t, results))
 }
@@ -94,7 +94,7 @@ func TestReprojectActors_MissingActor_MultiEnvelopeFn_NoChildren_NoResults(t *te
 	ctx := context.Background()
 	p := newMultiEntryDeleteKeyPipeline(t)
 
-	results, err := p.reprojectActors(ctx, []string{deleteKeyActor})
+	results, err := p.reprojectActors(ctx, p.ruleState(), []string{deleteKeyActor})
 	require.NoError(t, err)
 	require.Empty(t, results)
 }

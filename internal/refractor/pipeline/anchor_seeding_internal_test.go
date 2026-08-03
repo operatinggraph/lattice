@@ -414,31 +414,31 @@ func TestSeedAnchorFor_EligibilityConjuncts(t *testing.T) {
 
 	t.Run("plain single-branch anchor-labeled event seeds", func(t *testing.T) {
 		p := newPlain(t, seedUnitsSpec)
-		require.Equal(t, anchorKey, p.seedAnchorFor("unit", anchorKey))
+		require.Equal(t, anchorKey, p.seedAnchorFor(p.ruleState(), "unit", anchorKey))
 	})
 
 	t.Run("neighbor-labeled event does not seed", func(t *testing.T) {
 		p := newPlain(t, seedUnitsSpec)
-		require.Empty(t, p.seedAnchorFor("identity", "vtx.identity.SEEDpredicateBBBBBBB"))
+		require.Empty(t, p.seedAnchorFor(p.ruleState(), "identity", "vtx.identity.SEEDpredicateBBBBBBB"))
 	})
 
 	t.Run("unlabeled anchor disarms seeding", func(t *testing.T) {
 		p := newPlain(t, `MATCH (u) RETURN u.key AS key`)
 		require.Empty(t, p.seedAnchorLabel)
-		require.Empty(t, p.seedAnchorFor("unit", anchorKey))
+		require.Empty(t, p.seedAnchorFor(p.ruleState(), "unit", anchorKey))
 	})
 
 	t.Run("DiffRetraction disarms seeding", func(t *testing.T) {
 		p := newPlain(t, seedUnitsSpec)
 		require.NoError(t, p.SetDiffRetraction(true))
-		require.Empty(t, p.seedAnchorFor("unit", anchorKey),
+		require.Empty(t, p.seedAnchorFor(p.ruleState(), "unit", anchorKey),
 			"a DiffRetraction lens must recompute its whole row set — its diff retracts everything it fails to re-derive")
 	})
 
 	t.Run("ActorEnumerator disarms seeding", func(t *testing.T) {
 		p := newPlain(t, seedUnitsSpec)
 		p.SetActorEnumerator(NewActorEnumerator(nil, nil, "identity"))
-		require.Empty(t, p.seedAnchorFor("unit", anchorKey))
+		require.Empty(t, p.seedAnchorFor(p.ruleState(), "unit", anchorKey))
 	})
 
 	t.Run("envelope disarms seeding", func(t *testing.T) {
@@ -446,7 +446,7 @@ func TestSeedAnchorFor_EligibilityConjuncts(t *testing.T) {
 		p.SetEnvelopeFn(func(row map[string]any, keys map[string]any, _ map[string]any) (map[string]any, map[string]any, error) {
 			return row, keys, nil
 		})
-		require.Empty(t, p.seedAnchorFor("unit", anchorKey))
+		require.Empty(t, p.seedAnchorFor(p.ruleState(), "unit", anchorKey))
 	})
 
 	t.Run("multi-envelope disarms seeding", func(t *testing.T) {
@@ -454,7 +454,7 @@ func TestSeedAnchorFor_EligibilityConjuncts(t *testing.T) {
 		p.SetMultiEnvelopeFn(func(map[string]any, map[string]any, map[string]any) ([]Envelope, error) {
 			return nil, nil
 		})
-		require.Empty(t, p.seedAnchorFor("unit", anchorKey))
+		require.Empty(t, p.seedAnchorFor(p.ruleState(), "unit", anchorKey))
 	})
 
 	t.Run("multi-walk branches disarm seeding", func(t *testing.T) {
@@ -464,7 +464,7 @@ func TestSeedAnchorFor_EligibilityConjuncts(t *testing.T) {
 		p.UseFullEngineBranches(eng, branches[0], branches)
 		require.Empty(t, p.seedAnchorLabel,
 			"branch merging evaluates N queries; one seed cannot speak for all their anchors")
-		require.Empty(t, p.seedAnchorFor("unit", anchorKey))
+		require.Empty(t, p.seedAnchorFor(p.ruleState(), "unit", anchorKey))
 	})
 
 	t.Run("a reload back to a single walk re-arms seeding", func(t *testing.T) {
@@ -473,7 +473,7 @@ func TestSeedAnchorFor_EligibilityConjuncts(t *testing.T) {
 		branches := []ruleengine.CompiledRule{compile(t, seedUnitsSpec), compile(t, seedUnitsSpec)}
 		p.UseFullEngineBranches(eng, branches[0], branches)
 		p.UseFullEngine(eng, compile(t, seedUnitsSpec))
-		require.Equal(t, anchorKey, p.seedAnchorFor("unit", anchorKey))
+		require.Equal(t, anchorKey, p.seedAnchorFor(p.ruleState(), "unit", anchorKey))
 	})
 }
 

@@ -69,25 +69,25 @@ func walkOwnedColumns(branches []ruleengine.CompiledRule) map[string]int {
 // carries an ActorEnumerator besides) — so the branch loop passes the unseeded
 // context and every branch builds its own anchor candidate set by scan.
 func (p *Pipeline) executeBranches(
-	ctx context.Context, actorKey string, nodeProps map[string]any, params map[string]any, seedAnchor string,
+	ctx context.Context, rs ruleState, actorKey string, nodeProps map[string]any, params map[string]any, seedAnchor string,
 ) ([]ruleengine.ProjectionResult, ruleengine.EvalFootprint, error) {
 	ec := ruleengine.EventContext{NodeKey: actorKey, NodeProps: nodeProps, Parameters: params}
-	if len(p.fullCRBranches) <= 1 {
+	if len(rs.branches) <= 1 {
 		ec.SeedAnchor = seedAnchor
-		return p.fullEngine.ExecuteWithFootprint(ctx, p.fullCR, ec, p.adjKV, p.coreKV)
+		return rs.engine.ExecuteWithFootprint(ctx, rs.cr, ec, p.adjKV, p.coreKV)
 	}
 
-	branchOuts := make([][]ruleengine.ProjectionResult, len(p.fullCRBranches))
-	footprints := make([]ruleengine.EvalFootprint, len(p.fullCRBranches))
-	for i, cr := range p.fullCRBranches {
-		out, fp, err := p.fullEngine.ExecuteWithFootprint(ctx, cr, ec, p.adjKV, p.coreKV)
+	branchOuts := make([][]ruleengine.ProjectionResult, len(rs.branches))
+	footprints := make([]ruleengine.EvalFootprint, len(rs.branches))
+	for i, cr := range rs.branches {
+		out, fp, err := rs.engine.ExecuteWithFootprint(ctx, cr, ec, p.adjKV, p.coreKV)
 		if err != nil {
 			return nil, ruleengine.EvalFootprint{}, fmt.Errorf("pipeline: branch %d: %w", i, err)
 		}
 		branchOuts[i] = out
 		footprints[i] = fp
 	}
-	merged, err := mergeBranchRows(branchOuts, p.fullCRWalkOwnedColumns)
+	merged, err := mergeBranchRows(branchOuts, rs.walkOwnedColumns)
 	if err != nil {
 		return nil, ruleengine.EvalFootprint{}, err
 	}

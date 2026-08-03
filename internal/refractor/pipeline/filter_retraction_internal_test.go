@@ -272,7 +272,7 @@ func TestPlainLens_NeighborKeyedComposite_FallsThroughToLinger(t *testing.T) {
 		CoreKVKey: appKey, NodeLabel: "leaseapp",
 		Properties: map[string]any{"lastModifiedAt": "2026-07-02T10:00:00Z"},
 	}
-	results, _, err := p.evaluateForEntry(ctx, appEntry)
+	results, _, err := p.evaluateForEntry(ctx, p.ruleState(), appEntry)
 	require.NoError(t, err)
 	require.Len(t, results, 1)
 	require.False(t, results[0].Delete)
@@ -292,7 +292,7 @@ func TestPlainLens_NeighborKeyedComposite_FallsThroughToLinger(t *testing.T) {
 			OtherNodeID: d.otherID, OtherType: d.otherType, IsDeleted: true,
 		}))
 	}
-	results, _, err = p.evaluateForEntry(ctx, appEntry)
+	results, _, err = p.evaluateForEntry(ctx, p.ruleState(), appEntry)
 	require.NoError(t, err)
 	for _, r := range results {
 		require.False(t, r.Delete,
@@ -447,8 +447,8 @@ func TestPlainLens_IrrelevantTypeSkipped(t *testing.T) {
 	ctx := context.Background()
 	p, coreKV, _, targetKV := newRetractionPipeline(t, listedUnitsSpec, []string{"key"})
 	require.False(t, p.plainReprojectAll, "listedUnitsSpec has an exhaustive label set")
-	require.True(t, p.plainReactsTo("unit"))
-	require.False(t, p.plainReactsTo("meta"))
+	require.True(t, p.ruleState().plainReactsTo("unit"))
+	require.False(t, p.ruleState().plainReactsTo("meta"))
 
 	const unitID = "FRunitDDDDDDDDDDDDDD"
 	unitKey := "vtx.unit." + unitID

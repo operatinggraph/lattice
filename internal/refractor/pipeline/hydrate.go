@@ -50,7 +50,11 @@ func (p *Pipeline) Hydrate(ctx context.Context, identityID string) (uint64, erro
 		return 0, fmt.Errorf("pipeline: hydrate %q: no such identity", identityID)
 	}
 
-	results, err := p.reprojectActors(ctx, []string{actorKey})
+	// This entry point runs off the consumer goroutine (Hydrate is called by the
+	// personal-lens attach path), so it takes its own rule snapshot — see ruleMu.
+	rs := p.ruleState()
+
+	results, err := p.reprojectActors(ctx, rs, []string{actorKey})
 	if err != nil {
 		return 0, fmt.Errorf("pipeline: hydrate %q: %w", identityID, err)
 	}

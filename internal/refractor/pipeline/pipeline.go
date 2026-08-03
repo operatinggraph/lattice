@@ -129,6 +129,49 @@ type Pipeline struct {
 	plainReprojectRelations  map[string]struct{}
 	plainRelationsExhaustive bool
 
+	// ruleMu guards every field useFullEngineBranches writes — engineKind,
+	// fullEngine, fullCR, fullCRBranches, fullCRWalkOwnedColumns, the two
+	// plainReproject pairs above, and seedAnchorLabel. Those are the only
+	// fields on this struct rewritten AFTER Run: a MATCH hot-reload
+	// (cmd/refractor/reload.go) calls UseFullEngineBranches on a LIVE pipeline
+	// from CoreKVSource's dispatch goroutine while the consumer goroutine is
+	// inside handle reading them.
+	//
+	// Every OTHER field is either install-time only (set during activation
+	// before Run — the whole evaluate-shape set: actorEnumerator,
+	// patternClosedOutput, sweeper, secureDecryptor, both envelope fns,
+	// diffRetraction) or carries its own guard: adpt and requireGuardedAdapter
+	// under adapterMu, the progress and rebuild counters under their own
+	// mutexes and atomics. A new field belongs to one of those three classes;
+	// one written after Run with no guard is a bug.
+	//
+	// Read through ruleState(), never field-by-field. Two properties are the
+	// whole fix:
+	//
+	//   - The rewrite happens under ONE Lock, so the set flips atomically —
+	//     which is what the relation pair's doc above already claims and what
+	//     separate unsynchronized stores never actually delivered. That matters
+	//     most for that pair, because unlike the label pair it does not fail
+	//     safe: plainRelationsExhaustive is stated positively, so a reader
+	//     seeing the new flag against the not-yet-published map would judge
+	//     every link against an EMPTY exhaustive set and skip all of them.
+	//   - A snapshot stays coherent for a whole event. Without one a reload
+	//     landing mid-event could execute the new rule while deriving the
+	//     anchor's projection key from the old, retracting a row the new rule
+	//     legitimately produces under a different key.
+	//
+	// The maps and slices are COPY-ON-WRITE: useFullEngineBranches builds fresh
+	// ones every call and never mutates one it has already published, so a
+	// snapshot's maps remain safe to read after the lock is dropped. An edit
+	// that mutates a published map in place breaks that and must copy instead.
+	ruleMu sync.RWMutex
+
+	// ruleGen counts rule publications, and rides in every snapshot so the CDC
+	// write path can ask whether the rule it evaluated under is still in force
+	// — see supersededRule. Guarded by ruleMu with the set above, because it
+	// must advance in the same critical section that swaps the rule.
+	ruleGen uint64
+
 	// seedAnchorLabel is this lens's anchor vertex type
 	// (full.CompiledRule.AnchorLabel — the first MATCH clause's first node's
 	// label), derived once per engine install alongside plainReprojectLabels.
@@ -444,19 +487,20 @@ func (p *Pipeline) UseFullEngineBranches(eng *full.Engine, cr ruleengine.Compile
 }
 
 func (p *Pipeline) useFullEngineBranches(eng *full.Engine, cr ruleengine.CompiledRule, branches []ruleengine.CompiledRule) {
-	p.engineKind = ruleengine.EngineFull
-	p.fullEngine = eng
-	p.fullCR = cr
+	// Everything is derived into locals first and published under one Lock at
+	// the end (see ruleMu): a reader must never observe a half-rewritten rule.
+	next := ruleState{
+		engineKind: ruleengine.EngineFull,
+		engine:     eng,
+		cr:         cr,
+	}
 	// Unconditional, not just the len>1 arm: a reload (cmd/refractor/reload.go)
 	// calls this on an EXISTING pipeline, so a lens edited from 2+ Walks down
 	// to a single Walk must clear both fields — leaving them set would keep
 	// evaluating a Walk the new spec no longer has.
 	if len(branches) > 1 {
-		p.fullCRBranches = branches
-		p.fullCRWalkOwnedColumns = walkOwnedColumns(branches)
-	} else {
-		p.fullCRBranches = nil
-		p.fullCRWalkOwnedColumns = nil
+		next.branches = branches
+		next.walkOwnedColumns = walkOwnedColumns(branches)
 	}
 	// Pin the vertex types this lens's patterns can bind, so the plain
 	// aspect/link reprojection arms skip events on types the lens cannot
@@ -465,10 +509,7 @@ func (p *Pipeline) useFullEngineBranches(eng *full.Engine, cr ruleengine.Compile
 	// across every branch for a multi-walk lens: each branch's own clauses
 	// bind only that walk's types, but the plain-reprojection arms reason
 	// about the lens as a whole.
-	p.plainReprojectLabels = nil
-	p.plainReprojectAll = true
-	p.plainReprojectRelations = nil
-	p.plainRelationsExhaustive = false
+	next.reprojectAll = true
 	all := []ruleengine.CompiledRule{cr}
 	if len(branches) > 1 {
 		all = branches
@@ -507,27 +548,97 @@ func (p *Pipeline) useFullEngineBranches(eng *full.Engine, cr ruleengine.Compile
 		}
 	}
 	if exhaustive {
-		p.plainReprojectLabels = labels
-		p.plainReprojectAll = false
+		next.reprojectLabels = labels
+		next.reprojectAll = false
 	}
 	if relationsExhaustive {
-		p.plainReprojectRelations = relations
-		p.plainRelationsExhaustive = true
+		next.reprojectRelations = relations
+		next.relationsExhaustive = true
 	}
 	// Pin the anchor label an anchor-labeled event can seed the evaluation
-	// with. Unconditional like the label set above, and for the same reason: a
-	// reload must never leave a previous rule body's anchor armed. A multi-walk
-	// lens is excluded outright — branch merging evaluates N independent
-	// queries, each with its own anchor, and one seed cannot speak for all of
-	// them.
-	p.seedAnchorLabel = ""
+	// with. Derived unconditionally like the label set above, and for the same
+	// reason: a reload must never leave a previous rule body's anchor armed. A
+	// multi-walk lens is excluded outright — branch merging evaluates N
+	// independent queries, each with its own anchor, and one seed cannot speak
+	// for all of them.
 	if len(branches) <= 1 {
 		if fullCR, isFull := cr.(*full.CompiledRule); isFull {
 			if label, ok := fullCR.AnchorLabel(); ok {
-				p.seedAnchorLabel = label
+				next.seedAnchorLabel = label
 			}
 		}
 	}
+	p.publishRuleState(next)
+}
+
+// ruleState is a coherent snapshot of everything useFullEngineBranches
+// rewrites — the fields ruleMu guards. Taken once per consumer entry and
+// threaded down, so a MATCH hot-reload landing mid-event cannot show one gate
+// the new rule and the next gate the old one.
+//
+// Its maps and slices alias the Pipeline's own, which is safe precisely
+// because that publication is copy-on-write (see ruleMu). Nothing here may be
+// mutated.
+type ruleState struct {
+	gen                 uint64
+	engineKind          string
+	engine              *full.Engine
+	cr                  ruleengine.CompiledRule
+	branches            []ruleengine.CompiledRule
+	walkOwnedColumns    map[string]int
+	reprojectLabels     map[string]struct{}
+	reprojectAll        bool
+	reprojectRelations  map[string]struct{}
+	relationsExhaustive bool
+	seedAnchorLabel     string
+}
+
+// ruleState returns the pipeline's current compiled rule as one snapshot.
+//
+// Callers must take it ONCE at the top of an operation and pass it down rather
+// than re-reading per gate. The reason is COHERENCE, not lock safety: this
+// function holds ruleMu only for the struct copy and releases before it
+// returns, so a second call is always sequential and cannot deadlock. What a
+// second call costs is the guarantee — two snapshots in one operation can
+// straddle a hot-reload, which is exactly the incoherence ruleMu exists to
+// remove.
+//
+// The returned maps are the live published ones, safe to read outside the lock
+// only because publication is copy-on-write. No caller may mutate them — that
+// includes what ActorAwareNarrowingLabels and NarrowedFilterEligible hand back.
+func (p *Pipeline) ruleState() ruleState {
+	p.ruleMu.RLock()
+	defer p.ruleMu.RUnlock()
+	return ruleState{
+		gen:                 p.ruleGen,
+		engineKind:          p.engineKind,
+		engine:              p.fullEngine,
+		cr:                  p.fullCR,
+		branches:            p.fullCRBranches,
+		walkOwnedColumns:    p.fullCRWalkOwnedColumns,
+		reprojectLabels:     p.plainReprojectLabels,
+		reprojectAll:        p.plainReprojectAll,
+		reprojectRelations:  p.plainReprojectRelations,
+		relationsExhaustive: p.plainRelationsExhaustive,
+		seedAnchorLabel:     p.seedAnchorLabel,
+	}
+}
+
+// publishRuleState installs a freshly-derived rule as one atomic swap.
+func (p *Pipeline) publishRuleState(rs ruleState) {
+	p.ruleMu.Lock()
+	defer p.ruleMu.Unlock()
+	p.ruleGen++
+	p.engineKind = rs.engineKind
+	p.fullEngine = rs.engine
+	p.fullCR = rs.cr
+	p.fullCRBranches = rs.branches
+	p.fullCRWalkOwnedColumns = rs.walkOwnedColumns
+	p.plainReprojectLabels = rs.reprojectLabels
+	p.plainReprojectAll = rs.reprojectAll
+	p.plainReprojectRelations = rs.reprojectRelations
+	p.plainRelationsExhaustive = rs.relationsExhaustive
+	p.seedAnchorLabel = rs.seedAnchorLabel
 }
 
 // seedAnchorFor returns the vertex key an event on (eventLabel, eventKey) may
@@ -552,8 +663,8 @@ func (p *Pipeline) useFullEngineBranches(eng *full.Engine, cr ruleengine.Compile
 //     read as "every other anchor's rows are gone" and retract them all. This
 //     conjunct is what makes applyDiffRetraction unreachable from a seeded
 //     evaluation.
-func (p *Pipeline) seedAnchorFor(eventLabel, eventKey string) string {
-	if p.seedAnchorLabel == "" || eventKey == "" || eventLabel != p.seedAnchorLabel {
+func (p *Pipeline) seedAnchorFor(rs ruleState, eventLabel, eventKey string) string {
+	if rs.seedAnchorLabel == "" || eventKey == "" || eventLabel != rs.seedAnchorLabel {
 		return ""
 	}
 	if p.actorEnumerator != nil || p.envelopeFn != nil || p.multiEnvelopeFn != nil {
@@ -569,14 +680,14 @@ func (p *Pipeline) seedAnchorFor(eventLabel, eventKey string) string {
 // re-execute this lens for an event whose owner/endpoint vertex has the given
 // type. A lens with an exhaustive label set reprojects only for types its
 // patterns can bind.
-func (p *Pipeline) plainReactsTo(vertexType string) bool {
-	if p.engineKind != ruleengine.EngineFull {
+func (rs ruleState) plainReactsTo(vertexType string) bool {
+	if rs.engineKind != ruleengine.EngineFull {
 		return false
 	}
-	if p.plainReprojectAll {
+	if rs.reprojectAll {
 		return true
 	}
-	_, ok := p.plainReprojectLabels[vertexType]
+	_, ok := rs.reprojectLabels[vertexType]
 	return ok
 }
 
@@ -598,14 +709,14 @@ func (p *Pipeline) plainReactsTo(vertexType string) bool {
 // non-full engine, an empty/unparsed relation, or a non-exhaustive relation set
 // (an untyped or variable-length relationship anywhere in the lens) all
 // reproject.
-func (p *Pipeline) plainLinkReactsTo(relation string) bool {
-	if p.engineKind != ruleengine.EngineFull {
+func (rs ruleState) plainLinkReactsTo(relation string) bool {
+	if rs.engineKind != ruleengine.EngineFull {
 		return true
 	}
-	if !p.plainRelationsExhaustive || relation == "" {
+	if !rs.relationsExhaustive || relation == "" {
 		return true
 	}
-	_, ok := p.plainReprojectRelations[relation]
+	_, ok := rs.reprojectRelations[relation]
 	return ok
 }
 
@@ -625,14 +736,14 @@ func (p *Pipeline) plainLinkReactsTo(relation string) bool {
 // label set, it never re-scopes what any other lens evaluates. Only a
 // full-engine lens with an exhaustive label set that provably excludes
 // vertexType is skipped.
-func (p *Pipeline) plainVertexRelevant(vertexType string) bool {
-	if p.engineKind != ruleengine.EngineFull {
+func (rs ruleState) plainVertexRelevant(vertexType string) bool {
+	if rs.engineKind != ruleengine.EngineFull {
 		return true
 	}
-	if p.plainReprojectAll || vertexType == "" {
+	if rs.reprojectAll || vertexType == "" {
 		return true
 	}
-	_, ok := p.plainReprojectLabels[vertexType]
+	_, ok := rs.reprojectLabels[vertexType]
 	return ok
 }
 
@@ -666,13 +777,21 @@ const secureIdentityKeyType = "identity"
 // decryptor conjunct specifically that would narrow every Secure Lens, which is
 // the one case the conjunct exists to refuse.
 func (p *Pipeline) ActorAwareNarrowingLabels() (map[string]struct{}, bool) {
+	return p.actorAwareNarrowingLabels(p.ruleState())
+}
+
+// actorAwareNarrowingLabels is ActorAwareNarrowingLabels against a snapshot the
+// caller already holds — the form every in-pipeline caller uses, since taking a
+// second snapshot mid-event would reintroduce exactly the incoherence ruleMu
+// exists to remove.
+func (p *Pipeline) actorAwareNarrowingLabels(rs ruleState) (map[string]struct{}, bool) {
 	// Not actor-aware: the plain arms own their own gates.
 	if p.actorEnumerator == nil {
 		return nil, false
 	}
 	// ReferencedLabels only exists for the full engine, and only an exhaustive
 	// set proves a type cannot bind.
-	if p.engineKind != ruleengine.EngineFull || p.plainReprojectAll {
+	if rs.engineKind != ruleengine.EngineFull || rs.reprojectAll {
 		return nil, false
 	}
 	// An input outside the compiled pattern breaks the closure claim.
@@ -695,17 +814,17 @@ func (p *Pipeline) ActorAwareNarrowingLabels() (map[string]struct{}, bool) {
 	// The anchor's own soft-delete arrives as a vertex event of the anchor's
 	// type. A lens that cannot see that type would never retract the anchor's
 	// row, and on the auth plane a missed retraction is an over-grant.
-	if _, ok := p.plainReprojectLabels[p.actorEnumerator.actorType]; !ok {
+	if _, ok := rs.reprojectLabels[p.actorEnumerator.actorType]; !ok {
 		return nil, false
 	}
 	// The decryptor resolves key custody off a RETURN column, not off a node
 	// the executor bound, so the identity type is not implied by the pattern.
 	if p.secureDecryptor != nil {
-		if _, ok := p.plainReprojectLabels[secureIdentityKeyType]; !ok {
+		if _, ok := rs.reprojectLabels[secureIdentityKeyType]; !ok {
 			return nil, false
 		}
 	}
-	return p.plainReprojectLabels, true
+	return rs.reprojectLabels, true
 }
 
 // actorAwareFanOutRelevant reports whether the actor-aware fan-out arms must run
@@ -716,11 +835,11 @@ func (p *Pipeline) ActorAwareNarrowingLabels() (map[string]struct{}, bool) {
 //
 // Every uncertain case defaults to relevant: an ineligible pipeline, an empty
 // or unparsed type, or no types at all.
-func (p *Pipeline) actorAwareFanOutRelevant(types ...string) bool {
+func (p *Pipeline) actorAwareFanOutRelevant(rs ruleState, types ...string) bool {
 	if len(types) == 0 {
 		return true
 	}
-	labels, ok := p.ActorAwareNarrowingLabels()
+	labels, ok := p.actorAwareNarrowingLabels(rs)
 	if !ok {
 		return true
 	}
@@ -738,11 +857,11 @@ func (p *Pipeline) actorAwareFanOutRelevant(types ...string) bool {
 // vertexEventRelevant is the single gate the KindVertex arm consults for both
 // pipeline shapes: a plain lens judges by plainVertexRelevant, an actor-aware
 // one by §4.2's conjunction.
-func (p *Pipeline) vertexEventRelevant(vertexType string) bool {
+func (p *Pipeline) vertexEventRelevant(rs ruleState, vertexType string) bool {
 	if p.actorEnumerator != nil {
-		return p.actorAwareFanOutRelevant(vertexType)
+		return p.actorAwareFanOutRelevant(rs, vertexType)
 	}
-	return p.plainVertexRelevant(vertexType)
+	return rs.plainVertexRelevant(vertexType)
 }
 
 // SetPatternClosedOutput declares that this lens's row for an anchor is a
@@ -778,10 +897,17 @@ func (p *Pipeline) PatternClosedOutput() bool { return p.patternClosedOutput }
 // plainVertexRelevant/plainReactsTo, computed from the exact same data those
 // gates already trust — never a second, independently-fallible judgment.
 func (p *Pipeline) NarrowedFilterEligible() (labels map[string]struct{}, ok bool) {
-	if p.actorEnumerator != nil || p.engineKind != ruleengine.EngineFull || p.plainReprojectAll {
+	return p.narrowedFilterEligible(p.ruleState())
+}
+
+// narrowedFilterEligible is NarrowedFilterEligible against a snapshot the
+// caller already holds — see actorAwareNarrowingLabels for why the in-pipeline
+// callers must not take their own.
+func (p *Pipeline) narrowedFilterEligible(rs ruleState) (labels map[string]struct{}, ok bool) {
+	if p.actorEnumerator != nil || rs.engineKind != ruleengine.EngineFull || rs.reprojectAll {
 		return nil, false
 	}
-	return p.plainReprojectLabels, true
+	return rs.reprojectLabels, true
 }
 
 // ConsumerFilter derives this lens's Core KV consumer filter from its CURRENT
@@ -800,7 +926,11 @@ func (p *Pipeline) NarrowedFilterEligible() (labels map[string]struct{}, ok bool
 // under-deliver forever (a JetStream filter update never resets the
 // consumer's cursor — nats-server v2.14.0).
 func (p *Pipeline) ConsumerFilter() (filterSubjects []string, filterSubject string) {
-	labels, ok := p.NarrowedFilterEligible()
+	// One snapshot for both dimensions: the label set and the relation set must
+	// come from the SAME compiled rule, or a hot-reload landing between the two
+	// reads would build a filter no rule ever asked for.
+	rs := p.ruleState()
+	labels, ok := p.narrowedFilterEligible(rs)
 	if !ok || len(labels) == 0 || len(labels) > maxNarrowedFilterLabels {
 		return nil, subjects.CoreKVFilter(p.coreKVBucket)
 	}
@@ -814,9 +944,9 @@ func (p *Pipeline) ConsumerFilter() (filterSubjects []string, filterSubject stri
 	// the label narrowing's own eligibility untouched — the two dimensions fail
 	// back independently, and a lens that narrows by label today never stops
 	// because its relations do not qualify.
-	if p.plainRelationsExhaustive {
-		relationList := make([]string, 0, len(p.plainReprojectRelations))
-		for r := range p.plainReprojectRelations {
+	if rs.relationsExhaustive {
+		relationList := make([]string, 0, len(rs.reprojectRelations))
+		for r := range rs.reprojectRelations {
 			relationList = append(relationList, r)
 		}
 		if len(labelList)*(1+2*len(relationList)) <= maxNarrowedFilterSubjects {
@@ -1458,6 +1588,14 @@ func (p *Pipeline) handle(ctx context.Context, msg substrate.Message) (substrate
 	key := strings.TrimPrefix(msg.Subject, prefix)
 	tombstone := len(msg.Body) == 0
 
+	// One snapshot of the compiled rule for this whole message (see ruleMu). A
+	// MATCH hot-reload runs on CoreKVSource's dispatch goroutine and can land at
+	// any point below, so taking the rule once here is what makes this event
+	// judged AND evaluated by a single rule — the next event picks up the new
+	// one. Every gate and every evaluate arm reached from here is threaded this
+	// value rather than re-reading the pipeline.
+	rs := p.ruleState()
+
 	// Classify the key by Lattice Contract #1 §1.5 shape.
 	switch substrate.ClassifyKey(key) {
 	case substrate.KindAspect:
@@ -1477,12 +1615,12 @@ func (p *Pipeline) handle(ctx context.Context, msg substrate.Message) (substrate
 			// through so the fan-out raises the real error rather than being
 			// silently dropped here.
 			if _, parentType, _, _, pok := substrate.ParseAspectKey(key); pok &&
-				!p.actorAwareFanOutRelevant(parentType) {
+				!p.actorAwareFanOutRelevant(rs, parentType) {
 				return substrate.Ack, nil
 			}
-			return p.evalAspectFanOut(ctx, msg, key)
+			return p.evalAspectFanOut(ctx, rs, msg, key)
 		}
-		return p.evalPlainAspectReprojection(ctx, msg, key)
+		return p.evalPlainAspectReprojection(ctx, rs, msg, key)
 	case substrate.KindLink:
 		// A pure link mutation (holdsRole/manages/appliesToUnit/...) changes
 		// graph topology with no vertex event. On the actor-aware pipeline it
@@ -1498,12 +1636,12 @@ func (p *Pipeline) handle(ctx context.Context, msg substrate.Message) (substrate
 			// authoritative adjacency write is the dedicated whole-stream
 			// consumer's, not this one's. No reprojection, nothing to order.
 			if t1, _, _, t2, _, pok := substrate.ParseLinkKey(key); pok &&
-				!p.actorAwareFanOutRelevant(t1, t2) {
+				!p.actorAwareFanOutRelevant(rs, t1, t2) {
 				return substrate.Ack, nil
 			}
-			return p.evalLinkFanOut(ctx, msg, key, tombstone)
+			return p.evalLinkFanOut(ctx, rs, msg, key, tombstone)
 		}
-		return p.evalPlainLinkReprojection(ctx, msg, key)
+		return p.evalPlainLinkReprojection(ctx, rs, msg, key)
 	case substrate.KindUnknown:
 		slog.Warn("pipeline: unknown key shape — defect signal",
 			"ruleId", p.ruleID, "key", key)
@@ -1548,7 +1686,7 @@ func (p *Pipeline) handle(ctx context.Context, msg substrate.Message) (substrate
 	// into a full evaluation regardless of type. Both pipeline shapes consult
 	// the one gate: a plain lens through plainVertexRelevant, an actor-aware one
 	// through §4.2's conjunction.
-	if !p.vertexEventRelevant(label) {
+	if !p.vertexEventRelevant(rs, label) {
 		return substrate.Ack, nil
 	}
 
@@ -1563,7 +1701,7 @@ func (p *Pipeline) handle(ctx context.Context, msg substrate.Message) (substrate
 	// Evaluate against the full engine ([]ProjectionResult{Key,Values,Delete}).
 	// evaluateForEntry normalises and applies the envelope so the downstream
 	// write path sees a single []ruleengine.EvalResult shape.
-	results, enumeratedActors, err := p.evaluateForEntry(ctx, entry)
+	results, enumeratedActors, err := p.evaluateForEntry(ctx, rs, entry)
 	if err != nil {
 		slog.Error("pipeline: evaluate",
 			"ruleId", p.ruleID, "entityId", key,
@@ -1575,7 +1713,7 @@ func (p *Pipeline) handle(ctx context.Context, msg substrate.Message) (substrate
 	// terminal DLQ, retry enqueue, ack discipline). The adapter is captured
 	// once inside writeResults so all results in this message use a consistent
 	// instance even if HotReloadInto swaps it between messages.
-	return p.writeResults(ctx, msg, key, results, enumeratedActors)
+	return p.writeResults(ctx, rs, msg, key, results, enumeratedActors)
 }
 
 // evalLinkFanOut handles a KindLink CDC event on the actor-aware pipeline.
@@ -1586,7 +1724,7 @@ func (p *Pipeline) handle(ctx context.Context, msg substrate.Message) (substrate
 // A link tombstone arrives with an empty body (NATS DEL/PURGE). A link create
 // or update arrives with a body whose `isDeleted` field distinguishes a
 // soft-delete (revocation) from an active link.
-func (p *Pipeline) evalLinkFanOut(ctx context.Context, msg substrate.Message, key string, tombstone bool) (substrate.Decision, error) {
+func (p *Pipeline) evalLinkFanOut(ctx context.Context, rs ruleState, msg substrate.Message, key string, tombstone bool) (substrate.Decision, error) {
 	isDeleted := tombstone
 	if !tombstone {
 		var props map[string]any
@@ -1598,7 +1736,7 @@ func (p *Pipeline) evalLinkFanOut(ctx context.Context, msg substrate.Message, ke
 		isDeleted, _ = props["isDeleted"].(bool)
 	}
 
-	results, enumeratedActors, err := p.evaluateLinkFanOut(ctx, key, isDeleted)
+	results, enumeratedActors, err := p.evaluateLinkFanOut(ctx, rs, key, isDeleted)
 	if err != nil {
 		slog.Error("pipeline: link fan-out: evaluate",
 			"ruleId", p.ruleID, "entityId", key, "stage", "traversal", "err", err)
@@ -1608,7 +1746,7 @@ func (p *Pipeline) evalLinkFanOut(ctx context.Context, msg substrate.Message, ke
 		return p.dispositionEvalErr(ctx, msg, key, "traversal", err, enumeratedActors)
 	}
 
-	return p.writeResults(ctx, msg, key, results, enumeratedActors)
+	return p.writeResults(ctx, rs, msg, key, results, enumeratedActors)
 }
 
 // evalPlainAspectReprojection handles a KindAspect CDC event on a plain
@@ -1623,23 +1761,23 @@ func (p *Pipeline) evalLinkFanOut(ctx context.Context, msg substrate.Message, ke
 // doesn't bind the lens's MATCH evaluates to zero rows with no derivable
 // anchor key (harmless no-op); a missing/tombstoned owner is skipped — row
 // deletion belongs to the anchor-tombstone path.
-func (p *Pipeline) evalPlainAspectReprojection(ctx context.Context, msg substrate.Message, key string) (substrate.Decision, error) {
+func (p *Pipeline) evalPlainAspectReprojection(ctx context.Context, rs ruleState, msg substrate.Message, key string) (substrate.Decision, error) {
 	parentVtx, parentType, _, _, ok := substrate.ParseAspectKey(key)
 	if !ok {
 		return substrate.Ack, nil
 	}
-	if !p.plainReactsTo(parentType) {
+	if !rs.plainReactsTo(parentType) {
 		// The lens's patterns cannot bind this vertex type — the mutation
 		// cannot change its rows; skip the re-execute.
 		return substrate.Ack, nil
 	}
-	results, err := p.evaluatePlainFromVertex(ctx, parentVtx, parentType)
+	results, err := p.evaluatePlainFromVertex(ctx, rs, parentVtx, parentType)
 	if err != nil {
 		slog.Error("pipeline: plain aspect reprojection: evaluate",
 			"ruleId", p.ruleID, "entityId", key, "stage", "traversal", "err", err)
 		return p.dispositionEvalErr(ctx, msg, key, "traversal", err, nil)
 	}
-	return p.writeResults(ctx, msg, key, results, nil)
+	return p.writeResults(ctx, rs, msg, key, results, nil)
 }
 
 // evalPlainLinkReprojection handles a KindLink CDC event on a plain
@@ -1658,18 +1796,18 @@ func (p *Pipeline) evalPlainAspectReprojection(ctx context.Context, msg substrat
 // the same CDC event with no cross-consumer ordering guarantee, so applying
 // it here first is what guarantees the re-execute always reads a consistent
 // edge set — a tombstone's re-execute can never still see the removed edge.
-func (p *Pipeline) evalPlainLinkReprojection(ctx context.Context, msg substrate.Message, key string) (substrate.Decision, error) {
+func (p *Pipeline) evalPlainLinkReprojection(ctx context.Context, rs ruleState, msg substrate.Message, key string) (substrate.Decision, error) {
 	type1, id1, linkName, type2, id2, ok := substrate.ParseLinkKey(key)
 	if !ok {
 		return substrate.Ack, nil
 	}
-	if !p.plainLinkReactsTo(linkName) {
+	if !rs.plainLinkReactsTo(linkName) {
 		// The lens's patterns never traverse this relation, so the link
 		// cannot appear in any of them whatever its endpoints are — the same
 		// skip class as the endpoint test below, for the same reason.
 		return substrate.Ack, nil
 	}
-	reacts1, reacts2 := p.plainReactsTo(type1), p.plainReactsTo(type2)
+	reacts1, reacts2 := rs.plainReactsTo(type1), rs.plainReactsTo(type2)
 	if !reacts1 && !reacts2 {
 		// Neither endpoint type is bindable by the lens's patterns — the
 		// link cannot appear in its traversals; skip (including the
@@ -1717,7 +1855,7 @@ func (p *Pipeline) evalPlainLinkReprojection(ctx context.Context, msg substrate.
 		if !ep.reacts {
 			continue
 		}
-		results, err := p.evaluatePlainFromVertex(ctx, ep.vtx, ep.label)
+		results, err := p.evaluatePlainFromVertex(ctx, rs, ep.vtx, ep.label)
 		if err != nil {
 			slog.Error("pipeline: plain link reprojection: evaluate",
 				"ruleId", p.ruleID, "entityId", key, "endpoint", ep.vtx,
@@ -1733,14 +1871,14 @@ func (p *Pipeline) evalPlainLinkReprojection(ctx context.Context, msg substrate.
 			combined = append(combined, r)
 		}
 	}
-	return p.writeResults(ctx, msg, key, combined, nil)
+	return p.writeResults(ctx, rs, msg, key, combined, nil)
 }
 
 // evaluatePlainFromVertex point-reads a vertex and runs the plain evaluate
 // path seeded from it — the shared core of the plain aspect/link reprojection
 // arms. A missing or tombstoned vertex yields (nil, nil): its row lifecycle
 // belongs to the vertex-root event path.
-func (p *Pipeline) evaluatePlainFromVertex(ctx context.Context, vtxKey, vtxType string) ([]ruleengine.EvalResult, error) {
+func (p *Pipeline) evaluatePlainFromVertex(ctx context.Context, rs ruleState, vtxKey, vtxType string) ([]ruleengine.EvalResult, error) {
 	props, err := p.fetchVertexProps(ctx, vtxKey)
 	if err != nil {
 		return nil, err
@@ -1753,7 +1891,7 @@ func (p *Pipeline) evaluatePlainFromVertex(ctx context.Context, vtxKey, vtxType 
 		NodeLabel:  vtxType,
 		Properties: props,
 	}
-	results, _, err := p.evaluateForEntry(ctx, entry)
+	results, _, err := p.evaluateForEntry(ctx, rs, entry)
 	return results, err
 }
 
@@ -1781,8 +1919,8 @@ func dedupeKeyFor(r ruleengine.EvalResult) string {
 // adjacency update is required; the aspect body is irrelevant to the fan-out
 // (the reprojection cypher re-reads current Core KV state), so a tombstone
 // (empty body) and a value change take the same path.
-func (p *Pipeline) evalAspectFanOut(ctx context.Context, msg substrate.Message, key string) (substrate.Decision, error) {
-	results, enumeratedActors, err := p.evaluateAspectFanOut(ctx, key)
+func (p *Pipeline) evalAspectFanOut(ctx context.Context, rs ruleState, msg substrate.Message, key string) (substrate.Decision, error) {
+	results, enumeratedActors, err := p.evaluateAspectFanOut(ctx, rs, key)
 	if err != nil {
 		slog.Error("pipeline: aspect fan-out: evaluate",
 			"ruleId", p.ruleID, "entityId", key, "stage", "traversal", "err", err)
@@ -1792,7 +1930,7 @@ func (p *Pipeline) evalAspectFanOut(ctx context.Context, msg substrate.Message, 
 		return p.dispositionEvalErr(ctx, msg, key, "traversal", err, enumeratedActors)
 	}
 
-	return p.writeResults(ctx, msg, key, results, enumeratedActors)
+	return p.writeResults(ctx, rs, msg, key, results, enumeratedActors)
 }
 
 // dispositionEvalErr maps an evaluate-stage error to a Decision (+ error for the
@@ -1856,7 +1994,42 @@ func (p *Pipeline) dispositionEvalErr(ctx context.Context, msg substrate.Message
 // applied (no retry-enqueue, no terminal DLQ) — a partially-disposed batch
 // emits no frame, so a would-be-retracting frame can never race ahead of
 // the write it is supposed to describe.
-func (p *Pipeline) writeResults(ctx context.Context, msg substrate.Message, key string, results []ruleengine.EvalResult, enumeratedActors []string) (substrate.Decision, error) {
+// supersededRule reports whether the rule an evaluation ran under has been
+// replaced since its snapshot was taken. A true answer means the results in
+// hand were derived from a rule no longer in force, and must not be written.
+//
+// This exists because a stale write is not self-correcting on the CDC path.
+// Every result is stamped with THIS message's stream sequence (writeResults
+// below), and a MATCH hot-reload's rebuild replays the same messages with the
+// same sequences — so the guarded adapter's monotonic check (natskv.go's
+// storedSeq >= incomingSeq) drops the replay as an idempotent no-op. The
+// rebuild's truncate is what normally clears the way for it, but the truncate
+// runs on the reload's own goroutine while this handler is still mid-flight
+// (cmd/refractor/reload.go's MatchChange arm), so an in-flight evaluation can
+// land its stale row AFTER the purge and then swallow its own correction.
+//
+// On the auth plane that row is the pre-edit permission set: a MATCH edit made
+// to REVOKE something would be silently defeated for every actor the in-flight
+// event touched. The convergence sweep heals it eventually, but only for a lens
+// that got a sweep plan — projection/driver.go refuses enrolment with a warning
+// only — so it is not a bound worth relying on.
+//
+// Naking is the honest disposition: redelivery re-evaluates the message under
+// the new rule, which is exactly what the reload wanted. It cannot loop, since
+// each Nak is answered by a redelivery that finds a settled rule unless yet
+// another reload has landed.
+func (p *Pipeline) supersededRule(rs ruleState) bool {
+	p.ruleMu.RLock()
+	defer p.ruleMu.RUnlock()
+	return p.ruleGen != rs.gen
+}
+
+func (p *Pipeline) writeResults(ctx context.Context, rs ruleState, msg substrate.Message, key string, results []ruleengine.EvalResult, enumeratedActors []string) (substrate.Decision, error) {
+	if p.supersededRule(rs) {
+		slog.Info("pipeline: rule swapped mid-event — naking so redelivery evaluates the new rule",
+			"ruleId", p.ruleID, "entityId", key, "seq", msg.Sequence)
+		return substrate.Nak, nil
+	}
 	adpt := p.currentAdapter()
 	// Resolved once per call — adpt itself is captured once above, so whether
 	// it reports upsert outcomes cannot change across this call's loop.

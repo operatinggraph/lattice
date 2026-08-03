@@ -128,7 +128,11 @@ func (p *Pipeline) Reproject(ctx context.Context, actorKey string) (Reprojection
 
 	seq := p.Progress().LastAppliedSeq
 
-	results, err := p.reprojectActors(ctx, []string{actorKey})
+	// Sweep, control-plane RPC and the retry queue all reach here off the
+	// consumer goroutine, so this entry point takes its own rule snapshot.
+	rs := p.ruleState()
+
+	results, err := p.reprojectActors(ctx, rs, []string{actorKey})
 	if err != nil {
 		return Reprojection{}, fmt.Errorf("pipeline: reproject %q: %w", actorKey, err)
 	}

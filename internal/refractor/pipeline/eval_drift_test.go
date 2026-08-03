@@ -394,7 +394,7 @@ func TestExecuteFullForActor_InlineRetryConverges(t *testing.T) {
 		// mutation on the second (or any later) call.
 	})
 
-	results, err := p.executeFullForActor(hookCtx, idKey, nodeProps, "")
+	results, err := p.executeFullForActor(hookCtx, p.ruleState(), idKey, nodeProps, "")
 	require.NoError(t, err)
 	require.Equal(t, 2, fired, "one initial execution + one retry, no more")
 	require.Len(t, results, 1)
@@ -448,7 +448,7 @@ func TestExecuteFullForActor_SustainedDrift_ReturnsErrEvalDrift_NeverEmpty(t *te
 			map[string]any{"name": "v" + string(rune('0'+fired))})
 	})
 
-	results, err := p.executeFullForActor(hookCtx, idKey, nodeProps, "")
+	results, err := p.executeFullForActor(hookCtx, p.ruleState(), idKey, nodeProps, "")
 	require.Error(t, err)
 	require.ErrorIs(t, err, failure.ErrEvalDrift)
 	require.Nil(t, results, "sustained drift must never return an empty-but-non-nil result set")
@@ -570,7 +570,7 @@ func TestExecuteFullForActor_NonAuthPlaneLens_SkipsValidation(t *testing.T) {
 			map[string]any{"name": "updated"})
 	})
 
-	results, err := p.executeFullForActor(hookCtx, idKey, nodeProps, "")
+	results, err := p.executeFullForActor(hookCtx, p.ruleState(), idKey, nodeProps, "")
 	require.NoError(t, err)
 	require.Equal(t, 1, fired, "no retry — validation never ran")
 	require.Len(t, results, 1)
