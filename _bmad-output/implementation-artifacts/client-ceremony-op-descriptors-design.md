@@ -1268,8 +1268,10 @@ state (one atomic batch); chain-merge U3→U2→U1 leaves exactly one live edge 
 
 ### 14.6 CHECKPOINT — Inc 2a shipped; Inc 2b is next
 
-**Shipped:** the `boundTo` link and its four writers, the per-credential Protected lens, three class-(g)
-derived keys, and the review pass above. Worktree `lattice-wt-ceremony-inc2`.
+**Shipped** `217769cc` + `9c00567f`: the `boundTo` link and its four writers, the per-credential Protected
+lens, three class-(g) derived keys, and the review pass above. Merged, worktree removed — Inc 2b takes a
+fresh one. Live on the dev stack: all three packages diff-applied (identity-domain 0.12.1 → 0.13.1),
+`read_identity_credential_bindings` provisioned with forced RLS, Loupe rebuilt and cycled.
 
 **Next: Inc 2b** — the one-shot backfill (without it the lens projects only bindings made after this
 commit), the `signInMethods` pane section over it, `UnlinkCredential`'s `OpMetaSpec`, and the
