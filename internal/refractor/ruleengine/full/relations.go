@@ -9,9 +9,17 @@ package full
 //
 // exhaustive == false means the set is NOT authoritative and the caller must
 // treat every relation as potentially relevant: an untyped relationship
-// (`-[]->`, `-[r]->`) matches any relation, and a variable-length relationship
-// traverses intermediate hops whose relations the pattern never names.
-// Conservative by construction — when in doubt, reproject.
+// (`-[]->`, `-[r]->`) matches any relation. Conservative by construction — when
+// in doubt, reproject.
+//
+// A variable-length hop does NOT cost exhaustiveness here, which is where this
+// parts company with ReferencedLabels. That derivation must give up on a
+// var-length hop because the intermediate NODES bind arbitrary types; the
+// relation is different, because traverseRel re-applies the same rel.Type at
+// every hop of the walk (executor.go's `rel.Type != "" && e.Name != rel.Type`
+// inside the hop loop), so `-[:containedIn*0..7]->` traverses `containedIn` and
+// nothing else. Only an untyped hop is unbounded, and that case is caught by
+// the Type == "" arm below whatever its quantifier.
 //
 // An EMPTY set with exhaustive == true is a real, common, and maximally strong
 // answer, not a "no data" fallback: a query with no relationship pattern at all
@@ -33,12 +41,22 @@ func (cr *CompiledRule) ReferencedRelations() (relations map[string]struct{}, ex
 	relations = make(map[string]struct{})
 	exhaustive = true
 
+	// Declared ahead of addPattern so a pattern can descend into a node's or a
+	// relationship's PROPERTY MAP: those are general expressions the executor
+	// really evaluates (propsAllMatch -> evalExpr), and one may itself hold a
+	// PatternExpr / PatternComprehension that traverses a relation. A walk that
+	// stopped at p.Nodes and p.Rels would report an exhaustive set missing that
+	// relation, and the consumer would never be told the link changed.
+	var addExpr func(e Expr)
 	addPattern := func(p PathPattern) {
+		for _, n := range p.Nodes {
+			for _, v := range n.Properties {
+				addExpr(v)
+			}
+		}
 		for _, r := range p.Rels {
-			if r.MinHops != 1 || r.MaxHops != 1 {
-				// Variable-length: intermediate hops traverse relations this
-				// pattern does not name.
-				exhaustive = false
+			for _, v := range r.Properties {
+				addExpr(v)
 			}
 			if r.Type == "" {
 				exhaustive = false
@@ -47,7 +65,6 @@ func (cr *CompiledRule) ReferencedRelations() (relations map[string]struct{}, ex
 			relations[r.Type] = struct{}{}
 		}
 	}
-	var addExpr func(e Expr)
 	addExpr = func(e Expr) {
 		switch x := e.(type) {
 		case nil:

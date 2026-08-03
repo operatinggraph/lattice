@@ -86,8 +86,18 @@ func (cr *CompiledRule) ReferencedLabels() (labels map[string]struct{}, exhausti
 
 	// Pass 2: build the label set; an unlabeled node is exhaustive only as a
 	// re-reference to a labeled variable.
+	//
+	// addExpr is declared ahead of addPattern so a pattern can descend into a
+	// node's or a relationship's PROPERTY MAP. Those are general expressions
+	// the executor really evaluates (propsAllMatch -> evalExpr), and one may
+	// hold a PatternExpr / PatternComprehension binding a type no other clause
+	// mentions — which an exhaustive set has to contain.
+	var addExpr func(e Expr)
 	addPattern := func(p PathPattern) {
 		for _, n := range p.Nodes {
+			for _, v := range n.Properties {
+				addExpr(v)
+			}
 			if n.Label == "" {
 				if n.Variable == "" {
 					exhaustive = false
@@ -101,13 +111,15 @@ func (cr *CompiledRule) ReferencedLabels() (labels map[string]struct{}, exhausti
 			labels[n.Label] = struct{}{}
 		}
 		for _, r := range p.Rels {
+			for _, v := range r.Properties {
+				addExpr(v)
+			}
 			if r.MinHops != 1 || r.MaxHops != 1 {
 				// Variable-length: intermediate hops bind arbitrary types.
 				exhaustive = false
 			}
 		}
 	}
-	var addExpr func(e Expr)
 	addExpr = func(e Expr) {
 		switch x := e.(type) {
 		case nil:

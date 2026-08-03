@@ -82,10 +82,30 @@ func TestReferencedRelations(t *testing.T) {
 			exhaustive: false,
 		},
 		{
-			name:       "a variable-length hop traverses unnamed intermediate relations",
+			// Unlike ReferencedLabels, a var-length hop costs NOTHING here:
+			// traverseRel re-applies rel.Type at every hop of the walk, so a
+			// typed var-length walk traverses that relation and no other.
+			name:       "a TYPED variable-length hop is still exhaustive",
 			body:       `MATCH (a:unit)-[:manages*1..3]->(b:identity) RETURN a.key AS key`,
 			want:       []string{"manages"},
+			exhaustive: true,
+		},
+		{
+			name:       "an UNTYPED variable-length hop is not exhaustive",
+			body:       `MATCH (a:unit)-[*1..3]->(b:identity) RETURN a.key AS key`,
+			want:       nil,
 			exhaustive: false,
+		},
+		{
+			// A property map is a general expression the executor evaluates
+			// (propsAllMatch -> evalExpr), so a pattern nested in one really
+			// does traverse a relation. Missing it would report an exhaustive
+			// set that omits the relation, and the consumer would never be
+			// told the link changed.
+			name:       "a relation inside a NODE property map counts",
+			body:       "MATCH (b:book {owners: [(b)-[:borrowedBy]->(a:author) | a.key]}) RETURN b.key AS key",
+			want:       []string{"borrowedBy"},
+			exhaustive: true,
 		},
 		{
 			name:       "a relation reached only through a WHERE pattern predicate counts",
@@ -138,4 +158,33 @@ func TestReferencedRelations_ExhaustiveEmptyIsNotTheNonExhaustiveCase(t *testing
 	anyRel, okB := relationsOf(t, `MATCH (p:patient)-[]->(o:provider) RETURN p.key AS key`)
 	require.False(t, okB)
 	require.Empty(t, anyRel)
+}
+
+// TestPatternInsidePropertyMapIsWalkedByBothDerivations is the positive vector
+// proving the property-map descent actually runs, in BOTH derivations. Nothing
+// outside the map mentions `author` or `borrowedBy`, so a walk that stopped at
+// PathPattern.Nodes/.Rels could not produce either name — the assertions below
+// are only satisfiable by descending into NodePattern.Properties.
+//
+// This matters because the executor really evaluates those expressions
+// (propsAllMatch -> evalExpr -> evalPatternComprehension -> matchPath): a set
+// reported exhaustive while missing a type or relation the query traverses
+// would narrow the consumer past what the lens can read.
+func TestPatternInsidePropertyMapIsWalkedByBothDerivations(t *testing.T) {
+	const body = "MATCH (b:book {owners: [(b)-[:borrowedBy]->(a:author) | a.key]}) RETURN b.key AS key"
+	cr, err := New().Parse(body)
+	require.NoError(t, err)
+	compiled, isFull := cr.(*CompiledRule)
+	require.True(t, isFull)
+
+	labels, labelsOK := compiled.ReferencedLabels()
+	require.True(t, labelsOK)
+	require.Contains(t, labels, "author",
+		"only reachable through NodePattern.Properties — no other clause names this type")
+	require.Contains(t, labels, "book")
+
+	rels, relsOK := compiled.ReferencedRelations()
+	require.True(t, relsOK)
+	require.Contains(t, rels, "borrowedBy",
+		"only reachable through NodePattern.Properties — no other clause names this relation")
 }
