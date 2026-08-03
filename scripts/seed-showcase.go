@@ -97,10 +97,6 @@ const (
 	tenant2Name  = "Sam Okafor"
 	tenant2Email = "sam.okafor@showcase.dev.lattice.local"
 
-	// tenant1RentCents mirrors unit1's rentAmount (1900, seedResidentTenancies)
-	// converted to integer cents for loftspace-ledger's DebitAccount.
-	tenant1RentCents = 190000
-
 	// The two residents' OWN tenancies: seedTenant wires residesIn directly (a
 	// showcase shortcut, its own doc comment) rather than the real
 	// apply→sign→decide ceremony, so neither tenant1 nor tenant2 starts with a
@@ -1279,23 +1275,12 @@ func seedRileyClinicWorld(ctx context.Context, conn *substrate.Conn, adminKey, t
 			&processor.ContextHint{Reads: []string{rileyPatientKey}})
 	}
 
-	// Riley's RENT account: loftspace-ledger's LoftspaceCreateAccount is
-	// separate from clinic-ledger's above (heldFor a leaseapp, not a patient)
-	// — without it the one-bill statement's rent half never has an account to
-	// charge, so it stays 100% café. Gated on the same lease's .ledgerAccount
-	// guard as LoftspaceCreateAccount itself writes, so a rerun mints
-	// neither the account nor a second rent charge. adminKey holds the
-	// operator role, so LoftspaceCreateAccount's workplace-confinement guard
-	// (scripts.go) is exempt here the same way it is for every other
-	// admin-submitted op in this script.
-	if tenant1LeaseAppKey != "" && !alive(ctx, conn, tenant1LeaseAppKey+".ledgerAccount") {
-		reply := submitOp(ctx, conn, adminKey, "LoftspaceCreateAccount", "account",
-			map[string]any{"leaseAppKey": tenant1LeaseAppKey},
-			&processor.ContextHint{Reads: []string{tenant1LeaseAppKey}})
-		submitOp(ctx, conn, adminKey, "DebitAccount", "transaction",
-			map[string]any{"accountKey": reply.PrimaryKey, "amountCents": tenant1RentCents, "memo": "August rent"},
-			&processor.ContextHint{Reads: []string{reply.PrimaryKey}})
-	}
+	// Riley's rent account + recurring rent clause now bootstrap themselves:
+	// semantic-contracts' leaseRentSettlement Weaver target opens the
+	// LoftspaceCreateAccount and mints the monthly CreateClause for any
+	// approved, signed lease carrying a requestedRent (targets.go) — this
+	// seed no longer hand-posts a one-off "August rent" DebitAccount, so
+	// Riley's one-bill rent line converges the same way Sam's does.
 
 	// A third, fourth appointment carrying the demo's post-visit history: without
 	// at least one completed + documented visit and one noShow, the showcase

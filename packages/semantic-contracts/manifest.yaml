@@ -1,5 +1,5 @@
 name: semantic-contracts
-version: 0.4.3
+version: 0.4.4
 description: |
   LoftSpace "Executable Paper" reference package (Fires V1-V4 — fixed/one-time,
   conditioned, judgment, recurring monthly, and prorated computational
@@ -9,7 +9,11 @@ description: |
   clauseSatisfaction actorAggregate convergence lens (§10.2, missing_charge/
   missing_inspection, freshUntil-armed recurring freshness) + the §10.8
   playbook dispatching directOp(DebitAccount)/assignTask(InspectPremises) on
-  the gaps. Depends lease-signing + loftspace-ledger.
+  the gaps + the leaseRentSettlement actorAggregate lens/playbook
+  bootstrapping an approved signed lease's ledger account then its recurring
+  monthly rent clause (missing_account → directOp(LoftspaceCreateAccount),
+  missing_clause → directOp(CreateClause), dollars→cents conversion in the
+  lens). Depends lease-signing + loftspace-ledger.
 depends:
   - lease-signing
   - loftspace-ledger
@@ -30,6 +34,10 @@ declares:
       adapter: nats-kv
       bucket: weaver-targets
       engine: full
+    - canonicalName: leaseRentSettlement
+      adapter: nats-kv
+      bucket: weaver-targets
+      engine: full
   permissions:
     - operationType: CreateClause
       scope: any
@@ -43,6 +51,8 @@ declares:
   weaverTargets:
     - targetId: clauseSatisfaction
       lensRef: clauseSatisfaction
+    - targetId: leaseRentSettlement
+      lensRef: leaseRentSettlement
   opMetas:
     - operationType: CreateClause
     - operationType: InspectPremises

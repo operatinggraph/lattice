@@ -3,19 +3,24 @@ package semanticcontracts
 import (
 	"strings"
 	"testing"
+
+	"github.com/operatinggraph/lattice/internal/pkgmgr"
 )
 
-// TestSemanticContracts_PlaybookColumnsMatchLens (the §10.2↔§10.8 seam,
-// mirroring TestLeaseSigning_PlaybookColumnsMatchLens). A static assertion
-// (no pipeline): every row.<col> token the playbook templates is a member of
-// the clauseSatisfaction lens's BodyColumns, and the single gaps key is a
-// missing_* column the lens projects. Catches a drift between the playbook
-// and the lens cheaply.
-func TestSemanticContracts_PlaybookColumnsMatchLens(t *testing.T) {
+// checkPlaybookColumnsMatchLens is the §10.2↔§10.8 seam assertion (mirroring
+// TestLeaseSigning_PlaybookColumnsMatchLens): every row.<col> token the named
+// weaverTarget's playbook templates is a member of its own lens's
+// BodyColumns, and every gaps key is a missing_* column that lens projects.
+// Shared by every per-target test below — the package now declares two
+// targets (clauseSatisfaction, leaseRentSettlement), so each test selects its
+// own by TargetID rather than assuming there is exactly one (the trap a
+// single-target package can get away with, but this one no longer can).
+func checkPlaybookColumnsMatchLens(t *testing.T, targetID string) {
+	t.Helper()
 	lensCols := map[string]bool{}
 	var cols []string
 	for _, l := range Lenses() {
-		if l.CanonicalName == ClauseSatisfactionTarget {
+		if l.CanonicalName == targetID {
 			for _, c := range l.Output.BodyColumns {
 				lensCols[c] = true
 			}
@@ -23,17 +28,24 @@ func TestSemanticContracts_PlaybookColumnsMatchLens(t *testing.T) {
 		}
 	}
 	if cols == nil {
-		t.Fatal("clauseSatisfaction lens not declared")
+		t.Fatalf("%s lens not declared", targetID)
 	}
 
-	targets := WeaverTargets()
-	if len(targets) != 1 {
-		t.Fatalf("expected exactly 1 weaverTarget, got %d", len(targets))
+	var target pkgmgr.WeaverTargetSpec
+	var found bool
+	for _, wt := range WeaverTargets() {
+		if wt.TargetID == targetID {
+			target = wt
+			found = true
+			break
+		}
 	}
-	target := targets[0]
+	if !found {
+		t.Fatalf("%s weaverTarget not declared", targetID)
+	}
 
 	for _, l := range Lenses() {
-		if l.CanonicalName == ClauseSatisfactionTarget {
+		if l.CanonicalName == targetID {
 			prefix := strings.TrimSuffix(l.Output.OutputKeyPattern, ".{actorSuffix}")
 			if prefix != target.TargetID {
 				t.Fatalf("TargetID %q != lens OutputKeyPattern prefix %q", target.TargetID, prefix)
@@ -72,4 +84,12 @@ func TestSemanticContracts_PlaybookColumnsMatchLens(t *testing.T) {
 			t.Fatalf("gap %q action references row.%s, which is not a lens BodyColumn (lens has %v)", col, refCol, cols)
 		}
 	}
+}
+
+func TestSemanticContracts_PlaybookColumnsMatchLens(t *testing.T) {
+	checkPlaybookColumnsMatchLens(t, ClauseSatisfactionTarget)
+}
+
+func TestSemanticContracts_LeaseRentSettlementColumnsMatchLens(t *testing.T) {
+	checkPlaybookColumnsMatchLens(t, LeaseRentSettlementTarget)
 }

@@ -35,7 +35,7 @@ func TestPackage_StructurePins(t *testing.T) {
 	if got, want := len(Package.DDLs), 5; got != want {
 		t.Errorf("DDLs: got %d, want %d", got, want)
 	}
-	if got, want := len(Package.Lenses), 1; got != want {
+	if got, want := len(Package.Lenses), 2; got != want {
 		t.Errorf("Lenses: got %d, want %d", got, want)
 	}
 	if got, want := len(Package.Permissions), 3; got != want {
@@ -47,7 +47,7 @@ func TestPackage_StructurePins(t *testing.T) {
 	if got, want := len(Package.Roles), 0; got != want {
 		t.Errorf("Roles: got %d, want %d", got, want)
 	}
-	if got, want := len(Package.WeaverTargets), 1; got != want {
+	if got, want := len(Package.WeaverTargets), 2; got != want {
 		t.Errorf("WeaverTargets: got %d, want %d", got, want)
 	}
 	if got, want := len(Package.LoomPatterns), 0; got != want {
@@ -81,6 +81,9 @@ func TestPackage_StructurePins(t *testing.T) {
 	}
 	if got := Package.Lenses[0].CanonicalName; got != "clauseSatisfaction" {
 		t.Errorf("Lenses[0]: got %q, want %q", got, "clauseSatisfaction")
+	}
+	if got := Package.Lenses[1].CanonicalName; got != "leaseRentSettlement" {
+		t.Errorf("Lenses[1]: got %q, want %q", got, "leaseRentSettlement")
 	}
 	wantPerms := []struct{ op, scope string }{
 		{"CreateClause", "any"}, {"InspectPremises", "any"}, {"SupersedeClause", "any"},

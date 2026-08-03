@@ -6,10 +6,23 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 // lens's OutputKeyPattern prefix — the §10.2↔§10.8 binding Weaver reads.
 const ClauseSatisfactionTarget = "clauseSatisfaction"
 
-// Lenses returns the package's Lens declarations: the single
-// `clauseSatisfaction` actorAggregate convergence lens (§10.2) covering all
-// archetypes through Fire V3 (fixed/one-time, conditioned, judgment,
-// recurring monthly, and prorated computational clauses).
+// LeaseRentSettlementTarget is the §10.8 TargetID == the leaseRentSettlement
+// lens's OutputKeyPattern prefix. It closes the bootstrap gap ahead of
+// clauseSatisfaction: a signed, approved lease with an agreed rent never had
+// anything mint its ledger account or its recurring rent clause (verticals.md
+// "A signed lease never bills its rent") — clauseSatisfaction only ever
+// converges a clause that already exists. This target opens the account,
+// then the clause, mirroring cafe-domain's tabSettlement missing_account →
+// directOp(CreateAccount) idiom; once the clause exists, clauseSatisfaction
+// (above) owns billing it forever, so this target never dispatches
+// DebitAccount itself.
+const LeaseRentSettlementTarget = "leaseRentSettlement"
+
+// Lenses returns the package's Lens declarations: `clauseSatisfaction` (§10.2
+// actorAggregate covering all archetypes through Fire V3 — fixed/one-time,
+// conditioned, judgment, recurring monthly, and prorated computational
+// clauses) and `leaseRentSettlement` (the lease → account → clause bootstrap
+// chain feeding it).
 func Lenses() []pkgmgr.LensSpec {
 	return []pkgmgr.LensSpec{
 		{
@@ -30,8 +43,92 @@ func Lenses() []pkgmgr.LensSpec {
 				Freshness:     "auto",
 			},
 		},
+		{
+			CanonicalName:  LeaseRentSettlementTarget,
+			Class:          "meta.lens",
+			Adapter:        "nats-kv",
+			Bucket:         "weaver-targets",
+			Engine:         "full",
+			Spec:           leaseRentSettlementSpec,
+			ProjectionKind: "actorAggregate",
+			Output: &pkgmgr.OutputDescriptorSpec{
+				AnchorType:       "leaseapp",
+				OutputKeyPattern: LeaseRentSettlementTarget + ".{actorSuffix}",
+				BodyColumns:      []string{"violating", "missing_account", "missing_clause", "entityKey", "leaseAppKey", "accountKey", "requestedRentCents"},
+				EmptyBehavior:    "delete",
+				KeyColumn:        "entityId",
+				Freshness:        "auto",
+			},
+		},
 	}
 }
+
+// leaseRentSettlementSpec is the one-row-per-lease bootstrap cypher: an
+// approved, signed lease application (DecideLeaseApplication's own
+// approve-readiness floor already requires the signature, scripts.go) that
+// carries an agreed rent needs a ledger account, then a recurring monthly
+// rent clause, in two independent gap columns — mirroring cafe-domain's
+// tabSettlement missing_account → missing_charge shape exactly (lenses.go),
+// except the second gap here mints a CLAUSE, not a charge, because rent's
+// actual recurring billing is clauseSatisfaction's job (above) once the
+// clause exists:
+//
+//   - `missing_account` — approved + requestedRent present +
+//     l.ledgerAccount.data.accountKey is null (loftspace-ledger's guard
+//     aspect, the same property this package's own DebitAccount pathway
+//     reads — no link walk needed, mirroring cafe-domain's
+//     l.cafeLedgerAccount.data.accountKey read). Weaver dispatches
+//     LoftspaceCreateAccount{leaseAppKey} (loftspace-ledger, targets.go).
+//   - `missing_clause` — the account exists and no LIVE unconditioned
+//     monthly clause governs this lease yet (count(DISTINCT CASE WHEN ...)
+//     collapses the fan to a single existence check, the
+//     clauseSatisfaction/objectLiveness idiom — lease-signing's own
+//     freshBgComplete/payComplete columns use the identical
+//     count(DISTINCT CASE WHEN ... THEN key ELSE null END) shape). The
+//     period=monthly + conditioned<>true filter is deliberate, not
+//     incidental: it is what lets this gate distinguish the auto-minted rent
+//     clause from any OTHER clause a landlord might separately install on the
+//     same lease (a one-time move-in fee, a conditioned pet fee) — those must
+//     never suppress rent billing. Weaver dispatches
+//     CreateClause{leaseAppKey, accountKey, amountCents: requestedRentCents,
+//     period: "monthly", prose: <literal>} (this package).
+//
+// requestedRent (leaseapp .terms aspect, CreateLeaseApplication) is a plain
+// DOLLAR figure, like every other rent-shaped field in LoftSpace
+// (unit.listing.rentAmount, cmd/loftspace-app/web/app.js's "$"+rentAmount
+// display) — but every ledger amount (CreateClause's amountCents,
+// DebitAccount's amountCents) is integer CENTS. The ×100 conversion has to
+// happen here, in the lens (the full engine's arithmetic BinaryOp,
+// executor.go numericOp) — Weaver's GapActionSpec Params only ever
+// substitute a row column verbatim or a literal (strategist.go resolveParam),
+// never compute one — so requestedRentCents is the only column the
+// missing_clause dispatch may template as amountCents; templating the raw
+// requestedRent column would underbill by 100x.
+//
+// A lease with no requestedRent (an application that skipped moveInDate, or
+// predates this fire) never projects a row — it simply never violates,
+// exactly like clauseSatisfaction's own "no missing_account gap" precedents
+// (clinic-ledger/cafe-domain) degrade when a prerequisite fact is absent,
+// rather than dispatching a malformed op.
+const leaseRentSettlementSpec = `MATCH (l:leaseapp {key: $actorKey})
+OPTIONAL MATCH (l)<-[:governs]-(c:clause)
+WITH
+  l.key AS entityKey,
+  l.decision.data.value AS decision,
+  l.terms.data.requestedRent AS requestedRent,
+  l.ledgerAccount.data.accountKey AS accountKey,
+  count(DISTINCT CASE WHEN (c.terms.data.period = 'monthly') AND (c.terms.data.conditioned <> true) THEN c.key ELSE null END) AS rentClauseCount
+WHERE (decision = 'approved') AND (requestedRent <> null)
+RETURN
+  entityKey AS actorKey,
+  entityKey,
+  entityKey AS leaseAppKey,
+  accountKey,
+  (requestedRent * 100) AS requestedRentCents,
+  (accountKey = null) AS missing_account,
+  ((accountKey <> null) AND (rentClauseCount = 0)) AS missing_clause,
+  ((accountKey = null) OR ((accountKey <> null) AND (rentClauseCount = 0))) AS violating
+`
 
 // clauseSatisfactionSpec is the one-row-per-clause satisfaction cypher (§3.2
 // of the design). Two independent gaps, never both live on the same clause

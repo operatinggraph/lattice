@@ -36,6 +36,23 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 // Every row.<col> template is a clauseSatisfaction BodyColumn — the
 // §10.2↔§10.8 column seam, cross-checked by
 // TestSemanticContracts_PlaybookColumnsMatchLens.
+//
+// leaseRentSettlement's own playbook (lenses.go) is the bootstrap ahead of
+// this one — two independent gaps, mirroring cafe-domain's tabSettlement
+// missing_account → directOp(CreateAccount) shape:
+//
+//   - missing_account → directOp(LoftspaceCreateAccount) (loftspace-ledger).
+//     Grants operator unconfined (loftspace-ledger permissions.go), the same
+//     no-authContext.target idiom every directOp in this file uses.
+//   - missing_clause → directOp(CreateClause) (this package) — accountKey
+//     comes from THIS SAME row (the lens only opens missing_clause once
+//     missing_account has already converged, lenses.go), amountCents from
+//     requestedRentCents (the lens's own ×100 conversion — never the raw
+//     row.requestedRent dollar figure), period + prose are literals (no
+//     "row." prefix, so resolveParam passes them through verbatim,
+//     strategist.go).
+//
+// Cross-checked by TestSemanticContracts_LeaseRentSettlementColumnsMatchLens.
 func WeaverTargets() []pkgmgr.WeaverTargetSpec {
 	return []pkgmgr.WeaverTargetSpec{
 		{
@@ -58,6 +75,35 @@ func WeaverTargets() []pkgmgr.WeaverTargetSpec {
 					Operation: "InspectPremises",
 					Assignee:  "row.inspectorKey",
 					Target:    "row.clauseKey",
+				},
+			},
+		},
+		{
+			TargetID: LeaseRentSettlementTarget,
+			LensRef:  LeaseRentSettlementTarget,
+			Gaps: map[string]pkgmgr.GapActionSpec{
+				"missing_account": {
+					Action:    "directOp",
+					Operation: "LoftspaceCreateAccount",
+					// LoftspaceCreateAccount is claimed by loftspace-ledger's own
+					// vertexType DDL (the 4-installed-ledger-DDLs reverse-index trap
+					// above applies to every directOp in this file).
+					Class:  "account",
+					Params: map[string]string{"leaseAppKey": "row.leaseAppKey"},
+					Reads:  []string{"row.leaseAppKey"},
+				},
+				"missing_clause": {
+					Action:    "directOp",
+					Operation: "CreateClause",
+					Class:     "clause",
+					Params: map[string]string{
+						"leaseAppKey": "row.leaseAppKey",
+						"accountKey":  "row.accountKey",
+						"amountCents": "row.requestedRentCents",
+						"period":      "monthly",
+						"prose":       "Monthly rent per the signed lease agreement.",
+					},
+					Reads: []string{"row.leaseAppKey", "row.accountKey"},
 				},
 			},
 		},

@@ -41,6 +41,17 @@
 //     period; missing_inspection → assignTask(InspectPremises) to the
 //     assigned inspector.
 //
+//   - The `leaseRentSettlement` actorAggregate convergence lens + its own
+//     meta.weaverTarget: the bootstrap ahead of clauseSatisfaction — an
+//     approved, signed lease with an agreed rent gets its ledger account
+//     opened (missing_account → directOp(LoftspaceCreateAccount), mirroring
+//     cafe-domain's tabSettlement idiom) and then a recurring monthly rent
+//     clause minted (missing_clause → directOp(CreateClause), converting the
+//     lease's dollar-denominated requestedRent to integer cents in the lens
+//     itself since Weaver's playbook params never compute, only substitute)
+//     — after which clauseSatisfaction owns billing it forever. Closes
+//     verticals.md's "a signed lease never bills its rent."
+//
 // loftspace-ledger's DebitAccount op is extended (Fire V1) to accept an
 // optional clauseRef: when present it writes the
 // lnk.transaction.authorizedBy.clause audit link and updates the clause's
@@ -64,14 +75,16 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 // Package is the static, install-time bundle.
 var Package = pkgmgr.Definition{
 	Name:    "semantic-contracts",
-	Version: "0.4.3",
+	Version: "0.4.4",
 	Description: "LoftSpace 'Executable Paper' reference package (Fires V1-V4 — fixed/one-time, conditioned, " +
 		"judgment, recurring monthly, and prorated computational clauses, plus self-amendment): the clause vertex " +
 		"type (CreateClause/SupersedeClause, .prose/.terms/.status/.clauseInspection aspects, governs + " +
 		"chargesTo/requiresInspectionBy/conditionedOn/amends links) + the clauseSatisfaction actorAggregate " +
 		"convergence lens (§10.2, missing_charge/missing_inspection, freshUntil-armed recurring freshness) + the " +
-		"§10.8 playbook dispatching directOp(DebitAccount)/assignTask(InspectPremises) on the gaps. Depends " +
-		"lease-signing + loftspace-ledger.",
+		"§10.8 playbook dispatching directOp(DebitAccount)/assignTask(InspectPremises) on the gaps + the " +
+		"leaseRentSettlement actorAggregate lens/playbook bootstrapping an approved signed lease's ledger account " +
+		"then its recurring monthly rent clause (missing_account → directOp(LoftspaceCreateAccount), missing_clause " +
+		"→ directOp(CreateClause), dollars→cents conversion in the lens). Depends lease-signing + loftspace-ledger.",
 	Depends:       []string{"lease-signing", "loftspace-ledger"},
 	DDLs:          DDLs(),
 	Lenses:        Lenses(),

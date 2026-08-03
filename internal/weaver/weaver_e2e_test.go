@@ -13,6 +13,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/operatinggraph/lattice/internal/natsfixture"
+	"github.com/operatinggraph/lattice/internal/pkgmgr"
 	"github.com/operatinggraph/lattice/internal/substrate"
 	"github.com/operatinggraph/lattice/internal/weaver"
 	"github.com/operatinggraph/lattice/packages/augur"
@@ -1234,8 +1235,16 @@ func TestWeaverE2E_SemanticContracts_MissingCharge_PayloadCarriesAccountKey(t *t
 	ops := subscribeOps(t, nc)
 
 	targets := semanticcontracts.WeaverTargets()
-	require.Len(t, targets, 1, "semantic-contracts must declare exactly one weaverTarget")
-	target := targets[0]
+	var target pkgmgr.WeaverTargetSpec
+	var found bool
+	for _, wt := range targets {
+		if wt.TargetID == semanticcontracts.ClauseSatisfactionTarget {
+			target = wt
+			found = true
+			break
+		}
+	}
+	require.True(t, found, "semantic-contracts must declare the clauseSatisfaction weaverTarget")
 	ga, ok := target.Gaps["missing_charge"]
 	require.True(t, ok, "semantic-contracts playbook must declare missing_charge")
 	require.Equal(t, "directOp", ga.Action)
