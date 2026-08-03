@@ -1605,3 +1605,52 @@ render path itself is pinned by tests; what is unproven is the end-to-end read o
 **Next: Inc 2b-3** — confirm the pane end-to-end once the rebuild drains and the resume path exists,
 then decide whether the `/api/credentials/link` ceremony keeps its own button or waits for Inc 4. The two
 completeness rows (§16.6) still bind on the pane; neither has a live victim on this corpus today.
+
+## 17. Increment 2b-3 — the live confirmation (build note, 2026-08-03)
+
+No code. 2b-2 shipped the pane and could not prove it read, for two reasons §16.8 named. Both cleared,
+one of them by an unrelated Refractor fix, and confirming the pane is what showed the second reason had
+been mis-attributed.
+
+### 17.1 What the two blockers actually were
+
+`identityCredentialBindingsRead`'s structural pause cleared with `bb027dc5`'s resume path, as predicted.
+The second did not go the way §16.8 read it. `edgeStaffPanes` was not "still rebuilding, lag falling" —
+it was **latched** `rebuilding` with lag 0, along with the three `edgeManifest*ReadGrants` producers, by
+the defect `80b30bdf` fixes: the watcher that ends a rebuild dies with the process that armed it, and
+nothing re-armed it. A rebuilding lens **suppresses its own convergence sweep**, so the latch had
+switched off the only mechanism that reconciles a grant the CDC path missed.
+
+That is what was actually holding the pane back, and the evidence is in the grant plane rather than in
+the lens status. The pane's `offeredTo` edge landed with `ec87b8f4`; every one of the reader's
+`cap-read.edgeManifestStaff.*` slices still dated to the 2026-07-18 install, so the CDC path had not
+produced a grant for the new anchor in the hour and a half since. The pane row was therefore dropped
+fail-closed by the D1 gate (Contract #6 §6.14 Path B) — correctly, and silently, exactly as the lens's
+own comment says it will.
+
+### 17.2 The confirmation, and what it measures
+
+Cycling Refractor on `80b30bdf` un-latched five lenses, cleared the sweep suppression, and the producers
+resumed passing. Within ~4 minutes the sweep wrote
+`cap-read.edgeManifestStaff.identity.<reader>.9yg7KpZwFerwaFSk9yg7` (`via: ["holdsRole","offeredTo"]`,
+`projectionSeq` current), and `GET /api/pane?key=signInMethods` answered with the `credentials` section
+for three separate consumer identities — each seeing **exactly one row, its own**. RLS confinement holds
+with no filter declared, which is the claim §16 makes about this pane: the grant IS the confinement.
+
+So the end-to-end path the increment could not prove — descriptor → offer edge → read grant → Personal
+Lens delivery → host pane execution → Protected read under RLS — is confirmed on the live stack.
+
+### 17.3 The link button stays, and the reason is already written down
+
+The second half of the question §16.8 left open resolves to no change. `/api/credentials/link` keeps its
+bespoke backend call, because the ceremony arms a secret that must reach a SECOND device and return on a
+different op, and the descriptor vocabulary cannot express that until Inc 4's paired-code + credential
+-scoped actor land (§4.4). `credentials.go`'s own doc comment already states this; 2b-3 confirms it
+rather than revising it. The residual exemption count stays **2**, as §4.4 predicted.
+
+### 17.4 CHECKPOINT — the item is built; Inc 4 is the deferred tail
+
+Increments 1a, 1b, 3, 2a, 2b-1, 2b-2 and this confirmation are shipped. **Inc 4 remains
+designed-not-built** on its original ratification ground — there is still no two-device consumer, which
+is the specific thing whose arrival revives it. The two completeness rows (§16.6) still bind on the pane
+and still have no live victim on this corpus. The worktree for this item is retired.
