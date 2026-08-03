@@ -1,8 +1,10 @@
 # A supervised consumer's ack window is sized by the client's prefetch, not by its pump
 
-**Status:** Inc 1 + Inc 2 SHIPPED. **§2 is SUPERSEDED by §5b** — the mechanism it names is a real
-defect and is fixed, but it is *not* what wedged the live consumer; §5b has the measurement and the
-open question. Read §5b before acting on §1–§2.
+**Status:** Inc 1 + Inc 2 SHIPPED. **§2 is SUPERSEDED by §5b**, and **§5b's open question is ANSWERED
+in [`lens-trigger-relation-narrowing-design.md`](lens-trigger-relation-narrowing-design.md) §1** — the
+674 messages are neighbour-link events on a relation the lens never traverses, admitted by a trigger
+derivation that keys on endpoint type and discards the relation segment. Nothing in §1–§2's mechanism
+wedged this consumer; read §5b, then that design.
 **Board row:** `[Refractor] A lens consumer's ack floor freezes, so its rebuild can never drain`
 (`backlog/lattice.md`, component maintenance).
 **Owning code:** `internal/substrate` (the defect), `internal/refractor/health` (the silence).
