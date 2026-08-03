@@ -342,6 +342,41 @@ The grant-kind scope containment is **not** established by the submitted verdict
 party it constrains) — it is the approve-time re-validation in `freshCapabilityVerdict`, which re-reads the
 requester's live held permissions. For a submitted proposal that requester is `op.actor`, the real submitter.
 
+### 🏗️ Build checkpoint — F25.3a SHIPPED 2026-08-02 (`c1bdcfae`), next is F25.3b
+
+Draft + check + export landed in `cmd/loupe/weaverauthor.go` (+ `web/js/{logic,views}/weaverauthor.js`,
+routed at `#/weaver/author`). A structured form (mirrors `op.js`'s schema-driven field pattern) composes
+a `pkgmgr.WeaverTargetArtifactContent` + `pkgmgr.LensArtifactContent` pair; `POST /api/weaver/author/check`
+runs F25.2's lane-wide V1 (`computeLaneChecks`) + V3 (`computeInterference`, the draft joined into the live
+installed corpus under the sentinel id `__draft`) plus `pkgmgr.ValidateCapabilityArtifact` for both kinds —
+neither `held` nor `sensitiveAspects` is needed for `weaverTarget`/`lens`, so the call is substrate-free.
+Export is a pure client-side `Blob` download (this codebase's first) of the two-artifact bundle shaped for
+a future `SubmitCapabilityProposal` call per artifact. No propose step, no platform write.
+
+Two corrections F25.3b (and any future artifact-authoring UI) should build ON rather than rediscover, both
+found live-verifying against the real dev stack — grounding docs and code comments alone did not surface
+either:
+
+1. **`WeaverTargetArtifactContent`'s `gaps` map KEY is the full `missing_<gap>` column name, not a bare
+   suffix.** `pkgmgr/orchestrationguard.go`'s `validateGapAction` rejects a key that doesn't start with
+   `missing_` outright (`"gaps key %q does not match the missing_<gap> column convention"`) — confirmed
+   live: a gap keyed `"x"` failed target validation. The Add-gap field and cypher scaffold both take the
+   full column name (`missing_signature`, not `signature`) — check any future gap-authoring surface
+   against this rather than assuming the shorter, more ergonomic-looking shape.
+2. **A per-keystroke `render()` in a text-input handler destroys the focused DOM node.** Rebuilding the
+   whole panel on every `input` event (to mirror one field's value into another) recreates the input
+   element after the first character, dropping every keystroke after it — invisible in code review, only
+   caught by actually typing into the live form. The fix pattern: compute a cross-field DEFAULT at render
+   time (`l.canonicalName || draft.lensRef`) instead of eagerly writing one field's value into another on
+   input. Any future form in this lane doing field-to-field mirroring should use that pattern, not a
+   render-on-input handler.
+
+The restricted "lens" capability-artifact kind exposes no `ProjectionKind`/`Output`/`IntoKey` at all
+(unlike every existing `weaver-targets` lens in the corpus, all `actorAggregate`) — it is still
+expressible for the §10.2 row shape: `pkgmgr`'s nats-kv build defaults the storage key to a `key` column
+when `IntoKey` is empty (`build.go`), so a plain lens's own `RETURN … AS key` produces the
+`<targetId>.<entityId>` composite directly. The scaffold generates exactly that.
+
 ### 🏗️ Build checkpoint — F25.2 SHIPPED 2026-08-02 (`e9408470`), next is F25.3a
 
 The Checks panel (target map) + `#/weaver/verify` (lane-wide) landed in `cmd/loupe/weaververify.go`.
