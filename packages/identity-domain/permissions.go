@@ -97,6 +97,12 @@ func Permissions() []pkgmgr.PermissionSpec {
 			Note:          "Grants the right to remove one of your own bound credentials (scope=self); the last remaining credential cannot be removed. [no-op-meta: unprojected-input — its one input is the credential's vertex key, and bound credentials are served by a protected-lens read rather than projected as client-resolvable entities, so nothing can fill the field and a descriptor reduces to asking a person to hand-type a vtx.identity.<NanoID>. Closed by Inc 2's boundTo link and per-credential row (design §4.2).]",
 			GrantsTo:      []string{"consumer"},
 		},
+		{
+			OperationType: "ReconcileCredentialBinding",
+			Scope:         "any",
+			Note:          "Grants the right to converge one credential's boundTo link onto its credentialindex vertex — the repair verb for a binding whose edge is missing, including every binding made before the link type existed. Reaches nothing the index does not already assert: the payload's owner must equal the one the index records, and a tombstoned index rejects rather than reviving an unlinked credential.",
+			GrantsTo:      []string{"operator"},
+		},
 	}
 	return append(perms, RevocationPermissions()...)
 }

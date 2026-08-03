@@ -62,6 +62,7 @@ func DDLs() []pkgmgr.DDLSpec {
 				"InitiateCredentialLink",
 				"CompleteCredentialLink",
 				"UnlinkCredential",
+				"ReconcileCredentialBinding",
 			},
 			Description: "Identity domain DDL. " +
 				"Vertex shape: vtx.identity.<NanoID>, class=identity. " +
@@ -100,7 +101,14 @@ func DDLs() []pkgmgr.DDLSpec {
 				"validated target NAMES the identity being written — e.g. lease-signing's onboarding userTask, " +
 				"where the applicant records their own PII and is already bound by the task's own grant. " +
 				"Attaching an authContext.target of one's own choosing reaches nothing: an unvalidated target " +
-				"exempts nobody, and a validated one may not be paired with a payload naming someone else.",
+				"exempts nobody, and a validated one may not be paired with a payload naming someone else. " +
+				"ReconcileCredentialBinding: converges the boundTo link plane onto the credentialindex vertex " +
+				"for one credential (operator-only). The index vertex is the authority — it carries " +
+				"{actorKey, identityKey, boundAt} in plaintext, it is what UnlinkCredential tombstones, and the " +
+				"payload's identityKey must equal the one it records or the op rejects, so a caller cannot mint " +
+				"an edge the index does not already assert. Writes the index's original boundAt, never the " +
+				"submission time; re-runnable, and a tombstoned index rejects rather than reviving an unlinked " +
+				"credential.",
 			Script: identityDDLScript,
 			InputSchema: `{"type":"object","properties":` +
 				`{"name":{"type":"string","maxLength":200,"description":"Person's display name. Required for CreateUnclaimedIdentity."},` +
@@ -108,7 +116,7 @@ func DDLs() []pkgmgr.DDLSpec {
 				`"phone":{"type":"string","description":"Phone number, E.164 digits only. At least one of email/phone required."},` +
 				`"claimKeyHash":{"type":"string","description":"Lowercase hex sha256 of the client-minted claim secret (CreateUnclaimedIdentity, required). Lattice stores it verbatim; the plaintext never enters Lattice."},` +
 				`"claimKeyAlgo":{"type":"string","enum":["sha256"],"description":"Hash algorithm for claimKeyHash. Optional; defaults to sha256 (the only accepted value)."},` +
-				`"identityKey":{"type":"string","description":"vtx.identity.<NanoID> — target identity for UpdateIdentityState and RecordIdentityPII."},` +
+				`"identityKey":{"type":"string","description":"vtx.identity.<NanoID> — target identity for UpdateIdentityState, RecordIdentityPII, and ReconcileCredentialBinding (where it is the owner the credentialindex vertex must already record)."},` +
 				`"newState":{"type":"string","enum":["claimed"],"description":"Target state for UpdateIdentityState. Only unclaimed→claimed is permitted."},` +
 				`"claimKey":{"type":"string","description":"One-time-use claim key plaintext (ClaimIdentity). Its sha256 must match the stored hash."},` +
 				`"targetIdentityKey":{"type":"string","description":"vtx.identity.<NanoID> of the unclaimed identity to claim (ClaimIdentity)."},` +
@@ -121,7 +129,7 @@ func DDLs() []pkgmgr.DDLSpec {
 				`"linkKeyHash":{"type":"string","description":"Lowercase hex sha256 of the client-minted link secret (InitiateCredentialLink, required). Lattice stores it verbatim; the plaintext never enters Lattice."},` +
 				`"linkKeyAlgo":{"type":"string","enum":["sha256"],"description":"Hash algorithm for linkKeyHash. Optional; defaults to sha256 (the only accepted value)."},` +
 				`"linkKey":{"type":"string","description":"One-time-use link key plaintext (CompleteCredentialLink). Its sha256 must match the stored hash on targetIdentityKey."},` +
-				`"credentialActorKey":{"type":"string","description":"vtx.identity.<NanoID> of the bound credential to remove (UnlinkCredential, required). Submitted as U (op.actor==U, scope=self); names one entry in U's own credentials array."}}}`,
+				`"credentialActorKey":{"type":"string","description":"vtx.identity.<NanoID> of the bound credential to remove (UnlinkCredential, required). Submitted as U (op.actor==U, scope=self); names one entry in U's own credentials array. On ReconcileCredentialBinding it names the credential whose boundTo edge is being converged onto its index vertex."}}}`,
 			OutputSchema: `{"type":"object","properties":` +
 				`{"primaryKey":{"type":"string","description":"vtx.identity.<NanoID> of the created, claimed, or PII-recorded identity (the operation's principal key)."}}}`,
 			FieldDescription: map[string]string{
@@ -850,6 +858,22 @@ def derive_reads(op):
             keys.append(credential_bound_to_key(credential_actor_key, op.actor))
         return {"optionalReads": keys}
 
+    if ot == "ReconcileCredentialBinding":
+        # The index vertex execute reads as its authority, and the link it
+        # converges. The owner comes from the PAYLOAD rather than the actor:
+        # this op is submitted by an operator on someone else's behalf, so
+        # op.actor names the operator, not the person the edge belongs to.
+        # That is exactly why execute re-derives nothing from the payload it
+        # has not first checked against the index.
+        credential_actor_key = getattr(p, "credentialActorKey", None)
+        identity_key = getattr(p, "identityKey", None)
+        if type(credential_actor_key) != type("") or not credential_actor_key.startswith("vtx.identity."):
+            return {}
+        keys = [credential_index_key(credential_actor_key)]
+        if type(identity_key) == type("") and identity_key.startswith("vtx.identity."):
+            keys.append(credential_bound_to_key(credential_actor_key, identity_key))
+        return {"optionalReads": keys}
+
     return {}
 
 def execute(state, op):
@@ -1549,6 +1573,96 @@ def execute(state, op):
             "mutations": mutations,
             "events": events,
             "response": {"primaryKey": u_key},
+        }
+
+    if ot == "ReconcileCredentialBinding":
+        # Converges the boundTo link plane onto the credentialindex vertex for
+        # one credential. Every path that binds a credential writes the index
+        # vertex and the link in the SAME batch, so the index answers "which
+        # credential belongs to whom" for bindings the link plane never
+        # recorded. It is authoritative over that set and no wider: an identity
+        # whose only sign-in is the raw actor ProvisionConsumerIdentity minted
+        # has no index vertex at all, and nothing here reaches it.
+        def fail_reconcile(outcome):
+            fail("CredentialReconcileRejected: " + outcome)
+
+        credential_actor_key = getattr(p, "credentialActorKey", None)
+        identity_key = getattr(p, "identityKey", None)
+        if type(credential_actor_key) != type("") or not credential_actor_key.startswith("vtx.identity."):
+            fail("InvalidArgument: credentialActorKey: must be a vtx.identity.<NanoID> key")
+        if type(identity_key) != type("") or not identity_key.startswith("vtx.identity."):
+            fail("InvalidArgument: identityKey: must be a vtx.identity.<NanoID> key")
+        if credential_actor_key == identity_key:
+            # The same self-loop guard MergeIdentity's rekey loop applies: a
+            # vertex cannot be its own credential, and the link key would name
+            # one vertex twice.
+            fail_reconcile("self-loop")
+
+        # An EXISTING tombstone on the link is a retraction somebody made, and
+        # this op never overturns one. The index cannot stand in for that
+        # judgement, because the two records do not always move together:
+        # UnlinkCredential tombstones the index and the link in one batch, but
+        # privacy-base's ShredIdentityKey tombstones ONLY the link
+        # (shred_identity_key.go's collect_bound_to_links) -- the link names in
+        # plaintext which credential belonged to an erased person, and the
+        # credentialindex vertex is not in that erasure set. Treating a live
+        # index as sufficient authority would therefore republish exactly the
+        # association the shred exists to destroy.
+        #
+        # So the writable case is the ABSENT link, which is the only thing this
+        # op was built to reach: a binding made before the link type existed.
+        # A live link re-converges harmlessly (same document); a tombstoned one
+        # is left exactly as whoever retracted it left it.
+        link_key = credential_bound_to_key(credential_actor_key, identity_key)
+        existing_link = state[link_key] if link_key in state else None
+        if existing_link != None and hasattr(existing_link, "isDeleted") and existing_link.isDeleted:
+            fail_reconcile("retracted")
+
+        # The index vertex is the authority for the edge's CONTENT -- who owns
+        # the credential and when it was bound. identityKey is client-supplied
+        # (derive_reads needs both halves of the link key before anything is
+        # hydrated), so an owner the index does not record is a forged edge.
+        # A tombstoned index is the deliberate-unlink case.
+        index_key = credential_index_key(credential_actor_key)
+        index_vtx = state[index_key] if index_key in state else None
+        if index_vtx == None or (hasattr(index_vtx, "isDeleted") and index_vtx.isDeleted):
+            fail_reconcile("not-bound")
+        index_data = index_vtx.data if index_vtx.data != None else {}
+        if index_data.get("identityKey") != identity_key:
+            fail_reconcile("owner-mismatch")
+
+        # The index's own boundAt, never observed_at: stamping the run time
+        # would rewrite every historical binding's provenance to say it was
+        # made the day this op ran.
+        bound_at = index_data.get("boundAt")
+
+        # The index is re-Put unchanged, conditioned on the revision this pass
+        # read it at, and that guard is the only thing standing between the
+        # decision and the commit. The whole judgement above rests on the index
+        # -- but only MUTATION keys get their hydrated revision applied at step
+        # 8, and without this the index would be read-and-forgotten: an
+        # UnlinkCredential committing in the window between hydrate and commit
+        # would tombstone the index and the link, and this batch would then
+        # publish the edge live on top of it. The result is unrecoverable
+        # rather than merely stale -- a later UnlinkCredential rejects
+        # not-found (its array entry is already gone), so nothing can retract
+        # the edge again and the lens projects a credential the person removed.
+        # Conflicting here instead sends the whole op back through commitPipeline's
+        # OCC retry, which re-hydrates and rejects not-bound on the tombstone.
+        index_guard = {"op": "update", "key": index_key,
+                       "document": {"class": "credentialindex", "isDeleted": False, "data": index_data},
+                       "expectedRevision": index_vtx.revision}
+
+        # The link IS this op's principal key: it is what the op exists to
+        # write, and the reply-constraint admits a mutation key or the vertex
+        # root of one, neither of which the owning identity is here.
+        return {
+            "mutations": [
+                index_guard,
+                credential_bound_to_mutation(credential_actor_key, identity_key, bound_at),
+            ],
+            "events": [],
+            "response": {"primaryKey": credential_bound_to_key(credential_actor_key, identity_key)},
         }
 
     if ot == "RecordIdentityPII":

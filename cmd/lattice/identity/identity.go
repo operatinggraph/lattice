@@ -41,6 +41,7 @@ func NewCommand(natsURL, outputFmt, defaultActor *string) *cobra.Command {
 	}
 	cmd.AddCommand(newCreateUnclaimedCommand(natsURL, outputFmt, defaultActor))
 	cmd.AddCommand(newClaimCommand(natsURL, outputFmt, defaultActor))
+	cmd.AddCommand(newReconcileBindingsCommand(natsURL, outputFmt, defaultActor))
 	return cmd
 }
 

@@ -85,6 +85,7 @@ func staffCapDoc() *processor.CapabilityDoc {
 			{OperationType: "RecordIdentityPII", Scope: "any"},
 			{OperationType: "RevokeActor", Scope: "any"},
 			{OperationType: "UnrevokeActor", Scope: "any"},
+			{OperationType: "ReconcileCredentialBinding", Scope: "any"},
 		},
 		ServiceAccess:   []processor.ServiceAccessEntry{},
 		EphemeralGrants: []processor.EphemeralGrant{},
