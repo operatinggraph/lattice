@@ -332,3 +332,117 @@ func TestRegisterWithFilterFallback_CleanSuccessDoesNotUnpauseAPersistedPause(t 
 	require.NotNil(t, entry.PauseReason)
 	require.Equal(t, health.PauseReasonStructural, *entry.PauseReason)
 }
+
+// TestConsumerFilter_RelationNarrowing pins ConsumerFilter's THREE-step
+// degradation: relation-narrowed when the relation set is exhaustive and the
+// subject count fits, relation-blind narrowed when either fails, broad when
+// the label set itself is ineligible.
+func TestConsumerFilter_RelationNarrowing(t *testing.T) {
+	t.Run("exhaustive relations pin the link forms", func(t *testing.T) {
+		p := &Pipeline{
+			coreKVBucket:             "core-kv",
+			engineKind:               ruleengine.EngineFull,
+			plainReprojectLabels:     map[string]struct{}{"provider": {}},
+			plainReprojectRelations:  map[string]struct{}{"identifiedBy": {}},
+			plainRelationsExhaustive: true,
+		}
+		filterSubjects, filterSubject := p.ConsumerFilter()
+		require.Empty(t, filterSubject)
+		require.ElementsMatch(t, []string{
+			"$KV.core-kv.vtx.provider.>",
+			"$KV.core-kv.lnk.provider.*.identifiedBy.>",
+			"$KV.core-kv.lnk.*.*.identifiedBy.provider.>",
+		}, filterSubjects)
+	})
+
+	t.Run("an exhaustive EMPTY relation set subscribes to no link form", func(t *testing.T) {
+		p := &Pipeline{
+			coreKVBucket:             "core-kv",
+			engineKind:               ruleengine.EngineFull,
+			plainReprojectLabels:     map[string]struct{}{"patient": {}},
+			plainRelationsExhaustive: true,
+		}
+		filterSubjects, filterSubject := p.ConsumerFilter()
+		require.Empty(t, filterSubject)
+		require.Equal(t, []string{"$KV.core-kv.vtx.patient.>"}, filterSubjects)
+	})
+
+	t.Run("a non-exhaustive relation set keeps the relation-blind forms", func(t *testing.T) {
+		p := &Pipeline{
+			coreKVBucket:            "core-kv",
+			engineKind:              ruleengine.EngineFull,
+			plainReprojectLabels:    map[string]struct{}{"book": {}},
+			plainReprojectRelations: map[string]struct{}{"wrote": {}},
+			// plainRelationsExhaustive false: an untyped hop somewhere.
+		}
+		filterSubjects, filterSubject := p.ConsumerFilter()
+		require.Empty(t, filterSubject)
+		require.ElementsMatch(t, []string{
+			"$KV.core-kv.vtx.book.>", "$KV.core-kv.lnk.book.>", "$KV.core-kv.lnk.*.*.*.book.>",
+		}, filterSubjects)
+	})
+
+	// The ZERO VALUE must read as "not exhaustive", never as "exhaustive and
+	// empty" — the latter is the strongest narrowing there is, and a Pipeline
+	// that never ran UseFullEngineBranches must not get it by accident.
+	t.Run("the zero-value pipeline never relation-narrows", func(t *testing.T) {
+		p := &Pipeline{
+			coreKVBucket:         "core-kv",
+			engineKind:           ruleengine.EngineFull,
+			plainReprojectLabels: map[string]struct{}{"book": {}},
+		}
+		filterSubjects, _ := p.ConsumerFilter()
+		require.Len(t, filterSubjects, 3, "relation-blind forms, not a vertex-only set")
+	})
+
+	t.Run("a relation set past the subject budget falls back to relation-blind", func(t *testing.T) {
+		labels := map[string]struct{}{"a": {}, "b": {}, "c": {}, "d": {}}
+		relations := map[string]struct{}{"r1": {}, "r2": {}, "r3": {}}
+		// 4 x (1 + 2*3) = 28 > maxNarrowedFilterSubjects (24).
+		p := &Pipeline{
+			coreKVBucket:             "core-kv",
+			engineKind:               ruleengine.EngineFull,
+			plainReprojectLabels:     labels,
+			plainReprojectRelations:  relations,
+			plainRelationsExhaustive: true,
+		}
+		filterSubjects, filterSubject := p.ConsumerFilter()
+		require.Empty(t, filterSubject, "over the SUBJECT budget degrades to relation-blind, not to broad")
+		require.Len(t, filterSubjects, len(labels)*3)
+	})
+}
+
+// TestPlainLinkReactsTo pins the client-side relation gate — load-bearing for
+// any lens that keeps a broader filter than its relation set would allow
+// (over the subject budget, or actor-aware). Every uncertain input defaults to
+// relevant, exactly as plainReactsTo does.
+func TestPlainLinkReactsTo(t *testing.T) {
+	narrowed := &Pipeline{
+		engineKind:               ruleengine.EngineFull,
+		plainReprojectRelations:  map[string]struct{}{"identifiedBy": {}},
+		plainRelationsExhaustive: true,
+	}
+	require.True(t, narrowed.plainLinkReactsTo("identifiedBy"))
+	require.False(t, narrowed.plainLinkReactsTo("providedTo"),
+		"the exact live shape: a relation the lens never traverses")
+	require.True(t, narrowed.plainLinkReactsTo(""), "an unparsed relation defaults to relevant")
+
+	noRels := &Pipeline{
+		engineKind:               ruleengine.EngineFull,
+		plainRelationsExhaustive: true,
+	}
+	require.False(t, noRels.plainLinkReactsTo("anything"),
+		"a lens with no relationship pattern reacts to no link at all")
+
+	notExhaustive := &Pipeline{
+		engineKind:              ruleengine.EngineFull,
+		plainReprojectRelations: map[string]struct{}{"identifiedBy": {}},
+	}
+	require.True(t, notExhaustive.plainLinkReactsTo("providedTo"))
+
+	notFull := &Pipeline{
+		plainReprojectRelations:  map[string]struct{}{"identifiedBy": {}},
+		plainRelationsExhaustive: true,
+	}
+	require.True(t, notFull.plainLinkReactsTo("providedTo"), "a non-full engine has no relation data to trust")
+}

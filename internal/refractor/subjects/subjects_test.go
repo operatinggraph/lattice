@@ -237,3 +237,87 @@ func TestCoreKVNarrowedFilters_SameLabelFormsNonSubset(t *testing.T) {
 		assert.False(t, isSubsetMatch(p[1], p[0]), "%v must not be a subset of %v", p[1], p[0])
 	}
 }
+
+func TestCoreKVLinkSourceRelationFilter(t *testing.T) {
+	assert.Equal(t, "$KV.core-kv.lnk.provider.*.identifiedBy.>",
+		CoreKVLinkSourceRelationFilter("core-kv", "provider", "identifiedBy"))
+}
+
+func TestCoreKVLinkTargetRelationFilter(t *testing.T) {
+	assert.Equal(t, "$KV.core-kv.lnk.*.*.identifiedBy.identity.>",
+		CoreKVLinkTargetRelationFilter("core-kv", "identity", "identifiedBy"))
+}
+
+func TestCoreKVLinkRelationFilters_InvalidInputPanics(t *testing.T) {
+	assert.Panics(t, func() { CoreKVLinkSourceRelationFilter("core-kv", "pro.vider", "identifiedBy") })
+	assert.Panics(t, func() { CoreKVLinkSourceRelationFilter("core-kv", "provider", "identified.By") })
+	assert.Panics(t, func() { CoreKVLinkTargetRelationFilter("core-kv", "identity", "") })
+	assert.Panics(t, func() { CoreKVLinkTargetRelationFilter("core-kv", "", "identifiedBy") })
+}
+
+func TestCoreKVRelationNarrowedFilters(t *testing.T) {
+	got := CoreKVRelationNarrowedFilters("core-kv", []string{"provider", "identity"}, []string{"identifiedBy"})
+	want := []string{
+		"$KV.core-kv.vtx.identity.>",
+		"$KV.core-kv.lnk.identity.*.identifiedBy.>",
+		"$KV.core-kv.lnk.*.*.identifiedBy.identity.>",
+		"$KV.core-kv.vtx.provider.>",
+		"$KV.core-kv.lnk.provider.*.identifiedBy.>",
+		"$KV.core-kv.lnk.*.*.identifiedBy.provider.>",
+	}
+	assert.Equal(t, want, got, "labels and relations are sorted; each label expands to vertex + per-relation source/target")
+}
+
+// TestCoreKVRelationNarrowedFilters_NoRelationsIsVertexOnly pins the case the
+// whole narrowing turns on: a lens with NO relationship pattern subscribes to
+// no link form at all, because no link can change its rows. This is a
+// narrowing, not a "no data" fallback — a caller without an exhaustive
+// relation set must call CoreKVNarrowedFilters instead.
+func TestCoreKVRelationNarrowedFilters_NoRelationsIsVertexOnly(t *testing.T) {
+	got := CoreKVRelationNarrowedFilters("core-kv", []string{"patient"}, nil)
+	assert.Equal(t, []string{"$KV.core-kv.vtx.patient.>"}, got)
+}
+
+func TestCoreKVRelationNarrowedFilters_Dedupes(t *testing.T) {
+	got := CoreKVRelationNarrowedFilters("core-kv",
+		[]string{"book", "book"}, []string{"wrote", "wrote"})
+	want := []string{
+		"$KV.core-kv.vtx.book.>",
+		"$KV.core-kv.lnk.book.*.wrote.>",
+		"$KV.core-kv.lnk.*.*.wrote.book.>",
+	}
+	assert.Equal(t, want, got)
+}
+
+func TestCoreKVRelationNarrowedFilters_Empty(t *testing.T) {
+	assert.Empty(t, CoreKVRelationNarrowedFilters("core-kv", nil, []string{"wrote"}))
+}
+
+// TestCoreKVRelationNarrowedFilters_PairwiseNonSubset proves for the
+// relation-narrowed forms exactly what TestCoreKVNarrowedFilters_PairwiseNonSubset
+// proves for the relation-blind ones: nats-server's consumer-creation overlap
+// check would reject a filter set in which any subject is a subset of another,
+// and none of these are, in either direction.
+//
+// The label set deliberately includes a label that is ALSO a relation name
+// ("manages"), and a self-relation (book -wrote-> book), because those are the
+// two ways a token could collide across positions and turn one form into a
+// subset of another.
+func TestCoreKVRelationNarrowedFilters_PairwiseNonSubset(t *testing.T) {
+	filters := CoreKVRelationNarrowedFilters("core-kv",
+		[]string{"book", "author", "manages"},
+		[]string{"wrote", "manages"})
+	require.Len(t, filters, 15, "3 labels x (1 vertex + 2 relations x 2 link forms)")
+
+	for i, a := range filters {
+		for j, b := range filters {
+			if i == j {
+				continue
+			}
+			if isSubsetMatch(tokenize(a), tokenize(b)) {
+				t.Fatalf("filter[%d]=%q is a subset of filter[%d]=%q — nats-server would reject this pair as overlapping",
+					i, a, j, b)
+			}
+		}
+	}
+}

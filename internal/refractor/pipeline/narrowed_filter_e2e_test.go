@@ -114,7 +114,8 @@ func TestNarrowedFilter_DeliversOwnTypeNeverForeignType(t *testing.T) {
 
 	filterSubjects, filterSubject := p.ConsumerFilter()
 	require.Empty(t, filterSubject, "a single exhaustive label must narrow, not fall back to broad")
-	require.Len(t, filterSubjects, 3, "one label expands to 3 forms (vertex, link-source, link-target)")
+	require.Equal(t, []string{"$KV." + coreKVBucket + ".vtx.book.>"}, filterSubjects,
+		"this lens traverses no relationship at all, so no link form is subscribed")
 
 	spec := specFor(ruleID)
 	spec.FilterSubject = filterSubject
@@ -228,7 +229,7 @@ func TestNarrowedFilter_RebuildRecomputesLabelSet(t *testing.T) {
 		if err != nil {
 			return false
 		}
-		return len(i.Config.FilterSubjects) == 3 && i.Config.FilterSubjects[0] != "" &&
+		return len(i.Config.FilterSubjects) == 1 &&
 			containsFilter(i.Config.FilterSubjects, "$KV."+coreKVBucket+".vtx.widget.>")
 	})
 
@@ -330,4 +331,93 @@ func TestNarrowedFilter_RegistrationFailureFallsBackToBroadWithHealthSignal(t *t
 	require.Equal(t, "active", entry.Status, "the fallback recovery must leave the lens active, not paused")
 	require.NotNil(t, entry.LastError)
 	require.Contains(t, *entry.LastError, "narrowed")
+}
+
+// putLink writes a Contract #1 six-segment link key
+// (lnk.<typeA>.<idA>.<relation>.<typeB>.<idB>) with a live (non-tombstoned)
+// body, so the only thing distinguishing two writes here is the relation
+// segment the consumer's filter either pins or wildcards.
+func putLink(t *testing.T, kv *substrate.KV, typeA, idA, relation, typeB, idB string) string {
+	t.Helper()
+	key := "lnk." + typeA + "." + idA + "." + relation + "." + typeB + "." + idB
+	raw, err := json.Marshal(map[string]any{
+		"key": key, "isDeleted": false,
+		"createdAt": "2026-08-01T00:00:00Z", "lastModifiedAt": "2026-08-01T00:00:00Z",
+	})
+	require.NoError(t, err)
+	_, err = kv.Put(context.Background(), key, raw)
+	require.NoError(t, err)
+	return key
+}
+
+// TestNarrowedFilter_OffRelationLinkIsNeverDelivered is the end-to-end proof
+// for the relation dimension, over a real embedded NATS server, of exactly the
+// live defect that wedged clinicProviders: a lens whose only relationship
+// pattern is (b:book)-[:wrote]->(a:author) is subscribed to `wrote` links and
+// to NOTHING else, even though a `borrowedBy` link between the same two types
+// satisfies both endpoint-type tests.
+//
+// Before the relation segment was pinned, the filter forms were
+// lnk.book.> and lnk.*.*.*.author.>, so every link on either type reached the
+// lens and drove a full re-execute — 1,325 of them, live, on a lens that could
+// never bind one.
+//
+// Read off the consumer's own Delivered.Consumer at a settled (NumPending == 0)
+// checkpoint, so it is a server-side delivery tally and not a client-side skip.
+func TestNarrowedFilter_OffRelationLinkIsNeverDelivered(t *testing.T) {
+	env := startPipelineEnv(t)
+
+	bookID, authorID := narrowedID(t, "RelBk"), narrowedID(t, "RelAu")
+	putBookOrAuthor(t, env.coreKV, "vtx.book."+bookID, "book", "RelBk")
+	putBookOrAuthor(t, env.coreKV, "vtx.author."+authorID, "author", "RelAu")
+
+	eng, cr := compileFullRule(t,
+		"MATCH (b:book)-[:wrote]->(a:author) RETURN b.key AS key, b.title AS title",
+		[]string{"key"})
+	_, adpt := newTargetKV(t, env, "narrowed-rel-target", []string{"key"})
+
+	const ruleID = "narrowed-rel-lens"
+	p, err := pipeline.New(ruleID, "nats_kv", coreKVBucket, env.adjKV, env.coreKV, adpt, nil)
+	require.NoError(t, err)
+	p.UseFullEngine(eng, cr)
+
+	filterSubjects, filterSubject := p.ConsumerFilter()
+	require.Empty(t, filterSubject)
+	require.ElementsMatch(t, []string{
+		"$KV." + coreKVBucket + ".vtx.author.>",
+		"$KV." + coreKVBucket + ".lnk.author.*.wrote.>",
+		"$KV." + coreKVBucket + ".lnk.*.*.wrote.author.>",
+		"$KV." + coreKVBucket + ".vtx.book.>",
+		"$KV." + coreKVBucket + ".lnk.book.*.wrote.>",
+		"$KV." + coreKVBucket + ".lnk.*.*.wrote.book.>",
+	}, filterSubjects, "every link form pins the one relation the lens traverses")
+
+	spec := specFor(ruleID)
+	spec.FilterSubject = filterSubject
+	spec.FilterSubjects = filterSubjects
+	p.RunOn(env.conn, spec)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	wg := &sync.WaitGroup{}
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		p.Run(ctx)
+	}()
+	t.Cleanup(func() { cancel(); wg.Wait() })
+
+	before := waitConsumerSettled(t, env, "refractor-"+ruleID)
+
+	// A link between the SAME two types on a relation the lens never
+	// traverses — the shape of the 1,325 that wedged the live consumer.
+	putLink(t, env.coreKV, "book", bookID, "borrowedBy", "author", authorID)
+	after := waitConsumerSettled(t, env, "refractor-"+ruleID)
+	require.Equal(t, before.Delivered.Consumer, after.Delivered.Consumer,
+		"an off-relation link must never be delivered, however bindable its endpoint types are")
+
+	// The lens's own relation, between the same two vertices, must still land.
+	putLink(t, env.coreKV, "book", bookID, "wrote", "author", authorID)
+	withOwn := waitConsumerSettled(t, env, "refractor-"+ruleID)
+	require.Greater(t, withOwn.Delivered.Consumer, after.Delivered.Consumer,
+		"the lens's own relation must still be delivered — this narrowing must not blind it")
 }

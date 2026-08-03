@@ -168,20 +168,93 @@ func CoreKVLinkTargetFilter(bucket, label string) string {
 // wildcards, which is exactly what defeats subset matching — see
 // subjects_test.go's pairwise proof.
 func CoreKVNarrowedFilters(bucket string, labels []string) []string {
-	deduped := make(map[string]struct{}, len(labels))
-	sortedLabels := make([]string, 0, len(labels))
-	for _, l := range labels {
-		if _, dup := deduped[l]; dup {
-			continue
-		}
-		deduped[l] = struct{}{}
-		sortedLabels = append(sortedLabels, l)
-	}
-	sort.Strings(sortedLabels)
+	sortedLabels := dedupeSorted(labels)
 
 	out := make([]string, 0, len(sortedLabels)*3)
 	for _, l := range sortedLabels {
 		out = append(out, CoreKVVertexFilter(bucket, l), CoreKVLinkSourceFilter(bucket, l), CoreKVLinkTargetFilter(bucket, l))
 	}
+	return out
+}
+
+// CoreKVLinkSourceRelationFilter returns the JetStream filter subject that
+// covers every link key whose SOURCE type is label AND whose relation is
+// relation ($KV.<bucket>.lnk.<label>.*.<relation>.>) — Contract #1's
+// lnk.<typeA>.<idA>.<relation>.<typeB>.<idB> shape with typeA and relation both
+// pinned and idA wildcarded (a NanoID is exactly one token). The trailing `>`
+// covers typeB.idB and any tail beyond it.
+func CoreKVLinkSourceRelationFilter(bucket, label, relation string) string {
+	validateToken("label", label)
+	validateToken("relation", relation)
+	return "$KV." + bucket + ".lnk." + label + ".*." + relation + ".>"
+}
+
+// CoreKVLinkTargetRelationFilter returns the JetStream filter subject that
+// covers every link key whose TARGET type is label AND whose relation is
+// relation ($KV.<bucket>.lnk.*.*.<relation>.<label>.>) — the same six-segment
+// link shape with relation and typeB pinned and typeA/idA wildcarded.
+func CoreKVLinkTargetRelationFilter(bucket, label, relation string) string {
+	validateToken("label", label)
+	validateToken("relation", relation)
+	return "$KV." + bucket + ".lnk.*.*." + relation + "." + label + ".>"
+}
+
+// CoreKVRelationNarrowedFilters returns the deduped, deterministically-ordered
+// set of JetStream filter subjects for a lens whose referenced RELATIONS are
+// known exhaustively as well as its labels: for each label, its vertex form,
+// plus — for each relation — that (label, relation) pair's source and target
+// link forms.
+//
+// This is CoreKVNarrowedFilters with the link forms' relation segment pinned
+// instead of wildcarded. That segment is the one that decides whether a link can
+// appear in the lens's traversals at all: the relation-blind forms select on
+// "one endpoint has this type", which for a hub type like identity is close to
+// the whole link keyspace, and the lens then pays a full re-execute for every
+// link on that hub whatever the relation.
+//
+// An EMPTY relations slice is meaningful and returns the vertex forms ALONE: a
+// query with no relationship pattern (MATCH (p:patient) … RETURN p.key) cannot
+// be affected by any link, so it subscribes to none. A caller that does not know
+// the relation set exhaustively must call CoreKVNarrowedFilters instead — never
+// this one with an empty slice.
+//
+// The pairwise-non-subset property CoreKVNarrowedFilters' doc argues for holds
+// here for the same reason, and is proved the same way (subjects_test.go,
+// against a reimplementation of nats-server's own isSubsetMatch): any two forms
+// differ at some token position neither side wildcards — `vtx` vs `lnk` at
+// segment 3, the label at segment 4 or 6, the relation at segment 6, and the
+// source form's trailing `>` sits where the target form carries a literal
+// label, which subset matching refuses in both directions.
+func CoreKVRelationNarrowedFilters(bucket string, labels, relations []string) []string {
+	sortedLabels := dedupeSorted(labels)
+	sortedRelations := dedupeSorted(relations)
+
+	out := make([]string, 0, len(sortedLabels)*(1+2*len(sortedRelations)))
+	for _, l := range sortedLabels {
+		out = append(out, CoreKVVertexFilter(bucket, l))
+		for _, r := range sortedRelations {
+			out = append(out,
+				CoreKVLinkSourceRelationFilter(bucket, l, r),
+				CoreKVLinkTargetRelationFilter(bucket, l, r))
+		}
+	}
+	return out
+}
+
+// dedupeSorted collapses duplicates and returns the remainder in a stable
+// order, so a filter set derived from a map's iteration order is byte-identical
+// on every derivation — which is what lets activation and Rebuild each
+// recompute it independently and agree.
+func dedupeSorted(in []string) []string {
+	seen := make(map[string]struct{}, len(in))
+	out := make([]string, 0, len(in))
+	for _, s := range in {
+		if _, dup := seen[s]; dup {
+			continue
+		}
+		seen[s] = struct{}{}
+		out = append(out, s)
+	}
+	sort.Strings(out)
 	return out
 }

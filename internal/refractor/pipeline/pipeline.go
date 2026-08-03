@@ -29,6 +29,15 @@ import (
 // better choice.
 const maxNarrowedFilterLabels = 8
 
+// maxNarrowedFilterSubjects caps the TOTAL filter-subject count of a
+// relation-narrowed set, whose size is |labels| x (1 + 2|relations|) and so is
+// no longer bounded by maxNarrowedFilterLabels alone. It is set to exactly the
+// relation-blind ceiling (maxNarrowedFilterLabels x 3), so no lens that narrows
+// today can stop narrowing because the relation dimension was added: a lens
+// over budget here falls back to the relation-blind narrowed set, and only a
+// lens over the LABEL budget falls all the way back to the broad filter.
+const maxNarrowedFilterSubjects = maxNarrowedFilterLabels * 3
+
 // ProbeInterval is the delay between consecutive probe attempts during an infrastructure pause.
 // Exported so tests can override it to a short value for fast recovery detection.
 var ProbeInterval = 10 * time.Second
@@ -97,6 +106,28 @@ type Pipeline struct {
 	// event reprojects.
 	plainReprojectLabels map[string]struct{}
 	plainReprojectAll    bool
+
+	// plainReprojectRelations is the exhaustive set of link relations this
+	// lens's patterns can traverse (full.CompiledRule.ReferencedRelations) —
+	// the `<relation>` segment of Contract #1's
+	// lnk.<typeA>.<idA>.<relation>.<typeB>.<idB>. The label set above bounds
+	// which endpoint TYPES can bind; this bounds which relations between them
+	// the lens actually walks, which is what decides whether a link can appear
+	// in its traversals at all.
+	//
+	// plainRelationsExhaustive is stated in the POSITIVE, unlike
+	// plainReprojectAll beside it, and deliberately: an EMPTY relation set is
+	// the STRONGEST narrowing there is (a lens with no relationship pattern
+	// cannot be affected by any link), so an empty set cannot double as the
+	// fail-safe the way an empty LABEL set does for ConsumerFilter. The zero
+	// value must therefore read as "not exhaustive — every relation
+	// reprojects", which is what a positive flag gives to any Pipeline that has
+	// not run UseFullEngineBranches.
+	//
+	// Derived in the same UseFullEngineBranches call as the label set, so a
+	// MATCH hot-reload can never leave one stale against the other.
+	plainReprojectRelations  map[string]struct{}
+	plainRelationsExhaustive bool
 
 	// seedAnchorLabel is this lens's anchor vertex type
 	// (full.CompiledRule.AnchorLabel — the first MATCH clause's first node's
@@ -436,30 +467,52 @@ func (p *Pipeline) useFullEngineBranches(eng *full.Engine, cr ruleengine.Compile
 	// about the lens as a whole.
 	p.plainReprojectLabels = nil
 	p.plainReprojectAll = true
+	p.plainReprojectRelations = nil
+	p.plainRelationsExhaustive = false
 	all := []ruleengine.CompiledRule{cr}
 	if len(branches) > 1 {
 		all = branches
 	}
 	labels := map[string]struct{}{}
+	relations := map[string]struct{}{}
 	exhaustive := true
+	relationsExhaustive := true
 	for _, c := range all {
 		fullCR, isFull := c.(*full.CompiledRule)
 		if !isFull {
 			exhaustive = false
+			relationsExhaustive = false
 			break
 		}
 		ls, ok := fullCR.ReferencedLabels()
 		if !ok {
 			exhaustive = false
-			break
+		} else {
+			for l := range ls {
+				labels[l] = struct{}{}
+			}
 		}
-		for l := range ls {
-			labels[l] = struct{}{}
+		// The relation set is derived independently of the label set: a lens
+		// can name every label exhaustively while traversing an untyped
+		// relationship, or the reverse. Collecting both to the end (rather
+		// than breaking on the first non-exhaustive answer) is what lets the
+		// two narrowings degrade separately.
+		rs, rok := fullCR.ReferencedRelations()
+		if !rok {
+			relationsExhaustive = false
+		} else {
+			for r := range rs {
+				relations[r] = struct{}{}
+			}
 		}
 	}
 	if exhaustive {
 		p.plainReprojectLabels = labels
 		p.plainReprojectAll = false
+	}
+	if relationsExhaustive {
+		p.plainReprojectRelations = relations
+		p.plainRelationsExhaustive = true
 	}
 	// Pin the anchor label an anchor-labeled event can seed the evaluation
 	// with. Unconditional like the label set above, and for the same reason: a
@@ -524,6 +577,35 @@ func (p *Pipeline) plainReactsTo(vertexType string) bool {
 		return true
 	}
 	_, ok := p.plainReprojectLabels[vertexType]
+	return ok
+}
+
+// plainLinkReactsTo reports whether the plain link reprojection arm should
+// re-execute this lens for a link event on the given relation. It is
+// plainReactsTo's companion on the other half of the link key: that one asks
+// whether either ENDPOINT TYPE can bind, this one whether the RELATION between
+// them is one the lens's patterns actually traverse. A link satisfying only the
+// endpoint test — `lnk.service.<id>.providedTo.identity.<id>` reaching a lens
+// whose sole relationship pattern is `(pr)-[:identifiedBy]->(id:identity)` —
+// cannot appear in any traversal, and re-executing for it is pure cost.
+//
+// The false case lands in the SAME already-sanctioned skip class as
+// evalPlainLinkReprojection's "neither endpoint type is bindable": no
+// reprojection, and no adjacency self-apply, whose authoritative writer is the
+// dedicated whole-stream adjacency consumer rather than any lens pipeline.
+//
+// Every uncertain case defaults to relevant, exactly as plainReactsTo does: a
+// non-full engine, an empty/unparsed relation, or a non-exhaustive relation set
+// (an untyped or variable-length relationship anywhere in the lens) all
+// reproject.
+func (p *Pipeline) plainLinkReactsTo(relation string) bool {
+	if p.engineKind != ruleengine.EngineFull {
+		return true
+	}
+	if !p.plainRelationsExhaustive || relation == "" {
+		return true
+	}
+	_, ok := p.plainReprojectRelations[relation]
 	return ok
 }
 
@@ -725,6 +807,21 @@ func (p *Pipeline) ConsumerFilter() (filterSubjects []string, filterSubject stri
 	labelList := make([]string, 0, len(labels))
 	for l := range labels {
 		labelList = append(labelList, l)
+	}
+	// Relation-narrowed when the relation set is exhaustive too and the
+	// resulting subject count fits the budget; otherwise the relation-blind
+	// narrowed set. Degrading here rather than at NarrowedFilterEligible keeps
+	// the label narrowing's own eligibility untouched — the two dimensions fail
+	// back independently, and a lens that narrows by label today never stops
+	// because its relations do not qualify.
+	if p.plainRelationsExhaustive {
+		relationList := make([]string, 0, len(p.plainReprojectRelations))
+		for r := range p.plainReprojectRelations {
+			relationList = append(relationList, r)
+		}
+		if len(labelList)*(1+2*len(relationList)) <= maxNarrowedFilterSubjects {
+			return subjects.CoreKVRelationNarrowedFilters(p.coreKVBucket, labelList, relationList), ""
+		}
 	}
 	return subjects.CoreKVNarrowedFilters(p.coreKVBucket, labelList), ""
 }
@@ -1564,6 +1661,12 @@ func (p *Pipeline) evalPlainAspectReprojection(ctx context.Context, msg substrat
 func (p *Pipeline) evalPlainLinkReprojection(ctx context.Context, msg substrate.Message, key string) (substrate.Decision, error) {
 	type1, id1, linkName, type2, id2, ok := substrate.ParseLinkKey(key)
 	if !ok {
+		return substrate.Ack, nil
+	}
+	if !p.plainLinkReactsTo(linkName) {
+		// The lens's patterns never traverse this relation, so the link
+		// cannot appear in any of them whatever its endpoints are — the same
+		// skip class as the endpoint test below, for the same reason.
 		return substrate.Ack, nil
 	}
 	reacts1, reacts2 := p.plainReactsTo(type1), p.plainReactsTo(type2)
