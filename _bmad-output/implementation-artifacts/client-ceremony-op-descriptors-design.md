@@ -1574,7 +1574,7 @@ and the consumer stayed paused.
 
 Two consequences, handled differently:
 
-- **The cause is fixed** (`c2112bf1`): the emitted DDL now converges the table — one
+- **The cause is fixed** (`c2112bf1`, fixtures `49e1712e`): the emitted DDL now converges the table — one
   `ADD COLUMN IF NOT EXISTS` per declared body column plus the platform's own four, between the create
   and the policy so a policy naming a new column compiles. Additive only; key columns excluded, because a
   table missing one is a different table. Any lens could have hit this on any column addition; nothing
@@ -1587,7 +1587,7 @@ Two consequences, handled differently:
 
 ### 16.8 CHECKPOINT — Inc 2b-2 shipped; the pane is unverified live
 
-**Shipped** `ec87b8f4` (CI green) + `c2112bf1`: `PaneSpec.Surface` and its validation, the
+**Shipped** `ec87b8f4` + `c2112bf1` + `49e1712e` (CI green): `PaneSpec.Surface` and its validation, the
 `signInMethods` pane offered to `consumer`, `UnlinkCredential`'s descriptor with the
 `unprojected-input` exemption retired, `RotateClaimKey`'s `visibleWhen`, the renderer's
 authContext-buildability gate, the account surface on Facet's Me screen with the bespoke read retired
