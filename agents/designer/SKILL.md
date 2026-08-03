@@ -549,6 +549,38 @@ tombstones. **Capability KV is a lens projection** (projection correctness = aut
   checklist** — it is far more expensive and it arrives after the draft has hardened. Walk the reflexes
   yourself first; hand the reviewers the findings that need a second mind.
 
+- **A predicate you write in ONE clause is a claim that the set it filters has ONE shape — enumerate the
+  shapes first, and write the predicate over the enumeration.** All three blockers from the 2026-08-03
+  credential-binding pass were this single failure, in one 40-line algorithm: (1) an ownership guard
+  `data.identityKey == identity_key` **silently disabled the whole outbound arm**, because an outbound
+  index's `identityKey` is by construction the *other* identity — the guard needed two clauses
+  (`identityKey ==` **or** `actorKey ==`), and the design's own test for that arm was unsatisfiable;
+  (2) the idempotence test was `isDeleted`, but the retraction verb on that key preserves the body
+  (`step8_commit.go:414-418`), so the whole already-unbound population kept its plaintext through an
+  erasure that reported success — the test had to be the empty *body*, and the draft had cited that very
+  fact three paragraphs earlier to justify its own write shape; (3) an event was emitted "per live edge"
+  when the derivation it accompanied deliberately walked *tombstoned* edges too, stranding exactly the
+  population the walk was widened for. **The check:** for every skip/guard/emit predicate, write the state
+  table BEFORE the predicate (never-X, X, X-then-not-X, X-then-Y, both-directions, re-run) and evaluate the
+  predicate on each row — a design that ships a §"plane states" table cannot ship a one-clause rule over a
+  multi-shape set. Two corollaries from the same fire: **a fact you cite in one section binds every other
+  section** (G2 justified the write and was not applied to the tombstones the same loop walked past); and
+  **a lazily-read key you then write is a read-then-write with no serialization point**
+  (`starlark_kv.go:146-147`) — carry `expectedRevision` or the race's loser is a *third party's* live state,
+  which is a different harm class from every under-erasure the surrounding code already accepts.
+
+- **"On path P the precondition always holds" — go read whether P can BAIL OUT.** When a design converts a
+  fail-open into a fail-closed, its safety argument is always "the thing I now require is already
+  guaranteed upstream." Open the upstream function and look at its **return type and its early exits**: a
+  `func(...)` with no result is a best-effort convenience, not a guarantee. (Trialed same fire:
+  `provisionActorIfNeeded` returns nothing and swallows four failures — unconfigured, marshal, submit
+  error, non-Accepted reply — and in every one the request *proceeds*. The new guard would have turned a
+  transient into a user-visible "invalid claim key" on a ceremony whose client retries only on a different
+  outcome code.) The fix is usually to make the upstream honest in the same increment, not to soften the
+  guard. And **size the fixture migration by grepping every package that exercises the path, not the one
+  that owns it** — the same fire's estimate was half the real blast radius, and the "shared helper that
+  already exists" was an unexported `_test.go` function in one of nine affected packages.
+
 **Run the pre-build gates you write into your own designs — "ratified" ≠ "build-ready."** If a design
 self-flags a pre-build adversarial / `bmad-party-mode` pass (a deferred gate), that pass is a **Designer-lane
 obligation**: run it and **record it as run** before the design is build-ready. Do not leave it dangling for
