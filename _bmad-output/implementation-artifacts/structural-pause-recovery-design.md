@@ -1,7 +1,15 @@
 # Structural pause — a self-adjudicating verdict, a preserved cause, and an operable resume path
 
-**Status: 📐 awaiting-Andrew (ratification)**
+**Status: Inc 1 + Inc 3 ✅ BUILT (`bb027dc5`, 2026-08-03) · Inc 2 (§4.2) 📐 awaiting-Andrew**
 **Author:** Winston (Designer fire, 2026-08-01)
+
+> **What is decided and what is not.** §4.1 and §4.3 carry the doc's own verdict *"architectural fork: none,
+> frozen-contract change: none required"*, and the For-Andrew block names them as closing the diagnostic and
+> operability halves on their own — so the Steward built them (§11). **§4.2 is the one judgment call flagged for
+> Andrew** and is NOT built: whether a protected/grant lens may auto-resume once its own probe verifies clean.
+> `ConsumerSpec.StructuralProbe` does not exist; every structural pause is still operator-cleared. Ratifying §4.2
+> is a self-contained follow-on — nothing in it is needed for what shipped, and nothing that shipped presumes it.
+
 **Backlog:** Stream-2 Component maintenance — *[Refractor] A structurally-paused protected lens has no operable resume path + no diagnostic* (★★)
 **Owning components:** `internal/substrate` (ConsumerSupervisor), `internal/refractor/{adapter,health,failure,pipeline}`, `cmd/refractor`, `cmd/lattice/lens`. Docs: `docs/components/refractor-failure-tiers.md`, `docs/components/refractor.md`, `docs/observability/health-kv-schema.md`.
 
@@ -505,3 +513,30 @@ Claims that survived the attack unchanged, verified line by line: G1, G3, G4, G5
 §4.1 in-process serialization argument; the `NatsKVAdapter` probe-completeness claim; the absence of any
 non-adapter structural source on the handler path; every §5 contract verdict; every §1.2 board-row verdict; and the
 grant-lens under-grant-not-over-grant analysis in §4.2.
+
+---
+
+## 11. CHECKPOINT — Inc 1 + Inc 3 shipped; Inc 2 is Andrew's
+
+**Shipped** `bb027dc5` (CI green): the two `reporter.go` guards, `LastError` on both heartbeater lens snapshots
+carried into the `LensProjectionPaused` message via a shared `pausedLabel`, and
+`lattice lens pause | resume | rebuild | health`. The three `resolveActorHeader` copies §4.3 expected to find in
+two places turned out to be **three** — `loom`, `weaver` and `lens/reproject` — and all three now call
+`output.ResolveActorHeader` / `output.AddActorFlags`. No grant was widened, no op was added to Loupe's
+`readOnlyOps`, and `internal/controlauth` is untouched.
+
+**What the live stack proved, and the one thing it could not.** The three read models this design was filed
+against — `clinicAppointmentsRead`, `providerAppointmentsRead`, `identityCredentialBindingsRead` — were resumed
+from a terminal for the first time and are **active, lag 0, 35 / 35 / 6 rows**, with Refractor reporting zero
+health issues where a `LensProjectionPaused` warning had stood. `make provision-readpath` was re-run first, so the
+resume met a converged table and stuck rather than re-pausing on the next write.
+
+What it could **not** show is Inc 1's own payload: all three entries render `lastError` absent, because their
+causes were erased by the pre-fix `ClearLastError` before the guard existed. **The guard prevents the next
+erasure; it cannot recover a destroyed one.** The first structurally paused lens after this commit is where the
+preserved cause is observable end-to-end — worth confirming opportunistically rather than manufacturing.
+
+**Two facts for whoever takes §4.2.** The `identityCredentialBindingsRead` resume unblocks
+[client-ceremony Inc 2b-3](client-ceremony-op-descriptors-design.md) §16.8, whose pane read was waiting on exactly
+this. And the *other* live status defect is untouched and re-confirmed at a second restart: three
+`edgeManifest*ReadGrants` lenses still report `rebuilding` at lag 0 — its own board row, not this design's.
