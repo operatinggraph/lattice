@@ -70,14 +70,19 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 			Dispatch: &pkgmgr.OpDispatchSpec{
 				Class:       "identity",
 				AuthContext: "self",
-				// The dedup probe vtx.credentialindex.<sha256(actor)> is NOT
-				// declared: it is sha256-derived and the template vocabulary
-				// substitutes rather than computes. Harmless HERE, and only
-				// here — a claim is submitted by a FRESH credential, which by
-				// construction has no prior index entry to revive, and the
-				// load-bearing stop is the CreateOnly create that
-				// RevisionConflicts on an already-bound credential regardless
-				// of what the caller declared.
+				// The dedup probe vtx.credentialindex.<sha256(actor)> is absent
+				// from this list because no dispatcher can compute it — the
+				// template vocabulary substitutes, it does not hash. It IS
+				// declared, by the DDL's own derive_reads (Contract #2 §2.5
+				// class (g)), which resolves it from op.actor at the head of
+				// step 4. So the script's `credential-already-bound` guard and
+				// the tombstoned-index revive branch are LIVE on this path,
+				// where they were previously dormant: with the key undeclared
+				// the probe always read absent, so re-binding a credential
+				// whose index UnlinkCredential had tombstoned died on the
+				// CreateOnly create's revision-0 assertion instead of
+				// reviving. The CreateOnly create is still the backstop on the
+				// absent branch, so the concurrent-bind race is still caught.
 				Reads: []string{
 					"{payload.targetIdentityKey}",
 					"{payload.targetIdentityKey}.state",

@@ -53,15 +53,65 @@ var (
 	// one in a browser without shipping a hash implementation, and a shipped
 	// hash implementation would carry the alphabet too.
 	sha256Digest = regexp.MustCompile(`subtle\.digest\(\s*["']SHA-256["']`)
-	// derivedKeyShape mirrors the Go half's annotation exactly, so an author
-	// who has met one has met both.
-	derivedKeyShape = regexp.MustCompile(`//\s*derived-key:(.*)$`)
+	// derivedKeyShape mirrors the Go half's annotation, and additionally
+	// accepts the /* */ and JSDoc forms, which are idiomatic in these files and
+	// which a `//`-only parser would reject as undeclared — fail-closed, but
+	// fail-closed on a correct declaration just teaches authors the gate is
+	// broken.
+	derivedKeyShape = regexp.MustCompile(`(?://|/\*+|^\s*\*)\s*derived-key:(.*?)(?:\*/)?$`)
+	// derivedKeyConstruction — a Contract #1 key literal concatenated with a
+	// call whose name says it hashes. This is the second detector, and it is
+	// what makes the gate survive the alphabet const being annotated once: the
+	// deleted ports all read `"vtx.identityindex." + await sha256NanoID(...)`,
+	// and a re-port that reuses an existing NANOID_ALPHABET still has to write
+	// that line somewhere.
+	derivedKeyConstruction = regexp.MustCompile(`"(?:vtx|lnk)\.[a-zA-Z]*\.?"\s*\+\s*(?:await\s+)?[A-Za-z_$][A-Za-z0-9_$]*(?:NanoID|Nanoid|nanoid|Hash|hash|Digest|digest|Sha|sha|SHA)[A-Za-z0-9_$]*\(`)
+	// alphabetBinding captures the identifier a file binds the alphabet to, so
+	// every later USE of that name is flagged as well as the declaration.
+	alphabetBinding = regexp.MustCompile(`(?:const|let|var)\s+([A-Za-z_$][A-Za-z0-9_$]*)\s*=\s*["']` + nanoidAlphabet + `["']`)
 )
+
+// usesAny reports whether line references any of the given identifiers as a
+// whole word.
+func usesAny(line string, names []string) bool {
+	for _, n := range names {
+		for _, idx := range indexAll(line, n) {
+			beforeOK := idx == 0 || !isIdentByte(line[idx-1])
+			end := idx + len(n)
+			afterOK := end >= len(line) || !isIdentByte(line[end])
+			if beforeOK && afterOK {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func indexAll(hay, needle string) []int {
+	var out []int
+	for i := 0; ; {
+		j := strings.Index(hay[i:], needle)
+		if j < 0 {
+			return out
+		}
+		out = append(out, i+j)
+		i += j + len(needle)
+	}
+}
+
+func isIdentByte(b byte) bool {
+	return b == '_' || b == '$' || (b >= '0' && b <= '9') || (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z')
+}
 
 // webExtensions are the shipped web assets. Test assets (.test.mjs) are IN
 // scope: a test is exactly where a deleted re-port gets reintroduced, and the
 // gate's clean-tree claim would not survive exempting them.
-var webExtensions = map[string]bool{".js": true, ".mjs": true}
+//
+// .html is here because every app ships a login.html with a real inline
+// <script> (the six app servers go:embed their web/ directory), and the auth
+// flow is exactly where an identity-key derivation would be written. A gate
+// that stopped at .js would be defeated by moving the code one file sideways.
+var webExtensions = map[string]bool{".js": true, ".mjs": true, ".html": true}
 
 type finding struct {
 	file string
@@ -127,21 +177,56 @@ func trackedWebFiles() []string {
 // file — file granularity would make the first annotation a permanent hole in
 // exactly the file most likely to grow another derivation.
 func scanSource(path, src string) []finding {
-	if !strings.Contains(src, nanoidAlphabet) || !sha256Digest.MatchString(src) {
-		return nil
-	}
 	lines := strings.Split(src, "\n")
+	// Detector 1 — the alphabet and a digest in one file: a hash-to-NanoID
+	// port. Flagged on the alphabet line, which is where the annotation goes.
+	alphabetPort := strings.Contains(src, nanoidAlphabet) && sha256Digest.MatchString(src)
+
+	// The names bound to the alphabet literal. A re-port does not have to
+	// re-declare the alphabet — the whole point of the const being there is
+	// that it can be REUSED — so following the identifier is what keeps the
+	// annotated const from turning the rest of the file into a free pass.
+	var alphabetNames []string
+	if alphabetPort {
+		for _, line := range lines {
+			if m := alphabetBinding.FindStringSubmatch(line); m != nil {
+				alphabetNames = append(alphabetNames, m[1])
+			}
+		}
+	}
+
 	var out []finding
 	for i, line := range lines {
-		if !strings.Contains(line, nanoidAlphabet) {
+		if isCommentLine(line) {
+			continue
+		}
+		var msg string
+		switch {
+		case alphabetPort && (strings.Contains(line, nanoidAlphabet) || usesAny(line, alphabetNames)):
+			msg = "derived-key: hash-to-NanoID derivation in a web asset — this file both carries the Contract #1 NanoID alphabet and computes a SHA-256 digest, which is a client-side port of substrate.SHA256NanoID."
+		case derivedKeyConstruction.MatchString(line):
+			// Independent of detector 1 on purpose: once a file's alphabet
+			// constant carries an annotation, detector 1 goes quiet for that
+			// file forever, and a second derivation added later would ride in
+			// free. This one fires per key-construction site.
+			msg = "derived-key: a Contract #1 key built from a hash call in a web asset — deriving the key client-side is what class (g) replaced."
+		default:
 			continue
 		}
 		if declaredAt(lines, i) {
 			continue
 		}
-		out = append(out, finding{file: path, line: i + 1, msg: "derived-key: hash-to-NanoID derivation in a web asset — this file both carries the Contract #1 NanoID alphabet and computes a SHA-256 digest, which is a client-side port of substrate.SHA256NanoID. A key derived this way from an operation payload is a class-(g) declared read the owning DDL's `derive_reads` computes (Contract #2 §2.5); a browser port is a second implementation of the package's normalization that nothing keeps in agreement. If this derives something that is NOT a declared read (an object id, a requestId), declare `// derived-key: <what it derives and why the package cannot>`"})
+		out = append(out, finding{file: path, line: i + 1, msg: msg + " A key derived this way from an operation payload is a class-(g) declared read the owning DDL's `derive_reads` computes (Contract #2 §2.5); a browser port is a second implementation of the package's normalization that nothing keeps in agreement. If this derives something that is NOT a declared read (an object id, a requestId), declare `// derived-key: <what it derives and why the package cannot>`"})
 	}
 	return out
+}
+
+// isCommentLine reports whether a line is wholly a comment. Without it the
+// alphabet quoted inside a doc comment is flagged, which is the annotate-noise
+// failure this gate's own design argues against.
+func isCommentLine(line string) bool {
+	t := strings.TrimSpace(line)
+	return strings.HasPrefix(t, "//") || strings.HasPrefix(t, "/*") || strings.HasPrefix(t, "*")
 }
 
 // declaredAt reports whether line i carries a `// derived-key:` annotation with
@@ -153,11 +238,12 @@ func declaredAt(lines []string, i int) bool {
 		return true
 	}
 	for j := i - 1; j >= 0; j-- {
-		trimmed := strings.TrimSpace(lines[j])
-		if trimmed == "" {
-			return false
-		}
-		if !strings.HasPrefix(trimmed, "//") {
+		// A blank line or any code line ends the run, so an annotation never
+		// reaches past the statement it was written for. Every comment form is
+		// walked (`//`, `/* */`, a JSDoc `*` continuation) so that a correct
+		// declaration written in the idiom these files already use is honored
+		// rather than read as undeclared.
+		if !isCommentLine(lines[j]) {
 			return false
 		}
 		if reasonGiven(lines[j]) {
@@ -201,6 +287,30 @@ func selfTest() []string {
 			digest + "\t// derived-key: requestId, not a read\n" +
 				"\tconst A = \"" + alphabet + "\";\n" +
 				"\tconst B = \"" + alphabet + "\";\n", true},
+		{"a block-comment declaration passes",
+			digest + "\t/* derived-key: requestId, not a read */\n" +
+				"\tconst A = \"" + alphabet + "\";\n", false},
+		{"a JSDoc declaration passes",
+			digest + "\t/**\n\t * derived-key: requestId, not a read\n\t */\n" +
+				"\tconst A = \"" + alphabet + "\";\n", false},
+		{"the alphabet quoted inside a comment is not flagged",
+			digest + "\t// the canonical alphabet is \"" + alphabet + "\"\n", false},
+
+		// Detector 2 — key construction. These are the shape the deleted ports
+		// had, and the reason the gate survives an annotated alphabet const.
+		{"a key built from a hash call is denied, with no alphabet in the file",
+			"\tkeys.push(\"vtx.identityindex.\" + await sha256NanoID(\"email:\" + e));\n", true},
+		{"a renamed hash function does not evade detector 2",
+			"\tkeys.push(\"vtx.identityindex.\" + await contactDigest(\"email:\" + e));\n", true},
+		{"reusing an ANNOTATED alphabet const does not buy a free derivation",
+			digest + "\t// derived-key: requestId minting, not a read\n" +
+				"\tconst A = \"" + alphabet + "\";\n" +
+				"\tconst k = \"vtx.identityindex.\" + await sha256NanoID(\"email:\" + e);\n", true},
+		{"an annotated key construction passes",
+			"\t// derived-key: object id, content-addressed\n" +
+				"\tconst k = \"vtx.object.\" + await objectHash(bytes);\n", false},
+		{"an ordinary key concatenation is not flagged",
+			"\tconst k = \"lnk.identity.\" + applicantId + \".appliedToUnit.unit.\" + unitId;\n", false},
 	}
 
 	var failures []string

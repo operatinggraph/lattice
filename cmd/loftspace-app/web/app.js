@@ -683,6 +683,9 @@ async function deriveNanoID(namespace, input) {
       digest = new Uint8Array(await crypto.subtle.digest("SHA-256", digest));
       di = 0;
     }
+    // derived-key: the requestId expansion itself — see deriveNanoID's contract
+    // above. Not a declared read: no derive_reads could supply an id the
+    // envelope must already carry when it is submitted.
     out.push(NANOID_ALPHABET[digest[di] % NANOID_ALPHABET.length]);
     di++;
   }

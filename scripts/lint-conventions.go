@@ -271,10 +271,22 @@ var (
 
 	// derivedKeyCall / derivedKeyShape — the G2 call-site ban
 	// (client-ceremony-op-descriptors-design.md §6). A content-addressed id
-	// derivation OUTSIDE internal/ is how a submitter used to name a key it
-	// could not otherwise express; Contract #2 §2.5 class (g) makes that the
-	// owning DDL's job, so a surviving call site must say what it derives.
-	derivedKeyCall  = regexp.MustCompile(`\bsubstrate\.SHA256NanoID\(`)
+	// derivation in a SUBMITTER is how a caller used to name a key it could not
+	// otherwise express; Contract #2 §2.5 class (g) makes that the owning DDL's
+	// job, so a surviving call site must say what it derives.
+	//
+	// Matched on the BARE symbol rather than `substrate.SHA256NanoID`: an import
+	// alias (`sub.SHA256NanoID`) and a dot-import both evade a package-qualified
+	// pattern, and neither is exotic in a file that already imports substrate.
+	//
+	// The two banned entry points are the ones that can reproduce an index key:
+	// SHA256NanoID, and NanoIDFromPCG, which IS SHA256NanoID's body once seeded
+	// from a digest. substrate.DeriveNanoID is deliberately NOT banned — it
+	// expands the digest across the alphabet instead of seeding a PCG, so it
+	// yields a DIFFERENT id and cannot forge a key any script probes. Banning it
+	// would flag every Contract #4 requestId derivation in the tree, which is
+	// the annotate-the-noise failure that stops a default-deny gate being read.
+	derivedKeyCall  = regexp.MustCompile(`\b(SHA256NanoID|NanoIDFromPCG)\(`)
 	derivedKeyShape = regexp.MustCompile(`//\s*derived-key:(.*)$`)
 )
 
@@ -670,11 +682,24 @@ func scanSource(path string, data []byte) []finding {
 	// primitive itself lives (substrate defines it, the Processor exposes it to
 	// scripts, Loupe-adjacent managers consume it); packages/ is the DDL side,
 	// which is precisely where a derivation is supposed to happen.
+	// derivedKeyScoped — G2 bans the derivation at SUBMITTER call sites. The
+	// excluded trees are the ones that legitimately OWN the primitive:
+	// internal/substrate defines it, internal/processor exposes it to scripts,
+	// and packages/ is the DDL side, which is precisely where a derivation is
+	// supposed to happen. scripts/lint-*.go are excluded because their own
+	// self-test fixtures are string literals containing the banned call.
+	//
+	// scripts/ is otherwise IN scope: seed/demo scripts submit real operations,
+	// and one of them (seed-showcase) carried a live hand-ported derivation that
+	// a blanket scripts/ exclusion hid. The internal/ exclusion is broader than
+	// this gate's purpose warrants — internal/gateway and internal/objectmanager
+	// are submitters too — and is filed as its own board row rather than widened
+	// here, since it needs annotations on legitimate sites this fire does not own.
 	derivedKeyScoped := !strings.HasPrefix(slash, "internal/") && !strings.HasPrefix(slash, "packages/") &&
-		!strings.HasPrefix(slash, "scripts/")
-	var derivedKeyAt map[int]annotation
+		!strings.HasPrefix(slash, "scripts/lint-")
+	var derivedKeyLines []string
 	if derivedKeyScoped {
-		derivedKeyAt = annotationSpans(strings.Split(string(data), "\n"), derivedKeyShape)
+		derivedKeyLines = strings.Split(string(data), "\n")
 	}
 	// The file's own validated-target exemption helpers, derived from the
 	// script text rather than a hardcoded name list (see exemptionHelpers).
@@ -727,7 +752,7 @@ func scanSource(path string, data []byte) []finding {
 			out = append(out, checkNanoIDAlphabet(path, ln, line, nanoidAt[ln])...)
 		}
 		if derivedKeyScoped {
-			out = append(out, checkDerivedKey(path, ln, line, derivedKeyAt[ln])...)
+			out = append(out, checkDerivedKey(path, ln, derivedKeyLines)...)
 		}
 		if postureScoped {
 			out = append(out, checkReadPosture(path, ln, line, postureAt[ln], fileMutates)...)
@@ -1053,40 +1078,6 @@ func checkWorkplaceExempt(path string, ln int, line string, declared annotation,
 // 2026-08-01: composite_key_producer_test.go's "…01aaaaaaaaa" and four
 // mnemonic ids in packages/privacy-base/lens_cypher_test.go). declared is the
 // `// nanoid-alphabet:` annotation covering this line (annotationSpans).
-// checkDerivedKey is the G2 call-site ban
-// (client-ceremony-op-descriptors-design.md §6): default-deny a
-// content-addressed id derivation outside internal/, with an explicit
-// `// derived-key: <reason>` as the one escape.
-//
-// The rule is not "hashing is forbidden" — it is that a submitter deriving a
-// key CANNOT be doing so correctly by construction. A declared read key that
-// is a function of the payload under the *package's* semantics belongs to that
-// package's `derive_reads` (Contract #2 §2.5 class (g)); a client that
-// recomputes it has re-implemented the package's normalization in a second
-// language, where nothing makes the two agree and nothing notices when they
-// stop. What survives the ban is a derivation of something that is NOT a
-// declared read — an object id, a Contract #4 requestId — and those simply
-// have to say so, which is cheap and makes the exception re-checkable.
-//
-// _test.go files are in scope deliberately: a test is exactly where a deleted
-// re-port would be reintroduced, and an exempted test suite is a hole the
-// gate's own clean-tree claim would not survive.
-func checkDerivedKey(path string, ln int, line string, declared annotation) []finding {
-	if isCommentLine(line) || !derivedKeyCall.MatchString(line) {
-		return nil
-	}
-	if declared.text == "" {
-		return []finding{{file: path, line: ln, msg: "derived-key: undeclared substrate.SHA256NanoID outside internal/ — a key derived client-side from a payload is a class-(g) declared read the owning DDL's `derive_reads` should compute (Contract #2 §2.5); a hand-ported derivation is a second implementation of the package's normalization that nothing keeps in agreement. If this derives something that is NOT a declared read (an object id, a requestId), declare `// derived-key: <what it derives and why the package cannot>`"}}
-	}
-	// derivedKeyShape has a single capture group, so annotationSpans lands the
-	// reason in `shape`; there is no closed vocabulary here, only a required
-	// sentence.
-	if strings.TrimSpace(declared.shape) == "" {
-		return []finding{{file: path, line: ln, msg: "derived-key: declaration carries no reason — name what this derives and why it is not a declared read the owning package should compute"}}
-	}
-	return nil
-}
-
 func checkNanoIDAlphabet(path string, ln int, line string, declared annotation) []finding {
 	if isCommentLine(line) {
 		return nil
@@ -1128,6 +1119,88 @@ func checkNanoIDAlphabet(path string, ln int, line string, declared annotation) 
 		return nil
 	}
 }
+
+// checkDerivedKey is the G2 call-site ban
+// (client-ceremony-op-descriptors-design.md §6): default-deny a
+// content-addressed id derivation in a submitter, with an explicit
+// `// derived-key: <reason>` as the one escape.
+//
+// The rule is not "hashing is forbidden" — it is that a submitter deriving a
+// key CANNOT be doing so correctly by construction. A declared read key that
+// is a function of the payload under the *package's* semantics belongs to that
+// package's `derive_reads` (Contract #2 §2.5 class (g)); a client that
+// recomputes it has re-implemented the package's normalization in a second
+// language, where nothing makes the two agree and nothing notices when they
+// stop. What survives the ban is a derivation of something that is NOT a
+// declared read — an object id, a Contract #4 requestId — and those simply
+// have to say so, which is cheap and makes the exception re-checkable.
+//
+// The annotation binds to ONE statement: the line itself, or the contiguous
+// comment block immediately above it. It deliberately does NOT use
+// annotationSpans, whose indent-based scoping anchors a standalone comment to
+// the first code line beneath it and then covers everything indented deeper —
+// so a `// derived-key:` doc comment on a func would amnesty every derivation
+// in its body, and a doc comment that merely MENTIONS the annotation while
+// explaining the convention would do the same. For a gate whose whole value is
+// that each exception is individually re-checkable, one comment covering a
+// whole function is the failure mode, not a convenience.
+//
+// _test.go files are in scope deliberately: a test is exactly where a deleted
+// re-port would be reintroduced, and an exempted test suite is a hole the
+// gate's own clean-tree claim would not survive.
+func checkDerivedKey(path string, ln int, lines []string) []finding {
+	line := lines[ln-1]
+	if isCommentLine(line) || !derivedKeyCall.MatchString(line) {
+		return nil
+	}
+	switch derivedKeyReason(lines, ln-1) {
+	case reasonGiven:
+		return nil
+	case reasonMissing:
+		return []finding{{file: path, line: ln, msg: "derived-key: declaration carries no reason — name what this derives and why it is not a declared read the owning package should compute"}}
+	}
+	return []finding{{file: path, line: ln, msg: "derived-key: undeclared content-addressed id derivation in a submitter — a key derived client-side from a payload is a class-(g) declared read the owning DDL's `derive_reads` should compute (Contract #2 §2.5); a hand-ported derivation is a second implementation of the package's normalization that nothing keeps in agreement. If this derives something that is NOT a declared read (an object id, a requestId), declare `// derived-key: <what it derives and why the package cannot>`"}}
+}
+
+type derivedKeyVerdict int
+
+const (
+	reasonAbsent derivedKeyVerdict = iota
+	reasonMissing
+	reasonGiven
+)
+
+// derivedKeyReason looks for a `// derived-key:` annotation on line i, else on
+// the contiguous run of comment lines directly above it. A blank line or any
+// code line ends the run, so an annotation never reaches past the statement it
+// was written for.
+func derivedKeyReason(lines []string, i int) derivedKeyVerdict {
+	if v := derivedKeyOnLine(lines[i]); v != reasonAbsent {
+		return v
+	}
+	for j := i - 1; j >= 0; j-- {
+		trimmed := strings.TrimSpace(lines[j])
+		if trimmed == "" || !strings.HasPrefix(trimmed, "//") {
+			return reasonAbsent
+		}
+		if v := derivedKeyOnLine(lines[j]); v != reasonAbsent {
+			return v
+		}
+	}
+	return reasonAbsent
+}
+
+func derivedKeyOnLine(line string) derivedKeyVerdict {
+	m := derivedKeyShape.FindStringSubmatch(line)
+	if m == nil {
+		return reasonAbsent
+	}
+	if strings.TrimSpace(m[1]) == "" {
+		return reasonMissing
+	}
+	return reasonGiven
+}
+
 
 // quoteBytes renders a byte slice as a comma-separated, single-quoted list
 // for a finding message, e.g. []byte("l0") -> "'l', '0'".
@@ -1317,7 +1390,7 @@ func selfTest() []string {
 
 		{"an undeclared SHA256NanoID in cmd/ is denied", "cmd/some-app/keys.go",
 			"\tk := \"vtx.identityindex.\" + substrate.SHA256NanoID(\"email:\" + e)\n",
-			"undeclared substrate.SHA256NanoID outside internal/"},
+			"undeclared content-addressed id derivation in a submitter"},
 		{"a declared derivation passes", "cmd/some-app/objects.go",
 			"\t// derived-key: object id, content-addressed; not a declared read\n" +
 				"\toid := substrate.SHA256NanoID(\"object:\" + digest)\n", ""},
@@ -1333,7 +1406,38 @@ func selfTest() []string {
 			"\toid := substrate.SHA256NanoID(\"object:\" + digest)\n", ""},
 		{"the derived-key gate covers _test.go under cmd/", "cmd/some-app/objects_test.go",
 			"\twant := substrate.SHA256NanoID(\"object:\" + digest)\n",
-			"undeclared substrate.SHA256NanoID outside internal/"},
+			"undeclared content-addressed id derivation in a submitter"},
+		{"an import alias does not evade the ban", "cmd/some-app/keys.go",
+			"\tk := \"vtx.identityindex.\" + sub.SHA256NanoID(\"email:\" + e)\n",
+			"undeclared content-addressed id derivation in a submitter"},
+		{"a dot-import does not evade the ban", "cmd/some-app/keys.go",
+			"\tk := \"vtx.identityindex.\" + SHA256NanoID(\"email:\" + e)\n",
+			"undeclared content-addressed id derivation in a submitter"},
+		{"a digest-seeded NanoIDFromPCG does not evade the ban", "cmd/some-app/keys.go",
+			"\tk := \"vtx.identityindex.\" + substrate.NanoIDFromPCG(pcg, 20)\n",
+			"undeclared content-addressed id derivation in a submitter"},
+		{"DeriveNanoID is deliberately not banned (a different id, cannot forge a key)", "cmd/some-app/attach.go",
+			"\trid := substrate.DeriveNanoID(\"attach:\", input)\n", ""},
+		{"an annotation does NOT carry into a function body", "cmd/some-app/objects.go",
+			"// derived-key: object id, content-addressed\n" +
+				"func mint(digest string) string {\n" +
+				"\toid := substrate.SHA256NanoID(\"object:\" + digest)\n" +
+				"\treturn oid\n}\n",
+			"undeclared content-addressed id derivation in a submitter"},
+		{"an annotation does NOT carry to a nested statement", "cmd/some-app/objects.go",
+			"\t// derived-key: object id, content-addressed\n" +
+				"\toid := substrate.SHA256NanoID(\"object:\" + digest)\n" +
+				"\tif x {\n\t\tother := substrate.SHA256NanoID(\"email:\" + e)\n\t}\n",
+			"undeclared content-addressed id derivation in a submitter"},
+		{"a blank line breaks the annotation's reach", "cmd/some-app/objects.go",
+			"\t// derived-key: object id, content-addressed\n\n" +
+				"\toid := substrate.SHA256NanoID(\"object:\" + digest)\n",
+			"undeclared content-addressed id derivation in a submitter"},
+		{"scripts/ is in scope", "scripts/seed-demo.go",
+			"\tk := \"vtx.identityindex.\" + substrate.SHA256NanoID(\"email:\" + e)\n",
+			"undeclared content-addressed id derivation in a submitter"},
+		{"the lint scripts' own fixtures are exempt", "scripts/lint-conventions.go",
+			"\tsrc := \"substrate.SHA256NanoID(x)\"\n", ""},
 	}
 	var failures []string
 	for _, tc := range cases {

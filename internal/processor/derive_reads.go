@@ -3,6 +3,7 @@ package processor
 import (
 	"context"
 	"fmt"
+	"slices"
 
 	starlarkjson "go.starlark.net/lib/json"
 	starlarklib "go.starlark.net/starlark"
@@ -61,8 +62,13 @@ func deriveReads(ctx context.Context, prog *starlarksandbox.Program, env *Operat
 	base := declaredReadsFromEnvelope(env)
 	rid := env.RequestID
 
+	// One op value, bound BOTH as the call argument and as the `op` global.
+	// Building it twice re-parses the payload twice per derivation, per OCC
+	// attempt, and hands the two bindings distinct structs for no reason — a
+	// derivation comparing `op` against its own parameter should see one value.
+	opValue := deriveReadsOpValue(env)
 	out, sErr := starlarksandbox.Run(ctx, prog, deriveReadsEntrypoint,
-		starlarklib.Tuple{deriveReadsOpValue(env)}, deriveReadsGlobals(env), budget)
+		starlarklib.Tuple{opValue}, deriveReadsGlobals(opValue), budget)
 	if sErr != nil {
 		return declaredReads{}, &HydrationError{
 			Code:               "DeriveReadsFailed",
@@ -101,10 +107,10 @@ func deriveReads(ctx context.Context, prog *starlarksandbox.Program, env *Operat
 // the pre-pass runs BEFORE hydration, so there is no state to expose. `ddl` is
 // likewise empty — the derivation's input is the op, per the contract's
 // `derive_reads(op)` signature.
-func deriveReadsGlobals(env *OperationEnvelope) starlarklib.StringDict {
+func deriveReadsGlobals(opValue *starlarkstruct.Struct) starlarklib.StringDict {
 	return starlarklib.StringDict{
 		"state":  starlarklib.NewDict(0),
-		"op":     deriveReadsOpValue(env),
+		"op":     opValue,
 		"ddl":    starlarklib.NewDict(0),
 		"nanoid": failingModule("nanoid", []string{"new", "short"}),
 		"crypto": cryptoModule(),
@@ -264,7 +270,17 @@ func mergeDerivedReads(base declaredReads, derived derivedReads, rid string) (de
 
 	// Optional first, so weakest-wins holds for a derived/derived collision:
 	// a key in both derived lists is claimed here and skipped below.
+	//
+	// The two lists are CLONED before anything is appended. `merged := base`
+	// alone copies the slice headers, so an append lands in the envelope's own
+	// JSON-decoded backing array whenever that array has spare capacity —
+	// writing a derived key into storage the envelope owns, which is exactly
+	// what this file's header promises never happens. Harmless in today's
+	// sequential, pure-derivation path, but the invariant is stated as
+	// absolute, so it is enforced rather than argued.
 	merged := base
+	merged.Reads = slices.Clone(base.Reads)
+	merged.OptionalReads = slices.Clone(base.OptionalReads)
 	claimed := map[string]struct{}{}
 	appendDerived := func(keys []string, dst *[]string) error {
 		for _, key := range keys {

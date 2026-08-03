@@ -662,8 +662,35 @@ def validate_state_transition(current, new):
 # derive_reads runs before the operation's own validation, so failing here would
 # turn a clean InvalidArgument into an opaque hydration fault.
 
+#
+# MAX_CONTACT_INPUT bounds the work every normalizer does on a caller-supplied
+# string. derive_reads runs BEFORE execute's validation, so without it a ~1 MB
+# name (the Gateway body cap is 1 MiB) buys a lower()+split()+join() over half a
+# million tokens -- none of which the sandbox's step ceiling counts, since each
+# is a single builtin call -- on a payload execute is about to reject anyway.
+#
+# The cap is deliberately NOT enforced only here. A normalizer that silently
+# returned None over the limit while execute still ACCEPTED the value would
+# resurrect precisely the divergence this mechanism exists to end: 300 leading
+# spaces plus "Ada" is a 303-character raw input and a 3-character name, so
+# execute would accept it while the derived probe went missing. execute
+# therefore rejects the same inputs, on the RAW value, before it strips (see
+# require_contact_input). The two passes agree by construction, and the bound
+# sits far above any real name, email, or phone number.
+MAX_CONTACT_INPUT = 4096
+
+def within_contact_limit(raw):
+    return type(raw) == type("") and len(raw) <= MAX_CONTACT_INPUT
+
+def require_contact_input(field, raw):
+    # execute's half of the MAX_CONTACT_INPUT bound. Only a PRESENT string over
+    # the limit is a caller error; absent or non-string is left to each branch's
+    # own required/optional rules, which report better messages for it.
+    if type(raw) == type("") and len(raw) > MAX_CONTACT_INPUT:
+        fail("InvalidArgument: " + field + ": exceeds " + str(MAX_CONTACT_INPUT) + " characters")
+
 def normalize_name(raw):
-    if raw == None or type(raw) != type(""):
+    if not within_contact_limit(raw):
         return None
     normalized = " ".join(raw.lower().split())
     if len(normalized) == 0:
@@ -671,7 +698,7 @@ def normalize_name(raw):
     return normalized
 
 def normalize_email(raw):
-    if raw == None or type(raw) != type(""):
+    if not within_contact_limit(raw):
         return None
     e = raw.strip().lower()
     if len(e) == 0:
@@ -681,7 +708,7 @@ def normalize_email(raw):
 def normalize_phone(raw):
     # E.164-ish: digits and a plus survive, everything else is punctuation the
     # submitter's formatting added.
-    if raw == None or type(raw) != type(""):
+    if not within_contact_limit(raw):
         return None
     stripped = ""
     for ch in raw.elems():
@@ -759,6 +786,13 @@ def execute(state, op):
         return {"mutations": mutations, "events": events}
 
     if ot == "CreateUnclaimedIdentity":
+        # The RAW-input bound runs first, on the same values derive_reads saw,
+        # so no payload this branch accepts can be one the normalizers declined
+        # to normalize (MAX_CONTACT_INPUT above).
+        require_contact_input("name", getattr(p, "name", None))
+        require_contact_input("email", getattr(p, "email", None))
+        require_contact_input("phone", getattr(p, "phone", None))
+
         name = p.name if hasattr(p, "name") else None
         if name == None or type(name) != type("") or len(name.strip()) == 0:
             fail("InvalidArgument: name: required, maxLen 200")
