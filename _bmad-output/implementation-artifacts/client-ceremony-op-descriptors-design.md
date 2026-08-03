@@ -988,3 +988,86 @@ G2 blocking in both halves. Full suite green across 115 packages.
 **Next: Inc 3** (§9) — `OpCeremonySpec`, Facet's mint-and-reveal executor, the `CreateUnclaimedIdentity` /
 `RotateClaimKey` descriptors, and **G1** (the `[no-op-meta:]` closed vocabulary, incl. the six note
 rewrites and `package_test.go:235`). Inc 2 is also unblocked by Inc 1 but sits behind its own backfill.
+
+## 13. Increment 3 fire brief (build note, 2026-08-03)
+
+**Scope sentence (§9 row 3, verbatim):** `OpCeremonySpec` + Facet client ceremony support +
+`CreateUnclaimedIdentity` / `RotateClaimKey` descriptors + **G1** (incl. the six note rewrites +
+`package_test.go`); two exemptions removed.
+
+### 13.1 Verified touch-list (checked live at `fad2765b`)
+
+| Site | What it is |
+|---|---|
+| `internal/pkgmgr/definition.go:476-504` | `OpMetaSpec` — `Presentation` (482), `Dispatch` (497) are the nil-skipped sibling pointers `Ceremony` joins |
+| `internal/pkgmgr/build.go:229-264` | the op-meta emission loop; each optional sub-spec emits via `addCreate(opMetaKey+".<name>", docAspect(...))` |
+| `internal/pkgmgr/build.go:569-593` / `:597-639` | `opPresentationBody` / `opDispatchBody` — the sparse-map body-builder idiom `opCeremonyBody` mirrors |
+| `packages/edge-manifest/lenses.go:587-617` | `edgeCatalogTail` — projects `op.presentation.data.*` / `op.dispatch.data.*` into `manifest.op.<id>`; **the only path by which any client sees a descriptor aspect** |
+| `packages/edge-manifest/composed_test.go:400-465` | a hand-copied fixture of that cypher, kept in sync manually |
+| `packages/identity-domain/opmetas.go:32-` | the two shipped descriptors (`ClaimIdentity`, `RecordIdentityPII`) — the idiom to mirror |
+| `packages/identity-domain/permissions.go:49,67,85,91,97` | the five `[no-op-meta:]` Notes (all five line numbers verified accurate) |
+| `packages/control-authz/permissions.go:78` | the sixth Note — a shared template stamped onto every `personalLensPermissions()` op |
+| `packages/identity-domain/package_test.go:214-251` | `TestPackage_CeremonyOpsStateTheirExemption` — pins the marker shape and the "exempt ⇒ no op-meta" complement |
+| `scripts/lint-package-standard.go:78-80,743-770` | `exemptionMarker` + `checkS1`'s bare `strings.Contains` — G1's target |
+| `scripts/lint-conventions.go:232,342-353,927-937` | `authcontext-target` — the **closed-vocabulary precedent to mirror** (open capture regex → set membership → distinct "unknown code" error) |
+| `cmd/facet/web/app.js:955-978` | `opButton` — the degrade branches (`!dispatchClass`, unresolvable target) a ceremony-unsupported client extends |
+| `cmd/facet/web/app.js:1928-1975` | `renderDescriptorForm` — `fieldNames` filter (1940) is where the minted-hash field is dropped |
+| `cmd/facet/web/app.js:2178-2273` | `submitDescriptorForm` — payload assembly + `enqueue(...)` |
+| `cmd/facet/web/app.js:592-607` | `applyOutboxFrame` — `e.state === "confirmed"` is the only accepted/rejected seam that reaches the tab |
+| `cmd/facet/credentials.go:155-163` | `mintLinkSecret` — Facet's own 32-byte → hex-plaintext → sha256-hex idiom |
+| `cmd/loftspace-app/web/app.js:936-948` | `showClaimSecret`/`closeClaimSecret` — the reveal precedent: a dedicated dialog, deliberately **not** a toast (a toast auto-hides and the next `toast()` clears it, either of which destroys the only way into the account) |
+| `cmd/facet/web/descriptor_autofill.test.mjs:124-206` | the mirror test: a field excluded from the rendered set but present in the payload |
+
+### 13.2 Scope-diff gate — two divergences from the ratified body, both narrow-only
+
+**(1) `RotateClaimKey`'s target field is `identityKey`, not `targetIdentityKey`.** §4.3 names
+`TargetField: "targetIdentityKey"`; the DDL branch reads `p.identityKey` (`ddls.go:1155`) and fails closed
+on its absence. The design's field name is simply stale — corrected to the code.
+
+**(2) `RotateClaimKey` ships with NO `TargetField`/`TargetType` at all** (Winston, §0 — an implementation
+call the design did not reach). `resolveTargetKey` (`app.js:2134-2152`) ends in `selfAnchorKey(want)`, so a
+declared `TargetType:"identity"` that resolves from no context silently substitutes **the submitting staff
+member's own identity** rather than degrading. That is the exact hazard `ClaimIdentity`'s own descriptor
+records at `opmetas.go:50-57` and refuses for the same reason; this op inherits the refusal. `identityKey`
+instead carries `"x-entityRef":"identity"`, so the client renders a picker over the identities its mirror
+holds and `submitDescriptorForm`'s pick-required guard (`app.js:2204-2206`) fails closed when it holds none
+— unfillable-and-honest beats targeting the wrong person.
+
+**(3) In-scope by necessity, not expansion: the `edgeCatalog` lens must project the ceremony columns.**
+`.ceremony` is written by `build.go` but reaches a client **only** through `edgeCatalogTail`
+(`lenses.go:587-617`) — without the projection the increment's own stated deliverable ("Facet client
+ceremony support") has nothing to read. Same optional-and-nullable column idiom the file's doc comment
+(555-567) already establishes for `presentation`/`dispatch`. Carries an `edge-manifest` version bump.
+
+### 13.3 Increment order + green checks
+
+- **3a — platform vocabulary.** `OpCeremonySpec` + `Ceremony` field + `opCeremonyBody` + emission +
+  `edgeCatalogTail` ceremony columns + both version bumps.
+  Green: `go build ./...`, `go test ./internal/pkgmgr/ ./packages/edge-manifest/`.
+- **3b — descriptors + G1.** The two identity-domain descriptors, the exemption-note rewrites to the closed
+  vocabulary, `lint-package-standard`'s extract-and-validate, `package_test.go` re-pinned.
+  Green: `go test ./packages/identity-domain/ ./packages/control-authz/`,
+  `STRICT=1 go run ./scripts/lint-package-standard.go`.
+- **3c — Facet's mint-and-reveal executor.** Field removal, mint, reveal-on-`confirmed`, discard otherwise,
+  degrade without support. Green: `node --test cmd/facet/web/`, `go test ./cmd/facet/`.
+
+### 13.4 In-scope gotchas
+
+- **A package edit needs a version bump** — a same-version install no-ops, so both `identity-domain`
+  (0.11.0) and `edge-manifest` (0.14.13) bump or the change never lands on a running stack.
+- `docAspect` emits `data:{}` for an all-zero non-nil spec, which is why every body builder is sparse and
+  the **caller** does the nil-skip. `opCeremonyBody` follows both halves.
+- `composed_test.go`'s embedded cypher copy must gain the same columns or its comparison drifts.
+- `AuthContext` is **doc-comment convention, not validated Go** (`definition.go:559-568`); `"standing"` is
+  correct for both ops (scope=any grants to frontOfHouse/backOfHouse/operator, `permissions.go:47-51,65-69`).
+- `control-authz:78`'s Note is a **shared template** across every `personalLensPermissions()` op — one edit,
+  many ops; its code is `client-agent-op`.
+- Removing an exemption Note and adding an op-meta must land **together**: `package_test.go`'s complement
+  asserts an exempt op carries no descriptor, so a half-edit reddens the package.
+
+### 13.5 Non-goals
+
+Inc 2 (`boundTo`/`UnlinkCredential`), Inc 4 (`credential` authContext, `RevealWith`, `PairedCodeField`), any
+`InitiateCredentialLink`/`CompleteCredentialLink` descriptor, AI-authorability of `Ceremony`
+(`capabilitymaterializer_starlark.go`'s artifact allow-lists deliberately untouched — the same posture
+`Sensitive` already has), and any change to `derive_reads`.
