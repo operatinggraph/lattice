@@ -10,7 +10,7 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 //	CreateTask         → operator
 //	ClaimTask          → operator, frontOfHouse, backOfHouse
 //	ReAssignTask       → operator
-//	CompleteTask       → operator
+//	CompleteTask       → operator, self (the task's own assignee)
 //	CancelTask         → operator
 //	SetAvailability    → operator
 //	StartLoomPattern   → operator
@@ -69,6 +69,12 @@ func Permissions() []pkgmgr.PermissionSpec {
 			Scope:         "any",
 			Note:          "Grants the operator the right to submit CompleteTask operations.",
 			GrantsTo:      []string{"operator"},
+		},
+		{
+			OperationType: "CompleteTask",
+			Scope:         "self",
+			Note:          "Grants an assignee the right to complete a task assignedTo THEMSELVES (the script's standing guard confines a non-operator caller to a task whose assignedTo link resolves to the submitting actor; completing someone else's task is rejected). Every role a task can legitimately be assignedTo (Contract #10 §10.1's direct-push assignment) needs the grant, mirroring control-authz's personalLensPermissions role list.",
+			GrantsTo:      []string{"consumer", "frontOfHouse", "backOfHouse", "provider"},
 		},
 		{
 			OperationType: "CancelTask",

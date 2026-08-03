@@ -69,6 +69,32 @@ func oldAssignedLink() processor.VertexDoc {
 	}
 }
 
+// runLifecycleAs drives one lifecycle op as a given actor, with
+// AuthTargetValidated set as step 3 would (CompleteTask's scope=self path),
+// and a fake LinkLister backing the assignedTo kv.Links enumeration
+// task_assignee() runs (the class-(e) bounded lookup, same idiom
+// ClaimTask's queuedFor check uses — see claim_task_script_test.go).
+func runLifecycleAs(t *testing.T, op, actor string, authTargetValidated bool, payload map[string]any, hydrated map[string]processor.VertexDoc, lister processor.ScriptLinkLister) (processor.ScriptResult, error) {
+	t.Helper()
+	pb, _ := json.Marshal(payload)
+	sc := processor.ScriptContext{
+		Operation: &processor.OperationEnvelope{
+			RequestID:           "BBlc" + op + "QRSTUVWX",
+			Lane:                processor.LaneDefault,
+			OperationType:       op,
+			Actor:               actor,
+			AuthTargetValidated: authTargetValidated,
+			SubmittedAt:         "2026-06-04T00:00:00Z",
+			Payload:             pb,
+		},
+		Hydrated:     hydrated,
+		ScriptSource: lcTaskScript(t),
+		ScriptClass:  "task",
+		LinkLister:   lister,
+	}
+	return processor.NewStarlarkRunner(0, 0).Run(context.Background(), sc)
+}
+
 func mutationByOpKey(res processor.ScriptResult, op, key string) (processor.MutationOp, bool) {
 	for _, m := range res.Mutations {
 		if m.Op == op && m.Key == key {
@@ -194,6 +220,57 @@ func TestComplete_OpenToComplete(t *testing.T) {
 	}
 	if got, _ := res.Events[0].Data["taskKey"].(string); got != lcTaskKey {
 		t.Fatalf("TaskCompleted taskKey = %q, want %q", got, lcTaskKey)
+	}
+}
+
+// TestComplete_SelfAssignee_Success: CompleteTask's scope=self grant — the
+// task's own assignedTo identity completes it (op.authTargetValidated, as
+// step 3 sets when the self-scope permission row matched).
+func TestComplete_SelfAssignee_Success(t *testing.T) {
+	hydrated := map[string]processor.VertexDoc{lcTaskKey: taskRoot("open", 2)}
+	lister := fakeClaimLinkLister{links: []processor.LinkDoc{
+		{Key: "lnk.task." + lcTaskID + ".assignedTo.identity." + lcOldAssID,
+			Class: "assignedTo", SourceVertex: lcTaskKey, TargetVertex: lcOldAssign},
+	}}
+	res, err := runLifecycleAs(t, "CompleteTask", lcOldAssign, true,
+		map[string]any{"taskKey": lcTaskKey}, hydrated, lister)
+	if err != nil {
+		t.Fatalf("CompleteTask by its own assignee: unexpected error: %v", err)
+	}
+	rm, _ := mutationByOpKey(res, "update", lcTaskKey)
+	data, _ := rm.Document["data"].(map[string]any)
+	if got, _ := data["status"].(string); got != "complete" {
+		t.Fatalf("status = %q, want complete", got)
+	}
+}
+
+// TestComplete_NotAssignee_Rejected: a caller who is NOT the task's assignee
+// but somehow carries a self-scope-validated target (a different task's
+// assignee, say) is denied — op.authTargetValidated proves the target was
+// checked against op.actor, never that op.actor owns THIS task.
+func TestComplete_NotAssignee_Rejected(t *testing.T) {
+	hydrated := map[string]processor.VertexDoc{lcTaskKey: taskRoot("open", 2)}
+	lister := fakeClaimLinkLister{links: []processor.LinkDoc{
+		{Key: "lnk.task." + lcTaskID + ".assignedTo.identity." + lcOldAssID,
+			Class: "assignedTo", SourceVertex: lcTaskKey, TargetVertex: lcOldAssign},
+	}}
+	_, err := runLifecycleAs(t, "CompleteTask", lcNewAssign, true,
+		map[string]any{"taskKey": lcTaskKey}, hydrated, lister)
+	if err == nil || !strings.Contains(err.Error(), "AuthDenied") {
+		t.Fatalf("complete by a non-assignee: want AuthDenied rejection, got %v", err)
+	}
+}
+
+// TestComplete_QueuedTask_SelfScope_Rejected: an open, still-QUEUED task (no
+// assignedTo link yet, FR28) can never be self-completed — task_assignee
+// resolves to None, which matches no actor.
+func TestComplete_QueuedTask_SelfScope_Rejected(t *testing.T) {
+	hydrated := map[string]processor.VertexDoc{lcTaskKey: taskRoot("open", 2)}
+	lister := fakeClaimLinkLister{links: nil}
+	_, err := runLifecycleAs(t, "CompleteTask", lcOldAssign, true,
+		map[string]any{"taskKey": lcTaskKey}, hydrated, lister)
+	if err == nil || !strings.Contains(err.Error(), "AuthDenied") {
+		t.Fatalf("complete of a queued (unassigned) task via self-scope: want AuthDenied rejection, got %v", err)
 	}
 }
 

@@ -102,7 +102,9 @@ func taskDDL() pkgmgr.DDLSpec {
 			"new assignee + re-points the assignedTo link atomically (old tombstoned, new created); " +
 			"CompleteTask (open->complete) and CancelTask (open->cancelled) transition the root " +
 			"data.status. All lifecycle ops require the task to be open, assert the task root " +
-			"revision (OCC, Contract #2 §2.6), and reject any other source state (§10.6).",
+			"revision (OCC, Contract #2 §2.6), and reject any other source state (§10.6). " +
+			"CompleteTask additionally grants scope=self (permissions.go): a non-operator caller " +
+			"must be the task's own assignedTo identity, or the script rejects AuthDenied.",
 		Script: taskDDLScript,
 		InputSchema: `{"type":"object","properties":` +
 			`{"assignee":{"type":"string","description":"vtx.identity.<NanoID> — the identity that will perform the task. Required unless queue is given; a given+alive assignee always wins over queue."},` +
@@ -526,10 +528,21 @@ def execute(state, op):
                 "response": {"primaryKey": task_key}}
 
     if ot == "CompleteTask":
-        return transition_task(state, p, "complete", "orchestration.taskCompleted")
+        # workplace-exempt: (resource-bind) transition_task's own guard binds the
+        # validated target to THIS task: when op.authTargetValidated (self-scope
+        # matched, so op.actor == the caller-declared target), it re-derives the
+        # task's real assignedTo link and rejects unless it equals op.actor —
+        # the target is proven to name this specific task's assignee, not just
+        # to equal the actor in the abstract.
+        return transition_task(state, op, p, "complete", "orchestration.taskCompleted", True)
 
     if ot == "CancelTask":
-        return transition_task(state, p, "cancelled", "orchestration.taskCancelled")
+        # workplace-exempt: (no-validated-path) CancelTask grants only
+        # scope=any (operator) in permissions.go — no scope=self, no task
+        # mints one — so op.authTargetValidated can never legitimately be
+        # true here; enforce_self_assignee=False means this call never
+        # consults it anyway, and only an operator ever reaches this path.
+        return transition_task(state, op, p, "cancelled", "orchestration.taskCancelled", False)
 
     if ot == "SetAvailability":
         # Fire 2 (Contract #10 §10.1): writes the routing input CreateTask
@@ -585,7 +598,20 @@ def find_assigned_link(state, task_id):
             return k
     return None
 
-def transition_task(state, p, target_status, event_class):
+def task_assignee(task_key):
+    # The task's own assignedTo link, via the sanctioned bounded op-time
+    # enumeration (Contract #2 §2.5.1) -- an open task carries AT MOST one
+    # (the §10.1 "exactly one assignment link" invariant), same idiom
+    # ClaimTask's queuedFor lookup uses. Not a declared contextHint.reads key:
+    # the assignee is unknown to the caller until this resolves.
+    # read-posture: (e) relation=assignedTo epoch=task root
+    page, _ = kv.Links(task_key, "assignedTo", "out")
+    for lk in page:
+        if not lk.isDeleted:
+            return lk.targetVertex
+    return None
+
+def transition_task(state, op, p, target_status, event_class, enforce_self_assignee):
     # CompleteTask (open -> complete) and CancelTask (open -> cancelled) share
     # this validated-transition body. Only an OPEN task transitions; any other
     # source state is rejected with a structured ScriptError (the named AC
@@ -594,6 +620,16 @@ def transition_task(state, p, target_status, event_class):
     parts_of(task_key, "taskKey", "task")
     if not vertex_alive(state, task_key):
         fail("UnknownTask: " + task_key)
+    if enforce_self_assignee and op.authTargetValidated:
+        # CompleteTask's scope=self grant (permissions.go) matched: step 3
+        # already enforced authContext.target == op.actor, but that alone
+        # never proves the target relates to THIS task, so the script
+        # re-derives the real assignee and compares (mirrors clinic-domain's
+        # RescheduleAppointment self-scope guard). op.authTargetValidated is
+        # false on the scope=any (operator) path, which reads no target at
+        # all, so an operator's completion never pays this check.
+        if task_assignee(task_key) != op.actor:
+            fail("AuthDenied: " + op.actor + " may not complete a task not assignedTo them: " + task_key)
     status = root_status(state, task_key)
     if status == target_status:
         fail("TaskAlreadyInState: task " + task_key + " is already " + target_status)
