@@ -662,3 +662,76 @@ the material corrections, so a reader can see what changed and why:
   so Inc 4's deferral is correct; no Edge Starlark exists; `s1Debt` is empty.
 
 **No deferred gate remains** — this design self-flags no further pre-build review.
+
+## 11. Increment 1a fire brief (build note, 2026-08-03)
+
+Inc 1 is §9's **M–L** row and does not fit one fire. It splits at a real seam: the **platform primitive**
+(`internal/*`, no package or client change) and its **adoption** (identity-domain's declaration, the four
+hand-ported deletions, the two gates). This fire builds **1a**, the primitive.
+
+**Scope sentence (this fire).** The `derive_reads(op)` pre-pass at the head of step 4 — shared compiled
+program, `HasDeriveReads`, fail-closed `kv`/`nanoid` stubs, key-grammar validation, weakest-wins merge, the
+`egressReads` re-check, and the ceiling accounting — implemented exactly to Contract #2 §2.5 class (g), with
+its unit tests. No package declares one yet; no submitter changes.
+
+**Scope-diff gate against §9's Inc 1 row, item by item.** `derive_reads` pre-pass ✓ · shared
+compiled-program cache ✓ · `HasDeriveReads` ✓ · `kv`/`nanoid` stubs ✓ · merge/egress rules ✓ ·
+Contract #2 §2.5 — already committed (`4965b28a`), nothing to prepare · **1b:** identity-domain declares its
+four derived keys (version bump) · the four hand-ported derivations deleted · G2 + `scripts/lint-web.go` ·
+the equivalence and `dedup_test.go` e2e vectors. Narrow-only; no adjacent mechanism substituted.
+
+### 11.1 Verified touch-list (checked live at `570e5102`)
+
+| Site | What it is now | What 1a does |
+|---|---|---|
+| `internal/starlarksandbox/sandbox.go:108-167` | `Execute` compiles (`SourceProgram`, :110) then Init+Call; compile is not separable | split into `Compile` + `Run`; `Execute` becomes the two composed |
+| `internal/starlarksandbox/sandbox.go:110` | `SourceProgram` already returns the `*syntax.File` and discards it (`_`) | keep it — top-level `def`/assign names come free, no second parse |
+| `internal/processor/ddl_cache.go:24-48` | `MetaVertexRef` carries `ScriptSource` as a string | add a shared `*CompiledScript` built at `loadMetaVertex` (:268-279) |
+| `internal/processor/step4_hydrate.go:154-284` | the three hydration loops read `env.ContextHint` directly | read a merged, derived-aware read set instead; `env` stays untouched |
+| `internal/processor/starlark_runner.go:100-135` | `Run` builds 8 globals then `Execute`s (a compile per op) | build the same 8 names, reuse the shared program |
+| `internal/processor/opwire/opwire.go:104,273-310` | `MaxDeclaredReads = 1000`; the `egressReads` mutual exclusion at parse | the step-4 re-check mirrors both over the merged set |
+| `internal/processor/commit_path.go:907-914` | a `*HydrationError` → `ErrCodeHydrationFailed` + `Term` | the derivation faults reuse it — terminal, fail-closed, already wired |
+
+### 11.2 The one deviation, recorded not hidden
+
+§4.1 specifies `HasDeriveReads` "computed once at cache-refresh **from a single parse**", separate from the
+compiled-program cache. Built instead as **one** artifact: the flag falls out of the same
+`SourceProgram` call that produces the shared program, because that call already returns the `*syntax.File`
+and today throws it away. This is strictly less work than the design's shape (one compile, not a parse plus
+compiles) and satisfies the same contract sentence — *"An operation whose owning DDL defines no
+`derive_reads` is unaffected — no invocation, no cost"* — because the flag is checked before any Init or
+Call. What it does **not** claim is "zero compiles": the compile happens once per cache generation and is
+**shared with step 5**, which today pays one compile *per operation*. The honest statement of the cost is a
+net reduction, and that is what the test asserts.
+
+Detection covers a top-level `def derive_reads` **and** a top-level assignment to that name. A design that
+matched only `DefStmt` would silently ignore an assigned derivation — fail-open, in the one direction this
+increment exists to close.
+
+### 11.3 Increment order + green checks
+
+1. `starlarksandbox`: `Compile`/`Run` split + `Program.DefinesTopLevel` — `go test ./internal/starlarksandbox/`
+2. `CompiledScript` + `MetaVertexRef.Script` + `ScriptContext.Compiled`; `StarlarkRunner.Run` on the shared
+   program — `go test ./internal/processor/`
+3. the pre-pass itself (stubs, grammar, weakest-wins, egress re-check, ceiling) — same
+4. full `go build ./...`, `make vet`, `golangci-lint run ./...`, `STRICT=1 go run ./scripts/lint-conventions.go`,
+   `go test ./...`
+
+### 11.4 In-scope gotchas
+
+- **The predeclared name set must be identical across the two passes**, or the shared program is invalid:
+  `SourceProgram` resolves globals at compile time against `globals.Has`. One canonical name list owns both,
+  with a test that the runner's globals dict and the list agree — drift here is a compile error at runtime
+  on a live op, which is the worst place to find it.
+- **`state` in the pre-pass is not the hydrated state** — hydration has not run. It is an empty mapping, and
+  `derive_reads` reading it gets nothing rather than stale anything.
+- **Weakest-wins applies to a derived/derived collision too**, not only derived-vs-envelope. §4.1 states the
+  rule only against the envelope; a key in both derived lists is the same ambiguity and the same hardening
+  hazard, so it resolves the same way.
+- **The ceiling counts the distinct union**, matching `distinctKeys`' existing semantics — the ceiling has
+  always bounded round trips, not mentions (§2.5), and a derived duplicate must not consume budget twice.
+
+### 11.5 Non-goals
+
+Everything in 1b above; Inc 2/3/4; any change to `kv.Read`'s live fallthrough, the live-read budget, or the
+sensitive-read tracker; any contract edit (§2.5 class (g) is already committed and this fire builds to it).
