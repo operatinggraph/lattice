@@ -800,6 +800,8 @@ above).
   "lastProjectedAt": "<RFC3339>",
   "projectionLag": <uint64>,
   "lagProgressAt": "<RFC3339>",
+  "ackPending": <uint64>,
+  "ackFloorProgressAt": "<RFC3339>",
   "sweepCursor": "<anchorVertexKey>",
   "sweepReconciled": <uint64>
 }
@@ -831,6 +833,22 @@ longer than the reader's stall window (2 minutes) without advancing; an absent o
 `lagProgressAt` — a Refractor instance that predates this field, or a lens whose first poll hasn't
 landed — carries no evidence of active draining and renders yellow immediately, matching the
 pre-existing `consumerLag > 0` behavior.
+`ackPending` / `ackFloorProgressAt` describe the work the consumer has already been HANDED, which
+`consumerLag` structurally cannot see. `consumerLag` is `NumPending` — undelivered backlog — so a
+consumer that has been delivered everything and cannot finish it reports `consumerLag` 0 and is
+indistinguishable from one that is genuinely drained; `lagStalled` is never even consulted, because
+its gate is `consumerLag > 0`. `ackPending` is `NumAckPending`, the messages delivered but not yet
+acked, and `ackFloorProgressAt` is when the consumer's ack floor was last observed to advance —
+stamped at the lens's first poll and re-stamped whenever the floor MOVES (a rebuild recreates the
+durable and resets the floor, so a floor that moved backwards is a new consumer generation, which
+is itself forward progress). Together they are the forward-progress clock for delivered work, the
+counterpart to `lagProgressAt`'s clock for the undelivered backlog, and a reader renders yellow on
+`ackPending > 0` with `ackFloorProgressAt` older than the same 2-minute stall window. Unlike
+`lagProgressAt`, an ABSENT `ackFloorProgressAt` renders green, not yellow: the field is newer than
+the deployed fleet, and holding any lens with a message in flight yellow would fire on the normal
+mid-processing state rather than on a stall. The two fields are written as a pair or not at all — a
+poll that cannot read them leaves both alone rather than writing `ackPending` 0 over a real
+observation (design: lens-consumer-ack-window-design.md §3).
 `sweepCursor` / `sweepReconciled` are the auth-plane convergence sweep's round-robin
 position and cumulative heal count; both are omitted for a lens that does not sweep. They
 live on this existing entry rather than in new state, so a restarted Refractor resumes the

@@ -208,8 +208,9 @@ func TestReporter_SetConsumerLag(t *testing.T) {
 
 // TestReporter_SetProjectionProgress_RoundTrips verifies SetProjectionProgress
 // writes ConsumerLag/ProjectionLag (same value, both names), LastProjectedAt,
-// and LagProgressAt, while preserving ErrorCount across the read-modify-write
-// (lens-projection-liveness-design.md §3.2).
+// LagProgressAt, and the AckPending/AckFloorProgressAt pair, while preserving
+// ErrorCount across the read-modify-write
+// (lens-projection-liveness-design.md §3.2, lens-consumer-ack-window-design.md §4).
 func TestReporter_SetProjectionProgress_RoundTrips(t *testing.T) {
 	kv := startHealthKV(t)
 	r := health.New(kv, "my-rule")
@@ -219,7 +220,8 @@ func TestReporter_SetProjectionProgress_RoundTrips(t *testing.T) {
 
 	projectedAt := time.Date(2026, 7, 3, 12, 0, 0, 0, time.UTC)
 	progressAt := time.Date(2026, 7, 3, 11, 59, 0, 0, time.UTC)
-	require.NoError(t, r.SetProjectionProgress(context.Background(), 42, projectedAt, progressAt))
+	ackFloorAt := time.Date(2026, 7, 3, 11, 58, 0, 0, time.UTC)
+	require.NoError(t, r.SetProjectionProgress(context.Background(), 42, projectedAt, progressAt, 9, ackFloorAt))
 
 	entry, err := r.GetStatus(context.Background())
 	require.NoError(t, err)
@@ -227,12 +229,17 @@ func TestReporter_SetProjectionProgress_RoundTrips(t *testing.T) {
 	assert.Equal(t, uint64(42), entry.ProjectionLag, "operator-facing projectionLag alias must match")
 	assert.Equal(t, projectedAt.Format(time.RFC3339), entry.LastProjectedAt)
 	assert.Equal(t, progressAt.Format(time.RFC3339), entry.LagProgressAt)
+	assert.Equal(t, uint64(9), entry.AckPending, "ackPending must be written — it is the term consumerLag cannot see")
+	assert.Equal(t, ackFloorAt.Format(time.RFC3339), entry.AckFloorProgressAt)
 	assert.Equal(t, uint64(1), entry.ErrorCount, "errorCount must be preserved across the read-modify-write")
 }
 
 // TestReporter_SetProjectionProgress_ZeroTimeLeavesExisting verifies that a zero
 // lastProjectedAt or lagProgressAt (no advance observed this cycle) does not
 // blank an already-stored value — only a genuine advance should ever be written.
+// A zero ackFloorProgressAt holds AckPending too: writing 0 over a real nonzero
+// observation would erase the one field that separates a wedged consumer from a
+// drained one.
 func TestReporter_SetProjectionProgress_ZeroTimeLeavesExisting(t *testing.T) {
 	kv := startHealthKV(t)
 	r := health.New(kv, "my-rule")
@@ -240,17 +247,20 @@ func TestReporter_SetProjectionProgress_ZeroTimeLeavesExisting(t *testing.T) {
 
 	projectedAt := time.Date(2026, 7, 3, 12, 0, 0, 0, time.UTC)
 	progressAt := time.Date(2026, 7, 3, 11, 59, 0, 0, time.UTC)
-	require.NoError(t, r.SetProjectionProgress(context.Background(), 5, projectedAt, progressAt))
+	ackFloorAt := time.Date(2026, 7, 3, 11, 58, 0, 0, time.UTC)
+	require.NoError(t, r.SetProjectionProgress(context.Background(), 5, projectedAt, progressAt, 4, ackFloorAt))
 
 	// A later cycle with lag but no fresh projection/progress (zero times) must
 	// not blank the previously-recorded values.
-	require.NoError(t, r.SetProjectionProgress(context.Background(), 7, time.Time{}, time.Time{}))
+	require.NoError(t, r.SetProjectionProgress(context.Background(), 7, time.Time{}, time.Time{}, 0, time.Time{}))
 
 	entry, err := r.GetStatus(context.Background())
 	require.NoError(t, err)
 	assert.Equal(t, uint64(7), entry.ConsumerLag)
 	assert.Equal(t, projectedAt.Format(time.RFC3339), entry.LastProjectedAt, "lastProjectedAt must not be blanked by a zero-time update")
 	assert.Equal(t, progressAt.Format(time.RFC3339), entry.LagProgressAt, "lagProgressAt must not be blanked by a zero-time update")
+	assert.Equal(t, uint64(4), entry.AckPending, "ackPending must not be zeroed by a cycle that could not read ack stats")
+	assert.Equal(t, ackFloorAt.Format(time.RFC3339), entry.AckFloorProgressAt, "ackFloorProgressAt must not be blanked by a zero-time update")
 }
 
 // TestReporter_SetRebuilding verifies that SetRebuilding writes status "rebuilding",

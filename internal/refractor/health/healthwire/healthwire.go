@@ -65,6 +65,20 @@ type Entry struct {
 	// checks before treating ConsumerLag as staleness: only a backlog that has
 	// stopped falling for a while is a genuine signal.
 	LagProgressAt string `json:"lagProgressAt,omitempty"`
+	// AckPending is how many messages the lens's consumer has been delivered but
+	// not yet acked. ConsumerLag/ProjectionLag cannot see this: a consumer that
+	// has been handed everything and cannot finish it reports NumPending 0 and is
+	// indistinguishable from one that is genuinely drained. Read it together with
+	// AckFloorProgressAt — nonzero here with a stale clock there is a consumer
+	// that is no longer retiring the work it owes.
+	AckPending uint64 `json:"ackPending"`
+	// AckFloorProgressAt is when the consumer's ack floor was last observed to
+	// advance (stamped at the first poll too) — RFC3339 UTC; "" before the lens's
+	// first poll. It is the forward-progress clock for DELIVERED work, the
+	// counterpart to LagProgressAt's clock for the undelivered backlog. A floor
+	// that has stopped advancing while AckPending is nonzero is the signal, and
+	// the clock's age is how long it has been stuck.
+	AckFloorProgressAt string `json:"ackFloorProgressAt,omitempty"`
 	// SweepCursor is the auth-plane convergence sweep's round-robin position —
 	// the last anchor vertex key its deep pass verified
 	// (capability-projection-reconciliation-design.md §3.2). It lives on the

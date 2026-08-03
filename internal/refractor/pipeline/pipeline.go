@@ -922,6 +922,18 @@ func (p *Pipeline) Pending(ctx context.Context) (uint64, error) {
 	return p.supervisor.PendingForConsumer(ctx, p.consumerCfg.Name)
 }
 
+// AckStats returns the supervised consumer's un-acked count and ack floor. It
+// is what distinguishes a lens that is caught up from one that has been handed
+// everything and cannot finish it — both report Pending 0. Errors on the same
+// two windows Pending does, and the lag poller treats either as "skip this
+// cycle".
+func (p *Pipeline) AckStats(ctx context.Context) (substrate.AckStats, error) {
+	if p.supervisor == nil {
+		return substrate.AckStats{}, fmt.Errorf("pipeline: ack stats: no supervisor configured (RunOn not called)")
+	}
+	return p.supervisor.AckStatsForConsumer(ctx, p.consumerCfg.Name)
+}
+
 // RebuildInFlight reports whether a rebuild rescan is still draining — true
 // from the start of Rebuild until the completion watcher observes the consumer
 // fully drained (or the rebuild aborts). While true the lens's health entry is

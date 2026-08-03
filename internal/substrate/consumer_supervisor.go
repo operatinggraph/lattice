@@ -384,6 +384,35 @@ func (s *ConsumerSupervisor) AckFloorForConsumer(ctx context.Context, name strin
 	return info.AckFloor.Stream, nil
 }
 
+// AckStats is the pair a caller needs to tell "caught up" from "wedged", read
+// together so both describe the same instant.
+//
+// NumPending alone cannot make that distinction: a consumer that has been
+// handed everything and cannot finish it reports NumPending 0, exactly like one
+// that is genuinely drained. AckPending is the work it still owes, and AckFloor
+// is whether that work is being retired.
+type AckStats struct {
+	// AckPending is the count of messages delivered but not yet acked.
+	AckPending uint64
+	// AckFloor is the stream sequence up to which every message is acked.
+	AckFloor uint64
+}
+
+// AckStatsForConsumer returns the named durable's un-acked count and ack floor
+// from a single ConsumerInfo read, so a caller polling both does not pay two
+// round trips or risk reading them from two different instants.
+func (s *ConsumerSupervisor) AckStatsForConsumer(ctx context.Context, name string) (AckStats, error) {
+	info, err := s.consumerInfo(ctx, name, "ack stats")
+	if err != nil {
+		return AckStats{}, err
+	}
+	ackPending := info.NumAckPending
+	if ackPending < 0 {
+		ackPending = 0
+	}
+	return AckStats{AckPending: uint64(ackPending), AckFloor: info.AckFloor.Stream}, nil
+}
+
 // consumerInfo reads the live ConsumerInfo for a managed durable. op names the
 // calling accessor so the error identifies which read failed.
 func (s *ConsumerSupervisor) consumerInfo(ctx context.Context, name, op string) (*jetstream.ConsumerInfo, error) {

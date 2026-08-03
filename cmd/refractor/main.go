@@ -1033,6 +1033,7 @@ func main() {
 		// reset with no handle re-binding.
 		lp := health.NewLagPoller(conn, p.Pending, reporter, r.ID)
 		lp.SetProgressFunc(func() time.Time { return p.Progress().LastProjectedAt })
+		lp.SetAckStatsFunc(p.AckStats)
 		p.SetLagPoller(lp)
 
 		// Transient write failures escalate to the shared retry queue (deferred

@@ -398,7 +398,12 @@ func (r *Reporter) SetConsumerLag(ctx context.Context, lag uint64) error {
 // leaves the existing stored value untouched rather than blanking it; a zero
 // lagProgressAt does the same (the LagPoller stamps it from its first poll
 // onward, so zero here only happens before that poller has run at all).
-func (r *Reporter) SetProjectionProgress(ctx context.Context, lag uint64, lastProjectedAt, lagProgressAt time.Time) error {
+//
+// AckPending and AckFloorProgressAt land together, gated on a non-zero
+// ackFloorProgressAt: they are the pair that separates a consumer that is
+// caught up from one that has been handed everything and cannot finish it, and
+// half the pair is worse than neither.
+func (r *Reporter) SetProjectionProgress(ctx context.Context, lag uint64, lastProjectedAt, lagProgressAt time.Time, ackPending uint64, ackFloorProgressAt time.Time) error {
 	r.mu.RLock()
 	seq := r.activeSequence
 	r.mu.RUnlock()
@@ -417,6 +422,14 @@ func (r *Reporter) SetProjectionProgress(ctx context.Context, lag uint64, lastPr
 	}
 	if !lagProgressAt.IsZero() {
 		existing.LagProgressAt = lagProgressAt.UTC().Format(time.RFC3339)
+	}
+	// A zero ackFloorProgressAt means the poller has no ack-stats source or its
+	// read failed this cycle. Leave BOTH fields alone in that case: writing
+	// ackPending=0 over a real nonzero observation would erase the one signal
+	// that separates a wedged consumer from a drained one.
+	if !ackFloorProgressAt.IsZero() {
+		existing.AckPending = ackPending
+		existing.AckFloorProgressAt = ackFloorProgressAt.UTC().Format(time.RFC3339)
 	}
 	existing.ActiveSequence = seq
 	existing.LastUpdated = time.Now().UTC().Format(time.RFC3339)

@@ -31,6 +31,10 @@ type LagMetric struct {
 // treats as "skip this cycle", not a fatal condition.
 type LagFunc func(ctx context.Context) (uint64, error)
 
+// AckStatsFunc optionally returns the consumer's un-acked count and ack floor.
+// Same error posture as LagFunc: an error means "skip this cycle", not fatal.
+type AckStatsFunc func(ctx context.Context) (substrate.AckStats, error)
+
 // ProgressFunc optionally returns the pipeline's projection-progress
 // lastProjectedAt clock for inclusion in the health Entry each poll cycle
 // (lens-projection-liveness-design.md §3.2). Returns the zero time before the
@@ -54,6 +58,12 @@ type LagPoller struct {
 	// Reporter.SetProjectionProgress).
 	progress ProgressFunc
 
+	// ackStats optionally supplies the consumer's un-acked count and ack floor.
+	// nil (the default, unless SetAckStatsFunc is called) leaves the Entry's
+	// ackPending/ackFloorProgressAt untouched, so a caller that does not wire
+	// it is unchanged rather than reporting a fabricated zero.
+	ackStats AckStatsFunc
+
 	// lagOutstanding / lagProgressAt track whether ConsumerLag is actively
 	// draining, mirroring Pipeline's rebuild-progress clock
 	// (recordRebuildProgress/RebuildProgress): stamped at the first poll and
@@ -64,12 +74,28 @@ type LagPoller struct {
 	// treat as the real signal. Single dedicated goroutine (Start), so no lock.
 	lagOutstanding uint64
 	lagProgressAt  time.Time
+
+	// ackFloor / ackFloorProgressAt are the same shape for DELIVERED work: the
+	// ack floor is stamped at the first poll and re-stamped whenever it RISES.
+	// Lag falling and the floor rising are the two independent ways a consumer
+	// can be making progress, and a wedge shows up in the second while the
+	// first reads a perfectly healthy zero. Single dedicated goroutine (Start),
+	// so no lock.
+	ackFloor           uint64
+	ackFloorSeen       bool
+	ackFloorProgressAt time.Time
 }
 
 // SetProgressFunc attaches the pipeline's projection-progress source. Must be
 // called before Start. Pass nil to clear (the default).
 func (lp *LagPoller) SetProgressFunc(fn ProgressFunc) {
 	lp.progress = fn
+}
+
+// SetAckStatsFunc attaches the consumer's ack-stats source. Must be called
+// before Start. Pass nil to clear (the default).
+func (lp *LagPoller) SetAckStatsFunc(fn AckStatsFunc) {
+	lp.ackStats = fn
 }
 
 // NewLagPoller creates a LagPoller for the given rule. The lag source is read
@@ -153,13 +179,48 @@ func (lp *LagPoller) poll(ctx context.Context) {
 		if lp.progress != nil {
 			lastProjectedAt = lp.progress()
 		}
-		if err := lp.reporter.SetProjectionProgress(ctx, lag, lastProjectedAt, lp.lagProgressAt); err != nil {
+		ackPending, ackFloorProgressAt := lp.pollAckStats(ctx)
+		if err := lp.reporter.SetProjectionProgress(ctx, lag, lastProjectedAt, lp.lagProgressAt, ackPending, ackFloorProgressAt); err != nil {
 			if ctx.Err() == nil {
 				slog.Warn("lag poller: SetProjectionProgress failed",
 					"ruleId", lp.ruleID, "err", err)
 			}
 		}
 	}
+}
+
+// pollAckStats reads the consumer's un-acked count and ack floor and stamps the
+// floor's forward-progress clock. Returns the values to fold into the health
+// entry; a nil source or a read error yields the zero pair, which
+// SetProjectionProgress treats as "leave the stored fields alone" rather than
+// writing a fabricated zero over a real observation.
+func (lp *LagPoller) pollAckStats(ctx context.Context) (uint64, time.Time) {
+	if lp.ackStats == nil {
+		return 0, time.Time{}
+	}
+	stats, err := lp.ackStats(ctx)
+	if err != nil {
+		if ctx.Err() == nil {
+			slog.Warn("lag poller: ack stats unavailable",
+				"ruleId", lp.ruleID, "err", err)
+		}
+		return 0, time.Time{}
+	}
+	lp.recordAckFloorProgress(stats.AckFloor)
+	return stats.AckPending, lp.ackFloorProgressAt
+}
+
+// recordAckFloorProgress stamps ackFloorProgressAt at the first observation and
+// whenever the floor has RISEN since the previous poll. The floor is monotonic
+// per durable, but a rebuild recreates the durable and resets it, so a floor
+// that moved backwards is a new consumer generation, not a regression — stamp
+// that too, since the generation itself is forward progress.
+func (lp *LagPoller) recordAckFloorProgress(floor uint64) {
+	if !lp.ackFloorSeen || floor != lp.ackFloor {
+		lp.ackFloorProgressAt = time.Now()
+	}
+	lp.ackFloor = floor
+	lp.ackFloorSeen = true
 }
 
 // recordLagProgress stamps lagProgressAt at the first observation and

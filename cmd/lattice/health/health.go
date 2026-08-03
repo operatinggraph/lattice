@@ -79,10 +79,10 @@ type gatesSummary struct {
 
 // summaryRollup is the JSON shape emitted for --output json.
 type summaryRollup struct {
-	Overall    string          `json:"overall"`
-	Components []componentRow  `json:"components"`
-	Alerts     []string        `json:"alerts"`
-	Gates      gatesSummary    `json:"gates"`
+	Overall    string         `json:"overall"`
+	Components []componentRow `json:"components"`
+	Alerts     []string       `json:"alerts"`
+	Gates      gatesSummary   `json:"gates"`
 }
 
 // classifyKey returns the component group for a Health KV key.
@@ -176,6 +176,32 @@ func lagStalled(doc map[string]any) bool {
 	t, ok := parseTimestamp(doc, "lagProgressAt")
 	if !ok {
 		return true
+	}
+	return time.Since(t) > lagStallWindow
+}
+
+// ackFloorStalled reports whether a lens's consumer has stopped retiring the
+// work it has already been handed, per its LagPoller-maintained
+// ackFloorProgressAt clock.
+//
+// This is the case consumerLag structurally cannot see. A consumer that has
+// been delivered everything and cannot finish it reports NumPending 0, so
+// consumerLag reads 0 and lagStalled never gets consulted — the lens renders
+// green while its ack floor is frozen and its backlog is entirely in
+// ackPending. Measured live on clinicProviders: 678 un-acked, floor pinned,
+// consumerLag 0, status "active"
+// (lens-consumer-ack-window-design.md §3).
+//
+// An absent or unparseable clock reads as NOT stalled, the opposite of
+// lagStalled's posture, and deliberately: the field is new, so every Refractor
+// that predates it and every entry written before its first poll would
+// otherwise turn yellow for a lens with any un-acked message in flight, which
+// is the normal mid-processing state. The gate is ackPending > 0, and a
+// consumer only sits there with a stale clock when it is genuinely stuck.
+func ackFloorStalled(doc map[string]any) bool {
+	t, ok := parseTimestamp(doc, "ackFloorProgressAt")
+	if !ok {
+		return false
 	}
 	return time.Since(t) > lagStallWindow
 }
@@ -382,13 +408,23 @@ func computeSummaryRollup(allKeys []string, readEntry func(string) (map[string]a
 			status, _ := doc["status"].(string)
 			consumerLag, _ := doc["consumerLag"].(float64)
 			errorCount, _ := doc["errorCount"].(float64)
-			row.Details = fmt.Sprintf("consumerLag=%.0f errorCount=%.0f", consumerLag, errorCount)
+			ackPending, _ := doc["ackPending"].(float64)
+			row.Details = fmt.Sprintf("consumerLag=%.0f ackPending=%.0f errorCount=%.0f", consumerLag, ackPending, errorCount)
 			switch status {
 			case "active":
-				if consumerLag > 0 && lagStalled(doc) {
+				// Two independent ways a consumer stops making progress: an
+				// undelivered backlog that stops falling, and delivered work
+				// that stops being acked. The second reads consumerLag=0, so
+				// it has to be its own test rather than a refinement of the
+				// first.
+				switch {
+				case consumerLag > 0 && lagStalled(doc):
 					row.Status = "yellow"
 					row.level = rollupYellow
-				} else {
+				case ackPending > 0 && ackFloorStalled(doc):
+					row.Status = "yellow"
+					row.level = rollupYellow
+				default:
 					row.Status = "active"
 					row.level = rollupGreen
 				}
@@ -710,4 +746,3 @@ func newGatesCommand(natsURL, outputFmt *string) *cobra.Command {
 		},
 	}
 }
-

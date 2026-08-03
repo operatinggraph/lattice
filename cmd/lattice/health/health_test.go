@@ -447,7 +447,7 @@ func TestHealthSummary_Rollup_RefractorProcessorIssues(t *testing.T) {
 
 	t.Run("RefractorNoIssuesStaysGreen", func(t *testing.T) {
 		level := rollupOf(t, map[string]map[string]any{
-			"health.refractor.rfx-03":  {"heartbeatAt": fresh, "status": "healthy", "issues": []any{}},
+			"health.refractor.rfx-03":   {"heartbeatAt": fresh, "status": "healthy", "issues": []any{}},
 			"health.bootstrap.complete": {"status": "complete"},
 		})
 		if level != rollupGreen {
@@ -613,7 +613,7 @@ func TestHealthSummary_HappyPath(t *testing.T) {
 	entries := map[string]interface{}{
 		"health.processor.test.heartbeat": map[string]interface{}{"ping": true},
 		"health.refractor.test.lag":       map[string]interface{}{"lagMs": 10},
-		"health.bootstrap.complete":        map[string]interface{}{"ok": true},
+		"health.bootstrap.complete":       map[string]interface{}{"ok": true},
 	}
 	for k, v := range entries {
 		data, _ := json.Marshal(v)
@@ -643,4 +643,86 @@ func setupHealthEnv(t *testing.T) (context.Context, *substrate.Conn) {
 	t.Cleanup(conn.Close)
 	testutil.ProvisionHarness(t, ctx, conn)
 	return ctx, conn
+}
+
+// TestHealthSummary_Rollup_WedgedAckFloorYellow pins the case consumerLag
+// structurally cannot see. A consumer that has been delivered its whole backlog
+// and cannot finish it reports NumPending 0, so consumerLag is 0 and the
+// lagStalled test is never consulted — the exact shape measured live on
+// clinicProviders (678 un-acked, ack floor pinned, status "active",
+// consumerLag 0), which rendered green for as long as it was wedged.
+//
+// Three vectors: wedged (un-acked work, floor frozen) is yellow; a consumer
+// with un-acked work whose floor is still advancing is the normal
+// mid-processing state and stays green; and an entry with no
+// ackFloorProgressAt at all — a Refractor that predates the field — stays green
+// rather than turning every in-flight message into a yellow.
+func TestHealthSummary_Rollup_WedgedAckFloorYellow(t *testing.T) {
+	now := time.Now().UTC()
+	bootstrapDoc := map[string]any{"status": "complete", "completedAt": now.Format(time.RFC3339)}
+
+	cases := []struct {
+		name       string
+		lens       string
+		doc        map[string]any
+		wantStatus string
+		wantLevel  rollupLevel
+	}{
+		{
+			name: "wedged: delivered work, floor frozen",
+			lens: "lenswedged0000000",
+			doc: map[string]any{
+				"status":             "active",
+				"consumerLag":        float64(0),
+				"ackPending":         float64(678),
+				"ackFloorProgressAt": now.Add(-20 * time.Minute).Format(time.RFC3339),
+			},
+			wantStatus: "yellow",
+			wantLevel:  rollupYellow,
+		},
+		{
+			name: "healthy: delivered work, floor still advancing",
+			lens: "lensadvancing0000",
+			doc: map[string]any{
+				"status":             "active",
+				"consumerLag":        float64(0),
+				"ackPending":         float64(12),
+				"ackFloorProgressAt": now.Add(-5 * time.Second).Format(time.RFC3339),
+			},
+			wantStatus: "active",
+			wantLevel:  rollupGreen,
+		},
+		{
+			name: "older Refractor: no ackFloorProgressAt at all",
+			lens: "lensnoclock000000",
+			doc: map[string]any{
+				"status":      "active",
+				"consumerLag": float64(0),
+				"ackPending":  float64(3),
+			},
+			wantStatus: "active",
+			wantLevel:  rollupGreen,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			doc := tc.doc
+			doc["ruleId"] = tc.lens
+			doc["lastUpdated"] = now.Format(time.RFC3339)
+			docs := map[string]map[string]any{
+				tc.lens:                     doc,
+				"health.bootstrap.complete": bootstrapDoc,
+			}
+			readFn := func(k string) (map[string]any, bool) { d, ok := docs[k]; return d, ok }
+			rollup, level := computeSummaryRollup(
+				[]string{tc.lens, "health.bootstrap.complete"}, readFn, 60*time.Second, noneDeleted)
+			if level != tc.wantLevel {
+				t.Errorf("overall = %v, want %v", level, tc.wantLevel)
+			}
+			if rollup.Components[0].Status != tc.wantStatus {
+				t.Errorf("status = %q, want %q", rollup.Components[0].Status, tc.wantStatus)
+			}
+		})
+	}
 }
