@@ -562,12 +562,45 @@ def execute(state, op):
     # blind Put for the data-derived credentialindex key (not dispatch-
     # known ahead of cred_set), same idiom the claim script's own derived-
     # key writes use.
+    #
+    # identity-domain's boundTo link repoints in the same loop, for the same
+    # reason and by the same rule: it names the identity a credential is bound
+    # to, and after this merge that is the primary. A link left pointing at the
+    # secondary would outlive its own premise -- identityCredentialBindingsRead
+    # would keep projecting the merged-away identity as the owner, and the
+    # row's RLS anchor would confine it to an identity now in state=merged, so
+    # the credential would vanish from the primary's own list. Tombstone the
+    # old edge, write the new one; a credential already bound to the primary
+    # (both sides holding it) re-writes the same key idempotently, and its
+    # tombstone-then-write is ordered within one atomic batch.
+    #
+    # That tombstone is unconditional rather than read-before-write, for the
+    # same reason the credentialindex Put beside it is: cred_set is derived
+    # from the DECRYPTED binding array, so its keys are unknown before
+    # hydration and derive_reads cannot name them. It needs no guard once the
+    # Inc 2 backfill has run -- every entry in cred_set is by construction a
+    # credential the secondary held, so its edge exists. Until then the only
+    # cost is a tombstone over a key that never had a live value: adjacency is
+    # built from link events, so no phantom edge and no phantom row ever reach
+    # the lens.
     for c in cred_set:
         idx_key = "vtx.credentialindex." + crypto.sha256NanoID(c["actorKey"])
         mutations.append({"op": "update", "key": idx_key,
             "document": {"class": "credentialindex", "isDeleted": False,
                          "data": {"actorKey": c["actorKey"], "identityKey": primary,
                                   "boundAt": c["boundAt"]}}})
+        cred_id = c["actorKey"][len("vtx.identity."):]
+        if c["actorKey"] != secondary:
+            # The secondary's own key is in cred_set as the implicit
+            # self-credential (above) and never had an edge to itself, so only
+            # a real credential of the secondary has an old edge to retire.
+            mutations.append({"op": "tombstone",
+                "key": "lnk.identity." + cred_id + ".boundTo.identity." + secondary[len("vtx.identity."):]})
+        mutations.append({"op": "update",
+            "key": "lnk.identity." + cred_id + ".boundTo.identity." + primary[len("vtx.identity."):],
+            "document": {"class": "boundTo", "isDeleted": False,
+                         "sourceVertex": c["actorKey"], "targetVertex": primary,
+                         "localName": "boundTo", "data": {"boundAt": c["boundAt"]}}})
 
     # primary.credentialBinding is declared optionalReads: CAS'd on its
     # step-4 revision when present, an unconditioned blind Put (creating

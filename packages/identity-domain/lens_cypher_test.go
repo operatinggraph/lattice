@@ -323,3 +323,79 @@ func TestIdentityCredentialsRead_ActivatesWithItsDeclaredIntoKey(t *testing.T) {
 	require.NoError(t, cr.ValidateKeyColumns(),
 		"the lens must activate against its declared IntoKey — the activation-time gate a mis-declared key column dies on")
 }
+
+// ------------------------------------------------- credentialBindings (Inc 2a)
+
+// idBoundToWorld builds two owners so the RLS assertion has something to
+// mis-anchor onto: `owner` holds two credentials, `other` holds one. A lens
+// that anchored on the credential — or that dropped the anchor — would hand
+// one person's sign-in methods to the other while the table still looked right.
+//
+//	credA -boundTo-> owner
+//	credB -boundTo-> owner
+//	credC -boundTo-> other
+func idBoundToWorld(t *testing.T) *idFixture {
+	f := newIDFixture(t)
+	f.vtx(t, "owner", "identity", nil)
+	f.vtx(t, "other", "identity", nil)
+	for _, c := range []string{"credA", "credB", "credC"} {
+		f.vtx(t, c, "identity", nil)
+	}
+	f.edge(t, "boundTo", "credA", "owner")
+	f.edge(t, "boundTo", "credB", "owner")
+	f.edge(t, "boundTo", "credC", "other")
+	return f
+}
+
+// TestIdentityCredentialBindingsRead_OneRowPerCredentialAnchoredOnTheOwner is
+// the whole reason the boundTo link exists. identityCredentialsRead cannot have
+// this shape: its one jsonb column is the decrypted credentialBinding object,
+// and the credentials array only exists inside the ciphertext, so the engine
+// never sees the elements. As edges, a plain MATCH fans them out.
+func TestIdentityCredentialBindingsRead_OneRowPerCredentialAnchoredOnTheOwner(t *testing.T) {
+	f := idBoundToWorld(t)
+
+	rows := f.project(t, identityCredentialBindingsReadSpec, "")
+	require.Len(t, rows, 3, "one row per live boundTo edge across both owners; got %v", rows)
+
+	byBinding := map[string]map[string]any{}
+	for _, r := range rows {
+		byBinding[r.Values["binding_id"].(string)] = r.Values
+	}
+
+	for _, tc := range []struct{ cred, owner string }{
+		{"credA", "owner"}, {"credB", "owner"}, {"credC", "other"},
+	} {
+		row, ok := byBinding[lenstest.NanoID(tc.cred)]
+		require.True(t, ok, "no row for %s — the row id is the credential's own NanoID, unique under the one-credential-<=-one-identity guard", tc.cred)
+		require.Equal(t, f.key(tc.cred), row["entity_key"])
+		require.Equal(t, f.key(tc.cred), row["credential_actor_key"],
+			"the dispatch column: UnlinkCredential's payload field is the credential, not the owner")
+		require.Equal(t, f.key(tc.owner), row["identity_key"])
+		require.Equal(t, []any{lenstest.NanoID(tc.owner)}, row["authz_anchors"],
+			"anchored on the OWNER, never the credential — RLS compares lattice.actor_id against this list, and a credential-anchored row would be readable by the very actor the owner is trying to remove")
+	}
+}
+
+// TestIdentityCredentialBindingsRead_UnboundIdentityProjectsNoRow — a required
+// walk, so an identity with no live boundTo edge contributes nothing. The
+// fail-closed direction: an unanchored row is one RLS cannot confine.
+func TestIdentityCredentialBindingsRead_UnboundIdentityProjectsNoRow(t *testing.T) {
+	f := newIDFixture(t)
+	f.vtx(t, "loner", "identity", nil)
+	f.aspect(t, "loner", "state", "state", map[string]any{"value": "claimed"})
+
+	rows := f.project(t, identityCredentialBindingsReadSpec, "")
+	require.Empty(t, rows, "no boundTo edge, no row; got %v", rows)
+}
+
+func TestIdentityCredentialBindingsRead_ActivatesWithItsDeclaredIntoKey(t *testing.T) {
+	eng := full.New()
+	compiled, err := eng.Parse(identityCredentialBindingsReadSpec)
+	require.NoError(t, err)
+	cr, ok := compiled.(*full.CompiledRule)
+	require.True(t, ok)
+	cr.KeyColumns = []string{"binding_id"}
+	require.NoError(t, cr.ValidateKeyColumns(),
+		"the lens must activate against its declared IntoKey — the activation-time gate a mis-declared key column dies on")
+}

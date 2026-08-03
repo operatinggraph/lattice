@@ -496,6 +496,34 @@ func DDLs() []pkgmgr.DDLSpec {
 				},
 			},
 		},
+		{
+			CanonicalName: "boundTo",
+			Class:         "meta.ddl.linkType",
+			Description: "identity boundTo identity. The credential-to-owner edge " +
+				"(lnk.identity.<credentialId>.boundTo.identity.<ownerId>): the identity the Gateway " +
+				"provisioned for a raw sign-in, bound to the business identity it proved control of. " +
+				"The later-arriving credential is the source. Emitted by ClaimIdentity (first credential) " +
+				"and CompleteCredentialLink (Nth); tombstoned by UnlinkCredential; repointed to the " +
+				"primary by identity-hygiene's MergeIdentity. Carries the same {actorKey, boundAt} pair " +
+				"the credentialBinding aspect's array entry does — as a link, so the set is projectable " +
+				"one row per credential without decrypting a sensitive aspect (Contract #1: a " +
+				"relationship is a link, not a ref inside data). data.boundAt is provenance only: no lens " +
+				"can read it until the engine binds a relationship variable. permittedCommands is " +
+				"intentionally empty: multi-writer, open posture (mirrors indexes/duplicateOf above).",
+			Script:       linkTypeDDLScript,
+			InputSchema:  `{"type":"object","properties":{"boundAt":{"type":"string","description":"RFC3339 instant the credential was bound, mirroring the credentialBinding array entry."}}}`,
+			OutputSchema: `{"type":"object"}`,
+			FieldDescription: map[string]string{
+				"boundAt": "When this credential was bound to this identity — the same instant the credentialBinding entry and the credentialindex vertex carry.",
+			},
+			Examples: []pkgmgr.ExampleSpec{
+				{
+					Name:            "boundTo link",
+					Payload:         map[string]any{"boundAt": "2026-08-03T12:00:00Z"},
+					ExpectedOutcome: "lnk.identity.<credentialId>.boundTo.identity.<ownerId>, data {boundAt}; one per live entry in the owner's credentials array.",
+				},
+			},
+		},
 		RevocationDDL(),
 		ActorRevokedEventDDL(),
 		ActorUnrevokedEventDDL(),
@@ -515,7 +543,7 @@ def execute(state, op):
 `
 
 // linkTypeDDLScript is the declaration-only Starlark shared by this
-// package's link-type DDLs (indexes, duplicateOf). A link-type DDL declares
+// package's link-type DDLs (indexes, duplicateOf, boundTo). A link-type DDL declares
 // a link class's shape and direction; it is not an operation handler (the
 // identity/identity-hygiene DDLs' operations create/tombstone the links).
 // No operation carries a link class as its operation class, so execute is
@@ -726,6 +754,33 @@ def identity_index_key(contact_type, normalized):
 def credential_index_key(actor_key):
     return "vtx.credentialindex." + crypto.sha256NanoID(actor_key)
 
+def identity_id(identity_key):
+    return identity_key[len("vtx.identity."):]
+
+def credential_bound_to_key(credential_actor_key, owner_identity_key):
+    # Contract #1 §1.1: the later-arriving vertex is the source, so the
+    # credential is the source and the identity it binds to is the target --
+    # "credential boundTo identity" reads as the sentence it is. Both
+    # endpoints are identity vertices: a credential is the identity the
+    # Gateway provisioned for the raw sign-in, distinct from the business
+    # identity it proves control of.
+    return ("lnk.identity." + identity_id(credential_actor_key) +
+            ".boundTo.identity." + identity_id(owner_identity_key))
+
+def credential_bound_to_mutation(credential_actor_key, owner_identity_key, bound_at):
+    # An update, never a create: UnlinkCredential tombstones this link, and a
+    # later re-bind of the SAME credential to the SAME identity must revive it.
+    # A create asserts revision 0 and would take the whole atomic batch down
+    # with a RevisionConflict on exactly that path. Same revive posture as
+    # credential_index_mutation; the key is declared in derive_reads, so
+    # step 8 conditions the write on the revision it was read at when present
+    # and commits unconditioned when it is genuinely absent.
+    doc = {"class": "boundTo", "isDeleted": False,
+           "sourceVertex": credential_actor_key, "targetVertex": owner_identity_key,
+           "localName": "boundTo", "data": {"boundAt": bound_at}}
+    return {"op": "update", "key": credential_bound_to_key(credential_actor_key, owner_identity_key),
+            "document": doc}
+
 def derive_reads(op):
     # Contract #2 §2.5 class (g). The Processor runs this at the head of step 4
     # and merges what it returns into the declared read set, so a submitter no
@@ -762,7 +817,36 @@ def derive_reads(op):
         # The one-credential-<=-one-identity guard reads the index for the
         # SUBMITTING credential, so this key derives from the actor, not the
         # payload.
-        return {"optionalReads": [credential_index_key(op.actor)]}
+        keys = [credential_index_key(op.actor)]
+        target = getattr(p, "targetIdentityKey", None)
+        if type(target) == type("") and target.startswith("vtx.identity.") and op.actor.startswith("vtx.identity."):
+            # The boundTo link this op emits. Optional, and absent on every
+            # first bind -- present only when the same credential was unlinked
+            # from this same identity earlier and is being re-bound, which is
+            # the one case whose write must CAS rather than blind-Put.
+            keys.append(credential_bound_to_key(op.actor, target))
+            if ot == "ClaimIdentity":
+                # The consumer holdsRole grant ClaimIdentity upserts. A
+                # deterministic link key built from the payload target and the
+                # package's own pinned role literal -- derivable here for
+                # exactly the reason it was left underived before: no browser
+                # client can compute it, but the package can.
+                keys.append("lnk.identity." + identity_id(target) +
+                            ".holdsRole.role." + "__EXPECTED_CONSUMER_ROLE_KEY__"[len("vtx.role."):])
+        return {"optionalReads": keys}
+
+    if ot == "UnlinkCredential":
+        # The index and the link this op tombstones. Both derive from the
+        # payload's credentialActorKey under package semantics, and both are
+        # optional: a caller naming a credential that is not bound takes the
+        # not-found branch, which must not fault on a hydration miss.
+        credential_actor_key = getattr(p, "credentialActorKey", None)
+        if type(credential_actor_key) != type("") or not credential_actor_key.startswith("vtx.identity."):
+            return {}
+        keys = [credential_index_key(credential_actor_key)]
+        if op.actor.startswith("vtx.identity."):
+            keys.append(credential_bound_to_key(credential_actor_key, op.actor))
+        return {"optionalReads": keys}
 
     return {}
 
@@ -1108,6 +1192,7 @@ def execute(state, op):
                           "data": {"value": "claimed"}}},
             {"op": "tombstone", "key": target_identity_key + ".claimKey"},
             credential_index_mutation(cred_index_key, cred_index, actor_key, target_identity_key, observed_at),
+            credential_bound_to_mutation(actor_key, target_identity_key, observed_at),
             # An upsert, not a create: the grant may already be present, because
             # any authenticated touch of this identity provisions it (the
             # Gateway's ProvisionConsumerIdentity pre-flight) and a seeder may
@@ -1325,6 +1410,7 @@ def execute(state, op):
 
         mutations = [
             credential_index_mutation(cred_index_key, cred_index, actor_key, target_identity_key, observed_at),
+            credential_bound_to_mutation(actor_key, target_identity_key, observed_at),
             {"op": "tombstone", "key": link_key_aspect_key},
         ]
 
@@ -1440,6 +1526,7 @@ def execute(state, op):
 
         mutations = [
             {"op": "tombstone", "key": credential_index_key(credential_actor_key)},
+            {"op": "tombstone", "key": credential_bound_to_key(credential_actor_key, u_key)},
             {"op": "update", "key": binding_key,
              "document": {"class": "credentialBinding", "vertexKey": u_key, "localName": "credentialBinding",
                           "isDeleted": False,

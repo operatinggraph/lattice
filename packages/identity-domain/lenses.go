@@ -68,6 +68,43 @@ func Lenses() []pkgmgr.LensSpec {
 			},
 		},
 		{
+			// identityCredentialBindingsRead — one row per bound credential,
+			// the per-credential shape identityCredentialsRead cannot have:
+			// its `binding` column is the whole decrypted credentialBinding
+			// object, and the credentials array only exists inside the
+			// ciphertext, so the engine never sees the elements. The boundTo
+			// link puts the same set in the graph as edges, where a plain
+			// MATCH fans it out with no new engine primitive — which is what
+			// makes a per-credential dispatch target (a row an operator can
+			// act on) expressible at all.
+			//
+			// Same self-anchored RLS shape as identityCredentialsRead: the
+			// row's authz_anchor is the OWNER's NanoID, not the credential's,
+			// so an identity sees exactly its own credentials and a
+			// credential identity sees none of the rows naming it.
+			//
+			// No bound_at column. It would have to come from the link's own
+			// data, and a relationship variable is never bound into a binding
+			// — traverseRel extends only with the neighbour node
+			// (internal/refractor/ruleengine/full/executor.go) — so
+			// `[b:boundTo] … b.data.boundAt` has no meaning today. The link
+			// carries data.boundAt regardless, as the provenance a projection
+			// will read once the engine can.
+			CanonicalName: "identityCredentialBindingsRead",
+			Class:         "meta.lens",
+			Adapter:       "postgres",
+			Table:         "read_identity_credential_bindings",
+			Engine:        "full",
+			Spec:          identityCredentialBindingsReadSpec,
+			Protected:     true,
+			IntoKey:       []string{"binding_id"},
+			Columns: []pkgmgr.PostgresColumn{
+				{Name: "entity_key", Type: "text"},
+				{Name: "identity_key", Type: "text"},
+				{Name: "credential_actor_key", Type: "text"},
+			},
+		},
+		{
 			// identityAnchors — an actor-aggregate projection of the identity's
 			// residence (residesIn), workplace (worksAt), management (manages)
 			// and provider-binding (identifiedBy-inverse) anchors, the outbound
@@ -114,6 +151,21 @@ RETURN
   u.key                  AS entity_key,
   u.key                  AS identity_key,
   u.credentialBinding.data AS binding,
+  [nanoIdFromKey(u.key)] AS authz_anchors`
+
+// identityCredentialBindingsReadSpec fans the owner's credential set out one
+// row per boundTo edge. Anchored on the credential (the link's source) and
+// walked forward to the owner, so a credential with no live link projects
+// nothing — the same fail-closed absence identityCredentialsRead has for an
+// identity that never claimed. The row id is the credential's own NanoID: the
+// one-credential-≤-one-identity guard (ClaimIdentity / CompleteCredentialLink)
+// makes it unique across the table.
+const identityCredentialBindingsReadSpec = `MATCH (c:identity)-[:boundTo]->(u:identity)
+RETURN
+  nanoIdFromKey(c.key)   AS binding_id,
+  c.key                  AS entity_key,
+  u.key                  AS identity_key,
+  c.key                  AS credential_actor_key,
   [nanoIdFromKey(u.key)] AS authz_anchors`
 
 // identityIndexHintSpec projects one row per live identityindex vertex,

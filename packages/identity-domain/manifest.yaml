@@ -1,5 +1,5 @@
 name: identity-domain
-version: 0.12.1
+version: 0.13.0
 description: |
   Identity vertex creation, claim, and state-machine management. Provides
   CreateUnclaimedIdentity, UpdateIdentityState, ClaimIdentity, RotateClaimKey,
@@ -36,6 +36,8 @@ declares:
       class: meta.ddl.linkType
     - canonicalName: duplicateOf
       class: meta.ddl.linkType
+    - canonicalName: boundTo
+      class: meta.ddl.linkType
     - canonicalName: actorRevocation
       class: meta.ddl.vertexType
     - canonicalName: gateway.actorRevoked
@@ -50,6 +52,11 @@ declares:
     - canonicalName: identityCredentialsRead
       adapter: postgres
       table: read_identity_credentials
+      engine: full
+      protected: true
+    - canonicalName: identityCredentialBindingsRead
+      adapter: postgres
+      table: read_identity_credential_bindings
       engine: full
       protected: true
     - canonicalName: identityAnchors

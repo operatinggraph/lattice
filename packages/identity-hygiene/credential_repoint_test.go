@@ -424,3 +424,73 @@ func TestMergeCredentialRepoint_OverwritesExistingIndexVertex(t *testing.T) {
 
 	assertCredentialIndexPointsTo(t, ctx, conn, credActorKey, primaryKey)
 }
+
+// --- 7. TestMergeCredentialRepoint_BoundToLinkRepoints ---
+
+// boundToKey mirrors identity-domain's `boundTo` key: the credential (source)
+// to the identity it is bound to (target).
+func boundToKey(credentialActorKey, ownerIdentityKey string) string {
+	return "lnk.identity." + credentialActorKey[len("vtx.identity."):] +
+		".boundTo.identity." + ownerIdentityKey[len("vtx.identity."):]
+}
+
+// TestMergeCredentialRepoint_BoundToLinkRepoints covers the writer the Inc 2
+// design body did not name. The boundTo link says which identity a credential
+// belongs to, so after a merge that is the primary — a link left on the
+// secondary outlives its own premise twice over:
+// identityCredentialBindingsRead keeps projecting a merged-away identity as the
+// owner, and the row's RLS anchor confines it to an identity now in
+// state=merged, so the credential disappears from the primary's own list while
+// the person still signs in with it.
+//
+// The secondary's implicit self-credential is in cred_set too, and it never had
+// an edge to itself; what it needs is a NEW edge to the primary, which is what
+// makes the merged-away identity itself a credential of the survivor.
+func TestMergeCredentialRepoint_BoundToLinkRepoints(t *testing.T) {
+	ctx, conn := setupTestEnv(t)
+	cp, cons := newMergePipeline(t, ctx, conn, "mcrbound")
+
+	primaryID := testutil.GenReqID("PrimCredBnd00")
+	secondaryID := testutil.GenReqID("SecCredBnd000")
+	credActorID := testutil.GenReqID("CredActorBnd0")
+	primaryKey := "vtx.identity." + primaryID
+	secondaryKey := "vtx.identity." + secondaryID
+	credActorKey := "vtx.identity." + credActorID
+
+	seedIdentityVertex(t, ctx, conn, primaryKey, "unclaimed", "")
+	seedIdentityVertex(t, ctx, conn, secondaryKey, "claimed", "")
+	seedCredentialBindingSingular(t, ctx, conn, secondaryKey, credActorKey, "2026-01-01T00:00:00Z")
+	seedCredentialIndexVertex(t, ctx, conn, credActorKey, secondaryKey, "2026-01-01T00:00:00Z")
+	// The live edge the bind paths emit — seeded so the tombstone below is
+	// proven to RETRACT one, not merely to write a tombstone over a key that
+	// never existed.
+	seedLinkVertexWithClass(t, ctx, conn, boundToKey(credActorKey, secondaryKey), "boundTo", false,
+		map[string]any{"boundAt": "2026-01-01T00:00:00Z"})
+
+	env := &processor.OperationEnvelope{
+		RequestID:     testutil.GenReqID("MrgCredBnd000"),
+		Lane:          processor.LaneDefault,
+		OperationType: "MergeIdentity",
+		Actor:         operatorActorKey,
+		SubmittedAt:   "2026-08-03T11:00:00Z",
+		Class:         "identityHygiene",
+		Payload:       mergePayload(primaryKey, secondaryKey, []string{}),
+		ContextHint: &processor.ContextHint{
+			Reads:         mergeReads(primaryKey, secondaryKey, []string{}),
+			OptionalReads: mergeCredentialOptionalReads(primaryKey, secondaryKey),
+			Enumerations: []processor.EnumerationHint{
+				{Hub: secondaryKey, Relation: "assignedTo", Direction: "in"},
+				{Hub: secondaryKey, Relation: "indexes", Direction: "in"},
+			},
+		},
+	}
+	testutil.PublishOp(t, conn, env)
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
+
+	// The bound credential's edge moves off the secondary and onto the primary.
+	assertLinkTombstoned(t, ctx, conn, boundToKey(credActorKey, secondaryKey))
+	assertLinkLive(t, ctx, conn, boundToKey(credActorKey, primaryKey))
+
+	// The secondary itself becomes a credential of the survivor.
+	assertLinkLive(t, ctx, conn, boundToKey(secondaryKey, primaryKey))
+}
