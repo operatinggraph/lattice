@@ -259,6 +259,24 @@ cycle-loupe: assert-main-checkout
 	 NATS_URL=$(NATS_URL) NATS_NKEY=$(NKEY_LOUPE) BOOTSTRAP_JSON_PATH=$(BOOTSTRAP_JSON) LOUPE_PG_DSN=$(LOUPE_PG_DSN) LOUPE_OPERATOR_ACTOR_KEY="$$LOUPE_OP_KEY" LOUPE_DEV_AUTH=1 ./bin/loupe >>loupe.log 2>&1 </dev/null & \
 	  sleep 2; pgrep -f "bin/loupe" >/dev/null && echo "==> Loupe running on http://127.0.0.1:7777" || { echo "!! Loupe failed to start — see loupe.log"; exit 1; }
 
+## cycle-facet — Rebuild bin/facet from the current tree and relaunch it against
+## the STILL-RUNNING stack, the sibling of cycle-loupe above and not a teardown
+## either. Use it after any change that reaches cmd/facet — including its
+## go:embed'd web assets, which a running binary keeps serving from the copy it
+## was built with. Env matches the launch in `up-facet`, which is the authority
+## for how this component runs, minus that target's provisioning and reseeding:
+## those belong to bringing the showcase world up, not to landing a new binary
+## on it. Logs continue to facet.log.
+cycle-facet: assert-main-checkout
+	@echo "==> Killing the running facet..."
+	-pkill -f "bin/facet" 2>/dev/null || true
+	@echo "==> Rebuilding bin/facet..."
+	go build -o bin/facet ./cmd/facet
+	@echo "==> Starting facet in background..."
+	@FACET_STORE_DIR=./facet-store NATS_URL=$(NATS_URL) EDGE_GATEWAY_URL=http://localhost:8080 \
+	 FACET_DEV_AUTH=1 FACET_PG_DSN="$(FACET_PG_DSN)" NATS_NKEY=$(NKEY_FACET) ./bin/facet >>facet.log 2>&1 </dev/null & \
+	  sleep 2; pgrep -f "bin/facet" >/dev/null && echo "==> facet running on http://127.0.0.1:7810" || { echo "!! facet failed to start — see facet.log"; exit 1; }
+
 ## cycle-processor — Rebuild bin/processor from the current tree and relaunch it
 ## against the STILL-RUNNING stack, the sibling of cycle-refractor above and not
 ## a teardown either. Use it after any change that reaches internal/processor or
