@@ -30,6 +30,10 @@ func NewCommand(natsURL, outputFmt, defaultActor *string) *cobra.Command {
 	cmd.AddCommand(newLagCommand(natsURL, outputFmt))
 	cmd.AddCommand(newEmitDDLCommand(natsURL, outputFmt))
 	cmd.AddCommand(newReprojectCommand(natsURL, outputFmt, defaultActor))
+	cmd.AddCommand(newPauseCommand(natsURL, outputFmt, defaultActor))
+	cmd.AddCommand(newResumeCommand(natsURL, outputFmt, defaultActor))
+	cmd.AddCommand(newRebuildCommand(natsURL, outputFmt, defaultActor))
+	cmd.AddCommand(newHealthCommand(natsURL, outputFmt, defaultActor))
 	return cmd
 }
 

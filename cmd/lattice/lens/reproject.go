@@ -52,7 +52,7 @@ func newReprojectCommand(natsURL, outputFmt, defaultActor *string) *cobra.Comman
 			}
 			defer conn.Close()
 
-			msg := controlauth.NewActorRequestMsg(subject, resolveReprojectActorHeader(actor, actorToken))
+			msg := controlauth.NewActorRequestMsg(subject, output.ResolveActorHeader(actor, actorToken))
 			msg.Data = body
 			reply, err := conn.NATS().RequestMsgWithContext(ctx, msg)
 			if err != nil {
@@ -91,17 +91,6 @@ func newReprojectCommand(natsURL, outputFmt, defaultActor *string) *cobra.Comman
 	}
 
 	cmd.Flags().StringVar(&actorKey, "actor-key", "", "vertex key of the actor whose row is reconciled (required)")
-	cmd.Flags().StringVar(&actor, "actor", "", "actor key stamped on the control request (defaults to credential file actorKey)")
-	cmd.Flags().StringVar(&actorToken, "actor-token", "", "signed actor JWT stamped on the control request (overrides --actor)")
+	output.AddActorFlags(cmd, &actor, &actorToken)
 	return cmd
-}
-
-// resolveReprojectActorHeader picks the control-request HeaderActor value:
-// actorToken wins when non-empty (verified-actor mode), otherwise the raw
-// actor key (self-asserted mode).
-func resolveReprojectActorHeader(actor, actorToken string) string {
-	if actorToken != "" {
-		return actorToken
-	}
-	return actor
 }

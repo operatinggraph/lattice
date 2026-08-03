@@ -144,8 +144,15 @@ func (r *Reporter) SetPaused(ctx context.Context, reason, lastError string) erro
 		existing = Entry{}
 	}
 	var lastErrPtr *string
-	if lastError != "" {
+	switch {
+	case lastError != "":
 		lastErrPtr = &lastError
+	case existing.Status == "paused" && existing.LastError != nil:
+		// An empty cause means "no new cause", not "forget the old one". A lens
+		// already paused carries the diagnosis of whatever put it there, and a
+		// second pause raised over it — an operator Pause on a structurally
+		// paused lens, say — has no cause of its own to record.
+		lastErrPtr = existing.LastError
 	}
 	entry := Entry{
 		RuleID:         r.ruleID,
@@ -244,16 +251,28 @@ func (r *Reporter) RecordError(ctx context.Context, errMsg string) error {
 
 // ClearLastError nils LastError while preserving ErrorCount and every other
 // field on the entry — Status and PauseReason included, which this method
-// never reads for a decision and never writes. Its one caller is
-// pipeline.registerWithFilterFallback: a lens's Core KV consumer
-// (re)registration that succeeds cleanly (no narrowed-to-broad fallback) is
-// this process proving the lens healthy right now, but nothing else ever
-// revisits a LastError an earlier boot's fallback recorded — a restart alone
-// does not touch health KV, and RecordError only ever appends — so without
-// this call the message outlives every process that could still explain it
-// and keeps the lens rendering "fault" (cmd/loupe/renderedstate.go's fault
-// conjunct requires a live LastError, not just a nonzero cumulative
-// ErrorCount) long after the condition is gone.
+// never writes. Its one caller is pipeline.registerWithFilterFallback: a
+// lens's Core KV consumer (re)registration that succeeds cleanly (no
+// narrowed-to-broad fallback) is this process proving the lens healthy right
+// now, while a LastError an earlier boot's fallback recorded has no other
+// retirement path — a restart alone does not touch health KV, and RecordError
+// only ever appends — so without this call the message outlives every process
+// that could still explain it and keeps the lens rendering "fault"
+// (cmd/loupe/renderedstate.go's fault conjunct requires a live LastError, not
+// just a nonzero cumulative ErrorCount) long after the condition is gone.
+//
+// A structurally paused lens is the one exception, and the one status this
+// method does read for a decision: there LastError is not a stale artifact but
+// the pause's diagnosis — the whole of what an operator has to work from,
+// since a structural pause is held until a human reconciles it. Registration
+// succeeds regardless of the pause (supervisor.Add creates the durable and
+// spawns the pump; the pause lives in the pump), so without this guard every
+// Pipeline.Run and every Rebuild would erase the cause of a pause it did
+// nothing to resolve. Infra and manual pauses are not exempted: an infra pause
+// at activation is the "not yet provisioned" state its probe resolves on its
+// own, and a manual pause never carries a cause of its own, so for both the
+// only thing LastError can hold is exactly the stale fallback message this
+// method exists to retire.
 //
 // Deliberately narrower than SetActive, which also writes Status: "active"
 // and PauseReason: nil unconditionally — exactly the pair
@@ -272,6 +291,9 @@ func (r *Reporter) ClearLastError(ctx context.Context) error {
 	existing, err := r.readExisting(ctx)
 	if err != nil {
 		return fmt.Errorf("health: ClearLastError read: %w", err)
+	}
+	if existing.PauseReason != nil && *existing.PauseReason == PauseReasonStructural {
+		return nil
 	}
 	if existing.LastError == nil {
 		return nil

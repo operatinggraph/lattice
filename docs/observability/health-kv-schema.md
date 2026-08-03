@@ -806,7 +806,15 @@ above).
 ```
 
 `pauseReason` is `null` when active; `"infra"`, `"structural"`, or `"manual"` when paused.
-`lastError` is `null` when no error has occurred. `lastProjectedAt` is the wall-clock of the
+`lastError` is `null` when no error has occurred. On a **structural** pause it is not merely the
+last error but the pause's **diagnosis** — the lens is held until a human reconciles the cause, so
+that text is the whole of what the operator has to act on. It is therefore guaranteed for the life
+of the pause: the clean-registration clear that retires a stale message on every other lens skips a
+structurally paused one, and a second pause raised over it (an operator `pause`, which carries no
+cause of its own) preserves it rather than nulling it. Read it with `lattice lens health <lensId>`,
+which renders `pauseReason` and `lastError` together; the `LensProjectionPaused` issue message
+carries it truncated, so a health summary names the failing column or table, not only the tier.
+`lastProjectedAt` is the wall-clock of the
 lens's last successful target write — `""` until its first projection (design:
 lens-projection-liveness-design.md §3.2); a freshness signal, never an alert input on its own
 (a genuinely quiet, no-match lens naturally has an old value). `projectionLag` is the

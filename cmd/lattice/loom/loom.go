@@ -51,31 +51,6 @@ func NewCommand(natsURL, outputFmt, defaultActor *string) *cobra.Command {
 	return cmd
 }
 
-// addActorFlag registers the --actor and --actor-token flags shared by every
-// subcommand, defaulting --actor at RunE time to *defaultActor (the
-// credential-file actorKey) when unset. A resolved-empty actor is NOT an
-// error here (unlike the write-path `op submit`): in Fire 1 posture (no JWT
-// trust root configured server-side) the capability gate is not enforced, so
-// an anonymous request must keep working. --actor-token carries a signed
-// actor JWT (Fire 2, control-plane-capability-authz-design.md — mint one
-// with `gateway dev-token -sub <identityNanoID>` against a dev-mode server);
-// when set it is stamped in place of --actor and wins if both are given,
-// since presenting a token is the deliberate opt-in to verified-actor mode.
-func addActorFlag(cmd *cobra.Command, actor, actorToken *string) {
-	cmd.Flags().StringVar(actor, "actor", "", "actor key stamped on the control request (defaults to credential file actorKey)")
-	cmd.Flags().StringVar(actorToken, "actor-token", "", "signed actor JWT stamped on the control request (Fire 2 verified-actor mode; overrides --actor)")
-}
-
-// resolveActorHeader picks the control-request HeaderActor value: actorToken
-// wins when non-empty (verified-actor mode), otherwise the raw actor key
-// (Fire 1 self-asserted mode).
-func resolveActorHeader(actor, actorToken string) string {
-	if actorToken != "" {
-		return actorToken
-	}
-	return actor
-}
-
 // request sends a control-plane request to subject, stamping actorHeader as
 // the Lattice-Actor header when non-empty, and decodes the
 // control.ControlResponse. Connection is via output.Connect's raw *nats.Conn
@@ -116,7 +91,7 @@ func newListCommand(natsURL, outputFmt, defaultActor *string) *cobra.Command {
 			if actor == "" {
 				actor = *defaultActor
 			}
-			resp, err := request(*natsURL, control.ListSubject(), resolveActorHeader(actor, actorToken))
+			resp, err := request(*natsURL, control.ListSubject(), output.ResolveActorHeader(actor, actorToken))
 			if err != nil {
 				if *outputFmt == "json" {
 					return output.PrintJSONError("ControlError", err.Error())
@@ -140,7 +115,7 @@ func newListCommand(natsURL, outputFmt, defaultActor *string) *cobra.Command {
 			return nil
 		},
 	}
-	addActorFlag(cmd, &actor, &actorToken)
+	output.AddActorFlags(cmd, &actor, &actorToken)
 	return cmd
 }
 
@@ -154,7 +129,7 @@ func newConsumersCommand(natsURL, outputFmt, defaultActor *string) *cobra.Comman
 			if actor == "" {
 				actor = *defaultActor
 			}
-			resp, err := request(*natsURL, control.ConsumersSubject(), resolveActorHeader(actor, actorToken))
+			resp, err := request(*natsURL, control.ConsumersSubject(), output.ResolveActorHeader(actor, actorToken))
 			if err != nil {
 				if *outputFmt == "json" {
 					return output.PrintJSONError("ControlError", err.Error())
@@ -176,7 +151,7 @@ func newConsumersCommand(natsURL, outputFmt, defaultActor *string) *cobra.Comman
 			return nil
 		},
 	}
-	addActorFlag(cmd, &actor, &actorToken)
+	output.AddActorFlags(cmd, &actor, &actorToken)
 	return cmd
 }
 
@@ -198,7 +173,7 @@ func newInspectCommand(natsURL, outputFmt, defaultActor *string) *cobra.Command 
 				}
 				return err
 			}
-			resp, err := request(*natsURL, control.NameSubject(instanceID, "inspect"), resolveActorHeader(actor, actorToken))
+			resp, err := request(*natsURL, control.NameSubject(instanceID, "inspect"), output.ResolveActorHeader(actor, actorToken))
 			if err != nil {
 				if *outputFmt == "json" {
 					return output.PrintJSONError("ControlError", err.Error())
@@ -242,7 +217,7 @@ func newInspectCommand(natsURL, outputFmt, defaultActor *string) *cobra.Command 
 			return nil
 		},
 	}
-	addActorFlag(cmd, &actor, &actorToken)
+	output.AddActorFlags(cmd, &actor, &actorToken)
 	return cmd
 }
 
@@ -264,7 +239,7 @@ func newPauseCommand(natsURL, outputFmt, defaultActor *string) *cobra.Command {
 				}
 				return err
 			}
-			resp, err := request(*natsURL, control.NameSubject(name, "pause"), resolveActorHeader(actor, actorToken))
+			resp, err := request(*natsURL, control.NameSubject(name, "pause"), output.ResolveActorHeader(actor, actorToken))
 			if err != nil {
 				if *outputFmt == "json" {
 					return output.PrintJSONError("ControlError", err.Error())
@@ -283,7 +258,7 @@ func newPauseCommand(natsURL, outputFmt, defaultActor *string) *cobra.Command {
 			return nil
 		},
 	}
-	addActorFlag(cmd, &actor, &actorToken)
+	output.AddActorFlags(cmd, &actor, &actorToken)
 	return cmd
 }
 
@@ -305,7 +280,7 @@ func newResumeCommand(natsURL, outputFmt, defaultActor *string) *cobra.Command {
 				}
 				return err
 			}
-			resp, err := request(*natsURL, control.NameSubject(name, "resume"), resolveActorHeader(actor, actorToken))
+			resp, err := request(*natsURL, control.NameSubject(name, "resume"), output.ResolveActorHeader(actor, actorToken))
 			if err != nil {
 				if *outputFmt == "json" {
 					return output.PrintJSONError("ControlError", err.Error())
@@ -320,7 +295,7 @@ func newResumeCommand(natsURL, outputFmt, defaultActor *string) *cobra.Command {
 			return nil
 		},
 	}
-	addActorFlag(cmd, &actor, &actorToken)
+	output.AddActorFlags(cmd, &actor, &actorToken)
 	return cmd
 }
 
@@ -347,7 +322,7 @@ func newRedriveCommand(natsURL, outputFmt, defaultActor *string) *cobra.Command 
 				}
 				return err
 			}
-			resp, err := request(*natsURL, control.NameSubject(instanceID, "redrive"), resolveActorHeader(actor, actorToken))
+			resp, err := request(*natsURL, control.NameSubject(instanceID, "redrive"), output.ResolveActorHeader(actor, actorToken))
 			if err != nil {
 				if *outputFmt == "json" {
 					return output.PrintJSONError("ControlError", err.Error())
@@ -362,6 +337,6 @@ func newRedriveCommand(natsURL, outputFmt, defaultActor *string) *cobra.Command 
 			return nil
 		},
 	}
-	addActorFlag(cmd, &actor, &actorToken)
+	output.AddActorFlags(cmd, &actor, &actorToken)
 	return cmd
 }

@@ -70,6 +70,22 @@ default-on (`AuthModeCapability`) and shared across all three control planes
 data-plane Capability **Lens** that feeds Processor write-path auth is a separate
 mechanism and is also live.
 
+An operator reaches these ops two ways. Loupe drives all six from the lens card, but `resume` sits
+outside its demo-posture read-only set deliberately — a hosted read-only console should not gain a
+mutate verb. The CLI is the other: `lattice lens pause | resume | rebuild | health <lensId>`, each
+stamping whichever actor `--actor` (or `--actor-token`) names. The grant required is
+`ctrl.refractor.<op>` at scope `any`, matched exactly with no wildcard branch, so root is not
+implicitly permitted; on the dev and demo stacks `make dev-seed-console-operator` provisions an
+identity holding `consoleOperator`'s grants and persists its key.
+
+A **structural** pause is the one an operator must reach by hand, since nothing in the platform
+retires it: the pause survives a process cycle, and re-registration at boot clears a stale lens
+*fault* without clearing the pause. Its recorded cause is preserved for the life of the pause (see
+`docs/observability/health-kv-schema.md`), so the recovery sequence is `lattice lens health` to read
+what failed, fix that — for the common case, a lens that gained a body column and needs
+`make provision-readpath` re-run — then `lattice lens resume`. Resuming without fixing the cause
+just re-pauses the lens on its next write.
+
 ## Privacy / security supersession tiers
 
 Two supersession classifications sit above the four base tiers — both now built.

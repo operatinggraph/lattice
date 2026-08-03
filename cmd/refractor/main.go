@@ -586,6 +586,9 @@ func main() {
 			if st.PauseReason != nil {
 				snap.PauseReason = *st.PauseReason
 			}
+			if st.LastError != nil {
+				snap.LastError = *st.LastError
+			}
 			snap.Status = st.Status
 			snap.ConsumerLag = pending
 			out = append(out, snap)
@@ -658,6 +661,9 @@ func main() {
 			}
 			if st.PauseReason != nil {
 				snap.PauseReason = *st.PauseReason
+			}
+			if st.LastError != nil {
+				snap.LastError = *st.LastError
 			}
 			snap.RuleID = st.RuleID
 			snap.Status = st.Status

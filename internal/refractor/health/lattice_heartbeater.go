@@ -176,7 +176,13 @@ type CapabilityLensStatus struct {
 	RuleID        string
 	Status        string // "active" | "paused" | "rebuilding" | "unknown"
 	PauseReason   string // "" when not paused
-	ConsumerLag   uint64
+	// LastError is the pause's recorded cause, "" when there is none. A
+	// structural pause is held until a human reconciles it, so this text is the
+	// whole of what the operator has to act on — the issue message carries it,
+	// truncated, rather than making them open a browser to learn which column or
+	// table the projection failed on.
+	LastError   string
+	ConsumerLag uint64
 	// Unreadable, when non-empty, is the error that stopped this cycle from
 	// reading the lens's liveness inputs (its health entry or its consumer's
 	// pending count). Status/ConsumerLag are then not to be trusted, and the
@@ -231,10 +237,13 @@ type CapabilityLensStatus struct {
 // the lastProjectedAt progress clock; auth-plane lenses are excluded — the
 // CapabilityLensProvider path owns them.
 type LensLivenessStatus struct {
-	CanonicalName   string
-	RuleID          string
-	Status          string // "active" | "paused" | "rebuilding" | "unknown"
-	PauseReason     string // "" when not paused
+	CanonicalName string
+	RuleID        string
+	Status        string // "active" | "paused" | "rebuilding" | "unknown"
+	PauseReason   string // "" when not paused
+	// LastError is the pause's recorded cause, "" when there is none — carried
+	// into the issue message for the reason the capability path carries it.
+	LastError       string
 	ProjectionLag   uint64
 	LastProjectedAt time.Time // zero if never projected
 	// Unreadable, when non-empty, is the error that stopped this cycle from
@@ -686,11 +695,7 @@ func (h *LatticeHeartbeater) evalCapabilityLenses(now time.Time) (map[string]map
 			switch s.Status {
 			case "paused":
 				alert = "paused"
-				reason := s.PauseReason
-				if reason == "" {
-					reason = "unknown"
-				}
-				paused = append(paused, fmt.Sprintf("%s (%s)", name, reason))
+				paused = append(paused, pausedLabel(name, s.PauseReason, s.LastError))
 				// A paused lens is a hard error; its lag debounce is irrelevant and
 				// must not carry a stale streak into the next active cycle.
 				h.resetLagState(name)
@@ -1120,11 +1125,7 @@ func (h *LatticeHeartbeater) evalLenses(now time.Time) (map[string]map[string]an
 		switch s.Status {
 		case "paused":
 			alert = "paused"
-			reason := s.PauseReason
-			if reason == "" {
-				reason = "unknown"
-			}
-			paused = append(paused, fmt.Sprintf("%s (%s)", name, reason))
+			paused = append(paused, pausedLabel(name, s.PauseReason, s.LastError))
 			h.resetLensLagState(name)
 		case "active":
 			if h.evalLensLagHysteresis(name, s.ProjectionLag, threshold, clearThreshold, int(raiseCycles)) {
@@ -1504,4 +1505,26 @@ func formatISODuration(d time.Duration) string {
 	h := seconds / 3600
 	rem := seconds % 3600
 	return "PT" + itoa(h) + "H" + itoa(rem/60) + "M" + itoa(rem%60) + "S"
+}
+
+// pausedLabel renders one paused lens for a LensProjectionPaused issue message:
+// the lens name, why it is paused, and — when one was recorded — the cause,
+// truncated so a handful of paused lenses cannot push the issue past what a
+// health entry should carry. A structural pause is held until a human
+// reconciles it, so the cause is the operator's whole starting point; without
+// it the message says only "structural", which names the tier and not the
+// column, table or constraint the projection actually failed on.
+func pausedLabel(name, reason, lastError string) string {
+	if reason == "" {
+		reason = "unknown"
+	}
+	if lastError == "" {
+		return fmt.Sprintf("%s (%s)", name, reason)
+	}
+	const causeCap = 160
+	cause := strings.TrimSpace(lastError)
+	if len(cause) > causeCap {
+		cause = cause[:causeCap] + "..."
+	}
+	return fmt.Sprintf("%s (%s: %s)", name, reason, cause)
 }

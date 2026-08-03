@@ -370,18 +370,19 @@ func TestReporter_ClearLastError_ClearsErrorPreservesCount(t *testing.T) {
 	assert.Equal(t, "active", entry.Status, "ClearLastError must not touch status")
 }
 
-// TestReporter_ClearLastError_PreservesPausedStatus verifies item 3 of FIRE 2:
-// ClearLastError never reads or writes Status/PauseReason, so a persisted
-// pause survives the call untouched — the exact guarantee that lets
-// registerWithFilterFallback call it at boot without racing (or fighting) the
-// supervisor's restore-paused-on-startup path (substrate.ConsumerSupervisor's
-// restoreState, Pipeline.Run's doc comment).
+// TestReporter_ClearLastError_PreservesPausedStatus verifies ClearLastError
+// never writes Status/PauseReason, so a persisted pause survives the call
+// untouched — the exact guarantee that lets registerWithFilterFallback call it
+// at boot without racing (or fighting) the supervisor's
+// restore-paused-on-startup path (substrate.ConsumerSupervisor's restoreState,
+// Pipeline.Run's doc comment). An infra pause, whose lastError carries no
+// diagnosis the operator has to act on, still clears.
 func TestReporter_ClearLastError_PreservesPausedStatus(t *testing.T) {
 	kv := startHealthKV(t)
 	r := health.New(kv, "my-rule")
 
 	require.NoError(t, r.RecordError(context.Background(), "first error"))
-	require.NoError(t, r.SetPaused(context.Background(), health.PauseReasonStructural, "escalated failure"))
+	require.NoError(t, r.SetPaused(context.Background(), health.PauseReasonInfra, "target table absent"))
 
 	require.NoError(t, r.ClearLastError(context.Background()))
 
@@ -389,9 +390,69 @@ func TestReporter_ClearLastError_PreservesPausedStatus(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "paused", entry.Status, "ClearLastError must not flip a persisted pause active")
 	require.NotNil(t, entry.PauseReason)
-	assert.Equal(t, health.PauseReasonStructural, *entry.PauseReason, "ClearLastError must not touch pauseReason")
-	assert.Nil(t, entry.LastError, "lastError must still clear even while paused")
+	assert.Equal(t, health.PauseReasonInfra, *entry.PauseReason, "ClearLastError must not touch pauseReason")
+	assert.Nil(t, entry.LastError, "lastError must still clear on a non-structural pause")
 	assert.Equal(t, uint64(1), entry.ErrorCount, "errorCount must survive")
+}
+
+// TestReporter_ClearLastError_KeepsStructuralCause pins the one status
+// ClearLastError reads for a decision. A structural pause is held until a human
+// reconciles it, and its lastError IS the diagnosis they have to work from —
+// while registration succeeds regardless of the pause, so every Pipeline.Run
+// and every Rebuild would otherwise erase the cause of a pause it did nothing
+// to resolve, leaving `paused/structural` with a null cause.
+func TestReporter_ClearLastError_KeepsStructuralCause(t *testing.T) {
+	kv := startHealthKV(t)
+	r := health.New(kv, "my-rule")
+
+	const cause = `ERROR: column "row_kind" of relation "read_identity_credential_bindings" does not exist (SQLSTATE 42703)`
+	require.NoError(t, r.SetPaused(context.Background(), health.PauseReasonStructural, cause))
+
+	require.NoError(t, r.ClearLastError(context.Background()))
+
+	entry, err := r.GetStatus(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, "paused", entry.Status)
+	require.NotNil(t, entry.PauseReason)
+	assert.Equal(t, health.PauseReasonStructural, *entry.PauseReason)
+	require.NotNil(t, entry.LastError, "a structural pause's cause must survive ClearLastError")
+	assert.Equal(t, cause, *entry.LastError)
+}
+
+// TestReporter_SetPaused_EmptyCausePreservesExisting pins the second eraser: an
+// operator Pause raised over an already-structurally-paused lens carries no
+// cause of its own, and must not be read as "forget the old one".
+func TestReporter_SetPaused_EmptyCausePreservesExisting(t *testing.T) {
+	kv := startHealthKV(t)
+	r := health.New(kv, "my-rule")
+
+	const cause = `ERROR: relation "read_clinic_appointments" does not exist (SQLSTATE 42P01)`
+	require.NoError(t, r.SetPaused(context.Background(), health.PauseReasonStructural, cause))
+	require.NoError(t, r.SetPaused(context.Background(), health.PauseReasonManual, ""))
+
+	entry, err := r.GetStatus(context.Background())
+	require.NoError(t, err)
+	require.NotNil(t, entry.PauseReason)
+	assert.Equal(t, health.PauseReasonManual, *entry.PauseReason, "the new reason still wins")
+	require.NotNil(t, entry.LastError, "an empty cause means no new cause, not forget the old one")
+	assert.Equal(t, cause, *entry.LastError)
+}
+
+// TestReporter_SetPaused_EmptyCauseOnActiveLensClearsIt is the boundary of the
+// guard above: the preservation is keyed on the lens ALREADY being paused, so a
+// first pause raised on an active lens carrying a stale error still records "no
+// cause" rather than adopting an unrelated message as its diagnosis.
+func TestReporter_SetPaused_EmptyCauseOnActiveLensClearsIt(t *testing.T) {
+	kv := startHealthKV(t)
+	r := health.New(kv, "my-rule")
+
+	require.NoError(t, r.RecordError(context.Background(), "an unrelated stale error"))
+	require.NoError(t, r.SetPaused(context.Background(), health.PauseReasonManual, ""))
+
+	entry, err := r.GetStatus(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, "paused", entry.Status)
+	assert.Nil(t, entry.LastError, "a first pause on an active lens must not adopt a stale error as its cause")
 }
 
 // TestReporter_ClearLastError_NoOpWhenAlreadyNil verifies ClearLastError skips
