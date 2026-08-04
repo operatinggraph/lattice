@@ -1,5 +1,5 @@
 name: wellness-reminders
-version: 0.1.0
+version: 0.2.0
 description: |
   Wellness class reminder — the wellness vertical's first orchestration. A
   one-shot @at convergence over wellness-domain's booking: the .reminder
@@ -13,9 +13,15 @@ description: |
   external.notification off its own outbox to the bridge's "notification"
   adapter; RecordBookingReminderNotification records the outcome as an
   audit-only aspect (does not gate the convergence lens above).
+  Also ships pastDueBookings, the auto-no-show closer: freshUntil = the
+  session's own .schedule.endsAt (no derived deadline), gap opens once a
+  `booked` booking's class ends with no attendance mark. The §10.8 playbook
+  directOps wellness-domain's own SetBookingAttendance{status: noShow}
+  directly (no dedicated op needed — the operator path takes only plain row
+  columns), mirroring clinic-reminders' pastDueAppointments.
   Depends on wellness-domain (the booking/session vertex types +
-  .schedule.remindAt) and orchestration-base (MarkExpired re-touch at the
-  @at firing).
+  .schedule.remindAt/.schedule.endsAt) and orchestration-base (MarkExpired
+  re-touch at the @at firing).
 depends:
   - wellness-domain
   - orchestration-base
@@ -34,6 +40,10 @@ declares:
       adapter: nats-kv
       bucket: weaver-targets
       engine: full
+    - canonicalName: pastDueBookings
+      adapter: nats-kv
+      bucket: weaver-targets
+      engine: full
   permissions:
     - operationType: RecordBookingReminder
       scope: any
@@ -44,6 +54,8 @@ declares:
   weaverTargets:
     - targetId: wellnessBookingReminders
       lensRef: wellnessBookingReminders
+    - targetId: pastDueBookings
+      lensRef: pastDueBookings
   opMetas:
     - operationType: RecordBookingReminder
     - operationType: RecordBookingReminderNotification

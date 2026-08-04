@@ -20,6 +20,15 @@
 //	lens wellnessBookingReminders (weaver-target, full)  (freshUntil = the session's remindAt; remindedFor <> startsAt gate)
 //	playbook missing_reminder → directOp(RecordBookingReminder, remindedFor: row.startsAt)
 //
+// It also ships the auto-no-show closer (pastdue.go), mirroring
+// clinic-reminders' pastDueAppointments: a class whose session has ended
+// with the booking still `booked` never got a staff attendance mark, so
+// wellness-ledger's wellnessNoShowSettlement fee never had a status to key
+// on (verticals.md "a past class never closes out").
+//
+//	lens pastDueBookings (weaver-target, full)  (freshUntil = the session's endsAt; status='booked' AND endsAt<=$now gate)
+//	playbook missing_noshow_transition → directOp(SetBookingAttendance, bookingKey: row.entityKey, session: row.sessionKey, status: "noShow")
+//
 // The reminder mechanism INVERTS lease-signing's freshness re-open, exactly
 // like clinic-reminders: it projects freshUntil = a deadline (the session's
 // .schedule.remindAt wellness-domain precomputes = startsAt − 24h) so
@@ -47,14 +56,16 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 // Package is the static, install-time bundle.
 var Package = pkgmgr.Definition{
 	Name:    "wellness-reminders",
-	Version: "0.1.0",
+	Version: "0.2.0",
 	Description: "Wellness class reminder (the wellness vertical's first orchestration): the .reminder marker aspect " +
 		"+ RecordBookingReminder op, the wellnessBookingReminders weaver-target convergence lens (freshUntil = the " +
 		"booking's session .schedule.remindAt deadline arms the @at timer; the gap opens at the deadline) — the " +
 		"§10.8 playbook dispatches the directOp. Inverts lease-signing's freshness re-open, mirroring " +
 		"clinic-reminders' appointment-reminder half. Also fires external.notification off its own outbox to the " +
-		"bridge's \"notification\" adapter; RecordBookingReminderNotification records the outcome. Depends " +
-		"wellness-domain + orchestration-base.",
+		"bridge's \"notification\" adapter; RecordBookingReminderNotification records the outcome. Also ships the " +
+		"pastDueBookings weaver-target convergence lens (freshUntil = the session's .schedule.endsAt; gap opens once " +
+		"a `booked` booking's class ends) — the §10.8 playbook directOps wellness-domain's own SetBookingAttendance " +
+		"(status: noShow), mirroring clinic-reminders' pastDueAppointments. Depends wellness-domain + orchestration-base.",
 	Depends:       []string{"wellness-domain", "orchestration-base"},
 	DDLs:          DDLs(),
 	Lenses:        Lenses(),

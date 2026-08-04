@@ -7,11 +7,13 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 // binding Weaver reads.
 const WellnessBookingRemindersTarget = "wellnessBookingReminders"
 
-// Lenses returns the package's single weaver-target convergence lens:
-// wellnessBookingReminders, the ~24h-ahead class reminder. Mirrors
+// Lenses returns the package's weaver-target convergence lenses:
+// wellnessBookingReminders, the ~24h-ahead class reminder (mirrors
 // clinic-reminders' appointmentReminders lens, anchored on booking instead
 // of appointment — a wellness session has MANY bookers, so the reminder
-// marker (and hence the anchor) lives per-booking, not per-session.
+// marker, and hence the anchor, lives per-booking, not per-session), and
+// pastDueBookings, the auto-no-show closer (pastdue.go; mirrors
+// clinic-reminders' pastDueAppointments).
 func Lenses() []pkgmgr.LensSpec {
 	return []pkgmgr.LensSpec{
 		{
@@ -30,6 +32,7 @@ func Lenses() []pkgmgr.LensSpec {
 				KeyColumn:        "entityId",
 			},
 		},
+		pastDueBookingsLens(),
 	}
 }
 
