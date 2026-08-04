@@ -63,11 +63,17 @@ import (
 // CreateStudio mints a fresh vertex every rerun, and LoftSpace's browsable
 // inventory + /api/studios both rendered the resulting pile of
 // indistinguishable "12 Classic Demo Ave" / "Classic Demo Studio" duplicates.
+// latteID/croissantID join them for the same reason: an unpinned
+// CreateMenuItem minted a fresh pair every rerun, and the staff Manage Menu
+// grid + the self-order picker both rendered the resulting pile of
+// indistinguishable "Latte" / "Croissant" duplicates.
 const (
-	patientID  = "rQ7RnR5XWyZP2BSropUD"
-	providerID = "zJjptLYizx4vDU6KRt9i"
-	unitID     = "7mRGqbqxmZqPV9HY12T2"
-	studioID   = "neEA76zkT84xv8tc6CNX"
+	patientID   = "rQ7RnR5XWyZP2BSropUD"
+	providerID  = "zJjptLYizx4vDU6KRt9i"
+	unitID      = "7mRGqbqxmZqPV9HY12T2"
+	studioID    = "neEA76zkT84xv8tc6CNX"
+	latteID     = "qvVewSfyQZcWCnFAC3sY"
+	croissantID = "8rSutmvxePuueAZSCP8J"
 )
 
 func main() {
@@ -235,12 +241,18 @@ func main() {
 	// lives — the residence chain a Facet browse walk descends binds the unit
 	// itself at depth 0, so the catalog is reachable from the first hop.
 	menuLocationHint := &processor.ContextHint{Reads: []string{unitKey}}
-	menuItemReply := submitOp(ctx, conn, adminKey, "CreateMenuItem", "menuitem",
-		map[string]any{"name": "Latte", "priceCents": 450, "locationKey": unitKey}, menuLocationHint)
-	fmt.Printf("==> menu item:       %s (Latte, $4.50)\n", menuItemReply.PrimaryKey)
-	submitOp(ctx, conn, adminKey, "CreateMenuItem", "menuitem",
-		map[string]any{"name": "Croissant", "priceCents": 350, "locationKey": unitKey}, menuLocationHint)
-	fmt.Println("==> menu item:       Croissant, $3.50")
+	latteKey := "vtx.menuitem." + latteID
+	if !alive(ctx, conn, latteKey) {
+		submitOp(ctx, conn, adminKey, "CreateMenuItem", "menuitem",
+			map[string]any{"name": "Latte", "priceCents": 450, "locationKey": unitKey, "menuItemId": latteID}, menuLocationHint)
+	}
+	fmt.Printf("==> menu item:       %s (Latte, $4.50)\n", latteKey)
+	croissantKey := "vtx.menuitem." + croissantID
+	if !alive(ctx, conn, croissantKey) {
+		submitOp(ctx, conn, adminKey, "CreateMenuItem", "menuitem",
+			map[string]any{"name": "Croissant", "priceCents": 350, "locationKey": unitKey, "menuItemId": croissantID}, menuLocationHint)
+	}
+	fmt.Printf("==> menu item:       %s (Croissant, $3.50)\n", croissantKey)
 
 	// --- Wellness: studio + bookable session ---------------------------------
 
