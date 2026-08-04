@@ -1115,12 +1115,18 @@ func findApplicantLeaseApp(ctx context.Context, conn *substrate.Conn, applicantK
 // including the decide — it is the bootstrap operator (actor_holds_operator),
 // which require_manages / enforce_workplace both exempt unconditionally, the
 // same standing grant this script already relies on for AssignUnitOwner et
-// al. moveInDate is 2 months back so a freshly-minted .tenancy reads as an
-// ALREADY-ACTIVE tenancy, not a future one (a discovered application keeps
-// its own real moveInDate). Per-mutation idempotent; safe on every rerun.
+// al. moveInDate is 11 months back (not just "already active" — leaseEnd =
+// moveIn + the 12-month leaseTermMonths below lands ~1 month out, inside the
+// package's 60-day renewalWindow, so renewalOpensAt is already in the past
+// and leaseExpirySpec's missing_renewalCycle/Weaver's OpenRenewal dispatch
+// fire on this seed's very first tick — a 2-month-back moveIn left
+// renewalOpensAt ~8 months out, so the Renewals tab stayed empty for the
+// whole demo lifetime). A discovered (self-applied) application keeps its
+// own real moveInDate, untouched by this offset. Per-mutation idempotent;
+// safe on every rerun.
 // Returns each resident's leaseapp key ("" for an empty/unresolved tenant).
 func seedResidentTenancies(ctx context.Context, conn *substrate.Conn, adminKey, tenant1Key, tenant2Key string) (string, string) {
-	moveIn := time.Now().UTC().AddDate(0, -2, 0)
+	moveIn := time.Now().UTC().AddDate(0, -11, 0)
 	results := make([]string, 2)
 	for i, t := range []struct {
 		unitKey, fixedLeaseAppID, applicantKey, line1 string
