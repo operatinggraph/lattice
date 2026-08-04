@@ -180,6 +180,7 @@ func main() {
 			map[string]any{"fullName": "Dr. Classic Demo", "specialty": "Family Medicine", "providerId": providerID}, nil)
 	}
 	fmt.Printf("==> provider:        %s\n", providerKey)
+	reapDuplicateProviders(ctx, conn, adminKey, providerKey)
 
 	// Unconditioned SetProviderHours upsert (no OCC/guard aspect, config not a
 	// write-path claim key) — one window per UTC weekday, 08:00-18:00, wide
@@ -253,6 +254,7 @@ func main() {
 			map[string]any{"name": "Croissant", "priceCents": 350, "locationKey": unitKey, "menuItemId": croissantID}, menuLocationHint)
 	}
 	fmt.Printf("==> menu item:       %s (Croissant, $3.50)\n", croissantKey)
+	reapDuplicateMenuItems(ctx, conn, adminKey, unitKey, map[string]bool{latteKey: true, croissantKey: true})
 
 	// --- Wellness: studio + bookable session ---------------------------------
 
@@ -323,6 +325,88 @@ func slotClaimKeys(hub string, start, end time.Time) []string {
 		keys = append(keys, hub+".slot"+code)
 	}
 	return keys
+}
+
+// reapDuplicateMenuItems tombstones every live "Latte"/"Croissant" menu item
+// served at unitKey other than the checked-in canonical pair (keep) — c79f9b5f
+// pinned CreateMenuItem's ids going forward so a rerun converges instead of
+// duplicating, but never reaped the copies an unpinned rerun had already
+// minted before that fix landed, so the staff Manage Menu grid and the
+// self-order picker still render every one of them (verticals.md). Filtered
+// by the servedAt link to THIS seed's own unitKey, not by name alone — a
+// different demo (seed-showcase.go) mints its own, differently-ID'd
+// "Latte"/"Croissant" pair at its own location, and must not be touched here.
+// Direct Core KV reads + the same admin-actor op-submission every other
+// mutation in this file already uses (P2: state still changes only via
+// RetireMenuItem, never a raw KV write) — sanctioned here only because this
+// is a dev/ops loader, not a P5 vertical-app read path (mirrors alive/
+// findApplicantLeaseApp's identical rationale, seed-showcase.go).
+func reapDuplicateMenuItems(ctx context.Context, conn *substrate.Conn, adminKey, unitKey string, keep map[string]bool) {
+	keys, err := conn.KVListKeysPrefix(ctx, bootstrap.CoreKVBucket, "vtx.menuitem.")
+	must(err, "list vtx.menuitem. keys")
+	for _, key := range keys {
+		if keep[key] || !alive(ctx, conn, key) || !alive(ctx, conn, linkKey(key, "servedAt", unitKey)) {
+			continue
+		}
+		entry, err := conn.KVGet(ctx, bootstrap.CoreKVBucket, key+".price")
+		if err != nil {
+			continue
+		}
+		var aspect struct {
+			IsDeleted bool `json:"isDeleted"`
+			Data      struct {
+				Name string `json:"name"`
+			} `json:"data"`
+		}
+		if err := json.Unmarshal(entry.Value, &aspect); err != nil || aspect.IsDeleted {
+			continue
+		}
+		if aspect.Data.Name != "Latte" && aspect.Data.Name != "Croissant" {
+			continue
+		}
+		submitOp(ctx, conn, adminKey, "RetireMenuItem", "menuitem",
+			map[string]any{"menuItemKey": key},
+			&processor.ContextHint{Reads: []string{key}})
+		fmt.Printf("==> reaped duplicate menu item: %s (%s)\n", key, aspect.Data.Name)
+	}
+}
+
+// reapDuplicateProviders tombstones every live "Dr. Classic Demo" provider
+// other than the checked-in canonical one (keep) — adbf2571 pinned the
+// seed's provider id going forward but never reaped the pre-pin duplicates,
+// so the patient booking picker still offers all of them, none carrying
+// hours or a practicesAt site (verticals.md). Name-filtered only (no
+// location join at CreateProvider time to filter on, unlike menu items) —
+// safe because only this script ever mints a provider with this exact
+// fullName (seed-showcase.go's own provider uses a different name/id).
+func reapDuplicateProviders(ctx context.Context, conn *substrate.Conn, adminKey, keep string) {
+	keys, err := conn.KVListKeysPrefix(ctx, bootstrap.CoreKVBucket, "vtx.provider.")
+	must(err, "list vtx.provider. keys")
+	for _, key := range keys {
+		if key == keep || !alive(ctx, conn, key) {
+			continue
+		}
+		entry, err := conn.KVGet(ctx, bootstrap.CoreKVBucket, key+".profile")
+		if err != nil {
+			continue
+		}
+		var aspect struct {
+			IsDeleted bool `json:"isDeleted"`
+			Data      struct {
+				FullName string `json:"fullName"`
+			} `json:"data"`
+		}
+		if err := json.Unmarshal(entry.Value, &aspect); err != nil || aspect.IsDeleted {
+			continue
+		}
+		if aspect.Data.FullName != "Dr. Classic Demo" {
+			continue
+		}
+		submitOp(ctx, conn, adminKey, "TombstoneProvider", "provider",
+			map[string]any{"providerKey": key},
+			&processor.ContextHint{Reads: []string{key}})
+		fmt.Printf("==> reaped duplicate provider: %s (%s)\n", key, aspect.Data.FullName)
+	}
 }
 
 // alive reports whether key names a live (non-tombstoned) Core KV document —
