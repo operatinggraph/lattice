@@ -137,11 +137,33 @@ func queryLandlordUnits(ctx context.Context, pool pgxBeginner, actorID string) (
 	return out, nil
 }
 
+// dedupeUnitsByKey collapses a co-managed unit's one-row-per-landlord fan-out
+// (landlordUnitsReadSpec MATCH REQUIRES `manages`, packages/loftspace-domain/
+// lenses.go) down to one row per distinct unit. Every fanned-out row for the
+// same unit carries the same status/rent (they're the same unit), so keeping
+// the first occurrence loses no information; the SQL's `ORDER BY unit_key`
+// keeps a unit's fanned-out rows adjacent.
+func dedupeUnitsByKey(units []portfolioPulseUnit) []portfolioPulseUnit {
+	seen := make(map[string]bool, len(units))
+	out := make([]portfolioPulseUnit, 0, len(units))
+	for _, u := range units {
+		if seen[u.UnitKey] {
+			continue
+		}
+		seen[u.UnitKey] = true
+		out = append(out, u)
+	}
+	return out
+}
+
 // summarizePortfolioPulse folds the flat per-unit rows into the aggregate
 // counts the FE card renders. A pure function of the RLS-scoped rows — no
 // auth logic (RLS already guaranteed every row belongs to the requesting
-// landlord).
+// landlord). Deduplicates by UnitKey first: read_landlord_units fans a
+// co-managed unit out to one row per manager (see dedupeUnitsByKey), so
+// counting raw rows overstates totalUnits/leased and understates available.
 func summarizePortfolioPulse(units []portfolioPulseUnit) portfolioPulseResult {
+	units = dedupeUnitsByKey(units)
 	res := portfolioPulseResult{Units: units, TotalUnits: len(units)}
 	for _, u := range units {
 		switch u.UnitStatus {

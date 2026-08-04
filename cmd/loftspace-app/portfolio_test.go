@@ -65,6 +65,32 @@ func TestSummarizePortfolioPulse(t *testing.T) {
 	}
 }
 
+// A co-managed unit fans out to one row per landlord (landlordUnitsReadSpec,
+// packages/loftspace-domain/lenses.go) — a landlord co-managing a building's
+// units with 3 others must still see distinct-unit counts, not 4x-inflated
+// ones, and a status other than "leased" (available/pending) among the
+// fanned-out duplicates must not be lost.
+func TestSummarizePortfolioPulse_CoManagedUnit_DedupedByUnitKey(t *testing.T) {
+	units := []portfolioPulseUnit{
+		{UnitKey: "vtx.unit.a", UnitStatus: "leased"},
+		{UnitKey: "vtx.unit.a", UnitStatus: "leased"},
+		{UnitKey: "vtx.unit.a", UnitStatus: "leased"},
+		{UnitKey: "vtx.unit.a", UnitStatus: "leased"},
+		{UnitKey: "vtx.unit.b", UnitStatus: "available"},
+		{UnitKey: "vtx.unit.b", UnitStatus: "available"},
+	}
+	got := summarizePortfolioPulse(units)
+	if got.TotalUnits != 2 || got.Leased != 1 || got.Available != 1 {
+		t.Fatalf("unexpected breakdown: %+v", got)
+	}
+	if len(got.Units) != 2 {
+		t.Fatalf("Units = %d rows, want 2 deduped", len(got.Units))
+	}
+	if want := 0.5; got.OccupancyRate != want {
+		t.Fatalf("occupancyRate = %v, want %v", got.OccupancyRate, want)
+	}
+}
+
 func TestSummarizePortfolioPulse_NoUnits_ZeroRateNoDivideByZero(t *testing.T) {
 	got := summarizePortfolioPulse(nil)
 	if got.TotalUnits != 0 || got.OccupancyRate != 0 {
