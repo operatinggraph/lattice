@@ -25,6 +25,9 @@ the row is `🚧 blocked-on:` it (a missing *lens* is package work, built here).
 | **Portfolio pulse counts landlords, not units** | `summarizePortfolioPulse` folds `read_landlord_units` rows, but that lens fans a co-managed unit out to one row per manager by its own doc — the Riverside front desk reads "100% occupied (8/8 leased)" over 2 distinct units, and `available` is structurally 0 while `/api/listings` shows 8 available. | LoftSpace | FE | ★★ | S | ✅ shipped `0be2511d` · dedupe by UnitKey before counting |
 | **A leased unit with no manager falls out of every staff view** | Riverside Unit 1 carries no `manages` link, so its signed, rent-paying resident is absent from `read_landlord_units` / `read_landlord_lease_applications` and therefore from search, unit-applications, landlord applications and portfolio pulse — and nothing flags the unmanaged unit. | LoftSpace | pkg | ★★ | M | 📋 ready |
 | **The renewal machinery can't fire in the live demo** | The seeded tenancy runs to 2027-09-08 with `renewalOpensAt` 2027-07-10, so `leaseExpiry` never violates, no cycle opens, and the Renewals tab is empty for every hat — the goal-authored `renewalComplete` target is reachable only under the `leaseshortwindow` build tag. | LoftSpace | pkg | ★★ | S | 📋 ready |
+| **The executed lease names neither party** | `/api/lease-document` serves both parties a legal instrument reading `Tenant: vtx.identity.edu97ix…` and `Landlord: LoftSpace property management` — a hardcoded literal (`internal/bridge/docgen_adapter.go:232`); the identity that actually `manages` the unit is never resolved, and `doc.TenantName` is never assembled. | LoftSpace | pkg | ★★ | M | 🚧 blocked-on: [lattice.md](lattice.md) `[Loom] externalTask subject-only egress` (tenant name) · landlord party unblocked |
+| **A protected application card can never show its own progress** | The RLS read model carries display scalars but none of the gap columns the convergence lens projects, so `renderApplicationCard` falls through to the stepper-less fallback (`loftspace-app/web/app.js:1552`) — live, every applicant reads "In review." with no way to learn which of the four screening gates is open. | LoftSpace | pkg + FE | ★★ | M | 📋 ready |
+| **A screening budget that runs out dead-ends in silence** | `maxBgcheckRetries`/`maxPaymentRetries` = 3 but `leaseApplicationCompleteSpec` opts into no `augur` escalation for `"exhausted"`, so Weaver's terminal is a Health-KV warning nobody reads (live now, `internal/weaver/evaluator.go:956`); the lens projects no per-row exhausted signal either, so the FE stepper renders a dead check as "To do" forever. | LoftSpace | pkg | ★★ | S | 📋 ready |
 | **A tenant can see rent owed but can't pay it** | `/api/ledger` shows the resident $1,900 outstanding, yet `renderLedgerRecordForm` is gated on the landlord's `canRecord`, so no tenant-side payment exists — café already ships the resident-side counterpart ("Settle My Tab", `cafe-app/web/app.js:829`). | LoftSpace | FE + pkg | ★★ | M | 📋 ready |
 | **The café's Manage Menu panel AuthDenies its own staff** | The shipped staff tab cannot work: both menu-catalog ops grant `operator` only, while cafe-app submits as the signed-in actor. | Café | pkg | ★★ | S | ✅ ratified 2026-08-02 · grant `frontOfHouse`, workplace-confined in `menuItemDDLScript` (loftspace-ledger idiom; both helpers already in `tabDDLScript`) |
 | **An empty protected read is indistinguishable from a dead one** | `/api/my-appointments` answers `{"appointments":[],"count":0,"scope":"rls"}` whether the patient truly has no visits or the projection is structurally paused, so the FE renders "no upcoming visits" over 25 real ones. Every vertical's protected reads share the shape. | Cross-vertical | FE + pkg | ★★ | S | 📋 ready |
@@ -55,10 +58,9 @@ dated run-logs live in git history. Rotate LoftSpace ↔ Clinic ↔ Café ↔ We
 **Wellness joined** 2026-07-09 (`cmd/wellness-app` shipped, live on :7802) — fold it into rotation; see
 [agents/vertical-po/SKILL.md](../../../agents/vertical-po/SKILL.md) §1.
 
-- **Rotation to date:** LoftSpace ×20, Clinic ×19, Café ×10, Wellness ×7.
+- **Rotation to date:** LoftSpace ×21, Clinic ×19, Café ×10, Wellness ×7.
 - **Method:** reuse the already-up shared stack (detect NATS :4222 / app :7788/:7799/:7801/:7802), drive the real flow via `/api/op` + the lens projections as the product owner, file scored items. All four apps exist + are exercisable live (`:7788` / `:7799` / `:7801` / `:7802`).
 - **Live-stack note:** a stale bootstrap JSON vs. a recreated Core KV was a recurring dev-loop trap (2026-07-03, 2026-07-04) that silently emptied reads; `make up` now self-heals it (`109f59a`, 2026-07-05) — re-verify empty-read reports as a real product bug first.
-- **2026-08-01:** Wellness — drove member, instructor + front-desk hats live; My Classes hides the studio, and there is no waitlist, recurrence or reminder; filed 5.
 - **2026-08-01:** LoftSpace — drove tenant, landlord + front-desk hats live; browsable inventory is seven copies of one flat, rent never bills, six duplicate staff; filed 4 + broadened 1.
 - **2026-08-01:** Clinic — drove patient, provider + front-desk hats live; a booked visit hides its site, no provider is bookable, past visits never close out; filed 4.
 - **2026-08-02:** Café — drove resident self-order/void/settle + front-desk hats live; two leases are permanently unsettleable, void + menu curation reach no UI; filed 5.
@@ -67,7 +69,8 @@ dated run-logs live in git history. Rotate LoftSpace ↔ Clinic ↔ Café ↔ We
 - **2026-08-02:** Clinic — drove patient, provider + front-desk hats live; no appointment view resolves at all and the no-show never bills; filed 5.
 - **2026-08-03:** Café — drove resident + front-desk hats live through open/charge/void/settle; the catalog is 8 copies of 2 items, no charge can be named or itemized, and rent never bills; filed 4.
 - **2026-08-03:** Wellness — drove member, instructor + front-desk hats live; no past class closes out, no studio retires, no balance settles; filed 5.
-- **Next:** LoftSpace.
+- **2026-08-03:** LoftSpace — drove applicant, landlord + front-desk hats live; the executed lease names neither party, screening progress is invisible, an exhausted check dead-ends; filed 3 + 1 platform.
+- **Next:** Clinic.
 
 ## Done log — verticals (newest first)
 
