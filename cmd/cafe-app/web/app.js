@@ -487,6 +487,7 @@ async function renderPos() {
   document.getElementById("charge-form").addEventListener("submit", async (ev) => {
     ev.preventDefault();
     const input = document.getElementById("charge-amount");
+    const descInput = document.getElementById("charge-desc");
     const cents = parseDollars(input.value);
     if (cents === null) { toast("Enter a charge amount greater than $0.", false); return; }
     const btn = document.getElementById("charge-submit");
@@ -496,12 +497,13 @@ async function renderPos() {
         {
           operationType: "Charge", class: "tab",
           reads: [open.tabKey, open.tabKey + ".status"],
-          payload: { tabKey: open.tabKey, amountCents: cents },
+          payload: { tabKey: open.tabKey, amountCents: cents, description: descInput.value.trim() || undefined },
         },
         "add the charge"
       );
       toast("Charged " + money(cents) + ".", true);
       input.value = "";
+      descInput.value = "";
       setTimeout(renderPos, 700);
     } catch (e) {
       toast(e.message, false);
@@ -586,6 +588,7 @@ function renderOpenTabCard(tab, items) {
       : "") +
     '<form id="charge-form" class="field-row" style="margin-bottom:14px;">' +
     '<input id="charge-amount" type="number" step="0.01" min="0.01" placeholder="Off-menu amount ($)" required />' +
+    '<input id="charge-desc" type="text" placeholder="Description (optional)" />' +
     '<button id="charge-submit" type="submit">Add Charge</button>' +
     "</form>" +
     '<form id="void-form" class="field-row" style="margin-bottom:14px;">' +
