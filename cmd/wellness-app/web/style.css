@@ -124,6 +124,16 @@ button.danger:hover { background: #c94a3f; border-color: #c94a3f; }
   gap: 14px;
 }
 
+.appts-section-head {
+  grid-column: 1 / -1;
+  margin: 4px 0 -2px;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+
 .day-header {
   grid-column: 1 / -1;
   font-weight: 600;

@@ -362,6 +362,13 @@ function fmtRange(startsAt, endsAt) {
   return fmtDay(startsAt) + " " + fmtTime(startsAt) + " – " + fmtTime(endsAt);
 }
 
+// isPast mirrors clinic-app's isPast() (cmd/clinic-app/web/app.js) — used to
+// split My Classes into Upcoming/Past sections.
+function isPast(startsAt) {
+  const s = new Date(startsAt);
+  return !isNaN(s) && s.getTime() < Date.now();
+}
+
 // money renders integer cents as a fixed-2-decimal dollar string, mirroring
 // cafe-app's money() (cmd/cafe-app/web/app.js) — the fix for the
 // toLocaleString()-with-no-fraction-digits bug that once rendered a balance
@@ -753,7 +760,20 @@ async function renderMyClasses() {
     body.innerHTML = '<div class="empty">No booked classes — book one from the Schedule.</div>';
     return;
   }
-  body.innerHTML = '<div class="grid">' + bookings.map(myClassCard).join("") + "</div>";
+  // Split upcoming vs past so the member's next class leads (the API sorts
+  // ascending, which otherwise buries it under accumulated history) — mirrors
+  // clinic-app's My Appointments split. Upcoming reads soonest-first; Past
+  // reads most-recent-first.
+  const upcoming = bookings.filter((b) => !isPast(b.startsAt));
+  const past = bookings.filter((b) => isPast(b.startsAt)).reverse();
+  const section = (label, rows) => {
+    if (!rows.length) return "";
+    return (
+      '<div class="appts-section-head">' + esc(label + " · " + rows.length) + "</div>" +
+      rows.map(myClassCard).join("")
+    );
+  };
+  body.innerHTML = '<div class="grid">' + section("Upcoming", upcoming) + section("Past", past) + "</div>";
   bookings.forEach((b) => {
     const btn = document.getElementById("mycancel-" + domId(b.bookingKey));
     if (!btn) return;
