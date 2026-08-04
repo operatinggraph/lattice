@@ -111,7 +111,7 @@ def execute(state, op):
     fail("account DDL: unknown operationType: " + ot)
 `
 
-// transactionDDLScript handles DebitAccount and CreditAccount. Each mints a
+// transactionDDLScript handles ClinicDebitAccount and ClinicCreditAccount. Each mints a
 // fresh transaction vertex + a .entry aspect + the postedTo link to the
 // account. The ledger is append-only: no aspect on the account is read or
 // mutated here, so concurrent debits/credits against the same account never
@@ -260,7 +260,7 @@ def post_entry(state, op, entry_type, event_class, allow_appointment_ref):
     # settles: the transaction (later-arriving) is the source, the
     # pre-existing appointment is the target (Contract #1 §1.1). Only
     # written when the caller supplied appointmentRef — a plain
-    # human-submitted DebitAccount is unaffected. The clinicNoShowSettlement
+    # human-submitted ClinicDebitAccount is unaffected. The clinicNoShowSettlement
     # lens walks this link to converge the no-show-fee gap once posted.
     if appt_key != None:
         settles_lnk = "lnk.clinictransaction." + tx_id + ".settles.appointment." + appt_id
@@ -274,10 +274,10 @@ def post_entry(state, op, entry_type, event_class, allow_appointment_ref):
 def execute(state, op):
     ot = op.operationType
 
-    if ot == "DebitAccount":
+    if ot == "ClinicDebitAccount":
         return post_entry(state, op, "debit", "account.debited", True)
 
-    if ot == "CreditAccount":
+    if ot == "ClinicCreditAccount":
         return post_entry(state, op, "credit", "account.credited", False)
 
     fail("transaction DDL: unknown operationType: " + ot)

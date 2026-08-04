@@ -2659,8 +2659,8 @@ async function openLedgerAccount(patientKey) {
   throw new Error(msg || "could not open the ledger account");
 }
 
-// submitLedgerEntry posts a DebitAccount/CreditAccount against the selected
-// patient's ledger account, opening the account first if this is its
+// submitLedgerEntry posts a ClinicDebitAccount/ClinicCreditAccount against the
+// selected patient's ledger account, opening the account first if this is its
 // first-ever charge or payment (state.ledger.accountKey empty).
 async function submitLedgerEntry(opType, what) {
   if (!state.patient) {
@@ -4037,6 +4037,8 @@ function applyHatGating() {
   }
   const np = $("#new-patient");
   if (np) np.hidden = !fd;
+  const chargeBtn = $("#ledger-charge");
+  if (chargeBtn) chargeBtn.hidden = !fd;
   for (const id of ["#go-availability", "#go-sites"]) {
     const link = $(id);
     const hint = link && link.closest(".hint");
@@ -4199,8 +4201,8 @@ function init() {
   $("#appts-filter").addEventListener("change", renderAppts);
   $("#reload-myschedule").addEventListener("click", loadMySchedule);
   $("#myschedule-filter").addEventListener("change", renderMySchedule);
-  $("#ledger-charge").addEventListener("click", () => submitLedgerEntry("DebitAccount", "record the charge"));
-  $("#ledger-payment").addEventListener("click", () => submitLedgerEntry("CreditAccount", "record the payment"));
+  $("#ledger-charge").addEventListener("click", () => submitLedgerEntry("ClinicDebitAccount", "record the charge"));
+  $("#ledger-payment").addEventListener("click", () => submitLedgerEntry("ClinicCreditAccount", "record the payment"));
   $("#reload-followups").addEventListener("click", loadFollowups);
   $("#followups-filter").addEventListener("change", renderFollowups);
   $("#reload-series").addEventListener("click", loadSeries);

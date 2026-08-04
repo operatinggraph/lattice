@@ -16,8 +16,8 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 //     registered patient's account to pre-exist (previously the only route:
 //     clinic's standing front-desk/billing ClinicCreateAccount flow, which
 //     silently starved unopened patients' no-show fees of ever converging).
-//   - missing_charge → directOp(DebitAccount) over the now-real account, same
-//     as before.
+//   - missing_charge → directOp(ClinicDebitAccount) over the now-real account,
+//     same as before.
 func WeaverTargets() []pkgmgr.WeaverTargetSpec {
 	return []pkgmgr.WeaverTargetSpec{
 		{
@@ -36,16 +36,17 @@ func WeaverTargets() []pkgmgr.WeaverTargetSpec {
 				},
 				"missing_charge": {
 					Action:    "directOp",
-					Operation: "DebitAccount",
-					// DebitAccount is claimed by 4 installed ledger DDLs — pin the
-					// vertexType DDL this target dispatches to (MissingClass otherwise).
+					Operation: "ClinicDebitAccount",
+					// ClinicDebitAccount's DDL is claimed by this package alone, but pin
+					// the vertexType DDL this target dispatches to anyway (MissingClass
+					// otherwise if ever shared).
 					Class:  "clinictransaction",
 					Params: map[string]string{"accountKey": "row.accountKey", "amountCents": "row.feeCents", "appointmentRef": "row.appointmentKey", "memo": "row.memo"},
 					// Reads only the two bare vertex keys the DDL's vertex_alive() checks
 					// hydrate (accountKey, appointmentKey) — memo is free text ('No-show
 					// fee', never a vtx.* key) and belongs in Params only. Declaring it
 					// here made every dispatch fail at step4 hydrate (`KV get
-					// core-kv/No-show fee: nats: invalid key`), so DebitAccount never
+					// core-kv/No-show fee: nats: invalid key`), so the charge never
 					// executed and the gap never closed — confirmed live in processor.log
 					// against every one of this target's dispatches.
 					Reads: []string{"row.accountKey", "row.appointmentKey"},

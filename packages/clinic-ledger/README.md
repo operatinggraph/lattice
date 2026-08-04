@@ -15,13 +15,12 @@ running stack).
 | **Vertex types** (2) | `clinicaccount` (root `{}`, D5) · `clinictransaction` (root `{}`, D5, `.entry` aspect incl. a debit-only payer dimension) |
 | **Aspect types** (1) | `clinicLedgerAccountGuard` — `vtx.patient.<id>.ledgerAccount`, the per-patient create-only uniqueness guard |
 | **Links** (2) | `heldFor` (account → patient) · `postedTo` (transaction → account) |
-| **Operations** (3) | `ClinicCreateAccount` · `DebitAccount` · `CreditAccount` |
+| **Operations** (3) | `ClinicCreateAccount` · `ClinicDebitAccount` · `ClinicCreditAccount` |
 | **Projection lenses** (2) | `clinicLedgerHistory` (one row per transaction) → `clinic-ledger-history` · `clinicPatientAccounts` (patient → account key lookup) → `clinic-patient-accounts` (both `nats-kv`, `full` engine) |
 
-`DebitAccount`/`CreditAccount` are granted to `operator` only at `scope: any` (`permissions.go`) —
-the trusted single-identity model. `ClinicCreateAccount` also grants `frontOfHouse`, unconfined (a
-patient carries no building to workplace-confine to) — the front desk opens a patient's ledger
-account directly from the browser.
+All three operations are granted to `operator` and `frontOfHouse` at `scope: any` (`permissions.go`),
+unconfined — a patient carries no building to workplace-confine to. The front desk opens a patient's
+ledger account, records a charge, and records a payment all directly from the browser.
 
 ## Key shapes (Contract #1)
 
@@ -57,20 +56,20 @@ for why the account carries its own id rather than the patient's.
 
 ## Append-only ledger
 
-`DebitAccount`/`CreditAccount` each mint a fresh `vtx.clinictransaction.<id>` with a `.entry` aspect
-and the `postedTo` link back to the account — no balance field is ever written or mutated; the
-`clinicLedgerHistory` lens derives a balance by summing `amountCents` (positive for debit, negative
-for credit) client-side, so concurrent debits/credits never race a read-modify-write.
+`ClinicDebitAccount`/`ClinicCreditAccount` each mint a fresh `vtx.clinictransaction.<id>` with a
+`.entry` aspect and the `postedTo` link back to the account — no balance field is ever written or
+mutated; the `clinicLedgerHistory` lens derives a balance by summing `amountCents` (positive for
+debit, negative for credit) client-side, so concurrent debits/credits never race a read-modify-write.
 
 ## Payer dimension (billing, not a claims pipeline)
 
-A `DebitAccount` charge optionally carries `billedTo` (`self` | `insurance`, defaults to `self` when
-omitted) and, only when `billedTo` is `insurance`, `expectedReimbursementCents` (must be positive and
-`<= amountCents`) — enough for a clinic to track what it billed insurance for vs. what it actually
-collected via a `CreditAccount` payment. Both fields reject on `CreditAccount` (a payment has nothing
-to bill). This is **not** X12 837/835 claims/clearinghouse integration — that certified-EHR-scale
-lift is explicitly out of bounds for a reference vertical; the dimension only bounds what a debit
-entry *claims* about its payer.
+A `ClinicDebitAccount` charge optionally carries `billedTo` (`self` | `insurance`, defaults to `self`
+when omitted) and, only when `billedTo` is `insurance`, `expectedReimbursementCents` (must be positive
+and `<= amountCents`) — enough for a clinic to track what it billed insurance for vs. what it actually
+collected via a `ClinicCreditAccount` payment. Both fields reject on `ClinicCreditAccount` (a payment
+has nothing to bill). This is **not** X12 837/835 claims/clearinghouse integration — that
+certified-EHR-scale lift is explicitly out of bounds for a reference vertical; the dimension only
+bounds what a debit entry *claims* about its payer.
 
 ## Where the ledger is surfaced
 
@@ -82,5 +81,6 @@ only way the FE resolves a patient's account key, since it is no longer derivabl
 
 - **A stored/cached balance** — deliberately never materialized; always summed from
   `clinicLedgerHistory`.
-- **Refunds / voids as a distinct operation** — model as an offsetting `CreditAccount`/`DebitAccount`
-  entry with an explanatory `memo` today; a dedicated reversal op is not yet needed.
+- **Refunds / voids as a distinct operation** — model as an offsetting
+  `ClinicCreditAccount`/`ClinicDebitAccount` entry with an explanatory `memo` today; a dedicated
+  reversal op is not yet needed.

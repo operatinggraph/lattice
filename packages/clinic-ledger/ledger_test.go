@@ -44,8 +44,8 @@ func ledgerCapDoc() *processor.CapabilityDoc {
 			{OperationType: "CreateAppointment", Scope: "any"},
 			{OperationType: "SetAppointmentStatus", Scope: "any"},
 			{OperationType: "ClinicCreateAccount", Scope: "any"},
-			{OperationType: "DebitAccount", Scope: "any"},
-			{OperationType: "CreditAccount", Scope: "any"},
+			{OperationType: "ClinicDebitAccount", Scope: "any"},
+			{OperationType: "ClinicCreditAccount", Scope: "any"},
 		},
 		ServiceAccess:   []processor.ServiceAccessEntry{},
 		EphemeralGrants: []processor.EphemeralGrant{},
@@ -240,8 +240,8 @@ func TestClinicCreateAccount_UnknownPatient(t *testing.T) {
 	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeRejected)
 }
 
-// TestDebitCreditAccount_PostEntries (test 2). DebitAccount/CreditAccount each
-// mint a fresh transaction vertex (root {} — D5) + a .entry aspect + the
+// TestDebitCreditAccount_PostEntries (test 2). ClinicDebitAccount/ClinicCreditAccount
+// each mint a fresh transaction vertex (root {} — D5) + a .entry aspect + the
 // postedTo link to the account; the account root is never touched (append-only
 // ledger, no balance stored).
 func TestDebitCreditAccount_PostEntries(t *testing.T) {
@@ -256,7 +256,7 @@ func TestDebitCreditAccount_PostEntries(t *testing.T) {
 	debitEnv := &processor.OperationEnvelope{
 		RequestID:     debitReqID,
 		Lane:          processor.LaneDefault,
-		OperationType: "DebitAccount",
+		OperationType: "ClinicDebitAccount",
 		Actor:         ledgerActorKey,
 		SubmittedAt:   "2026-07-01T13:00:00Z",
 		Class:         "clinictransaction",
@@ -306,7 +306,7 @@ func TestDebitCreditAccount_PostEntries(t *testing.T) {
 	creditEnv := &processor.OperationEnvelope{
 		RequestID:     creditReqID,
 		Lane:          processor.LaneDefault,
-		OperationType: "CreditAccount",
+		OperationType: "ClinicCreditAccount",
 		Actor:         ledgerActorKey,
 		SubmittedAt:   "2026-07-05T09:00:00Z",
 		Class:         "clinictransaction",
@@ -342,7 +342,7 @@ func TestDebitAccount_InsuranceBilling(t *testing.T) {
 	debitEnv := &processor.OperationEnvelope{
 		RequestID:     debitReqID,
 		Lane:          processor.LaneDefault,
-		OperationType: "DebitAccount",
+		OperationType: "ClinicDebitAccount",
 		Actor:         ledgerActorKey,
 		SubmittedAt:   "2026-07-01T13:00:00Z",
 		Class:         "clinictransaction",
@@ -368,7 +368,7 @@ func TestDebitAccount_InsuranceBilling(t *testing.T) {
 // malformed shape of the billedTo/expectedReimbursementCents dimension: an
 // unrecognized billedTo value, insurance billing with no reimbursement
 // figure, a self-pay debit that supplies one anyway, a reimbursement that
-// exceeds the charge, and either field on a CreditAccount (a payment has
+// exceeds the charge, and either field on a credit (a payment has
 // nothing to bill).
 func TestDebitAccount_PayerDimensionValidation(t *testing.T) {
 	ctx, conn := setupLedgerEnv(t)
@@ -382,13 +382,13 @@ func TestDebitAccount_PayerDimensionValidation(t *testing.T) {
 		opType  string
 		payload string
 	}{
-		{"unrecognized billedTo value", "DebitAccount", `{"accountKey":"` + acctKey + `","amountCents":1000,"billedTo":"medicare"}`},
-		{"insurance with no reimbursement figure", "DebitAccount", `{"accountKey":"` + acctKey + `","amountCents":1000,"billedTo":"insurance"}`},
-		{"self-pay debit supplying a reimbursement anyway", "DebitAccount", `{"accountKey":"` + acctKey + `","amountCents":1000,"billedTo":"self","expectedReimbursementCents":500}`},
-		{"reimbursement exceeds the charge", "DebitAccount", `{"accountKey":"` + acctKey + `","amountCents":1000,"billedTo":"insurance","expectedReimbursementCents":1500}`},
-		{"non-positive reimbursement", "DebitAccount", `{"accountKey":"` + acctKey + `","amountCents":1000,"billedTo":"insurance","expectedReimbursementCents":0}`},
-		{"billedTo on a credit (payment)", "CreditAccount", `{"accountKey":"` + acctKey + `","amountCents":1000,"billedTo":"self"}`},
-		{"expectedReimbursementCents on a credit (payment)", "CreditAccount", `{"accountKey":"` + acctKey + `","amountCents":1000,"expectedReimbursementCents":500}`},
+		{"unrecognized billedTo value", "ClinicDebitAccount", `{"accountKey":"` + acctKey + `","amountCents":1000,"billedTo":"medicare"}`},
+		{"insurance with no reimbursement figure", "ClinicDebitAccount", `{"accountKey":"` + acctKey + `","amountCents":1000,"billedTo":"insurance"}`},
+		{"self-pay debit supplying a reimbursement anyway", "ClinicDebitAccount", `{"accountKey":"` + acctKey + `","amountCents":1000,"billedTo":"self","expectedReimbursementCents":500}`},
+		{"reimbursement exceeds the charge", "ClinicDebitAccount", `{"accountKey":"` + acctKey + `","amountCents":1000,"billedTo":"insurance","expectedReimbursementCents":1500}`},
+		{"non-positive reimbursement", "ClinicDebitAccount", `{"accountKey":"` + acctKey + `","amountCents":1000,"billedTo":"insurance","expectedReimbursementCents":0}`},
+		{"billedTo on a credit (payment)", "ClinicCreditAccount", `{"accountKey":"` + acctKey + `","amountCents":1000,"billedTo":"self"}`},
+		{"expectedReimbursementCents on a credit (payment)", "ClinicCreditAccount", `{"accountKey":"` + acctKey + `","amountCents":1000,"expectedReimbursementCents":500}`},
 	}
 	for i, c := range cases {
 		env := &processor.OperationEnvelope{
@@ -415,7 +415,7 @@ func TestDebitAccount_UnknownAccount(t *testing.T) {
 	env := &processor.OperationEnvelope{
 		RequestID:     testutil.GenReqID("debitunknownacct001"),
 		Lane:          processor.LaneDefault,
-		OperationType: "DebitAccount",
+		OperationType: "ClinicDebitAccount",
 		Actor:         ledgerActorKey,
 		SubmittedAt:   "2026-07-01T13:00:00Z",
 		Class:         "clinictransaction",
@@ -438,7 +438,7 @@ func TestDebitAccount_NonPositiveAmountRejected(t *testing.T) {
 	env := &processor.OperationEnvelope{
 		RequestID:     testutil.GenReqID("debitbadamount00001"),
 		Lane:          processor.LaneDefault,
-		OperationType: "DebitAccount",
+		OperationType: "ClinicDebitAccount",
 		Actor:         ledgerActorKey,
 		SubmittedAt:   "2026-07-01T13:00:00Z",
 		Class:         "clinictransaction",
@@ -507,7 +507,7 @@ func TestDebitAccount_AppointmentRefWritesSettlesLink(t *testing.T) {
 	debitEnv := &processor.OperationEnvelope{
 		RequestID:     debitReqID,
 		Lane:          processor.LaneDefault,
-		OperationType: "DebitAccount",
+		OperationType: "ClinicDebitAccount",
 		Actor:         ledgerActorKey,
 		SubmittedAt:   "2026-06-26T09:00:00Z",
 		Class:         "clinictransaction",
@@ -527,7 +527,7 @@ func TestDebitAccount_AppointmentRefWritesSettlesLink(t *testing.T) {
 	plainEnv := &processor.OperationEnvelope{
 		RequestID:     plainReqID,
 		Lane:          processor.LaneDefault,
-		OperationType: "DebitAccount",
+		OperationType: "ClinicDebitAccount",
 		Actor:         ledgerActorKey,
 		SubmittedAt:   "2026-06-26T09:05:00Z",
 		Class:         "clinictransaction",
@@ -554,7 +554,7 @@ func TestDebitAccount_UnknownAppointmentRefRejected(t *testing.T) {
 	env := &processor.OperationEnvelope{
 		RequestID:     testutil.GenReqID("debituar0000000001"),
 		Lane:          processor.LaneDefault,
-		OperationType: "DebitAccount",
+		OperationType: "ClinicDebitAccount",
 		Actor:         ledgerActorKey,
 		SubmittedAt:   "2026-06-26T09:00:00Z",
 		Class:         "clinictransaction",

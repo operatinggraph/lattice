@@ -10,13 +10,14 @@ import (
 	"github.com/operatinggraph/lattice/internal/testutil"
 )
 
-// Front-desk unconfined grant for ClinicCreateAccount (verticals.md —
-// "CreateAccount can't be called from any of the 4 ledger apps' browsers").
-// DebitAccount/CreditAccount stay operator-only — a billing act submitted by
-// the trusted-tool app, not the browser. A clinicaccount is anchored on a
-// patient, which carries no building, so there is nothing left to
-// workplace-confine — mirrors wellness-ledger's identical
-// WellnessCreateAccount fix and clinic-domain's
+// Front-desk unconfined grant for ClinicCreateAccount, ClinicDebitAccount,
+// and ClinicCreditAccount (verticals.md — "The clinic's Billing panel
+// AuthDenies every hat that can reach it"): clinic-app's Billing panel ships
+// a Record charge/payment form to the front desk alongside the patient, and
+// all three ops now grant frontOfHouse to match. A clinicaccount is anchored
+// on a patient, which carries no building, so there is nothing left to
+// workplace-confine — mirrors wellness-ledger's WellnessCreateAccount fix,
+// cafe-ledger's CreditCafeAccount, and clinic-domain's
 // TestFrontDesk_RegisterPatientUnconfined.
 const (
 	ledFDActorID  = "CLLEDFDACTRHJKMNPQRS"
@@ -38,6 +39,8 @@ func ledFDCapDoc() *processor.CapabilityDoc {
 		Lanes:                  []string{"default"},
 		PlatformPermissions: []processor.PlatformPermission{
 			{OperationType: "ClinicCreateAccount", Scope: "any"},
+			{OperationType: "ClinicDebitAccount", Scope: "any"},
+			{OperationType: "ClinicCreditAccount", Scope: "any"},
 			{OperationType: "CreatePatient", Scope: "any"},
 		},
 		ServiceAccess:   []processor.ServiceAccessEntry{},
@@ -106,5 +109,113 @@ func TestFrontDesk_ClinicCreateAccountDeniedWithoutIt(t *testing.T) {
 	testutil.PublishOp(t, conn, env)
 	if got := testutil.DriveOne(t, ctx, cp, cons, ""); got != processor.OutcomeRejected {
 		t.Fatalf("ClinicCreateAccount from an actor with no ledger grant = %v, want Rejected", got)
+	}
+}
+
+// TestFrontDesk_ClinicDebitAccountUnconfined is the Inc guarantee: a
+// front-desk actor holding only the ClinicDebitAccount grant (no operator
+// role) can record a charge against a patient's ledger account — the call
+// clinic-app's Billing panel needs so the desk can post a copay or invoice
+// line, not just open the account.
+func TestFrontDesk_ClinicDebitAccountUnconfined(t *testing.T) {
+	ctx, conn := setupLedgerEnv(t)
+	testutil.SeedCapDoc(t, ctx, conn, ledFDCapDoc())
+	cp, cons := newLedgerPipeline(t, ctx, conn, "fdledgerdebit")
+
+	patientKey := createPatient(t, ctx, conn, cp, cons, "fddebitpatient00001", "Front Desk Debit Patient")
+	acctKey := createAccount(t, ctx, conn, cp, cons, "fddebitacct0000001", patientKey)
+
+	env := &processor.OperationEnvelope{
+		RequestID:     testutil.GenReqID("fddebittx000000001"),
+		Lane:          processor.LaneDefault,
+		OperationType: "ClinicDebitAccount",
+		Actor:         ledFDActorKey,
+		SubmittedAt:   "2026-07-01T12:00:00Z",
+		Class:         "clinictransaction",
+		Payload:       json.RawMessage(`{"accountKey":"` + acctKey + `","amountCents":2500,"memo":"Front desk copay"}`),
+		ContextHint:   &processor.ContextHint{Reads: []string{acctKey}},
+	}
+	testutil.PublishOp(t, conn, env)
+	if got := testutil.DriveOne(t, ctx, cp, cons, ""); got != processor.OutcomeAccepted {
+		t.Fatalf("front-desk ClinicDebitAccount = %v, want Accepted (unconfined grant)", got)
+	}
+}
+
+// TestFrontDesk_ClinicDebitAccountDeniedWithoutIt proves the grant is what
+// changed: an actor with no platform permission at all is still denied.
+func TestFrontDesk_ClinicDebitAccountDeniedWithoutIt(t *testing.T) {
+	ctx, conn := setupLedgerEnv(t)
+	cp, cons := newLedgerPipeline(t, ctx, conn, "fdledgerdebitdenied")
+
+	patientKey := createPatient(t, ctx, conn, cp, cons, "fdnogrntdebitpat001", "Denied Debit Patient")
+	acctKey := createAccount(t, ctx, conn, cp, cons, "fdnogrntdebitacc001", patientKey)
+
+	env := &processor.OperationEnvelope{
+		RequestID:     testutil.GenReqID("fdnogrntdebittx0001"),
+		Lane:          processor.LaneDefault,
+		OperationType: "ClinicDebitAccount",
+		Actor:         ledNoGrantActorKey,
+		SubmittedAt:   "2026-07-01T12:00:00Z",
+		Class:         "clinictransaction",
+		Payload:       json.RawMessage(`{"accountKey":"` + acctKey + `","amountCents":2500,"memo":"Front desk copay"}`),
+		ContextHint:   &processor.ContextHint{Reads: []string{acctKey}},
+	}
+	testutil.PublishOp(t, conn, env)
+	if got := testutil.DriveOne(t, ctx, cp, cons, ""); got != processor.OutcomeRejected {
+		t.Fatalf("ClinicDebitAccount from an actor with no ledger grant = %v, want Rejected", got)
+	}
+}
+
+// TestFrontDesk_ClinicCreditAccountUnconfined is the Inc guarantee: a
+// front-desk actor holding only the ClinicCreditAccount grant (no operator
+// role) can record a payment against a patient's ledger account — the call
+// that settles a patient's balance over the counter, e.g. a no-show fee she
+// cannot record herself.
+func TestFrontDesk_ClinicCreditAccountUnconfined(t *testing.T) {
+	ctx, conn := setupLedgerEnv(t)
+	testutil.SeedCapDoc(t, ctx, conn, ledFDCapDoc())
+	cp, cons := newLedgerPipeline(t, ctx, conn, "fdledgercredit")
+
+	patientKey := createPatient(t, ctx, conn, cp, cons, "fdcreditpatient0001", "Front Desk Credit Patient")
+	acctKey := createAccount(t, ctx, conn, cp, cons, "fdcreditacct000001", patientKey)
+
+	env := &processor.OperationEnvelope{
+		RequestID:     testutil.GenReqID("fdcredittx00000001"),
+		Lane:          processor.LaneDefault,
+		OperationType: "ClinicCreditAccount",
+		Actor:         ledFDActorKey,
+		SubmittedAt:   "2026-07-01T12:00:00Z",
+		Class:         "clinictransaction",
+		Payload:       json.RawMessage(`{"accountKey":"` + acctKey + `","amountCents":2500,"memo":"Front desk payment"}`),
+		ContextHint:   &processor.ContextHint{Reads: []string{acctKey}},
+	}
+	testutil.PublishOp(t, conn, env)
+	if got := testutil.DriveOne(t, ctx, cp, cons, ""); got != processor.OutcomeAccepted {
+		t.Fatalf("front-desk ClinicCreditAccount = %v, want Accepted (unconfined grant)", got)
+	}
+}
+
+// TestFrontDesk_ClinicCreditAccountDeniedWithoutIt proves the grant is what
+// changed: an actor with no platform permission at all is still denied.
+func TestFrontDesk_ClinicCreditAccountDeniedWithoutIt(t *testing.T) {
+	ctx, conn := setupLedgerEnv(t)
+	cp, cons := newLedgerPipeline(t, ctx, conn, "fdledgercreditdenied")
+
+	patientKey := createPatient(t, ctx, conn, cp, cons, "fdnogrntcreditpat01", "Denied Credit Patient")
+	acctKey := createAccount(t, ctx, conn, cp, cons, "fdnogrntcreditacc01", patientKey)
+
+	env := &processor.OperationEnvelope{
+		RequestID:     testutil.GenReqID("fdnogrntcredittx001"),
+		Lane:          processor.LaneDefault,
+		OperationType: "ClinicCreditAccount",
+		Actor:         ledNoGrantActorKey,
+		SubmittedAt:   "2026-07-01T12:00:00Z",
+		Class:         "clinictransaction",
+		Payload:       json.RawMessage(`{"accountKey":"` + acctKey + `","amountCents":2500,"memo":"Front desk payment"}`),
+		ContextHint:   &processor.ContextHint{Reads: []string{acctKey}},
+	}
+	testutil.PublishOp(t, conn, env)
+	if got := testutil.DriveOne(t, ctx, cp, cons, ""); got != processor.OutcomeRejected {
+		t.Fatalf("ClinicCreditAccount from an actor with no ledger grant = %v, want Rejected", got)
 	}
 }
