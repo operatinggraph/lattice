@@ -1610,7 +1610,8 @@ function studioCard(s) {
     '<div class="card">' +
     '<div class="who">' + esc(s.name || "?") + "</div>" +
     '<div class="meta">' + esc(shortKey(s.studioKey)) + "</div>" +
-    '<div class="card-actions"><button id="sess-toggle-' + id + '" class="ghost">Schedule a class</button></div>' +
+    '<div class="card-actions"><button id="sess-toggle-' + id + '" class="ghost">Schedule a class</button>' +
+    '<button id="retire-' + id + '" class="danger">Retire</button></div>' +
     '<div id="sess-form-' + id + '" class="session-form" hidden>' +
     '<div class="field"><label>Class name</label><input type="text" id="sess-name-' + id + '" placeholder="e.g. Vinyasa Flow" maxlength="120" /></div>' +
     '<div class="field"><label>Starts</label><input type="datetime-local" id="sess-starts-' + id + '" step="900" /></div>' +
@@ -1664,6 +1665,25 @@ function wireStudioCard(s) {
       repeatCount: document.getElementById("sess-repeat-" + id),
       submit: document.getElementById("sess-create-" + id),
     });
+  });
+  document.getElementById("retire-" + id).addEventListener("click", async () => {
+    const btn = document.getElementById("retire-" + id);
+    btn.disabled = true;
+    try {
+      await opOrThrow(
+        {
+          operationType: "TombstoneStudio", class: "studio",
+          reads: [s.studioKey],
+          payload: { studioKey: s.studioKey },
+        },
+        "retire the studio"
+      );
+      toast("Studio retired.", true);
+      setTimeout(renderStudiosAdmin, 700);
+    } catch (e) {
+      toast(e.message, false);
+      btn.disabled = false;
+    }
   });
 }
 
