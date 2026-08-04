@@ -31,6 +31,9 @@ the row is `🚧 blocked-on:` it (a missing *lens* is package work, built here).
 | **A tenant can see rent owed but can't pay it** | `/api/ledger` shows the resident $1,900 outstanding, yet `renderLedgerRecordForm` is gated on the landlord's `canRecord`, so no tenant-side payment exists — café already ships the resident-side counterpart ("Settle My Tab", `cafe-app/web/app.js:829`). | LoftSpace | FE + pkg | ★★ | M | 📋 ready |
 | **The café's Manage Menu panel AuthDenies its own staff** | The shipped staff tab cannot work: both menu-catalog ops grant `operator` only, while cafe-app submits as the signed-in actor. | Café | pkg | ★★ | S | ✅ ratified 2026-08-02 · grant `frontOfHouse`, workplace-confined in `menuItemDDLScript` (loftspace-ledger idiom; both helpers already in `tabDDLScript`) |
 | **An empty protected read is indistinguishable from a dead one** | `/api/my-appointments` answers `{"appointments":[],"count":0,"scope":"rls"}` whether the patient truly has no visits or the projection is structurally paused, so the FE renders "no upcoming visits" over 25 real ones. Every vertical's protected reads share the shape. | Cross-vertical | FE + pkg | ★★ | S | 📋 ready |
+| **The clinic's Billing panel AuthDenies every hat that can reach it** | `DebitAccount`/`CreditAccount` grant `operator` only (`clinic-ledger/permissions.go:41,47`) while the ungated Record charge/payment form ships in My Appointments for patient and front desk alike — the desk is denied live (`AuthDenied`, `rolesCarryingPermission:[operator]`), so a patient's $475 of auto no-show fees is unsettleable and she is offered a charge affordance she should never hold. | Clinic | pkg + FE | ★★ | S | 📋 ready · mirrors café's ratified Manage Menu row + wellness's open balance row |
+| **A booked visit still doesn't say where to go** | `populateSiteSelect` defaults `#book-site` to "Any site" and never falls back to the provider's own `practicesAt` site, so 27 of 28 live appointments carry no `siteKey` — the `atSite` walk shipped in `bc13aa13` renders blank for 96% of visits (a fresh self-book against a single-site provider projects no site). | Clinic | FE | ★★ | S | 📋 ready |
+| **A documented visit can never be read back** | `RecordEncounter` captures `{summary, assessment?, plan?}` but the `.encounter` aspect is by design never projected (`clinic-domain/ddls.go:496`), so the read model carries only `documentedAt`/`followUpRequested` — neither the patient nor the authoring provider can ever see the note. | Clinic | FE + pkg | ★★ | M | 🚧 blocked-on: [lattice.md](lattice.md) `[Vault] Sensitive aspects are identity-anchored` |
 | **Five of the clinic's seven providers are unbookable duplicates** | Five providers all read "Dr. Classic Demo", none carries hours or a `practicesAt` site, and all five are offered in the patient's booking picker — `adbf2571` pinned the seed's provider id but nothing reaps the pre-pin duplicates. | Clinic | pkg | ★ | S | 📋 ready |
 | **The café catalog still carries pre-pin Latte/Croissant duplicates** | `seed-classic-demo.go`'s menu items are now pinned + `alive()`-guarded (no more growth on rerun), but the ~16 pre-pin copies already live in Core KV — mirrors row above (clinic providers): pin stops the bleeding, nothing reaps what's already there. | Café | pkg | ★ | S | 📋 ready |
 | **An off-menu charge can never be named** | `Charge`'s `description` param is shipped (cafe-domain `ddls.go:103`, and the seeded "Table repair fee" line proves it works), but no UI reaches it — the POS form is amount-only — so every hand-keyed charge posts to the resident's ledger and one-bill as the literal "Off-menu charge". | Café | FE | ★★ | S | ✅ shipped `38dd7d18` · description input mirrors loftspace/clinic's memo idiom |
@@ -58,11 +61,9 @@ dated run-logs live in git history. Rotate LoftSpace ↔ Clinic ↔ Café ↔ We
 **Wellness joined** 2026-07-09 (`cmd/wellness-app` shipped, live on :7802) — fold it into rotation; see
 [agents/vertical-po/SKILL.md](../../../agents/vertical-po/SKILL.md) §1.
 
-- **Rotation to date:** LoftSpace ×21, Clinic ×19, Café ×10, Wellness ×7.
+- **Rotation to date:** LoftSpace ×21, Clinic ×20, Café ×10, Wellness ×7.
 - **Method:** reuse the already-up shared stack (detect NATS :4222 / app :7788/:7799/:7801/:7802), drive the real flow via `/api/op` + the lens projections as the product owner, file scored items. All four apps exist + are exercisable live (`:7788` / `:7799` / `:7801` / `:7802`).
 - **Live-stack note:** a stale bootstrap JSON vs. a recreated Core KV was a recurring dev-loop trap (2026-07-03, 2026-07-04) that silently emptied reads; `make up` now self-heals it (`109f59a`, 2026-07-05) — re-verify empty-read reports as a real product bug first.
-- **2026-08-01:** LoftSpace — drove tenant, landlord + front-desk hats live; browsable inventory is seven copies of one flat, rent never bills, six duplicate staff; filed 4 + broadened 1.
-- **2026-08-01:** Clinic — drove patient, provider + front-desk hats live; a booked visit hides its site, no provider is bookable, past visits never close out; filed 4.
 - **2026-08-02:** Café — drove resident self-order/void/settle + front-desk hats live; two leases are permanently unsettleable, void + menu curation reach no UI; filed 5.
 - **2026-08-02:** Wellness — drove member, instructor + front-desk hats live; the ledger is dormant and the slot lock guards only the room; filed 3.
 - **2026-08-02:** LoftSpace — drove tenant, landlord + front-desk hats live; pulse counts landlords not units, a done task never retires, an unmanaged unit vanishes; filed 5.
@@ -70,7 +71,8 @@ dated run-logs live in git history. Rotate LoftSpace ↔ Clinic ↔ Café ↔ We
 - **2026-08-03:** Café — drove resident + front-desk hats live through open/charge/void/settle; the catalog is 8 copies of 2 items, no charge can be named or itemized, and rent never bills; filed 4.
 - **2026-08-03:** Wellness — drove member, instructor + front-desk hats live; no past class closes out, no studio retires, no balance settles; filed 5.
 - **2026-08-03:** LoftSpace — drove applicant, landlord + front-desk hats live; the executed lease names neither party, screening progress is invisible, an exhausted check dead-ends; filed 3 + 1 platform.
-- **Next:** Clinic.
+- **2026-08-04:** Clinic — drove patient, provider + front-desk hats live; billing denies every hat, a booked visit hides its site, a documented note is unreadable; filed 3.
+- **Next:** Café.
 
 ## Done log — verticals (newest first)
 
