@@ -780,6 +780,13 @@ function siteByKey(key) {
   return state.sites.find((s) => s.siteKey === key);
 }
 
+// providerSoleSite returns the one site a provider practicesAt, or "" if the
+// provider practices at zero or multiple sites (ambiguous — no safe default).
+function providerSoleSite(providerKey) {
+  const sites = state.providerSites.filter((ps) => ps.providerKey === providerKey);
+  return sites.length === 1 ? sites[0].siteKey : "";
+}
+
 // populateSiteSelect fills the booking site filter from the site directory,
 // defaulting to "Any site" — mirrors populateSpecialtySelect exactly.
 function populateSiteSelect() {
@@ -2057,8 +2064,11 @@ async function submitBook(ev) {
   if (reason) payload.reason = reason;
   // The Book form's site filter already narrows #provider to providers
   // assigned to it, so a chosen site is guaranteed valid for this provider —
-  // still hard-validated server-side (require_site_membership, ddls.go).
-  const site = $("#book-site") ? $("#book-site").value : "";
+  // still hard-validated server-side (require_site_membership, ddls.go). When
+  // the filter is left on "Any site", fall back to the provider's own sole
+  // practicesAt site rather than booking with no site at all — ambiguous
+  // (0 or 2+ sites) providers still book site-less.
+  const site = ($("#book-site") ? $("#book-site").value : "") || providerSoleSite(provider);
   if (site) payload.site = site;
 
   const asSelf = actingAsSelf();
