@@ -1270,7 +1270,16 @@ def execute(state, op):
 // menuItemDDLScript handles CreateMenuItem, RetireMenuItem. Known-key reads
 // only: RetireMenuItem declares menuItemKey in ContextHint.Reads so the
 // current revision is hydrated for the self-OCC'd tombstone (mirrors
-// service-domain's RetireServiceTemplate).
+// service-domain's RetireServiceTemplate). Both ops carry no scope=self grant
+// (permissions.go) — a staff caller that cannot prove root is workplace-
+// confined the same way VoidCharge is in tabDDLScript: the confinement
+// helpers below are that script's require_workplace idiom, mirrored here
+// rather than shared, since each op's Script is its own standalone Starlark
+// unit. CreateMenuItem confines against its own payload locationKey (already
+// a declared read); RetireMenuItem has no payload location, so it resolves
+// the item's own servedAt link instead (menu_item_served_at, the same
+// data-derived kv.Links follow-up tabDDLScript's self-service Charge branch
+// already uses for the identical resolution).
 const menuItemDDLScript = `
 def make_vtx(key, cls, data):
     return {"op": "create", "key": key,
@@ -1359,6 +1368,114 @@ def require_live_location(state, key, name):
     if cls != LOCATION_CLASS:
         fail("NotALocation: " + name + ": " + key + " has class " + str(cls) + ", required " + LOCATION_CLASS)
 
+# --- workplace write confinement (facet-staff-worlds-design.md §3.5) ---------
+# Mirrors tabDDLScript's identically-named helpers verbatim — see that
+# script's comment block for the full correctness argument (role-derived
+# exemption, tombstone-as-document, target-topology-only resolution). Each
+# op's Script is its own standalone Starlark unit, so the helpers are
+# duplicated here rather than shared.
+ROLE_PAGE_LIMIT = 50
+MAX_ROLE_PAGES = 4
+WORKPLACE_PARENT_PAGE_LIMIT = 20
+MAX_PARENT_PAGES = 4
+WORKPLACE_MAX_DEPTH = 8
+WORKPLACE_MAX_NODES = 64
+
+def actor_holds_operator(actor_key):
+    cursor = None
+    for _page in range(MAX_ROLE_PAGES):
+        # read-posture: (e) relation=holdsRole epoch=none -- an identity holds few
+        # roles, so this is never a keyspace scan.
+        page, cursor = kv.Links(actor_key, "holdsRole", "out", cursor, ROLE_PAGE_LIMIT)
+        for lk in page:
+            if lk.isDeleted:
+                continue
+            # read-posture: (e) per-candidate follow-up read off the enumeration
+            # above (data-derived key -- the role is unknown until it resolves).
+            cn = kv.Read(lk.targetVertex + ".canonicalName")
+            if cn != None and not cn.isDeleted and cn.data.get("value") == "operator":
+                return True
+        if cursor == None:
+            return False
+    return False
+
+def worksAt_covers(actor_id, location_key):
+    if location_key == None:
+        return False
+    frontier = [location_key]
+    seen = [location_key]
+    for _ in range(WORKPLACE_MAX_DEPTH):
+        if len(frontier) == 0:
+            return False
+        parents = []
+        for cur in frontier:
+            parts = cur.split(".")
+            if len(parts) != 3:
+                continue
+            # read-posture: (e) per-candidate follow-up read off the containedIn
+            # enumeration below -- the location VERTEX, so a tombstoned one
+            # neither confers a match nor is walked through.
+            node = kv.Read(cur)
+            if node == None or node.isDeleted:
+                continue
+            # read-posture: (e) per-candidate follow-up read off the same
+            # enumeration (data-derived key -- the ancestor chain is not
+            # knowable client-side, so it cannot be pre-declared).
+            lnk = kv.Read("lnk.identity." + actor_id + ".worksAt." + parts[1] + "." + parts[2])
+            if lnk != None and not lnk.isDeleted:
+                return True
+            cursor = None
+            for _page in range(MAX_PARENT_PAGES):
+                # read-posture: (e) relation=containedIn epoch=none -- a location has
+                # at most a few parents; containment is provisioned topology, not
+                # written concurrently with this op.
+                page, cursor = kv.Links(cur, "containedIn", "out", cursor, WORKPLACE_PARENT_PAGE_LIMIT)
+                for lk in page:
+                    if lk.isDeleted:
+                        continue
+                    nxt = lk.targetVertex
+                    if nxt in seen:
+                        continue
+                    if len(seen) >= WORKPLACE_MAX_NODES:
+                        continue
+                    seen.append(nxt)
+                    parents.append(nxt)
+                if cursor == None:
+                    break
+        frontier = parents
+    return False
+
+def workplace_exempt():
+    return op.authTargetValidated or actor_holds_operator(op.actor)
+
+def require_workplace(location_keys, what):
+    if op.authTargetValidated:
+        return
+    enforce_workplace(location_keys, what)
+
+def enforce_workplace(location_keys, what):
+    if actor_holds_operator(op.actor):
+        return
+    _, actor_id = parts_of(op.actor, "actor", "identity")
+    for loc in location_keys:
+        if loc != None and worksAt_covers(actor_id, loc):
+            return
+    fail("AuthDenied: " + op.actor + " does not worksAt any location covering " +
+         str(location_keys) + "; " + what)
+
+def menu_item_served_at(menu_item_key):
+    # A menu item's home location -- CreateMenuItem's servedAt link. Mirrors
+    # tabDDLScript's identically-named resolver, used there by the
+    # self-service Charge branch for the same lookup.
+    #
+    # read-posture: (e) relation=servedAt epoch=none -- a menu item carries
+    # exactly one servedAt link (required at CreateMenuItem, never rewired).
+    page, _ = kv.Links(menu_item_key, "servedAt", "out", None, 1)
+    for lk in page:
+        if not lk.isDeleted:
+            return lk.targetVertex
+    return None
+
 def execute(state, op):
     ot = op.operationType
     p = op.payload
@@ -1376,6 +1493,15 @@ def execute(state, op):
         location_key = required_string(p, "locationKey")
         loc_type, loc_id = parts_of(location_key, "locationKey", "")
         require_live_location(state, location_key, "locationKey")
+
+        # Staff-standing confinement: a non-operator staff actor may only add
+        # a catalog item at a location it worksAt.
+        # workplace-exempt: (no-validated-path) CreateMenuItem is granted
+        # scope=any to operator + frontOfHouse only (permissions.go) and no
+        # task mints it, so op.authTargetValidated is never legitimately true
+        # and only the operator escape reaches the exemption.
+        if not workplace_exempt():
+            require_workplace([location_key], "cannot create a menu item at " + location_key)
 
         item_id = bare_nanoid_or_mint(p, "menuItemId")
         item_key = "vtx.menuitem." + item_id
@@ -1395,15 +1521,25 @@ def execute(state, op):
                 "response": {"primaryKey": item_key}}
 
     if ot == "RetireMenuItem":
-        # Admin-only cleanup, mirrors service-domain's RetireServiceTemplate:
-        # a tombstone mutation carries no document (the runtime writes
-        # isDeleted:true + the lastModified* stamps only), self-OCC'd on the
-        # hydrated revision so a concurrent mutation of the same item aborts
-        # instead of racing.
+        # Staff/operator cleanup, mirrors service-domain's
+        # RetireServiceTemplate: a tombstone mutation carries no document (the
+        # runtime writes isDeleted:true + the lastModified* stamps only),
+        # self-OCC'd on the hydrated revision so a concurrent mutation of the
+        # same item aborts instead of racing.
         item_key = required_string(p, "menuItemKey")
         parts_of(item_key, "menuItemKey", "menuitem")
         if not vertex_alive(state, item_key):
             fail("UnknownMenuItem: " + item_key)
+
+        # Staff-standing confinement: the location comes from the item's OWN
+        # servedAt link (never the payload, which carries none), so the
+        # workplace cannot be forged.
+        # workplace-exempt: (no-validated-path) RetireMenuItem is granted
+        # scope=any to operator + frontOfHouse only (permissions.go) and no
+        # task mints it, so op.authTargetValidated is never legitimately true
+        # and only the operator escape reaches the exemption.
+        if not workplace_exempt():
+            require_workplace([menu_item_served_at(item_key)], "cannot retire menu item " + item_key)
 
         mutations = [
             {"op": "tombstone", "key": item_key,

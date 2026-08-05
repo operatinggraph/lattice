@@ -1,5 +1,5 @@
 name: cafe-domain
-version: 0.11.12
+version: 0.11.13
 description: |
   Café house-tab POS session domain: the tab vertex type (OpenTab/Charge/
   VoidCharge/Settle/SettleStaleTab, OCC-conditioned running total) + the
@@ -100,10 +100,10 @@ declares:
       grantsTo: [operator]
     - operationType: CreateMenuItem
       scope: any
-      grantsTo: [operator]
+      grantsTo: [operator, frontOfHouse]
     - operationType: RetireMenuItem
       scope: any
-      grantsTo: [operator]
+      grantsTo: [operator, frontOfHouse]
   weaverTargets:
     - targetId: cafeTabSettlement
       lensRef: cafeTabSettlement

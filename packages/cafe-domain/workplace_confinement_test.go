@@ -317,3 +317,95 @@ func TestWorkplace_UnlocatableTargetIsOperatorOnly(t *testing.T) {
 		t.Fatalf("operator OpenTab on an unlocatable lease = %v, want Accepted", got)
 	}
 }
+
+// wcMenuCapDoc grants the same scope=any tab surface as wcStaffCapDoc plus
+// CreateMenuItem/RetireMenuItem — the menu-catalog counterpart of the tab
+// grants, proving the capability plane cannot tell staff from root here
+// either.
+func wcMenuCapDoc() *processor.CapabilityDoc {
+	doc := wcStaffCapDoc()
+	doc.PlatformPermissions = append(doc.PlatformPermissions,
+		processor.PlatformPermission{OperationType: "CreateMenuItem", Scope: "any"},
+		processor.PlatformPermission{OperationType: "RetireMenuItem", Scope: "any"})
+	return doc
+}
+
+// wcSubmitCreateMenuItem submits CreateMenuItem{name, priceCents, locationKey}
+// as an arbitrary actor on the standing path, declaring exactly what a staff
+// caller would.
+func wcSubmitCreateMenuItem(t *testing.T, ctx context.Context, conn *substrate.Conn,
+	cp *processor.CommitPath, cons jetstream.Consumer, label, locationKey, actorKey string) processor.MessageOutcome {
+	t.Helper()
+	env := &processor.OperationEnvelope{
+		RequestID:     testutil.GenReqID(label),
+		Lane:          processor.LaneDefault,
+		OperationType: "CreateMenuItem",
+		Actor:         actorKey,
+		SubmittedAt:   "2026-08-05T12:00:00Z",
+		Class:         "menuitem",
+		Payload:       json.RawMessage(`{"name":"Latte","priceCents":450,"locationKey":"` + locationKey + `"}`),
+		ContextHint:   &processor.ContextHint{Reads: []string{locationKey}},
+	}
+	testutil.PublishOp(t, conn, env)
+	return testutil.DriveOne(t, ctx, cp, cons, "")
+}
+
+// wcSubmitRetireMenuItem submits RetireMenuItem{menuItemKey} as an arbitrary
+// actor on the standing path, declaring exactly what a staff caller would.
+func wcSubmitRetireMenuItem(t *testing.T, ctx context.Context, conn *substrate.Conn,
+	cp *processor.CommitPath, cons jetstream.Consumer, label, itemKey, actorKey string) processor.MessageOutcome {
+	t.Helper()
+	env := &processor.OperationEnvelope{
+		RequestID:     testutil.GenReqID(label),
+		Lane:          processor.LaneDefault,
+		OperationType: "RetireMenuItem",
+		Actor:         actorKey,
+		SubmittedAt:   "2026-08-05T12:05:00Z",
+		Class:         "menuitem",
+		Payload:       json.RawMessage(`{"menuItemKey":"` + itemKey + `"}`),
+		ContextHint:   &processor.ContextHint{Reads: []string{itemKey}},
+	}
+	testutil.PublishOp(t, conn, env)
+	return testutil.DriveOne(t, ctx, cp, cons, "")
+}
+
+// TestWorkplace_MenuItemStaffConfinedToWorkplace is the menu-catalog
+// counterpart of TestWorkplace_StaffConfinedToWorkplace: a staff actor may
+// add a catalog item at the building it worksAt and is denied at another —
+// the write the café's Manage Menu panel needs, currently AuthDenied for
+// every front-of-house staffer regardless of building.
+func TestWorkplace_MenuItemStaffConfinedToWorkplace(t *testing.T) {
+	ctx, conn := setupDomainEnv(t)
+	testutil.SeedCapDoc(t, ctx, conn, wcMenuCapDoc())
+	cp, cons := newDomainPipeline(t, ctx, conn, "wcmenu")
+	seedWorkplaceTopology(t, ctx, conn)
+
+	if got := wcSubmitCreateMenuItem(t, ctx, conn, cp, cons, "wcmia00000000000001", wcBuildingAKey, wcStaffKey); got != processor.OutcomeAccepted {
+		t.Fatalf("staff CreateMenuItem at its OWN workplace = %v, want Accepted", got)
+	}
+	if got := wcSubmitCreateMenuItem(t, ctx, conn, cp, cons, "wcmib00000000000002", wcBuildingBKey, wcStaffKey); got != processor.OutcomeRejected {
+		t.Fatalf("staff CreateMenuItem at ANOTHER building = %v, want Rejected", got)
+	}
+}
+
+// TestWorkplace_RetireMenuItemStaffConfinedToWorkplace proves RetireMenuItem
+// resolves its confining location from the item's OWN servedAt link (never a
+// payload field, which RetireMenuItem carries none of) — a staff member may
+// retire an item served at their own building and is denied for one served
+// elsewhere.
+func TestWorkplace_RetireMenuItemStaffConfinedToWorkplace(t *testing.T) {
+	ctx, conn := setupDomainEnv(t)
+	testutil.SeedCapDoc(t, ctx, conn, wcMenuCapDoc())
+	cp, cons := newDomainPipeline(t, ctx, conn, "wcretiremenu")
+	seedWorkplaceTopology(t, ctx, conn)
+
+	itemA := createMenuItem(t, ctx, conn, cp, cons, "wcrmiseeda00000000001", "Latte", 450, wcBuildingAKey)
+	itemB := createMenuItem(t, ctx, conn, cp, cons, "wcrmiseedb00000000001", "Latte", 450, wcBuildingBKey)
+
+	if got := wcSubmitRetireMenuItem(t, ctx, conn, cp, cons, "wcrma00000000000001", itemA, wcStaffKey); got != processor.OutcomeAccepted {
+		t.Fatalf("staff RetireMenuItem served at its OWN workplace = %v, want Accepted", got)
+	}
+	if got := wcSubmitRetireMenuItem(t, ctx, conn, cp, cons, "wcrmb00000000000002", itemB, wcStaffKey); got != processor.OutcomeRejected {
+		t.Fatalf("staff RetireMenuItem served at ANOTHER building = %v, want Rejected", got)
+	}
+}
