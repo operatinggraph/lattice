@@ -167,7 +167,7 @@ bridge `augur` adapter is bridge-registry config. No kernel change.
 | Approved-proposal dispatch — `augurDispatch` target + dispatch-time re-validation + `proposedOp` | ✅ Built |
 | Proposal-scoped deterministic requestId (collapse-only under reclaim) | ✅ Built |
 | Autonomy dial (`augur.autoApply` allow-list + confidence gate) | 🔒 Designed, parsed + validated, **Andrew-gated** — human-in-the-loop ships until ratified |
-| `exhausted`-trigger escalation (spent retry budget → L3) | 📋 Designed, follow-on (capture ships `unplannable` only) |
+| `exhausted`-trigger escalation (spent retry budget → L3) | ✅ Built — shares `augurEscalation` with `unplannable`; wired in `lease-signing` (screening gaps) |
 
 **What ships today:** a stuck, unplannable gap becomes a reasoned, human-reviewed proposal that, once
 approved, dispatches through the existing Weaver machinery. **Zero autonomous mutation** under the

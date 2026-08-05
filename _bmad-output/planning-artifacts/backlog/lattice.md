@@ -160,7 +160,7 @@ designed-through, but the *fork decision* + the *contract commit* are Andrew's.
 ### External-I/O maturity (bridge follow-ons)
 | Item | What it is | Imp | Size | State |
 |---|---|---|---|---|
-| **Bridge — real vendor adapters** | The async result-return path ships; every adapter behind it is still a `Fake*`. Replacing them needs real vendor credentials + a production destination, so it waits on one. | ★ now / ★★★ prod | M–L | 🗄️ shelved (revive: a real external destination) |
+| **Bridge — real vendor adapters** | The async result-return path ships; every adapter behind it is still a `Fake*`. Replacing them needs real vendor credentials + a production destination, so it waits on one. Augur's real adapter specifically: favor a NATS queue-group of model-runner processes over an embedded HTTP client — runners swap/scale independent of the bridge, no API key on it. | ★ now / ★★★ prod | M–L | 🗄️ shelved (revive: a real external destination) |
 
 ### Scale-out
 | Item | What it is | Imp | Size | State |
