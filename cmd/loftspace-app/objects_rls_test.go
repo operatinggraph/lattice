@@ -64,6 +64,23 @@ func TestObjectsD1_5_LeaseappEntitlement_RLS(t *testing.T) {
 		{Name: "doc_store_name", Type: "text"},
 		{Name: "doc_filename", Type: "text"},
 		{Name: "doc_content_type", Type: "text"},
+		{Name: "profile_submitted", Type: "boolean"},
+		{Name: "income_to_rent_met", Type: "boolean"},
+		{Name: "employment_verified", Type: "boolean"},
+		{Name: "reference_count", Type: "double precision"},
+		{Name: "has_co_applicant", Type: "boolean"},
+		{Name: "has_guarantor", Type: "boolean"},
+		{Name: "guarantor_income_to_rent_met", Type: "boolean"},
+		{Name: "missing_onboarding", Type: "boolean"},
+		{Name: "missing_bgcheck", Type: "boolean"},
+		{Name: "missing_payment", Type: "boolean"},
+		{Name: "missing_signature", Type: "boolean"},
+		{Name: "missing_decision", Type: "boolean"},
+		{Name: "inflight_bgcheck", Type: "boolean"},
+		{Name: "inflight_payment", Type: "boolean"},
+		{Name: "declined_bgcheck", Type: "boolean"},
+		{Name: "declined_payment", Type: "boolean"},
+		{Name: "declined", Type: "boolean"},
 	}
 	ddl, err := adapter.BuildProtectedTableDDL("read_lease_applications", []string{"app_id"}, body)
 	if err != nil {
@@ -81,10 +98,16 @@ func TestObjectsD1_5_LeaseappEntitlement_RLS(t *testing.T) {
 	exec("GRANT SELECT ON " + rlsTestSchema + ".actor_read_grants TO " + rlsTestRole)
 
 	// A owns app-A; B owns app-B. Self-grants for both.
-	exec(`INSERT INTO read_lease_applications (app_id, entity_key, applicant, authz_anchors, projection_seq)
-	      VALUES ('app-A', 'vtx.leaseapp.app-A', 'vtx.identity.`+subAlice+`', $1, 1)`, []string{subAlice})
-	exec(`INSERT INTO read_lease_applications (app_id, entity_key, applicant, authz_anchors, projection_seq)
-	      VALUES ('app-B', 'vtx.leaseapp.app-B', 'vtx.identity.`+subBob+`', $1, 1)`, []string{subBob})
+	exec(`INSERT INTO read_lease_applications (app_id, entity_key, applicant, authz_anchors, projection_seq,
+	      profile_submitted, missing_onboarding, missing_bgcheck, missing_payment, missing_signature, missing_decision,
+	      inflight_bgcheck, inflight_payment, declined_bgcheck, declined_payment, declined)
+	      VALUES ('app-A', 'vtx.leaseapp.app-A', 'vtx.identity.`+subAlice+`', $1, 1,
+	      false, false, false, false, false, false, false, false, false, false, false)`, []string{subAlice})
+	exec(`INSERT INTO read_lease_applications (app_id, entity_key, applicant, authz_anchors, projection_seq,
+	      profile_submitted, missing_onboarding, missing_bgcheck, missing_payment, missing_signature, missing_decision,
+	      inflight_bgcheck, inflight_payment, declined_bgcheck, declined_payment, declined)
+	      VALUES ('app-B', 'vtx.leaseapp.app-B', 'vtx.identity.`+subBob+`', $1, 1,
+	      false, false, false, false, false, false, false, false, false, false, false)`, []string{subBob})
 	exec(`INSERT INTO actor_read_grants (actor_id, anchor_id, grant_source, projection_seq, is_deleted)
 	      VALUES ($1, $1, 'cap-read', 1, false)`, subAlice)
 	exec(`INSERT INTO actor_read_grants (actor_id, anchor_id, grant_source, projection_seq, is_deleted)

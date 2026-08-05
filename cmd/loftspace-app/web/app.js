@@ -1458,101 +1458,14 @@ function shortKey(key) {
   return i >= 0 ? key.slice(i + 1) : key || "—";
 }
 
-// renderProtectedApplicationCard renders one application from the protected,
-// RLS-scoped read model: the unit header, a coarse decision/status banner, the
-// lease-terms panel (the scalars the protected model carries), the signed-lease
-// download, and Withdraw. The detailed per-step journey is omitted — it depends on
-// the Weaver convergence aggregate the protected model does not (yet) carry — and
-// the card says so once.
-function renderProtectedApplicationCard(row, highlight) {
-  const card = document.createElement("div");
-  card.className = "card app-card";
-  if (highlight && row.entityKey === highlight) card.classList.add("highlight");
-
-  const head = document.createElement("div");
-  head.className = "app-head";
-  const addr = document.createElement("div");
-  addr.className = "addr";
-  addr.textContent = row.unitAddress || (row.unitKey ? shortKey(row.unitKey) : "Application");
-  head.append(addr);
-  if (typeof row.unitRent === "number") {
-    const rent = document.createElement("div");
-    rent.className = "rent";
-    rent.innerHTML = `$${row.unitRent.toLocaleString()} <span>/ month</span>`;
-    head.append(rent);
-  }
-  const ref = document.createElement("div");
-  ref.className = "addr-sub mono";
-  ref.textContent = shortKey(row.entityKey);
-  head.append(ref);
-
-  const banner = document.createElement("div");
-  if (row.declined) {
-    banner.className = "decision declined";
-    banner.textContent =
-      row.landlordDeclined && row.declineReason
-        ? "Application declined: " + row.declineReason
-        : "Application declined.";
-  } else if (row.landlordApproved && row.unitStatus === "leased") {
-    banner.className = "decision ok";
-    banner.textContent = "Application complete — lease executed.";
-  } else if (row.landlordApproved) {
-    banner.className = "decision ok";
-    banner.textContent = "Approved — finalizing lease.";
-  } else if (row.signedAt) {
-    banner.className = "decision pending";
-    banner.textContent = "Signed — awaiting landlord decision.";
-  } else {
-    banner.className = "decision pending";
-    banner.textContent = "In review.";
-  }
-  card.append(head, banner);
-
-  const terms = renderLeaseTermsPanel(row);
-  if (terms) card.append(terms);
-
-  if (row.landlordApproved && row.unitStatus === "leased" && row.entityKey) {
-    card.append(renderStatementPanel(row.entityKey));
-    card.append(renderTenantLedgerPanel(row.entityKey));
-  }
-
-  const note = document.createElement("div");
-  note.className = "addr-sub";
-  note.textContent = "Step-by-step tracking returns when the protected read model carries gap state.";
-  card.append(note);
-
-  const actions = document.createElement("div");
-  actions.className = "card-actions";
-  if (row.signedAt) {
-    const lease = document.createElement("a");
-    lease.className = "ghost btn-link";
-    lease.textContent = "📄 Signed lease";
-    lease.href = "/api/lease-document?leaseAppKey=" + encodeURIComponent(row.entityKey);
-    lease.target = "_blank";
-    lease.rel = "noopener";
-    lease.title = "Signed on " + fmtDate(row.signedAt);
-    actions.append(lease);
-  }
-  if (!row.landlordApproved && row.unitKey) {
-    const wd = document.createElement("button");
-    wd.className = "ghost danger";
-    wd.textContent = "Withdraw application";
-    wd.addEventListener("click", () => withdrawApplication(row));
-    actions.append(wd);
-  }
-  if (actions.childElementCount > 0) card.append(actions);
-  return card;
-}
-
+// renderApplicationCard renders one application from the protected, RLS-scoped
+// read model (GET /api/applications, D1.3 Fire 3): the unit header, the
+// decision banner, the four-gate stepper, lease terms, qualification profile,
+// and — once the lease is executed — the statement/ledger panels. The
+// read_lease_applications projection carries the applicant's own
+// missing_*/inflight_*/declined_* gap state (packages/lease-signing/lenses.go),
+// the same shape the stepper below reads.
 function renderApplicationCard(row, highlight) {
-  // The PROTECTED Postgres read model (D1.3 Fire 3) carries the application's
-  // display scalars but not the Weaver-internal convergence aggregate (the per-gap
-  // stepper booleans, §10.2 — D1.5 rolls a protected gap model onto this pattern).
-  // In that scope render a compact, honest card instead of a stepper whose every
-  // step would falsely read "to do".
-  if (state.appsScope === "rls") {
-    return renderProtectedApplicationCard(row, highlight);
-  }
   const card = document.createElement("div");
   card.className = "card app-card";
   if (highlight && row.entityKey === highlight) card.classList.add("highlight");

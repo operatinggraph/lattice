@@ -15,6 +15,7 @@ package leasesigning
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 
@@ -22,14 +23,19 @@ import (
 	"github.com/operatinggraph/lattice/internal/refractor/ruleengine/full"
 )
 
-// projectRead runs the unparameterized leaseApplicationsRead lens over every
-// leaseapp in the fixture and returns the projected rows.
+// projectRead runs the leaseApplicationsRead lens over every leaseapp in the
+// fixture with the real wall-clock $now (the missing_bgcheck freshness term
+// needs it — the same param the live pipeline supplies, executeFullForActor's
+// params["now"] = time.Now().UTC().Format(time.RFC3339)) and returns the
+// projected rows.
 func (f *lensFixture) projectRead(t *testing.T) []ruleengine.ProjectionResult {
 	t.Helper()
 	eng := full.New()
 	cr, err := eng.Parse(leaseApplicationsReadSpec)
 	require.NoError(t, err, "leaseApplicationsRead cypher must parse on the full engine")
-	out, err := eng.ExecuteWith(context.Background(), cr, ruleengine.EventContext{Parameters: map[string]any{}}, f.adjKV, f.coreKV)
+	out, err := eng.ExecuteWith(context.Background(), cr, ruleengine.EventContext{Parameters: map[string]any{
+		"now": time.Now().UTC().Format(time.RFC3339),
+	}}, f.adjKV, f.coreKV)
 	require.NoError(t, err)
 	return out
 }
@@ -205,4 +211,156 @@ func TestLeaseApplicationsRead_DocPointersOnlyWhenAttached(t *testing.T) {
 	require.Equal(t, "text/plain; charset=utf-8", v["doc_content_type"])
 	require.Equal(t, []string{f.ids["alice"]}, anchorStrings(t, v["authz_anchors"]),
 		"the applicant-self anchor is untouched by the doc fans")
+}
+
+// TestLeaseApplicationsRead_ProjectsGapState — a bare-minimum application (only
+// the required applicationFor link) projects all four applicant gates open and
+// nothing declined/in-flight/decision-pending. The applicant's own protected
+// lens now carries the same four-gate journey state
+// leaseApplicationCompleteSpec projects, via the shared readinessOptionalMatch /
+// readinessWithItems fragment (the renderApplicationCard stepper's data source).
+func TestLeaseApplicationsRead_ProjectsGapState(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newLensFixture(t)
+	f.vtx(t, "app", "leaseapp")
+	f.vtx(t, "alice", "identity")
+	f.edge(t, "applicationFor", "app", "alice")
+
+	rows := f.projectRead(t)
+	require.Len(t, rows, 1)
+	v := rows[0].Values
+	require.Equal(t, true, v["missing_onboarding"], "no .ssn -> onboarding gap open")
+	require.Equal(t, false, v["missing_bgcheck"], "missing_bgcheck is gated behind onboarding (ssnVal <> null), same as leaseApplicationCompleteSpec")
+	require.Equal(t, true, v["missing_payment"], "missing_payment is not gated behind onboarding")
+	require.Equal(t, true, v["missing_signature"])
+	require.Equal(t, false, v["missing_decision"], "missing_decision requires the applicant gaps closed first")
+	require.Equal(t, false, v["inflight_bgcheck"])
+	require.Equal(t, false, v["inflight_payment"])
+	require.Equal(t, false, v["declined_bgcheck"])
+	require.Equal(t, false, v["declined_payment"])
+	require.Equal(t, false, v["declined"])
+}
+
+// TestLeaseApplicationsRead_MissingDecisionOpensWhenQualifiedAndUndecided — every
+// applicant gate closed (ssn + fresh bgcheck + payment + signature) but no
+// landlord .decision aspect yet: missing_decision opens, mirroring
+// leaseApplicationCompleteSpec's own missing_decision predicate.
+func TestLeaseApplicationsRead_MissingDecisionOpensWhenQualifiedAndUndecided(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := approvedAppFixture(t)
+
+	rows := f.projectRead(t)
+	require.Len(t, rows, 1)
+	v := rows[0].Values
+	require.Equal(t, false, v["missing_onboarding"])
+	require.Equal(t, false, v["missing_bgcheck"])
+	require.Equal(t, false, v["missing_payment"])
+	require.Equal(t, false, v["missing_signature"])
+	require.Equal(t, true, v["missing_decision"], "every applicant gap closed, no landlord decision yet -> awaiting review")
+	require.Equal(t, false, v["declined"])
+}
+
+// TestLeaseApplicationsRead_BgcheckFreshnessRequired — a STALE completed
+// background check (validUntil in the past) does not count toward
+// missing_bgcheck's closure, mirroring the convergence lens's freshness
+// predicate (the same `inst.outcome.data.validUntil > $now` term, shared via
+// readinessWithItems).
+func TestLeaseApplicationsRead_BgcheckFreshnessRequired(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newLensFixture(t)
+	bgFreshnessFixture(t, f, "2020-06-01T00:00:00Z")
+
+	rows := f.projectRead(t)
+	require.Len(t, rows, 1)
+	require.Equal(t, true, rows[0].Values["missing_bgcheck"], "a stale completed bgcheck must not count toward the gate")
+}
+
+// TestLeaseApplicationsRead_DeclinedBgcheckProjects — a FAILED background check
+// with no fresh completed replacement is a terminal verification decline, not a
+// silent "to do" — declined_bgcheck (and the top-level declined) project true.
+func TestLeaseApplicationsRead_DeclinedBgcheckProjects(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newLensFixture(t)
+	failed := "failed"
+	inflightBgFixture(t, f, false, &failed)
+
+	rows := f.projectRead(t)
+	require.Len(t, rows, 1)
+	v := rows[0].Values
+	require.Equal(t, true, v["declined_bgcheck"], "a failed bgcheck with no fresh completed replacement is declined")
+	require.Equal(t, true, v["missing_bgcheck"])
+	require.Equal(t, false, v["inflight_bgcheck"])
+	require.Equal(t, true, v["declined"], "declined_bgcheck folds into the top-level declined")
+}
+
+// TestLeaseApplicationsRead_InflightBgcheckProjects — a dispatched bgcheck with
+// no outcome yet is in flight, not declined and not (yet) closed.
+func TestLeaseApplicationsRead_InflightBgcheckProjects(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newLensFixture(t)
+	inflightBgFixture(t, f, true, nil)
+
+	rows := f.projectRead(t)
+	require.Len(t, rows, 1)
+	v := rows[0].Values
+	require.Equal(t, true, v["inflight_bgcheck"], "a dispatch marker with no outcome is in flight")
+	require.Equal(t, true, v["missing_bgcheck"], "in flight is not completed -> gap stays open")
+	require.Equal(t, false, v["declined_bgcheck"])
+	require.Equal(t, false, v["declined"])
+}
+
+// TestLeaseApplicationsRead_ProjectsProfileSignals — the D1.5-style profile
+// signal columns (mirroring landlordLeaseApplicationsReadSpec's own addition)
+// project the derived booleans/count off .profile, never the raw financials,
+// and degrade to profile_submitted=false + null signals when no profile was
+// ever submitted.
+func TestLeaseApplicationsRead_ProjectsProfileSignals(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newLensFixture(t)
+	f.seedApplication(t, "app", "alice", "unit1")
+	f.aspect(t, "app", "profile", "profile", map[string]any{
+		"annualIncome":             96000,
+		"employmentStatus":         "employed",
+		"incomeToRentMet":          true,
+		"employmentVerified":       true,
+		"referenceCount":           2,
+		"hasCoApplicant":           false,
+		"hasGuarantor":             true,
+		"guarantorIncomeToRentMet": true,
+		"submittedAt":              "2026-06-27T10:00:00Z",
+	})
+	f.seedApplication(t, "app2", "bob", "unit2")
+
+	rows := f.projectRead(t)
+	byApp := map[string]map[string]any{}
+	for _, r := range rows {
+		byApp[r.Values["app_id"].(string)] = r.Values
+	}
+
+	v := byApp[f.ids["app"]]
+	require.Equal(t, true, v["profile_submitted"])
+	require.Equal(t, true, v["income_to_rent_met"])
+	require.Equal(t, true, v["employment_verified"])
+	require.EqualValues(t, 2, v["reference_count"])
+	require.Equal(t, false, v["has_co_applicant"])
+	require.Equal(t, true, v["has_guarantor"])
+	require.Equal(t, true, v["guarantor_income_to_rent_met"])
+	require.NotContains(t, v, "annualIncome", "raw income must not be projected")
+
+	noProfile := byApp[f.ids["app2"]]
+	require.Equal(t, false, noProfile["profile_submitted"], "no .profile -> profile_submitted false")
+	require.Nil(t, noProfile["income_to_rent_met"], "no .profile -> null income signal")
+	require.Nil(t, noProfile["reference_count"])
 }

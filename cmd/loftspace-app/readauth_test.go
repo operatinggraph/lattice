@@ -210,26 +210,29 @@ func TestSessionCookieInteroperatesWithTheSharedDevKey(t *testing.T) {
 	}
 }
 
+// TestDeriveLandlordFlags — Declined is NOT one of deriveLandlordFlags' outputs
+// (it is projected directly by the lens, scanned straight off the row); this
+// only exercises LandlordApproved/LandlordDeclined, the two flags the function
+// actually derives from the raw landlord_decision string.
 func TestDeriveLandlordFlags(t *testing.T) {
 	approved := "approved"
 	declined := "declined"
 	cases := []struct {
-		name              string
-		decision          *string
-		wantApproved      bool
-		wantDeclined      bool
-		wantDeclinedAlias bool
+		name         string
+		decision     *string
+		wantApproved bool
+		wantDeclined bool
 	}{
-		{"nil", nil, false, false, false},
-		{"approved", &approved, true, false, false},
-		{"declined", &declined, false, true, true},
+		{"nil", nil, false, false},
+		{"approved", &approved, true, false},
+		{"declined", &declined, false, true},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			row := protectedApplicationRow{LandlordDecision: c.decision}
 			deriveLandlordFlags(&row)
-			if row.LandlordApproved != c.wantApproved || row.LandlordDeclined != c.wantDeclined || row.Declined != c.wantDeclinedAlias {
-				t.Errorf("flags = approved:%v declined:%v declinedAlias:%v", row.LandlordApproved, row.LandlordDeclined, row.Declined)
+			if row.LandlordApproved != c.wantApproved || row.LandlordDeclined != c.wantDeclined {
+				t.Errorf("flags = approved:%v declined:%v", row.LandlordApproved, row.LandlordDeclined)
 			}
 		})
 	}

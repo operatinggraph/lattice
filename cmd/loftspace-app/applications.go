@@ -14,16 +14,16 @@ import (
 // reach here, so there is no client-side filter.
 //
 // The protected model carries the application's display scalars (unit / terms /
-// signed / landlord-decision) but NOT the Weaver-internal convergence aggregate
-// (the missing_*/inflight_*/declined_* gap booleans) — that state is §10.2
-// Weaver-only today; D1.5 rolls a protected gap model onto this pattern. The FE
-// renders a coarse status from landlordDecision + signedAt until then. The
-// derived booleans below are computed from landlord_decision so the existing FE
-// keys keep meaning.
+// signed / landlord-decision) PLUS the applicant's own four-gate journey state
+// (missing_*/inflight_*/declined_* — the renderApplicationCard stepper's data
+// source) and the D1.5-style profile signal columns, both sourced the same way
+// landlordLeaseApplicationsReadSpec's `qualified` column is: the shared
+// readinessOptionalMatch/readinessWithItems cypher fragment
+// (packages/lease-signing/lenses.go).
 //
-// Nullable columns (the OPTIONAL unit/terms/signature/decision walks) are
-// pointers so an absent value stays absent rather than rendering a misleading
-// zero/empty.
+// Nullable columns (the OPTIONAL unit/terms/signature/decision walks, and the
+// profile signals which are null until a profile is submitted) are pointers so
+// an absent value stays absent rather than rendering a misleading zero/empty.
 type protectedApplicationRow struct {
 	EntityKey          string   `json:"entityKey"`
 	Applicant          string   `json:"applicant"`
@@ -52,6 +52,29 @@ type protectedApplicationRow struct {
 	DocStoreName   *string `json:"docStoreName"`
 	DocFilename    *string `json:"docFilename"`
 	DocContentType *string `json:"docContentType"`
+	// Qualification-profile signals (D1.5-style, mirroring
+	// landlordLeaseApplicationsReadSpec's own addition): pure app.profile.data.*
+	// scalar hops, null until SetApplicantProfile has run.
+	ProfileSubmitted         bool     `json:"profileSubmitted"`
+	IncomeToRentMet          *bool    `json:"incomeToRentMet"`
+	EmploymentVerified       *bool    `json:"employmentVerified"`
+	ReferenceCount           *float64 `json:"referenceCount"`
+	HasCoApplicant           *bool    `json:"hasCoApplicant"`
+	HasGuarantor             *bool    `json:"hasGuarantor"`
+	GuarantorIncomeToRentMet *bool    `json:"guarantorIncomeToRentMet"`
+	// The applicant's own four-gate journey state — the renderApplicationCard
+	// stepper's data source. Field names/JSON tags mirror the convergence lens's
+	// own RETURN aliases (missing_onboarding etc.), the shape the FE already
+	// expects.
+	MissingOnboarding bool `json:"missing_onboarding"`
+	MissingBgcheck    bool `json:"missing_bgcheck"`
+	MissingPayment    bool `json:"missing_payment"`
+	MissingSignature  bool `json:"missing_signature"`
+	MissingDecision   bool `json:"missing_decision"`
+	InflightBgcheck   bool `json:"inflight_bgcheck"`
+	InflightPayment   bool `json:"inflight_payment"`
+	DeclinedBgcheck   bool `json:"declined_bgcheck"`
+	DeclinedPayment   bool `json:"declined_payment"`
 }
 
 // selectApplicationsSQL reads the protected model. It carries NO auth WHERE — the
@@ -63,7 +86,12 @@ SELECT entity_key, applicant, unit_key, unit_address, unit_city, unit_region,
        unit_rent, unit_currency, unit_status, unit_bedrooms, unit_bathrooms,
        unit_available_from, signed_at, landlord_decision,
        decline_reason, terms_move_in_date, terms_lease_term_months,
-       terms_requested_rent, doc_store_name, doc_filename, doc_content_type
+       terms_requested_rent, doc_store_name, doc_filename, doc_content_type,
+       profile_submitted, income_to_rent_met, employment_verified, reference_count,
+       has_co_applicant, has_guarantor, guarantor_income_to_rent_met,
+       missing_onboarding, missing_bgcheck, missing_payment, missing_signature,
+       missing_decision, inflight_bgcheck, inflight_payment, declined_bgcheck,
+       declined_payment, declined
 FROM read_lease_applications
 ORDER BY app_id`
 
@@ -105,6 +133,11 @@ func queryApplications(ctx context.Context, pool pgxBeginner, actorID string) ([
 			&row.SignedAt, &row.LandlordDecision, &row.DeclineReason,
 			&row.TermsMoveInDate, &row.TermsLeaseTerm, &row.TermsRequestedRent,
 			&row.DocStoreName, &row.DocFilename, &row.DocContentType,
+			&row.ProfileSubmitted, &row.IncomeToRentMet, &row.EmploymentVerified, &row.ReferenceCount,
+			&row.HasCoApplicant, &row.HasGuarantor, &row.GuarantorIncomeToRentMet,
+			&row.MissingOnboarding, &row.MissingBgcheck, &row.MissingPayment, &row.MissingSignature,
+			&row.MissingDecision, &row.InflightBgcheck, &row.InflightPayment, &row.DeclinedBgcheck,
+			&row.DeclinedPayment, &row.Declined,
 		); err != nil {
 			return nil, err
 		}
@@ -130,7 +163,12 @@ SELECT entity_key, applicant, unit_key, unit_address, unit_city, unit_region,
        unit_rent, unit_currency, unit_status, unit_bedrooms, unit_bathrooms,
        unit_available_from, signed_at, landlord_decision, decline_reason,
        terms_move_in_date, terms_lease_term_months, terms_requested_rent,
-       doc_store_name, doc_filename, doc_content_type
+       doc_store_name, doc_filename, doc_content_type,
+       profile_submitted, income_to_rent_met, employment_verified, reference_count,
+       has_co_applicant, has_guarantor, guarantor_income_to_rent_met,
+       missing_onboarding, missing_bgcheck, missing_payment, missing_signature,
+       missing_decision, inflight_bgcheck, inflight_payment, declined_bgcheck,
+       declined_payment, declined
 FROM read_lease_applications
 WHERE entity_key = $1`
 
@@ -157,6 +195,11 @@ func queryApplicationByKey(ctx context.Context, pool pgxBeginner, actorID, entit
 		&row.SignedAt, &row.LandlordDecision, &row.DeclineReason,
 		&row.TermsMoveInDate, &row.TermsLeaseTerm, &row.TermsRequestedRent,
 		&row.DocStoreName, &row.DocFilename, &row.DocContentType,
+		&row.ProfileSubmitted, &row.IncomeToRentMet, &row.EmploymentVerified, &row.ReferenceCount,
+		&row.HasCoApplicant, &row.HasGuarantor, &row.GuarantorIncomeToRentMet,
+		&row.MissingOnboarding, &row.MissingBgcheck, &row.MissingPayment, &row.MissingSignature,
+		&row.MissingDecision, &row.InflightBgcheck, &row.InflightPayment, &row.DeclinedBgcheck,
+		&row.DeclinedPayment, &row.Declined,
 	)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -171,9 +214,12 @@ func queryApplicationByKey(ctx context.Context, pool pgxBeginner, actorID, entit
 	return row, true, nil
 }
 
-// deriveLandlordFlags recomputes the landlord-decision booleans the FE keys on
-// from the raw landlord_decision string, since the protected model projects the
-// raw value (not the booleans the Weaver convergence lens derived).
+// deriveLandlordFlags recomputes the landlord-approved/declined booleans the FE
+// keys on from the raw landlord_decision string (the protected model projects
+// the raw value, not a derived boolean). Declined itself is NOT derived here —
+// it is projected directly by the lens (a landlord decline OR either
+// service-instance gate's terminal verification failure), so it is scanned
+// straight off the row.
 func deriveLandlordFlags(row *protectedApplicationRow) {
 	if row.LandlordDecision == nil {
 		return
@@ -183,7 +229,6 @@ func deriveLandlordFlags(row *protectedApplicationRow) {
 		row.LandlordApproved = true
 	case "declined":
 		row.LandlordDeclined = true
-		row.Declined = true
 	}
 }
 

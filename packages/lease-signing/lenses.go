@@ -125,6 +125,23 @@ func Lenses() []pkgmgr.LensSpec {
 				{Name: "doc_store_name", Type: "text"},
 				{Name: "doc_filename", Type: "text"},
 				{Name: "doc_content_type", Type: "text"},
+				{Name: "profile_submitted", Type: "boolean"},
+				{Name: "income_to_rent_met", Type: "boolean"},
+				{Name: "employment_verified", Type: "boolean"},
+				{Name: "reference_count", Type: "double precision"},
+				{Name: "has_co_applicant", Type: "boolean"},
+				{Name: "has_guarantor", Type: "boolean"},
+				{Name: "guarantor_income_to_rent_met", Type: "boolean"},
+				{Name: "missing_onboarding", Type: "boolean"},
+				{Name: "missing_bgcheck", Type: "boolean"},
+				{Name: "missing_payment", Type: "boolean"},
+				{Name: "missing_signature", Type: "boolean"},
+				{Name: "missing_decision", Type: "boolean"},
+				{Name: "inflight_bgcheck", Type: "boolean"},
+				{Name: "inflight_payment", Type: "boolean"},
+				{Name: "declined_bgcheck", Type: "boolean"},
+				{Name: "declined_payment", Type: "boolean"},
+				{Name: "declined", Type: "boolean"},
 			},
 		},
 		{
@@ -749,9 +766,26 @@ RETURN
 //     unit_* / terms_* / signed_at / landlord_decision / decline_reason are the
 //     pure scalar hops off the unit's .address/.listing, the applicant's own
 //     requested .terms, and the application's .signature/.decision aspects — the
-//     same display columns leaseApplicationComplete projects, minus the
-//     service-instance convergence aggregate (that stays Weaver-internal §10.2
-//     state; D1.5 may roll the gap state onto a protected model later).
+//     same display columns leaseApplicationComplete projects.
+//   - profile_submitted / income_to_rent_met / employment_verified /
+//     reference_count / has_co_applicant / has_guarantor /
+//     guarantor_income_to_rent_met mirror landlordLeaseApplicationsReadSpec's own
+//     D1.5 addition: pure `app.profile.data.*` scalar hops, zero duplication.
+//   - missing_onboarding / missing_bgcheck / missing_payment / missing_signature /
+//     missing_decision / inflight_bgcheck / inflight_payment / declined_bgcheck /
+//     declined_payment / declined are the applicant's own four-gate journey
+//     state, the FE stepper reads (renderApplicationCard, loftspace-app/web/app.js).
+//     Sourced the same way landlordLeaseApplicationsReadSpec's `qualified` column
+//     is: the readinessOptionalMatch / readinessWithItems fragment shared with
+//     leaseApplicationCompleteSpec (ssnVal / freshBgComplete / payComplete), plus
+//     the per-gap inflight/failed counts over the same `inst` binding — the exact
+//     bgInflight/payInflight/bgFailed/payFailed formulas leaseApplicationComplete
+//     already runs. The service-instance convergence aggregate that drives
+//     Weaver's own dispatch/orchestration (dispatch-count vs. maxretries_<gap>,
+//     the "exhausted" state) stays Weaver-internal §10.2 state — not a lens
+//     predicate (see readinessOptionalMatch's doc comment) — so this lens's
+//     declined_<gap> reflects a terminal verification failure, never a
+//     retry-budget exhaustion.
 //   - authz_anchors = [nanoIdFromKey(id.key)] — the applicant-self anchor only
 //     (the milestone). applicationFor is a REQUIRED MATCH (not OPTIONAL): a
 //     leaseapp with no applicant link projects NO row, so the read model holds
@@ -780,12 +814,13 @@ RETURN
 //
 // '= null' / '<> null' is the full engine's null test (not IS NULL); list
 // literals + nanoIdFromKey in RETURN are the cap-read base lens's proven shape.
-const leaseApplicationsReadSpec = `
+var leaseApplicationsReadSpec = fmt.Sprintf(`
 MATCH (app:leaseapp)
 MATCH (app)-[:applicationFor]->(id:identity)
 OPTIONAL MATCH (app)-[:appliesToUnit]->(u:unit)
 OPTIONAL MATCH (app)<-[:providedTo]-(docInst:service)
 OPTIONAL MATCH (app)<-[:signedLease]-(leaseDocObj:object)
+%s
 WITH
   app.key                        AS entityKey,
   id.key                         AS applicantKey,
@@ -805,9 +840,21 @@ WITH
   app.terms.data.moveInDate      AS termsMoveInDate,
   app.terms.data.leaseTermMonths AS termsLeaseTermMonths,
   app.terms.data.requestedRent   AS termsRequestedRent,
+  (app.profile.data.submittedAt <> null)      AS profileSubmitted,
+  app.profile.data.incomeToRentMet            AS incomeToRentMet,
+  app.profile.data.employmentVerified         AS employmentVerified,
+  app.profile.data.referenceCount             AS referenceCount,
+  app.profile.data.hasCoApplicant             AS hasCoApplicant,
+  app.profile.data.hasGuarantor               AS hasGuarantor,
+  app.profile.data.guarantorIncomeToRentMet   AS guarantorIncomeToRentMet,
   max(CASE WHEN leaseDocObj.key <> null AND docInst.class = 'service.docGen.instance' AND docInst.outcome.data.status = 'completed' THEN docInst.outcome.data.storeName ELSE null END) AS docStoreName,
   max(CASE WHEN leaseDocObj.key <> null AND docInst.class = 'service.docGen.instance' AND docInst.outcome.data.status = 'completed' THEN docInst.outcome.data.filename ELSE null END) AS docFilename,
-  max(CASE WHEN leaseDocObj.key <> null AND docInst.class = 'service.docGen.instance' AND docInst.outcome.data.status = 'completed' THEN docInst.outcome.data.contentType ELSE null END) AS docContentType
+  max(CASE WHEN leaseDocObj.key <> null AND docInst.class = 'service.docGen.instance' AND docInst.outcome.data.status = 'completed' THEN docInst.outcome.data.contentType ELSE null END) AS docContentType,
+  %s,
+  count(DISTINCT CASE WHEN inst.class = 'service.backgroundCheck.instance' AND inst.dispatch.data.vendorRef <> null AND inst.outcome.data.status = null THEN inst.key ELSE null END) AS bgInflight,
+  count(DISTINCT CASE WHEN inst.class = 'service.payment.instance' AND inst.dispatch.data.vendorRef <> null AND inst.outcome.data.status = null THEN inst.key ELSE null END) AS payInflight,
+  count(DISTINCT CASE WHEN inst.class = 'service.backgroundCheck.instance' AND inst.outcome.data.status = 'failed' THEN inst.key ELSE null END) AS bgFailed,
+  count(DISTINCT CASE WHEN inst.class = 'service.payment.instance' AND inst.outcome.data.status = 'failed' THEN inst.key ELSE null END) AS payFailed
 RETURN
   nanoIdFromKey(entityKey)       AS app_id,
   entityKey                      AS entity_key,
@@ -828,11 +875,28 @@ RETURN
   termsMoveInDate                AS terms_move_in_date,
   termsLeaseTermMonths           AS terms_lease_term_months,
   termsRequestedRent             AS terms_requested_rent,
+  profileSubmitted                AS profile_submitted,
+  incomeToRentMet                 AS income_to_rent_met,
+  employmentVerified               AS employment_verified,
+  referenceCount                   AS reference_count,
+  hasCoApplicant                   AS has_co_applicant,
+  hasGuarantor                     AS has_guarantor,
+  guarantorIncomeToRentMet         AS guarantor_income_to_rent_met,
   docStoreName                   AS doc_store_name,
   docFilename                    AS doc_filename,
   docContentType                 AS doc_content_type,
+  (ssnVal = null)                                  AS missing_onboarding,
+  ((ssnVal <> null) AND (freshBgComplete = 0))      AS missing_bgcheck,
+  (payComplete = 0)                                 AS missing_payment,
+  (signedAt = null)                                 AS missing_signature,
+  ((ssnVal <> null) AND (freshBgComplete > 0) AND (payComplete > 0) AND (signedAt <> null) AND (landlordDecision = null)) AS missing_decision,
+  (bgInflight > 0)                                  AS inflight_bgcheck,
+  (payInflight > 0)                                 AS inflight_payment,
+  ((bgFailed > 0) AND (freshBgComplete = 0))        AS declined_bgcheck,
+  ((payFailed > 0) AND (payComplete = 0))           AS declined_payment,
+  (((bgFailed > 0) AND (freshBgComplete = 0)) OR ((payFailed > 0) AND (payComplete = 0)) OR (landlordDecision = 'declined')) AS declined,
   [nanoIdFromKey(applicantKey)]  AS authz_anchors
-`
+`, readinessOptionalMatch, readinessWithItems)
 
 // landlordLeaseApplicationsReadSpec is the LANDLORD-facing protected Postgres
 // read model's cypher (D1.3 Increment 2). Identical display surface to
