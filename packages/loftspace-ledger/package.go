@@ -54,14 +54,16 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 // Package is the static, install-time bundle.
 var Package = pkgmgr.Definition{
 	Name:    "loftspace-ledger",
-	Version: "0.4.6",
+	Version: "0.4.7",
 	Description: "Loftspace tenant payment ledger: the account vertex type (LoftspaceCreateAccount, independently-minted " +
 		"id, one per lease via a .ledgerAccount guard aspect on the leaseapp) + the transaction vertex type " +
 		"(DebitAccount/CreditAccount, append-only entries linked to the account via postedTo; DebitAccount's " +
 		"optional clauseRef writes the authorizedBy audit link + updates the clause status: completed one-time, " +
-		"or chargeValidUntil re-armed if period=monthly, Fire V3) + the ledgerHistory " +
-		"read-model lens (one row per transaction) + the leaseAccounts lens (lease -> account key lookup). " +
-		"Depends lease-signing.",
+		"or chargeValidUntil re-armed if period=monthly, Fire V3; CreditAccount also grants a consumer " +
+		"scope=self — a resident paying down their own balance, ownership-checked off the account's own " +
+		"heldFor topology and amount-capped at the account's own recomputed outstanding balance) + the " +
+		"ledgerHistory read-model lens (one row per transaction) + the leaseAccounts lens (lease -> account " +
+		"key lookup). Depends lease-signing.",
 	Depends:     []string{"lease-signing"},
 	DDLs:        DDLs(),
 	Lenses:      Lenses(),

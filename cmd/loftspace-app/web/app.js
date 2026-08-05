@@ -1513,6 +1513,7 @@ function renderProtectedApplicationCard(row, highlight) {
 
   if (row.landlordApproved && row.unitStatus === "leased" && row.entityKey) {
     card.append(renderStatementPanel(row.entityKey));
+    card.append(renderTenantLedgerPanel(row.entityKey));
   }
 
   const note = document.createElement("div");
@@ -1637,10 +1638,12 @@ function renderApplicationCard(row, highlight) {
     card.append(renderProfilePanel(row));
   }
 
-  // Payment ledger — read-only for the tenant, once the lease is fully executed
-  // (the landlord's console is where charges/payments are recorded).
+  // Payment ledger — the combined statement is read-only; the ledger panel
+  // below it lets the tenant pay down what they owe themselves (self-scoped
+  // CreditAccount, ownership-checked server-side — see renderTenantLedgerPanel).
   if (row.landlordApproved && row.unitStatus === "leased" && row.entityKey) {
     card.append(renderStatementPanel(row.entityKey));
+    card.append(renderTenantLedgerPanel(row.entityKey));
   }
 
   const actions = document.createElement("div");
@@ -2744,6 +2747,113 @@ function renderLedgerRecordForm(leaseAppKey, accountKey, body, canRecord) {
   return form;
 }
 
+// renderTenantLedgerPanel gives the tenant's own card a self-service "Pay
+// rent" control — the resident-side counterpart to the landlord's
+// renderLedgerRecordForm, credit-only (paying down a balance, never charging
+// one; mirrors cafe-app's resident self-service pattern). The op is
+// self-scoped (packages/loftspace-ledger's CreditAccount consumer scope=self
+// grant) and ownership-checked server-side against the account's own
+// heldFor→leaseapp→applicationFor chain, so a forged leaseAppKey only fails
+// closed — nothing here needs to be trusted client-side.
+function renderTenantLedgerPanel(leaseAppKey) {
+  const wrap = document.createElement("div");
+  wrap.className = "ledger-panel";
+
+  const toggle = document.createElement("button");
+  toggle.className = "ghost ledger-toggle";
+  toggle.textContent = "💳 Pay rent";
+  const body = document.createElement("div");
+  body.className = "ledger-body";
+  body.hidden = true;
+
+  toggle.addEventListener("click", () => {
+    body.hidden = !body.hidden;
+    if (body.hidden || body.dataset.loaded) return;
+    body.dataset.loaded = "1";
+    refreshTenantLedgerBody(body, leaseAppKey);
+  });
+
+  wrap.append(toggle, body);
+  return wrap;
+}
+
+// refreshTenantLedgerBody loads the tenant's own balance (GET /api/ledger,
+// P5) and, when there is a live account with something owed, a "Pay" form
+// pre-filled with the full balance. No account yet or a $0 balance renders
+// the balance line with no form — nothing to pay.
+async function refreshTenantLedgerBody(body, leaseAppKey) {
+  body.textContent = "Loading…";
+  let data;
+  try {
+    data = await appGet("/api/ledger?leaseAppKey=" + encodeURIComponent(leaseAppKey));
+  } catch (e) {
+    body.textContent = "Could not load your ledger: " + e.message;
+    return;
+  }
+  body.innerHTML = "";
+
+  const owed = data.balanceCents || 0;
+  const balance = document.createElement("div");
+  balance.className = "ledger-balance";
+  balance.textContent =
+    owed > 0
+      ? "Balance owed: " + moneyAmount(owed / 100)
+      : owed < 0
+        ? "Credit balance: " + moneyAmount(-owed / 100)
+        : "Balance: $0.00 (paid in full)";
+  body.append(balance);
+
+  if (!(owed > 0) || !data.accountKey) return;
+
+  const accountKey = data.accountKey;
+  const form = document.createElement("div");
+  form.className = "ledger-record-form";
+  const amount = document.createElement("input");
+  amount.type = "number";
+  amount.step = "0.01";
+  amount.min = "0.01";
+  // The server (packages/loftspace-ledger/scripts.go) rejects a self-credit
+  // above the account's real outstanding balance regardless — this cap is
+  // just so the common case doesn't round-trip a failure.
+  amount.max = (owed / 100).toFixed(2);
+  amount.placeholder = "Amount ($)";
+  amount.value = (owed / 100).toFixed(2);
+  const pay = document.createElement("button");
+  pay.textContent = "Pay";
+
+  pay.addEventListener("click", async () => {
+    const dollars = Number(amount.value);
+    if (!(dollars > 0)) {
+      toast("Enter an amount greater than zero.", "err");
+      return;
+    }
+    const cents = Math.round(dollars * 100);
+    pay.disabled = true;
+    try {
+      await opOrThrow(
+        {
+          operationType: "CreditAccount",
+          class: "transaction",
+          reads: [accountKey],
+          payload: { accountKey, amountCents: cents },
+        },
+        "record your payment",
+        { authContext: { target: state.applicant } }
+      );
+      toast("Payment recorded.", "ok");
+      body.dataset.loaded = "";
+      await refreshTenantLedgerBody(body, leaseAppKey);
+    } catch (e) {
+      toast(e.message, "err");
+    } finally {
+      pay.disabled = false;
+    }
+  });
+
+  form.append(amount, pay);
+  body.append(form);
+}
+
 // ---- Documents (upload / view / list) ----
 //
 // The applicant's documents, read from the `objectAttachments` lens projection
@@ -3782,8 +3892,10 @@ async function setListingStatus(u, status) {
 
 // opOrThrow submits an op and throws on a rejection or transport error, so the
 // post-a-listing chain stops at the first failure with a message naming the step.
-async function opOrThrow(body, what) {
-  const reply = await submitOp(body);
+// opts is optional and passed straight through to submitOp (e.g. {authContext}
+// for a scope=self write) — every existing 2-arg call site is unaffected.
+async function opOrThrow(body, what, opts) {
+  const reply = await submitOp(body, opts);
   if (reply && reply.status === "rejected") {
     const msg = reply.error ? `${reply.error.code}: ${reply.error.message}` : "rejected";
     throw new Error(`Could not ${what} — ${msg}`);
