@@ -389,6 +389,13 @@ def vertex_alive(state, key):
         return False
     return True
 
+# Self-credit balance-verification budget (post_entry's authContextTarget
+# branch): 10 pages of 50 postedTo entries covers many years of a monthly
+# rent history; an account that exceeds it fails the self-credit closed
+# rather than trust a partial sum.
+SELF_CREDIT_PAGE_LIMIT = 50
+SELF_CREDIT_MAX_PAGES = 10
+
 def post_entry(state, op, entry_type, event_class, allow_clause_ref):
     p = op.payload
     acct_key = required_string(p, "accountKey")
@@ -401,6 +408,87 @@ def post_entry(state, op, entry_type, event_class, allow_clause_ref):
     if amount_cents <= 0:
         fail("InvalidArgument: amountCents: required positive number")
     memo = optional_string(p, "memo")
+
+    # Resident-self ownership + amount trust (CreditAccount only —
+    # permissions.go grants no self-scope DebitAccount): the mere PRESENCE of
+    # authContextTarget selects this branch, same idiom as cafe-domain's
+    # Charge/Settle — it does not change what grant actually authorized the
+    # op (a scope=any operator submit never attaches a target), it only ever
+    # narrows behavior.
+    # authcontext-target: (selector) a branch selector, not a confinement
+    # exemption -- so it reads the raw target (did the caller declare a self
+    # target at all) rather than authTargetValidated. Safe because presence
+    # only pushes the caller onto the STRICTER branch below (the ownership +
+    # amount proofs), never grants anything a scope=any submit would not
+    # already.
+    if op.authContextTarget != "":
+        if entry_type != "credit":
+            fail("AuthDenied: a resident may only credit (pay down) their own account, not charge it")
+        # authcontext-target: (ownership) the value derives an identity whose
+        # ownership of the account's own lease is then proven by the
+        # applicationFor link read below -- a forged target only fails closed.
+        # The lease is recovered from the account's OWN heldFor topology,
+        # never the payload, so a forged claim only fails closed.
+        _, target_identity_id = parts_of(op.authContextTarget, "authContextTarget", "identity")
+        # read-posture: (e) relation=heldFor epoch=none -- an account carries
+        # exactly one heldFor link, so this is never a keyspace scan.
+        held_for_page, _ = kv.Links(acct_key, "heldFor", "out")
+        lease_key = None
+        for lk in held_for_page:
+            if not lk.isDeleted:
+                lease_key = lk.targetVertex
+        if lease_key == None:
+            fail("AuthDenied: account " + acct_key + " carries no live lease")
+        _, lease_id = parts_of(lease_key, "heldFor target", "leaseapp")
+        # read-posture: (e) per-candidate follow-up read off the enumeration
+        # above -- the lease id is data-derived, unknowable client-side.
+        application_for = kv.Read("lnk.leaseapp." + lease_id + ".applicationFor.identity." + target_identity_id)
+        if application_for == None or application_for.isDeleted:
+            fail("AuthDenied: a resident may only pay down their own lease's account")
+
+        # Amount trust: nothing on this platform verifies a self-submitted
+        # payment actually happened (no payment-rail integration — out of
+        # scope for a reference vertical, package doc), so an unbounded
+        # self-credit would let a resident forgive their own debt for free.
+        # The outstanding balance is recomputed from the account's OWN
+        # postedTo transaction history (never trusted from the payload),
+        # paginated + bounded exactly like the workplace-confinement walks
+        # above (worksAt_covers, this file's account DDL): an account whose
+        # history exhausts the page budget fails closed (denies) rather than
+        # trusts a partial sum. A self-credit may never exceed what is
+        # actually owed.
+        owed_cents = 0
+        cursor = None
+        budget_exhausted = True
+        for _page in range(SELF_CREDIT_MAX_PAGES):
+            # read-posture: (e) relation=postedTo epoch=none -- bounded by the
+            # page budget; exhausting it below fails closed.
+            page, cursor = kv.Links(acct_key, "postedTo", "in", cursor, SELF_CREDIT_PAGE_LIMIT)
+            for lk in page:
+                if lk.isDeleted:
+                    continue
+                # read-posture: (e) per-candidate follow-up read off the
+                # enumeration above -- each transaction's own .entry aspect,
+                # data-derived and unknowable client-side.
+                tx_entry = kv.Read(lk.sourceVertex + ".entry")
+                if tx_entry == None or tx_entry.isDeleted:
+                    continue
+                tx_amount = tx_entry.data.get("amountCents")
+                if tx_amount == None:
+                    continue
+                if tx_entry.data.get("type") == "debit":
+                    owed_cents += tx_amount
+                elif tx_entry.data.get("type") == "credit":
+                    owed_cents -= tx_amount
+            if cursor == None:
+                budget_exhausted = False
+                break
+        if budget_exhausted:
+            fail("AuthDenied: could not verify account " + acct_key + "'s balance (too much transaction history)")
+        if owed_cents <= 0:
+            fail("AuthDenied: account " + acct_key + " has no outstanding balance to pay")
+        if amount_cents > owed_cents:
+            fail("AuthDenied: amountCents exceeds account " + acct_key + "'s outstanding balance of " + str(owed_cents))
 
     # clauseRef (DebitAccount only — the semantic-contracts Executable Paper
     # consumer, Contract #10 §10.8): the clause this charge is authorized by.
@@ -522,9 +610,16 @@ def execute(state, op):
     ot = op.operationType
 
     if ot == "DebitAccount":
+        # workplace-exempt: (ownership-bound) post_entry's own authContextTarget
+        # branch fails closed for a debit (permissions.go grants no self-scope
+        # DebitAccount) -- only CreditAccount's branch below ever reaches the
+        # ownership proof.
         return post_entry(state, op, "debit", "account.debited", True)
 
     if ot == "CreditAccount":
+        # workplace-exempt: (ownership-bound) post_entry proves ownership itself --
+        # a self-scoped credit is allowed only once the account's heldFor lease's
+        # applicationFor link resolves to op.authContextTarget.
         return post_entry(state, op, "credit", "account.credited", False)
 
     fail("transaction DDL: unknown operationType: " + ot)
