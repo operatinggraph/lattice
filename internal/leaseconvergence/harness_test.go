@@ -569,6 +569,22 @@ func (h *harness) seedApplicant() (appKey, appID, applicantKey string) {
 	require.Equalf(h.t, processor.ReplyStatusAccepted, listingReply.Status, "SetListing: %+v", listingReply.Error)
 	h.lastUnitKey = unitKey
 
+	// A real landlord manages the unit before it can ever be decided — the
+	// leaseApplicationComplete lens's missing_manager gap (lease-signing
+	// lenses.go) opens on landlord approval for a unit with no live `manages`
+	// link, so an unmanaged unit here would never fully converge.
+	landlordReply := h.submitOp("CreateUnclaimedIdentity", "identity", "default", bootstrap.BootstrapIdentityKey, map[string]any{
+		"name":         "Landlord",
+		"email":        "landlord@loftspace.example",
+		"claimKeyHash": hex.EncodeToString(func() []byte { s := sha256.Sum256([]byte("lease-landlord-claim-" + mustNanoID(h.t))); return s[:] }()),
+	}, nil)
+	require.Equalf(h.t, processor.ReplyStatusAccepted, landlordReply.Status, "CreateUnclaimedIdentity(landlord): %+v", landlordReply.Error)
+	landlordKey := landlordReply.PrimaryKey
+	ownerReply := h.submitOp("AssignUnitOwner", "loftspaceOwnership", "default", bootstrap.BootstrapIdentityKey, map[string]any{
+		"landlord": landlordKey, "unit": unitKey,
+	}, &processor.ContextHint{Reads: []string{landlordKey, unitKey}})
+	require.Equalf(h.t, processor.ReplyStatusAccepted, ownerReply.Status, "AssignUnitOwner: %+v", ownerReply.Error)
+
 	appReply := h.submitOp("CreateLeaseApplication", "leaseapp", "default", bootstrap.BootstrapIdentityKey, map[string]any{
 		"applicant": applicantKey, "unit": unitKey,
 	}, &processor.ContextHint{Reads: []string{applicantKey, unitKey}})
