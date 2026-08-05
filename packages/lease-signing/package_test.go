@@ -228,3 +228,26 @@ func TestPackage_StructurePins(t *testing.T) {
 		}
 	}
 }
+
+// TestPackage_LeaseApplicationCompleteEscalatesExhaustedToAugur proves a gap
+// that spends its retry budget (declared maxretries_bgcheck/payment, or the
+// engine's default cap for any other gap on this target) reaches the Augur
+// AI-reasoning tier instead of parking behind an unread Health-KV
+// GapBudgetExhausted warning — internal/weaver's engine-side escalation
+// mechanics are proven by TestHandleRow_ExhaustedGapEscalatesToAugur; this
+// pins the PACKAGE'S declaration of it.
+func TestPackage_LeaseApplicationCompleteEscalatesExhaustedToAugur(t *testing.T) {
+	for _, target := range Package.WeaverTargets {
+		if target.TargetID != "leaseApplicationComplete" {
+			continue
+		}
+		if target.Augur == nil {
+			t.Fatalf("leaseApplicationComplete target: Augur is nil, want an \"exhausted\" escalation")
+		}
+		if got, want := target.Augur.Escalate, []string{"exhausted"}; len(got) != len(want) || got[0] != want[0] {
+			t.Fatalf("leaseApplicationComplete target: Augur.Escalate = %v, want %v", got, want)
+		}
+		return
+	}
+	t.Fatal("leaseApplicationComplete target not found in Package.WeaverTargets")
+}

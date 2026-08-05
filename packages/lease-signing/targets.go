@@ -65,6 +65,13 @@ func WeaverTargets() []pkgmgr.WeaverTargetSpec {
 		Admission: &pkgmgr.AdmissionSpec{
 			AdapterRates: map[string]float64{"backgroundCheck": 2, "stripe": 5},
 		},
+		// A gap that exhausts its retry budget (maxretries_bgcheck/payment = 3,
+		// packages/lease-signing/retry_budget.go) escalates to the Augur
+		// AI-reasoning tier (Contract #10 §10.8 "Augur escalation") instead of
+		// parking behind an unread Health-KV GapBudgetExhausted warning — the
+		// contract's own default posture for budget exhaustion on any gap in
+		// this target, declared vs. default-capped alike.
+		Augur: &pkgmgr.AugurSpec{Escalate: []string{"exhausted"}},
 		Gaps: map[string]pkgmgr.GapActionSpec{
 			"missing_onboarding":    {Action: "triggerLoom", Pattern: "onboarding", Subject: "row.applicant"},
 			"missing_bgcheck":       {Action: "triggerLoom", Pattern: "backgroundCheck", Subject: "row.applicant", Adapter: "backgroundCheck"},

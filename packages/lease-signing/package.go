@@ -82,7 +82,7 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 // Package is the static, install-time bundle.
 var Package = pkgmgr.Definition{
 	Name:    "lease-signing",
-	Version: "0.27.11",
+	Version: "0.27.12",
 	Description: "Loftspace lease-application convergence vertical: the leaseapp vertex type + CreateLeaseApplication/SignLease, " +
 		"the leaseApplicationComplete actorAggregate convergence lens (§10.2 keyColumn), the leaseApplicationsRead " +
 		"protected Postgres read model (Contract #6 §6.14 RLS — the applicant-self read boundary, D1.3 Fire 2; carries " +
@@ -91,7 +91,8 @@ var Package = pkgmgr.Definition{
 		"loftspace-domain manages link, D1.3 Increment 2), the §10.8 playbook " +
 		"(triggerLoom externalTask for bgcheck/payment/leaseDocument, assignTask SignLease, triggerLoom onboarding, directOp " +
 		"SetListingStatus to mark the unit leased on approval, directOp AttachObject to anchor the produced executed-lease " +
-		"artifact under the signedLease slot), the externalTask " +
+		"artifact under the signedLease slot), an augur escalation on \"exhausted\" so a gap that spends its retry budget " +
+		"reaches AI reasoning instead of an unread Health-KV warning, the externalTask " +
 		"instanceOp/replyOp wrapper DDLs (identity-family bgcheck/payment AND the leaseapp-subject docGen triad — the " +
 		"vendor-rendered executed-lease document), the bgcheck/payment/onboarding/leaseDocument loomPatterns, SetApplicantProfile " +
 		"(the applicant's qualification profile — raw financials captured in Core KV, only derived landlord-facing " +

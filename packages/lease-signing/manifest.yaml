@@ -1,5 +1,5 @@
 name: lease-signing
-version: 0.27.11
+version: 0.27.12
 description: |
   Loftspace lease-application convergence vertical: the leaseapp vertex type
   (CreateLeaseApplication + SignLease), the leaseApplicationComplete
@@ -11,7 +11,9 @@ description: |
   loftspace-domain manages link, D1.3 Increment 2), the §10.8 playbook
   (triggerLoom externalTask for bgcheck/payment/leaseDocument, assignTask
   SignLease, triggerLoom onboarding, directOp AttachObject anchoring the
-  produced executed-lease artifact), the externalTask
+  produced executed-lease artifact), an augur escalation on "exhausted" so a
+  gap that spends its retry budget reaches AI reasoning instead of an unread
+  Health-KV warning, the externalTask
   instanceOp/replyOp/dispatchOp wrapper DDLs (CreateLeaseServiceInstance /
   RecordLeaseServiceOutcome / RecordServiceDispatch, plus the leaseapp-subject
   docGen triad CreateLeaseDocInstance / RecordLeaseDocOutcome — the
