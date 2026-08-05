@@ -239,6 +239,14 @@ RETURN
 // open-tab card, so what a resident sees ordering and what lands on the
 // house-tab ledger entry are the identical string.
 //
+// `lines` is likewise a plain array pass-through of `t.status.data.lines`
+// (the itemized {id, description, amountCents, voided} entries Charge/
+// VoidCharge maintain), mirroring clinic-domain's `.hours.data.windows`
+// pass-through (lenses.go) — Cypher needs no `collect()` to project a field
+// that is already an array on the aspect. cmd/cafe-app renders it as the
+// itemized receipt breakdown, falling back to itemsMemo for a tab whose
+// .status predates the field (lines absent or []).
+//
 // A tab with totalCents=0 (opened and settled with nothing charged) never
 // violates either gap — no house-tab posting is needed for a zero-amount
 // visit.
@@ -268,13 +276,14 @@ WITH
   t.status.data.value AS status,
   t.status.data.totalCents AS totalCents,
   t.status.data.itemsMemo AS itemsMemo,
+  t.status.data.lines AS lines,
   t.status.data.openedAt AS openedAt,
   t.status.data.settledAt AS settledAt,
   (CASE WHEN t.status.data.value = 'open' THEN coalesce(cl, ol) ELSE cl END) AS l,
   count(tx.key) AS txCount
 WHERE l.key <> null
 WITH
-  entityKey, status, totalCents, itemsMemo, openedAt, settledAt, txCount,
+  entityKey, status, totalCents, itemsMemo, lines, openedAt, settledAt, txCount,
   l.key AS leaseAppKey,
   l.cafeLedgerAccount.data.accountKey AS accountKey
 RETURN
@@ -285,6 +294,7 @@ RETURN
   accountKey,
   totalCents,
   itemsMemo,
+  lines,
   status,
   openedAt,
   settledAt,

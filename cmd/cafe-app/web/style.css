@@ -181,6 +181,14 @@ button.danger:hover { background: #c94a3f; border-color: #c94a3f; }
 .ledger-entry.debit { color: var(--red); }
 .ledger-entry.credit { color: var(--green); }
 
+.items-list { list-style: none; margin: 0 0 12px; padding: 0; display: flex; flex-direction: column; gap: 4px; }
+.item-line { display: flex; align-items: center; gap: 8px; font-size: 13px; }
+.item-line .item-desc { flex: 1; }
+.item-line .item-amount { font-family: var(--mono); color: var(--text-dim); }
+.item-line.voided { text-decoration: line-through; color: var(--text-dim); }
+.item-line.voided .item-amount { text-decoration: line-through; }
+.item-line button { font-size: 11px; padding: 2px 8px; }
+
 .toast {
   position: fixed;
   bottom: 20px;

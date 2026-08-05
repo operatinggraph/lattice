@@ -209,6 +209,37 @@ function itemsMemoLine(memo) {
   return memo ? '<p class="meta">Items: ' + escapeHtml(memo) + "</p>" : "";
 }
 
+// chargeLinesBlock renders a tab's itemized .status.lines (cafe-domain's
+// tabStatus aspect — one {id, description, amountCents, voided} entry per
+// Charge, the structured twin of the flat itemsMemo string) as a priced
+// list, a voided line struck through and labeled rather than hidden. A tab
+// whose lines is empty or absent (predates the field, or nothing charged
+// yet) falls back to the flat itemsMemo line — the only place old and new
+// tabs still look the same. voidableTabKey, when given, adds a per-line
+// Void action (wired by the caller after insertion) — staff POS only, since
+// VoidCharge grants no self-service scope.
+function chargeLinesBlock(lines, memo, voidableTabKey) {
+  if (!lines || !lines.length) return itemsMemoLine(memo);
+  return (
+    '<ul class="items-list">' +
+    lines
+      .map(
+        (l) =>
+          '<li class="item-line' + (l.voided ? " voided" : "") + '">' +
+          '<span class="item-desc">' + escapeHtml(l.description) + "</span>" +
+          '<span class="item-amount">' + money(l.amountCents) + "</span>" +
+          (l.voided
+            ? '<span class="meta">(voided)</span>'
+            : voidableTabKey
+            ? '<button type="button" class="ghost" data-void-line="' + escapeHtml(l.id) + '">Void</button>'
+            : "") +
+          "</li>"
+      )
+      .join("") +
+    "</ul>"
+  );
+}
+
 // parseDollars turns a user-entered dollar string ("4.50") into integer
 // cents, or null when it isn't a positive amount.
 function parseDollars(s) {
@@ -459,6 +490,27 @@ async function renderPos() {
   }
   const items = (menu && menu.menu) || [];
   body.innerHTML = renderOpenTabCard(open, items);
+  body.querySelectorAll("[data-void-line]").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      const lineId = btn.dataset.voidLine;
+      btn.disabled = true;
+      try {
+        await opOrThrow(
+          {
+            operationType: "VoidCharge", class: "tab",
+            reads: [open.tabKey, open.tabKey + ".status"],
+            payload: { tabKey: open.tabKey, lineId },
+          },
+          "void the charge"
+        );
+        toast("Voided.", true);
+        setTimeout(renderPos, 700);
+      } catch (e) {
+        toast(e.message, false);
+        btn.disabled = false;
+      }
+    });
+  });
   const catalogForm = document.getElementById("pos-catalog-form");
   if (catalogForm) {
     catalogForm.addEventListener("submit", async (ev) => {
@@ -575,7 +627,7 @@ function renderOpenTabCard(tab, items) {
     "<h2>Open tab</h2>" +
     '<p class="amount">' + money(tab.totalCents) + "</p>" +
     '<p class="meta">Opened ' + (tab.openedAt || "?") + "</p>" +
-    itemsMemoLine(tab.itemsMemo) +
+    chargeLinesBlock(tab.lines, tab.itemsMemo, tab.tabKey) +
     (catalog.length
       ? '<form id="pos-catalog-form" class="field-row" style="margin-bottom:14px;">' +
         '<select id="pos-catalog-item">' +
@@ -592,8 +644,8 @@ function renderOpenTabCard(tab, items) {
     '<button id="charge-submit" type="submit">Add Charge</button>' +
     "</form>" +
     '<form id="void-form" class="field-row" style="margin-bottom:14px;">' +
-    '<input id="void-amount" type="number" step="0.01" min="0.01" placeholder="Void amount ($)" required />' +
-    '<button id="void-submit" type="submit" class="ghost">Void Charge</button>' +
+    '<input id="void-amount" type="number" step="0.01" min="0.01" placeholder="Free-amount correction ($)" required />' +
+    '<button id="void-submit" type="submit" class="ghost">Void by Amount</button>' +
     "</form>" +
     '<div class="panel-actions"><button id="settle-btn" class="danger">Settle Tab</button></div>' +
     "</div>"
@@ -709,7 +761,7 @@ function frontDeskCard(t, booking, lease, visit, bookerKey) {
     '<div class="who">' + escapeHtml(who) + "</div>" +
     '<div class="amount">' + money(t.totalCents) + "</div>" +
     '<div class="meta">Opened ' + (t.openedAt || "?") + "</div>" +
-    itemsMemoLine(t.itemsMemo) +
+    chargeLinesBlock(t.lines, t.itemsMemo, null) +
     classBadge +
     leaseLine +
     visitBadge +
@@ -840,7 +892,7 @@ async function renderResident() {
     parts.push(
       '<div class="panel"><h2>Open tab</h2><p class="amount">' + money(open.totalCents) +
       '</p><p class="meta">Opened ' + (open.openedAt || "?") + " — not yet settled</p>" +
-      itemsMemoLine(open.itemsMemo) + "</div>" +
+      chargeLinesBlock(open.lines, open.itemsMemo, null) + "</div>" +
       (selfMode ? '<div class="panel-actions" style="margin-top:-8px;"><button id="resident-settle-btn" class="danger">Settle My Tab</button></div>' : "")
     );
     if (selfMode) {
@@ -874,7 +926,7 @@ async function renderResident() {
     parts.push(
       '<div class="panel"><h2>Pending posting</h2><p class="amount">' + money(pendingSettled.totalCents) +
       '</p><p class="meta">Settled ' + (pendingSettled.settledAt || "?") + " — posting to the ledger shortly</p>" +
-      itemsMemoLine(pendingSettled.itemsMemo) + "</div>"
+      chargeLinesBlock(pendingSettled.lines, pendingSettled.itemsMemo, null) + "</div>"
     );
   }
   const rows = ledger.transactions || [];

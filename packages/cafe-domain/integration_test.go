@@ -414,6 +414,30 @@ func TestCharge_AccumulatesTotalCents(t *testing.T) {
 	if got, want := statusData["itemsMemo"].(string), "Off-menu charge, Off-menu charge"; got != want {
 		t.Fatalf("status.itemsMemo = %q, want %q (default off-menu line per Charge, comma-joined)", got, want)
 	}
+	lines, _ := statusData["lines"].([]any)
+	if len(lines) != 2 {
+		t.Fatalf("status.lines has %d entries, want 2 (one per Charge)", len(lines))
+	}
+	first, _ := lines[0].(map[string]any)
+	if got, want := first["id"].(string), "line-1"; got != want {
+		t.Fatalf("lines[0].id = %q, want %q", got, want)
+	}
+	if got, want := first["description"].(string), "Off-menu charge"; got != want {
+		t.Fatalf("lines[0].description = %q, want %q", got, want)
+	}
+	if got, want := first["amountCents"].(float64), float64(450); got != want {
+		t.Fatalf("lines[0].amountCents = %v, want %v", got, want)
+	}
+	if got := first["voided"].(bool); got {
+		t.Fatalf("lines[0].voided = %v, want false (never voided)", got)
+	}
+	second, _ := lines[1].(map[string]any)
+	if got, want := second["id"].(string), "line-2"; got != want {
+		t.Fatalf("lines[1].id = %q, want %q", got, want)
+	}
+	if got, want := second["amountCents"].(float64), float64(300); got != want {
+		t.Fatalf("lines[1].amountCents = %v, want %v", got, want)
+	}
 }
 
 func TestCharge_RejectsNonPositiveAmount(t *testing.T) {
@@ -526,6 +550,160 @@ func TestVoidCharge_ClampsAtZero(t *testing.T) {
 	}
 	if got, want := statusData["itemsMemo"].(string), "Off-menu charge, Void correction"; got != want {
 		t.Fatalf("status.itemsMemo = %q, want %q (a clamped void still actually reduced the total)", got, want)
+	}
+}
+
+// TestVoidCharge_ByLineId_DerivesAmountAndMarksVoided proves the itemized
+// void path: the caller names only lineId (never amountCents), the void
+// amount is derived from the line itself (the same "derive, don't trust"
+// posture Charge's own menuItemKey branch uses), and the target line is
+// marked voided:true in place rather than removed — a second, un-targeted
+// line is untouched.
+func TestVoidCharge_ByLineId_DerivesAmountAndMarksVoided(t *testing.T) {
+	ctx, conn := setupDomainEnv(t)
+	cp, cons := newDomainPipeline(t, ctx, conn, "voidline")
+
+	leaseKey := seedLease(t, ctx, conn, "BBCAFEDMNVLNDLEASEHJ")
+	tabKey := openTab(t, ctx, conn, cp, cons, "cdopentabvln00000001", leaseKey)
+
+	charge := func(reqLabel string, amountCents int) {
+		env := &processor.OperationEnvelope{
+			RequestID:     testutil.GenReqID(reqLabel),
+			Lane:          processor.LaneDefault,
+			OperationType: "Charge",
+			Actor:         domainActorKey,
+			SubmittedAt:   "2026-07-22T12:05:00Z",
+			Class:         "tab",
+			Payload:       json.RawMessage(`{"tabKey":"` + tabKey + `","amountCents":` + strconv.Itoa(amountCents) + `}`),
+			ContextHint:   &processor.ContextHint{Reads: []string{tabKey, tabKey + ".status"}},
+		}
+		testutil.PublishOp(t, conn, env)
+		testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
+	}
+	charge("cdvlnchargeone000001", 450)
+	charge("cdvlnchargetwo000001", 300)
+
+	voidEnv := &processor.OperationEnvelope{
+		RequestID:     testutil.GenReqID("cdvoidlineone0000001"),
+		Lane:          processor.LaneDefault,
+		OperationType: "VoidCharge",
+		Actor:         domainActorKey,
+		SubmittedAt:   "2026-07-22T12:06:00Z",
+		Class:         "tab",
+		Payload:       json.RawMessage(`{"tabKey":"` + tabKey + `","lineId":"line-1"}`),
+		ContextHint:   &processor.ContextHint{Reads: []string{tabKey, tabKey + ".status"}},
+	}
+	testutil.PublishOp(t, conn, voidEnv)
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
+
+	statusDoc := readDoc(t, ctx, conn, tabKey+".status")
+	statusData, _ := statusDoc["data"].(map[string]any)
+	if got, want := statusData["totalCents"].(float64), float64(300); got != want {
+		t.Fatalf("status.totalCents = %v, want %v (750-450, amount derived from line-1, not caller-supplied)", got, want)
+	}
+	if got, want := statusData["itemsMemo"].(string), "Off-menu charge, Off-menu charge, Void correction"; got != want {
+		t.Fatalf("status.itemsMemo = %q, want %q", got, want)
+	}
+	lines, _ := statusData["lines"].([]any)
+	if len(lines) != 2 {
+		t.Fatalf("status.lines has %d entries, want 2 (voided in place, not removed)", len(lines))
+	}
+	voided, _ := lines[0].(map[string]any)
+	if got := voided["voided"].(bool); !got {
+		t.Fatalf("lines[0].voided = %v, want true", got)
+	}
+	untouched, _ := lines[1].(map[string]any)
+	if got := untouched["voided"].(bool); got {
+		t.Fatalf("lines[1].voided = %v, want false (only line-1 was targeted)", got)
+	}
+}
+
+// TestVoidCharge_ByLineId_RejectsUnknownLine proves a lineId naming no live
+// entry on the tab (never charged, or already voided) is rejected rather
+// than silently voiding nothing or falling back to the legacy amount path.
+func TestVoidCharge_ByLineId_RejectsUnknownLine(t *testing.T) {
+	ctx, conn := setupDomainEnv(t)
+	cp, cons := newDomainPipeline(t, ctx, conn, "voidlineunknown")
+
+	leaseKey := seedLease(t, ctx, conn, "BBCAFEDMNVLUKLEASEHJ")
+	tabKey := openTab(t, ctx, conn, cp, cons, "cdopentabvlu00000001", leaseKey)
+
+	chargeEnv := &processor.OperationEnvelope{
+		RequestID:     testutil.GenReqID("cdvlucharge0000000001"),
+		Lane:          processor.LaneDefault,
+		OperationType: "Charge",
+		Actor:         domainActorKey,
+		SubmittedAt:   "2026-07-22T12:05:00Z",
+		Class:         "tab",
+		Payload:       json.RawMessage(`{"tabKey":"` + tabKey + `","amountCents":450}`),
+		ContextHint:   &processor.ContextHint{Reads: []string{tabKey, tabKey + ".status"}},
+	}
+	testutil.PublishOp(t, conn, chargeEnv)
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
+
+	voidEnv := &processor.OperationEnvelope{
+		RequestID:     testutil.GenReqID("cdvoidlineunk0000001"),
+		Lane:          processor.LaneDefault,
+		OperationType: "VoidCharge",
+		Actor:         domainActorKey,
+		SubmittedAt:   "2026-07-22T12:06:00Z",
+		Class:         "tab",
+		Payload:       json.RawMessage(`{"tabKey":"` + tabKey + `","lineId":"line-9"}`),
+		ContextHint:   &processor.ContextHint{Reads: []string{tabKey, tabKey + ".status"}},
+	}
+	testutil.PublishOp(t, conn, voidEnv)
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeRejected)
+}
+
+// TestVoidCharge_LegacyAmountOnly_LeavesLinesUntouched proves the
+// no-lineId form (a correction predating itemized lines, or an off-menu
+// adjustment with no line to reference) still works exactly as before and
+// never writes to .status.lines.
+func TestVoidCharge_LegacyAmountOnly_LeavesLinesUntouched(t *testing.T) {
+	ctx, conn := setupDomainEnv(t)
+	cp, cons := newDomainPipeline(t, ctx, conn, "voidlegacy")
+
+	leaseKey := seedLease(t, ctx, conn, "BBCAFEDMNVLGYLEASEHJ")
+	tabKey := openTab(t, ctx, conn, cp, cons, "cdopentabvlg00000001", leaseKey)
+
+	chargeEnv := &processor.OperationEnvelope{
+		RequestID:     testutil.GenReqID("cdvlgcharge0000000001"),
+		Lane:          processor.LaneDefault,
+		OperationType: "Charge",
+		Actor:         domainActorKey,
+		SubmittedAt:   "2026-07-22T12:05:00Z",
+		Class:         "tab",
+		Payload:       json.RawMessage(`{"tabKey":"` + tabKey + `","amountCents":850}`),
+		ContextHint:   &processor.ContextHint{Reads: []string{tabKey, tabKey + ".status"}},
+	}
+	testutil.PublishOp(t, conn, chargeEnv)
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
+
+	voidEnv := &processor.OperationEnvelope{
+		RequestID:     testutil.GenReqID("cdvoidlegacy00000001"),
+		Lane:          processor.LaneDefault,
+		OperationType: "VoidCharge",
+		Actor:         domainActorKey,
+		SubmittedAt:   "2026-07-22T12:06:00Z",
+		Class:         "tab",
+		Payload:       json.RawMessage(`{"tabKey":"` + tabKey + `","amountCents":350}`),
+		ContextHint:   &processor.ContextHint{Reads: []string{tabKey, tabKey + ".status"}},
+	}
+	testutil.PublishOp(t, conn, voidEnv)
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
+
+	statusDoc := readDoc(t, ctx, conn, tabKey+".status")
+	statusData, _ := statusDoc["data"].(map[string]any)
+	if got, want := statusData["totalCents"].(float64), float64(500); got != want {
+		t.Fatalf("status.totalCents = %v, want %v (850-350)", got, want)
+	}
+	lines, _ := statusData["lines"].([]any)
+	if len(lines) != 1 {
+		t.Fatalf("status.lines has %d entries, want 1 (the original Charge only — legacy void touches no line)", len(lines))
+	}
+	line, _ := lines[0].(map[string]any)
+	if got := line["voided"].(bool); got {
+		t.Fatalf("lines[0].voided = %v, want false (a legacy amount-only void never marks a line)", got)
 	}
 }
 
