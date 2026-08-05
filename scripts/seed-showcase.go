@@ -1615,6 +1615,20 @@ func seedLandlordWorld(ctx context.Context, conn *substrate.Conn, adminKey, cons
 
 	landlordKey := ensureLandlord(ctx, conn, adminKey, consumerRoleKey)
 
+	// Unit 1 and Unit 2 are leased straight through seedResidentTenancies with
+	// no `manages` link of their own — every landlord/staff read model walks
+	// unit <- manages <- identity (e.g. landlordUnitsReadSpec), so an
+	// unmanaged unit's signed, rent-paying resident silently drops out of
+	// every one of them. The landlord persona picks them up into the same
+	// portfolio Unit 4 already lives in, mirroring
+	// seedStaffWorklistApplication's Unit 3 convention (staff as interim
+	// manager) one level up (an actual landlord persona here, not staff).
+	for _, uk := range []string{unit1Key, unit2Key} {
+		if !alive(ctx, conn, linkKey(landlordKey, "manages", uk)) {
+			assignUnitOwner(ctx, conn, adminKey, landlordKey, uk)
+		}
+	}
+
 	if !alive(ctx, conn, unit4Key+".address") {
 		submitOp(ctx, conn, adminKey, "SetUnitAddress", "loftspaceListing",
 			map[string]any{"unit": unit4Key, "line1": "40 Riverside Walk", "city": "Riverside",
@@ -1680,7 +1694,7 @@ func ensureLandlord(ctx context.Context, conn *substrate.Conn, adminKey, consume
 		return seedLandlord(ctx, conn, adminKey, consumerRoleKey)
 	}
 	if !alive(ctx, conn, linkKey(existing, "manages", unit4Key)) {
-		assignUnitOwner(ctx, conn, adminKey, existing)
+		assignUnitOwner(ctx, conn, adminKey, existing, unit4Key)
 		fmt.Printf("==> healed:          re-wired %s manages Unit 4 (link was absent or tombstoned)\n", existing)
 	}
 	return existing
@@ -1705,26 +1719,26 @@ func seedLandlord(ctx context.Context, conn *substrate.Conn, adminKey, consumerR
 	submitOp(ctx, conn, adminKey, "AssignRole", "",
 		map[string]any{"actorKey": landlordKey, "roleKey": consumerRoleKey},
 		&processor.ContextHint{Reads: []string{landlordKey, consumerRoleKey}})
-	assignUnitOwner(ctx, conn, adminKey, landlordKey)
+	assignUnitOwner(ctx, conn, adminKey, landlordKey, unit4Key)
 	submitOp(ctx, conn, adminKey, "UpdateIdentityState", "identity",
 		map[string]any{"identityKey": landlordKey, "newState": "claimed"},
 		&processor.ContextHint{Reads: []string{landlordKey, landlordKey + ".state"}})
 	return landlordKey
 }
 
-// assignUnitOwner submits the Unit 4 management grant under the operator
-// identity — the only role AssignUnitOwner is granted to, deliberately, since it
-// is the op that CONFERS management and a self-scoped grant on it would let any
+// assignUnitOwner submits a management grant under the operator identity —
+// the only role AssignUnitOwner is granted to, deliberately, since it is the
+// op that CONFERS management and a self-scoped grant on it would let any
 // signed-in identity make itself a landlord.
 //
 // The management link rides optionalReads because the script reads it on demand
 // to tell create from revive, and it legitimately does not exist on a fresh pair.
-func assignUnitOwner(ctx context.Context, conn *substrate.Conn, adminKey, landlordKey string) {
+func assignUnitOwner(ctx context.Context, conn *substrate.Conn, adminKey, landlordKey, unitKey string) {
 	submitOp(ctx, conn, adminKey, "AssignUnitOwner", "loftspaceOwnership",
-		map[string]any{"landlord": landlordKey, "unit": unit4Key},
+		map[string]any{"landlord": landlordKey, "unit": unitKey},
 		&processor.ContextHint{
-			Reads:         []string{landlordKey, unit4Key},
-			OptionalReads: []string{linkKey(landlordKey, "manages", unit4Key)},
+			Reads:         []string{landlordKey, unitKey},
+			OptionalReads: []string{linkKey(landlordKey, "manages", unitKey)},
 		})
 }
 

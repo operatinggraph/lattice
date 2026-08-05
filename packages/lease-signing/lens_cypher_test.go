@@ -574,6 +574,64 @@ func TestLeaseApplicationComplete_ListingLeasedGap_RequiresApplicantReadinessEve
 	}
 }
 
+// TestLeaseApplicationComplete_ManagerGap_OpensWhenApprovedAndUnmanaged: a
+// landlord-APPROVED application whose unit carries NO `manages` link opens
+// missing_manager and stays violating — the state a real DecideLeaseApplication
+// approve can reach on a genuinely unmanaged unit (the op's operator/frontOfHouse
+// standing grant never checks for a manager), same shape the seed-showcase bug
+// (Riverside Unit 1) hit. Re-wiring a `manages` link closes the gap on
+// reprojection (the unit is an appliesToUnit neighbor) with no other write.
+func TestLeaseApplicationComplete_ManagerGap_OpensWhenApprovedAndUnmanaged(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := approvedAppFixture(t)
+	f.landlordDecision(t, "app", "approved")
+	f.vtx(t, "unit1", "unit")
+	f.aspect(t, "unit1", "listing", "listing", map[string]any{"rentAmount": 2400, "status": "leased"})
+	f.edge(t, "appliesToUnit", "app", "unit1")
+	// Deliberately NO manages link.
+
+	rows := f.project(t, "app")
+	require.Len(t, rows, 1)
+	v := rows[0].Values
+	require.Equal(t, true, v["landlordApproved"])
+	require.Equal(t, true, v["missing_manager"], "approved + unmanaged unit → the gap opens")
+	require.Equal(t, true, v["violating"], "an unmanaged unit keeps the row violating (flagged, not silently dropped)")
+
+	// Re-wire the manager — no other write — and the gap closes on reprojection.
+	f.vtx(t, "landlord1", "identity")
+	f.edge(t, "manages", "landlord1", "unit1")
+
+	rows = f.project(t, "app")
+	require.Len(t, rows, 1)
+	v = rows[0].Values
+	require.Equal(t, false, v["missing_manager"], "a manages link lands → gap closes")
+	require.Equal(t, false, v["violating"], "manager assigned + unit leased → converged")
+}
+
+// TestLeaseApplicationComplete_ManagerGap_NotOpenBeforeApproval: an unmanaged
+// unit does NOT open missing_manager before the landlord decides — the gap is
+// gated on landlordDecision='approved' like missing_listingLeased, not on the
+// unit's raw ownership state alone (an applicant browsing a not-yet-decided
+// unmanaged listing is not itself a flaggable problem).
+func TestLeaseApplicationComplete_ManagerGap_NotOpenBeforeApproval(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := approvedAppFixture(t)
+	f.vtx(t, "unit1", "unit")
+	f.aspect(t, "unit1", "listing", "listing", map[string]any{"rentAmount": 2400, "status": "available"})
+	f.edge(t, "appliesToUnit", "app", "unit1")
+	// No decision yet, and no manages link either.
+
+	rows := f.project(t, "app")
+	require.Len(t, rows, 1)
+	v := rows[0].Values
+	require.Nil(t, v["landlordDecision"])
+	require.Equal(t, false, v["missing_manager"], "no landlord decision yet → the manager gap is not gated open")
+}
+
 // TestLeaseApplicationComplete_ListingLeasedGap_ClosedWhenLeased: once a
 // landlord-approved application's unit is leased, missing_listingLeased is false and
 // the row CONVERGES (violating false) — applicantApproved + landlordApproved stay
@@ -587,6 +645,8 @@ func TestLeaseApplicationComplete_ListingLeasedGap_ClosedWhenLeased(t *testing.T
 	f.vtx(t, "unit1", "unit")
 	f.aspect(t, "unit1", "listing", "listing", map[string]any{"rentAmount": 2400, "status": "leased"})
 	f.edge(t, "appliesToUnit", "app", "unit1")
+	f.vtx(t, "landlord1", "identity")
+	f.edge(t, "manages", "landlord1", "unit1")
 
 	rows := f.project(t, "app")
 	require.Len(t, rows, 1)
@@ -596,6 +656,7 @@ func TestLeaseApplicationComplete_ListingLeasedGap_ClosedWhenLeased(t *testing.T
 	require.Equal(t, false, v["missing_decision"])
 	require.Equal(t, "leased", v["unitStatus"])
 	require.Equal(t, false, v["missing_listingLeased"], "unit leased → listing gap closed")
+	require.Equal(t, false, v["missing_manager"], "the unit carries a manages link → no gap")
 	require.Equal(t, false, v["violating"], "landlord-approved AND unit leased → converged")
 }
 
@@ -682,6 +743,8 @@ func TestLeaseApplicationComplete_ListingLeasedGap_NoListingNoGap(t *testing.T) 
 	f.landlordDecision(t, "app", "approved")
 	f.vtx(t, "unit1", "unit") // a unit with NO .listing aspect
 	f.edge(t, "appliesToUnit", "app", "unit1")
+	f.vtx(t, "landlord1", "identity")
+	f.edge(t, "manages", "landlord1", "unit1")
 
 	rows := f.project(t, "app")
 	require.Len(t, rows, 1)
@@ -691,6 +754,7 @@ func TestLeaseApplicationComplete_ListingLeasedGap_NoListingNoGap(t *testing.T) 
 	require.Equal(t, false, v["missing_decision"])
 	require.Nil(t, v["unitStatus"], "no listing aspect → unitStatus null")
 	require.Equal(t, false, v["missing_listingLeased"], "no listing → no transition target → gap stays closed (no thrash)")
+	require.Equal(t, false, v["missing_manager"], "the unit carries a manages link → no gap")
 	require.Equal(t, false, v["violating"], "landlord-approved + nothing to lease → converged")
 }
 

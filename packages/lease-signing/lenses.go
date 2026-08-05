@@ -48,7 +48,7 @@ func Lenses() []pkgmgr.LensSpec {
 			Output: &pkgmgr.OutputDescriptorSpec{
 				AnchorType:       "leaseapp",
 				OutputKeyPattern: "leaseApplicationComplete.{actorSuffix}",
-				BodyColumns:      []string{"violating", "missing_onboarding", "missing_bgcheck", "missing_payment", "missing_signature", "missing_listingLeased", "missing_decision", "missing_leaseDoc", "missing_leaseDocAttach", "applicantApproved", "landlordDecision", "landlordApproved", "landlordDeclined", "declineReason", "applicant", "entityKey", "freshUntil", "signedAt", "inflight_bgcheck", "inflight_payment", "inflight_docGen", "inflight_onboarding", "inflight_signature", "declined_bgcheck", "declined_payment", "declined_docGen", "declined", "maxretries_bgcheck", "maxretries_payment", "unitKey", "unitAddress", "unitCity", "unitRegion", "unitRent", "unitCurrency", "unitBedrooms", "unitBathrooms", "unitLeaseTermMonths", "unitAvailableFrom", "unitStatus", "termsMoveInDate", "termsLeaseTermMonths", "termsRequestedRent", "profileSubmitted", "incomeToRentMet", "employmentVerified", "referenceCount", "hasCoApplicant", "hasGuarantor", "guarantorIncomeToRentMet", "docStoreName", "docFilename", "docContentType", "docDigest", "docSize", "leaseDocAttached"},
+				BodyColumns:      []string{"violating", "missing_onboarding", "missing_bgcheck", "missing_payment", "missing_signature", "missing_listingLeased", "missing_decision", "missing_manager", "missing_leaseDoc", "missing_leaseDocAttach", "applicantApproved", "landlordDecision", "landlordApproved", "landlordDeclined", "declineReason", "applicant", "entityKey", "freshUntil", "signedAt", "inflight_bgcheck", "inflight_payment", "inflight_docGen", "inflight_onboarding", "inflight_signature", "declined_bgcheck", "declined_payment", "declined_docGen", "declined", "maxretries_bgcheck", "maxretries_payment", "unitKey", "unitAddress", "unitCity", "unitRegion", "unitRent", "unitCurrency", "unitBedrooms", "unitBathrooms", "unitLeaseTermMonths", "unitAvailableFrom", "unitStatus", "termsMoveInDate", "termsLeaseTermMonths", "termsRequestedRent", "profileSubmitted", "incomeToRentMet", "employmentVerified", "referenceCount", "hasCoApplicant", "hasGuarantor", "guarantorIncomeToRentMet", "docStoreName", "docFilename", "docContentType", "docDigest", "docSize", "leaseDocAttached"},
 				EmptyBehavior:    "delete",
 				KeyColumn:        "entityId",
 				Freshness:        "auto",
@@ -620,6 +620,7 @@ var leaseApplicationCompleteSpec = fmt.Sprintf(`
 MATCH (app:leaseapp {key: $actorKey})
 OPTIONAL MATCH (app)-[:applicationFor]->(id:identity)
 OPTIONAL MATCH (app)-[:appliesToUnit]->(u:unit)
+OPTIONAL MATCH (u)<-[:manages]-(mgr:identity)
 OPTIONAL MATCH (app)<-[:providedTo]-(docInst:service)
 OPTIONAL MATCH (app)<-[:signedLease]-(leaseDocObj:object)
 OPTIONAL MATCH (app)<-[:scopedTo]-(sigTask:task)
@@ -672,6 +673,7 @@ WITH
   count(DISTINCT CASE WHEN sigOp.data.operationType = 'SignLease' THEN sigTask.key ELSE null END) AS sigTaskOpen,
   count(DISTINCT CASE WHEN onbOp.data.operationType = 'RecordIdentityPII' THEN onbTask.key ELSE null END) AS onbTaskOpen,
   count(DISTINCT CASE WHEN leaseDocObj.key <> null THEN leaseDocObj.key ELSE null END) AS leaseDocAttachedCount,
+  count(DISTINCT mgr.key) AS managerCount,
   max(CASE WHEN inst.class = 'service.backgroundCheck.instance' AND inst.outcome.data.status = 'completed' AND inst.outcome.data.validUntil > $now THEN inst.outcome.data.validUntil ELSE null END) AS freshUntil
 RETURN
   entityKey AS actorKey,
@@ -728,9 +730,10 @@ RETURN
   ((ssnVal <> null) AND (freshBgComplete > 0) AND (payComplete > 0) AND (signedAt <> null)) AS applicantApproved,
   ((ssnVal <> null) AND (freshBgComplete > 0) AND (payComplete > 0) AND (signedAt <> null) AND (landlordDecision = null)) AS missing_decision,
   ((unitKey <> null) AND (ssnVal <> null) AND (freshBgComplete > 0) AND (payComplete > 0) AND (signedAt <> null) AND (landlordDecision = 'approved') AND (unitStatus <> null) AND (unitStatus <> 'leased')) AS missing_listingLeased,
+  ((unitKey <> null) AND (landlordDecision = 'approved') AND (managerCount = 0)) AS missing_manager,
   %d                     AS maxretries_bgcheck,
   %d                     AS maxretries_payment,
-  ((ssnVal = null) OR (freshBgComplete = 0) OR (payComplete = 0) OR (signedAt = null) OR ((ssnVal <> null) AND (freshBgComplete > 0) AND (payComplete > 0) AND (signedAt <> null) AND (landlordDecision = null)) OR ((unitKey <> null) AND (ssnVal <> null) AND (freshBgComplete > 0) AND (payComplete > 0) AND (signedAt <> null) AND (landlordDecision = 'approved') AND (unitStatus <> null) AND (unitStatus <> 'leased')) OR ((signedAt <> null) AND (docGenComplete = 0) AND (docGenInflight = 0) AND (docGenFailed = 0)) OR ((docGenComplete > 0) AND (leaseDocAttachedCount = 0))) AS violating
+  ((ssnVal = null) OR (freshBgComplete = 0) OR (payComplete = 0) OR (signedAt = null) OR ((ssnVal <> null) AND (freshBgComplete > 0) AND (payComplete > 0) AND (signedAt <> null) AND (landlordDecision = null)) OR ((unitKey <> null) AND (ssnVal <> null) AND (freshBgComplete > 0) AND (payComplete > 0) AND (signedAt <> null) AND (landlordDecision = 'approved') AND (unitStatus <> null) AND (unitStatus <> 'leased')) OR ((signedAt <> null) AND (docGenComplete = 0) AND (docGenInflight = 0) AND (docGenFailed = 0)) OR ((docGenComplete > 0) AND (leaseDocAttachedCount = 0)) OR ((unitKey <> null) AND (landlordDecision = 'approved') AND (managerCount = 0))) AS violating
 `, readinessOptionalMatch, readinessWithItems, maxBgcheckRetries, maxPaymentRetries)
 
 // leaseApplicationsReadSpec is the protected Postgres read model's cypher (D1.3

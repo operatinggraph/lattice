@@ -28,6 +28,19 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 //     reprojects this anchor). A qualified-but-undecided application sits in the
 //     lens's missing_decision state (violating, but NO playbook entry — nothing
 //     dispatches); the landlord decision is the human gate the flip waits behind.
+//   - missing_manager (violating, but NO playbook entry, same missing_decision
+//     shape) opens once a landlord APPROVES an application whose unit carries no
+//     live `manages` link (loftspace-domain's landlordUnitsRead/
+//     landlordLeaseApplicationsRead both walk unit <- manages <- identity, so an
+//     unmanaged unit's resident silently drops out of every landlord/staff view —
+//     DecideLeaseApplication's operator/frontOfHouse standing grant never checks
+//     for a manager, so this is reachable outside seed data). No auto-dispatch:
+//     WHO becomes the interim manager is a business call AssignUnitOwner alone
+//     can't make (it CONFERS management, not infers it) — this flag makes the gap
+//     visible in the weaver-targets bucket instead of silently vanishing, the fix
+//     is a human running AssignUnitOwner. Closes the moment any `manages` link
+//     lands (the unit is an appliesToUnit neighbor, so the link reprojects this
+//     anchor).
 //   - missing_leaseDoc → triggerLoom(leaseDocument) over the application itself
 //     (row.entityKey — the pattern's subjectType is leaseapp). Opens on signing
 //     (signature present, no completed docGen outcome, none in flight, none
