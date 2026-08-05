@@ -4,8 +4,12 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 
 // OpMetas declares descriptor-vocabulary metadata (edge-showcase-app-design.md
 // §3.3, edge-manifest Fire 1) for every cafe-domain op a person may trigger —
-// the whole tab lifecycle: OpenTab, Charge, VoidCharge, Settle — mirroring
-// clinic-domain's and wellness-domain's adoption.
+// the tab lifecycle (OpenTab, Charge, VoidCharge, Settle) plus the menu
+// catalog (CreateMenuItem, RetireMenuItem) — mirroring clinic-domain's and
+// wellness-domain's adoption. CreateMenuItem/RetireMenuItem are staff-standing
+// like VoidCharge (no self-scope grant), so each carries one AuthContext
+// "standing" descriptor and no ownership probe — workplace confinement
+// (ddls.go) is their only guard.
 //
 // Three of the four are consumer-invocable (scope=self); VoidCharge is
 // staff-standing. Charge is BOTH: permissions.go grants it scope=any to
@@ -194,6 +198,54 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 					"lnk.leaseapp.{me.leaseapp:id}.applicationFor.identity.{actor:id}",
 					"lnk.tab.{payload.tabKey:id}.chargedTo.leaseapp.{me.leaseapp:id}",
 				},
+			},
+		},
+		{
+			OperationType: "CreateMenuItem",
+			Presentation: &pkgmgr.OpPresentationSpec{
+				Title:       "Add a catalog item",
+				Description: "Add an item to the self-order menu catalog.",
+				Icon:        "cafe",
+				Tone:        "primary",
+				SubmitLabel: "Add item",
+			},
+			InputSchema: `{"type":"object","properties":` +
+				`{"name":{"type":"string","description":"Menu item display name."},` +
+				`"priceCents":{"type":"integer","minimum":1,"description":"Price in whole cents; must be positive."},` +
+				`"locationKey":{"type":"string","description":"vtx.<locationType>.<NanoID> of the place that serves this item — must be a location you worksAt (or an ancestor of it)."}},` +
+				`"required":["name","priceCents","locationKey"]}`,
+			FieldDescriptions: map[string]string{
+				"name":        "The item's display name.",
+				"priceCents":  "The item's price, entered in dollars — e.g. 4.50.",
+				"locationKey": "The place that serves this item. Confined to a location you worksAt (or an ancestor of it) unless you are the operator.",
+			},
+			Dispatch: &pkgmgr.OpDispatchSpec{
+				Class:       "menuitem",
+				AuthContext: "standing",
+				Reads:       []string{"{payload.locationKey}"},
+			},
+		},
+		{
+			OperationType: "RetireMenuItem",
+			Presentation: &pkgmgr.OpPresentationSpec{
+				Title:       "Retire a catalog item",
+				Description: "Remove an item from the self-order menu catalog.",
+				Icon:        "cafe",
+				Tone:        "destructive",
+				SubmitLabel: "Retire item",
+			},
+			InputSchema: `{"type":"object","properties":` +
+				`{"menuItemKey":{"type":"string","description":"vtx.menuitem.<NanoID> of the item to retire — auto-filled from the item being viewed."}},` +
+				`"required":["menuItemKey"]}`,
+			FieldDescriptions: map[string]string{
+				"menuItemKey": "The catalog item being retired — auto-filled by the client from the item being viewed (dispatch.targetField), not user-entered.",
+			},
+			Dispatch: &pkgmgr.OpDispatchSpec{
+				Class:       "menuitem",
+				AuthContext: "standing",
+				TargetField: "menuItemKey",
+				TargetType:  "menuitem",
+				Reads:       []string{"{payload.menuItemKey}"},
 			},
 		},
 	}

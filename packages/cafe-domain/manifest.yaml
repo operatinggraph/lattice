@@ -114,3 +114,5 @@ declares:
     - operationType: Charge
     - operationType: VoidCharge
     - operationType: Settle
+    - operationType: CreateMenuItem
+    - operationType: RetireMenuItem

@@ -46,7 +46,7 @@ func TestPackage_StructurePins(t *testing.T) {
 	if got, want := len(Package.Permissions), 10; got != want {
 		t.Errorf("Permissions: got %d, want %d", got, want)
 	}
-	if got, want := len(Package.OpMetas), 4; got != want {
+	if got, want := len(Package.OpMetas), 6; got != want {
 		t.Errorf("OpMetas: got %d, want %d", got, want)
 	}
 	if got, want := len(Package.Roles), 0; got != want {
