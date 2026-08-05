@@ -41,6 +41,10 @@ the row is `🚧 blocked-on:` it (a missing *lens* is package work, built here).
 | **My Classes buries the member's next class under weeks of history** | `renderMyClasses` renders the server's ascending list flat (`wellness-app/web/app.js:756`), so five already-past classes lead and the one upcoming class sorts last; clinic-app already sections Upcoming/Past (`clinic-app/web/app.js:2179`). | Wellness | FE | ★★ | S | ✅ shipped `b5b30940` · Upcoming/Past split, mirrors clinic-app's My Appointments |
 | **A studio can never be retired** | `TombstoneStudio` ships (wellness-domain `ddls.go:98`, `permissions.go:90`) but reaches no UI, so the staff Studios tab and the member's Schedule filter both offer 11 studios — seven pre-pin "Classic Demo Studio" duplicates plus three agent-verify leftovers, none reapable. | Wellness | FE + pkg | ★★ | S | ✅ shipped `69851ea5` · Retire button wired to TombstoneStudio, mirrors cafe-app's RetireMenuItem |
 | **A member sees a balance nobody can settle** | My Classes renders a balance panel, but `CreditAccount` stays operator-only by design (`wellness-ledger/frontdesk_grant_test.go:16`) and reaches no UI, so neither the member nor the front desk can record a payment — café ships the counterpart (`CreditCafeAccount`, `cafe-app/web/app.js:829`). | Wellness | FE + pkg | ★★ | M | 📋 ready |
+| **The "one bill" is really a two-bill** | `one-bill` declares only `oneBillRentEntries` + `oneBillCafeEntries` (`lenses.go:27,35`), so a lease statement carries rent + café and nothing else — 31 live `clinictransaction`s and 5 `wellnesstransaction`s reach no statement at all, though both joins exist (`clinicaccount-[heldFor]->patient-[identifiedBy]->identity<-[applicationFor]-leaseapp`; wellness anchors `heldFor` identity directly). | Cross-vertical | pkg | ★★ | M | 📋 ready |
+| **The café's Manage Menu grid shows every property's catalog** | `computeMenu`'s nil-covering branch (`cmd/cafe-app/menu.go:43`) leaves the staff grid unconfined while `RetireMenuItem` is workplace-confined and `/api/leases` is `staffCoveredLeases`-confined — a staffer who `worksAt` Riverside alone reads all 14 live items, 12 served at units in other buildings and un-retirable by him. | Café | pkg + FE | ★★ | S | 📋 ready |
+| **The front-desk card shows a resident's LAST upcoming visit, not their next** | `bookingsByLease` / `visitsByLease` are last-write-wins maps (`cafe-app/web/app.js:626,635`) over a multi-row feed with no ordering, and `frontDeskCard` renders one 🩺/🧘 badge — a lease carrying two visits the same day (11:00, 17:00 live) reads 17:00 at the desk. | Café | FE | ★★ | S | 📋 ready |
+| **A tab opened before `staleAt` shipped can never auto-settle** | `staleAt` is precomputed at OpenTab write time (`cafe-domain/ddls.go:942`), so `cafeStaleTabSettlement`'s `missing_settle` cannot see a tab whose `.status` carries no `staleAt` at all — 11 such tabs are open live (oldest 2026-07-18), each still holding its lease's `cafeOpenTab` guard, and nothing reports or backfills them. | Café | pkg | ★ | S | 📋 ready · the convergence itself is verified working (two tabs auto-settled at openedAt+24h) |
 | **Cancelling a priced class never refunds it** | `wellnessClassPriceSettlement` charges unconditionally at booking (`wellness-ledger/lenses.go:166`) and no convergence credits it back on `CancelBooking`, so a member who cancels a week out keeps the debit — which the row above leaves unpayable. | Wellness | pkg | ★★ | S→M | 📋 ready · gotcha: `CancelBooking` tombstones the booking — invisible to any Cypher MATCH after; mirroring `noShowSettlementSpec` won't work, needs a pre-tombstone marker design |
 
 **Explicitly descoped (ambitious-PO pass, 2026-07-09):** structured diagnosis/procedure coding (ICD/CPT),
@@ -61,10 +65,9 @@ dated run-logs live in git history. Rotate LoftSpace ↔ Clinic ↔ Café ↔ We
 **Wellness joined** 2026-07-09 (`cmd/wellness-app` shipped, live on :7802) — fold it into rotation; see
 [agents/vertical-po/SKILL.md](../../../agents/vertical-po/SKILL.md) §1.
 
-- **Rotation to date:** LoftSpace ×21, Clinic ×20, Café ×10, Wellness ×7.
+- **Rotation to date:** LoftSpace ×21, Clinic ×20, Café ×11, Wellness ×7.
 - **Method:** reuse the already-up shared stack (detect NATS :4222 / app :7788/:7799/:7801/:7802), drive the real flow via `/api/op` + the lens projections as the product owner, file scored items. All four apps exist + are exercisable live (`:7788` / `:7799` / `:7801` / `:7802`).
 - **Live-stack note:** a stale bootstrap JSON vs. a recreated Core KV was a recurring dev-loop trap (2026-07-03, 2026-07-04) that silently emptied reads; `make up` now self-heals it (`109f59a`, 2026-07-05) — re-verify empty-read reports as a real product bug first.
-- **2026-08-02:** Café — drove resident self-order/void/settle + front-desk hats live; two leases are permanently unsettleable, void + menu curation reach no UI; filed 5.
 - **2026-08-02:** Wellness — drove member, instructor + front-desk hats live; the ledger is dormant and the slot lock guards only the room; filed 3.
 - **2026-08-02:** LoftSpace — drove tenant, landlord + front-desk hats live; pulse counts landlords not units, a done task never retires, an unmanaged unit vanishes; filed 5.
 - **2026-08-02:** Clinic — drove patient, provider + front-desk hats live; no appointment view resolves at all and the no-show never bills; filed 5.
@@ -72,7 +75,8 @@ dated run-logs live in git history. Rotate LoftSpace ↔ Clinic ↔ Café ↔ We
 - **2026-08-03:** Wellness — drove member, instructor + front-desk hats live; no past class closes out, no studio retires, no balance settles; filed 5.
 - **2026-08-03:** LoftSpace — drove applicant, landlord + front-desk hats live; the executed lease names neither party, screening progress is invisible, an exhausted check dead-ends; filed 3 + 1 platform.
 - **2026-08-04:** Clinic — drove patient, provider + front-desk hats live; billing denies every hat, a booked visit hides its site, a documented note is unreadable; filed 3.
-- **Next:** Café.
+- **2026-08-04:** Café — drove self-order→settle + front-desk hats live; the one bill omits clinic/wellness, the staff menu grid is unconfined, the visit badge is last-wins; filed 4.
+- **Next:** Wellness.
 
 ## Done log — verticals (newest first)
 
