@@ -2,6 +2,17 @@
 
 Rolled from `verticals.md` when its live Done log passed ~25 entries. Full detail is in git.
 
+- 2026-08-02 · `11c50fd4` · A café credit balance no longer renders as `$-21.59` — ledgerBalanceLine mirrors loftspace-app's owed/credit/paid-in-full split. cafe-app
+- 2026-08-02 · `dc7d1983` · POS can now void a mis-tapped charge — Void Charge form wired to VoidCharge, mirroring the off-menu Charge form/handler. cafe-app
+- 2026-08-02 · `82613032` · POS lease picker now names the resident, not the raw key — fillLeaseSelect joins /api/residents + /api/frontdesk-lease-details, mirroring frontDeskCard's own join. cafe-app
+- 2026-08-02 · `af451062` · Nothing ever chases a tab left open — cafeStaleTabSettlement auto-dispatches SettleStaleTab once an open tab's staleAt (openedAt+24h) passes, mirroring clinic's pastDueAppointments. cafe-domain 0.11.11
+- 2026-08-02 · `fdbf16ff` · A house tab can no longer be permanently unsettleable — cafeTabSettlement admits openFor as an open-tab fallback anchor, Settle backfills the missing chargedTo link. cafe-domain 0.11.10
+- 2026-08-02 · `b7cf16b3` · A past visit no longer sits open, unbilled, forever — pastDueAppointments Weaver target auto-no-shows + bills it once endsAt passes. clinic-domain 0.28.17, clinic-reminders 0.7.3
+- 2026-08-02 · `2dcbfeaf` · A booked class now reminds its booker — new wellness-reminders package mirrors clinic-reminders' ~24h-ahead @at reminder, anchored on booking not session
+- 2026-08-02 · `22a40ba4` · Every clinic provider now offers real bookable slots — SetProviderHours seeds a full weekly window for Osei/Patel/classic-demo
+- 2026-08-02 · `bc13aa13` · A booked visit now says which clinic to go to — atSite walk added to clinicAppointmentsRead/providerAppointmentsRead/clinicAppointments + card render. clinic-domain 0.28.16
+- 2026-08-02 · `21a3b94d` · A no-show charge now says what it's for — clinicNoShowSettlement passes a memo to DebitAccount. clinic-ledger 0.2.3
+- 2026-08-02 · `f2183db9` · A full class now offers a real waitlist, not a dead-end — Schedule's Join-waitlist affordance + My Classes position, staff roster's booked/waitlisted split fixed too. wellness-domain 0.19.8
 - 2026-08-01 · `4870977c` · A weekly class no longer needs N separate creates — CreateSessionSeries mints occurrenceCount occurrences in one atomic op. wellness-domain 0.19.6
 - 2026-08-01 · `58af30ef` · A wellness class booking now has a price — CreateSession's priceCents + a new wellnessClassPriceSettlement Weaver target auto-charge the booker. wellness-domain 0.19.4, wellness-ledger 0.2.0
 - 2026-08-01 · `d53640f1` · Convergence targets declare §10.3 retry budgets — maxretries_<gap>=3 on all four weaver targets; orchestration-base 0.7.7, wellness-domain 0.19.3, wellness-ledger 0.1.1
