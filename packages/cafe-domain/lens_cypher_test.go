@@ -601,6 +601,50 @@ func TestCafeLeaseWorkplaces_HopBoundMatchesTheWriteSide(t *testing.T) {
 		"depths 0..7 cover the lease and depth 8 does not — the write side's own reach")
 }
 
+// TestMenuCatalog_CoveringLocations proves menuCatalogSpec's own
+// coveringLocations column — the leaseWorkplacesSpec shape re-anchored on a
+// menu item's servedAt link instead of a lease's appliesToUnit — so the
+// front-desk Manage Menu grid can confine itself to a staffer's own
+// workplace the same way staffCoveredLeases confines /api/leases: a staffer
+// wired to the BUILDING must still match an item served at a UNIT inside it.
+func TestMenuCatalog_CoveringLocations(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newCdFixture(t)
+	f.vtx(t, "item", "menuitem")
+	f.aspect(t, "item", "price", "menuItemPrice", map[string]any{"name": "Latte", "priceCents": 450.0})
+	unitKey := f.vtx(t, "unit4b", "unit")
+	buildingKey := f.vtx(t, "riverside", "location")
+	f.edge(t, "servedAt", "item", "unit4b")
+	f.edge(t, "containedIn", "unit4b", "riverside")
+
+	rows := f.project(t, menuCatalogSpec)
+	require.Len(t, rows, 1)
+	require.Equal(t, unitKey, rows[0].Values["servedAt"])
+	require.ElementsMatch(t, []any{unitKey, buildingKey}, rows[0].Values["coveringLocations"],
+		"depth-0 (the item's own servedAt unit) and its containedIn ancestor both cover the item")
+}
+
+// TestMenuCatalog_NoServedAtEmptyCovering proves an item minted with no
+// servedAt link still projects a row (the OPTIONAL MATCH above), with an
+// EMPTY covering set rather than a null or missing column — the same
+// fail-closed denial leaseWorkplacesSpec gives an unwired lease.
+func TestMenuCatalog_NoServedAtEmptyCovering(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newCdFixture(t)
+	f.vtx(t, "item", "menuitem")
+	f.aspect(t, "item", "price", "menuItemPrice", map[string]any{"name": "Muffin", "priceCents": 300.0})
+
+	rows := f.project(t, menuCatalogSpec)
+	require.Len(t, rows, 1)
+	require.Nil(t, rows[0].Values["servedAt"])
+	require.Empty(t, rows[0].Values["coveringLocations"],
+		"an unlinked item is covered by nobody; the boundary must not read that as unrestricted")
+}
+
 // identity seeds a bare vtx.identity vertex — cafeIdentitiesReadSpec's own
 // anchor type, distinct from cdFixture.vtx's tab/leaseapp/unit/location
 // vertices above.

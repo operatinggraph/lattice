@@ -16,10 +16,11 @@ import (
 // key — empty for an item minted before the column existed or with no
 // servedAt link.
 type menuItemProjection struct {
-	MenuItemKey string   `json:"menuItemKey"`
-	Name        string   `json:"name"`
-	PriceCents  *float64 `json:"priceCents"`
-	ServedAt    string   `json:"servedAt"`
+	MenuItemKey       string   `json:"menuItemKey"`
+	Name              string   `json:"name"`
+	PriceCents        *float64 `json:"priceCents"`
+	ServedAt          string   `json:"servedAt"`
+	CoveringLocations []string `json:"coveringLocations"`
 }
 
 // menuItemRow is the self-order picker shape the Resident view renders: the
@@ -34,15 +35,14 @@ type menuItemRow struct {
 // lens read model. A row that fails to decode or carries no menuItemKey (a
 // tombstoned projection entry) is skipped.
 //
-// covering, when non-nil, confines the rows to what a Charge at this lease
-// would actually accept: an item is offered only when its own servedAt key
-// appears in the set (cafe-domain's `location_covers` — the tab's own
-// building plus every containedIn ancestor covering it). An item with no
-// servedAt link is excluded rather than defaulting to visible, the same
-// fail-closed answer Charge itself gives an unresolvable item location. A
-// nil covering leaves the catalog unfiltered (the front-desk grid view,
-// which has no single lease/tab in view to confine against).
-func computeMenu(keys []string, get kvGetter, covering map[string]bool) []menuItemRow {
+// admit, when non-nil, confines the rows to a caller-specific bound: a
+// leaseAppKey-scoped picker offers only what a Charge at that lease would
+// actually accept (covering[p.ServedAt], cafe-domain's `location_covers`),
+// and the workplace-only front-desk Manage Menu grid offers only what the
+// staffer's own worksAt reaches (hats.covers(p.CoveringLocations)) — see
+// handleMenu. A nil admit leaves the catalog unfiltered (an operator, or a
+// resident/staffer with no scoping question in view).
+func computeMenu(keys []string, get kvGetter, admit func(menuItemProjection) bool) []menuItemRow {
 	rows := make([]menuItemRow, 0)
 	for _, k := range keys {
 		raw, ok := get(k)
@@ -53,7 +53,7 @@ func computeMenu(keys []string, get kvGetter, covering map[string]bool) []menuIt
 		if json.Unmarshal(raw, &p) != nil || p.MenuItemKey == "" {
 			continue
 		}
-		if covering != nil && !covering[p.ServedAt] {
+		if admit != nil && !admit(p) {
 			continue
 		}
 		var price int64
@@ -94,14 +94,22 @@ func (s *server) leaseCoveringLocations(ctx context.Context, leaseAppKey string)
 }
 
 // handleMenu implements GET /api/menu[?leaseAppKey=] — the catalog the
-// Resident self-order picker AND the staff POS catalog picker both render,
-// served from the cafe-domain menuCatalog lens (P5). With no leaseAppKey the
-// catalog is unfiltered (the front-desk grid view, which has no single
-// lease/tab in view). With one, a caller not admitted to that lease
-// (visibleLeases, mirroring handleTabs — admits a staffer's workplace-covered
-// leases too) is refused, and the catalog returned is confined to items a
-// Charge against that lease would actually accept — the offer side of the same
-// location_covers bound Charge already enforces.
+// Resident self-order picker AND the staff Manage Menu grid both render,
+// served from the cafe-domain menuCatalog lens (P5). With a leaseAppKey, a
+// caller not admitted to that lease (visibleLeases, mirroring handleTabs —
+// admits a staffer's workplace-covered leases too) is refused, and the
+// catalog returned is confined to items a Charge against that lease would
+// actually accept — the offer side of the same location_covers bound Charge
+// already enforces. With no leaseAppKey, a `worksAt` staffer (the front-desk
+// Manage Menu grid — loadManageMenu, cafe-app/web/app.js) is confined to
+// items their own workplace reaches (menuCatalogSpec's coveringLocations
+// intersected against hats.workplaces, the staffCoveredLeases idiom applied
+// per item instead of per lease) — the same building/unit relationship
+// RetireMenuItem's own operator/frontOfHouse write path would otherwise let
+// this grid show an item for and never confine. An operator, or a plain
+// resident asking with no lease/workplace question in view at all (the
+// self-order picker's own public-catalog case), sees the whole catalog
+// unfiltered.
 func (s *server) handleMenu(w http.ResponseWriter, r *http.Request) {
 	conn, ok := s.requireConn(w)
 	if !ok {
@@ -116,8 +124,9 @@ func (s *server) handleMenu(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 
 	leaseAppKey := strings.TrimSpace(r.URL.Query().Get("leaseAppKey"))
-	var covering map[string]bool
-	if leaseAppKey != "" {
+	var admit func(menuItemProjection) bool
+	switch {
+	case leaseAppKey != "":
 		visible, err := s.visibleLeases(ctx, hats)
 		if err != nil {
 			s.writeError(w, http.StatusBadGateway, err.Error())
@@ -127,7 +136,10 @@ func (s *server) handleMenu(w http.ResponseWriter, r *http.Request) {
 			s.writeError(w, http.StatusForbidden, notYourLease(hats))
 			return
 		}
-		covering = s.leaseCoveringLocations(ctx, leaseAppKey)
+		covering := s.leaseCoveringLocations(ctx, leaseAppKey)
+		admit = func(p menuItemProjection) bool { return covering[p.ServedAt] }
+	case hats.isStaff() && !hats.isOperator:
+		admit = func(p menuItemProjection) bool { return hats.covers(p.CoveringLocations) }
 	}
 
 	keys, err := conn.KVListKeys(ctx, cafedomain.MenuCatalogBucket)
@@ -136,6 +148,6 @@ func (s *server) handleMenu(w http.ResponseWriter, r *http.Request) {
 			"list "+cafedomain.MenuCatalogBucket+": "+err.Error()+" (is cafe-domain installed and the Weaver projecting?)")
 		return
 	}
-	rows := computeMenu(keys, s.kvGetter(ctx, cafedomain.MenuCatalogBucket), covering)
+	rows := computeMenu(keys, s.kvGetter(ctx, cafedomain.MenuCatalogBucket), admit)
 	s.writeJSON(w, http.StatusOK, map[string]any{"menu": rows})
 }

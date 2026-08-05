@@ -188,6 +188,18 @@ RETURN
 // than dropping out) — the exact key `location_covers` (ddls.go) resolves via
 // `menu_item_served_at` when a self-order Charge is bound, so a picker that
 // filters on this column offers only what that same Charge would accept.
+//
+// `coveringLocations` is the item's OWN ancestor chain — its servedAt
+// location plus every containedIn ancestor, the exact leaseWorkplacesSpec
+// shape (below) anchored on the item instead of a lease's unit. It is what
+// lets the front-desk Manage Menu grid (cmd/cafe-app/menu.go's handleMenu,
+// no leaseAppKey in view) confine itself to a staffer's own workplace the
+// same way staffCoveredLeases confines /api/leases: intersect the caller's
+// worksAt keys against this column rather than an exact-match on servedAt,
+// so a staffer wired to the BUILDING still sees an item served at a UNIT
+// inside it. The comprehension yields an empty list when `loc` never
+// matched (no servedAt link) — an unlinked item is covered by nobody,
+// mirroring leaseWorkplacesSpec's own empty-covering denial.
 const menuCatalogSpec = `MATCH (m:menuitem)
 OPTIONAL MATCH (m)-[:servedAt]->(loc)
 RETURN
@@ -195,7 +207,8 @@ RETURN
   m.key AS menuItemKey,
   m.price.data.name AS name,
   m.price.data.priceCents AS priceCents,
-  loc.key AS servedAt`
+  loc.key AS servedAt,
+  [(m)-[:servedAt]->(sloc)-[:containedIn*0..7]->(c) | c.key] AS coveringLocations`
 
 // tabSettlementSpec is the one-row-per-tab convergence cypher: a settled tab
 // with a positive total needs its charge posted onto the resident's

@@ -505,6 +505,70 @@ func TestHandleMenu_LeaseAppKey_NotYourLease_403(t *testing.T) {
 	}
 }
 
+// TestHandleMenu_NoLeaseAppKey_StaffConfinedToWorkplace proves the
+// front-desk Manage Menu grid (no leaseAppKey — loadManageMenu,
+// cafe-app/web/app.js) no longer shows every property's catalog: a staffer
+// wired to staffWorkplace sees only the item whose coveringLocations chain
+// reaches it, never the item served at an unrelated building.
+func TestHandleMenu_NoLeaseAppKey_StaffConfinedToWorkplace(t *testing.T) {
+	staff := "AAAAAAAAAAAAAAAAAAAA"
+	s, cookieFor := devSessionServer(t, fakeGatewayActor(t, map[string]bool{staff: true}))
+	putJSON(t, s.conn, cafedomain.MenuCatalogBucket, "vtx.menuitem.covered", map[string]any{
+		"menuItemKey": "vtx.menuitem.covered", "name": "Latte", "priceCents": 450,
+		"servedAt": staffWorkplace, "coveringLocations": []string{staffWorkplace},
+	})
+	putJSON(t, s.conn, cafedomain.MenuCatalogBucket, "vtx.menuitem.elsewhere", map[string]any{
+		"menuItemKey": "vtx.menuitem.elsewhere", "name": "Croissant", "priceCents": 350,
+		"servedAt": otherWorkplace, "coveringLocations": []string{otherWorkplace},
+	})
+
+	rec := sessionGET(s, s.handleMenu, "/api/menu", cookieFor(staff))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+	var body struct {
+		Menu []menuItemRow `json:"menu"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(body.Menu) != 1 || body.Menu[0].MenuItemKey != "vtx.menuitem.covered" {
+		t.Fatalf("menu = %+v, want exactly the item this staffer's workplace covers", body.Menu)
+	}
+}
+
+// TestHandleMenu_NoLeaseAppKey_OperatorSeesEveryItem proves the operator
+// exemption: break-glass admin (the write side's actor_holds_operator
+// exemption from require_workplace, ddls.go) can also see the whole catalog
+// on the same grid a workplace-bound staffer only sees part of.
+func TestHandleMenu_NoLeaseAppKey_OperatorSeesEveryItem(t *testing.T) {
+	op := "AAAAAAAAAAAAAAAAAAAA"
+	s, cookieFor := devSessionServer(t, fakeGatewayActorWorkplaces(t,
+		map[string][]string{op: {staffWorkplace}}, map[string]bool{op: true}))
+	putJSON(t, s.conn, cafedomain.MenuCatalogBucket, "vtx.menuitem.covered", map[string]any{
+		"menuItemKey": "vtx.menuitem.covered", "name": "Latte", "priceCents": 450,
+		"servedAt": staffWorkplace, "coveringLocations": []string{staffWorkplace},
+	})
+	putJSON(t, s.conn, cafedomain.MenuCatalogBucket, "vtx.menuitem.elsewhere", map[string]any{
+		"menuItemKey": "vtx.menuitem.elsewhere", "name": "Croissant", "priceCents": 350,
+		"servedAt": otherWorkplace, "coveringLocations": []string{otherWorkplace},
+	})
+
+	rec := sessionGET(s, s.handleMenu, "/api/menu", cookieFor(op))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+	var body struct {
+		Menu []menuItemRow `json:"menu"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(body.Menu) != 2 {
+		t.Fatalf("menu = %+v, want both items unfiltered for the operator", body.Menu)
+	}
+}
+
 // ---- whole-mux wiring: RequireSession covers every read (persona-worlds-design.md Fire W4 §3) ----
 
 func TestRegisterRoutes_UncredentialedAPIRead_401(t *testing.T) {
