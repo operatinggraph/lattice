@@ -20,10 +20,10 @@
 //     names; its deterministic, identity-anchored key is the uniqueness guard.
 //
 //   - The `wellnesstransaction` vertex type (DDL `wellnesstransaction`) —
-//     DebitAccount (a charge: a no-show fee and/or a class-price charge) and
-//     CreditAccount (a payment received) each mint vtx.wellnesstransaction.<NanoID>
+//     WellnessDebitAccount (a charge: a no-show fee and/or a class-price charge) and
+//     WellnessCreditAccount (a payment received) each mint vtx.wellnesstransaction.<NanoID>
 //     (root data {} per D5) with a .entry aspect {type, amountCents, memo?, postedAt},
-//     linked to the account via postedTo. DebitAccount independently accepts
+//     linked to the account via postedTo. WellnessDebitAccount independently accepts
 //     bookingRef (no-show settlement, writes settles) and priceBookingRef
 //     (class-price settlement, writes settlesClassPrice) — either, both, or
 //     neither, two distinct relations so the two settlement gaps never
@@ -43,8 +43,8 @@
 //   - The `wellnessNoShowSettlement` actorAggregate lens + its Weaver playbook
 //     (targets.go): a noShow booking carrying a noShowFeeCents (set by
 //     wellness-domain's SetBookingAttendance) converges via a directOp
-//     DebitAccount{accountKey, amountCents, bookingRef} once the booker's
-//     account exists — DebitAccount's optional bookingRef writes the settles
+//     WellnessDebitAccount{accountKey, amountCents, bookingRef} once the booker's
+//     account exists — WellnessDebitAccount's optional bookingRef writes the settles
 //     audit link (transaction→booking) the lens reads to detect the gap is
 //     closed. Mirrors clinic-ledger/clinic-domain's identical no-show-fee
 //     shape (clinicNoShowSettlement), self-contained in this one package (no
@@ -54,10 +54,10 @@
 //   - The `wellnessClassPriceSettlement` actorAggregate lens + its Weaver
 //     playbook (targets.go): the OTHER wellness billing gap — a session
 //     carrying a priceCents (set by wellness-domain's CreateSession)
-//     converges via a directOp DebitAccount{accountKey, amountCents,
+//     converges via a directOp WellnessDebitAccount{accountKey, amountCents,
 //     priceBookingRef} once the booker's account exists, UNCONDITIONAL on
 //     attendance (a class price is owed for the seat, not for showing up).
-//     DebitAccount's optional priceBookingRef writes the settlesClassPrice
+//     WellnessDebitAccount's optional priceBookingRef writes the settlesClassPrice
 //     audit link (transaction→booking, a relation distinct from the
 //     no-show settlement's settles) the lens reads to detect the gap is
 //     closed — so the two settlement gaps never collide in a count() or
@@ -77,7 +77,7 @@
 // ledgerHistory): a canonicalName is global across every installed package
 // (internal/pkgmgr/installer.go checkCanonicalNameCollision).
 //
-// Depends wellness-domain (DebitAccount's optional bookingRef validates
+// Depends wellness-domain (WellnessDebitAccount's optional bookingRef validates
 // against wellness-domain's booking vertex type; the wellnessNoShowSettlement
 // lens walks a booking's bookedBy link).
 package wellnessledger
@@ -87,10 +87,10 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 // Package is the static, install-time bundle.
 var Package = pkgmgr.Definition{
 	Name:    "wellness-ledger",
-	Version: "0.2.2",
+	Version: "0.2.3",
 	Description: "Wellness member payment ledger: the wellnessaccount vertex type (WellnessCreateAccount, independently-minted " +
 		"id, one per member identity via a .wellnessLedgerAccount guard aspect on the identity) + the wellnesstransaction " +
-		"vertex type (DebitAccount/CreditAccount, append-only entries linked to the account via postedTo, DebitAccount " +
+		"vertex type (WellnessDebitAccount/WellnessCreditAccount, append-only entries linked to the account via postedTo, WellnessDebitAccount " +
 		"independently taking optional bookingRef (no-show settlement, writes settles) and priceBookingRef (class-price " +
 		"settlement, writes settlesClassPrice) back-refs) + the wellnessLedgerHistory read-model lens (one row per " +
 		"transaction) + the wellnessMemberAccounts lens (member identity -> account key lookup) + the " +

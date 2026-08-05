@@ -902,6 +902,7 @@ async function loadRoster() {
     select.dataset.loaded = "1";
   }
   await renderRoster();
+  await loadRosterBilling();
 }
 
 // rosterGeneration counts roster renders. Each render captures it and any
@@ -1495,6 +1496,176 @@ function attendanceActions(b) {
   return '<div class="card-actions">' + btn("attended", "Attended") + btn("noShow", "No-show") + "</div>";
 }
 
+// ---- Roster billing (front desk records a charge/payment) --------------
+//
+// A member's balance panel (My Classes) has stood since ledgerBalanceLine
+// shipped, but nothing let anyone settle it — WellnessDebitAccount/
+// WellnessCreditAccount were operator-only. Both now grant frontOfHouse
+// unconfined (packages/wellness-ledger/permissions.go), so this panel lives
+// on Roster — the front desk's existing staff surface — rather than a new
+// tab. Independent of the session picker above it: a member's ledger has
+// nothing to do with which class is selected. The member picker reuses
+// loadMembers (the same book-a-member directory), and GET
+// /api/ledger?identityKey= is gated server-side to the same
+// workplace-covered confinement (cmd/wellness-app/ledger.go
+// memberVisibleToHats) — this panel adds no new authority, only a new
+// affordance for grants that already exist.
+
+// billingCache holds the last-loaded ledger answer for whichever member is
+// selected — submitBillingEntry reads its accountKey to avoid a redundant
+// GET when the picker hasn't changed since the last render.
+let billingCache = null;
+
+// loadRosterBilling populates the member picker once and renders the
+// currently-selected member's ledger. Hidden entirely for anyone without the
+// staff hat — an instructor holds no WellnessDebitAccount/WellnessCreditAccount
+// grant, so the panel could only ever fail closed for them.
+async function loadRosterBilling() {
+  const panel = document.getElementById("roster-billing");
+  if (!isStaff()) {
+    panel.hidden = true;
+    return;
+  }
+  panel.hidden = false;
+  const select = document.getElementById("billing-member");
+  if (!select.dataset.loaded) {
+    let members;
+    try {
+      members = await loadMembers();
+    } catch (e) {
+      select.innerHTML = '<option value="">(' + esc(e.message) + ")</option>";
+      return;
+    }
+    const prev = select.value;
+    select.innerHTML = "";
+    if (!members.length) {
+      select.innerHTML = '<option value="">(no members at your building)</option>';
+    } else {
+      // The ledger is per-IDENTITY, not per-lease, but loadMembers projects
+      // one row per lease — a member holding two leases would otherwise
+      // appear twice in a picker that means to offer one option per person.
+      const seen = new Set();
+      for (const m of members) {
+        if (seen.has(m.bookerKey)) continue;
+        seen.add(m.bookerKey);
+        const opt = document.createElement("option");
+        opt.value = m.bookerKey;
+        opt.textContent = nameForIdentity(idOf(m.bookerKey));
+        select.appendChild(opt);
+      }
+      if (prev && seen.has(prev)) select.value = prev;
+    }
+    select.dataset.loaded = "1";
+  }
+  await renderBilling();
+}
+
+// renderBilling (re)loads and paints the selected member's balance +
+// transaction list. Bails to an empty state with no member selected.
+async function renderBilling() {
+  const balanceEl = document.getElementById("billing-balance");
+  const list = document.getElementById("billing-list");
+  const empty = document.getElementById("billing-empty");
+  const memberKey = document.getElementById("billing-member").value;
+  if (!memberKey) {
+    balanceEl.textContent = "";
+    list.innerHTML = "";
+    empty.hidden = false;
+    empty.textContent = "Select a member above to see their billing history.";
+    billingCache = null;
+    return;
+  }
+  balanceEl.textContent = "Loading…";
+  list.innerHTML = "";
+  empty.hidden = true;
+  let data;
+  try {
+    data = await appGet("/api/ledger?identityKey=" + encodeURIComponent(memberKey));
+  } catch (e) {
+    balanceEl.textContent = "";
+    empty.hidden = false;
+    empty.textContent = "Could not load billing history: " + e.message;
+    billingCache = null;
+    return;
+  }
+  billingCache = data;
+  renderBillingBody(data);
+}
+
+function renderBillingBody(data) {
+  const balanceEl = document.getElementById("billing-balance");
+  const list = document.getElementById("billing-list");
+  const empty = document.getElementById("billing-empty");
+  balanceEl.textContent = ledgerBalanceLine(data.balanceCents);
+  const txs = data.transactions || [];
+  list.innerHTML = "";
+  if (!txs.length) {
+    empty.hidden = false;
+    empty.textContent = "No charges or payments recorded yet.";
+    return;
+  }
+  empty.hidden = true;
+  for (const t of txs) {
+    const li = document.createElement("li");
+    li.className = "ledger-entry " + t.type;
+    const sign = t.type === "debit" ? "+" : "−";
+    const d = new Date(t.postedAt);
+    const when = isNaN(d) ? t.postedAt : d.toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
+    li.textContent = when + " · " + sign + money(t.amountCents) + (t.memo ? " — " + t.memo : "");
+    list.append(li);
+  }
+}
+
+// submitBillingEntry posts WellnessDebitAccount/WellnessCreditAccount
+// against the selected member's ledger account, opening the account first
+// (ensureLedgerAccount, best-effort, mirrors the post-booking call site) if
+// this is its first-ever charge or payment.
+async function submitBillingEntry(opType, what) {
+  const memberKey = document.getElementById("billing-member").value;
+  if (!memberKey) {
+    toast("Select a member first.", false);
+    return;
+  }
+  const amountInput = document.getElementById("billing-amount");
+  const memoInput = document.getElementById("billing-memo");
+  const dollars = Number(amountInput.value);
+  if (!(dollars > 0)) {
+    toast("Enter an amount greater than zero.", false);
+    return;
+  }
+  const cents = Math.round(dollars * 100);
+  const chargeBtn = document.getElementById("billing-charge");
+  const paymentBtn = document.getElementById("billing-payment");
+  chargeBtn.disabled = paymentBtn.disabled = true;
+  try {
+    let accountKey = billingCache && billingCache.identityKey === memberKey ? billingCache.accountKey : "";
+    if (!accountKey) {
+      await ensureLedgerAccount(memberKey, false);
+      const data = await appGet("/api/ledger?identityKey=" + encodeURIComponent(memberKey));
+      accountKey = data.accountKey;
+    }
+    if (!accountKey) throw new Error("could not open the ledger account");
+    await opOrThrow(
+      {
+        operationType: opType,
+        class: "wellnesstransaction",
+        reads: [accountKey],
+        payload: { accountKey, amountCents: cents, memo: memoInput.value.trim() || undefined },
+      },
+      what,
+      false,
+    );
+    toast(what.charAt(0).toUpperCase() + what.slice(1) + " recorded.", true);
+    amountInput.value = "";
+    memoInput.value = "";
+    setTimeout(renderBilling, 700);
+  } catch (e) {
+    toast(e.message, false);
+  } finally {
+    chargeBtn.disabled = paymentBtn.disabled = false;
+  }
+}
+
 // ---- Studios (staff) view ------------------------------------------
 //
 // The staff surface for opening a studio and scheduling classes into it.
@@ -1986,10 +2157,14 @@ function init() {
   document.getElementById("roster-refresh").addEventListener("click", () => {
     staffSessionsCache = null; membersCache = null;
     document.getElementById("roster-session").dataset.loaded = "";
+    document.getElementById("billing-member").dataset.loaded = "";
     loadRoster();
   });
   document.getElementById("roster-book-submit").addEventListener("click", bookSelectedMember);
   document.getElementById("roster-book-guest-submit").addEventListener("click", bookGuest);
+  document.getElementById("billing-member").addEventListener("change", renderBilling);
+  document.getElementById("billing-charge").addEventListener("click", () => submitBillingEntry("WellnessDebitAccount", "record the charge"));
+  document.getElementById("billing-payment").addEventListener("click", () => submitBillingEntry("WellnessCreditAccount", "record the payment"));
   document.getElementById("studios-refresh").addEventListener("click", () => {
     studiosCache = null; instructorsCache = null;
     renderStudiosAdmin();

@@ -10,15 +10,15 @@ import (
 	"github.com/operatinggraph/lattice/internal/testutil"
 )
 
-// Front-desk unconfined grant for CreateAccount (verticals.md — "CreateAccount
-// can't be called from any of the 4 ledger apps' browsers", and "A wellness
-// class's ledger account never opens", blocked-on this exact gap).
-// DebitAccount/CreditAccount stay operator-only — every wellness charge is a
-// Weaver-target auto-charge, no front-desk caller reaches them. A
+// Front-desk unconfined grant for WellnessCreateAccount, WellnessDebitAccount,
+// and WellnessCreditAccount (verticals.md — "A member sees a balance nobody
+// can settle"): wellness-app's Roster view ships a Record charge/payment form
+// to the front desk, and all three ops now grant frontOfHouse to match. A
 // wellnessaccount is anchored on a member identity, which carries no
 // building, so there is nothing left to workplace-confine — mirrors
-// clinic-ledger's identical CreateAccount fix and clinic-domain's
-// TestFrontDesk_RegisterPatientUnconfined.
+// clinic-ledger's identical ClinicCreateAccount/ClinicDebitAccount/
+// ClinicCreditAccount fix, cafe-ledger's CreditCafeAccount, and
+// clinic-domain's TestFrontDesk_RegisterPatientUnconfined.
 const (
 	ledFDActorID  = "WLLEDFDACTRHJKMNPQRS"
 	ledFDActorKey = "vtx.identity." + ledFDActorID
@@ -67,6 +67,8 @@ func ledFDCapDoc() *processor.CapabilityDoc {
 		Lanes:                  []string{"default"},
 		PlatformPermissions: []processor.PlatformPermission{
 			{OperationType: "WellnessCreateAccount", Scope: "any"},
+			{OperationType: "WellnessDebitAccount", Scope: "any"},
+			{OperationType: "WellnessCreditAccount", Scope: "any"},
 		},
 		ServiceAccess:   []processor.ServiceAccessEntry{},
 		EphemeralGrants: []processor.EphemeralGrant{},
@@ -122,6 +124,114 @@ func TestFrontDesk_CreateAccountDeniedWithoutIt(t *testing.T) {
 	testutil.PublishOp(t, conn, env)
 	if got := testutil.DriveOne(t, ctx, cp, cons, ""); got != processor.OutcomeRejected {
 		t.Fatalf("CreateAccount from an actor with no ledger grant = %v, want Rejected", got)
+	}
+}
+
+// TestFrontDesk_WellnessDebitAccountUnconfined is the Inc guarantee: a
+// front-desk actor holding only the WellnessDebitAccount grant (no operator
+// role) can record a charge against a member's ledger account — the call
+// wellness-app's Roster billing panel needs so the desk can post a fee, not
+// just open the account.
+func TestFrontDesk_WellnessDebitAccountUnconfined(t *testing.T) {
+	ctx, conn := setupLedgerEnv(t)
+	testutil.SeedCapDoc(t, ctx, conn, ledFDCapDoc())
+	cp, cons := newLedgerPipeline(t, ctx, conn, "fdledgerdebit")
+
+	identityKey := seedIdentity(t, ctx, conn, "WLFDDBT23456789ABCDE")
+	acctKey := createAccount(t, ctx, conn, cp, cons, "fddebitacct0000001", identityKey)
+
+	env := &processor.OperationEnvelope{
+		RequestID:     testutil.GenReqID("fddebittx000000001"),
+		Lane:          processor.LaneDefault,
+		OperationType: "WellnessDebitAccount",
+		Actor:         ledFDActorKey,
+		SubmittedAt:   "2026-07-01T12:00:00Z",
+		Class:         "wellnesstransaction",
+		Payload:       json.RawMessage(`{"accountKey":"` + acctKey + `","amountCents":2500,"memo":"Front desk fee"}`),
+		ContextHint:   &processor.ContextHint{Reads: []string{acctKey}},
+	}
+	testutil.PublishOp(t, conn, env)
+	if got := testutil.DriveOne(t, ctx, cp, cons, ""); got != processor.OutcomeAccepted {
+		t.Fatalf("front-desk WellnessDebitAccount = %v, want Accepted (unconfined grant)", got)
+	}
+}
+
+// TestFrontDesk_WellnessDebitAccountDeniedWithoutIt proves the grant is what
+// changed: an actor with no platform permission at all is still denied.
+func TestFrontDesk_WellnessDebitAccountDeniedWithoutIt(t *testing.T) {
+	ctx, conn := setupLedgerEnv(t)
+	cp, cons := newLedgerPipeline(t, ctx, conn, "fdledgerdebitdenied")
+
+	identityKey := seedIdentity(t, ctx, conn, "WLNGDBT23456789ABCDE")
+	acctKey := createAccount(t, ctx, conn, cp, cons, "fdnogrntdebitacc001", identityKey)
+
+	env := &processor.OperationEnvelope{
+		RequestID:     testutil.GenReqID("fdnogrntdebittx0001"),
+		Lane:          processor.LaneDefault,
+		OperationType: "WellnessDebitAccount",
+		Actor:         ledNoGrantActorKey,
+		SubmittedAt:   "2026-07-01T12:00:00Z",
+		Class:         "wellnesstransaction",
+		Payload:       json.RawMessage(`{"accountKey":"` + acctKey + `","amountCents":2500,"memo":"Front desk fee"}`),
+		ContextHint:   &processor.ContextHint{Reads: []string{acctKey}},
+	}
+	testutil.PublishOp(t, conn, env)
+	if got := testutil.DriveOne(t, ctx, cp, cons, ""); got != processor.OutcomeRejected {
+		t.Fatalf("WellnessDebitAccount from an actor with no ledger grant = %v, want Rejected", got)
+	}
+}
+
+// TestFrontDesk_WellnessCreditAccountUnconfined is the Inc guarantee: a
+// front-desk actor holding only the WellnessCreditAccount grant (no operator
+// role) can record a payment against a member's ledger account — the call
+// that settles a member's balance over the counter, e.g. a no-show fee they
+// cannot record themselves.
+func TestFrontDesk_WellnessCreditAccountUnconfined(t *testing.T) {
+	ctx, conn := setupLedgerEnv(t)
+	testutil.SeedCapDoc(t, ctx, conn, ledFDCapDoc())
+	cp, cons := newLedgerPipeline(t, ctx, conn, "fdledgercredit")
+
+	identityKey := seedIdentity(t, ctx, conn, "WLFDCRD23456789ABCDE")
+	acctKey := createAccount(t, ctx, conn, cp, cons, "fdcreditacct000001", identityKey)
+
+	env := &processor.OperationEnvelope{
+		RequestID:     testutil.GenReqID("fdcredittx00000001"),
+		Lane:          processor.LaneDefault,
+		OperationType: "WellnessCreditAccount",
+		Actor:         ledFDActorKey,
+		SubmittedAt:   "2026-07-01T12:00:00Z",
+		Class:         "wellnesstransaction",
+		Payload:       json.RawMessage(`{"accountKey":"` + acctKey + `","amountCents":2500,"memo":"Front desk payment"}`),
+		ContextHint:   &processor.ContextHint{Reads: []string{acctKey}},
+	}
+	testutil.PublishOp(t, conn, env)
+	if got := testutil.DriveOne(t, ctx, cp, cons, ""); got != processor.OutcomeAccepted {
+		t.Fatalf("front-desk WellnessCreditAccount = %v, want Accepted (unconfined grant)", got)
+	}
+}
+
+// TestFrontDesk_WellnessCreditAccountDeniedWithoutIt proves the grant is what
+// changed: an actor with no platform permission at all is still denied.
+func TestFrontDesk_WellnessCreditAccountDeniedWithoutIt(t *testing.T) {
+	ctx, conn := setupLedgerEnv(t)
+	cp, cons := newLedgerPipeline(t, ctx, conn, "fdledgercreditdenied")
+
+	identityKey := seedIdentity(t, ctx, conn, "WLNGCRD23456789ABCDE")
+	acctKey := createAccount(t, ctx, conn, cp, cons, "fdnogrntcreditacc01", identityKey)
+
+	env := &processor.OperationEnvelope{
+		RequestID:     testutil.GenReqID("fdnogrntcredittx001"),
+		Lane:          processor.LaneDefault,
+		OperationType: "WellnessCreditAccount",
+		Actor:         ledNoGrantActorKey,
+		SubmittedAt:   "2026-07-01T12:00:00Z",
+		Class:         "wellnesstransaction",
+		Payload:       json.RawMessage(`{"accountKey":"` + acctKey + `","amountCents":2500,"memo":"Front desk payment"}`),
+		ContextHint:   &processor.ContextHint{Reads: []string{acctKey}},
+	}
+	testutil.PublishOp(t, conn, env)
+	if got := testutil.DriveOne(t, ctx, cp, cons, ""); got != processor.OutcomeRejected {
+		t.Fatalf("WellnessCreditAccount from an actor with no ledger grant = %v, want Rejected", got)
 	}
 }
 

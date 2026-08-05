@@ -3,7 +3,7 @@ package wellnessledger
 import "github.com/operatinggraph/lattice/internal/pkgmgr"
 
 // WeaverTargets returns the package's meta.weaverTarget playbook (Contract
-// #10 §10.8): two independent missing_* → directOp(DebitAccount) gaps over
+// #10 §10.8): two independent missing_* → directOp(WellnessDebitAccount) gaps over
 // the same booking, mirroring clinic-domain/clinic-ledger's identical shape
 // but self-contained inside wellness-ledger — it already depends on
 // wellness-domain (for bookingRef/priceBookingRef validation) and can read
@@ -13,7 +13,7 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 //   - NoShowSettlementTarget's missing_charge — a noShow booking's fee.
 //   - ClassPriceSettlementTarget's missing_price_charge — a priced session's
 //     booking price, unconditional on attendance. Independent of the first:
-//     each dispatches DebitAccount with a DIFFERENT ref param (bookingRef vs.
+//     each dispatches WellnessDebitAccount with a DIFFERENT ref param (bookingRef vs.
 //     priceBookingRef), writing a DIFFERENT settles/settlesClassPrice link, so
 //     the two never converge (or double-charge) each other's gap.
 //
@@ -40,8 +40,8 @@ func WeaverTargets() []pkgmgr.WeaverTargetSpec {
 			Gaps: map[string]pkgmgr.GapActionSpec{
 				"missing_charge": {
 					Action:    "directOp",
-					Operation: "DebitAccount",
-					// DebitAccount is claimed by multiple installed ledger DDLs
+					Operation: "WellnessDebitAccount",
+					// WellnessDebitAccount is claimed by multiple installed ledger DDLs
 					// (clinic-ledger, cafe-ledger, loftspace-ledger, this one) —
 					// pin the vertexType DDL this target dispatches to
 					// (MissingClass otherwise).
@@ -62,7 +62,7 @@ func WeaverTargets() []pkgmgr.WeaverTargetSpec {
 			Gaps: map[string]pkgmgr.GapActionSpec{
 				"missing_price_charge": {
 					Action:    "directOp",
-					Operation: "DebitAccount",
+					Operation: "WellnessDebitAccount",
 					// Pin the vertexType DDL this target dispatches to
 					// (MissingClass otherwise) — same rationale as
 					// NoShowSettlementTarget's Class field above.

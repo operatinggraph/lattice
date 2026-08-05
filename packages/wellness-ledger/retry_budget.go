@@ -1,6 +1,6 @@
 package wellnessledger
 
-// maxChargeRetries caps how many times Weaver auto-dispatches DebitAccount
+// maxChargeRetries caps how many times Weaver auto-dispatches WellnessDebitAccount
 // for one no-show booking before it stops and leaves the gap violating for
 // operator attention (Contract #10 §10.3): the lens projects it as the
 // constant maxretries_charge column on every wellnessNoShowSettlement row,
@@ -11,7 +11,7 @@ package wellnessledger
 const maxChargeRetries = 3
 
 // maxPriceChargeRetries caps how many times Weaver auto-dispatches
-// DebitAccount for one priced booking's class-price charge before it stops
+// WellnessDebitAccount for one priced booking's class-price charge before it stops
 // and leaves the gap violating for operator attention (Contract #10 §10.3):
 // the lens projects it as the constant maxretries_price column on every
 // wellnessClassPriceSettlement row, and Weaver bounds its per-(target,

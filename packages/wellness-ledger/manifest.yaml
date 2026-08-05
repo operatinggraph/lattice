@@ -1,11 +1,11 @@
 name: wellness-ledger
-version: 0.2.2
+version: 0.2.3
 description: |
   Wellness member payment ledger: the wellnessaccount vertex type (WellnessCreateAccount,
   independently-minted id, one per member identity via a .wellnessLedgerAccount
   guard aspect on the identity) + the wellnesstransaction vertex type
-  (DebitAccount/CreditAccount, append-only entries linked to the account via
-  postedTo, DebitAccount independently taking optional bookingRef (no-show
+  (WellnessDebitAccount/WellnessCreditAccount, append-only entries linked to the account via
+  postedTo, WellnessDebitAccount independently taking optional bookingRef (no-show
   settlement, writes settles) and priceBookingRef (class-price settlement,
   writes settlesClassPrice) back-refs) + the wellnessLedgerHistory read-model
   lens (one row per transaction) + the wellnessMemberAccounts lens (member
@@ -42,6 +42,8 @@ declares:
       engine: full
   opMetas:
     - operationType: WellnessCreateAccount
+    - operationType: WellnessDebitAccount
+    - operationType: WellnessCreditAccount
   permissions:
     - operationType: WellnessCreateAccount
       scope: any
@@ -49,12 +51,12 @@ declares:
     - operationType: WellnessCreateAccount
       scope: self
       grantsTo: [consumer]
-    - operationType: DebitAccount
+    - operationType: WellnessDebitAccount
       scope: any
-      grantsTo: [operator]
-    - operationType: CreditAccount
+      grantsTo: [operator, frontOfHouse]
+    - operationType: WellnessCreditAccount
       scope: any
-      grantsTo: [operator]
+      grantsTo: [operator, frontOfHouse]
   weaverTargets:
     - targetId: wellnessNoShowSettlement
       lensRef: wellnessNoShowSettlement

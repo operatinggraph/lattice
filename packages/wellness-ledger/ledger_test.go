@@ -46,8 +46,8 @@ func ledgerCapDoc() *processor.CapabilityDoc {
 			{OperationType: "CreateSession", Scope: "any"},
 			{OperationType: "CreateBooking", Scope: "any"},
 			{OperationType: "WellnessCreateAccount", Scope: "any"},
-			{OperationType: "DebitAccount", Scope: "any"},
-			{OperationType: "CreditAccount", Scope: "any"},
+			{OperationType: "WellnessDebitAccount", Scope: "any"},
+			{OperationType: "WellnessCreditAccount", Scope: "any"},
 		},
 		ServiceAccess:   []processor.ServiceAccessEntry{},
 		EphemeralGrants: []processor.EphemeralGrant{},
@@ -243,7 +243,7 @@ func TestCreateAccount_UnknownIdentity(t *testing.T) {
 	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeRejected)
 }
 
-// TestDebitCreditAccount_PostEntries (test 2). DebitAccount/CreditAccount each
+// TestDebitCreditAccount_PostEntries (test 2). WellnessDebitAccount/WellnessCreditAccount each
 // mint a fresh transaction vertex (root {} — D5) + a .entry aspect + the
 // postedTo link to the account; the account root is never touched (append-only
 // ledger, no balance stored).
@@ -259,7 +259,7 @@ func TestDebitCreditAccount_PostEntries(t *testing.T) {
 	debitEnv := &processor.OperationEnvelope{
 		RequestID:     debitReqID,
 		Lane:          processor.LaneDefault,
-		OperationType: "DebitAccount",
+		OperationType: "WellnessDebitAccount",
 		Actor:         ledgerActorKey,
 		SubmittedAt:   "2026-07-01T13:00:00Z",
 		Class:         "wellnesstransaction",
@@ -298,12 +298,12 @@ func TestDebitCreditAccount_PostEntries(t *testing.T) {
 		t.Fatalf("account root data must stay minimal ({}) after a debit — the ledger is append-only, got %v", d)
 	}
 
-	// CreditAccount — a payment received.
+	// WellnessCreditAccount — a payment received.
 	creditReqID := testutil.GenReqID("creditpay0000000001")
 	creditEnv := &processor.OperationEnvelope{
 		RequestID:     creditReqID,
 		Lane:          processor.LaneDefault,
-		OperationType: "CreditAccount",
+		OperationType: "WellnessCreditAccount",
 		Actor:         ledgerActorKey,
 		SubmittedAt:   "2026-07-05T09:00:00Z",
 		Class:         "wellnesstransaction",
@@ -330,7 +330,7 @@ func TestDebitAccount_UnknownAccount(t *testing.T) {
 	env := &processor.OperationEnvelope{
 		RequestID:     testutil.GenReqID("debitunknownacct001"),
 		Lane:          processor.LaneDefault,
-		OperationType: "DebitAccount",
+		OperationType: "WellnessDebitAccount",
 		Actor:         ledgerActorKey,
 		SubmittedAt:   "2026-07-01T13:00:00Z",
 		Class:         "wellnesstransaction",
@@ -353,7 +353,7 @@ func TestDebitAccount_NonPositiveAmountRejected(t *testing.T) {
 	env := &processor.OperationEnvelope{
 		RequestID:     testutil.GenReqID("debitbadamount00001"),
 		Lane:          processor.LaneDefault,
-		OperationType: "DebitAccount",
+		OperationType: "WellnessDebitAccount",
 		Actor:         ledgerActorKey,
 		SubmittedAt:   "2026-07-01T13:00:00Z",
 		Class:         "wellnesstransaction",
@@ -421,9 +421,9 @@ func createBooking(t *testing.T, ctx context.Context, conn *substrate.Conn, cp *
 	return "vtx.booking." + nanoIDFromRequestID(reqID)
 }
 
-// TestDebitAccount_BookingRefWritesSettlesLink (test 3). A DebitAccount
+// TestDebitAccount_BookingRefWritesSettlesLink (test 3). A WellnessDebitAccount
 // carrying bookingRef writes the settles audit link (transaction→booking) the
-// wellnessNoShowSettlement lens reads; a plain DebitAccount with no
+// wellnessNoShowSettlement lens reads; a plain WellnessDebitAccount with no
 // bookingRef writes no such link (byte-for-byte the existing plain-charge
 // shape).
 func TestDebitAccount_BookingRefWritesSettlesLink(t *testing.T) {
@@ -441,7 +441,7 @@ func TestDebitAccount_BookingRefWritesSettlesLink(t *testing.T) {
 	debitEnv := &processor.OperationEnvelope{
 		RequestID:     debitReqID,
 		Lane:          processor.LaneDefault,
-		OperationType: "DebitAccount",
+		OperationType: "WellnessDebitAccount",
 		Actor:         ledgerActorKey,
 		SubmittedAt:   "2026-06-26T09:00:00Z",
 		Class:         "wellnesstransaction",
@@ -456,12 +456,12 @@ func TestDebitAccount_BookingRefWritesSettlesLink(t *testing.T) {
 		t.Fatalf("settles link must exist: %s", settlesLnk)
 	}
 
-	// A plain DebitAccount (no bookingRef) writes no settles link at all.
+	// A plain WellnessDebitAccount (no bookingRef) writes no settles link at all.
 	plainReqID := testutil.GenReqID("debitbkr0000000002")
 	plainEnv := &processor.OperationEnvelope{
 		RequestID:     plainReqID,
 		Lane:          processor.LaneDefault,
-		OperationType: "DebitAccount",
+		OperationType: "WellnessDebitAccount",
 		Actor:         ledgerActorKey,
 		SubmittedAt:   "2026-06-26T09:05:00Z",
 		Class:         "wellnesstransaction",
@@ -472,11 +472,11 @@ func TestDebitAccount_BookingRefWritesSettlesLink(t *testing.T) {
 	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
 	plainSettlesLnk := "lnk.wellnesstransaction." + nanoIDFromRequestID(plainReqID) + ".settles.booking." + bookingID
 	if keyExists(t, ctx, conn, plainSettlesLnk) {
-		t.Fatalf("a plain DebitAccount with no bookingRef must write no settles link, found %s", plainSettlesLnk)
+		t.Fatalf("a plain WellnessDebitAccount with no bookingRef must write no settles link, found %s", plainSettlesLnk)
 	}
 }
 
-// TestDebitAccount_UnknownBookingRefRejected rejects a DebitAccount whose
+// TestDebitAccount_UnknownBookingRefRejected rejects a WellnessDebitAccount whose
 // bookingRef names a non-existent booking (UnknownBooking).
 func TestDebitAccount_UnknownBookingRefRejected(t *testing.T) {
 	ctx, conn := setupLedgerEnv(t)
@@ -488,7 +488,7 @@ func TestDebitAccount_UnknownBookingRefRejected(t *testing.T) {
 	env := &processor.OperationEnvelope{
 		RequestID:     testutil.GenReqID("debitubr0000000001"),
 		Lane:          processor.LaneDefault,
-		OperationType: "DebitAccount",
+		OperationType: "WellnessDebitAccount",
 		Actor:         ledgerActorKey,
 		SubmittedAt:   "2026-06-26T09:00:00Z",
 		Class:         "wellnesstransaction",
@@ -500,9 +500,9 @@ func TestDebitAccount_UnknownBookingRefRejected(t *testing.T) {
 }
 
 // TestDebitAccount_PriceBookingRefWritesSettlesClassPriceLink (test 5). A
-// DebitAccount carrying priceBookingRef writes the settlesClassPrice audit
+// WellnessDebitAccount carrying priceBookingRef writes the settlesClassPrice audit
 // link (transaction→booking, a relation DISTINCT from settles) the
-// wellnessClassPriceSettlement lens reads; a plain DebitAccount with no
+// wellnessClassPriceSettlement lens reads; a plain WellnessDebitAccount with no
 // priceBookingRef writes no such link. priceBookingRef and bookingRef are
 // independent — supplying priceBookingRef alone writes ONLY settlesClassPrice,
 // never settles (the byte-for-byte regression the EXISTING bookingRef shape
@@ -522,7 +522,7 @@ func TestDebitAccount_PriceBookingRefWritesSettlesClassPriceLink(t *testing.T) {
 	debitEnv := &processor.OperationEnvelope{
 		RequestID:     debitReqID,
 		Lane:          processor.LaneDefault,
-		OperationType: "DebitAccount",
+		OperationType: "WellnessDebitAccount",
 		Actor:         ledgerActorKey,
 		SubmittedAt:   "2026-06-26T09:00:00Z",
 		Class:         "wellnesstransaction",
@@ -538,15 +538,15 @@ func TestDebitAccount_PriceBookingRefWritesSettlesClassPriceLink(t *testing.T) {
 	}
 	settlesLnk := "lnk.wellnesstransaction." + nanoIDFromRequestID(debitReqID) + ".settles.booking." + bookingID
 	if keyExists(t, ctx, conn, settlesLnk) {
-		t.Fatalf("a DebitAccount carrying ONLY priceBookingRef must write no settles link, found %s", settlesLnk)
+		t.Fatalf("a WellnessDebitAccount carrying ONLY priceBookingRef must write no settles link, found %s", settlesLnk)
 	}
 
-	// A plain DebitAccount (no priceBookingRef) writes no settlesClassPrice link at all.
+	// A plain WellnessDebitAccount (no priceBookingRef) writes no settlesClassPrice link at all.
 	plainReqID := testutil.GenReqID("debitpbr0000000002")
 	plainEnv := &processor.OperationEnvelope{
 		RequestID:     plainReqID,
 		Lane:          processor.LaneDefault,
-		OperationType: "DebitAccount",
+		OperationType: "WellnessDebitAccount",
 		Actor:         ledgerActorKey,
 		SubmittedAt:   "2026-06-26T09:05:00Z",
 		Class:         "wellnesstransaction",
@@ -557,12 +557,12 @@ func TestDebitAccount_PriceBookingRefWritesSettlesClassPriceLink(t *testing.T) {
 	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
 	plainSettlesClassPriceLnk := "lnk.wellnesstransaction." + nanoIDFromRequestID(plainReqID) + ".settlesClassPrice.booking." + bookingID
 	if keyExists(t, ctx, conn, plainSettlesClassPriceLnk) {
-		t.Fatalf("a plain DebitAccount with no priceBookingRef must write no settlesClassPrice link, found %s", plainSettlesClassPriceLnk)
+		t.Fatalf("a plain WellnessDebitAccount with no priceBookingRef must write no settlesClassPrice link, found %s", plainSettlesClassPriceLnk)
 	}
 }
 
 // TestDebitAccount_BookingRefAndPriceBookingRefBothWritten proves the two ref
-// params are independent: a single DebitAccount carrying BOTH bookingRef and
+// params are independent: a single WellnessDebitAccount carrying BOTH bookingRef and
 // priceBookingRef writes BOTH the settles and settlesClassPrice links (no
 // mutual exclusion) — the no-show fee and the class-price charge on the same
 // booking are separate settlement facts.
@@ -581,7 +581,7 @@ func TestDebitAccount_BookingRefAndPriceBookingRefBothWritten(t *testing.T) {
 	debitEnv := &processor.OperationEnvelope{
 		RequestID:     debitReqID,
 		Lane:          processor.LaneDefault,
-		OperationType: "DebitAccount",
+		OperationType: "WellnessDebitAccount",
 		Actor:         ledgerActorKey,
 		SubmittedAt:   "2026-06-26T09:00:00Z",
 		Class:         "wellnesstransaction",
@@ -601,7 +601,7 @@ func TestDebitAccount_BookingRefAndPriceBookingRefBothWritten(t *testing.T) {
 	}
 }
 
-// TestDebitAccount_UnknownPriceBookingRefRejected rejects a DebitAccount whose
+// TestDebitAccount_UnknownPriceBookingRefRejected rejects a WellnessDebitAccount whose
 // priceBookingRef names a non-existent booking (UnknownBooking).
 func TestDebitAccount_UnknownPriceBookingRefRejected(t *testing.T) {
 	ctx, conn := setupLedgerEnv(t)
@@ -613,7 +613,7 @@ func TestDebitAccount_UnknownPriceBookingRefRejected(t *testing.T) {
 	env := &processor.OperationEnvelope{
 		RequestID:     testutil.GenReqID("debitupbr0000000001"),
 		Lane:          processor.LaneDefault,
-		OperationType: "DebitAccount",
+		OperationType: "WellnessDebitAccount",
 		Actor:         ledgerActorKey,
 		SubmittedAt:   "2026-06-26T09:00:00Z",
 		Class:         "wellnesstransaction",

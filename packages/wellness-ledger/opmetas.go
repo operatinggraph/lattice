@@ -3,28 +3,19 @@ package wellnessledger
 import "github.com/operatinggraph/lattice/internal/pkgmgr"
 
 // OpMetas declares descriptor-vocabulary metadata (edge-showcase-app-design.md
-// §3.3) for the one ledger op a person triggers.
+// §3.3) for the three ledger ops a person triggers — opening the account,
+// then charging or crediting it.
 //
-// DebitAccount and CreditAccount carry none deliberately: both stay granted
-// at scope=any to `operator` alone — every wellness charge/payment today is a
-// Weaver-target auto-charge (no-show fee, class price), never a
-// front-desk-initiated entry. Neither is something a person decides to do, so
-// neither has a form to render, and the S1 gate does not ask them for one (it
-// fires on ops granted beyond the trusted-tool roles).
-//
-// WellnessCreateAccount is the exception: opening a member's ledger account
-// is what the browser needs to do before My Classes can show a real balance
-// instead of "no charges yet" — a front-desk (or self-service) act, so it
-// grants frontOfHouse and needs a descriptor a client can render. The voice
-// modeled here is STAFF-standing (AuthContext "standing"), mirroring
-// cafe-ledger's CreditCafeAccount — the staff-facing case, where a
-// front-desk actor opens the account for a MEMBER BEING VIEWED
-// (dispatch.targetField). The op ALSO carries a scope=self grant
-// (permissions.go) for wellness-app's own hand-coded FE (which submits
-// directly via submitOp, not through this descriptor) to open a member's OWN
-// account at self-service booking time; no descriptor-driven client exists
-// for wellness yet, so a second self-scope OpMeta variant isn't added here
-// until one does.
+// All three are front-desk acts, so all three grant frontOfHouse
+// (permissions.go) and need a descriptor a client can render — the S1 gate
+// fires on any op granted beyond the trusted-tool roles. The voice is
+// STAFF-standing (AuthContext "standing"), mirroring cafe-ledger's
+// CreditCafeAccount and clinic-ledger's identical three-op set.
+// WellnessCreateAccount also carries a scope=self grant (permissions.go) for
+// wellness-app's own hand-coded FE (which submits directly via submitOp, not
+// through this descriptor) to open a member's OWN account at self-service
+// booking time; no descriptor-driven client exists for wellness yet, so a
+// second self-scope OpMeta variant isn't added here until one does.
 func OpMetas() []pkgmgr.OpMetaSpec {
 	return []pkgmgr.OpMetaSpec{
 		{
@@ -48,6 +39,60 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 				TargetField: "identityKey",
 				TargetType:  "identity",
 				Reads:       []string{"{payload.identityKey}"},
+			},
+		},
+		{
+			OperationType: "WellnessDebitAccount",
+			Presentation: &pkgmgr.OpPresentationSpec{
+				Title:       "Record a charge",
+				Description: "Charge a member's wellness ledger — a no-show fee or a front-desk-recorded fee.",
+				Icon:        "receipt",
+				Tone:        "primary",
+				SubmitLabel: "Record charge",
+			},
+			InputSchema: `{"type":"object","properties":` +
+				`{"accountKey":{"type":"string","description":"vtx.wellnessaccount.<NanoID> of the account being charged — auto-filled from the account being viewed."},` +
+				`"amountCents":{"type":"integer","title":"Amount","minimum":1,"description":"Charge amount, in whole cents."},` +
+				`"memo":{"type":"string","title":"Note","description":"Optional note describing the charge."}},` +
+				`"required":["accountKey","amountCents"]}`,
+			FieldDescriptions: map[string]string{
+				"accountKey":  "The account being charged — auto-filled by the client from the account being viewed (dispatch.targetField), not user-entered.",
+				"amountCents": "How much to charge, entered in dollars — e.g. 25.00. Must be more than zero; a charge increases what the member owes.",
+				"memo":        "Optional free text describing the charge — e.g. \"No-show fee — Vinyasa Flow\".",
+			},
+			Dispatch: &pkgmgr.OpDispatchSpec{
+				Class:       "wellnesstransaction",
+				AuthContext: "standing",
+				TargetField: "accountKey",
+				TargetType:  "wellnessaccount",
+				Reads:       []string{"{payload.accountKey}"},
+			},
+		},
+		{
+			OperationType: "WellnessCreditAccount",
+			Presentation: &pkgmgr.OpPresentationSpec{
+				Title:       "Record a payment",
+				Description: "Credit a payment received against a member's wellness ledger.",
+				Icon:        "receipt",
+				Tone:        "primary",
+				SubmitLabel: "Record payment",
+			},
+			InputSchema: `{"type":"object","properties":` +
+				`{"accountKey":{"type":"string","description":"vtx.wellnessaccount.<NanoID> of the account being paid — auto-filled from the account being viewed."},` +
+				`"amountCents":{"type":"integer","title":"Amount","minimum":1,"description":"Amount received, in whole cents."},` +
+				`"memo":{"type":"string","title":"Note","description":"Optional note describing the payment."}},` +
+				`"required":["accountKey","amountCents"]}`,
+			FieldDescriptions: map[string]string{
+				"accountKey":  "The account being credited — auto-filled by the client from the account being viewed (dispatch.targetField), not user-entered.",
+				"amountCents": "How much was received, entered in dollars — e.g. 25.00. Must be more than zero; a payment reduces what the member owes.",
+				"memo":        "Optional free text describing the payment — e.g. \"Front-desk payment\".",
+			},
+			Dispatch: &pkgmgr.OpDispatchSpec{
+				Class:       "wellnesstransaction",
+				AuthContext: "standing",
+				TargetField: "accountKey",
+				TargetType:  "wellnessaccount",
+				Reads:       []string{"{payload.accountKey}"},
 			},
 		},
 	}

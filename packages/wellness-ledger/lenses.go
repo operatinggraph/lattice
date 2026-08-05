@@ -46,7 +46,7 @@ const ClassPriceSettlementTarget = "wellnessClassPriceSettlement"
 // the ledger itself never stores a mutable running total), wellnessMemberAccounts
 // (the member -> account key lookup, since the account key is no longer
 // derivable), wellnessNoShowSettlement (the missing_charge convergence
-// lens targets.go's WeaverTargets dispatches DebitAccount over), and
+// lens targets.go's WeaverTargets dispatches WellnessDebitAccount over), and
 // wellnessClassPriceSettlement (the missing_price_charge convergence lens —
 // the OTHER wellness billing gap, a class's booking price, converged
 // unconditionally on attendance rather than gated on a noShow). Prefixed
@@ -120,7 +120,7 @@ func Lenses() []pkgmgr.LensSpec {
 //     booking yet (count(tx.key) collapses the fan to a single existence
 //     check — the objectLiveness/clauseSatisfaction idiom, same as
 //     clinic-ledger's clinicNoShowSettlement). Weaver dispatches
-//     DebitAccount{accountKey, amountCents, bookingRef} (targets.go) — the
+//     WellnessDebitAccount{accountKey, amountCents, bookingRef} (targets.go) — the
 //     bookingRef extension writes the settles audit link this OPTIONAL
 //     MATCH walks, so once posted the gap converges and stays converged
 //     (noShow carries forward once SetBookingAttendance sets it, and a
@@ -173,7 +173,7 @@ RETURN
 //     `settlesClassPrice` this booking yet (count(tx.key) collapses the fan to
 //     a single existence check, the same objectLiveness/clauseSatisfaction
 //     idiom noShowSettlementSpec uses). Weaver dispatches
-//     DebitAccount{accountKey, amountCents, priceBookingRef} (targets.go) —
+//     WellnessDebitAccount{accountKey, amountCents, priceBookingRef} (targets.go) —
 //     the priceBookingRef extension writes the settlesClassPrice audit link
 //     this OPTIONAL MATCH walks (a DISTINCT relation from settles, so this
 //     lens's count() never sees a no-show-fee transaction and vice versa), so
@@ -220,8 +220,8 @@ RETURN
 // account and heldFor to the identity so the FE can filter/group by
 // identityKey with no extra hop. Every MATCH is REQUIRED (not OPTIONAL): a
 // transaction projects a row only when it is genuinely posted to a live
-// account held for a live identity (the normal shape every DebitAccount/
-// CreditAccount commit produces). The per-row key is the transaction key (the
+// account held for a live identity (the normal shape every WellnessDebitAccount/
+// WellnessCreditAccount commit produces). The per-row key is the transaction key (the
 // IntoKey default), so the read model is keyed by vtx.wellnesstransaction.<id>;
 // transactionKey repeats it in the body for the reader.
 const ledgerHistorySpec = `MATCH (t:wellnesstransaction)

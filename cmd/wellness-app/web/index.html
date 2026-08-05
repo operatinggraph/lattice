@@ -62,6 +62,23 @@
       <button id="roster-book-guest-submit" class="ghost">Book guest</button>
     </div>
     <div id="roster-body"></div>
+
+    <div id="roster-billing" class="session-form" hidden>
+      <h2 style="margin: 0 0 8px; font-size: 15px;">Billing</h2>
+      <div class="field">
+        <label for="billing-member">Member</label>
+        <select id="billing-member"></select>
+      </div>
+      <div id="billing-balance" class="ledger-balance"></div>
+      <ul id="billing-list" class="ledger-list" aria-live="polite"></ul>
+      <div id="billing-empty" class="empty" hidden>No charges or payments recorded yet.</div>
+      <div class="ledger-record-form">
+        <input type="number" id="billing-amount" step="0.01" min="0.01" placeholder="Amount ($)" aria-label="Amount in dollars" />
+        <input type="text" id="billing-memo" placeholder="Memo (optional)" aria-label="Memo" />
+        <button type="button" id="billing-charge" class="ghost">+ Record charge</button>
+        <button type="button" id="billing-payment" class="ghost">+ Record payment</button>
+      </div>
+    </div>
   </section>
 
   <section id="view-studios" role="tabpanel" hidden>

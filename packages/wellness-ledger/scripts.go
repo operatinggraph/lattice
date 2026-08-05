@@ -119,7 +119,7 @@ def execute(state, op):
     fail("account DDL: unknown operationType: " + ot)
 `
 
-// transactionDDLScript handles DebitAccount and CreditAccount. Each mints a
+// transactionDDLScript handles WellnessDebitAccount and WellnessCreditAccount. Each mints a
 // fresh transaction vertex + a .entry aspect + the postedTo link to the
 // account. The ledger is append-only: no aspect on the account is read or
 // mutated here, so concurrent debits/credits against the same account never
@@ -212,7 +212,7 @@ def post_entry(state, op, entry_type, event_class, allow_booking_ref):
             if not vertex_alive(state, booking_key):
                 fail("UnknownBooking: " + booking_key)
 
-        # priceBookingRef is independent of bookingRef — a DebitAccount may
+        # priceBookingRef is independent of bookingRef — a WellnessDebitAccount may
         # carry either, both, or neither. Same validation shape, a DISTINCT
         # settlesClassPrice link below so the no-show and class-price
         # settlement gaps never collide in a count().
@@ -251,7 +251,7 @@ def post_entry(state, op, entry_type, event_class, allow_booking_ref):
     # settles: the transaction (later-arriving) is the source, the
     # pre-existing booking is the target (Contract #1 §1.1). Only written
     # when the caller supplied bookingRef — a plain human-submitted
-    # DebitAccount is unaffected. The wellnessNoShowSettlement lens walks
+    # WellnessDebitAccount is unaffected. The wellnessNoShowSettlement lens walks
     # this link to converge the no-show-fee gap once posted.
     if booking_key != None:
         settles_lnk = "lnk.wellnesstransaction." + tx_id + ".settles.booking." + booking_id
@@ -275,10 +275,10 @@ def post_entry(state, op, entry_type, event_class, allow_booking_ref):
 def execute(state, op):
     ot = op.operationType
 
-    if ot == "DebitAccount":
+    if ot == "WellnessDebitAccount":
         return post_entry(state, op, "debit", "account.debited", True)
 
-    if ot == "CreditAccount":
+    if ot == "WellnessCreditAccount":
         return post_entry(state, op, "credit", "account.credited", False)
 
     fail("transaction DDL: unknown operationType: " + ot)

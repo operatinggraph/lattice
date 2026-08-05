@@ -3,17 +3,15 @@ package wellnessledger
 import "github.com/operatinggraph/lattice/internal/pkgmgr"
 
 // Permissions returns the package's permission vertices + grants.
-// DebitAccount/CreditAccount stay orchestrator-submitted (the operator-grant
-// idiom clinic-ledger uses) — every wellness charge today is a Weaver-target
-// auto-charge (no-show fee, class price), never a front-desk-initiated entry.
-// WellnessCreateAccount also grants front-of-house staff: wellness-app's My
-// Classes balance panel can only ever show "no charges yet" until some
-// caller opens the member's account, and unlike Debit/Credit that caller IS
-// meant to be the browser (a member's first charge should not have to
-// precede their account existing). Unconfined, mirroring clinic-ledger's
-// CreateAccount / clinic-domain's CreatePatient — a wellnessaccount is
-// anchored on a member identity, which carries no building, so there is no
-// location to workplace-confine front-desk staff to.
+// WellnessCreateAccount, WellnessDebitAccount, and WellnessCreditAccount all
+// grant front-of-house staff alongside the operator: wellness-app's Roster
+// view ships a Record charge/payment form to the front desk, and every step
+// of that flow — opening a member's account, then charging or crediting it —
+// is meant to be reachable from the browser, mirroring clinic-ledger's
+// identical ClinicCreateAccount/ClinicDebitAccount/ClinicCreditAccount fix.
+// Unconfined — a wellnessaccount is anchored on a member identity, which
+// carries no building, so there is no location to workplace-confine any of
+// the three to.
 //
 // WellnessCreateAccount ALSO grants `consumer` at scope=self (real-actor-
 // write-auth-e2e idiom, wellness-domain's CreateBooking self-scope
@@ -24,20 +22,25 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 // `authContext.target == actor` is checked at step 3 (Contract #6); the
 // script separately requires payload.identityKey to BE that target
 // (scripts.go), the same gap CreateBooking's script closes for
-// payload.booker.
+// payload.booker. WellnessDebitAccount/WellnessCreditAccount carry no
+// self-scope grant: a payment credit needs a human witness (cash/card handed
+// over the counter), the same reason clinic-ledger and cafe-ledger keep
+// their own credit ops off the consumer role — a member self-crediting their
+// own balance would erase debt with no actual payment changing hands.
 //
-// Named WellnessCreateAccount rather than the bare CreateAccount every other
-// ledger package's CreateAccount uses: a standing grant matches on
-// operationType STRING EQUALITY alone (Contract #6 §240;
-// processor.matchPlatformPermission) — the envelope's `class` picks the DDL
-// but step 3 never reads it — so operationType is a GLOBAL namespace. A
-// frontOfHouse grant on the bare "CreateAccount" name would also authorize
-// that role against clinic-ledger's / loftspace-ledger's / cafe-ledger's
-// identically-named (operator-only) op, none of which intend it
-// (lint-package-standard S9; cafe-ledger's CreditCafeAccount is the same
-// idiom). Nothing else references "CreateAccount" in this package (no seed
-// script, no Weaver target, no FE call), so this is a straight rename, not
-// an additive alias.
+// Named Wellness{CreateAccount,DebitAccount,CreditAccount} rather than the
+// bare names every other ledger package's create/debit/credit ops use: a
+// standing grant matches on operationType STRING EQUALITY alone (Contract
+// #6 §240; processor.matchPlatformPermission) — the envelope's `class`
+// picks the DDL but step 3 never reads it — so operationType is a GLOBAL
+// namespace. A frontOfHouse grant on a bare "DebitAccount"/"CreditAccount"
+// name would also authorize that role against clinic-ledger's/
+// loftspace-ledger's identically-named (operator-only, or in clinic's case
+// now Clinic-prefixed) ops, none of which intend it (lint-package-standard
+// S9; cafe-ledger's CreditCafeAccount is the same idiom). Nothing else
+// references the bare "DebitAccount"/"CreditAccount" names in this package
+// (no seed script, only this package's own targets.go Weaver dispatch), so
+// this is a straight rename, not an additive alias.
 func Permissions() []pkgmgr.PermissionSpec {
 	return []pkgmgr.PermissionSpec{
 		{
@@ -53,16 +56,16 @@ func Permissions() []pkgmgr.PermissionSpec {
 			GrantsTo:      []string{"consumer"},
 		},
 		{
-			OperationType: "DebitAccount",
+			OperationType: "WellnessDebitAccount",
 			Scope:         "any",
-			Note:          "Grants the operator the right to submit DebitAccount (records a charge — a no-show fee today).",
-			GrantsTo:      []string{"operator"},
+			Note:          "Grants the operator and front-of-house staff the right to submit WellnessDebitAccount (records a charge — a no-show fee, a class price, or a front-desk-recorded fee). Unconfined: see package doc.",
+			GrantsTo:      []string{"operator", "frontOfHouse"},
 		},
 		{
-			OperationType: "CreditAccount",
+			OperationType: "WellnessCreditAccount",
 			Scope:         "any",
-			Note:          "Grants the operator the right to submit CreditAccount (records a payment received).",
-			GrantsTo:      []string{"operator"},
+			Note:          "Grants the operator and front-of-house staff the right to submit WellnessCreditAccount (records a payment received). Unconfined: see package doc.",
+			GrantsTo:      []string{"operator", "frontOfHouse"},
 		},
 	}
 }

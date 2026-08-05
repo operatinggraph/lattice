@@ -1,13 +1,16 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
 	"sort"
+	"strings"
 
 	"github.com/operatinggraph/lattice/internal/gateway/auth"
 	"github.com/operatinggraph/lattice/internal/substrate"
+	wellnessdomain "github.com/operatinggraph/lattice/packages/wellness-domain"
 	wellnessledger "github.com/operatinggraph/lattice/packages/wellness-ledger"
 )
 
@@ -91,19 +94,45 @@ func computeLedgerHistory(keys []string, get kvGetter, identityKey string) ([]le
 	return rows, balance
 }
 
+// memberVisibleToHats reports whether targetIdentityKey is a member hats'
+// workplace covers — reuses the exact wellnessMembers-lens confinement
+// /api/members' picker uses (computeCoveredMembers, residents.go) as the
+// ledger's staff-read gate, rather than standing up a second confinement
+// mechanism for the same fact. Fails CLOSED throughout that helper: an
+// operator sees every member, a staffer sees only the ones their `worksAt`
+// location covers, and a caller with no workplace covers nothing.
+func (s *server) memberVisibleToHats(ctx context.Context, hats subjectHats, targetIdentityKey string) (bool, error) {
+	bucket := wellnessdomain.WellnessMembersBucket
+	keys, err := s.conn.KVListKeys(ctx, bucket)
+	if err != nil {
+		return false, err
+	}
+	for _, row := range computeCoveredMembers(keys, s.kvGetter(ctx, bucket), hats) {
+		if row.BookerKey == targetIdentityKey {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
 // handleLedger implements GET /api/ledger — the signed-in member's own
-// billing history, served from the wellnessLedgerHistory + wellnessMemberAccounts
-// lens read models (P5, never Core KV). There is deliberately NO identityKey
-// parameter, mirroring handleBookings: whose ledger this is comes from the
-// verified session and nowhere else — a client-supplied identity filter is
-// precisely the vector clinic closed when it deleted `/api/appointments?provider=`.
+// billing history by default, served from the wellnessLedgerHistory +
+// wellnessMemberAccounts lens read models (P5, never Core KV). Whose ledger
+// this is comes from the verified session unless the caller supplies
+// ?identityKey=, which is gated to staff (isStaff/isOperator) AND checked
+// against memberVisibleToHats above — the same confinement /api/members
+// already enforces for its picker, not a fresh unauthenticated party filter
+// (that vector is the one clinic closed when it deleted
+// `/api/appointments?provider=` — the fix there was adding a visibility
+// check, not banning party filters outright; clinic's own `/api/ledger?
+// patientKey=` proves the pattern, gated by Postgres RLS instead of a lens).
+// wellness-app's Roster billing panel needs this to record a front-desk
+// charge/payment against a member OTHER than the signed-in session.
 //
 // Returns the member's transaction rows, the running balance, and the
-// account key — empty when no wellnessaccount has been opened for them yet,
-// which today only a root-submitted op can do (CreateAccount is
-// grantsTo-operator-only, packages/wellness-ledger/permissions.go; the
-// browser has no grant to call it itself). A blank accountKey is therefore
-// the normal, expected shape for most members right now, not an error.
+// account key — empty when no wellnessaccount has been opened for them yet.
+// A blank accountKey is the normal, expected shape for a member who hasn't
+// been charged yet, not an error.
 func (s *server) handleLedger(w http.ResponseWriter, r *http.Request) {
 	subject, err := s.authenticateRead(r)
 	if err != nil {
@@ -118,6 +147,29 @@ func (s *server) handleLedger(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 
 	identityKey := auth.IdentityKeyPrefix + subject
+	if target := strings.TrimSpace(r.URL.Query().Get("identityKey")); target != "" && target != identityKey {
+		hats, err := s.resolveSubjectHats(r)
+		if err != nil {
+			s.writeAuthError(w, err)
+			return
+		}
+		if !hats.isStaff() && !hats.isOperator {
+			s.writeError(w, http.StatusForbidden,
+				"another member's ledger is a staff surface for the place you work at")
+			return
+		}
+		visible, err := s.memberVisibleToHats(ctx, hats, target)
+		if err != nil {
+			s.logger.Error("check member visibility for ledger read", "error", err)
+			s.writeError(w, http.StatusBadGateway, "could not verify read access")
+			return
+		}
+		if !visible {
+			s.writeError(w, http.StatusForbidden, "member not visible to this actor")
+			return
+		}
+		identityKey = target
+	}
 
 	var accountKey string
 	entry, err := conn.KVGet(ctx, wellnessledger.MemberAccountsBucket, identityKey)
@@ -145,6 +197,7 @@ func (s *server) handleLedger(w http.ResponseWriter, r *http.Request) {
 	}
 	rows, balance := computeLedgerHistory(keys, s.kvGetter(ctx, bucket), identityKey)
 	s.writeJSON(w, http.StatusOK, map[string]any{
+		"identityKey":  identityKey,
 		"accountKey":   accountKey,
 		"transactions": rows,
 		"balanceCents": balance,
