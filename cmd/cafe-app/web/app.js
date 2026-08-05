@@ -602,6 +602,18 @@ function renderOpenTabCard(tab, items) {
 
 // ---- Front Desk view (staff only) --------------------------------------
 
+// keepSoonest reduces a lease's badge candidates (bookings or visits) to the
+// single soonest-upcoming one, mirroring the new Date(x.startsAt).getTime()
+// idiom clinic-app/wellness-app already use for upcoming/past sorting — a
+// lease's second same-day booking must not overwrite its first.
+function keepSoonest(byLease, item) {
+  const prev = byLease[item.leaseAppKey];
+  if (!prev) { byLease[item.leaseAppKey] = item; return; }
+  const prevAt = prev.startsAt ? new Date(prev.startsAt).getTime() : Infinity;
+  const itemAt = item.startsAt ? new Date(item.startsAt).getTime() : Infinity;
+  if (itemAt < prevAt) byLease[item.leaseAppKey] = item;
+}
+
 async function loadFrontDesk() {
   const grid = document.getElementById("frontdesk-grid");
   const summary = document.getElementById("frontdesk-summary");
@@ -623,7 +635,7 @@ async function loadFrontDesk() {
   let bookingsByLease = {};
   try {
     const br = await appGet("/api/frontdesk-bookings");
-    (br.bookings || []).forEach((b) => { bookingsByLease[b.leaseAppKey] = b; });
+    (br.bookings || []).forEach((b) => keepSoonest(bookingsByLease, b));
   } catch (_) { /* front-desk not installed / unreachable — badges just don't show */ }
 
   // Same join, for the resident's own upcoming clinic visit — existence +
@@ -632,7 +644,7 @@ async function loadFrontDesk() {
   let visitsByLease = {};
   try {
     const vs = await appGet("/api/frontdesk-visits");
-    (vs.visits || []).forEach((v) => { visitsByLease[v.leaseAppKey] = v; });
+    (vs.visits || []).forEach((v) => keepSoonest(visitsByLease, v));
   } catch (_) { /* front-desk not installed / unreachable — visit badge just doesn't show */ }
 
   // Same resident-name/unit-address join the lease pickers use
