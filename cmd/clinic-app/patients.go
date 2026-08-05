@@ -126,5 +126,7 @@ func (s *server) handleStaffPatients(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, http.StatusBadGateway, "could not read the protected patients model")
 		return
 	}
-	s.writeJSON(w, http.StatusOK, map[string]any{"patients": rows, "count": len(rows), "scope": "rls"})
+	resp := s.withProjectionHealth(ctx, "clinicPatientsRead",
+		map[string]any{"patients": rows, "count": len(rows), "scope": "rls"})
+	s.writeJSON(w, http.StatusOK, resp)
 }

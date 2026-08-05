@@ -259,7 +259,9 @@ func (s *server) handleMyAppointments(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, http.StatusBadGateway, "could not read the protected appointments model")
 		return
 	}
-	s.writeJSON(w, http.StatusOK, map[string]any{"appointments": rows, "count": len(rows), "scope": "rls"})
+	resp := s.withProjectionHealth(ctx, "clinicAppointmentsRead",
+		map[string]any{"appointments": rows, "count": len(rows), "scope": "rls"})
+	s.writeJSON(w, http.StatusOK, resp)
 }
 
 // selectMyProviderScheduleSQL is selectMyAppointmentsSQL's provider-anchored
@@ -357,7 +359,9 @@ func (s *server) handleMyProviderSchedule(w http.ResponseWriter, r *http.Request
 		s.writeError(w, http.StatusBadGateway, "could not read the protected provider schedule model")
 		return
 	}
-	s.writeJSON(w, http.StatusOK, map[string]any{"appointments": rows, "count": len(rows), "scope": "rls"})
+	resp := s.withProjectionHealth(ctx, "providerAppointmentsRead",
+		map[string]any{"appointments": rows, "count": len(rows), "scope": "rls"})
+	s.writeJSON(w, http.StatusOK, resp)
 }
 
 // handleStaffAppointments implements GET /api/staff/appointments — the
@@ -392,5 +396,7 @@ func (s *server) handleStaffAppointments(w http.ResponseWriter, r *http.Request)
 		s.writeError(w, http.StatusBadGateway, "could not read the protected appointments model")
 		return
 	}
-	s.writeJSON(w, http.StatusOK, map[string]any{"appointments": rows, "count": len(rows), "scope": "rls"})
+	resp := s.withProjectionHealth(ctx, "clinicAppointmentsRead",
+		map[string]any{"appointments": rows, "count": len(rows), "scope": "rls"})
+	s.writeJSON(w, http.StatusOK, resp)
 }

@@ -23,11 +23,14 @@ const state = {
   sites: [], // clinic-domain clinicSites lens rows: {siteKey, name}
   providerSites: [], // clinic-domain providerSites lens rows: {providerKey, siteKey, providerName, siteName}
   appts: [],
+  apptsProjectionHealthy: true, // false only when /api/my-appointments explicitly reports its projection paused — lets an empty grid read as "data feed paused" instead of "no appointments"
   mySchedule: [], // the signed-in provider's OWN appointments (PROTECTED, provider-self RLS via /api/my-schedule) — the provider hat's day view
+  mySchedProjectionHealthy: true, // same signal as apptsProjectionHealthy, for /api/my-schedule
   schedule: [],
   followups: [], // every appointment whose documented visit requested a follow-up (clinic-wide worklist)
   series: [], // clinic-wide recurring visit series worklist (PROTECTED, staff wildcard, D1.5)
   mySeries: [], // the selected patient's own recurring visit series (PROTECTED, patient-self RLS, D1.5)
+  mySeriesProjectionHealthy: true, // same signal as apptsProjectionHealthy, for /api/my-visit-series
   ledger: null, // the selected patient's last-loaded /api/ledger response (billing history + balance)
   patient: null, // the patient key whose record is on screen (a data selection, not an actor choice)
   view: "book",
@@ -2154,6 +2157,7 @@ async function loadAppts() {
     // patient on screen (see forPatient above the sibling slot-picker call).
     const data = await appGet("/api/my-appointments");
     state.appts = forPatient(data.appointments, state.patient);
+    state.apptsProjectionHealthy = data.projectionHealthy !== false;
   } catch (e) {
     grid.innerHTML = "";
     empty.hidden = false;
@@ -2178,7 +2182,9 @@ function renderAppts() {
   grid.innerHTML = "";
   if (state.appts.length === 0) {
     empty.hidden = false;
-    empty.textContent = "No appointments yet. Book one on the Book tab.";
+    empty.textContent = state.apptsProjectionHealthy
+      ? "No appointments yet. Book one on the Book tab."
+      : "Appointment data is temporarily paused — this list may be incomplete. Try again shortly.";
     $("#appts-summary").textContent = "";
     return;
   }
@@ -2239,6 +2245,7 @@ async function loadMySchedule() {
   try {
     const data = await appGet("/api/my-schedule");
     state.mySchedule = data.appointments || [];
+    state.mySchedProjectionHealthy = data.projectionHealthy !== false;
   } catch (e) {
     grid.innerHTML = "";
     state.mySchedule = [];
@@ -2256,7 +2263,9 @@ function renderMySchedule() {
   grid.innerHTML = "";
   if (state.mySchedule.length === 0) {
     empty.hidden = false;
-    empty.textContent = "No appointments on your schedule yet.";
+    empty.textContent = state.mySchedProjectionHealthy
+      ? "No appointments on your schedule yet."
+      : "Schedule data is temporarily paused — this list may be incomplete. Try again shortly.";
     $("#myschedule-summary").textContent = "";
     return;
   }
@@ -2557,6 +2566,7 @@ async function loadMySeries() {
   try {
     const data = await appGet("/api/my-visit-series");
     state.mySeries = forPatient(data.series, state.patient);
+    state.mySeriesProjectionHealthy = data.projectionHealthy !== false;
   } catch (e) {
     state.mySeries = [];
     renderMySeries();
@@ -2864,7 +2874,9 @@ function renderMySeries() {
   const mine = state.mySeries;
   if (mine.length === 0) {
     empty.hidden = false;
-    empty.textContent = "No recurring visit series for this patient yet.";
+    empty.textContent = state.mySeriesProjectionHealthy
+      ? "No recurring visit series for this patient yet."
+      : "Visit-series data is temporarily paused — this list may be incomplete. Try again shortly.";
     return;
   }
   empty.hidden = true;
