@@ -1,17 +1,20 @@
 name: one-bill
-version: 0.2.0
+version: 0.3.0
 description: |
-  Café vertical Inc 3 — the combined-statement lens. No vertex types, links,
-  or permissions of its own: two Lenses (oneBillRentEntries, oneBillCafeEntries)
-  re-project loftspace-ledger's and cafe-ledger's already-posted transactions,
-  tagged by source, into the shared one-bill-history bucket keyed by
-  leaseAppKey — café charges land on the same combined statement as rent.
-  The cypher engine has no UNION, so this is two Lenses sharing one bucket
+  The combined-statement lens. No vertex types, links, or permissions of its
+  own: four Lenses (oneBillRentEntries, oneBillCafeEntries, oneBillClinicEntries,
+  oneBillWellnessEntries) re-project loftspace-ledger's, cafe-ledger's,
+  clinic-ledger's and wellness-ledger's already-posted transactions, tagged by
+  source, into the shared one-bill-history bucket keyed by leaseAppKey — every
+  vertical's charges land on the same combined statement as rent.
+  The cypher engine has no UNION, so this is four Lenses sharing one bucket
   (mirrors rbac-domain/service-location's cap.roles.* / cap.svc.* precedent).
-  Depends on loftspace-ledger and cafe-ledger.
+  Depends on loftspace-ledger, cafe-ledger, clinic-ledger and wellness-ledger.
 depends:
   - loftspace-ledger
   - cafe-ledger
+  - clinic-ledger
+  - wellness-ledger
 declares:
   lenses:
     - canonicalName: oneBillRentEntries
@@ -19,6 +22,14 @@ declares:
       bucket: one-bill-history
       engine: full
     - canonicalName: oneBillCafeEntries
+      adapter: nats-kv
+      bucket: one-bill-history
+      engine: full
+    - canonicalName: oneBillClinicEntries
+      adapter: nats-kv
+      bucket: one-bill-history
+      engine: full
+    - canonicalName: oneBillWellnessEntries
       adapter: nats-kv
       bucket: one-bill-history
       engine: full

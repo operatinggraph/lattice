@@ -2609,14 +2609,20 @@ async function refreshLedgerBody(body, leaseAppKey, canRecord) {
   if (canRecord) body.append(renderLedgerRecordForm(leaseAppKey, data.accountKey, body, canRecord));
 }
 
-// ---- One-bill statement (read-only, combined rent + café) ----
+// ---- One-bill statement (read-only, combined rent + café + clinic + wellness) ----
 //
-// One row of the shared `one-bill-history` lens bucket (packages/one-bill,
-// Café Inc 3) per posted transaction — rent AND café charges on the same
-// lease statement, tagged by source. Read via GET /api/one-bill?leaseAppKey=
-// (P5). Tenant-facing only: the landlord's record-charge console still uses
-// renderLedgerPanel/handleLedger (rent only — café charges post through the
-// café POS, not this console).
+// One row of the shared `one-bill-history` lens bucket (packages/one-bill)
+// per posted transaction — rent, café, clinic and wellness charges all on
+// the same lease statement, tagged by source. Read via GET
+// /api/one-bill?leaseAppKey= (P5). Tenant-facing only: the landlord's
+// record-charge console still uses renderLedgerPanel/handleLedger (rent
+// only — every other vertical's charges post through its own console, not
+// this one).
+const ONE_BILL_SOURCE_BADGES = {
+  cafe: "☕ Café",
+  clinic: "🩺 Clinic",
+  wellness: "🧘 Wellness",
+};
 
 // renderStatementPanel builds a collapsible combined-statement section,
 // mirroring renderLedgerPanel's toggle/lazy-load shape.
@@ -2677,7 +2683,7 @@ async function refreshStatementBody(body, leaseAppKey) {
       const li = document.createElement("li");
       li.className = "ledger-entry " + e.type;
       const sign = e.type === "debit" ? "+" : "−";
-      const badge = e.source === "cafe" ? "☕ Café" : "🏠 Rent";
+      const badge = ONE_BILL_SOURCE_BADGES[e.source] || "🏠 Rent";
       li.textContent =
         fmtDate(e.postedAt) + " · " + badge + " · " + sign + moneyAmount(e.amountCents / 100) +
         (e.memo ? " — " + e.memo : "");
