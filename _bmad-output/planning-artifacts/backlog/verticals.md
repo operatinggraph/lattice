@@ -10,7 +10,7 @@ doc + git, never narrated in the cell): see [lattice.md → How this board works
 
 ## Vertical demand backlog (PO discovery)
 
-Open items only — shipped demand is in the Done log. The PO files (tagged vertical + owner: FE = Sally +
+Open items only — **shipped demand is in the Done log**. The PO files (tagged vertical + owner: FE = Sally +
 FE Engineer · pkg = Package Designer · platform = component owner + Lattice lane); the Steward + FE
 Engineer build. **No-paper-over:** a missing platform *primitive* routes to [lattice.md](lattice.md) and
 the row is `🚧 blocked-on:` it (a missing *lens* is package work, built here).
@@ -25,6 +25,9 @@ the row is `🚧 blocked-on:` it (a missing *lens* is package work, built here).
 | **An exhausted screening check still renders "To do" forever** | `leaseApplicationsRead` now carries missing/inflight/declined per gap (row above shipped) but no `exhausted_bgcheck`/`exhausted_payment` column — Weaver's dispatch-count-vs-budget state is deliberately not lens-readable — so `stepState` can't tell "escalated to Augur" from "not started". residual of `ab971faa` below. | LoftSpace | pkg + FE | ★ | S | 🚧 blocked-on: [lattice.md](lattice.md) `[Weaver] gap retry-budget exhaustion has no lens-readable signal` |
 | **Loftspace/café/wellness protected reads don't yet signal a paused projection** | An empty protected read (e.g. `{"appointments":[],"count":0}`) is indistinguishable from a structurally paused projection — clinic-app's 6 RLS reads already call `internal/projectionhealth.Check`; those apps' protected-read handlers don't yet. | Cross-vertical | FE + pkg | ★ | M | 📋 ready |
 | **App-server GET endpoints apply no per-lease/patient ownership filter** | `GET /api/ledger?leaseAppKey=` (loftspace-app) and its siblings answer any signed-in session for any key it names — a signed-in resident can read another lease's balance/accountKey. Not itself exploitable (write-path ops still prove ownership) but is the reconnaissance surface for one. App-wide, not one vertical. | Cross-vertical | pkg + platform | ★ | M | 📋 ready |
+| **A wellness member is billed with no itemization and no reason** | My Classes renders only `ledgerBalanceLine`, discarding the `transactions[]` self-scoped `/api/ledger` already returns (cafe-app itemizes the resident's own rows); and `wellnessNoShowSettlement`/`wellnessRefundSettlement` pass no `memo` — unlike `wellnessClassPriceSettlement`'s `row.sessionName` — so every auto-posted row reads "+$25.00" here and `memo: null` on the one bill. clinicNoShowSettlement is the precedent. | Wellness | FE + pkg | ★★ | M | 📋 ready |
+| **No seeded wellness class has a price, so two settlement targets have never fired** | All 36 live sessions carry `priceCents: 0`, so `settlesClassPrice` links = 0 and `vtx.wellnessrefund.*` = 0 — `wellnessClassPriceSettlement` and `wellnessRefundSettlement` have no demonstrable instance in the demo. | Wellness | pkg | ★★ | S | 📋 ready |
+| **Seven indistinguishable "Classic Demo Studio" rows survive the studio pin** | seed-classic-demo pins the studio id but has no `reapDuplicateStudios` beside its `reapDuplicateProviders`/`reapDuplicateMenuItems` — `/api/studios` serves 11 studios, 7 of them the same name, to the Studios tab and the CreateSession picker. | Wellness | pkg | ★ | S | 📋 ready |
 | **A documented visit can never be read back** | `RecordEncounter` captures `{summary, assessment?, plan?}` but the `.encounter` aspect is by design never projected (`clinic-domain/ddls.go:496`), so the read model carries only `documentedAt`/`followUpRequested` — neither the patient nor the authoring provider can ever see the note. | Clinic | FE + pkg | ★★ | M | 🚧 blocked-on: [lattice.md](lattice.md) `[Vault] Sensitive aspects are identity-anchored` |
 
 **Explicitly descoped (ambitious-PO pass, 2026-07-09):** structured diagnosis/procedure coding (ICD/CPT),
@@ -45,10 +48,9 @@ dated run-logs live in git history. Rotate LoftSpace ↔ Clinic ↔ Café ↔ We
 **Wellness joined** 2026-07-09 (`cmd/wellness-app` shipped, live on :7802) — fold it into rotation; see
 [agents/vertical-po/SKILL.md](../../../agents/vertical-po/SKILL.md) §1.
 
-- **Rotation to date:** LoftSpace ×21, Clinic ×20, Café ×11, Wellness ×7.
+- **Rotation to date:** LoftSpace ×21, Clinic ×20, Café ×11, Wellness ×8.
 - **Method:** reuse the already-up shared stack (detect NATS :4222 / app :7788/:7799/:7801/:7802), drive the real flow via `/api/op` + the lens projections as the product owner, file scored items. All four apps exist + are exercisable live (`:7788` / `:7799` / `:7801` / `:7802`).
 - **Live-stack note:** a stale bootstrap JSON vs. a recreated Core KV was a recurring dev-loop trap (2026-07-03, 2026-07-04) that silently emptied reads; `make up` now self-heals it (`109f59a`, 2026-07-05) — re-verify empty-read reports as a real product bug first.
-- **2026-08-02:** Wellness — drove member, instructor + front-desk hats live; the ledger is dormant and the slot lock guards only the room; filed 3.
 - **2026-08-02:** LoftSpace — drove tenant, landlord + front-desk hats live; pulse counts landlords not units, a done task never retires, an unmanaged unit vanishes; filed 5.
 - **2026-08-02:** Clinic — drove patient, provider + front-desk hats live; no appointment view resolves at all and the no-show never bills; filed 5.
 - **2026-08-03:** Café — drove resident + front-desk hats live through open/charge/void/settle; the catalog is 8 copies of 2 items, no charge can be named or itemized, and rent never bills; filed 4.
@@ -56,7 +58,8 @@ dated run-logs live in git history. Rotate LoftSpace ↔ Clinic ↔ Café ↔ We
 - **2026-08-03:** LoftSpace — drove applicant, landlord + front-desk hats live; the executed lease names neither party, screening progress is invisible, an exhausted check dead-ends; filed 3 + 1 platform.
 - **2026-08-04:** Clinic — drove patient, provider + front-desk hats live; billing denies every hat, a booked visit hides its site, a documented note is unreadable; filed 3.
 - **2026-08-04:** Café — drove self-order→settle + front-desk hats live; the one bill omits clinic/wellness, the staff menu grid is unconfined, the visit badge is last-wins; filed 4.
-- **Next:** Wellness.
+- **2026-08-05:** Wellness — drove member + instructor hats live through book/cancel; billing is unlabeled, no class is priced, studios duplicate; filed 3.
+- **Next:** LoftSpace.
 
 ## Done log — verticals (newest first)
 
