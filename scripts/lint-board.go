@@ -24,6 +24,12 @@
 //	                 rotation memory became a per-fire run-log).
 //	FAIL  doneline — a Done-log entry that is not one line (over doneEntryMax).
 //	FAIL  filesize — a lane file over fileMaxBytes.
+//	FAIL  shipped  — a row still in the open-items table whose State reads as
+//	                 shipped (e.g. "✅ shipped `sha`") — "Open items only —
+//	                 shipped demand is in the Done log" (verticals.md's own
+//	                 header); this happened three separate times (92e8e1f0,
+//	                 8f9b0633, c97b784f all landed with the row left dangling
+//	                 after the State flip) before this check existed.
 //	WARN  dep      — a 🚧/🏗️/📋/📐 row "behind X / blocked-on X" where X reads done.
 package main
 
@@ -56,6 +62,11 @@ var (
 	depRe      = regexp.MustCompile(`(?i)(blocked-on|behind)[: ]+([A-Za-z0-9 ._/-]{3,40})`)
 	headingRe  = regexp.MustCompile(`^#{2,3}\s+(.*)`)
 	tokenStrip = regexp.MustCompile(`[*` + "`" + `]`)
+	// shippedRe matches only when the row's OWN leading state token is ✅ and
+	// the cell also reads as shipped/closed — not a ✅-ratified-but-unbuilt
+	// design (no "shipped" text) and not an open row (📐/🏗️/📋/🚧) whose prose
+	// merely mentions that one increment among several has shipped.
+	shippedRe = regexp.MustCompile(`(?i)^✅.*\b(shipped|closed)\b`)
 )
 
 type finding struct {
@@ -186,6 +197,10 @@ func checkFile(path string) ([]finding, map[string]bool, []rowRef) {
 			}
 			if item, state := splitRow(line); item != "" {
 				rows = append(rows, rowRef{path, n, item, state})
+				if !inDone && shippedRe.MatchString(state) {
+					out = append(out, finding{path, n, "shipped", false,
+						fmt.Sprintf("row state %q reads as shipped but the row is still in the open-items table — delete the row (its Done-log line already carries the record)", state)})
+				}
 			}
 		}
 
