@@ -1,6 +1,11 @@
 # A declared read is never scope-checked against the operation — read-scope authorization
 
-**Status:** 📐 **awaiting-Andrew (ratification).** Design/doc-only; nothing built.
+**Status: 🗄️ SHELVED — Andrew, ratify session 2026-08-06.** Increment 1 is sound but **not pressing**;
+Increments 2–3 (`readScope`) are **held as disproportionate**; the staged Contract #2 §2.5 edit is
+**reverted**. The live weakness this design named is being closed at its own altitude instead — one
+package fire (guard the op, gate the class). Decisions, the containment evidence that drove them, and the
+revive triggers are in *Ratification outcome* below; **read that before the body**, which argues for a
+mechanism that was not ratified. Nothing built.
 **Lane:** Lattice (Stream 2). **Board row:** *[Processor] A declared read is never scope-checked against
 the actor's grant* (★★, M-as-filed → **L/XL as designed**, see §9).
 **Filed by:** `client-ceremony-op-descriptors-design.md` §12.7 — the residual class-(g) `derive_reads`
@@ -12,6 +17,60 @@ classes* row (`sensitive-read-tracker-consumption-design.md` §2.2), filed `🚧
 security-soundness). **They returned 4 blockers and 9 majors, and reshaped the design** — the draft's
 Increment-1 claim was false, its size estimate was wrong by ~3×, and three of its proposed reuses were
 mechanisms it had not opened. Findings are folded into the body; §11 records what changed and why.
+
+---
+
+## Ratification outcome (Andrew, 2026-08-06) — shelved, and what ships instead
+
+**The decisions.**
+
+1. **Increment 1 (hydrate-as-stored, decrypt-on-name, fail-closed whole-set redaction): sound, shelved.**
+   *Revive trigger:* the first `packages/**` script that takes a whole-set exposure
+   (`state.values()`/`items()`/rendering `state`), **or** any capacity window where cheap
+   plaintext-surface reduction is worth S–M. Contract #3 §3.10's replacement wording (§7.2) stays
+   **uncommitted and quoted there** — it describes Increment 1's semantics, and committing it while
+   Increment 1 is unbuilt would leave the contract asserting behavior no runtime provides.
+2. **Increments 2–3 (`readScope`, the template resolver, the live-seam check, default-deny): held.**
+   *Revive trigger:* a **second** unguarded payload-named sensitive read — i.e. evidence that per-op
+   ownership guards do not scale — or a whole-set-exposure script landing (which also revives Inc 1).
+3. **Contract #2 §2.5: reverted, not committed.** The staged paragraph specified only unbuilt `readScope`
+   behavior; committed present-tense contract text with no runtime behind it is fail-open.
+4. **What ships now, as its own board row:** an ownership guard on `CreateLeaseServiceInstance`'s
+   payload-named `subjectKey` + aspect segment, and an **authoring gate** that default-denies the class.
+   One package fire, S.
+
+**Why — the containment was verified, not assumed.** The design's four faces are all contained on current
+`main`, and the ratify session checked each rather than accepting the severity as filed:
+
+- **(a) surplus declared read → decrypt.** The plaintext reaches nothing: a script must render the whole
+  working set to expose a key it never names, and the corpus census is **zero** (§1.1d, re-run). A wasted
+  Vault call and a decrypt logged against an uninvolved identity — an audit smell, not a leak.
+- **(b) payload-named live read.** `CreateLeaseServiceInstance` is real (`scripts.go:1168`, shape + liveness
+  only, `Scope:"any"`), but `validateExternalEgressGuard` (`step6_validate.go:97-114`) **rejects the
+  operation** when a plaintext sensitive decrypt meets an `external.*` event. The outcome is a failure, not
+  exfiltration.
+- **(c) the whole-set oracle** needs an op that emits an external event *and* takes a whole-set exposure —
+  the same census-zero population as (a).
+- **(d) the wide working set** leaks only through the same rendering path.
+
+So the severity as filed rested on containment-by-corpus-accident, which is a real fragility but not a live
+exposure, and a platform-wide declaration mechanism is the wrong altitude for it. **The forward risk worth
+acting on is narrower and the guard's own comment names it:** its scope is deliberately the external plane,
+so an op that decrypts and derives PII into an **ordinary domain event** is unguarded — and ordinary events
+reach lenses and read models. That is an authoring risk, so the enforcement point is an authoring gate plus
+a guard on the one live instance (decision 4), per the ratified lint doctrine and the standing
+enforcement-point rule.
+
+**Not withdrawn:** §2's reframe (the write path needs *op*-scoped, not *actor*-scoped, read authorization,
+so the "read-path auth D1" fork the row inherited is false) stands and is the reason no architectural fork
+was ever at stake here. The `sensitive-read-tracker` §2.2 row is shelved **with** this design rather than
+built separately — its own conclusion was that only read-scope validation closes it, and that is what is
+held.
+
+**One correction folded at ratification:** the `keyshredded` finalization hint has never carried an
+`EgressReads` field, so `internal/loom/actuator.go` is the sole producer — the Increment-3 surface is
+smaller than §1 stated. Corpus counts in §5.2 also drifted within three days of authoring; any revived
+fire re-censuses rather than trusting them.
 
 ---
 
@@ -67,8 +126,9 @@ declared key, one Core-KV GET each (`step4_hydrate.go:239-327`).
 **The Gateway forwards `reads` and `optionalReads`, and silently drops `egressReads`.**
 `gateway.go:786-793` constructs `&processor.ContextHint{Reads, OptionalReads, Enumerations}` — there is no
 `EgressReads` field in that literal. So the egress-ref channel is unreachable from the HTTP boundary
-today; its only producers are `internal/loom/actuator.go:101-102` and
-`internal/refractor/keyshredded/manager.go:474`. **That is containment by omission, not by design** — a
+today; its only producers are the two sites in `internal/loom/actuator.go:101-102` (the `keyshredded`
+finalization hint at `manager.go:474` carries `Reads` only — its literal has never had an `EgressReads`
+field). **That is containment by omission, not by design** — a
 submitter reaching `core-operations` directly is not bound by it, and nothing states the rule. (The draft
 said the Gateway forwards `contextHint` verbatim; it does not.)
 
@@ -394,7 +454,9 @@ The draft's "descriptors are the read set" premise is false in two directions, a
 operationTypes**; **47** `OpDispatchSpec` blocks; **6** live `[no-op-meta:]` exemptions; 301 `"any"` /
 50 `"self"` scope entries. The draft's "46 → 35 ops, mostly transcription" was wrong by ~3× and is
 withdrawn. The migration input is the **union** of descriptor templates, each app's hand-built call sites,
-and the client's unconditional appends — per op, read off the script.
+and the client's unconditional appends — per op, read off the script. **These counts move weekly** (a
+2026-08-06 re-count already reads ~104 ops / 54 descriptors / 4 exemptions): the Increment-2 fire re-runs
+the census at build time rather than trusting any figure recorded here.
 
 ### 5.3 The live seam, and class-(e)
 
