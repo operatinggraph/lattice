@@ -1124,8 +1124,25 @@ executor. Exemptions 5 → 3.
 **Named residuals, filed as rows** (not claimed closed): no Facet surface offers a **standing** staff op,
 so both new descriptors are unreachable until one exists — pre-existing, and the reason these ops had no
 descriptor, but Inc 3 is what makes it binding; nothing projects an `identity` entity, so the picker has no
-candidates; and a durably-queued ceremony write outlives the plaintext it minted when the tab reloads
-offline.
+candidates (**struck 2026-08-06** — re-adjudication below); and a durably-queued ceremony write outlives
+the plaintext it minted when the tab reloads offline.
+
+**Identity-entity residual, re-adjudicated (critical-necessity session, 2026-08-06).** The row this
+checkpoint filed is struck, on three grounds: the picker consumer is unreachable by construction
+(`standingOps()` excludes target-typed ops — `app.js:280-284`, pinned by `standing_ops.test.mjs:87-92` —
+and every row surface resolves its own target, so `x-entityRef` never renders for `RotateClaimKey`); a
+labeled `manifest.ent` identity row fails package validation outright (sensitive fields → `SecureColumns`
+→ `Protected`, postgres-only — `bucketguard.go:146`), so the asked-for projection could only ever list
+bare NanoIDs; and an unclaimed identity is a graph island no per-staff grant reaches
+(`applicantRosterRead`'s anchors collapse to the self-NanoID; only `WildcardAnchor` resolves it). What
+survives is the product question, owned here: **which anchor makes an unclaimed identity visible to the
+right staffer** — a pane-section increment over a Protected Secure Lens with
+`dispatch: {targetColumn: "identity_key", targetType: "identity"}`, the `signInMethods` shape, beside the
+four shipped per-vertical staff rosters. `RotateClaimKey`'s `VisibleWhen{Field:"unclaimed"}` stays
+fail-closed (never offered) until such a lens carries the field; §16's cross-offer note should be read
+against this section, not the struck row. Two hygiene items ride that increment:
+`packages/identity-domain/package_test.go:225`'s rationale comment justifies the picker by the struck
+premise, and `packages/edge-manifest/lenses.go:475` says "Five types ship" over a six-type concat.
 
 **Next: Inc 2** (§4.2) — the `boundTo` link, its one-shot backfill, the per-credential Protected lens, the
 `signInMethods` pane section, and `UnlinkCredential`'s descriptor, which retires the `unprojected-input`
