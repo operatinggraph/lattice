@@ -1,6 +1,8 @@
 # Bounding auth-plane projection latency — relevance-gate and pattern-direct the actor-aware fan-out
 
-**Status: ✅ Andrew-ratified 2026-08-01** — build-ready; increments in §10 order.
+**Status: ✅ Andrew-ratified 2026-08-01** — build-ready; increments in §10 order. **§15.7's proposed
+Contract #6 §6.2 tie-rule amendment: HELD by Andrew 2026-08-06** — the tie rule stays `≤`-rejects
+unconditionally, the staged edit is reverted, and the resume order is §15.9's.
 Designer fire, Winston, 2026-08-01.
 Owning component: **Refractor** (`internal/refractor/pipeline`, `internal/refractor/projection`,
 `internal/refractor/ruleengine/full`).
@@ -35,7 +37,9 @@ product surface — with data behind it. If that reading of the ratification is 
 the one to correct.
 
 **No frozen-contract change.** Contract #6 states no projection-latency promise and none of its
-semantics move (§7). Nothing is staged uncommitted.
+semantics move (§7). Nothing is staged uncommitted. (Increment 2's build later surfaced a §6.2 tie-rule
+question — §15.7 — staged as an uncommitted proposal; Andrew **held** it on 2026-08-06, so this statement
+is true again: the contract is unchanged and the tree carries no edit.)
 
 **What this deliberately does not claim.** It does not establish a latency SLA. It removes the two terms
 that make latency *unbounded* — dependence on unrelated business write volume, and self-amplification
@@ -989,20 +993,39 @@ three findings that together make it unshippable, and all three were verified ag
    same token resolve last-writer-wins rather than by recency — and `seedAppliedSeqFromAckFloor` seeds
    every queue-group replica from the *same* ack floor, which manufactures exactly that tie.
 
-**The corrected shape is now staged as the contract proposal** (`docs/contracts/06-capability-kv.md`
-§6.2, UNCOMMITTED in `main` — the diff is the proposal): the tie may resolve toward a reconciliation only
-with read-back evidence, only with the CAS conditioned on **the revision at which divergence was
-observed**, only when a conflicting revision **re-proves** divergence before retrying, and only if the
-**retraction** direction is covered identically — with a reported failure, never a silent `nil`, when any
-of those cannot hold.
+**Resolution (Andrew, ratify session 2026-08-06): HELD — no contract change.** The corrected shape (tie
+resolves toward a reconciliation only with read-back evidence, revision-conditioned CAS, divergence
+re-proved on conflict, retraction covered, loud failure otherwise) was staged UNCOMMITTED and reviewed;
+Andrew held it, and the staged edit is reverted. Grounds: (1) the only divergence-at-tie reachable by
+ordinary operation is `projectedFromRevisions` provenance drift, which Contract #6 §6.3 itself classifies
+as coherence/debug provenance — a comparator-sensitivity question, not a healing gap; (2) a **content**
+divergence at a tied token requires a fault class with no observed producer; (3) committed §6.2 already
+carries the sanctioned repair for exactly that state (the 12.1b rebuild interaction: truncate, or
+guard-bypass replay). The sweep's contracted healing power stays **missing/stale only**. What ships
+instead is code-side honesty: a tie-rejected reconciliation holding read-back divergence evidence must
+**report failure loudly** — never the silent `nil` booked as `Wrote: true` — and the comparator must
+classify provenance-only divergence distinctly from content divergence. That honest-verdict reshape is
+`lens-projection-divergence-audit-design.md` Fire 1's `Verdict`/`UnverifiedReason` surface (📐 at the
+time of this decision), which rewrites the same `Reproject` branches; the sweep-side supersession check
+(`sweep-rule-snapshot-granularity-design.md`, 📐) rides the same seam.
 
-**One more asymmetry the next fire owns.** The reconcile path is reached only through `RowReader`, which
-only the NATS-KV adapter implements, so a guarded **SQL** target (`actor_read_grants` included) keeps the
-CDC tie rule whatever 2a does. Decide explicitly whether that is intended scope rather than inheriting it.
+**Revive shape, recorded for the day a real content divergence is observed at a resting token:** advance
+the token instead of relaxing the rule — a reconciliation may stamp the consumer's **fully-drained head**
+sequence (captured at `NumPending == 0` with no in-flight deliveries, before re-evaluation). Subordination
+holds verbatim (an unreflected in-label event is `> H` by the drain proof), an out-of-label event cannot
+move a pattern-closed lens's output (§4.2 is narrowing's own precondition), retraction passes for free at
+`H > stored`, and two same-`H` reconcilers are serialized by the existing `≤` rule. A one-sentence
+token-definition amendment, not a new write class — and it needs its own adversarial pass before building.
 
-**Build order for the next fire.** 2a lands first, against the ratified contract shape; Increment 2's
-narrowing follows it. The narrowing's code is complete and green in the worktree and is held **only** on
-this, because a narrowing whose named healer is starved is not what §4.6 ratified.
+The `RowReader` asymmetry noted during 2a carries over to the revive shape: only the NATS-KV adapter
+implements read-back, so a guarded **SQL** target (`actor_read_grants` included) stays on the CDC tie
+rule — the revive design must decide that scope explicitly rather than inherit it.
+
+**Build order for the next fire (rewritten after the 2026-08-06 hold).** 2a is dead — no tie-rule change
+ships. The gate before merging Increment 2's narrowing is the honest sweep verdict: divergence-audit
+Fire 1's `Verdict` reshape (or its minimal loud-failure form if that design is not yet ratified when the
+fire runs) plus the sweep supersession check, one fire on the shared `reproject.go`/`sweep.go` seam. Then
+merge the worktree's Increment 2 behind it; then Increment 3 as ratified.
 
 ### 15.8 Non-goals
 
@@ -1010,7 +1033,7 @@ Increment 3's pattern-directed derivation and its plain-arm shadow measurement; 
 enumerator, its caps, or its `reportsTo` hop; the ≤8-label cap; `verify-claim-ceremony.go`'s convergence
 poll (its own row); the §14.8 `nodeMatches` body-`class` residual (its own row, ★★★); any contract edit.
 
-### 15.9 CHECKPOINT (2026-08-03) — Increment 2 complete and green, held on a contract proposal
+### 15.9 CHECKPOINT (2026-08-03, resolved 2026-08-06) — Increment 2 complete and green; the §6.2 proposal is held
 
 **Worktree:** `/Users/andrewsolgan/Documents/GitHub/lattice-wt-authlat-inc2`, branch
 `fire/auth-latency-inc2`, based on `2a96cfcd`. Nothing merged to `main` from it.
@@ -1023,16 +1046,18 @@ through `InstallActorAggregate` and asserts on the JetStream delivery count, wit
 proving the either-endpoint alignment end to end. The negative was falsified deliberately — forcing the
 broad filter fails it by exactly the count of the excluded writes.
 
-**Held on.** The §6.2 tie-rule amendment (§15.7), staged UNCOMMITTED in `main` for Andrew. Increment 2
-must not land before it: narrowing starves the sweep, and the sweep is the conjunct that makes narrowing
-safe.
+**Held on — RESOLVED 2026-08-06.** Andrew held the §6.2 amendment: the tie rule is unchanged and the
+staged edit is reverted (§15.7 resolution). The "narrowing starves the sweep" framing is corrected with
+it: the sweep's contracted job — heal **missing/stale** — is untouched by narrowing; only
+divergent-at-equal-seq goes unwritable, which has no observed content producer and keeps the 12.1b
+rebuild as its repair. Increment 2 merges behind the honest-verdict fix, not behind a contract change.
 
-**The board row is 🚧 blocked-on-Andrew, not 🏗️** (set 2026-08-03 at Andrew's instruction), so no fire
-resumes this item on the in-flight rule. The worktree stays; ratification is what unblocks it.
+**The board row returns to 🏗️** with this resume order (2026-08-06). The worktree stays; its base
+`2a96cfcd` has skewed from `main` — re-derive premises against merged main at admit, per the standing
+rule.
 
-**Next fire, once unblocked.** (1) Andrew ratifies or redirects the §6.2 amendment. (2) Build 2a to the ratified shape —
-revision-conditioned CAS, divergence re-proved on conflict, retraction path covered, loud failure instead
-of a silent `nil`. (3) Merge the worktree's Increment 2 behind it. (4) Increment 3 as ratified.
+**Next fire.** (1) Honest sweep verdict + sweep supersession check (§15.7 resolution — one fire,
+`reproject.go`/`sweep.go`). (2) Merge the worktree's Increment 2 behind it. (3) Increment 3 as ratified.
 
-**Do not** merge the worktree first "since it is green." It is green and correct in isolation; what it is
-missing is the healer its own eligibility predicate assumes.
+**Do not** merge the worktree first "since it is green." It is green and correct in isolation; what it
+is missing is the loud tie-verdict its sweep otherwise fakes as a heal.
