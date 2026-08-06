@@ -143,6 +143,20 @@ const (
 	landlordEmail   = "nora.vance@showcase.dev.lattice.local"
 	applicant4Name  = "Priya Raman"
 	applicant4Email = "priya.raman@showcase.dev.lattice.local"
+
+	// The renewal-cycle beat: leaseApp1-4's .tenancy all land their
+	// renewalOpensAt in 2027 (units 1/2's listings pre-date the back-dated-
+	// moveIn fix in seedResidentTenancies and .tenancy is CREATE-ONLY, so no
+	// rerun or amend can reach them; units 3/4 are deliberately near-future
+	// for their own worklist/queue beats), so read_renewals has never had a
+	// live row. A fifth, dedicated unit + lease sidesteps both — see
+	// seedRenewalDemoTenancy.
+	unit5ID         = "LVundtGDjWPVP5Qr6HMy"
+	leaseApp5ID     = "MhZY2unHEAhNv61HUpb9"
+	unit5Key        = "vtx.unit." + unit5ID
+	leaseApp5Key    = "vtx.leaseapp." + leaseApp5ID
+	applicant5Name  = "Jordan Ellis"
+	applicant5Email = "jordan.ellis@showcase.dev.lattice.local"
 )
 
 // The W0 provider-spine increment (persona-worlds-design.md Fire W0): a
@@ -186,11 +200,12 @@ var showcaseLocationNames = map[string]map[string]any{
 	unit2Key:    {"name": "Unit 2", "icon": "door"},
 	unit3Key:    {"name": "Unit 3", "icon": "door"},
 	unit4Key:    {"name": "Unit 4", "icon": "door"},
+	unit5Key:    {"name": "Unit 5", "icon": "door"},
 }
 
 // showcaseLocationOrder fixes the iteration order a map does not have, so a
 // rerun submits its ops — and prints its lines — deterministically.
-var showcaseLocationOrder = []string{buildingKey, unit1Key, unit2Key, unit3Key, unit4Key}
+var showcaseLocationOrder = []string{buildingKey, unit1Key, unit2Key, unit3Key, unit4Key, unit5Key}
 
 // legacyMislabeledTemplates are the two backgroundCheck-classed templates
 // seed-edge-demo.go minted, branded "Maple Laundry" via .presentation — §7.3
@@ -261,6 +276,7 @@ func main() {
 		landlordKey := seedLandlordWorld(ctx, conn, adminKey, consumerRoleKey)
 		fmt.Printf("==> landlord:        %s (%s) manages Unit 4, holds consumer\n", landlordKey, landlordName)
 		fmt.Println("LOFTSPACE_LANDLORD_NANOID=" + strings.TrimPrefix(landlordKey, "vtx.identity."))
+		seedRenewalDemoTenancy(ctx, conn, adminKey, landlordKey)
 		healApprovedLeaseApplications(ctx, conn, adminKey)
 		maintKey := seedMaintenanceBeat(ctx, conn, adminKey)
 		fmt.Println("FACET_MAINT_NANOID=" + strings.TrimPrefix(maintKey, "vtx.identity."))
@@ -389,6 +405,7 @@ func main() {
 
 	landlordKey := seedLandlordWorld(ctx, conn, adminKey, consumerRoleKey)
 	fmt.Printf("==> landlord:        %s (%s) manages Unit 4, holds consumer\n", landlordKey, landlordName)
+	seedRenewalDemoTenancy(ctx, conn, adminKey, landlordKey)
 	healApprovedLeaseApplications(ctx, conn, adminKey)
 
 	// Cold-start race guard (verticals.md "Facet cold-start races the cap
@@ -1668,6 +1685,78 @@ func seedLandlordWorld(ctx context.Context, conn *substrate.Conn, adminKey, cons
 	}
 	fmt.Println("==> landlord queue:  " + leaseApp4Key + " (" + applicant4Name + " → Unit 4, signed, awaiting decision)")
 	return landlordKey
+}
+
+// seedRenewalDemoTenancy gives the landlord persona a fifth, dedicated unit
+// whose lease is decided straight through to approved (adminKey submits every
+// step, mirroring seedResidentTenancies) with a back-dated listing
+// availableFrom: leaseEnd = availableFrom + the 12-month leaseTermMonths
+// lands about a month out, inside the package's 60-day renewalWindow, so
+// renewalOpensAt is already in the past the moment DecideLeaseApplication
+// stamps .tenancy — leaseExpirySpec's missing_renewalCycle is true and
+// Weaver's OpenRenewal dispatch fires on this seed's very first tick.
+// Units 1-4's own .tenancy can never demonstrate this: 1/2's listings were
+// set before seedResidentTenancies' back-dated-moveIn fix landed and
+// .tenancy is CREATE-ONLY (no rerun or amend reaches an already-approved
+// lease), and 3/4 are deliberately near-future for their own worklist/queue
+// beats. A fresh unit sidesteps both. Wired into the existing landlord's
+// portfolio (manages), same as unit1/unit2 above. Per-mutation idempotent;
+// safe on every rerun.
+func seedRenewalDemoTenancy(ctx context.Context, conn *substrate.Conn, adminKey, landlordKey string) {
+	if !alive(ctx, conn, unit5Key) {
+		submitOp(ctx, conn, adminKey, "CreateLocation", "location",
+			map[string]any{"locationType": "unit", "locationId": unit5ID,
+				"presentation": showcaseLocationNames[unit5Key]}, nil)
+		submitOp(ctx, conn, adminKey, "WireContainedIn", "location",
+			map[string]any{"child": unit5Key, "parent": buildingKey},
+			&processor.ContextHint{Reads: []string{unit5Key, buildingKey}})
+	}
+	if !alive(ctx, conn, linkKey(landlordKey, "manages", unit5Key)) {
+		assignUnitOwner(ctx, conn, adminKey, landlordKey, unit5Key)
+	}
+	if !alive(ctx, conn, unit5Key+".address") {
+		submitOp(ctx, conn, adminKey, "SetUnitAddress", "loftspaceListing",
+			map[string]any{"unit": unit5Key, "line1": "50 Riverside Walk", "city": "Riverside",
+				"region": "CA", "postal": "92501"},
+			&processor.ContextHint{Reads: []string{unit5Key}})
+	}
+	moveIn := time.Now().UTC().AddDate(0, -11, 0)
+	if !alive(ctx, conn, unit5Key+".listing") {
+		submitOp(ctx, conn, adminKey, "SetListing", "loftspaceListing",
+			map[string]any{"unit": unit5Key, "rentAmount": 2050, "rentCurrency": "USD",
+				"bedrooms": 1, "bathrooms": 1, "sqft": 610, "leaseTermMonths": 12,
+				"availableFrom": moveIn.Format(time.RFC3339), "status": "available"},
+			&processor.ContextHint{Reads: []string{unit5Key}})
+	}
+	if !alive(ctx, conn, leaseApp5Key) {
+		salt, err := substrate.NewNanoID()
+		must(err, "generate renewal-demo applicant claim-key salt")
+		reply := submitOp(ctx, conn, adminKey, "CreateUnclaimedIdentity", "identity",
+			map[string]any{"name": applicant5Name, "email": applicant5Email,
+				"claimKeyHash": mustSHA256Hex("showcase-renewal-applicant-" + salt)},
+			nil)
+		applicantKey := reply.PrimaryKey
+		submitOp(ctx, conn, adminKey, "CreateLeaseApplication", "leaseapp",
+			map[string]any{"applicant": applicantKey, "unit": unit5Key, "leaseAppId": leaseApp5ID,
+				"moveInDate": moveIn.Format("2006-01-02"), "leaseTermMonths": 12, "requestedRent": 2050},
+			&processor.ContextHint{Reads: []string{applicantKey, unit5Key}})
+	}
+	if !alive(ctx, conn, leaseApp5Key+".signature") {
+		submitOp(ctx, conn, adminKey, "SignLease", "leaseapp",
+			map[string]any{"leaseAppKey": leaseApp5Key},
+			&processor.ContextHint{Reads: []string{leaseApp5Key}})
+	}
+	if !alive(ctx, conn, leaseApp5Key+".tenancy") {
+		submitOp(ctx, conn, adminKey, "DecideLeaseApplication", "leaseapp",
+			map[string]any{"leaseAppKey": leaseApp5Key, "decision": "approved"},
+			&processor.ContextHint{
+				Reads: []string{leaseApp5Key},
+				OptionalReads: []string{
+					leaseApp5Key + ".decision", leaseApp5Key + ".signature", leaseApp5Key + ".tenancy",
+				},
+			})
+	}
+	fmt.Println("==> renewal demo:    " + leaseApp5Key + " (" + unit5Key + ", approved, renewalOpensAt already past)")
 }
 
 // ensureLandlord recovers the landlord persona by its `manages` link into Unit
