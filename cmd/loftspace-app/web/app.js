@@ -1390,6 +1390,7 @@ async function loadApplications() {
     const data = await appGet("/api/applications");
     state.applications = data.applications || [];
     state.appsScope = data.scope || "";
+    state.appsProjectionHealthy = data.projectionHealthy !== false;
   } catch (e) {
     grid.innerHTML = "";
     empty.hidden = false;
@@ -1407,7 +1408,9 @@ function renderApplications() {
   grid.innerHTML = "";
   if (state.applications.length === 0) {
     empty.hidden = false;
-    empty.textContent = "No applications yet. Browse a listing and apply to get started.";
+    empty.textContent = state.appsProjectionHealthy === false
+      ? "Application data is temporarily paused — this list may be incomplete. Try again shortly."
+      : "No applications yet. Browse a listing and apply to get started.";
     $("#apps-summary").textContent = "";
     return;
   }
@@ -2253,6 +2256,7 @@ async function loadRenewalsQuiet() {
   }
   const data = await appGet("/api/renewals");
   state.renewals = data.renewals || [];
+  state.renewalsProjectionHealthy = data.projectionHealthy !== false;
   return state.renewals;
 }
 
@@ -2292,9 +2296,13 @@ function renderRenewals() {
   grid.innerHTML = "";
   if (state.renewals.length === 0) {
     empty.hidden = false;
-    empty.textContent = landlord
-      ? "No renewal cycles yet for the units you manage."
-      : "No renewal cycles yet. One opens automatically as your lease nears its term end.";
+    if (state.renewalsProjectionHealthy === false) {
+      empty.textContent = "Renewals data is temporarily paused — this list may be incomplete. Try again shortly.";
+    } else {
+      empty.textContent = landlord
+        ? "No renewal cycles yet for the units you manage."
+        : "No renewal cycles yet. One opens automatically as your lease nears its term end.";
+    }
     if (summary) summary.textContent = "";
     return;
   }
@@ -3188,9 +3196,13 @@ async function loadLandlordRLS() {
     const apps = data.applicationCount || 0;
     el.hidden = false;
     if (units.length === 0) {
-      // 0 can mean "manages nothing" OR "grant revoked" — both correctly return
-      // empty (no oracle); state the scope, not a cause we cannot distinguish here.
-      el.textContent = "🔒 RLS read boundary: Postgres scopes you to 0 units.";
+      if (data.projectionHealthy === false) {
+        el.textContent = "🔒 RLS read boundary: the projection is temporarily paused — this scope may be incomplete.";
+      } else {
+        // 0 can mean "manages nothing" OR "grant revoked" — both correctly return
+        // empty (no oracle); state the scope, not a cause we cannot distinguish here.
+        el.textContent = "🔒 RLS read boundary: Postgres scopes you to 0 units.";
+      }
       if (listEl) { listEl.hidden = true; listEl.innerHTML = ""; }
       return;
     }

@@ -106,5 +106,7 @@ func (s *server) handleStaffIdentities(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, http.StatusBadGateway, "could not read the protected identities model")
 		return
 	}
-	s.writeJSON(w, http.StatusOK, map[string]any{"identities": rows, "count": len(rows), "scope": "rls"})
+	resp := s.withProjectionHealth(ctx, "applicantRosterRead",
+		map[string]any{"identities": rows, "count": len(rows), "scope": "rls"})
+	s.writeJSON(w, http.StatusOK, resp)
 }

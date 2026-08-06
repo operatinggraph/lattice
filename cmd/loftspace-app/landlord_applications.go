@@ -256,5 +256,7 @@ func (s *server) handleLandlordApplications(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	units := groupLandlordRowsByUnit(rows)
-	s.writeJSON(w, http.StatusOK, map[string]any{"units": units, "count": len(units), "applicationCount": len(rows), "scope": "rls"})
+	resp := s.withProjectionHealth(ctx, "landlordLeaseApplicationsRead",
+		map[string]any{"units": units, "count": len(units), "applicationCount": len(rows), "scope": "rls"})
+	s.writeJSON(w, http.StatusOK, resp)
 }

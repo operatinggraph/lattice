@@ -261,5 +261,7 @@ func (s *server) handleApplications(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, http.StatusBadGateway, "could not read the protected lease-applications model")
 		return
 	}
-	s.writeJSON(w, http.StatusOK, map[string]any{"applications": rows, "count": len(rows), "scope": "rls"})
+	resp := s.withProjectionHealth(ctx, "leaseApplicationsRead",
+		map[string]any{"applications": rows, "count": len(rows), "scope": "rls"})
+	s.writeJSON(w, http.StatusOK, resp)
 }

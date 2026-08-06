@@ -126,10 +126,11 @@ func (s *server) handleRenewals(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, http.StatusBadGateway, "could not read the protected renewals model")
 		return
 	}
-	s.writeJSON(w, http.StatusOK, map[string]any{
+	resp := s.withProjectionHealth(ctx, "renewalsRead", map[string]any{
 		"renewals": rows,
 		"count":    len(rows),
 		"self":     actor.Subject,
 		"scope":    "rls",
 	})
+	s.writeJSON(w, http.StatusOK, resp)
 }
