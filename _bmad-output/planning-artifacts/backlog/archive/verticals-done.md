@@ -2,6 +2,16 @@
 
 Rolled from `verticals.md` when its live Done log passed ~25 entries. Full detail is in git.
 
+- 2026-08-04 · `329dc7d2` · The clinic front desk can finally record a charge or payment — DebitAccount/CreditAccount renamed Clinic{Debit,Credit}Account + frontOfHouse granted; the patient hat no longer sees Record charge. clinic-ledger 0.2.7
+- 2026-08-04 · `5afb72f7` · Pre-pin clinic-provider + café-menu-item duplicates finally reaped — seed-classic-demo.go tombstones every stray "Dr. Classic Demo"/Latte/Croissant, name+location filtered.
+- 2026-08-04 · `38dd7d18` · An off-menu café charge can finally be named — POS charge form gains an optional description input, mirroring loftspace/clinic-app's memo `trim() || undefined` idiom.
+- 2026-08-04 · `b5b30940` · My Classes now leads with the next class, not history — renderMyClasses splits Upcoming/Past, mirroring clinic-app's My Appointments.
+- 2026-08-03 · `69851ea5` · A wellness studio can finally be retired — studioCard gains a Retire button wired to TombstoneStudio, mirroring cafe-app's RetireMenuItem.
+- 2026-08-03 · `0be2511d` · Portfolio pulse now counts distinct units, not landlord fan-out rows — summarizePortfolioPulse dedupes read_landlord_units by UnitKey before counting.
+- 2026-08-03 · `1841a5b3` · A past class finally closes out — wellness-reminders gains pastDueBookings, mirroring clinic-reminders' pastDueAppointments; wellnessNoShowSettlement now has a producer. wellness-reminders 0.2.0
+- 2026-08-03 · `c79f9b5f` · The café catalog stops duplicating on every seed rerun — CreateMenuItem's Latte/Croissant gain pinned ids + an `alive()` guard, mirroring patient/provider/unit/studio. Pre-pin copies remain (row above).
+- 2026-08-03 · `2dc82ca0` · A no-show fee for an account-less patient now opens one — clinicNoShowSettlement gains a missing_account gap (ClinicCreateAccount), mirroring café's lazy account-open. clinic-ledger 0.2.6
+- 2026-08-03 · `a52a3422` · A signed lease finally bills its rent — semantic-contracts' leaseRentSettlement target bootstraps the ledger account + a recurring monthly clause for every approved lease; seed-showcase's one-off manual hack retired.
 - 2026-08-03 · `dbe2d6d7` · The auto no-show now actually bills — DebitAccount's own memo was declared as a KV read, failing every dispatch; all 35 rows now converged. clinic-ledger 0.2.5
 - 2026-08-03 · `bb027dc5` · Clinic appointment views resolve for every hat — the Lattice-side structural-pause resume reprojected both read models to 35/35 rows; live-verified via `/api/my-appointments`.
 - 2026-08-03 · `861bbbbf` · An assignee can finally retire their own task — CompleteTask gains a scope=self grant + a script-side assignedTo guard. orchestration-base 0.7.8

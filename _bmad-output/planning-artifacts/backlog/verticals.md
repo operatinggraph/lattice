@@ -25,7 +25,7 @@ the row is `🚧 blocked-on:` it (a missing *lens* is package work, built here).
 | **An exhausted screening check still renders "To do" forever** | `leaseApplicationsRead` now carries missing/inflight/declined per gap (row above shipped) but no `exhausted_bgcheck`/`exhausted_payment` column — Weaver's dispatch-count-vs-budget state is deliberately not lens-readable — so `stepState` can't tell "escalated to Augur" from "not started". residual of `ab971faa` below. | LoftSpace | pkg + FE | ★ | S | 🚧 blocked-on: [lattice.md](lattice.md) `[Weaver] gap retry-budget exhaustion has no lens-readable signal` |
 | **App-server GET endpoints apply no per-lease/patient ownership filter** | `GET /api/ledger?leaseAppKey=` was the ONE unguarded sibling — clinic/café/wellness ledger reads already enforce ownership; loftspace-app's `one_bill.go` had already flagged it. Fixed below (Done log). Closed as scoped, not app-wide. | Cross-vertical | pkg | ★ | M | ✅ shipped `92e8e1f0` |
 | **Seven indistinguishable "Classic Demo Studio" rows survive the studio pin** | seed-classic-demo pins the studio id but has no `reapDuplicateStudios` beside its `reapDuplicateProviders`/`reapDuplicateMenuItems` — `/api/studios` serves 11 studios, 7 of them the same name, to the Studios tab and the CreateSession picker. | Wellness | pkg | ★ | S | ✅ shipped `8f9b0633` |
-| **The renewals chain has never had a live instance** | All 5 `.tenancy` aspects carry a 2027 `renewalOpensAt`, so `leaseExpiry` never opens a cycle: zero renewal vertices exist and `read_renewals` has 0 lifetime inserts — the Renewals tab, `renewalsRead` and renewal signing stay un-demonstrable until 2027. | LoftSpace | pkg | ★★ | S | 📋 ready · seed one back-dated tenancy (precedent: wellness class pricing) |
+| **The renewals chain has never had a live instance** | All 5 `.tenancy` aspects carry a 2027 `renewalOpensAt`, so `leaseExpiry` never opens a cycle: zero renewal vertices exist and `read_renewals` has 0 lifetime inserts — the Renewals tab, `renewalsRead` and renewal signing stay un-demonstrable until 2027. | LoftSpace | pkg | ★★ | S | ✅ shipped `c97b784f` |
 | **A documented visit can never be read back** | `RecordEncounter` captures `{summary, assessment?, plan?}` but the `.encounter` aspect is by design never projected (`clinic-domain/ddls.go:496`), so the read model carries only `documentedAt`/`followUpRequested` — neither the patient nor the authoring provider can ever see the note. | Clinic | FE + pkg | ★★ | M | 🚧 blocked-on: [lattice.md](lattice.md) `[Vault] Sensitive aspects are identity-anchored` |
 
 **Explicitly descoped (ambitious-PO pass, 2026-07-09):** structured diagnosis/procedure coding (ICD/CPT),
@@ -64,6 +64,7 @@ dated run-logs live in git history. Rotate LoftSpace ↔ Clinic ↔ Café ↔ We
 
 One line per shipped item (`date · SHA · title`). Oldest roll to `archive/` past ~25.
 
+- 2026-08-06 · `c97b784f` · The renewal cycle finally has a live instance — seedRenewalDemoTenancy mints a fifth, back-dated unit+lease so renewalOpensAt is already past on approval; read_renewals gained its first open row.
 - 2026-08-06 · ops (no commit) · leaseApplicationsRead resumed via `lattice lens resume` (console-operator actor) after its declined-column pause; draining live, no re-errors.
 - 2026-08-06 · `5aa05ad0` · A co-managed unit no longer shows the landlord one application card per co-manager — landlordLeaseApplicationsRead dedupes by entity_key.
 - 2026-08-06 · `44ea340c` · A paused projection finally reads as paused, not empty — pkgmgr.LensID resolves the lens NanoID Health KV is actually keyed by; all 12 withProjectionHealth call sites fixed.
@@ -88,15 +89,4 @@ One line per shipped item (`date · SHA · title`). Oldest roll to `archive/` pa
 - 2026-08-04 · `ab971faa` · A screening budget that runs out no longer dead-ends in silence — leaseApplicationComplete escalates "exhausted" gaps to Augur reasoning instead of an unread GapBudgetExhausted warning. lease-signing 0.27.12
 - 2026-08-04 · `02b812c4` · The renewal cycle finally opens in the live demo — seedResidentTenancies' move-in pushed back 11 months (was 2) so leaseEnd lands inside the 60-day renewal window on the seed's first tick.
 - 2026-08-04 · `f836a533` · A booked visit finally says where to go — submitBook falls back to the provider's own sole practicesAt site when the site filter is left on "Any site".
-- 2026-08-04 · `329dc7d2` · The clinic front desk can finally record a charge or payment — DebitAccount/CreditAccount renamed Clinic{Debit,Credit}Account + frontOfHouse granted; the patient hat no longer sees Record charge. clinic-ledger 0.2.7
-- 2026-08-04 · `5afb72f7` · Pre-pin clinic-provider + café-menu-item duplicates finally reaped — seed-classic-demo.go tombstones every stray "Dr. Classic Demo"/Latte/Croissant, name+location filtered.
-- 2026-08-04 · `38dd7d18` · An off-menu café charge can finally be named — POS charge form gains an optional description input, mirroring loftspace/clinic-app's memo `trim() || undefined` idiom.
-- 2026-08-04 · `b5b30940` · My Classes now leads with the next class, not history — renderMyClasses splits Upcoming/Past, mirroring clinic-app's My Appointments.
-
-- 2026-08-03 · `69851ea5` · A wellness studio can finally be retired — studioCard gains a Retire button wired to TombstoneStudio, mirroring cafe-app's RetireMenuItem.
-- 2026-08-03 · `0be2511d` · Portfolio pulse now counts distinct units, not landlord fan-out rows — summarizePortfolioPulse dedupes read_landlord_units by UnitKey before counting.
-- 2026-08-03 · `1841a5b3` · A past class finally closes out — wellness-reminders gains pastDueBookings, mirroring clinic-reminders' pastDueAppointments; wellnessNoShowSettlement now has a producer. wellness-reminders 0.2.0
-- 2026-08-03 · `c79f9b5f` · The café catalog stops duplicating on every seed rerun — CreateMenuItem's Latte/Croissant gain pinned ids + an `alive()` guard, mirroring patient/provider/unit/studio. Pre-pin copies remain (row above).
-- 2026-08-03 · `2dc82ca0` · A no-show fee for an account-less patient now opens one — clinicNoShowSettlement gains a missing_account gap (ClinicCreateAccount), mirroring café's lazy account-open. clinic-ledger 0.2.6
-- 2026-08-03 · `a52a3422` · A signed lease finally bills its rent — semantic-contracts' leaseRentSettlement target bootstraps the ledger account + a recurring monthly clause for every approved lease; seed-showcase's one-off manual hack retired.
 - *(older entries rolled to [archive/verticals-done.md](archive/verticals-done.md))*
