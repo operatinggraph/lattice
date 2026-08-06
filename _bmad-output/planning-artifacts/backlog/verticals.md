@@ -22,6 +22,10 @@ the row is `🚧 blocked-on:` it (a missing *lens* is package work, built here).
 | **No way to demonstrate that Facet survives going offline** | Offline-first is the Edge's headline claim and nothing lets a viewer see it — the mirror only serves a disconnected world during a real NATS outage nobody can stage. Per [UX §6](../../implementation-artifacts/facet-app-ux.md) the honest offline story is a host↔NATS drop, not the browser going offline, so a truthful toggle disconnects the host engine: reads keep serving from bbolt, writes queue and drain on reconnect. | Cross-vertical | Sally + FE + platform | ★★ | M | 📋 designer · needs a fenced control surface |
 | **The executed lease names neither party** | `/api/lease-document` serves both parties a legal instrument reading `Tenant: vtx.identity.edu97ix…` and `Landlord: LoftSpace property management` — a hardcoded literal (`internal/bridge/docgen_adapter.go:232`); the identity that actually `manages` the unit is never resolved, and `doc.TenantName` is never assembled. | LoftSpace | pkg | ★★ | M | 🚧 blocked-on: [lattice.md](lattice.md) `[Loom] externalTask subject-only egress` (tenant name) · landlord party unblocked |
 | **An exhausted screening check still renders "To do" forever** | `leaseApplicationsRead` carries missing/inflight/declined per gap but no escalated column, so `stepState` can't tell "escalated to Augur" from "not started". `augurProposals` already projects `trigger='exhausted'` + a `forCandidate` link to the application, but that bucket is operator-posture — the signal lands as a lens column gated on the gap still being open. residual of `ab971faa` below. | LoftSpace | pkg + FE | ★ | S | 📋 ready |
+| **Nothing on the front desk's board says which site to go to** | 43 of 45 appointments (and all 6 currently scheduled) carry no site: both seeds omit `CreateAppointment`'s optional `site` (`scripts/seed-showcase.go:1236`, `scripts/seed-classic-demo.go:212`) and seed-classic-demo never runs `AssignProviderSite`, so `submitBook`'s sole-`practicesAt` fallback only ever fills FE-booked visits and the pre-Inc-2 corpus has no backfill (`BackfillTabStaleAt` precedent). | Clinic | pkg | ★★ | S | 📋 ready |
+| **A $750 balance is 28 indistinguishable "No-show fee" lines** | `ledgerHistorySpec` (`packages/clinic-ledger/lenses.go:138`) projects only type/amount/memo/postedAt and the memo is the constant `'No-show fee'` (`:121`), so no one can tie a charge to the visit that caused it — even though the transaction already carries the `settles` link to its appointment that `noShowSettlementSpec` matches. | Clinic | pkg + FE | ★★ | S | 📋 ready |
+| **A patient can see what they owe and has no way to pay it** | `ClinicCreditAccount` grants only `operator` + `frontOfHouse` at scope=any (`packages/clinic-ledger/permissions.go:44`), so the balance only ever rises — while a café resident settles their own tab (`cafe-domain/permissions.go:81`) and loftspace-ledger's `CreditAccount` already grants a consumer scope=self. | Clinic | pkg + FE | ★★ | S | 📋 ready |
+| **The showcase patient's record decays every day the stack runs** | `seed-showcase.go:1236` mints one date-derived appointment per day and nothing ever completes or settles it, so `MarkPastDueNoShow` bills another $25 the next day — Riley Chen, the demo's front-door persona, is now 28 no-shows and $750 owed with 30 debits and zero credits. | Clinic | pkg | ★★ | S | 📋 ready |
 | **A documented visit can never be read back** | `RecordEncounter` captures `{summary, assessment?, plan?}` but the `.encounter` aspect is by design never projected (`clinic-domain/ddls.go:496`), so the read model carries only `documentedAt`/`followUpRequested` — neither the patient nor the authoring provider can ever see the note. | Clinic | FE + pkg | ★★ | M | 🚧 blocked-on: [lattice.md](lattice.md) `[Vault] Sensitive aspects are identity-anchored` |
 
 **Explicitly descoped (ambitious-PO pass, 2026-07-09):** structured diagnosis/procedure coding (ICD/CPT),
@@ -42,10 +46,9 @@ dated run-logs live in git history. Rotate LoftSpace ↔ Clinic ↔ Café ↔ We
 **Wellness joined** 2026-07-09 (`cmd/wellness-app` shipped, live on :7802) — fold it into rotation; see
 [agents/vertical-po/SKILL.md](../../../agents/vertical-po/SKILL.md) §1.
 
-- **Rotation to date:** LoftSpace ×22, Clinic ×20, Café ×11, Wellness ×8.
+- **Rotation to date:** LoftSpace ×22, Clinic ×21, Café ×11, Wellness ×8.
 - **Method:** reuse the already-up shared stack (detect NATS :4222 / app :7788/:7799/:7801/:7802), drive the real flow via `/api/op` + the lens projections as the product owner, file scored items. All four apps exist + are exercisable live (`:7788` / `:7799` / `:7801` / `:7802`).
 - **Live-stack note:** a stale bootstrap JSON vs. a recreated Core KV was a recurring dev-loop trap (2026-07-03, 2026-07-04) that silently emptied reads; `make up` now self-heals it (`109f59a`, 2026-07-05) — re-verify empty-read reports as a real product bug first.
-- **2026-08-02:** LoftSpace — drove tenant, landlord + front-desk hats live; pulse counts landlords not units, a done task never retires, an unmanaged unit vanishes; filed 5.
 - **2026-08-02:** Clinic — drove patient, provider + front-desk hats live; no appointment view resolves at all and the no-show never bills; filed 5.
 - **2026-08-03:** Café — drove resident + front-desk hats live through open/charge/void/settle; the catalog is 8 copies of 2 items, no charge can be named or itemized, and rent never bills; filed 4.
 - **2026-08-03:** Wellness — drove member, instructor + front-desk hats live; no past class closes out, no studio retires, no balance settles; filed 5.
@@ -54,7 +57,8 @@ dated run-logs live in git history. Rotate LoftSpace ↔ Clinic ↔ Café ↔ We
 - **2026-08-04:** Café — drove self-order→settle + front-desk hats live; the one bill omits clinic/wellness, the staff menu grid is unconfined, the visit badge is last-wins; filed 4.
 - **2026-08-05:** Wellness — drove member + instructor hats live through book/cancel; billing is unlabeled, no class is priced, studios duplicate; filed 3.
 - **2026-08-06:** LoftSpace — drove applicant + landlord hats live; the applicant lens is paused dead, the health signal can't fire, renewals never opened; filed 4 + 2 platform.
-- **Next:** Clinic.
+- **2026-08-06:** Clinic — drove patient, provider + front-desk hats live; no visit says which site, a $750 bill is 28 identical lines, no patient can pay; filed 4.
+- **Next:** Café.
 
 ## Done log — verticals (newest first)
 
