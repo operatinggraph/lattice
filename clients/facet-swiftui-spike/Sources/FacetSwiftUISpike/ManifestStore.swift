@@ -13,6 +13,7 @@ public final class ManifestStore: ObservableObject {
     @Published public private(set) var ops: [JSONValue] = []
     @Published public private(set) var tasks: [JSONValue] = []
     @Published public private(set) var instances: [JSONValue] = []
+    @Published public private(set) var entities: [JSONValue] = []
     @Published public private(set) var outbox: [OutboxEntry] = []
     @Published public var connected: Bool = false
     @Published public var statusMessage: String = "Connecting…"
@@ -21,6 +22,7 @@ public final class ManifestStore: ObservableObject {
     private var opsByKey: [String: JSONValue] = [:]
     private var tasksByKey: [String: JSONValue] = [:]
     private var instancesByKey: [String: JSONValue] = [:]
+    private var entitiesByKey: [String: JSONValue] = [:]
     private var outboxByRequestID: [String: OutboxEntry] = [:]
     private var feedClient: FeedClient?
 
@@ -105,9 +107,21 @@ public final class ManifestStore: ObservableObject {
         case .instance:
             apply(frame, to: &instancesByKey)
             instances = sortedByKey(instancesByKey)
+        case .entity:
+            apply(frame, to: &entitiesByKey)
+            entities = sortedByKey(entitiesByKey)
         case .other:
             break
         }
+    }
+
+    /// The Swift-side call site for `app.js`'s `entityRefCandidates`: what an
+    /// `x-entityRef: "<type>"` field may hold, from the `manifest.ent.*` rows
+    /// this store already tracks. Kept a thin call into the free function so
+    /// the filter/label logic lives in `FacetManifestKit`, testable without a
+    /// live store.
+    public func entityRefCandidates(type: String) -> [EntityRefCandidate] {
+        FacetManifestKit.entityRefCandidates(type: type, entities: entities)
     }
 
     private func apply(_ frame: ManifestFrame, to dict: inout [String: JSONValue]) {

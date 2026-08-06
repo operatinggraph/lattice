@@ -16,13 +16,13 @@ public struct ManifestFrame: Equatable {
     public let connected: Bool
 
     /// The `manifest.*` namespace this frame's key belongs to — the same
-    /// five-way split `edge-manifest/lenses.go`'s five lenses project
-    /// (`manifest.me` / `.svc.` / `.op.` / `.task.` / `.inst.`), used here
-    /// to route a frame to the matching SwiftUI section. A non-manifest
-    /// frame (outbox/ready/revoked/connectivity) has an empty key and
-    /// resolves to `.other`.
+    /// split `edge-manifest/lenses.go`'s lenses project (`manifest.me` /
+    /// `.svc.` / `.op.` / `.task.` / `.inst.` / `.ent.`), used here to route
+    /// a frame to the matching SwiftUI section. A non-manifest frame
+    /// (outbox/ready/revoked/connectivity) has an empty key and resolves to
+    /// `.other`.
     public enum Section: String {
-        case identity, service, opMeta, task, instance, other
+        case identity, service, opMeta, task, instance, entity, other
     }
 
     public var section: Section {
@@ -31,6 +31,7 @@ public struct ManifestFrame: Equatable {
         if key.hasPrefix("manifest.op.") { return .opMeta }
         if key.hasPrefix("manifest.task.") { return .task }
         if key.hasPrefix("manifest.inst.") { return .instance }
+        if key.hasPrefix("manifest.ent.") { return .entity }
         return .other
     }
 

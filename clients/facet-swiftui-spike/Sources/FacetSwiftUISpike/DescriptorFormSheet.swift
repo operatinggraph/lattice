@@ -15,6 +15,11 @@ struct DescriptorFormSheet: View {
 
     @State private var values: [String: String] = [:]
     @State private var submitting = false
+    /// Per-field visible query text for `.entityRef` fields — kept separate
+    /// from `values`, which holds the submitted entity KEY once a candidate
+    /// is picked (mirrors `app.js`'s hidden-vs-visible input split: what a
+    /// visitor sees is not what the op receives).
+    @State private var entityRefQuery: [String: String] = [:]
 
     private var fields: [DescriptorField] { DescriptorForm.fields(for: op) }
 
@@ -79,16 +84,53 @@ struct DescriptorFormSheet: View {
         case .dateTime:
             DatePicker(field.title, selection: dateBinding(for: field.name, formatter: Self.dateTimeFormatter), displayedComponents: [.date, .hourAndMinute])
         case .entityRef(let type):
-            // No candidate picker yet (would need ManifestStore to track
-            // `manifest.ent.*` rows, which it does not today) — a plain,
-            // labeled text field is still a real, submittable form, just
-            // without the PWA's search-and-pick affordance.
-            TextField("vtx.\(type).<id>", text: binding(for: field.name))
+            entityRefInput(field, type: type)
+        }
+    }
+
+    /// Search-and-pick control for an `.entityRef` field — mirrors
+    /// `app.js`'s `entityRefCandidates`/`renderEntityRefResults`: the
+    /// visible text field is a query over `ManifestStore.entityRefCandidates`,
+    /// typing a character invalidates a prior pick (`values[field.name]`
+    /// clears, same as `app.js`'s `onGlobalInput`), and the candidate list
+    /// (capped at 6, same cap as `app.js`) only shows while nothing is
+    /// picked yet.
+    @ViewBuilder
+    private func entityRefInput(_ field: DescriptorField, type: String) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            TextField("Search \(type)…", text: entityRefQueryBinding(for: field.name))
                 #if canImport(UIKit)
                 .autocapitalization(.none)
                 #endif
                 .disableAutocorrection(true)
+            if (values[field.name] ?? "").isEmpty {
+                let all = store.entityRefCandidates(type: type)
+                let query = entityRefQuery[field.name] ?? ""
+                let matches = query.isEmpty ? all : all.filter { $0.label.localizedCaseInsensitiveContains(query) }
+                if matches.isEmpty {
+                    Text(all.isEmpty ? "Nothing available to pick yet." : "Nothing matches that.")
+                        .font(.caption).foregroundStyle(.secondary)
+                } else {
+                    ForEach(matches.prefix(6)) { candidate in
+                        Button(candidate.label) {
+                            values[field.name] = candidate.key
+                            entityRefQuery[field.name] = candidate.label
+                        }
+                        .font(.caption)
+                    }
+                }
+            }
         }
+    }
+
+    private func entityRefQueryBinding(for name: String) -> Binding<String> {
+        Binding(
+            get: { entityRefQuery[name] ?? "" },
+            set: { newValue in
+                entityRefQuery[name] = newValue
+                values[name] = ""
+            }
+        )
     }
 
     private func binding(for name: String) -> Binding<String> {
