@@ -142,6 +142,8 @@ func Lenses() []pkgmgr.LensSpec {
 				{Name: "declined_bgcheck", Type: "boolean"},
 				{Name: "declined_payment", Type: "boolean"},
 				{Name: "declined", Type: "boolean"},
+				{Name: "escalated_bgcheck", Type: "boolean"},
+				{Name: "escalated_payment", Type: "boolean"},
 			},
 		},
 		{
@@ -553,6 +555,22 @@ func Lenses() []pkgmgr.LensSpec {
 //	  terminally exhausted"; while a retry is in flight inflight_<g> is true and the
 //	  FE prefers that ("re-checking") over the standing-rejection read.
 //
+// ESCALATED DISPOSITION — the per-gap escalated_<g> column, the third leg beside
+// inflight_<g> / declined_<g>. The lens still cannot see Weaver's per-gap
+// dispatch count (declined's own caveat above), but once that count crosses its
+// maxretries_<g> cap Weaver's WeaverTargets Augur block (retry_budget.go,
+// packages/lease-signing/targets.go) escalates the gap by submitting
+// CreateAugurReasoningClaim, which mints a vtx.augurproposal write-ahead of the
+// AI-reasoning call and links it forCandidate to THIS leaseapp (packages/augur).
+// escalated_<g> is presence-based like inflight_<g>: any augurproposal reached
+// via the inbound forCandidate link whose TRUSTED .gap.gapColumn names this gap
+// (packages/augur/lenses.go's augurProposalsSpec projects the same aspect for
+// Loupe's review surface) sets it true, regardless of the proposal's review
+// state — the existence of a claim IS the "escalated to Augur" signal the FE
+// needs to stop rendering a stalled automated step as "To do" (renderApplicationCard's
+// stepper, cmd/loftspace-app/web/app.js). A gap that closes (missing_<g> flips
+// false) reads "done" regardless of escalated_<g> — stepState checks done first.
+//
 // EXECUTED-LEASE DOCUMENT — the docGen externalTask chain + the attach anchor.
 //
 //	The docGen claims are providedTo the LEASEAPP itself (the document is about
@@ -820,6 +838,7 @@ MATCH (app)-[:applicationFor]->(id:identity)
 OPTIONAL MATCH (app)-[:appliesToUnit]->(u:unit)
 OPTIONAL MATCH (app)<-[:providedTo]-(docInst:service)
 OPTIONAL MATCH (app)<-[:signedLease]-(leaseDocObj:object)
+OPTIONAL MATCH (app)<-[:forCandidate]-(prop:augurproposal)
 %s
 WITH
   app.key                        AS entityKey,
@@ -854,7 +873,9 @@ WITH
   count(DISTINCT CASE WHEN inst.class = 'service.backgroundCheck.instance' AND inst.dispatch.data.vendorRef <> null AND inst.outcome.data.status = null THEN inst.key ELSE null END) AS bgInflight,
   count(DISTINCT CASE WHEN inst.class = 'service.payment.instance' AND inst.dispatch.data.vendorRef <> null AND inst.outcome.data.status = null THEN inst.key ELSE null END) AS payInflight,
   count(DISTINCT CASE WHEN inst.class = 'service.backgroundCheck.instance' AND inst.outcome.data.status = 'failed' THEN inst.key ELSE null END) AS bgFailed,
-  count(DISTINCT CASE WHEN inst.class = 'service.payment.instance' AND inst.outcome.data.status = 'failed' THEN inst.key ELSE null END) AS payFailed
+  count(DISTINCT CASE WHEN inst.class = 'service.payment.instance' AND inst.outcome.data.status = 'failed' THEN inst.key ELSE null END) AS payFailed,
+  count(DISTINCT CASE WHEN prop.gap.data.gapColumn = 'missing_bgcheck' THEN prop.key ELSE null END) AS bgEscalated,
+  count(DISTINCT CASE WHEN prop.gap.data.gapColumn = 'missing_payment' THEN prop.key ELSE null END) AS payEscalated
 RETURN
   nanoIdFromKey(entityKey)       AS app_id,
   entityKey                      AS entity_key,
@@ -895,6 +916,8 @@ RETURN
   ((bgFailed > 0) AND (freshBgComplete = 0))        AS declined_bgcheck,
   ((payFailed > 0) AND (payComplete = 0))           AS declined_payment,
   (((bgFailed > 0) AND (freshBgComplete = 0)) OR ((payFailed > 0) AND (payComplete = 0)) OR (landlordDecision = 'declined')) AS declined,
+  (bgEscalated > 0)                                 AS escalated_bgcheck,
+  (payEscalated > 0)                                AS escalated_payment,
   [nanoIdFromKey(applicantKey)]  AS authz_anchors
 `, readinessOptionalMatch, readinessWithItems)
 

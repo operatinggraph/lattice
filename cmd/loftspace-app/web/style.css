@@ -245,6 +245,8 @@ button.ghost:hover { background: var(--bg-input); color: var(--text); }
 .step.active .step-status { color: var(--yellow); }
 .step.declined .step-dot { border-color: var(--red); color: var(--red); }
 .step.declined .step-status { color: var(--red); }
+.step.escalated .step-dot { border-color: var(--accent); color: var(--accent); }
+.step.escalated .step-status { color: var(--accent); }
 
 /* Tasks inbox */
 .task-card .task-scope { font-family: var(--mono); font-size: 11px; color: var(--text-dim); word-break: break-all; }

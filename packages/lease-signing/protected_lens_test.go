@@ -241,6 +241,8 @@ func TestLeaseApplicationsRead_ProjectsGapState(t *testing.T) {
 	require.Equal(t, false, v["declined_bgcheck"])
 	require.Equal(t, false, v["declined_payment"])
 	require.Equal(t, false, v["declined"])
+	require.Equal(t, false, v["escalated_bgcheck"], "no augurproposal exists yet -> not escalated")
+	require.Equal(t, false, v["escalated_payment"])
 }
 
 // TestLeaseApplicationsRead_MissingDecisionOpensWhenQualifiedAndUndecided — every
@@ -317,6 +319,72 @@ func TestLeaseApplicationsRead_InflightBgcheckProjects(t *testing.T) {
 	require.Equal(t, true, v["missing_bgcheck"], "in flight is not completed -> gap stays open")
 	require.Equal(t, false, v["declined_bgcheck"])
 	require.Equal(t, false, v["declined"])
+}
+
+// seedAugurEscalation mints an augurproposal vertex carrying the TRUSTED .gap
+// context (packages/augur's CreateAugurReasoningClaim shape) and links it
+// forCandidate to appName — the write-ahead escalation record Weaver's
+// WeaverTargets Augur block (retry_budget.go's maxretries_<g> cap exhausted)
+// mints against the retired gap.
+func (f *lensFixture) seedAugurEscalation(t *testing.T, propName, appName, gapColumn string) {
+	t.Helper()
+	appKey := "vtx." + f.types[f.ids[appName]] + "." + f.ids[appName]
+	f.vtx(t, propName, "augurproposal")
+	f.aspect(t, propName, "gap", "gap", map[string]any{
+		"targetId": "vtx.meta.faketarget", "entityId": appKey, "gapColumn": gapColumn, "trigger": "exhausted",
+	})
+	f.edge(t, "forCandidate", propName, appName)
+}
+
+// TestLeaseApplicationsRead_EscalatedProjectsPerGap — a live augurproposal
+// forCandidate-linked to the application sets escalated_<g> true for EXACTLY the
+// gap its TRUSTED .gap.gapColumn names, leaving the other gap's escalated_<g>
+// false — the per-gap scoping stepState needs to render "Escalated" on only the
+// step that was actually handed to Augur reasoning.
+func TestLeaseApplicationsRead_EscalatedProjectsPerGap(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newLensFixture(t)
+	f.vtx(t, "app", "leaseapp")
+	f.vtx(t, "alice", "identity")
+	f.aspect(t, "alice", "ssn", "ssn", map[string]any{"value": "123456789"})
+	f.edge(t, "applicationFor", "app", "alice")
+	f.seedAugurEscalation(t, "prop1", "app", "missing_bgcheck")
+
+	rows := f.projectRead(t)
+	require.Len(t, rows, 1, "the forCandidate fan must not multiply the row")
+	v := rows[0].Values
+	require.Equal(t, true, v["escalated_bgcheck"], "a live augurproposal naming missing_bgcheck escalates the bgcheck step")
+	require.Equal(t, false, v["escalated_payment"], "the proposal names bgcheck, not payment -> payment stays un-escalated")
+	require.Equal(t, true, v["missing_bgcheck"], "escalation does not itself close the gap (onboarding is done, so the gate is open on bgcheck itself)")
+}
+
+// TestLeaseApplicationsRead_EscalatedScopedToOwnApplication — an augurproposal
+// escalating a DIFFERENT application's bgcheck gap must not leak onto this one;
+// the forCandidate link is per-application, mirroring the anchor-scoping proof
+// the other authz tests run.
+func TestLeaseApplicationsRead_EscalatedScopedToOwnApplication(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newLensFixture(t)
+	f.vtx(t, "appA", "leaseapp")
+	f.vtx(t, "alice", "identity")
+	f.edge(t, "applicationFor", "appA", "alice")
+	f.vtx(t, "appB", "leaseapp")
+	f.vtx(t, "bob", "identity")
+	f.edge(t, "applicationFor", "appB", "bob")
+	f.seedAugurEscalation(t, "prop1", "appB", "missing_bgcheck")
+
+	rows := f.projectRead(t)
+	require.Len(t, rows, 2)
+	byApp := map[string]map[string]any{}
+	for _, r := range rows {
+		byApp[r.Values["app_id"].(string)] = r.Values
+	}
+	require.Equal(t, false, byApp[f.ids["appA"]]["escalated_bgcheck"], "appB's escalation must not leak onto appA")
+	require.Equal(t, true, byApp[f.ids["appB"]]["escalated_bgcheck"])
 }
 
 // TestLeaseApplicationsRead_ProjectsProfileSignals — the D1.5-style profile

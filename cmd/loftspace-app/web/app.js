@@ -1421,28 +1421,32 @@ function renderApplications() {
 }
 
 // Each step is one gap dimension, derived from the lens columns the row actually
-// carries: a closed gap is "done"; an open gap with a standing rejection (a failed
-// check no retry has superseded) is "declined"; an open gap with a call in flight
-// is "active" (In progress); an open gap with nothing in flight is "todo". A retry
-// in flight (inflight) takes precedence over a standing rejection — the check is
-// being re-run. The lens does not project a per-row "retries exhausted" signal
-// (maxretries_<g> is a constant cap), so a stalled non-declined automated step
-// reads as "todo".
-function stepState(done, inflight, declined) {
+// carries: a closed gap is "done"; an open gap with a call in flight is "active"
+// (In progress); an open gap whose retry budget is exhausted and has been handed
+// to Augur reasoning (escalated_bgcheck/escalated_payment — packages/lease-signing/
+// lenses.go's ESCALATED DISPOSITION) is "escalated"; an open gap with a standing
+// rejection (a failed check no retry has superseded) is "declined"; an open gap
+// with none of the above is "todo". Precedence mirrors the lens's own priority: a
+// retry in flight beats every other read (the check IS being re-run, including a
+// manual retry an operator dispatched after reviewing an escalated proposal);
+// escalated beats declined because it is the more informative terminal — the
+// system has already handed the standing rejection off to reasoning.
+function stepState(done, inflight, escalated, declined) {
   if (done) return "done";
   if (inflight) return "active";
+  if (escalated) return "escalated";
   if (declined) return "declined";
   return "todo";
 }
 
-const STEP_LABEL = { done: "Done", active: "In progress", declined: "Declined", todo: "To do" };
+const STEP_LABEL = { done: "Done", active: "In progress", escalated: "Escalated", declined: "Declined", todo: "To do" };
 
 function renderStep(num, title, st, note) {
   const step = document.createElement("li");
   step.className = "step " + st;
   const dot = document.createElement("span");
   dot.className = "step-dot";
-  dot.textContent = st === "done" ? "✓" : st === "declined" ? "✕" : String(num);
+  dot.textContent = st === "done" ? "✓" : st === "declined" ? "✕" : st === "escalated" ? "⚡" : String(num);
   const body = document.createElement("div");
   body.className = "step-body";
   const t = document.createElement("div");
@@ -1466,7 +1470,7 @@ function shortKey(key) {
 // decision banner, the four-gate stepper, lease terms, qualification profile,
 // and — once the lease is executed — the statement/ledger panels. The
 // read_lease_applications projection carries the applicant's own
-// missing_*/inflight_*/declined_* gap state (packages/lease-signing/lenses.go),
+// missing_*/inflight_*/escalated_*/declined_* gap state (packages/lease-signing/lenses.go),
 // the same shape the stepper below reads.
 function renderApplicationCard(row, highlight) {
   const card = document.createElement("div");
@@ -1529,10 +1533,10 @@ function renderApplicationCard(row, highlight) {
   const steps = document.createElement("ol");
   steps.className = "stepper";
   steps.append(
-    renderStep(1, "Onboarding (identity details)", stepState(!row.missing_onboarding, false, false)),
-    renderStep(2, "Background check", stepState(!row.missing_bgcheck, row.inflight_bgcheck, row.declined_bgcheck)),
-    renderStep(3, "Payment", stepState(!row.missing_payment, row.inflight_payment, row.declined_payment)),
-    renderStep(4, "Sign lease", stepState(!row.missing_signature, false, false)),
+    renderStep(1, "Onboarding (identity details)", stepState(!row.missing_onboarding, false, false, false)),
+    renderStep(2, "Background check", stepState(!row.missing_bgcheck, row.inflight_bgcheck, row.escalated_bgcheck, row.declined_bgcheck)),
+    renderStep(3, "Payment", stepState(!row.missing_payment, row.inflight_payment, row.escalated_payment, row.declined_payment)),
+    renderStep(4, "Sign lease", stepState(!row.missing_signature, false, false, false)),
   );
 
   card.append(head, banner, steps);
