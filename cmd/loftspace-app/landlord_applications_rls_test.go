@@ -29,6 +29,15 @@ import (
 const (
 	subLarry = "LLLLLLLLLLLLLLLLLLLL"
 	subLinda = "NNNNNNNNNNNNNNNNNNNN"
+	subOwen  = "OOOOOOOOOOOOOOOOOOOO"
+	subPeg   = "PPPPPPPPPPPPPPPPPPPP"
+	// buildingRiverside is a BUILDING anchor shared by every co-manager row on
+	// unit-CO3 (verticals.md: "12 Riverside Walk renders leaseapp …7×") — not a
+	// landlord identity. unit-CO's Larry/Linda rows above carry only each
+	// landlord's own self-anchor, so that fixture cannot reproduce the live fan-out;
+	// this one grants Peg read access to the BUILDING anchor itself, the shape
+	// that actually triggered it.
+	buildingRiverside = "RRRRRRRRRRRRRRRRRRRR"
 )
 
 func TestLandlordReadBoundary_RLS_Enforcement(t *testing.T) {
@@ -106,11 +115,14 @@ func TestLandlordReadBoundary_RLS_Enforcement(t *testing.T) {
 	//   - app-L on unit-L, managed by Larry           (anchor Larry)
 	//   - app-N on unit-N, managed by Linda           (anchor Linda)
 	//   - app-CO on unit-CO, CO-MANAGED by both        (two rows: anchor Larry / anchor Linda)
-	insRow := func(appID, landlordID, entityKey, applicantID, landlordKey, unitKey string, anchor string) {
+	insRowAnchors := func(appID, landlordID, entityKey, applicantID, landlordKey, unitKey string, anchors []string) {
 		exec(`INSERT INTO read_landlord_lease_applications
 		      (app_id, landlord_id, entity_key, applicant, landlord_key, unit_key, authz_anchors, projection_seq)
 		      VALUES ($1, $2, $3, $4, $5, $6, $7, 1)`,
-			appID, landlordID, entityKey, applicantID, landlordKey, unitKey, []string{anchor})
+			appID, landlordID, entityKey, applicantID, landlordKey, unitKey, anchors)
+	}
+	insRow := func(appID, landlordID, entityKey, applicantID, landlordKey, unitKey string, anchor string) {
+		insRowAnchors(appID, landlordID, entityKey, applicantID, landlordKey, unitKey, []string{anchor})
 	}
 	insRow("app-L", subLarry, "vtx.leaseapp.app-L", "vtx.identity."+subAlice, "vtx.identity."+subLarry, "vtx.unit.unit-L", subLarry)
 	insRow("app-N", subLinda, "vtx.leaseapp.app-N", "vtx.identity."+subBob, "vtx.identity."+subLinda, "vtx.unit.unit-N", subLinda)
@@ -337,6 +349,36 @@ func TestLandlordReadBoundary_RLS_Enforcement(t *testing.T) {
 		}
 		if len(units) != 0 || appCount != 0 {
 			t.Fatalf("a revoked grant must hide everything, got units=%v appCount=%d", units, appCount)
+		}
+	})
+
+	t.Run("a building-anchored reader sees ONE row per co-managed application, not one per co-manager", func(t *testing.T) {
+		// Reproduces the live fan-out (verticals.md): three co-managing landlords'
+		// rows for the SAME application, each carrying the shared building anchor
+		// alongside their own — then a reader granted the BUILDING anchor (not any
+		// landlord's own identity) matches all three rows' authz_anchors.
+		insRowAnchors("app-CO3", subLarry, "vtx.leaseapp.app-CO3", "vtx.identity."+subAlice,
+			"vtx.identity."+subLarry, "vtx.unit.unit-CO3", []string{subLarry, buildingRiverside})
+		insRowAnchors("app-CO3", subLinda, "vtx.leaseapp.app-CO3", "vtx.identity."+subAlice,
+			"vtx.identity."+subLinda, "vtx.unit.unit-CO3", []string{subLinda, buildingRiverside})
+		insRowAnchors("app-CO3", subOwen, "vtx.leaseapp.app-CO3", "vtx.identity."+subAlice,
+			"vtx.identity."+subOwen, "vtx.unit.unit-CO3", []string{subOwen, buildingRiverside})
+		defer exec("DELETE FROM read_landlord_lease_applications WHERE app_id = 'app-CO3'")
+
+		exec(`INSERT INTO actor_read_grants (actor_id, anchor_id, grant_source, projection_seq, is_deleted)
+		      VALUES ($1, $2, 'cap-read', 1, false)`, subPeg, buildingRiverside)
+		defer exec("DELETE FROM actor_read_grants WHERE actor_id = $1", subPeg)
+
+		code, units, appCount := get(t, cookieFor(subPeg), "")
+		if code != http.StatusOK {
+			t.Fatalf("status = %d, want 200", code)
+		}
+		if appCount != 1 {
+			t.Fatalf("Peg's building-anchor grant matches 3 co-manager rows for ONE application; appCount = %d, want 1", appCount)
+		}
+		ks := unitKeys(units)
+		if n := ks["vtx.unit.unit-CO3"]; n != 1 {
+			t.Fatalf("unit-CO3 must render its ONE application once, not once per co-manager; got %d", n)
 		}
 	})
 

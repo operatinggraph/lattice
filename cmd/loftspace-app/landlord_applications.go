@@ -136,6 +136,7 @@ func queryLandlordApplications(ctx context.Context, pool pgxBeginner, actorID st
 	defer rows.Close()
 
 	out := make([]protectedLandlordRow, 0)
+	seenEntityKey := make(map[string]bool)
 	for rows.Next() {
 		var row protectedLandlordRow
 		if err := rows.Scan(
@@ -152,6 +153,17 @@ func queryLandlordApplications(ctx context.Context, pool pgxBeginner, actorID st
 		); err != nil {
 			return nil, err
 		}
+		// The lens projects one row per co-managing landlord on the same unit, each
+		// carrying the SAME building/unit authz anchor alongside its own landlord's —
+		// so a building-anchored reader's RLS grant matches every co-manager's row for
+		// the one application (verticals.md: "12 Riverside Walk renders leaseapp …7×").
+		// All facets but LandlordKey are identical across those rows (same application,
+		// same unit); keep the first and drop the rest rather than rendering the same
+		// application once per co-manager.
+		if seenEntityKey[row.EntityKey] {
+			continue
+		}
+		seenEntityKey[row.EntityKey] = true
 		deriveLandlordRowFlags(&row)
 		out = append(out, row)
 	}
