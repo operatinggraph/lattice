@@ -2,6 +2,16 @@
 
 Rolled from `verticals.md` when its live Done log passed ~25 entries. Full detail is in git.
 
+- 2026-08-03 · `dbe2d6d7` · The auto no-show now actually bills — DebitAccount's own memo was declared as a KV read, failing every dispatch; all 35 rows now converged. clinic-ledger 0.2.5
+- 2026-08-03 · `bb027dc5` · Clinic appointment views resolve for every hat — the Lattice-side structural-pause resume reprojected both read models to 35/35 rows; live-verified via `/api/my-appointments`.
+- 2026-08-03 · `861bbbbf` · An assignee can finally retire their own task — CompleteTask gains a scope=self grant + a script-side assignedTo guard. orchestration-base 0.7.8
+- 2026-08-02 · `fc15f83d` · A wellness studio can finally onboard its own instructors — Studios tab gains an add/edit surface wired to CreateInstructor/SetInstructorProfile, mirroring CreateStudio's form+grid.
+- 2026-08-02 · `9e9de865` · An instructor/booker can no longer be double-booked across studios — instructorSlotClaim + bookerSlotClaim mirror clinic's provider/patientSlotClaim. wellness-domain 0.21.0
+- 2026-08-02 · `7643d0f1` · A wellness class's ledger account finally opens — WellnessCreateAccount grants consumer scope=self, wired into self-service + front-desk booking. wellness-ledger 0.2.2
+- 2026-08-02 · `b0f8d09a` · Front desk can now open clinic + loftspace ledger accounts too — ClinicCreateAccount (unconfined) + LoftspaceCreateAccount (workplace-confined) grant frontOfHouse. clinic-ledger 0.2.4, loftspace-ledger 0.4.5
+- 2026-08-02 · `329ac6cf` · Front desk can now open a wellness member's ledger account — WellnessCreateAccount grants frontOfHouse. wellness-ledger 0.2.1
+- 2026-08-02 · `5ef038d5` · A wellness class booking now carries a price the FE actually sets and shows — CreateSession price field, Schedule/My Classes price display, self-scoped GET /api/ledger + balance panel. wellness-app
+- 2026-08-02 · `ad20e036` · unit-applications' weaver-targets read scoped to its own prefix — KVListKeysPrefix, not a whole-bucket list + client-side filter. loftspace-app
 - 2026-08-02 · `11c50fd4` · A café credit balance no longer renders as `$-21.59` — ledgerBalanceLine mirrors loftspace-app's owed/credit/paid-in-full split. cafe-app
 - 2026-08-02 · `dc7d1983` · POS can now void a mis-tapped charge — Void Charge form wired to VoidCharge, mirroring the off-menu Charge form/handler. cafe-app
 - 2026-08-02 · `82613032` · POS lease picker now names the resident, not the raw key — fillLeaseSelect joins /api/residents + /api/frontdesk-lease-details, mirroring frontDeskCard's own join. cafe-app
