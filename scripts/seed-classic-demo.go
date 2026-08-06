@@ -265,6 +265,7 @@ func main() {
 			&processor.ContextHint{Reads: []string{unitKey}})
 	}
 	fmt.Printf("==> studio:          %s\n", studioKey)
+	reapDuplicateStudios(ctx, conn, adminKey, studioKey)
 
 	// Same 15-minute grid the clinic's appointment uses; the wellness DDL
 	// rejects an unaligned span with SlotGridViolation. Day-derived like the
@@ -407,6 +408,43 @@ func reapDuplicateProviders(ctx context.Context, conn *substrate.Conn, adminKey,
 			map[string]any{"providerKey": key},
 			&processor.ContextHint{Reads: []string{key}})
 		fmt.Printf("==> reaped duplicate provider: %s (%s)\n", key, aspect.Data.FullName)
+	}
+}
+
+// reapDuplicateStudios tombstones every live "Classic Demo Studio" other than
+// the checked-in canonical one (keep) — CreateStudio's studioId has always
+// been pinned by this script, but earlier reruns (before the id was derived
+// deterministically) each minted a fresh vertex, so the booking picker and
+// Studios tab still render every one of them (verticals.md). Name-filtered
+// only, mirroring reapDuplicateProviders — safe because seed-showcase.go's
+// own studio uses a different name ("Riverside Movement Studio").
+func reapDuplicateStudios(ctx context.Context, conn *substrate.Conn, adminKey, keep string) {
+	keys, err := conn.KVListKeysPrefix(ctx, bootstrap.CoreKVBucket, "vtx.studio.")
+	must(err, "list vtx.studio. keys")
+	for _, key := range keys {
+		if key == keep || !alive(ctx, conn, key) {
+			continue
+		}
+		entry, err := conn.KVGet(ctx, bootstrap.CoreKVBucket, key+".profile")
+		if err != nil {
+			continue
+		}
+		var aspect struct {
+			IsDeleted bool `json:"isDeleted"`
+			Data      struct {
+				Name string `json:"name"`
+			} `json:"data"`
+		}
+		if err := json.Unmarshal(entry.Value, &aspect); err != nil || aspect.IsDeleted {
+			continue
+		}
+		if aspect.Data.Name != "Classic Demo Studio" {
+			continue
+		}
+		submitOp(ctx, conn, adminKey, "TombstoneStudio", "studio",
+			map[string]any{"studioKey": key},
+			&processor.ContextHint{Reads: []string{key}})
+		fmt.Printf("==> reaped duplicate studio: %s (%s)\n", key, aspect.Data.Name)
 	}
 }
 
