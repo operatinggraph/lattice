@@ -25,6 +25,10 @@ the row is `🚧 blocked-on:` it (a missing *lens* is package work, built here).
 | **An exhausted screening check still renders "To do" forever** | `leaseApplicationsRead` now carries missing/inflight/declined per gap (row above shipped) but no `exhausted_bgcheck`/`exhausted_payment` column — Weaver's dispatch-count-vs-budget state is deliberately not lens-readable — so `stepState` can't tell "escalated to Augur" from "not started". residual of `ab971faa` below. | LoftSpace | pkg + FE | ★ | S | 🚧 blocked-on: [lattice.md](lattice.md) `[Weaver] gap retry-budget exhaustion has no lens-readable signal` |
 | **App-server GET endpoints apply no per-lease/patient ownership filter** | `GET /api/ledger?leaseAppKey=` was the ONE unguarded sibling — clinic/café/wellness ledger reads already enforce ownership; loftspace-app's `one_bill.go` had already flagged it. Fixed below (Done log). Closed as scoped, not app-wide. | Cross-vertical | pkg | ★ | M | ✅ shipped `92e8e1f0` |
 | **Seven indistinguishable "Classic Demo Studio" rows survive the studio pin** | seed-classic-demo pins the studio id but has no `reapDuplicateStudios` beside its `reapDuplicateProviders`/`reapDuplicateMenuItems` — `/api/studios` serves 11 studios, 7 of them the same name, to the Studios tab and the CreateSession picker. | Wellness | pkg | ★ | S | ✅ shipped `8f9b0633` |
+| **Every applicant's "My Applications" is empty** | `leaseApplicationsRead` has been paused since 2026-08-05T14:21 on a then-missing `declined` column; the column landed at the next restart but the pause is sticky, so `read_lease_applications` holds 0 rows against its landlord sibling's 65 and 10,317 events sit stranded. | LoftSpace | pkg | ★★★ | S | 📋 ready · `lattice lens resume` + rebuild · recurrence: [lattice.md](lattice.md) `[Refractor] a structural pause outlives its cause` |
+| **A paused projection still reads as "no results" in every app** | `withProjectionHealth` calls `projectionhealth.Check` with the lens canonical name, but Refractor keys Health KV by the lens rule NanoID (`entityNanoID(pkg,"lens:"+name)`), so every call site across loftspace/clinic/café/wellness resolves `Known=false` and stays silent — proven by the paused row above. | Cross-vertical | pkg + FE | ★★ | S | 📋 ready · needs an exported `pkgmgr.LensID` mirroring `RoleID` |
+| **A co-managed unit shows the landlord one card per co-manager** | `landlordLeaseApplicationsRead` fans out to one row per managing landlord and every row carries the same building anchor, so a building-anchored reader gets all of them: 12 Riverside Walk renders leaseapp `pbCxpGRQHx9V23TZaC6H` 7×. | LoftSpace | pkg + FE | ★★ | S | 📋 ready · dedupe by app_id at the read boundary |
+| **The renewals chain has never had a live instance** | All 5 `.tenancy` aspects carry a 2027 `renewalOpensAt`, so `leaseExpiry` never opens a cycle: zero renewal vertices exist and `read_renewals` has 0 lifetime inserts — the Renewals tab, `renewalsRead` and renewal signing stay un-demonstrable until 2027. | LoftSpace | pkg | ★★ | S | 📋 ready · seed one back-dated tenancy (precedent: wellness class pricing) |
 | **A documented visit can never be read back** | `RecordEncounter` captures `{summary, assessment?, plan?}` but the `.encounter` aspect is by design never projected (`clinic-domain/ddls.go:496`), so the read model carries only `documentedAt`/`followUpRequested` — neither the patient nor the authoring provider can ever see the note. | Clinic | FE + pkg | ★★ | M | 🚧 blocked-on: [lattice.md](lattice.md) `[Vault] Sensitive aspects are identity-anchored` |
 
 **Explicitly descoped (ambitious-PO pass, 2026-07-09):** structured diagnosis/procedure coding (ICD/CPT),
@@ -45,7 +49,7 @@ dated run-logs live in git history. Rotate LoftSpace ↔ Clinic ↔ Café ↔ We
 **Wellness joined** 2026-07-09 (`cmd/wellness-app` shipped, live on :7802) — fold it into rotation; see
 [agents/vertical-po/SKILL.md](../../../agents/vertical-po/SKILL.md) §1.
 
-- **Rotation to date:** LoftSpace ×21, Clinic ×20, Café ×11, Wellness ×8.
+- **Rotation to date:** LoftSpace ×22, Clinic ×20, Café ×11, Wellness ×8.
 - **Method:** reuse the already-up shared stack (detect NATS :4222 / app :7788/:7799/:7801/:7802), drive the real flow via `/api/op` + the lens projections as the product owner, file scored items. All four apps exist + are exercisable live (`:7788` / `:7799` / `:7801` / `:7802`).
 - **Live-stack note:** a stale bootstrap JSON vs. a recreated Core KV was a recurring dev-loop trap (2026-07-03, 2026-07-04) that silently emptied reads; `make up` now self-heals it (`109f59a`, 2026-07-05) — re-verify empty-read reports as a real product bug first.
 - **2026-08-02:** LoftSpace — drove tenant, landlord + front-desk hats live; pulse counts landlords not units, a done task never retires, an unmanaged unit vanishes; filed 5.
@@ -56,7 +60,8 @@ dated run-logs live in git history. Rotate LoftSpace ↔ Clinic ↔ Café ↔ We
 - **2026-08-04:** Clinic — drove patient, provider + front-desk hats live; billing denies every hat, a booked visit hides its site, a documented note is unreadable; filed 3.
 - **2026-08-04:** Café — drove self-order→settle + front-desk hats live; the one bill omits clinic/wellness, the staff menu grid is unconfined, the visit badge is last-wins; filed 4.
 - **2026-08-05:** Wellness — drove member + instructor hats live through book/cancel; billing is unlabeled, no class is priced, studios duplicate; filed 3.
-- **Next:** LoftSpace.
+- **2026-08-06:** LoftSpace — drove applicant + landlord hats live; the applicant lens is paused dead, the health signal can't fire, renewals never opened; filed 4 + 2 platform.
+- **Next:** Clinic.
 
 ## Done log — verticals (newest first)
 

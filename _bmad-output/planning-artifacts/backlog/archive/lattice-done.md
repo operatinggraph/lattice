@@ -1,5 +1,12 @@
 # Done log archive — lattice (older shipped items, newest first)
 
+- 2026-08-03 · `4336978b` · [Refractor] a lens subscribes to the relations it traverses, not every link touching a referenced type — `clinicProviders`' frozen floor was 674 unbindable `providedTo` links; its rebuild now drains in <1 min
+- 2026-08-03 · `80b30bdf` · [pkgmgr,edge-manifest,identity-domain,facet] client-ceremony Inc 2b-3 — the signInMethods pane confirmed live end-to-end, one own row per consumer under RLS; Inc 4 shelved
+- 2026-08-03 · `80b30bdf` · [Refractor] an interrupted rebuild re-arms its watcher instead of latching "rebuilding" — 5 lenses un-latched live, the capability sweep un-suppressed, degraded → healthy
+- 2026-08-03 · `bb027dc5` · [Refractor,lattice-CLI] structural pause Inc 1+3 — the pause keeps its cause, `lattice lens pause|resume|rebuild|health` ships; 3 frozen read models resumed live
+- 2026-08-03 · `c2112bf1` · [Refractor] a Protected lens that gains a column converges its table instead of pausing structurally on it
+- 2026-08-03 · `ec87b8f4` · [pkgmgr,edge-manifest,identity-domain,facet] client-ceremony Inc 2b-2 — PaneSpec.Surface, the signInMethods pane, UnlinkCredential's descriptor (exemption retired), two offer gates
+- 2026-08-03 · `5d464007` · [identity-domain,lattice-CLI] ReconcileCredentialBinding — the boundTo plane converges on the index; a retraction is never overturned (0→6 edges live)
 - 2026-08-03 · `9c00567f` · [identity-domain,identity-hygiene,privacy-base] client-ceremony Inc 2a — the boundTo link + its per-credential Protected lens; three class-(g) keys derived, the double-write and the erasure gap fixed
 - 2026-08-03 · `79cbcdb4` · [pkgmgr,identity-domain,facet] OpCeremonySpec — mint-and-reveal becomes descriptor vocabulary; two S1 exemptions retired, the marker becomes a closed expiring vocabulary
 - 2026-08-03 · `fdf841a2` · [identity-domain] derive_reads adoption — the package derives its 4 index keys, 6 client re-ports deleted, G2 blocking in both halves
