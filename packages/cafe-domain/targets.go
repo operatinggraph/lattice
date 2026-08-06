@@ -26,6 +26,11 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 //     dedicated operationType rather than a directOp against Settle itself
 //     because Settle's chargedTo-backfill branch needs a LINK read no
 //     GapActionSpec.Reads template can express (ddls.go).
+//   - missing_staleat → directOp(BackfillTabStaleAt) (this package), backfilling
+//     the SAME staleAt OpenTab would have written for a tab opened before that
+//     field shipped — invisible to missing_settle above until this runs
+//     (lenses.go). Same Reads shape as missing_settle: entityKey + its own
+//     .status aspect.
 func WeaverTargets() []pkgmgr.WeaverTargetSpec {
 	return []pkgmgr.WeaverTargetSpec{
 		{
@@ -67,6 +72,13 @@ func WeaverTargets() []pkgmgr.WeaverTargetSpec {
 					Class:  "tab",
 					Params: map[string]string{"tabKey": "row.entityKey"},
 					Reads:  []string{"row.entityKey", "row.entityKey.status"},
+				},
+				"missing_staleat": {
+					Action:    "directOp",
+					Operation: "BackfillTabStaleAt",
+					Class:     "tab",
+					Params:    map[string]string{"tabKey": "row.entityKey"},
+					Reads:     []string{"row.entityKey", "row.entityKey.status"},
 				},
 			},
 		},

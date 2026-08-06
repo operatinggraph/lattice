@@ -40,7 +40,7 @@ func tabVertexTypeDDL() pkgmgr.DDLSpec {
 	return pkgmgr.DDLSpec{
 		CanonicalName:     "tab",
 		Class:             "meta.ddl.vertexType",
-		PermittedCommands: []string{"OpenTab", "Charge", "VoidCharge", "Settle", "SettleStaleTab"},
+		PermittedCommands: []string{"OpenTab", "Charge", "VoidCharge", "Settle", "SettleStaleTab", "BackfillTabStaleAt"},
 		Description: "Café house-tab session DDL. Vertex shape: vtx.tab.<NanoID>, class=tab, root data = {} " +
 			"(minimal, D5 — the running total lives on the .status aspect). OpenTab{leaseAppKey} validates the lease " +
 			"is alive, rejects OpenTabAlreadyExists if the lease already has an open tab (the per-lease " +
@@ -103,12 +103,19 @@ func tabVertexTypeDDL() pkgmgr.DDLSpec {
 			"staff Settle already won the race. A dedicated operationType rather than a directOp against Settle " +
 			"itself, because Settle's chargedTo-backfill branch reads a LINK key a Weaver GapActionSpec's Reads " +
 			"cannot template (row.<column> only) — SettleStaleTab confirms chargedTo via a bounded kv.Links read " +
-			"instead of a declared one.",
+			"instead of a declared one. " +
+			"BackfillTabStaleAt{tabKey} (operator only, orchestration-internal) is the auto-remediation twin of " +
+			"OpenTab's staleAt write, dispatched by cafeStaleTabSettlement's missing_staleat gap for an OPEN tab " +
+			"whose .status carries no staleAt at all — every tab opened before the staleAt feature shipped, which " +
+			"missing_settle alone can never see (a null staleAt compares false against both '>' and '<=', so such a " +
+			"tab was previously invisible to the whole convergence). Computes the same openedAt + 24h OpenTab would " +
+			"have written and backfills it via an OCC-conditioned upsert; no-ops cleanly if the tab is already " +
+			"settled or staleAt is already present (a race with another dispatch, or a redelivery).",
 		Script: tabDDLScript,
 		InputSchema: `{"type":"object","properties":` +
 			`{"leaseAppKey":{"type":"string","description":"vtx.leaseapp.<NanoID> the tab is opened for (OpenTab; required, validated alive)."},` +
 			`"tabId":{"type":"string","description":"Optional bare NanoID for the new tab vertex (OpenTab); absent → minted."},` +
-			`"tabKey":{"type":"string","description":"vtx.tab.<NanoID> of an existing tab (Charge/VoidCharge/Settle/SettleStaleTab; required, validated alive + open)."},` +
+			`"tabKey":{"type":"string","description":"vtx.tab.<NanoID> of an existing tab (Charge/VoidCharge/Settle/SettleStaleTab/BackfillTabStaleAt; required, validated alive + open)."},` +
 			`"amountCents":{"type":"number","description":"The amount in integer cents; required for an off-menu Charge (no menuItemKey — added to the total) or a lineId-less (legacy) VoidCharge (subtracted, clamped at 0), must be > 0. Ignored by a VoidCharge that names lineId — the amount is derived from the line itself."},` +
 			`"menuItemKey":{"type":"string","description":"vtx.menuitem.<NanoID> of a live catalog item; amountCents is derived from it, ignoring any caller-supplied amountCents. Required for a self-service Charge; optional for a staff Charge (its absence means an off-menu, hand-keyed amountCents charge)."},` +
 			`"description":{"type":"string","description":"Optional free-text name for an off-menu Charge's line in .status.itemsMemo/.status.lines (no menuItemKey — a catalog item's own name is used instead). Defaults to \"Off-menu charge\" when omitted."},` +
@@ -119,7 +126,7 @@ func tabVertexTypeDDL() pkgmgr.DDLSpec {
 		FieldDescription: map[string]string{
 			"leaseAppKey": "Full vtx.leaseapp.<NanoID> key of the resident lease the tab is opened for (OpenTab; required, validated alive). Denormalized onto the tab's own .status aspect so Charge/Settle need no extra declared read to recover it.",
 			"tabId":       "Optional bare NanoID (no dots / key segments) for the new tab vertex (vtx.tab.<tabId>). Absent → minted with nanoid.new() (OpenTab).",
-			"tabKey":      "Full vtx.tab.<NanoID> key of an existing tab (Charge/VoidCharge/Settle/SettleStaleTab; required, validated alive + class=tab + currently open).",
+			"tabKey":      "Full vtx.tab.<NanoID> key of an existing tab (Charge/VoidCharge/Settle/SettleStaleTab/BackfillTabStaleAt; required, validated alive + class=tab + currently open).",
 			"amountCents": "The amount in integer cents; required for an off-menu Charge (must be a positive number, added to the tab's running .status.totalCents) or a lineId-less VoidCharge (must be a positive number, subtracted from .status.totalCents and clamped at 0). Ignored whenever menuItemKey is present (Charge) or lineId is present (VoidCharge).",
 			"menuItemKey": "Full vtx.menuitem.<NanoID> key of a live catalog item, served at the tab's own building. Required for a self-service Charge; optional for a staff Charge (present → catalog-priced like self-order; absent → hand-keyed amountCents). amountCents is derived from the item's own .price.priceCents, never trusted from the caller, whichever caller names it.",
 			"description": "Optional free-text line name for an off-menu Charge (no menuItemKey) — appended to .status.itemsMemo and recorded as the new .status.lines entry's description, instead of a catalog item's own name. Defaults to \"Off-menu charge\" when omitted. Ignored whenever menuItemKey is present (the item's own name is used).",
@@ -201,6 +208,14 @@ func tabVertexTypeDDL() pkgmgr.DDLSpec {
 					"rather than a declared read. Returns primaryKey. No-ops cleanly (empty mutations/events) if the tab " +
 					"is already settled — a staff Settle raced this dispatch and won.",
 			},
+			{
+				Name:    "BackfillTabStaleAt — backfill a legacy tab's missing staleAt (orchestration-internal)",
+				Payload: map[string]any{"tabKey": "vtx.tab.<NanoID>"},
+				ExpectedOutcome: "Validates the tab is alive + open, computes staleAt = openedAt + 24h (the value " +
+					"OpenTab would have written), and upserts it onto .status (OCC-conditioned). Returns primaryKey. " +
+					"No-ops cleanly (empty mutations/events) if the tab is already settled or already carries a " +
+					"staleAt.",
+			},
 		},
 	}
 }
@@ -213,7 +228,7 @@ func tabStatusAspectTypeDDL() pkgmgr.DDLSpec {
 	return pkgmgr.DDLSpec{
 		CanonicalName:     "tabStatus",
 		Class:             "meta.ddl.aspectType",
-		PermittedCommands: []string{"OpenTab", "Charge", "VoidCharge", "Settle", "SettleStaleTab"},
+		PermittedCommands: []string{"OpenTab", "Charge", "VoidCharge", "Settle", "SettleStaleTab", "BackfillTabStaleAt"},
 		Description: "Tab status aspect (café). Stored as vtx.tab.<NanoID>.status (class tabStatus) = " +
 			"{value: open|settled, totalCents, itemsMemo, lines, openedAt, staleAt, leaseAppKey, settledAt?}. Non-sensitive. Written by OpenTab " +
 			"(mints, value=open, totalCents=0, itemsMemo=\"\", lines=[], staleAt=openedAt+24h), Charge (OCC-conditioned accumulate onto totalCents, " +
@@ -221,9 +236,11 @@ func tabStatusAspectTypeDDL() pkgmgr.DDLSpec {
 			"carries staleAt forward unchanged), VoidCharge " +
 			"(OCC-conditioned decrement of totalCents, clamped at 0, appends \"Void correction\" to itemsMemo when the " +
 			"total actually decreased; a lineId-targeted void additionally marks that lines entry voided:true in place, " +
-			"a legacy amountCents-only void leaves lines untouched; carries staleAt forward unchanged), and Settle/SettleStaleTab " +
+			"a legacy amountCents-only void leaves lines untouched; carries staleAt forward unchanged), Settle/SettleStaleTab " +
 			"(OCC-conditioned close, value=settled, settledAt stamped, totalCents/itemsMemo/lines carried over frozen, staleAt dropped — " +
-			"no longer meaningful once settled) — all owned by the tab vertexType DDL's script. " +
+			"no longer meaningful once settled), and BackfillTabStaleAt (OCC-conditioned backfill of a missing staleAt on a tab opened " +
+			"before that field shipped, computed the same way OpenTab computes it; a no-op once staleAt is already present) — " +
+			"all owned by the tab vertexType DDL's script. " +
 			"Declaration-only: no op handler of its own.",
 		Script: aspectDeclarationOnlyScript,
 		InputSchema: `{"type":"object","properties":` +
@@ -237,7 +254,7 @@ func tabStatusAspectTypeDDL() pkgmgr.DDLSpec {
 			"itemsMemo":   "A comma-joined, running line of what was charged — each Charge appends the item's own name (or an off-menu charge's caller-supplied/default description), each qualifying VoidCharge appends \"Void correction\". Empty string on a fresh tab. Frozen by Settle (never rewritten after).",
 			"lines":       "The itemized breakdown a receipt renders instead of the flat itemsMemo string: a list of {id, description, amountCents, voided}, one entry per Charge, in charge order. id is \"line-\" + the entry's 1-based position (deterministic, unique within one tab). A lineId-targeted VoidCharge marks the matching entry voided:true rather than removing it, so a voided line still shows on the receipt struck through. A tab whose .status predates this field carries no lines key at all — read it as []. Empty list on a fresh tab. Frozen by Settle (never rewritten after).",
 			"openedAt":    "When the tab was opened (RFC3339, = OpenTab's op.submittedAt).",
-			"staleAt":     "RFC3339, = openedAt + 24h (OpenTab). The cafeStaleTabSettlement convergence lens (lenses.go) auto-dispatches SettleStaleTab once this passes with the tab still open. Carried forward unchanged by Charge/VoidCharge; dropped by Settle/SettleStaleTab once settled.",
+			"staleAt":     "RFC3339, = openedAt + 24h (OpenTab). The cafeStaleTabSettlement convergence lens (lenses.go) auto-dispatches SettleStaleTab once this passes with the tab still open, or BackfillTabStaleAt if it is absent entirely (a tab opened before this field shipped). Carried forward unchanged by Charge/VoidCharge; dropped by Settle/SettleStaleTab once settled.",
 			"leaseAppKey": "The resident lease this tab belongs to (denormalized from OpenTab's payload).",
 			"settledAt":   "When the tab was settled (RFC3339, = Settle's op.submittedAt). Absent while open.",
 		},
@@ -1334,6 +1351,44 @@ def execute(state, op):
             mutations.append(make_link(charged_to_lnk, tab_key, lease_key, "chargedTo", "chargedTo", {}))
 
         events = [{"class": "tab.settled", "data": {"tabKey": tab_key, "leaseAppKey": lease_key, "totalCents": total_cents, "reason": "stale"}}]
+        return {"mutations": mutations, "events": events,
+                "response": {"primaryKey": tab_key}}
+
+    if ot == "BackfillTabStaleAt":
+        # Orchestration-internal: cafeStaleTabSettlement's missing_staleat gap
+        # (lenses.go) dispatches this for an OPEN tab whose .status carries no
+        # staleAt at all — every tab opened before the staleAt feature shipped
+        # (af451062), invisible to missing_settle until this backfills the
+        # SAME value OpenTab would have written. Mirrors Settle's own
+        # chargedTo backfill (above): fix the missing field at the write
+        # path, never a read-side workaround.
+        tab_key = required_string(p, "tabKey")
+        if not vertex_alive(state, tab_key):
+            fail("UnknownTab: " + tab_key)
+        if class_of(state, tab_key) != "tab":
+            fail("WrongClass: tabKey: " + tab_key)
+
+        status_key = tab_key + ".status"
+        if status_key not in state:
+            fail("InvalidArgument: tabKey: caller must declare " + status_key + " in contextHint.reads")
+        existing = state[status_key]
+        if existing == None or (hasattr(existing, "isDeleted") and existing.isDeleted):
+            fail("UnknownTab: " + tab_key + ": no .status aspect")
+        if existing.data.get("value") != "open" or existing.data.get("staleAt") != None:
+            # Already settled by staff, or staleAt already present (a race
+            # with another dispatch, or a legitimate redelivery) — no-op
+            # cleanly rather than reject, the SettleStaleTab idiom above.
+            return {"mutations": [], "events": [], "response": {}}
+
+        opened_at = existing.data.get("openedAt")
+        stale_at = time.rfc3339_add(opened_at, "24h")
+        status_data = {"value": "open", "totalCents": existing.data.get("totalCents"),
+                        "itemsMemo": existing.data.get("itemsMemo", ""),
+                        "lines": existing.data.get("lines", []),
+                        "openedAt": opened_at, "staleAt": stale_at,
+                        "leaseAppKey": existing.data.get("leaseAppKey")}
+        mutations = [make_aspect_upsert_occ(tab_key, "status", "tabStatus", status_data, existing.revision)]
+        events = [{"class": "tab.staleAtBackfilled", "data": {"tabKey": tab_key, "staleAt": stale_at}}]
         return {"mutations": mutations, "events": events,
                 "response": {"primaryKey": tab_key}}
 

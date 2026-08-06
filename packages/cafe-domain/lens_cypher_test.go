@@ -345,6 +345,7 @@ func TestCafeStaleTabSettlement_OpenAndFresh_ArmsFreshUntilNotViolating(t *testi
 	require.Equal(t, "2026-07-08T12:00:00Z", v["staleAt"])
 	require.Equal(t, "2026-07-08T12:00:00Z", v["freshUntil"], "still ahead of now — arms the one-shot @at")
 	require.Equal(t, false, v["missing_settle"])
+	require.Equal(t, false, v["missing_staleat"], "staleAt is present — nothing to backfill")
 	require.Equal(t, false, v["violating"])
 }
 
@@ -364,6 +365,7 @@ func TestCafeStaleTabSettlement_OpenAndPastDue_Violating(t *testing.T) {
 	v := f.valuesAtStale(t, "pastduetab", "2026-07-08T13:00:00Z")
 	require.Nil(t, v["freshUntil"], "past the deadline — freshUntil goes null, the gap-dispatch path owns it now")
 	require.Equal(t, true, v["missing_settle"])
+	require.Equal(t, false, v["missing_staleat"], "staleAt is present — this is missing_settle's gap, not missing_staleat's")
 	require.Equal(t, true, v["violating"])
 }
 
@@ -386,15 +388,19 @@ func TestCafeStaleTabSettlement_Settled_NeverViolatesRegardlessOfStaleAt(t *test
 	require.Nil(t, v["staleAt"], "Settle drops staleAt from the rewritten aspect")
 	require.Nil(t, v["freshUntil"])
 	require.Equal(t, false, v["missing_settle"])
+	require.Equal(t, false, v["missing_staleat"], "settled — the status='open' guard excludes it from both gaps")
 	require.Equal(t, false, v["violating"])
 }
 
-// TestCafeStaleTabSettlement_LegacyTabWithNoStaleAt_NeverViolates covers a
-// tab seeded without staleAt (the pre-this-fire shape, or any residual
-// showcase data predating it): compareAny (full engine) treats a null
-// operand as incomparable, so both '>' and '<=' against $now resolve false —
-// such a tab is simply never auto-chased, not a script error.
-func TestCafeStaleTabSettlement_LegacyTabWithNoStaleAt_NeverViolates(t *testing.T) {
+// TestCafeStaleTabSettlement_LegacyTabWithNoStaleAt_ViolatesViaMissingStaleat
+// covers a tab seeded without staleAt (a tab opened before this field
+// shipped, af451062, or any residual showcase data predating it): compareAny
+// (full engine) treats a null operand as incomparable, so both '>' and '<='
+// against $now resolve false for missing_settle — such a tab would be
+// invisible to that gap alone, forever. missing_staleat is the dedicated
+// gap that catches it instead, dispatching BackfillTabStaleAt (ddls.go) to
+// compute the missing value so the NEXT cycle's missing_settle can see it.
+func TestCafeStaleTabSettlement_LegacyTabWithNoStaleAt_ViolatesViaMissingStaleat(t *testing.T) {
 	if testing.Short() {
 		t.Skip("requires NATS")
 	}
@@ -404,8 +410,9 @@ func TestCafeStaleTabSettlement_LegacyTabWithNoStaleAt_NeverViolates(t *testing.
 	v := f.valuesAtStale(t, "legacytab", "2026-12-01T00:00:00Z")
 	require.Nil(t, v["staleAt"])
 	require.Nil(t, v["freshUntil"])
-	require.Equal(t, false, v["missing_settle"], "null staleAt compares false both ways — never auto-chased")
-	require.Equal(t, false, v["violating"])
+	require.Equal(t, false, v["missing_settle"], "null staleAt compares false both ways — missing_settle alone never catches it")
+	require.Equal(t, true, v["missing_staleat"], "an open tab with no staleAt at all is what this gap exists to catch")
+	require.Equal(t, true, v["violating"])
 }
 
 // project runs an UNANCHORED spec (cafeLeaseWorkplaces takes no $actorKey,

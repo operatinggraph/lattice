@@ -66,7 +66,7 @@ func Lenses() []pkgmgr.LensSpec {
 			Output: &pkgmgr.OutputDescriptorSpec{
 				AnchorType:       "tab",
 				OutputKeyPattern: StaleTabSettlementTarget + ".{actorSuffix}",
-				BodyColumns:      []string{"violating", "missing_settle", "entityKey", "tabKey", "status", "openedAt", "staleAt", "maxretries_settle"},
+				BodyColumns:      []string{"violating", "missing_settle", "missing_staleat", "entityKey", "tabKey", "status", "openedAt", "staleAt", "maxretries_settle"},
 				EmptyBehavior:    "delete",
 				KeyColumn:        "entityId",
 				Freshness:        "auto",
@@ -326,6 +326,16 @@ RETURN
 // @at fire) permanently converges the gate — SettleStaleTab's own defensive
 // re-check (ddls.go) guards the same race a heartbeat later.
 //
+// missing_staleat is the second, independent gap: an OPEN tab whose
+// .status carries NO staleAt at all (every tab opened before this feature
+// shipped) compares false against both '>' and '<=' in full-engine
+// compareAny, so missing_settle alone can never see it — such a tab was
+// previously invisible to the whole convergence, forever. missing_staleat
+// dispatches BackfillTabStaleAt (ddls.go), which computes the same
+// openedAt + 24h OpenTab would have written; the NEXT convergence cycle
+// then re-evaluates missing_settle against the now-present value like any
+// other tab.
+//
 // maxretries_settle bakes the retry cap (maxSettleRetries, retry_budget.go)
 // into the row as a constant, the wellness-domain/lenses.go precedent
 // (orphanedBookingSettlementSpec) — built once at package init via
@@ -340,7 +350,11 @@ RETURN
   t.status.data.staleAt AS staleAt,
   CASE WHEN (t.status.data.value = 'open') AND (t.status.data.staleAt > $now) THEN t.status.data.staleAt ELSE null END AS freshUntil,
   ((t.status.data.value = 'open') AND (t.status.data.staleAt <= $now)) AS missing_settle,
-  ((t.status.data.value = 'open') AND (t.status.data.staleAt <= $now)) AS violating,
+  ((t.status.data.value = 'open') AND (t.status.data.staleAt = null)) AS missing_staleat,
+  (
+    ((t.status.data.value = 'open') AND (t.status.data.staleAt <= $now))
+    OR ((t.status.data.value = 'open') AND (t.status.data.staleAt = null))
+  ) AS violating,
   %d AS maxretries_settle
 `, maxSettleRetries)
 

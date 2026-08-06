@@ -88,6 +88,7 @@ func domainCapDoc() *processor.CapabilityDoc {
 			{OperationType: "VoidCharge", Scope: "any"},
 			{OperationType: "Settle", Scope: "any"},
 			{OperationType: "SettleStaleTab", Scope: "any"},
+			{OperationType: "BackfillTabStaleAt", Scope: "any"},
 			{OperationType: "CreateMenuItem", Scope: "any"},
 			{OperationType: "RetireMenuItem", Scope: "any"},
 		},
@@ -1107,6 +1108,81 @@ func TestSettleStaleTab_NoOpsIfAlreadySettled(t *testing.T) {
 	}
 	if got, want := statusData["settledAt"].(string), "2026-07-08T11:59:59Z"; got != want {
 		t.Fatalf("status.settledAt = %q, want %q (the staff Settle's own timestamp, untouched by the no-op)", got, want)
+	}
+}
+
+// TestBackfillTabStaleAt_ComputesFromOpenedAt covers the real defect: a tab
+// opened before staleAt shipped (af451062) carries a .status with no staleAt
+// key at all — seeded directly here, since OpenTab itself always writes one
+// now. cafeStaleTabSettlement's missing_staleat gap (lenses.go) is what
+// dispatches this in production; the op itself just needs to compute the
+// SAME openedAt + 24h OpenTab would have written and backfill it.
+func TestBackfillTabStaleAt_ComputesFromOpenedAt(t *testing.T) {
+	ctx, conn := setupDomainEnv(t)
+	cp, cons := newDomainPipeline(t, ctx, conn, "backfillstaleat")
+
+	leaseKey := seedLease(t, ctx, conn, "BBCAFEDMNBKFLEASEHJK")
+	tabKey := "vtx.tab.CDLEGACYTABKHJMNPQRS"
+	seedVertex(t, ctx, conn, tabKey, "tab", map[string]any{})
+	seedAspect(t, ctx, conn, tabKey, "status", "tabStatus", map[string]any{
+		"value": "open", "totalCents": 500.0, "itemsMemo": "", "lines": []any{},
+		"openedAt": "2026-07-07T12:00:00Z", "leaseAppKey": leaseKey,
+	})
+
+	backfillEnv := &processor.OperationEnvelope{
+		RequestID:     testutil.GenReqID("cdbackfillstale00001"),
+		Lane:          processor.LaneDefault,
+		OperationType: "BackfillTabStaleAt",
+		Actor:         domainActorKey,
+		SubmittedAt:   "2026-08-05T00:00:00Z",
+		Class:         "tab",
+		Payload:       json.RawMessage(`{"tabKey":"` + tabKey + `"}`),
+		ContextHint:   &processor.ContextHint{Reads: []string{tabKey, tabKey + ".status"}},
+	}
+	testutil.PublishOp(t, conn, backfillEnv)
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
+
+	statusDoc := readDoc(t, ctx, conn, tabKey+".status")
+	statusData, _ := statusDoc["data"].(map[string]any)
+	if got, _ := statusData["value"].(string); got != "open" {
+		t.Fatalf("status.value = %q, want open (backfill must not close the tab)", got)
+	}
+	if got, want := statusData["staleAt"].(string), "2026-07-08T12:00:00Z"; got != want {
+		t.Fatalf("status.staleAt = %q, want %q (openedAt + 24h)", got, want)
+	}
+	if got, want := statusData["totalCents"].(float64), 500.0; got != want {
+		t.Fatalf("status.totalCents = %v, want %v (carried forward unchanged)", got, want)
+	}
+}
+
+// TestBackfillTabStaleAt_NoOpsIfAlreadyPresent proves the idempotency guard:
+// a redelivery, or a race with a second dispatch, must not clobber a
+// staleAt the tab already carries (which could silently push the deadline
+// forward if it just overwrote unconditionally).
+func TestBackfillTabStaleAt_NoOpsIfAlreadyPresent(t *testing.T) {
+	ctx, conn := setupDomainEnv(t)
+	cp, cons := newDomainPipeline(t, ctx, conn, "backfillstalenoop")
+
+	leaseKey := seedLease(t, ctx, conn, "BBCAFEDMNRDYLEASEHJK")
+	tabKey := openTab(t, ctx, conn, cp, cons, "cdopentabnoop0000001", leaseKey)
+
+	backfillEnv := &processor.OperationEnvelope{
+		RequestID:     testutil.GenReqID("cdbackfillnoop00001"),
+		Lane:          processor.LaneDefault,
+		OperationType: "BackfillTabStaleAt",
+		Actor:         domainActorKey,
+		SubmittedAt:   "2026-08-05T00:00:00Z",
+		Class:         "tab",
+		Payload:       json.RawMessage(`{"tabKey":"` + tabKey + `"}`),
+		ContextHint:   &processor.ContextHint{Reads: []string{tabKey, tabKey + ".status"}},
+	}
+	testutil.PublishOp(t, conn, backfillEnv)
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
+
+	statusDoc := readDoc(t, ctx, conn, tabKey+".status")
+	statusData, _ := statusDoc["data"].(map[string]any)
+	if got, want := statusData["staleAt"].(string), "2026-07-08T12:00:00Z"; got != want {
+		t.Fatalf("status.staleAt = %q, want %q (OpenTab's own value, untouched by the no-op)", got, want)
 	}
 }
 

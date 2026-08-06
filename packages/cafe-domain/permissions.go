@@ -90,6 +90,12 @@ func Permissions() []pkgmgr.PermissionSpec {
 			GrantsTo:      []string{"operator"},
 		},
 		{
+			OperationType: "BackfillTabStaleAt",
+			Scope:         "any",
+			Note:          "Grants the operator the right to submit BackfillTabStaleAt (orchestration-internal: cafeStaleTabSettlement's missing_staleat directOp playbook, dispatched by Weaver's service actor to backfill staleAt on a tab opened before that field shipped -- same idiom as SettleStaleTab above).",
+			GrantsTo:      []string{"operator"},
+		},
+		{
 			OperationType: "CreateMenuItem",
 			Scope:         "any",
 			Note:          "Grants the operator and front-of-house staff the right to add an item to the self-order menu catalog, confined to the staffer's own workplace.",

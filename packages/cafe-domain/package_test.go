@@ -43,7 +43,7 @@ func TestPackage_StructurePins(t *testing.T) {
 	if got, want := len(Package.Lenses), 5; got != want {
 		t.Errorf("Lenses: got %d, want %d", got, want)
 	}
-	if got, want := len(Package.Permissions), 10; got != want {
+	if got, want := len(Package.Permissions), 11; got != want {
 		t.Errorf("Permissions: got %d, want %d", got, want)
 	}
 	if got, want := len(Package.OpMetas), 6; got != want {
@@ -98,6 +98,7 @@ func TestPackage_StructurePins(t *testing.T) {
 		{"VoidCharge", "any"},
 		{"Settle", "any"}, {"Settle", "self"},
 		{"SettleStaleTab", "any"},
+		{"BackfillTabStaleAt", "any"},
 		{"CreateMenuItem", "any"}, {"RetireMenuItem", "any"},
 	}
 	for i, want := range wantPerms {
