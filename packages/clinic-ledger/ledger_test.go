@@ -564,3 +564,271 @@ func TestDebitAccount_UnknownAppointmentRefRejected(t *testing.T) {
 	testutil.PublishOp(t, conn, env)
 	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeRejected)
 }
+
+// ledgerSelfConsumerID/Key/Cap + ledgerSelfConsumerCapDoc grant the platform
+// permission ClinicCreditAccount's scope=self branch checks — mirrors
+// loftspace-ledger's ledgerSelfConsumerCapDoc.
+const (
+	ledgerSelfConsumerID  = "CLLEDGERSELFCQNSHJKM"
+	ledgerSelfConsumerKey = "vtx.identity." + ledgerSelfConsumerID
+	ledgerSelfConsumerCap = "cap.identity." + ledgerSelfConsumerID
+)
+
+func ledgerSelfConsumerCapDoc() *processor.CapabilityDoc {
+	now := time.Now().UTC()
+	return &processor.CapabilityDoc{
+		Key:                    ledgerSelfConsumerCap,
+		Actor:                  ledgerSelfConsumerKey,
+		Version:                "1.0",
+		ProjectedAt:            now.Format(time.RFC3339Nano),
+		ProjectedFromRevisions: map[string]uint64{ledgerSelfConsumerKey: 1},
+		Lanes:                  []string{"default"},
+		PlatformPermissions: []processor.PlatformPermission{
+			{OperationType: "ClinicCreditAccount", Scope: "self"},
+		},
+		ServiceAccess:   []processor.ServiceAccessEntry{},
+		EphemeralGrants: []processor.EphemeralGrant{},
+		Roles:           []string{"vtx.role.consumer"},
+	}
+}
+
+func seedIdentity(t *testing.T, ctx context.Context, conn *substrate.Conn, id string) string {
+	t.Helper()
+	key := "vtx.identity." + id
+	seedVertex(t, ctx, conn, key, "identity", map[string]any{})
+	return key
+}
+
+func seedVertex(t *testing.T, ctx context.Context, conn *substrate.Conn, key, class string, data map[string]any) {
+	t.Helper()
+	if data == nil {
+		data = map[string]any{}
+	}
+	doc := map[string]any{"class": class, "isDeleted": false, "data": data}
+	b, _ := json.Marshal(doc)
+	if _, err := conn.KVPut(ctx, testutil.HarnessCoreBucket, key, b); err != nil {
+		t.Fatalf("seed vertex %s: %v", key, err)
+	}
+}
+
+func seedLink(t *testing.T, ctx context.Context, conn *substrate.Conn, key, source, target, class, localName string) {
+	t.Helper()
+	doc := map[string]any{
+		"class": class, "isDeleted": false,
+		"sourceVertex": source, "targetVertex": target,
+		"localName": localName, "data": map[string]any{},
+	}
+	b, _ := json.Marshal(doc)
+	if _, err := conn.KVPut(ctx, testutil.HarnessCoreBucket, key, b); err != nil {
+		t.Fatalf("seed link %s: %v", key, err)
+	}
+}
+
+// seedPatientWithIdentity seeds a live patient vertex plus its identifiedBy
+// link to identityID — the ownership chain ClinicCreditAccount's self-scope
+// branch walks (via the account's own heldFor link) to the patient, then
+// this link to the caller's identity.
+func seedPatientWithIdentity(t *testing.T, ctx context.Context, conn *substrate.Conn, patientID, identityID string) string {
+	t.Helper()
+	key := "vtx.patient." + patientID
+	seedVertex(t, ctx, conn, key, "patient", map[string]any{})
+	lnk := "lnk.patient." + patientID + ".identifiedBy.identity." + identityID
+	seedLink(t, ctx, conn, lnk, key, "vtx.identity."+identityID, "identifiedBy", "identifiedBy")
+	return key
+}
+
+// TestCreditAccount_ConsumerSelfScope_Allowed proves a real patient can
+// credit (pay down) THEIR OWN account: the account's heldFor patient
+// resolves (via identifiedBy) to the caller's own authContext.target
+// identity.
+func TestCreditAccount_ConsumerSelfScope_Allowed(t *testing.T) {
+	ctx, conn := setupLedgerEnv(t)
+	testutil.SeedCapDoc(t, ctx, conn, ledgerSelfConsumerCapDoc())
+	cp, cons := newLedgerPipeline(t, ctx, conn, "creditselfok")
+
+	seedIdentity(t, ctx, conn, ledgerSelfConsumerID)
+	patientKey := seedPatientWithIdentity(t, ctx, conn, "CLLEDGERSELFPATNTHJK", ledgerSelfConsumerID)
+	acctKey := createAccount(t, ctx, conn, cp, cons, "creditselfacctsetup1", patientKey)
+
+	// A front-desk-recorded charge establishes the $25 owed the self-credit
+	// below pays down — the balance cap (scripts.go) has nothing to verify
+	// against on a freshly-opened, never-charged account.
+	debitEnv := &processor.OperationEnvelope{
+		RequestID:     testutil.GenReqID("creditselfdebit000001"),
+		Lane:          processor.LaneDefault,
+		OperationType: "ClinicDebitAccount",
+		Actor:         ledgerActorKey,
+		SubmittedAt:   "2026-07-08T08:00:00Z",
+		Class:         "clinictransaction",
+		Payload:       json.RawMessage(`{"accountKey":"` + acctKey + `","amountCents":2500,"memo":"Office visit copay"}`),
+		ContextHint:   &processor.ContextHint{Reads: []string{acctKey}},
+	}
+	testutil.PublishOp(t, conn, debitEnv)
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
+
+	reqID := testutil.GenReqID("creditselfpay0000001")
+	env := &processor.OperationEnvelope{
+		RequestID:     reqID,
+		Lane:          processor.LaneDefault,
+		OperationType: "ClinicCreditAccount",
+		Actor:         ledgerSelfConsumerKey,
+		SubmittedAt:   "2026-07-08T09:00:00Z",
+		Class:         "clinictransaction",
+		Payload:       json.RawMessage(`{"accountKey":"` + acctKey + `","amountCents":2500}`),
+		ContextHint:   &processor.ContextHint{Reads: []string{acctKey}},
+		AuthContext:   &processor.AuthContext{Target: ledgerSelfConsumerKey},
+	}
+	testutil.PublishOp(t, conn, env)
+	outcome := testutil.DriveOne(t, ctx, cp, cons, "")
+	if outcome != processor.OutcomeAccepted {
+		t.Fatalf("self-service ClinicCreditAccount outcome = %v, want Accepted", outcome)
+	}
+}
+
+// TestCreditAccount_ConsumerSelfScope_RejectedOverBalance proves the
+// self-credit amount is bounded by what the account actually owes — a
+// patient cannot self-forgive debt by naming an amount larger than any
+// front-desk-recorded charge (scripts.go recomputes the balance from the
+// account's own postedTo history; nothing on this platform verifies a
+// self-submitted payment actually happened, so the amount itself is the
+// attack surface, not just which account it targets).
+func TestCreditAccount_ConsumerSelfScope_RejectedOverBalance(t *testing.T) {
+	ctx, conn := setupLedgerEnv(t)
+	testutil.SeedCapDoc(t, ctx, conn, ledgerSelfConsumerCapDoc())
+	cp, cons := newLedgerPipeline(t, ctx, conn, "creditselfoverbal")
+
+	seedIdentity(t, ctx, conn, ledgerSelfConsumerID)
+	patientKey := seedPatientWithIdentity(t, ctx, conn, "CLLEDGERSELFQVRPATNT", ledgerSelfConsumerID)
+	acctKey := createAccount(t, ctx, conn, cp, cons, "creditoverbalsetup01", patientKey)
+
+	debitEnv := &processor.OperationEnvelope{
+		RequestID:     testutil.GenReqID("creditoverbaldebit01"),
+		Lane:          processor.LaneDefault,
+		OperationType: "ClinicDebitAccount",
+		Actor:         ledgerActorKey,
+		SubmittedAt:   "2026-07-08T08:00:00Z",
+		Class:         "clinictransaction",
+		Payload:       json.RawMessage(`{"accountKey":"` + acctKey + `","amountCents":2500,"memo":"Office visit copay"}`),
+		ContextHint:   &processor.ContextHint{Reads: []string{acctKey}},
+	}
+	testutil.PublishOp(t, conn, debitEnv)
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
+
+	// $25 owed; self-credit claims $25,000 — must be rejected even though
+	// ownership checks out.
+	reqID := testutil.GenReqID("creditoverbalpay0001")
+	env := &processor.OperationEnvelope{
+		RequestID:     reqID,
+		Lane:          processor.LaneDefault,
+		OperationType: "ClinicCreditAccount",
+		Actor:         ledgerSelfConsumerKey,
+		SubmittedAt:   "2026-07-08T09:00:00Z",
+		Class:         "clinictransaction",
+		Payload:       json.RawMessage(`{"accountKey":"` + acctKey + `","amountCents":2500000}`),
+		ContextHint:   &processor.ContextHint{Reads: []string{acctKey}},
+		AuthContext:   &processor.AuthContext{Target: ledgerSelfConsumerKey},
+	}
+	testutil.PublishOp(t, conn, env)
+	outcome := testutil.DriveOne(t, ctx, cp, cons, "")
+	if outcome != processor.OutcomeRejected {
+		t.Fatalf("over-balance self-credit outcome = %v, want Rejected (AuthDenied)", outcome)
+	}
+}
+
+// TestCreditAccount_ConsumerSelfScope_RejectedNoBalance proves a self-credit
+// against a freshly-opened account (never charged, nothing owed) is rejected
+// — there is nothing to pay down.
+func TestCreditAccount_ConsumerSelfScope_RejectedNoBalance(t *testing.T) {
+	ctx, conn := setupLedgerEnv(t)
+	testutil.SeedCapDoc(t, ctx, conn, ledgerSelfConsumerCapDoc())
+	cp, cons := newLedgerPipeline(t, ctx, conn, "creditselfnobal")
+
+	seedIdentity(t, ctx, conn, ledgerSelfConsumerID)
+	patientKey := seedPatientWithIdentity(t, ctx, conn, "CLLEDGERSELFNQBAPATN", ledgerSelfConsumerID)
+	acctKey := createAccount(t, ctx, conn, cp, cons, "creditnobalsetup0001", patientKey)
+
+	reqID := testutil.GenReqID("creditnobalpay000001")
+	env := &processor.OperationEnvelope{
+		RequestID:     reqID,
+		Lane:          processor.LaneDefault,
+		OperationType: "ClinicCreditAccount",
+		Actor:         ledgerSelfConsumerKey,
+		SubmittedAt:   "2026-07-08T09:00:00Z",
+		Class:         "clinictransaction",
+		Payload:       json.RawMessage(`{"accountKey":"` + acctKey + `","amountCents":100}`),
+		ContextHint:   &processor.ContextHint{Reads: []string{acctKey}},
+		AuthContext:   &processor.AuthContext{Target: ledgerSelfConsumerKey},
+	}
+	testutil.PublishOp(t, conn, env)
+	outcome := testutil.DriveOne(t, ctx, cp, cons, "")
+	if outcome != processor.OutcomeRejected {
+		t.Fatalf("self-credit on a never-charged account outcome = %v, want Rejected (AuthDenied)", outcome)
+	}
+}
+
+// TestCreditAccount_ConsumerSelfScope_RejectedForOthersAccount proves a
+// consumer satisfying step 3 (authContext.target == actor) but naming an
+// account whose patient is NOT their own is rejected — self-service never
+// lets one patient pay down another's balance.
+func TestCreditAccount_ConsumerSelfScope_RejectedForOthersAccount(t *testing.T) {
+	ctx, conn := setupLedgerEnv(t)
+	testutil.SeedCapDoc(t, ctx, conn, ledgerSelfConsumerCapDoc())
+	cp, cons := newLedgerPipeline(t, ctx, conn, "creditselfother")
+
+	seedIdentity(t, ctx, conn, ledgerSelfConsumerID)
+	otherPatientID := "CLLEDGERQTHERPATNTHJ"
+	seedIdentity(t, ctx, conn, otherPatientID)
+	patientKey := seedPatientWithIdentity(t, ctx, conn, "CLLEDGERQTHERPATNTQR", otherPatientID)
+	acctKey := createAccount(t, ctx, conn, cp, cons, "creditotheracctsetup", patientKey)
+
+	reqID := testutil.GenReqID("creditselfpay0000002")
+	env := &processor.OperationEnvelope{
+		RequestID:     reqID,
+		Lane:          processor.LaneDefault,
+		OperationType: "ClinicCreditAccount",
+		Actor:         ledgerSelfConsumerKey,
+		SubmittedAt:   "2026-07-08T09:05:00Z",
+		Class:         "clinictransaction",
+		Payload:       json.RawMessage(`{"accountKey":"` + acctKey + `","amountCents":2500}`),
+		ContextHint:   &processor.ContextHint{Reads: []string{acctKey}},
+		AuthContext:   &processor.AuthContext{Target: ledgerSelfConsumerKey},
+	}
+	testutil.PublishOp(t, conn, env)
+	outcome := testutil.DriveOne(t, ctx, cp, cons, "")
+	if outcome != processor.OutcomeRejected {
+		t.Fatalf("self-service ClinicCreditAccount on another's account outcome = %v, want Rejected (AuthDenied)", outcome)
+	}
+}
+
+// TestCreditAccount_ConsumerSelfScope_DebitStaysStaffOnly proves the
+// self-scope grant does not leak to ClinicDebitAccount: even a caller who
+// legitimately owns the patient record cannot self-charge it (permissions.go
+// grants no scope=self ClinicDebitAccount, and post_entry's own branch fails
+// closed for a debit regardless).
+func TestCreditAccount_ConsumerSelfScope_DebitStaysStaffOnly(t *testing.T) {
+	ctx, conn := setupLedgerEnv(t)
+	testutil.SeedCapDoc(t, ctx, conn, ledgerSelfConsumerCapDoc())
+	cp, cons := newLedgerPipeline(t, ctx, conn, "debitselfdenied")
+
+	seedIdentity(t, ctx, conn, ledgerSelfConsumerID)
+	patientKey := seedPatientWithIdentity(t, ctx, conn, "CLLEDGERSELFDEBTPATN", ledgerSelfConsumerID)
+	acctKey := createAccount(t, ctx, conn, cp, cons, "debitselfacctsetup01", patientKey)
+
+	reqID := testutil.GenReqID("debitselfpay00000001")
+	env := &processor.OperationEnvelope{
+		RequestID:     reqID,
+		Lane:          processor.LaneDefault,
+		OperationType: "ClinicDebitAccount",
+		Actor:         ledgerSelfConsumerKey,
+		SubmittedAt:   "2026-07-08T09:10:00Z",
+		Class:         "clinictransaction",
+		Payload:       json.RawMessage(`{"accountKey":"` + acctKey + `","amountCents":500}`),
+		ContextHint:   &processor.ContextHint{Reads: []string{acctKey}},
+		AuthContext:   &processor.AuthContext{Target: ledgerSelfConsumerKey},
+	}
+	testutil.PublishOp(t, conn, env)
+	outcome := testutil.DriveOne(t, ctx, cp, cons, "")
+	if outcome != processor.OutcomeRejected {
+		t.Fatalf("self-scoped ClinicDebitAccount outcome = %v, want Rejected (no matching grant)", outcome)
+	}
+}

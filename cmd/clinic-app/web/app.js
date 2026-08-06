@@ -2681,7 +2681,15 @@ async function openLedgerAccount(patientKey) {
 
 // submitLedgerEntry posts a ClinicDebitAccount/ClinicCreditAccount against the
 // selected patient's ledger account, opening the account first if this is its
-// first-ever charge or payment (state.ledger.accountKey empty).
+// first-ever charge or payment (state.ledger.accountKey empty). A signed-in
+// patient paying down their OWN balance (actingAsSelf) submits ClinicCreditAccount
+// self-scoped (packages/clinic-ledger's consumer scope=self grant) — ownership
+// + amount trust are proven server-side against the account's own heldFor→
+// patient→identifiedBy topology and postedTo history, so a forged accountKey
+// or an over-balance amount only fails closed. ClinicDebitAccount never goes
+// self (permissions.go grants no self-scope charge) — a patient viewing their
+// own record only ever reaches this path via the payment button, since
+// applyHatGating hides #ledger-charge from non-front-desk sessions.
 async function submitLedgerEntry(opType, what) {
   if (!state.patient) {
     toast("Select a patient first.", "err");
@@ -2698,6 +2706,7 @@ async function submitLedgerEntry(opType, what) {
   const chargeBtn = $("#ledger-charge");
   const paymentBtn = $("#ledger-payment");
   chargeBtn.disabled = paymentBtn.disabled = true;
+  const asSelf = opType === "ClinicCreditAccount" && actingAsSelf();
   try {
     let accountKey = state.ledger && state.ledger.accountKey;
     if (!accountKey) accountKey = await openLedgerAccount(state.patient);
@@ -2705,7 +2714,8 @@ async function submitLedgerEntry(opType, what) {
       opType,
       "clinictransaction",
       { accountKey, amountCents: cents, memo: memoInput.value.trim() || undefined },
-      [accountKey]
+      [accountKey],
+      { asSelf }
     );
     const msg = rejectionMessage(reply);
     if (msg) throw new Error(msg);

@@ -1,5 +1,5 @@
 name: clinic-ledger
-version: 0.2.7
+version: 0.2.8
 description: |
   Clinic patient payment ledger: the clinicaccount vertex type (ClinicCreateAccount,
   independently-minted id, one per patient via a .ledgerAccount guard aspect
@@ -12,6 +12,9 @@ description: |
   lookup) + the clinicNoShowSettlement Weaver playbook (lazily opens the
   account via ClinicCreateAccount, then auto-charges the no-show fee). All
   three ops grant front-of-house staff alongside the operator, unconfined.
+  ClinicCreditAccount ALSO grants a patient scope=self (pay down their own
+  balance) — ownership + amount proven server-side against the account's own
+  heldFor->patient->identifiedBy topology and postedTo history.
   Depends clinic-domain.
 depends:
   - clinic-domain
@@ -50,6 +53,9 @@ declares:
     - operationType: ClinicCreditAccount
       scope: any
       grantsTo: [operator, frontOfHouse]
+    - operationType: ClinicCreditAccount
+      scope: self
+      grantsTo: [consumer]
   weaverTargets:
     - targetId: clinicNoShowSettlement
       lensRef: clinicNoShowSettlement

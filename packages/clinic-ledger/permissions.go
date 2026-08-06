@@ -26,6 +26,21 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 // references the bare "DebitAccount"/"CreditAccount" names in this package
 // (no seed script, only this package's own targets.go Weaver dispatch), so
 // this is a straight rename, not an additive alias.
+//
+// ClinicCreditAccount's scope=self grant (a patient paying down what they
+// owe) mirrors loftspace-ledger's CreditAccount consumer scope=self: the one
+// direction café's Settle/Charge idiom doesn't cover (a payment there is a
+// staff-witnessed cash/card act), but a patient portal's self-pay is the
+// norm and the platform has no payment-rail integration to witness the
+// money — the amount itself is the attack surface a patient's own submit
+// fully controls, not just which account it targets. scripts.go's
+// post_entry therefore proves BOTH: ownership (the account's own
+// heldFor→patient→identifiedBy topology, never the payload, resolves the
+// patient and binds it to the caller's identity) and amount (a self-credit
+// may never exceed the account's own recomputed outstanding balance,
+// paginated + bounded, failing closed if the history is too large to
+// verify). ClinicDebitAccount gets no matching self-scope grant — a patient
+// may pay down a balance, never charge one.
 func Permissions() []pkgmgr.PermissionSpec {
 	return []pkgmgr.PermissionSpec{
 		{
@@ -45,6 +60,12 @@ func Permissions() []pkgmgr.PermissionSpec {
 			Scope:         "any",
 			Note:          "Grants the operator and front-of-house staff the right to submit ClinicCreditAccount (records a payment received). Unconfined: see package doc.",
 			GrantsTo:      []string{"operator", "frontOfHouse"},
+		},
+		{
+			OperationType: "ClinicCreditAccount",
+			Scope:         "self",
+			Note:          "Grants a patient the right to credit (pay down) THEIR OWN account — the account's heldFor patient's identifiedBy link must resolve to the caller's identity (scripts.go). No matching ClinicDebitAccount grant: a patient pays down a balance, never charges one.",
+			GrantsTo:      []string{"consumer"},
 		},
 	}
 }

@@ -6,11 +6,19 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 // §3.3) for the three ledger ops a person triggers — opening the account,
 // then charging or crediting it.
 //
-// All three are front-desk acts, so all three grant frontOfHouse (permissions.go)
-// and need a descriptor a client can render — the S1 gate fires on any op
-// granted beyond the trusted-tool roles. The voice is STAFF-standing
-// (AuthContext "standing"), mirroring cafe-ledger's CreditCafeAccount and
-// wellness-ledger's WellnessCreateAccount.
+// ClinicCreateAccount and ClinicDebitAccount are front-desk-only acts (grant
+// frontOfHouse alone, permissions.go), so both stay in the STAFF-standing
+// voice (AuthContext "standing"), mirroring cafe-ledger's CreditCafeAccount
+// and wellness-ledger's WellnessCreateAccount.
+//
+// ClinicCreditAccount is now DUAL-grant (operator/frontOfHouse at scope=any,
+// PLUS a patient at scope=self — permissions.go), so it carries ONE
+// descriptor written in the SELF voice, per clinic-domain's own dual-grant
+// idiom (its opmetas.go — CreateAppointment/RescheduleAppointment/
+// SetAppointmentStatus each declare a single AuthContext "self" meta despite
+// also granting staff): a staff FE hardcodes its own dispatch (clinic-app's
+// front-desk billing form), while a descriptor-driven client cannot infer
+// the self path, so the self path is what the descriptor must name.
 func OpMetas() []pkgmgr.OpMetaSpec {
 	return []pkgmgr.OpMetaSpec{
 		{
@@ -66,25 +74,25 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 		{
 			OperationType: "ClinicCreditAccount",
 			Presentation: &pkgmgr.OpPresentationSpec{
-				Title:       "Record a payment",
-				Description: "Credit a payment received against a patient's billing ledger.",
+				Title:       "Pay balance",
+				Description: "Pay down what you owe on your billing ledger account.",
 				Icon:        "receipt",
 				Tone:        "primary",
-				SubmitLabel: "Record payment",
+				SubmitLabel: "Pay",
 			},
 			InputSchema: `{"type":"object","properties":` +
-				`{"accountKey":{"type":"string","description":"vtx.clinicaccount.<NanoID> of the account being paid — auto-filled from the account being viewed."},` +
-				`"amountCents":{"type":"integer","title":"Amount","minimum":1,"description":"Amount received, in whole cents."},` +
+				`{"accountKey":{"type":"string","description":"vtx.clinicaccount.<NanoID> of your own account — auto-filled from the account being viewed."},` +
+				`"amountCents":{"type":"integer","title":"Amount","minimum":1,"description":"Payment amount, in whole cents."},` +
 				`"memo":{"type":"string","title":"Note","description":"Optional note describing the payment."}},` +
 				`"required":["accountKey","amountCents"]}`,
 			FieldDescriptions: map[string]string{
-				"accountKey":  "The account being credited — auto-filled by the client from the account being viewed (dispatch.targetField), not user-entered.",
-				"amountCents": "How much was received, entered in dollars — e.g. 25.00. Must be more than zero; a payment reduces what the patient owes.",
-				"memo":        "Optional free text describing the payment — e.g. \"Insurance payment — claim #4471\".",
+				"accountKey":  "Your own billing account — auto-filled by the client (dispatch.targetField), not user-entered.",
+				"amountCents": "How much you're paying, entered in dollars — e.g. 25.00. Must be more than zero and cannot exceed what you actually owe (server-verified).",
+				"memo":        "Optional free text describing the payment — e.g. a check number.",
 			},
 			Dispatch: &pkgmgr.OpDispatchSpec{
 				Class:       "clinictransaction",
-				AuthContext: "standing",
+				AuthContext: "self",
 				TargetField: "accountKey",
 				TargetType:  "clinicaccount",
 				Reads:       []string{"{payload.accountKey}"},
