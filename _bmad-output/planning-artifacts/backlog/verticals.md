@@ -62,7 +62,7 @@ dated run-logs live in git history. Rotate LoftSpace ↔ Clinic ↔ Café ↔ We
 One line per shipped item (`date · SHA · title`). Oldest roll to `archive/` past ~25.
 
 - 2026-08-06 · `c97b784f` · The renewal cycle finally has a live instance — seedRenewalDemoTenancy mints a fifth, back-dated unit+lease so renewalOpensAt is already past on approval; read_renewals gained its first open row.
-- 2026-08-06 · ops (no commit) · leaseApplicationsRead resumed via `lattice lens resume` (console-operator actor) after its declined-column pause; draining live, no re-errors.
+- 2026-08-06 · ops (no commit) · Every applicant can see "My Applications" again — leaseApplicationsRead resumed after its declined-column structural pause; read_lease_applications repopulated, verified as a signed-in applicant.
 - 2026-08-06 · `5aa05ad0` · A co-managed unit no longer shows the landlord one application card per co-manager — landlordLeaseApplicationsRead dedupes by entity_key.
 - 2026-08-06 · `44ea340c` · A paused projection finally reads as paused, not empty — pkgmgr.LensID resolves the lens NanoID Health KV is actually keyed by; all 12 withProjectionHealth call sites fixed.
 - 2026-08-06 · `8f9b0633` · The seven duplicate "Classic Demo Studio" rows are finally reaped — seed-classic-demo gains reapDuplicateStudios, mirroring reapDuplicateProviders/reapDuplicateMenuItems.
