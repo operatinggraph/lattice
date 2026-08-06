@@ -6,6 +6,7 @@ import (
 	"net/http"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/operatinggraph/lattice/internal/pkgmgr"
 )
 
 // protectedApplicationRow is one row of the PROTECTED lease-applications Postgres read
@@ -261,7 +262,7 @@ func (s *server) handleApplications(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, http.StatusBadGateway, "could not read the protected lease-applications model")
 		return
 	}
-	resp := s.withProjectionHealth(ctx, "leaseApplicationsRead",
+	resp := s.withProjectionHealth(ctx, pkgmgr.LensID("lease-signing", "leaseApplicationsRead"),
 		map[string]any{"applications": rows, "count": len(rows), "scope": "rls"})
 	s.writeJSON(w, http.StatusOK, resp)
 }

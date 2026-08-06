@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/operatinggraph/lattice/internal/pkgmgr"
 	clinicdomain "github.com/operatinggraph/lattice/packages/clinic-domain"
 )
 
@@ -259,7 +260,7 @@ func (s *server) handleMyAppointments(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, http.StatusBadGateway, "could not read the protected appointments model")
 		return
 	}
-	resp := s.withProjectionHealth(ctx, "clinicAppointmentsRead",
+	resp := s.withProjectionHealth(ctx, pkgmgr.LensID("clinic-domain", "clinicAppointmentsRead"),
 		map[string]any{"appointments": rows, "count": len(rows), "scope": "rls"})
 	s.writeJSON(w, http.StatusOK, resp)
 }
@@ -359,7 +360,7 @@ func (s *server) handleMyProviderSchedule(w http.ResponseWriter, r *http.Request
 		s.writeError(w, http.StatusBadGateway, "could not read the protected provider schedule model")
 		return
 	}
-	resp := s.withProjectionHealth(ctx, "providerAppointmentsRead",
+	resp := s.withProjectionHealth(ctx, pkgmgr.LensID("clinic-domain", "providerAppointmentsRead"),
 		map[string]any{"appointments": rows, "count": len(rows), "scope": "rls"})
 	s.writeJSON(w, http.StatusOK, resp)
 }
@@ -396,7 +397,7 @@ func (s *server) handleStaffAppointments(w http.ResponseWriter, r *http.Request)
 		s.writeError(w, http.StatusBadGateway, "could not read the protected appointments model")
 		return
 	}
-	resp := s.withProjectionHealth(ctx, "clinicAppointmentsRead",
+	resp := s.withProjectionHealth(ctx, pkgmgr.LensID("clinic-domain", "clinicAppointmentsRead"),
 		map[string]any{"appointments": rows, "count": len(rows), "scope": "rls"})
 	s.writeJSON(w, http.StatusOK, resp)
 }

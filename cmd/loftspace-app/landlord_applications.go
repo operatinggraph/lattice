@@ -4,6 +4,8 @@ import (
 	"context"
 	"net/http"
 	"sort"
+
+	"github.com/operatinggraph/lattice/internal/pkgmgr"
 )
 
 // The landlord read boundary (D1.3 Increment 3) — the landlord/property-manager
@@ -256,7 +258,7 @@ func (s *server) handleLandlordApplications(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	units := groupLandlordRowsByUnit(rows)
-	resp := s.withProjectionHealth(ctx, "landlordLeaseApplicationsRead",
+	resp := s.withProjectionHealth(ctx, pkgmgr.LensID("lease-signing", "landlordLeaseApplicationsRead"),
 		map[string]any{"units": units, "count": len(units), "applicationCount": len(rows), "scope": "rls"})
 	s.writeJSON(w, http.StatusOK, resp)
 }

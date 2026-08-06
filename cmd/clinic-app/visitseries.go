@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"net/http"
+
+	"github.com/operatinggraph/lattice/internal/pkgmgr"
 )
 
 // protectedVisitSeriesRow is one row of the visitSeriesRead protected Postgres
@@ -110,7 +112,7 @@ func (s *server) handleMyVisitSeries(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, http.StatusBadGateway, "could not read the protected visit-series model")
 		return
 	}
-	resp := s.withProjectionHealth(ctx, "visitSeriesRead",
+	resp := s.withProjectionHealth(ctx, pkgmgr.LensID("clinic-reminders", "visitSeriesRead"),
 		map[string]any{"series": rows, "count": len(rows), "scope": "rls"})
 	s.writeJSON(w, http.StatusOK, resp)
 }
@@ -146,7 +148,7 @@ func (s *server) handleStaffVisitSeries(w http.ResponseWriter, r *http.Request) 
 		s.writeError(w, http.StatusBadGateway, "could not read the protected visit-series model")
 		return
 	}
-	resp := s.withProjectionHealth(ctx, "visitSeriesRead",
+	resp := s.withProjectionHealth(ctx, pkgmgr.LensID("clinic-reminders", "visitSeriesRead"),
 		map[string]any{"series": rows, "count": len(rows), "scope": "rls"})
 	s.writeJSON(w, http.StatusOK, resp)
 }

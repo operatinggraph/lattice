@@ -5,6 +5,7 @@ import (
 	"net/http"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/operatinggraph/lattice/internal/pkgmgr"
 )
 
 // protectedPatientRow is one row of the clinicPatientsRead protected Postgres
@@ -126,7 +127,7 @@ func (s *server) handleStaffPatients(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, http.StatusBadGateway, "could not read the protected patients model")
 		return
 	}
-	resp := s.withProjectionHealth(ctx, "clinicPatientsRead",
+	resp := s.withProjectionHealth(ctx, pkgmgr.LensID("clinic-domain", "clinicPatientsRead"),
 		map[string]any{"patients": rows, "count": len(rows), "scope": "rls"})
 	s.writeJSON(w, http.StatusOK, resp)
 }

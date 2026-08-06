@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"net/http"
+
+	"github.com/operatinggraph/lattice/internal/pkgmgr"
 )
 
 // The renewals read boundary (R3, the lease-renewal goal-authored-target
@@ -126,7 +128,7 @@ func (s *server) handleRenewals(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, http.StatusBadGateway, "could not read the protected renewals model")
 		return
 	}
-	resp := s.withProjectionHealth(ctx, "renewalsRead", map[string]any{
+	resp := s.withProjectionHealth(ctx, pkgmgr.LensID("lease-signing", "renewalsRead"), map[string]any{
 		"renewals": rows,
 		"count":    len(rows),
 		"self":     actor.Subject,

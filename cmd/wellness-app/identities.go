@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"net/http"
+
+	"github.com/operatinggraph/lattice/internal/pkgmgr"
 )
 
 // The identity-name read boundary: handleIdentities serves
@@ -99,7 +101,7 @@ func (s *server) handleIdentities(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, http.StatusBadGateway, "could not read the protected identities model")
 		return
 	}
-	resp := s.withProjectionHealth(ctx, "wellnessIdentitiesRead",
+	resp := s.withProjectionHealth(ctx, pkgmgr.LensID("wellness-domain", "wellnessIdentitiesRead"),
 		map[string]any{"identities": rows, "count": len(rows), "scope": "rls"})
 	s.writeJSON(w, http.StatusOK, resp)
 }

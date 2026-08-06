@@ -340,6 +340,16 @@ func RoleID(packageName, canonicalName string) string {
 	return entityNanoID(packageName, "role:"+canonicalName)
 }
 
+// LensID returns the deterministic, version-independent NanoID a package's
+// declared lens receives at install — the exact value entityNanoID computes
+// internally for a LensSpec (line 252's lensNanoIDs derivation). Refractor
+// keys Health KV by this NanoID (cmd/refractor/main.go's health.New(kv,
+// r.ID)), not by the lens's canonical name, so a caller checking
+// projectionhealth.Check for a specific lens must resolve this ID first.
+func LensID(packageName, canonicalName string) string {
+	return entityNanoID(packageName, "lens:"+canonicalName)
+}
+
 // permTag is the version-independent identity tag for a permission entity:
 // its operationType + scope (the logical identity per Contract #6), not its
 // position in the package's Permissions slice — so reordering the slice does
