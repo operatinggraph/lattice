@@ -829,7 +829,8 @@ func seedWellnessEntities(ctx context.Context, conn *substrate.Conn, adminKey st
 	if !alive(ctx, conn, sessKey) {
 		submitOp(ctx, conn, adminKey, "CreateSession", "session",
 			map[string]any{"studio": studioKey, "sessionId": sessID, "name": "Vinyasa Flow",
-				"startsAt": start.Format(time.RFC3339), "endsAt": end.Format(time.RFC3339), "capacity": 12},
+				"startsAt": start.Format(time.RFC3339), "endsAt": end.Format(time.RFC3339), "capacity": 12,
+				"priceCents": 1500},
 			&processor.ContextHint{
 				Reads: []string{studioKey},
 				// The studio's per-cell slot claims: absent until something
@@ -1446,7 +1447,7 @@ func seedSamMultiHat(ctx context.Context, conn *substrate.Conn, adminKey, tenant
 			map[string]any{
 				"studio": studioKey, "sessionId": sessID, "name": "Evening Flow with Sam",
 				"startsAt": start.Format(time.RFC3339), "endsAt": end.Format(time.RFC3339),
-				"capacity": 12, "instructor": samInstructorKey,
+				"capacity": 12, "instructor": samInstructorKey, "priceCents": 2000,
 			},
 			&processor.ContextHint{
 				Reads:         []string{studioKey, samInstructorKey},

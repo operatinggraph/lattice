@@ -278,12 +278,13 @@ func main() {
 	if !alive(ctx, conn, sessionKey) {
 		submitOp(ctx, conn, adminKey, "CreateSession", "session",
 			map[string]any{
-				"studio":    studioKey,
-				"sessionId": sessionID,
-				"name":      "Vinyasa Flow",
-				"startsAt":  sessionStart.Format(time.RFC3339),
-				"endsAt":    sessionEnd.Format(time.RFC3339),
-				"capacity":  12,
+				"studio":     studioKey,
+				"sessionId":  sessionID,
+				"name":       "Vinyasa Flow",
+				"startsAt":   sessionStart.Format(time.RFC3339),
+				"endsAt":     sessionEnd.Format(time.RFC3339),
+				"capacity":   12,
+				"priceCents": 1500,
 			},
 			&processor.ContextHint{
 				Reads: []string{studioKey},
