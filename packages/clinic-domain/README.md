@@ -18,9 +18,9 @@ Design: [`_bmad-output/implementation-artifacts/clinic-domain-design.md`](../../
 | Kind | Canonical names |
 |---|---|
 | **Vertex types** (3) | `patient`, `provider`, `appointment` |
-| **Aspect types** (9) | `patientDemographics`, `providerProfile`, `providerHours`, `providerTimeOff`, `providerSlotClaim`, `patientSlotClaim`, `appointmentSchedule`, `appointmentStatus`, `appointmentEncounter` |
-| **Links** (3) | `forPatient` (appointment → patient), `withProvider` (appointment → provider), `identifiedBy` (patient → identity, optional — links a pre-minted `vtx.identity` carrying sensitive contact) |
-| **Operations** (12) | `CreatePatient` · `TombstonePatient` · `CreateProvider` · `TombstoneProvider` · `SetProviderProfile` · `SetProviderHours` · `SetProviderTimeOff` · `CreateAppointment` · `RescheduleAppointment` · `SetAppointmentStatus` · `RecordEncounter` · `TombstoneAppointment` |
+| **Aspect types** (12) | `patientDemographics`, `providerProfile`, `providerHours`, `providerTimeOff`, `providerSlotClaim`, `patientSlotClaim`, `appointmentSchedule`, `appointmentStatus`, `appointmentEncounter`, `identityPatientClaim` (guard, on the linked identity), `providerIdentityClaim` (guard, on the provider), `identityProviderClaim` (guard, on the linked identity) |
+| **Links** (3) | `forPatient` (appointment → patient), `withProvider` (appointment → provider), `identifiedBy` (patient/provider → identity, optional — links a pre-minted `vtx.identity` carrying sensitive contact) |
+| **Operations** (13) | `CreatePatient` · `TombstonePatient` · `CreateProvider` · `TombstoneProvider` · `SetProviderProfile` · `SetProviderHours` · `SetProviderTimeOff` · `BindProviderIdentity` · `CreateAppointment` · `RescheduleAppointment` · `SetAppointmentStatus` · `RecordEncounter` · `TombstoneAppointment` |
 | **Projection lenses** (6) | `clinicAppointments` → `clinic-appointments` · `clinicProviders` → `clinic-providers` · `clinicPatients` → `clinic-patients` (all `nats-kv`, `full` engine) · `clinicAppointmentsRead` / `providerAppointmentsRead` / `clinicPatientsRead` (all `postgres`, `full` engine, **Protected** — Contract #6 §6.14 RLS, D1.5: patient-self / provider-self / patient-self-plus-workplace-plus-staff-wildcard) |
 
 Every op is granted to the `operator` role at `scope: any` (`permissions.go`) — no new capability
@@ -73,7 +73,9 @@ half-open overlap tests and the convergence lens's `remindAt` compare rely on.
   per booking (see *Conflict detection* below), never pre-seeded. An optional `identityKey` (validated
   alive + class=identity, via `contextHint.reads`) wires the `identifiedBy` link to a pre-minted
   `vtx.identity` carrying the patient's sensitive contact — no contact PII lives on `.demographics`
-  itself. Returns `primaryKey`.
+  itself, and claims a `CreateOnly` `.patientClaim` guard aspect (class `identityPatientClaim`) on the
+  linked identity — a global existence marker rejecting a **second, different** patient from ever
+  claiming the same identity. Returns `primaryKey`.
 - **`TombstonePatient`** — `{patientKey}`. Soft-deletes the patient **root only** (no cascade — see
   *Tombstone semantics*).
 
@@ -92,6 +94,12 @@ half-open overlap tests and the convergence lens's `remindAt` compare rely on.
   date-specific blackout `.timeOff` (RFC3339 UTC, `from < to`, normalized to canonical UTC). The
   exception layer *on top of* `.hours`. Pass `ranges:[]` to clear.
 - **`TombstoneProvider`** — `{providerKey}`. Soft-deletes the provider root only.
+- **`BindProviderIdentity`** — `{providerKey, identityKey}`. Binds a provider to its login identity: both
+  endpoints validated alive + typed, mints the `identifiedBy` link (provider → identity), claims a
+  `CreateOnly` guard aspect on **each** side (`.identityClaim` — class `providerIdentityClaim` — on the
+  provider; `.providerClaim` — class `identityProviderClaim` — on the identity) so the bind is mutually
+  exclusive (a second bind on either side is rejected), and idempotently grants the identity the
+  `provider` role via `holdsRole`. Returns `primaryKey` (the `identifiedBy` link key).
 
 ### Appointment
 
@@ -102,7 +110,17 @@ half-open overlap tests and the convergence lens's `remindAt` compare rely on.
   covered 15-minute cell on both the provider and patient hub. No `contextHint.reads` declaration is
   needed for the slot claims — each cell's `kv.Read` is **lazy** (§2.5): it only picks the mutation verb
   (create / CAS-revive / reject); the safety property is the atomic batch's `CreateOnly`/`expectedRevision`
-  conditioning at commit, not the read.
+  conditioning at commit, not the read. Also accepts an optional `leaseAppKey` (mirrors
+  `wellness-domain`'s `CreateBooking` resident-rate check): when the leaseapp is alive, carries a
+  `.tenancy` aspect, and its applicant identity matches the patient's own `identifiedBy` identity, a
+  `residentVisit` link (appointment → leaseapp) is written — a mismatch or absent lease falls through
+  **silently**, never a hard failure. Also accepts an optional `site` (`vtx.building.<NanoID>`, a
+  `location-domain` building carrying a clinic-domain `.site` profile): when supplied, the building must
+  be alive + `class=location` **and** the provider must `practicesAt` it (the `clinicSiteAssignment`
+  link) — a wrong-class building or a provider not assigned to that site is **REJECTED**
+  (`UnknownSite`/`NotALocation`/`ProviderNotAtSite`; unlike `leaseAppKey` this is a hard requirement once
+  supplied, not a silent fall-through), and an `atSite` link (appointment → building) is written. Omitted
+  `site` records no site.
 - **`RescheduleAppointment`** — `{appointmentKey, provider, patient, startsAt, endsAt, reason?}`. Rewrites
   the `.schedule` with new times (re-deriving `remindAt` so the `@at` reminder re-arms). `provider` and
   `patient` are **required and validated** to be the appointment's actual endpoints (via the
@@ -110,10 +128,16 @@ half-open overlap tests and the convergence lens's `remindAt` compare rely on.
   could silently land in an occupied slot, bypassing the double-book defense. Releases the grid cells the
   appointment no longer needs and claims the newly-covered ones in the same atomic batch — a rejected
   claim leaves the original booking's cells fully intact.
-- **`SetAppointmentStatus`** — `{appointmentKey, status, note?}`. Upserts `.status`. `status` ∈
-  `scheduled|confirmed|checkedIn|completed|cancelled|noShow`. `note` is an optional audit reason
-  (cancel / no-show, for billing + records), distinct from the `.schedule` visit `reason`; an omitted
-  note clears any prior one (the note belongs to the transition it was recorded with).
+- **`SetAppointmentStatus`** — `{appointmentKey, status, note?, noShowFeeCents?}`. Upserts `.status`.
+  `status` ∈ `scheduled|confirmed|checkedIn|completed|cancelled|noShow`. `note` is an optional audit
+  reason (cancel / no-show, for billing + records), distinct from the `.schedule` visit `reason`; an
+  omitted note clears any prior one (the note belongs to the transition it was recorded with).
+  Transitioning to `noShow` also stores a `noShowFeeCents` amount on `.status` — caller-supplied
+  (must be `> 0`) or a **2500** default when omitted — which `clinic-ledger`'s `clinicNoShowSettlement`
+  lens reads to post a `DebitAccount` charge. The **terminal** statuses `{cancelled, completed, noShow}`
+  are **final**: re-setting the same terminal value is idempotent, but changing a terminal status to a
+  *different* one is rejected (`TerminalStatus`) so a finished / cancelled visit can never silently
+  revert; non-terminal statuses move freely.
 - **`RecordEncounter`** — `{appointmentKey, summary, assessment?, plan?, followUpRequested?, followUpDate?}`.
   Upserts `.encounter` — the post-visit clinical record. `summary`/`assessment`/`plan` are RAW PHI, captured
   plaintext-for-now under the trusted-tool posture and **never projected** into a read model (the deferred
