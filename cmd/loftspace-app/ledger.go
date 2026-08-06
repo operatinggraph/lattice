@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"sort"
@@ -118,14 +119,42 @@ func resolveLeaseAccount(keys []string, get kvGetter, leaseAppKey string) string
 	return ""
 }
 
+// leaseVisibleToActor reports whether the authenticated actor may view
+// leaseAppKey's ledger — either as the tenant (queryApplicationByKey, RLS-scoped
+// to the caller's own leases, D1.5) or as the managing landlord
+// (queryLandlordApplications, RLS-scoped to the caller's own units), mirroring
+// the ownership checks handleOneBillStatement and handleUnitApplications already
+// apply to the same protected models.
+func leaseVisibleToActor(ctx context.Context, pool pgxBeginner, actorID, leaseAppKey string) (bool, error) {
+	if _, ok, err := queryApplicationByKey(ctx, pool, actorID, leaseAppKey); err != nil {
+		return false, err
+	} else if ok {
+		return true, nil
+	}
+	managed, err := queryLandlordApplications(ctx, pool, actorID)
+	if err != nil {
+		return false, err
+	}
+	for _, row := range managed {
+		if row.EntityKey == leaseAppKey {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
 // handleLedger implements GET /api/ledger?leaseAppKey= — the payment-history
 // view, served from the `ledgerHistory` + `leaseAccounts` lens read models
 // (NOT Core KV, P5). It returns the lease's transaction rows, the running
 // balance, and the account key (empty if the lease has not opened a ledger
-// account yet) the FE needs to post a new charge or payment.
+// account yet) the FE needs to post a new charge or payment. Scoped to a lease
+// the caller is party to (tenant or managing landlord) via leaseVisibleToActor
+// — unlike the query-param-trusting handler this replaces, a signed-in caller
+// cannot pull another lease's balance/accountKey by guessing its key.
 func (s *server) handleLedger(w http.ResponseWriter, r *http.Request) {
-	conn, ok := s.requireConn(w)
-	if !ok {
+	actor, err := s.authenticateRead(r)
+	if err != nil {
+		s.writeError(w, http.StatusUnauthorized, "authentication required: "+err.Error())
 		return
 	}
 	leaseAppKey := strings.TrimSpace(r.URL.Query().Get("leaseAppKey"))
@@ -136,6 +165,27 @@ func (s *server) handleLedger(w http.ResponseWriter, r *http.Request) {
 
 	ctx, cancel := s.reqContext(r)
 	defer cancel()
+
+	if s.pgPool == nil {
+		s.writeError(w, http.StatusBadGateway,
+			"protected read model not configured (set LOFTSPACE_APP_PG_DSN and ensure Postgres + the lease-signing protected lens are up)")
+		return
+	}
+	visible, err := leaseVisibleToActor(ctx, s.pgPool, actor.Subject, leaseAppKey)
+	if err != nil {
+		s.logger.Error("read protected lease applications", "error", err)
+		s.writeError(w, http.StatusBadGateway, "could not read the protected lease-applications model")
+		return
+	}
+	if !visible {
+		s.writeError(w, http.StatusForbidden, "not your lease")
+		return
+	}
+
+	conn, ok := s.requireConn(w)
+	if !ok {
+		return
+	}
 
 	acctBucket := loftspaceledger.LeaseAccountsBucket
 	acctKeys, err := conn.KVListKeys(ctx, acctBucket)
