@@ -96,7 +96,7 @@ func Lenses() []pkgmgr.LensSpec {
 			Output: &pkgmgr.OutputDescriptorSpec{
 				AnchorType:       "booking",
 				OutputKeyPattern: NoShowSettlementTarget + ".{actorSuffix}",
-				BodyColumns:      []string{"violating", "missing_charge", "entityKey", "bookingKey", "identityKey", "accountKey", "feeCents", "status", "maxretries_charge"},
+				BodyColumns:      []string{"violating", "missing_charge", "entityKey", "bookingKey", "identityKey", "accountKey", "feeCents", "status", "memo", "maxretries_charge"},
 				EmptyBehavior:    "delete",
 				KeyColumn:        "entityId",
 				Freshness:        "auto",
@@ -130,7 +130,7 @@ func Lenses() []pkgmgr.LensSpec {
 			Output: &pkgmgr.OutputDescriptorSpec{
 				AnchorType:       "wellnessrefund",
 				OutputKeyPattern: RefundSettlementTarget + ".{actorSuffix}",
-				BodyColumns:      []string{"violating", "missing_refund", "entityKey", "refundKey", "accountKey", "amountCents", "maxretries_refund"},
+				BodyColumns:      []string{"violating", "missing_refund", "entityKey", "refundKey", "accountKey", "amountCents", "memo", "maxretries_refund"},
 				EmptyBehavior:    "delete",
 				KeyColumn:        "entityId",
 				Freshness:        "auto",
@@ -185,6 +185,7 @@ RETURN
   accountKey,
   feeCents,
   status,
+  'No-show fee' AS memo,
   ((status = 'noShow') AND (feeCents <> null) AND (feeCents > 0) AND (accountKey <> null) AND (txCount = 0)) AS missing_charge,
   ((status = 'noShow') AND (feeCents <> null) AND (feeCents > 0) AND (accountKey <> null) AND (txCount = 0)) AS violating,
   %d AS maxretries_charge
@@ -286,6 +287,7 @@ RETURN
   entityKey AS refundKey,
   accountKey,
   amountCents,
+  'Class price refund' AS memo,
   ((accountKey <> null) AND (amountCents <> null) AND (amountCents > 0) AND (txCount = 0)) AS missing_refund,
   ((accountKey <> null) AND (amountCents <> null) AND (amountCents > 0) AND (txCount = 0)) AS violating,
   %d AS maxretries_refund

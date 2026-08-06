@@ -724,20 +724,47 @@ async function loadMyClasses() {
 }
 
 // renderMyBalance loads and renders the signed-in member's own wellness
-// ledger balance (GET /api/ledger, self-scoped) — the no-show-fee / class-price
-// billing wellness-ledger posts. A blank accountKey (no ledger account opened
-// yet) renders as a plain "no charges yet" note rather than an error: today
-// only a root-submitted CreateAccount can open one (verticals.md — the
-// browser has no grant to call it itself), so this is the normal state for
-// most members, not a fault.
+// ledger balance + itemized transaction history (GET /api/ledger,
+// self-scoped) — the no-show-fee / class-price billing wellness-ledger
+// posts, mirroring renderBillingBody's list idiom below. A blank accountKey
+// (no ledger account opened yet) renders as a plain "no charges yet" note
+// rather than an error: today only a root-submitted CreateAccount can open
+// one (verticals.md — the browser has no grant to call it itself), so this
+// is the normal state for most members, not a fault.
 async function renderMyBalance() {
   const el = document.getElementById("myclasses-balance");
+  const list = document.getElementById("myclasses-ledger-list");
+  const empty = document.getElementById("myclasses-ledger-empty");
   if (!el) return;
   try {
     const data = await appGet("/api/ledger");
-    el.textContent = data.accountKey ? ledgerBalanceLine(data.balanceCents) : "No charges yet.";
+    list.innerHTML = "";
+    if (!data.accountKey) {
+      el.textContent = "No charges yet.";
+      empty.hidden = true;
+      return;
+    }
+    el.textContent = ledgerBalanceLine(data.balanceCents);
+    const txs = data.transactions || [];
+    if (!txs.length) {
+      empty.hidden = false;
+      empty.textContent = "No charges yet.";
+      return;
+    }
+    empty.hidden = true;
+    for (const t of txs) {
+      const li = document.createElement("li");
+      li.className = "ledger-entry " + t.type;
+      const sign = t.type === "debit" ? "+" : "−";
+      const d = new Date(t.postedAt);
+      const when = isNaN(d) ? t.postedAt : d.toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
+      li.textContent = when + " · " + sign + money(t.amountCents) + (t.memo ? " — " + t.memo : "");
+      list.append(li);
+    }
   } catch (_) {
     el.textContent = "";
+    list.innerHTML = "";
+    empty.hidden = true;
   }
 }
 

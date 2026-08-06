@@ -52,8 +52,12 @@ func WeaverTargets() []pkgmgr.WeaverTargetSpec {
 					// pin the vertexType DDL this target dispatches to
 					// (MissingClass otherwise).
 					Class:  "wellnesstransaction",
-					Params: map[string]string{"accountKey": "row.accountKey", "amountCents": "row.feeCents", "bookingRef": "row.bookingKey"},
-					Reads:  []string{"row.accountKey", "row.bookingKey"},
+					Params: map[string]string{"accountKey": "row.accountKey", "amountCents": "row.feeCents", "bookingRef": "row.bookingKey", "memo": "row.memo"},
+					// memo excluded from Reads deliberately — it's free text
+					// ('No-show fee', never a vtx.* key), and declaring it here
+					// fails step4 hydrate the same way clinic-ledger's identical
+					// gap already hit (see clinic-ledger/targets.go's doc comment).
+					Reads: []string{"row.accountKey", "row.bookingKey"},
 				},
 			},
 		},
@@ -94,8 +98,10 @@ func WeaverTargets() []pkgmgr.WeaverTargetSpec {
 					// (MissingClass otherwise) — same rationale as the
 					// two targets above.
 					Class:  "wellnesstransaction",
-					Params: map[string]string{"accountKey": "row.accountKey", "amountCents": "row.amountCents", "refundRef": "row.refundKey"},
-					Reads:  []string{"row.accountKey", "row.refundKey"},
+					Params: map[string]string{"accountKey": "row.accountKey", "amountCents": "row.amountCents", "refundRef": "row.refundKey", "memo": "row.memo"},
+					// memo excluded from Reads deliberately — same rationale as
+					// NoShowSettlementTarget's gap above.
+					Reads: []string{"row.accountKey", "row.refundKey"},
 				},
 			},
 		},
