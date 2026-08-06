@@ -26,6 +26,7 @@ const (
 	sessionSeriesVertexDDL = "sessionseries"
 	bookingVertexDDL       = "booking"
 	instructorVertexDDL    = "instructor"
+	refundVertexDDL        = "wellnessrefund"
 
 	studioProfileAspectDDL           = "studioProfile"
 	sessionScheduleAspectDDL         = "sessionSchedule"
@@ -37,6 +38,7 @@ const (
 	sessionBookerClaimAspectDDL      = "sessionBookerClaim"
 	bookingStatusAspectDDL           = "bookingStatus"
 	sessionSeriesDefinitionAspectDDL = "sessionSeriesDefinition"
+	refundDetailAspectDDL            = "wellnessRefundDetail"
 
 	instructorProfileAspectDDL       = "instructorProfile"
 	instructorIdentityClaimAspectDDL = "instructorIdentityClaim"
@@ -88,6 +90,8 @@ func DDLs() []pkgmgr.DDLSpec {
 		instructorIdentityClaimAspectTypeDDL(),
 		identityInstructorClaimAspectTypeDDL(),
 		sessionSeriesDefinitionAspectTypeDDL(),
+		refundVertexTypeDDL(),
+		refundDetailAspectTypeDDL(),
 	}
 }
 
@@ -1174,6 +1178,96 @@ func identityInstructorClaimAspectTypeDDL() pkgmgr.DDLSpec {
 		},
 	}
 }
+
+func refundVertexTypeDDL() pkgmgr.DDLSpec {
+	return pkgmgr.DDLSpec{
+		CanonicalName: refundVertexDDL,
+		// Deliberately meta.ddl.aspectType, not vertexType, even though a
+		// wellnessrefund IS a full vertex (root + .detail aspect), not an
+		// aspect. CancelBooking is already the booking vertexType DDL's own
+		// op (bookingVertexDDL claims it) — ddl_cache.go's buildByCommand
+		// only counts vertexType-Kind DDLs toward the operationType→class
+		// ambiguity check (an op admitted by two vertexType DDLs is DROPPED
+		// from the index, breaking dispatch for every CancelBooking caller).
+		// step6_validate.go's write-gate itself resolves governance by class
+		// name alone, irrespective of vertexType/aspectType Kind — an
+		// aspectType-Kind DDL still fully gates this vertex's create
+		// mutation. So this Kind choice is the same "declaration-only,
+		// write-gate but not a dispatch owner" idiom every other aspectType
+		// DDL in this file already uses, just applied to a vertex-shaped
+		// mutation instead of a literal .aspect key.
+		Class:             "meta.ddl.aspectType",
+		PermittedCommands: []string{"CancelBooking"},
+		Description: "Wellness class-price refund marker. Vertex shape: vtx.wellnessrefund.<NanoID>, " +
+			"class=wellnessrefund, root data = {} (minimal, D5 — the data lives in the .detail aspect). Minted " +
+			"ONLY by CancelBooking (booking vertexType DDL, ddls.go), and only when the booking being cancelled " +
+			"already carries a posted settlesClassPrice charge — the one case wellness-ledger's own " +
+			"wellnessClassPriceSettlement lens cannot self-correct, since its `MATCH (bk:booking {key: " +
+			"$actorKey})` simply stops matching a tombstoned booking (no charge is ever posted for a booking " +
+			"cancelled BEFORE it was charged; that half of the gap needs no fix). Exists because the booking " +
+			"itself is tombstoned in the SAME mutation batch that discovers the charge — Contract #1's isDeleted " +
+			"read-filtering means no post-tombstone lens walk could ever find a marker written onto the booking's " +
+			"own aspects (the exact ReleaseOrphanedBooking .status.session precedent this mirrors, " +
+			"bookingStatusAspectTypeDDL above), so the marker must live on a vertex that survives the cancellation " +
+			"— a fresh one, not the booking. Carries the reverses link (wellnessrefund→wellnesstransaction, this " +
+			"refund is the later-arriving vertex — Contract #1 §1.1) to the original charge, which " +
+			"wellness-ledger's wellnessRefundSettlement lens (lenses.go) walks to converge the refund by " +
+			"dispatching WellnessCreditAccount{accountKey, amountCents, refundRef}.",
+		Script: refundDeclarationOnlyScript,
+		InputSchema: `{"type":"object","properties":` +
+			`{"accountKey":{"type":"string"},"amountCents":{"type":"number"},"bookingKey":{"type":"string"}}}`,
+		OutputSchema: `{"type":"object"}`,
+		FieldDescription: map[string]string{
+			"accountKey":  "The wellnessaccount the class-price charge being reversed was posted to. Stored on the .detail aspect, not root data (D5).",
+			"amountCents": "The exact amountCents of the original charge (read off its .entry aspect at CancelBooking time, not re-derived from the session's current price — the refund must match what was actually charged).",
+			"bookingKey":  "The cancelled booking this refund traces back to. Internal bookkeeping context only — the reverses link, not this field, carries the relationship to the original charge transaction.",
+		},
+		Examples: []pkgmgr.ExampleSpec{
+			{
+				Name:            "wellnessrefund — a class-price refund marker",
+				Payload:         map[string]any{"accountKey": "vtx.wellnessaccount.<NanoID>", "amountCents": 1500, "bookingKey": "vtx.booking.<NanoID>"},
+				ExpectedOutcome: "Stored as vtx.wellnessrefund.<NanoID> (root {}) + .detail aspect; minted by CancelBooking only when a settlesClassPrice charge already existed for the booking. wellness-ledger's wellnessRefundSettlement lens converges it into a WellnessCreditAccount.",
+			},
+		},
+	}
+}
+
+func refundDetailAspectTypeDDL() pkgmgr.DDLSpec {
+	return pkgmgr.DDLSpec{
+		CanonicalName:     refundDetailAspectDDL,
+		Class:             "meta.ddl.aspectType",
+		PermittedCommands: []string{"CancelBooking"},
+		Description: "Refund-marker detail aspect (wellness). Stored as vtx.wellnessrefund.<NanoID>.detail " +
+			"(class wellnessRefundDetail) = {accountKey, amountCents, bookingKey}. Non-sensitive. Written once, " +
+			"atomically alongside the wellnessrefund vertex it belongs to, by CancelBooking (booking vertexType " +
+			"DDL, ddls.go) — never updated afterward. Declaration-only: no op handler of its own.",
+		Script:       refundDeclarationOnlyScript,
+		InputSchema:  `{"type":"object","properties":{"accountKey":{"type":"string"},"amountCents":{"type":"number"},"bookingKey":{"type":"string"}}}`,
+		OutputSchema: `{"type":"object"}`,
+		FieldDescription: map[string]string{
+			"accountKey":  "The wellnessaccount the original class-price charge posted to.",
+			"amountCents": "The exact amountCents of the original charge, read off its .entry aspect at CancelBooking time.",
+			"bookingKey":  "The cancelled booking this refund traces back to (bookkeeping only).",
+		},
+		Examples: []pkgmgr.ExampleSpec{
+			{
+				Name:            "wellnessrefund detail aspect",
+				Payload:         map[string]any{"accountKey": "vtx.wellnessaccount.<NanoID>", "amountCents": 1500, "bookingKey": "vtx.booking.<NanoID>"},
+				ExpectedOutcome: "Stored as vtx.wellnessrefund.<NanoID>.detail; written once by CancelBooking alongside the wellnessrefund vertex it names.",
+			},
+		},
+	}
+}
+
+// refundDeclarationOnlyScript is the shared no-op script for both
+// wellnessrefund DDLs above — CancelBooking's script (bookingDDLScript,
+// owned by the booking vertexType DDL) is what actually mints these, so
+// this never executes as a dispatch target. Mirrors aspectDeclarationOnlyScript
+// below, worded for a vertex+aspect pair instead of a lone aspect.
+const refundDeclarationOnlyScript = `
+def execute(state, op):
+    fail("InvalidState: this DDL is declaration-only; wellnessrefund is minted by CancelBooking, owned by the booking vertexType DDL")
+`
 
 // aspectDeclarationOnlyScript is the shared no-op script for every
 // declaration-only aspect-type DDL — its op handler lives on the owning
@@ -3311,6 +3405,60 @@ def execute(state, op):
                 fail("InvalidState: " + book_key + ".status.waitlistSlot is missing; cannot cancel")
             mutations = [make_tombstone(book_key), make_tombstone(session + ".wl" + str(slot_n))]
             events = [{"class": "wellness.waitlistLeft", "data": {"bookingKey": book_key}}]
+
+        # A class-price charge already posted (settlesClassPrice) before this
+        # cancellation cannot be found by any post-tombstone lens walk over
+        # THIS booking (Contract #1 isDeleted read-filtering — the exact
+        # ReleaseOrphanedBooking .status.session precedent, bookingStatusAspectTypeDDL
+        # above) — so the refund marker mints HERE, while the booking is
+        # still alive, or never. Cancelling BEFORE a charge posts needs no
+        # such marker: once tombstoned, wellnessClassPriceSettlement's own
+        # MATCH (bk:booking, key=actorKey) simply stops matching
+        # (wellness-ledger/lenses.go), so the class-price gap it converges
+        # never fires for a cancelled booking in the first place — this
+        # branch exists only to REVERSE a charge that already landed.
+        # Checked regardless of booked/waitlisted: classPriceSettlementSpec
+        # carries no status filter, so either could in principle already
+        # carry a charge.
+        # read-posture: (e) relation=settlesClassPrice epoch=none -- a
+        # booking carries at most one live settlesClassPrice transaction
+        # (wellnessClassPriceSettlement's own txCount=0 gate is single-fire).
+        charge_page, _ = kv.Links(book_key, "settlesClassPrice", "in", None, 1)
+        for lk in charge_page:
+            if lk.isDeleted:
+                continue
+            charge_tx_key = lk.sourceVertex
+            _, charge_tx_id = parts_of(charge_tx_key, "chargeTransactionKey", "wellnesstransaction")
+            # read-posture: (e) per-candidate follow-up read off the
+            # enumeration above (data-derived key) -- the exact amount
+            # actually charged, not re-derived from the session's current
+            # (possibly since-changed) price.
+            entry = kv.Read(charge_tx_key + ".entry")
+            if entry == None or entry.isDeleted:
+                continue
+            amount_cents = entry.data.get("amountCents")
+            if amount_cents == None:
+                continue
+            # read-posture: (e) relation=postedTo epoch=none -- a
+            # wellnesstransaction carries exactly one postedTo link (written
+            # once, atomically, at mint time by WellnessDebitAccount/
+            # WellnessCreditAccount; never rewired).
+            acct_page, _ = kv.Links(charge_tx_key, "postedTo", "out", None, 1)
+            account_key = None
+            for alk in acct_page:
+                if not alk.isDeleted:
+                    account_key = alk.targetVertex
+            if account_key == None:
+                continue
+            refund_id = nanoid.new()
+            refund_key = "vtx.wellnessrefund." + refund_id
+            reverses_lnk = "lnk.wellnessrefund." + refund_id + ".reverses.wellnesstransaction." + charge_tx_id
+            mutations.append(make_vtx(refund_key, "wellnessrefund", {}))
+            mutations.append(make_aspect(refund_key, "detail", "wellnessRefundDetail",
+                {"accountKey": account_key, "amountCents": amount_cents, "bookingKey": book_key}))
+            mutations.append(make_link(reverses_lnk, refund_key, charge_tx_key, "reverses", "reverses", {}))
+            events.append({"class": "wellness.classPriceRefundQueued", "data": {"bookingKey": book_key, "refundKey": refund_key, "accountKey": account_key, "amountCents": amount_cents}})
+            break
 
         # Release the per-(session, booker) double-book guard so this booker can
         # re-book the session (cafe-domain's Settle→cafeOpenTabGuard release,

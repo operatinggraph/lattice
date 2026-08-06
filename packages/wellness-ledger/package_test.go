@@ -38,10 +38,10 @@ func TestPackage_StructurePins(t *testing.T) {
 	if got, want := len(Package.Permissions), 4; got != want {
 		t.Errorf("Permissions: got %d, want %d", got, want)
 	}
-	if got, want := len(Package.Lenses), 4; got != want {
+	if got, want := len(Package.Lenses), 5; got != want {
 		t.Errorf("Lenses: got %d, want %d", got, want)
 	}
-	if got, want := len(Package.WeaverTargets), 2; got != want {
+	if got, want := len(Package.WeaverTargets), 3; got != want {
 		t.Errorf("WeaverTargets: got %d, want %d", got, want)
 	}
 	if got, want := len(Package.LoomPatterns), 0; got != want {
@@ -69,14 +69,14 @@ func TestPackage_StructurePins(t *testing.T) {
 		}
 	}
 
-	wantLenses := []string{"wellnessLedgerHistory", "wellnessMemberAccounts", "wellnessNoShowSettlement", "wellnessClassPriceSettlement"}
+	wantLenses := []string{"wellnessLedgerHistory", "wellnessMemberAccounts", "wellnessNoShowSettlement", "wellnessClassPriceSettlement", "wellnessRefundSettlement"}
 	for i, d := range Package.Lenses {
 		if i < len(wantLenses) && d.CanonicalName != wantLenses[i] {
 			t.Errorf("Lenses[%d]: got %q, want %q", i, d.CanonicalName, wantLenses[i])
 		}
 	}
 
-	wantTargets := []string{"wellnessNoShowSettlement", "wellnessClassPriceSettlement"}
+	wantTargets := []string{"wellnessNoShowSettlement", "wellnessClassPriceSettlement", "wellnessRefundSettlement"}
 	for i, d := range Package.WeaverTargets {
 		if i < len(wantTargets) && d.TargetID != wantTargets[i] {
 			t.Errorf("WeaverTargets[%d]: got %q, want %q", i, d.TargetID, wantTargets[i])

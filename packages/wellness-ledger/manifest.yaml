@@ -1,5 +1,5 @@
 name: wellness-ledger
-version: 0.2.3
+version: 0.2.4
 description: |
   Wellness member payment ledger: the wellnessaccount vertex type (WellnessCreateAccount,
   independently-minted id, one per member identity via a .wellnessLedgerAccount
@@ -7,12 +7,15 @@ description: |
   (WellnessDebitAccount/WellnessCreditAccount, append-only entries linked to the account via
   postedTo, WellnessDebitAccount independently taking optional bookingRef (no-show
   settlement, writes settles) and priceBookingRef (class-price settlement,
-  writes settlesClassPrice) back-refs) + the wellnessLedgerHistory read-model
-  lens (one row per transaction) + the wellnessMemberAccounts lens (member
-  identity -> account key lookup) + the wellnessNoShowSettlement Weaver
-  playbook (no-show fee auto-charge) + the wellnessClassPriceSettlement Weaver
-  playbook (class-price auto-charge, unconditional on attendance). Depends
-  wellness-domain.
+  writes settlesClassPrice) back-refs; WellnessCreditAccount independently
+  taking optional refundRef, writes settlesRefund) + the wellnessLedgerHistory
+  read-model lens (one row per transaction) + the wellnessMemberAccounts lens
+  (member identity -> account key lookup) + the wellnessNoShowSettlement
+  Weaver playbook (no-show fee auto-charge) + the wellnessClassPriceSettlement
+  Weaver playbook (class-price auto-charge, unconditional on attendance) +
+  the wellnessRefundSettlement Weaver playbook (reverses a class-price charge
+  already posted before its booking was cancelled, anchored on
+  wellness-domain's wellnessrefund marker vertex). Depends wellness-domain.
 depends:
   - wellness-domain
 declares:
@@ -40,6 +43,10 @@ declares:
       adapter: nats-kv
       bucket: weaver-targets
       engine: full
+    - canonicalName: wellnessRefundSettlement
+      adapter: nats-kv
+      bucket: weaver-targets
+      engine: full
   opMetas:
     - operationType: WellnessCreateAccount
     - operationType: WellnessDebitAccount
@@ -62,3 +69,5 @@ declares:
       lensRef: wellnessNoShowSettlement
     - targetId: wellnessClassPriceSettlement
       lensRef: wellnessClassPriceSettlement
+    - targetId: wellnessRefundSettlement
+      lensRef: wellnessRefundSettlement

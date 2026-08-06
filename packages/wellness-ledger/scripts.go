@@ -193,7 +193,7 @@ def vertex_alive(state, key):
         return False
     return True
 
-def post_entry(state, op, entry_type, event_class, allow_booking_ref):
+def post_entry(state, op, entry_type, event_class, allow_booking_ref, allow_refund_ref):
     p = op.payload
     acct_key = required_string(p, "accountKey")
     _, acct_id = parts_of(acct_key, "accountKey", "wellnessaccount")
@@ -221,6 +221,21 @@ def post_entry(state, op, entry_type, event_class, allow_booking_ref):
             _, price_booking_id = parts_of(price_booking_key, "priceBookingRef", "booking")
             if not vertex_alive(state, price_booking_key):
                 fail("UnknownBooking: " + price_booking_key)
+
+    # refundRef (WellnessCreditAccount only, the mirror of bookingRef/
+    # priceBookingRef above being WellnessDebitAccount only): the vertex it
+    # names is a wellnessrefund marker (wellness-domain's CancelBooking,
+    # ddls.go), not a booking — a cancelled booking is tombstoned by the
+    # time any refund posts, so validating alive against class=booking here
+    # would always UnknownBooking a genuine refund.
+    refund_key = None
+    refund_id = None
+    if allow_refund_ref:
+        refund_key = optional_string(p, "refundRef")
+        if refund_key != None:
+            _, refund_id = parts_of(refund_key, "refundRef", "wellnessrefund")
+            if not vertex_alive(state, refund_key):
+                fail("UnknownRefund: " + refund_key)
 
     amount_cents = require_number(p, "amountCents")
     if amount_cents <= 0:
@@ -267,6 +282,15 @@ def post_entry(state, op, entry_type, event_class, allow_booking_ref):
         settles_price_lnk = "lnk.wellnesstransaction." + tx_id + ".settlesClassPrice.booking." + price_booking_id
         mutations.append(make_link(settles_price_lnk, tx_key, price_booking_key, "settlesClassPrice", "settlesClassPrice", {}))
 
+    # settlesRefund: the transaction (later-arriving) is the source, the
+    # pre-existing wellnessrefund marker is the target (Contract #1 §1.1).
+    # Only written when the caller supplied refundRef. The
+    # wellnessRefundSettlement lens walks this link to converge the refund
+    # gap once posted, mirroring settlesClassPrice's exact shape.
+    if refund_key != None:
+        settles_refund_lnk = "lnk.wellnesstransaction." + tx_id + ".settlesRefund.wellnessrefund." + refund_id
+        mutations.append(make_link(settles_refund_lnk, tx_key, refund_key, "settlesRefund", "settlesRefund", {}))
+
     events = [{"class": event_class,
                "data": {"accountKey": acct_key, "transactionKey": tx_key, "amountCents": amount_cents}}]
     return {"mutations": mutations, "events": events,
@@ -276,10 +300,10 @@ def execute(state, op):
     ot = op.operationType
 
     if ot == "WellnessDebitAccount":
-        return post_entry(state, op, "debit", "account.debited", True)
+        return post_entry(state, op, "debit", "account.debited", True, False)
 
     if ot == "WellnessCreditAccount":
-        return post_entry(state, op, "credit", "account.credited", False)
+        return post_entry(state, op, "credit", "account.credited", False, True)
 
     fail("transaction DDL: unknown operationType: " + ot)
 `

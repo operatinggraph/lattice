@@ -351,3 +351,90 @@ func TestWellnessClassPriceSettlement_NoShowSettlesLinkDoesNotConverge(t *testin
 	require.Equal(t, true, v["missing_price_charge"], "a settles (no-show) link must not satisfy the settlesClassPrice gap")
 	require.Equal(t, true, v["violating"])
 }
+
+// projectRefundAt runs the anchored wellnessRefundSettlement spec for one
+// wellnessrefund marker — refundSettlementSpec's counterpart to
+// projectClassPriceAt, anchored on wellnessrefund rather than booking (the
+// booking is already tombstoned by the time a refund marker exists).
+func (f *wlFixture) projectRefundAt(t *testing.T, refundName string) []ruleengine.ProjectionResult {
+	t.Helper()
+	now := time.Now().UTC().Format(time.RFC3339)
+	eng := full.New()
+	cr, err := eng.Parse(refundSettlementSpec)
+	require.NoError(t, err, "wellnessRefundSettlement cypher must parse on the full engine")
+	refundKey := "vtx.wellnessrefund." + f.ids[refundName]
+	out, err := eng.ExecuteWith(context.Background(), cr, ruleengine.EventContext{Parameters: map[string]any{
+		"actorKey":    refundKey,
+		"now":         now,
+		"projectedAt": now,
+	}}, f.adjKV, f.coreKV)
+	require.NoError(t, err)
+	return out
+}
+
+// mkRefund seeds one wellnessrefund marker carrying the given (optional, nil
+// to omit) accountKey/amountCents on its .detail aspect — mirroring what
+// wellness-domain's CancelBooking mints. accountName, when non-empty, also
+// seeds a real wellnessaccount vertex so accountKey resolves to a live key.
+func (f *wlFixture) mkRefund(t *testing.T, name string, accountName string, amountCents any) {
+	t.Helper()
+	f.vtx(t, name, "wellnessrefund")
+	detail := map[string]any{}
+	if accountName != "" {
+		f.vtx(t, accountName, "wellnessaccount")
+		detail["accountKey"] = "vtx.wellnessaccount." + f.ids[accountName]
+	}
+	if amountCents != nil {
+		detail["amountCents"] = amountCents
+	}
+	f.aspect(t, name, "detail", "wellnessRefundDetail", detail)
+}
+
+func TestWellnessRefundSettlement_NoCredit_MissingRefund(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newWlFixture(t)
+	f.mkRefund(t, "openrefund", "openrefund_acct", 1500.0)
+
+	v := f.projectRefundAt(t, "openrefund")[0].Values
+	require.Equal(t, "vtx.wellnessrefund."+f.ids["openrefund"], v["entityKey"])
+	require.Equal(t, "vtx.wellnessaccount."+f.ids["openrefund_acct"], v["accountKey"])
+	require.Equal(t, 1500.0, v["amountCents"])
+	require.Equal(t, true, v["missing_refund"], "no wellnesstransaction settlesRefund this marker yet — violating")
+	require.Equal(t, true, v["violating"])
+	requireIntColumn(t, v, "maxretries_refund", maxRefundRetries)
+}
+
+func TestWellnessRefundSettlement_Credited_Converged(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newWlFixture(t)
+	f.mkRefund(t, "paidrefund", "paidrefund_acct", 1500.0)
+	f.vtx(t, "paidrefund_tx", "wellnesstransaction")
+	f.edge(t, "settlesRefund", "paidrefund_tx", "paidrefund")
+
+	v := f.projectRefundAt(t, "paidrefund")[0].Values
+	require.Equal(t, false, v["missing_refund"], "a wellnesstransaction settlesRefund this marker — converged")
+	require.Equal(t, false, v["violating"])
+}
+
+// TestWellnessRefundSettlement_ClassPriceLinkDoesNotConverge proves the
+// refund gap is independent of the settlesClassPrice relation it mirrors: a
+// settlesClassPrice-linked transaction (a DIFFERENT relation, and in
+// practice never even reachable from a wellnessrefund's own OPTIONAL MATCH,
+// which keys on settlesRefund) does not satisfy this gap.
+func TestWellnessRefundSettlement_ClassPriceLinkDoesNotConverge(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newWlFixture(t)
+	f.mkRefund(t, "crossedrefund", "crossedrefund_acct", 1500.0)
+	f.vtx(t, "crossedrefund_tx", "wellnesstransaction")
+	f.edge(t, "settlesClassPrice", "crossedrefund_tx", "crossedrefund")
+
+	v := f.projectRefundAt(t, "crossedrefund")[0].Values
+	require.Equal(t, true, v["missing_refund"], "a settlesClassPrice link must not satisfy the settlesRefund gap")
+	require.Equal(t, true, v["violating"])
+}

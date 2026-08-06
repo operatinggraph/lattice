@@ -623,3 +623,94 @@ func TestDebitAccount_UnknownPriceBookingRefRejected(t *testing.T) {
 	testutil.PublishOp(t, conn, env)
 	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeRejected)
 }
+
+// seedRefund directly seeds a bare wellnessrefund vertex (root {}) — the
+// mirror of seedIdentity, standing in for wellness-domain's CancelBooking
+// (the only real minter) so refundRef validation can be exercised without
+// standing up a full booking/cancellation flow.
+func seedRefund(t *testing.T, ctx context.Context, conn *substrate.Conn, id string) string {
+	t.Helper()
+	key := "vtx.wellnessrefund." + id
+	doc := map[string]any{"class": "wellnessrefund", "isDeleted": false, "data": map[string]any{}}
+	b, _ := json.Marshal(doc)
+	if _, err := conn.KVPut(ctx, testutil.HarnessCoreBucket, key, b); err != nil {
+		t.Fatalf("seed refund %s: %v", key, err)
+	}
+	return key
+}
+
+// TestCreditAccount_RefundRefWritesSettlesRefundLink proves WellnessCreditAccount
+// carrying refundRef writes the settlesRefund audit link, and that a plain
+// WellnessCreditAccount (no refundRef) writes no such link — the
+// WellnessCreditAccount mirror of TestDebitAccount_BookingRefWritesSettlesLink.
+func TestCreditAccount_RefundRefWritesSettlesRefundLink(t *testing.T) {
+	ctx, conn := setupLedgerEnv(t)
+	cp, cons := newLedgerPipeline(t, ctx, conn, "refundref")
+
+	identityKey := seedIdentity(t, ctx, conn, "WLMK23456789ABCDT5AB")
+	acctKey := createAccount(t, ctx, conn, cp, cons, "createacctrfr0001", identityKey)
+	refundKey := seedRefund(t, ctx, conn, "WLREFUNDMKR1HJKMNPQR")
+	refundID := refundKey[len("vtx.wellnessrefund."):]
+
+	creditReqID := testutil.GenReqID("creditrfr0000000001")
+	creditEnv := &processor.OperationEnvelope{
+		RequestID:     creditReqID,
+		Lane:          processor.LaneDefault,
+		OperationType: "WellnessCreditAccount",
+		Actor:         ledgerActorKey,
+		SubmittedAt:   "2026-06-26T09:00:00Z",
+		Class:         "wellnesstransaction",
+		Payload:       json.RawMessage(`{"accountKey":"` + acctKey + `","amountCents":1500,"refundRef":"` + refundKey + `"}`),
+		ContextHint:   &processor.ContextHint{Reads: []string{acctKey, refundKey}},
+	}
+	testutil.PublishOp(t, conn, creditEnv)
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
+
+	settlesRefundLnk := "lnk.wellnesstransaction." + nanoIDFromRequestID(creditReqID) + ".settlesRefund.wellnessrefund." + refundID
+	if !keyExists(t, ctx, conn, settlesRefundLnk) {
+		t.Fatalf("settlesRefund link must exist: %s", settlesRefundLnk)
+	}
+
+	// A plain WellnessCreditAccount (no refundRef) writes no settlesRefund link at all.
+	plainReqID := testutil.GenReqID("creditrfr0000000002")
+	plainEnv := &processor.OperationEnvelope{
+		RequestID:     plainReqID,
+		Lane:          processor.LaneDefault,
+		OperationType: "WellnessCreditAccount",
+		Actor:         ledgerActorKey,
+		SubmittedAt:   "2026-06-26T09:05:00Z",
+		Class:         "wellnesstransaction",
+		Payload:       json.RawMessage(`{"accountKey":"` + acctKey + `","amountCents":1000}`),
+		ContextHint:   &processor.ContextHint{Reads: []string{acctKey}},
+	}
+	testutil.PublishOp(t, conn, plainEnv)
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
+	plainSettlesRefundLnk := "lnk.wellnesstransaction." + nanoIDFromRequestID(plainReqID) + ".settlesRefund.wellnessrefund." + refundID
+	if keyExists(t, ctx, conn, plainSettlesRefundLnk) {
+		t.Fatalf("a plain WellnessCreditAccount with no refundRef must write no settlesRefund link, found %s", plainSettlesRefundLnk)
+	}
+}
+
+// TestCreditAccount_UnknownRefundRefRejected rejects a WellnessCreditAccount whose
+// refundRef names a non-existent wellnessrefund marker (UnknownRefund) — the
+// WellnessCreditAccount mirror of TestDebitAccount_UnknownPriceBookingRefRejected.
+func TestCreditAccount_UnknownRefundRefRejected(t *testing.T) {
+	ctx, conn := setupLedgerEnv(t)
+	cp, cons := newLedgerPipeline(t, ctx, conn, "unknownrefundref")
+
+	identityKey := seedIdentity(t, ctx, conn, "WLMK23456789ABCDT6AB")
+	acctKey := createAccount(t, ctx, conn, cp, cons, "createacctuqr0001", identityKey)
+
+	env := &processor.OperationEnvelope{
+		RequestID:     testutil.GenReqID("credituqr0000000001"),
+		Lane:          processor.LaneDefault,
+		OperationType: "WellnessCreditAccount",
+		Actor:         ledgerActorKey,
+		SubmittedAt:   "2026-06-26T09:00:00Z",
+		Class:         "wellnesstransaction",
+		Payload:       json.RawMessage(`{"accountKey":"` + acctKey + `","amountCents":1500,"refundRef":"vtx.wellnessrefund.WLABSENTRFD2HJKMNPQR"}`),
+		ContextHint:   &processor.ContextHint{Reads: []string{acctKey, "vtx.wellnessrefund.WLABSENTRFD2HJKMNPQR"}},
+	}
+	testutil.PublishOp(t, conn, env)
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeRejected)
+}

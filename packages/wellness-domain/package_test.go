@@ -41,7 +41,7 @@ func TestPackage_ManifestMatchesDefinition(t *testing.T) {
 // one would not break a read: it would silently re-admit double-booking. That is
 // why they are pinned by name rather than counted.
 func TestPackage_StructurePins(t *testing.T) {
-	if got, want := len(Package.DDLs), 18; got != want {
+	if got, want := len(Package.DDLs), 20; got != want {
 		t.Errorf("DDLs: got %d, want %d", got, want)
 	}
 	if got, want := len(Package.Lenses), 7; got != want {
@@ -85,6 +85,8 @@ func TestPackage_StructurePins(t *testing.T) {
 		{"instructorIdentityClaim", "meta.ddl.aspectType"},
 		{"identityInstructorClaim", "meta.ddl.aspectType"},
 		{"sessionSeriesDefinition", "meta.ddl.aspectType"},
+		{"wellnessrefund", "meta.ddl.aspectType"},
+		{"wellnessRefundDetail", "meta.ddl.aspectType"},
 	}
 	for i, want := range wantDDLs {
 		if i >= len(Package.DDLs) {

@@ -20,3 +20,14 @@ const maxChargeRetries = 3
 // deleted when the gap closes (the charge posts), so a later booking on a
 // re-priced session starts a fresh budget.
 const maxPriceChargeRetries = 3
+
+// maxRefundRetries caps how many times Weaver auto-dispatches
+// WellnessCreditAccount for one wellnessrefund marker before it stops and
+// leaves the gap violating for operator attention (Contract #10 §10.3): the
+// lens projects it as the constant maxretries_refund column on every
+// wellnessRefundSettlement row, the same budget-per-target idiom
+// maxChargeRetries/maxPriceChargeRetries above establish. The count is
+// deleted when the gap closes (the credit posts) — a wellnessrefund is
+// minted at most once per cancelled booking (CancelBooking, wellness-domain),
+// so there is no "later" refund to reuse the budget.
+const maxRefundRetries = 3

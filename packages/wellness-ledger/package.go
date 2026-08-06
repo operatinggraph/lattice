@@ -87,15 +87,18 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 // Package is the static, install-time bundle.
 var Package = pkgmgr.Definition{
 	Name:    "wellness-ledger",
-	Version: "0.2.3",
+	Version: "0.2.4",
 	Description: "Wellness member payment ledger: the wellnessaccount vertex type (WellnessCreateAccount, independently-minted " +
 		"id, one per member identity via a .wellnessLedgerAccount guard aspect on the identity) + the wellnesstransaction " +
 		"vertex type (WellnessDebitAccount/WellnessCreditAccount, append-only entries linked to the account via postedTo, WellnessDebitAccount " +
 		"independently taking optional bookingRef (no-show settlement, writes settles) and priceBookingRef (class-price " +
-		"settlement, writes settlesClassPrice) back-refs) + the wellnessLedgerHistory read-model lens (one row per " +
+		"settlement, writes settlesClassPrice) back-refs; WellnessCreditAccount independently taking optional refundRef, " +
+		"writes settlesRefund) + the wellnessLedgerHistory read-model lens (one row per " +
 		"transaction) + the wellnessMemberAccounts lens (member identity -> account key lookup) + the " +
 		"wellnessNoShowSettlement Weaver playbook (no-show fee auto-charge) + the wellnessClassPriceSettlement Weaver " +
-		"playbook (class-price auto-charge, unconditional on attendance). Depends wellness-domain.",
+		"playbook (class-price auto-charge, unconditional on attendance) + the wellnessRefundSettlement Weaver playbook " +
+		"(reverses a class-price charge already posted before its booking was cancelled, anchored on wellness-domain's " +
+		"wellnessrefund marker vertex rather than the already-tombstoned booking). Depends wellness-domain.",
 	Depends:       []string{"wellness-domain"},
 	DDLs:          DDLs(),
 	Lenses:        Lenses(),

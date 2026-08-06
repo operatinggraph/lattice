@@ -38,6 +38,16 @@ const NoShowSettlementTarget = "wellnessNoShowSettlement"
 // sees the other's transaction.
 const ClassPriceSettlementTarget = "wellnessClassPriceSettlement"
 
+// RefundSettlementTarget is the §10.8 TargetID == the wellnessRefundSettlement
+// lens's OutputKeyPattern prefix — the §10.2↔§10.8 binding Weaver reads.
+// Anchored on wellnessrefund (wellness-domain/ddls.go), not booking: the
+// booking a refund traces back to is already tombstoned by the time the
+// refund marker exists (CancelBooking mints both in the same mutation
+// batch), so the gap must anchor on a vertex that survives — the exact
+// reason the marker exists at all (see wellness-domain's refundVertexTypeDDL
+// doc comment, ddls.go).
+const RefundSettlementTarget = "wellnessRefundSettlement"
+
 // Lenses returns the package's Lens declarations: wellnessLedgerHistory (one
 // row per posted transaction, flattening the .entry aspect + the account/
 // identity it posted to into a query-optimized read-model row — the FE
@@ -49,9 +59,13 @@ const ClassPriceSettlementTarget = "wellnessClassPriceSettlement"
 // lens targets.go's WeaverTargets dispatches WellnessDebitAccount over), and
 // wellnessClassPriceSettlement (the missing_price_charge convergence lens —
 // the OTHER wellness billing gap, a class's booking price, converged
-// unconditionally on attendance rather than gated on a noShow). Prefixed
-// like the package's DDLs (ddls.go): a Lens canonicalName is global across
-// every installed package, and loftspace-ledger already owns the bare
+// unconditionally on attendance rather than gated on a noShow), and
+// wellnessRefundSettlement (the missing_refund convergence lens — reverses a
+// class-price charge already posted before its booking was cancelled,
+// anchored on wellness-domain's wellnessrefund marker vertex rather than the
+// booking, which is already tombstoned by the time the marker exists).
+// Prefixed like the package's DDLs (ddls.go): a Lens canonicalName is global
+// across every installed package, and loftspace-ledger already owns the bare
 // `ledgerHistory` name.
 func Lenses() []pkgmgr.LensSpec {
 	return []pkgmgr.LensSpec{
@@ -100,6 +114,23 @@ func Lenses() []pkgmgr.LensSpec {
 				AnchorType:       "booking",
 				OutputKeyPattern: ClassPriceSettlementTarget + ".{actorSuffix}",
 				BodyColumns:      []string{"violating", "missing_price_charge", "entityKey", "bookingKey", "identityKey", "accountKey", "priceCents", "sessionName", "maxretries_price"},
+				EmptyBehavior:    "delete",
+				KeyColumn:        "entityId",
+				Freshness:        "auto",
+			},
+		},
+		{
+			CanonicalName:  RefundSettlementTarget,
+			Class:          "meta.lens",
+			Adapter:        "nats-kv",
+			Bucket:         "weaver-targets",
+			Engine:         "full",
+			Spec:           refundSettlementSpec,
+			ProjectionKind: "actorAggregate",
+			Output: &pkgmgr.OutputDescriptorSpec{
+				AnchorType:       "wellnessrefund",
+				OutputKeyPattern: RefundSettlementTarget + ".{actorSuffix}",
+				BodyColumns:      []string{"violating", "missing_refund", "entityKey", "refundKey", "accountKey", "amountCents", "maxretries_refund"},
 				EmptyBehavior:    "delete",
 				KeyColumn:        "entityId",
 				Freshness:        "auto",
@@ -215,6 +246,50 @@ RETURN
   ((priceCents <> null) AND (priceCents > 0) AND (accountKey <> null) AND (txCount = 0)) AS violating,
   %d AS maxretries_price
 `, maxPriceChargeRetries)
+
+// refundSettlementSpec is the one-row-per-wellnessrefund convergence cypher
+// for the class-price REFUND gap: a wellnessrefund marker (wellness-domain's
+// CancelBooking, ddls.go — minted only when the booking being cancelled
+// already carried a posted settlesClassPrice charge) needs its credit posted
+// back onto the account it names, once.
+//
+//   - `missing_refund` — the marker carries a live accountKey and a positive
+//     amountCents (always true for a well-formed marker — CancelBooking only
+//     mints one after resolving both), and no wellnesstransaction
+//     `settlesRefund` this marker yet (count(tx.key) collapses the fan to a
+//     single existence check, the same objectLiveness/clauseSatisfaction
+//     idiom classPriceSettlementSpec/noShowSettlementSpec use). Weaver
+//     dispatches WellnessCreditAccount{accountKey, amountCents, refundRef}
+//     (targets.go) — the refundRef extension writes the settlesRefund audit
+//     link this OPTIONAL MATCH walks, so once posted the gap converges and
+//     stays converged (a wellnessrefund is minted at most once per cancelled
+//     booking, so there is no later re-violation to guard against).
+//
+// Anchored on wellnessrefund, not booking — the whole reason this marker
+// exists is that the booking it traces back to is ALREADY tombstoned by the
+// time it is minted (Contract #1 isDeleted read-filtering), so no lens could
+// ever anchor this gap on the booking itself.
+// refundSettlementSpec is built once at package init: the retry cap
+// (maxRefundRetries) bakes into the constant maxretries_refund column, the
+// same §10.2 "the policy lives in the cypher" convention the other two specs
+// above follow. The cypher carries no literal '%'.
+var refundSettlementSpec = fmt.Sprintf(`MATCH (rf:wellnessrefund {key: $actorKey})
+OPTIONAL MATCH (rf)<-[:settlesRefund]-(tx:wellnesstransaction)
+WITH
+  rf.key AS entityKey,
+  rf.detail.data.accountKey AS accountKey,
+  rf.detail.data.amountCents AS amountCents,
+  count(tx.key) AS txCount
+RETURN
+  entityKey AS actorKey,
+  entityKey,
+  entityKey AS refundKey,
+  accountKey,
+  amountCents,
+  ((accountKey <> null) AND (amountCents <> null) AND (amountCents > 0) AND (txCount = 0)) AS missing_refund,
+  ((accountKey <> null) AND (amountCents <> null) AND (amountCents > 0) AND (txCount = 0)) AS violating,
+  %d AS maxretries_refund
+`, maxRefundRetries)
 
 // ledgerHistorySpec projects one row per transaction, walking postedTo to the
 // account and heldFor to the identity so the FE can filter/group by

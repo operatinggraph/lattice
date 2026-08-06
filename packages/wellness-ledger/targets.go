@@ -3,12 +3,12 @@ package wellnessledger
 import "github.com/operatinggraph/lattice/internal/pkgmgr"
 
 // WeaverTargets returns the package's meta.weaverTarget playbook (Contract
-// #10 §10.8): two independent missing_* → directOp(WellnessDebitAccount) gaps over
-// the same booking, mirroring clinic-domain/clinic-ledger's identical shape
-// but self-contained inside wellness-ledger — it already depends on
-// wellness-domain (for bookingRef/priceBookingRef validation) and can read
-// booking/session data directly, so no separate domain-side package or
-// cross-package dependency is needed.
+// #10 §10.8): three independent missing_* → directOp gaps, mirroring
+// clinic-domain/clinic-ledger's identical shape but self-contained inside
+// wellness-ledger — it already depends on wellness-domain (for
+// bookingRef/priceBookingRef/refundRef validation) and can read
+// booking/session/wellnessrefund data directly, so no separate domain-side
+// package or cross-package dependency is needed.
 //
 //   - NoShowSettlementTarget's missing_charge — a noShow booking's fee.
 //   - ClassPriceSettlementTarget's missing_price_charge — a priced session's
@@ -16,8 +16,14 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 //     each dispatches WellnessDebitAccount with a DIFFERENT ref param (bookingRef vs.
 //     priceBookingRef), writing a DIFFERENT settles/settlesClassPrice link, so
 //     the two never converge (or double-charge) each other's gap.
+//   - RefundSettlementTarget's missing_refund — reverses a class-price charge
+//     already posted before its booking was cancelled. Dispatches
+//     WellnessCreditAccount (not WellnessDebitAccount) with refundRef,
+//     anchored on wellness-domain's wellnessrefund marker vertex rather than
+//     the booking, which CancelBooking has already tombstoned by the time
+//     the marker exists.
 //
-// No missing_account gap on either target: wellness's existing billing (any
+// No missing_account gap on the first two targets: wellness's existing billing (any
 // front-desk-driven charge) already assumes a member's wellnessaccount exists
 // via the standing CreateAccount flow; a booker with no account yet simply
 // doesn't converge until one is opened, same as today's billing (mirrors
@@ -69,6 +75,27 @@ func WeaverTargets() []pkgmgr.WeaverTargetSpec {
 					Class:  "wellnesstransaction",
 					Params: map[string]string{"accountKey": "row.accountKey", "amountCents": "row.priceCents", "priceBookingRef": "row.bookingKey", "memo": "row.sessionName"},
 					Reads:  []string{"row.accountKey", "row.bookingKey", "row.sessionName"},
+				},
+			},
+		},
+		{
+			TargetID: RefundSettlementTarget,
+			LensRef:  RefundSettlementTarget,
+			// No missing_account gap: a wellnessrefund only ever exists
+			// because CancelBooking already resolved a live accountKey
+			// off the original charge's postedTo link (wellness-domain/
+			// ddls.go) before minting it — unlike the two targets above,
+			// there is no "account might not exist yet" case here.
+			Gaps: map[string]pkgmgr.GapActionSpec{
+				"missing_refund": {
+					Action:    "directOp",
+					Operation: "WellnessCreditAccount",
+					// Pin the vertexType DDL this target dispatches to
+					// (MissingClass otherwise) — same rationale as the
+					// two targets above.
+					Class:  "wellnesstransaction",
+					Params: map[string]string{"accountKey": "row.accountKey", "amountCents": "row.amountCents", "refundRef": "row.refundKey"},
+					Reads:  []string{"row.accountKey", "row.refundKey"},
 				},
 			},
 		},

@@ -1,5 +1,5 @@
 name: wellness-domain
-version: 0.21.0
+version: 0.21.1
 description: |
   Wellness bookable domain: studio / session / booking / instructor vertex
   types + their aspects and links, written by Create*/Tombstone*/Cancel*/Bind*
@@ -70,7 +70,14 @@ description: |
   drains a still-booked booking whose session was tombstoned — the
   wellnessOrphanedBookingSettlement convergence lens/target computes the
   missing_release gap it fires on, mirroring clinic-ledger's no-show
-  settlement idiom.
+  settlement idiom. CancelBooking also now mints a wellnessrefund marker
+  vertex (root {} + .detail aspect) whenever the booking being cancelled
+  already carries a posted settlesClassPrice charge — the booking itself
+  is tombstoned in the same mutation batch, so a post-tombstone lens walk
+  could never find a marker written onto its own aspects; the reverses
+  link (wellnessrefund -> wellnesstransaction) is what wellness-ledger's
+  wellnessRefundSettlement lens walks to converge the refund into a
+  WellnessCreditAccount.
 depends:
   - lease-signing
 declares:
@@ -110,6 +117,10 @@ declares:
     - canonicalName: identityInstructorClaim
       class: meta.ddl.aspectType
     - canonicalName: sessionSeriesDefinition
+      class: meta.ddl.aspectType
+    - canonicalName: wellnessrefund
+      class: meta.ddl.aspectType
+    - canonicalName: wellnessRefundDetail
       class: meta.ddl.aspectType
   lenses:
     - canonicalName: wellnessStudios
