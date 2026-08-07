@@ -444,13 +444,19 @@ vtx.identity.<U>.erasureRequested   { requestedAt, shreddedAt }
 
 and Inc 3 teaches every writer of the four erasable representations to fail closed against it:
 
-| Writer | File | Gate |
+| Writer | Gate | Positions gated |
 |---|---|---|
-| `ClaimIdentity` | `identity-domain/ddls.go:1142-1257` | reject `ErasedIdentity` |
-| `CompleteCredentialLink` | `:1438-1439` | reject `ErasedIdentity` |
-| `ReconcileCredentialBinding` | `:1578-1666` | reject — it already refuses a tombstoned index (`:1618-1619`); this is the same judgement one step earlier |
-| `index_vertex_mutation` callers | `:582-595` | **do not revive** for an erasure-requested identity |
-| `MergeIdentity` | `identity-hygiene/ddls.go` | reject an erasure-requested identity on either side |
+| `ClaimIdentity` | reject | the claimed identity **and** the submitting credential |
+| `CompleteCredentialLink` | reject | the target identity **and** the submitting credential |
+| `ReconcileCredentialBinding` | reject — it already refuses a tombstoned index; this is the same judgement one step earlier | the owner **and** the credential |
+| `CreateUnclaimedIdentity` | do not treat a sealed identity as a dedup **incumbent** — no `duplicateOf` may name it | the incumbent behind each contact hit |
+| `MergeIdentity` (identity-hygiene) | reject | primary **and** secondary |
+
+*(Corrected at build, increment 2. This table originally named the fifth row `index_vertex_mutation`
+callers / "do not revive"; the revive is not the reachable hazard — the `duplicateOf` a **live** hit
+produces is. It also named only the target position on the first three rows, which is narrower than what
+`ShredIdentityKey` erases: its `collect_bound_to_links` enumerates both directions, so an erased identity
+must be gated as the credential as well as the owner. See the increment-2 build note.)*
 
 Each gate is one `optionalReads`-declared read of `subjectKey + ".erasureRequested"` — read-posture
 class **(d)**, the same class `ShredIdentityKey` already declares for `piiKey`
@@ -1335,35 +1341,114 @@ entrypoint for that package but a shipped platform mechanism.
 **Scope-diff gate: narrow-only, with one row resolved rather than built** — see below. Nothing widened,
 no adjacent mechanism substituted.
 
-### §6's fifth row does not name a reachable hazard — resolved, not deferred
+### §6's fifth row — the brief got this wrong, and the review caught it
 
-§6's table lists five gates. Four are built. The fifth — *`index_vertex_mutation` callers: **do not
-revive** for an erasure-requested identity* — was checked against the code and the hazard it names cannot
-occur:
+The brief filed with this fire argued §6's fifth row (*`index_vertex_mutation` callers: **do not
+revive** for an erasure-requested identity*) named a hazard that could not occur, and proposed building
+four gates instead of five. **That was wrong.** All three review layers converged on it independently,
+and the gate is built. The reasoning is recorded because the *shape* of the error is worth keeping:
 
-- `index_vertex_mutation` has exactly one caller, `CreateUnclaimedIdentity` (`:980`, `:990`, `:996`), and
-  the document it revives always carries **the submitting op's own brand-new identity key**, never the
-  incumbent's. A revive therefore cannot re-create any representation of an erased person; it hands that
-  contact hash to the new person, which is what the dedup design intends.
-- The one thing `CreateUnclaimedIdentity` *can* write that names an erasure-requested identity is a fresh
-  `duplicateOf` link to a still-live index hit. That is not a monotonicity break: forming it **requires** a
-  live `identityindex` naming the sealed identity, which is exactly what `indexResidue > 0` tracks, so the
-  Weaver keeps sweeping; and `SealIdentityForErasureComplete` re-verifies residue **in its own commit**
-  (§7.2), so a correlation racing the purge cannot slip under the attestation. Once the purge lands, no
-  contact hit names the sealed identity, so no later create can form one.
-- The `indexes` links the residue lens counts are written by only two ops: `CreateUnclaimedIdentity`, for
-  its own new identity, and `MergeIdentity`, repointing onto the survivor — and the survivor arm is
-  covered by the `MergeIdentity` gate that *is* built.
+- The brief's factual claims were all true. `index_vertex_mutation` does have exactly one caller, and
+  the document it revives does always carry the submitting op's own newly-minted identity key, so a
+  revive genuinely cannot re-create an `identityindex` naming a sealed identity.
+- What it missed is that the revive is not the only thing `CreateUnclaimedIdentity` does with a contact
+  hit. A **live** hit produces a `duplicateOf` link naming the incumbent, plus its match criteria in
+  plaintext. If the incumbent is sealed, that link is a brand-new correlation to a person who asked to
+  be forgotten, written after the seal. It needs no exotic sequence: the **name index always matches**,
+  so an ordinary same-named walk-in registration during the convergence window does it.
+- The brief's fallback argument — the sweep keeps running and `SealIdentityForErasureComplete`
+  re-verifies in its own commit — is an argument about *eventual convergence*. §6 requires something
+  strictly stronger: the residue set must be **monotonically non-increasing** after step 2. A new
+  correlation link is a monotonicity break whether or not something later reaps it. Worse, the fallback
+  leaned on an op that does not exist yet, and on that op enumerating `duplicateOf` — an obligation
+  nothing had recorded.
 
-So the guarantee §6 exists to buy — a residue set that is monotonically non-increasing after the seal —
-is carried by the four gates. §6's table should read four rows; the fifth was a plausible inference from
-ledger #12's comment ("the shred is why the revive must exist") rather than a traced write path.
+**The lesson, stated for the next fire:** a gate row was dismissed by tracing the *mechanism the row
+named* (`index_vertex_mutation`) rather than the *hazard the row was reaching for* (this op can write a
+representation of a sealed identity). The row was mis-scoped, and mis-scoping is a reason to re-aim a
+gate, never to drop it.
 
-### The gate reads the target, not the actor — deliberately
+### What increment 2 built
 
-`ClaimIdentity` and `CompleteCredentialLink` write a `boundTo` whose **source** is the submitting
-credential. An erased identity appearing in that source position is out of the residue model's scope:
-§7.1 counts `(c)-[:boundTo]->(i)`, inbound only, and `UnbindIdentityCredentials` sweeps the credentials
-bound *to* the subject, not the subject's own use as someone else's credential. Gating the actor as well
-would be a widening of the ratified scope for a representation nothing counts, so the gate is on the
-target — exactly §6's table.
+Five gates, and one more link position than §6's table names:
+
+| Writer | Refusal | Position |
+|---|---|---|
+| `ClaimIdentity` | `ClaimKeyInvalid: erased` (generic on the wire; Health KV carries the word) | target **and** actor |
+| `CompleteCredentialLink` | `ClaimKeyInvalid: erased` | target **and** actor |
+| `ReconcileCredentialBinding` | `CredentialReconcileRejected: erased` (verbatim on the wire) | owner **and** credential |
+| `CreateUnclaimedIdentity` | none — the sealed incumbent is skipped as a dedup match | incumbent |
+| `MergeIdentity` | `ErasedIdentity` | primary **and** secondary |
+
+**Both link positions, not just the target.** The brief also argued the gate should read the target
+only, since §7.1 counts `(c)-[:boundTo]->(i)` — inbound. That too was wrong, for a reason the erasure op
+itself already records: `ShredIdentityKey`'s `collect_bound_to_links` enumerates `"in"` **and** `"out"`
+(`shred_identity_key.go`), because an identity is the target of every credential bound to it and the
+**source** when it is itself someone else's credential. Both directions are inside what the shred
+erases, so gating only the inbound one left `credentialindex(U)` and `boundTo U→W` creatable for a
+sealed U. Gating the actor is not a widening of ratified scope — it is matching the scope the erasure op
+already has.
+
+**Gate placement is load-bearing.** Each gate sits *below* the checks that authenticate the caller:
+after the claim/link secret comparison, and after `not-bound`/`owner-mismatch` on the reconcile path.
+Above them, a wrong-secret brute force against a sealed identity would have been diverted out of
+`claim-attempts.invalid-key` — the counter an operator watches — into `claim-attempts.erased`; and
+because `CredentialReconcileRejected` is **not** reclassified by the Processor (unlike
+`ClaimKeyInvalid`), an early reconcile gate would have answered "is this identity sealed for erasure?"
+for any key at all, contradicting that op's own permission Note.
+
+**The marker's CLASS is checked, not just its key.** privacy-base records that its aspect-type DDL gates
+the class rather than the key, so any package script can write some other class at
+`<identity>.erasureRequested`. A presence-only gate would have let such a write shut a person's claim,
+link, reconcile and merge paths permanently, with no op able to remove the marker.
+
+**`derive_reads` validates the NanoID before deriving.** The Processor answers a malformed derived key
+with `DeriveReadsInvalid` — a hydration fault raised *before* the operation's own validation — so
+deriving straight off an unvalidated payload turns a clean `ClaimKeyInvalid: no-target` into an opaque
+`HydrationFailed`, a distinguishable wire code on an NFR-S6-protected path. The same guard was extended
+to the pre-existing `credential_bound_to_key` derivations, which had the identical latent hazard.
+
+### Residuals — named, with their consumers
+
+1. **The gate cannot be commit-conditioned.** None of these ops mutates `.erasureRequested`, and step 8
+   conditions only mutation keys, so a seal committing between an op's step-4 hydration and its commit
+   is not detected: the op commits and the erased set grows by one. A script cannot `expectedRevision` a
+   key it does not mutate, and it may not write this key (only `SealIdentityForErasure` may). Same class
+   as increment 1's recorded OCC finding. It is recoverable — the new records are residue the sweep
+   reaps and the completion seal refuses over — but it means §7.3's "the create cannot happen" is not
+   literally true as built. **Consumer: the fire that builds `SealIdentityForErasureComplete`**, whose
+   in-commit re-verification is what actually closes this.
+2. **`SealIdentityForErasureComplete` must enumerate `duplicateOf` in both directions.** §7.1 counts
+   only `boundTo` and `indexes`; §7.2 says the seal "runs the same bounded enumerations" without
+   naming them. **Consumer: the same fire** — if it enumerates only the two counted relations, a
+   correlation link can survive the attestation.
+3. **The gate is wider than the residue anchor.** The gate closes on a tombstoned or body-less marker;
+   §7.1 anchors on a live `.erasureRequested.data.requestedAt`. Such a marker would shut the write path
+   while producing no residue row — an identity with nothing to converge. Both states need a writer that
+   does not exist. Kept deliberately fail-closed. **Consumer: the operator surface (§12 step 4)**, which
+   is where a shut-but-unprojected identity would become visible.
+4. **`ProvisionConsumerIdentity` re-grants `consumer` to a sealed identity** on its next authenticated
+   touch. It writes none of the counted representations, so it is outside the residue model — but nobody
+   had written that down. **Consumer: the fire that decides whether erasure should also revoke standing.**
+5. **`RotateClaimKey` / `InitiateCredentialLink` / `RecordIdentityPII` do fail closed for a sealed
+   identity — via the Vault, not this gate** (the seal requires a shredded `piiKey`, and the vault
+   returns `ErrKeyShredded`). They reject with an opaque vault error rather than an erasure refusal.
+   Recorded so a later fire does not assume they carry a §6 gate.
+6. **`MaxDeclaredReads` boundary on `MergeIdentity`.** Two derived keys now count toward the 1000-key
+   ceiling, so a merge that previously parsed at exactly 999–1000 declared keys now exceeds it. That is
+   ~495 edges, far beyond anything real, and the script's own 999-mutation preflight is the binding
+   constraint. Recorded, not fixed.
+7. **Contract #2 §2.5's class-(g) rationale is now narrower than shipped usage.** It describes class (g)
+   as existing for "a key a submitter cannot express"; `<identityKey>.erasureRequested` is trivially
+   expressible and is derived for a different, stronger reason — *a gate a submitter can disable by
+   omission is not a gate*. No normative clause is broken (the derivation is deterministic, grammar-valid,
+   weakest-wins, within the ceiling), so no contract edit is staged; a one-sentence broadening of that
+   rationale is the honest resolution whenever §2.5 is next opened.
+
+### Health-KV surface
+
+`claim-attempts.erased` is a new outcome in a documented bounded enum;
+`docs/observability/health-kv-schema.md` is updated in the same change. It matters more than a usual
+counter: NFR-S6 strips the outcome word from the reply, so Health KV is the **only** channel that
+carries it. The tests assert the counter directly — without that, swapping `fail_claim("erased")` for
+any existing outcome would have left every behavioural assertion green.
