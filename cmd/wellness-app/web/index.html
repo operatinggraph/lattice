@@ -41,6 +41,10 @@
     <div id="myclasses-balance" class="ledger-balance"></div>
     <ul id="myclasses-ledger-list" class="ledger-list" aria-live="polite"></ul>
     <div id="myclasses-ledger-empty" class="empty" hidden>No charges yet.</div>
+    <div id="myclasses-pay-form" class="ledger-record-form" hidden>
+      <input type="number" id="myclasses-pay-amount" step="0.01" min="0.01" placeholder="Amount ($)" aria-label="Amount in dollars" />
+      <button type="button" id="myclasses-pay-submit" class="ghost">+ Pay balance</button>
+    </div>
     <div id="myclasses-body"></div>
   </section>
 

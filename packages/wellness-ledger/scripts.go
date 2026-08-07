@@ -193,6 +193,13 @@ def vertex_alive(state, key):
         return False
     return True
 
+# Self-credit balance-verification budget (post_entry's authContextTarget
+# branch), mirroring clinic-ledger's identical constants: 10 pages of 50
+# postedTo entries covers many years of a billing history; an account that
+# exceeds it fails the self-credit closed rather than trust a partial sum.
+SELF_CREDIT_PAGE_LIMIT = 50
+SELF_CREDIT_MAX_PAGES = 10
+
 def post_entry(state, op, entry_type, event_class, allow_booking_ref, allow_refund_ref):
     p = op.payload
     acct_key = required_string(p, "accountKey")
@@ -241,6 +248,83 @@ def post_entry(state, op, entry_type, event_class, allow_booking_ref, allow_refu
     if amount_cents <= 0:
         fail("InvalidArgument: amountCents: required positive number")
     memo = optional_string(p, "memo")
+
+    # Member-self ownership + amount trust (WellnessCreditAccount only —
+    # permissions.go grants no self-scope WellnessDebitAccount), mirroring
+    # clinic-ledger's post_entry. The mere PRESENCE of authContextTarget
+    # selects this branch, same idiom as ClinicCreditAccount/CreateBooking —
+    # it does not change what grant actually authorized the op (a scope=any
+    # operator/frontOfHouse submit never attaches a target), it only ever
+    # narrows behavior.
+    # authcontext-target: (selector) a branch selector, not a confinement
+    # exemption -- so it reads the raw target (did the caller declare a self
+    # target at all) rather than authTargetValidated. Safe because presence
+    # only pushes the caller onto the STRICTER branch below (the ownership +
+    # amount proofs), never grants anything a scope=any submit would not
+    # already.
+    if op.authContextTarget != "":
+        if entry_type != "credit":
+            fail("AuthDenied: a member may only credit (pay down) their own account, not charge it")
+        # authcontext-target: (ownership) unlike clinic-ledger's account→
+        # patient→identifiedBy chain, a wellnessaccount's heldFor link
+        # targets the IDENTITY directly (accountDDLScript above), so
+        # ownership is a single link compare, no follow-up identifiedBy
+        # read needed. The identity is recovered from the account's OWN
+        # heldFor topology, never the payload, so a forged target only
+        # fails closed.
+        # read-posture: (e) relation=heldFor epoch=none -- an account carries
+        # exactly one heldFor link, so this is never a keyspace scan.
+        held_for_page, _ = kv.Links(acct_key, "heldFor", "out")
+        held_identity_key = None
+        for lk in held_for_page:
+            if not lk.isDeleted:
+                held_identity_key = lk.targetVertex
+        if held_identity_key == None:
+            fail("AuthDenied: account " + acct_key + " carries no live identity")
+        if held_identity_key != op.authContextTarget:
+            fail("AuthDenied: a member may only pay down their own account")
+
+        # Amount trust: nothing on this platform verifies a self-submitted
+        # payment actually happened (no payment-rail integration — out of
+        # scope for a reference vertical), so an unbounded self-credit would
+        # let a member forgive their own debt for free. The outstanding
+        # balance is recomputed from the account's OWN postedTo transaction
+        # history (never trusted from the payload), paginated + bounded: an
+        # account whose history exhausts the page budget fails closed
+        # (denies) rather than trusts a partial sum. A self-credit may never
+        # exceed what is actually owed.
+        owed_cents = 0
+        cursor = None
+        budget_exhausted = True
+        for _page in range(SELF_CREDIT_MAX_PAGES):
+            # read-posture: (e) relation=postedTo epoch=none -- bounded by the
+            # page budget; exhausting it below fails closed.
+            page, cursor = kv.Links(acct_key, "postedTo", "in", cursor, SELF_CREDIT_PAGE_LIMIT)
+            for lk in page:
+                if lk.isDeleted:
+                    continue
+                # read-posture: (e) per-candidate follow-up read off the
+                # enumeration above -- each transaction's own .entry aspect,
+                # data-derived and unknowable client-side.
+                tx_entry = kv.Read(lk.sourceVertex + ".entry")
+                if tx_entry == None or tx_entry.isDeleted:
+                    continue
+                tx_amount = tx_entry.data.get("amountCents")
+                if tx_amount == None:
+                    continue
+                if tx_entry.data.get("type") == "debit":
+                    owed_cents += tx_amount
+                elif tx_entry.data.get("type") == "credit":
+                    owed_cents -= tx_amount
+            if cursor == None:
+                budget_exhausted = False
+                break
+        if budget_exhausted:
+            fail("AuthDenied: could not verify account " + acct_key + "'s balance (too much transaction history)")
+        if owed_cents <= 0:
+            fail("AuthDenied: account " + acct_key + " has no outstanding balance to pay")
+        if amount_cents > owed_cents:
+            fail("AuthDenied: amountCents exceeds account " + acct_key + "'s outstanding balance of " + str(owed_cents))
 
     tx_id = nanoid.new()
     tx_key = "vtx.wellnesstransaction." + tx_id
@@ -300,9 +384,15 @@ def execute(state, op):
     ot = op.operationType
 
     if ot == "WellnessDebitAccount":
+        # workplace-exempt: (ownership-bound) post_entry's own authContextTarget
+        # branch fails closed for a debit (permissions.go grants no self-scope
+        # WellnessDebitAccount, so authContextTarget is never legitimately set here).
         return post_entry(state, op, "debit", "account.debited", True, False)
 
     if ot == "WellnessCreditAccount":
+        # workplace-exempt: (ownership-bound) post_entry proves ownership itself --
+        # a self-scoped credit is allowed only once the account's own heldFor
+        # link resolves to op.authContextTarget.
         return post_entry(state, op, "credit", "account.credited", False, True)
 
     fail("transaction DDL: unknown operationType: " + ot)

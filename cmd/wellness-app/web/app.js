@@ -735,16 +735,25 @@ async function renderMyBalance() {
   const el = document.getElementById("myclasses-balance");
   const list = document.getElementById("myclasses-ledger-list");
   const empty = document.getElementById("myclasses-ledger-empty");
+  const payForm = document.getElementById("myclasses-pay-form");
   if (!el) return;
   try {
     const data = await appGet("/api/ledger");
+    myBalanceCache = data;
     list.innerHTML = "";
     if (!data.accountKey) {
       el.textContent = "No charges yet.";
       empty.hidden = true;
+      payForm.hidden = true;
       return;
     }
     el.textContent = ledgerBalanceLine(data.balanceCents);
+    // Pay balance only offered while something is actually owed (a positive
+    // balance) — WellnessCreditAccount's self-scope grant lets a member pay
+    // DOWN a debt, never accrue a credit past $0, and the op itself rejects
+    // an over-balance amount server-side (scripts.go); hiding the form at
+    // $0 keeps the FE from offering a submit the op would only reject.
+    payForm.hidden = !(data.balanceCents > 0);
     const txs = data.transactions || [];
     if (!txs.length) {
       empty.hidden = false;
@@ -765,6 +774,55 @@ async function renderMyBalance() {
     el.textContent = "";
     list.innerHTML = "";
     empty.hidden = true;
+    payForm.hidden = true;
+  }
+}
+
+// myBalanceCache holds the last-loaded self /api/ledger answer — submitMyPayment
+// reads its accountKey to avoid a redundant re-fetch before the pay submit.
+let myBalanceCache = null;
+
+// submitMyPayment posts a self-scoped WellnessCreditAccount against the
+// signed-in member's OWN ledger account — opening it first (ensureLedgerAccount,
+// selfScoped) if this is their first-ever payment. Ownership + the outstanding-
+// balance cap are proven server-side (packages/wellness-ledger/scripts.go's
+// post_entry authContextTarget branch), mirroring clinic-app's patient
+// self-pay (submitLedgerEntry, asSelf).
+async function submitMyPayment() {
+  const amountInput = document.getElementById("myclasses-pay-amount");
+  const btn = document.getElementById("myclasses-pay-submit");
+  const dollars = Number(amountInput.value);
+  if (!(dollars > 0)) {
+    toast("Enter an amount greater than zero.", false);
+    return;
+  }
+  const cents = Math.round(dollars * 100);
+  btn.disabled = true;
+  try {
+    let accountKey = myBalanceCache && myBalanceCache.accountKey;
+    if (!accountKey) {
+      await ensureLedgerAccount(identityKey(), true);
+      const data = await appGet("/api/ledger");
+      accountKey = data.accountKey;
+    }
+    if (!accountKey) throw new Error("could not open the ledger account");
+    await opOrThrow(
+      {
+        operationType: "WellnessCreditAccount",
+        class: "wellnesstransaction",
+        reads: [accountKey],
+        payload: { accountKey, amountCents: cents },
+      },
+      "record the payment",
+      true,
+    );
+    toast("Payment recorded.", true);
+    amountInput.value = "";
+    setTimeout(renderMyBalance, 700);
+  } catch (e) {
+    toast(e.message, false);
+  } finally {
+    btn.disabled = false;
   }
 }
 
@@ -2180,6 +2238,7 @@ function init() {
     loadSchedule();
   });
   document.getElementById("myclasses-refresh").addEventListener("click", renderMyClasses);
+  document.getElementById("myclasses-pay-submit").addEventListener("click", submitMyPayment);
   document.getElementById("roster-session").addEventListener("change", renderRoster);
   document.getElementById("roster-refresh").addEventListener("click", () => {
     staffSessionsCache = null; membersCache = null;

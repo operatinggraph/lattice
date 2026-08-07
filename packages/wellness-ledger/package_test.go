@@ -35,7 +35,7 @@ func TestPackage_StructurePins(t *testing.T) {
 	if got, want := len(Package.DDLs), 3; got != want {
 		t.Errorf("DDLs: got %d, want %d", got, want)
 	}
-	if got, want := len(Package.Permissions), 4; got != want {
+	if got, want := len(Package.Permissions), 5; got != want {
 		t.Errorf("Permissions: got %d, want %d", got, want)
 	}
 	if got, want := len(Package.Lenses), 5; got != want {
@@ -58,7 +58,7 @@ func TestPackage_StructurePins(t *testing.T) {
 		}
 	}
 
-	wantPerms := []struct{ op, scope string }{{"WellnessCreateAccount", "any"}, {"WellnessCreateAccount", "self"}, {"WellnessDebitAccount", "any"}, {"WellnessCreditAccount", "any"}}
+	wantPerms := []struct{ op, scope string }{{"WellnessCreateAccount", "any"}, {"WellnessCreateAccount", "self"}, {"WellnessDebitAccount", "any"}, {"WellnessCreditAccount", "any"}, {"WellnessCreditAccount", "self"}}
 	for i, want := range wantPerms {
 		if i >= len(Package.Permissions) {
 			break

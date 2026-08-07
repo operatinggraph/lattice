@@ -22,11 +22,16 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 // `authContext.target == actor` is checked at step 3 (Contract #6); the
 // script separately requires payload.identityKey to BE that target
 // (scripts.go), the same gap CreateBooking's script closes for
-// payload.booker. WellnessDebitAccount/WellnessCreditAccount carry no
-// self-scope grant: a payment credit needs a human witness (cash/card handed
-// over the counter), the same reason clinic-ledger and cafe-ledger keep
-// their own credit ops off the consumer role — a member self-crediting their
-// own balance would erase debt with no actual payment changing hands.
+// payload.booker. WellnessDebitAccount carries no self-scope grant — a
+// charge needs a human witness (a no-show fee, a class price, a front-desk
+// walk-in) — but WellnessCreditAccount DOES: a member paying down what they
+// owe mirrors clinic-ledger's/loftspace-ledger's/cafe-ledger's identical
+// consumer scope=self self-pay grant, the one direction a front-desk-only
+// credit doesn't cover (My Classes' balance panel was the last vertical
+// still missing it). scripts.go's post_entry proves both ownership (the
+// account's OWN heldFor→identity link, never the payload) and amount (a
+// self-credit may never exceed the account's own recomputed outstanding
+// balance) server-side, mirroring clinic-ledger's post_entry exactly.
 //
 // Named Wellness{CreateAccount,DebitAccount,CreditAccount} rather than the
 // bare names every other ledger package's create/debit/credit ops use: a
@@ -66,6 +71,12 @@ func Permissions() []pkgmgr.PermissionSpec {
 			Scope:         "any",
 			Note:          "Grants the operator and front-of-house staff the right to submit WellnessCreditAccount (records a payment received). Unconfined: see package doc.",
 			GrantsTo:      []string{"operator", "frontOfHouse"},
+		},
+		{
+			OperationType: "WellnessCreditAccount",
+			Scope:         "self",
+			Note:          "Grants a member the right to credit (pay down) THEIR OWN account — the account's heldFor identity link must resolve to the caller's identity (scripts.go). No matching WellnessDebitAccount grant: a member pays down a balance, never charges one.",
+			GrantsTo:      []string{"consumer"},
 		},
 	}
 }
