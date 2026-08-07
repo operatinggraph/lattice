@@ -98,6 +98,13 @@ func Permissions() []pkgmgr.PermissionSpec {
 			GrantsTo:      []string{"consumer"},
 		},
 		{
+			OperationType: "UnbindIdentityCredentials",
+			Scope:         "any",
+			Note: "Authorizes the Loom service actor and the Weaver (both operator-equivalent via holdsRole, which is how a service actor is reached at all) to sweep an erasure's credential plane — step 3 of the identityErasure pattern, and the erasureResidue target's convergence dispatch (erasure-orchestration-design.md §5.4/§7.2). Confers no authority a completed erasure seal has not already exercised: the script refuses outright unless the subject carries a live erasureRequested marker of that class, and the seal itself refuses unless ShredIdentityKey has committed. " +
+				"[no-op-meta: engine-op — machinery with no person-facing affordance. It removes EVERY one of a person's sign-in methods with no last-credential guard, which is correct only for an erasure already sealed and is never a thing a person chooses from a form; UnlinkCredential is the descriptor-driven verb for that.]",
+			GrantsTo: []string{"operator"},
+		},
+		{
 			OperationType: "ReconcileCredentialBinding",
 			Scope:         "any",
 			Note:          "Grants the right to converge one credential's boundTo link onto its credentialindex vertex — the repair verb for a binding whose edge is missing, including every binding made before the link type existed. Reaches nothing the index does not already assert: the payload's owner must equal the one the index records, and a tombstoned index rejects rather than reviving an unlinked credential.",
