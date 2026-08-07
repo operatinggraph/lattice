@@ -1,7 +1,25 @@
 # Structural pause — a self-adjudicating verdict, a preserved cause, and an operable resume path
 
-**Status: Inc 1 + Inc 3 ✅ BUILT (`bb027dc5`, 2026-08-03) · Inc 2 (§4.2) 📐 awaiting-Andrew**
+**Status: Inc 1 + Inc 3 ✅ BUILT (`bb027dc5`, 2026-08-03) · Inc 2 (§4.2) ✅ Andrew-ratified 2026-08-06 — build-ready**
 **Author:** Winston (Designer fire, 2026-08-01)
+
+## Ratification of Increment 2 (Andrew, ratify session 2026-08-06)
+
+**Ratified as designed.** §4.2's judgment call is settled in favour of the self-adjudicating verdict: a
+structural pause whose own probe can decide the condition must re-probe, on the pattern
+`VerifyProtectedTable` already runs on a loop for *infra* pauses. A tier that means "pause until
+reconciled" and then never re-checks is a permanent outage wearing a transient's name.
+
+**The board's second row is folded in, not left standing.** *"[Refractor] A structural pause outlives its
+own cause with nothing to re-probe or announce it"* (★★, S–M, `📋 ready`) described this same defect from
+the symptom side, and its evidence is the necessity argument for this increment: `leaseApplicationsRead`
+dead ~23 h after its cause was gone, 10,317 events stranded, and cleared only when a human resumed the
+lens. One defect, one fire, one row — the duplicate is struck and its live evidence recorded here.
+
+**Scope reminder for the fire.** §4.2's re-probe is opt-in to `Protected || GrantTable` consumers, the
+relapse latch is what keeps a re-probe from flapping, and the recovered-pause health issue is what makes
+the recovery visible rather than silent. `StructuralProbe` does not exist in the tree today, so nothing
+here is partially built.
 
 > **What is decided and what is not.** §4.1 and §4.3 carry the doc's own verdict *"architectural fork: none,
 > frozen-contract change: none required"*, and the For-Andrew block names them as closing the diagnostic and
