@@ -2592,3 +2592,110 @@ layers and then verified against the engine before being acted on.
    "`SealIdentityForErasureComplete`" to the row filed for residual 2 above.
 
 Increments 3–6's other residuals are re-inherited verbatim.
+
+---
+
+## Fire B build note — increment 8 (2026-08-07): the Loom pattern
+
+### Fire brief
+
+**Scope sentence (verbatim from §12 Fire B, internal build order step 2).** *"the `identityErasure`
+Loom pattern"* — the last unbuilt artifact of step 2. Everything else step 2 named
+(`PurgeIdentityDedupFootprint`, the `identityErasureResidue` lens + `privacy-erasure` bucket, the
+`identityErasureComplete` weaverTarget, the two `surface` gaps, `SealIdentityForErasureComplete`)
+shipped in increments 1–7.
+
+**Scope-diff gate.** Narrow-only against §5.1 + §5.4, with three widenings the ratified text itself
+mandates rather than the build inventing: the `CompletionDomains` correction Fire A's §5.3 probe
+already recorded, the step-4 emission that same probe named as Fire B's to own, and the declared
+read-sets Fire A shipped the mechanism for. No adjacent mechanism substituted. Step 3 of the build
+order (narrowing `ShredIdentityKey`) is explicitly NOT in this increment.
+
+**Verified touch-list** (`file:line` checked live):
+
+- `packages/privacy-base/patterns.go` — NEW. Mirrors `packages/lease-signing/patterns.go:1-90` and
+  `packages/capability-author/patterns.go:1-41`, the only two shipped `LoomPatterns()` declarations.
+- `packages/privacy-base/package.go:34-43` — add `LoomPatterns: LoomPatterns()` (precedent
+  `packages/lease-signing/package.go:110`).
+- `packages/privacy-base/manifest.yaml` — add the `loomPatterns:` block (shape:
+  `packages/lease-signing/manifest.yaml:153-161`); version bump, required by
+  `scripts/lint-package-version.go:127-135`.
+- `packages/privacy-base/purge_identity_dedup_footprint.go:309-327` — the emission (D3 below), plus
+  the DDL description at `:64-120` and the file header at `:44`.
+- `packages/privacy-base/ddls.go` — register the new event type; mirror
+  `seal_identity_for_erasure.go:400-441`'s `ErasureRequestedEventDDL`.
+- `packages/privacy-base/permissions.go:51-57` — correct the "deliberately NO grant" paragraph
+  (D2 below).
+- `packages/privacy-base/package_test.go:50-57` — structure pins (+1 event DDL, +1 loomPattern).
+- `packages/privacy-base/patterns_test.go` — NEW drift-guard.
+
+**Precedents to mirror.** `validateLoomPatterns` (`internal/pkgmgr/orchestrationguard.go:275-359`)
+and the engine's `validate()` (`internal/loom/pattern.go`) run in lockstep — a spec that passes one
+passes the other, which is what keeps an install from admitting a pattern the CDC load rejects.
+Neither constrains a step's `Operation` to an op the same package declares, so step 3's
+`UnbindIdentityCredentials` (identity-domain) is a legal cross-package reference.
+
+**Increment order + runnable green checks.**
+
+1. The event on step 4's op (`go test ./packages/privacy-base/`).
+2. `patterns.go` + wiring + manifest (`go test ./packages/privacy-base/ ./internal/pkgmgr/`).
+3. Full gates + a live install on the running stack.
+
+### Four things §5.1 did not settle, and how this brief settles them
+
+**D1 — `CompletionDomains` is `["privacy", "identity"]`, not §5.1's `["privacy"]`.** Not a new
+finding: Fire A's §5.3 probe traced the correlation end to end and recorded that step 3
+(`UnbindIdentityCredentials`) emits `identity.unbound`, so the pattern completes on two domains per
+`docs/contracts/10-orchestration-loom.md:52-54`. This increment is where that correction lands in
+code. The cost is that Loom's completion consumer is now reconciled for the whole `identity` domain;
+an event carrying no live token is a lookup miss and an Ack (`engine.go:696-710`).
+
+**D2 — step 1's grant already ships, from a different package, and that is the posture.**
+`privacy-base/permissions.go:51-57` deliberately ships NO `ShredIdentityKey` grant, on the argument
+that right-to-erasure is a deployment decision. That paragraph predates the pattern and reads today
+as though step 1 were unauthorized. It is not: `packages/privacy-operator-grant/permissions.go:15-26`
+grants `ShredIdentityKey` to `operator` at `scope:any`, and `identity.system.loom` reaches `operator`
+via `holdsRole` — the same mechanical route every other step op's grant takes. The Makefile installs
+that package (`Makefile:1084-1085`). So no grant is added here and the posture is preserved; what
+changes is that privacy-base's comment now names the dependency, because a deployment that omits
+`privacy-operator-grant` gets a pattern whose step 1 fails authorization while steps 2–4 are granted.
+Filed as a residual rather than papered over.
+
+**D3 — step 4 gets an event, per the §5.3 probe's recommendation.**
+`PurgeIdentityDedupFootprint` emits nothing (`purge_identity_dedup_footprint.go:323-327`), and it is
+the pattern's LAST step, so on every happy path the instance would ride its 60s `StepTimeout`
+(`engine.go:148-149`) into the deadline probe, which advances correctly but logs
+`"loom: completion recovered via deadline probe; check completionDomains"`
+(`engine.go:1275-1278`) — a permanent misdiagnosis on a correctly-declared pattern. The op gains
+`privacy.dedupFootprintSwept{identityKey, relation, purged, mutations}`, emitted **unconditionally**,
+including on a pass that finds nothing: a step whose event is conditional on having found work cannot
+advance the instance for a subject whose dedup footprint was always empty. The event is not a generic
+lifecycle ping — it is the dedup plane's audit counterpart to the credential plane's
+`identity.unbound`, recording per-pass what an erasure removed, which is what §7.4's attestation
+reader wants and the only such record the dedup plane has (there is no read-model copy to retract, so
+nothing else would ever emit one).
+
+**D4 — the declared read-sets, derived per script rather than per DDL prose.** Fire A shipped the
+mechanism; this is its first consumer. `Reads` carries the bare `subject` token for all four steps —
+every one of them runs `vertex_alive(state, subjectKey)`, whose absence is a correctness error.
+`OptionalReads` is derived from what each script reads that is absence-tolerant:
+
+| Step | Op | `OptionalReads` | Why |
+|---|---|---|---|
+| 1 | `ShredIdentityKey` | `subject.piiKey` | `kv.Read` at `:288`, class (d) |
+| 2 | `SealIdentityForErasure` | `subject.mergedInto`, `subject.piiKey`, `subject.erasureRequested` | `:356` reads `.mergedInto` **from `state`**, `:367`/`:382` `kv.Read` the other two |
+| 3 | `UnbindIdentityCredentials` | `subject.erasureRequested` | `kv.Read` at `:359`, class (d) |
+| 4 | `PurgeIdentityDedupFootprint` | `subject.erasureRequested` | `kv.Read` at `:306`, class (d) |
+
+Step 2's `subject.mergedInto` is the one that is load-bearing rather than hygienic:
+`read_aspect_value(state, ...)` returns `None` for an undeclared key exactly as it does for an absent
+one, so an undeclared `.mergedInto` silently disarms the `IdentityMerged` refusal and lets the seal
+anchor an erasure on a merged-away identity whose residue is zero by construction. Declaring it is
+what makes that guard real for the Loom dispatcher. The class-(e) `kv.Links` walks in steps 1, 3 and
+4 stay undeclarable — the already-filed `[Loom/Weaver] A dispatcher cannot declare its op's class-(e)
+enumerations` row, unchanged by this increment.
+
+### Non-goals
+
+Narrowing `ShredIdentityKey` (build-order step 3), the operator surface and the `lint-conventions`
+rule (step 4), and anything that would give the Weaver's `GapActionSpec` an `OptionalReads` field.
