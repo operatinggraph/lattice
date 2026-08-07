@@ -1105,3 +1105,54 @@ consumer's own `Delivered.Consumer` tally at a settled fence).
 
 **Non-goals** — §15.8 verbatim, plus: extending relation narrowing to the actor-aware arm (that needs a
 client-side relation gate for the fan-out and its own soundness pass — filed as its own row, consumer named).
+
+### 15.11 Increment 2 review outcome — and the recovery leg it exposed
+
+**Three adversarial passes, scaled to the auth plane.** Delivery-side soundness · the relation-dimension
+fork · the test-proof audit. The core claim was **not refuted**: for the three CDC key shapes this consumer
+carries, server-side admission and the client-side §4.2 gate are **set-equal**, not merely one-sided —
+walked arm by arm against Contract #1 §1.5, including the aspect form (a label's vertex form covers its
+4-segment aspect keys), both link positions (which is what makes the disjunctive endpoint gate exact), meta
+vertices, tombstones, and `ReferencedLabels`' exhaustiveness over every `Clause` type. Adjacency, lens-spec
+reloads, sweep ticks and decryptor key custody all ride their own consumers or point reads, so none is
+starved by a narrower filter. Restart-with-widened-labels is equivalent to the broad regime, not worse: the
+pre-existing client gate ack-skipped the same messages and advanced the same cursor.
+
+**The relation fork was confirmed correct and load-bearing**, with a sharper reason than the one first
+written: it is not that pattern-closure fails to cover an untraversed relation — it would — but that
+narrowing the relation dimension here would silently extend *another* ratified design's blast radius to a
+corpus its own review never covered, and "match the client gate exactly" is the only invariant that
+survives a later edit to `actorAwareFanOutRelevant`, since a registered filter can never be widened back.
+That design's §3.5 premise ("`NarrowedFilterEligible` already refuses them") is falsified by this increment
+and has been corrected in place. Residual cost, stated plainly: a link joining an in-label endpoint over an
+untraversed relation still costs a queue slot, which on the auth plane is the dominant remainder of Term A —
+its own row.
+
+**Two defects on the RECOVERY leg, fixed here because this increment is what makes them load-bearing.**
+§4.2 will only narrow a lens that has a standing healer (the sweeper conjunct), and §8.3 is why: no revert
+widens a registered filter, so `Rebuild` or the sweep are the only two recoveries from a wrong narrow.
+
+1. **A failed `Rebuild` switched off both of them at once.** `SetRebuilding` is written before the work, but
+   the only writer of rebuilding → active is `watchRebuildCompletion`, launched on the success path alone.
+   Every error return cleared `rebuildInFlight` and left the status latched, and `Sweeper.suppressed`
+   refuses any tick whose status is not `active` — for the life of the process, since
+   `resumeInterruptedRebuild` runs only at start. The heartbeat could not escalate it either
+   (`evalRebuildWedged` returns false on a zero `RebuildProgressAt`, exactly what a failed rebuild leaves).
+   Reachable from one transient NATS RTT during `Reset`. Now every error return exits through
+   `abandonRebuild`: flag cleared, status restored, cause recorded. `active` + a live `LastError` is the
+   honest pair — the rebuild did not run, so the lens is still consuming under the filter and cursor it
+   already had; status carries liveness, `LastError` carries the verdict. The write order is load-bearing:
+   `SetActive` nils `LastError` by design, so the cause is recorded *after* the status, which is what the
+   new test caught.
+2. **A MATCH hot-reload's filter update failed silently.** `cmd/refractor/reload.go` logged the async
+   rebuild's error instead of recording it, and that rebuild is the only thing that re-derives the consumer
+   filter after `UseFullEngineBranches` publishes a new label set. A failure after a **widening** edit
+   leaves the consumer narrowed to the old set permanently — every write on a newly-referenced type denied
+   while the swapped-in client gate would have kept it, in both the grant and the retraction direction. Now
+   routed through `rl.refuse`, so it reaches the lens's health entry like every other refusal on that path.
+
+**Deferred with consumers named** (filed as rows, same commit as the ✅ flip): actor-aware relation
+narrowing · the sweep-heals-under-narrowing e2e · an actor-aware `Rebuild` widening test · the
+aspect-subsumption end-to-end assertion · the secure ∧ actorAggregate exclusion as an explicit
+translate-time test · the activation-order fail-closed reshape (verified correct today, latent for a future
+edit; both comments now state that early-call costs correctness rather than narrowing).

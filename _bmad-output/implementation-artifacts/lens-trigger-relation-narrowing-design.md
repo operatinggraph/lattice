@@ -137,10 +137,16 @@ the existing endpoint-type check. Redundant for a lens that also narrows server-
 that does not (over the subject budget, or a label set that is exhaustive while some *other* branch's
 relation set is not). Defaults to relevant on every uncertain input, exactly as `plainReactsTo` does.
 
-**Actor-aware pipelines are untouched.** `NarrowedFilterEligible` already refuses them
-(`actorEnumerator != nil`) because their fan-out is not bounded by their own MATCH labels, and
-`actorAwareFanOutRelevant` keeps its existing endpoint-type-only judgment. Nothing here widens what a
-Secure or actorAggregate lens sees, and nothing here narrows it either.
+**Actor-aware pipelines are untouched by the RELATION dimension** — but not, any longer, for the reason
+originally written here. This section said `NarrowedFilterEligible` "already refuses them
+(`actorEnumerator != nil`)", which stopped being true when
+[auth-plane-projection-latency](auth-plane-projection-latency-design.md) Increment 2 made an actor-aware
+pipeline eligible for **label** narrowing off §4.2's conjunction. The conclusion survives the premise's
+loss, and is now enforced explicitly rather than inherited: `ConsumerFilter` gates the relation branch on
+`actorEnumerator == nil`, because `actorAwareFanOutRelevant` keeps its endpoint-type-only judgment and so
+has no client-side relation gate for a relation-pinned subject to be conservative against. An actor-aware
+lens therefore narrows by label only. Extending this dimension to it means giving that fan-out arm a
+relation gate first — its own row, not a consequence of this design.
 
 ## 4. Why this is sound
 
