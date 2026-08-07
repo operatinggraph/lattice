@@ -1,6 +1,38 @@
 # Erasure as an orchestrated process — the Loom spine and the Weaver's convergent tail
 
-**Status: 📐 DRAFT awaiting Andrew — authored 2026-08-06 (Andrew's redirect of credential-binding-plane-lifecycle-design.md Inc 1: erasure is an orchestrated process, not a fatter op)**
+**Status: ✅ Andrew-RATIFIED 2026-08-06** — build-ready as **two fires**, both in the **Lattice lane**
+(§12, rewritten at ratification); the **§5.2 fork resolves to option B** (`StepSpec.Reads`). Authored
+2026-08-06 as Andrew's redirect of `credential-binding-plane-lifecycle-design.md` Inc 1: erasure is an
+orchestrated process, not a fatter op. **No contract change** (§14) — verified, and nothing staged.
+
+## Ratification (Andrew, 2026-08-06)
+
+**Ratified as designed, with the fork resolved and the decomposition rewritten.**
+
+- **§5.2 fork → option B (`StepSpec.Reads`).** Option A's lazy `kv.Read` would put three new erasure-path
+  ops on the losing side of a gate that is actively tightening toward blocking — the wrong footing for a
+  legal obligation — while option B extends the shipped `userTaskReads` resolution rather than inventing
+  one, and Loom's own comment already anticipates exactly it.
+- **Two fires, not five, and the collapse closes a regression window.** The original order narrowed the op
+  first on the argument that nothing regresses "that was ever guaranteed". True of the *guarantee*, but
+  today's shred really does tombstone an ordinary person's index vertices and `boundTo` links, and the
+  narrowing alone would stop doing that until the pattern landed. The cascade now leaves the op and arrives
+  in the pattern in **one landing**, with the narrowing sequenced last inside Fire B.
+- **Andrew's Loom-plus-Weaver call is vindicated by the DD pass, not merely accommodated.** Loom **cannot
+  wait** — a false guard *skips* the step — and `loom.md` states "linear only, no branches, no loops, no
+  fan-out. Conditional paths → Weaver." The unbounded convergent tail structurally cannot live in the
+  pattern, so the Weaver half is forced rather than optional.
+- **The convergence guarantee traces.** An independent probe read `gapSuppressed()` in full and confirmed
+  the mechanism §7.2 depends on: merely *declaring* `inflight_<g>` in the row routes past the default
+  retry budget of 3, so the sweep really can re-drive to zero rather than dying at three attempts.
+- **Both first-of-kind risks land in Fire B and are honestly flagged rather than hedged**: there is **no
+  Weaver-driven paged sweep anywhere in the codebase** (R1), and **no shipped Loom pattern uses a `systemOp`
+  step at all** (which is also why §5.3's completion-correlation detail is unverifiable from the corpus and
+  becomes Fire A's probe). Fire B therefore takes the full 3-layer adversarial review.
+- **Option C keeps three preconditions, not two.** §9.2 claims its sequencing is "unchanged" from the
+  credential-binding design's §7.4 while dropping that section's *behind the first configured external key
+  source* gate. Treated as standing — `.idpBinding` cannot exist before an external key source — unless
+  someone argues otherwise on the record.
 
 > **DD pass, 2026-08-06.** An independent probe verified ~40 code claims against current `main`: **36 exact,
 > 4 with citation drift, zero substantively false.** Both headline claims are exact to the line, including
@@ -747,44 +779,74 @@ By construction, at every level:
 
 ---
 
-## 12. Increments
+## 12. Increments — TWO fires (rewritten at ratification 2026-08-06)
 
-Fewer, larger fires with a declared internal build order. Sizes are honest.
+Andrew's standing amendments: **one lane** (Lattice) and **fewer, larger fires**. The original five
+increments collapse to two, and the collapse fixes a sequencing hazard the five-increment order created.
 
-**Inc 1 — Narrow the op. Size S.**
-`ShredIdentityKey` loses the three enumerations, all four refusal modes, and the mutation-count
-pre-flight. One mutation, one event. Update the DDL description and the stale in-commit rationale
-(#11). Update `packages/identity-domain/ddls.go:1605-1612`'s comment, which asserts the shred
-tombstones only the link (the credential-binding design already noted it expires).
-**Ships alone and is immediately correct**: the erasure becomes *less* complete than today but *cannot
-refuse*, and nothing regresses that was ever guaranteed. Depends on nothing.
+### Fire A — `StepSpec.Reads` in Loom (Lattice, S–M). Option B on the §5.2 fork.
 
-**Inc 2 — `StepSpec.Reads` in Loom. Size S–M. (Skipped if Andrew picks §5.2 option A.)**
-`pkgmgr.StepSpec` + `loomPatternSpecBody` + `loom.Step` + `pattern.go` validate + `submitSystemOp`
-resolution. Mirrors the shipped `userTaskReads` resolution. **Also confirms §5.3's unverified
-completion-correlation detail** with a systemOp step whose op emits a domain event — that answer sizes
-Inc 4. Platform work, no privacy surface.
+`pkgmgr.StepSpec` gains `Reads`/`OptionalReads`; `loomPatternSpecBody`; `loom.Step`; `pattern.go`
+validate; `submitSystemOp` resolution, mirroring the shipped `userTaskReads` resolution that
+`submitUserTask` already threads into `buildOutbox`. Pattern load rejects a `Reads` entry on a
+`userTask`/`externalTask` step. Plus the §5.3 correlation probe — **a systemOp step whose bound op emits a
+domain event**, which is the detail the design could not verify from the corpus (no shipped pattern uses a
+`systemOp` at all) and which sizes Fire B.
 
-**Inc 3 — Close the write path, and the unbind primitive. Size M.**
-`SealIdentityForErasure` (privacy-base) writing `.erasureRequested`; five fail-closed gates across
-identity-domain and identity-hygiene (§6); `UnbindIdentityCredentials` (identity-domain, §5.4) with its
-`Scope:"any"` grant. **The largest correctness increment**, and the one that makes §7's convergence
-mean anything. Depends on Inc 1.
+**Fork resolved to option B, not lazy `kv.Read`.** Option A would place three new erasure-path ops on the
+losing side of a gate that is actively tightening toward blocking — the wrong footing for a legal
+obligation — while option B extends a shipped resolution rather than inventing one, and Loom's own comment
+already anticipates it (*"a future systemOp that reads would set its own read-set here"*).
 
-**Inc 4 — The pattern and the convergence. Size M–L.**
-`PurgeIdentityDedupFootprint`; the `identityErasureResidue` lens + `privacy-erasure` bucket; the
-`identityErasureComplete` weaverTarget; the `identityErasure` Loom pattern; the two `surface` gaps;
-`SealIdentityForErasureComplete` with in-commit re-verification. R1's `N > 3·PAGE` proof lands here,
-first. Depends on Inc 2 + Inc 3.
+Platform-only, no privacy surface, ships safely alone, and it is the cheap de-risking that tells Fire B its
+size.
 
-**Inc 5 — Operator surface and the standing gate. Size S.**
-A Loupe pane over `privacy-erasure` (P5: reads the bucket) showing per-identity residue and seal
-state; a `lint-conventions` rule for §10 point 4 — no op reachable from the erasure pattern or target
-may page an enumeration. Depends on Inc 4.
+### Fire B — the whole erasure move, in one landing (Lattice, L–XL).
 
-**Not an increment: option C** (§9.2), behind precondition (i).
+Old Increments 1, 3, 4 and 5 together. **The collapse is not tidiness — it closes a regression window.**
+The five-increment order put the op-narrowing first, arguing it *"ships alone and is immediately correct:
+the erasure becomes less complete than today but cannot refuse, and nothing regresses that was ever
+guaranteed."* That is true about **guarantees** and glosses a **common-case behavioural regression**: today
+a shred for an ordinary person really does tombstone their `identityindex` vertices, `duplicateOf` links and
+`boundTo` links, and after the narrowing alone it would not — until the pattern lands. "It was never
+guaranteed because it could refuse above 999 mutations" is a fair statement about the guarantee and a weak
+one about what actually happens to the common case. So the cascade **leaves the op and arrives in the
+pattern in one landing**.
 
----
+Internal build order, chosen so erasure never does less than it does today:
+
+1. **Write-path closure and the unbind primitive.** `SealIdentityForErasure` (privacy-base) writing
+   `.erasureRequested`; the five fail-closed gates across identity-domain and identity-hygiene (§6);
+   `UnbindIdentityCredentials` (identity-domain, §5.4) with its `Scope:"any"` grant. Purely additive —
+   nothing is removed yet. This is the increment that makes §7's convergence mean anything.
+2. **The pattern and the convergence.** `PurgeIdentityDedupFootprint`; the `identityErasureResidue` lens +
+   `privacy-erasure` bucket; the `identityErasureComplete` weaverTarget; the `identityErasure` Loom
+   pattern; the two `surface` gaps; `SealIdentityForErasureComplete` with its in-commit re-verification.
+   R1's `N > 3·PAGE` proof lands here.
+3. **Then narrow the op.** `ShredIdentityKey` drops the three enumerations, the four refusal modes and the
+   mutation-count pre-flight — one mutation, one event — only once the pattern demonstrably performs the
+   work the op is giving up. Update the DDL description, the stale in-commit rationale, and
+   `identity-domain/ddls.go:1605-1612`'s comment.
+4. **Operator surface and the standing gate.** A Loupe pane over `privacy-erasure` (P5: reads the bucket)
+   showing per-identity residue and seal state; the `lint-conventions` rule for §10 point 4 — no op
+   reachable from the erasure pattern or target may page an enumeration.
+
+**One dependency to resolve rather than inherit.** The original §12 declared "Inc 3 depends on Inc 1", i.e.
+the write-path closure depending on the narrowing. This order inverts that. If the dependency is real — if a
+gate genuinely cannot be written against the un-narrowed op — the fire must say why and keep the
+enumerations live until step 2 completes, rather than reordering silently. Do not assume either way from
+this rewrite.
+
+**Review depth: full 3-layer adversarial.** Fire B carries both of the design's first-of-kind risks — R1's
+Weaver-driven **paged** sweep, for which the codebase has no precedent anywhere, and R5's three-way
+`OPTIONAL MATCH` residue fan-out with a flagged possible engine limitation — plus a legal obligation and
+five write-path gates.
+
+**Not a fire: option C** (§9.2), behind its preconditions. Note the third one stands: the DD pass found
+§9.2 claims the sequencing is "unchanged" from the credential-binding design's §7.4 while dropping that
+section's *behind the first configured external key source* gate. Treated as standing, since `.idpBinding`
+cannot exist before an external key source — so option C has **three** preconditions, not two, unless
+someone argues otherwise on the record.
 
 ## 13. Test strategy
 
