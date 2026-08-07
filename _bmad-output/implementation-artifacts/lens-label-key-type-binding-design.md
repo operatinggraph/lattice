@@ -25,7 +25,7 @@ argues, and both are worth carrying into the fire:
 **The judgment call in §8.3 is settled, and the other way round from the sketch.** The removed capability
 ("any location" via a shared class discriminator) is real demand, and Andrew wants it — but neither the
 label form nor §8.3's **label disjunction** is the right mechanism, and §8.3 is superseded rather than
-merely unbuilt. It resolves as a **dynamic type taxonomy**: a `specializes` link between the *type meta
+merely unbuilt. It resolves as a **dynamic type taxonomy**: a `subtypeOf` link between the *type meta
 vertices*, so a new leaf (`room`, `hallway`) can be declared **by a different package** and picked up by
 any lens labelling the abstract type, with no lens edit and no redeploy. That is its own design
 (`dynamic-type-taxonomy-design.md`, filed this session), and it **depends on this fire**: label resolution

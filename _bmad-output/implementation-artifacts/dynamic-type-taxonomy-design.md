@@ -20,7 +20,7 @@
 >
 > **A2 — Expansion is EXPLICIT in the cypher: `:unit` is exactly `vtx.unit.<id>`; `:unit*` expands.**
 > Implicit resolution is rejected, and the reason inverts the argument the session first reached for.
-> Implicit means adding `studio specializes unit` **silently widens** every existing `:unit` lens's result
+> Implicit means adding `studio subtypeOf unit` **silently widens** every existing `:unit` lens's result
 > set — and on this platform a widened result set can be a widened *grant*, since read-grant producers
 > anchor on exactly these types. Silently failing to include a new leaf is a visible gap; silently
 > including it is an over-grant nobody sees. Explicit is the fail-closed reading of a label. It also gives
@@ -79,7 +79,7 @@ Size **L** (3 fires) · Imp **★★★** · depends on `lens-label-key-type-bin
 
 **What it does.** A *type* becomes a first-class graph object: `unit`, `building`, `property` each get their own
 type meta vertex, and a new **abstract** type `location` gets one too, joined by
-`lnk.meta.<unitMetaId>.specializes.meta.<locationMetaId>`. A lens writes `MATCH (l:location)` and the Refractor
+`lnk.meta.<unitMetaId>.subtypeOf.meta.<locationMetaId>`. A lens writes `MATCH (l:location*)` — the `*` is the explicit opt-in of amendment A2 — and the Refractor
 resolves that label, **at activation**, into the concrete leaf set `{unit, building, property}`. A different
 package installing `room` later adds one link, and every lens filtering on `location` picks it up — no lens edit,
 no redeploy, no human action. This is the mechanism your ratification of the sibling design specified in place of
@@ -107,7 +107,7 @@ DDL resolution fails **open** on seven distinct paths, `step6_resolve_ddl.go:202
 and does commit before anything declares `room`. A taxonomy widening therefore needs a **Rebuild**, not an
 in-place filter update. (3) Refractor's only meta-vertex CDC source is server-side filtered to
 `$KV.<bucket>.vtx.meta.>` and its handler explicitly drops links (`corekv_source.go:395-419`, `:550`), so a
-`specializes` link event is **structurally invisible** to it — the taxonomy needs its own consumer. Extending the
+`subtypeOf` link event is **structurally invisible** to it — the taxonomy needs its own consumer. Extending the
 existing watch would have produced a trigger that silently never fires.
 
 **One fork for you (§9.3).** The write-side guards. Eight hand-written copies of `class != "location"` across five
@@ -141,7 +141,7 @@ with the five consumers that already read a label as a key type.
 It also removes the platform's only way, however accidental, to say **"any location."** Your ratification settled
 what replaces it (`lens-label-key-type-binding-design.md:25-42`):
 
-> It resolves as a **dynamic type taxonomy**: a `specializes` link between the *type meta vertices*, so a new leaf
+> It resolves as a **dynamic type taxonomy**: a `subtypeOf` link between the *type meta vertices*, so a new leaf
 > (`room`, `hallway`) can be declared **by a different package** and picked up by any lens labelling the abstract
 > type, with no lens edit and no redeploy. … Under the taxonomy the leaf types stay as they are, `location`
 > becomes a declared abstract type, the shared bare class is dropped, and `loftspace-domain:373`'s
@@ -291,10 +291,10 @@ corpus happens to contain is not a guarantee. `DDLCache` gains an `Abstract bool
 from `data.abstract` in the same scan that already populates `Kind` and `PermittedCommands`
 (`internal/processor/ddl_cache.go:120-174`).
 
-### 3.3 The `specializes` link
+### 3.3 The `subtypeOf` link
 
 ```
-lnk.meta.<leafTypeMetaId>.specializes.meta.<abstractTypeMetaId>
+lnk.meta.<leafTypeMetaId>.subtypeOf.meta.<abstractTypeMetaId>
 ```
 
 Six segments, `meta` on both sides (Contract #1 `01-addressing-and-envelope.md:11`). `meta` is already legal as a
@@ -306,21 +306,21 @@ a test fixture (`pipeline/filter_retraction_internal_test.go:477`) — so this i
 leaf type arrives after the abstract (an abstract with no leaves is useless; a leaf without its abstract cannot
 resolve), so **leaf → abstract**.
 
-**Relation name: `specializes`.** Sentence test: *"unit specializes location"* — reads correctly, and both
+**Relation name: `subtypeOf`.** Sentence test: *"unit subtypeOf location"* — reads correctly, and both
 endpoints are unambiguously *type declarations*. Rejected: `isA` (invites the instance-level reading — "this unit
 is a location" — which is what `instanceOf` already means, §7); `subtypeOf` (correct but reads as a
 property rather than an act, and the platform's relation names are verbs — `holdsRole`, `grantedBy`,
-`assignedTo`, `forOperation`, `instanceOf`, `offeredTo`); `refines` (vaguer). Settled: **`specializes`**.
+`assignedTo`, `forOperation`, `instanceOf`, `offeredTo`); `refines` (vaguer). Settled: **`subtypeOf`**.
 
 ### 3.4 Shape rules
 
 | Rule | Decision | Why |
 |---|---|---|
-| **Acyclicity** | Enforced. A cycle in the `specializes` graph makes the leaf set undefined. | §5.4 places the enforcement. |
-| **Multiple parents** | **Allowed.** `room specializes location` and `room specializes billable` are both true and both well-defined. | Resolution is always *downward* (abstract → its concrete members), never upward (leaf → its one type), so no ambiguity arises. The platform's one-live-edge precedent (`soleTarget`, `step6_resolve_ddl.go:280-285`) exists for *type authority*, where the question genuinely has one right answer; a taxonomy membership question does not have that shape. **Caveat carried forward:** the §12.8 DDL-inheritance extension *would* reintroduce ambiguity, and must forbid multiple parents or declare a precedence rule before it is built. |
+| **Acyclicity** | Enforced. A cycle in the `subtypeOf` graph makes the leaf set undefined. | §5.4 places the enforcement. |
+| **Multiple parents** | **Allowed.** `room subtypeOf location` and `room subtypeOf billable` are both true and both well-defined. | Resolution is always *downward* (abstract → its concrete members), never upward (leaf → its one type), so no ambiguity arises. The platform's one-live-edge precedent (`soleTarget`, `step6_resolve_ddl.go:280-285`) exists for *type authority*, where the question genuinely has one right answer; a taxonomy membership question does not have that shape. **Caveat carried forward:** the §12.8 DDL-inheritance extension *would* reintroduce ambiguity, and must forbid multiple parents or declare a precedence rule before it is built. |
 | **Multi-level depth** | **Allowed**, bounded to `maxTaxonomyDepth = 4`. | Mirrors `maxInstanceOfHops = 4` (`step6_resolve_ddl.go:14-20`) and its stated reason: a bound plus a visited set keeps the walk terminating and abuse-proof against crafted cycles. |
-| **Transitivity** | **Yes.** `room specializes unit specializes location` ⇒ `location` covers `room`. | Anything else makes an abstract's meaning depend on where in the chain a package chose to attach, which is the opposite of the "declare a leaf anywhere, get picked up" requirement. |
-| **A type may be both concrete and abstract-of-others** | Yes. `unit` has instances *and* may have `room` specialize it. | Nothing forbids it and forbidding it would be arbitrary. |
+| **Transitivity** | **Yes.** `room subtypeOf unit subtypeOf location` ⇒ `location` covers `room`. | Anything else makes an abstract's meaning depend on where in the chain a package chose to attach, which is the opposite of the "declare a leaf anywhere, get picked up" requirement. |
+| **A type may be both concrete and abstract-of-others** | Yes. `unit` has instances *and* may have `room subtypeOf unit`. | Nothing forbids it and forbidding it would be arbitrary. |
 | **The expanded set** | The **concrete** (non-`abstract`) members of the abstract's transitive downward closure. An abstract mid-type contributes its leaves but **not itself**. | An abstract type has no instances, so including it would add a filter subject (`$KV.<b>.vtx.location.>`) that can never match — and, worse, would let `plainVertexRelevant` admit a type that cannot exist, which is harmless but dishonest. |
 | **An abstract type must not be named `meta` or `op`** | Enforced at install. | Contract #1 §1.2 (`:38-45`) reserves both. |
 | **An empty expanded set** | The lens becomes **non-exhaustive** (broad filter), and it logs. Never `exhaustive = true` on an empty set. | An empty answer is far more likely "the resolver has not loaded yet" than "genuinely zero leaves." `ConsumerFilter` already treats `len(labels) == 0` as broad (`pipeline.go:934-935`), so this is consistent with the shipped gate rather than a new special case. |
@@ -331,8 +331,8 @@ property rather than an act, and the platform's relation names are verbs — `ho
 
 - `Abstract bool` — declares a type with no instances. Mutually exclusive with `Script`/`PermittedCommands`
   (validated at build).
-- `SpecializesRef string` — names the abstract type this concrete (or mid-abstract) type specializes, **by
-  canonicalName**. The installer resolves it and emits the `specializes` link into the same atomic batch.
+- `SubtypeOfRef string` — names the abstract type this concrete (or mid-abstract) type is a **subtype of**,
+  **by canonicalName**. The installer resolves it and emits the `subtypeOf` link into the same atomic batch.
 - `LeafBudget int` — abstract types only; see §6.2.
 
 **Resolution, and where it must NOT copy the precedent.** An in-batch abstract resolves from the batch-local map,
@@ -344,15 +344,15 @@ closed** when the named abstract does not resolve, is not `abstract: true`, or i
 *verify precedent, don't just copy it* rule: `resolveLensRef`'s pass-through is unfixed debt, not a pattern.)
 
 **Cross-package declaration needs no cooperation from the abstract's owner.** Package B declares
-`DDLSpec{CanonicalName: "room", SpecializesRef: "location"}` and the installer emits
-`lnk.meta.<roomId>.specializes.meta.<locationId>` in B's own batch. The install guardrails permit it: they check
+`DDLSpec{CanonicalName: "room", SubtypeOfRef: "location"}` and the installer emits
+`lnk.meta.<roomId>.subtypeOf.meta.<locationId>` in B's own batch. The install guardrails permit it: they check
 key shape, create-only, and aspect naming (`install_ddl.go:39-68`, `:94-95`, `:103-106`), and the protected-key
 backstop fires only on update/tombstone (`:22-32`) — B creates a *new* link key and never mutates
 location-domain's vertex. **This is the property that makes the whole design work**, and it is a pre-existing
 platform affordance, not a new hole.
 
 **One uninstall hazard, named.** Uninstall tombstones only the uninstalling package's own `declaredKeys`
-(`installer.go:847-872`). The `specializes` link lives in B's declaredKeys, so uninstalling B cleans it up. But
+(`installer.go:847-872`). The `subtypeOf` link lives in B's declaredKeys, so uninstalling B cleans it up. But
 uninstalling **location-domain** leaves B's link pointing at a tombstoned target. The resolver therefore treats a
 link whose target meta is absent or tombstoned as **not contributing** (§5.1), and that shrink is a taxonomy
 narrowing, handled by §5.3's tombstone path.
@@ -464,7 +464,7 @@ class of defect the memoization exists to prevent.
 
 Refractor's only meta-vertex CDC source subscribes with prefix `"vtx.meta."`
 (`corekv_source.go:395-419`), which `substrate.SubscribeKVChanges` turns into the **server-side** FilterSubject
-`$KV.<bucket>.vtx.meta.>` (`subscribe.go:51`, `:331-355`). A `lnk.meta.<a>.specializes.meta.<b>` write is
+`$KV.<bucket>.vtx.meta.>` (`subscribe.go:51`, `:331-355`). A `lnk.meta.<a>.subtypeOf.meta.<b>` write is
 therefore never delivered to that consumer — and even if it were, the handler's switch covers only `KindVertex`
 and `KindAspect`, with `// Unknown / link / malformed → ignore` at `corekv_source.go:550`.
 
@@ -474,11 +474,11 @@ use). One watch, one cache, N pipelines.
 
 ```
 FilterSubjects: [ $KV.<bucket>.vtx.meta.>                       // type metas: canonicalName, abstract flag
-                  $KV.<bucket>.lnk.meta.*.specializes.>  ]      // the taxonomy edges
+                  $KV.<bucket>.lnk.meta.*.subtypeOf.>  ]      // the taxonomy edges
 DeliverPolicy:  DeliverLastPerSubject   (+ IncludeHistory)      // a fresh boot sees the whole taxonomy
 ```
 
-The second subject pins segment 3 (`lnk`), segment 4 (`meta`), and segment 6 (`specializes`), wildcards the leaf
+The second subject pins segment 3 (`lnk`), segment 4 (`meta`), and segment 6 (`subtypeOf`), wildcards the leaf
 id, and lets `>` absorb `meta.<abstractId>`. The two forms differ at segment 3 in a position neither wildcards, so
 they are not a subset pair — the same property `subjects.go:159-169` argues for the narrowed set.
 
@@ -513,7 +513,7 @@ So `vtx.room.<id>` can commit long before anything declares `room`. And an in-pl
 **never moves the cursor** (`pipeline.go:926-927`, nats-server v2.14.0), so those pre-existing instances would
 never be delivered — a permanent, silent hole in every lens using the abstract.
 
-**Therefore a `specializes` create triggers `Rebuild(ctx, truncate=false)` on every lens whose expanded label set
+**Therefore a `subtypeOf` create triggers `Rebuild(ctx, truncate=false)` on every lens whose expanded label set
 actually changed.** `Rebuild` recomputes `ConsumerFilter()` and delete-recreates the durable via
 `supervisor.Reset` (`pipeline.go:1417-1433`; `consumer_supervisor.go:193-198`), which under
 `DeliverLastPerSubject` (the activation policy, `cmd/refractor/main.go:1025`) replays the last value of every
@@ -532,7 +532,7 @@ is not belt-and-braces; it is what makes the ordering irrelevant.
 
 ### 6.4 A narrowing (tombstone) must also go through Rebuild — for a different reason
 
-A `specializes` tombstone shrinks the leaf set. The lens should stop matching that type — **and its
+A `subtypeOf` tombstone shrinks the leaf set. The lens should stop matching that type — **and its
 already-projected rows for that type must retract.**
 
 That is a **row-set shrink, not a single-row overwrite**, and "overwrite-by-reprojection retracts it" is the exact
@@ -548,8 +548,8 @@ narrow the filter in place.**
 
 | Event | Action |
 |---|---|
-| `specializes` create, expanded set grew | Publish widened rule state (client gate), then `Rebuild` (recomputes filter + resets cursor). |
-| `specializes` tombstone, expanded set shrank | `Rebuild`. Never an in-place narrowing. |
+| `subtypeOf` create, expanded set grew | Publish widened rule state (client gate), then `Rebuild` (recomputes filter + resets cursor). |
+| `subtypeOf` tombstone, expanded set shrank | `Rebuild`. Never an in-place narrowing. |
 | Type meta created/updated (`abstract` flag flips, canonicalName changes) | Re-derive; treat as grow or shrink accordingly. |
 | Abstract's target meta tombstoned (the uninstall hazard, §3.5) | Link stops contributing ⇒ shrink ⇒ `Rebuild`. |
 | Resolver read fault, cycle, depth exceeded, unresolvable, empty set | `exhaustive = false` ⇒ `reprojectAll = true` ⇒ broad filter. **Never keep a stale narrow set.** |
@@ -558,7 +558,7 @@ narrow the filter in place.**
 The final row is the invariant the whole section serves: **a stale narrow set is the only unacceptable state**,
 because it is the one that silently drops real events.
 
-## 7. `instanceOf` and `specializes` — two questions, one meeting point
+## 7. `instanceOf` and `subtypeOf` — two questions, one meeting point
 
 No per-instance link is needed. But the `instanceOf` precedent is real and must be related rather than ignored.
 
@@ -568,10 +568,10 @@ No per-instance link is needed. But the `instanceOf` precedent is real and must 
   lens to discriminate a service *template* from an *instance*: an instance's `instanceOf` lands on a
   `vtx.service.*` (so it matches `:service` and is excluded), a template's lands on a `vtx.meta.*` (so it does
   not, and is admitted).
-- **`specializes` answers "which concrete types does this abstract name cover?"** — per-*type*, resolved once at
+- **`subtypeOf` answers "which concrete types does this abstract name cover?"** — per-*type*, resolved once at
   **activation**.
 
-They meet at the type meta vertex: `instanceOf` chains *terminate* there, and `specializes` links those same
+They meet at the type meta vertex: `instanceOf` chains *terminate* there, and `subtypeOf` links those same
 terminals to each other. The taxonomy is the edge set over the terminals of the instanceOf chains. Nothing
 per-instance is required, because the expansion is a property of the *type*, and every instance already reaches its
 type through the chain that exists.
@@ -624,7 +624,7 @@ Letting `class` back in would break that three ways:
 |---|---|
 | One DDL, `CanonicalName: "location"`, governing three key types (`packages/location-domain/ddls.go:56`) | **Four** type metas: concrete `unit`, `building`, `property` (each with the DDL's existing script + permittedCommands), and **abstract `location`** (`Abstract: true`, no script) |
 | `LOCATION_CLASS = "location"` written onto all three (`:187`, `:318`) | `make_vtx(loc_key, lt, {})` — **class equals the key type**, satisfying the invariant the sibling design's census says every other package already meets (`lens-label-key-type-binding-design.md:108-110`) |
-| No taxonomy | `lnk.meta.<unitId>.specializes.meta.<locationId>` × 3, emitted in location-domain's own install batch |
+| No taxonomy | `lnk.meta.<unitId>.subtypeOf.meta.<locationId>` × 3, emitted in location-domain's own install batch |
 | `LOCATION_TYPES = [...]` hardcoded in Starlark (`:182`) | Still present for the write-side guards in Fire 3 (§9.3); the *read* side no longer consults it |
 
 The three concrete DDLs share one script const (they already do — one Starlark body serves all three key types),
@@ -657,7 +657,7 @@ package-local list — behaviourally identical to today, with the list where it 
 ### 9.3 The fork (§For-Andrew)
 
 Making sites 1–3 read the *taxonomy* instead of a local list is the write-path half of this design. It needs a
-Starlark read of the `specializes` edges, which under Contract #2 §2.5 must be declared at **every dispatcher** of
+Starlark read of the `subtypeOf` edges, which under Contract #2 §2.5 must be declared at **every dispatcher** of
 those ops — `contextHint.reads` for a required key, or an annotated class-(e) bounded `kv.Links` enumeration — plus
 a fail-closed answer when the taxonomy is unreadable. That is a real mechanism with its own read-posture surface,
 and it is separable from the read-path expansion.
@@ -755,7 +755,7 @@ same lenses' health entries flip to `filterBroadReason = "label-cap"` on their n
 
 **No frozen-contract edit is staged.** Checked, surface by surface:
 
-- **Contract #1 §1.1** (link direction): `specializes` follows it — later-arriving leaf as source. No change.
+- **Contract #1 §1.1** (link direction): `subtypeOf` follows it — later-arriving leaf as source. No change.
 - **Contract #1 §1.2** (`:38-45`, reserved `meta`/`op`): unchanged; §8 enforces it for abstract names.
 - **Contract #1 §1.5** (DDL resolution, permissive default): §8's "reject a mutation whose class resolves to an
   abstract DDL" is an **addition**, not a contradiction. §1.5's permissive default governs the case where **no**
@@ -775,7 +775,7 @@ member of that vocabulary and belongs in the table. Proposed insertion under §1
 > type name that participates in the type taxonomy but has no instances. No key may use an abstract type name in
 > any type segment, and no document may carry it as a `class`; the Processor rejects either at commit. An abstract
 > type declares no `.script` and no `.permittedCommands`. Concrete types are joined to it by
-> `lnk.meta.<concreteTypeMetaId>.specializes.meta.<abstractTypeMetaId>`, whose transitive downward closure is the
+> `lnk.meta.<concreteTypeMetaId>.subtypeOf.meta.<abstractTypeMetaId>`, whose transitive downward closure is the
 > set of concrete types the abstract name covers.
 
 Per the house rule, this is staged as an uncommitted edit **only if and when Andrew ratifies this design** — not
@@ -783,12 +783,12 @@ now, and not folded into a build commit.
 
 ## 12. Alternatives considered
 
-**12.1 Spec-declared taxonomy** (a `Specializes []string` on the lens spec, or a Go-side map in Refractor) —
+**12.1 Spec-declared taxonomy** (a `SubtypeOf []string` on the lens spec, or a Go-side map in Refractor) —
 **rejected.** It is static. A new leaf declared by a *different* package cannot be picked up without editing the
 consuming lens and redeploying, which is the requirement verbatim. It also puts the type relationship in N places
 (every consuming lens) instead of one (the type declaration).
 
-**12.2 Pattern-traversal polymorphism** (leave the node unlabeled and walk `specializes` in the cypher, or anchor
+**12.2 Pattern-traversal polymorphism** (leave the node unlabeled and walk `subtypeOf` in the cypher, or anchor
 on the meta vertex) — **rejected, with the evidence.** This is the option Andrew asked about, and it inverts:
 
 - A pattern-polymorphic position must be **unlabeled**. `labels.go:101-107` sets `exhaustive = false` for an
@@ -835,7 +835,7 @@ lens's cypher, i.e. mutate other packages' meta vertices, which the install guar
 (`docs/components/_packages.md:324-336`; the protected-key backstop, `install_ddl.go:22-32`). The whole point is
 that resolution happens at *activation*, on the reader's side.
 
-**12.9 Extend `specializes` to inherit the DDL script / permittedCommands down the taxonomy** — **not built,
+**12.9 Extend `subtypeOf` to inherit the DDL script / permittedCommands down the taxonomy** — **not built,
 recorded as the natural extension.** It would remove the three-way `DDLSpec` duplication in §9.1 and give §9.3's
 guards their taxonomy check for free. It is rejected *for this design* because it puts the taxonomy on the
 **write** path inside `resolveGoverningDDL` (`step6_resolve_ddl.go:197-241`), whose blast radius is every
@@ -860,7 +860,7 @@ precedence rule. Named so it is built deliberately later, not stumbled into.
 ## 14. Decomposition — three fires, in order
 
 **Fire 1 — the taxonomy exists and cannot be misused.** (M)
-Type-meta declaration surface (`DDLSpec.Abstract`, `SpecializesRef`, `LeafBudget`); installer resolution
+Type-meta declaration surface (`DDLSpec.Abstract`, `SubtypeOfRef`, `LeafBudget`); installer resolution
 (batch-local, then the `checkCanonicalNameCollision` scan, **fail-closed** on a miss — not `resolveLensRef`'s
 pass-through); `DDLCache.MetaVertexRef.Abstract` populated from `data.abstract`; step 6's two new fail-closed
 gates (abstract type segment in any key position; class resolving to an abstract DDL); install-time acyclicity +
@@ -877,7 +877,7 @@ invalidation path — client gate before server filter, then `Rebuild`, for both
 is an over-grant. This is the *fewer, larger fires* call.
 
 **Fire 3 — location-domain lands, and the first consumer arrives.** (M)
-Four type metas (three concrete sharing one script, one abstract) + three `specializes` links; class becomes the
+Four type metas (three concrete sharing one script, one abstract) + three `subtypeOf` links; class becomes the
 key type at `packages/location-domain/ddls.go:318`; five guards drop their redundant class check, three take
 `cls in LOCATION_TYPES`; `packages/location-domain/integration_test.go:195` updated; and
 `capabilityServiceAccess` (`packages/service-location/lenses.go:133-145`) labels `loc0`/`loc`/`exLoc`
@@ -898,9 +898,9 @@ before admit, regardless of size. Fires 1 and 3 ⇒ standard.
    (`lenses.go:1034-1038`); today an unenforced convention (§8).
 3. **A per-row `typeOf(x.key)` engine function** — consumer: `AnchorWalk.AnchorType`'s audit literal
    (`anchorwalk.go:608-615`), which is what currently forbids an abstract Path-B anchor (§8).
-4. **`specializes`-driven DDL inheritance** — consumer: the three-way `DDLSpec` duplication in §9.1 (§12.9).
+4. **`subtypeOf`-driven DDL inheritance** — consumer: the three-way `DDLSpec` duplication in §9.1 (§12.9).
 5. **A board row for this design** — there is none today (grepped `backlog/{lattice,verticals,loupe}.md`:
-   no `taxonom`/`specializes` row). Winston files it; this doc does not touch the board.
+   no `taxonom`/`subtypeOf` row). Winston files it; this doc does not touch the board.
 
 ## 15. Test strategy
 
@@ -912,8 +912,8 @@ tombstoned target meta stops contributing; an empty expanded set ⇒ non-exhaust
 
 **The four equality sites**, each with an abstract label, each written to **fail against the un-generalized
 code**:
-1. `nodeMatches` binds `vtx.building.<id>` for `(l:location)` and does **not** bind `vtx.patient.<id>`.
-2. `seedAnchorBinds` accepts a `vtx.unit.<id>` seed for an anchor written `(l:location)`.
+1. `nodeMatches` binds `vtx.building.<id>` for `(l:location*)` and does **not** bind `vtx.patient.<id>`.
+2. `seedAnchorBinds` accepts a `vtx.unit.<id>` seed for an anchor written `(l:location*)`.
 3. **`AnchorProjectionKey` retracts** on a `vtx.unit.<id>` **tombstone** for a `:location`-anchored lens. This is
    the over-grant test; it must be driven through a grant-shaped target, not just asserted on the key map.
 4. `seedAnchorFor` returns the event key (not `""`) for a leaf-type event on a `:location`-anchored lens.
@@ -924,13 +924,13 @@ broad filter. A `:location` lens with an armed resolver reports `exhaustive = tr
 **Invalidation.** (a) **Ordering**: a leaf event arriving in the window between the rule-state swap and the
 consumer-filter change is **not** ack-skipped (the §6.2 hazard, asserted directly). (b) **Backfill / the
 falsified precondition**: a `vtx.room.<id>` written **before** `room` is declared *is* projected after the
-`specializes` install — this is the test that proves §6.3's Rebuild is necessary, and it must be written so a
-bare filter-update implementation fails it. (c) **Tombstone**: a `specializes` tombstone retracts the leaf's rows
+`subtypeOf` install — this is the test that proves §6.3's Rebuild is necessary, and it must be written so a
+bare filter-update implementation fails it. (c) **Tombstone**: a `subtypeOf` tombstone retracts the leaf's rows
 rather than orphaning them (row-set shrink, §6.4).
 
 **Fail-closed gates (Fire 1).** A mutation whose key carries an abstract type segment is rejected — in vertex
 root, aspect owner, **and both** link endpoint positions. A mutation whose class resolves to an abstract DDL is
-rejected. An install whose `SpecializesRef` names a nonexistent / non-abstract / tombstoned meta fails. An
+rejected. An install whose `SubtypeOfRef` names a nonexistent / non-abstract / tombstoned meta fails. An
 install-time cycle is refused. Each also has a **positive vector first**, so no negative test can pass for the
 wrong reason.
 
@@ -980,7 +980,7 @@ all are folded above. Recording them because the ones that changed it are the de
 4. **The trigger I first specified could never fire.** The draft said "extend Refractor's existing meta watch."
    `CoreKVSource` subscribes with prefix `"vtx.meta."`, which becomes the **server-side** filter
    `$KV.<bucket>.vtx.meta.>` (`corekv_source.go:395-419`, `subscribe.go:51`), and its handler ends with
-   `// Unknown / link / malformed → ignore` (`:550`). A `specializes` link event is structurally invisible to it.
+   `// Unknown / link / malformed → ignore` (`:550`). A `subtypeOf` link event is structurally invisible to it.
    → §6.1: its own consumer, with the two-subject filter and the non-subset argument.
 
 5. **Writing the expansion onto the live `CompiledRule` would race a concurrent evaluation.** The draft said
