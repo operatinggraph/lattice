@@ -1293,3 +1293,77 @@ because `vertexDocToStarlark` always populates `isDeleted` and `data`; the doubl
 aspectType from the operationType→class reverse index, so Loom's class-less dispatch resolves uniquely;
 both `events.privacy.*` consumers filter on the exact `keyShredded` subject, so the new event class breaks
 nothing; and no golden file, bootstrap json or install script pins privacy-base's version.
+
+---
+
+## Fire B build note — increment 2 (2026-08-07): the write-path gates
+
+Increment 1 shipped the marker. This is the half of §12 Fire B step 1 that reads it: **§6's fail-closed
+gates**. `UnbindIdentityCredentials` — the remaining term of step 1 — is increment 3; the split follows
+§6's own dependency arrow (a gate reads the marker; the unbind op does not) and opens no regression
+window, because a gate only ever refuses a write that today succeeds against a sealed identity.
+
+### Fire brief
+
+**1. Scope (§12 Fire B step 1, second term).** The §6 gate table: every writer of an erasable
+representation of a person reads `subjectKey + ".erasureRequested"` and fails closed. Green bar:
+`go test ./packages/identity-domain/ ./packages/identity-hygiene/`, full `go test ./... -p 4`, and the
+lint gate set.
+
+**2. Verified touch-list** (anchors checked live against `a6fd4bff`). `packages/identity-domain/ddls.go`:
+`derive_reads` (`:794`, its `ClaimIdentity`/`CompleteCredentialLink` arm `:826` and its
+`ReconcileCredentialBinding` arm `:861`); the gate helper beside `enforce_not_merged` (`:628`);
+`ClaimIdentity` (`:1142`), `CompleteCredentialLink` (`:1370`), `ReconcileCredentialBinding` (`:1578`).
+`packages/identity-hygiene/ddls.go`: a new `derive_reads` and the gate in `execute`. Plus both packages'
+`manifest.yaml` + `package.go` version and any `package_test.go` count, and a test file each.
+
+**3. Precedents mirrored.** `read_merged_into` + `enforce_not_merged`
+(`identity-domain/ddls.go:620-629`) — the read-an-aspect-then-refuse gate shape, already applied at four
+sites. `derive_reads`' existing arms (`:826-875`) — the class-(g) derivation that spares every dispatcher.
+`fail_claim` / `fail_link` / `fail_reconcile` — the typed refusal closures, whose outcome string is
+internal (NFR-S6 reclassifies the wire code) so a specific outcome costs no enumeration oracle.
+`seal_identity_for_erasure.go:376` — the `kv.Read` + `# read-posture: (d)` form for this exact aspect.
+
+**4. In-scope gotchas.** The gate reads via `kv.Read`, not `state[…]`: a `state` lookup of an undeclared
+key reads as absent, so a dispatcher that failed to declare would silently open the gate, while an
+undeclared `kv.Read` falls through to a live GET (`internal/processor/starlark_kv.go:115-121`) and still
+refuses. Declared-and-absent costs no round trip (`KnownAbsent`, `:111`). Every `kv.Read` in `packages/`
+must carry a `# read-posture:` annotation — those findings are **blocking**, not advisory
+(`scripts/lint-conventions.go:869`). identity-hygiene has no `derive_reads` today; adding one is a new
+entrypoint for that package but a shipped platform mechanism.
+
+**Scope-diff gate: narrow-only, with one row resolved rather than built** — see below. Nothing widened,
+no adjacent mechanism substituted.
+
+### §6's fifth row does not name a reachable hazard — resolved, not deferred
+
+§6's table lists five gates. Four are built. The fifth — *`index_vertex_mutation` callers: **do not
+revive** for an erasure-requested identity* — was checked against the code and the hazard it names cannot
+occur:
+
+- `index_vertex_mutation` has exactly one caller, `CreateUnclaimedIdentity` (`:980`, `:990`, `:996`), and
+  the document it revives always carries **the submitting op's own brand-new identity key**, never the
+  incumbent's. A revive therefore cannot re-create any representation of an erased person; it hands that
+  contact hash to the new person, which is what the dedup design intends.
+- The one thing `CreateUnclaimedIdentity` *can* write that names an erasure-requested identity is a fresh
+  `duplicateOf` link to a still-live index hit. That is not a monotonicity break: forming it **requires** a
+  live `identityindex` naming the sealed identity, which is exactly what `indexResidue > 0` tracks, so the
+  Weaver keeps sweeping; and `SealIdentityForErasureComplete` re-verifies residue **in its own commit**
+  (§7.2), so a correlation racing the purge cannot slip under the attestation. Once the purge lands, no
+  contact hit names the sealed identity, so no later create can form one.
+- The `indexes` links the residue lens counts are written by only two ops: `CreateUnclaimedIdentity`, for
+  its own new identity, and `MergeIdentity`, repointing onto the survivor — and the survivor arm is
+  covered by the `MergeIdentity` gate that *is* built.
+
+So the guarantee §6 exists to buy — a residue set that is monotonically non-increasing after the seal —
+is carried by the four gates. §6's table should read four rows; the fifth was a plausible inference from
+ledger #12's comment ("the shred is why the revive must exist") rather than a traced write path.
+
+### The gate reads the target, not the actor — deliberately
+
+`ClaimIdentity` and `CompleteCredentialLink` write a `boundTo` whose **source** is the submitting
+credential. An erased identity appearing in that source position is out of the residue model's scope:
+§7.1 counts `(c)-[:boundTo]->(i)`, inbound only, and `UnbindIdentityCredentials` sweeps the credentials
+bound *to* the subject, not the subject's own use as someone else's credential. Gating the actor as well
+would be a widening of the ratified scope for a representation nothing counts, so the gate is on the
+target — exactly §6's table.
