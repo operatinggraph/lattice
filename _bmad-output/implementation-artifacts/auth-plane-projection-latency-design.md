@@ -1323,3 +1323,107 @@ on the real graph and by how much it would narrow, not that it is a superset.
 Flipping any arm to act on the derived set (next fire, with the differential test + e2e (a)/(d) as its
 evidence) · the plain-arm shadow and §D2 Phase 2's wiring · any change to the enumerator's caps or its
 `reportsTo` hop · any Contract amendment.
+
+## 17. Increment 3b fire brief (build note, 2026-08-07) — the flip
+
+**Scope sentence (verbatim from §16.7's named next fire).** *Flipping any arm to act on the derived set
+(next fire, with the differential test + e2e (a)/(d) as its evidence).* Read with §10's Increment 3 row,
+whose remaining clauses are exactly these: "wire the three actor-aware arms; … differential test; e2e (a)
+tightened to co-holder-revision-unchanged, plus (d)."
+
+**Scope-diff gate, item by item.** Three arms wired to act — in scope, the whole point. Differential test —
+in scope, and §8.3 names it as the mitigation for the one risk this fire creates. e2e (a) tightened + (d) —
+in scope, named. Two things this brief ADDS to the ratified scope, both narrowings rather than
+substitutions, declared here rather than discovered in the diff:
+
+1. **Two further conjuncts before an arm may ACT** (§17.2). Neither widens anything; both refuse to act on
+   a lens where acting would be unsound, and both are conjuncts §4.2 already ratified for the sibling
+   narrowing. Omitting them would have shipped the flip onto every personal lens.
+2. **An operator mode knob** (§17.3), mirroring `REFRACTOR_MAX_BINDINGS`' shape. It exists because the
+   rollback is **not** a code revert (§17.5) and an operator needs a way to stop the bleeding at 3am.
+
+Nothing is substituted for an adjacent mechanism, and no declared dependency moved: the derivation, the hop
+index, and the shadow all shipped in `f484330d` and are re-read here, not re-derived.
+
+### 17.1 Verified touch-list (checked live against `main`)
+
+- `pipeline/evaluate.go:733-748` (vertex fan-out) · `:789-821` (link fan-out) · `:841-855` (aspect fan-out)
+  — each currently runs `Enumerate` then `shadowAnchorDerivation`; each becomes one call to the shared
+  chooser, which decides which of the two answers the event acts on.
+- **NEW `pipeline/anchor_derivation_mode.go`** — the mode (`off` / `shadow` / `act`), its per-pipeline
+  override, its package-level default, and the chooser.
+- `pipeline/anchor_derivation.go:117-128` (`derivationIndex`) — gains the two act-only conjuncts of §17.2.
+  They are act-only deliberately: shadow mode must keep observing the lenses acting would refuse, since
+  "how often would we have been wrong here" is exactly what the observation is for.
+- `pipeline/anchor_derivation_shadow.go:52-71` — the stats struct gains the act-side counters
+  (`Acted` / `ActedAnchors` / `FellBack`), and `logSummaryIfDue` prints them. In act mode the arm runs on
+  **every** event, not one in eight, so the summary interval is against events, not samples.
+- `pipeline/pipeline.go:837` (`p.sweeper == nil`) and `:897` (`patternClosedOutput`) — read, not changed;
+  they are where §17.2's two conjuncts get their answer.
+- `cmd/refractor/main.go:776-783` — the `REFRACTOR_MAX_BINDINGS` read whose shape §17.3 mirrors.
+
+### 17.2 Two conjuncts an arm must clear before it ACTS
+
+`derivationIndex`'s three shipped conjuncts (an enumerator is installed · the hop index is `Complete` ·
+the anchor position's label is the enumerator's actor type) all ask whether the derivation *can answer*.
+Acting asks a second question — whether a smaller answer is *safe here* — and two of §4.2's already-ratified
+conjuncts are the answer to it. Both are fail-closed and both refuse rather than widen:
+
+1. **`patternClosedOutput`.** The derivation reasons entirely over the compiled pattern, so a row that
+   depends on an input the pattern does not bind can change with no pattern edge changing — and a derived
+   set that legitimately excludes that anchor would skip a real change. §4.4 names the class exactly:
+   **every personal lens**, with two out-of-pattern inputs (the D1 read gate and the Interest Set), and
+   `projection/personal.go:130` installs an `ActorEnumerator` on each — so these arms are live for personal
+   lenses today and without this conjunct the flip would have reached all of them. This is the conjunct
+   whose omission would have been a silent defect rather than a pessimisation.
+2. **A sweep plan is installed (`p.sweeper != nil`).** §8.3's mitigation for the under-approximation risk is
+   "the sweep is a conjunct, so a narrowed lens always has a healer" — and this fire is the first time a
+   *derived* set decides a reprojection rather than merely being counted next to one. A lens with no
+   standing healer must not also lose the incidental recompute.
+
+What is deliberately **not** required: the rest of §4.2 — an exhaustive label set, the anchor type in the
+label set, the decryptor's identity type. Those bound whether an event may be **withheld from the lens**,
+which is a different question from which anchors an event that *did* arrive can affect. Requiring them
+would exclude `capabilityEphemeral`, and §4.7's 3b names reaching exactly the non-exhaustive lenses
+Increments 1–2 cannot as the increment's purpose. Conflating the two gates would have quietly narrowed the
+increment to the corpus that already had a narrowing.
+
+### 17.3 The mode, and why it is an operator knob
+
+`REFRACTOR_ANCHOR_DERIVATION` = `act` (default) · `shadow` · `off`, read once in `cmd/refractor/main.go`
+and applied as the package default, with a per-pipeline override for tests. The shape mirrors
+`REFRACTOR_MAX_BINDINGS` (`main.go:776-783`): read, parse, validate, log what took effect, keep the default
+on a bad value.
+
+Three modes rather than a boolean because the third one is not "off" — **`shadow` is the mode this fire
+inherits and §D2 Phase 2 will want**, and deleting it to make room for a boolean would throw away the
+plain arm's vehicle. The shadow's comparison counters keep their meaning; they simply stop being fed on an
+arm that acts, because acting means the BFS is never run and there is nothing to compare against. That is
+not an instrumentation regression — running both would spend exactly the cost the increment exists to
+remove. What replaces it in act mode is a different and more directly useful measurement: how often the
+derivation answered versus fell back, and how many anchors it reprojected, per lens, at INFO.
+
+### 17.4 Increment order + green checks
+
+1. Mode + chooser + the two act conjuncts, arms still on `shadow` — `go test ./internal/refractor/pipeline/`.
+2. Flip the default to `act`; the three arms wired — same package green, plus e2e (a)/(d) below.
+3. Differential test (§9's superset proof) — `go test ./internal/refractor/pipeline/ -run Differential`.
+4. `cmd/refractor` env read — `go build ./...`.
+5. Full `-p 4` suite (§9: Increment 3 changes evaluation for a class of lenses).
+
+### 17.5 Rollback is asymmetric — the knob stops the bleeding, the sweep heals
+
+Stated plainly because the natural assumption is wrong and §8.3 already had to state it once for
+Increment 2. This flip is pure client-side computation with no consumer-filter change, so setting
+`REFRACTOR_ANCHOR_DERIVATION=off` restores today's behaviour on the very next event — but it does **not**
+heal a row a shortfall already left stale, because the events that would have reprojected it are gone.
+Recovery from a bad narrow is `Rebuild` or the convergence sweep, exactly as for Increment 2. The knob's
+value is that it bounds the damage to the window before it is turned, without a redeploy; §17.2's second
+conjunct is what guarantees the healer exists to finish the job.
+
+### 17.6 Non-goals
+
+The plain-arm shadow and §D2 Phase 2's wiring (its own filed row, sequenced behind this one) · narrowing
+the blanket `WITH` refusal (its own filed row, §16.4) · any change to the enumerator's caps or its
+`reportsTo` hop · surfacing the act-side tally to Health KV (the log is the reader this fire owes; the
+Health surface is the divergence-audit row's shape, not this one's) · any Contract amendment.
