@@ -964,3 +964,124 @@ mechanism before accepting the premise — including the codebase's own premises
 shipped systemOp emits a domain event, so I could not confirm from existing code how a systemOp step
 advances. It is flagged in the ledger, assigned to Inc 2, and cannot change the architecture — only
 one line of the pattern declaration.
+
+---
+
+## Fire A build note (2026-08-07)
+
+### Fire brief
+
+**1. Scope (verbatim, §12 Fire A).** *"`pkgmgr.StepSpec` gains `Reads`/`OptionalReads`;
+`loomPatternSpecBody`; `loom.Step`; `pattern.go` validate; `submitSystemOp` resolution, mirroring the
+shipped `userTaskReads` resolution that `submitUserTask` already threads into `buildOutbox`. Pattern load
+rejects a `Reads` entry on a `userTask`/`externalTask` step. Plus the §5.3 correlation probe."*
+Green bar: `go test ./internal/loom/ ./internal/pkgmgr/` + the full gate set; the probe answered on the
+record.
+
+**2. Verified touch-list** (anchors re-checked live against `885f39be`; all four design citations hold,
+two drifted by a few lines and are corrected here):
+
+| Site | Anchor (live) | Design cited | Edit |
+|---|---|---|---|
+| `internal/pkgmgr/definition.go` | `type StepSpec struct` **:426** | `:426-458` ✅ | add `Reads`, `OptionalReads` |
+| `internal/pkgmgr/build.go` | `loomPatternSpecBody` **:856** | `:856-889` ✅ | emit both, omit when empty |
+| `internal/loom/pattern.go` | `type Step struct` **:28** | `:28-48` ✅ | add both with `omitempty` json tags |
+| `internal/loom/pattern.go` | `validate()` **:190** | `:190-239` ✅ | systemOp-only + template-form check |
+| `internal/loom/engine.go` | `submitSystemOp` **:857**, `buildOutbox(...nil, nil, nil)` **:867** | `:861-867` ▲ drift 4 lines | resolve + thread |
+| `internal/loom/actuator.go` | `buildOutbox` **:134** | `:134` ✅ | no change — signature already carries both |
+
+**3. Precedents to mirror.** `userTaskReads` (`engine.go:889`) + `userTaskOptionalReads` (`:909`) — the
+derive-a-read-set-from-the-subject helper with its invariant recorded in the comment and pinned by a test
+(`usertask_reads_internal_test.go`). Resolution threading: `submitUserTask` (`:965`) passes both sets into
+`buildOutbox`. Validation style: `validate()`'s existing wrong-kind-field rejections
+(`pattern.go:203-215`). Spec-body emission: `loomPatternSpecBody`'s emit-only-when-set arms
+(`build.go:858-878`). Nothing here is greenfield.
+
+**4. Increment order.**
+1. `pkgmgr` — `StepSpec` fields + `loomPatternSpecBody` emission. Green: `go test ./internal/pkgmgr/`.
+2. `loom` — `Step` fields, `validate()` rules, `systemOpReads`/`systemOpOptionalReads` + `submitSystemOp`
+   threading. Green: `go test ./internal/loom/`.
+3. Probe (§5.3) — answered by reading, recorded below. Green: the finding is on the record.
+4. Gates: `go build ./...`, `make vet`, `golangci-lint run ./...`,
+   `STRICT=1 go run ./scripts/lint-conventions.go`, `make verify-kernel`, `go test ./internal/loom/
+   ./internal/pkgmgr/ ./internal/processor/`.
+
+**5. In-scope gotchas.**
+- **Contract #10 §10.5 freezes the step shape** — *"Step shape: `{ kind, operation, guard? }` for
+  `userTask`/`systemOp`"* (`docs/contracts/10-orchestration-loom.md:55`). §14's "no contract change" is
+  wrong on this one point: two new systemOp-only step fields extend a frozen shape. The edit is made in
+  `main` **UNCOMMITTED** as the proposal; the code ships around it.
+- Aspect keys stay 4-segment: `subject.<aspect>` resolves to `inst.SubjectKey + "." + aspect`, exactly the
+  shape `userTaskOptionalReads` already builds (`subjectKey + ".availability"`).
+- No package version bump — no `packages/` entity changes in this fire.
+- No stack cycle needed for `pkgmgr`, but `internal/loom` ships in binaries beyond `bin/loom`; derive them
+  mechanically at admit.
+
+**6. Adjacent finds.** One, filed as a lattice row: `submitSystemOp` has no equivalent of
+`userTaskReads`'s coverage test, so nothing pins a future step-op's declared set to what its DDL actually
+reads — the same guard `TestUserTaskReads_CoverEndpoints` gives the userTask arm. Deliberately not filed:
+the §12 "one dependency to resolve rather than inherit" question is Fire B's, not this fire's.
+
+**7. Non-goals.** No `packages/privacy-base` or `identity-domain` change; no pattern declaration; no lens,
+target or op; no narrowing of `ShredIdentityKey`. `egressReads` stays nil on the systemOp arm (no
+external-plane step op exists) — Fire A adds only the two read classes §5.2 names.
+
+**Scope-diff gate: clean.** Every touch traces to the scope sentence; the brief narrows nothing and
+substitutes nothing. Declared dependency check both ways: Fire A declares no dependency on Fire B (correct
+— it ships alone), and no unlisted dependency surfaced.
+
+### §5.3 correlation probe — ANSWERED (the detail Fire A owed Fire B)
+
+**Question.** *"Loom advances a step on a completion event correlated to the pending token, over the
+pattern's `completionDomains`. I did not trace the correlation end to end for a `systemOp` whose bound op
+emits its own domain event, because no shipped systemOp emits one. Inc 2 must confirm this before Inc 4 is
+sized; if a systemOp advances on op-commit rather than a domain event, `CompletionDomains` may be
+irrelevant here."*
+
+**Answer: a systemOp advances on the domain event, and `CompletionDomains` is load-bearing — but only for
+promptness, never for correctness.** Two paths, traced end to end:
+
+1. **The event path (the normal one).** `submitSystemOp` sets `inst.PendingToken = deriveRequestID(...)`
+   and submits the op under that same `requestId` (`engine.go:858-867`). The Processor stamps the emitted
+   event's top-level `requestId` from the op envelope — `RequestID: env.RequestID`
+   (`internal/processor/step7_events.go:83`, on the `Event` struct at `:18-22`). Loom's completion
+   consumer parses that field into `eventBody.RequestID` (`engine.go:672`), `correlationKeys` tries it
+   first (`:728`), and `handleCompletion` resolves `token.<requestId>` → advance (`:696-710`). So the
+   correlation closes **iff** the bound op emits an event whose **domain is in `completionDomains`** —
+   the consumer is only reconciled for those domains.
+2. **The deadline backstop.** If no such event arrives — a mis-declared `completionDomains`, or a bound op
+   that emits nothing at all — `onDeadline` takes the systemOp branch, where *the pending token IS the op
+   requestId*, probes the Contract #4 tracker, finds the op committed, logs
+   `"loom: completion recovered via deadline probe; check completionDomains"` and **advances**
+   (`engine.go:1220-1229`). Exactly what `docs/contracts/10-orchestration-loom.md:191` promises: the
+   deadline "backstops a mis-declared `completionDomains` → alert, never a silent wedge."
+
+**Consequences for Fire B, stated so it does not have to re-derive them.**
+
+- **`CompletionDomains: ["privacy"]` stays in §5.1, and it is not cosmetic.** Steps 1 and 2
+  (`ShredIdentityKey`, `SealIdentityForErasure`) emit `privacy.*`, so `privacy` must be listed or every
+  one of those steps advances one `StepTimeout` late with a WARN.
+- **§5.4's step 3 forces a second domain.** `UnbindIdentityCredentials` emits `identity.unbound`, so the
+  pattern completes on **two** domains — `CompletionDomains: ["privacy", "identity"]`, per the contract's
+  own *"a pattern mixing … lists every domain it completes on"* (`:52-54`). §5.1's single-element
+  declaration is **wrong as written**; Fire B must widen it.
+- **§5.4's step 4 emits nothing** (`PurgeIdentityDedupFootprint`, "Emits: none"), so it **cannot** advance
+  on an event and will *always* take the deadline path — a guaranteed per-instance `StepTimeout` stall plus
+  a spurious "check completionDomains" WARN on the happy path. That is a real design defect this probe
+  surfaced: either step 4 emits a `privacy.*` event (the cheap fix, and the one consistent with every other
+  step), or it is the pattern's last step and the erasure's completion is deliberately deadline-paced.
+  **Recommendation: give step 4 an event.** Fire B owns the change; it does not alter the architecture,
+  only the op's emission and one line of §5.1.
+- **Sizing verdict for Fire B: unchanged.** The mechanism the design assumed is the mechanism that exists.
+
+### What Fire A shipped
+
+`StepSpec.Reads`/`OptionalReads` (`internal/pkgmgr`), carried through `loomPatternSpecBody` into the
+`meta.loomPattern` spec body, deserialized onto `loom.Step`, validated systemOp-only against the
+`subject` / `subject.<aspect>` template grammar, and resolved against `inst.SubjectKey` in
+`submitSystemOp` — the arm that has passed `nil, nil, nil` to `buildOutbox` since Phase 2.
+
+**Contract edit prepared, UNCOMMITTED, for Andrew:** `docs/contracts/10-orchestration-loom.md` §10.5 step
+shape, extended with the two systemOp-only read fields. Affected consumers: `internal/loom` (Step,
+validate, submitSystemOp), `internal/pkgmgr` (StepSpec, spec body) — both in this fire; no shipped pattern
+declares either field, so nothing in `packages/` changes.
