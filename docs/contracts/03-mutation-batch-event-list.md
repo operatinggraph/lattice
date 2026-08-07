@@ -202,8 +202,8 @@ A legitimate business operation that genuinely requires more than 998 mutations 
 An aspect whose aspect-type DDL declares `sensitive: true` (Contract #1 §sensitivity lookup; Contract #7
 reserved `sensitive` aspect type) is stored in Core KV with its `data` **encrypted** (ciphertext), never
 in plaintext. This is the storage-format invariant behind crypto-shredding (right-to-erasure on an
-immutable ledger): destroying the per-identity key renders the ciphertext — in live KV and in the
-JetStream history — permanently unrecoverable.
+immutable ledger): destroying the **key holder's** key renders the ciphertext — in live KV and in the
+JetStream history — permanently unrecoverable, at exactly the granularity that key has.
 
 **Commit-path placement.** Encryption is Processor commit-path middleware, applied **after** step-6
 validation and **before** the step-8 atomic commit:
@@ -213,24 +213,64 @@ validation and **before** the step-8 atomic commit:
 2. Step 6 (validate) validates schema / `permittedCommands` / `sensitiveAspectScope` against the
    **plaintext** mutation, exactly as for non-sensitive aspects.
 3. After validation, for each mutation whose resolved DDL is `sensitive`, the Processor encrypts
-   `mutation.data` with the anchoring identity's data-encryption key (DEK), replacing it with a ciphertext
-   envelope `{ ct, nonce, keyId }`. If the anchoring identity has no `vtx.identity.<id>.piiKey` aspect, the
-   Processor lazily provisions one (the wrapped DEK reference — never key material) and adds it to the
+   `mutation.data` with the **resolved key holder's** data-encryption key (DEK), replacing it with a
+   ciphertext envelope `{ ct, nonce, keyId }`. If the resolved holder has no `<holderKey>.piiKey` aspect,
+   the Processor lazily provisions one (the wrapped DEK reference — never key material) and adds it to the
    **same** atomic batch.
 4. Step 8 commits ciphertext (and any new `piiKey`) atomically. Plaintext sensitive `data` never lands in
    Core KV.
 
-**Key custody.** The per-identity DEK is wrapped by an external key-management backend (the Vault); only
-the **wrapped** DEK is referenced from `piiKey`, satisfying "key material never in Core KV." Encryption is
-non-deterministic (random nonce) and is compatible with last-writer-wins-by-revision and `requestId`
-idempotency (which key on the request, not on content).
+**Key custody.** A sensitive aspect's `data` is encrypted under a **key holder's** data-encryption key
+(DEK). The holder is a function of the aspect's **resolved aspect-type DDL** — never supplied by the
+caller and never discovered by graph traversal. Two holder kinds exist:
+
+- **`identity`** (the default when undeclared) — the holder is the aspect's own anchoring identity.
+  Policy: **erase-on-request**. Its DEK is destroyed by `ShredIdentityKey`.
+- **`retentionClass`** — the holder is a controller-declared retention-class vertex
+  (`vtx.retentionclass.<NanoID>`), named by the DDL's `custody.retentionClass`. Policy:
+  **erase-on-expiry**. Its DEK is destroyed by `ShredRetentionClassKey`, on the controller's retention
+  schedule, not on a data subject's request.
+
+*(Transitional, ratified 2026-08-06: the `retentionClass` kind, `ShredRetentionClassKey`, and the
+`keyId`-resolved decrypt below land with the retention-class custody build. Until that increment ships the
+platform implements the `identity` kind only — which this section already described — and every decrypt
+re-derives custody from the aspect's anchor. No wire format changes when it lands: the stored envelope
+already carries `keyId`.)*
+
+Every holder references only its **wrapped** DEK, from `<holderKey>.piiKey`, satisfying "key material
+never in Core KV." Encryption is non-deterministic (random nonce) and is compatible with
+last-writer-wins-by-revision and `requestId` idempotency (which key on the request, not on content).
+
+**The ciphertext names its own key.** The stored envelope is `{ ct, nonce, keyId }`, where `keyId` is the
+holder's vertex key and is bound as AEAD associated data. **Every decrypt resolves custody from `keyId`,
+never by re-deriving it from the aspect's anchor or from a projected column.** A substituted `keyId`
+therefore fails authenticated decryption rather than opening the record under another holder's key. A
+consequence: **re-classifying a data class cannot orphan already-committed records** — each keeps the key
+it was written under.
+
+**Retention and erasure.** Destroying a key IS the erasure, at exactly the granularity the key has. The
+two kinds are two clocks: `ShredIdentityKey` destroys a person's DEK and makes every aspect custodied by
+that person unrecoverable, while a record custodied by a retention class **survives** — it becomes
+pseudonymized (retained, with its subject's direct identifiers unrecoverable) rather than erased. A
+retained record must not duplicate its subject's direct identifiers, or the subject's erasure is defeated
+by that duplication. Conversely `ShredRetentionClassKey` makes every record in that class unrecoverable
+regardless of any subject's erasure state.
+
+**Erasure must reach the read models.** A key destruction is not complete when the key is destroyed; it is
+complete when no projected read model still holds the plaintext. A Secure Lens projects `null` for a
+column whose holder key is destroyed, and that null is **stable under reprojection** (a later
+re-evaluation re-attempts the decrypt and fails the same way), so re-projecting the affected lenses is
+convergent. Where the holder is not a vertex the lens binds — which is always true for a retention class
+— the platform must **re-project** the lenses whose secure columns declare that holder type; a lazy
+next-event scrub is not an erasure guarantee, because nothing enumerates or attests it.
 
 **Readers.** Direct Core-KV readers observe ciphertext. The Refractor's default projection path copies the
 ciphertext as-is — so sensitive aspects are unreadable at general lens targets without an explicit
 decryption seam. Plaintext is produced only by the Processor (for Starlark), by an explicit
 Vault-decrypt consumer (a trusted tool, or the read-path-authorized Secure Lens), or by the **bridge's
 external-egress unwrap** (§10.5 sensitive-ref params — plaintext bounded to the in-memory adapter call).
-`ShredIdentityKey` destroys the DEK, after which no consumer can decrypt.
+Destroying the holder's DEK — `ShredIdentityKey` for an `identity` holder, `ShredRetentionClassKey` for a
+retention class — leaves no consumer able to decrypt.
 
 **External-egress guard.** An operation that emits an `external.*`-domain event must not have **consumed**
 readable sensitive data in the same execution — its script taking such a document from `state` or a
@@ -249,20 +289,30 @@ that genuinely consumes the data is rejected exactly as before. Correspondingly,
 write path never encrypted it) counts as consumed when read — the guard does not depend on a crypto
 boundary being present to bind.
 
-**Live-envelope rule.** A Vault-decrypt consumer resolves the identity's key envelope from the
-**current** `piiKey` state (the aspect, or its lens projection) **at decrypt time — never from a stored
-or carried copy**. A shred rewrites `piiKey` to a shredded placeholder at the source; a frozen envelope
+**Live-envelope rule.** A Vault-decrypt consumer resolves the **key holder's** envelope (the holder named
+by the ciphertext's `keyId`) from the **current** `piiKey` state (the aspect, or its lens projection) **at
+decrypt time — never from a stored or carried copy**. A shred rewrites `piiKey` to a shredded placeholder at the source; a frozen envelope
 copy in a durable plane would out-live that rewrite and defeat crypto-shredding across a Vault restart.
 
 **Ref-provenance rule.** A sensitive-ref is **authenticated at mint**: the Processor stamps every
 `$sensitiveRef` it authors with a MAC (a key derived from the Vault's platform secret) binding
 `{ref, requestId, ciphertext}` — `requestId` being the minting operation's, carried top-level on the
 emitted event. The **external-egress unwrap consumer decrypts only through the ref-verified decrypt
-RPC**, which recomputes the MAC before any decryption and derives the identity from the authenticated
-`ref`; an unverifiable ref (absent or mismatched MAC) is a permanent data error — never decrypted,
-never retried. A ref is a per-execution artifact, not a durable capability: a consumer never accepts a
-marker outside the event of the operation that minted it. The wholesale decrypt RPC (no MAC) remains
-for the trusted-tool inspector class only.
+RPC**, which recomputes the MAC before any decryption; because the MAC covers the ciphertext's `keyId`,
+custody is **authenticated rather than re-derived**. An unverifiable ref (absent or mismatched MAC) is a
+permanent data error — never decrypted, never retried. A ref is a per-execution artifact, not a durable
+capability: a consumer never accepts a marker outside the event of the operation that minted it. The
+wholesale decrypt RPC (no MAC) remains for the trusted-tool inspector class only. A sensitive-ref for a
+**non-`identity`** holder is **refused** at hydration until the external-egress key-envelope read path
+covers non-identity holders (its envelope lens is identity-only today); the refusal is typed and loud,
+never a silent pass-through of raw ciphertext.
+
+**Reveal.** A decrypt request carrying no actor and no declared purpose is **denied** for a
+non-`identity` holder. A retention-class record has no data subject whose grant scopes its disclosure, so
+the wholesale trusted-tool decrypt RPC — which carries neither actor nor purpose — is not an
+authorization path for it. The sanctioned read path is a read-path-authorized **Secure Lens**, where
+custody answers "can this be decrypted at all" and the Protected/RLS/grant plane answers "which actor
+sees this row."
 
 ### 3.11 Sensitive-object (blob) encryption at rest
 
@@ -270,13 +320,14 @@ The blob analog of §3.10. An object (the off-graph blob plane, Contract #7 §7.
 `.content` aspect + bytes in `core-objects`) created with `sensitive: true` has its **bytes** stored as
 **ciphertext**, encrypted client-side before they are streamed onto the §7.2 bytes plane. This makes a
 document-PII blob (a lease PDF, an ID scan, a signature image) crypto-shreddable on the same immutable
-ledger and under the **same per-identity key** as §3.10's aspect-PII.
+ledger and under the **same §3.10 key holder** as aspect-PII. Blobs remain identity-custodied: the holder
+for an object is always an identity.
 
 **Envelope encryption (bulk bytes never reach the Vault).** A `sensitive` object is encrypted with a random
 per-object Content Encryption Key (CEK) — `ciphertext = AES-256-GCM(CEK, nonce, plaintext)` — and the
 **CEK**, not the bytes, is wrapped under the governing identity's §3.10 DEK
 (`wrappedCEK = Vault.WrapKey(governingIdentity, CEK)`). The Vault handles only the small CEK; the bulk
-bytes never leave the uploader. There is **no new key hierarchy**: the §3.10 per-identity DEK (referenced
+bytes never leave the uploader. There is **no new key hierarchy**: that identity's §3.10 DEK (referenced
 from `vtx.identity.<id>.piiKey`, the *wrapped* DEK, never key material) is the only secret, and
 `ShredIdentityKey` already destroys it.
 

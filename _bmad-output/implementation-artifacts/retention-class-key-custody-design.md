@@ -1,6 +1,71 @@
 # Retention-class key custody — a sensitive aspect's DEK belongs to a key holder, not to a person
 
-**Status: 📐 DRAFT awaiting Andrew — authored 2026-08-06 (redirect of subject-anchored-sensitive-aspects-design.md, held by Andrew same session)**
+**Status: ✅ Andrew-RATIFIED 2026-08-06** — build-ready as **two fires**, both in the **Lattice lane**
+(§11, rewritten at ratification). Authored 2026-08-06 as the redirect of
+`subject-anchored-sensitive-aspects-design.md`, held by Andrew the same session.
+
+## Ratification (Andrew, 2026-08-06)
+
+**Ratified, with the three forks resolved and two structural amendments.**
+
+- **F1 — keep both delivery mechanisms.** The identity kind keeps its in-band `piiKey`-CDC scrub; the
+  rebuild path is added only for non-identity holders. §6.3 *derives* why in-band is sound for an identity
+  (the key aspect hangs off the vertex the lens already binds) and why a class holder has no per-row anchor
+  to make it work — so this is specialization with a proof, not two mechanisms by drift, and it regresses
+  none of the six shipped secure lenses.
+- **F2 — `null` + privacy-tier alarm, not `Terminal`.** `Terminal` leaves a previously projected
+  **plaintext** row standing, which is the wrong failure direction on this plane, and today a per-row
+  failure discards the whole result set so one bad row stalls the lens *including a later erasure scrub*.
+  The alarm preserves the loudness `Terminal` existed for. The split rule (null for custody, `Terminal` for
+  ciphertext shape) is rejected: a ciphertext-shape failure is equally a reason to redact rather than
+  freeze.
+- **F3 — (a)** `lattice-architecture.md:1019` is planning-lead-owned and is **not** touched by this design;
+  Item 6 needs an amendment routed separately. **(b)** Moving `patientDemographics.fullName` onto the
+  identity is **in scope** — without it the clinic consumer ships a "pseudonymized record" claim that is
+  false with the name sitting in plaintext beside it, and §6.4 is this design's own acceptance criterion.
+  **(c)** already applied; the board row reads two live plus one prospective.
+
+**Amendment 1 — everything stays in the Lattice lane.** The original §11 routed Increments 3 and 4 to the
+Verticals lane. Andrew: *"keep everything under lattice backlog, do not split parts into verticals to avoid
+ping-pong or stale 'blocked by'."* One item, one lane, one owner, one row — including the clinic FE surface
+for the note, which the verticals board previously carried as a `🚧 blocked-on` row that is now struck and
+absorbed here.
+
+**Amendment 2 — fewer, larger fires.** Four increments collapse to two, per the standing rule. §11 below is
+rewritten; the original four-increment text is superseded, not merely re-labelled.
+
+**Contract edits committed at ratification** (Contract #1 §1.6; Contract #3 §3.10's six spans and §3.11's
+cross-references), each carrying a transitional note, since the runtime arrives with Fire 1 and a
+present-tense clause with nothing behind it is fail-open. §5.1's quoted text is what landed.
+
+**Corrections folded at ratification** (independent DD pass over this doc's ledger — 13 of 14 priority
+claims verified exact, and the substance of every one of them held):
+
+- **`refmac.go`'s `ct.KeyID` append is line 25, not 24** (line 24 appends `requestID`). The MAC does cover
+  `keyId`; only the pointer was off.
+- **Ledger #38 overclaims on one of the six secure lenses.** Not all use `IdentityKeyColumn:
+  "identity_key"` — lease-signing's `landlordLeaseApplicationsRead` uses `"applicant"`. The count of six is
+  confirmed and they are: `clinicPatientsRead`, `identityCredentialsRead`, `applicantRosterRead`,
+  `landlordLeaseApplicationsRead`, `wellnessIdentitiesRead`, `cafeIdentitiesRead`. Fire 1's migration
+  surface is unchanged, but a builder must not assume a uniform column name.
+- **Every `clinic-domain` line citation in the ledger is stale by dozens of lines** — commit `dbe9e65e`
+  ("appointments finally carry a site") landed the same evening, *after* this design was authored, adding 86
+  lines to `ddls.go` and 68 to `lenses.go`. `encounterAspectTypeDDL()` now starts at :906, and the three
+  lens sites projecting the operational triad are at :496-498, :714-716, :749-751. The substance re-verified
+  true at the new locations. This is parallel-fire base skew inside a single session; Fire 2 re-derives
+  rather than trusting any pointer here.
+- **`rebuildRule` is reachable today, just not programmatically.** Beyond the CLI, Loupe's operator-control
+  proxy also allow-lists `"rebuild"` (`cmd/loupe/control.go:64-69`) — a second *human-driven* path. The
+  design's substantive point stands: there is no automated in-process caller, which is what Fire 1 needs
+  when it exports `RebuildRule`.
+- **No premature adopter exists** — `retentionclass`, `HolderTypes` and `custody`-as-declared-field return
+  zero hits across `internal/`, `packages/` and `cmd/`. Fully greenfield.
+- **No collision with `erasure-orchestration-design.md`** and no forced ordering either way: the shared
+  touch points (`privacy-base`'s manifest, `pkgmgr`'s spec structs) are additive in different sections, and
+  the erasure design deliberately keys its write-path gates off a separate `.erasureRequested` aspect rather
+  than `piiKey.shredded`, precisely so a retention-class shred cannot freeze a person's writes. The one
+  build-hygiene caution: this design mirrors only `shred_identity_key.go:267-311` into a sibling script —
+  the exact slice the erasure design says it keeps unchanged — so mirror that slice, never the whole file.
 
 Backlog row: `planning-artifacts/backlog/lattice.md` → *Privacy / Vault* → **"[Vault] Sensitive aspects are
 identity-anchored, so retained records have no home"** (★★★, L). Grounds in the ratified
@@ -950,60 +1015,72 @@ clinic does not meet §6.4's acceptance criterion — the patient's name survive
 
 ---
 
-## 11. Decomposition (each independently shippable and green)
+## 11. Decomposition — TWO fires, both in the Lattice lane (rewritten at ratification 2026-08-06)
 
-**Increment 1 — the custody primitive (Lattice lane, L).** `CustodySpec` + `RetentionClassSpec` on
-`pkgmgr`, their reserved DDL aspects and `MetaVertexRef` fields, the four install-time validations, the
-`retentionclass` vertex type + `.retentionPolicy`, `pkgmgr.RetentionClassID`; step 6's conditional
-`sensitiveAspectScope` plus the class-less and budget-exhaustion closures; step 6.5's holder resolution and
-`ensureKeyHolderKey`; **the Processor read path switched to `ct.KeyID`** (`sensitive_decrypt.go`), the
-non-identity silent branch deleted, and the typed refusal for a non-identity holder under `egressReads`;
-the `Vault` interface parameter rename `identityKey` → `keyHolderKey` with every doc comment re-derived;
-`ShredRetentionClassKey` + `privacy.retentionClassKeyShredded` + `piiKey`'s `permittedCommands`; the
-retention-class shred worker; the `retentionKeyStatus` lens. Contract #1 §1.6 + Contract #3 §3.10 edits
-staged **UNCOMMITTED** as the proposal diff.
+Andrew's amendments: everything stays in the **Lattice lane** (no Verticals split — one item, one lane, one
+owner, no cross-lane `blocked-on` to go stale), and **fewer, larger fires**. The original four increments
+collapse to two; that text is superseded.
+
+### Fire 1 — the custody platform (Lattice, L–XL). Green with zero consumers.
+
+Old Increments 1 and 2 as one fire. They are coupled by their own acceptance criterion: Increment 1's
+primitive is unobservable until a read model can project under a class holder, and Increment 2's delivery
+guarantee is meaningless without the primitive. Internal build order:
+
+1. **Custody vocabulary + write path.** `CustodySpec` + `RetentionClassSpec` on `pkgmgr`, their reserved
+   DDL aspects and `MetaVertexRef` fields, the four install-time validations, the `retentionclass` vertex
+   type (**note the key segment is `retentionclass` — `[a-z][a-z0-9]*`, so no camelCase**) +
+   `.retentionPolicy`, `pkgmgr.RetentionClassID`; step 6's conditional `sensitiveAspectScope` plus the
+   class-less and budget-exhaustion closures; step 6.5's holder resolution and `ensureKeyHolderKey`.
+2. **The read path switches to `ct.KeyID`** — all five sites, the non-identity silent branch deleted, the
+   typed refusal for a non-identity holder under `egressReads`; the `Vault` interface parameter rename
+   `identityKey` → `keyHolderKey` with every doc comment re-derived.
+3. **Erasure vocabulary + delivery.** `ShredRetentionClassKey` + `privacy.retentionClassKeyShredded` +
+   `piiKey`'s `permittedCommands`; the retention-class shred worker; the `retentionKeyStatus` lens;
+   `SecureColumn.HolderTypes` replacing `IdentityKeyColumn` with validation; **per-row failure projects
+   `null` + a privacy-tier alarm** (F2); `secureIdentityKeyType` deleted; **`control.Service.RebuildRule`
+   exported** (serialized per lens); the destruction-event consumer with the `HolderTypes` enumeration and
+   the `projectionsRebuilt` attestation; the six shipped lens migrations; `keyshredded/manager.go:31-37`'s
+   excuse and `pipeline/sweep.go:29-33`'s stale reason re-derived.
+
 **Acceptance test (the criterion, provable with zero lenses):** write a retained aspect on an appointment;
 `ShredIdentityKey` the patient; assert the patient's `.name` fails `ErrKeyShredded` **and** the encounter
-still decrypts; then `ShredRetentionClassKey` and assert the encounter fails too.
-Negative test per rule: absent/malformed `keyId`; `keyId` naming a holder with no key aspect; soft-deleted
-key aspect; `retentionClass` custody declared with `Sensitive: false`; cross-package class reference;
-class-less mutation; non-identity `egressReads`. Security plane → full 3-layer review.
+still decrypts; then `ShredRetentionClassKey` and assert the encounter fails too. **The guarantee test:** a
+secure lens anchored on a **non-identity** type with class custody, driven through the real `handle()`
+path, projects the note; a real `ShredRetentionClassKey` scrubs it to null; a second rebuild is idempotent;
+and one un-listed-holder-type row does not stop any other row from updating. Negative test per rule:
+absent/malformed `keyId`; `keyId` naming a holder with no key aspect; soft-deleted key aspect;
+`retentionClass` custody declared with `Sensitive: false`; cross-package class reference; class-less
+mutation; non-identity `egressReads`. Security plane → full 3-layer adversarial review.
 
-**Increment 2 — Refractor read path + erasure delivery (Lattice lane, M–L). GATES 3 and 4.**
-`SecureColumn.HolderTypes` replacing `IdentityKeyColumn`, with validation; the decryptor trusting
-`ct.KeyID`; per-row failure containment (F2); `secureIdentityKeyType` deleted; exported
-`control.Service.RebuildRule` (serialized per lens); the destruction-event consumer with the
-`HolderTypes` enumeration and the `projectionsRebuilt` attestation; the six shipped lens migrations;
-`keyshredded/manager.go:31-37`'s excuse and `pipeline/sweep.go:29-33`'s stale reason re-derived.
-**Test that pins the guarantee:** a secure lens anchored on a **non-identity** type with class custody,
-driven through the real `handle()` path, projects the note; a real `ShredRetentionClassKey` scrubs it to
-null; and a *second* rebuild is idempotent. Plus: one un-listed-holder-type row does not stop any other row
-from updating. Security plane → full 3-layer review.
+### Fire 2 — the consumers (Lattice, M–L). One full-stack reset.
 
-**Increment 3 — clinic encounter PHI (Verticals lane, M).** Split `.encounter` into the sensitive PHI
-aspect (`Sensitive: true`, `custody.kind: retentionClass`, class `clinicalRecord`) and a non-sensitive
-operational sibling; re-point the three shipped lenses at the sibling (§9.1); declare the retention class;
-`clinicEncountersRead` protected Secure Lens with `HolderTypes: ["retentionclass"]`; the §6.4 obligation
-written into the class description. Plus F3(b) if Andrew scopes it in. **Delivery boundary: full-stack
-reset.**
+Old Increments 3 and 4 plus F3(b) plus the clinic FE surface. Collapsed because they share the custody
+vocabulary, the identical aspect-split mechanic, and — decisively — **one delivery boundary**: each needs a
+full-stack reset, so shipping them together costs one reset instead of two. Internal order:
 
-**Increment 4 — lease-signing income (Verticals lane, M–L).** Author the aspectType DDL that does not exist
-(§9.2); three-way split of `.profile` (§9.1); the retained financial aspect takes a `underwritingRecord`
-retention class; the third-party identifiers move to their own identities (§8.7) or the increment states
-why not. **Delivery boundary: full-stack reset.**
+1. **Clinic.** Split `.encounter` into the sensitive PHI aspect (`Sensitive: true`,
+   `custody.kind: retentionClass`, class `clinicalRecord`) and a non-sensitive operational sibling;
+   re-point the three shipped lenses at the sibling (§9.1); declare the retention class;
+   `clinicEncountersRead` protected Secure Lens with `HolderTypes: ["retentionclass"]`; the §6.4 obligation
+   written into the class description. **Move `patientDemographics.fullName` onto the identity** (F3(b)) —
+   without it §6.4's acceptance criterion is unmet, since the patient's name would survive their erasure in
+   plaintext. **Plus the FE surface** that renders the note to the treating provider, absorbed from the
+   struck verticals row.
+2. **Lease-signing.** Author the aspectType DDL that does not exist (§9.2 — `.profile` is written inline by
+   the `leaseapp` vertexType script); three-way split of `.profile` (§9.1); the retained financial aspect
+   takes an `underwritingRecord` retention class; the third-party identifiers (`guarantorName`,
+   `coApplicantName`, `coApplicantContact`) move to their own identities (§8.7) or the fire states why not.
 
-**Increment 5 — deferred, each behind a named trigger.**
-(a) **Retained-class egress refs** — switch `service.go:478` / `egress.go:174` to `ct.KeyID` (no MAC v2) and
-widen the envelope read path past `MATCH (i:identity)`. Trigger: the first package needing to egress a
-retained record.
-(b) **Period bucketing** — holder id derived from `(class, period)`, minted in-batch; constrained by
+### Deferred tail — each behind a named trigger
+
+(a) **Retained-class egress refs** — switch the two egress sites to `ct.KeyID` (no MAC v2) and widen the
+envelope read path past `MATCH (i:identity)`. Trigger: the first package needing to egress a retained
+record. (b) **Period bucketing** — holder id derived from `(class, period)`, minted in-batch, constrained by
 §7.3's *id-varies, type-fixed* rule. Trigger: a real statutory clock, or the first class approaching expiry.
 (c) **Purpose-gated retained reveal** — `lattice.vault.decryptretained`, default-deny by natsperm (§6.5).
-Trigger: an operator reveal or audit export of a retained record.
-(d) **Background-check result detail** — a new sibling aspect under a retention class. Trigger: a package
-storing the detail (§9.3).
-
----
+Trigger: an operator reveal or audit export of a retained record. (d) **Background-check result detail** — a
+new sibling aspect under a retention class. Trigger: a package storing the detail (§9.3).
 
 ## 12. Adversarial pass (run against my own draft; what it changed)
 
