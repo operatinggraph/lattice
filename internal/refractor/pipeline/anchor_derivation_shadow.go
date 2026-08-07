@@ -39,6 +39,14 @@ import (
 // reads a bounded fraction of it (§4.7).
 const defaultDerivationShadowSampling = 8
 
+// derivationShadowSummaryEvery emits the running tally to the log every N
+// sampled events. Without it the shadow is unobservable in production: the
+// per-event line is DEBUG (which no deployed component prints) and the counters
+// live in memory behind an accessor nothing calls — so the measurement that is
+// this increment's whole justification would never reach an operator. The
+// summary is INFO, per lens, and cheap at this interval.
+const derivationShadowSummaryEvery = 50
+
 // DerivationShadowStats is a snapshot of what the shadow has observed for one
 // lens. Counts are per sampled event except where a field names anchors.
 type DerivationShadowStats struct {
@@ -125,9 +133,11 @@ func (p *Pipeline) shadowAnchorDerivation(rs ruleState, eventKey string, bfsAnch
 
 func (p *Pipeline) recordShadowDeclined() {
 	p.derivShadow.mu.Lock()
-	defer p.derivShadow.mu.Unlock()
 	p.derivShadow.stats.Sampled++
 	p.derivShadow.stats.Declined++
+	snapshot := p.derivShadow.stats
+	p.derivShadow.mu.Unlock()
+	p.logSummaryIfDue(snapshot)
 }
 
 func (p *Pipeline) recordShadowComparison(eventKey string, bfsAnchors, derived []string) {
@@ -171,7 +181,9 @@ func (p *Pipeline) recordShadowComparison(eventKey string, bfsAnchors, derived [
 	if len(narrowed) == 0 && len(divergent) == 0 {
 		st.Agreed++
 	}
+	snapshot := *st
 	p.derivShadow.mu.Unlock()
+	p.logSummaryIfDue(snapshot)
 
 	if len(divergent) > 0 {
 		// The BFS is the trusted superset, so an anchor outside it means the
@@ -187,6 +199,22 @@ func (p *Pipeline) recordShadowComparison(eventKey string, bfsAnchors, derived [
 	slog.Debug("pipeline: anchor-derivation shadow",
 		"ruleId", p.ruleID, "eventKey", eventKey,
 		"bfsCount", len(inBFS), "derivedCount", len(inDerived), "narrowedBy", len(narrowed))
+}
+
+// logSummaryIfDue emits the running tally every derivationShadowSummaryEvery
+// sampled events. It takes a snapshot taken under the lock rather than reading
+// the live struct, so the line it prints is one coherent observation and the
+// logging itself never happens with the lock held.
+func (p *Pipeline) logSummaryIfDue(st DerivationShadowStats) {
+	if st.Sampled == 0 || st.Sampled%derivationShadowSummaryEvery != 0 {
+		return
+	}
+	slog.Info("pipeline: anchor-derivation shadow tally",
+		"ruleId", p.ruleID,
+		"sampled", st.Sampled, "declined", st.Declined, "agreed", st.Agreed,
+		"narrowedEvents", st.NarrowedEvents, "narrowedAnchors", st.NarrowedAnchors,
+		"divergentEvents", st.DivergentEvents, "divergentAnchors", st.DivergentAnchors,
+		"bfsAnchors", st.BFSAnchors, "derivedAnchors", st.DerivedAnchors)
 }
 
 func cappedList(s []string, n int) []string {
