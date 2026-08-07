@@ -1493,7 +1493,29 @@ incidental, and narrowing the blanket refusal is the only thing that would ever 
 fire supports is "the ~half of the corpus whose cypher is pattern-closed and non-transitive gets faster",
 never "every actor-aware lens does".
 
-### 17.7 Non-goals
+### 17.7 Measured on the live stack — and the defect the measurement unmasked
+
+§9's acceptance is "grant visibility insensitive to unrelated write volume and flat in concurrent claims",
+not a fixed number of seconds. Measured with `make test-claim-ceremony` against the running stack,
+alternating the knob on the same binary — which is what the knob is for:
+
+| Mode | 3 runs |
+|---|---|
+| `off` (the shipped BFS) | 8 OK/1 FAIL · 7/2 · 4/5 — the grant misses the harness's 5 s window, and in the worst run the *first touch* is denied `AuthDenied` because the prior grant had not landed |
+| `act` | 8 OK/1 FAIL, **3 times out of 3** — every latency assertion passes, deterministically |
+
+The single remaining failure is the same one in all six runs, and it is **not** a latency assertion. It is
+also no longer the defect its board row described, which is the part worth recording: with grants landing in
+time, the second device's re-claim now gets *past* auth and dies further in, at **step 4 hydrate** —
+`decrypt vtx.identity.<id>.claimKey: read deleted sensitive aspect`. The first claim tombstones `.claimKey`;
+the re-claim still declares it. So `ClaimIdentity`'s script never runs and NFR-S6's deliberately generic
+400 `ClaimKeyInvalid` never renders — the caller gets a 500, which distinguishes "already claimed" from
+"wrong key" and is precisely the enumeration the generic rejection exists to prevent. A latency bug was
+masking an anti-enumeration hole by rejecting the request earlier, for the wrong reason. Its row is
+rewritten from the observed mechanism (Gateway → Processor, ★ → ★★); fixing it is a read-declaration and
+step-4 semantics question, not this fire's touch-list.
+
+### 17.8 Non-goals
 
 The plain-arm shadow and §D2 Phase 2's wiring (its own filed row, sequenced behind this one) · narrowing
 the blanket `WITH` refusal (its own filed row, §16.4) · any change to the enumerator's caps or its
