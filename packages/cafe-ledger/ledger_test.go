@@ -468,3 +468,259 @@ func TestDebitAccount_NonPositiveAmountRejected(t *testing.T) {
 	testutil.PublishOp(t, conn, env)
 	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeRejected)
 }
+
+// --- CreditCafeAccount consumer scope=self (resident self-pay) -------------
+
+const (
+	ledgerSelfConsumerID  = "BBCAFESELFCQNSMRHJKN"
+	ledgerSelfConsumerKey = "vtx.identity." + ledgerSelfConsumerID
+	ledgerSelfConsumerCap = "cap.identity." + ledgerSelfConsumerID
+)
+
+// ledgerSelfConsumerCapDoc grants the platform permission CreditCafeAccount's
+// scope=self branch checks — mirrors loftspace-ledger's ledgerSelfConsumerCapDoc.
+func ledgerSelfConsumerCapDoc() *processor.CapabilityDoc {
+	now := time.Now().UTC()
+	return &processor.CapabilityDoc{
+		Key:                    ledgerSelfConsumerCap,
+		Actor:                  ledgerSelfConsumerKey,
+		Version:                "1.0",
+		ProjectedAt:            now.Format(time.RFC3339Nano),
+		ProjectedFromRevisions: map[string]uint64{ledgerSelfConsumerKey: 1},
+		Lanes:                  []string{"default"},
+		PlatformPermissions: []processor.PlatformPermission{
+			{OperationType: "CreditCafeAccount", Scope: "self"},
+		},
+		ServiceAccess:   []processor.ServiceAccessEntry{},
+		EphemeralGrants: []processor.EphemeralGrant{},
+		Roles:           []string{"vtx.role.consumer"},
+	}
+}
+
+func seedIdentity(t *testing.T, ctx context.Context, conn *substrate.Conn, id string) string {
+	t.Helper()
+	key := "vtx.identity." + id
+	seedVertex(t, ctx, conn, key, "identity", map[string]any{})
+	return key
+}
+
+func seedLink(t *testing.T, ctx context.Context, conn *substrate.Conn, key, source, target, class, localName string) {
+	t.Helper()
+	doc := map[string]any{
+		"class": class, "isDeleted": false,
+		"sourceVertex": source, "targetVertex": target,
+		"localName": localName, "data": map[string]any{},
+	}
+	b, _ := json.Marshal(doc)
+	if _, err := conn.KVPut(ctx, testutil.HarnessCoreBucket, key, b); err != nil {
+		t.Fatalf("seed link %s: %v", key, err)
+	}
+}
+
+// seedLeaseWithApplicant seeds a live leaseapp vertex plus its applicationFor
+// link to applicantID — the ownership chain CreditCafeAccount's self-scope
+// branch walks (via the account's own heldFor link) to the lease, then this
+// link to the caller's identity.
+func seedLeaseWithApplicant(t *testing.T, ctx context.Context, conn *substrate.Conn, leaseID, applicantID string) string {
+	t.Helper()
+	key := "vtx.leaseapp." + leaseID
+	seedVertex(t, ctx, conn, key, "leaseapp", map[string]any{})
+	lnk := "lnk.leaseapp." + leaseID + ".applicationFor.identity." + applicantID
+	seedLink(t, ctx, conn, lnk, key, "vtx.identity."+applicantID, "applicationFor", "applicationFor")
+	return key
+}
+
+// TestCreditCafeAccount_ConsumerSelfScope_Allowed proves a real resident can
+// credit (pay down) THEIR OWN account: the account's heldFor lease resolves
+// (via applicationFor) to the caller's own authContext.target identity.
+func TestCreditCafeAccount_ConsumerSelfScope_Allowed(t *testing.T) {
+	ctx, conn := setupLedgerEnv(t)
+	testutil.SeedCapDoc(t, ctx, conn, ledgerSelfConsumerCapDoc())
+	cp, cons := newLedgerPipeline(t, ctx, conn, "creditselfok")
+
+	seedIdentity(t, ctx, conn, ledgerSelfConsumerID)
+	leaseKey := seedLeaseWithApplicant(t, ctx, conn, "BBCAFESELFLEASEHJKMN", ledgerSelfConsumerID)
+	acctKey := createAccount(t, ctx, conn, cp, cons, "creditselfacctsetup1", leaseKey)
+
+	// A front-desk-recorded charge establishes the $18.50 owed the self-credit
+	// below pays down — the balance cap (scripts.go) has nothing to verify
+	// against on a freshly-opened, never-charged account.
+	debitEnv := &processor.OperationEnvelope{
+		RequestID:     testutil.GenReqID("creditselfdebit000001"),
+		Lane:          processor.LaneDefault,
+		OperationType: "DebitAccount",
+		Actor:         ledgerActorKey,
+		SubmittedAt:   "2026-07-08T08:00:00Z",
+		Class:         "cafetransaction",
+		Payload:       json.RawMessage(`{"accountKey":"` + acctKey + `","amountCents":1850,"memo":"Settled tab"}`),
+		ContextHint:   &processor.ContextHint{Reads: []string{acctKey}},
+	}
+	testutil.PublishOp(t, conn, debitEnv)
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
+
+	reqID := testutil.GenReqID("creditselfpay0000001")
+	env := &processor.OperationEnvelope{
+		RequestID:     reqID,
+		Lane:          processor.LaneDefault,
+		OperationType: "CreditCafeAccount",
+		Actor:         ledgerSelfConsumerKey,
+		SubmittedAt:   "2026-07-08T09:00:00Z",
+		Class:         "cafetransaction",
+		Payload:       json.RawMessage(`{"accountKey":"` + acctKey + `","amountCents":1850}`),
+		ContextHint:   &processor.ContextHint{Reads: []string{acctKey}},
+		AuthContext:   &processor.AuthContext{Target: ledgerSelfConsumerKey},
+	}
+	testutil.PublishOp(t, conn, env)
+	outcome := testutil.DriveOne(t, ctx, cp, cons, "")
+	if outcome != processor.OutcomeAccepted {
+		t.Fatalf("self-service CreditCafeAccount outcome = %v, want Accepted", outcome)
+	}
+}
+
+// TestCreditCafeAccount_ConsumerSelfScope_RejectedOverBalance proves the
+// self-credit amount is bounded by what the account actually owes — a
+// resident cannot self-forgive debt by naming an amount larger than any
+// front-desk-recorded charge (scripts.go recomputes the balance from the
+// account's own postedTo history; nothing on this platform verifies a
+// self-submitted payment actually happened, so the amount itself is the
+// attack surface, not just which account it targets).
+func TestCreditCafeAccount_ConsumerSelfScope_RejectedOverBalance(t *testing.T) {
+	ctx, conn := setupLedgerEnv(t)
+	testutil.SeedCapDoc(t, ctx, conn, ledgerSelfConsumerCapDoc())
+	cp, cons := newLedgerPipeline(t, ctx, conn, "creditselfoverbal")
+
+	seedIdentity(t, ctx, conn, ledgerSelfConsumerID)
+	leaseKey := seedLeaseWithApplicant(t, ctx, conn, "BBCAFESELFQVRLEASEHJ", ledgerSelfConsumerID)
+	acctKey := createAccount(t, ctx, conn, cp, cons, "creditoverbalsetup01", leaseKey)
+
+	debitEnv := &processor.OperationEnvelope{
+		RequestID:     testutil.GenReqID("creditoverbaldebit01"),
+		Lane:          processor.LaneDefault,
+		OperationType: "DebitAccount",
+		Actor:         ledgerActorKey,
+		SubmittedAt:   "2026-07-08T08:00:00Z",
+		Class:         "cafetransaction",
+		Payload:       json.RawMessage(`{"accountKey":"` + acctKey + `","amountCents":1850,"memo":"Settled tab"}`),
+		ContextHint:   &processor.ContextHint{Reads: []string{acctKey}},
+	}
+	testutil.PublishOp(t, conn, debitEnv)
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
+
+	// $18.50 owed; self-credit claims $18,500 — must be rejected even though
+	// ownership checks out.
+	reqID := testutil.GenReqID("creditoverbalpay0001")
+	env := &processor.OperationEnvelope{
+		RequestID:     reqID,
+		Lane:          processor.LaneDefault,
+		OperationType: "CreditCafeAccount",
+		Actor:         ledgerSelfConsumerKey,
+		SubmittedAt:   "2026-07-08T09:00:00Z",
+		Class:         "cafetransaction",
+		Payload:       json.RawMessage(`{"accountKey":"` + acctKey + `","amountCents":1850000}`),
+		ContextHint:   &processor.ContextHint{Reads: []string{acctKey}},
+		AuthContext:   &processor.AuthContext{Target: ledgerSelfConsumerKey},
+	}
+	testutil.PublishOp(t, conn, env)
+	outcome := testutil.DriveOne(t, ctx, cp, cons, "")
+	if outcome != processor.OutcomeRejected {
+		t.Fatalf("over-balance self-credit outcome = %v, want Rejected (AuthDenied)", outcome)
+	}
+}
+
+// TestCreditCafeAccount_ConsumerSelfScope_RejectedNoBalance proves a
+// self-credit against a freshly-opened account (never charged, nothing owed)
+// is rejected — there is nothing to pay down.
+func TestCreditCafeAccount_ConsumerSelfScope_RejectedNoBalance(t *testing.T) {
+	ctx, conn := setupLedgerEnv(t)
+	testutil.SeedCapDoc(t, ctx, conn, ledgerSelfConsumerCapDoc())
+	cp, cons := newLedgerPipeline(t, ctx, conn, "creditselfnobal")
+
+	seedIdentity(t, ctx, conn, ledgerSelfConsumerID)
+	leaseKey := seedLeaseWithApplicant(t, ctx, conn, "BBCAFESELFNQBALEASEH", ledgerSelfConsumerID)
+	acctKey := createAccount(t, ctx, conn, cp, cons, "creditnobalsetup0001", leaseKey)
+
+	reqID := testutil.GenReqID("creditnobalpay000001")
+	env := &processor.OperationEnvelope{
+		RequestID:     reqID,
+		Lane:          processor.LaneDefault,
+		OperationType: "CreditCafeAccount",
+		Actor:         ledgerSelfConsumerKey,
+		SubmittedAt:   "2026-07-08T09:00:00Z",
+		Class:         "cafetransaction",
+		Payload:       json.RawMessage(`{"accountKey":"` + acctKey + `","amountCents":100}`),
+		ContextHint:   &processor.ContextHint{Reads: []string{acctKey}},
+		AuthContext:   &processor.AuthContext{Target: ledgerSelfConsumerKey},
+	}
+	testutil.PublishOp(t, conn, env)
+	outcome := testutil.DriveOne(t, ctx, cp, cons, "")
+	if outcome != processor.OutcomeRejected {
+		t.Fatalf("self-credit on a never-charged account outcome = %v, want Rejected (AuthDenied)", outcome)
+	}
+}
+
+// TestCreditCafeAccount_ConsumerSelfScope_RejectedForOthersAccount proves a
+// consumer satisfying step 3 (authContext.target == actor) but naming an
+// account whose lease is NOT their own is rejected — self-service never lets
+// one resident pay down another's balance.
+func TestCreditCafeAccount_ConsumerSelfScope_RejectedForOthersAccount(t *testing.T) {
+	ctx, conn := setupLedgerEnv(t)
+	testutil.SeedCapDoc(t, ctx, conn, ledgerSelfConsumerCapDoc())
+	cp, cons := newLedgerPipeline(t, ctx, conn, "creditselfother")
+
+	seedIdentity(t, ctx, conn, ledgerSelfConsumerID)
+	otherApplicantID := "BBCAFEQTHERAPPLCTHJK"
+	seedIdentity(t, ctx, conn, otherApplicantID)
+	leaseKey := seedLeaseWithApplicant(t, ctx, conn, "BBCAFEQTHERLEASEHJKM", otherApplicantID)
+	acctKey := createAccount(t, ctx, conn, cp, cons, "creditotheracctsetup", leaseKey)
+
+	reqID := testutil.GenReqID("creditselfpay0000002")
+	env := &processor.OperationEnvelope{
+		RequestID:     reqID,
+		Lane:          processor.LaneDefault,
+		OperationType: "CreditCafeAccount",
+		Actor:         ledgerSelfConsumerKey,
+		SubmittedAt:   "2026-07-08T09:05:00Z",
+		Class:         "cafetransaction",
+		Payload:       json.RawMessage(`{"accountKey":"` + acctKey + `","amountCents":1850}`),
+		ContextHint:   &processor.ContextHint{Reads: []string{acctKey}},
+		AuthContext:   &processor.AuthContext{Target: ledgerSelfConsumerKey},
+	}
+	testutil.PublishOp(t, conn, env)
+	outcome := testutil.DriveOne(t, ctx, cp, cons, "")
+	if outcome != processor.OutcomeRejected {
+		t.Fatalf("self-service CreditCafeAccount on another's account outcome = %v, want Rejected (AuthDenied)", outcome)
+	}
+}
+
+// TestCreditCafeAccount_ConsumerSelfScope_DebitStaysStaffOnly proves the
+// self-scope grant does not leak to DebitAccount: even a caller who
+// legitimately owns the lease cannot self-charge it (permissions.go grants no
+// scope=self DebitAccount, and post_entry's own branch fails closed for a
+// debit regardless).
+func TestCreditCafeAccount_ConsumerSelfScope_DebitStaysStaffOnly(t *testing.T) {
+	ctx, conn := setupLedgerEnv(t)
+	testutil.SeedCapDoc(t, ctx, conn, ledgerSelfConsumerCapDoc())
+	cp, cons := newLedgerPipeline(t, ctx, conn, "debitselfdenied")
+
+	seedIdentity(t, ctx, conn, ledgerSelfConsumerID)
+	leaseKey := seedLeaseWithApplicant(t, ctx, conn, "BBCAFESELFDEBTLEASEH", ledgerSelfConsumerID)
+	acctKey := createAccount(t, ctx, conn, cp, cons, "debitselfacctsetup01", leaseKey)
+
+	reqID := testutil.GenReqID("debitselfpay00000001")
+	env := &processor.OperationEnvelope{
+		RequestID:     reqID,
+		Lane:          processor.LaneDefault,
+		OperationType: "DebitAccount",
+		Actor:         ledgerSelfConsumerKey,
+		SubmittedAt:   "2026-07-08T09:10:00Z",
+		Class:         "cafetransaction",
+		Payload:       json.RawMessage(`{"accountKey":"` + acctKey + `","amountCents":500}`),
+		ContextHint:   &processor.ContextHint{Reads: []string{acctKey}},
+		AuthContext:   &processor.AuthContext{Target: ledgerSelfConsumerKey},
+	}
+	testutil.PublishOp(t, conn, env)
+	outcome := testutil.DriveOne(t, ctx, cp, cons, "")
+	if outcome != processor.OutcomeRejected {
+		t.Fatalf("self-scoped DebitAccount outcome = %v, want Rejected (no matching grant)", outcome)
+	}
+}

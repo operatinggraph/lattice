@@ -947,13 +947,24 @@ async function renderResident() {
           .join("") +
         "</ul>"
       : '<p class="meta">No posted café charges yet.</p>') +
-    // Recording a payment is a front-desk act — someone hands money over at
-    // the counter. A resident never credits their own account, so this is the
-    // staff half of the pane. The control needs the lease's account to exist;
-    // until it does there is nothing to credit, and saying so beats a button
-    // that can only fail.
+    // Front desk records a payment handed over at the counter (staff form,
+    // unconfined by amount — cash/card is witnessed in person). A resident
+    // instead pays down their OWN balance self-service (self-scoped
+    // CreditCafeAccount — packages/cafe-ledger's consumer scope=self grant):
+    // ownership + the amount cap are proven server-side against the
+    // account's own heldFor→leaseapp→applicationFor topology and postedTo
+    // history, so a forged accountKey or an over-balance amount only fails
+    // closed — nothing here needs to be trusted client-side. Neither form
+    // needs the account to exist first; that only matters for what to pay.
     (selfMode
-      ? ""
+      ? ledger.accountKey && (ledger.balanceCents || 0) > 0
+        ? '<form id="self-pay-form" class="field-row" style="margin-top:14px;">' +
+          '<input id="self-pay-amount" type="number" step="0.01" min="0.01" max="' +
+          (ledger.balanceCents / 100).toFixed(2) +
+          '" placeholder="Payment ($)" value="' + (ledger.balanceCents / 100).toFixed(2) + '" required />' +
+          '<button id="self-pay-submit" type="submit">Pay</button>' +
+          "</form>"
+        : ""
       : ledger.accountKey
         ? '<form id="record-payment-form" class="field-row" style="margin-top:14px;">' +
           '<input id="record-payment-amount" type="number" step="0.01" min="0.01" placeholder="Payment ($)" required />' +
@@ -988,6 +999,34 @@ async function renderResident() {
           "record the payment"
         );
         toast("Recorded " + money(cents) + ".", true);
+        setTimeout(renderResident, 700);
+      } catch (e) {
+        toast(e.message, false);
+        btn.disabled = false;
+      }
+    });
+  }
+  const selfPayForm = document.getElementById("self-pay-form");
+  if (selfPayForm) {
+    selfPayForm.addEventListener("submit", async (ev) => {
+      ev.preventDefault();
+      const amountInput = document.getElementById("self-pay-amount");
+      const cents = parseDollars(amountInput.value);
+      if (cents === null) { toast("Enter a payment amount greater than $0.", false); return; }
+      const btn = document.getElementById("self-pay-submit");
+      btn.disabled = true;
+      try {
+        await opOrThrow(
+          {
+            operationType: "CreditCafeAccount",
+            class: "cafetransaction",
+            reads: [ledger.accountKey],
+            payload: { accountKey: ledger.accountKey, amountCents: cents },
+          },
+          "pay your balance",
+          true
+        );
+        toast("Paid " + money(cents) + ".", true);
         setTimeout(renderResident, 700);
       } catch (e) {
         toast(e.message, false);

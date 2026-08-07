@@ -12,12 +12,14 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 // form to render, and the S1 gate does not ask them for one (it fires on ops
 // granted beyond the trusted-tool roles).
 //
-// CreditCafeAccount is the exception: recording a payment is a front-desk act with
-// a human on the other side of the counter, so it grants frontOfHouse and needs
-// a descriptor a client can render. The voice is STAFF-standing (AuthContext
-// "standing"), matching cafe-domain's VoidCharge rather than its self-scoped
-// Charge — there is no consumer grant here at all, because a resident crediting
-// their own account is the one thing a ledger must never let them do.
+// CreditCafeAccount is the exception: recording a payment is a person-triggered
+// act, so it needs a descriptor a client can render. It is now DUAL-grant
+// (operator/frontOfHouse at scope=any, PLUS a resident at scope=self —
+// permissions.go), so it carries ONE descriptor written in the SELF voice, per
+// clinic-ledger's own dual-grant idiom (ClinicCreditAccount's opmetas.go):
+// cafe-app's front-desk billing form hardcodes its own dispatch, while a
+// descriptor-driven client cannot infer the self path, so the self path is
+// what the descriptor must name.
 //
 // Dispatch.Class is "cafetransaction", the transaction DDL's own CanonicalName
 // (transactionDDL) — the Contract #2 §2.1 envelope `class` DDL-hint, never the
@@ -34,25 +36,25 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 		{
 			OperationType: "CreditCafeAccount",
 			Presentation: &pkgmgr.OpPresentationSpec{
-				Title:       "Record a payment",
-				Description: "Credit a house-tab payment received at the counter.",
+				Title:       "Pay house tab",
+				Description: "Pay down what you owe on your café house tab.",
 				Icon:        "receipt",
 				Tone:        "primary",
-				SubmitLabel: "Record payment",
+				SubmitLabel: "Pay",
 			},
 			InputSchema: `{"type":"object","properties":` +
-				`{"accountKey":{"type":"string","description":"vtx.cafeaccount.<NanoID> of the house account being paid — auto-filled from the account being viewed."},` +
-				`"amountCents":{"type":"integer","title":"Amount","minimum":1,"description":"Amount received, in whole cents."},` +
+				`{"accountKey":{"type":"string","description":"vtx.cafeaccount.<NanoID> of your own account — auto-filled from the account being viewed."},` +
+				`"amountCents":{"type":"integer","title":"Amount","minimum":1,"description":"Payment amount, in whole cents."},` +
 				`"memo":{"type":"string","title":"Note","description":"Optional note describing the payment."}},` +
 				`"required":["accountKey","amountCents"]}`,
 			FieldDescriptions: map[string]string{
-				"accountKey":  "The house account being credited — auto-filled by the client from the account being viewed (dispatch.targetField), not user-entered. A staffer may only credit accounts whose lease sits at a location they worksAt.",
-				"amountCents": "How much was received, entered in dollars — e.g. 4.50. Must be more than zero; a payment reduces what the resident owes.",
-				"memo":        "Optional free text describing the payment — how it was tendered, a reference number, whatever the front desk needs to recognise it later.",
+				"accountKey":  "Your own house-tab account — auto-filled by the client (dispatch.targetField), not user-entered.",
+				"amountCents": "How much you're paying, entered in dollars — e.g. 4.50. Must be more than zero and cannot exceed what you actually owe (server-verified).",
+				"memo":        "Optional free text describing the payment — a reference number, whatever helps you recognise it later.",
 			},
 			Dispatch: &pkgmgr.OpDispatchSpec{
 				Class:       "cafetransaction",
-				AuthContext: "standing",
+				AuthContext: "self",
 				TargetField: "accountKey",
 				TargetType:  "cafeaccount",
 				Reads:       []string{"{payload.accountKey}"},

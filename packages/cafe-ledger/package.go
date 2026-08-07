@@ -59,12 +59,13 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 // Package is the static, install-time bundle.
 var Package = pkgmgr.Definition{
 	Name:    "cafe-ledger",
-	Version: "0.3.8",
+	Version: "0.3.9",
 	Description: "Café house-tab payment ledger: the cafeaccount vertex type (CreateAccount, independently-minted " +
 		"id, one per lease via a .cafeLedgerAccount guard aspect on the leaseapp) + the cafetransaction vertex type " +
 		"(DebitAccount/CreditCafeAccount, append-only entries linked to the account via postedTo) + the " +
 		"cafeLedgerHistory read-model lens (one row per transaction) + the cafeLeaseAccounts lens (lease -> account " +
-		"key lookup). Depends lease-signing.",
+		"key lookup). CreditCafeAccount ALSO grants a resident scope=self (pay down their own house tab), ownership " +
+		"+ amount proven server-side. Depends lease-signing.",
 	Depends:     []string{"lease-signing"},
 	DDLs:        DDLs(),
 	Lenses:      Lenses(),

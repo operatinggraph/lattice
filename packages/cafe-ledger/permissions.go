@@ -29,6 +29,19 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 // them the collision confers nothing. The rule the lint-package-standard S9 gate
 // enforces is exactly that boundary — an operationType granted beyond `operator`
 // must be declared by exactly one package.
+//
+// CreditCafeAccount's scope=self grant (a resident paying down their own house
+// tab) mirrors loftspace-ledger's CreditAccount / clinic-ledger's
+// ClinicCreditAccount consumer scope=self grants: nothing on this platform
+// verifies a self-submitted payment actually happened (no payment-rail
+// integration — out of scope for a reference vertical), so the amount itself
+// is the attack surface, not just which account it targets. scripts.go's
+// post_entry therefore proves BOTH ownership (the account's own
+// heldFor->leaseapp->applicationFor topology, never the payload) and amount
+// (a self-credit may never exceed the account's own recomputed outstanding
+// balance, paginated + bounded, failing closed if the history is too large to
+// verify). DebitAccount gets no matching self-scope grant — a resident pays
+// down a balance, never charges one.
 func Permissions() []pkgmgr.PermissionSpec {
 	return []pkgmgr.PermissionSpec{
 		{
@@ -48,6 +61,12 @@ func Permissions() []pkgmgr.PermissionSpec {
 			Scope:         "any",
 			Note:          "Grants the operator and front-of-house staff the right to submit CreditCafeAccount (records a house-tab payment received). A staffer is confined to accounts whose lease sits at a location they worksAt; the operator is unconfined.",
 			GrantsTo:      []string{"operator", "frontOfHouse"},
+		},
+		{
+			OperationType: "CreditCafeAccount",
+			Scope:         "self",
+			Note:          "Grants a resident the right to credit (pay down) THEIR OWN house-tab account — the account's heldFor lease's applicationFor link must resolve to the caller's identity (scripts.go). No matching DebitAccount grant: a resident pays down a balance, never charges one.",
+			GrantsTo:      []string{"consumer"},
 		},
 	}
 }

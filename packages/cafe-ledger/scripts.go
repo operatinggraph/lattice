@@ -337,9 +337,14 @@ def workplace_exempt():
 def require_workplace(location_keys, what):
     # Binds the STANDING path only -- operator and staff role grants, which
     # authorize via scope=any and so carry no target the platform has checked.
-    # CreditCafeAccount has no scope=self grant at all, so for this script the
-    # authTargetValidated branch is unreachable today; it is kept because the
-    # exemption is part of the idiom's meaning, not an optimization.
+    # CreditCafeAccount's scope=self grant (permissions.go) is what makes the
+    # authTargetValidated branch reachable: a resident's self-scoped credit
+    # sets it (matchPlatformPermission requires target == actor for scope=self
+    # to match at all), exempting them from the workplace walk below -- a
+    # resident does not worksAt their own leased unit. That exemption only
+    # ever says "the platform already checked the target names the caller,"
+    # never "the caller owns this resource" -- post_entry's own
+    # authContextTarget branch is what proves the ACCOUNT is theirs.
     #
     # The exemption keys on authTargetValidated, NOT on authContextTarget being
     # non-empty: the raw target is a client-supplied hint that any scope=any
@@ -431,6 +436,13 @@ def account_unit(acct_key):
         return None
     return unit
 
+# Self-credit balance-verification budget (post_entry's authContextTarget
+# branch): 10 pages of 50 postedTo entries covers many years of a house-tab
+# history; an account that exceeds it fails the self-credit closed rather
+# than trust a partial sum.
+SELF_CREDIT_PAGE_LIMIT = 50
+SELF_CREDIT_MAX_PAGES = 10
+
 def post_entry(state, op, entry_type, event_class, allow_tab_ref, confine):
     p = op.payload
     acct_key = required_string(p, "accountKey")
@@ -454,6 +466,90 @@ def post_entry(state, op, entry_type, event_class, allow_tab_ref, confine):
     if amount_cents <= 0:
         fail("InvalidArgument: amountCents: required positive number")
     memo = optional_string(p, "memo")
+
+    # Resident-self ownership + amount trust (CreditCafeAccount only —
+    # permissions.go grants no self-scope DebitAccount): op.authTargetValidated
+    # (workplace_exempt(), already checked above) only proves the caller's
+    # target names THEMSELVES (the platform's own scope=self match); it says
+    # nothing about whether the ACCOUNT being credited is theirs, so that
+    # ownership proof is this branch's job, mirroring loftspace-ledger's
+    # CreditAccount / clinic-ledger's ClinicCreditAccount. The mere PRESENCE
+    # of authContextTarget selects this branch, same idiom as cafe-domain's
+    # Charge/Settle — it does not change what grant actually authorized the
+    # op (a scope=any operator/frontOfHouse submit never attaches a target),
+    # it only ever narrows behavior.
+    # authcontext-target: (selector) a branch selector, not a confinement
+    # exemption -- so it reads the raw target (did the caller declare a self
+    # target at all) rather than authTargetValidated. Safe because presence
+    # only pushes the caller onto the STRICTER branch below (the ownership +
+    # amount proofs), never grants anything a scope=any submit would not
+    # already.
+    if op.authContextTarget != "":
+        if entry_type != "credit":
+            fail("AuthDenied: a resident may only credit (pay down) their own account, not charge it")
+        # authcontext-target: (ownership) the value derives an identity whose
+        # ownership of the account's own lease is then proven by the
+        # applicationFor link read below -- a forged target only fails closed.
+        # The lease is recovered from the account's OWN heldFor topology,
+        # never the payload, so a forged claim only fails closed.
+        _, target_identity_id = parts_of(op.authContextTarget, "authContextTarget", "identity")
+        # read-posture: (e) relation=heldFor epoch=none -- a cafeaccount
+        # carries exactly one heldFor link, so this is never a keyspace scan.
+        held_for_page, _ = kv.Links(acct_key, "heldFor", "out")
+        lease_key = None
+        for lk in held_for_page:
+            if not lk.isDeleted:
+                lease_key = lk.targetVertex
+        if lease_key == None:
+            fail("AuthDenied: account " + acct_key + " carries no live lease")
+        _, lease_id = parts_of(lease_key, "heldFor target", "leaseapp")
+        # read-posture: (e) per-candidate follow-up read off the enumeration
+        # above -- the lease id is data-derived, unknowable client-side.
+        application_for = kv.Read("lnk.leaseapp." + lease_id + ".applicationFor.identity." + target_identity_id)
+        if application_for == None or application_for.isDeleted:
+            fail("AuthDenied: a resident may only pay down their own lease's account")
+
+        # Amount trust: nothing on this platform verifies a self-submitted
+        # payment actually happened (no payment-rail integration — out of
+        # scope for a reference vertical), so an unbounded self-credit would
+        # let a resident forgive their own debt for free. The outstanding
+        # balance is recomputed from the account's OWN postedTo transaction
+        # history (never trusted from the payload), paginated + bounded: an
+        # account whose history exhausts the page budget fails closed
+        # (denies) rather than trusts a partial sum. A self-credit may never
+        # exceed what is actually owed.
+        owed_cents = 0
+        cursor = None
+        budget_exhausted = True
+        for _page in range(SELF_CREDIT_MAX_PAGES):
+            # read-posture: (e) relation=postedTo epoch=none -- bounded by the
+            # page budget; exhausting it below fails closed.
+            page, cursor = kv.Links(acct_key, "postedTo", "in", cursor, SELF_CREDIT_PAGE_LIMIT)
+            for lk in page:
+                if lk.isDeleted:
+                    continue
+                # read-posture: (e) per-candidate follow-up read off the
+                # enumeration above -- each transaction's own .entry aspect,
+                # data-derived and unknowable client-side.
+                tx_entry = kv.Read(lk.sourceVertex + ".entry")
+                if tx_entry == None or tx_entry.isDeleted:
+                    continue
+                tx_amount = tx_entry.data.get("amountCents")
+                if tx_amount == None:
+                    continue
+                if tx_entry.data.get("type") == "debit":
+                    owed_cents += tx_amount
+                elif tx_entry.data.get("type") == "credit":
+                    owed_cents -= tx_amount
+            if cursor == None:
+                budget_exhausted = False
+                break
+        if budget_exhausted:
+            fail("AuthDenied: could not verify account " + acct_key + "'s balance (too much transaction history)")
+        if owed_cents <= 0:
+            fail("AuthDenied: account " + acct_key + " has no outstanding balance to pay")
+        if amount_cents > owed_cents:
+            fail("AuthDenied: amountCents exceeds account " + acct_key + "'s outstanding balance of " + str(owed_cents))
 
     # tabRef (DebitAccount only — the cafe-domain Settle consumer): the tab
     # this charge settles. A tab-settlement playbook dispatch (cafe-domain's
@@ -518,12 +614,15 @@ def execute(state, op):
         return post_entry(state, op, "debit", "account.debited", True, False)
 
     if ot == "CreditCafeAccount":
-        # workplace-exempt: (no-validated-path) CreditCafeAccount declares one
-        # scope=any grant, to [operator, frontOfHouse] (permissions.go), and no
-        # package mints a task forOperation it -- so op.authTargetValidated is
-        # never legitimately true and only an operator reaches the exemption.
-        # The frontOfHouse half is bound by require_workplace instead. Adding a
-        # scope=self grant, or a task, makes this claim false.
+        # workplace-exempt: (ownership-bound) CreditCafeAccount now declares a
+        # scope=self grant too (permissions.go): a resident's self-scoped
+        # submit sets op.authTargetValidated (the platform's own target==actor
+        # check), exempting it from the workplace walk below -- but that only
+        # discharges once post_entry's own authContextTarget branch proves the
+        # ACCOUNT itself is theirs (the heldFor->leaseapp->applicationFor
+        # walk). An operator or frontOfHouse scope=any submit carries no
+        # target, so it still clears via actor_holds_operator /
+        # require_workplace as before.
         return post_entry(state, op, "credit", "account.credited", False, True)
 
     fail("transaction DDL: unknown operationType: " + ot)
