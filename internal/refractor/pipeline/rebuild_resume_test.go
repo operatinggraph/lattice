@@ -31,8 +31,8 @@ func (b *blockingAdapter) Upsert(ctx context.Context, _ map[string]any, _ map[st
 	}
 }
 func (b *blockingAdapter) Delete(context.Context, map[string]any, uint64) error { return nil }
-func (b *blockingAdapter) Probe(context.Context) error                         { return nil }
-func (b *blockingAdapter) Close() error                                        { return nil }
+func (b *blockingAdapter) Probe(context.Context) error                          { return nil }
+func (b *blockingAdapter) Close() error                                         { return nil }
 
 // reporterOn opens a health bucket of its own and returns a reporter for ruleID.
 func reporterOn(t *testing.T, env *pipelineEnv, bucket, ruleID string) *health.Reporter {
@@ -164,4 +164,57 @@ func closedChan() chan struct{} {
 	c := make(chan struct{})
 	close(c)
 	return c
+}
+
+// TestPipeline_Rebuild_FailureDoesNotLatchRebuilding is the sibling of the
+// restart case above, and the hole it leaves. That test covers a process killed
+// MID-rebuild; this one covers a rebuild that never got going — and until now the
+// two ended in the same place, because the only writer of the rebuilding → active
+// transition is the completion watcher, which Rebuild launches on its SUCCESS
+// path only. Every error return cleared the in-flight flag and left the status
+// latched at "rebuilding" with nothing remaining to retire it. resumeInterrupted
+// Rebuild does not help: it runs at process start, and this process is still up.
+//
+// Which matters most for a NARROWED lens, and that is why it is fixed here.
+// Sweeper.suppressed refuses any tick whose status is not "active", so the
+// convergence sweep — the standing healer ActorAwareNarrowingLabels counts as one
+// of §4.2's conjuncts before it will narrow anything — stops running for the life
+// of the process. A failed rebuild is the single event able to switch off BOTH of
+// the two recoveries ConsumerFilter names for a wrong narrow: the rebuild did not
+// happen, and the status it left behind suppressed the sweep that covers for it.
+//
+// RebuildInFlight() is asserted false as well, because it is the FIRST thing
+// suppressed() checks — a fix that restored the status but left the flag set
+// would keep the sweep suppressed by the other branch and this test would still
+// have passed.
+func TestPipeline_Rebuild_FailureDoesNotLatchRebuilding(t *testing.T) {
+	env := startPipelineEnv(t)
+
+	reporter := reporterOn(t, env, "HEALTH-rule-rbf-latch", "rule-rbf-latch")
+
+	eng, cr := compileFullRule(t,
+		"MATCH (a:agreement {key: $actorKey}) RETURN a.id AS agreement_id",
+		[]string{"agreement_id"})
+	p, err := pipeline.New("rule-rbf-latch", "nats_kv", coreKVBucket, env.adjKV, env.coreKV,
+		&blockingAdapter{release: closedChan()}, reporter)
+	require.NoError(t, err)
+	p.UseFullEngine(eng, cr)
+
+	// Never started, so there is no supervisor to reset — Rebuild fails at its
+	// step 3 guard. Any of the three error returns reaches the same exit; this is
+	// the one reachable without breaking a collaborator.
+	require.Error(t, p.Rebuild(context.Background(), false),
+		"a rebuild with no supervisor must fail rather than report success")
+
+	assert.False(t, p.RebuildInFlight(),
+		"the in-flight flag is suppressed()'s first check, so a failed rebuild must clear it")
+
+	entry, err := reporter.GetStatus(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, "active", entry.Status,
+		"a failed rebuild must not leave the status that suppresses the convergence sweep forever")
+	require.NotNil(t, entry.LastError,
+		"active is only honest paired with the recorded cause — the lens is live AND at fault")
+	assert.Contains(t, *entry.LastError, "no supervisor configured",
+		"the recorded cause must name what actually failed")
 }

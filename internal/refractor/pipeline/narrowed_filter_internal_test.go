@@ -56,8 +56,14 @@ func TestNarrowedFilterEligible_Table(t *testing.T) {
 			engineKind: ruleengine.EngineFull, all: true, wantOK: false,
 		},
 		{
-			name: "actor-aware pipeline is never eligible regardless of labels",
+			name: "actor-aware pipeline meeting only the plain conditions is not eligible",
 			engineKind: ruleengine.EngineFull, labels: bookOnly, actorAware: true, wantOK: false,
+			// The plain branch's two conditions are necessary but nowhere near
+			// sufficient for an actor-aware pipeline: §4.2 adds pattern-closure, a
+			// sweep plan, the anchor type, and the decryptor. A bare enumerator
+			// satisfies none of them, so this stays broad — see
+			// TestNarrowedFilterEligible_ActorAwareIsTheFanOutGate for the
+			// eligible direction.
 		},
 	}
 	for _, tc := range cases {
@@ -79,6 +85,135 @@ func TestNarrowedFilterEligible_Table(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestNarrowedFilterEligible_ActorAwareIsTheFanOutGate pins Increment 2's whole
+// claim (auth-plane-projection-latency-design.md §4.6): for an actor-aware
+// pipeline, "may the server withhold this event" and "may the fan-out arm skip
+// it" are the same question, so eligibility and the label set must come from
+// §4.2's conjunction — never a second derivation that could drift from the
+// client gate the soundness argument rests on.
+//
+// eligiblePipeline (actor_aware_relevance_internal_test.go) is the shared
+// fixture: it satisfies every §4.2 conjunct and asserts its own eligibility, so
+// a knock-out below cannot pass vacuously.
+func TestNarrowedFilterEligible_ActorAwareIsTheFanOutGate(t *testing.T) {
+	t.Run("an eligible actor-aware pipeline narrows to its derived labels", func(t *testing.T) {
+		p := eligiblePipeline(t)
+		labels, ok := p.NarrowedFilterEligible()
+		require.True(t, ok, "the §4.2 conjunction holds, so the consumer may narrow")
+		require.Equal(t, identityRoleLabels(), labels)
+
+		// The set the SERVER filters on and the set the fan-out arms judge by have
+		// to be one set, asserted against the independently-stated expectation
+		// above rather than against each other — comparing the two call sites
+		// would hold under any regression that kept them equal and wrong.
+		require.True(t, p.actorAwareFanOutRelevant(p.ruleState(), "identity"))
+		require.False(t, p.actorAwareFanOutRelevant(p.ruleState(), "booking"),
+			"a type the server would filter away must also be one the arms skip")
+	})
+
+	// Each conjunct independently forces the broad filter. The conjunct table in
+	// actor_aware_relevance_internal_test.go proves this for the client gate;
+	// these re-prove it through NarrowedFilterEligible, because a delivery-side
+	// narrowing that outlives a failed conjunct is not recoverable by a code
+	// revert (§8.3 — a JetStream filter update never rewinds the cursor).
+	knockOuts := []struct {
+		name     string
+		knockOut func(p *Pipeline)
+	}{
+		{"non-exhaustive label set", func(p *Pipeline) { p.plainReprojectAll = true }},
+		{"output is not pattern-closed", func(p *Pipeline) { p.patternClosedOutput = false }},
+		{"no convergence sweep to heal what narrowing stops refreshing", func(p *Pipeline) { p.sweeper = nil }},
+		{"anchor type outside the label set", func(p *Pipeline) {
+			p.actorEnumerator = NewActorEnumerator(nil, nil, "service")
+		}},
+		{"secure lens whose identity key type is outside the label set", func(p *Pipeline) {
+			p.secureDecryptor = &SecureDecryptor{}
+			p.plainReprojectLabels = map[string]struct{}{"role": {}}
+			p.actorEnumerator = NewActorEnumerator(nil, nil, "role")
+		}},
+	}
+	for _, tc := range knockOuts {
+		t.Run("broad filter when: "+tc.name, func(t *testing.T) {
+			p := eligiblePipeline(t)
+			p.coreKVBucket = "core-kv"
+			tc.knockOut(p)
+
+			labels, ok := p.NarrowedFilterEligible()
+			require.False(t, ok)
+			require.Nil(t, labels)
+
+			filterSubjects, filterSubject := p.ConsumerFilter()
+			require.Empty(t, filterSubjects, "a failed conjunct must fall all the way back to the broad filter")
+			require.Equal(t, "$KV.core-kv.>", filterSubject)
+		})
+	}
+}
+
+// TestConsumerFilter_ActorAwareNarrowsByLabelOnly pins the derivation end of
+// Increment 2, in both dimensions.
+//
+// The LABEL dimension: an eligible actor-aware pipeline's filter set is the same
+// three-forms-per-label expansion the plain path gets — the vertex form (which
+// subsumes the label's aspect keys, Contract #1 §1.5) plus both link directions,
+// which is the alignment the fan-out arms' own skip conditions require.
+//
+// The RELATION dimension: it must NOT apply, even when the compiled rule's
+// relation set is exhaustive and would fit the subject budget. Relation
+// narrowing is sound for a plain lens because plainLinkReactsTo already skips a
+// link on an untraversed relation; the actor-aware link arm judges by endpoint
+// type alone, so withholding by relation would deny it an event its client gate
+// keeps. The subject that proves it is asserted by name below: a source-pinned
+// relation form must never appear.
+func TestConsumerFilter_ActorAwareNarrowsByLabelOnly(t *testing.T) {
+	everyForm := []string{
+		"$KV.core-kv.vtx.identity.>",
+		"$KV.core-kv.lnk.identity.>",
+		"$KV.core-kv.lnk.*.*.*.identity.>",
+		"$KV.core-kv.vtx.role.>",
+		"$KV.core-kv.lnk.role.>",
+		"$KV.core-kv.lnk.*.*.*.role.>",
+	}
+
+	t.Run("relation-blind rule narrows to every form", func(t *testing.T) {
+		p := eligiblePipeline(t)
+		p.coreKVBucket = "core-kv"
+
+		filterSubjects, filterSubject := p.ConsumerFilter()
+		require.Empty(t, filterSubject, "an eligible actor-aware pipeline must not fall back to broad")
+		require.ElementsMatch(t, everyForm, filterSubjects)
+	})
+
+	t.Run("an exhaustive relation set does not narrow the link forms", func(t *testing.T) {
+		p := eligiblePipeline(t)
+		p.coreKVBucket = "core-kv"
+		// What capabilityRoles actually derives: every traversed edge typed, so
+		// the plain path here would relation-narrow.
+		p.plainReprojectRelations = map[string]struct{}{"holdsRole": {}}
+		p.plainRelationsExhaustive = true
+
+		filterSubjects, filterSubject := p.ConsumerFilter()
+		require.Empty(t, filterSubject)
+		require.ElementsMatch(t, everyForm, filterSubjects,
+			"an actor-aware lens narrows by label only — its link arm has no relation gate")
+		require.NotContains(t, filterSubjects, "$KV.core-kv.lnk.identity.*.holdsRole.>",
+			"a relation-pinned form would withhold a link on an untraversed relation whose endpoint type the fan-out arm still binds")
+	})
+
+	t.Run("the same rule on a plain pipeline does relation-narrow", func(t *testing.T) {
+		// The control that keeps the assertion above from passing because
+		// relation narrowing is broken outright rather than gated.
+		p := eligiblePipeline(t)
+		p.coreKVBucket = "core-kv"
+		p.actorEnumerator = nil
+		p.plainReprojectRelations = map[string]struct{}{"holdsRole": {}}
+		p.plainRelationsExhaustive = true
+
+		filterSubjects, filterSubject := p.ConsumerFilter()
+		require.Empty(t, filterSubject)
+		require.Contains(t, filterSubjects, "$KV.core-kv.lnk.identity.*.holdsRole.>")
+	})
 }
 
 // TestConsumerFilter_Table pins ConsumerFilter's narrow-vs-broad decision,

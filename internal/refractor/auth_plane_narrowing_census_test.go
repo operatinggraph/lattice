@@ -33,6 +33,13 @@ import (
 // cannot express.
 func narrowingVerdict(t *testing.T, lensID, cypher, anchorType string) (map[string]struct{}, bool) {
 	t.Helper()
+	return narrowingPipeline(t, lensID, cypher, anchorType).ActorAwareNarrowingLabels()
+}
+
+// narrowingPipeline is narrowingVerdict's pipeline, for the assertions that need
+// the DELIVERY side of the gate rather than its label verdict.
+func narrowingPipeline(t *testing.T, lensID, cypher, anchorType string) *pipeline.Pipeline {
+	t.Helper()
 	eng := full.New()
 	cr, err := eng.Parse(cypher)
 	require.NoError(t, err, "%s must parse", lensID)
@@ -45,7 +52,7 @@ func narrowingVerdict(t *testing.T, lensID, cypher, anchorType string) (map[stri
 	p.SetActorEnumerator(pipeline.NewActorEnumerator(nil, nil, anchorType))
 	p.SetPatternClosedOutput(true)
 	p.SetSweepPlan(pipeline.SweepPlan{AnchorType: anchorType, KeyPrefix: lensID + "."})
-	return p.ActorAwareNarrowingLabels()
+	return p
 }
 
 // TestAuthPlaneLenses_NarrowingVerdict pins the verdict for every auth-plane
@@ -87,6 +94,49 @@ func TestAuthPlaneLenses_NarrowingVerdict(t *testing.T) {
 			require.Equal(t, tc.wantLabels, labels,
 				"the fan-out arms judge every event against this set — a change here is an authorization change")
 		})
+	}
+}
+
+// TestAuthPlaneLenses_ConsumerFilterVerdict is the delivery half of the census:
+// the label verdict above decides whether the fan-out ARMS may skip an event,
+// and Increment 2 makes the same verdict decide whether the SERVER delivers it
+// at all. The two must stay one decision, so the filter set is pinned against
+// the real shipped cypher and not only against a hand-built fixture.
+//
+// It also pins the one dimension the two decisions do NOT share. capabilityRoles
+// types every traversed edge, so its relation set is exhaustive and the plain
+// path would relation-narrow the link forms. An actor-aware lens must not: its
+// link arm judges by endpoint type alone, so a relation-pinned subject would
+// withhold a link joining an in-label endpoint over an untraversed relation —
+// an event that arm keeps. Asserted here by the ABSENCE of any relation-pinned
+// form, because the failure it guards against is silent and unrecoverable by a
+// revert (a JetStream filter update never rewinds the cursor).
+func TestAuthPlaneLenses_ConsumerFilterVerdict(t *testing.T) {
+	p := narrowingPipeline(t, "CensusRbacFiLter9999", rbacCapabilityRolesSpec(t), "identity")
+
+	filterSubjects, filterSubject := p.ConsumerFilter()
+	require.Empty(t, filterSubject,
+		"the shipped capabilityRoles must narrow, not fall back to the broad filter")
+
+	bucket := bootstrap.CoreKVBucket
+	require.ElementsMatch(t, []string{
+		"$KV." + bucket + ".vtx.identity.>",
+		"$KV." + bucket + ".lnk.identity.>",
+		"$KV." + bucket + ".lnk.*.*.*.identity.>",
+		"$KV." + bucket + ".vtx.role.>",
+		"$KV." + bucket + ".lnk.role.>",
+		"$KV." + bucket + ".lnk.*.*.*.role.>",
+		"$KV." + bucket + ".vtx.permission.>",
+		"$KV." + bucket + ".lnk.permission.>",
+		"$KV." + bucket + ".lnk.*.*.*.permission.>",
+	}, filterSubjects,
+		"three labels expand to the vertex form plus both link directions, and nothing else")
+
+	for _, s := range filterSubjects {
+		require.NotContains(t, s, ".holdsRole.",
+			"a relation-pinned subject on an actor-aware lens withholds what its link arm keeps")
+		require.NotContains(t, s, ".grantedBy.",
+			"a relation-pinned subject on an actor-aware lens withholds what its link arm keeps")
 	}
 }
 

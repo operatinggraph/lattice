@@ -880,22 +880,41 @@ func (p *Pipeline) PatternClosedOutput() bool { return p.patternClosedOutput }
 // NarrowedFilterEligible reports whether this pipeline's Core KV consumer may
 // be scoped to a narrowed, server-side FilterSubjects set instead of the
 // broad $KV.<bucket>.> filter, and if so the exhaustive set of vertex-type
-// labels to derive it from — the SAME plainReprojectLabels/plainReprojectAll
-// useFullEngineBranches already computed from every compiled branch's
-// ReferencedLabels(), not a second derivation.
+// labels to derive it from — the SAME set useFullEngineBranches already
+// computed from every compiled branch's ReferencedLabels(), not a second
+// derivation.
 //
-// Eligible only when every condition the plain aspect/link/vertex
-// reprojection arms already gate CORRECTNESS on also holds:
-// actorEnumerator == nil (the exact check the KindVertex handler makes
-// before consulting plainVertexRelevant — an actor-aware pipeline's fan-out
-// is not bounded by its own MATCH labels, so it must keep the broad filter),
-// engineKind == EngineFull (plainReactsTo/plainVertexRelevant have no label
-// data for any other engine), and an EXHAUSTIVE referenced-label set
-// (!plainReprojectAll). A narrowed consumer can therefore never be delivered
-// an event the client-side gates would not already have ack-and-skipped as
-// irrelevant: server-side filtering here is strictly more conservative than
-// plainVertexRelevant/plainReactsTo, computed from the exact same data those
-// gates already trust — never a second, independently-fallible judgment.
+// The invariant is one sentence: a narrowed consumer is never denied an event
+// this pipeline's own CLIENT-side gate would have kept. Server-side filtering is
+// therefore strictly more conservative than that gate, derived from the exact
+// data the gate already trusts — never a second, independently-fallible
+// judgment. Each pipeline shape brings its own client gate, so each brings its
+// own eligibility:
+//
+//   - PLAIN — engineKind == EngineFull (plainReactsTo/plainVertexRelevant have
+//     no label data for any other engine) and an EXHAUSTIVE referenced-label set
+//     (!reprojectAll): the two conditions those gates already require.
+//   - ACTOR-AWARE — the §4.2 conjunction, actorAwareNarrowingLabels. Whether a
+//     fan-out arm may skip an event and whether the server may withhold it are
+//     the same question (auth-plane-projection-latency-design.md §4.6), so there
+//     is one answer to it.
+//
+// An actor-aware pipeline's FAN-OUT breadth is not bounded by its own MATCH
+// labels — the enumerator walks adjacency, so one relevant event can reach
+// actors no label names. That is a different question from RELEVANCE: once §4.2
+// holds, whether any actor can be affected at all IS bounded by the pattern's
+// label set, and only that second question decides delivery. The enumerator
+// itself is unaffected by a narrower filter because adjacency is written by its
+// own dedicated whole-stream consumer (refractor/consumer/bootstrap.go), not by
+// this pipeline's deliveries.
+//
+// Label-set-to-subject alignment, which is what makes "the exact data" exact
+// rather than nearly so: CoreKVNarrowedFilters emits a vertex form per label,
+// and a Contract #1 aspect key is the 4-segment vtx.<type>.<id>.<localName>, so
+// a label's vertex form already covers its aspects — which is what the aspect
+// arm judges by parent type. It emits a source-pinned AND a target-pinned link
+// form, so a link is admitted when EITHER endpoint type is in the set — which is
+// what the link arm judges, skipping only when NEITHER is.
 func (p *Pipeline) NarrowedFilterEligible() (labels map[string]struct{}, ok bool) {
 	return p.narrowedFilterEligible(p.ruleState())
 }
@@ -904,7 +923,10 @@ func (p *Pipeline) NarrowedFilterEligible() (labels map[string]struct{}, ok bool
 // caller already holds — see actorAwareNarrowingLabels for why the in-pipeline
 // callers must not take their own.
 func (p *Pipeline) narrowedFilterEligible(rs ruleState) (labels map[string]struct{}, ok bool) {
-	if p.actorEnumerator != nil || rs.engineKind != ruleengine.EngineFull || rs.reprojectAll {
+	if p.actorEnumerator != nil {
+		return p.actorAwareNarrowingLabels(rs)
+	}
+	if rs.engineKind != ruleengine.EngineFull || rs.reprojectAll {
 		return nil, false
 	}
 	return rs.reprojectLabels, true
@@ -925,11 +947,55 @@ func (p *Pipeline) narrowedFilterEligible(rs ruleState) (labels map[string]struc
 // before the next rebuild, and a stale filter left in place would silently
 // under-deliver forever (a JetStream filter update never resets the
 // consumer's cursor — nats-server v2.14.0).
+//
+// This is also the one place a per-event predicate gets SNAPSHOTTED, because a
+// consumer's filter is fixed at registration. actorAwareNarrowingLabels is
+// deliberately lazy — the host installs its inputs in stages, so a snapshot
+// taken mid-installation reads a later stage's component as absent — and the
+// snapshot here is sound only when every one of those stages has already run.
+// The order that satisfies it, verified live: UseFullEngineBranches →
+// InstallActorAggregate (enumerator, pattern-closure, sweep plan) →
+// SetSecureDecryptor → ConsumerFilter → RunOn (cmd/refractor/main.go).
+//
+// GETTING THAT ORDER WRONG COSTS CORRECTNESS, NOT MERELY NARROWING, and the
+// failure is counter-intuitive enough to state outright: a missing stage does
+// NOT fall back to the broad filter. With the enumerator not yet installed this
+// pipeline is indistinguishable from a plain one, so narrowedFilterEligible
+// takes the PLAIN branch — whose two conditions (full engine, exhaustive labels)
+// UseFullEngineBranches has already satisfied. The result is a narrowed filter
+// granted with NONE of §4.2's conjuncts evaluated: no pattern-closure, no sweep
+// plan, no anchor-type-in-labels, no decryptor check — and then the relation
+// dimension applies too, because that gate also reads the enumerator. Calling
+// this early therefore yields the MOST aggressive filter, not the broadest. A
+// missed anchor soft-delete is an over-grant, and per the paragraph below no
+// revert recovers it. Any new install stage belongs ABOVE this call.
+//
+// The secure-decryptor conjunct is a special case of the same rule: installing a
+// decryptor after this call would narrow a secure lens whose decryptor conjunct
+// was never evaluated. Secure columns are refused on any non-empty
+// projectionKind at spec load, so secure ∧ actorAggregate cannot exist today;
+// whoever lifts that ban owns this ordering.
+//
+// RECOVERING FROM A WRONG NARROW IS NOT A CODE REVERT, and this is the site that
+// has to say so. A JetStream filter update never rewinds the consumer's cursor,
+// so widening the filter back — by any means, reverting the code that narrowed
+// it included — leaves every event the narrow filter already excluded
+// permanently undelivered. The recovery is Pipeline.Rebuild (consumer reset plus
+// re-projection from the DeliverLastPerSubject snapshot) or the convergence
+// sweep, which is why a sweep plan is one of §4.2's conjuncts rather than a
+// nice-to-have: a narrowed lens must always have a standing healer.
 func (p *Pipeline) ConsumerFilter() (filterSubjects []string, filterSubject string) {
 	// One snapshot for both dimensions: the label set and the relation set must
 	// come from the SAME compiled rule, or a hot-reload landing between the two
 	// reads would build a filter no rule ever asked for.
 	rs := p.ruleState()
+	// One read of the actor dimension for the whole derivation, for the same
+	// reason rs is one snapshot: this function consults it twice (eligibility,
+	// then the relation gate below), and two reads could straddle a change and
+	// build a filter no single pipeline shape ever asked for. ruleState cannot
+	// carry this — actor-awareness is installed, not compiled — so it is hoisted
+	// here instead.
+	actorAware := p.actorEnumerator != nil
 	labels, ok := p.narrowedFilterEligible(rs)
 	if !ok || len(labels) == 0 || len(labels) > maxNarrowedFilterLabels {
 		return nil, subjects.CoreKVFilter(p.coreKVBucket)
@@ -944,7 +1010,22 @@ func (p *Pipeline) ConsumerFilter() (filterSubjects []string, filterSubject stri
 	// the label narrowing's own eligibility untouched — the two dimensions fail
 	// back independently, and a lens that narrows by label today never stops
 	// because its relations do not qualify.
-	if rs.relationsExhaustive {
+	//
+	// The relation dimension is PLAIN-ONLY, and that is a correctness gate, not
+	// a budget one. It is sound for a plain lens because plainLinkReactsTo is its
+	// client-side counterpart: the arm already skips a link whose relation the
+	// patterns never traverse, so the server withholding that link is strictly
+	// more conservative than a gate that ran regardless. The actor-aware link arm
+	// has no relation gate — actorAwareFanOutRelevant judges by ENDPOINT TYPE
+	// alone, skipping only when NEITHER endpoint can bind — so narrowing by
+	// relation there would withhold events its client gate keeps: a second,
+	// independently-fallible judgment, which is the one thing
+	// NarrowedFilterEligible's invariant forbids. This is reachable rather than
+	// theoretical (capabilityRoles derives an exhaustive relation set), and the
+	// event it would lose is a real one: a link joining an in-label endpoint to an
+	// out-of-label one over a relation the pattern never walks. Extending the
+	// dimension means giving the fan-out arm a relation gate first.
+	if !actorAware && rs.relationsExhaustive {
 		relationList := make([]string, 0, len(rs.reprojectRelations))
 		for r := range rs.reprojectRelations {
 			relationList = append(relationList, r)
@@ -1340,6 +1421,57 @@ func (p *Pipeline) Run(ctx context.Context) {
 // Returns nil immediately — the rebuild runs asynchronously. The caller (control
 // service) MUST call Rebuild in its own goroutine and return an async ack to the
 // operator before Rebuild returns.
+// abandonRebuild is every Rebuild error return's exit: it clears the in-flight
+// flag, records the cause on the lens's health entry, and takes the status back
+// out of "rebuilding". It returns the error unchanged so a caller reads exactly
+// what went wrong.
+//
+// Leaving the status alone is what made this necessary. SetRebuilding is written
+// before any of the work, but the only writer of the rebuilding → active
+// transition is watchRebuildCompletion, which Rebuild launches on the SUCCESS
+// path only. So a rebuild that failed left "rebuilding" latched with no watcher
+// remaining to clear it, and Sweeper.suppressed refuses every tick whose status
+// is not "active" — for the life of the process, since resumeInterruptedRebuild
+// runs at startup only. RebuildInFlight() reads false by then, so the sweep's
+// first suppression check does not catch it either.
+//
+// That is not a cosmetic status bug for a NARROWED lens. ActorAwareNarrowingLabels
+// authorizes narrowing partly on the strength of a standing healer (the sweeper
+// conjunct, and see ConsumerFilter's doc: Rebuild or the sweep are the only two
+// recoveries from a wrong narrow). A failed Rebuild is the one event that could
+// switch BOTH off at once — the rebuild did not happen, and the status it left
+// behind suppresses the sweep that would have covered for it.
+//
+// "active" plus a recorded LastError is the honest pair, not a contradiction: the
+// rebuild did not run, so the lens is still consuming under exactly the filter
+// and cursor it had before the call — it is active, and it also has a fault worth
+// an operator's attention. The status carries liveness; LastError carries the
+// verdict. Loupe's fault conjunct keys off a live LastError precisely so the two
+// can be read together.
+func (p *Pipeline) abandonRebuild(ctx context.Context, cause error) error {
+	// Clear the flag FIRST: the status write below must not race a concurrent
+	// healthSink.SetActive that would re-assert "rebuilding" off a stale flag.
+	p.rebuildInFlight.Store(false)
+	if p.reporter == nil {
+		return cause
+	}
+	// Status FIRST, cause SECOND, and the order is load-bearing: SetActive writes
+	// LastError back as an explicit JSON null (Reporter.SetActive), so recording
+	// the cause before restoring the status would erase the very thing that makes
+	// "active" honest and leave a clean-looking entry behind.
+	if setErr := p.reporter.SetActive(ctx); setErr != nil {
+		// Louder than the usual health-write warning: this is the path that
+		// leaves the convergence sweep suppressed with nothing to un-latch it.
+		slog.Error("pipeline: rebuild: could not clear rebuilding status after a failed rebuild — the convergence sweep stays suppressed until this lens is rebuilt or restarted",
+			"ruleId", p.ruleID, "err", setErr)
+	}
+	if recErr := p.reporter.RecordError(ctx, cause.Error()); recErr != nil {
+		slog.Error("pipeline: rebuild: record abandoned-rebuild health signal",
+			"ruleId", p.ruleID, "err", recErr)
+	}
+	return cause
+}
+
 func (p *Pipeline) Rebuild(ctx context.Context, truncate bool) error {
 	// Mark the rebuild in flight before the status write so a concurrent
 	// supervisor health persist (probe recovery, operator resume) cannot
@@ -1396,8 +1528,7 @@ func (p *Pipeline) Rebuild(ctx context.Context, truncate bool) error {
 		adpt := p.currentAdapter()
 		if t, ok := adpt.(adapter.Truncater); ok {
 			if err := t.Truncate(ctx); err != nil {
-				p.rebuildInFlight.Store(false)
-				return fmt.Errorf("pipeline: rebuild: truncate: %w", err)
+				return p.abandonRebuild(ctx, fmt.Errorf("pipeline: rebuild: truncate: %w", err))
 			}
 		} else {
 			slog.Warn("pipeline: rebuild: truncate=true but adapter does not implement Truncater; skipping",
@@ -1411,8 +1542,7 @@ func (p *Pipeline) Rebuild(ctx context.Context, truncate bool) error {
 	// reaches here — activation's filter must not ride forward unexamined) and
 	// reset the durable via the supervisor (delete-recreate-swap) with it.
 	if p.supervisor == nil {
-		p.rebuildInFlight.Store(false)
-		return fmt.Errorf("pipeline: rebuild: no supervisor configured")
+		return p.abandonRebuild(ctx, fmt.Errorf("pipeline: rebuild: no supervisor configured"))
 	}
 	filterSubjects, filterSubject := p.ConsumerFilter()
 	resetWithFilter := func() error {
@@ -1428,8 +1558,7 @@ func (p *Pipeline) Rebuild(ctx context.Context, truncate bool) error {
 		filterSubjects = nil
 		filterSubject = subjects.CoreKVFilter(p.coreKVBucket)
 	}, resetWithFilter); err != nil {
-		p.rebuildInFlight.Store(false)
-		return fmt.Errorf("pipeline: rebuild: reset consumer: %w", err)
+		return p.abandonRebuild(ctx, fmt.Errorf("pipeline: rebuild: reset consumer: %w", err))
 	}
 
 	// 4. Launch background goroutine to transition to "active" when lag reaches zero.

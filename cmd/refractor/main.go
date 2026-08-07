@@ -1021,13 +1021,28 @@ func main() {
 		if r.Into.Protected || r.Into.GrantTable {
 			initialPause = substrate.PauseInfra
 		}
-		// D1 (refractor-footprint-reduction-design.md): a plain, full-engine
-		// lens with an exhaustive referenced-label set gets a narrowed,
+		// D1 (refractor-footprint-reduction-design.md): a full-engine lens
+		// with an exhaustive referenced-label set gets a narrowed,
 		// server-side FilterSubjects consumer instead of the broad
 		// $KV.<bucket>.> filter — ConsumerFilter is the single derivation
 		// both this activation call and Pipeline.Rebuild (on a later
 		// MATCH hot-reload) share, so eligibility and the label set are
 		// never computed two different ways.
+		//
+		// This call must stay AFTER every stage that installs a conjunct of the
+		// actor-aware eligibility predicate — UseFullEngineBranches above, the
+		// InstallActorAggregate switch above (enumerator, pattern-closure, sweep
+		// plan), and SetSecureDecryptor above — because a consumer filter is
+		// fixed at registration and so snapshots a predicate that is otherwise
+		// evaluated per event (see ConsumerFilter's doc).
+		//
+		// Moving it up, or adding a new install stage below it, costs
+		// CORRECTNESS — not just narrowing. A pipeline whose enumerator is not
+		// installed yet is indistinguishable from a plain one, so it takes the
+		// plain eligibility branch, whose conditions UseFullEngineBranches has
+		// already met: narrowing is granted with none of §4.2's conjuncts
+		// evaluated, relation-narrowed as well. Early is the MOST aggressive
+		// filter, and no revert widens a registered one back.
 		filterSubjects, filterSubject := p.ConsumerFilter()
 		p.RunOn(conn, substrate.ConsumerSpec{
 			Name:           subjects.LensDurable(r.ID),

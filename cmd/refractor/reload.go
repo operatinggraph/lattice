@@ -356,9 +356,24 @@ func (rl *reloader) update(_, newLens *lens.Rule, kind lens.UpdateKind) {
 		// control.Service.rebuildRule: Reset() is a network round trip, and this
 		// runs on CoreKVSource's single dispatch goroutine, which every other
 		// lens's spec reload also shares.
+		// A failure here is RECORDED on the lens's health entry, not merely
+		// logged. This rebuild is the only thing that re-derives the Core KV
+		// consumer filter after the label set above changed, and a JetStream
+		// filter update never rewinds a consumer's cursor
+		// (Pipeline.ConsumerFilter's doc) — so a rebuild that fails after a MATCH
+		// edit WIDENED the label set leaves the live consumer narrowed to the OLD
+		// set permanently: every write on a newly-referenced type is denied
+		// delivery while the already-swapped client gate would have kept it. On
+		// the auth plane that runs both ways — a grant the graph no longer
+		// supports, with no retraction able to reach it. Unlike every other
+		// refusal on this path the new spec has already been accepted by the time
+		// this runs, so a log line was the only account of a lens now serving a
+		// rule it cannot see all the events for.
 		go func() {
 			if err := entry.pipeline.Rebuild(rl.ctx, false); err != nil {
-				rl.logger.Error("MATCH hot-reload: trigger rebuild", "lensId", newLens.ID, "err", err)
+				rl.refuse(entry, newLens.ID,
+					"MATCH hot-reload: rebuild failed — the Core KV consumer filter may still carry the pre-edit label set",
+					"err", err)
 			}
 		}()
 	}
