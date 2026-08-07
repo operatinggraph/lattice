@@ -1452,3 +1452,140 @@ to the pre-existing `credential_bound_to_key` derivations, which had the identic
 counter: NFR-S6 strips the outcome word from the reply, so Health KV is the **only** channel that
 carries it. The tests assert the counter directly — without that, swapping `fail_claim("erased")` for
 any existing outcome would have left every behavioural assertion green.
+
+---
+
+## Fire B build note — increment 3 (2026-08-07): the unbind primitive
+
+Increment 1 shipped the marker, increment 2 the five gates that read it. This is the **last term of
+§12 Fire B step 1**: `UnbindIdentityCredentials`, the op that takes the credential-plane half of the
+cascade out of `ShredIdentityKey`'s commit. Step 1 is complete when this lands; §12 step 2 (the
+pattern, the residue lens, the Weaver target, the completion seal) is the next fire.
+
+### Fire brief
+
+**1. Scope (§12 Fire B step 1, third term).** `UnbindIdentityCredentials` in `identity-domain` per
+§5.4: owner from `subjectKey`, no last-credential guard, `Scope:"any"` to the service actors, copying
+`UnlinkCredential`'s body — tombstone `credentialindex`, tombstone `boundTo`, rewrite the
+`credentialBinding.credentials` array, emit `identity.unbound`. Green bar:
+`go test ./packages/identity-domain/`, full `go test ./... -p 4`, and the lint gate set.
+
+**2. Verified touch-list** (anchors checked live against `c5150d23`). New file
+`packages/identity-domain/unbind_identity_credentials.go` (DDL + script, mirroring
+`packages/privacy-base/seal_identity_for_erasure.go:223-398`); new
+`unbind_identity_credentials_test.go`. Edited: `package.go` (DDL list + version),
+`permissions.go` (the grant, after `UnlinkCredential` at `:95-99`), `manifest.yaml` (version,
+`declares.ddls`, `declares.permissions`), `package_test.go` (the DDL/permission count pins at
+`:48-59`). Read-only anchors: `ddls.go:829-830` (`credential_index_key`), `:835-843`
+(`credential_bound_to_key`), `:1671-1761` (`UnlinkCredential`'s body), `:409-434`
+(the `credentialBinding` aspect DDL — `permittedCommands` intentionally empty),
+`:514-541` (`boundTo` linkType — same open posture), `shred_identity_key.go:231-266`
+(`collect_bound_to_direction`/`collect_bound_to_links`, both directions),
+`internal/gateway/credential_bindings_materializer.go:143-153` (the one DELETE fold).
+
+**3. Precedents mirrored.** `seal_identity_for_erasure.go` — the whole file shape: a standalone
+`meta.ddl.vertexType` DDL for an erasure-plane op, its own copies of `required_string` / `parts_of` /
+`vertex_alive`, a `Scope:"any"` grant to `operator` carrying a `[no-op-meta: engine-op — …]`
+exemption, no descriptor. `shred_identity_key.go`'s `collect_*_direction` — the class-(e) paged
+`kv.Links` walk with its `# read-posture: (e) relation=… epoch=none (…)` annotation.
+`UnlinkCredential`'s mutation triple and `identity.unbound` payload shape.
+
+**4. In-scope gotchas.** `crypto.sha256NanoID` is a Processor builtin, so the index-key derivation
+copies verbatim. Neither `boundTo`, `duplicateOf` nor `credentialBinding` declares
+`permittedCommands`, and `credentialindex` has no vertexType DDL at all, so no write gate needs
+widening for the new verb. `kv.Links` **must** carry a class-(e) annotation naming `relation=` and an
+`epoch=` — `scripts/lint-conventions.go:869` makes those findings blocking, not advisory.
+
+**Scope-diff gate: three resolutions, all narrow-or-match, none substituting an adjacent mechanism.**
+Two of them are the interesting ones and are recorded below. Nothing widened.
+
+### Three things the ratified §5.4 did not settle, and how the build settled them
+
+**(a) Both link directions, because that is the scope the op being narrowed already has.**
+§5.4 says the op "takes the owner from `subjectKey`", which reads as the inbound direction, and §7.1
+counts only `(c)-[:boundTo]->(i)`. But `ShredIdentityKey` tombstones `boundTo` in **both** directions
+today (`shred_identity_key.go:251-266`, and its own comment says why: an identity is the target of
+every credential bound to it and the **source** when it is itself someone else's credential — a
+merged-away identity folded into the survivor, or a Scenario-B identity later linked to another).
+§12's build order exists precisely so "erasure never does less than it does today", so an
+inbound-only unbind would make step 3's narrowing a behavioural regression. Covering both is not a
+widening of ratified scope — it is matching the scope the op being narrowed already has, the same
+resolution increment 2 reached for the gate's actor position.
+
+**(b) The erased subject's OWN `credentialBinding` array is not rewritten — it cannot be, and it
+does not need to be.** This is the finding that reshaped the increment, and it is a correction to
+§5.4's "copies `UnlinkCredential`'s body" wherever that body touches the subject's own aspect.
+
+`credentialBinding` is `Sensitive: true` (`ddls.go:409-434`). A sensitive aspect is decrypted on the
+way in and encrypted on the way out under the anchoring identity's DEK, and
+`internal/vault/local.go:381` refuses both for a shredded envelope — durably, off `envelope.Shredded`,
+not merely the in-memory deny-list. This op's precondition is the seal, the seal's precondition is a
+shredded `piiKey` (§6, increment 1), so **by construction the subject's DEK is always dead when this
+op runs**. Reading that aspect — declared or via `kv.Read` — would fault in hydrate
+(`sensitive_decrypt.go:225`), and every redelivery would reproduce it: the op would be unable to
+erase anyone, which is the exact failure class this design exists to remove.
+
+Applying increment 2's lesson — trace the *hazard* a clause reaches for, not the *mechanism* it
+names — the hazard is **a live, readable list naming the erased person's credentials**. Three
+surfaces carry one, and all three are closed:
+
+| Surface | Readable after the shred? | Closed by |
+|---|---|---|
+| Subject's own `credentialBinding.credentials` | **No** — ciphertext under a destroyed DEK | the shred itself; that *is* crypto-erasure |
+| `credential-bindings` KV bucket (`actorKey → {identityKey}`, plaintext, outside Core KV) | **Yes** | the `identity.unbound` emission — the plane's only row-set shrink |
+| Owner `W`'s array, where the subject is itself `W`'s credential (outbound) | **Yes** — `W` is not erased, `W`'s DEK is alive | the array rewrite, applied to `W` |
+
+So the array rewrite survives exactly where it is both possible and load-bearing, and the emission —
+not the rewrite — is what closes the inbound side. That is also why §9.1 can claim this realises old
+option B's full intent: the Gateway seam's retraction was always the part that mattered.
+
+**(c) The op fail-closes unless the subject is sealed (`ErasureNotSealed`).** §5.4 states no
+precondition and §5.1 makes the step guardless — but a guardless *step* is a statement about Loom
+skipping, not about the *op's* own preconditions. Without one, a `Scope:"any"` grant to `operator`
+is a bare "tombstone anyone's sign-in methods" verb held by five service actors. Requiring the
+`.erasureRequested` marker gives the grant the same fail-closed justification
+`SealIdentityForErasure`'s own permission Note rests on — *it confers no authority a completed seal
+has not already exercised* — and costs the pattern nothing, since §5.1 orders the seal at step 2 and
+this op at step 3. A refusal added is a narrowing, which the scope-diff gate permits.
+
+The marker is read with the same class-check increment 2 built (`marker_closes_write_path`): the
+document's `class` must be `erasureRequested`, so a foreign write at that key cannot arm this verb
+any more than it can shut a person's claim path.
+
+### The bound, and why one direction per invocation
+
+§5.4 declares `≤ 2·PAGE + 1` mutations and §10 requires that **no step can reintroduce a refusal**.
+A single page of one direction lands exactly on that bound:
+
+- inbound page — 2 mutations per credential (its `credentialindex` + the link), plus at most one
+  array rewrite: `2·PAGE + 1`;
+- outbound page — the subject's own `credentialindex` once (the same key for every outbound link,
+  deduped), plus one link tombstone and at most one owner-array rewrite per link: `2·PAGE + 1`.
+
+Draining **both** directions in one commit would reach `4·PAGE + 2 = 1026` and trip step 8's
+`BatchTooLarge` — a refusal, on exactly the well-connected person §2 says must never be refusable.
+So the op takes **inbound first, and outbound only when inbound is exhausted**, one page, no loop,
+no cap-failure branch. Convergence is not this op's job: §5.5's whole point is that the Loom spine is
+an accelerator, and §7.2's Weaver tail re-dispatches until the residue reaches zero. A subject with
+more than `PAGE` credentials gets one page from the pattern's step 3 and the rest from the tail.
+
+### Residuals — named, with their consumers
+
+1. **`StepSpec` has no `Enumerations` field.** Fire A added `Reads`/`OptionalReads`; a class-(e)
+   enumeration is declared through `ContextHint.Enumerations`, which the Loom systemOp submit path
+   cannot express. The declaration is metadata the Processor validates and otherwise ignores
+   (`opwire.go:66-116`), so the walk executes correctly either way — but the pattern's step will
+   submit this op with an undeclared enumeration, which is a posture gap, not a runtime one.
+   **Consumer: the fire that declares the `identityErasure` pattern** — it either adds the field
+   alongside Fire A's two or records the omission against Contract #2 §2.5.
+2. **The §13 read-set coverage guard still has nothing to compare against.** Same state increment 1
+   recorded: until a pattern declares this op's reads, the test helper's literal is the only thing
+   pinning them. **Consumer: the pattern fire**, unchanged.
+3. **A subject that is `W`'s *last* credential locks `W` out.** No last-credential guard, by §5.4's
+   ruling, and correctly so — the credential is being erased, so leaving `W`'s array pointing at it
+   would preserve a correlation to an erased person in exchange for a sign-in path that no longer
+   authenticates. Recorded because it is a real operator-visible consequence with no surface that
+   announces it. **Consumer: the operator surface (§12 step 4).**
+4. **Same non-commit-conditioned window increment 2 recorded.** The seal is read, not mutated, so a
+   seal committing between this op's hydration and its commit is not detected. Identical class,
+   identical closure. **Consumer: the fire that builds `SealIdentityForErasureComplete`.**
