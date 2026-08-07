@@ -1159,3 +1159,94 @@ narrowing · the sweep-heals-under-narrowing e2e · an actor-aware `Rebuild` wid
 aspect-subsumption end-to-end assertion · the secure ∧ actorAggregate exclusion as an explicit
 translate-time test · the activation-order fail-closed reshape (verified correct today, latent for a future
 edit; both comments now state that early-call costs correctness rather than narrowing).
+
+## 16. Increment 3 fire brief (build note, 2026-08-07) — the derivation, landed in shadow
+
+**Scope sentence (verbatim from §10, Increment 3).** New unit under `pipeline/` deriving the
+affected-anchor set from the compiled pattern + the changed element (3a edge-seeded, 3b node-seeded), hop
+index over **every** pattern source with a `complete` flag, superset invariant + fallback to the shipped
+BFS; wire the three actor-aware arms; plus the sampled plain-arm shadow measurement; differential test;
+e2e (a) tightened plus (d).
+
+**Build order inside the increment (Winston, in-fire) — shadow first, flip second.** This fire lands the
+derivation and runs it in **shadow on the actor-aware arms**: derive, compare against the
+`ActorEnumerator` BFS's answer, count agreement / superset / **shortfall** per lens — and act on the BFS's
+answer, unchanged. The flip to acting is the next fire, and the plain-arm shadow (§4.7's own consumer,
+§D2 Phase 2) rides the same unit after it.
+
+The reason is the invariant's direction. Under-approximation on the auth plane is a missed revocation, and
+§4.7 asks for a differential test over generated mutations as its proof. A synthetic differential proves
+the derivation against the corpus the test author thought of; the shadow proves it against the graph that
+actually exists, on every live event, before anything depends on it. §4.7 already ratifies exactly this
+shape ("derive, compare, count, act on neither") for the plain arm — this applies it to the arm whose
+correctness cost is higher, first. Nothing is narrowed: the same increment lands, with the flip carrying
+measured shortfall evidence instead of only a generated one.
+
+### 16.1 Verified touch-list (checked live against `main`)
+
+- **NEW `ruleengine/full/hopindex.go`** — `(cr *CompiledRule) AnchorHopIndex()`. Mirrors
+  `ReferencedRelations`' walk (`relations.go:38-119`) clause-for-clause and expression-for-expression, so a
+  pattern position one derivation reads and the other does not cannot exist. Anchor identification reuses
+  `pathPatternReferencesActorKey` / `exprReferencesActorKey` (`ast.go:444-480`).
+- **NEW `pipeline/anchor_derivation.go`** — the data walk over `adjacency.Neighbors`
+  (`adjacency/store.go:19`), edge-seeded and node-seeded, returning `(anchorKeys, ok)`.
+- `pipeline/evaluate.go:733` (vertex fan-out) · `:793` (link fan-out, both endpoints) · `:832` (aspect
+  fan-out) — the three shadow call sites, each immediately after the `Enumerate` whose answer still wins.
+- `pipeline/pipeline.go` — the sampling counter + the per-lens shadow tally and its accessor.
+
+### 16.2 The completeness predicate — what makes an index refuse to answer
+
+`complete` is a conjunction, and every conjunct is fail-closed. An incomplete index never skips and never
+derives; the caller falls back to the shipped BFS.
+
+1. **No `With` clause anywhere.** A `WITH` that drops a variable re-seeds an unlabeled downstream node
+   through the whole-bucket scan (`labels.go:16-24`'s scope argument), so that position reaches the anchor
+   through *no link at all* — an adjacency walk cannot see the dependency and would under-approximate.
+2. **Every relationship carries a `Type`.** An untyped hop matches any relation, so it cannot be indexed by
+   relation name — the same arm `ReferencedRelations` fails exhaustiveness on (`relations.go:62-65`).
+3. **No variable-length hop** (`MinHops != 1 || MaxHops != 1`) anywhere in the graph. The intermediate
+   nodes are the problem, not the relation: a back-chain crossing one cannot be walked hop-by-hop.
+4. **The anchor position is identified** — exactly one position whose property map embeds `$actorKey`.
+5. **Every position is connected to the anchor position** in the pattern graph. A disconnected position is
+   a cartesian seed: an event binding it affects *every* anchor, which is precisely the case a
+   "derived empty ⇒ skip" answer would get catastrophically wrong.
+
+Conjunct 5 is the one that is easy to miss and the only one that is unsound to omit — the other four
+degrade to a wider set, this one degrades to a *smaller* one.
+
+### 16.3 Pattern-graph model
+
+Positions are equivalence classes of pattern node positions, merged by variable name when non-empty (an
+unnamed position is its own class). Within one `PathPattern`, `Rels[i]` joins `Nodes[i]` and `Nodes[i+1]`
+by index (`executor.go:515-523`), independent of variable names; merging by name is what joins the
+separate `OPTIONAL MATCH` clauses of `capabilityEphemeral` into one graph. Merging can only *add* edges,
+and an added edge only widens the derived set, so the merge is safe in the invariant's direction.
+
+Back-walking translates one pattern hop into one relation-filtered, direction-flipped `adjacency.Neighbors`
+read: a pattern `(a)-[:r]->(b)` walked from `b` toward `a` reads `b`'s edges for `Name == "r" &&
+Direction == "inbound"`. `DirBoth` accepts either. Several hops carrying one relation yield several
+back-walks, **unioned** (§4.7).
+
+### 16.4 Worked expectations (the acceptance the shadow must reproduce)
+
+- `capabilityRoles` / `holdsRole` link event — the anchor-side endpoint *is* the anchor; derived =
+  {that identity}, against a BFS that returns every co-holder reachable through the role.
+- `capabilityRoles` / `grantedBy` link event — back-walk gives `role ←[holdsRole]— identity` = every
+  holder, which is correct and necessary, so shadow agreement here is the *expected* answer, not a miss.
+- `capabilityEphemeral` / an event on `vtx.booking.<id>` — binds the unlabeled `tgt`/`tgt2`/`tgt3`
+  positions; three back-chains, each pruning immediately where the typed edge is absent.
+- `capabilityServiceAccess` — `containedIn*0..` fails conjunct 3, so the index is incomplete and this lens
+  falls back on every event. Expected and recorded, not a defect.
+
+### 16.5 Increment order + green checks
+
+1. `hopindex.go` + units against the three shipped cyphers' real text — `go test ./internal/refractor/ruleengine/full/`.
+2. `anchor_derivation.go` + units over a seeded adjacency fixture — `go test ./internal/refractor/pipeline/`.
+3. Shadow wiring + counters — `go test ./internal/refractor/...`.
+4. Full `-p 4` suite (§9: Increment 3 changes evaluation for a class of lenses).
+
+### 16.6 Non-goals
+
+Flipping any arm to act on the derived set (next fire, with the differential test + e2e (a)/(d) as its
+evidence) · the plain-arm shadow and §D2 Phase 2's wiring · any change to the enumerator's caps or its
+`reportsTo` hop · any Contract amendment.
