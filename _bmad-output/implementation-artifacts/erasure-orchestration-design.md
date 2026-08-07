@@ -552,8 +552,18 @@ A `WeaverTargetSpec` in `privacy-base`, `TargetID: "identityErasureComplete"`, `
 |---|---|---|
 | `missing_credentialResidue` | `directOp UnbindIdentityCredentials{subjectKey: row.entityKey}` | next page; count strictly decreases |
 | `missing_dedupResidue` | `directOp PurgeIdentityDedupFootprint{subjectKey: row.entityKey}` | next page; count strictly decreases |
-| `missing_vaultDestruction` | `surface` (issueCode `erasure.vaultKeyNotDestroyed`, severity `critical`) | a stuck async half is **escalated, not swept** — the Vault destruction has exactly one correct actor |
-| `missing_projectionNullify` | `surface` (issueCode `erasure.projectionsNotNullified`, `critical`) | ditto |
+| `missing_vaultDestruction` | `surface` (issueCode `ErasureVaultKeyNotDestroyed`, severity `warning`) | a stuck async half is **escalated, not swept** — the Vault destruction has exactly one correct actor |
+| `missing_projectionNullify` | `surface` (issueCode `ErasureProjectionsNotNullified`, `warning`) | ditto |
+
+> **Both cells corrected at increment 7's build.** `critical` is not a valid `IssueSeverity` —
+> `registry.go:643-646` accepts `warning` or `error` only, and a target carrying anything else is
+> rejected at CDC load, so this table as first written would have installed **no** target at all and
+> none of the five gaps would have dispatched. `error`, the obvious repair, is also wrong: these two
+> gaps are open from the instant the row first projects on **every** erasure (the marker precedes both
+> async halves by construction), and an `error` issue escalates the whole Weaver component to
+> `unhealthy` — so the ordinary path would hold Weaver unhealthy for the whole normal in-flight window,
+> against Contract #5 §5.2. The dotted issue codes are corrected for the same reason §5.5 gives:
+> `code` is PascalCase, and these would have been the only exceptions in the system.
 | `missing_erasureSeal` | `directOp SealIdentityForErasureComplete{subjectKey: row.entityKey}` | writes the attestation |
 
 **Convergence terminates, and is uncapped, by construction.** Both sweep gaps declare
@@ -2318,6 +2328,15 @@ target, the tombstoned-marker gap) are re-inherited verbatim rather than re-file
 
 ## Fire B build note — increment 7 (2026-08-07): the weaverTarget
 
+> **Two of this brief's decisions were FALSIFIED by the build's own review — do not build from them.**
+> **(a) The three `maxretries_<g>` columns do not ship, at any size.** Decision 2 below sizes them
+> against a per-commit re-dispatch cadence the engine does not have; the measured cadence is one
+> attempt per 30-minute mark lease, which makes a ceiling-sized cap inert and a reachable one
+> terminally parking. **(b) The two `surface` gaps ship at `warning`, not `error`.** Decision 1 is
+> right that §7.2's `critical` is invalid and would sink the whole target, and wrong that `error` is
+> therefore the answer. Both are worked through in "Three corrections the build made to the ratified
+> text" below, which supersedes this brief wherever they differ. Decisions 3 and 4 shipped as written.
+
 ### Fire brief
 
 **Scope sentence, verbatim from §12 Fire B step 2's list:** the `identityErasureComplete` weaverTarget,
@@ -2435,3 +2454,141 @@ dispatch is a naming question only.
 **Adjacent finds — filed now, not at ship.** None new. Increments 3–6's residuals are re-inherited
 verbatim rather than re-filed; increment 5's residual 1 and increment 6's residual 1 are **discharged
 here** rather than inherited.
+
+### What increment 7 built
+
+`identityErasureComplete` in `privacy-base` (`targets.go`), package `0.8.0 → 0.9.0`. One
+`WeaverTargetSpec` over the `identityErasureResidue` rows increment 5 has been projecting, binding all
+five `missing_*` columns to an action. `LensRef` names the lens; the binding the Weaver actually
+resolves through is the row-key prefix, which is why `TargetID` and the lens's canonical name are
+allowed to differ.
+
+| Gap | Action | What it dispatches |
+|---|---|---|
+| `missing_credentialResidue` | `directOp` | `UnbindIdentityCredentials{subjectKey}` |
+| `missing_dedupResidue` | `directOp` | `PurgeIdentityDedupFootprint{subjectKey}` |
+| `missing_vaultDestruction` | `surface` | `ErasureVaultKeyNotDestroyed`, `warning` |
+| `missing_projectionNullify` | `surface` | `ErasureProjectionsNotNullified`, `warning` |
+| `missing_erasureSeal` | `directOp` | `SealIdentityForErasureComplete{subjectKey}` |
+
+No gap sets `Class`: each of the three operationTypes is admitted by exactly one **vertexType** DDL
+corpus-wide, and `commandIndexEligible` excludes the `erasure` aspectType DDL that also lists
+`SealIdentityForErasureComplete`. A test pins the non-ambiguity rather than pinning a workaround,
+because the day it stops holding the dispatch fails closed and loudly (`MissingClass`).
+
+### Three corrections the build made to the ratified text
+
+1. **§7.2's `critical` severity would have sunk the whole target, and `error` — the obvious
+   repair — is also wrong.** `registry.go:643-646` and `orchestrationguard.go:260-267` accept
+   `warning` or `error` and nothing else; a target carrying anything else is **rejected at CDC load**,
+   so all five gaps would have been dead, not just the two `surface` ones. That much increment 6
+   already filed. What the build found is that `error` fails for a different reason: the residue row
+   exists the moment `.erasureRequested` does — `SealIdentityForErasure` requires only that the shred
+   committed — and both async halves are driven off the `privacy.keyShredded` that same commit emits,
+   so **both gaps are open at the instant the row first projects, on every erasure.** `aggregateStatus`
+   escalates the component to `unhealthy` on any `error` issue, so the ordinary path would hold the
+   whole Weaver unhealthy for the whole normal in-flight window. Contract #5 §5.2 reserves that tier
+   for "cannot fulfil the responsibility"; a pending async half in one subject's erasure is not that.
+   `warning` matches the only other `surface` gap in the corpus. **§7.2's table is corrected below.**
+2. **§7.2's dotted issue codes are the only non-PascalCase codes in the system.** Contract #5 §5.5
+   documents `code` as PascalCase and all thirteen shipped codes follow it. Nothing validates the
+   shape, which is precisely why it had to be decided rather than discovered — a dotted code installs
+   green and is simply wrong forever. `ErasureVaultKeyNotDestroyed` / `ErasureProjectionsNotNullified`.
+3. **No retry cap ships, and the reason is the next section.**
+
+### The re-dispatch rate §7.2's termination proof does not price
+
+§7.2 proves termination in `ceil(N/PAGE)` passes. That is true, and it is a statement about **passes**,
+not about time. The build set out to size a `maxretries_<g>` cap — the mechanism increments 5 and 6
+both named this increment as the consumer of — and sizing it required knowing what a pass costs.
+
+A pass costs **thirty minutes**. The chain, verified rather than inferred:
+
+- Dispatch 1 CAS-creates the gap's mark with a `defaultMarkLease` of 30 minutes
+  (`reconciler.go:17`; `cmd/weaver/main.go` sets no override).
+- The sweep commits, the lens reprojects, and that arrives as a **fresh** CDC delivery.
+- `dispatchGap` computes `stale := found && !leaseLive(...) && staleMark(...)`
+  (`evaluator.go:300`). The mark's lease is live, so `stale` is false — regardless of the
+  constant-`false` `inflight_<g>` column, which only makes `staleMark`'s own term true.
+- `fireEpisode` therefore takes the `found && !stale && !redelivered` branch: **the anti-storm drop**
+  (`evaluator.go:465-470`).
+- `releaseCompletedLeg` does not rescue it — it returns immediately for any gap with no `Goal`
+  (`evaluator.go:743`), which is all three of these.
+
+So the only surviving dispatch leg is the reconciler's lease-expiry reclaim, and the realized rate is
+**64 links per 30 minutes**. `evaluator.go:295-299` states the `!leaseLive` term rules out "an
+in-memory CDC round trip, milliseconds, not the mark's lease" — true for every gap shipped before this
+one, because each closes on a single dispatch. **This target is the first to use re-dispatch as a
+*progress* lane rather than a *failure-retry* lane, and the engine has no seam for that.** §7.2 called
+the Weaver-driven paged sweep first-of-kind risk #40 and declined to claim precedent; this is that
+risk, measured.
+
+What it does to the cap: a bound sized to the sweeps' own reachable ceiling (256 dispatches per arm) is
+a 21-to-32-day chain — inert, never reached. A bound small enough to fire, as the seal's would be, is
+worse than none: `escalateExhaustedGap` alerts and **returns without touching the mark**
+(`evaluator.go:949-957`), the mark TTL-expires, the reconciler enumerates marks rather than rows, and
+`gapSuppressed` keeps suppressing on a dispatch-count key that only a gap-close resets. A
+stuck-but-recoverable seal becomes permanently parked. Uncapped, it stays noisy and self-healing.
+
+The residual's other named option — route the loud stop to a `surface` gap — is unavailable for a
+reason that outlives the pacing: a `surface` gap fires on a `missing_<g>` column, and a hard-failing
+sweep commits nothing, so it leaves every residue count exactly where it was. "Stuck" is "this count
+stopped decreasing", which is a claim about history, and the row carries none.
+
+**The obligation therefore stays open with corrected coordinates, and the increment ships without it.**
+That is the honest reading of a residual whose named mechanism did not survive contact: keep the
+coordinates, kill the framing. What the target still does is the thing that matters — a well-connected
+person who cannot be erased **at all** today can be erased slowly.
+
+### The proofs
+
+Four tests. `…_EveryLensGapHasPlaybookEntry` is the one that earns its place and is
+mutation-verified: a `missing_*` column the lens projects with no `Gaps` entry raises a standing
+**`error`**-severity `GapWithoutPlaybook` and takes the whole Weaver component `unhealthy`
+(`evaluator.go:179-201`, `health.go:362-386`) — the failure increment 6 explicitly declined to ship
+into, now pinned from the other direction. `…_PlaybookColumnsMatchLens` walks the forward direction and
+resolves the lens by `LensRef`, not by name-equals-`TargetID`; the two shipped copies of this check
+elsewhere in the corpus assume those are the same string, and this package is the first where they
+deliberately are not. `…_DispatchedOpsAreUnambiguous` pins the omitted `Class`.
+`…_SurfaceGapsCarryWarningSeverityAndPascalCaseIssueCode` pins correction 1.
+
+The three-layer adversarial pass (two independent deep layers plus an acceptance audit) is what
+produced the pacing finding and the severity correction; both were reached independently by both deep
+layers and then verified against the engine before being acted on.
+
+### Residuals — named, with their consumers
+
+1. **The convergence loop advances one sweep page per 30-minute mark lease.** An ordinary person
+   converges in a few passes; a wide subject takes days. The engine has no seam for a gap whose
+   re-dispatch *is* the progress — the anti-storm drop cannot distinguish "the episode is still in
+   flight" from "the episode landed and the gap is still open because there is more to do".
+   **Consumers: this target, and any future paged convergence loop.** The shape is an engine change
+   (an episode whose effect has demonstrably landed should release its lease rather than wait it out),
+   so it is Designer-lane, not a package fix. Filed as a board row.
+2. **A stuck sweep or seal re-dispatches indefinitely with no escalation** — increment 5's residual 1
+   and increment 6's residual 1, **still open**, with `maxretries_<g>` ruled out above. Expressing
+   "stuck" needs either a per-entity attempt record or an elapsed-time predicate against the shred
+   stamp; the row carries neither. **Consumer: the operator surface (§12 step 4)**, which reads the
+   residue row directly and can show a count that has stopped moving without needing the loop to
+   announce it. Filed as a board row.
+3. **A `surface` gap's Health issue is keyed per `(target, column)` with no entity segment**
+   (`issueKeyGap`, `evaluator.go:1068`). With two erasures in flight, whichever subject's async halves
+   land first clears the issue raised for the one that is genuinely stuck. Benign for the aggregate
+   `unroutedTasks` gap this key shape was written for; wrong for a per-subject gap. **Consumer: these
+   two `surface` gaps, and every future per-entity `surface` gap.** Engine-level, pre-existing —
+   filed as a board row.
+4. **A Weaver `directOp` cannot declare a class-(e) bounded enumeration.** `GapActionSpec` has no
+   `Enumerations` field and the Weaver's `contextHint` envelope carries only `Reads`/`OptionalReads`,
+   so the five `kv.Links` walks these ops run are undeclarable by their dispatcher. The same gap the
+   already-filed `systemOp` row names, on a second dispatcher. Metadata only — the walks execute
+   correctly. **Consumer: the read-posture debt sweep's warn→block flip.** Folded into the existing
+   row rather than filed twice.
+5. **The gap can close early on residue the lens cannot see, and the seal is not the backstop it was
+   named as.** Increment 5's residual 4 (a live link to a tombstoned neighbour; a `duplicateOf`
+   self-link) closes the sweep gap, whereupon the seal opens, refuses `ErasureIncomplete` on its own
+   in-commit walk, and — with the sweep gap now closed and only the lens able to reopen it — nothing
+   ever dispatches the op that could clear the link. The seal correctly prevents a **false
+   attestation**; it does not prevent a **stall**. Residual 4's consumer is corrected from
+   "`SealIdentityForErasureComplete`" to the row filed for residual 2 above.
+
+Increments 3–6's other residuals are re-inherited verbatim.
