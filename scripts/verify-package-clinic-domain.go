@@ -178,7 +178,7 @@ func main() {
 	ddlChecks := []ddlCheck{
 		{canonical: "patient", class: "meta.ddl.vertexType", ops: []string{"CreatePatient", "TombstonePatient"}},
 		{canonical: "provider", class: "meta.ddl.vertexType", ops: []string{"CreateProvider", "TombstoneProvider", "SetProviderProfile", "SetProviderHours", "SetProviderTimeOff", "BindProviderIdentity"}},
-		{canonical: "appointment", class: "meta.ddl.vertexType", ops: []string{"CreateAppointment", "RescheduleAppointment", "SetAppointmentStatus", "MarkPastDueNoShow", "RecordEncounter", "TombstoneAppointment"}},
+		{canonical: "appointment", class: "meta.ddl.vertexType", ops: []string{"CreateAppointment", "RescheduleAppointment", "SetAppointmentStatus", "MarkPastDueNoShow", "BackfillAppointmentSite", "RecordEncounter", "TombstoneAppointment"}},
 		{canonical: "patientDemographics", class: "meta.ddl.aspectType", ops: []string{"CreatePatient"}},
 		{canonical: "providerProfile", class: "meta.ddl.aspectType", ops: []string{"CreateProvider", "SetProviderProfile"}},
 		{canonical: "appointmentSchedule", class: "meta.ddl.aspectType", ops: []string{"CreateAppointment", "RescheduleAppointment"}},
