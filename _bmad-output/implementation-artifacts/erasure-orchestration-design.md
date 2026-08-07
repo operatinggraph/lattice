@@ -1709,3 +1709,81 @@ asserted as an unchanged revision on an already-tombstoned key rather than as a 
    consequence no surface announces. **Consumer: the operator surface (§12 step 4).**
 6. **Same non-commit-conditioned window increments 1 and 2 recorded.** The marker is read, not
    mutated. **Consumer: the fire that builds `SealIdentityForErasureComplete`.**
+
+## Fire B build note — increment 4 (2026-08-07): the dedup-plane sweep
+
+### Fire brief
+
+**Scope sentence, verbatim from §12 Fire B step 2's list:** `PurgeIdentityDedupFootprint`.
+
+Step 2 names six deliverables — this op, the `identityErasureResidue` lens + `privacy-erasure`
+bucket, the `identityErasureComplete` weaverTarget, the `identityErasure` pattern, the two `surface`
+gaps, and `SealIdentityForErasureComplete`. This increment builds **only the op**, for the same
+reason increment 3 built only `UnbindIdentityCredentials`: it is the second of the two sweeps the
+target dispatches, and both must exist before a target that dispatches them can be written against
+anything real. Every other step-2 deliverable is a **non-goal here**.
+
+**Touch list (verified live).**
+
+| File | What |
+|---|---|
+| `packages/privacy-base/purge_identity_dedup_footprint.go` | NEW — the `meta.ddl.vertexType` DDL + Starlark, mirroring `identity-domain/unbind_identity_credentials.go` |
+| `packages/privacy-base/ddls.go:92-97` | add `PurgeIdentityDedupFootprintDDL()` to `DDLs()` |
+| `packages/privacy-base/permissions.go:40-54` | `Scope:"any"` → `operator`, with the `[no-op-meta: engine-op — …]` exemption the seal's grant already carries |
+| `packages/privacy-base/package.go:37` · `manifest.yaml:2` | `0.5.0 → 0.6.0` (an edit at the same version no-ops on install) |
+| `packages/privacy-base/purge_identity_dedup_footprint_test.go` | NEW — the convergence proof + its siblings |
+
+**Precedents to mirror, and the one to refuse.**
+
+- **`unbind_identity_credentials.go` (inc 3) is the shape**, top to bottom: `collect_live_sweep`'s
+  read-side paging to `SWEEP_LIMIT = 64` live links, the `ErasureResidueUnreachable` loud stop when
+  the page budget is spent on nothing but tombstones, `marker_closes_write_path`'s **class** check,
+  one direction per invocation, and no `primaryKey`.
+- **`shred_identity_key.go:178-247` is where the three enumerations come from** — `indexes` inbound,
+  `duplicateOf` both directions — including the read-posture `(e)` annotations, verbatim in intent.
+- **Refuse the shred's tombstone idiom.** The shred writes
+  `{"op":"update", …, isDeleted:True, data: <re-read body>}`, which costs a `kv.Read` per
+  `identityindex` hit purely to carry the body forward. The `tombstone` verb already does that:
+  `buildMutationValue` (`internal/processor/step8_commit.go:407-418`) seeds the document from the
+  **prior** body and layers the script's document over it, so a bare
+  `{"op":"tombstone","key":…}` preserves class and `data` and sets `isDeleted`. Inc 3 uses the verb;
+  this op does too. It drops up to 64 hydrating reads per pass — real headroom against the wall
+  budget that killed `PAGE = 256`.
+
+**Increment order + the green check after each.**
+
+1. The DDL + script + registration + grant + version bump → `go build ./...`.
+2. The tests → `go test ./packages/privacy-base/ -count=1`.
+3. Full-suite + gates → `go test ./... -p 4`, `make vet`, `golangci-lint run ./...`,
+   `STRICT=1 go run ./scripts/lint-conventions.go`, `make verify-kernel`,
+   `make verify-package-privacy-base`.
+
+**In-scope gotchas, each already grounded.**
+
+- **The mutation cost per class differs, and that sets the sweep order.** An `indexes` hit costs
+  **2** mutations (the `vtx.identityindex.<hash>` vertex *and* the link); a `duplicateOf` hit costs
+  **1**. Draining all three collectors in one commit reaches `2·SWEEP + 2·SWEEP = 256` mutations. So
+  one class per commit, in the order `indexes` → `duplicateOf` out → `duplicateOf` in, capping any
+  commit at `2·SWEEP_LIMIT = 128` — the same magnitude inc 3 measured clean at `2·SWEEP+1 = 129`.
+- **Cross-package tombstoning of identity-domain's classes is already proven, and the verb makes the
+  question moot.** `indexes` and `duplicateOf` both declare `PermittedCommands` **empty** on purpose
+  (*"multi-writer, open posture"*, `identity-domain/ddls.go:466-500`), and `ShredIdentityKey` —
+  privacy-base — tombstones all three classes today. Under the `tombstone` verb the point does not
+  even arise: step 6 derives the class from the mutation **document**, and a document-less tombstone
+  skips the DDL lookup entirely (`step6_validate.go:143-155`).
+- **`duplicateOf` is enumerated in both directions** because the identity may be either side of the
+  pair — the later-arriving identity that matched an incumbent (source) or the incumbent others
+  matched against (target). Sweeping one direction would leave live pair evidence naming an erased
+  person, which is the whole class this op exists to remove.
+- **No events.** §5.4's table gives step 4 `Emits: none`, and it is right: the dedup footprint has
+  no read-model seam of its own to retract, unlike the credential plane's Gateway bucket.
+
+**Adjacent finds — filed now, not at ship.** None new. The three residuals this op inherits from inc
+3 (the finite scan window, the missing `Enumerations` declaration on a `systemOp` step, the §13
+read-set coverage guard with nothing to compare against) are already filed rows and are re-inherited
+verbatim rather than re-filed.
+
+**Non-goals.** The residue lens, the `privacy-erasure` bucket, the weaverTarget, the pattern, the
+surface gaps, `SealIdentityForErasureComplete`, and narrowing `ShredIdentityKey` (step 3 — and the
+shred keeps its enumerations until step 2 completes, per §12's build order, so this op and the shred
+deliberately overlap for now).
