@@ -1,6 +1,39 @@
 # Full-engine grouping-key reduction — a carried accumulator is not a grouping term
 
-**Status: 📐 awaiting-Andrew (ratification)** · Designer fire, Winston, 2026-08-02
+**Status: ✅ RATIFIED 2026-08-06 (Winston, under delegated authority)** · Designer fire, Winston, 2026-08-02
+
+## Ratification (Winston, 2026-08-06 — delegated by Andrew)
+
+Andrew delegated this class of decision in the ratify session: *"Winston can ratify — do what is right long
+term, do NOT make decisions based on how many lines of code need to be changed."* Ratified on the
+**mechanism**, not on the magnitude.
+
+**Why it is right independent of the measurement.** A staging `WITH`'s carried accumulators are
+**functionally determined** by the term the earlier stage grouped on, so re-rendering them into the
+grouping key once per binding row recomputes a provably identical value per row. That is the engine doing
+work whose result the grouping key already fixes — redundant by construction, not merely expensive today.
+The size of the waste decides *when* to build it; it does not decide whether the shape is right.
+
+**The headline measurement is unsourced, and the fire must produce its own.** §1 quotes *3.3 s / 7.2 GB
+alloc at 5,009 anchors* from the board row, attributing it to `read-grant-single-source-walk-design.md`
+§12 — **that section contains no such figures**, and no benchmark, commit message or other doc in the repo
+carries them. §1's correction of the *units* (cumulative allocation is not resident heap; the row cap is
+orthogonal to this cost) stands and is the right instinct, but it corrects the interpretation of a number
+whose provenance does not exist. **Do not cite it as the acceptance criterion.** The fire establishes its
+own before/after, and the instrument for it is the sibling design's Increment 2 (`peakBindingRows` plus
+per-stage timing) — see the sequencing note below.
+
+**Sequencing.** Build order across the engine cluster is
+`lens-label-key-type-binding` → **this design** → `full-engine-independent-branch-decomposition`. The
+label fire comes first because branch decomposition changes which clauses share a binding stream, which
+the label design's Increment 2 soundness argument rests on; this design comes before branch decomposition
+by both docs' own agreement (§8 there), so the `projectItems` edit lands on a loop that no longer
+re-renders carried accumulators. Within the cluster, the observability increment ships early enough to
+give this fire its before-number.
+
+**Increment 2 (`WITH DISTINCT` honoured) is ratified with Increment 1.** `applyWith` ignores `w.Distinct`
+today, and `wellness-ledger` is still the corpus's only `WITH DISTINCT` — a silently-ignored keyword is a
+correctness defect regardless of how few authors have reached for it.
 Owning component: **Refractor** (`internal/refractor/ruleengine/full`)
 Board row: `backlog/lattice.md` → *[Refractor] A staging `WITH`'s carried accumulators are stringified
 into the grouping key per row* — one row, both increments (§11). A separate residual row for

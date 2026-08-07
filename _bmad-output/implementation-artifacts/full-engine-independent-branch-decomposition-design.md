@@ -1,6 +1,43 @@
 # Full-engine independent-branch decomposition — sibling OPTIONAL branches fold, they do not multiply
 
-**Status: 📐 awaiting-Andrew (ratification)** · Designer fire, Winston, 2026-08-02
+**Status: ✅ RATIFIED 2026-08-06 (Winston, under delegated authority) — fork resolved to the ENGINE option**
+· Designer fire, Winston, 2026-08-02
+
+## Ratification (Winston, 2026-08-06 — delegated by Andrew)
+
+Andrew delegated this class of decision in the ratify session: *"Winston can ratify — do what is right long
+term, do NOT make decisions based on how many lines of code need to be changed."*
+
+**The fork resolves to the engine change, not the authoring convention + gate.** Three reasons, none of
+them about cost:
+
+1. **Independent branches are semantically independent, so their cost should be additive.** A cross product
+   over sibling OPTIONAL branches computes a combinatorial object no consumer asked for and no projection
+   reads. That is an engine defect, not a tuning parameter.
+2. **A convention would push an engine deficiency onto every future lens author** — and the platform
+   itself would be its first violator, since the generated read-grant producers emit staged multi-branch
+   shapes. A rule the platform's own code generator breaks is not a rule.
+3. **A gate cannot express the constraint.** Branch independence is a semantic property of the branch set,
+   not a syntactic property of one clause, so a lint over cypher text could only approximate it — and an
+   approximate gate on a correctness-shaped property is the fingers-crossed state the label-binding fire
+   exists to end.
+
+**Increment 2 (`peakBindingRows` observability) ships FIRST within this design**, ahead of Increment 1.
+Not as a gate on the decision — the decision is made — but because it is the acceptance instrument for
+this fire *and* for the grouping-key sibling, whose headline measurement turns out to have no traceable
+provenance anywhere in the repo. §2's own "~730 MB" is an honest extrapolation to the 1M-row cap rather
+than a second measurement, and nothing in the engine measures peak rows today (`maxBindings` is a cap that
+errors, with no counter). Building the instrument first turns both fires' acceptance criteria from
+extrapolation into observation.
+
+**Increment 3 (streaming the binding set) stays shelved** with its existing revive trigger — Increment 2
+is what makes that trigger observable, which is the design's own §9-C reasoning and remains right.
+
+**Sequencing.** `lens-label-key-type-binding` → `full-engine-grouping-key-reduction` → **this design**.
+The label fire must precede it because branch grouping changes which clauses share a binding stream, and
+that design's Increment 2 soundness argument rests on the current sharing; the grouping-key fire precedes
+it by both docs' agreement (§8), so this design's `projectItems` edit lands on a loop that no longer
+re-renders carried accumulators.
 Owning component: **Refractor** (`internal/refractor/ruleengine/full`)
 Board row: `backlog/lattice.md` → *[Refractor] The executor still materializes the whole binding set*
 (★★, L, previously `📋 designer · no live consumer`). **That row's "no live consumer" is wrong** — §2
