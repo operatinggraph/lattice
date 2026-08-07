@@ -87,7 +87,15 @@ Source package: `internal/processor/`
 **`<instance>`** follows the convention `proc-<NanoID>` (Contract #5 §5.1).
 
 **`<outcome>` enum** for claim-attempts: `success`, `invalid-key`, `wrong-state`, `flagged`,
-`merged`, `credential-already-bound`, `no-target`.
+`merged`, `credential-already-bound`, `no-target`, `erased`.
+
+`erased` means the identity is sealed for erasure — it carries
+`vtx.identity.<NanoID>.erasureRequested`, so no further credential may be bound to it
+(erasure-orchestration-design.md §6). Health KV is the **only** channel that carries this outcome:
+NFR-S6 reclassifies every claim rejection to one generic wire code, so the word never reaches the
+caller. The gate sits *below* the claim-secret comparison precisely so that a wrong-secret attempt
+against a sealed identity still counts as `invalid-key` — the counter an operator watches for brute
+force — instead of being diverted here.
 
 **`<alertCode>` enum** (known Phase 1 codes): `stub-auth-active`, `privileged-lane-grant-rejected`.
 

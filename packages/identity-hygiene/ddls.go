@@ -99,7 +99,14 @@ func DDLs() []pkgmgr.DDLSpec {
 				"a live assignedTo task in status open (Contract #10 §10.1 no-orphan " +
 				"tombstone guard) — reassign/cancel it first. Repoints every credential " +
 				"resolving to secondary onto primary (multi-credential-identity-linking-" +
-				"design.md §3.3), emitting identity.rebound per credential. Multi-key " +
+				"design.md §3.3), emitting identity.rebound per credential. Rejects " +
+				"(ErasedIdentity) if EITHER side carries .erasureRequested " +
+				"(erasure-orchestration-design.md §6): merging ONTO a sealed identity " +
+				"creates fresh index and credential representations of a person whose " +
+				"write path has closed, and merging one AWAY moves its correlations onto " +
+				"a live survivor while its own residue count falls to zero, which would " +
+				"attest an erasure that erased nothing. Both markers are hydrated by this " +
+				"DDL's own derive_reads, so no submitter declares them. Multi-key " +
 				"op: returns no primaryKey; merge counts ride the IdentityMerged event " +
 				"and the committed key set is in OperationReply.Revisions.",
 			Script: identityHygieneScript,
@@ -188,6 +195,12 @@ func DDLs() []pkgmgr.DDLSpec {
 // `indexes` links (Hub: secondary, Relation: "indexes", Direction: "in"), in
 // addition to the existing assignedTo enumeration.
 //
+// The caller declares NOTHING for the erasure gate. `primary.erasureRequested`
+// and `secondary.erasureRequested` are derived by this DDL's own `derive_reads`
+// (Contract #2 §2.5 class (g)) — a guard that refuses a merge touching a person
+// sealed for erasure (erasure-orchestration-design.md §6) must not depend on a
+// submitter remembering to enable it.
+//
 // The script reads the hydrated map by known key, with two sanctioned
 // enumeration exceptions: the secondary-has-open-tasks guard (inbound
 // assignedTo) and the indexes-driven repoint (inbound indexes), both via the
@@ -258,6 +271,65 @@ def collect_indexes_repoints(secondary_key):
             return repoints
     fail("IdentityIndexFanoutTooLarge: " + secondary_key + " has too many indexes links to enumerate at merge time")
 
+NANOID_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz123456789"
+
+def is_identity_vertex_key(key):
+    # True only for a key the Contract #1 grammar accepts as
+    # vtx.identity.<NanoID> -- exactly what substrate's ClassifyKey accepts
+    # once ".erasureRequested" is appended.
+    #
+    # Load-bearing, not decoration. The Processor validates every key
+    # derive_reads returns and answers a malformed one with DeriveReadsInvalid,
+    # a hydration fault raised BEFORE the operation's own validation. Deriving
+    # straight off the payload would turn "MergeIdentity{primary: 'vtx.identity.x'}"
+    # -- today a clean MergeIdentityMissing -- into an opaque HydrationFailed.
+    # identity-domain's own normalizers state the rule: a derivation never
+    # fails, and never widens what the operation itself rejects.
+    if type(key) != type("") or not key.startswith("vtx.identity."):
+        return False
+    parts = key.split(".")
+    if len(parts) != 3 or len(parts[2]) != 20:
+        return False
+    for ch in parts[2].elems():
+        if ch not in NANOID_ALPHABET:
+            return False
+    return True
+
+def derive_reads(op):
+    # Contract #2 §2.5 class (g). The Processor runs this at the head of step 4
+    # and merges the result into the declared read set, so the erasure gate's
+    # marker keys are hydrated without every submitter having to name them.
+    #
+    # Only the erasure markers derive here. Everything else this script reads
+    # is already declared by the dispatcher (the doc block above lists it), and
+    # moving any of it would split one contract across two places. These two
+    # are different in kind: they belong to a guard that must hold no matter
+    # what the caller declared, and a gate a submitter can forget to enable is
+    # not a gate. (The script reads them through kv.Read, so a missed
+    # derivation still refuses -- it just costs a live GET instead of a
+    # snapshot lookup.)
+    #
+    # optionalReads, never reads: absent for every identity that was never
+    # sealed for erasure, which is nearly all of them, and a required read's
+    # absence is a HydrationMiss that would block every ordinary merge.
+    #
+    # The op argument is a struct -- op.operationType, op.actor, op.payload
+    # (also a struct). No kv, no nanoid: both are fail-closed stubs in this
+    # pass, and a derivation that reads state is a read, not a derivation.
+    if op.operationType != "MergeIdentity":
+        return {}
+    p = op.payload
+    keys = []
+    for field in ["primary", "secondary"]:
+        v = getattr(p, field, None)
+        if is_identity_vertex_key(v):
+            marker = v + ".erasureRequested"
+            if marker not in keys:
+                keys.append(marker)
+    if len(keys) == 0:
+        return {}
+    return {"optionalReads": keys}
+
 def execute(state, op):
     ot = op.operationType
     p = op.payload
@@ -305,6 +377,54 @@ def execute(state, op):
         fail("MergeStateRejected: primary state=merged")
     if s_state == "merged":
         fail("MergeStateRejected: secondary state=merged")
+
+    # --- Neither side sealed for erasure (erasure-orchestration-design.md §6) ---
+    #
+    # Both sides, for different reasons, and the second is not the obvious one.
+    #
+    # A merge onto a sealed PRIMARY repoints the secondary's identityindex
+    # vertices onto it and writes fresh inbound "indexes" links -- new
+    # instances of exactly the representation the residue count measures, and
+    # so the write that would let an erased set grow after the seal.
+    #
+    # A merge whose SECONDARY is sealed is worse, because it looks like
+    # progress: it moves that person's indexes and credentials onto a LIVE
+    # survivor, so the residue count anchored on the secondary falls toward
+    # zero while every correlation it measured is alive under another key. The
+    # erasure would then attest completion over a person whose record merely
+    # changed address. SealIdentityForErasure refuses the reverse ordering (an
+    # erasure request naming an already-merged identity, IdentityMerged); this
+    # is the same hazard reached from the other side.
+    #
+    # Read through kv.Read on purpose. state[...] on an undeclared key reads as
+    # ABSENT, so for a fail-closed guard one forgotten declaration would open
+    # it; an undeclared kv.Read falls through to a live Core KV GET and still
+    # refuses. The derive_reads below makes the declared case the normal one.
+    def erasure_requested(identity_key):
+        # read-posture: (d) declared in optionalReads by this package's own
+        # derive_reads (Contract #2 §2.5 class (g)). Absence-tolerant, and
+        # absent for every identity never sealed for erasure.
+        doc = kv.Read(identity_key + ".erasureRequested")
+        if doc == None:
+            return False
+        # The CLASS, not just the key. privacy-base records that its
+        # aspect-type DDL gates the class rather than the key, so a mutation at
+        # this key declaring some other class falls to the permissive default
+        # and any package script could write one; without this check such a
+        # document would shut a person's merge path permanently, with nothing
+        # able to remove it. "class" is a Starlark reserved word, so it is read
+        # with getattr rather than dotted access.
+        if not hasattr(doc, "class") or getattr(doc, "class") != "erasureRequested":
+            return False
+        # A tombstoned marker still closes -- presence of the right class is
+        # the signal, live or not. A gate that reopened on a tombstone would
+        # let the erased set grow again exactly when that was least observable.
+        return True
+
+    if erasure_requested(primary):
+        fail("ErasedIdentity: primary " + primary + " is sealed for erasure; merging onto it would create fresh index and credential representations of a person whose record is being closed")
+    if erasure_requested(secondary):
+        fail("ErasedIdentity: secondary " + secondary + " is sealed for erasure; merging it away would move its correlations onto a live identity while its own residue count fell to zero, attesting an erasure that erased nothing")
 
     # --- No-orphan tombstone guard (Contract #10 §10.1): secondary must not
     # still hold a live open task. Checked ahead of the edges trust gate --

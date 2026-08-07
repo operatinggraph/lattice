@@ -79,7 +79,14 @@ func DDLs() []pkgmgr.DDLSpec {
 				"idpBinding (sensitive; the raw iss/sub of the external IdP token an opaque-mode ActorID was " +
 				"derived from — Contract #11 §3.3, written only by ProvisionConsumerIdentity, absent for a " +
 				"nanoid-mode/dev-provisioned actor), " +
-				"mergedInto (vertex-key reference, set only by identity-hygiene package's MergeIdentity). " +
+				"mergedInto (vertex-key reference, set only by identity-hygiene package's MergeIdentity), " +
+				"erasureRequested (privacy-base-owned marker; its PRESENCE closes this identity's write path — " +
+				"ClaimIdentity, CompleteCredentialLink and ReconcileCredentialBinding refuse once it exists, in " +
+				"EITHER link position (ShredIdentityKey erases boundTo in both directions, so an erased identity is " +
+				"gated as the credential as well as as the owner), and CreateUnclaimedIdentity stops treating the " +
+				"identity as a dedup incumbent so no fresh duplicateOf names it. That is what makes the residue " +
+				"count the erasure's completion seal rests on measure a CLOSED set; erasure-orchestration-design.md " +
+				"§6, hydrated by this DDL's own derive_reads so no submitter declares it). " +
 				"The client mints the claim secret, submits only claimKeyHash; Lattice never holds the plaintext. " +
 				"State machine + IdentityMerged guard enforced in .script. " +
 				"ProvisionConsumerIdentity: idempotently creates a bare, already-claimed consumer identity at a " +
@@ -629,6 +636,64 @@ def enforce_not_merged(current_state, merged_into):
     if current_state == "merged":
         fail("IdentityMerged: mergedInto=" + (merged_into if merged_into != None else "<unknown>"))
 
+def erasure_requested(identity_key):
+    # The erasure write-path gate (erasure-orchestration-design.md §6). The
+    # PRESENCE of vtx.identity.<NanoID>.erasureRequested means this person
+    # invoked a right to be forgotten, and from that instant no writer may
+    # create a fresh erasable representation of them -- otherwise the residue
+    # count the erasure's completion seal rests on measures an OPEN set, and
+    # "zero" degrades from "erased" to "zero at projection time".
+    #
+    # Read through kv.Read rather than state[...], and that difference IS the
+    # guard. A state[...] lookup of a key no dispatcher declared reads as
+    # ABSENT, so one missing declaration would silently open the gate -- the
+    # one failure mode a fail-closed guard may not have. An undeclared kv.Read
+    # falls through to a live Core KV GET instead (internal/processor/
+    # starlark_kv.go), so the gate refuses either way; declaring the key only
+    # buys it the step-4 snapshot with no round trip.
+    #
+    # read-posture: (d) declared in optionalReads by this package's own
+    # derive_reads (Contract #2 §2.5 class (g)). Absence-tolerant, and absence
+    # is the ordinary case -- no identity carries this marker until it is
+    # sealed for erasure.
+    return marker_closes_write_path(kv.Read(identity_key + ".erasureRequested"))
+
+def marker_closes_write_path(doc):
+    # Shared by every gate in this package so the four of them cannot drift.
+    #
+    # The CLASS is checked, not merely the key. privacy-base records that its
+    # aspect-type DDL gates the class rather than the key
+    # (seal_identity_for_erasure.go), so a mutation at this key declaring some
+    # OTHER class falls to resolveGoverningDDL's permissive default and any
+    # package script could write one. Without this check such a document would
+    # close a person's claim, link, reconcile and merge paths permanently --
+    # nothing removes the marker, so there would be no way back. Requiring the
+    # real class means only the real seal can shut the path.
+    #
+    # "class" is a Starlark reserved word, so it cannot be read via dotted
+    # attribute access -- getattr with the string key is required (the same
+    # idiom location-domain's root_class uses).
+    if doc == None:
+        return False
+    if not hasattr(doc, "class") or getattr(doc, "class") != "erasureRequested":
+        return False
+    # A tombstoned document reads as PRESENT carrying the flag, not as None,
+    # and it still closes. Nothing removes this marker -- its non-removal is
+    # the convention §7's convergence rests on -- but a gate that reopened on a
+    # tombstone would let the erased set grow again exactly when that was least
+    # observable. Presence of the right class is the signal, live or not.
+    #
+    # This is deliberately WIDER than §7.1's residue anchor, which projects on
+    # a live .erasureRequested.data.requestedAt that is not null. A tombstoned or
+    # body-less marker therefore shuts the write path while producing no
+    # residue row -- an identity with nothing to converge and no operator
+    # surface. Both states require a writer that does not exist (this class has
+    # exactly one, and it always writes both fields), and of the two ways to be
+    # wrong, refusing writes for a person nobody is erasing is recoverable
+    # while growing the erased set is the thing §6 exists to prevent. Recorded
+    # in the design's inc-2 build note rather than papered over.
+    return True
+
 ROLE_PAGE_LIMIT = 50
 MAX_ROLE_PAGES = 4
 
@@ -791,6 +856,45 @@ def credential_bound_to_mutation(credential_actor_key, owner_identity_key, bound
     return {"op": "update", "key": credential_bound_to_key(credential_actor_key, owner_identity_key),
             "document": doc}
 
+NANOID_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz123456789"
+
+def is_identity_vertex_key(key):
+    # True only for a key the Contract #1 grammar accepts as
+    # vtx.identity.<NanoID>, i.e. exactly what substrate's ClassifyKey will
+    # accept once ".erasureRequested" is appended to it.
+    #
+    # This is not decoration. The Processor validates every key derive_reads
+    # returns against that grammar and answers a malformed one with
+    # DeriveReadsInvalid -- a hydration fault, raised BEFORE the operation's
+    # own validation runs. Deriving from an unvalidated payload would therefore
+    # convert a clean "ClaimKeyInvalid: no-target" into an opaque
+    # HydrationFailed, and on an NFR-S6-protected path that is a new,
+    # distinguishable wire code any caller can reach with "vtx.identity.x".
+    # The same rule the contact normalizers above already obey: a derivation
+    # never fails, and never widens what the operation itself rejects.
+    if type(key) != type("") or not key.startswith("vtx.identity."):
+        return False
+    parts = key.split(".")
+    if len(parts) != 3 or len(parts[2]) != 20:
+        return False
+    for ch in parts[2].elems():
+        if ch not in NANOID_ALPHABET:
+            return False
+    return True
+
+def erasure_marker_keys(identity_keys):
+    # The §6 erasure markers for a set of identity positions, skipping any that
+    # is absent or not a well-formed identity vertex key. Deduped: the Processor
+    # tolerates a repeated key, but a self-claim would otherwise derive the same
+    # marker twice and spend two of the declared-read budget on one fact.
+    keys = []
+    for k in identity_keys:
+        if is_identity_vertex_key(k):
+            marker = k + ".erasureRequested"
+            if marker not in keys:
+                keys.append(marker)
+    return keys
+
 def derive_reads(op):
     # Contract #2 §2.5 class (g). The Processor runs this at the head of step 4
     # and merges what it returns into the declared read set, so a submitter no
@@ -829,7 +933,26 @@ def derive_reads(op):
         # payload.
         keys = [credential_index_key(op.actor)]
         target = getattr(p, "targetIdentityKey", None)
-        if type(target) == type("") and target.startswith("vtx.identity.") and op.actor.startswith("vtx.identity."):
+        # The erasure markers the §6 gate reads, for BOTH ends of the boundTo
+        # this op emits -- ShredIdentityKey erases that link in both directions
+        # (privacy-base/shred_identity_key.go), so both positions are gated.
+        #
+        # Derived here rather than asked of every submitter for the reason
+        # class (g) exists: three separate front ends dispatch these two ops,
+        # and a gate whose correctness depended on each of them remembering a
+        # declaration would be a gate with three ways to be forgotten. (It
+        # still refuses if this derivation is ever missed -- the gate reads
+        # through kv.Read, which falls through to a live GET -- but then it
+        # costs a round trip per claim rather than a snapshot lookup.)
+        keys += erasure_marker_keys([target, op.actor])
+        # Both endpoints must be WELL-FORMED, not merely prefixed. A prefix
+        # check accepts "vtx.identity.x", from which this builds a link key the
+        # Contract #1 grammar rejects -- and the Processor answers a malformed
+        # derived key with DeriveReadsInvalid, a hydration fault raised before
+        # the script's own validation. On this NFR-S6-protected path that is a
+        # distinguishable wire code where the caller should have seen the
+        # generic ClaimKeyInvalid. For a well-formed payload nothing changes.
+        if is_identity_vertex_key(target) and is_identity_vertex_key(op.actor):
             # The boundTo link this op emits. Optional, and absent on every
             # first bind -- present only when the same credential was unlinked
             # from this same identity earlier and is being re-bound, which is
@@ -851,10 +974,10 @@ def derive_reads(op):
         # optional: a caller naming a credential that is not bound takes the
         # not-found branch, which must not fault on a hydration miss.
         credential_actor_key = getattr(p, "credentialActorKey", None)
-        if type(credential_actor_key) != type("") or not credential_actor_key.startswith("vtx.identity."):
+        if not is_identity_vertex_key(credential_actor_key):
             return {}
         keys = [credential_index_key(credential_actor_key)]
-        if op.actor.startswith("vtx.identity."):
+        if is_identity_vertex_key(op.actor):
             keys.append(credential_bound_to_key(credential_actor_key, op.actor))
         return {"optionalReads": keys}
 
@@ -867,11 +990,15 @@ def derive_reads(op):
         # has not first checked against the index.
         credential_actor_key = getattr(p, "credentialActorKey", None)
         identity_key = getattr(p, "identityKey", None)
-        if type(credential_actor_key) != type("") or not credential_actor_key.startswith("vtx.identity."):
+        if not is_identity_vertex_key(credential_actor_key):
             return {}
         keys = [credential_index_key(credential_actor_key)]
-        if type(identity_key) == type("") and identity_key.startswith("vtx.identity."):
+        if is_identity_vertex_key(identity_key):
             keys.append(credential_bound_to_key(credential_actor_key, identity_key))
+        # The erasure markers the §6 gate reads, both ends. This op's only
+        # dispatcher declares no contextHint at all, so class (g) is the only
+        # place they can come from.
+        keys += erasure_marker_keys([identity_key, credential_actor_key])
         return {"optionalReads": keys}
 
     return {}
@@ -932,24 +1059,50 @@ def execute(state, op):
 
         name_index_key = identity_index_key("name", normalize_name(name))
 
+        # The erasure gate on the dedup path (§6). A live index hit is what
+        # turns a new registration into a duplicateOf link naming the
+        # incumbent, in a link key plus its match criteria in plaintext. If
+        # that incumbent has been sealed for erasure, the link is a BRAND-NEW
+        # correlation to a person who asked to be forgotten, created after the
+        # seal -- the erased set growing, which is the one property §6 exists
+        # to forbid. It needs no exotic path: the name index always matches, so
+        # an ordinary same-named walk-in during the convergence window does it.
+        #
+        # Skipping the match, rather than refusing the whole op, is the right
+        # shape. The incumbent is not the caller's business and the person in
+        # front of the front desk is entitled to be registered; what they are
+        # not entitled to is a recorded correlation with someone being erased.
+        # A skipped match reads exactly as "no duplicate", which is what the
+        # corpus will say about that contact once the erasure converges.
+        def match_is_erased(hit):
+            # read-posture: (e) bounded per-candidate follow-up off the three
+            # contact-index probes derive_reads declares -- at most one read
+            # per contact type, three in the worst case, never a scan. The
+            # incumbent's key is only knowable from the hit's own body, so it
+            # cannot be declared ahead of hydration the way the index keys are.
+            return marker_closes_write_path(kv.Read(hit.data["identityKey"] + ".erasureRequested"))
+
+        def live_hit(hit):
+            return hit != None and (not hasattr(hit, "isDeleted") or not hit.isDeleted)
+
         duplicate = False
         matched = {}
         if email != None:
             email_index_key = identity_index_key("email", email)
             email_hit = state[email_index_key] if email_index_key in state else None
-            if email_hit != None and (not hasattr(email_hit, "isDeleted") or not email_hit.isDeleted):
+            if live_hit(email_hit) and not match_is_erased(email_hit):
                 duplicate = True
                 incumbent_key = email_hit.data["identityKey"]
                 matched[incumbent_key] = (matched[incumbent_key] if incumbent_key in matched else []) + ["exact-email"]
         if phone != None:
             phone_index_key = identity_index_key("phone", phone)
             phone_hit = state[phone_index_key] if phone_index_key in state else None
-            if phone_hit != None and (not hasattr(phone_hit, "isDeleted") or not phone_hit.isDeleted):
+            if live_hit(phone_hit) and not match_is_erased(phone_hit):
                 duplicate = True
                 incumbent_key = phone_hit.data["identityKey"]
                 matched[incumbent_key] = (matched[incumbent_key] if incumbent_key in matched else []) + ["exact-phone"]
         name_hit = state[name_index_key] if name_index_key in state else None
-        if name_hit != None and (not hasattr(name_hit, "isDeleted") or not name_hit.isDeleted):
+        if live_hit(name_hit) and not match_is_erased(name_hit):
             duplicate = True
             incumbent_key = name_hit.data["identityKey"]
             matched[incumbent_key] = (matched[incumbent_key] if incumbent_key in matched else []) + ["exact-name"]
@@ -1174,6 +1327,7 @@ def execute(state, op):
         if current_state != "unclaimed":
             fail_claim("wrong-state")
 
+
         actor_key = op.actor
         cred_index_key = credential_index_key(actor_key)
         cred_index = state[cred_index_key] if cred_index_key in state else None
@@ -1191,6 +1345,29 @@ def execute(state, op):
         stored_hash = claim_key_aspect.data["hash"]
         if not crypto.constant_time_equal(submitted_hash, stored_hash):
             fail_claim("invalid-key")
+
+        # Erasure gate (§6), deliberately placed AFTER the secret comparison.
+        # A claim writes a credentialindex vertex and a boundTo link at BOTH
+        # ends, and every one of those is inside what ShredIdentityKey erases
+        # (its collect_bound_to_links enumerates "in" AND "out", privacy-base/
+        # shred_identity_key.go, because the identity is the target of every
+        # credential bound to it and the SOURCE when it is itself someone
+        # else's credential). So both positions are gated, not just the target.
+        #
+        # Below the secret check for two reasons. The outcome word never
+        # reaches the wire -- the Processor reclassifies every ClaimKeyInvalid
+        # to one generic code (NFR-S6) -- so Health KV is the only channel that
+        # carries it, and a gate placed above the comparison would divert every
+        # WRONG-secret attempt against a sealed identity out of the
+        # claim-attempts.invalid-key counter an operator watches for brute
+        # force, and into claim-attempts.erased. It would also hand a caller
+        # holding no valid secret a measurably shorter path. Below it, only a
+        # caller who proved the secret learns anything, and the brute-force
+        # counter keeps counting brute force.
+        if erasure_requested(target_identity_key):
+            fail_claim("erased")
+        if erasure_requested(actor_key):
+            fail_claim("erased")
 
         observed_at = op.submittedAt
 
@@ -1397,6 +1574,7 @@ def execute(state, op):
         if target_state != "claimed":
             fail_link("wrong-state")
 
+
         # The same one-credential-<=-one-identity dedup guard ClaimIdentity
         # applies (#11 §11.4): this is a declared-optionalReads guard for the
         # friendly generic error only -- the load-bearing stop is the
@@ -1420,6 +1598,13 @@ def execute(state, op):
         stored_hash = link_key_aspect.data["hash"]
         if not crypto.constant_time_equal(submitted_hash, stored_hash):
             fail_link("invalid-key")
+
+        # Erasure gate (§6) -- the same two link positions and the same
+        # below-the-secret placement as ClaimIdentity, for the same reasons.
+        if erasure_requested(target_identity_key):
+            fail_link("erased")
+        if erasure_requested(actor_key):
+            fail_link("erased")
 
         observed_at = op.submittedAt
         new_entry = {"actorKey": actor_key, "boundAt": observed_at}
@@ -1630,6 +1815,28 @@ def execute(state, op):
         index_data = index_vtx.data if index_vtx.data != None else {}
         if index_data.get("identityKey") != identity_key:
             fail_reconcile("owner-mismatch")
+
+        # Erasure gate (§6), placed AFTER not-bound and owner-mismatch. This
+        # op's whole purpose is to republish a boundTo edge from a
+        # credentialindex the shred deliberately left standing, so for a sealed
+        # identity it is the most direct way to undo an erasure in progress --
+        # the comment above already reasons about the shred, and this is that
+        # reasoning one degree stronger: the shred's tombstone made one edge
+        # unrecoverable, the seal makes the whole person's edge set closed.
+        #
+        # Unlike ClaimKeyInvalid, CredentialReconcileRejected is NOT
+        # reclassified by the Processor, so this outcome word reaches the
+        # caller verbatim. Above the two checks it would have answered "is this
+        # identity sealed for erasure?" for any identity key at all, including
+        # one with no index -- contradicting this op's own permission Note that
+        # it reaches nothing the index does not already assert. Below them, a
+        # caller learns it only for a binding the index already confirms is
+        # theirs. Both endpoints are gated for the same reason as the claim
+        # path: the shred erases boundTo in both directions.
+        if erasure_requested(identity_key):
+            fail_reconcile("erased")
+        if erasure_requested(credential_actor_key):
+            fail_reconcile("erased")
 
         # The index's own boundAt, never observed_at: stamping the run time
         # would rewrite every historical binding's provenance to say it was

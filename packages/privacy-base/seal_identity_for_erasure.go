@@ -75,8 +75,13 @@ func ErasureRequestedAspectDDL() pkgmgr.DDLSpec {
 			"vtx.identity.<NanoID>.erasureRequested = {requestedAt, shreddedAt}. Its PRESENCE is the signal " +
 			"that this person is being forgotten, read as a class-(d) optionalReads by every writer that " +
 			"could otherwise create a fresh erasable representation of them (ClaimIdentity, " +
-			"CompleteCredentialLink, ReconcileCredentialBinding, the identityindex revive path, and " +
-			"identity-hygiene's MergeIdentity), each of which rejects ErasedIdentity once it exists. " +
+			"CompleteCredentialLink, ReconcileCredentialBinding — each in EITHER link position, since the shred " +
+			"erases boundTo in both directions — plus CreateUnclaimedIdentity, which stops treating a sealed " +
+			"identity as a dedup incumbent so no fresh duplicateOf names it, and " +
+			"identity-hygiene's MergeIdentity on either side. MergeIdentity refuses with ErasedIdentity; the " +
+			"claim and link paths refuse with the generic ClaimKeyInvalid the anti-enumeration rule requires " +
+			"(outcome `erased`, carried in Health KV only) and the reconcile path with " +
+			"CredentialReconcileRejected: erased. " +
 			"Distinct from piiKey.shredded by design: shredded means the key is dead (a retention-class " +
 			"shred will one day mean it for non-erasure reasons), erasureRequested means the person " +
 			"invoked erasure. Only SealIdentityForErasure may write this CLASS; non-removal is a " +
@@ -95,7 +100,7 @@ func ErasureRequestedAspectDDL() pkgmgr.DDLSpec {
 			{
 				Name:            "erasureRequested marker",
 				Payload:         map[string]any{"requestedAt": "2026-08-07T00:00:00Z", "shreddedAt": "2026-08-07T00:00:00Z"},
-				ExpectedOutcome: "Written by SealIdentityForErasure on vtx.identity.<NanoID>. From this commit on, the five identity write-path gates reject this identity.",
+				ExpectedOutcome: "Written by SealIdentityForErasure on vtx.identity.<NanoID>. From this commit on, the identity write-path gates refuse every op that would create a fresh erasable representation of this person.",
 			},
 		},
 	}
@@ -224,7 +229,7 @@ func SealIdentityForErasureDDL() pkgmgr.DDLSpec {
 			"SealIdentityForErasure{subjectKey} writes vtx.identity.<NanoID>.erasureRequested = " +
 			"{requestedAt, shreddedAt} as a single unconditioned update and emits " +
 			"privacy.erasureRequested. Exactly one mutation for every identity regardless of " +
-			"connectivity — this op cannot refuse a person. The marker is what the five identity " +
+			"connectivity — this op cannot refuse a person. The marker is what the identity " +
 			"write-path gates read to reject further writes, which is what makes the erased set " +
 			"monotonically non-increasing and so makes a residue count provable rather than " +
 			"point-in-time. Requires subjectKey in ContextHint.Reads: a tombstoned identity is " +
@@ -250,8 +255,8 @@ func SealIdentityForErasureDDL() pkgmgr.DDLSpec {
 				Payload: map[string]any{"subjectKey": "vtx.identity.<NanoID>"},
 				ExpectedOutcome: "Writes vtx.identity.<NanoID>.erasureRequested = {requestedAt, shreddedAt} and emits " +
 					"privacy.erasureRequested. From this commit on, ClaimIdentity, CompleteCredentialLink, " +
-					"ReconcileCredentialBinding, the identityindex revive path and MergeIdentity all reject this " +
-					"identity with ErasedIdentity, so no new credential or index representation of the person can " +
+					"ReconcileCredentialBinding, CreateUnclaimedIdentity's dedup match and MergeIdentity all refuse " +
+					"this identity, so no new credential, index or duplicate-correlation representation of them can " +
 					"be created while the erasure converges.",
 			},
 			{
