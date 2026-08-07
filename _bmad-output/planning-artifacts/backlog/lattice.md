@@ -48,11 +48,11 @@ Open items only (shipped ones are in the Done log). Grouped by component tag.
 |---|---|---|---|---|
 | **[Bootstrap] Reconcile creates + updates but never removes a retired kernel key** | A kernel entity the current binary no longer builds stays live and executable in a long-lived bucket — a dispatchable DDL, a running lens pipeline, and a held canonicalName that blocks the kernel→package migration. A shrink has no wipe-free path today. | ★ | S–M | ✅ ratified 2026-08-06 (Inc 1; fork → retire verb) · [design](../../implementation-artifacts/kernel-orphan-retirement-design.md) · Inc 2 gated on Inc 1's census |
 | **[orchestration-base] A closed task's ephemeral grant stays exercisable until expiry** | `capabilityEphemeral`'s three branches filter only `expiresAt > $now` (lenses.go:284-308) and step-3 matches taskKey+opType+target+expiry — status never checked — so CancelTask/CompleteTask do not revoke the grant; a cancelled task's op stays submittable until `expiresAt`. Lens-side `status='open'` filter is the likely shape (myTasks already has it). | ★ | S | 🗄️ shelved (Andrew 2026-07-27: deprioritized; revive: a long-TTL task class or observed misuse) |
-| **[Refractor] Post-claim auth-grant latency is unbounded by design** | Auth-plane actorAggregate lenses (`capabilityRoles` incl.) intake the full broad Core-KV stream serially — ~2 events/sec through a ceremony burst — so grant visibility is queue-position luck, 5–20s observed, no upper bound. Facet's `isTransientAuthLag` retry papers over it client-side. | ★★ | L | 🏗️ building · [design](../../implementation-artifacts/auth-plane-projection-latency-design.md) · next: Increment 3 (pattern-directed derivation) |
+| **[Refractor] Post-claim auth-grant latency is unbounded by design** | Auth-plane actorAggregate lenses (`capabilityRoles` incl.) intake the full broad Core-KV stream serially — ~2 events/sec through a ceremony burst — so grant visibility is queue-position luck, 5–20s observed, no upper bound. Facet's `isTransientAuthLag` retry papers over it client-side. | ★★ | L | 🏗️ building · [design](../../implementation-artifacts/auth-plane-projection-latency-design.md) · next: Inc 3b — flip the arms to act, with §9's differential test |
 | **[Refractor] A labeled pattern node also binds by body `class`, so a class-only label narrows unsoundly** | `nodeMatches` binds a vertex whose key type ∉ the label set when its body `class` equals the label, and the narrowing gates decide on that set. Unused (all 34 shipped labels are key types) but load-bearing for the narrowing the auth plane now depends on. | ★★★ | S–M | ✅ ratified 2026-08-06 · [design](../../implementation-artifacts/lens-label-key-type-binding-design.md) · Inc 2 folds the OPTIONAL/WHERE derivation hole |
 | **[Tooling] `verify-claim-ceremony.go` asserts a 5s SLA the platform never promised** | `waitForRoleGrant`'s 5s deadline (scripts/verify-claim-ceremony.go:437) reads a real, unbounded latency (see the row above) as "never appears" — 4/5 live runs on the fixed demo box failed this assertion while every grant was confirmed present in Capability KV minutes later. Poll to convergence and report the measured latency instead of asserting a fixed window. | ★ | XS | 📋 ready |
 | **[Gateway] Re-claiming an already-claimed identity returns 403, want 400** | `make test-claim-ceremony`'s second-device negative case wants `ClaimKeyInvalid` (400 Bad Request) but gets HTTP 403 — deterministic across 5/5 live runs on the demo box (2026-08-01). Auth now rejects the request before the business-rule check runs, so the client sees a permission error rather than the intended validation error. | ★ | XS–S | 📋 ready |
-| **[Refractor] D2 Phase 2 — reverse anchor enumeration for neighbor events** | A referenced-non-anchor-type event still triggers a full per-lens recompute — plain-lens corpus only (D2's eligibility excludes actorAggregate). Demand trigger now measured: 1,325 neighbour-link events wedged `clinicProviders`, each a full recompute of 7 anchors. | ★★ | S | 🚧 seq behind [auth-plane-latency](../../implementation-artifacts/auth-plane-projection-latency-design.md) Inc 3 · re-measure after [relation narrowing](../../implementation-artifacts/lens-trigger-relation-narrowing-design.md) |
+| **[Refractor] D2 Phase 2 — reverse anchor enumeration for neighbor events** | A referenced-non-anchor-type event still triggers a full per-lens recompute — plain-lens corpus only (D2's eligibility excludes actorAggregate). Demand trigger now measured: 1,325 neighbour-link events wedged `clinicProviders`, each a full recompute of 7 anchors. | ★★ | S | 🚧 seq behind [auth-plane-latency](../../implementation-artifacts/auth-plane-projection-latency-design.md) Inc 3b · the shared derivation unit now exists; this wires the plain arm to it once the shadow reports |
 | **[Refractor] A staging `WITH`'s carried accumulators are stringified into the grouping key per row** | `projectItems` normalizes every non-aggregating item per binding row, so a generated producer's stage *k* pays `rows_k × Σ|slice_j|` full renderings of anchor maps that are functionally determined by what an earlier stage grouped on — redundant by construction. | ★★ | S–M | ✅ ratified 2026-08-06 (Winston, delegated) · [design](../../implementation-artifacts/full-engine-grouping-key-reduction-design.md) · seq behind the label fire |
 | **[Pkgmgr] `validateGrantSliceVarNames` cannot see a variable inside a node property map** | `patternVarNames` reports pattern variables only; the chain parser skips a `{...}` property map wholesale, so `(bk:booking {slice: grantSlice0})` is accepted and emitted verbatim. Fail-closed today (the comparison never matches → under-grant) and no shipped `Chain` carries a property map, but the guard misses its stated invariant. | ★ | XS–S | 📋 ready · record property-map vars at parse time, or reject a non-literal value |
 | **[Refractor] Sibling OPTIONAL branches multiply instead of folding** | `applyMatch` builds the full `[]binding` cross product; the 1M-row cap then permits ~730 MB. 14 hand-authored lenses have 2–8 independent branches in one stage, incl. `capabilityEphemeral` (grants) and `myTasks`; producer staging fixed only the generated ones. Fold each branch into its own aggregator instead. | ★★ | L | ✅ ratified 2026-08-06 (Winston, delegated; fork → engine) · [design](../../implementation-artifacts/full-engine-independent-branch-decomposition-design.md) · Inc 2 first |
@@ -77,6 +77,8 @@ Open items only (shipped ones are in the Done log). Grouped by component tag.
 | **[Refractor] An actor-aware lens narrows by label but never by relation** | `ConsumerFilter`'s relation dimension is gated to plain pipelines: `actorAwareFanOutRelevant` judges by endpoint type alone, so a relation-pinned subject would withhold a link its fan-out arm keeps. Needs a relation gate on that arm first. | ★ | S–M | 📋 ready · consumer: `capabilityRoles` — the remainder of Term A · [why](../../implementation-artifacts/auth-plane-projection-latency-design.md) §15.11 |
 | **[Refractor] Narrowing's mandated healer is never exercised end to end** | §4.2 refuses to narrow a lens without a sweep plan, because narrowing removes the incidental reprojection that used to heal a lost row — yet no test deletes a row under a narrowed consumer and requires `RunSweep` to restore it. Three siblings ride the same gap. | ★★ | M | 📋 ready · consumer: the next fire editing a narrowed label set · [why](../../implementation-artifacts/auth-plane-projection-latency-design.md) §15.11 |
 | **[Refractor] A pre-install `ConsumerFilter` call would narrow with no conjunct evaluated** | Order is correct today and verified, but the failure mode is inverted: an uninstalled enumerator reads as PLAIN, whose conditions activation has already met — so calling early yields the most aggressive filter with none of §4.2's conjuncts checked. Wants a fail-closed seal. | ★★ | S | 📋 ready · consumer: the next fire adding a `cmd/refractor` install stage · [why](../../implementation-artifacts/auth-plane-projection-latency-design.md) §15.11 |
+| **[Refractor] The affected-anchor index refuses every lens carrying a `WITH`** | The conjunct is blanket where the hazard is narrow: only a variable a later clause re-references after the `WITH` dropped it re-seeds by bucket scan. 14 of the 31 actorAggregate lenses have no `MATCH` after their `WITH`, and every generated `cap-read.<domain>` producer stages through one. | ★★ | S–M | 📋 ready · consumer: Inc 3b's measured win · [why](../../implementation-artifacts/auth-plane-projection-latency-design.md) §16.4 |
+| **[Refractor] `ReferencedLabels` treats a later OPTIONAL label as constraining** | A failed OPTIONAL/negated re-reference restores the row with the ORIGINAL binding (`nullBindNewVars`), so a variable can hold a type the set omits while `exhaustive` stays true. Shipped — D1's narrowing and the Inc-1 reproject gate both judge on it. The hop index was fixed here; its sibling was not. | ★★ | S | 📋 ready · consumer: the first lens labeling a variable at a re-reference, not its binding site · [why](../../implementation-artifacts/auth-plane-projection-latency-design.md) §16.6.1 |
 | **[Tooling] No gate enforces `gofmt`, and four files in one package have already drifted** | There is no gofmt step in `.github/workflows/*`, `gofmt` is not in golangci's enabled set, and the Makefile has no target — so formatting drift is invisible until someone runs `gofmt -l` by hand. `internal/refractor/pipeline` alone carries four unformatted files today. | ★ | XS | 📋 ready · consumer: any fire whose mechanical edit leaves a file unformatted and no gate says so |
 
 ### Survey log (round-robin rotation)
@@ -100,36 +102,14 @@ feature backlog; Loupe moved to its own lane, [loupe.md](loupe.md)). Survey the 
 - 2026-07-25 Refractor (pre-scoped, out of rotation) — filed shared-bucket rebuild-truncate hazard from the cap-read design's adversarial review; next unchanged.
 - **Next:** Weaver.
 
-## Arch-review intake — platform hardening & doc/contract truth
+## Arch-review intake — CLOSED, no open rows
 
-Open corrections from the [2026-07-02 full-platform review](../../../docs/reviews/arch-review-2026-07-02.md)
-— per-finding `file:line` evidence and per-component verdicts live there; the What-cells here are abridged.
-Refractor's deferred re-review is now filed as its own subsection below (2026-07-06).
-Severity-ordered; same row discipline as component maintenance (shipped rows collapse to the Done log).
-
-| Item | What it is | Imp | Size | State |
-|---|---|---|---|---|
-
-### Refractor re-review (2026-07-06)
-
-The deferred post-update re-review the 2026-07-02 pass held back — verdict **drifted** at the time; full
-evidence in [arch-review-2026-07-06.md](../../../docs/reviews/arch-review-2026-07-06.md). **CLOSED** — the
-2026-07-18 survey confirmed all 8 ranked corrections landed (`de4290b4`, `c5ed56b0`, `da8ee6cc` + the
-Chronicler-host extraction and NKey-matrix grants), no open rows remain.
-
-| Item | What it is | Imp | Size | State |
-|---|---|---|---|---|
-
-### Weaver re-review (2026-07-06)
-
-Scoped Weaver re-review — verdict **healthy** (best-conformed engine); full evidence in
-[arch-review-2026-07-06-weaver.md](../../../docs/reviews/arch-review-2026-07-06-weaver.md). The W2 control
-fail-closed fix, W3 validator-parity + heartbeat honesty, W4 targetId install-check, W1/W6 comment +
-natsperm hygiene, and the W5 contract reconciliation shipped this session (Done log); these are the
-deferred follow-ons.
-
-| Item | What it is | Imp | Size | State |
-|---|---|---|---|---|
+Every ranked correction from the three 2026-07 reviews has shipped; the per-finding `file:line` evidence
+and per-component verdicts live in the reports, not here.
+[Full platform 2026-07-02](../../../docs/reviews/arch-review-2026-07-02.md) ·
+[Refractor re-review](../../../docs/reviews/arch-review-2026-07-06.md) (verdict *drifted*; all 8 landed,
+confirmed by the 2026-07-18 survey) ·
+[Weaver re-review](../../../docs/reviews/arch-review-2026-07-06-weaver.md) (verdict *healthy*).
 
 ## Lattice feature backlog — the Phase-3 build queue
 
@@ -193,7 +173,7 @@ designed-through, but the *fork decision* + the *contract commit* are Andrew's.
 | Item | What it is | Imp | Size | State |
 |---|---|---|---|---|
 | **[Refractor] The sweep-heal e2e polls the row, then asserts the counter** | `TestRefractor_ConvergenceSweep_DetectsAndHealsLostProjection_E2E` waits for the healed doc in KV then requires `Reconciled >= 1`; write and counter are separate steps, so under load the row lands first and the assert reads 0 — as it also would if CDC re-projection healed it, not the sweep. Tighten, never loosen. | ★★ | S | 📋 ready · owner: Whetstone · CI run 30182951177, green on re-run |
-| **Package drive tests fail their OUTCOME assert under full-suite load** | Three instances, all `packages/*` op-drive tests that pass alone and redden under `-p 4`: `TestSettle_ConsumerSelfScope_Allowed` (cafe-domain, 302s vs 21s), `TestRecordPII_OperatorRoleOnSecondPage` (identity-domain), `TestCreateLeaseApplication_DifferentApplicantsSameUnit_Allowed`. Assertions, not the handshake signature — root-cause, never loosen; a shared cause is likely. | ★★ | S–M | 📋 ready · owner: Whetstone |
+| **Package drive tests redden under full-suite load** | Four instances, all `packages/*`, each green alone: `TestSettle_ConsumerSelfScope_Allowed` (cafe-domain, 302s vs 21s), `TestRecordPII_OperatorRoleOnSecondPage` and `TestCompleteCredentialLink_GenericError_NoEnumeration` (identity-domain — the latter blows the 250ms Starlark wall budget during package INSTALL, i.e. setup, not an assert), `TestCreateLeaseApplication_DifferentApplicantsSameUnit_Allowed`. Not the handshake signature — root-cause, never loosen. | ★★ | S–M | 📋 ready · owner: Whetstone |
 | **Embedded-NATS shard flakes under parallel load** | Two different embedded-NATS tests failed on CI runners on consecutive days (`TestLaneSpecs_PerLaneBacklogIsolation` unit-1; `TestPersonalLens_PL2_E2E_InterestSetFiltersThenAdmits` unit-2); both post-date the per-test-server parallelization. Local repro: `go test ./...` with NO `-p` cap reddens 3 other embedded-NATS tests that pass 3x in isolation and under CI's `-p 4`. Root-cause per the flake rule: tighten, never loosen. | ★★ | M | 📋 ready · owner: Whetstone |
 | **CI pipeline speed (continuous)** | Make CI faster without weakening any gate — owned continuously by the **Whetstone**. Matrix split done (serial → 4 parallel jobs); convergence + unit parallelized; unit itself now sharded across 2 runners. | ★★ | M (ongoing) | 🏗️ continuous (Whetstone) · aggregate-CPU ceiling confirmed 2x, isolating natsperm into its own step reconfirmed it (Done log) · next: propose paid larger runners to Andrew |
 | **[Processor] A RevisionConflict on an UNDECLARED key names nothing** | NATS omits the failing subject, so `ConflictError.ConflictingKey` is always empty and `conflictKeyForSignal` rebuilds it only from *declared* defaulted/absent-create keys (`commit_path.go:520`) — a submitter who MISSES a `contextHint` declaration gets `conflictingKey:""` plus a raw `wrong last sequence`. Exactly the error the Contract #2 §2.5 sweep makes most likely. Found driving Café. | ★★ | M | 📋 ready |
@@ -217,7 +197,4 @@ Real but low-value; do **not** spend design or build effort here unless Andrew g
 One line per shipped item (`date · SHA · [tag] title`). Oldest roll to `archive/` past ~25.
 
 - 2026-08-07 · `6f03b32b` · [Refractor] a reconciliation that cannot repair a row stops reporting that it did — explicit Verdict, supersession refusal, guard-decline visibility
-- 2026-08-03 · `2e6d108d` · [facet] a standing role grant gets a home-screen surface — four ops the client discovered and rendered nowhere (CreateUnclaimedIdentity, CreatePatient, ReportIssue, CreateStudio) are live
-- 2026-08-03 · `82c7972b` · [Refractor] a hot-reload's rule swap is atomic, and an evaluation the swap superseded is naked instead of written — the revoking MATCH edit it would have defeated
-- 2026-08-03 · `5488ec8e` · [Refractor] a relationship alternation is refused at parse instead of executing as its first type, and RETURN DISTINCT stops collapsing two rows that differ only by node
-- *(older entries rolled to [archive/lattice-done.md](archive/lattice-done.md); newest rolled entry `80b30bdf`)*
+- *(older entries rolled to [archive/lattice-done.md](archive/lattice-done.md); newest rolled entry `2e6d108d`)*

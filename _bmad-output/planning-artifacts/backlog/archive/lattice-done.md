@@ -1,5 +1,8 @@
 # Done log archive — lattice (older shipped items, newest first)
 
+- 2026-08-03 · `2e6d108d` · [facet] a standing role grant gets a home-screen surface — four ops the client discovered and rendered nowhere (CreateUnclaimedIdentity, CreatePatient, ReportIssue, CreateStudio) are live
+- 2026-08-03 · `82c7972b` · [Refractor] a hot-reload's rule swap is atomic, and an evaluation the swap superseded is naked instead of written — the revoking MATCH edit it would have defeated
+- 2026-08-03 · `5488ec8e` · [Refractor] a relationship alternation is refused at parse instead of executing as its first type, and RETURN DISTINCT stops collapsing two rows that differ only by node
 - 2026-08-03 · `4336978b` · [Refractor] a lens subscribes to the relations it traverses, not every link touching a referenced type — `clinicProviders`' frozen floor was 674 unbindable `providedTo` links; its rebuild now drains in <1 min
 - 2026-08-03 · `80b30bdf` · [pkgmgr,edge-manifest,identity-domain,facet] client-ceremony Inc 2b-3 — the signInMethods pane confirmed live end-to-end, one own row per consumer under RLS; Inc 4 shelved
 - 2026-08-03 · `80b30bdf` · [Refractor] an interrupted rebuild re-arms its watcher instead of latching "rebuilding" — 5 lenses un-latched live, the capability sweep un-suppressed, degraded → healthy

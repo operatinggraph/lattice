@@ -1206,13 +1206,20 @@ derives; the caller falls back to the shipped BFS.
    relation name — the same arm `ReferencedRelations` fails exhaustiveness on (`relations.go:62-65`).
 3. **No variable-length hop** (`MinHops != 1 || MaxHops != 1`) anywhere in the graph. The intermediate
    nodes are the problem, not the relation: a back-chain crossing one cannot be walked hop-by-hop.
-4. **The anchor position is identified** — exactly one position whose property map embeds `$actorKey`.
-5. **Every position is connected to the anchor position** in the pattern graph. A disconnected position is
-   a cartesian seed: an event binding it affects *every* anchor, which is precisely the case a
-   "derived empty ⇒ skip" answer would get catastrophically wrong.
+4. **The anchor position is identified** — exactly one position carrying literally `{key: $actorKey}`. The
+   property name and the whole expression are both matched exactly: `key` is the only property the executor
+   point-reads on, so any other makes the anchor a label-prefix SCAN binding many vertices, and `$actorKey`
+   embedded in a larger expression pins a different vertex entirely (§16.6.2).
+5. **Every pattern is GROUNDED at the anchor** — its head node is a position already reached from the
+   anchor by an earlier clause. `matchPath` seeds `Nodes[0]` alone and reaches the rest by traversal, so an
+   ungrounded head is a bucket scan: every vertex of that type binds, and every anchor's row depends on all
+   of them. That is precisely the case a "derived empty ⇒ skip" answer would get catastrophically wrong.
 
 Conjunct 5 is the one that is easy to miss and the only one that is unsound to omit — the other four
-degrade to a wider set, this one degrades to a *smaller* one.
+degrade to a wider set, this one degrades to a *smaller* one. It is stated as **grounding rather than
+connectivity** because the review falsified the weaker form: a scan-seeded position with one optional or
+negated hop back to the anchor is *reachable* in the hop graph while still binding by scan, so reachability
+would have passed exactly the shape the conjunct exists to refuse (§16.6.3).
 
 ### 16.3 Pattern-graph model
 
@@ -1238,6 +1245,15 @@ back-walks, **unioned** (§4.7).
 - `capabilityServiceAccess` — `containedIn*0..` fails conjunct 3, so the index is incomplete and this lens
   falls back on every event. Expected and recorded, not a defect.
 
+**Correction, from the review's corpus census (this fire).** The paragraph above predicted *one* fallback
+lens. The real number is **~16 of the 31 actorAggregate lenses, plus the whole generated `cap-read.<domain>`
+producer family** — and almost all of it is conjunct 1 (any `WITH`), not conjunct 3. Fourteen of those lenses
+carry a `WITH` with **no `MATCH` after it**, so the downstream bucket re-seed the conjunct exists to refuse is
+structurally impossible in them; they are refused by a blanket test rather than by the hazard. The refusal
+stays blanket in this fire — it is fail-closed and correct, and narrowing it needs its own soundness pass over
+the WITH's own `WHERE` and the `RETURN`'s pattern comprehensions, which can re-seed just as a later `MATCH`
+can. Filed as its own row with the consumer named.
+
 ### 16.5 Increment order + green checks
 
 1. `hopindex.go` + units against the three shipped cyphers' real text — `go test ./internal/refractor/ruleengine/full/`.
@@ -1245,7 +1261,61 @@ back-walks, **unioned** (§4.7).
 3. Shadow wiring + counters — `go test ./internal/refractor/...`.
 4. Full `-p 4` suite (§9: Increment 3 changes evaluation for a class of lenses).
 
-### 16.6 Non-goals
+### 16.6 Adversarial review outcome — three findings on the invariant itself
+
+Three passes, scaled to the auth plane: superset soundness · the completeness predicate + AST walk · wiring,
+cost and test-proof. Two ran independently on the soundness question and **converged on the same three
+defects**, each of which could return a set SMALLER than the truth. All three are fixed here; none was
+reachable from the shipped corpus, and that is the point — the derivation's contract has to hold for the next
+lens someone authors, not only for the fourteen that exist.
+
+1. **A later label was adopted as the position's label.** The premise ("one variable, one node, so a label
+   written anywhere constrains every occurrence") is false for the clause every actorAggregate lens is built
+   from: when an `OPTIONAL MATCH` re-references a bound variable with a label that fails, the executor
+   restores the row with the **original binding intact** (`nullBindNewVars` nulls only variables not already
+   bound). So the variable really can hold another type, and adopting the later label narrows
+   `PositionsBinding` below what the executor binds — an event on the other type would derive nothing at all.
+   **Fixed:** a position's label is fixed at its FIRST occurrence, which is what binds it; a later label is a
+   filter and is ignored. The same false premise underpins `ReferencedLabels`' `labeledVars` pass — noted, not
+   changed here, and filed.
+
+2. **The anchor was detected on any property carrying `$actorKey`.** Both load-bearing steps of the walk —
+   never expanding from the anchor position, and minting `vtx.<type>.<id>` for what it reaches — assume the
+   position is pinned to exactly one vertex. Only `{key: $actorKey}` does that: `key` is the one property the
+   executor point-reads on, and any other makes the anchor a label-prefix scan binding many vertices. A
+   `{managedBy: $actorKey}` lens would have reported the wrong actor *and* stopped the walk that would have
+   found the right ones. `$actorKey` merely *embedded* in the expression (`$actorKey + '-shadow'`) pins a
+   different vertex again. **Fixed:** the property name and the whole expression are both matched exactly.
+
+3. **The connectivity conjunct counted hops that do not bind.** §16.2's fifth conjunct is meant to prove a
+   position is not a bucket-scan seed, and undirected reachability does not prove it: `MATCH (i {key:
+   $actorKey}) MATCH (u:unit)` is correctly refused, but adding **one** `OPTIONAL MATCH (i)-[:owns]->(u)` —
+   a hop that filters nothing, since the optional cannot drop `u` — made the scan-seeded position look
+   connected. Every anchor's row depends on every unit, and the derivation would have returned the empty set
+   and licensed the skip. Adding a hop made it unsound, which is the inversion worth remembering.
+   **Fixed:** the conjunct is now GROUNDING, not reachability — mirroring what `pkgmgr/anchorwalk.go` already
+   requires of generated lenses. A pattern extends the grounded set only when its HEAD is already grounded,
+   because `matchPath` seeds `Nodes[0]` alone. The same distinction fixes a second defect the reviewers found
+   independently: `Dist` now counts binding hops only, so a `WHERE NOT` shortcut can no longer make a far
+   position look near and seed a link tombstone at the endpoint that could only reach the anchor by crossing
+   the edge just removed.
+
+**Also folded:** a read-cap that no test drove and no operator could tune (now `SetAnchorDerivationReadCap`,
+with a test proving a refusal rather than a truncated set); `SetAnchorDerivationSampling(0)` documented as
+disabling while it restored the default; a self-loop hop read in one direction only; the `anchorHops`
+reload lifetime, now tested the way `seedAnchorLabel`'s already was.
+
+**Accepted without a change:** the label comparison matches key types while the executor's `nodeMatches` also
+binds on body `class` — the already-ratified lens-label/key-type binding item, now inherited by a third
+derivation and recorded at the site so one fix closes all three.
+
+**Stated rather than fixed — what the shadow cannot tell you.** The shadow measures the narrowing and flags
+divergence from the enumerator, and that is all it can do: a genuine shortfall and the intended win are both
+"the derived set is smaller". Neither set is ground truth. §9's differential test over pre/post recomputes is
+what licenses the flip, and §16's framing is corrected accordingly — the shadow proves the derivation behaves
+on the real graph and by how much it would narrow, not that it is a superset.
+
+### 16.7 Non-goals
 
 Flipping any arm to act on the derived set (next fire, with the differential test + e2e (a)/(d) as its
 evidence) · the plain-arm shadow and §D2 Phase 2's wiring · any change to the enumerator's caps or its
