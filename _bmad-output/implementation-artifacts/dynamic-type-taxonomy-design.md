@@ -1,6 +1,9 @@
 # A dynamic type taxonomy — an abstract type is graph data, and a lens label expands against it
 
-**Status: 📐 DRAFT awaiting Andrew — authored 2026-08-06 (co-designed with Andrew in the ratify session; subsumes the location-domain class question)**
+**Status: ✅ Andrew-RATIFIED 2026-08-06** — build-ready as **two fires**, both in the **Lattice lane**
+(§14, rewritten at ratification). Four amendments below are Andrew's and supersede the body where they
+differ. Contract #1 §1.7's abstract-vertexType note is **committed** with a transitional marker. Authored
+2026-08-06, co-designed with Andrew in the ratify session; subsumes the location-domain class question.
 
 > **AMENDMENTS (Andrew, ratify session 2026-08-06) — these supersede the body where they differ.**
 >
@@ -778,8 +781,9 @@ member of that vocabulary and belongs in the table. Proposed insertion under §1
 > `lnk.meta.<concreteTypeMetaId>.subtypeOf.meta.<abstractTypeMetaId>`, whose transitive downward closure is the
 > set of concrete types the abstract name covers.
 
-Per the house rule, this is staged as an uncommitted edit **only if and when Andrew ratifies this design** — not
-now, and not folded into a build commit.
+**Committed at ratification** (2026-08-06), with a transitional marker appended: abstract types land with
+Fire A, so until that fire ships nothing declares one and the clause constrains nothing. That marker is
+removed by Fire A.
 
 ## 12. Alternatives considered
 
@@ -857,50 +861,93 @@ precedence rule. Named so it is built deliberately later, not stumbled into.
 | **The class rename touches five packages' guards** | Five of eight sites become *stricter* (drop a redundant check); three keep a local list. Full-suite gate, and the integration test at `packages/location-domain/integration_test.go:195` (which asserts `class == "location"`) must be updated to assert class == key type — a test that pins the old invariant is exactly what should fail. |
 | **Collision with in-flight Refractor designs** | `lens-label-key-type-binding-design.md` **must land first** (this design's §8.1 requires the class out of the resolution path). `full-engine-independent-branch-decomposition` touches the same executor file — sequence, no semantic overlap with §5's sites. |
 
-## 14. Decomposition — three fires, in order
+## 14. Decomposition — TWO fires, both in the Lattice lane (rewritten at ratification)
 
-**Fire 1 — the taxonomy exists and cannot be misused.** (M)
-Type-meta declaration surface (`DDLSpec.Abstract`, `SubtypeOfRef`, `LeafBudget`); installer resolution
-(batch-local, then the `checkCanonicalNameCollision` scan, **fail-closed** on a miss — not `resolveLensRef`'s
-pass-through); `DDLCache.MetaVertexRef.Abstract` populated from `data.abstract`; step 6's two new fail-closed
-gates (abstract type segment in any key position; class resolving to an abstract DDL); install-time acyclicity +
-depth courtesy check; the `LeafBudget` warning. **No Refractor change.** Green on its own: the taxonomy is
-declarable and inert.
+Andrew's standing amendments: **one lane** (no Verticals split — the package-side guard edits and the
+location split ride with the engine work, so no cross-lane `blocked-on` exists to go stale) and **fewer,
+larger fires**. The original three collapse to two. The reasoning is the no-dead-scaffolding rule applied
+honestly: the old Fires 1 *and* 2 are both **inert** until an abstract type is actually declared, so the
+value only lands at the old Fire 3. Splitting the two inert halves buys nothing and costs a rebase.
 
-**Fire 2 — Refractor expands, and the trigger is sound.** (M–L, the largest)
-`internal/refractor/taxonomy` resolver + its own consumer (§6.1) with `armed`; `full.WithLabelExpansion` returning
-a copy (§4.3); expansion in `useFullEngineBranches` with the §4.2 exhaustiveness rule; the **four** equality sites
-(§5.1); `ruleState.seedAnchorLabels` as a set; resolver-time cycle/depth detection as the authority; the
-invalidation path — client gate before server filter, then `Rebuild`, for both grow and shrink (§6.2–6.4); the
-`filterMode`/`filterLabelCount`/`filterBroadReason` health fields + the schema doc + Loupe's badge.
-**Not splittable:** expansion without the trigger is unsound (a stale narrow set), and the trigger without site 3
-is an over-grant. This is the *fewer, larger fires* call.
+### Fire A — the taxonomy exists, expands, and cannot be misused (Lattice, L). Green with zero consumers.
 
-**Fire 3 — location-domain lands, and the first consumer arrives.** (M)
-Four type metas (three concrete sharing one script, one abstract) + three `subtypeOf` links; class becomes the
-key type at `packages/location-domain/ddls.go:318`; five guards drop their redundant class check, three take
-`cls in LOCATION_TYPES`; `packages/location-domain/integration_test.go:195` updated; and
-`capabilityServiceAccess` (`packages/service-location/lenses.go:133-145`) labels `loc0`/`loc`/`exLoc`
-`:location` — the design's first live consumer, converting a permanently-broad auth-plane lens to narrowed.
+Old Fires 1 and 2 as one fire. Internal build order:
 
-**Sequencing.** After `lens-label-key-type-binding-design.md` ships (hard dependency, §8.1). Ahead of, or
-sequenced against, `full-engine-independent-branch-decomposition` (shared executor file).
+1. **Declaration surface + write-path gates.** `DDLSpec.Abstract`, `SubtypeOfRef`, `LeafBudget`; installer
+   resolution (batch-local, then the `checkCanonicalNameCollision` scan, **fail-closed** on a miss — not
+   `resolveLensRef`'s pass-through); `DDLCache.MetaVertexRef.Abstract` from `data.abstract`; step 6's two
+   fail-closed gates (an abstract type segment in any key position; a class resolving to an abstract DDL);
+   install-time acyclicity + depth check; the `LeafBudget` warning.
+2. **The `*` sigil — a real parser extension** (amendment A2, which this design predates). A label is
+   `OC_LabelName` in the openCypher grammar, so accepting a trailing `*` means extending the grammar or
+   post-processing the label text. Size it as grammar work, not a string tweak. `*` is the
+   **reflexive-transitive** closure. `:unit` keeps meaning exactly `vtx.unit.<id>`.
+3. **Resolution + expansion.** `internal/refractor/taxonomy` resolver with `armed`;
+   `full.WithLabelExpansion` returning a copy (§4.3); expansion in `useFullEngineBranches` with §4.2's
+   exhaustiveness rule; the **four** equality sites (§5.1 — including anchor retraction);
+   `ruleState.seedAnchorLabels` as a set; resolver-time cycle/depth detection as the authority.
+4. **The trigger, on the EXISTING meta watch** (amendment A1 — *not* a new consumer). Widen
+   `SubscribeKVChanges` to take more than one prefix and add a `lnk.meta.*` branch where
+   `corekv_source.go:550` currently ignores links. That consumer's durable is per-boot with
+   `IncludeHistory`, so history replay reconstructs the taxonomy at boot and there is no backfill window;
+   one consumer also gives a single total order over lens-definition and taxonomy invalidation. Then the
+   invalidation path itself: **client gate before server filter**, then `Rebuild`, for both grow and shrink
+   (§6.2–6.4).
+5. **The validation gate** (amendment A3): a bare label naming no concrete key type is an **error**, not a
+   silent empty match; `label*` on a name that is not declared abstract is an error; an expansion exceeding
+   the ≤8-label cap raises a health signal rather than dropping silently to the broad filter. Declare the
+   unknown-label posture explicitly — resolution becomes a vocabulary lookup where today it is an
+   uninterpreted string, and a cross-package label's resolvability depends on install order.
+6. **Observability.** `filterMode` / `filterLabelCount` / `filterBroadReason` health fields, the schema doc,
+   Loupe's badge.
 
-**Review depth.** Fire 2 touches the auth plane's retraction and narrowing gates ⇒ full 3-layer adversarial
-before admit, regardless of size. Fires 1 and 3 ⇒ standard.
+**Not splittable, and the design's own argument for that stands:** expansion without the trigger is a stale
+narrow set, and the trigger without the retraction site is an over-grant. **Review depth: full 3-layer
+adversarial regardless of size** — this touches the auth plane's retraction and narrowing gates.
 
-**Filed alongside, not folded in** (each with its consumer named, per *deferred tail must name its consumer*):
+### Fire B — location lands and the first consumer arrives (Lattice, M).
+
+Old Fire 3, with the census corrected. Four type metas (three concrete sharing one script, one abstract) +
+three `subtypeOf` links; the class becomes the key type at `packages/location-domain/ddls.go:318`;
+`packages/location-domain/integration_test.go:195` updated; and `capabilityServiceAccess`
+(`packages/service-location/lenses.go:133-145`) labels `loc0`/`loc`/`exLoc` **`:location*`** — the first
+live consumer, converting a permanently-broad auth-plane lens into a narrowed one.
+
+**Three corrections this fire must honor, from the DD pass** (the doc's §9.2 census is wrong and must be
+re-run rather than trusted):
+
+- **At least 10 guard sites across 7 packages, not 8 across 5.** `wellness-domain/ddls.go:1612` and
+  `maintenance-domain/ddls.go:485` reach the same check through a generic `require_live_typed(…, "location")`
+  helper, so a grep for the named wrappers misses them. **Census by the check, not by the wrapper.**
+- **`clinic-domain`'s `SetSiteProfile` needs a guard ADDED, not removed.** It is listed as "redundant — drop
+  the class check", but `require_live_building` tests aliveness and the class and nothing else, and that
+  file's `parts_of` calls all belong to a *different* DDL script. The class check is the **sole** type guard
+  on `buildingKey`; dropping it would let the op write a `clinicSiteProfile` aspect onto any live vertex, and
+  `TestClinic_SetSiteProfileRejectsNonLocationBuilding` pins the current rejection.
+- **The "becomes stricter" claim is empirical, not enforced**, and the **migration window** is unaddressed:
+  pre-rename vertices still carry the shared class while new guards expect the per-type one. The fire states
+  its ordering rather than discovering it.
+
+**Because Fire B changes a live security guard in a package as a side effect of an engine feature, it also
+takes the full 3-layer review** — not the standard depth the original §14 assigned it.
+
+**Sequencing.** Hard dependency: after `lens-label-key-type-binding-design.md` ships (§8.1) — label
+resolution must have exactly one authority before an abstract label expands. Sequenced against
+`full-engine-independent-branch-decomposition` (shared executor file).
+
+**Filed alongside, not folded in** (each with its consumer named):
 
 1. **Taxonomy-read write-side guard** — consumer: `location-domain`'s `WireContainedIn`,
-   `service-location`'s four wiring ops, `cafe-domain`'s `CreateMenuItem` (§9.2 sites 1–3). Pending Andrew's
-   §9.3 fork.
-2. **`entityType` ⟷ `entityKey` type-segment pairing gate** — consumer: every `edge-manifest` walk tail
-   (`lenses.go:1034-1038`); today an unenforced convention (§8).
-3. **A per-row `typeOf(x.key)` engine function** — consumer: `AnchorWalk.AnchorType`'s audit literal
-   (`anchorwalk.go:608-615`), which is what currently forbids an abstract Path-B anchor (§8).
-4. **`subtypeOf`-driven DDL inheritance** — consumer: the three-way `DDLSpec` duplication in §9.1 (§12.9).
-5. **A board row for this design** — there is none today (grepped `backlog/{lattice,verticals,loupe}.md`:
-   no `taxonom`/`subtypeOf` row). Winston files it; this doc does not touch the board.
+   `service-location`'s four wiring ops, `cafe-domain`'s `CreateMenuItem`. Resolved at ratification toward
+   the **local list** in Fire B, with the taxonomy-read form filed behind those three sites, because a
+   Starlark taxonomy read pulls Contract #2 §2.5 read-posture declarations into every dispatcher.
+2. **`entityType` ⟷ `entityKey` type-segment pairing gate** — consumer: every `edge-manifest` walk tail;
+   today an unenforced convention.
+3. **A per-row `typeOf(x.key)` engine function** — consumer: `AnchorWalk.AnchorType`'s audit literal, which
+   is what currently forbids an abstract Path-B anchor.
+4. **`subtypeOf`-driven DDL inheritance** — consumer: the three-way `DDLSpec` duplication in §9.1. Note the
+   §3.4 caveat: this extension would reintroduce the multiple-parents ambiguity and must forbid multiple
+   parents or declare a precedence rule first.
 
 ## 15. Test strategy
 

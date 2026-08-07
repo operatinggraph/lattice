@@ -218,6 +218,8 @@ vtx.meta.Hj4kPmRtw9nbCxz5vQ2y.permittedCommands
   data: { commands: ["CreateIdentity", "FlagIdentity", "MergeIdentity", "ClaimIdentity"] }
 ```
 
+**Abstract vertex types.** A `meta.ddl.vertexType` meta-vertex whose root `data.abstract` is `true` declares an **abstract** vertex type: a type name that participates in the type taxonomy but has no instances. No key may use an abstract type name in any type segment, and no document may carry it as a `class`; the Processor rejects either at commit. An abstract type declares no `.script` and no `.permittedCommands`. Concrete types are joined to it by `lnk.meta.<concreteTypeMetaId>.subtypeOf.meta.<abstractTypeMetaId>`, whose transitive downward closure is the set of concrete types the abstract name covers. *(Transitional, ratified 2026-08-06: abstract types and the `subtypeOf` relation land with the dynamic-type-taxonomy build; until that fire ships nothing declares one, so every type name is concrete and this clause constrains nothing.)*
+
 **Aspect-type DDL example — the DDL for `email`:**
 
 ```
