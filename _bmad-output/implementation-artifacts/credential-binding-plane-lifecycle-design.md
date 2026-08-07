@@ -4,6 +4,68 @@
 identity-domain, identity-hygiene, edge-manifest, Gateway · Size **M–L** (Inc 1 S–M · Inc 2 M · Inc 3a XS) ·
 Imp **★★** · adversarial pass run and folded (§12)
 
+## Ratification (ratify session 2026-08-06)
+
+**Status: Inc 2 + Inc 3a ✅ RATIFIED (Winston, delegated) · Inc 1 🗄️ HELD AND REDIRECTED (Andrew) ·
+Inc 3b deferred.** Read this section before the body: §7's fork is superseded, and §3's mechanism moves to
+a different plane.
+
+**Increment 1 is held, and the fork is dissolved rather than answered.** §7 asked *"what does
+`ShredIdentityKey` erase?"* and offered A (PII-only) / B (full unbind) / C (cascade). Andrew rejected the
+question's framing: **an op named for shredding a key should shred the key, and a "forget me" request is an
+orchestrated multi-op process — a Loom pattern, with the Weaver for convergence where needed.** Three
+grounded facts make that unarguable, and all three are live today:
+
+- The op is **already five jobs in one atomic batch** (`shred_identity_key.go:315-355`): it marks `piiKey`
+  shredded, then runs three paged enumerations (`MAX_INDEXES_PAGES = 64` and siblings at `:179/:205/:233`)
+  tombstoning every owned `identityindex` vertex plus its `indexes` link, every `duplicateOf` link and
+  every `boundTo` link, then emits `privacy.keyShredded`. Increment 1 proposed adding three more.
+- **It can refuse to erase.** The pre-flight cap at `:321-330` fails with `ShredBatchTooLarge` above 999
+  mutations, so a sufficiently-connected person **cannot be erased at all**. A right-to-erasure obligation
+  that can be declined because the subject has too many links is not a guarantee; it is a size limit on who
+  may be forgotten.
+- **A pattern instance already exists, hand-rolled.** `RecordShredFinalization{identityKey, step:
+  vaultKeyDestroyed|projectionsNullified}` (`:93`, handler `:356`) is called by `internal/privacyworker`
+  after `Vault.ShredKey` and by `internal/refractor/keyshredded` after its nullify targets succeed; a
+  `shredStatus` lens projects progress, and `:292-293` resets it because *"a (re-)shred starts a NEW
+  finalization cycle"*. Durable step state, multiple actors, a progress projection, cycle semantics — every
+  element of a pattern instance except the orchestrator.
+
+**What that changes for §7.** The question becomes *which steps belong in the erasure pattern*, and B's
+intent survives intact as the step list. **Option C is unblocked rather than refused**: the anti-cascade
+argument (`retention-class-key-custody-design.md` §8.6, and §9.1 of the design it replaced) is against an
+**unattested in-batch walk** whose enumeration completeness *is* the guarantee. Under a pattern each step
+attests what it covered and a residue lens detects an identity whose key is shredded but whose
+`boundTo`/`credentialindex`/index rows are still live — incompleteness becomes detectable and repairable,
+which is the platform's own detect-and-recover doctrine rather than a weaker promise. C's remaining
+preconditions are (i) `credentialindex` reachability made structural, and (ii) a way for a key to actually
+leave the keyspace — a tombstoned `lnk.identity.<credId>.boundTo.identity.<uId>` still names both parties
+**in its own key**, so erasure-completeness may be the real revive trigger for the shelved hard-delete verb.
+All of this is `erasure-orchestration-design.md`.
+
+**Increments 2 and 3a are ratified as they stand** — both are op-local and have nothing to do with erasure.
+Inc 2 is not hygiene: §4.3's `MergeIdentity` case is a **live shipped defect**, verified this session at
+`packages/identity-hygiene/ddls.go:595-618` — the `credentialindex` write sits unconditionally at the top
+of the loop while the guard that skips the self-`boundTo` link `continue`s below it, so when the primary is
+itself a credential of the secondary the merge writes a self-index, and `ClaimIdentity` reads exactly that
+vertex as `credential-already-bound`, permanently blocking that identity's own future claim. Inc 3b
+(`identityIdpBindingsRead`) stays designed-not-built behind the first configured external key source.
+
+**Two corrections folded at ratification.** §5.2 labels Inc 3a *"(built)"* — it is not; `panes.go:77` still
+ships the old false-completeness string, and nothing in this design has shipped. And §7.3's blocker cites
+the in-flight subject-anchored design, which Andrew held and replaced the same session; the anti-cascade
+argument survives verbatim in `retention-class-key-custody-design.md` §8.6, so the blocker holds and only
+the citation moves.
+
+**§6.2's contract sharpening: its stated blocker is gone, and it is still not staged.** It was held because
+Contract #3 carried the subject-anchored proposal and "one diff must mean one decision" — that proposal was
+reverted this session, so the file is clean. It stays unstaged deliberately: the sentence imposes a MUST on
+authors that Inc 2 is what satisfies, so it should ride the Inc-2 **build** fire, where text and behavior
+land together, rather than sit in the contract asserting a rule no script yet follows. Frozen-contract
+commits are Andrew's regardless of the delegation covering these increments.
+
+---
+
 ## For Andrew
 
 **What it does.** The fact *"credential A signs in as person U"* is carried in **four** places, written by
