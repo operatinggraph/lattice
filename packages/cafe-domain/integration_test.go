@@ -432,12 +432,18 @@ func TestCharge_AccumulatesTotalCents(t *testing.T) {
 	if got := first["voided"].(bool); got {
 		t.Fatalf("lines[0].voided = %v, want false (never voided)", got)
 	}
+	if got, want := first["orderedBy"].(string), domainActorKey; got != want {
+		t.Fatalf("lines[0].orderedBy = %q, want %q (the Charge's own op.actor)", got, want)
+	}
 	second, _ := lines[1].(map[string]any)
 	if got, want := second["id"].(string), "line-2"; got != want {
 		t.Fatalf("lines[1].id = %q, want %q", got, want)
 	}
 	if got, want := second["amountCents"].(float64), float64(300); got != want {
 		t.Fatalf("lines[1].amountCents = %v, want %v", got, want)
+	}
+	if got, want := second["orderedBy"].(string), domainActorKey; got != want {
+		t.Fatalf("lines[1].orderedBy = %q, want %q (the Charge's own op.actor)", got, want)
 	}
 }
 
@@ -613,9 +619,15 @@ func TestVoidCharge_ByLineId_DerivesAmountAndMarksVoided(t *testing.T) {
 	if got := voided["voided"].(bool); !got {
 		t.Fatalf("lines[0].voided = %v, want true", got)
 	}
+	if got, want := voided["orderedBy"].(string), domainActorKey; got != want {
+		t.Fatalf("lines[0].orderedBy = %q, want %q (VoidCharge rewrites voided:true in place but must not drop who ordered it)", got, want)
+	}
 	untouched, _ := lines[1].(map[string]any)
 	if got := untouched["voided"].(bool); got {
 		t.Fatalf("lines[1].voided = %v, want false (only line-1 was targeted)", got)
+	}
+	if got, want := untouched["orderedBy"].(string), domainActorKey; got != want {
+		t.Fatalf("lines[1].orderedBy = %q, want %q", got, want)
 	}
 }
 
@@ -1677,6 +1689,14 @@ func TestCharge_SelfOrder_DerivesAmountFromMenuItem(t *testing.T) {
 	if got, want := statusData["itemsMemo"].(string), "Latte"; got != want {
 		t.Fatalf("status.itemsMemo = %q, want %q (the menu item's own name)", got, want)
 	}
+	lines, _ := statusData["lines"].([]any)
+	if len(lines) != 1 {
+		t.Fatalf("status.lines has %d entries, want 1", len(lines))
+	}
+	line, _ := lines[0].(map[string]any)
+	if got, want := line["orderedBy"].(string), domainConsumerKey; got != want {
+		t.Fatalf("lines[0].orderedBy = %q, want %q (the RESIDENT's own identity on a self-order, not staff)", got, want)
+	}
 }
 
 // TestCharge_SelfOrder_RejectedForOthersTab proves a consumer satisfying
@@ -1879,6 +1899,14 @@ func TestCharge_Staff_CatalogItemDerivesAmount(t *testing.T) {
 	}
 	if got, want := statusData["itemsMemo"].(string), "Latte"; got != want {
 		t.Fatalf("status.itemsMemo = %q, want %q (the menu item's own name)", got, want)
+	}
+	lines, _ := statusData["lines"].([]any)
+	if len(lines) != 1 {
+		t.Fatalf("status.lines has %d entries, want 1", len(lines))
+	}
+	line, _ := lines[0].(map[string]any)
+	if got, want := line["orderedBy"].(string), domainActorKey; got != want {
+		t.Fatalf("lines[0].orderedBy = %q, want %q (the STAFFER's own identity on a POS ring-up, not the resident)", got, want)
 	}
 }
 

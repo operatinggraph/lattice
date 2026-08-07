@@ -209,11 +209,23 @@ function itemsMemoLine(memo) {
   return memo ? '<p class="meta">Items: ' + escapeHtml(memo) + "</p>" : "";
 }
 
+// orderedByLabel resolves a lines entry's orderedBy (cafe-domain's op.actor,
+// full vtx.identity.<NanoID>, ddls.go) to a short "by <name>" tag via the
+// same nameForIdentity/idOf roster lookup the lease picker already uses for
+// bookerKey — "" when the line predates the field or the roster can't
+// resolve it (a resident's own view never holds a staffer's row), so a shared
+// house tab's receipt distinguishes each resident's self-order and a staff
+// ring-up instead of reading identically either way.
+function orderedByLabel(orderedBy) {
+  if (!orderedBy) return "";
+  return " · by " + escapeHtml(nameForIdentity(idOf(orderedBy)));
+}
+
 // chargeLinesBlock renders a tab's itemized .status.lines (cafe-domain's
-// tabStatus aspect — one {id, description, amountCents, voided} entry per
-// Charge, the structured twin of the flat itemsMemo string) as a priced
-// list, a voided line struck through and labeled rather than hidden. A tab
-// whose lines is empty or absent (predates the field, or nothing charged
+// tabStatus aspect — one {id, description, amountCents, voided, orderedBy}
+// entry per Charge, the structured twin of the flat itemsMemo string) as a
+// priced list, a voided line struck through and labeled rather than hidden. A
+// tab whose lines is empty or absent (predates the field, or nothing charged
 // yet) falls back to the flat itemsMemo line — the only place old and new
 // tabs still look the same. voidableTabKey, when given, adds a per-line
 // Void action (wired by the caller after insertion) — staff POS only, since
@@ -226,7 +238,7 @@ function chargeLinesBlock(lines, memo, voidableTabKey) {
       .map(
         (l) =>
           '<li class="item-line' + (l.voided ? " voided" : "") + '">' +
-          '<span class="item-desc">' + escapeHtml(l.description) + "</span>" +
+          '<span class="item-desc">' + escapeHtml(l.description) + orderedByLabel(l.orderedBy) + "</span>" +
           '<span class="item-amount">' + money(l.amountCents) + "</span>" +
           (l.voided
             ? '<span class="meta">(voided)</span>'

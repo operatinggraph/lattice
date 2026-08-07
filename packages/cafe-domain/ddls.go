@@ -65,11 +65,14 @@ func tabVertexTypeDDL() pkgmgr.DDLSpec {
 			"optional description for an off-menu charge, defaulting to \"Off-menu charge\") to .status.itemsMemo, a " +
 			"comma-joined running line so a tab (open or settled) shows what was actually rung up, not just the " +
 			"total; a repeated identical name in the memo is exactly what a duplicate tap looks like. Every Charge " +
-			"also appends a structured entry {id, description, amountCents, voided: false} to .status.lines (id = " +
-			"\"line-\" + the 1-based position of the new entry, deterministic and collision-free within one tab), " +
+			"also appends a structured entry {id, description, amountCents, voided: false, orderedBy} to .status.lines " +
+			"(id = \"line-\" + the 1-based position of the new entry, deterministic and collision-free within one " +
+			"tab; orderedBy = op.actor, the identity that submitted THIS Charge — the resident on a self-order, the " +
+			"staffer on a POS ring-up, distinguishing the two on the itemized receipt where itemsMemo cannot), " +
 			"the itemized breakdown a receipt renders instead of the flat memo string; a tab whose .status predates " +
-			"this field (no lines key at all) is treated as lines=[] and simply accrues no itemized entries until " +
-			"its next Charge, itemsMemo staying the only record of what it already carried. " +
+			"this field (no lines key at all, or a line predating orderedBy) is treated as lines=[] / orderedBy " +
+			"absent respectively and simply accrues no itemized entries until its next Charge, itemsMemo staying " +
+			"the only record of what it already carried. " +
 			"VoidCharge (operator/frontOfHouse only — no self-service grant, a POS correction is a staff decision " +
 			"even when reversing a resident's own self-order mis-tap) has two forms. VoidCharge{tabKey, lineId} " +
 			"voids one specific .status.lines entry by its id: rejects UnknownChargeLine if no live (non-voided) " +
@@ -148,7 +151,7 @@ func tabVertexTypeDDL() pkgmgr.DDLSpec {
 				ExpectedOutcome: "Validates the tab is alive + open, adds 850 to .status.totalCents (OCC-conditioned " +
 					"on the aspect's current revision), appends \"Late checkout fee\" to .status.itemsMemo (or " +
 					"\"Off-menu charge\" if description is omitted) and a matching {id, description, amountCents: 850, " +
-					"voided: false} entry to .status.lines. Returns primaryKey. Rejects TabNotOpen if the tab " +
+					"voided: false, orderedBy: op.actor} entry to .status.lines. Returns primaryKey. Rejects TabNotOpen if the tab " +
 					"is already settled, or InvalidArgument if amountCents <= 0.",
 			},
 			{
@@ -232,7 +235,7 @@ func tabStatusAspectTypeDDL() pkgmgr.DDLSpec {
 		Description: "Tab status aspect (café). Stored as vtx.tab.<NanoID>.status (class tabStatus) = " +
 			"{value: open|settled, totalCents, itemsMemo, lines, openedAt, staleAt, leaseAppKey, settledAt?}. Non-sensitive. Written by OpenTab " +
 			"(mints, value=open, totalCents=0, itemsMemo=\"\", lines=[], staleAt=openedAt+24h), Charge (OCC-conditioned accumulate onto totalCents, " +
-			"appends the charged item's name to itemsMemo and a matching {id, description, amountCents, voided: false} entry to lines, " +
+			"appends the charged item's name to itemsMemo and a matching {id, description, amountCents, voided: false, orderedBy: op.actor} entry to lines, " +
 			"carries staleAt forward unchanged), VoidCharge " +
 			"(OCC-conditioned decrement of totalCents, clamped at 0, appends \"Void correction\" to itemsMemo when the " +
 			"total actually decreased; a lineId-targeted void additionally marks that lines entry voided:true in place, " +
@@ -245,14 +248,14 @@ func tabStatusAspectTypeDDL() pkgmgr.DDLSpec {
 		Script: aspectDeclarationOnlyScript,
 		InputSchema: `{"type":"object","properties":` +
 			`{"value":{"type":"string","enum":["open","settled"]},"totalCents":{"type":"number"},"itemsMemo":{"type":"string"},` +
-			`"lines":{"type":"array","items":{"type":"object","properties":{"id":{"type":"string"},"description":{"type":"string"},"amountCents":{"type":"number"},"voided":{"type":"boolean"}}}},` +
+			`"lines":{"type":"array","items":{"type":"object","properties":{"id":{"type":"string"},"description":{"type":"string"},"amountCents":{"type":"number"},"voided":{"type":"boolean"},"orderedBy":{"type":"string"}}}},` +
 			`"openedAt":{"type":"string"},"staleAt":{"type":"string"},"leaseAppKey":{"type":"string"},"settledAt":{"type":"string"}}}`,
 		OutputSchema: `{"type":"object"}`,
 		FieldDescription: map[string]string{
 			"value":       "open | settled.",
 			"totalCents":  "The tab's running total in integer cents, accumulated by Charge.",
 			"itemsMemo":   "A comma-joined, running line of what was charged — each Charge appends the item's own name (or an off-menu charge's caller-supplied/default description), each qualifying VoidCharge appends \"Void correction\". Empty string on a fresh tab. Frozen by Settle (never rewritten after).",
-			"lines":       "The itemized breakdown a receipt renders instead of the flat itemsMemo string: a list of {id, description, amountCents, voided}, one entry per Charge, in charge order. id is \"line-\" + the entry's 1-based position (deterministic, unique within one tab). A lineId-targeted VoidCharge marks the matching entry voided:true rather than removing it, so a voided line still shows on the receipt struck through. A tab whose .status predates this field carries no lines key at all — read it as []. Empty list on a fresh tab. Frozen by Settle (never rewritten after).",
+			"lines":       "The itemized breakdown a receipt renders instead of the flat itemsMemo string: a list of {id, description, amountCents, voided, orderedBy}, one entry per Charge, in charge order. id is \"line-\" + the entry's 1-based position (deterministic, unique within one tab). orderedBy is op.actor from the Charge that created the line — the resident's own identity on a self-order, the staffer's on a POS ring-up — so a shared house tab's receipt can tell the two apart; a line predating this field carries no orderedBy key at all, read as unknown. A lineId-targeted VoidCharge marks the matching entry voided:true rather than removing it, so a voided line still shows on the receipt struck through. A tab whose .status predates this field carries no lines key at all — read it as []. Empty list on a fresh tab. Frozen by Settle (never rewritten after).",
 			"openedAt":    "When the tab was opened (RFC3339, = OpenTab's op.submittedAt).",
 			"staleAt":     "RFC3339, = openedAt + 24h (OpenTab). The cafeStaleTabSettlement convergence lens (lenses.go) auto-dispatches SettleStaleTab once this passes with the tab still open, or BackfillTabStaleAt if it is absent entirely (a tab opened before this field shipped). Carried forward unchanged by Charge/VoidCharge; dropped by Settle/SettleStaleTab once settled.",
 			"leaseAppKey": "The resident lease this tab belongs to (denormalized from OpenTab's payload).",
@@ -931,7 +934,8 @@ def void_line_by_id(lines, line_id):
         if found_amount == None and line.get("id") == line_id and not line.get("voided", False):
             found_amount = line.get("amountCents")
             new_lines.append({"id": line.get("id"), "description": line.get("description"),
-                               "amountCents": line.get("amountCents"), "voided": True})
+                               "amountCents": line.get("amountCents"), "voided": True,
+                               "orderedBy": line.get("orderedBy")})
         else:
             new_lines.append(line)
     return new_lines, found_amount
@@ -1131,7 +1135,8 @@ def execute(state, op):
         existing_lines = existing.data.get("lines", [])
         new_line_id = "line-" + str(len(existing_lines) + 1)
         new_lines = existing_lines + [{"id": new_line_id, "description": item_name,
-                                        "amountCents": amount_cents, "voided": False}]
+                                        "amountCents": amount_cents, "voided": False,
+                                        "orderedBy": op.actor}]
         status_data = {"value": "open", "totalCents": new_total, "itemsMemo": new_memo, "lines": new_lines,
                         "openedAt": existing.data.get("openedAt"),
                         "staleAt": existing.data.get("staleAt"),

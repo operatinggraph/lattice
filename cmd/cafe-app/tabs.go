@@ -21,6 +21,7 @@ type tabChargeLineProjection struct {
 	Description string   `json:"description"`
 	AmountCents *float64 `json:"amountCents"`
 	Voided      bool     `json:"voided"`
+	OrderedBy   string   `json:"orderedBy"`
 }
 
 // tabSettlementProjection is one row of the cafe-domain `cafeTabSettlement`
@@ -42,12 +43,16 @@ type tabSettlementProjection struct {
 
 // tabChargeLine is one itemized entry a receipt renders — the same shape as
 // tabChargeLineProjection with AmountCents normalized to int64, mirroring
-// tabRow's own TotalCents normalization below.
+// tabRow's own TotalCents normalization below. OrderedBy passes through
+// cafe-domain's own op.actor key unchanged (vtx.identity.<NanoID>), the same
+// full-key shape app.js already resolves via idOf()+nameForIdentity() for a
+// tab's bookerKey — a line predating the field carries "".
 type tabChargeLine struct {
 	ID          string `json:"id"`
 	Description string `json:"description"`
 	AmountCents int64  `json:"amountCents"`
 	Voided      bool   `json:"voided"`
+	OrderedBy   string `json:"orderedBy,omitempty"`
 }
 
 // tabRow is the tab card the POS/front-desk views render.
@@ -105,6 +110,7 @@ func computeTabs(keys []string, get kvGetter, leaseAppKey string) []tabRow {
 			}
 			lines = append(lines, tabChargeLine{
 				ID: l.ID, Description: l.Description, AmountCents: amount, Voided: l.Voided,
+				OrderedBy: l.OrderedBy,
 			})
 		}
 		rows = append(rows, tabRow{

@@ -240,12 +240,13 @@ RETURN
 // house-tab ledger entry are the identical string.
 //
 // `lines` is likewise a plain array pass-through of `t.status.data.lines`
-// (the itemized {id, description, amountCents, voided} entries Charge/
-// VoidCharge maintain), mirroring clinic-domain's `.hours.data.windows`
-// pass-through (lenses.go) — Cypher needs no `collect()` to project a field
-// that is already an array on the aspect. cmd/cafe-app renders it as the
-// itemized receipt breakdown, falling back to itemsMemo for a tab whose
-// .status predates the field (lines absent or []).
+// (the itemized {id, description, amountCents, voided, orderedBy} entries
+// Charge/VoidCharge maintain — orderedBy = the Charge's own op.actor),
+// mirroring clinic-domain's `.hours.data.windows` pass-through (lenses.go) —
+// Cypher needs no `collect()` to project a field that is already an array on
+// the aspect. cmd/cafe-app renders it as the itemized receipt breakdown,
+// falling back to itemsMemo for a tab whose .status predates the field
+// (lines absent or []).
 //
 // A tab with totalCents=0 (opened and settled with nothing charged) never
 // violates either gap — no house-tab posting is needed for a zero-amount
