@@ -266,6 +266,28 @@ func TestAnchorHopIndex_Refusals(t *testing.T) {
 			body: `MATCH (u:unit)-[:managedBy]->(i:identity) RETURN u.key AS k, i.key AS ik`,
 			want: "no pattern position binds $actorKey",
 		},
+		{
+			// The first case in this table, spelled with the clauses SWAPPED.
+			// Grounding is judged as each pattern is walked, so a pattern
+			// reached before the anchor is identified was neither grounded nor
+			// refused, and nothing revisited it. Clause order is not something
+			// a lens author owes us.
+			name: "a cartesian seed BEFORE the anchor clause is refused too",
+			body: `MATCH (other:role) MATCH (i:identity {key: $actorKey}) RETURN i.key AS k, other.key AS r`,
+			want: "not reached from the anchor",
+		},
+		{
+			// A variable introduced inside a WHERE pattern is never bound in
+			// the outer row — existsAsPredicate calls matchPath and discards
+			// the bindings. So the later MATCH headed by `b` seeds from the
+			// badge bucket, every anchor's row depends on all of it, and the
+			// walk (whose only route back is the non-binding `blocked` hop)
+			// derives the empty set for almost every event: a skip, not a
+			// wider answer.
+			name: "a WHERE pattern does not bind, so it cannot ground a later head",
+			body: `MATCH (i:identity {key: $actorKey}) WHERE NOT (i)-[:blocked]->(b:badge) MATCH (b)-[:issuedBy]->(o:org) RETURN i.key AS k, o.key AS ok`,
+			want: "not reached from the anchor",
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ix := indexOf(t, tc.body)

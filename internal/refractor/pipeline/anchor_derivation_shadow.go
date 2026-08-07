@@ -68,6 +68,21 @@ type DerivationShadowStats struct {
 
 	BFSAnchors     int64 // total anchors the BFS returned over sampled events
 	DerivedAnchors int64 // total the derivation returned over the same events
+
+	// The act-mode counters. They are a different measurement from the shadow's
+	// and cannot be collected alongside it: acting means the BFS is never run,
+	// so there is no second set to compare against. What is worth knowing once
+	// the derivation decides is how often it answers at all — a lens that falls
+	// back on every event carries the flip's cost and none of its benefit, and
+	// only this ratio says so.
+	//
+	// Acted counts events reprojected against the derived set, ActedAnchors the
+	// anchors those events reprojected, and FellBack the events that ran the
+	// enumerator because a §17.2 conjunct, the hop index, or the read cap
+	// refused.
+	Acted        int64
+	ActedAnchors int64
+	FellBack     int64
 }
 
 type derivationShadow struct {
@@ -75,6 +90,10 @@ type derivationShadow struct {
 	events   atomic.Int64
 	sampling atomic.Int64
 	stats    DerivationShadowStats
+
+	// staticRefusal is the last reason this lens was found unable to act, so
+	// the reason is logged on change rather than on every event.
+	staticRefusal string
 }
 
 // AnchorDerivationShadow returns this lens's shadow tally.
@@ -215,6 +234,38 @@ func (p *Pipeline) logSummaryIfDue(st DerivationShadowStats) {
 		"narrowedEvents", st.NarrowedEvents, "narrowedAnchors", st.NarrowedAnchors,
 		"divergentEvents", st.DivergentEvents, "divergentAnchors", st.DivergentAnchors,
 		"bfsAnchors", st.BFSAnchors, "derivedAnchors", st.DerivedAnchors)
+}
+
+// recordDerivationActed and recordDerivationFellBack are the act-mode tally.
+// The interval is against acting EVENTS rather than sampled ones: acting runs
+// the derivation on every event, so there is no sampling to divide by, and a
+// lens that falls back every time still reaches the interval and reports that
+// it is doing so — which is precisely the case an operator needs told.
+func (p *Pipeline) recordDerivationActed(anchors int) {
+	p.derivShadow.mu.Lock()
+	p.derivShadow.stats.Acted++
+	p.derivShadow.stats.ActedAnchors += int64(anchors)
+	snapshot := p.derivShadow.stats
+	p.derivShadow.mu.Unlock()
+	p.logActSummaryIfDue(snapshot)
+}
+
+func (p *Pipeline) recordDerivationFellBack() {
+	p.derivShadow.mu.Lock()
+	p.derivShadow.stats.FellBack++
+	snapshot := p.derivShadow.stats
+	p.derivShadow.mu.Unlock()
+	p.logActSummaryIfDue(snapshot)
+}
+
+func (p *Pipeline) logActSummaryIfDue(st DerivationShadowStats) {
+	total := st.Acted + st.FellBack
+	if total == 0 || total%derivationShadowSummaryEvery != 0 {
+		return
+	}
+	slog.Info("pipeline: anchor-derivation tally",
+		"ruleId", p.ruleID,
+		"acted", st.Acted, "actedAnchors", st.ActedAnchors, "fellBack", st.FellBack)
 }
 
 func cappedList(s []string, n int) []string {

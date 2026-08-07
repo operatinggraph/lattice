@@ -245,7 +245,7 @@ func (b *hopIndexBuilder) addPattern(p PathPattern, binding bool) {
 			b.noteAnchor(positions[i])
 		}
 	}
-	b.ground(positions)
+	b.ground(positions, binding)
 
 	// Rels[i] joins Nodes[i] and Nodes[i+1] BY INDEX (executor.go's pattern
 	// walk), independent of whether either node carries a variable.
@@ -279,22 +279,51 @@ func (b *hopIndexBuilder) addPattern(p PathPattern, binding bool) {
 // traversal, so a pattern headed by an already-bound variable extends the
 // grounded set, and one headed by anything else starts a fresh bucket scan.
 // Clause order is load-bearing and matches the executor's.
-func (b *hopIndexBuilder) ground(positions []int) {
-	if len(positions) == 0 || b.anchor < 0 {
+//
+// Two things it must NOT do, both of which return a set smaller than the truth
+// rather than larger — the one direction this whole unit exists to refuse:
+//
+//   - Treat a pattern reached before the anchor as neither grounded nor
+//     refused. Nothing upstream has pinned anything yet, so matchPath binds its
+//     head from that head's own bucket; every anchor's row then depends on the
+//     whole bucket while the walk, having no hop from those positions to the
+//     anchor, derives the empty set and licenses a skip.
+//   - Let a NON-BINDING pattern extend the grounded set. existsAsPredicate and
+//     evalPatternComprehension both call matchPath and DISCARD its bindings, so
+//     a variable a WHERE pattern or a RETURN comprehension introduces is still
+//     unbound in the outer row. A later MATCH headed by it is therefore a fresh
+//     bucket scan, and counting it as grounded would pass exactly the shape the
+//     conjunct exists to catch. Such a pattern must still REQUIRE a grounded
+//     head — a WHERE pattern headed by an unbound variable scans a bucket per
+//     row just as a MATCH does.
+func (b *hopIndexBuilder) ground(positions []int, binding bool) {
+	if len(positions) == 0 {
+		return
+	}
+	if b.anchor < 0 {
+		b.markUngrounded(positions[0])
 		return
 	}
 	if b.grounded == nil {
 		b.grounded = map[int]bool{b.anchor: true}
 	}
 	if !b.grounded[positions[0]] {
-		if b.ungrounded == "" {
-			b.ungrounded = fmt.Sprintf("pattern headed by position %d (%s) is not reached from the anchor — it binds by bucket scan, so it affects every anchor", positions[0], describeLabel(b.labels[positions[0]]))
-		}
+		b.markUngrounded(positions[0])
+		return
+	}
+	if !binding {
 		return
 	}
 	for _, pos := range positions {
 		b.grounded[pos] = true
 	}
+}
+
+func (b *hopIndexBuilder) markUngrounded(head int) {
+	if b.ungrounded != "" {
+		return
+	}
+	b.ungrounded = fmt.Sprintf("pattern headed by position %d (%s) is not reached from the anchor — it binds by bucket scan, so it affects every anchor", head, describeLabel(b.labels[head]))
 }
 
 // noteAnchor records the $actorKey position. Two distinct positions binding it

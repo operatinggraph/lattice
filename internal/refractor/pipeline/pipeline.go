@@ -218,10 +218,15 @@ type Pipeline struct {
 	// the cypher per actor. Nil uses the single-execute path.
 	actorEnumerator *ActorEnumerator
 
-	// derivShadow tallies the pattern-directed affected-anchor derivation
-	// against the enumerator's answer on a sampled fraction of fan-out events.
-	// It observes; it never decides (anchor_derivation_shadow.go).
+	// derivShadow tallies the pattern-directed affected-anchor derivation — its
+	// agreement with the enumerator under `shadow`, and how often it answered
+	// at all under `act` (anchor_derivation_shadow.go).
 	derivShadow derivationShadow
+
+	// derivMode is this pipeline's override of how the derivation participates
+	// in a fan-out. Zero is DerivationModeUnset, i.e. take the package default
+	// (anchor_derivation_mode.go).
+	derivMode atomic.Int64
 
 	// derivReadCap bounds the adjacency documents one derivation walk may read
 	// before it gives up and falls back. Zero means DefaultDerivationReadCap.

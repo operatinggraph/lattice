@@ -730,13 +730,16 @@ func detectOutputKeyCollision(results []ruleengine.EvalResult) (collidingKey str
 // — the pipeline write loop handles each result row independently.
 func (p *Pipeline) evaluateFanOut(ctx context.Context, rs ruleState, entry ruleengine.NodeEntry) ([]ruleengine.EvalResult, []string, error) {
 	eventType, _, _ := substrate.ParseVertexKey(entry.CoreKVKey)
-	actorKeys, err := p.actorEnumerator.Enumerate(ctx, entry.CoreKVKey, eventType)
+	actorKeys, err := p.affectedAnchors(ctx, rs, entry.CoreKVKey,
+		func() ([]string, bool, error) {
+			return p.deriveAnchorsForVertex(ctx, rs, entry.CoreKVKey, eventType)
+		},
+		func() ([]string, error) {
+			return p.actorEnumerator.Enumerate(ctx, entry.CoreKVKey, eventType)
+		})
 	if err != nil {
 		return nil, nil, fmt.Errorf("pipeline: fan-out enumerate: %w", err)
 	}
-	p.shadowAnchorDerivation(rs, entry.CoreKVKey, actorKeys, func() ([]string, bool, error) {
-		return p.deriveAnchorsForVertex(ctx, rs, entry.CoreKVKey, eventType)
-	})
 	// No affected actors → no projection to write. This is a valid
 	// outcome (e.g. a role with no assignments yet, or a service in a
 	// location no actor sits inside).
@@ -786,31 +789,39 @@ func (p *Pipeline) evaluateLinkFanOut(ctx context.Context, rs ruleState, linkKey
 		}
 	}
 
-	// Seed the actor enumeration from BOTH endpoint vertices and union the
-	// results. Either endpoint may be (or reach) an actor.
 	srcVtx := substrate.VertexKey(srcType, srcID)
 	dstVtx := substrate.VertexKey(dstType, dstID)
 
-	actorSet := map[string]struct{}{}
-	for _, ep := range []struct{ key, typ string }{{srcVtx, srcType}, {dstVtx, dstType}} {
-		actors, err := p.actorEnumerator.Enumerate(ctx, ep.key, ep.typ)
-		if err != nil {
-			return nil, nil, fmt.Errorf("pipeline: link fan-out enumerate from %q: %w", ep.key, err)
-		}
-		for _, a := range actors {
-			actorSet[a] = struct{}{}
-		}
+	// Chosen before the empty-set return, not after: "this event reached nobody"
+	// is a real answer either arm can give, and skipping the choice on the quiet
+	// events would both bias the tally and leave the derivation's own empty
+	// answer unreachable — which for a link binding no hop is the common case.
+	actorKeys, err := p.affectedAnchors(ctx, rs, linkKey,
+		func() ([]string, bool, error) {
+			return p.deriveAnchorsForLink(ctx, rs, linkKey)
+		},
+		func() ([]string, error) {
+			// Seed the actor enumeration from BOTH endpoint vertices and union
+			// the results. Either endpoint may be (or reach) an actor.
+			actorSet := map[string]struct{}{}
+			for _, ep := range []struct{ key, typ string }{{srcVtx, srcType}, {dstVtx, dstType}} {
+				actors, err := p.actorEnumerator.Enumerate(ctx, ep.key, ep.typ)
+				if err != nil {
+					return nil, fmt.Errorf("pipeline: link fan-out enumerate from %q: %w", ep.key, err)
+				}
+				for _, a := range actors {
+					actorSet[a] = struct{}{}
+				}
+			}
+			out := make([]string, 0, len(actorSet))
+			for a := range actorSet {
+				out = append(out, a)
+			}
+			return out, nil
+		})
+	if err != nil {
+		return nil, nil, err
 	}
-	actorKeys := make([]string, 0, len(actorSet))
-	for a := range actorSet {
-		actorKeys = append(actorKeys, a)
-	}
-	// Shadowed before the empty-set return, not after: "the enumerator reached
-	// nobody" is exactly as much evidence about the derivation as a populated
-	// answer, and sampling only the busy events would bias the tally.
-	p.shadowAnchorDerivation(rs, linkKey, actorKeys, func() ([]string, bool, error) {
-		return p.deriveAnchorsForLink(ctx, rs, linkKey)
-	})
 	if len(actorKeys) == 0 {
 		// A link whose endpoints reach no actors (e.g. a book→author link)
 		// is a correct no-op.
@@ -838,13 +849,16 @@ func (p *Pipeline) evaluateAspectFanOut(ctx context.Context, rs ruleState, aspec
 		return nil, nil, fmt.Errorf("pipeline: aspect fan-out: not a Contract #1 aspect key: %q", aspectKey)
 	}
 
-	actorKeys, err := p.actorEnumerator.Enumerate(ctx, parentVtx, parentType)
+	actorKeys, err := p.affectedAnchors(ctx, rs, aspectKey,
+		func() ([]string, bool, error) {
+			return p.deriveAnchorsForAspect(ctx, rs, aspectKey)
+		},
+		func() ([]string, error) {
+			return p.actorEnumerator.Enumerate(ctx, parentVtx, parentType)
+		})
 	if err != nil {
 		return nil, nil, fmt.Errorf("pipeline: aspect fan-out enumerate from %q: %w", parentVtx, err)
 	}
-	p.shadowAnchorDerivation(rs, aspectKey, actorKeys, func() ([]string, bool, error) {
-		return p.deriveAnchorsForAspect(ctx, rs, aspectKey)
-	})
 	// No affected actors → no projection to write (e.g. a meta-vertex aspect,
 	// or a vertex no actor reaches). A correct no-op.
 	if len(actorKeys) == 0 {

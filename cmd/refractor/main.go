@@ -783,6 +783,34 @@ func main() {
 		}
 	}
 
+	// REFRACTOR_ANCHOR_DERIVATION selects how the pattern-directed
+	// affected-anchor derivation participates in an actor-aware fan-out:
+	// `act` (the default) lets it decide which anchors reproject, `shadow`
+	// counts it against the enumerator's answer without acting, `off` runs
+	// neither. It is set here rather than per-lens because the two places
+	// pipelines are built — the static rule loader below and
+	// projection.InstallActorAggregate — would otherwise each need it, and one
+	// of them could be missed.
+	//
+	// Turning it down bounds further damage from a derivation shortfall on the
+	// next event; it does NOT heal a row already left stale, which is Rebuild's
+	// job or the sweep's (auth-plane-projection-latency-design.md §17.5).
+	anchorDerivation := pipeline.DefaultAnchorDerivationMode()
+	if v := os.Getenv("REFRACTOR_ANCHOR_DERIVATION"); v != "" {
+		m, err := pipeline.ParseDerivationMode(v)
+		if err != nil {
+			logger.Error("invalid REFRACTOR_ANCHOR_DERIVATION; keeping the default", "value", v, "err", err)
+		} else {
+			pipeline.SetDefaultAnchorDerivationMode(m)
+			anchorDerivation = m
+		}
+	}
+	// Logged unconditionally, not only when overridden. Which arm decides a
+	// reprojection is the single most load-bearing thing about this process's
+	// auth-plane behaviour, and an operator reading a tally line needs to know
+	// which mode produced it without inferring it from the line's own name.
+	logger.Info("anchor-derivation mode", "mode", anchorDerivation.String())
+
 	// projectionRevision reads the current Core KV revision for an arbitrary
 	// key. The actor-aggregate envelope uses it to populate
 	// `projectedFromRevisions`. Errors and absent keys collapse to 0, which the
