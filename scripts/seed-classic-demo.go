@@ -209,6 +209,13 @@ func main() {
 	apptID := substrate.DeriveNanoID("classic-demo-appointment", apptDay.Format("2006-01-02"))
 	apptKey := "vtx.appointment." + apptID
 	if !alive(ctx, conn, apptKey) {
+		// No `site` param here, deliberately: unlike seed-showcase.go's Riley
+		// world, this seed's ONLY location vertex is unitKey (CreateLocation
+		// {locationType: "unit"} above) — there is no vtx.building in this
+		// world at all, so there is nothing to AssignProviderSite this
+		// provider to and no site key CreateAppointment could validate
+		// against. Minting a building purely to satisfy the optional site
+		// param would be scope this seed's world does not otherwise need.
 		submitOp(ctx, conn, adminKey, "CreateAppointment", "appointment",
 			map[string]any{
 				"patient":       patientKey,

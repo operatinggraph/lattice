@@ -46,7 +46,7 @@ func TestPackage_DDLs(t *testing.T) {
 	vertexCmds := map[string][]string{
 		"patient":              {"CreatePatient", "TombstonePatient"},
 		"provider":             {"CreateProvider", "TombstoneProvider", "SetProviderProfile", "SetProviderHours", "SetProviderTimeOff", "BindProviderIdentity"},
-		"appointment":          {"CreateAppointment", "RescheduleAppointment", "SetAppointmentStatus", "MarkPastDueNoShow", "RecordEncounter", "TombstoneAppointment"},
+		"appointment":          {"CreateAppointment", "RescheduleAppointment", "SetAppointmentStatus", "MarkPastDueNoShow", "BackfillAppointmentSite", "RecordEncounter", "TombstoneAppointment"},
 		"clinicSite":           {"SetSiteProfile"},
 		"clinicSiteAssignment": {"AssignProviderSite", "RemoveProviderSite"},
 	}
@@ -162,7 +162,7 @@ func TestPackage_NoCommandOverlapAcrossVertexTypes(t *testing.T) {
 //   - consumer (scope self) — patient self-booking / self-reschedule /
 //     self-cancel.
 //
-// Plus the twelve projection lenses and the location-domain dependency.
+// Plus the thirteen projection lenses and the location-domain dependency.
 func TestPackage_Permissions(t *testing.T) {
 	type wantGrant struct {
 		scope     string
@@ -193,6 +193,9 @@ func TestPackage_Permissions(t *testing.T) {
 		// Weaver-only auto no-show (clinic-reminders' pastDueAppointments target's
 		// only caller) — operator authority, the RecordAppointmentReminder idiom.
 		"MarkPastDueNoShow": operatorOnly(),
+		// Weaver-only site backfill (this package's own clinicSiteBackfill
+		// target's only caller) — operator authority, the MarkPastDueNoShow idiom.
+		"BackfillAppointmentSite": operatorOnly(),
 	}
 	wantCount := 0
 	for _, grants := range wantPerms {
@@ -230,8 +233,8 @@ func TestPackage_Permissions(t *testing.T) {
 		t.Fatalf("expected Depends=[location-domain], got %v", got)
 	}
 
-	if got := len(Package.Lenses); got != 12 {
-		t.Fatalf("expected 12 lenses, got %d", got)
+	if got := len(Package.Lenses); got != 13 {
+		t.Fatalf("expected 13 lenses, got %d", got)
 	}
 	lensByName := map[string]pkgmgr.LensSpec{}
 	for _, l := range Package.Lenses {
@@ -257,6 +260,11 @@ func TestPackage_Permissions(t *testing.T) {
 		l.Adapter != "nats-kv" || l.Bucket != ClinicProviderSitesBucket || !l.DiffRetraction ||
 		len(l.IntoKey) != 2 || l.IntoKey[0] != "provider_id" || l.IntoKey[1] != "site_id" {
 		t.Fatalf("unexpected providerSites shape: %+v", lensByName["providerSites"])
+	}
+	if l, ok := lensByName["clinicSiteBackfill"]; !ok ||
+		l.Adapter != "nats-kv" || l.Bucket != "weaver-targets" || l.ProjectionKind != "actorAggregate" ||
+		l.Output == nil || l.Output.AnchorType != "appointment" {
+		t.Fatalf("unexpected clinicSiteBackfill shape: %+v", lensByName["clinicSiteBackfill"])
 	}
 	if l, ok := lensByName["clinicAppointmentsRead"]; !ok ||
 		l.Adapter != "postgres" || l.Table != "read_clinic_appointments" || !l.Protected {
@@ -292,8 +300,8 @@ func TestPackage_Permissions(t *testing.T) {
 	if lensByName["patientIdentityReadGrants"].GrantSource == lensByName["providerIdentityReadGrants"].GrantSource {
 		t.Fatal("the patient and provider identity-bridge producers share a grant_source")
 	}
-	if got := len(Package.WeaverTargets); got != 0 {
-		t.Fatalf("expected 0 weaverTargets, got %d", got)
+	if got := len(Package.WeaverTargets); got != 1 {
+		t.Fatalf("expected 1 weaverTarget, got %d", got)
 	}
 	if got := len(Package.OpMetas); got != 7 {
 		t.Errorf("OpMetas: got %d, want 7", got)

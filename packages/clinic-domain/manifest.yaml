@@ -1,5 +1,5 @@
 name: clinic-domain
-version: 0.28.17
+version: 0.28.18
 depends:
   - location-domain
 description: |
@@ -147,6 +147,10 @@ declares:
       adapter: nats-kv
       bucket: clinic-provider-sites
       engine: full
+    - canonicalName: clinicSiteBackfill
+      adapter: nats-kv
+      bucket: weaver-targets
+      engine: full
     - canonicalName: clinicAppointmentsRead
       adapter: postgres
       engine: full
@@ -214,6 +218,9 @@ declares:
     - operationType: MarkPastDueNoShow
       scope: any
       grantsTo: [operator]
+    - operationType: BackfillAppointmentSite
+      scope: any
+      grantsTo: [operator]
     - operationType: TombstoneAppointment
       scope: any
       grantsTo: [operator]
@@ -229,6 +236,9 @@ declares:
     - operationType: BindProviderIdentity
       scope: any
       grantsTo: [operator]
+  weaverTargets:
+    - targetId: clinicSiteBackfill
+      lensRef: clinicSiteBackfill
   opMetas:
     - operationType: CreateAppointment
     - operationType: RescheduleAppointment

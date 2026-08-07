@@ -1210,14 +1210,13 @@ func seedResidentTenancies(ctx context.Context, conn *substrate.Conn, adminKey, 
 // (.ledgerAccount, .activeVisitSeriesWith<providerId>), independent of the
 // account/series vertex's own freshly-minted NanoID, so idempotency checks
 // against those guard keys (not the unpredictable child key) mirror
-// seedKaiServiceProvider's identity-guard idiom. Fixed patient handle;
-// day-derived appointment ids on the 15-minute grid, offset a whole distinct
-// days AND distinct fixed hours (futureDayAt) so neither the derived id nor
-// the patient's own slot claims can collide between the two bookings — nor
-// across a reseed a day later, when the +1-day booking lands on the +2-day
-// booking's date (distinct hours keep them off the same patient-hub slot). A
-// rerun on the same UTC day converges on the same ids (mirrors
-// seedWellnessEntities/seedMaintenanceBeat's day-derived idiom).
+// seedKaiServiceProvider's identity-guard idiom. Fixed patient handle; every
+// appointment id is likewise a FIXED derivation (substrate.DeriveNanoID with
+// no per-run discriminator), so each is created exactly once at first
+// bootstrap — guarded by the same alive() check as the rest of this file —
+// and never regenerated on a later reseed. Distinct fixed hours (futureDayAt)
+// keep the several same-day bookings off the same provider/patient 15-minute
+// slot claims.
 func seedRileyClinicWorld(ctx context.Context, conn *substrate.Conn, adminKey, tenant1Key, tenant1LeaseAppKey string) {
 	if !alive(ctx, conn, rileyPatientKey) {
 		submitOp(ctx, conn, adminKey, "CreatePatient", "patient",
@@ -1230,20 +1229,21 @@ func seedRileyClinicWorld(ctx context.Context, conn *substrate.Conn, adminKey, t
 
 	oseiStart := futureDayAt(1, 14)
 	oseiEnd := oseiStart.Add(30 * time.Minute)
-	oseiApptID := substrate.DeriveNanoID("showcase-appointment-osei", oseiStart.Format("2006-01-02"))
+	oseiApptID := substrate.DeriveNanoID("showcase-appointment-osei", "")
 	oseiApptKey := "vtx.appointment." + oseiApptID
 	if !alive(ctx, conn, oseiApptKey) {
 		submitOp(ctx, conn, adminKey, "CreateAppointment", "appointment",
 			map[string]any{
 				"patient": rileyPatientKey, "provider": oseiProviderKey, "appointmentId": oseiApptID,
 				"startsAt": oseiStart.Format(time.RFC3339), "endsAt": oseiEnd.Format(time.RFC3339),
-				"reason": "Sports physical",
+				"reason": "Sports physical", "site": buildingKey,
 			},
 			&processor.ContextHint{
 				Reads: []string{rileyPatientKey, oseiProviderKey},
 				OptionalReads: append(
-					slotClaimKeys(oseiProviderKey, oseiStart, oseiEnd),
-					slotClaimKeys(rileyPatientKey, oseiStart, oseiEnd)...),
+					append(slotClaimKeys(oseiProviderKey, oseiStart, oseiEnd),
+						slotClaimKeys(rileyPatientKey, oseiStart, oseiEnd)...),
+					buildingKey, linkKey(oseiProviderKey, "practicesAt", buildingKey)),
 			})
 	}
 
@@ -1256,40 +1256,42 @@ func seedRileyClinicWorld(ctx context.Context, conn *substrate.Conn, adminKey, t
 	// so slot claims never collide.
 	residentApptStart := futureDayAt(1, 11)
 	residentApptEnd := residentApptStart.Add(30 * time.Minute)
-	residentApptID := substrate.DeriveNanoID("showcase-appointment-osei-resident", residentApptStart.Format("2006-01-02"))
+	residentApptID := substrate.DeriveNanoID("showcase-appointment-osei-resident", "")
 	residentApptKey := "vtx.appointment." + residentApptID
 	if tenant1LeaseAppKey != "" && !alive(ctx, conn, residentApptKey) {
 		submitOp(ctx, conn, adminKey, "CreateAppointment", "appointment",
 			map[string]any{
 				"patient": rileyPatientKey, "provider": oseiProviderKey, "appointmentId": residentApptID,
 				"startsAt": residentApptStart.Format(time.RFC3339), "endsAt": residentApptEnd.Format(time.RFC3339),
-				"reason": "Follow-up: brace check", "leaseAppKey": tenant1LeaseAppKey,
+				"reason": "Follow-up: brace check", "leaseAppKey": tenant1LeaseAppKey, "site": buildingKey,
 			},
 			&processor.ContextHint{
 				Reads: []string{rileyPatientKey, oseiProviderKey},
 				OptionalReads: append(
 					append(slotClaimKeys(oseiProviderKey, residentApptStart, residentApptEnd),
 						slotClaimKeys(rileyPatientKey, residentApptStart, residentApptEnd)...),
-					tenant1LeaseAppKey, tenant1LeaseAppKey+".tenancy"),
+					tenant1LeaseAppKey, tenant1LeaseAppKey+".tenancy",
+					buildingKey, linkKey(oseiProviderKey, "practicesAt", buildingKey)),
 			})
 	}
 
 	patelStart := futureDayAt(2, 16)
 	patelEnd := patelStart.Add(30 * time.Minute)
-	patelApptID := substrate.DeriveNanoID("showcase-appointment-patel", patelStart.Format("2006-01-02"))
+	patelApptID := substrate.DeriveNanoID("showcase-appointment-patel", "")
 	patelApptKey := "vtx.appointment." + patelApptID
 	if !alive(ctx, conn, patelApptKey) {
 		submitOp(ctx, conn, adminKey, "CreateAppointment", "appointment",
 			map[string]any{
 				"patient": rileyPatientKey, "provider": providerKey, "appointmentId": patelApptID,
 				"startsAt": patelStart.Format(time.RFC3339), "endsAt": patelEnd.Format(time.RFC3339),
-				"reason": "Annual checkup",
+				"reason": "Annual checkup", "site": buildingKey,
 			},
 			&processor.ContextHint{
 				Reads: []string{rileyPatientKey, providerKey},
 				OptionalReads: append(
-					slotClaimKeys(providerKey, patelStart, patelEnd),
-					slotClaimKeys(rileyPatientKey, patelStart, patelEnd)...),
+					append(slotClaimKeys(providerKey, patelStart, patelEnd),
+						slotClaimKeys(rileyPatientKey, patelStart, patelEnd)...),
+					buildingKey, linkKey(providerKey, "practicesAt", buildingKey)),
 			})
 	}
 
@@ -1320,20 +1322,21 @@ func seedRileyClinicWorld(ctx context.Context, conn *substrate.Conn, adminKey, t
 	// slot claims from colliding on the same provider/patient hub.
 	completedStart := futureDayAt(1, 9)
 	completedEnd := completedStart.Add(30 * time.Minute)
-	completedApptID := substrate.DeriveNanoID("showcase-appointment-osei-completed", completedStart.Format("2006-01-02"))
+	completedApptID := substrate.DeriveNanoID("showcase-appointment-osei-completed", "")
 	completedApptKey := "vtx.appointment." + completedApptID
 	if !alive(ctx, conn, completedApptKey) {
 		submitOp(ctx, conn, adminKey, "CreateAppointment", "appointment",
 			map[string]any{
 				"patient": rileyPatientKey, "provider": oseiProviderKey, "appointmentId": completedApptID,
 				"startsAt": completedStart.Format(time.RFC3339), "endsAt": completedEnd.Format(time.RFC3339),
-				"reason": "Follow-up: sports physical clearance",
+				"reason": "Follow-up: sports physical clearance", "site": buildingKey,
 			},
 			&processor.ContextHint{
 				Reads: []string{rileyPatientKey, oseiProviderKey},
 				OptionalReads: append(
-					slotClaimKeys(oseiProviderKey, completedStart, completedEnd),
-					slotClaimKeys(rileyPatientKey, completedStart, completedEnd)...),
+					append(slotClaimKeys(oseiProviderKey, completedStart, completedEnd),
+						slotClaimKeys(rileyPatientKey, completedStart, completedEnd)...),
+					buildingKey, linkKey(oseiProviderKey, "practicesAt", buildingKey)),
 			})
 		submitOp(ctx, conn, adminKey, "SetAppointmentStatus", "appointment",
 			map[string]any{
@@ -1359,20 +1362,21 @@ func seedRileyClinicWorld(ctx context.Context, conn *substrate.Conn, adminKey, t
 
 	noShowStart := futureDayAt(2, 10)
 	noShowEnd := noShowStart.Add(30 * time.Minute)
-	noShowApptID := substrate.DeriveNanoID("showcase-appointment-patel-noshow", noShowStart.Format("2006-01-02"))
+	noShowApptID := substrate.DeriveNanoID("showcase-appointment-patel-noshow", "")
 	noShowApptKey := "vtx.appointment." + noShowApptID
 	if !alive(ctx, conn, noShowApptKey) {
 		submitOp(ctx, conn, adminKey, "CreateAppointment", "appointment",
 			map[string]any{
 				"patient": rileyPatientKey, "provider": providerKey, "appointmentId": noShowApptID,
 				"startsAt": noShowStart.Format(time.RFC3339), "endsAt": noShowEnd.Format(time.RFC3339),
-				"reason": "Annual checkup",
+				"reason": "Annual checkup", "site": buildingKey,
 			},
 			&processor.ContextHint{
 				Reads: []string{rileyPatientKey, providerKey},
 				OptionalReads: append(
-					slotClaimKeys(providerKey, noShowStart, noShowEnd),
-					slotClaimKeys(rileyPatientKey, noShowStart, noShowEnd)...),
+					append(slotClaimKeys(providerKey, noShowStart, noShowEnd),
+						slotClaimKeys(rileyPatientKey, noShowStart, noShowEnd)...),
+					buildingKey, linkKey(providerKey, "practicesAt", buildingKey)),
 			})
 		submitOp(ctx, conn, adminKey, "SetAppointmentStatus", "appointment",
 			map[string]any{

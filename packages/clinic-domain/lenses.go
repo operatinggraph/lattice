@@ -38,6 +38,12 @@ const ClinicSitesBucket = "clinic-sites"
 // hygiene's duplicateCandidates shape (composite IntoKey, DiffRetraction).
 const ClinicProviderSitesBucket = "clinic-provider-sites"
 
+// ClinicSiteBackfillTarget is the §10.8 TargetID == the clinicSiteBackfill
+// lens's OutputKeyPattern prefix — the §10.2↔§10.8 binding Weaver reads
+// (targets.go), the cafeStaleTabSettlement idiom applied to this package's
+// own appointment shape.
+const ClinicSiteBackfillTarget = "clinicSiteBackfill"
+
 // Lenses returns the package's two projection lenses. Both are flat projections
 // (no aggregation / WITH), so OPTIONAL-matched neighbour bindings are live
 // directly in RETURN and the §4-B1 "WITH-drop" hazard does not apply. Aspect
@@ -88,6 +94,33 @@ func Lenses() []pkgmgr.LensSpec {
 			Spec:           providerSitesSpec,
 			IntoKey:        []string{"provider_id", "site_id"},
 			DiffRetraction: true,
+		},
+		{
+			// clinicSiteBackfill — the missing_site convergence lens
+			// (cafeStaleTabSettlement's idiom, cafe-domain/lenses.go, applied
+			// to this package's own appointment shape): flags a LIVE
+			// appointment carrying no atSite link, dispatching
+			// BackfillAppointmentSite (ddls.go, targets.go) to backfill the
+			// link CreateAppointment's own optional site branch would have
+			// written had a site been supplied at booking time. See
+			// clinicSiteBackfillSpec below for the non-convergence safety
+			// note (an appointment whose provider practises at zero or
+			// several sites stays missing_site forever, harmlessly).
+			CanonicalName:  ClinicSiteBackfillTarget,
+			Class:          "meta.lens",
+			Adapter:        "nats-kv",
+			Bucket:         "weaver-targets",
+			Engine:         "full",
+			Spec:           clinicSiteBackfillSpec,
+			ProjectionKind: "actorAggregate",
+			Output: &pkgmgr.OutputDescriptorSpec{
+				AnchorType:       "appointment",
+				OutputKeyPattern: ClinicSiteBackfillTarget + ".{actorSuffix}",
+				BodyColumns:      []string{"violating", "missing_site", "entityKey", "appointmentKey", "status"},
+				EmptyBehavior:    "delete",
+				KeyColumn:        "entityId",
+				Freshness:        "auto",
+			},
 		},
 		{
 			// clinicAppointmentsRead — the protected Postgres read model for the
@@ -553,6 +586,41 @@ RETURN
   b.key                 AS siteKey,
   pr.profile.data.fullName AS providerName,
   b.site.data.name         AS siteName`
+
+// clinicSiteBackfillSpec is the missing_site convergence cypher: one row per
+// appointment, mirroring cafe-domain's staleTabSettlementSpec shape exactly
+// (MATCH the anchor by $actorKey, OPTIONAL MATCH the neighbour whose absence
+// is the gap). An appointment with no atSite link (OPTIONAL MATCH binds
+// site=null) is missing_site; one that already carries the link is not — the
+// same aspect/link-presence idiom clinicAppointmentsSpec's own OPTIONAL MATCH
+// (atSite) uses, just turned into a boolean gap column instead of a display
+// field.
+//
+// Non-convergence safety (mirrors cafe-domain's own missing_staleat note,
+// lenses.go): BackfillAppointmentSite (ddls.go) only ever writes the atSite
+// link when the appointment's provider practicesAt EXACTLY ONE site — zero
+// (an unassigned or dead provider) or two-or-more (genuinely ambiguous which
+// site) both leave the op a clean no-op. Such an appointment's missing_site
+// stays true forever, so Weaver re-dispatches BackfillAppointmentSite against
+// it on every convergence pass — harmlessly: each dispatch is an idempotent
+// no-op (empty mutations/events), never a retry that could clobber anything
+// or accumulate side effects, exactly the posture cafe-domain's own
+// permanently-unresolvable BackfillTabStaleAt case relies on. No retry-count
+// column is needed here (unlike missing_settle's maxretries_settle, which
+// bounds a DIFFERENT kind of gap — cafe-domain's own SettleStaleTab keeps
+// retrying a tab that COULD converge but hasn't yet); this gap's two
+// terminal, permanently-open shapes are distinguished from a genuinely
+// transient one by the SAME idempotent-no-op property, not a counter.
+const clinicSiteBackfillSpec = `MATCH (a:appointment {key: $actorKey})
+OPTIONAL MATCH (a)-[:atSite]->(site:building)
+RETURN
+  a.key AS actorKey,
+  a.key AS entityKey,
+  a.key AS appointmentKey,
+  a.status.data.value AS status,
+  (site.key = null) AS missing_site,
+  (site.key = null) AS violating
+`
 
 // clinicPatientsReadSpec is the protected Postgres read model's cypher for the
 // clinic-wide patient roster (D1.5, the staff-wildcard increment; Vault Fire 5

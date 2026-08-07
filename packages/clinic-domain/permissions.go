@@ -144,6 +144,12 @@ func Permissions() []pkgmgr.PermissionSpec {
 			Note:          "Grants the operator the right to submit MarkPastDueNoShow operations (orchestration-internal: clinic-reminders' pastDueAppointments directOp playbook, dispatched by Weaver's service actor once a non-terminal appointment's endsAt passes unattended — the RecordAppointmentReminder grant idiom).",
 			GrantsTo:      []string{"operator"},
 		},
+		{
+			OperationType: "BackfillAppointmentSite",
+			Scope:         "any",
+			Note:          "Grants the operator the right to submit BackfillAppointmentSite operations (orchestration-internal: this package's own clinicSiteBackfill directOp playbook, dispatched by Weaver's service actor for a live appointment carrying no atSite link — the MarkPastDueNoShow grant idiom).",
+			GrantsTo:      []string{"operator"},
+		},
 		mk("TombstoneAppointment"),
 		mk("SetSiteProfile"),
 		mk("AssignProviderSite"),
