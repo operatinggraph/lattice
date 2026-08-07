@@ -34,10 +34,14 @@ extrapolation into observation.
 is what makes that trigger observable, which is the design's own §9-C reasoning and remains right.
 
 **Sequencing.** `lens-label-key-type-binding` → `full-engine-grouping-key-reduction` → **this design**.
-The label fire must precede it because branch grouping changes which clauses share a binding stream, and
-that design's Increment 2 soundness argument rests on the current sharing; the grouping-key fire precedes
-it by both docs' agreement (§8), so this design's `projectItems` edit lands on a loop that no longer
-re-renders carried accumulators.
+The label fire **shipped 2026-08-07**, which turns its sequencing note into a live obligation on this
+build: its Increment 2 accumulates an `OPTIONAL MATCH`'s labels **per path**, sound only because a clause's
+paths are threaded into one binding stream (`executor.matchPatterns`). Branch grouping changes exactly
+which clauses share that stream, so **this build must re-derive `ReferencedLabels`' optional-label scope
+per branch group** — a later unlabeled node in another group is no longer a re-reference at all, and
+`internal/refractor/label_derivation_corpus_census_test.go` pins every lens's verdict, so a regression
+surfaces there. The grouping-key fire precedes this one by both docs' agreement (§8), so this design's
+`projectItems` edit lands on a loop that no longer re-renders carried accumulators.
 Owning component: **Refractor** (`internal/refractor/ruleengine/full`)
 Board row: `backlog/lattice.md` → *[Refractor] The executor still materializes the whole binding set*
 (★★, L, previously `📋 designer · no live consumer`). **That row's "no live consumer" is wrong** — §2

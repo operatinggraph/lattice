@@ -1,7 +1,7 @@
 # A pattern label names a vertex key type — retiring the body-`class` binding fallback
 
-**Status: ✅ Andrew-ratified 2026-08-06** — both increments, one fire; build-ready. Designer fire
-2026-08-02 · owner: Refractor (rule engine) · Size **S** · Imp **★★★**
+**Status: ✅ SHIPPED 2026-08-07** — both increments, one fire. Andrew-ratified 2026-08-06. Designer fire
+2026-08-02 · owner: Refractor (rule engine) · Size **S** · Imp **★★★** · build note §13
 
 ## Ratification (Andrew, 2026-08-06)
 
@@ -519,3 +519,59 @@ Also recorded (verified, no change needed): required-MATCH pruning holds in **bo
 pattern-expression bindings provably never escape, so dropping `collectVarsExpr` from pass 1 fixes a live
 under-approximation rather than merely being conservative; widening the `labels` set can never make
 `exhaustive` wrongly true; and the four auth-plane lenses' verdicts are unmoved by Inc 2.
+
+## 13. Build note (Winston, 2026-08-07) — what the build's own review changed
+
+Both increments landed as designed, plus one correction the build's adversarial pass earned. Three
+read-only reviewers ran against a frozen tree: derivation soundness · binder blast radius · house rules +
+test integrity.
+
+**The one defect, found independently by BOTH adversarial passes — §4.3 clause 2 is true per PATH, not per
+CLAUSE.** The clause reads *"an OPTIONAL path binds as a unit or null-binds every variable NEW to it"*, and
+the first implementation applied it at clause granularity: accumulate every pattern's labels in an
+`OPTIONAL MATCH`, then judge that clause's unlabeled nodes. A clause's comma-separated paths are threaded
+one into the next (`executor.matchPatterns`), and when a later path fails, `nullBindNewVars` nulls only the
+variables still ABSENT from the row — so an earlier path's whole-bucket binding survives with a type the
+later path's label never constrained:
+
+```
+OPTIONAL MATCH (i)-[:owns]->(x), (x:role)-[:grantedBy]->(p:permission)
+```
+
+derives `{identity, role, permission}` with `exhaustive = true` while `x` can hold any type. Fixed by
+accumulating each path's labels immediately before judging that path. Not a regression the fire introduced
+— the pre-change derivation reported the same verdict for this shape, from its segment-global pass 1 — but
+it is the hole the increment existed to close, and it is now pinned in both directions (a label on the path
+that BINDS the variable still narrows, so the scoping costs no legitimate narrowing).
+
+**The exposure is measured, not asserted.** A corpus census over **all 111 executable cyphers** the platform
+installs — walk-expanded, `SpecBranches`-inclusive, plus the four kernel lenses — shows **no verdict and no
+label set moved**, before or after the correction. Both increments close hazards for the next lens authored
+rather than changing the shipped corpus. Independently: 36 distinct labels, every one a real key type;
+**exactly one** bare-token class/key-type divergence in the tree (`location-domain`, as §3 found); **zero**
+production vertices with a root-level `label`. The removal's blast radius is also one site smaller than §4.1
+states — the labeled seed scan already required `KindVertex` under a `vtx.<label>.` prefix, so `nodeMatches`
+was a tautology there; three call sites change, not four.
+
+**A monotonicity argument worth keeping** (reviewer-supplied, verified): the new label scopes are a SUBSET
+of what the old pass 1 collected, so no lens can gain narrowing it did not already have. Any verdict that
+moved could only move narrow→broad — more reprojection, never a withheld event.
+
+**Also corrected in this fire, each found by review:** two comment citations that grepped to nothing
+(`seedScan` → `seedNodes`; `pipeline/anchor_delete.go` → the rule engine's own `anchor_delete.go`);
+`pipeline/anchor_derivation.go`'s comment, which described this exact hole as an open ratified item and
+became false on ship; `adjacency/builder.go`'s `EdgeEntry` doc, which told implementers to fall back to a
+NodeID-only lookup without saying that such a neighbour can no longer satisfy a LABELED pattern at all; and
+the corpus census's silent skip of a spec-less lens, now required to be an `eventStream` lens rather than
+merely tolerated.
+
+**Discharged elsewhere.** `auth-plane-projection-latency-design.md` §14.8's recorded Increment-0b deviation
+is closed by this fire, and §17.6's escalation of the label/key-type hole resolves with it. The two designs
+that sequence behind this one — `full-engine-grouping-key-reduction` and `dynamic-type-taxonomy` — are
+unblocked. `full-engine-independent-branch-decomposition` inherits a live obligation rather than a
+prospective one: its branch grouping changes which clauses share a binding stream, and Increment 2's
+per-path accumulation now rests on that sharing, so its build must re-derive the rule per branch group.
+
+**Not folded, deliberately.** `lens-projection-divergence-audit-design.md`'s `auditCoverageBasis: "key-type"`
+caveat is still correct as written and stays until that design's own build reaches its §4.3, exactly as §6
+directed.
