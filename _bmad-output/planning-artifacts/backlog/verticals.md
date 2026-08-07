@@ -22,6 +22,10 @@ the row is `🚧 blocked-on:` it (a missing *lens* is package work, built here).
 | **No way to demonstrate that Facet survives going offline** | Offline-first is the Edge's headline claim and nothing lets a viewer see it — the mirror only serves a disconnected world during a real NATS outage nobody can stage. Per [UX §6](../../implementation-artifacts/facet-app-ux.md) the honest offline story is a host↔NATS drop, not the browser going offline, so a truthful toggle disconnects the host engine: reads keep serving from bbolt, writes queue and drain on reconnect. | Cross-vertical | Sally + FE + platform | ★★ | M | 📋 designer · needs a fenced control surface |
 | **The executed lease still doesn't name its tenant** | `/api/lease-document` renders `Tenant: vtx.identity.edu97ix…` — the applicant's real name is never assembled (`doc.TenantName`), a sensitive link-discovered aspect with no egress-declaration path. The landlord party now resolves via the unit's `manages` link (shipped `d46ab947`). | LoftSpace | pkg | ★★ | S | 🚧 blocked-on: [lattice.md](lattice.md) `[Loom] externalTask subject-only egress` |
 | **Two ghost leases sit in the POS lease picker under a raw key** | Both are seed/verify leftovers held by the platform admin identity, which `cafeIdentitiesRead` never names, so `app.js:425` degrades to `shortKey`; one resolves no unit at all (blank address, $0 rent) in `frontdesk-lease-details`. Reap precedent: `8f9b0633` / `c643cf06`. | Café | pkg | ★★ | S | 📋 ready |
+| **Retiring a studio strands its classes with no location at all** | `TombstoneStudio` soft-deletes with no cascade ([ddls.go:111](../../../packages/wellness-domain/ddls.go)) and `reapDuplicateStudios` ([seed-classic-demo.go:428](../../../scripts/seed-classic-demo.go)) tombstoned two, so 6 sessions still `atStudio`-linked there project a null studio and the card renders no location line ([app.js:705](../../../cmd/wellness-app/web/app.js)). `ReassignSession` already exists; mirror the `missing_manager` convergence flag (`c643cf06`). | Wellness | pkg | ★★ | S | 📋 ready |
+| **A wellness member still can't pay their own balance** | `WellnessCreditAccount` grants `operator`+`frontOfHouse` only ([permissions.go:65](../../../packages/wellness-ledger/permissions.go)) — the one vertical left without the consumer `scope=self` self-pay grant clinic/café/LoftSpace all shipped (`ea68207b` / `80a1f76c` / `a587b245`); the FE's only payment control is the front-desk Roster panel. | Wellness | pkg + FE | ★★ | S | 📋 ready |
+| **A no-show fee never names the class it charges for** | `wellnessLedgerHistory` projects the bare literal `'No-show fee' AS memo` ([lenses.go:188](../../../packages/wellness-ledger/lenses.go)), so a member's history is N indistinguishable $25 debits with nothing to dispute. Clinic precedent `15f628f4` walks the `settles` link for the visit date. | Wellness | pkg | ★★ | S | 📋 ready |
+| **The unauthenticated class schedule advertises agent-verify artifacts** | `/api/studios` + `/api/sessions` are public-read ([server.go:29](../../../cmd/wellness-app/server.go)) and 3 of 5 studios plus 5 of 12 upcoming classes are "PO Discovery"/"Steward Verify"/"Recurrence Verify" litter — verify fires mint demo-visible entities and never reap them. Reap precedent: `8f9b0633`. | Wellness | pkg | ★ | S | 📋 ready |
 
 **Explicitly descoped (ambitious-PO pass, 2026-07-09):** structured diagnosis/procedure coding (ICD/CPT),
 vitals, and e-prescribing were considered and deliberately NOT filed — a certified EHR is out of scope for a
@@ -41,10 +45,9 @@ dated run-logs live in git history. Rotate LoftSpace ↔ Clinic ↔ Café ↔ We
 **Wellness joined** 2026-07-09 (`cmd/wellness-app` shipped, live on :7802) — fold it into rotation; see
 [agents/vertical-po/SKILL.md](../../../agents/vertical-po/SKILL.md) §1.
 
-- **Rotation to date:** LoftSpace ×22, Clinic ×21, Café ×12, Wellness ×8.
+- **Rotation to date:** LoftSpace ×22, Clinic ×21, Café ×12, Wellness ×9.
 - **Method:** reuse the already-up shared stack (detect NATS :4222 / app :7788/:7799/:7801/:7802), drive the real flow via `/api/op` + the lens projections as the product owner, file scored items. All four apps exist + are exercisable live (`:7788` / `:7799` / `:7801` / `:7802`).
 - **Live-stack note:** a stale bootstrap JSON vs. a recreated Core KV was a recurring dev-loop trap (2026-07-03, 2026-07-04) that silently emptied reads; `make up` now self-heals it (`109f59a`, 2026-07-05) — re-verify empty-read reports as a real product bug first.
-- **2026-08-02:** Clinic — drove patient, provider + front-desk hats live; no appointment view resolves at all and the no-show never bills; filed 5.
 - **2026-08-03:** Café — drove resident + front-desk hats live through open/charge/void/settle; the catalog is 8 copies of 2 items, no charge can be named or itemized, and rent never bills; filed 4.
 - **2026-08-03:** Wellness — drove member, instructor + front-desk hats live; no past class closes out, no studio retires, no balance settles; filed 5.
 - **2026-08-03:** LoftSpace — drove applicant, landlord + front-desk hats live; the executed lease names neither party, screening progress is invisible, an exhausted check dead-ends; filed 3 + 1 platform.
@@ -54,7 +57,8 @@ dated run-logs live in git history. Rotate LoftSpace ↔ Clinic ↔ Café ↔ We
 - **2026-08-06:** LoftSpace — drove applicant + landlord hats live; the applicant lens is paused dead, the health signal can't fire, renewals never opened; filed 4 + 2 platform.
 - **2026-08-06:** Clinic — drove patient, provider + front-desk hats live; no visit says which site, a $750 bill is 28 identical lines, no patient can pay; filed 4.
 - **2026-08-07:** Café — drove resident self-order→settle + front-desk hats live; no resident pays their own tab, no line names its orderer; filed 3 + 1 platform.
-- **Next:** Wellness.
+- **2026-08-07:** Wellness — drove member + front-desk hats live through schedule/book/bill; a retired studio strands its classes, no member self-pays, no fee names its class; filed 4.
+- **Next:** LoftSpace.
 
 ## Done log — verticals (newest first)
 
