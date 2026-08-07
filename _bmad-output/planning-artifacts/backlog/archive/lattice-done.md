@@ -1,5 +1,8 @@
 # Done log archive — lattice (older shipped items, newest first)
 
+- 2026-08-07 · `c4040761` · [Refractor] a pattern label is the vertex key type — body-class binding retired, label scopes split (Inc 1+2)
+- 2026-08-07 · `5d60fb2b` · [Refractor] post-claim auth-grant latency bounded — the pattern-directed derivation now decides which anchors reproject (Inc 0–3 complete)
+- 2026-08-07 · `6f03b32b` · [Refractor] a reconciliation that cannot repair a row stops reporting that it did — explicit Verdict, supersession refusal, guard-decline visibility
 - 2026-08-03 · `2e6d108d` · [facet] a standing role grant gets a home-screen surface — four ops the client discovered and rendered nowhere (CreateUnclaimedIdentity, CreatePatient, ReportIssue, CreateStudio) are live
 - 2026-08-03 · `82c7972b` · [Refractor] a hot-reload's rule swap is atomic, and an evaluation the swap superseded is naked instead of written — the revoking MATCH edit it would have defeated
 - 2026-08-03 · `5488ec8e` · [Refractor] a relationship alternation is refused at parse instead of executing as its first type, and RETURN DISTINCT stops collapsing two rows that differ only by node

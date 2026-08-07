@@ -381,7 +381,7 @@ irrelevant here and the declaration simplifies. This does not change the archite
 | 1 | `ShredIdentityKey` | privacy-base | **1**, constant | yes — re-shred rewrites the envelope and resets the cycle (#5) | `privacy.keyShredded` |
 | 2 | `SealIdentityForErasure` | privacy-base | **1**, constant | yes — unconditioned upsert of `.erasureRequested` | `privacy.erasureRequested` |
 | 3 | `UnbindIdentityCredentials` | identity-domain | ≤ `2·PAGE + 1` | yes — already-tombstoned rows are skipped | one `identity.unbound` per credential unbound |
-| 4 | `PurgeIdentityDedupFootprint` | privacy-base | ≤ `3·PAGE` | yes — same | none |
+| 4 | `PurgeIdentityDedupFootprint` | privacy-base | ≤ `2·SWEEP_LIMIT` (see below) | yes — same | none |
 
 `PAGE = 256`, matching the existing enumeration page limits (`shred_identity_key.go:178`, `:204`,
 `:232`). **No step can exceed its bound**, so no step can reintroduce a refusal (§10).
@@ -391,6 +391,13 @@ irrelevant here and the declaration simplifies. This does not change the archite
 because it sizes an atomic batch on every pass and `2·PAGE` mutations exceeds the 250ms Starlark
 wall budget under load. Step 3's bound is therefore `≤ 2·SWEEP_LIMIT + 1 = 129`; step 4's should be
 derived the same way when it is built. See §10 point 4.
+
+**Derived by increment 4: step 4's bound is `2·SWEEP_LIMIT = 128`, one class per commit.** The three
+classes do not cost the same — an `indexes` hit is **two** mutations (the index vertex *and* the
+link) where a `duplicateOf` hit is one — so draining all three collectors in one commit reaches
+`4·SWEEP_LIMIT`. Sweeping one class per commit, `indexes` → `duplicateOf` out → `duplicateOf` in,
+caps any commit at the magnitude step 3 measured clean. This is why the original `≤ 3·PAGE` was
+wrong in both directions: it under-counted the per-hit cost and over-counted the batch.
 
 **Step 3 is new work, not a rename.** Per #30 `UnlinkCredential` is unusable by an orchestrator on
 three counts. Step 3's op takes the owner from `subjectKey`, carries **no** last-credential guard (a
@@ -521,7 +528,18 @@ aggregate rows). `= null` / `<> null`, never `IS NULL` — the engine's conventi
 
 `duplicateOf` residue folds into `missing_dedupResidue` and is swept by the same op; it gets no
 separate count only because `duplicateOf` and `indexes` are cleared by one op and a second count would
-buy nothing. *(If the engine cannot carry three `OPTIONAL MATCH` fan-outs in one row without a
+buy nothing.
+
+> **FALSIFIED by increment 4 — the lens increment must not build the spec above.** That justification
+> rests on one commit clearing both classes. It does not: the sweep op takes **one class per commit**
+> (the bound derived in §5.4), `indexes` first and `duplicateOf` only once `indexes` is exhausted. So
+> a subject with 2 `indexes` links and 500 `duplicateOf` links has `indexResidue = 0` after the first
+> pass — `missing_dedupResidue` closes, the Weaver stops dispatching, and 500 live `duplicateOf` links
+> naming an erased person survive with a seal written over them. The Loom step is a single `systemOp`
+> and does not cover the tail either. **The lens must count `duplicateOf` in both directions** — either
+> folded into `dedupResidue` alongside `indexResidue`, or as its own `missing_duplicateResidue` gap
+> dispatching the same op. This is now a **three-way** `OPTIONAL MATCH` fan-out on the dedup side
+> alone, which is the R5 shape and inherits its `count(DISTINCT CASE WHEN …)` fallback. *(If the engine cannot carry three `OPTIONAL MATCH` fan-outs in one row without a
 cartesian blow-up — the `count(DISTINCT CASE WHEN …)` idiom at `lease-signing/lenses.go:646` exists
 precisely for that — the build collapses them into that form. Flagged, not assumed.)*
 
@@ -759,8 +777,8 @@ By construction, at every level:
    *constant*, for every identity in the corpus. The `total_muts` computation and the
    `ShredBatchTooLarge` fail are **deleted** (`shred_identity_key.go:321-330`), and so are the three
    `…FanoutTooLarge` failures (#2), because their enumerations leave with them.
-2. **Every step op is bounded by a page**, not by the subject's connectivity: ≤ `2·PAGE + 1` (step 3)
-   and ≤ `3·PAGE` (step 4), with `PAGE = 256` (§5.4). Both are far under the 999 platform ceiling with
+2. **Every step op is bounded by a page**, not by the subject's connectivity: ≤ `2·SWEEP_LIMIT + 1`
+   (step 3) and ≤ `2·SWEEP_LIMIT` (step 4), with `SWEEP_LIMIT = 64` (§5.4 as amended). Both are far under the 999 platform ceiling with
    room to spare, and — the load-bearing part — **the bound does not depend on any input**. A person
    with 10,000 credentials produces 20 identical bounded commits, not one refusal.
 3. **The tail is covered by convergence, not by a bigger commit.** Each pass strictly decreases the
@@ -803,7 +821,33 @@ By construction, at every level:
      only past ~16k links in one direction — far beyond where today's in-shred cascade already
      refuses — and the durable fix is the shelved hard-delete verb or a per-relation epoch.
 
-**Net: there is no input for which the platform can decline to erase a person.**
+**Net: there is no input for which the platform can decline to erase a person — of the MUTATION
+count, which is what this section bounds.**
+
+**Corrected by increment 4 — the READ side carries a ceiling this section never bounded, and the
+sweep builds its own way into it.** The enumeration is a stable ascending scan over the keyspace, and
+a tombstone stays in it, so each pass drains the lexicographically-earliest live links and the
+tombstone prefix ahead of them grows by `SWEEP_LIMIT` every time. A subject with more than
+`MAX_*_PAGES × PAGE` links **on one relation** therefore converges normally until that prefix fills
+the scan window, and then stops permanently at `ErasureResidueUnreachable` — with no pre-existing
+tombstones required, which is what the previous wording ("only past ~16k *tombstoned* links, far
+beyond where today's cascade refuses") got wrong. Two consequences follow, and neither is a reason
+to prefer the un-decomposed shred, which refuses around **500** index links where this reaches ~16k:
+
+- **The claim is about mutations.** A subject past the window cannot be fully erased by this
+  machinery, and because the `indexes` collector runs first on every dispatch, its failure also
+  blocks the two `duplicateOf` classes for that subject. The stop is loud and surfaced rather than a
+  silent stall, which is the property that makes it repairable.
+- **The per-pass READ cost grows with what has already been swept.** Each pass re-pages over the
+  accumulated tombstones before reaching a live link, so a whole erasure costs `O(L²/SWEEP_LIMIT)`
+  round trips and a single pass can approach the Processor's 250 ms Starlark wall well before the
+  window ceiling — a refusal through the second door this section's own amendment warns about, on the
+  read side rather than the write side.
+
+**The durable fix is the shelved hard-delete mutation verb**, whose board row already records that a
+tombstoned key persists and is still enumerated by `kv.Links`. A tombstone that leaves the keyspace
+removes the ceiling and the rescan cost together. Increment 3 named that row as this design's first
+real driver; increment 4 is the measurement that makes the driver concrete.
 
 ---
 
@@ -812,7 +856,7 @@ By construction, at every level:
 | # | Risk | Mitigation |
 |---|---|---|
 | **R1** | **First Weaver-driven paged sweep in the codebase** (#40). No precedent for a `directOp` that processes N rows and expects re-dispatch. If the uncapped-budget reading of `evaluator.go:875-881` is wrong in practice, sweeps stall at 3 passes. | Inc 4 proves it with an integration test at `N > 3·PAGE` before any other convergence work lands. Fallback is a lens-computed `maxretries_erasureresidue = ceil(N/PAGE) + 2` — grounded, since a row-declared cap always wins (#28) — at the cost of a baroque column. |
-| **R2** | **`Scope:"any"` grants on erasure verbs** (§5.3). Three new ops that tombstone credentials, granted to service actors. | No `OpMeta` descriptor, no person-facing affordance, no operator grant. Submitters are `identity.system.loom` and `identity.system.weaver` only. `make verify-package-*` on both packages; the grant matrix diff is a review gate in its own right. |
+| **R2** | **`Scope:"any"` grants on erasure verbs** (§5.3). Three new ops that tombstone credentials, granted to service actors. | No `OpMeta` descriptor and no person-facing affordance. The grant IS to `operator` — grants attach to roles, not actor keys, so that is how a service actor is reached at all, and it reaches human operators with it; each op therefore fail-closes on the `erasureRequested` marker's class, conferring no authority a completed seal has not already exercised. Intended submitters are `identity.system.loom` and `identity.system.weaver`. `make verify-package-*` on both packages; the grant matrix diff is a review gate in its own right. |
 | **R3** | **§6's write gates are a behaviour change on the hot claim path.** `ClaimIdentity` gains a read and a rejection. | The read is class-(d) `optionalReads` (one extra hydration key, absent for every non-erased identity). The rejection is unreachable for anyone not erased. Full `go test ./...` — a shared claim-path default reaches unedited consumers. |
 | **R4** | **Ledger #26**: Loom's contract describes a retry branch the code lacks. A step that fails goes terminal with no retry. | Not relied upon (§5.5): a dead spine degrades to eventual, never to incomplete, because the Weaver tail is independent. Pre-existing divergence — worth its own board row, out of scope here. |
 | **R5** | **Three `OPTIONAL MATCH` fan-outs in one lens row** may not project cleanly (§7.1). | Collapse to the `count(DISTINCT CASE WHEN …)` idiom (`lease-signing/lenses.go:646-647`). Proven by a `lens_cypher_test.go` parse test against the full engine before Inc 4 — the `packages/privacy-base/lens_cypher_test.go:65` precedent. |
@@ -1627,7 +1671,7 @@ more than `PAGE` credentials gets one page from the pattern's step 3 and the res
    identical closure. **Consumer: the fire that builds `SealIdentityForErasureComplete`.**
 
 
-## Fire B build note — increment 3 (2026-08-07): the unbind primitive
+### What increment 3 shipped
 
 Shipped `d66cb731`. **§12 Fire B step 1 is complete**; step 2 (the pattern, the residue lens, the
 Weaver target, the completion seal) is the next fire.
@@ -1787,3 +1831,122 @@ verbatim rather than re-filed.
 surface gaps, `SealIdentityForErasureComplete`, and narrowing `ShredIdentityKey` (step 3 — and the
 shred keeps its enumerations until step 2 completes, per §12's build order, so this op and the shred
 deliberately overlap for now).
+
+### What increment 4 built
+
+`PurgeIdentityDedupFootprint` in `privacy-base`, as its own `meta.ddl.vertexType` DDL
+(`purge_identity_dedup_footprint.go`, mirroring `identity-domain/unbind_identity_credentials.go`),
+granted `Scope:"any"` to `operator` with a `[no-op-meta: engine-op — …]` exemption and no
+descriptor. Package `0.5.0 → 0.6.0`.
+
+| Class | Direction | Per hit | Mutations/commit |
+|---|---|---|---|
+| `indexes` | in | tombstone the `vtx.identityindex.<hash>` source **and** the link | `2·SWEEP_LIMIT` |
+| `duplicateOf` | out, then in | tombstone the link only — the other endpoint is a live person | `SWEEP_LIMIT` |
+
+One class per commit, in that order. It emits nothing and names no `primaryKey`, and it refuses a
+subject carrying no `erasureRequested` marker **of that class** (`ErasureNotSealed`).
+
+The tombstones carry **no document**: `buildMutationValue` seeds a tombstone's document from the
+prior body, and that prior comes from `readPriorDocuments`, a commit-time read independent of
+`contextHint`. So class and `data` survive without the `kv.Read` per index vertex the shred spends —
+up to 64 hydrating reads a pass, which is real headroom against the wall budget that sized
+`SWEEP_LIMIT`.
+
+### The confinement the bodyless tombstone removed, and had to get back
+
+Dropping the document is what buys the reads, and it also drops the only thing that was checking
+**what** gets destroyed. Three facts compose: the enumeration's server filter is
+`lnk.*.*.indexes.identity.<subjectId>`, so the source **type** is a wildcard; `sourceVertex` is
+derived faithfully from whatever the key says; and step 6 derives the class from the mutation
+document, so a document-less tombstone skips DDL resolution and never consults `permittedCommands`
+on the key being destroyed. Nothing downstream re-checks, and the `indexes` linkType ships
+`permittedCommands` **empty** on purpose (*multi-writer, open posture*), so the platform enforces
+nothing here either.
+
+A link at `lnk.identity.<victim>.indexes.identity.<subject>` therefore made this op tombstone the
+victim's identity root, under a `scope:any` grant. No shipped op creates a non-identityindex-sourced
+`indexes` link, so it was safe by **accident of corpus shape**, not by an invariant — and the sibling
+this op mirrors is structurally immune for a reason that did not carry over: it runs the source
+through `crypto.sha256NanoID` into a derived `credentialindex` key, so a poisoned source can only
+tombstone a key that does not exist.
+
+`sweep_indexes` now tombstones the source only when it lies in the `vtx.identityindex.` keyspace. A
+foreign source is **skipped, not fatal, and its link still goes** — the link is genuinely the
+subject's inbound edge and removing it is what shrinks the residue, so convergence is unaffected;
+refusing the whole sweep would let one planted link make a person unerasable, trading a destructive
+failure for a fail-open one.
+
+### Three corrections the build made to the ratified text
+
+All three are recorded in the design body above, not only here.
+
+1. **§7.1's residue predicate cannot ride on `indexResidue` alone.** Its justification — *"`duplicateOf`
+   and `indexes` are cleared by one op"* — assumed one commit drains both. This build takes one class
+   per commit, so a subject whose `indexes` links clear first closes the gap while its `duplicateOf`
+   links are still live, and the seal would be written over them. **The lens increment must count
+   `duplicateOf` in both directions.**
+2. **§5.4 and §10 point 2's `≤ 3·PAGE` bound for step 4 was wrong in both directions** — it
+   under-counted the per-hit cost (an `indexes` hit is two mutations) and over-counted the batch. The
+   real bound is `2·SWEEP_LIMIT = 128`, held by sweeping one class per commit.
+3. **§10's "no input for which the platform can decline to erase a person" is a statement about the
+   MUTATION count only.** The read side has a ceiling nothing bounded, and the sweep builds its own
+   way into it: the scan is stable and ascending and a tombstone stays in the keyspace, so the prefix
+   ahead of the live links grows by `SWEEP_LIMIT` every pass until it fills the window. Past ~16k
+   links on one relation the op stops permanently — loudly, which is the repairable failure — and the
+   per-pass rescan makes the whole erasure `O(L²/SWEEP_LIMIT)` round trips, which can approach the
+   250 ms wall well before the ceiling.
+
+### The proofs
+
+`TestPurgeIdentityDedupFootprint_WideSubject_ConvergesPastOnePage` seeds 300 owned index vertices —
+**past the 256-key read page, which is the number that matters** — and requires every pass to strictly
+decrease the residue to zero. Mutation-tested against the single-page implementation §10 originally
+specified: it **stalls at 46 residue on pass 5**, exactly as the corrected §10 predicts. A 150-link
+fixture passes against that same broken build, which is why the number is 300 and must not be
+lowered. `…_DuplicateOfOnly_ConvergesPastOnePage` is the same proof for the other arm, which the
+indexes test cannot reach.
+
+`…_ForeignSourcedIndexesLink_SpareTheVertex` is the confinement proof, and it fails against the
+unguarded build by tombstoning a bystander's identity root.
+
+Seven siblings cover: the ordinary indexes sweep over a footprint `CreateUnclaimedIdentity` really
+built; both `duplicateOf` directions on one subject; the cost ordering that sets the batch bound (a
+build sweeping the classes together passes every other test and fails this one); `ErasureNotSealed`
+and the foreign-marker-class refusal, each **paired with its own positive vector over one corpus**;
+the tombstoned marker still arming the verb; absent and tombstoned subjects, likewise paired; the
+ungranted-actor denial against a control holding the same role on the same lane; idempotence as an
+unchanged revision rather than a bare re-accept; that a tombstone preserves class and `data`; and
+that the op **emits nothing**.
+
+### Residuals — named, with their consumers
+
+1. **The lens must count `duplicateOf`** (correction 1). **Consumer: the residue-lens increment**, the
+   next unit of §12 step 2.
+2. **R1's dispatch-count proof is not in this increment.** §12 step 2 asks for `N > 3·PAGE` proving
+   the sweep is dispatched more than three times, but R1's actual risk is the **Weaver's** retry
+   budget suppressing at 3 — untestable until a target exists. These tests re-dispatch from the test
+   body instead. **Consumer: the `identityErasureComplete` weaverTarget increment.**
+3. **The read-side ceiling and the quadratic rescan** (correction 3). **Consumer: the shelved
+   hard-delete mutation verb**, whose row already records that a tombstoned key persists and is still
+   enumerated by `kv.Links`. Increment 3 named that row as this design's first driver; this is the
+   measurement that makes it concrete, and it is a stronger driver than the ceiling alone.
+4. **An erased person's still-live index vertex denies a live person their own.** While `A` is sealed
+   but not yet swept, `C` registering with `A`'s email sees a live index hit, so no index vertex is
+   created for `C` and — because the match is erased — no `duplicateOf` is recorded either. This op
+   then tombstones the vertex, and the next registrant revives it pointing at themselves. `C` is left
+   permanently absent from the dedup index. Originates in §6's gates; this increment is what makes it
+   irreversible. **Consumer: the write-path gate that suppresses the index probe's hit for an
+   erasure-sealed owner** — filed as its own board row.
+5. **`ErasureResidueUnreachable`, `NotFound` on an absent subject via the enumeration path, and the
+   live-read budget's worst case are untested.** The first needs a ~16k-link fixture. The budget's
+   worst case is ~49k units against a 60k default — it fits, but the constant's own sizing comment
+   does not yet name this op. **Consumer: the fire that raises `SWEEP_LIMIT`, either page constant, or
+   the number of relations swept.**
+6. **`UnbindIdentityCredentials`' Description carries the same absolute "can never refuse" sentence**
+   this increment corrected in its own. A description-only edit still requires an `identity-domain`
+   version bump, so it is deliberately not made here. **Consumer: the increment that narrows
+   `ShredIdentityKey` (§12 step 3), which touches both packages.**
+7. **There is no `make verify-package-privacy-base` target**, so the standard package gate does not
+   exist for this package; `lint-package-standard`, `lint-package-version` and the package's own
+   tests are what cover it. **Consumer: the fire that adds the target.**
