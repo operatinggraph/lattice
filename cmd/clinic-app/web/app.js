@@ -2650,7 +2650,13 @@ function renderLedger(data) {
     const sign = t.type === "debit" ? "+" : "−";
     const d = new Date(t.postedAt);
     const when = isNaN(d) ? t.postedAt : d.toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
-    li.textContent = when + " · " + sign + moneyAmount(t.amountCents) + (t.memo ? " — " + t.memo : "");
+    let line = when + " · " + sign + moneyAmount(t.amountCents) + (t.memo ? " — " + t.memo : "");
+    if (t.visitStartsAt) {
+      const vd = new Date(t.visitStartsAt);
+      const visitWhen = isNaN(vd) ? t.visitStartsAt : vd.toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
+      line += " (visit " + visitWhen + ")";
+    }
+    li.textContent = line;
     list.append(li);
   }
 }

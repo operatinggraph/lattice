@@ -135,9 +135,20 @@ RETURN
 // produces). The per-row key is the transaction key (the IntoKey default), so
 // the read model is keyed by vtx.clinictransaction.<id>; transactionKey
 // repeats it in the body for the reader.
+//
+// The settles hop is OPTIONAL (unlike the two above) because most
+// transactions — copays, payments — never settle an appointment; only a
+// clinicNoShowSettlement-dispatched debit does (targets.go's
+// appointmentRef param, written as the settles link). Surfacing
+// appointmentKey/visitStartsAt here is what lets a reader tie an otherwise
+// identical "No-show fee" line to the specific visit that caused it — the
+// link already existed for noShowSettlementSpec's own convergence check
+// (:105-ish above); this just also projects it into the history a patient
+// or front-desk actually reads.
 const ledgerHistorySpec = `MATCH (t:clinictransaction)
 MATCH (t)-[:postedTo]->(a:clinicaccount)
 MATCH (a)-[:heldFor]->(pt:patient)
+OPTIONAL MATCH (t)-[:settles]->(appt:appointment)
 RETURN
   t.key AS key,
   t.key AS transactionKey,
@@ -148,7 +159,9 @@ RETURN
   t.entry.data.memo AS memo,
   t.entry.data.postedAt AS postedAt,
   t.entry.data.billedTo AS billedTo,
-  t.entry.data.expectedReimbursementCents AS expectedReimbursementCents`
+  t.entry.data.expectedReimbursementCents AS expectedReimbursementCents,
+  appt.key AS appointmentKey,
+  appt.schedule.data.startsAt AS visitStartsAt`
 
 // patientAccountsSpec projects one row per patient — the anchor is the
 // patient (not the account), so a patient with no ledger account yet still

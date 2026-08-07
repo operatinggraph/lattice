@@ -184,3 +184,69 @@ func TestClinicNoShowSettlement_NoShowCharged_Converged(t *testing.T) {
 	require.Equal(t, false, v["missing_charge"], "a clinictransaction settles this appointment — converged")
 	require.Equal(t, false, v["violating"])
 }
+
+// project runs the unanchored clinicLedgerHistory spec — the engine
+// enumerates its own roots and no actorKey is supplied, mirroring
+// cafe-ledger/lens_cypher_test.go's `project` helper.
+func (f *clFixture) project(t *testing.T, specName, spec string) []ruleengine.ProjectionResult {
+	t.Helper()
+	now := time.Now().UTC().Format(time.RFC3339)
+	eng := full.New()
+	cr, err := eng.Parse(spec)
+	require.NoError(t, err, "%s cypher must parse on the full engine", specName)
+	out, err := eng.ExecuteWith(context.Background(), cr, ruleengine.EventContext{Parameters: map[string]any{
+		"now":         now,
+		"projectedAt": now,
+	}}, f.adjKV, f.coreKV)
+	require.NoError(t, err)
+	return out
+}
+
+// mkPostedTransaction seeds the shape a committed DebitAccount/CreditAccount
+// produces: a clinictransaction posted to a clinicaccount held for a patient.
+func (f *clFixture) mkPostedTransaction(t *testing.T, prefix string, amountCents float64, memo string) {
+	t.Helper()
+	f.vtx(t, prefix+"_patient", "patient")
+	f.vtx(t, prefix+"_acct", "clinicaccount")
+	f.vtx(t, prefix+"_tx", "clinictransaction")
+	f.edge(t, "heldFor", prefix+"_acct", prefix+"_patient")
+	f.edge(t, "postedTo", prefix+"_tx", prefix+"_acct")
+	f.aspect(t, prefix+"_tx", "entry", "transactionEntry", map[string]any{
+		"type":        "debit",
+		"amountCents": amountCents,
+		"memo":        memo,
+		"postedAt":    "2026-08-06T00:00:00Z",
+	})
+}
+
+func TestClinicLedgerHistory_SettlesAppointment_ProjectsVisit(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newClFixture(t)
+	f.mkPostedTransaction(t, "noshow", 2500, "No-show fee")
+	f.vtx(t, "noshow_appt", "appointment")
+	f.aspect(t, "noshow_appt", "schedule", "appointmentSchedule", map[string]any{"startsAt": "2026-08-05T09:00:00Z"})
+	f.edge(t, "settles", "noshow_tx", "noshow_appt")
+
+	rows := f.project(t, "clinicLedgerHistory", ledgerHistorySpec)
+	require.Len(t, rows, 1)
+	v := rows[0].Values
+	require.Equal(t, "vtx.appointment."+f.ids["noshow_appt"], v["appointmentKey"],
+		"the settles link ties this charge to the visit that caused it")
+	require.Equal(t, "2026-08-05T09:00:00Z", v["visitStartsAt"])
+}
+
+func TestClinicLedgerHistory_NoSettlesLink_ProjectsNullVisit(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newClFixture(t)
+	f.mkPostedTransaction(t, "copay", 15000, "Copay")
+
+	rows := f.project(t, "clinicLedgerHistory", ledgerHistorySpec)
+	require.Len(t, rows, 1)
+	v := rows[0].Values
+	require.Nil(t, v["appointmentKey"], "a copay settles no appointment — OPTIONAL MATCH leaves it null")
+	require.Nil(t, v["visitStartsAt"])
+}

@@ -22,15 +22,23 @@ type ledgerEntryProjection struct {
 	AmountCents    *float64 `json:"amountCents"`
 	Memo           string   `json:"memo"`
 	PostedAt       string   `json:"postedAt"`
+	AppointmentKey string   `json:"appointmentKey"`
+	VisitStartsAt  string   `json:"visitStartsAt"`
 }
 
-// ledgerEntryRow is the billing-history row the FE renders.
+// ledgerEntryRow is the billing-history row the FE renders. AppointmentKey /
+// VisitStartsAt are empty for the common transaction (a copay or payment
+// settles no appointment) — only a no-show debit's settles hop populates
+// them, which is what lets the FE tell two otherwise-identical "No-show fee"
+// lines apart.
 type ledgerEntryRow struct {
 	TransactionKey string `json:"transactionKey"`
 	Type           string `json:"type"`
 	AmountCents    int64  `json:"amountCents"`
 	Memo           string `json:"memo,omitempty"`
 	PostedAt       string `json:"postedAt"`
+	AppointmentKey string `json:"appointmentKey,omitempty"`
+	VisitStartsAt  string `json:"visitStartsAt,omitempty"`
 }
 
 // computeLedgerHistory filters the ledgerHistory lens rows to one patient,
@@ -63,6 +71,8 @@ func computeLedgerHistory(keys []string, get kvGetter, patientKey string) ([]led
 			AmountCents:    amount,
 			Memo:           p.Memo,
 			PostedAt:       p.PostedAt,
+			AppointmentKey: p.AppointmentKey,
+			VisitStartsAt:  p.VisitStartsAt,
 		})
 	}
 	sort.Slice(rows, func(i, j int) bool {

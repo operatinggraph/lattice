@@ -24,6 +24,33 @@ func TestComputeLedgerHistory_FiltersSumsAndOrders(t *testing.T) {
 	}
 }
 
+func TestComputeLedgerHistory_CarriesAppointmentTie(t *testing.T) {
+	keys, get := fakeKV(map[string]any{
+		"vtx.clinictransaction.5": map[string]any{"transactionKey": "vtx.clinictransaction.5", "accountKey": "vtx.clinicaccount.ppp", "patientKey": "vtx.patient.ppp", "type": "debit", "amountCents": 2500, "memo": "No-show fee", "postedAt": "2026-08-06T00:00:00Z", "appointmentKey": "vtx.appointment.a1", "visitStartsAt": "2026-08-05T09:00:00Z"},
+		// a copay settles no appointment — the tie fields are just empty, not an error
+		"vtx.clinictransaction.6": map[string]any{"transactionKey": "vtx.clinictransaction.6", "accountKey": "vtx.clinicaccount.ppp", "patientKey": "vtx.patient.ppp", "type": "debit", "amountCents": 15000, "memo": "Copay", "postedAt": "2026-08-06T00:00:00Z"},
+	})
+
+	rows, _ := computeLedgerHistory(keys, get, "vtx.patient.ppp")
+	if len(rows) != 2 {
+		t.Fatalf("want 2 rows, got %d (%+v)", len(rows), rows)
+	}
+	var noShow, copay ledgerEntryRow
+	for _, r := range rows {
+		if r.TransactionKey == "vtx.clinictransaction.5" {
+			noShow = r
+		} else {
+			copay = r
+		}
+	}
+	if noShow.AppointmentKey != "vtx.appointment.a1" || noShow.VisitStartsAt != "2026-08-05T09:00:00Z" {
+		t.Errorf("no-show row: want appointment tie, got AppointmentKey=%q VisitStartsAt=%q", noShow.AppointmentKey, noShow.VisitStartsAt)
+	}
+	if copay.AppointmentKey != "" || copay.VisitStartsAt != "" {
+		t.Errorf("copay row: want no appointment tie, got AppointmentKey=%q VisitStartsAt=%q", copay.AppointmentKey, copay.VisitStartsAt)
+	}
+}
+
 func TestComputeLedgerHistory_NoTransactionsZeroBalance(t *testing.T) {
 	rows, balance := computeLedgerHistory(nil, func(string) ([]byte, bool) { return nil, false }, "vtx.patient.fresh")
 	if len(rows) != 0 || balance != 0 {
