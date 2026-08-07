@@ -398,6 +398,27 @@ func (e *Engine) handleTrigger(ctx context.Context, msg substrate.Message) subst
 			"instanceId", t.InstanceID, "patternRef", t.PatternRef)
 		return substrate.Ack
 	}
+	// subjectKey names a VERTEX — `vtx.<type>.<id>`, three segments. The trigger
+	// payload is caller-supplied, and the subject is the namespace every
+	// subject-relative construct in the pattern is rendered against: a step's
+	// declared reads resolve to `subjectKey` and `subjectKey + "." + aspect`
+	// (systemOpReads). A deeper key would silently redirect that rendering — a
+	// caller passing `vtx.identity.<id>.piiKey` would have `subject` name the
+	// aspect itself, and the confinement the grammar claims (a step can only
+	// reach its own subject's keys) would not hold. Bind the namespace to a
+	// vertex shape here, where the input enters, rather than trusting each
+	// consumer downstream to re-derive it. Redelivery cannot fix a malformed
+	// key, so drop it (Ack), loudly — the same posture as the id check above.
+	//
+	// Shape only, not a NanoID check: the id segment's canonical form is a
+	// separate concern (and one the guard evaluator and the pinned instance
+	// record share), while three-segment-ness is the whole of what confinement
+	// needs.
+	if parts := strings.Split(t.SubjectKey, "."); len(parts) != 3 || parts[0] != "vtx" || parts[1] == "" || parts[2] == "" {
+		e.logger.Warn("loom: patternStarted subjectKey is not a vtx.<type>.<id> vertex key; dropping",
+			"subjectKey", t.SubjectKey, "patternRef", t.PatternRef, "instanceId", t.InstanceID)
+		return substrate.Ack
+	}
 
 	// Idempotency on instanceId: a redelivered trigger finds the cursor present
 	// and skips (Contract #10 §10.9) — unless the prior delivery crashed between
@@ -860,11 +881,18 @@ func (e *Engine) submitSystemOp(ctx context.Context, inst *Instance, pattern *Pa
 
 	target := pattern.MetaKey
 	payload := map[string]any{"subjectKey": inst.SubjectKey}
-	// A systemOp's bound op is read-free in the Phase-2 vocabulary (the lifecycle
-	// ops are event-only — empty mutations, no vertex_alive), so no
-	// ContextHint.Reads is declared. A future systemOp that reads would set its
-	// own read-set here from the step's known target.
-	ob, err := buildOutbox(token, step.Operation, payload, target, e.cfg.Lane, e.cfg.ActorKey, nil, nil, nil)
+	// The step's declared read-sets are subject-relative templates (`subject`,
+	// `subject.<aspect>`), because a pattern definition is authored before any
+	// subject exists — the concrete keys are knowable only here, against this
+	// instance. A step that declares nothing stays read-free, which is what the
+	// event-only lifecycle ops are.
+	//
+	// egressReads stays nil: a systemOp's bound op is an internal-plane op, and
+	// the external plane's declared egress belongs to the externalTask arm,
+	// which infers it from the step's params (inferExternalTaskReads).
+	reads := systemOpReads(step.Reads, inst.SubjectKey)
+	optionalReads := systemOpReads(step.OptionalReads, inst.SubjectKey)
+	ob, err := buildOutbox(token, step.Operation, payload, target, e.cfg.Lane, e.cfg.ActorKey, reads, optionalReads, nil)
 	if err != nil {
 		return err
 	}
@@ -875,6 +903,28 @@ func (e *Engine) submitSystemOp(ctx context.Context, inst *Instance, pattern *Pa
 		"instanceId", inst.InstanceID, "cursor", inst.Cursor,
 		"kind", step.Kind, "operation", step.Operation, "requestId", token)
 	return nil
+}
+
+// systemOpReads resolves a systemOp step's declared read templates against the
+// running instance's subject. It is the systemOp counterpart of userTaskReads:
+// where a userTask's set is DERIVED from the CreateTask invariant (the engine
+// knows what CreateTask reads), a systemOp's bound op is package-authored, so
+// the set is DECLARED by the pattern and the engine only renders it — the
+// engine never learns what a package's op reads.
+//
+// nil in, nil out: a step declaring nothing produces a nil read-set, so the
+// event-only lifecycle ops keep the exact outbox shape they have always had.
+// The templates are validated at pattern load (validateSubjectTemplates), so
+// every entry here is renderable.
+func systemOpReads(templates []string, subjectKey string) []string {
+	if len(templates) == 0 {
+		return nil
+	}
+	keys := make([]string, len(templates))
+	for i, t := range templates {
+		keys[i] = resolveSubjectTemplate(t, subjectKey)
+	}
+	return keys
 }
 
 // userTaskReads is the ContextHint.Reads set for a userTask's CreateTask. The

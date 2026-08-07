@@ -81,3 +81,8 @@ func IsValidNanoID(s string) bool { return keys.IsValidNanoID(s) }
 
 // IsValidShortCode reports whether s is a canonical 8-character short code.
 func IsValidShortCode(s string) bool { return keys.IsValidShortCode(s) }
+
+// IsValidLocalName reports whether s is a Contract #1 aspect/link local name —
+// an aspect key's fourth segment. For a caller holding a local name but not yet
+// a whole key to parse.
+func IsValidLocalName(s string) bool { return keys.IsValidLocalName(s) }

@@ -850,9 +850,9 @@ func actionCatalogEntryBody(e ActionCatalogEntrySpec) map[string]any {
 // steps}` shape the Loom pattern source deserializes into a runtime Pattern.
 // completionDomains is omitted when empty (it defaults to {subjectType}); a
 // step's guard is omitted when nil. systemOp/userTask emit `operation`;
-// externalTask emits `adapter`/`params`/`replyOp`/`instanceOp` — each field is
-// emitted only when set, so the round-tripped step matches the engine Step
-// shape the validate() admits.
+// externalTask emits `adapter`/`params`/`replyOp`/`instanceOp`; a systemOp
+// emits `reads`/`optionalReads` — each field is emitted only when set, so the
+// round-tripped step matches the engine Step shape the validate() admits.
 func loomPatternSpecBody(p LoomPatternSpec) map[string]any {
 	steps := make([]any, len(p.Steps))
 	for i, s := range p.Steps {
@@ -871,6 +871,12 @@ func loomPatternSpecBody(p LoomPatternSpec) map[string]any {
 		}
 		if s.InstanceOp != "" {
 			step["instanceOp"] = s.InstanceOp
+		}
+		if len(s.Reads) > 0 {
+			step["reads"] = s.Reads
+		}
+		if len(s.OptionalReads) > 0 {
+			step["optionalReads"] = s.OptionalReads
 		}
 		if len(s.Guard) > 0 {
 			step["guard"] = s.Guard

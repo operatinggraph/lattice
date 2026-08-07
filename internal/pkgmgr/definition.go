@@ -455,6 +455,19 @@ type StepSpec struct {
 	// vertex and emits the external.<adapter> event (required for externalTask,
 	// unused otherwise).
 	InstanceOp string
+
+	// Reads and OptionalReads are the Contract #2 §2.5 declared read-sets a
+	// systemOp step's bound op needs hydrated, written as templates against the
+	// instance subject: the bare token `subject`, or `subject.<aspect>` for one
+	// of its aspects. The engine resolves each against the instance's subjectKey
+	// at submit time — a pattern author never writes a concrete key, because the
+	// subject is not known until an instance runs.
+	//
+	// systemOp-only. A userTask's read-set is derived by the engine from the
+	// CreateTask invariant, and an externalTask's from its declared params, so a
+	// declared set on either kind rejects the whole pattern.
+	Reads         []string
+	OptionalReads []string
 }
 
 // OpMetaSpec is one op-meta vertex a package declares so an op is discoverable

@@ -130,13 +130,15 @@ type WeaverTargetArtifactContent struct {
 // (§10.5), reused verbatim so an AI-authored step can never carry a shape the
 // engine wouldn't already accept from a hand-authored package.
 type StepArtifact struct {
-	Kind       string         `json:"kind"`
-	Operation  string         `json:"operation,omitempty"`
-	Guard      map[string]any `json:"guard,omitempty"`
-	Adapter    string         `json:"adapter,omitempty"`
-	Params     map[string]any `json:"params,omitempty"`
-	ReplyOp    string         `json:"replyOp,omitempty"`
-	InstanceOp string         `json:"instanceOp,omitempty"`
+	Kind          string         `json:"kind"`
+	Operation     string         `json:"operation,omitempty"`
+	Guard         map[string]any `json:"guard,omitempty"`
+	Adapter       string         `json:"adapter,omitempty"`
+	Params        map[string]any `json:"params,omitempty"`
+	ReplyOp       string         `json:"replyOp,omitempty"`
+	InstanceOp    string         `json:"instanceOp,omitempty"`
+	Reads         []string       `json:"reads,omitempty"`
+	OptionalReads []string       `json:"optionalReads,omitempty"`
 }
 
 // LoomPatternArtifactContent is the JSON shape of a "loomPattern"-kind
@@ -454,13 +456,15 @@ var knownLoomPatternFields = map[string]bool{
 // trail — the same class as knownGapActionFields one level down from a
 // weaverTarget's gaps.
 var knownStepFields = map[string]bool{
-	"kind":       true,
-	"operation":  true,
-	"guard":      true,
-	"adapter":    true,
-	"params":     true,
-	"replyOp":    true,
-	"instanceOp": true,
+	"kind":          true,
+	"operation":     true,
+	"guard":         true,
+	"adapter":       true,
+	"params":        true,
+	"replyOp":       true,
+	"instanceOp":    true,
+	"reads":         true,
+	"optionalReads": true,
 }
 
 // unknownLoomPatternFields decodes content as a generic JSON object and returns

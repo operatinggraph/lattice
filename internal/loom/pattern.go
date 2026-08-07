@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+
+	"github.com/operatinggraph/lattice/internal/substrate"
 )
 
 // Step kinds (Contract #10 §10.5). A systemOp step submits its bound op
@@ -45,6 +47,87 @@ type Step struct {
 	// vertex (with the caller-supplied instance handle) and emits the
 	// external.<adapter> event via its own transactional outbox.
 	InstanceOp string `json:"instanceOp,omitempty"`
+
+	// Reads and OptionalReads are the Contract #2 §2.5 read-sets a systemOp
+	// step's bound op needs hydrated, declared as subject-relative templates
+	// (`subject` or `subject.<aspect>`) because a pattern is authored long before
+	// any subject exists. submitSystemOp resolves them against inst.SubjectKey.
+	//
+	// systemOp-only, enforced by validate: a userTask's read-set is derived by
+	// the engine from the CreateTask invariant (userTaskReads) and an
+	// externalTask's from its declared params (inferExternalTaskReads), so a
+	// declared set on either kind would be silently ignored — the pattern is
+	// rejected instead, the same doctrine as a kind carrying a foreign field.
+	Reads         []string `json:"reads,omitempty"`
+	OptionalReads []string `json:"optionalReads,omitempty"`
+}
+
+// subjectToken is the root of a step's declared-read template grammar: the bare
+// token names the instance subject's vertex, `subject.<aspect>` one of its
+// aspects.
+const subjectToken = "subject"
+
+// resolveSubjectTemplate renders one declared-read template against a concrete
+// subject key. `subject` → the root key; `subject.<aspect>` → the 4-segment
+// aspect key `vtx.<type>.<id>.<aspect>` (Contract #1) — the same key shape
+// userTaskOptionalReads builds for the assignee's `.availability`. Templates are
+// validated at pattern load, so an unparseable one never reaches here.
+func resolveSubjectTemplate(tmpl, subjectKey string) string {
+	if tmpl == subjectToken {
+		return subjectKey
+	}
+	return subjectKey + strings.TrimPrefix(tmpl, subjectToken)
+}
+
+// rejectDeclaredReads refuses a declared read-set on a kind whose read-set the
+// engine derives for itself. Silently ignoring the declaration would be the
+// worse outcome: an author who believes a key is hydrated writes a script that
+// reads it, and the miss surfaces as a hydration failure at run time rather
+// than a pattern that never loaded.
+func rejectDeclaredReads(patternID string, idx int, s Step, because string) error {
+	for _, f := range []struct {
+		name    string
+		entries []string
+	}{{"reads", s.Reads}, {"optionalReads", s.OptionalReads}} {
+		if len(f.entries) != 0 {
+			return fmt.Errorf("pattern %q step %d: %s is a systemOp-only field, not permitted on a %s step (%s)",
+				patternID, idx, f.name, s.Kind, because)
+		}
+	}
+	return nil
+}
+
+// validateSubjectTemplates checks one declared read-set against the grammar
+// resolveSubjectTemplate implements. Every entry must be subject-relative: the
+// subject is the only key a pattern definition can name at authoring time, so a
+// literal key is an authoring error rather than a shortcut — it would pin one
+// instance's data into the definition every instance of the pattern shares.
+//
+// The aspect segment is held to the full Contract #1 localName, not merely
+// "non-empty and dot-free". A rendered key travels to the Processor as a
+// ContextHint read and is fetched with a NATS KV GET, whose key charset is
+// narrower than "any string without a dot": a space, `*`, `>` or a non-ASCII
+// byte yields ErrInvalidKey rather than ErrKeyNotFound, which is not the
+// absence branch — it is a hard hydration error that every redelivery
+// reproduces, so the step wedges and the instance rides its deadline to a
+// failed terminal. Catching the charset here is the difference between a
+// pattern that never installs and a pattern that installs and runs dark.
+func validateSubjectTemplates(patternID string, idx int, field string, entries []string) error {
+	for _, e := range entries {
+		if e == subjectToken {
+			continue
+		}
+		aspect, ok := strings.CutPrefix(e, subjectToken+".")
+		if !ok {
+			return fmt.Errorf("pattern %q step %d: %s entry %q must be %q or %q — a step's reads are subject-relative templates",
+				patternID, idx, field, e, subjectToken, subjectToken+".<aspect>")
+		}
+		if !substrate.IsValidLocalName(aspect) {
+			return fmt.Errorf("pattern %q step %d: %s entry %q names %q, which is not a Contract #1 aspect localName",
+				patternID, idx, field, e, aspect)
+		}
+	}
+	return nil
 }
 
 // Pattern is the in-engine view of a meta.loomPattern definition. A pattern
@@ -212,6 +295,18 @@ func (p *Pattern) validate() error {
 			if len(s.Params) != 0 {
 				return fmt.Errorf("pattern %q step %d: params is an externalTask-only field, not permitted on a %s step", p.PatternID, i, s.Kind)
 			}
+			if s.Kind == StepKindUserTask {
+				if err := rejectDeclaredReads(p.PatternID, i, s, "the engine derives a userTask's read-set from the CreateTask invariant"); err != nil {
+					return err
+				}
+			} else {
+				if err := validateSubjectTemplates(p.PatternID, i, "reads", s.Reads); err != nil {
+					return err
+				}
+				if err := validateSubjectTemplates(p.PatternID, i, "optionalReads", s.OptionalReads); err != nil {
+					return err
+				}
+			}
 		case StepKindExternalTask:
 			if strings.TrimSpace(s.Adapter) == "" {
 				return fmt.Errorf("pattern %q step %d: adapter required for externalTask", p.PatternID, i)
@@ -224,6 +319,9 @@ func (p *Pattern) validate() error {
 			}
 			if strings.TrimSpace(s.Operation) != "" {
 				return fmt.Errorf("pattern %q step %d: operation is a systemOp/userTask-only field, not permitted on an externalTask step", p.PatternID, i)
+			}
+			if err := rejectDeclaredReads(p.PatternID, i, s, "an externalTask's read-set is inferred from its declared params"); err != nil {
+				return err
 			}
 		default:
 			return fmt.Errorf("pattern %q step %d: kind %q unsupported (systemOp | userTask | externalTask)",

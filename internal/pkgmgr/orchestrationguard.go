@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+
+	"github.com/operatinggraph/lattice/internal/substrate"
 )
 
 // singleTokenPattern accepts a value usable as a single NATS KV key segment,
@@ -276,7 +278,9 @@ func validateGapAction(targetIdx int, targetID, col string, ga GapActionSpec) er
 // {systemOp,userTask,externalTask}, with each kind's §10.5 shape enforced
 // exactly — required fields present AND foreign fields absent: systemOp/userTask
 // require a non-empty operation and forbid adapter/instanceOp/replyOp/params,
-// externalTask requires adapter/instanceOp/replyOp and forbids operation) plus
+// externalTask requires adapter/instanceOp/replyOp and forbids operation, and
+// only a systemOp may declare Reads/OptionalReads, whose entries must be
+// subject-relative templates) plus
 // a package-local patternId-uniqueness check (two patterns
 // minting the same create-only loomPattern key would collide on an opaque
 // conflict). It mirrors the engine's validate() exactly so an install never
@@ -318,6 +322,18 @@ func (def Definition) validateLoomPatterns() error {
 				if len(s.Params) != 0 {
 					return fmt.Errorf("pkgmgr: LoomPattern[%d] %q step %d: params is an externalTask-only field, not permitted on a %s step", idx, p.PatternID, sIdx, s.Kind)
 				}
+				if s.Kind == stepKindUserTask {
+					if err := rejectStepReads(idx, p.PatternID, sIdx, s, "the engine derives a userTask's read-set from the CreateTask invariant"); err != nil {
+						return err
+					}
+				} else {
+					if err := validateStepReadTemplates(idx, p.PatternID, sIdx, "reads", s.Reads); err != nil {
+						return err
+					}
+					if err := validateStepReadTemplates(idx, p.PatternID, sIdx, "optionalReads", s.OptionalReads); err != nil {
+						return err
+					}
+				}
 			case stepKindExternalTask:
 				if strings.TrimSpace(s.Adapter) == "" {
 					return fmt.Errorf("pkgmgr: LoomPattern[%d] %q step %d: adapter is required for externalTask", idx, p.PatternID, sIdx)
@@ -331,10 +347,59 @@ func (def Definition) validateLoomPatterns() error {
 				if strings.TrimSpace(s.Operation) != "" {
 					return fmt.Errorf("pkgmgr: LoomPattern[%d] %q step %d: operation is a systemOp/userTask-only field, not permitted on an externalTask step", idx, p.PatternID, sIdx)
 				}
+				if err := rejectStepReads(idx, p.PatternID, sIdx, s, "an externalTask's read-set is inferred from its declared params"); err != nil {
+					return err
+				}
 			default:
 				return fmt.Errorf("pkgmgr: LoomPattern[%d] %q step %d: kind %q unsupported (systemOp | userTask | externalTask)",
 					idx, p.PatternID, sIdx, s.Kind)
 			}
+		}
+	}
+	return nil
+}
+
+// stepSubjectToken is the root of a step's declared-read template grammar. It
+// mirrors loom's subjectToken: the installer and the engine validate the same
+// grammar so an install never admits a template the engine would reject at CDC
+// load — the same lockstep validateLoomPatterns keeps with validate().
+const stepSubjectToken = "subject"
+
+// rejectStepReads refuses a declared read-set on a step kind whose read-set the
+// engine derives for itself (userTask from the CreateTask invariant,
+// externalTask from its params). Mirrors loom's rejectDeclaredReads.
+func rejectStepReads(idx int, patternID string, sIdx int, s StepSpec, because string) error {
+	for _, f := range []struct {
+		name    string
+		entries []string
+	}{{"Reads", s.Reads}, {"OptionalReads", s.OptionalReads}} {
+		if len(f.entries) != 0 {
+			return fmt.Errorf("pkgmgr: LoomPattern[%d] %q step %d: %s is a systemOp-only field, not permitted on a %s step (%s)",
+				idx, patternID, sIdx, f.name, s.Kind, because)
+		}
+	}
+	return nil
+}
+
+// validateStepReadTemplates checks a systemOp step's declared read-set against
+// the subject-relative grammar the engine resolves at submit time: the bare
+// `subject` token, or `subject.<aspect>` for one of its aspects, with the aspect
+// held to the full Contract #1 localName — a rendered key is fetched with a NATS
+// KV GET, whose charset rejects (as a hard error, not an absence) anything a
+// bare dot-free check would admit. Mirrors loom's validateSubjectTemplates.
+func validateStepReadTemplates(idx int, patternID string, sIdx int, field string, entries []string) error {
+	for _, e := range entries {
+		if e == stepSubjectToken {
+			continue
+		}
+		aspect, ok := strings.CutPrefix(e, stepSubjectToken+".")
+		if !ok {
+			return fmt.Errorf("pkgmgr: LoomPattern[%d] %q step %d: %s entry %q must be %q or %q — a step's reads are subject-relative templates",
+				idx, patternID, sIdx, field, e, stepSubjectToken, stepSubjectToken+".<aspect>")
+		}
+		if !substrate.IsValidLocalName(aspect) {
+			return fmt.Errorf("pkgmgr: LoomPattern[%d] %q step %d: %s entry %q names %q, which is not a Contract #1 aspect localName",
+				idx, patternID, sIdx, field, e, aspect)
 		}
 	}
 	return nil

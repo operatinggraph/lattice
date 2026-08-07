@@ -154,6 +154,13 @@ func isValidTypeSegment(s string) bool {
 	return true
 }
 
+// IsValidLocalName reports whether s is a Contract #1 aspect/link local name.
+// It is exported for callers that must check a local name BEFORE they hold a
+// whole key to parse: a Loom pattern declaring a step read as
+// `subject.<aspect>` is validated at install and at pattern load, long before
+// any instance subject exists to build the key against.
+func IsValidLocalName(s string) bool { return isValidLocalName(s) }
+
 // isValidLocalName matches Contract #1 local-name pattern:
 // [a-z][a-zA-Z0-9]*. Underscore prefix is reserved (Contract #1 §1.4) and
 // is NOT a substrate-level validation concern — Processor enforces that at
