@@ -2250,8 +2250,26 @@ func (p *Pipeline) enqueueActorReprojectRetry(rawPayload []byte, actorKey string
 		RawPayload:   rawPayload,
 		RuleSequence: capturedSeq,
 		WriteFn: func(rctx context.Context) error {
-			_, err := p.Reproject(rctx, actorKey)
-			return err
+			res, err := p.Reproject(rctx, actorKey)
+			if err != nil {
+				return err
+			}
+			if res.Verdict == VerdictBlocked {
+				// The reconciliation ran and the ordering guard declined its
+				// write, so the repair this entry owes has NOT been made —
+				// retiring the entry here would report the owed repair as
+				// delivered and leave nothing else looking at the row.
+				//
+				// Retrying is productive rather than a spin: the token is the
+				// pipeline's last-applied sequence, which advances on every
+				// acked event, so a later attempt carries a token that can
+				// outrank the stored watermark. If the backoff is exhausted
+				// first, the entry reaches the DLQ and records an error, which
+				// is an honest terminal signal — and strictly better than the
+				// silence it replaces.
+				return fmt.Errorf("pipeline: actor-reproject %q: %s", actorKey, res.VerdictReason)
+			}
+			return nil
 		},
 		Attempt:     0,
 		MaxAttempts: p.retryMaxAttempts,

@@ -121,6 +121,18 @@ type UpsertOutcome struct {
 	// when an unguarded write was skipped because the marshaled row was
 	// already byte-identical to what's currently stored.
 	Wrote bool
+	// DeclinedByWatermark is true when a guarded write was dropped because the
+	// stored projectionSeq was equal to or higher than this call's token
+	// (Contract #6 §6.2). It is orthogonal to Wrote, which keeps reporting
+	// true on that branch: advancing — or deliberately holding — the watermark
+	// is the guarded path's job on every call, and writeResults' audit skip
+	// reads Wrote to decide whether a new audit fact exists.
+	//
+	// It exists for the caller that must know the difference: a reconciler
+	// holding read-back evidence that the row diverges learns here that its
+	// repair provably did not land, instead of booking the guard's silent nil
+	// as a heal and reporting a frozen row as converged on every pass.
+	DeclinedByWatermark bool
 }
 
 // OutcomeUpserter is an optional interface for adapters whose Upsert can
@@ -161,4 +173,51 @@ type UpsertOutcome struct {
 // unexported method).
 type OutcomeUpserter interface {
 	UpsertWithOutcome(ctx context.Context, keys map[string]any, row map[string]any, projectionSeq uint64) (UpsertOutcome, error)
+}
+
+// DeleteOutcome reports what one OutcomeDeleter.DeleteWithOutcome call actually
+// did to the target store.
+type DeleteOutcome struct {
+	// Wrote is true when the call performed a real retraction — a hard delete
+	// of a live key, a soft tombstone Put, or a guarded tombstone that
+	// committed. Every way of retracting nothing reports false: a guarded
+	// delete the watermark declined, a guarded delete dropped for want of an
+	// ordering token, and a hard delete of an already-absent key.
+	//
+	// This is deliberately STRICTER than UpsertOutcome.Wrote, which stays true
+	// through the guarded path's own no-op branches because advancing the
+	// watermark is that path's job on every call and writeResults' audit skip
+	// reads it. A retraction has no such second job: if the row is still there,
+	// nothing happened. The two therefore must not be wired to a shared
+	// consumer without deciding which rule that consumer wants — use
+	// DeclinedByWatermark, which means the same thing on both.
+	Wrote bool
+	// DeclinedByWatermark is true when a guarded retraction was dropped
+	// because the stored projectionSeq was equal to or higher than this call's
+	// token. This is the over-grant direction: a revocation that silently does
+	// not land leaves the pre-edit permission set live, which is the state
+	// Contract #6 §6.2's guard exists to keep subordinate — not to conceal.
+	DeclinedByWatermark bool
+}
+
+// OutcomeDeleter is the retraction sibling of OutcomeUpserter, for adapters
+// whose Delete can report whether the retraction actually landed. Implemented
+// by NatsKVAdapter.
+//
+// It exists because reporting only the upsert direction leaves the more
+// dangerous half silent. A guarded Delete runs the same CAS as a guarded
+// Upsert, so a revocation at a tied-or-lower watermark is dropped and returns
+// nil — and a reconciler reading only the error would book Deleted and Wrote
+// for a row that still grants what the edit meant to revoke.
+//
+// An adapter that does not implement it is treated as having written, the
+// historical behavior every caller already gets from plain Delete.
+//
+// The same Go-embedding trap OutcomeUpserter documents applies verbatim: a
+// test double that embeds *NatsKVAdapter and overrides only Delete still
+// promotes DeleteWithOutcome straight through to the embedded adapter, so a
+// caller preferring the outcome form would bypass the override. Route both
+// through one shared unexported method.
+type OutcomeDeleter interface {
+	DeleteWithOutcome(ctx context.Context, keys map[string]any, projectionSeq uint64) (DeleteOutcome, error)
 }

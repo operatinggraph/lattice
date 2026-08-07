@@ -78,12 +78,20 @@ func newReprojectCommand(natsURL, outputFmt, defaultActor *string) *cobra.Comman
 			// read as a clean bill of health.
 			state := "no projection for this actor"
 			switch {
+			case resp.Reproject.Verdict == "blocked":
+				// The repair provably did not land — the stored watermark
+				// outranks the reconciliation's token. Rendering this as
+				// anything quieter is the exact misreport this verdict exists
+				// to end.
+				state = "BLOCKED: " + resp.Reproject.VerdictReason
 			case resp.Reproject.Deleted:
 				state = "healed: row deleted"
 			case resp.Reproject.Wrote:
 				state = "healed: row written"
 			case resp.Reproject.Converged:
 				state = "converged (no write)"
+			case resp.Reproject.Verdict == "unverified" && resp.Reproject.VerdictReason != "":
+				state = "unverified: " + resp.Reproject.VerdictReason
 			}
 			fmt.Printf("%s\t%s\tprojectionSeq=%d\n", resp.Reproject.Actor, state, resp.Reproject.ProjectionSeq)
 			return nil

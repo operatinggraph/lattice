@@ -125,9 +125,10 @@ func TestGuardedWrite_CreateRetriesThroughRevisionConflictThenSucceeds(t *testin
 	}
 	a := &NatsKVAdapter{kv: store, keyOrder: []string{"key"}, guarded: true}
 
-	err := a.guardedWrite(context.Background(), "k1", map[string]any{"v": 1}, 5, false)
+	verdict, err := a.guardedWrite(context.Background(), "k1", map[string]any{"v": 1}, 5, false)
 
 	require.NoError(t, err)
+	assert.Equal(t, guardCommitted, verdict, "a create that committed is not a watermark decline")
 	assert.Equal(t, 4, store.calls, "must retry Create through 3 conflicts then succeed on the 4th attempt")
 }
 
@@ -138,9 +139,10 @@ func TestGuardedWrite_UpdateRetriesThroughRevisionConflictThenSucceeds(t *testin
 	}
 	a := &NatsKVAdapter{kv: store, keyOrder: []string{"key"}, guarded: true}
 
-	err := a.guardedWrite(context.Background(), "k1", map[string]any{"v": 1}, 5, false)
+	verdict, err := a.guardedWrite(context.Background(), "k1", map[string]any{"v": 1}, 5, false)
 
 	require.NoError(t, err)
+	assert.Equal(t, guardCommitted, verdict, "an update that committed is not a watermark decline")
 	assert.Equal(t, 3, store.calls, "must retry Update through 2 conflicts then succeed on the 3rd attempt")
 }
 
@@ -151,7 +153,7 @@ func TestGuardedWrite_CASExhaustionReturnsError(t *testing.T) {
 	}
 	a := &NatsKVAdapter{kv: store, keyOrder: []string{"key"}, guarded: true}
 
-	err := a.guardedWrite(context.Background(), "k1", map[string]any{"v": 1}, 5, false)
+	_, err := a.guardedWrite(context.Background(), "k1", map[string]any{"v": 1}, 5, false)
 
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "revision conflict not resolved after 8 attempts")
@@ -202,4 +204,123 @@ func TestStoredProjectionSeq(t *testing.T) {
 		assert.False(t, ok)
 		assert.Zero(t, seq)
 	})
+}
+
+// watermarkStore is a kvStore fake holding one stored body with a fixed
+// projectionSeq, so guardedWrite's stored-seq decline branch can be driven
+// deterministically at an exact tie — the condition a real stack only
+// produces by racing a CDC event against a reconciliation.
+type watermarkStore struct {
+	stored       []byte
+	writeAttempt int // Create+Update calls that reached the store
+}
+
+func (s *watermarkStore) Get(ctx context.Context, key string) (*substrate.KVEntry, error) {
+	return &substrate.KVEntry{Value: s.stored, Revision: 7}, nil
+}
+func (s *watermarkStore) Create(ctx context.Context, key string, value []byte) (uint64, error) {
+	s.writeAttempt++
+	return 1, nil
+}
+func (s *watermarkStore) Update(ctx context.Context, key string, value []byte, expectedRevision uint64) (uint64, error) {
+	s.writeAttempt++
+	return expectedRevision + 1, nil
+}
+func (s *watermarkStore) Put(ctx context.Context, key string, value []byte) (uint64, error) {
+	panic("unused by watermark decline tests")
+}
+func (s *watermarkStore) Delete(ctx context.Context, key string) error {
+	panic("unused by watermark decline tests")
+}
+func (s *watermarkStore) ListKeys(ctx context.Context) ([]string, error) {
+	panic("unused by watermark decline tests")
+}
+func (s *watermarkStore) ListKeysPrefix(ctx context.Context, prefix string) ([]string, error) {
+	panic("unused by watermark decline tests")
+}
+func (s *watermarkStore) Purge(ctx context.Context, key string) error {
+	panic("unused by watermark decline tests")
+}
+func (s *watermarkStore) Status(ctx context.Context) error {
+	panic("unused by watermark decline tests")
+}
+
+// TestGuardedUpsert_DeclinedAtTiedWatermarkIsReported pins the honesty half of
+// the guarded upsert: the write is still attempted and Wrote stays true (the
+// watermark path's job is unconditional), but DeclinedByWatermark now tells a
+// reconciler that nothing actually changed in the store. Without the reported
+// field this branch is byte-identical to a committed heal.
+func TestGuardedUpsert_DeclinedAtTiedWatermarkIsReported(t *testing.T) {
+	store := &watermarkStore{stored: []byte(`{"projectionSeq":9,"v":"stale"}`)}
+	a := &NatsKVAdapter{kv: store, keyOrder: []string{"key"}, guarded: true}
+
+	// Tie: the reconciler's token equals the stored watermark.
+	outcome, err := a.upsert(context.Background(), map[string]any{"key": "k1"}, map[string]any{"v": "fresh"}, 9)
+
+	require.NoError(t, err)
+	assert.True(t, outcome.Wrote, "the guarded path must keep reporting Wrote — writeResults' audit skip reads it")
+	assert.True(t, outcome.DeclinedByWatermark, "a tied watermark declined the write and must say so")
+	assert.Zero(t, store.writeAttempt, "the declined branch reaches neither Create nor Update")
+}
+
+// TestGuardedUpsert_CommittedBelowWatermarkIsNotDeclined is the negative twin:
+// the same fixture with a strictly higher token commits, so a green result in
+// the test above cannot come from a field that is simply always true.
+func TestGuardedUpsert_CommittedBelowWatermarkIsNotDeclined(t *testing.T) {
+	store := &watermarkStore{stored: []byte(`{"projectionSeq":9,"v":"stale"}`)}
+	a := &NatsKVAdapter{kv: store, keyOrder: []string{"key"}, guarded: true}
+
+	outcome, err := a.upsert(context.Background(), map[string]any{"key": "k1"}, map[string]any{"v": "fresh"}, 10)
+
+	require.NoError(t, err)
+	assert.True(t, outcome.Wrote)
+	assert.False(t, outcome.DeclinedByWatermark, "a token above the stored watermark commits")
+	assert.Equal(t, 1, store.writeAttempt)
+}
+
+// TestGuardedDelete_DeclinedAtTiedWatermarkReportsNotWrote covers the
+// over-grant direction. A revocation dropped by the guard leaves the pre-edit
+// row live, so unlike the upsert path there is no watermark-advancing work to
+// claim: Wrote must be false, or a reconciler books a retraction that never
+// happened.
+func TestGuardedDelete_DeclinedAtTiedWatermarkReportsNotWrote(t *testing.T) {
+	store := &watermarkStore{stored: []byte(`{"projectionSeq":9,"grant":"live"}`)}
+	a := &NatsKVAdapter{kv: store, keyOrder: []string{"key"}, guarded: true}
+
+	outcome, err := a.deleteRow(context.Background(), map[string]any{"key": "k1"}, 9)
+
+	require.NoError(t, err)
+	assert.False(t, outcome.Wrote, "a declined revocation retracted nothing")
+	assert.True(t, outcome.DeclinedByWatermark)
+	assert.Zero(t, store.writeAttempt)
+}
+
+// TestGuardedDelete_CommittedRetractionReportsWrote is the negative twin for
+// the retraction direction.
+func TestGuardedDelete_CommittedRetractionReportsWrote(t *testing.T) {
+	store := &watermarkStore{stored: []byte(`{"projectionSeq":9,"grant":"live"}`)}
+	a := &NatsKVAdapter{kv: store, keyOrder: []string{"key"}, guarded: true}
+
+	outcome, err := a.deleteRow(context.Background(), map[string]any{"key": "k1"}, 10)
+
+	require.NoError(t, err)
+	assert.True(t, outcome.Wrote)
+	assert.False(t, outcome.DeclinedByWatermark)
+	assert.Equal(t, 1, store.writeAttempt)
+}
+
+// TestGuardedWrite_SequenceLessDropIsNotAWatermarkDecline keeps the two
+// fail-closed conditions distinct: a caller with no ordering token is refused
+// upstream (pipeline's ErrNoOrderingToken), and folding it into the watermark
+// signal would report a missing token as a conflict with a stored one.
+func TestGuardedWrite_SequenceLessDropIsNotAWatermarkDecline(t *testing.T) {
+	store := &watermarkStore{stored: []byte(`{"projectionSeq":9}`)}
+	a := &NatsKVAdapter{kv: store, keyOrder: []string{"key"}, guarded: true}
+
+	verdict, err := a.guardedWrite(context.Background(), "k1", map[string]any{"v": 1}, 0, false)
+
+	require.NoError(t, err)
+	assert.Equal(t, guardDroppedNoToken, verdict,
+		"a sequence-less drop is its own condition — neither a commit nor a watermark decline")
+	assert.Zero(t, store.writeAttempt)
 }

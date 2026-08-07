@@ -138,10 +138,15 @@ type Reprojector interface {
 
 // Reprojection mirrors pipeline.Reprojection across the package boundary.
 type Reprojection struct {
-	Actor         string
-	Converged     bool
-	Deleted       bool
-	Wrote         bool
+	Actor     string
+	Converged bool
+	Deleted   bool
+	Wrote     bool
+	// Verdict is the reconciliation's conclusion, already rendered ("healed",
+	// "blocked", …). It crosses as a string because this package deliberately
+	// does not import internal/pipeline, where the enum lives.
+	Verdict       string
+	VerdictReason string
 	ProjectionSeq uint64
 }
 
@@ -906,6 +911,8 @@ func (s *Service) reprojectActor(ctx context.Context, ruleID string, body Contro
 		Converged:     res.Converged,
 		Deleted:       res.Deleted,
 		Wrote:         res.Wrote,
+		Verdict:       res.Verdict,
+		VerdictReason: res.VerdictReason,
 		ProjectionSeq: res.ProjectionSeq,
 	}}
 }

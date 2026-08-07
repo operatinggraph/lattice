@@ -63,7 +63,68 @@ const (
 	// indistinguishable from one that was never installed, which is the
 	// monitoring equivalent of reporting healthy.
 	issueCapabilityLensUnreadable = "CapabilityLensUnreadable"
+	// issueCapabilityAuditUnverified is raised when the sweep examined an
+	// anchor and could reach NO conclusion about it. It covers the blind spot
+	// the divergence and repair codes share: both are inferred from what the
+	// sweep managed to WRITE, so an anchor whose divergence has no repair
+	// transport at all produces no write, no heal, no error — and clears the
+	// divergent streak. The lens then reads healthier the more thoroughly it
+	// is broken. An unverified anchor is worse than a healed divergence (the
+	// sweep does not know what it is looking at) and better than a confirmed
+	// unrepairable row (which it does know, and cannot fix).
+	issueCapabilityAuditUnverified = "CapabilityAuditUnverified"
+	// issueCapabilityRepairBlocked is raised when the sweep found a divergence
+	// and the ordering guard refused the repair (Contract #6 §6.2 — the stored
+	// watermark equals or exceeds the reconciliation's token). It is the worst
+	// of this family: there is no error to retry, because the write returned
+	// success having changed nothing, and the row stays wrong until a real CDC
+	// event above that watermark reprojects it. On the auth plane that row is
+	// a permission set the graph no longer grants.
+	issueCapabilityRepairBlocked = "CapabilityRepairBlocked"
 )
+
+// alertRank orders the single-valued per-lens `alert` field. Two conditions can
+// hold at once — a lens can be lagging AND holding an unrepairable row — so the
+// field needs a total order, and encoding that order in the CALL SEQUENCE of
+// the checks that set it makes it invisible and re-derivable only by reading
+// every branch. It ships as a table with a test instead.
+//
+// The order, worst first, and why:
+//   - paused: the sweep is suppressed while paused, so any verdict under it is
+//     a frozen artifact rather than a live one.
+//   - unreadable: the lens's own inputs could not be read, so the quieter
+//     values below are claims made on missing evidence.
+//   - repair-failing: a row that is wrong NOW and whose repair errored.
+//   - repair-blocked: also wrong now, and the repair returned success having
+//     changed nothing — one rank quieter than repair-failing only because
+//     there is no fault to chase, not because it is more benign.
+//   - sweep-stalled: the detector itself is not running, so every value below
+//     is stale by construction.
+//   - unverified: the detector ran and could reach no conclusion.
+//   - lagging: the read model is merely behind, and will catch up.
+//
+// Nothing displaced is lost: each condition raises its own issue, and the
+// underlying counters travel in the same metrics map.
+var alertRank = map[string]int{
+	"paused":         7,
+	"unreadable":     6,
+	"repair-failing": 5,
+	"repair-blocked": 4,
+	"sweep-stalled":  3,
+	"unverified":     2,
+	"lagging":        1,
+	"ok":             0,
+	"":               0,
+}
+
+// raiseAlert returns whichever of the two alerts ranks worse, so a caller never
+// has to know what else may already have been set.
+func raiseAlert(current, candidate string) string {
+	if alertRank[candidate] > alertRank[current] {
+		return candidate
+	}
+	return current
+}
 
 // capabilityDivergenceErrorStreak is the number of CONSECUTIVE sweep passes
 // that must each heal a divergence before the issue escalates from warning to
@@ -157,6 +218,8 @@ const (
 	issueLensCoverageDivergence = "LensCoverageDivergence"
 	issueLensRepairFailing      = "LensRepairFailing"
 	issueLensSweepStalled       = "LensSweepStalled"
+	issueLensAuditUnverified    = "LensAuditUnverified"
+	issueLensRepairBlocked      = "LensRepairBlocked"
 )
 
 // issueLensRegistryIncomplete is the registry-reconciliation-probe issue
@@ -193,7 +256,10 @@ type CapabilityLensStatus struct {
 	// SweepReconciled is the lens's cumulative count of divergent projections
 	// the convergence sweep has healed; SweepDivergentStreak is how many
 	// consecutive sweep passes have each healed at least one. Zero for a lens
-	// with no sweeper installed (every non-auth-plane target).
+	// with no sweeper installed — which is NOT "every non-auth-plane target":
+	// the enrolment gate grants a plan to any actor-aggregate lens that can
+	// scope a listing to its own rows and round-trip its own keys, business
+	// lenses included.
 	SweepReconciled      uint64
 	SweepDivergentStreak int
 	// SweepFailingActors is how many anchors currently carry an unrepaired
@@ -206,6 +272,22 @@ type CapabilityLensStatus struct {
 	SweepFailingActors int
 	SweepFailedStreak  int
 	SweepLastFailure   string
+	// SweepUnverified is how many anchors the last pass reached no verdict on,
+	// SweepUnverifiedStreak how many consecutive passes carried at least one,
+	// and SweepLastUnverified the governing reason. SweepBlocked and its
+	// siblings are the same shape for a divergence the ordering guard refused
+	// to let the sweep repair.
+	//
+	// These are the outcomes the divergence and repair verdicts above cannot
+	// express, because both are inferred from a WRITE: an anchor with no
+	// repair transport produces no write and no error, so it clears the
+	// divergent streak and reads as converged.
+	SweepUnverified       int
+	SweepUnverifiedStreak int
+	SweepLastUnverified   string
+	SweepBlocked          int
+	SweepBlockedStreak    int
+	SweepLastBlocked      string
 	// SweepLastPassAt is when the sweep last reached a verdict and SweepInterval
 	// its tick period; SweepSuppression names why the most recent tick was
 	// skipped ("" when it ran). Together they are the sweep's own liveness: every
@@ -258,15 +340,21 @@ type LensLivenessStatus struct {
 	// the lag and pause fields structurally cannot: a lens can be active and
 	// caught up while its projection has a hole, because the events that would
 	// have filled it are in the past.
-	SweepReconciled      uint64
-	SweepDivergentStreak int
-	SweepFailingActors   int
-	SweepFailedStreak    int
-	SweepLastFailure     string
-	SweepLastPassAt      time.Time
-	SweepSuppression     string
-	SweepSuppressionAt   time.Time
-	SweepInterval        time.Duration
+	SweepReconciled       uint64
+	SweepDivergentStreak  int
+	SweepFailingActors    int
+	SweepFailedStreak     int
+	SweepLastFailure      string
+	SweepUnverified       int
+	SweepUnverifiedStreak int
+	SweepLastUnverified   string
+	SweepBlocked          int
+	SweepBlockedStreak    int
+	SweepLastBlocked      string
+	SweepLastPassAt       time.Time
+	SweepSuppression      string
+	SweepSuppressionAt    time.Time
+	SweepInterval         time.Duration
 }
 
 // issueRecord is one entry of the Health-KV `issues` array (Contract #5 §5.5).
@@ -673,10 +761,12 @@ func (h *LatticeHeartbeater) evalCapabilityLenses(now time.Time) (map[string]map
 
 	snaps := h.CapabilityLensProvider()
 	metric := make(map[string]map[string]any, len(snaps))
-	var paused, lagging, diverging, unrepaired, stalled, unreadable []string
+	var paused, lagging, diverging, unrepaired, stalled, unreadable, blocked, unverified []string
 	divergenceSeverity := ""
 	repairSeverity := ""
 	stallSeverity := ""
+	blockedSeverity := ""
+	unverifiedSeverity := ""
 	seen := make(map[string]struct{}, len(snaps))
 	for _, s := range snaps {
 		name := capLensName(s)
@@ -745,16 +835,40 @@ func (h *LatticeHeartbeater) evalCapabilityLenses(now time.Time) (map[string]map
 			} else if repairSeverity == "" {
 				repairSeverity = "warning"
 			}
-			// Alert precedence is paused > repair-failing > lagging. Paused
-			// wins because the sweep is suppressed while paused, so a lingering
-			// failure there is a frozen artifact rather than a live one;
-			// repair-failing outranks lagging because a row that is wrong now
-			// beats a read-model that is merely behind. Neither displaced fact
-			// is lost — `consumerLag` carries the lag value in this same map,
-			// and each condition raises its own issue.
-			if alert != "paused" && alert != "unreadable" {
-				alert = "repair-failing"
+			alert = raiseAlert(alert, "repair-failing")
+		}
+		// A divergence the ordering guard refused to let the sweep repair. It
+		// is the one verdict that reports itself as a SUCCESS on every other
+		// signal: the write returned nil, so nothing errored, the heal counter
+		// ticked, and the row never changed.
+		if s.SweepBlockedStreak > 0 {
+			detail := fmt.Sprintf("%s (%d row(s) unrepairable over %d consecutive passes",
+				name, s.SweepBlocked, s.SweepBlockedStreak)
+			if s.SweepLastBlocked != "" {
+				detail += ": " + s.SweepLastBlocked
 			}
+			blocked = append(blocked, detail+")")
+			if s.SweepBlockedStreak >= capabilityDivergenceErrorStreak {
+				blockedSeverity = "error"
+			} else if blockedSeverity == "" {
+				blockedSeverity = "warning"
+			}
+			alert = raiseAlert(alert, "repair-blocked")
+		}
+		// An anchor the sweep examined and could conclude nothing about.
+		if s.SweepUnverifiedStreak > 0 {
+			detail := fmt.Sprintf("%s (%d anchor(s) unverified over %d consecutive passes",
+				name, s.SweepUnverified, s.SweepUnverifiedStreak)
+			if s.SweepLastUnverified != "" {
+				detail += ": " + s.SweepLastUnverified
+			}
+			unverified = append(unverified, detail+")")
+			if s.SweepUnverifiedStreak >= capabilityDivergenceErrorStreak {
+				unverifiedSeverity = "error"
+			} else if unverifiedSeverity == "" {
+				unverifiedSeverity = "warning"
+			}
+			alert = raiseAlert(alert, "unverified")
 		}
 		// Every verdict above describes the last pass the sweep completed, so a
 		// sweep that has stopped passing keeps republishing them — the detector's
@@ -809,9 +923,7 @@ func (h *LatticeHeartbeater) evalCapabilityLenses(now time.Time) (map[string]map
 				}
 			}
 			stalled = append(stalled, detail+")")
-			if alert == "ok" || alert == "lagging" {
-				alert = "sweep-stalled"
-			}
+			alert = raiseAlert(alert, "sweep-stalled")
 		}
 		lastPassAt := ""
 		if !s.SweepLastPassAt.IsZero() {
@@ -822,8 +934,16 @@ func (h *LatticeHeartbeater) evalCapabilityLenses(now time.Time) (map[string]map
 			"alert":            alert,
 			"reconciled":       s.SweepReconciled,
 			"failingActors":    s.SweepFailingActors,
+			"unverified":       s.SweepUnverified,
+			"blocked":          s.SweepBlocked,
 			"sweepLastPassAt":  lastPassAt,
 			"sweepSuppression": s.SweepSuppression,
+		}
+		if s.SweepLastUnverified != "" {
+			entryMetric["unverifiedReason"] = s.SweepLastUnverified
+		}
+		if s.SweepLastBlocked != "" {
+			entryMetric["blockedReason"] = s.SweepLastBlocked
 		}
 		if s.Status == StatusRebuilding && !s.RebuildProgressAt.IsZero() {
 			// Only while one is running: a finished rebuild's last count is not a
@@ -872,6 +992,22 @@ func (h *LatticeHeartbeater) evalCapabilityLenses(now time.Time) (map[string]map
 			message: "the convergence sweep could not repair a divergent capability projection; the row stays wrong " +
 				"and no other signal reports it, because a failed repair heals nothing and so clears the divergence " +
 				"streak: " + strings.Join(unrepaired, ", "),
+		}
+	}
+	if len(blocked) > 0 {
+		active[issueCapabilityRepairBlocked] = capIssue{
+			severity: blockedSeverity,
+			message: "the convergence sweep found a divergent capability projection and the ordering guard declined its repair; " +
+				"the write returned success having changed nothing, so the row stays wrong while every other signal " +
+				"reports a heal: " + strings.Join(blocked, ", "),
+		}
+	}
+	if len(unverified) > 0 {
+		active[issueCapabilityAuditUnverified] = capIssue{
+			severity: unverifiedSeverity,
+			message: "the convergence sweep examined a capability anchor and could reach no verdict on it; an anchor whose " +
+				"divergence has no repair transport writes nothing, which every count below this one reads as " +
+				"convergence: " + strings.Join(unverified, ", "),
 		}
 	}
 	if len(stalled) > 0 {
@@ -1087,7 +1223,7 @@ func (h *LatticeHeartbeater) evalLenses(now time.Time) (map[string]map[string]an
 
 	snaps := h.LensProvider()
 	metric := make(map[string]map[string]any, len(snaps))
-	var paused, lagging, unreadable []string
+	var paused, lagging, unreadable, blocked, unverified []string
 	var diverging, unrepaired, stalled []string
 	seen := make(map[string]struct{}, len(snaps))
 	for _, s := range snaps {
@@ -1099,7 +1235,7 @@ func (h *LatticeHeartbeater) evalLenses(now time.Time) (map[string]map[string]an
 		// repair that is failing right now is a fact about the projection, and
 		// losing it to a fault in observing something else would leave the lens
 		// looking merely unobserved.
-		sweepAlert := h.evalLensSweep(name, now, s, &diverging, &unrepaired, &stalled)
+		sweepAlert := h.evalLensSweep(name, now, s, &diverging, &unrepaired, &stalled, &blocked, &unverified)
 		if s.Unreadable != "" {
 			// The reporter-derived inputs (status, pause reason, projection lag)
 			// are the untrusted ones, so their thresholds are skipped rather
@@ -1137,21 +1273,7 @@ func (h *LatticeHeartbeater) evalLenses(now time.Time) (map[string]map[string]an
 			// any pending streak.
 			h.resetLensLagState(name)
 		}
-		// Alert precedence, the cap path's: paused outranks everything (the
-		// sweep is suppressed while paused, so a verdict there is a frozen
-		// artifact), a row that is wrong now outranks one that is merely behind,
-		// and the detector's own silence is what is left when nothing else is
-		// wrong. Nothing displaced is lost — each condition raises its own issue.
-		switch sweepAlert {
-		case "repair-failing":
-			if alert != "paused" {
-				alert = sweepAlert
-			}
-		case "sweep-stalled":
-			if alert == "ok" || alert == "lagging" {
-				alert = sweepAlert
-			}
-		}
+		alert = raiseAlert(alert, sweepAlert)
 		lastProjectedAt := ""
 		if !s.LastProjectedAt.IsZero() {
 			lastProjectedAt = substrate.FormatTimestamp(s.LastProjectedAt)
@@ -1203,6 +1325,20 @@ func (h *LatticeHeartbeater) evalLenses(now time.Time) (map[string]map[string]an
 				strings.Join(unrepaired, ", "),
 		}
 	}
+	if len(blocked) > 0 {
+		active[issueLensRepairBlocked] = capIssue{
+			severity: "warning",
+			message: "convergence sweep found a divergent row and the ordering guard declined its repair, so the write " +
+				"reported success having changed nothing: " + strings.Join(blocked, ", "),
+		}
+	}
+	if len(unverified) > 0 {
+		active[issueLensAuditUnverified] = capIssue{
+			severity: "warning",
+			message: "convergence sweep reached no verdict on a lens anchor, so its correctness is unknown rather than " +
+				"confirmed: " + strings.Join(unverified, ", "),
+		}
+	}
 	if len(stalled) > 0 {
 		active[issueLensSweepStalled] = capIssue{
 			severity: "warning",
@@ -1235,12 +1371,26 @@ func addLensSweepMetrics(m map[string]any, s LensLivenessStatus) {
 	m["failingActors"] = s.SweepFailingActors
 	m["sweepLastPassAt"] = lastPassAt
 	m["sweepSuppression"] = s.SweepSuppression
+	// Always published, including at zero: "no unverified anchors" is a
+	// verdict, and an absent field is indistinguishable from a Refractor that
+	// does not compute one — which is exactly the ambiguity this whole change
+	// exists to remove. The reasons are omitted when empty, per the
+	// suppression field's precedent.
+	m["unverified"] = s.SweepUnverified
+	m["blocked"] = s.SweepBlocked
+	if s.SweepLastUnverified != "" {
+		m["unverifiedReason"] = s.SweepLastUnverified
+	}
+	if s.SweepLastBlocked != "" {
+		m["blockedReason"] = s.SweepLastBlocked
+	}
 }
 
 // evalLensSweep collects one business lens's convergence-sweep verdicts into the
 // caller's detail lists and returns the alert this lens's sweep argues for
-// ("repair-failing", "sweep-stalled", or "" for none) — the caller applies the
-// precedence against the consumer-derived alerts.
+// ("repair-failing", "repair-blocked", "unverified", "sweep-stalled", or "" for
+// none) — the caller merges it against the consumer-derived alerts through
+// raiseAlert.
 //
 // The sibling of the cap path's inline sweep block, and deliberately not a
 // shared one: it raises different issue codes, keeps its staleness clock in its
@@ -1253,7 +1403,7 @@ func (h *LatticeHeartbeater) evalLensSweep(
 	name string,
 	now time.Time,
 	s LensLivenessStatus,
-	diverging, unrepaired, stalled *[]string,
+	diverging, unrepaired, stalled, blocked, unverified *[]string,
 ) string {
 	alert := ""
 	if s.SweepDivergentStreak > 0 {
@@ -1275,7 +1425,25 @@ func (h *LatticeHeartbeater) evalLensSweep(
 			detail += ": " + s.SweepLastFailure
 		}
 		*unrepaired = append(*unrepaired, detail+")")
-		alert = "repair-failing"
+		alert = raiseAlert(alert, "repair-failing")
+	}
+	if s.SweepBlockedStreak > 0 {
+		detail := fmt.Sprintf("%s (%d row(s) unrepairable over %d consecutive passes",
+			name, s.SweepBlocked, s.SweepBlockedStreak)
+		if s.SweepLastBlocked != "" {
+			detail += ": " + s.SweepLastBlocked
+		}
+		*blocked = append(*blocked, detail+")")
+		alert = raiseAlert(alert, "repair-blocked")
+	}
+	if s.SweepUnverifiedStreak > 0 {
+		detail := fmt.Sprintf("%s (%d anchor(s) unverified over %d consecutive passes",
+			name, s.SweepUnverified, s.SweepUnverifiedStreak)
+		if s.SweepLastUnverified != "" {
+			detail += ": " + s.SweepLastUnverified
+		}
+		*unverified = append(*unverified, detail+")")
+		alert = raiseAlert(alert, "unverified")
 	}
 
 	stallCycles := h.CapabilitySweepStallCycles
@@ -1311,10 +1479,7 @@ func (h *LatticeHeartbeater) evalLensSweep(
 		detail += ", no suppression recorded — the sweep is not ticking"
 	}
 	*stalled = append(*stalled, detail+")")
-	if alert == "" {
-		alert = "sweep-stalled"
-	}
-	return alert
+	return raiseAlert(alert, "sweep-stalled")
 }
 
 // evalRegistryReconciliation surfaces the RegistryReconciliationProvider's

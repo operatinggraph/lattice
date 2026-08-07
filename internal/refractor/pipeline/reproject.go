@@ -42,6 +42,74 @@ var ErrNotActorAggregate = errors.New("pipeline: reproject: lens is not actor-ag
 // event.
 var ErrNoOrderingToken = errors.New("pipeline: reproject: pipeline has applied no events, so it holds no ordering token and the guard would drop the write")
 
+// ErrRuleSuperseded reports that the rule an actor's re-evaluation ran under
+// was replaced before its results could be written, so those results derive
+// from a rule no longer in force and must not land. It mirrors writeResults'
+// supersededRule refusal on the CDC path — the two are one policy over the
+// target's two write paths.
+//
+// The condition is per-pipeline, not per-actor: no actor is at fault, and the
+// results in hand are equally stale for every one of them.
+var ErrRuleSuperseded = errors.New("pipeline: reproject: the rule this evaluation ran under was replaced before the write, so its results are stale")
+
+// Verdict is Reproject's conclusion for one actor. Every successful call
+// reaches exactly one; the zero value is VerdictUnverified, so a branch added
+// later that forgets to conclude reports "I do not know" rather than
+// "converged".
+//
+// The verdict is explicit rather than inferred from the write outcome because
+// an outcome the repair path has no transport for produces no write — and a
+// signal derived from writes reads that as convergence, making a lens look
+// healthier the more thoroughly it is broken.
+type Verdict uint8
+
+const (
+	// VerdictUnverified means no comparison was reached, so the actor's
+	// correctness is unknown. See Reprojection.VerdictReason.
+	VerdictUnverified Verdict = iota
+	// VerdictConverged means the stored row already equalled the recomputed
+	// one, or was correctly absent.
+	VerdictConverged
+	// VerdictHealed means a divergence was found and the repair landed.
+	VerdictHealed
+	// VerdictBlocked means a divergence was found and the repair provably did
+	// NOT land: the ordering guard declined it against an equal-or-fresher
+	// stored watermark (Contract #6 §6.2). The row stays wrong until a real
+	// CDC event above that watermark reprojects it.
+	VerdictBlocked
+)
+
+// String renders a Verdict for logs and health fields.
+func (v Verdict) String() string {
+	switch v {
+	case VerdictConverged:
+		return "converged"
+	case VerdictHealed:
+		return "healed"
+	case VerdictBlocked:
+		return "blocked"
+	default:
+		return "unverified"
+	}
+}
+
+// severity orders verdicts by how much attention they deserve:
+// blocked > unverified > healed > converged. A confirmed unrepairable row
+// outranks "I do not know" (the sweep knows exactly what is wrong and cannot
+// fix it), which outranks a heal (a divergence that was repaired).
+func (v Verdict) severity() int {
+	switch v {
+	case VerdictBlocked:
+		return 3
+	case VerdictUnverified:
+		return 2
+	case VerdictHealed:
+		return 1
+	default: // VerdictConverged
+		return 0
+	}
+}
+
 // Reprojection reports what one Reproject call did to one actor's row.
 type Reprojection struct {
 	// Actor is the vertex key that was re-evaluated.
@@ -52,11 +120,58 @@ type Reprojection struct {
 	// Deleted is true when reconciliation removed the row (actor absent, or
 	// the envelope's empty semantics retract it).
 	Deleted bool
-	// Wrote is true when a divergence was healed by an upsert or a delete.
+	// Wrote is true when a divergence was healed by an upsert or a delete
+	// that actually landed. A write the ordering guard declined does not set
+	// it — that is VerdictBlocked.
 	Wrote bool
+	// Verdict is this call's conclusion for the actor. One call can carry
+	// many results for one actor (a perEntry lens), so it is the WORST
+	// verdict any result reached: an actor with one blocked row and nine
+	// converged ones is not converged.
+	Verdict Verdict
+	// VerdictReason names the cause behind a VerdictUnverified or
+	// VerdictBlocked, so the issue an operator reads names a condition rather
+	// than a count. Empty for Converged and Healed.
+	VerdictReason string
 	// ProjectionSeq is the ordering token the write carried — the pipeline's
 	// last-applied stream sequence captured before re-evaluation.
 	ProjectionSeq uint64
+}
+
+// verdictFold accumulates the per-result verdicts of one Reproject call into
+// the actor's single conclusion.
+//
+// It tracks whether ANY result concluded, separately from what they concluded,
+// because the two must not share an encoding. VerdictUnverified is both the
+// fail-closed default (nothing concluded ⇒ "I do not know") and a verdict a
+// result can actively reach, and it outranks Healed — so folding straight onto
+// the zero value would let the default swallow every real conclusion after it,
+// reporting a healed actor as unverified forever. The flag is what keeps the
+// default and the verdict distinguishable.
+type verdictFold struct {
+	verdict   Verdict
+	reason    string
+	concluded bool
+}
+
+// add folds one result's verdict in, keeping the worst and the reason that
+// produced it.
+func (f *verdictFold) add(v Verdict, reason string) {
+	switch {
+	case !f.concluded, v.severity() > f.verdict.severity():
+		f.verdict, f.reason, f.concluded = v, reason, true
+	case v == f.verdict && f.reason == "":
+		f.reason = reason
+	}
+}
+
+// resolve returns the actor's conclusion. Nothing concluded means nothing was
+// verified — never that everything converged.
+func (f *verdictFold) resolve(defaultReason string) (Verdict, string) {
+	if !f.concluded {
+		return VerdictUnverified, defaultReason
+	}
+	return f.verdict, f.reason
 }
 
 // volatileEnvelopeFields are stamped fresh on every evaluation and therefore
@@ -67,6 +182,80 @@ type Reprojection struct {
 // EnvelopeFn). Everything else — including projectedFromRevisions — is
 // compared, so a genuine source-revision change still reads as divergence.
 var volatileEnvelopeFields = []string{"projectedAt"}
+
+// provenanceEnvelopeFields carry the freshness record rather than the row's
+// meaning: projectedFromRevisions maps each contributing graph key to the Core
+// KV revision the projection read (projection.ContributingSources), which
+// Contract #6 §6.3 classifies as coherence/debug provenance.
+//
+// They stay INSIDE the divergence comparison — a source-revision change is a
+// real divergence and is repaired like any other. They are enumerated
+// separately only so a reconciliation that provably could not write can say
+// WHICH KIND of divergence it failed to repair. That distinction is the whole
+// reason the Contract #6 §6.2 tie-rule amendment was held rather than
+// shipped: provenance drift at a resting watermark is reachable by an ordinary
+// operation (a lens-definition write that leaves the MATCH unchanged
+// reprojects nothing yet diverges every row), while a CONTENT divergence at a
+// tied token has no observed producer. Reporting both identically would either
+// bury a real finding in provenance noise or raise an alarm on every benign
+// tick.
+var provenanceEnvelopeFields = []string{"projectedFromRevisions"}
+
+// divergence classifies how a stored row differs from a freshly computed one.
+type divergence uint8
+
+const (
+	// divergenceNone means the rows are equivalent modulo volatile fields.
+	divergenceNone divergence = iota
+	// divergenceProvenance means they differ ONLY in the freshness record —
+	// the row's meaning is identical.
+	divergenceProvenance
+	// divergenceContent means they differ in the row's actual content.
+	divergenceContent
+)
+
+func (d divergence) String() string {
+	switch d {
+	case divergenceProvenance:
+		return "provenance-only divergence (projectedFromRevisions)"
+	case divergenceContent:
+		return "content divergence"
+	default:
+		// Reachable inside a blocked reason only when the write path had no
+		// read-back to classify with, so the honest rendering is that the kind
+		// is unknown — never "no divergence", which reads as a claim the row
+		// was fine.
+		return "divergence of unknown kind (no read-back)"
+	}
+}
+
+// classifyDivergence compares a stored row against a freshly computed one and
+// reports whether they differ, and if so whether the difference is confined to
+// the provenance fields. Both sides are copied before any key is dropped, so
+// neither the caller's computed row nor the adapter's returned map is mutated.
+//
+// Comparison is by canonical JSON rendering — the same identity basis
+// resultsContainKeys uses — because the stored row has been through a JSON
+// round-trip (numbers decode as float64, lists as []any) while the computed
+// row still carries the engine's in-memory Go types. A structural comparison
+// would read those as divergent for byte-identical documents and turn every
+// reconciliation into a write.
+func classifyDivergence(stored, computed map[string]any) divergence {
+	if rowsEquivalent(stored, computed) {
+		return divergenceNone
+	}
+	a, aerr := canonicalJSON(stored, provenanceEnvelopeFields...)
+	b, berr := canonicalJSON(computed, provenanceEnvelopeFields...)
+	if aerr != nil || berr != nil {
+		// A row that cannot be rendered cannot be proven provenance-only, so
+		// it takes the louder classification rather than the quieter one.
+		return divergenceContent
+	}
+	if bytes.Equal(a, b) {
+		return divergenceProvenance
+	}
+	return divergenceContent
+}
 
 // Reproject re-executes one actor's projection and reconciles the stored row
 // with it (capability-projection-reconciliation-design.md §3.1). It is the
@@ -137,9 +326,38 @@ func (p *Pipeline) Reproject(ctx context.Context, actorKey string) (Reprojection
 		return Reprojection{}, fmt.Errorf("pipeline: reproject %q: %w", actorKey, err)
 	}
 
+	// Refuse results derived from a rule that has since been replaced — the
+	// same policy writeResults applies on the CDC path, at the same point in
+	// the sequence (after evaluation, before any write). Checking earlier
+	// would leave the window open for a swap landing DURING evaluation, which
+	// is the longer interval.
+	//
+	// The check SHRINKS the window; it does not eliminate it. A MATCH
+	// hot-reload increments the rule generation SYNCHRONOUSLY and only then
+	// starts the goroutine that truncates the lens's rows (cmd/refractor's
+	// reload path), so a swap that lands during evaluation — the long
+	// interval, which is why the check sits here and not earlier — is caught.
+	// A swap landing between this check and a write below is not, and for a
+	// perEntry actor with many results that residual is the whole write loop.
+	// Closing it entirely would need the check to be atomic with each write,
+	// i.e. a lock held across the target I/O; the CDC path accepts the same
+	// residual for the same reason. Without any check at all, a
+	// still-running sweep pass lands an old-rule row into the emptied target
+	// — where the absent-key branch takes it unconditionally — stamped at the
+	// consumer HEAD, which is >= every sequence the rebuild is about to
+	// replay. The rebuild is then locked out of that key by the very write it
+	// was racing, and if the MATCH edit was a narrowing or a revocation the
+	// frozen row is the pre-edit permission set.
+	if p.supersededRule(rs) {
+		return Reprojection{}, ErrRuleSuperseded
+	}
+
 	out := Reprojection{Actor: actorKey, ProjectionSeq: seq}
+	var fold verdictFold
 	adpt := p.currentAdapter()
 	reader, canRead := adpt.(adapter.RowReader)
+	outcomeUpserter, reportsUpsert := adpt.(adapter.OutcomeUpserter)
+	outcomeDeleter, reportsDelete := adpt.(adapter.OutcomeDeleter)
 
 	// Every result is attempted even after one fails: a doc-mode lens's
 	// single result made "abort on first error" indistinguishable from
@@ -156,14 +374,48 @@ func (p *Pipeline) Reproject(ctx context.Context, actorKey string) (Reprojection
 			// A delete is skippable only when the row is already gone;
 			// GetRow reports a soft-deleted row as absent too, so an
 			// already-retracted actor writes nothing.
+			//
+			// retractionEvidenced tracks whether this branch actually LOOKED.
+			// Without a read-back — or after a read that errored — a delete
+			// returning nil proves nothing: an idempotent retraction of an
+			// absent key is indistinguishable from one that removed a live
+			// row. The upsert branch below refuses to call that a heal, and
+			// this branch must apply the same rule to the same fact.
+			retractionEvidenced := false
 			if canRead {
-				if _, present, rerr := reader.GetRow(ctx, result.Keys); rerr == nil && !present {
+				_, present, rerr := reader.GetRow(ctx, result.Keys)
+				switch {
+				case rerr != nil:
+					// A read that failed is not a read that found the row.
+				case !present:
 					out.Converged = true
+					fold.add(VerdictConverged, "")
 					continue
+				default:
+					retractionEvidenced = true
 				}
 			}
 			if seq == 0 {
 				errs = append(errs, ErrNoOrderingToken)
+				continue
+			}
+			if reportsDelete {
+				outcome, derr := outcomeDeleter.DeleteWithOutcome(ctx, result.Keys, seq)
+				if derr != nil {
+					errs = append(errs, fmt.Errorf("delete %v: %w", result.Keys, derr))
+					continue
+				}
+				if outcome.DeclinedByWatermark {
+					// The over-grant direction: a retraction the guard
+					// declined leaves the row live. Reporting it as a heal is
+					// how a revoking MATCH edit gets silently defeated while
+					// the sweep logs a repair once a minute.
+					fold.add(VerdictBlocked, "stored watermark >= reconciliation token; retraction unrepairable")
+					continue
+				}
+				out.Deleted = true
+				out.Wrote = true
+				fold.add(retractionVerdict(retractionEvidenced))
 				continue
 			}
 			if derr := adpt.Delete(ctx, result.Keys, seq); derr != nil {
@@ -172,17 +424,29 @@ func (p *Pipeline) Reproject(ctx context.Context, actorKey string) (Reprojection
 			}
 			out.Deleted = true
 			out.Wrote = true
+			fold.add(retractionVerdict(retractionEvidenced))
 			continue
 		}
 
+		// divergedAs carries the read-back evidence from the comparison below
+		// to the write outcome, so a declined write can name WHICH KIND of
+		// divergence it failed to repair. Without a reader there is no
+		// evidence at all, which is its own verdict.
+		divergedAs := divergenceNone
 		if canRead {
 			stored, present, rerr := reader.GetRow(ctx, result.Keys)
 			if rerr != nil {
 				errs = append(errs, fmt.Errorf("read stored row %v: %w", result.Keys, rerr))
 				continue
 			}
-			if present && rowsEquivalent(stored, result.Row) {
+			if present {
+				divergedAs = classifyDivergence(stored, result.Row)
+			} else {
+				divergedAs = divergenceContent
+			}
+			if divergedAs == divergenceNone {
 				out.Converged = true
+				fold.add(VerdictConverged, "")
 				continue
 			}
 			// The KV guard drops a token-less write outright, BEFORE it looks
@@ -202,11 +466,33 @@ func (p *Pipeline) Reproject(ctx context.Context, actorKey string) (Reprojection
 			}
 		}
 
+		if reportsUpsert {
+			outcome, uerr := outcomeUpserter.UpsertWithOutcome(ctx, result.Keys, result.Row, seq)
+			if uerr != nil {
+				errs = append(errs, fmt.Errorf("upsert %v: %w", result.Keys, uerr))
+				continue
+			}
+			if outcome.DeclinedByWatermark {
+				// A divergence this path provably cannot repair. Which kind it
+				// is decides whether an operator should act: provenance drift
+				// at a resting watermark is reachable by ordinary operation,
+				// whereas content divergence here has no known producer and is
+				// a real finding on sight.
+				fold.add(VerdictBlocked,
+					"stored watermark >= reconciliation token; "+divergedAs.String()+" unrepairable")
+				continue
+			}
+			out.Wrote = outcome.Wrote
+			fold.add(writeVerdict(canRead))
+			continue
+		}
+
 		if uerr := adpt.Upsert(ctx, result.Keys, result.Row, seq); uerr != nil {
 			errs = append(errs, fmt.Errorf("upsert %v: %w", result.Keys, uerr))
 			continue
 		}
 		out.Wrote = true
+		fold.add(writeVerdict(canRead))
 	}
 
 	if len(errs) > 0 {
@@ -214,10 +500,51 @@ func (p *Pipeline) Reproject(ctx context.Context, actorKey string) (Reprojection
 			actorKey, len(errs), len(results), errors.Join(errs...))
 	}
 
-	if out.Wrote {
-		out.Converged = false
+	if len(results) == 0 {
+		// The evaluation produced nothing to reconcile against. When doc-mode
+		// zero-row retraction is armed, a zero-row actor arrives here as a
+		// DELETE result instead, so its absence was proven; a perEntry lens
+		// runs multiEntryRetractions unconditionally, so silence means the
+		// prefix diff found nothing to retract. Neither of those reaches this
+		// branch. What does is a doc-mode lens whose empty behaviour has no
+		// retraction transport — the exact shape that let twelve stale rows
+		// render green for twelve days, reported as convergence because the
+		// write loop simply never iterated.
+		if p.zeroRowRetraction || p.multiEnvelopeFn != nil {
+			fold.add(VerdictConverged, "")
+		} else {
+			fold.add(VerdictUnverified, "zero rows and no retraction transport for emptyBehavior")
+		}
 	}
+
+	out.Verdict, out.VerdictReason = fold.resolve("no result reached a comparison")
+	// Converged is derived from the verdict rather than latched by any single
+	// result, so the boolean and the verdict can never disagree on the wire. A
+	// perEntry actor with one converged entry and one blocked entry is not a
+	// converged actor, and a consumer reading only the boolean must not be told
+	// that it is.
+	out.Converged = out.Verdict == VerdictConverged
 	return out, nil
+}
+
+// writeVerdict is the verdict a landed write earns. Without read-back the write
+// is not evidence of anything: the adapter cannot distinguish a repaired
+// divergence from an unconditional rewrite of an already-correct row.
+func writeVerdict(canRead bool) (Verdict, string) {
+	if canRead {
+		return VerdictHealed, ""
+	}
+	return VerdictUnverified, "target cannot read rows back, so a write is not evidence of divergence"
+}
+
+// retractionVerdict is writeVerdict's delete-side twin: a retraction counts as a
+// heal only when the row was READ as present first, since deleting an absent key
+// succeeds just as quietly as removing a live one.
+func retractionVerdict(evidenced bool) (Verdict, string) {
+	if evidenced {
+		return VerdictHealed, ""
+	}
+	return VerdictUnverified, "row was not read back before retraction, so the delete is not evidence of divergence"
 }
 
 // rowsEquivalent compares a stored row against a freshly computed one,
@@ -240,12 +567,16 @@ func rowsEquivalent(stored, computed map[string]any) bool {
 	return bytes.Equal(a, b)
 }
 
-// canonicalJSON renders a row without its volatile fields. encoding/json emits
-// map keys in sorted order, so the rendering is stable for a given content.
-func canonicalJSON(row map[string]any) ([]byte, error) {
+// canonicalJSON renders a row without its volatile fields, plus any extra
+// fields the caller asks to ignore. encoding/json emits map keys in sorted
+// order, so the rendering is stable for a given content.
+func canonicalJSON(row map[string]any, alsoIgnore ...string) ([]byte, error) {
 	clean := make(map[string]any, len(row))
 	maps.Copy(clean, row)
 	for _, f := range volatileEnvelopeFields {
+		delete(clean, f)
+	}
+	for _, f := range alsoIgnore {
 		delete(clean, f)
 	}
 	return json.Marshal(clean)

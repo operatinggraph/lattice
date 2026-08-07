@@ -21,6 +21,22 @@ var _ PrefixKeyLister = (*NatsKVAdapter)(nil)
 var _ RowReader = (*NatsKVAdapter)(nil)
 var _ SeqGuarded = (*NatsKVAdapter)(nil)
 var _ OutcomeUpserter = (*NatsKVAdapter)(nil)
+var _ OutcomeDeleter = (*NatsKVAdapter)(nil)
+
+// guardVerdict reports how a guarded write ended when it did not error.
+type guardVerdict uint8
+
+const (
+	// guardCommitted means the write landed (created or updated).
+	guardCommitted guardVerdict = iota
+	// guardDeclinedByWatermark means the stored projectionSeq equalled or
+	// exceeded this call's token, so the write was dropped as an idempotent
+	// no-op (Contract #6 §6.2).
+	guardDeclinedByWatermark
+	// guardDroppedNoToken means the caller supplied no ordering token, so the
+	// write was dropped fail-closed before any stored watermark was consulted.
+	guardDroppedNoToken
+)
 
 // guardCASMaxAttempts caps the conditional-write retry loop a guarded adapter
 // runs when a concurrent writer (the retry-queue goroutine) collides on the
@@ -166,10 +182,11 @@ func (a *NatsKVAdapter) upsert(ctx context.Context, keys map[string]any, row map
 		// stale replay of a DIFFERENT row at a lower (but still-unseen-by-this-
 		// key) seq could then pass the monotonic guard that watermark exists
 		// to block.
-		if err := a.guardedWrite(ctx, key, row, projectionSeq, false); err != nil {
+		verdict, err := a.guardedWrite(ctx, key, row, projectionSeq, false)
+		if err != nil {
 			return UpsertOutcome{}, err
 		}
-		return UpsertOutcome{Wrote: true}, nil
+		return UpsertOutcome{Wrote: true, DeclinedByWatermark: verdict == guardDeclinedByWatermark}, nil
 	}
 	data, err := json.Marshal(row)
 	if err != nil {
@@ -212,16 +229,40 @@ func (a *NatsKVAdapter) upsert(ctx context.Context, keys map[string]any, row map
 // comparison that originally motivated soft-delete on the capability plane was
 // removed in Story 1.5.4, so absence and tombstone are now equivalent for auth.
 func (a *NatsKVAdapter) Delete(ctx context.Context, keys map[string]any, projectionSeq uint64) error {
+	_, err := a.deleteRow(ctx, keys, projectionSeq)
+	return err
+}
+
+// DeleteWithOutcome is Delete plus a report of whether the retraction actually
+// landed (adapter.OutcomeDeleter). A reconciler uses it to tell a committed
+// revocation apart from one the watermark guard declined — the direction where
+// a silent drop leaves the pre-edit permission set live.
+func (a *NatsKVAdapter) DeleteWithOutcome(ctx context.Context, keys map[string]any, projectionSeq uint64) (DeleteOutcome, error) {
+	return a.deleteRow(ctx, keys, projectionSeq)
+}
+
+// deleteRow is the shared implementation behind Delete and DeleteWithOutcome.
+func (a *NatsKVAdapter) deleteRow(ctx context.Context, keys map[string]any, projectionSeq uint64) (DeleteOutcome, error) {
 	key, err := a.buildKey(keys)
 	if err != nil {
-		return fmt.Errorf("natskv delete: %w", err)
+		return DeleteOutcome{}, fmt.Errorf("natskv delete: %w", err)
 	}
 	if a.guarded {
 		// A guarded delete is always a soft tombstone carrying the watermark,
 		// regardless of the lens's deleteMode: the high-water mark must survive
 		// physical absence so a lower-seq replay still loses. Absence and an
 		// isDeleted tombstone are equivalent for authorization (Contract #6 §6.8).
-		return a.guardedWrite(ctx, key, nil, projectionSeq, true)
+		verdict, gerr := a.guardedWrite(ctx, key, nil, projectionSeq, true)
+		if gerr != nil {
+			return DeleteOutcome{}, gerr
+		}
+		// Wrote is claimed only for a retraction that COMMITTED. A
+		// sequence-less drop retracted nothing either, so it must not be
+		// reported as a write just because it was not a watermark conflict.
+		return DeleteOutcome{
+			Wrote:               verdict == guardCommitted,
+			DeclinedByWatermark: verdict == guardDeclinedByWatermark,
+		}, nil
 	}
 	if a.deleteMode == DeleteModeSoft {
 		tombstone := map[string]any{
@@ -230,21 +271,24 @@ func (a *NatsKVAdapter) Delete(ctx context.Context, keys map[string]any, project
 		}
 		data, err := json.Marshal(tombstone)
 		if err != nil {
-			return fmt.Errorf("natskv delete: marshal tombstone: %w", err)
+			return DeleteOutcome{}, fmt.Errorf("natskv delete: marshal tombstone: %w", err)
 		}
 		if _, err := a.kv.Put(ctx, key, data); err != nil {
-			return fmt.Errorf("natskv delete: put tombstone %s: %w", key, err)
+			return DeleteOutcome{}, fmt.Errorf("natskv delete: put tombstone %s: %w", key, err)
 		}
-		return nil
+		return DeleteOutcome{Wrote: true}, nil
 	}
 	// Hard delete: physically remove the key. Deleting an absent key is a no-op.
 	if err := a.kv.Delete(ctx, key); err != nil {
 		if errors.Is(err, substrate.ErrKeyNotFound) {
-			return nil
+			// Deleting an absent key is idempotent and not an error, but it
+			// retracted nothing — reporting a write here would let a caller
+			// book a repair for a row that was never there.
+			return DeleteOutcome{}, nil
 		}
-		return fmt.Errorf("natskv delete: delete %s: %w", key, err)
+		return DeleteOutcome{}, fmt.Errorf("natskv delete: delete %s: %w", key, err)
 	}
-	return nil
+	return DeleteOutcome{Wrote: true}, nil
 }
 
 // guardedWrite performs a monotonic, conditional write under the projection
@@ -261,23 +305,31 @@ func (a *NatsKVAdapter) Delete(ctx context.Context, keys map[string]any, project
 // caller supplying incomingSeq == 0 has no real ordering token behind the
 // write. Such a write carries no ordering and is dropped as a fail-closed no-op
 // so it can neither create a clobberable seq-0 key nor no-op a real update.
-func (a *NatsKVAdapter) guardedWrite(ctx context.Context, key string, row map[string]any, incomingSeq uint64, delete bool) error {
+//
+// The returned guardVerdict distinguishes the three ways this call can end
+// without an error, because a caller holding evidence that the row diverges
+// needs to tell a repair that COMMITTED apart from one that provably did not
+// land — and, among the latter, a watermark conflict apart from a missing
+// ordering token. Folding the two drops together would report an absent token
+// as a conflict with a stored one, which is a different fault with a different
+// fix.
+func (a *NatsKVAdapter) guardedWrite(ctx context.Context, key string, row map[string]any, incomingSeq uint64, delete bool) (guardVerdict, error) {
 	if incomingSeq == 0 {
 		slog.Warn("natskv guarded write: dropping sequence-less write (no ordering token)",
 			"key", key, "delete", delete)
-		return nil
+		return guardDroppedNoToken, nil
 	}
 	body := a.guardedBody(row, incomingSeq, delete)
 	data, err := json.Marshal(body)
 	if err != nil {
-		return fmt.Errorf("natskv guarded write: marshal %s: %w", key, err)
+		return guardCommitted, fmt.Errorf("natskv guarded write: marshal %s: %w", key, err)
 	}
 
 	for attempt := 0; attempt < guardCASMaxAttempts; attempt++ {
 		entry, getErr := a.kv.Get(ctx, key)
 		if getErr != nil {
 			if !errors.Is(getErr, substrate.ErrKeyNotFound) {
-				return fmt.Errorf("natskv guarded write: get %s: %w", key, getErr)
+				return guardCommitted, fmt.Errorf("natskv guarded write: get %s: %w", key, getErr)
 			}
 			// Key absent: create it. A concurrent create wins the revision and
 			// we re-read on the next iteration.
@@ -285,29 +337,29 @@ func (a *NatsKVAdapter) guardedWrite(ctx context.Context, key string, row map[st
 				if errors.Is(createErr, substrate.ErrRevisionConflict) {
 					continue
 				}
-				return fmt.Errorf("natskv guarded write: create %s: %w", key, createErr)
+				return guardCommitted, fmt.Errorf("natskv guarded write: create %s: %w", key, createErr)
 			}
-			return nil
+			return guardCommitted, nil
 		}
 
 		if storedSeq, ok := storedProjectionSeq(entry.Value); ok && storedSeq >= incomingSeq {
 			// A write with an equal-or-higher watermark already landed; this is
 			// an idempotent no-op (a stale lower-seq replay loses).
-			return nil
+			return guardDeclinedByWatermark, nil
 		}
 
 		if _, updErr := a.kv.Update(ctx, key, data, entry.Revision); updErr != nil {
 			if errors.Is(updErr, substrate.ErrRevisionConflict) {
 				continue
 			}
-			return fmt.Errorf("natskv guarded write: update %s: %w", key, updErr)
+			return guardCommitted, fmt.Errorf("natskv guarded write: update %s: %w", key, updErr)
 		}
-		return nil
+		return guardCommitted, nil
 	}
 
 	slog.Warn("natskv guarded write: CAS loop exhausted under contention",
 		"key", key, "attempts", guardCASMaxAttempts, "projectionSeq", incomingSeq)
-	return fmt.Errorf("natskv guarded write: %s: revision conflict not resolved after %d attempts", key, guardCASMaxAttempts)
+	return guardCommitted, fmt.Errorf("natskv guarded write: %s: revision conflict not resolved after %d attempts", key, guardCASMaxAttempts)
 }
 
 // guardedBody builds the persisted document for a guarded write: a soft

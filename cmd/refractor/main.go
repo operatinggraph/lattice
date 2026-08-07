@@ -555,6 +555,12 @@ func main() {
 				snap.SweepFailingActors = status.FailingActors
 				snap.SweepFailedStreak = status.FailedStreak
 				snap.SweepLastFailure = status.LastFailure
+				snap.SweepUnverified = status.Unverified
+				snap.SweepUnverifiedStreak = status.UnverifiedStreak
+				snap.SweepLastUnverified = status.LastUnverified
+				snap.SweepBlocked = status.Blocked
+				snap.SweepBlockedStreak = status.BlockedStreak
+				snap.SweepLastBlocked = status.LastBlocked
 				snap.SweepLastPassAt = status.LastPassAt
 				snap.SweepSuppression = status.Suppression
 				snap.SweepSuppressionAt = status.SuppressionAt
@@ -635,6 +641,12 @@ func main() {
 				snap.SweepFailingActors = status.FailingActors
 				snap.SweepFailedStreak = status.FailedStreak
 				snap.SweepLastFailure = status.LastFailure
+				snap.SweepUnverified = status.Unverified
+				snap.SweepUnverifiedStreak = status.UnverifiedStreak
+				snap.SweepLastUnverified = status.LastUnverified
+				snap.SweepBlocked = status.Blocked
+				snap.SweepBlockedStreak = status.BlockedStreak
+				snap.SweepLastBlocked = status.LastBlocked
 				snap.SweepLastPassAt = status.LastPassAt
 				snap.SweepSuppression = status.Suppression
 				snap.SweepSuppressionAt = status.SuppressionAt
@@ -1419,6 +1431,8 @@ func (r pipelineReprojector) Reproject(ctx context.Context, actorKey string) (co
 		Converged:     res.Converged,
 		Deleted:       res.Deleted,
 		Wrote:         res.Wrote,
+		Verdict:       res.Verdict.String(),
+		VerdictReason: res.VerdictReason,
 		ProjectionSeq: res.ProjectionSeq,
 	}, nil
 }

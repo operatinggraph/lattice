@@ -108,10 +108,18 @@ type ControlResponse struct {
 // ProjectionSeq is the ordering token the write carried — the pipeline's
 // last-applied stream sequence captured before re-evaluation.
 type ReprojectResult struct {
-	Actor         string `json:"actor"`
-	Converged     bool   `json:"converged"`
-	Deleted       bool   `json:"deleted,omitempty"`
-	Wrote         bool   `json:"wrote"`
+	Actor     string `json:"actor"`
+	Converged bool   `json:"converged"`
+	Deleted   bool   `json:"deleted,omitempty"`
+	Wrote     bool   `json:"wrote"`
+	// Verdict is the reconciliation's conclusion: "converged", "healed",
+	// "blocked" or "unverified". It is carried alongside the booleans rather
+	// than derived from them because two of its four values are invisible in
+	// that encoding — a blocked and an unverified actor both render as
+	// {converged:false, wrote:false}, which reads as "nothing to do".
+	Verdict string `json:"verdict"`
+	// VerdictReason names the cause behind a blocked or unverified verdict.
+	VerdictReason string `json:"verdictReason,omitempty"`
 	ProjectionSeq uint64 `json:"projectionSeq"`
 }
 

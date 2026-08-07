@@ -95,6 +95,32 @@ type SweepStatus struct {
 	FailingActors int
 	FailedStreak  int
 	LastFailure   string
+	// Unverified is how many anchors in the last pass reached no verdict at
+	// all, UnverifiedStreak how many consecutive passes carried at least one,
+	// and LastUnverified the governing reason.
+	//
+	// It is the third outcome the heal/fail pair cannot express. A pass that
+	// examines an anchor and can conclude nothing about it writes nothing —
+	// and a signal derived from writes reads that as convergence: no heal
+	// counted, streak reset, green. Counting it separately is what keeps an
+	// anchor whose divergence has no repair transport from making the lens
+	// read HEALTHIER the more thoroughly it is broken.
+	Unverified       int
+	UnverifiedStreak int
+	LastUnverified   string
+	// Blocked is how many anchors in the last pass held a divergence the
+	// ordering guard refused to let the sweep repair (Contract #6 §6.2 —
+	// stored watermark >= the reconciliation's token), BlockedStreak how many
+	// consecutive passes carried at least one, and LastBlocked the governing
+	// reason.
+	//
+	// This is the worst of the four: unlike an unverified anchor the sweep
+	// knows exactly what is wrong, and unlike a failing one there is no error
+	// to retry — the write returned success having changed nothing. A row here
+	// stays wrong until a real CDC event above that watermark reprojects it.
+	Blocked       int
+	BlockedStreak int
+	LastBlocked   string
 }
 
 // actorFailure is one anchor's unrepaired-reprojection state. It lives from the
@@ -157,7 +183,23 @@ type Sweeper struct {
 	// failing is the per-actor unrepaired-failure set, and passNo the monotonic
 	// tick counter the per-actor backoff schedules against.
 	failing map[string]*actorFailure
-	passNo  uint64
+	// blocked and unverified are the standing sets of anchors whose last
+	// verdict was VerdictBlocked / VerdictUnverified, keyed by actor and
+	// valued by the governing reason.
+	//
+	// They are SETS, not per-pass counters, for the same reason `failing` is:
+	// a pass examines at most `batch` anchors chosen by cursor round-robin, so
+	// a per-pass tally reports whichever verdicts this batch happened to
+	// contain and reads zero on every pass that did not re-examine them. On a
+	// corpus larger than one batch that makes the streak — and therefore the
+	// escalation to error — structurally unreachable, and publishes a clean
+	// verdict over a row the sweep has proven it cannot repair for all but one
+	// pass in every rotation. An entry lives from the verdict that created it
+	// until a later verdict on the SAME anchor supersedes it, or the anchor
+	// leaves the corpus.
+	blocked    map[string]string
+	unverified map[string]string
+	passNo     uint64
 	// coverage and orphan are the two prefilter hints' rotation + earned-share
 	// state (see hintState and candidates).
 	coverage hintState
@@ -237,11 +279,13 @@ func newSweeper(p *Pipeline, plan SweepPlan) *Sweeper {
 		batch = DefaultSweepBatch
 	}
 	return &Sweeper{
-		p:        p,
-		plan:     plan,
-		interval: iv,
-		batch:    batch,
-		failing:  map[string]*actorFailure{},
+		p:          p,
+		plan:       plan,
+		interval:   iv,
+		batch:      batch,
+		failing:    map[string]*actorFailure{},
+		blocked:    map[string]string{},
+		unverified: map[string]string{},
 	}
 }
 
@@ -262,7 +306,11 @@ func (p *Pipeline) SetSweepPlan(plan SweepPlan) {
 }
 
 // Sweeper returns this pipeline's convergence sweeper, or nil when no plan is
-// installed (every non-auth-plane lens).
+// installed. That is not "every non-auth-plane lens": since the enrolment gate
+// landed, any actor-aggregate lens that can scope a key listing to its own
+// rows, round-trip its own keys, and whose adapter enumerates under a prefix
+// gets a plan — business lenses included. What has no sweeper is a lens that
+// fails one of those conjuncts, or is not actor-aggregate at all.
 func (p *Pipeline) Sweeper() *Sweeper { return p.sweeper }
 
 // RunSweep runs the convergence sweep until ctx is cancelled. It returns
@@ -389,6 +437,30 @@ func (s *Sweeper) pass(ctx context.Context) {
 	orphanTried, orphanHits := 0, 0
 	for _, actor := range sel.actors {
 		res, rerr := s.p.Reproject(ctx, actor)
+		if errors.Is(rerr, ErrRuleSuperseded) {
+			// A hot-reload replaced the rule while this pass was mid-loop, so
+			// every result still in hand derives from a retired rule. Abandon
+			// the pass, mirroring the ordering-token arm below: the condition
+			// is per-pipeline, not per-actor.
+			//
+			// Deliberately NOT noteActorFailure — no actor is at fault, and a
+			// consecutive-failure strike would push it into backoffPasses and
+			// delay the genuine post-rebuild heal. Info, not Warn: this is the
+			// expected consequence of a reload, and the rebuild the same reload
+			// kicked off is about to re-derive the corpus anyway.
+			//
+			// Recorded as an ABANDONED pass, not a completed one. A reload is
+			// nobody's fault, so it raises no repair failure — but a pass that
+			// stopped partway verified almost nothing, and stamping it as a
+			// clean fault-free tick would reset the liveness clock and publish
+			// a converged lens on the strength of a pass that examined one
+			// anchor. That is precisely the collapse toward health this verdict
+			// model exists to end.
+			slog.Info("pipeline: sweep: pass abandoned — rule swapped mid-pass",
+				"ruleId", s.p.ruleID, "actor", actor)
+			s.recordAbandoned(ctx, healed, "rule swapped mid-pass")
+			return
+		}
 		if errors.Is(rerr, ErrNoOrderingToken) {
 			// The pipeline has applied nothing this process, so every write
 			// that would correct an existing row loses to its stored
@@ -408,17 +480,36 @@ func (s *Sweeper) pass(ctx context.Context) {
 			continue
 		}
 		s.clearActorFailure(actor)
+		// A hint's premise is "this anchor is divergent", and a BLOCKED verdict
+		// confirms that premise exactly as a heal does — the divergence was
+		// real, the guard simply refused the repair. Scoring only writes would
+		// demote the orphan hint precisely when it keeps finding rows the guard
+		// will not let the sweep retract, throttling the detector for the
+		// over-grant direction.
+		premiseHeld := res.Wrote || res.Verdict == VerdictBlocked
 		if _, viaCoverage := sel.fromCoverage[actor]; viaCoverage {
 			coverageTried++
-			if res.Wrote {
+			if premiseHeld {
 				coverageHits++
 			}
 		}
 		if _, viaOrphan := sel.fromOrphan[actor]; viaOrphan {
 			orphanTried++
-			if res.Wrote {
+			if premiseHeld {
 				orphanHits++
 			}
+		}
+		s.noteVerdict(actor, res.Verdict, res.VerdictReason)
+		switch res.Verdict {
+		case VerdictBlocked:
+			// Warn, not Info: the sweep has PROVEN it cannot repair this row,
+			// and a quieter level would sit beside the heal lines it is not.
+			slog.Warn("pipeline: sweep: divergence could not be repaired — the ordering guard declined the write",
+				"ruleId", s.p.ruleID, "actor", actor, "reason", res.VerdictReason,
+				"projectionSeq", res.ProjectionSeq)
+		case VerdictUnverified:
+			slog.Warn("pipeline: sweep: anchor reached no verdict",
+				"ruleId", s.p.ruleID, "actor", actor, "reason", res.VerdictReason)
 		}
 		if res.Wrote {
 			healed++
@@ -431,6 +522,20 @@ func (s *Sweeper) pass(ctx context.Context) {
 	s.noteHintOutcome("orphan", &s.orphan, orphanTried, orphanHits)
 
 	s.record(ctx, healed, nil)
+}
+
+// governingReasonLocked picks the reason a heartbeat message names when several
+// anchors share a verdict: the lexicographically first, so the published text
+// is stable across passes instead of flapping with map iteration order. The
+// count beside it is what conveys breadth. Caller holds s.mu.
+func governingReasonLocked(set map[string]string) string {
+	governing := ""
+	for _, reason := range set {
+		if governing == "" || reason < governing {
+			governing = reason
+		}
+	}
+	return governing
 }
 
 // noteSuppressed records (or clears) the reason the last tick verified nothing.
@@ -496,7 +601,7 @@ func (s *Sweeper) backedOff(actor string, passNo uint64) bool {
 func (s *Sweeper) reapDepartedFailures(anchors []string, targets map[string]struct{}) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if len(s.failing) == 0 {
+	if len(s.failing) == 0 && len(s.blocked) == 0 && len(s.unverified) == 0 {
 		return
 	}
 	present := make(map[string]struct{}, len(anchors)+len(targets))
@@ -512,6 +617,39 @@ func (s *Sweeper) reapDepartedFailures(anchors []string, targets map[string]stru
 		if _, ok := present[actor]; !ok {
 			delete(s.failing, actor)
 		}
+	}
+	// The verdict sets depart on the same terms: an anchor that has left the
+	// corpus carries no live claim about a row, so holding its verdict would
+	// report a permanent issue for something that no longer exists.
+	for actor := range s.blocked {
+		if _, ok := present[actor]; !ok {
+			delete(s.blocked, actor)
+		}
+	}
+	for actor := range s.unverified {
+		if _, ok := present[actor]; !ok {
+			delete(s.unverified, actor)
+		}
+	}
+}
+
+// noteVerdict records an anchor's non-clean verdict, and clearVerdicts retires
+// both entries once a later pass reaches a clean one for that anchor. A verdict
+// is per-anchor standing state: only a NEW verdict on the SAME anchor may
+// supersede it, never the mere fact that some other batch ran.
+func (s *Sweeper) noteVerdict(actor string, v Verdict, reason string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	switch v {
+	case VerdictBlocked:
+		s.blocked[actor] = reason
+		delete(s.unverified, actor)
+	case VerdictUnverified:
+		s.unverified[actor] = reason
+		delete(s.blocked, actor)
+	default:
+		delete(s.blocked, actor)
+		delete(s.unverified, actor)
 	}
 }
 
@@ -954,6 +1092,35 @@ func (s *Sweeper) anchorLive(ctx context.Context, actorKey string) bool {
 // fault is a pass-level failure (the survey, or a tick abandoned before it
 // could verify anything); a nil fault with an empty failing set is the only
 // combination that clears the repair verdict.
+//
+// The blocked and unverified verdicts are read from their standing SETS rather
+// than from anything this pass tallied, so a pass that re-examined none of
+// those anchors — or abandoned before it could — leaves them intact. A pass
+// must never clear a verdict it did not re-derive; that is the same collapse
+// toward health this whole verdict model exists to end, one layer up.
+// recordAbandoned books a pass that stopped before it could verify its batch.
+// It banks the heals that genuinely landed and publishes the reason, but leaves
+// every streak and the liveness clock alone: the pass reached no verdict, so it
+// may neither clear one nor claim the freshness of one. This is the disposition
+// noteSuppressed already takes for a tick that never ran — an abandoned pass is
+// far closer to that than to a completed one.
+func (s *Sweeper) recordAbandoned(ctx context.Context, healed int, reason string) {
+	s.mu.Lock()
+	s.status.Reconciled += uint64(healed)
+	s.status.Suppression = reason
+	s.status.SuppressionAt = time.Now()
+	snapshot := s.status
+	s.mu.Unlock()
+
+	if s.p.reporter == nil {
+		return
+	}
+	if err := s.p.reporter.SetSweepProgress(ctx, snapshot.Cursor, snapshot.Reconciled); err != nil {
+		slog.Warn("pipeline: sweep: could not persist cursor",
+			"ruleId", s.p.ruleID, "err", err)
+	}
+}
+
 func (s *Sweeper) record(ctx context.Context, healed int, fault error) {
 	s.mu.Lock()
 	s.status.Reconciled += uint64(healed)
@@ -961,6 +1128,22 @@ func (s *Sweeper) record(ctx context.Context, healed int, fault error) {
 		s.status.DivergentStreak++
 	} else {
 		s.status.DivergentStreak = 0
+	}
+	s.status.Unverified = len(s.unverified)
+	if len(s.unverified) > 0 {
+		s.status.UnverifiedStreak++
+		s.status.LastUnverified = truncateFailure(governingReasonLocked(s.unverified))
+	} else {
+		s.status.UnverifiedStreak = 0
+		s.status.LastUnverified = ""
+	}
+	s.status.Blocked = len(s.blocked)
+	if len(s.blocked) > 0 {
+		s.status.BlockedStreak++
+		s.status.LastBlocked = truncateFailure(governingReasonLocked(s.blocked))
+	} else {
+		s.status.BlockedStreak = 0
+		s.status.LastBlocked = ""
 	}
 	s.status.FailingActors = len(s.failing)
 	switch {

@@ -461,10 +461,10 @@ currently reserved-but-unemitted.
       }
     },
     "capabilityLens": {
-      "<lensCanonicalName>": {"status": "active | paused | rebuilding | unknown", "consumerLag": <uint64> | null, "alert": "ok | paused | unreadable | repair-failing | sweep-stalled | lagging", "reconciled": <uint64>, "failingActors": <int>, "sweepLastPassAt": "<RFC3339>" | "", "sweepSuppression": "<string>", "unreadable": "<string>"}
+      "<lensCanonicalName>": {"status": "active | paused | rebuilding | unknown", "consumerLag": <uint64> | null, "alert": "ok | paused | unreadable | repair-failing | repair-blocked | sweep-stalled | unverified | lagging", "reconciled": <uint64>, "failingActors": <int>, "unverified": <int>, "blocked": <int>, "unverifiedReason": "<string>", "blockedReason": "<string>", "sweepLastPassAt": "<RFC3339>" | "", "sweepSuppression": "<string>", "unreadable": "<string>"}
     },
     "lensLiveness": {
-      "<lensCanonicalName>": {"status": "active | paused | rebuilding | unknown", "projectionLag": <uint64> | null, "lastProjectedAt": "<RFC3339>" | "", "alert": "ok | paused | unreadable | repair-failing | sweep-stalled | lagging", "unreadable": "<string>", "sweepEnrolled": <bool>, "reconciled": <uint64>, "failingActors": <int>, "sweepLastPassAt": "<RFC3339>" | "", "sweepSuppression": "<string>"}
+      "<lensCanonicalName>": {"status": "active | paused | rebuilding | unknown", "projectionLag": <uint64> | null, "lastProjectedAt": "<RFC3339>" | "", "alert": "ok | paused | unreadable | repair-failing | repair-blocked | sweep-stalled | unverified | lagging", "unreadable": "<string>", "sweepEnrolled": <bool>, "reconciled": <uint64>, "failingActors": <int>, "unverified": <int>, "blocked": <int>, "unverifiedReason": "<string>", "blockedReason": "<string>", "sweepLastPassAt": "<RFC3339>" | "", "sweepSuppression": "<string>"}
     }
   },
   "issues": [
@@ -531,7 +531,11 @@ passes each heal something (events are still being lost, so the sweep is paperin
 ongoing gap rather than a past one), and clearing on the first clean pass.
 `metrics.capabilityLens.<name>.reconciled` is the matching cumulative counter: it is
 deliberately loud, because a nonzero *rate* is itself the signal to go find the delivery
-gap. `0` for a lens with no sweeper, which is every non-auth-plane target.
+gap. It reads `0` for a lens with no sweeper — which is **not** "every non-auth-plane
+target": since the enrolment gate landed, any actor-aggregate lens that can name its own
+rows gets a plan, business lenses included. What has no sweeper is a lens that fails one of
+the enrolment conjuncts, or is not actor-aggregate at all (`sweepEnrolled: false` says
+which).
 
 `CapabilityRepairFailing` is the sweep's second, independent verdict, and it covers the
 blind spot of the code above: `CapabilityCoverageDivergence` is keyed on what the sweep
@@ -556,6 +560,39 @@ then backs off by doubling to a sixteen-pass ceiling — the backoff suppresses 
 streaks are per-process state (a restart opens a fresh escalation window and re-discovers
 a live failure on its first pass), unlike the cumulative `reconciled` counter, which is
 restored from this document.
+
+`CapabilityRepairBlocked` / `LensRepairBlocked` cover the case the two codes above still
+cannot express, and it is the worst of the family: the sweep found a divergence, attempted
+the repair, and the **ordering guard declined the write** against an equal-or-fresher
+stored watermark (Contract #6 §6.2). Nothing errored — the write returned success having
+changed nothing — so `RepairFailing` stays silent, and the previous accounting counted it
+as a heal, logging *"healed a divergent projection"* once per pass for a row it provably
+could not touch. There is no retry that helps: the row stays wrong until a real CDC event
+above that watermark reprojects it, and on the auth plane that row is a permission set the
+graph no longer grants. `metrics.*.<name>.blocked` is the per-pass count and `blockedReason`
+names the governing cause, **including which kind of divergence went unrepaired** —
+`projectedFromRevisions` drift alone (coherence/debug provenance per §6.3, reachable by an
+ordinary lens-definition write) reads differently from a content divergence, which has no
+known producer and is a real finding on sight. Auth plane escalates to `error` at two
+consecutive blocked passes; business lenses stay `warning`.
+
+`CapabilityAuditUnverified` / `LensAuditUnverified` are the third outcome: the sweep
+examined an anchor and could reach **no verdict at all**. Every count above is inferred
+from a write, so an anchor whose divergence has no repair transport produces no write, no
+error, and no heal — which clears the divergent streak and publishes green. That is the
+shape behind the twelve `orphanedTaskGrants` rows that sat stale for twelve days behind a
+healthy card. `metrics.*.<name>.unverified` is the per-pass count and `unverifiedReason`
+the governing cause. It ranks *below* `repair-blocked` (the sweep does not know what it is
+looking at, where blocked knows exactly) and *above* `lagging`. It is expected to read `0`
+across the current corpus — every shipped actor-aggregate lens arms zero-row retraction —
+and that is the point: the silence can no longer happen, not that it is happening.
+
+**`alert` precedence**, worst first, is a single total order shared by both maps:
+`paused` > `unreadable` > `repair-failing` > `repair-blocked` > `sweep-stalled` >
+`unverified` > `lagging` > `ok`. The field is single-valued and several conditions can hold
+at once, so the order ships as a table with a test rather than as the call sequence of the
+branches that set it. Nothing displaced is lost: each condition raises its own issue and
+its underlying counters travel in the same metrics map.
 
 `CapabilitySweepStalled` watches the **detector's own liveness**, which is the blind spot
 every code above shares: each of them reports what the sweep's last completed pass found,
