@@ -734,6 +734,9 @@ func (p *Pipeline) evaluateFanOut(ctx context.Context, rs ruleState, entry rulee
 	if err != nil {
 		return nil, nil, fmt.Errorf("pipeline: fan-out enumerate: %w", err)
 	}
+	p.shadowAnchorDerivation(rs, entry.CoreKVKey, actorKeys, func() ([]string, bool, error) {
+		return p.deriveAnchorsForVertex(ctx, rs, entry.CoreKVKey, eventType)
+	})
 	// No affected actors → no projection to write. This is a valid
 	// outcome (e.g. a role with no assignments yet, or a service in a
 	// location no actor sits inside).
@@ -798,14 +801,20 @@ func (p *Pipeline) evaluateLinkFanOut(ctx context.Context, rs ruleState, linkKey
 			actorSet[a] = struct{}{}
 		}
 	}
-	if len(actorSet) == 0 {
-		// A link whose endpoints reach no actors (e.g. a book→author link)
-		// is a correct no-op.
-		return nil, nil, nil
-	}
 	actorKeys := make([]string, 0, len(actorSet))
 	for a := range actorSet {
 		actorKeys = append(actorKeys, a)
+	}
+	// Shadowed before the empty-set return, not after: "the enumerator reached
+	// nobody" is exactly as much evidence about the derivation as a populated
+	// answer, and sampling only the busy events would bias the tally.
+	p.shadowAnchorDerivation(rs, linkKey, actorKeys, func() ([]string, bool, error) {
+		return p.deriveAnchorsForLink(ctx, rs, linkKey)
+	})
+	if len(actorKeys) == 0 {
+		// A link whose endpoints reach no actors (e.g. a book→author link)
+		// is a correct no-op.
+		return nil, nil, nil
 	}
 	results, err := p.reprojectActors(ctx, rs, actorKeys)
 	return results, actorKeys, err
@@ -833,6 +842,9 @@ func (p *Pipeline) evaluateAspectFanOut(ctx context.Context, rs ruleState, aspec
 	if err != nil {
 		return nil, nil, fmt.Errorf("pipeline: aspect fan-out enumerate from %q: %w", parentVtx, err)
 	}
+	p.shadowAnchorDerivation(rs, aspectKey, actorKeys, func() ([]string, bool, error) {
+		return p.deriveAnchorsForAspect(ctx, rs, aspectKey)
+	})
 	// No affected actors → no projection to write (e.g. a meta-vertex aspect,
 	// or a vertex no actor reaches). A correct no-op.
 	if len(actorKeys) == 0 {

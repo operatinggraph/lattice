@@ -190,6 +190,14 @@ type Pipeline struct {
 	// never have it.
 	seedAnchorLabel string
 
+	// anchorHops is the compiled pattern GRAPH the affected-anchor derivation
+	// walks under (auth-plane-projection-latency-design.md §4.7). Guarded by
+	// ruleMu and republished on every rule swap alongside seedAnchorLabel, so a
+	// hot-reload can never leave a previous rule body's graph armed. Its zero
+	// value is Complete == false, which is the fail-closed answer: fall back to
+	// the enumerator's BFS.
+	anchorHops full.HopIndex
+
 	// diffRetraction opts a plain lens into Fire 3's neighbor-driven / multi-row
 	// target-diff retraction (negative-filter-retraction-projection-design.md
 	// §2.4): when Fire 2's read-free AnchorProjectionKey check cannot derive a
@@ -209,6 +217,15 @@ type Pipeline struct {
 	// non-actor vertex into the set of affected actors and re-executes
 	// the cypher per actor. Nil uses the single-execute path.
 	actorEnumerator *ActorEnumerator
+
+	// derivShadow tallies the pattern-directed affected-anchor derivation
+	// against the enumerator's answer on a sampled fraction of fan-out events.
+	// It observes; it never decides (anchor_derivation_shadow.go).
+	derivShadow derivationShadow
+
+	// derivReadCap bounds the adjacency documents one derivation walk may read
+	// before it gives up and falls back. Zero means DefaultDerivationReadCap.
+	derivReadCap atomic.Int64
 
 	// actorDeleteKey derives the Capability KV target key to delete when an
 	// actor disappears (tombstone shortcut and reprojectActors missing-actor
@@ -566,6 +583,12 @@ func (p *Pipeline) useFullEngineBranches(eng *full.Engine, cr ruleengine.Compile
 			if label, ok := fullCR.AnchorLabel(); ok {
 				next.seedAnchorLabel = label
 			}
+			// The pattern graph the affected-anchor derivation walks under
+			// (auth-plane-projection-latency-design.md §4.7). Derived here for
+			// the same two reasons the anchor label is, and excluded on the
+			// same multi-walk arm: each branch carries its own anchor, and one
+			// graph cannot speak for all of them.
+			next.anchorHops = fullCR.AnchorHopIndex()
 		}
 	}
 	p.publishRuleState(next)
@@ -591,6 +614,7 @@ type ruleState struct {
 	reprojectRelations  map[string]struct{}
 	relationsExhaustive bool
 	seedAnchorLabel     string
+	anchorHops          full.HopIndex
 }
 
 // ruleState returns the pipeline's current compiled rule as one snapshot.
@@ -621,6 +645,7 @@ func (p *Pipeline) ruleState() ruleState {
 		reprojectRelations:  p.plainReprojectRelations,
 		relationsExhaustive: p.plainRelationsExhaustive,
 		seedAnchorLabel:     p.seedAnchorLabel,
+		anchorHops:          p.anchorHops,
 	}
 }
 
@@ -639,6 +664,7 @@ func (p *Pipeline) publishRuleState(rs ruleState) {
 	p.plainReprojectRelations = rs.reprojectRelations
 	p.plainRelationsExhaustive = rs.relationsExhaustive
 	p.seedAnchorLabel = rs.seedAnchorLabel
+	p.anchorHops = rs.anchorHops
 }
 
 // seedAnchorFor returns the vertex key an event on (eventLabel, eventKey) may
