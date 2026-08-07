@@ -1154,3 +1154,142 @@ operation" row: this change **rides** that gap and does not widen its reach (a D
 already replaces the submitter's set wholesale, and any direct submitter can already name any key) — what
 is new is the authoring surface, so whenever that row is built, the scope check must cover this path,
 whose keys arrive on an op submitted under Loom's own service actor.
+
+---
+
+## Fire B build note — increment 1 (2026-08-07): the erasure marker
+
+Fire B is L–XL and spans fires (§12's four internal steps). This is the first landing: **§6's marker
+aspect and the op that writes it**. The five write-path gates and `UnbindIdentityCredentials` — the rest
+of step 1 — are the next increment. The split follows the design's own dependency arrow (the gates read
+the marker; the marker reads nothing) and it opens no regression window, because nothing here removes or
+changes any existing behaviour. §12's regression argument was about narrowing the op FIRST, which is
+step 3 and still sequenced last.
+
+### Fire brief
+
+**1. Scope (§12 Fire B step 1, narrowed to its first term).** `SealIdentityForErasure` (privacy-base)
+writing `.erasureRequested`. Green bar: `go test ./packages/privacy-base/`, full `go test ./... -p 4`,
+and the lint gate set.
+
+**2. Verified touch-list** (anchors checked live against `c414a9d5`): a new
+`packages/privacy-base/seal_identity_for_erasure.go`; `ddls.go`'s `DDLs()` (`:28`, tail `:79-80`);
+`permissions.go`'s `Permissions()` (`:20`); `manifest.yaml` (`:2` version, `:11` ddls, `:27`
+permissions); `package.go`'s `Version` (`:27`); `package_test.go`'s counts (`:19`, `:25`); a new test
+file.
+
+**3. Precedents mirrored.** `MarkExpired` (`packages/orchestration-base/mark_expired.go:189-227`) — the
+one-aspect-one-event op shape. `RecordShredFinalization` (`shred_identity_key.go:356-390`) — the
+fail-closed-on-unshredded precondition. `FreshnessExpiryAspectDDL` — an aspect-type DDL whose
+`PermittedCommands` IS the write gate. `KeyShreddedEventDDL` — a registered event-type DDL.
+`record_shred_finalization_test.go` — the test harness. Nothing here is greenfield.
+
+**4. In-scope gotchas.** `lint-package-version` requires the manifest bump (`package.go` parity is pinned
+by `TestPackage_ManifestMatchesDefinition`, not by the gate). **There is no
+`make verify-package-privacy-base` target and no `scripts/verify-package-privacy-base.go`** — this
+package has never had a live-install verify script, so the applicable gates are the generic ones
+(`lint-conventions`, `lint-package-standard`, `lint-package-version`, `lint-lens-anchors`, `vet`,
+`golangci-lint`) plus the package's own tests. Test fixture NanoIDs must avoid `I l O 0`.
+
+**Scope-diff gate: clean, narrow-only** — every touch traces to §6; nothing substituted, nothing widened.
+
+### Three decisions the design left to the build
+
+- **The marker is its own aspect, not a flag on `piiKey`** — as §6 argued, and the build confirms the
+  seam argument is the stronger one: `piiKey` is privacy-base-owned while the gates that consume the
+  marker live in identity-domain and identity-hygiene, so the marker is a contract between packages.
+- **The op's payload field is `subjectKey`, not `identityKey`.** Loom's `submitSystemOp` builds
+  `{"subjectKey": inst.SubjectKey}` itself and a pattern cannot reshape it; the Weaver's `directOp` gaps
+  in §7.2 dispatch the same field. See the obligation below.
+- **It fail-closes on an unshredded identity** (`ErasureNotShredded`). §5.4 called the write an
+  "unconditioned upsert" and the build kept that for the WRITE, but added a precondition on the READ: the
+  seal copies `piiKey.shreddedAt` as the cycle discriminator §5.5 and §7.1 both depend on, and a null
+  discriminator makes the residue lens's `sealedForShreddedAt <> requestedForShreddedAt` compare
+  null-with-null and read as *sealed*. A seal with no shred behind it would therefore attest a completion
+  it never earned — the exact failure §8.6 rejects. The same reasoning already governs
+  `RecordShredFinalization`.
+- **A re-seal preserves `requestedAt` and refreshes `shreddedAt`.** §5.4's "unconditioned upsert" would
+  restamp both; the first request is the legally meaningful instant, and refreshing only the discriminator
+  is what makes §5.5's "a re-shred invalidates the old seal by field-diff without tombstoning anything"
+  actually true.
+
+### An obligation this increment hands the pattern increment (step 2)
+
+**`ShredIdentityKey` takes `identityKey`; a Loom `systemOp` step submits `{"subjectKey": …}`.** §5.1
+declares step 1 as `systemOp ShredIdentityKey`, and as written that step submits a payload the op does
+not understand — it would fail `InvalidArgument: identityKey: required` on every instance. The design
+never named this. It is the pattern increment's to resolve (accept `subjectKey` as an alias on the shred
+op, or teach the step kind to carry a payload field name); it is not resolvable here, because nothing
+submits the shred as a step until the pattern exists. Recorded rather than filed: it lives inside this
+same live item.
+
+The other standing obligation is unchanged and still owed by whichever increment declares the pattern's
+reads: the `TestUserTaskReads_CoverEndpoints` analogue per step op (§13, Inc 2), pinning a step op's
+declared read-set to what its DDL actually reads.
+
+### What increment 1 shipped
+
+`erasureRequested` (aspectType, `PermittedCommands: [SealIdentityForErasure]`), `sealIdentityForErasure`
+(vertexType) with its op, and `privacy.erasureRequested` (eventType) — plus the `scope:any` grant to
+`operator`, the manifest/version bump (0.3.0 → 0.4.0) and 12 tests through the real commit path.
+
+### What the adversarial pass changed (3-layer: blind hunter · edge-case hunter · acceptance audit)
+
+Capability-plane change (a new grant, a new write-gate aspect), so it took the full depth despite being M.
+Every finding below was fixed before the merge, not filed.
+
+**A new refusal the design never anticipated — a merged-away identity.** `MergeIdentity` does not
+tombstone the secondary: it writes `.state = merged` and `.mergedInto` and leaves the vertex alive, having
+already tombstoned that identity's inbound `boundTo` edges and repointed its `identityindex` edges onto
+the survivor. So §7.1's residue lens, anchored on a sealed secondary, counts **zero on its first
+projection** while every credential and index representing that person lives on un-erased under the
+survivor. That is §8.6's success-signal-on-silent-failure, reached by an ordinary ordering (merge, then an
+erasure request naming the pre-merge identity). §6's gate table covers only the reverse ordering. The op
+now refuses with `IdentityMerged` and names the survivor. **This belongs in §6's table as a sixth row.**
+
+**Two false claims about the Weaver.** The op's doc asserted that the Weaver's `directOp` dispatches
+`subjectKey` as an engine constraint — its params are author-declared (`internal/weaver/strategist.go`),
+and it is §7.2's gap actions that choose the field. The permission Note named "the Weaver's erasure
+target" as a submitter; **no ratified gap dispatches `SealIdentityForErasure`** (§7.2 dispatches
+`SealIdentityForErasureComplete`). Both corrected.
+
+**The `permittedCommands` claim was stronger than step 6 enforces.** A tombstone carries no document
+(Contract #3 §3.3), so its class is empty and the DDL block is skipped entirely — no aspect-type DDL can
+refuse a tombstone, and the declaration gates the **class**, not the key. Non-removal of the marker, which
+§7's convergence rests on, is a convention held by code review. The comments now say so, matching what
+`piiKey`'s own entry already admitted about the identical mechanism.
+
+**Two tests passed for the wrong reason.** The re-seal test could not fail on the `requestedAt`
+preservation it named — one hardcoded `submittedAt` made both seals stamp the same value, so deleting the
+preservation branch left it green. And the wide-subject test seeded **one** link rather than 300, because
+`testutil.GenReqID` is a pure function of its label. The fixture now asserts its own width, which
+immediately caught a second collision: `GenReqID` silently drops characters outside the NanoID alphabet,
+`'0'` among them, folding `Cr10` onto `Cr1`. Also added: the missing-`shreddedAt` arm, a non-identity
+target, and name-pins for the three new DDLs and the new grant (`package_test.go` counted them but its
+`wantDDLs`/`wantPerms` slices bounded their own loops, leaving the tail unpinned).
+
+**Two findings recorded rather than fixed, because neither has an in-script fix.**
+
+1. **The cycle discriminator is not OCC-protected.** `piiKey` is a class-(d) `optionalReads` served from
+   the step-4 snapshot and this op does not mutate it, so nothing conditions the commit on the envelope
+   still being what was read; a shred committing concurrently with a seal can persist the previous cycle's
+   `shreddedAt`. Narrow (the pattern runs these sequentially) and self-announcing (a re-shred clears the
+   finalization booleans, so the row surfaces as critical rather than attesting). A script cannot
+   `expectedRevision` a key it does not mutate.
+2. **§5.1's step-2 guard defeats the re-seal, and must change in the pattern increment.** The guard is
+   `{"absent": "subject.erasureRequested.data.requestedAt"}`. On a second erasure for the same person the
+   marker already exists, so **step 2 skips**, `shreddedAt` is never refreshed, and §7.1's
+   `missing_erasureSeal = (sealedForShreddedAt <> requestedForShreddedAt)` evaluates old-versus-old =
+   **false** — the new erasure reads as already attested on the previous cycle's evidence. Nothing else
+   can refresh the marker: this op is the only writer of the class, and no Weaver gap dispatches it. The
+   same hole opens for an out-of-band re-shred via Loupe's shred button with no re-seal. **Fire B step 2
+   must drop that guard or key it on `shreddedAt`.**
+
+**Verified correct under attack** (recorded so a later fire does not re-litigate): the Starlark guards are
+fail-closed on every payload and envelope state either hunter could construct (`shredded` compared with
+`!= True` is type-strict, so `"true"` and `1` are rejected); `live_data`'s attribute access cannot raise,
+because `vertexDocToStarlark` always populates `isDeleted` and `data`; the double appearance of
+`SealIdentityForErasure` in two DDLs' `PermittedCommands` is safe, since `commandIndexEligible` excludes
+aspectType from the operationType→class reverse index, so Loom's class-less dispatch resolves uniquely;
+both `events.privacy.*` consumers filter on the exact `keyShredded` subject, so the new event class breaks
+nothing; and no golden file, bootstrap json or install script pins privacy-base's version.
