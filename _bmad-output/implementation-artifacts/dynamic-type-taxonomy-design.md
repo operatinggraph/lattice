@@ -2,6 +2,47 @@
 
 **Status: 📐 DRAFT awaiting Andrew — authored 2026-08-06 (co-designed with Andrew in the ratify session; subsumes the location-domain class question)**
 
+> **AMENDMENTS (Andrew, ratify session 2026-08-06) — these supersede the body where they differ.**
+>
+> **A1 — Taxonomy events ride the EXISTING meta watch; no new consumer.** The "the taxonomy needs its own
+> consumer" conclusion does not follow from its own evidence, which shows only that *today's* filter and
+> handler exclude links. Two additive changes suffice: let `SubscribeKVChanges` take more than one prefix
+> (plural `FilterSubjects` is what the shipped narrowing already relies on) and add a `lnk.meta.*` branch
+> where `corekv_source.go:550`'s `// Unknown / link / malformed → ignore` currently sits. **There is no
+> backfill window to reason about at all**: that consumer's durable is `lens-source-<instance>-<bootNonce>`
+> with `IncludeHistory: true` and `PruneStaleDurables` sweeping the prior boot's, so it already replays
+> matching history from the beginning on every start — the taxonomy is reconstructed at boot and live link
+> events arrive as they happen. **Reuse is the correct shape, not merely the cheap one:** a lens-definition
+> change and a taxonomy change invalidate the *same* artifact (a compiled rule and its derived label set),
+> so one consumer gives a single total order over both. Two consumers would manufacture a genuine race —
+> "rule recompiled under the old taxonomy, taxonomy event arrives after" — as a state the design would then
+> have to handle. Cost: a marginally longer boot replay.
+>
+> **A2 — Expansion is EXPLICIT in the cypher: `:unit` is exactly `vtx.unit.<id>`; `:unit*` expands.**
+> Implicit resolution is rejected, and the reason inverts the argument the session first reached for.
+> Implicit means adding `studio specializes unit` **silently widens** every existing `:unit` lens's result
+> set — and on this platform a widened result set can be a widened *grant*, since read-grant producers
+> anchor on exactly these types. Silently failing to include a new leaf is a visible gap; silently
+> including it is an over-grant nobody sees. Explicit is the fail-closed reading of a label. It also gives
+> an author the only opt-out that matters — a lens wanting units and not studios simply writes `:unit`,
+> with **no class check needed**, which independently confirms that retiring the body-`class` binding
+> fallback was right. `*` is the **reflexive-transitive** closure: self ∪ all descendants at any depth (for
+> a purely abstract name, just the descendants), so a multi-level taxonomy never needs `**`. The sigil is
+> free in this grammatical position — Cypher uses `*` for variable-length relationships and `RETURN *`,
+> never on a node label — but accepting a trailing `*` on `OC_LabelName` is a **real parser extension** to
+> size, not a string tweak. This section is the canonical source for the syntax until the lens-authoring
+> skill exists.
+>
+> **A3 — A bare label naming no concrete key type is an ERROR, not an empty match.** "`:location` finds
+> nothing because it is abstract" is right about the semantics and wrong as a runtime behaviour: a lens
+> that silently projects nothing is the failure class this session spent its day removing. The taxonomy
+> supplies a vocabulary for the first time, so the case is detectable. The gate gets three checks: a bare
+> label naming no concrete key type (error — a typo, or a forgotten `*`); `label*` where the name is not
+> declared abstract (error — nothing to expand); and an expansion exceeding the ≤8-label cap (a health
+> signal, never a silent drop to the broad filter). This makes label resolution a vocabulary lookup where
+> today it is an uninterpreted string, so the **unknown-label posture must be a declared decision** — a
+> cross-package label's resolvability depends on install order.
+>
 > **DD pass, 2026-08-06 — §§1–8 verified, §9.3's census corrected.** An independent probe checked ~35
 > citations across the four label-keyed mechanisms, anchor retraction, `seedAnchorFor`, the meta-CDC watch,
 > the caps and `location-domain/ddls.go:56`; **every one verified exact or functionally exact**, including
