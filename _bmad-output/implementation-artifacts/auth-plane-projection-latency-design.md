@@ -1061,3 +1061,47 @@ rule.
 
 **Do not** merge the worktree first "since it is green." It is green and correct in isolation; what it
 is missing is the loud tie-verdict its sweep otherwise fakes as a heal.
+
+### 15.10 Build note — Increment 2 re-derived against merged `main` (the fire that lands it)
+
+**Scope sentence (verbatim from §4.6, unchanged).** An eligible actor-aware pipeline's Core KV consumer is
+narrowed server-side to the label set §4.2 already proves its fan-out arms may skip, so an unrelated
+business write never costs the auth-plane lens a queue slot — Term A of the latency budget.
+
+**Gate cleared.** §15.7's precondition — the honest sweep verdict + the supersession check on the shared
+`reproject.go`/`sweep.go` seam — shipped as `6f03b32b`. Increment 2 merges behind it, as ratified.
+
+**Re-derivation against merged `main` (the worktree's base `2a96cfcd` had skewed by 11 refractor commits;
+the standing parallel-fire rule).** Two of those commits move the ground under the increment:
+
+- `82c7972b` made the compiled rule a copy-on-write `ruleState` snapshot threaded per event. Every gate now
+  takes `rs`, so the delegation must be `narrowedFilterEligible(rs) → actorAwareNarrowingLabels(rs)` — one
+  snapshot, never a second `p.ruleState()` call inside the same decision. The public wrappers stay.
+- `a322256b` added a SECOND narrowing dimension: `ConsumerFilter` emits the relation-narrowed subject set
+  (`CoreKVLinkSourceRelationFilter`/`…Target…`, one pair per label × relation) whenever the compiled rule's
+  relation set is exhaustive.
+
+**The relation dimension does not carry to an actor-aware lens, and this is the increment's one new
+decision (Winston, in-fire).** Relation narrowing is sound for the plain corpus because it has a
+client-side counterpart: `plainLinkReactsTo` skips a link whose relation the patterns never traverse, so
+the server withholding it is strictly more conservative than a gate that already ran. The actor-aware link
+arm has no such gate — it judges by **endpoint type only** (`actorAwareFanOutRelevant(rs, t1, t2)`,
+`pipeline.go:1638`), skipping only when NEITHER endpoint can bind. Applying relation narrowing there would
+withhold events the client gate keeps: a **second, independently-fallible judgment**, which is exactly the
+shape §4.6's invariant forbids. `capabilityRoles` derives an exhaustive relation set, so this is reachable,
+not theoretical — and Increment 2's own acceptance (c) already encodes it: the half-in-label
+`identity -bookedBy-> booking` link it requires delivered is on a relation the lens never traverses, so an
+unguarded merge would have failed that assertion. **Resolution: an actor-aware pipeline narrows by LABEL
+only** — the relation branch is gated on `actorEnumerator == nil` and says why at the site.
+
+**Touch-list (checked live against `main`).** `pipeline.go:906` `narrowedFilterEligible` (delegate) ·
+`pipeline.go:947` `ConsumerFilter` (relation branch gated + the alignment argument) · `cmd/refractor/main.go`
+(the ordering requirement: `ConsumerFilter` must follow every conjunct-installing stage, since a consumer
+filter snapshots a per-event predicate at registration) · `narrowed_filter_internal_test.go` (the
+`never eligible` case becomes `plain conditions alone are not sufficient`; the fan-out-gate identity and the
+three-forms expansion) · `auth_plane_narrowing_census_test.go` (the real shipped cypher's FILTER verdict,
+not just its label verdict) · `refractor_capability_relevance_gate_e2e_test.go` (acceptance (c): the
+consumer's own `Delivered.Consumer` tally at a settled fence).
+
+**Non-goals** — §15.8 verbatim, plus: extending relation narrowing to the actor-aware arm (that needs a
+client-side relation gate for the fan-out and its own soundness pass — filed as its own row, consumer named).
