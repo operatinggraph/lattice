@@ -1056,11 +1056,14 @@ rebuild as its repair. Increment 2 merges behind the honest-verdict fix, not beh
 `2a96cfcd` has skewed from `main` — re-derive premises against merged main at admit, per the standing
 rule.
 
-**Next fire.** (1) Honest sweep verdict + sweep supersession check (§15.7 resolution — one fire,
-`reproject.go`/`sweep.go`). (2) Merge the worktree's Increment 2 behind it. (3) Increment 3 as ratified.
+**Next fire — SUPERSEDED, all three steps resolved; see §15.10 and §15.11.** (1) The honest sweep verdict
+shipped as `6f03b32b`. (2) Increment 2 merged behind it, re-derived against the skewed base, with the
+relation-dimension fork resolved and two recovery-leg defects fixed. (3) **Increment 3 is what remains** —
+pattern-directed derivation and its plain-arm shadow measurement.
 
-**Do not** merge the worktree first "since it is green." It is green and correct in isolation; what it
-is missing is the loud tie-verdict its sweep otherwise fakes as a heal.
+The `lattice-wt-authlat-inc2` worktree is **retired**: its uncommitted Increment 2 was re-derived onto
+merged `main` rather than merged as-is (its base had skewed 11 refractor commits, and one of them would have
+failed its own acceptance (c)). Nothing in it is unlanded.
 
 ### 15.10 Build note — Increment 2 re-derived against merged `main` (the fire that lands it)
 
