@@ -2130,10 +2130,12 @@ first.** The target cannot ship before this op exists, and not for a tidiness re
 column that is true while the target's playbook declares no `Gaps` entry for it is neither an install
 error nor silently ignored: `dispatchGap` raises a standing **`error`-severity** `GapWithoutPlaybook`
 Health issue and Acks (`internal/weaver/evaluator.go:179-201`), which `aggregateStatus` escalates the
-whole component to `unhealthy` on (`internal/weaver/health.go:362-386`). Increment 5's lens projects
-`missing_erasureSeal` **true for every erasure-requested identity** today — `.erasure` does not exist,
-so the field-diff opens (`lenses.go:296-303`). A target shipped now would therefore install a permanent
-red on the Weaver the moment the first erasure is requested. Same ordering rationale increments 3 and
+whole component to `unhealthy` on (`internal/weaver/health.go:362-386`). Increment 5's
+`missing_erasureSeal` is a conjunction — all five residue counts zero **and** both async halves landed
+**and** the field-diff (`lenses.go:296-303`), so it opens **the moment the first erasure converges**,
+not at every request. Nothing else can ever close it: `.erasure` has no other producer. A target
+shipped now would therefore install a permanent red on the Weaver at the first converged erasure —
+later than "immediately", and no less permanent. Same ordering rationale increments 3 and
 4 each gave: the pieces the target dispatches exist before the target that dispatches them. This is the
 third and last of them, so the target increment that follows wires all five gaps against real ops.
 
@@ -2191,3 +2193,123 @@ not re-derived: **§7.2's `surface` gaps specify severity `critical`, which is n
 target carrying anything else is rejected at CDC load with a `TargetRejected` issue — the target would
 never register at all. `"error"` is the intended tier. Increments 3, 4 and 5's residuals are
 re-inherited verbatim rather than re-filed.
+
+### What increment 6 built
+
+`SealIdentityForErasureComplete` in `privacy-base`, package `0.7.0 → 0.8.0`, with the `.erasure`
+attestation aspect DDL, the `privacy.erasureCompleted` event DDL, and the `Scope:"any"` → `operator`
+grant the Weaver service actor reaches it through. The op walks five arms in its own atomic commit and
+writes the attestation only if every one is clear.
+
+| Arm | Cleared by | Contributes to |
+|---|---|---|
+| `boundTo` inbound · outbound | `UnbindIdentityCredentials` | `coverage.credentials` |
+| `indexes` inbound | `PurgeIdentityDedupFootprint` | `coverage.indexes` |
+| `duplicateOf` outbound · inbound | `PurgeIdentityDedupFootprint` | `coverage.duplicates` |
+
+`coverage` counts the **tombstoned** links the walk passed on its way to proving no live one remains —
+what was erased, per class. A residue count in an attestation is always zero and proves nothing.
+
+### Five corrections the build made to the ratified text
+
+1. **§7.2's `surface` gaps specify severity `critical`, which is not a valid `IssueSeverity`.**
+   `registry.go:643-645` accepts `"warning"` or `"error"` only, and a target carrying anything else is
+   **rejected at CDC load** with a `TargetRejected` issue — it would never register at all. The
+   weaverTarget increment must use `"error"`.
+2. **The two async halves are re-verified in the op, not inherited from the lens's gap ordering.** §7.1's
+   spec opens `missing_erasureSeal` only after `vaultKeyDestroyed` and `projectionsNullified` are both
+   true, and the lens's own comment named that ordering as the guarantee *until an op re-verifies them*.
+   It is discharged here — because a `directOp` gap fires from a reconcile sweep as readily as from a
+   fresh row, so a guarantee that lives in a projection's column ordering is not one.
+3. **The merged-away gate keys on `.state`, read LIVE, not on `.mergedInto` read from `state[...]`.**
+   §7.2 said nothing about the gate's mechanism and the sibling's shape was the obvious thing to copy;
+   it is the wrong one for a fail-closed gate. A `state[...]` lookup of a key **no dispatcher declared**
+   reads as ABSENT, so one missing declaration silently opens the gate — and this op's dispatcher does
+   not exist yet, so nothing but a test literal pins the declaration today. `.state` is written for
+   every identity; `.mergedInto` only for a merged one, so only `.state` can carry the signal.
+4. **The prior attestation is read TOMBSTONE-BLIND.** No aspect-type DDL can refuse a tombstone (a
+   tombstone carries no document, so step 6 never resolves the class), so any package script can remove
+   this attestation. Recovery is the good part — the lens reopens the gap and this op rewrites it — but
+   a live-only read would make that recovery silently restamp `sealedAt`, the one field here with legal
+   meaning, to now.
+5. **`privacy.erasureCompleted` is emitted once per erasure CYCLE, not per commit.** The op is
+   idempotent and the Weaver re-dispatches a gap until it observes it close, so an unconditional
+   emission announces the same completion every pass. A re-verification of an already-attested cycle
+   rewrites coverage and stays quiet.
+
+### The budget the design was measuring is not the budget that binds
+
+§7.2 and §11 R1 reason about enumeration size. The op's live-read arithmetic is comfortable —
+`160 × (1 + 256) = 41,120` of the 60,000-unit budget, which is why the page budget is **shared** across
+the five arms rather than allotted per-arm (virtually no identity is wide on all five, so a shared
+budget verifies the lopsided subject a per-arm split would refuse).
+
+**The 250ms Starlark wall binds one to two orders of magnitude sooner.** `connLinkLister` issues one
+`KVGet` per listed key and `KVListKeysFilter` re-enumerates each arm's whole matching key set on every
+page call, so a walk over N links costs N sequential round trips plus a quadratic term in key names.
+Proving *absence* means paging every arm to its cursor end, which makes this op strictly more expensive
+than either sweep — both stop as soon as `SWEEP_LIMIT` live links are in hand — and it runs at the
+moment a subject's tombstone count is maximal.
+
+This is not theoretical. During this fire's full-suite run,
+`TestUnbindIdentityCredentials_WideSubject_ConvergesPastOnePage` — the **existing** sweep, at 300 links —
+failed with `ScriptTimeout: script exceeded wall budget 250ms` under parallel load, and passed in
+isolation. The sibling already lives at the edge of this wall; the seal pages strictly further.
+
+Consequence, stated because it is not what the design assumed: past the practical ceiling the op dies
+as `ScriptTimeout`, not the named `ErasureVerificationUnreachable`. **Both are refusals and both are
+fail-closed** — no attestation is written either way, which is the property that matters — but the loud,
+erasure-specific stop is not the stop that fires, and CI cannot see it (`PROCESSOR_SCRIPT_WALL_MS=5000`
+in both the Makefile and `ci.yml`, a 20× widening).
+
+### The proofs
+
+Fourteen tests. Five are mutation-verified against the specific wrong build they exist to catch: a
+single-page walk, a dropped `boundTo` outbound arm, a live-only read of a tombstoned attestation, a
+merged gate without the `.state` clause, and an unconditional completion event. Each reds only when its
+own guard is removed.
+
+`…_FindsALiveLinkPastAPageOfTombstones` is the one that separates a real verification from a plausible
+one. A converged subject's enumeration is *all tombstones*, so a build that read one page and stopped
+would attest every erasure it was asked about. The fixture is 300 tombstoned links — past the 256-key
+read page — with the single live one keyed to sort last; mutation-verified, the single-page build
+attests it while every other test in the file stays green.
+
+`…_RefusesALiveCredentialInEitherDirection` is §13's named headline. `…_RefusesAnOutstandingAsyncHalf`
+and `…_RequiresAShreddedEnvelope` sweep their fixtures clean first, so the fact under test is the only
+refusable one — otherwise both would pass on a live `indexes` link and stay green against a build with
+no async check at all.
+
+### Residuals — named, with their consumers
+
+1. **The verification walk's real ceiling is wall time, and past it the refusal is `ScriptTimeout`
+   rather than the named stop.** Fail-closed, so no false attestation — but a wide subject is swept
+   clean and never attested, with a diagnostic that names nothing about erasure. **Consumers: the
+   `identityErasureComplete` weaverTarget increment**, which must not re-dispatch a `ScriptTimeout`
+   forever (it inherits the same obligation increment 5's residual 1 named for the sweeps' hard stop),
+   **and the shelved hard-delete mutation verb**, which dissolves the whole class — a tombstone that
+   leaves the keyspace makes a converged subject's walk proportional to its LIVE links, which is zero.
+   Filed as a board row.
+2. **The verify ceiling is smaller than the two sweeps' combined ceiling.** Each sweep allots 64 pages
+   × 256 *per relation-direction*; the seal allots 160 pages *shared across five arms*. So a subject
+   inside every sweep's own per-arm ceiling can still exceed the seal's aggregate one. Same consumers,
+   same durable fix; travels with residual 1 on one row.
+3. **A `credentialindex` with no `boundTo` link is residue nothing walks.** The vertex carries its
+   identity in its body and has no link to it, so no enumeration reaches one;
+   `UnbindIdentityCredentials` tombstones each alongside its `boundTo`, which covers every one that
+   *has* a link. §9.2(i) already records the class as named-not-designed. **Consumer: the attestation's
+   own coverage claim** — filed as a board row.
+4. **The walk contends no shared OCC key** (Contract #2 §2.5.1). What keeps a link from being created
+   behind it is §6's write-path gates, not serialization: every creator of the three classes reads the
+   marker and refuses a marked identity — verified across identity-domain and identity-hygiene during
+   this fire's review. That is a property of the current corpus held by review, and it is now stated in
+   the script rather than assumed. **Consumer: the next fire adding a writer of `boundTo`, `indexes` or
+   `duplicateOf`.**
+5. **`ErasureVerificationUnreachable` has no test.** Reaching it needs ~41,000 seeded links, which no
+   package test can afford — and per residual 1 the path is unreachable in production anyway. It is the
+   error text, not the mechanism, that is unproven. **Consumer: whichever fire lands the hard-delete
+   verb**, after which the ceiling is reachable at a testable size.
+
+Increments 3, 4 and 5's other residuals (the finite scan window, the missing `Enumerations` declaration
+on a `systemOp` step, the read-set coverage guard, the absent `make verify-package-privacy-base`
+target, the tombstoned-marker gap) are re-inherited verbatim rather than re-filed.

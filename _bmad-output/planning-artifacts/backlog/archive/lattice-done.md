@@ -464,3 +464,6 @@ Rolled from `lattice.md` when its live Done log passed ~25 entries. Full detail 
 - 2026-08-01 · `16d3b328` · [Refractor] doc-mode aggregate zero-row retraction — a live anchor that stops matching now tombstones its row on the CDC, fan-out, and sweep paths alike; the false "EmptyBehavior handles it" rationale rewritten
 - 2026-08-07 · `34812168` · [Loom] erasure Fire A — a systemOp step declares its op's reads (`StepSpec.Reads`)
 - 2026-08-07 · `1e922347` · [privacy-base] erasure Fire B inc 1 — the erasureRequested marker + SealIdentityForErasure
+- 2026-08-07 · `a6ba4f02` · [identity-domain] erasure Fire B inc 2 — the five §6 write-path gates, both link positions
+- 2026-08-07 · `d66cb731` · [identity-domain] erasure Fire B inc 3 — UnbindIdentityCredentials, the bounded credential sweep
+- 2026-08-07 · `df369e13` · [privacy-base] erasure Fire B inc 4 — PurgeIdentityDedupFootprint, the dedup-plane sweep

@@ -69,7 +69,7 @@ Open items only (shipped ones are in the Done log). Grouped by component tag.
 | **[Facet] A durably-queued ceremony write outlives the plaintext it minted** | The reveal is held in memory only, so a reload or sign-out while the intent sits in the offline queue drops the secret — and the write still lands on the next drain, arming an identity nobody can claim, with no signal on any surface. Persisting the plaintext is not the answer; warning before the queue drains is. | ★★ | S–M | 📋 ready · consumer: staff creating an identity offline |
 | **[identity-domain] A credential whose identity vertex was never provisioned projects no binding row** | `identityCredentialBindingsRead` anchors on `(c:identity)` and `readNode` returns nil for a missing key, so the row silently never appears while `identityCredentialsRead` still lists that credential from the decrypted array. Reachable via `lattice identity claim --actor`, which skips the Gateway's provisioning pre-flight. | ★★ | S–M | ✅ ratified 2026-08-06 · Inc 2 of [design](../../implementation-artifacts/credential-binding-plane-lifecycle-design.md) |
 | **[Refractor] A lens cannot project a relationship's own `data` or name** | `RelPattern.Variable` is parsed (`full/visitor.go:274`) but `traverseRel` binds only the neighbour node, so `b.data.x` / `type(b)` are silent nulls — a link's data and name are unreadable by any lens. Consumer: `objectAttachments` binds `r` but cannot project the linkName `DetachObject` requires, so a listed document cannot offer "remove". | ★★ | M | ✅ ratified 2026-08-06 (Winston, delegated) · [design](../../implementation-artifacts/relationship-data-projection-design.md) · narrow bind only |
-| **[privacy-base] Erasure is one op's atomic batch, so it can refuse to erase and leaves correlations live** | `ShredIdentityKey` is five jobs in one commit and fails above 999 mutations, so a well-connected person cannot be erased at all. Becomes a Loom pattern with a Weaver-driven convergent tail and a seal (Andrew 2026-08-06). | ★★★ | L–XL | 🏗️ Fire B step 2 inc 5 done · [design](../../implementation-artifacts/erasure-orchestration-design.md) · 🔭 contract #10 §10.5 UNCOMMITTED · next: the identityErasureComplete weaverTarget |
+| **[privacy-base] Erasure is one op's atomic batch, so it can refuse to erase and leaves correlations live** | `ShredIdentityKey` is five jobs in one commit and fails above 999 mutations, so a well-connected person cannot be erased at all. Becomes a Loom pattern with a Weaver-driven convergent tail and a seal (Andrew 2026-08-06). | ★★★ | L–XL | 🏗️ Fire B step 2 inc 6 done · [design](../../implementation-artifacts/erasure-orchestration-design.md) · 🔭 contract #10 §10.5 UNCOMMITTED · next: the identityErasureComplete weaverTarget |
 | **[identity-domain] A provisioned raw actor has no `credentialindex`, so its sign-in method is unlistable** | `ProvisionConsumerIdentity` writes the identity vertex and `.idpBinding` only — no index vertex, no `boundTo`, no `credentialBinding`. So a Scenario-B person's only credential is invisible to `identityCredentialBindingsRead`, and no reconcile reaches it. An incomplete list is harder to notice than an empty one. | ★★ | M | ✅ ratified 2026-08-06 · Inc 3a of [design](../../implementation-artifacts/credential-binding-plane-lifecycle-design.md) · 3b deferred |
 | **[Processor] `derive_reads` binds `state`/`ddl` to empty dicts rather than failing closed** | `kv` and `nanoid` are fail-closed stubs; `state[k]` in a derivation returns a silent `None` instead of the loud error `kv.Read` gives. Within Contract #2 §2.5, which mandates stubs only for those two — but it is the weakest link in the purity argument, and `state` is what an author reaches for by habit. | ★ | S | 📋 ready · [why](../../implementation-artifacts/client-ceremony-op-descriptors-design.md) §12.7 |
 | **[Refractor] An actor-aware lens narrows by label but never by relation** | `ConsumerFilter`'s relation dimension is gated to plain pipelines: `actorAwareFanOutRelevant` judges by endpoint type alone, so a relation-pinned subject would withhold a link its fan-out arm keeps. Needs a relation gate on that arm first. | ★ | S–M | 📋 ready · consumer: `capabilityRoles` — the remainder of Term A · [why](../../implementation-artifacts/auth-plane-projection-latency-design.md) §15.11 |
@@ -79,6 +79,8 @@ Open items only (shipped ones are in the Done log). Grouped by component tag.
 | **[Refractor] The enumerator's anchor-type fast path returns a singleton, ignoring a second actor-type position** | `Enumerate` short-circuits to `[eventKey]` when the event vertex's type is the actor type (`actor_enumerator.go:107-109`), so an aspect event on one identity never reaches an anchor binding THAT identity at a non-anchor position — `capabilityEphemeral`'s `report:identity`. | ★★ | S | 📋 ready · consumer: the first lens reading a non-anchor identity position's data · [why](../../implementation-artifacts/auth-plane-projection-latency-design.md) §17.6 |
 | **[Loom] A `systemOp` step cannot declare its op's enumerations** | Fire A added `StepSpec.Reads`/`OptionalReads`, but a class-(e) `kv.Links` walk is declared through `ContextHint.Enumerations`, which the systemOp submit path cannot express. Metadata only — the walk executes correctly — so this is a posture gap, not a runtime one. | ★ | XS–S | 📋 ready · consumer: the `identityErasure` pattern, whose step 3 op enumerates `boundTo` both ways · [why](../../implementation-artifacts/erasure-orchestration-design.md) inc 3 residual 1 |
 | **[identity-domain] A sealed identity's live index vertex denies the next person their own** | A registrant sharing an erasure-sealed identity's email hits that still-live `identityindex`, so they get no index vertex and no `duplicateOf`. The sweep then tombstones it and a later registrant revives it, leaving the middle person permanently unindexed. | ★★ | S | 📋 ready · consumer: the §6 gate that must suppress the probe hit · [why](../../implementation-artifacts/erasure-orchestration-design.md) inc 4 residual 4 |
+| **[privacy-base] The erasure walk's real ceiling is wall time, so its named stop never fires** | `kv.Links` costs one KVGet per key and re-lists the arm per page, so the 250ms wall binds far below the seal's 40,960-link budget: a wide subject dies as `ScriptTimeout`, not `ErasureVerificationUnreachable` — fail-closed but undiagnosable. The shipped `UnbindIdentityCredentials` wide test hits the same wall at 300 links. | ★★ | S–M | 📋 ready · consumer: the identityErasureComplete weaverTarget · [why](../../implementation-artifacts/erasure-orchestration-design.md) inc 6 res 1–2 |
+| **[identity-domain] A `credentialindex` with no `boundTo` link is residue nothing can walk** | It carries its identity in its body and has no link to it, so no enumeration reaches one; the sweep tombstones each alongside its `boundTo`, covering only those that have one. §9.2(i) names the class; the erasure attestation's coverage does not account for it. | ★ | S | 📋 ready · consumer: the erasure attestation's coverage claim · [why](../../implementation-artifacts/erasure-orchestration-design.md) inc 6 residual 3 |
 | **[Tooling] No gate enforces `gofmt`, and four files in one package have already drifted** | There is no gofmt step in `.github/workflows/*`, `gofmt` is not in golangci's enabled set, and the Makefile has no target — so formatting drift is invisible until someone runs `gofmt -l` by hand. `internal/refractor/pipeline` alone carries four unformatted files today. | ★ | XS | 📋 ready · consumer: any fire whose mechanical edit leaves a file unformatted and no gate says so |
 
 ### Survey log (round-robin rotation)
@@ -88,10 +90,6 @@ Components: Core · Weaver · Loom · Refractor · Bootstrap · object-store-man
 feature backlog; Loupe moved to its own lane, [loupe.md](loupe.md)). Survey the stalest
 (`git log -1 --format=%ct -- <path>`), note ONE dated line, rotate.
 
-- 2026-07-02 Arch-review, all components — filed the intake section below; Refractor findings held for the post-update re-review; root-identity designation → Designer.
-- 2026-07-02 Designer — object-plane-nats-permissions (★★★ arch #2; `$O.core-objects.>` grant fix + first natsperm object vectors; no contract change) (→ 📐).
-- 2026-07-05 objmgr-and-bootstrap-component-pages CLOSED — bootstrap/vault/privacyworker pages written, README+architecture-overview updated, Bootstrap + object-store-manager added to this rotation.
-- 2026-07-06 Arch-review — Refractor deferred re-review filed ([report](../../../docs/reviews/arch-review-2026-07-06.md)): verdict drifted; 9 rows filed (chronicler-host ★★★, publish-acl ★★★, protected-by-default ★★★); doc/marker truth-up done.
 - 2026-07-13 Core (processor healthy, clean lint/vet, no TODOs; step 6.5 sensitive-encrypt path was 0% covered, filled 80.1%→82.0%).
 - 2026-07-18 Weaver (healthy, 86.8%/78.6%/91.3% cov, clean lint, no TODOs; filed error-branch-coverage + a doc-drift fix).
 - 2026-07-18 Loom (healthy, 82.3%/80.2% cov, clean lint, no TODOs; prior deadline/redelivery gaps already shipped `495476b`; filed starlark-guard-sandbox-value-iface-uncovered).
@@ -104,12 +102,10 @@ feature backlog; Loupe moved to its own lane, [loupe.md](loupe.md)). Survey the 
 
 ## Arch-review intake — CLOSED, no open rows
 
-Every ranked correction from the three 2026-07 reviews has shipped; the per-finding `file:line` evidence
-and per-component verdicts live in the reports, not here.
-[Full platform 2026-07-02](../../../docs/reviews/arch-review-2026-07-02.md) ·
-[Refractor re-review](../../../docs/reviews/arch-review-2026-07-06.md) (verdict *drifted*; all 8 landed,
-confirmed by the 2026-07-18 survey) ·
-[Weaver re-review](../../../docs/reviews/arch-review-2026-07-06-weaver.md) (verdict *healthy*).
+All three 2026-07 reviews' corrections shipped; evidence and verdicts live in the reports.
+[platform](../../../docs/reviews/arch-review-2026-07-02.md) ·
+[Refractor](../../../docs/reviews/arch-review-2026-07-06.md) ·
+[Weaver](../../../docs/reviews/arch-review-2026-07-06-weaver.md).
 
 ## Lattice feature backlog — the Phase-3 build queue
 
@@ -196,8 +192,6 @@ Real but low-value; do **not** spend design or build effort here unless Andrew g
 
 One line per shipped item (`date · SHA · [tag] title`). Oldest roll to `archive/` past ~25.
 
+- 2026-08-07 · `010e383d` · [privacy-base] erasure Fire B inc 6 — SealIdentityForErasureComplete, the completion seal
 - 2026-08-07 · `ea406aeb` · [privacy-base] erasure Fire B inc 5 — the identityErasureResidue convergence lens
-- 2026-08-07 · `df369e13` · [privacy-base] erasure Fire B inc 4 — PurgeIdentityDedupFootprint, the dedup-plane sweep
-- 2026-08-07 · `d66cb731` · [identity-domain] erasure Fire B inc 3 — UnbindIdentityCredentials, the bounded credential sweep
-- 2026-08-07 · `a6ba4f02` · [identity-domain] erasure Fire B inc 2 — the five §6 write-path gates, both link positions
-- *(older entries rolled to [archive/lattice-done.md](archive/lattice-done.md); newest rolled entry `34812168`)*
+- *(older entries rolled to [archive/lattice-done.md](archive/lattice-done.md); newest rolled entry `df369e13`)*
