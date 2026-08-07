@@ -899,9 +899,11 @@ Each increment is independently green; A→B→C is a build order, and the fire 
   as `perEntryRetryAdapter`/`partialFailAdapter` already do.
 - **The check goes *after* evaluation.** Checking before would leave the window open for a swap landing
   *during* evaluation, which is the longer interval (supersession §6 Inc 1's order-of-operations note).
-- **`Unverified` reads 0 across today's corpus** (§4.2) — all 19 actor-aggregate lenses arm
-  `zeroRowRetraction`. That is the expected green, not a broken counter; test 7's armed twin is what
-  proves the counter discriminates.
+- **`Unverified` reads 0 across today's corpus** (§4.2) — re-censused at build time: **24**
+  actor-aggregate lenses, all 24 declaring `EmptyBehavior: "delete"`, so `zeroRowRetraction` is armed
+  for every one. (§4.2's "19" is the 2026-08-01 count and is stale; the *property* still holds.) That
+  is the expected green, not a broken counter; test 7's armed twin is what proves the counter
+  discriminates.
 - **Only `NatsKVAdapter` is `RowReader`** (`natskv.go:21`) and only it is `PrefixKeyLister`, so the sweep
   is only ever installed on it (supersession G10) — the Postgres/grant families take the fall-back path.
 
