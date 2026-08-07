@@ -1421,7 +1421,79 @@ Recovery from a bad narrow is `Rebuild` or the convergence sweep, exactly as for
 value is that it bounds the damage to the window before it is turned, without a redeploy; §17.2's second
 conjunct is what guarantees the healer exists to finish the job.
 
-### 17.6 Non-goals
+### 17.6 Adversarial review outcome — the flip found two live defects in the derivation it was flipping
+
+Three passes: superset soundness · wiring/edge-cases/test-integrity · corpus census. The soundness pass
+**refuted** the fire's central claim, and both defects were in `hopIndexBuilder.ground` — the very conjunct
+§16.6.3 was written to close. §16.6.3 fixed `Dist` (binding hops only); it did not fix grounding itself.
+Both return a set SMALLER than the truth, which on this plane is a grant outliving its revocation. Both are
+fixed here, each with a regression case that fails without the fix (verified by reverting).
+
+1. **A non-binding pattern grounded a bucket-scanned position.** `ground` was called ignoring `addPattern`'s
+   own `binding` flag, so a variable first introduced inside a `WHERE` pattern or a `RETURN` comprehension
+   counted as grounded — while `existsAsPredicate` and `evalPatternComprehension` both call `matchPath` and
+   **discard the bindings**. A later `MATCH` headed by that variable is therefore a fresh bucket scan, and
+   the index called the query `Complete`. `MATCH (i {key:$actorKey}) WHERE NOT (i)-[:blocked]->(b:badge)
+   MATCH (b)-[:issuedBy]->(o:org)` derives the empty set for almost every `issuedBy` event while every
+   anchor's row depends on the whole `badge` bucket. **Fixed:** a non-binding pattern must still *require* a
+   grounded head, but never *extends* the grounded set.
+
+2. **Any pattern reached before the anchor was never grounding-checked at all.** `ground` returned early
+   while `b.anchor < 0`, so `MATCH (other:role) MATCH (i {key:$actorKey})` passed — the identical query the
+   file's own test asserts is refused in the *other clause order*. Clause order is not something a lens
+   author owes us. **Fixed:** a pattern reached before the anchor is refused outright; nothing upstream has
+   pinned anything, so its head is a bucket scan by definition.
+
+**Escalated, not fixed here — the label/key-type hole is no longer cosmetic.** The walk matches labels
+against the KEY TYPE while `executor.go`'s `nodeMatches` also binds on body `class`/`label`. In shadow that
+produced a divergence count; acting, it produces a *skip*. The already-ratified lens-label/key-type item now
+inherits a stale-row severity rather than a wider-set one, and its row is re-scored accordingly. Two things
+bound it: D1's shipped `FilterSubjects` already withholds such an event from any §4.2-eligible lens (the
+filter is by key type), so the exposure is confined to broad-filtered *acting* lenses; and it requires a
+vertex whose key type differs from its body class, which Contract #1 does not permit but no gate enforces.
+
+**Not adopted, and why — the reviewer's premise inverts.** The edge-case pass proposed an anchor-type fast
+path for the aspect arm, since `ActorEnumerator` returns a singleton there while the derivation seeds every
+position binding the actor type (three of them on `capabilityEphemeral`, via its unlabeled targets) and pays
+one adjacency read. Adopting it would inherit the *enumerator's* narrowness: a lens reading a property of a
+non-anchor `identity` position — `capabilityEphemeral`'s `report` — has rows the singleton cannot reach. The
+derivation is the more conservative of the two here, and the cost is one read. The enumerator's own fast
+path is filed as its own row with that consumer named.
+
+**Also folded, all found by review:** three test cases that passed vacuously — `rolesSpec` and the reduced
+ephemeral spec project only *keys*, so every `data.*` mutation moved no row and the superset assertion ran
+over an empty ground truth, leaving the node-seeded and aspect arms with **no live differential coverage**
+(both specs now project data; every case requires a non-empty ground truth and a non-declining answer); a
+revocation test that never revoked anything (`buildCollisionEdge` writes a different `EdgeID` than the
+pipeline's tombstone, and adjacency removes strictly by `EdgeID`, so the edge survived — the fixture now
+seeds the link key, and the assertion is on the *retraction* rather than on set membership); a static
+refusal counted as a per-event fall-back, which made every personal lens take a lock and log `acted=0`
+forever at 8× the shipped rate (now logged once per reason, not tallied); a garbage mode silently resolving
+to `act`, the most permissive value (now refuses to the enumerator and says so); the effective mode logged
+only when overridden, so a default deployment announced nothing while the shipped shadow line went quiet
+(now logged unconditionally at boot); and no Makefile passthrough for the knob §17.5 exists to make operable
+(now mirrors `REFRACTOR_MAX_BINDINGS` in `up` and `cycle-refractor`).
+
+**§9's e2e (d) — what discharges it, stated rather than assumed.** This fire adds no bespoke (d) test; the
+pre-existing auth-plane e2e suite now runs under the flipped default and is the evidence —
+`TestRefractor_CapabilityLens_RealClaimIdentityOp_WithEphemeralConsumer_E2E`,
+`TestRefractor_CapabilityLens_RelevanceGate_GrantAndRetraction_E2E`,
+`TestRefractor_FanInStress_CapabilityRolesAndEphemeral_ConvergeUnderRoleGrantChurn`, and
+`TestNonExhaustiveAuthPlaneLenses_StayBroad`, all green. Naming them is the point: an undeclared reliance on
+someone else's test is how a gate quietly stops covering what it is credited for.
+
+**Corpus census — the benefit claim survives, in its narrow form.** 15 of 30 hand-authored actorAggregate
+lenses clear all five hop-index conjuncts *and* both act-only conjuncts, and none that clears the index is
+then refused by the two new conjuncts. Three of the four named auth-plane lenses act — `capabilityRoles`,
+`capabilityEphemeral`, `myTasks`; `capabilityServiceAccess` falls back unconditionally on `containedIn*0..`,
+as §16.4 already recorded. Of the 15 that fall back, 14 are the blanket `WITH` refusal. **Sharpened by the
+census:** the generated `cap-read.<domain>` family's `WITH` is *structural* — `generateProducerSpec` stages
+every member walk behind one to bound the fan-out cross-product — so that family's refusal is permanent, not
+incidental, and narrowing the blanket refusal is the only thing that would ever reach it. The claim this
+fire supports is "the ~half of the corpus whose cypher is pattern-closed and non-transitive gets faster",
+never "every actor-aware lens does".
+
+### 17.7 Non-goals
 
 The plain-arm shadow and §D2 Phase 2's wiring (its own filed row, sequenced behind this one) · narrowing
 the blanket `WITH` refusal (its own filed row, §16.4) · any change to the enumerator's caps or its
