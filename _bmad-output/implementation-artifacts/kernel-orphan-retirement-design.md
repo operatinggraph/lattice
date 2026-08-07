@@ -1,6 +1,34 @@
 # Kernel-orphan retirement — reconcile's missing third verb
 
-**Status:** 📐 **awaiting-Andrew (ratification)**
+**Status:** ✅ **Inc 1 RATIFIED 2026-08-06 (Winston, delegated) · Inc 2 shape settled, build conditional on Inc 1's census**
+
+## Ratification (Winston, 2026-08-06 — delegated by Andrew)
+
+**The fork resolves to the retire verb, not to enforcing the version bump — on completeness.** A
+reconciler that converges *up* but never *down* cannot express "this is the desired state"; it can only
+add. And the bump gate does not answer the row at all: a version bump handles an entity that **changed**,
+not one the binary stopped building. §6.7 calls the bump "the wrong direction" and it is right, so it is
+recorded as rejected rather than left as a live fallback.
+
+**Verified at ratification.** `reconcile.go` really does have exactly four outcomes — `missing`, `stale`,
+`retained`, `unchanged` (`:48-51`) — with no delete or tombstone branch anywhere in the file. The detail
+that sharpens the gap: `retained` explicitly *names* "a deleted entity … deliberately left alone", and the
+file reasons at length about never rewriting a stored soft tombstone. So leaving an existing tombstone
+alone is a deliberate, correct decision, while there is **no path to create one** for an entity the binary
+retired. The missing verb is exactly the third one.
+
+**Increment 1 is ratified for build. Increment 2's shape is settled but its build is conditional.** Inc 1
+is the non-destructive detector and the design already makes it gate Inc 2 — that ordering is kept, and
+strengthened into a condition: **Inc 2 builds only if Inc 1 reports a non-empty census on a long-lived
+deployment.** §1.2's self-correction is why that qualifier matters and it verifies out — `checkVersion`
+hard-fails an old `lattice.bootstrap.json` against a new binary, forcing a wipe, so kernel orphans cannot
+accumulate on the dev loop at all. A census taken there would be empty by construction and would prove
+nothing. Building a destructive kernel verb against an unmeasured demand would be scaffolding with no
+consumer.
+
+**Flagged for Andrew's override.** Inc 2 gives bootstrap a destructive verb over kernel state. I resolved
+it under the delegation because Inc 1 is non-destructive and gates it, so nothing can bite before the
+census reports — but this is the call in this tranche most likely to be worth taking back.
 
 **Component:** `internal/bootstrap` (+ `scripts/verify-kernel.go`, `scripts/lint-conventions.go`).
 

@@ -1,8 +1,31 @@
 # Edge cold sign-in — deliver the world, not the ledger
 
-**Status: 📐 awaiting-Andrew (ratification)** — designed 2026-08-01 by the Designer fire against the
+**Status: ✅ RATIFIED 2026-08-06 (Winston, under delegated authority) — fork resolved to REPOSITION** — designed 2026-08-01 by the Designer fire against the
 [lattice lane](../planning-artifacts/backlog/lattice.md) row *"[Edge] A cold sign-in replays the actor's
 retained history, not their world"*.
+
+## Ratification (Winston, 2026-08-06 — delegated by Andrew)
+
+**Fork resolved to reposition; compaction rejected.** The deciding argument is altitude, not cost.
+Reposition changes one client's own consumer: it starts where its hydrate snapshot was taken, which is the
+standard snapshot-then-delta shape every sync protocol uses, and nothing outside that consumer observes
+the change. Compaction would drop `MaxAge` and collapse per-key history **on a shared stream** to fix one
+client's cold start — repairing a client symptom by changing a substrate-wide retention property other
+consumers depend on. §8's four objections stand; this is the fifth and the one that settles it.
+
+**The measurement is sound, and the design honestly reverses its own row.** The row was filed proposing
+compaction; §5 re-grounds it and recommends the opposite. The headline number traces word-for-word to its
+demo-box commit (`0d476524`, 2026-07-31): 2,049 frames to deliver a 14-key world, `ready` at 33 s.
+
+**Verified at ratification:** the hardcoded policy is real — `DeliverPolicy: jetstream.DeliverAllPolicy`
+at `internal/substrate/consumer.go:141`, with no policy field anywhere on the consumer config struct, so
+the transport seam genuinely cannot express a starting position today.
+
+**One thing this is NOT, recorded so a builder does not conflate them.** `SetSyncFirstSeq`
+(`internal/refractor/control/service.go:405-412`) is the **`syncgap` op's gap detector** —
+`gapped = cursor < firstSeq`, fail-closed when unset. It reasons about a stream's first sequence to decide
+whether a client's cursor has been trimmed away; it is not a delivery-position setter and gives this fire
+nothing to reuse beyond the vocabulary.
 
 **For Andrew:**
 

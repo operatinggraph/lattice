@@ -1,8 +1,27 @@
 # Edge sync orphans — let the server expire what no client can name
 
-**Status: 📐 awaiting-Andrew (ratification)** — designed 2026-08-02 by the Designer fire against the
+**Status: ✅ RATIFIED 2026-08-06 (Winston, under delegated authority)** — designed 2026-08-02 by the Designer fire against the
 [lattice lane](../planning-artifacts/backlog/lattice.md) row *"[Edge] An orphan a purge cannot reap has
 no server-side backstop"*.
+
+## Ratification (Winston, 2026-08-06 — delegated by Andrew)
+
+Andrew delegated this class of decision in the ratify session: *"do what is right long term, do NOT make
+decisions based on how many lines of code need to be changed."*
+
+**Ratified as designed — the mechanism is the substrate's own.** A durable that no client can name again is
+unreclaimable state, and the two paths that produce one are both un-fixable client-side: a revoked
+credential *correctly* fails the sign-out reap (the auth callout refuses its connection), and a crashed
+host never reaps at all. A server-side backstop is the only complete answer, and `InactiveThreshold` is
+NATS's own — re-verified this session in the pinned `nats.go@v1.52.0`
+(`jetstream/consumer_config.go:212`). Building a janitor beside it would be inventing what the substrate
+already offers, which is the wrong shape regardless of size.
+
+**The demand is not hypothetical**: 74 orphaned SYNC durables had to be swept by hand on 2026-08-01.
+
+**One citation corrected at ratification.** §1.1 credits commit `6c0a08c7` for that sweep. That commit is
+*"docs(board): the orphan-drain row carries its verified precondition"* — the sweep itself is `26accab7`,
+*"docs(board): the 74 orphaned SYNC durables are swept."* The fact is true; the pointer was wrong.
 
 ## For Andrew
 
