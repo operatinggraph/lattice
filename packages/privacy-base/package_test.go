@@ -34,7 +34,7 @@ func TestPackage_StructurePins(t *testing.T) {
 	if got, want := len(Package.Roles), 0; got != want {
 		t.Errorf("Roles: got %d, want %d", got, want)
 	}
-	if got, want := len(Package.WeaverTargets), 0; got != want {
+	if got, want := len(Package.WeaverTargets), 1; got != want {
 		t.Errorf("WeaverTargets: got %d, want %d", got, want)
 	}
 	if got, want := len(Package.LoomPatterns), 0; got != want {
@@ -84,6 +84,19 @@ func TestPackage_StructurePins(t *testing.T) {
 		got := Package.Lenses[i]
 		if got.CanonicalName != want.name || got.Bucket != want.bucket {
 			t.Errorf("Lenses[%d]: got %s→%s, want %s→%s", i, got.CanonicalName, got.Bucket, want.name, want.bucket)
+		}
+	}
+
+	wantWeaverTargets := []string{ErasureCompleteTarget}
+	if len(wantWeaverTargets) != len(Package.WeaverTargets) {
+		t.Fatalf("wantWeaverTargets pins %d of %d targets — the loop below is bounded by the want-slice, so an unpinned tail is invisible", len(wantWeaverTargets), len(Package.WeaverTargets))
+	}
+	for i, want := range wantWeaverTargets {
+		if i >= len(Package.WeaverTargets) {
+			break
+		}
+		if got := Package.WeaverTargets[i].TargetID; got != want {
+			t.Errorf("WeaverTargets[%d]: got TargetID %s, want %s", i, got, want)
 		}
 	}
 

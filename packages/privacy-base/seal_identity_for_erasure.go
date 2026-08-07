@@ -169,8 +169,9 @@ def execute(state, op):
 // read. A shred committing concurrently with a seal can therefore persist the
 // PREVIOUS cycle's shreddedAt into the marker. The window is narrow (the
 // pattern runs these sequentially) and self-announcing (a re-shred clears the
-// finalization booleans, so the residue row surfaces as critical rather than
-// attesting), and there is no in-script fix — a script cannot condition on a
+// finalization booleans, so the residue row reopens its two async-half gaps —
+// each raised as a Weaver Health issue by the identityErasureComplete target —
+// rather than attesting), and there is no in-script fix — a script cannot condition on a
 // key it does not mutate.
 //
 // # Fail-closed on a merged-away identity

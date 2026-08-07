@@ -1,5 +1,5 @@
 name: privacy-base
-version: 0.8.0
+version: 0.9.0
 description: |
   Per-identity PII key-custody envelope (piiKey) backing crypto-shred
   (vault-crypto-shredding-design.md §2.1/§2.2). ShredIdentityKey marks the
@@ -10,7 +10,11 @@ description: |
   provable rather than point-in-time. SealIdentityForErasureComplete then walks
   that person's remaining links inside its own commit and writes the erasure
   attestation only if none is live (§7.2) — the lens decides when to try, the op
-  decides whether it is true. No dependencies — the DDLs attach to
+  decides whether it is true. The identityErasureComplete Weaver target
+  (§7.2/§10.8) is what turns the identityErasureResidue lens's five projected
+  missing_* columns into that convergence loop: directOp dispatch of the two
+  sweep ops and the seal, surface for the two async crypto-shred halves. No
+  dependencies — the DDLs attach to
   identity vertices by Contract #1 key-shape convention, not an install-order
   coupling with identity-domain.
 declares:
@@ -48,6 +52,9 @@ declares:
       adapter: nats-kv
       bucket: weaver-targets
       engine: full
+  weaverTargets:
+    - targetId: identityErasureComplete
+      lensRef: identityErasureResidue
   permissions:
     - operationType: RecordShredFinalization
       scope: any
