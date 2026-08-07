@@ -25,6 +25,9 @@ the row is `🚧 blocked-on:` it (a missing *lens* is package work, built here).
 | **Retiring a studio strands its classes with no location at all** | `TombstoneStudio` soft-deletes with no cascade ([ddls.go:111](../../../packages/wellness-domain/ddls.go)) and `reapDuplicateStudios` ([seed-classic-demo.go:428](../../../scripts/seed-classic-demo.go)) tombstoned two, so 6 sessions still `atStudio`-linked there project a null studio and the card renders no location line ([app.js:705](../../../cmd/wellness-app/web/app.js)). `ReassignSession` already exists; mirror the `missing_manager` convergence flag (`c643cf06`). | Wellness | pkg | ★★ | S | 📋 ready |
 | **A wellness member still can't pay their own balance** | `WellnessCreditAccount` grants `operator`+`frontOfHouse` only ([permissions.go:65](../../../packages/wellness-ledger/permissions.go)) — the one vertical left without the consumer `scope=self` self-pay grant clinic/café/LoftSpace all shipped (`ea68207b` / `80a1f76c` / `a587b245`); the FE's only payment control is the front-desk Roster panel. | Wellness | pkg + FE | ★★ | S | 📋 ready |
 | **A no-show fee never names the class it charges for** | `wellnessLedgerHistory` projects the bare literal `'No-show fee' AS memo` ([lenses.go:188](../../../packages/wellness-ledger/lenses.go)), so a member's history is N indistinguishable $25 debits with nothing to dispute. Clinic precedent `15f628f4` walks the `settles` link for the visit date. | Wellness | pkg | ★★ | S | 📋 ready |
+| **Three of the eight storefront listings can never be leased** | All 8 are the same "12 Classic Demo Ave" $2200/1bd unit: 3 carry no `manages` landlord so an application to them is undecidable ([permissions.go:135](../../../packages/lease-signing/permissions.go)), 7 are pre-pin duplicates the `unitID` pin never reaped, and the pinned one accrued 10 co-managers from the unguarded per-run mint ([seed-classic-demo.go:73,127](../../../scripts/seed-classic-demo.go)). Reap precedent: `8f9b0633`. | LoftSpace | pkg | ★★ | S | 📋 ready |
+| **A landlord sets renewal terms without ever seeing whose renewal it is** | `renewalsReadSpec` binds the tenant identity but projects only `tenant.key` ([renewal_lenses.go:305](../../../packages/lease-signing/renewal_lenses.go)), so the card renders address + cycle end + a short key ([app.js:2334](../../../cmd/loftspace-app/web/app.js)) and Set terms / Decline act on an unnamed person. `landlordLeaseApplicationsRead` already names its applicant via a SECURE column ([lenses.go:269](../../../packages/lease-signing/lenses.go)) — mirror it. | LoftSpace | pkg | ★★ | S | 📋 ready |
+| **A qualification profile stays rewritable after the lease is approved and signed** | `SetApplicantProfile` is an "UNCONDITIONED upsert (re-submittable)" with no terminal-state guard ([ddls.go:114](../../../packages/lease-signing/ddls.go)) — verified live against an approved + signed application, so the record the landlord decided on is never preserved as a fair-housing record. `DecideLeaseApplication`'s own `DecisionFinal` ([:95](../../../packages/lease-signing/ddls.go)) is the in-package precedent. | LoftSpace | pkg | ★ | S | 📋 ready |
 | **The unauthenticated class schedule advertises agent-verify artifacts** | `/api/studios` + `/api/sessions` are public-read ([server.go:29](../../../cmd/wellness-app/server.go)) and 3 of 5 studios plus 5 of 12 upcoming classes are "PO Discovery"/"Steward Verify"/"Recurrence Verify" litter — verify fires mint demo-visible entities and never reap them. Reap precedent: `8f9b0633`. | Wellness | pkg | ★ | S | 📋 ready |
 
 **Explicitly descoped (ambitious-PO pass, 2026-07-09):** structured diagnosis/procedure coding (ICD/CPT),
@@ -45,10 +48,9 @@ dated run-logs live in git history. Rotate LoftSpace ↔ Clinic ↔ Café ↔ We
 **Wellness joined** 2026-07-09 (`cmd/wellness-app` shipped, live on :7802) — fold it into rotation; see
 [agents/vertical-po/SKILL.md](../../../agents/vertical-po/SKILL.md) §1.
 
-- **Rotation to date:** LoftSpace ×22, Clinic ×21, Café ×12, Wellness ×9.
+- **Rotation to date:** LoftSpace ×23, Clinic ×21, Café ×12, Wellness ×9.
 - **Method:** reuse the already-up shared stack (detect NATS :4222 / app :7788/:7799/:7801/:7802), drive the real flow via `/api/op` + the lens projections as the product owner, file scored items. All four apps exist + are exercisable live (`:7788` / `:7799` / `:7801` / `:7802`).
 - **Live-stack note:** a stale bootstrap JSON vs. a recreated Core KV was a recurring dev-loop trap (2026-07-03, 2026-07-04) that silently emptied reads; `make up` now self-heals it (`109f59a`, 2026-07-05) — re-verify empty-read reports as a real product bug first.
-- **2026-08-03:** Café — drove resident + front-desk hats live through open/charge/void/settle; the catalog is 8 copies of 2 items, no charge can be named or itemized, and rent never bills; filed 4.
 - **2026-08-03:** Wellness — drove member, instructor + front-desk hats live; no past class closes out, no studio retires, no balance settles; filed 5.
 - **2026-08-03:** LoftSpace — drove applicant, landlord + front-desk hats live; the executed lease names neither party, screening progress is invisible, an exhausted check dead-ends; filed 3 + 1 platform.
 - **2026-08-04:** Clinic — drove patient, provider + front-desk hats live; billing denies every hat, a booked visit hides its site, a documented note is unreadable; filed 3.
@@ -58,7 +60,8 @@ dated run-logs live in git history. Rotate LoftSpace ↔ Clinic ↔ Café ↔ We
 - **2026-08-06:** Clinic — drove patient, provider + front-desk hats live; no visit says which site, a $750 bill is 28 identical lines, no patient can pay; filed 4.
 - **2026-08-07:** Café — drove resident self-order→settle + front-desk hats live; no resident pays their own tab, no line names its orderer; filed 3 + 1 platform.
 - **2026-08-07:** Wellness — drove member + front-desk hats live through schedule/book/bill; a retired studio strands its classes, no member self-pays, no fee names its class; filed 4.
-- **Next:** LoftSpace.
+- **2026-08-07:** LoftSpace — drove applicant, landlord + staff hats live through profile/decide/renew/search; 3 listings are unleasable, a renewal never names its tenant; filed 3.
+- **Next:** Clinic.
 
 ## Done log — verticals (newest first)
 
