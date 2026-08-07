@@ -2115,3 +2115,79 @@ rather than growing the corpus, so 400 unrelated bystanders red a corpus-seeded 
 Increments 3 and 4's other residuals (the finite scan window, the missing `Enumerations` declaration
 on a `systemOp` step, the read-set coverage guard, the `UnbindIdentityCredentials` description edit,
 the absent `make verify-package-privacy-base` target) are re-inherited verbatim rather than re-filed.
+
+---
+
+## Fire B build note — increment 6 (2026-08-07): the completion seal
+
+### Fire brief
+
+**Scope sentence, verbatim from §12 Fire B step 2's list:** `SealIdentityForErasureComplete` with its
+in-commit re-verification.
+
+**Why this increment is the op and not the `identityErasureComplete` weaverTarget, which §12 lists
+first.** The target cannot ship before this op exists, and not for a tidiness reason. A `missing_<g>`
+column that is true while the target's playbook declares no `Gaps` entry for it is neither an install
+error nor silently ignored: `dispatchGap` raises a standing **`error`-severity** `GapWithoutPlaybook`
+Health issue and Acks (`internal/weaver/evaluator.go:179-201`), which `aggregateStatus` escalates the
+whole component to `unhealthy` on (`internal/weaver/health.go:362-386`). Increment 5's lens projects
+`missing_erasureSeal` **true for every erasure-requested identity** today — `.erasure` does not exist,
+so the field-diff opens (`lenses.go:296-303`). A target shipped now would therefore install a permanent
+red on the Weaver the moment the first erasure is requested. Same ordering rationale increments 3 and
+4 each gave: the pieces the target dispatches exist before the target that dispatches them. This is the
+third and last of them, so the target increment that follows wires all five gaps against real ops.
+
+**Non-goals:** the `identityErasureComplete` weaverTarget, the `identityErasure` Loom pattern, the two
+`surface` gaps, narrowing `ShredIdentityKey` (§12 step 3), the operator surface (§12 step 4).
+
+**Touch list (verified live).**
+
+| File | What |
+|---|---|
+| `packages/privacy-base/seal_identity_for_erasure_complete.go` | NEW — the `.erasure` attestation aspect DDL · the op DDL + script · the `privacy.erasureCompleted` event DDL |
+| `packages/privacy-base/ddls.go` | register the three new DDLs |
+| `packages/privacy-base/permissions.go` | the `Scope:"any"` → `operator` grant |
+| `packages/privacy-base/manifest.yaml` · `package.go` | the declarations · `0.7.0 → 0.8.0` |
+| `packages/privacy-base/seal_identity_for_erasure_complete_test.go` | NEW — the guard matrix and the verification proofs |
+| `packages/privacy-base/package_test.go` | the structure pins (DDLs 7→10, permissions 3→4) |
+
+**Precedents to mirror.** `privacy-base/seal_identity_for_erasure.go` is the sibling in every respect —
+aspect-DDL + op-DDL + event-DDL in one file, the `required_string`/`parts_of`/`vertex_alive`/`live_data`
+helper copies Starlark's absent `load()` forces, and the `IdentityMerged` / `ErasureNotShredded`
+fail-closed guards this op must repeat verbatim (a merged-away identity's residue is zero by
+construction, so an attestation there attests nothing). `privacy-base/purge_identity_dedup_footprint.go`'s
+`collect_live_sweep` is the paged `kv.Links` walk over a soft-delete substrate and the source of the
+class-(e) read-posture annotations. `identity-domain/unbind_identity_credentials.go` owns the other two
+arms.
+
+**Increment order + the green check after each.** (1) the three DDLs + registration + version bump →
+`go build ./...`; (2) the grant + structure pins → `go test ./packages/privacy-base/ -count=1`;
+(3) the guard matrix and verification tests → same; (4) gates → `go test ./... -p 4`, `make vet`,
+`golangci-lint run ./...`, all `scripts/lint-*.go`, `make verify-kernel`.
+
+**In-scope gotchas.**
+
+- **The verification walk must cover exactly the five arms the lens counts and the two sweeps clear** —
+  `boundTo` inbound and outbound, `indexes` inbound, `duplicateOf` outbound and inbound. An arm the
+  seal does not walk is an arm the attestation does not cover, and the seal is the last thing standing
+  between a stale row and a false attestation.
+- **The seal must re-verify the two ASYNC halves itself, not inherit them from gap ordering.** The
+  lens's `missing_erasureSeal` only opens once `vaultKeyDestroyed` and `projectionsNullified` are both
+  true, and `lenses.go:235-244` names that ordering as the guarantee *until an op re-verifies them* —
+  and hands this increment the obligation by name. A guarantee that lives in a projection's column
+  ordering is a guarantee that dies the first time a gap is dispatched out of order.
+- **The live-read budget, not the sweep's ceiling, bounds what this op can verify.** `kv.Links` charges
+  its clamped page LIMIT per page against a 60,000-unit budget
+  (`internal/processor/live_read_budget.go:26`, `starlark_kv.go:204-224`), so five arms at the sweeps'
+  own `64 × 256` would charge 81,920 and abort mid-walk. A **shared** page budget across the five arms
+  rather than a per-arm one is what keeps the ordinary lopsided subject verifiable, since almost no
+  identity is wide on all five.
+- **A tombstone is still enumerated.** The walk pages the whole cursor to prove absence; it cannot stop
+  at the first page, because one sweep's worth of tombstones fills it.
+
+**Adjacent finds — filed now, not at ship.** One, for the weaverTarget increment that follows, so it is
+not re-derived: **§7.2's `surface` gaps specify severity `critical`, which is not a valid
+`IssueSeverity`.** `internal/weaver/registry.go:643-645` accepts `"warning"` or `"error"` only, and a
+target carrying anything else is rejected at CDC load with a `TargetRejected` issue — the target would
+never register at all. `"error"` is the intended tier. Increments 3, 4 and 5's residuals are
+re-inherited verbatim rather than re-filed.
