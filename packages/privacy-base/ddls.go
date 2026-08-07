@@ -25,6 +25,19 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 //   - `privacy.keyShredded` (meta.ddl.eventType) — the registered event-type
 //     DDL for the op's emitted event (Contract #3 §3.4). See
 //     shred_identity_key.go.
+//   - `erasureRequested` (meta.ddl.aspectType, NOT sensitive) — the
+//     erasure-request marker, vtx.identity.<NanoID>.erasureRequested. Its
+//     PermittedCommands admits SealIdentityForErasure alone, which refuses a
+//     create/update of that CLASS to any other operation. It carries the same
+//     caveat piiKey's entry above records for the same mechanism, plus one
+//     more: a tombstone carries no document, so its class is empty and no
+//     aspect-type DDL can refuse one. Non-removal of this marker is a
+//     convention held by review, not a step-6 guarantee — see
+//     seal_identity_for_erasure.go.
+//   - `sealIdentityForErasure` (meta.ddl.vertexType) — the
+//     SealIdentityForErasure op DDL. See seal_identity_for_erasure.go.
+//   - `privacy.erasureRequested` (meta.ddl.eventType) — the registered
+//     event-type DDL for the seal's emitted event.
 func DDLs() []pkgmgr.DDLSpec {
 	return []pkgmgr.DDLSpec{
 		{
@@ -78,6 +91,9 @@ func DDLs() []pkgmgr.DDLSpec {
 		},
 		ShredIdentityKeyDDL(),
 		KeyShreddedEventDDL(),
+		ErasureRequestedAspectDDL(),
+		SealIdentityForErasureDDL(),
+		ErasureRequestedEventDDL(),
 	}
 }
 

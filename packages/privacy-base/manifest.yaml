@@ -1,12 +1,15 @@
 name: privacy-base
-version: 0.3.0
+version: 0.4.0
 description: |
   Per-identity PII key-custody envelope (piiKey) backing crypto-shred
   (vault-crypto-shredding-design.md §2.1/§2.2). ShredIdentityKey marks the
   envelope shredded=true and emits privacy.keyShredded, consumed by the
-  privacy-worker's async Vault.ShredKey destruction. No dependencies — the
-  DDL attaches to identity vertices by Contract #1 key-shape convention, not
-  an install-order coupling with identity-domain.
+  privacy-worker's async Vault.ShredKey destruction. SealIdentityForErasure
+  writes the erasureRequested marker that closes an erased person's write path
+  (erasure-orchestration-design.md §6), which is what makes a residue count
+  provable rather than point-in-time. No dependencies — the DDLs attach to
+  identity vertices by Contract #1 key-shape convention, not an install-order
+  coupling with identity-domain.
 declares:
   ddls:
     - canonicalName: piiKey
@@ -14,6 +17,12 @@ declares:
     - canonicalName: shredIdentityKey
       class: meta.ddl.vertexType
     - canonicalName: privacy.keyShredded
+      class: meta.ddl.eventType
+    - canonicalName: erasureRequested
+      class: meta.ddl.aspectType
+    - canonicalName: sealIdentityForErasure
+      class: meta.ddl.vertexType
+    - canonicalName: privacy.erasureRequested
       class: meta.ddl.eventType
   lenses:
     - canonicalName: shredStatus
@@ -26,5 +35,8 @@ declares:
       engine: full
   permissions:
     - operationType: RecordShredFinalization
+      scope: any
+      grantsTo: [operator]
+    - operationType: SealIdentityForErasure
       scope: any
       grantsTo: [operator]

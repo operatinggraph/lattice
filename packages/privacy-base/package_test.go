@@ -10,19 +10,21 @@ import (
 // rather than reaching an install, where the same change is a silent capability
 // or read-model shift.
 //
-// This package is load-bearing for crypto-shred and declares no operation a
-// script dispatches: piiKey is minted and read by the Processor's own commit
-// path, and the class is registered here only so the DDL cache and Loupe can
-// see it. A DDL quietly vanishing from this list would therefore break
-// encrypt-on-write with no failing operation to point at.
+// This package is load-bearing for crypto-shred. `piiKey` is minted and read
+// by the Processor's own commit path, and its class is registered here only so
+// the DDL cache and Loupe can see it — a DDL quietly vanishing from this list
+// would break encrypt-on-write with no failing operation to point at. The
+// erasure declarations are different in kind: `sealIdentityForErasure` IS
+// script-dispatched, and `erasureRequested`'s permittedCommands is the write
+// gate on the marker every identity write-path guard reads.
 func TestPackage_StructurePins(t *testing.T) {
-	if got, want := len(Package.DDLs), 3; got != want {
+	if got, want := len(Package.DDLs), 6; got != want {
 		t.Errorf("DDLs: got %d, want %d", got, want)
 	}
 	if got, want := len(Package.Lenses), 2; got != want {
 		t.Errorf("Lenses: got %d, want %d", got, want)
 	}
-	if got, want := len(Package.Permissions), 1; got != want {
+	if got, want := len(Package.Permissions), 2; got != want {
 		t.Errorf("Permissions: got %d, want %d", got, want)
 	}
 	if got, want := len(Package.OpMetas), 0; got != want {
@@ -45,6 +47,12 @@ func TestPackage_StructurePins(t *testing.T) {
 		{"piiKey", "meta.ddl.aspectType"},
 		{"shredIdentityKey", "meta.ddl.vertexType"},
 		{"privacy.keyShredded", "meta.ddl.eventType"},
+		{"erasureRequested", "meta.ddl.aspectType"},
+		{"sealIdentityForErasure", "meta.ddl.vertexType"},
+		{"privacy.erasureRequested", "meta.ddl.eventType"},
+	}
+	if len(wantDDLs) != len(Package.DDLs) {
+		t.Fatalf("wantDDLs pins %d of %d declarations — the loop below is bounded by the want-slice, so an unpinned tail is invisible", len(wantDDLs), len(Package.DDLs))
 	}
 	for i, want := range wantDDLs {
 		if i >= len(Package.DDLs) {
@@ -66,7 +74,13 @@ func TestPackage_StructurePins(t *testing.T) {
 		}
 	}
 
-	wantPerms := []struct{ op, scope string }{{"RecordShredFinalization", "any"}}
+	wantPerms := []struct{ op, scope string }{
+		{"RecordShredFinalization", "any"},
+		{"SealIdentityForErasure", "any"},
+	}
+	if len(wantPerms) != len(Package.Permissions) {
+		t.Fatalf("wantPerms pins %d of %d grants — an unpinned grant could change scope silently", len(wantPerms), len(Package.Permissions))
+	}
 	for i, want := range wantPerms {
 		if i >= len(Package.Permissions) {
 			break
