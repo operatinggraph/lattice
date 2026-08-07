@@ -1,5 +1,5 @@
 name: privacy-base
-version: 0.6.0
+version: 0.7.0
 description: |
   Per-identity PII key-custody envelope (piiKey) backing crypto-shred
   (vault-crypto-shredding-design.md §2.1/§2.2). ShredIdentityKey marks the
@@ -34,6 +34,10 @@ declares:
     - canonicalName: piiKeyEnvelope
       adapter: nats-kv
       bucket: privacy-pii-key-envelopes
+      engine: full
+    - canonicalName: identityErasureResidue
+      adapter: nats-kv
+      bucket: weaver-targets
       engine: full
   permissions:
     - operationType: RecordShredFinalization

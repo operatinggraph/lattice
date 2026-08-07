@@ -22,7 +22,7 @@ func TestPackage_StructurePins(t *testing.T) {
 	if got, want := len(Package.DDLs), 7; got != want {
 		t.Errorf("DDLs: got %d, want %d", got, want)
 	}
-	if got, want := len(Package.Lenses), 2; got != want {
+	if got, want := len(Package.Lenses), 3; got != want {
 		t.Errorf("Lenses: got %d, want %d", got, want)
 	}
 	if got, want := len(Package.Permissions), 3; got != want {
@@ -66,13 +66,21 @@ func TestPackage_StructurePins(t *testing.T) {
 		}
 	}
 
-	wantLenses := []string{"shredStatus", "piiKeyEnvelope"}
+	wantLenses := []struct{ name, bucket string }{
+		{"shredStatus", ShredStatusBucket},
+		{"piiKeyEnvelope", PiiKeyEnvelopeBucket},
+		{"identityErasureResidue", "weaver-targets"},
+	}
+	if len(wantLenses) != len(Package.Lenses) {
+		t.Fatalf("wantLenses pins %d of %d lenses — the loop below is bounded by the want-slice, so an unpinned tail is invisible", len(wantLenses), len(Package.Lenses))
+	}
 	for i, want := range wantLenses {
 		if i >= len(Package.Lenses) {
 			break
 		}
-		if got := Package.Lenses[i].CanonicalName; got != want {
-			t.Errorf("Lenses[%d]: got %q, want %q", i, got, want)
+		got := Package.Lenses[i]
+		if got.CanonicalName != want.name || got.Bucket != want.bucket {
+			t.Errorf("Lenses[%d]: got %s→%s, want %s→%s", i, got.CanonicalName, got.Bucket, want.name, want.bucket)
 		}
 	}
 

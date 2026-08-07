@@ -148,25 +148,37 @@ var corpusLabelVerdicts = map[string]labelVerdict{
 	// consumers take the unconditional fan-out. The label set is still pinned:
 	// widening it is safe, but a label DROPPING out is how a broad lens quietly
 	// stops being judged against a type it reads.
-	"applicantRosterRead":           {broad, "building identity leaseapp unit"},
-	"cafeIdentitiesRead":            {broad, "identity leaseapp"},
-	"cafeLeaseWorkplaces":           {broad, "leaseapp"},
-	"capabilityEphemeral":           {broad, "identity role task"},
-	"capabilityServiceAccess":       {broad, "identity service"},
-	"clauseSatisfaction":            {broad, "account clause identity transaction"},
-	"edgeCatalog#0":                 {broad, "identity meta service"},
-	"edgeEntityMenuItems":           {broad, "identity menuitem"},
-	"edgeEntityProviders":           {broad, "identity provider"},
-	"edgeEntitySessions#0":          {broad, "identity instructor session studio"},
-	"edgeEntityStudios":             {broad, "identity studio"},
-	"edgeIdentity":                  {broad, "identity instructor leaseapp patient provider role serviceprovider"},
-	"edgeManifestReadGrants":        {broad, "booking identity leaseapp menuitem meta provider service session studio tab task"},
-	"edgeManifestStaffReadGrants":   {broad, "identity meta permission role studio task workorder"},
-	"edgeServices":                  {broad, "identity service"},
-	"edgeStaffWorkOrders":           {broad, "identity workorder"},
-	"edgeTasks#0":                   {broad, "identity task unit"},
-	"edgeTasks#1":                   {broad, "identity role task unit"},
-	"identityAnchors":               {broad, "identity"},
+	"applicantRosterRead":         {broad, "building identity leaseapp unit"},
+	"cafeIdentitiesRead":          {broad, "identity leaseapp"},
+	"cafeLeaseWorkplaces":         {broad, "leaseapp"},
+	"capabilityEphemeral":         {broad, "identity role task"},
+	"capabilityServiceAccess":     {broad, "identity service"},
+	"clauseSatisfaction":          {broad, "account clause identity transaction"},
+	"edgeCatalog#0":               {broad, "identity meta service"},
+	"edgeEntityMenuItems":         {broad, "identity menuitem"},
+	"edgeEntityProviders":         {broad, "identity provider"},
+	"edgeEntitySessions#0":        {broad, "identity instructor session studio"},
+	"edgeEntityStudios":           {broad, "identity studio"},
+	"edgeIdentity":                {broad, "identity instructor leaseapp patient provider role serviceprovider"},
+	"edgeManifestReadGrants":      {broad, "booking identity leaseapp menuitem meta provider service session studio tab task"},
+	"edgeManifestStaffReadGrants": {broad, "identity meta permission role studio task workorder"},
+	"edgeServices":                {broad, "identity service"},
+	"edgeStaffWorkOrders":         {broad, "identity workorder"},
+	"edgeTasks#0":                 {broad, "identity task unit"},
+	"edgeTasks#1":                 {broad, "identity role task unit"},
+	"identityAnchors":             {broad, "identity"},
+	// Deliberately broad, and it must stay that way. identityErasureResidue's
+	// five fan-out arms bind UNLABELED nodes on purpose: each mirrors a
+	// kv.Links(subject, relation, direction, …) enumeration in
+	// UnbindIdentityCredentials / PurgeIdentityDedupFootprint, and those filter
+	// by relation and direction with no type filter at all — an `indexes` link's
+	// source type is a wildcard in the server filter, which is the confinement
+	// hazard that op's own build had to close. Labelling an arm would make the
+	// lens count a SUBSET of what the op sweeps, so residue could read zero while
+	// a live link naming the erased person remains, and the completion seal would
+	// be written over it. The reprojection cost is bounded by the anchor
+	// predicate: only erasure-requested identities have a row at all.
+	"identityErasureResidue":        {broad, "identity"},
 	"landlordLeaseApplicationsRead": {broad, "building identity leaseapp service unit"},
 	"landlordUnitsRead":             {broad, "building identity unit"},
 	"leaseApplicationComplete":      {broad, "identity leaseapp object service task unit"},

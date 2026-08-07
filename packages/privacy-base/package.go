@@ -34,7 +34,7 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 // Package is the static, install-time bundle.
 var Package = pkgmgr.Definition{
 	Name:        "privacy-base",
-	Version:     "0.6.0",
+	Version:     "0.7.0",
 	Description: "Per-identity PII key-custody envelope (piiKey) backing crypto-shred, and the erasureRequested marker that closes an erased identity's write path.",
 	DDLs:        DDLs(),
 	Lenses:      Lenses(),
