@@ -2313,3 +2313,125 @@ no async check at all.
 Increments 3, 4 and 5's other residuals (the finite scan window, the missing `Enumerations` declaration
 on a `systemOp` step, the read-set coverage guard, the absent `make verify-package-privacy-base`
 target, the tombstoned-marker gap) are re-inherited verbatim rather than re-filed.
+
+---
+
+## Fire B build note — increment 7 (2026-08-07): the weaverTarget
+
+### Fire brief
+
+**Scope sentence, verbatim from §12 Fire B step 2's list:** the `identityErasureComplete` weaverTarget,
+and the two `surface` gaps.
+
+This is the increment increments 3–6 each deferred to. Every piece the target dispatches now exists:
+`UnbindIdentityCredentials` (inc 3), `PurgeIdentityDedupFootprint` (inc 4), the
+`identityErasureResidue` lens whose rows it reads (inc 5), and `SealIdentityForErasureComplete`
+(inc 6). The target is what turns five projected `missing_*` columns into a convergence loop.
+
+**Non-goals:** the `identityErasure` Loom pattern, narrowing `ShredIdentityKey` (§12 step 3), the
+operator surface (§12 step 4), R1's `N > 3·PAGE` dispatch-count proof against a live stack.
+
+**Touch list (verified live).**
+
+| File | What |
+|---|---|
+| `packages/privacy-base/targets.go` | NEW — `WeaverTargets()`: `identityErasureComplete`, five gaps |
+| `packages/privacy-base/lenses.go` | the three `maxretries_<g>` columns the cap term reads · `BodyColumns` |
+| `packages/privacy-base/package.go` | `WeaverTargets:` field · `0.8.0 → 0.9.0` |
+| `packages/privacy-base/manifest.yaml` | `declares.weaverTargets` · version |
+| `packages/privacy-base/targets_test.go` | NEW — playbook↔lens column binding, the cap arithmetic, the severity pin |
+| `packages/privacy-base/erasure_residue_lens_test.go` | the `maxretries_*` projections |
+| `packages/privacy-base/package_test.go` | the structure pin: WeaverTargets 0 → 1 |
+
+**Precedents to mirror.** `packages/orchestration-base/targets.go:26-49` is the only shipped package
+carrying both a `surface` gap (`unroutedTasks`) and a `directOp` gap (`orphanedTaskGrants`);
+`packages/lease-signing/targets.go:69-103` is the richest playbook (two `directOp` gaps with `Params`
+and `Reads`). `packages/lease-signing/lens_unit_test.go:18-97` is the playbook↔lens column
+cross-check — **it must not be copied verbatim**: it looks the lens up by
+`l.CanonicalName == targetID`, and this package is the first where the two deliberately differ
+(`identityErasureResidue` vs `identityErasureComplete`, `lenses.go:21-28`). Look it up by `LensRef`.
+
+**Increment order + the green check after each.** (1) `targets.go` + registration + version bump →
+`go build ./...`; (2) the `maxretries_*` lens columns → `go test ./packages/privacy-base/ -count=1`;
+(3) the binding + cap tests + structure pins → same; (4) gates → `go test ./... -p 4`, `make vet`,
+`golangci-lint run ./...`, all `scripts/lint-*.go`, `make verify-kernel`.
+
+### Four things the ratified §7.2 did not settle, and how this brief settles them
+
+**1. `IssueSeverity: "critical"` would reject the whole target — and `critical` is not the only thing
+wrong with §7.2's issue codes.** Increment 6 already filed the severity half as an adjacent find:
+`internal/weaver/registry.go:643-646` and `internal/pkgmgr/orchestrationguard.go:260-267` accept
+`"warning"` or `"error"` and nothing else, and a target carrying anything else is **rejected at CDC
+load** (`TargetRejected`) — it would never register, so all five gaps would be dead, not just the two
+`surface` ones. The tier is `"error"`.
+
+The `issueCode` half is new here. §7.2 specifies `erasure.vaultKeyNotDestroyed` /
+`erasure.projectionsNotNullified`. **Contract #5 §5.5 documents the `code` field as PascalCase**
+(`docs/contracts/05-health-kv.md:109-124`), and every code raised anywhere — the twelve engine-side
+codes and the single shipped package one (`UnroutedTasks`) — follows it. Nothing validates the shape,
+so a dotted code would install green and simply be the only non-conforming code in the system. The
+codes are `ErasureVaultKeyNotDestroyed` and `ErasureProjectionsNotNullified`.
+
+**2. The retry cap is this increment's obligation, and a constant is the only shape that can work.**
+Increment 5's residual 1 and increment 6's residual 1 both name this increment as their consumer: a
+sweep that hard-fails (`ErasureResidueUnreachable`), or a seal that dies on the 250ms wall, re-dispatches
+forever with no escalation, because the lens's constant-`false` `inflight_<g>` columns opt those gaps out
+of `defaultDirectOpRetryBudget` (`evaluator.go:886-920` — the fallback applies only to a `directOp` gap
+that declares **no** `inflight_<g>`). The mechanism available is a `maxretries_<g>` row column.
+
+A **residue-derived** cap inverts and must be refused: the dispatch count rises while a converging
+subject's residue falls, so a cap scaled to current residue suppresses the sweep exactly as it
+approaches zero. The cap has to be a constant, and the only defensible constant is **the sweep's own
+reachable ceiling** — a bound a converging subject cannot reach, so the cap can only fire on a subject
+the sweep has already stopped making progress on:
+
+| Gap | Arms | Per-commit | Per-arm ceiling | Cap |
+|---|---|---|---|---|
+| `missing_credentialResidue` | `boundTo` in · out | `SWEEP_LIMIT` 64 | `64 × 256` = 16,384 | **512** |
+| `missing_dedupResidue` | `indexes` in · `duplicateOf` out · in | 64 | 16,384 | **768** |
+| `missing_erasureSeal` | — idempotent, one commit | — | — | **8** |
+
+The two sweeps' ceilings are `MAX_BOUND_TO_PAGES × BOUND_TO_PAGE_LIMIT` and
+`MAX_LINK_PAGES × LINK_PAGE_LIMIT` (`unbind_identity_credentials.go:131-134`,
+`purge_identity_dedup_footprint.go:146-149`), and each takes **one direction or class per commit**, so
+a subject that is reachable at all needs at most `ceil(16,384 / 64)` = 256 dispatches per arm. The seal
+is different in kind: it is size-independent and idempotent, and its only legitimate re-dispatch cause
+is lens-vs-commit lag, which a reprojection resolves — so its cap is small, and reaching it means the
+seal is refusing something the lens cannot see (increment 5's residual 4).
+
+Exhaustion is not silent: `escalateExhaustedGap` (`evaluator.go:922-1005`) raises a standing
+`GapBudgetExhausted` Health issue. The `surface` gaps need no cap — a `surface` action is level-driven
+and idempotent, and the fallback budget applies to `directOp` only.
+
+**3. `Class` is omitted on all three `directOp` gaps, deliberately.** `plan.class` →
+`opEnvelope.Class` exists only to disambiguate the Processor's `operationType → class` reverse index
+(`internal/processor/ddl_cache.go:395-430`), which drops an operationType admitted by **two or more
+vertexType DDLs** rather than guess. Corpus-wide, each of the three is admitted by exactly one
+vertexType DDL — including `SealIdentityForErasureComplete`, whose second hit is the `erasure`
+**aspectType** DDL that `commandIndexEligible` excludes. Pinning `Class` where it is not needed would
+be a second place to keep in sync. The day a second vertexType DDL admits one of these, the dispatch
+fails closed and loudly (`MissingClass`), so a test pins the non-ambiguity rather than the workaround.
+
+**4. `UnbindIdentityCredentials` lives in `identity-domain`, and that is fine.** `Class` has nothing
+to do with which package owns the DDL, and the Weaver submits under one fixed service actor
+(`engine.go:40-42`) that the `Scope:"any"` → `operator` grants already reach. The cross-package
+dispatch is a naming question only.
+
+**In-scope gotchas.**
+
+- **The gap column names in the playbook must match the lens's projected columns exactly** — a
+  `missing_<g>` column true with no `Gaps` entry raises a standing **`error`**-severity
+  `GapWithoutPlaybook` and escalates the whole Weaver to `unhealthy`
+  (`evaluator.go:179-201`, `health.go:362-386`). This is the failure increment 6 declined to ship into.
+- **Integer literals project, and land as the Weaver expects.** `256 AS x` parses to `Literal{int64}`
+  (`ruleengine/full/visitor.go:662-672`), serializes as a bare JSON number, and `intColumn`
+  (`evaluator.go:805-832`) accepts `float64`/`int`/`int64` — a string would be a `RowDataError`.
+- **The dispatch count resets on gap close** (`clearClosedMarks`, `evaluator.go:645-719`), so a second
+  erasure cycle starts on a fresh budget rather than a spent one. The cap is per open episode.
+- **`LensRef` binds nothing at install** — the Weaver resolves a target by the `weaver-targets` row-key
+  **prefix**, so `TargetID` must equal the lens's `OutputKeyPattern` prefix. Increment 5 already shaped
+  the lens for this; a test pins it so neither side can drift alone.
+
+**Adjacent finds — filed now, not at ship.** None new. Increments 3–6's residuals are re-inherited
+verbatim rather than re-filed; increment 5's residual 1 and increment 6's residual 1 are **discharged
+here** rather than inherited.
