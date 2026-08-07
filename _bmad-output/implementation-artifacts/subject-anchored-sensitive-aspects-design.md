@@ -1,6 +1,64 @@
 # Subject-anchored sensitive aspects + a retention posture — design
 
-**Status: 📐 awaiting-Andrew (ratification).** Author: Winston (Designer fire, 2026-08-02).
+**Status: 🗄️ HELD AND SUPERSEDED — Andrew, ratify session 2026-08-06.** The mechanism below is the wrong
+one: custody must not be the data subject's erasable key. **Replaced by
+[retention-class-key-custody-design.md](retention-class-key-custody-design.md)**; both staged contract
+edits (Contract #1 `subjectKey`, Contract #3 §3.10 as written) are **reverted**. Read *Held: why* below
+before reusing anything from the body — several of its findings survive and are named there, but its
+data model does not. Author: Winston (Designer fire, 2026-08-02).
+
+---
+
+## Held: why, and what survives (Andrew, 2026-08-06)
+
+**The premise is inverted for the data class it was built for.** §3.10's staged text made the design's
+headline property *"an aspect anchored anywhere in the graph but governed by a shredded subject is
+therefore unrecoverable with no cascade"*. For a clinical encounter — and for a background-check result,
+the other named case — that is the **defect**, not the guarantee: those records carry a retention
+obligation that outlives a data subject's erasure request, so keying them to the subject's erasable DEK
+means honoring an erasure destroys what the controller is required to keep. Increment 4 half-saw this and
+answered with a *second per-identity* DEK, which leaves the record's key lifetime hanging off the person
+rather than off the record's own retention clock. Retention is not an add-on to a person-keyed model; it
+is the fact that decides custody.
+
+**The replacement shape (Andrew's, confirmed in session).** Shred granularity follows the **erasure
+boundary**, because destroying the key *is* the erasure. So the DEK belongs to a **key holder carrying a
+retention policy**: `identity` becomes one holder kind (erase-on-request — today's model, unchanged), and
+a **retention-class holder** owned by the data controller is another (erase-on-expiry). A
+deployment-wide key is rejected outright (no expiry granularity — that is disk encryption, the
+substrate's concern); a per-controller-only key is necessary but insufficient (it cannot expire one
+aged-out record). The holder is **resolved from the aspect's own DDL class**, not supplied by the caller
+and not discovered by traversal — so **Contract #1 needs no new field at all**, and the
+attacker-controlled-field property that §3 sites 5–6 credit to the anchoring rule is preserved rather
+than traded away.
+
+**Findings from this design that survive and are carried into the replacement:**
+
+- **§4.5 — the whole-`data` encryption problem.** Step 6.5 encrypts the entire `data` map, so flipping
+  `.encounter` to sensitive would null `documentedAt`/`followUpRequested`/`followUpDate` in three shipped
+  lenses. The aspect must be split; the ratified aspect-level-granularity rule already requires it.
+- **§5 — the shred must be *delivered*.** `ReferencedLabels` collects labels from node patterns only, so
+  custody expressed as a property chain contributes no label and the shred event is dropped twice. This
+  survives as a *requirement*, and its shape simplifies: a holder **type** is statically known from a
+  lens spec's secure columns, so it can join the referenced set directly.
+- **§3's census** of the six sites the anchoring rule is load-bearing at, and the finding that sites 5–6
+  (the egress ref plane) are a silent obligation rather than custody plumbing.
+- **The sequencing discipline.** Platform custody → Refractor delivery → vertical consumer, never
+  reordered: a projected decrypted record that survives erasure while erasure reports success is strictly
+  worse than today's un-projected plaintext.
+
+**What the session found beyond this design.** The demand is three live instances, not one: clinic
+`.encounter`, lease-signing's `annualIncome`/`guarantorAnnualIncome` on `.profile`, and the
+background-check `outcome` aspect — all non-person-scoped, all plaintext-for-now, all retained classes.
+The read side also turns out to be *simpler* than this design assumed: the stored ciphertext already
+carries `keyId` (`vault/local.go:223`, `:242`), and both read paths ignore it and re-derive custody from
+the anchor segment or a required projected column — so trusting the ciphertext removes machinery instead
+of adding it, and makes the custody-immutability rule of §4.4 unnecessary.
+
+**Naming note (Andrew).** `subjectKey` was already a shipped *operation payload* field meaning the Loom
+pattern subject (`packages/lease-signing/ddls.go:286`, live in `orchestration-base` + `lease-signing`).
+Landing a same-named aspect-envelope field in contract text would have given one word two meanings; the
+replacement design avoids the collision by needing no envelope field.
 
 Backlog row: `planning-artifacts/backlog/lattice.md` → *Privacy / Vault* → **"[Vault] Sensitive aspects are
 identity-anchored, so event-scoped PHI has no home"** (★★★, L). Grounds in the ratified
