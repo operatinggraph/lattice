@@ -205,7 +205,21 @@ adversarial pass (§12) — the original citation was a comment, a wrong line, o
 
 ---
 
-## 3. Increment 1 — the erasure reaches the whole plane
+## 3. Increment 1 — the erasure reaches the whole plane — 🗄️ SUPERSEDED, DO NOT BUILD FROM THIS SECTION
+
+> **Superseded 2026-08-06 (Andrew's redirect — see the Ratification block at the top).** Everything below in
+> §3 specifies the **wrong mechanism**: it makes `ShredIdentityKey` erase *more* inside its own atomic
+> batch. Andrew held exactly that: an op named for shredding a key shreds the key, and "forget me" is an
+> orchestrated process. **The live design is
+> [`erasure-orchestration-design.md`](erasure-orchestration-design.md)**, where the op narrows to one
+> mutation, a Loom pattern owns the ordered spine, and a Weaver target over a residue lens owns the
+> convergent tail with a seal as the guarantee.
+>
+> §3's *diagnosis* survives and is worth reading — the four representations, which paths write which, and
+> why a half-erased plane is incoherent (§1.1–§1.3). Its *prescription* does not. Read it as the problem
+> statement it is, never as build instructions. §3.2's "why `update`-with-empty-data rather than
+> `tombstone`" reasoning is carried into the replacement design; §3.4's plane-state table is still the
+> clearest statement of what must end up true.
 
 **Owner: privacy-base.** Size **S–M**. This is the option-B half of the §7 fork: the half that is
 live-correct today regardless of how the fork resolves, and the half that makes the shred internally

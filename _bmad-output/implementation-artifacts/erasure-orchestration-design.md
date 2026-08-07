@@ -2,6 +2,32 @@
 
 **Status: 📐 DRAFT awaiting Andrew — authored 2026-08-06 (Andrew's redirect of credential-binding-plane-lifecycle-design.md Inc 1: erasure is an orchestrated process, not a fatter op)**
 
+> **DD pass, 2026-08-06.** An independent probe verified ~40 code claims against current `main`: **36 exact,
+> 4 with citation drift, zero substantively false.** Both headline claims are exact to the line, including
+> the verbatim comments quoted — the `identityindex` revive-on-next-write (so a shred's tombstone is
+> deliberately non-terminal) and the `systemOp` read-free fork. §7.2's whole convergence guarantee traces
+> correctly under close reading of `gapSuppressed()`: merely *declaring* `inflight_<g>` in the row routes
+> past the default-3 budget, so the sweep really can re-drive to zero. Feasibility confirmed: `systemOp`
+> exists as described, **zero shipped Loom pattern uses a `systemOp` step**, and **no Weaver-driven paged
+> sweep exists anywhere** — so R1 and R5 are honestly flagged as novel rather than hedged. No premature
+> adopter of any erasure name. Corrections folded:
+>
+> - **The §5.2 fork's precedent is real and exactly shaped.** `userTaskReads` (`internal/loom/engine.go`)
+>   returns a Reads set templated off `inst.SubjectKey` and `submitUserTask` passes it into `buildOutbox`,
+>   which `submitSystemOp` does not — so Option B extends a shipped pattern rather than inventing one. The
+>   "a future systemOp that reads would set its own read-set here" comment is verbatim at the cited site.
+> - **Citation drifts** (substance intact in every case): the guard-skip comment is at `engine.go:827`, not
+>   `:825`; the "linkage is ownership, so this needs no decryption" phrase is at
+>   `shred_identity_key.go:53` (near-variant at `:184`), not `:186-188`; `orchestration-base/opmetas.go`
+>   returns **one** entry (`ClaimTask`), not zero, so §5.3's "deliberately empty" should read
+>   "deliberately one person-facing op"; and ledger #7's `keyshredded/manager.go:253` is the wrong line —
+>   `submitFinalization` is at `:458`, `handleKeyShredded` at `:296`.
+> - **§9.2 silently drops a gating clause.** It says the option-C sequencing is *"unchanged from the
+>   credential-binding design's §7.4"*, but §7.4 gates C **behind the first configured external key
+>   source** as well. Either that clause is obsolete post-redirect — in which case say why, since
+>   `.idpBinding` still cannot exist before an external key source — or it stands and C has **three**
+>   preconditions, not two. Treated as standing until argued otherwise.
+
 **Author:** Winston (Designer fire, 2026-08-06) · **Owners:** privacy-base, identity-domain, internal/loom, internal/weaver
 **Supersedes:** `credential-binding-plane-lifecycle-design.md` §3 (Increment 1) and §7's A/B/C fork.
 **Size: L** (5 increments; Inc 1 S, Inc 2 M, Inc 3 M, Inc 4 M–L, Inc 5 S). No frozen-contract change.
