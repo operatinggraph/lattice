@@ -2,6 +2,33 @@
 
 **Status: 📐 DRAFT awaiting Andrew — authored 2026-08-06 (co-designed with Andrew in the ratify session; subsumes the location-domain class question)**
 
+> **DD pass, 2026-08-06 — §§1–8 verified, §9.3's census corrected.** An independent probe checked ~35
+> citations across the four label-keyed mechanisms, anchor retraction, `seedAnchorFor`, the meta-CDC watch,
+> the caps and `location-domain/ddls.go:56`; **every one verified exact or functionally exact**, including
+> all seven `step6_resolve_ddl.go` fail-open paths (the evidence that the backfill precondition is false),
+> the demand claim (`capabilityServiceAccess` really is unlabeled at `loc0`/`loc`/`exLoc`), zero premature
+> adopters, and the ratified-not-built state of the sibling label-binding design. Three corrections to
+> **§9.3 only**, folded here:
+>
+> 1. **The census undercounts: ≥10 sites across 7 packages, not 8 across 5.** Missing
+>    `wellness-domain/ddls.go:1612` and `maintenance-domain/ddls.go:485`, both reaching the same check
+>    through a generic `require_live_typed(…, "location")` helper rather than a named wrapper — so a
+>    grep for the named wrappers misses them. The fire must census by the *check*, not by the wrapper.
+> 2. **One site is miscategorised in the unsafe direction.** `clinic-domain/site.go`'s `SetSiteProfile`
+>    (`:124-130`) is listed as "redundant — drop the class check". It is not: `require_live_building` tests
+>    alive-ness and `cls != "location"` and nothing else, and the file's five `parts_of` calls all belong to
+>    a *different* DDL script (`:288-315`), so they do not guard this op. The class check is the **sole**
+>    type guard on `buildingKey` — dropping it would let the op write a `clinicSiteProfile` aspect onto any
+>    live vertex. A shipped test pins the current behavior
+>    (`TestClinic_SetSiteProfileRejectsNonLocationBuilding`). That site needs a key-segment or taxonomy
+>    check **added**, not the class check deleted.
+> 3. **Site #6's citation drifted 25 lines** (`clinic-domain/ddls.go:2021-2022`, not `:1996-1997`).
+>
+> And one caveat the section should carry rather than imply: the "dropping the class check makes the guard
+> *stricter*" claim rests on an **empirical** invariant — that only `location-domain` mints these key
+> shapes today — not on anything Contract #1 enforces. It also does not address the migration window in
+> which pre-rename vertices still carry the old shared class while new guards expect the per-type one.
+
 Designer fire 2026-08-06 · owner: Refractor (rule engine) + Processor (step 6 gate) + pkgmgr (declaration surface) ·
 Size **L** (3 fires) · Imp **★★★** · depends on `lens-label-key-type-binding-design.md` (✅ ratified `f365d80a`)
 
