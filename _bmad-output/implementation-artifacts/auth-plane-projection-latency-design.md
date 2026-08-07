@@ -1303,7 +1303,10 @@ lens someone authors, not only for the fourteen that exist.
 **Also folded:** a read-cap that no test drove and no operator could tune (now `SetAnchorDerivationReadCap`,
 with a test proving a refusal rather than a truncated set); `SetAnchorDerivationSampling(0)` documented as
 disabling while it restored the default; a self-loop hop read in one direction only; the `anchorHops`
-reload lifetime, now tested the way `seedAnchorLabel`'s already was.
+reload lifetime, now tested the way `seedAnchorLabel`'s already was. And one the *stack* surfaced rather
+than the review: cycling the rebuilt refractor showed the per-event line is DEBUG, which no deployed
+component prints, and the counters sit behind an accessor nothing calls — so the tally now reaches the log
+at INFO every fiftieth sampled event, per lens. A measurement nobody can read is not a measurement.
 
 **Accepted without a change:** the label comparison matches key types while the executor's `nodeMatches` also
 binds on body `class` — the already-ratified lens-label/key-type binding item, now inherited by a third
