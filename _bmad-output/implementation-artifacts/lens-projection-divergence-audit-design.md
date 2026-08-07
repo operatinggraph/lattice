@@ -1,7 +1,41 @@
 # Lens projection divergence audit — a correctness verdict that does not depend on a successful repair
 
-**Status: 📐 awaiting-Andrew (ratification)**
+**Status: ✅ RATIFIED 2026-08-06 (Winston, under delegated authority) — Fire 1 collapses with the sweep-supersession design into ONE fire**
 **Author:** Winston (Designer fire, 2026-08-01)
+
+## Ratification (Winston, 2026-08-06 — delegated by Andrew)
+
+Andrew delegated this class of decision in the ratify session: *"Winston can ratify — do what is right long
+term, do NOT make decisions based on how many lines of code need to be changed."*
+
+**Ratified, and this design became load-bearing earlier the same session.** Andrew **held** the Contract #6
+§6.2 tie-rule amendment that the auth-plane build had staged, on the grounds that the guard's repair path
+already exists in the contract and the only reachable divergence-at-tie is provenance drift. What the hold
+requires instead is exactly this design's Fire 1: a reconciliation that cannot write must **report that
+honestly** rather than return the silent `nil` the sweep books as `Wrote: true` and logs as *"healed a
+divergent projection"*. See `auth-plane-projection-latency-design.md` §15.7 for that resolution. So Fire 1
+is not merely a health improvement — it is the mechanism a frozen-contract decision now rests on.
+
+**Fire 1 is collapsed with `sweep-rule-snapshot-granularity-design.md` into one fire.** Both rewrite the
+same `Reproject` write path and the same `sweep.go` branch structure: this design reshapes what counts as a
+verdict, that one adds the `supersededRule` check the CDC path already has and `Reproject` lacks. Landing
+them separately would mean two rebases over one another's branch table for no gain, and both are answering
+the same underlying defect — a sweep write whose outcome is reported as success when it is not. Neither doc
+knew about the other (this one predates that finding by two days), so the collapse is recorded here rather
+than in either body.
+
+**Fire 2 (the plain-lens Auditor) is ratified as designed**, and it is the right long-term shape rather
+than a nice-to-have: lens health today is liveness-only, so a frozen row renders green — the grounded
+incident is 12 `orphanedTaskGrants` rows sitting 12 days stale behind a healthy card (§1.1). A sampled
+projected-vs-recomputed verdict is the only signal that can see per-row wrongness, and §4.4's fail-closed
+enrolment (refuse with a published reason) is what keeps an unaudited lens from reading as an audited one.
+
+**Two things the fire must carry.** The §1.2 census (65 of 84 lenses with no per-row verdict; 35
+plain-nats-kv candidates) is dated 2026-08-01 and the corpus has grown since — re-census at build time, as
+the design's own startup-log posture already anticipates. And per the retention-custody design's finding,
+Fire 2's enrolment requires `adapter.RowReader`, whose sole implementor is the NATS-KV adapter, so the
+GrantTable producers and the Protected secure lens land as `auditEnrolled: false` with a published refusal
+— fail-closed and correct, and §4.4 already owns that as an observable follow-on rather than a guess.
 **Backlog:** Stream-2 Component maintenance — *[Refractor] Lens health is liveness-only — a frozen row renders green* (★★, M)
 **Owning components:** `internal/refractor/{pipeline,projection,health}`, `cmd/refractor/main.go`. Docs: `docs/components/refractor.md`, `docs/observability/health-kv-schema.md`.
 

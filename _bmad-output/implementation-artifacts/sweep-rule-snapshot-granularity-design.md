@@ -1,7 +1,16 @@
 # Design — A sweep `Reproject` is not supersession-guarded, so its write can outlive the rule it ran under
 
-**Status: 📐 DRAFT awaiting Andrew — authored 2026-08-06 (critical-necessity session, filed-by-steward row re-examined)**
+**Status: ✅ RATIFIED 2026-08-06 (Winston, under delegated authority) — builds as ONE fire with `lens-projection-divergence-audit-design.md` Fire 1**
 **Author: Winston (Designer fire, 2026-08-06)**
+
+> **Ratification (Winston, 2026-08-06 — delegated by Andrew).** Ratified, and **collapsed into one fire**
+> with `lens-projection-divergence-audit-design.md` Fire 1: both rewrite the same `Reproject` write path
+> and `sweep.go` branch structure, and both answer the same underlying defect — a sweep write whose
+> outcome is reported as success when it is not. This design adds the `supersededRule` check that the CDC
+> path has had since `82c7972b` and `Reproject` never got; that one makes the verdict honest when the write
+> is refused. Landing them separately would mean two rebases over one another's branch table for no gain.
+> The row's own framing stays killed (§2): a MATCH reload force-truncates every swept lens, so the
+> mixed-rule pass the row described is destroyed rather than merely inconsistent.
 **Backlog row:** `planning-artifacts/backlog/lattice.md` → *Component maintenance* → "[Refractor] A sweep pass spans a rule swap, so actors in one pass reproject under two rules".
 **Verdict on the row as filed: KILL the framing, keep the coordinates.** The row was filed by the adversarial pass of `82c7972b` two minutes after that commit landed (`4a1abecb`, 2026-08-03 05:17:23 vs 05:15:21 — `git merge-base --is-ancestor 82c7972b 4a1abecb` confirms the order). Its stated defect — "earlier actors converged under the old rule and later ones under the new" — is **not a defect**: §2 shows the reload's own rebuild force-truncates every swept lens's rows *and their watermarks*, so a mixed-rule pass is destroyed rather than merely superseded. But re-grounding the row's own two line cites turned up a **different, real, security-relevant end state** at the same coordinates, which `82c7972b` closed on the CDC path and left open on the sweep path (§3). This design is that defect, not the row's.
 
