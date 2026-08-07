@@ -31,6 +31,17 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 // marker of that class, so the grant confers nothing a completed seal has not
 // already exercised.
 //
+// SealIdentityForErasureComplete is the only one of the four whose submitter is
+// the Weaver ALONE — it is the identityErasureComplete target's terminal gap
+// action and no Loom step runs it, because the pattern cannot know when the
+// convergent tail has drained. Same operator grant at scope:any for the same
+// mechanical reason (grants attach to roles, and identity.system.weaver reaches
+// operator via holdsRole). The grant is unusually inert for a scope:any one: the
+// op writes nothing unless the identity carries a real erasureRequested marker,
+// a shredded envelope whose Vault destruction and projection nullification have
+// both landed, and no live residue link on any of five relations — so an actor
+// holding it can attest an erasure that already happened and nothing else.
+//
 // Granting to operator does reach the other operator-equivalent service actors
 // (Bridge, object-store-manager, privacy) as well as human operators. That is
 // the same breadth identity-hygiene's MergeIdentity grant carries, and it
@@ -64,6 +75,13 @@ func Permissions() []pkgmgr.PermissionSpec {
 			Scope:         "any",
 			Note: "Authorizes the Loom and Weaver service actors (operator-equivalent) to sweep an erasure-sealed identity's dedup footprint — its owned identityindex vertices and its duplicateOf pair links (erasure-orchestration-design.md §5.4 step 4). " +
 				"[no-op-meta: engine-op — the fourth step of the identityErasure Loom pattern and a gap action of the identityErasureComplete target; no person chooses it from a form, and it refuses outright unless the identity carries a live erasureRequested marker of that class.]",
+			GrantsTo: []string{"operator"},
+		},
+		{
+			OperationType: "SealIdentityForErasureComplete",
+			Scope:         "any",
+			Note: "Authorizes the Weaver service actor (operator-equivalent) to write an identity's erasure-completion attestation after re-verifying its residue in the same commit (erasure-orchestration-design.md §7.2). " +
+				"[no-op-meta: engine-op — the terminal gap action of the identityErasureComplete target; no person chooses it from a form, and it refuses outright unless the erasure has already converged on every relation it walks.]",
 			GrantsTo: []string{"operator"},
 		},
 	}

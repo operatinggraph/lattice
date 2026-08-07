@@ -19,13 +19,13 @@ import (
 // permittedCommands is the write gate on the marker every identity write-path
 // guard reads — including the two erasure verbs' own preconditions.
 func TestPackage_StructurePins(t *testing.T) {
-	if got, want := len(Package.DDLs), 7; got != want {
+	if got, want := len(Package.DDLs), 10; got != want {
 		t.Errorf("DDLs: got %d, want %d", got, want)
 	}
 	if got, want := len(Package.Lenses), 3; got != want {
 		t.Errorf("Lenses: got %d, want %d", got, want)
 	}
-	if got, want := len(Package.Permissions), 3; got != want {
+	if got, want := len(Package.Permissions), 4; got != want {
 		t.Errorf("Permissions: got %d, want %d", got, want)
 	}
 	if got, want := len(Package.OpMetas), 0; got != want {
@@ -52,6 +52,9 @@ func TestPackage_StructurePins(t *testing.T) {
 		{"sealIdentityForErasure", "meta.ddl.vertexType"},
 		{"privacy.erasureRequested", "meta.ddl.eventType"},
 		{"purgeIdentityDedupFootprint", "meta.ddl.vertexType"},
+		{"erasure", "meta.ddl.aspectType"},
+		{"sealIdentityForErasureComplete", "meta.ddl.vertexType"},
+		{"privacy.erasureCompleted", "meta.ddl.eventType"},
 	}
 	if len(wantDDLs) != len(Package.DDLs) {
 		t.Fatalf("wantDDLs pins %d of %d declarations — the loop below is bounded by the want-slice, so an unpinned tail is invisible", len(wantDDLs), len(Package.DDLs))
@@ -88,6 +91,7 @@ func TestPackage_StructurePins(t *testing.T) {
 		{"RecordShredFinalization", "any"},
 		{"SealIdentityForErasure", "any"},
 		{"PurgeIdentityDedupFootprint", "any"},
+		{"SealIdentityForErasureComplete", "any"},
 	}
 	if len(wantPerms) != len(Package.Permissions) {
 		t.Fatalf("wantPerms pins %d of %d grants — an unpinned grant could change scope silently", len(wantPerms), len(Package.Permissions))
