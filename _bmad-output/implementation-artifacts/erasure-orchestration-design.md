@@ -1950,3 +1950,53 @@ that the op **emits nothing**.
 7. **There is no `make verify-package-privacy-base` target**, so the standard package gate does not
    exist for this package; `lint-package-standard`, `lint-package-version` and the package's own
    tests are what cover it. **Consumer: the fire that adds the target.**
+
+---
+
+## Fire B build note — increment 5 (2026-08-07): the residue lens
+
+### Fire brief
+
+**Scope sentence, verbatim from §12 Fire B step 2's list:** the `identityErasureResidue` lens +
+`privacy-erasure` bucket.
+
+Step 2's six deliverables are being built one per increment, for the reason increments 3 and 4
+each gave: the pieces the `identityErasureComplete` weaverTarget dispatches must exist before a
+target can be written against anything real. Increment 3 built `UnbindIdentityCredentials`,
+increment 4 built `PurgeIdentityDedupFootprint`; this increment builds the lens whose gaps
+schedule them both. **Non-goals:** the weaverTarget, the `identityErasure` Loom pattern, the two
+`surface` gaps, `SealIdentityForErasureComplete`, and narrowing `ShredIdentityKey` (step 3).
+
+**Touch list (verified live).**
+
+| File | What |
+|---|---|
+| `packages/privacy-base/lenses.go` | `ErasureResidueBucket` const · the `identityErasureResidue` `LensSpec` · `identityErasureResidueSpec` |
+| `packages/privacy-base/manifest.yaml` · `package.go` | the lens declaration · `0.6.0 → 0.7.0` |
+| `packages/privacy-base/erasure_residue_lens_test.go` | NEW — the full-engine cypher proofs |
+| `packages/privacy-base/package_test.go` | the structure pin: lens count, names, and now buckets |
+| `internal/refractor/label_derivation_corpus_census_test.go` | the pinned narrowing verdict every shipped lens must carry |
+
+**Precedents to mirror.** `privacy-base/lens_cypher_test.go:64-70` is the parse-and-execute harness
+(`lenstest.KVs` + `full.New()`); `identity-domain/lens_cypher_test.go:90-101` is the adjacency edge
+fixture, which writes BOTH directions of every link and is what lets one relation be counted from
+either endpoint. `objects-base/lenses.go:96-112` is the `OPTIONAL MATCH` + `count()` + `missing_<gap>`
+residue idiom; `lease-signing/lenses.go:645-647` is the `count(DISTINCT …)` form.
+
+**Increment order + the green check after each.** (1) spec + registration + version bump →
+`go build ./...`; (2) the tests → `go test ./packages/privacy-base/ -count=1`; (3) gates →
+`go test ./... -p 4`, `make vet`, `golangci-lint run ./...`, all seven `scripts/lint-*.go`,
+`make verify-kernel`.
+
+**In-scope gotchas.**
+
+- **The lens must count exactly what the two sweep ops enumerate — no more, no less.** An arm the
+  lens omits is residue no gap reports, swept by an op the Weaver stops dispatching, under a seal
+  written over it.
+- **`.erasure` does not exist yet** — its DDL ships with `SealIdentityForErasureComplete`. It
+  projects null, so `missing_erasureSeal` reads open, which is correct.
+- **A `WITH` disqualifies the affected-anchor index** (`hopindex.go:86-90`), so link events reach
+  this lens's anchors by BFS. §7.1's own spec carries a `WITH`, so this is not a new cost.
+
+**Adjacent finds — filed now, not at ship.** None new; increments 3 and 4's residuals are
+re-inherited verbatim rather than re-filed.
