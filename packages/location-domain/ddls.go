@@ -33,6 +33,13 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 //	vtx.property.<id>   class=location   root data = {}
 //	lnk.<childType>.<childId>.containedIn.<parentType>.<parentId>   class=containedIn
 //
+// The shared class is a BODY discriminator, so a lens reads it as a property
+// predicate — `MATCH (l {class: "location"})`, in seed or traversal position.
+// A cypher label is the key type (`:unit`, `:building`, `:property`) and never
+// resolves against the body, so `MATCH (l:location)` matches nothing. The
+// enforcement that actually holds the place graph closed is op-side: the
+// endpoint-class check above, not any downstream cypher.
+//
 // The containedIn link's source is the later-arriving CHILD (the contained
 // vertex), the target is the pre-existing PARENT (the container) — Contract #1
 // §1.1. The sentence reads "unit containedIn building", "building containedIn

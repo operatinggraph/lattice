@@ -546,10 +546,21 @@ func (ex *executor) currentNode(b binding, n NodePattern) *nodeRef {
 	return r
 }
 
-// nodeMatches checks label match. Resolves the node's label from (in order):
-//  1. the parsed `vtx.<type>.<id>` prefix of its key (Contract #1 keys),
-//  2. a `class` property in its stored JSON,
-//  3. a `label` property in its stored JSON.
+// nodeMatches checks label match. A pattern label IS the Contract #1 vertex key
+// type: it matches iff the node's key parses as `vtx.<type>.<id>` and `<type>`
+// equals the label. Fine-grained classification lives in the body's `class`
+// field (Contract #1 §1) and is matched with a property predicate —
+// `MATCH (l {class: "location"})` — never with a label.
+//
+// This is the reading of a label that every other mechanism already applies,
+// and each of them depends on the binder agreeing: the labeled seed scan
+// (seedNodes), event seeding (seedAnchorBinds), anchor retraction and the D2
+// seeding eligibility the pipeline reads off it (anchor_delete.go's
+// AnchorLabel), and the narrowing derivation (ReferencedLabels, consumed by the
+// plain reproject gate, the client relevance gate and the actor-aware narrowed
+// filter). A binder admitting a second resolution would let those narrow on a
+// label set the executor does not honor — on the auth plane, a grant that never
+// updates and never retracts.
 //
 // Returns true when the pattern label is empty.
 func (ex *executor) nodeMatches(ref *nodeRef, n NodePattern) bool {
@@ -559,18 +570,8 @@ func (ex *executor) nodeMatches(ref *nodeRef, n NodePattern) bool {
 	if ref == nil {
 		return false
 	}
-	if vtype, _, ok := substrate.ParseVertexKey(ref.key); ok {
-		if vtype == n.Label {
-			return true
-		}
-	}
-	if c, ok := ref.props["class"].(string); ok && c == n.Label {
-		return true
-	}
-	if l, ok := ref.props["label"].(string); ok && l == n.Label {
-		return true
-	}
-	return false
+	vtype, _, ok := substrate.ParseVertexKey(ref.key)
+	return ok && vtype == n.Label
 }
 
 // checkProps is a thin alias retained for readability.
@@ -672,9 +673,9 @@ func (ex *executor) seedNodes(b binding, n NodePattern) ([]*nodeRef, error) {
 			}
 		} else if cls != substrate.KindVertex && cls != substrate.KindUnknown {
 			// The whole-bucket scan additionally admits KindUnknown: an
-			// unlabeled pattern matches any key shape nodeMatches accepts,
-			// including a non-Contract#1 key carrying a matching body
-			// "class"/"label" property.
+			// unlabeled pattern imposes no label constraint at all, so a key
+			// whose shape is not a Contract #1 vertex key is still a
+			// candidate and only the property predicates can exclude it.
 			continue
 		}
 		ref, err := ex.fetchNode(k)

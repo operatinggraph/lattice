@@ -12,12 +12,14 @@ import (
 
 // EdgeEntry is one graph edge stored in the adjacency list for a node.
 //
-// OtherType is the Contract #1 vertex-type segment of the OTHER endpoint.
-// When set, executors can reconstruct the OTHER endpoint's full vertex key
-// (vtx.<OtherType>.<OtherNodeID>) for a Core KV point read without needing
-// to scan the bucket. OtherType is empty for legacy Materializer-style
-// edge events (which carry no type information); executors must fall
-// back to coreKV lookup by NodeID-only in that case.
+// OtherType is the Contract #1 vertex-type segment of the OTHER endpoint, and
+// every producer in the tree sets it from the parsed link key. It lets an
+// executor reconstruct the OTHER endpoint's full vertex key
+// (vtx.<OtherType>.<OtherNodeID>) for a Core KV point read without scanning the
+// bucket — and that reconstruction is the only way such a neighbour reaches a
+// LABELED pattern node, since a pattern label is the Contract #1 key type and a
+// bare NodeID parses as no type at all. An entry without it falls back to a
+// NodeID-only lookup that can satisfy an unlabeled pattern only.
 type EdgeEntry struct {
 	CoreKvKey   string `json:"coreKvKey"`
 	EdgeID      string `json:"edgeId"`

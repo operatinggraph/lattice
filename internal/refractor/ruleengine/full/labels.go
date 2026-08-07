@@ -22,6 +22,29 @@ package full
 // `WITH a AS b`, never `WITH a.x AS a` — keeps its label downstream, under the
 // name the WITH gives it. `WITH *` carries no items through the visitor, so it
 // carries no label either, which matches an executor that projects nothing.
+//
+// A label excuses an unlabeled sighting only where it CONSTRAINS what survives,
+// which is what the two label scopes below distinguish:
+//
+//   - A REQUIRED MATCH's label constrains the whole segment, backward and
+//     forward: applied to an already-bound variable it drops the bindings that
+//     fail it (executor.applyMatch), pruning an earlier whole-bucket seed down
+//     to that type.
+//   - An OPTIONAL MATCH's label constrains only from its own clause onward: the
+//     path binds as a unit or null-binds every variable NEW to it, and a failed
+//     match restores the row with any earlier binding intact
+//     (executor.nullBindNewVars). So it can never justify an unlabeled sighting
+//     that came before it.
+//   - A label inside a WHERE or a pattern comprehension constrains nothing at
+//     all: those bindings are discarded rather than threaded into the row
+//     (executor.existsAsPredicate, executor.evalPatternComprehension), so a
+//     later MATCH on the same name is a fresh whole-bucket seed.
+//
+// Both scopes feed the WITH carry, since a carried bare reference keeps its
+// *nodeRef: downstream the variable is either that label's type or null, and a
+// null binding cannot extend a required match. This matters for the generated
+// read-grant lenses in particular, whose walk chains compile entirely to
+// OPTIONAL MATCH under a single required head (pkgmgr/anchorwalk.go).
 func (cr *CompiledRule) ReferencedLabels() (labels map[string]struct{}, exhaustive bool) {
 	if cr == nil || cr.Query == nil {
 		return nil, false
@@ -29,37 +52,32 @@ func (cr *CompiledRule) ReferencedLabels() (labels map[string]struct{}, exhausti
 	labels = make(map[string]struct{})
 	exhaustive = true
 
-	// Pass 1: every variable that carries a label anywhere in the CURRENT WITH
-	// segment — an unlabeled `(u)` later in that segment is a re-reference to
-	// that binding, not a new any-type node
-	// (`MATCH (u:unit)` … `MATCH (u)<-[:manages]-(l:identity)`).
+	// Pass 1: every variable a REQUIRED MATCH labels anywhere in the CURRENT
+	// WITH segment — an unlabeled `(u)` anywhere in that segment is a
+	// re-reference to that binding, not a new any-type node
+	// (`MATCH (u:unit)` … `MATCH (u)<-[:manages]-(l:identity)`). Forward-looking
+	// as well as backward, because a required label prunes bindings a preceding
+	// clause already made.
 	labeledVars := make(map[string]struct{})
-	collectVars := func(p PathPattern) {
+	// optionalLabeled holds what an OPTIONAL MATCH labels, accumulated in clause
+	// order by pass 2 rather than collected up front, so it can excuse only the
+	// unlabeled sightings that FOLLOW it. Segment-local: it empties at each WITH,
+	// because a variable that WITH does not carry is unbound afterwards and a
+	// later re-reference re-seeds through the whole-bucket scan.
+	optionalLabeled := make(map[string]struct{})
+	collectVarsInto := func(dst map[string]struct{}, p PathPattern) {
 		for _, n := range p.Nodes {
 			if n.Label != "" && n.Variable != "" {
-				labeledVars[n.Variable] = struct{}{}
+				dst[n.Variable] = struct{}{}
 			}
 		}
 	}
-	var collectVarsExpr func(e Expr)
-	collectVarsExpr = func(e Expr) {
-		switch x := e.(type) {
-		case *PatternExpr:
-			collectVars(x.Pattern)
-		case *PatternComprehension:
-			collectVars(x.Pattern)
-			collectVarsExpr(x.Where)
-			collectVarsExpr(x.Projection)
-		case *Not:
-			collectVarsExpr(x.Operand)
-		case *AndOr:
-			for _, op := range x.Operands {
-				collectVarsExpr(op)
-			}
-		case *BinaryOp:
-			collectVarsExpr(x.Left)
-			collectVarsExpr(x.Right)
+	labelConstrains := func(v string) bool {
+		if _, ok := labeledVars[v]; ok {
+			return true
 		}
+		_, ok := optionalLabeled[v]
+		return ok
 	}
 	// carryLabeled returns the labeled variables that survive a WITH, under the
 	// names the WITH gives them. An item that is not a bare variable reference
@@ -72,7 +90,7 @@ func (cr *CompiledRule) ReferencedLabels() (labels map[string]struct{}, exhausti
 			if !isVar {
 				continue
 			}
-			if _, wasLabeled := labeledVars[vr.Name]; !wasLabeled {
+			if !labelConstrains(vr.Name) {
 				continue
 			}
 			name := it.Alias
@@ -103,7 +121,7 @@ func (cr *CompiledRule) ReferencedLabels() (labels map[string]struct{}, exhausti
 					exhaustive = false
 					continue
 				}
-				if _, isRef := labeledVars[n.Variable]; !isRef {
+				if !labelConstrains(n.Variable) {
 					exhaustive = false
 				}
 				continue
@@ -161,10 +179,10 @@ func (cr *CompiledRule) ReferencedLabels() (labels map[string]struct{}, exhausti
 		}
 	}
 	// Both passes run per WITH segment, in source order: pass 1 must see the
-	// whole segment before pass 2 judges any of its unlabeled nodes (a label
-	// may appear on a later clause of the same segment), and pass 2 must run
-	// before the segment's own labeled set is replaced by what its closing WITH
-	// carries forward.
+	// whole segment before pass 2 judges any of its unlabeled nodes (a required
+	// label may appear on a later clause of the same segment and still prune
+	// this one's bindings), and pass 2 must run before the segment's own labeled
+	// set is replaced by what its closing WITH carries forward.
 	clauses := cr.Query.Clauses
 	for start := 0; start < len(clauses); {
 		end := start
@@ -181,17 +199,28 @@ func (cr *CompiledRule) ReferencedLabels() (labels map[string]struct{}, exhausti
 		}
 
 		for _, c := range segment {
-			if m, isMatch := c.(*Match); isMatch {
+			if m, isMatch := c.(*Match); isMatch && !m.Optional {
 				for _, p := range m.Patterns {
-					collectVars(p)
+					collectVarsInto(labeledVars, p)
 				}
-				collectVarsExpr(m.Where)
 			}
 		}
 		for _, c := range segment {
 			switch cl := c.(type) {
 			case *Match:
 				for _, p := range cl.Patterns {
+					if cl.Optional {
+						// A PATH binds whole or null-binds every variable new to
+						// it, so its own labels hold over its own unlabeled
+						// nodes. The unit is the path, NOT the clause: a clause's
+						// comma-separated paths are threaded one into the next
+						// (executor.matchPatterns), and a later path's failure
+						// null-binds only what is still absent from the row
+						// (executor.nullBindNewVars) — leaving an earlier path's
+						// whole-bucket binding in place, of a type this clause's
+						// later label never constrained.
+						collectVarsInto(optionalLabeled, p)
+					}
 					addPattern(p)
 				}
 				addExpr(cl.Where)
@@ -212,7 +241,12 @@ func (cr *CompiledRule) ReferencedLabels() (labels map[string]struct{}, exhausti
 		for _, it := range closing.Items {
 			addExpr(it.Expr)
 		}
+		// The carry folds both scopes into the next segment's required set, then
+		// the optional scope empties: past this WITH an optionally-labeled
+		// variable either survived as a carried binding or is unbound, and the
+		// WITH's own WHERE already reads that carried scope.
 		labeledVars = carryLabeled(closing)
+		optionalLabeled = make(map[string]struct{})
 		addExpr(closing.Where)
 		start = end + 1
 	}

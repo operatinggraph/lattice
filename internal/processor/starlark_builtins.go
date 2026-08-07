@@ -103,7 +103,7 @@ func deterministicNanoID(src *rand.PCG, n int) string {
 // sha256 and constant_time_equal are internal/starlarksandbox.CryptoBuiltins
 // — pure, zero-internal-dep. sha256NanoID is Processor-specific: it derives a
 // valid Contract #1 NanoID from SHA-256(s), used to build deterministic
-// index-vertex keys (vtx.identityIndex.<id>) that satisfy substrate.ClassifyKey
+// index-vertex keys (vtx.identityindex.<id>) that satisfy substrate.ClassifyKey
 // (which requires NanoID-alphabet chars in the 3rd segment); it depends on
 // substrate (an internal package), which is why it is composed in here rather
 // than living in the leaf. The contact-type prefix in the hash input (e.g.

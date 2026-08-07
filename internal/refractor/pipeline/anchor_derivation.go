@@ -146,13 +146,11 @@ type seededNode struct {
 //     whose OtherType the adjacency entry does not record is kept, because
 //     "cannot confirm the label" must widen the set, not narrow it.
 //
-// The label comparison inherits ONE known hole, shared with every other label
-// derivation in this package: the executor's nodeMatches also binds a vertex
-// whose body `class` equals the pattern label, while a label here is matched
-// against the KEY TYPE only. A vertex bound that way would be pruned. That is
-// the lens-label/key-type binding defect already ratified as its own item, and
-// closing it there closes it for all three derivations at once; nothing is
-// added here that would drift from that fix.
+// The label comparison matches a pattern label against the vertex KEY TYPE,
+// which is what a label means everywhere — the executor's nodeMatches binds on
+// nothing else. So a vertex this walk prunes on the far end's label is one the
+// executor could not have bound either, and the pruning stays inside the
+// superset property above.
 //
 // It does NOT expand from a node reached at the anchor position. That is sound
 // because the anchor position is pinned by `{key: $actorKey}`: within one

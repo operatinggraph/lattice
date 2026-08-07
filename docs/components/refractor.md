@@ -363,6 +363,17 @@ same arm), and a `KindLink` event re-executes seeded from **both endpoint vertic
 listing price or a renamed provider is promptly fresh in its read model, instead of
 incidentally fresh on the next unrelated vertex-root event.
 
+**A pattern label is the vertex key type.** `MATCH (u:unit)` binds a vertex whose key
+parses as `vtx.unit.<id>` — nothing else. Fine-grained classification lives in the body's
+`class` field (Contract #1 §1) and is matched as a property predicate,
+`MATCH (l {class: "location"})`, which works in seed and traversal position alike. The
+distinction is load-bearing rather than stylistic: the labeled seed scan, event seeding,
+anchor retraction, and the narrowing derivation below all read a label as the key type,
+so a binder resolving it any other way would narrow those on a set the executor does not
+honor. The property form is the wider one — being unlabeled costs `exhaustive`, and an
+**anchor** position cannot use it at all, since anchor event-seeding and tombstone
+retraction both require a label.
+
 **Type-relevance skip (the amplification bound).** The re-execute runs only when the
 event's owner/endpoint vertex **type** is in the lens's referenced-label set
 (`full.CompiledRule.ReferencedLabels` — every node label its MATCH patterns, pattern
@@ -371,6 +382,16 @@ expressions, and comprehensions can bind): a `meta` aspect mutation cannot chang
 set is not exhaustive (an unlabeled node pattern, or a variable-length relationship
 whose intermediate hops bind arbitrary types) disables the skip and reprojects on
 every event — conservative, never a missed refresh.
+
+A label makes that set exhaustive only where it actually **constrains** what survives.
+A label in a **required** `MATCH` does, in both directions — a required match on an
+already-bound variable drops the bindings that fail it, so it prunes an earlier
+whole-bucket seed. A label in an **OPTIONAL** `MATCH` does so from that clause onward
+only: the path binds as a unit or null-binds its new variables, and it never prunes a
+binding made earlier. A label inside a `WHERE` or a pattern comprehension constrains
+**nothing** downstream — those bindings are discarded, so a later `MATCH` on the same
+name is a fresh whole-bucket seed. Both scopes reset at a `WITH`, which rebuilds every
+binding from its projection items alone.
 
 On top of that freshness transport sits **filter-retraction**: after any plain
 (no actor enumerator, no envelope) full-engine re-execute, a presence check derives
