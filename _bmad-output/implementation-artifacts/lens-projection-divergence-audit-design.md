@@ -739,3 +739,180 @@ writing, and the startup census reports a non-zero enrolled count on the dev sta
 
 **Sequencing:** Fire 2 depends on Fire 1 (it reports `unverified` through Fire 1's fields). Fire 1 carries value on
 its own and may ship alone.
+
+---
+
+## 11. Fire brief — Fire 1 (collapsed with `sweep-rule-snapshot-granularity-design.md`)
+
+**Compiled 2026-08-07 (Lattice Steward fire), Phase 0, before any edit.** Three read-only scouts over
+`pipeline/{reproject,sweep,pipeline}.go`, `adapter/*`, and the health plane; every `file:line` below was
+re-read live on `2f180ea6`.
+
+### 11.1 Scope sentence
+
+One fire on the `Reproject`/`sweep.go` seam that makes a reconciliation's reported outcome match what it
+actually did: **this design's Fire 1** (an exhaustive `Verdict`, fail-closed at `Unverified`),
+**`sweep-rule-snapshot-granularity-design.md` Inc 1** (`Reproject` refuses to write under a superseded
+rule) and **its Inc 2** (a guard-declined write becomes visible instead of reporting a heal), which is
+also the code-side honesty `auth-plane-projection-latency-design.md` §15.7 substituted for the held
+Contract #6 §6.2 amendment.
+
+### 11.2 Scope-diff gate — brief vs ratified scope, item by item
+
+| Ratified item | Source | In brief |
+|---|---|---|
+| `Verdict` + `Reprojection` verdict fields, zero value `Unverified` | this doc §4.1, §10 Fire 1 | ✅ Inc B |
+| `SweepStatus.Unverified`/`UnverifiedStreak`/`LastUnverified`; `pass()` counts; `record()` publishes | §4.2, §10 | ✅ Inc C |
+| Both status structs carry them; `main.go`'s two providers populate | §10 | ✅ Inc C |
+| `CapabilityAuditUnverified` / `LensAuditUnverified` at §4.2's precedence + severities; `alert` gains `unverified` | §4.2, §10 | ✅ Inc C |
+| `health-kv-schema.md` + `refractor.md` fields/codes **and** the two stale claims in §5 | §5, §10 | ✅ Inc C |
+| Tests per §7 Increment-1, incl. the disarmed-retraction regression + its negative twin | §7 | ✅ Inc B/C |
+| `ErrRuleSuperseded` + check after evaluation, before the write loop | supersession §6 Inc 1 | ✅ Inc B |
+| Per-caller disposition: sweep abandons pass (no `noteActorFailure`), RPC returns, retry re-enqueues | supersession §6 Inc 1 | ✅ Inc B |
+| Guarded write reports *committed* vs *declined by watermark*; `Reproject` stops setting `Wrote` unconditionally; sweep counts blocked separately | supersession §6 Inc 2 | ✅ Inc A/B/C |
+| Tie-rejected reconciliation holding read-back divergence evidence reports failure **loudly** | auth-plane §15.7 | ✅ Inc A/B |
+| Comparator classifies **provenance-only** divergence distinctly from **content** divergence | auth-plane §15.7 | ✅ Inc B |
+
+**Three narrowing-only deviations, recorded rather than assumed.**
+
+1. **`UnverifiedReason` → `VerdictReason`.** §4.1 named the field for the one verdict it knew about; the
+   collapse adds `Blocked`, which needs a reason on the same footing. One field serves both — a second
+   parallel string would be the same value under two names.
+2. **`DeleteOutcome` / `OutcomeDeleter` is added beside `UpsertOutcome` / `OutcomeUpserter`.** Supersession
+   Inc 2 says "surface it through `upsert`", and upsert alone would leave exactly the hole that killed the
+   previous attempt: auth-plane §15.7 finding 2 — *"a guarded `Delete` … a **revocation** at a tied
+   watermark is still dropped while `Reprojection.Deleted`/`Wrote` report it healed. That is the over-grant
+   direction — the one §6.2 exists for."* `Delete` runs the same `guardedWrite` and needs the same report.
+   Completing the stated requirement, not widening it.
+3. **`CapabilityRepairBlocked` / `LensRepairBlocked` + `alert: repair-blocked`.** §4.2 enumerated codes for
+   `unverified` only, because this doc predates the supersession finding by two days (its own §preamble
+   says so). Inc 2's counter needs a surface or it is a field nobody reads.
+
+**Dependencies re-verified both ways.** Fire 2 (the Auditor) depends on this fire's fields — not started
+here. `auth-plane-projection-latency-design.md` §15.9 names this fire as the gate before merging its
+Increment-2 worktree — that merge is the *next* fire, explicitly not this one.
+
+### 11.3 Verified touch-list (`file:line` checked live on `2f180ea6`)
+
+**Inc A — the adapter reports what the guard did** (`internal/refractor/adapter/`)
+- `adapter.go:115-124` `UpsertOutcome` — gains `DeclinedByWatermark bool`. `Wrote`'s meaning is
+  **unchanged** so `writeResults`' audit skip (`pipeline.go:2112`) keeps today's behaviour exactly.
+- `adapter.go` — new `DeleteOutcome` + `OutcomeDeleter`, mirroring `OutcomeUpserter:126-164` including its
+  Go-embedding trap note for test doubles.
+- `natskv.go:264-311` `guardedWrite` — returns an outcome; the `storedSeq >= incomingSeq` branch at
+  **`:293`** (today a bare `return nil`) reports *declined*. It still **attempts** every write: `:158-171`'s
+  reasoning is preserved verbatim.
+- `natskv.go:153-196` `upsert`, `:214-248` `Delete`, `:139-142` `Upsert` — thread the outcome.
+- `postgres.go:217-220`, `read_path_adapters.go` — implement neither new interface; callers fall back to
+  "assume it wrote", the historical behaviour (`OutcomeUpserter`'s own stated contract).
+
+**Inc B — `Reproject` reaches an honest verdict** (`internal/refractor/pipeline/reproject.go`)
+- `:46-60` `Reprojection` — `+Verdict`, `+VerdictReason`. `Converged`/`Deleted`/`Wrote` stay (the RPC at
+  `control/service.go:908`, `cmd/refractor/main.go:1421` and `cmd/lattice/lens/reproject.go:83` read them).
+- `:69` `volatileEnvelopeFields` + `:234-241` `rowsEquivalent` — `rowsEquivalent` becomes a thin wrapper on
+  a new `classifyDivergence(stored, computed)` returning `divergenceNone` / `divergenceProvenance` /
+  `divergenceContent`. Provenance = differs **only** in `projectedFromRevisions` (the field `:67`'s comment
+  says is deliberately compared; Contract #6 §6.3 classifies it as coherence/debug provenance).
+- `:135` after `reprojectActors` and **before** the `:154` loop — `if p.supersededRule(rs) { return
+  Reprojection{}, ErrRuleSuperseded }`. Placement mirrors `pipeline.go:2028`; soundness is `reload.go:346`
+  (`ruleGen++`, synchronous) strictly before `:359-363` (`go func(){ Rebuild }`).
+- `:155-176` delete branch / `:178-209` upsert branch — assign a verdict on every path per §4.1's table
+  plus the two new rows below; `out.Wrote` is set from the adapter outcome, not unconditionally.
+- `:212-220` — verdict aggregation across results, **worst-wins**: `Blocked` > `Unverified` > `Healed` >
+  `Converged`. A confirmed-unrepairable row outranks "I do not know", which outranks a heal (§4.2's own
+  ordering, extended by the one verdict it did not have).
+
+**Verdict table additions** (beside §4.1's eight rows):
+
+| Situation | Verdict | Reason |
+|---|---|---|
+| Guarded write declined at `storedSeq >= incomingSeq`, read-back showed **content** divergence | `Blocked` | `"stored watermark >= reconciliation token; content divergence unrepairable"` |
+| …showed **provenance-only** divergence | `Blocked` | `"…; provenance-only divergence (projectedFromRevisions)"` — the benign class §15.7 names, distinguished so it is not noise |
+| Zero results, `zeroRowRetraction` disarmed, doc-mode | `Unverified` | per §4.1 |
+
+- `pipeline.go:2253` (`enqueueActorReprojectRetry`) — `ErrRuleSuperseded` is transient, re-enqueue.
+- `control/service.go:900` — return the error.
+
+**Inc C — the sweep counts it and the heartbeat says it** (`sweep.go`, `health/`, `cmd/refractor/main.go`, docs)
+- `sweep.go:66-98` `SweepStatus` — `+Unverified/UnverifiedStreak/LastUnverified`,
+  `+Blocked/BlockedStreak/LastBlocked`, mirroring the shipped `FailingActors/FailedStreak/LastFailure` triple.
+- `sweep.go:390-429` `pass()` — count verdicts beside `healed`; **new arm** `errors.Is(rerr,
+  ErrRuleSuperseded)` → log **Info**, `s.record(ctx, …, nil)`, `return` — mirroring the
+  `ErrNoOrderingToken` arm at `:392-403` but **not** `noteActorFailure` (`:404-409`): no actor is at fault
+  and a strike would push it into `backoffPasses` and delay the genuine post-rebuild heal.
+- `sweep.go:957-990` `record()` — streak arithmetic for both new counters, same shape as `DivergentStreak`.
+- `sweep.go:265-266` — the stale *"every non-auth-plane lens"* comment, corrected here (§5 item 2).
+- `health/lattice_heartbeater.go:174-232` / `:234-270` — both status structs carry the six fields;
+  `:38-72` gains four codes; `capabilityDivergenceErrorStreak` (`:72`, value 2) gates the auth-plane
+  error escalation; business lenses stay `warning` at every streak (`refractor.md:838`).
+- **`alert` precedence, shipped as a table with a test:** `paused` > `unreadable` > `repair-failing` >
+  `repair-blocked` > `sweep-stalled` > `unverified` > `lagging` > `ok`.
+- `cmd/refractor/main.go:551` and `:628` — both providers populate the new fields.
+- `docs/observability/health-kv-schema.md` — new fields + codes; **`:534`'s stale claim corrected** (§5 item 1).
+- `docs/components/refractor.md` — the verdict model and the four codes.
+
+### 11.4 Precedents to mirror (do not invent a second shape)
+
+- **Refusal placement + prose:** `writeResults`' `supersededRule` check, `pipeline.go:2027-2032`.
+- **Pass-abandon disposition:** the `ErrNoOrderingToken` arm, `sweep.go:392-403`.
+- **Counter triple + streaks:** `FailingActors`/`FailedStreak`/`LastFailure`, `sweep.go:66-98`, `:957-990`.
+- **Optional outcome interface:** `OutcomeUpserter`, `adapter.go:126-164` — including its explicit
+  test-double embedding trap (a double overriding `Delete` must override `DeleteWithOutcome` too).
+- **Tests:** siblings in `pipeline/rule_swap_race_internal_test.go` — `countingAdapter` (`:189-202`),
+  `raceSwapSpecA`/`SpecB` (disjoint labels + relations), `TestWriteResults_SupersededRuleIsNakedNotWritten`
+  (`:214`) is the direct CDC-half analogue of test 1 below.
+
+### 11.5 Increment order + runnable green checks
+
+Each increment is independently green; A→B→C is a build order, and the fire lands as two commits (A+B, then C).
+
+1. **Inc A** — `go test ./internal/refractor/adapter/...`
+2. **Inc B** — `go test ./internal/refractor/pipeline/... ./internal/refractor/control/...`
+3. **Inc C** — `go test ./internal/refractor/...`, then the full `go test ./...` (Inc A touches
+   `UpsertOutcome`, which `writeResults` consumes — supersession §7's wide-blast-radius note).
+
+**Tests, each proven to fail without its fix** (observed failure recorded in the build note):
+
+| # | Test | Pins |
+|---|---|---|
+| 1 | `TestReproject_RefusesWriteUnderSupersededRule` | supersession §7.1 — no write lands under the retired rule |
+| 2 | `TestSweepPass_AbandonsOnRuleSwap` | §7.2 — early return, **no** `backoffPasses` strike, deterministic channel sync (never `time.Sleep`) |
+| 3 | `TestGuardedWrite_PostTruncateStrayWriteDoesNotFreezeReplay` | §7.3 — the **outcome**: the row ends matching the new rule. §7.5 negative control: assert the positive vector first (with Inc 1 reverted the stray write *does* freeze the replay) so a green cannot come from an inert guard |
+| 4 | `TestReprojection_ReportsBlockedNotHealed` | §7.4 — blocked, not `Wrote`; the sweep counts it unrepaired |
+| 5 | `TestReprojection_BlockedDistinguishesProvenanceFromContent` | auth-plane §15.7's comparator requirement, both directions |
+| 6 | `TestReprojection_ZeroValueVerdictIsUnverified` | this doc §7 — a table test over a `Reprojection{}` literal, so a later branch that forgets to conclude is caught by the type |
+| 7 | `TestSweep_DisarmedRetractionPublishesUnverified` + armed negative twin | this doc §7's regression — the counter **discriminates**, not merely fires |
+| 8 | `TestAlertPrecedence` | §11.3's table, since the field is single-valued and two values can co-apply |
+
+**Gates:** `go build ./...`, `make vet`, `golangci-lint run ./...`, `make verify-kernel`, every
+`scripts/lint-*.go` gate, full `go test ./...`. No DDL/permission change → `verify-package-*` not engaged.
+
+### 11.6 In-scope gotchas
+
+- **`Wrote`'s meaning must not move.** `natskv.go:158-171` documents why the guarded path reports `Wrote:
+  true` on its internal no-op branches, and `writeResults` skips `writeAudit` on `!wrote`
+  (`pipeline.go:2112`). The new signal is an **added** field; repurposing `Wrote` would silently change
+  the CDC write-audit.
+- **Test-double embedding trap.** `OutcomeUpserter`'s doc (`adapter.go:126-164`) records that a double
+  embedding `*NatsKVAdapter` and overriding only `Upsert` still promotes `UpsertWithOutcome` straight
+  through. `DeleteWithOutcome` inherits the identical trap — route both through one unexported method,
+  as `perEntryRetryAdapter`/`partialFailAdapter` already do.
+- **The check goes *after* evaluation.** Checking before would leave the window open for a swap landing
+  *during* evaluation, which is the longer interval (supersession §6 Inc 1's order-of-operations note).
+- **`Unverified` reads 0 across today's corpus** (§4.2) — all 19 actor-aggregate lenses arm
+  `zeroRowRetraction`. That is the expected green, not a broken counter; test 7's armed twin is what
+  proves the counter discriminates.
+- **Only `NatsKVAdapter` is `RowReader`** (`natskv.go:21`) and only it is `PrefixKeyLister`, so the sweep
+  is only ever installed on it (supersession G10) — the Postgres/grant families take the fall-back path.
+
+### 11.7 Adjacent finds — filed to the board NOW, not carried
+
+None new. The two stale doc claims (§5) are **in** this fire, not filed. `sweep.go:265-266`'s comment is
+corrected here rather than left for a doc sweep.
+
+### 11.8 Non-goals
+
+Fire 2 (the plain-lens Auditor) and `ReferencesParam`; any remediation for a blocked row beyond reporting
+it (supersession §8's boundary — Inc 1 removes the mechanism that manufactures them); the Contract #6 §6.2
+tie-rule (**held by Andrew**, staged edit reverted — nothing here touches guard semantics); merging the
+`auth-latency-inc2` worktree (the *next* fire, gated on this one); Increment 3 of the auth-plane design.
