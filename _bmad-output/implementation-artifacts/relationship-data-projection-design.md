@@ -1,6 +1,39 @@
 # Binding a relationship in the full engine — `type(r)`, `r.key`, `r.data.<field>`
 
-**Status: 📐 DRAFT awaiting Andrew — authored 2026-08-06 (critical-necessity session, filed-by-steward row re-examined)**
+**Status: ✅ RATIFIED 2026-08-06 (Winston, under delegated authority) — option (b), the narrow bind**
+
+## Ratification (Winston, 2026-08-06 — delegated by Andrew)
+
+Andrew delegated this class of decision in the ratify session: *"Winston can ratify — do what is right long
+term, do NOT make decisions based on how many lines of code need to be changed."*
+
+**Ratified as §4(b): bind the relationship and project `type(r)`, `r.key`, `r.data.<field>`.** The decisive
+argument is §4(a)'s, and it is architectural rather than economic: **`linkName` cannot be duplicated onto a
+vertex at all.** It is not a fact about either endpoint — it is the identity of the edge. One object
+attached to the same owner under two slots is two links and one object vertex, so no vertex field can hold
+"which slot"; duplicating it would mean inventing a per-link vertex, which is a worse model than reading
+the link. That is why the cheap package-side workaround was not taken: it is not merely cheaper, it is
+wrong. The filed row's own justification (`bound_at`) is correctly **downgraded** in §3.1 — that fact is
+already on a plaintext vertex three times over — and the design ratifies on the consumer the row never
+named: a shipped `DetachObject` whose required `linkName` no read model can supply, so LoftSpace lists a
+document it cannot offer to remove.
+
+**§4(c) (full relationship semantics — `WHERE` on rel fields, a rel in a grouping key, `r` as a returned
+entity, variable-length collections) stays rejected for now, on soundness rather than size.** A
+data-predicate edge filter is not expressible as a selector, so `recordEdgeSelector` could no longer
+honestly certify the footprint and every such lens would degrade to whole-document `Fallback` comparison.
+No consumer asks for it, and (b) is the precondition for all of it rather than a barrier — so this is a
+deferral that forecloses nothing.
+
+**Nothing new is needed to make it sound**, which §5 establishes and I accept: the `KindLink` reprojection
+arm is unconditional and already fires on data-only link updates, footprint validation is key-shape-agnostic
+and closes itself with no new code, `ReferencedLabels` is unaffected, and sweep recompute parity is
+automatic because it runs the same engine entry point. That is what makes this a projection capability
+rather than a converged-but-wrong generator.
+
+**Not a fold.** §4(d) is right that `link-aspect-triggered-reprojection-plain-lenses-design.md` is 🗄️
+SUBSUMED and its Fire 1 is the *reason* §5.1 is already closed, not a fold target; and this is Refractor
+engine work, so neither identity-domain nor objects-base owns it.
 
 Designer fire 2026-08-06 (Winston) · Lattice lane, Refractor projection-maturity · Size **S–M** (Inc 1 S · Inc 2 S · Inc 3 XS)
 · Backlog row re-examined: *[Refractor] A lens cannot project a relationship's own `data`* (planning-artifacts/backlog/lattice.md,
