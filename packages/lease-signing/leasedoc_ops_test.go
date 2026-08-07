@@ -191,6 +191,57 @@ func TestLeaseDocInstance_MintsClaim_EmitsDocGenEvent(t *testing.T) {
 	if _, present := doc["termsMoveInDate"]; present {
 		t.Fatalf("doc.termsMoveInDate must be omitted when the application has no .terms, got %v", doc["termsMoveInDate"])
 	}
+	// This unit carries no `manages` link — an unmanaged unit names no landlord.
+	if _, present := doc["landlordKey"]; present {
+		t.Fatalf("doc.landlordKey must be omitted for an unmanaged unit, got %v", doc["landlordKey"])
+	}
+}
+
+// TestLeaseDocInstance_ManagedUnit_ResolvesLandlordKey: a unit carrying a live
+// `manages` link (loftspace-domain/ownership.go) resolves the landlord's bare
+// identity key into doc.landlordKey — unlike tenantName, the key itself is not
+// a sensitive aspect, so it needs no egress-declaration path and is not
+// blocked on the same Loom primitive.
+func TestLeaseDocInstance_ManagedUnit_ResolvesLandlordKey(t *testing.T) {
+	t.Parallel()
+	ctx, conn := setupLeaseEnv(t)
+	cp, cons := newLeasePipeline(t, ctx, conn, "docinstlandlord")
+
+	applicantKey := mintNamedIdentity(t, ctx, conn, cp, cons, "docLandlIdent01", "Alice Smith")
+	appKey, unitKey := signedDocGenApp(t, ctx, conn, cp, cons, applicantKey)
+
+	landlordID := "BBDocLandLordHJKMNPQ"
+	landlordKey := "vtx.identity." + landlordID
+	_, unitID, _ := substrate.ParseVertexKey(unitKey)
+	testutil.SeedLink(t, ctx, conn,
+		"lnk.identity."+landlordID+".manages.unit."+unitID,
+		"manages", landlordKey, unitKey)
+
+	handle := "dgLandLordHandCdEfGh"
+	instReqID := testutil.GenReqID("docInstLandl001")
+	env := &processor.OperationEnvelope{
+		RequestID:     instReqID,
+		Lane:          processor.LaneDefault,
+		OperationType: "CreateLeaseDocInstance",
+		Actor:         lsActorKey,
+		SubmittedAt:   time.Now().UTC().Format(time.RFC3339),
+		Class:         "leaseDocInstance",
+		Payload: json.RawMessage(`{"instanceKey":"` + handle + `","subjectKey":"` + appKey +
+			`","adapter":"docGen","replyOp":"RecordLeaseDocOutcome","params":{"family":"docGen"}}`),
+		ContextHint: &processor.ContextHint{Reads: []string{appKey}},
+	}
+	testutil.PublishOp(t, conn, env)
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
+
+	ev := findEmittedEvent(t, ctx, conn, instReqID, "external.docGen")
+	params, _ := ev["params"].(map[string]any)
+	doc, _ := params["doc"].(map[string]any)
+	if doc == nil {
+		t.Fatalf("params.doc missing: %v", params)
+	}
+	if got, _ := doc["landlordKey"].(string); got != landlordKey {
+		t.Fatalf("doc.landlordKey = %q, want %q", got, landlordKey)
+	}
 }
 
 // submitShredIdentityKey drives a REAL ShredIdentityKey (privacy-base, urgent

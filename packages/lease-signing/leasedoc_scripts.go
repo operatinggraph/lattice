@@ -11,18 +11,20 @@ package leasesigning
 //     the pattern fires on signing, but a raced or manual trigger against an
 //     unsigned application must fail with no claim and no dispatch).
 //   - the emitted params carry the RESOLVED document fields (§10.5's
-//     linked-vertex read: kv.Links walks the applicationFor / appliesToUnit
-//     links; kv.Read loads the unit's .address/.listing and the application's
-//     own .terms), so the vendor receives real field values and never touches
-//     the graph or a lens. Absent optional fields are omitted from doc{}; the
-//     vendor's renderer degrades exactly as the display path does (an unnamed
-//     applicant renders by bare key). The applicant's .name is deliberately
-//     NOT read here (sensitive-param-egress design §3.6's emission guard): a
-//     link-discovered sensitive aspect has no contextHint.egressReads
-//     declaration path (Loom cannot pre-declare a key this DDL only resolves
-//     at execute time via live_link_target), so a plaintext read here would
-//     be structurally rejected as sensitive-plaintext-into-external-event.
-//     The vendor renders a nameless document (the same degrade this DDL
+//     linked-vertex read: kv.Links walks the applicationFor / appliesToUnit /
+//     manages links; kv.Read loads the unit's .address/.listing and the
+//     application's own .terms), so the vendor receives real field values and
+//     never touches the graph or a lens. Absent optional fields are omitted
+//     from doc{}; the vendor's renderer degrades exactly as the display path
+//     does (an unnamed applicant renders by bare key, an unmanaged unit names
+//     no landlord). The applicant's and landlord's .name aspects are
+//     deliberately NOT read here (sensitive-param-egress design §3.6's
+//     emission guard): a link-discovered sensitive aspect has no
+//     contextHint.egressReads declaration path (Loom cannot pre-declare a key
+//     this DDL only resolves at execute time via live_link_target /
+//     live_link_source), so a plaintext read here would be structurally
+//     rejected as sensitive-plaintext-into-external-event. The vendor renders
+//     both parties by their bare identity key (the same degrade this DDL
 //     already used for a shredded/unprovisioned applicant) until a follow-on
 //     extends egress-safe reads to link-discovered aspects.
 const leaseDocInstanceDDLScript = `
@@ -101,6 +103,22 @@ def live_link_target(hub_key, relation):
     for l in page:
         if not l.isDeleted:
             return l.targetVertex
+    return None
+
+def live_link_source(hub_key, relation):
+    # The counterpart of live_link_target for links where the subject is the
+    # TARGET: a unit's inbound "manages" links (loftspace-domain/ownership.go
+    # — source = landlord identity, target = unit; a flat co-management set
+    # with no primary). The first live entry resolves a representative
+    # landlord party; absent -> None (an unmanaged unit names no landlord).
+    # Unlike the tenant's display name, the resolved value here is a bare
+    # identity KEY — not a sensitive aspect — so no egress-declaration path is
+    # needed (contrast the tenantName comment below).
+    # read-posture: (e) relation=manages epoch=none
+    page, _ = kv.Links(hub_key, relation, "in")
+    for l in page:
+        if not l.isDeleted:
+            return l.sourceVertex
     return None
 
 def aspect_data(key):
@@ -207,6 +225,9 @@ def execute(state, op):
         unit = live_link_target(subject_key, "appliesToUnit")
         if unit != None:
             doc["unitKey"] = unit
+            landlord = live_link_source(unit, "manages")
+            if landlord != None:
+                doc["landlordKey"] = landlord
             addr = aspect_data(unit + ".address")
             put_string(doc, "unitAddress", addr, "line1")
             put_string(doc, "unitCity", addr, "city")

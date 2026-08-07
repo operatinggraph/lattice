@@ -42,6 +42,7 @@ type docGenFields struct {
 	TenantName           string   `json:"tenantName"`
 	Applicant            string   `json:"applicant"`
 	UnitKey              string   `json:"unitKey"`
+	LandlordKey          string   `json:"landlordKey"`
 	UnitAddress          string   `json:"unitAddress"`
 	UnitCity             string   `json:"unitCity"`
 	UnitRegion           string   `json:"unitRegion"`
@@ -209,7 +210,8 @@ func (f *FakeDocGen) SideEffects(idempotencyKey string) int {
 // idempotent, orphan-free attach — identical bytes map to one digest/oid).
 // Only present fields are emitted, so an application missing optional terms
 // degrades to whatever it carries rather than printing blanks; an unnamed
-// applicant renders by their bare identity key.
+// applicant renders by their bare identity key, and an unmanaged unit omits
+// the Landlord line entirely rather than naming a placeholder party.
 func renderLeaseDocument(leaseAppKey string, doc docGenFields) string {
 	var b strings.Builder
 	line := func(label, value string) {
@@ -233,7 +235,7 @@ func renderLeaseDocument(leaseAppKey string, doc docGenFields) string {
 	if doc.TenantName != "" && doc.Applicant != "" {
 		line("Tenant ID", doc.Applicant)
 	}
-	line("Landlord", "LoftSpace property management")
+	line("Landlord", doc.LandlordKey)
 	fullAddr := joinNonEmpty(", ", doc.UnitAddress, doc.UnitCity, doc.UnitRegion)
 	line("Premises", fullAddr)
 	line("Unit", doc.UnitKey)
