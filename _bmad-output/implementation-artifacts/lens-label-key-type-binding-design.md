@@ -1,7 +1,49 @@
 # A pattern label names a vertex key type — retiring the body-`class` binding fallback
 
-**Status: 📐 awaiting-Andrew (ratification)** · Designer fire 2026-08-02 · owner: Refractor (rule engine) ·
-Size **S** · Imp **★★★**
+**Status: ✅ Andrew-ratified 2026-08-06** — both increments, one fire; build-ready. Designer fire
+2026-08-02 · owner: Refractor (rule engine) · Size **S** · Imp **★★★**
+
+## Ratification (Andrew, 2026-08-06)
+
+**Ratified as designed: delete the body `class`/`label` fallback, and fold the OPTIONAL/negated-`WHERE`
+derivation hole in as Increment 2.** Two findings from the session strengthen the case beyond what the body
+argues, and both are worth carrying into the fire:
+
+- **The fallback is not merely unsound-in-principle, it is unused.** Every pattern label in every shipped
+  lens (all of `packages/*/lenses.go` plus the kernel lenses) was enumerated: **34 distinct labels, every
+  one of them a real vertex key type** — `account`, `appointment`, `building`, `identity`, `meta`, `unit`,
+  `role`, `task`, and so on. Nothing labels a node `:location`. And the second fallback branch is **dead
+  code**: no `packages/**` vertex body carries a `label` property at all (the only `"label"` occurrences are
+  a pane spec's *column* label and an unrelated subject-token validator). So Increment 1 removes
+  dead-and-dangerous code rather than changing live behavior.
+- **The conflation is already in the vocabulary of the lenses that decide read access.** clinic-domain's
+  read-grant lenses reason in comments like *"only ever matches class=identity, so it does NOT grant a
+  patient (class=patient) its own anchor"* (`packages/clinic-domain/lenses.go:120-121`, `:293-303`) —
+  describing a **key-type** match as a class match, in security-critical design notes. Making a label mean
+  the address is what lets that vocabulary be precise.
+
+**The judgment call in §8.3 is settled, and the other way round from the sketch.** The removed capability
+("any location" via a shared class discriminator) is real demand, and Andrew wants it — but neither the
+label form nor §8.3's **label disjunction** is the right mechanism, and §8.3 is superseded rather than
+merely unbuilt. It resolves as a **dynamic type taxonomy**: a `specializes` link between the *type meta
+vertices*, so a new leaf (`room`, `hallway`) can be declared **by a different package** and picked up by
+any lens labelling the abstract type, with no lens edit and no redeploy. That is its own design
+(`dynamic-type-taxonomy-design.md`, filed this session), and it **depends on this fire**: label resolution
+must have exactly one authority, so an abstract label may expand against the declared taxonomy only once
+the body `class` is out of the resolution path. Do not build §8.3's disjunction.
+
+**The location-domain question is absorbed there too, not filed as a rename.** Andrew's first instinct was
+dotted classes (`location.unit`), then collapsing the three key types into one `vtx.location`. Both were
+set aside on architectural grounds, not cost (cost is explicitly not a criterion): the key type is the only
+thing that can be a *subscription* filter — the Core-KV subject is derived from the key and NATS filters on
+subject tokens, so a body field can never narrow delivery. Collapsing the types would therefore lose
+per-type narrowing permanently. Under the taxonomy the leaf types stay as they are, `location` becomes a
+declared abstract type, the shared bare class is dropped, and `loftspace-domain:373`'s `cls != "location"`
+guard becomes a taxonomy check.
+
+**No frozen-contract change; nothing staged uncommitted.** Contract #1 §1's existing sentence — the type
+segment is a coarse routing category, fine-grained classification lives in `class` — is what this brings
+the engine into line with.
 
 ## For Andrew
 
