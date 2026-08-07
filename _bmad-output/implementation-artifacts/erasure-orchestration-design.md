@@ -855,10 +855,15 @@ someone argues otherwise on the record.
   does not fire). Re-shred still resets the cycle (#5) and still writes the placeholder for a
   never-sensitive identity (`:299-306` — the restart-safety argument must survive the narrowing, and a
   test should say so).
-- **Inc 2** — `internal/loom`: a systemOp step with declared reads produces an outbox record carrying
-  the resolved `ContextHint.Reads`; a `subject.<aspect>` template resolves against `inst.SubjectKey`;
-  pattern load rejects a `Reads` entry on a `userTask`/`externalTask` step. Plus the §5.3 correlation
-  probe.
+- **Inc 2 (Fire A) — SHIPPED.** `internal/loom`: a systemOp step with declared reads produces an outbox
+  record carrying the resolved `ContextHint.Reads`; a `subject.<aspect>` template resolves against
+  `inst.SubjectKey`; pattern load rejects a `Reads` entry on a `userTask`/`externalTask` step. Plus the
+  §5.3 correlation probe. Fire A added two guards its review earned: the template grammar's charset
+  boundary, and the `subjectKey`-is-a-vertex confinement precondition.
+  **Fire B inherits one test Fire A could not write**: the `TestUserTaskReads_CoverEndpoints` analogue
+  for each step op it declares — the declared set must cover every key that op's DDL reads, or the op
+  HydrationMisses in production. There is nothing to compare against until a pattern declares reads, so
+  the guard lands with the declaration, one per step op in §5.4.
 - **Inc 3** — the resurrection test, which is the one that matters: shred → seal → attempt the write
   that today revives the index (`ddls.go:593-594`) → assert rejection and assert **no live
   `identityindex`**. A **negative test can pass for the wrong reason**, so the positive vector runs
@@ -1032,10 +1037,14 @@ derive-a-read-set-from-the-subject helper with its invariant recorded in the com
 - No stack cycle needed for `pkgmgr`, but `internal/loom` ships in binaries beyond `bin/loom`; derive them
   mechanically at admit.
 
-**6. Adjacent finds.** One, filed as a lattice row: `submitSystemOp` has no equivalent of
-`userTaskReads`'s coverage test, so nothing pins a future step-op's declared set to what its DDL actually
-reads — the same guard `TestUserTaskReads_CoverEndpoints` gives the userTask arm. Deliberately not filed:
-the §12 "one dependency to resolve rather than inherit" question is Fire B's, not this fire's.
+**6. Adjacent finds.** One, and it resolves to a Fire B obligation rather than a board row.
+`submitSystemOp` has no equivalent of `userTaskReads`'s coverage test, so nothing pins a step-op's
+declared set to what its DDL actually reads — the guard `TestUserTaskReads_CoverEndpoints` gives the
+userTask arm. That guard **cannot be written until a pattern declares reads**: there is nothing to
+compare a DDL against while the field is unused. So it is not a standalone row that would sit unpickable;
+it is a test **Fire B owes**, one per step op it declares (§5.4's four), and it is named in §13 below.
+Deliberately not filed: the §12 "one dependency to resolve rather than inherit" question is Fire B's,
+not this fire's.
 
 **7. Non-goals.** No `packages/privacy-base` or `identity-domain` change; no pattern declaration; no lens,
 target or op; no narrowing of `ShredIdentityKey`. `egressReads` stays nil on the systemOp arm (no
