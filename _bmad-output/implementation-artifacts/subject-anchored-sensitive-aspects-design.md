@@ -47,9 +47,12 @@ than traded away.
   reordered: a projected decrypted record that survives erasure while erasure reports success is strictly
   worse than today's un-projected plaintext.
 
-**What the session found beyond this design.** The demand is three live instances, not one: clinic
-`.encounter`, lease-signing's `annualIncome`/`guarantorAnnualIncome` on `.profile`, and the
-background-check `outcome` aspect — all non-person-scoped, all plaintext-for-now, all retained classes.
+**What the session found beyond this design.** The demand is wider than the one consumer, though not as
+wide as first stated in session: **two** live plaintext instances — clinic `.encounter`, and
+lease-signing's `annualIncome`/`guarantorAnnualIncome` on `.profile` (which has **no aspect-type DDL at
+all**, being written by the `leaseapp` vertexType script, so it costs more than clinic's flip) — plus the
+background-check `outcome` as a **prospective** retention class, since it stores `{status, completedAt,
+validUntil}` and no sensitive payload today. The replacement design carries the corrected census.
 The read side also turns out to be *simpler* than this design assumed: the stored ciphertext already
 carries `keyId` (`vault/local.go:223`, `:242`), and both read paths ignore it and re-derive custody from
 the anchor segment or a required projected column — so trusting the ciphertext removes machinery instead
