@@ -23,6 +23,14 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 // affordance, and an operator submitting it by hand is exercising the same
 // authority they already hold over MergeIdentity.
 //
+// PurgeIdentityDedupFootprint carries the same posture one step further out:
+// its submitters are the pattern's fourth step AND the erasure target's gap
+// action, so it is reached by identity.system.loom and identity.system.weaver
+// alike — both operator via holdsRole. Like the seal it ships no OpMeta
+// descriptor, and it refuses any subject without a live erasureRequested
+// marker of that class, so the grant confers nothing a completed seal has not
+// already exercised.
+//
 // Granting to operator does reach the other operator-equivalent service actors
 // (Bridge, object-store-manager, privacy) as well as human operators. That is
 // the same breadth identity-hygiene's MergeIdentity grant carries, and it
@@ -49,6 +57,13 @@ func Permissions() []pkgmgr.PermissionSpec {
 			Scope:         "any",
 			Note: "Authorizes the Loom service actor (operator-equivalent) to seal an already-shredded identity for erasure, closing its write path (erasure-orchestration-design.md §6). " +
 				"[no-op-meta: engine-op — the second step of the identityErasure Loom pattern; no person chooses it from a form, and it refuses outright unless a shred has already committed.]",
+			GrantsTo: []string{"operator"},
+		},
+		{
+			OperationType: "PurgeIdentityDedupFootprint",
+			Scope:         "any",
+			Note: "Authorizes the Loom and Weaver service actors (operator-equivalent) to sweep an erasure-sealed identity's dedup footprint — its owned identityindex vertices and its duplicateOf pair links (erasure-orchestration-design.md §5.4 step 4). " +
+				"[no-op-meta: engine-op — the fourth step of the identityErasure Loom pattern and a gap action of the identityErasureComplete target; no person chooses it from a form, and it refuses outright unless the identity carries a live erasureRequested marker of that class.]",
 			GrantsTo: []string{"operator"},
 		},
 	}

@@ -14,17 +14,18 @@ import (
 // by the Processor's own commit path, and its class is registered here only so
 // the DDL cache and Loupe can see it — a DDL quietly vanishing from this list
 // would break encrypt-on-write with no failing operation to point at. The
-// erasure declarations are different in kind: `sealIdentityForErasure` IS
-// script-dispatched, and `erasureRequested`'s permittedCommands is the write
-// gate on the marker every identity write-path guard reads.
+// erasure declarations are different in kind: `sealIdentityForErasure` and
+// `purgeIdentityDedupFootprint` ARE script-dispatched, and `erasureRequested`'s
+// permittedCommands is the write gate on the marker every identity write-path
+// guard reads — including the two erasure verbs' own preconditions.
 func TestPackage_StructurePins(t *testing.T) {
-	if got, want := len(Package.DDLs), 6; got != want {
+	if got, want := len(Package.DDLs), 7; got != want {
 		t.Errorf("DDLs: got %d, want %d", got, want)
 	}
 	if got, want := len(Package.Lenses), 2; got != want {
 		t.Errorf("Lenses: got %d, want %d", got, want)
 	}
-	if got, want := len(Package.Permissions), 2; got != want {
+	if got, want := len(Package.Permissions), 3; got != want {
 		t.Errorf("Permissions: got %d, want %d", got, want)
 	}
 	if got, want := len(Package.OpMetas), 0; got != want {
@@ -50,6 +51,7 @@ func TestPackage_StructurePins(t *testing.T) {
 		{"erasureRequested", "meta.ddl.aspectType"},
 		{"sealIdentityForErasure", "meta.ddl.vertexType"},
 		{"privacy.erasureRequested", "meta.ddl.eventType"},
+		{"purgeIdentityDedupFootprint", "meta.ddl.vertexType"},
 	}
 	if len(wantDDLs) != len(Package.DDLs) {
 		t.Fatalf("wantDDLs pins %d of %d declarations — the loop below is bounded by the want-slice, so an unpinned tail is invisible", len(wantDDLs), len(Package.DDLs))
@@ -77,6 +79,7 @@ func TestPackage_StructurePins(t *testing.T) {
 	wantPerms := []struct{ op, scope string }{
 		{"RecordShredFinalization", "any"},
 		{"SealIdentityForErasure", "any"},
+		{"PurgeIdentityDedupFootprint", "any"},
 	}
 	if len(wantPerms) != len(Package.Permissions) {
 		t.Fatalf("wantPerms pins %d of %d grants — an unpinned grant could change scope silently", len(wantPerms), len(Package.Permissions))

@@ -1,5 +1,5 @@
 name: privacy-base
-version: 0.5.0
+version: 0.6.0
 description: |
   Per-identity PII key-custody envelope (piiKey) backing crypto-shred
   (vault-crypto-shredding-design.md §2.1/§2.2). ShredIdentityKey marks the
@@ -24,6 +24,8 @@ declares:
       class: meta.ddl.vertexType
     - canonicalName: privacy.erasureRequested
       class: meta.ddl.eventType
+    - canonicalName: purgeIdentityDedupFootprint
+      class: meta.ddl.vertexType
   lenses:
     - canonicalName: shredStatus
       adapter: nats-kv
@@ -38,5 +40,8 @@ declares:
       scope: any
       grantsTo: [operator]
     - operationType: SealIdentityForErasure
+      scope: any
+      grantsTo: [operator]
+    - operationType: PurgeIdentityDedupFootprint
       scope: any
       grantsTo: [operator]

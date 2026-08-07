@@ -94,6 +94,7 @@ func DDLs() []pkgmgr.DDLSpec {
 		ErasureRequestedAspectDDL(),
 		SealIdentityForErasureDDL(),
 		ErasureRequestedEventDDL(),
+		PurgeIdentityDedupFootprintDDL(),
 	}
 }
 
