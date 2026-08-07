@@ -386,6 +386,12 @@ irrelevant here and the declaration simplifies. This does not change the archite
 `PAGE = 256`, matching the existing enumeration page limits (`shred_identity_key.go:178`, `:204`,
 `:232`). **No step can exceed its bound**, so no step can reintroduce a refusal (§10).
 
+**Amended by increment 3: the COMMIT bound is `SWEEP_LIMIT = 64`, not `PAGE`.** `PAGE` remains the
+`kv.Links` read page, where it came from; a sweep's *mutation* count is a separate, smaller constant
+because it sizes an atomic batch on every pass and `2·PAGE` mutations exceeds the 250ms Starlark
+wall budget under load. Step 3's bound is therefore `≤ 2·SWEEP_LIMIT + 1 = 129`; step 4's should be
+derived the same way when it is built. See §10 point 4.
+
 **Step 3 is new work, not a rename.** Per #30 `UnlinkCredential` is unusable by an orchestrator on
 three counts. Step 3's op takes the owner from `subjectKey`, carries **no** last-credential guard (a
 person being erased keeps no sign-in path — that is the point), and is granted `Scope:"any"` to the
@@ -762,10 +768,40 @@ By construction, at every level:
    zero.
 4. **No step can reintroduce a refusal.** This is a checkable property, and Inc 5's test strategy
    makes it one: *no op reachable from the erasure pattern or the erasure target may compute a
-   mutation count from an unbounded enumeration.* Each sweep enumerates **exactly one page** —
-   `kv.Links` with a single call and no page loop — so the `MAX_*_PAGES` construct that produces the
-   fanout failures does not exist in the new ops at all. The cursor lives in the *world* (the
-   remaining live links), not in the script.
+   mutation count from an unbounded enumeration.* Each sweep retires **at most `SWEEP_LIMIT` live
+   links**, a constant, so the `MAX_*_PAGES` fanout failures do not exist in the new ops.
+
+   **Corrected by increment 3 — the mechanism, not the property.** This point originally specified
+   the implementation as *"`kv.Links` with a single call and no page loop … the cursor lives in the
+   world (the remaining live links), not in the script."* That is **false against this substrate**,
+   and building it that way produces a silent stall rather than a refusal. A tombstone is a **soft
+   delete**: the key stays in the keyspace and `kv.Links` keeps returning it with `isDeleted` set
+   (`internal/processor/starlark_kv.go`'s `connLinkLister` skips only a *hard* delete — the
+   shipped `kv.Links` LIST-cost row on the board says the same thing). So after one sweep the first
+   page is entirely tombstones, and a cursor-less call finds zero live links and stalls there
+   **forever**, at a non-zero residue, while the target re-dispatches a no-op. The cursor lives in
+   the **keyspace**, which retains what the world has discarded.
+
+   What the sweep ops actually do: **page on the READ until `SWEEP_LIMIT` LIVE links are in hand**,
+   and cap the mutation count at that constant. The property this point exists to guarantee — a
+   mutation count that cannot be grown by the subject's connectivity — holds unchanged; only the
+   claim that one `kv.Links` call suffices was wrong. **Inc 5's lint rule must be written to the
+   property, not to the literal "no page loop"** — a rule banning the page loop would ban the very
+   construct convergence requires.
+
+   Two consequences increment 3 measured and the sweep ops must respect:
+   - **`SWEEP_LIMIT` is not the read page limit.** §5.4's `PAGE = 256` was taken from the *read*
+     page sizes of ops that enumerate and commit once; in a sweep the same number sizes an **atomic
+     batch on every pass**, and `2·256` mutations exceeds the Processor's **250ms Starlark wall
+     budget** on a loaded host. An op that refuses by wall clock reintroduces this refusal through a
+     second door. `SWEEP_LIMIT = 64` measured clean under the full `-p 4` suite; the cost is more
+     passes, which the target already dispatches uncapped.
+   - **The scan window is finite.** Paging past accumulated tombstones is bounded by
+     `MAX_*_PAGES × page`, so a subject with more tombstoned links than that window ahead of its
+     live ones cannot be reached. The sweep **fails loudly** there rather than returning empty: a
+     silent stall under an uncapped re-dispatch is strictly worse than a surfaced stop. Reachable
+     only past ~16k links in one direction — far beyond where today's in-shred cascade already
+     refuses — and the durable fix is the shelved hard-delete verb or a per-relation epoch.
 
 **Net: there is no input for which the platform can decline to erase a person.**
 
@@ -1589,3 +1625,87 @@ more than `PAGE` credentials gets one page from the pattern's step 3 and the res
 4. **Same non-commit-conditioned window increment 2 recorded.** The seal is read, not mutated, so a
    seal committing between this op's hydration and its commit is not detected. Identical class,
    identical closure. **Consumer: the fire that builds `SealIdentityForErasureComplete`.**
+
+
+## Fire B build note — increment 3 (2026-08-07): the unbind primitive
+
+Shipped `d66cb731`. **§12 Fire B step 1 is complete**; step 2 (the pattern, the residue lens, the
+Weaver target, the completion seal) is the next fire.
+
+### What increment 3 built
+
+`UnbindIdentityCredentials` in `identity-domain`, as its own `meta.ddl.vertexType` DDL
+(`unbind_identity_credentials.go`, mirroring privacy-base's `seal_identity_for_erasure.go`), granted
+`Scope:"any"` to `operator` with a `[no-op-meta: engine-op — …]` exemption and no descriptor. Package
+`0.16.0 → 0.17.0`.
+
+| Direction | Per link | Owner array | Emits |
+|---|---|---|---|
+| inbound (credentials bound to the subject) | tombstone `credentialindex(cred)` + the link | **not rewritten** — see below | `identity.unbound{identityKey: subject, actorKey: cred}` |
+| outbound (the subject IS someone's credential) | tombstone `credentialindex(subject)` once + the link | **rewritten** — the owner's key is alive | `identity.unbound{identityKey: owner, actorKey: subject}` |
+
+Inbound first, outbound only once inbound is exhausted: draining both in one commit would reach
+`4·SWEEP+2` mutations, and the point of the decomposition is that no input grows the commit.
+
+### Three corrections the build made to the ratified text
+
+All three are recorded in the design body above, not only here — a build note nobody re-reads is not
+where a falsified premise belongs.
+
+1. **§10 point 4's implementation claim was false** — a tombstone is a soft delete, so the specified
+   cursor-less `kv.Links` call stalls silently instead of converging. Body rewritten; the *property*
+   it guarantees is unchanged, and **Inc 5's lint rule must be written to the property, not to the
+   literal "no page loop"**.
+2. **§5.4's `PAGE = 256` cannot size a commit** — `2·256` mutations exceeds the 250ms Starlark wall
+   budget on a loaded host. Caught by the full `-p 4` suite; the package alone passed 3/3 quietly,
+   which is exactly why the wide-blast-radius suite is the gate. `SWEEP_LIMIT = 64`.
+3. **§5.4's "copies `UnlinkCredential`'s body" cannot include the subject's own array** —
+   `credentialBinding` is sensitive, the seal's own precondition guarantees the subject's DEK is
+   shredded, and `internal/vault/local.go` refuses decrypt and encrypt alike off
+   `envelope.Shredded`. Tracing the *hazard* (a live readable list naming an erased person) rather
+   than the *mechanism*: the subject's array is already erased by key destruction, the Gateway's
+   `credential-bindings` bucket is the readable copy, and `identity.unbound` is its only retraction.
+
+Plus one addition: **`ErasureNotSealed`**. §5.4 states no precondition, but without one a
+`Scope:"any"` grant to `operator` is a bare "tombstone anyone's sign-in methods" verb held by five
+service actors. Requiring the marker — checked by **class**, per increment 2 — costs the pattern
+nothing (§5.1 orders the seal first) and lets the grant claim what the seal's own Note claims. A
+refusal added is a narrowing.
+
+### The convergence proof
+
+`TestUnbindIdentityCredentials_WideSubject_ConvergesPastOnePage` seeds 301 inbound links and requires
+every pass to **strictly decrease** the residue until it reaches zero. It was mutation-tested twice
+against the single-page implementation §10 specified, and fails against it both times — which is what
+makes it a proof rather than a claim. It asserts convergence rather than arithmetic, so tuning
+`SWEEP_LIMIT` does not touch it.
+
+Six siblings cover: the inbound sweep with the subject's aspect **revision-pinned unchanged** (the
+load-bearing negative for correction 3); the last credential going with no refusal; `ErasureNotSealed`
+and the foreign-marker-class refusal, each **paired with its own positive vector over one corpus**;
+the ungranted-actor denial against a control holding the same role on the same lane; and idempotence,
+asserted as an unchanged revision on an already-tombstoned key rather than as a bare re-accept.
+
+### Residuals — named, with their consumers
+
+1. **`StepSpec` cannot declare an enumeration.** Fire A added `Reads`/`OptionalReads`; a class-(e)
+   walk is declared through `ContextHint.Enumerations`, which the systemOp submit path cannot
+   express. Metadata only (`opwire.go:66-116` — the Processor validates the shape and otherwise
+   ignores it), so the walk executes correctly; the declaration is what is missing. **Filed** as a
+   Loom row. **Consumer: the pattern fire.**
+2. **The scan window is finite** (§10 point 4, above). Past ~16k tombstoned links in one direction
+   the sweep cannot reach the live ones and fails loudly. **Consumer: the shelved hard-delete
+   mutation verb**, whose board row already records that a tombstoned key persists and is still
+   enumerated by `kv.Links` — this is that row's first real driver.
+3. **The op names no `primaryKey`.** The reply-constraint requires one to lie inside the write
+   footprint, and every key this op writes belongs to a credential, a link, or another person's
+   aspect — never the subject. Nothing needs one today. **Consumer: any future dispatcher that
+   correlates on the reply rather than on the request id.**
+4. **The §13 read-set coverage guard still has nothing to compare against** — unchanged from
+   increment 1. **Consumer: the pattern fire.**
+5. **An erased subject that was an owner's LAST credential locks that owner out.** Correct per
+   §5.4's no-last-credential-guard ruling — the credential no longer authenticates either way, and
+   leaving it named would preserve a correlation to an erased person — but it is an operator-visible
+   consequence no surface announces. **Consumer: the operator surface (§12 step 4).**
+6. **Same non-commit-conditioned window increments 1 and 2 recorded.** The marker is read, not
+   mutated. **Consumer: the fire that builds `SealIdentityForErasureComplete`.**
