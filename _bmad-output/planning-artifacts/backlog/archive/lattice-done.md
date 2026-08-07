@@ -462,3 +462,5 @@ Rolled from `lattice.md` when its live Done log passed ~25 entries. Full detail 
 - 2026-08-01 · `809444e4` · [Refractor] claim-grant "never projects" premise disproven — every failed grant present minutes later [design §13.8](../../implementation-artifacts/facet-staff-worlds-design.md)
 - 2026-08-01 · `082ebbb4` · [Weaver] sweep honors a target freeze; an undeclared directOp retry budget bounds at the engine default (3) with a loud GapBudgetExhausted — §10.2 amendment staged uncommitted
 - 2026-08-01 · `16d3b328` · [Refractor] doc-mode aggregate zero-row retraction — a live anchor that stops matching now tombstones its row on the CDC, fan-out, and sweep paths alike; the false "EmptyBehavior handles it" rationale rewritten
+- 2026-08-07 · `34812168` · [Loom] erasure Fire A — a systemOp step declares its op's reads (`StepSpec.Reads`)
+- 2026-08-07 · `1e922347` · [privacy-base] erasure Fire B inc 1 — the erasureRequested marker + SealIdentityForErasure

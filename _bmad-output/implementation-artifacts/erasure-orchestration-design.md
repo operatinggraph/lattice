@@ -2000,3 +2000,118 @@ residue idiom; `lease-signing/lenses.go:645-647` is the `count(DISTINCT …)` fo
 
 **Adjacent finds — filed now, not at ship.** None new; increments 3 and 4's residuals are
 re-inherited verbatim rather than re-filed.
+
+### What increment 5 built
+
+`identityErasureResidue` in `privacy-base` (`lenses.go`), package `0.6.0 → 0.7.0`. One row per
+erasure-requested identity, counting live residue in **five** directions and exposing the five
+`missing_*` gaps, three `inflight_*` declarations and `violating` that §7.2's target dispatches on.
+
+| Arm | Swept by | Count |
+|---|---|---|
+| `boundTo` inbound · outbound | `UnbindIdentityCredentials` | `boundInResidue` · `boundOutResidue` |
+| `indexes` inbound | `PurgeIdentityDedupFootprint` | `indexResidue` |
+| `duplicateOf` outbound · inbound | `PurgeIdentityDedupFootprint` | `duplicateOutResidue` · `duplicateInResidue` |
+
+### Four corrections the build made to the ratified text
+
+All four are recorded in the spec's own doc comment, not only here.
+
+1. **§7.1 counted `boundTo` inbound only.** `UnbindIdentityCredentials` sweeps **both** directions
+   (`unbind_identity_credentials.go`'s `sweep_inbound`/`sweep_outbound`) — the subject owns
+   credentials *and* is itself someone else's. The outbound direction was residue no gap reported.
+   This is the same class of error increment 4 found on the dedup side, on the plane it did not look at.
+2. **§7.1's `privacy-erasure` bucket cannot coexist with §7.2's gap table, and this is the one that
+   would have failed silently.** The Weaver consumes exactly ONE bucket — `WeaverTargetsBucket`,
+   default `weaver-targets` — off `$KV.<bucket>.<targetId>.>`, resolving a target by row-key
+   **prefix**. Nothing binds a `WeaverTargetSpec.LensRef` to its lens's bucket at install, so
+   `identityErasureComplete` would have installed **green** and never dispatched a single gap: no
+   error, no issue, no convergence. The lens therefore takes the shape all ~19 shipped convergence
+   lenses have — `weaver-targets` + `ProjectionKind: actorAggregate` + an `Output` descriptor keyed
+   `identityErasureComplete.{actorSuffix}` + a `{key: $actorKey}` anchor projecting
+   `actorKey`/`entityKey`/`entityId`. **P5 is unaffected** (weaver-targets is a lens target like any
+   other), and §7.4's "prove it" was always the identity's own `.erasure.coverage` aspect, not this row.
+3. **§5.5's cycle discriminator is the LIVE `piiKey.shreddedAt`, and the marker's copy is not a
+   substitute.** They look interchangeable because `SealIdentityForErasure` refreshes the marker —
+   but only when it runs, and §5.1's ratified step-2 guard skips step 2 whenever the marker already
+   carries a `requestedAt`, which on a re-triggered erasure it always does. A marker-diff therefore
+   reads *equal* after a genuine re-shred of a completed erasure: the row goes quiet with cycle 2
+   unattested and cycle 1's `sealedAt` sitting on it as though it were the answer.
+4. **§7.2's "no `maxretries_<g>` ⇒ the budget term never suppresses" is wrong for a `directOp` gap.**
+   `gapSuppressed` falls to the engine's `defaultDirectOpRetryBudget` unless the row declares
+   `inflight_<g>` — by *presence*, not truth. The constant-`false` `inflight_*` columns are what
+   actually make the re-dispatch uncapped, and the seal gap needs one too (§7.2 named only the two
+   sweep gaps).
+
+### Two shapes that would have made the row silently wrong at scale
+
+Neither is a correctness bug in the ratified text; both are ways to write this cypher that pass every
+functional test and fail in production, so each is pinned by a test that reds against the wrong form.
+
+- **Five sibling `OPTIONAL MATCH` clauses in one stage** — §7.1's literal shape — make the engine
+  build the arms' cross product: 64 credentials × 300 index vertices × 300 duplicate pairs reaches
+  **5.76M bindings against the 1M cap and the evaluation is REFUSED**. No row, no gap, no dispatch,
+  on exactly the well-connected people this design exists to be able to erase. Staging one arm per
+  `WITH` collapses the bindings to one row per anchor between arms; the same subject projects in
+  ~150ms. R5's named `count(DISTINCT CASE WHEN …)` fallback does **not** help — it fixes count
+  inflation, not the binding cross-product — so the deviation from R5 is deliberate.
+- **An arm written neighbour-first** (`(c)-[:boundTo]->(i)`) leads with an unbound, unlabeled node.
+  `matchPath` seeds from a path's first node and takes the adjacency walk only when it is already
+  bound; otherwise it falls to a whole-bucket `ListKeys` plus a point read per vertex. So each
+  inbound arm would scan the entire corpus on every reprojection and, past ~1M vertices, refuse the
+  evaluation — the same silent non-erasure, re-keyed on **deployment size**, which nothing about the
+  subject bounds, landing on every erasure at once including the trivial ones. All 32 inbound arms in
+  the shipped lens corpus are anchor-first; these would have been the only exceptions.
+
+The lens is **broad** in the corpus label census, deliberately: its arms bind unlabeled nodes because
+the sweep ops' `kv.Links` walks filter by relation and direction with **no type filter**, so labelling
+an arm would count a subset of what the op sweeps.
+
+### The proofs
+
+Ten tests, of which five are mutation-verified against the specific wrong build they exist to catch:
+folding `duplicateOf` into `indexes` (§7.1's falsified shape), dropping the `boundTo` outbound arm,
+writing an arm neighbour-first, diffing the marker's stale `shreddedAt`, and deleting the residue
+conjunction from the seal gate — each reds at least one test, several red two.
+
+`…_ResidueFallsToZeroAsTheSweepsRun` is the convergence proof and walks both ops' **real** sweep
+order, requiring that draining one direction or class does *not* close a folded gap. It crosses the
+boundary the static tests cannot: a tombstoned link leaves adjacency outright
+(`adjacency/builder.go`'s `upsertEdge` → `removeEdge`), which is the mechanism §7.2's "each dispatch
+strictly decreases the count" rests on. `…_ArmsSeedFromTheAnchorNotTheCorpus` shrinks the binding cap
+rather than growing the corpus, so 400 unrelated bystanders red a corpus-seeded arm in milliseconds.
+`…_IsShapedAsAConvergenceLens` pins the weaver quartet so the row cannot be re-privatised.
+
+### Residuals — named, with their consumers
+
+1. **A hard-failing sweep now re-dispatches forever with no escalation.** §7.2's termination proof
+   assumes every dispatch tombstones ≥ 1 link; increment 4 falsified that — both sweeps
+   `fail("ErasureResidueUnreachable: …")` past ~16k tombstoned links on one relation. This
+   increment's `inflight_<g>` declarations opt those gaps out of the default retry budget, and an
+   ordinary `directOp` reclaim is never backed off, so `escalateExhaustedGap` can never fire.
+   **Consumer: the `identityErasureComplete` weaverTarget increment**, which must declare a
+   `maxretries_<g>` for that case or route the loud stop to a `surface` gap.
+2. **§12 step 4 and §13 Inc 5 both name a Loupe pane over `privacy-erasure`, a bucket that no longer
+   exists.** The operator surface reads the `identityErasureComplete.*` rows in `weaver-targets`
+   instead. **Consumer: the operator-surface increment (§12 step 4).**
+3. **A tombstoned `erasureRequested` marker drops the row while both sweep ops stay armed.** The ops
+   are deliberately tombstone-blind on the marker (*"a gate that reopened on a tombstone would be the
+   one failure mode a fail-closed guard may not have"*); the lens cannot be, because the engine
+   resolves a tombstoned aspect to null. Non-removal of the marker is a convention held by review,
+   not a platform-enforced invariant — no aspect-type DDL can refuse a tombstone. **Consumer: the
+   increment that protects the marker, or the weaverTarget increment if it must tolerate the gap.**
+4. **The lens counts live links to LIVE neighbours; the ops count live links.** `traverseRel` drops
+   an edge whose endpoint does not resolve to a live vertex, so a live link to a tombstoned or absent
+   neighbour is residue the op sweeps and the lens cannot see — a gap that closes early. No shipped
+   writer produces that state today (both sweeps tombstone vertex and link in one commit; a merge
+   leaves the secondary alive), so it holds by accident of corpus shape, not by construction. Same
+   class: a `duplicateOf` **self-link** is invisible to the lens (`traverseRel` skips the anchor
+   itself) and would be swept, though every write path refuses self-loops today. **Consumer:
+   `SealIdentityForErasureComplete`, whose in-commit re-verification walks the links directly and is
+   the backstop for both.**
+5. **R1's `N > 3·PAGE` dispatch-count proof still has nothing to run against** — inherited unchanged
+   from increment 4. **Consumer: the `identityErasureComplete` weaverTarget increment.**
+
+Increments 3 and 4's other residuals (the finite scan window, the missing `Enumerations` declaration
+on a `systemOp` step, the read-set coverage guard, the `UnbindIdentityCredentials` description edit,
+the absent `make verify-package-privacy-base` target) are re-inherited verbatim rather than re-filed.
