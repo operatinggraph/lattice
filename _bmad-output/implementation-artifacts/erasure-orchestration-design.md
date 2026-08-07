@@ -989,6 +989,17 @@ two drifted by a few lines and are corrected here):
 | `internal/loom/pattern.go` | `validate()` **:190** | `:190-239` ✅ | systemOp-only + template-form check |
 | `internal/loom/engine.go` | `submitSystemOp` **:857**, `buildOutbox(...nil, nil, nil)` **:867** | `:861-867` ▲ drift 4 lines | resolve + thread |
 | `internal/loom/actuator.go` | `buildOutbox` **:134** | `:134` ✅ | no change — signature already carries both |
+| `internal/pkgmgr/orchestrationguard.go` | `validateLoomPatterns` **:286** | not cited | mirror the rules (see below) |
+| `internal/pkgmgr/capabilitymaterializer.go` | `StepArtifact` **:132**, `knownStepFields` **:456** | not cited | mirror the fields |
+
+**Two sites the design's scope sentence does not name, and why they are in scope rather than drift.**
+`validateLoomPatterns`' own doc comment states its contract: *"It mirrors the engine's validate() exactly
+so an install never admits a pattern the engine would reject at CDC load."* A validation rule added to
+`pattern.go` alone would break that lockstep and let a package install a pattern that then runs dark —
+so the installer mirror is part of "pattern.go validate", not an addition to it. Likewise `StepArtifact`
+is *"a field-for-field mirror of pkgmgr.StepSpec … reused verbatim"*, materialized by a direct
+`StepSpec(s)` struct conversion (`capabilitymaterializer.go:641`): adding a field to `StepSpec` without
+it does not compile. Both are consequences of the scope sentence, not extensions of it.
 
 **3. Precedents to mirror.** `userTaskReads` (`engine.go:889`) + `userTaskOptionalReads` (`:909`) — the
 derive-a-read-set-from-the-subject helper with its invariant recorded in the comment and pinned by a test
@@ -1013,7 +1024,11 @@ derive-a-read-set-from-the-subject helper with its invariant recorded in the com
   `main` **UNCOMMITTED** as the proposal; the code ships around it.
 - Aspect keys stay 4-segment: `subject.<aspect>` resolves to `inst.SubjectKey + "." + aspect`, exactly the
   shape `userTaskOptionalReads` already builds (`subjectKey + ".availability"`).
-- No package version bump — no `packages/` entity changes in this fire.
+- **A package version bump is required even though no package entity changes.**
+  `scripts/lint-package-version.go` fires on any `internal/pkgmgr/` change reaching a package that
+  declares `ReadGrantDomains`, because that tree compiles the GENERATED read-grant producer lens. The
+  gate has no declaration escape hatch and the premise is not verifiable by eye, so `edge-manifest`
+  bumps 0.15.1 → 0.15.2 (manifest.yaml + `package.go` — parity is test-pinned).
 - No stack cycle needed for `pkgmgr`, but `internal/loom` ships in binaries beyond `bin/loom`; derive them
   mechanically at admit.
 
@@ -1082,6 +1097,51 @@ promptness, never for correctness.** Two paths, traced end to end:
 `submitSystemOp` — the arm that has passed `nil, nil, nil` to `buildOutbox` since Phase 2.
 
 **Contract edit prepared, UNCOMMITTED, for Andrew:** `docs/contracts/10-orchestration-loom.md` §10.5 step
-shape, extended with the two systemOp-only read fields. Affected consumers: `internal/loom` (Step,
-validate, submitSystemOp), `internal/pkgmgr` (StepSpec, spec body) — both in this fire; no shipped pattern
-declares either field, so nothing in `packages/` changes.
+shape, extended with the two systemOp-only read fields, the localName constraint on the aspect segment,
+and the `subjectKey`-names-a-vertex requirement the grammar's confinement rests on. Affected consumers:
+`internal/loom` (Step, validate, submitSystemOp, the trigger guard), `internal/pkgmgr` (StepSpec, spec
+body, validateLoomPatterns, StepArtifact) — all in this fire; no shipped pattern declares either field,
+so every installed spec body is byte-identical and nothing in `packages/` needs reinstalling.
+
+### What the adversarial pass changed (3-layer: blind hunter · edge-case hunter · acceptance audit)
+
+Contract-adjacent + read-declaration plane, so the fire took the full depth despite being S–M. Two real
+defects, both found independently by two hunters, both fixed before the merge rather than filed.
+
+**D1 — the aspect segment was checked for "non-empty and dot-free", which is not the predicate the
+rendered key must satisfy.** A NATS KV key's charset is narrower: `subject.*`, `subject.>`,
+`subject.pii key`, `subject.pii/key` and any non-ASCII aspect passed BOTH validators, and the rendered
+key then failed hydration with `ErrInvalidKey` — which is not the `ErrKeyNotFound` absence branch but a
+hard error every redelivery reproduces, so the step wedges and the instance rides its deadline to a
+failed terminal. This is precisely the "installs cleanly, then runs dark" outcome the two-validator
+lockstep exists to prevent, arriving through a gap the lockstep did not cover. Fixed by holding the
+aspect to the Contract #1 localName — and by EXPORTING `substrate.IsValidLocalName` rather than writing
+a third regex, so the check is the same predicate `ParseAspectKey` applies to the finished key.
+
+**D2 — the confinement claim rested on an unbound input.** "Subject-relative ⇒ reaches only the
+subject's own keys" holds only if `subjectKey` names a vertex, and §10.9's trigger payload is
+caller-supplied and was checked for non-emptiness alone (`engine.go` validates `instanceId` with
+`IsValidNanoID` two lines away, and nothing equivalent for the subject). A caller passing
+`vtx.identity.<id>.piiKey` would make the bare `subject` token name the aspect itself. `StartLoomPattern`
+is granted only to `operator` at `scope:any`, so this was not an escalation for an unprivileged caller —
+but the grammar this fire ships is what makes the property load-bearing, so the input is now bound to a
+three-segment vertex shape at the point it enters, not re-derived by each consumer.
+
+**Refuted / no action.** The blind hunter read the `edge-manifest` version bump as stray; it is required
+by `lint-package-version` (the acceptance audit confirmed it, with precedent `7fb9f505`). Both hunters
+raised the absence of a `MaxDeclaredReads` (1000) bound in the pattern validators: real, but the
+Processor's envelope parse already rejects terminally and loudly, and no hand-authored pattern
+approaches it — noted here rather than filed, since it is one line in the shared validator whenever a
+generator ever emits step reads.
+
+**Verified correct under attack** (worth recording so a later fire does not re-litigate): the two
+validators are logically identical on every input either hunter could construct; `nil` vs `[]string{}`
+collapses identically at every layer (`systemOpReads` → `omitempty` on `Step`/`outboxRecord` →
+`actuator.go`'s `len(...) > 0` ContextHint gate), so a read-free lifecycle op's outbox record and
+`ops.<lane>` envelope are byte-identical to today; an already-installed spec aspect with no `reads` key
+loads and runs unchanged, and the pattern PIN round-trips the new fields, so a crash-recovered instance
+keeps its declared reads. On the shelved "[Processor] A declared read is never scope-checked against the
+operation" row: this change **rides** that gap and does not widen its reach (a DDL's `derive_reads`
+already replaces the submitter's set wholesale, and any direct submitter can already name any key) — what
+is new is the authoring surface, so whenever that row is built, the scope check must cover this path,
+whose keys arrive on an op submitted under Loom's own service actor.
