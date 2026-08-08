@@ -61,7 +61,7 @@ The promotion diffs must land (as their own reviewable slice) before the surroun
 | D6 | 06 §6.1 L94–100 | Privileged-lane allowlist rule (honored iff `{operationType, lane}` allowlisted; else stripped + `PrivilegedLaneGrantRejected`; anchor doc-level lanes exempt) — sits beside stale Fire-2 text |
 | D7 | 01 §1.9 L356 | Substrate tests MUST include NanoID collision-rate validation against published alphabet/length |
 | D8 | 01 §1.1 L25 | Links carry **no `direction` field** — direction is encoded by segment order only |
-| D9 | 01 §1.6 L180 + 03 §3.10 | `retentionClass` declaration **REFUSED AT INSTALL** until class-key destruction reaches read models — a live MUST wearing transitional clothing |
+| D9 | 01 §1.6 L180 + 03 §3.10 | ~~REFUSED AT INSTALL~~ **Resolved 2026-08-08 in the pending-proposal refresh**: the install gate is lifted (`internal/pkgmgr/custodyscope.go` — class-key destruction now reaches read models), so the transitional clauses were deleted, not promoted; #03 keeps the one surviving rule (egress carries identity-held records only) as a normative sentence |
 | D10 | 02 §2.9 L415 | Envelope JSON parsing is **lenient on unknown fields** — the wire forward-compat guarantee |
 | D11 | 02 §2.2 L43 | operationType→class index built from **vertexType DDLs only** + global ambiguity guard drops multi-admitted ops |
 | D12 | 05 §5.4 L97–105 | The **Vault** health group (`backend` field semantics: local `ShredKey` = deny-list refusal vs KMS key destruction) — schema doc has **no Vault section at all**; move, never delete |

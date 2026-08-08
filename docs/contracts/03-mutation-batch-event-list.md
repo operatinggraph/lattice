@@ -231,11 +231,9 @@ caller and never discovered by graph traversal. Two holder kinds exist:
   **erase-on-expiry**. Its DEK is destroyed by `ShredRetentionClassKey`, on the controller's retention
   schedule, not on a data subject's request.
 
-*(Transitional, ratified 2026-08-06: the `retentionClass` kind, `ShredRetentionClassKey`, and the
-`keyId`-resolved decrypt below land with the retention-class custody build. Until that increment ships the
-platform implements the `identity` kind only — which this section already described — and every decrypt
-re-derives custody from the aspect's anchor. No wire format changes when it lands: the stored envelope
-already carries `keyId`.)*
+**The external-egress boundary carries identity-held records only.** The bridge resolves a holder's
+envelope from a lens that enumerates identity holders alone, so an egress ref for any other holder type
+is refused, with the type named, at the site that authors the operation.
 
 Every holder references only its **wrapped** DEK, from `<holderKey>.piiKey`, satisfying "key material
 never in Core KV." Encryption is non-deterministic (random nonce) and is compatible with
