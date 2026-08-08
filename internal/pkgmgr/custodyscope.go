@@ -3,11 +3,15 @@ package pkgmgr
 import "fmt"
 
 // validateCustodyScope enforces the install-time custody rules
-// (retention-class-key-custody-design.md §3.2), plus the availability gate
-// rule 5 describes. Every one fails CLOSED, and they exist for the same
-// reason: a package that believes it has a retention posture it does not
-// actually have is worse than one that has none, because the belief is what
-// stops anyone looking again.
+// (retention-class-key-custody-design.md §3.2). Every one fails CLOSED, and
+// they exist for the same reason: a package that believes it has a retention
+// posture it does not actually have is worse than one that has none, because
+// the belief is what stops anyone looking again.
+//
+// A retentionClass declaration is INSTALLABLE — the availability gate that
+// refused one while the mechanism was half-built is gone, because its cause is:
+// a class-key destruction now reaches the read models, via the Refractor's
+// rebuild-driven delivery (internal/refractor/classkeyshredded, §6.3).
 //
 // It is a pure function (no I/O) so it runs before any KV operation, the same
 // doctrine as validateSensitiveClassScope, whose sibling it is.
@@ -73,34 +77,14 @@ func (def Definition) validateCustodyScope() error {
 					"pkgmgr: DDL[%d] %q: Custody.RetentionClass %q is not declared by this package — a retention class may only be named by the package that declares it",
 					idx, d.CanonicalName, c.RetentionClass)
 			}
-			// 5. Shape is valid, but the mechanism is not yet whole. A retention
-			// class promises a key that CAN be destroyed on the class's own
-			// schedule, and a promise is only as good as the last link in it.
-			// `ShredRetentionClassKey` now destroys the key, and the Vault
-			// refuses every subsequent decrypt — but a DESTRUCTION THAT NO READ
-			// MODEL HEARS is still not an erasure. A Secure Lens scrubs an
-			// identity-custodied row in-band because the key aspect hangs off
-			// the vertex the lens already binds; a class holder is not the
-			// ciphertext's host, so nothing forces a lens to react to its
-			// destruction (retention-class-key-custody-design.md §6.3 derives
-			// both halves). A row would keep rendering decrypted PHI while the
-			// destruction reported success — worse than the un-projected
-			// plaintext this design set out to fix, because it reads as
-			// compliant from every surface. Refusing the declaration is the
-			// fail-closed reading of a half-built primitive. This check runs
-			// LAST so a malformed declaration still gets its precise error.
-			//
-			// REMOVE THIS with the rebuild-driven delivery increment, whose
-			// green bar is a real ShredRetentionClassKey scrubbing a
-			// class-custodied row out of a live Secure Lens.
-			return fmt.Errorf(
-				"pkgmgr: DDL[%d] %q: Custody.Kind %q is not installable yet — a class-key destruction does not yet reach the read models, so a Secure Lens could keep rendering plaintext the destruction claims to have erased; this gate lifts when the rebuild-driven delivery ships",
-				idx, d.CanonicalName, CustodyKindRetentionClass)
-		}
-
-		// 6. Kind identity carries no class; naming one states a custody the
-		// install would not honor.
-		if c.RetentionClass != "" {
+		} else if c.RetentionClass != "" {
+			// 5. Kind identity carries no class; naming one states a custody the
+			// install would not honor. Written as the else arm rather than a
+			// standalone check because the two are mutually exclusive by
+			// construction, and an unguarded version would reject every VALID
+			// retentionClass declaration the moment nothing above it returned
+			// early — which is exactly what happened when the availability gate
+			// that used to sit between them was removed.
 			return fmt.Errorf(
 				"pkgmgr: DDL[%d] %q: Custody.RetentionClass %q is set but Custody.Kind is %q — only kind %q custodies on a class",
 				idx, d.CanonicalName, c.RetentionClass, CustodyKindIdentity, CustodyKindRetentionClass)

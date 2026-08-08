@@ -15,8 +15,15 @@ import (
 	"github.com/operatinggraph/lattice/internal/substrate"
 )
 
-// DefaultSweepInterval and DefaultSweepBatch bound the auth-plane convergence
-// sweep (capability-projection-reconciliation-design.md §3.2). The deep pass
+// DefaultSweepInterval and DefaultSweepBatch bound the convergence sweep
+// (capability-projection-reconciliation-design.md §3.2). "Auth-plane" describes
+// the only lens family enrolled today, NOT the condition for enrolment: that is
+// sweepEnrolment (driver.go), three structural conjuncts — the output key
+// pattern must yield a prefix, it must round-trip through AnchorFromKey so the
+// orphan direction can claim a row, and the target adapter must be able to
+// enumerate keys under that prefix. Reading the old wording as a policy is what
+// makes a Secure Lens look deliberately excluded when it simply never reaches
+// InstallActorAggregate. The deep pass
 // re-executes at most DefaultSweepBatch anchors per tick, so a 10k-actor cell
 // fully re-verifies in roughly seven hours while costing one bounded batch of
 // cypher evaluations a minute. Both are deployment-overridable, like the

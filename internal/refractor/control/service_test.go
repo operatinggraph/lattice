@@ -3,6 +3,7 @@ package control_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"sync"
 	"testing"
 	"time"
@@ -286,6 +287,7 @@ type mockRebuilder struct {
 	mu          sync.Mutex
 	rebuilt     bool
 	truncateArg bool
+	waited      bool  // set only by RebuildAndWait, so a test can tell the two arms apart
 	err         error // non-nil → Rebuild returns this error
 }
 
@@ -295,6 +297,19 @@ func (m *mockRebuilder) Rebuild(_ context.Context, truncate bool) error {
 	m.truncateArg = truncate
 	m.mu.Unlock()
 	return m.err
+}
+
+func (m *mockRebuilder) RebuildAndWait(ctx context.Context, truncate bool) error {
+	m.mu.Lock()
+	m.waited = true
+	m.mu.Unlock()
+	return m.Rebuild(ctx, truncate)
+}
+
+func (m *mockRebuilder) wasWaitedOn() bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.waited
 }
 
 func (m *mockRebuilder) wasRebuilt() (rebuilt bool, truncate bool) {
@@ -778,4 +793,39 @@ func TestNATSServicesIntrospection(t *testing.T) {
 	for op, found := range wantOps {
 		assert.True(t, found, "endpoint for op %q must be registered with subject lattice.ctrl.refractor.*.%s", op, op)
 	}
+}
+
+// RebuildRule is the in-process arm the retention-class key-destruction
+// consumer calls. Unlike the "rebuild" control op it must not answer the moment
+// the rescan is started: the consumer records projectionsRebuilt on the strength
+// of its return, so returning early would attest to an erasure still in flight.
+func TestControl_RebuildRule_WaitsForTheRescanRatherThanStartingIt(t *testing.T) {
+	svc := control.NewService()
+	mr := &mockRebuilder{}
+	svc.RegisterRebuilder("rebuild-inproc-1", mr)
+
+	require.NoError(t, svc.RebuildRule(context.Background(), "rebuild-inproc-1", false))
+
+	rebuilt, truncate := mr.wasRebuilt()
+	assert.True(t, rebuilt, "the registered Rebuilder must be driven")
+	assert.False(t, truncate, "truncate is forwarded as given")
+	assert.True(t, mr.wasWaitedOn(),
+		"RebuildRule must take the WAITING arm — the fire-and-forget Rebuild carries no completion")
+}
+
+func TestControl_RebuildRule_UnregisteredRuleIsNotSilentlyTreatedAsRebuilt(t *testing.T) {
+	svc := control.NewService()
+	err := svc.RebuildRule(context.Background(), "never-registered", false)
+	require.Error(t, err, "a lens nothing registered cannot have been rebuilt, and must not report success")
+	assert.ErrorIs(t, err, control.ErrRuleNotRegistered)
+}
+
+func TestControl_RebuildRule_PropagatesTheRebuildFailure(t *testing.T) {
+	svc := control.NewService()
+	mr := &mockRebuilder{err: errors.New("target unreachable")}
+	svc.RegisterRebuilder("rebuild-inproc-fail", mr)
+
+	err := svc.RebuildRule(context.Background(), "rebuild-inproc-fail", true)
+	require.Error(t, err, "a failed rebuild must reach the caller, which is what stops the attestation")
+	assert.Contains(t, err.Error(), "target unreachable")
 }

@@ -12,6 +12,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sync/atomic"
 	"testing"
@@ -75,6 +76,22 @@ func mintIdentityPII(t *testing.T, v *vault.LocalBackend, identityKey string, da
 	return ctMap, piiKeyDoc
 }
 
+// requireRedacted runs Apply over one row and asserts fork F2's posture: the
+// unresolvable column projects null, the row survives, and the refusal is
+// RECORDED as a redaction rather than thrown as an error that would discard the
+// whole result set. Returns the redaction so callers can assert on its reason.
+func requireRedacted(t *testing.T, dec *SecureDecryptor, row map[string]any, column string) SecureRedaction {
+	t.Helper()
+	redactions, err := dec.Apply(context.Background(), []ruleengine.EvalResult{{Row: row}})
+	require.NoError(t, err, "a resolution failure redacts; it must not fail the result set")
+	require.Len(t, redactions, 1, "exactly one column could not be resolved")
+	require.Equal(t, column, redactions[0].Column)
+	assert.Equal(t, failure.CatTerminal, failure.Classify(redactions[0].Reason),
+		"the refusal keeps its Terminal classification — only its DISPOSITION changed")
+	assert.Nil(t, row[column], "an unresolvable secure column projects null")
+	return redactions[0]
+}
+
 func TestSecureDecryptor_DecryptsFieldAndWholeObject(t *testing.T) {
 	v := newTestVault(t)
 	const idKey = "vtx.identity.SecUnitALiceAAAAAAAA"
@@ -97,7 +114,8 @@ func TestSecureDecryptor_DecryptsFieldAndWholeObject(t *testing.T) {
 		Keys: map[string]any{"key": idKey},
 		Row:  map[string]any{"identity_key": idKey, "name": ctMap, "name_full": ctMap2, "state": "active"},
 	}}
-	require.NoError(t, dec.Apply(context.Background(), results))
+	_, err = dec.Apply(context.Background(), results)
+	require.NoError(t, err)
 
 	assert.Equal(t, "Alice", results[0].Row["name"], "field-selected secure column projects the plaintext field")
 	full, ok := results[0].Row["name_full"].(map[string]any)
@@ -117,7 +135,8 @@ func TestSecureDecryptor_AbsentAspectStaysNull(t *testing.T) {
 	require.NoError(t, err)
 
 	results := []ruleengine.EvalResult{{Row: map[string]any{"identity_key": "vtx.identity.X", "phone": nil}}}
-	require.NoError(t, dec.Apply(context.Background(), results))
+	_, err = dec.Apply(context.Background(), results)
+	require.NoError(t, err)
 	assert.Nil(t, results[0].Row["phone"])
 	assert.Zero(t, calls.Load(), "an absent aspect makes no Vault call")
 }
@@ -134,7 +153,8 @@ func TestSecureDecryptor_ShreddedProjectsNull(t *testing.T) {
 	require.NoError(t, err)
 
 	results := []ruleengine.EvalResult{{Row: map[string]any{"identity_key": idKey, "name": ctMap, "state": "active"}}}
-	require.NoError(t, dec.Apply(context.Background(), results), "a shredded key is not an error — the row survives with null PII")
+	_, err = dec.Apply(context.Background(), results)
+	require.NoError(t, err, "a shredded key is not an error — the row survives with null PII")
 	assert.Nil(t, results[0].Row["name"], "shredded identity's PII projects null")
 	assert.Equal(t, "active", results[0].Row["state"])
 }
@@ -158,7 +178,8 @@ func TestSecureDecryptor_ShreddedPlaceholderEnvelopeProjectsNull(t *testing.T) {
 	require.NoError(t, err)
 
 	results := []ruleengine.EvalResult{{Row: map[string]any{"identity_key": idKey, "name": ctMap}}}
-	require.NoError(t, dec.Apply(context.Background(), results))
+	_, err = dec.Apply(context.Background(), results)
+	require.NoError(t, err)
 	assert.Nil(t, results[0].Row["name"])
 }
 
@@ -174,9 +195,9 @@ func TestSecureDecryptor_TamperedCiphertextIsTerminal(t *testing.T) {
 	}, nil)
 	require.NoError(t, err)
 
-	err = dec.Apply(context.Background(), []ruleengine.EvalResult{{Row: map[string]any{"identity_key": idKey, "name": ctMap}}})
-	require.Error(t, err)
-	assert.Equal(t, failure.CatTerminal, failure.Classify(err), "authenticated-decrypt failure must fail the projection closed")
+	row := map[string]any{"identity_key": idKey, "name": ctMap}
+	requireRedacted(t, dec, row, "name")
+	assert.Equal(t, idKey, row["identity_key"], "the row survives; only the unopenable column is redacted")
 }
 
 func TestSecureDecryptor_NonEnvelopeValueIsTerminal(t *testing.T) {
@@ -188,14 +209,13 @@ func TestSecureDecryptor_NonEnvelopeValueIsTerminal(t *testing.T) {
 
 	// A plaintext string where a ciphertext envelope was declared — an
 	// authoring defect (e.g. the column bound to a non-sensitive aspect field).
-	err = dec.Apply(context.Background(), []ruleengine.EvalResult{{Row: map[string]any{"identity_key": "vtx.identity.X", "name": "plaintext"}}})
-	require.Error(t, err)
-	assert.Equal(t, failure.CatTerminal, failure.Classify(err))
+	requireRedacted(t, dec, map[string]any{"identity_key": "vtx.identity.X", "name": "plaintext"}, "name")
 
-	// A map that is not a ciphertext envelope (no ct) — same posture.
-	err = dec.Apply(context.Background(), []ruleengine.EvalResult{{Row: map[string]any{"identity_key": "vtx.identity.X", "name": map[string]any{"value": "plain"}}}})
-	require.Error(t, err)
-	assert.Equal(t, failure.CatTerminal, failure.Classify(err))
+	// A map that is not a ciphertext envelope (no ct) — same posture. Note the
+	// redaction REPLACES the value: a plaintext string sitting in a column
+	// declared secure must not reach the read model just because it could not
+	// be parsed as ciphertext.
+	requireRedacted(t, dec, map[string]any{"identity_key": "vtx.identity.X", "name": map[string]any{"value": "plain"}}, "name")
 }
 
 // A row carrying no holder key at all decrypts anyway: custody comes from the
@@ -213,7 +233,8 @@ func TestSecureDecryptor_RowWithoutAHolderKeyStillDecrypts(t *testing.T) {
 	require.NoError(t, err)
 
 	row := map[string]any{"name": ctMap}
-	require.NoError(t, dec.Apply(context.Background(), []ruleengine.EvalResult{{Row: row}}))
+	_, err = dec.Apply(context.Background(), []ruleengine.EvalResult{{Row: row}})
+	require.NoError(t, err)
 	assert.Equal(t, "Alice", row["name"])
 }
 
@@ -232,9 +253,7 @@ func TestSecureDecryptor_CiphertextWithoutKeyIDIsTerminal(t *testing.T) {
 	}, nil)
 	require.NoError(t, err)
 
-	err = dec.Apply(context.Background(), []ruleengine.EvalResult{{Row: map[string]any{"identity_key": idKey, "name": ctMap}}})
-	require.Error(t, err)
-	assert.Equal(t, failure.CatTerminal, failure.Classify(err))
+	requireRedacted(t, dec, map[string]any{"identity_key": idKey, "name": ctMap}, "name")
 }
 
 // A malformed keyId is refused rather than repaired: the row carries a
@@ -250,9 +269,7 @@ func TestSecureDecryptor_MalformedKeyIDNeverFallsBackToTheRow(t *testing.T) {
 	}, nil)
 	require.NoError(t, err)
 
-	err = dec.Apply(context.Background(), []ruleengine.EvalResult{{Row: map[string]any{"identity_key": idKey, "name": ctMap}}})
-	require.Error(t, err)
-	assert.Equal(t, failure.CatTerminal, failure.Classify(err))
+	requireRedacted(t, dec, map[string]any{"identity_key": idKey, "name": ctMap}, "name")
 }
 
 // The divergence bar for this site: a projected column names a DIFFERENT
@@ -275,7 +292,8 @@ func TestSecureDecryptor_KeyIDWinsOverADivergentRowColumn(t *testing.T) {
 	require.NoError(t, err)
 
 	row := map[string]any{"identity_key": decoyHolder, "name": ctMap}
-	require.NoError(t, dec.Apply(context.Background(), []ruleengine.EvalResult{{Row: row}}))
+	_, err = dec.Apply(context.Background(), []ruleengine.EvalResult{{Row: row}})
+	require.NoError(t, err)
 	assert.Equal(t, "Alice", row["name"])
 }
 
@@ -299,7 +317,8 @@ func TestSecureDecryptor_DecryptsUnderARetentionClassHolder(t *testing.T) {
 	require.NoError(t, err)
 
 	row := map[string]any{"identity_key": anchorIdentity, "note": ctMap}
-	require.NoError(t, dec.Apply(context.Background(), []ruleengine.EvalResult{{Row: row}}))
+	_, err = dec.Apply(context.Background(), []ruleengine.EvalResult{{Row: row}})
+	require.NoError(t, err)
 	assert.Equal(t, "chart note", row["note"])
 }
 
@@ -318,10 +337,9 @@ func TestSecureDecryptor_UndeclaredHolderTypeIsTerminal(t *testing.T) {
 	require.NoError(t, err)
 
 	row := map[string]any{"note": ctMap}
-	err = dec.Apply(context.Background(), []ruleengine.EvalResult{{Row: row}})
-	require.Error(t, err)
-	assert.Equal(t, failure.CatTerminal, failure.Classify(err))
-	assert.Contains(t, err.Error(), "retentionclass")
+	red := requireRedacted(t, dec, row, "note")
+	assert.Contains(t, red.Reason.Error(), "retentionclass",
+		"the redaction carries the precise refusal, which is what the alarm reports")
 }
 
 // Widening the list is the author's act, and it admits both kinds at once —
@@ -344,7 +362,8 @@ func TestSecureDecryptor_ListedHolderTypesAdmitBothKinds(t *testing.T) {
 
 	retained := map[string]any{"note": classCT}
 	erasable := map[string]any{"note": idCT}
-	require.NoError(t, dec.Apply(context.Background(), []ruleengine.EvalResult{{Row: retained}, {Row: erasable}}))
+	_, err = dec.Apply(context.Background(), []ruleengine.EvalResult{{Row: retained}, {Row: erasable}})
+	require.NoError(t, err)
 	assert.Equal(t, "chart note", retained["note"])
 	assert.Equal(t, "Alice", erasable["note"])
 }
@@ -381,9 +400,7 @@ func TestSecureDecryptor_SoftDeletedPiiKeyIsTerminal(t *testing.T) {
 	}, nil)
 	require.NoError(t, err)
 
-	err = dec.Apply(context.Background(), []ruleengine.EvalResult{{Row: map[string]any{"identity_key": idKey, "name": ctMap}}})
-	require.Error(t, err)
-	assert.Equal(t, failure.CatTerminal, failure.Classify(err))
+	requireRedacted(t, dec, map[string]any{"identity_key": idKey, "name": ctMap}, "name")
 }
 
 func TestSecureDecryptor_MalformedPiiKeyDocIsTerminal(t *testing.T) {
@@ -398,9 +415,7 @@ func TestSecureDecryptor_MalformedPiiKeyDocIsTerminal(t *testing.T) {
 	}, nil)
 	require.NoError(t, err)
 
-	err = dec.Apply(context.Background(), []ruleengine.EvalResult{{Row: map[string]any{"identity_key": idKey, "name": ctMap}}})
-	require.Error(t, err)
-	assert.Equal(t, failure.CatTerminal, failure.Classify(err))
+	requireRedacted(t, dec, map[string]any{"identity_key": idKey, "name": ctMap}, "name")
 }
 
 func TestSecureDecryptor_MissingDeclaredFieldIsTerminal(t *testing.T) {
@@ -416,9 +431,7 @@ func TestSecureDecryptor_MissingDeclaredFieldIsTerminal(t *testing.T) {
 	}, nil)
 	require.NoError(t, err)
 
-	err = dec.Apply(context.Background(), []ruleengine.EvalResult{{Row: map[string]any{"identity_key": idKey, "name": ctMap}}})
-	require.Error(t, err)
-	assert.Equal(t, failure.CatTerminal, failure.Classify(err))
+	requireRedacted(t, dec, map[string]any{"identity_key": idKey, "name": ctMap}, "name")
 }
 
 func TestSecureDecryptor_CiphertextWithoutPiiKeyIsTerminal(t *testing.T) {
@@ -431,9 +444,88 @@ func TestSecureDecryptor_CiphertextWithoutPiiKeyIsTerminal(t *testing.T) {
 	}, nil)
 	require.NoError(t, err)
 
-	err = dec.Apply(context.Background(), []ruleengine.EvalResult{{Row: map[string]any{"identity_key": idKey, "name": ctMap}}})
-	require.Error(t, err)
-	assert.Equal(t, failure.CatTerminal, failure.Classify(err))
+	requireRedacted(t, dec, map[string]any{"identity_key": idKey, "name": ctMap}, "name")
+}
+
+// errCoreKV fails every read, standing in for an unreachable Core KV.
+type errCoreKV struct{ err error }
+
+func (e errCoreKV) Get(_ context.Context, _ string) (*substrate.KVEntry, error) { return nil, e.err }
+
+// The property fork F2 exists for: one unresolvable row must not take the rest
+// of the lens down with it. Before F2 the first bad row returned an error that
+// discarded the WHOLE result set, and because a non-seeded plain lens recomputes
+// every row on each reprojection, that one row blocked every other row from ever
+// updating again — a later erasure scrub included. Hence the bad row goes FIRST.
+func TestSecureDecryptor_OneUnresolvableRowDoesNotStopTheOthers(t *testing.T) {
+	v := newTestVault(t)
+	const goodKey = "vtx.identity.SecUnitGoodRowAAAAAA"
+	const classHolder = "vtx.retentionclass.SecUnitCLassAAAAAAAA"
+	goodCT, goodPiiKey := mintIdentityPII(t, v, goodKey, map[string]any{"value": "Alice"})
+	// Held by a class this column never declared — unresolvable, per row.
+	badCT, classPiiKey := mintIdentityPII(t, v, classHolder, map[string]any{"value": "chart note"})
+
+	dec, err := NewSecureDecryptor(v, fakeCoreKV{
+		goodKey + ".piiKey":     goodPiiKey,
+		classHolder + ".piiKey": classPiiKey,
+	}, []SecureColumn{
+		{Column: "name", HolderTypes: []string{"identity"}, Field: "value"},
+	}, nil)
+	require.NoError(t, err)
+
+	bad := map[string]any{"identity_key": goodKey, "name": badCT, "state": "active"}
+	good := map[string]any{"identity_key": goodKey, "name": goodCT}
+	redactions, err := dec.Apply(context.Background(), []ruleengine.EvalResult{{Row: bad}, {Row: good}})
+	require.NoError(t, err, "the bad row must not fail the batch")
+
+	assert.Nil(t, bad["name"], "the unresolvable row redacts to null")
+	assert.Equal(t, "active", bad["state"], "and keeps its non-secure columns")
+	assert.Equal(t, "Alice", good["name"], "the SIBLING row still projects its plaintext")
+	require.Len(t, redactions, 1, "only the bad row is redacted")
+	assert.Equal(t, "name", redactions[0].Column)
+}
+
+// A legitimate shred projects null too, but it is NOT a redaction: alarming on
+// every erasure would bury the defect signal under the expected case, which is
+// the distinction the SecureRedactions counter exists to draw.
+func TestSecureDecryptor_AShredIsNotCountedAsARedaction(t *testing.T) {
+	v := newTestVault(t)
+	const idKey = "vtx.identity.SecUnitNotAredactAAA"
+	ctMap, piiKeyDoc := mintIdentityPII(t, v, idKey, map[string]any{"value": "Gone"})
+	require.NoError(t, v.ShredKey(context.Background(), idKey))
+
+	dec, err := NewSecureDecryptor(v, fakeCoreKV{idKey + ".piiKey": piiKeyDoc}, []SecureColumn{
+		{Column: "name", HolderTypes: []string{"identity"}, Field: "value"},
+	}, nil)
+	require.NoError(t, err)
+
+	row := map[string]any{"identity_key": idKey, "name": ctMap}
+	redactions, err := dec.Apply(context.Background(), []ruleengine.EvalResult{{Row: row}})
+	require.NoError(t, err)
+	assert.Nil(t, row["name"], "the shredded column still projects null")
+	assert.Empty(t, redactions, "but erasure is the mechanism working, not a resolution failure")
+}
+
+// An INFRA read failure is not a redaction either, and this is the direction
+// that matters: nulling a live column on a transient Core KV blip would destroy
+// good plaintext and flap it back on the next reprojection. The row is left
+// untouched and the error propagates for the standard retry/pause path.
+func TestSecureDecryptor_InfraReadFailureDoesNotRedact(t *testing.T) {
+	v := newTestVault(t)
+	const idKey = "vtx.identity.SecUnitBLipAAAAAAAAA"
+	ctMap, _ := mintIdentityPII(t, v, idKey, map[string]any{"value": "Alice"})
+
+	dec, err := NewSecureDecryptor(v, errCoreKV{errors.New("kv unreachable")}, []SecureColumn{
+		{Column: "name", HolderTypes: []string{"identity"}, Field: "value"},
+	}, nil)
+	require.NoError(t, err)
+
+	row := map[string]any{"identity_key": idKey, "name": ctMap}
+	redactions, err := dec.Apply(context.Background(), []ruleengine.EvalResult{{Row: row}})
+	require.Error(t, err, "an unreachable Core KV must still propagate for retry")
+	assert.NotEqual(t, failure.CatTerminal, failure.Classify(err))
+	assert.Empty(t, redactions)
+	assert.Equal(t, ctMap, row["name"], "the column is left ALONE, not nulled, so a retry can still resolve it")
 }
 
 func TestSecureDecryptor_DeleteResultsPassThrough(t *testing.T) {
@@ -448,7 +540,8 @@ func TestSecureDecryptor_DeleteResultsPassThrough(t *testing.T) {
 		{Delete: true, Keys: map[string]any{"key": "read_x"}},
 		{Row: nil},
 	}
-	require.NoError(t, dec.Apply(context.Background(), results))
+	_, err = dec.Apply(context.Background(), results)
+	require.NoError(t, err)
 	assert.Zero(t, calls.Load())
 }
 

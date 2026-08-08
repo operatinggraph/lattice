@@ -333,6 +333,11 @@ type Pipeline struct {
 	// prematurely reporting "active" while the rescan is still draining.
 	rebuildPollInterval time.Duration
 	rebuildInFlight     atomic.Bool
+	// rebuildSerial (capacity 1) serializes RebuildAndWait callers per pipeline.
+	// A channel rather than a sync.Mutex because acquisition must honour the
+	// caller's context: a rebuild drain is unbounded in principle, and a shutting
+	// -down consumer must not be pinned waiting for one.
+	rebuildSerial chan struct{}
 	// rebuildOutstanding is the most recent un-drained count watchRebuildCompletion
 	// polled, and rebuildProgressAt when that count last went DOWN. Together they
 	// separate a rebuild that is draining from one that is wedged — a distinction
@@ -487,6 +492,7 @@ func New(
 		reporter:            reporter,
 		rebuildPollInterval: iv,
 		started:             make(chan struct{}),
+		rebuildSerial:       make(chan struct{}, 1),
 	}
 	p.adpt = adpt
 	return p, nil
@@ -1502,6 +1508,62 @@ func (p *Pipeline) abandonRebuild(ctx context.Context, cause error) error {
 			"ruleId", p.ruleID, "err", recErr)
 	}
 	return cause
+}
+
+// RebuildAndWait rebuilds this pipeline and blocks until the rescan has
+// drained, serialized against any other RebuildAndWait caller on the same
+// pipeline. Rebuild itself is fire-and-forget — it returns as soon as the
+// durable has been reset, leaving a background watcher to notice the drain — so
+// a caller that must ATTEST to a completed rebuild (the retention-class key
+// destruction consumer, retention-class-key-custody-design.md §6.3 step 4)
+// cannot use it directly.
+//
+// It waits out an already-in-flight rebuild BEFORE starting its own rather than
+// adopting it, and that ordering is the whole point. A rebuild in progress may
+// have been started by another path — the MATCH hot-reloader
+// (cmd/refractor/reload.go), which holds no control service and so cannot be
+// serialized from there — and it may have begun BEFORE the key destruction this
+// rebuild is answering to. Its rows can therefore still carry plaintext the
+// destruction was supposed to erase. Counting it as this destruction's rebuild
+// would attest to an erasure that never happened, so the wait is fail-closed
+// where a CAS-and-skip would fail open.
+func (p *Pipeline) RebuildAndWait(ctx context.Context, truncate bool) error {
+	select {
+	case p.rebuildSerial <- struct{}{}:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	defer func() { <-p.rebuildSerial }()
+
+	if err := p.waitRebuildDrained(ctx); err != nil {
+		return fmt.Errorf("pipeline: rebuild: waiting out an in-flight rebuild: %w", err)
+	}
+	if err := p.Rebuild(ctx, truncate); err != nil {
+		return err
+	}
+	return p.waitRebuildDrained(ctx)
+}
+
+// waitRebuildDrained blocks until no rebuild rescan is in flight for this
+// pipeline. Polls the same flag watchRebuildCompletion clears, at the same
+// interval it polls the consumer with, so the two cannot disagree about when a
+// rebuild is finished.
+func (p *Pipeline) waitRebuildDrained(ctx context.Context) error {
+	if !p.RebuildInFlight() {
+		return nil
+	}
+	t := time.NewTicker(p.rebuildPollInterval)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-t.C:
+			if !p.RebuildInFlight() {
+				return nil
+			}
+		}
+	}
 }
 
 func (p *Pipeline) Rebuild(ctx context.Context, truncate bool) error {

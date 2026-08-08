@@ -27,12 +27,17 @@ func custodiedDDL(c CustodySpec) DDLSpec {
 	}
 }
 
-// The positive vector first: a well-formed declaration passes every SHAPE
-// rule, so each rejection below is proven to be about the thing it names
-// rather than about the fixture being malformed some other way. It then stops
-// at the availability gate — which is itself the assertion that the gate runs
-// LAST, after the shape rules rather than instead of them.
-func TestCustodyScope_WellFormedRetentionClassDeclaration_StopsOnlyAtTheAvailabilityGate(t *testing.T) {
+// The positive vector first: a well-formed declaration passes every SHAPE rule,
+// so each rejection below is proven to be about the thing it names rather than
+// about the fixture being malformed some other way.
+//
+// It now INSTALLS. It used to stop at an availability gate that refused every
+// retentionClass declaration while a class-key destruction could not reach the
+// read models — a lens would have kept rendering PHI the destruction reported as
+// erased. The Refractor's rebuild-driven delivery closed that, so the gate is
+// gone and this is the assertion that it is: if a future change re-breaks the
+// delivery, a package declaring class custody must not quietly keep installing.
+func TestCustodyScope_WellFormedRetentionClassDeclaration_Installs(t *testing.T) {
 	def := Definition{
 		Name:             "clinic-domain",
 		RetentionClasses: []RetentionClassSpec{validRetentionClass()},
@@ -43,12 +48,8 @@ func TestCustodyScope_WellFormedRetentionClassDeclaration_StopsOnlyAtTheAvailabi
 	if err := def.validateRetentionClasses(); err != nil {
 		t.Fatalf("validateRetentionClasses: %v", err)
 	}
-	err := def.validateCustodyScope()
-	if err == nil {
-		t.Fatal("retentionClass custody must be refused while the read path cannot resolve it")
-	}
-	if !strings.Contains(err.Error(), "not installable yet") {
-		t.Fatalf("a well-formed declaration must fail ONLY on the availability gate, got: %v", err)
+	if err := def.validateCustodyScope(); err != nil {
+		t.Fatalf("a well-formed retentionClass declaration must install: %v", err)
 	}
 }
 

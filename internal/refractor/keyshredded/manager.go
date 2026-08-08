@@ -28,9 +28,17 @@
 // every package that ships one, and reliably does not (cap-read-per-anchor-
 // grant-keys-design.md's Fire 2 follow-on).
 //
-// A SECURE lens (secureColumns) needs no entry here: its piiKey-CDC-triggered
-// reprojection already scrubs a shredded identity's secure columns to NULL in
-// place (pipeline/secure.go), the stronger guarantee. This allowlist is for
+// A SECURE lens (secureColumns) needs no entry here, and the reason is a
+// property of the IDENTITY holder rather than of secure lenses in general: an
+// identity-anchored sensitive aspect is reachable in cypher only through a node
+// bound to that identity, so the lens either binds (id:identity) — putting
+// `identity` in its referenced-label set — or binds an unlabeled node and
+// clears `exhaustive`. Either way the piiKey CDC event a shred commits reaches
+// it, its decryptor re-runs, and the secure columns scrub to NULL in place
+// (pipeline/secure.go) — the stronger guarantee. That derivation FAILS for a
+// non-identity holder, which is not the ciphertext's host and which nothing
+// forces a lens to bind; those are delivered by rebuild instead
+// (internal/refractor/classkeyshredded). This allowlist is for
 // plain lenses whose rows should be DELETED outright on a shred. A plain lens
 // only ever projects a sensitive aspect as its ciphertext envelope (general
 // lenses never decrypt), so an un-listed plain lens holds garbage ciphertext

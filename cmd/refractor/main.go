@@ -29,6 +29,7 @@ import (
 	"github.com/operatinggraph/lattice/internal/controlauth"
 	"github.com/operatinggraph/lattice/internal/refractor/adapter"
 	"github.com/operatinggraph/lattice/internal/refractor/capabilityenv"
+	"github.com/operatinggraph/lattice/internal/refractor/classkeyshredded"
 	"github.com/operatinggraph/lattice/internal/refractor/consumer"
 	"github.com/operatinggraph/lattice/internal/refractor/control"
 	"github.com/operatinggraph/lattice/internal/refractor/failure"
@@ -145,6 +146,30 @@ func capReadShredTargets(registry map[string]*pipelineEntry) []keyshredded.Nulli
 			continue
 		}
 		targets = append(targets, keyshredded.NullifyTarget{RuleID: id, PerEntry: true})
+	}
+	return targets
+}
+
+// holderTypeRebuildTargets returns a RebuildTarget for every running lens with a
+// secure column that declares holderType — the enumeration a retention-class key
+// destruction is delivered through (retention-class-key-custody-design.md §6.3
+// step 2).
+//
+// It reads the DECLARED SecureColumn.HolderTypes the running pipeline's
+// decryptor was built from, never an inference over compiled cypher: which
+// holders a column will open is a statement its author made, and deriving it
+// instead would make an erasure's completeness depend on a parser agreeing with
+// a declaration. Pure over its input so it is testable without a live registry
+// mutex; the caller holds the lock, exactly as capReadShredTargets is used.
+func holderTypeRebuildTargets(registry map[string]*pipelineEntry, holderType string) []classkeyshredded.RebuildTarget {
+	var targets []classkeyshredded.RebuildTarget
+	for id, entry := range registry {
+		for _, col := range entry.secureColumns {
+			if slices.Contains(col.HolderTypes, holderType) {
+				targets = append(targets, classkeyshredded.RebuildTarget{RuleID: id})
+				break
+			}
+		}
 	}
 	return targets
 }
@@ -453,6 +478,30 @@ func main() {
 		}
 	}()
 
+	// The retention-class half. A class holder is not the ciphertext's host, so
+	// no CDC event reaches the lenses whose rows it opens and no sweep enrols
+	// them — the destruction is delivered by rebuilding each declaring lens
+	// instead (retention-class-key-custody-design.md §6.3). Like the identity
+	// half's listers, the target set is re-derived from the live registry per
+	// event so a lens installed after this line is still reached.
+	classKeyShredded := classkeyshredded.New(classkeyshredded.Config{
+		Conn:         conn,
+		EventsStream: bootstrap.CoreEventsStreamName,
+		Control:      controlSvc,
+		Logger:       logger,
+		ActorKey:     privacyActorKey,
+	})
+	classKeyShredded.SetTargetLister(func(holderType string) []classkeyshredded.RebuildTarget {
+		mu.Lock()
+		defer mu.Unlock()
+		return holderTypeRebuildTargets(registry, holderType)
+	})
+	go func() {
+		if err := classKeyShredded.Run(ctx); err != nil && ctx.Err() == nil {
+			logger.Error("classkeyshredded listener exited with error", "err", err)
+		}
+	}()
+
 	// Registry size for the heartbeater's metrics.lensesRegistered
 	// (lens-registry-restart-integrity-design.md §4 Fire B step 1) — the
 	// exact started-pipeline set every other registry-scoped provider below
@@ -681,6 +730,7 @@ func main() {
 			snap.RuleID = st.RuleID
 			snap.Status = st.Status
 			snap.ProjectionLag = pending
+			snap.SecureRedactions = st.SecureRedactions
 			snap.LastProjectedAt = entry.pipeline.Progress().LastProjectedAt
 			out = append(out, snap)
 		}

@@ -162,9 +162,10 @@ RETURN
 //
 // All aspect reads are the null-safe node.<aspect>.data.<field> form, so a
 // not-yet-recorded finalization step projects null, distinguishing "in flight"
-// from the recorded true. projectionsRebuilt has no producer until item 3b of
-// the design ships the Refractor's destruction consumer; it projects null
-// until then, which is the honest rendering of "not yet attested".
+// from the recorded true. projectionsRebuilt is produced by the Refractor's
+// destruction consumer (internal/refractor/classkeyshredded) once every secure
+// lens declaring this holder's type is back at zero lag, so a null there reads
+// as "rebuilds still outstanding" rather than "no such mechanism".
 const retentionKeyStatusSpec = `MATCH (r:retentionclass)
 WHERE r.retentionPolicy.data.canonicalName <> null
 RETURN

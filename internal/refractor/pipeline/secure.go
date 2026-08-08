@@ -128,31 +128,63 @@ func (d *SecureDecryptor) HolderTypes() []string {
 	return out
 }
 
+// SecureRedaction records one column this decryptor could not resolve and
+// therefore projected as null. It is the payload of the privacy-critical alarm
+// the caller raises: Column names the projected alias, Reason carries the
+// precise refusal the resolution failed with.
+type SecureRedaction struct {
+	Column string
+	Reason error
+}
+
 // Apply decrypts every declared secure column across results, mutating rows
-// in place. Delete results and nil rows pass through untouched.
+// in place, and returns the columns it redacted. Delete results and nil rows
+// pass through untouched.
 //
 // Failure posture (fail closed, never fail open):
-//   - absent aspect (column value null) → column stays null.
-//   - shredded identity key → column projects null (right-to-erasure).
+//   - absent aspect (column value null) → column stays null, no redaction: an
+//     aspect a vertex never had is not a failure to resolve one.
+//   - shredded key → column projects null, no redaction: erasure is this
+//     mechanism working, and alarming on it would drown the signal in the
+//     expected case.
 //   - malformed envelope, plaintext where ciphertext was declared, a holder
-//     type the column never declared, ciphertext with no piiKey, or
-//     authenticated-decrypt failure → a Terminal error: the row is never
-//     written (DLQ + health), so a defect can suppress a projection but can
-//     never leak ciphertext into a plaintext column or vice versa.
+//     type the column never declared, ciphertext with no piiKey, an unparseable
+//     piiKey, or authenticated-decrypt failure → the column projects null and
+//     the row is KEPT, recorded as a SecureRedaction for the caller to alarm on
+//     (retention-class-key-custody-design.md §6.2, fork F2). A Terminal error
+//     here used to discard the whole result set, which left a previously
+//     projected PLAINTEXT row standing — the wrong direction on this plane, and
+//     one bad row then blocked every other row of the lens from updating,
+//     including a later erasure scrub. Redaction can never over-reveal.
 //   - piiKey read infra errors surface unwrapped for the standard
-//     infra/transient classification (retry/pause).
-func (d *SecureDecryptor) Apply(ctx context.Context, results []ruleengine.EvalResult) error {
+//     infra/transient classification (retry/pause). These are deliberately NOT
+//     redactions: they are recoverable and the row is untouched, so retrying
+//     converges, whereas nulling a live column on a KV blip would destroy good
+//     plaintext and flap it back on the next reprojection.
+func (d *SecureDecryptor) Apply(ctx context.Context, results []ruleengine.EvalResult) ([]SecureRedaction, error) {
+	var redactions []SecureRedaction
 	for i := range results {
 		if results[i].Delete || results[i].Row == nil {
 			continue
 		}
 		for _, col := range d.columns {
-			if err := d.decryptColumn(ctx, results[i].Row, col); err != nil {
-				return err
+			err := d.decryptColumn(ctx, results[i].Row, col)
+			if err == nil {
+				continue
 			}
+			// The redaction decision keys off the classification the refusal
+			// already carries, so every call site keeps its precise message and
+			// only its DISPOSITION changes: Terminal (unresolvable for this
+			// input, however often it is retried) redacts; anything else is
+			// transient and still propagates.
+			if failure.Classify(err) != failure.CatTerminal {
+				return redactions, err
+			}
+			results[i].Row[col.Column] = nil
+			redactions = append(redactions, SecureRedaction{Column: col.Column, Reason: err})
 		}
 	}
-	return nil
+	return redactions, nil
 }
 
 func (d *SecureDecryptor) decryptColumn(ctx context.Context, row map[string]any, col SecureColumn) error {
@@ -228,8 +260,11 @@ func (d *SecureDecryptor) decryptColumn(ctx context.Context, row map[string]any,
 		fv, present := value[col.Field]
 		if !present {
 			// The plaintext decrypted fine but lacks the declared field — a
-			// spec/DDL mismatch. Fail loud rather than project a null that is
-			// indistinguishable from a legitimate shred or absent aspect.
+			// spec/DDL mismatch. Terminal, so Apply redacts the column: the
+			// resulting null IS indistinguishable from a legitimate shred, which
+			// this site once chose Terminal to avoid, and the alarm Apply raises
+			// is what carries that distinction instead. Silence about a defect is
+			// the cost; standing plaintext was the alternative.
 			return failure.Terminal(fmt.Errorf(
 				"pipeline: secure column %q: decrypted object has no field %q — the secureColumns declaration does not match the aspect's plaintext shape",
 				col.Column, col.Field))

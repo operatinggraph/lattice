@@ -362,3 +362,68 @@ func TestValidatePerEntryCapReadAdapter(t *testing.T) {
 		})
 	}
 }
+
+// TestHolderTypeRebuildTargets asserts the enumeration a retention-class key
+// destruction is delivered through: every lens with a secure column DECLARING
+// the destroyed holder's type, and nothing else. The excluded shapes are the
+// ones a live registry actually holds — a lens whose columns declare only
+// "identity" (the six migrated ones, which must keep their in-band CDC scrub
+// and must not be dragged into a rebuild), and a plain lens with no secure
+// columns at all.
+func TestHolderTypeRebuildTargets(t *testing.T) {
+	registry := map[string]*pipelineEntry{
+		"clinical-notes": {secureColumns: []lens.SecureColumn{
+			{Column: "note", HolderTypes: []string{"retentionclass"}},
+		}},
+		"mixed-after-reclassification": {secureColumns: []lens.SecureColumn{
+			{Column: "email", HolderTypes: []string{"identity"}},
+			{Column: "note", HolderTypes: []string{"identity", "retentionclass"}},
+		}},
+		"identity-only": {secureColumns: []lens.SecureColumn{
+			{Column: "name", HolderTypes: []string{"identity"}},
+		}},
+		"plain-lens": {},
+	}
+
+	got := map[string]bool{}
+	for _, tgt := range holderTypeRebuildTargets(registry, "retentionclass") {
+		got[tgt.RuleID] = true
+	}
+	want := map[string]bool{"clinical-notes": true, "mixed-after-reclassification": true}
+	if len(got) != len(want) {
+		t.Fatalf("got %v, want exactly %v", got, want)
+	}
+	for id := range want {
+		if !got[id] {
+			t.Fatalf("expected %q to be enumerated, got %v", id, got)
+		}
+	}
+
+	// A lens declaring a type is enumerated ONCE even when several of its
+	// columns name it — a duplicate would rebuild the same lens twice.
+	ids := holderTypeRebuildTargets(registry, "identity")
+	seen := map[string]int{}
+	for _, tgt := range ids {
+		seen[tgt.RuleID]++
+	}
+	if seen["mixed-after-reclassification"] != 1 {
+		t.Fatalf("a lens with two columns naming the type must be enumerated once, got %v", seen)
+	}
+}
+
+// An empty registry, or a holder type nothing declares, yields no targets —
+// which the consumer treats as "no read model holds this plaintext" and attests
+// on. It must therefore never be an error or a panic.
+func TestHolderTypeRebuildTargets_NoDeclarers(t *testing.T) {
+	if got := holderTypeRebuildTargets(map[string]*pipelineEntry{}, "retentionclass"); len(got) != 0 {
+		t.Fatalf("expected no targets from an empty registry, got %v", got)
+	}
+	registry := map[string]*pipelineEntry{
+		"identity-only": {secureColumns: []lens.SecureColumn{
+			{Column: "name", HolderTypes: []string{"identity"}},
+		}},
+	}
+	if got := holderTypeRebuildTargets(registry, "retentionclass"); len(got) != 0 {
+		t.Fatalf("a type nothing declares must yield no targets, got %v", got)
+	}
+}

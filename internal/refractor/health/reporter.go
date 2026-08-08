@@ -352,6 +352,30 @@ func (r *Reporter) RecordEvalDriftRequeue(ctx context.Context) error {
 	return r.put(ctx, existing)
 }
 
+// RecordSecureRedactions adds n to SecureRedactions — the count of secure
+// columns an evaluation projected as null because it could not resolve them
+// (retention-class-key-custody-design.md §6.2, fork F2). Takes a COUNT rather
+// than incrementing by one because a single evaluation redacts per column per
+// row: a lens-wide misdeclaration would otherwise turn one event into a KV
+// write storm. n == 0 is a no-op, so callers can call it unconditionally.
+// Thread-safe; serialized via writeMu against the other counter writers.
+func (r *Reporter) RecordSecureRedactions(ctx context.Context, n uint64) error {
+	if n == 0 {
+		return nil
+	}
+	r.writeMu.Lock()
+	defer r.writeMu.Unlock()
+
+	existing, err := r.readExisting(ctx)
+	if err != nil {
+		return fmt.Errorf("health: RecordSecureRedactions read: %w", err)
+	}
+	existing.SecureRedactions += n
+	existing.LastUpdated = time.Now().UTC().Format(time.RFC3339)
+	existing.RuleID = r.ruleID
+	return r.put(ctx, existing)
+}
+
 // Delete removes the health KV entry for this rule (FR39 — rule deletion cleanup).
 // After Delete, subsequent GetStatus calls return the default active zero Entry
 // (ErrKeyNotFound path in readExisting). Safe to call when no entry exists —

@@ -3,13 +3,12 @@
 // DDL, driven through the real Processor commit path — not a hand-seeded
 // fixture.
 //
-// The holder vertices are seeded directly rather than installed, because
-// pkgmgr still REFUSES a retentionClass custody declaration at install
-// (internal/pkgmgr/custodyscope.go rule 5, lifted by item 3b once the
-// destruction can reach a read model). That gate constrains what a PACKAGE may
-// declare; it does not constrain the op, which requires only a live holder
-// vertex — which is exactly what lets this fire's acceptance criterion be
-// proven with zero installed classes and zero consumers.
+// The holder vertices are seeded directly rather than installed. That was
+// originally forced — pkgmgr refused a retentionClass custody declaration at
+// install until a destruction could reach a read model — and is kept on its own
+// merits now that it installs: seeding depends only on a live holder vertex,
+// which is what lets these tests prove the op's whole spine with zero installed
+// classes and zero consumers.
 package privacybase_test
 
 import (
@@ -338,17 +337,9 @@ func TestRecordRetentionClassShredFinalization_RequiresPriorShred(t *testing.T) 
 	submitRetentionFinalization(t, ctx, conn, cp, cons, rcHolderFinalize,
 		"projectionsNullified", "RCFinalWrongStep", processor.OutcomeRejected)
 
-	// (c2) projectionsRebuilt is DECLARED but refused: its Refractor producer
-	// does not exist, so any value it could hold today would attest a rebuild
-	// that never ran — and this verb is granted to operator at scope:any, so
-	// "nothing submits it" is not a guarantee.
-	submitRetentionFinalization(t, ctx, conn, cp, cons, rcHolderFinalize,
-		"projectionsRebuilt", "RCFinalNoProducer", processor.OutcomeRejected)
-	if data := rcPiiKeyData(t, ctx, conn, rcHolderFinalize); data["projectionsRebuilt"] != nil {
-		t.Fatalf("a refused step must write nothing: %+v", data)
-	}
-
-	// (d) the happy path flips exactly the named flag.
+	// (d) the happy path flips exactly the named flag, and only it — the two
+	// steps are recorded by two independent listeners, so one landing must never
+	// imply the other.
 	submitRetentionFinalization(t, ctx, conn, cp, cons, rcHolderFinalize,
 		"vaultKeyDestroyed", "RCFinalOK", processor.OutcomeAccepted)
 	data := rcPiiKeyData(t, ctx, conn, rcHolderFinalize)
@@ -357,6 +348,25 @@ func TestRecordRetentionClassShredFinalization_RequiresPriorShred(t *testing.T) 
 	}
 	if _, present := data["projectionsRebuilt"]; present {
 		t.Fatalf("recording one step must not touch the other: %+v", data)
+	}
+
+	// (e) projectionsRebuilt is now ACCEPTED: its producer exists (the
+	// Refractor's classkeyshredded consumer, which submits it only after every
+	// secure lens declaring this holder's type has rebuilt to zero lag). It was
+	// refused while it had none, because this verb is granted to operator at
+	// scope:any — so "nothing submits it" was never a guarantee, and any value
+	// it held would have attested a rebuild that never ran.
+	submitRetentionFinalization(t, ctx, conn, cp, cons, rcHolderFinalize,
+		"projectionsRebuilt", "RCFinalRebuilt", processor.OutcomeAccepted)
+	data = rcPiiKeyData(t, ctx, conn, rcHolderFinalize)
+	if data["projectionsRebuilt"] != true {
+		t.Fatalf("projectionsRebuilt not recorded: %+v", data)
+	}
+	if data["projectionsRebuiltAt"] == nil {
+		t.Fatalf("projectionsRebuilt must carry its timestamp: %+v", data)
+	}
+	if data["vaultKeyDestroyed"] != true {
+		t.Fatalf("the sibling step must survive: %+v", data)
 	}
 }
 

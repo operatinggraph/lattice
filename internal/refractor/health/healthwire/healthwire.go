@@ -103,4 +103,16 @@ type Entry struct {
 	// that sizes the still-undesigned per-row footprint validation for the
 	// unanchored grant-table scans.
 	EvalDriftRequeues uint64 `json:"evalDriftRequeues,omitempty"`
+	// SecureRedactions is the cumulative number of secure-column values this
+	// lens projected as null because it could not RESOLVE them — a malformed
+	// envelope, a holder type the column never declared, a missing or
+	// unparseable piiKey, or a failed authenticated decrypt
+	// (retention-class-key-custody-design.md §6.2, fork F2). A legitimate shred
+	// is NOT counted: erasure projecting null is the mechanism working. So any
+	// nonzero value is a defect between a package's custody declaration and its
+	// ciphertext, and it is privacy-critical precisely because the redaction is
+	// SILENT at the read model — the row still renders, carrying a null where
+	// plaintext belongs, indistinguishable from an erased record. This counter
+	// is the only thing that tells those two apart.
+	SecureRedactions uint64 `json:"secureRedactions,omitempty"`
 }

@@ -57,14 +57,13 @@ const retentionClassKeyShreddedEventDDL = "privacy.retentionClassKeyShredded"
 // "projectionsRebuilt" once every secure lens carrying this holder's type is
 // back at zero lag.
 //
-// The second step is DECLARED here (the lens projects the column, and a
-// compliance surface that has to grow a column to observe a step could not
-// have observed the step it was written for) but REFUSED by the script until
-// its producer exists. The two are not in tension: a declared column with no
-// value is honestly "not yet attested", while a step this script accepts is a
-// step the finalization grant lets an operator write — so accepting one nothing
-// produces would make every value it could hold a forged attestation of a
-// rebuild that never ran.
+// Both steps are accepted, each because its producer exists. The step was
+// declared before it was accepted — the lens had to grow the column first, since
+// a compliance surface cannot observe a step it has no column for — and stayed
+// refused meanwhile, because a step this script accepts is a step the
+// finalization grant lets an operator write, so accepting one with no producer
+// would have made every value it could hold a forged attestation of a rebuild
+// that never ran.
 //
 // Why a separate finalization verb rather than widening RecordShredFinalization:
 // that op validates its subject as vtx.identity.<NanoID> and its steps are the
@@ -92,12 +91,12 @@ func ShredRetentionClassKeyDDL() pkgmgr.DDLSpec {
 		Script: shredRetentionClassKeyDDLScript,
 		InputSchema: `{"type":"object","properties":` +
 			`{"retentionClassKey":{"type":"string","description":"vtx.retentionclass.<NanoID> — the retention-class key holder whose DEK is being destroyed (or whose destruction progress is being recorded)."},` +
-			`"step":{"type":"string","enum":["vaultKeyDestroyed","projectionsRebuilt"],"description":"RecordRetentionClassShredFinalization only — which async finalization step completed. projectionsRebuilt is declared but REFUSED until its Refractor producer exists, so that no value it holds can be an attestation of a rebuild that never ran."}}}`,
+			`"step":{"type":"string","enum":["vaultKeyDestroyed","projectionsRebuilt"],"description":"RecordRetentionClassShredFinalization only — which async finalization step completed."}}}`,
 		OutputSchema: `{"type":"object","properties":` +
 			`{"primaryKey":{"type":"string","description":"vtx.retentionclass.<NanoID> of the shredded key holder."}}}`,
 		FieldDescription: map[string]string{
 			"retentionClassKey": "Full vtx.retentionclass.<NanoID> key of the retention-class holder to shred. Must exist and not be tombstoned; declared in ContextHint.Reads.",
-			"step":              "RecordRetentionClassShredFinalization only: vaultKeyDestroyed (privacy-worker, after Vault.ShredKey) or projectionsRebuilt (Refractor destruction consumer, after every affected secure lens is back at zero lag — refused until that consumer exists).",
+			"step":              "RecordRetentionClassShredFinalization only: vaultKeyDestroyed (privacy-worker, after Vault.ShredKey) or projectionsRebuilt (Refractor destruction consumer, after every affected secure lens is back at zero lag).",
 		},
 		Examples: []pkgmgr.ExampleSpec{
 			{
@@ -233,19 +232,14 @@ def execute(state, op):
         holder_key = required_string(p, "retentionClassKey")
         parts_of(holder_key, "retentionClassKey", "retentionclass")
         step = required_string(p, "step")
-        # projectionsRebuilt is a DECLARED step with no producer yet: the
-        # Refractor consumer that attests it is item 3b. A step this script
-        # accepts is a step an operator holding the finalization grant can
-        # write, so accepting one nothing legitimately produces would mean any
-        # non-null value it ever holds before 3b is necessarily forged -- an
-        # attestation of a rebuild that never ran, on the compliance surface.
-        # It is refused until its producer exists; 3b admits it in the same
-        # change that makes it real, and 3b's own consumer test is what fails
-        # loudly if that is forgotten.
-        if step == "projectionsRebuilt":
-            fail("FailedPrecondition: step projectionsRebuilt has no producer yet -- the Refractor rebuild consumer that attests it is not built")
-        if step != "vaultKeyDestroyed":
-            fail("InvalidArgument: step: required vaultKeyDestroyed; got " + step)
+        # Both steps have a producer now. vaultKeyDestroyed comes from
+        # internal/privacyworker after Vault.ShredKey; projectionsRebuilt comes
+        # from internal/refractor/classkeyshredded, once every secure lens
+        # declaring this holder's type has rebuilt to zero lag. Each is written
+        # by the identity.system.privacy service actor after its own
+        # irreversible work landed, so neither can attest to work that never ran.
+        if step != "vaultKeyDestroyed" and step != "projectionsRebuilt":
+            fail("InvalidArgument: step: required vaultKeyDestroyed or projectionsRebuilt; got " + step)
 
         # The piiKey comes from the DECLARED read set (ContextHint.Reads --
         # the submitters always declare it), NOT the lazy kv.Read seam: a
@@ -283,10 +277,10 @@ def execute(state, op):
 // event model), mirroring KeyShreddedEventDDL.
 //
 // The event has TWO independent durable consumers, exactly as
-// privacy.keyShredded does: the privacy-worker destroys the Vault key, and
-// (item 3b) the Refractor rebuilds every secure lens whose declared holder
-// types include retentionclass. Neither blocks the other and each records its
-// own finalization step.
+// privacy.keyShredded does: the privacy-worker destroys the Vault key, and the
+// Refractor's classkeyshredded consumer rebuilds every secure lens whose
+// declared holder types include retentionclass. Neither blocks the other and
+// each records its own finalization step.
 func RetentionClassKeyShreddedEventDDL() pkgmgr.DDLSpec {
 	return pkgmgr.DDLSpec{
 		CanonicalName: retentionClassKeyShreddedEventDDL,

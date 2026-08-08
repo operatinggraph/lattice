@@ -90,6 +90,11 @@ const (
 // every branch. It ships as a table with a test instead.
 //
 // The order, worst first, and why:
+//   - secure-redaction: the read model is not stale or frozen but CONFIDENTLY
+//     WRONG, and being served that way — a row rendering a null the reader
+//     cannot distinguish from a lawfully erased record. Above paused because a
+//     frozen lens misleads nobody, and every condition below is about a read
+//     model being behind or unverified rather than actively lying.
 //   - paused: the sweep is suppressed while paused, so any verdict under it is
 //     a frozen artifact rather than a live one.
 //   - unreadable: the lens's own inputs could not be read, so the quieter
@@ -106,15 +111,16 @@ const (
 // Nothing displaced is lost: each condition raises its own issue, and the
 // underlying counters travel in the same metrics map.
 var alertRank = map[string]int{
-	"paused":         7,
-	"unreadable":     6,
-	"repair-failing": 5,
-	"repair-blocked": 4,
-	"sweep-stalled":  3,
-	"unverified":     2,
-	"lagging":        1,
-	"ok":             0,
-	"":               0,
+	"secure-redaction": 8,
+	"paused":           7,
+	"unreadable":       6,
+	"repair-failing":   5,
+	"repair-blocked":   4,
+	"sweep-stalled":    3,
+	"unverified":       2,
+	"lagging":          1,
+	"ok":               0,
+	"":                 0,
 }
 
 // raiseAlert returns whichever of the two alerts ranks worse, so a caller never
@@ -202,6 +208,15 @@ const (
 	defaultLensLagRaiseCycles  = 3
 	issueLensProjectionPaused  = "LensProjectionPaused"
 	issueLensProjectionLagging = "LensProjectionLagging"
+	// issueLensSecureRedaction is raised when a lens has projected any
+	// secure-column null it could not resolve. `error`, not `warning`, and
+	// unlike every other business-lens code here: those describe a read model
+	// that is stale or frozen, which is visibly wrong to whoever reads it. This
+	// one describes a read model that is CONFIDENTLY wrong — the row renders,
+	// with a null that is indistinguishable from an erased record, so nothing
+	// downstream can tell a defect from a lawful erasure. Nothing else in the
+	// system carries that distinction.
+	issueLensSecureRedaction = "LensSecureRedaction"
 	// issueLensProjectionUnreadable is raised when a business lens's liveness
 	// inputs cannot be read. The general-lens mirror of
 	// CapabilityLensUnreadable: an unobserved read model must say so rather
@@ -355,6 +370,12 @@ type LensLivenessStatus struct {
 	SweepSuppression      string
 	SweepSuppressionAt    time.Time
 	SweepInterval         time.Duration
+	// SecureRedactions is the cumulative count of secure-column values this
+	// lens projected as null because it could not resolve them (fork F2). It
+	// answers what no liveness field can: the lens is active, caught up and
+	// writing rows, and those rows carry nulls where plaintext belongs. A
+	// legitimate shred is not counted, so any nonzero value is a defect.
+	SecureRedactions uint64
 }
 
 // issueRecord is one entry of the Health-KV `issues` array (Contract #5 §5.5).
@@ -1224,7 +1245,7 @@ func (h *LatticeHeartbeater) evalLenses(now time.Time) (map[string]map[string]an
 	snaps := h.LensProvider()
 	metric := make(map[string]map[string]any, len(snaps))
 	var paused, lagging, unreadable, blocked, unverified []string
-	var diverging, unrepaired, stalled []string
+	var diverging, unrepaired, stalled, redacting []string
 	seen := make(map[string]struct{}, len(snaps))
 	for _, s := range snaps {
 		name := lensName(s)
@@ -1278,11 +1299,23 @@ func (h *LatticeHeartbeater) evalLenses(now time.Time) (map[string]map[string]an
 		if !s.LastProjectedAt.IsZero() {
 			lastProjectedAt = substrate.FormatTimestamp(s.LastProjectedAt)
 		}
+		if s.SecureRedactions > 0 {
+			// Raised on the CUMULATIVE count, not a per-cycle delta: a redaction
+			// is not a transient the next cycle clears — the null is written into
+			// the read model and stays there until whatever made it unresolvable
+			// is fixed and the lens reprojects. A delta-based signal would go
+			// quiet while the wrong rows were still being served.
+			alert = raiseAlert(alert, "secure-redaction")
+			redacting = append(redacting, fmt.Sprintf("%s (%d)", name, s.SecureRedactions))
+		}
 		m := map[string]any{
 			"status":          s.Status,
 			"projectionLag":   s.ProjectionLag,
 			"lastProjectedAt": lastProjectedAt,
 			"alert":           alert,
+		}
+		if s.SecureRedactions > 0 {
+			m["secureRedactions"] = s.SecureRedactions
 		}
 		addLensSweepMetrics(m, s)
 		metric[name] = m
@@ -1302,6 +1335,14 @@ func (h *LatticeHeartbeater) evalLenses(now time.Time) (map[string]map[string]an
 			severity: "warning",
 			message: fmt.Sprintf("lens projection lag exceeds threshold %d; its read model may be stale: %s",
 				threshold, strings.Join(lagging, ", ")),
+		}
+	}
+	if len(redacting) > 0 {
+		active[issueLensSecureRedaction] = capIssue{
+			severity: "error",
+			message: "lens projected a secure column as null because it could not resolve the value; the row renders " +
+				"as if the record were erased, and only this counter distinguishes that from a real erasure: " +
+				strings.Join(redacting, ", "),
 		}
 	}
 	if len(unreadable) > 0 {

@@ -488,6 +488,7 @@ currently reserved-but-unemitted.
     {"code": "LensCoverageDivergence", "severity": "warning", "message": "<string>", "since": "<RFC3339>"},
     {"code": "LensRepairFailing", "severity": "warning", "message": "<string>", "since": "<RFC3339>"},
     {"code": "LensSweepStalled", "severity": "warning", "message": "<string>", "since": "<RFC3339>"},
+    {"code": "LensSecureRedaction", "severity": "error", "message": "<string>", "since": "<RFC3339>"},
     {"code": "LensRegistryIncomplete", "severity": "error", "message": "<string>", "since": "<RFC3339>"}
   ]
 }
@@ -848,9 +849,29 @@ above).
   "ackPending": <uint64>,
   "ackFloorProgressAt": "<RFC3339>",
   "sweepCursor": "<anchorVertexKey>",
-  "sweepReconciled": <uint64>
+  "sweepReconciled": <uint64>,
+  "secureRedactions": <uint64>
 }
 ```
+
+`secureRedactions` is the cumulative count of secure-column values this lens projected as
+**null because it could not resolve them** — a malformed envelope, a holder type the column never
+declared, a missing or unparseable `piiKey`, or a failed authenticated decrypt
+(`retention-class-key-custody-design.md` §6.2, fork F2). Omitted while zero, which is the entire
+current corpus.
+
+A **legitimate shred is not counted**: erasure projecting null is the mechanism working, and
+counting it would bury the defect signal under the expected case. So any nonzero value is a defect
+somewhere between a package's custody declaration and its ciphertext. It is the only signal that
+distinguishes the two, because the redaction is otherwise **silent at the read model** — the row
+still renders, carrying a null exactly where an erased record would carry one.
+
+That is why the derived `LensSecureRedaction` issue is `error` where every other business-lens code
+is `warning`, and why the per-lens `alert` token `secure-redaction` outranks even `paused`: the
+other conditions describe a read model that is stale or frozen, which is visibly wrong to whoever
+reads it; this one describes a read model that is confidently wrong and still being served. The
+issue is raised on the CUMULATIVE count, so it persists across cycles in which no new redaction
+happens — the null stays in the read model until the cause is fixed and the lens reprojects.
 
 `pauseReason` is `null` when active; `"infra"`, `"structural"`, or `"manual"` when paused.
 `lastError` is `null` when no error has occurred. On a **structural** pause it is not merely the

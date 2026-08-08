@@ -94,7 +94,40 @@ func (p *Pipeline) applySecureDecrypt(ctx context.Context, results []ruleengine.
 	if p.secureDecryptor == nil {
 		return nil
 	}
-	return p.secureDecryptor.Apply(ctx, results)
+	redactions, err := p.secureDecryptor.Apply(ctx, results)
+	// Alarm before returning: an infra error can arrive after some columns have
+	// already been redacted, and those nulls land whether or not this evaluation
+	// goes on to complete.
+	p.alarmSecureRedactions(ctx, redactions)
+	return err
+}
+
+// alarmSecureRedactions raises the privacy-critical tier for every secure column
+// an evaluation projected as null because it could not resolve it
+// (retention-class-key-custody-design.md §6.2, fork F2).
+//
+// It deliberately does NOT pause the lens, which is where this tier differs from
+// the one keyshredded raises. There, a failed nullification leaves a shredded
+// identity's row standing, so halting the lens IS the containment. Here the
+// containment already happened — the value is null in the row about to be
+// written — and pausing would reinstate exactly the whole-lens stall F2 was
+// ratified to remove: one unresolvable row blocking every other row of the lens
+// from ever updating, a later erasure scrub included.
+func (p *Pipeline) alarmSecureRedactions(ctx context.Context, redactions []SecureRedaction) {
+	if len(redactions) == 0 {
+		return
+	}
+	for _, r := range redactions {
+		slog.Error("pipeline: secure column redacted to null; its value could not be resolved (privacy-critical, not a shred)",
+			"ruleId", p.ruleID, "column", r.Column, "err", failure.PrivacyCritical(r.Reason))
+	}
+	if p.reporter == nil {
+		return
+	}
+	if err := p.reporter.RecordSecureRedactions(ctx, uint64(len(redactions))); err != nil {
+		slog.Error("pipeline: record secure-redaction health signal",
+			"ruleId", p.ruleID, "err", err)
+	}
 }
 
 // evaluateForEntryRaw is evaluateForEntry's core, pre-decrypt.

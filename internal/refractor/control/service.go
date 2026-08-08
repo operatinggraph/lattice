@@ -95,7 +95,15 @@ type coreKVGetter interface {
 // of the rule's target store. *pipeline.Pipeline satisfies this via its Rebuild method.
 // Defined here so internal/control does not import internal/pipeline (architecture boundary).
 type Rebuilder interface {
+	// Rebuild starts a rescan and returns once the durable has been reset; the
+	// drain continues in the background. This is what the "rebuild" control op
+	// answers {Started: true} from.
 	Rebuild(ctx context.Context, truncate bool) error
+	// RebuildAndWait starts a rescan and blocks until it has drained, serialized
+	// per lens. Part of the interface rather than an optional type assertion so
+	// a future Rebuilder cannot satisfy Rebuilder while silently lacking the
+	// completion signal an erasure attestation depends on.
+	RebuildAndWait(ctx context.Context, truncate bool) error
 }
 
 // Deleter is implemented by any component that can cleanly stop a rule and remove
@@ -608,6 +616,26 @@ func (s *Service) PauseRule(ctx context.Context, ruleID string) error {
 	}
 	p.Pause(ctx)
 	return nil
+}
+
+// RebuildRule rebuilds ruleID's projection and blocks until the rescan has
+// drained, serialized per lens by the underlying pipeline. The in-process
+// equivalent of the "rebuild" control-plane op, but with the completion the RPC
+// arm deliberately does not wait for: it answers "{Started: true}" immediately,
+// which is right for an operator at a CLI and useless to a caller that must
+// ATTEST a rebuild finished before recording an erasure step
+// (retention-class-key-custody-design.md §6.3 step 4).
+//
+// Returns an error if ruleID is not registered, or if the rebuild fails or its
+// wait is cancelled.
+func (s *Service) RebuildRule(ctx context.Context, ruleID string, truncate bool) error {
+	s.mu.Lock()
+	r, ok := s.rebuilderByRuleID[ruleID]
+	s.mu.Unlock()
+	if !ok {
+		return fmt.Errorf("control: rule %q: %w", ruleID, ErrRuleNotRegistered)
+	}
+	return r.RebuildAndWait(ctx, truncate)
 }
 
 // NullifyRow deletes ONE projected row (by its Into.Key values) from ruleID's
