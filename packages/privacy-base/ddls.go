@@ -38,6 +38,10 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 //     SealIdentityForErasure op DDL. See seal_identity_for_erasure.go.
 //   - `privacy.erasureRequested` (meta.ddl.eventType) — the registered
 //     event-type DDL for the seal's emitted event.
+//   - `privacy.dedupFootprintSwept` (meta.ddl.eventType) — the registered
+//     event-type DDL for the dedup sweep's emitted event, and the only per-pass
+//     record of what an erasure removed from that plane. See
+//     purge_identity_dedup_footprint.go.
 func DDLs() []pkgmgr.DDLSpec {
 	return []pkgmgr.DDLSpec{
 		{
@@ -95,6 +99,7 @@ func DDLs() []pkgmgr.DDLSpec {
 		SealIdentityForErasureDDL(),
 		ErasureRequestedEventDDL(),
 		PurgeIdentityDedupFootprintDDL(),
+		DedupFootprintSweptEventDDL(),
 		ErasureAspectDDL(),
 		SealIdentityForErasureCompleteDDL(),
 		ErasureCompletedEventDDL(),

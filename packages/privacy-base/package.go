@@ -21,6 +21,12 @@
 // person's write path, so that the residue an erasure is judged by belongs to
 // a set nothing can grow.
 //
+// And it owns the erasure's shape: the identityErasure Loom pattern (§5), which
+// declares the ordered spine, and the identityErasureComplete Weaver target
+// over the identityErasureResidue lens (§7), which drives the convergent tail
+// the spine cannot express. Step 1 of the pattern binds ShredIdentityKey, whose
+// grant this package deliberately does not ship — see permissions.go.
+//
 // Install via `lattice-pkg install packages/privacy-base`. No dependencies
 // — the DDLs attach to identity vertices by convention (Contract #1
 // key-shape), not by an install-order coupling with identity-domain. The
@@ -34,10 +40,11 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 // Package is the static, install-time bundle.
 var Package = pkgmgr.Definition{
 	Name:          "privacy-base",
-	Version:       "0.9.0",
-	Description:   "Per-identity PII key-custody envelope (piiKey) backing crypto-shred, the erasureRequested marker that closes an erased identity's write path, and the erasure attestation that closes the cycle.",
+	Version:       "0.10.0",
+	Description:   "Per-identity PII key-custody envelope (piiKey) backing crypto-shred, the erasureRequested marker that closes an erased identity's write path, the identityErasure Loom pattern that orders the whole erasure, and the attestation that closes the cycle.",
 	DDLs:          DDLs(),
 	Lenses:        Lenses(),
 	Permissions:   Permissions(),
 	WeaverTargets: WeaverTargets(),
+	LoomPatterns:  LoomPatterns(),
 }

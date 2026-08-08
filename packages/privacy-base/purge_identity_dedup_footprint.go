@@ -7,6 +7,10 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 // §5.4, step 4 of the identityErasure pattern).
 const purgeIdentityDedupFootprintDDL = "purgeIdentityDedupFootprint"
 
+// dedupFootprintSweptEventDDL is the canonical name of the eventType DDL for
+// the sweep's emitted event.
+const dedupFootprintSweptEventDDL = "privacy.dedupFootprintSwept"
+
 // PurgeIdentityDedupFootprintDDL declares the dedup-plane sweep of an erasure.
 //
 // It is the sibling of identity-domain's UnbindIdentityCredentials, and exists
@@ -39,13 +43,26 @@ const purgeIdentityDedupFootprintDDL = "purgeIdentityDedupFootprint"
 // magnitude UnbindIdentityCredentials measured clean against the Starlark wall
 // budget.
 //
-// # What it does not do
+// # What its event is for, and why it is unconditional
 //
-// It emits no event. The credential plane's sweep emits identity.unbound
-// because the Gateway's credential-bindings bucket is a readable copy that has
-// to shrink (Contract #11 §11.4); the dedup plane has no such seam — an
-// identityindex vertex is read by the index probe, which reads Core KV state
-// directly and therefore sees the tombstone.
+// It emits privacy.dedupFootprintSwept on every pass, including one that finds
+// nothing left. No read model needs it — an identityindex vertex is read by the
+// index probe, which reads Core KV state directly and therefore sees the
+// tombstone, so unlike the credential plane's identity.unbound (Contract #11
+// §11.4) there is no copy to retract. It is the dedup plane's AUDIT record: the
+// per-pass account of what an erasure removed, which is the only such record
+// this plane has and is what §7.4's attestation reader wants.
+//
+// Unconditional because it is also what advances the identityErasure pattern's
+// LAST step. A step whose event is conditional on having found work cannot
+// advance the instance for a subject whose dedup footprint was always empty,
+// and a step that emits nothing at all rides its 60s deadline into a probe that
+// advances correctly while logging "check completionDomains" against a pattern
+// that declared them correctly. relation is empty and purged is zero on the
+// pass that finds nothing — that pass IS the convergence signal, not a
+// non-event.
+//
+// # What it does not do
 //
 // It does not tombstone the subject's own identity vertex or any aspect of it.
 // The dedup footprint is what the subject's contact details left OUTSIDE the
@@ -80,9 +97,11 @@ func PurgeIdentityDedupFootprintDDL() pkgmgr.DDLSpec {
 			"ErasureResidueUnreachable — a loud stop chosen over the silent stall that returning " +
 			"empty would produce under an uncapped re-dispatch. " +
 			"Idempotent: already-tombstoned rows are skipped, so a re-run " +
-			"over a fully swept subject is a no-op with no mutations. Emits nothing — unlike the " +
-			"credential plane there is no read-model copy to retract; the index probe reads Core KV " +
-			"and sees the tombstone. Requires the subject to carry a live erasureRequested marker of " +
+			"over a fully swept subject is a no-op with no mutations. Emits " +
+			"privacy.dedupFootprintSwept on every pass including that one — no read model needs it " +
+			"(the index probe reads Core KV and sees the tombstone), it is the dedup plane's audit " +
+			"record of what each pass removed, and it is what advances the identityErasure pattern's " +
+			"last step without riding a deadline. Requires the subject to carry a live erasureRequested marker of " +
 			"that class (ErasureNotSealed) — this is machinery for an erasure already sealed, not a " +
 			"way to break a person's dedup hygiene.",
 		Script: purgeIdentityDedupFootprintDDLScript,
@@ -95,8 +114,8 @@ func PurgeIdentityDedupFootprintDDL() pkgmgr.DDLSpec {
 		// and every key this op writes belongs to an identityindex vertex or a
 		// link — never to the subject. Naming the subject would be the write
 		// path used as a read channel. Nothing needs one: Loom correlates a
-		// systemOp on its pending token and Weaver on the dispatch, and the
-		// observable outcome is the shrinking residue.
+		// systemOp on the requestId its emitted event carries and Weaver on the
+		// dispatch, and the observable outcome is the shrinking residue.
 		OutputSchema: `{"type":"object","properties":{}}`,
 		FieldDescription: map[string]string{
 			"subjectKey": "Full vtx.identity.<NanoID> key of the identity being swept. Must exist, not be tombstoned, and carry a live erasureRequested marker. Declared in ContextHint.Reads; the erasureRequested marker is read live and the indexes/duplicateOf walks are declared as ContextHint.Enumerations.",
@@ -106,9 +125,17 @@ func PurgeIdentityDedupFootprintDDL() pkgmgr.DDLSpec {
 				Name:    "PurgeIdentityDedupFootprint — sweep one page of a sealed identity's dedup footprint",
 				Payload: map[string]any{"subjectKey": "vtx.identity.<NanoID>"},
 				ExpectedOutcome: "Tombstones up to 64 owned identityindex vertices with their indexes links, or — once those " +
-					"are exhausted — up to 64 duplicateOf links in one direction. A subject with more " +
+					"are exhausted — up to 64 duplicateOf links in one direction, and emits " +
+					"privacy.dedupFootprintSwept naming the relation and the count. A subject with more " +
 					"footprint than one page keeps a non-empty residue, which the erasure target " +
 					"re-dispatches this op against until it reaches zero.",
+			},
+			{
+				Name:    "PurgeIdentityDedupFootprint — sealed identity whose footprint is already gone",
+				Payload: map[string]any{"subjectKey": "vtx.identity.<NanoID>"},
+				ExpectedOutcome: "Commits with no mutations and still emits privacy.dedupFootprintSwept with an empty relation " +
+					"and purged=0 — the convergence signal, and what advances the identityErasure pattern's last step for " +
+					"a subject that never had a dedup footprint at all.",
 			},
 			{
 				Name:            "PurgeIdentityDedupFootprint — identity that was never sealed for erasure",
@@ -311,20 +338,94 @@ def execute(state, op):
         # would reach 4*SWEEP_LIMIT and put this op back in reach of the wall
         # budget that sized SWEEP_LIMIT in the first place. Whatever this commit
         # leaves is residue the erasure target re-dispatches against.
+        relation = ""
         hits = collect_live_sweep(subject_key, "indexes", "in")
         if len(hits) > 0:
+            relation = "indexes"
             mutations = sweep_indexes(hits)
         else:
             hits = collect_live_sweep(subject_key, "duplicateOf", "out")
             if len(hits) == 0:
                 hits = collect_live_sweep(subject_key, "duplicateOf", "in")
+            if len(hits) > 0:
+                relation = "duplicateOf"
             mutations = sweep_duplicate_of(hits)
 
-        # No events: the dedup plane has no read-model copy to retract, unlike
-        # the credential plane's Gateway bucket. No primaryKey: nothing this op
-        # writes belongs to the subject, and the reply-constraint rejects a
-        # primaryKey outside the write footprint.
-        return {"mutations": mutations, "events": [], "response": {}}
+        # UNCONDITIONAL, including the pass that finds nothing: this event is
+        # what advances the identityErasure pattern's last step, and a subject
+        # whose dedup footprint was always empty would otherwise never emit one.
+        # An empty relation with purged=0 says the sweep found nothing left,
+        # which is the convergence signal, not the absence of one.
+        # targetKey is carried explicitly, redundant with identityKey, because
+        # step 7 otherwise derives an event's target POSITIONALLY from the
+        # mutation at the same index -- which here would name whichever
+        # identityindex vertex happened to be swept first, and nothing at all on
+        # the pass that sweeps none. An audit record of a person's erasure
+        # should name the person on every pass.
+        events = [{"class": "privacy.dedupFootprintSwept",
+                   "data": {"identityKey": subject_key, "targetKey": subject_key,
+                            "relation": relation,
+                            "purged": len(hits), "mutations": len(mutations)}}]
+
+        # No primaryKey: nothing this op writes belongs to the subject, and the
+        # reply-constraint rejects a primaryKey outside the write footprint.
+        return {"mutations": mutations, "events": events, "response": {}}
 
     fail("purgeIdentityDedupFootprint DDL: unknown operationType: " + ot)
+`
+
+// DedupFootprintSweptEventDDL returns the event-type DDL declaration for
+// privacy.dedupFootprintSwept (Contract #3 §3.4 typed-event model). Registered
+// for the same reason privacy.keyShredded and privacy.erasureRequested are: it
+// documents the schema an auditor's reader binds to, and on this plane it is
+// the ONLY per-pass record of what an erasure removed — there is no read-model
+// copy whose shrinkage could stand in for one.
+func DedupFootprintSweptEventDDL() pkgmgr.DDLSpec {
+	return pkgmgr.DDLSpec{
+		CanonicalName: dedupFootprintSweptEventDDL,
+		Class:         "meta.ddl.eventType",
+		Description: "Emitted by PurgeIdentityDedupFootprint (erasure-orchestration-design.md §5.4) on " +
+			"every commit, naming the relation that pass swept and how much of it went. Emitted on the " +
+			"pass that finds nothing too, with an empty relation and purged=0: that pass is the dedup " +
+			"plane's convergence signal, and it is what advances the identityErasure pattern's last step " +
+			"for a subject whose footprint was already gone. A consumer counting erased footprint sums " +
+			"purged across an identity's events; a consumer watching for convergence waits for one with " +
+			"purged=0.",
+		Script: dedupFootprintSweptEventDDLScript,
+		InputSchema: `{"type":"object","properties":` +
+			`{"identityKey":{"type":"string","description":"vtx.identity.<NanoID> — the identity whose dedup footprint was swept."},` +
+			`"targetKey":{"type":"string","description":"Same value as identityKey, carried so the event's step-7 target names the person rather than whichever index vertex was swept first."},` +
+			`"relation":{"type":"string","description":"The relation this pass swept: indexes, duplicateOf, or empty when nothing live remained."},` +
+			`"purged":{"type":"integer","description":"Live links this pass removed. Zero means the sweep found nothing left."},` +
+			`"mutations":{"type":"integer","description":"Tombstones this pass committed — normally two per indexes hit (the index vertex and the link), one when a foreign-sourced link spares the vertex, one per duplicateOf hit."}}}`,
+		OutputSchema: `{"type":"object"}`,
+		FieldDescription: map[string]string{
+			"identityKey": "The identity whose dedup footprint was swept.",
+			"targetKey":   "Same as identityKey; carried so the event's target names the person on every pass.",
+			"relation":    "Which relation this pass swept, or empty when no live link remained on any of them.",
+			"purged":      "Live links removed by this pass; zero is the convergence signal.",
+			"mutations":   "Tombstones committed. An indexes hit normally costs two (the index vertex and the link) but one when the link's source lies outside the identityindex keyspace and the vertex is spared; a duplicateOf hit always costs one.",
+		},
+		Examples: []pkgmgr.ExampleSpec{
+			{
+				Name:            "privacy.dedupFootprintSwept — a page of index entries went",
+				Payload:         map[string]any{"identityKey": "vtx.identity.<NanoID>", "targetKey": "vtx.identity.<NanoID>", "relation": "indexes", "purged": 64, "mutations": 128},
+				ExpectedOutcome: "Advances the identityErasure pattern's fourth step on the privacy completion domain, and records for an auditor that 64 of this person's index entries were destroyed.",
+			},
+			{
+				Name:            "privacy.dedupFootprintSwept — nothing left to sweep",
+				Payload:         map[string]any{"identityKey": "vtx.identity.<NanoID>", "targetKey": "vtx.identity.<NanoID>", "relation": "", "purged": 0, "mutations": 0},
+				ExpectedOutcome: "The dedup plane has converged. Advances the pattern's last step for a subject that never had a footprint, which is the case a work-conditional event could not advance at all.",
+			},
+		},
+	}
+}
+
+// dedupFootprintSweptEventDDLScript is the declaration-only Starlark for the
+// dedupFootprintSwept event-type DDL. Events are emitted by a script's `events`
+// return list, never dispatched as operations — mirrors
+// erasureRequestedEventDDLScript's fail-closed stub.
+const dedupFootprintSweptEventDDLScript = `
+def execute(state, op):
+    fail("event-type DDL: not an operation handler: " + op.operationType)
 `

@@ -55,6 +55,18 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 // differs because it is not the decision: it records one already taken, and
 // it is inert until a shred has committed (the op fail-closes otherwise), so
 // it can carry no erasure authority the shred did not already exercise.
+//
+// That posture is what STEP 1 of this package's own identityErasure pattern
+// rests on, and it is worth naming here rather than leaving to be rediscovered:
+// packages/privacy-operator-grant ships the ShredIdentityKey grant to operator
+// at scope:any as an explicit, revertible deployment decision (Andrew
+// 2026-07-04), and identity.system.loom reaches operator by holdsRole exactly
+// as it does for the three grants below. A deployment installing privacy-base
+// WITHOUT privacy-operator-grant therefore gets a pattern whose steps 2 through
+// 4 are authorized and whose first is not — the instance fails its step-1
+// deadline probe rather than running an unauthorized erasure, which is the
+// right direction to fail, but the grant is a precondition of the pattern doing
+// anything at all, not an optional extra.
 func Permissions() []pkgmgr.PermissionSpec {
 	return []pkgmgr.PermissionSpec{
 		{

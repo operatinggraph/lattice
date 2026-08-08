@@ -22,16 +22,18 @@ package privacybase_test
 import (
 	"context"
 	"encoding/json"
-	"errors"
+	"slices"
 	"strings"
 	"testing"
 
 	"github.com/nats-io/nats.go/jetstream"
 
 	"github.com/operatinggraph/lattice/internal/bootstrap"
+	"github.com/operatinggraph/lattice/internal/pkgmgr"
 	"github.com/operatinggraph/lattice/internal/processor"
 	"github.com/operatinggraph/lattice/internal/substrate"
 	"github.com/operatinggraph/lattice/internal/testutil"
+	privacybase "github.com/operatinggraph/lattice/packages/privacy-base"
 )
 
 const (
@@ -94,11 +96,24 @@ func newPurgePipeline(t *testing.T, ctx context.Context, conn *substrate.Conn, d
 }
 
 // submitPurgeAs publishes one PurgeIdentityDedupFootprint and drives it to
-// wantOutcome. The declared read-set is what the identityErasure pattern's
-// step will declare through StepSpec.Reads/OptionalReads and what the erasure
-// target's directOp will declare; until either lands this literal is the only
-// thing pinning it (design §13's coverage guard still has nothing to compare
-// against).
+// wantOutcome. The declared read-set mirrors what the identityErasure pattern's
+// fourth step declares through StepSpec.Reads/OptionalReads;
+// TestPurgeDeclaredReadSetMatchesThePatternStep is design §13's coverage guard
+// holding the two together, so a fixture that drifted from the real dispatcher
+// stops proving anything about it.
+// purgeFixtureReads / purgeFixtureOptionalReads are the read-set every test in
+// this file submits. They are functions rather than inline literals so
+// TestPurgeDeclaredReadSetMatchesThePatternStep compares the pattern step
+// against what the fixture ACTUALLY sends — a second hand-written copy would let
+// the fixture drift from the dispatcher while the guard stayed green.
+func purgeFixtureReads(subjectKey string) []string {
+	return []string{subjectKey}
+}
+
+func purgeFixtureOptionalReads(subjectKey string) []string {
+	return []string{subjectKey + ".erasureRequested"}
+}
+
 func submitPurgeAs(t *testing.T, ctx context.Context, conn *substrate.Conn,
 	cp *processor.CommitPath, cons jetstream.Consumer, actorKey, subjectKey, reqLabel string, wantOutcome processor.MessageOutcome) string {
 	t.Helper()
@@ -112,8 +127,8 @@ func submitPurgeAs(t *testing.T, ctx context.Context, conn *substrate.Conn,
 		Class:         "purgeIdentityDedupFootprint",
 		Payload:       json.RawMessage(`{"subjectKey":"` + subjectKey + `"}`),
 		ContextHint: &processor.ContextHint{
-			Reads:         []string{subjectKey},
-			OptionalReads: []string{subjectKey + ".erasureRequested"},
+			Reads:         purgeFixtureReads(subjectKey),
+			OptionalReads: purgeFixtureOptionalReads(subjectKey),
 			Enumerations: []processor.EnumerationHint{
 				{Hub: subjectKey, Relation: "indexes", Direction: "in"},
 				{Hub: subjectKey, Relation: "duplicateOf", Direction: "out"},
@@ -703,47 +718,108 @@ func TestPurgeIdentityDedupFootprint_ForeignSourcedIndexesLink_SpareTheVertex(t 
 	}
 }
 
-// TestPurgeIdentityDedupFootprint_EmitsNothing pins the design's Emits: none.
+// TestPurgeIdentityDedupFootprint_EmitsAlways pins the emission the pattern's
+// last step advances on, in BOTH directions — a pass that swept something and a
+// pass that found nothing.
 //
-// The credential-plane sweep emits identity.unbound because the Gateway's
-// credential-bindings bucket is a readable copy that has to shrink. The dedup
-// plane has no such seam, so an event here would be a lifecycle announcement
-// nothing consumes — and, on the erasure path specifically, a durable record
-// that a named person was being erased. Nothing else in this file would catch
-// one.
-func TestPurgeIdentityDedupFootprint_EmitsNothing(t *testing.T) {
+// The empty pass is the one that matters and the one a work-conditional
+// emission would miss: a subject whose dedup footprint was always empty would
+// never emit, so the pattern's fourth and final step would ride its 60s
+// StepTimeout into the deadline probe on every ordinary erasure, advancing
+// correctly while logging "check completionDomains" against a pattern that
+// declared them correctly.
+//
+// No read model consumes it, which is why it is an audit record rather than a
+// retraction signal, and why it names the subject: privacy.keyShredded,
+// privacy.erasureRequested, identity.unbound and privacy.erasureCompleted all
+// carry the same subject key, because an erasure's whole point is to be
+// attestable.
+func TestPurgeIdentityDedupFootprint_EmitsAlways(t *testing.T) {
 	ctx, conn := setupPurgeEnv(t)
 	v := testutil.TestVault(t)
-	cp, cons := newDefaultPipeline(t, ctx, conn, "purge-noev-default", v)
-	sysCP, sysCons := newPurgePipeline(t, ctx, conn, "purge-noev-system")
+	cp, cons := newDefaultPipeline(t, ctx, conn, "purge-ev-default", v)
+	sysCP, sysCons := newPurgePipeline(t, ctx, conn, "purge-ev-system")
 
-	identityKey := createIdentity(t, ctx, conn, cp, cons, "PurgeNoEv")
+	// createIdentity leaves a real dedup footprint: an email and a name index
+	// entry, both under one page, so a single pass drains the class.
+	identityKey := createIdentity(t, ctx, conn, cp, cons, "PurgeEv")
 	pbSealForErasure(t, ctx, conn, identityKey)
-	reqID := submitPurge(t, ctx, conn, sysCP, sysCons, identityKey, "PurgeNoEvDo", processor.OutcomeAccepted)
 
-	// A sweep that did real work: the assertion is about a pass that HAD
-	// something to announce, not an empty no-op.
-	if got := livePurgeResidue(t, ctx, conn, identityKey, "indexes", "in"); got != 0 {
-		t.Fatalf("precondition: the pass swept nothing (live indexes links = %d)", got)
+	if got := livePurgeResidue(t, ctx, conn, identityKey, "indexes", "in"); got == 0 {
+		t.Fatal("precondition: the fixture left no dedup footprint, so pass 1 would not be a sweep with anything to announce")
 	}
-	// No outbox aspect at all is the strongest form of the property and what
-	// this op actually produces; an empty events list would satisfy it too, so
-	// both are accepted and only a real emission fails.
+
+	// Pass 1 — a sweep with something to announce.
+	reqSwept := submitPurge(t, ctx, conn, sysCP, sysCons, identityKey, "PurgeEvSwept", processor.OutcomeAccepted)
+	swept := purgeSweepEvent(t, ctx, conn, reqSwept)
+	if got := swept.Payload["relation"]; got != "indexes" {
+		t.Errorf("relation = %v, want indexes", got)
+	}
+	if got, ok := swept.Payload["purged"].(float64); !ok || got == 0 {
+		t.Errorf("purged = %v, want the count this pass removed", swept.Payload["purged"])
+	}
+	if got := swept.Payload["identityKey"]; got != identityKey {
+		t.Errorf("identityKey = %v, want %s", got, identityKey)
+	}
+	if swept.TargetKey != identityKey {
+		t.Errorf("TargetKey = %q, want the subject %s — step 7 falls back to the mutation at the same index, which here is an identityindex vertex, so an audit record would name the wrong entity",
+			swept.TargetKey, identityKey)
+	}
+
+	// Pass 2 — the other class. Without this the `relation` label could be
+	// hardcoded to "indexes" on both branches and every other assertion here
+	// would still pass.
+	if got := livePurgeResidue(t, ctx, conn, identityKey, "indexes", "in"); got != 0 {
+		t.Fatalf("precondition: pass 1 left %d live indexes links", got)
+	}
+	const dupPeerKey = "vtx.identity.PurgeEvDupPeerHJKMNP"
+	seedVertex(t, ctx, conn, dupPeerKey, "identity", map[string]any{}, false)
+	testutil.SeedLink(t, ctx, conn,
+		pbDuplicateOfLinkKey(strings.TrimPrefix(identityKey, "vtx.identity."), dupPeerKey),
+		"duplicateOf", identityKey, dupPeerKey)
+
+	dup := purgeSweepEvent(t, ctx, conn,
+		submitPurge(t, ctx, conn, sysCP, sysCons, identityKey, "PurgeEvDup", processor.OutcomeAccepted))
+	if got := dup.Payload["relation"]; got != "duplicateOf" {
+		t.Errorf("relation = %v, want duplicateOf — the label must name the class this pass actually swept, not the first one it tried", got)
+	}
+
+	// Pass 3 — nothing left on any class. The convergence signal, and the case
+	// a work-conditional emission drops on the floor.
+	reqEmpty := submitPurge(t, ctx, conn, sysCP, sysCons, identityKey, "PurgeEvEmpty", processor.OutcomeAccepted)
+	empty := purgeSweepEvent(t, ctx, conn, reqEmpty)
+	if got := empty.Payload["relation"]; got != "" {
+		t.Errorf("relation = %v, want empty — no class had a live link left", got)
+	}
+	if got := empty.Payload["purged"]; got != float64(0) {
+		t.Errorf("purged = %v, want 0", got)
+	}
+	if empty.TargetKey != identityKey {
+		t.Errorf("TargetKey = %q, want the subject %s — with no mutation to fall back on, an unset target would be empty", empty.TargetKey, identityKey)
+	}
+}
+
+// purgeSweepEvent reads the single privacy.dedupFootprintSwept event a purge
+// commit emitted, off its outbox aspect. Fails the test if the commit emitted
+// no event at all — the failure mode the pattern's last step cannot survive.
+func purgeSweepEvent(t *testing.T, ctx context.Context, conn *substrate.Conn, reqID string) processor.Event {
+	t.Helper()
 	entry, err := conn.KVGet(ctx, testutil.HarnessCoreBucket, processor.OutboxAspectKey(reqID))
 	if err != nil {
-		if !errors.Is(err, substrate.ErrKeyNotFound) {
-			t.Fatalf("KVGet outbox aspect for %s: %v", reqID, err)
-		}
-		return
+		t.Fatalf("KVGet outbox aspect for %s: %v — the sweep emitted no event, so the identityErasure pattern's last step can only advance by deadline", reqID, err)
 	}
 	aspect, err := processor.ParseOutboxAspect(entry.Value)
 	if err != nil {
 		t.Fatalf("parse outbox aspect: %v", err)
 	}
-	if len(aspect.Data.Events) != 0 {
-		t.Errorf("the dedup sweep emitted %d event(s): %+v — it has no read-model seam to retract, and an erasure-path event durably records that a named person is being erased",
-			len(aspect.Data.Events), aspect.Data.Events)
+	if len(aspect.Data.Events) != 1 {
+		t.Fatalf("the sweep emitted %d event(s), want exactly 1: %+v", len(aspect.Data.Events), aspect.Data.Events)
 	}
+	ev := aspect.Data.Events[0]
+	if ev.EventType != "privacy.dedupFootprintSwept" {
+		t.Fatalf("event type = %q, want privacy.dedupFootprintSwept", ev.EventType)
+	}
+	return ev
 }
 
 // TestPurgeIdentityDedupFootprint_AbsentOrTombstonedSubject_Rejected — the
@@ -836,4 +912,44 @@ func TestPurgeIdentityDedupFootprint_DuplicateOfOnly_ConvergesPastOnePage(t *tes
 		residue = next
 	}
 	t.Fatalf("duplicateOf residue did not reach zero within 24 passes (still %d)", residue)
+}
+
+// TestPurgeDeclaredReadSetMatchesThePatternStep is design §13's coverage guard,
+// which had nothing to compare against until the pattern landed.
+//
+// Every test in this file submits the op with a hand-written ContextHint. That
+// literal is a claim about what the real dispatcher declares, and a claim
+// nothing checked: the fixture could keep declaring a key the pattern dropped
+// and every assertion here would go on passing against a read-set production
+// never sends. Rendering the step's subject-relative templates against a
+// concrete subject is what makes the two comparable at all.
+func TestPurgeDeclaredReadSetMatchesThePatternStep(t *testing.T) {
+	const subjectKey = "vtx.identity.PurgeReadSetPin12345"
+
+	var step pkgmgr.StepSpec
+	for _, s := range privacybase.LoomPatterns()[0].Steps {
+		if s.Operation == "PurgeIdentityDedupFootprint" {
+			step = s
+		}
+	}
+	if step.Operation == "" {
+		t.Fatal("the identityErasure pattern no longer binds PurgeIdentityDedupFootprint — this op's only orchestrated dispatcher is gone")
+	}
+
+	render := func(tmpl []string) []string {
+		out := make([]string, 0, len(tmpl))
+		for _, e := range tmpl {
+			out = append(out, subjectKey+strings.TrimPrefix(e, "subject"))
+		}
+		return out
+	}
+	wantReads := purgeFixtureReads(subjectKey)
+	wantOptional := purgeFixtureOptionalReads(subjectKey)
+
+	if got := render(step.Reads); !slices.Equal(got, wantReads) {
+		t.Errorf("the pattern step's rendered Reads = %v, but every test here submits %v — the fixture is proving a read-set the dispatcher does not send", got, wantReads)
+	}
+	if got := render(step.OptionalReads); !slices.Equal(got, wantOptional) {
+		t.Errorf("the pattern step's rendered OptionalReads = %v, but every test here submits %v", got, wantOptional)
+	}
 }

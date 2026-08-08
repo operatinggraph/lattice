@@ -146,9 +146,10 @@ def execute(state, op):
 // a pattern cannot reshape it (`internal/loom/engine.go`). The Weaver's
 // directOp params are author-declared rather than engine-fixed, but §7.2's gap
 // actions declare the same field. So the erasure step ops speak subjectKey
-// while ShredIdentityKey, which predates the pattern, speaks identityKey.
-// That divergence is real and it is resolved where the pattern lands, not
-// here: the pattern is what first submits ShredIdentityKey as a step.
+// while ShredIdentityKey, which predates the pattern, speaks identityKey. That
+// divergence is closed on the shred's side: it accepts either name for the same
+// subject and refuses a disagreeing pair, so a step submitting subjectKey and an
+// operator submitting identityKey reach the same op (shred_identity_key.go).
 //
 // # Fail-closed on an unshredded identity
 //
@@ -198,16 +199,16 @@ def execute(state, op):
 // erasure after a re-shred reopen the completion gap without anything being
 // tombstoned.
 //
-// **The pattern's step-2 guard as ratified defeats this, and must change.**
-// §5.1 guards step 2 on {"absent": "subject.erasureRequested.data.requestedAt"}.
-// On a second erasure for the same person the marker already exists, so step 2
-// SKIPS, shreddedAt is never refreshed, and §7.1's
-// missing_erasureSeal = (sealedForShreddedAt <> requestedForShreddedAt)
-// evaluates old-versus-old = false — the new erasure reads as already attested
-// on the previous cycle's evidence. Nothing else can refresh the marker: this
-// op is the only writer of the class, and no ratified Weaver gap dispatches it.
-// The guard is therefore a correctness hazard, not an optimization; the fire
-// that declares the pattern must drop it or key it on shreddedAt.
+// The marker's own shreddedAt is provenance, not the completeness test, and the
+// distinction is what makes the pattern's step-2 guard safe. That step is
+// guarded on {"absent": "subject.erasureRequested.data.requestedAt"}, so a
+// second erasure for the same person skips it and the marker keeps naming the
+// cycle the REQUEST was sealed against. Nothing authoritative reads it there:
+// the residue lens field-diffs the LIVE envelope
+// (erasure.sealedForShreddedAt <> piiKey.shreddedAt, lenses.go), which cannot go
+// stale, and SealIdentityForErasureComplete reads shreddedAt from the envelope
+// too. A marker-versus-marker completeness test would have made the guard a
+// correctness hazard; the lens deliberately does not use one.
 //
 // Reads: subjectKey in ContextHint.Reads — the target-existence guard, which
 // covers the TOMBSTONED arm. An identity key naming nothing at all never

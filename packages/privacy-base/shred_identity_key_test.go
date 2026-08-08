@@ -783,3 +783,82 @@ func TestShredIdentityKey_ErasesBoundToLinks_BothDirections(t *testing.T) {
 		t.Fatalf("a boundTo link touching neither side of the shredded identity was tombstoned — the erasure must be scoped to the subject")
 	}
 }
+
+// submitShredPayload publishes one ShredIdentityKey with a caller-chosen
+// payload, so a test can exercise the subject-naming surface rather than the
+// single spelling submitShred hardcodes.
+func submitShredPayload(t *testing.T, ctx context.Context, conn *substrate.Conn,
+	cp *processor.CommitPath, cons jetstream.Consumer, identityKey, payload, reqLabel string, wantOutcome processor.MessageOutcome) {
+	t.Helper()
+	testutil.PublishOp(t, conn, &processor.OperationEnvelope{
+		RequestID:     testutil.GenReqID(reqLabel),
+		Lane:          processor.LaneUrgent,
+		OperationType: "ShredIdentityKey",
+		Actor:         pbStaffActorKey,
+		SubmittedAt:   "2026-08-07T10:10:00Z",
+		Class:         "shredIdentityKey",
+		Payload:       json.RawMessage(payload),
+		ContextHint:   &processor.ContextHint{Reads: []string{identityKey}, Enumerations: shredEnumerations(identityKey)},
+	})
+	testutil.DriveOne(t, ctx, cp, cons, wantOutcome)
+}
+
+// TestShredIdentityKey_AcceptsSubjectKeyAlias is what makes step 1 of the
+// identityErasure pattern able to run at all.
+//
+// This op names its subject `identityKey`; every other op on the erasure path
+// names it `subjectKey`, and a Loom systemOp step submits a payload the ENGINE
+// builds — `{"subjectKey": inst.SubjectKey}` (internal/loom/engine.go), with no
+// field-name knob on StepSpec. So the pattern's first step sends a payload this
+// op would otherwise reject `InvalidArgument: identityKey: required`, on every
+// instance, forever: no shred, no seal, and therefore no erasureRequested marker
+// — which is the residue lens's anchor predicate, so the Weaver's convergent
+// tail never gets a row either. The spine and the guarantee both die at cursor 0.
+//
+// Nothing else catches it. Install validation checks step STRUCTURE, not payload
+// compatibility (internal/pkgmgr/orchestrationguard.go), the Processor does not
+// enforce InputSchema, and any test that pre-shreds its fixture skips the step
+// on its guard and never sends the payload at all.
+func TestShredIdentityKey_AcceptsSubjectKeyAlias(t *testing.T) {
+	ctx, conn := setupShredEnv(t)
+	v := testutil.TestVault(t)
+	cp, cons := newDefaultPipeline(t, ctx, conn, "shred-alias", v)
+	urgentCP, urgentCons := newUrgentPipeline(t, ctx, conn, "shred-alias-urgent", v)
+
+	identityKey := createIdentity(t, ctx, conn, cp, cons, "ShredAlias")
+	recordPII(t, ctx, conn, cp, cons, identityKey, "ShredAliasPII")
+
+	submitShredPayload(t, ctx, conn, urgentCP, urgentCons, identityKey,
+		`{"subjectKey":"`+identityKey+`"}`, "ShredAliasOp", processor.OutcomeAccepted)
+
+	data, _ := readDoc(t, ctx, conn, identityKey+".piiKey")["data"].(map[string]any)
+	if data["shredded"] != true {
+		t.Fatalf("the envelope was not shredded under the subjectKey alias: %v — the identityErasure pattern's first step submits exactly this payload", data)
+	}
+}
+
+// TestShredIdentityKey_DisagreeingSubjectNames_Rejected pins the refusal rather
+// than a precedence rule. Resolving a disagreement here means picking which of
+// two named people to irreversibly destroy a key for, which is not a choice this
+// op gets to make on a caller's behalf.
+func TestShredIdentityKey_DisagreeingSubjectNames_Rejected(t *testing.T) {
+	ctx, conn := setupShredEnv(t)
+	v := testutil.TestVault(t)
+	cp, cons := newDefaultPipeline(t, ctx, conn, "shred-disagree", v)
+	urgentCP, urgentCons := newUrgentPipeline(t, ctx, conn, "shred-disagree-urgent", v)
+
+	a := createIdentity(t, ctx, conn, cp, cons, "ShredDisA")
+	recordPII(t, ctx, conn, cp, cons, a, "ShredDisAPII")
+	b := createIdentity(t, ctx, conn, cp, cons, "ShredDisB")
+	recordPII(t, ctx, conn, cp, cons, b, "ShredDisBPII")
+
+	submitShredPayload(t, ctx, conn, urgentCP, urgentCons, a,
+		`{"identityKey":"`+a+`","subjectKey":"`+b+`"}`, "ShredDisagreeOp", processor.OutcomeRejected)
+
+	for _, k := range []string{a, b} {
+		data, _ := readDoc(t, ctx, conn, k+".piiKey")["data"].(map[string]any)
+		if data["shredded"] == true {
+			t.Errorf("%s was shredded despite the disagreeing payload — the op picked a person the caller did not unambiguously name", k)
+		}
+	}
+}

@@ -97,20 +97,30 @@ func ShredIdentityKeyDDL() pkgmgr.DDLSpec {
 			"received a sensitive write, so the shred survives a Processor restart) and emits " +
 			"privacy.keyShredded{identityKey}. Recording intent only: the irreversible Vault.ShredKey key " +
 			"destruction happens asynchronously in the privacy-worker's event listener, never on this " +
-			"synchronous commit path. Requires identityKey in ContextHint.Reads (the target-existence guard); " +
+			"synchronous commit path. The subject may be named identityKey or subjectKey — the latter is what " +
+			"the identityErasure pattern's first step submits, since a Loom systemOp's payload field is the " +
+			"engine's and not the step's; exactly one is required and a disagreeing pair is refused. Requires " +
+			"that key in ContextHint.Reads (the target-existence guard); " +
 			"rejects an absent or tombstoned identity. Also admits " +
 			"RecordShredFinalization{identityKey, step: vaultKeyDestroyed|projectionsNullified} — the async " +
 			"listeners' durable progress record (Fire 4b): flips the named boolean (+ an At stamp) on the " +
 			"already-shredded piiKey envelope, the state the shredStatus lens projects for operators.",
 		Script: shredIdentityKeyDDLScript,
+		// identityKey is not in `required`: ShredIdentityKey accepts `subjectKey`
+		// as an equivalent name for the same subject, because a Loom systemOp
+		// step submits {"subjectKey": <subject>} and the payload field is the
+		// engine's to choose, not the step's. The script requires exactly one of
+		// the two and refuses a pair that disagree; RecordShredFinalization
+		// takes identityKey alone.
 		InputSchema: `{"type":"object","properties":` +
-			`{"identityKey":{"type":"string","description":"vtx.identity.<NanoID> — the identity whose PII key is being shredded (or whose shred progress is being recorded)."},` +
-			`"step":{"type":"string","enum":["vaultKeyDestroyed","projectionsNullified"],"description":"RecordShredFinalization only — which async finalization step completed."}},` +
-			`"required":["identityKey"]}`,
+			`{"identityKey":{"type":"string","description":"vtx.identity.<NanoID> — the identity whose PII key is being shredded (or whose shred progress is being recorded). ShredIdentityKey also accepts this as subjectKey."},` +
+			`"subjectKey":{"type":"string","description":"ShredIdentityKey only — the same identity under the name every other erasure-path op uses, and the name the identityErasure pattern's first step submits."},` +
+			`"step":{"type":"string","enum":["vaultKeyDestroyed","projectionsNullified"],"description":"RecordShredFinalization only — which async finalization step completed."}}}`,
 		OutputSchema: `{"type":"object","properties":` +
 			`{"primaryKey":{"type":"string","description":"vtx.identity.<NanoID> of the shredded identity."}}}`,
 		FieldDescription: map[string]string{
 			"identityKey": "Full vtx.identity.<NanoID> key of the identity to shred. Must exist and not be tombstoned; declared in ContextHint.Reads (ShredIdentityKey only — RecordShredFinalization is read-free and checks the piiKey via kv.Read).",
+			"subjectKey":  "ShredIdentityKey only: the same key as identityKey, accepted under the name the identityErasure pattern's systemOp step submits. Exactly one of the two is required; both present and disagreeing is refused.",
 			"step":        "RecordShredFinalization only: vaultKeyDestroyed (privacy-worker, after Vault.ShredKey) or projectionsNullified (Refractor keyshredded listener, after all nullify targets succeeded).",
 		},
 		Examples: []pkgmgr.ExampleSpec{
@@ -152,6 +162,27 @@ def required_string(p, name):
     if v == None or type(v) != type("") or len(v.strip()) == 0:
         fail("InvalidArgument: " + name + ": required non-empty string")
     return v.strip()
+
+def subject_of(p):
+    # ShredIdentityKey names its subject identityKey; every other op on the
+    # erasure path names it subjectKey, and a Loom systemOp step submits
+    # {"subjectKey": <subject>} with no way for a pattern to say otherwise --
+    # the payload field belongs to the engine, not the step. So both are
+    # accepted: identityKey is the documented name every direct submitter uses,
+    # subjectKey is what the identityErasure pattern's first step sends. Both
+    # present with different values is refused rather than resolved, because
+    # guessing which the caller meant is guessing which person to erase.
+    has_identity = hasattr(p, "identityKey")
+    has_subject = hasattr(p, "subjectKey")
+    if has_identity and has_subject:
+        a = required_string(p, "identityKey")
+        b = required_string(p, "subjectKey")
+        if a != b:
+            fail("InvalidArgument: identityKey and subjectKey name different identities (" + a + " vs " + b + "); supply one")
+        return a
+    if has_subject:
+        return required_string(p, "subjectKey")
+    return required_string(p, "identityKey")
 
 def vertex_alive(state, key):
     if key not in state:
@@ -269,7 +300,7 @@ def execute(state, op):
     p = op.payload
 
     if ot == "ShredIdentityKey":
-        identity_key = required_string(p, "identityKey")
+        identity_key = subject_of(p)
         parts_of(identity_key, "identityKey", "identity")
 
         if not vertex_alive(state, identity_key):

@@ -65,7 +65,10 @@ func UnbindIdentityCredentialsDDL() pkgmgr.DDLSpec {
 			"UnbindIdentityCredentials{subjectKey} tombstones one bounded page of the subject's " +
 			"boundTo links and each credential's credentialindex vertex, and emits one " +
 			"identity.unbound per credential so the Gateway's credential-bindings bucket drops the " +
-			"row. Both link directions are swept — the subject is the target of every credential " +
+			"row, plus one identity.credentialsSwept per commit unconditionally — the pass-level record the " +
+			"identityErasure pattern's guardless third step advances on, since a pass that unbinds nothing " +
+			"emits no identity.unbound and would otherwise ride a step deadline. " +
+			"Both link directions are swept — the subject is the target of every credential " +
 			"bound to it and the source when it is itself someone else's credential — inbound " +
 			"first, outbound only once inbound is exhausted, so one commit never exceeds " +
 			"2*SWEEP_LIMIT+1 mutations and the op can never refuse a well-connected person — not on " +
@@ -364,12 +367,37 @@ def execute(state, op):
         # BatchTooLarge -- a refusal, on exactly the well-connected person this
         # decomposition exists to stop refusing. Whatever this commit leaves is
         # residue the erasure target re-dispatches against.
+        direction = ""
         hits = collect_live_sweep(subject_key, "in")
         if len(hits) > 0:
+            direction = "in"
             mutations, events = sweep_inbound(subject_key, hits)
         else:
             hits = collect_live_sweep(subject_key, "out")
+            if len(hits) > 0:
+                direction = "out"
             mutations, events = sweep_outbound(subject_key, hits)
+
+        # One identity.credentialsSwept per commit, UNCONDITIONALLY, alongside
+        # the per-credential identity.unbound events above. The two answer
+        # different questions and only one of them can answer this one: an
+        # unbound event says a named credential stopped authenticating and is
+        # what shrinks the Gateway's readable copy, so it is emitted per hit and
+        # a pass with no hits emits none. That is correct for a retraction and
+        # useless for a step: the identityErasure pattern's third step is
+        # guardless, so it runs for every subject, and on the ordinary path it
+        # finds nothing (the un-narrowed ShredIdentityKey already tombstoned the
+        # boundTo links in its own commit). A step that emits nothing rides its
+        # 60s deadline into the op-status probe and advances while logging
+        # "check completionDomains" against a pattern that declared them
+        # correctly. The sweep-pass event is what the step advances on; an empty
+        # direction with swept=0 is the convergence signal.
+        events.append({"class": "identity.credentialsSwept", "data": {
+            "identityKey": subject_key,
+            "targetKey": subject_key,
+            "direction": direction,
+            "swept": len(hits),
+        }})
 
         # No primaryKey: see the DDL's OutputSchema comment -- nothing this op
         # writes belongs to the subject, and the reply-constraint rejects a

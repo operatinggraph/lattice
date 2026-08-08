@@ -488,3 +488,79 @@ func TestUnbindIdentityCredentials_OutboundSweep_RewritesOwnerArray(t *testing.T
 			"use must not keep pointing at a credential that no longer resolves", subjectKey)
 	}
 }
+
+// TestUnbindIdentityCredentials_EmitsSweepPassEventOnEveryCommit pins the
+// pass-level emission in both directions — a pass that unbound something and a
+// pass that found nothing.
+//
+// The per-credential identity.unbound events cannot serve this purpose and are
+// not meant to: they are the Gateway's retraction signal, so a pass with no hits
+// correctly emits none. But the identityErasure pattern's third step is
+// guardless and runs for every subject, and on the ordinary path it finds
+// nothing at all — ShredIdentityKey still tombstones the boundTo links in its
+// own commit until the narrowing lands. Without a pass-level event that step
+// rides its 60s deadline into the op-status probe on every erasure, advancing
+// while logging a completionDomains warning against a pattern that declared them
+// correctly.
+func TestUnbindIdentityCredentials_EmitsSweepPassEventOnEveryCommit(t *testing.T) {
+	t.Parallel()
+	ctx, conn := setupUnbindEnv(t)
+	cp, cons := newLinkPipeline(t, ctx, conn, "unbind-pass-default")
+	sysCP, sysCons := newUnbindPipeline(t, ctx, conn, "unbind-pass-system")
+
+	uKey := claimFreshIdentity(t, ctx, conn, cp, cons, "UnbPass")
+	linkSecondCredential(t, ctx, conn, cp, cons, uKey, secondCredActorKey, "UnbPassLink", "link-secret-unb-pass")
+	sealForErasure(t, ctx, conn, uKey)
+
+	// Pass 1 — a sweep with credentials to unbind.
+	swept := unbindSweepEvent(t, ctx, conn,
+		submitUnbind(t, ctx, conn, sysCP, sysCons, uKey, "UnbPass1", processor.OutcomeAccepted))
+	if got := swept.Payload["direction"]; got != "in" {
+		t.Errorf("direction = %v, want in", got)
+	}
+	if got, ok := swept.Payload["swept"].(float64); !ok || got == 0 {
+		t.Errorf("swept = %v, want the count this pass unbound", swept.Payload["swept"])
+	}
+	if swept.TargetKey != uKey {
+		t.Errorf("TargetKey = %q, want the subject %s", swept.TargetKey, uKey)
+	}
+
+	// Pass 2 — nothing left. The case a per-credential emission drops, and the
+	// one the pattern's guardless step hits on every ordinary erasure.
+	empty := unbindSweepEvent(t, ctx, conn,
+		submitUnbind(t, ctx, conn, sysCP, sysCons, uKey, "UnbPass2", processor.OutcomeAccepted))
+	if got := empty.Payload["direction"]; got != "" {
+		t.Errorf("direction = %v, want empty — neither direction had a live link left", got)
+	}
+	if got := empty.Payload["swept"]; got != float64(0) {
+		t.Errorf("swept = %v, want 0", got)
+	}
+	if empty.TargetKey != uKey {
+		t.Errorf("TargetKey = %q, want the subject %s — with no mutation to fall back on, an unset target would be empty", empty.TargetKey, uKey)
+	}
+}
+
+// unbindSweepEvent reads the one identity.credentialsSwept event a sweep commit
+// emitted. Fails if the commit emitted none — the failure mode the pattern's
+// third step cannot survive.
+func unbindSweepEvent(t *testing.T, ctx context.Context, conn *substrate.Conn, reqID string) processor.Event {
+	t.Helper()
+	entry, err := conn.KVGet(ctx, testutil.HarnessCoreBucket, processor.OutboxAspectKey(reqID))
+	if err != nil {
+		t.Fatalf("KVGet outbox aspect for %s: %v — the sweep emitted nothing, so the identityErasure pattern's third step can only advance by deadline", reqID, err)
+	}
+	aspect, err := processor.ParseOutboxAspect(entry.Value)
+	if err != nil {
+		t.Fatalf("parse outbox aspect: %v", err)
+	}
+	var found []processor.Event
+	for _, ev := range aspect.Data.Events {
+		if ev.EventType == "identity.credentialsSwept" {
+			found = append(found, ev)
+		}
+	}
+	if len(found) != 1 {
+		t.Fatalf("got %d identity.credentialsSwept event(s), want exactly 1: %+v", len(found), aspect.Data.Events)
+	}
+	return found[0]
+}

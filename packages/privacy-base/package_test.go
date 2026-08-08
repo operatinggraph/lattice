@@ -17,9 +17,11 @@ import (
 // erasure declarations are different in kind: `sealIdentityForErasure` and
 // `purgeIdentityDedupFootprint` ARE script-dispatched, and `erasureRequested`'s
 // permittedCommands is the write gate on the marker every identity write-path
-// guard reads — including the two erasure verbs' own preconditions.
+// guard reads — including the two erasure verbs' own preconditions. The
+// identityErasure pattern is pinned in depth by patterns_test.go; the count here
+// is what catches a second pattern arriving unannounced.
 func TestPackage_StructurePins(t *testing.T) {
-	if got, want := len(Package.DDLs), 10; got != want {
+	if got, want := len(Package.DDLs), 11; got != want {
 		t.Errorf("DDLs: got %d, want %d", got, want)
 	}
 	if got, want := len(Package.Lenses), 3; got != want {
@@ -37,7 +39,7 @@ func TestPackage_StructurePins(t *testing.T) {
 	if got, want := len(Package.WeaverTargets), 1; got != want {
 		t.Errorf("WeaverTargets: got %d, want %d", got, want)
 	}
-	if got, want := len(Package.LoomPatterns), 0; got != want {
+	if got, want := len(Package.LoomPatterns), 1; got != want {
 		t.Errorf("LoomPatterns: got %d, want %d", got, want)
 	}
 	if got, want := len(Package.Depends), 0; got != want {
@@ -52,6 +54,7 @@ func TestPackage_StructurePins(t *testing.T) {
 		{"sealIdentityForErasure", "meta.ddl.vertexType"},
 		{"privacy.erasureRequested", "meta.ddl.eventType"},
 		{"purgeIdentityDedupFootprint", "meta.ddl.vertexType"},
+		{"privacy.dedupFootprintSwept", "meta.ddl.eventType"},
 		{"erasure", "meta.ddl.aspectType"},
 		{"sealIdentityForErasureComplete", "meta.ddl.vertexType"},
 		{"privacy.erasureCompleted", "meta.ddl.eventType"},
