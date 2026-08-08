@@ -70,7 +70,7 @@ type ScriptContext struct {
 	// which is what every caller that builds a ScriptContext by hand does.
 	Compiled    *CompiledScript
 	ScriptClass string
-	KVReader     ScriptKVReader
+	KVReader    ScriptKVReader
 	// LinkLister backs the script's `kv.Links()` builtin (Contract #2 §2.5.1) —
 	// the bounded, paged op-time enumeration of a hub vertex's canonical links.
 	// Populated by step 4 (Hydrate) with a live Core-KV-backed lister. Optional:

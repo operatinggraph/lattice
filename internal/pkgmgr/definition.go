@@ -784,9 +784,8 @@ type DDLSpec struct {
 
 	// Custody declares WHICH key holder custodies this aspect's DEK
 	// (retention-class-key-custody-design.md §3.2). The zero value means
-	// custody kind `identity` — the aspect's own anchoring identity, today's
-	// model byte-for-byte — so a DDL that omits it installs exactly as
-	// before (no `.custody` aspect emitted). Meaningful only alongside
+	// custody kind `identity` — the aspect's own anchoring identity — and a
+	// DDL that omits it emits no `.custody` aspect. Meaningful only alongside
 	// Sensitive on an aspect-type DDL; validateCustodyScope rejects every
 	// other combination.
 	Custody CustodySpec

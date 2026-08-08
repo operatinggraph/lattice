@@ -27,10 +27,12 @@ func custodiedDDL(c CustodySpec) DDLSpec {
 	}
 }
 
-// The positive vector first: a well-formed declaration passes both validators,
-// so every rejection below is proven to be about the thing it names rather
-// than about the fixture being malformed in some other way.
-func TestCustodyScope_WellFormedRetentionClassDeclaration_Passes(t *testing.T) {
+// The positive vector first: a well-formed declaration passes every SHAPE
+// rule, so each rejection below is proven to be about the thing it names
+// rather than about the fixture being malformed some other way. It then stops
+// at the availability gate — which is itself the assertion that the gate runs
+// LAST, after the shape rules rather than instead of them.
+func TestCustodyScope_WellFormedRetentionClassDeclaration_StopsOnlyAtTheAvailabilityGate(t *testing.T) {
 	def := Definition{
 		Name:             "clinic-domain",
 		RetentionClasses: []RetentionClassSpec{validRetentionClass()},
@@ -41,8 +43,12 @@ func TestCustodyScope_WellFormedRetentionClassDeclaration_Passes(t *testing.T) {
 	if err := def.validateRetentionClasses(); err != nil {
 		t.Fatalf("validateRetentionClasses: %v", err)
 	}
-	if err := def.validateCustodyScope(); err != nil {
-		t.Fatalf("validateCustodyScope: %v", err)
+	err := def.validateCustodyScope()
+	if err == nil {
+		t.Fatal("retentionClass custody must be refused while the read path cannot resolve it")
+	}
+	if !strings.Contains(err.Error(), "not installable yet") {
+		t.Fatalf("a well-formed declaration must fail ONLY on the availability gate, got: %v", err)
 	}
 }
 
@@ -260,8 +266,8 @@ func TestBuildInstallBatch_RetentionClassMintsHolderAndResolvesCustody(t *testin
 	}
 }
 
-// A package declaring no custody emits no .custody aspect at all — the install
-// batch for every shipped package stays byte-for-byte what it was.
+// A package declaring no custody emits no .custody aspect and mints no holder:
+// its install batch carries nothing from this mechanism at all.
 func TestBuildInstallBatch_NoCustodyDeclared_EmitsNoCustodyAspect(t *testing.T) {
 	def := Definition{Name: "identity-domain", DDLs: []DDLSpec{custodiedDDL(CustodySpec{})}}
 	ops, _, err := BuildInstallBatchForTest(def)

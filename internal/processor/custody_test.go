@@ -56,8 +56,8 @@ func TestDDLCache_LoadsCustodyDeclaration(t *testing.T) {
 		t.Fatalf("CustodyHolderKey = %q, want %q", ref.CustodyHolderKey, testRetentionClassKey)
 	}
 
-	// A DDL that declares no custody stays exactly as it was: empty kind, which
-	// every consumer reads as the identity kind.
+	// A DDL that declares no custody carries an empty kind, which every
+	// consumer reads as the identity kind.
 	plain, ok := cache.Lookup("ssn")
 	if !ok {
 		t.Fatal("ssn DDL not in cache")
@@ -102,8 +102,9 @@ func validateOneMutation(t *testing.T, v *ValidatorImpl, ctx context.Context, m 
 
 // THE POSITIVE VECTOR, and the reason this whole design exists: a sensitive
 // aspect whose DDL custodies its DEK on a retention class may anchor on a
-// vertex that is not an identity. Before this, step 6 refused it outright,
-// which is why two retained-class records sat in Core KV as plaintext.
+// vertex that is not an identity. Without it a record whose retention
+// obligation outlives its subject has no expressible home and sits in Core KV
+// as plaintext.
 func TestStep6_RetentionClassCustody_PermitsNonIdentityAnchor(t *testing.T) {
 	t.Parallel()
 	ctx, conn, _, _, _ := setupTestPipeline(t)
@@ -117,9 +118,9 @@ func TestStep6_RetentionClassCustody_PermitsNonIdentityAnchor(t *testing.T) {
 
 // The regression guard on the positive vector: permitting a non-identity
 // anchor is a property of the DECLARED CUSTODY, not a general loosening. An
-// aspect that declares no custody keeps today's rejection byte-for-byte —
-// otherwise a package could flip Sensitive:true, forget custody, and get
-// plaintext at rest instead of an error.
+// aspect that declares no custody is still rejected — otherwise a package
+// could flip Sensitive:true, forget custody, and get plaintext at rest
+// instead of an error.
 func TestStep6_UndeclaredCustody_StillRefusesNonIdentityAnchor(t *testing.T) {
 	t.Parallel()
 	ctx, conn, _, _, _ := setupTestPipeline(t)
@@ -291,22 +292,56 @@ func TestEncryptSensitiveMutations_RetentionClassCustody_MintsHolderKeyOnce(t *t
 	}
 }
 
-// A sensitive aspect on a non-identity anchor that declares NO custody still
-// passes through unencrypted here — step 6 rejected it upstream, so step 6.5
-// never sees one in a real pipeline and must not invent a holder for it.
-func TestEncryptSensitiveMutations_NonIdentityAnchor_NoCustody_PassesThrough(t *testing.T) {
+// A sensitive aspect whose custody resolves to NO key holder must fail the
+// operation, never pass through. Step 6 rejects every shape that reaches here,
+// but that is an invariant spanning two steps that read a DDL cache a
+// concurrent meta-commit can invalidate BETWEEN them. Passing through would
+// commit the plaintext of a declared-sensitive aspect on exactly the race the
+// invariant does not cover, so step 6.5 refuses on its own authority.
+func TestEncryptSensitiveMutations_SensitiveWithNoHolder_IsAnError(t *testing.T) {
 	t.Parallel()
 	ctx, conn, _, _, _ := setupTestPipeline(t)
 	cp, _ := newEncryptTestCommitPath(t, ctx, conn)
 
 	aspectKey := "vtx.appointment." + testNanoID2 + ".ssn"
 	in := []MutationOp{sensitiveMutation(aspectKey, "ssn", "123-45-6789")}
+	out, _, err := cp.encryptSensitiveMutations(ctx, in, HydratedState{})
+	if err == nil {
+		t.Fatalf("a sensitive aspect with no resolvable holder must fail, got mutations %v", mutationKeys(out))
+	}
+	if !strings.Contains(err.Error(), "no key holder") {
+		t.Fatalf("error must name the missing holder, got: %v", err)
+	}
+}
+
+// The kind gate mirrors step 6's own, in the SKIP direction. A DDL cache
+// lookup is keyed on canonicalName alone, so a VERTEX mutation carrying an
+// aspect DDL's class resolves to that aspect DDL — and step 6 gates its
+// custody check on the mutation being an aspect, so it never checks one.
+// Step 6.5 must gate identically: an asymmetry is what lets one step act on
+// a mutation the other never validated. Encrypting here would produce a
+// vertex root no read path decrypts.
+func TestEncryptSensitiveMutations_VertexMutationWithAspectClass_PassesThrough(t *testing.T) {
+	t.Parallel()
+	ctx, conn, _, _, _ := setupTestPipeline(t)
+	cp, _ := newEncryptTestCommitPath(t, ctx, conn)
+
+	key := "vtx.ssn." + testNanoID2
+	in := []MutationOp{{
+		Op:  "create",
+		Key: key,
+		Document: map[string]interface{}{
+			"class":     "ssn",
+			"isDeleted": false,
+			"data":      map[string]interface{}{"value": "123-45-6789"},
+		},
+	}}
 	out, minted, err := cp.encryptSensitiveMutations(ctx, in, HydratedState{})
 	if err != nil {
-		t.Fatalf("encryptSensitiveMutations: %v", err)
+		t.Fatalf("a non-aspect mutation must pass through as step 6 lets it, got: %v", err)
 	}
 	if minted {
-		t.Fatal("no key may be minted for an aspect with no resolvable holder")
+		t.Fatal("no key may be minted for a non-aspect mutation")
 	}
 	data, _ := out[0].Document["data"].(map[string]interface{})
 	if data == nil || data["value"] != "123-45-6789" {
@@ -343,4 +378,150 @@ func ciphertextOfMutation(t *testing.T, ms []MutationOp, key string) vault.Ciphe
 	}
 	t.Fatalf("mutation %s not in batch", key)
 	return vault.Ciphertext{}
+}
+
+// seedCustodyAspect writes the REAL reserved aspect key a package install
+// emits — `vtx.meta.<ddl>.custody` — as opposed to the root-document fallback
+// the other fixtures use. Both halves of the contract must be exercised: the
+// install writes this key, so a typo in the suffix or in the `data` nesting
+// would otherwise pass every test while breaking every real install.
+func seedCustodyAspect(t *testing.T, ctx context.Context, conn *substrate.Conn, class, kind, holderKey string, deleted bool) {
+	t.Helper()
+	root := "vtx.meta." + class
+	doc := []byte(`{"class":"custody","vertexKey":"` + root + `","localName":"custody","isDeleted":` +
+		boolLiteral(deleted) + `,"data":{"kind":"` + kind + `","holderKey":"` + holderKey + `"}}`)
+	if _, err := conn.KVPut(ctx, testCoreBucket, root+".custody", doc); err != nil {
+		t.Fatalf("seed %s.custody: %v", root, err)
+	}
+}
+
+// The install-produced path, end to end: a plain sensitive DDL root plus a
+// real `.custody` aspect resolves to the declared kind and holder.
+func TestDDLCache_LoadsCustodyFromTheRealAspectKey(t *testing.T) {
+	t.Parallel()
+	ctx, conn, _, _, _ := setupTestPipeline(t)
+	seedSensitiveAspectClassDDL(t, ctx, conn, "encounter", true)
+	seedCustodyAspect(t, ctx, conn, "encounter", CustodyKindRetentionClass, testRetentionClassKey, false)
+
+	cache := NewDDLCache(conn, testCoreBucket, testLogger())
+	if err := cache.Refresh(ctx); err != nil {
+		t.Fatalf("Refresh: %v", err)
+	}
+	ref, ok := cache.Lookup("encounter")
+	if !ok {
+		t.Fatal("encounter DDL not in cache")
+	}
+	if ref.CustodyKind != CustodyKindRetentionClass || ref.CustodyHolderKey != testRetentionClassKey {
+		t.Fatalf("the real .custody aspect must drive custody, got kind=%q holder=%q", ref.CustodyKind, ref.CustodyHolderKey)
+	}
+}
+
+// A tombstone retains the prior document, so a revoked custody declaration
+// must read as ABSENT. Otherwise a package that removes its Custody keeps
+// writing to the class DEK forever, with no way to un-declare it short of
+// deleting the whole DDL.
+func TestDDLCache_TombstonedCustodyReadsAsAbsent(t *testing.T) {
+	t.Parallel()
+	ctx, conn, _, _, _ := setupTestPipeline(t)
+	seedSensitiveAspectClassDDL(t, ctx, conn, "encounter", true)
+	seedCustodyAspect(t, ctx, conn, "encounter", CustodyKindRetentionClass, testRetentionClassKey, true)
+
+	cache := NewDDLCache(conn, testCoreBucket, testLogger())
+	if err := cache.Refresh(ctx); err != nil {
+		t.Fatalf("Refresh: %v", err)
+	}
+	ref, ok := cache.Lookup("encounter")
+	if !ok {
+		t.Fatal("encounter DDL not in cache")
+	}
+	if ref.CustodyKind != "" || ref.CustodyHolderKey != "" {
+		t.Fatalf("a tombstoned custody declaration must read as absent, got kind=%q holder=%q", ref.CustodyKind, ref.CustodyHolderKey)
+	}
+}
+
+// An unparseable custody body must not be readable as ANY custodian. Zeroing
+// it would degrade the DDL to identity custody (re-pointing a retained
+// record's DEK at the subject whose erasure it was declared to survive), and
+// failing the load would drop the DDL entirely — after which the class is not
+// sensitive to anyone and commits as plaintext. The class stays loaded,
+// sensitive, and unwritable.
+func TestDDLCache_MalformedCustodyPoisonsTheClass(t *testing.T) {
+	t.Parallel()
+	ctx, conn, _, _, _ := setupTestPipeline(t)
+	seedSensitiveAspectClassDDL(t, ctx, conn, "encounter", true)
+	root := "vtx.meta.encounter"
+	if _, err := conn.KVPut(ctx, testCoreBucket, root+".custody",
+		[]byte(`{"isDeleted":false,"data":{"kind":123,"holderKey":"x"}}`)); err != nil {
+		t.Fatalf("seed malformed custody: %v", err)
+	}
+
+	cache := NewDDLCache(conn, testCoreBucket, testLogger())
+	if err := cache.Refresh(ctx); err != nil {
+		t.Fatalf("Refresh: %v", err)
+	}
+	ref, ok := cache.Lookup("encounter")
+	if !ok {
+		t.Fatal("the DDL must stay loaded — dropping it makes the class non-sensitive and its data plaintext")
+	}
+	if !ref.Sensitive {
+		t.Fatal("the class must stay sensitive")
+	}
+	if ref.CustodyKind != CustodyKindUnresolvable {
+		t.Fatalf("CustodyKind = %q, want the poison value %q", ref.CustodyKind, CustodyKindUnresolvable)
+	}
+
+	// And the poison is load-bearing: step 6 refuses the write outright.
+	v := NewValidator(cache, conn, testCoreBucket, testLogger())
+	err := validateOneMutation(t, v, ctx, aspectMutation("vtx.identity."+testNanoID2+".encounter", "encounter"))
+	if err == nil {
+		t.Fatal("a class whose custodian is unknown must reject its writes")
+	}
+	var ddlErr *DDLViolation
+	if !errors.As(err, &ddlErr) || ddlErr.ViolatedConstraint != "sensitiveAspectScope" {
+		t.Fatalf("want sensitiveAspectScope violation, got %v", err)
+	}
+}
+
+// --- The budget fail-open closure -----------------------------------------
+
+// Steps 6 and 6.5 re-resolve the SAME mutation against the SAME shared
+// live-read budget. Step 6 can resolve a class as sensitive, pass its
+// anchoring check, and leave the budget exhausted; step 6.5's identical call
+// then comes back empty. Reading that emptiness as "not sensitive" is what
+// committed plaintext. It is now an error instead.
+func TestEncryptSensitiveMutations_BudgetExhaustedResolution_IsAnError(t *testing.T) {
+	t.Parallel()
+	ctx, conn, _, _, _ := setupTestPipeline(t)
+	cp, _ := newEncryptTestCommitPath(t, ctx, conn)
+
+	// A class with no exact DDL, so resolution must walk the instanceOf chain
+	// and spend live reads — against a budget with nothing left.
+	in := []MutationOp{sensitiveMutation("vtx.identity."+testNanoID2+".ssn2", "ssn.v2", "123-45-6789")}
+	state := HydratedState{Context: ScriptContext{LiveReads: &liveReadBudgetTracker{budget: 0}}}
+
+	_, _, err := cp.encryptSensitiveMutations(ctx, in, state)
+	if err == nil {
+		t.Fatal("a resolution that came back empty after a live-read fault must fail the operation, not skip encryption")
+	}
+	if !strings.Contains(err.Error(), "live-read fault") {
+		t.Fatalf("the error must name the fault, got: %v", err)
+	}
+}
+
+// The other half of the same rule, and the reason it is two conditions rather
+// than one: step 6 keeps its fail-open to the permissive default. A budget
+// exhausted during STEP 6's own walk resolves to no DDL and the mutation
+// passes — unchanged, and asserted here so the asymmetry is deliberate rather
+// than incidental.
+func TestStep6_BudgetExhausted_StillFailsOpenToPermissive(t *testing.T) {
+	t.Parallel()
+	ctx, conn, _, _, _ := setupTestPipeline(t)
+	v := newCustodyValidator(t, ctx, conn)
+
+	m := aspectMutation("vtx.appointment."+testNanoID2+".notes", "unregistered.v2")
+	state := HydratedState{Context: ScriptContext{LiveReads: &liveReadBudgetTracker{budget: 0}}}
+	env := newTestEnvelope(testNanoID1)
+	if err := v.Validate(ctx, env, ScriptResult{Mutations: []MutationOp{m}}, state); err != nil {
+		t.Fatalf("step 6 must still fail open to the permissive default, got: %v", err)
+	}
 }

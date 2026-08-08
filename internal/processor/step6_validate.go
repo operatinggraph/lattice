@@ -197,12 +197,12 @@ func (v *ValidatorImpl) validateOne(ctx context.Context, env *OperationEnvelope,
 // the DDL's declared custody kind (retention-class-key-custody-design.md
 // §4.1). The fail-closed default is the whole point of the shape: a package
 // that flips Sensitive:true on an appointment-anchored aspect and forgets to
-// declare custody gets today's rejection, NOT plaintext at rest.
+// declare custody is rejected, NOT granted plaintext at rest.
 func validateSensitiveCustody(ref MetaVertexRef, mutationKey, parentType, rid string) error {
 	switch ref.CustodyKind {
 	case "", CustodyKindIdentity:
-		// Byte-identical to the pre-custody rule: the DEK is the anchoring
-		// identity's, so the anchor must BE an identity or there is no holder.
+		// The DEK belongs to the anchoring identity, so the anchor must BE an
+		// identity or there is no holder to custody it.
 		if parentType != "identity" {
 			return &DDLViolation{
 				ViolatedConstraint: "sensitiveAspectScope",

@@ -127,11 +127,11 @@ type AuthTraceWriter interface {
 // Nil emitter is valid — all methods are no-ops (allows stub-mode callers
 // to skip wiring).
 type AuthTraceEmitter struct {
-	writer             AuthTraceWriter
-	bucket             string
-	instance           string
+	writer              AuthTraceWriter
+	bucket              string
+	instance            string
 	traceAllowDecisions bool
-	logger             *slog.Logger
+	logger              *slog.Logger
 }
 
 // NewAuthTraceEmitter constructs the emitter. writer is typically a *substrate.Conn.
@@ -143,11 +143,11 @@ func NewAuthTraceEmitter(writer AuthTraceWriter, bucket, instance string, traceA
 		logger = slog.Default()
 	}
 	return &AuthTraceEmitter{
-		writer:             writer,
-		bucket:             bucket,
-		instance:           instance,
+		writer:              writer,
+		bucket:              bucket,
+		instance:            instance,
 		traceAllowDecisions: traceAllowDecisions,
-		logger:             logger,
+		logger:              logger,
 	}
 }
 
@@ -198,15 +198,15 @@ func (e *AuthTraceEmitter) buildRecord(env *OperationEnvelope, decision Decision
 	}
 
 	rec := AuthTraceRecord{
-		Key:        key,
-		Class:      "meta.healthRecord",
-		RequestID:  env.RequestID,
-		Actor:      env.Actor,
-		Operation:  env.OperationType,
+		Key:         key,
+		Class:       "meta.healthRecord",
+		RequestID:   env.RequestID,
+		Actor:       env.Actor,
+		Operation:   env.OperationType,
 		AuthOutcome: outcome,
-		AuthCode:   authCode,
-		AuthReason: authReason,
-		ObservedAt: now,
+		AuthCode:    authCode,
+		AuthReason:  authReason,
+		ObservedAt:  now,
 	}
 
 	// Populate from doc (available on denial paths via Decision.Doc and on

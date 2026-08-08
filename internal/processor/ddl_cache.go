@@ -89,6 +89,13 @@ const (
 	// declared KIND above is camelCase; these are two different strings and
 	// conflating them yields a key nothing can address.
 	RetentionClassVertexType = "retentionclass"
+
+	// CustodyKindUnresolvable marks a DDL whose custody declaration exists but
+	// could not be read. It is deliberately not a legal declared kind — the
+	// install admits only the two above — so every consumer's default branch
+	// refuses it, which is the point: a class whose custodian is unknown must
+	// reject its writes rather than guess a holder.
+	CustodyKindUnresolvable = "!unresolvable"
 )
 
 // DDLCache is the Processor's in-memory map from canonicalName to
@@ -308,19 +315,37 @@ func (c *DDLCache) loadMetaVertex(ctx context.Context, root string, _ []string) 
 		}
 	}
 
-	// custody aspect. Absent → kind "identity", today's model — which is why
-	// nothing is defaulted here: an empty CustodyKind IS the identity kind,
-	// and step 6 reads it that way rather than relying on a value written at
-	// load time (a DDL fixture that predates this aspect must behave exactly
-	// as it did before).
+	// custody aspect. Absent → the identity kind. Nothing is defaulted here on
+	// purpose: an empty CustodyKind IS the identity kind, and every consumer
+	// reads it that way, so a DDL carrying no custody declaration needs no
+	// value materialized at load time to behave correctly.
 	if cEntry, err := c.conn.KVGet(ctx, c.coreBucket, root+".custody"); err == nil {
 		var asp struct {
-			Data struct {
+			IsDeleted bool `json:"isDeleted"`
+			Data      struct {
 				Kind      string `json:"kind"`
 				HolderKey string `json:"holderKey"`
 			} `json:"data"`
 		}
-		if err := json.Unmarshal(cEntry.Value, &asp); err == nil {
+		// An unparseable custody declaration poisons the kind rather than
+		// zeroing it or failing the load. Each alternative fails OPEN in its
+		// own direction: zeroing degrades the DDL to identity custody, quietly
+		// re-pointing a retained record's DEK at the very data subject whose
+		// erasure it was declared to survive; returning an error makes Refresh
+		// skip the meta-vertex entirely, so the class resolves to NO DDL, is
+		// never seen as sensitive, and commits as plaintext. Poisoning keeps
+		// the DDL present and sensitive with a kind no branch accepts, so
+		// step 6 rejects every write to it — loudly, and with nothing at rest.
+		if err := json.Unmarshal(cEntry.Value, &asp); err != nil {
+			c.logger.Warn("ddl cache: unparseable custody aspect; refusing writes to this class",
+				"key", root+".custody", "error", err)
+			ref.CustodyKind = CustodyKindUnresolvable
+			ref.CustodyHolderKey = ""
+		} else if !asp.IsDeleted {
+			// A tombstone retains the prior document, so the declaration must
+			// be read as ABSENT when deleted — otherwise a package that
+			// revokes its custody declaration keeps writing to the class DEK
+			// forever, with no way to un-declare short of dropping the DDL.
 			ref.CustodyKind = asp.Data.Kind
 			ref.CustodyHolderKey = asp.Data.HolderKey
 		}

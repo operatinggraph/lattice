@@ -62,24 +62,47 @@ func (cp *CommitPath) encryptSensitiveMutations(ctx context.Context, mutations [
 		}
 		kind := substrate.ClassifyKey(m.Key)
 		ref, ok, fault := resolver.resolveGoverningDDLChecked(ctx, class, m.Key, kind, result, state)
-		if fault != nil {
-			// A DEGRADED resolution is not a "not sensitive" answer. Step 6
-			// ran first against this same shared live-read budget and may have
-			// resolved this very class as sensitive before exhausting it; were
-			// we to treat the fault as a miss, the aspect would commit as
-			// plaintext. Fail the operation instead — the caller's OCC/stub
-			// handling replies a failure, and a retry gets a fresh budget.
-			return nil, false, fmt.Errorf("step 6.5: resolve DDL for %s degraded by a live-read fault; refusing to treat it as non-sensitive: %w", m.Key, fault)
+		if fault != nil && !ok {
+			// An EMPTY resolution that follows a live-read fault is not a "not
+			// sensitive" answer — it is no answer at all. Step 6 ran first
+			// against this same shared live-read budget and may have resolved
+			// this very class as sensitive before exhausting it; reading the
+			// empty result as a miss would commit the aspect as PLAINTEXT.
+			// Reject the operation instead.
+			//
+			// Both conditions are required. A fault that still ends in a
+			// definitive DDL (a later hop resolved it) told us what we needed,
+			// so it is immaterial and must not fail an otherwise valid write.
+			//
+			// The rejection is TERMINAL, not a retry: handleStubFailure replies
+			// and Terms the message, and the budget counter is monotone within
+			// an execution, so the submitter resubmits rather than the platform
+			// redelivering into the same exhausted budget.
+			return nil, false, fmt.Errorf("step 6.5: resolve DDL for %s came back empty after a live-read fault; refusing to treat it as non-sensitive: %w", m.Key, fault)
 		}
 		if !ok || !ref.Sensitive {
 			continue
 		}
-		holderKey, ok := keyHolderFor(ref, m.Key)
-		if !ok {
-			// step 6 already rejected a sensitive aspect whose custody it
-			// could not satisfy; a malformed key here would have failed
-			// validation.
+		// Sensitivity is an ASPECT-level property — the install refuses
+		// Sensitive on any other DDL class — and step 6 gates its custody
+		// check the same way. A vertex or link mutation whose class merely
+		// collides with a sensitive aspect DDL's canonicalName is not a
+		// sensitive aspect, so it passes through here exactly as step 6 lets
+		// it pass. Keeping the two gates identical is the point: an asymmetry
+		// is what lets one step act on a mutation the other never checked.
+		if kind != substrate.KindAspect {
 			continue
+		}
+		holderKey, ok := keyHolderFor(ref, kind, m.Key)
+		if !ok {
+			// The DDL says this data is sensitive and we could not determine a
+			// key holder for it. Step 6 rejects every shape that reaches here,
+			// but that is an invariant across two steps reading a cache a
+			// concurrent meta-commit can invalidate BETWEEN them — not a
+			// guarantee. Skipping would commit the plaintext of a declared
+			// sensitive aspect, so this fails the operation rather than
+			// trusting the earlier step to still agree.
+			return nil, false, fmt.Errorf("step 6.5: sensitive class %q on %s resolves to no key holder (custody kind %q); refusing to commit it unencrypted", ref.CanonicalName, m.Key, ref.CustodyKind)
 		}
 		env, ok := envelopes[holderKey]
 		if !ok {
@@ -114,24 +137,42 @@ func (cp *CommitPath) encryptSensitiveMutations(ctx context.Context, mutations [
 	return append(out, extra...), len(extra) > 0, nil
 }
 
-// keyHolderFor resolves WHICH vertex custodies this aspect's DEK
+// keyHolderFor resolves WHICH vertex custodies this mutation's DEK
 // (retention-class-key-custody-design.md §4.2). Custody is a function of the
 // resolved DDL and nothing else: a retentionClass DDL names its holder, and
-// every other DDL falls back to today's derivation — the aspect's own
-// anchoring identity. Returns false when neither yields a usable holder,
-// which step 6 has already rejected upstream.
-func keyHolderFor(ref MetaVertexRef, mutationKey string) (string, bool) {
-	if ref.CustodyKind == CustodyKindRetentionClass {
+// every other DDL derives the aspect's own anchoring identity. Returns false
+// when neither yields a usable holder; the caller treats that as a hard error
+// rather than as permission to commit plaintext.
+//
+// The kind gate is load-bearing and mirrors step 6's own (`ref.Sensitive &&
+// kind == KindAspect`). A DDL cache lookup is keyed on canonicalName alone, so
+// a VERTEX mutation carrying an aspect DDL's class resolves to that aspect
+// DDL; step 6 skips its custody check for a non-aspect mutation, so without
+// this gate step 6.5 would encrypt a vertex root under a holder nothing
+// validated and no read path would ever decrypt it.
+func keyHolderFor(ref MetaVertexRef, kind substrate.KeyKind, mutationKey string) (string, bool) {
+	if kind != substrate.KindAspect {
+		return "", false
+	}
+	switch ref.CustodyKind {
+	case CustodyKindRetentionClass:
 		if ref.CustodyHolderKey == "" {
 			return "", false
 		}
 		return ref.CustodyHolderKey, true
-	}
-	vertexKey, vertexType, _, _, ok := substrate.ParseAspectKey(mutationKey)
-	if !ok || vertexType != "identity" {
+	case "", CustodyKindIdentity:
+		vertexKey, vertexType, _, _, ok := substrate.ParseAspectKey(mutationKey)
+		if !ok || vertexType != "identity" {
+			return "", false
+		}
+		return vertexKey, true
+	default:
+		// An unrecognized kind must NOT fall through to the identity
+		// derivation. Doing so would custody a record on the data subject
+		// whenever the declaration was garbled — silently choosing the one
+		// custodian a retained record was declared to outlive.
 		return "", false
 	}
-	return vertexKey, true
 }
 
 // ensureKeyHolderKey returns the key holder's existing piiKey envelope, or

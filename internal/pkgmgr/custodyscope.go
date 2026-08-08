@@ -2,11 +2,12 @@ package pkgmgr
 
 import "fmt"
 
-// validateCustodyScope enforces the four install-time custody rules
-// (retention-class-key-custody-design.md §3.2). All four fail CLOSED, and all
-// four exist for the same reason: a package that believes it has a retention
-// posture it does not actually have is worse than one that has none, because
-// the belief is what stops anyone looking again.
+// validateCustodyScope enforces the install-time custody rules
+// (retention-class-key-custody-design.md §3.2), plus the availability gate
+// rule 5 describes. Every one fails CLOSED, and they exist for the same
+// reason: a package that believes it has a retention posture it does not
+// actually have is worse than one that has none, because the belief is what
+// stops anyone looking again.
 //
 // It is a pure function (no I/O) so it runs before any KV operation, the same
 // doctrine as validateSensitiveClassScope, whose sibling it is.
@@ -72,10 +73,25 @@ func (def Definition) validateCustodyScope() error {
 					"pkgmgr: DDL[%d] %q: Custody.RetentionClass %q is not declared by this package — a retention class may only be named by the package that declares it",
 					idx, d.CanonicalName, c.RetentionClass)
 			}
-			continue
+			// 5. Shape is valid, but the mechanism is not yet whole. The read
+			// path does not resolve custody from the ciphertext's keyId — every
+			// decrypt site still derives the holder from the aspect's own anchor
+			// (design §11 Fire 1 item 2). Until that lands a class-custodied
+			// record is WRITE-ONLY: decrypt-on-read hands the script raw
+			// ciphertext, and a Secure Lens fails its whole batch on the AEAD
+			// tag. Refusing the declaration is the fail-closed reading of a
+			// half-built primitive; permitting it trades a loud install error
+			// for silent unreadable PHI. This check runs LAST so a malformed
+			// declaration still gets its precise error.
+			//
+			// REMOVE THIS with item 2, whose green bar is a per-site test that a
+			// ciphertext's keyId, not its anchor, selects the key.
+			return fmt.Errorf(
+				"pkgmgr: DDL[%d] %q: Custody.Kind %q is not installable yet — the write path custodies on the class but every decrypt site still resolves the holder from the aspect's anchor, so the record would be unreadable; this gate lifts when the keyId-resolved read path ships",
+				idx, d.CanonicalName, CustodyKindRetentionClass)
 		}
 
-		// Kind identity carries no class; naming one states a custody the
+		// 6. Kind identity carries no class; naming one states a custody the
 		// install would not honor.
 		if c.RetentionClass != "" {
 			return fmt.Errorf(

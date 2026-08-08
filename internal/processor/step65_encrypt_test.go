@@ -228,37 +228,6 @@ func TestEncryptSensitiveMutations_Tombstone_PassesThrough(t *testing.T) {
 	}
 }
 
-// TestEncryptSensitiveMutations_NonIdentityAnchor_PassesThrough: a sensitive
-// class anchored under a non-identity vertex type is left alone here (step 6
-// already rejects a non-identity-anchored sensitive aspect ahead of this
-// stage, so a malformed key surviving to 6.5 must not panic or encrypt).
-func TestEncryptSensitiveMutations_NonIdentityAnchor_PassesThrough(t *testing.T) {
-	t.Parallel()
-	ctx, conn, _, _, _ := setupTestPipeline(t)
-	cp, _ := newEncryptTestCommitPath(t, ctx, conn)
-
-	in := []MutationOp{sensitiveMutation("vtx.task."+testNanoID2+".ssn", "ssn", "123-45-6789")}
-
-	out, minted, err := cp.encryptSensitiveMutations(ctx, in, HydratedState{})
-	if err != nil {
-		t.Fatalf("encryptSensitiveMutations: %v", err)
-	}
-	if minted {
-		t.Fatalf("mintedPiiKey = true, want false")
-	}
-	data := out[0].Document["data"].(map[string]interface{})
-	if data["value"] != "123-45-6789" {
-		t.Fatalf("data = %+v, want the plaintext left untouched (no identity key to encrypt under)", data)
-	}
-}
-
-// TestEncryptSensitiveMutations_InstanceOfChainedSensitiveClass_Encrypts: a
-// mutation's OWN class ("ssn.v2") is not directly registered, but its
-// identity's instanceOf chain resolves — via the SAME ddlResolver step 6 uses
-// — to a vertex classed "ssn", a registered Sensitive DDL. Before wiring step
-// 6.5 through the shared resolver this mutation's raw DDLs.Lookup("ssn.v2")
-// missed and the plaintext committed unencrypted; the shared resolver now
-// encrypts it exactly as step 6 would anchor-check it.
 func TestEncryptSensitiveMutations_InstanceOfChainedSensitiveClass_Encrypts(t *testing.T) {
 	t.Parallel()
 	ctx, conn, _, _, _ := setupTestPipeline(t)
