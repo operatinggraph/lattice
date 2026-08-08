@@ -195,6 +195,31 @@ func (r *ddlResolver) logger() *slog.Logger {
 // coarse-class vertex shipping today the exact lookup wins first, so the walk —
 // and any read — never runs.
 func (r *ddlResolver) resolveGoverningDDL(ctx context.Context, class, key string, kind substrate.KeyKind, result ScriptResult, state HydratedState) (MetaVertexRef, bool) {
+	ref, ok, _ := r.resolveGoverningDDLChecked(ctx, class, key, kind, result, state)
+	return ref, ok
+}
+
+// resolveGoverningDDLChecked is resolveGoverningDDL plus the one thing the
+// permissive default deliberately hides: whether resolution was DEGRADED by a
+// live-read fault rather than genuinely finding no governing DDL. Both
+// outcomes return ok=false, and for step 6 that conflation is correct — a read
+// fault must degrade to today's permissive behavior, never resolve into a
+// wrong DDL.
+//
+// It is NOT correct for step 6.5, which re-resolves the SAME mutation against
+// the SAME shared live-read budget step 6 just spent from. Step 6 can resolve
+// a class as sensitive, pass its anchoring check, and leave the budget
+// exhausted; step 6.5's identical call then faults, reads ok=false as "not
+// sensitive", and commits the aspect as PLAINTEXT. Two steps disagreeing about
+// sensitivity fails open in the one direction this plane cannot tolerate, so
+// step 6.5 takes the error and fails the operation instead.
+func (r *ddlResolver) resolveGoverningDDLChecked(ctx context.Context, class, key string, kind substrate.KeyKind, result ScriptResult, state HydratedState) (MetaVertexRef, bool, error) {
+	var fault error
+	ref, ok := r.resolveWithFault(ctx, class, key, kind, result, state, &fault)
+	return ref, ok, fault
+}
+
+func (r *ddlResolver) resolveWithFault(ctx context.Context, class, key string, kind substrate.KeyKind, result ScriptResult, state HydratedState, fault *error) (MetaVertexRef, bool) {
 	if ref, ok := r.DDLs.Lookup(class); ok {
 		return ref, true // exact match — unchanged Contract #1 §1.5 step-3 path
 	}
@@ -207,7 +232,7 @@ func (r *ddlResolver) resolveGoverningDDL(ctx context.Context, class, key string
 	visited := map[string]bool{root: true}
 	cur := root
 	for hop := 0; hop < maxInstanceOfHops; hop++ {
-		target, ok := r.instanceOfTargetOf(ctx, cur, result, state)
+		target, ok := r.instanceOfTargetOf(ctx, cur, result, state, fault)
 		if !ok {
 			break // no instanceOf link → no type authority
 		}
@@ -228,7 +253,7 @@ func (r *ddlResolver) resolveGoverningDDL(ctx context.Context, class, key string
 
 		// A business vertex whose own class is itself a registered DDL is also a
 		// terminal (the one-hop instance→type domain shape).
-		if tclass, ok := r.classOf(ctx, target, result, state); ok {
+		if tclass, ok := r.classOf(ctx, target, result, state, fault); ok {
 			if ref, ok := r.DDLs.Lookup(tclass); ok {
 				return ref, true
 			}
@@ -250,7 +275,7 @@ func (r *ddlResolver) resolveGoverningDDL(ctx context.Context, class, key string
 // the gate). The in-flight batch is the authoritative layer (last op per link
 // key wins; a tombstone in the batch suppresses the same link committed below);
 // then the hydrated working set, then a single bounded on-demand Core KV read.
-func (r *ddlResolver) instanceOfTargetOf(ctx context.Context, vtxRoot string, result ScriptResult, state HydratedState) (string, bool) {
+func (r *ddlResolver) instanceOfTargetOf(ctx context.Context, vtxRoot string, result ScriptResult, state HydratedState, fault *error) (string, bool) {
 	batchLive, batchDead := reconcileBatchInstanceOf(vtxRoot, result.Mutations)
 	if len(batchLive) > 0 {
 		return soleTarget(batchLive)
@@ -263,6 +288,10 @@ func (r *ddlResolver) instanceOfTargetOf(ctx context.Context, vtxRoot string, re
 		if err != nil {
 			// Fail-open to the permissive default — never resolve into a wrong
 			// DDL on a read fault. A read error degrades to today's behavior.
+			// The fault is RECORDED, not acted on, so a caller that cannot
+			// tolerate a degraded resolution (step 6.5) can tell this apart
+			// from a genuine "no DDL".
+			recordResolveFault(fault, err)
 			r.logger().Warn("step 6: instanceOf on-demand read failed; resolving to permissive default",
 				"vtxRoot", vtxRoot, "error", err)
 			return "", false
@@ -359,7 +388,7 @@ func sortEdges(edges []instanceOfEdge) {
 // classOf resolves the class of the vertex at targetKey, preferring the batch,
 // then the working set, then a single on-demand Core KV read. Used to detect a
 // terminal whose own class is itself a registered DDL.
-func (r *ddlResolver) classOf(ctx context.Context, targetKey string, result ScriptResult, state HydratedState) (string, bool) {
+func (r *ddlResolver) classOf(ctx context.Context, targetKey string, result ScriptResult, state HydratedState, fault *error) (string, bool) {
 	for _, m := range result.Mutations {
 		if m.Key != targetKey || m.Document == nil || mutationTombstoned(m) {
 			continue
@@ -375,11 +404,27 @@ func (r *ddlResolver) classOf(ctx context.Context, targetKey string, result Scri
 		return doc.Class, true
 	}
 	if r.classReader != nil {
-		if class, ok, err := r.classReader.ClassOf(ctx, targetKey, state.Context.LiveReads); err == nil && ok {
+		class, ok, err := r.classReader.ClassOf(ctx, targetKey, state.Context.LiveReads)
+		if err != nil {
+			// Same posture as the instanceOf reader above: degrade to the
+			// permissive default, but record that the resolution was degraded
+			// rather than genuinely empty.
+			recordResolveFault(fault, err)
+		} else if ok {
 			return class, true
 		}
 	}
 	return "", false
+}
+
+// recordResolveFault keeps the FIRST live-read fault of a resolution. First,
+// not last: it is the one that truncated the walk, so it is the one that
+// explains why the resolution came back empty. Nil-safe — every caller that
+// does not care passes nil.
+func recordResolveFault(fault *error, err error) {
+	if fault != nil && *fault == nil {
+		*fault = err
+	}
 }
 
 // vertexRootForResolve derives the 3-segment vertex root whose instanceOf chain

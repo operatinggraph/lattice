@@ -523,7 +523,7 @@ func TestBuildInstallBatch_SensitiveAspectEmittedOnlyWhenTrue(t *testing.T) {
 		EntityNanoIDForTest(def.Name, "ddl:plainType"),
 		EntityNanoIDForTest(def.Name, "ddl:secretType"),
 	}
-	ops, _, err := inst.buildInstallBatch(def, pkgKey, ddlIDs, nil, nil, nil, nil, nil, nil, nil)
+	ops, _, err := inst.buildInstallBatch(def, pkgKey, ddlIDs, nil, nil, nil, nil, nil, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("buildInstallBatch: %v", err)
 	}
@@ -576,7 +576,7 @@ func TestBuildInstallBatch_EffectsAspectEmittedOnlyWhenDeclared(t *testing.T) {
 		EntityNanoIDForTest(def.Name, "opMeta:SignLease"),
 		EntityNanoIDForTest(def.Name, "opMeta:CreateLeaseApplication"),
 	}
-	ops, _, err := inst.buildInstallBatch(def, pkgKey, ddlIDs, nil, nil, nil, nil, nil, opMetaIDs, nil)
+	ops, _, err := inst.buildInstallBatch(def, pkgKey, ddlIDs, nil, nil, nil, nil, nil, opMetaIDs, nil, nil)
 	if err != nil {
 		t.Fatalf("buildInstallBatch: %v", err)
 	}
@@ -637,7 +637,7 @@ func TestBuildInstallBatch_CeremonyAspectEmittedOnlyWhenDeclared(t *testing.T) {
 		EntityNanoIDForTest(def.Name, "opMeta:CreateUnclaimedIdentity"),
 		EntityNanoIDForTest(def.Name, "opMeta:ClaimIdentity"),
 	}
-	ops, _, err := inst.buildInstallBatch(def, pkgKey, ddlIDs, nil, nil, nil, nil, nil, opMetaIDs, nil)
+	ops, _, err := inst.buildInstallBatch(def, pkgKey, ddlIDs, nil, nil, nil, nil, nil, opMetaIDs, nil, nil)
 	if err != nil {
 		t.Fatalf("buildInstallBatch: %v", err)
 	}

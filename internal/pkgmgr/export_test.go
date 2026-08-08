@@ -48,9 +48,13 @@ func BuildInstallBatchForTest(def Definition) ([]InstallMutationForTest, []strin
 		inst.RoleIDs[r.CanonicalName] = roleIDs[idx]
 	}
 	def = inst.resolvePaneRoles(def)
+	retentionClassIDs := make([]string, len(def.RetentionClasses))
+	for idx, rc := range def.RetentionClasses {
+		retentionClassIDs[idx] = RetentionClassID(def.Name, rc.CanonicalName)
+	}
 
 	ops, declared, err := inst.buildInstallBatch(def, pkgKey, ddlIDs, lensIDs, permIDs, roleIDs,
-		weaverTargetIDs, loomPatternIDs, opMetaIDs, paneIDs)
+		weaverTargetIDs, loomPatternIDs, opMetaIDs, paneIDs, retentionClassIDs)
 	if err != nil {
 		return nil, nil, err
 	}

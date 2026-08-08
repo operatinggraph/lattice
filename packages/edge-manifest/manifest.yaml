@@ -1,5 +1,5 @@
 name: edge-manifest
-version: 0.15.2
+version: 0.15.3
 description: |
   The Facet edge app's world manifest: fifteen Personal Lenses (edgeIdentity/
   edgeServices/edgeCatalog/edgeTasks/

@@ -38,9 +38,19 @@ type MetaVertexRef struct {
 	// per Contract #1 §1.5).
 	PermittedCommands []string
 	// Sensitive is true when the DDL declares `sensitive: true` (Phase-1
-	// applies to aspect DDLs; sensitive aspects may only attach to
-	// identity vertices per NFR-S3).
+	// applies to aspect DDLs; a sensitive aspect's anchoring rule follows
+	// CustodyKind below).
 	Sensitive bool
+	// CustodyKind is the declared key-custody kind of a sensitive aspect DDL
+	// (retention-class-key-custody-design.md §3.2): "identity" — the default,
+	// and what an absent declaration means — or "retentionClass". It is what
+	// makes step 6's identity-anchoring rule conditional rather than absolute.
+	CustodyKind string
+	// CustodyHolderKey is the resolved vertex key of the key holder, set only
+	// for CustodyKind "retentionClass". The INSTALL resolves the declared
+	// class's canonical name to this key, so the commit path performs no
+	// extra read to learn whose DEK encrypts the aspect.
+	CustodyHolderKey string
 	// ScriptSource is the body of the .script aspect, if present. The
 	// Hydrator surfaces this verbatim to the Executor; empty for DDLs
 	// without an attached script.
@@ -56,6 +66,37 @@ type MetaVertexRef struct {
 	// source compiled to.
 	Script *CompiledScript
 }
+
+// Key-custody kinds, as they appear in a DDL meta-vertex's `.custody` aspect
+// (retention-class-key-custody-design.md §3.2). pkgmgr WRITES these strings at
+// install; the Processor reads them here. They are deliberately duplicated
+// rather than imported: pkgmgr already depends on this package, so the import
+// would cycle — the same reason the `.sensitive` aspect's name is a literal on
+// both sides. Any change to these values must land on both.
+const (
+	// CustodyKindIdentity custodies a sensitive aspect's DEK on the aspect's
+	// own anchoring identity. The default: an ABSENT custody declaration
+	// means this, so an empty CustodyKind and this constant are the same
+	// case everywhere they are tested.
+	CustodyKindIdentity = "identity"
+
+	// CustodyKindRetentionClass custodies the DEK on a package-declared
+	// retention-class holder, which permits any anchor type.
+	CustodyKindRetentionClass = "retentionClass"
+
+	// RetentionClassVertexType is the Contract #1 type segment of a holder
+	// vertex — all lowercase, because a type segment is [a-z][a-z0-9]*. The
+	// declared KIND above is camelCase; these are two different strings and
+	// conflating them yields a key nothing can address.
+	RetentionClassVertexType = "retentionclass"
+
+	// CustodyKindUnresolvable marks a DDL whose custody declaration exists but
+	// could not be read. It is deliberately not a legal declared kind — the
+	// install admits only the two above — so every consumer's default branch
+	// refuses it, which is the point: a class whose custodian is unknown must
+	// reject its writes rather than guess a holder.
+	CustodyKindUnresolvable = "!unresolvable"
+)
 
 // DDLCache is the Processor's in-memory map from canonicalName to
 // MetaVertexRef. Built at startup via Refresh and refreshed
@@ -271,6 +312,50 @@ func (c *DDLCache) loadMetaVertex(ctx context.Context, root string, _ []string) 
 	if !ref.Sensitive && rootDoc.Data != nil {
 		if v, ok := rootDoc.Data["sensitive"].(bool); ok {
 			ref.Sensitive = v
+		}
+	}
+
+	// custody aspect. Absent → the identity kind. Nothing is defaulted here on
+	// purpose: an empty CustodyKind IS the identity kind, and every consumer
+	// reads it that way, so a DDL carrying no custody declaration needs no
+	// value materialized at load time to behave correctly.
+	if cEntry, err := c.conn.KVGet(ctx, c.coreBucket, root+".custody"); err == nil {
+		var asp struct {
+			IsDeleted bool `json:"isDeleted"`
+			Data      struct {
+				Kind      string `json:"kind"`
+				HolderKey string `json:"holderKey"`
+			} `json:"data"`
+		}
+		// An unparseable custody declaration poisons the kind rather than
+		// zeroing it or failing the load. Each alternative fails OPEN in its
+		// own direction: zeroing degrades the DDL to identity custody, quietly
+		// re-pointing a retained record's DEK at the very data subject whose
+		// erasure it was declared to survive; returning an error makes Refresh
+		// skip the meta-vertex entirely, so the class resolves to NO DDL, is
+		// never seen as sensitive, and commits as plaintext. Poisoning keeps
+		// the DDL present and sensitive with a kind no branch accepts, so
+		// step 6 rejects every write to it — loudly, and with nothing at rest.
+		if err := json.Unmarshal(cEntry.Value, &asp); err != nil {
+			c.logger.Warn("ddl cache: unparseable custody aspect; refusing writes to this class",
+				"key", root+".custody", "error", err)
+			ref.CustodyKind = CustodyKindUnresolvable
+			ref.CustodyHolderKey = ""
+		} else if !asp.IsDeleted {
+			// A tombstone retains the prior document, so the declaration must
+			// be read as ABSENT when deleted — otherwise a package that
+			// revokes its custody declaration keeps writing to the class DEK
+			// forever, with no way to un-declare short of dropping the DDL.
+			ref.CustodyKind = asp.Data.Kind
+			ref.CustodyHolderKey = asp.Data.HolderKey
+		}
+	} else if !errors.Is(err, substrate.ErrKeyNotFound) {
+		return ref, false, fmt.Errorf("read custody %s: %w", root, err)
+	}
+	if ref.CustodyKind == "" && rootDoc.Data != nil {
+		if m, ok := rootDoc.Data["custody"].(map[string]interface{}); ok {
+			ref.CustodyKind, _ = m["kind"].(string)
+			ref.CustodyHolderKey, _ = m["holderKey"].(string)
 		}
 	}
 

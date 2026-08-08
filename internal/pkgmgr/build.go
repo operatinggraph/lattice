@@ -54,6 +54,7 @@ func (i *Installer) buildInstallBatch(
 	pkgKey string,
 	ddlIDs, lensIDs, permIDs, roleIDs []string,
 	weaverTargetIDs, loomPatternIDs, opMetaIDs, paneIDs []string,
+	retentionClassIDs []string,
 ) ([]installMutation, []string, error) {
 	var ops []installMutation
 	var declared []string
@@ -77,6 +78,25 @@ func (i *Installer) buildInstallBatch(
 		indexKey := "vtx.roleindex." + sha256NanoID("rolecanonical:"+r.CanonicalName)
 		addCreate(indexKey, docVertex("roleindex",
 			map[string]any{"canonicalName": r.CanonicalName, "roleId": roleIDs[idx]}))
+	}
+
+	// Retention-class key holders (retention-class-key-custody-design.md §3.1).
+	// A holder is an ordinary vertex whose `.piiKey` aspect the Processor mints
+	// lazily on the first sensitive write custodied by it — the same shape an
+	// identity holder has, which is why the key aspect keeps the localName
+	// `piiKey` rather than gaining a per-kind name. No canonical-name index
+	// vertex is minted: unlike a role, a class is nameable only by its own
+	// declaring package, so nothing ever resolves one cross-package.
+	for idx, rc := range def.RetentionClasses {
+		rcKey := "vtx." + RetentionClassVertexType + "." + retentionClassIDs[idx]
+		addCreate(rcKey, docVertex(RetentionClassVertexType, nil))
+		addCreate(rcKey+".retentionPolicy", docAspect(rcKey, "retentionPolicy", "retentionPolicy",
+			map[string]any{
+				"canonicalName":   rc.CanonicalName,
+				"policy":          rc.Policy,
+				"retentionPeriod": rc.RetentionPeriod,
+				"description":     rc.Description,
+			}))
 	}
 
 	// Fail-fast: validate all DDLSpec self-description fields before writing any entries.
@@ -140,6 +160,15 @@ func (i *Installer) buildInstallBatch(
 		if d.Sensitive {
 			addCreate(ddlKey+".sensitive", docAspect(ddlKey, "sensitive", "sensitive",
 				map[string]any{"value": true}))
+		}
+		// Key-custody declaration (retention-class-key-custody-design.md §3.2).
+		// Emitted only when a kind is declared; absent → the DDL cache resolves
+		// custody kind `identity`, today's model. Carrying the resolved holder
+		// KEY (not just the class's canonical name) is what keeps the commit
+		// path read-free: step 6.5 needs no lookup to know whose DEK to use.
+		if d.Custody.Kind != "" {
+			addCreate(ddlKey+".custody", docAspect(ddlKey, "custody", "custody",
+				custodyBody(def.Name, d.Custody)))
 		}
 	}
 
@@ -666,6 +695,22 @@ func paneSurface(s string) string {
 		return PaneSurfaceWork
 	}
 	return s
+}
+
+// custodyBody renders a DDL's `.custody` aspect. It resolves the declared
+// class's canonicalName to the holder's VERTEX KEY here, at install, so the
+// Processor's commit path never has to: step 6.5 reads holderKey straight off
+// the already-resolved DDL and mints or reads that vertex's `.piiKey` with no
+// extra lookup. Resolution is same-package by construction — pkgName is the
+// declaring package, which validateCustodyScope has already proven declares
+// the named class.
+func custodyBody(pkgName string, c CustodySpec) map[string]any {
+	body := map[string]any{"kind": c.Kind}
+	if c.RetentionClass != "" {
+		body["retentionClass"] = c.RetentionClass
+		body["holderKey"] = RetentionClassKey(pkgName, c.RetentionClass)
+	}
+	return body
 }
 
 func opCeremonyBody(c *OpCeremonySpec) map[string]any {
