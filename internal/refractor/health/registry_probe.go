@@ -72,24 +72,56 @@ func (p registryProbeSpecProbe) isEventStream() bool {
 	return p.Data != nil && p.Data.Source != nil && p.Data.Source.Kind == "eventStream"
 }
 
-// declaresHolderType reports whether this spec's Secure-Lens columns name
+// mayHoldHolderType reports whether this spec's Secure-Lens columns could name
 // holderType — the lens author's own statement about which key holders may open
 // its ciphertext, read from the same `targetConfig.secureColumns[].holderTypes` the
 // running decryptor is built from rather than inferred from compiled cypher.
-func (p registryProbeSpecProbe) declaresHolderType(holderType string) bool {
-	tc := p.TargetConfig
-	if tc == nil && p.Data != nil {
-		tc = p.Data.TargetConfig
-	}
-	if tc == nil {
-		return false
-	}
-	for _, sc := range tc.SecureColumns {
-		if slices.Contains(sc.HolderTypes, holderType) {
-			return true
+//
+// It answers UNKNOWN as YES, and the asymmetry is the whole point: the caller
+// uses this to decide which lenses a key destruction must reach, so excluding one
+// whose rows still hold the destroyed plaintext is the only unsafe direction.
+// Two shapes are unknown rather than negative, and both describe a lens that
+// CANNOT activate — which is precisely the lens whose absence from the registry
+// has to keep withholding the attestation:
+//
+//   - no targetConfig at either level — a spec that parses but carries no target
+//     config, which is the shape translateSpec rejects, so the lens never
+//     registers;
+//   - a secure column with an empty holderTypes list, which NewSecureDecryptor
+//     refuses outright.
+//
+// A decoded targetConfig with no secure columns at all is a genuine no: a plain
+// lens holds no ciphertext, and skipping those is what the narrowing is for. A
+// spec that did not decode CLEANLY never reaches here at all — the caller lets
+// only a cleanly-decoded spec exclude anything, since a partial decode can leave
+// a targetConfig standing while the field the error landed on is the one that
+// would have claimed the holder.
+func (p registryProbeSpecProbe) mayHoldHolderType(holderType string) bool {
+	// Both levels are consulted, never one in preference to the other, because
+	// the running loader picks between them by a different test than "which is
+	// non-nil" (unwrapSpecBody keys off a top-level cypherRule). A body carrying
+	// both would otherwise be read here from one level and projected there from
+	// the other. No producible spec has both — make_aspect writes the envelope
+	// only — so this costs nothing and removes the divergence by construction,
+	// exactly as the isEventStream sibling above does.
+	for _, tc := range []*registryProbeTargetProbe{p.TargetConfig, p.dataTargetConfig()} {
+		if tc == nil {
+			continue
+		}
+		for _, sc := range tc.SecureColumns {
+			if len(sc.HolderTypes) == 0 || slices.Contains(sc.HolderTypes, holderType) {
+				return true
+			}
 		}
 	}
-	return false
+	return p.TargetConfig == nil && p.dataTargetConfig() == nil
+}
+
+func (p registryProbeSpecProbe) dataTargetConfig() *registryProbeTargetProbe {
+	if p.Data == nil {
+		return nil
+	}
+	return p.Data.TargetConfig
 }
 
 // RegistryProbe periodically reconciles the set of lens IDs declared in Core
@@ -292,20 +324,19 @@ func (p *RegistryProbe) declaredLensIDs(ctx context.Context, holderType string) 
 		}
 
 		specEntry, err := p.conn.KVGet(ctx, p.bucket, key+".spec")
-		specReadable := false
 		var sp registryProbeSpecProbe
-		if err == nil && json.Unmarshal(specEntry.Value, &sp) == nil {
-			specReadable = true
-			if sp.isEventStream() {
-				continue
-			}
+		specRead := err == nil && json.Unmarshal(specEntry.Value, &sp) == nil
+		if specRead && sp.isEventStream() {
+			continue
 		}
 
-		// A holder-type filter, when one is asked for. An unreadable or
-		// unparseable spec is kept regardless — its holder types are UNKNOWN, and
-		// treating unknown as "not relevant" is the one direction that could
-		// silently exclude the lens whose plaintext the caller is asking about.
-		if holderType != "" && specReadable && !sp.declaresHolderType(holderType) {
+		// A holder-type filter, when one is asked for. Only a spec that decoded
+		// CLEANLY is allowed to exclude a lens: encoding/json keeps decoding past
+		// a type error, so a partially-populated probe can carry a targetConfig
+		// that says "not this holder" while the field the error landed on is
+		// exactly the one that would have said otherwise. Unknown means relevant,
+		// and a spec that did not fully decode is unknown.
+		if holderType != "" && specRead && !sp.mayHoldHolderType(holderType) {
 			continue
 		}
 

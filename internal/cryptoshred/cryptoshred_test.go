@@ -104,6 +104,19 @@ func csPrivacyCapDoc() *processor.CapabilityDoc {
 	}
 }
 
+// seedCSVertex writes a minimal live vertex envelope straight to Core KV, for
+// the service actors this harness needs to exist but does not create through an
+// operation.
+func seedCSVertex(t *testing.T, ctx context.Context, conn *substrate.Conn, key, class string) {
+	t.Helper()
+	b, err := json.Marshal(map[string]any{
+		"class": class, "isDeleted": false, "data": map[string]any{},
+	})
+	require.NoError(t, err)
+	_, err = conn.KVPut(ctx, testutil.HarnessCoreBucket, key, b)
+	require.NoError(t, err, "seed vertex %s", key)
+}
+
 type harness struct {
 	t          *testing.T
 	ctx        context.Context
@@ -127,6 +140,11 @@ func newHarness(t *testing.T) *harness {
 	ctx, conn := testutil.SetupPackageTestEnv(t) // rbac + privacy-base + identity + hygiene
 	testutil.SeedCapDoc(t, ctx, conn, csStaffCapDoc())
 	testutil.SeedCapDoc(t, ctx, conn, csPrivacyCapDoc())
+	// The service actor's own Core-KV vertex, not just its capability doc:
+	// RecordShredFinalization declares the actor as a hydrated read and checks
+	// its class, so an actor key with no vertex behind it is a declared-absent
+	// read and the finalization fails closed before the class check runs.
+	seedCSVertex(t, ctx, conn, csPrivacyActorKey, "identity.system.privacy")
 
 	v := testutil.TestVault(t)
 	cp, cons := testutil.CapabilityPipeline(t, ctx, conn, testutil.PipelineConfig{

@@ -656,9 +656,12 @@ func (s *Service) PauseRule(ctx context.Context, ruleID string) error {
 // (retention-class-key-custody-design.md §6.3 step 4).
 //
 // Returns an error if ruleID is not registered, if the rebuild fails, if its
-// wait is cancelled, or — as pipeline.ErrRebuildWaitTimeout — if wait expires
-// with the rescan still draining. That last one is a failure, not a completion:
-// the caller does not know the lens is rebuilt, so it must not attest.
+// wait is cancelled, as ErrRebuildWaitTimeout if wait expires with the rescan
+// still draining, or as ErrRebuildNotDrained if the rebuild ended with no
+// watcher having observed it drain. None of those is a completion: the caller
+// does not know the lens is rebuilt, so it must not attest. The last two also
+// say the fault is not the LENS's, which is why they are told apart — see their
+// declarations in this package.
 func (s *Service) RebuildRule(ctx context.Context, ruleID string, truncate bool, wait time.Duration) error {
 	s.mu.Lock()
 	r, ok := s.rebuilderByRuleID[ruleID]

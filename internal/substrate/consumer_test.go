@@ -298,17 +298,15 @@ func TestRunDurableConsumer_ReadFromBody(t *testing.T) {
 	}
 }
 
-// AckWait and MaxPrefetch are one fix, not two, and neither is testable through
-// behaviour alone at a sane test duration — so this asserts they reach the
-// JetStream consumer, which is the part that can silently regress.
-//
-// Why they travel together: AckWait's clock runs from when a message is
-// DELIVERED, and with nats.go's default prefetch of 500 "delivered" means "into
-// the client's buffer", not "into the handler". This loop is strictly serial, so
-// on a DeliverAll replay a queued message sits through every preceding handler
-// and is redelivered before its own ever runs, however large AckWait is. Capping
-// the prefetch is what makes the ack clock start when the work does.
-func TestRunDurableConsumer_AckWaitAndPrefetchReachTheConsumer(t *testing.T) {
+// AckWait and MaxPrefetch are one fix, not two: AckWait's clock runs from when a
+// message is DELIVERED, and with nats.go's default prefetch of 500 "delivered"
+// means "into the client's buffer", not "into the handler". This loop is
+// strictly serial, so on a DeliverAll replay a queued message sits through every
+// preceding handler and is redelivered before its own ever runs, however large
+// AckWait is. Capping the prefetch is what makes the ack clock start when the
+// work does. They are asserted separately because only one of them is visible on
+// the server: this test covers AckWait, the next covers the prefetch cap.
+func TestRunDurableConsumer_AckWaitReachesTheConsumer(t *testing.T) {
 	t.Parallel()
 	c, ctx := newTestConn(t)
 	bucket := "core-kv"
@@ -354,6 +352,80 @@ func TestRunDurableConsumer_AckWaitAndPrefetchReachTheConsumer(t *testing.T) {
 	if info.Config.AckWait != 97*time.Second {
 		t.Fatalf("AckWait = %v, want 97s — a slow handler is redelivered mid-flight without it", info.Config.AckWait)
 	}
+}
+
+// MaxPrefetch is a CLIENT-side pull option and never appears in ConsumerInfo, so
+// asserting it means asserting what it does: with one handler parked, a capped
+// consumer leaves the rest of the backlog UNDELIVERED on the server. Uncapped,
+// nats.go pulls up to 500 into its buffer, where each one's ack deadline is
+// already running against a handler that has not started.
+func TestRunDurableConsumer_MaxPrefetchLeavesTheBacklogUndelivered(t *testing.T) {
+	t.Parallel()
+	c, ctx := newTestConn(t)
+	bucket := "core-kv"
+	provisionCoreBucket(ctx, t, c, bucket)
+
+	cfg := DurableConsumerConfig{
+		Stream:        "KV_" + bucket,
+		FilterSubject: "$KV." + bucket + ".vtx.meta.>",
+		Durable:       "dc-test-prefetch",
+		MaxPrefetch:   1,
+	}
+	for _, key := range []string{"vtx.meta.pf1", "vtx.meta.pf2", "vtx.meta.pf3"} {
+		publishDurableTestMsg(ctx, t, c, bucket, key, []byte(`{"v":1}`))
+	}
+
+	runCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	defer close(release)
+	go func() {
+		_ = c.RunDurableConsumer(runCtx, cfg, func(_ context.Context, _ Message) Decision {
+			select {
+			case <-entered:
+			default:
+				close(entered)
+			}
+			<-release
+			return Ack
+		})
+	}()
+
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("consumer never delivered a message")
+	}
+
+	// The poll below gets its own deadline rather than riding the connection's:
+	// nesting a 5s poll inside a wait that may already have spent most of the
+	// shared budget turns a slow host into a hard failure on ctx rather than a
+	// readable assertion about the counts.
+	pollCtx, pollCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer pollCancel()
+	cons, err := c.js.Consumer(pollCtx, "KV_"+bucket, "dc-test-prefetch")
+	if err != nil {
+		t.Fatalf("look up consumer: %v", err)
+	}
+	// Poll to the steady state: the cap bounds how many the client MAY pull, so
+	// the reachable assertion is that while the single handler is parked the
+	// other two are still waiting on the server. Uncapped this settles at
+	// ackPending=3, pending=0 and the poll runs out.
+	var ackPending, pending uint64
+	for pollCtx.Err() == nil {
+		info, err := cons.Info(pollCtx)
+		if err != nil {
+			break
+		}
+		ackPending, pending = uint64(info.NumAckPending), info.NumPending
+		if ackPending == 1 && pending == 2 {
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatalf("with MaxPrefetch=1 exactly one message may be outstanding while the handler is parked: NumAckPending=%d NumPending=%d, want 1 and 2",
+		ackPending, pending)
 }
 
 // A zero AckWait must leave JetStream's own default rather than writing one, so

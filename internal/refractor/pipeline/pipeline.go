@@ -1504,17 +1504,14 @@ func (p *Pipeline) abandonRebuild(ctx context.Context, sig *rebuildSignal, cause
 	// rebuild is a finished one as far as a waiter is concerned — it is not
 	// draining and nothing further will end it — but `drained` is never set, so
 	// the waiter reads it as the failure it is.
-	owned := p.ownsRebuild(sig)
-	p.endRebuild(sig)
-
-	// The PIPELINE-WIDE state below belongs to whichever rebuild is current, and
-	// this one may no longer be it. Clearing the in-flight flag and writing
-	// "active" under a NEWER rebuild's live rescan would un-suppress the
-	// convergence sweep (Sweeper.suppressed reads RebuildInFlight) and announce a
-	// lens that is still draining — the precise condition the suppression exists
-	// to create. An older rebuild's failure is still worth recording, but it does
-	// not get to retire a newer one's status.
-	if !owned {
+	//
+	// endRebuild clears the in-flight flag when this rebuild still owns it, and
+	// reports that ownership. The status write below belongs to whichever rebuild
+	// is current, and this one may no longer be it: announcing "active" under a
+	// NEWER rebuild's live rescan would report a lens that is still draining. An
+	// older rebuild's failure is still worth recording, but it does not get to
+	// retire a newer one's status.
+	if owned := p.endRebuild(sig); !owned {
 		if p.reporter != nil {
 			if recErr := p.reporter.RecordError(ctx, cause.Error()); recErr != nil {
 				slog.Error("pipeline: rebuild: record abandoned-rebuild health signal",
@@ -1524,9 +1521,6 @@ func (p *Pipeline) abandonRebuild(ctx context.Context, sig *rebuildSignal, cause
 		return cause
 	}
 
-	// Clear the flag FIRST: the status write below must not race a concurrent
-	// healthSink.SetActive that would re-assert "rebuilding" off a stale flag.
-	p.rebuildInFlight.Store(false)
 	if p.reporter == nil {
 		return cause
 	}
@@ -1552,11 +1546,12 @@ func (p *Pipeline) abandonRebuild(ctx context.Context, sig *rebuildSignal, cause
 // actually observed the rescan reach zero outstanding.
 //
 // The two are separate because a closed channel alone cannot answer the
-// question an attesting caller is asking. A watcher cancelled at shutdown also
-// closes `done` — and a waiter selecting on a closed channel and an expired
-// context takes either arm at random, so "the rescan drained" and "the process
-// is going down mid-rescan" became the same observation about half the time.
-// The flag is what the waiter reads; the channel only says "stop waiting".
+// question an attesting caller is asking. Every exit closes `done`, including a
+// watcher cancelled at shutdown — and a waiter selecting on a closed channel and
+// an expired context takes either arm at random, so a close read as completion
+// makes "the rescan drained" and "the process is going down mid-rescan" the same
+// observation about half the time. The flag is what the waiter reads; the
+// channel only says "stop waiting".
 type rebuildSignal struct {
 	done    chan struct{}
 	drained atomic.Bool
@@ -1574,19 +1569,51 @@ func (p *Pipeline) beginRebuild() *rebuildSignal {
 	return sig
 }
 
-// endRebuild releases every waiter on sig and, if sig is still the installed
-// signal, clears it. The equality check keeps a slow finisher from retracting a
-// newer rebuild's signal: a rebuild that started after this one has already
-// replaced rebuildWatch, and its own waiters must keep waiting.
+// endRebuild ends sig: it clears the pipeline-wide in-flight flag, retracts the
+// installed signal and releases every waiter, and reports whether sig was still
+// the installed rebuild. The equality check keeps a slow finisher from
+// retracting a newer rebuild's signal: a rebuild that started after this one has
+// already replaced rebuildWatch, and its own waiters must keep waiting.
+//
+// Ownership, the flag and the release all move inside ONE critical section
+// because they are one decision. Checking ownership through a separate call
+// leaves a window between the answer and the mutation it gates, and clearing the
+// flag after the release leaves a wider one: a waiter freed by the close can
+// begin the next rebuild — beginRebuild takes this same lock, so it cannot — and
+// have its `rebuildInFlight` cleared out from under it by the goroutine that
+// just ended. That un-suppresses the convergence sweep (Sweeper.suppressed reads
+// RebuildInFlight) while the newer rescan is still draining.
+//
+// What ownership means here is narrow, and the narrowness is why this is not the
+// whole story: rebuildWatch tracks the most recently BEGUN rebuild, not the set
+// of rescans still running. `Rebuild` is fire-and-forget and does not take
+// rebuildSerial, so a second caller can begin — and then abandon — a rebuild
+// while an earlier watcher is still polling a live rescan; that abandon owns the
+// signal, clears the flag, and un-suppresses the sweep under the earlier rescan.
+// The ordering below closes the successor race, NOT that one. Closing it too
+// needs the flag to count live watchers rather than name one signal, and the
+// consequence meanwhile is bounded: the sweep is a healer, and the attestation
+// path reads `drained`, never this flag.
+//
+// The health STATUS write also stays with the caller, after this returns: it is
+// remote I/O and does not belong under a mutex every watcher takes. Two residues
+// follow, both bounded. An older goroutine's "active" can land after a newer
+// rebuild's "rebuilding", which the newer rebuild corrects when it drains; and
+// waiters are now released BEFORE that write, so a caller can return from
+// RebuildAndWait while the entry still reads "rebuilding" — no consumer reads
+// status after a rebuild, and the flag, which is the load-bearing half, is
+// ordered here.
 //
 // It does NOT set `drained` — only the watcher that saw the rescan finish does
 // that — so every other exit (abandoned, cancelled, never watched) releases
 // waiters with an honest "this did not drain".
-func (p *Pipeline) endRebuild(sig *rebuildSignal) {
+func (p *Pipeline) endRebuild(sig *rebuildSignal) bool {
 	p.rebuildWatchMu.Lock()
 	defer p.rebuildWatchMu.Unlock()
-	if p.rebuildWatch == sig {
+	owned := p.rebuildWatch == sig
+	if owned {
 		p.rebuildWatch = nil
+		p.rebuildInFlight.Store(false)
 	}
 	// Closing under the lock rather than beside it: two enders racing on the
 	// select/default form would both see it open and double-close, which panics.
@@ -1595,17 +1622,7 @@ func (p *Pipeline) endRebuild(sig *rebuildSignal) {
 	default:
 		close(sig.done)
 	}
-}
-
-// ownsRebuild reports whether sig is still the pipeline's installed rebuild.
-// An exit path that mutates PIPELINE-WIDE state (the in-flight flag, the health
-// status) must check this first: a rebuild that started later already owns
-// both, and clearing them out from under it un-suppresses the convergence sweep
-// and marks the lens active while a rescan is still draining.
-func (p *Pipeline) ownsRebuild(sig *rebuildSignal) bool {
-	p.rebuildWatchMu.Lock()
-	defer p.rebuildWatchMu.Unlock()
-	return p.rebuildWatch == sig
+	return owned
 }
 
 // currentRebuildSignal returns the in-flight rebuild's completion signal, or
@@ -1829,7 +1846,6 @@ func (p *Pipeline) rebuild(ctx context.Context, truncate bool, sig *rebuildSigna
 		// still running, it simply cannot be watched. The Rebuilder contract
 		// exists so an attesting caller cannot be handed a completion nobody
 		// observed, and this is the branch that would otherwise hand it one.
-		p.rebuildInFlight.Store(false)
 		p.endRebuild(sig)
 	}
 
@@ -1888,12 +1904,13 @@ func (p *Pipeline) resumeInterruptedRebuild(ctx context.Context) {
 // "active" over a rescan that has not drained — and that is not a transient
 // mislabel when the in-flight message then fails and is redelivered.
 func (p *Pipeline) watchRebuildCompletion(ctx context.Context, sig *rebuildSignal) {
-	// The rebuild window ends when this watcher exits for any reason; the
-	// deferred clear keeps the health sink from pinning "rebuilding" forever
-	// after a cancelled watch, and the deferred endRebuild releases the waiters
-	// on THIS rebuild — the watcher that owns a signal is the only thing that
-	// closes it.
-	defer p.rebuildInFlight.Store(false)
+	// The rebuild window ends when this watcher exits for any reason, so the
+	// deferred endRebuild both releases the waiters on THIS rebuild and clears
+	// the in-flight flag — but only while this rebuild still owns it. Clearing it
+	// unconditionally is the same hazard the abandon path guards against, on the
+	// path that runs every time: a watcher cancelled at shutdown, or one that
+	// returns after a newer rebuild has already begun, would otherwise
+	// un-suppress the convergence sweep under a live rescan.
 	defer p.endRebuild(sig)
 	ticker := time.NewTicker(p.rebuildPollInterval)
 	defer ticker.Stop()
@@ -1918,10 +1935,13 @@ func (p *Pipeline) watchRebuildCompletion(ctx context.Context, sig *rebuildSigna
 				// before the release below, so no waiter can observe the closed
 				// channel without it.
 				sig.drained.Store(true)
-				// Clear the flag before the status write so a concurrent health
-				// sink SetActive that re-checks the flag converges on "active".
-				p.rebuildInFlight.Store(false)
-				if p.reporter != nil {
+				// endRebuild clears the in-flight flag before releasing waiters,
+				// so a concurrent health sink re-checking the flag converges on
+				// "active" — and reports whether this rebuild is still the current
+				// one. Announcing "active" when it is not would retire a newer
+				// rescan's status mid-drain. The deferred endRebuild runs again on
+				// the way out and is a no-op by then.
+				if owned := p.endRebuild(sig); owned && p.reporter != nil {
 					if serr := p.reporter.SetActive(ctx); serr != nil {
 						slog.Error("pipeline: rebuild: set active", "ruleId", p.ruleID, "err", serr)
 					}

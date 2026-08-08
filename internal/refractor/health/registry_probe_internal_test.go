@@ -60,6 +60,37 @@ func putLens(ctx context.Context, t *testing.T, conn *substrate.Conn, bucket, id
 	require.NoError(t, err)
 }
 
+// putLensEnvelopeSpec writes the spec the way a PACKAGE INSTALL writes it: the
+// aspect envelope `{class, vertexKey, localName, isDeleted, data:{...spec...}}`
+// that meta_ddl.go's make_aspect emits, which unwrapSpecBody then unwraps. Every
+// live secure lens takes this path, so a probe tested only against the bare
+// top-level form is tested against a shape production never writes.
+func putLensEnvelopeSpec(ctx context.Context, t *testing.T, conn *substrate.Conn, bucket, id, targetConfig string) {
+	t.Helper()
+	vtxKey := "vtx.meta." + id
+	vtxBody, err := json.Marshal(map[string]any{"id": id, "class": "meta.lens", "isDeleted": false})
+	require.NoError(t, err)
+	_, err = conn.KVPut(ctx, bucket, vtxKey, vtxBody)
+	require.NoError(t, err)
+
+	spec := map[string]any{
+		"id":            id,
+		"canonicalName": "lens." + id,
+		"targetType":    "nats_kv",
+		"cypherRule":    "MATCH (c:contract) RETURN c.id AS contract_id",
+	}
+	if targetConfig != "" {
+		spec["targetConfig"] = json.RawMessage(targetConfig)
+	}
+	specBody, err := json.Marshal(map[string]any{
+		"class": "lensSpec", "vertexKey": vtxKey, "localName": "spec",
+		"isDeleted": false, "data": spec,
+	})
+	require.NoError(t, err)
+	_, err = conn.KVPut(ctx, bucket, vtxKey+".spec", specBody)
+	require.NoError(t, err)
+}
+
 func putEventStreamLens(ctx context.Context, t *testing.T, conn *substrate.Conn, bucket, id string) {
 	t.Helper()
 	vtxKey := "vtx.meta." + id
@@ -309,5 +340,67 @@ func TestRegistryProbe_ReconcileNowForHolderType_KeepsALensWithAnUnreadableSpec(
 	}
 	if len(missing) != 1 {
 		t.Fatalf("a lens with unknown holder types must be reported, got %v", missing)
+	}
+}
+
+// The narrowing has to work on the shape a package install actually writes: the
+// aspect envelope, whose declarations live under `data`. Reading only the bare
+// top-level form would make every live secure lens look like it declares
+// nothing, so every destruction would find an empty relevant set and attest
+// vacuously.
+func TestRegistryProbe_ReconcileNowForHolderType_ReadsThePackageInstalledEnvelope(t *testing.T) {
+	conn, ctx := newRegistryProbeTestConn(t)
+	const bucket = "core-kv"
+
+	putLensEnvelopeSpec(ctx, t, conn, bucket, "DbCdEfGhJkMnPqRsTuVz",
+		`{"bucket":"identity_view","key":["id"],"secureColumns":[{"column":"name","holderTypes":["identity"]}]}`)
+	putLensEnvelopeSpec(ctx, t, conn, bucket, "EbCdEfGhJkMnPqRsTuWa",
+		`{"bucket":"note_view","key":["id"],"secureColumns":[{"column":"note","holderTypes":["retentionclass"]}]}`)
+
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	p := NewRegistryProbe(conn, bucket, func() []string { return nil }, logger)
+
+	missing, err := p.ReconcileNowForHolderType(ctx, "retentionclass")
+	if err != nil {
+		t.Fatalf("ReconcileNowForHolderType: %v", err)
+	}
+	if len(missing) != 1 || missing[0] != "EbCdEfGhJkMnPqRsTuWa" {
+		t.Fatalf("the envelope-shaped declaration must be read, got %v", missing)
+	}
+}
+
+// A spec that parses as JSON but yields no targetConfig has declared nothing
+// this probe can read — which is also the shape translateSpec rejects, so it is
+// exactly the lens that never registers while its rows still hold plaintext.
+// Unknown must not resolve to "not relevant".
+func TestRegistryProbe_ReconcileNowForHolderType_KeepsASpecWithNoTargetConfig(t *testing.T) {
+	conn, ctx := newRegistryProbeTestConn(t)
+	const bucket = "core-kv"
+
+	putLensEnvelopeSpec(ctx, t, conn, bucket, "FbCdEfGhJkMnPqRsTuWb", "")
+	// A secure column with an empty holder-type list is unknown for the same
+	// reason: NewSecureDecryptor refuses one, so the lens cannot activate.
+	putLensEnvelopeSpec(ctx, t, conn, bucket, "GbCdEfGhJkMnPqRsTuWc",
+		`{"bucket":"note_view","key":["id"],"secureColumns":[{"column":"note","holderTypes":[]}]}`)
+	// A decoded targetConfig with no secure columns at all IS a genuine no: a
+	// plain lens holds no ciphertext, and skipping it is what narrowing is for.
+	putLensEnvelopeSpec(ctx, t, conn, bucket, "HbCdEfGhJkMnPqRsTuWd",
+		`{"bucket":"plain_view","key":["id"]}`)
+
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	p := NewRegistryProbe(conn, bucket, func() []string { return nil }, logger)
+
+	missing, err := p.ReconcileNowForHolderType(ctx, "retentionclass")
+	if err != nil {
+		t.Fatalf("ReconcileNowForHolderType: %v", err)
+	}
+	want := map[string]bool{"FbCdEfGhJkMnPqRsTuWb": true, "GbCdEfGhJkMnPqRsTuWc": true}
+	if len(missing) != len(want) {
+		t.Fatalf("both unknown-declaration lenses must be kept and the plain one dropped, got %v", missing)
+	}
+	for _, id := range missing {
+		if !want[id] {
+			t.Fatalf("unexpected lens in the relevant set: %s (got %v)", id, missing)
+		}
 	}
 }

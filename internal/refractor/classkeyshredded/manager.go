@@ -87,12 +87,12 @@ const (
 	// be trusted at all", not "is this one lens up yet" — but both are counted
 	// off the SAME msg.NumDelivered, so they are STAGED rather than independent:
 	// readiness runs first and owns deliveries 1..20, and the not-registered
-	// budget above starts where this one ends. Sizing them equally made the
-	// second dead — a boot that spent its deliveries on readiness left the first
-	// ErrRuleNotRegistered with zero retries and sent it straight to the
-	// privacy-critical give-up arm. The window is real: main.go registers the
-	// entry in the lens registry before it registers the Rebuilder, so "ready"
-	// can be true while a rebuilder is not.
+	// budget above starts where this one ends. Equal sizes would leave the second
+	// budget dead, since a boot that spends its deliveries on readiness would
+	// reach the first ErrRuleNotRegistered with no retries left and go straight to
+	// the privacy-critical give-up arm. The window it needs is real: main.go
+	// registers the entry in the lens registry before it registers the Rebuilder,
+	// so "ready" can be true while a rebuilder is not.
 	maxNotReadyDeliveries = 20
 
 	// DefaultRebuildWait bounds how long ONE lens's rescan is waited on. It is

@@ -280,3 +280,37 @@ func TestAbandonRebuild_DoesNotClearANewerRebuildsInFlightState(t *testing.T) {
 	default:
 	}
 }
+
+// The same rule at its source. Every exit funnels through endRebuild — the
+// abandon path, the watcher's deferred exit, its drained arm, and the unwatched
+// branch — so the ownership test belongs to it rather than to any one caller,
+// and the watcher's two gates have no coverage of their own without this. A
+// non-owner releases only its OWN waiters: the flag it does not own stays set,
+// because that flag is what keeps the convergence sweep suppressed while the
+// newer rescan drains.
+func TestEndRebuild_ANonOwnerReleasesItsWaitersWithoutClearingTheFlag(t *testing.T) {
+	p := newRebuildWaitPipeline(t)
+	older := p.beginRebuild()
+	newer := p.beginRebuild()
+	p.rebuildInFlight.Store(true)
+
+	assert.False(t, p.endRebuild(older), "the older rebuild no longer owns the pipeline-wide state")
+	assert.True(t, p.RebuildInFlight(),
+		"a non-owner must not un-suppress the sweep under a newer rescan")
+	select {
+	case <-older.done:
+	default:
+		t.Fatal("endRebuild must release its own waiters even when it does not own the flag")
+	}
+	select {
+	case <-newer.done:
+		t.Fatal("a non-owner released the NEWER rebuild's waiters")
+	default:
+	}
+
+	// The owner does clear it, and clears it before releasing its waiters — the
+	// ordering that stops a woken waiter's own rebuild from being cleared out
+	// from under it by the goroutine that just ended.
+	assert.True(t, p.endRebuild(newer), "the newest rebuild owns the pipeline-wide state")
+	assert.False(t, p.RebuildInFlight(), "the owner clears the flag as it ends")
+}
