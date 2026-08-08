@@ -1074,9 +1074,13 @@ full-stack reset, so shipping them together costs one reset instead of two. Inte
 
 ### Deferred tail — each behind a named trigger
 
-(a) **Retained-class egress refs** — switch the two egress sites to `ct.KeyID` (no MAC v2) and widen the
-envelope read path past `MATCH (i:identity)`. Trigger: the first package needing to egress a retained
-record. (b) **Period bucketing** — holder id derived from `(class, period)`, minted in-batch, constrained by
+(a) **Retained-class egress refs** — widen the envelope read path past `MATCH (i:identity)` and lift the
+two identity-only holder refusals (the Processor's, at ref-authoring; the bridge's, at unwrap). The holder
+resolution itself already switched in item 2, and the MAC needs no v2 — it covers `keyId` already. **One
+thing this tail must also settle:** the identity-only rule lives in the Processor and the bridge, not at the
+crypto boundary, so `vault.Service.handleDecryptRef` will serve a class-held record given a valid MAC. That
+is unreachable today (the Processor refuses to mint that MAC), but it means the rule's enforcement points
+move together or not at all. Trigger: the first package needing to egress a retained record. (b) **Period bucketing** — holder id derived from `(class, period)`, minted in-batch, constrained by
 §7.3's *id-varies, type-fixed* rule. Trigger: a real statutory clock, or the first class approaching expiry.
 (c) **Purpose-gated retained reveal** — `lattice.vault.decryptretained`, default-deny by natsperm (§6.5).
 Trigger: an operator reveal or audit export of a retained record. (d) **Background-check result detail** — a
@@ -1284,7 +1288,36 @@ no shipped script relies on it"; the census found two that do — identity-domai
 (`UpdateIdentityState`, called by the seed scripts) and the kernel's `meta_ddl.go` `make_update`. Filed as
 a lattice row with both prerequisites named.
 
-**Next — item 2, the read path.** Switch all five decrypt sites to `ct.KeyID`
+**Done — item 2 (2026-08-08).** The read path. All five decrypt sites resolve the holder through
+`vault.KeyHolder(ct)`; the non-identity silent branch is deleted; the egress arm gains a typed refusal
+naming the holder type, mirrored at the bridge; the `Vault` parameter is `keyHolderKey` at all 7 methods
+plus `OpenWithSessionKey`, with every doc comment re-derived (the RPC structs' Go fields rename to
+`KeyHolderKey`, their `json:"identityKey"` tags deliberately frozen).
+
+Two guards moved rather than vanished. `LocalBackend` labels a ciphertext with the holder its DEK was
+actually derived under (not `envelope.KeyID`, which nothing validates), and refuses a labelled ciphertext
+decrypted under a different holder — an unlabelled one is exempt, because `objectcrypto` drops the label by
+design. That check is what keeps the invariant structural instead of resident in five call sites.
+
+**The install gate is RE-AIMED, not lifted** (§15.5). Its original cause — a class-custodied record is
+write-only — dies here, but `ShredRetentionClassKey` is item 3, so lifting it now would license retained
+PHI under an undestroyable DEK. Item 3 lifts it. **`HolderTypes` (§6.1 fail-closed rule 2) is also item 3**,
+so a secure column currently accepts any well-formed holder; §6.1's AAD argument bounds that, but the
+enumeration key §6.3 needs does not exist yet.
+
+Adversarial review (opus, security plane) returned no blocker: the AAD and DEK-selection strings never
+diverge; a submitter cannot influence `keyId` on the write path (`step65_encrypt.go`'s holder comes only
+from the installed DDL); `IdentityKeyColumn` was never an RLS input, so decoupling custody from it cannot
+move a row into another actor's visibility; the MAC covers the field the holder is read from and is verified
+before any decrypt. Availability improved — the old terminal condition was reachable by a lens author
+declaring a column their cypher never RETURNs, and that class is gone. Two residuals it named are filed as
+rows; one caveat is recorded below.
+
+**Caveat, recorded so a later fire does not over-read the claim.** "keyId is self-authenticating" covers the
+aspect-ciphertext path only. The object-CEK path (`objectcrypto.EncodeWrappedCEK`) deliberately drops the
+label and supplies its holder out of band, so `WrapKey`/`UnwrapKey` still take an externally chosen holder.
+
+**Then — item 2 detail, for reference.** Switch all five decrypt sites to `ct.KeyID`
 (`processor/sensitive_decrypt.go:162`+`:217`, `refractor/pipeline/secure.go:130`+`:137`,
 `vault/service.go:478`+`:499`, `bridge/egress.go:174`+`:183`, `cmd/loupe/vault.go:148`+`:176`); delete the
 non-identity silent branch that today hands raw ciphertext to a script (`sensitive_decrypt.go:163-171`); add

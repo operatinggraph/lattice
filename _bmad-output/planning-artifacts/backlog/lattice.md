@@ -133,7 +133,7 @@ designed-through, but the *fork decision* + the *contract commit* are Andrew's.
 ### Privacy / Vault
 | Item | What it is | Imp | Size | State |
 |---|---|---|---|---|
-| **[Vault] Sensitive aspects are identity-anchored, so retained records have no home** | Step 6 rejects a sensitive aspect on any non-identity parent, so two retained-class records sit plaintext in Core KV — clinic `.encounter` and lease-signing's income `.profile`. Custody belongs to a key holder with a retention policy; identity is the erase-on-request kind. | ★★★ | L–XL | 🏗️ building · [design](../../implementation-artifacts/retention-class-key-custody-design.md) §14 · next: Fire 1 item 2 keyId read path |
+| **[Vault] Sensitive aspects are identity-anchored, so retained records have no home** | Step 6 rejects a sensitive aspect on any non-identity parent, so two retained-class records sit plaintext in Core KV — clinic `.encounter` and lease-signing's income `.profile`. Custody belongs to a key holder with a retention policy; identity is the erase-on-request kind. | ★★★ | L–XL | 🏗️ building · [design](../../implementation-artifacts/retention-class-key-custody-design.md) §14 · next: item 3 shred + delivery |
 
 ### External-I/O maturity (bridge follow-ons)
 | Item | What it is | Imp | Size | State |
