@@ -1,6 +1,6 @@
 ---
 name: steward
-description: "Winston's advancer for one swim-lane stream (Verticals OR Lattice, named by the caller) — sense the stream's lane file + signals, select the next unit (verticals: importance×readiness; lattice: round-robin across components), activate the owning role at L1, admit/commit at L2, exit (bounded). Two streams run in parallel on disjoint code. Design: _bmad-output/implementation-artifacts/agentic-ops-swimlanes-design.md (+ agentic-ops-design.md §6.1.1)."
+description: "Winston's advancer for one swim-lane stream (Verticals OR Lattice, named by the caller) — sense the stream's lane file + signals, select the next unit (both streams: importance-first; lattice round-robin is the starvation guard), activate the owning role at L1, admit/commit at L2, then take the next eligible unit — drain with stops. Two streams run in parallel on disjoint code. Design: _bmad-output/implementation-artifacts/agentic-ops-swimlanes-design.md (+ agentic-ops-design.md §6.1.1)."
 ---
 
 # Steward — advance one stream, one fire
@@ -14,7 +14,8 @@ description: "Winston's advancer for one swim-lane stream (Verticals OR Lattice,
 - **Verticals** — App-vertical package + FE work; lane file `planning-artifacts/backlog/verticals.md`. Select
   the top **importance × readiness** item.
 - **Lattice** — platform features + component maintenance; lane file `planning-artifacts/backlog/lattice.md`.
-  Select by **round-robin across components** (stalest first).
+  Select **importance-first** (§2: ratified designs → ready features → filler); round-robin across components
+  is the starvation guard / tie-breaker, never the primary axis.
 
 The two streams run in **parallel** on disjoint code by default (verticals = `packages/<vertical>*` +
 `cmd/<x>-app`; Lattice = `internal/*` + core packages) — this is the organizing split for demand/selection, not
@@ -25,7 +26,8 @@ the boundary (§2 "wear the other hat") is safe. **Ladder:** drive owners at **L
 change + architectural forks to Andrew. **Metric:** Andrew-interventions per shipped change, trending down.
 Design: `implementation-artifacts/agentic-ops-swimlanes-design.md`.
 
-One fire = sense → select → activate → admit → **exit (bounded)**. Keep it terse.
+One fire = sense → select → activate → (admit → next unit)… → **exit at a stop** (§4 drain-with-stops).
+Keep it terse.
 
 ## 0. Decide — don't defer (the prime directive)
 
@@ -241,10 +243,12 @@ touch-list (`file:line` checked live) · precedents to mirror · increment order
 in-scope gotchas · **adjacent finds filed to the board NOW** · non-goals — and run the **scope-diff gate**:
 brief vs the ratified scope sentence, item-by-item, narrow-only, never substituting an adjacent mechanism;
 declared dependencies re-verified both ways. Append the brief to the owning design doc as its build note and
-**commit it (docs, in `main`) before code**. The brief is what lets builder sub-agents run mechanical
-increments on a cheaper tier, and it moves residual-filing *before* the build — §4's residual harvest then
-catches only true surprises (frequent mid-build residuals = a brief-quality defect). XS/S single-file fires
-may compress the brief in-context; the scope-diff gate applies at every size.
+**commit it (docs, in `main`) before code**. **One committed brief per ITEM, compiled when the item is first
+selected — on resuming an in-flight 🏗️ item, do NOT recompile**: the §4 multi-fire delta-scout replaces it
+(a fresh brief per resume is the old per-story ceremony creeping back). The brief is what lets builder
+sub-agents run mechanical increments on a cheaper tier, and it moves residual-filing *before* the build —
+§4's residual ladder then catches only true surprises (frequent mid-build residuals = a brief-quality
+defect). XS/S single-file fires may compress the brief in-context; the scope-diff gate applies at every size.
 
 Pick the role: **Verticals** → package work via the **owner** playbook + **UX-then-FE**; **Lattice** → the
 **owner** playbook (named component) or **Lamplighter** (observability) — **and Loupe operator-surface FE
@@ -365,17 +369,32 @@ running; the **browser tab** you do not.
   edits sitting in the tree and pushes them (this happened: a fire swept an in-progress README and pushed it
   before it was finished). `git pull --rebase` before pushing. If you see modified files you didn't touch,
   **leave them alone** — they're someone else's in-flight work, not yours to commit.
-- **Bounded batch, then exit — you cannot see the budget, so don't guess it.** There is no usage tool
-  (`/context` is interactive-only), so do **not** try to "use up the budget" or run until you sense you're low.
-  Do a **bounded batch** — a few XS/S/M items, **or one increment** of a big (L+) item — committing each unit
-  green (watch CI), **then exit.** Throughput comes from **frequent fires across two parallel streams**, not
-  from one marathon fire; the **rate-limiter is the governor** — when the window trips a fire fails cheaply and
-  the next resumes after reset, and every completed unit is already committed, so nothing is lost. Don't thrash
-  or chase "one more." A purely **design** fire writes **one** design doc and exits.
+- **Drain with stops — after each green unit, take the next (Andrew, 2026-08-08; supersedes
+  bounded-batch-then-exit, which produced under-filled runs: an M unit done in minutes idled the lane until
+  the next scheduled fire).** You cannot see the budget (no usage tool; `/context` is interactive-only), so
+  don't guess it in **either** direction: never stop early "to be safe," never stall estimating "room for one
+  more." After a unit lands green (its own commit, CI watched), **pick the next eligible unit** — the
+  in-flight item's next increment, or the next item per §2 — and keep advancing. The only legitimate stops:
+  **eligible queue drained · genuine stuck-loop · a fork only Andrew can decide · main would go red.** The
+  **rate-limiter stays the governor**: a tripped window fails cheaply, committed units are never lost, and the
+  schedule is the **resume heartbeat, not the work quantum**. Under the fleet build lock, **renew the lease
+  after every green unit** (re-stamp `acquired_at` while your owner token still matches — the exact command is
+  in the scheduled task's lock protocol): progress is what keeps a long run protected from stale-reclaim, and
+  a wedged run stops renewing and ages out. A purely **design** fire writes **one** design doc and exits.
 - **Multi-fire:** a big item that can't be finished + reviewed + made green in one fire keeps its **code in a
-  persistent worktree**; the **detailed CHECKPOINT (worktree path · what's done fire-by-fire · next steps)
-  goes in the item's design doc**, and your lane row carries a **one-line 🏗️ pointer** to it. Merge only when
-  complete + green — **main is never left partial**. A later fire reads the design-doc checkpoint and resumes.
+  persistent worktree**; the **CHECKPOINT (worktree path · what's done · exact next steps) goes in the item's
+  design doc**, and your lane row carries a **one-line 🏗️ pointer** to it. Two sound landing shapes — the
+  design doc must say which, and why: **hold the worktree and merge once when complete** (main never partial),
+  or **land each increment on `main`** when every boundary is independently green *and* safe (state the
+  invariant that keeps main correct across boundaries — e.g. an install gate stays shut throughout).
+  **Resume ceremony is light (Andrew, 2026-08-08):** a later fire reads the checkpoint, runs a **delta-scout**
+  (re-verify the next increment's touch-list live), and **amends the checkpoint in the same commit as the
+  increment** — no fresh committed brief, no re-derived scope, no extra board reconcile beyond the row's
+  one-line pointer. **Review cadence:** per-increment review sized to the increment's **own diff + posture
+  delta** — a posture-changing increment (gate lift, narrowing, new enforcement point) gets the full 3-layer
+  pass, a mechanical middle increment gets a lead review — plus **one cumulative adversarial pass over the
+  item's whole diff at close**. That closing pass, not repetition per increment, is what the security plane's
+  full-depth guarantee means for a multi-fire item.
 - **You are the board's editor — keep it an INDEX, not a journal (the row discipline, §5 of the swimlanes
   design; load-bearing — the lane files once hit 250–300 KB of in-cell journals and no role could `Read`
   one).** Update your lane file in `main` as you go (📋 → 🏗️ → ✅), **directly in main** (not a worktree).
@@ -407,18 +426,29 @@ running; the **browser tab** you do not.
   items are the **un-picked** ones; the picked item self-corrects during grounding anyway). *(Trialed
   2026-06-30: shipping D1.3 left its prerequisite still marked 🏗️ building and a dependent's blocker stale —
   both surfaced only by an after-the-fact sweep, which this step exists to pre-empt.)*
-- **On ship, harvest the build note's NAMED RESIDUALS into board rows (same docs commit).** A residual /
-  deferred tail that lives only in a design-doc paragraph ("the honest next tail", "no UX yet") is
-  **invisible to lane selection** — the fleet picks from rows, not prose, so an honestly-named tail starves
-  exactly as if it had been silently dropped. When the fire you admit names residuals: file each as a capped
-  row in the owning lane **in the same docs commit as the ✅ flip**, naming the residual's **consumer** (per
-  the deferred-tail rule) — or state in that commit why one is deliberately not filed (standing Andrew-block,
-  or already covered by a named existing row). Same discipline for forward-references: code/comments must not
-  point at another fire's *assumed* future deliverable — point at a filed row or the other design's ratified
-  scope, else you've created a seam nobody owns. *(Trialed 2026-07-18: Facet Inc 3 honestly named "sync dies
-  at authorization expiry — no UX" as the next tail but filed no row; EDGE.5 W4's shell then forward-referenced
-  a "Fire 3 refresh endpoint" no fire had scoped, and the gap surfaced only when a live host wedged — after
-  the hosted-demo consumer had already arrived.)*
+- **On ship, residuals run a triage LADDER — fixing beats filing (Andrew, 2026-08-08).** When the fire you
+  admit names residuals, take each one through, in order: **(1) fix it in-fire** when it is bounded and its
+  consumer is nameable — *especially* when the unblocking consumer shipped in this very fire; **(2)** a defect
+  **this fire introduced is never filed — fix it or don't ship the increment**; **(3) fold** it into an
+  existing named row when one covers it; **(4) file** what survives as a capped row in the owning lane **in
+  the same docs commit as the ✅ flip**, naming the residual's **consumer** *and* the concrete **blocker**
+  that stops it being finished now — or state in that commit why one is deliberately not filed (standing
+  Andrew-block, or covered by a named existing row). A residual that lives only in a design-doc paragraph is
+  invisible to lane selection — so file what survives the ladder — but the ladder comes first: **the backlog
+  shrinks by building, not grows by reviewing.** Same discipline for forward-references: code/comments must
+  not point at another fire's *assumed* future deliverable — point at a filed row or the other design's
+  ratified scope, else you've created a seam nobody owns. *(Trialed 2026-07-18: an honestly-named tail with no
+  row starved until a live host wedged. Trialed 2026-08-07/08: two initiatives filed 24 review-residual rows
+  and closed 4 — three filings were the fires' own defects, one with its named consumer already shipped
+  in-fire.)*
+- **The design doc's BODY stays true — a falsified ratified claim is amended where it stands (Andrew,
+  2026-08-08).** When a build falsifies a ratified claim, weakens a stated guarantee, or lands a mechanism the
+  body argues against, **rewrite/strike that body text in the same commit as the increment** (dated — the
+  ratification-banner-rewrites-body rule, applied at build time). A build note alone is not the record: an
+  unamended body is a wrong instruction to the next fire (this shipped — a falsified read-model-bucket
+  instruction sat in an unbuilt tail pointing builders at a bucket that cannot exist). Build notes stay
+  terse — checkpoint + deviations, not a fire journal; the board's index-not-journal rule applies to a design
+  doc's build sections too.
 
 ## 5. Replenish if idle
 

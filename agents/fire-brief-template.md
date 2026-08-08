@@ -9,7 +9,11 @@ compiled when the fire is *selected*, minutes before building, so the builder ex
 
 **When.** Mandatory for **M+ fires and any multi-package or security/capability-plane fire regardless of
 size**. An XS/S single-file fire may compress the brief to an in-context checklist (proportionality — don't
-bureaucratize a coverage fix), but the **scope-diff gate applies at every size**.
+bureaucratize a coverage fix), but the **scope-diff gate applies at every size**. **One brief per ITEM,
+compiled when the item is first selected — never per resume (Andrew, 2026-08-08):** resuming an in-flight 🏗️
+item runs a **delta-scout** (re-verify the checkpoint's next increment's touch-list live) whose findings ride
+the increment's own commit; recompiling a full committed brief per resume is the old per-story ceremony
+creeping back.
 
 **Who produces it.** The activator (Winston / the Steward) fans out **one or more READ-ONLY scouts** —
 generic sub-agents (Read/Grep/Glob + read-only git only; **no make, no docker, no builds/tests, no writes**)
@@ -29,7 +33,8 @@ Scouts are *not* roles: the owning roles (`owner`, `fe-engineer`, …) remain sk
    package version bumps, `provision-readpath`, hot-reload vs restart, full-suite triggers, …).
 6. **Adjacent finds** — everything discovered that is out of scope: **file each as a board row NOW**, before
    the first edit (or state why one is deliberately not filed). Pre-build filing is the healthy half of
-   residual discovery; mid-build filings should become rare.
+   residual discovery; mid-build filings should become rare. (On-ship residuals then run the Steward's triage
+   ladder — fix-in-fire first, and a fire never files a defect it introduced; `agents/steward/SKILL.md` §4.)
 7. **Non-goals** — what the fire deliberately does not touch (the drift fence).
 
 ## The scope-diff gate (before the first edit)
@@ -47,7 +52,8 @@ Append the brief to the owning design doc as `### <fire> fire brief (build note,
 (docs-only, in `main`) before opening the worktree** — it must survive session death. A small item with no
 design doc carries its brief in the commit-message body instead. During the build the brief is the
 checklist; any deviation gets one appended line in the build note (what changed, why) — that is the drift
-record the admit review reads.
+record the admit review reads. On a multi-fire item this commit-before-code applies to the item's **first**
+brief only; resume delta-scout notes and checkpoint amendments ride the increment's own commit.
 
 ## Builder economics
 

@@ -17,15 +17,19 @@
 
 ## 2. Principles
 
-- **Don't measure the budget — make every fire safe to end.** Each fire does a **bounded batch** (a few small
-  items, or one increment of a big one), commits each unit green, and **exits**. It never tries to "drain the
-  queue" or "use up the budget." Throughput = **cadence × parallel streams**; **the rate-limiter is the
-  governor** — run dense, and when the window trips, fires fail cheaply and resume after reset. Push until the
-  limiter says no (nothing on the table); never lose work (bounded + committed units).
+- **Budget-blind, drain with stops (Andrew, 2026-08-08 — supersedes bounded-batch-then-exit, which produced
+  under-filled runs: a quick unit idled the lane until the next scheduled fire).** A fire cannot see the
+  budget, so it neither stops early "to be safe" nor guesses "room for one more": after each unit lands green
+  it takes the **next eligible unit**, stopping only at **queue drained · stuck-loop · an Andrew-only fork ·
+  main would go red**. Throughput = **filled runs × parallel streams**; **the rate-limiter is the governor** —
+  a tripped window fails cheaply, committed units are never lost, and the schedule is the resume heartbeat,
+  not the work quantum. Under the fleet build lock a run **renews the lease after every green unit**, so a
+  progressing run is never stale-reclaimed and a wedged one ages out.
 - **Two parallel streams, split along the no-collision seam.** App-vertical work (packages + FE) and Lattice
   platform work touch **disjoint code areas**, so they run **concurrently** without colliding. Lattice work
   stays **serial within itself** (features + maintenance both live in `internal/*` — splitting them would
-  collide), advancing by **round-robin across components**.
+  collide), advancing **importance-first** (ratified designs → ready features → filler); round-robin across
+  components is the starvation guard / tie-breaker.
 - **Demand is hydrated per lane — and the PO drives Lattice demand too.** A vertical never papers over a
   missing Lattice feature (see §4).
 
@@ -34,7 +38,7 @@
 | Stream | Code area (disjoint) | Advancer | Demand / readiness (file-only) |
 |---|---|---|---|
 | **1 — App Verticals** | `packages/<vertical>-*` (loftspace-domain, lease-signing, clinic-*), `cmd/<vertical>-app`, vertical lenses | **Vertical Steward** (`steward-verticals`) | **Vertical PO** (`vertical-po-discovery`) |
-| **2 — Lattice** (features + component maintenance) | `internal/*` (processor, weaver, loom, refractor, substrate, bootstrap), `cmd/loupe`, core/base packages | **Lattice Steward** (`steward-autonomous`) — **round-robin across components** | **Surveyor** (`platform-surveyor`) hydrates raw demand → **Designer** (`lattice-designer`) deepens it into build-ready designs **+ PO-routed platform gaps** |
+| **2 — Lattice** (features + component maintenance) | `internal/*` (processor, weaver, loom, refractor, substrate, bootstrap), `cmd/loupe`, core/base packages | **Lattice Steward** (`steward-autonomous`) — **importance-first; round-robin as starvation guard** | **Surveyor** (`platform-surveyor`) hydrates raw demand → **Designer** (`lattice-designer`) deepens it into build-ready designs **+ PO-routed platform gaps** |
 
 - **Stream 2 is a three-stage pipeline:** **Surveyor** (files + scores raw demand) → **Designer** (turns the
   items — almost all need design — into design docs, each **flagged for Andrew to ratify**) → **Lattice
@@ -51,10 +55,12 @@
   gate still green, flakiness only down. A builder (L1→L2, worktree → commit → watch CI); runs on its own
   cadence, parallel to the Stewards. Skill: `agents/whetstone/`.
 - Stream 1 is **mostly package + FE**: the PO defines the capability → Sally (UX) → FE Engineer builds → package/lens work via the owner pattern.
-- Stream 2 **round-robins across components** (Core / Weaver / Loom / Refractor / Loupe + cross-cutting
-  features) by component freshness × importance×readiness — the existing component-coverage rotation, now the
-  Lattice stream's core selection rule. "Features" and "maintenance" are two *kinds* of item within the lane,
-  not separate rotation axes.
+- Stream 2 selects **importance-first**: a `✅ Andrew-ratified, build-ready` design beats the top
+  importance×readiness ready feature beats maintenance-as-filler. **Round-robin across components**
+  (freshness — Core / Weaver / Loom / Refractor / Loupe) is the **starvation guard + tie-breaker among
+  comparable-importance items**, not the primary axis: it keeps quiet components improving, but a ★★★ ready
+  item beats a ★ stale-component pin every time. "Features" and "maintenance" are two *kinds* of item within
+  the lane, not separate rotation axes.
 - **Loupe is a Lattice-stream component** (`cmd/loupe` — disjoint from the vertical apps' `cmd/*-app`, so no
   cross-stream collision): it is the operator/inspector and the **P5 Core-KV-reading exception**, i.e.
   *platform* infra, not a product vertical. The Lattice Steward advances it like any component — the **owner**
@@ -133,19 +139,32 @@ markdown now.*
 Each advancer fire:
 1. **Sense** its lane file + signals (Lamplighter/CI; for Lattice, component freshness).
 2. **Pre-empt** on reliability/observability red.
-3. **Select** — Verticals: top importance×readiness ready item; Lattice: round-robin component × importance×readiness. Resume any in-flight (🏗️) item first.
-4. **Advance** a **bounded batch** — several XS/S/M, or one increment of a big (L+) item — each its own green
-   commit; **then exit.** No "drain", no "budget" guessing.
-5. **Multi-fire** for big items: persistent worktree + a 🏗️ CHECKPOINT; merge only when complete + green.
+3. **Select** — Verticals: top importance×readiness ready item; Lattice: importance-first (round-robin as
+   starvation guard). Resume any in-flight (🏗️) item first.
+4. **Advance — drain with stops:** each unit its own green commit; after each, take the **next eligible
+   unit** (the same item's next increment, or the next item), renewing the build-lock lease. Stop only at:
+   queue drained · stuck-loop · an Andrew-only fork · main would go red.
+5. **Multi-fire** for big items: persistent worktree + a 🏗️ CHECKPOINT in the design doc (one-line row
+   pointer). Resumes are light: delta-scout + checkpoint amended in the increment's own commit — no fresh
+   committed brief. Review sized to each increment's diff + posture delta, plus **one cumulative adversarial
+   pass at close**. Landing shape per the design doc: merge-once-when-complete, or per-increment landings
+   when every boundary is independently green and safe.
 
-**Between Select and Advance, every build fire compiles a FIRE BRIEF (Phase 0; rules + template:
-`agents/fire-brief-template.md` — Winston 2026-07-23, first trialed on persona-worlds W0):** read-only
-scouts → a committed build-note artifact (verified touch-list · precedents to mirror · increment order +
-runnable green checks · in-scope gotchas · adjacent finds filed pre-build · non-goals) → the **scope-diff
-gate** against the ratified scope sentence (narrow-only, dependencies re-verified both ways). Design docs
-stay outcome-level on purpose; the brief is the just-in-time story compilation that lets the builder
-execute instead of rediscover — and lets mechanical increments run on a cheaper tier. It is the old
-create-story→dev-story chain's story file, reborn per-fire at selection time.
+**Between Select and Advance, every build ITEM gets a FIRE BRIEF at first selection (Phase 0; rules +
+template: `agents/fire-brief-template.md` — Winston 2026-07-23, first trialed on persona-worlds W0):**
+read-only scouts → a committed build-note artifact (verified touch-list · precedents to mirror · increment
+order + runnable green checks · in-scope gotchas · adjacent finds filed pre-build · non-goals) → the
+**scope-diff gate** against the ratified scope sentence (narrow-only, dependencies re-verified both ways).
+Design docs stay outcome-level on purpose; the brief is the just-in-time story compilation that lets the
+builder execute instead of rediscover — and lets mechanical increments run on a cheaper tier. It is the old
+create-story→dev-story chain's story file, reborn per-item at selection time — **once per item, never per
+resume** (resumes run the delta-scout).
+
+**Residuals run a triage ladder (Andrew, 2026-08-08) — fixing beats filing:** fix in-fire when bounded with
+a nameable consumer; a defect the fire introduced is never filed; else fold into an existing row; else file
+with named consumer + blocker in the ✅ flip's docs commit. And the design doc's **body stays true**: a build
+that falsifies a ratified claim amends that body text in the same commit — build notes are checkpoints, not
+journals. Full rules: `agents/steward/SKILL.md` §4.
 
 Cadence: both advancers fire densely + staggered; the two hydrators on their own cadence. Tune **up** until the
 limiter occasionally trips — that trip is the signal the window is fully used.
@@ -186,11 +205,15 @@ Only a primordial/kernel-seed change needs a fresh bootstrap.) A *stale running 
 
 ## 9. The fleet (scheduled tasks)
 
-| Task | Role | Cadence |
+The **scheduler is authoritative for cadence** — Andrew tunes it live; this column is the indicative shape
+(checked 2026-08-08). Under drain-with-stops the cadence is a **resume heartbeat**: an overlapping firing
+sees LOCK-HELD and no-ops.
+
+| Task | Role | Cadence (indicative) |
 |---|---|---|
-| `steward-autonomous` | **Lattice Steward** (advance Stream 2) | even hours (`0 */2`) |
-| `steward-verticals` | **Vertical Steward** (advance Stream 1) | odd hours (`0 1-23/2`), offset from Lattice |
-| `lattice-designer` | **Designer** (build-ready designs ahead of the Lattice Steward) | odd hours :30 (`30 1-23/2`) — pipelines before the even-hour Lattice advancer |
-| `platform-surveyor` | **Surveyor** (hydrate `lattice.md`) | 3×/day (`0 7,15,23`) |
-| `vertical-po-discovery` | **Vertical PO** (hydrate `verticals.md` + route Lattice gaps) | 3×/day (`0 5,13,21`) |
-| `ci-whetstone` | **Whetstone** (make CI faster, no weaker gate) | 2×/day (`30 6,18`) |
+| `steward-autonomous` | **Lattice Steward** (advance Stream 2) | hourly (`6 */1`) |
+| `steward-verticals` | **Vertical Steward** (advance Stream 1) | odd hours (`42 1-23/2`), offset from Lattice |
+| `lattice-designer` | **Designer** (build-ready designs ahead of the Lattice Steward) | every 4h (`6 1-23/4`) — pipelines ahead of the Lattice advancer |
+| `platform-surveyor` | **Surveyor** (hydrate `lattice.md`) | 3×/day (`56 7,15,23`) |
+| `vertical-po-discovery` | **Vertical PO** (hydrate `verticals.md` + route Lattice gaps) | 3×/day (`41 5,13,21`) |
+| `ci-whetstone` | **Whetstone** (make CI faster, no weaker gate) | 2×/day (`48 6,18`) |

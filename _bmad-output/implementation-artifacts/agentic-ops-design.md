@@ -336,8 +336,11 @@ drains** (an L item finished with the queue still non-empty → keep going too).
 **cannot query its remaining token/credit budget** — there is no usage tool, and `/context` is interactive-only
 — so it must **not** treat "budget" as a measurable stop signal or stop early "to be safe." The only legitimate
 stops are: queue drained, an item too big to finish this turn (checkpoint → multi-fire), or a stuck-loop /
-context wall. To offset cold-start conservatism, the **scheduled fire runs every 2h** (was 6h) — frequent
-thorough fires, each fully committed so nothing is lost if a turn ends mid-stream.
+context wall. *(Re-affirmed 2026-08-08: this drain-with-stops rule is authoritative — the swim-lane doc's
+interim bounded-batch-then-exit posture is superseded, and its §2/§6 now match this text.)* The scheduled
+fire runs on a dense heartbeat (live cadence is whatever Andrew set in the scheduler) — each run fully
+committed so nothing is lost if a turn ends mid-stream, and each resumes from committed units + the
+checkpoint.
 
 ### 6.2 Hooks (deterministic, harness-run — settings.json)
 
