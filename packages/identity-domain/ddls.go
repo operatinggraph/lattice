@@ -637,13 +637,14 @@ def enforce_not_merged(current_state, merged_into):
     if current_state == "merged":
         fail("IdentityMerged: mergedInto=" + (merged_into if merged_into != None else "<unknown>"))
 
-def erasure_requested(identity_key):
-    # The erasure write-path gate (erasure-orchestration-design.md §6). The
-    # PRESENCE of vtx.identity.<NanoID>.erasureRequested means this person
-    # invoked a right to be forgotten, and from that instant no writer may
-    # create a fresh erasable representation of them -- otherwise the residue
-    # count the erasure's completion seal rests on measures an OPEN set, and
-    # "zero" degrades from "erased" to "zero at projection time".
+def write_path_closed(identity_key):
+    # The erasure write-path gate (erasure-orchestration-design.md §6). True
+    # when EITHER this person invoked a right to be forgotten -- the PRESENCE
+    # of vtx.identity.<NanoID>.erasureRequested -- OR their PII key has already
+    # been destroyed. From either instant no writer may create a fresh erasable
+    # representation of them, otherwise the residue count the erasure's
+    # completion seal rests on measures an OPEN set, and "zero" degrades from
+    # "erased" to "zero at projection time".
     #
     # Read through kv.Read rather than state[...], and that difference IS the
     # guard. A state[...] lookup of a key no dispatcher declared reads as
@@ -657,7 +658,51 @@ def erasure_requested(identity_key):
     # derive_reads (Contract #2 §2.5 class (g)). Absence-tolerant, and absence
     # is the ordinary case -- no identity carries this marker until it is
     # sealed for erasure.
-    return marker_closes_write_path(kv.Read(identity_key + ".erasureRequested"))
+    if marker_closes_write_path(kv.Read(identity_key + ".erasureRequested")):
+        return True
+    # The SECOND condition, and the marker is checked first because it is the
+    # one derive_reads hydrates -- a sealed subject costs no round trip here.
+    #
+    # A destroyed PII key closes the write path on its own, with no marker
+    # beside it. The marker is written by the erasure PATTERN's seal, so it is
+    # present for every subject erased through the pattern; a bare
+    # ShredIdentityKey submit writes only piiKey.shredded, and those subjects
+    # exist: the operator Shred button submits the op directly. Gating on the
+    # marker alone leaves
+    # each of them reading as a live, unerased dedup incumbent: an ordinary
+    # same-contact walk-in mints a fresh duplicateOf naming a person whose key
+    # is already destroyed, which is a NEW decrypt-free correlation to someone
+    # already erased -- the exact growth of the erased set §6 exists to forbid,
+    # arriving through the path that has always been the common one.
+    #
+    # It is also the weaker fact deliberately, not accidentally: shredded means
+    # the key is gone, so no writer can produce a decryptable representation of
+    # this person again either way. Closing on it costs a recoverable refusal
+    # for a subject nobody is actively converging; leaving it open costs a
+    # durable correlation nothing can walk back.
+    #
+    # read-posture: (d) declared in optionalReads by derive_reads alongside the
+    # marker, absence-tolerant for the same reason -- no identity carries a
+    # piiKey until its first sensitive write.
+    return key_shredded_closes_write_path(kv.Read(identity_key + ".piiKey"))
+
+def key_shredded_closes_write_path(doc):
+    # The piiKey half of the gate, shared for the same anti-drift reason as
+    # marker_closes_write_path below, and checking the class for the same
+    # reason: this key's aspect-type DDL is privacy-base's, so a document
+    # declaring some other class at the same key falls to resolveGoverningDDL's
+    # permissive default. Only a real piiKey envelope may shut the path.
+    #
+    # Tombstone-tolerant, again like the marker: the envelope is the record
+    # that a key was destroyed, and destruction does not become untrue when the
+    # aspect is deleted.
+    if doc == None:
+        return False
+    if not hasattr(doc, "class") or getattr(doc, "class") != "piiKey":
+        return False
+    if doc.data == None:
+        return False
+    return doc.data.get("shredded", False) == True
 
 def marker_closes_write_path(doc):
     # Shared by every gate in this package so the four of them cannot drift.
@@ -883,17 +928,19 @@ def is_identity_vertex_key(key):
             return False
     return True
 
-def erasure_marker_keys(identity_keys):
-    # The §6 erasure markers for a set of identity positions, skipping any that
-    # is absent or not a well-formed identity vertex key. Deduped: the Processor
+def erasure_gate_keys(identity_keys):
+    # BOTH keys the §6 gate reads for a set of identity positions -- the
+    # erasure marker and the piiKey envelope -- skipping any position that is
+    # absent or not a well-formed identity vertex key. Deduped: the Processor
     # tolerates a repeated key, but a self-claim would otherwise derive the same
-    # marker twice and spend two of the declared-read budget on one fact.
+    # pair twice and spend four of the declared-read budget on two facts.
     keys = []
     for k in identity_keys:
         if is_identity_vertex_key(k):
-            marker = k + ".erasureRequested"
-            if marker not in keys:
-                keys.append(marker)
+            for suffix in [".erasureRequested", ".piiKey"]:
+                gate_key = k + suffix
+                if gate_key not in keys:
+                    keys.append(gate_key)
     return keys
 
 def derive_reads(op):
@@ -934,9 +981,10 @@ def derive_reads(op):
         # payload.
         keys = [credential_index_key(op.actor)]
         target = getattr(p, "targetIdentityKey", None)
-        # The erasure markers the §6 gate reads, for BOTH ends of the boundTo
-        # this op emits -- ShredIdentityKey erases that link in both directions
-        # (privacy-base/shred_identity_key.go), so both positions are gated.
+        # The two keys the §6 gate reads -- the erasure marker and the piiKey
+        # envelope -- for BOTH ends of the boundTo this op emits, since
+        # ShredIdentityKey erases that link in both directions
+        # (privacy-base/shred_identity_key.go) and both positions are gated.
         #
         # Derived here rather than asked of every submitter for the reason
         # class (g) exists: three separate front ends dispatch these two ops,
@@ -945,7 +993,7 @@ def derive_reads(op):
         # still refuses if this derivation is ever missed -- the gate reads
         # through kv.Read, which falls through to a live GET -- but then it
         # costs a round trip per claim rather than a snapshot lookup.)
-        keys += erasure_marker_keys([target, op.actor])
+        keys += erasure_gate_keys([target, op.actor])
         # Both endpoints must be WELL-FORMED, not merely prefixed. A prefix
         # check accepts "vtx.identity.x", from which this builds a link key the
         # Contract #1 grammar rejects -- and the Processor answers a malformed
@@ -996,10 +1044,10 @@ def derive_reads(op):
         keys = [credential_index_key(credential_actor_key)]
         if is_identity_vertex_key(identity_key):
             keys.append(credential_bound_to_key(credential_actor_key, identity_key))
-        # The erasure markers the §6 gate reads, both ends. This op's only
-        # dispatcher declares no contextHint at all, so class (g) is the only
-        # place they can come from.
-        keys += erasure_marker_keys([identity_key, credential_actor_key])
+        # The two keys the §6 gate reads, both ends. This op's only dispatcher
+        # declares no contextHint at all, so class (g) is the only place they
+        # can come from.
+        keys += erasure_gate_keys([identity_key, credential_actor_key])
         return {"optionalReads": keys}
 
     return {}
@@ -1077,11 +1125,17 @@ def execute(state, op):
         # corpus will say about that contact once the erasure converges.
         def match_is_erased(hit):
             # read-posture: (e) bounded per-candidate follow-up off the three
-            # contact-index probes derive_reads declares -- at most one read
-            # per contact type, three in the worst case, never a scan. The
-            # incumbent's key is only knowable from the hit's own body, so it
-            # cannot be declared ahead of hydration the way the index keys are.
-            return marker_closes_write_path(kv.Read(hit.data["identityKey"] + ".erasureRequested"))
+            # contact-index probes derive_reads declares -- at most TWO reads
+            # per contact type (the marker, then the piiKey only if the marker
+            # is absent), six in the worst case, never a scan. The incumbent's
+            # key is only knowable from the hit's own body, so neither can be
+            # declared ahead of hydration the way the index keys are.
+            #
+            # Both conditions, via the same helper the claim/link/reconcile
+            # gates use: the dedup path is where a bare-shredded incumbent does
+            # its damage -- it is the one gate whose refusal PREVENTS a new
+            # correlation rather than merely refusing to extend an old one.
+            return write_path_closed(hit.data["identityKey"])
 
         def live_hit(hit):
             return hit != None and (not hasattr(hit, "isDeleted") or not hit.isDeleted)
@@ -1365,9 +1419,9 @@ def execute(state, op):
         # holding no valid secret a measurably shorter path. Below it, only a
         # caller who proved the secret learns anything, and the brute-force
         # counter keeps counting brute force.
-        if erasure_requested(target_identity_key):
+        if write_path_closed(target_identity_key):
             fail_claim("erased")
-        if erasure_requested(actor_key):
+        if write_path_closed(actor_key):
             fail_claim("erased")
 
         observed_at = op.submittedAt
@@ -1602,9 +1656,9 @@ def execute(state, op):
 
         # Erasure gate (§6) -- the same two link positions and the same
         # below-the-secret placement as ClaimIdentity, for the same reasons.
-        if erasure_requested(target_identity_key):
+        if write_path_closed(target_identity_key):
             fail_link("erased")
-        if erasure_requested(actor_key):
+        if write_path_closed(actor_key):
             fail_link("erased")
 
         observed_at = op.submittedAt
@@ -1834,9 +1888,9 @@ def execute(state, op):
         # caller learns it only for a binding the index already confirms is
         # theirs. Both endpoints are gated for the same reason as the claim
         # path: the shred erases boundTo in both directions.
-        if erasure_requested(identity_key):
+        if write_path_closed(identity_key):
             fail_reconcile("erased")
-        if erasure_requested(credential_actor_key):
+        if write_path_closed(credential_actor_key):
             fail_reconcile("erased")
 
         # The index's own boundAt, never observed_at: stamping the run time

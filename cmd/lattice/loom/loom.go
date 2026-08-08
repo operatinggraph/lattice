@@ -1,7 +1,11 @@
-// Package loom implements the lattice loom command group: operator
-// list/consumers/inspect/pause/resume/redrive controls for the Loom
-// orchestration engine, via the lattice.ctrl.loom.* NATS Services control
-// plane.
+// Package loom implements the lattice loom command group for the Loom
+// orchestration engine.
+//
+// Two planes, and the split is the write/read one. `start` begins a pattern
+// instance, which is a state change, so it submits a StartLoomPattern
+// OPERATION through the Processor (P2). Everything else —
+// list/consumers/inspect/pause/resume/redrive — inspects or steers the running
+// engine and goes over the lattice.ctrl.loom.* NATS Services control plane.
 package loom
 
 import (
@@ -40,8 +44,9 @@ func validateName(kind, name string) error {
 func NewCommand(natsURL, outputFmt, defaultActor *string) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "loom",
-		Short: "Operate the Loom engine (list/consumers/inspect/pause/resume/redrive)",
+		Short: "Operate the Loom engine (start/list/consumers/inspect/pause/resume/redrive)",
 	}
+	cmd.AddCommand(newStartCommand(natsURL, outputFmt, defaultActor))
 	cmd.AddCommand(newListCommand(natsURL, outputFmt, defaultActor))
 	cmd.AddCommand(newConsumersCommand(natsURL, outputFmt, defaultActor))
 	cmd.AddCommand(newInspectCommand(natsURL, outputFmt, defaultActor))

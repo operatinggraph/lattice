@@ -447,12 +447,262 @@ func TestErasureGate_DeriveReadsCoversBothPositions(t *testing.T) {
 	// ReconcileCredentialBinding arm. Each passes BOTH link positions, so a
 	// derivation that silently dropped the actor half would have to delete an
 	// argument this assertion also reads.
-	if n := strings.Count(derive, "erasure_marker_keys("); n != 2 {
-		t.Fatalf("derive_reads calls erasure_marker_keys %d time(s), want 2 (the claim/link arm and the reconcile arm)", n)
+	if n := strings.Count(derive, "erasure_gate_keys("); n != 2 {
+		t.Fatalf("derive_reads calls erasure_gate_keys %d time(s), want 2 (the claim/link arm and the reconcile arm)", n)
 	}
-	for _, want := range []string{"erasure_marker_keys([target, op.actor])", "erasure_marker_keys([identity_key, credential_actor_key])"} {
+	for _, want := range []string{"erasure_gate_keys([target, op.actor])", "erasure_gate_keys([identity_key, credential_actor_key])"} {
 		if !strings.Contains(derive, want) {
 			t.Fatalf("derive_reads is missing %q — one of the two gated link positions would fall back to a live Core KV read on every call", want)
 		}
 	}
+	// Both of the gate's conditions are hydrated, not just the marker. The
+	// piiKey half is what closes the write path for a subject shredded by a
+	// bare ShredIdentityKey submit — no marker was ever written for those — so
+	// a derivation carrying only the marker would leave the commonest erased
+	// population reading as a live dedup incumbent.
+	gateIdx := strings.Index(script, "def erasure_gate_keys(identity_keys):")
+	if gateIdx < 0 {
+		t.Fatal("no erasure_gate_keys helper found in the identity script")
+	}
+	gate := script[gateIdx:]
+	if end := strings.Index(gate, "\ndef "); end > 0 {
+		gate = gate[:end]
+	}
+	for _, want := range []string{`".erasureRequested"`, `".piiKey"`} {
+		if !strings.Contains(gate, want) {
+			t.Fatalf("erasure_gate_keys does not derive %s — that half of the §6 gate would cost a live Core KV read on every claim, link and reconcile", want)
+		}
+	}
+}
+
+// The second condition's fixtures MUTATE the identity's real piiKey envelope
+// rather than writing a fresh one. Every identity created by this harness
+// already carries an envelope — its claimKey is a sensitive aspect — and
+// replacing it with a hand-built placeholder makes the Vault refuse to decrypt
+// that aspect, so the op dies in hydrate and any assertion below the gate
+// would pass for the wrong reason.
+//
+// They also use the RECONCILE path rather than claim. Reconcile names its
+// outcome word on the wire (NFR-S6 reclassification does not touch it), and it
+// does not decrypt the claimKey — so the refusal it asserts is provably the
+// gate's and not the Vault's own shredded-key refusal arriving first.
+
+// mutatePiiKey read-modify-writes the identity's existing piiKey envelope,
+// applying a caller-chosen class, shredded flag and tombstone flag. The
+// wrappedDEK is preserved: the fixture changes only the facts the gate reads.
+func mutatePiiKey(t *testing.T, ctx context.Context, conn *substrate.Conn, identityKey, class string, shredded, tombstoned bool) {
+	t.Helper()
+	key := identityKey + ".piiKey"
+	entry, err := conn.KVGet(ctx, testutil.HarnessCoreBucket, key)
+	if err != nil {
+		t.Fatalf("KVGet %s: %v — the fixture assumes a real envelope already exists (the claimKey is sensitive)", key, err)
+	}
+	var doc map[string]any
+	if err := json.Unmarshal(entry.Value, &doc); err != nil {
+		t.Fatalf("unmarshal %s: %v", key, err)
+	}
+	doc["class"] = class
+	doc["isDeleted"] = tombstoned
+	data, ok := doc["data"].(map[string]any)
+	if !ok {
+		t.Fatalf("%s has no data map — the envelope shape this gate reads has changed", key)
+	}
+	if shredded {
+		data["shredded"] = true
+		data["shreddedAt"] = "2026-08-07T08:59:00Z"
+	} else {
+		delete(data, "shredded")
+	}
+	raw, err := json.Marshal(doc)
+	if err != nil {
+		t.Fatalf("marshal %s: %v", key, err)
+	}
+	if _, err := conn.KVPut(ctx, testutil.HarnessCoreBucket, key, raw); err != nil {
+		t.Fatalf("write %s: %v", key, err)
+	}
+}
+
+// assertPiiKeyUnshredded proves the fixture's starting state, so a test that
+// asserts the path stays OPEN cannot pass merely because the envelope was
+// missing or already carried the flag.
+func assertPiiKeyUnshredded(t *testing.T, ctx context.Context, conn *substrate.Conn, identityKey string) {
+	t.Helper()
+	key := identityKey + ".piiKey"
+	entry, err := conn.KVGet(ctx, testutil.HarnessCoreBucket, key)
+	if err != nil {
+		t.Fatalf("KVGet %s: %v — this control needs a real, live envelope to be meaningful", key, err)
+	}
+	var doc struct {
+		Class string         `json:"class"`
+		Data  map[string]any `json:"data"`
+	}
+	if err := json.Unmarshal(entry.Value, &doc); err != nil {
+		t.Fatalf("unmarshal %s: %v", key, err)
+	}
+	if doc.Class != "piiKey" {
+		t.Fatalf("%s has class %q, want piiKey", key, doc.Class)
+	}
+	if v, ok := doc.Data["shredded"]; ok && v == true {
+		t.Fatalf("%s is already shredded — this control asserts an UNSHREDDED envelope leaves the path open", key)
+	}
+}
+
+// TestErasureGate_Reconcile_ShreddedKeyClosesWithNoMarker is the gate's second
+// condition, and it exists because the marker alone does not cover the
+// population that matters most. The marker is written by the erasure PATTERN's
+// seal; a bare ShredIdentityKey submit — what the operator Shred button has
+// always sent — writes only piiKey.shredded. Gated on the marker alone, every
+// one of those subjects reads as a live, unerased identity.
+//
+// NO marker is seeded. If the gate still consulted only the marker, this
+// reconcile would be accepted.
+func TestErasureGate_Reconcile_ShreddedKeyClosesWithNoMarker(t *testing.T) {
+	t.Parallel()
+	ctx, conn := setupTestEnv(t)
+	cp, cons := newLinkPipeline(t, ctx, conn, "erase-shred-recon")
+
+	uKey := claimFreshIdentity(t, ctx, conn, cp, cons, "ShredRecon")
+	dropBoundToLink(t, ctx, conn, consumerActorKey, uKey)
+	assertKeyAbsent(t, ctx, conn, uKey+".erasureRequested",
+		"the fixture must carry NO marker, or this proves only what the marker half already proved")
+	mutatePiiKey(t, ctx, conn, uKey, "piiKey", true, false)
+
+	outcome, reply := testutil.SubmitAndAwaitReply(t, ctx, conn, cp, cons,
+		reconcileEnv(testutil.GenReqID("ShredReconShr"), consumerActorKey, uKey))
+	if outcome != processor.OutcomeRejected {
+		t.Fatalf("outcome = %q, want rejected — a key-shredded identity with no marker kept its write path open", outcome)
+	}
+	if reply.Error == nil || !strings.Contains(reply.Error.Message, "CredentialReconcileRejected: erased") {
+		t.Fatalf("rejected with %+v, want the `erased` guard — a rejection from anywhere else means the gate never ran", reply.Error)
+	}
+	assertKeyAbsent(t, ctx, conn, boundToLinkKey(consumerActorKey, uKey),
+		"the gate refused the reconcile but the edge was republished anyway")
+
+	// One fact changed, nothing else. If this does not now succeed, the
+	// rejection above belonged to some other guard and proved nothing.
+	mutatePiiKey(t, ctx, conn, uKey, "piiKey", false, false)
+	testutil.PublishOp(t, conn, reconcileEnv(testutil.GenReqID("ShredReconOpn"), consumerActorKey, uKey))
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
+	assertLiveBoundTo(t, ctx, conn, consumerActorKey, uKey)
+}
+
+// TestErasureGate_UnshreddedPiiKeyDoesNotClose is the false-positive control,
+// and it is what makes the second condition safe to ship. Every identity that
+// has taken a sensitive write carries a piiKey envelope — in this package,
+// every identity at all, since the claimKey is sensitive — so a gate keyed on
+// the envelope's PRESENCE rather than its shredded flag would refuse the
+// claim, link, reconcile and merge paths of the entire population,
+// permanently, with no op able to reopen them.
+func TestErasureGate_UnshreddedPiiKeyDoesNotClose(t *testing.T) {
+	t.Parallel()
+	ctx, conn := setupTestEnv(t)
+	cp, cons := newLinkPipeline(t, ctx, conn, "erase-live-key")
+
+	uKey := claimFreshIdentity(t, ctx, conn, cp, cons, "LiveKey")
+	dropBoundToLink(t, ctx, conn, consumerActorKey, uKey)
+	assertPiiKeyUnshredded(t, ctx, conn, uKey)
+
+	testutil.PublishOp(t, conn, reconcileEnv(testutil.GenReqID("LiveKeyRecon"), consumerActorKey, uKey))
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
+	assertLiveBoundTo(t, ctx, conn, consumerActorKey, uKey)
+}
+
+// TestErasureGate_WrongClassAtPiiKeyDoesNotClose — the same class check the
+// marker half carries, for the same reason. privacy-base owns the piiKey
+// aspect-type DDL, so a document declaring some other class at this key falls
+// to resolveGoverningDDL's permissive default and any package script could
+// write one. A class-blind gate would let such a write shut a person's write
+// path permanently, with nothing able to reopen it.
+func TestErasureGate_WrongClassAtPiiKeyDoesNotClose(t *testing.T) {
+	t.Parallel()
+	ctx, conn := setupTestEnv(t)
+	cp, cons := newLinkPipeline(t, ctx, conn, "erase-key-class")
+
+	uKey := claimFreshIdentity(t, ctx, conn, cp, cons, "KeyClass")
+	dropBoundToLink(t, ctx, conn, consumerActorKey, uKey)
+	mutatePiiKey(t, ctx, conn, uKey, "note", true, false)
+
+	testutil.PublishOp(t, conn, reconcileEnv(testutil.GenReqID("KeyClassDo"), consumerActorKey, uKey))
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
+}
+
+// TestErasureGate_TombstonedShreddedKeyStillCloses — destruction does not
+// become untrue when the aspect is deleted, and a gate that reopened on a
+// tombstone would let the erased set grow again exactly when that was least
+// observable. Same posture as the marker half.
+func TestErasureGate_TombstonedShreddedKeyStillCloses(t *testing.T) {
+	t.Parallel()
+	ctx, conn := setupTestEnv(t)
+	cp, cons := newLinkPipeline(t, ctx, conn, "erase-key-tomb")
+
+	uKey := claimFreshIdentity(t, ctx, conn, cp, cons, "KeyTomb")
+	dropBoundToLink(t, ctx, conn, consumerActorKey, uKey)
+	mutatePiiKey(t, ctx, conn, uKey, "piiKey", true, true)
+
+	outcome, reply := testutil.SubmitAndAwaitReply(t, ctx, conn, cp, cons,
+		reconcileEnv(testutil.GenReqID("KeyTombShr"), consumerActorKey, uKey))
+	if outcome != processor.OutcomeRejected {
+		t.Fatalf("outcome = %q, want rejected — a tombstoned shredded envelope reopened the write path", outcome)
+	}
+	if reply.Error == nil || !strings.Contains(reply.Error.Message, "CredentialReconcileRejected: erased") {
+		t.Fatalf("rejected with %+v, want the `erased` guard", reply.Error)
+	}
+
+	mutatePiiKey(t, ctx, conn, uKey, "piiKey", false, false)
+	testutil.PublishOp(t, conn, reconcileEnv(testutil.GenReqID("KeyTombOpen"), consumerActorKey, uKey))
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
+}
+
+// TestErasureGate_CreateUnclaimedIdentity_SkipsBareShreddedIncumbent is the
+// vector the second condition was built for. A bare-shredded subject keeps a
+// live identityindex and no marker, so an ordinary same-contact walk-in mints
+// lnk.identity.<new>.duplicateOf.identity.<shredded> and an identity.created
+// carrying matchedIdentityKeys — a brand-new, durable, decrypt-free
+// correlation to a person whose key is already destroyed. Nothing exotic
+// reaches it: the front desk registering a namesake does.
+func TestErasureGate_CreateUnclaimedIdentity_SkipsBareShreddedIncumbent(t *testing.T) {
+	t.Parallel()
+	ctx, conn := setupTestEnv(t)
+	cp, cons := newCreatePipeline(t, ctx, conn, "ici-shred-dedup")
+
+	const sharedEmail = "shredded.dedup@example.com"
+	emailIdxKey := contactIndexKey("email", sharedEmail)
+
+	createContact := func(label, name string) string {
+		t.Helper()
+		reqID := testutil.GenReqID(label)
+		env := &processor.OperationEnvelope{
+			RequestID:     reqID,
+			Lane:          processor.LaneDefault,
+			OperationType: "CreateUnclaimedIdentity",
+			Actor:         staffActorKey,
+			SubmittedAt:   "2026-08-07T10:00:00Z",
+			Class:         "identity",
+			Payload: json.RawMessage(`{"name":"` + name + `","email":"` + sharedEmail +
+				`","claimKeyHash":"` + sha256HexOf("claim-"+label) + `"}`),
+			ContextHint: &processor.ContextHint{OptionalReads: []string{emailIdxKey}},
+		}
+		testutil.PublishOp(t, conn, env)
+		testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
+		return identityIDFromRequestID(reqID)
+	}
+
+	incumbentID := createContact("ShredDedupInc", "Shred Dedup One")
+	incumbentKey := "vtx.identity." + incumbentID
+
+	// Positive vector FIRST: without it the negative below could pass simply
+	// because the dedup never matched at all.
+	dupID := createContact("ShredDedupDup", "Shred Dedup Two")
+	assertKeyPresent(t, ctx, conn, duplicateOfLinkKey(dupID, incumbentKey),
+		"an un-shredded incumbent must still be deduped against, or the shredded case below proves nothing")
+
+	// Shred the incumbent's key with NO marker — the bare-submit state — and
+	// register the same contact again.
+	mutatePiiKey(t, ctx, conn, incumbentKey, "piiKey", true, false)
+	assertKeyAbsent(t, ctx, conn, incumbentKey+".erasureRequested",
+		"the fixture must carry NO marker, or this proves only what the marker half already proved")
+	afterID := createContact("ShredDedupAft", "Shred Dedup Three")
+
+	assertKeyAbsent(t, ctx, conn, duplicateOfLinkKey(afterID, incumbentKey),
+		"a fresh duplicateOf named an identity whose PII key is already destroyed — the erased set grew through the path the operator button has always used")
 }

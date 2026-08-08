@@ -100,13 +100,14 @@ func DDLs() []pkgmgr.DDLSpec {
 				"tombstone guard) — reassign/cancel it first. Repoints every credential " +
 				"resolving to secondary onto primary (multi-credential-identity-linking-" +
 				"design.md §3.3), emitting identity.rebound per credential. Rejects " +
-				"(ErasedIdentity) if EITHER side carries .erasureRequested " +
+				"(ErasedIdentity) if EITHER side carries .erasureRequested or an " +
+				"already-shredded .piiKey envelope " +
 				"(erasure-orchestration-design.md §6): merging ONTO a sealed identity " +
 				"creates fresh index and credential representations of a person whose " +
 				"write path has closed, and merging one AWAY moves its correlations onto " +
 				"a live survivor while its own residue count falls to zero, which would " +
-				"attest an erasure that erased nothing. Both markers are hydrated by this " +
-				"DDL's own derive_reads, so no submitter declares them. Multi-key " +
+				"attest an erasure that erased nothing. Both gate keys per side are " +
+				"hydrated by this DDL's own derive_reads, so no submitter declares them. Multi-key " +
 				"op: returns no primaryKey; merge counts ride the IdentityMerged event " +
 				"and the committed key set is in OperationReply.Revisions.",
 			Script: identityHygieneScript,
@@ -195,8 +196,8 @@ func DDLs() []pkgmgr.DDLSpec {
 // `indexes` links (Hub: secondary, Relation: "indexes", Direction: "in"), in
 // addition to the existing assignedTo enumeration.
 //
-// The caller declares NOTHING for the erasure gate. `primary.erasureRequested`
-// and `secondary.erasureRequested` are derived by this DDL's own `derive_reads`
+// The caller declares NOTHING for the erasure gate. `.erasureRequested` and
+// `.piiKey` for both sides are derived by this DDL's own `derive_reads`
 // (Contract #2 §2.5 class (g)) — a guard that refuses a merge touching a person
 // sealed for erasure (erasure-orchestration-design.md §6) must not depend on a
 // submitter remembering to enable it.
@@ -298,11 +299,12 @@ def is_identity_vertex_key(key):
 def derive_reads(op):
     # Contract #2 §2.5 class (g). The Processor runs this at the head of step 4
     # and merges the result into the declared read set, so the erasure gate's
-    # marker keys are hydrated without every submitter having to name them.
+    # keys are hydrated without every submitter having to name them.
     #
-    # Only the erasure markers derive here. Everything else this script reads
-    # is already declared by the dispatcher (the doc block above lists it), and
-    # moving any of it would split one contract across two places. These two
+    # Only the erasure gate's keys derive here -- the marker and the piiKey
+    # envelope, per side. Everything else this script reads is already declared
+    # by the dispatcher (the doc block above lists it), and moving any of it
+    # would split one contract across two places. These four
     # are different in kind: they belong to a guard that must hold no matter
     # what the caller declared, and a gate a submitter can forget to enable is
     # not a gate. (The script reads them through kv.Read, so a missed
@@ -310,8 +312,9 @@ def derive_reads(op):
     # snapshot lookup.)
     #
     # optionalReads, never reads: absent for every identity that was never
-    # sealed for erasure, which is nearly all of them, and a required read's
-    # absence is a HydrationMiss that would block every ordinary merge.
+    # sealed for erasure and never took a sensitive write, which is nearly all
+    # of them, and a required read's absence is a HydrationMiss that would
+    # block every ordinary merge.
     #
     # The op argument is a struct -- op.operationType, op.actor, op.payload
     # (also a struct). No kv, no nanoid: both are fail-closed stubs in this
@@ -323,9 +326,10 @@ def derive_reads(op):
     for field in ["primary", "secondary"]:
         v = getattr(p, field, None)
         if is_identity_vertex_key(v):
-            marker = v + ".erasureRequested"
-            if marker not in keys:
-                keys.append(marker)
+            for suffix in [".erasureRequested", ".piiKey"]:
+                gate_key = v + suffix
+                if gate_key not in keys:
+                    keys.append(gate_key)
     if len(keys) == 0:
         return {}
     return {"optionalReads": keys}
@@ -400,31 +404,48 @@ def execute(state, op):
     # ABSENT, so for a fail-closed guard one forgotten declaration would open
     # it; an undeclared kv.Read falls through to a live Core KV GET and still
     # refuses. The derive_reads below makes the declared case the normal one.
-    def erasure_requested(identity_key):
+    def aspect_of_class(identity_key, local_name, want_class):
         # read-posture: (d) declared in optionalReads by this package's own
         # derive_reads (Contract #2 §2.5 class (g)). Absence-tolerant, and
-        # absent for every identity never sealed for erasure.
-        doc = kv.Read(identity_key + ".erasureRequested")
+        # absent for every identity never sealed for erasure and never shredded.
+        doc = kv.Read(identity_key + "." + local_name)
         if doc == None:
-            return False
+            return None
         # The CLASS, not just the key. privacy-base records that its
-        # aspect-type DDL gates the class rather than the key, so a mutation at
-        # this key declaring some other class falls to the permissive default
+        # aspect-type DDLs gate the class rather than the key, so a mutation at
+        # either key declaring some other class falls to the permissive default
         # and any package script could write one; without this check such a
         # document would shut a person's merge path permanently, with nothing
         # able to remove it. "class" is a Starlark reserved word, so it is read
         # with getattr rather than dotted access.
-        if not hasattr(doc, "class") or getattr(doc, "class") != "erasureRequested":
-            return False
-        # A tombstoned marker still closes -- presence of the right class is
+        if not hasattr(doc, "class") or getattr(doc, "class") != want_class:
+            return None
+        # A tombstoned document still counts -- presence of the right class is
         # the signal, live or not. A gate that reopened on a tombstone would
         # let the erased set grow again exactly when that was least observable.
-        return True
+        return doc
 
-    if erasure_requested(primary):
-        fail("ErasedIdentity: primary " + primary + " is sealed for erasure; merging onto it would create fresh index and credential representations of a person whose record is being closed")
-    if erasure_requested(secondary):
-        fail("ErasedIdentity: secondary " + secondary + " is sealed for erasure; merging it away would move its correlations onto a live identity while its own residue count fell to zero, attesting an erasure that erased nothing")
+    def write_path_closed(identity_key):
+        # The §6 gate's two conditions, in the order identity-domain's own gate
+        # checks them and for the same reasons (identity-domain/ddls.go).
+        if aspect_of_class(identity_key, "erasureRequested", "erasureRequested") != None:
+            return True
+        # A destroyed PII key closes the merge path on its own. The marker is
+        # written by the erasure PATTERN's seal; a bare ShredIdentityKey submit
+        # writes only piiKey.shredded, and those subjects exist: the operator
+        # Shred button submits the op directly. Left open, a merge repoints
+        # such a subject's contact hashes
+        # onto a living survivor: correlations to a person whose key is already
+        # destroyed, moved onto an identity that stays live.
+        env = aspect_of_class(identity_key, "piiKey", "piiKey")
+        if env == None or env.data == None:
+            return False
+        return env.data.get("shredded", False) == True
+
+    if write_path_closed(primary):
+        fail("ErasedIdentity: primary " + primary + " is sealed for erasure or already key-shredded; merging onto it would create fresh index and credential representations of a person whose record is being closed")
+    if write_path_closed(secondary):
+        fail("ErasedIdentity: secondary " + secondary + " is sealed for erasure or already key-shredded; merging it away would move its correlations onto a live identity while its own residue count fell to zero, attesting an erasure that erased nothing")
 
     # --- No-orphan tombstone guard (Contract #10 §10.1): secondary must not
     # still hold a live open task. Checked ahead of the edges trust gate --

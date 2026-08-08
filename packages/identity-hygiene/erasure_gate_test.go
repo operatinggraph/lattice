@@ -176,7 +176,174 @@ func TestErasureGate_Merge_DeriveReadsNamesBothSides(t *testing.T) {
 			t.Fatalf("derive_reads does not name %s — the erasure marker for that side would fall to a live Core KV read on every merge", field)
 		}
 	}
-	if !strings.Contains(derive, `".erasureRequested"`) {
-		t.Fatal("derive_reads does not name the erasure marker aspect")
+	for _, aspect := range []string{`".erasureRequested"`, `".piiKey"`} {
+		if !strings.Contains(derive, aspect) {
+			t.Fatalf("derive_reads does not name %s — that half of the §6 gate would fall to a live Core KV read on every merge", aspect)
+		}
 	}
+}
+
+// The second condition's fixtures write the piiKey envelope directly — these
+// tests seed bare identity vertices that have none — but only ever on the
+// SECONDARY when the paired accept-arm is exercised. Two constraints make the
+// primary different in kind:
+//
+//   - The merge ENCRYPTS primary.credentialBinding (step 6.5), so a hand-built
+//     envelope with an empty wrappedDEK on the primary makes that step fail —
+//     the op would then be rejected by the Vault rather than by this gate.
+//   - Removing a seeded envelope does not restore the untouched state. The KV
+//     key keeps its revision, and the encrypt path mints a fresh envelope with
+//     a create-only write, which then fails RevisionConflict.
+//
+// So the primary-side case asserts the refusal only, and takes its "this
+// really was the gate" evidence from the wire message, which names both the
+// guard and the side. The paired accept-arm lives on the secondary tests,
+// where flipping the shredded flag back changes exactly one fact.
+
+func piiKeyDoc(identityKey, class string, shredded, tombstoned bool) map[string]any {
+	data := map[string]any{"wrappedDEK": "", "keyId": "", "alg": "", "createdAt": "2026-08-07T08:00:00Z"}
+	if shredded {
+		data["shredded"] = true
+		data["shreddedAt"] = "2026-08-07T08:59:00Z"
+	}
+	return map[string]any{
+		"class": class, "vertexKey": identityKey, "localName": "piiKey",
+		"isDeleted": tombstoned, "data": data,
+	}
+}
+
+func writePiiKey(t *testing.T, ctx context.Context, conn *substrate.Conn, identityKey, class string, shredded, tombstoned bool) {
+	t.Helper()
+	raw, err := json.Marshal(piiKeyDoc(identityKey, class, shredded, tombstoned))
+	if err != nil {
+		t.Fatalf("marshal piiKey for %s: %v", identityKey, err)
+	}
+	if _, err := conn.KVPut(ctx, testutil.HarnessCoreBucket, identityKey+".piiKey", raw); err != nil {
+		t.Fatalf("write piiKey on %s: %v", identityKey, err)
+	}
+}
+
+// TestErasureGate_Merge_RejectsBareShreddedSecondary is the merge path's half
+// of the gate's second condition. The marker is written by the erasure
+// PATTERN's seal; a bare ShredIdentityKey submit — what the operator Shred
+// button has always sent — writes only piiKey.shredded. Merging such a subject
+// away repoints its contact hashes onto a living survivor: correlations to a
+// person whose key is already destroyed, moved onto an identity that stays
+// live, with no marker anywhere to stop it.
+//
+// NO marker is seeded. If the gate still consulted only the marker this merge
+// would be accepted.
+func TestErasureGate_Merge_RejectsBareShreddedSecondary(t *testing.T) {
+	ctx, conn := setupTestEnv(t)
+	cp, cons := newMergePipeline(t, ctx, conn, "erase-shred-sec")
+
+	primaryKey := "vtx.identity." + testutil.GenReqID("PrimShredSec11")
+	secondaryKey := "vtx.identity." + testutil.GenReqID("SecShredSec111")
+	seedIdentityVertex(t, ctx, conn, primaryKey, "unclaimed", "")
+	seedIdentityVertex(t, ctx, conn, secondaryKey, "unclaimed", "")
+
+	writePiiKey(t, ctx, conn, secondaryKey, "piiKey", true, false)
+	assertMergeRefusedErased(t, ctx, conn, cp, cons,
+		erasureMergeEnv(testutil.GenReqID("MrgShredSecNo"), primaryKey, secondaryKey), "secondary")
+
+	if got, _ := readAspectData(t, ctx, conn, secondaryKey+".state")["value"].(string); got != "unclaimed" {
+		t.Fatalf("secondary.state = %q after a refused merge, want unclaimed", got)
+	}
+
+	// One fact changed, nothing else: the same envelope, no longer shredded.
+	writePiiKey(t, ctx, conn, secondaryKey, "piiKey", false, false)
+	testutil.PublishOp(t, conn, erasureMergeEnv(testutil.GenReqID("MrgShredSecOk"), primaryKey, secondaryKey))
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
+	if got, _ := readAspectData(t, ctx, conn, secondaryKey+".state")["value"].(string); got != "merged" {
+		t.Fatalf("secondary.state = %q after the merge, want merged — the rejection above was some other guard's", got)
+	}
+}
+
+// TestErasureGate_Merge_RejectsBareShreddedPrimary — the other side. Merging
+// ONTO a key-shredded identity writes fresh identityindex repoints and inbound
+// `indexes` links naming a person whose key is already gone. Refusal-only, per
+// the note above; the wire message names both the guard and the side.
+func TestErasureGate_Merge_RejectsBareShreddedPrimary(t *testing.T) {
+	ctx, conn := setupTestEnv(t)
+	cp, cons := newMergePipeline(t, ctx, conn, "erase-shred-prim")
+
+	primaryKey := "vtx.identity." + testutil.GenReqID("PrimShredPri1")
+	secondaryKey := "vtx.identity." + testutil.GenReqID("SecShredPri11")
+	seedIdentityVertex(t, ctx, conn, primaryKey, "unclaimed", "")
+	seedIdentityVertex(t, ctx, conn, secondaryKey, "unclaimed", "")
+
+	writePiiKey(t, ctx, conn, primaryKey, "piiKey", true, false)
+	assertMergeRefusedErased(t, ctx, conn, cp, cons,
+		erasureMergeEnv(testutil.GenReqID("MrgShredPriNo"), primaryKey, secondaryKey), "primary")
+
+	if got, _ := readAspectData(t, ctx, conn, secondaryKey+".state")["value"].(string); got != "unclaimed" {
+		t.Fatalf("secondary.state = %q after a refused merge, want unclaimed", got)
+	}
+}
+
+// TestErasureGate_Merge_UnshreddedPiiKeyDoesNotClose is the false-positive
+// control, and it is what makes the second condition safe to ship. Every
+// identity that has taken a sensitive write carries a piiKey envelope, so a
+// gate keyed on the envelope's PRESENCE rather than its shredded flag would
+// refuse the merge path of the entire PII-bearing population — permanently.
+func TestErasureGate_Merge_UnshreddedPiiKeyDoesNotClose(t *testing.T) {
+	ctx, conn := setupTestEnv(t)
+	cp, cons := newMergePipeline(t, ctx, conn, "erase-key-open")
+
+	primaryKey := "vtx.identity." + testutil.GenReqID("PrimKeyOpen11")
+	secondaryKey := "vtx.identity." + testutil.GenReqID("SecKeyOpen111")
+	seedIdentityVertex(t, ctx, conn, primaryKey, "unclaimed", "")
+	seedIdentityVertex(t, ctx, conn, secondaryKey, "unclaimed", "")
+
+	writePiiKey(t, ctx, conn, secondaryKey, "piiKey", false, false)
+
+	testutil.PublishOp(t, conn, erasureMergeEnv(testutil.GenReqID("MrgKeyOpenOk"), primaryKey, secondaryKey))
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
+	if got, _ := readAspectData(t, ctx, conn, secondaryKey+".state")["value"].(string); got != "merged" {
+		t.Fatalf("secondary.state = %q, want merged — the gate closed on a live, unshredded envelope", got)
+	}
+}
+
+// TestErasureGate_Merge_WrongClassAtPiiKeyDoesNotClose — the same class check
+// the marker half carries. privacy-base owns the piiKey aspect-type DDL, so a
+// document declaring some other class at this key falls to the permissive
+// default and any package script could write one; a class-blind gate would let
+// such a write shut a person's merge path permanently.
+func TestErasureGate_Merge_WrongClassAtPiiKeyDoesNotClose(t *testing.T) {
+	ctx, conn := setupTestEnv(t)
+	cp, cons := newMergePipeline(t, ctx, conn, "erase-key-class")
+
+	primaryKey := "vtx.identity." + testutil.GenReqID("PrimKeyCls11")
+	secondaryKey := "vtx.identity." + testutil.GenReqID("SecKeyCls111")
+	seedIdentityVertex(t, ctx, conn, primaryKey, "unclaimed", "")
+	seedIdentityVertex(t, ctx, conn, secondaryKey, "unclaimed", "")
+
+	writePiiKey(t, ctx, conn, secondaryKey, "note", true, false)
+
+	testutil.PublishOp(t, conn, erasureMergeEnv(testutil.GenReqID("MrgKeyClsOk"), primaryKey, secondaryKey))
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
+	if got, _ := readAspectData(t, ctx, conn, secondaryKey+".state")["value"].(string); got != "merged" {
+		t.Fatalf("secondary.state = %q, want merged — the gate closed on a document of the wrong class", got)
+	}
+}
+
+// TestErasureGate_Merge_TombstonedShreddedKeyStillCloses — destruction does not
+// become untrue when the aspect is deleted.
+func TestErasureGate_Merge_TombstonedShreddedKeyStillCloses(t *testing.T) {
+	ctx, conn := setupTestEnv(t)
+	cp, cons := newMergePipeline(t, ctx, conn, "erase-key-tomb")
+
+	primaryKey := "vtx.identity." + testutil.GenReqID("PrimKeyTomb11")
+	secondaryKey := "vtx.identity." + testutil.GenReqID("SecKeyTomb111")
+	seedIdentityVertex(t, ctx, conn, primaryKey, "unclaimed", "")
+	seedIdentityVertex(t, ctx, conn, secondaryKey, "unclaimed", "")
+
+	writePiiKey(t, ctx, conn, secondaryKey, "piiKey", true, true)
+	assertMergeRefusedErased(t, ctx, conn, cp, cons,
+		erasureMergeEnv(testutil.GenReqID("MrgKeyTombNo"), primaryKey, secondaryKey), "secondary")
+
+	// One fact changed: still tombstoned, no longer shredded.
+	writePiiKey(t, ctx, conn, secondaryKey, "piiKey", false, true)
+	testutil.PublishOp(t, conn, erasureMergeEnv(testutil.GenReqID("MrgKeyTombOk"), primaryKey, secondaryKey))
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
 }
