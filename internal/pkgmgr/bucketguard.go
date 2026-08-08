@@ -5,6 +5,7 @@ import (
 	"slices"
 
 	"github.com/operatinggraph/lattice/internal/bootstrap"
+	"github.com/operatinggraph/lattice/internal/substrate/keys"
 )
 
 // personalActorKeyField mirrors internal/refractor/adapter.PersonalActorKeyField
@@ -159,8 +160,8 @@ func (def Definition) validateLensReadPath() error {
 			}
 			seen := make(map[string]struct{}, len(l.SecureColumns))
 			for _, sc := range l.SecureColumns {
-				if sc.Column == "" || sc.IdentityKeyColumn == "" {
-					return fmt.Errorf("pkgmgr: Lens[%d] %q: each SecureColumns entry needs both Column and IdentityKeyColumn", idx, l.CanonicalName)
+				if sc.Column == "" || len(sc.HolderTypes) == 0 {
+					return fmt.Errorf("pkgmgr: Lens[%d] %q: each SecureColumns entry needs both Column and a non-empty HolderTypes — a column that names no holder type would decrypt under whatever holder a ciphertext happened to name", idx, l.CanonicalName)
 				}
 				if _, dup := seen[sc.Column]; dup {
 					return fmt.Errorf("pkgmgr: Lens[%d] %q: SecureColumns declares column %q twice", idx, l.CanonicalName, sc.Column)
@@ -175,13 +176,15 @@ func (def Definition) validateLensReadPath() error {
 				if _, ok := declared[sc.Column]; !ok {
 					return fmt.Errorf("pkgmgr: Lens[%d] %q: secure column %q is not among the declared Columns", idx, l.CanonicalName, sc.Column)
 				}
-				if _, bad := reserved[sc.IdentityKeyColumn]; bad {
-					return fmt.Errorf("pkgmgr: Lens[%d] %q: IdentityKeyColumn %q is a platform RLS column", idx, l.CanonicalName, sc.IdentityKeyColumn)
-				}
-				if _, ok := declared[sc.IdentityKeyColumn]; !ok {
-					if _, isKey := keyCols[sc.IdentityKeyColumn]; !isKey {
-						return fmt.Errorf("pkgmgr: Lens[%d] %q: IdentityKeyColumn %q is not among the declared Columns or IntoKey — the adapter writes every row field as a table column", idx, l.CanonicalName, sc.IdentityKeyColumn)
+				seenHolder := make(map[string]struct{}, len(sc.HolderTypes))
+				for _, ht := range sc.HolderTypes {
+					if !keys.IsValidTypeSegment(ht) {
+						return fmt.Errorf("pkgmgr: Lens[%d] %q: secure column %q declares holder type %q, which is not a Contract #1 vertex type segment ([a-z][a-z0-9]*) — no key holder could ever match it", idx, l.CanonicalName, sc.Column, ht)
 					}
+					if _, dup := seenHolder[ht]; dup {
+						return fmt.Errorf("pkgmgr: Lens[%d] %q: secure column %q declares holder type %q twice", idx, l.CanonicalName, sc.Column, ht)
+					}
+					seenHolder[ht] = struct{}{}
 				}
 			}
 		}

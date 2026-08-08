@@ -130,7 +130,7 @@ func Lenses() []pkgmgr.LensSpec {
 				{Name: "name", Type: "text"},
 			},
 			SecureColumns: []pkgmgr.SecureColumn{
-				{Column: "name", IdentityKeyColumn: "identity_key", Field: "value"},
+				{Column: "name", HolderTypes: []string{"identity"}, Field: "value"},
 			},
 		},
 	}

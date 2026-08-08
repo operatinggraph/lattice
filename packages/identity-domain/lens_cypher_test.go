@@ -179,7 +179,7 @@ func TestIdentityCredentialsRead_AnchorsOnTheReadersOwnNanoID(t *testing.T) {
 	require.Equal(t, lenstest.NanoID("claimed"), row["identity_id"])
 	require.Equal(t, f.key("claimed"), row["entity_key"])
 	require.Equal(t, f.key("claimed"), row["identity_key"],
-		"identity_key is the SecureColumn's IdentityKeyColumn — the Vault decrypts this row against it, so it must be the owning identity's key")
+		"identity_key is an ordinary projected column (the decryptor opens the row from the ciphertext's own keyId), but consumers read it as the row's owner, so it must be the owning identity's key")
 
 	require.Equal(t, []any{lenstest.NanoID("claimed")}, row["authz_anchors"],
 		"the row is self-anchored: RLS compares lattice.actor_id against this list, so any other NanoID here hands one identity's decrypted credential list to another")

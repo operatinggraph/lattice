@@ -2,6 +2,7 @@ package pkgmgr
 
 import (
 	"encoding/json"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -395,15 +396,18 @@ func TestLensSpecBody_Postgres_SecureColumns(t *testing.T) {
 		Spec:          "MATCH (i:identity) RETURN i.key AS identity_id",
 		Protected:     true,
 		Columns:       []PostgresColumn{{Name: "name", Type: "text"}, {Name: "identity_key", Type: "text"}},
-		SecureColumns: []SecureColumn{{Column: "name", IdentityKeyColumn: "identity_key", Field: "value"}},
+		SecureColumns: []SecureColumn{{Column: "name", HolderTypes: []string{"identity"}, Field: "value"}},
 	})
 	cfg := body["targetConfig"].(map[string]any)
 	secure, ok := cfg["secureColumns"].([]map[string]any)
 	if !ok || len(secure) != 1 {
 		t.Fatalf("secureColumns: want 1 entry, got %v (%T)", cfg["secureColumns"], cfg["secureColumns"])
 	}
-	if secure[0]["column"] != "name" || secure[0]["identityKeyColumn"] != "identity_key" || secure[0]["field"] != "value" {
+	if secure[0]["column"] != "name" || secure[0]["field"] != "value" {
 		t.Fatalf("secureColumns entry mismatch: %v", secure[0])
+	}
+	if ht, ok := secure[0]["holderTypes"].([]string); !ok || !slices.Equal(ht, []string{"identity"}) {
+		t.Fatalf("secureColumns holderTypes: want [identity], got %v (%T)", secure[0]["holderTypes"], secure[0]["holderTypes"])
 	}
 }
 
@@ -430,38 +434,44 @@ func TestValidateLensReadPath(t *testing.T) {
 		{"public and grant rejected", LensSpec{CanonicalName: "L", Adapter: "postgres", Table: "t", Public: true, GrantTable: true}, true},
 		{"secure protected ok", LensSpec{CanonicalName: "L", Adapter: "postgres", Table: "t", Protected: true,
 			Columns:       []PostgresColumn{{Name: "name", Type: "text"}, {Name: "identity_key", Type: "text"}},
-			SecureColumns: []SecureColumn{{Column: "name", IdentityKeyColumn: "identity_key", Field: "value"}}}, false},
-		{"secure identity-key via IntoKey ok", LensSpec{CanonicalName: "L", Adapter: "postgres", Table: "t", Protected: true,
+			SecureColumns: []SecureColumn{{Column: "name", HolderTypes: []string{"identity"}, Field: "value"}}}, false},
+		{"secure alongside an IntoKey column ok", LensSpec{CanonicalName: "L", Adapter: "postgres", Table: "t", Protected: true,
 			IntoKey:       []string{"identity_key"},
 			Columns:       []PostgresColumn{{Name: "name", Type: "text"}},
-			SecureColumns: []SecureColumn{{Column: "name", IdentityKeyColumn: "identity_key"}}}, false},
+			SecureColumns: []SecureColumn{{Column: "name", HolderTypes: []string{"identity"}}}}, false},
 		{"secure reserved column rejected", LensSpec{CanonicalName: "L", Adapter: "postgres", Table: "t", Protected: true,
 			Columns:       []PostgresColumn{{Name: "authz_anchors", Type: "text[]"}, {Name: "identity_key", Type: "text"}},
-			SecureColumns: []SecureColumn{{Column: "authz_anchors", IdentityKeyColumn: "identity_key"}}}, true},
+			SecureColumns: []SecureColumn{{Column: "authz_anchors", HolderTypes: []string{"identity"}}}}, true},
 		{"secure key-column overlap rejected", LensSpec{CanonicalName: "L", Adapter: "postgres", Table: "t", Protected: true,
 			IntoKey:       []string{"name"},
 			Columns:       []PostgresColumn{{Name: "name", Type: "text"}, {Name: "identity_key", Type: "text"}},
-			SecureColumns: []SecureColumn{{Column: "name", IdentityKeyColumn: "identity_key"}}}, true},
-		{"secure undeclared identityKeyColumn rejected", LensSpec{CanonicalName: "L", Adapter: "postgres", Table: "t", Protected: true,
+			SecureColumns: []SecureColumn{{Column: "name", HolderTypes: []string{"identity"}}}}, true},
+		{"secure needs no column carrying the holder key", LensSpec{CanonicalName: "L", Adapter: "postgres", Table: "t", Protected: true,
 			Columns:       []PostgresColumn{{Name: "name", Type: "text"}},
-			SecureColumns: []SecureColumn{{Column: "name", IdentityKeyColumn: "identity_key"}}}, true},
+			SecureColumns: []SecureColumn{{Column: "name", HolderTypes: []string{"identity"}}}}, false},
 		{"secure without protected rejected", LensSpec{CanonicalName: "L", Adapter: "postgres", Table: "t",
 			Columns:       []PostgresColumn{{Name: "name", Type: "text"}},
-			SecureColumns: []SecureColumn{{Column: "name", IdentityKeyColumn: "identity_key"}}}, true},
+			SecureColumns: []SecureColumn{{Column: "name", HolderTypes: []string{"identity"}}}}, true},
 		{"secure on nats-kv rejected", LensSpec{CanonicalName: "L", Adapter: "nats-kv", Bucket: "b",
-			SecureColumns: []SecureColumn{{Column: "name", IdentityKeyColumn: "identity_key"}}}, true},
+			SecureColumns: []SecureColumn{{Column: "name", HolderTypes: []string{"identity"}}}}, true},
 		{"secure on actor-aggregate rejected", LensSpec{CanonicalName: "L", Adapter: "postgres", Table: "t", Protected: true, ProjectionKind: "actorAggregate",
 			Columns:       []PostgresColumn{{Name: "name", Type: "text"}},
-			SecureColumns: []SecureColumn{{Column: "name", IdentityKeyColumn: "identity_key"}}}, true},
+			SecureColumns: []SecureColumn{{Column: "name", HolderTypes: []string{"identity"}}}}, true},
 		{"secure undeclared column rejected", LensSpec{CanonicalName: "L", Adapter: "postgres", Table: "t", Protected: true,
 			Columns:       []PostgresColumn{{Name: "name", Type: "text"}},
-			SecureColumns: []SecureColumn{{Column: "ssn", IdentityKeyColumn: "identity_key"}}}, true},
-		{"secure missing identityKeyColumn rejected", LensSpec{CanonicalName: "L", Adapter: "postgres", Table: "t", Protected: true,
+			SecureColumns: []SecureColumn{{Column: "ssn", HolderTypes: []string{"identity"}}}}, true},
+		{"secure missing holderTypes rejected", LensSpec{CanonicalName: "L", Adapter: "postgres", Table: "t", Protected: true,
 			Columns:       []PostgresColumn{{Name: "name", Type: "text"}},
 			SecureColumns: []SecureColumn{{Column: "name"}}}, true},
+		{"secure non-segment holderType rejected", LensSpec{CanonicalName: "L", Adapter: "postgres", Table: "t", Protected: true,
+			Columns:       []PostgresColumn{{Name: "name", Type: "text"}},
+			SecureColumns: []SecureColumn{{Column: "name", HolderTypes: []string{"retentionClass"}}}}, true},
+		{"secure duplicate holderType rejected", LensSpec{CanonicalName: "L", Adapter: "postgres", Table: "t", Protected: true,
+			Columns:       []PostgresColumn{{Name: "name", Type: "text"}},
+			SecureColumns: []SecureColumn{{Column: "name", HolderTypes: []string{"identity", "identity"}}}}, true},
 		{"secure duplicate column rejected", LensSpec{CanonicalName: "L", Adapter: "postgres", Table: "t", Protected: true,
 			Columns:       []PostgresColumn{{Name: "name", Type: "text"}},
-			SecureColumns: []SecureColumn{{Column: "name", IdentityKeyColumn: "identity_key"}, {Column: "name", IdentityKeyColumn: "identity_key"}}}, true},
+			SecureColumns: []SecureColumn{{Column: "name", HolderTypes: []string{"identity"}}, {Column: "name", HolderTypes: []string{"identity"}}}}, true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

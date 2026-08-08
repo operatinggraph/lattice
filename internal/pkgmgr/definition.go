@@ -1084,15 +1084,15 @@ type PostgresColumn struct {
 }
 
 // SecureColumn declares one decrypt-at-projection column of a Secure Lens:
-// Column is the RETURN alias holding the ciphertext envelope,
-// IdentityKeyColumn the RETURN alias holding the owning identity's vertex key
-// (vtx.identity.<id>), and Field optionally one field of the decrypted
-// plaintext object to project (empty projects the whole object). Mirrors the
-// Refractor-side lens.SecureColumn on-wire shape.
+// Column is the RETURN alias holding the ciphertext envelope, HolderTypes the
+// vertex types whose keys may open it (["identity"], ["retentionclass"]), and
+// Field optionally one field of the decrypted plaintext object to project
+// (empty projects the whole object). Mirrors the Refractor-side
+// lens.SecureColumn on-wire shape.
 type SecureColumn struct {
-	Column            string
-	IdentityKeyColumn string
-	Field             string
+	Column      string
+	HolderTypes []string
+	Field       string
 }
 
 // SourceConfig mirrors the on-wire lens-source descriptor (the Chronicler's

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"sync/atomic"
 
 	"github.com/operatinggraph/lattice/internal/refractor/failure"
@@ -22,18 +23,27 @@ import (
 // plaintext object to project (e.g. "value"); empty projects the whole
 // decrypted object.
 //
-// IdentityKeyColumn names a RETURN alias carrying the owning identity's vertex
-// key (vtx.identity.<id>). It is a required declaration a lens spec must
-// satisfy, and it is an ordinary projected column; it does NOT select the
-// decryption key. Custody is read from the ciphertext's own keyId
-// (vault.KeyHolder), which is the AEAD associated data the ciphertext was
-// sealed under and therefore the only self-authenticating answer — a column
-// value could disagree with it, and a lens can declare a column its cypher
-// never RETURNs at all.
+// HolderTypes enumerates the vertex types whose keys may open this column —
+// ["identity"] for a subject-custodied record, ["retentionclass"] for one whose
+// custody follows a retention obligation instead. Required and non-empty.
+//
+// It does not SELECT the decryption key: custody is read from the ciphertext's
+// own keyId (vault.KeyHolder), which is the AEAD associated data the ciphertext
+// was sealed under and therefore the only self-authenticating answer. What
+// HolderTypes does is bound which of those answers this column will act on, so
+// a lens that never meant to render a retained record cannot be made to by a
+// ciphertext that names one. It is also the declared key by which an erasure
+// mechanism asks "which lenses' rows depend on holder type T?" without parsing
+// compiled cypher.
+//
+// A list, because re-classification is legal and does not migrate existing
+// ciphertext: after a class change one column legitimately carries keyIds of two
+// holder types across rows, and widening the list is the lens author's explicit
+// act rather than something inferred from the corpus.
 type SecureColumn struct {
-	Column            string `json:"column"`
-	IdentityKeyColumn string `json:"identityKeyColumn"`
-	Field             string `json:"field,omitempty"`
+	Column      string   `json:"column"`
+	HolderTypes []string `json:"holderTypes"`
+	Field       string   `json:"field,omitempty"`
 }
 
 // coreKVGetter is the single point-read the decryptor needs from Core KV
@@ -86,7 +96,36 @@ func NewSecureDecryptor(v vault.Vault, coreKV coreKVGetter, columns []SecureColu
 	if len(columns) == 0 {
 		return nil, errors.New("pipeline: secure decryptor: at least one secure column required")
 	}
+	for _, col := range columns {
+		// The spec validators refuse an empty holder-type list, but the
+		// invariant belongs here too: an empty list makes every membership test
+		// false, so the column would refuse every ciphertext it is ever given
+		// while HolderTypes() reports no dependency on any holder at all. Fail
+		// at construction rather than three packages away.
+		if len(col.HolderTypes) == 0 {
+			return nil, fmt.Errorf("pipeline: secure decryptor: column %q declares no holderTypes", col.Column)
+		}
+	}
 	return &SecureDecryptor{vault: v, coreKV: coreKV, columns: columns, calls: calls}, nil
+}
+
+// HolderTypes returns the distinct holder types across every declared column —
+// the set of vertex types whose key destruction this lens's rows depend on.
+// Callers use it to answer "does this lens react to holder type T?" without
+// parsing compiled cypher, which is the whole reason the type is declared.
+func (d *SecureDecryptor) HolderTypes() []string {
+	seen := make(map[string]struct{}, len(d.columns))
+	out := make([]string, 0, len(d.columns))
+	for _, col := range d.columns {
+		for _, ht := range col.HolderTypes {
+			if _, dup := seen[ht]; dup {
+				continue
+			}
+			seen[ht] = struct{}{}
+			out = append(out, ht)
+		}
+	}
+	return out
 }
 
 // Apply decrypts every declared secure column across results, mutating rows
@@ -95,11 +134,11 @@ func NewSecureDecryptor(v vault.Vault, coreKV coreKVGetter, columns []SecureColu
 // Failure posture (fail closed, never fail open):
 //   - absent aspect (column value null) → column stays null.
 //   - shredded identity key → column projects null (right-to-erasure).
-//   - malformed envelope, plaintext where ciphertext was declared, missing
-//     identity-key column, ciphertext with no piiKey, or authenticated-decrypt
-//     failure → a Terminal error: the row is never written (DLQ + health), so
-//     a defect can suppress a projection but can never leak ciphertext into a
-//     plaintext column or vice versa.
+//   - malformed envelope, plaintext where ciphertext was declared, a holder
+//     type the column never declared, ciphertext with no piiKey, or
+//     authenticated-decrypt failure → a Terminal error: the row is never
+//     written (DLQ + health), so a defect can suppress a projection but can
+//     never leak ciphertext into a plaintext column or vice versa.
 //   - piiKey read infra errors surface unwrapped for the standard
 //     infra/transient classification (retry/pause).
 func (d *SecureDecryptor) Apply(ctx context.Context, results []ruleengine.EvalResult) error {
@@ -142,6 +181,15 @@ func (d *SecureDecryptor) decryptColumn(ctx context.Context, row map[string]any,
 	keyHolderKey, err := vault.KeyHolder(ct)
 	if err != nil {
 		return failure.Terminal(fmt.Errorf("pipeline: secure column %q: %w", col.Column, err))
+	}
+	// The ciphertext names its holder; the declaration says which holders this
+	// column agreed to render. A ciphertext naming a holder type the lens never
+	// declared is refused rather than opened — the lens author, not the write
+	// path, decides whether a retained record surfaces here.
+	if holderType := vault.KeyHolderType(keyHolderKey); !slices.Contains(col.HolderTypes, holderType) {
+		return failure.Terminal(fmt.Errorf(
+			"pipeline: secure column %q: ciphertext is held by %s, whose type %q is not among the column's declared holderTypes %v",
+			col.Column, keyHolderKey, holderType, col.HolderTypes))
 	}
 
 	envelope, err := d.readPiiKeyEnvelope(ctx, keyHolderKey)

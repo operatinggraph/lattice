@@ -128,8 +128,8 @@ func TestNarrowedFilterEligible_ActorAwareIsTheFanOutGate(t *testing.T) {
 		{"anchor type outside the label set", func(p *Pipeline) {
 			p.actorEnumerator = NewActorEnumerator(nil, nil, "service")
 		}},
-		{"secure lens whose identity key type is outside the label set", func(p *Pipeline) {
-			p.secureDecryptor = &SecureDecryptor{}
+		{"secure lens whose declared holder type is outside the label set", func(p *Pipeline) {
+			p.secureDecryptor = &SecureDecryptor{columns: []SecureColumn{{Column: "name", HolderTypes: []string{"identity"}}}}
 			p.plainReprojectLabels = map[string]struct{}{"role": {}}
 			p.actorEnumerator = NewActorEnumerator(nil, nil, "role")
 		}},

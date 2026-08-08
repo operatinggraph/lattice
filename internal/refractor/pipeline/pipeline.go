@@ -778,21 +778,6 @@ func (rs ruleState) plainVertexRelevant(vertexType string) bool {
 	return ok
 }
 
-// secureIdentityKeyType is the vertex type SecureDecryptor resolves key custody
-// against: readPiiKeyEnvelope point-reads vtx.identity.<id>.piiKey (secure.go),
-// and step 6's sensitiveAspectScope admits no other parent for a sensitive
-// aspect. A narrowed lens that cannot see this type would never be delivered a
-// shred and would keep projecting decrypted plaintext.
-//
-// The literal is a fact about the Processor's sensitive-aspect scope, not about
-// the decryptor, which resolves custody from an arbitrary lens-declared RETURN
-// alias. It is also unreachable in the shipped corpus — a secure lens and an
-// actorAggregate projection are mutually exclusive at translate time, and a
-// secure PERSONAL lens is already ineligible for want of pattern-closure — so
-// the conjunct is a standing guard for a combination that cannot exist yet, and
-// whoever lifts that ban owns re-deriving this type rather than inheriting it.
-const secureIdentityKeyType = "identity"
-
 // ActorAwareNarrowingLabels reports whether this actor-aware pipeline's fan-out
 // arms may skip an event whose vertex types its compiled patterns provably
 // cannot bind, and if so the exhaustive label set to judge against. It is the
@@ -848,11 +833,27 @@ func (p *Pipeline) actorAwareNarrowingLabels(rs ruleState) (map[string]struct{},
 	if _, ok := rs.reprojectLabels[p.actorEnumerator.actorType]; !ok {
 		return nil, false
 	}
-	// The decryptor resolves key custody off a RETURN column, not off a node
-	// the executor bound, so the identity type is not implied by the pattern.
+	// A key holder is not implied by the pattern: the decryptor resolves custody
+	// from the ciphertext's own keyId, and a holder vertex may not be one the
+	// cypher binds at all. The in-band scrub is a CDC event on <holder>.piiKey,
+	// so a narrowed lens that cannot see a declared holder type would never be
+	// delivered that holder's destruction and would keep projecting decrypted
+	// plaintext. Judge against what the lens DECLARED — the declaration is the
+	// only place a holder type is knowable without parsing compiled cypher.
+	//
+	// This conjunct guards a combination that cannot exist yet, and claims
+	// nothing about the lenses that ship today: reaching here at all requires an
+	// actorEnumerator (narrowedFilterEligible), and a secure lens is refused on
+	// any non-empty projectionKind at translate time, so every shipped secure
+	// lens takes the PLAIN branch, which carries no holder-type conjunct. What
+	// contains the exposure meanwhile is pkgmgr's custody-scope gate, which
+	// refuses a non-identity holder at install. Whoever lifts either ban owns
+	// carrying this requirement onto the arm they open.
 	if p.secureDecryptor != nil {
-		if _, ok := rs.reprojectLabels[secureIdentityKeyType]; !ok {
-			return nil, false
+		for _, holderType := range p.secureDecryptor.HolderTypes() {
+			if _, ok := rs.reprojectLabels[holderType]; !ok {
+				return nil, false
+			}
 		}
 	}
 	return rs.reprojectLabels, true

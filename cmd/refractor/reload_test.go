@@ -174,12 +174,47 @@ func TestHotReloadRefusal_AcceptsAnIntoOnlyEdit(t *testing.T) {
 func TestHotReloadRefusal_SecureColumnsChange(t *testing.T) {
 	entry := runningEntry()
 	newLens := authPlaneRule(t)
-	newLens.Into.SecureColumns = []lens.SecureColumn{{Column: "ssn", IdentityKeyColumn: "identityKey"}}
+	newLens.Into.SecureColumns = []lens.SecureColumn{{Column: "ssn", HolderTypes: []string{"identity"}}}
 	assert.Contains(t, hotReloadRefusal(entry, newLens), "secureColumns")
 }
 
+// A live decryptor is fixed at activation, so a holder-type edit is exactly as
+// unswappable as a column edit: widening the list changes which ciphertexts the
+// running decrypt set will open, and a swap would leave the old, narrower set
+// deciding. Same column, same field, different holder types must still refuse.
+func TestHotReloadRefusal_HolderTypesAloneStillRefuses(t *testing.T) {
+	entry := secureEntry()
+	newLens := secureRule()
+	newLens.Into.SecureColumns = []lens.SecureColumn{
+		{Column: "ssn", HolderTypes: []string{"identity", "retentionclass"}},
+	}
+	assert.Contains(t, hotReloadRefusal(entry, newLens), "secureColumns")
+}
+
+// The comparison is order-sensitive because the declaration is authored, not
+// computed — a reordered list is a spec edit, and over-refusing a reload costs
+// a reactivation while under-refusing one leaves a stale decrypt set live.
+func TestHotReloadRefusal_ReorderedHolderTypesRefuses(t *testing.T) {
+	entry := &pipelineEntry{
+		guarded: true, target: "postgres", table: "patients", dsn: "postgres://one",
+		secureColumns: []lens.SecureColumn{{Column: "ssn", HolderTypes: []string{"identity", "retentionclass"}}},
+	}
+	newLens := secureRule()
+	newLens.Into.SecureColumns = []lens.SecureColumn{
+		{Column: "ssn", HolderTypes: []string{"retentionclass", "identity"}},
+	}
+	assert.Contains(t, hotReloadRefusal(entry, newLens), "secureColumns")
+}
+
+// An identical declaration is not a secureColumns change, so the refusal must
+// come from elsewhere or not at all — otherwise every reload of a secure lens
+// would be refused for the wrong reason.
+func TestHotReloadRefusal_IdenticalHolderTypesIsNotASecureColumnsChange(t *testing.T) {
+	assert.NotContains(t, hotReloadRefusal(secureEntry(), secureRule()), "secureColumns")
+}
+
 func secureEntry() *pipelineEntry {
-	cols := []lens.SecureColumn{{Column: "ssn", IdentityKeyColumn: "identityKey"}}
+	cols := []lens.SecureColumn{{Column: "ssn", HolderTypes: []string{"identity"}}}
 	return &pipelineEntry{
 		guarded:       true,
 		target:        "postgres",
@@ -196,7 +231,7 @@ func secureRule() *lens.Rule {
 			Target:        "postgres",
 			Table:         "patients",
 			DSN:           "postgres://one",
-			SecureColumns: []lens.SecureColumn{{Column: "ssn", IdentityKeyColumn: "identityKey"}},
+			SecureColumns: []lens.SecureColumn{{Column: "ssn", HolderTypes: []string{"identity"}}},
 		},
 	}
 }
@@ -472,7 +507,7 @@ func TestReloaderUpdate_MatchChangeSecureColumnsRefusalIsRecorded(t *testing.T) 
 	}
 
 	newLens := authPlaneRule(t)
-	newLens.Into.SecureColumns = []lens.SecureColumn{{Column: "ssn", IdentityKeyColumn: "identityKey"}}
+	newLens.Into.SecureColumns = []lens.SecureColumn{{Column: "ssn", HolderTypes: []string{"identity"}}}
 	rl.update(authPlaneRule(t), newLens, lens.MatchChange)
 
 	status, err := reporter.GetStatus(context.Background())
@@ -744,7 +779,7 @@ func TestPinnedFieldsMatchTheRefusalSet(t *testing.T) {
 		"targetConfig.grantTable": func(r *lens.Rule) { r.Into.GrantTable = !r.Into.GrantTable },
 		"targetConfig.protected":  func(r *lens.Rule) { r.Into.Protected = !r.Into.Protected },
 		"targetConfig.secureColumns": func(r *lens.Rule) {
-			r.Into.SecureColumns = []lens.SecureColumn{{Column: "ssn", IdentityKeyColumn: "identityKey"}}
+			r.Into.SecureColumns = []lens.SecureColumn{{Column: "ssn", HolderTypes: []string{"identity"}}}
 		},
 	}
 	for _, f := range reloadpin.PinnedFields {

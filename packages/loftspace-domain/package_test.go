@@ -3,6 +3,7 @@ package loftspacedomain
 import (
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -192,7 +193,7 @@ func TestPackage_Permissions(t *testing.T) {
 	roster := lensByName["applicantRosterRead"]
 	if len(roster.SecureColumns) != 1 ||
 		roster.SecureColumns[0].Column != "name" ||
-		roster.SecureColumns[0].IdentityKeyColumn != "identity_key" ||
+		!slices.Equal(roster.SecureColumns[0].HolderTypes, []string{"identity"}) ||
 		roster.SecureColumns[0].Field != "value" {
 		t.Fatalf("unexpected applicantRosterRead SecureColumns: %+v", roster.SecureColumns)
 	}

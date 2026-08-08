@@ -23,7 +23,7 @@ func secureSpec(t *testing.T, cfg map[string]any) *LensSpec {
 			{"name": "identity_key", "type": "text"},
 		},
 		"secureColumns": []map[string]any{
-			{"column": "name", "identityKeyColumn": "identity_key", "field": "value"},
+			{"column": "name", "holderTypes": []any{"identity"}, "field": "value"},
 		},
 	}
 	for k, v := range cfg {
@@ -45,7 +45,7 @@ func TestTranslateSpec_SecureColumns_Threaded(t *testing.T) {
 	r, err := translateSpec(secureSpec(t, nil))
 	require.NoError(t, err)
 	require.Len(t, r.Into.SecureColumns, 1)
-	assert.Equal(t, SecureColumn{Column: "name", IdentityKeyColumn: "identity_key", Field: "value"}, r.Into.SecureColumns[0])
+	assert.Equal(t, SecureColumn{Column: "name", HolderTypes: []string{"identity"}, Field: "value"}, r.Into.SecureColumns[0])
 	assert.True(t, r.Into.Protected)
 }
 
@@ -77,28 +77,28 @@ func TestTranslateSpec_SecureColumns_ActorAggregateRejected(t *testing.T) {
 func TestTranslateSpec_SecureColumns_UndeclaredColumnRejected(t *testing.T) {
 	_, err := translateSpec(secureSpec(t, map[string]any{
 		"secureColumns": []map[string]any{
-			{"column": "ssn", "identityKeyColumn": "identity_key"},
+			{"column": "ssn", "holderTypes": []any{"identity"}},
 		},
 	}))
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "not among the declared")
 }
 
-func TestTranslateSpec_SecureColumns_MissingIdentityKeyColumnRejected(t *testing.T) {
+func TestTranslateSpec_SecureColumns_MissingHolderTypesRejected(t *testing.T) {
 	_, err := translateSpec(secureSpec(t, map[string]any{
 		"secureColumns": []map[string]any{
 			{"column": "name"},
 		},
 	}))
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "identityKeyColumn")
+	assert.Contains(t, err.Error(), "holderTypes")
 }
 
 func TestTranslateSpec_SecureColumns_DuplicateRejected(t *testing.T) {
 	_, err := translateSpec(secureSpec(t, map[string]any{
 		"secureColumns": []map[string]any{
-			{"column": "name", "identityKeyColumn": "identity_key"},
-			{"column": "name", "identityKeyColumn": "identity_key", "field": "value"},
+			{"column": "name", "holderTypes": []any{"identity"}},
+			{"column": "name", "holderTypes": []any{"identity"}, "field": "value"},
 		},
 	}))
 	require.Error(t, err)
@@ -112,15 +112,7 @@ func TestTranslateSpec_SecureColumns_ReservedRLSColumnRejected(t *testing.T) {
 			{"name": "identity_key", "type": "text"},
 		},
 		"secureColumns": []map[string]any{
-			{"column": "authz_anchors", "identityKeyColumn": "identity_key"},
-		},
-	}))
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "platform RLS column")
-
-	_, err = translateSpec(secureSpec(t, map[string]any{
-		"secureColumns": []map[string]any{
-			{"column": "name", "identityKeyColumn": "projection_seq"},
+			{"column": "authz_anchors", "holderTypes": []any{"identity"}},
 		},
 	}))
 	require.Error(t, err)
@@ -134,40 +126,51 @@ func TestTranslateSpec_SecureColumns_KeyColumnRejected(t *testing.T) {
 			{"name": "identity_key", "type": "text"},
 		},
 		"secureColumns": []map[string]any{
-			{"column": "identity_id", "identityKeyColumn": "identity_key"},
+			{"column": "identity_id", "holderTypes": []any{"identity"}},
 		},
 	}))
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "output-key column")
 }
 
-func TestTranslateSpec_SecureColumns_UndeclaredIdentityKeyColumnRejected(t *testing.T) {
-	_, err := translateSpec(secureSpec(t, map[string]any{
-		"columns": []map[string]any{
-			{"name": "name", "type": "text"},
-		},
-		"secureColumns": []map[string]any{
-			{"column": "name", "identityKeyColumn": "identity_key"},
-		},
-	}))
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "identityKeyColumn")
-}
-
-func TestTranslateSpec_SecureColumns_IdentityKeyAsKeyColumnAllowed(t *testing.T) {
-	// The identity-key column may be an output-key column (it is not
-	// rewritten by the decryptor, only read).
+// A secure lens needs no column carrying its holder's key. Custody comes from
+// the ciphertext, so a lens projecting the ciphertext column alone is valid —
+// this is the whole class of "the declared column's RETURN alias was never
+// projected" runtime failure that resolving custody from keyId removed.
+func TestTranslateSpec_SecureColumns_NoHolderKeyColumnNeeded(t *testing.T) {
 	r, err := translateSpec(secureSpec(t, map[string]any{
-		"key": []string{"identity_key"},
 		"columns": []map[string]any{
 			{"name": "name", "type": "text"},
 		},
 		"secureColumns": []map[string]any{
-			{"column": "name", "identityKeyColumn": "identity_key"},
+			{"column": "name", "holderTypes": []any{"identity"}},
 		},
 	}))
 	require.NoError(t, err)
 	require.Len(t, r.Into.SecureColumns, 1)
+}
+
+// A holder type that is not a Contract #1 type segment can never match a key
+// holder, so the column would refuse every ciphertext it was given. Refuse the
+// declaration instead of shipping a lens that projects null forever.
+func TestTranslateSpec_SecureColumns_InvalidHolderTypeRejected(t *testing.T) {
+	_, err := translateSpec(secureSpec(t, map[string]any{
+		"secureColumns": []map[string]any{
+			{"column": "name", "holderTypes": []any{"retentionClass"}},
+		},
+	}))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "vertex type segment")
+}
+
+func TestTranslateSpec_SecureColumns_DuplicateHolderTypeRejected(t *testing.T) {
+	_, err := translateSpec(secureSpec(t, map[string]any{
+		"secureColumns": []map[string]any{
+			{"column": "name", "holderTypes": []any{"identity", "identity"}},
+		},
+	}))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "twice")
 }
 
 func TestTranslateSpec_SecureColumns_NATSKVRejected(t *testing.T) {
@@ -179,7 +182,7 @@ func TestTranslateSpec_SecureColumns_NATSKVRejected(t *testing.T) {
 			"bucket": "roster",
 			"key":    []string{"key"},
 			"secureColumns": []map[string]any{
-				{"column": "name", "identityKeyColumn": "key"},
+				{"column": "name", "holderTypes": []any{"identity"}},
 			},
 		}),
 	}

@@ -79,7 +79,7 @@ func Lenses() []pkgmgr.LensSpec {
 				{Name: "state", Type: "text"},
 			},
 			SecureColumns: []pkgmgr.SecureColumn{
-				{Column: "name", IdentityKeyColumn: "identity_key", Field: "value"},
+				{Column: "name", HolderTypes: []string{"identity"}, Field: "value"},
 			},
 		},
 		{
@@ -161,8 +161,8 @@ RETURN
 // plaintext `value` field at rest), so service / unnamed actors are excluded
 // and the picker stays a list of real people. The RETURN carries the envelope
 // whole (`i.name.data AS name`) for the Secure-Lens decryptor, which projects
-// the decrypted object's `value` field per the SecureColumns declaration;
-// `identity_key` doubles as the decryptor's key-custody column. authz_anchors
+// the decrypted object's `value` field per the SecureColumns declaration,
+// opening it under the holder the ciphertext itself names. authz_anchors
 // carries the identity's OWN bare NanoID (a signed-in actor always resolves
 // its own name) PLUS the bare NanoID of every landlord managing a unit the
 // identity has a live lease application against, PLUS every building

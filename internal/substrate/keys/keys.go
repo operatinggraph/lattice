@@ -137,6 +137,13 @@ func splitVertexKey(key string) (vertexType, id string, ok bool) {
 
 // --- segment validators ---
 
+// IsValidTypeSegment reports whether s is a Contract #1 vertex-type segment.
+// Exported for the same reason as IsValidLocalName: a caller may have to check
+// a type BEFORE any key exists to parse it out of — a lens spec's secureColumns
+// declares the holder types whose keys may open a column, validated at install
+// and at spec load, long before a ciphertext naming one of them is written.
+func IsValidTypeSegment(s string) bool { return isValidTypeSegment(s) }
+
 // isValidTypeSegment matches Contract #1 type pattern: [a-z][a-z0-9]*.
 func isValidTypeSegment(s string) bool {
 	if len(s) == 0 {

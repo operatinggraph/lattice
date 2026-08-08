@@ -472,8 +472,8 @@ func lensSpecBody(lensID string, l LensSpec) map[string]any {
 			secure := make([]map[string]any, len(l.SecureColumns))
 			for i, c := range l.SecureColumns {
 				entry := map[string]any{
-					"column":            c.Column,
-					"identityKeyColumn": c.IdentityKeyColumn,
+					"column":      c.Column,
+					"holderTypes": c.HolderTypes,
 				}
 				if c.Field != "" {
 					entry["field"] = c.Field

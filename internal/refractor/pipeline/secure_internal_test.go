@@ -82,8 +82,8 @@ func TestSecureDecryptor_DecryptsFieldAndWholeObject(t *testing.T) {
 
 	var calls atomic.Uint64
 	dec, err := NewSecureDecryptor(v, fakeCoreKV{idKey + ".piiKey": piiKeyDoc}, []SecureColumn{
-		{Column: "name", IdentityKeyColumn: "identity_key", Field: "value"},
-		{Column: "name_full", IdentityKeyColumn: "identity_key"},
+		{Column: "name", HolderTypes: []string{"identity"}, Field: "value"},
+		{Column: "name_full", HolderTypes: []string{"identity"}},
 	}, &calls)
 	require.NoError(t, err)
 
@@ -112,7 +112,7 @@ func TestSecureDecryptor_AbsentAspectStaysNull(t *testing.T) {
 	v := newTestVault(t)
 	var calls atomic.Uint64
 	dec, err := NewSecureDecryptor(v, fakeCoreKV{}, []SecureColumn{
-		{Column: "phone", IdentityKeyColumn: "identity_key", Field: "value"},
+		{Column: "phone", HolderTypes: []string{"identity"}, Field: "value"},
 	}, &calls)
 	require.NoError(t, err)
 
@@ -129,7 +129,7 @@ func TestSecureDecryptor_ShreddedProjectsNull(t *testing.T) {
 	require.NoError(t, v.ShredKey(context.Background(), idKey))
 
 	dec, err := NewSecureDecryptor(v, fakeCoreKV{idKey + ".piiKey": piiKeyDoc}, []SecureColumn{
-		{Column: "name", IdentityKeyColumn: "identity_key", Field: "value"},
+		{Column: "name", HolderTypes: []string{"identity"}, Field: "value"},
 	}, nil)
 	require.NoError(t, err)
 
@@ -153,7 +153,7 @@ func TestSecureDecryptor_ShreddedPlaceholderEnvelopeProjectsNull(t *testing.T) {
 	require.NoError(t, err)
 
 	dec, err := NewSecureDecryptor(v, fakeCoreKV{idKey + ".piiKey": placeholderDoc}, []SecureColumn{
-		{Column: "name", IdentityKeyColumn: "identity_key", Field: "value"},
+		{Column: "name", HolderTypes: []string{"identity"}, Field: "value"},
 	}, nil)
 	require.NoError(t, err)
 
@@ -170,7 +170,7 @@ func TestSecureDecryptor_TamperedCiphertextIsTerminal(t *testing.T) {
 	ctMap["ct"] = "dGFtcGVyZWQtY2lwaGVydGV4dA=="
 
 	dec, err := NewSecureDecryptor(v, fakeCoreKV{idKey + ".piiKey": piiKeyDoc}, []SecureColumn{
-		{Column: "name", IdentityKeyColumn: "identity_key", Field: "value"},
+		{Column: "name", HolderTypes: []string{"identity"}, Field: "value"},
 	}, nil)
 	require.NoError(t, err)
 
@@ -182,7 +182,7 @@ func TestSecureDecryptor_TamperedCiphertextIsTerminal(t *testing.T) {
 func TestSecureDecryptor_NonEnvelopeValueIsTerminal(t *testing.T) {
 	v := newTestVault(t)
 	dec, err := NewSecureDecryptor(v, fakeCoreKV{}, []SecureColumn{
-		{Column: "name", IdentityKeyColumn: "identity_key", Field: "value"},
+		{Column: "name", HolderTypes: []string{"identity"}, Field: "value"},
 	}, nil)
 	require.NoError(t, err)
 
@@ -198,18 +198,17 @@ func TestSecureDecryptor_NonEnvelopeValueIsTerminal(t *testing.T) {
 	assert.Equal(t, failure.CatTerminal, failure.Classify(err))
 }
 
-// A row that projects no identity-key column decrypts anyway: custody comes
-// from the ciphertext's keyId, so the declared column is an ordinary projected
-// value the decryptor never consults. This is the property that lets a lens
-// declare a column its cypher does not RETURN without failing per-row at
-// runtime — the failure mode the column-derived custody could not rule out.
-func TestSecureDecryptor_AbsentIdentityKeyColumnStillDecrypts(t *testing.T) {
+// A row carrying no holder key at all decrypts anyway: custody comes from the
+// ciphertext's keyId, so no projected column takes part in opening it. This is
+// the property that lets a lens project the ciphertext column alone — the
+// per-row failure mode column-derived custody could not rule out.
+func TestSecureDecryptor_RowWithoutAHolderKeyStillDecrypts(t *testing.T) {
 	v := newTestVault(t)
 	const idKey = "vtx.identity.SecUnitNoidCoLAAAAAA"
 	ctMap, piiKeyDoc := mintIdentityPII(t, v, idKey, map[string]any{"value": "Alice"})
 
 	dec, err := NewSecureDecryptor(v, fakeCoreKV{idKey + ".piiKey": piiKeyDoc}, []SecureColumn{
-		{Column: "name", IdentityKeyColumn: "identity_key", Field: "value"},
+		{Column: "name", HolderTypes: []string{"identity"}, Field: "value"},
 	}, nil)
 	require.NoError(t, err)
 
@@ -229,7 +228,7 @@ func TestSecureDecryptor_CiphertextWithoutKeyIDIsTerminal(t *testing.T) {
 	delete(ctMap, "keyId")
 
 	dec, err := NewSecureDecryptor(v, fakeCoreKV{idKey + ".piiKey": piiKeyDoc}, []SecureColumn{
-		{Column: "name", IdentityKeyColumn: "identity_key", Field: "value"},
+		{Column: "name", HolderTypes: []string{"identity"}, Field: "value"},
 	}, nil)
 	require.NoError(t, err)
 
@@ -247,7 +246,7 @@ func TestSecureDecryptor_MalformedKeyIDNeverFallsBackToTheRow(t *testing.T) {
 	ctMap["keyId"] = "not-a-vertex-key"
 
 	dec, err := NewSecureDecryptor(v, fakeCoreKV{idKey + ".piiKey": piiKeyDoc}, []SecureColumn{
-		{Column: "name", IdentityKeyColumn: "identity_key", Field: "value"},
+		{Column: "name", HolderTypes: []string{"identity"}, Field: "value"},
 	}, nil)
 	require.NoError(t, err)
 
@@ -256,11 +255,11 @@ func TestSecureDecryptor_MalformedKeyIDNeverFallsBackToTheRow(t *testing.T) {
 	assert.Equal(t, failure.CatTerminal, failure.Classify(err))
 }
 
-// The divergence bar for this site: the row's identity-key column names a
-// DIFFERENT holder than the ciphertext does, and both holders have a live
-// piiKey. Only the ciphertext's keyId can open it, so a decryptor still
-// reading the column would fail the AEAD tag rather than return the plaintext.
-func TestSecureDecryptor_KeyIDWinsOverADivergentIdentityKeyColumn(t *testing.T) {
+// The divergence bar for this site: a projected column names a DIFFERENT
+// holder than the ciphertext does, and both holders have a live piiKey. Only
+// the ciphertext's keyId can open it, so a decryptor reaching for the row
+// would fail the AEAD tag rather than return the plaintext.
+func TestSecureDecryptor_KeyIDWinsOverADivergentRowColumn(t *testing.T) {
 	v := newTestVault(t)
 	const sealingHolder = "vtx.identity.SecUnitSeaLerAAAAAAA"
 	const decoyHolder = "vtx.identity.SecUnitDecoyAAAAAAAA"
@@ -271,7 +270,7 @@ func TestSecureDecryptor_KeyIDWinsOverADivergentIdentityKeyColumn(t *testing.T) 
 		sealingHolder + ".piiKey": sealingPiiKey,
 		decoyHolder + ".piiKey":   decoyPiiKey,
 	}, []SecureColumn{
-		{Column: "name", IdentityKeyColumn: "identity_key", Field: "value"},
+		{Column: "name", HolderTypes: []string{"identity"}, Field: "value"},
 	}, nil)
 	require.NoError(t, err)
 
@@ -295,13 +294,72 @@ func TestSecureDecryptor_DecryptsUnderARetentionClassHolder(t *testing.T) {
 		classHolder + ".piiKey":    classPiiKey,
 		anchorIdentity + ".piiKey": anchorPiiKey,
 	}, []SecureColumn{
-		{Column: "note", IdentityKeyColumn: "identity_key", Field: "value"},
+		{Column: "note", HolderTypes: []string{"retentionclass"}, Field: "value"},
 	}, nil)
 	require.NoError(t, err)
 
 	row := map[string]any{"identity_key": anchorIdentity, "note": ctMap}
 	require.NoError(t, dec.Apply(context.Background(), []ruleengine.EvalResult{{Row: row}}))
 	assert.Equal(t, "chart note", row["note"])
+}
+
+// The declaration bounds which holders a column will act on. The same
+// class-held ciphertext, live piiKey and all, is refused by a column that
+// declared only ["identity"] — a lens renders a retained record because its
+// author said so, never because a write path pointed one at it.
+func TestSecureDecryptor_UndeclaredHolderTypeIsTerminal(t *testing.T) {
+	v := newTestVault(t)
+	const classHolder = "vtx.retentionclass.SecUnitCLassAAAAAAAA"
+	ctMap, classPiiKey := mintIdentityPII(t, v, classHolder, map[string]any{"value": "chart note"})
+
+	dec, err := NewSecureDecryptor(v, fakeCoreKV{classHolder + ".piiKey": classPiiKey}, []SecureColumn{
+		{Column: "note", HolderTypes: []string{"identity"}, Field: "value"},
+	}, nil)
+	require.NoError(t, err)
+
+	row := map[string]any{"note": ctMap}
+	err = dec.Apply(context.Background(), []ruleengine.EvalResult{{Row: row}})
+	require.Error(t, err)
+	assert.Equal(t, failure.CatTerminal, failure.Classify(err))
+	assert.Contains(t, err.Error(), "retentionclass")
+}
+
+// Widening the list is the author's act, and it admits both kinds at once —
+// the re-classification case, where one column carries keyIds of two holder
+// types across rows because a class change does not migrate ciphertext.
+func TestSecureDecryptor_ListedHolderTypesAdmitBothKinds(t *testing.T) {
+	v := newTestVault(t)
+	const classHolder = "vtx.retentionclass.SecUnitCLassAAAAAAAA"
+	const idHolder = "vtx.identity.SecUnitSubjectAAAAAA"
+	classCT, classPiiKey := mintIdentityPII(t, v, classHolder, map[string]any{"value": "chart note"})
+	idCT, idPiiKey := mintIdentityPII(t, v, idHolder, map[string]any{"value": "Alice"})
+
+	dec, err := NewSecureDecryptor(v, fakeCoreKV{
+		classHolder + ".piiKey": classPiiKey,
+		idHolder + ".piiKey":    idPiiKey,
+	}, []SecureColumn{
+		{Column: "note", HolderTypes: []string{"identity", "retentionclass"}, Field: "value"},
+	}, nil)
+	require.NoError(t, err)
+
+	retained := map[string]any{"note": classCT}
+	erasable := map[string]any{"note": idCT}
+	require.NoError(t, dec.Apply(context.Background(), []ruleengine.EvalResult{{Row: retained}, {Row: erasable}}))
+	assert.Equal(t, "chart note", retained["note"])
+	assert.Equal(t, "Alice", erasable["note"])
+}
+
+// HolderTypes is the enumeration key an erasure mechanism asks its question
+// through, so the set it reports must be the distinct union across columns,
+// not a per-column list a caller has to flatten.
+func TestSecureDecryptor_HolderTypesReportsTheDistinctUnion(t *testing.T) {
+	v := newTestVault(t)
+	dec, err := NewSecureDecryptor(v, fakeCoreKV{}, []SecureColumn{
+		{Column: "email", HolderTypes: []string{"identity"}},
+		{Column: "note", HolderTypes: []string{"retentionclass", "identity"}},
+	}, nil)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"identity", "retentionclass"}, dec.HolderTypes())
 }
 
 func TestSecureDecryptor_SoftDeletedPiiKeyIsTerminal(t *testing.T) {
@@ -319,7 +377,7 @@ func TestSecureDecryptor_SoftDeletedPiiKeyIsTerminal(t *testing.T) {
 	require.NoError(t, err)
 
 	dec, err := NewSecureDecryptor(v, fakeCoreKV{idKey + ".piiKey": deletedDoc}, []SecureColumn{
-		{Column: "name", IdentityKeyColumn: "identity_key", Field: "value"},
+		{Column: "name", HolderTypes: []string{"identity"}, Field: "value"},
 	}, nil)
 	require.NoError(t, err)
 
@@ -336,7 +394,7 @@ func TestSecureDecryptor_MalformedPiiKeyDocIsTerminal(t *testing.T) {
 	ctMap, _ := mintIdentityPII(t, v, idKey, map[string]any{"value": "Alice"})
 
 	dec, err := NewSecureDecryptor(v, fakeCoreKV{idKey + ".piiKey": []byte("{not json")}, []SecureColumn{
-		{Column: "name", IdentityKeyColumn: "identity_key", Field: "value"},
+		{Column: "name", HolderTypes: []string{"identity"}, Field: "value"},
 	}, nil)
 	require.NoError(t, err)
 
@@ -354,7 +412,7 @@ func TestSecureDecryptor_MissingDeclaredFieldIsTerminal(t *testing.T) {
 	ctMap, piiKeyDoc := mintIdentityPII(t, v, idKey, map[string]any{"value": "Alice"})
 
 	dec, err := NewSecureDecryptor(v, fakeCoreKV{idKey + ".piiKey": piiKeyDoc}, []SecureColumn{
-		{Column: "name", IdentityKeyColumn: "identity_key", Field: "displayName"},
+		{Column: "name", HolderTypes: []string{"identity"}, Field: "displayName"},
 	}, nil)
 	require.NoError(t, err)
 
@@ -369,7 +427,7 @@ func TestSecureDecryptor_CiphertextWithoutPiiKeyIsTerminal(t *testing.T) {
 	ctMap, _ := mintIdentityPII(t, v, idKey, map[string]any{"value": "Alice"})
 
 	dec, err := NewSecureDecryptor(v, fakeCoreKV{}, []SecureColumn{
-		{Column: "name", IdentityKeyColumn: "identity_key", Field: "value"},
+		{Column: "name", HolderTypes: []string{"identity"}, Field: "value"},
 	}, nil)
 	require.NoError(t, err)
 
@@ -382,7 +440,7 @@ func TestSecureDecryptor_DeleteResultsPassThrough(t *testing.T) {
 	v := newTestVault(t)
 	var calls atomic.Uint64
 	dec, err := NewSecureDecryptor(v, fakeCoreKV{}, []SecureColumn{
-		{Column: "name", IdentityKeyColumn: "identity_key"},
+		{Column: "name", HolderTypes: []string{"identity"}},
 	}, &calls)
 	require.NoError(t, err)
 
@@ -509,7 +567,7 @@ RETURN i.key AS key, i.key AS identity_key, i.name.data AS name`
 	p.UseFullEngine(eng, cr)
 
 	decr, err := NewSecureDecryptor(v, coreKV, []SecureColumn{
-		{Column: "name", IdentityKeyColumn: "identity_key", Field: "value"},
+		{Column: "name", HolderTypes: []string{"identity"}, Field: "value"},
 	}, nil)
 	require.NoError(t, err)
 	p.SetSecureDecryptor(decr)
@@ -645,7 +703,7 @@ RETURN app.key AS key, id.key AS applicant, id.name.data AS applicant_name`
 	require.NoError(t, err)
 	p.UseFullEngine(eng, cr)
 	decr, err := NewSecureDecryptor(v, coreKV, []SecureColumn{
-		{Column: "applicant_name", IdentityKeyColumn: "applicant", Field: "value"},
+		{Column: "applicant_name", HolderTypes: []string{"identity"}, Field: "value"},
 	}, nil)
 	require.NoError(t, err)
 	p.SetSecureDecryptor(decr)

@@ -15,6 +15,7 @@ import (
 	"github.com/operatinggraph/lattice/internal/refractor/ruleengine"
 	"github.com/operatinggraph/lattice/internal/refractor/ruleengine/full"
 	"github.com/operatinggraph/lattice/internal/substrate"
+	"github.com/operatinggraph/lattice/internal/substrate/keys"
 )
 
 // lensSourceDurablePrefix is the JetStream durable-consumer name prefix for
@@ -275,15 +276,15 @@ type PostgresColumn struct {
 }
 
 // SecureColumn declares one decrypt-at-projection column of a Secure Lens.
-// Column is the RETURN alias holding the ciphertext envelope;
-// IdentityKeyColumn is the RETURN alias holding the owning identity's vertex
-// key (vtx.identity.<id>); Field optionally selects one field of the
-// decrypted plaintext object (e.g. "value" — empty projects the whole
-// object). On-wire mirror of pipeline.SecureColumn.
+// Column is the RETURN alias holding the ciphertext envelope; HolderTypes are
+// the vertex types whose keys may open it (["identity"], ["retentionclass"]);
+// Field optionally selects one field of the decrypted plaintext object
+// (e.g. "value" — empty projects the whole object). On-wire mirror of
+// pipeline.SecureColumn.
 type SecureColumn struct {
-	Column            string `json:"column"`
-	IdentityKeyColumn string `json:"identityKeyColumn"`
-	Field             string `json:"field,omitempty"`
+	Column      string   `json:"column"`
+	HolderTypes []string `json:"holderTypes"`
+	Field       string   `json:"field,omitempty"`
 }
 
 // TargetNATSKVConfig is the expected shape of LensSpec.TargetConfig
@@ -874,8 +875,8 @@ func validateSecureColumns(spec *LensSpec, cfg TargetPostgresConfig) error {
 	}
 	seen := make(map[string]struct{}, len(cfg.SecureColumns))
 	for _, sc := range cfg.SecureColumns {
-		if sc.Column == "" || sc.IdentityKeyColumn == "" {
-			return fmt.Errorf("lens %q: each secureColumns entry needs both column and identityKeyColumn", spec.ID)
+		if sc.Column == "" || len(sc.HolderTypes) == 0 {
+			return fmt.Errorf("lens %q: each secureColumns entry needs both column and a non-empty holderTypes — a column that names no holder type would decrypt under whatever holder a ciphertext happened to name", spec.ID)
 		}
 		if _, dup := seen[sc.Column]; dup {
 			return fmt.Errorf("lens %q: secureColumns declares column %q twice", spec.ID, sc.Column)
@@ -890,13 +891,15 @@ func validateSecureColumns(spec *LensSpec, cfg TargetPostgresConfig) error {
 		if _, ok := declared[sc.Column]; !ok {
 			return fmt.Errorf("lens %q: secure column %q is not among the declared targetConfig.columns", spec.ID, sc.Column)
 		}
-		if _, bad := reserved[sc.IdentityKeyColumn]; bad {
-			return fmt.Errorf("lens %q: identityKeyColumn %q is a platform RLS column", spec.ID, sc.IdentityKeyColumn)
-		}
-		if _, ok := declared[sc.IdentityKeyColumn]; !ok {
-			if _, isKey := keyCols[sc.IdentityKeyColumn]; !isKey {
-				return fmt.Errorf("lens %q: identityKeyColumn %q is not among the declared targetConfig.columns or key columns — the adapter writes every row field as a table column, so an undeclared column fails at write time", spec.ID, sc.IdentityKeyColumn)
+		seenHolder := make(map[string]struct{}, len(sc.HolderTypes))
+		for _, ht := range sc.HolderTypes {
+			if !keys.IsValidTypeSegment(ht) {
+				return fmt.Errorf("lens %q: secure column %q declares holder type %q, which is not a Contract #1 vertex type segment ([a-z][a-z0-9]*) — no key holder could ever match it", spec.ID, sc.Column, ht)
 			}
+			if _, dup := seenHolder[ht]; dup {
+				return fmt.Errorf("lens %q: secure column %q declares holder type %q twice", spec.ID, sc.Column, ht)
+			}
+			seenHolder[ht] = struct{}{}
 		}
 	}
 	return nil

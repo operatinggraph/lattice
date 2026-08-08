@@ -676,7 +676,7 @@ func TestWellnessIdentitiesRead_ProjectsEnvelopeWholeAndSelfAnchors(t *testing.T
 	rows := f.project(t, wellnessIdentitiesReadSpec)
 	require.Len(t, rows, 1, "exactly one roster row for the one named identity")
 	v := rows[0].Values
-	require.Equal(t, aliceKey, v["identity_key"], "identity_key is the secure decryptor's key-custody column")
+	require.Equal(t, aliceKey, v["identity_key"], "identity_key names the row's owner for its consumers; the decryptor opens the row under the holder the ciphertext names")
 	name, ok := v["name"].(map[string]any)
 	require.True(t, ok, "name must be the ciphertext envelope map, got %T (%v)", v["name"], v["name"])
 	require.Equal(t, "3q2+7w==", name["ct"], "the envelope reaches the decryptor whole")

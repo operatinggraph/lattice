@@ -274,7 +274,7 @@ RETURN a.key AS key, a.key AS identity_key, a.email.data AS email`)
 	p.UseFullEngine(eng, cr)
 
 	dec, err := pipeline.NewSecureDecryptor(h.v, coreKV, []pipeline.SecureColumn{
-		{Column: "email", IdentityKeyColumn: "identity_key", Field: "value"},
+		{Column: "email", HolderTypes: []string{"identity"}, Field: "value"},
 	}, nil)
 	require.NoError(h.t, err)
 	p.SetSecureDecryptor(dec)

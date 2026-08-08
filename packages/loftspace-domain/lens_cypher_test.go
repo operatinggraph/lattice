@@ -117,7 +117,7 @@ func envelopeData() map[string]any {
 // TestApplicantRosterRead_ProjectsEnvelopeWholeForNamedIdentity proves a named
 // identity (ciphertext-enveloped .name + .state) projects one row: the name
 // column is the envelope MAP (for the secure decryptor), identity_key doubles
-// as the key-custody column, authz_anchors carries at least the self-anchor.
+// naming the row's owner, authz_anchors carries at least the self-anchor.
 func TestApplicantRosterRead_ProjectsEnvelopeWholeForNamedIdentity(t *testing.T) {
 	if testing.Short() {
 		t.Skip("requires NATS")
@@ -132,7 +132,7 @@ func TestApplicantRosterRead_ProjectsEnvelopeWholeForNamedIdentity(t *testing.T)
 	v := rows[0].Values
 	require.Equal(t, f.ids["alice"], v["identity_id"], "identity_id is the bare NanoID (nanoIdFromKey)")
 	require.Equal(t, aliceKey, v["entity_key"])
-	require.Equal(t, aliceKey, v["identity_key"], "identity_key is the secure decryptor's key-custody column")
+	require.Equal(t, aliceKey, v["identity_key"], "identity_key names the row's owner for its consumers; the decryptor opens the row under the holder the ciphertext names")
 	require.Equal(t, "claimed", v["state"])
 	name, ok := v["name"].(map[string]any)
 	require.True(t, ok, "name must be the ciphertext envelope map, got %T (%v)", v["name"], v["name"])

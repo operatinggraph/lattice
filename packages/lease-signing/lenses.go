@@ -209,8 +209,8 @@ func Lenses() []pkgmgr.LensSpec {
 			// RLS-protected table only — the landlord who manages the unit is the
 			// authorized reader of the applicant's contact details. The cypher
 			// RETURNs each aspect's ciphertext envelope whole (id.<aspect>.data);
-			// the `applicant` column doubles as the decryptor's key-custody column
-			// (the OWNING identity is the applicant, not the landlord anchor). A
+			// the decryptor opens each under the holder the ciphertext names, which
+			// is the applicant's own identity, not the landlord anchor. A
 			// missing aspect projects null; a shredded applicant's columns project
 			// null (right-to-erasure). The shred's piiKey CDC event triggers
 			// re-evaluation of this lens, and because the anchor MATCH is
@@ -272,9 +272,9 @@ func Lenses() []pkgmgr.LensSpec {
 				{Name: "qualified", Type: "boolean"},
 			},
 			SecureColumns: []pkgmgr.SecureColumn{
-				{Column: "applicant_name", IdentityKeyColumn: "applicant", Field: "value"},
-				{Column: "applicant_email", IdentityKeyColumn: "applicant", Field: "value"},
-				{Column: "applicant_phone", IdentityKeyColumn: "applicant", Field: "value"},
+				{Column: "applicant_name", HolderTypes: []string{"identity"}, Field: "value"},
+				{Column: "applicant_email", HolderTypes: []string{"identity"}, Field: "value"},
+				{Column: "applicant_phone", HolderTypes: []string{"identity"}, Field: "value"},
 			},
 		},
 	}

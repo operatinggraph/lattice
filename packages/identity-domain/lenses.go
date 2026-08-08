@@ -64,7 +64,7 @@ func Lenses() []pkgmgr.LensSpec {
 				{Name: "binding", Type: "jsonb"},
 			},
 			SecureColumns: []pkgmgr.SecureColumn{
-				{Column: "binding", IdentityKeyColumn: "identity_key"},
+				{Column: "binding", HolderTypes: []string{"identity"}},
 			},
 		},
 		{

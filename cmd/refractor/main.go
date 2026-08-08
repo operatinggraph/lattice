@@ -14,6 +14,7 @@ import (
 	_ "net/http/pprof"
 	"os"
 	"os/signal"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -1025,7 +1026,7 @@ func main() {
 		if len(r.Into.SecureColumns) > 0 {
 			cols := make([]pipeline.SecureColumn, len(r.Into.SecureColumns))
 			for i, sc := range r.Into.SecureColumns {
-				cols[i] = pipeline.SecureColumn{Column: sc.Column, IdentityKeyColumn: sc.IdentityKeyColumn, Field: sc.Field}
+				cols[i] = pipeline.SecureColumn{Column: sc.Column, HolderTypes: slices.Clone(sc.HolderTypes), Field: sc.Field}
 			}
 			dec, err := pipeline.NewSecureDecryptor(vaultBackend, coreKV, cols, &vaultCalls)
 			if err != nil {
@@ -1362,13 +1363,17 @@ func loadVault(logger *slog.Logger) (*vault.LocalBackend, error) {
 }
 
 // secureColumnsEqual reports whether two secure-column declarations are
-// identical (order-sensitive — the spec is authored, not computed).
+// identical (order-sensitive — the spec is authored, not computed; that holds
+// for the holder-type list within an entry for the same reason).
 func secureColumnsEqual(a, b []lens.SecureColumn) bool {
 	if len(a) != len(b) {
 		return false
 	}
 	for i := range a {
-		if a[i] != b[i] {
+		if a[i].Column != b[i].Column || a[i].Field != b[i].Field {
+			return false
+		}
+		if !slices.Equal(a[i].HolderTypes, b[i].HolderTypes) {
 			return false
 		}
 	}
@@ -1376,21 +1381,20 @@ func secureColumnsEqual(a, b []lens.SecureColumn) bool {
 }
 
 // secureAliasNames collects every RETURN alias a secure-column declaration
-// consumes (the ciphertext column + its identity-key column, deduplicated).
+// consumes. That is the ciphertext column alone: custody comes from the
+// ciphertext's own keyId, so no second column is read to decrypt one.
 func secureAliasNames(cols []lens.SecureColumn) []string {
 	if len(cols) == 0 {
 		return nil
 	}
-	seen := make(map[string]struct{}, len(cols)*2)
-	out := make([]string, 0, len(cols)*2)
+	seen := make(map[string]struct{}, len(cols))
+	out := make([]string, 0, len(cols))
 	for _, sc := range cols {
-		for _, n := range []string{sc.Column, sc.IdentityKeyColumn} {
-			if _, dup := seen[n]; dup {
-				continue
-			}
-			seen[n] = struct{}{}
-			out = append(out, n)
+		if _, dup := seen[sc.Column]; dup {
+			continue
 		}
+		seen[sc.Column] = struct{}{}
+		out = append(out, sc.Column)
 	}
 	return out
 }

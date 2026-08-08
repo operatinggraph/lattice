@@ -101,9 +101,9 @@ func TestActorAwareNarrowingLabels_EveryConjunctFailsClosed(t *testing.T) {
 			},
 		},
 		{
-			name: "a secure lens whose identity key type is outside the label set",
+			name: "a secure lens whose declared holder type is outside the label set",
 			knockOut: func(p *Pipeline) {
-				p.secureDecryptor = &SecureDecryptor{}
+				p.secureDecryptor = &SecureDecryptor{columns: []SecureColumn{{Column: "name", HolderTypes: []string{"identity"}}}}
 				p.plainReprojectLabels = map[string]struct{}{"identity": {}, "role": {}}
 				delete(p.plainReprojectLabels, "identity")
 				p.actorEnumerator = NewActorEnumerator(nil, nil, "role")
@@ -123,12 +123,14 @@ func TestActorAwareNarrowingLabels_EveryConjunctFailsClosed(t *testing.T) {
 	}
 }
 
-// TestActorAwareNarrowingLabels_SecureLensNarrowsWhenItSeesIdentity is the
-// positive half of the decryptor conjunct: a secure lens is not excluded as a
-// class, only one whose label set cannot see vtx.identity.<id>.piiKey.
-func TestActorAwareNarrowingLabels_SecureLensNarrowsWhenItSeesIdentity(t *testing.T) {
+// TestActorAwareNarrowingLabels_SecureLensNarrowsWhenItSeesItsHolderTypes is
+// the positive half of the decryptor conjunct: a secure lens is not excluded as
+// a class, only one whose label set cannot see a holder type it declared. The
+// decryptor must carry columns — an empty one satisfies the loop vacuously and
+// would pass whatever the label set said.
+func TestActorAwareNarrowingLabels_SecureLensNarrowsWhenItSeesItsHolderTypes(t *testing.T) {
 	p := eligiblePipeline(t)
-	p.secureDecryptor = &SecureDecryptor{}
+	p.secureDecryptor = &SecureDecryptor{columns: []SecureColumn{{Column: "name", HolderTypes: []string{"identity"}}}}
 	labels, ok := p.ActorAwareNarrowingLabels()
 	require.True(t, ok, "identity is in the label set, so the shred is still delivered")
 	require.Equal(t, identityRoleLabels(), labels)
