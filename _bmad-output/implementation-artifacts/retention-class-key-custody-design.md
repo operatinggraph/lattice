@@ -2182,3 +2182,74 @@ else: no new capability, no widening of what 3b-ii delivers.
 
 Read-path auth, the ops-lane impersonation seam, Fire 2's consumers (the clinic PHI aspect), and any change
 to what 3b-ii projects. No test is loosened to accommodate the §19.5 flake.
+
+## 21. Item 3b-ii — review closed (2026-08-08)
+
+Every finding in §19.1–§19.3 is closed in code. What each fix actually changed, and the two places the
+review's own prescription was adjusted after grounding it:
+
+**B1 — readiness is now an explicit signal, not an inference from the target count.** `classkeyshredded`
+takes a `SetRegistryReady` check and gates the WHOLE delivery on it, not merely the empty-target case: an
+incomplete registry yields a **short** target set, so attesting off a partial enumeration is the same fail-open
+as attesting off an empty one. The signal is `health.RegistryProbe.ReconcileNow`, a new on-demand form of the
+reconciliation the probe already runs on a tick — it asks **Core KV**, the platform's persistent lens registry,
+rather than the in-process map whose incompleteness is the hazard, so it answers the question the identity
+half's static floor answers by proxy. A floor cannot be built here: nothing obliges any lens to bind a
+retention class, so no lens is guaranteed to exist to hold it. **Absence of the check reads as NOT ready**,
+which covers the whole boot window (it is wired after the lens source starts, and the durable is
+`DeliverAll`). Past a bounded redelivery budget it delivers to what IS registered and withholds the
+attestation, leaving the operator's row visibly in-flight — the honest state when the registry itself is the
+thing that is wrong. `TestHandle_NoDeclaringLensStillAttests` keeps its behaviour and gains its precondition:
+the vacuous attestation is correct **only** because the registry is ready.
+
+**B2 — a per-rebuild completion channel replaces the shared flag.** `Rebuild` installs a channel that its own
+watcher closes (`beginRebuild`/`endRebuild`, with `endRebuild` clearing the slot only if it still holds *its*
+channel, so a slow finisher cannot retract a newer rebuild's signal). `RebuildAndWait` waits on the channel it
+was handed, so neither the MATCH hot-reloader nor the operator rebuild op can end another caller's wait by
+failing. **The `abe2e798` commit message's claim that `rebuildSerial` covers the hot-reloader is withdrawn:
+it serializes `RebuildAndWait` callers against each other and nothing else**, which is precisely why the wait
+had to stop reading shared state. `rebuildInFlight` survives unchanged as the health sink's status hint — it
+was never a completion signal, and the fix is to stop asking it to be one.
+
+**B3 — the wait is bounded; the rebuild is not.** `RebuildAndWait` takes a wait budget and returns
+`ErrRebuildWaitTimeout`, which an attesting caller must read as "not known to be rebuilt". The budget
+deliberately does **not** ride on the rebuild's context: cancelling `Rebuild` would also kill
+`watchRebuildCompletion`, latching `rebuilding` and, through `Sweeper.suppressed`, retiring the convergence
+sweep for the life of the process — the exact failure `abandonRebuild` exists to prevent. The consumer's
+durable also sets `AckWait` (new on `substrate.DurableConsumerConfig`) above its own upper bound, since
+JetStream's 30s default redelivers during any rebuild longer than 30s — the normal case at these lens sizes,
+with each redelivery re-running every rebuild.
+
+**M1** — `SetActive`/`SetPaused`/`SetRebuilding` now carry `SecureRedactions` **and** `EvalDriftRetries` /
+`EvalDriftRequeues` forward. The pre-existing pair is fixed with the new counter rather than filed: it is the
+same field list and the same one-line omission, and leaving two of three zeroed is a trap for the next reader.
+
+**M2 — the finalization actor is pinned in-script, and the overclaiming comment is gone.** Both steps of
+`RecordRetentionClassShredFinalization` — and, for the same reason and in the same package, both steps of
+`RecordShredFinalization` — now require `op.actor` to resolve to a live `identity.system.privacy` vertex,
+declared by every submitter in `contextHint.reads` (an undeclared actor fails closed). Two things worth
+recording: `class` is a **reserved word** in `go.starlark.net`, so the check reads `getattr(doc, "class")` —
+`doc.class` is a parse error, which would have surfaced at package install, not at build; and the guarantee is
+deliberately stated narrowly, because it bounds **which identity** may attest, not **who may publish under
+that identity**. Ops-lane actor impersonation is a platform seam and is unchanged. Saying so is the point:
+the comment that claimed the stronger property is what M2 was.
+
+**M3** — a `context.Canceled` from `RebuildRule` now Naks instead of falling through to the "real failure"
+arm, so a rolling deploy redelivers the destruction rather than acking past it with no lens rebuilt and
+nothing left to redrive it. It also stops blaming the lens: the old path paused it.
+
+**M4** — the redaction count is read off the successful status read **before** the pending-count read that can
+fail on its own, at both the provider (`cmd/refractor`) and the heartbeater, so a NATS blip observing one
+input no longer erases a fact already in hand about another. The heartbeater's unreadable branch now evaluates
+the redaction alert too, and carries the count in its metric.
+
+**Minors** — the handler logs `attested` as what it actually did (`allClean && ActorKey != ""`), so the
+documented attestation-disabled configuration stops logging a submit that never happened; and the redaction
+COUNTER advances only when the evaluation completes, since all three callers discard the result set on error
+and the redelivery would otherwise re-add the same redactions on every retry. The log stays unconditional — a
+refusal that happened is worth seeing whether or not its row landed.
+
+Two adjacent things this fire also carries, each named in §20.6: the identity-plane finalization verb (M2's
+sibling, fixed here rather than filed) and the drift-counter pair (M1's). The package-test harness now routes
+finalization records over the **system** lane, which is where their real submitters publish — the previous
+urgent-lane submit was a fixture divergence the actor pin surfaced.
