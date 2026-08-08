@@ -178,6 +178,23 @@ func liveBoundToCount(t *testing.T, ctx context.Context, conn *substrate.Conn, s
 	return 0
 }
 
+// assertBoundToLive is assertTombstoned's opposite, for a link the sweep must
+// leave alone.
+func assertBoundToLive(t *testing.T, ctx context.Context, conn *substrate.Conn, key, why string) {
+	t.Helper()
+	entry, err := conn.KVGet(ctx, testutil.HarnessCoreBucket, key)
+	if err != nil {
+		t.Fatalf("KVGet %s: %v — %s", key, err, why)
+	}
+	var doc map[string]any
+	if err := json.Unmarshal(entry.Value, &doc); err != nil {
+		t.Fatalf("unmarshal %s: %v", key, err)
+	}
+	if deleted, _ := doc["isDeleted"].(bool); deleted {
+		t.Fatalf("%s is tombstoned — %s", key, why)
+	}
+}
+
 func assertTombstoned(t *testing.T, ctx context.Context, conn *substrate.Conn, key, why string) {
 	t.Helper()
 	entry, err := conn.KVGet(ctx, testutil.HarnessCoreBucket, key)
@@ -210,6 +227,16 @@ func TestUnbindIdentityCredentials_InboundSweep_LeavesSubjectAspectUntouched(t *
 	uKey := claimFreshIdentity(t, ctx, conn, cp, cons, "UnbInSw")
 	linkSecondCredential(t, ctx, conn, cp, cons, uKey, secondCredActorKey, "UnbInSwLink", "link-secret-unb-in")
 
+	// Someone else's credential bound to someone else — a boundTo touching
+	// neither end of the subject. This op holds a scope:any grant and issues
+	// document-less tombstones, so nothing downstream of the script re-checks
+	// what it names: the enumeration's key filter is the whole confinement, and
+	// a filter widened by one segment would take this link with the subject's.
+	const bystanderCred = "vtx.identity.BBunbByCredHJKMNPQRS"
+	const bystanderOwner = "vtx.identity.BBunbByHubbHJKMNPQRS"
+	bystanderLink := "lnk.identity.BBunbByCredHJKMNPQRS.boundTo.identity.BBunbByHubbHJKMNPQRS"
+	testutil.SeedLink(t, ctx, conn, bystanderLink, "boundTo", bystanderCred, bystanderOwner)
+
 	// The array carries both credentials before the sweep. Reading it here
 	// also proves the subject's DEK is alive at fixture time, so the
 	// unreadability asserted after the seal is a property of the erasure
@@ -233,6 +260,8 @@ func TestUnbindIdentityCredentials_InboundSweep_LeavesSubjectAspectUntouched(t *
 	if got := liveBoundToCount(t, ctx, conn, uKey, "in"); got != 0 {
 		t.Fatalf("live inbound boundTo links = %d, want 0", got)
 	}
+	assertBoundToLive(t, ctx, conn, bystanderLink,
+		"a boundTo between two other people was tombstoned; this sweep is confined to the subject by its key filter alone")
 	assertTrackerEvent(t, ctx, conn, reqID, "identity.unbound")
 
 	// The load-bearing negative: the subject's own credentialBinding is
@@ -431,9 +460,9 @@ func TestUnbindIdentityCredentials_WideSubject_ConvergesPastOnePage(t *testing.T
 
 // TestUnbindIdentityCredentials_OutboundSweep_RewritesOwnerArray covers the
 // direction §5.4's "takes the owner from subjectKey" reads past: the subject is
-// itself someone else's credential. ShredIdentityKey already tombstones this
-// direction, so an inbound-only sweep would make its eventual narrowing a
-// behavioural regression.
+// itself someone else's credential. ShredIdentityKey does not touch boundTo
+// links at all, so this direction — like the inbound one — is retired only
+// here; an inbound-only sweep would leave it permanently unerasable.
 //
 // Here the array rewrite IS both possible and load-bearing — the owner is not
 // being erased, their key is alive, and their credentials array names the
@@ -496,11 +525,10 @@ func TestUnbindIdentityCredentials_OutboundSweep_RewritesOwnerArray(t *testing.T
 // The per-credential identity.unbound events cannot serve this purpose and are
 // not meant to: they are the Gateway's retraction signal, so a pass with no hits
 // correctly emits none. But the identityErasure pattern's third step is
-// guardless and runs for every subject, and on the ordinary path it finds
-// nothing at all — ShredIdentityKey still tombstones the boundTo links in its
-// own commit until the narrowing lands. Without a pass-level event that step
-// rides its 60s deadline into the op-status probe on every erasure, advancing
-// while logging a completionDomains warning against a pattern that declared them
+// guardless and runs for every subject, including one a later re-dispatch
+// finds already fully swept. Without a pass-level event that step rides its
+// 60s deadline into the op-status probe on every erasure, advancing while
+// logging a completionDomains warning against a pattern that declared them
 // correctly.
 func TestUnbindIdentityCredentials_EmitsSweepPassEventOnEveryCommit(t *testing.T) {
 	t.Parallel()

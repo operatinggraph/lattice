@@ -149,14 +149,12 @@ func submitPurge(t *testing.T, ctx context.Context, conn *substrate.Conn,
 // pbSealForErasureAs writes the erasureRequested marker directly, at a chosen
 // class and liveness.
 //
-// Seeded rather than submitted because the real SealIdentityForErasure
-// requires a shredded piiKey, and today's ShredIdentityKey still erases the
-// dedup footprint in its own commit (design §12 orders the narrowing last, so
-// the shred and this op deliberately overlap until step 3 lands). Driving the
-// real seal would therefore hand every test a subject whose footprint was
-// already gone — the one input that cannot exercise the sweep. The chain the
-// seal itself guards is proven by its own tests; what these need is a live
-// footprint under a live marker.
+// Seeded rather than submitted so each test here isolates
+// PurgeIdentityDedupFootprint from the rest of the erasure chain — driving
+// the real ShredIdentityKey + SealIdentityForErasure sequence for every
+// fixture would retest chains their own test files already cover. The chain
+// the seal itself guards is proven by its own tests; what these need is a
+// live footprint under a live marker, built directly.
 func pbSealForErasureAs(t *testing.T, ctx context.Context, conn *substrate.Conn, identityKey, class string, tombstoned bool) {
 	t.Helper()
 	raw, err := json.Marshal(map[string]any{
@@ -246,10 +244,22 @@ func TestPurgeIdentityDedupFootprint_ErasesOwnedIndexesAndLinks(t *testing.T) {
 	emailLinkKey := pbIndexesLinkKey(emailIdxKey, identityID)
 	nameLinkKey := pbIndexesLinkKey(nameIdxKey, identityID)
 
+	// Another person's own indexes footprint, touching neither end of the
+	// subject's. This op holds a scope:any grant and issues document-less
+	// tombstones, so nothing downstream of the script re-checks what it names:
+	// the enumeration's key filter is the whole confinement.
+	bystanderKey, bystanderID := createUnclaimedWithProbe(t, ctx, conn, cp, cons,
+		"Purge Idx Bystander", "purge-idx-bystander@example.com", strings.Repeat("9", 64), "PurgeIdxBy", nil)
+	bystanderIdxKey := pbContactIndexKey("email", "purge-idx-bystander@example.com")
+	bystanderLinkKey := pbIndexesLinkKey(bystanderIdxKey, bystanderID)
+
 	// The footprint is real and live before the sweep, so what the assertions
 	// below observe is this op's doing rather than the fixture's.
 	if readIsDeleted(t, ctx, conn, emailIdxKey) || readIsDeleted(t, ctx, conn, nameLinkKey) {
 		t.Fatal("precondition: the dedup footprint is already tombstoned")
+	}
+	if readIsDeleted(t, ctx, conn, bystanderIdxKey) || readIsDeleted(t, ctx, conn, bystanderLinkKey) {
+		t.Fatal("precondition: the bystander's own footprint is already tombstoned")
 	}
 
 	pbSealForErasure(t, ctx, conn, identityKey)
@@ -258,6 +268,11 @@ func TestPurgeIdentityDedupFootprint_ErasesOwnedIndexesAndLinks(t *testing.T) {
 	for _, k := range []string{emailIdxKey, emailLinkKey, nameIdxKey, nameLinkKey} {
 		if !readIsDeleted(t, ctx, conn, k) {
 			t.Errorf("%s is still live after the sweep", k)
+		}
+	}
+	for _, k := range []string{bystanderKey, bystanderIdxKey, bystanderLinkKey} {
+		if readIsDeleted(t, ctx, conn, k) {
+			t.Errorf("%s belongs to someone nobody is erasing and was tombstoned by the sweep", k)
 		}
 	}
 }
@@ -299,8 +314,23 @@ func TestPurgeIdentityDedupFootprint_ErasesDuplicateOfBothDirections(t *testing.
 	outboundDup := pbDuplicateOfLinkKey(subjectID, incumbentKey)
 	testutil.SeedLink(t, ctx, conn, outboundDup, "duplicateOf", subjectKey, incumbentKey)
 
+	// A pair between two other people, touching neither end of the subject —
+	// the same confinement question as the indexes arm, asked of the two
+	// duplicateOf filters, which name the subject at opposite ends of the key.
+	claimD := strings.Repeat("6", 64)
+	claimE := strings.Repeat("7", 64)
+	bystanderAKey, bystanderAID := createUnclaimedWithProbe(t, ctx, conn, cp, cons,
+		"Purge Dup Bystander A", "purge-dup-by-a@example.com", claimD, "PurgeDupByA", nil)
+	bystanderBKey, _ := createUnclaimedWithProbe(t, ctx, conn, cp, cons,
+		"Purge Dup Bystander B", "purge-dup-by-b@example.com", claimE, "PurgeDupByB", nil)
+	bystanderDup := pbDuplicateOfLinkKey(bystanderAID, bystanderBKey)
+	testutil.SeedLink(t, ctx, conn, bystanderDup, "duplicateOf", bystanderAKey, bystanderBKey)
+
 	if readIsDeleted(t, ctx, conn, inboundDup) || readIsDeleted(t, ctx, conn, outboundDup) {
 		t.Fatal("precondition: a duplicateOf link is already tombstoned")
+	}
+	if readIsDeleted(t, ctx, conn, bystanderDup) {
+		t.Fatal("precondition: the bystanders' own pair is already tombstoned")
 	}
 
 	pbSealForErasure(t, ctx, conn, subjectKey)
@@ -321,6 +351,9 @@ func TestPurgeIdentityDedupFootprint_ErasesDuplicateOfBothDirections(t *testing.
 	// The other people in those pairs are untouched: nobody is erasing them.
 	if readIsDeleted(t, ctx, conn, incumbentKey) {
 		t.Error("sweeping the subject must not tombstone the other side's identity vertex")
+	}
+	if readIsDeleted(t, ctx, conn, bystanderDup) {
+		t.Error("a duplicateOf between two other people was tombstoned; this sweep is confined to the subject by its key filters alone")
 	}
 }
 
@@ -518,10 +551,10 @@ func TestPurgeIdentityDedupFootprint_SecondRunIsNoOp(t *testing.T) {
 
 // TestPurgeIdentityDedupFootprint_TombstonePreservesBody — the tombstones
 // carry no document, because buildMutationValue seeds a tombstone's document
-// from the PRIOR body. ShredIdentityKey spends a kv.Read per index vertex to
-// carry that body forward by hand; skipping those reads is what buys this op
-// headroom against the wall budget, and it is only sound if the verb really
-// does preserve what the manual form preserved.
+// from the PRIOR body. Skipping a per-candidate kv.Read to carry that body
+// forward by hand is what buys this op headroom against the wall budget, and
+// it is only sound if the bare verb really does preserve what a hand-rolled
+// update would have.
 //
 // A build that reverted to a bodyless update would leave a tombstone with no
 // class and no data — indistinguishable from a key that never existed, to any

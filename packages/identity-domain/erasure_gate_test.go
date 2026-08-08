@@ -154,11 +154,11 @@ func TestErasureGate_ClaimIdentity_RejectsSealedTarget(t *testing.T) {
 }
 
 // TestErasureGate_ClaimIdentity_RejectsSealedActor covers the position the
-// first draft of this gate missed. ShredIdentityKey erases boundTo in BOTH
-// directions — its own comment says why: the identity is the target of every
-// credential bound to it and the SOURCE when it is itself someone else's
-// credential. So an erased identity used AS a credential writes two records
-// inside the shred's own erasure set, and must be refused there too.
+// first draft of this gate missed. UnbindIdentityCredentials erases boundTo in
+// BOTH directions — its own comment says why: the identity is the target of
+// every credential bound to it and the SOURCE when it is itself someone
+// else's credential. So an erased identity used AS a credential writes two
+// records inside that sweep's own erasure set, and must be refused here too.
 func TestErasureGate_ClaimIdentity_RejectsSealedActor(t *testing.T) {
 	t.Parallel()
 	ctx, conn := setupTestEnv(t)

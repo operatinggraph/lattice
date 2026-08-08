@@ -82,8 +82,8 @@ func DDLs() []pkgmgr.DDLSpec {
 				"mergedInto (vertex-key reference, set only by identity-hygiene package's MergeIdentity), " +
 				"erasureRequested (privacy-base-owned marker; its PRESENCE closes this identity's write path — " +
 				"ClaimIdentity, CompleteCredentialLink and ReconcileCredentialBinding refuse once it exists, in " +
-				"EITHER link position (ShredIdentityKey erases boundTo in both directions, so an erased identity is " +
-				"gated as the credential as well as as the owner), and CreateUnclaimedIdentity stops treating the " +
+				"EITHER link position (UnbindIdentityCredentials erases boundTo in both directions on erasure, so " +
+				"an erased identity is gated as the credential as well as as the owner), and CreateUnclaimedIdentity stops treating the " +
 				"identity as a dedup incumbent so no fresh duplicateOf names it. That is what makes the residue " +
 				"count the erasure's completion seal rests on measure a CLOSED set; erasure-orchestration-design.md " +
 				"§6, hydrated by this DDL's own derive_reads so no submitter declares it). " +
@@ -469,8 +469,9 @@ func DDLs() []pkgmgr.DDLSpec {
 				"vtx.identityindex.<hash> vertex to the vtx.identity.<NanoID> it currently points at " +
 				"(lnk.identityindex.<hash>.indexes.identity.<NanoID>). Created in the same batch as the " +
 				"index vertex by CreateUnclaimedIdentity; repointed (tombstone + create) by " +
-				"identity-hygiene's MergeIdentity; tombstoned by ShredIdentityKey. Makes merge repoint and " +
-				"shred erase decrypt-free — linkage is ownership, so no plaintext lookup is needed. " +
+				"identity-hygiene's MergeIdentity; tombstoned by privacy-base's PurgeIdentityDedupFootprint " +
+				"on erasure. Makes merge repoint and erasure sweep decrypt-free — linkage is ownership, so " +
+				"no plaintext lookup is needed. " +
 				"permittedCommands is intentionally empty: multi-writer, open posture (mirrors the " +
 				"identity-anchored aspect DDLs above).",
 			Script:       linkTypeDDLScript,
@@ -495,8 +496,8 @@ func DDLs() []pkgmgr.DDLSpec {
 				"when a new identity's normalized email/phone/name collides with a live identityindex hit; " +
 				"the later-arriving identity is the source. data.criteria unions the matched dimensions " +
 				"(exact-email/exact-phone/exact-name). Tombstoned (both directions) by identity-hygiene's " +
-				"MergeIdentity on merge, and by ShredIdentityKey on shred. permittedCommands is " +
-				"intentionally empty: multi-writer, open posture.",
+				"MergeIdentity on merge, and by privacy-base's PurgeIdentityDedupFootprint on erasure. " +
+				"permittedCommands is intentionally empty: multi-writer, open posture.",
 			Script:       linkTypeDDLScript,
 			InputSchema:  `{"type":"object","properties":{"criteria":{"type":"array","items":{"type":"string"},"description":"Matched dimensions: exact-email, exact-phone, exact-name."}}}`,
 			OutputSchema: `{"type":"object"}`,
@@ -518,9 +519,9 @@ func DDLs() []pkgmgr.DDLSpec {
 				"(lnk.identity.<credentialId>.boundTo.identity.<ownerId>): the identity the Gateway " +
 				"provisioned for a raw sign-in, bound to the business identity it proved control of. " +
 				"The later-arriving credential is the source. Emitted by ClaimIdentity (first credential) " +
-				"and CompleteCredentialLink (Nth); tombstoned by UnlinkCredential, and by privacy-base's " +
-				"ShredIdentityKey in both directions — it names in plaintext which credential belonged to " +
-				"an erased person, so it must not outlive the key; repointed to the " +
+				"and CompleteCredentialLink (Nth); tombstoned by UnlinkCredential, and by " +
+				"UnbindIdentityCredentials in both directions on erasure — it names in plaintext which " +
+				"credential belonged to an erased person, so it must not outlive the key; repointed to the " +
 				"primary by identity-hygiene's MergeIdentity. Carries the same {actorKey, boundAt} pair " +
 				"the credentialBinding aspect's array entry does — as a link, so the set is projectable " +
 				"one row per credential without decrypting a sensitive aspect (Contract #1: a " +
@@ -587,8 +588,9 @@ def make_update(key, data):
     return {"op": "update", "key": key, "document": {"isDeleted": False, "data": data}}
 
 def index_vertex_mutation(index_key, contact_type, identity_key, existing):
-    # dedup-over-encrypted-pii-design.md §3.5: a shredded identity's owned
-    # identityindex vertices are tombstoned in-commit, so a later create for
+    # dedup-over-encrypted-pii-design.md §3.5: an erased identity's owned
+    # identityindex vertices are tombstoned by the erasure's dedup sweep
+    # (privacy-base/PurgeIdentityDedupFootprint), so a later create for
     # the SAME contact must be able to re-derive a live index -- a blind
     # "create" collides with the tombstone's own write history (CreateOnly
     # asserts revision 0, which a previously-written key can never satisfy
@@ -983,8 +985,9 @@ def derive_reads(op):
         target = getattr(p, "targetIdentityKey", None)
         # The two keys the §6 gate reads -- the erasure marker and the piiKey
         # envelope -- for BOTH ends of the boundTo this op emits, since
-        # ShredIdentityKey erases that link in both directions
-        # (privacy-base/shred_identity_key.go) and both positions are gated.
+        # UnbindIdentityCredentials erases that link in both directions on
+        # erasure (identity-domain/unbind_identity_credentials.go), so both
+        # positions are gated.
         #
         # Derived here rather than asked of every submitter for the reason
         # class (g) exists: three separate front ends dispatch these two ops,
@@ -1403,10 +1406,10 @@ def execute(state, op):
 
         # Erasure gate (§6), deliberately placed AFTER the secret comparison.
         # A claim writes a credentialindex vertex and a boundTo link at BOTH
-        # ends, and every one of those is inside what ShredIdentityKey erases
-        # (its collect_bound_to_links enumerates "in" AND "out", privacy-base/
-        # shred_identity_key.go, because the identity is the target of every
-        # credential bound to it and the SOURCE when it is itself someone
+        # ends, and every one of those is inside what UnbindIdentityCredentials
+        # erases (it sweeps "in" AND "out", identity-domain/
+        # unbind_identity_credentials.go, because the identity is the target of
+        # every credential bound to it and the SOURCE when it is itself someone
         # else's credential). So both positions are gated, not just the target.
         #
         # Below the secret check for two reasons. The outcome word never
@@ -1840,14 +1843,13 @@ def execute(state, op):
 
         # An EXISTING tombstone on the link is a retraction somebody made, and
         # this op never overturns one. The index cannot stand in for that
-        # judgement, because the two records do not always move together:
-        # UnlinkCredential tombstones the index and the link in one batch, but
-        # privacy-base's ShredIdentityKey tombstones ONLY the link
-        # (shred_identity_key.go's collect_bound_to_links) -- the link names in
-        # plaintext which credential belonged to an erased person, and the
-        # credentialindex vertex is not in that erasure set. Treating a live
-        # index as sufficient authority would therefore republish exactly the
-        # association the shred exists to destroy.
+        # judgement: UnlinkCredential and the erasure path's own
+        # UnbindIdentityCredentials both retire the index and the link
+        # together, but nothing in this DDL's permittedCommands (deliberately
+        # empty, multi-writer, open posture) guarantees every writer of a
+        # boundTo tombstone keeps the pair in lockstep. Treating a live index
+        # as sufficient authority would let any writer that tombstones the
+        # link alone have its retraction silently undone.
         #
         # So the writable case is the ABSENT link, which is the only thing this
         # op was built to reach: a binding made before the link type existed.
@@ -1871,13 +1873,15 @@ def execute(state, op):
         if index_data.get("identityKey") != identity_key:
             fail_reconcile("owner-mismatch")
 
-        # Erasure gate (§6), placed AFTER not-bound and owner-mismatch. This
-        # op's whole purpose is to republish a boundTo edge from a
-        # credentialindex the shred deliberately left standing, so for a sealed
-        # identity it is the most direct way to undo an erasure in progress --
-        # the comment above already reasons about the shred, and this is that
-        # reasoning one degree stronger: the shred's tombstone made one edge
-        # unrecoverable, the seal makes the whole person's edge set closed.
+        # Erasure gate (§6), placed AFTER not-bound and owner-mismatch. This op
+        # can CREATE a boundTo link that never existed -- the legacy-binding
+        # case this op exists for, a live credentialindex with no link because
+        # it predates the link type. UnbindIdentityCredentials's sweep walks
+        # boundTo links, not credentialindex vertices, so a legacy binding with
+        # no link is never inside its enumeration; an index-only judgement here
+        # would publish, for the first time, a decrypt-free boundTo association
+        # for a sealed identity. Both endpoints are gated for the same reason
+        # as the claim path.
         #
         # Unlike ClaimKeyInvalid, CredentialReconcileRejected is NOT
         # reclassified by the Processor, so this outcome word reaches the
@@ -1887,7 +1891,7 @@ def execute(state, op):
         # it reaches nothing the index does not already assert. Below them, a
         # caller learns it only for a binding the index already confirms is
         # theirs. Both endpoints are gated for the same reason as the claim
-        # path: the shred erases boundTo in both directions.
+        # path: UnbindIdentityCredentials erases boundTo in both directions.
         if write_path_closed(identity_key):
             fail_reconcile("erased")
         if write_path_closed(credential_actor_key):

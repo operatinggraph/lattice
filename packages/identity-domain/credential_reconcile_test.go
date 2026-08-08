@@ -86,9 +86,13 @@ func dropBoundToLink(t *testing.T, ctx context.Context, conn *substrate.Conn, cr
 	}
 }
 
-// tombstoneBoundToLink retracts the edge the way ShredIdentityKey does — a
-// soft tombstone that preserves the document — while leaving the
-// credentialindex vertex untouched, which is the half the shred does not erase.
+// tombstoneBoundToLink retracts the edge as a soft tombstone that preserves
+// the document, while leaving the credentialindex vertex untouched. No
+// shipped op leaves exactly this pair of facts — UnbindIdentityCredentials
+// retires both the link and the index together, and MergeIdentity repoints
+// the index rather than leaving it stale — so the state is built directly
+// here as the defensive scenario ReconcileCredentialBinding must not trust an
+// index alone against.
 func tombstoneBoundToLink(t *testing.T, ctx context.Context, conn *substrate.Conn, credentialActorKey, ownerIdentityKey string) {
 	t.Helper()
 	linkKey := boundToLinkKey(credentialActorKey, ownerIdentityKey)
@@ -232,13 +236,14 @@ func TestReconcileCredentialBinding_TombstonedIndexRejects(t *testing.T) {
 // credentialindex vertex cannot answer on its own, and the reason this op does
 // not treat it as the only authority.
 //
-// privacy-base's ShredIdentityKey tombstones every boundTo link touching an
-// erased identity — the link names, in the key itself and in plaintext, which
-// sign-in credential belonged to which person, so it must not outlive the
-// encryption key. It does NOT tombstone the credentialindex vertex. An
-// index-only judgement would therefore see "live index, missing edge", call it
-// work, and republish the exact association the erasure destroyed — restoring
-// it decrypt-free and graph-traversable, for a person whose data is gone.
+// No shipped op leaves a boundTo link tombstoned while its credentialindex
+// vertex stays live and unchanged — UnbindIdentityCredentials (the erasure
+// path's credential-plane sweep) retires both together in one commit, and
+// MergeIdentity repoints the index onto the merge's primary rather than
+// leaving it stale. The state is built directly here as the defensive
+// scenario this op must not get wrong regardless of cause: an index-only
+// judgement would see "live index, missing edge", call it work, and republish
+// an association whose edge is gone — decrypt-free and graph-traversable.
 func TestReconcileCredentialBinding_ShreddedEdgeIsNotRevived(t *testing.T) {
 	t.Parallel()
 	ctx, conn := setupTestEnv(t)
@@ -246,8 +251,7 @@ func TestReconcileCredentialBinding_ShreddedEdgeIsNotRevived(t *testing.T) {
 
 	uKey := claimFreshIdentity(t, ctx, conn, cp, cons, "ReconShred")
 
-	// The shred's effect on this edge, reproduced exactly: the link tombstoned,
-	// the index left standing.
+	// The scenario under test: the link tombstoned, the index left standing.
 	tombstoneBoundToLink(t, ctx, conn, consumerActorKey, uKey)
 	if entry, err := conn.KVGet(ctx, testutil.HarnessCoreBucket, credentialIndexKey(consumerActorKey)); err != nil {
 		t.Fatalf("the index must survive the shred for this test to mean anything: %v", err)

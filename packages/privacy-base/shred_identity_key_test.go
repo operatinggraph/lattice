@@ -120,17 +120,6 @@ func recordPII(t *testing.T, ctx context.Context, conn *substrate.Conn,
 	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
 }
 
-// shredEnumerations declares the two dedup-hygiene erasure enumerations
-// (dedup-over-encrypted-pii-design.md §3.5) every ShredIdentityKey dispatcher
-// must declare — mirrors cmd/loupe/web/js/views/graph.js's openShredModal.
-func shredEnumerations(identityKey string) []processor.EnumerationHint {
-	return []processor.EnumerationHint{
-		{Hub: identityKey, Relation: "indexes", Direction: "in"},
-		{Hub: identityKey, Relation: "duplicateOf", Direction: "out"},
-		{Hub: identityKey, Relation: "duplicateOf", Direction: "in"},
-	}
-}
-
 func submitShred(t *testing.T, ctx context.Context, conn *substrate.Conn,
 	cp *processor.CommitPath, cons jetstream.Consumer, identityKey, reqLabel string, wantOutcome processor.MessageOutcome) {
 	t.Helper()
@@ -142,7 +131,7 @@ func submitShred(t *testing.T, ctx context.Context, conn *substrate.Conn,
 		SubmittedAt:   "2026-07-02T10:10:00Z",
 		Class:         "shredIdentityKey",
 		Payload:       json.RawMessage(`{"identityKey":"` + identityKey + `"}`),
-		ContextHint:   &processor.ContextHint{Reads: []string{identityKey}, Enumerations: shredEnumerations(identityKey)},
+		ContextHint:   &processor.ContextHint{Reads: []string{identityKey}},
 	}
 	testutil.PublishOp(t, conn, env)
 	testutil.DriveOne(t, ctx, cp, cons, wantOutcome)
@@ -484,12 +473,15 @@ func readCiphertextForTest(t *testing.T, ctx context.Context, conn *substrate.Co
 	return doc.Data
 }
 
-// --- Fire 3 (shred hygiene, design §3.5): erasing the live dedup-hygiene
-// footprint in the SAME atomic batch as the shred intent. ---
+// --- The dedup-hygiene footprint (design §3.5): what the key shred leaves
+// standing, and who erases it. ---
 
 // pbContactIndexKey mirrors identity-domain's contactIndexKey / the script's
 // own crypto.sha256NanoID(contactType + ":" + normalized) derivation.
 func pbContactIndexKey(contactType, normalized string) string {
+	// derived-key: the identityindex key an assertion names. A test has to
+	// derive it independently of the script that writes it — reading the key
+	// back out of the package under test would assert nothing.
 	return "vtx.identityindex." + substrate.SHA256NanoID(contactType+":"+normalized)
 }
 
@@ -537,11 +529,12 @@ func createUnclaimedWithProbe(t *testing.T, ctx context.Context, conn *substrate
 	return identityKey, identityID
 }
 
-// TestShredIdentityKey_ErasesOwnedIndexesAndLinks proves the identityindex
-// vertices an identity owns (email + name, both created fresh — no
-// collision) and their `indexes` links are tombstoned in the SAME commit as
-// the shred intent (design §3.5).
-func TestShredIdentityKey_ErasesOwnedIndexesAndLinks(t *testing.T) {
+// TestShredIdentityKey_LeavesOwnedIndexesLive proves ShredIdentityKey does not
+// touch the identityindex vertices an identity owns (email + name, both created
+// fresh — no collision) or their `indexes` links: that arm is swept by
+// PurgeIdentityDedupFootprint, staged off a live erasureRequested marker
+// (identityErasure pattern step 4), never by the key shred itself.
+func TestShredIdentityKey_LeavesOwnedIndexesLive(t *testing.T) {
 	ctx, conn := setupShredEnv(t)
 	v := testutil.TestVault(t)
 	cp, cons := newDefaultPipeline(t, ctx, conn, "shred-idx-erase", v)
@@ -564,23 +557,25 @@ func TestShredIdentityKey_ErasesOwnedIndexesAndLinks(t *testing.T) {
 	urgentCP, urgentCons := newUrgentPipeline(t, ctx, conn, "shred-idx-erase-urgent", v)
 	submitShred(t, ctx, conn, urgentCP, urgentCons, identityKey, "IdxEraseShred", processor.OutcomeAccepted)
 
-	if !readIsDeleted(t, ctx, conn, emailIdxKey) {
-		t.Fatalf("email identityindex vertex not tombstoned after shred")
+	if readIsDeleted(t, ctx, conn, emailIdxKey) {
+		t.Fatalf("email identityindex vertex tombstoned by ShredIdentityKey — the dedup footprint belongs to PurgeIdentityDedupFootprint")
 	}
-	if !readIsDeleted(t, ctx, conn, emailLinkKey) {
-		t.Fatalf("email indexes link not tombstoned after shred")
+	if readIsDeleted(t, ctx, conn, emailLinkKey) {
+		t.Fatalf("email indexes link tombstoned by ShredIdentityKey — the dedup footprint belongs to PurgeIdentityDedupFootprint")
 	}
-	if !readIsDeleted(t, ctx, conn, nameIdxKey) {
-		t.Fatalf("name identityindex vertex not tombstoned after shred")
+	if readIsDeleted(t, ctx, conn, nameIdxKey) {
+		t.Fatalf("name identityindex vertex tombstoned by ShredIdentityKey — the dedup footprint belongs to PurgeIdentityDedupFootprint")
 	}
-	if !readIsDeleted(t, ctx, conn, nameLinkKey) {
-		t.Fatalf("name indexes link not tombstoned after shred")
+	if readIsDeleted(t, ctx, conn, nameLinkKey) {
+		t.Fatalf("name indexes link tombstoned by ShredIdentityKey — the dedup footprint belongs to PurgeIdentityDedupFootprint")
 	}
 }
 
-// TestShredIdentityKey_ErasesDuplicateOfLink_SourceSide shreds the NEWER
-// (source) side of a duplicateOf pair — the "out" direction enumeration.
-func TestShredIdentityKey_ErasesDuplicateOfLink_SourceSide(t *testing.T) {
+// TestShredIdentityKey_LeavesDuplicateOfLinkLive_SourceSide shreds the NEWER
+// (source) side of a duplicateOf pair and proves the link survives: that arm
+// belongs to PurgeIdentityDedupFootprint, staged off a live erasureRequested
+// marker (identityErasure pattern step 4).
+func TestShredIdentityKey_LeavesDuplicateOfLinkLive_SourceSide(t *testing.T) {
 	ctx, conn := setupShredEnv(t)
 	v := testutil.TestVault(t)
 	cp, cons := newDefaultPipeline(t, ctx, conn, "shred-dup-src", v)
@@ -602,15 +597,15 @@ func TestShredIdentityKey_ErasesDuplicateOfLink_SourceSide(t *testing.T) {
 	urgentCP, urgentCons := newUrgentPipeline(t, ctx, conn, "shred-dup-src-urgent", v)
 	submitShred(t, ctx, conn, urgentCP, urgentCons, newcomerKey, "DupSrcShred", processor.OutcomeAccepted)
 
-	if !readIsDeleted(t, ctx, conn, dupLinkKey) {
-		t.Fatalf("duplicateOf link not tombstoned after shredding its source side")
+	if readIsDeleted(t, ctx, conn, dupLinkKey) {
+		t.Fatalf("duplicateOf link tombstoned by shredding its source side — the dedup footprint belongs to PurgeIdentityDedupFootprint")
 	}
 }
 
-// TestShredIdentityKey_ErasesDuplicateOfLink_TargetSide shreds the
-// INCUMBENT (target) side of a duplicateOf pair — the "in" direction
-// enumeration — while the newer side stays alive.
-func TestShredIdentityKey_ErasesDuplicateOfLink_TargetSide(t *testing.T) {
+// TestShredIdentityKey_LeavesDuplicateOfLinkLive_TargetSide shreds the
+// INCUMBENT (target) side of a duplicateOf pair and proves the link
+// survives, for the same reason as the source side.
+func TestShredIdentityKey_LeavesDuplicateOfLinkLive_TargetSide(t *testing.T) {
 	ctx, conn := setupShredEnv(t)
 	v := testutil.TestVault(t)
 	cp, cons := newDefaultPipeline(t, ctx, conn, "shred-dup-tgt", v)
@@ -632,46 +627,87 @@ func TestShredIdentityKey_ErasesDuplicateOfLink_TargetSide(t *testing.T) {
 	urgentCP, urgentCons := newUrgentPipeline(t, ctx, conn, "shred-dup-tgt-urgent", v)
 	submitShred(t, ctx, conn, urgentCP, urgentCons, incumbentKey, "DupTgtShred", processor.OutcomeAccepted)
 
-	if !readIsDeleted(t, ctx, conn, dupLinkKey) {
-		t.Fatalf("duplicateOf link not tombstoned after shredding its target (incumbent) side")
+	if readIsDeleted(t, ctx, conn, dupLinkKey) {
+		t.Fatalf("duplicateOf link tombstoned by shredding its target (incumbent) side — the dedup footprint belongs to PurgeIdentityDedupFootprint")
 	}
-	// The newer side is untouched — still a live identity, just no longer
-	// linked to the now-shredded incumbent.
+	// The newer side is untouched — still a live identity, just not linked to
+	// the shredded incumbent by anything this op does.
 	if readIsDeleted(t, ctx, conn, newcomerKey) {
 		t.Fatalf("shredding the incumbent must not tombstone the newer identity's own root vertex")
 	}
 }
 
-// TestShredIdentityKey_Reshred_Idempotent proves a second ShredIdentityKey
-// on an already-shredded identity still succeeds (the erasure enumerations
-// find nothing the second time — no fanout-cap or ordering fault).
+// TestShredIdentityKey_Reshred_Idempotent proves a second ShredIdentityKey on
+// an already-shredded identity is still Accepted, and that its envelope
+// afterward carries shredded=true with the SECOND submit's shreddedAt (not
+// stale from the first) and none of a prior finalization cycle's booleans —
+// the finalization-cycle reset (RecordShredFinalization's own
+// TestRecordShredFinalization_ReShredResetsCycle pins the general case; this
+// pins ShredIdentityKey's own accept-twice contract, which is the whole of what
+// a second shred has to prove).
 func TestShredIdentityKey_Reshred_Idempotent(t *testing.T) {
 	ctx, conn := setupShredEnv(t)
 	v := testutil.TestVault(t)
 	cp, cons := newDefaultPipeline(t, ctx, conn, "shred-reshred", v)
+	urgentCP, urgentCons := newUrgentPipeline(t, ctx, conn, "shred-reshred-urgent", v)
+	testutil.SeedCapDoc(t, ctx, conn, privacyCapDoc())
+	sysCP, sysCons := newSystemPipeline(t, ctx, conn, "shred-reshred-system", v)
 
 	identityKey := createIdentity(t, ctx, conn, cp, cons, "Reshred")
 
-	urgentCP, urgentCons := newUrgentPipeline(t, ctx, conn, "shred-reshred-urgent", v)
 	submitShred(t, ctx, conn, urgentCP, urgentCons, identityKey, "ReshredOne", processor.OutcomeAccepted)
-	submitShred(t, ctx, conn, urgentCP, urgentCons, identityKey, "ReshredTwo", processor.OutcomeAccepted)
+	submitFinalization(t, ctx, conn, sysCP, sysCons, identityKey, "vaultKeyDestroyed", "ReshredVKD", processor.OutcomeAccepted)
 
-	if !readIsDeleted(t, ctx, conn, pbContactIndexKey("name", "shred target")) {
-		t.Fatalf("name index not tombstoned after re-shred")
+	const secondSubmittedAt = "2026-07-02T11:45:00Z"
+	testutil.PublishOp(t, conn, &processor.OperationEnvelope{
+		RequestID:     testutil.GenReqID("ReshredTwo"),
+		Lane:          processor.LaneUrgent,
+		OperationType: "ShredIdentityKey",
+		Actor:         pbStaffActorKey,
+		SubmittedAt:   secondSubmittedAt,
+		Class:         "shredIdentityKey",
+		Payload:       json.RawMessage(`{"identityKey":"` + identityKey + `"}`),
+		ContextHint:   &processor.ContextHint{Reads: []string{identityKey}},
+	})
+	testutil.DriveOne(t, ctx, urgentCP, urgentCons, processor.OutcomeAccepted)
+
+	data := piiKeyData(t, ctx, conn, identityKey)
+	if data["shredded"] != true {
+		t.Fatalf("piiKey.shredded = %v after re-shred, want true", data["shredded"])
+	}
+	if got, _ := data["shreddedAt"].(string); got != secondSubmittedAt {
+		t.Fatalf("piiKey.shreddedAt = %q after re-shred, want the second submit's %q", got, secondSubmittedAt)
+	}
+	for _, stale := range []string{"vaultKeyDestroyed", "vaultKeyDestroyedAt", "projectionsNullified", "projectionsNullifiedAt"} {
+		if _, present := data[stale]; present {
+			t.Errorf("re-shred must clear prior-cycle %s; still present: %v", stale, data[stale])
+		}
 	}
 }
 
 // TestShredIdentityKey_PostShredCreate_FreshIndexNoLinkToShredded is the
-// Gate-3-style vector design §3.5/§7 names explicitly: after Fire 3 erases a
-// shredded identity's owned index, a LATER create for the same contact must
-// revive a fresh, live index pointed at the new identity — not silently skip
-// indexing (the tombstone would otherwise look "present" to the create
-// script's not-in-state gate) — and must NOT flag a duplicateOf against the
-// shredded identity.
+// Gate-3-style vector design §3.5/§7 names explicitly: once the dedup sweep has
+// tombstoned an erased identity's owned index, a LATER create for the same
+// contact must revive a fresh, live index pointed at the new identity — not
+// silently skip indexing (the tombstone would otherwise look "present" to the
+// create script's not-in-state gate) — and must NOT flag a duplicateOf against
+// the erased identity.
+//
+// The revive is what this test carries alone. The duplicateOf half is a shape
+// assertion, not a proof of the §6 gate: the sweep has tombstoned the index, so
+// the create's live_hit check drops the candidate before match_is_erased is
+// consulted at all, and the erasure marker would close the write path even
+// tombstoned (identity-domain's marker_closes_write_path). The gate's
+// piiKey.shredded arm — the bare-shredded incumbent an ordinary walk-in would
+// otherwise correlate to — is proven where it can fail, against a live index
+// and with a positive control:
+// identity-domain's TestErasureGate_CreateUnclaimedIdentity_SkipsBareShreddedIncumbent.
 func TestShredIdentityKey_PostShredCreate_FreshIndexNoLinkToShredded(t *testing.T) {
 	ctx, conn := setupShredEnv(t)
 	v := testutil.TestVault(t)
 	cp, cons := newDefaultPipeline(t, ctx, conn, "shred-postcreate", v)
+	testutil.SeedCapDoc(t, ctx, conn, purgeCapDoc())
+	sysCP, sysCons := newPurgePipeline(t, ctx, conn, "shred-postcreate-system")
 
 	claimA := strings.Repeat("5", 64)
 	claimC := strings.Repeat("6", 64)
@@ -681,9 +717,17 @@ func TestShredIdentityKey_PostShredCreate_FreshIndexNoLinkToShredded(t *testing.
 	urgentCP, urgentCons := newUrgentPipeline(t, ctx, conn, "shred-postcreate-urgent", v)
 	submitShred(t, ctx, conn, urgentCP, urgentCons, ownerKey, "ReuseOwnerShred", processor.OutcomeAccepted)
 
+	// PurgeIdentityDedupFootprint owns the tombstoning: seal the owner for
+	// erasure and run one sweep. One invocation is enough for the indexes arm
+	// — the op sweeps one class per pass, in the order indexes ->
+	// duplicateOf-out -> duplicateOf-in, and the owner's footprint here is
+	// only an indexes hit.
+	pbSealForErasure(t, ctx, conn, ownerKey)
+	submitPurge(t, ctx, conn, sysCP, sysCons, ownerKey, "ReuseOwnerPurge", processor.OutcomeAccepted)
+
 	emailIdxKey := pbContactIndexKey("email", "reuse@example.com")
 	if !readIsDeleted(t, ctx, conn, emailIdxKey) {
-		t.Fatalf("precondition: owner's email index not tombstoned by shred")
+		t.Fatalf("precondition: owner's email index not tombstoned by the sweep")
 	}
 
 	newKey, newID := createUnclaimedWithProbe(t, ctx, conn, cp, cons,
@@ -733,19 +777,15 @@ func seedBoundToLink(t *testing.T, ctx context.Context, conn *substrate.Conn, cr
 	return key
 }
 
-// TestShredIdentityKey_ErasesBoundToLinks_BothDirections — the boundTo link
-// names, in plaintext and in the key itself, which sign-in credential belonged
-// to which person. Killing the DEK makes the credentialBinding aspect that
-// mirrors it unreadable; a surviving link answers the same question anyway,
-// decrypt-free and graph-traversable, which is exactly what this op's
-// dedup-hygiene erasure exists to prevent. Both sibling link classes in the
-// identity plane (indexes, duplicateOf) are erased here; boundTo is the third.
-//
-// Both directions, because the erased identity sits on either side: it is the
-// TARGET of every credential bound to it, and the SOURCE when it is itself a
-// credential of someone else — the shape MergeIdentity leaves behind when it
-// folds a merged-away identity into the survivor as its self-credential.
-func TestShredIdentityKey_ErasesBoundToLinks_BothDirections(t *testing.T) {
+// TestShredIdentityKey_LeavesBoundToLinksLive_BothDirections — the boundTo
+// link names, in plaintext and in the key itself, which sign-in credential
+// belonged to which person, and a live link answers that question decrypt-free
+// regardless of what ShredIdentityKey does to the DEK. Retiring it belongs to
+// UnbindIdentityCredentials (identityErasure pattern step 3), which also
+// retires the credential's own credentialindex vertex — a live index must not
+// be allowed to authorize republishing. ShredIdentityKey itself leaves every
+// boundTo link, both directions, exactly as it found them.
+func TestShredIdentityKey_LeavesBoundToLinksLive_BothDirections(t *testing.T) {
 	ctx, conn := setupShredEnv(t)
 	v := testutil.TestVault(t)
 	cp, cons := newDefaultPipeline(t, ctx, conn, "shred-boundto", v)
@@ -760,8 +800,11 @@ func TestShredIdentityKey_ErasesBoundToLinks_BothDirections(t *testing.T) {
 	// The subject as OWNER (in) and as CREDENTIAL of someone else (out).
 	inbound := seedBoundToLink(t, ctx, conn, credKey, subjectKey)
 	outbound := seedBoundToLink(t, ctx, conn, subjectKey, otherKey)
-	// A third link touching neither side of the subject — the erasure must be
-	// scoped, not a sweep of the boundTo keyspace.
+	// A third link touching neither side of the subject. Against an op that
+	// tombstones nothing this only shows the fixture is a real corpus rather
+	// than an empty one; the scoping assertion that can fail belongs to the
+	// sweep that does the tombstoning
+	// (identity-domain's TestUnbindIdentityCredentials_InboundSweep_*).
 	bystander := seedBoundToLink(t, ctx, conn, credKey, otherKey)
 
 	for _, k := range []string{inbound, outbound, bystander} {
@@ -773,14 +816,14 @@ func TestShredIdentityKey_ErasesBoundToLinks_BothDirections(t *testing.T) {
 	urgentCP, urgentCons := newUrgentPipeline(t, ctx, conn, "shred-boundto-urgent", v)
 	submitShred(t, ctx, conn, urgentCP, urgentCons, subjectKey, "BoundToShredDo", processor.OutcomeAccepted)
 
-	if !readIsDeleted(t, ctx, conn, inbound) {
-		t.Fatalf("boundTo naming the shredded identity as OWNER survived the shred — the credential↔person link outlives the key it was supposed to die with")
+	if readIsDeleted(t, ctx, conn, inbound) {
+		t.Fatalf("boundTo naming the shredded identity as OWNER was tombstoned by ShredIdentityKey — credential retirement belongs to UnbindIdentityCredentials")
 	}
-	if !readIsDeleted(t, ctx, conn, outbound) {
-		t.Fatalf("boundTo naming the shredded identity as CREDENTIAL survived the shred")
+	if readIsDeleted(t, ctx, conn, outbound) {
+		t.Fatalf("boundTo naming the shredded identity as CREDENTIAL was tombstoned by ShredIdentityKey — credential retirement belongs to UnbindIdentityCredentials")
 	}
 	if readIsDeleted(t, ctx, conn, bystander) {
-		t.Fatalf("a boundTo link touching neither side of the shredded identity was tombstoned — the erasure must be scoped to the subject")
+		t.Fatalf("a boundTo link touching neither side of the shredded identity was tombstoned")
 	}
 }
 
@@ -798,7 +841,7 @@ func submitShredPayload(t *testing.T, ctx context.Context, conn *substrate.Conn,
 		SubmittedAt:   "2026-08-07T10:10:00Z",
 		Class:         "shredIdentityKey",
 		Payload:       json.RawMessage(payload),
-		ContextHint:   &processor.ContextHint{Reads: []string{identityKey}, Enumerations: shredEnumerations(identityKey)},
+		ContextHint:   &processor.ContextHint{Reads: []string{identityKey}},
 	})
 	testutil.DriveOne(t, ctx, cp, cons, wantOutcome)
 }

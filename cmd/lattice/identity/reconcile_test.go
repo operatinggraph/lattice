@@ -94,11 +94,11 @@ func TestReconcileBindings_ClassifiesEachCase(t *testing.T) {
 	// C — deliberately unlinked: both tombstoned.
 	seedIndex(t, ctx, conn, "reconHashCCCCCCCCCCC", reconCredC, reconOwner, true)
 	seedBoundTo(t, ctx, conn, reconCredC, reconOwner, true)
-	// D — the erasure shape: live index, TOMBSTONED edge. ShredIdentityKey
-	// tombstones the boundTo link and leaves the credentialindex vertex
-	// standing, so this pair is what an erased person looks like. Counting it
-	// as work would republish the credential-to-person association the shred
-	// destroyed, decrypt-free.
+	// D — the diverged shape: live index, TOMBSTONED edge. Nothing currently
+	// writes a boundTo tombstone without also retiring its index, but the
+	// reconciler must not trust that and republish anyway — counting it as
+	// work would restore, decrypt-free, whatever credential-to-person
+	// association the missing link was severing.
 	seedIndex(t, ctx, conn, "reconHashDDDDDDDDDDD", reconCredD, reconOwner, false)
 	seedBoundTo(t, ctx, conn, reconCredD, reconOwner, true)
 	// E — a merge's implicit self-credential: an index whose actorKey and

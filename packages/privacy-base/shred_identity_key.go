@@ -47,28 +47,15 @@ const keyShreddedEventDDL = "privacy.keyShredded"
 // would fault HydrationMiss the first time the script touched that legitimate
 // absence (deferred past hydration, not on hydration itself).
 //
-// ShredIdentityKey also erases the identity's live dedup-hygiene footprint in
-// the SAME atomic batch as the shred intent (dedup-over-encrypted-pii-design.md
-// §3.5): the identity's owned identityindex vertices (enumerated via their
-// inbound "indexes" links — linkage is ownership, so this needs no decryption)
-// are tombstoned along with those links, and every duplicateOf pair link
-// touching the identity (enumerated in BOTH directions — the identity may be
-// the newer or the older side of a pair) is tombstoned, as is every boundTo
-// link (also both directions — the identity is the target of every credential
-// bound to it, and the source when it is itself a credential of another),
-// which names in plaintext which sign-in credential belonged to the erased
-// person. This is why the shred
-// erase needs no separate worker step and no ordering window against
-// Vault.ShredKey: the decrypt window the async privacy-worker races is closed
-// the instant this commit lands (envelope.Shredded is checked before
-// WrappedDEK-emptiness in internal/vault), so anything this commit doesn't
-// erase would never be reachable by a later erase anyway — erasing here, where
-// the plaintext-derived hashes are still linked, is the only decrypt-free
-// window that exists. Both enumerations are class-(e) (Contract #2 §2.5.1,
-// bounded kv.Links, metadata-only in ContextHint.Enumerations) and are
-// declared by every ShredIdentityKey dispatcher. Re-shred is idempotent: a
-// prior shred already tombstoned these links, so the enumerations return
-// nothing on a second run.
+// ShredIdentityKey writes exactly one mutation and emits exactly one event,
+// always — its cost cannot grow with the identity's connectivity, so it can
+// never refuse an identity for size. The identity's dedup-hygiene footprint
+// (owned identityindex vertices, duplicateOf pair links, boundTo credential
+// links) is erased by the identityErasure Loom pattern's steps 3 and 4 —
+// UnbindIdentityCredentials (identity-domain) and PurgeIdentityDedupFootprint
+// (privacy-base) — both paged from a live erasureRequested marker rather than
+// enumerated in this commit. A subject taken through that pattern is fully
+// erased; a direct ShredIdentityKey submit shreds only the key.
 //
 // The DDL also admits RecordShredFinalization{identityKey, step} — the
 // Fire-4b durable progress record the two async shred listeners submit under
@@ -206,95 +193,6 @@ def parts_of(key, name, want_type):
         fail("InvalidArgument: " + name + ": required vtx." + want_type + ".<NanoID>; got " + key)
     return parts[1], parts[2]
 
-INDEXES_PAGE_LIMIT = 256
-MAX_INDEXES_PAGES = 64
-
-def collect_owned_indexes(identity_key):
-    # dedup-over-encrypted-pii-design.md §3.5: the identity's owned
-    # identityindex vertices are enumerable via their inbound "indexes"
-    # links (linkage IS ownership) without knowing the plaintext the hash
-    # derives from. Enumerated via the sanctioned bounded kv.Links
-    # (Contract #2 §2.5.1), direction "in" -- the identity is the indexes
-    # link's TARGET (identityindex vertex is source, per Contract #1 §1.1).
-    # Mirrors identity-hygiene's collect_indexes_repoints.
-    hits = []
-    cursor = None
-    for _page in range(MAX_INDEXES_PAGES):
-        # read-posture: (e) relation=indexes epoch=none (read-only guard: an
-        # indexes link created concurrently with the shred slips past --
-        # accepted, same posture as identity-hygiene's merge-time enumeration)
-        links, cursor = kv.Links(identity_key, "indexes", "in", cursor, INDEXES_PAGE_LIMIT)
-        for lk in links:
-            if lk.isDeleted:
-                continue
-            hits.append(lk)
-        if cursor == None:
-            return hits
-    fail("IdentityIndexFanoutTooLarge: " + identity_key + " has too many indexes links to enumerate at shred time")
-
-DUPLICATE_OF_PAGE_LIMIT = 256
-MAX_DUPLICATE_OF_PAGES = 64
-
-def collect_duplicate_of_direction(identity_key, direction):
-    hits = []
-    cursor = None
-    for _page in range(MAX_DUPLICATE_OF_PAGES):
-        # read-posture: (e) relation=duplicateOf epoch=none (read-only
-        # guard: a duplicateOf link created concurrently with the shred
-        # slips past -- accepted, same posture as the indexes enumeration
-        # above)
-        links, cursor = kv.Links(identity_key, "duplicateOf", direction, cursor, DUPLICATE_OF_PAGE_LIMIT)
-        for lk in links:
-            if lk.isDeleted:
-                continue
-            hits.append(lk)
-        if cursor == None:
-            return hits
-    fail("IdentityDuplicateOfFanoutTooLarge: " + identity_key + " has too many duplicateOf links (" + direction + ") to enumerate at shred time")
-
-def collect_duplicate_of_links(identity_key):
-    # dedup-over-encrypted-pii-design.md §3.5: every duplicateOf pair link
-    # touching the identity is durable pair evidence that must not outlive
-    # the shred. The identity may be either side of the pair (the newer
-    # identity that matched an incumbent, source; or an incumbent later
-    # identities matched against, target) -- both directions are enumerated.
-    return collect_duplicate_of_direction(identity_key, "out") + collect_duplicate_of_direction(identity_key, "in")
-
-BOUND_TO_PAGE_LIMIT = 256
-MAX_BOUND_TO_PAGES = 64
-
-def collect_bound_to_direction(identity_key, direction):
-    hits = []
-    cursor = None
-    for _page in range(MAX_BOUND_TO_PAGES):
-        # read-posture: (e) relation=boundTo epoch=none (read-only guard: a
-        # boundTo link created concurrently with the shred slips past --
-        # accepted, same posture as the enumerations above)
-        links, cursor = kv.Links(identity_key, "boundTo", direction, cursor, BOUND_TO_PAGE_LIMIT)
-        for lk in links:
-            if lk.isDeleted:
-                continue
-            hits.append(lk)
-        if cursor == None:
-            return hits
-    fail("IdentityBoundToFanoutTooLarge: " + identity_key + " has too many boundTo links (" + direction + ") to enumerate at shred time")
-
-def collect_bound_to_links(identity_key):
-    # identity-domain's boundTo link names, in plaintext and in the key itself,
-    # which sign-in credential belongs to which person. That is the same class
-    # of plaintext derivative the indexes and duplicateOf enumerations above
-    # exist to erase: the sensitive credentialBinding aspect it mirrors becomes
-    # unreadable the moment the DEK dies, but a live link outlives the key and
-    # answers the question anyway -- decrypt-free, and graph-traversable.
-    #
-    # Both directions, for the same reason duplicateOf enumerates both: the
-    # identity is the TARGET of every credential bound to it, and is itself the
-    # SOURCE when it is a credential of someone else -- a merged-away identity
-    # folded into the survivor as its implicit self-credential
-    # (identity-hygiene's MergeIdentity), or a Scenario-B identity later
-    # linked to another.
-    return collect_bound_to_direction(identity_key, "in") + collect_bound_to_direction(identity_key, "out")
-
 def execute(state, op):
     ot = op.operationType
     p = op.payload
@@ -340,46 +238,6 @@ def execute(state, op):
         mutations = [{"op": "update", "key": pii_key_key,
             "document": {"class": "piiKey", "vertexKey": identity_key,
                          "localName": "piiKey", "isDeleted": False, "data": data}}]
-
-        # dedup-over-encrypted-pii-design.md §3.5: erase the live dedup-hygiene
-        # footprint in this same atomic batch -- decrypt-free, linkage is
-        # ownership. Idempotent: a re-shred's enumerations find nothing (the
-        # links are already tombstoned from the first shred).
-        idx_hits = collect_owned_indexes(identity_key)
-        dup_hits = collect_duplicate_of_links(identity_key)
-        bound_hits = collect_bound_to_links(identity_key)
-
-        # Pre-flight batch-size cap (mirrors identity-hygiene's MergeIdentity
-        # MergeBatchTooLarge guard): 1 (piiKey) + 2 per owned index (vertex +
-        # link) + 1 per duplicateOf link + 1 per boundTo link. A
-        # right-to-erasure op must never silently drop the erasure half --
-        # fail loud and early rather than let step8_commit's BatchTooLarge
-        # (itself terminal on redelivery) surface as an opaque, unshreddable
-        # identity.
-        total_muts = 1 + len(idx_hits) * 2 + len(dup_hits) + len(bound_hits)
-        if total_muts > 999:
-            fail("ShredBatchTooLarge: " + identity_key + " has too large a dedup-hygiene footprint (" + str(total_muts) + " mutations) to erase in one shred commit")
-
-        for lk in idx_hits:
-            idx_vertex_key = lk.sourceVertex
-            # read-posture: (e) per-candidate follow-up read off the
-            # enumeration above (data-derived key: the hash is not
-            # dispatch-known ahead of collect_owned_indexes)
-            idx_vtx = kv.Read(idx_vertex_key)
-            idx_data = idx_vtx.data if idx_vtx != None and idx_vtx.data != None else {}
-            mutations.append({"op": "update", "key": idx_vertex_key,
-                "document": {"class": "identityindex", "isDeleted": True, "data": idx_data}})
-            mutations.append({"op": "update", "key": lk.key,
-                "document": {"class": "indexes", "isDeleted": True, "data": lk.data}})
-
-        for lk in dup_hits:
-            dup_class = getattr(lk, "class") if hasattr(lk, "class") else "duplicateOf"
-            mutations.append({"op": "update", "key": lk.key,
-                "document": {"class": dup_class, "isDeleted": True, "data": lk.data}})
-
-        for lk in bound_hits:
-            mutations.append({"op": "update", "key": lk.key,
-                "document": {"class": "boundTo", "isDeleted": True, "data": lk.data}})
 
         events = [{"class": "privacy.keyShredded", "data": {"identityKey": identity_key}}]
         return {"mutations": mutations, "events": events, "response": {"primaryKey": identity_key}}

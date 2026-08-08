@@ -13,12 +13,11 @@ const dedupFootprintSweptEventDDL = "privacy.dedupFootprintSwept"
 
 // PurgeIdentityDedupFootprintDDL declares the dedup-plane sweep of an erasure.
 //
-// It is the sibling of identity-domain's UnbindIdentityCredentials, and exists
-// for the same reason: ShredIdentityKey's dedup cascade is unbounded in the
-// subject's connectivity, so the shred carries a mutation-count pre-flight that
-// can REFUSE to erase a well-connected person (design §2). Moving the cascade
-// here — one bounded page per commit, re-dispatched until the residue reaches
-// zero — is what retires that refusal (§10).
+// It is the sibling of identity-domain's UnbindIdentityCredentials: ShredIdentityKey
+// writes exactly one mutation and never touches the dedup plane, so its cost
+// cannot grow with the subject's connectivity (design §4.1/§10). This op is
+// the dedup-plane sweep a person's erasure still needs — one bounded page per
+// commit, re-dispatched until the residue reaches zero.
 //
 // # What it removes
 //
@@ -89,8 +88,8 @@ func PurgeIdentityDedupFootprintDDL() pkgmgr.DDLSpec {
 			"links, and its duplicateOf pair links in both directions. One class per commit — indexes " +
 			"first, then duplicateOf outbound, then inbound — because an indexes hit costs two " +
 			"mutations to a duplicateOf hit's one, so no commit exceeds 2*SWEEP_LIMIT mutations — a " +
-			"count no input can grow, which is what lifts erasure past the shred's own 999-mutation " +
-			"size limit on who qualifies. The READ side is not bounded the same way: a sweep always " +
+			"count no input can grow, which is what makes an erasure's mutation cost independent of how " +
+			"connected the subject is. The READ side is not bounded the same way: a sweep always " +
 			"scans from the start of the keyspace, so each pass pages over everything it has already " +
 			"tombstoned, and both the cost per pass and the scan window are finite. Past roughly 16k " +
 			"links on one relation the live ones fall outside the window and the op stops with " +
@@ -167,9 +166,9 @@ func PurgeIdentityDedupFootprintDDL() pkgmgr.DDLSpec {
 // The tombstones carry no document. buildMutationValue seeds a tombstone's
 // document from the PRIOR body and layers the script's over it
 // (internal/processor/step8_commit.go), so the bare verb preserves class and
-// data and sets isDeleted — which is what ShredIdentityKey spends a kv.Read per
-// index vertex to achieve by hand. Skipping those reads is real headroom
-// against the same wall budget that forced SWEEP_LIMIT below the read page size.
+// data and sets isDeleted — with no per-candidate kv.Read needed to carry that
+// body forward by hand. Skipping those reads is real headroom against the
+// same wall budget that forced SWEEP_LIMIT below the read page size.
 const purgeIdentityDedupFootprintDDLScript = `
 LINK_PAGE_LIMIT = 256
 MAX_LINK_PAGES = 64
@@ -231,8 +230,7 @@ def collect_live_sweep(identity_key, relation, direction):
         # read-posture: (e) relation=indexes epoch=none; relation=duplicateOf
         # epoch=none -- one collector serves both walks, so both relations the
         # dispatcher declares in contextHint.enumerations are named. Read-only guard:
-        # a link created concurrently with the sweep slips past -- accepted, the
-        # same posture privacy-base's shred-time enumerations declare, and
+        # a link created concurrently with the sweep slips past -- accepted, and
         # harmless here because the erasure seal closed the write path before
         # this op ever runs.
         links, cursor = kv.Links(identity_key, relation, direction, cursor, LINK_PAGE_LIMIT)
@@ -257,11 +255,11 @@ def collect_live_sweep(identity_key, relation, direction):
         # prefix grows by SWEEP_LIMIT every time. A subject with more than
         # MAX_LINK_PAGES * LINK_PAGE_LIMIT links on one relation therefore
         # converges normally until that prefix fills the window, then stops here
-        # for good -- no pre-existing tombstones required. It still erases far
-        # more than the un-decomposed shred, whose 999-mutation pre-flight
-        # refuses around 500 index links, so this raises the ceiling rather than
-        # introducing one; but "no input can decline an erasure" is a statement
-        # about the MUTATION count alone. The durable fix is a hard delete: a
+        # for good -- no pre-existing tombstones required. So "no input can
+        # decline an erasure" is a statement about the MUTATION count alone: the
+        # per-commit cost is bounded whatever the subject's connectivity, while
+        # the READ window is what can still refuse a very wide subject, loudly
+        # and at a far higher threshold. The durable fix is a hard delete: a
         # tombstone that leaves the keyspace takes this ceiling with it, and the
         # per-pass rescan cost too.
         fail("ErasureResidueUnreachable: " + identity_key + " has more than " +

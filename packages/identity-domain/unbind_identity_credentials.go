@@ -10,24 +10,22 @@ const unbindIdentityCredentialsDDL = "unbindIdentityCredentials"
 // UnbindIdentityCredentialsDDL declares the credential-plane sweep of an
 // erasure.
 //
-// This op exists so ShredIdentityKey does not have to do this work inside its
-// own commit. The shred's credential cascade is unbounded in the subject's
-// connectivity, so it carries a mutation-count pre-flight that can REFUSE to
-// erase a well-connected person (design §2). Moving the cascade here — one
-// bounded page per commit, re-dispatched until the residue reaches zero — is
-// what retires that refusal (§10).
+// ShredIdentityKey writes exactly one mutation and never touches the
+// credential plane, so its cost cannot grow with the subject's connectivity
+// (design §4.1/§10); this op is the credential-plane sweep that a person's
+// erasure still needs — one bounded page per commit, re-dispatched until the
+// residue reaches zero.
 //
 // # What it removes, and what it deliberately does not
 //
 // For each live boundTo link on the subject it tombstones the credential's
 // `vtx.credentialindex.<hash>` vertex and the link itself, and emits one
-// identity.unbound event. Both link directions are swept, because both are
-// inside what the shred erases today: the subject is the TARGET of every
-// credential bound to it, and is itself the SOURCE when it is a credential of
-// someone else (a merged-away identity folded into its survivor, or a
-// Scenario-B identity later linked to another). Sweeping only the inbound
-// direction would make the shred's eventual narrowing a behavioural
-// regression, which §12's build order exists to prevent.
+// identity.unbound event. Both link directions are swept: the subject is the
+// TARGET of every credential bound to it, and is itself the SOURCE when it is
+// a credential of someone else (a merged-away identity folded into its
+// survivor, or a Scenario-B identity later linked to another) — sweeping only
+// the inbound direction would leave that second case permanently unerasable,
+// since ShredIdentityKey covers neither.
 //
 // It does NOT rewrite the SUBJECT's own credentialBinding array, and cannot:
 // that aspect is sensitive, so it is decrypted on read and encrypted on write
@@ -212,9 +210,8 @@ def collect_live_sweep(identity_key, direction):
     for _page in range(MAX_BOUND_TO_PAGES):
         # read-posture: (e) relation=boundTo epoch=none (read-only guard: a
         # boundTo link created concurrently with the sweep slips past --
-        # accepted, same posture as privacy-base's shred-time enumerations, and
-        # harmless here because the erasure seal closed the write path before
-        # this op ever runs)
+        # accepted, and harmless here because the erasure seal closed the write
+        # path before this op ever runs)
         links, cursor = kv.Links(identity_key, "boundTo", direction, cursor, BOUND_TO_PAGE_LIMIT)
         for lk in links:
             if lk.isDeleted:
@@ -230,8 +227,7 @@ def collect_live_sweep(identity_key, direction):
         # reach them. Returning empty would read as "converged" and leave the
         # erasure target re-dispatching a no-op forever -- an invisible stall,
         # strictly worse than a loud stop. Reachable only past ~16k tombstoned
-        # boundTo links in one direction, far beyond where today's in-shred
-        # cascade already refuses.
+        # boundTo links in one direction.
         fail("ErasureResidueUnreachable: " + identity_key + " has more than " +
              str(MAX_BOUND_TO_PAGES * BOUND_TO_PAGE_LIMIT) + " tombstoned " + direction +
              "-bound boundTo links ahead of its live ones; the sweep cannot page far enough to reach them")
@@ -385,13 +381,15 @@ def execute(state, op):
         # what shrinks the Gateway's readable copy, so it is emitted per hit and
         # a pass with no hits emits none. That is correct for a retraction and
         # useless for a step: the identityErasure pattern's third step is
-        # guardless, so it runs for every subject, and on the ordinary path it
-        # finds nothing (the un-narrowed ShredIdentityKey already tombstoned the
-        # boundTo links in its own commit). A step that emits nothing rides its
-        # 60s deadline into the op-status probe and advances while logging
-        # "check completionDomains" against a pattern that declared them
-        # correctly. The sweep-pass event is what the step advances on; an empty
-        # direction with swept=0 is the convergence signal.
+        # guardless, so it runs for every subject, including one who never
+        # bound any credential and so has nothing to sweep at all — the
+        # unbound event never fires for that input. A step that emits nothing
+        # rides its 60s deadline into the op-status probe and advances while
+        # logging "check completionDomains" against a pattern that declared
+        # them correctly. The sweep-pass event is what the step advances on;
+        # an empty direction with swept=0 is the convergence signal, whether
+        # from a subject with no credentials to begin with or one a later
+        # re-dispatch finds fully swept.
         events.append({"class": "identity.credentialsSwept", "data": {
             "identityKey": subject_key,
             "targetKey": subject_key,

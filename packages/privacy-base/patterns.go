@@ -36,13 +36,12 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 // matters more than the property. The convergent tail is anchored on the marker
 // step 2 writes — the residue lens's own WHERE clause is
 // erasureRequested.requestedAt <> null — so an instance that dies at step 1 or 2
-// leaves no row, no dispatch, and no tail at all. There is exactly one live way
-// to reach that today: step 1's op still carries its own unbounded in-commit
-// cascade and refuses ShredBatchTooLarge above 999 mutations, so a
-// well-connected person's erasure fails at cursor 0 — the very subject the paged
-// sweeps at steps 3 and 4 exist to serve. Retiring that refusal is the narrowing
-// of ShredIdentityKey (design §12 Fire B, build-order step 3), and until it
-// lands the failed instance is the only signal.
+// leaves no row, no dispatch, and no tail at all. Neither step can fail on the
+// subject's connectivity to explain that: ShredIdentityKey writes exactly one
+// mutation, always (design §4.1/§10), and SealIdentityForErasure is a single
+// conditioned upsert. A dead spine before step 2 completes is an infrastructure
+// fault, not a property of the person being erased — the failed instance is the
+// only signal.
 //
 // # What a COMPLETED instance does and does not mean
 //
@@ -82,7 +81,7 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 // script reads it from `state`, where an UNDECLARED key and an ABSENT one are
 // both None, so leaving it off would silently disarm the IdentityMerged refusal
 // and let the seal anchor an erasure on a merged-away identity whose residue is
-// zero by construction. The class-(e) kv.Links walks in steps 1, 3 and 4 stay
+// zero by construction. The class-(e) kv.Links walks in steps 3 and 4 stay
 // undeclarable — a step cannot express an enumeration.
 func LoomPatterns() []pkgmgr.LoomPatternSpec {
 	return []pkgmgr.LoomPatternSpec{

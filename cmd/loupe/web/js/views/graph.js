@@ -907,8 +907,11 @@ function renderShredProof(box, identityKey, sensitive, unchecked, row, shredStat
   box.appendChild(banner);
 
   box.appendChild(el("div", "muted small shred-bounds",
-    "This shreds sensitive aspects. PII in uploaded documents (object store) is a separate follow-on " +
-    "(crypto-shred for object-store blobs) — not erased by this action."));
+    "This shreds sensitive aspects, and nothing else. The decrypt-free footprint — contact-hash index " +
+    "vertices, duplicateOf pairs, credential bindings — stays live and keeps answering questions about " +
+    "this person without any key. Erasing that is the identityErasure pattern's work: " +
+    "lattice loom start identityErasure --subject <identityKey>. PII in uploaded documents (object " +
+    "store) is a separate follow-on (crypto-shred for object-store blobs) — not erased by this action."));
 }
 
 // shredChecklistEl is the cross-plane confirmation — the teaching device
@@ -1044,16 +1047,6 @@ function openShredModal(identityKey) {
         // sensitive write, so its piiKey aspect may legitimately not exist
         // yet (script-read-posture-design §13).
         optionalReads: [identityKey + ".piiKey"],
-        // class (e) — the script's decrypt-free dedup-hygiene erase
-        // (dedup-over-encrypted-pii-design.md §3.5): the identity's owned
-        // identityindex vertices (inbound "indexes") and every duplicateOf
-        // pair link touching it (both directions — it may be either side
-        // of the pair) are bounded kv.Links enumerations, metadata only.
-        enumerations: [
-          { hub: identityKey, relation: "indexes", direction: "in" },
-          { hub: identityKey, relation: "duplicateOf", direction: "out" },
-          { hub: identityKey, relation: "duplicateOf", direction: "in" },
-        ],
       }),
     });
     inFlight = false;

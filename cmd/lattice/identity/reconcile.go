@@ -200,11 +200,15 @@ func reconcileBindings(ctx context.Context, conn *substrate.Conn, actor string, 
 				return nil, fmt.Errorf("parse boundTo for %s: %w", cred, err)
 			}
 			if link.IsDeleted {
-				// Somebody retracted this edge. An unlink tombstones the index
-				// too and is already counted above, so what reaches here is an
-				// erasure: ShredIdentityKey tombstones the link and leaves the
-				// index standing. Re-publishing it would restore, decrypt-free,
-				// the credential-to-person association the shred destroyed.
+				// An unlink tombstones the index too and is already counted
+				// above, so what reaches here is the index and link having
+				// diverged: nothing currently writes a boundTo tombstone without
+				// also retiring its index (UnlinkCredential and the erasure
+				// path's UnbindIdentityCredentials both tombstone the pair
+				// together), but this reconciler exists precisely because Core
+				// KV can still show this shape. Re-publishing the link here
+				// would restore, decrypt-free, whatever credential-to-person
+				// association the missing link was severing.
 				report.Retracted++
 				continue
 			}

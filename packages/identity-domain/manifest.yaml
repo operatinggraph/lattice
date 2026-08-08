@@ -1,5 +1,5 @@
 name: identity-domain
-version: 0.19.0
+version: 0.20.0
 description: |
   Identity vertex creation, claim, and state-machine management. Provides
   CreateUnclaimedIdentity, UpdateIdentityState, ClaimIdentity, RotateClaimKey,
