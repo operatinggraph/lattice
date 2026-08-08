@@ -1,5 +1,7 @@
 # Done log archive — lattice (older shipped items, newest first)
 
+- 2026-08-07 · `010e383d` · [privacy-base] erasure Fire B inc 6 — SealIdentityForErasureComplete, the completion seal
+- 2026-08-07 · `ea406aeb` · [privacy-base] erasure Fire B inc 5 — the identityErasureResidue convergence lens
 - 2026-08-07 · `c4040761` · [Refractor] a pattern label is the vertex key type — body-class binding retired, label scopes split (Inc 1+2)
 - 2026-08-07 · `5d60fb2b` · [Refractor] post-claim auth-grant latency bounded — the pattern-directed derivation now decides which anchors reproject (Inc 0–3 complete)
 - 2026-08-07 · `6f03b32b` · [Refractor] a reconciliation that cannot repair a row stops reporting that it did — explicit Verdict, supersession refusal, guard-decline visibility
