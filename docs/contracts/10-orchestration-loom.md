@@ -52,7 +52,8 @@ type — so an all-userTask onboarding pattern over `identity` subjects declares
 consumer that never sees the completion). A pattern mixing userTask + systemOp steps lists every domain
 it completes on.
 
-**Step shape:** `{ kind, operation, guard? }` for `userTask`/`systemOp` — completion is implicit
+**Step shape:** `{ kind, operation, guard? }` for `userTask`, `{ kind, operation, guard?, reads?,
+optionalReads? }` for `systemOp` — completion is implicit
 (§10.6), no per-step event. The `externalTask` kind (below) is **two-op-shaped** and carries its own
 fields `{ kind, adapter, params, replyOp, instanceOp }`.
 - `kind` ∈ `userTask` (engine creates a task with links `assignedTo` → the subject,
@@ -63,6 +64,25 @@ fields `{ kind, adapter, params, replyOp, instanceOp }`.
   result — see below).
 - **Linear only** — no branches/loops/fan-out. A compound *path* is a Weaver signal. The
   `externalTask`'s two ops (submit-instanceOp → park) are **one logical step**, not a branch/fan-out.
+
+**`reads` / `optionalReads` — a `systemOp`'s declared read-set (Amended 2026-08-07).** A `systemOp`'s
+bound op is package-authored, so the pattern **declares** its read-set and the engine only resolves it.
+Both fields are **`systemOp`-only** — a `userTask`'s read-set is derived from the §10.5
+assignee/scopedTo invariant and an `externalTask`'s from its `params`, so a declared set on either kind
+is **ignorable**, and a pattern carrying one is **rejected** at install and at load rather than
+silently running read-free.
+
+Entries are **subject-relative templates**, never literal keys: the bare token `subject` (the
+instance's subject vertex) or `subject.<aspect>`, where `<aspect>` MUST be a Contract #1 **localName**,
+validated at install and at load — the rendered key is then a 4-segment aspect key on that vertex. The
+engine renders each entry against the running instance's `subjectKey` and passes the result as the
+submitted op's `ContextHint.Reads` / `ContextHint.OptionalReads` (Contract #2 §2.5) — `Reads` for keys
+whose absence is a correctness error, `OptionalReads` for absence-tolerant reads. A step declaring
+neither stays read-free.
+
+**`subjectKey` names a vertex.** §10.9's trigger payload carries a caller-supplied `subjectKey`, and it
+is the namespace every subject-relative construct renders against: the engine requires a three-segment
+`vtx.<type>.<id>` key and **drops the trigger otherwise**.
 
 **`externalTask` (Amended 2026-06-18 — 13.1, External I/O Bridge).** A step that dispatches an idempotent
 external call and **waits for its result** — symmetric to a `userTask` (dispatch to an async completer,
