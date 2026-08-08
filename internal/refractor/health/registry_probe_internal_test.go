@@ -251,3 +251,63 @@ func TestRegistryProbe_ReconcileNowFailureIsNotAnEmptyMissingSet(t *testing.T) {
 		t.Fatal("a failed enumeration must return an error, not an empty missing set")
 	}
 }
+
+// Corpus-global readiness answers a question nobody asked: any single lens that
+// never registers, for any reason, would withhold every retention-class
+// attestation for every holder type forever. Scoped to the DECLARING set, "not
+// ready" means lenses that might be serving this holder's plaintext are missing.
+func TestRegistryProbe_ReconcileNowForHolderType_IgnoresLensesThatCannotHoldIt(t *testing.T) {
+	conn, ctx := newRegistryProbeTestConn(t)
+	const bucket = "core-kv"
+
+	// Unregistered, and declares a DIFFERENT holder type: irrelevant here.
+	putLens(ctx, t, conn, bucket, "AbCdEfGhJkMnPqRsTuVw", false,
+		`{"bucket":"identity_view","key":["id"],"secureColumns":[{"column":"name","holderTypes":["identity"]}]}`)
+	// Unregistered, and declares the one being destroyed.
+	putLens(ctx, t, conn, bucket, "BbCdEfGhJkMnPqRsTuVx", false,
+		`{"bucket":"note_view","key":["id"],"secureColumns":[{"column":"note","holderTypes":["retentionclass"]}]}`)
+
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	p := NewRegistryProbe(conn, bucket, func() []string { return nil }, logger)
+
+	missing, err := p.ReconcileNowForHolderType(ctx, "retentionclass")
+	if err != nil {
+		t.Fatalf("ReconcileNowForHolderType: %v", err)
+	}
+	if len(missing) != 1 || missing[0] != "BbCdEfGhJkMnPqRsTuVx" {
+		t.Fatalf("only the lens declaring the destroyed holder type is relevant, got %v", missing)
+	}
+
+	// The corpus-global form still sees both, so this is a narrowing of the
+	// question rather than a change to what the probe can observe.
+	all, err := p.ReconcileNow(ctx)
+	if err != nil {
+		t.Fatalf("ReconcileNow: %v", err)
+	}
+	if len(all) != 2 {
+		t.Fatalf("the unscoped form must still report every unregistered lens, got %v", all)
+	}
+}
+
+// Fail-closed at the edge: a lens whose spec cannot be parsed has UNKNOWN holder
+// types, and unknown must never resolve to "not relevant" — that is the one
+// direction that silently drops the lens whose plaintext is being asked about.
+func TestRegistryProbe_ReconcileNowForHolderType_KeepsALensWithAnUnreadableSpec(t *testing.T) {
+	conn, ctx := newRegistryProbeTestConn(t)
+	const bucket = "core-kv"
+	putLens(ctx, t, conn, bucket, "CbCdEfGhJkMnPqRsTuVy", false, `{"bucket":"v","key":["id"]}`)
+	if _, err := conn.KVPut(ctx, bucket, "vtx.meta.CbCdEfGhJkMnPqRsTuVy.spec", []byte("{not json")); err != nil {
+		t.Fatalf("corrupt the spec: %v", err)
+	}
+
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	p := NewRegistryProbe(conn, bucket, func() []string { return nil }, logger)
+
+	missing, err := p.ReconcileNowForHolderType(ctx, "retentionclass")
+	if err != nil {
+		t.Fatalf("ReconcileNowForHolderType: %v", err)
+	}
+	if len(missing) != 1 {
+		t.Fatalf("a lens with unknown holder types must be reported, got %v", missing)
+	}
+}

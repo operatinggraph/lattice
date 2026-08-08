@@ -103,7 +103,7 @@ func (r *Reporter) SetActive(ctx context.Context) error {
 
 	existing, err := r.readExisting(ctx)
 	if err != nil {
-		slog.Warn("health: SetActive could not read existing entry, ErrorCount/ConsumerLag reset to 0",
+		slog.Warn("health: SetActive could not read existing entry — every carried-forward field (error/redaction/drift counters, sweep progress, projection progress) resets to its zero value",
 			"ruleId", r.ruleID, "err", err)
 		existing = Entry{}
 	}
@@ -132,6 +132,18 @@ func (r *Reporter) SetActive(ctx context.Context) error {
 		SecureRedactions:  existing.SecureRedactions,
 		EvalDriftRetries:  existing.EvalDriftRetries,
 		EvalDriftRequeues: existing.EvalDriftRequeues,
+		// The projection-progress fields, for the same reason and by the same
+		// rule SetProjectionProgress states about itself: they are OBSERVATIONS,
+		// and a status transition observes none of them, so writing zeroes here
+		// asserts something no read established. The LagPoller restores the first
+		// four within a cycle; LastProjectedAt it does not, because it only ever
+		// writes a NON-ZERO value — so a SetActive at activation erases a lens's
+		// last-projection timestamp permanently.
+		ProjectionLag:      existing.ProjectionLag,
+		LagProgressAt:      existing.LagProgressAt,
+		AckPending:         existing.AckPending,
+		AckFloorProgressAt: existing.AckFloorProgressAt,
+		LastProjectedAt:    existing.LastProjectedAt,
 	}
 	if err := r.put(ctx, entry); err != nil {
 		return err
@@ -156,7 +168,7 @@ func (r *Reporter) SetPaused(ctx context.Context, reason, lastError string) erro
 
 	existing, err := r.readExisting(ctx)
 	if err != nil {
-		slog.Warn("health: SetPaused could not read existing entry, ErrorCount/ConsumerLag reset to 0",
+		slog.Warn("health: SetPaused could not read existing entry — every carried-forward field (error/redaction/drift counters, sweep progress, projection progress) resets to its zero value",
 			"ruleId", r.ruleID, "err", err)
 		existing = Entry{}
 	}
@@ -189,6 +201,18 @@ func (r *Reporter) SetPaused(ctx context.Context, reason, lastError string) erro
 		SecureRedactions:  existing.SecureRedactions,
 		EvalDriftRetries:  existing.EvalDriftRetries,
 		EvalDriftRequeues: existing.EvalDriftRequeues,
+		// The projection-progress fields, for the same reason and by the same
+		// rule SetProjectionProgress states about itself: they are OBSERVATIONS,
+		// and a status transition observes none of them, so writing zeroes here
+		// asserts something no read established. The LagPoller restores the first
+		// four within a cycle; LastProjectedAt it does not, because it only ever
+		// writes a NON-ZERO value — so a SetActive at activation erases a lens's
+		// last-projection timestamp permanently.
+		ProjectionLag:      existing.ProjectionLag,
+		LagProgressAt:      existing.LagProgressAt,
+		AckPending:         existing.AckPending,
+		AckFloorProgressAt: existing.AckFloorProgressAt,
+		LastProjectedAt:    existing.LastProjectedAt,
 	}
 	if err := r.put(ctx, entry); err != nil {
 		return err
@@ -213,7 +237,7 @@ func (r *Reporter) SetRebuilding(ctx context.Context) error {
 
 	existing, err := r.readExisting(ctx)
 	if err != nil {
-		slog.Warn("health: SetRebuilding could not read existing entry, ErrorCount/ConsumerLag reset to 0",
+		slog.Warn("health: SetRebuilding could not read existing entry — every carried-forward field (error/redaction/drift counters, sweep progress, projection progress) resets to its zero value",
 			"ruleId", r.ruleID, "err", err)
 		existing = Entry{}
 	}
@@ -235,6 +259,18 @@ func (r *Reporter) SetRebuilding(ctx context.Context) error {
 		SecureRedactions:  existing.SecureRedactions,
 		EvalDriftRetries:  existing.EvalDriftRetries,
 		EvalDriftRequeues: existing.EvalDriftRequeues,
+		// The projection-progress fields, for the same reason and by the same
+		// rule SetProjectionProgress states about itself: they are OBSERVATIONS,
+		// and a status transition observes none of them, so writing zeroes here
+		// asserts something no read established. The LagPoller restores the first
+		// four within a cycle; LastProjectedAt it does not, because it only ever
+		// writes a NON-ZERO value — so a SetActive at activation erases a lens's
+		// last-projection timestamp permanently.
+		ProjectionLag:      existing.ProjectionLag,
+		LagProgressAt:      existing.LagProgressAt,
+		AckPending:         existing.AckPending,
+		AckFloorProgressAt: existing.AckFloorProgressAt,
+		LastProjectedAt:    existing.LastProjectedAt,
 	}
 	if err := r.put(ctx, entry); err != nil {
 		return err

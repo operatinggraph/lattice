@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"log/slog"
+	"slices"
 	"sort"
 	"sync"
 	"time"
@@ -44,11 +45,24 @@ type registryProbeSpecProbe struct {
 	Source *struct {
 		Kind string `json:"kind"`
 	} `json:"source"`
-	Data *struct {
+	TargetConfig *registryProbeTargetProbe `json:"targetConfig"`
+	Data         *struct {
 		Source *struct {
 			Kind string `json:"kind"`
 		} `json:"source"`
+		TargetConfig *registryProbeTargetProbe `json:"targetConfig"`
 	} `json:"data"`
+}
+
+// registryProbeTargetProbe peeks at the Secure-Lens holder-type declarations,
+// which live in the spec's targetConfig for both target kinds (the Postgres and
+// NATS-KV config structs each carry secureColumns — the NATS-KV one only so a
+// misdirected declaration fails closed at activation). Mirrors
+// lens.SecureColumn's on-wire shape.
+type registryProbeTargetProbe struct {
+	SecureColumns []struct {
+		HolderTypes []string `json:"holderTypes"`
+	} `json:"secureColumns"`
 }
 
 func (p registryProbeSpecProbe) isEventStream() bool {
@@ -56,6 +70,26 @@ func (p registryProbeSpecProbe) isEventStream() bool {
 		return true
 	}
 	return p.Data != nil && p.Data.Source != nil && p.Data.Source.Kind == "eventStream"
+}
+
+// declaresHolderType reports whether this spec's Secure-Lens columns name
+// holderType — the lens author's own statement about which key holders may open
+// its ciphertext, read from the same `targetConfig.secureColumns[].holderTypes` the
+// running decryptor is built from rather than inferred from compiled cypher.
+func (p registryProbeSpecProbe) declaresHolderType(holderType string) bool {
+	tc := p.TargetConfig
+	if tc == nil && p.Data != nil {
+		tc = p.Data.TargetConfig
+	}
+	if tc == nil {
+		return false
+	}
+	for _, sc := range tc.SecureColumns {
+		if slices.Contains(sc.HolderTypes, holderType) {
+			return true
+		}
+	}
+	return false
 }
 
 // RegistryProbe periodically reconciles the set of lens IDs declared in Core
@@ -138,14 +172,24 @@ func (p *RegistryProbe) Run(ctx context.Context) {
 // set in place rather than clearing it (a transient KV-listing error must
 // never look like "registry reconciled clean").
 func (p *RegistryProbe) check(ctx context.Context) {
-	if _, err := p.ReconcileNow(ctx); err != nil {
+	missing, err := p.reconcile(ctx, "")
+	if err != nil {
 		p.logger.Warn("registry-reconciliation probe: enumerate declared lenses failed", "err", err)
+		return
+	}
+	p.mu.Lock()
+	p.missing = missing
+	p.mu.Unlock()
+
+	if len(missing) > 0 {
+		p.logger.Warn("registry-reconciliation probe: lens(es) declared but not registered",
+			"count", len(missing), "lensIds", missing)
 	}
 }
 
 // ReconcileNow runs one reconciliation pass immediately and returns the lens
-// IDs declared in Core KV but absent from the registry, storing the result the
-// same way the periodic check does.
+// IDs declared in Core KV but absent from the registry — WITHOUT publishing the
+// result.
 //
 // It exists because "the registry is loaded" is a question with a caller that
 // cannot wait for a tick: the retention-class destruction consumer must not
@@ -155,11 +199,44 @@ func (p *RegistryProbe) check(ctx context.Context) {
 // the platform's persistent lens registry — rather than against the in-process
 // map whose incompleteness is the hazard.
 //
+// Not publishing is the load-bearing half. Missing() is what the heartbeat
+// reads to raise LensRegistryIncomplete, and its contract is that it stays
+// empty until the first SCHEDULED check completes — the 60s boot grace window
+// exists precisely so a lens that is merely still starting is never reported as
+// one the replay never delivered. An on-demand caller runs inside that window
+// by construction, so storing its result here would publish exactly the false
+// positive the grace window was built to suppress.
+//
 // An error is NOT an empty missing set: a caller must treat it as "unknown",
 // never as "reconciled clean", which is why the error is returned rather than
 // folded into the slice.
 func (p *RegistryProbe) ReconcileNow(ctx context.Context) ([]string, error) {
-	declared, err := p.declaredLensIDs(ctx)
+	return p.reconcile(ctx, "")
+}
+
+// ReconcileNowForHolderType is ReconcileNow narrowed to the lenses that could
+// actually hold the named key holder's plaintext — those whose spec declares
+// holderType in a Secure-Lens column.
+//
+// Scope is the whole point. Corpus-global readiness answers a question nobody
+// asked: ANY single lens that never registers — a bad spec, a failed
+// activation, another deployment's — would make readiness false forever, so
+// every destruction of every holder type would burn its budget and give up
+// without attesting. Narrowing it to the declaring set means "not ready" is a
+// statement about lenses that might be serving THIS holder's plaintext, which is
+// the condition worth withholding an attestation over.
+//
+// It stays fail-closed at the edges: a lens whose spec cannot be read or parsed
+// keeps its unknown holder types and is reported, because "unknown" must not
+// resolve to "not relevant".
+func (p *RegistryProbe) ReconcileNowForHolderType(ctx context.Context, holderType string) ([]string, error) {
+	return p.reconcile(ctx, holderType)
+}
+
+// reconcile is the pure computation behind both: enumerate declared lens IDs
+// and diff against the registered set. It stores nothing.
+func (p *RegistryProbe) reconcile(ctx context.Context, holderType string) ([]string, error) {
+	declared, err := p.declaredLensIDs(ctx, holderType)
 	if err != nil {
 		return nil, err
 	}
@@ -176,15 +253,6 @@ func (p *RegistryProbe) ReconcileNow(ctx context.Context) ([]string, error) {
 		}
 	}
 	sort.Strings(missing)
-
-	p.mu.Lock()
-	p.missing = missing
-	p.mu.Unlock()
-
-	if len(missing) > 0 {
-		p.logger.Warn("registry-reconciliation probe: lens(es) declared but not registered",
-			"count", len(missing), "lensIds", missing)
-	}
 	return missing, nil
 }
 
@@ -195,7 +263,7 @@ func (p *RegistryProbe) ReconcileNow(ctx context.Context) ([]string, error) {
 // counted as declared — deliberately fail-closed: an activation that never
 // completes is exactly the class of silent failure this probe exists to
 // surface (§4 Fire B step 2), not a case to quietly exclude.
-func (p *RegistryProbe) declaredLensIDs(ctx context.Context) ([]string, error) {
+func (p *RegistryProbe) declaredLensIDs(ctx context.Context, holderType string) ([]string, error) {
 	keys, err := p.conn.KVListKeysPrefix(ctx, p.bucket, "vtx.meta.")
 	if err != nil {
 		return nil, err
@@ -224,11 +292,21 @@ func (p *RegistryProbe) declaredLensIDs(ctx context.Context) ([]string, error) {
 		}
 
 		specEntry, err := p.conn.KVGet(ctx, p.bucket, key+".spec")
-		if err == nil {
-			var sp registryProbeSpecProbe
-			if json.Unmarshal(specEntry.Value, &sp) == nil && sp.isEventStream() {
+		specReadable := false
+		var sp registryProbeSpecProbe
+		if err == nil && json.Unmarshal(specEntry.Value, &sp) == nil {
+			specReadable = true
+			if sp.isEventStream() {
 				continue
 			}
+		}
+
+		// A holder-type filter, when one is asked for. An unreadable or
+		// unparseable spec is kept regardless — its holder types are UNKNOWN, and
+		// treating unknown as "not relevant" is the one direction that could
+		// silently exclude the lens whose plaintext the caller is asking about.
+		if holderType != "" && specReadable && !sp.declaresHolderType(holderType) {
+			continue
 		}
 
 		ids = append(ids, id)

@@ -247,3 +247,40 @@ func TestRecordShredFinalization_ReShredResetsCycle(t *testing.T) {
 		}
 	}
 }
+
+// The identity-plane sibling of the retention-class actor pin. Without its own
+// negative vector, a revert of shred_identity_key.go's guard alone would leave
+// every positive test green: they all submit as the privacy actor, which the
+// guard admits either way.
+func TestRecordShredFinalization_NonPrivacyActorIsDenied(t *testing.T) {
+	ctx, conn := setupFinalizationEnv(t)
+	v := testutil.TestVault(t)
+	cp, cons := newDefaultPipeline(t, ctx, conn, "fin-actor-default", v)
+	urgentCP, urgentCons := newUrgentPipeline(t, ctx, conn, "fin-actor-urgent", v)
+	sysCP, sysCons := newSystemPipeline(t, ctx, conn, "fin-actor-system", v)
+
+	identityKey := createIdentity(t, ctx, conn, cp, cons, "FinActorId")
+	recordPII(t, ctx, conn, cp, cons, identityKey, "FinActorPII")
+	submitShred(t, ctx, conn, urgentCP, urgentCons, identityKey, "FinActorShred", processor.OutcomeAccepted)
+
+	// A staff operator holding the verb's grant, declaring its own vertex — the
+	// most capable forger the scope:any grant permits.
+	seedVertex(t, ctx, conn, pbStaffActorKey, "identity", nil, false)
+	env := &processor.OperationEnvelope{
+		RequestID:     testutil.GenReqID("FinActorForged"),
+		Lane:          processor.LaneSystem,
+		OperationType: "RecordShredFinalization",
+		Actor:         pbStaffActorKey,
+		SubmittedAt:   "2026-07-02T10:20:00Z",
+		Payload:       json.RawMessage(`{"identityKey":"` + identityKey + `","step":"projectionsNullified"}`),
+		ContextHint: &processor.ContextHint{
+			Reads: []string{identityKey + ".piiKey", pbStaffActorKey},
+		},
+	}
+	testutil.PublishOp(t, conn, env)
+	testutil.DriveOne(t, ctx, sysCP, sysCons, processor.OutcomeRejected)
+
+	if data := piiKeyData(t, ctx, conn, identityKey); data["projectionsNullified"] != nil {
+		t.Fatalf("a non-privacy actor must not be able to attest a nullification: %+v", data)
+	}
+}

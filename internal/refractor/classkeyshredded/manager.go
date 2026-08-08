@@ -78,12 +78,21 @@ const (
 	// maxNotRegisteredDeliveries bounds the redelivery of an event naming a
 	// lens that has not registered yet (a Refractor still starting up), so a
 	// permanently-misconfigured RuleID cannot nak-loop forever.
-	maxNotRegisteredDeliveries = 20
+	maxNotRegisteredDeliveries = maxNotReadyDeliveries + 20
+	// maxSubmitDeliveries is the third stage on the same counter, for a failing
+	// finalization publish.
+	maxSubmitDeliveries = maxNotRegisteredDeliveries + 20
 	// maxNotReadyDeliveries bounds the same retry for a registry that has not
-	// finished loading. Separate from the budget above because it answers a
-	// different question — "can this enumeration be trusted at all", not "is
-	// this one lens up yet" — and a registry that never reconciles is an
-	// operator-visible LensRegistryIncomplete condition, not a lens fault.
+	// finished loading. It answers a different question — "can this enumeration
+	// be trusted at all", not "is this one lens up yet" — but both are counted
+	// off the SAME msg.NumDelivered, so they are STAGED rather than independent:
+	// readiness runs first and owns deliveries 1..20, and the not-registered
+	// budget above starts where this one ends. Sizing them equally made the
+	// second dead — a boot that spent its deliveries on readiness left the first
+	// ErrRuleNotRegistered with zero retries and sent it straight to the
+	// privacy-critical give-up arm. The window is real: main.go registers the
+	// entry in the lens registry before it registers the Rebuilder, so "ready"
+	// can be true while a rebuilder is not.
 	maxNotReadyDeliveries = 20
 
 	// DefaultRebuildWait bounds how long ONE lens's rescan is waited on. It is
@@ -97,11 +106,25 @@ const (
 	// condition itself by pausing a lens whose rebuild failed, so the next
 	// event would enumerate the same lens and wedge.
 	DefaultRebuildWait = 30 * time.Minute
-	// defaultAckWait must exceed the whole handler's upper bound, or JetStream
-	// redelivers the event while the rebuilds it triggered are still running
-	// and each redelivery re-runs all of them. The 30s default is far below a
-	// single rebuild at these lens sizes, which is the normal case, not an edge.
+	// DefaultHandlerBudget bounds the WHOLE handler, not one lens. RebuildWait
+	// is per target inside the loop, so N targets make the handler's real upper
+	// bound N × RebuildWait — unbounded in the only variable that matters, since
+	// N is however many lenses declare the holder type. Every rebuild draws from
+	// this one budget, and a target reached with nothing left is not attempted:
+	// the attestation is withheld rather than an ack deadline blown.
+	DefaultHandlerBudget = 90 * time.Minute
+	// defaultAckWait must exceed DefaultHandlerBudget, or JetStream redelivers
+	// the event while the rebuilds it triggered are still running and each
+	// redelivery re-runs all of them. The 30s default is far below a single
+	// rebuild at these lens sizes, which is the normal case, not an edge.
 	defaultAckWait = 2 * time.Hour
+	// classKeyPrefetch is 1 because AckWait is measured from delivery into the
+	// client's prefetch buffer, not from handler entry. With nats.go's default
+	// of 500 a queued destruction would sit through every preceding rebuild and
+	// be redelivered before its own handler ran, no matter how large AckWait is
+	// — and each redelivery re-runs every rebuild and burns a NumDelivered the
+	// readiness and not-registered budgets are counting.
+	classKeyPrefetch = 1
 )
 
 // RebuildTarget names one lens whose projection must be rebuilt.
@@ -132,6 +155,9 @@ type Config struct {
 	// RebuildWait bounds the wait on ONE lens's rescan. Defaults to
 	// DefaultRebuildWait.
 	RebuildWait time.Duration
+	// HandlerBudget bounds every rebuild of one destruction together. Defaults
+	// to DefaultHandlerBudget.
+	HandlerBudget time.Duration
 	// AckWait is the durable's ack deadline. Defaults to defaultAckWait.
 	AckWait time.Duration
 }
@@ -143,7 +169,7 @@ type Manager struct {
 
 	mu            sync.Mutex
 	targetLister  func(holderType string) []RebuildTarget
-	registryReady func(ctx context.Context) error
+	registryReady func(ctx context.Context, holderType string) error
 }
 
 // New constructs a Manager, applying defaults for the omitted fields. Panics if
@@ -165,6 +191,9 @@ func New(cfg Config) *Manager {
 	}
 	if cfg.RebuildWait <= 0 {
 		cfg.RebuildWait = DefaultRebuildWait
+	}
+	if cfg.HandlerBudget <= 0 {
+		cfg.HandlerBudget = DefaultHandlerBudget
 	}
 	if cfg.AckWait <= 0 {
 		cfg.AckWait = defaultAckWait
@@ -199,9 +228,13 @@ func (m *Manager) targetsFor(holderType string) []RebuildTarget {
 }
 
 // SetRegistryReady registers the check that answers "is the lens registry
-// complete enough for an enumeration over it to mean anything?". It returns nil
-// when it is, and an error naming the reason when it is not or cannot be
-// determined.
+// complete enough for an enumeration over THIS holder type to mean anything?".
+// It returns nil when it is, and an error naming the reason when it is not or
+// cannot be determined.
+//
+// It takes the holder type because the corpus-global form answers a question
+// nobody asked: any single lens that never registers, for any reason, would
+// withhold every attestation for every holder type forever.
 //
 // This is the difference between the two readings of an under-populated target
 // set, which the set itself cannot tell apart: "no live lens declares this
@@ -218,20 +251,20 @@ func (m *Manager) targetsFor(holderType string) []RebuildTarget {
 // attested. That is deliberate: a cold-boot durable replays from the start of
 // the subject history (DeliverAllPolicy), so the un-set window is exactly when
 // a vacuous attestation would be most likely and most wrong.
-func (m *Manager) SetRegistryReady(fn func(ctx context.Context) error) {
+func (m *Manager) SetRegistryReady(fn func(ctx context.Context, holderType string) error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.registryReady = fn
 }
 
-func (m *Manager) checkRegistryReady(ctx context.Context) error {
+func (m *Manager) checkRegistryReady(ctx context.Context, holderType string) error {
 	m.mu.Lock()
 	fn := m.registryReady
 	m.mu.Unlock()
 	if fn == nil {
 		return errors.New("lens registry readiness check not wired yet (Refractor still starting)")
 	}
-	return fn(ctx)
+	return fn(ctx, holderType)
 }
 
 // HandledTotal returns the count of destruction events this instance has
@@ -255,9 +288,12 @@ func (m *Manager) Run(ctx context.Context) error {
 		Durable:         m.cfg.Durable,
 		RedeliveryDelay: defaultRedeliveryDelay,
 		// The handler blocks on real rescans, so the default 30s ack deadline
-		// would redeliver the event mid-flight and re-run every rebuild.
-		AckWait: m.cfg.AckWait,
-		Logger:  m.cfg.Logger,
+		// would redeliver the event mid-flight and re-run every rebuild — and
+		// the prefetch cap is half of that fix, since the deadline is measured
+		// from delivery into the client's buffer rather than from handler entry.
+		AckWait:     m.cfg.AckWait,
+		MaxPrefetch: classKeyPrefetch,
+		Logger:      m.cfg.Logger,
 	}, m.handleClassKeyShredded)
 }
 
@@ -298,7 +334,7 @@ func (m *Manager) handleClassKeyShredded(ctx context.Context, msg substrate.Mess
 	// registry it reads, and an under-populated registry produces a SHORT target
 	// set, not just an empty one — so this gates the whole delivery, not merely
 	// the vacuous case.
-	readyErr := m.checkRegistryReady(ctx)
+	readyErr := m.checkRegistryReady(ctx, holderType)
 	if readyErr != nil {
 		if msg.NumDelivered <= maxNotReadyDeliveries {
 			m.cfg.Logger.Warn("refractor classkeyshredded: lens registry not reconciled; retrying the whole event rather than attesting over a partial enumeration",
@@ -311,20 +347,44 @@ func (m *Manager) handleClassKeyShredded(ctx context.Context, msg substrate.Mess
 		// something is wrong with the registry itself (a live
 		// LensRegistryIncomplete condition), and an attestation here would be a
 		// claim about lenses this process cannot see.
-		m.cfg.Logger.Error("refractor classkeyshredded: lens registry never reconciled within the redelivery budget; delivering to what is registered and NOT attesting (privacy-critical)",
-			"retentionClassKey", holderKey, "deliveries", msg.NumDelivered, "reason", readyErr)
+		// Ack-and-alarm rather than Nak-forever, decided rather than defaulted.
+		// Naking indefinitely would wedge this strictly-serial consumer on one
+		// holder and stop every later destruction — the wedge the wait budget was
+		// added to remove. What makes the Ack safe is that the destruction is
+		// REDRIVABLE by an operator: re-submitting ShredRetentionClassKey for the
+		// same holder is idempotent, clears the prior cycle's finalization
+		// progress, and re-emits this event. The in-flight retentionKeyStatus row
+		// is the signal to do it, so the log names the action rather than only the
+		// fault.
+		m.cfg.Logger.Error("refractor classkeyshredded: lens registry never reconciled for this holder type within the redelivery budget; delivering to what is registered and NOT attesting (privacy-critical) — once the missing lenses register, re-drive by re-submitting ShredRetentionClassKey for this holder",
+			"retentionClassKey", holderKey, "holderType", holderType,
+			"deliveries", msg.NumDelivered, "reason", readyErr)
 	}
 
 	targets := m.targetsFor(holderType)
 	allClean := readyErr == nil
 	notRegistered := false
 
+	// One budget for every rebuild this destruction triggers. Per-lens alone
+	// leaves the handler's real bound at N × RebuildWait, which is what the ack
+	// deadline has to sit above — and N is however many lenses declare the
+	// holder type, so it is not a constant anyone can size against.
+	deadline := time.Now().Add(m.cfg.HandlerBudget)
+
 	for _, t := range targets {
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			allClean = false
+			m.cfg.Logger.Error("refractor classkeyshredded: handler budget exhausted before this lens was rebuilt; NOT attesting (privacy-critical)",
+				"retentionClassKey", holderKey, "ruleId", t.RuleID)
+			continue
+		}
+		wait := min(m.cfg.RebuildWait, remaining)
 		// truncate=false deliberately: the row is RETAINED and only its
 		// plaintext is destroyed, so the rebuild must upsert null over it, not
 		// delete it. Truncating would also take out every other class's rows
 		// this lens carries.
-		err := m.cfg.Control.RebuildRule(ctx, t.RuleID, false, m.cfg.RebuildWait)
+		err := m.cfg.Control.RebuildRule(ctx, t.RuleID, false, wait)
 		if err == nil {
 			continue
 		}
@@ -350,6 +410,21 @@ func (m *Manager) handleClassKeyShredded(ctx context.Context, msg substrate.Mess
 			m.cfg.Logger.Error("refractor classkeyshredded: lens never registered after the redelivery budget; giving up (privacy-critical, its rows may still hold plaintext)",
 				"retentionClassKey", holderKey, "ruleId", t.RuleID,
 				"deliveries", msg.NumDelivered)
+			continue
+		}
+		// The two "not known to be rebuilt, but not the lens's fault" classes.
+		// They must be told apart from a rebuild failure BEFORE the pause arm
+		// below, because pausing here is self-perpetuating: a paused lens cannot
+		// drain a rebuild (supervisor.Reset requests a reopen without clearing a
+		// pause), so a lens whose rescan legitimately outran the budget once
+		// would burn the whole budget, time out and re-pause on every later
+		// destruction — while serving its pre-destruction rows the entire time.
+		// That is the wedge the budget was added to remove, relocated. The
+		// attestation is still withheld (allClean is already false): the lens is
+		// left running, and the operator's row stays visibly in-flight.
+		if errors.Is(err, control.ErrRebuildWaitTimeout) || errors.Is(err, control.ErrRebuildNotDrained) {
+			m.cfg.Logger.Error("refractor classkeyshredded: rebuild not confirmed drained; NOT attesting and leaving the lens running (privacy-critical)",
+				"retentionClassKey", holderKey, "ruleId", t.RuleID, "error", failure.PrivacyCritical(err))
 			continue
 		}
 		// A real rebuild failure: this lens may still be rendering plaintext
@@ -379,9 +454,19 @@ func (m *Manager) handleClassKeyShredded(ctx context.Context, msg substrate.Mess
 	// tracker.
 	if allClean && m.cfg.ActorKey != "" {
 		if err := m.submitFinalization(ctx, holderKey, msg.Sequence); err != nil {
-			m.cfg.Logger.Warn("refractor classkeyshredded: finalization submit failed; retrying whole event",
-				"retentionClassKey", holderKey, "error", err)
-			return substrate.NakWithDelay
+			// Bounded like every other Nak arm here, and for a sharper reason: a
+			// retry re-runs every rebuild this destruction triggered, so an
+			// unbounded loop against a persistently unpublishable op is not a
+			// retry, it is a rescan storm. Past the budget the rebuilds have
+			// still landed; only the attestation is missing, which is what the
+			// operator's in-flight row already says.
+			if msg.NumDelivered <= maxSubmitDeliveries {
+				m.cfg.Logger.Warn("refractor classkeyshredded: finalization submit failed; retrying whole event",
+					"retentionClassKey", holderKey, "deliveries", msg.NumDelivered, "error", err)
+				return substrate.NakWithDelay
+			}
+			m.cfg.Logger.Error("refractor classkeyshredded: finalization submit still failing past the redelivery budget; the rebuilds landed but the attestation did not (privacy-critical)",
+				"retentionClassKey", holderKey, "deliveries", msg.NumDelivered, "error", err)
 		}
 	}
 

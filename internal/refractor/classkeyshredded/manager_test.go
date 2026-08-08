@@ -63,11 +63,21 @@ func (r recordingRebuilder) RebuildAndWait(_ context.Context, truncate bool, wai
 	return nil
 }
 
+// recordingPauser makes "was this lens paused?" observable, which is the whole
+// question for an error class that must NOT pause.
+type recordingPauser struct {
+	ruleID string
+	paused *[]string
+}
+
+func (p recordingPauser) Pause(context.Context) { *p.paused = append(*p.paused, p.ruleID) }
+
 type harness struct {
 	mgr    *Manager
 	svc    *control.Service
 	built  []string
 	failed []string
+	paused []string
 }
 
 func newHarness(t *testing.T, actorKey string) *harness {
@@ -75,7 +85,7 @@ func newHarness(t *testing.T, actorKey string) *harness {
 	h := &harness{svc: control.NewService()}
 	h.mgr = New(Config{Control: h.svc, ActorKey: actorKey})
 	// Ready by default: the tests that care about readiness override it.
-	h.mgr.SetRegistryReady(func(context.Context) error { return nil })
+	h.mgr.SetRegistryReady(func(context.Context, string) error { return nil })
 	return h
 }
 
@@ -83,6 +93,7 @@ func (h *harness) register(ruleID string, err error) {
 	h.svc.RegisterRebuilder(ruleID, recordingRebuilder{
 		ruleID: ruleID, built: &h.built, failed: &h.failed, err: err,
 	})
+	h.svc.RegisterPauser(ruleID, recordingPauser{ruleID: ruleID, paused: &h.paused})
 }
 
 func eventFor(t *testing.T, holderKey string) substrate.Message {
@@ -225,8 +236,8 @@ func TestNew_PanicsWithoutAControlService(t *testing.T) {
 // class), so the readiness signal is explicit and gates the whole delivery.
 func TestHandle_AnUnreconciledRegistryRetriesRatherThanEnumeratingOverIt(t *testing.T) {
 	h := newHarness(t, attestingActor)
-	h.mgr.SetRegistryReady(func(context.Context) error {
-		return errors.New("2 lens(es) declared in Core KV but not registered")
+	h.mgr.SetRegistryReady(func(context.Context, string) error {
+		return errors.New("2 lens(es) declaring this holder type are in Core KV but not registered")
 	})
 	h.register(lensSecure, nil)
 	h.mgr.SetTargetLister(func(string) []RebuildTarget { return []RebuildTarget{{RuleID: lensSecure}} })
@@ -262,7 +273,7 @@ func TestHandle_AnUnwiredReadinessCheckIsTreatedAsNotReady(t *testing.T) {
 // all of.
 func TestHandle_AnUnreconciledRegistryGivesUpAfterTheBudgetWithoutAttesting(t *testing.T) {
 	h := newHarness(t, attestingActor)
-	h.mgr.SetRegistryReady(func(context.Context) error { return errors.New("registry never reconciled") })
+	h.mgr.SetRegistryReady(func(context.Context, string) error { return errors.New("registry never reconciled") })
 	h.register(lensSecure, nil)
 	h.mgr.SetTargetLister(func(string) []RebuildTarget { return []RebuildTarget{{RuleID: lensSecure}} })
 
@@ -292,4 +303,71 @@ func TestHandle_AShutdownMidRebuildIsRetriedNotAcked(t *testing.T) {
 	assert.Equal(t, substrate.NakWithDelay, dec,
 		"a shutdown must redeliver the destruction to the next process, not lose it")
 	assert.Zero(t, h.mgr.HandledTotal())
+}
+
+// The two "not known to be rebuilt, but not the lens's fault" classes must not
+// reach the pause arm. Pausing here is self-perpetuating: a paused lens cannot
+// drain a rebuild (Rebuild's supervisor.Reset requests a reopen without clearing
+// a pause), so a lens whose rescan legitimately outran the budget once would
+// burn the whole budget, time out and re-pause on every later destruction —
+// serving its pre-destruction rows the entire time. That is the wedge the budget
+// removed, relocated one arm down.
+func TestHandle_ARebuildNotConfirmedDrainedWithholdsTheAttestationWithoutPausing(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		err  error
+	}{
+		{"wait budget expired", control.ErrRebuildWaitTimeout},
+		{"ended without draining", control.ErrRebuildNotDrained},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newHarness(t, attestingActor)
+			h.register(lensSecure, tc.err)
+			h.mgr.SetTargetLister(func(string) []RebuildTarget {
+				return []RebuildTarget{{RuleID: lensSecure}}
+			})
+
+			dec := h.mgr.handleClassKeyShredded(context.Background(), eventFor(t, classHolder))
+
+			assert.Equal(t, substrate.Ack, dec)
+			assert.Empty(t, h.paused,
+				"a slow or unobserved rebuild is not a lens fault — pausing it makes the next destruction wedge too")
+			// No submit, so no panic on the nil Conn: the attestation is withheld.
+		})
+	}
+}
+
+// A genuine rebuild failure still pauses, so the arm above is a narrowing and
+// not a removal.
+func TestHandle_ARealRebuildFailureStillPausesTheLens(t *testing.T) {
+	h := newHarness(t, attestingActor)
+	h.register(lensSecure, errors.New("target unreachable"))
+	h.mgr.SetTargetLister(func(string) []RebuildTarget {
+		return []RebuildTarget{{RuleID: lensSecure}}
+	})
+
+	dec := h.mgr.handleClassKeyShredded(context.Background(), eventFor(t, classHolder))
+
+	assert.Equal(t, substrate.Ack, dec)
+	assert.Equal(t, []string{lensSecure}, h.paused,
+		"a lens that may still be rendering plaintext whose key is gone is halted")
+}
+
+// Both retry budgets are counted off the SAME msg.NumDelivered, so sizing them
+// equally made the second dead: a boot that spent its deliveries on readiness
+// left the first ErrRuleNotRegistered with zero retries. Staging them is what
+// gives each a real window, and this is the delivery that proves the second one
+// still has one.
+func TestHandle_TheNotRegisteredBudgetSurvivesAnExhaustedReadinessBudget(t *testing.T) {
+	h := newHarness(t, attestingActor)
+	h.mgr.SetTargetLister(func(string) []RebuildTarget {
+		return []RebuildTarget{{RuleID: "rule-not-yet-registered"}}
+	})
+
+	msg := eventFor(t, classHolder)
+	msg.NumDelivered = maxNotReadyDeliveries + 1 // readiness is spent; this lens is not
+	dec := h.mgr.handleClassKeyShredded(context.Background(), msg)
+
+	assert.Equal(t, substrate.NakWithDelay, dec,
+		"an unregistered lens must still get its own retries after readiness used up its own")
 }

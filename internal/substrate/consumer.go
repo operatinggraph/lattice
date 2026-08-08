@@ -109,7 +109,22 @@ type DurableConsumerConfig struct {
 	// handler that runs longer than AckWait is redelivered WHILE STILL RUNNING,
 	// and each redelivery re-does the whole handler. Any consumer whose handler
 	// can legitimately exceed 30s must set this above its own upper bound.
+	//
+	// Setting it is NOT sufficient on its own — see MaxPrefetch. The clock runs
+	// from delivery, and delivery means "into the client's prefetch buffer", not
+	// "into the handler".
 	AckWait time.Duration
+	// MaxPrefetch caps how many messages the client pulls ahead of the handler.
+	// A zero value leaves nats.go's DefaultMaxMessages (500), which is right for
+	// a fast handler and wrong for a slow one for a reason AckWait alone cannot
+	// fix: AckWait is measured from when a message is DELIVERED INTO THE BUFFER,
+	// and this loop is strictly serial, so message N sits in the buffer through
+	// every preceding message's handler. On a DeliverAll replay a queued message
+	// can exhaust any AckWait before its handler is even entered, and each
+	// redelivery re-runs the whole handler and burns a NumDelivered any
+	// delivery-budget logic is counting. A slow-handler consumer should set 1,
+	// so the ack clock starts when the work does.
+	MaxPrefetch int
 	// Logger is the diagnostics sink. Defaults to slog.Default() when nil.
 	Logger *slog.Logger
 }
@@ -163,7 +178,7 @@ func (c *Conn) RunDurableConsumer(ctx context.Context, cfg DurableConsumerConfig
 			cfg.Durable, cfg.Stream, err)
 	}
 
-	c.runDurableLoop(ctx, cons, cfg.Durable, cfg.RedeliveryDelay, logger, handler)
+	c.runDurableLoop(ctx, cons, cfg.Durable, cfg.RedeliveryDelay, cfg.MaxPrefetch, logger, handler)
 	return nil
 }
 
@@ -174,6 +189,7 @@ func (c *Conn) runDurableLoop(
 	cons jetstream.Consumer,
 	durable string,
 	redeliveryDelay time.Duration,
+	maxPrefetch int,
 	logger *slog.Logger,
 	handler HandlerFunc,
 ) {
@@ -181,7 +197,11 @@ func (c *Conn) runDurableLoop(
 		if ctx.Err() != nil {
 			return
 		}
-		mc, err := cons.Messages()
+		var opts []jetstream.PullMessagesOpt
+		if maxPrefetch > 0 {
+			opts = append(opts, jetstream.PullMaxMessages(maxPrefetch))
+		}
+		mc, err := cons.Messages(opts...)
 		if err != nil {
 			logger.Error("substrate: durable consumer: open messages iterator",
 				"durable", durable, "error", err)

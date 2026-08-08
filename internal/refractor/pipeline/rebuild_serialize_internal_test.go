@@ -21,6 +21,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/operatinggraph/lattice/internal/refractor/control"
 )
 
 // blockingTruncAdapter parks inside Truncate until released, so a test can hold
@@ -75,6 +77,7 @@ func TestRebuildAndWait_WaitsOutARebuildStartedElsewhere(t *testing.T) {
 	}, 50*time.Millisecond, 5*time.Millisecond,
 		"RebuildAndWait must not start its own rescan while another is in flight")
 
+	other.drained.Store(true)
 	p.endRebuild(other) // the other rebuild drains
 
 	select {
@@ -200,14 +203,80 @@ func TestRebuildAndWait_BudgetExpiryIsAFailureNotACompletion(t *testing.T) {
 
 	select {
 	case err := <-done:
-		require.ErrorIs(t, err, ErrRebuildWaitTimeout)
+		require.ErrorIs(t, err, control.ErrRebuildWaitTimeout)
 	case <-time.After(5 * time.Second):
 		t.Fatal("an unbounded wait: the budget never expired the caller")
 	}
 
 	select {
-	case <-stillRunning:
+	case <-stillRunning.done:
 		t.Fatal("the budget ended the REBUILD, not just the wait — its watcher would be gone and the status latched")
+	default:
+	}
+}
+
+// A cancelled watcher closes the signal too — it is the same `defer` every exit
+// runs — so a waiter that reads the CLOSE as completion returns success for a
+// rescan that was killed mid-drain. And because both select arms are then ready,
+// Go picks uniformly at random, so it did so about half the time. Success is the
+// `drained` flag, which only the watcher that saw zero outstanding ever sets.
+func TestWaitRebuildSignal_ACancelledWatcherIsNotACompletion(t *testing.T) {
+	p := newRebuildWaitPipeline(t)
+	sig := p.beginRebuild()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	p.endRebuild(sig) // exactly what watchRebuildCompletion's ctx-cancel exit does
+
+	// Repeated because the defect was a 50/50 select race: one pass proves little.
+	for range 50 {
+		err := p.waitRebuildSignal(ctx, ctx, sig)
+		require.Error(t, err, "a signal closed without a drain must never read as success")
+		require.ErrorIs(t, err, context.Canceled,
+			"a shutdown must surface as the caller's own cancellation, so the handler naks instead of attesting")
+	}
+}
+
+// The same close, with the caller's context still live: not a shutdown, not a
+// timeout — a rebuild that ended without anyone observing it drain. It gets its
+// own sentinel because the caller's response differs from both.
+func TestWaitRebuildSignal_AnEndWithoutADrainIsItsOwnError(t *testing.T) {
+	p := newRebuildWaitPipeline(t)
+	sig := p.beginRebuild()
+	p.endRebuild(sig)
+
+	err := p.waitRebuildSignal(context.Background(), context.Background(), sig)
+	require.ErrorIs(t, err, control.ErrRebuildNotDrained)
+}
+
+// The success path, so the fix is not "never report completion".
+func TestWaitRebuildSignal_ADrainedRescanSucceeds(t *testing.T) {
+	p := newRebuildWaitPipeline(t)
+	sig := p.beginRebuild()
+	sig.drained.Store(true)
+	p.endRebuild(sig)
+
+	require.NoError(t, p.waitRebuildSignal(context.Background(), context.Background(), sig))
+}
+
+// abandonRebuild clears PIPELINE-WIDE state — the in-flight flag and the health
+// status — and an older rebuild failing must not clear a newer one's. The flag
+// is what Sweeper.suppressed reads, so clearing it under a live rescan
+// un-suppresses the convergence sweep and announces a lens that is still
+// draining: the exact condition the suppression exists to create.
+func TestAbandonRebuild_DoesNotClearANewerRebuildsInFlightState(t *testing.T) {
+	p := newRebuildWaitPipeline(t)
+	older := p.beginRebuild()
+	newer := p.beginRebuild() // the newer rebuild now owns the pipeline-wide state
+	p.rebuildInFlight.Store(true)
+
+	require.Error(t, p.abandonRebuild(context.Background(), older, assert.AnError))
+
+	assert.True(t, p.RebuildInFlight(),
+		"an older rebuild's failure must not un-suppress the sweep under a newer rescan")
+	select {
+	case <-newer.done:
+		t.Fatal("an older rebuild's failure released the NEWER rebuild's waiters")
 	default:
 	}
 }

@@ -13,6 +13,7 @@ import (
 
 	"github.com/operatinggraph/lattice/internal/refractor/adapter"
 	"github.com/operatinggraph/lattice/internal/refractor/adjacency"
+	"github.com/operatinggraph/lattice/internal/refractor/control"
 	"github.com/operatinggraph/lattice/internal/refractor/failure"
 	"github.com/operatinggraph/lattice/internal/refractor/health"
 	"github.com/operatinggraph/lattice/internal/refractor/ruleengine"
@@ -349,7 +350,7 @@ type Pipeline struct {
 	// over a rescan still running and, for the retention-class consumer,
 	// attest to an erasure that had not reached the read models.
 	rebuildWatchMu sync.Mutex
-	rebuildWatch   chan struct{}
+	rebuildWatch   *rebuildSignal
 	// rebuildOutstanding is the most recent un-drained count watchRebuildCompletion
 	// polled, and rebuildProgressAt when that count last went DOWN. Together they
 	// separate a rebuild that is draining from one that is wedged — a distinction
@@ -1498,15 +1499,34 @@ func (p *Pipeline) Run(ctx context.Context) {
 // an operator's attention. The status carries liveness; LastError carries the
 // verdict. Loupe's fault conjunct keys off a live LastError precisely so the two
 // can be read together.
-func (p *Pipeline) abandonRebuild(ctx context.Context, done chan struct{}, cause error) error {
+func (p *Pipeline) abandonRebuild(ctx context.Context, sig *rebuildSignal, cause error) error {
+	// Release every waiter on THIS rebuild's signal, always. An abandoned
+	// rebuild is a finished one as far as a waiter is concerned — it is not
+	// draining and nothing further will end it — but `drained` is never set, so
+	// the waiter reads it as the failure it is.
+	owned := p.ownsRebuild(sig)
+	p.endRebuild(sig)
+
+	// The PIPELINE-WIDE state below belongs to whichever rebuild is current, and
+	// this one may no longer be it. Clearing the in-flight flag and writing
+	// "active" under a NEWER rebuild's live rescan would un-suppress the
+	// convergence sweep (Sweeper.suppressed reads RebuildInFlight) and announce a
+	// lens that is still draining — the precise condition the suppression exists
+	// to create. An older rebuild's failure is still worth recording, but it does
+	// not get to retire a newer one's status.
+	if !owned {
+		if p.reporter != nil {
+			if recErr := p.reporter.RecordError(ctx, cause.Error()); recErr != nil {
+				slog.Error("pipeline: rebuild: record abandoned-rebuild health signal",
+					"ruleId", p.ruleID, "err", recErr)
+			}
+		}
+		return cause
+	}
+
 	// Clear the flag FIRST: the status write below must not race a concurrent
 	// healthSink.SetActive that would re-assert "rebuilding" off a stale flag.
 	p.rebuildInFlight.Store(false)
-	// Release every waiter on THIS rebuild's signal. An abandoned rebuild is a
-	// finished one as far as a waiter is concerned — it is not draining, and
-	// nothing further will close the channel — but it is emphatically not a
-	// successful one, which is why the error travels back up unchanged.
-	p.endRebuild(done)
 	if p.reporter == nil {
 		return cause
 	}
@@ -1527,45 +1547,70 @@ func (p *Pipeline) abandonRebuild(ctx context.Context, done chan struct{}, cause
 	return cause
 }
 
-// ErrRebuildWaitTimeout is returned by RebuildAndWait when the rescan has not
-// drained inside the caller's wait budget. It is a failure, never a completion:
-// a caller that attests to a rebuild must treat it as "this lens is not known
-// to be rebuilt" and decline to attest, because the rescan is still running and
-// its rows may still hold the plaintext the destruction was supposed to erase.
-var ErrRebuildWaitTimeout = errors.New("pipeline: rebuild: wait budget expired before the rescan drained")
+// rebuildSignal is one rebuild's completion record. `done` is closed when that
+// rebuild ends for ANY reason; `drained` is set only by the watcher that
+// actually observed the rescan reach zero outstanding.
+//
+// The two are separate because a closed channel alone cannot answer the
+// question an attesting caller is asking. A watcher cancelled at shutdown also
+// closes `done` — and a waiter selecting on a closed channel and an expired
+// context takes either arm at random, so "the rescan drained" and "the process
+// is going down mid-rescan" became the same observation about half the time.
+// The flag is what the waiter reads; the channel only says "stop waiting".
+type rebuildSignal struct {
+	done    chan struct{}
+	drained atomic.Bool
+}
 
 // beginRebuild installs a fresh completion signal for a rebuild about to start
-// and returns it. The returned channel belongs to that rebuild: only the
+// and returns it. The returned signal belongs to that rebuild: only the
 // goroutine that ends it (its watcher, or the error path that abandons it)
-// closes it, via endRebuild.
-func (p *Pipeline) beginRebuild() chan struct{} {
-	done := make(chan struct{})
+// ends it, via endRebuild.
+func (p *Pipeline) beginRebuild() *rebuildSignal {
+	sig := &rebuildSignal{done: make(chan struct{})}
 	p.rebuildWatchMu.Lock()
-	p.rebuildWatch = done
+	p.rebuildWatch = sig
 	p.rebuildWatchMu.Unlock()
-	return done
+	return sig
 }
 
-// endRebuild closes done exactly once and, if done is still the installed
-// signal, clears it. The equality check is what keeps a slow finisher from
-// retracting a newer rebuild's signal: a rebuild that started after this one
-// has already replaced rebuildWatch, and its own waiters must keep waiting.
-func (p *Pipeline) endRebuild(done chan struct{}) {
+// endRebuild releases every waiter on sig and, if sig is still the installed
+// signal, clears it. The equality check keeps a slow finisher from retracting a
+// newer rebuild's signal: a rebuild that started after this one has already
+// replaced rebuildWatch, and its own waiters must keep waiting.
+//
+// It does NOT set `drained` — only the watcher that saw the rescan finish does
+// that — so every other exit (abandoned, cancelled, never watched) releases
+// waiters with an honest "this did not drain".
+func (p *Pipeline) endRebuild(sig *rebuildSignal) {
 	p.rebuildWatchMu.Lock()
-	if p.rebuildWatch == done {
+	defer p.rebuildWatchMu.Unlock()
+	if p.rebuildWatch == sig {
 		p.rebuildWatch = nil
 	}
-	p.rebuildWatchMu.Unlock()
+	// Closing under the lock rather than beside it: two enders racing on the
+	// select/default form would both see it open and double-close, which panics.
 	select {
-	case <-done:
+	case <-sig.done:
 	default:
-		close(done)
+		close(sig.done)
 	}
 }
 
-// currentRebuildSignal returns the in-flight rebuild's completion channel, or
+// ownsRebuild reports whether sig is still the pipeline's installed rebuild.
+// An exit path that mutates PIPELINE-WIDE state (the in-flight flag, the health
+// status) must check this first: a rebuild that started later already owns
+// both, and clearing them out from under it un-suppresses the convergence sweep
+// and marks the lens active while a rescan is still draining.
+func (p *Pipeline) ownsRebuild(sig *rebuildSignal) bool {
+	p.rebuildWatchMu.Lock()
+	defer p.rebuildWatchMu.Unlock()
+	return p.rebuildWatch == sig
+}
+
+// currentRebuildSignal returns the in-flight rebuild's completion signal, or
 // nil when none is running.
-func (p *Pipeline) currentRebuildSignal() chan struct{} {
+func (p *Pipeline) currentRebuildSignal() *rebuildSignal {
 	p.rebuildWatchMu.Lock()
 	defer p.rebuildWatchMu.Unlock()
 	return p.rebuildWatch
@@ -1599,7 +1644,7 @@ func (p *Pipeline) currentRebuildSignal() chan struct{} {
 // health entry latched on "rebuilding" and, through Sweeper.suppressed, retire
 // the convergence sweep for the life of the process. A rebuild that outlives
 // the budget therefore keeps running and keeps its watcher; only this caller
-// gives up, with ErrRebuildWaitTimeout. A wait <= 0 means no bound, which no
+// gives up, with control.ErrRebuildWaitTimeout. A wait <= 0 means no bound, which no
 // attesting caller should use — an unbounded wait inside a serial durable
 // handler stops every subsequent message on that consumer.
 func (p *Pipeline) RebuildAndWait(ctx context.Context, truncate bool, wait time.Duration) error {
@@ -1617,34 +1662,51 @@ func (p *Pipeline) RebuildAndWait(ctx context.Context, truncate bool, wait time.
 		defer cancel()
 	}
 
-	if err := p.waitRebuildSignal(waitCtx, ctx, p.currentRebuildSignal()); err != nil {
+	// Waiting OUT a pre-existing rebuild asks a weaker question than waiting on
+	// our own: all that matters is that it has ENDED, so this rescan cannot be
+	// mistaken for it. How it ended is that rebuild's business — an abandoned or
+	// unwatched one leaves the coast just as clear as a drained one, and
+	// refusing to proceed on it would make an unrelated failure permanently
+	// block every attesting caller.
+	if err := p.waitRebuildSignal(waitCtx, ctx, p.currentRebuildSignal()); err != nil &&
+		!errors.Is(err, control.ErrRebuildNotDrained) {
 		return fmt.Errorf("pipeline: rebuild: waiting out an in-flight rebuild: %w", err)
 	}
-	done, err := p.rebuildWithSignal(ctx, truncate)
+	sig, err := p.rebuildWithSignal(ctx, truncate)
 	if err != nil {
 		return err
 	}
-	return p.waitRebuildSignal(waitCtx, ctx, done)
+	return p.waitRebuildSignal(waitCtx, ctx, sig)
 }
 
-// waitRebuildSignal blocks until done is closed, waitCtx expires, or the
-// caller's own ctx is cancelled. A nil channel means no rebuild was in flight.
-// The two contexts are distinguished deliberately: a cancelled CALLER is a
-// shutdown and returns its own error, while an expired WAIT BUDGET is this
-// pipeline's own verdict and must be legible as such to a caller deciding
-// whether it may attest.
-func (p *Pipeline) waitRebuildSignal(waitCtx, ctx context.Context, done chan struct{}) error {
-	if done == nil {
+// waitRebuildSignal blocks until sig ends, waitCtx expires, or the caller's own
+// ctx is cancelled. A nil sig means no rebuild was in flight.
+//
+// Success is `sig.drained`, never the closed channel: every other way a rebuild
+// ends closes the channel too, so reading the close as completion is how a
+// shutdown, an abandoned rescan, or a rebuild nothing ever watched all came
+// back as "rebuilt". The three error classes are kept distinct because the
+// caller's response differs — a cancelled caller retries on the next process, a
+// budget expiry means the rescan is still running and healthy, and neither is a
+// fault of the LENS, so neither may be answered by pausing it.
+func (p *Pipeline) waitRebuildSignal(waitCtx, ctx context.Context, sig *rebuildSignal) error {
+	if sig == nil {
 		return nil
 	}
 	select {
-	case <-done:
-		return nil
+	case <-sig.done:
+		if sig.drained.Load() {
+			return nil
+		}
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		return control.ErrRebuildNotDrained
 	case <-waitCtx.Done():
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		return ErrRebuildWaitTimeout
+		return control.ErrRebuildWaitTimeout
 	}
 }
 
@@ -1659,15 +1721,15 @@ func (p *Pipeline) Rebuild(ctx context.Context, truncate bool) error {
 // started, closed when that rescan drains (or when it is abandoned). On error
 // the signal is already closed and nil is returned: there is nothing to wait
 // for.
-func (p *Pipeline) rebuildWithSignal(ctx context.Context, truncate bool) (chan struct{}, error) {
-	done := p.beginRebuild()
-	if err := p.rebuild(ctx, truncate, done); err != nil {
+func (p *Pipeline) rebuildWithSignal(ctx context.Context, truncate bool) (*rebuildSignal, error) {
+	sig := p.beginRebuild()
+	if err := p.rebuild(ctx, truncate, sig); err != nil {
 		return nil, err
 	}
-	return done, nil
+	return sig, nil
 }
 
-func (p *Pipeline) rebuild(ctx context.Context, truncate bool, done chan struct{}) error {
+func (p *Pipeline) rebuild(ctx context.Context, truncate bool, sig *rebuildSignal) error {
 	// Mark the rebuild in flight before the status write so a concurrent
 	// supervisor health persist (probe recovery, operator resume) cannot
 	// publish "active" while the rescan is still draining.
@@ -1723,7 +1785,7 @@ func (p *Pipeline) rebuild(ctx context.Context, truncate bool, done chan struct{
 		adpt := p.currentAdapter()
 		if t, ok := adpt.(adapter.Truncater); ok {
 			if err := t.Truncate(ctx); err != nil {
-				return p.abandonRebuild(ctx, done, fmt.Errorf("pipeline: rebuild: truncate: %w", err))
+				return p.abandonRebuild(ctx, sig, fmt.Errorf("pipeline: rebuild: truncate: %w", err))
 			}
 		} else {
 			slog.Warn("pipeline: rebuild: truncate=true but adapter does not implement Truncater; skipping",
@@ -1737,7 +1799,7 @@ func (p *Pipeline) rebuild(ctx context.Context, truncate bool, done chan struct{
 	// reaches here — activation's filter must not ride forward unexamined) and
 	// reset the durable via the supervisor (delete-recreate-swap) with it.
 	if p.supervisor == nil {
-		return p.abandonRebuild(ctx, done, fmt.Errorf("pipeline: rebuild: no supervisor configured"))
+		return p.abandonRebuild(ctx, sig, fmt.Errorf("pipeline: rebuild: no supervisor configured"))
 	}
 	filterSubjects, filterSubject := p.ConsumerFilter()
 	resetWithFilter := func() error {
@@ -1753,19 +1815,22 @@ func (p *Pipeline) rebuild(ctx context.Context, truncate bool, done chan struct{
 		filterSubjects = nil
 		filterSubject = subjects.CoreKVFilter(p.coreKVBucket)
 	}, resetWithFilter); err != nil {
-		return p.abandonRebuild(ctx, done, fmt.Errorf("pipeline: rebuild: reset consumer: %w", err))
+		return p.abandonRebuild(ctx, sig, fmt.Errorf("pipeline: rebuild: reset consumer: %w", err))
 	}
 
 	// 4. Launch background goroutine to transition to "active" when lag reaches zero.
 	if p.reporter != nil {
-		go p.watchRebuildCompletion(ctx, done)
+		go p.watchRebuildCompletion(ctx, sig)
 	} else {
-		// No reporter → no completion watcher will ever clear the flag, so this
-		// rebuild has no observable end. Ending it here rather than leaving the
-		// signal open is what keeps a waiter from blocking forever on a lens
-		// that will never report; the rescan itself still runs.
+		// No reporter → no completion watcher, so this rebuild has no observable
+		// end. Ending the signal keeps a waiter from blocking forever on a lens
+		// that will never report, and leaving `drained` unset is what keeps that
+		// waiter from reading the release as a completed rescan: the rescan is
+		// still running, it simply cannot be watched. The Rebuilder contract
+		// exists so an attesting caller cannot be handed a completion nobody
+		// observed, and this is the branch that would otherwise hand it one.
 		p.rebuildInFlight.Store(false)
-		p.endRebuild(done)
+		p.endRebuild(sig)
 	}
 
 	return nil
@@ -1822,14 +1887,14 @@ func (p *Pipeline) resumeInterruptedRebuild(ctx context.Context) {
 // delivered, so a backlog-only check reads zero mid-flight and would publish
 // "active" over a rescan that has not drained — and that is not a transient
 // mislabel when the in-flight message then fails and is redelivered.
-func (p *Pipeline) watchRebuildCompletion(ctx context.Context, done chan struct{}) {
+func (p *Pipeline) watchRebuildCompletion(ctx context.Context, sig *rebuildSignal) {
 	// The rebuild window ends when this watcher exits for any reason; the
 	// deferred clear keeps the health sink from pinning "rebuilding" forever
 	// after a cancelled watch, and the deferred endRebuild releases the waiters
 	// on THIS rebuild — the watcher that owns a signal is the only thing that
 	// closes it.
 	defer p.rebuildInFlight.Store(false)
-	defer p.endRebuild(done)
+	defer p.endRebuild(sig)
 	ticker := time.NewTicker(p.rebuildPollInterval)
 	defer ticker.Stop()
 	for {
@@ -1849,6 +1914,10 @@ func (p *Pipeline) watchRebuildCompletion(ctx context.Context, done chan struct{
 			}
 			p.recordRebuildProgress(outstanding)
 			if outstanding == 0 {
+				// The ONE place a rebuild is recorded as genuinely finished. Set
+				// before the release below, so no waiter can observe the closed
+				// channel without it.
+				sig.drained.Store(true)
 				// Clear the flag before the status write so a concurrent health
 				// sink SetActive that re-checks the flag converges on "active".
 				p.rebuildInFlight.Store(false)

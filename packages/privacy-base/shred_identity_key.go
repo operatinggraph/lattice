@@ -106,7 +106,7 @@ func ShredIdentityKeyDDL() pkgmgr.DDLSpec {
 		OutputSchema: `{"type":"object","properties":` +
 			`{"primaryKey":{"type":"string","description":"vtx.identity.<NanoID> of the shredded identity."}}}`,
 		FieldDescription: map[string]string{
-			"identityKey": "Full vtx.identity.<NanoID> key of the identity to shred. Must exist and not be tombstoned; declared in ContextHint.Reads (ShredIdentityKey only — RecordShredFinalization is read-free and checks the piiKey via kv.Read).",
+			"identityKey": "Full vtx.identity.<NanoID> key of the identity to shred. Must exist and not be tombstoned; declared in ContextHint.Reads. RecordShredFinalization declares the piiKey there too (a hydrated read is OCC-conditioned, unlike kv.Read), plus the submitting actor's own vertex, which the script reads to refuse an attestation written by anyone but the identity.system.privacy service actor.",
 			"subjectKey":  "ShredIdentityKey only: the same key as identityKey, accepted under the name the identityErasure pattern's systemOp step submits. Exactly one of the two is required; both present and disagreeing is refused.",
 			"step":        "RecordShredFinalization only: vaultKeyDestroyed (privacy-worker, after Vault.ShredKey) or projectionsNullified (Refractor keyshredded listener, after all nullify targets succeeded).",
 		},

@@ -632,18 +632,23 @@ func main() {
 				out = append(out, snap)
 				continue
 			}
+			// Everything st already carries is transferred BEFORE the pending
+			// read, which can fail on its own. A pause reason and a last error
+			// are facts in hand about the lens; losing them to a fault observing
+			// something else leaves the lens looking merely unobserved, and
+			// Loupe's fault conjunct keys off a live LastError.
+			if st.PauseReason != nil {
+				snap.PauseReason = *st.PauseReason
+			}
+			if st.LastError != nil {
+				snap.LastError = *st.LastError
+			}
 			pending, err := entry.pipeline.Pending(context.Background())
 			if err != nil {
 				snap.Status = "unknown"
 				snap.Unreadable = "consumer pending count: " + err.Error()
 				out = append(out, snap)
 				continue
-			}
-			if st.PauseReason != nil {
-				snap.PauseReason = *st.PauseReason
-			}
-			if st.LastError != nil {
-				snap.LastError = *st.LastError
 			}
 			snap.Status = st.Status
 			snap.ConsumerLag = pending
@@ -714,25 +719,27 @@ func main() {
 				out = append(out, snap)
 				continue
 			}
-			// Carried BEFORE the pending read, which can fail on its own: st was
-			// read successfully and holds the count, so shipping a zero here
-			// would let a NATS blip observing something else silently downgrade
-			// the highest-ranked alert in the system to a warning. Same doctrine
-			// as the sweep verdicts above — an observation fault about one input
-			// must not erase a fact already in hand about another.
+			// Everything st already carries is transferred BEFORE the pending
+			// read, which can fail on its own. Same doctrine as the sweep
+			// verdicts above — an observation fault about one input must not
+			// erase a fact already in hand about another. The redaction count is
+			// the sharpest case (a NATS blip would silently downgrade the
+			// highest-ranked alert in the system to a warning), but a pause
+			// reason and a last error are facts too, and Loupe's fault conjunct
+			// keys off a live LastError.
 			snap.SecureRedactions = st.SecureRedactions
+			if st.PauseReason != nil {
+				snap.PauseReason = *st.PauseReason
+			}
+			if st.LastError != nil {
+				snap.LastError = *st.LastError
+			}
 			pending, err := entry.pipeline.Pending(context.Background())
 			if err != nil {
 				snap.Status = "unknown"
 				snap.Unreadable = "consumer pending count: " + err.Error()
 				out = append(out, snap)
 				continue
-			}
-			if st.PauseReason != nil {
-				snap.PauseReason = *st.PauseReason
-			}
-			if st.LastError != nil {
-				snap.LastError = *st.LastError
 			}
 			snap.RuleID = st.RuleID
 			snap.Status = st.Status
@@ -1304,19 +1311,22 @@ func main() {
 	// clean case that must attest — is indistinguishable from "nothing has
 	// registered yet". Core KV is the platform's persistent lens registry, so
 	// asking it, rather than the in-process map whose incompleteness is the
-	// hazard, is what makes the two separable.
+	// hazard, is what makes the two separable. Scoped to the lenses that DECLARE
+	// the destroyed holder type, because the corpus-global form would let one
+	// permanently-unactivatable lens anywhere withhold every attestation forever.
 	//
 	// Wired HERE rather than at construction on purpose: until this line runs
 	// the consumer has no readiness check and treats every event as not-ready,
 	// which covers exactly the cold-boot window its DeliverAll durable replays
 	// the whole subject history through.
-	classKeyShredded.SetRegistryReady(func(ctx context.Context) error {
-		missing, err := registryProbe.ReconcileNow(ctx)
+	classKeyShredded.SetRegistryReady(func(ctx context.Context, holderType string) error {
+		missing, err := registryProbe.ReconcileNowForHolderType(ctx, holderType)
 		if err != nil {
 			return fmt.Errorf("reconcile declared lenses against the registry: %w", err)
 		}
 		if len(missing) > 0 {
-			return fmt.Errorf("%d lens(es) declared in Core KV but not registered: %v", len(missing), missing)
+			return fmt.Errorf("%d lens(es) declaring holder type %q are in Core KV but not registered: %v",
+				len(missing), holderType, missing)
 		}
 		return nil
 	})

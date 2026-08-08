@@ -536,6 +536,9 @@ func TestHandleKeyShredded_CleanPath_SubmitsFinalization(t *testing.T) {
 			IdentityKey string `json:"identityKey"`
 			Step        string `json:"step"`
 		} `json:"payload"`
+		ContextHint struct {
+			Reads []string `json:"reads"`
+		} `json:"contextHint"`
 	}
 	require.NoError(t, json.Unmarshal(data, &env))
 	require.Equal(t, "RecordShredFinalization", env.OperationType)
@@ -544,6 +547,14 @@ func TestHandleKeyShredded_CleanPath_SubmitsFinalization(t *testing.T) {
 	require.Equal(t, "vtx.identity.AAAAAAAAAAAAAAAAAAAA", env.Payload.IdentityKey)
 	require.Equal(t, StepProjectionsNullified, env.Payload.Step)
 	require.True(t, substrate.IsValidNanoID(env.RequestID))
+	// Two declared reads, each load-bearing for a different reason: the piiKey is
+	// the OCC condition against the sibling record racing this one on the system
+	// lane, and the ACTOR's own vertex is what the finalization script reads to
+	// refuse an attestation written by anyone but the privacy service actor. An
+	// undeclared actor fails the op closed, so dropping either is a live outage,
+	// not a test failure — which is exactly why it is asserted here.
+	require.Equal(t, []string{"vtx.identity.AAAAAAAAAAAAAAAAAAAA.piiKey", actorKey},
+		env.ContextHint.Reads)
 }
 
 // TestHandleKeyShredded_PrivacyCritical_SkipsFinalization proves a

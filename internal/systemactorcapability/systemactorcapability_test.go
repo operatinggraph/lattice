@@ -422,8 +422,11 @@ func TestSystemActorCapability_FourEnginePathsAuthorize(t *testing.T) {
 	_, err = h.coreKV.Put(h.ctx, piiKeyKey, piiBody)
 	require.NoError(t, err)
 
+	// The actor's own vertex is declared alongside the piiKey: the finalization
+	// script reads state[op.actor].class to refuse an attestation written by
+	// anyone but the privacy service actor, so an undeclared actor fails closed.
 	rr := h.submitOpAccepted("RecordShredFinalization", "system", bootstrap.PrivacyIdentityKey, map[string]any{
 		"identityKey": identityKey, "step": "vaultKeyDestroyed",
-	}, []string{piiKeyKey}, 15*time.Second)
+	}, []string{piiKeyKey, bootstrap.PrivacyIdentityKey}, 15*time.Second)
 	require.Equalf(t, processor.ReplyStatusAccepted, rr.Status, "privacy RecordShredFinalization: %+v", rr.Error)
 }

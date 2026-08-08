@@ -69,7 +69,7 @@ just stay perpetually in-flight.
 |-----------|----------|-------|
 | In | `events.privacy.keyShredded` durable (`privacy-worker`, `core-events`) | one message = one identity's shred to finalize; body read as `payload.identityKey` (read-from-body discipline, mirroring `internal/objectmanager`'s tombstoned-event handling) |
 | Out | `Vault.ShredKey` call | against the Processor's own `*vault.LocalBackend` instance (shared in-process, not a network call) |
-| Out | `RecordShredFinalization` op, `ops.<lane>` (default `system`) | submitted under the `identity.system.privacy` service actor, `ContextHint.Reads` declaring the `piiKey` aspect so the record is hydrated + OCC-conditioned against the sibling `projectionsNullified` record racing it on the same lane |
+| Out | `RecordShredFinalization` op, `ops.<lane>` (default `system`) | submitted under the `identity.system.privacy` service actor, `ContextHint.Reads` declaring the `piiKey` aspect so the record is hydrated + OCC-conditioned against the sibling `projectionsNullified` record racing it on the same lane, **and the service actor's own vertex**, which the script reads to refuse an attestation written by any other actor (an undeclared actor fails the op closed) |
 
 ---
 

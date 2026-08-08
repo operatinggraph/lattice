@@ -297,3 +297,108 @@ func TestRunDurableConsumer_ReadFromBody(t *testing.T) {
 		t.Fatalf("handler never received the message")
 	}
 }
+
+// AckWait and MaxPrefetch are one fix, not two, and neither is testable through
+// behaviour alone at a sane test duration — so this asserts they reach the
+// JetStream consumer, which is the part that can silently regress.
+//
+// Why they travel together: AckWait's clock runs from when a message is
+// DELIVERED, and with nats.go's default prefetch of 500 "delivered" means "into
+// the client's buffer", not "into the handler". This loop is strictly serial, so
+// on a DeliverAll replay a queued message sits through every preceding handler
+// and is redelivered before its own ever runs, however large AckWait is. Capping
+// the prefetch is what makes the ack clock start when the work does.
+func TestRunDurableConsumer_AckWaitAndPrefetchReachTheConsumer(t *testing.T) {
+	t.Parallel()
+	c, ctx := newTestConn(t)
+	bucket := "core-kv"
+	provisionCoreBucket(ctx, t, c, bucket)
+
+	cfg := DurableConsumerConfig{
+		Stream:        "KV_" + bucket,
+		FilterSubject: "$KV." + bucket + ".vtx.meta.>",
+		Durable:       "dc-test-ackwait",
+		AckWait:       97 * time.Second,
+		MaxPrefetch:   1,
+	}
+	publishDurableTestMsg(ctx, t, c, bucket, "vtx.meta.ackwait", []byte(`{"v":1}`))
+
+	runCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	delivered := make(chan struct{})
+	go func() {
+		_ = c.RunDurableConsumer(runCtx, cfg, func(_ context.Context, _ Message) Decision {
+			select {
+			case <-delivered:
+			default:
+				close(delivered)
+			}
+			return Ack
+		})
+	}()
+
+	select {
+	case <-delivered:
+	case <-time.After(10 * time.Second):
+		t.Fatal("consumer never delivered a message")
+	}
+
+	cons, err := c.js.Consumer(ctx, "KV_"+bucket, "dc-test-ackwait")
+	if err != nil {
+		t.Fatalf("look up consumer: %v", err)
+	}
+	info, err := cons.Info(ctx)
+	if err != nil {
+		t.Fatalf("consumer info: %v", err)
+	}
+	if info.Config.AckWait != 97*time.Second {
+		t.Fatalf("AckWait = %v, want 97s — a slow handler is redelivered mid-flight without it", info.Config.AckWait)
+	}
+}
+
+// A zero AckWait must leave JetStream's own default rather than writing one, so
+// every existing consumer keeps the behaviour it was built against.
+func TestRunDurableConsumer_ZeroAckWaitLeavesTheDefault(t *testing.T) {
+	t.Parallel()
+	c, ctx := newTestConn(t)
+	bucket := "core-kv"
+	provisionCoreBucket(ctx, t, c, bucket)
+
+	cfg := DurableConsumerConfig{
+		Stream:        "KV_" + bucket,
+		FilterSubject: "$KV." + bucket + ".vtx.meta.>",
+		Durable:       "dc-test-ackwait-default",
+	}
+	publishDurableTestMsg(ctx, t, c, bucket, "vtx.meta.ackwaitdef", []byte(`{"v":1}`))
+
+	runCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	delivered := make(chan struct{})
+	go func() {
+		_ = c.RunDurableConsumer(runCtx, cfg, func(_ context.Context, _ Message) Decision {
+			select {
+			case <-delivered:
+			default:
+				close(delivered)
+			}
+			return Ack
+		})
+	}()
+	select {
+	case <-delivered:
+	case <-time.After(10 * time.Second):
+		t.Fatal("consumer never delivered a message")
+	}
+
+	cons, err := c.js.Consumer(ctx, "KV_"+bucket, "dc-test-ackwait-default")
+	if err != nil {
+		t.Fatalf("look up consumer: %v", err)
+	}
+	info, err := cons.Info(ctx)
+	if err != nil {
+		t.Fatalf("consumer info: %v", err)
+	}
+	if info.Config.AckWait != 30*time.Second {
+		t.Fatalf("AckWait = %v, want JetStream's 30s default left untouched", info.Config.AckWait)
+	}
+}

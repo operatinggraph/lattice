@@ -30,6 +30,29 @@ import (
 // "the row could not be nullified" (privacy-critical, no retry).
 var ErrRuleNotRegistered = errors.New("control: rule not registered")
 
+// ErrRebuildWaitTimeout and ErrRebuildNotDrained are the two ways RebuildRule
+// can return without knowing the rescan finished. They live here, with the
+// Rebuilder contract, because the CALLER's response turns on telling them apart
+// from an ordinary rebuild failure — and getting that wrong is not a cosmetic
+// mislabel:
+//
+//   - ErrRebuildWaitTimeout — the budget expired; the rescan is still running,
+//     with its completion watcher intact.
+//   - ErrRebuildNotDrained — the rebuild ended without any watcher observing it
+//     reach zero outstanding (its watcher was cancelled, or the lens has no
+//     reporter and so no watcher at all).
+//
+// Neither is a fault of the LENS, so neither may be answered by PAUSING it. A
+// paused lens cannot drain a rebuild — Rebuild's supervisor.Reset requests a
+// reopen without clearing a pause — so pausing a merely-slow lens is
+// self-perpetuating: every later destruction burns the whole budget, times out,
+// and re-pauses it while it keeps serving its pre-destruction rows. Both mean
+// "not known to be rebuilt": withhold the attestation, do not pause.
+var (
+	ErrRebuildWaitTimeout = errors.New("control: rebuild wait budget expired before the rescan drained")
+	ErrRebuildNotDrained  = errors.New("control: rebuild ended without a watcher observing it drain")
+)
+
 // validateTimeout bounds the total time allowed for the validate op (NFR10 — CI-practical latency).
 const validateTimeout = 5 * time.Second
 

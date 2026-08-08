@@ -144,7 +144,7 @@ func TestDurableJanitor_EventStreamLensDurableSurvives(t *testing.T) {
 	makeConsumer(ctx, t, conn, "refractor-"+eventStreamID)
 
 	probe := NewRegistryProbe(conn, bucket, func() []string { return nil }, quietLogger())
-	declared, err := probe.declaredLensIDs(ctx)
+	declared, err := probe.declaredLensIDs(ctx, "")
 	require.NoError(t, err)
 	require.NotContains(t, declared, eventStreamID, "premise: the probe's narrow set excludes it")
 
