@@ -2075,8 +2075,27 @@ reason.
 
 ### 19.5 Verification still owed at merge
 
-The full `go test ./... -p 4` for this branch has **not** been run clean. The one run that completed was
-concurrent with a 15-minute `golangci-lint` and two opus review agents, and its failures were
-`ScriptTimeout: script exceeded wall budget 250ms` at package INSTALL in packages this fire never touched
-(cafe-domain, clinic-domain, identity-domain) — the signature of the already-filed load flake, not a result.
-**Re-run it quiet before merging** and judge it against a clean-main baseline, per the standing triage rule.
+The full `go test ./... -p 4` for this branch has **not** been run clean, and the one run that completed
+exited **1 with nine failing packages**. It ran concurrent with a 15-minute `golangci-lint` and two opus
+review agents, so it is not a result — but it is not dismissible either, and the earlier reading of it
+recorded here was wrong in a way worth correcting rather than quietly fixing.
+
+- **Eight `packages/*`** (cafe-domain, clinic-domain, identity-domain, lease-signing, loftspace-domain,
+  privacy-base, semantic-contracts, service-domain) failed with `ScriptTimeout: script exceeded wall budget
+  250ms` at package INSTALL — the already-filed load-flake signature, in packages this fire never touched.
+  Consistent with host contention.
+- **`internal/refractor` also failed, and NOT with that signature.**
+  `TestRefractor_CapabilityLens_RealClaimIdentityOp_E2E` and its `_WithEphemeralConsumer_E2E` sibling failed
+  on a 25s convergence assertion (`refractor_claim_batch_real_op_e2e_test.go:292`): `cap.roles.<target>`
+  never gained the consumer-role grant from the real `ClaimIdentity` op's own `holdsRole` write. The test's
+  own message calls itself a captured minimal repro of a defect "specific to the real script's own mutation
+  encoding", so it may well be a known-open pin rather than a regression — **but that is a hypothesis, and
+  it is in a tree this fire edited.**
+
+**The decisive check the next fire must run FIRST, before anything else:** those two tests against
+**clean `main`** (the main checkout carries no code from this fire — docs only — so it is a true baseline).
+If they fail there too, they are pre-existing and the eight package failures are contention. If they pass
+there and fail on the branch, this increment has a regression the review did not find, and that outranks
+every item in §19.1. A reason this fire's changes are *unlikely* to be the cause — `applySecureDecrypt`
+returns immediately when no decryptor is installed, and these are plain auth-plane lenses with no secure
+columns — is an argument for the hypothesis, not a substitute for running it.
