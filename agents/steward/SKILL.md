@@ -1,6 +1,6 @@
 ---
 name: steward
-description: "Winston's advancer for one swim-lane stream (Verticals OR Lattice, named by the caller) — sense the stream's lane file + signals, select the next unit (both streams: importance-first; lattice round-robin is the starvation guard), activate the owning role at L1, admit/commit at L2, then take the next eligible unit — drain with stops. Two streams run in parallel on disjoint code. Design: _bmad-output/implementation-artifacts/agentic-ops-swimlanes-design.md (+ agentic-ops-design.md §6.1.1)."
+description: "Winston's advancer for one swim-lane stream (Verticals OR Lattice, named by the caller) — sense the stream's lane file + signals, select the next unit (both streams: importance-first; lattice round-robin is the starvation guard), activate the owning role at L1, admit/commit at L2, exit (bounded — the batch is sized by the design brief's fire breakdown). Two streams run in parallel on disjoint code. Design: _bmad-output/implementation-artifacts/agentic-ops-swimlanes-design.md (+ agentic-ops-design.md §6.1.1)."
 ---
 
 # Steward — advance one stream, one fire
@@ -26,8 +26,8 @@ the boundary (§2 "wear the other hat") is safe. **Ladder:** drive owners at **L
 change + architectural forks to Andrew. **Metric:** Andrew-interventions per shipped change, trending down.
 Design: `implementation-artifacts/agentic-ops-swimlanes-design.md`.
 
-One fire = sense → select → activate → (admit → next unit)… → **exit at a stop** (§4 drain-with-stops).
-Keep it terse.
+One fire = sense → select → activate → admit → **exit (bounded — the batch is sized by the design brief's
+fire breakdown, §4)**. Keep it terse.
 
 ## 0. Decide — don't defer (the prime directive)
 
@@ -369,18 +369,21 @@ running; the **browser tab** you do not.
   edits sitting in the tree and pushes them (this happened: a fire swept an in-progress README and pushed it
   before it was finished). `git pull --rebase` before pushing. If you see modified files you didn't touch,
   **leave them alone** — they're someone else's in-flight work, not yours to commit.
-- **Drain with stops — after each green unit, take the next (Andrew, 2026-08-08; supersedes
-  bounded-batch-then-exit, which produced under-filled runs: an M unit done in minutes idled the lane until
-  the next scheduled fire).** You cannot see the budget (no usage tool; `/context` is interactive-only), so
-  don't guess it in **either** direction: never stop early "to be safe," never stall estimating "room for one
-  more." After a unit lands green (its own commit, CI watched), **pick the next eligible unit** — the
-  in-flight item's next increment, or the next item per §2 — and keep advancing. The only legitimate stops:
-  **eligible queue drained · genuine stuck-loop · a fork only Andrew can decide · main would go red.** The
-  **rate-limiter stays the governor**: a tripped window fails cheaply, committed units are never lost, and the
-  schedule is the **resume heartbeat, not the work quantum**. Under the fleet build lock, **renew the lease
-  after every green unit** (re-stamp `acquired_at` while your owner token still matches — the exact command is
-  in the scheduled task's lock protocol): progress is what keeps a long run protected from stale-reclaim, and
-  a wedged run stops renewing and ages out. A purely **design** fire writes **one** design doc and exits.
+- **Bounded batch, then exit — you cannot see the budget, so don't guess it (Andrew, 2026-08-08).** There
+  is no usage tool (`/context` is interactive-only), so do **not** try to "use up the budget" or run until
+  you sense you're low. Do a **bounded batch** — a few XS/S/M items, **or, for a big (L+) item, its design
+  brief's next fire-breakdown increment(s)**: the ratified fire plan + the brief's increment order set the
+  unit size — never an improvised thinner slice sized to the schedule, and never "the queue is still
+  non-empty" as a reason to continue — committing each unit green (watch CI), **then exit.** The exit is
+  load-bearing twice over: **context is finite** (an open-ended run trips compaction mid-work), and **a
+  paused schedule is Andrew's fleet-control lever** (a run that drains the queue outlives the pause).
+  Throughput comes from **frequent, well-filled fires across two parallel streams**, not from one marathon
+  fire; the **rate-limiter is the governor** — when the window trips a fire fails cheaply and the next
+  resumes after reset, and every completed unit is already committed, so nothing is lost. Don't thrash or
+  chase "one more." Under the fleet build lock, **renew the lease after every green unit** (re-stamp
+  `acquired_at` while your owner token still matches — the exact command is in the scheduled task's lock
+  protocol): a fire can legitimately exceed the 90-min stale threshold, and progress is what keeps it
+  protected while a wedged run ages out. A purely **design** fire writes **one** design doc and exits.
 - **Multi-fire:** a big item that can't be finished + reviewed + made green in one fire keeps its **code in a
   persistent worktree**; the **CHECKPOINT (worktree path · what's done · exact next steps) goes in the item's
   design doc**, and your lane row carries a **one-line 🏗️ pointer** to it. Two sound landing shapes — the

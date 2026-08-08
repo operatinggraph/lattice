@@ -17,14 +17,16 @@
 
 ## 2. Principles
 
-- **Budget-blind, drain with stops (Andrew, 2026-08-08 — supersedes bounded-batch-then-exit, which produced
-  under-filled runs: a quick unit idled the lane until the next scheduled fire).** A fire cannot see the
-  budget, so it neither stops early "to be safe" nor guesses "room for one more": after each unit lands green
-  it takes the **next eligible unit**, stopping only at **queue drained · stuck-loop · an Andrew-only fork ·
-  main would go red**. Throughput = **filled runs × parallel streams**; **the rate-limiter is the governor** —
-  a tripped window fails cheaply, committed units are never lost, and the schedule is the resume heartbeat,
-  not the work quantum. Under the fleet build lock a run **renews the lease after every green unit**, so a
-  progressing run is never stale-reclaimed and a wedged one ages out.
+- **Budget-blind, bounded batch, then exit (Andrew, 2026-08-08).** A fire cannot see the budget, so it never
+  guesses in either direction: it does a **bounded batch** — a few small items, or a big item's **next
+  fire-breakdown increment(s) as its design brief defines them** (the ratified fire plan sets the unit size;
+  never a thinner improvised slice, never "queue still non-empty" as a reason to continue) — commits each
+  unit green, and **exits**. The exit is load-bearing: **context is finite** (an open-ended run trips
+  compaction mid-work), and **a paused schedule is the fleet-control lever** — a run that drains the queue
+  would outlive the pause. Throughput = **well-filled fires × parallel streams**; **the rate-limiter is the
+  governor** — a tripped window fails cheaply and committed units are never lost. Under the fleet build lock
+  a run **renews the lease after every green unit**, so a legitimately-long fire is never stale-reclaimed and
+  a wedged one ages out.
 - **Two parallel streams, split along the no-collision seam.** App-vertical work (packages + FE) and Lattice
   platform work touch **disjoint code areas**, so they run **concurrently** without colliding. Lattice work
   stays **serial within itself** (features + maintenance both live in `internal/*` — splitting them would
@@ -141,9 +143,9 @@ Each advancer fire:
 2. **Pre-empt** on reliability/observability red.
 3. **Select** — Verticals: top importance×readiness ready item; Lattice: importance-first (round-robin as
    starvation guard). Resume any in-flight (🏗️) item first.
-4. **Advance — drain with stops:** each unit its own green commit; after each, take the **next eligible
-   unit** (the same item's next increment, or the next item), renewing the build-lock lease. Stop only at:
-   queue drained · stuck-loop · an Andrew-only fork · main would go red.
+4. **Advance** a **bounded batch** — several XS/S/M, or a big (L+) item's next fire-breakdown
+   increment(s) per its design brief — each its own green commit, renewing the build-lock lease;
+   **then exit** (context is finite, and a paused schedule must actually pause the fleet).
 5. **Multi-fire** for big items: persistent worktree + a 🏗️ CHECKPOINT in the design doc (one-line row
    pointer). Resumes are light: delta-scout + checkpoint amended in the increment's own commit — no fresh
    committed brief. Review sized to each increment's diff + posture delta, plus **one cumulative adversarial
@@ -206,8 +208,8 @@ Only a primordial/kernel-seed change needs a fresh bootstrap.) A *stale running 
 ## 9. The fleet (scheduled tasks)
 
 The **scheduler is authoritative for cadence** — Andrew tunes it live; this column is the indicative shape
-(checked 2026-08-08). Under drain-with-stops the cadence is a **resume heartbeat**: an overlapping firing
-sees LOCK-HELD and no-ops.
+(checked 2026-08-08). A fire that legitimately outlasts the next firing is safe: the newcomer sees
+LOCK-HELD and no-ops.
 
 | Task | Role | Cadence (indicative) |
 |---|---|---|

@@ -329,18 +329,17 @@ neglected, so the Steward also tracks each component's freshness via `git log -1
 routine pick with **that component's Inquiry** — guaranteeing every component rotates through attention
 regardless of where the loud items are. Andrew may set a **per-cycle theme** that biases selection. Inquiry
 fires from three triggers — idle-fill, signal-reactive, and **coverage-rotation** — never every tick, so the
-board is replenished, not spammed. **Throughput (corrected 2026-06-25 — fires were stopping after one big
-item with budget to spare):** a fire is **not capped at one item, and size does not cap items-per-fire** — the
-Steward commits each completed item green, then picks the next, and **keeps working until the eligible queue
-drains** (an L item finished with the queue still non-empty → keep going too). Critically, a scheduled fire
-**cannot query its remaining token/credit budget** — there is no usage tool, and `/context` is interactive-only
-— so it must **not** treat "budget" as a measurable stop signal or stop early "to be safe." The only legitimate
-stops are: queue drained, an item too big to finish this turn (checkpoint → multi-fire), or a stuck-loop /
-context wall. *(Re-affirmed 2026-08-08: this drain-with-stops rule is authoritative — the swim-lane doc's
-interim bounded-batch-then-exit posture is superseded, and its §2/§6 now match this text.)* The scheduled
-fire runs on a dense heartbeat (live cadence is whatever Andrew set in the scheduler) — each run fully
-committed so nothing is lost if a turn ends mid-stream, and each resumes from committed units + the
-checkpoint.
+board is replenished, not spammed. **Throughput (amended 2026-08-08; supersedes the 2026-06-25 "keeps
+working until the eligible queue drains" correction):** a fire is **not capped at one item** — it does a
+**bounded batch** (a few XS/S/M items, or a big item's next fire-breakdown increment(s) as its design brief
+defines them), commits each unit green, **then exits**. It does **not** drain the queue: context is finite
+(an open-ended run trips compaction mid-work), and a **paused schedule must actually pause the fleet** — a
+run that keeps draining outlives Andrew's pause, which is the fleet-control lever. Critically, a scheduled
+fire **cannot query its remaining token/credit budget** — there is no usage tool, and `/context` is
+interactive-only — so it must **not** treat "budget" as a measurable stop signal in either direction: no
+stopping early "to be safe," no running until it senses it's low. The scheduled fire runs on a dense
+heartbeat (live cadence is whatever Andrew set in the scheduler) — each run fully committed so nothing is
+lost if a turn ends mid-stream, and each resumes from committed units + the checkpoint.
 
 ### 6.2 Hooks (deterministic, harness-run — settings.json)
 
