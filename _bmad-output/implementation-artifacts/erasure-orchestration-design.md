@@ -2810,3 +2810,106 @@ is what makes step 2's `subject.mergedInto` declaration load-bearing rather than
    event is one `loom-state` GET and an Ack — but it is the first pattern to pay it. **Consumer: the
    next pattern completing on a high-volume domain.** Noted, not filed.
 5. Increments 3–7's other residuals are re-inherited verbatim.
+
+---
+
+## Fire B build note — increment 9 (2026-08-07): narrowing the shred
+
+### Fire brief
+
+**Scope sentence, verbatim from §12 Fire B's internal build order, step 3.** *"`ShredIdentityKey`
+drops the three enumerations, the four refusal modes and the mutation-count pre-flight — one
+mutation, one event — only once the pattern demonstrably performs the work the op is giving up.
+Update the DDL description, the stale in-commit rationale, and `identity-domain/ddls.go`'s comment."*
+
+**Scope-diff gate — the step-3 precondition, discharged arm by arm before anything is deleted.** The
+step is conditional (*"only once the pattern demonstrably performs the work the op is giving up"*),
+so the precondition is checked rather than assumed. The op's cascade covers five arms: `indexes`
+inbound, `duplicateOf` outbound and inbound, `boundTo` inbound and outbound. Against the shipped
+sweeps:
+
+| Arm | Today, in `ShredIdentityKey` | After, in | Bound |
+|---|---|---|---|
+| `indexes` in (+ the `identityindex` vertex) | `collect_owned_indexes` | `PurgeIdentityDedupFootprint` (inc 4) | `2·64`/pass |
+| `duplicateOf` out | `collect_duplicate_of_direction` | same | `2·64`/pass |
+| `duplicateOf` in | same | same | `2·64`/pass |
+| `boundTo` in (+ each credential's `credentialindex`) | `collect_bound_to_direction` | `UnbindIdentityCredentials` (inc 3) | `2·64+1`/pass |
+| `boundTo` out (+ the subject's `credentialindex`) | same | same | `2·64+1`/pass |
+
+Arm-for-arm identical, and the sweeps strictly exceed the op on two of them: they tombstone the
+`credentialindex` vertices the shred deliberately left standing. Both are guarded on a live
+`erasureRequested` marker of class `erasureRequested`, both are steps 3 and 4 of the shipped
+`identityErasure` pattern, and the `identityErasureResidue` lens (inc 5) counts exactly these five
+arms while the `identityErasureComplete` target (inc 7) re-dispatches until all five are zero. The
+precondition holds. **Narrow-only: no adjacent mechanism substituted, nothing widened.**
+
+**Verified touch-list** (`file:line` checked live).
+
+| File | What |
+|---|---|
+| `packages/privacy-base/shred_identity_key.go:209-296` | delete the three collectors + their six page constants |
+| `…:352-361` | delete `total_muts` and the `ShredBatchTooLarge` pre-flight |
+| `…:363-382` | delete the three mutation loops |
+| `…:50-71` · `:94-107` · `:122` | the doc comment, the DDL `Description`, the `identityKey` FieldDescription |
+| `packages/privacy-base/shred_identity_key_test.go:123-133,145,801` | `shredEnumerations` and its two `ContextHint` uses |
+| `packages/privacy-base/seal_identity_for_erasure_test.go:135` | `submitShredAt`, the second test dispatcher declaring the same enumerations |
+| `…:544,583,613,748` | the four cascade proofs — inverted, not deleted (below) |
+| `…:648,671` | `_Reshred_Idempotent` and the Gate-3 revive vector — re-anchored on the sweep |
+| `packages/privacy-base/package.go` · `manifest.yaml` | version bump (`scripts/lint-package-version.go`) |
+| `packages/privacy-base/patterns.go:44` · `purge_identity_dedup_footprint.go:17,170` · `purge_identity_dedup_footprint_test.go:153,521` | the "un-narrowed shred" rationale is now history |
+| `packages/identity-domain/ddls.go:85,472,498,522,938,1352,1791,1836` | eight sites asserting the shred erases links |
+| `packages/identity-domain/unbind_identity_credentials.go:13,389` · `_test.go:434,500` · `erasure_gate_test.go:157` · `credential_reconcile_test.go:89,235` | same class |
+| `cmd/lattice/identity/reconcile.go:205` · `reconcile_test.go:97` | same class |
+| `cmd/loupe/web/js/views/graph.js:1044-1053` | the now-dead `enumerations` declaration |
+
+**Precedents to mirror.** `purge_identity_dedup_footprint.go` and `unbind_identity_credentials.go`
+are the ops the work moves to and the authority for what the corrected comments must now say.
+`markExpiredDDLScript` (orchestration-base) is the shape a one-mutation, one-event op returns to.
+
+**Increment order + the runnable green check after each.** (1) the script narrowing + the three
+doc surfaces + version bump → `go test ./packages/privacy-base/ -count=1`; (2) the test inversions →
+same; (3) the corpus comment corrections → `go build ./... && go test ./packages/identity-domain/
+./cmd/lattice/... -count=1`; (4) gates → `go test ./... -p 4`, `make vet`, `golangci-lint run ./...`,
+every `scripts/lint-*.go`, `make verify-kernel`.
+
+**In-scope gotchas.**
+
+- **Invert the four cascade proofs; do not delete them.** A deleted test is indistinguishable from a
+  test that never existed, and these four are the only live record of which arms the erasure covers.
+  Each becomes its negative — the shred leaves the link **live** — plus the positive that the arm is
+  swept by the op that now owns it. A negative test alone passes for the wrong reason if the fixture
+  never built the link (`feedback_negative_test_false_pass`), so each keeps its existing
+  precondition assert that the link starts live.
+- **The Gate-3 revive vector (`_PostShredCreate_FreshIndexNoLinkToShredded`) is the one that must not
+  weaken.** It proves a later create for the same contact revives a tombstoned index rather than
+  silently skipping it — a real correctness property of the *create* path that happens to be staged
+  by the shred. Re-stage it on `PurgeIdentityDedupFootprint` (seal the marker, sweep, then create);
+  do not drop the vector because its staging changed.
+- **`shredEnumerations` declared only `indexes` + `duplicateOf` while the script also enumerated
+  `boundTo` both ways** — an undeclared class-(e) enumeration in the shipped test dispatcher and in
+  Loupe's submit. It disappears with the collectors rather than needing a fix, so it is recorded
+  here and not filed.
+- **Do not touch the placeholder-envelope path or the finalization-cycle reset** (§4.1): both stay
+  verbatim. The narrowing removes mutations 2..N, never mutation 1.
+
+**Non-goals.** §12 step 4 in full: the operator surface, the `lint-conventions` rule for §10 point 4,
+and — named explicitly because it is the interesting one — **repointing Loupe's Shred button at
+`StartLoomPattern{identityErasure}`**. See the regression window below.
+
+### The window this opens, named rather than discovered later
+
+After this increment a **direct** `ShredIdentityKey` submit — which is what Loupe's Shred button and
+the `console-operator` / `demo-operator` grants do — shreds the key and nothing else: no
+`erasureRequested` marker, therefore no residue-lens row, therefore no convergent tail. The dedup
+footprint of an identity erased that way stays live indefinitely. Only a subject taken through the
+`identityErasure` pattern is actually erased.
+
+This is not the cascade-window §12 collapsed the five increments to avoid — that one was *the op
+narrowed before the pattern existed*, and the pattern shipped in increment 8, so the work arrived
+before it left. This is the separate, smaller fact that **the operator's button has not been
+repointed at the pattern yet**, which is §12 step 4's own scope. It is not deferred into prose: step 4
+is this item's next increment and the board row's next step names it. The repoint is genuinely step
+4's rather than a fifteen-line edit here, because the shred-proof panel
+(`graph.js:showShredProof`) watches one synchronous commit and would have to become a four-step
+progress surface over the instance and the residue row — UX work, in Loupe's own lane.
+
