@@ -1260,7 +1260,29 @@ Full bar: `go build ./...` · `make vet` · `golangci-lint run ./...` · `STRICT
 **Worktree:** `/Users/andrewsolgan/Documents/GitHub/lattice-wt-retention-custody`
 (branch `fire/retention-class-custody-inc1`).
 
-**Done.** *(nothing yet — this fire is building item 1; updated at admit)*
+**Done — item 1 (2026-08-07).** Custody vocabulary + write path. `CustodySpec`/`RetentionClassSpec`, the
+`retentionclass` holder + `.retentionPolicy`, `RetentionClassID`/`RetentionClassKey`, six install
+validations, the `.custody` aspect carrying the RESOLVED holder key, `MetaVertexRef.CustodyKind`/
+`CustodyHolderKey`, step 6's conditional anchoring rule, step 6.5's holder resolution +
+`ensureKeyHolderKey`, and the shared-live-read-budget fail-open (step 6.5 now errors on an empty
+resolution that followed a fault; step 6 keeps its permissive fail-open unchanged).
+
+Adversarial review then closed four more fail-opens the first pass introduced or inherited: a sensitive
+aspect with no resolvable holder is an error rather than a silent plaintext commit; step 6.5's kind gate
+now matches step 6's, so neither acts on a mutation the other never checked; an unrecognized custody kind
+no longer falls through to the identity derivation; and a malformed `.custody` body poisons the class
+(loaded, sensitive, unwritable) rather than degrading to identity custody or vanishing the DDL — both of
+which fail open, in opposite directions. A tombstoned `.custody` now reads as absent, so revoking a
+declaration revokes it.
+
+**`retentionClass` custody is REFUSED AT INSTALL** until item 2 lands (`pkgmgr/custodyscope.go`, rule 5).
+The write path custodies on the class while every decrypt site still resolves the holder from the anchor,
+so a record written today would be write-only. Item 2's first act is deleting that gate.
+
+**Deliberately NOT in item 1:** the class-less-mutation closure. §4.1 scoped it "after a census confirming
+no shipped script relies on it"; the census found two that do — identity-domain's `make_update`
+(`UpdateIdentityState`, called by the seed scripts) and the kernel's `meta_ddl.go` `make_update`. Filed as
+a lattice row with both prerequisites named.
 
 **Next — item 2, the read path.** Switch all five decrypt sites to `ct.KeyID`
 (`processor/sensitive_decrypt.go:162`+`:217`, `refractor/pipeline/secure.go:130`+`:137`,
