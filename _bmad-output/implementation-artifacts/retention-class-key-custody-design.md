@@ -1261,8 +1261,10 @@ Full bar: `go build ./...` · `make vet` · `golangci-lint run ./...` · `STRICT
 
 ## 14. Multi-fire checkpoint (live)
 
-**Worktree:** none held. Items 1, 2, 3a and 3b-i are merged to `main`, so each fire opens a fresh worktree
-off `main` rather than resuming a persistent one — item 3b-ii starts clean.
+**Worktree:** `/Users/andrewsolgan/Documents/GitHub/lattice-wt-retention-3bii`, branch
+`fire/retention-class-3b-ii`, commit `abe2e798` — **HELD, not merged.** Items 1, 2, 3a and 3b-i are merged
+to `main`; item 3b-ii is built but its adversarial review returned blockers (§19). **Main is clean and
+carries none of it.** The next fire resumes in that worktree from §19's list, it does not start over.
 
 **Done — item 1 (2026-08-07).** Custody vocabulary + write path. `CustodySpec`/`RetentionClassSpec`, the
 `retentionclass` holder + `.retentionPolicy`, `RetentionClassID`/`RetentionClassKey`, six install
@@ -1947,3 +1949,134 @@ brief, none substituted. Two derivations, neither a widening:
 - **No cypher change to the six migrated lenses.** None needs one.
 - **No new sweep plan for secure lenses.** `sweep.go`'s stale *reason* is corrected; the *gate*
   (`sweepEnrolment`) is not re-aimed.
+
+## 19. Item 3b-ii — built, reviewed, HELD (2026-08-08)
+
+**State: `fire/retention-class-3b-ii` @ `abe2e798`, in the worktree named in §14. NOT merged; `main` carries
+none of it.** The increment is functionally complete against §18's scope and every gate that ran was green —
+`go build`, `make vet`, `golangci-lint` (0 issues), all seven `scripts/lint-*.go`, and the package tests for
+each area. It is held because the mandated 3-layer adversarial review (security plane) returned blockers that
+are **real fail-opens in the erasure guarantee**, and an erasure attestation that can be wrong is worse than
+one that does not exist yet. Two independent reviewers (opus) converged on most of them, which is why they
+are recorded as findings rather than hypotheses.
+
+**Do not re-derive these.** Each is grounded at a file:line in that worktree.
+
+### 19.1 Blockers — must close before merge
+
+**B1 — a cold-boot empty registry attests with zero rebuilds.** `classKeyShredded.Run` is launched at
+`cmd/refractor/main.go:499` but the lens registry is not populated until `:1169`, behind
+`bootstrapper.Ready()` and `src.Start(ctx)`. `holderTypeRebuildTargets` over an empty map returns nil →
+`allClean` stays true → `projectionsRebuilt` is submitted → **Ack**, so no redelivery. A restart with a
+pending destruction, or a first-ever boot (the durable is `DeliverAllPolicy`, so the whole subject history
+replays), attests a complete erasure while every declaring lens keeps serving plaintext. The identity
+consumer already solves this and **says so** at `main.go:390-398` — a static floor target makes an
+unloaded registry hit `ErrRuleNotRegistered` → Nak, and that comment explicitly names the vacuous-Ack
+regression "this fire must not reintroduce". `classkeyshredded` has no floor and no readiness gate, and
+`TestHandle_NoDeclaringLensStillAttests` currently *enshrines* the vacuous attestation. The legitimate case
+("no live lens declares this type") and the dangerous one ("the registry has not loaded") are
+indistinguishable as written; they must be told apart by an explicit readiness signal, not by the target
+count.
+
+**B2 — the completion signal is clobberable, so the wait can return over a still-running rescan.**
+`waitRebuildDrained` polls `rebuildInFlight`, a single pipeline-wide `atomic.Bool` that
+`abandonRebuild` (`pipeline.go:1492`) clears unconditionally as its first statement. `rebuildSerial`
+serializes `RebuildAndWait` against itself only — the other two callers use plain `Rebuild` and bypass it:
+`cmd/refractor/reload.go:373` (the MATCH hot-reloader) and `control/service.go:906` (the operator rebuild
+op). So a concurrent hot-reload or operator rebuild that fails anywhere after its own `Store(true)` clears
+the flag out from under a waiting caller, which then returns nil and attests. **The commit message on
+`abe2e798` states the serialization covers the hot-reloader because it lives in `Pipeline` — that claim is
+false and must be corrected with the fix.** The durable fix is a per-rebuild completion signal (a channel
+created by the rebuild that launched it, closed by its own watcher) rather than a shared flag; polling
+`OutstandingForConsumer` directly is the weaker alternative and still needs a stability check, since a
+transient zero is observable between `supervisor.Reset` and the replay landing.
+
+**B3 — an unbounded wait wedges the whole consumer, and the handler creates the condition itself.**
+`waitRebuildDrained` has no deadline, and `rebuildInFlight` never clears for a **paused** lens: `Rebuild`'s
+`supervisor.Reset` only requests a reopen and does not clear a pause, so the pump stays parked, outstanding
+never reaches zero, and the watcher loops forever. `handleClassKeyShredded` calls this **synchronously**
+inside the message handler, and `substrate`'s durable loop is strictly serial — so one paused declaring lens
+stops every subsequent class-key destruction for the life of the process. It is self-inflicted: the handler
+calls `PauseRule` on a failed rebuild (`manager.go:256`), and the next event enumerates that same lens and
+wedges. Needs a bounded wait whose expiry is a failure (no attestation), not a hang. Related and bounded by
+the same fix: `RunDurableConsumer` sets no `AckWait`, so JetStream's 30s default redelivers during any
+rebuild longer than 30s — the normal case at these lens sizes — amplifying one destruction into repeated
+full rescans.
+
+### 19.2 Majors — close with the blockers
+
+**M1 — the rebuild erases the counter that is its own evidence.** `Reporter.SetActive` / `SetRebuilding` /
+`SetPaused` build a fresh `Entry` carrying forward only `ConsumerLag`, `ErrorCount`, `SweepCursor`,
+`SweepReconciled`. `SecureRedactions` is not in that list, so **every status transition zeroes it** — and
+`Rebuild` calls `SetRebuilding` on the way in and `SetActive` on the way out, so this fire's own rebuild
+clears the counter at both ends of itself. The `LensSecureRedaction` issue then goes quiet while the
+unresolvable nulls are still being served, which is exactly the delta-signal failure the counter was made
+cumulative to avoid. (`EvalDriftRetries`/`EvalDriftRequeues` carry the same pre-existing bug; the new
+counter inherited the pattern rather than introducing it.)
+
+**M2 — `projectionsRebuilt` is forgeable, and the comment that replaced the guard asserts a property no
+code enforces.** The lifted script guard was the only thing preventing an attestation with no rebuild. The
+replacement text claims each step "is written by the identity.system.privacy service actor after its own
+irreversible work landed, so neither can attest to work that never ran" — but `execute` never reads
+`op.actor`, and the verb is `Scope:"any"`, `GrantsTo:["operator"]` (`permissions.go:99-105`). Any operator
+can stamp it one second after the destruction commits; the only precondition checked is that the piiKey is
+shredded, which is true by construction at that moment. `op.actor` IS available to these scripts
+(`clinic-domain/ddls.go:1375` uses it). Either pin the actor for the finalization steps or withdraw the
+comment's guarantee — as written the comment is what stops the next reader from looking. **Note the same
+exposure already exists for `vaultKeyDestroyed`,** which predates this fire, so the fix should cover both
+steps rather than only the new one.
+
+**M3 — a shutdown mid-rebuild loses the destruction permanently.** `context.Canceled` from `RebuildRule` is
+not `ErrRuleNotRegistered`, so it takes the "real failure" arm and falls through to `return substrate.Ack`
+(`manager.go:287`). A rolling deploy during a rebuild therefore acks the event, advances the durable cursor,
+and the destruction is never redelivered: no lens is ever rebuilt, `projectionsRebuilt` is never recorded,
+and nothing remains to drive it. The handler needs an explicit `ctx.Err()` check returning Nak.
+
+**M4 — a known redaction count is lost to an unrelated observation fault.**
+`snap.SecureRedactions = st.SecureRedactions` sits at `cmd/refractor/main.go:733`, *after* the
+`pipeline.Pending()` early-`continue` at `:722`. In that branch `st` was read successfully and carries the
+count, but the snapshot ships zeroed — so a NATS blip reading the consumer's pending count silently
+downgrades the highest-ranked alert in the system to `unreadable`/warning. `lattice_heartbeater.go:1281`
+`continue`s before the redaction block at `:1302`, so both sites need the fix. (Skipping on a failed
+`GetStatus` is correct — there the count genuinely is unknown.) This contradicts the doctrine stated 30
+lines above it at `main.go:681-686`, which reads the sweep verdicts *before* the reporter for this exact
+reason.
+
+### 19.3 Minors
+
+- The handler logs `"attested", allClean` while the submit is gated on `allClean && ActorKey != ""`, so the
+  documented attestation-disabled configuration logs `attested=true` having published nothing
+  (`manager.go:275` vs `:283`).
+- `applySecureDecrypt` alarms on redactions accumulated before a non-Terminal error, justified by a comment
+  saying "those nulls land whether or not this evaluation completes". They do not: all three call sites
+  discard the result set on error. The `>0` verdict stays correct (a genuine defect was seen) but the count
+  an operator sizes exposure from inflates on every redelivery.
+
+### 19.4 What the review CONFIRMED sound — do not re-litigate
+
+- **The ordering claim holds, and by derivation rather than luck.** `local.go:399` tests
+  `envelope.Shredded` *before* the `dekCache` lookup at `:408`, so a cached DEK cannot open a shredded
+  holder; `secure.go:288` point-reads `<holder>.piiKey` on every `decryptColumn`, so no decryptor holds a
+  stale envelope. The Refractor's own `LocalBackend` never learns of the privacy-worker's `ShredKey`, which
+  is precisely why the durable flag written on the shred's own commit is load-bearing — and it is honoured.
+  No handshake with the privacy-worker is needed.
+- **F2's redaction leaks nothing.** All seven Terminal returns in `decryptColumn` are reached before the
+  column is written, and `Apply` nulls the column for every one of them; the classification keys off
+  `errors.As` wrapper detection, so no data value can move an error between categories. Ciphertext can never
+  survive into a plaintext column. One forward caveat worth keeping: `LocalBackend.Decrypt` is pure
+  in-memory, so if a network-backed KMS backend ever lands, `secure.go:252` would convert a transport blip
+  into a redaction — the exact posture this increment rules out.
+- **The `custodyscope` rule-5 removal is sound.** Neither reviewer could construct a declaration that now
+  installs but should not; the else-arm restructure is equivalent to the old rule 6 for every reachable
+  input, and rules 1–4 are untouched.
+- **The enumeration is sound.** No nil registry entries are reachable, empty `HolderTypes` is refused at
+  construction, duplicate rule IDs are impossible, and `allClean` is correctly false on the
+  budget-exhaustion give-up path.
+
+### 19.5 Verification still owed at merge
+
+The full `go test ./... -p 4` for this branch has **not** been run clean. The one run that completed was
+concurrent with a 15-minute `golangci-lint` and two opus review agents, and its failures were
+`ScriptTimeout: script exceeded wall budget 250ms` at package INSTALL in packages this fire never touched
+(cafe-domain, clinic-domain, identity-domain) — the signature of the already-filed load flake, not a result.
+**Re-run it quiet before merging** and judge it against a clean-main baseline, per the standing triage rule.

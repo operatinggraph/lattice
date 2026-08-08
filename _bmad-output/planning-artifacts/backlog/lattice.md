@@ -124,7 +124,7 @@ but the *fork decision* + the *contract commit* are Andrew's.
 ### Privacy / Vault
 | Item | What it is | Imp | Size | State |
 |---|---|---|---|---|
-| **[Vault] Sensitive aspects are identity-anchored, so retained records have no home** | Step 6 rejects a sensitive aspect on any non-identity parent, so two retained-class records sit plaintext in Core KV — clinic `.encounter` and lease-signing's income `.profile`. Custody belongs to a key holder with a retention policy. | ★★★ | L–XL | 🏗️ building · [design](../../implementation-artifacts/retention-class-key-custody-design.md) §18 · next: item 3b-ii rebuild delivery + gate lift |
+| **[Vault] Sensitive aspects are identity-anchored, so retained records have no home** | Step 6 rejects a sensitive aspect on any non-identity parent, so two retained-class records sit plaintext in Core KV — clinic `.encounter` and lease-signing's income `.profile`. Custody belongs to a key holder with a retention policy. | ★★★ | L–XL | 🏗️ building · [design](../../implementation-artifacts/retention-class-key-custody-design.md) §19 · next: close 3b-ii's 3 review blockers, then merge |
 
 ### External-I/O maturity (bridge follow-ons)
 | Item | What it is | Imp | Size | State |
