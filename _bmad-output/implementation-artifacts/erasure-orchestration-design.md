@@ -3186,3 +3186,29 @@ secondary tests, where flipping the shredded flag back changes exactly one fact.
 - **Loupe's Shred button and modal still say the opposite** (*"Its PII becomes unrecoverable
   everywhere"*). Repointing it at the pattern is §12 step 4 and Loupe-lane UX work; the CLI trigger is
   what makes the pattern reachable meanwhile. Consumer: the operator.
+
+### The precedent the build copied, and the live stack that falsified it
+
+`loom start` first read a pattern's name off a `.canonicalName` aspect, mirroring
+how `lattice lens` names a meta-vertex. A loom pattern has no such aspect. The
+unit tests seeded the aspect they expected and stayed green; the running stack
+answered with six patterns, **every one of them listed by key and none by name**
+— so name resolution, the reason the verb exists over `op submit`, was dead on
+the only corpus that matters.
+
+The authority is `internal/weaver/registry.go`'s `indexPattern`, which reads
+`patternId` off the pattern's `.spec` aspect and registers the bare vertex id
+alongside it. Resolution now mirrors that: three reference forms (patternId,
+vertex NanoID, full key), the spec body unwrapped on the same `steps` sentinel.
+After the fix the same probe answers `backgroundCheck, collectPayment,
+onboarding, leaseDocument, capabilityAuthor, identityErasure`.
+
+**Live proof, and its boundary.** Resolution is proven against the running stack
+(above), and the two packages are diff-applied live (`identity-domain`
+0.18→0.19, `identity-hygiene` 0.4→0.5, `updated=4` each), with `verify-kernel`
+and Loupe re-cycled on the rebuilt binaries. The **submit** half is proven by
+unit tests and by Weaver's own StartLoomPattern dispatch in the convergence
+suites, not by a live run: starting `identityErasure` for real destroys a key
+irreversibly, which is not something to do to shared dev state as a smoke test.
+The first true end-to-end belongs with the narrowing's merge, on a subject
+created for it.
