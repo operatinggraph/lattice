@@ -2913,3 +2913,130 @@ is this item's next increment and the board row's next step names it. The repoin
 (`graph.js:showShredProof`) watches one synchronous commit and would have to become a four-step
 progress surface over the instance and the residue row — UX work, in Loupe's own lane.
 
+
+### What increment 9 built, and why it is NOT merged
+
+The narrowing itself is built, gated and reviewed, and it is **parked on the branch
+`fire/erasure-inc9-narrow-shred` (worktree `/Users/andrewsolgan/Documents/GitHub/lattice-wt-erasure-inc9`),
+not merged.** `main` still carries the un-narrowed op.
+
+`ShredIdentityKey` is reduced to one mutation and one event — the three collectors, their six page
+constants, the three `…FanoutTooLarge` refusals, the `total_muts` pre-flight and `ShredBatchTooLarge`
+are gone; §4.1's keeps (placeholder envelope, finalization-cycle reset, `shreddedAt`,
+`privacy.keyShredded`, the `vertex_alive` guard, the whole `RecordShredFinalization` arm) are verbatim.
+The four cascade proofs are inverted rather than deleted, the Gate-3 revive vector is re-staged on the
+sweep, and ~20 corpus sites that named the shred as the eraser of `boundTo`/`indexes`/`duplicateOf` now
+name the op that actually does it. `go build`, `go vet`, all eight `scripts/lint-*.go` and the touched
+packages pass; `identity-domain`'s diff is provably documentation-only (comment-stripped, its
+executable content is byte-identical, and every differing line in `ddls.go` is a quoted `Description`).
+
+### The precondition this brief discharged, and the axis it discharged it on
+
+§12 step 3 is conditional: *"only once the pattern demonstrably performs the work the op is giving
+up."* The brief above discharges it **arm by arm on coverage** and concludes "the precondition holds."
+Coverage was the wrong axis, and the 3-layer pass found it: **nothing can start the pattern.**
+`"identityErasure"` occurs exactly once outside tests — `packages/privacy-base/patterns.go:89`, its own
+declaration. No Weaver playbook names it (a pattern instance is started by a playbook `pattern` action,
+`internal/weaver/strategist.go:149`), `cmd/lattice/loom` has no `start`, and Loupe has no erasure
+surface at all — its only affordance is the Shred button, which submits the bare op. An installed
+pattern is not an invokable one, and "demonstrably performs" is a claim about reachability, not about
+whether the arms line up.
+
+What that makes the narrowing, on the only path the product ships:
+
+- **Every arm live, permanently.** A direct shred writes no `erasureRequested` marker, so the residue
+  lens — anchored `WHERE i.erasureRequested.data.requestedAt <> null` — never projects a row, the
+  `identityErasureComplete` target never dispatches, and both sweeps refuse `ErasureNotSealed` if
+  invoked by hand. Re-submitting the shred repairs nothing, because the shred is the thing that now
+  does nothing. The window between key destruction and link erasure goes from **zero** (one atomic
+  commit) to **unbounded**.
+- **The erased set GROWS.** Every §6 gate keys on the marker, not on `piiKey.shredded`
+  (`identity-domain/ddls.go:641-661`, consumed at `:1086` by `CreateUnclaimedIdentity`'s
+  `match_is_erased`). The shredded identity's `identityindex` now survives with no marker beside it, so
+  it reads as a live, unerased dedup incumbent: an ordinary same-email walk-in mints
+  `lnk.identity.<new>.duplicateOf.identity.<shredded>` and emits
+  `identity.created{duplicate:true, matchedIdentityKeys:[<shreddedKey>]}` — a new, durable,
+  decrypt-free correlation to a person whose key was already destroyed. `MergeIdentity` gates on the
+  same marker, so a bare-shredded identity also stays mergeable, and a merge repoints its contact
+  hashes onto a living survivor.
+- **Loupe says the opposite.** The modal reads *"Its PII becomes unrecoverable everywhere"* and the
+  proof panel prints an unqualified live-KV / JetStream / projections checklist. Nothing on any surface
+  says the footprint is still standing.
+
+So the brief's "window this opens, named rather than discovered later" understated it in kind, not
+just in degree: it is not that the operator's button does less than the pattern, it is that the
+button's path never converges and actively adds correlations. §12's build order exists to make sure
+*"erasure never does less than it does today"*, and this would breach it. The work waits for a
+trigger.
+
+### Two further defects the pass found, both in shipped code and independent of the narrowing
+
+- **A pre-narrowing shredded subject reaches a full completion attestation with its
+  `credentialindex` vertices live.** The old shred tombstoned `boundTo` both directions and
+  deliberately left each `vtx.credentialindex.<hash>` standing. Run the pattern over such a subject
+  and `collect_live_sweep` finds zero live links, so `sweep_inbound` never runs and
+  `sweep_outbound`'s subject-`credentialindex` tombstone is gated on `len(hits) > 0`; the residue
+  lens counts neighbours reached over live links, so all five arms read zero, and
+  `SealIdentityForErasureComplete` walks the same five relations and nothing else. Result: a written
+  `.erasure` attestation with `violating=false` over N live vertices each mapping
+  `sha256(raw sign-in id) → the erased person`. `seal_identity_for_erasure_complete.go:131-135`
+  already names this class as uncoverable but frames it as hypothetical; the pre-narrowing shred is a
+  concrete shipped producer of exactly that shape.
+- **A `MergeIdentity` landing between steps 1 and 2 burns the key and wedges the subject.** Step 1's
+  guard carries `absent(subject.mergedInto.data.value)` precisely so a merged-away subject fails at
+  the seal *"with nothing burned"* — but the guard is evaluated before step 1 and cannot see a merge
+  that commits after it. The key is destroyed, step 2 refuses `IdentityMerged`, `mergedInto` is never
+  removed, so the seal refuses permanently, no marker is ever written, and both sweeps refuse
+  forever. Today the shred at least erased the footprint in the same commit; after the narrowing step
+  1 erases nothing, so containment rests entirely on the merge having moved the footprint.
+
+### Checkpoint — what the resuming fire does
+
+**Worktree:** `/Users/andrewsolgan/Documents/GitHub/lattice-wt-erasure-inc9`, branch
+`fire/erasure-inc9-narrow-shred`, based on `59c246f4`. Rebase before resuming.
+
+**Done:** the narrowing, the test inversions, the Gate-3 re-staging, the corpus corrections, the two
+version bumps.
+
+**Must land in the SAME commit as the narrowing, or before it:**
+
+1. **A trigger.** Erasure must be startable by the operator — `StartLoomPattern{patternRef:
+   "identityErasure", subjectKey}` is already granted to `operator` at `scope:any`
+   (`orchestration-base/loom_lifecycle.go:154-165`), so the missing piece is the surface, not the
+   authority. This is §12 step 4's operator surface, and it is now a **prerequisite** of step 3
+   rather than a follow-on.
+2. **A decision on the bare-shred path**, which the trigger does not by itself close: either the §6
+   gates also fire on `piiKey.shredded` (so a direct shred closes the write path immediately and the
+   erased set cannot grow while the pattern is pending), or the direct submit is refused outright in
+   favour of the pattern. The first is the smaller change and the better semantics; it widens §6's
+   gate to a second condition and needs `derive_reads` to hydrate the hit's `piiKey`.
+
+**Also outstanding on the branch, from the same review pass:**
+
+- §13's Inc-1 obligations are undischarged: **no test asserts the shred commits exactly one
+  mutation**, and none asserts `ShredBatchTooLarge` is gone as a *symbol*. The four inversions are
+  pure negatives naming five specific keys — a reintroduced cascade over any unseeded relation passes
+  all four. The claim `patterns.go` and `unbind_identity_credentials.go` now rest on ("writes exactly
+  one mutation, always") is executable nowhere.
+- The Gate-3 vector's second property is hollowed out: seeding the marker to stage the sweep also
+  makes `match_is_erased` return true, so the *"must NOT flag a duplicateOf against the shredded
+  identity"* assertion is now double-covered and cannot fail for the reason it was written. Tombstone
+  the marker after the sweep and before the create.
+- `_LeavesBoundToLinksLive_BothDirections` still seeds a bystander link but now asserts it against an
+  op that mutates nothing, so the sweep-scoping assertion is vacuous; neither sweep's own test
+  asserts that a link touching neither endpoint survives — and those ops hold `scope:any` and issue
+  document-less tombstones.
+- Eleven CLAUDE.md no-changelog phrasings in `shred_identity_key_test.go` (five comments, six
+  `t.Fatalf` strings using "…'s job now").
+- Stale claims the touch-list missed: `patterns.go:84` ("walks in steps **1**, 3 and 4"),
+  `identity-domain/ddls.go:591-592` (`index_vertex_mutation`'s "tombstoned in-commit" rationale),
+  `purge_identity_dedup_footprint.go:91-92` (a DDL **Description** still citing "the shred's own
+  999-mutation size limit"), `:234`/`:259-262`, `unbind_identity_credentials.go:213`/`:231`, and
+  `shred_identity_key_test.go:476-477`'s section header.
+- A stray `purgeCapDocMissingGrant()` seed in the re-staged Gate-3 test that nothing submits as.
+
+**Verified sound under attack**, so the resuming fire need not re-litigate: the five-arm coverage
+itself (identical, and strictly larger on the two `credentialindex` arms); class-divergent links under
+the bodyless tombstone; dangling neighbours; self-links; every other `ShredIdentityKey` caller, none of
+which asserts the cascade; and the `contextHint.Enumerations` removals, which are metadata with no
+runtime consumer.
