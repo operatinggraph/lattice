@@ -26,11 +26,15 @@ func setupStartEnv(t *testing.T) (context.Context, *substrate.Conn) {
 	return ctx, conn
 }
 
-// seedMetaVertex writes a meta-vertex of the given class plus its canonicalName
-// aspect — the two-key shape Contract #1 mandates (a meta-vertex is
-// vtx.meta.<NanoID> and its name lives on a separate aspect, never on the
-// vertex root).
-func seedMetaVertex(t *testing.T, ctx context.Context, conn *substrate.Conn, key, class, name string, deleted bool) {
+// seedMetaVertex writes a meta-vertex of the given class plus its `.spec`
+// aspect — the two-key shape a live loom pattern actually has (verified against
+// a running stack: a pattern vertex carries a root and a `.spec`, and no
+// `.canonicalName`, which is why the name is read off the spec's patternId
+// rather than through the reader `lattice lens` uses).
+//
+// The spec body is wrapped in the standard envelope's `data`, the shape
+// pkgmgr installs and Weaver's unwrapSpecBody probes.
+func seedMetaVertex(t *testing.T, ctx context.Context, conn *substrate.Conn, key, class, patternID string, deleted bool) {
 	t.Helper()
 	vtx, err := json.Marshal(map[string]any{
 		"class": class, "vertexKey": key, "isDeleted": deleted, "data": map[string]any{},
@@ -41,18 +45,60 @@ func seedMetaVertex(t *testing.T, ctx context.Context, conn *substrate.Conn, key
 	if _, err := conn.KVPut(ctx, bootstrap.CoreKVBucket, key, vtx); err != nil {
 		t.Fatalf("seed %s: %v", key, err)
 	}
-	if name == "" {
+	if patternID == "" {
 		return
 	}
 	asp, err := json.Marshal(map[string]any{
-		"class": "canonicalName", "vertexKey": key, "localName": "canonicalName",
-		"isDeleted": false, "data": map[string]any{"value": name},
+		"class": "spec", "vertexKey": key, "localName": "spec", "isDeleted": false,
+		"data": map[string]any{
+			"patternId":   patternID,
+			"subjectType": "identity",
+			"steps":       []any{},
+		},
 	})
 	if err != nil {
-		t.Fatalf("marshal %s.canonicalName: %v", key, err)
+		t.Fatalf("marshal %s.spec: %v", key, err)
 	}
-	if _, err := conn.KVPut(ctx, bootstrap.CoreKVBucket, key+".canonicalName", asp); err != nil {
-		t.Fatalf("seed %s.canonicalName: %v", key, err)
+	if _, err := conn.KVPut(ctx, bootstrap.CoreKVBucket, key+".spec", asp); err != nil {
+		t.Fatalf("seed %s.spec: %v", key, err)
+	}
+}
+
+// TestResolvePatternKey_ByVertexNanoID — the third reference form Weaver's
+// registry accepts. An operator reading `loom list` or a Health card has the
+// vertex id, not always the patternId.
+func TestResolvePatternKey_ByVertexNanoID(t *testing.T) {
+	ctx, conn := setupStartEnv(t)
+	seedMetaVertex(t, ctx, conn, erasurePatternKey, loomPatternClass, "identityErasure", false)
+
+	got, err := resolvePatternKey(ctx, conn, strings.TrimPrefix(erasurePatternKey, "vtx.meta."))
+	if err != nil {
+		t.Fatalf("resolvePatternKey by vertex id: %v", err)
+	}
+	if got != erasurePatternKey {
+		t.Fatalf("resolved to %q, want %q", got, erasurePatternKey)
+	}
+}
+
+// TestResolvePatternKey_SpecWithoutPatternIdIsStillReachable — a spec carrying
+// no patternId leaves the pattern nameless, but it must not vanish: it is still
+// reachable by key and must still be listed, or an operator sees a pattern in
+// `loom list` that this command claims is not installed.
+func TestResolvePatternKey_SpecWithoutPatternIdIsStillReachable(t *testing.T) {
+	ctx, conn := setupStartEnv(t)
+	seedMetaVertex(t, ctx, conn, erasurePatternKey, loomPatternClass, "", false)
+
+	got, err := resolvePatternKey(ctx, conn, erasurePatternKey)
+	if err != nil {
+		t.Fatalf("a pattern with no patternId is unreachable by its own key: %v", err)
+	}
+	if got != erasurePatternKey {
+		t.Fatalf("resolved to %q, want %q", got, erasurePatternKey)
+	}
+
+	_, err = resolvePatternKey(ctx, conn, "anything")
+	if err == nil || !strings.Contains(err.Error(), erasurePatternKey) {
+		t.Fatalf("error = %v, want the nameless pattern listed by key so the operator can reach it", err)
 	}
 }
 

@@ -109,8 +109,8 @@ carries — both as the payload's patternRef and as authContext.target.`,
 				Payload:       json.RawMessage(payloadBytes),
 				// Pattern-as-target (Contract #10 §10.8): per-pattern
 				// authorization anchors on the pattern definition vertex, which
-				// is why the canonical name is resolved before submitting
-				// rather than passed through.
+				// is why the reference is resolved before submitting rather
+				// than passed through.
 				AuthContext: &processor.AuthContext{Target: patternKey},
 			}
 
@@ -162,16 +162,18 @@ carries — both as the payload's patternRef and as authContext.target.`,
 }
 
 // resolvePatternKey turns a pattern reference into the meta-vertex key the
-// operation must carry. A `vtx.meta.<NanoID>` reference is verified to name a
-// live meta.loomPattern rather than taken on trust — submitting an
-// authContext.target that is not a pattern would authorize against the wrong
-// vertex, and the resulting refusal names neither the pattern nor the reason.
+// operation must carry. Three forms resolve, the same three Weaver's registry
+// accepts from a playbook (`internal/weaver/registry.go` indexPattern): the
+// pattern's own `patternId`, the bare vertex NanoID, and the full
+// `vtx.meta.<NanoID>` key.
 //
-// A bare canonical name is matched against the installed patterns, mirroring
-// how `lattice lens` lists meta-vertices: scan the three-segment `vtx.meta.*`
-// keys, keep the ones whose class matches, and read each one's name off its
-// `.canonicalName` aspect (Contract #1 — a meta-vertex's name never lives on
-// the vertex root).
+// A key reference is VERIFIED, not trusted — a reference naming a meta-vertex
+// of some other class would authorize against the wrong vertex, and the refusal
+// that follows names neither the pattern nor the reason.
+//
+// The name comes off the pattern's `.spec` aspect, which is where a patternId
+// lives; a loom pattern carries no `.canonicalName` aspect, so the reader
+// `lattice lens` uses for meta-vertices finds nothing here.
 func resolvePatternKey(ctx context.Context, conn *substrate.Conn, ref string) (string, error) {
 	ref = strings.TrimSpace(ref)
 	if ref == "" {
@@ -183,39 +185,36 @@ func resolvePatternKey(ctx context.Context, conn *substrate.Conn, ref string) (s
 		return "", err
 	}
 
-	if strings.HasPrefix(ref, "vtx.meta.") {
-		for _, p := range patterns {
-			if p.key == ref {
-				return p.key, nil
-			}
-		}
-		return "", fmt.Errorf("%s is not a live meta.loomPattern vertex (installed patterns: %s)",
-			ref, patternNames(patterns))
-	}
-
 	var matched []string
 	for _, p := range patterns {
-		if p.name == ref {
+		if ref == p.key || ref == p.vertexID || (p.patternID != "" && ref == p.patternID) {
 			matched = append(matched, p.key)
 		}
 	}
+
 	switch len(matched) {
 	case 1:
 		return matched[0], nil
 	case 0:
+		if strings.HasPrefix(ref, "vtx.meta.") {
+			return "", fmt.Errorf("%s is not a live meta.loomPattern vertex (installed patterns: %s)",
+				ref, patternNames(patterns))
+		}
 		return "", fmt.Errorf("no live Loom pattern named %q (installed patterns: %s)", ref, patternNames(patterns))
 	default:
-		// Two live vertices sharing a canonical name is a corrupt registry, not
-		// a caller error: picking either would start a pattern the operator did
-		// not choose. Name both and refuse.
-		return "", fmt.Errorf("pattern name %q resolves to %d live meta.loomPattern vertices (%s) — pass the vtx.meta.<NanoID> key to disambiguate",
+		// Two live vertices answering to one reference is a corrupt registry,
+		// not a caller error: picking either would start a pattern the operator
+		// did not choose. Weaver's index silently keeps the last writer; an
+		// operator command must not.
+		return "", fmt.Errorf("pattern reference %q resolves to %d live meta.loomPattern vertices (%s) — pass the vtx.meta.<NanoID> key to disambiguate",
 			ref, len(matched), strings.Join(matched, ", "))
 	}
 }
 
 type patternRef struct {
-	key  string
-	name string
+	key       string
+	vertexID  string
+	patternID string
 }
 
 func loomPatterns(ctx context.Context, conn *substrate.Conn) ([]patternRef, error) {
@@ -242,42 +241,66 @@ func loomPatterns(ctx context.Context, conn *substrate.Conn) ([]patternRef, erro
 		if doc.Class != loomPatternClass || doc.IsDeleted {
 			continue
 		}
-		out = append(out, patternRef{key: k, name: metaCanonicalName(ctx, conn, k)})
+		out = append(out, patternRef{
+			key:       k,
+			vertexID:  strings.TrimPrefix(k, "vtx.meta."),
+			patternID: specPatternID(ctx, conn, k),
+		})
 	}
 	return out, nil
 }
 
-// metaCanonicalName reads a meta-vertex's canonical name from its
-// `<vertexKey>.canonicalName` aspect. Returns "" when the aspect is absent,
-// unreadable, tombstoned or carries no name — such a pattern is still
-// reachable by its vtx.meta key, it simply cannot be named.
-func metaCanonicalName(ctx context.Context, conn *substrate.Conn, vertexKey string) string {
-	entry, err := conn.KVGet(ctx, bootstrap.CoreKVBucket, vertexKey+".canonicalName")
+// specPatternID reads `patternId` off the pattern's `.spec` aspect. The body
+// may be the spec itself or the spec wrapped in the standard envelope's `data`,
+// so it is unwrapped on the `steps` sentinel — the same probe Weaver's registry
+// applies to the same aspect.
+//
+// Returns "" when the aspect is absent, unreadable, tombstoned or carries no
+// patternId; such a pattern is still reachable by its key or vertex id, it
+// simply has no name to match.
+func specPatternID(ctx context.Context, conn *substrate.Conn, vertexKey string) string {
+	entry, err := conn.KVGet(ctx, bootstrap.CoreKVBucket, vertexKey+".spec")
 	if err != nil {
 		return ""
 	}
-	var aspect struct {
-		IsDeleted bool `json:"isDeleted"`
-		Data      struct {
-			Value string `json:"value"`
-		} `json:"data"`
+	var envelope struct {
+		IsDeleted bool                       `json:"isDeleted"`
+		Steps     json.RawMessage            `json:"steps"`
+		Data      map[string]json.RawMessage `json:"data"`
 	}
-	if err := json.Unmarshal(entry.Value, &aspect); err != nil || aspect.IsDeleted {
+	if err := json.Unmarshal(entry.Value, &envelope); err != nil || envelope.IsDeleted {
 		return ""
 	}
-	return aspect.Data.Value
+	body := envelope.Data
+	if len(envelope.Steps) > 0 {
+		// The spec is at the top level, not under `data`.
+		var flat map[string]json.RawMessage
+		if err := json.Unmarshal(entry.Value, &flat); err != nil {
+			return ""
+		}
+		body = flat
+	}
+	raw, ok := body["patternId"]
+	if !ok {
+		return ""
+	}
+	var id string
+	if err := json.Unmarshal(raw, &id); err != nil {
+		return ""
+	}
+	return id
 }
 
-// patternNames renders the installed set for an error message. An unnamed
-// pattern is listed by key so the operator can still reach it.
+// patternNames renders the installed set for an error message. A pattern whose
+// spec carries no patternId is listed by key so the operator can still reach it.
 func patternNames(patterns []patternRef) string {
 	if len(patterns) == 0 {
 		return "none installed"
 	}
 	names := make([]string, 0, len(patterns))
 	for _, p := range patterns {
-		if p.name != "" {
-			names = append(names, p.name)
+		if p.patternID != "" {
+			names = append(names, p.patternID)
 		} else {
 			names = append(names, p.key)
 		}
