@@ -1133,6 +1133,157 @@ new sibling aspect under a retention class. Trigger: a package storing the detai
 
 ---
 
-*Designer fire, 2026-08-06. Awaiting Andrew's ratification. **No contract edit is staged** — the proposed
-Contract #1 §1.6 and Contract #3 §3.10 text lives in §5.1 of this document only, and will be staged as the
-proposal diff on ratification.*
+*Designer fire, 2026-08-06; ratified by Andrew the same day (see the block at the top). The Contract #1 §1.6
+and Contract #3 §3.10 edits §5.1 proposed **are committed**, each carrying a transitional note that says the
+runtime arrives with Fire 1 — so a present-tense clause never stands with nothing behind it. Building the
+transitional clauses out is what discharges them.*
+
+---
+
+## 13. Fire 1 item 1 fire brief (build note, 2026-08-07)
+
+**Scope cut, stated up front.** §11 scopes **Fire 1** as three coupled internal items (L–XL). This fire takes
+**item 1 only** — the custody vocabulary + write path — and leaves items 2 and 3 to later fires behind a 🏗️
+checkpoint (§14). Item 1 is the largest unit that ships green with its own provable acceptance criterion; item
+2 (the five decrypt sites) turned out to be a security-plane trust change in its own right, needing a reorder
+at two sites and a per-site divergence test that no existing fixture covers (see §13.6). Splitting there is a
+seam, not timidity: nothing declares custody until Fire 2, so item 1 lands with zero live consumers either way.
+
+### 13.1 Scope sentence (verbatim, §11 Fire 1 item 1)
+
+> **Custody vocabulary + write path.** `CustodySpec` + `RetentionClassSpec` on `pkgmgr`, their reserved DDL
+> aspects and `MetaVertexRef` fields, the four install-time validations, the `retentionclass` vertex type
+> (**note the key segment is `retentionclass` — `[a-z][a-z0-9]*`, so no camelCase**) + `.retentionPolicy`,
+> `pkgmgr.RetentionClassID`; step 6's conditional `sensitiveAspectScope` plus the class-less and
+> budget-exhaustion closures; step 6.5's holder resolution and `ensureKeyHolderKey`.
+
+### 13.2 Verified touch-list (every anchor re-checked live at `c340d127`)
+
+| File:line | What |
+|---|---|
+| `internal/pkgmgr/definition.go:746-799` | `DDLSpec` — add `Custody CustodySpec` after `Sensitive` (:772) |
+| `internal/pkgmgr/definition.go:123-226` | `Definition` — add `RetentionClasses []RetentionClassSpec` |
+| `internal/pkgmgr/definition.go:35-46` | `validateAll`'s slice — append after `validateSensitiveClassScope` (:43) |
+| `internal/pkgmgr/custodyscope.go` (NEW) | the four install-time validations |
+| `internal/pkgmgr/installer.go:329-351` | `RetentionClassID`, mirroring `RoleID` (:339) / `LensID` (:349) |
+| `internal/pkgmgr/installer.go:199-207`, `:271` | mint the class NanoIDs; thread them into `buildInstallBatch` |
+| `internal/pkgmgr/build.go:52-57` | `buildInstallBatch` signature — add `retentionClassIDs []string` |
+| `internal/pkgmgr/build.go:70-80` | after the Role loop: `vtx.retentionclass.<id>` + `.retentionPolicy` |
+| `internal/pkgmgr/build.go:135-143` | after the `.sensitive` emit: the conditional `.custody` emit |
+| `internal/processor/ddl_cache.go:24-58`, `:258-275` | `MetaVertexRef` custody fields + the `.custody` load |
+| `internal/processor/step6_validate.go:176-195` | `sensitiveAspectScope` becomes conditional on the kind |
+| `internal/processor/step6_validate.go:156` | the class-less closure |
+| `internal/processor/step65_encrypt.go:59-73`, `:107-144` | holder resolution; `ensureIdentityKey` → `ensureKeyHolderKey` |
+| `internal/processor/step6_resolve_ddl.go:261-269`, `:378` | surface the live-read fault so 6.5 can hard-error |
+
+**Two design citations rotted and are corrected here.** Ledger #34's `definition.go:752-759` names the wrong
+span — those are `Class`/`PermittedCommands`/`Description` field comments; the real emit seam is
+`build.go:135-143`. Ledger #10's `refmac.go:24` is off by one in the other direction than the ratification
+note assumed: `keyId` is appended at **:25**, `requestID` at :24 — the ratification correction is right.
+
+### 13.3 Precedents to mirror
+
+- **`Custody` as a reserved DDL aspect** → `DDLSpec.Sensitive` end to end: field `definition.go:765-772`,
+  validator `sensitivescope.go:22-38`, conditional emit `build.go:135-143`, cache load `ddl_cache.go:258-275`.
+  There is **no reserved-aspect registry** — this is the third hand-written instance of that pattern.
+- **`CustodySpec` serialized into an aspect body** → `OpMetaSpec.Ceremony` (`definition.go:521`) with
+  `opCeremonyBody` (`build.go:671-683`). `CustodySpec` is a **value**, not a pointer (its zero value is
+  meaningful = `identity`), so the emit guard is `d.Custody.Kind != ""`, not a nil check.
+- **The holder root + aspect** → the Role loop, `build.go:70-80` (`docVertex` :897, `docAspect` :904).
+  **No `roleindex` analog**: class references are same-package-only, so nothing looks one up cross-package.
+- **`RetentionClassID`** → `RoleID`/`LensID` verbatim, tag `"retention:"+canonicalName`.
+- **Gotcha carried from the precedent:** `sensitivescope.go`'s empty-`Class` fallback is `opMetaClass`
+  (`= "meta.ddl.vertexType"`, `build.go:23`), matching `buildInstallBatch`'s own default. Do **not** default
+  an unset `Class` to `aspectType` in the new validator — that silently skips the check it should run.
+
+### 13.4 Increment order + green checks
+
+1. **pkgmgr vocabulary + install batch** — `CustodySpec`, `RetentionClassSpec`, `RetentionClassID`, the ID
+   minting, the holder root + `.retentionPolicy`, the `.custody` emit.
+   `go test ./internal/pkgmgr/`
+2. **The four install-time validations** — `custodyscope.go` + the `validateAll` wiring.
+   `go test ./internal/pkgmgr/`
+3. **`MetaVertexRef` + the `.custody` cache load.** `go test ./internal/processor/ -run DDLCache`
+4. **Step 6's conditional `sensitiveAspectScope`.** `go test ./internal/processor/ -run 'Step6|Validate'`
+5. **Step 6.5's holder resolution + `ensureKeyHolderKey`.** `go test ./internal/processor/ -run Encrypt`
+6. **The two fail-open closures** — budget-exhaustion hard error in 6.5; the class-less rejection.
+   `go test ./internal/processor/`
+
+Full bar: `go build ./...` · `make vet` · `golangci-lint run ./...` · `STRICT=1 go run ./scripts/lint-conventions.go`
+· `go test ./internal/pkgmgr/ ./internal/processor/ ./internal/vault/` · `make verify-kernel`.
+
+### 13.5 In-scope gotchas
+
+- Vertex type segment is `[a-z][a-z0-9]*` (`keys/keys.go:141-155`) — the **key** segment is
+  `retentionclass`; the declared **kind** string stays camelCase `"retentionClass"`. Two different strings.
+- `Vault` needs **no interface change**: `identityKey` is an arbitrary AAD string (`local.go:203`, `:218`,
+  `:238`), `Envelope.KeyID = identityKey` (:223), `Ciphertext.KeyID = envelope.KeyID` (:242). Step 6.5 may
+  pass a `vtx.retentionclass.<id>` into the `identityKey` parameter slot today; the **rename** is item 2's.
+- Step 6's own budget fail-open **stays** — `TestResolveGoverningDDL_LiveReadBudgetExhaustedFailsOpen`
+  asserts it and must keep passing. Only **step 6.5** hard-errors, so the fault must be surfaced through a
+  new fault-aware resolver variant rather than by changing `resolveGoverningDDL`'s behavior.
+- Step 6.5 is gated on `cp.deps.Vault != nil && cp.deps.DDLs != nil` (`commit_path.go:378`).
+- `TestEncryptSensitiveMutations_NonIdentityAnchor_PassesThrough` asserts the behavior this fire changes —
+  **re-aim it, don't delete it**: a non-identity anchor with no custody declaration still passes through
+  (step 6 rejected it upstream); one *with* `retentionClass` custody must now encrypt under the class holder.
+
+### 13.6 Adjacent finds (filed or deliberately not, now)
+
+- **No `ct.KeyID`/anchor divergence exists anywhere today** — checked, because item 2's whole trust switch
+  rests on it. `MergeIdentity`'s `aspectConflictResolution` (`identity-hygiene/ddls.go:788-799`) reads the
+  secondary's **decrypted plaintext** `data["value"]`, requires it be a non-empty *string*, and emits a fresh
+  plaintext mutation on the primary, which step 6.5 re-encrypts under the primary's own key. It never copies
+  a ciphertext between anchors. Not filed — a verified absence, recorded so item 2 need not re-derive it.
+- **No test fixture at any of the five decrypt sites constructs a ciphertext whose `KeyID` differs from the
+  independently-derived custody key.** So today's suites cannot distinguish "trusts `ct.KeyID`" from "trusts
+  the anchor/column/ref" — they are always equal in every fixture. Not filed separately: it is item 2's own
+  green bar, and §14's checkpoint names it as a required deliverable of that fire.
+- **`privacy-base`'s `piiKey` DDL description still says "per-identity"** and its `permittedCommands` will
+  need `ShredRetentionClassKey`. Deliberately **not** done here so privacy-base takes **one** version bump in
+  item 3 rather than two; no package declares custody until Fire 2, so nothing mints a class-held `piiKey`
+  in the interim. Named in §14 as an item-3 deliverable, not a free-floating residual.
+
+### 13.7 Non-goals (the drift fence)
+
+- **Item 2** — the five decrypt sites, the non-identity silent branch's deletion, the typed `egressReads`
+  refusal, the `identityKey` → `keyHolderKey` rename.
+- **Item 3** — `ShredRetentionClassKey`, `privacy.retentionClassKeyShredded`, the shred worker, the
+  `retentionKeyStatus` lens, `SecureColumn.HolderTypes` replacing `IdentityKeyColumn`, the F2 null+alarm
+  change, `secureIdentityKeyType`'s deletion, `RebuildRule`'s export, the destruction-event consumer, and the
+  six shipped lens migrations.
+- **Fire 2 entirely** — the clinic and lease-signing consumers, the aspect splits, `patientDemographics.fullName`.
+- **The deferred tail** (§11) — retained-class egress refs, period bucketing, purpose-gated retained reveal.
+- `lattice-architecture.md:1019` — planning-lead-owned (F3(a)), routed separately. Not touched.
+
+## 14. Multi-fire checkpoint (live)
+
+**Worktree:** `/Users/andrewsolgan/Documents/GitHub/lattice-wt-retention-custody`
+(branch `fire/retention-class-custody-inc1`).
+
+**Done.** *(nothing yet — this fire is building item 1; updated at admit)*
+
+**Next — item 2, the read path.** Switch all five decrypt sites to `ct.KeyID`
+(`processor/sensitive_decrypt.go:162`+`:217`, `refractor/pipeline/secure.go:130`+`:137`,
+`vault/service.go:478`+`:499`, `bridge/egress.go:174`+`:183`, `cmd/loupe/vault.go:148`+`:176`); delete the
+non-identity silent branch that today hands raw ciphertext to a script (`sensitive_decrypt.go:163-171`); add
+the typed non-identity refusal under `egressReads`; rename the `Vault` interface's `identityKey` parameter to
+`keyHolderKey` at all 7 methods + `local.go`'s 8 sites. **Two sites need a reorder, not a substitution:**
+`sensitive_decrypt.go` parses the ciphertext at `:221`, *after* the anchor gate at `:162`, and
+`cmd/loupe/vault.go` computes its custody handle at `:148`, *before* it fetches the aspect at `:158-172` — in
+both, the guard must move after the ciphertext is in hand, which changes failure ordering. **Required green
+bar:** a per-site test constructing a `ct.KeyID` that *diverges* from the anchor/lens column — no existing
+fixture does, so today's suites cannot tell the switch took effect. Security plane → full 3-layer adversarial
+review. `SecureColumn.IdentityKeyColumn` stays required-but-unread through item 2 (item 3 removes it), so the
+six shipped lenses need no migration yet — but `TestSecureDecryptor_MissingIdentityKeyIsTerminal` must be
+re-aimed when the decryptor stops reading the column.
+
+**Then — item 3, erasure vocabulary + delivery.** `ShredRetentionClassKey` mirroring
+`shred_identity_key.go:267-311` (**that slice only** — the erasure design keeps the rest unchanged);
+`privacy.retentionClassKeyShredded`; the retention-class shred worker; the `retentionKeyStatus` lens;
+`SecureColumn.HolderTypes` replacing `IdentityKeyColumn` with validation; per-row failure projects `null` +
+a privacy-tier alarm (F2); `secureIdentityKeyType` deleted; `control.Service.RebuildRule` exported
+(serialized per lens); the destruction-event consumer with its `projectionsRebuilt` attestation; the six
+shipped lens migrations; `keyshredded/manager.go:31-37`'s excuse and `pipeline/sweep.go:29-33`'s stale
+reason re-derived. **Plus the one package edit deferred out of item 1:** `privacy-base`'s `piiKey` DDL
+description ("per-identity" → "a key holder's DEK envelope") and its `permittedCommands` gaining
+`ShredRetentionClassKey` — bundled here so privacy-base takes one version bump, not two.
