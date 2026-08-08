@@ -13,16 +13,15 @@ A lint gate (`scripts/lint-board.go`, run in CI + before any board commit) enfor
 
 - **A row is** `Item · What it is (one line) · Imp · Size · State` — **aim ≤ 300 chars, hard cap 600.** The
   **State** cell = a **token** + a **link to the design doc / commit** + (only if 🏗️) **one ≤10-word next
-  step**. Nothing else.
+  step**. Nothing else. **The whole FILE is capped too** — compact rows when it bites.
 - **The fire's narrative goes in the COMMIT MESSAGE + the design doc — NEVER the board** (the CLAUDE.md
-  no-changelog rule). Do **not** put in a cell: design rationale / fork-resolution / "why I chose this",
-  adversarial findings, the fire-by-fire journal, commit SHAs-with-prose, coverage %, review depth, "Was: …".
-  A multi-fire checkpoint (worktree · done · next) lives in the **design doc**; the row carries a one-line
-  pointer. **The four ways this regressed after the 2026-06-29 reform — refuse each by name:**
-  - ✗ **Design summary in State.** ✓ `🏗️ building · [design](…) · next: Inc 1 series-state lens`.
-  - ✗ **Blocked-reasoning essay.** ✓ `🚧 blocked-on Vault (PII projection) · [why](design)`.
-  - ✗ **Survey-log fire-journal.** ✓ one dated line: `2026-06-30 Refractor — healthy; filed 2`.
-  - ✗ **Multi-sentence Done-log entry.** ✓ exactly one line: `date · SHA · [tag] title`.
+  no-changelog rule). Never in a cell: design rationale / fork-resolution / "why I chose this", adversarial
+  findings, the fire-by-fire journal, SHAs-with-prose, coverage %, review depth, "Was: …". A multi-fire
+  checkpoint (worktree · done · next) lives in the **design doc**; the row carries a one-line pointer.
+  **The four ways this regressed after the 2026-06-29 reform — refuse each by name:** design summary in
+  State (✓ `🏗️ building · [design](…) · next: Inc 1 series-state lens`); blocked-reasoning essay
+  (✓ `🚧 blocked-on Vault (PII projection) · [why](design)`); survey-log fire-journal (✓ `2026-06-30
+  Refractor — healthy; filed 2`); multi-sentence Done-log entry (✓ `date · SHA · [tag] title`).
 - **Capped sections** (the lint enforces): **Survey-log / PO-notes ≤ 12 dated one-liners** — rotation memory
   only (what was surveyed/exercised, what's next), never a per-fire log; **Done-log ≤ 25 one-liners**, older
   roll to `archive/`. **Shipped (✅ built) items leave the feature tables** → a one-line Done-log entry.
@@ -33,9 +32,8 @@ A lint gate (`scripts/lint-board.go`, run in CI + before any board commit) enfor
 
 ## Loupe → its own lane
 
-Loupe (`cmd/loupe`) is advanced by **Stream 3** on its own board — **[loupe.md](loupe.md)** (the Loupe 2.0
-console program + Loupe component maintenance; runs parallel to this stream, own build lock). Loupe rows no
-longer live here; a platform primitive Loupe needs still files HERE per the cross-lane rules.
+Loupe (`cmd/loupe`) is Stream 3, on **[loupe.md](loupe.md)** (own build lock). Loupe rows do not live here;
+a platform primitive Loupe needs still files HERE per the cross-lane rules.
 
 ## Component maintenance
 
@@ -64,13 +62,13 @@ Open items only (shipped ones are in the Done log). Grouped by component tag.
 | **[Processor] A declared read is never scope-checked against the operation** | `contextHint` is client-supplied and step 3 authorizes on `operationType + actor + authContext` without inspecting it, so any actor with any op grant can have any key hydrated and decrypted. Contained unless a script renders whole state. | ★★ | L–XL | 🗄️ shelved (revive: a whole-set-exposure script, or a 2nd unguarded payload read) · [design](../../implementation-artifacts/declared-read-scope-authorization-design.md) |
 | **[Tooling] The G2 derived-key gate does not cover `internal/` submitters** | `internal/gateway/whoami.go` re-implements identity-domain's email normalization and derives both index keys; `internal/objectmanager` derives too. The gate excludes `internal/` wholesale because that tree also OWNS the primitive. Needs an allowlist of the three owning packages plus site annotations. | ★ | S | 📋 ready · [why](../../implementation-artifacts/client-ceremony-op-descriptors-design.md) §12.7 |
 | **[Facet] A durably-queued ceremony write outlives the plaintext it minted** | The reveal is held in memory only, so a reload or sign-out while the intent sits in the offline queue drops the secret — the write still lands on the next drain, arming an identity nobody can claim, with no signal anywhere. | ★★ | S–M | 📋 ready · consumer: staff creating an identity offline |
-| **[identity-domain] A credential whose identity vertex was never provisioned projects no binding row** | `identityCredentialBindingsRead` anchors on `(c:identity)` and `readNode` returns nil for a missing key, so the row never appears while `identityCredentialsRead` still lists that credential. Reachable via `lattice identity claim --actor`, which skips the Gateway's provisioning pre-flight. | ★★ | S–M | ✅ ratified 2026-08-06 · Inc 2 of [design](../../implementation-artifacts/credential-binding-plane-lifecycle-design.md) |
+| **[identity-domain] A credential whose identity vertex was never provisioned projects no binding row** | `identityCredentialBindingsRead` anchors on `(c:identity)` and `readNode` nils a missing key, so the row never appears while `identityCredentialsRead` still lists the credential. Reachable via `lattice identity claim --actor`, which skips the Gateway pre-flight. | ★★ | S–M | ✅ ratified 2026-08-06 · Inc 2 of [design](../../implementation-artifacts/credential-binding-plane-lifecycle-design.md) |
 | **[Refractor] A lens cannot project a relationship's own `data` or name** | `RelPattern.Variable` is parsed (`full/visitor.go:274`) but `traverseRel` binds only the neighbour node, so `b.data.x` / `type(b)` are silent nulls. Consumer: `objectAttachments`, which cannot project the linkName `DetachObject` needs. | ★★ | M | ✅ ratified 2026-08-06 (Winston, delegated) · [design](../../implementation-artifacts/relationship-data-projection-design.md) · narrow bind only |
 | **[identity-domain] A provisioned raw actor has no `credentialindex`, so its sign-in method is unlistable** | `ProvisionConsumerIdentity` writes the identity vertex and `.idpBinding` only — no index vertex, no `boundTo`, no `credentialBinding` — so a Scenario-B person's only credential is invisible to `identityCredentialBindingsRead`. | ★★ | M | ✅ ratified 2026-08-06 · Inc 3a of [design](../../implementation-artifacts/credential-binding-plane-lifecycle-design.md) · 3b deferred |
 | **[Processor] `derive_reads` binds `state`/`ddl` to empty dicts rather than failing closed** | `kv` and `nanoid` are fail-closed stubs; `state[k]` in a derivation returns a silent `None` instead of the loud error `kv.Read` gives. Within Contract #2 §2.5, which mandates stubs only for those two — but it is the weakest link in the purity argument, and `state` is what an author reaches for by habit. | ★ | S | 📋 ready · [why](../../implementation-artifacts/client-ceremony-op-descriptors-design.md) §12.7 |
 | **[Refractor] An actor-aware lens narrows by label but never by relation** | `ConsumerFilter`'s relation dimension is gated to plain pipelines: `actorAwareFanOutRelevant` judges by endpoint type alone, so a relation-pinned subject would withhold a link its fan-out arm keeps. Needs a relation gate on that arm first. | ★ | S–M | 📋 ready · consumer: `capabilityRoles` — the remainder of Term A · [why](../../implementation-artifacts/auth-plane-projection-latency-design.md) §15.11 |
 | **[Refractor] Narrowing's mandated healer is never exercised end to end** | §4.2 refuses to narrow a lens without a sweep plan, because narrowing removes the incidental reprojection that used to heal a lost row — yet no test deletes a row under a narrowed consumer and requires `RunSweep` to restore it. | ★★ | M | 📋 ready · consumer: the next fire editing a narrowed label set · [why](../../implementation-artifacts/auth-plane-projection-latency-design.md) §15.11 |
-| **[Refractor] A pre-install `ConsumerFilter` call would narrow with no conjunct evaluated** | Order is correct today and verified, but the failure mode is inverted: an uninstalled enumerator reads as PLAIN, whose conditions activation has already met — so calling early yields the most aggressive filter with none of §4.2's conjuncts checked. | ★★ | S | 📋 ready · consumer: the next fire adding a `cmd/refractor` install stage · [why](../../implementation-artifacts/auth-plane-projection-latency-design.md) §15.11 |
+| **[Refractor] A pre-install `ConsumerFilter` call would narrow with no conjunct evaluated** | Order is correct today, but the failure mode is inverted: an uninstalled enumerator reads as PLAIN, whose conditions activation has already met — so an early call yields the most aggressive filter with none of §4.2's conjuncts checked. | ★★ | S | 📋 ready · consumer: the next fire adding a `cmd/refractor` install stage · [why](../../implementation-artifacts/auth-plane-projection-latency-design.md) §15.11 |
 | **[Refractor] The affected-anchor index refuses every lens carrying a `WITH`** | The conjunct is blanket where the hazard is narrow: only a variable a later clause re-references after the `WITH` dropped it re-seeds by bucket scan. It keeps 14 of 30 actorAggregate lenses on the BFS. | ★★ | S–M | 📋 ready · consumer: the generated producer family · [why](../../implementation-artifacts/auth-plane-projection-latency-design.md) §17.6 |
 | **[Refractor] The enumerator's anchor-type fast path returns a singleton** | `Enumerate` short-circuits to `[eventKey]` when the event vertex's type is the actor type, so an aspect event on one identity never reaches an anchor binding it at a non-anchor position — `capabilityEphemeral`'s `report:identity`. | ★★ | S | 📋 ready · consumer: the first lens reading a non-anchor identity position's data · [why](../../implementation-artifacts/auth-plane-projection-latency-design.md) §17.6 |
 | **[Loom/Weaver] A dispatcher cannot declare its op's class-(e) enumerations** | A `kv.Links` walk is declared through `ContextHint.Enumerations`, expressible by neither the Loom `systemOp` submit path nor a Weaver `directOp` (`GapActionSpec` has no field). Metadata only; the walks run correctly. | ★ | XS–S | 📋 ready · consumers: the `identityErasure` pattern; `identityErasureComplete` · [why](../../implementation-artifacts/erasure-orchestration-design.md) inc 3 res 1, inc 7 res 4 |
@@ -82,22 +80,18 @@ Open items only (shipped ones are in the Done log). Grouped by component tag.
 | **[Weaver] A `surface` gap's Health issue carries no entity segment** | `issueKeyGap` keys per `(target, column)`, so with two erasures in flight the subject whose halves land first clears the issue raised for the stuck one. Wrong per-subject. | ★ | S | 📋 ready · consumer: `identityErasureComplete`'s async-half gaps · [why](../../implementation-artifacts/erasure-orchestration-design.md) inc 7 res 3 |
 | **[privacy-base] A pre-narrowing shredded subject earns a clean attestation over live `credentialindex` vertices** | That shred tombstoned `boundTo` and left each `vtx.credentialindex.<hash>` standing, so the sweep finds no live link, all five residue arms read zero, and the seal attests `violating=false` over N live `sha256(sign-in id) → erased person` rows. | ★★ | S–M | 📋 ready · consumer: the attestation over any such shred · [why](../../implementation-artifacts/erasure-orchestration-design.md) inc 9 |
 | **[privacy-base] `identityErasure` has never run end to end on a live stack** | Every arm is proven in package tests and the submit path by Weaver's dispatch, but no subject has gone through all four steps on a running stack — a real run destroys a key, so it needs a subject made for it. | ★★ | S | 📋 ready · consumer: the first real erasure · [why](../../implementation-artifacts/erasure-orchestration-design.md) inc 11 res 2 |
-| **[privacy-base] A merge concurrent with erasure step 1 still wedges the subject** | The §6 piiKey gate refuses any merge submitted after step 1 commits, so only the race survives: a `MergeIdentity` hydrating its gate before step 1 and landing after holds no OCC on `piiKey`. The key is destroyed, step 2 refuses `IdentityMerged` forever, and no re-run repairs it. | ★ | S | 📋 ready · consumer: the identityErasure pattern's step-1 guard · [why](../../implementation-artifacts/erasure-orchestration-design.md) inc 9–10 |
+| **[privacy-base] A merge concurrent with erasure step 1 still wedges the subject** | The §6 piiKey gate refuses any merge submitted after step 1 commits, so only the race survives: a `MergeIdentity` hydrating its gate before step 1 and landing after holds no OCC on `piiKey`. Key destroyed, step 2 refuses `IdentityMerged` forever. | ★ | S | 📋 ready · consumer: the identityErasure pattern's step-1 guard · [why](../../implementation-artifacts/erasure-orchestration-design.md) inc 9–10 |
 | **[Tooling] privacy-base has no `verify-package-*` target** | It owns the erasure spine (pattern, weaver target, residue lens, seal, 6 DDLs) and asserts none of it after a diff-apply, so a bad install surfaces only when an erasure stalls. | ★ | S | 📋 ready · consumer: the next privacy-base diff-apply · mirror `verify-package-identity` |
-| **[Processor] A class-less aspect mutation commits plaintext past both DDL gates** | Step 6 gates on `if class != ""` (`step6_validate.go:156`) and 6.5 `continue`s on an empty class, so a `data`-bearing aspect write with no `class` skips permittedCommands, sensitiveAspectScope AND encryption. Two live producers need a class first: identity-domain's `make_update`, the kernel's `meta_ddl.go`. | ★★ | S–M | 📋 ready · consumer: Fire 2's clinic PHI aspect · [why](../../implementation-artifacts/retention-class-key-custody-design.md) §13.6 |
-| **[Pkgmgr] A renamed or uninstalled retention class strands its DEK beyond any shred** | The holder id salts from the class canonicalName and the runtime-minted `<holder>.piiKey` is not in `declaredKeys`, so a rename mints a new holder while old ciphertexts name the old one, and uninstall tombstones the holder but leaves the key — undestroyable, since the shred derives the new id. | ★★ | S–M | 📋 ready · consumer `ShredRetentionClassKey` now SHIPPED · [why](../../implementation-artifacts/retention-class-key-custody-design.md) §14 |
+| **[Processor] A class-less aspect mutation commits plaintext past both DDL gates** | Step 6 gates on `if class != ""` (`step6_validate.go:156`) and 6.5 `continue`s on an empty class, so a `data`-bearing aspect write with no `class` skips permittedCommands, sensitiveAspectScope AND encryption. Two live producers need a class first. | ★★ | S–M | 📋 ready · consumer: Fire 2's clinic PHI aspect · [why](../../implementation-artifacts/retention-class-key-custody-design.md) §13.6 |
+| **[Pkgmgr] A renamed or uninstalled retention class strands its DEK beyond any shred** | The holder id salts from the class canonicalName and `<holder>.piiKey` is not in `declaredKeys`: a rename mints a new holder while old ciphertexts name the old one, and uninstall tombstones the holder but leaves the key — undestroyable, and `retentionKeyStatus` drops the row. | ★★ | S–M | 📋 ready · consumer `ShredRetentionClassKey` now SHIPPED · [why](../../implementation-artifacts/retention-class-key-custody-design.md) §14 |
 | **[Tooling] No gate enforces `gofmt`, and four files in one package have already drifted** | There is no gofmt step in `.github/workflows/*`, `gofmt` is not in golangci's enabled set, and the Makefile has no target — so formatting drift is invisible until someone runs `gofmt -l` by hand. `internal/refractor/pipeline` alone carries four unformatted files today. | ★ | XS | 📋 ready · consumer: any fire whose mechanical edit leaves a file unformatted and no gate says so |
 
 ### Survey log (round-robin rotation)
 
 Rotation memory only — findings are the filed rows; fire narratives live in commits, never here.
-Components: Core · Weaver · Loom · Refractor · Bootstrap · object-store-manager (+ the cross-cutting
-feature backlog; Loupe moved to its own lane, [loupe.md](loupe.md)). Survey the stalest
-(`git log -1 --format=%ct -- <path>`), note ONE dated line, rotate.
+Components: Core · Weaver · Loom · Refractor · Bootstrap · object-store-manager (+ the cross-cutting feature
+backlog). Survey the stalest (`git log -1 --format=%ct -- <path>`), note ONE dated line, rotate.
 
-- 2026-07-13 Core (healthy; step 6.5 sensitive-encrypt path 0% → filled, 80.1%→82.0%).
-- 2026-07-18 Weaver (healthy, 86.8/78.6/91.3% cov; filed error-branch-cov + a doc-drift fix).
-- 2026-07-18 Loom (healthy, 82.3/80.2% cov; filed starlark-guard-sandbox-value-iface-uncovered).
 - 2026-07-18 Refractor (healthy; all 8 07-06-review findings already resolved — no new rows).
 - 2026-07-19 object-store-manager (67.5/91.4% cov; filed doc-drift + cascade error-branch cov).
 - 2026-07-19 Bootstrap (69.3% cov; filed stale-bootstrap-json-no-freshness-probe ★★ + seed-idempotency-branch-cov).
@@ -105,27 +99,26 @@ feature backlog; Loupe moved to its own lane, [loupe.md](loupe.md)). Survey the 
 - 2026-07-25 Refractor (out of rotation) — filed shared-bucket rebuild-truncate hazard; next unchanged.
 - **Next:** Weaver.
 
-## Arch-review intake — CLOSED, no open rows
+## Arch-review intake — CLOSED
 
-All three 2026-07 reviews' corrections shipped; verdicts in the reports:
-[platform](../../../docs/reviews/arch-review-2026-07-02.md) ·
-[Refractor](../../../docs/reviews/arch-review-2026-07-06.md) ·
-[Weaver](../../../docs/reviews/arch-review-2026-07-06-weaver.md).
+All three 2026-07 reviews' corrections shipped; verdicts in `docs/reviews/arch-review-2026-07-0{2,6}*.md`.
 
 ## Lattice feature backlog — the Phase-3 build queue
 
-The AI-driven flywheel draws from this list (Surveyor files → Designer designs → Steward builds the
-ratified). Everything here needs design and is fair game **except** 🚧 Andrew-gated rows. Architectural
-**forks** (Gateway, read-path auth, Vault, multi-cell, HA-NATS) and **frozen-contract** changes are
-designed-through, but the *fork decision* + the *contract commit* are Andrew's.
+The flywheel draws from this list (Surveyor files → Designer designs → Steward builds the ratified).
+Everything here needs design and is fair game **except** 🚧 Andrew-gated rows. Architectural **forks**
+(Gateway, read-path auth, Vault, multi-cell, HA-NATS) and **frozen-contract** changes are designed-through,
+but the *fork decision* + the *contract commit* are Andrew's.
 
 
 ### Security & trust boundary
 | Item | What it is | Imp | Size | State |
 |---|---|---|---|---|
 | **[Processor] Whole-set `state` exposure remains an existence oracle for sensitive classes** | A guard keyed on consumption still splits on a surplus sensitive declared read when the script takes a whole-set exposure (`items()`/`values()`/rendering `state`) — the flip is correct, so only read-scope validation of the declared set closes it. | ★ | S | 🗄️ shelved with Inc 1 of [design](../../implementation-artifacts/declared-read-scope-authorization-design.md) (revive: a whole-set-exposure script) |
-| **[lease-signing] A payload-named identity aspect is read with no ownership guard** | `CreateLeaseServiceInstance` takes `subjectKey` and (via `resolve_subject_params`) the aspect segment from the payload, checked for shape + liveness only (`scripts.go:1168`, `Scope:"any"`). Step 6 rejects the op before an `external.*` event can leak, but that guard is external-plane only — deriving PII into an ordinary domain event is unguarded. | ★★ | S | 📋 ready · guard the op + an authoring gate for the class, one fire |
-| **[Loom] An externalTask can only declare its SUBJECT's own aspects for egress** | `inferExternalTaskReads` parses `subject.<aspect>` only (`internal/loom/externaltask_params.go:42`), so a LINKED vertex's field is undeclarable in `contextHint.egressReads` and the commit-path guard rejects it plaintext (`internal/processor/step6_validate.go:110`) — a vendor call needing a neighbour's sensitive field renders blank (LoftSpace: the executed lease names its tenant by raw NanoID). | ★★ | M | 📋 ready · needs a link-hop template form |
+| **[rbac] Any `operator` can self-grant the verb no package grants them** | `CreatePermission` takes `operationType` as a free string with no allow-list, and both it and `GrantPermission` are `scope:any` to operator — so "ships no grant" (the two shred verbs) is a default, not a boundary: two ops reach an irreversible key destruction. Needs a never-self-grantable set. | ★★ | M | 📋 ready · consumer: the destruction verbs' claimed posture · `packages/rbac-domain/ddls.go:306`,`:392` |
+| **[natsperm] `$JS.API.>` lets any component delete a durable or purge core-events** | `protectedStreamDenies` covers registered KV buckets only and `core-events` is a plain stream, so a vertical app (deliberately denied `ops.>`) can delete either shred worker's durable or purge the stream — every pending destruction suppressed silently, shreds committed and never executed. | ★★ | M | 📋 ready · consumer: both crypto-shred workers · `internal/natsperm/matrix.go:56-70`,`:119-125` |
+| **[lease-signing] A payload-named identity aspect is read with no ownership guard** | `CreateLeaseServiceInstance` takes `subjectKey` and (via `resolve_subject_params`) the aspect segment from the payload, checked for shape + liveness only (`scripts.go:1168`, `Scope:"any"`). Step 6's guard is external-plane only — deriving PII into an ordinary domain event is unguarded. | ★★ | S | 📋 ready · guard the op + an authoring gate for the class, one fire |
+| **[Loom] An externalTask can only declare its SUBJECT's own aspects for egress** | `inferExternalTaskReads` parses `subject.<aspect>` only (`externaltask_params.go:42`), so a LINKED vertex's field is undeclarable in `egressReads` and the commit guard rejects it plaintext (`step6_validate.go:110`) — a vendor call needing a neighbour's sensitive field renders blank. | ★★ | M | 📋 ready · needs a link-hop template form |
 | **[appsession] The production IdP posture cannot open a session** | `setCookie` runs only under a non-nil `Signer`, so with `_JWT_PUBLIC_KEY`/`_ISSUER` set nothing issues the cookie — the verify-only posture is unreachable (401 everywhere), killing every FE write path. | ★★ | L | 🗄️ shelved (revive: first real-IdP deployment) · ✅ design Andrew-ratified 2026-07-25 · [design](../../implementation-artifacts/appsession-oidc-production-signin-design.md) |
 | **NATS write restriction — Fire 4 (production mTLS)** | Fires 1–3 closed the fabricated-KV-write surface at the account level; the remaining fire binds subject permissions to client certificates instead of NKeys, which only matters off the dev stack. | ★ now / ★★ prod | M | 🗄️ shelved (revive: production deployment) · [design](../../implementation-artifacts/nats-account-write-restriction-design.md) §Fire-3-status |
 | **Keyed identity-index hashes (HMAC)** | Unkeyed `sha256NanoID` contact hashes are dictionary-testable with substrate access and survive a shred in JetStream history. A Vault-keyed HMAC bounds it, but needs a MAC primitive, key custody at every hash computer, and a one-stroke consumer migration. | ★ now / ★★ prod | M | 🗄️ shelved (revive: production threat model) · [analysis](../../implementation-artifacts/dedup-over-encrypted-pii-design.md) §9.1/§10-C |
@@ -133,7 +126,7 @@ designed-through, but the *fork decision* + the *contract commit* are Andrew's.
 ### Privacy / Vault
 | Item | What it is | Imp | Size | State |
 |---|---|---|---|---|
-| **[Vault] Sensitive aspects are identity-anchored, so retained records have no home** | Step 6 rejects a sensitive aspect on any non-identity parent, so two retained-class records sit plaintext in Core KV — clinic `.encounter` and lease-signing's income `.profile`. Custody belongs to a key holder with a retention policy; identity is the erase-on-request kind. | ★★★ | L–XL | 🏗️ building · [design](../../implementation-artifacts/retention-class-key-custody-design.md) §14 · next: item 3b rebuild delivery + gate lift |
+| **[Vault] Sensitive aspects are identity-anchored, so retained records have no home** | Step 6 rejects a sensitive aspect on any non-identity parent, so two retained-class records sit plaintext in Core KV — clinic `.encounter` and lease-signing's income `.profile`. Custody belongs to a key holder with a retention policy. | ★★★ | L–XL | 🏗️ building · [design](../../implementation-artifacts/retention-class-key-custody-design.md) §14 · next: item 3b rebuild delivery + gate lift |
 
 ### External-I/O maturity (bridge follow-ons)
 | Item | What it is | Imp | Size | State |
@@ -144,13 +137,13 @@ designed-through, but the *fork decision* + the *contract commit* are Andrew's.
 | Item | What it is | Imp | Size | State |
 |---|---|---|---|---|
 | Multi-cell / sharding | Graph scales by **cells** (root + subgraph co-located for atomic writes); global adjacency index + bridge links. | ★ now / ★★★ at scale | XL | ✅ ratified · [design](../../implementation-artifacts/multi-cell-sharding-design.md) · 🚧 seq (prod-scale driver) |
-| **Global identity for a hyperscale tenant** | A hyperscale tenant (WeWork) spans cells/regions — cross-cell shadows + cross-region residency on top of multi-cell. | ★ now / ★★★ at hyperscale | L–XL | ✅ ratified (2026-07-16) · 🚧 Andrew-gated: DO NOT BUILD until further notice (does NOT auto-clear on multi-cell Fire 2 / a driver) · [design](../../implementation-artifacts/global-identity-hyperscale-tenant-design.md) |
+| **Global identity for a hyperscale tenant** | A hyperscale tenant spans cells/regions — cross-cell shadows + cross-region residency on top of multi-cell. | ★ now / ★★★ at hyperscale | L–XL | ✅ ratified (2026-07-16) · 🚧 Andrew-gated: DO NOT BUILD until further notice (does NOT auto-clear on multi-cell Fire 2 / a driver) · [design](../../implementation-artifacts/global-identity-hyperscale-tenant-design.md) |
 | **HA NATS clustering** | Single-server today; clustering + multi-instance engine fan-out. | ★ now / ★★ prod | M–L | ✅ ratified · [design](../../implementation-artifacts/ha-nats-clustering-design.md) · 🚧 shelved (prod-HA driver) |
 
 ### Edge & personal lenses
 | Item | What it is | Imp | Size | State |
 |---|---|---|---|---|
-| **Personal Lens — multicast fan-out dedup** | Fires 1–5 shipped and PL.6's WS half is subsumed by EDGE.5; what remains is deduping identical per-identity deltas across subscribers, which only pays back at subscriber counts no cell has yet. | ★ | M | 🗄️ shelved (revive: a bandwidth trigger) · [design](../../implementation-artifacts/personal-secure-lens-design.md) |
+| **Personal Lens — multicast fan-out dedup** | Fires 1–5 shipped and PL.6's WS half is subsumed by EDGE.5; what remains is deduping identical per-identity deltas across subscribers, which pays back only at subscriber counts no cell has yet. | ★ | M | 🗄️ shelved (revive: a bandwidth trigger) · [design](../../implementation-artifacts/personal-secure-lens-design.md) |
 
 ### AI-native
 | Item | What it is | Imp | Size | State |
@@ -162,9 +155,9 @@ designed-through, but the *fork decision* + the *contract commit* are Andrew's.
 ### Read-model / projection maturity
 | Item | What it is | Imp | Size | State |
 |---|---|---|---|---|
-| **OpenSearch target adapter** | A third lens target adapter beside NATS-KV and Postgres. The Postgres FTS interim already serves the one search consumer, so the adapter itself still has none. | ★ | M | 🗄️ shelved (ratified, no consumer) · [design](../../implementation-artifacts/search-target-adapter-design.md) |
+| **OpenSearch target adapter** | A third lens target adapter beside NATS-KV and Postgres. The Postgres FTS interim serves the one search consumer, so the adapter itself has none. | ★ | M | 🗄️ shelved (ratified, no consumer) · [design](../../implementation-artifacts/search-target-adapter-design.md) |
 | **Dynamic type taxonomy — an abstract type a lens can label** | `subtypeOf` links between type meta vertices, resolved to a leaf-label set at activation, so a leaf any package declares is picked up by lenses writing `:abstract*`. Recovers the polymorphism the label-binding fire removes; first consumer `capabilityServiceAccess`, unnarrowable today. | ★★ | L | ✅ ratified 2026-08-06 · [design](../../implementation-artifacts/dynamic-type-taxonomy-design.md) · 2 fires · unblocked |
-| **[Refractor] Cross-instance projection-latency rollup** | Aggregate per-lens projection latency across Refractor instances into one per-component view (single-instance today, so per-instance == per-component). Link-tombstone re-projection half **subsumed** by the link-aspect reprojection design. | ★ | S | 🚧 seq behind HA-NATS multi-instance · [link-aspect design](../../implementation-artifacts/link-aspect-triggered-reprojection-plain-lenses-design.md) subsumes the tombstone half; no multi-instance consumer yet |
+| **[Refractor] Cross-instance projection-latency rollup** | Aggregate per-lens projection latency across Refractor instances into one per-component view (single-instance today, so per-instance == per-component). Link-tombstone half **subsumed** by the link-aspect reprojection design. | ★ | S | 🚧 seq behind HA-NATS multi-instance · [link-aspect design](../../implementation-artifacts/link-aspect-triggered-reprojection-plain-lenses-design.md) subsumes the tombstone half; no multi-instance consumer yet |
 
 ### Refinements & ops
 | Item | What it is | Imp | Size | State |
@@ -177,7 +170,7 @@ designed-through, but the *fork decision* + the *contract commit* are Andrew's.
 | **CI pipeline speed (continuous)** | Make CI faster without weakening any gate — owned continuously by the **Whetstone**. Matrix split done (serial → 4 parallel jobs); convergence + unit parallelized; unit itself now sharded across 2 runners. | ★★ | M (ongoing) | 🏗️ continuous (Whetstone) · aggregate-CPU ceiling confirmed 2x · next: propose paid larger runners to Andrew |
 | **[Processor] A RevisionConflict on an UNDECLARED key names nothing** | NATS omits the failing subject, so `ConflictError.ConflictingKey` is always empty and `conflictKeyForSignal` rebuilds it only from *declared* defaulted/absent-create keys (`commit_path.go:520`) — a submitter who MISSES a `contextHint` declaration gets `conflictingKey:""` plus a raw `wrong last sequence`. Exactly the error the Contract #2 §2.5 sweep makes most likely. Found driving Café. | ★★ | M | 📋 ready |
 | **Hard-delete mutation verb (true link/aspect keyspace reclaim)** | Mutation vocab is create/update/tombstone (soft PUTs); a tombstoned key persists and is still enumerated by `kv.Links`. A 4th `delete` verb (NATS `DEL`) would let dead links leave the keyspace. | ★ | M | 🗄️ shelved (Andrew 2026-07-02) · [design + hold banner](../../implementation-artifacts/hard-delete-mutation-verb-design.md) · demand dissolved by clinic write-path slot claims; §3 edits reverted; revive only on a real reclaim driver |
-| **Script-read posture — Fire 3 (Processor-side guards)** | Fires 1–2 + the debt sweep + the warn→block flip ship. Fire 3 makes a guarded step a generic Processor-side operation feature, superseding Loom's engine read; no op needs one yet. | ★★ | M | 🗄️ shelved (revive: the first guarded-step consumer) · [design §12](../../implementation-artifacts/script-read-posture-design.md) |
+| **Script-read posture — Fire 3 (Processor-side guards)** | Fires 1–2 + the debt sweep + the warn→block flip ship. Fire 3 makes a guarded step a generic Processor-side feature, superseding Loom's engine read; no op needs one yet. | ★★ | M | 🗄️ shelved (revive: the first guarded-step consumer) · [design §12](../../implementation-artifacts/script-read-posture-design.md) |
 
 ### Parking lot — very low priority (far, far back)
 
@@ -185,9 +178,9 @@ Real but low-value; do **not** spend design or build effort here unless Andrew g
 
 | Item | Why it's parked | Imp | Size | State |
 |---|---|---|---|---|
-| **Expose the authorizer's resolved roles to op scripts (`op.actorRoles`)** | Step 3 resolves the actor's roles but scripts cannot see them, so an op asking "is my caller root" re-derives it by walking `holdsRole` — a derivation that can disagree with what step 3 authorized, plus a `kv.Links` round trip per op. | ★★ | S | 📋 ready · consumer: the staff workplace guards ([staff-worlds F4](../../implementation-artifacts/facet-staff-worlds-design.md)) |
-| **Historical state query (FR51)** | Operators query historical state across a time range (audit/ledger + point-in-time reconstruction). Low near-term value, standing storage cost. | ★ now / ★★ if real need | M→L | ✅ ratified (design) · [design](../../implementation-artifacts/historical-state-query-design.md) · build deferred (Andrew, revive on a concrete need); archive layers re-home to the Chronicler |
-| multi-aspect atomic OCC for `UpdateMetaVertex` | `meta_ddl.go` applies `expectedRevision` to the first changed aspect by design; true multi-key OCC needs a substrate per-key-revision primitive — marginal value. | ★ | M+ | 🗄️ parked |
+| **Expose the authorizer's resolved roles to op scripts (`op.actorRoles`)** | Step 3 resolves the actor's roles but scripts cannot see them, so an op asking "is my caller root" re-derives it by walking `holdsRole` — which can disagree with what step 3 authorized, plus a `kv.Links` round trip per op. | ★★ | S | 📋 ready · consumer: the staff workplace guards ([staff-worlds F4](../../implementation-artifacts/facet-staff-worlds-design.md)) |
+| **Historical state query (FR51)** | Operators query historical state across a time range (audit/ledger + point-in-time reconstruction). Low value, standing storage cost. | ★ now / ★★ if real need | M→L | ✅ ratified (design) · [design](../../implementation-artifacts/historical-state-query-design.md) · build deferred (Andrew, revive on a concrete need); archive layers re-home to the Chronicler |
+| multi-aspect atomic OCC for `UpdateMetaVertex` | `meta_ddl.go` applies `expectedRevision` to the first changed aspect by design; true multi-key OCC needs a substrate per-key-revision primitive. | ★ | M+ | 🗄️ parked |
 | freshnessExpiry marker tombstone-on-convergence | A converged marker is read by nothing and harmless; tombstoning buys cleanup not correctness. | ★ | S | 🗄️ parked |
 | production freshness-window tuning | A staleness-tolerance vs. timer-churn value judgment — Andrew's call if/when it matters. | ★ | XS | 🗄️ parked |
 
