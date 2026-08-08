@@ -2993,7 +2993,13 @@ trigger.
 ### Checkpoint — what the resuming fire does
 
 **Worktree:** `/Users/andrewsolgan/Documents/GitHub/lattice-wt-erasure-inc9`, branch
-`fire/erasure-inc9-narrow-shred`, based on `59c246f4`. Rebase before resuming.
+`fire/erasure-inc9-narrow-shred`, carrying the narrowing as one commit. Rebase before resuming, and
+squash it into the merge commit rather than landing its WIP message.
+
+**Both numbered prerequisites below are now discharged by increment 10** (the `lattice loom start`
+trigger and the §6 gate's `piiKey.shredded` condition, both on `main`). They are left in place as the
+record of what the narrowing was waiting on. What remains before the merge is the list under *"Also
+outstanding on the branch"*.
 
 **Done:** the narrowing, the test inversions, the Gate-3 re-staging, the corpus corrections, the two
 version bumps.
