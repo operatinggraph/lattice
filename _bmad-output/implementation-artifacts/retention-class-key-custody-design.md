@@ -1261,12 +1261,21 @@ Full bar: `go build ./...` · `make vet` · `golangci-lint run ./...` · `STRICT
 
 ## 14. Multi-fire checkpoint (live)
 
-**Worktree:** `/Users/andrewsolgan/Documents/GitHub/lattice-wt-retention-3bii`, branch
-`fire/retention-class-3b-ii`, commit `a83340d8` (rebased onto `731041bb`) — **HELD, not merged.** Items 1, 2,
-3a and 3b-i are merged to `main`; item 3b-ii is built (`b490919f`) and its review closed (`a83340d8`), but the
-review OF that closure returned a second crop of blockers (§22). **Main is clean and carries none of it.** The
-next fire resumes in that worktree from **§22.1**, it does not start over — §19's findings are confirmed
-closed and must not be re-litigated (§19.4, §22 preamble).
+**FIRE 1 IS COMPLETE.** Items 1, 2, 3a, 3b-i and 3b-ii are all merged to `main`; the
+`fire/retention-class-3b-ii` worktree has served its purpose and can be removed. `custodyscope.go` rule 5 is
+lifted, so `retentionClass` custody is installable end to end: declared at install, written on the sensitive
+path, resolved at every decrypt site, destroyed by `ShredRetentionClassKey`, and delivered to the read models
+with a `projectionsRebuilt` attestation that only fires when every lens declaring the destroyed holder type
+has provably drained a rebuild.
+
+Item 3b-ii took three rounds of adversarial review to land, each closing the crop the previous one
+introduced (§19 → §21, §22 → §23, §24 → §24.7). Do not re-litigate any of them; the closed findings and the
+things confirmed sound are recorded there.
+
+**NEXT: Fire 2 — the consumers.** Fire 1 built the mechanism and deliberately shipped no user of it (§13.7):
+the clinic `.encounter` and lease-signing income `.profile` records that motivated the whole item are still
+plaintext in Core KV, and moving them is Fire 2's scope, along with the aspect splits and
+`patientDemographics.fullName`. That is the increment the `lattice.md` row now points at.
 
 **Done — item 1 (2026-08-07).** Custody vocabulary + write path. `CustodySpec`/`RetentionClassSpec`, the
 `retentionclass` holder + `.retentionPolicy`, `RetentionClassID`/`RetentionClassKey`, six install
@@ -2585,3 +2594,35 @@ this holder) and now also covers one it was not (a lens that stopped declaring i
 Not fixed here because the fix is not a guard: it needs a record of what a lens's columns USED to hold, or a
 sweep at the moment a declaration narrows — the same shape as the narrowing-healer question §4.2 already
 raises for label sets. Filed to `lattice.md`, consumer named.
+
+### 24.7 The closure's own re-review — no blockers, and what it corrected
+
+The §24 delta went back through one focused adversarial pass (concurrency + security plane), because the two
+prior closures each introduced a defect in exactly this code. **No blockers.** It confirmed the successor
+race is genuinely closed — no lost `Store(true)`, no flag stuck true, no double-close, no waiter blocked
+forever, no goroutine leak — and that both new test families pin distinct production lines. Six things were
+worth fixing, and one of them is the kind this project cares about most:
+
+- **The `endRebuild` doc asserted a guarantee the code does not give.** Ownership is `rebuildWatch == sig`,
+  which names the most recently **begun** rebuild, not the set of rescans still **running**. `Rebuild` is
+  fire-and-forget and skips `rebuildSerial`, so a second caller can begin and then abandon a rebuild while an
+  earlier watcher is still polling a live rescan — and that abandon legitimately owns the flag. The ordering
+  fix closes the *successor* race, not that one. The behaviour is pre-existing and bounded (the sweep is a
+  healer; the attestation path reads `drained`, never this flag), but a comment telling the next reader the
+  ordering is closed is what stops them looking. The claim is now scoped to what it earns, and names what
+  closing the rest would take.
+- **The probe's parse-success guard was free, and dropping it made correctness rest on `encoding/json`'s
+  partial-decode behaviour.** A type error does not stop decoding, so a probe can be left holding a
+  `targetConfig` that says "not this holder" while the field the error landed on is the one that would have
+  said otherwise. Re-added: only a spec that decoded cleanly may exclude a lens.
+- **Precedence between the two spec levels replaced with a union**, matching the `isEventStream` sibling —
+  the loader picks between them by a different test (a top-level `cypherRule`), so a body carrying both would
+  be read here from one level and projected there from the other. No producible spec has both; the cost is
+  nothing and the divergence goes away by construction.
+- **Both new ownership gates in `watchRebuildCompletion` would have survived their own revert.** No test
+  drove that function at all. `TestEndRebuild_ANonOwnerReleasesItsWaitersWithoutClearingTheFlag` puts the
+  test at the source every exit funnels through, rather than at any one caller.
+- A comment of this fire's own making narrated a prior change ("the same defect the abandon path **was fixed
+  for**") — the CLAUDE.md rule, caught on the fire that was correcting two others for it.
+- The prefetch test nested a 5s poll inside the shared 10s connection context, which on a loaded host fails
+  on `ctx` instead of reporting the counts. The poll owns its deadline now.
