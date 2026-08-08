@@ -41,6 +41,8 @@ func (def Definition) validateAll() error {
 		def.validateOpMetas,
 		def.validateEffects,
 		def.validateSensitiveClassScope,
+		def.validateRetentionClasses,
+		def.validateCustodyScope,
 		def.validateCanonicalNameUniqueness,
 		def.validatePermissionIdentityUniqueness,
 	} {
@@ -155,6 +157,15 @@ type Definition struct {
 	// declared role by canonical name in GrantsTo; the installer resolves
 	// it to the role's deterministic NanoID.
 	Roles []RoleSpec
+
+	// RetentionClasses lists the retention-class key holders this package
+	// declares (retention-class-key-custody-design.md §3.1). Each mints a
+	// vtx.retentionclass.<NanoID> root + a `.retentionPolicy` aspect on a
+	// deterministic, version-independent NanoID, and is nameable by this same
+	// package's aspect-type DDLs through Custody.RetentionClass. A class is a
+	// data controller's own declaration, so only the declaring package may
+	// name it.
+	RetentionClasses []RetentionClassSpec
 
 	// WeaverTargets lists the meta.weaverTarget meta-vertices this package
 	// declares. Each binds a violation Lens's weaver-targets row prefix
@@ -771,6 +782,15 @@ type DDLSpec struct {
 	// omits it installs exactly as before (no `.sensitive` aspect emitted).
 	Sensitive bool
 
+	// Custody declares WHICH key holder custodies this aspect's DEK
+	// (retention-class-key-custody-design.md §3.2). The zero value means
+	// custody kind `identity` — the aspect's own anchoring identity, today's
+	// model byte-for-byte — so a DDL that omits it installs exactly as
+	// before (no `.custody` aspect emitted). Meaningful only alongside
+	// Sensitive on an aspect-type DDL; validateCustodyScope rejects every
+	// other combination.
+	Custody CustodySpec
+
 	// Self-description aspects. Required for all DDL classes.
 
 	// InputSchema is the JSON Schema string for this DDL's operation payload.
@@ -796,6 +816,74 @@ type DDLSpec struct {
 	// PermittedCommands, and every guard must parse (same grammar as a Loom
 	// step Guard, §10.5) — a malformed effect rejects the whole install.
 	Effects map[string][]json.RawMessage
+}
+
+// Custody kinds (retention-class-key-custody-design.md §3.1). These are the
+// DECLARED kind strings, which are camelCase; the retention-class holder's
+// VERTEX TYPE segment is the all-lowercase `retentionclass`
+// (RetentionClassVertexType) because a Contract #1 type segment is
+// [a-z][a-z0-9]*. The two strings are deliberately different things.
+const (
+	// CustodyKindIdentity custodies the DEK on the aspect's own anchoring
+	// identity. Policy erase-on-request; destroyed by ShredIdentityKey. This
+	// is the default when a DDL declares no custody at all.
+	CustodyKindIdentity = "identity"
+
+	// CustodyKindRetentionClass custodies the DEK on a package-declared
+	// retention-class holder. Policy erase-on-expiry; destroyed by
+	// ShredRetentionClassKey on the controller's schedule, NOT on a data
+	// subject's erasure request — which is the whole point: a record in a
+	// retention class survives its subject's erasure, pseudonymized.
+	CustodyKindRetentionClass = "retentionClass"
+
+	// RetentionClassVertexType is the Contract #1 vertex type segment of a
+	// retention-class holder: vtx.retentionclass.<NanoID>.
+	RetentionClassVertexType = "retentionclass"
+
+	// RetentionPolicyEraseOnExpiry is the only retention policy this
+	// increment implements. The period is declarative — nothing expires a
+	// class key automatically yet (design §7.2).
+	RetentionPolicyEraseOnExpiry = "eraseOnExpiry"
+)
+
+// CustodySpec declares which key holder custodies a sensitive aspect's DEK.
+// Custody is a function of the resolved aspect-type DDL and nothing else —
+// never supplied by the caller, never discovered by graph traversal (design
+// §3.3), so it is known at install time and reaches the Processor's commit
+// path as an already-resolved field with no extra read.
+type CustodySpec struct {
+	// Kind is "" (== identity), CustodyKindIdentity, or
+	// CustodyKindRetentionClass.
+	Kind string
+
+	// RetentionClass is the canonicalName of a RetentionClassSpec THIS SAME
+	// package declares. Required iff Kind is CustodyKindRetentionClass, empty
+	// otherwise. Cross-package references are refused: a retention class is a
+	// data controller's own declaration, not a shared handle.
+	RetentionClass string
+}
+
+// RetentionClassSpec declares a controller-owned retention class — the key
+// holder for records whose retention obligation outlives any one data
+// subject's erasure request (design §3.1). Each declared class mints a
+// vtx.retentionclass.<NanoID> root plus a .retentionPolicy aspect at install,
+// on the same deterministic-NanoID mechanism roles and lenses already use.
+type RetentionClassSpec struct {
+	// CanonicalName identifies the class within its declaring package, e.g.
+	// "clinicalRecord". It is what a DDL's Custody.RetentionClass names.
+	CanonicalName string
+
+	// Description is what this class is and why it is retained — the place
+	// the controller records the obligation the retention answers to.
+	Description string
+
+	// Policy is RetentionPolicyEraseOnExpiry, the only kind implemented.
+	Policy string
+
+	// RetentionPeriod is an ISO-8601 duration. DECLARATIVE: no automatic
+	// expiry exists yet, so this states the controller's schedule rather than
+	// arming a timer (design §7.2).
+	RetentionPeriod string
 }
 
 // ExampleSpec is a single named usage example for a DDL operation.

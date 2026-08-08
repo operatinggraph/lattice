@@ -267,9 +267,13 @@ func (i *Installer) buildManifestBatch(def Definition) ([]installMutation, []str
 	for idx, p := range def.Panes {
 		paneNanoIDs[idx] = entityNanoID(def.Name, "pane:"+p.CanonicalName)
 	}
+	retentionClassNanoIDs := make([]string, len(def.RetentionClasses))
+	for idx, rc := range def.RetentionClasses {
+		retentionClassNanoIDs[idx] = RetentionClassID(def.Name, rc.CanonicalName)
+	}
 
 	ops, declared, err := i.buildInstallBatch(def, pkgKey, ddlNanoIDs, lensNanoIDs, permNanoIDs, roleNanoIDs,
-		weaverTargetNanoIDs, loomPatternNanoIDs, opMetaNanoIDs, paneNanoIDs)
+		weaverTargetNanoIDs, loomPatternNanoIDs, opMetaNanoIDs, paneNanoIDs, retentionClassNanoIDs)
 	if err != nil {
 		return nil, nil, "", err
 	}
@@ -348,6 +352,25 @@ func RoleID(packageName, canonicalName string) string {
 // projectionhealth.Check for a specific lens must resolve this ID first.
 func LensID(packageName, canonicalName string) string {
 	return entityNanoID(packageName, "lens:"+canonicalName)
+}
+
+// RetentionClassID returns the deterministic, version-independent NanoID a
+// package's declared retention class receives at install — the exact value
+// entityNanoID computes internally for a RetentionClassSpec. Exported for the
+// same reason as RoleID/LensID: a caller that must address the holder vertex
+// (the Processor resolving custody, an operator naming the class to shred)
+// resolves it without a KV read or re-deriving the tag convention.
+func RetentionClassID(packageName, canonicalName string) string {
+	return entityNanoID(packageName, "retention:"+canonicalName)
+}
+
+// RetentionClassKey returns the full Contract #1 vertex key of a package's
+// declared retention class. The type segment is all-lowercase
+// (RetentionClassVertexType) because a type segment is [a-z][a-z0-9]* — the
+// declared custody KIND string is camelCase, and conflating the two produces a
+// key nothing can address.
+func RetentionClassKey(packageName, canonicalName string) string {
+	return "vtx." + RetentionClassVertexType + "." + RetentionClassID(packageName, canonicalName)
 }
 
 // permTag is the version-independent identity tag for a permission entity:

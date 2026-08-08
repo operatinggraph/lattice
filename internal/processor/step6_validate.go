@@ -170,9 +170,9 @@ func (v *ValidatorImpl) validateOne(ctx context.Context, env *OperationEnvelope,
 				}
 			}
 
-			// Sensitive aspect write-scope (NFR-S3). Only meaningful for
-			// aspect mutations: sensitive aspects may only attach to
-			// identity-typed vertices.
+			// Sensitive aspect write-scope (NFR-S3), CONDITIONAL ON THE
+			// DECLARED CUSTODY KIND (retention-class-key-custody-design.md
+			// §4.1). Only meaningful for aspect mutations.
 			if ref.Sensitive && kind == substrate.KindAspect {
 				_, parentType, _, _, ok := substrate.ParseAspectKey(m.Key)
 				if !ok {
@@ -183,20 +183,67 @@ func (v *ValidatorImpl) validateOne(ctx context.Context, env *OperationEnvelope,
 						Detail:             "aspect key failed to parse",
 					}
 				}
-				if parentType != "identity" {
-					return &DDLViolation{
-						ViolatedConstraint: "sensitiveAspectScope",
-						MutationKey:        m.Key,
-						OperationRequestID: rid,
-						Detail: fmt.Sprintf("sensitive aspect %q may only attach to identity vertices; parent type is %q",
-							ref.CanonicalName, parentType),
-					}
+				if err := validateSensitiveCustody(ref, m.Key, parentType, rid); err != nil {
+					return err
 				}
 			}
 		}
 	}
 
 	return nil
+}
+
+// validateSensitiveCustody enforces the sensitive-aspect anchoring rule for
+// the DDL's declared custody kind (retention-class-key-custody-design.md
+// §4.1). The fail-closed default is the whole point of the shape: a package
+// that flips Sensitive:true on an appointment-anchored aspect and forgets to
+// declare custody gets today's rejection, NOT plaintext at rest.
+func validateSensitiveCustody(ref MetaVertexRef, mutationKey, parentType, rid string) error {
+	switch ref.CustodyKind {
+	case "", CustodyKindIdentity:
+		// Byte-identical to the pre-custody rule: the DEK is the anchoring
+		// identity's, so the anchor must BE an identity or there is no holder.
+		if parentType != "identity" {
+			return &DDLViolation{
+				ViolatedConstraint: "sensitiveAspectScope",
+				MutationKey:        mutationKey,
+				OperationRequestID: rid,
+				Detail: fmt.Sprintf("sensitive aspect %q may only attach to identity vertices; parent type is %q",
+					ref.CanonicalName, parentType),
+			}
+		}
+		return nil
+
+	case CustodyKindRetentionClass:
+		// Any anchor is permitted — the holder is the declared class, not the
+		// parent. What IS checked is that the install actually resolved a
+		// holder of the right type. This validates a value the INSTALL
+		// produced, never caller input, so it can only fail if a DDL was
+		// written or migrated wrong; failing closed keeps a malformed custody
+		// declaration from committing plaintext-adjacent state under a key
+		// step 6.5 could not mint.
+		holder := ref.CustodyHolderKey
+		holderType, _, ok := substrate.ParseVertexKey(holder)
+		if !ok || holderType != RetentionClassVertexType {
+			return &DDLViolation{
+				ViolatedConstraint: "sensitiveAspectScope",
+				MutationKey:        mutationKey,
+				OperationRequestID: rid,
+				Detail: fmt.Sprintf("sensitive aspect %q declares custody kind %q but its holder key %q is not a vtx.%s.<NanoID> vertex",
+					ref.CanonicalName, CustodyKindRetentionClass, holder, RetentionClassVertexType),
+			}
+		}
+		return nil
+
+	default:
+		return &DDLViolation{
+			ViolatedConstraint: "sensitiveAspectScope",
+			MutationKey:        mutationKey,
+			OperationRequestID: rid,
+			Detail: fmt.Sprintf("sensitive aspect %q declares unknown custody kind %q",
+				ref.CanonicalName, ref.CustodyKind),
+		}
+	}
 }
 
 func stringInSlice(s string, list []string) bool {

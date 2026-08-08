@@ -311,7 +311,7 @@ func TestEncryptSensitiveMutations_InstanceOfChainedSensitiveClass_Encrypts(t *t
 // TestEnsureIdentityKey_ExistingKey_NoExtraMutation: calling ensureIdentityKey
 // directly for an identity that already has a piiKey returns the stored
 // envelope and appends nothing to extra.
-func TestEnsureIdentityKey_ExistingKey_NoExtraMutation(t *testing.T) {
+func TestEnsureKeyHolderKey_ExistingKey_NoExtraMutation(t *testing.T) {
 	t.Parallel()
 	ctx, conn, _, _, _ := setupTestPipeline(t)
 	cp, v := newEncryptTestCommitPath(t, ctx, conn)
@@ -324,7 +324,7 @@ func TestEnsureIdentityKey_ExistingKey_NoExtraMutation(t *testing.T) {
 	seedPiiKeyAspect(t, ctx, conn, identityKey, want)
 
 	var extra []MutationOp
-	got, err := cp.ensureIdentityKey(ctx, identityKey, &extra)
+	got, err := cp.ensureKeyHolderKey(ctx, identityKey, &extra)
 	if err != nil {
 		t.Fatalf("ensureIdentityKey: %v", err)
 	}
@@ -341,14 +341,14 @@ func TestEnsureIdentityKey_ExistingKey_NoExtraMutation(t *testing.T) {
 // TestEnsureIdentityKey_NoKey_MintsAndAppends: an identity with no piiKey
 // mints a fresh envelope via the Vault and appends exactly one create
 // mutation for the piiKey aspect to extra.
-func TestEnsureIdentityKey_NoKey_MintsAndAppends(t *testing.T) {
+func TestEnsureKeyHolderKey_NoKey_MintsAndAppends(t *testing.T) {
 	t.Parallel()
 	ctx, conn, _, _, _ := setupTestPipeline(t)
 	cp, _ := newEncryptTestCommitPath(t, ctx, conn)
 
 	identityKey := "vtx.identity." + testNanoID2
 	var extra []MutationOp
-	env, err := cp.ensureIdentityKey(ctx, identityKey, &extra)
+	env, err := cp.ensureKeyHolderKey(ctx, identityKey, &extra)
 	if err != nil {
 		t.Fatalf("ensureIdentityKey: %v", err)
 	}

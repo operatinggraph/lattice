@@ -61,30 +61,40 @@ func (cp *CommitPath) encryptSensitiveMutations(ctx context.Context, mutations [
 			continue
 		}
 		kind := substrate.ClassifyKey(m.Key)
-		ref, ok := resolver.resolveGoverningDDL(ctx, class, m.Key, kind, result, state)
+		ref, ok, fault := resolver.resolveGoverningDDLChecked(ctx, class, m.Key, kind, result, state)
+		if fault != nil {
+			// A DEGRADED resolution is not a "not sensitive" answer. Step 6
+			// ran first against this same shared live-read budget and may have
+			// resolved this very class as sensitive before exhausting it; were
+			// we to treat the fault as a miss, the aspect would commit as
+			// plaintext. Fail the operation instead — the caller's OCC/stub
+			// handling replies a failure, and a retry gets a fresh budget.
+			return nil, false, fmt.Errorf("step 6.5: resolve DDL for %s degraded by a live-read fault; refusing to treat it as non-sensitive: %w", m.Key, fault)
+		}
 		if !ok || !ref.Sensitive {
 			continue
 		}
-		vertexKey, vertexType, _, _, ok := substrate.ParseAspectKey(m.Key)
-		if !ok || vertexType != "identity" {
-			// step 6 already rejected a non-identity-anchored sensitive
-			// aspect; a malformed key here would have failed validation.
+		holderKey, ok := keyHolderFor(ref, m.Key)
+		if !ok {
+			// step 6 already rejected a sensitive aspect whose custody it
+			// could not satisfy; a malformed key here would have failed
+			// validation.
 			continue
 		}
-		env, ok := envelopes[vertexKey]
+		env, ok := envelopes[holderKey]
 		if !ok {
 			var err error
-			env, err = cp.ensureIdentityKey(ctx, vertexKey, &extra)
+			env, err = cp.ensureKeyHolderKey(ctx, holderKey, &extra)
 			if err != nil {
-				return nil, false, fmt.Errorf("step 6.5: ensure piiKey for %s: %w", vertexKey, err)
+				return nil, false, fmt.Errorf("step 6.5: ensure piiKey for %s: %w", holderKey, err)
 			}
-			envelopes[vertexKey] = env
+			envelopes[holderKey] = env
 		}
 		plaintext, err := json.Marshal(m.Document["data"])
 		if err != nil {
 			return nil, false, fmt.Errorf("step 6.5: marshal plaintext for %s: %w", m.Key, err)
 		}
-		ct, err := cp.deps.Vault.Encrypt(ctx, vertexKey, env, plaintext)
+		ct, err := cp.deps.Vault.Encrypt(ctx, holderKey, env, plaintext)
 		if err != nil {
 			return nil, false, fmt.Errorf("step 6.5: encrypt %s: %w", m.Key, err)
 		}
@@ -104,12 +114,39 @@ func (cp *CommitPath) encryptSensitiveMutations(ctx context.Context, mutations [
 	return append(out, extra...), len(extra) > 0, nil
 }
 
-// ensureIdentityKey returns vertexKey's existing piiKey envelope, or mints a
-// fresh one and appends its create mutation to *extra when the identity has
-// no piiKey yet (design §2.1 lazy creation — a non-sensitive identity never
-// gets one). Called at most once per identity per batch — callers cache the
-// result across the batch's mutations.
-func (cp *CommitPath) ensureIdentityKey(ctx context.Context, vertexKey string, extra *[]MutationOp) (vault.Envelope, error) {
+// keyHolderFor resolves WHICH vertex custodies this aspect's DEK
+// (retention-class-key-custody-design.md §4.2). Custody is a function of the
+// resolved DDL and nothing else: a retentionClass DDL names its holder, and
+// every other DDL falls back to today's derivation — the aspect's own
+// anchoring identity. Returns false when neither yields a usable holder,
+// which step 6 has already rejected upstream.
+func keyHolderFor(ref MetaVertexRef, mutationKey string) (string, bool) {
+	if ref.CustodyKind == CustodyKindRetentionClass {
+		if ref.CustodyHolderKey == "" {
+			return "", false
+		}
+		return ref.CustodyHolderKey, true
+	}
+	vertexKey, vertexType, _, _, ok := substrate.ParseAspectKey(mutationKey)
+	if !ok || vertexType != "identity" {
+		return "", false
+	}
+	return vertexKey, true
+}
+
+// ensureKeyHolderKey returns the key holder's existing piiKey envelope, or
+// mints a fresh one and appends its create mutation to *extra when the holder
+// has none yet (design §2.1 lazy creation — a holder with no sensitive data
+// never gets a key). Called at most once per holder per batch — callers cache
+// the result across the batch's mutations, so a batch touching many records
+// under one retention class mints once.
+//
+// The holder is not necessarily the aspect's parent: for a retention class it
+// is a vertex the operation never named, so this appends a create on a key
+// outside the operation's own footprint. No shipped permission check is keyed
+// on the committed footprint, but anything that later audits one must expect a
+// vtx.retentionclass.* key in a batch whose operation names only its records.
+func (cp *CommitPath) ensureKeyHolderKey(ctx context.Context, vertexKey string, extra *[]MutationOp) (vault.Envelope, error) {
 	piiKeyKey := vertexKey + ".piiKey"
 	entry, err := cp.deps.Conn.KVGet(ctx, cp.deps.CoreBucket, piiKeyKey)
 	if err == nil {
