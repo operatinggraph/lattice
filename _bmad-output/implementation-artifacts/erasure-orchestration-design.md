@@ -3040,3 +3040,149 @@ itself (identical, and strictly larger on the two `credentialindex` arms); class
 the bodyless tombstone; dangling neighbours; self-links; every other `ShredIdentityKey` caller, none of
 which asserts the cascade; and the `contextHint.Enumerations` removals, which are metadata with no
 runtime consumer.
+
+## Fire B build note — increment 10 (2026-08-07): the trigger and the gate's second condition
+
+### Fire brief
+
+**Scope sentence.** The two items increment 9's checkpoint named as prerequisites of the narrowing —
+*"a trigger: erasure must be startable by the operator"* and *"a decision on the bare-shred path"* —
+built independently of the narrowing, which stays parked.
+
+**Scope-diff gate.** Both land on the UN-narrowed op, so neither depends on increment 9 and neither
+is a partial of it. The narrowing's own commit is unchanged and still withheld; this increment
+removes two of the three reasons it was withheld. Narrow-only: no adjacent mechanism substituted.
+
+**Verified touch-list** (`file:line` checked live).
+
+| File | What |
+|---|---|
+| `cmd/lattice/loom/start.go` (new) | `lattice loom start <patternRef> --subject` — the operator trigger |
+| `cmd/lattice/loom/start_test.go` (new) | resolution: by name, by key, tombstoned, unknown, ambiguous |
+| `cmd/lattice/loom/loom.go:1-52` | package doc (two planes) + `AddCommand` |
+| `packages/identity-domain/ddls.go:640-746` | `write_path_closed` gains the piiKey condition; `key_shredded_closes_write_path` |
+| `…:931-943` | `erasure_gate_keys` derives both keys per position |
+| `…:1123-1135` | `match_is_erased` routes through the shared gate |
+| `packages/identity-hygiene/ddls.go:298-330` · `:403-445` | the same two conditions on the merge path |
+| both packages' `package.go` · `manifest.yaml` | version bumps (0.18→0.19, 0.4→0.5) |
+
+**Precedents mirrored.** `cmd/lattice/lens`'s meta-vertex scan + `canonicalName` reader for pattern
+resolution; `internal/weaver/strategist.go:145-170` for pattern-as-`authContext.target` (§10.8);
+identity-domain's own `marker_closes_write_path` for the class + tombstone posture.
+
+**Non-goals.** The narrowing itself (still parked on `fire/erasure-inc9-narrow-shred`); Loupe's Shred
+button repoint; the §13 Inc-1 obligations and the other branch residuals.
+
+### The trigger, and why it is not `lattice op submit`
+
+`StartLoomPattern` is granted to `operator` at `scope:any`, so authority was never missing —
+reachability was. `"identityErasure"` occurred exactly once outside tests, at its own declaration: no
+Weaver playbook named it, `cmd/lattice/loom` had no `start`, and Loupe has no erasure surface.
+
+`lattice op submit --operation-type StartLoomPattern` can build the envelope by hand, and that is
+precisely why a named verb was needed rather than a documented incantation. Two things a hand-rolled
+submit gets wrong, both silently:
+
+- **The pattern reference must be the meta-vertex key**, not the canonical name the operator knows.
+- **That key must also be `authContext.target`** — per-pattern authorization anchors on the
+  definition vertex (Contract #10 §10.8). A submit that omits it authorizes against nothing.
+
+So `start` resolves the name against the installed `meta.loomPattern` vertices and stamps the
+resolved key in both places. A `vtx.meta.<NanoID>` reference is **verified, not trusted**: a
+reference naming a meta-vertex of some other class would authorize against the wrong vertex, and the
+refusal that follows names neither the pattern nor the reason. A tombstoned pattern does not resolve
+(Core KV holds logical deletes, so a class-only scan would start an instance of a retired pattern),
+and an ambiguous name refuses with both keys rather than picking one.
+
+`start` is the only verb in this group that goes through the **Processor** rather than
+`lattice.ctrl.loom.*`: starting a pattern is a state change (P2), the rest inspect or steer the
+running engine.
+
+### The bare-shred decision: widen §6, and why that is the retroactive half
+
+The checkpoint offered two shapes — widen the §6 gates to fire on `piiKey.shredded`, or refuse the
+direct submit outright. This increment builds the **first**, and the reason is that it is the only
+one of the two that reaches the subjects that already exist.
+
+Refusing the direct submit closes the path *going forward*. It does nothing for the population the
+operator Shred button has already produced: identities whose key is destroyed, carrying **no**
+`erasureRequested` marker, because the marker is written by the pattern's seal and the pattern did
+not exist. Every §6 gate keyed on the marker alone reads each of them as a live, unerased dedup
+incumbent — so an ordinary same-contact walk-in mints
+`lnk.identity.<new>.duplicateOf.identity.<shredded>` and an `identity.created` carrying
+`matchedIdentityKeys`, and `MergeIdentity` repoints their contact hashes onto a living survivor.
+Both are new, durable, decrypt-free correlations to a person whose key is already gone.
+
+The condition is the **weaker fact deliberately**: shredded means no writer can produce a decryptable
+representation of this person again, whichever way the gate goes. Of the two ways to be wrong,
+refusing writes for a subject nobody is actively converging is recoverable; growing the erased set is
+what §6 exists to prevent.
+
+**The false-positive vector is the whole risk, and it is the sharp one.** Every identity that has
+taken a sensitive write carries a `piiKey` envelope — in identity-domain, *every* identity, since the
+claimKey is sensitive. A gate keyed on the envelope's presence rather than its `shredded` flag, or
+blind to its class, would permanently refuse the claim, link, reconcile and merge paths of the entire
+PII-bearing population with no op able to reopen them. Both packages therefore check class **and**
+flag, and both carry a control test asserting a live unshredded envelope leaves the path open. Under
+a presence-only mutation those controls redden along with the whole suite — which is the evidence
+they are load-bearing rather than decorative.
+
+Gate order is marker-first: the marker is what `derive_reads` hydrates, so a sealed subject costs no
+round trip and the piiKey read happens only on the miss.
+
+### Three things the build settled that the checkpoint did not
+
+- **The gate spans two packages, not one.** `marker_closes_write_path` has four consumers, and two of
+  them are the sweeps' `ErasureNotSealed` precondition (`unbind_identity_credentials.go:360`,
+  `purge_identity_dedup_footprint.go:332`), not write-path gates. Those stay **marker-only**: they are
+  pattern steps, and a bare shred must not authorize a hand-invoked sweep. The write-path gates are
+  identity-domain's claim/link/reconcile/dedup and identity-hygiene's merge — both widened.
+- **`derive_reads` doubles, and that is the cheap half.** Both gate keys are derived per position, so
+  the claim/link/reconcile paths pay a snapshot lookup rather than a live GET. Only the dedup path's
+  per-candidate follow-up is live, at most two reads per contact type, six in the worst case.
+- **The gate helper is renamed to `write_path_closed`.** `erasure_requested` named one of its two
+  conditions, and a gate that fires on a fact its own name denies is the kind of thing a later reader
+  disarms by accident.
+
+### Two fixture constraints the merge-path tests hit, recorded because they are not obvious
+
+Seeding a `piiKey` envelope by hand is not a neutral act on the identity a merge writes **into**:
+
+- The merge encrypts `primary.credentialBinding` at step 6.5, so a hand-built envelope with an empty
+  `wrappedDEK` on the primary makes that step fail — the op is then refused by the Vault, not by the
+  gate, and every assertion below it passes for the wrong reason.
+- **Removing a seeded envelope does not restore the untouched state.** The KV key keeps its revision,
+  and the encrypt path mints a fresh envelope with a create-only write, which then fails
+  `RevisionConflict` with an empty `conflictingKey` — the shape the `[Processor] A RevisionConflict on
+  an UNDECLARED key names nothing` row already describes.
+
+So the primary-side case asserts the refusal only, taking its "this really was the gate" evidence
+from the wire message, which names both the guard and the side; the paired accept-arm lives on the
+secondary tests, where flipping the shredded flag back changes exactly one fact.
+
+### The proofs
+
+- Both packages' full suites green; `cmd/lattice/loom` green.
+- **Mutation-tested three ways.** Dropping the piiKey condition reddens the three closure tests in
+  each package and leaves the controls green. Making the condition presence-only (no class, no flag)
+  reddens the controls **and** the whole pre-existing marker suite.
+- `go build ./...`, `make vet`, `golangci-lint run ./...`, all eight `scripts/lint-*.go` under
+  `STRICT=1`: clean.
+- `go test ./... -p 4` reddens `clinic-domain` / `identity-domain` / `lease-signing` under load with
+  `ScriptTimeout: script exceeded wall budget 250ms` and `nats: invalid key`. **Baselined at clean
+  `main` in a throwaway worktree**: the same packages redden with an overlapping set of tests and the
+  same count, including `TestUnbindIdentityCredentials_WideSubject_ConvergesPastOnePage`, which the
+  `Package drive tests redden under full-suite load` row already names. Not this change.
+
+### Residuals — named, with their consumers
+
+- **The narrowing's third prerequisite is now the only one left.** With a trigger and a closed write
+  path, `fire/erasure-inc9-narrow-shred` still carries the §13 Inc-1 obligations and the review
+  residuals listed in increment 9's checkpoint. Consumer: the next fire on this item.
+- **A bare shred still converges nothing.** The write path is closed for such a subject, but no marker
+  means no residue row and no convergent tail — the footprint stands until an operator runs the
+  pattern. Consumer: the pre-narrowing shredded corpus, already filed as
+  *"A pre-narrowing shredded subject earns a clean attestation over live `credentialindex` vertices"*.
+- **Loupe's Shred button and modal still say the opposite** (*"Its PII becomes unrecoverable
+  everywhere"*). Repointing it at the pattern is §12 step 4 and Loupe-lane UX work; the CLI trigger is
+  what makes the pattern reachable meanwhile. Consumer: the operator.
