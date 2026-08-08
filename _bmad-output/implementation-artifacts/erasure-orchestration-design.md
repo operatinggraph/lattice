@@ -3218,3 +3218,120 @@ suites, not by a live run: starting `identityErasure` for real destroys a key
 irreversibly, which is not something to do to shared dev state as a smoke test.
 The first true end-to-end belongs with the narrowing's merge, on a subject
 created for it.
+
+## Fire B build note — increment 11 (2026-08-07): the narrowing lands
+
+### Fire brief
+
+**Scope sentence.** Discharge the list increment 9's checkpoint left under *"Also
+outstanding on the branch"* — the §13 Inc-1 obligations plus five review residuals — and merge
+`fire/erasure-inc9-narrow-shred`. The narrowing's own code is unchanged from the parked commit.
+
+**Scope-diff gate.** Both of the checkpoint's numbered prerequisites were discharged by increment 10
+(`lattice loom start`, the §6 gate's `piiKey.shredded` arm), so nothing here rebuilds them. The
+rebase carried two conflicts in `identity-domain/ddls.go`, both comment-only: increment 10 renamed
+`erasure_requested` → `write_path_closed` and widened the derive_reads comment to name the piiKey
+envelope, while the branch was correcting the same comments' account of *which op* erases `boundTo`.
+Resolved by keeping increment 10's mechanism and the branch's attribution. `git diff main..HEAD` over
+`identity-domain/ddls.go`, filtered to non-comment non-string lines, is empty — no increment-10
+behaviour was reverted.
+
+**Non-goals.** Loupe's shred button is not repointed at the pattern (§12 step 4, Loupe's lane); the
+first true end-to-end run of `identityErasure` against a live stack is not attempted here.
+
+### What increment 11 built
+
+**The §13 Inc-1 obligations, which were the claim resting on nothing.** The four cascade inversions
+are pure negatives naming five specific keys, so a cascade over any relation they do not name passes
+all four, and `patterns.go` / `unbind_identity_credentials.go` both rest on a claim — *"writes exactly
+one mutation, always"* — that was executable nowhere. `shred_identity_key_cost_test.go` states the
+property instead, against the installed DDL script through the real Starlark runner:
+
+- exactly one mutation and one event at 0, 1 and 500 links, with a counting `LinkLister` asserted
+  **never consulted**. That lister is the only channel by which a link count can reach the script
+  (`internal/processor/starlark_kv.go:201-210` — a nil lister makes `kv.Links` fail), so the assertion
+  is generic where the five negatives were per-relation;
+- a source-level assertion that `ShredBatchTooLarge`, `FanoutTooLarge`, `kv.Links` and `total_muts`
+  are gone as **symbols**. §13 asked for exactly this rather than "it does not fire", because a size
+  refusal on a branch no test reaches is invisible to any behavioural assertion.
+
+Mutation-tested: reintroducing a paged `indexes` cascade with a size refusal reddens all three
+connectivity arms (0 links on the never-consulted assertion, 1 and 500 on the mutation count) and both
+symbol assertions.
+
+**A scoping assertion in each sweep's own test.** `UnbindIdentityCredentials` and
+`PurgeIdentityDedupFootprint` both hold `scope:any` and issue document-less tombstones, so step 6
+resolves no DDL for the key being destroyed: the enumeration's key filter is their whole confinement.
+Each now seeds a link touching **neither** end of the subject and requires it to survive — a `boundTo`
+between two other people, a `duplicateOf` between two others, and another person's own `indexes`
+footprint. Mutation-tested by widening the `"in"` filter by one segment
+(`lnk.*.*.<rel>.<type>.<id>` → `lnk.*.*.<rel>.>`): all three redden, and only those three.
+
+The bystander in `_LeavesBoundToLinksLive_BothDirections` stays, with its claim corrected — against an
+op that tombstones nothing it shows the fixture is a real corpus, and nothing more. The assertion that
+can fail now lives with the op that does the tombstoning.
+
+**The Gate-3 vector's second property, stated honestly rather than staged.** The checkpoint asked for
+the marker to be tombstoned after the sweep so the duplicateOf refusal would rest on the
+`piiKey.shredded` arm alone. It does not work, for two independent reasons the review found: a
+**tombstoned** `erasureRequested` still closes the write path by design
+(`identity-domain/ddls.go:728-742` — presence of the class is the signal, live or not), and the sweep
+has already tombstoned the index, so `live_hit` drops the candidate before `match_is_erased` is
+consulted at all. So the retraction is dropped and the test's doc comment says what the assertion is —
+a shape check on the revive path — and points at where the gate is proven where it *can* fail, against
+a live index and with a positive control:
+identity-domain's `TestErasureGate_CreateUnclaimedIdentity_SkipsBareShreddedIncumbent`.
+
+**Loupe's shred panel said the opposite of what the op does.** The bounds line now names the
+decrypt-free footprint a bare shred leaves standing — contact-hash index vertices, `duplicateOf`
+pairs, credential bindings — and points at `lattice loom start identityErasure --subject <identityKey>`.
+Repointing the button itself is still §12 step 4.
+
+**The corpus claims the touch-list missed:** the pattern's step list (`patterns.go` — the class-(e)
+walks are in steps 3 and 4, not 1); `index_vertex_mutation`'s revive rationale, which cited an
+in-commit tombstone; both sweeps' read-posture notes, which cited "the same posture privacy-base's
+shred-time enumerations declare"; and the two ceiling comments that measured themselves against a
+999-mutation pre-flight that no longer exists. Plus a stray `purgeCapDocMissingGrant()` seed nothing
+submitted as, and eleven no-changelog phrasings.
+
+`identity-domain` 0.19 → 0.20 (four DDL `Description`s and the sweep script's in-string comments),
+`privacy-base` 0.10 → 0.11 (the `shredIdentityKey` script body, the purge `Description`).
+
+### The precondition that was checked on the wrong axis, and what it cost
+
+Increment 9's brief discharged §12 step 3's *"only once the pattern demonstrably performs the work the
+op is giving up"* arm by arm on coverage, and its own 3-layer pass found coverage was the wrong axis:
+nothing could **start** the pattern. That is the whole reason this took three fires rather than one —
+the narrowing was correct and complete in increment 9 and still unlandable, because "demonstrably
+performs" is a claim about reachability. The generalisable form: a precondition naming an outcome the
+work must already produce is checked on the *dispatch* path first, not on the arms.
+
+### The proofs
+
+- `go build ./...`, `make vet`, `golangci-lint run ./...` (cache cleaned), all eight
+  `scripts/lint-*.go` under `STRICT=1`, and `lint-package-version` with `DIFF_BASE=main`: clean.
+  `gofmt -l` over every file this fire touched: clean.
+- `packages/privacy-base`, `packages/identity-hygiene`, `cmd/lattice/...`: green.
+- Three mutation tests, each reverted after: the reintroduced cascade, the widened `"in"` filter, and
+  (from increment 10) the dropped piiKey condition.
+- **`packages/identity-domain` reddens under its own package-level load, and so does clean `main`.**
+  Three runs at this commit and three at `9d80900d` each redden a *rotating* membership —
+  `TestUnbindIdentityCredentials_WideSubject_ConvergesPastOnePage`,
+  `TestRecordPII_OperatorRoleOnSecondPage`, `TestErasureGate_CompleteCredentialLink_RejectsSealedIdentity`,
+  `TestProvisionConsumerIdentity_UnknownConsumerRoleKey_Rejected` — with green runs interleaved on both
+  sides. Not this change; it is the filed *Package drive tests redden under full-suite load* row, whose
+  reach this fire widens from full-suite to single-package.
+
+### Residuals — named, with their consumers
+
+- **A bare shred leaves a live `identityindex` owned by an erased person, and the next walk-in on that
+  contact gets no index of their own.** `CreateUnclaimedIdentity` writes an index vertex only when the
+  hit is absent or tombstoned, so a live-but-erased incumbent means the newcomer is neither deduped
+  (correct — the §6 gate skips it) nor indexed (wrong). Consumer: the second person to walk in on a
+  bare-shredded contact. Already filed as *A sealed identity's live index vertex denies the next person
+  their own*; this fire widens that row's reach from sealed to bare-shredded.
+- **The pattern has never run end to end against a live stack.** Every arm is proven in package tests
+  and the submit path by Weaver's own dispatch, but no subject has been taken through all four steps on
+  the running stack, because doing so destroys a key irreversibly. Consumer: the first real erasure.
+- **Loupe's Shred button still submits the bare op.** The panel now says so; repointing it is §12 step
+  4 and Loupe-lane UX work. Consumer: the operator.
