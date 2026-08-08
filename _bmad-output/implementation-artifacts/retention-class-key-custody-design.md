@@ -1261,8 +1261,8 @@ Full bar: `go build ./...` · `make vet` · `golangci-lint run ./...` · `STRICT
 
 ## 14. Multi-fire checkpoint (live)
 
-**Worktree:** none held. Items 1, 2 and 3a are merged to `main`, so each fire opens a fresh worktree off
-`main` rather than resuming a persistent one — item 3b starts clean.
+**Worktree:** none held. Items 1, 2, 3a and 3b-i are merged to `main`, so each fire opens a fresh worktree
+off `main` rather than resuming a persistent one — item 3b-ii starts clean.
 
 **Done — item 1 (2026-08-07).** Custody vocabulary + write path. `CustodySpec`/`RetentionClassSpec`, the
 `retentionclass` holder + `.retentionPolicy`, `RetentionClassID`/`RetentionClassKey`, six install
@@ -1354,19 +1354,45 @@ the key aspect hangs off the vertex the lens already binds, and a class holder i
 so nothing forces a lens to react. Lifting the gate here would license retained PHI whose erasure no
 projection would honor, which is strictly worse than today's un-projected plaintext. Item 3b lifts it.
 
-**Then — item 3b, the delivery half.** `SecureColumn.HolderTypes` replacing `IdentityKeyColumn` with
-validation (five sites: `pipeline/secure.go`, `lens/corekv_source.go`, `pkgmgr/definition.go`, and the two
-validation mirrors `corekv_source.go:838-903` + `bucketguard.go:106-190`); per-row failure projects `null` +
-a privacy-tier alarm (F2 — note `failure.CatPrivacyCritical` exists and is classified but has **no** generic
-routing in `dispositionEvalErr`, so this fire either extends that routing or reuses `keyshredded`'s manual
-pause); `secureIdentityKeyType` deleted; **`control.Service.RebuildRule` exported** (serialized per lens —
-today `rebuildRule` spawns a goroutine per request with no cross-caller lock, and there are already two
-unserialized callers, the control RPC and `cmd/refractor/reload.go:372-378`); the destruction-event consumer
-with the `HolderTypes` enumeration and the `projectionsRebuilt` attestation; the six shipped lens migrations
-(**not uniform** — lease-signing's uses `IdentityKeyColumn: "applicant"`); `keyshredded/manager.go:31-37`'s
-excuse and `pipeline/sweep.go:29-33`'s stale reason re-derived; **and lifting `custodyscope.go` rule 5.**
-One trap already located: `secureColumnsEqual` (`cmd/refractor/main.go:1366-1376`) compares with `!=`, so a
-slice field breaks the hot-reload refusal path at compile time.
+**Done — item 3b-i (2026-08-08).** The declaration. `SecureColumn.HolderTypes` replaces
+`IdentityKeyColumn` at all five sites, required non-empty and each entry a Contract #1 type segment
+(`keys.IsValidTypeSegment`, newly exported alongside `IsValidLocalName` for the same reason). It is enforced
+on arrival rather than left inert: a ciphertext whose `vault.KeyHolderType` is not in the column's list is
+refused as a `failure.Terminal`, which no live corpus can reach — rule 5 has never let a non-identity DEK be
+minted, and all six migrated lenses declare `["identity"]`. `secureIdentityKeyType` is gone, its narrowing
+conjunct now looping the declared holder types. `secureAliasNames` drops the alias it no longer consumes;
+`secureColumnsEqual` compares field-wise plus `slices.Equal`. Seven package version bumps — six for the
+migration, `edge-manifest` because `lint-package-version` demands one of any `pkgmgr` change reaching a
+generated read-grant producer lens.
+
+Adversarial review (opus security plane + edge-case + acceptance) closed two fail-opens the first pass left.
+An empty `HolderTypes` satisfied the re-aimed conjunct **vacuously** — the loop body never runs — so
+`NewSecureDecryptor` now refuses one rather than delegating the invariant to a validator three packages
+away, and the positive narrowing test that had been passing on an empty decryptor now carries columns. It
+also caught the re-aimed comment **overclaiming**: reaching that conjunct needs an `actorEnumerator`, which
+a secure lens can never have (`secureColumns` is refused on any non-empty `projectionKind`), so every
+shipped secure lens takes the plain branch, which carries no holder-type conjunct at all. The comment now
+says so, and names the install gate as what actually contains the exposure meanwhile.
+
+The wire field renames, so a spec installed from an older package version carries `identityKeyColumn` and no
+`holderTypes`, fails the required-non-empty rule, and the lens **refuses to load** rather than loading with
+an allow-list matching nothing — verified through the real parse path, and surfaced by
+`health/registry_probe.go`'s declared-but-not-registered reconciliation. The diff-apply is the migration:
+reinstall, then cycle.
+
+**Then — item 3b-ii, the delivery half.** Per-row failure projects `null` + a privacy-tier alarm (F2 — note
+`failure.CatPrivacyCritical` exists and is classified but has **no** generic routing in `dispositionEvalErr`,
+so this fire either extends that routing or reuses `keyshredded`'s manual pattern: `failure.PrivacyCritical`
+decorates the log line while the pause is a separate explicit `Control.PauseRule` call);
+**`control.Service.RebuildRule` exported** (serialized per lens — `rebuildRule` at `control/service.go:870-883`
+spawns a goroutine per request with no cross-caller lock, `Pipeline.Rebuild` stores `rebuildInFlight`
+unconditionally rather than by CAS, and there are already two unserialized callers, the control RPC and
+`cmd/refractor/reload.go:372-378`); the destruction-event consumer with the `HolderTypes` enumeration and the
+`projectionsRebuilt` attestation — which also **lifts the `FailedPrecondition: step projectionsRebuilt has no
+producer yet` guard** already shipped in `shred_retention_class_key.go`, and needs a per-lens holder-type
+enumeration over `cmd/refractor`'s registry mirroring `capReadShredTargets`;
+`keyshredded/manager.go:31-37`'s excuse and `pipeline/sweep.go:29-33`'s stale reason re-derived;
+**and lifting `custodyscope.go` rule 5.**
 
 **Superseded — item 3 as one unit.** `ShredRetentionClassKey` mirroring
 `shred_identity_key.go:267-311` (**that slice only** — the erasure design keeps the rest unchanged);
