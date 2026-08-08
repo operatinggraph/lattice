@@ -1764,3 +1764,186 @@ declares `["identity"]`. 3b-ii changes *how* that refusal fails (F2: `null` + al
   `pipeline/sweep.go:29-33`'s stale reason re-derived; **lifting `custodyscope.go` rule 5.**
 - **Fire 2** — the clinic and lease-signing consumers.
 - Any cypher change to the six migrated lenses — none needs one.
+
+## 18. Fire 1 item 3b-ii fire brief (build note, 2026-08-08)
+
+Compiled by the Lattice Steward at `3c5142b8` from five read-only scout passes, before any edit. This is
+the **delivery** half of item 3b, and the last increment of Fire 1: after it, a class-key destruction
+reaches the read models, so both the `projectionsRebuilt` guard and the `custodyscope` install gate lift.
+
+### 18.1 Scope sentence (verbatim, §14 "Then — item 3b-ii, the delivery half")
+
+> Per-row failure projects `null` + a privacy-tier alarm (F2); **`control.Service.RebuildRule` exported**
+> (serialized per lens); the destruction-event consumer with the `HolderTypes` enumeration and the
+> `projectionsRebuilt` attestation — which also **lifts the `FailedPrecondition: step projectionsRebuilt has
+> no producer yet` guard** already shipped in `shred_retention_class_key.go`, and needs a per-lens
+> holder-type enumeration over `cmd/refractor`'s registry mirroring `capReadShredTargets`;
+> `keyshredded/manager.go:31-37`'s excuse and `pipeline/sweep.go:29-33`'s stale reason re-derived;
+> **and lifting `custodyscope.go` rule 5.**
+
+**Scope-diff gate — brief vs ratified scope, item by item.** Seven named deliverables, all seven in the
+brief, none substituted. Two derivations, neither a widening:
+
+- **"privacy-tier alarm" is built as counter + Health-KV field + heartbeat issue + log**, because §6.2's
+  ruling names the tier as "(health + log + counter)". A counter nothing reads is a mute measurement, so
+  the heartbeater rule that surfaces it is part of the alarm, not an addition to it. `docs/observability/
+  health-kv-schema.md` moves in the same commit (the Health-emission rule).
+- **The alarm does NOT pause the lens.** §6.2's parenthetical enumerates health + log + counter; the pause
+  appears only as a description of the tier `keyshredded` raises. Pausing on a per-row failure would
+  reinstate the whole-lens stall F2 exists to kill (§6.2: "one bad row permanently blocks every other row
+  of that lens from ever updating — including a later erasure scrub"). Redact-then-continue, alarm loudly.
+
+### 18.2 Verified touch-list (every anchor re-checked live at `3c5142b8`)
+
+**F2 — per-row null + alarm**
+- `internal/refractor/pipeline/secure.go:144-156` — `Apply` returns on the first `decryptColumn` error
+  (`:151`), discarding the rest of the result set. This is the abort F2 removes.
+- `internal/refractor/pipeline/secure.go:158-250` — `decryptColumn`'s seven `failure.Terminal` returns
+  (`:167`, `:173`, `:183`, `:190`, `:201`, `:220`, `:225`, `:233`) each become a per-row redaction.
+  `:213-216` (`ErrKeyShredded` → `nil`) is **not** a failure and keeps its silent path.
+- `internal/refractor/pipeline/secure.go:227-235` — the missing-`Field` case, which §6.2 names explicitly
+  as the precedent F2 overrides.
+- `internal/refractor/pipeline/secure.go:131-143` — `Apply`'s failure-posture doc comment, which states
+  the Terminal posture and must be re-derived rather than left asserting the old contract.
+- `internal/refractor/pipeline/evaluate.go:81-85` (`applySecureDecrypt`), plus its two other callers
+  `pipeline.go:1906` and `pipeline.go:2090`.
+- `internal/refractor/pipeline/secure.go:77-85` + `:89` — the `SecureDecryptor` struct and
+  `NewSecureDecryptor`; it holds `vault`, `coreKV`, `columns`, `calls` and **no logger or reporter**.
+- `internal/refractor/health/reporter.go:323-335` (`RecordEvalDriftRetry`) — the counter method to mirror.
+- `internal/refractor/health/healthwire/healthwire.go:38-106` — the `Entry` struct the counter field joins.
+- `internal/refractor/health/lattice_heartbeater.go` — the reader that turns a counter into an issue.
+- `docs/observability/health-kv-schema.md:478-492` — the per-lens issue-kind list.
+
+**Serialized rebuild**
+- `internal/refractor/control/service.go:870-883` — unexported `rebuildRule`, spawns a bare goroutine.
+- `internal/refractor/control/service.go:795` — the `"rebuild"` RPC dispatch, which must stay async
+  (`{Started:true}`).
+- `internal/refractor/control/service.go:584/602/617/632` — `ResumeRule`/`PauseRule`/`NullifyRow`/
+  `NullifyActor`, the exported-sibling shape to mirror (lock → look up → unlock → call).
+- `internal/refractor/pipeline/pipeline.go:1507-1511` — `Rebuild` stores `rebuildInFlight`
+  **unconditionally**, not by CAS.
+- `internal/refractor/pipeline/pipeline.go:1642` — `resumeInterruptedRebuild` already CASes, so the atomic
+  is used both ways today; `:1282` `RebuildInFlight()` is **already exported** (the completion predicate
+  §6.3 step 4 needs exists).
+- `cmd/refractor/reload.go:372-378` — the second unserialized caller. It holds no control service
+  (`reloader` at `:255`), which is why serialization goes in `Pipeline.Rebuild`, not only in the exported
+  control method.
+
+**Destruction consumer + enumeration + attestation**
+- `internal/refractor/keyshredded/manager.go` — the whole consumer shape to mirror: `Config` `:127-158`,
+  `Manager` `:161-168`, `New` `:239`, subscribe `:274-282`, handler `:296-429`, finalization submit.
+- `internal/refractor/keyshredded/manager.go:70-74` — `FilterSubject` + `DefaultDurable`
+  (`refractor-keyshredded`). Taken names: `privacy-worker`, `privacy-worker-retention`,
+  `refractor-keyshredded`.
+- `internal/privacyworker/manager.go:55-68` — `RetentionClassKeyShreddedFilterSubject`
+  (`events.privacy.retentionClassKeyShredded`) and `DefaultRetentionClassDurable`.
+- `internal/privacyworker/manager.go:335-372` — `submitFinalization`: the op envelope shape, the
+  `contextHint.reads` of `<holder>.piiKey`, the derived request id.
+- `cmd/refractor/main.go:78-118` — `pipelineEntry`, whose `secureColumns []lens.SecureColumn` (`:117`) is
+  the declared metadata the enumeration reads.
+- `cmd/refractor/main.go:131-150` — `capReadShredTargets`, the pure-over-registry precedent, and
+  `isPerEntryCapReadOutput` `:126-129` factored out of it for the same testability reason.
+- `cmd/refractor/main.go:389-398` (construct), `:435-448` (`SetTargetLister` under the registry `mu` at
+  `:427`), `:450-454` (run) — the wiring to mirror.
+- `internal/refractor/pipeline/secure.go:116-129` — `SecureDecryptor.HolderTypes()`, whose doc comment
+  already states its purpose is "does this lens react to holder type T?".
+
+**Guard + gate lifts**
+- `packages/privacy-base/shred_retention_class_key.go:236-246` — the `projectionsRebuilt` refusal.
+- `packages/privacy-base/shred_retention_class_key.go:42-57`, `:95`, `:100` — the three doc/schema spans
+  that assert "no producer yet" and must be re-derived with the guard.
+- `packages/privacy-base/lenses.go:165-166` — `retentionKeyStatus`'s "has no producer until item 3b".
+- `packages/privacy-base/package.go:48` — version `0.12.0`, needs a bump.
+- `internal/pkgmgr/custodyscope.go:76-99` — rule 5, whose own comment names this fire as its remover
+  ("REMOVE THIS with the rebuild-driven delivery increment").
+- `internal/pkgmgr/custodyscope_test.go:35-53` — the test asserting "not installable yet"; it must be
+  re-aimed to assert the declaration now INSTALLS, not deleted.
+
+**Stale reasons to re-derive**
+- `internal/refractor/keyshredded/manager.go:31-37` — the secure-lens excuse.
+- `internal/refractor/pipeline/sweep.go:18-27` — the "auth-plane only" reason; the real gate is
+  `sweepEnrolment` (`driver.go:301-323`), a three-conjunct structural refusal.
+
+### 18.3 Precedents to mirror
+
+| New thing | Mirror | Why this one |
+|---|---|---|
+| Destruction consumer | `keyshredded.Manager` | Same process, same stream, same durable-consumer shape, same finalization-submit tail; §6.3 step 1 names it. |
+| Registry enumeration | `capReadShredTargets` (`main.go:141`) | Pure over `registry`, caller holds the lock, re-evaluated per event so a newly-installed lens is picked up without a restart. |
+| Counter + health field | `RecordEvalDriftRetry` / `EvalDriftRetries` | The one existing per-pipeline cumulative counter whose only job is to make a silent in-band behaviour observable. |
+| Exported control method | `PauseRule` / `NullifyRow` | Lock → look up → unlock → call; already exported "for exactly this kind of in-process caller" (ledger #29). |
+| Finalization submit | `privacyworker.submitFinalization:335-372` | Already submits `RecordRetentionClassShredFinalization`, so the second step reuses a proven envelope + contextHint. |
+
+### 18.4 Increment order + green checks
+
+1. **F2 per-row redaction.** `decryptColumn` returns a typed redaction instead of `failure.Terminal`;
+   `Apply` records it and continues; the pipeline logs `failure.PrivacyCritical` + bumps the counter.
+   Green: new per-branch tests asserting the column is `null`, the row is written, sibling rows still
+   project, and the counter moved. `go test ./internal/refractor/...`.
+2. **Health surface.** Counter field on `Entry`, `Reporter.RecordSecureRedaction`, heartbeater issue kind,
+   `health-kv-schema.md` in the same commit. Green: `go test ./internal/refractor/health/...`.
+3. **Serialized rebuild.** `Pipeline.Rebuild` takes a per-pipeline rebuild lock (structural — covers the
+   reloader caller that cannot reach the control service); `control.Service.RebuildRule(ctx, ruleID,
+   truncate) error` exported and run to completion; the RPC arm keeps returning `{Started:true}` by
+   calling it in a goroutine. Green: a test firing two concurrent rebuilds and asserting they serialize.
+4. **Destruction consumer.** New `internal/refractor/classkeyshredded` package + wiring in
+   `cmd/refractor/main.go`; enumerate by holder type over the registry; rebuild each to completion; submit
+   `RecordRetentionClassShredFinalization{step:"projectionsRebuilt"}`. Green: package tests over a fake
+   control service, plus a pure test of the enumeration.
+5. **Guard + gate lifts + version bump.** `projectionsRebuilt` accepted; rule 5 deleted; both tests
+   re-aimed; privacy-base `0.12.0 → 0.13.0`. Green: `go test ./packages/privacy-base/... ./internal/pkgmgr/...`.
+6. **Full gates.** `go build ./...`, `make vet`, `golangci-lint run ./...`, `STRICT=1 go run
+   ./scripts/lint-conventions.go`, `STRICT=1 go run ./scripts/lint-board.go`, the other `scripts/lint-*.go`
+   gates, `go test ./...`.
+
+### 18.5 In-scope gotchas
+
+- **The ordering question is settled, and settled by the flag, not by luck.** A rebuild driven by the
+  destruction event decrypts against `envelope.Shredded`, which `ShredRetentionClassKey` writes to
+  `<holder>.piiKey` **synchronously on the same commit that emits the event**
+  (`shred_retention_class_key.go:196-223`), and `SecureDecryptor.readPiiKeyEnvelope` (`secure.go:252-271`)
+  reads that document straight off Core KV. `local.go:391-401` refuses on `b.shredded[holder] || envelope.Shredded`.
+  So the rebuild does **not** race `privacyworker`'s async `Vault.ShredKey` — the in-memory deny-list is a
+  redundant second path, not a precondition. Do not add a wait-for-privacyworker handshake.
+- **A rebuild already in flight must not be counted as this destruction's rebuild.** It may have started
+  before the shred flag landed, so its rows can carry plaintext. The serialization must **queue**, not
+  drop: wait for the in-flight one to drain, then start a fresh one. A CAS-and-skip here would be
+  fail-open, which is the opposite of what this whole increment is for.
+- **`Apply` mutates rows in place and F2 keeps the row.** A redacted column must be set to `nil`
+  explicitly — leaving the ciphertext in the row would project ciphertext into a plaintext column, the one
+  thing `:131-143`'s posture comment promises can never happen.
+- **`ErrKeyShredded` is not a failure.** It already projects `null` and must not raise the alarm, or every
+  legitimate erasure becomes an alert and the signal is worthless.
+- **Zero matching lenses is a valid outcome, and must still attest.** If no active lens declares the
+  destroyed holder's type, nothing holds the plaintext and `projectionsRebuilt` is vacuously true — attest
+  immediately rather than leaving the erasure permanently unfinalized.
+- **Over-rebuild is the ratified direction** (§6.3): enumerate by holder *type*, not holder *instance*.
+- **The wire field on `Entry` is a Health-KV schema change**, so `docs/observability/health-kv-schema.md`
+  moves in the same commit — that is what keeps the change L2-safe.
+- **`lint-package-version`** demands a version bump for a `pkgmgr` change reaching a generated read-grant
+  producer lens; item 3b-i needed seven bumps for this reason. Re-run the gate rather than predicting it.
+
+### 18.6 Adjacent finds (filed now, not carried)
+
+- **`dispositionEvalErr` has no `CatPrivacyCritical` arm** (`pipeline.go:2116-2138`): the category is
+  defined and classified but falls through to the default `Nak`. Today that is unreachable, because the
+  category is only ever constructed inside `keyshredded` (`manager.go:382`, `:399`), which handles its own
+  pause and never returns the error into the pipeline's disposition path. This fire keeps it unreachable
+  (F2's alarm does not return a `PrivacyCritical` error up the evaluation path — it redacts and continues),
+  so the gap stays latent rather than being closed here. **Filed as a board row** naming the consumer: the
+  first caller that wraps an evaluation-path error as `PrivacyCritical`.
+- **`capReadShredTargets` skips hand-authored Postgres GrantTable cap-read producers** (no `Output`
+  descriptor) — already named in its own doc comment as a distinct gap; not this fire's, and unchanged by
+  it. Not filed anew; the comment carries it.
+
+### 18.7 Non-goals (the drift fence)
+
+- **No Fire 2 consumers.** No clinic `.encounter` split, no lease-signing `.profile` split, no
+  `patientDemographics.fullName` move, no FE. Lifting rule 5 makes those *possible*; it does not start them.
+- **No retained-class egress.** Deferred tail (a) stays shut; the two identity-only holder refusals stay.
+- **No period bucketing, no purpose-gated retained reveal, no background-check detail** — tails (b)–(d).
+- **No change to the identity kind's in-band scrub.** F1 ratified two mechanisms; `keyshredded`'s
+  behaviour is untouched and only its *comment* is re-derived.
+- **No cypher change to the six migrated lenses.** None needs one.
+- **No new sweep plan for secure lenses.** `sweep.go`'s stale *reason* is corrected; the *gate*
+  (`sweepEnrolment`) is not re-aimed.
