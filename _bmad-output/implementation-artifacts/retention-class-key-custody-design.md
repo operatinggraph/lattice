@@ -1453,3 +1453,125 @@ Full bar: `go build ./...` · `make vet` · `golangci-lint run ./...` ·
 - **Deferred tail (a)** — widening `piiKeyEnvelope` past `MATCH (i:identity)` so a retained record can
   egress. This fire *refuses* that case; it does not enable it.
 - The `json:"identityKey"` wire tags (§15.5).
+
+## 16. Fire 1 item 3a fire brief (build note, 2026-08-08)
+
+**Item 3 splits in two, at a green boundary.** §14's item 3 lists twelve deliverables spanning two
+different planes: a **destruction** half (an op, an event, an async key-destroyer, an operator lens) and a
+**delivery** half (`HolderTypes`, per-row `null`+alarm, the exported rebuild, the Refractor destruction
+consumer, six lens migrations). The destruction half is provable and green with zero consumers and changes
+no shipped behavior; the delivery half rewrites the failure posture of six live secure lenses. This fire
+builds **3a, the destruction half**; **3b** is the delivery half and lifts the install gate. The split is a
+narrowing of §14's item 3, not a re-scoping: every deliverable stays, in the same order §14 gives them, and
+the gate that makes the whole thing safe (`custodyscope.go` rule 5) stays shut across the boundary — so at
+no point does a package custody retained PHI on a DEK whose destruction cannot reach a read model.
+
+### 16.1 Scope sentence (narrowed from §11 Fire 1 item 3 / §14)
+
+> **Erasure vocabulary + destruction.** `ShredRetentionClassKey` + `privacy.retentionClassKeyShredded` +
+> `piiKey`'s `permittedCommands`; the retention-class shred worker; the `retentionKeyStatus` lens. **Plus
+> the one package edit deferred out of item 1:** `privacy-base`'s `piiKey` DDL description ("per-identity" →
+> "a key holder's DEK envelope") and its `permittedCommands` gaining the new verbs — bundled here so
+> privacy-base takes one version bump, not two.
+
+**Green bar (the acceptance criterion, provable with zero lenses and zero installed classes):** seed a live
+`vtx.retentionclass.<NanoID>` holder; `ShredRetentionClassKey` marks `<holder>.piiKey` `shredded=true`
+(writing the durable empty-`wrappedDEK` placeholder when the class never received a sensitive write) and
+emits `privacy.retentionClassKeyShredded`; the worker consumes it, calls `Vault.ShredKey(holderKey)`, and
+records `vaultKeyDestroyed`; a subsequent `Decrypt` under that holder fails `ErrKeyShredded`. Negative
+vectors: an absent/tombstoned holder; a holder key of the wrong vertex type; a finalization with no prior
+shred; a finalization naming an unknown step.
+
+### 16.2 Verified touch-list (every anchor re-checked live at `9a3ffb9e`)
+
+**Create** — `packages/privacy-base/shred_retention_class_key.go` (+ `_test.go`).
+
+| Site | Anchor | Edit |
+|---|---|---|
+| `packages/privacy-base/ddls.go:46-95` | `piiKey` DDL; `PermittedCommands` :51; description :52-60 | add both verbs; re-derive "per-identity" wording |
+| `packages/privacy-base/package.go:41-50` | `Version: "0.11.0"` :43 | bump; register the two new DDLs |
+| `packages/privacy-base/lenses.go:11,63-71` | `ShredStatusBucket` :11; `Lenses()` :63 | new bucket const + `retentionKeyStatus` entry |
+| `internal/privacyworker/manager.go:46-61,118-126` | consts; `Run` drives ONE consumer | second durable consumer, same `Config` |
+| `cmd/processor/main.go:251-264` | `privacyworker.New` wiring | run the second consumer |
+| `docs/contracts/01-addressing-and-envelope.md:180` | transitional note | narrow again, **UNCOMMITTED** |
+
+### 16.3 Precedents to mirror
+
+- **The op + event DDL** → `shred_identity_key.go` — the `ShredIdentityKey` arm (`:200-243`), the
+  `RecordShredFinalization` arm (`:245-278`, the slice §14 names), and `KeyShreddedEventDDL()`
+  (`:283-313`). **That file only**, per the ratification banner's build-hygiene caution — the erasure design
+  keeps the rest of the spine unchanged.
+- **The durable placeholder** → `shred_identity_key.go:228-235`. Load-bearing for the identical reason:
+  `LocalBackend.shredded` is in-memory (`vault/local.go:53`), so a skipped mutation would let a post-restart
+  sensitive write mint a fresh, unshredded class DEK.
+- **The worker** → `internal/privacyworker/manager.go:132-221` — same publish-then-Ack cascade idiom, same
+  `substrate.DeriveNanoID` requestId keyed on the triggering event's sequence, same `NakWithDelay` on a
+  failed `ShredKey` (a shred is never silently dropped).
+- **The lens** → `lenses.go:109-123` (`shredStatusSpec`), the null-safe `node.<aspect>.data.<field>` form so
+  a not-yet-recorded step projects null rather than failing.
+- **Permissions** → `permissions.go`: `ShredRetentionClassKey` ships **NO grant**, exactly as
+  `ShredIdentityKey` does — destroying a retention class is the data controller's decision, and its grant
+  posture belongs to the deployment. The finalization verb takes the operator/scope:any grant
+  `RecordShredFinalization` carries, for the same reason (the submitter is a service actor, and grants
+  attach to roles).
+
+### 16.4 Increment order + green checks
+
+1. **Op + event DDL + piiKey admission + version bump.**
+   `go test ./packages/privacy-base/ -run 'RetentionClass'`
+2. **The worker's second consumer + `cmd/processor` wiring.**
+   `go test ./internal/privacyworker/`
+3. **The `retentionKeyStatus` lens.**
+   `go test ./packages/privacy-base/ -run 'Lens|Cypher'`
+4. **Gates.** `go build ./...` · `make vet` · `golangci-lint run ./...` ·
+   `STRICT=1 go run ./scripts/lint-conventions.go` · `go test ./packages/privacy-base/ ./internal/privacyworker/ ./internal/pkgmgr/ ./internal/processor/`
+
+### 16.5 In-scope gotchas
+
+- **`packages/privacy-base` is RED at clean `main` under package-level load, and it is not this fire.**
+  `TestPurgeIdentityDedupFootprint_{WideSubject,DuplicateOfOnly}_ConvergesPastOnePage` fail
+  `outcome mismatch: got "rejected" want "accepted"` when the whole package runs, pass in isolation, and
+  pass whole-package under `PROCESSOR_SCRIPT_WALL_MS=5000` — measured three ways on a quiet host at
+  `9a3ffb9e` in a clean worktree. That is the filed row *"[privacy-base] The erasure walk's real ceiling is
+  wall time"* reproducing locally: the 250ms Starlark wall binds before the walk's own named stop. CI sets
+  the 5s wall, which is why CI is green. **Run this package's gate with `PROCESSOR_SCRIPT_WALL_MS=5000`**
+  and do not read those two failures as this fire's.
+- **A retention class cannot be installed, so the tests seed the holder directly.** `custodyscope.go` rule 5
+  still refuses `retentionClass` custody at install and this fire does **not** lift it (3b does). The op
+  requires only a live holder vertex, so the acceptance criterion is provable by seeding
+  `vtx.retentionclass.<NanoID>` — which is what keeps 3a green with zero consumers.
+- **The contract note's stated reason goes stale the moment this fire lands.** Contract #1 §1.6's
+  transitional note currently says `retentionClass` is refused at install "for one remaining reason:
+  `ShredRetentionClassKey` does not exist." After 3a it exists and the gate is still shut — for the
+  *delivery* reason. The note is re-derived in `main`, **still uncommitted**, as part of the same standing
+  proposal, not a new one.
+- **The holder's key aspect is `<holderKey>.piiKey`, type-agnostic already** — step 6.5's
+  `ensureKeyHolderKey` (`step65_encrypt.go:178-216`) keys off whatever holder `keyHolderFor` resolved, so
+  the class path needs no new aspect shape.
+- **`privacy-base` has no `verify-package-*` target** (already a filed row). Not added here.
+
+### 16.6 Adjacent finds
+
+- **`internal/refractor/failure`'s `CatPrivacyCritical` has no generic pipeline routing** — it is defined
+  and classified (`classify.go:30-35`, `:115-124`) but `dispositionEvalErr` (`pipeline.go:2115-2137`) never
+  branches on it; only `keyshredded/manager.go` acts on the tier, by hand. Not filed: 3b's per-row
+  `null`+alarm is precisely the fire that must either extend that routing or reuse the manual pattern, and
+  it is named here so 3b does not read the tier as already wired.
+- **`secureColumnsEqual` (`cmd/refractor/main.go:1366-1376`) compares `lens.SecureColumn` with `!=`**, so
+  adding `HolderTypes []string` breaks the hot-reload refusal path (`reload.go:84`) at compile time. Not
+  filed — it is a 3b touch-list entry, recorded so 3b does not discover it mid-build.
+- **Three parallel `SecureColumn` definitions** (`pipeline/secure.go:33`, `lens/corekv_source.go:283`,
+  `pkgmgr/definition.go:1092`) with two independent validation mirrors (`corekv_source.go:838-903`,
+  `bucketguard.go:106-190`). Not filed — 3b must change all five together, recorded here as its map.
+
+### 16.7 Non-goals (the drift fence)
+
+- **3b** — `SecureColumn.HolderTypes` replacing `IdentityKeyColumn` + its validation; per-row custody
+  failure projecting `null` + the privacy-tier alarm (F2); `secureIdentityKeyType`'s deletion;
+  `control.Service.RebuildRule` exported + serialized per lens; the Refractor destruction-event consumer
+  with the `HolderTypes` enumeration and the `projectionsRebuilt` attestation; the six shipped lens
+  migrations; `keyshredded/manager.go:31-37`'s excuse and `pipeline/sweep.go:29-33`'s stale reason
+  re-derived; **lifting `custodyscope.go` rule 5.**
+- **Fire 2** — the clinic and lease-signing consumers.
+- **Deferred tail (a)** — widening `piiKeyEnvelope` past `MATCH (i:identity)`.
+- The two `PurgeIdentityDedupFootprint` wall-clock failures (§16.5) — an already-filed row, not this fire.
