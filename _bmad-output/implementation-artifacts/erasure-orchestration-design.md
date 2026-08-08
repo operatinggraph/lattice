@@ -2699,3 +2699,114 @@ enumerations` row, unchanged by this increment.
 
 Narrowing `ShredIdentityKey` (build-order step 3), the operator surface and the `lint-conventions`
 rule (step 4), and anything that would give the Weaver's `GapActionSpec` an `OptionalReads` field.
+
+### What increment 8 built
+
+`packages/privacy-base/patterns.go` — the `identityErasure` pattern: four `systemOp` steps, two
+guarded, all four declaring their own read-sets; wired into the Definition, the manifest, and the
+structure pins. `PurgeIdentityDedupFootprint` gained `privacy.dedupFootprintSwept` (registered
+event-type DDL) and `UnbindIdentityCredentials` gained `identity.credentialsSwept`, both emitted
+unconditionally. `ShredIdentityKey` now accepts `subjectKey` as an equivalent name for its subject.
+
+### What the adversarial pass changed (3-layer: blind hunter · edge-case hunter · acceptance audit)
+
+Erasure plane, `scope:any` verbs, a legal obligation — full depth. **Four real defects, two of them
+found independently by both deep layers, all fixed before the merge rather than filed.** The pattern
+as first written was dead on arrival; the brief did not catch that, and the brief is where it should
+have been caught.
+
+**D1 — every instance would have died at cursor 0, and the design had already said so.**
+`ShredIdentityKey` names its subject `identityKey`; `submitSystemOp` builds
+`{"subjectKey": inst.SubjectKey}` and a pattern cannot reshape it — the payload field is the engine's,
+not the step's. So step 1 submits a payload the op rejects `InvalidArgument: identityKey: required`,
+on every instance, and the failure is not contained: no shred, no seal, therefore **no
+`erasureRequested` marker** — which is the residue lens's anchor predicate, so the Weaver's convergent
+tail never receives a row either. Both the spine and the guarantee die together. Nothing would have
+caught it: install validation checks step *structure*, never payload compatibility; the Processor does
+not enforce `InputSchema`; and any integration test that pre-shreds its fixture skips step 1 on its
+guard and never sends the payload at all. Increment 1's build note recorded this exact obligation and
+handed it to this increment (*"It is the pattern increment's to resolve"*) — the Phase-0 brief read
+§5 and the increment-7 note and missed a hand-off written three notes earlier. Fixed on the shred's
+side (accept either name, refuse a disagreeing pair rather than pick a precedence — resolving a
+disagreement means choosing which of two named people to irreversibly destroy a key for).
+
+**D2 — the step-1 guard destroyed a key for the one subject class the design refuses outright.** A
+merged-away identity keeps a live vertex; its credentials and indexes already moved to the survivor,
+so `SealIdentityForErasure` refuses it `IdentityMerged`. But the seal is step 2. A step 1 guarded only
+on `piiKey.data.shredded` runs first and shreds — irreversibly, via the async Vault destruction — for
+a subject whose erasure the design says must not proceed at all. The guard gained an
+`absent(subject.mergedInto.data.value)` conjunct, so the instance now fails at the seal with nothing
+burned.
+
+**D3 — the same guard wedged an identity forever, and the error message named the remedy it forbade.**
+An envelope shredded before the finalization-cycle change carries `shredded=true` and **no**
+`shreddedAt`. Guarded on `shredded` alone, step 1 skips it permanently — and step 2 then refuses
+`ErasureNotShredded: … re-run ShredIdentityKey to restamp it`, which is precisely what the guard
+prevents. A re-shred is idempotent, so the disjunct `absent(subject.piiKey.data.shreddedAt)` costs
+nothing and is what unwedges the erasure.
+
+**D4 — fixing step 4's emission alone bought nothing, because step 3 stalls first.** D3 of the brief
+gave `PurgeIdentityDedupFootprint` an event so the pattern's last step would not ride a 60s deadline.
+`UnbindIdentityCredentials` has the identical shape one step earlier: it emits `identity.unbound` **per
+credential**, so a pass that unbinds nothing emits nothing — and on the ordinary path it unbinds
+nothing, because the un-narrowed `ShredIdentityKey` already tombstoned the `boundTo` links in its own
+commit. Step 3 is guardless, so it runs for every subject. The stall was not removed by the brief's
+fix, only moved. `identity.credentialsSwept` is the pass-level record the step advances on, emitted
+alongside the per-credential retractions rather than instead of them: the two answer different
+questions, and only the pass-level one can answer "did this step run".
+
+**Two claims corrected rather than defended.** The pattern doc asserted the §5.5 property — *"a dead
+spine degrades an erasure from prompt to eventual, never from complete to incomplete"* — as though it
+held throughout. It holds only from step 2 onward: the tail is anchored on the marker step 2 writes,
+so a death at step 1 or 2 leaves no row and no dispatch. And there is a live way to reach that today —
+step 1's op still carries its own unbounded in-commit cascade and refuses `ShredBatchTooLarge` above
+999 mutations, so a well-connected person's erasure fails at cursor 0, which is the subject class the
+paged sweeps exist to serve. Retiring that is build-order step 3 (narrowing the op), and until it
+lands the failed instance is the only signal. Separately, a **completed** instance means the spine
+ran, not that the person is erased: steps 3 and 4 sweep one page each and complete with residue
+outstanding by design.
+
+**Two superseded directives in the corpus, rewritten rather than left.**
+`seal_identity_for_erasure.go` carried a bold *"The pattern's step-2 guard as ratified defeats this,
+and must change"* — falsified by increment 5, which made the completeness test field-diff the LIVE
+envelope (`sealedForShreddedAt <> piiKey.shreddedAt`) rather than the marker. Keeping the guard is
+correct; the comment was instructing the next reader to break working code. The same file's
+`identityKey`/`subjectKey` divergence note now records how the divergence closed.
+
+**Test-quality findings, all fixed.** The read-set coverage guard compared the pattern step against a
+third hand-written copy of the read-set rather than against the fixture's own `ContextHint`, so a
+fixture drifting from the dispatcher would have kept it green — the literals are now shared helpers.
+The emission test never asserted the `duplicateOf` branch's `relation` label, so hardcoding it to
+`"indexes"` passed; a third pass covers it. One test comment narrated a change relative to a prior
+state (the CLAUDE.md no-changelog rule) and was rewritten to describe what is true now.
+
+**Refuted / verified-correct under attack**, recorded so a later fire does not re-litigate: the
+`scope:any` authorization chain is sound end to end (a `scope:any` grant ignores `AuthContext.Target`
+entirely, and `loom holdsRole operator` is seeded in the same atomic primordial batch, so the ordering
+is guaranteed); the new events cannot loop, storm, or mis-advance an instance (Weaver targets are
+lens/CDC-driven, not event-driven, and an event whose `requestId` is not a live token resolves
+nothing); the explicit `targetKey` in the event data does exactly what it claims, since step 7
+otherwise pairs event *i* with mutation *i* and would name an `identityindex` vertex on a swept pass
+and nothing at all on an empty one; and the declared `optionalReads` really do land in `state`, which
+is what makes step 2's `subject.mergedInto` declaration load-bearing rather than decorative.
+
+### Residuals — named, with their consumers
+
+1. **A well-connected person's erasure still fails at step 1**, because `ShredIdentityKey` keeps its
+   unbounded in-commit cascade and its 999-mutation refusal until the narrowing lands. **Consumer: the
+   narrowing itself (build-order step 3)**, which is already the item's next increment — not filed as
+   a separate row.
+2. **`privacy-operator-grant` is a precondition of the pattern, not an optional extra.** A deployment
+   installing privacy-base without it gets a pattern whose steps 2–4 are authorized and whose first is
+   not. Recorded in `permissions.go` at the grant-posture paragraph that used to read as though the
+   absence were deliberate for all submitters. **Consumer: any non-default deployment**; no row —
+   the posture is Andrew's standing decision and the doc now names the coupling.
+3. **A step-op rejection reaches the operator 60s later as the generic `"step N deadline exceeded; op
+   rejected or lost"`.** `ShredBatchTooLarge`, `IdentityMerged` and `ErasureNotShredded` are
+   indistinguishable at the Loom terminal. **Consumer: the operator surface (§12 step 4)**, which
+   reads the residue row and the instance together — folded into that step rather than filed twice.
+4. **Loom's `identity` completion domain now runs a consumer over the whole `events.identity.>`
+   subject.** No other shipped pattern needs a domain that broad. Bounded and correct — an unmatched
+   event is one `loom-state` GET and an Ack — but it is the first pattern to pay it. **Consumer: the
+   next pattern completing on a high-volume domain.** Noted, not filed.
+5. Increments 3–7's other residuals are re-inherited verbatim.
