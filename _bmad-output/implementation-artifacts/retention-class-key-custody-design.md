@@ -1568,7 +1568,7 @@ shred; a finalization naming an unknown step.
 | `packages/privacy-base/lenses.go:11,63-71` | `ShredStatusBucket` :11; `Lenses()` :63 | new bucket const + `retentionKeyStatus` entry |
 | `internal/privacyworker/manager.go:46-61,118-126` | consts; `Run` drives ONE consumer | second durable consumer, same `Config` |
 | `cmd/processor/main.go:251-264` | `privacyworker.New` wiring | run the second consumer |
-| `docs/contracts/01-addressing-and-envelope.md:180` | transitional note | narrow again, **UNCOMMITTED** |
+| `docs/contracts/01-addressing-and-envelope.md:180` | transitional note | narrow again — superseded: the transitional was deleted outright at ratification (`79d984a5`), the gate having lifted |
 
 ### 16.3 Precedents to mirror
 

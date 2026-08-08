@@ -1122,7 +1122,8 @@ derive-a-read-set-from-the-subject helper with its invariant recorded in the com
 - **Contract #10 §10.5 freezes the step shape** — *"Step shape: `{ kind, operation, guard? }` for
   `userTask`/`systemOp`"* (`docs/contracts/10-orchestration-loom.md:55`). §14's "no contract change" is
   wrong on this one point: two new systemOp-only step fields extend a frozen shape. The edit is made in
-  `main` **UNCOMMITTED** as the proposal; the code ships around it.
+  `main` **UNCOMMITTED** as the proposal; the code ships around it. *(Ratified + committed 2026-08-08,
+  `1ad3f1c4`, trimmed to its normative core.)*
 - Aspect keys stay 4-segment: `subject.<aspect>` resolves to `inst.SubjectKey + "." + aspect`, exactly the
   shape `userTaskOptionalReads` already builds (`subjectKey + ".availability"`).
 - **A package version bump is required even though no package entity changes.**
@@ -1201,7 +1202,8 @@ promptness, never for correctness.** Two paths, traced end to end:
 `subject` / `subject.<aspect>` template grammar, and resolved against `inst.SubjectKey` in
 `submitSystemOp` — the arm that has passed `nil, nil, nil` to `buildOutbox` since Phase 2.
 
-**Contract edit prepared, UNCOMMITTED, for Andrew:** `docs/contracts/10-orchestration-loom.md` §10.5 step
+**Contract edit prepared for Andrew (ratified + committed 2026-08-08, `1ad3f1c4`, trimmed to its
+normative core):** `docs/contracts/10-orchestration-loom.md` §10.5 step
 shape, extended with the two systemOp-only read fields, the localName constraint on the aspect segment,
 and the `subjectKey`-names-a-vertex requirement the grammar's confinement rests on. Affected consumers:
 `internal/loom` (Step, validate, submitSystemOp, the trigger guard), `internal/pkgmgr` (StepSpec, spec
