@@ -504,8 +504,14 @@ func TestManager_RecordsRetentionClassFinalizationAfterShred(t *testing.T) {
 	if env.Payload.IdentityKey != "" {
 		t.Errorf("the class verb must not carry an identityKey, got %q", env.Payload.IdentityKey)
 	}
-	if len(env.ContextHint.Reads) != 1 || env.ContextHint.Reads[0] != holderKey+".piiKey" {
-		t.Errorf("contextHint.reads = %v, want [%s.piiKey] — the OCC condition the racing sibling record needs",
+	// Two declared reads, each load-bearing for a different reason: the piiKey is
+	// the OCC condition the racing sibling record needs, and the ACTOR's own
+	// vertex is what the script reads to refuse an attestation written by anyone
+	// but the privacy service actor — an undeclared actor fails the op closed.
+	if len(env.ContextHint.Reads) != 2 ||
+		env.ContextHint.Reads[0] != holderKey+".piiKey" ||
+		env.ContextHint.Reads[1] != actorKey {
+		t.Errorf("contextHint.reads = %v, want [%s.piiKey <actor>] — the OCC condition plus the actor pin",
 			env.ContextHint.Reads, holderKey)
 	}
 	if !substrate.IsValidNanoID(env.RequestID) {

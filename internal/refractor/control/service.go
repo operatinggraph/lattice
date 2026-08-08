@@ -103,7 +103,13 @@ type Rebuilder interface {
 	// per lens. Part of the interface rather than an optional type assertion so
 	// a future Rebuilder cannot satisfy Rebuilder while silently lacking the
 	// completion signal an erasure attestation depends on.
-	RebuildAndWait(ctx context.Context, truncate bool) error
+	//
+	// wait bounds the WAIT, never the rebuild: the rescan and its completion
+	// watcher outlive an expired budget, and only this caller gives up. An
+	// attesting caller must pass a positive bound — it runs inside a strictly
+	// serial durable handler, where an unbounded wait on one lens stops every
+	// later message on that consumer.
+	RebuildAndWait(ctx context.Context, truncate bool, wait time.Duration) error
 }
 
 // Deleter is implemented by any component that can cleanly stop a rule and remove
@@ -626,16 +632,18 @@ func (s *Service) PauseRule(ctx context.Context, ruleID string) error {
 // ATTEST a rebuild finished before recording an erasure step
 // (retention-class-key-custody-design.md §6.3 step 4).
 //
-// Returns an error if ruleID is not registered, or if the rebuild fails or its
-// wait is cancelled.
-func (s *Service) RebuildRule(ctx context.Context, ruleID string, truncate bool) error {
+// Returns an error if ruleID is not registered, if the rebuild fails, if its
+// wait is cancelled, or — as pipeline.ErrRebuildWaitTimeout — if wait expires
+// with the rescan still draining. That last one is a failure, not a completion:
+// the caller does not know the lens is rebuilt, so it must not attest.
+func (s *Service) RebuildRule(ctx context.Context, ruleID string, truncate bool, wait time.Duration) error {
 	s.mu.Lock()
 	r, ok := s.rebuilderByRuleID[ruleID]
 	s.mu.Unlock()
 	if !ok {
 		return fmt.Errorf("control: rule %q: %w", ruleID, ErrRuleNotRegistered)
 	}
-	return r.RebuildAndWait(ctx, truncate)
+	return r.RebuildAndWait(ctx, truncate, wait)
 }
 
 // NullifyRow deletes ONE projected row (by its Into.Key values) from ruleID's

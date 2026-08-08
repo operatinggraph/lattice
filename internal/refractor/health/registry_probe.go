@@ -138,10 +138,30 @@ func (p *RegistryProbe) Run(ctx context.Context) {
 // set in place rather than clearing it (a transient KV-listing error must
 // never look like "registry reconciled clean").
 func (p *RegistryProbe) check(ctx context.Context) {
+	if _, err := p.ReconcileNow(ctx); err != nil {
+		p.logger.Warn("registry-reconciliation probe: enumerate declared lenses failed", "err", err)
+	}
+}
+
+// ReconcileNow runs one reconciliation pass immediately and returns the lens
+// IDs declared in Core KV but absent from the registry, storing the result the
+// same way the periodic check does.
+//
+// It exists because "the registry is loaded" is a question with a caller that
+// cannot wait for a tick: the retention-class destruction consumer must not
+// attest an erasure off an enumeration taken over a registry that has not
+// finished loading, where "no lens declares this holder type" and "no lens has
+// registered yet" are the same empty set. This answers it against Core KV —
+// the platform's persistent lens registry — rather than against the in-process
+// map whose incompleteness is the hazard.
+//
+// An error is NOT an empty missing set: a caller must treat it as "unknown",
+// never as "reconciled clean", which is why the error is returned rather than
+// folded into the slice.
+func (p *RegistryProbe) ReconcileNow(ctx context.Context) ([]string, error) {
 	declared, err := p.declaredLensIDs(ctx)
 	if err != nil {
-		p.logger.Warn("registry-reconciliation probe: enumerate declared lenses failed", "err", err)
-		return
+		return nil, err
 	}
 
 	registeredSet := make(map[string]struct{}, len(p.registered()))
@@ -165,6 +185,7 @@ func (p *RegistryProbe) check(ctx context.Context) {
 		p.logger.Warn("registry-reconciliation probe: lens(es) declared but not registered",
 			"count", len(missing), "lensIds", missing)
 	}
+	return missing, nil
 }
 
 // declaredLensIDs enumerates every `vtx.meta.<id>` vertex whose envelope

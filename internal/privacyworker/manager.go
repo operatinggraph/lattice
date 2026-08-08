@@ -306,12 +306,12 @@ func (m *Manager) handleRetentionClassKeyShredded(ctx context.Context, msg subst
 // worker carries its own copy to keep the module boundary clean (the
 // weaver/objectmanager idiom — substrate-only, no internal/processor import).
 type finalizationOpEnvelope struct {
-	RequestID     string                  `json:"requestId"`
-	Lane          string                  `json:"lane"`
-	OperationType string                  `json:"operationType"`
-	Actor         string                  `json:"actor"`
-	SubmittedAt   string                  `json:"submittedAt"`
-	Payload       json.RawMessage         `json:"payload"`
+	RequestID     string                   `json:"requestId"`
+	Lane          string                   `json:"lane"`
+	OperationType string                   `json:"operationType"`
+	Actor         string                   `json:"actor"`
+	SubmittedAt   string                   `json:"submittedAt"`
+	Payload       json.RawMessage          `json:"payload"`
 	ContextHint   *finalizationContextHint `json:"contextHint,omitempty"`
 }
 
@@ -346,6 +346,11 @@ type finalization struct {
 // entry. A prefix is part of the derivation, so it is frozen per kind: an
 // in-flight event redelivered across a deploy must derive the same id on both
 // sides of it, or the tracker sees a duplicate rather than a retry.
+//
+// ContextHint.Reads also declares the ACTOR's own vertex: the script pins these
+// attestations to the identity.system.privacy service actor by reading
+// state[op.actor].class, and an undeclared actor fails the op closed. So the
+// declaration is a correctness requirement of the submit, not an optimization.
 func (m *Manager) submitFinalization(ctx context.Context, f finalization) error {
 	payload, err := json.Marshal(map[string]any{
 		f.SubjectField: f.HolderKey,
@@ -362,7 +367,9 @@ func (m *Manager) submitFinalization(ctx context.Context, f finalization) error 
 		Actor:         m.cfg.ActorKey,
 		SubmittedAt:   substrate.FormatTimestamp(time.Now()),
 		Payload:       payload,
-		ContextHint:   &finalizationContextHint{Reads: []string{f.HolderKey + ".piiKey"}},
+		ContextHint: &finalizationContextHint{
+			Reads: []string{f.HolderKey + ".piiKey", m.cfg.ActorKey},
+		},
 	}
 	data, err := json.Marshal(env)
 	if err != nil {

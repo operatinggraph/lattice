@@ -122,6 +122,16 @@ func (r *Reporter) SetActive(ctx context.Context) error {
 		// not silently restart the walk or zero the counter the operator reads.
 		SweepCursor:     existing.SweepCursor,
 		SweepReconciled: existing.SweepReconciled,
+		// Every CUMULATIVE fault counter carries forward for the same reason,
+		// and SecureRedactions is the one that made the omission load-bearing:
+		// a rebuild calls SetRebuilding on the way in and SetActive on the way
+		// out, so a dropped counter is zeroed twice by the very operation an
+		// erasure uses to reach the read models. The LensSecureRedaction issue
+		// then goes quiet while the unresolvable nulls are still being served —
+		// exactly the delta-signal failure the counter is cumulative to avoid.
+		SecureRedactions:  existing.SecureRedactions,
+		EvalDriftRetries:  existing.EvalDriftRetries,
+		EvalDriftRequeues: existing.EvalDriftRequeues,
 	}
 	if err := r.put(ctx, entry); err != nil {
 		return err
@@ -171,10 +181,14 @@ func (r *Reporter) SetPaused(ctx context.Context, reason, lastError string) erro
 		LastError:      lastErrPtr,          // null when no error message; non-nil otherwise
 		LastUpdated:    time.Now().UTC().Format(time.RFC3339),
 		RuleEngine:     r.RuleEngine(),
-		// Preserved for the same reason as in SetActive: sweep progress is
-		// lens-lifetime state, not status-transition state.
-		SweepCursor:     existing.SweepCursor,
-		SweepReconciled: existing.SweepReconciled,
+		// Preserved for the same reason as in SetActive: sweep progress and the
+		// cumulative fault counters are lens-lifetime state, not
+		// status-transition state.
+		SweepCursor:       existing.SweepCursor,
+		SweepReconciled:   existing.SweepReconciled,
+		SecureRedactions:  existing.SecureRedactions,
+		EvalDriftRetries:  existing.EvalDriftRetries,
+		EvalDriftRequeues: existing.EvalDriftRequeues,
 	}
 	if err := r.put(ctx, entry); err != nil {
 		return err
@@ -213,10 +227,14 @@ func (r *Reporter) SetRebuilding(ctx context.Context) error {
 		LastError:      nil,                 // JSON null
 		LastUpdated:    time.Now().UTC().Format(time.RFC3339),
 		RuleEngine:     r.RuleEngine(),
-		// Preserved for the same reason as in SetActive: sweep progress is
-		// lens-lifetime state, not status-transition state.
-		SweepCursor:     existing.SweepCursor,
-		SweepReconciled: existing.SweepReconciled,
+		// Preserved for the same reason as in SetActive: sweep progress and the
+		// cumulative fault counters are lens-lifetime state, not
+		// status-transition state.
+		SweepCursor:       existing.SweepCursor,
+		SweepReconciled:   existing.SweepReconciled,
+		SecureRedactions:  existing.SecureRedactions,
+		EvalDriftRetries:  existing.EvalDriftRetries,
+		EvalDriftRequeues: existing.EvalDriftRequeues,
 	}
 	if err := r.put(ctx, entry); err != nil {
 		return err

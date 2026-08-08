@@ -102,6 +102,14 @@ type DurableConsumerConfig struct {
 	// A zero value falls back to DefaultRedeliveryDelay. It has no effect on
 	// plain Nak (immediate redelivery) decisions.
 	RedeliveryDelay time.Duration
+	// AckWait is how long JetStream waits for a Decision before treating the
+	// message as un-acked and redelivering it. A zero value leaves JetStream's
+	// 30s default, which is right for a handler that returns promptly and wrong
+	// for one that blocks on real work: the loop below is strictly serial, so a
+	// handler that runs longer than AckWait is redelivered WHILE STILL RUNNING,
+	// and each redelivery re-does the whole handler. Any consumer whose handler
+	// can legitimately exceed 30s must set this above its own upper bound.
+	AckWait time.Duration
 	// Logger is the diagnostics sink. Defaults to slog.Default() when nil.
 	Logger *slog.Logger
 }
@@ -144,6 +152,9 @@ func (c *Conn) RunDurableConsumer(ctx context.Context, cfg DurableConsumerConfig
 	}
 	if cfg.MaxDeliver > 0 {
 		consCfg.MaxDeliver = cfg.MaxDeliver
+	}
+	if cfg.AckWait > 0 {
+		consCfg.AckWait = cfg.AckWait
 	}
 
 	cons, err := c.js.CreateOrUpdateConsumer(ctx, cfg.Stream, consCfg)

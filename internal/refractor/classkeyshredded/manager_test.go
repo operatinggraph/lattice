@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -25,6 +26,10 @@ const (
 	classHolder = "vtx.retentionclass.RCkeyHLDRabcdefghijk"
 	lensSecure  = "rule-secure-clinical"
 	lensOther   = "rule-secure-other"
+	// attestingActor enables the finalization submit. The harness wires no Conn,
+	// so a submit dereferences a nil connection and panics — which is what makes
+	// "the attestation was withheld" an assertion rather than a comment.
+	attestingActor = "vtx.identity.privacySvcActor0000"
 )
 
 // recordingRebuilder records which lenses were rebuilt, and can fail a chosen
@@ -37,7 +42,13 @@ type recordingRebuilder struct {
 }
 
 func (r recordingRebuilder) Rebuild(context.Context, bool) error { return r.err }
-func (r recordingRebuilder) RebuildAndWait(_ context.Context, truncate bool) error {
+func (r recordingRebuilder) RebuildAndWait(_ context.Context, truncate bool, wait time.Duration) error {
+	if wait <= 0 {
+		// Guarded here rather than left to review: this wait runs inside a
+		// strictly serial durable handler, so an unbounded one stops every later
+		// class-key destruction for the life of the process.
+		panic("a destruction rebuild must pass a bounded wait")
+	}
 	if truncate {
 		// Guarded here rather than left to review: truncating would delete every
 		// row of a lens that also carries other classes' records, when the whole
@@ -63,6 +74,8 @@ func newHarness(t *testing.T, actorKey string) *harness {
 	t.Helper()
 	h := &harness{svc: control.NewService()}
 	h.mgr = New(Config{Control: h.svc, ActorKey: actorKey})
+	// Ready by default: the tests that care about readiness override it.
+	h.mgr.SetRegistryReady(func(context.Context) error { return nil })
 	return h
 }
 
@@ -105,6 +118,10 @@ func TestHandle_RebuildsEveryLensDeclaringTheHolderType(t *testing.T) {
 // complete and MUST still be attested. Leaving it unattested would park the
 // operator's retentionKeyStatus row forever on the strength of there being
 // nothing to do.
+//
+// This is only sound because the registry is READY: an empty target set means
+// "nothing declares this holder type" only when the enumeration it came from
+// could see everything. The readiness tests below cover the other reading.
 func TestHandle_NoDeclaringLensStillAttests(t *testing.T) {
 	h := newHarness(t, "")
 	h.mgr.SetTargetLister(func(string) []RebuildTarget { return nil })
@@ -121,7 +138,7 @@ func TestHandle_NoDeclaringLensStillAttests(t *testing.T) {
 // key no longer exists. It is paused, and — the load-bearing half — the
 // attestation is withheld, so nothing records an erasure that did not complete.
 func TestHandle_AFailedRebuildWithholdsTheAttestation(t *testing.T) {
-	h := newHarness(t, "")
+	h := newHarness(t, attestingActor)
 	h.register(lensSecure, errors.New("target unreachable"))
 	h.register(lensOther, nil)
 	h.mgr.SetTargetLister(func(string) []RebuildTarget {
@@ -134,8 +151,9 @@ func TestHandle_AFailedRebuildWithholdsTheAttestation(t *testing.T) {
 	assert.Equal(t, []string{lensSecure}, h.failed)
 	assert.Equal(t, []string{lensOther}, h.built,
 		"one lens's failure must not skip the remaining lenses")
-	// allClean is false, so no finalization is submitted. With no Conn wired, a
-	// submit attempt would panic — reaching Ack without one is the assertion.
+	// allClean is false, so no finalization is submitted. The harness carries an
+	// ActorKey (so the submit is enabled) and no Conn (so a submit would panic
+	// on a nil connection) — reaching Ack without panicking is the assertion.
 }
 
 // A lens that exists in the corpus but has not registered yet (a Refractor
@@ -158,7 +176,7 @@ func TestHandle_UnregisteredLensRetriesRatherThanAttesting(t *testing.T) {
 // nak-looping. It gives up LOUDLY and still withholds the attestation — the
 // erasure is genuinely incomplete, and the stuck row is the signal.
 func TestHandle_UnregisteredLensGivesUpAfterTheBudgetWithoutAttesting(t *testing.T) {
-	h := newHarness(t, "")
+	h := newHarness(t, attestingActor)
 	h.mgr.SetTargetLister(func(string) []RebuildTarget {
 		return []RebuildTarget{{RuleID: "rule-never-registers"}}
 	})
@@ -196,4 +214,82 @@ func TestHandle_MalformedEventsAreDroppedNotRetried(t *testing.T) {
 func TestNew_PanicsWithoutAControlService(t *testing.T) {
 	assert.Panics(t, func() { New(Config{}) },
 		"every handler path dereferences Control; failing at construction beats panicking on the first real event")
+}
+
+// The registry is the enumeration's ground truth, so an incomplete one makes the
+// target set SHORT, not merely empty — every lens that has not registered yet is
+// silently absent from it. Attesting off that would record a complete erasure
+// while the missing lenses kept serving plaintext, which is the vacuous-Ack
+// failure the identity half's static floor target exists to prevent. A class
+// holder can have no such floor (nothing obliges a lens to bind a retention
+// class), so the readiness signal is explicit and gates the whole delivery.
+func TestHandle_AnUnreconciledRegistryRetriesRatherThanEnumeratingOverIt(t *testing.T) {
+	h := newHarness(t, attestingActor)
+	h.mgr.SetRegistryReady(func(context.Context) error {
+		return errors.New("2 lens(es) declared in Core KV but not registered")
+	})
+	h.register(lensSecure, nil)
+	h.mgr.SetTargetLister(func(string) []RebuildTarget { return []RebuildTarget{{RuleID: lensSecure}} })
+
+	dec := h.mgr.handleClassKeyShredded(context.Background(), eventFor(t, classHolder))
+
+	assert.Equal(t, substrate.NakWithDelay, dec)
+	assert.Empty(t, h.built, "the enumeration must not even run over a registry that cannot be trusted")
+	assert.Zero(t, h.mgr.HandledTotal(), "a redelivery is not a completed handling")
+}
+
+// Absence of a readiness check is NOT readiness. The check is wired late in the
+// Refractor's startup — after the lens source starts — while this consumer's
+// durable is running from the first moment, and its DeliverAll policy replays
+// the whole subject history. So the un-wired window is exactly when a vacuous
+// attestation is both most likely and most wrong.
+func TestHandle_AnUnwiredReadinessCheckIsTreatedAsNotReady(t *testing.T) {
+	h := &harness{svc: control.NewService()}
+	h.mgr = New(Config{Control: h.svc, ActorKey: attestingActor})
+	h.mgr.SetTargetLister(func(string) []RebuildTarget { return nil })
+
+	dec := h.mgr.handleClassKeyShredded(context.Background(), eventFor(t, classHolder))
+
+	assert.Equal(t, substrate.NakWithDelay, dec,
+		"an empty target set read off a registry with no readiness signal must never attest")
+}
+
+// The retry is bounded, because a registry that never reconciles is an operator
+// condition (LensRegistryIncomplete), not something to nak-loop on forever. Past
+// the budget it delivers to whatever IS registered — better than nothing — and
+// still withholds the attestation, leaving the retentionKeyStatus row visibly
+// in-flight, which is the honest reading of a registry this process cannot see
+// all of.
+func TestHandle_AnUnreconciledRegistryGivesUpAfterTheBudgetWithoutAttesting(t *testing.T) {
+	h := newHarness(t, attestingActor)
+	h.mgr.SetRegistryReady(func(context.Context) error { return errors.New("registry never reconciled") })
+	h.register(lensSecure, nil)
+	h.mgr.SetTargetLister(func(string) []RebuildTarget { return []RebuildTarget{{RuleID: lensSecure}} })
+
+	msg := eventFor(t, classHolder)
+	msg.NumDelivered = maxNotReadyDeliveries + 1
+	dec := h.mgr.handleClassKeyShredded(context.Background(), msg)
+
+	assert.Equal(t, substrate.Ack, dec, "the redelivery budget is exhausted")
+	assert.Equal(t, []string{lensSecure}, h.built,
+		"what IS registered is still rebuilt — the destruction reaches what it can reach")
+	// No submit, so no panic on the nil Conn: the attestation is withheld.
+}
+
+// A cancelled context is a rolling deploy, not a lens fault. Acking here would
+// advance the durable cursor past a destruction no lens was rebuilt for, with
+// nothing left to redrive it: the projectionsRebuilt step would never be
+// recorded and no later event would enumerate this holder again.
+func TestHandle_AShutdownMidRebuildIsRetriedNotAcked(t *testing.T) {
+	h := newHarness(t, attestingActor)
+	h.register(lensSecure, context.Canceled)
+	h.mgr.SetTargetLister(func(string) []RebuildTarget { return []RebuildTarget{{RuleID: lensSecure}} })
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	dec := h.mgr.handleClassKeyShredded(ctx, eventFor(t, classHolder))
+
+	assert.Equal(t, substrate.NakWithDelay, dec,
+		"a shutdown must redeliver the destruction to the next process, not lose it")
+	assert.Zero(t, h.mgr.HandledTotal())
 }

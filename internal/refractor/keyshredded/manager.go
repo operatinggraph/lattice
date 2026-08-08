@@ -455,7 +455,11 @@ type finalizationContextHint struct {
 }
 
 // submitFinalization publishes one RecordShredFinalization
-// {projectionsNullified} op. ContextHint.Reads declares the piiKey aspect so
+// {projectionsNullified} op. ContextHint.Reads also declares the ACTOR's own
+// vertex: the script pins this attestation to the identity.system.privacy
+// service actor by reading state[op.actor].class, so an undeclared actor fails
+// the op closed — the declaration is a correctness requirement of the submit,
+// not an optimization. It declares the piiKey aspect so
 // the record is hydrated + OCC-conditioned (the sibling vaultKeyDestroyed
 // record can race this one on the system lane's concurrent workers;
 // conditioning turns a would-be lost-update into a transparent commit-path
@@ -479,7 +483,9 @@ func (m *Manager) submitFinalization(ctx context.Context, identityKey string, se
 		Actor:         m.cfg.ActorKey,
 		SubmittedAt:   substrate.FormatTimestamp(time.Now()),
 		Payload:       payload,
-		ContextHint:   &finalizationContextHint{Reads: []string{identityKey + ".piiKey"}},
+		ContextHint: &finalizationContextHint{
+			Reads: []string{identityKey + ".piiKey", m.cfg.ActorKey},
+		},
 	}
 	data, err := json.Marshal(env)
 	if err != nil {

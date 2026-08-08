@@ -1268,12 +1268,22 @@ func (h *LatticeHeartbeater) evalLenses(now time.Time) (map[string]map[string]an
 			alert = "unreadable"
 			unreadable = append(unreadable, fmt.Sprintf("%s (%s)", name, s.Unreadable))
 			h.resetLensLagState(name)
+			// The redaction count survives an unreadable cycle for the same
+			// reason the sweep verdicts do: the reporter-derived inputs are the
+			// untrusted ones, and this count comes from a status read that
+			// SUCCEEDED (the provider carries it forward past a failed pending
+			// read). A known count of nulls being served is not made unknown by
+			// a fault observing something else.
+			alert = raiseAlert(alert, evalSecureRedaction(name, s, &redacting))
 			m := map[string]any{
 				"status":          s.Status,
 				"projectionLag":   nil,
 				"lastProjectedAt": "",
 				"alert":           alert,
 				"unreadable":      s.Unreadable,
+			}
+			if s.SecureRedactions > 0 {
+				m["secureRedactions"] = s.SecureRedactions
 			}
 			addLensSweepMetrics(m, s)
 			metric[name] = m
@@ -1299,15 +1309,7 @@ func (h *LatticeHeartbeater) evalLenses(now time.Time) (map[string]map[string]an
 		if !s.LastProjectedAt.IsZero() {
 			lastProjectedAt = substrate.FormatTimestamp(s.LastProjectedAt)
 		}
-		if s.SecureRedactions > 0 {
-			// Raised on the CUMULATIVE count, not a per-cycle delta: a redaction
-			// is not a transient the next cycle clears — the null is written into
-			// the read model and stays there until whatever made it unresolvable
-			// is fixed and the lens reprojects. A delta-based signal would go
-			// quiet while the wrong rows were still being served.
-			alert = raiseAlert(alert, "secure-redaction")
-			redacting = append(redacting, fmt.Sprintf("%s (%d)", name, s.SecureRedactions))
-		}
+		alert = raiseAlert(alert, evalSecureRedaction(name, s, &redacting))
 		m := map[string]any{
 			"status":          s.Status,
 			"projectionLag":   s.ProjectionLag,
@@ -1398,6 +1400,23 @@ func (h *LatticeHeartbeater) evalLenses(now time.Time) (map[string]map[string]an
 // a listing to its own rows. That decision is otherwise a line in the
 // activation log, and a lens quietly running without its only stale-row
 // detector reads exactly like a lens whose sweep keeps finding nothing.
+// evalSecureRedaction returns the alert token for a lens that has projected one
+// or more secure columns as null because it could not resolve them, appending
+// its label to the report list.
+//
+// Raised on the CUMULATIVE count, not a per-cycle delta: a redaction is not a
+// transient the next cycle clears — the null is written into the read model and
+// stays there until whatever made it unresolvable is fixed and the lens
+// reprojects. A delta-based signal would go quiet while the wrong rows were
+// still being served.
+func evalSecureRedaction(name string, s LensLivenessStatus, redacting *[]string) string {
+	if s.SecureRedactions == 0 {
+		return ""
+	}
+	*redacting = append(*redacting, fmt.Sprintf("%s (%d)", name, s.SecureRedactions))
+	return "secure-redaction"
+}
+
 func addLensSweepMetrics(m map[string]any, s LensLivenessStatus) {
 	enrolled := s.SweepInterval > 0
 	m["sweepEnrolled"] = enrolled

@@ -287,8 +287,9 @@ type mockRebuilder struct {
 	mu          sync.Mutex
 	rebuilt     bool
 	truncateArg bool
-	waited      bool  // set only by RebuildAndWait, so a test can tell the two arms apart
-	err         error // non-nil → Rebuild returns this error
+	waited      bool          // set only by RebuildAndWait, so a test can tell the two arms apart
+	waitArg     time.Duration // the budget the caller passed, so a test can assert it is bounded
+	err         error         // non-nil → Rebuild returns this error
 }
 
 func (m *mockRebuilder) Rebuild(_ context.Context, truncate bool) error {
@@ -299,11 +300,18 @@ func (m *mockRebuilder) Rebuild(_ context.Context, truncate bool) error {
 	return m.err
 }
 
-func (m *mockRebuilder) RebuildAndWait(ctx context.Context, truncate bool) error {
+func (m *mockRebuilder) RebuildAndWait(ctx context.Context, truncate bool, wait time.Duration) error {
 	m.mu.Lock()
 	m.waited = true
+	m.waitArg = wait
 	m.mu.Unlock()
 	return m.Rebuild(ctx, truncate)
+}
+
+func (m *mockRebuilder) waitBudget() time.Duration {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.waitArg
 }
 
 func (m *mockRebuilder) wasWaitedOn() bool {
@@ -804,18 +812,20 @@ func TestControl_RebuildRule_WaitsForTheRescanRatherThanStartingIt(t *testing.T)
 	mr := &mockRebuilder{}
 	svc.RegisterRebuilder("rebuild-inproc-1", mr)
 
-	require.NoError(t, svc.RebuildRule(context.Background(), "rebuild-inproc-1", false))
+	require.NoError(t, svc.RebuildRule(context.Background(), "rebuild-inproc-1", false, 90*time.Second))
 
 	rebuilt, truncate := mr.wasRebuilt()
 	assert.True(t, rebuilt, "the registered Rebuilder must be driven")
 	assert.False(t, truncate, "truncate is forwarded as given")
 	assert.True(t, mr.wasWaitedOn(),
 		"RebuildRule must take the WAITING arm — the fire-and-forget Rebuild carries no completion")
+	assert.Equal(t, 90*time.Second, mr.waitBudget(),
+		"the caller's wait budget must reach the Rebuilder; swallowing it would restore the unbounded wait")
 }
 
 func TestControl_RebuildRule_UnregisteredRuleIsNotSilentlyTreatedAsRebuilt(t *testing.T) {
 	svc := control.NewService()
-	err := svc.RebuildRule(context.Background(), "never-registered", false)
+	err := svc.RebuildRule(context.Background(), "never-registered", false, time.Minute)
 	require.Error(t, err, "a lens nothing registered cannot have been rebuilt, and must not report success")
 	assert.ErrorIs(t, err, control.ErrRuleNotRegistered)
 }
@@ -825,7 +835,7 @@ func TestControl_RebuildRule_PropagatesTheRebuildFailure(t *testing.T) {
 	mr := &mockRebuilder{err: errors.New("target unreachable")}
 	svc.RegisterRebuilder("rebuild-inproc-fail", mr)
 
-	err := svc.RebuildRule(context.Background(), "rebuild-inproc-fail", true)
+	err := svc.RebuildRule(context.Background(), "rebuild-inproc-fail", true, time.Minute)
 	require.Error(t, err, "a failed rebuild must reach the caller, which is what stops the attestation")
 	assert.Contains(t, err.Error(), "target unreachable")
 }

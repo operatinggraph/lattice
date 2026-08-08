@@ -235,11 +235,34 @@ def execute(state, op):
         # Both steps have a producer now. vaultKeyDestroyed comes from
         # internal/privacyworker after Vault.ShredKey; projectionsRebuilt comes
         # from internal/refractor/classkeyshredded, once every secure lens
-        # declaring this holder's type has rebuilt to zero lag. Each is written
-        # by the identity.system.privacy service actor after its own
-        # irreversible work landed, so neither can attest to work that never ran.
+        # declaring this holder's type has rebuilt to zero lag. Each producer
+        # submits only after its own irreversible work landed; the actor guard
+        # below is what keeps anyone else from submitting in its place.
         if step != "vaultKeyDestroyed" and step != "projectionsRebuilt":
             fail("InvalidArgument: step: required vaultKeyDestroyed or projectionsRebuilt; got " + step)
+
+        # Both finalization steps are ATTESTATIONS on a compliance surface, and
+        # the verb's own grant is too wide to be their only gate: it is
+        # scope:any granted to operator (permissions.go), so any operator could
+        # stamp either step one second after the destruction commits -- the
+        # shredded precondition below is true by construction at that moment.
+        # Pin the writer to the privacy service actor instead. Its vertex is
+        # declared in contextHint.reads by every submitter of this verb, so an
+        # undeclared or mismatched actor fails closed here rather than being
+        # believed. "class" is a reserved word in Starlark, hence getattr.
+        #
+        # What this does NOT do: close actor impersonation on the ops lane. The
+        # envelope's actor is self-asserted by whoever can publish there, and
+        # constraining that is a platform-wide seam, not this script's. The
+        # guarantee is narrower than "only the privacy worker can write this" --
+        # it is "only the privacy service actor identity can" -- and saying so
+        # is the point, because a comment claiming the stronger property is what
+        # stops the next reader from looking.
+        actor_doc = state[op.actor] if op.actor in state else None
+        if actor_doc == None or (hasattr(actor_doc, "isDeleted") and actor_doc.isDeleted):
+            fail("PermissionDenied: RecordRetentionClassShredFinalization requires the identity.system.privacy service actor; op.actor was not declared in contextHint.reads or is absent")
+        if getattr(actor_doc, "class", "") != "identity.system.privacy":
+            fail("PermissionDenied: RecordRetentionClassShredFinalization may be recorded only by the identity.system.privacy service actor")
 
         # The piiKey comes from the DECLARED read set (ContextHint.Reads --
         # the submitters always declare it), NOT the lazy kv.Read seam: a

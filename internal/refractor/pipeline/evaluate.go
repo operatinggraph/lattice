@@ -95,11 +95,27 @@ func (p *Pipeline) applySecureDecrypt(ctx context.Context, results []ruleengine.
 		return nil
 	}
 	redactions, err := p.secureDecryptor.Apply(ctx, results)
-	// Alarm before returning: an infra error can arrive after some columns have
-	// already been redacted, and those nulls land whether or not this evaluation
-	// goes on to complete.
+	// The COUNTER measures nulls that reached the read model, so it is advanced
+	// only when the result set survives to be written. All three callers discard
+	// the results on error, and the message is then redelivered — so counting on
+	// the error path would re-add the same redactions on every retry and inflate
+	// the number an operator sizes the exposure from. The log is unconditional:
+	// a refusal that happened is worth seeing whether or not its row landed.
+	p.logSecureRedactions(redactions)
+	if err != nil {
+		return err
+	}
 	p.alarmSecureRedactions(ctx, redactions)
-	return err
+	return nil
+}
+
+// logSecureRedactions records each refusal individually, at the tier that says
+// this is a privacy fault rather than a lawful erasure.
+func (p *Pipeline) logSecureRedactions(redactions []SecureRedaction) {
+	for _, r := range redactions {
+		slog.Error("pipeline: secure column redacted to null; its value could not be resolved (privacy-critical, not a shred)",
+			"ruleId", p.ruleID, "column", r.Column, "err", failure.PrivacyCritical(r.Reason))
+	}
 }
 
 // alarmSecureRedactions raises the privacy-critical tier for every secure column
@@ -114,14 +130,7 @@ func (p *Pipeline) applySecureDecrypt(ctx context.Context, results []ruleengine.
 // ratified to remove: one unresolvable row blocking every other row of the lens
 // from ever updating, a later erasure scrub included.
 func (p *Pipeline) alarmSecureRedactions(ctx context.Context, redactions []SecureRedaction) {
-	if len(redactions) == 0 {
-		return
-	}
-	for _, r := range redactions {
-		slog.Error("pipeline: secure column redacted to null; its value could not be resolved (privacy-critical, not a shred)",
-			"ruleId", p.ruleID, "column", r.Column, "err", failure.PrivacyCritical(r.Reason))
-	}
-	if p.reporter == nil {
+	if len(redactions) == 0 || p.reporter == nil {
 		return
 	}
 	if err := p.reporter.RecordSecureRedactions(ctx, uint64(len(redactions))); err != nil {

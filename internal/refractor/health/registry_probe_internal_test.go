@@ -201,3 +201,53 @@ func TestRegistryProbe_RunHonorsGraceWindowThenTicks(t *testing.T) {
 		return len(p.Missing()) == 1
 	}, 3*time.Second, 10*time.Millisecond, "Run must reconcile after the (shrunk) grace window")
 }
+
+// ReconcileNow answers the question on demand, for a caller that cannot wait for
+// a tick: the retention-class destruction consumer, which must not attest an
+// erasure off an enumeration taken over a registry that has not finished
+// loading. Same computation as the periodic check, returned rather than only
+// stored.
+func TestRegistryProbe_ReconcileNowAnswersOnDemand(t *testing.T) {
+	conn, ctx := newRegistryProbeTestConn(t)
+	const bucket = "core-kv"
+	putLens(ctx, t, conn, bucket, "AbCdEfGhJkMnPqRsTuVw", false, `{"bucket":"contract_view","key":["contract_id"]}`)
+
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	registered := []string{}
+	p := NewRegistryProbe(conn, bucket, func() []string { return registered }, logger)
+
+	missing, err := p.ReconcileNow(ctx)
+	if err != nil {
+		t.Fatalf("ReconcileNow: %v", err)
+	}
+	if len(missing) != 1 || missing[0] != "AbCdEfGhJkMnPqRsTuVw" {
+		t.Fatalf("a declared-but-unregistered lens must be reported, got %v", missing)
+	}
+
+	registered = []string{"AbCdEfGhJkMnPqRsTuVw"}
+	missing, err = p.ReconcileNow(ctx)
+	if err != nil {
+		t.Fatalf("ReconcileNow after registration: %v", err)
+	}
+	if len(missing) != 0 {
+		t.Fatalf("a registered lens is not missing, got %v", missing)
+	}
+}
+
+// An enumeration failure is UNKNOWN, never "reconciled clean". Folding it into
+// an empty slice is exactly how a caller gating an erasure attestation on this
+// would read a dead Core KV as "no lens declares that holder type".
+func TestRegistryProbe_ReconcileNowFailureIsNotAnEmptyMissingSet(t *testing.T) {
+	conn, ctx := newRegistryProbeTestConn(t)
+	const bucket = "core-kv"
+	putLens(ctx, t, conn, bucket, "AbCdEfGhJkMnPqRsTuVw", false, `{"bucket":"contract_view","key":["contract_id"]}`)
+
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	p := NewRegistryProbe(conn, bucket, func() []string { return nil }, logger)
+
+	badCtx, cancel := context.WithCancel(ctx)
+	cancel()
+	if _, err := p.ReconcileNow(badCtx); err == nil {
+		t.Fatal("a failed enumeration must return an error, not an empty missing set")
+	}
+}

@@ -61,6 +61,10 @@ func setupShredEnv(t *testing.T) (context.Context, *substrate.Conn) {
 	t.Helper()
 	ctx, conn := testutil.SetupPackageTestEnv(t) // installs rbac+privacy-base+identity+hygiene
 	testutil.SeedCapDoc(t, ctx, conn, staffCapDoc())
+	testutil.SeedCapDoc(t, ctx, conn, privacyCapDoc())
+	// The service actor's own vertex: the finalization scripts read its class to
+	// refuse an attestation written by anyone else.
+	seedVertex(t, ctx, conn, pbPrivacyActorKey, "identity.system.privacy", nil, false)
 	return ctx, conn
 }
 

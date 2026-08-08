@@ -714,6 +714,13 @@ func main() {
 				out = append(out, snap)
 				continue
 			}
+			// Carried BEFORE the pending read, which can fail on its own: st was
+			// read successfully and holds the count, so shipping a zero here
+			// would let a NATS blip observing something else silently downgrade
+			// the highest-ranked alert in the system to a warning. Same doctrine
+			// as the sweep verdicts above — an observation fault about one input
+			// must not erase a fact already in hand about another.
+			snap.SecureRedactions = st.SecureRedactions
 			pending, err := entry.pipeline.Pending(context.Background())
 			if err != nil {
 				snap.Status = "unknown"
@@ -730,7 +737,6 @@ func main() {
 			snap.RuleID = st.RuleID
 			snap.Status = st.Status
 			snap.ProjectionLag = pending
-			snap.SecureRedactions = st.SecureRedactions
 			snap.LastProjectedAt = entry.pipeline.Progress().LastProjectedAt
 			out = append(out, snap)
 		}
@@ -1288,6 +1294,32 @@ func main() {
 	registryProbe := health.NewRegistryProbe(conn, coreKVBucket, registeredLensIDs, logger)
 	go registryProbe.Run(ctx)
 	hb.RegistryReconciliationProvider = registryProbe.Missing
+
+	// The same reconciliation, on demand, is the retention-class destruction
+	// consumer's readiness gate. It enumerates live lenses by declared holder
+	// type to decide which read models a destroyed key still reaches, and that
+	// enumeration is only as trustworthy as the registry underneath it: over a
+	// registry still loading, a SHORT target set is indistinguishable from a
+	// complete one, and "nothing declares this holder type" — the legitimately
+	// clean case that must attest — is indistinguishable from "nothing has
+	// registered yet". Core KV is the platform's persistent lens registry, so
+	// asking it, rather than the in-process map whose incompleteness is the
+	// hazard, is what makes the two separable.
+	//
+	// Wired HERE rather than at construction on purpose: until this line runs
+	// the consumer has no readiness check and treats every event as not-ready,
+	// which covers exactly the cold-boot window its DeliverAll durable replays
+	// the whole subject history through.
+	classKeyShredded.SetRegistryReady(func(ctx context.Context) error {
+		missing, err := registryProbe.ReconcileNow(ctx)
+		if err != nil {
+			return fmt.Errorf("reconcile declared lenses against the registry: %w", err)
+		}
+		if len(missing) > 0 {
+			return fmt.Errorf("%d lens(es) declared in Core KV but not registered: %v", len(missing), missing)
+		}
+		return nil
+	})
 
 	// The inverse reconciliation: a per-lens durable whose lens no longer
 	// exists in Core KV. The tombstone-triggered reap (remover, above) needs

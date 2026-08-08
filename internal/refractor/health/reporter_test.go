@@ -481,3 +481,38 @@ func TestReporter_ClearLastError_NoOpWhenAlreadyNil(t *testing.T) {
 	assert.Nil(t, entry.LastError)
 	assert.Empty(t, entry.LastUpdated, "a no-op clear must never have written an entry")
 }
+
+// Every CUMULATIVE counter survives a status transition, and SecureRedactions
+// is the one that made the omission load-bearing: Rebuild calls SetRebuilding on
+// the way in and SetActive on the way out, so a dropped counter is zeroed twice
+// by the very operation a retention-class destruction uses to reach the read
+// models. The LensSecureRedaction issue would then go quiet while the
+// unresolvable nulls were still being served — the delta-signal failure the
+// counter is cumulative to avoid.
+func TestReporter_StatusTransitions_PreserveTheCumulativeCounters(t *testing.T) {
+	ctx := context.Background()
+	kv := startHealthKV(t)
+	r := health.New(kv, "counter-rule")
+
+	require.NoError(t, r.RecordSecureRedactions(ctx, 3))
+	require.NoError(t, r.RecordEvalDriftRetry(ctx))
+	require.NoError(t, r.RecordEvalDriftRequeue(ctx))
+
+	assertCounters := func(t *testing.T, stage string) {
+		t.Helper()
+		entry, err := r.GetStatus(ctx)
+		require.NoError(t, err)
+		assert.Equal(t, uint64(3), entry.SecureRedactions, "secureRedactions must survive %s", stage)
+		assert.Equal(t, uint64(1), entry.EvalDriftRetries, "evalDriftRetries must survive %s", stage)
+		assert.Equal(t, uint64(1), entry.EvalDriftRequeues, "evalDriftRequeues must survive %s", stage)
+	}
+
+	// The exact pair a rebuild writes, in order.
+	require.NoError(t, r.SetRebuilding(ctx))
+	assertCounters(t, "SetRebuilding")
+	require.NoError(t, r.SetActive(ctx))
+	assertCounters(t, "SetActive")
+
+	require.NoError(t, r.SetPaused(ctx, "manual", "operator paused"))
+	assertCounters(t, "SetPaused")
+}

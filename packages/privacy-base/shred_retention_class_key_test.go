@@ -105,13 +105,15 @@ func submitRetentionFinalization(t *testing.T, ctx context.Context, conn *substr
 	t.Helper()
 	env := &processor.OperationEnvelope{
 		RequestID:     testutil.GenReqID(reqLabel),
-		Lane:          processor.LaneUrgent,
+		Lane:          processor.LaneSystem,
 		OperationType: "RecordRetentionClassShredFinalization",
-		Actor:         pbStaffActorKey,
+		Actor:         pbPrivacyActorKey,
 		SubmittedAt:   "2026-08-08T10:20:00Z",
 		Class:         rcRetentionClassDDL,
 		Payload:       json.RawMessage(`{"retentionClassKey":"` + holderKey + `","step":"` + step + `"}`),
-		ContextHint:   &processor.ContextHint{Reads: []string{holderKey + ".piiKey"}},
+		ContextHint: &processor.ContextHint{
+			Reads: []string{holderKey + ".piiKey", pbPrivacyActorKey},
+		},
 	}
 	testutil.PublishOp(t, conn, env)
 	testutil.DriveOne(t, ctx, cp, cons, wantOutcome)
@@ -317,11 +319,14 @@ func TestRecordRetentionClassShredFinalization_RequiresPriorShred(t *testing.T) 
 	ctx, conn := setupShredEnv(t)
 	v := testutil.TestVault(t)
 	cp, cons := newUrgentPipeline(t, ctx, conn, "rcfinal-guards", v)
+	// The finalization records travel the SYSTEM lane, which is where their real
+	// submitters publish — the operator's shred is the urgent-lane half.
+	sysCP, sysCons := newSystemPipeline(t, ctx, conn, "rcfinal-guards-system", v)
 
 	seedRetentionClassHolder(t, ctx, conn, rcHolderFinalize, "clinicalRecord")
 
 	// (a) no envelope at all.
-	submitRetentionFinalization(t, ctx, conn, cp, cons, rcHolderFinalize,
+	submitRetentionFinalization(t, ctx, conn, sysCP, sysCons, rcHolderFinalize,
 		"vaultKeyDestroyed", "RCFinalNoEnvelope", processor.OutcomeRejected)
 
 	// (b) an envelope that exists but was never shredded.
@@ -329,18 +334,18 @@ func TestRecordRetentionClassShredFinalization_RequiresPriorShred(t *testing.T) 
 		"wrappedDEK": "AAAA", "keyId": rcHolderFinalize, "kekVersion": "v1",
 		"alg": "AES-256-GCM", "createdAt": "2026-08-01T00:00:00Z", "shredded": false,
 	}, false)
-	submitRetentionFinalization(t, ctx, conn, cp, cons, rcHolderFinalize,
+	submitRetentionFinalization(t, ctx, conn, sysCP, sysCons, rcHolderFinalize,
 		"vaultKeyDestroyed", "RCFinalNotShredded", processor.OutcomeRejected)
 
 	// (c) an unknown step is refused even once the shred has landed.
 	submitRetentionShred(t, ctx, conn, cp, cons, rcHolderFinalize, "RCFinalShred", processor.OutcomeAccepted)
-	submitRetentionFinalization(t, ctx, conn, cp, cons, rcHolderFinalize,
+	submitRetentionFinalization(t, ctx, conn, sysCP, sysCons, rcHolderFinalize,
 		"projectionsNullified", "RCFinalWrongStep", processor.OutcomeRejected)
 
 	// (d) the happy path flips exactly the named flag, and only it — the two
 	// steps are recorded by two independent listeners, so one landing must never
 	// imply the other.
-	submitRetentionFinalization(t, ctx, conn, cp, cons, rcHolderFinalize,
+	submitRetentionFinalization(t, ctx, conn, sysCP, sysCons, rcHolderFinalize,
 		"vaultKeyDestroyed", "RCFinalOK", processor.OutcomeAccepted)
 	data := rcPiiKeyData(t, ctx, conn, rcHolderFinalize)
 	if data["vaultKeyDestroyed"] != true {
@@ -356,7 +361,7 @@ func TestRecordRetentionClassShredFinalization_RequiresPriorShred(t *testing.T) 
 	// refused while it had none, because this verb is granted to operator at
 	// scope:any — so "nothing submits it" was never a guarantee, and any value
 	// it held would have attested a rebuild that never ran.
-	submitRetentionFinalization(t, ctx, conn, cp, cons, rcHolderFinalize,
+	submitRetentionFinalization(t, ctx, conn, sysCP, sysCons, rcHolderFinalize,
 		"projectionsRebuilt", "RCFinalRebuilt", processor.OutcomeAccepted)
 	data = rcPiiKeyData(t, ctx, conn, rcHolderFinalize)
 	if data["projectionsRebuilt"] != true {
@@ -505,6 +510,7 @@ func TestRecordRetentionClassShredFinalization_ClassLessResolves(t *testing.T) {
 	ctx, conn := setupShredEnv(t)
 	v := testutil.TestVault(t)
 	cp, cons := newUrgentPipeline(t, ctx, conn, "rcfinal-classless", v)
+	sysCP, sysCons := newSystemPipeline(t, ctx, conn, "rcfinal-classless-system", v)
 
 	const holderKey = "vtx.retentionclass.RCkeyCLSSabcdefghijk"
 	seedRetentionClassHolder(t, ctx, conn, holderKey, "clinicalRecord")
@@ -512,18 +518,62 @@ func TestRecordRetentionClassShredFinalization_ClassLessResolves(t *testing.T) {
 
 	env := &processor.OperationEnvelope{
 		RequestID:     testutil.GenReqID("RCClassLessFin"),
+		Lane:          processor.LaneSystem,
+		OperationType: "RecordRetentionClassShredFinalization",
+		Actor:         pbPrivacyActorKey,
+		SubmittedAt:   "2026-08-08T10:20:00Z",
+		// No Class — the reverse index must resolve it.
+		Payload: json.RawMessage(`{"retentionClassKey":"` + holderKey + `","step":"vaultKeyDestroyed"}`),
+		ContextHint: &processor.ContextHint{
+			Reads: []string{holderKey + ".piiKey", pbPrivacyActorKey},
+		},
+	}
+	testutil.PublishOp(t, conn, env)
+	testutil.DriveOne(t, ctx, sysCP, sysCons, processor.OutcomeAccepted)
+
+	if data := rcPiiKeyData(t, ctx, conn, holderKey); data["vaultKeyDestroyed"] != true {
+		t.Fatalf("class-less finalization did not record vaultKeyDestroyed: %+v", data)
+	}
+}
+
+// The finalization steps are ATTESTATIONS on a compliance surface, and the
+// verb's own grant does not bound who may write them: it is scope:any granted
+// to operator, so any operator could stamp either step one second after the
+// destruction commits — the shredded precondition is true by construction at
+// that moment, and nothing else in the script looks at the writer. So the
+// script pins the writer to the privacy service actor.
+//
+// The narrower guarantee is deliberate and worth naming: this bounds WHICH
+// IDENTITY may attest, not who may publish under that identity. Ops-lane actor
+// impersonation is a platform seam, unchanged by this.
+func TestRecordRetentionClassShredFinalization_NonPrivacyActorIsDenied(t *testing.T) {
+	ctx, conn := setupShredEnv(t)
+	v := testutil.TestVault(t)
+	cp, cons := newUrgentPipeline(t, ctx, conn, "rcfinal-actor", v)
+
+	const holderKey = "vtx.retentionclass.RCkeyACTRabcdefghijk"
+	seedRetentionClassHolder(t, ctx, conn, holderKey, "clinicalRecord")
+	submitRetentionShred(t, ctx, conn, cp, cons, holderKey, "RCActorShred", processor.OutcomeAccepted)
+
+	// A staff operator holding the verb's grant, declaring its own vertex — the
+	// most capable forger the grant permits.
+	seedVertex(t, ctx, conn, pbStaffActorKey, "identity", nil, false)
+	env := &processor.OperationEnvelope{
+		RequestID:     testutil.GenReqID("RCActorForged"),
 		Lane:          processor.LaneUrgent,
 		OperationType: "RecordRetentionClassShredFinalization",
 		Actor:         pbStaffActorKey,
 		SubmittedAt:   "2026-08-08T10:20:00Z",
-		// No Class — the reverse index must resolve it.
-		Payload:     json.RawMessage(`{"retentionClassKey":"` + holderKey + `","step":"vaultKeyDestroyed"}`),
-		ContextHint: &processor.ContextHint{Reads: []string{holderKey + ".piiKey"}},
+		Class:         rcRetentionClassDDL,
+		Payload:       json.RawMessage(`{"retentionClassKey":"` + holderKey + `","step":"projectionsRebuilt"}`),
+		ContextHint: &processor.ContextHint{
+			Reads: []string{holderKey + ".piiKey", pbStaffActorKey},
+		},
 	}
 	testutil.PublishOp(t, conn, env)
-	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeRejected)
 
-	if data := rcPiiKeyData(t, ctx, conn, holderKey); data["vaultKeyDestroyed"] != true {
-		t.Fatalf("class-less finalization did not record vaultKeyDestroyed: %+v", data)
+	if data := rcPiiKeyData(t, ctx, conn, holderKey); data["projectionsRebuilt"] != nil {
+		t.Fatalf("a non-privacy actor must not be able to attest a rebuild: %+v", data)
 	}
 }

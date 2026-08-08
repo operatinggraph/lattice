@@ -76,3 +76,27 @@ func TestEvalLenses_SecureRedactionPersistsAcrossQuietCycles(t *testing.T) {
 		t.Fatalf("the issue must persist while the redacted rows are still being served; got %+v", issues)
 	}
 }
+
+// A fault reading ONE input must not erase a fact already in hand about
+// another. The pending-count read can fail on its own, and the provider carries
+// the redaction count past that failure precisely so it is still known here —
+// so an unreadable cycle must keep raising the alert rather than silently
+// downgrading the highest-ranked signal in the system to a warning.
+func TestEvalLenses_SecureRedactionSurvivesAnUnreadableCycle(t *testing.T) {
+	h := &LatticeHeartbeater{}
+	snap := redactionSnap("clinicEncountersRead", 4)
+	snap.Status = "unknown"
+	snap.Unreadable = "consumer pending count: connection reset"
+
+	metric, issues := beat(h, time.Now(), snap)
+
+	if _, ok := issueByCode(issues, issueLensSecureRedaction); !ok {
+		t.Fatalf("a known redaction count must still raise while another input is unreadable; got %+v", issues)
+	}
+	if got := metric["clinicEncountersRead"]["alert"]; got != "secure-redaction" {
+		t.Fatalf("secure-redaction outranks unreadable — a wrong read model beats an unobserved one; got %v", got)
+	}
+	if got := metric["clinicEncountersRead"]["secureRedactions"]; got != uint64(4) {
+		t.Fatalf("the count must be carried even on the unreadable path; got %v", got)
+	}
+}

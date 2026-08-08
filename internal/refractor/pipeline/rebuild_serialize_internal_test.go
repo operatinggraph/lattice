@@ -1,9 +1,11 @@
 package pipeline
 
-// Coverage of RebuildAndWait's two properties: it waits for a rebuild to DRAIN
-// rather than returning the moment the durable is reset, and it serializes
-// callers per pipeline instead of letting two rescans of one lens overlap
-// (retention-class-key-custody-design.md §6.3, "two risks in the rebuild path").
+// Coverage of RebuildAndWait's properties: it waits for a rebuild to DRAIN
+// rather than returning the moment the durable is reset, it serializes callers
+// per pipeline instead of letting two rescans of one lens overlap, its wait
+// cannot be ended by an unrelated rebuild, and it gives up on a budget rather
+// than blocking forever (retention-class-key-custody-design.md §6.3, "two risks
+// in the rebuild path", and §19.1 B2/B3).
 //
 // Both tests drive Rebuild without a supervisor, so it returns its
 // no-supervisor error after the phase under test — the same window
@@ -58,10 +60,10 @@ func newRebuildWaitPipeline(t *testing.T) *Pipeline {
 // this destruction's rebuild would attest to an erasure that never happened.
 func TestRebuildAndWait_WaitsOutARebuildStartedElsewhere(t *testing.T) {
 	p := newRebuildWaitPipeline(t)
-	p.rebuildInFlight.Store(true)
+	other := p.beginRebuild()
 
 	done := make(chan error, 1)
-	go func() { done <- p.RebuildAndWait(context.Background(), false) }()
+	go func() { done <- p.RebuildAndWait(context.Background(), false, 0) }()
 
 	assert.Never(t, func() bool {
 		select {
@@ -73,7 +75,7 @@ func TestRebuildAndWait_WaitsOutARebuildStartedElsewhere(t *testing.T) {
 	}, 50*time.Millisecond, 5*time.Millisecond,
 		"RebuildAndWait must not start its own rescan while another is in flight")
 
-	p.rebuildInFlight.Store(false) // the other rebuild drains
+	p.endRebuild(other) // the other rebuild drains
 
 	select {
 	case err := <-done:
@@ -99,7 +101,7 @@ func TestRebuildAndWait_SerializesConcurrentCallers(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			// Each errors on the missing supervisor; the ORDERING is the assertion.
-			_ = p.RebuildAndWait(context.Background(), true)
+			_ = p.RebuildAndWait(context.Background(), true, 0)
 		}()
 	}
 
@@ -129,11 +131,11 @@ func TestRebuildAndWait_SerializesConcurrentCallers(t *testing.T) {
 // drain — the reason the serialization is a channel and not a sync.Mutex.
 func TestRebuildAndWait_HonorsContextCancellation(t *testing.T) {
 	p := newRebuildWaitPipeline(t)
-	p.rebuildInFlight.Store(true) // never drains
+	p.beginRebuild() // never drains
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
-	go func() { done <- p.RebuildAndWait(ctx, false) }()
+	go func() { done <- p.RebuildAndWait(ctx, false, 0) }()
 	cancel()
 
 	select {
@@ -141,5 +143,71 @@ func TestRebuildAndWait_HonorsContextCancellation(t *testing.T) {
 		require.ErrorIs(t, err, context.Canceled)
 	case <-time.After(5 * time.Second):
 		t.Fatal("a cancelled context must release a RebuildAndWait caller")
+	}
+}
+
+// The completion signal belongs to ONE rebuild. A different rebuild failing —
+// which is what abandonRebuild does, unconditionally, on any error — must not
+// release a caller waiting on an earlier one. Before the per-rebuild channel,
+// waiters polled a single pipeline-wide flag that abandonRebuild cleared as its
+// first statement, so a concurrent hot-reload or operator rebuild ended the
+// wait of a caller whose own rescan was still running: it returned nil and, for
+// the retention-class consumer, attested to an erasure that had not landed.
+func TestRebuildAndWait_AnotherRebuildsFailureDoesNotEndThisWait(t *testing.T) {
+	p := newRebuildWaitPipeline(t)
+	mine := p.beginRebuild()
+
+	released := make(chan struct{})
+	go func() {
+		defer close(released)
+		_ = p.waitRebuildSignal(context.Background(), context.Background(), mine)
+	}()
+
+	// A second rebuild starts and immediately fails, exactly as a hot-reload or
+	// an operator rebuild does when its own setup errors.
+	theirs := p.beginRebuild()
+	require.Error(t, p.abandonRebuild(context.Background(), theirs, assert.AnError))
+
+	assert.Never(t, func() bool {
+		select {
+		case <-released:
+			return true
+		default:
+			return false
+		}
+	}, 100*time.Millisecond, 5*time.Millisecond,
+		"an unrelated rebuild's failure released a caller waiting on a different rebuild")
+
+	p.endRebuild(mine)
+	select {
+	case <-released:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the waiter was not released when its OWN rebuild ended")
+	}
+}
+
+// An expired wait budget is a failure with its own error, never a completion —
+// a caller that attests must be able to tell "the rescan drained" from "I
+// stopped waiting". The rebuild itself keeps running: the budget bounds the
+// wait only, so the completion watcher survives to clear the "rebuilding"
+// status and un-suppress the convergence sweep.
+func TestRebuildAndWait_BudgetExpiryIsAFailureNotACompletion(t *testing.T) {
+	p := newRebuildWaitPipeline(t)
+	stillRunning := p.beginRebuild()
+
+	done := make(chan error, 1)
+	go func() { done <- p.RebuildAndWait(context.Background(), false, 50*time.Millisecond) }()
+
+	select {
+	case err := <-done:
+		require.ErrorIs(t, err, ErrRebuildWaitTimeout)
+	case <-time.After(5 * time.Second):
+		t.Fatal("an unbounded wait: the budget never expired the caller")
+	}
+
+	select {
+	case <-stillRunning:
+		t.Fatal("the budget ended the REBUILD, not just the wait — its watcher would be gone and the status latched")
+	default:
 	}
 }

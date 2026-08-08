@@ -36,6 +36,7 @@ func privacyCapDoc() *processor.CapabilityDoc {
 		Lanes:                  []string{"system"},
 		PlatformPermissions: []processor.PlatformPermission{
 			{OperationType: "RecordShredFinalization", Scope: "any"},
+			{OperationType: "RecordRetentionClassShredFinalization", Scope: "any"},
 		},
 		ServiceAccess:   []processor.ServiceAccessEntry{},
 		EphemeralGrants: []processor.EphemeralGrant{},
@@ -57,7 +58,9 @@ func newSystemPipeline(t *testing.T, ctx context.Context, conn *substrate.Conn, 
 // wantOutcome. Class-less, with the piiKey declared in ContextHint.Reads —
 // exactly the envelope the real listeners (internal/privacyworker,
 // internal/refractor/keyshredded) publish, so the operationType→class
-// reverse-index inference AND the hydrated OCC conditioning are exercised.
+// reverse-index inference AND the hydrated OCC conditioning are exercised —
+// including the ACTOR's own vertex, which the script reads to pin these
+// attestations to the identity.system.privacy service actor.
 func submitFinalization(t *testing.T, ctx context.Context, conn *substrate.Conn,
 	cp *processor.CommitPath, cons jetstream.Consumer, identityKey, step, reqLabel string, wantOutcome processor.MessageOutcome) {
 	t.Helper()
@@ -68,7 +71,9 @@ func submitFinalization(t *testing.T, ctx context.Context, conn *substrate.Conn,
 		Actor:         pbPrivacyActorKey,
 		SubmittedAt:   "2026-07-02T10:20:00Z",
 		Payload:       json.RawMessage(`{"identityKey":"` + identityKey + `","step":"` + step + `"}`),
-		ContextHint:   &processor.ContextHint{Reads: []string{identityKey + ".piiKey"}},
+		ContextHint: &processor.ContextHint{
+			Reads: []string{identityKey + ".piiKey", pbPrivacyActorKey},
+		},
 	}
 	testutil.PublishOp(t, conn, env)
 	testutil.DriveOne(t, ctx, cp, cons, wantOutcome)
@@ -79,6 +84,9 @@ func setupFinalizationEnv(t *testing.T) (context.Context, *substrate.Conn) {
 	ctx, conn := testutil.SetupPackageTestEnv(t)
 	testutil.SeedCapDoc(t, ctx, conn, staffCapDoc())
 	testutil.SeedCapDoc(t, ctx, conn, privacyCapDoc())
+	// The service actor's own vertex: the finalization script reads its class to
+	// refuse an attestation written by anyone else.
+	seedVertex(t, ctx, conn, pbPrivacyActorKey, "identity.system.privacy", nil, false)
 	return ctx, conn
 }
 

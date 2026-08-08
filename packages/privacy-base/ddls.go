@@ -55,9 +55,9 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 func DDLs() []pkgmgr.DDLSpec {
 	return []pkgmgr.DDLSpec{
 		{
-			CanonicalName:     "piiKey",
-			Class:             "meta.ddl.aspectType",
-			Sensitive:         false,
+			CanonicalName: "piiKey",
+			Class:         "meta.ddl.aspectType",
+			Sensitive:     false,
 			PermittedCommands: []string{
 				"ShredIdentityKey", "RecordShredFinalization",
 				"ShredRetentionClassKey", "RecordRetentionClassShredFinalization",

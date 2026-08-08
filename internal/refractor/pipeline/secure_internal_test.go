@@ -25,6 +25,7 @@ import (
 	"github.com/operatinggraph/lattice/internal/refractor/adapter"
 	"github.com/operatinggraph/lattice/internal/refractor/adjacency"
 	"github.com/operatinggraph/lattice/internal/refractor/failure"
+	"github.com/operatinggraph/lattice/internal/refractor/health"
 	"github.com/operatinggraph/lattice/internal/refractor/ruleengine"
 	"github.com/operatinggraph/lattice/internal/refractor/ruleengine/full"
 	"github.com/operatinggraph/lattice/internal/substrate"
@@ -838,4 +839,65 @@ RETURN app.key AS key, id.key AS applicant, id.name.data AS applicant_name`
 	require.NoError(t, json.Unmarshal(entry.Value, &row))
 	assert.Nil(t, row["applicant_name"], "the neighbor identity's shred scrubs the anchored row's plaintext")
 	assert.Equal(t, identityKey, row["applicant"], "non-PII columns survive the scrub")
+}
+
+// mixedCoreKV redacts one holder (absent piiKey → Terminal) and makes the other
+// unreachable (a raw error → infra), so one Apply returns BOTH a redaction and
+// an error — the shape the counter's placement turns on.
+type mixedCoreKV struct{ unreachableKey string }
+
+func (m mixedCoreKV) Get(_ context.Context, key string) (*substrate.KVEntry, error) {
+	if key == m.unreachableKey {
+		return nil, errors.New("core kv: connection reset")
+	}
+	return nil, fmt.Errorf("get %q: %w", key, substrate.ErrKeyNotFound)
+}
+
+// The counter measures nulls that reached the READ MODEL, so it must not advance
+// on an evaluation that errored: all three callers of applySecureDecrypt discard
+// the result set on error and the message is redelivered, so counting there
+// re-adds the same redactions on every retry and inflates the number an operator
+// sizes the exposure from. The LOG is unconditional — a refusal that happened is
+// worth seeing either way — which is why only the health counter is asserted.
+func TestApplySecureDecrypt_ARedactionLostToAnErroredEvaluationIsNotCounted(t *testing.T) {
+	ctx := context.Background()
+	_, _, healthKV := newCollisionKVs(t)
+	reporter := health.New(healthKV, "rule-secure-count")
+
+	v := newTestVault(t)
+	const redactedKey = "vtx.identity.SecCountRedactedAAAA"
+	const unreachableKey = "vtx.identity.SecCountUnreachAAAAA"
+	redactedCT, _ := mintIdentityPII(t, v, redactedKey, map[string]any{"value": "Alice"})
+	unreachableCT, _ := mintIdentityPII(t, v, unreachableKey, map[string]any{"value": "Bob"})
+
+	dec, err := NewSecureDecryptor(v, mixedCoreKV{unreachableKey: unreachableKey + ".piiKey"},
+		[]SecureColumn{{Column: "name", HolderTypes: []string{"identity"}, Field: "value"}}, nil)
+	require.NoError(t, err)
+
+	p, err := New("rule-secure-count", "nats_kv", "CORE", nil, nil, &guardedTruncAdapter{}, reporter)
+	require.NoError(t, err)
+	p.secureDecryptor = dec
+
+	// The redacting row is evaluated FIRST, so a redaction is genuinely in hand
+	// when the second row's infra failure aborts the batch.
+	err = p.applySecureDecrypt(ctx, []ruleengine.EvalResult{
+		{Row: map[string]any{"identity_key": redactedKey, "name": redactedCT}},
+		{Row: map[string]any{"identity_key": unreachableKey, "name": unreachableCT}},
+	})
+	require.Error(t, err, "an infra failure still propagates — it is not a redaction")
+
+	entry, gErr := reporter.GetStatus(ctx)
+	require.NoError(t, gErr)
+	assert.Zero(t, entry.SecureRedactions,
+		"the discarded row's null never reached the read model, so it must not be counted")
+
+	// The same redaction on an evaluation that COMPLETES is counted, which is
+	// what keeps this from being a fix that simply stops counting.
+	require.NoError(t, p.applySecureDecrypt(ctx, []ruleengine.EvalResult{
+		{Row: map[string]any{"identity_key": redactedKey, "name": redactedCT}},
+	}))
+	entry, gErr = reporter.GetStatus(ctx)
+	require.NoError(t, gErr)
+	assert.Equal(t, uint64(1), entry.SecureRedactions,
+		"a null that DID land in the read model is exactly what the counter is for")
 }
