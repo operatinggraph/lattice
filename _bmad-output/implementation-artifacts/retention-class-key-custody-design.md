@@ -2477,3 +2477,111 @@ claim-ceremony family is a **pre-existing intermittent at head**, not a reading 
 **5/5** quiet on the branch and 3/3 at `main` — contention. `TestRefractor_E2E_P99` fails on both sides too,
 but it asserts a 500ms p99 budget on a host sitting at ~11 GB of swap, which is the documented contention
 condition rather than a defect worth a row.
+
+## 24. Item 3b-ii — the third crop, and the CI gate it was hiding (2026-08-08)
+
+The §23 closure was reviewed by three layers (security plane, edge-case, acceptance) against the
+`4cfe1284..3b67472d` delta. The acceptance layer confirms **12 of 13** §22 findings genuinely closed by
+non-tautological tests with **no scope drift**; §23's narrative holds claim-by-claim. Two blockers and one
+major survived, all three converged on by more than one layer, and the first would have turned `main` red.
+
+### 24.1 Blockers — closed
+
+**B1 — C3's class recurred in a SECOND build-tagged e2e, and that one is in CI.**
+`internal/cryptoshred/cryptoshred_test.go` carries `//go:build cryptoshred`, so `go test ./...` never
+compiles it, but `make test-crypto-shred` runs in `.github/workflows/ci.yml`. Its harness seeds the privacy
+service actor's **capability doc** and never its Core-KV **vertex**; once the submitters began declaring the
+actor as a hydrated read, that declared-absent key fails the op closed —
+`HydrationMiss: missingKey=vtx.identity.CSprivacyActKMNPQRST`, reproduced here before the fix. §22's C3 was
+diagnosed as one file's bug; it was a class, and the sweep was aimed at the instance. The seeding mirrors
+`record_shred_finalization_test.go`'s, and the gate is green.
+
+**B2 — the holder-type filter resolved "cannot read a declaration" to NOT RELEVANT in one shape.**
+`declaresHolderType` returned false when no `targetConfig` decoded, and `specReadable` only covered a spec
+that failed to *parse*. A spec that parses as JSON but carries no target config — the shape `translateSpec`
+itself rejects, so exactly the lens that never registers — was therefore dropped from the relevant set,
+leaving readiness clean and the target set empty, which attests vacuously over rows that still hold the
+plaintext. C13's narrowing turned a fail-closed corpus-global check into a fail-open one for that shape.
+It is now `mayHoldHolderType`, which answers **unknown as yes** and says so at the top: no decoded
+targetConfig, or a secure column with an empty `holderTypes` list (which `NewSecureDecryptor` refuses, so
+that lens cannot activate either). A decoded targetConfig with no secure columns at all stays a genuine
+no — a plain lens holds no ciphertext, and skipping those is what the narrowing is for. `specReadable`
+disappears from the call site because it is now redundant rather than because it stopped mattering: an
+unreadable spec leaves the probe zero-valued, and a zero probe is one of the unknown shapes.
+
+### 24.2 The major — C6 was closed on the path that almost never runs
+
+The per-rebuild-ownership doctrine reached `abandonRebuild` and stopped there. `watchRebuildCompletion` —
+the path every rebuild takes — still cleared `rebuildInFlight` unconditionally in both its deferred exit and
+its drained arm, so a watcher cancelled at shutdown, or one returning after a newer rebuild had begun,
+un-suppressed the convergence sweep under a live rescan: verbatim the condition C6 was filed for. And
+`abandonRebuild`'s own check was a TOCTOU — it took the lock twice, and the release it now precedes is what
+frees a waiter to start the successor in between.
+
+Both die the same way: **ownership, the flag and the release are one decision, so they happen in one hold of
+`rebuildWatchMu`.** `endRebuild` tests ownership, clears the flag if it owns, closes the channel, and returns
+what it found; `ownsRebuild` is gone. Clearing before the release is what makes the ordering total — a waiter
+woken by the close must take that same lock in `beginRebuild` before it can set the flag again, so the
+successor's `Store(true)` can no longer land before the predecessor's `Store(false)`.
+
+**Accepted residual, recorded rather than papered over:** the health STATUS write is remote I/O and stays
+outside the lock, so an older goroutine's `SetActive` can still land after a newer rebuild's
+`SetRebuilding`. It is transient — the newer rebuild writes its own status when it drains — and the
+load-bearing half, the flag the sweep reads, is ordered. Holding the mutex across a NATS round-trip to close
+a cosmetic window is the worse trade.
+
+### 24.3 Also closed
+
+- **The probe's tests used a spec shape production never writes.** Both new holder-type tests wrote
+  `targetConfig` at the top level, while every package-installed lens stores the `make_aspect` envelope with
+  the spec under `data`. The `Data.TargetConfig` branch — the only one a live secure lens takes — had zero
+  coverage, so a regression dropping it would make every secure lens read as declaring nothing. There is now
+  an envelope-shaped fixture and tests for the live shape, plus B2's regression vector.
+- **A test that could not catch its own revert.** `MaxPrefetch` is a client-side pull option and never
+  appears in `ConsumerInfo`, so the test named for it asserted only `AckWait`. It is split: `AckWait` keeps
+  the server-side assertion, and the cap is now asserted behaviourally — with one handler parked, the rest of
+  the backlog must still be waiting on the server. Mutation-verified: with the cap disabled it reports
+  `NumAckPending=3 NumPending=0` and fails.
+- The stale `pipeline.ErrRebuildWaitTimeout` reference in the file that now defines the sentinel itself, and
+  two comments narrating prior state rather than describing present behaviour (the CLAUDE.md rule).
+
+### 24.4 Deliberately NOT closed, with the reason
+
+- **§22.4's `ReconcileNow` cost** (a full `vtx.meta.*` scan per delivery). §23 claimed every §22.4 minor was
+  closed; this one was never touched, and it should not be: freshness is the entire point of the readiness
+  check, and a cached answer would report "ready" off a stale registry — the exact failure the check exists
+  to prevent. A destruction is a rare event, so the scan is not on any hot path.
+- **`ReconcileNow` has no production caller.** Kept as the unscoped form the narrowed one delegates to, and
+  exercised by tests as the contrast that proves the narrowing is a narrowing.
+- **The submit stage's delivery ceiling and the wait budget shared across `RebuildAndWait`'s two waits.**
+  Both are fail-closed (they withhold the attestation) and both are bounded; neither is worth new state here.
+
+### 24.5 Verification
+
+Green on the branch: `go build`, `make vet`, `golangci-lint`, all eight `scripts/lint-*.go`,
+`make test-crypto-shred`, `make test-system-actor-capability`, and
+`internal/refractor/{pipeline,health,classkeyshredded,control,keyshredded}` + `internal/substrate` +
+`internal/pkgmgr` + `packages/privacy-base`.
+
+**`packages/privacy-base`'s six failures on this host are the 250ms Starlark wall, not this branch.** Each is
+either `ScriptTimeout: script exceeded wall budget 250ms` at `InstallPackage`, or an op rejected for the same
+reason — on a host sitting at ~12 GB of 13.3 GB swap. CI runs the suite with `PROCESSOR_SCRIPT_WALL_MS=5000`
+precisely because of this, and the failing shape is the ★★★ row already filed
+(*a class-(e) enumeration has no budget of its own — the 250ms wall binds first*). §23.1's finding stands
+unchanged: the `internal/refractor` claim-ceremony family is a pre-existing intermittent at head.
+
+### 24.6 Residual filed, not fixed — the oracle describes the lens NOW
+
+Both halves of "which lenses must this destruction reach" answer from the lens's **current** declaration:
+the readiness probe reads `targetConfig.secureColumns[].holderTypes` off the spec in Core KV, and the target
+lister reads the running pipeline's `secureColumns`. The plaintext in a target store, though, was written
+under whatever declaration was live **then**. So a package upgrade that narrows a lens's holder types — from
+`["identity","retentionclass"]` to `["identity"]`, with a clean activation and no malformed spec anywhere —
+puts its pre-upgrade ciphertext rows outside every destruction that follows: the target set is empty,
+readiness is clean, and `manager.go`'s "an empty target set is vacuously clean and MUST still attest" fires
+over rows that still render. The comment is right about the case it was written for (no lens ever declared
+this holder) and now also covers one it was not (a lens that stopped declaring it).
+
+Not fixed here because the fix is not a guard: it needs a record of what a lens's columns USED to hold, or a
+sweep at the moment a declaration narrows — the same shape as the narrowing-healer question §4.2 already
+raises for label sets. Filed to `lattice.md`, consumer named.
