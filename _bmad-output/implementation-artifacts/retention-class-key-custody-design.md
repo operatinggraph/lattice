@@ -1262,9 +1262,11 @@ Full bar: `go build ./...` · `make vet` · `golangci-lint run ./...` · `STRICT
 ## 14. Multi-fire checkpoint (live)
 
 **Worktree:** `/Users/andrewsolgan/Documents/GitHub/lattice-wt-retention-3bii`, branch
-`fire/retention-class-3b-ii`, commit `abe2e798` — **HELD, not merged.** Items 1, 2, 3a and 3b-i are merged
-to `main`; item 3b-ii is built but its adversarial review returned blockers (§19). **Main is clean and
-carries none of it.** The next fire resumes in that worktree from §19's list, it does not start over.
+`fire/retention-class-3b-ii`, commit `a83340d8` (rebased onto `731041bb`) — **HELD, not merged.** Items 1, 2,
+3a and 3b-i are merged to `main`; item 3b-ii is built (`b490919f`) and its review closed (`a83340d8`), but the
+review OF that closure returned a second crop of blockers (§22). **Main is clean and carries none of it.** The
+next fire resumes in that worktree from **§22.1**, it does not start over — §19's findings are confirmed
+closed and must not be re-litigated (§19.4, §22 preamble).
 
 **Done — item 1 (2026-08-07).** Custody vocabulary + write path. `CustodySpec`/`RetentionClassSpec`, the
 `retentionclass` holder + `.retentionPolicy`, `RetentionClassID`/`RetentionClassKey`, six install
@@ -2253,3 +2255,140 @@ Two adjacent things this fire also carries, each named in §20.6: the identity-p
 sibling, fixed here rather than filed) and the drift-counter pair (M1's). The package-test harness now routes
 finalization records over the **system** lane, which is where their real submitters publish — the previous
 urgent-lane submit was a fixture divergence the actor pin surfaced.
+
+## 22. Item 3b-ii — the closure reviewed, and HELD AGAIN (2026-08-08)
+
+**State: `fire/retention-class-3b-ii` @ `a83340d8` (§21's closure, rebased onto `731041bb`), in the worktree
+named in §14. STILL NOT merged; `main` carries none of it.** Every gate that ran was green — `go build`,
+`make vet`, `golangci-lint` (0 issues), all eight `scripts/lint-*.go`, and the targeted package tests of
+§20.4. The **acceptance layer confirms every §19.1–§19.3 finding is genuinely closed**, each by a
+non-tautological test, with **no scope drift** past §20.1 and all three §20.5 gotchas honoured; §21's
+narrative was checked claim-by-claim against the code and holds.
+
+It is held because the two adversarial layers (opus, security plane + edge-case) returned a **second crop of
+findings, introduced by the fix itself** — and the most serious of them **defeat the very findings they were
+closing**. Two independent reviewers converged on most; the two marked *verified* were re-grounded by Winston
+directly rather than taken on report. **Do not re-derive these** — each is at a `file:line` in that worktree.
+
+### 22.1 Blockers — must close before merge
+
+**C1 — a cancelled watcher closes the completion signal, so the wait returns success and M3 never fires.
+(Both layers; VERIFIED.)** `watchRebuildCompletion`'s `case <-ctx.Done(): return` runs its
+`defer p.endRebuild(done)` (`pipeline.go:1825-1832`), which **closes** `done` having never observed
+`outstanding == 0`. `waitRebuildSignal` (`:1635-1648`) then has both `<-done` and `<-waitCtx.Done()` ready and
+Go picks uniformly at random, so on shutdown `RebuildAndWait` returns **nil** about half the time for a rescan
+that was killed mid-drain. `classkeyshredded/manager.go:328-330` takes `if err == nil { continue }`, so M3's
+`ctx.Err()` Nak arm at `:336` — which lives *inside* the `err != nil` branch — is never reached, `allClean`
+stays true, and the handler attests. Correctness then rests only on the cancelled-ctx publish failing. This is
+M3 re-opened by B3's own machinery. The wait must not read a closed channel as success while `ctx.Err() != nil`.
+
+**C2 — `ErrRebuildWaitTimeout` falls through to the pause arm, and a paused lens can never drain a rebuild.**
+`manager.go:327` → `:336` (not ctx) → `:341` (not `ErrRuleNotRegistered`) → **`:355-365` pause the lens**. The
+one error class meaning "the rebuild is fine, I stopped waiting" is indistinguishable from "target
+unreachable". A lens whose rescan legitimately exceeds `DefaultRebuildWait` is therefore paused — and the
+pause is self-perpetuating by this file's own grounding at `:94-98` (`supervisor.Reset` requests a reopen
+without clearing a pause), so every later destruction burns the full budget, times out, and re-pauses it while
+the lens serves its pre-destruction rows. B3's wedge is replaced, not removed. Compounding: the budget is
+**shared across both waits** (`pipeline.go:1613-1628`), so a concurrent hot-reload rebuild can consume it and
+`RebuildAndWait` returns the sentinel **without ever starting a rebuild** — and the handler then pauses a lens
+it never touched.
+
+**C3 — a submitter was missed, and it is build-tagged, so no default gate catches it. (VERIFIED.)**
+`internal/systemactorcapability/systemactorcapability_test.go:425` submits `RecordShredFinalization` as
+`bootstrap.PrivacyIdentityKey` with `reads = []string{piiKeyKey}` — **the actor vertex is not declared**, so
+M2's guard fails it closed and `require.Equal(Accepted)` at `:428` fails. The file carries
+`//go:build systemactorcapability` (`:1`), so `go test ./...` never compiles it: **`make
+test-system-actor-capability` is red right now, silently**, and it is not in `.github/workflows`. The
+production submitters are complete (`privacyworker/manager.go:371`, `keyshredded/manager.go:487`,
+`classkeyshredded/manager.go:443`); this is the standing "build-tagged tests escape the default gates" rule.
+
+**C4 — the two redelivery budgets share one counter, so the not-registered budget is dead. (Both layers.)**
+`maxNotReadyDeliveries` (`:303`) and `maxNotRegisteredDeliveries` (`:346`) both test `msg.NumDelivered`
+against 20, and the readiness arm runs first. A boot that spends 20 deliveries on readiness leaves a lens
+hitting `ErrRuleNotRegistered` with **zero** retries — it goes straight to the privacy-critical give-up arm.
+The comment at `:82-87` asserts the two are separate because they answer different questions; they are not.
+The window is real: `registry[r.ID] = entry` (`main.go:1175`) precedes `RegisterRebuilder` (`:1187`), so
+"ready" can be true while a rebuilder is not yet registered.
+
+**C5 — the on-demand reconcile publishes a false `LensRegistryIncomplete` inside the boot grace window.**
+`ReconcileNow` stores into the shared `p.missing` (`registry_probe.go:180-182`), which is exactly what
+`hb.RegistryReconciliationProvider = registryProbe.Missing` reads (`main.go:1296`). `Missing`'s contract at
+`:103-106` is explicit that it must be empty before the first check completes, and the 60s grace window
+(`:15-21`) exists for that reason. Calling it from the handler on every delivery stamps the not-yet-registered
+set into `p.missing` well inside that window. `ReconcileNow` should answer without publishing.
+
+### 22.2 Majors — close with the blockers
+
+- **C6 — `abandonRebuild` still clobbers a newer rebuild's shared state** (`pipeline.go:1501-1512`). The
+  per-rebuild-ownership doctrine reached the channel but not `rebuildInFlight` or the `SetActive` write, both
+  of which are still unconditional. An older rebuild failing under a newer one's live rescan therefore
+  un-suppresses the convergence sweep (`sweep.go:395` reads `RebuildInFlight()`) and marks the lens active —
+  the exact condition the suppression exists to prevent. Needs the same identity check `endRebuild` uses.
+- **C7 — a nil reporter makes `RebuildAndWait` return "rebuilt" immediately** (`pipeline.go:1760-1769`): the
+  no-watcher branch closes `done` while the rescan is still running. Not reachable through `cmd/refractor`
+  today, but reachable by construction — and `control/service.go:102-112` claims the `Rebuilder` interface
+  exists precisely so this cannot happen. `ErrRebuildWaitTimeout` is the honest answer for a rebuild with no
+  observable end.
+- **C8 — the M1 carry-forward missed five fields, one of them permanently** (`health/reporter.go:105-131`,
+  `:173-192`, `:219-238`). `ProjectionLag`, `LagProgressAt`, `AckPending`, `AckFloorProgressAt` and
+  `LastProjectedAt` are still zeroed by the three status writers — while `SetProjectionProgress:459-475`
+  explicitly refuses to blank four of them, for the reason M1 states. The LagPoller restores four within ~5s;
+  **`LastProjectedAt` it does not**, because it only writes a non-zero value, so a `SetActive` at activation
+  erases the lens's last-projection timestamp for good. Same class as M1, same one-line-per-field fix.
+- **C9 — M4's read-ordering doctrine reached one field out of three** (`cmd/refractor/main.go:635-646` and
+  `:723-735`). `st.PauseReason` and `st.LastError` are still assigned *after* the failable `Pending()` read, in
+  **both** providers, so a NATS blip still discards a pause reason and a last-error already in hand — and
+  Loupe's fault conjunct keys off a live `LastError`. The commit's own argument applies verbatim.
+- **C10 — `endRebuild`'s `select/default/close` sits outside `rebuildWatchMu`** (`pipeline.go:1553-1564`), so
+  "closes done exactly once" is asserted rather than enforced; two enders would double-close and panic.
+  Unreachable today, and moving the close inside the lock costs nothing.
+- **C11 — `AckWait` is sized against one lens, not the handler, and not the prefetch buffer**
+  (`manager.go:99-104`, `substrate/consumer.go:105-113`). `RebuildWait` is **per target** inside the loop at
+  `:327`, so the handler's upper bound is N × 30min and **N ≥ 5 exceeds the 2h constant** the comment claims it
+  is above. Worse, `RunDurableConsumer` drives `cons.Messages()` with no opts, so nats.go's
+  `DefaultMaxMessages = 500` prefetches: `AckWait` runs from **delivery into that buffer**, not from handler
+  entry, so on the cold-boot `DeliverAll` replay this fix is written for, a queued message is redelivered
+  regardless of the value — and each redelivery re-runs every rebuild and burns `NumDelivered`, tripping C4.
+
+### 22.3 Design-level — decide, then close
+
+- **C12 — past the readiness budget the event is Acked with no redrive path** (`manager.go:308-316`, `:396`).
+  The un-registered lenses are not in `targets` at all (the lister reads the registry), so they are never
+  rebuilt, and the durable cursor has moved past the destruction. Once the registry recovers nothing
+  re-triggers either the missed rebuilds or the attestation; the "visibly in-flight row" is an alert, not a
+  redrive. **The fork:** Ack-and-alarm (today, loses the destruction) vs. Nak indefinitely (fail-closed, but
+  wedges the consumer — the shape the filed privacy-base escalation row already describes).
+- **C13 — readiness is corpus-global, so one unactivatable lens permanently withholds every attestation.**
+  `declaredLensIDs` counts **every** non-deleted `meta.lens` vertex and deliberately counts a lens whose
+  `.spec` fetch fails as declared. Any single lens that never registers — bad spec, failed activation, another
+  deployment's — makes `readyErr` non-nil forever, so every destruction for every holder type burns the budget
+  and then Acks without attesting. The signal is not scoped to lenses declaring the destroyed holder type,
+  which is the question actually being asked.
+
+### 22.4 Minors
+
+- `packages/privacy-base/shred_identity_key.go:109` still says `RecordShredFinalization` "is read-free and
+  checks the piiKey via `kv.Read`" — wrong on both counts since §21, and a submitter following it fails closed.
+  Same stale text in `docs/components/privacyworker.md:72` and `docs/components/refractor.md`.
+- `health/reporter.go:106-108`'s warn still names only `ErrorCount`/`ConsumerLag` as reset; it now also zeroes
+  the counters M1 just made load-bearing.
+- `manager.go:380-386` (submit failure) is the one Nak arm with no `NumDelivered` bound, and `MaxDeliver` is
+  unset, so a persistent publish failure loops forever re-running every rebuild.
+- `ReconcileNow` is a full `vtx.meta.*` scan with two `KVGet`s per meta vertex, run synchronously per delivery
+  and repeated on all 20 readiness Naks.
+- Test gaps the acceptance layer named: no negative test for the identity-plane sibling's actor pin (a revert
+  of `shred_identity_key.go`'s guard alone would go undetected); `keyshredded`'s own `ContextHint.Reads` fix is
+  unasserted (`TestHandleKeyShredded_CleanPath_SubmitsFinalization` never inspects `ContextHint`); the
+  `substrate` `AckWait` plumbing has no direct test.
+
+### 22.5 Verification still owed at merge
+
+The full `go test ./... -p 4` on this branch is **still not run clean, and this fire's attempt is not a
+result** — it collapsed across ~10 `packages/*` plus `internal/refractor` while the host sat at **11.4 GB of
+12.2 GB swap with ~47 MB of free pages**, the documented contention condition, and was killed rather than left
+to thrash. The three `internal/refractor` capability-lens E2E failures it recorded
+(`RealClaimIdentityOp_E2E`, `_WithEphemeralConsumer_E2E`, `TwoActorClaimCeremony_MultiActorRace_E2E`) are
+**not** re-judged by it: §19.5 already established the ephemeral sibling as a pre-existing intermittent at
+clean `main` (2/4), filed for the Whetstone, but the other two failed only in this thrashing run and have no
+quiet-host reading on either side. **The next fire must re-run those three on a quiet host, branch vs. clean
+`main`, before reading anything into them** — and must not treat this fire's suite log as a baseline.
