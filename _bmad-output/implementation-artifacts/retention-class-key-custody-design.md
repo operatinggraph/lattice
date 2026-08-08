@@ -1257,8 +1257,8 @@ Full bar: `go build ./...` · `make vet` · `golangci-lint run ./...` · `STRICT
 
 ## 14. Multi-fire checkpoint (live)
 
-**Worktree:** `/Users/andrewsolgan/Documents/GitHub/lattice-wt-retention-custody`
-(branch `fire/retention-class-custody-inc1`).
+**Worktree:** `/Users/andrewsolgan/Documents/GitHub/lattice-wt-retention-custody-inc2`
+(branch `fire/retention-custody-inc2`). Item 1's worktree was removed once its merge landed on `main`.
 
 **Done — item 1 (2026-08-07).** Custody vocabulary + write path. `CustodySpec`/`RetentionClassSpec`, the
 `retentionclass` holder + `.retentionPolicy`, `RetentionClassID`/`RetentionClassKey`, six install
@@ -1309,3 +1309,114 @@ shipped lens migrations; `keyshredded/manager.go:31-37`'s excuse and `pipeline/s
 reason re-derived. **Plus the one package edit deferred out of item 1:** `privacy-base`'s `piiKey` DDL
 description ("per-identity" → "a key holder's DEK envelope") and its `permittedCommands` gaining
 `ShredRetentionClassKey` — bundled here so privacy-base takes one version bump, not two.
+
+## 15. Fire 1 item 2 fire brief (build note, 2026-08-07)
+
+### 15.1 Scope sentence (verbatim, §11 Fire 1 item 2)
+
+> **The read path switches to `ct.KeyID`** — all five sites, the non-identity silent branch deleted, the
+> typed refusal for a non-identity holder under `egressReads`; the `Vault` interface parameter rename
+> `identityKey` → `keyHolderKey` with every doc comment re-derived.
+
+### 15.2 Verified touch-list (every anchor re-checked live at `1d5ca961`)
+
+| File:line | What |
+|---|---|
+| `internal/processor/sensitive_decrypt.go:162-172` | delete the non-identity silent branch |
+| `internal/processor/sensitive_decrypt.go:173-204` | egress arm — the typed non-identity refusal |
+| `internal/processor/sensitive_decrypt.go:217-225` | reorder: parse ct **before** the envelope read; holder ← `ct.KeyID` |
+| `internal/refractor/pipeline/secure.go:130-137` | holder ← `ct.KeyID` (ct already parsed at `:125`, no reorder) |
+| `internal/refractor/pipeline/secure.go:153` | `Decrypt` under the resolved holder |
+| `internal/vault/service.go:478`, `:499` | `DecryptRef` — holder ← `in.Ciphertext.KeyID`; `in.Ref` keeps its shape check |
+| `internal/bridge/egress.go:174-183`, `:201` | holder ← `marker.Ciphertext.KeyID`; typed refusal naming deferred tail (a) |
+| `cmd/loupe/vault.go:147-149`, `:170`, `:176`, `:193` | reorder: fetch aspect → parse ct → holder ← `ct.KeyID` → fetch `<holder>.piiKey` |
+| `internal/vault/vault.go:63`, `:75`–`:132` | 7 interface methods + `OpenWithSessionKey` — param rename + doc comments |
+| `internal/vault/local.go:52-53`, `:203-296`, `:373-401` | impl params, AAD sites, cache-map comments |
+| `internal/vault/vaultwire/vaultwire.go:91-105` | `OpenWithSessionKey` param + doc |
+| `internal/pkgmgr/custodyscope.go` rule 5 | **re-aim, do not delete** — see §15.5 |
+
+**Two design citations corrected.** §14 lists `bridge/egress.go` and `vault/service.go` under "switch to
+`ct.KeyID`" while the deferred tail (a) says the *egress* sites switch later. Both are right at different
+granularities and the brief resolves it: **the holder resolution switches at all five sites now**; what tail
+(a) defers is *widening the bridge's envelope source* past the identity-only `piiKeyEnvelope` lens
+(`privacy-base/lenses.go`). Until that lands a non-identity holder is refused at egress — typed, at the mint
+point and again at the bridge — rather than failing as an unexplained missing envelope. Second: `secure.go`
+needs **no** reorder (§14 named two reorder sites; only `sensitive_decrypt.go` and `cmd/loupe/vault.go`
+qualify — `secure.go` already parses the ciphertext at `:125`, ahead of the column read at `:130`).
+
+### 15.3 Precedents to mirror
+
+- **The uniform shape** → §6.1's four lines. `substrate.ClassifyKey(holder) == KindVertex` is the
+  well-formedness gate (`substrate/keys.go:56`); `substrate.ParseVertexKey` (`:59`) yields the type segment
+  the egress refusals test.
+- **Fail-closed classification** → `secure.go:199-211`'s soft-deleted-piiKey treatment: absent and
+  tombstoned are the same answer, and neither falls back.
+- **Typed permanent failure at the bridge** → `permanentEgressFailure` (`egress.go:175-178`), already the
+  shape for a malformed ref.
+- **Why the switch is safe** → `local.go`'s AAD binding (`:238`, `:252`) against the envelope minted with
+  the same string (`:217`, `:223`): a substituted `keyId` fails the GCM tag. `ct.KeyID` self-authenticates.
+
+### 15.4 Increment order + green checks
+
+1. **`Vault` param rename + doc comments** (mechanical, no behavior). `go test ./internal/vault/`
+2. **`sensitive_decrypt.go`** — delete the silent branch, reorder, holder ← `ct.KeyID`, egress refusal.
+   `go test ./internal/processor/`
+3. **`secure.go`** — holder ← `ct.KeyID`; re-aim `TestSecureDecryptor_MissingIdentityKeyIsTerminal`.
+   `go test ./internal/refractor/...`
+4. **`vault/service.go` + `bridge/egress.go` + `cmd/loupe/vault.go`.**
+   `go test ./internal/vault/ ./internal/bridge/ ./cmd/loupe/`
+5. **The divergence bar** — a per-site test whose `ct.KeyID` differs from the anchor / lens column, plus the
+   negative vectors (absent `keyId`, malformed `keyId`, holder with no `piiKey`, tombstoned key aspect).
+
+Full bar: `go build ./...` · `make vet` · `golangci-lint run ./...` ·
+`STRICT=1 go run ./scripts/lint-conventions.go` · `STRICT=1 go run ./scripts/lint-board.go` ·
+`go test ./internal/vault/ ./internal/processor/ ./internal/refractor/... ./internal/bridge/ ./internal/pkgmgr/ ./cmd/loupe/` ·
+`make verify-kernel`.
+
+### 15.5 In-scope gotchas
+
+- **The install gate is RE-AIMED, not deleted** (the one deliberate divergence from §14's plan, decided
+  here). §14 said "item 2's first act is deleting that gate," reasoning that the gate's stated cause — a
+  class-custodied record is *write-only* — is exactly what item 2 removes. That cause does die. But a second
+  one is born the moment the record becomes readable: **item 3 owns `ShredRetentionClassKey`**, so between
+  item 2 and item 3 a package could custody retained PHI on a class DEK that **no verb can ever destroy** —
+  a retention class whose whole purpose is a destroyable key. Lifting the gate on the death of its *first*
+  reason would ship the hazard the gate exists for. The gate's message and comment are re-derived to name
+  the remaining cause; item 3 lifts it. No consumer is delayed: nothing declares custody until Fire 2, which
+  follows item 3.
+- **`ct.KeyID` is not available where `v == nil`.** With no Vault wired, step 6.5 never encrypted, so the
+  aspect body is plaintext and carries no `keyId`. The non-egress arm already returns early on `v == nil`
+  (`:214`); the **egress** arm must keep authoring its unauthenticated marker in that deployment
+  (`TestEgressReads_SensitiveKey_HydratesAsRef` has no Vault) — so the refusal is gated on a *parseable*
+  ciphertext, and an unparseable body stays an error only where it already was (`v != nil`, `:189-192`).
+- **`SecureColumn.IdentityKeyColumn` stays declared-and-required, and becomes unread.** Its removal plus
+  `HolderTypes` is item 3, so the six shipped lenses need no migration in this fire.
+  `TestSecureDecryptor_MissingIdentityKeyIsTerminal` asserts the behavior this fire deletes — **re-aim it**
+  to the new terminal condition (a ciphertext whose `keyId` is absent or malformed), don't delete it.
+- **`HolderTypes` (§6.1 fail-closed rule 2) is item 3.** In this fire a column accepts any well-formed
+  holder. That is not a confidentiality widening — §6.1's AAD argument is what bounds it — but it does mean
+  the *enumeration* key §6.3 needs does not exist yet. Stated so item 3 does not read this fire as
+  already-covered.
+- **RPC wire structs keep their JSON tags.** `DecryptRequest`/`WrapKeyRequest`/`UnwrapKeyRequest`/
+  `IssueSessionKeyRequest` rename their **Go** fields to `KeyHolderKey` (they now carry a
+  `vtx.retentionclass.*` on the loupe path, so the old name would be a vestigial trap) while the
+  `json:"identityKey"` tags stay frozen — renaming a live NATS RPC field is a wire change with no bearing on
+  this fire's guarantee, and the scope-diff gate is narrow-only.
+- **The MAC is unaffected.** `RefMACInput(ref, requestID, ct)` covers the whole ciphertext including its
+  `keyId`, so switching the *holder* source needs no MAC v2 (§8.9 / tail (a) already say so).
+
+### 15.6 Adjacent finds (filed or deliberately not, now)
+
+- **`secureIdentityKeyType` (`pipeline.go`) survives this fire.** §6.1 lists its deletion, §11 places it in
+  item 3, and it is consulted only on a path a Secure Lens structurally cannot take (ledger #20). Not filed
+  — it is a named item-3 deliverable, recorded here so item 3 does not treat it as done.
+- **The uncommitted Contract #1 §1.6 transitional note narrows again with this fire** and is updated in
+  `main`, still uncommitted, as part of the same standing proposal — not a new one.
+
+### 15.7 Non-goals (the drift fence)
+
+- **Item 3** — everything §14 lists under it, unchanged.
+- **Fire 2** — the clinic and lease-signing consumers.
+- **Deferred tail (a)** — widening `piiKeyEnvelope` past `MATCH (i:identity)` so a retained record can
+  egress. This fire *refuses* that case; it does not enable it.
+- The `json:"identityKey"` wire tags (§15.5).
