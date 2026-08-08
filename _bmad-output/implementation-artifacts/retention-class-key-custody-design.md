@@ -1261,8 +1261,8 @@ Full bar: `go build ./...` · `make vet` · `golangci-lint run ./...` · `STRICT
 
 ## 14. Multi-fire checkpoint (live)
 
-**Worktree:** `/Users/andrewsolgan/Documents/GitHub/lattice-wt-retention-custody-inc2`
-(branch `fire/retention-custody-inc2`). Item 1's worktree was removed once its merge landed on `main`.
+**Worktree:** none held. Items 1 and 2 are merged to `main`, so each fire opens a fresh worktree off `main`
+rather than resuming a persistent one — item 3 starts clean.
 
 **Done — item 1 (2026-08-07).** Custody vocabulary + write path. `CustodySpec`/`RetentionClassSpec`, the
 `retentionclass` holder + `.retentionPolicy`, `RetentionClassID`/`RetentionClassKey`, six install
