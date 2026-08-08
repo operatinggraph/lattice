@@ -1611,3 +1611,130 @@ shred; a finalization naming an unknown step.
 - **Fire 2** — the clinic and lease-signing consumers.
 - **Deferred tail (a)** — widening `piiKeyEnvelope` past `MATCH (i:identity)`.
 - The two `PurgeIdentityDedupFootprint` wall-clock failures (§16.5) — an already-filed row, not this fire.
+
+## 17. Fire 1 item 3b-i fire brief (build note, 2026-08-08)
+
+**Item 3b splits in two, at the same kind of green boundary 3a used.** §14's item 3b lists eight
+deliverables. Four of them are the **declaration** — `HolderTypes` replacing `IdentityKeyColumn` across the
+five sites, `secureIdentityKeyType`'s deletion, the six shipped lens migrations, and the `secureColumnsEqual`
+slice-compare the field forces — and they change no shipped projection behavior, because item 2 already made
+the decryptor resolve custody from `ct.KeyID` and left `IdentityKeyColumn` required-but-unread
+(`secure.go:25-32`, proven by `TestSecureDecryptor_AbsentIdentityKeyColumnStillDecrypts`). The other four are
+the **delivery** — F2's per-row `null`+alarm, the exported serialized `RebuildRule`, the destruction-event
+consumer with its `projectionsRebuilt` attestation, and the two stale rationales — and they rewrite the
+failure posture of six live secure lenses. This fire builds **3b-i, the declaration**; **3b-ii** is delivery
+and lifts the install gate. Narrowing, not re-scoping: every §14 deliverable survives, in §14's order, and
+`custodyscope.go` rule 5 stays shut across the boundary.
+
+### 17.1 Scope sentence (narrowed from §14 item 3b)
+
+> **`SecureColumn.HolderTypes` replaces `IdentityKeyColumn`** at all five sites
+> (`pipeline/secure.go`, `lens/corekv_source.go`, `pkgmgr/definition.go` + the two validation mirrors
+> `corekv_source.go` and `bucketguard.go`), required non-empty and enforced per-row at decrypt time;
+> `secureIdentityKeyType` deleted, its narrowing conjunct re-aimed at the declared holder types; the six
+> shipped lens migrations (**not uniform** — lease-signing's is `IdentityKeyColumn: "applicant"`, three
+> entries); `secureColumnsEqual`'s slice compare.
+
+**Enforcement lands with the declaration, not after it.** §14 leaves `HolderTypes` inert until the delivery
+half; that would ship a declared field no code reads, which this codebase forbids. It is instead enforced
+here — a ciphertext whose `vault.KeyHolderType` is not in the column's `HolderTypes` is refused — and the
+refusal is a `failure.Terminal`, matching every neighbouring custody refusal in `decryptColumn` today.
+**This cannot fire in any live corpus:** rule 5 refuses `retentionClass` custody at install, so step 6.5 has
+never minted a non-identity DEK, so every ciphertext in existence is identity-held and every migrated lens
+declares `["identity"]`. 3b-ii changes *how* that refusal fails (F2: `null` + alarm, per-row), not *whether*
+— which is the correct order, since converting a refusal that does not exist yet is not a boundary.
+
+### 17.2 Verified touch-list (every anchor re-checked live at `c120a7d0`)
+
+| Site | Anchor | Edit |
+|---|---|---|
+| `internal/refractor/pipeline/secure.go:16-37` | `SecureColumn`; doc :25-32 | `HolderTypes []string \`json:"holderTypes"\``; re-derive the doc |
+| `internal/refractor/pipeline/secure.go:119-145` | `decryptColumn`, after `vault.KeyHolder` :142 | Terminal unless `KeyHolderType` ∈ `col.HolderTypes` |
+| `internal/refractor/pipeline/secure.go:92-104` | `Apply`'s failure-posture doc | add the unlisted-holder row |
+| `internal/refractor/pipeline/pipeline.go:781-794`, `:851-857` | `secureIdentityKeyType` const + its conjunct | delete the const; conjunct loops the decryptor's declared holder types |
+| `internal/refractor/lens/corekv_source.go:283-287`, `:877-900` | wire struct + `validateSecureColumns` | field swap; required-non-empty + per-entry type-segment validity |
+| `internal/pkgmgr/definition.go:1088-1096` | `pkgmgr.SecureColumn` | field swap + doc |
+| `internal/pkgmgr/bucketguard.go:155-189` | the validation mirror | same two rules, same wording shape |
+| `internal/pkgmgr/build.go:471-483` | `targetConfig["secureColumns"]` marshal | `"identityKeyColumn"` → `"holderTypes"` |
+| `cmd/refractor/main.go:1025-1029` | `lens.SecureColumn` → `pipeline.SecureColumn` | carry `HolderTypes` (copy the slice) |
+| `cmd/refractor/main.go:1378-1396` | `secureAliasNames` | drop `IdentityKeyColumn` from the alias set |
+| `cmd/refractor/main.go:1364-1376` | `secureColumnsEqual` | `!=` → field-wise + `slices.Equal` |
+| `packages/clinic-domain/lenses.go:312-315` | `clinicPatientsRead`, 2 entries | `HolderTypes: []string{"identity"}` + version bump |
+| `packages/identity-domain/lenses.go:66-68` | `identityCredentialsRead`, 1 | same |
+| `packages/loftspace-domain/lenses.go:81-83` | `applicantRosterRead`, 1 | same |
+| `packages/lease-signing/lenses.go:274-278` | `landlordLeaseApplicationsRead`, 3, col `applicant` | same |
+| `packages/wellness-domain/lenses.go:137-139` | `wellnessIdentitiesRead`, 1 | same |
+| `packages/cafe-domain/lenses.go:132-134` | `cafeIdentitiesRead`, 1 | same |
+
+### 17.3 Precedents to mirror
+
+- **The validation wording + fail-closed posture** → the `IdentityKeyColumn` rules being replaced
+  (`corekv_source.go:877-879` required; `bucketguard.go:162-165` its mirror). The two mirrors must stay
+  textually parallel — they already are, and a builder editing one and not the other is the standing hazard.
+- **A type-segment validity check** → the same rule `pkgmgr` already applies to a vertex type elsewhere;
+  `[a-z][a-z0-9]*` per `keys.go:141-155`, the convention §12.1 already corrected this design on.
+- **The per-row custody refusal** → `decryptColumn`'s existing neighbours (`secure.go:144`, `:153-154`,
+  `:172`): a `failure.Terminal` naming the column, the holder, and what was expected.
+- **A slice-bearing equality helper** → `slices.Equal` on the field, the ordinary Go form; the surrounding
+  comment already says the comparison is order-sensitive because the spec is authored, which stays true.
+
+### 17.4 Increment order + green checks
+
+1. **The three structs + both validation mirrors + the marshal.**
+   `go test ./internal/refractor/lens/ ./internal/pkgmgr/`
+2. **The decryptor's enforcement + `secureIdentityKeyType`'s re-aim.**
+   `go test ./internal/refractor/pipeline/`
+3. **`cmd/refractor`'s three helpers.** `go build ./... && go test ./cmd/refractor/`
+4. **The six lens migrations + version bumps.** `go test ./packages/...`
+5. **Gates.** `go build ./...` · `make vet` · `golangci-lint run ./...` ·
+   `STRICT=1 go run ./scripts/lint-conventions.go` · `STRICT=1 go run ./scripts/lint-board.go` ·
+   `go test ./internal/refractor/... ./internal/pkgmgr/ ./cmd/refractor/ ./packages/...`
+
+### 17.5 In-scope gotchas
+
+- **The wire field renames, so an installed lens spec goes stale.** `build.go` marshals the spec into the
+  package's `vtx.meta.*` aspect, and `corekv_source.go` parses it back. After this lands, a lens installed
+  from an older package version carries `identityKeyColumn` and no `holderTypes`, which the new required
+  rule refuses — the lens fails to load rather than loading unvalidated. That is the fail-closed direction
+  and the reason all six packages take a version bump in this same commit: the diff-apply is the migration.
+  **On the running stack the order is reinstall-then-cycle**, never cycle-then-reinstall.
+- **`secureAliasNames` shrinks, so a lens may stop being forced to RETURN a column it still declares.**
+  The alias set exists to make the executor project the columns the decryptor needs; the identity-key column
+  is no longer one of them. Every migrated lens keeps RETURNing its `identity_key`/`applicant` alias as an
+  ordinary projected column — none of the six needs a cypher change (§6.2, re-verified against all six
+  RETURN clauses) — but the *requirement* is gone, which is the point: §14 item 2 named "the declared
+  column's RETURN alias was never projected" as a whole class of runtime failure this removes.
+- **`packages/privacy-base` is RED at clean `main` under package-level load** — the two
+  `TestPurgeIdentityDedupFootprint_*_ConvergesPastOnePage` wall-clock failures (§16.5, an already-filed
+  row). Run the packages gate with `PROCESSOR_SCRIPT_WALL_MS=5000` and do not read them as this fire's.
+- **The narrowing conjunct is dead code today and must stay fail-closed anyway.** `pipeline.go:851-857`
+  guards a secure + actor-aggregate combination translate-time validation already refuses
+  (`TestTranslateSpec_SecureColumns_ActorAggregateRejected`). Re-aim it, do not drop it: whoever lifts that
+  ban owns re-deriving the guard, which is exactly what the const's own comment says.
+- **`vault.KeyHolderType` already exists** (`vault/keyholder.go:54-60`, shipped in item 2) — the
+  enforcement needs no new parser.
+
+### 17.6 Adjacent finds
+
+- **`vault-crypto-shredding-design.md:612` describes the `{column, identityKeyColumn, field}` shape.** Not
+  edited: it is a shipped design doc recording what that fire built, and this design supersedes it in the
+  ordinary way. Noted so a later reader does not read it as live drift.
+- **`internal/refractor/failure`'s `CatPrivacyCritical` still has no generic routing** in
+  `dispositionEvalErr` (`pipeline.go:2115-2137`); only `keyshredded/manager.go:379-388` acts on the tier, and
+  it does so by hand — `failure.PrivacyCritical(err)` decorates the log line while the pause is a separate
+  explicit `Control.PauseRule` call. Carried forward from §16.6 unchanged: 3b-ii is the fire that must either
+  extend that routing or reuse the manual pattern.
+- **`Pipeline.Rebuild` has no serialization gate.** `rebuildInFlight` is `Store(true)` unconditionally
+  (`pipeline.go:1510`), not a CAS — only `resumeInterruptedRebuild` uses a CAS (`:1641`), and that guards a
+  different thing. Not filed: it is 3b-ii's own "serialized per lens" deliverable, recorded so 3b-ii does not
+  discover it mid-build.
+
+### 17.7 Non-goals (the drift fence)
+
+- **3b-ii** — F2's per-row `null` + privacy-tier alarm; `control.Service.RebuildRule` exported + serialized
+  per lens; the Refractor destruction-event consumer with the `HolderTypes` enumeration and the
+  `projectionsRebuilt` attestation (and lifting the `FailedPrecondition: step projectionsRebuilt has no
+  producer yet` guard in `shred_retention_class_key.go`); `keyshredded/manager.go:31-37`'s excuse and
+  `pipeline/sweep.go:29-33`'s stale reason re-derived; **lifting `custodyscope.go` rule 5.**
+- **Fire 2** — the clinic and lease-signing consumers.
+- Any cypher change to the six migrated lenses — none needs one.
