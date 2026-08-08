@@ -99,7 +99,7 @@ func TestPersonalLens_PL5_E2E_ShreddedIdentitySessionKeyDenied(t *testing.T) {
 	require.NoError(t, err)
 
 	// Before shredding, the Edge can obtain a session key.
-	reqData, err := json.Marshal(vault.IssueSessionKeyRequest{IdentityKey: identityKey, Envelope: env, TTLSeconds: 60})
+	reqData, err := json.Marshal(vault.IssueSessionKeyRequest{KeyHolderKey: identityKey, Envelope: env, TTLSeconds: 60})
 	require.NoError(t, err)
 	reply, err := h.conn.NATS().Request(vault.IssueSessionKeySubject, reqData, 5*time.Second)
 	require.NoError(t, err)

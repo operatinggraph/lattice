@@ -64,8 +64,8 @@ func TestWrapKey_RoundTrip(t *testing.T) {
 			_ = msg.Respond(mustJSON(t, vault.WrapKeyResponse{Error: "bad request"}))
 			return
 		}
-		if req.IdentityKey != identityKey {
-			t.Errorf("responder: IdentityKey = %q, want %q", req.IdentityKey, identityKey)
+		if req.KeyHolderKey != identityKey {
+			t.Errorf("responder: KeyHolderKey = %q, want %q", req.KeyHolderKey, identityKey)
 		}
 		if !bytes.Equal(req.Key, cek) {
 			t.Errorf("responder: Key = %v, want %v", req.Key, cek)
@@ -106,8 +106,8 @@ func TestUnwrapKey_RoundTrip(t *testing.T) {
 			_ = msg.Respond(mustJSON(t, vault.UnwrapKeyResponse{Error: "bad request"}))
 			return
 		}
-		if req.IdentityKey != identityKey {
-			t.Errorf("responder: IdentityKey = %q, want %q", req.IdentityKey, identityKey)
+		if req.KeyHolderKey != identityKey {
+			t.Errorf("responder: KeyHolderKey = %q, want %q", req.KeyHolderKey, identityKey)
 		}
 		if !bytes.Equal(req.Wrapped.CT, wrapped.CT) || !bytes.Equal(req.Wrapped.Nonce, wrapped.Nonce) {
 			t.Errorf("responder: Wrapped = %+v, want %+v", req.Wrapped, wrapped)

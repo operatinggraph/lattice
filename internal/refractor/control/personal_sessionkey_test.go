@@ -55,10 +55,10 @@ type fakeSessionVault struct {
 
 // SessionKeyCall records one IssueSessionKey invocation's arguments.
 type SessionKeyCall struct {
-	IdentityKey string
-	Envelope    vault.Envelope
-	AspectScope string
-	TTL         time.Duration
+	KeyHolderKey string
+	Envelope     vault.Envelope
+	AspectScope  string
+	TTL          time.Duration
 }
 
 func (f *fakeSessionVault) CreateIdentityKey(context.Context, string) (vault.Envelope, error) {
@@ -85,13 +85,13 @@ func (f *fakeSessionVault) ShredKey(context.Context, string) error {
 	panic("fakeSessionVault: ShredKey not used by the sessionkey op")
 }
 
-func (f *fakeSessionVault) IssueSessionKey(_ context.Context, identityKey string, envelope vault.Envelope, aspectScope string, ttl time.Duration) (vault.SessionKey, error) {
-	call := SessionKeyCall{IdentityKey: identityKey, Envelope: envelope, AspectScope: aspectScope, TTL: ttl}
+func (f *fakeSessionVault) IssueSessionKey(_ context.Context, keyHolderKey string, envelope vault.Envelope, aspectScope string, ttl time.Duration) (vault.SessionKey, error) {
+	call := SessionKeyCall{KeyHolderKey: keyHolderKey, Envelope: envelope, AspectScope: aspectScope, TTL: ttl}
 	f.calledWith = append(f.calledWith, call)
 	if f.err != nil {
 		return vault.SessionKey{}, f.err
 	}
-	return vault.SessionKey{Key: []byte(f.key.IdentityKey + "-dek"), ExpiresAt: time.Unix(1000, 0).UTC()}, nil
+	return vault.SessionKey{Key: []byte(f.key.KeyHolderKey + "-dek"), ExpiresAt: time.Unix(1000, 0).UTC()}, nil
 }
 
 func (f *fakeSessionVault) MAC(context.Context, string, []byte) ([]byte, error) {
@@ -172,7 +172,7 @@ func TestControl_PersonalSessionKey_Success_ReturnsKey(t *testing.T) {
 	kv := &fakeCoreKV{entries: map[string]*substrate.KVEntry{
 		identityKey + ".piiKey": piiKeyEntry(t, envelope),
 	}}
-	fv := &fakeSessionVault{key: SessionKeyCall{IdentityKey: identityKey}}
+	fv := &fakeSessionVault{key: SessionKeyCall{KeyHolderKey: identityKey}}
 
 	svc := control.NewService()
 	svc.SetCapabilityChecker(control.NewStubCapabilityChecker(nil))
@@ -193,7 +193,7 @@ func TestControl_PersonalSessionKey_Success_ReturnsKey(t *testing.T) {
 	assert.Equal(t, time.Unix(1000, 0).UTC(), resp.PersonalSessionKey.ExpiresAt)
 
 	require.Len(t, fv.calledWith, 1)
-	assert.Equal(t, identityKey, fv.calledWith[0].IdentityKey)
+	assert.Equal(t, identityKey, fv.calledWith[0].KeyHolderKey)
 	assert.Equal(t, envelope, fv.calledWith[0].Envelope)
 	assert.Equal(t, "ssn", fv.calledWith[0].AspectScope)
 	assert.Equal(t, 60*time.Second, fv.calledWith[0].TTL)
@@ -276,7 +276,7 @@ func TestControl_PersonalSessionKey_VerifiedActorFillsEmptyBodyIdentity(t *testi
 	kv := &fakeCoreKV{entries: map[string]*substrate.KVEntry{
 		identityKeyA + ".piiKey": piiKeyEntry(t, vault.Envelope{KeyID: "kek-1"}),
 	}}
-	fv := &fakeSessionVault{key: SessionKeyCall{IdentityKey: identityKeyA}}
+	fv := &fakeSessionVault{key: SessionKeyCall{KeyHolderKey: identityKeyA}}
 
 	svc := control.NewService()
 	svc.SetCapabilityChecker(control.NewStubCapabilityChecker(nil))
@@ -298,5 +298,5 @@ func TestControl_PersonalSessionKey_VerifiedActorFillsEmptyBodyIdentity(t *testi
 	require.Empty(t, resp.Error)
 	require.NotNil(t, resp.PersonalSessionKey)
 	require.Len(t, fv.calledWith, 1)
-	assert.Equal(t, identityKeyA, fv.calledWith[0].IdentityKey)
+	assert.Equal(t, identityKeyA, fv.calledWith[0].KeyHolderKey)
 }

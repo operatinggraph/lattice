@@ -18,11 +18,18 @@ import (
 // vault-crypto-shredding-design.md §2.3 Phase B). Column names the RETURN
 // alias whose evaluated value is a sensitive aspect's ciphertext envelope
 // ({ct, nonce, keyId} — the aspect's `data` map, reached in cypher as
-// `node.<aspect>.data`). IdentityKeyColumn names the RETURN alias carrying
-// the OWNING identity's vertex key (vtx.identity.<id>) — the key custody
-// anchor whose piiKey wraps the DEK. Field optionally selects one field of
-// the decrypted plaintext object to project (e.g. "value"); empty projects
-// the whole decrypted object.
+// `node.<aspect>.data`). Field optionally selects one field of the decrypted
+// plaintext object to project (e.g. "value"); empty projects the whole
+// decrypted object.
+//
+// IdentityKeyColumn names a RETURN alias carrying the owning identity's vertex
+// key (vtx.identity.<id>). It is a required declaration a lens spec must
+// satisfy, and it is an ordinary projected column; it does NOT select the
+// decryption key. Custody is read from the ciphertext's own keyId
+// (vault.KeyHolder), which is the AEAD associated data the ciphertext was
+// sealed under and therefore the only self-authenticating answer — a column
+// value could disagree with it, and a lens can declare a column its cypher
+// never RETURNs at all.
 type SecureColumn struct {
 	Column            string `json:"column"`
 	IdentityKeyColumn string `json:"identityKeyColumn"`
@@ -127,30 +134,33 @@ func (d *SecureDecryptor) decryptColumn(ctx context.Context, row map[string]any,
 		return failure.Terminal(fmt.Errorf("pipeline: secure column %q: %w", col.Column, err))
 	}
 
-	identityKey, _ := row[col.IdentityKeyColumn].(string)
-	if identityKey == "" {
-		return failure.Terminal(fmt.Errorf(
-			"pipeline: secure column %q: identity-key column %q is empty for a non-null ciphertext — cannot resolve key custody",
-			col.Column, col.IdentityKeyColumn))
+	// Custody comes from the ciphertext, never from the row. vault.KeyHolder
+	// reads the keyId the ciphertext was sealed under, so a projected column
+	// the cypher happens to return takes no part in deciding which DEK opens
+	// it — which is what lets a row whose custody sits on a retention-class
+	// holder project through the same decryptor as a subject-custodied one.
+	keyHolderKey, err := vault.KeyHolder(ct)
+	if err != nil {
+		return failure.Terminal(fmt.Errorf("pipeline: secure column %q: %w", col.Column, err))
 	}
 
-	envelope, err := d.readPiiKeyEnvelope(ctx, identityKey)
+	envelope, err := d.readPiiKeyEnvelope(ctx, keyHolderKey)
 	if err != nil {
 		if errors.Is(err, substrate.ErrKeyNotFound) {
-			// Ciphertext exists but its identity has no piiKey — an invariant
+			// Ciphertext exists but its key holder has no piiKey — an invariant
 			// violation (step 6.5 mints the piiKey in the same atomic batch as
 			// the first sensitive write; a shred leaves a durable placeholder).
 			return failure.Terminal(fmt.Errorf(
-				"pipeline: secure column %q: identity %s has ciphertext but no piiKey aspect", col.Column, identityKey))
+				"pipeline: secure column %q: key holder %s has ciphertext but no piiKey aspect", col.Column, keyHolderKey))
 		}
 		// Infra (KV unreachable, …) — classify via the standard path.
-		return fmt.Errorf("pipeline: secure column %q: read piiKey for %s: %w", col.Column, identityKey, err)
+		return fmt.Errorf("pipeline: secure column %q: read piiKey for %s: %w", col.Column, keyHolderKey, err)
 	}
 
 	if d.calls != nil {
 		d.calls.Add(1)
 	}
-	plaintext, err := d.vault.Decrypt(ctx, identityKey, envelope, ct)
+	plaintext, err := d.vault.Decrypt(ctx, keyHolderKey, envelope, ct)
 	if err != nil {
 		if errors.Is(err, vault.ErrKeyShredded) {
 			// Shredded → the PII is gone; project null and keep the row.
@@ -158,8 +168,8 @@ func (d *SecureDecryptor) decryptColumn(ctx context.Context, row map[string]any,
 			return nil
 		}
 		// ErrDecryptFailed / ErrInvalidEnvelope (tampered ciphertext, wrong
-		// identity binding) — permanently unrecoverable for this input.
-		return failure.Terminal(fmt.Errorf("pipeline: secure column %q: decrypt under %s: %w", col.Column, identityKey, err))
+		// holder binding) — permanently unrecoverable for this input.
+		return failure.Terminal(fmt.Errorf("pipeline: secure column %q: decrypt under %s: %w", col.Column, keyHolderKey, err))
 	}
 
 	var value map[string]any
@@ -183,16 +193,16 @@ func (d *SecureDecryptor) decryptColumn(ctx context.Context, row map[string]any,
 	return nil
 }
 
-// readPiiKeyEnvelope point-reads and parses vtx.identity.<id>.piiKey — the
-// same aspect shape the Processor's commit path writes (the aspect envelope's
-// `data` field carries the vault.Envelope). A soft-deleted piiKey aspect is
-// treated as absent (the engine treats soft-deleted aspects as absent too —
-// the two layers must agree, and a "deleted" key must never open ciphertext).
-// A piiKey that exists but cannot be parsed is permanently unusable, so the
-// error is Terminal — a Transient classification would Nak-loop the
-// triggering event forever.
-func (d *SecureDecryptor) readPiiKeyEnvelope(ctx context.Context, identityKey string) (vault.Envelope, error) {
-	entry, err := d.coreKV.Get(ctx, identityKey+".piiKey")
+// readPiiKeyEnvelope point-reads and parses a key holder's <holder>.piiKey —
+// the same aspect shape the Processor's commit path writes (the aspect
+// envelope's `data` field carries the vault.Envelope). A soft-deleted piiKey
+// aspect is treated as absent (the engine treats soft-deleted aspects as
+// absent too — the two layers must agree, and a "deleted" key must never open
+// ciphertext). A piiKey that exists but cannot be parsed is permanently
+// unusable, so the error is Terminal — a Transient classification would
+// Nak-loop the triggering event forever.
+func (d *SecureDecryptor) readPiiKeyEnvelope(ctx context.Context, keyHolderKey string) (vault.Envelope, error) {
+	entry, err := d.coreKV.Get(ctx, keyHolderKey+".piiKey")
 	if err != nil {
 		return vault.Envelope{}, err
 	}
@@ -204,7 +214,7 @@ func (d *SecureDecryptor) readPiiKeyEnvelope(ctx context.Context, identityKey st
 		Data      vault.Envelope `json:"data"`
 	}
 	if err := json.Unmarshal(entry.Value, &doc); err != nil {
-		return vault.Envelope{}, failure.Terminal(fmt.Errorf("parse piiKey %s.piiKey: %w", identityKey, err))
+		return vault.Envelope{}, failure.Terminal(fmt.Errorf("parse piiKey %s.piiKey: %w", keyHolderKey, err))
 	}
 	if doc.IsDeleted {
 		return vault.Envelope{}, substrate.ErrKeyNotFound

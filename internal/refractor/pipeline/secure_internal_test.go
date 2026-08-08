@@ -77,7 +77,7 @@ func mintIdentityPII(t *testing.T, v *vault.LocalBackend, identityKey string, da
 
 func TestSecureDecryptor_DecryptsFieldAndWholeObject(t *testing.T) {
 	v := newTestVault(t)
-	const idKey = "vtx.identity.SecUnitAliceAAAAAAAAA"
+	const idKey = "vtx.identity.SecUnitALiceAAAAAAAA"
 	ctMap, piiKeyDoc := mintIdentityPII(t, v, idKey, map[string]any{"value": "Alice", "source": "signup"})
 
 	var calls atomic.Uint64
@@ -198,7 +198,12 @@ func TestSecureDecryptor_NonEnvelopeValueIsTerminal(t *testing.T) {
 	assert.Equal(t, failure.CatTerminal, failure.Classify(err))
 }
 
-func TestSecureDecryptor_MissingIdentityKeyIsTerminal(t *testing.T) {
+// A row that projects no identity-key column decrypts anyway: custody comes
+// from the ciphertext's keyId, so the declared column is an ordinary projected
+// value the decryptor never consults. This is the property that lets a lens
+// declare a column its cypher does not RETURN without failing per-row at
+// runtime — the failure mode the column-derived custody could not rule out.
+func TestSecureDecryptor_AbsentIdentityKeyColumnStillDecrypts(t *testing.T) {
 	v := newTestVault(t)
 	const idKey = "vtx.identity.SecUnitNoidCoLAAAAAA"
 	ctMap, piiKeyDoc := mintIdentityPII(t, v, idKey, map[string]any{"value": "Alice"})
@@ -208,16 +213,102 @@ func TestSecureDecryptor_MissingIdentityKeyIsTerminal(t *testing.T) {
 	}, nil)
 	require.NoError(t, err)
 
-	err = dec.Apply(context.Background(), []ruleengine.EvalResult{{Row: map[string]any{"name": ctMap}}})
+	row := map[string]any{"name": ctMap}
+	require.NoError(t, dec.Apply(context.Background(), []ruleengine.EvalResult{{Row: row}}))
+	assert.Equal(t, "Alice", row["name"])
+}
+
+// The terminal condition is now a ciphertext that names no usable key holder.
+// A missing keyId leaves custody unknowable, and there is deliberately no
+// fallback to the row or to the aspect's anchor — a fallback would open the
+// record under a holder it never named.
+func TestSecureDecryptor_CiphertextWithoutKeyIDIsTerminal(t *testing.T) {
+	v := newTestVault(t)
+	const idKey = "vtx.identity.SecUnitNoidCoLAAAAAA"
+	ctMap, piiKeyDoc := mintIdentityPII(t, v, idKey, map[string]any{"value": "Alice"})
+	delete(ctMap, "keyId")
+
+	dec, err := NewSecureDecryptor(v, fakeCoreKV{idKey + ".piiKey": piiKeyDoc}, []SecureColumn{
+		{Column: "name", IdentityKeyColumn: "identity_key", Field: "value"},
+	}, nil)
+	require.NoError(t, err)
+
+	err = dec.Apply(context.Background(), []ruleengine.EvalResult{{Row: map[string]any{"identity_key": idKey, "name": ctMap}}})
 	require.Error(t, err)
 	assert.Equal(t, failure.CatTerminal, failure.Classify(err))
+}
+
+// A malformed keyId is refused rather than repaired: the row carries a
+// perfectly good identity key, and the decryptor must not reach for it.
+func TestSecureDecryptor_MalformedKeyIDNeverFallsBackToTheRow(t *testing.T) {
+	v := newTestVault(t)
+	const idKey = "vtx.identity.SecUnitNoidCoLAAAAAA"
+	ctMap, piiKeyDoc := mintIdentityPII(t, v, idKey, map[string]any{"value": "Alice"})
+	ctMap["keyId"] = "not-a-vertex-key"
+
+	dec, err := NewSecureDecryptor(v, fakeCoreKV{idKey + ".piiKey": piiKeyDoc}, []SecureColumn{
+		{Column: "name", IdentityKeyColumn: "identity_key", Field: "value"},
+	}, nil)
+	require.NoError(t, err)
+
+	err = dec.Apply(context.Background(), []ruleengine.EvalResult{{Row: map[string]any{"identity_key": idKey, "name": ctMap}}})
+	require.Error(t, err)
+	assert.Equal(t, failure.CatTerminal, failure.Classify(err))
+}
+
+// The divergence bar for this site: the row's identity-key column names a
+// DIFFERENT holder than the ciphertext does, and both holders have a live
+// piiKey. Only the ciphertext's keyId can open it, so a decryptor still
+// reading the column would fail the AEAD tag rather than return the plaintext.
+func TestSecureDecryptor_KeyIDWinsOverADivergentIdentityKeyColumn(t *testing.T) {
+	v := newTestVault(t)
+	const sealingHolder = "vtx.identity.SecUnitSeaLerAAAAAAA"
+	const decoyHolder = "vtx.identity.SecUnitDecoyAAAAAAAA"
+	ctMap, sealingPiiKey := mintIdentityPII(t, v, sealingHolder, map[string]any{"value": "Alice"})
+	_, decoyPiiKey := mintIdentityPII(t, v, decoyHolder, map[string]any{"value": "Mallory"})
+
+	dec, err := NewSecureDecryptor(v, fakeCoreKV{
+		sealingHolder + ".piiKey": sealingPiiKey,
+		decoyHolder + ".piiKey":   decoyPiiKey,
+	}, []SecureColumn{
+		{Column: "name", IdentityKeyColumn: "identity_key", Field: "value"},
+	}, nil)
+	require.NoError(t, err)
+
+	row := map[string]any{"identity_key": decoyHolder, "name": ctMap}
+	require.NoError(t, dec.Apply(context.Background(), []ruleengine.EvalResult{{Row: row}}))
+	assert.Equal(t, "Alice", row["name"])
+}
+
+// The same divergence with a NON-identity holder: a retention-class holder
+// seals the record, its piiKey is live, and the row's identity-key column
+// names the anchoring identity. The decryptor follows the class holder, which
+// is the whole point of custody that outlives its subject.
+func TestSecureDecryptor_DecryptsUnderARetentionClassHolder(t *testing.T) {
+	v := newTestVault(t)
+	const classHolder = "vtx.retentionclass.SecUnitCLassAAAAAAAA"
+	const anchorIdentity = "vtx.identity.SecUnitAnchorAAAAAAA"
+	ctMap, classPiiKey := mintIdentityPII(t, v, classHolder, map[string]any{"value": "chart note"})
+	_, anchorPiiKey := mintIdentityPII(t, v, anchorIdentity, map[string]any{"value": "unused"})
+
+	dec, err := NewSecureDecryptor(v, fakeCoreKV{
+		classHolder + ".piiKey":    classPiiKey,
+		anchorIdentity + ".piiKey": anchorPiiKey,
+	}, []SecureColumn{
+		{Column: "note", IdentityKeyColumn: "identity_key", Field: "value"},
+	}, nil)
+	require.NoError(t, err)
+
+	row := map[string]any{"identity_key": anchorIdentity, "note": ctMap}
+	require.NoError(t, dec.Apply(context.Background(), []ruleengine.EvalResult{{Row: row}}))
+	assert.Equal(t, "chart note", row["note"])
 }
 
 func TestSecureDecryptor_SoftDeletedPiiKeyIsTerminal(t *testing.T) {
 	// A soft-deleted piiKey aspect must never open ciphertext — the engine
 	// treats soft-deleted aspects as absent, and the decryptor must agree.
 	v := newTestVault(t)
-	const idKey = "vtx.identity.SecUnitDelPiiKeyAAA"
+	const idKey = "vtx.identity.SecUnitDeLPiiKeyAAAA"
 	ctMap, _ := mintIdentityPII(t, v, idKey, map[string]any{"value": "Alice"})
 	env, err := v.CreateIdentityKey(context.Background(), "vtx.identity.SecUnitotherAAAAAAAA")
 	require.NoError(t, err)
@@ -241,7 +332,7 @@ func TestSecureDecryptor_MalformedPiiKeyDocIsTerminal(t *testing.T) {
 	// A piiKey that exists but cannot be parsed is permanently unusable — it
 	// must Terminal-DLQ, not Nak-loop as an unclassified (transient) error.
 	v := newTestVault(t)
-	const idKey = "vtx.identity.SecUnitBadPiiKeyAAA"
+	const idKey = "vtx.identity.SecUnitBadPiiKeyAAAA"
 	ctMap, _ := mintIdentityPII(t, v, idKey, map[string]any{"value": "Alice"})
 
 	dec, err := NewSecureDecryptor(v, fakeCoreKV{idKey + ".piiKey": []byte("{not json")}, []SecureColumn{
@@ -259,7 +350,7 @@ func TestSecureDecryptor_MissingDeclaredFieldIsTerminal(t *testing.T) {
 	// mismatch must fail loud, not project a null indistinguishable from a
 	// shred.
 	v := newTestVault(t)
-	const idKey = "vtx.identity.SecUnitNoFieldAAAAA"
+	const idKey = "vtx.identity.SecUnitNoFieLdAAAAAA"
 	ctMap, piiKeyDoc := mintIdentityPII(t, v, idKey, map[string]any{"value": "Alice"})
 
 	dec, err := NewSecureDecryptor(v, fakeCoreKV{idKey + ".piiKey": piiKeyDoc}, []SecureColumn{

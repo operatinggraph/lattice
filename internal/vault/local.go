@@ -19,7 +19,7 @@ import (
 
 // LocalAlg identifies the AEAD this backend uses for both DEK-wrapping and
 // aspect-data encryption (design §2.5, grounded in NIST SP 800-38D — a
-// per-identity DEK's message count stays far below the 96-bit-random-nonce
+// per-holder DEK's message count stays far below the 96-bit-random-nonce
 // birthday bound at this scale).
 const LocalAlg = "AES-256-GCM"
 
@@ -40,7 +40,7 @@ const dekCacheTTL = 5 * time.Minute
 
 // LocalBackend is the envelope-encryption Vault backend (design §2.5, Path
 // A — the ratified recommendation): a single master key-encryption key
-// (KEK), sealed outside Core KV, wraps a random per-identity data-encryption
+// (KEK), sealed outside Core KV, wraps a random per-holder data-encryption
 // key (DEK). Suited to the dev + trusted-tool (Loupe, 127.0.0.1) deployment
 // posture; production KMS backends (HashiCorp Vault Transit, AWS/GCP KMS)
 // implement the same Vault interface later.
@@ -49,8 +49,8 @@ type LocalBackend struct {
 	kekVersion string
 
 	mu       sync.Mutex
-	dekCache map[string]cachedDEK // identityKey -> unwrapped DEK
-	shredded map[string]time.Time // identityKey -> ShredKey call time
+	dekCache map[string]cachedDEK // keyHolderKey -> unwrapped DEK
+	shredded map[string]time.Time // keyHolderKey -> ShredKey call time
 	macKeys  map[string][]byte    // purpose -> derived MAC key (memoized, platform-scoped)
 
 	// Operational counters for the Vault's own Health-KV heartbeat group
@@ -65,9 +65,9 @@ type LocalBackend struct {
 // LocalBackendName identifies this backend in the health.vault heartbeat's
 // `backend` field (Contract #5 §5.4 Vault baseline). An operator reads it to
 // know a shred's guarantee strength: on this local envelope backend ShredKey is
-// a deny-list *refusal* (the shared master KEK cannot be per-identity
+// a deny-list *refusal* (the shared master KEK cannot be per-holder
 // destroyed — see ShredKey), whereas a production KMS backend destroys the
-// per-identity key version, which is true cryptographic erasure.
+// per-holder key version, which is true cryptographic erasure.
 const LocalBackendName = "local-envelope"
 
 // Stats is a point-in-time snapshot of a LocalBackend's operational counters,
@@ -77,8 +77,8 @@ const LocalBackendName = "local-envelope"
 //
 // DEKCacheSize is the count of *unwrapped* DEKs currently held in the TTL cache
 // (the active decrypt/encrypt working set) — deliberately NOT a custody-set
-// total: this backend holds no durable list of per-identity keys (each wrapped
-// DEK lives in Core KV as the identity's piiKey aspect, not in the Vault), so
+// total: this backend holds no durable list of per-holder keys (each wrapped
+// DEK lives in Core KV as the holder's piiKey aspect, not in the Vault), so
 // there is no cheap, honest "total keys held" for it to report.
 type Stats struct {
 	Backend       string // LocalBackendName
@@ -86,7 +86,7 @@ type Stats struct {
 	DecryptCalls  uint64 // cumulative Decrypt calls (Contract #5 §5.4 vault_calls_total)
 	ShredCalls    uint64 // cumulative ShredKey calls (keyshredded_handled_total, Vault side)
 	DEKCacheSize  int    // unwrapped DEKs currently cached (gauge; TTL-bounded working set)
-	ShreddedCount int    // identities on the in-memory shred deny-list (gauge)
+	ShreddedCount int    // key holders on the in-memory shred deny-list (gauge)
 }
 
 // Stats returns a snapshot of this backend's operational counters for the
@@ -187,25 +187,25 @@ func GenerateMasterKEK() (string, error) {
 }
 
 // CreateIdentityKey mints a random DEK, wraps it under the master KEK bound
-// to identityKey as AEAD associated data, and returns the Envelope. It does
-// not persist or cache anything by identityKey alone — the returned Envelope
-// is the caller's only handle on the new key until the caller supplies it
-// back to Encrypt/Decrypt.
+// to keyHolderKey as AEAD associated data, and returns the Envelope. It does
+// not persist or cache anything by keyHolderKey alone — the returned
+// Envelope is the caller's only handle on the new key until the caller
+// supplies it back to Encrypt/Decrypt.
 //
-// Refuses to mint for an identity already on the in-memory shredded deny-list
-// (ErrKeyShredded). This is defense-in-depth, not the durability guarantee —
-// within a single process the very next Encrypt call would reject a freshly
-// minted key anyway via checkAndDeriveDEK's own b.shredded check, so this
-// check exists to fail fast/obviously rather than mint a DEK that could never
-// be used, and to keep the "never mint for a shredded identity" invariant
-// true at every entry point, not just the one that happens to be reachable
-// today.
-func (b *LocalBackend) CreateIdentityKey(_ context.Context, identityKey string) (Envelope, error) {
-	if identityKey == "" {
-		return Envelope{}, fmt.Errorf("%w: empty identityKey", ErrInvalidEnvelope)
+// Refuses to mint for a key holder already on the in-memory shredded
+// deny-list (ErrKeyShredded). This is defense-in-depth, not the durability
+// guarantee — within a single process the very next Encrypt call would
+// reject a freshly minted key anyway via checkAndDeriveDEK's own b.shredded
+// check, so this check exists to fail fast/obviously rather than mint a DEK
+// that could never be used, and to keep the "never mint for a shredded
+// holder" invariant true at every entry point, not just the one that
+// happens to be reachable today.
+func (b *LocalBackend) CreateIdentityKey(_ context.Context, keyHolderKey string) (Envelope, error) {
+	if keyHolderKey == "" {
+		return Envelope{}, fmt.Errorf("%w: empty keyHolderKey", ErrInvalidEnvelope)
 	}
 	b.mu.Lock()
-	_, alreadyShredded := b.shredded[identityKey]
+	_, alreadyShredded := b.shredded[keyHolderKey]
 	b.mu.Unlock()
 	if alreadyShredded {
 		return Envelope{}, ErrKeyShredded
@@ -214,13 +214,13 @@ func (b *LocalBackend) CreateIdentityKey(_ context.Context, identityKey string) 
 	if _, err := rand.Read(dek); err != nil {
 		return Envelope{}, fmt.Errorf("vault: generate DEK: %w", err)
 	}
-	wrapped, err := b.seal(b.kek, dek, []byte(identityKey))
+	wrapped, err := b.seal(b.kek, dek, []byte(keyHolderKey))
 	if err != nil {
 		return Envelope{}, fmt.Errorf("vault: wrap DEK: %w", err)
 	}
 	return Envelope{
 		WrappedDEK: wrapped,
-		KeyID:      identityKey,
+		KeyID:      keyHolderKey,
 		KEKVersion: b.kekVersion,
 		Alg:        LocalAlg,
 		CreatedAt:  time.Now().UTC(),
@@ -229,58 +229,76 @@ func (b *LocalBackend) CreateIdentityKey(_ context.Context, identityKey string) 
 }
 
 // Encrypt implements Vault.
-func (b *LocalBackend) Encrypt(_ context.Context, identityKey string, envelope Envelope, plaintext []byte) (Ciphertext, error) {
+func (b *LocalBackend) Encrypt(_ context.Context, keyHolderKey string, envelope Envelope, plaintext []byte) (Ciphertext, error) {
 	b.encryptCalls.Add(1)
-	dek, err := b.checkAndDeriveDEK(identityKey, envelope)
+	dek, err := b.checkAndDeriveDEK(keyHolderKey, envelope)
 	if err != nil {
 		return Ciphertext{}, err
 	}
-	nonce, ct, err := b.sealWithNonce(dek, plaintext, []byte(identityKey))
+	nonce, ct, err := b.sealWithNonce(dek, plaintext, []byte(keyHolderKey))
 	if err != nil {
 		return Ciphertext{}, fmt.Errorf("vault: encrypt: %w", err)
 	}
-	return Ciphertext{CT: ct, Nonce: nonce, KeyID: envelope.KeyID}, nil
+	// The label is the holder the DEK was actually derived under, not
+	// envelope.KeyID: checkAndDeriveDEK proves the wrapped DEK is AEAD-bound to
+	// keyHolderKey but never reads the envelope's own label, so an envelope
+	// document whose keyId disagreed with its holder would mint a ciphertext
+	// that names a holder unable to open it — and every decrypt site resolves
+	// custody from exactly this field.
+	return Ciphertext{CT: ct, Nonce: nonce, KeyID: keyHolderKey}, nil
 }
 
 // Decrypt implements Vault.
-func (b *LocalBackend) Decrypt(_ context.Context, identityKey string, envelope Envelope, ct Ciphertext) ([]byte, error) {
+func (b *LocalBackend) Decrypt(_ context.Context, keyHolderKey string, envelope Envelope, ct Ciphertext) ([]byte, error) {
 	b.decryptCalls.Add(1)
-	dek, err := b.checkAndDeriveDEK(identityKey, envelope)
+	// A ciphertext that names its holder must be opened under that holder and
+	// no other. Every decrypt site resolves custody from ct.KeyID, so agreement
+	// here is normally trivial — which is the point: the check is what keeps a
+	// site that resolves custody from somewhere else (an anchor, a projected
+	// column) from silently succeeding, instead of relying on each caller to
+	// remember. A ciphertext carrying no label is exempt: the object-CEK wire
+	// form deliberately drops it (objectcrypto.EncodeWrappedCEK), and there the
+	// holder is supplied out of band.
+	if ct.KeyID != "" && ct.KeyID != keyHolderKey {
+		return nil, fmt.Errorf("%w: ciphertext names key holder %q but the decrypt was attempted under %q",
+			ErrInvalidEnvelope, ct.KeyID, keyHolderKey)
+	}
+	dek, err := b.checkAndDeriveDEK(keyHolderKey, envelope)
 	if err != nil {
 		return nil, err
 	}
-	plaintext, err := b.openWithNonce(dek, ct.Nonce, ct.CT, []byte(identityKey))
+	plaintext, err := b.openWithNonce(dek, ct.Nonce, ct.CT, []byte(keyHolderKey))
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrDecryptFailed, err)
 	}
 	return plaintext, nil
 }
 
-// ShredKey implements Vault. It is idempotent: shredding an identity that
+// ShredKey implements Vault. It is idempotent: shredding a key holder that
 // was never created, or is already shredded, still succeeds. Marking
 // shredded and evicting the DEK cache happen under the same lock
 // checkAndDeriveDEK holds for its shredded-check + derive, so a ShredKey
 // call can never interleave inside an in-flight Encrypt/Decrypt (no TOCTOU
 // window where a decrypt "wins the race" against a concurrent shred).
-func (b *LocalBackend) ShredKey(_ context.Context, identityKey string) error {
+func (b *LocalBackend) ShredKey(_ context.Context, keyHolderKey string) error {
 	b.shredCalls.Add(1)
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	b.shredded[identityKey] = time.Now().UTC()
-	delete(b.dekCache, identityKey)
+	b.shredded[keyHolderKey] = time.Now().UTC()
+	delete(b.dekCache, keyHolderKey)
 	return nil
 }
 
 // WrapKey implements Vault. It is Encrypt under a key-custody name — see the
 // interface doc for why the two methods share an implementation.
-func (b *LocalBackend) WrapKey(ctx context.Context, identityKey string, envelope Envelope, key []byte) (Ciphertext, error) {
-	return b.Encrypt(ctx, identityKey, envelope, key)
+func (b *LocalBackend) WrapKey(ctx context.Context, keyHolderKey string, envelope Envelope, key []byte) (Ciphertext, error) {
+	return b.Encrypt(ctx, keyHolderKey, envelope, key)
 }
 
 // UnwrapKey implements Vault. It is Decrypt under a key-custody name — see
 // the interface doc for why the two methods share an implementation.
-func (b *LocalBackend) UnwrapKey(ctx context.Context, identityKey string, envelope Envelope, wrapped Ciphertext) ([]byte, error) {
-	return b.Decrypt(ctx, identityKey, envelope, wrapped)
+func (b *LocalBackend) UnwrapKey(ctx context.Context, keyHolderKey string, envelope Envelope, wrapped Ciphertext) ([]byte, error) {
+	return b.Decrypt(ctx, keyHolderKey, envelope, wrapped)
 }
 
 // maxSessionKeyTTL bounds an IssueSessionKey request — a hygiene ceiling on
@@ -288,12 +306,12 @@ func (b *LocalBackend) UnwrapKey(ctx context.Context, identityKey string, envelo
 // checkAndDeriveDEK's shred check below, run fresh on every call.
 const maxSessionKeyTTL = time.Hour
 
-// IssueSessionKey implements Vault. It returns identityKey's DEK — the same
+// IssueSessionKey implements Vault. It returns keyHolderKey's DEK — the same
 // key Encrypt/Decrypt use — via the identical shredded-check + derive path,
-// so a shredded identity is denied exactly as Decrypt would be. ttl <= 0 or
+// so a shredded holder is denied exactly as Decrypt would be. ttl <= 0 or
 // > maxSessionKeyTTL clamps to maxSessionKeyTTL rather than erroring.
-func (b *LocalBackend) IssueSessionKey(_ context.Context, identityKey string, envelope Envelope, _ string, ttl time.Duration) (SessionKey, error) {
-	dek, err := b.checkAndDeriveDEK(identityKey, envelope)
+func (b *LocalBackend) IssueSessionKey(_ context.Context, keyHolderKey string, envelope Envelope, _ string, ttl time.Duration) (SessionKey, error) {
+	dek, err := b.checkAndDeriveDEK(keyHolderKey, envelope)
 	if err != nil {
 		return SessionKey{}, err
 	}
@@ -347,7 +365,7 @@ func (b *LocalBackend) macKey(purpose string) []byte {
 	return key
 }
 
-// checkAndDeriveDEK returns the plaintext DEK for identityKey, or
+// checkAndDeriveDEK returns the plaintext DEK for keyHolderKey, or
 // ErrKeyShredded / ErrInvalidEnvelope. The shredded-check, DEK-cache lookup,
 // KEK-unwrap, and cache-write all run under one held lock — this is the
 // single critical section that makes ShredKey a real barrier: it cannot run
@@ -355,30 +373,30 @@ func (b *LocalBackend) macKey(purpose string) []byte {
 // decrypt-in-flight at the moment of a concurrent shred either completes
 // entirely before the shred is recorded or observes it and fails, never
 // both-partially. The cache is further validated against a hash of
-// envelope.WrappedDEK (not just identityKey) so a caller supplying a
-// different Envelope for the same identity within the TTL window — a stale
+// envelope.WrappedDEK (not just keyHolderKey) so a caller supplying a
+// different Envelope for the same holder within the TTL window — a stale
 // copy, or a future rotated key — re-derives rather than silently reusing
 // the wrong DEK. Unwrapping is CPU-bound, in-memory AES-GCM (no I/O), so
 // holding the lock across it does not risk blocking on an external call.
 //
 // The shredded check runs BEFORE the WrappedDEK-empty check (not after): a
-// caller may present a durable placeholder envelope for an identity that was
+// caller may present a durable placeholder envelope for a holder that was
 // shredded before it ever had a real key (empty WrappedDEK, Shredded=true —
 // packages/privacy-base's ShredIdentityKey DDL writes exactly this shape when
 // no piiKey existed yet, so the shred survives a process restart even though
 // b.shredded is in-memory-only). Such an envelope must report ErrKeyShredded,
-// not ErrInvalidEnvelope — the caller is asking "can I use this identity's
+// not ErrInvalidEnvelope — the caller is asking "can I use this holder's
 // key," and the honest answer is "no, it was shredded," not "your envelope is
 // malformed."
-func (b *LocalBackend) checkAndDeriveDEK(identityKey string, envelope Envelope) ([]byte, error) {
-	if identityKey == "" {
-		return nil, fmt.Errorf("%w: empty identityKey", ErrInvalidEnvelope)
+func (b *LocalBackend) checkAndDeriveDEK(keyHolderKey string, envelope Envelope) ([]byte, error) {
+	if keyHolderKey == "" {
+		return nil, fmt.Errorf("%w: empty keyHolderKey", ErrInvalidEnvelope)
 	}
 
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
-	if _, ok := b.shredded[identityKey]; ok || envelope.Shredded {
+	if _, ok := b.shredded[keyHolderKey]; ok || envelope.Shredded {
 		return nil, ErrKeyShredded
 	}
 
@@ -387,18 +405,18 @@ func (b *LocalBackend) checkAndDeriveDEK(identityKey string, envelope Envelope) 
 	}
 	wrappedHash := sha256.Sum256(envelope.WrappedDEK)
 
-	if cached, ok := b.dekCache[identityKey]; ok && cached.wrappedHash == wrappedHash && time.Now().Before(cached.expiresAt) {
+	if cached, ok := b.dekCache[keyHolderKey]; ok && cached.wrappedHash == wrappedHash && time.Now().Before(cached.expiresAt) {
 		return cached.plaintext, nil
 	}
 	if envelope.KEKVersion != b.kekVersion {
 		return nil, fmt.Errorf("%w: envelope KEK version %q, backend has %q", ErrInvalidEnvelope, envelope.KEKVersion, b.kekVersion)
 	}
-	dek, err := b.open(b.kek, envelope.WrappedDEK, []byte(identityKey))
+	dek, err := b.open(b.kek, envelope.WrappedDEK, []byte(keyHolderKey))
 	if err != nil {
 		return nil, fmt.Errorf("%w: unwrap DEK: %v", ErrInvalidEnvelope, err)
 	}
 
-	b.dekCache[identityKey] = cachedDEK{plaintext: dek, wrappedHash: wrappedHash, expiresAt: time.Now().Add(dekCacheTTL)}
+	b.dekCache[keyHolderKey] = cachedDEK{plaintext: dek, wrappedHash: wrappedHash, expiresAt: time.Now().Add(dekCacheTTL)}
 	return dek, nil
 }
 

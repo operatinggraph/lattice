@@ -159,17 +159,6 @@ func decryptSensitiveDoc(ctx context.Context, conn *substrate.Conn, bucket strin
 		// live decrypt: fail closed here rather than relying on an erased body.
 		return fmt.Errorf("read deleted sensitive aspect %s", doc.Key)
 	}
-	vertexKey, vertexType, _, _, ok := substrate.ParseAspectKey(doc.Key)
-	if !ok || vertexType != "identity" {
-		// A malformed or non-identity-anchored sensitive aspect should never
-		// have committed (step 6 rejects it at write time) — decrypt-on-read
-		// is not the place to re-litigate that; leave the document as-is. The
-		// body therefore reaches the script readable, so it still records.
-		if !egress {
-			tracker.markPlaintext(doc.Key)
-		}
-		return nil
-	}
 	if egress {
 		// Ref-marker authoring needs only the DDL lookup + the ciphertext
 		// already in hand — no live Vault backend required (design §3.2). The
@@ -189,6 +178,9 @@ func decryptSensitiveDoc(ctx context.Context, conn *substrate.Conn, bucket strin
 			ct, err := ciphertextFromData(doc.Data)
 			if err != nil {
 				return fmt.Errorf("parse ciphertext for ref-mac %s: %w", doc.Key, err)
+			}
+			if err := refusableEgressHolder(ct); err != nil {
+				return fmt.Errorf("author egress ref for %s: %w", doc.Key, err)
 			}
 			mac, err := v.MAC(ctx, vault.RefMACPurpose, vault.RefMACInput(doc.Key, requestID, ct))
 			if err != nil {
@@ -214,15 +206,22 @@ func decryptSensitiveDoc(ctx context.Context, conn *substrate.Conn, bucket strin
 	if v == nil {
 		return nil
 	}
-	envelope, err := readPiiKeyEnvelope(ctx, conn, bucket, vertexKey)
-	if err != nil {
-		return fmt.Errorf("read piiKey for %s: %w", doc.Key, err)
-	}
+	// The ciphertext is parsed before anything else is resolved, because it is
+	// what names its own key holder (vault.KeyHolder). Nothing about where the
+	// aspect is stored takes part in that answer.
 	ct, err := ciphertextFromData(doc.Data)
 	if err != nil {
 		return fmt.Errorf("parse ciphertext for %s: %w", doc.Key, err)
 	}
-	plaintext, err := v.Decrypt(ctx, vertexKey, envelope, ct)
+	keyHolderKey, err := vault.KeyHolder(ct)
+	if err != nil {
+		return fmt.Errorf("resolve key holder for %s: %w", doc.Key, err)
+	}
+	envelope, err := readPiiKeyEnvelope(ctx, conn, bucket, keyHolderKey)
+	if err != nil {
+		return fmt.Errorf("read piiKey for %s: %w", doc.Key, err)
+	}
+	plaintext, err := v.Decrypt(ctx, keyHolderKey, envelope, ct)
 	if err != nil {
 		return fmt.Errorf("decrypt %s: %w", doc.Key, err)
 	}
@@ -234,12 +233,36 @@ func decryptSensitiveDoc(ctx context.Context, conn *substrate.Conn, bucket strin
 	return nil
 }
 
-// readPiiKeyEnvelope reads and parses vertexKey's piiKey aspect. Internal
+// refusableEgressHolder refuses an egress ref whose key holder the bridge
+// cannot resolve an envelope for.
+//
+// The bridge unwraps a $sensitiveRef by reading the holder's envelope live
+// from the piiKeyEnvelope lens (packages/privacy-base), and that lens
+// enumerates identity holders alone. A retention-class-custodied record handed
+// to the bridge would therefore fail as an envelope that never projects —
+// indistinguishable from a lens that is merely lagging, and retried until the
+// unwrap budget is spent. Refusing it here, where the operation is authored,
+// turns that into one typed error naming the holder type, at the point a
+// script author can act on it.
+func refusableEgressHolder(ct vault.Ciphertext) error {
+	keyHolderKey, err := vault.KeyHolder(ct)
+	if err != nil {
+		return err
+	}
+	if holderType := vault.KeyHolderType(keyHolderKey); holderType != "identity" {
+		return fmt.Errorf(
+			"key holder %s is a %q holder, and only an identity holder's envelope is reachable at the external-egress boundary",
+			keyHolderKey, holderType)
+	}
+	return nil
+}
+
+// readPiiKeyEnvelope reads and parses keyHolderKey's piiKey aspect. Internal
 // Processor bookkeeping — never declared in a script's contextHint.reads;
 // Starlark never sees the envelope, only the decrypted plaintext (design
 // §2.2's "Starlark stays pure" guarantee).
-func readPiiKeyEnvelope(ctx context.Context, conn *substrate.Conn, bucket, vertexKey string) (vault.Envelope, error) {
-	entry, err := conn.KVGet(ctx, bucket, vertexKey+".piiKey")
+func readPiiKeyEnvelope(ctx context.Context, conn *substrate.Conn, bucket, keyHolderKey string) (vault.Envelope, error) {
+	entry, err := conn.KVGet(ctx, bucket, keyHolderKey+".piiKey")
 	if err != nil {
 		return vault.Envelope{}, err
 	}

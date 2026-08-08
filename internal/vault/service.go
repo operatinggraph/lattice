@@ -68,13 +68,15 @@ const handlerTimeout = 5 * time.Second
 
 // DecryptRequest is the JSON payload for a DecryptSubject request. The
 // caller supplies everything the Vault needs to decrypt — its own
-// identityKey, the Envelope from that identity's piiKey aspect, and the
+// keyHolderKey, the Envelope from that holder's piiKey aspect, and the
 // Ciphertext from the sensitive aspect's data — since the Vault itself holds
-// no durable per-identity state beyond the master KEK.
+// no durable per-holder state beyond the master KEK.
 type DecryptRequest struct {
-	IdentityKey string     `json:"identityKey"`
-	Envelope    Envelope   `json:"envelope"`
-	Ciphertext  Ciphertext `json:"ciphertext"`
+	// KeyHolderKey is the Go field name; the wire name stays "identityKey"
+	// deliberately unchanged.
+	KeyHolderKey string     `json:"identityKey"`
+	Envelope     Envelope   `json:"envelope"`
+	Ciphertext   Ciphertext `json:"ciphertext"`
 }
 
 // DecryptResponse is the JSON reply for a DecryptSubject request. Exactly
@@ -85,12 +87,14 @@ type DecryptResponse struct {
 }
 
 // WrapKeyRequest is the JSON payload for a WrapKeySubject request — wrap key
-// (a per-object CEK, small enough for envelope wrapping) under identityKey's
-// DEK. The caller supplies the identity's piiKey Envelope, as with Decrypt.
+// (a per-object CEK, small enough for envelope wrapping) under keyHolderKey's
+// DEK. The caller supplies the holder's piiKey Envelope, as with Decrypt.
 type WrapKeyRequest struct {
-	IdentityKey string   `json:"identityKey"`
-	Envelope    Envelope `json:"envelope"`
-	Key         []byte   `json:"key"`
+	// KeyHolderKey is the Go field name; the wire name stays "identityKey"
+	// deliberately unchanged.
+	KeyHolderKey string   `json:"identityKey"`
+	Envelope     Envelope `json:"envelope"`
+	Key          []byte   `json:"key"`
 }
 
 // WrapKeyResponse is the JSON reply for a WrapKeySubject request. Exactly
@@ -102,11 +106,13 @@ type WrapKeyResponse struct {
 
 // UnwrapKeyRequest is the JSON payload for an UnwrapKeySubject request — the
 // read-side counterpart of WrapKeyRequest: unwrap Wrapped back to the
-// original key bytes under identityKey's DEK.
+// original key bytes under keyHolderKey's DEK.
 type UnwrapKeyRequest struct {
-	IdentityKey string     `json:"identityKey"`
-	Envelope    Envelope   `json:"envelope"`
-	Wrapped     Ciphertext `json:"wrapped"`
+	// KeyHolderKey is the Go field name; the wire name stays "identityKey"
+	// deliberately unchanged.
+	KeyHolderKey string     `json:"identityKey"`
+	Envelope     Envelope   `json:"envelope"`
+	Wrapped      Ciphertext `json:"wrapped"`
 }
 
 // UnwrapKeyResponse is the JSON reply for an UnwrapKeySubject request.
@@ -117,14 +123,16 @@ type UnwrapKeyResponse struct {
 }
 
 // IssueSessionKeyRequest is the JSON payload for an IssueSessionKeySubject
-// request — mint a transient decryption key for identityKey's DEK. AspectScope
+// request — mint a transient decryption key for keyHolderKey's DEK. AspectScope
 // is carried for audit/API-shape only (personal-secure-lens-design.md §3.6);
 // TTLSeconds <= 0 lets the backend pick its own default/ceiling.
 type IssueSessionKeyRequest struct {
-	IdentityKey string   `json:"identityKey"`
-	Envelope    Envelope `json:"envelope"`
-	AspectScope string   `json:"aspectScope,omitempty"`
-	TTLSeconds  int64    `json:"ttlSeconds,omitempty"`
+	// KeyHolderKey is the Go field name; the wire name stays "identityKey"
+	// deliberately unchanged.
+	KeyHolderKey string   `json:"identityKey"`
+	Envelope     Envelope `json:"envelope"`
+	AspectScope  string   `json:"aspectScope,omitempty"`
+	TTLSeconds   int64    `json:"ttlSeconds,omitempty"`
 }
 
 // IssueSessionKeyResponse is the JSON reply for an IssueSessionKeySubject
@@ -139,7 +147,7 @@ type IssueSessionKeyResponse struct {
 // bridge's egress unwrap supplies the sensitive-ref marker's fields plus the
 // minting operation's requestId (read from the external event's envelope,
 // never caller-chosen at unwrap time) and its own live-fetched piiKey
-// Envelope. Unlike DecryptRequest, there is no IdentityKey field: it is
+// Envelope. Unlike DecryptRequest, there is no KeyHolderKey field: it is
 // derived server-side from Ref once the MAC verifies (design §3.3) — one
 // less attacker-controlled input.
 type DecryptRefRequest struct {
@@ -259,16 +267,16 @@ func (s *Service) handleDecrypt(req micro.Request) {
 		s.respond(req, DecryptResponse{Error: "vault: invalid request"})
 		return
 	}
-	if in.IdentityKey == "" {
+	if in.KeyHolderKey == "" {
 		s.respond(req, DecryptResponse{Error: "vault: identityKey required"})
 		return
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), handlerTimeout)
 	defer cancel()
-	plaintext, err := s.vault.Decrypt(ctx, in.IdentityKey, in.Envelope, in.Ciphertext)
+	plaintext, err := s.vault.Decrypt(ctx, in.KeyHolderKey, in.Envelope, in.Ciphertext)
 	if err != nil {
-		s.logger.Warn("vault: decrypt request failed", "identityKey", in.IdentityKey, "err", err)
+		s.logger.Warn("vault: decrypt request failed", "identityKey", in.KeyHolderKey, "err", err)
 		if errors.Is(err, ErrKeyShredded) {
 			s.respond(req, DecryptResponse{Error: ErrKeyShredded.Error()})
 			return
@@ -314,7 +322,7 @@ func (s *Service) handleWrapKey(req micro.Request) {
 		s.respondWrapKey(req, WrapKeyResponse{Error: "vault: invalid request"})
 		return
 	}
-	if in.IdentityKey == "" {
+	if in.KeyHolderKey == "" {
 		s.respondWrapKey(req, WrapKeyResponse{Error: "vault: identityKey required"})
 		return
 	}
@@ -325,9 +333,9 @@ func (s *Service) handleWrapKey(req micro.Request) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), handlerTimeout)
 	defer cancel()
-	wrapped, err := s.vault.WrapKey(ctx, in.IdentityKey, in.Envelope, in.Key)
+	wrapped, err := s.vault.WrapKey(ctx, in.KeyHolderKey, in.Envelope, in.Key)
 	if err != nil {
-		s.logger.Warn("vault: wrapKey request failed", "identityKey", in.IdentityKey, "err", err)
+		s.logger.Warn("vault: wrapKey request failed", "identityKey", in.KeyHolderKey, "err", err)
 		if errors.Is(err, ErrKeyShredded) {
 			s.respondWrapKey(req, WrapKeyResponse{Error: ErrKeyShredded.Error()})
 			return
@@ -367,16 +375,16 @@ func (s *Service) handleUnwrapKey(req micro.Request) {
 		s.respondUnwrapKey(req, UnwrapKeyResponse{Error: "vault: invalid request"})
 		return
 	}
-	if in.IdentityKey == "" {
+	if in.KeyHolderKey == "" {
 		s.respondUnwrapKey(req, UnwrapKeyResponse{Error: "vault: identityKey required"})
 		return
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), handlerTimeout)
 	defer cancel()
-	key, err := s.vault.UnwrapKey(ctx, in.IdentityKey, in.Envelope, in.Wrapped)
+	key, err := s.vault.UnwrapKey(ctx, in.KeyHolderKey, in.Envelope, in.Wrapped)
 	if err != nil {
-		s.logger.Warn("vault: unwrapKey request failed", "identityKey", in.IdentityKey, "err", err)
+		s.logger.Warn("vault: unwrapKey request failed", "identityKey", in.KeyHolderKey, "err", err)
 		if errors.Is(err, ErrKeyShredded) {
 			s.respondUnwrapKey(req, UnwrapKeyResponse{Error: ErrKeyShredded.Error()})
 			return
@@ -416,16 +424,16 @@ func (s *Service) handleIssueSessionKey(req micro.Request) {
 		s.respondIssueSessionKey(req, IssueSessionKeyResponse{Error: "vault: invalid request"})
 		return
 	}
-	if in.IdentityKey == "" {
+	if in.KeyHolderKey == "" {
 		s.respondIssueSessionKey(req, IssueSessionKeyResponse{Error: "vault: identityKey required"})
 		return
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), handlerTimeout)
 	defer cancel()
-	sk, err := s.vault.IssueSessionKey(ctx, in.IdentityKey, in.Envelope, in.AspectScope, time.Duration(in.TTLSeconds)*time.Second)
+	sk, err := s.vault.IssueSessionKey(ctx, in.KeyHolderKey, in.Envelope, in.AspectScope, time.Duration(in.TTLSeconds)*time.Second)
 	if err != nil {
-		s.logger.Warn("vault: issueSessionKey request failed", "identityKey", in.IdentityKey, "err", err)
+		s.logger.Warn("vault: issueSessionKey request failed", "identityKey", in.KeyHolderKey, "err", err)
 		if errors.Is(err, ErrKeyShredded) {
 			s.respondIssueSessionKey(req, IssueSessionKeyResponse{Error: ErrKeyShredded.Error()})
 			return
@@ -451,10 +459,10 @@ func (s *Service) respondIssueSessionKey(req micro.Request, resp IssueSessionKey
 }
 
 // handleDecryptRef is DecryptRefSubject's responder (design
-// sensitive-ref-mac-provenance-design.md §3.3): (1) parse the request and
-// validate Ref is a well-formed identity-anchored aspect key, deriving
-// identityKey from it server-side (the caller no longer supplies one — one
-// less attacker-controlled field); (2) recompute the MAC over
+// sensitive-ref-mac-provenance-design.md §3.3): (1) parse the request,
+// validate Ref is a well-formed aspect key, and resolve the key holder from
+// the ciphertext's own keyId (vault.KeyHolder) rather than from any field the
+// caller chose independently; (2) recompute the MAC over
 // {ref, requestId, ciphertext} and reject on mismatch or an empty MAC with
 // ErrRefUnverified — checked BEFORE any decrypt attempt, so a fabricated ref
 // never reaches the shred/DEK-unwrap machinery; (3) delegate to the same
@@ -475,9 +483,17 @@ func (s *Service) handleDecryptRef(req micro.Request) {
 		s.respondDecryptRef(req, DecryptRefResponse{Error: "vault: invalid request"})
 		return
 	}
-	identityKey, vertexType, _, _, ok := substrate.ParseAspectKey(in.Ref)
-	if !ok || vertexType != "identity" {
-		s.respondDecryptRef(req, DecryptRefResponse{Error: "vault: ref is not a well-formed identity-anchored aspect key"})
+	if _, _, _, _, ok := substrate.ParseAspectKey(in.Ref); !ok {
+		s.respondDecryptRef(req, DecryptRefResponse{Error: "vault: ref is not a well-formed aspect key"})
+		return
+	}
+	// The ref names WHICH record is being opened and is bound into the MAC; it
+	// does not decide which key opens it. Custody is the ciphertext's own
+	// keyId, so a ref pointing at one holder's aspect can never borrow a
+	// different holder's DEK.
+	keyHolderKey, err := KeyHolder(in.Ciphertext)
+	if err != nil {
+		s.respondDecryptRef(req, DecryptRefResponse{Error: "vault: ciphertext names no usable key holder"})
 		return
 	}
 
@@ -496,7 +512,7 @@ func (s *Service) handleDecryptRef(req micro.Request) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), handlerTimeout)
 	defer cancel()
-	plaintext, err := s.vault.Decrypt(ctx, identityKey, in.Envelope, in.Ciphertext)
+	plaintext, err := s.vault.Decrypt(ctx, keyHolderKey, in.Envelope, in.Ciphertext)
 	if err != nil {
 		s.logger.Warn("vault: decryptRef request failed", "ref", in.Ref, "err", err)
 		if errors.Is(err, ErrKeyShredded) {

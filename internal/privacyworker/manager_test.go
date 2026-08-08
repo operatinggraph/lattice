@@ -22,7 +22,7 @@ import (
 type fakeVault struct {
 	mu         sync.Mutex
 	shredded   []string
-	failNTimes int // ShredKey fails this many times before succeeding, per identityKey
+	failNTimes int // ShredKey fails this many times before succeeding, per keyHolderKey
 	failCounts map[string]int
 }
 
@@ -54,17 +54,17 @@ func (f *fakeVault) MAC(context.Context, string, []byte) ([]byte, error) {
 	panic("fakeVault: MAC not used by privacyworker")
 }
 
-func (f *fakeVault) ShredKey(_ context.Context, identityKey string) error {
+func (f *fakeVault) ShredKey(_ context.Context, keyHolderKey string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.failCounts == nil {
 		f.failCounts = map[string]int{}
 	}
-	if f.failCounts[identityKey] < f.failNTimes {
-		f.failCounts[identityKey]++
+	if f.failCounts[keyHolderKey] < f.failNTimes {
+		f.failCounts[keyHolderKey]++
 		return errors.New("fakeVault: injected ShredKey failure")
 	}
-	f.shredded = append(f.shredded, identityKey)
+	f.shredded = append(f.shredded, keyHolderKey)
 	return nil
 }
 
@@ -130,7 +130,7 @@ func TestManager_ShredsOnKeyShreddedEvent(t *testing.T) {
 		}).Run(runCtx)
 	}()
 
-	const identityKey = "vtx.identity.ManagerHappyPathKMNPQ"
+	const identityKey = "vtx.identity.ManagerHappyPathKMNP"
 	publishKeyShredded(t, ctx, conn, `{"payload":{"identityKey":"`+identityKey+`"}}`)
 
 	deadline := time.Now().Add(5 * time.Second)
@@ -186,7 +186,7 @@ func TestManager_MissingIdentityKey_Terminated(t *testing.T) {
 
 	publishKeyShredded(t, ctx, conn, `{"payload":{}}`)
 
-	const identityKey = "vtx.identity.ManagerMissingKeyKMNPQ"
+	const identityKey = "vtx.identity.ManagerMissngKeyKMNP"
 	publishKeyShredded(t, ctx, conn, `{"payload":{"identityKey":"`+identityKey+`"}}`)
 
 	deadline := time.Now().Add(5 * time.Second)
@@ -216,7 +216,7 @@ func TestManager_ShredKeyError_Retries(t *testing.T) {
 		}).Run(runCtx)
 	}()
 
-	const identityKey = "vtx.identity.ManagerRetryKMNPQRSTU"
+	const identityKey = "vtx.identity.ManagerRetryKMNPQRST"
 	publishKeyShredded(t, ctx, conn, `{"payload":{"identityKey":"`+identityKey+`"}}`)
 
 	deadline := time.Now().Add(15 * time.Second)

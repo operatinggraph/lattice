@@ -225,10 +225,10 @@ func putSensitiveAspect(t *testing.T, ctx context.Context, conn *substrate.Conn,
 func TestVaultDecrypt_RoundTrip(t *testing.T) {
 	hs, backend, conn := vaultDecryptFixture(t)
 	ctx := context.Background()
-	putSensitiveAspect(t, ctx, conn, backend, "vtx.identity.abc123", "vtx.identity.abc123.ssn", []byte(`{"value":"123-45-6789"}`))
+	putSensitiveAspect(t, ctx, conn, backend, "vtx.identity.LoupeReveaLAAAAAAAAA", "vtx.identity.LoupeReveaLAAAAAAAAA.ssn", []byte(`{"value":"123-45-6789"}`))
 
 	res, err := hs.Client().Post(hs.URL+"/api/vault/decrypt", "application/json",
-		bytes.NewReader([]byte(`{"aspectKey":"vtx.identity.abc123.ssn"}`)))
+		bytes.NewReader([]byte(`{"aspectKey":"vtx.identity.LoupeReveaLAAAAAAAAA.ssn"}`)))
 	if err != nil {
 		t.Fatalf("POST: %v", err)
 	}
@@ -261,13 +261,13 @@ func TestVaultDecrypt_RoundTrip(t *testing.T) {
 func TestVaultDecrypt_ShreddedIdentity(t *testing.T) {
 	hs, backend, conn := vaultDecryptFixture(t)
 	ctx := context.Background()
-	putSensitiveAspect(t, ctx, conn, backend, "vtx.identity.shredme", "vtx.identity.shredme.ssn", []byte(`{"value":"111-22-3333"}`))
-	if err := backend.ShredKey(ctx, "vtx.identity.shredme"); err != nil {
+	putSensitiveAspect(t, ctx, conn, backend, "vtx.identity.LoupeShredMeAAAAAAAA", "vtx.identity.LoupeShredMeAAAAAAAA.ssn", []byte(`{"value":"111-22-3333"}`))
+	if err := backend.ShredKey(ctx, "vtx.identity.LoupeShredMeAAAAAAAA"); err != nil {
 		t.Fatalf("shred key: %v", err)
 	}
 
 	res, err := hs.Client().Post(hs.URL+"/api/vault/decrypt", "application/json",
-		bytes.NewReader([]byte(`{"aspectKey":"vtx.identity.shredme.ssn"}`)))
+		bytes.NewReader([]byte(`{"aspectKey":"vtx.identity.LoupeShredMeAAAAAAAA.ssn"}`)))
 	if err != nil {
 		t.Fatalf("POST: %v", err)
 	}
@@ -296,7 +296,7 @@ func TestVaultDecrypt_RejectsMalformedRequests(t *testing.T) {
 
 	// A vertex root, not an aspect.
 	res1, err := hs.Client().Post(hs.URL+"/api/vault/decrypt", "application/json",
-		bytes.NewReader([]byte(`{"aspectKey":"vtx.identity.abc123"}`)))
+		bytes.NewReader([]byte(`{"aspectKey":"vtx.identity.LoupeReveaLAAAAAAAAA"}`)))
 	if err != nil {
 		t.Fatalf("POST vertex key: %v", err)
 	}
@@ -307,11 +307,11 @@ func TestVaultDecrypt_RejectsMalformedRequests(t *testing.T) {
 
 	// A real aspect whose data is plaintext, not a ciphertext envelope.
 	plainDoc, _ := json.Marshal(map[string]any{"isDeleted": false, "data": map[string]any{"value": "not encrypted"}})
-	if _, err := conn.KVPut(ctx, bootstrap.CoreKVBucket, "vtx.identity.abc123.nickname", plainDoc); err != nil {
+	if _, err := conn.KVPut(ctx, bootstrap.CoreKVBucket, "vtx.identity.LoupeReveaLAAAAAAAAA.nickname", plainDoc); err != nil {
 		t.Fatalf("put plain aspect: %v", err)
 	}
 	res2, err := hs.Client().Post(hs.URL+"/api/vault/decrypt", "application/json",
-		bytes.NewReader([]byte(`{"aspectKey":"vtx.identity.abc123.nickname"}`)))
+		bytes.NewReader([]byte(`{"aspectKey":"vtx.identity.LoupeReveaLAAAAAAAAA.nickname"}`)))
 	if err != nil {
 		t.Fatalf("POST plaintext aspect: %v", err)
 	}
@@ -331,24 +331,26 @@ func TestVaultDecrypt_RejectsMalformedRequests(t *testing.T) {
 		t.Errorf("GET status = %d, want 400", res3.StatusCode)
 	}
 
-	// A sensitive-shaped aspect hanging off a meta-vertex (not an identity) —
-	// Contract #1 §1.6 anchors sensitive aspects to identities only. This
-	// must fail closed with a clear 400, not a misleading "no piiKey" 502.
-	metaCT, _ := json.Marshal(map[string]any{
+	// A ciphertext whose keyId is not a vertex key names no key holder, so
+	// there is nothing to fetch a piiKey for: fail closed with a clear 400, not
+	// a misleading "no piiKey" 502. The anchor here is a meta-vertex on
+	// purpose — a reveal that fell back to the aspect's anchor would reach a
+	// different outcome, so this pins the absence of that fallback.
+	unlabelledCT, _ := json.Marshal(map[string]any{
 		"isDeleted": false,
 		"data":      map[string]any{"ct": "YWJj", "nonce": "bnBu", "keyId": "k1"},
 	})
-	if _, err := conn.KVPut(ctx, bootstrap.CoreKVBucket, "vtx.meta.notAnIdentity.ssn", metaCT); err != nil {
-		t.Fatalf("put meta aspect: %v", err)
+	if _, err := conn.KVPut(ctx, bootstrap.CoreKVBucket, "vtx.meta.LoupeNoHoLderAAAAAAA.ssn", unlabelledCT); err != nil {
+		t.Fatalf("put unlabelled aspect: %v", err)
 	}
 	res4, err := hs.Client().Post(hs.URL+"/api/vault/decrypt", "application/json",
-		bytes.NewReader([]byte(`{"aspectKey":"vtx.meta.notAnIdentity.ssn"}`)))
+		bytes.NewReader([]byte(`{"aspectKey":"vtx.meta.LoupeNoHoLderAAAAAAA.ssn"}`)))
 	if err != nil {
-		t.Fatalf("POST meta-anchored aspect: %v", err)
+		t.Fatalf("POST aspect with an unusable keyId: %v", err)
 	}
 	defer res4.Body.Close()
 	if res4.StatusCode != http.StatusBadRequest {
-		t.Errorf("meta-anchored aspect status = %d, want 400", res4.StatusCode)
+		t.Errorf("unusable keyId status = %d, want 400", res4.StatusCode)
 	}
 
 	// A ciphertext envelope missing nonce/keyId is incomplete, not decryptable
@@ -357,11 +359,11 @@ func TestVaultDecrypt_RejectsMalformedRequests(t *testing.T) {
 		"isDeleted": false,
 		"data":      map[string]any{"ct": "YWJj"},
 	})
-	if _, err := conn.KVPut(ctx, bootstrap.CoreKVBucket, "vtx.identity.abc123.partial", partialCT); err != nil {
+	if _, err := conn.KVPut(ctx, bootstrap.CoreKVBucket, "vtx.identity.LoupeReveaLAAAAAAAAA.partial", partialCT); err != nil {
 		t.Fatalf("put partial-envelope aspect: %v", err)
 	}
 	res5, err := hs.Client().Post(hs.URL+"/api/vault/decrypt", "application/json",
-		bytes.NewReader([]byte(`{"aspectKey":"vtx.identity.abc123.partial"}`)))
+		bytes.NewReader([]byte(`{"aspectKey":"vtx.identity.LoupeReveaLAAAAAAAAA.partial"}`)))
 	if err != nil {
 		t.Fatalf("POST partial envelope: %v", err)
 	}

@@ -126,7 +126,7 @@ func DecodeWrappedCEK(s string) (vault.Ciphertext, error) {
 // (Loupe via its inspector-only direct Core-KV read, a vertical app via a
 // lens projection) — this package is agnostic to that source.
 func WrapKey(ctx context.Context, conn *substrate.Conn, identityKey string, env vault.Envelope, key []byte) (vault.Ciphertext, error) {
-	reqBody, err := json.Marshal(vault.WrapKeyRequest{IdentityKey: identityKey, Envelope: env, Key: key})
+	reqBody, err := json.Marshal(vault.WrapKeyRequest{KeyHolderKey: identityKey, Envelope: env, Key: key})
 	if err != nil {
 		return vault.Ciphertext{}, fmt.Errorf("marshal wrapKey request: %w", err)
 	}
@@ -147,7 +147,7 @@ func WrapKey(ctx context.Context, conn *substrate.Conn, identityKey string, env 
 // UnwrapKey calls the Vault's UnwrapKeySubject RPC — the read-side
 // counterpart of WrapKey.
 func UnwrapKey(ctx context.Context, conn *substrate.Conn, identityKey string, env vault.Envelope, wrapped vault.Ciphertext) ([]byte, error) {
-	reqBody, err := json.Marshal(vault.UnwrapKeyRequest{IdentityKey: identityKey, Envelope: env, Wrapped: wrapped})
+	reqBody, err := json.Marshal(vault.UnwrapKeyRequest{KeyHolderKey: identityKey, Envelope: env, Wrapped: wrapped})
 	if err != nil {
 		return nil, fmt.Errorf("marshal unwrapKey request: %w", err)
 	}

@@ -164,23 +164,39 @@ func (e *Engine) unwrapEgressParams(ctx context.Context, raw json.RawMessage, re
 }
 
 // resolveSensitiveRef unwraps one sensitive-ref marker to its plaintext field
-// value: derive the anchoring identity from the ref, fetch its LIVE key
-// envelope from the piiKeyEnvelope lens (never a stored/carried copy — the
-// restart-/replay-proof shred gate, design §3.2/§3.5), call the ref-verified
-// Vault decrypt RPC (mandatory MAC verification), and extract the requested
-// field. Every failure is classified permanent (do not retry) or transient
-// (redeliver, bounded).
+// value: resolve the key holder from the ciphertext's own keyId, fetch that
+// holder's LIVE key envelope from the piiKeyEnvelope lens (never a
+// stored/carried copy — the restart-/replay-proof shred gate, design
+// §3.2/§3.5), call the ref-verified Vault decrypt RPC (mandatory MAC
+// verification), and extract the requested field. Every failure is classified
+// permanent (do not retry) or transient (redeliver, bounded).
+//
+// Only an identity holder can be served here, because the envelope source —
+// the piiKeyEnvelope lens — enumerates identity holders alone. The Processor
+// refuses to author an egress ref for any other holder type, so this is the
+// second of two gates on the same rule rather than the only one; it exists
+// because the bridge is where an unserveable holder would otherwise decay into
+// an envelope that simply never projects.
 func (e *Engine) resolveSensitiveRef(ctx context.Context, marker sensitiveRefMarker, requestID string, numDelivered uint64) (string, *egressFailure) {
-	identityKey, vertexType, _, _, ok := substrate.ParseAspectKey(marker.Ref)
-	if !ok || vertexType != "identity" {
+	if _, _, _, _, ok := substrate.ParseAspectKey(marker.Ref); !ok {
 		return "", permanentEgressFailure(
-			fmt.Errorf("bridge: $sensitiveRef.ref %q is not a well-formed identity-anchored aspect key", marker.Ref))
+			fmt.Errorf("bridge: $sensitiveRef.ref %q is not a well-formed aspect key", marker.Ref))
+	}
+	keyHolderKey, err := vault.KeyHolder(marker.Ciphertext)
+	if err != nil {
+		return "", permanentEgressFailure(
+			fmt.Errorf("bridge: $sensitiveRef for %q: %w", marker.Ref, err))
+	}
+	if holderType := vault.KeyHolderType(keyHolderKey); holderType != "identity" {
+		return "", permanentEgressFailure(fmt.Errorf(
+			"bridge: $sensitiveRef for %q is held by %s, a %q holder — the piiKeyEnvelope lens serves identity holders only",
+			marker.Ref, keyHolderKey, holderType))
 	}
 	if marker.Field == "" {
 		return "", permanentEgressFailure(fmt.Errorf("bridge: $sensitiveRef for %q carries no field", marker.Ref))
 	}
 
-	envelope, err := e.fetchLiveEnvelope(ctx, identityKey)
+	envelope, err := e.fetchLiveEnvelope(ctx, keyHolderKey)
 	if err != nil {
 		if numDelivered < maxEgressUnwrapAttempts {
 			verb := "read"
@@ -188,14 +204,14 @@ func (e *Engine) resolveSensitiveRef(ctx context.Context, marker sensitiveRefMar
 				verb = "not yet projected"
 			}
 			return "", transientEgressFailure(
-				fmt.Errorf("bridge: piiKeyEnvelope for %s %s (attempt %d): %w", identityKey, verb, numDelivered, err))
+				fmt.Errorf("bridge: piiKeyEnvelope for %s %s (attempt %d): %w", keyHolderKey, verb, numDelivered, err))
 		}
 		// Every fetchLiveEnvelope failure — absent row, unparseable value, a
 		// persistent bucket error — must escalate past the retry budget, not
 		// only the ErrKeyNotFound arm: an unconditional transient return here
 		// would Nak forever on a bad row, parking the pattern unbounded (FR29).
 		return "", permanentEgressFailure(
-			fmt.Errorf("bridge: piiKeyEnvelope for %s unusable after %d attempts: %w", identityKey, numDelivered, err))
+			fmt.Errorf("bridge: piiKeyEnvelope for %s unusable after %d attempts: %w", keyHolderKey, numDelivered, err))
 	}
 
 	plaintext, verr := e.vaultDecryptRef(ctx, marker.Ref, requestID, envelope, marker.Ciphertext, marker.MAC)
@@ -207,49 +223,49 @@ func (e *Engine) resolveSensitiveRef(ctx context.Context, marker sensitiveRefMar
 			return "", permanentEgressFailure(fmt.Errorf("bridge: %s ref unverified: %w", marker.Ref, verr))
 		}
 		if errors.Is(verr, vault.ErrKeyShredded) {
-			return "", permanentEgressFailure(fmt.Errorf("bridge: %s is shredded: %w", identityKey, verr))
+			return "", permanentEgressFailure(fmt.Errorf("bridge: %s is shredded: %w", keyHolderKey, verr))
 		}
 		if numDelivered < maxEgressUnwrapAttempts {
 			return "", transientEgressFailure(
-				fmt.Errorf("bridge: vault decrypt for %s (attempt %d): %w", identityKey, numDelivered, verr))
+				fmt.Errorf("bridge: vault decrypt for %s (attempt %d): %w", keyHolderKey, numDelivered, verr))
 		}
 		return "", permanentEgressFailure(
-			fmt.Errorf("bridge: vault decrypt for %s failed after %d attempts: %w", identityKey, numDelivered, verr))
+			fmt.Errorf("bridge: vault decrypt for %s failed after %d attempts: %w", keyHolderKey, numDelivered, verr))
 	}
 
 	var fields map[string]json.RawMessage
 	if err := json.Unmarshal(plaintext, &fields); err != nil {
-		return "", permanentEgressFailure(fmt.Errorf("bridge: unmarshal decrypted %s: %w", identityKey, err))
+		return "", permanentEgressFailure(fmt.Errorf("bridge: unmarshal decrypted %s: %w", keyHolderKey, err))
 	}
 	fv, ok := fields[marker.Field]
 	if !ok {
-		return "", permanentEgressFailure(fmt.Errorf("bridge: decrypted %s has no field %q", identityKey, marker.Field))
+		return "", permanentEgressFailure(fmt.Errorf("bridge: decrypted %s has no field %q", keyHolderKey, marker.Field))
 	}
 	var s string
 	if err := json.Unmarshal(fv, &s); err != nil {
-		return "", permanentEgressFailure(fmt.Errorf("bridge: decrypted %s field %q is not a scalar string", identityKey, marker.Field))
+		return "", permanentEgressFailure(fmt.Errorf("bridge: decrypted %s field %q is not a scalar string", keyHolderKey, marker.Field))
 	}
 	if s == "" {
-		return "", permanentEgressFailure(fmt.Errorf("bridge: decrypted %s field %q is empty", identityKey, marker.Field))
+		return "", permanentEgressFailure(fmt.Errorf("bridge: decrypted %s field %q is empty", keyHolderKey, marker.Field))
 	}
 	return s, nil
 }
 
-// fetchLiveEnvelope reads identityKey's wrapped-DEK Envelope off the
+// fetchLiveEnvelope reads keyHolderKey's wrapped-DEK Envelope off the
 // privacy-base piiKeyEnvelope lens — the P5-compliant read the bridge uses in
 // place of a Core-KV read (P2: the bridge reads no Core KV; its two transport
 // surfaces are this one lens-bucket read and the vault decrypt RPC). Always
 // resolved fresh from the lens for this call — never cached or carried across
 // calls — so a shred that lands between op commit and egress is observed
 // (design §3.2/§3.5's live-envelope rule).
-func (e *Engine) fetchLiveEnvelope(ctx context.Context, identityKey string) (vault.Envelope, error) {
-	entry, err := e.conn.KVGet(ctx, envelopeLensBucket, identityKey)
+func (e *Engine) fetchLiveEnvelope(ctx context.Context, keyHolderKey string) (vault.Envelope, error) {
+	entry, err := e.conn.KVGet(ctx, envelopeLensBucket, keyHolderKey)
 	if err != nil {
 		return vault.Envelope{}, err
 	}
 	var env vault.Envelope
 	if err := json.Unmarshal(entry.Value, &env); err != nil {
-		return vault.Envelope{}, fmt.Errorf("parse piiKeyEnvelope for %s: %w", identityKey, err)
+		return vault.Envelope{}, fmt.Errorf("parse piiKeyEnvelope for %s: %w", keyHolderKey, err)
 	}
 	return env, nil
 }

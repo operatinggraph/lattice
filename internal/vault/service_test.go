@@ -56,9 +56,9 @@ func TestService_Decrypt_RoundTrip(t *testing.T) {
 	require.NoError(t, svc.StartNATSListener(ctx, nc))
 
 	resp := sendDecrypt(t, nc, vault.DecryptRequest{
-		IdentityKey: "identity-1",
-		Envelope:    env,
-		Ciphertext:  ct,
+		KeyHolderKey: "identity-1",
+		Envelope:     env,
+		Ciphertext:   ct,
 	})
 
 	require.Empty(t, resp.Error)
@@ -84,9 +84,9 @@ func TestService_Decrypt_ShreddedIdentity_Denied(t *testing.T) {
 	require.NoError(t, svc.StartNATSListener(ctx, nc))
 
 	resp := sendDecrypt(t, nc, vault.DecryptRequest{
-		IdentityKey: "identity-1",
-		Envelope:    env,
-		Ciphertext:  ct,
+		KeyHolderKey: "identity-1",
+		Envelope:     env,
+		Ciphertext:   ct,
 	})
 
 	require.NotEmpty(t, resp.Error)
@@ -169,17 +169,17 @@ func TestService_WrapUnwrapKey_RoundTrip(t *testing.T) {
 
 	cek := []byte("0123456789abcdef0123456789abcdef") // 32 bytes (a per-object CEK)
 	wrapResp := sendWrapKey(t, nc, vault.WrapKeyRequest{
-		IdentityKey: "identity-1",
-		Envelope:    env,
-		Key:         cek,
+		KeyHolderKey: "identity-1",
+		Envelope:     env,
+		Key:          cek,
 	})
 	require.Empty(t, wrapResp.Error)
 	assert.NotEqual(t, cek, wrapResp.Ciphertext.CT, "wrapped CEK must not equal the plaintext CEK")
 
 	unwrapResp := sendUnwrapKey(t, nc, vault.UnwrapKeyRequest{
-		IdentityKey: "identity-1",
-		Envelope:    env,
-		Wrapped:     wrapResp.Ciphertext,
+		KeyHolderKey: "identity-1",
+		Envelope:     env,
+		Wrapped:      wrapResp.Ciphertext,
 	})
 	require.Empty(t, unwrapResp.Error)
 	assert.Equal(t, cek, unwrapResp.Key)
@@ -205,9 +205,9 @@ func TestService_UnwrapKey_ShreddedIdentity_Denied(t *testing.T) {
 	require.NoError(t, svc.StartNATSListener(ctx, nc))
 
 	resp := sendUnwrapKey(t, nc, vault.UnwrapKeyRequest{
-		IdentityKey: "identity-1",
-		Envelope:    env,
-		Wrapped:     wrapped,
+		KeyHolderKey: "identity-1",
+		Envelope:     env,
+		Wrapped:      wrapped,
 	})
 	require.NotEmpty(t, resp.Error)
 	assert.Empty(t, resp.Key)
@@ -227,7 +227,7 @@ func TestService_WrapKey_MissingKey_Rejected(t *testing.T) {
 	svc := vault.NewService(backend, nil)
 	require.NoError(t, svc.StartNATSListener(ctx, nc))
 
-	resp := sendWrapKey(t, nc, vault.WrapKeyRequest{IdentityKey: "identity-1", Envelope: env})
+	resp := sendWrapKey(t, nc, vault.WrapKeyRequest{KeyHolderKey: "identity-1", Envelope: env})
 	require.NotEmpty(t, resp.Error)
 }
 
@@ -281,10 +281,10 @@ func TestService_IssueSessionKey_ReturnsTheDEK(t *testing.T) {
 	require.NoError(t, svc.StartNATSListener(ctx, nc))
 
 	resp := sendIssueSessionKey(t, nc, vault.IssueSessionKeyRequest{
-		IdentityKey: "identity-1",
-		Envelope:    env,
-		AspectScope: "lease",
-		TTLSeconds:  60,
+		KeyHolderKey: "identity-1",
+		Envelope:     env,
+		AspectScope:  "lease",
+		TTLSeconds:   60,
 	})
 	require.Empty(t, resp.Error)
 	require.NotEmpty(t, resp.Key)
@@ -318,9 +318,9 @@ func TestService_IssueSessionKey_ShreddedIdentity_Denied(t *testing.T) {
 	require.NoError(t, svc.StartNATSListener(ctx, nc))
 
 	resp := sendIssueSessionKey(t, nc, vault.IssueSessionKeyRequest{
-		IdentityKey: "identity-1",
-		Envelope:    env,
-		TTLSeconds:  60,
+		KeyHolderKey: "identity-1",
+		Envelope:     env,
+		TTLSeconds:   60,
 	})
 	require.NotEmpty(t, resp.Error)
 	assert.Empty(t, resp.Key)

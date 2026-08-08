@@ -59,10 +59,41 @@ func TestLocalBackend_DistinctIdentitiesGetDistinctKeys(t *testing.T) {
 	ctA, err := b.Encrypt(ctx, "identity-A", envA, plaintext)
 	require.NoError(t, err)
 
-	// identity-B's envelope cannot decrypt identity-A's ciphertext.
-	_, err = b.Decrypt(ctx, "identity-B", envB, ctA)
+	// identity-B's envelope cannot decrypt identity-A's ciphertext. The label is
+	// cleared so the refusal must come from the CRYPTO: the holder key is AEAD
+	// associated data, so B's DEK opening a ciphertext sealed under A's fails
+	// the tag. An unlabelled ciphertext is a real wire form
+	// (objectcrypto.EncodeWrappedCEK drops the label), and it is the only way to
+	// reach the AEAD under a deliberately wrong holder, since a labelled
+	// ciphertext is refused on its label first.
+	unlabelled := ctA
+	unlabelled.KeyID = ""
+	_, err = b.Decrypt(ctx, "identity-B", envB, unlabelled)
 	require.Error(t, err)
 	assert.ErrorIs(t, err, vault.ErrDecryptFailed)
+}
+
+// A labelled ciphertext is refused before any key material is touched when the
+// decrypt is attempted under a different holder. Every decrypt site resolves
+// custody from that label, so this guard is what keeps a site resolving it from
+// somewhere else — an aspect's anchor, a projected column — from quietly
+// succeeding, rather than each caller having to remember.
+func TestLocalBackend_CiphertextLabelMustMatchTheHolder(t *testing.T) {
+	ctx := context.Background()
+	b := newTestBackend(t)
+
+	envA, err := b.CreateIdentityKey(ctx, "identity-A")
+	require.NoError(t, err)
+	envB, err := b.CreateIdentityKey(ctx, "identity-B")
+	require.NoError(t, err)
+
+	ctA, err := b.Encrypt(ctx, "identity-A", envA, []byte("secret"))
+	require.NoError(t, err)
+	assert.Equal(t, "identity-A", ctA.KeyID, "a ciphertext carries the holder its DEK was derived under")
+
+	_, err = b.Decrypt(ctx, "identity-B", envB, ctA)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, vault.ErrInvalidEnvelope)
 }
 
 func TestLocalBackend_MismatchedIdentityKeyForEnvelope_Denied(t *testing.T) {
@@ -344,6 +375,10 @@ func TestLocalBackend_UnwrapKey_WrongIdentity_Denied(t *testing.T) {
 	wrapped, err := b.WrapKey(ctx, "identity-A", envA, cek)
 	require.NoError(t, err)
 
+	// Cleared for the same reason as the Decrypt case above: an object CEK
+	// travels unlabelled on the wire (objectcrypto.EncodeWrappedCEK), so this
+	// is the shape whose only defence is the AEAD holder binding.
+	wrapped.KeyID = ""
 	_, err = b.UnwrapKey(ctx, "identity-B", envB, wrapped)
 	require.Error(t, err)
 	assert.ErrorIs(t, err, vault.ErrDecryptFailed)

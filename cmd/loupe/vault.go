@@ -6,7 +6,6 @@ import (
 	"io"
 	"net/http"
 	"sort"
-	"strings"
 
 	"github.com/operatinggraph/lattice/internal/bootstrap"
 	"github.com/operatinggraph/lattice/internal/substrate"
@@ -144,14 +143,6 @@ func (s *server) handleVaultDecrypt(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, http.StatusBadRequest, "aspectKey must be a 4-segment vtx.<type>.<id>.<localName> aspect key")
 		return
 	}
-	segs := strings.SplitN(req.AspectKey, ".", 4)
-	identityKey := strings.Join(segs[:3], ".")
-	if vertexType(identityKey) != "identity" {
-		s.writeError(w, http.StatusBadRequest,
-			req.AspectKey+" does not anchor to an identity vertex — a sensitive aspect's DEK is always custodied by its anchoring identity (Contract #1 §1.6)")
-		return
-	}
-
 	ctx, cancel := s.reqContext(r)
 	defer cancel()
 
@@ -172,25 +163,35 @@ func (s *server) handleVaultDecrypt(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, http.StatusBadRequest, req.AspectKey+": "+err.Error())
 		return
 	}
+	// Custody is resolved from the ciphertext, not from the aspect key the
+	// caller supplied, so the reveal follows a record whose DEK is held by a
+	// retention class as readily as one held by its anchoring identity. It also
+	// means the key this handler fetches is the one the record itself names —
+	// the aspect key selects WHICH record, never which key opens it.
+	keyHolderKey, err := vault.KeyHolder(ct)
+	if err != nil {
+		s.writeError(w, http.StatusBadRequest, req.AspectKey+": "+err.Error())
+		return
+	}
 
-	piiEntry, err := conn.KVGet(ctx, bootstrap.CoreKVBucket, identityKey+".piiKey")
+	piiEntry, err := conn.KVGet(ctx, bootstrap.CoreKVBucket, keyHolderKey+".piiKey")
 	if err != nil {
 		if errors.Is(err, substrate.ErrKeyNotFound) {
-			s.writeError(w, http.StatusBadGateway, identityKey+" has a sensitive aspect but no piiKey — key custody invariant violated")
+			s.writeError(w, http.StatusBadGateway, keyHolderKey+" holds a sensitive aspect's key but has no piiKey — key custody invariant violated")
 			return
 		}
-		s.writeError(w, http.StatusBadGateway, "get "+identityKey+".piiKey: "+err.Error())
+		s.writeError(w, http.StatusBadGateway, "get "+keyHolderKey+".piiKey: "+err.Error())
 		return
 	}
 	var piiDoc struct {
 		Data vault.Envelope `json:"data"`
 	}
 	if err := json.Unmarshal(piiEntry.Value, &piiDoc); err != nil {
-		s.writeError(w, http.StatusBadGateway, "parse "+identityKey+".piiKey: "+err.Error())
+		s.writeError(w, http.StatusBadGateway, "parse "+keyHolderKey+".piiKey: "+err.Error())
 		return
 	}
 
-	reqBody, err := json.Marshal(vault.DecryptRequest{IdentityKey: identityKey, Envelope: piiDoc.Data, Ciphertext: ct})
+	reqBody, err := json.Marshal(vault.DecryptRequest{KeyHolderKey: keyHolderKey, Envelope: piiDoc.Data, Ciphertext: ct})
 	if err != nil {
 		s.writeError(w, http.StatusInternalServerError, "marshal decrypt request: "+err.Error())
 		return

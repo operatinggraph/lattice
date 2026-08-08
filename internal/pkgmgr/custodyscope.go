@@ -73,21 +73,22 @@ func (def Definition) validateCustodyScope() error {
 					"pkgmgr: DDL[%d] %q: Custody.RetentionClass %q is not declared by this package — a retention class may only be named by the package that declares it",
 					idx, d.CanonicalName, c.RetentionClass)
 			}
-			// 5. Shape is valid, but the mechanism is not yet whole. The read
-			// path does not resolve custody from the ciphertext's keyId — every
-			// decrypt site still derives the holder from the aspect's own anchor
-			// (design §11 Fire 1 item 2). Until that lands a class-custodied
-			// record is WRITE-ONLY: decrypt-on-read hands the script raw
-			// ciphertext, and a Secure Lens fails its whole batch on the AEAD
-			// tag. Refusing the declaration is the fail-closed reading of a
+			// 5. Shape is valid, but the mechanism is not yet whole. A retention
+			// class is a promise about a key that CAN be destroyed on the
+			// class's own schedule, and the verb that destroys one —
+			// ShredRetentionClassKey — does not exist (design §11 Fire 1 item
+			// 3). A record custodied here would be written, and read, and then
+			// held forever: precisely the outcome a retention class exists to
+			// prevent, and one that reads as compliant from every surface.
+			// Refusing the declaration is the fail-closed reading of a
 			// half-built primitive; permitting it trades a loud install error
-			// for silent unreadable PHI. This check runs LAST so a malformed
-			// declaration still gets its precise error.
+			// for undestroyable retained PHI. This check runs LAST so a
+			// malformed declaration still gets its precise error.
 			//
-			// REMOVE THIS with item 2, whose green bar is a per-site test that a
-			// ciphertext's keyId, not its anchor, selects the key.
+			// REMOVE THIS with item 3, whose green bar is a real
+			// ShredRetentionClassKey against a class-custodied record.
 			return fmt.Errorf(
-				"pkgmgr: DDL[%d] %q: Custody.Kind %q is not installable yet — the write path custodies on the class but every decrypt site still resolves the holder from the aspect's anchor, so the record would be unreadable; this gate lifts when the keyId-resolved read path ships",
+				"pkgmgr: DDL[%d] %q: Custody.Kind %q is not installable yet — a class-custodied DEK has no destruction verb, so the retention obligation the class declares could never be discharged; this gate lifts when ShredRetentionClassKey ships",
 				idx, d.CanonicalName, CustodyKindRetentionClass)
 		}
 

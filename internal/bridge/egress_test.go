@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"log/slog"
+	"strings"
 	"testing"
 	"time"
 
@@ -15,6 +16,13 @@ import (
 )
 
 // --- shared harness -----------------------------------------------------
+
+// Valid 20-char limited-alphabet NanoIDs (CLAUDE.md's seed-data convention),
+// so the keys these tests synthesize parse as real vertex keys.
+const (
+	testEgressIdentityID = "EgressUnitPersonAAAA"
+	testEgressClassID    = "EgressUnitCLassAAAAA"
+)
 
 func egressTestConn(t *testing.T) *substrate.Conn {
 	t.Helper()
@@ -192,19 +200,52 @@ func TestResolveSensitiveRef_Permanent(t *testing.T) {
 		}
 	})
 
-	t.Run("non-identity ref", func(t *testing.T) {
+	t.Run("ciphertext names no key holder", func(t *testing.T) {
 		conn := egressTestConn(t)
 		e := &Engine{conn: conn, logger: slog.Default()}
-		_, ferr := e.resolveSensitiveRef(ctx, sensitiveRefMarker{Ref: "vtx.leaseapp.abc.status", Field: "value"}, testRequestID, 1)
+		_, ferr := e.resolveSensitiveRef(ctx, sensitiveRefMarker{
+			Ref:        "vtx.identity." + testEgressIdentityID + ".ssn",
+			Ciphertext: vault.Ciphertext{CT: []byte("x"), Nonce: []byte("y")},
+			Field:      "value",
+		}, testRequestID, 1)
 		if ferr == nil || ferr.class != egressPermanent {
-			t.Fatalf("non-identity ref: want permanent failure, got %v", ferr)
+			t.Fatalf("keyId-less ciphertext: want permanent failure, got %v", ferr)
+		}
+	})
+
+	// The envelope source — the piiKeyEnvelope lens — enumerates identity
+	// holders alone, so a class-held record can only be refused here. It is
+	// refused on the HOLDER's type, not the ref's: the ref below anchors on a
+	// perfectly ordinary identity.
+	t.Run("non-identity key holder", func(t *testing.T) {
+		conn := egressTestConn(t)
+		e := &Engine{conn: conn, logger: slog.Default()}
+		_, ferr := e.resolveSensitiveRef(ctx, sensitiveRefMarker{
+			Ref: "vtx.identity." + testEgressIdentityID + ".ssn",
+			Ciphertext: vault.Ciphertext{
+				CT: []byte("x"), Nonce: []byte("y"),
+				KeyID: "vtx.retentionclass." + testEgressClassID,
+			},
+			Field: "value",
+		}, testRequestID, 1)
+		if ferr == nil || ferr.class != egressPermanent {
+			t.Fatalf("class-held record: want permanent failure, got %v", ferr)
+		}
+		if !strings.Contains(ferr.err.Error(), "retentionclass") {
+			t.Fatalf("refusal must name the holder type, got %v", ferr.err)
 		}
 	})
 
 	t.Run("no field", func(t *testing.T) {
 		conn := egressTestConn(t)
 		e := &Engine{conn: conn, logger: slog.Default()}
-		_, ferr := e.resolveSensitiveRef(ctx, sensitiveRefMarker{Ref: "vtx.identity.abc.ssn"}, testRequestID, 1)
+		_, ferr := e.resolveSensitiveRef(ctx, sensitiveRefMarker{
+			Ref: "vtx.identity." + testEgressIdentityID + ".ssn",
+			Ciphertext: vault.Ciphertext{
+				CT: []byte("x"), Nonce: []byte("y"),
+				KeyID: "vtx.identity." + testEgressIdentityID,
+			},
+		}, testRequestID, 1)
 		if ferr == nil || ferr.class != egressPermanent {
 			t.Fatalf("empty field: want permanent failure, got %v", ferr)
 		}
