@@ -33,6 +33,7 @@ buildable-first; F11–F13 gated on lattice cross-lane asks (§6 there).
 
 | Item | What it is | Imp | Size | State |
 |---|---|---|---|---|
+| **`retentionKeyStatus` has no operator surface** | The Vault page's shred view reads `privacy-shreds` (identity holders only), so the new `privacy-retention-keys` bucket — every declared retention class, its policy/period, and its destruction progress — is unreadable in Loupe. `handleVaultShreds` is the shape to mirror. | ★★ | S–M | 📋 ready · consumer: an operator asking which classes have expired · [design](../../implementation-artifacts/retention-class-key-custody-design.md) §4.4 |
 | **The Shred button submits a bare key shred, not an erasure** | `ShredIdentityKey` now destroys the key only; the decrypt-free footprint survives until the `identityErasure` pattern runs. The button should start the pattern (`StartLoomPattern`, already granted to `operator`), which turns `showShredProof`'s one-commit panel into a four-step progress surface over the instance and the residue row. | ★★ | M | 📋 ready · UX-then-FE · [design](../../implementation-artifacts/erasure-orchestration-design.md) §12 step 4 |
 
 ## Parked

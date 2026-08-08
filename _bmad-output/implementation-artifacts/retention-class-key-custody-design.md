@@ -1261,8 +1261,8 @@ Full bar: `go build ./...` · `make vet` · `golangci-lint run ./...` · `STRICT
 
 ## 14. Multi-fire checkpoint (live)
 
-**Worktree:** none held. Items 1 and 2 are merged to `main`, so each fire opens a fresh worktree off `main`
-rather than resuming a persistent one — item 3 starts clean.
+**Worktree:** none held. Items 1, 2 and 3a are merged to `main`, so each fire opens a fresh worktree off
+`main` rather than resuming a persistent one — item 3b starts clean.
 
 **Done — item 1 (2026-08-07).** Custody vocabulary + write path. `CustodySpec`/`RetentionClassSpec`, the
 `retentionclass` holder + `.retentionPolicy`, `RetentionClassID`/`RetentionClassKey`, six install
@@ -1332,7 +1332,43 @@ review. `SecureColumn.IdentityKeyColumn` stays required-but-unread through item 
 six shipped lenses need no migration yet — but `TestSecureDecryptor_MissingIdentityKeyIsTerminal` must be
 re-aimed when the decryptor stops reading the column.
 
-**Then — item 3, erasure vocabulary + delivery.** `ShredRetentionClassKey` mirroring
+**Done — item 3a (2026-08-08).** Erasure vocabulary + destruction. `ShredRetentionClassKey` +
+`RecordRetentionClassShredFinalization` on a new `shredRetentionClassKey` DDL,
+`privacy.retentionClassKeyShredded`, `piiKey`'s `permittedCommands` + a re-derived description covering
+both holder kinds, a second durable consumer in `internal/privacyworker` (its own durable, so one kind's
+stuck destruction cannot park the other's), and the `retentionKeyStatus` lens. privacy-base 0.11.0 →
+0.12.0.
+
+Three deliberate divergences from the mirror, each with its reason in the commit: **no `subjectKey` alias**
+(no pattern binds this op, so an alias would be vocabulary with no submitter); **a separate finalization
+verb** (`RecordShredFinalization` validates a `vtx.identity` subject and its steps are the identity plane's
+— `projectionsNullified` keys on a row's own identity column, which a class-custodied row does not have);
+**no grant** (this is the widest-blast-radius verb in the package — it destroys every record a class holds,
+for subjects who never asked for anything — so `operator`/scope:any by default would make it the most
+casually reachable one; the finalization sibling IS granted, because recording a committed destruction
+confers no authority to start one).
+
+**The install gate STILL stays shut**, and its remaining cause is now the last one: a class-key destruction
+does not reach the read models. §6.3's derivation is why — an identity-custodied row scrubs in-band because
+the key aspect hangs off the vertex the lens already binds, and a class holder is not the ciphertext's host,
+so nothing forces a lens to react. Lifting the gate here would license retained PHI whose erasure no
+projection would honor, which is strictly worse than today's un-projected plaintext. Item 3b lifts it.
+
+**Then — item 3b, the delivery half.** `SecureColumn.HolderTypes` replacing `IdentityKeyColumn` with
+validation (five sites: `pipeline/secure.go`, `lens/corekv_source.go`, `pkgmgr/definition.go`, and the two
+validation mirrors `corekv_source.go:838-903` + `bucketguard.go:106-190`); per-row failure projects `null` +
+a privacy-tier alarm (F2 — note `failure.CatPrivacyCritical` exists and is classified but has **no** generic
+routing in `dispositionEvalErr`, so this fire either extends that routing or reuses `keyshredded`'s manual
+pause); `secureIdentityKeyType` deleted; **`control.Service.RebuildRule` exported** (serialized per lens —
+today `rebuildRule` spawns a goroutine per request with no cross-caller lock, and there are already two
+unserialized callers, the control RPC and `cmd/refractor/reload.go:372-378`); the destruction-event consumer
+with the `HolderTypes` enumeration and the `projectionsRebuilt` attestation; the six shipped lens migrations
+(**not uniform** — lease-signing's uses `IdentityKeyColumn: "applicant"`); `keyshredded/manager.go:31-37`'s
+excuse and `pipeline/sweep.go:29-33`'s stale reason re-derived; **and lifting `custodyscope.go` rule 5.**
+One trap already located: `secureColumnsEqual` (`cmd/refractor/main.go:1366-1376`) compares with `!=`, so a
+slice field breaks the hot-reload refusal path at compile time.
+
+**Superseded — item 3 as one unit.** `ShredRetentionClassKey` mirroring
 `shred_identity_key.go:267-311` (**that slice only** — the erasure design keeps the rest unchanged);
 `privacy.retentionClassKeyShredded`; the retention-class shred worker; the `retentionKeyStatus` lens;
 `SecureColumn.HolderTypes` replacing `IdentityKeyColumn` with validation; per-row failure projects `null` +
