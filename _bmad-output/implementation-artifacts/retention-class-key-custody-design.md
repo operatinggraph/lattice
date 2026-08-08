@@ -2392,3 +2392,88 @@ to thrash. The three `internal/refractor` capability-lens E2E failures it record
 clean `main` (2/4), filed for the Whetstone, but the other two failed only in this thrashing run and have no
 quiet-host reading on either side. **The next fire must re-run those three on a quiet host, branch vs. clean
 `main`, before reading anything into them** — and must not treat this fire's suite log as a baseline.
+
+## 23. Item 3b-ii — the second crop closed (2026-08-08)
+
+Every finding in §22.1–§22.4 is closed on `fire/retention-class-3b-ii` @ `961ddcd2`. Gates green: `go build`,
+`make vet`, `golangci-lint` (0 issues), all eight `scripts/lint-*.go`, `make test-system-actor-capability`
+(the build-tagged gate C3 found red), and the touched packages. What changed, and where the fix went past
+the report:
+
+**C1 (with C7, and M3 restored) — completion is a fact a rebuild records, not a channel closing.** A rebuild
+now carries a `rebuildSignal{done, drained}`; `drained` is set **only** by the watcher that observed
+`outstanding == 0`, and every other exit — cancelled watcher, abandoned rescan, a lens with no reporter and
+so no watcher at all — closes `done` without it. The waiter reads the flag; the channel only says "stop
+waiting". That removes the 50/50 select outcome at its source rather than re-ordering the select, and it
+answers C7 in the same stroke: a rebuild nobody can watch reports `ErrRebuildNotDrained` instead of success.
+M3's `ctx.Err()` arm lives inside the error branch the race was skipping, so it fires again. **One thing the
+fix had to decide that the report did not raise:** `RebuildAndWait`'s *first* wait — waiting OUT a
+pre-existing rebuild — asks a weaker question than its second. All it needs is that the prior rebuild has
+**ended**; how it ended is that rebuild's business, and treating an abandoned one as a blocker would let an
+unrelated failure permanently block every attesting caller. It tolerates `ErrRebuildNotDrained`; the second
+wait does not.
+
+**C2 — the two "not the lens's fault" classes get their own arm, ahead of the pause.**
+`control.ErrRebuildWaitTimeout` and `control.ErrRebuildNotDrained` live on the Rebuilder contract, because
+telling them from a rebuild failure is the *caller's* decision and getting it wrong is self-perpetuating: a
+paused lens cannot drain a rebuild, so pausing a merely-slow one guarantees the next destruction times out
+and re-pauses it. The attestation is still withheld; the lens is left running.
+
+**C3 — the missed submitter, and the gate that could not see it.** `systemactorcapability`'s e2e now declares
+the actor. `make test-system-actor-capability` passes. §20.5's own gotcha said a missed submitter is a live
+outage rather than a test failure; the build tag is why review, not CI, is what caught it.
+
+**C4 — the budgets are staged, not equal.** They share one `NumDelivered` by construction, so
+`maxNotRegisteredDeliveries` now *starts* where `maxNotReadyDeliveries` ends (and the submit-failure Nak,
+previously unbounded, is a third stage). The comment claiming independence is gone.
+
+**C5 — `ReconcileNow` answers without publishing.** `reconcile` is the pure computation; only the scheduled
+`check` stores into the set `Missing()` exposes, so the boot grace window keeps suppressing exactly the
+false positive it was built for.
+
+**C13 — readiness is scoped to the holder type, which is the question actually being asked.**
+`ReconcileNowForHolderType` keeps only lenses whose spec declares the destroyed holder type in a Secure-Lens
+column (read from `targetConfig.secureColumns[].holderTypes` — the author's own statement, not an inference
+over compiled cypher). Corpus-global readiness let any single unactivatable lens anywhere withhold every
+attestation for every holder type forever. Fail-closed at the edge: a spec that cannot be read or parsed has
+**unknown** holder types and is kept, because unknown must never resolve to "not relevant".
+
+**C12 — Ack-and-alarm stands, and the reason is a redrive path that already exists.** Naking forever would
+wedge a strictly serial consumer on one holder and stop every later destruction — the failure B3 exists to
+prevent. What makes the Ack safe is that a destruction is **operator-redrivable**: re-submitting
+`ShredRetentionClassKey` for the same holder is idempotent, clears the prior cycle's finalization progress
+(§4.3) and re-emits the event. The give-up log now names that action rather than only the fault.
+
+**C11 — two bugs, not one.** `RebuildWait` is per target, so the handler's real bound was N × 30 min; a
+single `HandlerBudget` now spans every rebuild of one destruction, and a target reached with nothing left is
+skipped without attesting. And `AckWait` alone could not have worked: its clock runs from delivery into
+nats.go's 500-message prefetch buffer, not from handler entry, so on the cold-boot `DeliverAll` replay this
+fix was written for a queued destruction was redelivered before its own handler ran. `MaxPrefetch` (new on
+`substrate.DurableConsumerConfig`, set to 1 here) is the other half.
+
+**C6, C8, C9 — the same lesson three times: a doctrine that reached one site and not its siblings.**
+`abandonRebuild` checks ownership before clearing pipeline-wide state (an older rebuild's failure was
+un-suppressing the convergence sweep under a newer live rescan); the three status writers carry the five
+projection-progress fields they were still zeroing — `LastProjectedAt` **permanently**, since the LagPoller
+only ever writes a non-zero value; and both health providers transfer every field they already hold before
+the pending read that can fail. C10's close moved inside the mutex.
+
+**Minors** — the stale "read-free / checks the piiKey via kv.Read" text is corrected in the DDL field
+description, `docs/components/privacyworker.md` and `docs/components/refractor.md`; the reporter's
+could-not-read warning names what it now actually resets. Every test gap the acceptance layer named is
+filled: the identity-plane actor pin has its own negative vector, `keyshredded`'s declared reads are
+asserted, and `AckWait`/`MaxPrefetch` have direct plumbing tests (including that a zero value leaves
+JetStream's default alone).
+
+### 23.1 §22.5's owed verification — answered
+
+Run on a quiet host, `internal/refractor` alone, two runs each side: **clean `main` fails 2 of 2 and the
+branch fails 2 of 2**, with membership rotating across `RealClaimIdentityOp_E2E`,
+`_WithEphemeralConsumer_E2E` and `_TwoActorClaimCeremony_MultiActorRace_E2E` — the same 25s convergence
+assertion each time. A failure at `main` cannot be caused by code `main` does not carry, so the whole
+claim-ceremony family is a **pre-existing intermittent at head**, not a reading on this increment. The
+`lattice.md` row is widened from the single ephemeral sibling to the family. `internal/loom`'s
+`TestSupervisor_RemovedDomainPauseDoesNotResurrectOnReAdd`, which failed once in the thrashing run, passes
+**5/5** quiet on the branch and 3/3 at `main` — contention. `TestRefractor_E2E_P99` fails on both sides too,
+but it asserts a 500ms p99 budget on a host sitting at ~11 GB of swap, which is the documented contention
+condition rather than a defect worth a row.
