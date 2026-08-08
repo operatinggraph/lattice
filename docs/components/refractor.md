@@ -232,14 +232,6 @@ The read-path primitives live in `adapter/rls.go`:
   name) keeps producers disjoint — a revoke from one package never wipes another's coexisting
   grant. RLS then unions across all sources natively via the policy.
 
-> **Tombstone column (staged §6.14 clarification).** The grant table carries an `is_deleted`
-> boolean the contract's illustrative four-column schema omits. It is **required**: §6.14
-> mandates that a delete "applies only when its incoming `projectionSeq` exceeds the stored
-> one" and that a stale replay "cannot resurrect a revoked grant" — both need the revoked
-> row's seq **retained**, which a hard `DELETE` discards. Revocation is therefore a
-> seq-guarded **soft tombstone**; the RLS policy and the membership lookup filter
-> `NOT is_deleted`. This reuses the existing Postgres soft-delete convention.
-
 **Activation wiring.** A postgres lens spec declares the read-path posture in its
 `targetConfig`:
 
@@ -251,8 +243,10 @@ The read-path primitives live in `adapter/rls.go`:
   next probe passes and the lens **auto-resumes** (no operator Resume, no Refractor restart). The
   adapter also encodes the `authz_anchors` (and any declared `text[]`) column as a Postgres array
   (the full engine emits a list as `[]any`, which the base adapter would otherwise coerce to
-  JSONB). A protected lens **may not** use `deleteMode: soft` — the RLS table has no `is_deleted`
-  column and the §6.14 policy does not filter it, so soft delete is rejected at spec load.
+  JSONB). A protected lens's Delete is **always** the seq-guarded soft tombstone
+  (`UPDATE … SET is_deleted=true, deleted_at=NOW(), projection_seq=$N`, conditioned on the incoming seq
+  exceeding the stored one — `adapter/postgres.go`) regardless of the declared `deleteMode`, and the
+  generated policy filters `NOT is_deleted` before evaluating membership (Contract #6 §6.14).
 - **`grantTable: true`** → the lens projects to `actor_read_grants` through the seq-guarded
   **`GrantWriterAdapter`** (table + composite key `actor_id, anchor_id, grant_source` default
   from the platform; the lens need only RETURN those three), and likewise starts infra-paused

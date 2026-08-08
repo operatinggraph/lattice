@@ -369,3 +369,19 @@ lattice op submit \
 
 Expected reply: `status: rejected` — the Processor's DDL cache no longer has an
 entry for `book`, so `CreateBook` cannot be resolved.
+
+## Appendix — recommended business link names (FR55)
+
+The capability cyphers walk business-graph topology by link name. These names ship with this
+reference implementation as **recommended conventions only** — they are not platform-reserved; a
+deployment may standardize on its own link types and author its cyphers against those (Contract #6 §6.9).
+
+| Link name | Used between | Semantics |
+|-----------|--------------|-----------|
+| `containedIn` | Location vertices (unit → building, room → unit, building → property) | Physical or logical containment; transitive |
+| `availableAt` | Service vertex → location vertex | Service is offered at this location (and by default, at locations contained within) |
+| `unavailableAt` | Service vertex → location vertex | Explicit exclusion override; closer exclusion wins over distant availability |
+| `leases` | Identity → lease vertex | Actor holds a lease; lease references a unit via `containedIn` from the unit side |
+| `residesIn` | Identity → location vertex | Actor resides at this location (independent of lease — guests, family, etc.) |
+| `assignedTo` | Task vertex → identity vertex | Task is assigned to the actor; grants ephemeral capability per FR56 |
+| `reportsTo` | Identity → identity | Reporting chain for manager-delegated task auth per FR56 |

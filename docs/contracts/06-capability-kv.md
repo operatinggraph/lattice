@@ -6,12 +6,10 @@ This contract is **security-critical** per the architecture's "Capability Lens i
 
 ### Source of Truth
 
-**The shape defined in this contract is *produced by* the Capability Lens cypher query's `RETURN` clause.** The bootstrap-seeded cypher query at `vtx.meta.lens.capability` is the *source of truth* for what gets written to Capability KV. This contract serves two derived functions:
-
-1. **Read-side contract** — the Processor at step 3 needs to know the shape to read it correctly. This contract documents the shape the cypher RETURN produces so Processor's reader code is grounded in a stable expectation.
-2. **Test oracle** — Story 3.2's contract-conformance test runs the bootstrap cypher query against a seeded graph and asserts the output structure matches the shape below. This test catches schema drift if anyone modifies the Capability Lens cypher query without updating this contract (or vice versa).
-
-**Schema drift mitigation:** Any change to either the bootstrap cypher query OR this contract must update the other in the same operation. The contract-conformance test in Story 3.2 is the safety net.
+**The shapes in this contract are produced by the capability lenses' `RETURN` clauses** — the
+bootstrap-seeded primordial anchor plus the package-owned slices (§6.1). Any change to a producing
+cypher OR this contract must update the other in the same operation; the contract-conformance tests
+are the safety net.
 
 ### 6.1 Bucket and Key Pattern
 
@@ -47,63 +45,49 @@ cap.role-by-operation.BookExecutiveCleaning
 **Phase 2 extends this to a *package-owned* producer.** The `cap.ephemeral.*` key space is produced by a **third Lens (`capabilityEphemeral`) shipped by the `orchestration-base` package** — not seeded at bootstrap. This is the first instance of the **contract-contribution model**: core owns the Capability KV bucket + the step-3 reader; *packages project the grant types they own* into disjoint key spaces. It is what lets the bootstrap `capability` cypher **stop referencing the package-owned `task` type** (the dependency direction becomes package→core). `capabilityEphemeral` is its first proof-of-pattern.
 
 **Phase 2 decomposition — the god-cypher split to package-owned disjoint keys (Epic 12 — COMPLETE
-2026-06-17).** The decomposition is adjudicated (`docs/decisions/projection-plane-decomposition.md`,
-D-PROJECTION + D-CONSUMER) and **landed**. The mechanism — a declarative `projectionKind: actorAggregate`
-plan compiler (§6.13, Story 12.3/12.4) on the write side and a **generic one-key-per-path auth-hook
-dispatcher** on the read side (Contract #2 §2.8, Story 12.5) — lets each grant type live at its own
-disjoint key with **no core edit**:
+2026-06-17).** Adjudicated and recorded, with the full session narrative, in
+`docs/decisions/projection-plane-decomposition.md` (D-PROJECTION + D-CONSUMER). The mechanism — the
+declarative `projectionKind: actorAggregate` plan compiler (§6.13) on the write side and the generic
+one-key-per-path auth-hook dispatcher (Contract #2 §2.8) on the read side — lets each grant type live
+at its own disjoint key with **no core edit**:
 
-- **`cap.roles.<actor>`** — `rbac-domain` projects the role/permission grants (Story 12.6, **done**);
-  the bootstrap `capability` cypher **dropped its `holdsRole`/`grantedBy`/`role`/`permission` MATCHes**.
-  An ordinary actor's role-derived platform grants now read from this key; a kernel-seeded primordial
-  identity reads the core anchor (below). `capabilityRoleIndex` (FR22 denial source) is `rbac-domain`-
-  owned too, degrading to empty when `rbac-domain` is absent.
-- **`cap.svc.<actor>`** — service-access grants. **Path B taken (Story 12.7, folded into 12.6):** no
-  `service-location` package exists, so the bootstrap cypher's `containedIn`/`availableAt`/
-  `unavailableAt`/`permitsOperation` MATCHes were **simply deleted** with no replacement projection;
-  the service matcher kind + key space stay registered-but-empty (absence = denial, §6.8) until a real
-  service package projects into them — a pure package addition, no core edit.
+- **`cap.roles.<actor>`** — role/permission grants, projected by `rbac-domain`'s `capabilityRoles`
+  lens. `capabilityRoleIndex` (FR22 denial source) is `rbac-domain`-owned too; both degrade to empty
+  when `rbac-domain` is absent.
+- **`cap.svc.<actor>`** — service-access grants, projected by the service package that owns the
+  residence scheme (`service-location`'s `capabilityServiceAccess` lens, §6.5). The key space degrades
+  to registered-but-empty (absence = denial, §6.8) when no service package is installed.
 
-After the decomposition the bootstrap `capability` cypher is the **narrow primordial-identity anchor**: it
-designates root by the **primordial `holdsRole → operator` topology** — a bounded single-link existence
-check (`MATCH (identity {key:$actorKey})-[:holdsRole]->(:role {canonicalName:'operator'})`) projecting the
-literal set of root-equivalent platform grants core must project even when no RBAC package is installed. The
-`operator` role, its permission vertices, and the seven system identities' `holdsRole` links are all
-**core-seeded** (Contract #7 §7.2/§7.7), so the anchor couples to the **primordial** operator topology, not
-to the rbac-domain **package** — core stays authorizable with rbac-domain absent — and it satisfies §7.7's
-rule that *root capability is established by graph topology, not by class-based special-casing*. (This
-re-admits `holdsRole`/`operator` vocabulary into core's cypher, narrowing Epic-12's "core names no rbac
-vocabulary" preference to a package-*dependency* break only.) `data.protected` is **not** a capability
-designator; it retains only its anti-brick meaning (the step-8 update/tombstone guard, Story 1.5.5). Step-3
-path-dispatches **before** the read: the **ordinary-actor** platform path and every scoped (task/service)
-path read **exactly one** disjoint key (§2.8 amendment) — ordinary actor → `cap.roles.<actor>` —
-preserving the single-GET **user hot path**. The **system-actor** (kernel-seeded root-topology
-identity — the same `holdsRole → operator` predicate) platform path is the one bounded exception: it reads the core `cap.<actor>` anchor **∪**
-`cap.roles.<actor>` and **unions** them (concat `platformPermissions`, union `lanes`). The two keys carry
-architecturally-distinct slices a system actor legitimately spans — the anchor is the **rbac-independent
-kernel floor** (the privileged `meta`/`urgent`/`system` lanes + the 6 bootstrap meta/install ops,
-projectable before any package exists so a fresh kernel can `InstallPackage`), while `cap.roles.<actor>`
-is the **rbac-derived extension** (the package ops the operator role carries — e.g.
-`MarkExpired`/`DetachObject`/`RecordShredFinalization` — projected by rbac-domain's `capabilityRoles`
-walk of `holdsRole→operator←grantedBy←permission`). They cannot be merged into one key without
-re-coupling the floor to the operator graph. The union is **deny-closed** (a grant appears iff some slice
-grants it; both keys absent → `AuthDenied`, §6.8) and bounded to the ~5–7 kernel-seeded root actors on
-their engine/background ops — never the user hot path. Absent rbac-domain, the derivation degrades to
-`cap.<actor>` for all actors (floor only; ordinary actors deny by absence).
+After the decomposition the bootstrap `capability` cypher is the **narrow primordial-identity
+anchor**: it designates root by the **primordial `holdsRole → operator` topology** — a bounded
+single-link existence check projecting the literal set of root-equivalent platform grants core must
+project even when no RBAC package is installed. The `operator` role, its permission vertices, and the
+system identities' `holdsRole` links are **core-seeded** (Contract #7 §7.2), so the anchor couples to
+the primordial operator topology, not to the rbac-domain package — root capability is established by
+graph topology, never by class-based special-casing (§7.2). `data.protected` is **not** a capability
+designator; it retains only its anti-brick meaning (the step-8 update/tombstone guard).
+
+**Step-3 key derivation (normative).** Step 3 path-dispatches **before** the read:
+
+- The **ordinary-actor** platform path and every scoped (task / service) path read **exactly one**
+  disjoint key (§2.8) — ordinary actor → `cap.roles.<actor>`, task → `cap.ephemeral.<actor>`,
+  service → `cap.svc.<actor>` — preserving the single-GET **user hot path**.
+- The **system-actor** platform path (a kernel-seeded root-topology identity, the same
+  `holdsRole → operator` predicate) is the one bounded exception: it reads the core `cap.<actor>`
+  anchor **∪** `cap.roles.<actor>` and **unions** them (concat `platformPermissions`, union `lanes`).
+  The anchor is the rbac-independent kernel floor; `cap.roles.<actor>` the rbac-derived extension.
+  The union is **deny-closed** — a grant appears iff some slice grants it; both keys absent →
+  `AuthDenied` (§6.8) — and bounded to the kernel-seeded root actors, never the user hot path.
+- **Absent `rbac-domain`**, the derivation degrades to `cap.<actor>` for all actors (floor only;
+  ordinary actors deny by absence).
 
 **Privileged lanes are core-policy-owned, not anchor-exclusive (scoped-privileged-lane-grants-design.md,
 mechanism C1).** A `cap.roles.<actor>` entry MAY carry a privileged (`meta`/`urgent`/`system`) per-op
-`lanes` value (§6.4) — but it is honored only when `{operationType, lane}` is on a core-owned allowlist (a
-Processor constant); an unlisted privileged grant is stripped to `default` and raises a
-`PrivilegedLaneGrantRejected` Health issue. This relaxes the *mechanism* (no longer a hard-coded
-`cap.roles ⇒ lanes:["default"]` ceiling) while preserving the *invariant* (core still decides what may
-ever be privileged; a package only assigns an allowlisted grant to a role). The anchor's doc-level `lanes`
-is unaffected — root keeps all four lanes regardless of the allowlist. **Sequencing (as of this edit):**
-Fire 1 (the per-op `lanes` field + the per-matched-permission gate) has landed; the **allowlist +
-fail-closed strip + `PrivilegedLaneGrantRejected` is Fire 2, not yet built** — no package sets a privileged
-`lanes` value yet, so this is inert in production today, but a per-op `lanes` grant that a package *did*
-set would currently be honored unconditionally (no core gate) until Fire 2 ships. See the design doc's §7
-decomposition.
+`lanes` value (§6.4) — honored **only** when `{operationType, lane}` is on the core-owned allowlist (a
+Processor constant, `privilegedLaneAllowlist`); an unlisted privileged grant is **stripped to
+`default`** and raises a `PrivilegedLaneGrantRejected` Health issue. Core decides what may ever be
+privileged; a package only assigns an allowlisted grant to a role. The anchor's doc-level `lanes` is
+unaffected — root keeps all four lanes regardless of the allowlist.
 
 ### 6.2 Document Shape
 
@@ -175,10 +159,9 @@ decomposition.
 #### Phase 2 amendment — projection-write integrity guard (`projectionSeq`, Story 12.1)
 
 Actor-aggregate capability projections are written under a **monotonic write-ordering guard** so a
-retried or reordered stale projection can never resurrect a revoked grant on the security plane. The
-exposure is confirmed-reachable on `cap.ephemeral.<actor>`: Refractor's retry queue replays a *captured
-row* (not a re-evaluation) from a **separate goroutine**, so a stale "open-era" `Upsert` can land after
-a close-`Delete` and re-write a revoked grant, with no further CDC event to re-delete it.
+retried or reordered stale projection can never resurrect a revoked grant on the security plane (the
+confirmed-reachable exposure is recorded in `docs/decisions/projection-plane-decomposition.md`,
+D-INTEGRITY).
 
 - **`projectionSeq`** (integer) is stamped on every guarded write = the **JetStream stream sequence of
   the triggering CDC message**. It is a total order maintained by the substrate, plan-independent, and
@@ -196,10 +179,9 @@ a close-`Delete` and re-write a revoked grant, with no further CDC event to re-d
   (load-bearing: the retry queue writes concurrently with the main consumer).
 - **Enforcement is adapter-local:** only the NATS-KV adapter enforces the guard; the Postgres adapter is
   exempt (implements the extended write signature as a pass-through, no guard).
-- **Rebuild interaction (Story 12.1b):** a `Rebuild(truncate=false)` replays historical lower-seq events
-  that the guard would reject against live high-seq watermarks. Resolution: guarded buckets either force
-  `truncate=true` (watermark cleared with the data) or the rebuild bypasses the guard for the replay —
-  defined and tested in 12.1b.
+- **Rebuild interaction:** a guarded bucket's rebuild **forces `truncate=true`** — the purge clears the
+  watermarks with the data, the stream replays from empty, and the highest-seq write wins
+  (`docs/components/refractor.md`, rebuild table).
 - **Non-CDC writes (reconciliation and shred — the only two sanctioned token classes):** a write with no
   triggering CDC message must still carry a `projectionSeq`, and exactly two token classes are sanctioned.
   (1) A **reconciliation write** (the auth-plane reproject verb / convergence sweep) is stamped with the
@@ -239,7 +221,7 @@ Each entry describes a system-level operation not scoped to any service.
 |-------|----------|---------|
 | `operationType` | yes | Operation-type identifier, matched by **exact string equality** (no casing constraint is enforced). **Business** operations are conventionally PascalCase verb-noun (Contract #2 §2.1 — `CreateIdentity`, `ClaimIdentity`). **Platform control** operations use the reserved **`ctrl.<comp>.<verb>`** namespace (e.g. `ctrl.weaver.disable`, `ctrl.refractor.rebuild`, `ctrl.loom.pause`) — mirroring the `lattice.ctrl.<comp>.<verb>` control subject taxonomy and keeping control grants unmistakably distinct from business ops. |
 | `scope` | yes | One of `any`, `self`, `owned`, `specific`. See §6.7. (Platform control ops use `any` — blanket per-verb grants; platform-path `specific` is a deny-stub, §6.7, so per-target control scoping is deferred to when `specific` is implemented.) |
-| `lanes` | no | Optional array of lanes this grant authorizes (default `["default"]` when absent). The step-3 lane gate checks `env.Lane` against the **matched permission's** `lanes` on the platform path (falling back to the doc-level `lanes`, §6.3, for entries without their own) — **landed**. A **privileged** lane (`meta`/`urgent`/`system`) in a package-projected (`cap.roles`) grant is honored **only if** `{operationType, lane}` is on the core privileged-lane allowlist (a Processor constant); otherwise it is stripped to `default` and a `PrivilegedLaneGrantRejected` Health issue is raised — **the allowlist + strip is Fire 2 of scoped-privileged-lane-grants-design.md, not yet built** (see §6.1's sequencing note); no package sets a privileged `lanes` value today. The **anchor** doc's lanes are unaffected (root keeps all four). |
+| `lanes` | no | Optional array of lanes this grant authorizes (default `["default"]` when absent). The step-3 lane gate checks `env.Lane` against the **matched permission's** `lanes` on the platform path (falling back to the doc-level `lanes`, §6.3, for entries without their own) — **landed**. A **privileged** lane (`meta`/`urgent`/`system`) in a package-projected (`cap.roles`) grant is honored **only if** `{operationType, lane}` is on the core privileged-lane allowlist (a Processor constant); otherwise it is stripped to `default` and a `PrivilegedLaneGrantRejected` Health issue is raised (§6.1). The **anchor** doc's lanes are unaffected (root keeps all four). |
 
 Processor dispatch (when `authContext.service` is null AND `authContext.task` is null):
 1. Scan `platformPermissions[]` for matching `operationType`
@@ -315,23 +297,12 @@ unchanged**; what changes is its *container, key, producer, and source paths*:
 - **Link-sourced** (Contract #10 §10.1 — task relationships are links, not fields): the lens walks
   `(identity)<-[:assignedTo]-(task)` (+ `reportsTo` 2-hop for manager delegation), then
   `operationType` ← `(task)-[:forOperation]->(op)`, `target` ← `(task)-[:scopedTo]->(t)`,
-  `expiresAt` ← `task.data.expiresAt`. *(Was: `task.data.grantedOperationType` / `task.data.targetKey`
-  fields — corrected anti-pattern.)*
-- **Bootstrap `capability` cypher drops its two `task` OPTIONAL MATCHes** and the `ephemeralGrants`
-  section of `cap.<actor>` (it goes empty / is removed there). §6.10 item 5 is satisfied by the new
-  lens instead.
-- **Step-3 (`step3_auth_capability.go`):** the `task`-dispatch branch (`matchEphemeralGrant`) reads
-  `cap.ephemeral.<actor>` (it needs only grants) — a **single GET, no fallback**. The **matching logic
-  is unchanged**. A task-path no-match denies with `AuthContextMismatch`; the denial builder
-  (`BuildDenialDetails`) returns early for that code and emits **no `actorRoles`**, so there is **no
-  `cap.<actor>` second read** on this path. (Earlier drafts claimed a roles-fallback-on-denial — that
-  was based on a false premise about the denial shape and is dropped.)
-- **Conformance:** the §6.6 contract-conformance test moves with the lens (now asserts the
-  `cap.ephemeral.<actor>` entry against the `orchestration-base` `capabilityEphemeral` cypher); the
-  bootstrap `capability` conformance test drops its `ephemeralGrants` expectations.
-
-Rationale + the broader god-cypher decomposition (auth-hooks consumer side, rbac/service projections):
-Contract #10 §10.1/§10.7 + lattice-architecture.md future-ADR open item.
+  `expiresAt` ← `task.data.expiresAt`.
+- The bootstrap `capability` cypher carries no `task` MATCHes and no `ephemeralGrants` section;
+  §6.10 item 5 is satisfied by this lens.
+- **Step-3:** the task-dispatch branch reads `cap.ephemeral.<actor>` — a **single GET, no fallback**;
+  matching per the table above. A task-path no-match denies with `AuthContextMismatch` and emits **no
+  `actorRoles`** (the denial builder returns early for that code — no `cap.<actor>` second read).
 
 ### 6.7 Scope Enumeration
 
@@ -360,33 +331,26 @@ step-3 behavior change**. A non-auth consumer of a guarded bucket (e.g. `my-task
 
 ### 6.9 Recommended Business Link Names
 
-The Capability Lens cypher rule references business-graph link names to walk topology. The following names are **recommended conventions** shipped with the canonical reference implementation ("Hello Lattice", FR55). Operators may define their own link types and rewrite the cypher rule to match; the names below are not platform-reserved, only convention.
-
-| Link name | Used between | Semantics |
-|-----------|--------------|-----------|
-| `containedIn` | Location vertices (unit → building, room → unit, building → property) | Physical or logical containment; transitive |
-| `availableAt` | Service vertex → location vertex | Service is offered at this location (and by default, at locations contained within) |
-| `unavailableAt` | Service vertex → location vertex | Explicit exclusion override; closer exclusion wins over distant availability |
-| `leases` | Identity → lease vertex | Actor holds a lease; lease references a unit via `containedIn` from the unit side |
-| `residesIn` | Identity → location vertex | Actor resides at this location (independent of lease — guests, family, etc.) |
-| `assignedTo` | Task vertex → identity vertex | Task is assigned to the actor; grants ephemeral capability per FR56 |
-| `reportsTo` | Identity → identity | Reporting chain for manager-delegated task auth per FR56 |
-
-These are recommendations only. The cypher rule (Story 3.x) is authored against whichever link conventions a deployment standardizes on.
+The capability cyphers walk business-graph link names. The recommended conventions (`containedIn` /
+`availableAt` / `unavailableAt` / `leases` / `residesIn` / `assignedTo` / `reportsTo`) ship with the
+reference implementation — `docs/hello-lattice.md`, appendix. They are conventions, not
+platform-reserved names: a cypher is authored against whichever link vocabulary a deployment
+standardizes on.
 
 ### 6.10 Cypher Rule — Required Behaviors (Epic 3 Acceptance Criteria)
 
 The Capability Lens cypher rule (the data of a `vtx.meta.<id>` with `class: "meta.lens"`) is built in Epic 3. Its required behaviors, captured here so Epic 3's acceptance criteria can reference this contract:
 
-1. **Multi-level containment exclusion.** An `unavailableAt` link at any level of an actor's containment chain wins over `availableAt` at a higher level. The rule must check the entire containment path between the actor's location and the exclusion's target, not just direct links. Test case: penthouse resident with building-level `availableAt: laundry` and penthouse-level `unavailableAt: laundry` → laundry NOT in `serviceAccess[]`.
-
-2. **Direct and transitive availability.** A service `availableAt` a location grants access to actors at that location AND at locations contained within it. The rule walks `containedIn` from the actor's location upward, collecting availability at each level. Test case: resident of any unit in a building can access `availableAt: building` services.
-
-3. **Operation-level overrides.** Individual operation vertices linked to a service may have their own `availableAt`/`unavailableAt` links that override service-level resolution. The rule applies operation-level filtering AFTER service-level resolution; `serviceAccess[].allowedOperations[]` reflects the result.
-
-4. **Role specialization.** Permissions derived from `vtx.role.*` linked to the identity contribute to `platformPermissions[]` independent of location-scoped service access. An actor may have both location-derived service access AND role-derived platform permissions; both must appear in their projection.
-
-5. **Task-derived ephemeral grants (FR56).** Tasks `assignedTo` the actor produce `ephemeralGrants[]` entries with `expiresAt` populated from the task's `dueAt` or expiry aspect. Manager delegation: tasks assigned to direct reports (via `reportsTo`) produce ephemeral grants for the manager. Two-hop traversal limit at Phase 1; deeper delegation chains are Phase 2+. **Phase 2 (a1):** this behavior moves to the `orchestration-base` `capabilityEphemeral` lens (key `cap.ephemeral.<actor>`); the bootstrap `capability` cypher no longer produces ephemeral grants. See §6.6 amendment.
+1. **Multi-level containment exclusion.** An `unavailableAt` at any level of the actor's containment
+   chain wins over `availableAt` at a higher level — a whole-path check, never direct links only.
+2. **Direct and transitive availability.** `availableAt` a location grants access at that location and
+   at every location contained within it.
+3. **Operation-level overrides.** An operation vertex's own `availableAt`/`unavailableAt` links filter
+   AFTER service-level resolution; `serviceAccess[].allowedOperations[]` reflects the result.
+4. **Role specialization.** Role-derived `platformPermissions[]` and location-derived `serviceAccess[]`
+   are independent; an actor holding both shows both.
+5. **Task-derived ephemeral grants (FR56)** — produced by the `orchestration-base` `capabilityEphemeral`
+   lens (§6.6 amendment), including `reportsTo` manager delegation (two-hop limit).
 
 6. **Adversarial test coverage (Phase 1 Gate 3).** The Capability Lens 4 attack vectors must be tested and rejected:
    - Direct manipulation of `vtx.role.*` to grant unauthorized permissions
@@ -396,11 +360,9 @@ The Capability Lens cypher rule (the data of a `vtx.meta.<id>` with `class: "met
 
 ### 6.11 Service Availability Windows — Deferred
 
-Service vertices may eventually carry temporal availability aspects — e.g., `availableFrom`/`availableUntil` aspects, recurring schedules ("laundry 6am–10pm"), holiday closures, maintenance windows. **These are explicitly OUT of Capability KV scope.**
-
-The cypher rule at Phase 1 evaluates service availability based purely on static graph topology (the existence of `availableAt` / `unavailableAt` links at projection time). If a service is temporally closed but the graph topology still says it's available, the projection will say it's available; rejection on temporal grounds is the responsibility of the operation itself (Starlark business logic) or a Phase 2 mechanism.
-
-The shape and Lattice integration of service availability windows requires a **separate architecture session**. This is tracked as a Phase 2 design open item — not a Phase 1 gap.
+Temporal availability (windows, recurring schedules, closures) is **out of Capability KV scope**: the
+cypher evaluates static graph topology only, and rejection on temporal grounds belongs to the
+operation's own logic or a future mechanism ratified in its own session.
 
 ### 6.12 FR22 Denial Response — Worked Example
 
@@ -421,43 +383,20 @@ When the penthouse resident attempts `BookLaundryService` targeting `vtx.service
 }
 ```
 
-The denial response is structural (per Journey 5's design): it names what was denied, with the rich
-class (`deniedService` from `authContext.service`; `deniedServiceClass` from a single denial-time read
-of the service vertex's `.class` aspect, per §6.5). It does **not** enumerate what IS available —
-"which services can this actor use" is the application's read-model question (architecture P5: apps
-read lens projections), already answered by the actor's residence projection; the denial payload does
-not duplicate a query surface.
+The denial is structural: it names what was denied (`deniedService` from `authContext.service`;
+`deniedServiceClass` from a single denial-time read of the service vertex's `.class` aspect, §6.5); it
+does **not** enumerate what IS available — that is the application's read-model question (P5).
 
-**`actorRoles` on a service denial.** A service-op denial does **not** surface `actorRoles`. The service auth path reads the disjoint `cap.svc.<actor>` key projected by the `service-location` package's `capabilityServiceAccess` lens (the residence-based grant scheme), and that document carries `serviceAccess[]` only — no `roles`. Under the residence scheme this is the more faithful denial: a service denial is explained by residence (the `deniedService` / `deniedServiceClass` fields), not by the actor's roles, which never participate in the service grant. The `actorRoles` field remains populated on **role-derived** (platform-path) denials, where the role projection is what was evaluated.
+**`actorRoles` on a service denial.** A service-op denial does **not** surface `actorRoles` — the
+service path reads `cap.svc.<actor>`, which carries `serviceAccess[]` only; roles never participate in
+the service grant. `actorRoles` remains populated on **role-derived** (platform-path) denials, where
+the role projection is what was evaluated.
 
-### 6.13 Implementation Notes
+### 6.13 Actor-aggregate projection (the Output descriptor)
 
-**For the AI agent implementing Story 3.x (Capability Lens cypher rule):**
-
-- The Lens definition is a `vtx.meta.<id>` with `class: "meta.lens"`. Its aspects include `canonicalName: "capability"`, `targetBucket: "capability-kv"`, `cypherRule: "..."`, and the schema for the output document.
-- The cypher rule produces one output document per identity, keyed by `cap.<actor-vertex-suffix>`.
-- The rule must handle the six behaviors enumerated in §6.10.
-- Output documents must follow the shape in §6.2 exactly — Processor's parser is strict about field names and types.
-
-**For the AI agent implementing Story 1.4 (Processor — Consume, Dedup, Auth Stub):**
-
-Phase 1 stub implementation:
-- Step 3 reads `cap.<actor-vertex-suffix>` from Capability KV
-- If missing → `AuthDenied`
-- If present: dispatch per Contract #2 §2.8 logic (task → service → platform path selection)
-- The stub may always-allow if the deployment is configured with `LATTICE_AUTH_STUB=allow-all` for early development — but production deployments enforce strictly. The bypass test suite (Story 1.11) must run with the real Capability Lens, not the stub.
-
-**For the bypass test suite (Stories 1.11 and 3.x):**
-
-The Capability Lens 4 attack vectors (Phase 1 Gate 3) test against the real Lens output, not the stub. Test data: a graph that exercises each attack vector listed in §6.10 item 6.
-
-**For the AI agent implementing Story 12.3/12.4 (declarative actor-aggregate projection):**
-
-A per-actor aggregating lens is driven by **declarative aspects**, not core Go keyed on the lens
-canonical name (the per-`CanonicalName` `switch` in `cmd/refractor/main.go` and the bespoke
-`internal/refractor/capabilityenv/` wrappers are **deleted** in Story 12.4). A `meta.lens` definition
-opts in with a new aspect **`projectionKind: "actorAggregate"`**; Refractor then compiles a
-`ProjectionPlan{Execution, Output}` (plus an `AuthPlane` classification flag):
+A per-actor aggregating lens is driven by **declarative aspects**, never core Go keyed on the lens
+canonical name. A `meta.lens` definition opts in with the aspect **`projectionKind: "actorAggregate"`**;
+Refractor compiles a `ProjectionPlan{Execution, Output}` (plus an `AuthPlane` classification flag):
 
 - **Execution** — evaluate the lens for a bound `$actorKey` (the existing per-actor eval).
 - **Fan-out** — on a changed vertex / link / aspect the affected anchors are enumerated by the **broad
@@ -496,50 +435,28 @@ The Story 12.4 acceptance gate: installing a **brand-new** actor-aggregate packa
 `InstallPackage` projects + invalidates correctly with **zero** edits under `cmd/` or
 `internal/refractor/capabilityenv/`.
 
-#### Phase 2 amendment — scalar passthrough body columns (CAR E6, ratified 2026-06-18, Andrew)
+#### Amendment — scalar passthrough body columns (ratified 2026-06-18)
 
-The `bodyColumns` above were originally **roster** columns: each is a `collect(DISTINCT {...})` **list**,
-and `realnessFilter` drops the degenerate null-collect artifact an OPTIONAL-match cypher leaves for an
-actor with no real rows. A §10.2 **convergence** lens (External I/O Bridge) instead projects **scalar**
-columns — `violating` (bool), each `missing_<gap>` (bool), and the `row.<col>` param columns the §10.8
-playbook templates (`entityKey`, `applicant` — strings) — which Weaver reads as scalars (`boolColumn`
-requires a Go `bool`; param columns resolve as strings).
+A body column's handling is decided by the **shape of its RETURN value at projection time** (no
+descriptor field — opt-in by value shape):
 
-An actorAggregate Output descriptor's body columns **MAY therefore be scalar passthroughs**, detected by
-the **shape of the RETURN value at projection time** (no new descriptor field — opt-in by value shape):
+- A **list** (`[]`) value is **realness-filtered** (the roster behavior) — degenerate null-collect
+  entries are dropped.
+- A **scalar** (bool / string / number / `nil`) value projects **verbatim**, bypassing the realness
+  filter. A `nil` scalar projects as a genuine **null** (present field, null value) — **never** coerced
+  to `[]`.
 
-- A body column whose RETURN value is a **list** (`[]`) is **realness-filtered** (the roster behavior,
-  unchanged) — degenerate null-collect entries are dropped.
-- A body column whose RETURN value is a **scalar** (bool / string / number / `nil`) projects **verbatim**:
-  the raw value as-is, bypassing the realness filter. A `nil` scalar projects as a genuine **null**
-  (present field, null value), so a downstream bool reads `false` and a string param reads absent —
-  **never** coerced to `[]`. (Before this amendment every body column ran through the list filter, so a
-  scalar projected as `[]` and Weaver's `boolColumn` could not read it.)
-
-This is what lets a §10.2 convergence lens project the scalar `violating` / `missing_*` / param columns
-Weaver reads end-to-end — together with the §10.2 Option (b) `keyColumn` (bare-NanoID row key), it makes a
-convergence lens projectable through Refractor's actorAggregate path.
-
-The change is **additive and opt-in by value shape**: existing roster lenses (`my-tasks`,
-`capabilityEphemeral`, the bootstrap `capability`) declare list body columns and are **unaffected**
-(byte-for-byte identical projections + delete-when-empty). The empty-actor delete paths are distinct per
-cause: an anchor that is **tombstoned** retracts via the actor-disappearance delete at
-`BuildKey(actorKey)`; a **live** anchor whose required MATCH stops yielding a row retracts via the
-doc-mode zero-row retraction (a clean zero-row evaluation of an `emptyBehavior: delete`/`softDelete`
-lens tombstones its positively-confirmed-live key); a lens that designates a **scalar** `realnessFilter`
-column (e.g. `entityKey` non-null = anchor alive) still drives the `emptyBehavior` retract when that scalar
-is absent. Landed in Refractor's Epic-12 Output-descriptor machinery
-(`internal/refractor/projection/driver.go` `EnvelopeFn`); no frozen-contract widening.
+This is what lets a §10.2 convergence lens project scalar `violating` / `missing_*` / param columns
+end-to-end (with §10.2's Option (b) bare-NanoID `keyColumn`). Roster lenses declare list body columns
+and are unaffected. The empty-anchor retract paths are distinct per cause: a **tombstoned** anchor
+retracts via the actor-disappearance delete; a **live** anchor whose required MATCH stops yielding a
+row retracts via the doc-mode zero-row retraction; a lens designating a **scalar** `realnessFilter`
+column still drives the `emptyBehavior` retract when that scalar is absent.
 
 ### 6.14 Read-path authorization (D1) — `cap-read.*` + authz-anchor
 
 > **Status: ✅ Andrew-ratified (2026-06-27).** Read-path mirror of the write-path Capability KV.
-> Design: `_bmad-output/implementation-artifacts/read-path-authorization-d1-design.md`
-> (`lattice-architecture.md` D1; Contract #10 §10.2; brainstorming #38/#61/#118). **Forks resolved by
-> Andrew:** **(1) enforcement = Postgres-RLS (Path A) is *the* boundary for protected data**; the NATS-KV
-> read-gateway filter (Path B) is **transitional scaffold only** — once RLS ships, a `protected: true` read
-> model served from NATS-KV is a **lint-failable** state (see "Enforcement" below). **(2)** the minimal
-> JWT read-actor auth seam ships as **D1 increment 1**; the full internet-facing Gateway is deferred to ops.
+> Design: `_bmad-output/implementation-artifacts/read-path-authorization-d1-design.md`.
 
 Contract #6 above is the **write-path** authorization surface (the Processor reads it at commit step 3).
 **Reads** have no such boundary — a lens target can be read directly, bypassing the Capability boundary
@@ -575,11 +492,6 @@ tombstones-first, in the same pass — a row-set shrink has no automatic overwri
 failures retry as actor re-evaluations, never raw-write replays** (a replayed `Create` at an absent key
 carries no watermark to lose against and would resurrect a revoked grant).
 
-> **Migration complete (2026-07-28):** the legacy per-actor *document* shape (dual-read, actor-by-actor
-> tombstone of legacy parent docs, then a one-shot purge — cap-read-per-anchor-grant-keys-design.md §6,
-> Fires 1-3) has fully drained; the per-anchor shape below is the only live wire format. `IsReadable`
-> no longer reads the legacy shape.
-
 **Per-anchor NATS-KV entry shape (`cap-read[.<source>].<actorSuffix>.<anchorId>`).** Each producer projects
 one entry per anchor it grants; the actor's effective readable set is the union of live (non-tombstoned)
 entries across every slice — membership is a key lookup, never a roster scan.
@@ -601,21 +513,15 @@ entries across every slice — membership is a key lookup, never a roster scan.
 | `anchorType` / `via` | yes | Audit-only metadata (vertex type; justifying link path — the read analog of §6.5 `resolvedVia`). Never part of the membership match. |
 | `key`/`actor`/`version`/`projectedAt`/`projectionSeq` | yes | As §6.3 (read-path mirror; `projectionSeq` is the per-key §6.2 guard token; `projectedFromRevisions` is not carried on per-anchor entries — it was aggregate provenance). |
 
-> **Representation note (`anchorId`) — the anchor is an opaque match token = the bare NanoID (Andrew,
-> 2026-06-29).** An RLS anchor is an **opaque membership token**, *not* a dereferenceable address: enforcement
-> only asks "is this row's anchor ∈ the actor's granted anchors?" — it never reads the vertex, never branches
-> on type. So `anchorId` is the resource's **bare NanoID** (`Lk2Pn6mQrtwzKbcXvP3T`), which is **globally
-> unique by construction** and therefore a sufficient token; **`anchor_type` plays no role in the match.**
-> (Contrast §6.5 `serviceAccess.service`/`resolvedVia`, which carry the **full vertex key** `vtx.<type>.<id>`
-> *because there it is a write-path **read-hint address** the Processor dereferences/hydrates by* — a
-> genuinely different use; the two are not the same kind of thing and must not be conflated.) The bare NanoID
-> is produced by **`nanoIdFromKey(<vertexKey>)`** — a targeted, fail-closed cypher function added to the
-> auth-plane engine to strip the `vtx.<type>.` prefix (the engine had no string function, which is why **D1.1
-> shipped the full key as a pre-function interim** — its lens is revised to `nanoIdFromKey` once the function
-> lands; see the Lattice-lane prerequisite). **The membership join matches NanoID-to-NanoID** — both
-> `actor_read_grants.anchor_id` and the read-model row's `authzAnchors` carry bare NanoIDs; the policy compares
-> them directly with **no `anchor_type` concatenation**. `anchorType` is retained on the NATS-KV
-> `readableAnchors` doc as **audit-only metadata** (which vertex type a grant is for) — never in the match.
+**Join semantics (normative) — the anchor is an opaque match token, the bare NanoID (Andrew,
+2026-06-29).** Enforcement asks only "is this row's anchor ∈ the actor's granted anchors?" — it never
+dereferences the vertex and never branches on type. `anchorId` is the resource's **bare NanoID**
+(globally unique by construction), produced by **`nanoIdFromKey(<vertexKey>)`**, a fail-closed cypher
+function. **The membership join matches NanoID-to-NanoID** — `actor_read_grants.anchor_id` and the
+row's `authzAnchors` both carry bare NanoIDs, compared directly with **no `anchor_type`
+concatenation**; `anchorType` is audit-only metadata, never part of the match. (Contrast §6.5's
+`service`/`resolvedVia`, which carry full vertex keys because they are write-path read-hint addresses
+the Processor dereferences — a different use; never conflate the two.)
 
 **The merge point — the Postgres `actor_read_grants` table (Path A).** Every read-grant lens **also**
 projects to a shared table whose primary key carries the **contributing lens** so producers stay disjoint:
@@ -655,71 +561,45 @@ intent for an un-declared target — which is exactly why the default is *protec
 Contract #10 §10.2's "carries the D1 authz anchor **there** [the Postgres read-path]" to **any** protected
 target.
 
-**Enforcement (Andrew-ratified Fork 1 — Path A is the boundary; Path B is transitional only).** The read
-boundary authenticates the reader (D1 increment 1: a signed JWT keyed to the Identity vertex → verified
-`actor_id`; checked against the token-revocation KV — brainstorm #118/#111), then:
-- **Protected data → Postgres-RLS (the enforcement boundary).** The business read model lives in a Postgres
-  table with an `authz_anchors` column (a set — e.g. `text[]`) + a **set-membership** RLS policy:
-  `USING (EXISTS (SELECT 1 FROM unnest(authz_anchors) a WHERE a IN (SELECT anchor_id FROM
-  actor_read_grants WHERE actor_id = current_setting('lattice.actor_id', true) AND NOT is_deleted)))` (a row is
-  visible if **any** of its anchors — bare NanoIDs — is granted by a **live** grant). The boundary sets
-  `SET LOCAL lattice.actor_id` per session; enforcement is
-  DB-native and **unbypassable by app code**. **Every protected table carries `ENABLE ROW LEVEL
-  SECURITY` AND `FORCE ROW LEVEL SECURITY`**, so a table whose policy was never generated **denies all rows**
-  (a fail-closed outage, never a silent leak). The table is **provisioned out-of-band** (a migration), like
-  every other Postgres lens target — Refractor issues **no DDL**. Instead Refractor **verifies the security
-  posture at lens activation** — `FORCE ROW LEVEL SECURITY` is enabled, the required columns
-  (`authz_anchors text[]`, `projection_seq bigint`, `is_deleted boolean`, `deleted_at timestamptz`, key +
-  body) exist, and a `FOR SELECT` policy is present — and if any is absent it **pauses the lens fail-closed**
-  (`PauseInfra` → never projects a protected row into an unverified table; raises `CapabilityLensPaused`),
-  **auto-resuming** once a re-probe confirms the posture (no Refractor restart). The check re-runs on the
-  periodic heartbeat, so a post-activation `FORCE ROW LEVEL SECURITY` removal re-pauses. The
-  **security-load-bearing assertion is `FORCE ROW LEVEL SECURITY = on`**: with it enabled, *any*
-  policy/column mistake fails closed (the table over-denies — a visible outage), so an out-of-band
-  provisioning error can never over-share. This is the destination for **all** protected read models. The
-  generated `USING` clause denies a tombstoned row (`NOT is_deleted`) to every reader before evaluating
-  anchor membership at all (see the seq-guarded protected Delete below).
-- **`actor_read_grants` is `projectionSeq`-guarded (the read-auth source of truth).** Unlike an ordinary
-  (non-protected) business read-model table (which may be last-writer-wins — the Postgres adapter is
-  guard-exempt there), the grant table inherits the §6.2/§6.8 **monotonic-seq guarantee**: an upsert/delete
-  applies only when its incoming `projectionSeq` exceeds the stored one (per `(actor_id, anchor_id,
-  grant_source)`), so a stale CDC replay **cannot resurrect a revoked grant**. Each lens's projection
-  upserts/tombstones **only its own `grant_source` rows** (so revoking one source never wipes another's
-  coexisting grant), and a package uninstall retracts its `grant_source` rows via the standard lens-eviction.
-- **A protected business table's own Delete is seq-guarded the same way.** A protected table also carries
-  `projection_seq` (guarded on Upsert, mirroring the grant table above); its Delete is likewise **always** a
-  seq-guarded soft tombstone (`is_deleted = true, deleted_at = NOW(), projection_seq` bumped to the incoming
-  value, conditioned on the incoming value exceeding the stored one) — never a hard `DELETE` — regardless of
-  the lens's declared `deleteMode`. Retaining the row and its watermark (rather than discarding both via a
-  hard delete) means a later stale CDC replay's `INSERT … ON CONFLICT` guard still has a row to compare
-  against; a hard delete would leave no row, so the guard could never fire and the stale replay would
-  resurrect the row unconditionally. A fresh Upsert at a higher seq revives a tombstoned row
-  (`is_deleted ← false`), mirroring `UpsertGrant`.
-- **The wildcard anchor (D1 design M5) — an all-access grant.** A grant row `(actor_id, '*', grant_source)`
-  — the reserved anchor `'*'`, never a real resource NanoID (the platform's NanoID alphabet excludes it) —
-  makes `actor_id` able to read every row of every protected table, regardless of that row's `authz_anchors`.
-  The generated policy checks this first: `EXISTS (SELECT 1 FROM actor_read_grants WHERE actor_id =
-  current_setting('lattice.actor_id', true) AND anchor_id = '*' AND NOT is_deleted) OR EXISTS (SELECT 1 FROM
-  unnest(authz_anchors) a WHERE a IN (SELECT anchor_id FROM actor_read_grants WHERE actor_id =
-  current_setting('lattice.actor_id', true) AND NOT is_deleted))`. It is still a §6.14 set-membership lookup
-  against `actor_read_grants` (seq-guarded, revocable, traceable to a grant row) — never an RLS bypass; an
-  all-access read stays attributable exactly like any other read.
-- **NATS-KV read-gateway filter (Path B) — transitional scaffold only.** During a migration a boundary MAY
-  GET the `cap-read.*.<actor>` slices, union them, and filter NATS-KV rows whose `authzAnchor` ∉ that union.
-  **This is not a sanctioned end-state:** once Postgres-RLS ships, **a `protected: true` read model served
-  from NATS-KV is a forbidden, lint-failable state** — the `protected: true` conventions-lint gate is
-  extended from "must project `authzAnchor`" to "must target Postgres (RLS-enforced)." Public/operational
-  read models stay on NATS-KV (they declare no `authzAnchor`).
+**Enforcement — Postgres RLS (Path A) is the boundary; Path B is transitional only.** The read boundary
+authenticates the reader (a signed JWT keyed to the Identity vertex → verified `actor_id`, checked
+against the token-revocation KV), then:
 
-**No entry = no read; no public-by-omission.** Absence of any `cap-read.*` grant for the actor — or a row
-none of whose `authzAnchors` is a granted anchor — denies the read, mirroring §6.8. There is **no
-anonymous/public-read fallback by omission**: a read model is public **only** by an explicit `public: true`
-declaration, **never** by forgetting an anchor. (The earlier "no `authzAnchor` ⇒ public-read" rule was
-default-open — a forgotten column silently world-published a protected model; the read path now denies on
-absence, exactly as the write path does.)
+- **Protected data → Postgres RLS.** The read model lives in a Postgres table with `authz_anchors
+  text[]` + the set-membership policy above; the boundary sets `SET LOCAL lattice.actor_id` per
+  session; enforcement is DB-native and **unbypassable by app code**. **Every protected table carries
+  `ENABLE` AND `FORCE ROW LEVEL SECURITY`** — with FORCE on, *any* policy/column mistake over-denies (a
+  visible fail-closed outage, never a silent leak). Tables are **provisioned out-of-band** (a
+  migration); Refractor issues no DDL. Instead it **verifies the posture at lens activation and on the
+  periodic heartbeat** — FORCE RLS enabled; the required columns (`authz_anchors text[]`,
+  `projection_seq bigint`, `is_deleted boolean`, `deleted_at timestamptz`, key + body); a `FOR SELECT`
+  policy present — and **pauses the lens fail-closed** on any absence (`PauseInfra` →
+  `CapabilityLensPaused`), auto-resuming on a passing re-probe. Mechanism detail:
+  `docs/components/refractor.md` (Protected read-model provisioning). The generated `USING` clause
+  denies a tombstoned row (`NOT is_deleted`) before evaluating membership.
+- **`actor_read_grants` is `projectionSeq`-guarded** (the read-auth source of truth): an upsert/delete
+  applies only when its incoming seq exceeds the stored one, per `(actor_id, anchor_id,
+  grant_source)`, so a stale CDC replay cannot resurrect a revoked grant. Each lens touches **only its
+  own `grant_source` rows**; a package uninstall retracts them via the standard lens-eviction.
+  (An ordinary non-protected business table may be last-writer-wins — the Postgres adapter is
+  guard-exempt there.)
+- **A protected table's own Delete is always a seq-guarded soft tombstone** (`is_deleted = true,
+  deleted_at = NOW()`, `projection_seq` bumped, conditioned on exceeding the stored seq) — **never a
+  hard `DELETE`**, regardless of the lens's declared `deleteMode`: a hard delete would discard the
+  watermark, leaving nothing for the guard to compare against, so a stale replay would resurrect the
+  row unconditionally. A fresh higher-seq Upsert revives a tombstoned row (`is_deleted ← false`).
+- **The wildcard anchor `'*'` — an all-access grant.** A grant row `(actor_id, '*', grant_source)` —
+  the reserved anchor `'*'`, never a real NanoID (the alphabet excludes it) — reads every row of every
+  protected table. The generated policy checks it first: `EXISTS (SELECT 1 FROM actor_read_grants
+  WHERE actor_id = current_setting('lattice.actor_id', true) AND anchor_id = '*' AND NOT is_deleted)
+  OR EXISTS (SELECT 1 FROM unnest(authz_anchors) a WHERE a IN (SELECT anchor_id FROM
+  actor_read_grants WHERE actor_id = current_setting('lattice.actor_id', true) AND NOT is_deleted))`.
+  Still a seq-guarded, revocable, attributable grant row — never an RLS bypass.
+- **NATS-KV read-gateway filter (Path B) — transitional scaffold only.** A migration boundary MAY
+  union the `cap-read.*.<actor>` slices and filter NATS-KV rows. Not a sanctioned end-state: a
+  `protected: true` read model served from NATS-KV is a **forbidden, lint-failable state** — the lint
+  gate requires it to target Postgres (RLS-enforced). Public/operational read models stay on NATS-KV.
 
-**Affected consumers:** Refractor (the core base `capabilityRead` lens + the Postgres `actor_read_grants`
-multi-target); each **package** (ships its own `cap-read.<domain>` read-grant lens — `rbac-domain`,
-`loftspace`, `clinic`, …); the read boundary (Postgres RLS; the transitional NATS-KV filter); every
-protected business read-model lens (must project `authzAnchor`, and — post-RLS — must target Postgres). No
-change to the write-path §6.2–§6.13.
+**No entry = no read; no public-by-omission.** Absence of any `cap-read.*` grant for the actor — or a
+row none of whose `authzAnchors` is a granted anchor — denies the read, mirroring §6.8. A read model is
+public **only** by an explicit `public: true` declaration, **never** by forgetting an anchor.
