@@ -2099,3 +2099,86 @@ there and fail on the branch, this increment has a regression the review did not
 every item in §19.1. A reason this fire's changes are *unlikely* to be the cause — `applySecureDecrypt`
 returns immediately when no decryptor is installed, and these are plain auth-plane lenses with no secure
 columns — is an argument for the hypothesis, not a substitute for running it.
+
+**Verdict (run 2026-08-08, quiet host, detached worktree at `de1000fd` vs the branch): NOT a regression —
+the sibling is a pre-existing flake at clean `main`.** `_E2E` passes on both. `_WithEphemeralConsumer_E2E`
+fails **2 of 4** runs at clean `main` and **2 of 3** on the branch: comparable rates, and a failure at
+`main` is by construction not caused by code `main` does not carry. The eight `packages/*` failures were
+contention, as suspected. What this did surface is a real intermittent at head — the ephemeral-consumer
+sibling is genuinely non-deterministic, filed to `lattice.md` for the Whetstone under the standing rule
+(tighten, never loosen). §19.1's blockers are therefore the whole remaining gate.
+
+## 20. Item 3b-ii — review-closure fire brief (build note, 2026-08-08)
+
+Compiled from §19, which is itself the scout report: every finding is already grounded at a `file:line` in
+the `fire/retention-class-3b-ii` worktree, so this brief re-verifies anchors and fixes the build order
+rather than re-deriving the findings. Line numbers below are at `2c6cad86` (the increment rebased onto
+`de1000fd`).
+
+### 20.1 Scope sentence
+
+Close every finding §19.1–§19.3 raised against item 3b-ii — three blockers, four majors, two minors — so the
+increment's erasure attestation cannot be true-by-vacuity, clobbered, or wedged, and then merge it. Nothing
+else: no new capability, no widening of what 3b-ii delivers.
+
+### 20.2 Verified touch-list
+
+| Finding | Anchor | Fix |
+|---|---|---|
+| B1 | `cmd/refractor/main.go:488-503` (launch), `:1267` (`src.Start`), `classkeyshredded/manager.go:222-288` | An explicit registry-readiness gate, supplied by `health.RegistryProbe`. |
+| B2 | `pipeline/pipeline.go:335` (`rebuildInFlight`), `:1489` (`abandonRebuild`), `:1530` (`RebuildAndWait`), `:1551` (`waitRebuildDrained`) | Per-rebuild completion channel, closed by that rebuild's own watcher. |
+| B3 | `pipeline/pipeline.go:1551`, `classkeyshredded/manager.go:231`, `substrate/consumer.go:139-148` | Bounded wait + an explicit `AckWait` on the durable. |
+| M1 | `health/reporter.go:110-125`, `:164-178`, `:206-220` | Carry the cumulative counters across every status transition. |
+| M2 | `packages/privacy-base/shred_retention_class_key.go:232-240`, `permissions.go:99-105`, `internal/processor/starlark_runner.go:661` (`op.actor`), `:626` (`.class`) | Pin the finalization actor to the privacy service actor, in-script. |
+| M3 | `classkeyshredded/manager.go:250-261`, `:287` | `ctx.Err()` → Nak before the "real failure" arm. |
+| M4 | `cmd/refractor/main.go:717-733`, `health/lattice_heartbeater.go:1260-1281` | Read the redaction count before the observation that can fail. |
+| Minors | `classkeyshredded/manager.go:275`/`:283`; `pipeline/evaluate.go:94-104` | Log what was actually done; count only nulls that were actually written. |
+
+### 20.3 Precedents to mirror
+
+- **Readiness, not a target count** — `cmd/refractor/main.go:390-398`'s static floor for the identity half.
+  A retention-class floor cannot exist (no lens is forced to bind a class), so the same intent is served by
+  an explicit signal instead: `health.RegistryProbe` already computes declared-vs-registered, which is the
+  exact question, and a nil signal reads as NOT ready so the boot window is fail-closed by construction.
+- **Per-rebuild signal** — `watchRebuildCompletion`'s existing `defer` ownership: the goroutine that watches
+  a rebuild is the thing that ends it. The channel just makes that ownership addressable.
+- **Actor-class check** — `state[key].class` is the same projection `kv.Read` returns
+  (`starlark_runner.go:618-637`), so the guard reads like every other in-script envelope check.
+
+### 20.4 Increment order + green checks
+
+1. `substrate` `AckWait` + `pipeline` per-rebuild signal + bounded `RebuildAndWait` (B2, B3) →
+   `go test ./internal/substrate/ ./internal/refractor/pipeline/`.
+2. `RegistryProbe.ReconcileNow` + the readiness gate + `ctx.Err()` arm + the log fix (B1, M3, minor 1) →
+   `go test ./internal/refractor/health/ ./internal/refractor/classkeyshredded/ ./internal/refractor/control/`.
+3. Counter carry-forward + read-before-observe + count-only-what-lands (M1, M4, minor 2) →
+   `go test ./internal/refractor/health/ ./internal/refractor/pipeline/ ./cmd/refractor/`.
+4. Actor pin (M2) + `privacy-base` version bump → `go test ./packages/privacy-base/ ./internal/privacyworker/`.
+5. Full gates + a quiet `go test ./... -p 4` judged against the §19.5 baseline.
+
+### 20.5 In-scope gotchas
+
+- The bound in B3 must apply to the **wait**, never to the rebuild: passing a deadline-bearing context into
+  `Rebuild` would also kill `watchRebuildCompletion`, latching `rebuilding` and suppressing the sweep — the
+  precise failure `abandonRebuild`'s doc comment was written about.
+- M2's guard needs the actor key in `contextHint.reads` at **every** submitter of the verb, or the op
+  fails closed on a legitimate submit. Both submitters are ours; a missed one is a live outage, not a test
+  failure, so change them in the same commit as the script.
+- The actor pin narrows "any operator" to "the privacy service actor". It does **not** close ops-lane actor
+  impersonation, which is a platform-wide seam and not this fire's; say so in the comment rather than
+  restating a guarantee the code does not give — that overclaim is what M2 was.
+
+### 20.6 Adjacent finds (filed now)
+
+- `TestRefractor_CapabilityLens_RealClaimIdentityOp_WithEphemeralConsumer_E2E` is a genuine intermittent at
+  clean `main` (2/4 failures, §19.5) — filed to `lattice.md` for the Whetstone.
+- `RecordShredFinalization` (the identity-plane verb) carries M2's exposure identically. It lives in the
+  same package and takes the same three-line guard, so it is fixed here rather than filed — leaving one of
+  two sibling verbs pinned would be an asymmetry the next reader has to rediscover.
+- `EvalDriftRetries` / `EvalDriftRequeues` are zeroed by the same status transitions as `SecureRedactions`
+  (M1). Same field list, same one-line fix, so they are carried forward here too.
+
+### 20.7 Non-goals
+
+Read-path auth, the ops-lane impersonation seam, Fire 2's consumers (the clinic PHI aspect), and any change
+to what 3b-ii projects. No test is loosened to accommodate the §19.5 flake.
