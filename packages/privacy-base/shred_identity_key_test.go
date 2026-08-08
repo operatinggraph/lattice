@@ -31,7 +31,10 @@ const (
 
 // staffCapDoc grants CreateUnclaimedIdentity/RecordIdentityPII (default lane)
 // and ShredIdentityKey (urgent lane, per design §2.2's "ops.urgent.>" —
-// Contract #2 names urgent for emergency revocations).
+// Contract #2 names urgent for emergency revocations), plus the
+// retention-class destruction verbs the sibling suite drives. The grant is a
+// TEST posture only: privacy-base ships no ShredRetentionClassKey grant for
+// the reason permissions.go records.
 func staffCapDoc() *processor.CapabilityDoc {
 	now := time.Now().UTC()
 	return &processor.CapabilityDoc{
@@ -45,6 +48,8 @@ func staffCapDoc() *processor.CapabilityDoc {
 			{OperationType: "CreateUnclaimedIdentity", Scope: "any"},
 			{OperationType: "RecordIdentityPII", Scope: "any"},
 			{OperationType: "ShredIdentityKey", Scope: "any"},
+			{OperationType: "ShredRetentionClassKey", Scope: "any"},
+			{OperationType: "RecordRetentionClassShredFinalization", Scope: "any"},
 		},
 		ServiceAccess:   []processor.ServiceAccessEntry{},
 		EphemeralGrants: []processor.EphemeralGrant{},

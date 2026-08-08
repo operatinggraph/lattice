@@ -1,10 +1,15 @@
 name: privacy-base
-version: 0.11.0
+version: 0.12.0
 description: |
-  Per-identity PII key-custody envelope (piiKey) backing crypto-shred
-  (vault-crypto-shredding-design.md §2.1/§2.2). ShredIdentityKey marks the
-  envelope shredded=true and emits privacy.keyShredded, consumed by the
-  privacy-worker's async Vault.ShredKey destruction. SealIdentityForErasure
+  The key-custody envelope (piiKey) backing crypto-shred
+  (vault-crypto-shredding-design.md §2.1/§2.2), for both holder kinds.
+  ShredIdentityKey marks a person's envelope shredded=true and emits
+  privacy.keyShredded; ShredRetentionClassKey does the same for a retention
+  class's envelope and emits privacy.retentionClassKeyShredded
+  (retention-class-key-custody-design.md §4.3). Both are consumed by the
+  privacy-worker's async Vault.ShredKey destruction, on their own durables. The
+  two verbs are the erasure boundary itself: a record custodied on a class
+  survives its subject's erasure and dies on the class's own expiry. SealIdentityForErasure
   writes the erasureRequested marker that closes an erased person's write path
   (erasure-orchestration-design.md §6), which is what makes a residue count
   provable rather than point-in-time. SealIdentityForErasureComplete then walks
@@ -28,6 +33,10 @@ declares:
       class: meta.ddl.vertexType
     - canonicalName: privacy.keyShredded
       class: meta.ddl.eventType
+    - canonicalName: shredRetentionClassKey
+      class: meta.ddl.vertexType
+    - canonicalName: privacy.retentionClassKeyShredded
+      class: meta.ddl.eventType
     - canonicalName: erasureRequested
       class: meta.ddl.aspectType
     - canonicalName: sealIdentityForErasure
@@ -49,6 +58,10 @@ declares:
       adapter: nats-kv
       bucket: privacy-shreds
       engine: full
+    - canonicalName: retentionKeyStatus
+      adapter: nats-kv
+      bucket: privacy-retention-keys
+      engine: full
     - canonicalName: piiKeyEnvelope
       adapter: nats-kv
       bucket: privacy-pii-key-envelopes
@@ -65,6 +78,9 @@ declares:
       subjectType: identity
   permissions:
     - operationType: RecordShredFinalization
+      scope: any
+      grantsTo: [operator]
+    - operationType: RecordRetentionClassShredFinalization
       scope: any
       grantsTo: [operator]
     - operationType: SealIdentityForErasure

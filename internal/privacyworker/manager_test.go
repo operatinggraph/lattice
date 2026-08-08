@@ -314,3 +314,201 @@ func TestManager_RecordsFinalizationAfterShred(t *testing.T) {
 		t.Errorf("requestId %q is not a Contract #1 NanoID", env.RequestID)
 	}
 }
+
+func publishRetentionClassKeyShredded(t *testing.T, ctx context.Context, conn *substrate.Conn, body string) {
+	t.Helper()
+	if err := conn.Publish(ctx, privacyworker.RetentionClassKeyShreddedFilterSubject, []byte(body), nil); err != nil {
+		t.Fatalf("publish %s: %v", privacyworker.RetentionClassKeyShreddedFilterSubject, err)
+	}
+}
+
+// TestManager_ShredsOnRetentionClassKeyShreddedEvent — the erase-on-expiry
+// happy path: a well-formed privacy.retentionClassKeyShredded event drives
+// exactly one Vault.ShredKey call for its retentionClassKey.
+func TestManager_ShredsOnRetentionClassKeyShreddedEvent(t *testing.T) {
+	conn, ctx := newTestConn(t)
+	fv := &fakeVault{}
+	runCtx, cancel := context.WithCancel(ctx)
+	t.Cleanup(cancel)
+	go func() {
+		_ = privacyworker.New(privacyworker.Config{
+			Conn: conn, EventsStream: "core-events", Durable: "pw-rc-happy", Vault: fv,
+		}).Run(runCtx)
+	}()
+
+	const holderKey = "vtx.retentionclass.RCwrkerHappyKMNPQRST"
+	publishRetentionClassKeyShredded(t, ctx, conn, `{"payload":{"retentionClassKey":"`+holderKey+`"}}`)
+
+	deadline := time.Now().Add(5 * time.Second)
+	for fv.shreddedCount(holderKey) == 0 {
+		if time.Now().After(deadline) {
+			t.Fatalf("Vault.ShredKey(%s) was not called within 5s", holderKey)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// TestManager_BothConsumersRunIndependently proves ONE Manager.Run serves both
+// holder kinds AND that it does so on two SEPARATE durables.
+//
+// The second half is the part worth asserting, and the reason the durable
+// names are checked rather than inferred: a single consumer on a widened
+// `events.privacy.>` filter with a subject-dispatching handler would satisfy
+// the "both kinds get shredded" assertion identically. What it would NOT give
+// is an independent cursor per kind — which is the whole reason the two exist,
+// since a retention-class destruction stuck on its Vault call would otherwise
+// park a person's right-to-erasure behind it.
+func TestManager_BothConsumersRunIndependently(t *testing.T) {
+	conn, ctx := newTestConn(t)
+	fv := &fakeVault{}
+	runCtx, cancel := context.WithCancel(ctx)
+	t.Cleanup(cancel)
+	go func() {
+		_ = privacyworker.New(privacyworker.Config{
+			Conn: conn, EventsStream: "core-events", Durable: "pw-both", Vault: fv,
+		}).Run(runCtx)
+	}()
+
+	const identityKey = "vtx.identity.BthKindsdentKMNPQRST"
+	const holderKey = "vtx.retentionclass.BthKindsCassKMNPQRST"
+	publishRetentionClassKeyShredded(t, ctx, conn, `{"payload":{"retentionClassKey":"`+holderKey+`"}}`)
+	publishKeyShredded(t, ctx, conn, `{"payload":{"identityKey":"`+identityKey+`"}}`)
+
+	deadline := time.Now().Add(5 * time.Second)
+	for fv.shreddedCount(identityKey) == 0 || fv.shreddedCount(holderKey) == 0 {
+		if time.Now().After(deadline) {
+			t.Fatalf("both kinds not shredded within 5s: identity=%d class=%d",
+				fv.shreddedCount(identityKey), fv.shreddedCount(holderKey))
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	// Two durables, not one widened filter — the cursor independence itself.
+	stream, err := conn.JetStream().Stream(ctx, "core-events")
+	if err != nil {
+		t.Fatalf("open core-events stream: %v", err)
+	}
+	want := map[string]bool{"pw-both": false, privacyworker.DefaultRetentionClassDurable: false}
+	for name := range stream.ConsumerNames(ctx).Name() {
+		if _, ok := want[name]; ok {
+			want[name] = true
+		}
+	}
+	for name, found := range want {
+		if !found {
+			t.Errorf("durable %q not created — the two kinds are not on independent cursors", name)
+		}
+	}
+}
+
+// TestManager_MissingRetentionClassKey_DoesNotJamTheConsumer — an event with no
+// subject has nothing to destroy, so it must not park the retention consumer:
+// a well-formed event published AFTER it is still processed.
+//
+// This asserts non-jamming, NOT the Term disposition specifically — a
+// NakWithDelay would also let the later message through, since JetStream's
+// AckExplicit does not block the cursor behind a nak'd message. The handler
+// does Term (nothing about a subject-less event improves on redelivery); what
+// is proven here is the property that would actually hurt if it broke.
+func TestManager_MissingRetentionClassKey_DoesNotJamTheConsumer(t *testing.T) {
+	conn, ctx := newTestConn(t)
+	fv := &fakeVault{}
+	runCtx, cancel := context.WithCancel(ctx)
+	t.Cleanup(cancel)
+	go func() {
+		_ = privacyworker.New(privacyworker.Config{
+			Conn: conn, EventsStream: "core-events", Durable: "pw-rc-missing", Vault: fv,
+		}).Run(runCtx)
+	}()
+
+	publishRetentionClassKeyShredded(t, ctx, conn, `{"payload":{}}`)
+
+	const holderKey = "vtx.retentionclass.RCafterMissingKMNPQR"
+	publishRetentionClassKeyShredded(t, ctx, conn, `{"payload":{"retentionClassKey":"`+holderKey+`"}}`)
+
+	deadline := time.Now().Add(5 * time.Second)
+	for fv.shreddedCount(holderKey) == 0 {
+		if time.Now().After(deadline) {
+			t.Fatalf("a subject-less event jammed the retention consumer: %s never shredded", holderKey)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// TestManager_RecordsRetentionClassFinalizationAfterShred — the class half's
+// publish-then-ack: a successful ShredKey is followed by exactly one
+// RecordRetentionClassShredFinalization{vaultKeyDestroyed} on ops.system,
+// naming its subject retentionClassKey (NOT identityKey — the two verbs carry
+// different subject vocabularies, and submitting the wrong one would be
+// rejected by the receiving script).
+func TestManager_RecordsRetentionClassFinalizationAfterShred(t *testing.T) {
+	conn, ctx := newTestConn(t)
+	opsCons := opsStreamFor(t, ctx, conn, "core-operations")
+	fv := &fakeVault{}
+	const actorKey = "vtx.identity.PrivacyActorKMNPQRST"
+	runCtx, cancel := context.WithCancel(ctx)
+	t.Cleanup(cancel)
+	go func() {
+		_ = privacyworker.New(privacyworker.Config{
+			Conn: conn, EventsStream: "core-events", Durable: "pw-rc-record", Vault: fv,
+			ActorKey: actorKey,
+		}).Run(runCtx)
+	}()
+
+	const holderKey = "vtx.retentionclass.RCrecrdFinaKMNPQRSTU"
+	publishRetentionClassKeyShredded(t, ctx, conn, `{"payload":{"retentionClassKey":"`+holderKey+`"}}`)
+
+	deadline := time.Now().Add(5 * time.Second)
+	for fv.shreddedCount(holderKey) == 0 {
+		if time.Now().After(deadline) {
+			t.Fatalf("Vault.ShredKey(%s) was not called within 5s", holderKey)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	msgs, err := opsCons.Fetch(1, jetstream.FetchMaxWait(4*time.Second))
+	if err != nil {
+		t.Fatalf("fetch from ops stream: %v", err)
+	}
+	var got jetstream.Msg
+	for m := range msgs.Messages() {
+		got = m
+		_ = m.Ack()
+	}
+	if got == nil {
+		t.Fatal("no RecordRetentionClassShredFinalization op published to ops.system")
+	}
+	var env struct {
+		RequestID     string `json:"requestId"`
+		Lane          string `json:"lane"`
+		OperationType string `json:"operationType"`
+		Actor         string `json:"actor"`
+		Payload       struct {
+			RetentionClassKey string `json:"retentionClassKey"`
+			IdentityKey       string `json:"identityKey"`
+			Step              string `json:"step"`
+		} `json:"payload"`
+		ContextHint struct {
+			Reads []string `json:"reads"`
+		} `json:"contextHint"`
+	}
+	if err := json.Unmarshal(got.Data(), &env); err != nil {
+		t.Fatalf("unmarshal op envelope: %v", err)
+	}
+	if env.OperationType != "RecordRetentionClassShredFinalization" || env.Lane != "system" || env.Actor != actorKey {
+		t.Errorf("envelope = %+v, want RecordRetentionClassShredFinalization/system/%s", env, actorKey)
+	}
+	if env.Payload.RetentionClassKey != holderKey || env.Payload.Step != privacyworker.StepVaultKeyDestroyed {
+		t.Errorf("payload = %+v, want {%s %s}", env.Payload, holderKey, privacyworker.StepVaultKeyDestroyed)
+	}
+	if env.Payload.IdentityKey != "" {
+		t.Errorf("the class verb must not carry an identityKey, got %q", env.Payload.IdentityKey)
+	}
+	if len(env.ContextHint.Reads) != 1 || env.ContextHint.Reads[0] != holderKey+".piiKey" {
+		t.Errorf("contextHint.reads = %v, want [%s.piiKey] — the OCC condition the racing sibling record needs",
+			env.ContextHint.Reads, holderKey)
+	}
+	if !substrate.IsValidNanoID(env.RequestID) {
+		t.Errorf("requestId %q is not a Contract #1 NanoID", env.RequestID)
+	}
+}

@@ -126,6 +126,16 @@ var corpusLabelVerdicts = map[string]labelVerdict{
 	"providerSites":                     {narrow, "building provider"},
 	"renewalComplete":                   {narrow, "identity leaseapp renewal service unit"},
 	"renewalsRead":                      {narrow, "identity leaseapp renewal unit"},
+	// retentionKeyStatus narrows to the holder type alone, and that single
+	// label is what makes the lens self-updating: a shred writes
+	// vtx.retentionclass.<H>.piiKey, which matches the one subject this
+	// narrowed filter subscribes, so a destruction reaches the operator view
+	// without waiting for an unrelated event. Same in-band property
+	// shredStatus has for identities — and precisely the property a SECURE
+	// lens anchored elsewhere cannot have, because a class holder is not a
+	// vertex such a lens binds (retention-class-key-custody-design.md §6.3,
+	// which is why the destruction THERE needs a driven rebuild).
+	"retentionKeyStatus":                {narrow, "retentionclass"},
 	"shredStatus":                       {narrow, "identity"},
 	"staffReadGrants":                   {narrow, "building identity role"},
 	"unroutedTasks":                     {narrow, "role task"},

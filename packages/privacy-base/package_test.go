@@ -21,13 +21,13 @@ import (
 // identityErasure pattern is pinned in depth by patterns_test.go; the count here
 // is what catches a second pattern arriving unannounced.
 func TestPackage_StructurePins(t *testing.T) {
-	if got, want := len(Package.DDLs), 11; got != want {
+	if got, want := len(Package.DDLs), 13; got != want {
 		t.Errorf("DDLs: got %d, want %d", got, want)
 	}
-	if got, want := len(Package.Lenses), 3; got != want {
+	if got, want := len(Package.Lenses), 4; got != want {
 		t.Errorf("Lenses: got %d, want %d", got, want)
 	}
-	if got, want := len(Package.Permissions), 4; got != want {
+	if got, want := len(Package.Permissions), 5; got != want {
 		t.Errorf("Permissions: got %d, want %d", got, want)
 	}
 	if got, want := len(Package.OpMetas), 0; got != want {
@@ -50,6 +50,8 @@ func TestPackage_StructurePins(t *testing.T) {
 		{"piiKey", "meta.ddl.aspectType"},
 		{"shredIdentityKey", "meta.ddl.vertexType"},
 		{"privacy.keyShredded", "meta.ddl.eventType"},
+		{"shredRetentionClassKey", "meta.ddl.vertexType"},
+		{"privacy.retentionClassKeyShredded", "meta.ddl.eventType"},
 		{"erasureRequested", "meta.ddl.aspectType"},
 		{"sealIdentityForErasure", "meta.ddl.vertexType"},
 		{"privacy.erasureRequested", "meta.ddl.eventType"},
@@ -74,6 +76,7 @@ func TestPackage_StructurePins(t *testing.T) {
 
 	wantLenses := []struct{ name, bucket string }{
 		{"shredStatus", ShredStatusBucket},
+		{"retentionKeyStatus", RetentionKeyStatusBucket},
 		{"piiKeyEnvelope", PiiKeyEnvelopeBucket},
 		{"identityErasureResidue", "weaver-targets"},
 	}
@@ -105,6 +108,7 @@ func TestPackage_StructurePins(t *testing.T) {
 
 	wantPerms := []struct{ op, scope string }{
 		{"RecordShredFinalization", "any"},
+		{"RecordRetentionClassShredFinalization", "any"},
 		{"SealIdentityForErasure", "any"},
 		{"PurgeIdentityDedupFootprint", "any"},
 		{"SealIdentityForErasureComplete", "any"},

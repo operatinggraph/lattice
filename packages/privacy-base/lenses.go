@@ -18,6 +18,19 @@ const ShredStatusBucket = "privacy-shreds"
 // Core-KV read (P5 inspector exception) cmd/loupe/objects_crypto.go uses.
 const PiiKeyEnvelopeBucket = "privacy-pii-key-envelopes"
 
+// RetentionKeyStatusBucket is the package-owned NATS-KV read model the
+// retentionKeyStatus lens projects into — the operator analog of
+// ShredStatusBucket for the other holder kind
+// (retention-class-key-custody-design.md §4.4).
+//
+// A NEW lens rather than a widening of piiKeyEnvelope: that lens's
+// `MATCH (i:identity)` has two live consumers — the bridge's egress unwrap
+// (internal/bridge/egress.go) and loftspace-app's blob path — whose row shape
+// must not change here. A separate bucket also keeps the two holder kinds'
+// operator surfaces independently readable, which is what an operator asking
+// "which retention classes have expired" actually wants.
+const RetentionKeyStatusBucket = "privacy-retention-keys"
+
 // ErasureCompleteTarget is the §10.8 TargetID, and therefore the
 // identityErasureResidue lens's weaver-targets row prefix — the §10.2↔§10.8
 // binding the Weaver resolves a target through (internal/weaver/registry.go's
@@ -68,6 +81,14 @@ func Lenses() []pkgmgr.LensSpec {
 			Bucket:        ShredStatusBucket,
 			Engine:        "full",
 			Spec:          shredStatusSpec,
+		},
+		{
+			CanonicalName: "retentionKeyStatus",
+			Class:         "meta.lens",
+			Adapter:       "nats-kv",
+			Bucket:        RetentionKeyStatusBucket,
+			Engine:        "full",
+			Spec:          retentionKeyStatusSpec,
 		},
 		{
 			CanonicalName: "piiKeyEnvelope",
@@ -122,6 +143,43 @@ RETURN
   i.piiKey.data.vaultKeyDestroyedAt AS vaultKeyDestroyedAt,
   i.piiKey.data.projectionsNullified AS projectionsNullified,
   i.piiKey.data.projectionsNullifiedAt AS projectionsNullifiedAt`
+
+// retentionKeyStatusSpec projects one row per retention-class key holder,
+// keyed by the holder vertex key — the operator analog of shredStatusSpec
+// (retention-class-key-custody-design.md §4.4).
+//
+// The anchor predicate is the `.retentionPolicy` aspect, not `shredded = true`
+// as shredStatus uses, and the difference is deliberate. A shred is an event
+// in an identity's life: before it, there is nothing an operator needs to
+// watch. A retention class is a standing DECLARATION with a policy and a
+// period, and the question an operator asks is "which of my classes are still
+// live, and which have expired" — a question no lens filtered to the shredded
+// ones can answer. So every installed holder projects, and the shred fields
+// are simply null until one happens. The presence guard also excludes a bare
+// vtx.retentionclass vertex that carries no declaration, which install never
+// mints (internal/pkgmgr/build.go writes the vertex and its policy aspect in
+// one batch) but a hand-seeded one might.
+//
+// All aspect reads are the null-safe node.<aspect>.data.<field> form, so a
+// not-yet-recorded finalization step projects null, distinguishing "in flight"
+// from the recorded true. projectionsRebuilt has no producer until item 3b of
+// the design ships the Refractor's destruction consumer; it projects null
+// until then, which is the honest rendering of "not yet attested".
+const retentionKeyStatusSpec = `MATCH (r:retentionclass)
+WHERE r.retentionPolicy.data.canonicalName <> null
+RETURN
+  r.key AS key,
+  r.key AS retentionClassKey,
+  r.retentionPolicy.data.canonicalName AS canonicalName,
+  r.retentionPolicy.data.policy AS policy,
+  r.retentionPolicy.data.retentionPeriod AS retentionPeriod,
+  r.retentionPolicy.data.description AS description,
+  r.piiKey.data.shredded AS shredded,
+  r.piiKey.data.shreddedAt AS shreddedAt,
+  r.piiKey.data.vaultKeyDestroyed AS vaultKeyDestroyed,
+  r.piiKey.data.vaultKeyDestroyedAt AS vaultKeyDestroyedAt,
+  r.piiKey.data.projectionsRebuilt AS projectionsRebuilt,
+  r.piiKey.data.projectionsRebuiltAt AS projectionsRebuiltAt`
 
 // piiKeyEnvelopeSpec projects one row per identity that has ever received a
 // piiKey envelope (real or the ShredIdentityKey empty-wrappedDEK placeholder

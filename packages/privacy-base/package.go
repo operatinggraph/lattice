@@ -1,7 +1,12 @@
 // Package privacybase is the privacy-base Capability Package. It declares
-// the `piiKey` aspect-type DDL — the per-identity wrapped-DEK envelope
-// reference (Contract #3 §3.10, vault-crypto-shredding-design.md §2.1) that
-// backs crypto-shred for sensitive aspects.
+// the `piiKey` aspect-type DDL — the wrapped-DEK envelope reference
+// (Contract #3 §3.10, vault-crypto-shredding-design.md §2.1) that backs
+// crypto-shred for sensitive aspects — and the destruction verb of each
+// holder kind: ShredIdentityKey erases a person's key on request, and
+// ShredRetentionClassKey erases a retention class's key on expiry
+// (retention-class-key-custody-design.md §4.3). The two are siblings by
+// design: a record custodied on a class outlives its subject's erasure, which
+// is the whole reason retained data has a home.
 //
 // piiKey is never written by an operation script: the Processor's commit
 // path mints and persists it internally (step 6.5 encrypt-on-write, lazily,
@@ -40,8 +45,8 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 // Package is the static, install-time bundle.
 var Package = pkgmgr.Definition{
 	Name:          "privacy-base",
-	Version:       "0.11.0",
-	Description:   "Per-identity PII key-custody envelope (piiKey) backing crypto-shred, the erasureRequested marker that closes an erased identity's write path, the identityErasure Loom pattern that orders the whole erasure, and the attestation that closes the cycle.",
+	Version:       "0.12.0",
+	Description:   "The key-custody envelope (piiKey) backing crypto-shred for both holder kinds — an identity, erased on request, and a retention class, erased on expiry — the erasureRequested marker that closes an erased identity's write path, the identityErasure Loom pattern that orders the whole erasure, and the attestation that closes the cycle.",
 	DDLs:          DDLs(),
 	Lenses:        Lenses(),
 	Permissions:   Permissions(),

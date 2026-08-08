@@ -74,21 +74,27 @@ func (def Definition) validateCustodyScope() error {
 					idx, d.CanonicalName, c.RetentionClass)
 			}
 			// 5. Shape is valid, but the mechanism is not yet whole. A retention
-			// class is a promise about a key that CAN be destroyed on the
-			// class's own schedule, and the verb that destroys one —
-			// ShredRetentionClassKey — does not exist (design §11 Fire 1 item
-			// 3). A record custodied here would be written, and read, and then
-			// held forever: precisely the outcome a retention class exists to
-			// prevent, and one that reads as compliant from every surface.
-			// Refusing the declaration is the fail-closed reading of a
-			// half-built primitive; permitting it trades a loud install error
-			// for undestroyable retained PHI. This check runs LAST so a
-			// malformed declaration still gets its precise error.
+			// class promises a key that CAN be destroyed on the class's own
+			// schedule, and a promise is only as good as the last link in it.
+			// `ShredRetentionClassKey` now destroys the key, and the Vault
+			// refuses every subsequent decrypt — but a DESTRUCTION THAT NO READ
+			// MODEL HEARS is still not an erasure. A Secure Lens scrubs an
+			// identity-custodied row in-band because the key aspect hangs off
+			// the vertex the lens already binds; a class holder is not the
+			// ciphertext's host, so nothing forces a lens to react to its
+			// destruction (retention-class-key-custody-design.md §6.3 derives
+			// both halves). A row would keep rendering decrypted PHI while the
+			// destruction reported success — worse than the un-projected
+			// plaintext this design set out to fix, because it reads as
+			// compliant from every surface. Refusing the declaration is the
+			// fail-closed reading of a half-built primitive. This check runs
+			// LAST so a malformed declaration still gets its precise error.
 			//
-			// REMOVE THIS with item 3, whose green bar is a real
-			// ShredRetentionClassKey against a class-custodied record.
+			// REMOVE THIS with the rebuild-driven delivery increment, whose
+			// green bar is a real ShredRetentionClassKey scrubbing a
+			// class-custodied row out of a live Secure Lens.
 			return fmt.Errorf(
-				"pkgmgr: DDL[%d] %q: Custody.Kind %q is not installable yet — a class-custodied DEK has no destruction verb, so the retention obligation the class declares could never be discharged; this gate lifts when ShredRetentionClassKey ships",
+				"pkgmgr: DDL[%d] %q: Custody.Kind %q is not installable yet — a class-key destruction does not yet reach the read models, so a Secure Lens could keep rendering plaintext the destruction claims to have erased; this gate lifts when the rebuild-driven delivery ships",
 				idx, d.CanonicalName, CustodyKindRetentionClass)
 		}
 

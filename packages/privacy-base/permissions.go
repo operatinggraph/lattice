@@ -48,6 +48,27 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 // confers no authority a completed shred has not already exercised: the op
 // fail-closes unless ShredIdentityKey has committed for that identity.
 //
+// ShredRetentionClassKey ships NO grant either, and for a reason that only
+// LOOKS like the one below. ShredIdentityKey is ungranted because erasure is a
+// subject's request and a deployment's consent decision. ShredRetentionClassKey
+// is ungranted because it is the data CONTROLLER's scheduled act: it destroys
+// every record a class holds at once, for subjects who never asked for anything
+// and may have no idea the class exists. It is the widest-blast-radius verb in
+// this package, and a deployment should have to say so on purpose.
+//
+// Be precise about what withholding the grant buys, because it is less than it
+// looks: it is a DEFAULT, not a boundary. `operator` already holds
+// CreatePermission and GrantPermission at scope:any (packages/rbac-domain), and
+// CreatePermission takes operationType as a free string with no allow-list — so
+// an operator can grant themselves this verb in two ops and then call it. What
+// the missing grant actually buys is that doing so is an explicit, separately
+// committed act with its own audit trail, rather than authority that arrives
+// silently with the role. Closing the gap properly needs a core-owned
+// never-self-grantable operationType set, which is filed, not assumed here.
+//
+// Its finalization sibling above IS granted: recording that an
+// already-committed destruction finished confers no authority to start one.
+//
 // ShredIdentityKey itself deliberately ships NO grant here: right-to-erasure
 // is an operator/consent decision whose grant posture belongs to the
 // deployment (a vertical package or an explicit operator provisioning step),
@@ -74,6 +95,13 @@ func Permissions() []pkgmgr.PermissionSpec {
 			Scope:         "any",
 			Note:          "Authorizes the privacy service actor (identity.system.privacy, operator-equivalent) to durably record crypto-shred finalization progress (vault-crypto-shredding-design.md Fire 4b).",
 			GrantsTo:      []string{"operator"},
+		},
+		{
+			OperationType: "RecordRetentionClassShredFinalization",
+			Scope:         "any",
+			Note: "Authorizes the privacy service actor (identity.system.privacy, operator-equivalent) to durably record retention-class key-destruction progress (retention-class-key-custody-design.md §4.3/§4.4). " +
+				"[no-op-meta: engine-op — submitted by the privacy-worker after Vault.ShredKey and by the Refractor after every affected secure lens is rebuilt; no person chooses it from a form, and it refuses outright unless a ShredRetentionClassKey has already committed for that holder.]",
+			GrantsTo: []string{"operator"},
 		},
 		{
 			OperationType: "SealIdentityForErasure",
