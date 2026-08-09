@@ -400,10 +400,20 @@ for each compiled branch:
 > An abstract label must not make a lens report exhaustive on a leaf set that can grow after activation without
 > the trigger firing.
 
-`exhaustive` stays `true` only when the resolver is **armed** — meaning its taxonomy snapshot loaded *and* its
-invalidation consumer is live (§5). Any of: resolver absent, snapshot never loaded, consumer not running, cycle
-detected, depth bound exceeded, abstract unresolvable, expanded set empty ⇒ `exhaustive = false` ⇒
-`reprojectAll = true` ⇒ broad filter + no client skip. **Correct-but-slower, never wrong-but-fast.**
+A broad filter rescues **delivery**. It does nothing for the **matcher**: a lens evaluating against an expansion
+set that is itself wrong projects the wrong row set at any filter width. So the fail-closed posture has **two
+tiers**, by whether the expanded set is *known*:
+
+| The expanded set is… | Because | Posture |
+|---|---|---|
+| **known, freshness not guaranteed** | snapshot loaded, invalidation consumer not live | `exhaustive = false` ⇒ `reprojectAll = true` ⇒ broad filter + no client skip. The lens **runs**. Correct-but-slower. |
+| **known and empty** | an abstract with no concrete descendants | `exhaustive = false`. The lens runs and matches nothing, which is the truthful answer — an abstract with no concrete subtypes admits no instances. Never `exhaustive = true` on an empty set: that publishes an empty `reprojectLabels` with `reprojectAll = false`, and `plainVertexRelevant` then skip-and-Acks **every** event while the lens presents as narrowed and health-green — §6.5's one unacceptable state. (Plain-lens-specific: `actorAwareNarrowingLabels` fails open on an empty set.) |
+| **not known at all** | no resolver, snapshot never loaded, label unresolvable, cycle detected, depth bound exceeded | **Refuse activation**, loudly. No filter width makes a matcher with no expansion set correct, and the alternative — evaluating as though the bare label were meant — is a silent empty projection. Nothing is published; the pipeline keeps whatever rule it already had. |
+
+**Correct-but-slower, never wrong-but-fast — and never silently wrong at all.** Note the asymmetry the third row
+buys: the *activation* fail-closed is loud (an error, recorded on the lens's health entry), whereas a missing
+`LabelExpansion` entry reaching the *executor* is a silent zero-row bind. Refusing at activation is what keeps the
+silent path unreachable.
 
 `armed` is a live read at derivation time, not a snapshot taken once at process start — mirroring
 `ActorAwareNarrowingLabels`' own reason for being evaluated per event rather than at installation
@@ -435,10 +445,20 @@ binding attempt.
 
 ## 5. The generalized mechanisms — per-site changes
 
-Four **equality** sites become set-membership. Five **set** consumers generalize for free because they are already
-set-membership tests over `reprojectLabels`, which now simply holds more entries.
+**Six** mechanisms read a lens label as a vertex key type, and every one of them must agree with the binder or the
+lens is wrong. Five **set** consumers generalize for free because they are already set-membership tests over
+`reprojectLabels`, which now simply holds more entries.
 
-### 5.1 The four equality sites
+> **The census below was wrong when this design was ratified: it listed four sites and there are six.** The two it
+> missed — the labeled seed **scan** (§5.1a) and the **`HopIndex`** derivation's three comparisons (§5.1b) — were
+> found by the increment-3 adversarial pass, independently by all three reviewers. Both fail in the dangerous
+> direction (a silently empty row set; a skipped anchor recompute), and both are reachable by Fire B's own named
+> consumer. Corrected 2026-08-09. The lesson generalizes: "which sites compare a label" is a **census**, and a
+> census is verified by grepping the comparison, never by listing the ones the author happened to think of.
+
+Paths below are `internal/refractor/ruleengine/full/` (this doc's earlier drafts say `internal/refractor/full/`).
+
+### 5.1 The four equality sites named at ratification
 
 | # | Site | Today | After | Why it is load-bearing |
 |---|---|---|---|---|
@@ -450,6 +470,55 @@ set-membership tests over `reprojectLabels`, which now simply holds more entries
 Sites 3 and 4 both key off `anchorPattern` (`anchor_delete.go:258-275`), the single shared derivation every
 anchor-scoped mechanism uses. Generalizing them together preserves that single-derivation property; generalizing
 one and not the other would split it.
+
+### 5.1a Site 5 — the labeled seed SCAN (`executor.go`, `seedNodes`)
+
+`seedNodes` builds a candidate set with `ListKeysPrefix("vtx." + n.Label + ".")`. A prefix scan **cannot express a
+set**, so this is not an equality test to flip — it is a single-prefix read that must become one read per concrete
+member of the expansion.
+
+Left un-generalized, an abstract label scans its own prefix and finds **zero keys** (§3.2: an abstract type names
+no instance), so the binder never sees a candidate and the site-1 generalization is dead on this path. The failure
+is worse than "no rows", because it is **conditional on how the evaluation was entered**: a point-seeded or
+traversal-bound evaluation projects rows normally, while any *unseeded* evaluation of the same lens — boot,
+`Rebuild` / `Reset`, a neighbour-triggered re-execute, actor-aware fan-out — yields an empty row set. Filter
+retraction treats an anchor's absence from the derived set as authoritative, so the empty recompute lands as a
+**spurious mass Delete**: on a grant lens, a mass revoke.
+
+`nodeMatches`' own doc comment already names "the labeled seed scan (`seedNodes`)" first among the mechanisms that
+must agree with the binder. The ratified census contradicted a comment already in the tree.
+
+### 5.1b Site 6 — the affected-anchor derivation (`HopIndex`, three comparisons)
+
+`HopIndex.Labels[i]` stores `NodePattern.Label` verbatim (`hopindex.go:213`, `:218`), and three consumers compare
+it by string equality:
+
+| Site | Code |
+|---|---|
+| `hopindex.go:411-419` `PositionsBinding` | `if l == "" \|\| l == vertexType` |
+| `hopindex.go:435-437` `AnchorSideSeeds.admits` | `return l == "" \|\| l == typ` |
+| `pipeline/anchor_derivation.go:220` far-end prune | `e.OtherType != step.ToLabel` |
+
+Plus `walkToAnchors`' `anchorPrefix := "vtx." + idx.Labels[idx.Anchor] + "."` (`anchor_derivation.go:160`), which
+would build unreachable keys for an expanded anchor.
+
+**This is the over-grant direction, and it is the one an empty answer hides.** An empty derived set on a
+`Complete` index licenses an outright skip — `deriveAnchorsForLink`'s own doc says an empty set there "is a real
+answer — the link binds no hop, so no anchor's output can change." So the relevance gate (expanded, admits the
+leaf event) and the derivation (not expanded, binds nothing) **disagree**: the event is delivered and then
+silently dropped, and the anchor is never re-projected. On a grant producer that is a grant that never revokes.
+
+It is not hypothetical for Fire B. `capabilityServiceAccess` is actor-aware with a concrete `identity` anchor, so
+`derivationIndex` is ready; its `loc0`/`loc`/`exLoc` positions are **unlabeled today**, meaning `PositionsBinding`
+matches every type. Fire B labels them `:location*`, which flips those positions from *matches everything* to
+*matches nothing* — the regression arrives with the first consumer.
+
+The expansion is threaded into `HopIndex` **at derivation time** (`useFullEngineBranches` has the resolved sets in
+hand), as a resolved per-position set parallel to `Labels`. Resolving per event instead would violate §5.3.
+
+`anchor_derivation.go`'s soundness comments (`:150-152`, `:209-213`) ground the derivation's superset property on
+"the executor's `nodeMatches` binds on nothing else" — true before expansion existed, false after. They are
+restated in terms of the expanded set.
 
 ### 5.2 The five set consumers — no change needed, but a stated reason each
 
@@ -897,8 +966,10 @@ Old Fires 1 and 2 as one fire. Internal build order:
    **reflexive-transitive** closure. `:unit` keeps meaning exactly `vtx.unit.<id>`.
 3. **Resolution + expansion.** `internal/refractor/taxonomy` resolver with `armed`;
    `full.WithLabelExpansion` returning a copy (§4.3); expansion in `useFullEngineBranches` with §4.2's
-   exhaustiveness rule; the **four** equality sites (§5.1 — including anchor retraction);
-   `ruleState.seedAnchorLabels` as a set; resolver-time cycle/depth detection as the authority.
+   two-tier exhaustiveness rule; **all six** label-reading sites (§5.1 — including anchor retraction — plus
+   §5.1a's seed scan and §5.1b's `HopIndex` derivation, which this line said "four" until the increment-3
+   adversarial pass corrected the census, 2026-08-09); `ruleState.seedAnchorLabels` as a set; resolver-time
+   cycle/depth detection as the authority.
 4. **The trigger, on the EXISTING meta watch** (amendment A1 — *not* a new consumer). Widen
    `SubscribeKVChanges` to take more than one prefix and add a `lnk.meta.*` branch where
    `corekv_source.go:550` currently ignores links. That consumer's durable is per-boot with
@@ -940,6 +1011,13 @@ re-run rather than trusted):
 - **The "becomes stricter" claim is empirical, not enforced**, and the **migration window** is unaddressed:
   pre-rename vertices still carry the shared class while new guards expect the per-type one. The fire states
   its ordering rather than discovering it.
+- **Live `vtx.location.<id>` test fixtures block the install.** `packages/wellness-domain/workplace_confinement_test.go:460`,
+  `:572`, `:575` seed real `vtx.location.*` vertices into Core KV, and increment 1's `checkAbstractNoLiveInstances`
+  (`internal/pkgmgr/taxonomy.go`) refuses `Abstract: true` while any live instance of that type exists — so those
+  fixtures seeded before location-domain's upgrade in the same process make the install fail. Fire B names this in
+  its ordering rather than discovering it at run time. (Production is clear: location-domain mints
+  `vtx.unit.*`/`vtx.building.*`/`vtx.property.*` and never `vtx.location.*`, so no live instance stops matching —
+  the real migration hazard is the **class** gate above, not the key type.)
 
 **Because Fire B changes a live security guard in a package as a side effect of an engine feature, it also
 takes the full 3-layer review** — not the standard depth the original §14 assigned it.
@@ -1300,7 +1378,76 @@ parse, nothing declares an abstract type, and no label consumer has changed. Inc
 exhaustiveness rule; the **four** equality sites (§5.1, anchor retraction included);
 `ruleState.seedAnchorLabels` as a set; resolver-time cycle/depth detection as the authority. The seam this
 increment leaves is exact: `visitor.go:273-281` is the refusal to replace, and `NodePattern.LabelExpand` is the
-signal already carried through the AST. The resolver ships **disarmed**, so §4.2 forces `exhaustive = false`
-(correct-but-slower) until item 4's trigger lands.
+signal already carried through the AST. The resolver ships **disarmed** with no snapshot.
+
+**This paragraph predicted the wrong posture for that disarmed state, and §17.5 records what shipped instead
+(2026-08-09).** It assumed §4.2 would force `exhaustive = false` (correct-but-slower) and let the lens run. A
+disarmed resolver with no snapshot does not have a stale set — it has **no** set, and no filter width makes a
+matcher with no expansion set correct. Such a lens **refuses activation**; only the known-but-stale tier runs
+broad. §4.2 now states both tiers.
 
 **Still carried into Fire B:** the class-gate migration hazard in §17.2 is unchanged by this increment.
+
+### 17.5 Fire A · Increment 3 — resolution + expansion (2026-08-09)
+
+**Scope sentence (§14 Fire A build order item 3)** as amended: the resolver with `armed`, `WithLabelExpansion` as
+a copy, expansion in `useFullEngineBranches` under §4.2, **all six** label-reading sites, `seedAnchorLabels` as a
+set, resolver-time cycle/depth as the authority.
+
+**Shipped.** New `internal/refractor/taxonomy` (resolver, three-valued `Status`, resolve-time cycle/depth
+authority at `maxDepth = 4` matching `pkgmgr`'s `maxTaxonomyDepth`) and `ruleengine/full/label_expansion.go`
+(`WithLabelExpansion`, `ExpansionLabels`). Expansion wired into `useFullEngineBranches`; all six sites converted;
+`ruleState.seedAnchorLabel string` → `seedAnchorLabels map[string]struct{}`; increment 2's parse-time sigil
+refusal lifted (the multi-label refusal stays). `UseFullEngine`/`UseFullEngineBranches` now return `error`.
+
+**Scope-diff gate: narrow-only.** Nothing from item 4 (trigger/invalidation/`Rebuild`), item 5 (validation gate,
+leaf-budget signal) or item 6 (health fields, Loupe) leaked in. One expansion beyond the sentence — the `error`
+return — is the refusal posture's necessary plumbing, handled at both production call sites.
+
+**Four deviations from the ratified body, each amended where it stands:**
+
+1. **§4.2 is now two-tier.** A broad filter rescues delivery, not the matcher. Set-known-but-stale runs broad;
+   set-unknown refuses activation. §17.4 predicted the opposite and is corrected above.
+2. **§5.1's census was wrong — six sites, not four** (§5.1a seed scan, §5.1b `HopIndex`). Found independently by
+   all three adversarial reviewers. Both missed sites fail in the dangerous direction, and §5.1b is reachable by
+   Fire B's own named consumer.
+3. **An abstract name is excluded from its own expansion** (concrete parents stay, reflexively). Including it
+   would add a filter subject that can never match — §3.4's row.
+4. **An expanded ANCHOR position makes `AnchorHopIndex` refuse `Complete`.** `walkToAnchors` builds the anchor's
+   key from one literal prefix and `seededNode` never carries the concrete type a walk discovers, so an expanded
+   anchor's key cannot be constructed safely. Refusing falls back to the ActorEnumerator BFS — correct-but-slower,
+   the same posture every other unresolvable shape in that builder takes. **Consequence to design around: a
+   `*`-anchored lens gets no affected-anchor fast path.** Fire B's consumer is unaffected (its anchor is the
+   concrete `identity`; only non-anchor positions carry `*`).
+
+**Inertness holds, and it is proven rather than asserted.** No production caller of `SetTaxonomyResolver` exists,
+so every `*` lens would refuse activation — and no `packages/` lens carries the sigil (the corpus's only `*` is
+the var-length relationship quantifier, a different grammar production). The two fixes that touch shipped paths
+were traced: `HopIndex`'s `admitsType` reduces to the exact deleted inline comparison when no position is
+expanded, and the boot-time `KeyColumns` reorder collapses to the old code for every plain lens because
+`CompiledBranches` is non-nil only for Personal nats-subject lenses (`anchorwalk.go:276-279`).
+
+### 17.6 Checkpoint — Fire A, after increment 3
+
+**Landed on `main`; no worktree is held.** Increment 4 starts fresh.
+
+**Next — increment 4, the trigger on the existing meta watch (§14 Fire A item 4).** Four preconditions this
+increment leaves it, each grounded:
+
+- **There is no re-derivation seam, and it is absent rather than merely unwired.** `SetArmed` and
+  `InstallSnapshot` notify nothing, and `pipelineEntry` retains neither `*lens.Rule` nor the compiled rule, so
+  item 4 cannot re-invoke `UseFullEngineBranches` without re-reading the lens definition. Building that seam is
+  part of item 4, not an afterthought.
+- **A boot refusal is never retried** — `retryTransientBoot` wraps only the adapter build, so a lens refused for
+  an unknown expansion stays dark until a lens-definition edit or a restart. Arming the resolver must therefore
+  also re-derive, or every `*` lens stays refused for the process's life.
+- **`SetArmed(true)` alone flips a lens from broad to narrowed**, and a JetStream filter update never rewinds a
+  cursor — which is why §6.3 routes a widening through `Rebuild`. The public setter has no mechanism enforcing
+  that today.
+- **`LeafBudget` counts DIRECT children while the runtime cap applies to the transitive union.** An abstract with
+  4 direct children of 4 leaves each passes install and silently blows `maxNarrowedFilterLabels = 8`;
+  `ConsumerFilter` drops to the broad filter with no health signal. The operator-visible signal is item 5/6's —
+  named here so it is not rediscovered.
+
+**Still carried into Fire B:** the §17.2 class-gate migration hazard, and the live `vtx.location.*` test fixtures
+named in §14 Fire B.
