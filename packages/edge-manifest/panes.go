@@ -70,11 +70,20 @@ func Panes() []pkgmgr.PaneSpec {
 // project yet), so declaring it twice under two roles would put the same
 // column in the SELECT twice to satisfy a role neither the host nor the
 // renderer reads.
+//
+// `emptyCopy` says "no ADDITIONAL methods" because the section lists BOUND
+// credentials only, and the reader is by definition signed in. A raw actor
+// signs in as the account itself and owns no `boundTo` edge; a person who has
+// just claimed sees nothing until the projection lands. Neither is
+// distinguishable here — `appsession` resolves a bound credential up to its
+// owner and drops the distinction, and `manifest.me` carries no signal for it —
+// so the copy is written to be true on every input rather than asserting to a
+// signed-in person that they have no way to sign in.
 const signInMethodsSections = `[
   {
     "id": "credentials",
     "title": "Sign-in methods",
-    "emptyCopy": "No sign-in methods on record.",
+    "emptyCopy": "No additional sign-in methods are bound to this account.",
     "source": {
       "table": "read_identity_credential_bindings",
       "columns": [
