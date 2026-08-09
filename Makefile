@@ -1506,6 +1506,7 @@ refresh-clinic:
 	NATS_URL=$(NATS_URL) NATS_NKEY=$(NKEY_LATTICE_PKG) BOOTSTRAP_JSON_PATH=$(BOOTSTRAP_JSON) ./bin/lattice-pkg install --force packages/clinic-reminders
 	NATS_URL=$(NATS_URL) NATS_NKEY=$(NKEY_LATTICE_PKG) BOOTSTRAP_JSON_PATH=$(BOOTSTRAP_JSON) ./bin/lattice-pkg install --force packages/clinic-ledger
 	@$(MAKE) provision-clinic-role
+	@$(MAKE) provision-readpath
 	@echo "==> Rebuilding clinic-app binary..."
 	go build -o bin/clinic-app ./cmd/clinic-app
 	@echo "==> Restarting clinic-app..."
