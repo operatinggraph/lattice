@@ -247,8 +247,13 @@ mirroring `cmd/object-store-manager/main.go:72` (`actorKey := bootstrap.ObjmgrId
 `internal/gateway/gateway.go`'s `handleOperations` gains, after `Authenticate` succeeds and before
 `s.submit` for the **client's** requested op: a check against a small in-memory set of actor keys already
 known-provisioned. On a miss, submit `ProvisionConsumerIdentity{targetActorKey: actor.ActorID}` under the
-Gateway's own `env.Actor` (`bootstrap.GatewayIdentityKey`), tolerate the reply, add the actor to the set,
-then proceed exactly as today. The set is a pure latency optimization (bounded/LRU; a false miss just
+Gateway's own `env.Actor` (`bootstrap.GatewayIdentityKey`), ~~tolerate the reply~~, add the actor to the
+set, then proceed. **Superseded 2026-08-08 by
+[credential-binding-plane-lifecycle-design.md](credential-binding-plane-lifecycle-design.md) §4.4:** the
+write path no longer tolerates a failed pre-flight — it answers **503**, because the claim ops now refuse
+an actor vertex that does not exist and that refusal is generic on the wire, so tolerating here surfaced
+as "invalid claim key" and broke the ceremony out. `whoami` keeps the tolerant posture described here.
+The set is a pure latency optimization (bounded/LRU; a false miss just
 re-runs the idempotent op) — correctness never depends on it, and it starts empty on every restart by
 design (a cold Gateway just re-provisions already-provisioned actors once, harmlessly).
 

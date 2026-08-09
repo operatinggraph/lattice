@@ -87,7 +87,20 @@ Source package: `internal/processor/`
 **`<instance>`** follows the convention `proc-<NanoID>` (Contract #5 §5.1).
 
 **`<outcome>` enum** for claim-attempts: `success`, `invalid-key`, `wrong-state`, `flagged`,
-`merged`, `credential-already-bound`, `no-target`, `erased`.
+`merged`, `credential-already-bound`, `credential-not-provisioned`, `no-target`, `erased`.
+
+`credential-not-provisioned` means the SUBMITTING credential has no live identity vertex — either
+never provisioned, or tombstoned (revoked). The claim emits a `boundTo` edge whose source is that
+vertex, and `identityCredentialBindingsRead` anchors on it, so binding without one produces a row
+the person's sign-in-methods list can never show (Contract #3 §3.5). A sustained count here means
+the Gateway's first-touch `ProvisionConsumerIdentity` pre-flight is failing — that path answers
+503 rather than proceeding — or a submitter is reaching the Processor without one at all, which is
+what `lattice identity provision` exists for. Like `erased`, the word never reaches the caller.
+
+It also takes one population from `credential-already-bound`: an actor with **no vertex but a live
+`credentialindex`** — the post-shred residue shape, where the shred retracts the edge and leaves the
+index standing. The endpoint guard sits above the already-bound guard, so that case now counts here.
+An operator watching the re-bind counter should expect it to go quiet on exactly that population.
 
 `erased` means the identity is sealed for erasure — it carries
 `vtx.identity.<NanoID>.erasureRequested`, so no further credential may be bound to it

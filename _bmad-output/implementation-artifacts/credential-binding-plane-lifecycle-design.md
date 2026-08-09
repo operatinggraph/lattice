@@ -6,9 +6,9 @@ Imp **★★** · adversarial pass run and folded (§12)
 
 ## Ratification (ratify session 2026-08-06)
 
-**Status: Inc 2 + Inc 3a ✅ RATIFIED (Winston, delegated) · Inc 1 🗄️ HELD AND REDIRECTED (Andrew) ·
-Inc 3b deferred.** Read this section before the body: §7's fork is superseded, and §3's mechanism moves to
-a different plane.
+**Status: Inc 2 + Inc 3a ✅ SHIPPED (2026-08-08, build note §13) · Inc 1 🗄️ HELD AND REDIRECTED (Andrew) ·
+Inc 3b deferred.** Read this section before the body: §7's fork is superseded, §3's mechanism moves to
+a different plane, and §4.3's instruction was corrected at build (a dated strike stands in place).
 
 **Increment 1 is held, and the fork is dissolved rather than answered.** §7 asked *"what does
 `ShredIdentityKey` erase?"* and offered A (PII-only) / B (full unbind) / C (cascade). Andrew rejected the
@@ -405,10 +405,21 @@ succeeds silently.
 consequences, all live: it is unreachable by any decrypt-free erasure enumeration (§3.4's one open row); by
 **G13** it permanently rejects that person's every future `ClaimIdentity` with `credential-already-bound`;
 and it is the reason `lattice identity reconcile-bindings` carries a bespoke skip for the merged shape
-(client-ceremony §15.6). The fix is to move the index write below the self-loop test — the same two-line
-shape the link write already has. A migration is **not** required to make Inc 1 correct (a stranded
-self-index is inert once the person is erased), but the CLI's skip and any live self-index should be listed
-by a `--dry-run` reconcile pass before the fire closes.
+(client-ceremony §15.6).
+
+**~~The fix is to move the index write below the self-loop test.~~ Corrected at build, 2026-08-08: moving
+the write is necessary but NOT sufficient, and on its own does not deliver §4.7's requirement that the merge
+"leaves that person able to claim."** The index the merge would rewrite is **already live** — the primary is
+a credential of the secondary, so `vtx.credentialindex.<sha(P)>` = `{actorKey: P, identityKey: S}` exists
+from the original bind. Omitting the write leaves that vertex standing, and **G13**'s guard reads liveness,
+not contents: the person stays refused `credential-already-bound`, now by a row pointing at a merged-away
+identity. The retraction has to be a **tombstone** in that branch, which is exactly what the script already
+does to the `boundTo` edge two lines above and for the same reason — the merge dissolves the premise that P
+is a credential of anything. A tombstone over a key that never held a live value costs nothing, the
+tolerance the surrounding comment already establishes for the edge.
+
+A migration is **not** required to make Inc 1 correct (a stranded self-index is inert once the person is
+erased), but the CLI's skip and any live self-index should be listed by a `--dry-run` reconcile pass.
 
 ### 4.4 The precondition Inc 2 makes load-bearing — and the Gateway change that pays for it
 
@@ -504,7 +515,7 @@ So a raw actor's sign-in method is **not a credential binding** and must never b
 actually is: an **IdP binding** (`.idpBinding = {iss, sub}`, opaque mode only) or, under Contract #11's
 dev-only `nanoid` pin, nothing at all.
 
-### 5.2 Inc 3a — stop asserting a falsehood (built)
+### 5.2 Inc 3a — stop asserting a falsehood
 
 **Owner: edge-manifest, not Facet.** Size **XS**. The pane's empty state is a *descriptor field*:
 `emptyCopy` on the `signInMethods` `PaneSpec` (`packages/edge-manifest/panes.go:44-91`, the string at
@@ -842,3 +853,35 @@ with a live operator read path; that no dispatcher declares `op.actor` in `reads
 §5.3's lens spec would parse and validate; and that `.idpBinding` is unreachable in every environment we run.
 
 The pre-build gate this design set for itself is therefore **discharged**, not deferred.
+
+---
+
+## 13. Build note — Inc 2 + Inc 3a (2026-08-08)
+
+**Shipped.** Inc 3a `6c4ca0e4` · Inc 2 `b71be85d`. Gates: `go build ./...`, `make vet`,
+`golangci-lint`, `STRICT=1 lint-conventions`, `lint-package-standard`, `lint-package-version`,
+`gofmt`, and `go test ./... -p 4` (CI's parallelism) green.
+
+**Deviations from the ratified body**, both recorded where they stand:
+
+- **§4.3 — the self-index fix is a tombstone, not a moved write.** Struck and rewritten in §4.3
+  with the state table that falsifies the original instruction: the index is already live pointing
+  at the secondary, so omitting the write preserves the very refusal §4.7 requires the merge to
+  clear.
+- **§4.7's Gateway test split in two.** The design named one test ("a failed pre-flight 503s the
+  write and does not 503 whoami"). Shipped as four, because the pre-flight has three distinct
+  failure shapes and one of them must NOT 503: submit error, non-accepted reply, and the
+  never-configured no-op an embedding relies on.
+
+**Not deviations, but worth naming.** `testutil.SeedCredentialActor` is the shared minimal seed
+§4.5 said belonged in `internal/testutil` rather than the unexported `seedDirectIdentity`; it seeds
+the vertex only. The fixture blast radius landed well under §4.5's count — the real-op submitters
+are a small subset of the reference count, most of which are mock pipelines or assertions on op
+names.
+
+**Falsification.** Every guard test was re-run with its guard disabled and the derive_reads test
+with the derivation deleted; all failed as required.
+
+**Live verification pending.** The claim ceremony has not been re-run end to end on the dev stack
+under the new guard — package tests drive the real scripts through a real Processor, but the
+Gateway's 503 path has no live exercise. Filed as its own row rather than left here.
