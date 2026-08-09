@@ -147,16 +147,27 @@ type seededNode struct {
 //     "cannot confirm the label" must widen the set, not narrow it.
 //
 // The label comparison matches a pattern label against the vertex KEY TYPE,
-// which is what a label means everywhere — the executor's nodeMatches binds on
-// nothing else. So a vertex this walk prunes on the far end's label is one the
-// executor could not have bound either, and the pruning stays inside the
-// superset property above.
+// which is what a label means everywhere: bare equality for an ordinary
+// position, or membership in the taxonomy-resolved downward closure
+// (HopIndex.admitsType) for a `*` position — the same reading full/executor.
+// go's nodeMatches applies (dynamic-type-taxonomy-design.md §5.1). So a
+// vertex this walk prunes on the far end's label is one the executor could
+// not have bound either, and the pruning stays inside the superset property
+// above.
 //
 // It does NOT expand from a node reached at the anchor position. That is sound
 // because the anchor position is pinned by `{key: $actorKey}`: within one
 // evaluation it binds exactly one vertex, so a realized path from some OTHER
 // anchor to the changed element cannot pass through this one.
 func (p *Pipeline) walkToAnchors(ctx context.Context, idx full.HopIndex, seeds []seededNode) ([]string, bool, error) {
+	// Labels[Anchor] is always a bare (non-`*`) label here: AnchorHopIndex
+	// refuses Complete when the anchor position itself carries LabelExpand
+	// (hopindex.go), because a realized anchor vertex's own concrete type is
+	// never learned by this walk — seededNode carries only a bare NanoID,
+	// not the type an edge's OtherType recorded on the hop that reached it —
+	// so one literal key prefix could not be right for an expanded anchor's
+	// several possible concrete types. Concretely: derivationIndex requires
+	// Complete, so this function never runs against such a query at all.
 	anchorPrefix := substrate.VertexPrefix + "." + idx.Labels[idx.Anchor] + "."
 
 	anchors := map[string]struct{}{}
@@ -218,8 +229,23 @@ func (p *Pipeline) walkToAnchors(ctx context.Context, idx full.HopIndex, seeds [
 				}
 				// An edge entry with no OtherType is a legacy typeless edge:
 				// the far end's type is unknown, so the pattern's label cannot
-				// rule it out and the walk keeps it.
-				if step.ToLabel != "" && e.OtherType != "" && e.OtherType != step.ToLabel {
+				// rule it out and the walk keeps it. A `*` far end prunes by
+				// set membership against its taxonomy-resolved downward
+				// closure instead of string equality — and, symmetrically to
+				// full/executor.go's nodeMatches, an unresolved expansion
+				// (step.ToExpanded == nil) fails closed by pruning, never by
+				// falling back to ToLabel's bare (and possibly abstract, so
+				// meaningless as a key type) string.
+				if step.ToLabelExpand {
+					if e.OtherType != "" {
+						if step.ToExpanded == nil {
+							continue
+						}
+						if _, hit := step.ToExpanded[e.OtherType]; !hit {
+							continue
+						}
+					}
+				} else if step.ToLabel != "" && e.OtherType != "" && e.OtherType != step.ToLabel {
 					continue
 				}
 				next := seededNode{pos: step.ToPos, id: e.OtherNodeID}

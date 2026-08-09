@@ -66,6 +66,81 @@ type HopIndex struct {
 	// Incomplete records why Complete is false — for the health surface, and so
 	// a test can assert on the REASON rather than only on the verdict.
 	Incomplete string
+
+	// LabelExpand marks which positions carry the `*` taxonomy-expansion
+	// sigil (NodePattern.LabelExpand), parallel to Labels — the AST-derived
+	// half of the same generalization the four §5.1 sites already carry.
+	// Nil (or an all-false slice) is exactly today's shape: every position's
+	// Labels[i] is read as bare equality.
+	LabelExpand []bool
+
+	// Expanded is Labels[i]'s taxonomy-resolved concrete downward closure
+	// for every position where LabelExpand[i] is true — nil until
+	// WithLabelExpansion populates it. A LabelExpand position with no entry
+	// here (because WithLabelExpansion was never called, or the resolver had
+	// nothing for that label) admits NOTHING: the derivation fails closed
+	// rather than falling back to Labels[i]'s bare (and for an abstract
+	// label, meaningless) string.
+	Expanded []map[string]struct{}
+}
+
+// WithLabelExpansion returns a copy of ix carrying exp as the resolved
+// concrete set for every LabelExpand position — mirroring
+// CompiledRule.WithLabelExpansion's copy-on-write shape (§4.3): called once
+// per activation/re-derivation (pipeline.useFullEngineBranches, which
+// already has exp in hand from resolving ExpansionLabels), never per event,
+// and never mutates ix in place.
+//
+// A position's own admits-nothing-on-no-entry behavior (see the Expanded
+// field doc) is what keeps this fail-closed when exp does not cover a label
+// this index needs — which cannot happen on the path
+// useFullEngineBranches actually takes (it refuses activation before
+// reaching this call whenever any needed label is unresolved), but must
+// still be safe for a caller that builds a HopIndex directly, as the tests
+// do.
+func (ix HopIndex) WithLabelExpansion(exp map[string]map[string]struct{}) HopIndex {
+	if len(ix.LabelExpand) == 0 {
+		return ix
+	}
+	next := ix
+	expanded := make([]map[string]struct{}, len(ix.Labels))
+	any := false
+	for i, isExpand := range ix.LabelExpand {
+		if !isExpand {
+			continue
+		}
+		if set, ok := exp[ix.Labels[i]]; ok {
+			expanded[i] = set
+			any = true
+		}
+	}
+	if any {
+		next.Expanded = expanded
+	}
+	return next
+}
+
+// admitsType reports whether position pos — labeled ix.Labels[pos], and
+// taxonomy-expanded when ix.LabelExpand[pos] is true — admits vertexType.
+// The single predicate PositionsBinding and AnchorSideSeeds' admits closure
+// both reduce to, so the two can never disagree about the same position.
+func (ix HopIndex) admitsType(pos int, vertexType string) bool {
+	l := ix.Labels[pos]
+	if l == "" {
+		return true
+	}
+	if pos < len(ix.LabelExpand) && ix.LabelExpand[pos] {
+		if pos >= len(ix.Expanded) {
+			return false
+		}
+		set := ix.Expanded[pos]
+		if set == nil {
+			return false
+		}
+		_, hit := set[vertexType]
+		return hit
+	}
+	return l == vertexType
 }
 
 // AnchorHopIndex builds the pattern graph for cr. See §16.2 of the design for
@@ -104,7 +179,7 @@ func (cr *CompiledRule) AnchorHopIndex() HopIndex {
 		}
 	}
 
-	idx := HopIndex{Labels: b.labels, Hops: b.hops, Anchor: b.anchor}
+	idx := HopIndex{Labels: b.labels, Hops: b.hops, Anchor: b.anchor, LabelExpand: b.expand}
 	idx.Dist = idx.distances()
 
 	// Ordered so the most fundamental refusal wins: without an anchor, nothing
@@ -114,6 +189,20 @@ func (cr *CompiledRule) AnchorHopIndex() HopIndex {
 		idx.Incomplete = "no pattern position binds $actorKey"
 	case b.multiAnchor:
 		idx.Incomplete = "several pattern positions bind $actorKey"
+	case b.expand[b.anchor]:
+		// walkToAnchors constructs the anchor's own vertex KEY from a single
+		// literal prefix ("vtx." + Labels[Anchor] + "."), because the anchor
+		// is pinned by {key: $actorKey} to exactly one vertex whose Contract
+		// #1 type the walk otherwise has no way to learn — a vertex reached
+		// by the walk carries only a bare NanoID (adjacency.EdgeEntry does
+		// not thread OtherType through seededNode), not its concrete type.
+		// An expanded anchor's actual instances can be ANY of several
+		// concrete types, so one literal prefix cannot be right for all of
+		// them. Refusing here — rather than guessing a prefix or threading
+		// per-vertex types through the walk — is the same fail-closed
+		// posture every other shape this builder cannot resolve takes: fall
+		// back to the shipped ActorEnumerator BFS, unchanged.
+		idx.Incomplete = "the anchor pattern position carries the `*` taxonomy-expansion sigil — the derivation cannot construct a single anchor key prefix for an expanded set"
 	case b.reject != "":
 		idx.Incomplete = b.reject
 	case b.ungrounded != "":
@@ -175,6 +264,7 @@ func (ix HopIndex) distances() []int {
 
 type hopIndexBuilder struct {
 	labels      []string
+	expand      []bool // parallel to labels; n.LabelExpand at each position's first occurrence
 	hops        []PatternHop
 	byVar       map[string]int
 	anchor      int
@@ -211,11 +301,13 @@ type hopIndexBuilder struct {
 func (b *hopIndexBuilder) position(n NodePattern) int {
 	if n.Variable == "" {
 		b.labels = append(b.labels, n.Label)
+		b.expand = append(b.expand, n.LabelExpand)
 		return len(b.labels) - 1
 	}
 	i, seen := b.byVar[n.Variable]
 	if !seen {
 		b.labels = append(b.labels, n.Label)
+		b.expand = append(b.expand, n.LabelExpand)
 		i = len(b.labels) - 1
 		b.byVar[n.Variable] = i
 	}
@@ -407,11 +499,13 @@ func (b *hopIndexBuilder) addExpr(e Expr) {
 // PositionsBinding returns every position whose label admits vertexType — the
 // node-seeded entry point (§4.7's 3b). An UNLABELED position matches any type,
 // which is what lets the derivation reach lenses whose label set is not
-// exhaustive and which Increments 1–2 therefore cannot narrow.
+// exhaustive and which Increments 1–2 therefore cannot narrow. A `*` position
+// admits vertexType by set membership against its taxonomy-resolved downward
+// closure (admitsType) rather than string equality.
 func (ix HopIndex) PositionsBinding(vertexType string) []int {
 	var out []int
-	for i, l := range ix.Labels {
-		if l == "" || l == vertexType {
+	for i := range ix.Labels {
+		if ix.admitsType(i, vertexType) {
 			out = append(out, i)
 		}
 	}
@@ -432,10 +526,7 @@ func (ix HopIndex) PositionsBinding(vertexType string) []int {
 // anchor's output can change — the skip §4.7 licenses. On an incomplete index
 // the caller must not read it that way.
 func (ix HopIndex) AnchorSideSeeds(srcType, rel, dstType string) []Seed {
-	admits := func(pos int, typ string) bool {
-		l := ix.Labels[pos]
-		return l == "" || l == typ
-	}
+	admits := ix.admitsType
 	var out []Seed
 	consider := func(srcPos, dstPos int) {
 		ds, dd := ix.Dist[srcPos], ix.Dist[dstPos]
@@ -480,9 +571,21 @@ type Seed struct {
 // StepsFrom returns the moves available while standing at position pos: for
 // each incident hop, the position it leads to and the adjacency read that gets
 // there. ToLabel is the pattern's label for the far end ("" when unlabeled),
-// which prunes an edge whose other end the pattern cannot bind.
+// which prunes an edge whose other end the pattern cannot bind. ToLabelExpand
+// + ToExpanded carry the same generalization when the far end is a `*`
+// position: the prune becomes set membership instead of string equality.
 func (ix HopIndex) StepsFrom(pos int) []PatternStep {
 	var out []PatternStep
+	step := func(toPos int, rel string, dir Direction, standingAtTail bool) PatternStep {
+		s := PatternStep{ToPos: toPos, Rel: rel, EdgeDir: edgeDirFor(dir, standingAtTail), ToLabel: ix.Labels[toPos]}
+		if toPos < len(ix.LabelExpand) && ix.LabelExpand[toPos] {
+			s.ToLabelExpand = true
+			if ix.Expanded != nil {
+				s.ToExpanded = ix.Expanded[toPos]
+			}
+		}
+		return s
+	}
 	// Two independent tests rather than a switch: a hop whose endpoints merged
 	// into ONE position (`(x)-[:r]->(x)`) is standing at both its ends, and a
 	// switch would read only the tail direction.
@@ -490,10 +593,10 @@ func (ix HopIndex) StepsFrom(pos int) []PatternStep {
 		if h.From == pos {
 			// Walking From→To follows the arrow as written, so the edge on the
 			// node we are standing on is outbound for DirOut.
-			out = append(out, PatternStep{ToPos: h.To, Rel: h.Rel, EdgeDir: edgeDirFor(h.Dir, true), ToLabel: ix.Labels[h.To]})
+			out = append(out, step(h.To, h.Rel, h.Dir, true))
 		}
 		if h.To == pos {
-			out = append(out, PatternStep{ToPos: h.From, Rel: h.Rel, EdgeDir: edgeDirFor(h.Dir, false), ToLabel: ix.Labels[h.From]})
+			out = append(out, step(h.From, h.Rel, h.Dir, false))
 		}
 	}
 	return out
@@ -507,6 +610,16 @@ type PatternStep struct {
 	Rel     string
 	EdgeDir string
 	ToLabel string
+
+	// ToLabelExpand + ToExpanded generalize ToLabel the same way NodePattern.
+	// LabelExpand + CompiledRule.LabelExpansion generalize a query pattern's
+	// bare label (§5.1): when ToLabelExpand is true, a far-end prune must
+	// test membership in ToExpanded rather than string-compare against
+	// ToLabel. ToExpanded is nil when the expansion was never resolved for
+	// this position — the caller must fail closed on that, not fall back to
+	// ToLabel.
+	ToLabelExpand bool
+	ToExpanded    map[string]struct{}
 }
 
 // edgeDirFor maps a pattern arrow onto the adjacency Direction to read while

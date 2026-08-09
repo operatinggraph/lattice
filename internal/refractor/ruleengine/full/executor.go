@@ -127,6 +127,13 @@ type executor struct {
 	// context check can be sampled rather than paid per row.
 	maxBindings int
 	steps       int
+
+	// labelExpansion is the compiled rule's LabelExpansion, threaded through
+	// so nodeMatches and the re-check inside seedNodes can resolve a
+	// LabelExpand-flagged pattern without a graph read (§4.4 — the hot path
+	// stays a map lookup). Nil for a rule with no `*` pattern, matching
+	// CompiledRule.LabelExpansion's own zero value.
+	labelExpansion map[string]map[string]struct{}
 }
 
 // cancelCheckInterval is how many checkpoint calls pass between context
@@ -223,17 +230,18 @@ func (e *Engine) ExecuteWithFootprint(
 	}
 
 	ex := &executor{
-		ctx:           ctx,
-		adjKV:         adjKV,
-		coreKV:        coreKV,
-		params:        ec.Parameters,
-		keyColumns:    compiled.KeyColumns,
-		seedAnchor:    seedAnchorFor(compiled.Query, ec.SeedAnchor),
-		nodes:         map[string]*nodeRef{},
-		edges:         map[string][]adjacency.EdgeEntry{},
-		edgeRevisions: map[string]uint64{},
-		edgeSelectors: map[string]*ruleengine.EdgeSelectorFootprint{},
-		maxBindings:   e.maxBindings,
+		ctx:            ctx,
+		adjKV:          adjKV,
+		coreKV:         coreKV,
+		params:         ec.Parameters,
+		keyColumns:     compiled.KeyColumns,
+		seedAnchor:     seedAnchorFor(compiled.Query, ec.SeedAnchor, compiled.LabelExpansion),
+		nodes:          map[string]*nodeRef{},
+		edges:          map[string][]adjacency.EdgeEntry{},
+		edgeRevisions:  map[string]uint64{},
+		edgeSelectors:  map[string]*ruleengine.EdgeSelectorFootprint{},
+		maxBindings:    e.maxBindings,
+		labelExpansion: compiled.LabelExpansion,
 	}
 
 	bindings := []binding{{}}
@@ -548,9 +556,12 @@ func (ex *executor) currentNode(b binding, n NodePattern) *nodeRef {
 
 // nodeMatches checks label match. A pattern label IS the Contract #1 vertex key
 // type: it matches iff the node's key parses as `vtx.<type>.<id>` and `<type>`
-// equals the label. Fine-grained classification lives in the body's `class`
-// field (Contract #1 §1) and is matched with a property predicate —
-// `MATCH (l {class: "location"})` — never with a label.
+// equals the label, OR — when the pattern carries the `*` taxonomy-expansion
+// sigil (NodePattern.LabelExpand) — `<type>` is a member of the label's
+// resolved downward closure (dynamic-type-taxonomy-design.md §5.1 site 1).
+// Fine-grained classification lives in the body's `class` field (Contract #1
+// §1) and is matched with a property predicate — `MATCH (l {class:
+// "location"})` — never with a label.
 //
 // This is the reading of a label that every other mechanism already applies,
 // and each of them depends on the binder agreeing: the labeled seed scan
@@ -562,6 +573,13 @@ func (ex *executor) currentNode(b binding, n NodePattern) *nodeRef {
 // label set the executor does not honor — on the auth plane, a grant that never
 // updates and never retracts.
 //
+// The lookup is keyed on the PATTERN's own LabelExpand flag, never on the
+// label string alone: a query may bind both `(a:location)` and
+// `(b:location*)`, and only the second ever consults LabelExpansion. A
+// LabelExpand pattern whose label has no entry in LabelExpansion (the
+// expansion was never resolved for it) matches nothing — fail closed, never
+// fall back to the bare-label reading.
+//
 // Returns true when the pattern label is empty.
 func (ex *executor) nodeMatches(ref *nodeRef, n NodePattern) bool {
 	if n.Label == "" {
@@ -571,7 +589,18 @@ func (ex *executor) nodeMatches(ref *nodeRef, n NodePattern) bool {
 		return false
 	}
 	vtype, _, ok := substrate.ParseVertexKey(ref.key)
-	return ok && vtype == n.Label
+	if !ok {
+		return false
+	}
+	if n.LabelExpand {
+		set, hasSet := ex.labelExpansion[n.Label]
+		if !hasSet {
+			return false
+		}
+		_, hit := set[vtype]
+		return hit
+	}
+	return vtype == n.Label
 }
 
 // checkProps is a thin alias retained for readability.
@@ -634,7 +663,7 @@ func (ex *executor) seedNodes(b binding, n NodePattern) ([]*nodeRef, error) {
 	// defensive: arming already proved this exact pattern point-seedable, and
 	// a seed that somehow reached a pattern it cannot bind falls back to the
 	// scan below rather than narrowing the wrong pattern.
-	if seed := ex.takeSeedAnchor(); seed != "" && seedAnchorBinds(n, seed) {
+	if seed := ex.takeSeedAnchor(); seed != "" && seedAnchorBinds(n, seed, ex.labelExpansion) {
 		return ex.pointCandidate(b, n, seed)
 	}
 
@@ -650,11 +679,38 @@ func (ex *executor) seedNodes(b binding, n NodePattern) ([]*nodeRef, error) {
 	// error here would retract live rows on a transient substrate blip. An
 	// empty bucket/prefix returns an empty slice with no error and seeds
 	// nothing.
+	//
+	// A LabelExpand pattern cannot be expressed as ONE prefix — an abstract
+	// label's own "vtx.<label>." prefix has no instances at all (§3.2), and
+	// the label's resolved closure is a SET of concrete types, not a single
+	// string. So this lists once per concrete member instead. An unresolved
+	// expansion (no entry in ex.labelExpansion) binds nothing, matching the
+	// fail-closed posture the other three label-equality sites already take
+	// — never fall back to scanning the bare (abstract) prefix, which would
+	// silently seed zero candidates from every unseeded evaluation of a
+	// `*`-anchored lens (boot, Rebuild, a neighbour-triggered re-execute) and
+	// disagree with a seeded evaluation of the SAME lens that reaches the
+	// leaf via pointCandidate above — the disagreement filter-retraction
+	// reads as a mass revoke.
 	var keys []string
 	var err error
-	if n.Label != "" {
+	switch {
+	case n.LabelExpand:
+		set, hasSet := ex.labelExpansion[n.Label]
+		if !hasSet {
+			return nil, nil
+		}
+		for vt := range set {
+			vtKeys, lerr := ex.coreKV.ListKeysPrefix(ex.ctx, substrate.VertexPrefix+"."+vt+".")
+			if lerr != nil {
+				err = lerr
+				break
+			}
+			keys = append(keys, vtKeys...)
+		}
+	case n.Label != "":
 		keys, err = ex.coreKV.ListKeysPrefix(ex.ctx, substrate.VertexPrefix+"."+n.Label+".")
-	} else {
+	default:
 		keys, err = ex.coreKV.ListKeys(ex.ctx)
 	}
 	if err != nil {
@@ -744,12 +800,12 @@ func (ex *executor) takeSeedAnchor() string {
 // pattern, the same derivation AnchorProjectionKey uses — is ever seedable;
 // later MATCH clauses, OPTIONAL MATCH clauses, and sibling comma-separated
 // patterns keep their own candidate sets whatever the event was.
-func seedAnchorFor(q *Query, seedKey string) string {
+func seedAnchorFor(q *Query, seedKey string, exp map[string]map[string]struct{}) string {
 	if seedKey == "" || q == nil {
 		return ""
 	}
 	n, ok := anchorPattern(q)
-	if !ok || !seedAnchorBinds(n, seedKey) {
+	if !ok || !seedAnchorBinds(n, seedKey, exp) {
 		return ""
 	}
 	return seedKey
@@ -758,13 +814,18 @@ func seedAnchorFor(q *Query, seedKey string) string {
 // seedAnchorBinds reports whether one vertex key can stand in for pattern n's
 // entire candidate set. Two structural conditions:
 //
-//   - n is labeled with the key's own Contract #1 vertex type. An unlabeled
-//     pattern binds any type (so one vertex is not its candidate set), and a
-//     pattern labeled with a DIFFERENT type is not the event's pattern at all
-//     — a neighbor-type event says nothing about which anchors changed.
+//   - n is labeled with the key's own Contract #1 vertex type — or, when n
+//     carries the `*` taxonomy-expansion sigil, the key's type is a member
+//     of the label's resolved downward closure (exp[n.Label]) — §5.1 site 2,
+//     the engine half of event seeding. An unlabeled pattern binds any type
+//     (so one vertex is not its candidate set), and a pattern labeled with a
+//     type outside what n admits is not the event's pattern at all — a
+//     neighbor-type event says nothing about which anchors changed. A
+//     LabelExpand pattern whose label has no entry in exp matches nothing —
+//     fail closed, never the bare-label reading.
 //   - n carries no `key` property. Such a pattern already resolves to a point
 //     read of its own key, which the seed must not silently displace.
-func seedAnchorBinds(n NodePattern, seedKey string) bool {
+func seedAnchorBinds(n NodePattern, seedKey string, exp map[string]map[string]struct{}) bool {
 	if n.Label == "" {
 		return false
 	}
@@ -772,7 +833,18 @@ func seedAnchorBinds(n NodePattern, seedKey string) bool {
 		return false
 	}
 	vtype, _, ok := substrate.ParseVertexKey(seedKey)
-	return ok && vtype == n.Label
+	if !ok {
+		return false
+	}
+	if n.LabelExpand {
+		set, hasSet := exp[n.Label]
+		if !hasSet {
+			return false
+		}
+		_, hit := set[vtype]
+		return hit
+	}
+	return vtype == n.Label
 }
 
 // fetchNode reads a Core KV vertex, returning nil for missing or soft-deleted.

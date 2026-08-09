@@ -65,7 +65,7 @@ func walkOwnedColumns(branches []ruleengine.CompiledRule) map[string]int {
 //
 // seedAnchor rides the EventContext into the single-branch call only. A
 // multi-walk lens never receives one — seedAnchorFor's eligibility excludes it
-// (seedAnchorLabel is cleared for multi-walk installs, and a Personal lens
+// (seedAnchorLabels is cleared for multi-walk installs, and a Personal lens
 // carries an ActorEnumerator besides) — so the branch loop passes the unseeded
 // context and every branch builds its own anchor candidate set by scan.
 func (p *Pipeline) executeBranches(

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -19,6 +20,7 @@ import (
 	"github.com/operatinggraph/lattice/internal/refractor/ruleengine"
 	"github.com/operatinggraph/lattice/internal/refractor/ruleengine/full"
 	"github.com/operatinggraph/lattice/internal/refractor/subjects"
+	"github.com/operatinggraph/lattice/internal/refractor/taxonomy"
 	"github.com/operatinggraph/lattice/internal/substrate"
 )
 
@@ -132,7 +134,7 @@ type Pipeline struct {
 
 	// ruleMu guards every field useFullEngineBranches writes — engineKind,
 	// fullEngine, fullCR, fullCRBranches, fullCRWalkOwnedColumns, the two
-	// plainReproject pairs above, and seedAnchorLabel. Those are the only
+	// plainReproject pairs above, and seedAnchorLabels. Those are the only
 	// fields on this struct rewritten AFTER Run: a MATCH hot-reload
 	// (cmd/refractor/reload.go) calls UseFullEngineBranches on a LIVE pipeline
 	// from CoreKVSource's dispatch goroutine while the consumer goroutine is
@@ -173,10 +175,12 @@ type Pipeline struct {
 	// must advance in the same critical section that swaps the rule.
 	ruleGen uint64
 
-	// seedAnchorLabel is this lens's anchor vertex type
-	// (full.CompiledRule.AnchorLabel — the first MATCH clause's first node's
-	// label), derived once per engine install alongside plainReprojectLabels.
-	// An event on this type is a mutation of the anchor itself, so the
+	// seedAnchorLabels is the set of vertex types an event may seed this
+	// lens's evaluation with — a singleton {AnchorLabel} for a bare anchor
+	// pattern, or the taxonomy-resolved downward closure for a `*`-suffixed
+	// one (dynamic-type-taxonomy-design.md §5.1 site 4), derived once per
+	// engine install alongside plainReprojectLabels. An event whose type is a
+	// member of this set is a mutation of the anchor itself, so the
 	// evaluation it triggers can be narrowed to that one anchor instead of
 	// recomputing every anchor's rows (refractor-footprint-reduction-design.md
 	// §D2 Phase 1). Empty disables seeding entirely: a multi-walk lens (whose
@@ -189,12 +193,12 @@ type Pipeline struct {
 	// AFTER UseFullEngine (cmd/refractor/main.go) — a snapshot taken here
 	// would read every one of them unset and arm seeding for lenses that must
 	// never have it.
-	seedAnchorLabel string
+	seedAnchorLabels map[string]struct{}
 
 	// anchorHops is the compiled pattern GRAPH the affected-anchor derivation
 	// walks under (auth-plane-projection-latency-design.md §4.7). Guarded by
-	// ruleMu and republished on every rule swap alongside seedAnchorLabel, so a
-	// hot-reload can never leave a previous rule body's graph armed. Its zero
+	// ruleMu and republished on every rule swap alongside seedAnchorLabels, so
+	// a hot-reload can never leave a previous rule body's graph armed. Its zero
 	// value is Complete == false, which is the fail-closed answer: fall back to
 	// the enumerator's BFS.
 	anchorHops full.HopIndex
@@ -256,6 +260,19 @@ type Pipeline struct {
 	// evaluation, before any write path (Contract #3 §3.10). Nil for every
 	// non-secure lens — rows pass through untouched.
 	secureDecryptor *SecureDecryptor
+
+	// taxonomyResolver expands a `*`-suffixed label pattern into its
+	// taxonomy-declared downward closure (dynamic-type-taxonomy-design.md
+	// §4). Installed once before Run via SetTaxonomyResolver, like
+	// secureDecryptor and sweeper above — useFullEngineBranches reads it on
+	// every derivation, including a MATCH hot-reload, but nothing ever
+	// writes it after activation. Nil behaves exactly like a Resolver with
+	// no snapshot loaded (taxonomy.StatusUnknown): a lens with no `*`
+	// pattern never consults it at all (§14 Fire A item 3's inertness
+	// guarantee), so a pipeline that never calls SetTaxonomyResolver is
+	// unaffected unless a compiled rule carries the sigil, in which case it
+	// correctly refuses activation.
+	taxonomyResolver *taxonomy.Resolver
 
 	// patternClosedOutput reports whether this lens's row for an anchor is a
 	// function solely of the subgraph its compiled pattern binds from that
@@ -514,8 +531,14 @@ func New(
 // UseFullEngine switches this pipeline's evaluate path to the full
 // openCypher engine. cr must be the *full.CompiledRule that lens.Parse /
 // corekv_source produced for this rule. Must be called before Run.
-func (p *Pipeline) UseFullEngine(eng *full.Engine, cr ruleengine.CompiledRule) {
-	p.useFullEngineBranches(eng, cr, nil)
+//
+// Returns an error — and leaves the pipeline's previously published rule
+// state untouched — when a `*` label pattern's taxonomy expansion cannot be
+// trusted at all (taxonomy.StatusUnknown: no resolver installed, no
+// snapshot loaded, an unresolvable label, or a cycle/depth fault). See
+// useFullEngineBranches.
+func (p *Pipeline) UseFullEngine(eng *full.Engine, cr ruleengine.CompiledRule) error {
+	return p.useFullEngineBranches(eng, cr, nil)
 }
 
 // UseFullEngineBranches is UseFullEngine's multi-walk sibling
@@ -523,13 +546,17 @@ func (p *Pipeline) UseFullEngine(eng *full.Engine, cr ruleengine.CompiledRule) {
 // a Personal lens's N independently-compiled query branches (lens.Rule.
 // CompiledBranches), cr must be branches[0]. Nil/single-element branches
 // behaves exactly like UseFullEngine. Must be called before Run.
-func (p *Pipeline) UseFullEngineBranches(eng *full.Engine, cr ruleengine.CompiledRule, branches []ruleengine.CompiledRule) {
-	p.useFullEngineBranches(eng, cr, branches)
+func (p *Pipeline) UseFullEngineBranches(eng *full.Engine, cr ruleengine.CompiledRule, branches []ruleengine.CompiledRule) error {
+	return p.useFullEngineBranches(eng, cr, branches)
 }
 
-func (p *Pipeline) useFullEngineBranches(eng *full.Engine, cr ruleengine.CompiledRule, branches []ruleengine.CompiledRule) {
+func (p *Pipeline) useFullEngineBranches(eng *full.Engine, cr ruleengine.CompiledRule, branches []ruleengine.CompiledRule) error {
 	// Everything is derived into locals first and published under one Lock at
 	// the end (see ruleMu): a reader must never observe a half-rewritten rule.
+	// Nothing is published at all if this function returns an error part way
+	// through — the taxonomy-expansion refusal below is an activation
+	// failure, not a rule swap, so the pipeline keeps evaluating whatever
+	// rule (if any) it already had.
 	next := ruleState{
 		engineKind: ruleengine.EngineFull,
 		engine:     eng,
@@ -559,12 +586,19 @@ func (p *Pipeline) useFullEngineBranches(eng *full.Engine, cr ruleengine.Compile
 	relations := map[string]struct{}{}
 	exhaustive := true
 	relationsExhaustive := true
+	expansionNeeded := map[string]struct{}{}
 	for _, c := range all {
 		fullCR, isFull := c.(*full.CompiledRule)
 		if !isFull {
 			exhaustive = false
 			relationsExhaustive = false
-			break
+			// continue, not break: a LATER branch may still be a
+			// *full.CompiledRule carrying `*`, and expansionNeeded below
+			// must see it regardless of exhaustive already being lost —
+			// otherwise an unresolvable label on that branch would be
+			// silently dropped instead of refusing activation loudly
+			// through the same path every other `*` branch goes through.
+			continue
 		}
 		ls, ok := fullCR.ReferencedLabels()
 		if !ok {
@@ -573,6 +607,9 @@ func (p *Pipeline) useFullEngineBranches(eng *full.Engine, cr ruleengine.Compile
 			for l := range ls {
 				labels[l] = struct{}{}
 			}
+		}
+		for l := range fullCR.ExpansionLabels() {
+			expansionNeeded[l] = struct{}{}
 		}
 		// The relation set is derived independently of the label set: a lens
 		// can name every label exhaustively while traversing an untyped
@@ -588,6 +625,78 @@ func (p *Pipeline) useFullEngineBranches(eng *full.Engine, cr ruleengine.Compile
 			}
 		}
 	}
+
+	// Taxonomy expansion (dynamic-type-taxonomy-design.md §4). Consulted only
+	// when at least one pattern in the query carries the `*` sigil: a
+	// sigil-free query's labels are derived from ReferencedLabels() alone,
+	// above, and the resolver is never called for it (§14 Fire A item 3's
+	// inertness guarantee).
+	var expandedLabels map[string]map[string]struct{}
+	if len(expansionNeeded) > 0 {
+		status := taxonomy.StatusUnknown
+		if p.taxonomyResolver != nil {
+			expandedLabels, status = p.taxonomyResolver.Expand(expansionNeeded)
+		}
+		if status == taxonomy.StatusUnknown {
+			// §4.2's two-tier fork: a set-KNOWN-but-possibly-stale answer
+			// may still activate broad (below); a set UNKNOWN answer must
+			// never activate at all, because no filter width rescues a
+			// MATCHER evaluating against a wrong expansion. Nothing has
+			// been published — the pipeline's previous rule
+			// state (if any) is untouched.
+			return fmt.Errorf(
+				"pipeline: taxonomy expansion unknown for label(s) %s — no resolver snapshot, an unresolvable label, or a cycle/depth fault; refusing activation rather than risk projecting the wrong row set",
+				sortedLabelList(expansionNeeded))
+		}
+		if status != taxonomy.StatusArmed {
+			// Known but not guaranteed current: correct-but-slower, never
+			// wrong-but-fast. Forces the broad filter even though every
+			// referenced label above resolved exhaustively.
+			exhaustive = false
+		}
+		// An abstract label with no concrete descendants (or whose
+		// descendants are all themselves abstract) resolves to a KNOWN, empty
+		// set — Expand reports ok/StatusArmed for it, not StatusUnknown, per
+		// §3.4's expanded-set row: "genuinely zero leaves" is a real answer,
+		// not a resolver fault. But publishing exhaustive=true on it would
+		// make reprojectLabels lose that label's contribution entirely
+		// (nothing is unioned in below) while every OTHER gate keyed off
+		// reprojectLabels — plainVertexRelevant chief among them, whose false
+		// branch acks-and-drops with no fallback — reads the narrowed set as
+		// authoritative. That is the "stale narrow set" §6.5 calls the only
+		// unacceptable state: the lens goes silently dark on that type while
+		// presenting as narrowed and health-green. (Actor-aware lenses do not
+		// share this hazard — an unseeded fan-out re-executes rather than
+		// relying on the plain reprojection gate — so this is plain-lens
+		// specific.) Forces the broad filter instead, exactly like a
+		// not-yet-armed resolver.
+		for l, set := range expandedLabels {
+			if len(set) == 0 {
+				exhaustive = false
+				slog.Warn("pipeline: taxonomy label resolved to zero concrete types — degrading to the broad filter",
+					"ruleId", p.ruleID, "label", l)
+			}
+		}
+		// Every LabelExpand label's own raw string was already added to
+		// labels by ReferencedLabels() above (it collects the AST label text
+		// unconditionally, blind to the `*` sigil). That string must not
+		// survive into reprojectLabels on its own: for an ABSTRACT label it
+		// names no instance at all (§3.4's expanded-set row — including it
+		// would add a filter subject that can never match, and would let
+		// plainVertexRelevant admit a type that cannot exist), and for a
+		// CONCRETE label the resolved set already contains it via Expand's
+		// reflexivity. So each expanded label is deleted and replaced
+		// wholesale by its resolved concrete member set.
+		for l := range expandedLabels {
+			delete(labels, l)
+		}
+		for _, set := range expandedLabels {
+			for vt := range set {
+				labels[vt] = struct{}{}
+			}
+		}
+	}
+
 	if exhaustive {
 		next.reprojectLabels = labels
 		next.reprojectAll = false
@@ -596,26 +705,71 @@ func (p *Pipeline) useFullEngineBranches(eng *full.Engine, cr ruleengine.Compile
 		next.reprojectRelations = relations
 		next.relationsExhaustive = true
 	}
-	// Pin the anchor label an anchor-labeled event can seed the evaluation
+
+	// Publish the taxonomy-resolved compiled rule(s) — a copy carrying
+	// LabelExpansion (full.WithLabelExpansion, §4.3), never a mutation of the
+	// caller's cr/branches — but only when expansion actually ran; a lens
+	// with no `*` keeps the exact rule object it was given, preserving
+	// identity as well as behaviour.
+	if len(expansionNeeded) > 0 {
+		wrapped := make([]ruleengine.CompiledRule, len(all))
+		for i, c := range all {
+			if fullCR, isFull := c.(*full.CompiledRule); isFull {
+				wrapped[i] = full.WithLabelExpansion(fullCR, expandedLabels)
+			} else {
+				wrapped[i] = c
+			}
+		}
+		next.cr = wrapped[0]
+		if len(branches) > 1 {
+			next.branches = wrapped
+		}
+	}
+
+	// Pin the anchor label(s) an anchor-labeled event can seed the evaluation
 	// with. Derived unconditionally like the label set above, and for the same
 	// reason: a reload must never leave a previous rule body's anchor armed. A
 	// multi-walk lens is excluded outright — branch merging evaluates N
 	// independent queries, each with its own anchor, and one seed cannot speak
 	// for all of them.
 	if len(branches) <= 1 {
-		if fullCR, isFull := cr.(*full.CompiledRule); isFull {
+		if fullCR, isFull := next.cr.(*full.CompiledRule); isFull {
 			if label, ok := fullCR.AnchorLabel(); ok {
-				next.seedAnchorLabel = label
+				if fullCR.AnchorLabelExpand() {
+					if set, ok := expandedLabels[label]; ok {
+						next.seedAnchorLabels = set
+					}
+				} else {
+					next.seedAnchorLabels = map[string]struct{}{label: {}}
+				}
 			}
 			// The pattern graph the affected-anchor derivation walks under
 			// (auth-plane-projection-latency-design.md §4.7). Derived here for
 			// the same two reasons the anchor label is, and excluded on the
 			// same multi-walk arm: each branch carries its own anchor, and one
-			// graph cannot speak for all of them.
-			next.anchorHops = fullCR.AnchorHopIndex()
+			// graph cannot speak for all of them. WithLabelExpansion threads
+			// the SAME resolved sets into every `*` position the graph
+			// carries — PositionsBinding, AnchorSideSeeds and the walk's
+			// far-end prune all read them (dynamic-type-taxonomy-design.md
+			// §5.1's HopIndex-shaped sixth mechanism) — mirroring
+			// full.WithLabelExpansion exactly: a no-op when expandedLabels is
+			// nil (no `*` anywhere in this query).
+			next.anchorHops = fullCR.AnchorHopIndex().WithLabelExpansion(expandedLabels)
 		}
 	}
 	p.publishRuleState(next)
+	return nil
+}
+
+// sortedLabelList returns labels' keys sorted, for a deterministic error
+// message.
+func sortedLabelList(labels map[string]struct{}) []string {
+	out := make([]string, 0, len(labels))
+	for l := range labels {
+		out = append(out, l)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // ruleState is a coherent snapshot of everything useFullEngineBranches
@@ -637,7 +791,7 @@ type ruleState struct {
 	reprojectAll        bool
 	reprojectRelations  map[string]struct{}
 	relationsExhaustive bool
-	seedAnchorLabel     string
+	seedAnchorLabels    map[string]struct{}
 	anchorHops          full.HopIndex
 }
 
@@ -668,7 +822,7 @@ func (p *Pipeline) ruleState() ruleState {
 		reprojectAll:        p.plainReprojectAll,
 		reprojectRelations:  p.plainReprojectRelations,
 		relationsExhaustive: p.plainRelationsExhaustive,
-		seedAnchorLabel:     p.seedAnchorLabel,
+		seedAnchorLabels:    p.seedAnchorLabels,
 		anchorHops:          p.anchorHops,
 	}
 }
@@ -687,7 +841,7 @@ func (p *Pipeline) publishRuleState(rs ruleState) {
 	p.plainReprojectAll = rs.reprojectAll
 	p.plainReprojectRelations = rs.reprojectRelations
 	p.plainRelationsExhaustive = rs.relationsExhaustive
-	p.seedAnchorLabel = rs.seedAnchorLabel
+	p.seedAnchorLabels = rs.seedAnchorLabels
 	p.anchorHops = rs.anchorHops
 }
 
@@ -700,10 +854,12 @@ func (p *Pipeline) publishRuleState(rs ruleState) {
 //
 // Every conjunct is a correctness requirement, not a heuristic:
 //
-//   - eventLabel == seedAnchorLabel — only a mutation of the anchor ITSELF
-//     bounds the change to one anchor. A neighbor (referenced non-anchor type)
-//     event can affect any number of anchors through the walk, and deriving
-//     which ones is §D2 Phase 2; it keeps the full recompute.
+//   - eventLabel is a member of seedAnchorLabels — only a mutation of the
+//     anchor ITSELF (or, for a `*`-suffixed anchor, one of its
+//     taxonomy-resolved concrete subtypes) bounds the change to one anchor.
+//     A neighbor (referenced non-anchor type) event can affect any number of
+//     anchors through the walk, and deriving which ones is §D2 Phase 2; it
+//     keeps the full recompute.
 //   - no ActorEnumerator and no envelope — an actor-aware/personal evaluation
 //     is already scoped to one actor, and its "anchor" is that actor, not the
 //     event vertex; seeding it with an event key would evaluate the wrong
@@ -714,7 +870,10 @@ func (p *Pipeline) publishRuleState(rs ruleState) {
 //     conjunct is what makes applyDiffRetraction unreachable from a seeded
 //     evaluation.
 func (p *Pipeline) seedAnchorFor(rs ruleState, eventLabel, eventKey string) string {
-	if rs.seedAnchorLabel == "" || eventKey == "" || eventLabel != rs.seedAnchorLabel {
+	if eventKey == "" {
+		return ""
+	}
+	if _, ok := rs.seedAnchorLabels[eventLabel]; !ok {
 		return ""
 	}
 	if p.actorEnumerator != nil || p.envelopeFn != nil || p.multiEnvelopeFn != nil {
@@ -1180,6 +1339,19 @@ func (p *Pipeline) ZeroRowRetractionArmed() bool {
 // (Contract #3 §3.10). Pass nil to clear. Must be called before Run.
 func (p *Pipeline) SetSecureDecryptor(d *SecureDecryptor) {
 	p.secureDecryptor = d
+}
+
+// SetTaxonomyResolver installs the taxonomy resolver this pipeline's `*`
+// label patterns expand against (dynamic-type-taxonomy-design.md §4). Item
+// 4's CDC consumer constructs one Resolver and calls this once per pipeline
+// at activation, mirroring SetSweepPlan/SetSecureDecryptor. Must be called
+// before Run — like SetSecureDecryptor, not after: useFullEngineBranches
+// reads taxonomyResolver unguarded, and a MATCH hot-reload
+// (cmd/refractor/reload.go) calls it on a LIVE pipeline from CoreKVSource's
+// dispatch goroutine, so a later SetTaxonomyResolver call would race that
+// read.
+func (p *Pipeline) SetTaxonomyResolver(r *taxonomy.Resolver) {
+	p.taxonomyResolver = r
 }
 
 // SetAuthPlane records whether this lens projects an authorization surface

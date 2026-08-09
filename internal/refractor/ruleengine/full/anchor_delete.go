@@ -82,8 +82,29 @@ func (*Engine) AnchorProjectionKey(
 	// anchor tombstone (retract) from a secondary-node tombstone (re-execute):
 	// a provider/appointment tombstone is the anchor; a patient tombstone
 	// reaching the appointment lens via forPatient is a secondary node.
-	anchorVar, anchorLabel, found := anchorNode(q)
-	if !found || anchorLabel == "" || eventType != anchorLabel {
+	//
+	// When the anchor pattern carries the `*` taxonomy-expansion sigil, the
+	// discriminator is set membership against the resolved downward closure
+	// instead of string equality — §5.1 site 3, anchor retraction, the most
+	// dangerous of the four: left as equality, an abstract-anchored lens
+	// whose anchor tombstones as a leaf type never matches anchorLabel, so
+	// the retraction never fires and the row goes stale — a grant that never
+	// revokes, on a grant-producing lens. A LabelExpand anchor whose label
+	// has no entry in LabelExpansion refuses (fail closed) rather than
+	// falling back to the bare-label reading.
+	anchorVar, anchorLabel, anchorExpand, found := anchorNode(q)
+	if !found || anchorLabel == "" {
+		return nil, false
+	}
+	if anchorExpand {
+		set, hasSet := compiled.LabelExpansion[anchorLabel]
+		if !hasSet {
+			return nil, false
+		}
+		if _, hit := set[eventType]; !hit {
+			return nil, false
+		}
+	} else if eventType != anchorLabel {
 		return nil, false
 	}
 
@@ -255,6 +276,24 @@ func (cr *CompiledRule) AnchorLabel() (string, bool) {
 	return n.Label, true
 }
 
+// AnchorLabelExpand reports whether the anchor pattern AnchorLabel names
+// carries the `*` taxonomy-expansion sigil (NodePattern.LabelExpand) — the
+// signal useFullEngineBranches needs to decide whether
+// ruleState.seedAnchorLabels holds the bare anchor label alone or its
+// resolved downward closure. False (including when there is no anchor) is
+// the correct default: a query with no `*` anywhere always takes the bare-
+// label branch at every call site that consults this method.
+func (cr *CompiledRule) AnchorLabelExpand() bool {
+	if cr == nil || cr.Query == nil {
+		return false
+	}
+	n, found := anchorPattern(cr.Query)
+	if !found {
+		return false
+	}
+	return n.LabelExpand
+}
+
 // anchorPattern returns the first MATCH clause's first node pattern — the
 // lens's anchor, and the single derivation every anchor-scoped mechanism
 // shares (retraction key resolution, engine event seeding, the pipeline's
@@ -274,13 +313,16 @@ func anchorPattern(q *Query) (NodePattern, bool) {
 	return NodePattern{}, false
 }
 
-// anchorNode returns the variable + label of the lens's anchor pattern.
-func anchorNode(q *Query) (variable, label string, ok bool) {
+// anchorNode returns the variable + label of the lens's anchor pattern, plus
+// whether that label carries the `*` taxonomy-expansion sigil
+// (NodePattern.LabelExpand) — the flag AnchorProjectionKey needs to decide
+// between a bare-label equality check and a resolved-set membership check.
+func anchorNode(q *Query) (variable, label string, expand bool, ok bool) {
 	n, found := anchorPattern(q)
 	if !found {
-		return "", "", false
+		return "", "", false, false
 	}
-	return n.Variable, n.Label, true
+	return n.Variable, n.Label, n.LabelExpand, true
 }
 
 // firstReturnItem returns the first projection item of the RETURN clause — the

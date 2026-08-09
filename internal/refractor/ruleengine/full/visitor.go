@@ -271,15 +271,6 @@ func (v *astVisitor) visitNodePattern(ctx cypher.IOC_NodePatternContext) NodePat
 			"write a single label per node pattern", ctx.GetText())
 		return np
 	}
-	if np.LabelExpand {
-		// Label expansion (design §14 Fire A item 3) has no resolver:
-		// internal/refractor/taxonomy does not exist. Accepting the sigil here
-		// and letting the executor treat it as the bare label would silently
-		// match only `vtx.<label>.*` — for an abstract type, no instances at
-		// all — a silent empty result set where the author asked for a
-		// subtype union. Refuse loudly instead of guessing.
-		v.fail("label expansion (:%s*) is not available: no taxonomy resolver", np.Label)
-	}
 	return np
 }
 

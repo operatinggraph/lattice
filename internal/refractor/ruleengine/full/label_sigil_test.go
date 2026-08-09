@@ -2,10 +2,11 @@ package full
 
 // The `*` label-expansion sigil (dynamic-type-taxonomy-design.md §14 Fire A)
 // is a grammar-level extension confined to oC_NodePattern: `(l:location*)`
-// parses and the visitor records the sigil on NodePattern.LabelExpand, but
-// Parse refuses it outright because no taxonomy resolver exists to expand it
-// (internal/refractor/taxonomy is unbuilt) — see refusal (b) below.
-// Refusal (a) additionally rejects a sigil on a multi-label pattern, which is
+// parses, the visitor records the sigil on NodePattern.LabelExpand, and
+// Parse accepts it — resolution against a live taxonomy
+// (internal/refractor/taxonomy) is an activation-time question
+// (pipeline.useFullEngineBranches), not a parse-time one. The one refusal
+// Parse still carries rejects a sigil on a multi-label pattern, which is
 // ambiguous about which label it expands.
 //
 // These tests also pin that the sigil is confined to oC_NodePattern and does
@@ -104,26 +105,29 @@ func TestVisitNodePattern_LabelSigil(t *testing.T) {
 	}
 }
 
-// TestParse_LabelSigilRefused pins refusal (b): the sigil parses at the
-// grammar level, but Parse refuses it because no taxonomy resolver exists to
-// expand it — an accepted-but-silently-bare label would match only
-// `vtx.location.*`, which for an abstract type is no instances at all.
-func TestParse_LabelSigilRefused(t *testing.T) {
-	_, err := New().Parse(`MATCH (l:location*) RETURN l`)
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "expansion")
-	require.Contains(t, err.Error(), "location")
+// TestParse_LabelSigilCompilesUnresolved pins the parse/activation split:
+// the sigil parses AND compiles, and the resulting CompiledRule carries the
+// flag through unresolved (LabelExpansion nil), since Parse has no graph
+// access and cannot resolve anything itself. Resolution happens at
+// activation (internal/refractor/pipeline's useFullEngineBranches), not at
+// parse time.
+func TestParse_LabelSigilCompilesUnresolved(t *testing.T) {
+	cr, err := New().Parse(`MATCH (l:location*) RETURN l`)
+	require.NoError(t, err)
+	compiled, ok := cr.(*CompiledRule)
+	require.True(t, ok)
+	require.Nil(t, compiled.LabelExpansion)
+	labels := compiled.ExpansionLabels()
+	require.Equal(t, map[string]struct{}{"location": {}}, labels)
 }
 
 // TestParse_MultiLabelSigilRefused pins refusal (a): a sigil on a multi-label
 // pattern is ambiguous about which label expands, so it is refused
-// independently of (and with a more specific message than) the "no resolver"
-// refusal.
+// independently of anything the taxonomy resolver could ever answer.
 func TestParse_MultiLabelSigilRefused(t *testing.T) {
 	_, err := New().Parse(`MATCH (n:A:B*) RETURN n`)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "ambiguous")
-	require.NotContains(t, err.Error(), "no taxonomy resolver")
 }
 
 // TestParse_LabelSigilNoRegressionInExpressionGrammar pins that the sigil

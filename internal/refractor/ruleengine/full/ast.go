@@ -260,6 +260,19 @@ type CompiledRule struct {
 	// adapter requires. Empty/unset keeps the legacy first-RETURN-item key, so
 	// single-key lenses and directly-constructed test rules are unchanged.
 	KeyColumns []string
+
+	// LabelExpansion maps a label carrying the `*` taxonomy-expansion sigil
+	// (NodePattern.LabelExpand) to the set of concrete vertex key types it
+	// admits — the resolver's answer for this query, captured once at
+	// activation/re-derivation by WithLabelExpansion
+	// (dynamic-type-taxonomy-design.md §4.3). Nil for any query with no `*`
+	// pattern, and for every query until an activation has resolved one.
+	//
+	// The four label-equality sites key their lookup on the PATTERN's own
+	// LabelExpand flag, never on the label string alone — a query may
+	// contain both `(a:location)` and `(b:location*)`, and only the second
+	// ever looks in this map.
+	LabelExpansion map[string]map[string]struct{}
 }
 
 // EngineName implements ruleengine.CompiledRule.

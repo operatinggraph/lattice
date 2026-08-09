@@ -343,7 +343,10 @@ func (rl *reloader) update(_, newLens *lens.Rule, kind lens.UpdateKind) {
 				}
 			}
 		}
-		entry.pipeline.UseFullEngineBranches(rl.fullEngine, newLens.CompiledRule, newLens.CompiledBranches)
+		if err := entry.pipeline.UseFullEngineBranches(rl.fullEngine, newLens.CompiledRule, newLens.CompiledBranches); err != nil {
+			rl.refuse(entry, newLens.ID, "label expansion (MATCH update)", "err", err)
+			return
+		}
 		rl.logger.Info("lens MATCH hot-reloaded", "lensId", newLens.ID)
 		entry.reporter.SetRuleSequence(newLens.Sequence)
 		entry.reporter.SetRuleEngine(newLens.ResolvedEngine)

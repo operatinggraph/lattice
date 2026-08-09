@@ -324,7 +324,7 @@ func TestDeriveAnchors_ReadCapZeroMeansUnset(t *testing.T) {
 	}
 }
 
-// TestAnchorHops_ReloadLifetime mirrors the seedAnchorLabel reload tests: the
+// TestAnchorHops_ReloadLifetime mirrors the seedAnchorLabels reload tests: the
 // graph is republished on every rule swap, so a lens edited down to multiple
 // walks disarms the derivation and one edited back re-arms it. A stale graph
 // would direct the walk under a pattern the lens no longer has.

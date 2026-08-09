@@ -934,25 +934,59 @@ func main() {
 			}
 			// Thread the output key columns so the engine builds the complete
 			// multi-column projection key (a composite-key lens — e.g. a
-			// GrantTable lens — needs every key column the adapter requires).
-			// Fail closed if a key column is not a RETURN alias; see
-			// threadsKeyColumns for which lenses are exempt and why.
-			if cr, ok := r.CompiledRule.(*full.CompiledRule); ok && threadsKeyColumns(r) {
-				cr.KeyColumns = []string(r.Into.Key)
-				if err := cr.ValidateKeyColumns(); err != nil {
-					logger.Error("full engine key-column validation", "lensId", r.ID, "err", err)
-					return
-				}
-				// A Secure Lens's secure + identity-key columns must be RETURN
-				// aliases — a typo would otherwise project silent nulls (secure
-				// column) or Terminal-DLQ every row (identity-key column) with
-				// nothing pointing at the misdeclared spec.
-				if err := cr.ValidateReturnAliases(secureAliasNames(r.Into.SecureColumns)...); err != nil {
-					logger.Error("secure-column RETURN-alias validation", "lensId", r.ID, "err", err)
-					return
+			// GrantTable lens — needs every key column the adapter requires) —
+			// BEFORE UseFullEngineBranches, not after. hotReloadKeyColumns
+			// (shared with the MATCH hot-reload path) makes the THREADING
+			// decision identically for a plain lens and a Personal lens, so
+			// activation and a later cypher edit can never disagree about
+			// WHICH columns get threaded; threadsKeyColumns names which
+			// lenses are exempt and why. The alias-VALIDATION gate just below
+			// is a separate question and is NOT shared the same way: it runs
+			// only under threadsKeyColumns(r), so a Personal lens is exempt
+			// from it here exactly as reload.go's own `if threadsKeyColumns`
+			// arm is (reload.go's ValidateReturnAliases call for a Personal
+			// lens's MATCH update sits inside its own `if threaded` block,
+			// one level broader — a pre-existing, narrower divergence this
+			// fire does not touch).
+			//
+			// The ordering matters because KeyColumns is the one CompiledRule
+			// field ever mutated after construction, and
+			// UseFullEngineBranches' publish is copy-on-write for any
+			// `*`-carrying rule (full.WithLabelExpansion returns a shallow
+			// COPY, dynamic-type-taxonomy-design.md §4.3): threading after
+			// that publish would set KeyColumns on the ORIGINAL
+			// r.CompiledRule, not the copy the pipeline actually evaluates —
+			// a `*`-carrying Personal lens would then run with KeyColumns
+			// permanently nil and the adapter would reject every write.
+			// InstallPersonalLens threads again further below (via the same
+			// projection.ThreadKeyColumns), which is a harmless no-op once
+			// this has already run — it stays independently correct for
+			// callers that invoke it without this pre-threading.
+			if cr, ok := r.CompiledRule.(*full.CompiledRule); ok {
+				if keyCols, thread := hotReloadKeyColumns(r); thread {
+					if err := projection.ThreadKeyColumns(cr, r.CompiledBranches, keyCols); err != nil {
+						logger.Error("full engine key-column validation", "lensId", r.ID, "err", err)
+						return
+					}
+					if threadsKeyColumns(r) {
+						// A Secure Lens's secure + identity-key columns must be
+						// RETURN aliases — a typo would otherwise project silent
+						// nulls (secure column) or Terminal-DLQ every row
+						// (identity-key column) with nothing pointing at the
+						// misdeclared spec. A Personal Lens's reserved "__actor"
+						// key has no such shape, so it is exempt: threadsKeyColumns
+						// is false for it.
+						if err := cr.ValidateReturnAliases(secureAliasNames(r.Into.SecureColumns)...); err != nil {
+							logger.Error("secure-column RETURN-alias validation", "lensId", r.ID, "err", err)
+							return
+						}
+					}
 				}
 			}
-			p.UseFullEngineBranches(fullEngine, r.CompiledRule, r.CompiledBranches)
+			if err := p.UseFullEngineBranches(fullEngine, r.CompiledRule, r.CompiledBranches); err != nil {
+				logger.Error("full engine activation", "lensId", r.ID, "err", err)
+				return
+			}
 		}
 
 		// Fire 3 (negative-filter-retraction-projection-design.md §2.4): a plain
