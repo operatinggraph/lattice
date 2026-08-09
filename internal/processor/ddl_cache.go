@@ -41,6 +41,15 @@ type MetaVertexRef struct {
 	// applies to aspect DDLs; a sensitive aspect's anchoring rule follows
 	// CustodyKind below).
 	Sensitive bool
+	// Abstract is true when the DDL declares itself an abstract type — a type
+	// naming no instance (dynamic-type-taxonomy-design.md §3.2). Populated
+	// from the root vertex document's `data.abstract`, never derived from "a
+	// vertexType with no script" (the accident-of-shape failure the marker is
+	// explicit to avoid). Absent means false; a PRESENT but non-bool value
+	// fails closed to true instead (loadMetaVertex logs a WARN) — false is
+	// the permissive direction for the abstract write-path gates, so an
+	// ambiguous marker must not resolve to it.
+	Abstract bool
 	// CustodyKind is the declared key-custody kind of a sensitive aspect DDL
 	// (retention-class-key-custody-design.md §3.2): "identity" — the default,
 	// and what an absent declaration means — or "retentionClass". It is what
@@ -243,6 +252,30 @@ func (c *DDLCache) loadMetaVertex(ctx context.Context, root string, _ []string) 
 		return ref, false, nil
 	}
 	ref.Kind = deriveDDLKind(rootDoc.Class)
+
+	// Abstract marker (dynamic-type-taxonomy-design.md §3.2): read straight off
+	// the root document's `data.abstract`, never derived from the DDL's other
+	// fields. Absent means false — the overwhelming common case, every DDL
+	// that declares no taxonomy membership at all. A PRESENT but non-bool
+	// value is a different case: false is the PERMISSIVE direction for the
+	// two step-6 write-path gates this field feeds (an unrecognized value
+	// resolving to false would let an instance of a type someone tried to
+	// mark abstract keep writing undetected), so an ambiguous marker fails
+	// CLOSED toward true instead — the doctrine step 6.5's custody-kind
+	// unmarshal failure already states (ddl_cache.go's own comment there:
+	// "each alternative fails OPEN in its own direction"). Logged so the
+	// drift is visible rather than silently resolved either way.
+	if rootDoc.Data != nil {
+		if raw, present := rootDoc.Data["abstract"]; present {
+			if v, ok := raw.(bool); ok {
+				ref.Abstract = v
+			} else {
+				c.logger.Warn("ddl cache: data.abstract is present but not a JSON bool; treating as abstract (fail-closed — false is the permissive direction for the abstract write-path gates)",
+					"key", root, "value", raw)
+				ref.Abstract = true
+			}
+		}
+	}
 
 	// Shadow-key fallback: if the root key's last segment is a canonical-name
 	// string (not a NanoID), treat it as the canonical name. This covers test

@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/nats-io/nats.go"
@@ -130,7 +131,22 @@ func (i *Installer) Install(ctx context.Context, def Definition) (*InstallResult
 	// sees a package's own previously-written meta-vertices as a collision.
 	// A collision the install introduces would otherwise silently shadow one
 	// definition at runtime (the DDL cache keeps first-seen, logs a WARN).
-	if err := i.checkCanonicalNameCollision(ctx, def); err != nil {
+	//
+	// The scan below is the ONE Core KV key list this whole Install call
+	// needs — buildManifestBatch (and everything it calls: SubtypeOfRef
+	// resolution, the installed subtypeOf graph, the live-instance guard on a
+	// newly-declared abstract type) reuses it rather than re-listing. A def
+	// declaring no DDL/Lens/OpMeta name — and therefore, since Abstract and
+	// SubtypeOfRef both live on DDLSpec, no taxonomy mechanism either —
+	// performs zero KV I/O here.
+	var scan metaScanResult
+	if needsMetaCollisionScan(def) {
+		scan, err = i.scanMeta(ctx)
+		if err != nil {
+			return nil, err
+		}
+	}
+	if err := i.checkCanonicalNameCollision(def, scan.names); err != nil {
 		return nil, err
 	}
 
@@ -144,13 +160,15 @@ func (i *Installer) Install(ctx context.Context, def Definition) (*InstallResult
 	}
 
 	// Step 3 — build the mutation manifest (role NanoIDs, grant resolution,
-	// version-independent entity keys, the full create batch). Shared with
-	// Upgrade, which needs the identical new key set + bodies.
-	ops, declared, pkgKey, err := i.buildManifestBatch(def)
+	// version-independent entity keys, the full create batch — including
+	// dynamic-type-taxonomy-design.md §3.5's SubtypeOfRef resolution). Shared
+	// with Upgrade/Apply, which need the identical new key set + bodies.
+	ops, declared, pkgKey, leafBudgetWarnings, err := i.buildManifestBatch(ctx, def, scan)
 	if err != nil {
 		return nil, err
 	}
 	res.PackageKey = pkgKey
+	res.LeafBudgetWarnings = leafBudgetWarnings
 
 	// Step 4 — submit the InstallPackage op to the Processor. The op
 	// carries the pre-built manifest; the kernel script enforces
@@ -184,13 +202,24 @@ func (i *Installer) Install(ctx context.Context, def Definition) (*InstallResult
 // buildManifestBatch mints version-independent entity keys for def, resolves
 // its grants, validates them, and builds the full create-batch manifest as
 // LOGICAL documents (Contract #8 §8.1). Returns the create mutations, the flat
-// declared-key list, and the package vertex key. Shared by Install (the fresh
-// create) and Upgrade (the new side of the diff): both need the identical
-// version-independent key set + bodies, so deriving them in one place keeps the
-// upgrade diff aligned with what a fresh install would write. Field-level
-// validation (validateLensBuckets etc.) and the install-specific idempotency /
-// canonicalName-collision checks remain with the callers.
-func (i *Installer) buildManifestBatch(def Definition) ([]installMutation, []string, string, error) {
+// declared-key list, the package vertex key, and any LeafBudget warnings
+// (dynamic-type-taxonomy-design.md §10.2 — advisory only, never a rejection).
+// Shared by Install (the fresh create), Upgrade, and Apply's dry-run preview:
+// all three need the identical version-independent key set + bodies, so
+// deriving them in one place keeps the upgrade diff aligned with what a fresh
+// install would write. Field-level validation (validateLensBuckets etc.) and
+// the install-specific idempotency / canonicalName-collision checks remain
+// with the callers.
+//
+// scan is the caller's Core KV key list, already fetched when
+// scan.fetched is true (Install always has one whenever needsMetaCollisionScan
+// applied). When scan.fetched is false and this def actually needs one
+// (needsTaxonomyScan — a SubtypeOfRef to resolve or an Abstract declaration's
+// live-instance guard, taxonomy.go), buildManifestBatch fetches its own,
+// exactly once. Upgrade and Apply's dry-run preview — which never run the
+// Install-only canonicalName collision check and so never pre-fetch — reach
+// this lazy path.
+func (i *Installer) buildManifestBatch(ctx context.Context, def Definition, scan metaScanResult) ([]installMutation, []string, string, []string, error) {
 	// Mint deterministic NanoIDs for any roles this package declares, and
 	// register them in RoleIDs so this package's own GrantsTo entries (and the
 	// grant links built below) resolve to the role's in-batch NanoID. The role
@@ -219,18 +248,18 @@ func (i *Installer) buildManifestBatch(def Definition) ([]installMutation, []str
 	for idx, p := range def.Permissions {
 		for _, g := range p.GrantsTo {
 			if !substrate.IsValidNanoID(g) {
-				return nil, nil, "", fmt.Errorf("pkgmgr: Permission[%d] %q: GrantsTo entry %q is not a valid NanoID — role may not be installed or bootstrap JSON is missing the role ID", idx, p.OperationType, g)
+				return nil, nil, "", nil, fmt.Errorf("pkgmgr: Permission[%d] %q: GrantsTo entry %q is not a valid NanoID — role may not be installed or bootstrap JSON is missing the role ID", idx, p.OperationType, g)
 			}
 		}
 	}
 	for idx, p := range def.Panes {
 		for _, g := range p.OfferedToRoles {
 			if !substrate.IsValidNanoID(g) {
-				return nil, nil, "", fmt.Errorf("pkgmgr: Pane[%d] %q: OfferedToRoles entry %q is not a valid NanoID — role may not be installed or bootstrap JSON is missing the role ID", idx, p.CanonicalName, g)
+				return nil, nil, "", nil, fmt.Errorf("pkgmgr: Pane[%d] %q: OfferedToRoles entry %q is not a valid NanoID — role may not be installed or bootstrap JSON is missing the role ID", idx, p.CanonicalName, g)
 			}
 		}
 		if !IsPaneSurface(p.Surface) {
-			return nil, nil, "", fmt.Errorf("pkgmgr: Pane[%d] %q: Surface %q is not a known surface (%q or %q)", idx, p.CanonicalName, p.Surface, PaneSurfaceWork, PaneSurfaceAccount)
+			return nil, nil, "", nil, fmt.Errorf("pkgmgr: Pane[%d] %q: Surface %q is not a known surface (%q or %q)", idx, p.CanonicalName, p.Surface, PaneSurfaceWork, PaneSurfaceAccount)
 		}
 	}
 
@@ -272,12 +301,35 @@ func (i *Installer) buildManifestBatch(def Definition) ([]installMutation, []str
 		retentionClassNanoIDs[idx] = RetentionClassID(def.Name, rc.CanonicalName)
 	}
 
-	ops, declared, err := i.buildInstallBatch(def, pkgKey, ddlNanoIDs, lensNanoIDs, permNanoIDs, roleNanoIDs,
-		weaverTargetNanoIDs, loomPatternNanoIDs, opMetaNanoIDs, paneNanoIDs, retentionClassNanoIDs)
-	if err != nil {
-		return nil, nil, "", err
+	// dynamic-type-taxonomy-design.md §3.5/§8: resolve every declared
+	// SubtypeOfRef (batch-local first, then the installed kernel), and
+	// refuse a newly-declared Abstract type that still has live instances
+	// (checkAbstractNoLiveInstances, taxonomy.go). A def using neither
+	// mechanism (needsTaxonomyScan false) performs zero extra reads — and
+	// when the caller (Install) already fetched scan, neither does this def
+	// re-list the bucket even when it DOES use one.
+	if !scan.fetched && needsTaxonomyScan(def) {
+		var err error
+		scan, err = i.scanMeta(ctx)
+		if err != nil {
+			return nil, nil, "", nil, err
+		}
 	}
-	return ops, declared, pkgKey, nil
+	if err := i.checkAbstractNoLiveInstances(ctx, def, scan.keys); err != nil {
+		return nil, nil, "", nil, err
+	}
+	subtypeAbstractIDs, leafBudgetWarnings, err := i.resolveTaxonomy(ctx, def, scan)
+	if err != nil {
+		return nil, nil, "", nil, err
+	}
+
+	ops, declared, err := i.buildInstallBatch(def, pkgKey, ddlNanoIDs, lensNanoIDs, permNanoIDs, roleNanoIDs,
+		weaverTargetNanoIDs, loomPatternNanoIDs, opMetaNanoIDs, paneNanoIDs, retentionClassNanoIDs,
+		subtypeAbstractIDs)
+	if err != nil {
+		return nil, nil, "", nil, err
+	}
+	return ops, declared, pkgKey, leafBudgetWarnings, nil
 }
 
 // deterministicNanoID derives a stable Contract #1 NanoID from the
@@ -548,6 +600,12 @@ type InstallResult struct {
 	Skipped            bool
 	Reason             string
 	DependencyWarnings []string
+	// LeafBudgetWarnings names every abstract type (dynamic-type-taxonomy-
+	// design.md §10.2) whose resolved leaf count this install pushed past its
+	// declared LeafBudget. Advisory only — the install still succeeded;
+	// rejecting it would let one package's lens narrowing veto another
+	// package's type declaration. Empty when nothing is at risk.
+	LeafBudgetWarnings []string
 }
 
 // ErrVersionMismatch is returned by Install when a different version of
@@ -665,33 +723,63 @@ func (i *Installer) findInstalledPackage(ctx context.Context, name string) (*ins
 	return nil, nil
 }
 
-// checkCanonicalNameCollision rejects an install whose declared meta-vertex
-// canonicalNames (DDL + Lens + op-meta OperationType) collide with a
-// canonicalName already carried by a meta-vertex in the kernel. It is a single
-// KVListKeys pass plus a targeted read of only the `vtx.meta.*.canonicalName`
-// aspect keys (the same shape the DDL cache reads), so it does not over-fetch.
-// A tombstoned aspect is ignored — its canonicalName is no longer live.
-func (i *Installer) checkCanonicalNameCollision(ctx context.Context, def Definition) error {
-	declared := make(map[string]struct{}, len(def.DDLs)+len(def.Lenses)+len(def.OpMetas))
-	for _, d := range def.DDLs {
-		declared[d.CanonicalName] = struct{}{}
-	}
-	for _, l := range def.Lenses {
-		declared[l.CanonicalName] = struct{}{}
-	}
-	for _, o := range def.OpMetas {
-		declared[o.OperationType] = struct{}{}
-	}
-	if len(declared) == 0 {
-		return nil
-	}
+// metaScanResult carries the single Core KV key list + its derived
+// canonicalName index that one Install/Upgrade/Apply call threads through
+// every consumer that needs either: the canonicalName collision guard
+// (Install only), cross-package SubtypeOfRef resolution, the installed
+// subtypeOf graph scan, and the live-instance guard on a newly-declared
+// abstract type (taxonomy.go). fetched is false for the zero value, the
+// "nobody has scanned yet" state a def declaring nothing scan-worthy never
+// leaves.
+type metaScanResult struct {
+	keys    []string          // raw KVListKeys(CoreBucket) result
+	names   map[string]string // canonicalName -> meta-vertex id, derived from keys
+	fetched bool
+}
 
+// needsMetaCollisionScan reports whether def declares any meta canonicalName
+// that could collide (a DDL, Lens, or op-meta) — false only for a def with
+// none of the three, in which case checkCanonicalNameCollision has nothing to
+// check and skips its scan entirely. A distinct gate from needsTaxonomyScan
+// in taxonomy.go: this one governs an Install-only check that must still run
+// for a def with DDLs but no SubtypeOfRef/Abstract at all.
+func needsMetaCollisionScan(def Definition) bool {
+	return len(def.DDLs) > 0 || len(def.Lenses) > 0 || len(def.OpMetas) > 0
+}
+
+// scanMeta performs the ONE KVListKeys pass a caller needs, plus the derived
+// canonicalName index, and returns them together so nothing downstream ever
+// re-lists the bucket. Callers only invoke this when they have already
+// established (via needsMetaCollisionScan / needsTaxonomyScan) that a scan is
+// actually needed — this method itself always fetches.
+func (i *Installer) scanMeta(ctx context.Context) (metaScanResult, error) {
 	keys, err := i.Conn.KVListKeys(ctx, CoreBucket)
 	if err != nil {
-		return fmt.Errorf("pkgmgr: list keys: %w", err)
+		return metaScanResult{}, fmt.Errorf("pkgmgr: list keys: %w", err)
 	}
+	names, err := i.canonicalNamesFromKeys(ctx, keys)
+	if err != nil {
+		return metaScanResult{}, err
+	}
+	return metaScanResult{keys: keys, names: names, fetched: true}, nil
+}
+
+// canonicalNamesFromKeys filters an already-fetched Core KV key list for
+// every `vtx.meta.*.canonicalName` aspect key (the same shape the DDL cache
+// reads) and returns canonicalName -> meta-vertex id for every LIVE
+// (non-tombstoned) one. Targeted GETs only, no KVListKeys of its own.
+//
+// The id is taken directly from the key's middle segment — NOT validated as
+// a Contract #1 NanoID. The DDL cache's own Refresh (ddl_cache.go) accepts
+// ANY `vtx.meta.<X>` root regardless of whether X is a real NanoID (the
+// shadow-key convention, `vtx.meta.<canonicalName>`, used by test fixtures
+// seeded directly via KVPut rather than through a real package install); a
+// stricter check here would silently drop such a fixture from both the
+// collision guard and cross-package SubtypeOfRef resolution.
+func (i *Installer) canonicalNamesFromKeys(ctx context.Context, keys []string) (map[string]string, error) {
 	const metaPrefix = "vtx.meta."
 	const cnSuffix = ".canonicalName"
+	names := make(map[string]string)
 	for _, k := range keys {
 		if len(k) < len(metaPrefix)+len(cnSuffix) {
 			continue
@@ -702,12 +790,16 @@ func (i *Installer) checkCanonicalNameCollision(ctx context.Context, def Definit
 		if k[len(k)-len(cnSuffix):] != cnSuffix {
 			continue
 		}
+		id := k[len(metaPrefix) : len(k)-len(cnSuffix)]
+		if id == "" || strings.Contains(id, ".") {
+			continue // not a 3-segment vtx.meta.<id> root
+		}
 		entry, err := i.Conn.KVGet(ctx, CoreBucket, k)
 		if err != nil {
 			if errors.Is(err, substrate.ErrKeyNotFound) {
 				continue
 			}
-			return fmt.Errorf("pkgmgr: get %s: %w", k, err)
+			return nil, fmt.Errorf("pkgmgr: get %s: %w", k, err)
 		}
 		var env struct {
 			IsDeleted bool `json:"isDeleted"`
@@ -721,9 +813,32 @@ func (i *Installer) checkCanonicalNameCollision(ctx context.Context, def Definit
 		if env.IsDeleted {
 			continue
 		}
-		if _, collides := declared[env.Data.Value]; collides {
-			return fmt.Errorf("%w: %q (declared by package %q, already on %s)",
-				ErrCanonicalNameCollision, env.Data.Value, def.Name, k)
+		names[env.Data.Value] = id
+	}
+	return names, nil
+}
+
+// checkCanonicalNameCollision rejects an install whose declared meta-vertex
+// canonicalNames (DDL + Lens + op-meta OperationType) collide with a
+// canonicalName already carried by a meta-vertex in the kernel. metaNames is
+// the scanMetaCanonicalNames result the caller already computed — a
+// collision the install introduces would otherwise silently shadow one
+// definition at runtime (the DDL cache keeps first-seen, logs a WARN).
+func (i *Installer) checkCanonicalNameCollision(def Definition, metaNames map[string]string) error {
+	declared := make(map[string]struct{}, len(def.DDLs)+len(def.Lenses)+len(def.OpMetas))
+	for _, d := range def.DDLs {
+		declared[d.CanonicalName] = struct{}{}
+	}
+	for _, l := range def.Lenses {
+		declared[l.CanonicalName] = struct{}{}
+	}
+	for _, o := range def.OpMetas {
+		declared[o.OperationType] = struct{}{}
+	}
+	for name := range declared {
+		if id, collides := metaNames[name]; collides {
+			return fmt.Errorf("%w: %q (declared by package %q, already on vtx.meta.%s)",
+				ErrCanonicalNameCollision, name, def.Name, id)
 		}
 	}
 	return nil

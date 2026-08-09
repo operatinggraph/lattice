@@ -43,6 +43,7 @@ func (def Definition) validateAll() error {
 		def.validateSensitiveClassScope,
 		def.validateRetentionClasses,
 		def.validateCustodyScope,
+		def.validateAbstractDDLScope,
 		def.validateCanonicalNameUniqueness,
 		def.validatePermissionIdentityUniqueness,
 	} {
@@ -789,6 +790,35 @@ type DDLSpec struct {
 	// Sensitive on an aspect-type DDL; validateCustodyScope rejects every
 	// other combination.
 	Custody CustodySpec
+
+	// Abstract marks this DDL as a type that names no instance — usable only
+	// as a lens pattern label or a subtypeOf ancestor (dynamic-type-taxonomy-
+	// design.md §3.2), never as the class of a written document or a key's
+	// type segment. Meaningful only for Class == "meta.ddl.vertexType" (the
+	// same empty-Class default buildInstallBatch applies); mutually exclusive
+	// with Script and PermittedCommands, which an abstract type declares
+	// neither of. validateAbstractDDLScope rejects every other combination.
+	// Defaults false, the ordinary case for every DDL that does not declare it.
+	Abstract bool
+
+	// SubtypeOfRef names, by canonicalName, the abstract type this DDL is a
+	// subtype of (§3.3/§3.5). The installer resolves it — batch-local first,
+	// then against an already-installed abstract meta-vertex — and emits the
+	// `subtypeOf` link (leaf → abstract, Contract #1 §1.1) into the same
+	// atomic batch. Resolution fails the install closed when the name does
+	// not resolve, resolves to a non-abstract type, or resolves to a
+	// tombstoned meta-vertex. Meaningful only alongside Class ==
+	// "meta.ddl.vertexType"; empty declares no taxonomy membership.
+	SubtypeOfRef string
+
+	// LeafBudget bounds how many concrete subtypeOf leaves this abstract type
+	// is expected to accept before a dependent lens's narrowed-filter label
+	// cap is at risk (§10.2). Meaningful only when Abstract is true; zero
+	// defaults to 8 (maxNarrowedFilterLabels) at the point a consumer reads
+	// it. Exceeding it is a WARNING surfaced on InstallResult, never an
+	// install rejection — rejecting a leaf install would let one package's
+	// lens narrowing veto another package's type declaration.
+	LeafBudget int
 
 	// Self-description aspects. Required for all DDL classes.
 

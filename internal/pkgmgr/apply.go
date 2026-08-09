@@ -52,6 +52,13 @@ type ApplyResult struct {
 	// until re-activated, which is the difference between an upgrade that
 	// applied and one that merely landed.
 	ReactivationRequired []string
+
+	// LeafBudgetWarnings names every subtypeOf target (dynamic-type-taxonomy-
+	// design.md §10.2) whose resolved leaf count this apply pushed past its
+	// declared LeafBudget. Advisory only — the apply still succeeded. This is
+	// the operator-visible surface for `lattice-pkg install`/`upgrade`, which
+	// route through Apply rather than Install directly.
+	LeafBudgetWarnings []string
 }
 
 // Apply is the upgrade-aware entry point for `lattice-pkg install` / `upgrade`
@@ -103,7 +110,7 @@ func (i *Installer) Apply(ctx context.Context, def Definition, opts ApplyOptions
 
 	// In-place diff-apply: cross-version auto-upgrade, or same-version force /
 	// the explicit upgrade command.
-	mutations, sum, err := i.computeDeltaAgainst(ctx, existing, def)
+	mutations, sum, leafBudgetWarnings, err := i.computeDeltaAgainst(ctx, existing, def)
 	if err != nil {
 		return nil, err
 	}
@@ -118,6 +125,7 @@ func (i *Installer) Apply(ctx context.Context, def Definition, opts ApplyOptions
 		Tombstoned:  sum.tombstoned,
 
 		ReactivationRequired: sum.reactivation,
+		LeafBudgetWarnings:   leafBudgetWarnings,
 	}
 	if len(mutations) == 0 {
 		res.Action = "skip"
@@ -149,17 +157,18 @@ func (i *Installer) Apply(ctx context.Context, def Definition, opts ApplyOptions
 // the canonical-name collision guard) and adapts its result.
 func (i *Installer) applyFreshInstall(ctx context.Context, def Definition, opts ApplyOptions) (*ApplyResult, error) {
 	if opts.DryRun {
-		ops, _, pkgKey, err := i.buildManifestBatch(def)
+		ops, _, pkgKey, leafBudgetWarnings, err := i.buildManifestBatch(ctx, def, metaScanResult{})
 		if err != nil {
 			return nil, err
 		}
 		res := &ApplyResult{
-			PackageName: def.Name,
-			PackageKey:  pkgKey,
-			Action:      "install",
-			ToVersion:   def.Version,
-			Created:     len(ops),
-			DryRun:      true,
+			PackageName:        def.Name,
+			PackageKey:         pkgKey,
+			Action:             "install",
+			ToVersion:          def.Version,
+			Created:            len(ops),
+			DryRun:             true,
+			LeafBudgetWarnings: leafBudgetWarnings,
 		}
 		for _, op := range ops {
 			res.CreatedKeys = append(res.CreatedKeys, op.Key)
@@ -178,6 +187,7 @@ func (i *Installer) applyFreshInstall(ctx context.Context, def Definition, opts 
 		ToVersion:          r.PackageVersion,
 		Created:            len(r.DeclaredKeys),
 		DependencyWarnings: r.DependencyWarnings,
+		LeafBudgetWarnings: r.LeafBudgetWarnings,
 	}
 	// Defensive: a fresh-branch install should never skip (existing == nil),
 	// but mirror the reason if it ever does so the CLI reports it faithfully.

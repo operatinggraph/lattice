@@ -166,7 +166,34 @@ Field semantics:
   logged as a warning and the install proceeds; strict enforcement is a future
   option.
 - **declares.ddls[]**: each entry maps to one DDL meta-vertex + its canonical
-  aspects (canonicalName, permittedCommands, description, script).
+  aspects (canonicalName, description, and — for an ordinary, non-abstract
+  DDL — permittedCommands, script). A DDL may instead declare:
+  - **abstract**: marks the type as naming no instance (dynamic-type-taxonomy-
+    design.md §3.2) — usable as a lens pattern label or a `subtypeOf`
+    ancestor, never as the class of a written document or a key's type
+    segment. Legal only alongside `class: meta.ddl.vertexType`; mutually
+    exclusive with `permittedCommands`/`script`, which an abstract DDL emits
+    neither of. Declaring `abstract: true` over a type that still has a live
+    instance is refused at install/upgrade time.
+  - **subtypeOf**: the canonicalName of the type this DDL is a subtype of.
+    The target may be concrete or abstract (a concrete type may have
+    subtypes too). The installer resolves it — batch-local first (another
+    DDL in the SAME package), then against the already-installed kernel —
+    and fails the install closed when the name does not resolve to a live,
+    non-tombstoned `meta.ddl.vertexType` meta-vertex. This needs no
+    cooperation from the target's owning package: a package may declare
+    `subtypeOf` against a type it does not itself own. The resulting
+    `subtypeOf` link lands in the declaring package's own `declaredKeys`, so
+    uninstalling that package cleans the link up (uninstalling the TARGET's
+    owning package instead leaves the link pointing at a tombstoned
+    meta-vertex, which subsequent reads treat as non-contributing). The
+    installer also refuses a `subtypeOf` graph that is cyclic or requires an
+    upward walk deeper than 4 hops.
+  - **leafBudget**: (abstract types only) the expected upper bound on direct
+    `subtypeOf` children before a dependent lens's narrowed-filter label cap
+    is at risk; defaults to 8 when unset. Exceeding it is a WARNING on the
+    install/upgrade result, never a rejection — one package's lens narrowing
+    must never veto another package's type declaration.
 - **declares.lenses[]**: each entry maps to one Lens meta-vertex + its canonical
   aspects (canonicalName, spec, adapter, etc.). The Refractor auto-picks-up new
   lenses via its `vtx.meta.>` watch.

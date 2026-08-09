@@ -49,12 +49,19 @@ type installMutation struct {
 // manifest aspect so uninstall can enumerate). The mutations are shipped
 // in the InstallPackage op payload and committed atomically by the
 // Processor, which stamps provenance.
+//
+// subtypeAbstractIDs maps a def.DDLs index to the already-resolved abstract
+// meta-vertex NanoID for a DDL that declared SubtypeOfRef (resolveTaxonomy
+// in installer.go performs the batch-local/cross-package resolution, which
+// needs I/O this otherwise-pure function must not perform). nil/absent
+// entries emit no subtypeOf link, exactly as today.
 func (i *Installer) buildInstallBatch(
 	def Definition,
 	pkgKey string,
 	ddlIDs, lensIDs, permIDs, roleIDs []string,
 	weaverTargetIDs, loomPatternIDs, opMetaIDs, paneIDs []string,
 	retentionClassIDs []string,
+	subtypeAbstractIDs map[int]string,
 ) ([]installMutation, []string, error) {
 	var ops []installMutation
 	var declared []string
@@ -122,15 +129,27 @@ func (i *Installer) buildInstallBatch(
 		if class == "" {
 			class = "meta.ddl.vertexType"
 		}
-		addCreate(ddlKey, docVertex(class, nil))
+		addCreate(ddlKey, docVertex(class, abstractDDLRootData(d)))
 		addCreate(ddlKey+".canonicalName", docAspect(ddlKey, "canonicalName", "canonicalName",
 			map[string]any{"value": d.CanonicalName}))
-		addCreate(ddlKey+".permittedCommands", docAspect(ddlKey, "permittedCommands", "permittedCommands",
-			map[string]any{"commands": d.PermittedCommands}))
+		// An abstract type names no instance, so it declares neither a script
+		// nor a permittedCommands gate (dynamic-type-taxonomy-design.md §3.2)
+		// — emitting either, even empty, would make it look concrete to a
+		// reader of the aspect list alone.
+		if !d.Abstract {
+			addCreate(ddlKey+".permittedCommands", docAspect(ddlKey, "permittedCommands", "permittedCommands",
+				map[string]any{"commands": d.PermittedCommands}))
+		}
 		addCreate(ddlKey+".description", docAspect(ddlKey, "description", "description",
 			map[string]any{"text": d.Description}))
-		addCreate(ddlKey+".script", docAspect(ddlKey, "script", "script",
-			map[string]any{"source": d.Script}))
+		if !d.Abstract {
+			addCreate(ddlKey+".script", docAspect(ddlKey, "script", "script",
+				map[string]any{"source": d.Script}))
+		}
+		if abstractID, ok := subtypeAbstractIDs[idx]; ok {
+			linkKey := "lnk.meta." + ddlIDs[idx] + ".subtypeOf.meta." + abstractID
+			addCreate(linkKey, docLink(ddlKey, metaVertexPrefix+abstractID, "subtypeOf", "subtypeOf", nil))
+		}
 		// Self-description aspects: inputSchema, outputSchema, fieldDescription, examples.
 		fdMap := make(map[string]any, len(d.FieldDescription))
 		for k, v := range d.FieldDescription {
@@ -937,6 +956,25 @@ func loomPatternSpecBody(p LoomPatternSpec) map[string]any {
 		body["completionDomains"] = p.CompletionDomains
 	}
 	return body
+}
+
+// abstractDDLRootData builds a DDL root vertex's `data` object. A non-abstract
+// DDL (Abstract false, the default) returns nil, so docVertex fills `{}` —
+// every ordinary DDL's root document carries no data at all. An abstract DDL
+// returns the explicit `{"abstract": true}` marker (dynamic-type-taxonomy-
+// design.md §3.2 — never derived from "no script", an inference that would
+// also match other DDL shapes), plus "leafBudget" when the author declared a
+// non-zero budget (a zero/absent budget defaults to the narrowed-filter label
+// cap wherever it is later consulted).
+func abstractDDLRootData(d DDLSpec) map[string]any {
+	if !d.Abstract {
+		return nil
+	}
+	data := map[string]any{"abstract": true}
+	if d.LeafBudget != 0 {
+		data["leafBudget"] = d.LeafBudget
+	}
+	return data
 }
 
 func docVertex(class string, data map[string]any) map[string]any {

@@ -249,7 +249,7 @@ func TestUpgrade_DeltaCarriesExpectedRevision(t *testing.T) {
 	if err != nil || existing == nil {
 		t.Fatalf("findInstalledPackage: existing=%+v err=%v", existing, err)
 	}
-	mutations, sum, err := inst.computeDeltaAgainst(ctx, existing, v2)
+	mutations, sum, _, err := inst.computeDeltaAgainst(ctx, existing, v2)
 	if err != nil {
 		t.Fatalf("computeDeltaAgainst: %v", err)
 	}

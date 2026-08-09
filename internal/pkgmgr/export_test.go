@@ -6,6 +6,15 @@ package pkgmgr
 // loom.Pattern) — the regression that proves the seam emits exactly what the
 // engines load, with no engine change. Test-only; not part of the public API.
 func BuildInstallBatchForTest(def Definition) ([]InstallMutationForTest, []string, error) {
+	return BuildInstallBatchWithSubtypesForTest(def, nil)
+}
+
+// BuildInstallBatchWithSubtypesForTest is BuildInstallBatchForTest plus an
+// explicit DDL-index -> abstract-meta-vertex-NanoID map, so a test can pin
+// the `subtypeOf` link emission (build.go) without standing up a live
+// Installer.resolveTaxonomy resolution (installer.go, which needs a
+// substrate connection). Test-only; not part of the public API.
+func BuildInstallBatchWithSubtypesForTest(def Definition, subtypeAbstractIDs map[int]string) ([]InstallMutationForTest, []string, error) {
 	inst := &Installer{}
 	pkgKey := PackageVertexPrefix + entityNanoID(def.Name, "package")
 
@@ -54,7 +63,7 @@ func BuildInstallBatchForTest(def Definition) ([]InstallMutationForTest, []strin
 	}
 
 	ops, declared, err := inst.buildInstallBatch(def, pkgKey, ddlIDs, lensIDs, permIDs, roleIDs,
-		weaverTargetIDs, loomPatternIDs, opMetaIDs, paneIDs, retentionClassIDs)
+		weaverTargetIDs, loomPatternIDs, opMetaIDs, paneIDs, retentionClassIDs, subtypeAbstractIDs)
 	if err != nil {
 		return nil, nil, err
 	}

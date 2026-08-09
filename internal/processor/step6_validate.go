@@ -140,6 +140,26 @@ func (v *ValidatorImpl) validateOne(ctx context.Context, env *OperationEnvelope,
 		}
 	}
 
+	// 2.5. Abstract type segment gate (dynamic-type-taxonomy-design.md §8 rows
+	// 2-3): an abstract type names no instance, so it may not appear as a
+	// key's type segment in ANY position — the vertex root, an aspect's owner,
+	// or either link endpoint (an endpoint's type is a restatement of that
+	// endpoint's own vertex key, so an abstract there names no vertex either).
+	// Independent of the document's `class` — this checks the KEY itself.
+	//
+	// Exempt on tombstone: removing an instance is exactly the corrective
+	// action that must stay possible once a type is declared abstract — a
+	// live concrete type flipped to abstract must still be able to shed its
+	// existing vertices/aspects/links. A tombstone can never CREATE an
+	// instance, so exempting it preserves §8's invariant ("an abstract type
+	// names no instance") rather than weakening it: the set of abstract-typed
+	// instances can only ever shrink through this path, never grow.
+	if m.Op != "tombstone" {
+		if err := v.validateAbstractKeySegments(m.Key, kind, rid); err != nil {
+			return err
+		}
+	}
+
 	// 3. Class derivation from document. For tombstones the document is
 	// optional — if absent, skip DDL lookups.
 	class := ""
@@ -155,6 +175,27 @@ func (v *ValidatorImpl) validateOne(ctx context.Context, env *OperationEnvelope,
 	// authority for a fine-grained discriminator class that has no direct DDL.
 	if class != "" {
 		if ref, ok := v.resolveGoverningDDL(ctx, class, m.Key, kind, result, state); ok {
+			// Abstract class gate (§8 row 4): a document's class must not
+			// resolve to an abstract DDL. This is an ADDITION to Contract #1
+			// §1.5's permissive default, not a contradiction — §1.5 covers "no
+			// DDL found"; here one IS found and is structurally unusable (no
+			// instance may ever carry it).
+			//
+			// Exempt on tombstone for the same reason as the segment gate
+			// above: removing an instance whose class was flipped to abstract
+			// is the corrective path, and a tombstone cannot create an
+			// abstract-classed instance, so exempting it never weakens the
+			// invariant.
+			if ref.Abstract && m.Op != "tombstone" {
+				return &DDLViolation{
+					ViolatedConstraint: "abstractClass",
+					MutationKey:        m.Key,
+					OperationRequestID: rid,
+					Detail: fmt.Sprintf("class %q resolves to abstract DDL meta-vertex %q — an abstract type names no instance and may not be written",
+						class, ref.MetaVertexKey),
+				}
+			}
+
 			// permittedCommands enforcement: when the DDL declares a
 			// non-empty list, the operation envelope's operationType
 			// must appear in it.
@@ -244,6 +285,57 @@ func validateSensitiveCustody(ref MetaVertexRef, mutationKey, parentType, rid st
 				ref.CanonicalName, ref.CustodyKind),
 		}
 	}
+}
+
+// validateAbstractKeySegments rejects a mutation whose key uses an abstract
+// type (dynamic-type-taxonomy-design.md §8 rows 2-3) as a type segment in any
+// of the four positions a key can carry one: a vertex root, an aspect's owner
+// type, or either link endpoint. Uses the substrate key parsers rather than
+// hand-splitting, per the design's own instruction. A type segment that
+// resolves to no DDL at all (byName miss) is not an abstract-type violation —
+// that is Contract #1 §1.5's ordinary permissive default, unrelated to this
+// gate.
+//
+// UNREACHABILITY CAVEAT: each switch case below only appends to segments
+// when its Parse* call reports ok == true; on ok == false, segments stays
+// empty and this function falls through to ALLOW. That fall-through is safe
+// today only because the caller already ran substrate.ClassifyKey (rejecting
+// KindUnknown) before calling here, and ClassifyKey enforces the IDENTICAL
+// segment predicates ParseVertexKey/ParseAspectKey/ParseLinkKey use — so a
+// key already classified as KindVertex/KindAspect/KindLink cannot fail its
+// matching Parse* call as the code stands. If ClassifyKey and the Parse*
+// functions are ever allowed to diverge, this fall-through silently REOPENS
+// the gate instead of rejecting — unlike the sensitive-aspect check below
+// (validateOne's ParseAspectKey call), which returns a *DDLViolation* on the
+// same shape of parse failure rather than falling through to permit.
+func (v *ValidatorImpl) validateAbstractKeySegments(key string, kind substrate.KeyKind, rid string) error {
+	var segments []string
+	switch kind {
+	case substrate.KindVertex:
+		if t, _, ok := substrate.ParseVertexKey(key); ok {
+			segments = append(segments, t)
+		}
+	case substrate.KindAspect:
+		if _, t, _, _, ok := substrate.ParseAspectKey(key); ok {
+			segments = append(segments, t)
+		}
+	case substrate.KindLink:
+		if t1, _, _, t2, _, ok := substrate.ParseLinkKey(key); ok {
+			segments = append(segments, t1, t2)
+		}
+	}
+	for _, seg := range segments {
+		if ref, ok := v.DDLs.Lookup(seg); ok && ref.Abstract {
+			return &DDLViolation{
+				ViolatedConstraint: "abstractTypeSegment",
+				MutationKey:        key,
+				OperationRequestID: rid,
+				Detail: fmt.Sprintf("key type segment %q resolves to abstract DDL meta-vertex %q — an abstract type names no instance and may not appear in a key",
+					seg, ref.MetaVertexKey),
+			}
+		}
+	}
+	return nil
 }
 
 func stringInSlice(s string, list []string) bool {

@@ -213,6 +213,14 @@ func logApplyResult(cmd string, res *pkgmgr.ApplyResult, logger *slog.Logger) {
 	for _, w := range res.DependencyWarnings {
 		logger.Warn(w)
 	}
+	// dynamic-type-taxonomy-design.md §10.2: a leaf install/upgrade that pushed
+	// a subtypeOf target past its declared LeafBudget is never rejected, so
+	// this is the only place the signal reaches an operator running
+	// `lattice-pkg install`/`upgrade` (both route through Apply) — a warning
+	// nothing prints is not a warning.
+	for _, w := range res.LeafBudgetWarnings {
+		logger.Warn(w)
+	}
 	// Loud, and after the result rather than before it: the upgrade DID land, so
 	// this is not a failure — it is the half of "committed" that a success line
 	// alone would hide, namely that the running Refractor is still serving the

@@ -41,6 +41,11 @@ type UpgradeResult struct {
 	// keep serving their activated spec until re-activated, and saying so is the
 	// difference between an upgrade that applied and one that only landed.
 	ReactivationRequired []string
+
+	// LeafBudgetWarnings names every subtypeOf target (dynamic-type-taxonomy-
+	// design.md §10.2) whose resolved leaf count this upgrade pushed past its
+	// declared LeafBudget. Advisory only — the upgrade still succeeded.
+	LeafBudgetWarnings []string
 }
 
 // Upgrade applies an in-place version upgrade of an already-installed package
@@ -82,7 +87,7 @@ func (i *Installer) Upgrade(ctx context.Context, def Definition) (*UpgradeResult
 
 	// Steps 3–4 — rebuild the new manifest + diff into the create/update/
 	// tombstone delta.
-	mutations, sum, err := i.computeDeltaAgainst(ctx, existing, def)
+	mutations, sum, leafBudgetWarnings, err := i.computeDeltaAgainst(ctx, existing, def)
 	if err != nil {
 		return nil, err
 	}
@@ -96,6 +101,7 @@ func (i *Installer) Upgrade(ctx context.Context, def Definition) (*UpgradeResult
 		Tombstoned:  sum.tombstoned,
 
 		ReactivationRequired: sum.reactivation,
+		LeafBudgetWarnings:   leafBudgetWarnings,
 	}
 	if len(mutations) == 0 {
 		res.Skipped = true
@@ -147,19 +153,21 @@ func (i *Installer) preflight(def Definition) (Definition, error) {
 
 // computeDeltaAgainst rebuilds def's manifest on version-independent keys and
 // diffs it against an installed base's recorded declared-key set, returning the
-// create/update/tombstone mutation batch and its partition counts. Shared by
-// Upgrade and Apply's in-place path; the caller already holds the installed
-// base, so it is not re-resolved here.
-func (i *Installer) computeDeltaAgainst(ctx context.Context, existing *installedPackage, def Definition) ([]installMutation, diffSummary, error) {
+// create/update/tombstone mutation batch, its partition counts, and any
+// LeafBudget warnings (dynamic-type-taxonomy-design.md §10.2) the rebuild
+// surfaced. Shared by Upgrade and Apply's in-place path; the caller already
+// holds the installed base, so it is not re-resolved here.
+func (i *Installer) computeDeltaAgainst(ctx context.Context, existing *installedPackage, def Definition) ([]installMutation, diffSummary, []string, error) {
 	oldKeys, err := i.readDeclaredKeys(ctx, existing.Key)
 	if err != nil {
-		return nil, diffSummary{}, err
+		return nil, diffSummary{}, nil, err
 	}
-	newOps, _, _, err := i.buildManifestBatch(def)
+	newOps, _, _, leafBudgetWarnings, err := i.buildManifestBatch(ctx, def, metaScanResult{})
 	if err != nil {
-		return nil, diffSummary{}, err
+		return nil, diffSummary{}, nil, err
 	}
-	return i.diffManifest(ctx, oldKeys, newOps)
+	mutations, sum, err := i.diffManifest(ctx, oldKeys, newOps)
+	return mutations, sum, leafBudgetWarnings, err
 }
 
 // submitUpgradeOp submits one UpgradePackage op carrying the upgrade delta.

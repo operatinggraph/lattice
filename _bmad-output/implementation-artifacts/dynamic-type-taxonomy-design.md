@@ -1141,3 +1141,57 @@ post-processing `ln.GetText()` in the visitor (`visitor.go:239-256`, the sole `.
 a token the lexer never produces. The host has `antlr` **4.13.2** while `go.mod` pins the runtime at
 **4.13.1**; regenerating a 570 KB parser across a generator/runtime version skew is item 2's first decision, not
 a detail. Recorded here so the next fire starts from it.
+
+**Deviations from the brief, and why.**
+
+1. **A5 landed mid-build.** The build implemented §3.5's "the parent must be `abstract: true`" faithfully and pinned
+   it with a test; Andrew's A5 ruling reversed it. The resolution now requires the parent to name a live
+   `meta.ddl.vertexType` and nothing more, and §3.5's body was rewritten (`33e562c4`) rather than annotated.
+2. **Both step-6 gates exempt `tombstone`.** §8's table says "reject a mutation" without qualification, and taken
+   literally that is a trap: two reviewers independently proved that flipping a live type to abstract leaves its
+   instances not merely unwritable but **undeletable**, with no cleanup path and no recovery but an inverse
+   upgrade. A tombstone can only shrink the abstract-typed instance set, so exempting it preserves §8's invariant
+   ("an abstract type names no instance") instead of weakening it. Paired with a new install/upgrade refusal to
+   declare a type abstract while a live `vtx.<name>.*` key exists — prevention plus a retirement path, rather
+   than either alone.
+3. **A package's own previously-installed `subtypeOf` edges are excluded from the acyclicity merge.** Without it a
+   package can never invert its own taxonomy: `buildManifestBatch` runs before `diffManifest` decides which old
+   keys the upgrade tombstones, so a legal re-parent reads as a cycle against edges the same commit removes.
+   The exclusion is package-scoped, so a genuine cross-package cycle is still caught (both cases are tested).
+4. **The depth walk seeds from every node in the merged graph**, not just the batch's new leaves — an edge added
+   *above* a node that already has descendants lengthens their chains, and seeding from new leaves alone never
+   re-walks them.
+5. **A non-bool `data.abstract` resolves to `true`, with a WARN**, mirroring the custody doctrine already stated
+   in the same file: each alternative must fail open in its own direction, and `false` is the permissive value
+   for these gates.
+
+**Falsified by the build:** the increment is *not* a pure structural no-op as first claimed. The
+`checkCanonicalNameCollision` refactor silently narrowed the guard to NanoID-keyed meta vertices, dropping the
+shadow-key shape the Processor's own DDL cache deliberately honors — a real behaviour change, now restored and
+pinned by a test.
+
+### 17.2 Checkpoint — Fire A, after increment 1
+
+**Landed on `main`; no worktree is held.** The landing invariant held: nothing declares an abstract type, so both
+gates and the taxonomy path stay unreachable until Fire B. Increment 2 starts from a fresh worktree.
+
+**Next — increment 2, the `*` sigil.** This is the decision the increment opens with, not a detail. The grammar
+is `internal/refractor/ruleengine/full/cypher/Cypher.g4`, ANTLR-generated with the output **committed** and no
+`go:generate`, Makefile target, or CI step that regenerates it. `oC_LabelName` → `oC_SymbolicName` admits Unicode
+`ID_Start`/`ID_Continue` + `Pc` and cannot lex `*`, so `(l:location*)` is a parse error *before* the visitor runs
+— post-processing `ln.GetText()` (`visitor.go:239-256`, the sole `.Label` assignment) cannot reach a token the
+lexer never emits. The host has `antlr` **4.13.2**; `go.mod` pins the runtime at **4.13.1**. So increment 2 must
+first settle: regenerate a 570 KB parser across that version skew, or pin the generator to 4.13.1.
+
+**Carried into Fire B — the class gate is the migration hazard, and it is not the one §14 names.**
+`checkAbstractNoLiveInstances` will *not* block declaring `location` abstract, because location-domain mints
+`vtx.unit.*` / `vtx.building.*` / `vtx.property.*` and never `vtx.location.*`. The **class** gate is what bites:
+those vertices carry `class: "location"`, so the moment `location` is abstract every update to them is refused.
+The class rename must therefore land in the *same* batch as the abstract declaration. Tombstones stay permitted
+throughout (deviation 2), so a partial migration is recoverable.
+
+**Filed, not folded (each with its consumer):** an **event class naming an abstract type is ungated** — §8's
+table classifies key segments and document `class` but never an event's class; consumer: the first package
+declaring an event class that names an abstract type. And **Contract #1 §1.2's `meta`/`op` reservation has no
+platform-wide enforcement** for an ordinary DDL's canonicalName — this increment guards only abstract names;
+consumer: any package declaring a DDL named `meta` or `op`.
