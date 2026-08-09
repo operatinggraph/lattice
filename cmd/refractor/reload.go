@@ -248,7 +248,7 @@ func newPipelineEntry(
 	var expansion map[string]map[string]struct{}
 	status := taxonomy.StatusUnknown
 	if resolver != nil && len(labels) > 0 {
-		expansion, status = resolver.Expand(labels)
+		expansion, _, status, _ = resolver.Expand(labels)
 	}
 	return &pipelineEntry{
 		cancel:             cancel,
@@ -448,7 +448,7 @@ func (rl *reloader) update(_, newLens *lens.Rule, kind lens.UpdateKind) {
 		var newExpansion map[string]map[string]struct{}
 		newStatus := taxonomy.StatusUnknown
 		if rl.resolver != nil && len(entry.taxExpansionLabels) > 0 {
-			newExpansion, newStatus = rl.resolver.Expand(entry.taxExpansionLabels)
+			newExpansion, _, newStatus, _ = rl.resolver.Expand(entry.taxExpansionLabels)
 		}
 		// taxMu-guarded: a rederiveEntry-spawned Rebuild goroutine from an
 		// EARLIER taxonomy re-derivation on this same entry may still be

@@ -655,8 +655,10 @@ func (p *Pipeline) useFullEngineBranches(eng *full.Engine, cr ruleengine.Compile
 	var expandedLabels map[string]map[string]struct{}
 	if len(expansionNeeded) > 0 {
 		status := taxonomy.StatusUnknown
+		reason := "no taxonomy resolver is installed on this pipeline"
+		var inert map[string]struct{}
 		if p.taxonomyResolver != nil {
-			expandedLabels, status = p.taxonomyResolver.Expand(expansionNeeded)
+			expandedLabels, inert, status, reason = p.taxonomyResolver.Expand(expansionNeeded)
 		}
 		if status == taxonomy.StatusUnknown {
 			if !liveReDerivation {
@@ -667,8 +669,8 @@ func (p *Pipeline) useFullEngineBranches(eng *full.Engine, cr ruleengine.Compile
 				// been published — the pipeline's previous rule
 				// state (if any) is untouched.
 				return fmt.Errorf(
-					"pipeline: taxonomy expansion unknown for label(s) %s — no resolver snapshot, an unresolvable label, or a cycle/depth fault; refusing activation rather than risk projecting the wrong row set",
-					sortedLabelList(expansionNeeded))
+					"pipeline: taxonomy expansion unknown for label(s) %s — %s; refusing activation rather than risk projecting the wrong row set",
+					sortedLabelList(expansionNeeded), reason)
 			}
 			// A live re-derivation is governed by §6.5, not §4.2 (see
 			// UseFullEngineBranchesForReDerivation's doc): fall through
@@ -682,7 +684,24 @@ func (p *Pipeline) useFullEngineBranches(eng *full.Engine, cr ruleengine.Compile
 			// never risks a wrong row either: unavailable, not wrong, until
 			// the next re-derivation finds a trustworthy answer again.
 			slog.Warn("pipeline: live taxonomy re-derivation found the expansion unknown — degrading to the broad filter rather than keeping a stale narrow set",
-				"ruleId", p.ruleID, "labels", sortedLabelList(expansionNeeded))
+				"ruleId", p.ruleID, "labels", sortedLabelList(expansionNeeded), "reason", reason)
+		} else if !liveReDerivation && len(inert) > 0 {
+			// ACTIVATION-only (taxonomy.Resolver.Expand's doc has the full
+			// split): a `*` whose resolved closure is exactly {itself}
+			// asserts a polymorphism the taxonomy does not currently
+			// declare — refused here as an authoring mistake, never a
+			// silent no-op. A LIVE re-derivation must NOT take this
+			// branch: a concrete type's LAST subtypeOf child can be
+			// uninstalled by a DIFFERENT package while this lens is
+			// running and correct, and {itself} is the truthful, merely
+			// un-widened answer for it right now (§6.5) — refusing here
+			// would take the lens's own still-resolvable instances dark
+			// along with the widening it lost. liveReDerivation's branch
+			// below (via exhaustive/expandedLabels) accepts inert answers
+			// exactly like any other resolved label.
+			return fmt.Errorf(
+				"pipeline: taxonomy expansion for label(s) %s resolves to exactly itself — the `*` sigil asserts a polymorphism the taxonomy does not currently declare; refusing activation rather than accept a no-op sigil",
+				sortedLabelList(inert))
 		}
 		if status != taxonomy.StatusArmed {
 			// Known but not guaranteed current: correct-but-slower, never
@@ -1243,7 +1262,21 @@ func (p *Pipeline) ConsumerFilter() (filterSubjects []string, filterSubject stri
 	// here instead.
 	actorAware := p.actorEnumerator != nil
 	labels, ok := p.narrowedFilterEligible(rs)
-	if !ok || len(labels) == 0 || len(labels) > maxNarrowedFilterLabels {
+	if !ok || len(labels) == 0 {
+		return nil, subjects.CoreKVFilter(p.coreKVBucket)
+	}
+	if len(labels) > maxNarrowedFilterLabels {
+		// Unlike the not-eligible/empty arm above (an ordinary, frequent
+		// shape — most lenses are not full-engine or not exhaustive, and
+		// logging every one of them would make this signal noise), crossing
+		// the label cap is a footprint REGRESSION worth an operator's
+		// attention (§10.1): a lens author wrote one label and a DIFFERENT
+		// package's install pushed the resolved count over the cap, with no
+		// other signal anywhere today (registerWithFilterFallback logs a
+		// registration FAULT; this is a silent, correct-but-broader
+		// derivation, the gap named at design time).
+		slog.Warn("pipeline: narrowed filter label count exceeds the cap — falling back to the broad filter",
+			"ruleId", p.ruleID, "labelCount", len(labels), "cap", maxNarrowedFilterLabels)
 		return nil, subjects.CoreKVFilter(p.coreKVBucket)
 	}
 	labelList := make([]string, 0, len(labels))

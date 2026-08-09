@@ -13,8 +13,10 @@ package pipeline
 // (package pipeline_test).
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"log/slog"
 	"testing"
 
 	"github.com/nats-io/nats.go/jetstream"
@@ -283,6 +285,86 @@ func TestConsumerFilter_Table(t *testing.T) {
 		filterSubjects, filterSubject := p.ConsumerFilter()
 		require.Empty(t, filterSubjects)
 		require.Equal(t, "$KV.core-kv.>", filterSubject)
+	})
+}
+
+// captureDefaultLogger swaps slog's default logger for one writing to a
+// buffer, for the duration of the test, restoring the previous default on
+// cleanup. Package-level slog is what ConsumerFilter's label-cap warning
+// (and every other production log call in this package) actually writes
+// through — there is no per-Pipeline injectable logger to substitute
+// instead.
+func captureDefaultLogger(t *testing.T) *bytes.Buffer {
+	t.Helper()
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+	return &buf
+}
+
+// TestConsumerFilter_LabelCapFallback_LogsWarn pins §14 Fire A item 5's
+// audibility rule: a cap-driven fallback to the broad filter must log a
+// slog.Warn naming the rule id and the count vs. the cap — unlike a failed
+// registration, which signals via registerWithFilterFallback, this arm
+// otherwise has no other signal anywhere. The not-eligible and empty arms —
+// ordinary, frequent shapes most lenses take — must NOT log, or the signal
+// would be drowned in noise.
+func TestConsumerFilter_LabelCapFallback_LogsWarn(t *testing.T) {
+	t.Run("label count past the cap logs a warning", func(t *testing.T) {
+		buf := captureDefaultLogger(t)
+		labels := make(map[string]struct{}, maxNarrowedFilterLabels+1)
+		for i := 0; i < maxNarrowedFilterLabels+1; i++ {
+			labels[string(rune('a'+i))] = struct{}{}
+		}
+		p := &Pipeline{
+			ruleID:               "cap-warn-rule",
+			coreKVBucket:         "core-kv",
+			engineKind:           ruleengine.EngineFull,
+			plainReprojectLabels: labels,
+		}
+		filterSubjects, filterSubject := p.ConsumerFilter()
+		require.Empty(t, filterSubjects)
+		require.Equal(t, "$KV.core-kv.>", filterSubject)
+
+		logged := buf.String()
+		require.Contains(t, logged, "cap-warn-rule")
+		require.Contains(t, logged, "label count exceeds the cap")
+	})
+
+	t.Run("ineligible (not full engine) logs nothing", func(t *testing.T) {
+		buf := captureDefaultLogger(t)
+		p := &Pipeline{ruleID: "ineligible-rule", coreKVBucket: "core-kv"}
+		_, filterSubject := p.ConsumerFilter()
+		require.Equal(t, "$KV.core-kv.>", filterSubject)
+		require.Empty(t, buf.String(), "the not-eligible arm is an ordinary, frequent shape — it must not log")
+	})
+
+	t.Run("empty exhaustive label set logs nothing", func(t *testing.T) {
+		buf := captureDefaultLogger(t)
+		p := &Pipeline{
+			ruleID:               "empty-rule",
+			coreKVBucket:         "core-kv",
+			engineKind:           ruleengine.EngineFull,
+			plainReprojectLabels: map[string]struct{}{},
+		}
+		_, filterSubject := p.ConsumerFilter()
+		require.Equal(t, "$KV.core-kv.>", filterSubject)
+		require.Empty(t, buf.String(), "an empty exhaustive set is not a cap overrun — it must not log")
+	})
+
+	t.Run("eligible and under the cap logs nothing", func(t *testing.T) {
+		buf := captureDefaultLogger(t)
+		p := &Pipeline{
+			ruleID:               "under-cap-rule",
+			coreKVBucket:         "core-kv",
+			engineKind:           ruleengine.EngineFull,
+			plainReprojectLabels: map[string]struct{}{"book": {}},
+		}
+		filterSubjects, filterSubject := p.ConsumerFilter()
+		require.Empty(t, filterSubject)
+		require.NotEmpty(t, filterSubjects)
+		require.Empty(t, buf.String(), "the common eligible-and-narrowed path must gain nothing")
 	})
 }
 

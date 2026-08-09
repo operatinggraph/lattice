@@ -24,10 +24,11 @@ import (
 // over pkgregistry.All() found 27 of 59 shipping vertexType DDLs whose
 // CanonicalName differs from (or, for an op-only DDL like "shredIdentityKey",
 // never becomes) that segment, e.g. "workOrder" writes vtx.workorder.<id>.
-// keys.IsValidTypeSegment is enforced only on the ABSTRACT subset below, not
-// on concrete vertexType DDLs generally — do not extend it here to "fix"
-// that; it would reject those 27 packages. That gap is real and separate;
-// this check closes only the exact-name collision §1.2 names.
+// keys.IsValidTypeSegment is enforced below only on a TAXONOMY-PARTICIPATING
+// DDL (Abstract, or SubtypeOfRef declared) — never on an ordinary concrete
+// vertexType DDL generally, which would reject those 27 packages. A
+// non-participating DDL's CanonicalName can be any shape at all; this
+// reserved-name check closes only the exact-name collision §1.2 names.
 var reservedTypeNames = map[string]struct{}{
 	"meta": {},
 	"op":   {},
@@ -75,6 +76,35 @@ func (def Definition) validateAbstractDDLScope() error {
 			}
 		}
 
+		// A taxonomy-PARTICIPATING DDL's own CanonicalName must itself be
+		// usable as a vertex key-type segment (dynamic-type-taxonomy-
+		// design.md §14 Fire A item 5). "Participating" here is Abstract, or
+		// SubtypeOfRef declared (a concrete leaf or a concrete/abstract mid
+		// type naming its own ancestor) — the third participation mode, "is
+		// the TARGET of some other DDL's subtypeOf edge," needs no separate
+		// check here: reaching a target at all requires another DDL's own
+		// SubtypeOfRef to equal that target's CanonicalName exactly
+		// (resolveExternalSubtypeTarget/batch-local resolution both match by
+		// literal string), and that referencing DDL's SubtypeOfRef is
+		// checked against this same authority below — so a target's
+		// CanonicalName format is proven by induction through whichever DDL
+		// names it, never left unchecked.
+		//
+		// The resolver (internal/refractor/taxonomy) expands a `*` label by
+		// comparing canonicalNames against vertex KEY-TYPE segments. A
+		// taxonomy participant whose own CanonicalName cannot even BE a
+		// key-type segment can never be reached by (or contribute a
+		// concrete instance to) any abstract label's expansion, so
+		// admitting one here would let an install succeed while silently
+		// guaranteeing the resolver can never see it.
+		if d.Abstract || d.SubtypeOfRef != "" {
+			if !keys.IsValidTypeSegment(d.CanonicalName) {
+				return fmt.Errorf(
+					"pkgmgr: DDL[%d]: taxonomy-participating CanonicalName %q is not a valid Contract #1 type segment ([a-z][a-z0-9]*)",
+					idx, d.CanonicalName)
+			}
+		}
+
 		if d.Abstract {
 			if class != ddlClassVertexType {
 				return fmt.Errorf(
@@ -95,11 +125,6 @@ func (def Definition) validateAbstractDDLScope() error {
 				return fmt.Errorf(
 					"pkgmgr: DDL[%d] %q: LeafBudget is negative (%d)",
 					idx, d.CanonicalName, d.LeafBudget)
-			}
-			if !keys.IsValidTypeSegment(d.CanonicalName) {
-				return fmt.Errorf(
-					"pkgmgr: DDL[%d]: Abstract CanonicalName %q is not a valid Contract #1 type segment ([a-z][a-z0-9]*)",
-					idx, d.CanonicalName)
 			}
 		} else if d.LeafBudget != 0 {
 			return fmt.Errorf(

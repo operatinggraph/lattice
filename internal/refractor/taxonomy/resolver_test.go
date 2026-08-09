@@ -33,14 +33,18 @@ var (
 	unitID     = tid("TAXunitMeta")
 	buildingID = tid("TAXbuildingMeta")
 	roomID     = tid("TAXroomMeta")
+	closetID   = tid("TAXclosetMeta")
 	billableID = tid("TAXbillableMeta")
 )
 
 func TestExpand_NoSnapshot_IsUnknown(t *testing.T) {
 	r := New()
-	_, status := r.Expand(map[string]struct{}{"location": {}})
+	_, _, status, reason := r.Expand(map[string]struct{}{"location": {}})
 	if status != StatusUnknown {
 		t.Fatalf("status = %v, want StatusUnknown", status)
+	}
+	if reason == "" {
+		t.Fatal("expected a non-empty reason for an unloaded resolver")
 	}
 }
 
@@ -49,9 +53,12 @@ func TestExpand_UnknownLabel_IsUnknown(t *testing.T) {
 	r.InstallSnapshot([]TypeSnapshot{
 		{ID: unitID, CanonicalName: "unit"},
 	})
-	_, status := r.Expand(map[string]struct{}{"nosuchtype": {}})
+	_, _, status, reason := r.Expand(map[string]struct{}{"nosuchtype": {}})
 	if status != StatusUnknown {
 		t.Fatalf("status = %v, want StatusUnknown for an unresolvable label", status)
+	}
+	if !strings.Contains(reason, "nosuchtype") {
+		t.Errorf("reason should name the offending label; got %q", reason)
 	}
 }
 
@@ -63,7 +70,7 @@ func TestExpand_SnapshotWithoutLiveConsumer_IsStaleNotArmed(t *testing.T) {
 	})
 	// SetArmed is never called: the resolver ships disarmed until item 4's
 	// CDC consumer marks it live.
-	exp, status := r.Expand(map[string]struct{}{"location": {}})
+	exp, _, status, _ := r.Expand(map[string]struct{}{"location": {}})
 	if status != StatusStale {
 		t.Fatalf("status = %v, want StatusStale", status)
 	}
@@ -77,32 +84,89 @@ func TestExpand_Armed_ReportsArmed(t *testing.T) {
 		{ID: unitID, CanonicalName: "unit", SubtypeOf: []string{"location"}},
 	})
 	r.SetArmed(true)
-	exp, status := r.Expand(map[string]struct{}{"location": {}})
+	exp, _, status, _ := r.Expand(map[string]struct{}{"location": {}})
 	if status != StatusArmed {
 		t.Fatalf("status = %v, want StatusArmed", status)
 	}
 	requireSet(t, exp["location"], "unit")
 }
 
-// TestExpand_ReflexiveClosure pins §3.4's "expanded set" row: a bare
-// concrete label's own expansion is exactly itself, with no taxonomy
-// declared at all.
-func TestExpand_ReflexiveClosure(t *testing.T) {
+// TestExpand_ConcreteChildless_ResolvesToItselfAndIsInert pins the
+// activation/re-derivation split (dynamic-type-taxonomy-design.md §14 Fire A
+// item 5, amendment A3): Expand itself never refuses a concrete childless
+// `*` label — its closure is exactly {itself}, a perfectly valid answer —
+// it only FLAGS the label as inert via the returned inert set. What a
+// caller does with that flag is the caller's decision; TestUseFullEngine_
+// ConcreteChildlessSigil_RefusesAtActivationOnly (pipeline package) pins the
+// two opposite decisions the two production callers make.
+func TestExpand_ConcreteChildless_ResolvesToItselfAndIsInert(t *testing.T) {
 	r := New()
 	r.InstallSnapshot([]TypeSnapshot{
 		{ID: unitID, CanonicalName: "unit"},
 	})
 	r.SetArmed(true)
-	exp, status := r.Expand(map[string]struct{}{"unit": {}})
+	exp, inert, status, reason := r.Expand(map[string]struct{}{"unit": {}})
+	if status != StatusArmed {
+		t.Fatalf("status = %v, want StatusArmed — a childless concrete label is a resolvable answer, not a fault", status)
+	}
+	if reason != "" {
+		t.Errorf("expected no reason on a successful resolution, got %q", reason)
+	}
+	requireSet(t, exp["unit"], "unit")
+	if _, ok := inert["unit"]; !ok {
+		t.Errorf("expected %q in the inert set, got %v", "unit", inert)
+	}
+}
+
+// TestExpand_ConcreteWithOnlyAbstractLeaflessChild_IsInert pins that
+// inertness is decided from the COMPUTED CLOSURE, not a direct-child count:
+// "unit" has one direct child, "unitgroup", but unitgroup is abstract and
+// has no concrete descendants of its own. unit's closure is therefore still
+// exactly {"unit"} — structurally identical to the childless case above —
+// so it must be flagged inert too, even though len(direct children) == 1.
+func TestExpand_ConcreteWithOnlyAbstractLeaflessChild_IsInert(t *testing.T) {
+	r := New()
+	groupID := tid("TAXunitgroupMeta")
+	r.InstallSnapshot([]TypeSnapshot{
+		{ID: unitID, CanonicalName: "unit"},
+		{ID: groupID, CanonicalName: "unitgroup", Abstract: true, SubtypeOf: []string{"unit"}},
+	})
+	r.SetArmed(true)
+	exp, inert, status, _ := r.Expand(map[string]struct{}{"unit": {}})
 	if status != StatusArmed {
 		t.Fatalf("status = %v, want StatusArmed", status)
 	}
 	requireSet(t, exp["unit"], "unit")
+	if _, ok := inert["unit"]; !ok {
+		t.Errorf("a concrete type whose only child is abstract-and-leafless must be inert (closure == {itself}); inert = %v", inert)
+	}
+}
+
+// TestExpand_ReflexiveClosure pins §3.4's "expanded set" row: a concrete
+// type with at least one CONCRETE (or otherwise leaf-bearing) subtypeOf
+// descendant expands reflexively to itself plus its descendants, and is NOT
+// flagged inert — the `*` sigil bought something real.
+func TestExpand_ReflexiveClosure(t *testing.T) {
+	r := New()
+	r.InstallSnapshot([]TypeSnapshot{
+		{ID: unitID, CanonicalName: "unit"},
+		{ID: roomID, CanonicalName: "room", SubtypeOf: []string{"unit"}},
+	})
+	r.SetArmed(true)
+	exp, inert, status, _ := r.Expand(map[string]struct{}{"unit": {}})
+	if status != StatusArmed {
+		t.Fatalf("status = %v, want StatusArmed", status)
+	}
+	requireSet(t, exp["unit"], "unit", "room")
+	if _, ok := inert["unit"]; ok {
+		t.Errorf("unit's closure gained \"room\" — it must not be flagged inert")
+	}
 }
 
 // TestExpand_AbstractExcludesItself pins the other half of §3.4's row: an
 // abstract type contributes its concrete leaves but never itself, since it
-// names no instance.
+// names no instance. Never flagged inert — inertness applies only to a
+// CONCRETE label (see Expand's doc).
 func TestExpand_AbstractExcludesItself(t *testing.T) {
 	r := New()
 	r.InstallSnapshot([]TypeSnapshot{
@@ -111,16 +175,48 @@ func TestExpand_AbstractExcludesItself(t *testing.T) {
 		{ID: buildingID, CanonicalName: "building", SubtypeOf: []string{"location"}},
 	})
 	r.SetArmed(true)
-	exp, status := r.Expand(map[string]struct{}{"location": {}})
+	exp, inert, status, _ := r.Expand(map[string]struct{}{"location": {}})
 	if status != StatusArmed {
 		t.Fatalf("status = %v, want StatusArmed", status)
 	}
 	requireSet(t, exp["location"], "unit", "building")
+	if _, ok := inert["location"]; ok {
+		t.Errorf("an abstract label must never be flagged inert, got %v", inert)
+	}
+}
+
+// TestExpand_AbstractWithNoChildrenAtAll_IsArmedWithEmptySet pins §4.2's
+// second tier at the boundary a later fire could otherwise silently break:
+// an abstract type with ZERO subtypeOf children (not merely an abstract
+// mid-type with no concrete descendants) still resolves to a KNOWN, empty,
+// non-inert set — never StatusUnknown, and never flagged inert (inertness
+// is a CONCRETE-only concept). Kept distinct from
+// TestExpand_AbstractWithNoConcreteDescendants_IsArmedWithEmptySet below,
+// which exercises an abstract WITH a (leafless) child — the "zero direct
+// children" and "children exist but none are concrete" shapes are both
+// required to stay green independently.
+func TestExpand_AbstractWithNoChildrenAtAll_IsArmedWithEmptySet(t *testing.T) {
+	r := New()
+	r.InstallSnapshot([]TypeSnapshot{
+		{ID: locationID, CanonicalName: "location", Abstract: true},
+	})
+	r.SetArmed(true)
+	exp, inert, status, _ := r.Expand(map[string]struct{}{"location": {}})
+	if status != StatusArmed {
+		t.Fatalf("status = %v, want StatusArmed", status)
+	}
+	if got := exp["location"]; len(got) != 0 {
+		t.Fatalf("got %v, want an empty (but present) set", got)
+	}
+	if _, ok := inert["location"]; ok {
+		t.Errorf("an abstract label must never be flagged inert, got %v", inert)
+	}
 }
 
 // TestExpand_ConcreteTypeWithSubtypes pins amendment A5 (commit 33e562c4): a
 // CONCRETE type may itself have subtypes, and its own expansion must still
-// include its own instances (reflexivity) alongside its descendants'.
+// include its own instances (reflexivity) alongside its descendants', and
+// must not be flagged inert.
 func TestExpand_ConcreteTypeWithSubtypes(t *testing.T) {
 	r := New()
 	r.InstallSnapshot([]TypeSnapshot{
@@ -128,11 +224,14 @@ func TestExpand_ConcreteTypeWithSubtypes(t *testing.T) {
 		{ID: roomID, CanonicalName: "room", SubtypeOf: []string{"unit"}},
 	})
 	r.SetArmed(true)
-	exp, status := r.Expand(map[string]struct{}{"unit": {}})
+	exp, inert, status, _ := r.Expand(map[string]struct{}{"unit": {}})
 	if status != StatusArmed {
 		t.Fatalf("status = %v, want StatusArmed", status)
 	}
 	requireSet(t, exp["unit"], "unit", "room")
+	if _, ok := inert["unit"]; ok {
+		t.Errorf("unit's closure gained \"room\" — it must not be flagged inert")
+	}
 }
 
 // TestExpand_MultiLevelChain pins §3.4's transitivity rule: location <-
@@ -145,7 +244,7 @@ func TestExpand_MultiLevelChain(t *testing.T) {
 		{ID: roomID, CanonicalName: "room", SubtypeOf: []string{"unit"}},
 	})
 	r.SetArmed(true)
-	exp, status := r.Expand(map[string]struct{}{"location": {}})
+	exp, _, status, _ := r.Expand(map[string]struct{}{"location": {}})
 	if status != StatusArmed {
 		t.Fatalf("status = %v, want StatusArmed", status)
 	}
@@ -165,13 +264,13 @@ func TestExpand_Diamond(t *testing.T) {
 		{ID: roomID, CanonicalName: "room", SubtypeOf: []string{"unit", "billable"}},
 	})
 	r.SetArmed(true)
-	exp, status := r.Expand(map[string]struct{}{"location": {}})
+	exp, _, status, _ := r.Expand(map[string]struct{}{"location": {}})
 	if status != StatusArmed {
 		t.Fatalf("status = %v, want StatusArmed", status)
 	}
 	requireSet(t, exp["location"], "unit", "building", "room")
 
-	expB, statusB := r.Expand(map[string]struct{}{"billable": {}})
+	expB, _, statusB, _ := r.Expand(map[string]struct{}{"billable": {}})
 	if statusB != StatusArmed {
 		t.Fatalf("status = %v, want StatusArmed", statusB)
 	}
@@ -189,9 +288,41 @@ func TestExpand_Cycle_IsUnknown(t *testing.T) {
 		{ID: unitID, CanonicalName: "unit", SubtypeOf: []string{"location"}},
 	})
 	r.SetArmed(true)
-	_, status := r.Expand(map[string]struct{}{"location": {}})
+	_, _, status, reason := r.Expand(map[string]struct{}{"location": {}})
 	if status != StatusUnknown {
 		t.Fatalf("status = %v, want StatusUnknown for a cyclic taxonomy", status)
+	}
+	if !strings.Contains(reason, "location") || !strings.Contains(reason, "cycle") {
+		t.Errorf("reason should name the queried label and the cycle cause; got %q", reason)
+	}
+}
+
+// TestExpand_ReasonTruncatesLongCanonicalName pins that a reason string
+// built from a raw canonicalName (unbounded — validated only on the
+// pkgmgr-mediated install path, never on a raw core-operations submit) is
+// always bounded, never interpolated verbatim. A cycle is the vehicle: the
+// cycle-detection reason interpolates the OTHER node's canonicalName
+// (collectDownLocked), which here is deliberately far longer than
+// maxReasonNameLen.
+func TestExpand_ReasonTruncatesLongCanonicalName(t *testing.T) {
+	r := New()
+	longName := strings.Repeat("x", maxReasonNameLen+50)
+	longID := tid("TAXlongCycleMeta")
+	shortID := tid("TAXshortCycleMeta")
+	r.InstallSnapshot([]TypeSnapshot{
+		{ID: longID, CanonicalName: longName, SubtypeOf: []string{"shortloop"}},
+		{ID: shortID, CanonicalName: "shortloop", SubtypeOf: []string{longName}},
+	})
+	r.SetArmed(true)
+	_, _, status, reason := r.Expand(map[string]struct{}{"shortloop": {}})
+	if status != StatusUnknown {
+		t.Fatalf("status = %v, want StatusUnknown for a cyclic taxonomy", status)
+	}
+	if strings.Contains(reason, longName) {
+		t.Errorf("reason must not interpolate the raw, untruncated canonicalName (%d bytes); got %q", len(longName), reason)
+	}
+	if len(reason) > 4*maxReasonNameLen {
+		t.Errorf("reason is not bounded: %d bytes: %q", len(reason), reason)
 	}
 }
 
@@ -218,7 +349,7 @@ func TestExpand_OverDepth_IsUnknown(t *testing.T) {
 		{ID: n5, CanonicalName: "n5", SubtypeOf: []string{"n4"}},
 	})
 	r.SetArmed(true)
-	_, status := r.Expand(map[string]struct{}{"root": {}})
+	_, _, status, _ := r.Expand(map[string]struct{}{"root": {}})
 	if status != StatusUnknown {
 		t.Fatalf("status = %v, want StatusUnknown for a chain deeper than maxDepth", status)
 	}
@@ -239,7 +370,7 @@ func TestExpand_WithinDepthBound_Resolves(t *testing.T) {
 		{ID: n3, CanonicalName: "n3", SubtypeOf: []string{"n2"}},
 	})
 	r.SetArmed(true)
-	exp, status := r.Expand(map[string]struct{}{"root": {}})
+	exp, _, status, _ := r.Expand(map[string]struct{}{"root": {}})
 	if status != StatusArmed {
 		t.Fatalf("status = %v, want StatusArmed for a chain within maxDepth", status)
 	}
@@ -260,7 +391,7 @@ func TestExpand_AbstractWithNoConcreteDescendants_IsArmedWithEmptySet(t *testing
 		{ID: midID, CanonicalName: "mid", Abstract: true, SubtypeOf: []string{"location"}},
 	})
 	r.SetArmed(true)
-	exp, status := r.Expand(map[string]struct{}{"location": {}})
+	exp, _, status, _ := r.Expand(map[string]struct{}{"location": {}})
 	if status != StatusArmed {
 		t.Fatalf("status = %v, want StatusArmed", status)
 	}
@@ -273,7 +404,11 @@ func TestExpand_AbstractWithNoConcreteDescendants_IsArmedWithEmptySet(t *testing
 // behavior for a CanonicalName shared by two snapshot entries (e.g. a
 // rename's create-new + tombstone-old both live in one boot-replay window):
 // the name must become UNRESOLVABLE, never silently resolve to an arbitrary
-// last-write-wins winner while dropping the other registrant's subtree.
+// last-write-wins winner while dropping the other registrant's subtree. A
+// DIRECT query of the ambiguous name must report the AMBIGUITY as its
+// cause, not a generic "unknown label" — the whole point of a reason string
+// is naming the real cause, and during a rename's create-new/tombstone-old
+// window this is a collision, not a typo.
 func TestInstallSnapshot_DuplicateCanonicalName_IsUnresolvable(t *testing.T) {
 	r := New()
 	oldID := tid("TAXdupOldMeta")
@@ -283,23 +418,29 @@ func TestInstallSnapshot_DuplicateCanonicalName_IsUnresolvable(t *testing.T) {
 		{ID: oldID, CanonicalName: "unit"},
 		{ID: newID, CanonicalName: "unit"},
 		{ID: childID, CanonicalName: "room", SubtypeOf: []string{"unit"}},
+		{ID: closetID, CanonicalName: "closet", SubtypeOf: []string{"room"}},
 	})
 	r.SetArmed(true)
 
-	_, status := r.Expand(map[string]struct{}{"unit": {}})
+	_, _, status, reason := r.Expand(map[string]struct{}{"unit": {}})
 	if status != StatusUnknown {
 		t.Fatalf("status = %v, want StatusUnknown for a duplicated canonicalName", status)
+	}
+	if !strings.Contains(reason, "unit") || !strings.Contains(reason, "ambiguous") {
+		t.Errorf("a direct query of a collided name should report AMBIGUITY as the cause, not a generic unknown; got %q", reason)
 	}
 
 	// The colliding name must not silently resolve as a SubtypeOf parent
 	// either — "room" declared subtypeOf the ambiguous "unit" name, so its
 	// edge must not attach to either registrant, and "room" alone (queried
-	// directly, not through "unit") still resolves to just itself.
-	exp, status := r.Expand(map[string]struct{}{"room": {}})
+	// directly, not through "unit") still resolves to itself plus its own
+	// child "closet" — proving the collision on "unit" left "room" itself
+	// perfectly resolvable.
+	exp, _, status, _ := r.Expand(map[string]struct{}{"room": {}})
 	if status != StatusArmed {
 		t.Fatalf("status = %v, want StatusArmed for the unambiguous label", status)
 	}
-	requireSet(t, exp["room"], "room")
+	requireSet(t, exp["room"], "room", "closet")
 }
 
 // TestInstallSnapshot_EmptyCanonicalName_NeverResolvable pins that a
@@ -311,18 +452,19 @@ func TestInstallSnapshot_EmptyCanonicalName_NeverResolvable(t *testing.T) {
 	r.InstallSnapshot([]TypeSnapshot{
 		{ID: tid("TAXblankMeta"), CanonicalName: ""},
 		{ID: unitID, CanonicalName: "unit"},
+		{ID: roomID, CanonicalName: "room", SubtypeOf: []string{"unit"}},
 	})
 	r.SetArmed(true)
 
-	_, status := r.Expand(map[string]struct{}{"": {}})
+	_, _, status, _ := r.Expand(map[string]struct{}{"": {}})
 	if status != StatusUnknown {
 		t.Fatalf("status = %v, want StatusUnknown for an empty label", status)
 	}
-	exp, status := r.Expand(map[string]struct{}{"unit": {}})
+	exp, _, status, _ := r.Expand(map[string]struct{}{"unit": {}})
 	if status != StatusArmed {
 		t.Fatalf("status = %v, want StatusArmed", status)
 	}
-	requireSet(t, exp["unit"], "unit")
+	requireSet(t, exp["unit"], "unit", "room")
 }
 
 // TestInstallSnapshot_ResetsArmed pins that a reload never carries a
@@ -330,15 +472,19 @@ func TestInstallSnapshot_EmptyCanonicalName_NeverResolvable(t *testing.T) {
 // so a consumer that dies and later re-installs a snapshot before
 // re-arming must see StatusStale, not a stale StatusArmed.
 func TestInstallSnapshot_ResetsArmed(t *testing.T) {
+	snap := []TypeSnapshot{
+		{ID: unitID, CanonicalName: "unit"},
+		{ID: roomID, CanonicalName: "room", SubtypeOf: []string{"unit"}},
+	}
 	r := New()
-	r.InstallSnapshot([]TypeSnapshot{{ID: unitID, CanonicalName: "unit"}})
+	r.InstallSnapshot(snap)
 	r.SetArmed(true)
-	if _, status := r.Expand(map[string]struct{}{"unit": {}}); status != StatusArmed {
+	if _, _, status, _ := r.Expand(map[string]struct{}{"unit": {}}); status != StatusArmed {
 		t.Fatalf("status = %v, want StatusArmed before reload", status)
 	}
 
-	r.InstallSnapshot([]TypeSnapshot{{ID: unitID, CanonicalName: "unit"}})
-	if _, status := r.Expand(map[string]struct{}{"unit": {}}); status != StatusStale {
+	r.InstallSnapshot(snap)
+	if _, _, status, _ := r.Expand(map[string]struct{}{"unit": {}}); status != StatusStale {
 		t.Fatalf("status = %v, want StatusStale immediately after a reload — armed must not survive InstallSnapshot", status)
 	}
 }
@@ -366,12 +512,15 @@ func TestExpand_DuplicateNameReachedAsAncestorDescendant_IsUnknown(t *testing.T)
 	})
 	r.SetArmed(true)
 
-	_, status := r.Expand(map[string]struct{}{"dup": {}})
+	_, _, status, reason := r.Expand(map[string]struct{}{"dup": {}})
 	if status != StatusUnknown {
 		t.Fatalf("status = %v, want StatusUnknown querying the duplicated name directly", status)
 	}
+	if !strings.Contains(reason, "ambiguous") {
+		t.Errorf("a direct query of a collided name should report ambiguity as the cause; got %q", reason)
+	}
 
-	_, status = r.Expand(map[string]struct{}{"g": {}})
+	_, _, status, _ = r.Expand(map[string]struct{}{"g": {}})
 	if status != StatusUnknown {
 		t.Fatalf("status = %v, want StatusUnknown — reaching a poisoned descendant must refuse the whole "+
 			"query, never silently return {\"e\"} while \"c\" (unreachable because \"dup\" could not resolve "+

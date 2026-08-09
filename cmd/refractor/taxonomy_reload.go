@@ -128,7 +128,7 @@ func (rl *reloader) rederiveEntry(entry *pipelineEntry) {
 	if len(entry.taxExpansionLabels) == 0 {
 		return
 	}
-	expanded, status := rl.resolver.Expand(entry.taxExpansionLabels)
+	expanded, _, status, _ := rl.resolver.Expand(entry.taxExpansionLabels)
 	entry.taxMu.Lock()
 	unchanged := taxonomyExpansionEqual(expanded, status, entry.taxExpansion, entry.taxExpansionStatus)
 	entry.taxMu.Unlock()

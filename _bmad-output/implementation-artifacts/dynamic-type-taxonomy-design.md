@@ -266,7 +266,15 @@ narrowed one. That is a concrete, live, nameable consumer — not a speculative 
 
 ### 3.1 A type meta vertex
 
-A vertex type is declared by a `meta.ddl.vertexType` meta vertex whose `.canonicalName` **is the key type**:
+A vertex type is declared by a `meta.ddl.vertexType` meta vertex whose `.canonicalName` **names the key type**.
+The two are conventionally identical and **nothing enforces it**: `maintenance-domain` declares
+`CanonicalName: "workOrder"` for instances keyed `vtx.workorder.<id>` (`packages/maintenance-domain/ddls.go:31`),
+and several live lens labels (`role`, `permission`, `retentionclass`, `identityindex`, `meta`) name kernel types
+with no package-declared vertexType meta at all. Every mechanism that compares a canonicalName against a
+key-type segment — this resolver's `byName` map, `checkAbstractNoLiveInstances`' prefix scan — is therefore
+working across two namespaces and must say which one it means. The install-time gate on a
+taxonomy-participating canonicalName (§14 Fire A item 5) is what makes the identity hold *for the types the
+taxonomy touches*; it cannot make it hold in general, which is why the bare-label posture is what it is (§4.2).
 
 ```
 vtx.meta.<NanoID>                          class = "meta.ddl.vertexType"
@@ -334,6 +342,7 @@ property rather than an act, and the platform's relation names are verbs — `ho
 | **Multi-level depth** | **Allowed**, bounded to `maxTaxonomyDepth = 4`. | Mirrors `maxInstanceOfHops = 4` (`step6_resolve_ddl.go:14-20`) and its stated reason: a bound plus a visited set keeps the walk terminating and abuse-proof against crafted cycles. |
 | **Transitivity** | **Yes.** `room subtypeOf unit subtypeOf location` ⇒ `location` covers `room`. | Anything else makes an abstract's meaning depend on where in the chain a package chose to attach, which is the opposite of the "declare a leaf anywhere, get picked up" requirement. |
 | **A type may be both concrete and abstract-of-others** | Yes. `unit` has instances *and* may have `room subtypeOf unit`. | Nothing forbids it and forbidding it would be arbitrary. |
+| **A `*` whose closure is exactly `{itself}`** (an **inert** sigil) | **Refused at activation, accepted on live re-derivation** (§4.2's fourth tier). Decided from the computed closure, not a direct-child count — a concrete type whose only child is abstract-and-leafless is inert too. | At activation the sigil asserts a polymorphism the taxonomy does not declare, and refusing is not permanent: another package installing a leaf re-derives and the same query resolves. On a live re-derivation the same state means the taxonomy *shrank* under a running lens, where `{itself}` is correct. |
 | **The expanded set** | The **concrete** (non-`abstract`) members of the abstract's transitive downward closure. An abstract mid-type contributes its leaves but **not itself**. | An abstract type has no instances, so including it would add a filter subject (`$KV.<b>.vtx.location.>`) that can never match — and, worse, would let `plainVertexRelevant` admit a type that cannot exist, which is harmless but dishonest. |
 | **An abstract type must not be named `meta` or `op`** | Enforced at install. | Contract #1 §1.2 (`:38-45`) reserves both. |
 | **An empty expanded set** | The lens becomes **non-exhaustive** (broad filter), and it logs. Never `exhaustive = true` on an empty set. | An empty answer is far more likely "the resolver has not loaded yet" than "genuinely zero leaves." `ConsumerFilter` already treats `len(labels) == 0` as broad (`pipeline.go:934-935`), so this is consistent with the shipped gate rather than a new special case. |
@@ -393,7 +402,10 @@ for each compiled branch:
               else      → union expanded into labels
 ```
 
-`resolver.Expand` maps each label to itself when concrete, and to its concrete downward closure when abstract.
+`resolver.Expand` maps an abstract label to its concrete downward closure, and a concrete label to itself ∪ that
+closure (reflexive, amendment A5). It also reports, per label, whether the resolved closure is exactly
+`{itself}` — an **inert** `*`, indistinguishable from the bare label. `Expand` never refuses an inert label;
+the two callers decide it differently (§4.2). A **bare** label never reaches `Expand` at all.
 
 ### 4.2 The exhaustiveness rule — the one the brief flags
 
@@ -409,6 +421,7 @@ tiers**, by whether the expanded set is *known*:
 | **known, freshness not guaranteed** | snapshot loaded, invalidation consumer not live | `exhaustive = false` ⇒ `reprojectAll = true` ⇒ broad filter + no client skip. The lens **runs**. Correct-but-slower. |
 | **known and empty** | an abstract with no concrete descendants | `exhaustive = false`. The lens runs and matches nothing, which is the truthful answer — an abstract with no concrete subtypes admits no instances. Never `exhaustive = true` on an empty set: that publishes an empty `reprojectLabels` with `reprojectAll = false`, and `plainVertexRelevant` then skip-and-Acks **every** event while the lens presents as narrowed and health-green — §6.5's one unacceptable state. (Plain-lens-specific: `actorAwareNarrowingLabels` fails open on an empty set.) |
 | **not known at all** | no resolver, snapshot never loaded, label unresolvable, cycle detected, depth bound exceeded | **Refuse activation**, loudly. No filter width makes a matcher with no expansion set correct, and the alternative — evaluating as though the bare label were meant — is a silent empty projection. Nothing is published; the pipeline keeps whatever rule it already had. |
+| **known, and exactly `{itself}`** — an **inert** `*` | the label resolves to a concrete type whose whole downward closure is itself (childless, or every child abstract and leafless) | **Refuse at ACTIVATION; accept on live RE-DERIVATION.** The set is known and correct, so this tier is a *policy* refusal, not a trust one — which is why it splits by caller where the rows above do not. At activation the `*` can only be an authoring mistake (it asserts a polymorphism the taxonomy does not declare), and refusing is retried automatically when a leaf later appears (§14 Fire A item 4). On a live re-derivation the identical state has a benign cause — a **different** package uninstalled the last leaf under a lens that is running and correct — and `{itself}` is the truthful, merely un-widened answer. Refusing there would take the lens's own still-resolvable instances dark along with the widening it lost, converting an unrelated uninstall into an availability cliff. |
 
 **Correct-but-slower, never wrong-but-fast — and never silently wrong at all.** Note the asymmetry the third row
 buys: the *activation* fail-closed is loud (an error, recorded on the lens's health entry), whereas a missing
@@ -807,6 +820,12 @@ design-time obligation rather than a live bug.
 ### 10.2 `leafBudget` — turning a dynamic silent regression into a static contract
 
 An abstract type declares `LeafBudget int` (default 8, the label cap). Then:
+
+> **Build status (2026-08-09):** the leaf-installer half below is built and now counts the **transitive**
+> closure (§17.9). The lens-author half — the `K + leafBudget ≤ maxNarrowedFilterLabels` check at the *lens's*
+> install — is **not built**: pkgmgr validates that a lens spec parses but never extracts its node labels, so
+> `K` is not computable there today. `LeafBudget` therefore has a warning consumer but no refusal consumer.
+> Filed as a lane row with that gap named; do not read the paragraph below as shipped.
 
 - **A lens author gets a decidable answer.** At the *lens's* install, `K + leafBudget ≤ maxNarrowedFilterLabels`
   is checked, and the install **fails** if the lens cannot fit its own worst case. The lens author owns their own
@@ -1455,10 +1474,12 @@ increment leaves it, each grounded:
 - **`SetArmed(true)` alone flips a lens from broad to narrowed**, and a JetStream filter update never rewinds a
   cursor — which is why §6.3 routes a widening through `Rebuild`. The public setter has no mechanism enforcing
   that today.
-- **`LeafBudget` counts DIRECT children while the runtime cap applies to the transitive union.** An abstract with
-  4 direct children of 4 leaves each passes install and silently blows `maxNarrowedFilterLabels = 8`;
-  `ConsumerFilter` drops to the broad filter with no health signal. The operator-visible signal is item 5/6's —
-  named here so it is not rediscovered.
+- **`LeafBudget` counted DIRECT children while the runtime cap applies to the transitive union** — an abstract
+  with 4 direct children of 4 leaves each passed install and silently blew `maxNarrowedFilterLabels = 8`.
+  **Closed by increment 5** (§17.9): the count is now the transitive concrete closure, it counts a concrete root
+  reflexively, and it rechecks every *ancestor* of a newly-parented node rather than only the direct target.
+  The operator-visible half — `ConsumerFilter` dropping to the broad filter with no health field — remains
+  item 6's; increment 5 gave that fallback a log line only.
 
 **Still carried into Fire B:** the §17.2 class-gate migration hazard, and the live `vtx.location.*` test fixtures
 named in §14 Fire B.
@@ -1543,3 +1564,87 @@ consumer-creation requests is a mechanism that has **already OOM-killed `lattice
 today only because no `packages/` lens carries `*`; the first one makes it live. **A serialized or coalesced
 rebuild scheduler is therefore a prerequisite of Fire B, not a follow-on** — filed as its own ★★★ lane row.
 This supersedes §6.3's "bounding it" paragraph, which counts trigger frequency and never counts the fan-out.
+
+### 17.9 Fire A · Increment 5 — the validation gate (2026-08-09)
+
+**Scope sentence (§14 Fire A item 5, amendment A3):** make the taxonomy's assumptions checked rather than
+assumed — refuse a `*` the taxonomy provably cannot honour, count `LeafBudget` over the closure it actually
+governs, gate a taxonomy-participating canonicalName at its declaration site, make the narrowed-filter cap
+fallback audible, and declare the bare-label posture explicitly.
+
+**Scope-diff gate: narrow-only**, confirmed by an independent acceptance audit. Item 6 (`filterMode` /
+`filterLabelCount` / `filterBroadReason`, the schema doc, Loupe's badge) and Fire B did not leak in; items 2–4's
+shipped sites were re-touched only where `Expand`'s signature forced a mechanical `_`.
+
+**A3's three checks did not land equally, and the differences are adjudicated here rather than left to be
+rediscovered.**
+
+1. **`label*` on a name that is not declared abstract → refused, narrowed to `{itself}`-closure inertness.**
+   A3 taken literally contradicts amendment A5, which makes the closure reflexive precisely because *"a concrete
+   type may also have subtypes"*: under A3's literal wording `:unit*` with `room subtypeOf unit` would be an
+   error, under A5 it must expand to `{unit, room}`. Refusing only a **provably inert** sigil satisfies A5 and
+   preserves A3's stated rationale (nothing to expand), and is strictly narrower than A3's rule, so it never
+   over-refuses. §3.4 and §4.2 carry the rule; both directions are pinned by tests.
+2. **A cap overrun raises a log line, not a health signal.** A narrowing against item 6, which owns the three
+   health fields as one coherent unit; splitting one field out would have shipped a schema doc item 6 rewrites.
+3. **"A bare label naming no concrete key type is an error" is RETIRED, with reason — not built, not deferred.**
+   A lens node label names a vertex **key-type segment**; the resolver's vocabulary is keyed by the
+   **canonicalName** of a `meta.ddl.vertexType` meta. §3.1 now records that those two namespaces are not the
+   same, and the live corpus proves it: `maintenance-domain` declares `CanonicalName: "workOrder"` for instances
+   keyed `vtx.workorder.<id>`, and five live lens labels (`role`, `permission`, `retentionclass`,
+   `identityindex`, `meta`) name kernel types with no vertexType meta under that name at all. A runtime
+   "unresolvable bare label ⇒ refuse activation" gate cannot tell an author's typo from a correct kernel label,
+   and would take live lenses dark across at least five packages. The posture is therefore **declared** — item
+   5's own fourth clause — in `internal/refractor/taxonomy`'s package doc, and the enforcement point that would
+   be right (an authoring/install-time lint over lens specs, once an authoritative key-type vocabulary exists)
+   is filed as a lane row rather than left in a code comment.
+
+**Built.** `Expand` returns `(closure, inert, Status, reason)`: it never refuses an inert label, it flags one,
+and the two callers decide oppositely (§4.2's fourth tier). Reasons are per-cause, bounded, and deterministic
+across calls; a directly-queried ambiguous canonicalName now reports ambiguity instead of "unresolvable".
+`LeafBudget` counts the transitive concrete closure, counts a concrete root reflexively, and rechecks every
+ancestor of a newly-parented node. A taxonomy-participating canonicalName must be a valid Contract #1 key-type
+segment. The label-cap fallback logs.
+
+**The grounding falsified a shipped increment-1 claim, and fixing it is what closed the vacuity.**
+`checkAbstractNoLiveInstances` scans `vtx.<canonicalName>.`, which is silently vacuous for any type whose
+canonicalName is not its key segment — the `workOrder` shape exactly. The fix is the **segment gate**, not a
+cleverer scan: an Abstract canonicalName is now constrained to `[a-z][a-z0-9]*`, and every live key's type
+segment already is (step 6 → `ClassifyKey`, under P2's sole-writer rule), so the exact-prefix scan is sound for
+everything it is allowed to see. A case-divergence scan was built first and **removed before merge**: two
+reviewers independently proved it unsatisfiable (for two lowercase-ASCII strings `EqualFold ⟺ ==`), and its
+only test passed by planting a key through a raw `KVPut` that the Processor itself would refuse. Dead code
+carrying a safety claim is worse than no code; the residual it could not close — a canonicalName that is a
+valid segment but simply not the one its instances use — is filed, not implied.
+
+**The adversarial pass was load-bearing again — three cold reviewers, one availability cliff.** The inert-sigil
+refusal originally applied on every path, so a **different** package uninstalling the last leaf under a live,
+correct `:unit*` lens drove it through the re-derivation path to `WithLabelExpansion(nil)` — zero rows,
+including `unit`'s own still-resolvable instances. That is §6.5's forbidden state reached from a benign cause,
+and it is why §4.2's fourth tier splits by caller. Two further real defects: the transitive count never counted
+a concrete root, so a concrete type with 8 subtypes passed a budget of 8 while the runtime expanded to 9 — the
+exact boundary the count was rewritten for; and only the *direct* target was rechecked, so the headline
+cross-package case (A declares the abstract, B the mid-type, C the leaves) still warned about nothing.
+
+### 17.10 Checkpoint — Fire A, after increment 5
+
+**Landed on `main`; no worktree is held.** Increment 6 starts fresh.
+
+**Next — increment 6, observability (§14 Fire A item 6).** `filterMode` / `filterLabelCount` /
+`filterBroadReason` on `healthwire.Entry`, `docs/observability/health-kv-schema.md`, and Loupe's badge (the
+badge is `cmd/loupe/**`, so it belongs to the Loupe lane's lock — file it there rather than reaching across).
+Increment 5's cap log line is the placeholder that item 6 replaces with the real signal.
+
+**Fire A is otherwise complete: items 1–5 are built.** Fire B remains gated — not by anything increment 5
+leaves, but by the rebuild fan-out row above (§17.8), which must land before a `packages/` lens carries `*`.
+
+**Three residuals this increment leaves, each filed with its consumer and its blocker:**
+
+- **No authoritative vertex key-type vocabulary exists**, so neither the bare-label gate (A3 check 1) nor a
+  general canonicalName-is-the-key-segment gate can be built. Consumer: an authoring-time lens-label lint.
+  Blocker: the vocabulary itself — kernel types are minted by Starlark string construction and have no
+  vertexType meta.
+- **`LeafBudget` has a warning consumer but no refusal consumer.** §10.2's decidable answer for a *lens author*
+  needs `K` — the lens's own label count — at install, and pkgmgr validates that a lens spec parses without ever
+  extracting its labels. Consumer: a lens author crossing the cap. Blocker: label extraction in pkgmgr.
+- **§17.8's two `armed` preconditions are untouched** and remain as filed.

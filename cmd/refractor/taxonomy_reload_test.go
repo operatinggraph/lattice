@@ -43,7 +43,7 @@ func TestRederiveEntry_NoOpWhenExpansionUnchanged(t *testing.T) {
 	resolver.SetArmed(true)
 
 	labels := map[string]struct{}{"location": {}}
-	expanded, status := resolver.Expand(labels)
+	expanded, _, status, _ := resolver.Expand(labels)
 	require.Equal(t, taxonomy.StatusArmed, status)
 	require.Equal(t, map[string]map[string]struct{}{"location": {"unit": {}}}, expanded)
 
@@ -181,7 +181,7 @@ func TestRederiveEntry_GrowThenShrink_GoesThroughRebuildBothWays(t *testing.T) {
 	p.SetTaxonomyResolver(resolver)
 
 	labels := map[string]struct{}{"location": {}}
-	initialExpand, initialStatus := resolver.Expand(labels)
+	initialExpand, _, initialStatus, _ := resolver.Expand(labels)
 	require.Equal(t, taxonomy.StatusArmed, initialStatus)
 	require.NoError(t, p.UseFullEngineBranches(fullEngine, cr, nil))
 
@@ -368,7 +368,7 @@ func TestRederiveEntry_LiveStatusUnknownDegradesToBroadRatherThanRefusing(t *tes
 	p.SetTaxonomyResolver(resolver)
 
 	labels := map[string]struct{}{"location": {}}
-	initialExpand, initialStatus := resolver.Expand(labels)
+	initialExpand, _, initialStatus, _ := resolver.Expand(labels)
 	require.Equal(t, taxonomy.StatusArmed, initialStatus)
 	require.NoError(t, p.UseFullEngineBranches(fullEngine, cr, nil))
 

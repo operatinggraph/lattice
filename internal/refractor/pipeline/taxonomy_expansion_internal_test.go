@@ -186,6 +186,62 @@ func TestUseFullEngine_UnknownTaxonomy_UnresolvableLabelAndCycleBothRefuse(t *te
 	})
 }
 
+// TestUseFullEngine_ConcreteChildlessSigil_ActivationRefusesReDerivationAccepts
+// pins the activation/re-derivation split that closes the "a live `*` lens
+// goes dark when its concrete type's last subtypeOf child is uninstalled"
+// hazard: a `*` on a concrete type with no subtypeOf children resolves to a
+// KNOWN, correct closure of exactly {itself} (taxonomy.Resolver.Expand's
+// inert flag) — never taxonomy.StatusUnknown. Two entry points, two
+// deliberately opposite decisions about that same answer:
+//
+//   - ACTIVATION (UseFullEngine/UseFullEngineBranches) refuses on it. An
+//     author writing `:unit*` against a taxonomy that cannot currently
+//     honour it is exactly the authoring mistake amendment A3 exists to
+//     catch, so nothing is published and the error names the label.
+//   - A LIVE RE-DERIVATION (UseFullEngineBranchesForReDerivation) must NOT
+//     take that same refusal — this is the exact shape of "unit's last
+//     subtypeOf child gets uninstalled by a DIFFERENT package while
+//     `:unit*` is live and correct" (§6.5): the re-derivation accepts
+//     {itself} and keeps the pipeline narrowed on "unit", so the lens's own
+//     still-resolvable instances never go dark.
+func TestUseFullEngine_ConcreteChildlessSigil_ActivationRefusesReDerivationAccepts(t *testing.T) {
+	eng := full.New()
+	cr, err := eng.Parse(`MATCH (l:unit*) RETURN l.key AS key`)
+	require.NoError(t, err)
+
+	resolver := taxonomy.New()
+	resolver.InstallSnapshot([]taxonomy.TypeSnapshot{
+		{ID: taxID("TAXchildlessUnitMeta"), CanonicalName: "unit"},
+	})
+	resolver.SetArmed(true)
+
+	t.Run("activation refuses", func(t *testing.T) {
+		p, err := New("concrete-childless-activation", "nats_kv", "CORE", nil, nil, &keyListerAdapter{}, nil)
+		require.NoError(t, err)
+		p.SetTaxonomyResolver(resolver)
+
+		err = p.UseFullEngine(eng, cr)
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "unit")
+		require.Contains(t, err.Error(), "resolves to exactly itself")
+
+		rs := p.ruleState()
+		require.Empty(t, rs.engineKind, "a refused activation must publish nothing")
+	})
+
+	t.Run("live re-derivation accepts and stays narrowed on itself", func(t *testing.T) {
+		p, err := New("concrete-childless-rederivation", "nats_kv", "CORE", nil, nil, &keyListerAdapter{}, nil)
+		require.NoError(t, err)
+		p.SetTaxonomyResolver(resolver)
+
+		require.NoError(t, p.UseFullEngineBranchesForReDerivation(eng, cr, nil))
+
+		rs := p.ruleState()
+		require.False(t, rs.reprojectAll, "a live re-derivation must accept the inert {itself} closure and stay narrowed, never go broad and never refuse")
+		require.Equal(t, map[string]struct{}{"unit": {}}, rs.reprojectLabels)
+	})
+}
+
 // TestUseFullEngineBranches_UnknownTaxonomy_LeavesPreviousRuleStatePublished
 // pins the hot-reload shape (cmd/refractor/reload.go): a MATCH edit that
 // would refuse to activate must leave the PIPELINE'S PREVIOUS rule running,

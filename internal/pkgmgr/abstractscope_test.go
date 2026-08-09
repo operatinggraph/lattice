@@ -91,6 +91,22 @@ func TestAbstractScope_ConcreteVertexTypeOrdinaryName_Passes(t *testing.T) {
 	}
 }
 
+// TestAbstractScope_NonParticipatingOddCanonicalName_Passes proves the new
+// key-type-segment gate (item 5, §14 Fire A) is scoped to taxonomy
+// PARTICIPANTS only — Abstract or SubtypeOfRef-bearing — and does not widen
+// into a blanket format check over every vertexType DDL. "workOrder" is a
+// real shipped shape (packages/maintenance-domain/ddls.go): a vertexType
+// DDL whose CanonicalName is not itself a valid Contract #1 type segment
+// (its instances key as vtx.workorder.<id>, lowercase), and it declares
+// neither Abstract nor SubtypeOfRef, so it never participates in the
+// taxonomy and must be untouched.
+func TestAbstractScope_NonParticipatingOddCanonicalName_Passes(t *testing.T) {
+	def := Definition{Name: "p", DDLs: []DDLSpec{minimalDDL("workOrder", "meta.ddl.vertexType", false)}}
+	if err := def.validateAbstractDDLScope(); err != nil {
+		t.Fatalf("a non-taxonomy-participating vertexType DDL's CanonicalName must not be format-checked: %v", err)
+	}
+}
+
 // TestAbstractScope_AspectTypeDDLNamedMeta_Passes proves the reserved-name
 // check is scoped to vertexType DDLs deliberately, not by accident: an
 // aspectType DDL's CanonicalName is never written into a key's vertex-type
@@ -196,6 +212,22 @@ func TestAbstractScope_Rejections(t *testing.T) {
 				return d
 			}()}},
 			wantSub: "own CanonicalName",
+		},
+		{
+			// A CONCRETE DDL declaring SubtypeOfRef is a taxonomy
+			// participant too (§14 Fire A item 5): its own CanonicalName
+			// must be usable as a vertex key-type segment, not only an
+			// Abstract DDL's — a concrete leaf with a CanonicalName the
+			// resolver can never match against any instance's key type
+			// must be refused at install, not left to silently fail every
+			// `*` expansion later.
+			name: "concrete SubtypeOfRef-bearing canonicalName not a valid type segment",
+			def: Definition{Name: "p", DDLs: []DDLSpec{func() DDLSpec {
+				d := minimalDDL("Room", "meta.ddl.vertexType", false)
+				d.SubtypeOfRef = "location"
+				return d
+			}()}},
+			wantSub: "not a valid Contract #1 type segment",
 		},
 	}
 	for _, tc := range cases {

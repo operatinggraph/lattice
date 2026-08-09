@@ -2,6 +2,7 @@ package pkgmgr
 
 import (
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -283,4 +284,257 @@ func containsAll(s string, subs ...string) bool {
 		}
 	}
 	return true
+}
+
+// TestInstaller_LeafBudget_CountsTransitiveClosureThroughAbstractMidType
+// pins the invariant this check enforces: an abstract's LeafBudget compares
+// against the FULL transitive concrete closure the runtime resolver
+// (internal/refractor/taxonomy) actually expands a `*` label into, not
+// merely its direct children. "apextype" has exactly one direct subtypeOf
+// child ("branch", itself abstract with no instances of its own) and four
+// concrete leaves two hops down, through branch, so the warning must report
+// that transitive count (4) — the number the runtime narrowed filter
+// actually has to hold — against the declared budget (3).
+func TestInstaller_LeafBudget_CountsTransitiveClosureThroughAbstractMidType(t *testing.T) {
+	ctx, _, inst := newInstallerHarness(t)
+
+	root := abstractDDL("apextype") // "root" collides with the bootstrap-seeded primordial meta-meta DDL.
+	root.LeafBudget = 3
+	branch := abstractDDL("branch")
+	branch.SubtypeOfRef = "apextype"
+	leaf1 := minimalDDL("leaf1", "meta.ddl.vertexType", false)
+	leaf1.SubtypeOfRef = "branch"
+	leaf2 := minimalDDL("leaf2", "meta.ddl.vertexType", false)
+	leaf2.SubtypeOfRef = "branch"
+	leaf3 := minimalDDL("leaf3", "meta.ddl.vertexType", false)
+	leaf3.SubtypeOfRef = "branch"
+	leaf4 := minimalDDL("leaf4", "meta.ddl.vertexType", false)
+	leaf4.SubtypeOfRef = "branch"
+
+	def := Definition{Name: "twolevel-pkg", Version: "0.1.0", DDLs: []DDLSpec{root, branch, leaf1, leaf2, leaf3, leaf4}}
+	res, err := inst.Install(ctx, def)
+	if err != nil {
+		t.Fatalf("install: %v", err)
+	}
+
+	rootID := EntityNanoIDForTest("twolevel-pkg", "ddl:apextype")
+	var rootWarning string
+	for _, w := range res.LeafBudgetWarnings {
+		if strings.Contains(w, rootID) {
+			rootWarning = w
+		}
+	}
+	if rootWarning == "" {
+		t.Fatalf("expected a LeafBudget warning naming root's TRANSITIVE count (4 concrete leaves reached "+
+			"through the abstract mid \"branch\") — got %v", res.LeafBudgetWarnings)
+	}
+	if !containsAll(rootWarning, "leaf count 4", "LeafBudget 3") {
+		t.Errorf("warning should report the transitive count (4); got %q", rootWarning)
+	}
+}
+
+// TestInstaller_LeafBudget_ConcreteRootCountsItself pins the boundary a
+// CONCRETE subtypeOf target sits at (amendment A5 — a concrete type may
+// have subtypes): the runtime resolver's Expand is reflexive for a concrete
+// label, so a concrete target's OWN instances count toward its transitive
+// closure exactly like any of its concrete descendants do. "widgetunit" is
+// concrete with 8 concrete subtypes — at the default budget of 8 (a
+// concrete DDL cannot declare its own LeafBudget, abstractscope.go), the
+// count must be 9 (widgetunit itself plus its 8 subtypes), not 8, or the
+// exact boundary where the runtime expansion silently exceeds
+// maxNarrowedFilterLabels goes unwarned.
+func TestInstaller_LeafBudget_ConcreteRootCountsItself(t *testing.T) {
+	ctx, _, inst := newInstallerHarness(t)
+
+	root := minimalDDL("widgetunit", "meta.ddl.vertexType", false)
+	ddls := []DDLSpec{root}
+	for i := 0; i < 8; i++ {
+		leaf := minimalDDL(fmt.Sprintf("widgetleaf%d", i), "meta.ddl.vertexType", false)
+		leaf.SubtypeOfRef = "widgetunit"
+		ddls = append(ddls, leaf)
+	}
+
+	def := Definition{Name: "concrete-root-pkg", Version: "0.1.0", DDLs: ddls}
+	res, err := inst.Install(ctx, def)
+	if err != nil {
+		t.Fatalf("install: %v", err)
+	}
+
+	rootID := EntityNanoIDForTest("concrete-root-pkg", "ddl:widgetunit")
+	var rootWarning string
+	for _, w := range res.LeafBudgetWarnings {
+		if strings.Contains(w, rootID) {
+			rootWarning = w
+		}
+	}
+	if rootWarning == "" {
+		t.Fatalf("expected a LeafBudget warning: widgetunit's transitive count is 9 (itself + 8 concrete "+
+			"subtypes) against the default budget of 8 — a count that omits the concrete root itself would "+
+			"read 8, exactly at budget, and never warn. got %v", res.LeafBudgetWarnings)
+	}
+	if !containsAll(rootWarning, "leaf count 9", "LeafBudget 8") {
+		t.Errorf("warning should report count 9 (root included) against budget 8; got %q", rootWarning)
+	}
+}
+
+// TestInstaller_LeafBudget_TransitiveCount_IgnoresAbstractMidType pins the
+// exclusion at its exact boundary: "root2" has budget 2 and a transitive
+// concrete closure of exactly 2 (leaf5, leaf6, reached through the abstract
+// mid "branch2"). Counting "branch2" itself — an abstract type has no
+// instances, §3.4 — would wrongly push the total to 3 and warn; excluding
+// it correctly leaves the total at exactly the budget, which must NOT warn.
+func TestInstaller_LeafBudget_TransitiveCount_IgnoresAbstractMidType(t *testing.T) {
+	ctx, _, inst := newInstallerHarness(t)
+
+	root := abstractDDL("root2")
+	root.LeafBudget = 2
+	branch := abstractDDL("branch2")
+	branch.SubtypeOfRef = "root2"
+	leaf1 := minimalDDL("leaf5", "meta.ddl.vertexType", false)
+	leaf1.SubtypeOfRef = "branch2"
+	leaf2 := minimalDDL("leaf6", "meta.ddl.vertexType", false)
+	leaf2.SubtypeOfRef = "branch2"
+
+	def := Definition{Name: "boundary-pkg", Version: "0.1.0", DDLs: []DDLSpec{root, branch, leaf1, leaf2}}
+	res, err := inst.Install(ctx, def)
+	if err != nil {
+		t.Fatalf("install: %v", err)
+	}
+	rootID := EntityNanoIDForTest("boundary-pkg", "ddl:root2")
+	for _, w := range res.LeafBudgetWarnings {
+		if strings.Contains(w, rootID) {
+			t.Fatalf("root2's transitive concrete count is exactly 2 (leaf5, leaf6) at budget 2 — must NOT "+
+				"warn; counting the abstract mid \"branch2\" itself would wrongly push the total to 3. got %q", w)
+		}
+	}
+}
+
+// TestInstaller_LeafBudget_TransitiveCount_ExternalAbstractMidTypeExcluded
+// proves the exclusion above also holds when the abstract mid-type was
+// installed by a DIFFERENT, earlier package — the common real shape, since
+// leaf installs land incrementally over time. Determining "extbranch" is
+// abstract here requires a Core KV read (internal/pkgmgr/taxonomy.go's
+// isAbstractMetaVertex), not a batch-local lookup: the package under test
+// (the leaves package, which installs the two new edges) never declares
+// "extbranch" itself. The leaves package's OWN install result is what is
+// asserted on — the ancestor-recheck walk (ancestorsOf) means "extroot"
+// is re-validated from THIS install even though this package never names
+// "extroot" at all, so no extra forcing package is needed to exercise it.
+func TestInstaller_LeafBudget_TransitiveCount_ExternalAbstractMidTypeExcluded(t *testing.T) {
+	ctx, _, inst := newInstallerHarness(t)
+
+	rootDef := Definition{Name: "extmid-root-pkg", Version: "0.1.0", DDLs: []DDLSpec{func() DDLSpec {
+		d := abstractDDL("extroot")
+		d.LeafBudget = 2
+		return d
+	}()}}
+	if _, err := inst.Install(ctx, rootDef); err != nil {
+		t.Fatalf("install root: %v", err)
+	}
+
+	branchDef := Definition{Name: "extmid-branch-pkg", Version: "0.1.0", DDLs: []DDLSpec{func() DDLSpec {
+		d := abstractDDL("extbranch")
+		d.SubtypeOfRef = "extroot"
+		return d
+	}()}}
+	if _, err := inst.Install(ctx, branchDef); err != nil {
+		t.Fatalf("install branch: %v", err)
+	}
+
+	leavesDef := Definition{Name: "extmid-leaves-pkg", Version: "0.1.0", DDLs: []DDLSpec{
+		func() DDLSpec {
+			d := minimalDDL("extleaf1", "meta.ddl.vertexType", false)
+			d.SubtypeOfRef = "extbranch"
+			return d
+		}(),
+		func() DDLSpec {
+			d := minimalDDL("extleaf2", "meta.ddl.vertexType", false)
+			d.SubtypeOfRef = "extbranch"
+			return d
+		}(),
+	}}
+	res, err := inst.Install(ctx, leavesDef)
+	if err != nil {
+		t.Fatalf("install leaves: %v", err)
+	}
+	rootID := EntityNanoIDForTest("extmid-root-pkg", "ddl:extroot")
+	for _, w := range res.LeafBudgetWarnings {
+		if strings.Contains(w, rootID) {
+			t.Fatalf("extroot's transitive concrete count is exactly 2 (extleaf1, extleaf2, reached through "+
+				"the EXTERNALLY-installed abstract mid \"extbranch\") at budget 2 — must NOT warn; failing to "+
+				"read extbranch's abstractness from Core KV would wrongly count it as concrete. got %q", w)
+		}
+	}
+}
+
+// TestInstaller_LeafBudget_AncestorRecheck_CrossPackageIndirectOverrun pins
+// finding 4's fix directly: a batch whose OWN newChildrenByTarget never
+// names an ancestor at all must still trigger that ancestor's LeafBudget
+// recheck when the ancestor's transitive closure grows underneath it.
+// "root" (budget 2, package A) has one abstract child "branch" (package B,
+// no budget of its own); "branch" gets three NEW concrete leaves in package
+// C. Package C's install never references "root" — its own direct target
+// is "branch" — but root's transitive count is now 3, over its budget of
+// 2, and package C's install result is where that must surface: the
+// ancestor walk (ancestorsOf, ranging from "branch" up through the
+// already-installed "branch subtypeOf root" edge) is what makes package C's
+// install see "root" at all.
+func TestInstaller_LeafBudget_AncestorRecheck_CrossPackageIndirectOverrun(t *testing.T) {
+	ctx, _, inst := newInstallerHarness(t)
+
+	rootDef := Definition{Name: "ancestor-root-pkg", Version: "0.1.0", DDLs: []DDLSpec{func() DDLSpec {
+		d := abstractDDL("ancroot")
+		d.LeafBudget = 2
+		return d
+	}()}}
+	if _, err := inst.Install(ctx, rootDef); err != nil {
+		t.Fatalf("install root: %v", err)
+	}
+
+	branchDef := Definition{Name: "ancestor-branch-pkg", Version: "0.1.0", DDLs: []DDLSpec{func() DDLSpec {
+		d := abstractDDL("ancbranch")
+		d.SubtypeOfRef = "ancroot"
+		return d
+	}()}}
+	if _, err := inst.Install(ctx, branchDef); err != nil {
+		t.Fatalf("install branch: %v", err)
+	}
+
+	leavesDef := Definition{Name: "ancestor-leaves-pkg", Version: "0.1.0", DDLs: []DDLSpec{
+		func() DDLSpec {
+			d := minimalDDL("ancleaf1", "meta.ddl.vertexType", false)
+			d.SubtypeOfRef = "ancbranch"
+			return d
+		}(),
+		func() DDLSpec {
+			d := minimalDDL("ancleaf2", "meta.ddl.vertexType", false)
+			d.SubtypeOfRef = "ancbranch"
+			return d
+		}(),
+		func() DDLSpec {
+			d := minimalDDL("ancleaf3", "meta.ddl.vertexType", false)
+			d.SubtypeOfRef = "ancbranch"
+			return d
+		}(),
+	}}
+	res, err := inst.Install(ctx, leavesDef)
+	if err != nil {
+		t.Fatalf("install leaves: %v", err)
+	}
+
+	rootID := EntityNanoIDForTest("ancestor-root-pkg", "ddl:ancroot")
+	var rootWarning string
+	for _, w := range res.LeafBudgetWarnings {
+		if strings.Contains(w, rootID) {
+			rootWarning = w
+		}
+	}
+	if rootWarning == "" {
+		t.Fatalf("expected the leaves package's install to surface ancroot's LeafBudget overrun "+
+			"(transitive count 3 > budget 2) even though this package never names ancroot at all — "+
+			"got %v", res.LeafBudgetWarnings)
+	}
+	if !containsAll(rootWarning, "leaf count 3", "LeafBudget 2") {
+		t.Errorf("warning should report ancroot's transitive count (3) and budget (2); got %q", rootWarning)
+	}
 }

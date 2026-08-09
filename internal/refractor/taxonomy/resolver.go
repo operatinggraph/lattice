@@ -19,9 +19,47 @@
 // never touched again stays permanently disarmed with no snapshot, which is
 // the fail-closed posture a `*`-carrying lens sees before its process's
 // CoreKVSource has delivered a first taxonomy event.
+//
+// # Only a `*`-carrying label is a taxonomy vocabulary lookup
+//
+// This resolver is consulted for a label ONLY when the query pattern that
+// names it carries the `*` sigil (full.CompiledRule.ExpansionLabels — every
+// caller in internal/refractor/pipeline builds its input set from exactly
+// that). A BARE label (no `*`) is never passed to Expand at all: it stays an
+// uninterpreted vertex key-type string, matched structurally by the existing
+// address-comparison sites (executor.go's nodeMatches and its five
+// siblings).
+//
+// This is deliberate, not an oversight this package's own vocabulary could
+// close. A lens node label names a vertex KEY-TYPE segment; this resolver's
+// vocabulary is keyed by the CANONICALNAME of a meta.ddl.vertexType meta
+// vertex — and the two namespaces are provably different in the live corpus.
+// `packages/maintenance-domain/ddls.go` declares CanonicalName "workOrder"
+// for instances keyed `vtx.workorder.<id>` (canonicalName and key-type
+// segment differ only in case, but differ). Several live lens labels —
+// `role`, `permission`, `retentionclass`, `identityindex`, `meta` — name
+// kernel/primordial types with no package-declared vertexType meta under
+// that name at all, so this resolver's byName map would never contain them
+// regardless of how complete the taxonomy graph itself is. A runtime
+// "unresolvable bare label ⇒ refuse activation" gate would therefore be
+// unable to distinguish an author's typo from a perfectly correct kernel
+// label: it cannot tell "unknown because this resolver's vocabulary is
+// incomplete with respect to key types" from "unknown because nothing was
+// ever meant to exist here" — and refusing on the former takes live,
+// correct lenses dark (a census found this reachable across at least
+// clinic-domain, edge-manifest, identity-domain, privacy-base and
+// capability-author). Silent-empty-match is a real hazard for a bare label
+// too, but the fix for it is authoring-time, not this resolver: a
+// lint/install-time check over lens specs against an authoritative key-type
+// vocabulary the platform does not yet have, once one exists. Until then a
+// bare label is out of this package's scope entirely.
 package taxonomy
 
-import "sync"
+import (
+	"fmt"
+	"sort"
+	"sync"
+)
 
 // maxDepth bounds the downward closure walk, mirroring
 // internal/pkgmgr/taxonomy.go's maxTaxonomyDepth and its stated reason: a
@@ -77,10 +115,11 @@ type typeInfo struct {
 type Resolver struct {
 	mu sync.RWMutex
 
-	byID       map[string]typeInfo // meta NanoID -> resolved identity
-	byName     map[string]string   // canonicalName -> meta NanoID
-	childrenOf map[string][]string // parent NanoID -> child NanoIDs (subtypeOf edges, downward)
-	poisoned   map[string]bool     // meta NanoID -> its CanonicalName collided with another entry's
+	byID          map[string]typeInfo // meta NanoID -> resolved identity
+	byName        map[string]string   // canonicalName -> meta NanoID
+	childrenOf    map[string][]string // parent NanoID -> child NanoIDs (subtypeOf edges, downward)
+	poisoned      map[string]bool     // meta NanoID -> its CanonicalName collided with another entry's
+	poisonedNames map[string]bool     // canonicalName -> true, for a name deleted from byName above: lets a DIRECT query of that name report the ambiguity rather than "unknown"
 
 	loaded bool
 	armed  bool
@@ -141,6 +180,14 @@ type TypeSnapshot struct {
 // refuses (§ below) the instant it reaches one, on any path, concrete or
 // abstract, leaf or not — so a collision is unresolvable both ways, never
 // one and not the other.
+//
+// The collided NAME itself survives in poisonedNames even though byName no
+// longer carries it: a direct query of that name still needs to say WHY it
+// is unresolvable (an ambiguous canonicalName) rather than report the
+// generic "does not resolve to any declared vertex type" a genuine typo
+// gets — the whole point of a reason string is that it names the real
+// cause, and "unresolvable" and "ambiguous" are different causes an
+// operator acts on differently.
 func (r *Resolver) InstallSnapshot(snap []TypeSnapshot) {
 	byID := make(map[string]typeInfo, len(snap))
 	byName := make(map[string]string, len(snap))
@@ -154,11 +201,13 @@ func (r *Resolver) InstallSnapshot(snap []TypeSnapshot) {
 		nameCount[s.CanonicalName]++
 	}
 	poisoned := make(map[string]bool)
+	poisonedNames := make(map[string]bool)
 	for name, count := range nameCount {
 		if count <= 1 {
 			continue
 		}
 		delete(byName, name)
+		poisonedNames[name] = true
 	}
 	for _, s := range snap {
 		if s.CanonicalName != "" && nameCount[s.CanonicalName] > 1 {
@@ -190,6 +239,7 @@ func (r *Resolver) InstallSnapshot(snap []TypeSnapshot) {
 	r.byName = byName
 	r.childrenOf = childrenOf
 	r.poisoned = poisoned
+	r.poisonedNames = poisonedNames
 	r.loaded = true
 	// A reload must never carry a previous life's armed flag forward — a
 	// stale true here would report StatusArmed on the very next Expand call
@@ -208,6 +258,26 @@ func (r *Resolver) SetArmed(armed bool) {
 	r.armed = armed
 }
 
+// maxReasonNameLen bounds how much of a raw name Expand's reason strings
+// interpolate. A query label is authored, grammar-bound text, but a
+// canonicalName is a `.canonicalName` aspect's raw `data.value`, validated
+// only on the pkgmgr-mediated install path — abstractscope.go's own doc
+// names the raw core-operations submit that bypasses it — so a reason
+// string built from one must not assume any length or charset bound. reason
+// feeds an activation error and a slog.Warn (internal/refractor/pipeline),
+// so both stay safe to log and surface verbatim regardless of what a
+// bypassed write put in Core KV.
+const maxReasonNameLen = 80
+
+// truncateReasonName bounds s for interpolation into an Expand reason
+// string, marking a truncation rather than performing it silently.
+func truncateReasonName(s string) string {
+	if len(s) <= maxReasonNameLen {
+		return s
+	}
+	return s[:maxReasonNameLen] + "…(truncated)"
+}
+
 // Expand resolves each label in labels to the set of concrete vertex key
 // types it admits: itself when concrete (reflexive — a concrete type may
 // also have subtypes, amendment A5, so omitting itself would silently drop
@@ -220,46 +290,108 @@ func (r *Resolver) SetArmed(armed bool) {
 // Status reports how far the answer can be trusted (see the Status
 // constants). A single unresolvable label, or one whose downward walk hits
 // a cycle or exceeds maxDepth, degrades the WHOLE call to
-// (nil, StatusUnknown) — never a partial map silently missing that one
-// label's entry, which a caller iterating the result could not distinguish
-// from "this label genuinely has no subtypes."
-func (r *Resolver) Expand(labels map[string]struct{}) (map[string]map[string]struct{}, Status) {
+// (nil, nil, StatusUnknown, reason) — never a partial map silently missing
+// that one label's entry, which a caller iterating the result could not
+// distinguish from "this label genuinely has no subtypes." reason names the
+// offending label and the cause (unresolvable name, an ambiguous
+// canonicalName, a cycle, or over-depth); it is only ever non-empty
+// alongside StatusUnknown, and every interpolated name is bounded by
+// truncateReasonName, so it is always safe to surface verbatim in an error
+// or a log line.
+//
+// labels is scanned in sorted order, not map order, so which label's reason
+// is reported is deterministic when more than one is unresolvable — an
+// error message that names a different label on every call for the same
+// input would be its own small debugging hazard.
+//
+// inert names every requested label whose resolved closure is EXACTLY
+// {label} because label names a CONCRETE type (amendment A3, §14 Fire A
+// item 5): the `*` sigil bought nothing over the bare label, whether
+// because the type has no subtypeOf children at all or because every
+// child it does have is itself abstract with no concrete leaves of its
+// own — the test is the computed CLOSURE (len(set) == 1 for a concrete
+// label), not the direct-child count, so both shapes are caught alike.
+// inert is populated only alongside a successful (StatusArmed or
+// StatusStale) answer: Expand ALWAYS returns the closure for a resolvable
+// label and never refuses on inertness itself — what to DO about an inert
+// label is entirely the caller's decision, and the two production callers
+// make opposite ones on purpose. An ACTIVATION
+// (pipeline.useFullEngineBranches, liveReDerivation=false) refuses on it:
+// an author's `*` asserting a polymorphism the taxonomy does not currently
+// have is exactly the authoring mistake amendment A3 exists to catch. A
+// LIVE RE-DERIVATION (liveReDerivation=true) must not: §6.5 forbids
+// treating "the taxonomy just shrank under a running lens" — a live,
+// correct `:unit*` losing its last child to another package's uninstall —
+// the same as an author's mistake. {label} is the truthful, merely
+// un-widened answer for that type right now, and the lens's own instances
+// keep projecting.
+func (r *Resolver) Expand(labels map[string]struct{}) (map[string]map[string]struct{}, map[string]struct{}, Status, string) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
 	if !r.loaded {
-		return nil, StatusUnknown
+		return nil, nil, StatusUnknown, "no taxonomy snapshot has ever been loaded"
 	}
 
+	ordered := make([]string, 0, len(labels))
+	for l := range labels {
+		ordered = append(ordered, l)
+	}
+	sort.Strings(ordered)
+
 	out := make(map[string]map[string]struct{}, len(labels))
-	for label := range labels {
-		set, ok := r.expandOneLocked(label)
+	var inert map[string]struct{}
+	for _, label := range ordered {
+		set, labelInert, ok, reason := r.expandOneLocked(label)
 		if !ok {
-			return nil, StatusUnknown
+			return nil, nil, StatusUnknown, reason
 		}
 		out[label] = set
+		if labelInert {
+			if inert == nil {
+				inert = map[string]struct{}{}
+			}
+			inert[label] = struct{}{}
+		}
 	}
 	if r.armed {
-		return out, StatusArmed
+		return out, inert, StatusArmed, ""
 	}
-	return out, StatusStale
+	return out, inert, StatusStale, ""
 }
 
 // expandOneLocked computes one label's reflexive-transitive downward
 // closure. Called with r.mu held. ok is false when label does not resolve
-// to a known type, or the downward walk detects a cycle or exceeds
-// maxDepth.
-func (r *Resolver) expandOneLocked(label string) (set map[string]struct{}, ok bool) {
+// to a known type — including a name poisonedNames records as ambiguous,
+// which reports that specific cause rather than a generic "unknown" — or
+// the downward walk detects a cycle, a poisoned descendant, or exceeds
+// maxDepth; reason then names label and the specific cause. inert reports
+// whether label's computed closure is exactly {label} because label names a
+// CONCRETE type — see Expand's doc for what that means and who acts on it.
+// inert is always false when ok is false.
+func (r *Resolver) expandOneLocked(label string) (set map[string]struct{}, inert bool, ok bool, reason string) {
 	id, known := r.byName[label]
 	if !known {
-		return nil, false
+		if r.poisonedNames[label] {
+			return nil, false, false, fmt.Sprintf(
+				"label %q is ambiguous: its canonicalName is declared by more than one type meta vertex",
+				truncateReasonName(label))
+		}
+		return nil, false, false, fmt.Sprintf("label %q does not resolve to any declared vertex type", truncateReasonName(label))
 	}
+	info := r.byID[id] // guaranteed present: byName and byID are populated together, and a poisoned id is removed from byName (never leaves `known` true).
 	set = map[string]struct{}{}
 	onPath := map[string]bool{id: true}
-	if !r.collectDownLocked(id, set, onPath, 0) {
-		return nil, false
+	if walkOK, walkReason := r.collectDownLocked(id, set, onPath, 0); !walkOK {
+		return nil, false, false, fmt.Sprintf("label %q: %s", truncateReasonName(label), walkReason)
 	}
-	return set, true
+	// A concrete label's closure always contains at least {label} itself
+	// (collectDownLocked's own reflexivity, below); len == 1 therefore means
+	// nothing ELSE was added, at any depth — the sigil is a no-op over the
+	// bare label. An abstract label is never reflexive (§3.4), so this can
+	// never fire for one regardless of how small its closure is.
+	inert = !info.abstract && len(set) == 1
+	return set, inert, true, ""
 }
 
 // collectDownLocked walks id's subtypeOf children depth-first, adding every
@@ -268,35 +400,35 @@ func (r *Resolver) expandOneLocked(label string) (set map[string]struct{}, ok bo
 // internal/pkgmgr/taxonomy.go's walkTaxonomyNoCycle — so a legitimate
 // multi-parent diamond (two branches converging on a shared descendant) is
 // never mistaken for a cycle; only a genuine back-edge to a current-path
-// ancestor is. Returns false on a cycle, a chain deeper than maxDepth, or a
+// ancestor is. ok is false on a cycle, a chain deeper than maxDepth, or a
 // poisoned id (InstallSnapshot's doc) reached anywhere in the walk — id is
 // never the walk's own starting point (a poisoned name is already absent
 // from byName), so this only fires when a poisoned entry is a DESCENDANT of
 // some other, unambiguous label, which is exactly the path byName's
-// deletion alone cannot guard.
-func (r *Resolver) collectDownLocked(id string, set map[string]struct{}, onPath map[string]bool, depth int) bool {
+// deletion alone cannot guard. reason is empty exactly when ok is true.
+func (r *Resolver) collectDownLocked(id string, set map[string]struct{}, onPath map[string]bool, depth int) (ok bool, reason string) {
 	if r.poisoned[id] {
-		return false
+		return false, fmt.Sprintf("reaches type %q, whose canonicalName is declared by more than one type meta vertex (ambiguous)", truncateReasonName(r.byID[id].canonicalName))
 	}
 	info, known := r.byID[id]
 	if !known {
-		return false
+		return false, "reaches a subtypeOf edge whose target is not in the loaded snapshot"
 	}
 	if !info.abstract {
 		set[info.canonicalName] = struct{}{}
 	}
 	for _, child := range r.childrenOf[id] {
 		if onPath[child] {
-			return false
+			return false, fmt.Sprintf("cycle in the subtypeOf graph (reaches %q again)", truncateReasonName(r.byID[child].canonicalName))
 		}
 		if depth+1 > maxDepth {
-			return false
+			return false, fmt.Sprintf("subtypeOf chain exceeds maxDepth=%d", maxDepth)
 		}
 		onPath[child] = true
-		if !r.collectDownLocked(child, set, onPath, depth+1) {
-			return false
+		if ok, reason := r.collectDownLocked(child, set, onPath, depth+1); !ok {
+			return false, reason
 		}
 		delete(onPath, child)
 	}
-	return true
+	return true, ""
 }

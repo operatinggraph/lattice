@@ -172,37 +172,234 @@ func (i *Installer) resolveTaxonomy(ctx context.Context, def Definition, scan me
 		}
 	}
 
-	// LeafBudget warnings (§10.2 — NEVER a rejection). Counts DIRECT subtypeOf
-	// children only: the full transitive concrete-leaf closure belongs to the
-	// runtime resolver (Fire A item 3, internal/refractor/taxonomy). A
-	// direct-child count is a conservative, reachable install-time signal —
-	// never worse than no signal, and exact for the common single-level
-	// taxonomy shape (§9's location/unit/building/property). The same "drop
-	// this package's own prior edges" filter above applies here too, so
-	// re-applying an unchanged definition never double-counts its own
-	// already-installed edge as both "existing" and "new".
-	existingChildren := map[string]int{}
-	for _, parents := range installedEdges {
+	// LeafBudget warnings (§10.2 — NEVER a rejection). Counts the TRANSITIVE
+	// concrete-descendant closure, matching what the runtime resolver
+	// (internal/refractor/taxonomy, §4.2) actually expands a `*` label into.
+	// A DIRECT-child count is exact only for a single-level taxonomy and
+	// silently passes a multi-level one straight through: an abstract with
+	// 4 direct (abstract) children of 4 leaves each has a direct-child
+	// count of 4 but a runtime expansion of 16, which is the count that
+	// actually meets maxNarrowedFilterLabels
+	// (internal/refractor/pipeline/pipeline.go).
+	// downwardEdges is parent -> children, the DOWNWARD mirror of merged
+	// (child -> parents) above, built from the identical edge set — this
+	// batch's own new edges (resolved) UNIONed with every surviving
+	// installed edge (installedEdges, already filtered of this package's
+	// own stale edges) — so the walk below sees exactly the graph the
+	// acyclicity check just proved terminates within maxTaxonomyDepth.
+	downwardEdges := make(map[string][]string, len(installedEdges)+len(resolved))
+	for child, parents := range installedEdges {
 		for _, p := range parents {
-			existingChildren[p]++
+			downwardEdges[p] = append(downwardEdges[p], child)
 		}
 	}
+	for idx, targetID := range resolved {
+		downwardEdges[targetID] = append(downwardEdges[targetID], ddlIDs[idx])
+	}
+	batchAbstract := make(map[string]bool, len(def.DDLs))
+	for idx, d := range def.DDLs {
+		batchAbstract[ddlIDs[idx]] = d.Abstract
+	}
+	abstractCache := map[string]bool{}
+
+	// A TRANSITIVE count means an ANCESTOR's budget can be pushed over by a
+	// batch that never names the ancestor at all: package A declares
+	// abstract root (LeafBudget 2); B parents abstract branch under root; C
+	// installs three leaves under branch. C's own newChildrenByTarget
+	// contains only branch — root's transitive count just grew to 3 too,
+	// through a package that has no idea root exists. So every ANCESTOR of
+	// a newly-parented node must be re-walked too, not only the node's own
+	// immediate target — a direct child count would have been the
+	// ancestor's own count for free at a single level, but a transitive one
+	// is not. ancestorsOf walks merged (built above, child -> []parents,
+	// the FULL installed+new graph, already proven acyclic and within
+	// maxTaxonomyDepth by the walk immediately above) upward, so it
+	// inherits that same bound.
+	recheckTargets := map[string]bool{}
+	for targetID := range newChildrenByTarget {
+		recheckTargets[targetID] = true
+		for _, ancestor := range ancestorsOf(targetID, merged) {
+			recheckTargets[ancestor] = true
+		}
+	}
+
 	var warnings []string
-	for targetID, newCount := range newChildrenByTarget {
-		budget := targetLeafBudget[targetID]
+	for targetID := range recheckTargets {
+		// targetLeafBudget only carries an entry for a DIRECTLY-referenced
+		// target (resolved via SubtypeOfRef, above) — an ancestor pulled in
+		// only by the upward walk was never looked up that way, so its own
+		// declared budget is read here for the first time.
+		budget, ok := targetLeafBudget[targetID]
+		if !ok {
+			budget = i.leafBudgetForMetaVertex(ctx, targetID, batchLeafBudgets)
+		}
 		if budget <= 0 {
 			budget = leafBudgetDefault
 		}
-		total := existingChildren[targetID] + newCount
+		total := i.countTransitiveConcreteDescendants(ctx, targetID, downwardEdges, batchAbstract, abstractCache)
 		if total > budget {
 			warnings = append(warnings, fmt.Sprintf(
-				"subtypeOf target vtx.meta.%s: leaf count %d exceeds declared LeafBudget %d",
+				"subtypeOf target vtx.meta.%s: leaf count %d exceeds declared LeafBudget %d (transitive concrete descendant count, not direct children)",
 				targetID, total, budget))
 		}
 	}
 	sort.Strings(warnings)
 
 	return resolved, warnings, nil
+}
+
+// ancestorsOf walks node's parents upward through adj (child -> []parents,
+// e.g. resolveTaxonomy's merged), depth-first, returning every ancestor
+// reached — node itself is never included. Mirrors walkTaxonomyNoCycle's
+// traversal shape but collects nodes instead of checking for a cycle: adj
+// is always the SAME graph a walkTaxonomyNoCycle pass over every node
+// already proved acyclic and within maxTaxonomyDepth before this is ever
+// called, so no cycle guard is needed here — only the identical depth cap,
+// carried over defensively.
+func ancestorsOf(node string, adj map[string][]string) []string {
+	var out []string
+	visited := map[string]bool{node: true}
+	var walk func(n string, depth int)
+	walk = func(n string, depth int) {
+		if depth > maxTaxonomyDepth {
+			return
+		}
+		for _, parent := range adj[n] {
+			if visited[parent] {
+				continue
+			}
+			visited[parent] = true
+			out = append(out, parent)
+			walk(parent, depth+1)
+		}
+	}
+	walk(node, 0)
+	return out
+}
+
+// leafBudgetForMetaVertex returns id's declared LeafBudget (0 meaning
+// undeclared, which the caller defaults to leafBudgetDefault), consulting
+// batchLeafBudgets first (an Abstract DDL this SAME batch declares, at zero
+// extra I/O) and otherwise reading the already-installed root document —
+// the ancestor-recheck counterpart to resolveExternalSubtypeTarget's inline
+// read for a DIRECTLY-referenced target: an ancestor discovered only by
+// ancestorsOf was never looked up by SubtypeOfRef resolution, so its budget
+// has not been read at all until now. A missing document, a read fault, or
+// a malformed body all read as undeclared (0) — the same "never worse than
+// no signal" licence countTransitiveConcreteDescendants documents.
+func (i *Installer) leafBudgetForMetaVertex(ctx context.Context, id string, batchLeafBudgets map[string]int) int {
+	if budget, ok := batchLeafBudgets[id]; ok {
+		return budget
+	}
+	entry, err := i.Conn.KVGet(ctx, CoreBucket, "vtx.meta."+id)
+	if err != nil {
+		return 0
+	}
+	var env struct {
+		Data struct {
+			LeafBudget int `json:"leafBudget"`
+		} `json:"data"`
+	}
+	if uerr := json.Unmarshal(entry.Value, &env); uerr != nil {
+		return 0
+	}
+	return env.Data.LeafBudget
+}
+
+// countTransitiveConcreteDescendants counts rootID's own CONCRETE
+// contribution (if any) plus every CONCRETE descendant reached by walking
+// downwardEdges (parent -> children) depth-first, mirroring EXACTLY what
+// the runtime resolver's Expand admits for a `*` label over the same graph
+// (internal/refractor/taxonomy's collectDownLocked, which is reflexive for
+// a concrete id and skips an abstract one — §3.4/amendment A5, "a concrete
+// type may itself have subtypes"). rootID itself is counted when it
+// resolves concrete: amendment A5 makes a concrete type a legal subtypeOf
+// target, and collectDownLocked adds a concrete id's own canonicalName
+// before it ever looks at children — omitting that here would under-count
+// by exactly one for every concrete target, the boundary at which "count ==
+// budget, no warning" silently hides a real 1-over overrun.
+//
+// Bounded by maxTaxonomyDepth as a defensive cap, not a correctness
+// requirement — the graph downwardEdges is built from is the SAME edge set
+// resolveTaxonomy's caller just proved acyclic and within maxTaxonomyDepth
+// (the walk immediately above), and a DAG proven bounded in one direction
+// is bounded in the other. visited (by node ID, not by path) dedupes a
+// diamond so a doubly-reachable descendant is counted once, matching
+// collectDownLocked's set semantics.
+//
+// Never returns an error: this is an advisory, install-time SIGNAL (§10.2
+// — a LeafBudget overrun is a warning, never a rejection), so a read fault
+// partway through the walk degrades to under-counting that one branch
+// rather than failing the install for a check that exists only to warn.
+// "Never worse than no signal" is what licenses that degradation.
+func (i *Installer) countTransitiveConcreteDescendants(ctx context.Context, rootID string, downwardEdges map[string][]string, batchAbstract map[string]bool, abstractCache map[string]bool) int {
+	visited := map[string]bool{rootID: true}
+	count := 0
+	if !i.isAbstractMetaVertex(ctx, rootID, batchAbstract, abstractCache) {
+		count++
+	}
+	var walk func(id string, depth int)
+	walk = func(id string, depth int) {
+		if depth > maxTaxonomyDepth {
+			return
+		}
+		for _, child := range downwardEdges[id] {
+			if visited[child] {
+				continue
+			}
+			visited[child] = true
+			if !i.isAbstractMetaVertex(ctx, child, batchAbstract, abstractCache) {
+				count++
+			}
+			walk(child, depth+1)
+		}
+	}
+	walk(rootID, 0)
+	return count
+}
+
+// isAbstractMetaVertex reports whether meta vertex id declares
+// data.abstract == true, consulting batchAbstract first (a node this SAME
+// install batch declares, at zero extra I/O) and otherwise reading the
+// already-installed root document, caching the answer in abstractCache so a
+// node reached via more than one path in one countTransitiveConcreteDescendants
+// call is read at most once.
+//
+// A missing document, a read fault, or a present-but-non-bool `abstract`
+// value all resolve to CONCRETE (false) — the opposite fail-closed direction
+// from internal/processor/ddl_cache.go's reading of the identical field, and
+// deliberately so, mirroring internal/refractor/lens.abstractFlagFromData's
+// reasoning for the SAME divergence: there, `abstract=true` silently
+// narrows a live filter, so it fails toward false. Here, wrongly reading a
+// real abstract mid-type as concrete makes the LeafBudget count LARGER, not
+// smaller — the safe direction for a check whose entire purpose is
+// catching a count that got too big, since the failure mode of an
+// over-generous count is a spurious warning (harmless — this check never
+// blocks) while the failure mode of an under-count is a real overrun that
+// silently goes unwarned.
+func (i *Installer) isAbstractMetaVertex(ctx context.Context, id string, batchAbstract map[string]bool, abstractCache map[string]bool) bool {
+	if v, ok := batchAbstract[id]; ok {
+		return v
+	}
+	if v, ok := abstractCache[id]; ok {
+		return v
+	}
+	entry, err := i.Conn.KVGet(ctx, CoreBucket, "vtx.meta."+id)
+	if err != nil {
+		abstractCache[id] = false
+		return false
+	}
+	var env struct {
+		Data struct {
+			Abstract bool `json:"abstract"`
+		} `json:"data"`
+	}
+	abstract := false
+	if uerr := json.Unmarshal(entry.Value, &env); uerr == nil {
+		abstract = env.Data.Abstract
+	}
+	abstractCache[id] = abstract
+	return abstract
 }
 
 // resolveExternalSubtypeTarget resolves ref to an already-installed
@@ -272,6 +469,28 @@ func (i *Installer) resolveExternalSubtypeTarget(ctx context.Context, ref string
 //
 // keys is the caller's already-fetched Core KV key list (buildManifestBatch
 // fetches it lazily, at most once) — no KVListKeys of its own.
+//
+// What makes the exact-prefix scan below SOUND: a live key's type segment
+// is always lowercase-ASCII ([a-z][a-z0-9]*) — step6_validate.go's
+// ClassifyKey enforces that on every commit (Contract #2 P2) — and, for a
+// taxonomy-participating DDL, abstractscope.go's key-type-segment gate now
+// constrains CanonicalName to that identical alphabet before this ever
+// runs. Two strings drawn from the same lowercase-ASCII alphabet are equal
+// iff they are byte-identical, so an exact-prefix match already answers
+// "is this the segment the instance actually uses" — no case-insensitive
+// comparison is needed or meaningful here.
+//
+// The residual this does NOT close, named plainly rather than implied
+// covered: a CanonicalName that IS a valid key-type segment but simply is
+// not the segment the type's own instances key under — e.g. declaring
+// Abstract: true on "workorder" while every instance is actually keyed
+// vtx.wo.<id>, an equally valid but DIFFERENT segment. Nothing catches
+// that today: the scan finds no live "vtx.workorder.*" key, the
+// declaration proceeds, and step 6's write-path gates then refuse every
+// future write to the "vtx.wo.*" instances with no cleanup path. Closing
+// that gap needs a way to ask "what segment does THIS type's instances
+// actually use," which nothing in the platform can answer for an existing
+// type today.
 func (i *Installer) checkAbstractNoLiveInstances(ctx context.Context, def Definition, keys []string) error {
 	for idx, d := range def.DDLs {
 		if !d.Abstract {
@@ -282,17 +501,11 @@ func (i *Installer) checkAbstractNoLiveInstances(ctx context.Context, def Defini
 			if !strings.HasPrefix(k, prefix) {
 				continue
 			}
-			entry, err := i.Conn.KVGet(ctx, CoreBucket, k)
+			live, err := i.isLiveMetaOrVertexKey(ctx, k)
 			if err != nil {
-				if errors.Is(err, substrate.ErrKeyNotFound) {
-					continue
-				}
-				return fmt.Errorf("pkgmgr: get %s: %w", k, err)
+				return err
 			}
-			var env struct {
-				IsDeleted bool `json:"isDeleted"`
-			}
-			if uerr := json.Unmarshal(entry.Value, &env); uerr != nil || env.IsDeleted {
+			if !live {
 				continue
 			}
 			return fmt.Errorf(
@@ -301,6 +514,27 @@ func (i *Installer) checkAbstractNoLiveInstances(ctx context.Context, def Defini
 		}
 	}
 	return nil
+}
+
+// isLiveMetaOrVertexKey reports whether k names a live (non-tombstoned)
+// Core KV entry. A missing key or an unmarshal failure both read as "not
+// live" — the same permissive treatment checkAbstractNoLiveInstances' scan
+// always gave them.
+func (i *Installer) isLiveMetaOrVertexKey(ctx context.Context, k string) (bool, error) {
+	entry, err := i.Conn.KVGet(ctx, CoreBucket, k)
+	if err != nil {
+		if errors.Is(err, substrate.ErrKeyNotFound) {
+			return false, nil
+		}
+		return false, fmt.Errorf("pkgmgr: get %s: %w", k, err)
+	}
+	var env struct {
+		IsDeleted bool `json:"isDeleted"`
+	}
+	if uerr := json.Unmarshal(entry.Value, &env); uerr != nil {
+		return false, nil
+	}
+	return !env.IsDeleted, nil
 }
 
 // scanInstalledSubtypeOfEdgesFromKeys filters the caller's already-fetched
