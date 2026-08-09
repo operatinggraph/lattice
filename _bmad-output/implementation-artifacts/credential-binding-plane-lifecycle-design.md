@@ -882,6 +882,15 @@ names.
 **Falsification.** Every guard test was re-run with its guard disabled and the derive_reads test
 with the derivation deleted; all failed as required.
 
-**Live verification pending.** The claim ceremony has not been re-run end to end on the dev stack
-under the new guard — package tests drive the real scripts through a real Processor, but the
-Gateway's 503 path has no live exercise. Filed as its own row rather than left here.
+**Live verification.** Both packages diff-applied onto the running stack (identity-domain
+0.20.1→0.20.2, identity-hygiene 0.5.0→0.5.1), `bin/gateway` rebuilt and cycled,
+`make verify-package-identity` (99 assertions) and `make verify-package-edge-manifest` (88) green.
+The ceremony was then driven end to end through the real Processor: `lattice identity provision`
+minted the credential vertex, `.state` and the consumer grant, and the subsequent `claim` committed
+the `boundTo` edge and the `credentialindex` — the positive path the guard must not break.
+
+The **refusal** path is proven in package tests against a real Processor and a real script, each
+falsified by disabling its guard, rather than live: an actor with no vertex also has no capability
+entry, so on a live stack it is refused at step 3 before the script runs, and manufacturing the
+residue shape (capability without vertex) would mean writing broken state onto the shared stack.
+The Gateway's 503 arm is likewise covered by tests, not by a live exercise.
