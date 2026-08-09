@@ -14,7 +14,7 @@ type DedupOutcome int
 const (
 	// DedupNotFound means the requestId has not been committed before
 	// (or the tracker was operator-tombstoned — treated the same per
-	// Contract #4 §4.5).
+	// Contract #4 §4.4).
 	DedupNotFound DedupOutcome = iota
 	// DedupDuplicate means a non-deleted tracker exists for this
 	// requestId. The commit path must short-circuit and emit a
@@ -29,7 +29,7 @@ type DedupResult struct {
 	Tracker *Tracker
 
 	// TombstonedRevision is the Core KV revision of an operator-tombstoned
-	// tracker (present, isDeleted: true — the Contract #4 §4.5 retry signal,
+	// tracker (present, isDeleted: true — the Contract #4 §4.4 retry signal,
 	// reported as DedupNotFound). The commit path threads it to the step-8
 	// tracker write as Tracker.SupersedesRevision so the re-execution's
 	// tracker supersedes the tombstoned value instead of attempting a

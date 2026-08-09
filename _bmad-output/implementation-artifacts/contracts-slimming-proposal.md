@@ -1,9 +1,10 @@
 # Contracts slimming — review + proposal
 
-> **Status:** 📐 **awaiting-Andrew (ratification of the plan; every resulting edit is a frozen-contract
-> change — prepared uncommitted per slice, Andrew commits).** Review run 2026-08-08 by three read-only
-> reviewers over all 16 files in `docs/contracts/`, on Andrew's direction: the contracts have accreted
-> prose — propose what to **delete** or **move to `/docs`**, leaving contracts lean and normative.
+> **Status:** ✅ **EXECUTED 2026-08-08** — Andrew ratified the plan and pre-authorized the slice
+> commits (review post-merge). All 16 files landed across `44f5af38..f425d1e9`; the corpus went
+> **391 KB → 286 KB (−27%)** with every danger-flagged rule promoted before its surroundings moved,
+> and the stale-false passages corrected against shipped code. The dispositions below are the record
+> of what moved where. Review provenance: three read-only reviewers, 2026-08-08.
 
 ## 0. The test applied — the corpus's own rule
 
