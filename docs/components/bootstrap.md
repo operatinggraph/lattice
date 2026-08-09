@@ -60,7 +60,7 @@ Bootstrap solves two ordering problems that `make up` alone cannot:
 
 ## Kernel composition (what gets seeded)
 
-Per Contract #7 §7.2/§7.7, one atomic batch (`substrate.AtomicBatch` — all-or-nothing) writes, in
+Per Contract #7 §7.2, one atomic batch (`substrate.AtomicBatch` — all-or-nothing) writes, in
 order: op tracker → identities → meta DDLs → Lens definitions → roles → permissions → links. Roughly:
 
 - 1 bootstrap op tracker
@@ -139,14 +139,14 @@ handling.
 did on some Core KV, not what this Core KV currently holds. A `status="committed"` file is therefore
 never on its own grounds to skip seeding. After provisioning, `cmd/bootstrap` asks the bucket via
 `Seeder.PrimordialSeeded`, which probes the op tracker key that `SeedPrimordial` writes first
-(§7.7 ordering) and that therefore stands for the whole primordial set. Core KV — not the file — is
+(§7.4 — the op tracker is written first) and that therefore stands for the whole primordial set. Core KV — not the file — is
 the authority on whether a given bucket has been seeded.
 
 When the two disagree (a recreated or wiped Core KV behind a surviving committed file), bootstrap
 logs a warning naming the disagreement, rewrites the file to `status="in-progress"`, and re-seeds
 using its stable NanoIDs — so the restored keys are exactly the ones existing packages and data
 already reference. Reopening the two-phase window is what makes the re-seed safe to interrupt: the
-op tracker is written *first* (§7.7), so it marks a seed *started*, not finished, and a run that
+op tracker is written *first* (§7.4), so it marks a seed *started*, not finished, and a run that
 died partway would otherwise leave the sentinel present, the rest of the kernel absent, and the file
 still claiming `committed` — unrecoverable, because nothing would signal a retry. With the window
 open, the next run reads `in-progress` and re-seeds.

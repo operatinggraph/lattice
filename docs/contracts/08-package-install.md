@@ -30,13 +30,10 @@ mutation computation stays client-side.
   entities carry real provenance authored by the actor that ran the install.
 - **Deterministic, version-independent NanoIDs.** Every entity's NanoID is derived
   from `package name + entity tag` (`sha256` → Contract #1 alphabet) — **not** the
-  version. The same logical entity (a lens, DDL, role, op-meta — identified by its
-  canonicalName / identity tag) therefore keeps the **same** `vtx.meta.<id>` /
-  `vtx.<type>.<id>` key across versions, so a version upgrade is an **in-place
-  update** of stable keys (§8.6) rather than a re-mint that would orphan the old
-  vertices and break every NanoID cross-reference (a WeaverTarget's `lensRef`, a
-  permission's `grantedBy` link). A same-version re-install still produces identical
-  keys, so the create-only batch stays idempotent. The permission tag keys on
+  version. The same logical entity keeps the **same** key across versions, so a
+  version upgrade is an **in-place update** of stable keys (§8.6) and every NanoID
+  cross-reference stays valid; a same-version re-install produces identical keys,
+  keeping the create-only batch idempotent. The permission tag keys on
   `operationType + scope` (logical identity), not the list index, so reordering a
   package's permissions does not churn keys.
 - **Deterministic `requestId`.** The op `requestId` is derived from
@@ -123,16 +120,12 @@ protected-key check — a tombstone of a protected kernel key is rejected
 authoritatively by the Processor commit-time guard (§8.4), not by this script.
 
 > **Per-key OCC (read-time revision).** Before submitting, the client `KVGet`s each
-> declared key and passes the entry's revision as its `expectedRevision`. A Core-KV
-> key is its own JetStream subject, so `KVGet`'s revision **is** the per-subject
-> last-sequence the `Nats-Expected-Last-Subject-Sequence` precondition compares
-> against (the same read-time revision the Processor conditions its own §3.2
-> updates/tombstones on). If any declared key is concurrently modified between the
-> client's read and the commit, the whole atomic batch is rejected
-> (`RevisionConflict`) — because the batch is atomic, the package is left **fully
-> installed** (never half-uninstalled); re-run the uninstall (the re-read picks up
-> the new revision). Conditioning on the *read-time* revision (not the install-time
-> one) is what makes a legitimately-upgraded key not spuriously conflict.
+> declared key and passes the entry's revision as its `expectedRevision`. If any
+> declared key is concurrently modified between the client's read and the commit,
+> the whole atomic batch is rejected (`RevisionConflict`) — the batch is atomic, so
+> the package is left **fully installed** (never half-uninstalled); re-run the
+> uninstall. Conditioning on the *read-time* revision (not the install-time one) is
+> what makes a legitimately-upgraded key not spuriously conflict.
 
 ---
 
@@ -163,9 +156,8 @@ Defense-in-depth (clearer per-op error, **not** authoritative):
   and tested (the meta-root DDL declares the target in `ContextHint.Reads`), but
   the Processor commit-time guard above is the authoritative backstop.
 
-This closes the 1.5.2 kernel-protection residual: an operation cannot disable auth
-(the Capability lens) or the kernel (the meta-root DDL) by rewriting or tombstoning
-it.
+Net invariant: an operation cannot disable auth (the Capability lenses) or the kernel (the meta-root
+DDL) by rewriting or tombstoning them.
 
 ---
 
@@ -225,11 +217,9 @@ therefore cannot rewrite or tombstone a protected kernel / auth root.
 All create/update/tombstone mutations land in **one** step-8 atomic batch (all-or-nothing —
 no half-migrated package), and the step-8 `vtx.meta.*` invalidation fires in-commit for every
 touched DDL/lens meta-vertex, so the new definitions are usable immediately (no restart).
-Downstream reaction is the **existing** CDC machinery: Refractor's `CoreKVSource` observes a
-changed lens `.spec` and `ClassifyUpdate` selects a hot-swap (INTO-only) or a **full rebuild**
-(MATCH change — which **evicts** rows the new cypher no longer matches, discharging the Epic-12
-"anchor no longer matches WHERE → tombstone on in-place upgrade" obligation); the Weaver /
-Loom registries reload changed targets / patterns from their CDC sources.
+Downstream reaction is the existing CDC machinery — lens hot-swap vs full rebuild (which evicts
+rows the new cypher no longer matches), Weaver/Loom registry reloads: `docs/components/refractor.md`
+(Lens lifecycle) + `docs/components/_packages.md`.
 
 ### OCC
 

@@ -9,15 +9,7 @@ is not a delivery channel for secrets.
 
 ---
 
-## 9.1 Why Option C
-
-A claim secret lets the holder bind their credential to an unclaimed identity.
-Earlier designs minted the plaintext server-side (inside the Starlark script) and
-returned it in the operation reply — making the synchronous write reply a
-delivery channel for sensitive data, with a "must not be logged" caveat. A reply
-field that needs a do-not-log warning is carrying data it should not.
-
-Option C removes the server-side mint and the return channel entirely:
+## 9.1 The custody model (Option C)
 
 - The **client** mints the claim secret (plaintext).
 - The client computes `sha256(plaintext)` and submits **only the hash** in the
@@ -25,8 +17,8 @@ Option C removes the server-side mint and the return channel entirely:
 - Lattice stores the hash verbatim. The plaintext is never persisted (not in the
   `core-operations` stream, not in Core KV) and never returned.
 
-There is no `secret.mint()` Starlark builtin and no `OneTimeSecret` reply field.
-The Processor stays fully generic (zero per-operation coupling).
+Rationale and the rejected server-side-mint alternatives:
+`docs/decisions/identity-claim-secret-option-c.md`.
 
 ---
 
@@ -77,3 +69,6 @@ All failure modes collapse to the generic `ClaimKeyInvalid` reply code
 - The CLI (`lattice identity create-unclaimed`) mints the secret locally, prints
   the plaintext once, submits only the hash, and reads the created key from
   `OperationReply.primaryKey`.
+- There is **no `secret.mint()` Starlark builtin and no `OneTimeSecret` reply
+  field** — the Processor stays fully generic (zero per-operation coupling); a
+  server-side mint surface may not be reintroduced.

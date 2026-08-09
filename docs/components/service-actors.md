@@ -4,7 +4,7 @@
 
 > Implementation page for the Loom + Weaver + Bridge service-actor identities seeded into the
 > primordial bootstrap. Grounding of record: `docs/contracts/07-primordial-bootstrap.md`
-> §7.1/§7.2/§7.5/§7.7, `docs/contracts/06-capability-kv.md` §6.4/§6.8, and arch §92. Update this page
+> §7.1/§7.2/§7.5, `docs/contracts/06-capability-kv.md` §6.4/§6.8, and arch §92. Update this page
 > in the same commit as `internal/bootstrap` changes; drift is a documentation bug.
 
 ---
@@ -33,7 +33,7 @@ permission` into `platformPermissions[].scope:"any"` for **any** holder. The ser
 admin's exact topology. Their `cap.identity.<id>` docs are produced by the Refractor projecting
 that topology, identical to the admin's (Contract #7 §7.1 — no direct `cap.*` seeding).
 
-## Class never gates capability (Contract #7 §7.7)
+## Class never gates capability (Contract #7 §7.2)
 
 The admin identity is plain `class: "identity"`; the service actors are `identity.system.loom` /
 `identity.system.weaver` / `identity.system.bridge`. This difference is **inert** for capability:

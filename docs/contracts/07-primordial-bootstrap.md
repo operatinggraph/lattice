@@ -6,7 +6,7 @@ The primordial bootstrap is the set of Core KV entries that `make up` seeds into
 
 **Bootstrap establishes graph topology; the Capability Lens does the rest.** No Core KV mutations bypass the Capability Lens's role as the sole authorization surface (NFR-S2). System identities — including the bootstrap identity and internal service actor identities — receive their Capability KV entries through normal Lens projection, derived from the topology that `make up` seeds.
 
-This is the critical design principle: every actor's auth traces back to graph topology. No actor has a "direct-seeded" Capability KV entry that doesn't follow the Lens's logic. An operator or AI agent auditing the platform sees a uniform model — even the bootstrap identity's capabilities are explainable by walking the graph from its identity vertex through its role and permission links.
+This is the critical design principle: every actor's auth traces back to graph topology. No actor has a "direct-seeded" Capability KV entry that doesn't follow the Lens's logic.
 
 ### 7.2 Primordial Seeding Inventory
 
@@ -43,7 +43,7 @@ This is the critical design principle: every actor's auth traces back to graph t
 - `targetBucket: "capability"`
 - `outputSchema`: JSON Schema for the Capability KV document (Contract #6 §6.2)
 
-**6. Operator role + kernel permission vertices** — the topology that produces root-equivalent capability when projected. The **only** primordial role is `operator` (one `vtx.role.<NanoID>`, `canonicalName: "operator"`). The kernel seeds the meta-permission vertices (`CreateMetaVertex` / `UpdateMetaVertex` / `TombstoneMetaVertex`, `scope: "any"`) and the package-lifecycle permissions, each linked `grantedBy` → operator (link direction `permission → role`; reads "permission granted by role"). An identity holding the operator role via `holdsRole` (item 8) projects to root-equivalent capability — this bounded single-link existence check **is** the root designation (Contract #6 §6.1 / #7 §7.7), **not** a `data.protected` flag (`protected` carries only anti-brick immutability).
+**6. Operator role + kernel permission vertices** — the topology that produces root-equivalent capability when projected. The **only** primordial role is `operator` (one `vtx.role.<NanoID>`, `canonicalName: "operator"`). The kernel seeds the meta-permission vertices (`CreateMetaVertex` / `UpdateMetaVertex` / `TombstoneMetaVertex`, `scope: "any"`) and the package-lifecycle permissions, each linked `grantedBy` → operator (link direction `permission → role`; reads "permission granted by role"). An identity holding the operator role via `holdsRole` (item 8) projects to root-equivalent capability — this bounded single-link existence check **is** the root designation (Contract #6 §6.1): root capability is established by **graph topology, never by class-based special-casing**, and not by a `data.protected` flag (`protected` carries only anti-brick immutability).
 
 **7. System identity vertices** (seven kernel actors, each carrying `data.protected: true` for anti-brick immutability — per §6.1, `protected` is *not* a capability designator):
 - The **primordial admin identity** (`vtx.identity.<NanoID>`, `class: "identity"`) — authors all primordial entries' provenance.
@@ -56,7 +56,7 @@ Six of the seven hold the operator role (item 8), which is what projects their r
 - `lnk.identity.<admin-id>.holdsRole.role.<operator-role-id>`
 - one `holdsRole` → operator edge per service actor (Loom / Weaver / Bridge / object-store-manager / privacy)
 
-This `holdsRole → operator` topology **is** how the Capability Lens designates root-equivalence (Contract #6 §6.1 / #7 §7.7) — a bounded single-link existence check, not a class and not a `data.protected` flag.
+This `holdsRole → operator` topology is the root designation (item 6).
 
 (Additional internal service actor identities for Loom, Weaver, etc. are seeded by their respective stream's bootstrap procedures in Phase 2+, following the same pattern — with or without the operator `holdsRole` link, per that actor's own trust-boundary needs.)
 
@@ -90,9 +90,7 @@ All NanoIDs for primordial vertices are generated at first `make up` execution a
 }
 ```
 
-There is no `processorIdentityKey` (§7.2 item 7 — the Processor is the sole Core-KV writer, not an actor, so it needs no seeded identity) and no per-class `metaMetaDDLKeys` block (§7.2 item 1 — the five former per-class meta-meta DDLs collapsed into the single self-describing `metaRoot`).
-
-This config provides the deployment a stable reference set for the primordial NanoIDs across restarts. Without it, post-restart code paths that need to reference (e.g.) "the bootstrap identity" couldn't find it without a class-based Lens query (which would work, but adds startup latency).
+This config provides the deployment a stable reference set for the primordial NanoIDs across restarts.
 
 ### 7.4 Bootstrap Idempotence and Re-runs
 
@@ -100,7 +98,7 @@ This config provides the deployment a stable reference set for the primordial Na
 
 **Core KV, not the file, is the authority on whether a bucket has been seeded.** `lattice.bootstrap.json` is file-local: it records what a bootstrap run once did on *some* Core KV, not what *this* Core KV holds. The two can disagree — a recreated or wiped bucket behind a surviving `status="committed"` file — and a deployment that skipped seeding on the file's word alone would come up "ready" with silently-empty reads. Bootstrap therefore probes the bucket (the op tracker key) after provisioning and seeds on the bucket's answer.
 
-The file remains authoritative for the *identity* of the primordial set: on that disagreement the re-seed reuses the file's NanoIDs, so restored keys are exactly the ones existing packages and data already reference. Because the op tracker is written first (§7.7) it marks a seed *started*, not finished, so a re-seed against a `committed` file first rewrites the file to `status="in-progress"`, keeping the two-phase window that makes an interrupted run retryable.
+The file remains authoritative for the *identity* of the primordial set: on that disagreement the re-seed reuses the file's NanoIDs, so restored keys are exactly the ones existing packages and data already reference. **The op tracker is written first** — it marks a seed *started*, not finished, so a re-seed against a `committed` file first rewrites the file to `status="in-progress"`, keeping the two-phase window that makes an interrupted run retryable.
 
 If an operator wants a fresh deployment, the procedure is:
 1. `make down` — clears all NATS buckets, drops Postgres data, deletes `lattice.bootstrap.json`
@@ -110,33 +108,12 @@ This is consistent with the immutability principle: primordial keys aren't reass
 
 ### 7.5 Readiness Gate
 
-`make up` does NOT complete until Refractor has projected the bootstrap identity's Capability KV entry. This eliminates the startup race window where Capability KV is empty and operations would fail auth.
-
-**`make up` sequence:**
-
-```
-1. Start NATS, provision Core KV / Health KV / Capability KV / Weaver buckets
-   (all with `allow_msg_ttl: true` enabled)
-2. Start Postgres, run any schema setup
-3. Seed primordial Core KV entries (§7.2 inventory) using NATS direct writes
-4. Persist lattice.bootstrap.json
-5. Start Processor and Refractor (and other configured services)
-6. Poll readiness:
-   - Refractor health reports `status: "healthy"` AND `lens_count_active >= 1`
-   - Capability KV contains `cap.<bootstrap-identity-suffix>` with root capability
-7. Print "Lattice ready ({deploymentName})" and exit success
-```
-
-**Configurable timeout** (default: 30 seconds) on the readiness poll. If exceeded, `make up` exits with a clear error message identifying which component failed to reach readiness:
-
-```
-ERROR: Lattice did not reach ready state within 30s.
-  Refractor health: status=starting, lens_count_active=0
-  Capability KV: cap.identity.<bootstrap-id> not found
-Suggest: check refractor logs at <path>, or `make down && make up` to retry.
-```
-
-The default 30s is generous for Phase 1's scale (a handful of bootstrap entries). Production deployments at scale (post-MVP) may need longer; the timeout is deployment-configurable.
+`make up` does NOT complete until Refractor has projected the bootstrap identity's Capability KV entry
+(Refractor healthy with an active lens count, and `cap.<bootstrap-identity-suffix>` present with root
+capability). This eliminates the startup race window where Capability KV is empty and operations would
+fail auth. The readiness poll's timeout is deployment-configurable (default 30s); on expiry `make up`
+exits with an error naming the component that failed to reach readiness. Sequence and mechanics:
+`docs/components/bootstrap.md`.
 
 ### 7.6 What's NOT in the Primordial Bootstrap
 
@@ -150,35 +127,10 @@ Several things deliberately stay out of `make up`:
 
 **No Lens projections beyond Capability.** Other Lenses (business projections, query surfaces) are authored after bootstrap and activate via CDC.
 
-### 7.7 Implementation Notes
+### 7.7 Bypass coverage
 
-**For the AI agent implementing Story 1.4 (Dev Harness):**
-
-The `make up` target's implementation:
-1. Idempotence check: probe Core KV (the op tracker key) after provisioning and skip seeding on the bucket's answer per §7.4 — `lattice.bootstrap.json` supplies the stable NanoID set, never the skip decision
-2. Bucket provisioning: create `core-kv`, `health-kv`, `capability-kv`, `weaver-state` buckets; all configured with `allow_msg_ttl: true`
-3. NanoID generation: invoke substrate's `nanoid.New()` for each primordial NanoID; assemble into the bootstrap config
-4. Direct KV writes: for each primordial entry in §7.2 inventory, construct the document with proper envelope fields (provenance referencing the bootstrap identity and bootstrap op tracker), write to Core KV via NATS direct write
-5. Persist `lattice.bootstrap.json`
-6. Start Processor, Refractor, and any other configured services
-7. Readiness poll loop per §7.5
-8. Exit success on readiness OR exit failure on timeout
-
-The order of primordial writes matters for some consistency properties: write the meta-meta DDLs first, then the reserved type DDLs, then the Capability Lens definition, then root role and permissions, then system identities, then topology links. Refractor's CDC processing will handle whatever order it sees, but a logical write order makes debugging easier when bootstrap fails.
-
-**For the AI agent implementing Story 3.x (Capability Lens cypher rule):**
-
-The cypher rule must produce root-equivalent capability when projecting an identity that holds the root role. Concretely:
-- Walk identity → `holdsRole` → role
-- For role.canonicalName matching `"systemRoot"` (or the deployment's root role convention), emit `platformPermissions[]` entries with `scope: "any"` for every known operation type
-- This means the cypher rule must know the operation types — Phase 1 handles this by walking inbound `grantedBy` links from the role to discover permission vertices, which carry the operation types as aspects (cypher: `MATCH (r:role)<-[:grantedBy]-(p:permission)`)
-- For non-root roles, the same traversal applies but only the explicitly granted operations are emitted
-
-The rule is uniform across system and non-system identities; root capability is established by graph topology, not by class-based special-casing.
-
-**For the bypass test suite (Stories 1.11 and 3.x):**
-
-Test cases that MUST be covered:
-- Bootstrap identity submits operations and they succeed (validates the Lens correctly projects from topology)
-- A non-bootstrap identity with the same `class: "identity.system.bootstrap"` value but without `holdsRole` topology does NOT get root capability (proves class doesn't grant access; topology does)
-- Tampering with the root role vertex (e.g., removing inbound `grantedBy` links from its permissions) causes the bootstrap identity to lose corresponding capabilities on the next projection cycle (proves the auth boundary is reactive to topology changes)
+The bypass suite MUST prove the topology-not-class rule (§7.2 item 6) in both directions: an identity
+**with** the `holdsRole → operator` topology projects root capability; an identity carrying a system
+`class` value but **without** the topology does not; and removing the role's inbound `grantedBy` links
+drops the corresponding capabilities on the next projection cycle (the auth boundary is reactive to
+topology).
