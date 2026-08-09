@@ -39,5 +39,5 @@ Feature availability is version-gated; cite the version that introduced a featur
 | `@every` / 6-field cron / timezone message schedules (ADR-51) | NATS 2.14 | Recurring schedules — the cron-killer (Contract #10 §10.4 "Recurring schedules"). |
 
 **Platform floor: NATS 2.14** (the highest of the above). Pinned in `go.mod` + `docker-compose.yml`;
-recorded in Contract #4 §4.3. Do not assume a lower floor — `@every`/cron need 2.14 and the platform
+owned by this file (contracts cite it, never restate it). Do not assume a lower floor — `@every`/cron need 2.14 and the platform
 provides it.

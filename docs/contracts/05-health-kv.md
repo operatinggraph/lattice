@@ -13,7 +13,7 @@ Health KV is the operational observability plane. Every running component writes
 health.<component>.<instance>
 ```
 
-- `<component>` — canonical component name (lowercase, no dots). Phase 1 values: `processor`, `refractor`. Phase 2+ additions: `loom`, `weaver`, `gateway`.
+- `<component>` — canonical component name (lowercase, no dots). The live component inventory is the schema doc's (`docs/observability/health-kv-schema.md`).
 - `<instance>` — stable identifier for the running instance. Convention: `<component-prefix>-<NanoID>` where the NanoID is generated once at instance startup (e.g., `proc-Lk2Pn6mQrtwzKbcXvP3T`). The NanoID persists across heartbeats (the same instance keeps writing to the same key); a restart generates a new NanoID and hence a new key.
 
 **Health KV keys do NOT follow Core KV's `vtx`/`asp`/`lnk` patterns.** Health is a separate addressing space in a separate bucket. Direct KV writes to Health are explicitly sanctioned (it's the only sanctioned direct-KV-write pattern outside Refractor's own targets, per architecture P2).
@@ -74,37 +74,17 @@ health.<component>.<instance>
 
 Status transitions are component-author's discretion; the platform does not enforce specific rules about when a component should transition states. The convention: components should err on the side of being honest about degradation rather than reporting false-healthy.
 
-### 5.4 Recommended Metrics Baseline (Phase 1 Components)
+### 5.4 Metrics
 
-These metrics are recommended (not enforced) at MVP. Stream 7 may harden them into requirements.
+`metrics` is component-specific; the **per-component metric inventory is owned by the schema doc**
+(`docs/observability/health-kv-schema.md`), which enumerates every emitted key and its document shape.
+Two conventions are contractual:
 
-**Processor:**
-- `ops_consumed_total` — JetStream messages consumed (cumulative since startup)
-- `ops_committed_total` — operations that reached step 8 successfully (cumulative)
-- `ops_rejected_total` — operations rejected at any step before commit (cumulative)
-- `p99_starlark_ms` — Starlark execution p99 latency (rolling window, recommend 5 minutes)
-- `p99_commit_path_ms` — full commit path p99 latency, step 1 through step 10 (rolling window)
-- `lane_lag` — per-lane JetStream consumer lag (messages behind head, by lane name). The **Phase-1** Processor runs a *single* durable consumer (`processor-main`) over all `ops.*` lanes, so a true per-lane split is not separable **today**: the per-lane keys are reported `null` ("not measured per-lane") and the genuine aggregate backlog is surfaced as `lane_lag_total` (a `null` total means the backlog could not be read this tick — never a fabricated `0`). The per-lane keys are **reserved**, not retired: when the Processor adopts the architecture's design-of-record **per-lane consumers** (the 3-lane-consumer model — `lattice-architecture.md`; `LATTICE_PROCESSOR_LANES_*_CONSUMERS`, one `substrate.ConsumerSupervisor` per lane), each lane reports its own real lag here and `lane_lag_total` becomes their sum. A backlog above the configured threshold raises a `ProcessorLaneLagging` warning (`status: degraded`).
-- `lane_lag_total` — aggregate JetStream consumer backlog across all lanes (`processor-main` `NumPending`); `null` when unreadable.
-
-**Refractor:**
-- `lens_count_active` — number of Lens definitions currently projecting
-- `cdc_lag_p99_ms_by_lens` — map of `{lensName: p99LagMs}` for each active Lens (architecture's primary liveness indicator)
-- `projection_errors_total` — projection failures count (cumulative)
-- `vault_calls_total` — Vault decryption calls count (cumulative; Phase 1 stub may report 0)
-- `keyshredded_handled_total` — `KeyShredded` events processed (cumulative)
-
-**Vault** (`health.vault.<instance>` — its own component group, emitted by the Processor that hosts the authoritative Vault; the Vault is an embedded backend with no standalone binary, so its heartbeat shares the Processor's instance id):
-- `backend` — the active Vault backend: `local-envelope` (the dev envelope-encryption backend) or a KMS adapter id. An operator reads this to know a shred's guarantee strength — the local backend's `ShredKey` is a deny-list *refusal* (the shared master KEK cannot be per-identity destroyed), whereas a KMS backend destroys the per-identity key version (true cryptographic erasure).
-- `vault_calls_total` — cumulative `Decrypt` calls through this Vault (commit-path decrypt-on-read + the trusted-tool `lattice.vault.decrypt` RPC).
-- `encrypt_calls_total` — cumulative `Encrypt` calls (commit-path step-6.5 encrypt-on-write).
-- `keyshredded_handled_total` — cumulative `ShredKey` calls (the privacy-worker's async key destruction).
-- `dek_cache_size` — unwrapped DEKs currently held in the TTL working-set cache. A gauge, **not** a custody-set total: per-identity wrapped DEKs live in Core KV as `piiKey` aspects, not in the Vault, so the backend has no cheap, honest "total keys held" to report.
-- `keys_shredded` — identities on the in-memory shred deny-list (gauge).
-
-(This is the Vault's own group. The identically-named `vault_calls_total` / `keyshredded_handled_total` under **Refractor** above count Refractor's *separate* Secure-Lens Vault instance and are unaffected.)
-
-**Loom / Weaver / Gateway:** TBD in Phase 2; conventions will follow this pattern.
+- **An unmeasured metric reports `null`, never a fabricated `0`** — e.g. a per-lane lag key that is
+  reserved but not separable under the current consumer topology reports `null`, and a `null`
+  aggregate means "could not be read this tick."
+- A metric whose name collides across component groups (e.g. `vault_calls_total` under both the Vault
+  group and Refractor) counts that component's **own** instance, never a shared total.
 
 ### 5.5 Issue Records
 
@@ -146,28 +126,6 @@ Both `heartbeat_interval` and `ttl_multiplier` are component-configurable via de
 
 **Health KV is NOT projected via the Capability Lens at Phase 1.** Every actor with NATS cluster access can read Health KV. This is consistent with the architecture's "Health KV reads are not auth-gated at MVP" note. Phase 2+ may add capability scoping; not in Phase 1 scope.
 
-### 5.8 Implementation Notes
-
-**For the AI agent implementing Story 1.4 (Dev Harness):**
-
-- Health KV bucket created at `make up` time with `allow_msg_ttl: true`
-- Bucket name: `health` (or `lattice_health` if namespace prefixing is required by deployment)
-
-**For the AI agent implementing Story 1.4 (Processor — Consume, Dedup, Auth Stub):**
-
-The Processor instance, on startup:
-1. Generate instance NanoID (20-char custom alphabet via substrate's `nanoid.new()`)
-2. Construct instance ID: `proc-<NanoID>`
-3. Write initial heartbeat with `status: "starting"` and instance metadata
-4. Begin commit path consumer loops
-5. Once consumers are running, transition to `status: "healthy"` and begin regular heartbeat cadence on the configured interval (default 10s)
-6. Each heartbeat write: read current metrics from in-memory counters, construct the document, write to `health.processor.<instance-id>` with `TTL=100s` (default)
-7. On `SIGTERM` / shutdown signal: transition to `status: "shuttingDown"` and write a final heartbeat before exit
-
-**For the AI agent implementing Story 2.x (Refractor — Materializer morph):**
-
-The same pattern applies to Refractor, with Refractor-specific metrics. The Refractor health key is `health.refractor.refr-<NanoID>`.
-
-**For the bypass test suite (Story 1.11):**
-
-Bypass test category #1 (direct KV write to Core KV) does NOT apply to Health KV — Health KV is the explicitly sanctioned direct-write surface. The test suite must NOT include Health KV writes as bypass attempts.
+**Bypass-suite boundary:** direct-KV-write bypass coverage (category #1) does NOT apply to Health KV —
+it is the explicitly sanctioned direct-write surface (§5.1); the suite must not count Health KV writes
+as bypass attempts.

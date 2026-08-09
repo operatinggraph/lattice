@@ -161,6 +161,36 @@ emitted inline in the Refractor heartbeat document (under `metrics.lensLags` and
 `metrics.lensLatency`). This key is **not emitted** in Phase 1 and is omitted from this
 inventory.
 
+### Vault
+
+Source package: `internal/vault/` (emitter: `cmd/processor/main.go` — the Vault is an embedded
+backend with no standalone binary, so its heartbeat is emitted by the Processor that hosts the
+authoritative Vault and shares that Processor's instance id).
+
+| Key Pattern | Frequency | Source File | Emitter | TTL |
+|---|---|---|---|---|
+| `health.vault.<instance>` | ≥ 10s heartbeat | `internal/vault/local.go` (snapshot) | Processor heartbeater | Category A — `interval×10`, re-armed |
+
+The heartbeat `metrics` carry:
+
+- **`backend`** — the active Vault backend: `local-envelope` (the dev envelope-encryption backend) or
+  a KMS adapter id. **An operator reads this to know a shred's guarantee strength** — the local
+  backend's `ShredKey` is a deny-list *refusal* (the shared master KEK cannot be per-identity
+  destroyed), whereas a KMS backend destroys the per-identity key version (true cryptographic
+  erasure).
+- `vault_calls_total` — cumulative `Decrypt` calls through this Vault (commit-path decrypt-on-read +
+  the trusted-tool `lattice.vault.decrypt` RPC).
+- `encrypt_calls_total` — cumulative `Encrypt` calls (commit-path step-6.5 encrypt-on-write).
+- `keyshredded_handled_total` — cumulative `ShredKey` calls (the privacy-worker's async key
+  destruction).
+- `dek_cache_size` — unwrapped DEKs currently held in the TTL working-set cache. A gauge, **not** a
+  custody-set total: per-identity wrapped DEKs live in Core KV as `piiKey` aspects, not in the Vault,
+  so the backend has no cheap, honest "total keys held" to report.
+- `keys_shredded` — identities on the in-memory shred deny-list (gauge).
+
+The identically-named `vault_calls_total` / `keyshredded_handled_total` under **Refractor** count
+Refractor's *separate* Secure-Lens Vault instance and are unaffected.
+
 ### Weaver
 
 Source package: `internal/weaver/`
