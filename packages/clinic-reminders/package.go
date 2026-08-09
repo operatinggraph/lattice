@@ -12,7 +12,7 @@
 //
 // It is the convergence sibling of the projection-only clinic-domain (the
 // location-domain → lease-signing layering): clinic-domain owns the appointment +
-// its .schedule/.status/.encounter aspects; clinic-reminders ATTACHES the reminder
+// its .schedule/.status/.encounter/.documentation aspects; clinic-reminders ATTACHES the reminder
 // machinery — the .reminder / .followUpReminder marker aspects (the follow-up half
 // in followups.go) — AND owns its own self-contained visitseries vertex type (the
 // clinic-domain patient/provider idiom) for the recurring series.
@@ -39,7 +39,7 @@
 // The reminder mechanism INVERTS lease-signing's freshness re-open. lease projects
 // freshUntil to RE-OPEN a converged gap at a deadline; these project freshUntil = a
 // deadline (the .schedule.remindAt clinic-domain precomputes = startsAt − 24h, or
-// the .encounter.followUpDate a documented visit requested) so Weaver's @at temporal
+// the .documentation.followUpDate a documented visit requested) so Weaver's @at temporal
 // lane fires at the deadline → MarkExpired re-touches the appointment → the row
 // re-projects with a fresh $now → the gap OPENS → Weaver dispatches the directOp →
 // the marker records the deadline it reminded for → the gate (remindedFor = the
@@ -59,7 +59,7 @@
 // _bmad-output/implementation-artifacts/clinic-reminders-notification-adapter-design.md.
 //
 // Depends clinic-domain (the appointment/patient/provider vertex types + the
-// appointment's .schedule.remindAt / .schedule.endsAt / .encounter.followUpDate /
+// appointment's .schedule.remindAt / .schedule.endsAt / .documentation.followUpDate /
 // the MarkPastDueNoShow op) + orchestration-base (MarkExpired / the
 // freshnessExpiry marker the @at firing writes). Install via
 // `lattice-pkg install packages/clinic-reminders` after both.
@@ -70,11 +70,11 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 // Package is the static, install-time bundle.
 var Package = pkgmgr.Definition{
 	Name:    "clinic-reminders",
-	Version: "0.7.3",
+	Version: "0.8.0",
 	Description: "Clinic appointment & follow-up reminders + recurring visit series + the auto no-show closer (the " +
 		"clinic vertical's orchestration): the .reminder / .followUpReminder marker aspects + RecordAppointmentReminder / " +
 		"RecordFollowUpReminder ops, the appointmentReminders + followUpReminders weaver-target convergence lenses " +
-		"(freshUntil = the .schedule.remindAt / .encounter.followUpDate deadline arms the @at timer; the gap opens " +
+		"(freshUntil = the .schedule.remindAt / .documentation.followUpDate deadline arms the @at timer; the gap opens " +
 		"at the deadline); the visitseries vertex type + Start/Pause/Resume/AdvanceVisitSeries ops + the " +
 		"visitSeriesDue rolling convergence lens (freshUntil re-arms forward on every advance instead of clearing " +
 		"to a permanent close); and the pastDueAppointments convergence lens, which binds freshUntil DIRECTLY to " +

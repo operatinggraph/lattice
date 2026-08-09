@@ -24,18 +24,21 @@ func TestPackage_ManifestMatchesDefinition(t *testing.T) {
 	}
 }
 
-// TestPackage_DDLs pins the eighteen DDLs: five vertexType owners (patient,
-// provider, appointment, clinicSite, clinicSiteAssignment) and thirteen
-// aspectType step-6 gates (nine attach to patient/provider/appointment
+// TestPackage_DDLs pins the nineteen DDLs: five vertexType owners (patient,
+// provider, appointment, clinicSite, clinicSiteAssignment) and fourteen
+// aspectType step-6 gates (ten attach to patient/provider/appointment
 // vertices; identityPatientClaim and identityProviderClaim attach onto an
 // identity-domain vertex, the clinic-reminders idiom; clinicSiteProfile
 // attaches onto a location-domain building, the loftspace-domain
 // aspect-contribution idiom; providerIdentityClaim attaches onto the
-// package's own provider vertex). All aspect DDLs MUST be NON-sensitive, and
-// each names ONLY its writer op(s) in permittedCommands.
+// package's own provider vertex). Every aspect DDL is NON-sensitive and names
+// ONLY its writer op(s) in permittedCommands EXCEPT appointmentEncounter,
+// which is SENSITIVE and custodied on the clinicalRecord retention class —
+// see TestPackage_EncounterAspectIsSensitiveAndCustodied — the one deliberate
+// exception this loop excludes and tests separately.
 func TestPackage_DDLs(t *testing.T) {
-	if got := len(Package.DDLs); got != 18 {
-		t.Fatalf("expected 18 DDLs, got %d", got)
+	if got := len(Package.DDLs); got != 19 {
+		t.Fatalf("expected 19 DDLs, got %d", got)
 	}
 
 	byName := map[string]pkgmgr.DDLSpec{}
@@ -76,19 +79,19 @@ func TestPackage_DDLs(t *testing.T) {
 	}
 
 	aspectWriters := map[string][]string{
-		"patientDemographics":   {"CreatePatient"},
-		"providerProfile":       {"CreateProvider", "SetProviderProfile"},
-		"appointmentSchedule":   {"CreateAppointment", "RescheduleAppointment"},
-		"appointmentStatus":     {"CreateAppointment", "SetAppointmentStatus", "MarkPastDueNoShow"},
-		"providerHours":         {"SetProviderHours"},
-		"providerTimeOff":       {"SetProviderTimeOff"},
-		"providerSlotClaim":     {"CreateAppointment", "RescheduleAppointment", "SetAppointmentStatus", "MarkPastDueNoShow", "TombstoneAppointment"},
-		"patientSlotClaim":      {"CreateAppointment", "RescheduleAppointment", "SetAppointmentStatus", "MarkPastDueNoShow", "TombstoneAppointment"},
-		"appointmentEncounter":  {"RecordEncounter"},
-		"identityPatientClaim":  {"CreatePatient"},
-		"clinicSiteProfile":     {"SetSiteProfile"},
-		"providerIdentityClaim": {"BindProviderIdentity"},
-		"identityProviderClaim": {"BindProviderIdentity"},
+		"patientDemographics":      {"CreatePatient"},
+		"providerProfile":          {"CreateProvider", "SetProviderProfile"},
+		"appointmentSchedule":      {"CreateAppointment", "RescheduleAppointment"},
+		"appointmentStatus":        {"CreateAppointment", "SetAppointmentStatus", "MarkPastDueNoShow"},
+		"providerHours":            {"SetProviderHours"},
+		"providerTimeOff":          {"SetProviderTimeOff"},
+		"providerSlotClaim":        {"CreateAppointment", "RescheduleAppointment", "SetAppointmentStatus", "MarkPastDueNoShow", "TombstoneAppointment"},
+		"patientSlotClaim":         {"CreateAppointment", "RescheduleAppointment", "SetAppointmentStatus", "MarkPastDueNoShow", "TombstoneAppointment"},
+		"appointmentDocumentation": {"RecordEncounter"},
+		"identityPatientClaim":     {"CreatePatient"},
+		"clinicSiteProfile":        {"SetSiteProfile"},
+		"providerIdentityClaim":    {"BindProviderIdentity"},
+		"identityProviderClaim":    {"BindProviderIdentity"},
 	}
 	for name, wantCmds := range aspectWriters {
 		asp, ok := byName[name]
@@ -119,6 +122,73 @@ func TestPackage_DDLs(t *testing.T) {
 				t.Fatalf("%s missing permittedCommand %q (have %v)", name, c, asp.PermittedCommands)
 			}
 		}
+	}
+}
+
+// TestPackage_EncounterAspectIsSensitiveAndCustodied is the regression guard for
+// the clinical-record custody posture: the appointmentEncounter DDL must declare
+// Sensitive + a retentionClass Custody naming clinicalRecord, and the package
+// must declare exactly that retention class with the eraseOnExpiry policy. A
+// silent loss of either — Sensitive flipping back to false, or Custody being
+// dropped/retargeted — would fall back to committing the raw clinical record as
+// PLAINTEXT (Sensitive false) or reject at install (Custody naming an undeclared
+// class), so this pins both halves of the declaration together.
+func TestPackage_EncounterAspectIsSensitiveAndCustodied(t *testing.T) {
+	byName := map[string]pkgmgr.DDLSpec{}
+	for _, d := range Package.DDLs {
+		byName[d.CanonicalName] = d
+	}
+	enc, ok := byName["appointmentEncounter"]
+	if !ok {
+		t.Fatalf("missing appointmentEncounter aspectType DDL")
+	}
+	if !enc.Sensitive {
+		t.Fatalf("appointmentEncounter must be Sensitive (it carries the raw clinical record)")
+	}
+	if enc.Custody.Kind != pkgmgr.CustodyKindRetentionClass {
+		t.Fatalf("appointmentEncounter Custody.Kind = %q, want %q", enc.Custody.Kind, pkgmgr.CustodyKindRetentionClass)
+	}
+	if enc.Custody.RetentionClass != "clinicalRecord" {
+		t.Fatalf("appointmentEncounter Custody.RetentionClass = %q, want %q", enc.Custody.RetentionClass, "clinicalRecord")
+	}
+
+	if got := len(Package.RetentionClasses); got != 1 {
+		t.Fatalf("expected exactly 1 retention class, got %d", got)
+	}
+	rc := Package.RetentionClasses[0]
+	if rc.CanonicalName != "clinicalRecord" {
+		t.Fatalf("retention class CanonicalName = %q, want %q", rc.CanonicalName, "clinicalRecord")
+	}
+	if rc.Policy != pkgmgr.RetentionPolicyEraseOnExpiry {
+		t.Fatalf("retention class Policy = %q, want %q", rc.Policy, pkgmgr.RetentionPolicyEraseOnExpiry)
+	}
+	if rc.RetentionPeriod == "" {
+		t.Fatalf("retention class RetentionPeriod must be declared (it is declarative, but an unstated schedule is unauditable)")
+	}
+	if rc.Description == "" {
+		t.Fatalf("retention class Description must be declared")
+	}
+}
+
+// TestPackage_DocumentationAspectIsNotSensitive proves the split's whole point:
+// the operational .documentation aspect carries no custody at all, so the plain
+// (unencrypted-read) lenses that project it can actually read it. A regression
+// that flips Sensitive on this DDL would make clinicAppointments' operational
+// columns unreadable by every non-Vault-aware lens.
+func TestPackage_DocumentationAspectIsNotSensitive(t *testing.T) {
+	byName := map[string]pkgmgr.DDLSpec{}
+	for _, d := range Package.DDLs {
+		byName[d.CanonicalName] = d
+	}
+	doc, ok := byName["appointmentDocumentation"]
+	if !ok {
+		t.Fatalf("missing appointmentDocumentation aspectType DDL")
+	}
+	if doc.Sensitive {
+		t.Fatalf("appointmentDocumentation must NOT be sensitive — it is the plain-lens-readable half of the split")
+	}
+	if doc.Custody.Kind != "" || doc.Custody.RetentionClass != "" {
+		t.Fatalf("appointmentDocumentation must declare no custody, got %+v", doc.Custody)
 	}
 }
 
@@ -357,10 +427,11 @@ func TestPackage_ScriptGuards(t *testing.T) {
 		`WrongProvider`,                                                    // reschedule/terminal ops validate the passed provider
 		`WrongPatient`,                                                     // reschedule validates the passed patient via the forPatient link
 		`ot == "RecordEncounter"`,                                          // the clinical-record op handler
-		`make_aspect_upsert(appt_key, "encounter", "appointmentEncounter"`, // RecordEncounter upserts .encounter
-		`clinic.appointmentEncounterRecorded`,                              // RecordEncounter event
-		`"documentedAt": time.rfc3339_utc(op.submittedAt)`,                 // operational documentedAt derived from submittedAt
-		`cannot record encounter on appointment `,                          // RecordEncounter's standing provider-binding guard
+		`make_aspect_upsert(appt_key, "encounter", "appointmentEncounter"`, // RecordEncounter upserts the sensitive .encounter half
+		`make_aspect_upsert(appt_key, "documentation", "appointmentDocumentation"`, // RecordEncounter upserts the operational .documentation half
+		`clinic.appointmentEncounterRecorded`,                                      // RecordEncounter event
+		`"documentedAt": time.rfc3339_utc(op.submittedAt)`,                         // operational documentedAt derived from submittedAt
+		`cannot record encounter on appointment `,                                  // RecordEncounter's standing provider-binding guard
 	} {
 		if !strings.Contains(appointmentDDLScript, want) {
 			t.Errorf("appointment script must reference %q", want)
@@ -368,17 +439,18 @@ func TestPackage_ScriptGuards(t *testing.T) {
 	}
 
 	// The clinical-record PHI discipline: the clinicAppointments lens projects the
-	// OPERATIONAL encounter signals but NEVER the raw clinical content. summary /
+	// OPERATIONAL documentation signals but NEVER the raw clinical content. summary /
 	// assessment / plan must not appear in any RETURN projection (the .demographics
-	// name-only precedent applied to .encounter; the Vault plane owns display).
-	for _, projected := range []string{"a.encounter.data.documentedAt", "a.encounter.data.followUpRequested", "a.encounter.data.followUpDate"} {
+	// name-only precedent applied to the split — the sensitive .encounter half is
+	// never projected by any lens).
+	for _, projected := range []string{"a.documentation.data.documentedAt", "a.documentation.data.followUpRequested", "a.documentation.data.followUpDate"} {
 		if !strings.Contains(clinicAppointmentsSpec, projected) {
-			t.Errorf("clinicAppointments must project the operational encounter signal %q", projected)
+			t.Errorf("clinicAppointments must project the operational documentation signal %q", projected)
 		}
 	}
 	for _, phi := range []string{"encounter.data.summary", "encounter.data.assessment", "encounter.data.plan"} {
 		if strings.Contains(clinicAppointmentsSpec, phi) {
-			t.Errorf("clinicAppointments must NOT project the raw clinical PHI field %q (Vault-plane deferred)", phi)
+			t.Errorf("clinicAppointments must NOT project the raw clinical PHI field %q (SENSITIVE, custodied on the clinicalRecord retention class)", phi)
 		}
 	}
 

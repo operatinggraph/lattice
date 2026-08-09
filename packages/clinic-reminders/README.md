@@ -7,7 +7,7 @@ is due"), and the **recurring visit series** ("a patient on a standing cadence h
 each a marker/rolling aspect + op + convergence lens + §10.8 playbook.
 
 It is the convergence **sibling** of the projection-only `clinic-domain`: clinic-domain owns the
-`appointment` vertex + its `.schedule`/`.status`/`.encounter` aspects (precomputing
+`appointment` vertex + its `.schedule`/`.status`/`.encounter`/`.documentation` aspects (precomputing
 `remindAt = startsAt − 24h`, and normalizing a documented visit's `followUpDate` to a full RFC3339
 instant); clinic-reminders *attaches the reminder machinery* onto that vertex (the `loftspace-domain`
 idiom of one package adding an aspect onto another package's vertex type — the step-6 write gate keys on
@@ -31,7 +31,7 @@ Design: [`_bmad-output/implementation-artifacts/clinic-reminders-design.md`](../
 | **Read lens** (1) | `visitSeriesRead` → Postgres (`protected`, D1.5 RLS — the patient's own series + the clinic-wide staff worklist) |
 | **Weaver targets** (3) | `appointmentReminders` — `missing_reminder` → `directOp(RecordAppointmentReminder)` · `followUpReminders` — `missing_followup_reminder` → `directOp(RecordFollowUpReminder)` · `visitSeriesDue` — `missing_series_advance` → `directOp(AdvanceVisitSeries)` |
 
-`Depends`: `clinic-domain` (the appointment + `.schedule.remindAt` / `.encounter.followUpDate`; the
+`Depends`: `clinic-domain` (the appointment + `.schedule.remindAt` / `.documentation.followUpDate`; the
 patient/provider vertex types the visit series links to) + `orchestration-base` (`MarkExpired` / the
 `freshnessExpiry` marker the `@at` firing writes). All ops are granted to the `operator` role at
 `scope: any` (`permissions.go`) — no new capability surface; Weaver's service actor dispatches the
@@ -40,7 +40,7 @@ patient/provider vertex types the visit series links to) + `orchestration-base` 
 ## Follow-up reminders (`followups.go`)
 
 The **same mechanism** as the appointment reminder, keyed on the documented visit's
-`.encounter.followUpDate` instead of `.schedule.remindAt`, and firing **at** that date (no lead offset —
+`.documentation.followUpDate` instead of `.schedule.remindAt`, and firing **at** that date (no lead offset —
 the visit is already past and `followUpDate` is the provider's soft target). When `RecordEncounter`
 captures `followUpRequested` + a `followUpDate`, clinic-domain normalizes the date-only FE value to a
 full RFC3339 instant (`09:00:00Z` "the morning of") so Weaver's `@at` temporal lane can arm a timer at

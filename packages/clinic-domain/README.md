@@ -36,8 +36,9 @@ vtx.provider.<id>     class=provider     root {}   .profile  {fullName, specialt
                                                    .slot<cellcode> {}   (class providerSlotClaim — one per occupied 15-min cell, on demand)
 vtx.appointment.<id>  class=appointment  root {}   .schedule {startsAt, endsAt, remindAt, reason?}
                                                    .status   {value ∈ scheduled|confirmed|checkedIn|completed|cancelled|noShow, note?}
-                                                   .encounter {summary, assessment?, plan? (RAW PHI, never projected);
-                                                               documentedAt, followUpRequested, followUpDate? (operational, projected)}
+                                                   .encounter      {summary, assessment?, plan?}  (SENSITIVE — encrypted, DEK on the
+                                                                    clinicalRecord retention class; never projected)
+                                                   .documentation  {documentedAt, followUpRequested, followUpDate?}  (operational, projected)
 
 lnk.appointment.<id>.forPatient.patient.<id>      (appointment → patient — the later-arriving vertex is the source, §1.1)
 lnk.appointment.<id>.withProvider.provider.<id>   (appointment → provider)
@@ -139,11 +140,13 @@ half-open overlap tests and the convergence lens's `remindAt` compare rely on.
   *different* one is rejected (`TerminalStatus`) so a finished / cancelled visit can never silently
   revert; non-terminal statuses move freely.
 - **`RecordEncounter`** — `{appointmentKey, summary, assessment?, plan?, followUpRequested?, followUpDate?}`.
-  Upserts `.encounter` — the post-visit clinical record. `summary`/`assessment`/`plan` are RAW PHI, captured
-  plaintext-for-now under the trusted-tool posture and **never projected** into a read model (the deferred
-  Vault plane owns clinical-content display). `documentedAt` (server-stamped) and the follow-up fields are
-  OPERATIONAL, non-PHI signals — `clinicAppointments` / `clinicAppointmentsRead` / `providerAppointmentsRead`
-  project them (documentation presence + follow-up scheduling), never the clinical content itself.
+  Upserts the post-visit record as two sibling aspects, split along the sensitivity boundary because step 6.5
+  encrypts a whole aspect's `data` map. `.encounter` holds `summary`/`assessment`/`plan` — RAW PHI, **SENSITIVE**,
+  its DEK custodied on the package's own `clinicalRecord` retention class rather than the patient's identity, and
+  **never projected** into any read model. `.documentation` holds `documentedAt` (server-stamped) and the
+  follow-up fields — OPERATIONAL, non-PHI signals that `clinicAppointments` / `clinicAppointmentsRead` /
+  `providerAppointmentsRead` / clinic-reminders' `followUpReminders` project (documentation presence +
+  follow-up scheduling), never the clinical content itself.
 - **`TombstoneAppointment`** — `{appointmentKey}`. Soft-deletes the appointment root only.
 
 ## Conflict detection & availability (Capability-KV §06 — "the operation's own Starlark logic")
@@ -249,10 +252,13 @@ has no consumer; §10.4 ships `@at` one-shot) — that remains a deferred platfo
   the Protected, RLS-scoped `clinicPatientsRead` / `clinicAppointmentsRead` lenses. Sensitive **contact** (email/phone)
   lives on the linked `identifiedBy` identity instead, and its display + right-to-be-forgotten are fully
   wired via the Vault plane (Fire 5's Secure-Lens `clinicPatientsRead` columns + the platform's
-  `ShredIdentityKey`) — clinic was that plane's forcing function. What remains deferred is the **clinical
-  record** (`RecordEncounter`'s `.encounter` aspect — summary/assessment/plan): captured now but never
-  projected into any lens — only the operational documentation/follow-up presence signals are — and its
-  own right-to-be-forgotten + display stay gated on a future Vault extension.
+  `ShredIdentityKey`) — clinic was that plane's forcing function. The **clinical record**
+  (`RecordEncounter`'s `.encounter` aspect — summary/assessment/plan) is encrypted at rest under a
+  *retention-class* holder, not the patient's identity: its obligation outlives any one patient's erasure, so
+  `ShredIdentityKey` leaves it readable and the operator-driven `ShredRetentionClassKey` destroys it. It is
+  still never projected into any lens — only the operational documentation/follow-up presence signals are —
+  so clinical-note **display** to a clinician has no read model yet, and the record's survival is not yet
+  pseudonymous while `.demographics`' plaintext `fullName` outlives the shred.
 - **Cascade-on-tombstone.** `Tombstone{Patient,Provider,Appointment}` soft-deletes the named vertex
   **root only** — its aspects and incident links are left in place. The projection lenses anchor on the
   live root, so a tombstoned vertex drops from the read model and its orphaned aspects are not surfaced.

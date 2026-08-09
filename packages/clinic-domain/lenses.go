@@ -466,13 +466,14 @@ func Lenses() []pkgmgr.LensSpec {
 // clinic-reminders is not installed.
 //
 // documentedAt / followUpRequested / followUpDate are the OPERATIONAL, non-PHI
-// signals of the appointment's .encounter aspect (the post-visit clinical record
-// written by RecordEncounter). The RAW clinical content (summary / assessment /
-// plan) is DELIBERATELY NOT projected — it is PHI the deferred Vault plane owns, the
-// same name-only discipline clinicPatients applies to .demographics. A non-null
+// signals of the appointment's .documentation aspect (written by RecordEncounter
+// alongside the sensitive .encounter aspect). The RAW clinical content (summary /
+// assessment / plan) lives on .encounter and is DELIBERATELY NOT projected — it is
+// SENSITIVE PHI (its DEK custodied on the clinicalRecord retention class), the same
+// name-only discipline clinicPatients applies to .demographics. A non-null
 // documentedAt IS the "visit documented" presence signal (mirrors reminderSentAt);
 // followUpDate is null unless a follow-up was requested. All null until a visit is
-// documented (and whenever no .encounter aspect exists), null-safe by key-shape.
+// documented (and whenever no .documentation aspect exists), null-safe by key-shape.
 const clinicAppointmentsSpec = `MATCH (a:appointment)
 OPTIONAL MATCH (a)-[:forPatient]->(p:patient)
 OPTIONAL MATCH (a)-[:withProvider]->(pr:provider)
@@ -493,9 +494,9 @@ RETURN
   site.site.data.name AS siteName,
   a.reminder.data.sentAt AS reminderSentAt,
   a.followUpReminder.data.sentAt AS followUpReminderSentAt,
-  a.encounter.data.documentedAt AS documentedAt,
-  a.encounter.data.followUpRequested AS followUpRequested,
-  a.encounter.data.followUpDate AS followUpDate`
+  a.documentation.data.documentedAt AS documentedAt,
+  a.documentation.data.followUpRequested AS followUpRequested,
+  a.documentation.data.followUpDate AS followUpDate`
 
 // clinicProvidersSpec projects one row per NAMED provider — the human-readable
 // roster the booking UI renders so a patient picks a provider by name + specialty
@@ -695,27 +696,27 @@ MATCH (a)-[:forPatient]->(p:patient)
 OPTIONAL MATCH (a)-[:withProvider]->(pr:provider)
 OPTIONAL MATCH (a)-[:atSite]->(site:building)
 RETURN
-  nanoIdFromKey(a.key)               AS appointment_id,
-  a.key                              AS entity_key,
-  a.schedule.data.startsAt           AS starts_at,
-  a.schedule.data.endsAt             AS ends_at,
-  a.schedule.data.reason             AS reason,
-  a.status.data.value                AS status,
-  a.status.data.note                 AS status_note,
-  p.key                              AS patient_key,
-  p.demographics.data.fullName       AS patient_name,
-  pr.key                             AS provider_key,
-  pr.profile.data.fullName           AS provider_name,
-  pr.profile.data.specialty          AS provider_specialty,
-  site.key                           AS site_key,
-  site.site.data.name                AS site_name,
-  a.reminder.data.sentAt             AS reminder_sent_at,
-  a.followUpReminder.data.sentAt     AS follow_up_reminder_sent_at,
-  a.encounter.data.documentedAt      AS documented_at,
-  a.encounter.data.followUpRequested AS follow_up_requested,
-  a.encounter.data.followUpDate      AS follow_up_date,
+  nanoIdFromKey(a.key)                   AS appointment_id,
+  a.key                                  AS entity_key,
+  a.schedule.data.startsAt               AS starts_at,
+  a.schedule.data.endsAt                 AS ends_at,
+  a.schedule.data.reason                 AS reason,
+  a.status.data.value                    AS status,
+  a.status.data.note                     AS status_note,
+  p.key                                  AS patient_key,
+  p.demographics.data.fullName           AS patient_name,
+  pr.key                                 AS provider_key,
+  pr.profile.data.fullName               AS provider_name,
+  pr.profile.data.specialty              AS provider_specialty,
+  site.key                               AS site_key,
+  site.site.data.name                    AS site_name,
+  a.reminder.data.sentAt                 AS reminder_sent_at,
+  a.followUpReminder.data.sentAt         AS follow_up_reminder_sent_at,
+  a.documentation.data.documentedAt      AS documented_at,
+  a.documentation.data.followUpRequested AS follow_up_requested,
+  a.documentation.data.followUpDate      AS follow_up_date,
   [nanoIdFromKey(p.key)] + [(pr)-[:practicesAt]->(b:building) | nanoIdFromKey(b.key)]
-                                     AS authz_anchors
+                                         AS authz_anchors
 `
 
 // providerAppointmentsReadSpec is the PROVIDER-anchored protected Postgres read
@@ -730,26 +731,26 @@ MATCH (a)-[:withProvider]->(pr:provider)
 OPTIONAL MATCH (a)-[:forPatient]->(p:patient)
 OPTIONAL MATCH (a)-[:atSite]->(site:building)
 RETURN
-  nanoIdFromKey(a.key)               AS appointment_id,
-  a.key                              AS entity_key,
-  a.schedule.data.startsAt           AS starts_at,
-  a.schedule.data.endsAt             AS ends_at,
-  a.schedule.data.reason             AS reason,
-  a.status.data.value                AS status,
-  a.status.data.note                 AS status_note,
-  p.key                              AS patient_key,
-  p.demographics.data.fullName       AS patient_name,
-  pr.key                             AS provider_key,
-  pr.profile.data.fullName           AS provider_name,
-  pr.profile.data.specialty          AS provider_specialty,
-  site.key                           AS site_key,
-  site.site.data.name                AS site_name,
-  a.reminder.data.sentAt             AS reminder_sent_at,
-  a.followUpReminder.data.sentAt     AS follow_up_reminder_sent_at,
-  a.encounter.data.documentedAt      AS documented_at,
-  a.encounter.data.followUpRequested AS follow_up_requested,
-  a.encounter.data.followUpDate      AS follow_up_date,
-  [nanoIdFromKey(pr.key)]            AS authz_anchors
+  nanoIdFromKey(a.key)                   AS appointment_id,
+  a.key                                  AS entity_key,
+  a.schedule.data.startsAt               AS starts_at,
+  a.schedule.data.endsAt                 AS ends_at,
+  a.schedule.data.reason                 AS reason,
+  a.status.data.value                    AS status,
+  a.status.data.note                     AS status_note,
+  p.key                                  AS patient_key,
+  p.demographics.data.fullName           AS patient_name,
+  pr.key                                 AS provider_key,
+  pr.profile.data.fullName               AS provider_name,
+  pr.profile.data.specialty              AS provider_specialty,
+  site.key                               AS site_key,
+  site.site.data.name                    AS site_name,
+  a.reminder.data.sentAt                 AS reminder_sent_at,
+  a.followUpReminder.data.sentAt         AS follow_up_reminder_sent_at,
+  a.documentation.data.documentedAt      AS documented_at,
+  a.documentation.data.followUpRequested AS follow_up_requested,
+  a.documentation.data.followUpDate      AS follow_up_date,
+  [nanoIdFromKey(pr.key)]                AS authz_anchors
 `
 
 // clinicPatientReadGrantsSpec is the cap-read.clinic.patient GrantTable

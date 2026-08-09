@@ -2,7 +2,7 @@ package clinicreminders
 
 // Rule-engine proof of the followUpReminders convergence lens, driven through the
 // `full` engine against an embedded NATS Core/Adjacency KV — the appointment-reminder
-// mirror keyed on the documented visit's .encounter.followUpDate instead of
+// mirror keyed on the documented visit's .documentation.followUpDate instead of
 // .schedule.remindAt. With an INJECTED $now it pins the time-gated predicate:
 //
 //   - PENDING (followUpDate > $now): not violating; freshUntil = followUpDate.
@@ -38,10 +38,11 @@ func (f *remFixture) projectFollowUpAt(t *testing.T, apptName, now string) []rul
 	return out
 }
 
-// mkFollowUpAppt seeds one documented appointment with a .status + a .encounter
-// aspect ({followUpRequested, followUpDate?, documentedAt}), optionally a
-// .followUpReminder {sentAt, remindedFor}. encounterPresent=false seeds NO encounter
-// (an appointment whose visit was never documented). The anchor is named so
+// mkFollowUpAppt seeds one documented appointment with a .status + a
+// .documentation aspect ({followUpRequested, followUpDate?, documentedAt}) plus
+// its sibling sensitive .encounter aspect, optionally a .followUpReminder
+// {sentAt, remindedFor}. encounterPresent=false seeds NEITHER aspect (an
+// appointment whose visit was never documented). The anchor is named so
 // projectFollowUpAt targets it. A .schedule is seeded too (a real appointment always
 // has one) but the follow-up gate does not read it.
 func (f *remFixture) mkFollowUpAppt(t *testing.T, name, status string, encounterPresent, followUpRequested bool, followUpDate, sentAt, remindedFor string) {
@@ -51,11 +52,12 @@ func (f *remFixture) mkFollowUpAppt(t *testing.T, name, status string, encounter
 		"startsAt": "2026-06-20T15:00:00Z", "endsAt": "2026-06-20T15:30:00Z", "remindAt": "2026-06-19T15:00:00Z"})
 	f.aspect(t, name, "status", "appointmentStatus", map[string]any{"value": status})
 	if encounterPresent {
-		enc := map[string]any{"summary": "visit note", "documentedAt": "2026-06-20T16:00:00Z", "followUpRequested": followUpRequested}
+		f.aspect(t, name, "encounter", "appointmentEncounter", map[string]any{"summary": "visit note"})
+		doc := map[string]any{"documentedAt": "2026-06-20T16:00:00Z", "followUpRequested": followUpRequested}
 		if followUpRequested && followUpDate != "" {
-			enc["followUpDate"] = followUpDate
+			doc["followUpDate"] = followUpDate
 		}
-		f.aspect(t, name, "encounter", "appointmentEncounter", enc)
+		f.aspect(t, name, "documentation", "appointmentDocumentation", doc)
 	}
 	if sentAt != "" {
 		marker := map[string]any{"sentAt": sentAt}
@@ -180,8 +182,8 @@ func TestFollowUpReminders_NoFollowUp(t *testing.T) {
 }
 
 // TestFollowUpReminders_NoEncounter — an appointment whose visit was never documented
-// (no .encounter aspect): the followUpDate terms resolve null → never violating;
-// freshUntil null. One row per anchor is still produced.
+// (neither .encounter nor .documentation): the followUpDate terms resolve null →
+// never violating; freshUntil null. One row per anchor is still produced.
 func TestFollowUpReminders_NoEncounter(t *testing.T) {
 	if testing.Short() {
 		t.Skip("requires NATS")
@@ -195,6 +197,32 @@ func TestFollowUpReminders_NoEncounter(t *testing.T) {
 	require.Equal(t, false, v["missing_followup_reminder"], "no encounter → no followUpDate → never reminded")
 	require.Equal(t, false, v["violating"])
 	require.Nil(t, v["freshUntil"])
+}
+
+// TestFollowUpReminders_EncounterWithoutDocumentation pins the half-documented
+// appointment at this package's own consumer: one carrying the SENSITIVE
+// .encounter aspect but no .documentation sibling resolves every
+// a.documentation.data.* reference to null, so it is never violating and arms no
+// @at timer. A corpus predating the sibling aspect holds exactly that shape, and
+// reminding off it would fire against a deadline the lens cannot see. Distinct
+// from TestFollowUpReminders_NoEncounter, which has NEITHER aspect.
+func TestFollowUpReminders_EncounterWithoutDocumentation(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newRemFixture(t)
+	f.vtx(t, "appt", "appointment")
+	f.aspect(t, "appt", "schedule", "appointmentSchedule", map[string]any{
+		"startsAt": "2026-06-20T15:00:00Z", "endsAt": "2026-06-20T15:30:00Z", "remindAt": "2026-06-19T15:00:00Z"})
+	f.aspect(t, "appt", "status", "appointmentStatus", map[string]any{"value": "completed"})
+	f.aspect(t, "appt", "encounter", "appointmentEncounter", map[string]any{"summary": "visit note, no documentation aspect yet"})
+
+	v := f.projectFollowUpAt(t, "appt", remNow)[0].Values
+	require.Equal(t, false, v["missing_followup_reminder"], "no .documentation aspect → followUpRequested/followUpDate null → never due")
+	require.Equal(t, false, v["violating"])
+	require.Nil(t, v["freshUntil"])
+	require.Nil(t, v["followUpDate"])
+	require.Nil(t, v["followUpRequested"])
 }
 
 // TestFollowUpReminders_Cancelled — a follow-up due date has passed but the

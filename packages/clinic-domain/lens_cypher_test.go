@@ -171,11 +171,12 @@ func TestClinicAppointments_StatusTransitionProjects(t *testing.T) {
 
 // TestClinicAppointments_ProjectsEncounterOperationalSignalsOnly proves the
 // clinical-record PHI discipline at the projection layer: an appointment with a
-// documented visit (.encounter carrying RAW clinical content AND operational
-// signals) projects ONLY the operational, non-PHI signals (documentedAt /
-// followUpRequested / followUpDate) — and NEVER the raw clinical content (summary /
-// assessment / plan), the deferred Vault plane's domain. This is the .demographics
-// name-only discipline applied to .encounter.
+// documented visit (the sensitive .encounter aspect carrying RAW clinical content,
+// the non-sensitive .documentation aspect carrying the operational signals)
+// projects ONLY the operational, non-PHI signals (documentedAt / followUpRequested
+// / followUpDate) — and NEVER the raw clinical content (summary / assessment /
+// plan), which is SENSITIVE and custodied on the clinicalRecord retention class.
+// This is the .demographics name-only discipline applied to the split.
 func TestClinicAppointments_ProjectsEncounterOperationalSignalsOnly(t *testing.T) {
 	if testing.Short() {
 		t.Skip("requires NATS")
@@ -188,11 +189,14 @@ func TestClinicAppointments_ProjectsEncounterOperationalSignalsOnly(t *testing.T
 	f.aspect(t, "drsam", "profile", "providerProfile", map[string]any{"fullName": "Dr. Sam Okafor", "specialty": "Cardiology"})
 	f.aspect(t, "appt", "schedule", "appointmentSchedule", map[string]any{"startsAt": "2026-07-01T15:00:00Z", "endsAt": "2026-07-01T15:30:00Z"})
 	f.aspect(t, "appt", "status", "appointmentStatus", map[string]any{"value": "completed"})
-	// A documented visit: RAW clinical PHI alongside the operational signals.
+	// A documented visit: RAW clinical PHI on the sensitive .encounter aspect,
+	// operational signals on the sibling .documentation aspect.
 	f.aspect(t, "appt", "encounter", "appointmentEncounter", map[string]any{
-		"summary":           "Patient seen for annual checkup; vitals normal.",
-		"assessment":        "Essential hypertension, well-controlled.",
-		"plan":              "Continue medication; recheck in 6 months.",
+		"summary":    "Patient seen for annual checkup; vitals normal.",
+		"assessment": "Essential hypertension, well-controlled.",
+		"plan":       "Continue medication; recheck in 6 months.",
+	})
+	f.aspect(t, "appt", "documentation", "appointmentDocumentation", map[string]any{
 		"documentedAt":      "2026-07-01T15:30:00Z",
 		"followUpRequested": true,
 		"followUpDate":      "2027-01-15T15:00:00Z",
@@ -222,8 +226,9 @@ func TestClinicAppointments_ProjectsEncounterOperationalSignalsOnly(t *testing.T
 }
 
 // TestClinicAppointments_UndocumentedVisitNullEncounter proves an appointment with
-// no .encounter aspect projects null operational columns (null-safe by key-shape) —
-// the undocumented-visit baseline.
+// no .documentation aspect (and no .encounter — the visit was never documented at
+// all) projects null operational columns (null-safe by key-shape) — the
+// undocumented-visit baseline.
 func TestClinicAppointments_UndocumentedVisitNullEncounter(t *testing.T) {
 	if testing.Short() {
 		t.Skip("requires NATS")
@@ -241,9 +246,42 @@ func TestClinicAppointments_UndocumentedVisitNullEncounter(t *testing.T) {
 
 	rows := f.project(t, clinicAppointmentsSpec)
 	require.Len(t, rows, 1)
-	require.Nil(t, rows[0].Values["documentedAt"], "no .encounter aspect → null documentedAt (null-safe)")
-	require.Nil(t, rows[0].Values["followUpRequested"], "no .encounter aspect → null followUpRequested")
-	require.Nil(t, rows[0].Values["followUpDate"], "no .encounter aspect → null followUpDate")
+	require.Nil(t, rows[0].Values["documentedAt"], "no .documentation aspect → null documentedAt (null-safe)")
+	require.Nil(t, rows[0].Values["followUpRequested"], "no .documentation aspect → null followUpRequested")
+	require.Nil(t, rows[0].Values["followUpDate"], "no .documentation aspect → null followUpDate")
+}
+
+// TestClinicAppointments_EncounterWithoutDocumentationProjectsNullOperationalColumns
+// pins the half-documented appointment: one carrying the SENSITIVE .encounter
+// aspect but no .documentation sibling still projects a row, with null
+// operational columns rather than a failed row. The two aspects are written
+// together by RecordEncounter, so nothing produces this shape today — but a
+// corpus predating the sibling aspect holds exactly it, and the lens must read
+// such an appointment as undocumented rather than dropping it from the grid.
+func TestClinicAppointments_EncounterWithoutDocumentationProjectsNullOperationalColumns(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newLensFixture(t)
+	f.vtx(t, "appt", "appointment")
+	f.vtx(t, "alice", "patient")
+	f.vtx(t, "drsam", "provider")
+	f.aspect(t, "alice", "demographics", "patientDemographics", map[string]any{"fullName": "Alice Rivera"})
+	f.aspect(t, "drsam", "profile", "providerProfile", map[string]any{"fullName": "Dr. Sam Okafor", "specialty": "Cardiology"})
+	f.aspect(t, "appt", "schedule", "appointmentSchedule", map[string]any{"startsAt": "2026-07-01T15:00:00Z", "endsAt": "2026-07-01T15:30:00Z"})
+	f.aspect(t, "appt", "status", "appointmentStatus", map[string]any{"value": "completed"})
+	// .encounter present, .documentation absent — the pre-split-corpus shape.
+	f.aspect(t, "appt", "encounter", "appointmentEncounter", map[string]any{
+		"summary": "Patient seen for annual checkup; vitals normal.",
+	})
+	f.edge(t, "forPatient", "appt", "alice")
+	f.edge(t, "withProvider", "appt", "drsam")
+
+	rows := f.project(t, clinicAppointmentsSpec)
+	require.Len(t, rows, 1, "an appointment with .encounter but no .documentation still projects exactly one row")
+	require.Nil(t, rows[0].Values["documentedAt"], "no .documentation aspect → null documentedAt, even though .encounter exists")
+	require.Nil(t, rows[0].Values["followUpRequested"], "no .documentation aspect → null followUpRequested")
+	require.Nil(t, rows[0].Values["followUpDate"], "no .documentation aspect → null followUpDate")
 }
 
 // TestClinicPatients_RostersKeysOnly proves the open patient roster projects one row

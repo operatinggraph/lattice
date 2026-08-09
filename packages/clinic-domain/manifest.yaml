@@ -1,11 +1,12 @@
 name: clinic-domain
-version: 0.28.19
+version: 0.29.0
 depends:
   - location-domain
 description: |
   Clinic bookable domain. Owns three vertex types —
   patient, provider, appointment — with their aspects (.demographics, .profile,
-  .schedule, .status, .encounter, provider/patient .slot<cellcode> claims) and
+  .schedule, .status, .encounter, .documentation, provider/patient
+  .slot<cellcode> claims) and
   links (forPatient, withProvider, identifiedBy), written by the
   Create*/Reschedule/SetAppointmentStatus/RecordEncounter/Tombstone* ops.
   CreatePatient's optional identityKey wires identifiedBy to a pre-minted
@@ -19,9 +20,12 @@ description: |
   Secure-Lens columns (Vault Fire 5): decrypted at projection from the linked
   identity for the workplace-anchored and wildcard staff audiences, null for a
   patient with no identifiedBy link or a shredded identity.
-  RecordEncounter captures the post-visit clinical record (.encounter — RAW PHI
-  {summary, assessment, plan} never projected, plus operational documentation /
-  follow-up signals the lens does project). Six projection lenses
+  RecordEncounter captures the post-visit clinical record split across two
+  sibling aspects along the sensitivity boundary: .encounter (RAW PHI
+  {summary, assessment, plan}, SENSITIVE, DEK custodied on the package's own
+  clinicalRecord retention class rather than the patient's identity, never
+  projected) and .documentation (the operational documentation / follow-up
+  signals the lens does project). Six projection lenses
   (clinicAppointments, clinicProviders, clinicPatients, clinicAppointmentsRead,
   providerAppointmentsRead, clinicPatientsRead) are the P5 read models a clinic FE
   reads. clinicAppointmentsRead, providerAppointmentsRead, and clinicPatientsRead
@@ -48,9 +52,14 @@ description: |
   the provider's opt-in .hours availability windows (SetProviderHours).
   @every recurring schedules are the separate deferred item
   this vertical forces — out of scope here. The Vault plane it forces is fully
-  wired for contact (identifiedBy link + Secure-Lens display); the clinical
-  record's (.encounter raw PHI) right-to-be-forgotten + display remain
-  deferred.
+  wired for contact (identifiedBy link + Secure-Lens display) and, for the
+  clinical record, for custody: .encounter is SENSITIVE, its DEK held by the
+  package's own clinicalRecord retention class rather than the patient's
+  identity, so a patient's ShredIdentityKey leaves the record readable and the
+  operator-driven ShredRetentionClassKey is what destroys it. Two things are
+  still open: that survival is not yet pseudonymous (.demographics' plaintext
+  fullName outlives the shred), and clinical-note DISPLAY to a clinician has no
+  read model.
   CreateAppointment ALSO grants consumer scope=self (real-actor-write-auth-e2e
   idiom, mirroring lease-signing's CreateLeaseApplication precedent): a real
   patient books their own appointment through the Gateway. Step 3 authorizes
@@ -117,6 +126,8 @@ declares:
     - canonicalName: patientSlotClaim
       class: meta.ddl.aspectType
     - canonicalName: appointmentEncounter
+      class: meta.ddl.aspectType
+    - canonicalName: appointmentDocumentation
       class: meta.ddl.aspectType
     - canonicalName: identityPatientClaim
       class: meta.ddl.aspectType

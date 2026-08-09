@@ -36,13 +36,14 @@ const (
 	providerVertexDDL    = "provider"
 	appointmentVertexDDL = "appointment"
 
-	demographicsAspectDDL = "patientDemographics"
-	profileAspectDDL      = "providerProfile"
-	scheduleAspectDDL     = "appointmentSchedule"
-	statusAspectDDL       = "appointmentStatus"
-	hoursAspectDDL        = "providerHours"
-	timeOffAspectDDL      = "providerTimeOff"
-	encounterAspectDDL    = "appointmentEncounter"
+	demographicsAspectDDL  = "patientDemographics"
+	profileAspectDDL       = "providerProfile"
+	scheduleAspectDDL      = "appointmentSchedule"
+	statusAspectDDL        = "appointmentStatus"
+	hoursAspectDDL         = "providerHours"
+	timeOffAspectDDL       = "providerTimeOff"
+	encounterAspectDDL     = "appointmentEncounter"
+	documentationAspectDDL = "appointmentDocumentation"
 
 	providerSlotClaimAspectDDL = "providerSlotClaim"
 	patientSlotClaimAspectDDL  = "patientSlotClaim"
@@ -50,6 +51,12 @@ const (
 	identityPatientClaimAspectDDL  = "identityPatientClaim"
 	providerIdentityClaimAspectDDL = "providerIdentityClaim"
 	identityProviderClaimAspectDDL = "identityProviderClaim"
+
+	// clinicalRecordRetentionClass is the canonicalName of the retention-class key
+	// holder this package declares (see RetentionClasses). The .encounter aspect's
+	// Custody names it — the holder the clinical record's DEK is custodied on,
+	// never the patient's own identity.
+	clinicalRecordRetentionClass = "clinicalRecord"
 )
 
 // DDLs returns the package's seven DDL meta-vertex declarations:
@@ -107,6 +114,7 @@ func DDLs() []pkgmgr.DDLSpec {
 		providerSlotClaimAspectTypeDDL(),
 		patientSlotClaimAspectTypeDDL(),
 		encounterAspectTypeDDL(),
+		documentationAspectTypeDDL(),
 		identityPatientClaimAspectTypeDDL(),
 		clinicSiteProfileAspectTypeDDL(),
 		providerIdentityClaimAspectTypeDDL(),
@@ -414,11 +422,11 @@ func appointmentVertexTypeDDL() pkgmgr.DDLSpec {
 			"The terminal statuses {cancelled, completed, noShow} are FINAL: " +
 			"re-setting the same terminal value is idempotent, but changing a terminal status to a different one is " +
 			"rejected (TerminalStatus) so a finished / cancelled visit cannot silently revert; non-terminal statuses " +
-			"move freely. RecordEncounter upserts the .encounter aspect — the post-visit clinical " +
-			"record {summary, assessment?, plan?} (raw clinical content, captured plaintext-for-now under the trusted-tool " +
-			"posture, the .demographics discipline — the deferred Vault plane owns its at-rest encryption + display; NEVER " +
-			"projected into a read model) plus the OPERATIONAL, non-PHI signals {documentedAt (derived from op.submittedAt), " +
-			"followUpRequested, followUpDate?} that the clinicAppointments lens DOES project (presence-of-documentation + " +
+			"move freely. RecordEncounter upserts two sibling aspects along the sensitivity boundary: .encounter — the " +
+			"raw clinical record {summary, assessment?, plan?}, SENSITIVE, its DEK custodied on the clinicalRecord " +
+			"retention class (never on the patient's identity), NEVER projected into a read model — and .documentation " +
+			"— the OPERATIONAL, non-PHI signals {documentedAt (derived from op.submittedAt), followUpRequested, " +
+			"followUpDate?} that the clinicAppointments lens DOES project (presence-of-documentation + " +
 			"follow-up scheduling, never the clinical content). TombstoneAppointment soft-deletes the appointment. The " +
 			"clinic's booking grid is a mandatory 15-minute cadence (:00/:15/:30/:45; SlotGridViolation if startsAt/endsAt " +
 			"misalign, AppointmentTooLong past 24h/96 cells): CreateAppointment AND RescheduleAppointment discretize " +
@@ -486,11 +494,11 @@ func appointmentVertexTypeDDL() pkgmgr.DDLSpec {
 			`"status":{"type":"string","enum":["scheduled","confirmed","checkedIn","completed","cancelled","noShow"],"description":"New status (SetAppointmentStatus; required). Transitioning TO a terminal value (completed/cancelled/noShow) for the first time also requires provider + patient (to release the held slot-claim cells; omitted on a non-terminal transition or an idempotent same-value re-set)."},` +
 			`"note":{"type":"string","description":"Optional audit note for the transition, e.g. a cancel / no-show reason (SetAppointmentStatus; optional). Stored on .status, distinct from the .schedule visit reason; an omitted note carries none."},` +
 			`"noShowFeeCents":{"type":"number","description":"Optional no-show fee in integer cents, only meaningful when status is noShow (SetAppointmentStatus; optional, must be > 0 when supplied). Defaults to 2500 when omitted. Stored on .status; clinic-ledger's clinicNoShowSettlement lens reads it to post a DebitAccount charge against the patient's ledger account."},` +
-			`"summary":{"type":"string","description":"Visit summary / clinical note (RecordEncounter; required). RAW clinical content — captured plaintext-for-now (the .demographics PHI discipline), NEVER projected into a read model (the deferred Vault plane owns display)."},` +
-			`"assessment":{"type":"string","description":"Clinical assessment / diagnosis (RecordEncounter; optional). RAW PHI — captured, never projected."},` +
-			`"plan":{"type":"string","description":"Treatment plan / orders (RecordEncounter; optional). RAW PHI — captured, never projected. The clinical reason for any follow-up belongs here, not in the operational followUp fields."},` +
-			`"followUpRequested":{"type":"boolean","description":"Whether the visit calls for a follow-up (RecordEncounter; optional, default false). OPERATIONAL, non-PHI — projected (the existence of a follow-up, like an appointment time)."},` +
-			`"followUpDate":{"type":"string","description":"Suggested follow-up date, RFC3339 / date (RecordEncounter; optional). OPERATIONAL, non-PHI — projected only when followUpRequested is true."}},` +
+			`"summary":{"type":"string","description":"Visit summary / clinical note (RecordEncounter; required). RAW clinical content, stored SENSITIVE on .encounter — DEK custodied on the clinicalRecord retention class, NEVER projected into a read model."},` +
+			`"assessment":{"type":"string","description":"Clinical assessment / diagnosis (RecordEncounter; optional). RAW PHI, stored SENSITIVE on .encounter — captured, never projected."},` +
+			`"plan":{"type":"string","description":"Treatment plan / orders (RecordEncounter; optional). RAW PHI, stored SENSITIVE on .encounter — captured, never projected. The clinical reason for any follow-up belongs here, not in the operational followUp fields."},` +
+			`"followUpRequested":{"type":"boolean","description":"Whether the visit calls for a follow-up (RecordEncounter; optional, default false). OPERATIONAL, non-PHI — stored on .documentation, projected (the existence of a follow-up, like an appointment time)."},` +
+			`"followUpDate":{"type":"string","description":"Suggested follow-up date, RFC3339 / date (RecordEncounter; optional). OPERATIONAL, non-PHI — stored on .documentation, projected only when followUpRequested is true."}},` +
 			`"required":[]}`,
 		OutputSchema: `{"type":"object","properties":` +
 			`{"primaryKey":{"type":"string","description":"vtx.appointment.<NanoID> the operation wrote."}}}`,
@@ -507,11 +515,11 @@ func appointmentVertexTypeDDL() pkgmgr.DDLSpec {
 			"status":            "New appointment status, one of {scheduled, confirmed, checkedIn, completed, cancelled, noShow} (SetAppointmentStatus; required). The first transition to a terminal value also requires provider + patient.",
 			"note":              "Optional audit note recorded with a SetAppointmentStatus transition (e.g. a cancel / no-show reason). Stored on the .status aspect, distinct from the .schedule visit reason; omitted → no note.",
 			"noShowFeeCents":    "Optional no-show fee in integer cents (SetAppointmentStatus, only meaningful when status is noShow; must be > 0 when supplied, defaults to 2500 when omitted). Stored on the .status aspect; read by clinic-ledger's clinicNoShowSettlement lens to post a DebitAccount charge.",
-			"summary":           "Required visit summary / clinical note (RecordEncounter). RAW clinical content — captured plaintext-for-now under the trusted-tool posture (the .demographics PHI discipline) and NEVER projected into a read model; the deferred Vault plane owns its at-rest encryption + display.",
-			"assessment":        "Optional clinical assessment / diagnosis (RecordEncounter). RAW PHI — captured, never projected.",
-			"plan":              "Optional treatment plan / orders (RecordEncounter). RAW PHI — captured, never projected. The clinical reason for a follow-up lives here, not in the operational followUp fields.",
-			"followUpRequested": "Optional boolean (default false): does this visit need a follow-up (RecordEncounter)? OPERATIONAL, non-PHI — projected into clinicAppointments (the existence of a follow-up, like an appointment time, is not clinical content).",
-			"followUpDate":      "Optional suggested follow-up date (RFC3339 / date) (RecordEncounter). OPERATIONAL, non-PHI — projected only when followUpRequested is true.",
+			"summary":           "Required visit summary / clinical note (RecordEncounter). RAW clinical content stored SENSITIVE on .encounter — DEK custodied on the clinicalRecord retention class, NEVER projected into a read model.",
+			"assessment":        "Optional clinical assessment / diagnosis (RecordEncounter). RAW PHI stored SENSITIVE on .encounter — captured, never projected.",
+			"plan":              "Optional treatment plan / orders (RecordEncounter). RAW PHI stored SENSITIVE on .encounter — captured, never projected. The clinical reason for a follow-up lives here, not in the operational followUp fields.",
+			"followUpRequested": "Optional boolean (default false): does this visit need a follow-up (RecordEncounter)? OPERATIONAL, non-PHI — stored on .documentation, projected into clinicAppointments (the existence of a follow-up, like an appointment time, is not clinical content).",
+			"followUpDate":      "Optional suggested follow-up date (RFC3339 / date) (RecordEncounter). OPERATIONAL, non-PHI — stored on .documentation, projected only when followUpRequested is true.",
 		},
 		Examples: []pkgmgr.ExampleSpec{
 			{
@@ -603,10 +611,10 @@ func appointmentVertexTypeDDL() pkgmgr.DDLSpec {
 					"followUpRequested": true,
 					"followUpDate":      "2027-01-15T15:00:00Z",
 				},
-				ExpectedOutcome: "Validates the appointment is alive + class=appointment, then upserts the .encounter aspect — the " +
-					"RAW clinical record {summary, assessment?, plan?} captured plaintext-for-now (NEVER projected, the .demographics " +
-					"PHI discipline) plus the OPERATIONAL signals {documentedAt (= op.submittedAt, canonical UTC), followUpRequested, " +
-					"followUpDate?} that the clinicAppointments lens DOES project. Unconditioned upsert (re-runnable — a provider can " +
+				ExpectedOutcome: "Validates the appointment is alive + class=appointment, then upserts two sibling aspects: .encounter — " +
+					"the RAW clinical record {summary, assessment?, plan?}, SENSITIVE, DEK custodied on the clinicalRecord retention " +
+					"class, NEVER projected — and .documentation — the OPERATIONAL signals {documentedAt (= op.submittedAt, canonical " +
+					"UTC), followUpRequested, followUpDate?} that the clinicAppointments lens DOES project. Unconditioned upsert (re-runnable — a provider can " +
 					"correct the note). Returns primaryKey.",
 			},
 		},
@@ -904,50 +912,98 @@ func patientSlotClaimAspectTypeDDL() pkgmgr.DDLSpec {
 }
 
 // encounterAspectTypeDDL declares the .encounter aspect (class appointmentEncounter)
-// — the post-visit clinical record, the step-6 write gate for RecordEncounter
-// (whose appointment vertexType DDL owns the script). Declaration-only.
+// — the raw clinical record, the step-6 write gate for RecordEncounter (whose
+// appointment vertexType DDL owns the script). Declaration-only.
 //
-// NON-sensitive in the step-6 sense (it attaches to a vtx.appointment, not an
-// identity — sensitiveAspectScope forbids a sensitive aspect on a non-identity
-// vertex anyway), BUT it carries RAW CLINICAL PHI (summary / assessment / plan) and
-// is therefore stored plaintext-for-now ONLY under the trusted-tool posture, the
-// SAME discipline as patient .demographics: the deferred Vault plane owns its
-// at-rest encryption + right-to-be-forgotten + display. The clinic vertical is the
-// Vault forcing function — clinical-record display is the validating flow that
-// pulls Vault into existence. The clinicAppointments lens DELIBERATELY projects
-// ONLY the operational, non-PHI fields (documentedAt / followUpRequested /
-// followUpDate) and NEVER the clinical content — the .demographics name-only
-// precedent applied to the encounter.
+// SENSITIVE, custodied on the clinicalRecord retention class (RetentionClasses)
+// rather than on the patient's own identity: the record's retention obligation
+// outlives any one patient's erasure request, so its DEK lives on a holder the
+// patient's ShredIdentityKey cannot reach — after that shred the record is still
+// readable, pseudonymized, its link to the now-unrecoverable identity intact but
+// resolving to nothing (retention-class-key-custody-design.md §6.4). Step 6.5
+// encrypts the WHOLE aspect data map, which is why the operational post-visit
+// signals (documentedAt / followUpRequested / followUpDate) live on the sibling
+// .documentation aspect instead of here — a non-sensitive field sharing this
+// aspect's data would be encrypted along with the PHI and unreadable to the
+// plain lenses that need it (clinicAppointments et al.). This aspect carries
+// ONLY the clinical content; it is never projected by any lens.
 func encounterAspectTypeDDL() pkgmgr.DDLSpec {
 	return pkgmgr.DDLSpec{
 		CanonicalName:     encounterAspectDDL,
 		Class:             "meta.ddl.aspectType",
 		PermittedCommands: []string{"RecordEncounter"},
+		Sensitive:         true,
+		Custody:           pkgmgr.CustodySpec{Kind: pkgmgr.CustodyKindRetentionClass, RetentionClass: clinicalRecordRetentionClass},
 		Description: "Appointment encounter aspect (clinic). Stored as vtx.appointment.<NanoID>.encounter (class " +
-			"appointmentEncounter) = {summary, assessment?, plan?, documentedAt, followUpRequested, followUpDate?}. The " +
-			"post-visit clinical record, written by RecordEncounter (whose appointment vertexType DDL owns the script). " +
-			"summary / assessment / plan are RAW clinical PHI — captured plaintext-for-now under the trusted-tool posture " +
-			"(the .demographics discipline) and NEVER projected into a read model (the deferred Vault plane owns display). " +
-			"documentedAt / followUpRequested / followUpDate are OPERATIONAL, non-PHI signals the clinicAppointments lens " +
-			"DOES project (documentation-presence + follow-up scheduling). Declaration-only: no op handler.",
+			"appointmentEncounter) = {summary, assessment?, plan?} — the raw clinical record, written by RecordEncounter " +
+			"(whose appointment vertexType DDL owns the script). SENSITIVE: its DEK is custodied on the clinicalRecord " +
+			"retention-class holder (RetentionClasses), not on the patient's identity — the record survives " +
+			"ShredIdentityKey on its patient as a pseudonymized retained record, rather than becoming unrecoverable " +
+			"alongside the patient's directly-identifying .name/.email/.phone. The operational, non-PHI post-visit " +
+			"signals (documentedAt / followUpRequested / followUpDate) live on the sibling .documentation aspect, which " +
+			"is what the clinicAppointments/clinicAppointmentsRead/providerAppointmentsRead lenses project — this " +
+			"aspect's content is never projected by any lens. Declaration-only: no op handler.",
 		Script: aspectDeclarationOnlyScript,
 		InputSchema: `{"type":"object","properties":` +
-			`{"summary":{"type":"string"},"assessment":{"type":"string"},"plan":{"type":"string"},` +
-			`"documentedAt":{"type":"string"},"followUpRequested":{"type":"boolean"},"followUpDate":{"type":"string"}}}`,
+			`{"summary":{"type":"string"},"assessment":{"type":"string"},"plan":{"type":"string"}}}`,
 		OutputSchema: `{"type":"object"}`,
 		FieldDescription: map[string]string{
-			"summary":           "Visit summary / clinical note (RAW PHI — never projected).",
-			"assessment":        "Clinical assessment / diagnosis (RAW PHI — never projected).",
-			"plan":              "Treatment plan / orders (RAW PHI — never projected).",
-			"documentedAt":      "When the visit was documented (RFC3339, = op.submittedAt). Operational — projected.",
+			"summary":    "Visit summary / clinical note (RAW PHI — never projected).",
+			"assessment": "Clinical assessment / diagnosis (RAW PHI — never projected).",
+			"plan":       "Treatment plan / orders (RAW PHI — never projected).",
+		},
+		Examples: []pkgmgr.ExampleSpec{
+			{
+				Name:            "appointment encounter aspect",
+				Payload:         map[string]any{"summary": "Annual checkup, vitals normal.", "assessment": "Essential hypertension, well-controlled."},
+				ExpectedOutcome: "Stored ENCRYPTED as vtx.appointment.<NanoID>.encounter, written by RecordEncounter, DEK custodied on the clinicalRecord retention-class holder. Never projected by any lens.",
+			},
+		},
+	}
+}
+
+// documentationAspectTypeDDL declares the .documentation aspect (class
+// appointmentDocumentation) — the operational, non-PHI half of the post-visit
+// record, the step-6 write gate for RecordEncounter (whose appointment
+// vertexType DDL owns the script, alongside the sensitive .encounter aspect).
+// Declaration-only.
+//
+// NON-sensitive, no custody: this aspect exists because step 6.5 encrypts an
+// entire aspect's data map, so a non-sensitive field sharing the sensitive
+// .encounter aspect's data would be encrypted along with the clinical content
+// and unreadable to every plain lens — the aspect-level sensitivity boundary
+// forces the split. clinicAppointments, clinicAppointmentsRead,
+// providerAppointmentsRead (clinic-domain) and followUpReminders
+// (clinic-reminders) all read this aspect for the presence-of-documentation and
+// follow-up-scheduling signals.
+func documentationAspectTypeDDL() pkgmgr.DDLSpec {
+	return pkgmgr.DDLSpec{
+		CanonicalName:     documentationAspectDDL,
+		Class:             "meta.ddl.aspectType",
+		PermittedCommands: []string{"RecordEncounter"},
+		Description: "Appointment documentation aspect (clinic). Stored as vtx.appointment.<NanoID>.documentation " +
+			"(class appointmentDocumentation) = {documentedAt, followUpRequested, followUpDate?} — the OPERATIONAL, " +
+			"non-PHI half of the post-visit record, written by RecordEncounter (whose appointment vertexType DDL owns " +
+			"the script) alongside the sensitive .encounter aspect. It is a SEPARATE aspect from .encounter because " +
+			"step 6.5 encrypts an entire aspect's data map: a non-sensitive field sharing the sensitive aspect's data " +
+			"would be encrypted along with the clinical content and unreadable to every plain lens, so the " +
+			"aspect-level sensitivity boundary forces this split. Consumed by clinicAppointments, " +
+			"clinicAppointmentsRead, and providerAppointmentsRead (clinic-domain's own lenses) and by " +
+			"clinic-reminders' followUpReminders. Declaration-only: no op handler.",
+		Script: aspectDeclarationOnlyScript,
+		InputSchema: `{"type":"object","properties":` +
+			`{"documentedAt":{"type":"string"},"followUpRequested":{"type":"boolean"},"followUpDate":{"type":"string"}}}`,
+		OutputSchema: `{"type":"object"}`,
+		FieldDescription: map[string]string{
+			"documentedAt":      "When the visit was documented (RFC3339, = op.submittedAt). Operational — projected. A non-null documentedAt IS the \"visit documented\" presence signal.",
 			"followUpRequested": "Whether a follow-up is needed. Operational — projected.",
 			"followUpDate":      "Suggested follow-up date (RFC3339 / date). Operational — projected when followUpRequested.",
 		},
 		Examples: []pkgmgr.ExampleSpec{
 			{
-				Name:            "appointment encounter aspect",
-				Payload:         map[string]any{"summary": "Annual checkup, vitals normal.", "documentedAt": "2026-07-01T15:30:00Z", "followUpRequested": false},
-				ExpectedOutcome: "Stored as vtx.appointment.<NanoID>.encounter; written by RecordEncounter. Clinical fields never projected.",
+				Name:            "appointment documentation aspect",
+				Payload:         map[string]any{"documentedAt": "2026-07-01T15:30:00Z", "followUpRequested": false},
+				ExpectedOutcome: "Stored as vtx.appointment.<NanoID>.documentation; written by RecordEncounter. Read by clinicAppointments and followUpReminders.",
 			},
 		},
 	}
@@ -2843,36 +2899,41 @@ def execute(state, op):
             if not actor_bound_to_appointment_provider(op.actor, standing_provider):
                 require_workplace(appointment_sites(appt_id), "cannot record encounter on appointment " + appt_key)
 
-        # RAW clinical record — PHI, captured plaintext-for-now (the .demographics
-        # discipline), NEVER projected (the lens projects only the operational fields
-        # below; the deferred Vault plane owns clinical-content display). summary is
-        # the required visit note; assessment (diagnosis) + plan (orders) optional.
+        # The post-visit record splits across two aspects along the sensitivity
+        # boundary: .encounter carries the raw clinical content (SENSITIVE, DEK
+        # custodied on the clinicalRecord retention class — step 6.5 encrypts its
+        # whole data map); .documentation carries the operational signals the
+        # plain lenses project, which would be unreadable if they shared the
+        # encrypted aspect. summary is the required visit note; assessment
+        # (diagnosis) + plan (orders) are optional and stay off .documentation
+        # entirely.
         summary = required_string(p, "summary")
-        enc = {"summary": summary,
-               # documentedAt is OPERATIONAL (when the visit was documented) — derived
-               # from op.submittedAt, normalized to canonical whole-second UTC
-               # (time.rfc3339_utc — pure, no clock read). A non-null documentedAt IS
-               # the "visit documented" presence signal the lens surfaces.
-               "documentedAt": time.rfc3339_utc(op.submittedAt),
-               # followUpRequested is OPERATIONAL, non-PHI (the existence of a
-               # follow-up, like an appointment time — projected). The clinical REASON
-               # for a follow-up lives in the plan field and is never projected.
-               "followUpRequested": optional_bool(p, "followUpRequested")}
+        enc = {"summary": summary}
         assessment = optional_string(p, "assessment")
         if assessment != None:
             enc["assessment"] = assessment
         plan = optional_string(p, "plan")
         if plan != None:
             enc["plan"] = plan
+        # documentedAt is OPERATIONAL (when the visit was documented) — derived
+        # from op.submittedAt, normalized to canonical whole-second UTC
+        # (time.rfc3339_utc — pure, no clock read). A non-null documentedAt IS
+        # the "visit documented" presence signal the lens surfaces.
+        doc = {"documentedAt": time.rfc3339_utc(op.submittedAt),
+               # followUpRequested is OPERATIONAL, non-PHI (the existence of a
+               # follow-up, like an appointment time — projected). The clinical REASON
+               # for a follow-up lives in .encounter's plan field and is never projected.
+               "followUpRequested": optional_bool(p, "followUpRequested")}
         follow_date = optional_string(p, "followUpDate")
-        if enc["followUpRequested"] and follow_date != None:
+        if doc["followUpRequested"] and follow_date != None:
             # Normalized to a full canonical-UTC RFC3339 instant so the optional
             # clinic-reminders follow-up reminder can arm an @at timer at it.
-            enc["followUpDate"] = normalize_follow_up_date(follow_date)
-        # Unconditioned upsert of the whole .encounter aspect (re-runnable — a
-        # provider can correct the note). The .schedule / .status aspects + the
-        # forPatient / withProvider links are untouched.
-        mutations = [make_aspect_upsert(appt_key, "encounter", "appointmentEncounter", enc)]
+            doc["followUpDate"] = normalize_follow_up_date(follow_date)
+        # Unconditioned upsert of both aspects (re-runnable — a provider can
+        # correct the note). The .schedule / .status aspects + the forPatient /
+        # withProvider links are untouched.
+        mutations = [make_aspect_upsert(appt_key, "encounter", "appointmentEncounter", enc),
+                     make_aspect_upsert(appt_key, "documentation", "appointmentDocumentation", doc)]
         events = [{"class": "clinic.appointmentEncounterRecorded",
                    "data": {"appointmentKey": appt_key}}]
         return {"mutations": mutations, "events": events,

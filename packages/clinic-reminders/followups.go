@@ -8,8 +8,8 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 // not silently fall through (the clinic vertical's forcing function for the
 // follow-ups worklist). It is the SAME convergence mechanism as the appointment
 // reminder — aspect + op + freshUntil-armed @at lens + directOp playbook — applied
-// to a different anchor field (the appointment's .encounter.followUpDate instead of
-// .schedule.remindAt). The appointment-reminder definitions live alongside in
+// to a different anchor field (the appointment's .documentation.followUpDate instead
+// of .schedule.remindAt). The appointment-reminder definitions live alongside in
 // ddls.go / lenses.go / targets.go; this file holds the follow-up-specific set.
 //
 //	vtx.appointment.<id>.followUpReminder = {sentAt, remindedFor}  (class followUpReminder — this package)
@@ -48,7 +48,7 @@ func followUpReminderDDLs() []pkgmgr.DDLSpec {
 
 // recordFollowUpReminderVertexTypeDDL owns the RecordFollowUpReminder script — the
 // directOp the followUpReminders playbook dispatches when missing_followup_reminder
-// opens (the encounter's followUpDate deadline passed). It writes
+// opens (the documentation's followUpDate deadline passed). It writes
 // vtx.appointment.<id>.followUpReminder = {sentAt, remindedFor} on a LIVE
 // appointment, read-guarded on [appointmentKey] (never marks a follow-up reminder on
 // an absent/tombstoned appointment), as an UNCONDITIONED update (idempotent in
@@ -63,7 +63,7 @@ func recordFollowUpReminderVertexTypeDDL() pkgmgr.DDLSpec {
 		Description: "Follow-up-reminder op handler (clinic-reminders). RecordFollowUpReminder{appointmentKey, remindedFor?} writes " +
 			"vtx.appointment.<NanoID>.followUpReminder = {sentAt, remindedFor} on a LIVE appointment (class followUpReminder), recording that " +
 			"the follow-up reminder fired for the followUpDate in remindedFor. It is the directOp the followUpReminders §10.8 playbook dispatches when the " +
-			"missing_followup_reminder gap opens (the documented visit's .encounter.followUpDate deadline passed); the playbook supplies remindedFor = row.followUpDate so a later " +
+			"missing_followup_reminder gap opens (the documented visit's .documentation.followUpDate deadline passed); the playbook supplies remindedFor = row.followUpDate so a later " +
 			"re-documentation that moves the followUpDate re-opens the gap and re-arms the reminder. Reads [appointmentKey] to " +
 			"liveness-guard the parent. The write is an UNCONDITIONED update (create-if-absent / overwrite-if-present), so it is idempotent in effect and re-run-safe " +
 			"under at-least-once. Submitted under Weaver's service-actor authority. Mints NO vertex of its own type (the " +
@@ -73,13 +73,13 @@ func recordFollowUpReminderVertexTypeDDL() pkgmgr.DDLSpec {
 		Script: recordFollowUpReminderScript,
 		InputSchema: `{"type":"object","properties":` +
 			`{"appointmentKey":{"type":"string","description":"vtx.appointment.<NanoID> whose documented visit requested the follow-up (required; validated alive). The caller MUST list it in ContextHint.Reads."},` +
-			`"remindedFor":{"type":"string","description":"The encounter followUpDate (RFC3339, canonical UTC) this reminder is for (optional; the playbook supplies row.followUpDate). Recorded so a re-documented follow-up date re-arms the reminder."}},` +
+			`"remindedFor":{"type":"string","description":"The documentation followUpDate (RFC3339, canonical UTC) this reminder is for (optional; the playbook supplies row.followUpDate). Recorded so a re-documented follow-up date re-arms the reminder."}},` +
 			`"required":["appointmentKey"]}`,
 		OutputSchema: `{"type":"object","properties":` +
 			`{"primaryKey":{"type":"string","description":"vtx.appointment.<NanoID> the follow-up reminder marker was written on."}}}`,
 		FieldDescription: map[string]string{
 			"appointmentKey": "Full vtx.appointment.<NanoID> key whose visit requested the follow-up. RecordFollowUpReminder validates it is alive and writes the .followUpReminder aspect on it. The caller MUST list this key in ContextHint.Reads.",
-			"remindedFor":    "The encounter followUpDate (RFC3339, canonical UTC) this reminder is for. The followUpReminders playbook supplies it as row.followUpDate; stored on .followUpReminder so the convergence gate (remindedFor <> followUpDate) re-opens — and re-arms the reminder — when a re-documentation moves the followUpDate.",
+			"remindedFor":    "The documentation followUpDate (RFC3339, canonical UTC) this reminder is for. The followUpReminders playbook supplies it as row.followUpDate; stored on .followUpReminder so the convergence gate (remindedFor <> followUpDate) re-opens — and re-arms the reminder — when a re-documentation moves the followUpDate.",
 		},
 		Examples: []pkgmgr.ExampleSpec{
 			{
@@ -107,16 +107,16 @@ func followUpReminderAspectTypeDDL() pkgmgr.DDLSpec {
 			"(class followUpReminder) = {sentAt, remindedFor}. Non-sensitive (a fire timestamp + the followUpDate it reminded for; the " +
 			"clinical reason lives in the unprojected .encounter.plan). Written ONLY by RecordFollowUpReminder (whose " +
 			"followUpReminderOp vertexType DDL owns the script); this aspect-type DDL is the step-6 write gate. " +
-			"Declaration-only: no op handler. remindedFor = the encounter followUpDate this reminder was for; the gate " +
+			"Declaration-only: no op handler. remindedFor = the documentation followUpDate this reminder was for; the gate " +
 			"(remindedFor = followUpDate) closing it converges, and a re-documented follow-up date re-opens it.",
 		Script: aspectDeclarationOnlyScript,
 		InputSchema: `{"type":"object","properties":` +
 			`{"sentAt":{"type":"string","description":"RFC3339 instant the follow-up reminder fired (the op's submittedAt, canonical UTC)."},` +
-			`"remindedFor":{"type":"string","description":"The encounter followUpDate (RFC3339, canonical UTC) this reminder was for."}}}`,
+			`"remindedFor":{"type":"string","description":"The documentation followUpDate (RFC3339, canonical UTC) this reminder was for."}}}`,
 		OutputSchema: `{"type":"object"}`,
 		FieldDescription: map[string]string{
 			"sentAt":      "RFC3339 instant the follow-up reminder fired (op.submittedAt, canonical UTC).",
-			"remindedFor": "The encounter followUpDate (RFC3339, canonical UTC) this reminder was for. remindedFor = the current followUpDate closes the convergence gap; a re-documented follow-up date re-opens it.",
+			"remindedFor": "The documentation followUpDate (RFC3339, canonical UTC) this reminder was for. remindedFor = the current followUpDate closes the convergence gap; a re-documented follow-up date re-opens it.",
 		},
 		Examples: []pkgmgr.ExampleSpec{
 			{
@@ -178,7 +178,7 @@ def execute(state, op):
 
         sent_at = time.rfc3339_utc(op.submittedAt)
 
-        # remindedFor: the encounter followUpDate this reminder is FOR (the
+        # remindedFor: the documentation followUpDate this reminder is FOR (the
         # followUpReminders playbook supplies it as Params{remindedFor:
         # row.followUpDate} — already canonical UTC from clinic-domain's normalize,
         # stored verbatim so the lens's remindedFor <> followUpDate compare is
@@ -220,7 +220,7 @@ def execute(state, op):
 `
 
 // followUpRemindersLens is the follow-up-reminder convergence lens — the
-// appointment-reminder mirror keyed on the appointment's .encounter.followUpDate.
+// appointment-reminder mirror keyed on the appointment's .documentation.followUpDate.
 func followUpRemindersLens() pkgmgr.LensSpec {
 	return pkgmgr.LensSpec{
 		CanonicalName:  "followUpReminders",
@@ -242,7 +242,7 @@ func followUpRemindersLens() pkgmgr.LensSpec {
 
 // followUpRemindersSpec is the one-row-per-appointment follow-up-reminder
 // convergence cypher. It mirrors appointmentRemindersSpec but keys on the
-// .encounter.followUpDate deadline instead of .schedule.remindAt, and fires AT the
+// .documentation.followUpDate deadline instead of .schedule.remindAt, and fires AT the
 // deadline (no lead offset — the visit is already past and followUpDate is the
 // provider's soft target).
 //
@@ -255,8 +255,8 @@ func followUpRemindersLens() pkgmgr.LensSpec {
 //     re-documentation moved followUpDate). A reminder sent for the current date
 //     reads remindedFor = followUpDate → false → converged.
 //   - followUpRequested = true — the documented visit asked for a follow-up. When no
-//     visit is documented, or no follow-up was requested, .encounter.followUpDate is
-//     absent → the followUpDate terms are null → not due.
+//     visit is documented, or no follow-up was requested, .documentation.followUpDate
+//     is absent → the followUpDate terms are null → not due.
 //   - followUpDate <= $now — the follow-up deadline has arrived/passed (lexical
 //     RFC3339 compare = chronological on canonical UTC — clinic-domain normalizes
 //     the captured date-only followUpDate to a full RFC3339 instant).
@@ -275,16 +275,16 @@ OPTIONAL MATCH (a)-[:withProvider]->(pr:provider)
 RETURN
   a.key AS actorKey,
   a.key AS entityKey,
-  a.encounter.data.followUpRequested AS followUpRequested,
-  a.encounter.data.followUpDate AS followUpDate,
+  a.documentation.data.followUpRequested AS followUpRequested,
+  a.documentation.data.followUpDate AS followUpDate,
   a.followUpReminder.data.sentAt AS followUpReminderSentAt,
   a.followUpReminder.data.remindedFor AS remindedFor,
   a.status.data.value AS status,
   p.key AS patientKey,
   pr.key AS providerKey,
-  CASE WHEN (a.followUpReminder.data.remindedFor <> a.encounter.data.followUpDate) AND (a.encounter.data.followUpRequested = true) AND (a.status.data.value <> 'cancelled') AND (a.encounter.data.followUpDate > $now) THEN a.encounter.data.followUpDate ELSE null END AS freshUntil,
-  ((a.followUpReminder.data.remindedFor <> a.encounter.data.followUpDate) AND (a.encounter.data.followUpRequested = true) AND (a.encounter.data.followUpDate <= $now) AND (a.status.data.value <> 'cancelled')) AS missing_followup_reminder,
-  ((a.followUpReminder.data.remindedFor <> a.encounter.data.followUpDate) AND (a.encounter.data.followUpRequested = true) AND (a.encounter.data.followUpDate <= $now) AND (a.status.data.value <> 'cancelled')) AS violating`
+  CASE WHEN (a.followUpReminder.data.remindedFor <> a.documentation.data.followUpDate) AND (a.documentation.data.followUpRequested = true) AND (a.status.data.value <> 'cancelled') AND (a.documentation.data.followUpDate > $now) THEN a.documentation.data.followUpDate ELSE null END AS freshUntil,
+  ((a.followUpReminder.data.remindedFor <> a.documentation.data.followUpDate) AND (a.documentation.data.followUpRequested = true) AND (a.documentation.data.followUpDate <= $now) AND (a.status.data.value <> 'cancelled')) AS missing_followup_reminder,
+  ((a.followUpReminder.data.remindedFor <> a.documentation.data.followUpDate) AND (a.documentation.data.followUpRequested = true) AND (a.documentation.data.followUpDate <= $now) AND (a.status.data.value <> 'cancelled')) AS violating`
 
 // followUpRemindersTarget returns the §10.8 playbook for the follow-up reminder: the
 // single missing_followup_reminder gap → directOp(RecordFollowUpReminder) over the

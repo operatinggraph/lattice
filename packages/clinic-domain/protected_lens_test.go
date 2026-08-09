@@ -42,7 +42,7 @@ func anchorStrings(t *testing.T, v any) []string {
 }
 
 // seedAppointment mints one appointment linked to a named patient + provider,
-// with the full display-column surface (schedule, status, encounter signals).
+// with the full display-column surface (schedule, status, documentation signals).
 func (f *lensFixture) seedAppointment(t *testing.T, apptName, patientName, providerName string) {
 	t.Helper()
 	f.vtx(t, apptName, "appointment")
@@ -52,7 +52,7 @@ func (f *lensFixture) seedAppointment(t *testing.T, apptName, patientName, provi
 	f.aspect(t, providerName, "profile", "providerProfile", map[string]any{"fullName": "Dr. Sam Okafor", "specialty": "Cardiology"})
 	f.aspect(t, apptName, "schedule", "appointmentSchedule", map[string]any{"startsAt": "2026-07-01T15:00:00Z", "endsAt": "2026-07-01T15:30:00Z", "reason": "Annual checkup"})
 	f.aspect(t, apptName, "status", "appointmentStatus", map[string]any{"value": "scheduled"})
-	f.aspect(t, apptName, "encounter", "appointmentEncounter", map[string]any{"documentedAt": "2026-07-01T15:35:00Z", "followUpRequested": true, "followUpDate": "2026-08-01"})
+	f.aspect(t, apptName, "documentation", "appointmentDocumentation", map[string]any{"documentedAt": "2026-07-01T15:35:00Z", "followUpRequested": true, "followUpDate": "2026-08-01"})
 	f.edge(t, "forPatient", apptName, patientName)
 	f.edge(t, "withProvider", apptName, providerName)
 }
@@ -192,6 +192,9 @@ func TestProviderAppointmentsRead_ProjectsProviderSelfAnchor(t *testing.T) {
 	require.Equal(t, "Alice Rivera", v["patient_name"])
 	require.Equal(t, providerKey, v["provider_key"])
 	require.Equal(t, "Dr. Sam Okafor", v["provider_name"])
+	require.Equal(t, "2026-07-01T15:35:00Z", v["documented_at"])
+	require.Equal(t, true, v["follow_up_requested"])
+	require.Equal(t, "2026-08-01", v["follow_up_date"])
 
 	// The headline: authz_anchors is exactly [the provider's bare NanoID], NOT
 	// the patient's — the anchor axis flips relative to clinicAppointmentsRead.
@@ -551,4 +554,40 @@ func TestPatientIdentityReadGrants(t *testing.T) {
 		require.Equal(t, f.ids["patCarol"], byActor[f.ids["carol"]], "each login anchors on its OWN patient")
 		require.Equal(t, f.ids["patDan"], byActor[f.ids["dan"]])
 	})
+}
+
+// TestProtectedAppointmentReads_EncounterWithoutDocumentationProjectsNull proves
+// the pre-split-corpus null-safety case on BOTH patient- and provider-anchored
+// protected read models: an appointment carrying the SENSITIVE .encounter aspect
+// but no .documentation aspect still projects a row (never fails), with null
+// documented_at / follow_up_requested / follow_up_date — the same discipline
+// clinicAppointments (the open lens) proves at the unprotected layer.
+func TestProtectedAppointmentReads_EncounterWithoutDocumentationProjectsNull(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newLensFixture(t)
+	f.vtx(t, "appt", "appointment")
+	f.vtx(t, "alice", "patient")
+	f.vtx(t, "drsam", "provider")
+	f.aspect(t, "alice", "demographics", "patientDemographics", map[string]any{"fullName": "Alice Rivera"})
+	f.aspect(t, "drsam", "profile", "providerProfile", map[string]any{"fullName": "Dr. Sam Okafor", "specialty": "Cardiology"})
+	f.aspect(t, "appt", "schedule", "appointmentSchedule", map[string]any{"startsAt": "2026-07-01T15:00:00Z", "endsAt": "2026-07-01T15:30:00Z"})
+	f.aspect(t, "appt", "status", "appointmentStatus", map[string]any{"value": "completed"})
+	// .encounter present, .documentation absent.
+	f.aspect(t, "appt", "encounter", "appointmentEncounter", map[string]any{"summary": "Patient seen for annual checkup."})
+	f.edge(t, "forPatient", "appt", "alice")
+	f.edge(t, "withProvider", "appt", "drsam")
+
+	for name, spec := range map[string]string{
+		"clinicAppointmentsReadSpec":   clinicAppointmentsReadSpec,
+		"providerAppointmentsReadSpec": providerAppointmentsReadSpec,
+	} {
+		rows := f.project(t, spec)
+		require.Len(t, rows, 1, "%s: an appointment with .encounter but no .documentation still projects exactly one row", name)
+		v := rows[0].Values
+		require.Nil(t, v["documented_at"], "%s: no .documentation aspect → null documented_at, even though .encounter exists", name)
+		require.Nil(t, v["follow_up_requested"], "%s: no .documentation aspect → null follow_up_requested", name)
+		require.Nil(t, v["follow_up_date"], "%s: no .documentation aspect → null follow_up_date", name)
+	}
 }

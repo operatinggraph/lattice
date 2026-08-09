@@ -233,12 +233,12 @@ func followUpReminderNotificationAspectTypeDDL() pkgmgr.DDLSpec {
 		Script: aspectDeclarationOnlyScript,
 		InputSchema: `{"type":"object","properties":` +
 			`{"status":{"type":"string","description":"The adapter's terminal verdict (completed|failed)."},` +
-			`"remindedFor":{"type":"string","description":"The encounter followUpDate this notification was for."},` +
+			`"remindedFor":{"type":"string","description":"The documentation followUpDate this notification was for."},` +
 			`"sentAt":{"type":"string","description":"RFC3339 instant the outcome was recorded, canonical UTC."}}}`,
 		OutputSchema: `{"type":"object"}`,
 		FieldDescription: map[string]string{
 			"status":      "The adapter's terminal verdict (completed|failed).",
-			"remindedFor": "The encounter followUpDate this notification was for.",
+			"remindedFor": "The documentation followUpDate this notification was for.",
 			"sentAt":      "RFC3339 instant the outcome was recorded (op.submittedAt, canonical UTC).",
 		},
 		Examples: []pkgmgr.ExampleSpec{

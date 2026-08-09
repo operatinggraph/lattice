@@ -31,6 +31,7 @@ import (
 	"github.com/operatinggraph/lattice/internal/processor"
 	"github.com/operatinggraph/lattice/internal/substrate"
 	"github.com/operatinggraph/lattice/internal/testutil"
+	"github.com/operatinggraph/lattice/internal/vault"
 	clinicdomain "github.com/operatinggraph/lattice/packages/clinic-domain"
 	locationdomain "github.com/operatinggraph/lattice/packages/location-domain"
 )
@@ -203,6 +204,50 @@ func clReadDoc(t *testing.T, ctx context.Context, conn *substrate.Conn, key stri
 		t.Fatalf("unmarshal %s: %v", key, err)
 	}
 	return doc
+}
+
+// clDecryptEncounter reads an appointment's SENSITIVE .encounter aspect and
+// decrypts it via the shared TestVault against the package's own clinicalRecord
+// retention-class holder — the DEK RecordEncounter's write custodies on (custody
+// kind retentionClass, never the patient's identity). Mirrors identity-domain's
+// readDecryptedAspectData, generalized to a non-identity holder key.
+func clDecryptEncounter(t *testing.T, ctx context.Context, conn *substrate.Conn, apptKey string) map[string]any {
+	t.Helper()
+	holderKey := pkgmgr.RetentionClassKey("clinic-domain", "clinicalRecord")
+
+	envEntry, err := conn.KVGet(ctx, testutil.HarnessCoreBucket, holderKey+".piiKey")
+	if err != nil {
+		t.Fatalf("KVGet %s: %v", holderKey+".piiKey", err)
+	}
+	var envDoc struct {
+		Data vault.Envelope `json:"data"`
+	}
+	if err := json.Unmarshal(envEntry.Value, &envDoc); err != nil {
+		t.Fatalf("unmarshal %s: %v", holderKey+".piiKey", err)
+	}
+
+	aspectKey := apptKey + ".encounter"
+	ctEntry, err := conn.KVGet(ctx, testutil.HarnessCoreBucket, aspectKey)
+	if err != nil {
+		t.Fatalf("KVGet %s: %v", aspectKey, err)
+	}
+	var ctDoc struct {
+		Data vault.Ciphertext `json:"data"`
+	}
+	if err := json.Unmarshal(ctEntry.Value, &ctDoc); err != nil {
+		t.Fatalf("unmarshal %s: %v", aspectKey, err)
+	}
+
+	v := testutil.TestVault(t)
+	plaintext, err := v.Decrypt(ctx, holderKey, envDoc.Data, ctDoc.Data)
+	if err != nil {
+		t.Fatalf("decrypt %s: %v", aspectKey, err)
+	}
+	var value map[string]any
+	if err := json.Unmarshal(plaintext, &value); err != nil {
+		t.Fatalf("unmarshal decrypted %s: %v", aspectKey, err)
+	}
+	return value
 }
 
 func clMissing(t *testing.T, ctx context.Context, conn *substrate.Conn, key string) bool {
@@ -872,11 +917,13 @@ func TestClinic_MarkPastDueNoShowSkipsAlreadyTerminal(t *testing.T) {
 }
 
 // TestClinic_RecordEncounter proves the post-visit clinical-record path: a
-// RecordEncounter upserts the .encounter aspect carrying the RAW clinical content
-// (summary / assessment / plan — captured plaintext-for-now, the .demographics PHI
-// discipline) PLUS the operational signals (documentedAt = canonical-UTC
-// op.submittedAt, followUpRequested, followUpDate). A correction (re-run with
-// followUpRequested=false) overwrites the whole aspect and drops followUpDate
+// RecordEncounter upserts two sibling aspects along the sensitivity boundary —
+// .encounter, SENSITIVE, carrying the RAW clinical content (summary / assessment
+// / plan), its DEK custodied on the clinicalRecord retention class (never the
+// patient's identity), and .documentation, non-sensitive, carrying the
+// operational signals (documentedAt = canonical-UTC op.submittedAt,
+// followUpRequested, followUpDate). A correction (re-run with
+// followUpRequested=false) overwrites both aspects and drops followUpDate
 // (unconditioned upsert). A non-appointment target is rejected (WrongClass).
 func TestClinic_RecordEncounter(t *testing.T) {
 	t.Parallel()
@@ -895,12 +942,13 @@ func TestClinic_RecordEncounter(t *testing.T) {
 		`{"appointmentKey":"`+apptKey+`","summary":"Annual checkup, vitals normal.","assessment":"Essential hypertension, well-controlled.","plan":"Continue medication; recheck in 6 months.","followUpRequested":true,"followUpDate":"2027-01-15T15:00:00Z"}`,
 		[]string{apptKey}, processor.OutcomeAccepted)
 
-	enc := clReadDoc(t, ctx, conn, apptKey+".encounter")
-	if cls, _ := enc["class"].(string); cls != "appointmentEncounter" {
+	// The .encounter aspect's class is readable without decrypting its data (only
+	// the data map is ciphertext).
+	if cls, _ := clReadDoc(t, ctx, conn, apptKey+".encounter")["class"].(string); cls != "appointmentEncounter" {
 		t.Fatalf("encounter class = %q, want appointmentEncounter", cls)
 	}
-	data, _ := enc["data"].(map[string]any)
-	// Raw clinical content is captured.
+	// Raw clinical content is SENSITIVE — captured only under decryption.
+	data := clDecryptEncounter(t, ctx, conn, apptKey)
 	if data["summary"] != "Annual checkup, vitals normal." {
 		t.Fatalf("encounter summary = %v", data["summary"])
 	}
@@ -910,35 +958,42 @@ func TestClinic_RecordEncounter(t *testing.T) {
 	if data["plan"] != "Continue medication; recheck in 6 months." {
 		t.Fatalf("encounter plan = %v", data["plan"])
 	}
-	// Operational signals: documentedAt is the canonical-UTC op.submittedAt anchor.
-	if data["documentedAt"] != clSubmittedAnchor {
-		t.Fatalf("encounter documentedAt = %v, want %s (= op.submittedAt)", data["documentedAt"], clSubmittedAnchor)
+
+	// Operational signals live on the non-sensitive .documentation aspect.
+	docAsp := clReadDoc(t, ctx, conn, apptKey+".documentation")
+	if cls, _ := docAsp["class"].(string); cls != "appointmentDocumentation" {
+		t.Fatalf("documentation class = %q, want appointmentDocumentation", cls)
 	}
-	if data["followUpRequested"] != true {
-		t.Fatalf("encounter followUpRequested = %v, want true", data["followUpRequested"])
+	docData, _ := docAsp["data"].(map[string]any)
+	// documentedAt is the canonical-UTC op.submittedAt anchor.
+	if docData["documentedAt"] != clSubmittedAnchor {
+		t.Fatalf("documentation documentedAt = %v, want %s (= op.submittedAt)", docData["documentedAt"], clSubmittedAnchor)
 	}
-	if data["followUpDate"] != "2027-01-15T15:00:00Z" {
-		t.Fatalf("encounter followUpDate = %v", data["followUpDate"])
+	if docData["followUpRequested"] != true {
+		t.Fatalf("documentation followUpRequested = %v, want true", docData["followUpRequested"])
+	}
+	if docData["followUpDate"] != "2027-01-15T15:00:00Z" {
+		t.Fatalf("documentation followUpDate = %v", docData["followUpDate"])
 	}
 
 	// A correction (unconditioned upsert): no follow-up this time → followUpDate
-	// dropped, followUpRequested false. Whole aspect is replaced.
+	// dropped, followUpRequested false. Both aspects are replaced whole.
 	clSubmit(t, ctx, conn, cp, cons, "enc0002", "RecordEncounter", "appointment",
 		`{"appointmentKey":"`+apptKey+`","summary":"Corrected note.","followUpRequested":false,"followUpDate":"2027-01-15T15:00:00Z"}`,
 		[]string{apptKey}, processor.OutcomeAccepted)
-	enc = clReadDoc(t, ctx, conn, apptKey+".encounter")
-	data, _ = enc["data"].(map[string]any)
+	data = clDecryptEncounter(t, ctx, conn, apptKey)
 	if data["summary"] != "Corrected note." {
 		t.Fatalf("after correction summary = %v", data["summary"])
 	}
 	if _, hasAssessment := data["assessment"]; hasAssessment {
 		t.Fatalf("correction must replace the whole aspect; stale assessment present: %v", data["assessment"])
 	}
-	if data["followUpRequested"] != false {
-		t.Fatalf("after correction followUpRequested = %v, want false", data["followUpRequested"])
+	docData, _ = clReadDoc(t, ctx, conn, apptKey+".documentation")["data"].(map[string]any)
+	if docData["followUpRequested"] != false {
+		t.Fatalf("after correction followUpRequested = %v, want false", docData["followUpRequested"])
 	}
-	if _, hasDate := data["followUpDate"]; hasDate {
-		t.Fatalf("followUpDate must be dropped when followUpRequested is false; got %v", data["followUpDate"])
+	if _, hasDate := docData["followUpDate"]; hasDate {
+		t.Fatalf("followUpDate must be dropped when followUpRequested is false; got %v", docData["followUpDate"])
 	}
 
 	// A date-only followUpDate (the FE's <input type=date> value) is normalized to a
@@ -949,10 +1004,9 @@ func TestClinic_RecordEncounter(t *testing.T) {
 	clSubmit(t, ctx, conn, cp, cons, "enc0004", "RecordEncounter", "appointment",
 		`{"appointmentKey":"`+apptKey+`","summary":"Follow-up by date.","followUpRequested":true,"followUpDate":"2027-03-20"}`,
 		[]string{apptKey}, processor.OutcomeAccepted)
-	enc = clReadDoc(t, ctx, conn, apptKey+".encounter")
-	data, _ = enc["data"].(map[string]any)
-	if data["followUpDate"] != "2027-03-20T09:00:00Z" {
-		t.Fatalf("date-only followUpDate must normalize to 2027-03-20T09:00:00Z; got %v", data["followUpDate"])
+	docData, _ = clReadDoc(t, ctx, conn, apptKey+".documentation")["data"].(map[string]any)
+	if docData["followUpDate"] != "2027-03-20T09:00:00Z" {
+		t.Fatalf("date-only followUpDate must normalize to 2027-03-20T09:00:00Z; got %v", docData["followUpDate"])
 	}
 
 	// A non-appointment target key is rejected (the vtx.appointment.<id> key-shape

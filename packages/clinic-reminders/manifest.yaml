@@ -1,5 +1,5 @@
 name: clinic-reminders
-version: 0.7.3
+version: 0.8.0
 description: |
   Clinic appointment & follow-up reminders + recurring visit series + the auto
   no-show closer — the clinic vertical's orchestration. Four one-shot/rolling @at
@@ -8,7 +8,7 @@ description: |
   appointmentReminders weaver-target lens (freshUntil = the .schedule.remindAt
   clinic-domain precomputes); (2) the at-the-date follow-up reminder — the
   .followUpReminder aspect + RecordFollowUpReminder op, the followUpReminders
-  weaver-target lens (freshUntil = the .encounter.followUpDate a documented visit
+  weaver-target lens (freshUntil = the .documentation.followUpDate a documented visit
   requested); (3) a rolling recurring visit series over its own visitseries vertex
   type — StartVisitSeries / PauseVisitSeries / ResumeVisitSeries /
   AdvanceVisitSeries ops, the visitSeriesDue weaver-target lens (freshUntil =
@@ -24,7 +24,7 @@ description: |
   RecordAppointmentReminderNotification / RecordFollowUpReminderNotification record
   the outcome as an audit-only aspect (neither gates the convergence lenses above).
   Depends on clinic-domain (the appointment/patient/provider vertex types +
-  .schedule.remindAt / .schedule.endsAt / .encounter.followUpDate / the
+  .schedule.remindAt / .schedule.endsAt / .documentation.followUpDate / the
   MarkPastDueNoShow op) and orchestration-base (MarkExpired re-touch at the @at
   firing).
 depends:

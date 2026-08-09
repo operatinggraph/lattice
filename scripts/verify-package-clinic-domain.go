@@ -50,6 +50,7 @@ import (
 	"github.com/nats-io/nats.go/jetstream"
 
 	"github.com/operatinggraph/lattice/internal/bootstrap"
+	"github.com/operatinggraph/lattice/internal/pkgmgr"
 	"github.com/operatinggraph/lattice/scripts/pkgverify"
 )
 
@@ -188,6 +189,7 @@ func main() {
 		{canonical: "providerSlotClaim", class: "meta.ddl.aspectType", ops: []string{"CreateAppointment", "RescheduleAppointment", "SetAppointmentStatus", "MarkPastDueNoShow", "TombstoneAppointment"}},
 		{canonical: "patientSlotClaim", class: "meta.ddl.aspectType", ops: []string{"CreateAppointment", "RescheduleAppointment", "SetAppointmentStatus", "MarkPastDueNoShow", "TombstoneAppointment"}},
 		{canonical: "appointmentEncounter", class: "meta.ddl.aspectType", ops: []string{"RecordEncounter"}},
+		{canonical: "appointmentDocumentation", class: "meta.ddl.aspectType", ops: []string{"RecordEncounter"}},
 		{canonical: "clinicSite", class: "meta.ddl.vertexType", ops: []string{"SetSiteProfile"}},
 		{canonical: "clinicSiteAssignment", class: "meta.ddl.vertexType", ops: []string{"AssignProviderSite", "RemoveProviderSite"}},
 		{canonical: "clinicSiteProfile", class: "meta.ddl.aspectType", ops: []string{"SetSiteProfile"}},
@@ -262,6 +264,63 @@ func main() {
 				} else {
 					ok(k + " envelope shape OK")
 				}
+			}
+		}
+	}
+
+	// The clinicalRecord retention class + the custody it confers on the
+	// clinical record. A diff-apply that installs the DDLs but drops either the
+	// holder vertex or the .custody aspect leaves .encounter marked Sensitive
+	// with no resolvable holder, which the Processor refuses at commit — the
+	// package would install clean and every RecordEncounter would fail. Assert
+	// the whole chain: the holder exists, its policy says what it retains, the
+	// aspect DDL is marked sensitive, and its custody names THAT holder key.
+	holderKey := pkgmgr.RetentionClassKey("clinic-domain", "clinicalRecord")
+	if env, err := pkgverify.GetEnvelope(ctx, coreKV, holderKey); err != nil {
+		fail(holderKey, fmt.Sprintf("clinicalRecord retention-class holder missing: %v", err))
+	} else if cls, _ := env["class"].(string); cls != pkgmgr.RetentionClassVertexType {
+		fail(holderKey+" class", fmt.Sprintf("got %q want %q", cls, pkgmgr.RetentionClassVertexType))
+	} else {
+		ok("clinicalRecord retention-class holder exists: " + holderKey)
+	}
+	policyKey := holderKey + ".retentionPolicy"
+	if env, err := pkgverify.GetEnvelope(ctx, coreKV, policyKey); err != nil {
+		fail(policyKey, fmt.Sprintf("missing: %v", err))
+	} else {
+		data, _ := env["data"].(map[string]any)
+		name, _ := data["canonicalName"].(string)
+		policy, _ := data["policy"].(string)
+		if name != "clinicalRecord" || policy != pkgmgr.RetentionPolicyEraseOnExpiry {
+			fail(policyKey, fmt.Sprintf("canonicalName=%q policy=%q want %q / %q",
+				name, policy, "clinicalRecord", pkgmgr.RetentionPolicyEraseOnExpiry))
+		} else {
+			ok(policyKey + " declares clinicalRecord / " + pkgmgr.RetentionPolicyEraseOnExpiry)
+		}
+	}
+	if encKey, err := pkgverify.FindMetaByCanonical(ctx, coreKV, allKeys, "appointmentEncounter"); err != nil || encKey == "" {
+		fail("appointmentEncounter custody", fmt.Sprintf("DDL not found: %v", err))
+	} else {
+		if env, err := pkgverify.GetEnvelope(ctx, coreKV, encKey+".sensitive"); err != nil {
+			fail(encKey+".sensitive", fmt.Sprintf("missing — the clinical record would commit as plaintext: %v", err))
+		} else {
+			data, _ := env["data"].(map[string]any)
+			if v, _ := data["value"].(bool); !v {
+				fail(encKey+".sensitive", "value=false — the clinical record would commit as plaintext")
+			} else {
+				ok(encKey + ".sensitive=true")
+			}
+		}
+		if env, err := pkgverify.GetEnvelope(ctx, coreKV, encKey+".custody"); err != nil {
+			fail(encKey+".custody", fmt.Sprintf("missing: %v", err))
+		} else {
+			data, _ := env["data"].(map[string]any)
+			kind, _ := data["kind"].(string)
+			holder, _ := data["holderKey"].(string)
+			if kind != pkgmgr.CustodyKindRetentionClass || holder != holderKey {
+				fail(encKey+".custody", fmt.Sprintf("kind=%q holderKey=%q want %q / %q",
+					kind, holder, pkgmgr.CustodyKindRetentionClass, holderKey))
+			} else {
+				ok(encKey + ".custody names the clinicalRecord holder")
 			}
 		}
 	}
