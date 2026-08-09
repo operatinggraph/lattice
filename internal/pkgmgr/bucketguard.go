@@ -142,14 +142,15 @@ func (def Definition) validateLensReadPath() error {
 			// Mirror Refractor's validateSecureColumns (Contract #3 §3.10) so a
 			// Secure Lens that could never activate is rejected at install time.
 			// The reserved names are the platform RLS columns (the Refractor-side
-			// adapter.AuthzAnchorsColumn / adapter.ProjectionSeqColumn).
+			// adapter.AuthzAnchorsColumn / adapter.ProjectionSeqColumn /
+			// adapter.IsDeletedColumn / adapter.DeletedAtColumn).
 			if !l.Protected {
 				return fmt.Errorf("pkgmgr: Lens[%d] %q: SecureColumns require Protected — a Secure Lens projects plaintext PII and may only target an RLS-protected model (Contract #3 §3.10)", idx, l.CanonicalName)
 			}
 			if l.ProjectionKind != "" {
 				return fmt.Errorf("pkgmgr: Lens[%d] %q: SecureColumns are supported on plain projection lenses only, not ProjectionKind %q", idx, l.CanonicalName, l.ProjectionKind)
 			}
-			reserved := map[string]struct{}{"authz_anchors": {}, "projection_seq": {}}
+			reserved := map[string]struct{}{"authz_anchors": {}, "projection_seq": {}, "is_deleted": {}, "deleted_at": {}}
 			declared := make(map[string]struct{}, len(l.Columns))
 			for _, c := range l.Columns {
 				declared[c.Name] = struct{}{}
