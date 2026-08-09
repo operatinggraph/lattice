@@ -2919,3 +2919,78 @@ Reading them back:
   appointment, so the re-point resolves through Refractor against the real `.documentation` aspect.
 
 The stack carries one proof appointment (patient "Retention Proof") — it held no clinic data before this.
+
+---
+
+## 27. Fire 2 — CLOSED (2026-08-08)
+
+Both items shipped. `c25cac52` Inc B, `7eb4c72f` Inc C, `a04dc6f0` item 2 (lease-signing), `392ead03` Inc D.
+The A–D increment split was this steward's own decomposition of item 1, not a ratified boundary; Andrew's
+direction mid-fire was that Fire 2 is the unit, and it was closed as one.
+
+### 27.1 What the plane now is, end to end
+
+Two packages declare a retention class and custody a record on it. Clinic's `clinicalRecord` holds
+`.encounter` (summary / assessment / plan) and is read back by `clinicEncountersRead`, a provider-anchored
+Secure Lens, and rendered to the treating provider at `GET /api/my-encounters`. Lease-signing's
+`underwritingRecord` holds `.profile` (the applicant's raw financials) and `.underwritingParties` (the
+guarantor's and co-applicant's identifiers, and the references), with `.applicationSignals` carrying the
+derived signals in the clear. §6.4's acceptance criterion is met for clinic: an identified patient's name
+now lives on their identity's sensitive `.name`, so `ShredIdentityKey` destroys it with their contact.
+
+### 27.2 The decisions this fire made, and why
+
+- **The unidentified patient keeps a plaintext name.** No identity means no key to shred, so no erasure
+  promise the plaintext defeats. The two populations are disjoint by construction; the read models carry
+  the erasable name and the plaintext fallback as separate, never-both-populated columns.
+- **Third-party identifiers are NOT rehomed onto their own identities.** §8.7 already rejects per-row
+  traversed custody, and minting an unclaimed identity for a guarantor who never consented and can never
+  claim it would invent machinery to hold data that person cannot reach. They are retained under the same
+  class, and the class Description — which is projected into the unprotected `retentionKeyStatus` lens —
+  says so. That is the scope sentence's "or the fire states why not", stated where an operator reads it.
+- **Derived signals stay non-sensitive.** §9.1's prose lists `incomeToRentMet` among retained financial
+  facts; the code's own doc comment and all three shipped lenses treat it as derived. §9.1's shorthand is
+  superseded here: encrypting it would have nulled three lenses' columns silently and green.
+- **A missing plaintext field is a spec mismatch, so a stable written shape is load-bearing.**
+  `RecordEncounter` writes all three PHI keys always, an unfilled optional as `""`. A secure column's
+  `Field` naming a key the plaintext omits is Terminal to the decryptor, which redacts and raises the
+  privacy-critical alarm — so the ordinary visit with no separate assessment would have fired it.
+
+### 27.3 The delivery question, settled
+
+No cypher can bind a `retentionclass` holder — custody is declared, never linked — so the in-band
+`.piiKey` CDC scrub that serves identity-custodied columns cannot fire for a class-custodied lens.
+`cmd/refractor`'s `holderTypeRebuildTargets` enumerates every running lens by its DECLARED `HolderTypes`
+and rebuilds it. That is why `HolderTypes` is load-bearing rather than documentation, and why both package
+tests and the verify scripts assert it: a diff-apply that drops `secureColumns` installs clean and writes
+ciphertext envelopes into a plaintext column, and the read model looks populated.
+
+### 27.4 What review caught that the build did not
+
+Three blockers on lease-signing, all of a class the author cannot see because each depends on state the
+author is not holding: a stale `.profile` in the loftspace FE's `optionalReads` that hard-faults step-4
+hydration on any pre-existing plaintext body; `canonicalName: "profile"` claiming a generic word in the
+globally-unique aspect-type namespace while SENSITIVE, so a future package's `profile` class would encrypt
+under lease-signing's holder; and the guarantor guard failing OPEN — an application whose signals aspect is
+absent read as "no guarantor" and skipped `GuarantorNotVerified` entirely. Absence is not evidence, and
+both ops now refuse with `ApplicationSignalsMissing`. Signing a renewal therefore requires a profile
+submission, including a guarantor-less one — a deliberate behavioral change.
+
+On the clinic FE: a saved correction reverted on screen and a second save wrote the pre-correction text
+back over it, because the note cache was refreshed only by a view switch. And a failed fetch was
+indistinguishable from "no note", which in the edit modal meant typing a summary into a blank-looking form
+destroyed the assessment and plan, since `RecordEncounter` replaces the whole aspect.
+
+Two dead reads surfaced with them: `renewal_lenses.go` read `hasGuarantor` off an `:identity` binding that
+has never carried a `.profile`. One mattered — the `renewalComplete` goal atom compares against false and
+the engine reads `null = False` as false, so every no-guarantor renewal's goal was unreachable and burned
+its retry budget.
+
+### 27.5 Owed, and deliberately not filed
+
+The pre-declaration corpus is unchanged: an `.encounter` or a `.profile` written before its declaration is
+plaintext at rest, outside the shred, and its operational sibling does not exist. §11 budgets one
+full-stack reset for exactly this and the demo box resets nightly. This is a premise, not a permanent
+property — a deployment that outlives a reset makes it a real row.
+
+The deferred tail (a)–(d) is unchanged and still behind its named triggers.
