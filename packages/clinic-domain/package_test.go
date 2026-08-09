@@ -303,8 +303,8 @@ func TestPackage_Permissions(t *testing.T) {
 		t.Fatalf("expected Depends=[location-domain], got %v", got)
 	}
 
-	if got := len(Package.Lenses); got != 13 {
-		t.Fatalf("expected 13 lenses, got %d", got)
+	if got := len(Package.Lenses); got != 14 {
+		t.Fatalf("expected 14 lenses, got %d", got)
 	}
 	lensByName := map[string]pkgmgr.LensSpec{}
 	for _, l := range Package.Lenses {
@@ -347,6 +347,36 @@ func TestPackage_Permissions(t *testing.T) {
 	if l, ok := lensByName["clinicPatientsRead"]; !ok ||
 		l.Adapter != "postgres" || l.Table != "read_clinic_patients" || !l.Protected {
 		t.Fatalf("unexpected clinicPatientsRead shape: %+v", lensByName["clinicPatientsRead"])
+	}
+	// clinicEncountersRead is the only read path to the clinical record, so its
+	// posture is asserted field by field rather than by shape alone: PROTECTED
+	// (validateSecureColumns refuses secure columns on anything else), and one
+	// secure column per PHI field, each declaring the retentionclass holder type
+	// — the declaration cmd/refractor's holderTypeRebuildTargets enumerates to
+	// deliver a class-key destruction, and the only thing that stops a
+	// subject-custodied ciphertext being opened in these columns.
+	if l, ok := lensByName["clinicEncountersRead"]; !ok ||
+		l.Adapter != "postgres" || l.Table != "read_clinic_encounters" || !l.Protected || l.GrantTable {
+		t.Fatalf("unexpected clinicEncountersRead shape: %+v", lensByName["clinicEncountersRead"])
+	}
+	encSecure := map[string]pkgmgr.SecureColumn{}
+	for _, sc := range lensByName["clinicEncountersRead"].SecureColumns {
+		encSecure[sc.Column] = sc
+	}
+	if len(encSecure) != 3 {
+		t.Fatalf("clinicEncountersRead must declare exactly the three PHI columns as secure, got %v", encSecure)
+	}
+	for _, col := range []string{"summary", "assessment", "plan"} {
+		sc, ok := encSecure[col]
+		if !ok {
+			t.Fatalf("clinicEncountersRead column %q must be a secure column — a plain projection would write the ciphertext envelope into the read model", col)
+		}
+		if len(sc.HolderTypes) != 1 || sc.HolderTypes[0] != "retentionclass" {
+			t.Errorf("clinicEncountersRead secure column %q must declare holderTypes [retentionclass], got %v", col, sc.HolderTypes)
+		}
+		if sc.Field != col {
+			t.Errorf("clinicEncountersRead secure column %q must name field %q of the decrypted plaintext, got %q", col, col, sc.Field)
+		}
 	}
 	if l, ok := lensByName["clinicPatientReadGrants"]; !ok ||
 		l.Adapter != "postgres" || !l.GrantTable || l.Protected {
@@ -441,8 +471,8 @@ func TestPackage_ScriptGuards(t *testing.T) {
 	// The clinical-record PHI discipline: the clinicAppointments lens projects the
 	// OPERATIONAL documentation signals but NEVER the raw clinical content. summary /
 	// assessment / plan must not appear in any RETURN projection (the .demographics
-	// name-only precedent applied to the split — the sensitive .encounter half is
-	// never projected by any lens).
+	// name-only precedent applied to the split — the sensitive .encounter half
+	// reaches a reader through clinicEncountersRead alone, asserted below).
 	for _, projected := range []string{"a.documentation.data.documentedAt", "a.documentation.data.followUpRequested", "a.documentation.data.followUpDate"} {
 		if !strings.Contains(clinicAppointmentsSpec, projected) {
 			t.Errorf("clinicAppointments must project the operational documentation signal %q", projected)
@@ -452,6 +482,33 @@ func TestPackage_ScriptGuards(t *testing.T) {
 		if strings.Contains(clinicAppointmentsSpec, phi) {
 			t.Errorf("clinicAppointments must NOT project the raw clinical PHI field %q (SENSITIVE, custodied on the clinicalRecord retention class)", phi)
 		}
+	}
+
+	// clinicEncountersRead is the ONE lens allowed to touch .encounter, and the
+	// exclusivity is the property worth pinning: any other spec naming the aspect
+	// would copy the ciphertext envelope into a model with no decryptor — or, if
+	// that model were ever given one, open the record to that lens's audience.
+	// A per-field reference (encounter.data.summary) is doubly wrong: the secure
+	// decryptor needs the whole envelope, so it would project a null, not a value.
+	for name, spec := range map[string]string{
+		"clinicAppointmentsSpec":       clinicAppointmentsSpec,
+		"clinicAppointmentsReadSpec":   clinicAppointmentsReadSpec,
+		"providerAppointmentsReadSpec": providerAppointmentsReadSpec,
+		"clinicPatientsSpec":           clinicPatientsSpec,
+		"clinicPatientsReadSpec":       clinicPatientsReadSpec,
+	} {
+		if strings.Contains(spec, ".encounter") {
+			t.Errorf("%s must NOT reference the sensitive .encounter aspect — clinicEncountersRead is its only reader", name)
+		}
+	}
+	if !strings.Contains(clinicEncountersReadSpec, "a.encounter.data                  AS summary") {
+		t.Error("clinicEncountersRead must RETURN the whole .encounter envelope per secure column (a.encounter.data), not a field of it")
+	}
+	if strings.Contains(clinicEncountersReadSpec, "a.encounter.data.") {
+		t.Error("clinicEncountersRead must not reach INTO the ciphertext envelope; the decryptor's Field selects the plaintext key")
+	}
+	if !strings.Contains(clinicEncountersReadSpec, "[nanoIdFromKey(pr.key)]           AS authz_anchors") {
+		t.Error("clinicEncountersRead must anchor on the treating provider alone — no workplace token, so the clinical note is not front-desk readable")
 	}
 
 	// A patient's NAME is PHI: it must NEVER be PROJECTED by an OPEN (unauthenticated,

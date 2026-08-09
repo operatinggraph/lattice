@@ -1,5 +1,5 @@
 name: clinic-domain
-version: 0.29.0
+version: 0.30.0
 depends:
   - location-domain
 description: |
@@ -23,13 +23,14 @@ description: |
   RecordEncounter captures the post-visit clinical record split across two
   sibling aspects along the sensitivity boundary: .encounter (RAW PHI
   {summary, assessment, plan}, SENSITIVE, DEK custodied on the package's own
-  clinicalRecord retention class rather than the patient's identity, never
-  projected) and .documentation (the operational documentation / follow-up
-  signals the lens does project). Six projection lenses
-  (clinicAppointments, clinicProviders, clinicPatients, clinicAppointmentsRead,
-  providerAppointmentsRead, clinicPatientsRead) are the P5 read models a clinic FE
-  reads. clinicAppointmentsRead, providerAppointmentsRead, and clinicPatientsRead
-  are PROTECTED Postgres read models (Contract #6 §6.14 RLS, D1.5, mirroring
+  clinicalRecord retention class rather than the patient's identity, read back
+  only through clinicEncountersRead) and .documentation (the operational
+  documentation / follow-up signals the plain lenses project). Seven projection
+  lenses (clinicAppointments, clinicProviders, clinicPatients,
+  clinicAppointmentsRead, providerAppointmentsRead, clinicPatientsRead,
+  clinicEncountersRead) are the P5 read models a clinic FE
+  reads. clinicAppointmentsRead, providerAppointmentsRead, clinicPatientsRead and
+  clinicEncountersRead are PROTECTED Postgres read models (Contract #6 §6.14 RLS, D1.5, mirroring
   lease-signing's leaseApplicationsRead / landlordLeaseApplicationsRead) —
   cmd/clinic-app's My Appointments, My Schedule, and the clinic-wide staff views
   (follow-ups worklist, "All providers" aggregate, the patient-context switcher
@@ -56,10 +57,10 @@ description: |
   clinical record, for custody: .encounter is SENSITIVE, its DEK held by the
   package's own clinicalRecord retention class rather than the patient's
   identity, so a patient's ShredIdentityKey leaves the record readable and the
-  operator-driven ShredRetentionClassKey is what destroys it. Two things are
-  still open: that survival is not yet pseudonymous (.demographics' plaintext
-  fullName outlives the shred), and clinical-note DISPLAY to a clinician has no
-  read model.
+  operator-driven ShredRetentionClassKey is what destroys it, nulling every
+  clinicEncountersRead column that renders it. One thing is still open: that
+  survival is not yet pseudonymous (.demographics' plaintext fullName outlives
+  the shred).
   CreateAppointment ALSO grants consumer scope=self (real-actor-write-auth-e2e
   idiom, mirroring lease-signing's CreateLeaseApplication precedent): a real
   patient books their own appointment through the Gateway. Step 3 authorizes
@@ -169,6 +170,9 @@ declares:
       adapter: postgres
       engine: full
     - canonicalName: clinicPatientsRead
+      adapter: postgres
+      engine: full
+    - canonicalName: clinicEncountersRead
       adapter: postgres
       engine: full
     - canonicalName: clinicPatientReadGrants

@@ -591,3 +591,123 @@ func TestProtectedAppointmentReads_EncounterWithoutDocumentationProjectsNull(t *
 		require.Nil(t, v["follow_up_date"], "%s: no .documentation aspect → null follow_up_date", name)
 	}
 }
+
+// seedEncounter writes the SENSITIVE .encounter aspect as the shape step 6.5
+// actually commits — a ciphertext envelope {ct, nonce, keyId} whose keyId names
+// the clinicalRecord retention-class holder, never the appointment or the
+// patient. The engine copies that map through verbatim; turning it back into
+// summary/assessment/plan is pipeline.SecureDecryptor's job, proven in
+// internal/refractor. What is proven HERE is that the cypher hands the decryptor
+// the whole envelope in each of the three columns, which is the part a lens spec
+// can get wrong.
+func (f *lensFixture) seedEncounter(t *testing.T, apptName, holderID string) map[string]any {
+	t.Helper()
+	envelope := map[string]any{
+		"ct":    "3q2+7w==",
+		"nonce": "3q2+7w==",
+		"keyId": "vtx.retentionclass." + holderID,
+	}
+	f.aspect(t, apptName, "encounter", "appointmentEncounter", envelope)
+	return envelope
+}
+
+// TestClinicEncountersRead_ProjectsEnvelopePerColumnUnderProviderAnchor — the
+// clinical record's read model projects one row per DOCUMENTED appointment,
+// hands the same ciphertext envelope to each of the three secure columns, and
+// anchors on the treating provider alone.
+func TestClinicEncountersRead_ProjectsEnvelopePerColumnUnderProviderAnchor(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newLensFixture(t)
+	f.seedAppointment(t, "appt", "alice", "drsam")
+	envelope := f.seedEncounter(t, "appt", "7hRMjLYwg6WSpaXj7hRM")
+
+	rows := f.project(t, clinicEncountersReadSpec)
+	require.Len(t, rows, 1, "exactly one row per documented appointment")
+	v := rows[0].Values
+
+	require.Equal(t, f.ids["appt"], v["appointment_id"], "appointment_id is the IntoKey")
+	require.Equal(t, "vtx.appointment."+f.ids["appt"], v["entity_key"])
+	require.Equal(t, "vtx.patient."+f.ids["alice"], v["patient_key"])
+	require.Equal(t, "vtx.provider."+f.ids["drsam"], v["provider_key"])
+	require.Equal(t, "2026-07-01T15:35:00Z", v["documented_at"],
+		"documented_at comes off the NON-sensitive .documentation sibling")
+
+	for _, col := range []string{"summary", "assessment", "plan"} {
+		require.Equal(t, envelope, v[col],
+			"secure column %q must carry the WHOLE ciphertext envelope — the decryptor's Field selects the plaintext key, and a projection reaching into the envelope would yield null", col)
+	}
+
+	// The patient's NAME is deliberately absent: the plaintext note must not sit
+	// beside a direct identifier in this table.
+	require.NotContains(t, v, "patient_name",
+		"the clinical record's own table must not carry the patient name")
+
+	require.Equal(t, []string{f.ids["drsam"]}, anchorStrings(t, v["authz_anchors"]),
+		"authz_anchors must be exactly the treating provider's bare NanoID — no workplace token, so the note is not front-desk readable")
+}
+
+// TestClinicEncountersRead_UndocumentedAppointmentProducesNoRow — an appointment
+// nobody has documented projects no row at all. The presence filter reads the
+// non-sensitive .documentation sibling, written in the same batch as .encounter,
+// so the row set is exactly the set of appointments carrying a record.
+func TestClinicEncountersRead_UndocumentedAppointmentProducesNoRow(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newLensFixture(t)
+	f.vtx(t, "appt", "appointment")
+	f.vtx(t, "alice", "patient")
+	f.vtx(t, "drsam", "provider")
+	f.aspect(t, "appt", "schedule", "appointmentSchedule", map[string]any{"startsAt": "2026-07-01T15:00:00Z", "endsAt": "2026-07-01T15:30:00Z"})
+	f.edge(t, "forPatient", "appt", "alice")
+	f.edge(t, "withProvider", "appt", "drsam")
+
+	require.Empty(t, f.project(t, clinicEncountersReadSpec),
+		"an undocumented appointment must produce no PHI-columned row")
+}
+
+// TestClinicEncountersRead_NoProviderLinkProducesNoRow — withProvider is the
+// REQUIRED anchor walk, so a documented appointment with no provider projects no
+// row rather than one with a null anchor. Fail-closed: an unanchored row in a
+// protected table is readable by a WildcardAnchor holder alone, but the
+// clinical-record plane should not rely on that.
+func TestClinicEncountersRead_NoProviderLinkProducesNoRow(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newLensFixture(t)
+	f.vtx(t, "appt", "appointment")
+	f.vtx(t, "alice", "patient")
+	f.aspect(t, "appt", "documentation", "appointmentDocumentation", map[string]any{"documentedAt": "2026-07-01T15:35:00Z", "followUpRequested": false})
+	f.seedEncounter(t, "appt", "7hRMjLYwg6WSpaXj7hRM")
+	f.edge(t, "forPatient", "appt", "alice")
+
+	require.Empty(t, f.project(t, clinicEncountersReadSpec),
+		"a documented appointment with no treating provider must project no row")
+}
+
+// TestClinicEncountersRead_AnchorScopesPerProvider — two providers' records never
+// carry each other's anchor. The projection-layer proof of "a provider reads only
+// the notes they wrote".
+func TestClinicEncountersRead_AnchorScopesPerProvider(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newLensFixture(t)
+	f.seedAppointment(t, "apptA", "alice", "drsam")
+	f.seedAppointment(t, "apptB", "bob", "drlee")
+	f.seedEncounter(t, "apptA", "7hRMjLYwg6WSpaXj7hRM")
+	f.seedEncounter(t, "apptB", "7hRMjLYwg6WSpaXj7hRM")
+
+	rows := f.project(t, clinicEncountersReadSpec)
+	require.Len(t, rows, 2)
+	byAppt := map[string][]string{}
+	for _, r := range rows {
+		byAppt[r.Values["appointment_id"].(string)] = anchorStrings(t, r.Values["authz_anchors"])
+	}
+	require.Equal(t, []string{f.ids["drsam"]}, byAppt[f.ids["apptA"]])
+	require.Equal(t, []string{f.ids["drlee"]}, byAppt[f.ids["apptB"]])
+	require.NotContains(t, byAppt[f.ids["apptA"]], f.ids["drlee"], "one provider's note must not carry another's anchor")
+}

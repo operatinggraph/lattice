@@ -36,8 +36,9 @@ vtx.provider.<id>     class=provider     root {}   .profile  {fullName, specialt
                                                    .slot<cellcode> {}   (class providerSlotClaim — one per occupied 15-min cell, on demand)
 vtx.appointment.<id>  class=appointment  root {}   .schedule {startsAt, endsAt, remindAt, reason?}
                                                    .status   {value ∈ scheduled|confirmed|checkedIn|completed|cancelled|noShow, note?}
-                                                   .encounter      {summary, assessment?, plan?}  (SENSITIVE — encrypted, DEK on the
-                                                                    clinicalRecord retention class; never projected)
+                                                   .encounter      {summary, assessment, plan}   (SENSITIVE — encrypted, DEK on the
+                                                                    clinicalRecord retention class; read back only through
+                                                                    clinicEncountersRead, decrypted at projection)
                                                    .documentation  {documentedAt, followUpRequested, followUpDate?}  (operational, projected)
 
 lnk.appointment.<id>.forPatient.patient.<id>      (appointment → patient — the later-arriving vertex is the source, §1.1)
@@ -143,7 +144,9 @@ half-open overlap tests and the convergence lens's `remindAt` compare rely on.
   Upserts the post-visit record as two sibling aspects, split along the sensitivity boundary because step 6.5
   encrypts a whole aspect's `data` map. `.encounter` holds `summary`/`assessment`/`plan` — RAW PHI, **SENSITIVE**,
   its DEK custodied on the package's own `clinicalRecord` retention class rather than the patient's identity, and
-  **never projected** into any read model. `.documentation` holds `documentedAt` (server-stamped) and the
+  readable only through **`clinicEncountersRead`**, the Secure Lens that decrypts them at projection for the
+  treating provider. All three keys are always written — an unfilled optional as `""` — so the plaintext shape
+  matches that lens's per-field secure columns. `.documentation` holds `documentedAt` (server-stamped) and the
   follow-up fields — OPERATIONAL, non-PHI signals that `clinicAppointments` / `clinicAppointmentsRead` /
   `providerAppointmentsRead` / clinic-reminders' `followUpReminders` project (documentation presence +
   follow-up scheduling), never the clinical content itself.
@@ -256,9 +259,9 @@ has no consumer; §10.4 ships `@at` one-shot) — that remains a deferred platfo
   (`RecordEncounter`'s `.encounter` aspect — summary/assessment/plan) is encrypted at rest under a
   *retention-class* holder, not the patient's identity: its obligation outlives any one patient's erasure, so
   `ShredIdentityKey` leaves it readable and the operator-driven `ShredRetentionClassKey` destroys it. It is
-  still never projected into any lens — only the operational documentation/follow-up presence signals are —
-  so clinical-note **display** to a clinician has no read model yet, and the record's survival is not yet
-  pseudonymous while `.demographics`' plaintext `fullName` outlives the shred.
+  projected by exactly one lens — `clinicEncountersRead`, provider-anchored, which decrypts it at projection
+  for the treating provider (and a WildcardAnchor holder), never the front desk. The record's survival is not
+  yet pseudonymous while `.demographics`' plaintext `fullName` outlives the shred.
 - **Cascade-on-tombstone.** `Tombstone{Patient,Provider,Appointment}` soft-deletes the named vertex
   **root only** — its aspects and incident links are left in place. The projection lenses anchor on the
   live root, so a tombstoned vertex drops from the read model and its orphaned aspects are not surfaced.

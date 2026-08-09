@@ -985,8 +985,15 @@ func TestClinic_RecordEncounter(t *testing.T) {
 	if data["summary"] != "Corrected note." {
 		t.Fatalf("after correction summary = %v", data["summary"])
 	}
-	if _, hasAssessment := data["assessment"]; hasAssessment {
+	// The correction omitted assessment, so it is written as the empty string —
+	// the plaintext shape is fixed so clinicEncountersRead's per-field secure
+	// columns never see a missing field. The stale value being gone (rather than
+	// the key being gone) is what proves the whole aspect was replaced.
+	if data["assessment"] != "" {
 		t.Fatalf("correction must replace the whole aspect; stale assessment present: %v", data["assessment"])
+	}
+	if data["plan"] != "" {
+		t.Fatalf("correction must replace the whole aspect; stale plan present: %v", data["plan"])
 	}
 	docData, _ = clReadDoc(t, ctx, conn, apptKey+".documentation")["data"].(map[string]any)
 	if docData["followUpRequested"] != false {

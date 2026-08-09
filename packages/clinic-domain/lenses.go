@@ -315,6 +315,67 @@ func Lenses() []pkgmgr.LensSpec {
 			},
 		},
 		{
+			// clinicEncountersRead — the protected Postgres read model that renders
+			// the clinical record back to the provider who documented it. It is the
+			// ONLY read path to .encounter's content: the aspect is sensitive, its
+			// DEK is custodied on the clinicalRecord retention-class holder, and a
+			// plain lens copying it would project the ciphertext envelope verbatim.
+			//
+			// Secure columns with HolderTypes ["retentionclass"], not ["identity"]:
+			// custody follows the retention obligation rather than the patient, so
+			// the record outlives the patient's erasure. The decryptor takes custody
+			// from the ciphertext's own keyId; HolderTypes is this lens's statement
+			// of which holders it agreed to render, so a subject-custodied ciphertext
+			// arriving in one of these columns is refused rather than opened.
+			//
+			// The class-key destruction reaches these rows through the declaration,
+			// not through the cypher: no lens can bind the holder vertex (custody is
+			// declared, never linked), so the in-band .piiKey CDC scrub that serves
+			// clinicPatientsRead's identity columns cannot fire here.
+			// cmd/refractor's holderTypeRebuildTargets enumerates every running lens
+			// declaring the destroyed holder's type and rebuilds it, which is why
+			// HolderTypes is the load-bearing declaration and not documentation.
+			//
+			// PROVIDER-anchored, mirroring providerAppointmentsRead exactly:
+			// withProvider is the REQUIRED anchor walk (an appointment with no
+			// provider projects no row — fail-closed, never a null authz_anchor) and
+			// authz_anchors carries the provider's own bare NanoID, which
+			// clinicProviderReadGrants already produces. No workplace token: unlike
+			// the appointment schedule, the clinical note is not front-desk material,
+			// so the row reaches the treating provider and a WildcardAnchor holder
+			// only. forPatient stays OPTIONAL and contributes patient_key alone —
+			// the patient's NAME is deliberately absent, so the plaintext note does
+			// not sit beside an identifier in a second table; a reader that needs it
+			// joins read_provider_appointments on appointment_id.
+			//
+			// The WHERE presence filter keys off the NON-sensitive sibling: the two
+			// aspects are written in one batch by RecordEncounter, so a documentedAt
+			// is exactly the set of appointments carrying a record, and an
+			// undocumented appointment produces no PHI-columned row at all.
+			CanonicalName: "clinicEncountersRead",
+			Class:         "meta.lens",
+			Adapter:       "postgres",
+			Table:         "read_clinic_encounters",
+			Engine:        "full",
+			Spec:          clinicEncountersReadSpec,
+			Protected:     true,
+			IntoKey:       []string{"appointment_id"},
+			Columns: []pkgmgr.PostgresColumn{
+				{Name: "entity_key", Type: "text"},
+				{Name: "patient_key", Type: "text"},
+				{Name: "provider_key", Type: "text"},
+				{Name: "documented_at", Type: "text"},
+				{Name: "summary", Type: "text"},
+				{Name: "assessment", Type: "text"},
+				{Name: "plan", Type: "text"},
+			},
+			SecureColumns: []pkgmgr.SecureColumn{
+				{Column: "summary", HolderTypes: []string{"retentionclass"}, Field: "summary"},
+				{Column: "assessment", HolderTypes: []string{"retentionclass"}, Field: "assessment"},
+				{Column: "plan", HolderTypes: []string{"retentionclass"}, Field: "plan"},
+			},
+		},
+		{
 			// clinicPatientReadGrants — the cap-read.clinic.patient GrantTable
 			// producer that closes the gap flagged live (0-of-1 read):
 			// clinicAppointmentsRead's authz_anchors anchors on the PATIENT
@@ -751,6 +812,39 @@ RETURN
   a.documentation.data.followUpRequested AS follow_up_requested,
   a.documentation.data.followUpDate      AS follow_up_date,
   [nanoIdFromKey(pr.key)]                AS authz_anchors
+`
+
+// clinicEncountersReadSpec is the PROVIDER-anchored protected Postgres read
+// model's cypher for the clinical record itself — the only projection of
+// .encounter's content anywhere. withProvider is REQUIRED (the anchor walk),
+// forPatient is OPTIONAL and display-only, exactly as providerAppointmentsRead
+// splits them.
+//
+// The three PHI columns all RETURN the SAME expression, a.encounter.data — the
+// whole ciphertext envelope ({ct, nonce, keyId}) — three times under three
+// aliases. That is the Secure-Lens calling convention: the cypher hands the
+// decryptor an envelope per column and the declaration's Field names which key
+// of the decrypted plaintext each alias keeps. Nothing here can read the
+// plaintext; the column is ciphertext until pipeline.SecureDecryptor rewrites it.
+//
+// The presence filter reads the non-sensitive sibling rather than .encounter
+// itself: RecordEncounter writes both aspects in one batch, so documentedAt is
+// present exactly when a record exists, and testing a ciphertext envelope for
+// nullity would couple the row set to the encryption envelope's shape.
+const clinicEncountersReadSpec = `MATCH (a:appointment)
+MATCH (a)-[:withProvider]->(pr:provider)
+WHERE a.documentation.data.documentedAt <> null
+OPTIONAL MATCH (a)-[:forPatient]->(p:patient)
+RETURN
+  nanoIdFromKey(a.key)              AS appointment_id,
+  a.key                             AS entity_key,
+  p.key                             AS patient_key,
+  pr.key                            AS provider_key,
+  a.documentation.data.documentedAt AS documented_at,
+  a.encounter.data                  AS summary,
+  a.encounter.data                  AS assessment,
+  a.encounter.data                  AS plan,
+  [nanoIdFromKey(pr.key)]           AS authz_anchors
 `
 
 // clinicPatientReadGrantsSpec is the cap-read.clinic.patient GrantTable

@@ -325,6 +325,63 @@ func main() {
 		}
 	}
 
+	// clinicEncountersRead — the one read path back to a record held under that
+	// class. Its posture is asserted from the INSTALLED spec rather than the Go
+	// literal, because a diff-apply that lands the lens with its secureColumns
+	// dropped installs clean and then writes ciphertext envelopes into a
+	// plaintext column: the read model would look populated and be unreadable,
+	// with no error anywhere. The holder type is equally load-bearing — it is
+	// what cmd/refractor's holderTypeRebuildTargets enumerates to deliver a
+	// ShredRetentionClassKey to these rows.
+	if lensKey, err := pkgverify.FindMetaByCanonical(ctx, coreKV, allKeys, "clinicEncountersRead"); err != nil || lensKey == "" {
+		fail("clinicEncountersRead lens", fmt.Sprintf("lens meta-vertex not found: %v", err))
+	} else if env, err := pkgverify.GetEnvelope(ctx, coreKV, lensKey+".spec"); err != nil {
+		fail(lensKey+".spec", fmt.Sprintf("missing: %v", err))
+	} else {
+		ok("clinicEncountersRead lens exists: " + lensKey)
+		data, _ := env["data"].(map[string]any)
+		cfg, _ := data["targetConfig"].(map[string]any)
+		if table, _ := cfg["table"].(string); table != "read_clinic_encounters" {
+			fail(lensKey+".spec table", fmt.Sprintf("got %q want %q", table, "read_clinic_encounters"))
+		}
+		if protected, _ := cfg["protected"].(bool); !protected {
+			fail(lensKey+".spec protected", "false — a Secure Lens may only target an RLS-protected model")
+		}
+		secure, _ := cfg["secureColumns"].([]any)
+		if len(secure) != 3 {
+			fail(lensKey+".spec secureColumns", fmt.Sprintf("got %d entries, want 3 (summary/assessment/plan) — a dropped entry projects the ciphertext envelope verbatim", len(secure)))
+		} else {
+			byColumn := map[string]map[string]any{}
+			for _, e := range secure {
+				entry, _ := e.(map[string]any)
+				col, _ := entry["column"].(string)
+				byColumn[col] = entry
+			}
+			for _, col := range []string{"summary", "assessment", "plan"} {
+				entry, present := byColumn[col]
+				if !present {
+					fail(lensKey+".spec secureColumns", "missing secure column "+col)
+					continue
+				}
+				field, _ := entry["field"].(string)
+				holders, _ := entry["holderTypes"].([]any)
+				if field != col {
+					fail(lensKey+".spec secureColumns."+col, fmt.Sprintf("field=%q want %q", field, col))
+					continue
+				}
+				if len(holders) != 1 {
+					fail(lensKey+".spec secureColumns."+col, fmt.Sprintf("holderTypes=%v want exactly [retentionclass]", holders))
+					continue
+				}
+				if ht, _ := holders[0].(string); ht != pkgmgr.RetentionClassVertexType {
+					fail(lensKey+".spec secureColumns."+col, fmt.Sprintf("holderTypes=[%q] want [%q]", ht, pkgmgr.RetentionClassVertexType))
+					continue
+				}
+				ok(fmt.Sprintf("clinicEncountersRead secure column %s decrypts under a %s holder", col, pkgmgr.RetentionClassVertexType))
+			}
+		}
+	}
+
 	for _, canonical := range retiredCanonicals {
 		ddlKey, err := pkgverify.FindMetaByCanonical(ctx, coreKV, allKeys, canonical)
 		if err != nil {

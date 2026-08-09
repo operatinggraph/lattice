@@ -28,7 +28,11 @@ func RetentionClasses() []pkgmgr.RetentionClassSpec {
 				"this class delivers retention WITHOUT pseudonymization. RetentionPeriod is DECLARATIVE: no automatic " +
 				"expiry timer exists yet, so P7Y states the controller's schedule rather than arming one. Destruction " +
 				"is the operator-driven ShredRetentionClassKey, and it reaches only records written under this " +
-				"declaration — an .encounter written before it is plaintext at rest and outside the shred.",
+				"declaration — an .encounter written before it is plaintext at rest and outside the shred. The one " +
+				"read path back to a record held here is clinicEncountersRead, the provider-anchored Secure Lens " +
+				"that decrypts summary/assessment/plan at projection for the treating provider; destroying this " +
+				"class's key nulls all three on the rebuild cmd/refractor triggers for every lens declaring this " +
+				"holder type.",
 		},
 	}
 }

@@ -216,9 +216,9 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 				`"required":["appointmentKey","summary"]}`,
 			FieldDescriptions: map[string]string{
 				"appointmentKey":    "The appointment being documented — auto-filled by the client from the appointment being viewed (dispatch.targetField), not user-entered.",
-				"summary":           "Required visit summary / clinical note. RAW clinical content — captured, never projected into a read model.",
-				"assessment":        "Optional clinical assessment / diagnosis. RAW PHI — captured, never projected.",
-				"plan":              "Optional treatment plan / orders. RAW PHI — captured, never projected.",
+				"summary":           "Required visit summary / clinical note. RAW clinical content — encrypted at rest, read back only through clinicEncountersRead by the treating provider.",
+				"assessment":        "Optional clinical assessment / diagnosis. RAW PHI — encrypted at rest, read back only through clinicEncountersRead by the treating provider.",
+				"plan":              "Optional treatment plan / orders. RAW PHI — encrypted at rest, read back only through clinicEncountersRead by the treating provider.",
 				"followUpRequested": "Whether this visit calls for a follow-up. OPERATIONAL, non-PHI — projected.",
 				"followUpDate":      "Suggested follow-up date, when followUpRequested is true. OPERATIONAL, non-PHI — projected.",
 			},
