@@ -408,7 +408,7 @@ func (s *targetSource) start(ctx context.Context) error {
 	events, err := s.conn.SubscribeKVChanges(
 		ctx,
 		s.bucket,
-		"vtx.meta.",
+		[]string{"vtx.meta."},
 		durable,
 		substrate.SubscribeKVOptions{IncludeHistory: true, Logger: s.logger},
 	)

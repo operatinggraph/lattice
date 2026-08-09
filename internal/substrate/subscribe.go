@@ -48,8 +48,9 @@ type SubscribeKVOptions struct {
 // SubscribeKVChanges creates a durable JetStream consumer on the backing
 // stream of the named KV bucket (NATS convention: KV bucket "foo" is
 // backed by stream "KV_foo"), filtered to subjects matching
-// "$KV.<bucket>.<keyPrefix>". Each KV mutation under the prefix is
-// decoded into a KVEvent and emitted on the returned channel.
+// "$KV.<bucket>.<keyPrefix>" for each entry of keyPrefixes. Each KV mutation
+// under any of the prefixes is decoded into a KVEvent and emitted on the
+// returned channel.
 //
 // Sequence position is persisted across restarts: re-invoking
 // SubscribeKVChanges with the same durableName resumes from the
@@ -57,13 +58,20 @@ type SubscribeKVOptions struct {
 // jetstream.KeyValue.Watch (which is ephemeral and replays full history
 // on every connect).
 //
-// keyPrefix semantics:
+// keyPrefixes must be non-empty. Each entry follows the same semantics:
 //   - "" — matches all keys (equivalent to ">")
 //   - "vtx.meta." — matches all keys under the vtx.meta prefix
 //   - "vtx.meta.>" or "vtx.*" — already a NATS wildcard, used verbatim
 //   - bare literal without trailing "." or wildcard — returns an error;
 //     callers must be explicit: append "." for prefix matching or ">" for
 //     all descendants
+//
+// A single-element slice produces a ConsumerConfig using the singular
+// FilterSubject field, never the plural FilterSubjects — nats-server treats
+// the two as different, mutually exclusive configs (CreateOrUpdateConsumer's
+// response even echoes them back differently), so a one-prefix subscription's
+// consumer config carries exactly the shape a single prefix needs, no more.
+// FilterSubjects (plural) is used only when len(keyPrefixes) > 1.
 //
 // On ctx.Done the returned channel is closed, but the durable consumer is
 // PRESERVED in the JetStream catalog — its acked position is the point of
@@ -82,7 +90,7 @@ type SubscribeKVOptions struct {
 func (c *Conn) SubscribeKVChanges(
 	ctx context.Context,
 	bucket string,
-	keyPrefix string,
+	keyPrefixes []string,
 	durableName string,
 	opts SubscribeKVOptions,
 ) (<-chan KVEvent, error) {
@@ -91,6 +99,9 @@ func (c *Conn) SubscribeKVChanges(
 	}
 	if durableName == "" {
 		return nil, fmt.Errorf("substrate: SubscribeKVChanges: durableName required")
+	}
+	if len(keyPrefixes) == 0 {
+		return nil, fmt.Errorf("substrate: SubscribeKVChanges: at least one keyPrefix required")
 	}
 
 	logger := opts.Logger
@@ -109,24 +120,37 @@ func (c *Conn) SubscribeKVChanges(
 
 	streamName := "KV_" + bucket
 	subjectPrefix := "$KV." + bucket + "."
-	normalizedPrefix, err := normalizePrefix(keyPrefix)
-	if err != nil {
-		return nil, fmt.Errorf("substrate: SubscribeKVChanges: %w", err)
+	normalizedPrefixes := make([]string, len(keyPrefixes))
+	for i, kp := range keyPrefixes {
+		np, err := normalizePrefix(kp)
+		if err != nil {
+			return nil, fmt.Errorf("substrate: SubscribeKVChanges: %w", err)
+		}
+		normalizedPrefixes[i] = np
 	}
-	filterSubject := subjectPrefix + normalizedPrefix
 
 	deliverPolicy := jetstream.DeliverNewPolicy
 	if opts.IncludeHistory {
 		deliverPolicy = jetstream.DeliverAllPolicy
 	}
 
-	cons, err := c.js.CreateOrUpdateConsumer(ctx, streamName, jetstream.ConsumerConfig{
+	cfg := jetstream.ConsumerConfig{
 		Durable:       durableName,
-		FilterSubject: filterSubject,
 		DeliverPolicy: deliverPolicy,
 		AckPolicy:     ackPolicy,
 		MaxDeliver:    maxDeliver,
-	})
+	}
+	if len(normalizedPrefixes) == 1 {
+		cfg.FilterSubject = subjectPrefix + normalizedPrefixes[0]
+	} else {
+		filterSubjects := make([]string, len(normalizedPrefixes))
+		for i, np := range normalizedPrefixes {
+			filterSubjects[i] = subjectPrefix + np
+		}
+		cfg.FilterSubjects = filterSubjects
+	}
+
+	cons, err := c.js.CreateOrUpdateConsumer(ctx, streamName, cfg)
 	if err != nil {
 		return nil, fmt.Errorf("substrate: SubscribeKVChanges: create consumer %q on %q: %w",
 			durableName, streamName, err)

@@ -113,7 +113,7 @@ func (h *Host) Start(ctx context.Context) error {
 	events, err := h.cfg.Conn.SubscribeKVChanges(
 		ctx,
 		h.cfg.CoreKVBucket,
-		"vtx.meta.",
+		[]string{"vtx.meta."},
 		durable,
 		substrate.SubscribeKVOptions{IncludeHistory: true, Logger: h.logger},
 	)

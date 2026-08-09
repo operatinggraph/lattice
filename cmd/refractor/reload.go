@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"log/slog"
+	"sync"
 
 	"github.com/operatinggraph/lattice/internal/refractor/adapter"
 	"github.com/operatinggraph/lattice/internal/refractor/health"
@@ -10,6 +11,7 @@ import (
 	"github.com/operatinggraph/lattice/internal/refractor/pipeline"
 	"github.com/operatinggraph/lattice/internal/refractor/projection"
 	"github.com/operatinggraph/lattice/internal/refractor/ruleengine/full"
+	"github.com/operatinggraph/lattice/internal/refractor/taxonomy"
 )
 
 // reactivateRemedy names what an operator must actually do when a spec change
@@ -220,6 +222,19 @@ func stringsEqual(a, b []string) bool {
 // therefore the only source that arms the surface pin for the one family whose
 // lenses share a single table with five other producers, where a lens moved off
 // its surface leaves rows no producer can address.
+//
+// resolver, when non-nil and r carries expansion labels, is consulted here to
+// seed taxExpansion/taxExpansionStatus from the SAME answer activation's own
+// UseFullEngineBranches call just used moments earlier (resolver state cannot
+// have changed between the two — both run synchronously on one goroutine) —
+// not left at the conservative (nil, StatusUnknown) zero value. Without this,
+// the first live taxonomy event after every single activation would
+// unconditionally look like a change and force a redundant durable
+// delete-recreate + DeliverLastPerSubject replay + rebuilding health status,
+// for a set that never actually differs from what the pipeline was activated
+// against. nil is safe (and used by tests that construct entries directly): it
+// just leaves the baseline at zero value, at worst costing one such redundant
+// re-derivation the first time a real taxonomy event arrives.
 func newPipelineEntry(
 	r *lens.Rule,
 	adpt adapter.Adapter,
@@ -227,24 +242,35 @@ func newPipelineEntry(
 	reporter *health.Reporter,
 	cancel context.CancelFunc,
 	done chan struct{},
+	resolver *taxonomy.Resolver,
 ) *pipelineEntry {
+	labels := unionExpansionLabels(r)
+	var expansion map[string]map[string]struct{}
+	status := taxonomy.StatusUnknown
+	if resolver != nil && len(labels) > 0 {
+		expansion, status = resolver.Expand(labels)
+	}
 	return &pipelineEntry{
-		cancel:        cancel,
-		done:          done,
-		pipeline:      p,
-		reporter:      reporter,
-		canonicalName: r.CanonicalName,
-		authPlane:     projection.IsAuthPlane(r),
-		guarded:       adapterIsGuarded(adpt),
-		target:        r.Into.Target,
-		bucket:        r.Into.Bucket,
-		table:         r.Into.Table,
-		dsn:           r.Into.DSN,
-		protected:     r.Into.Protected,
-		grantSource:   r.Into.GrantSource,
-		grantTable:    r.Into.GrantTable,
-		output:        r.Output,
-		secureColumns: r.Into.SecureColumns,
+		cancel:             cancel,
+		done:               done,
+		pipeline:           p,
+		reporter:           reporter,
+		canonicalName:      r.CanonicalName,
+		authPlane:          projection.IsAuthPlane(r),
+		guarded:            adapterIsGuarded(adpt),
+		target:             r.Into.Target,
+		bucket:             r.Into.Bucket,
+		table:              r.Into.Table,
+		dsn:                r.Into.DSN,
+		protected:          r.Into.Protected,
+		grantSource:        r.Into.GrantSource,
+		grantTable:         r.Into.GrantTable,
+		output:             r.Output,
+		secureColumns:      r.Into.SecureColumns,
+		rule:               r,
+		taxExpansionLabels: labels,
+		taxExpansion:       expansion,
+		taxExpansionStatus: status,
 	}
 }
 
@@ -258,6 +284,51 @@ type reloader struct {
 	lookup       func(lensID string) (*pipelineEntry, bool)
 	buildAdapter func(*lens.Rule) (adapter.Adapter, error)
 	fullEngine   *full.Engine
+
+	// resolver is the taxonomy resolver every full-engine pipeline's `*`
+	// expansion reads (installed via pipeline.SetTaxonomyResolver at
+	// activation, cmd/refractor/main.go). taxonomyChanged calls its own
+	// Expand — not merely relying on what UseFullEngineBranches computes
+	// internally — because comparing against the PREVIOUS Expand answer
+	// (entry.taxExpansion) is what tells a real set change from a no-op;
+	// UseFullEngineBranches only ever sees "the current answer", with
+	// nothing to diff against.
+	resolver *taxonomy.Resolver
+
+	// liveEntries snapshots the running pipeline registry under its own
+	// lock — reloader has no direct handle on cmd/refractor's registry
+	// map/mutex, so main.go supplies this closure the same way it supplies
+	// lookup.
+	liveEntries func() []*pipelineEntry
+
+	// activateForTaxonomy re-attempts activation of a lens previously
+	// refused at UseFullEngineBranches for an unknown taxonomy expansion
+	// (main.go's startPipeline). Supplied so retryRefused can drive
+	// activation without reloader importing startPipeline's closure-local
+	// state (the registry, the adapter builder, etc). Must be the SAME
+	// existence-checked entry point src.SetLoadCallback uses for a first
+	// load (main.go wires it to that closure, not to the bare startPipeline
+	// func) — otherwise a retry could reactivate a lens a concurrent load
+	// already registered, racing two pipelines for one lens ID.
+	activateForTaxonomy func(*lens.Rule)
+
+	// ruleKnown reports whether CoreKVSource still has ruleID loaded
+	// (src.Get's second return, ignoring the rule itself) — retryRefused's
+	// belt to remover.remove/pipelineDeleter.Delete's eviction braces: a
+	// rule tombstoned while queued in refused is evicted here instead of
+	// retried, on the offchance some deletion path reaches the registry
+	// without going through either of those two. nil in tests that supply
+	// no source; retryRefused then retries every queued rule unconditionally.
+	ruleKnown func(ruleID string) bool
+
+	refusedMu sync.Mutex
+	// refused holds every lens whose activation failed at
+	// UseFullEngineBranches specifically because its taxonomy expansion was
+	// unknown (dynamic-type-taxonomy-design.md §14 Fire A item 4, §17.6's
+	// "a boot refusal is never retried" precondition) — never any OTHER
+	// activation failure. taxonomyChanged retries each entry here on every
+	// taxonomy event; an entry is removed the moment its retry activates.
+	refused map[string]*lens.Rule
 }
 
 // refuse tells the operator, in both places they look, that their edit did not
@@ -277,6 +348,20 @@ func (rl *reloader) refuse(entry *pipelineEntry, lensID, reason string, attrs ..
 func (rl *reloader) update(_, newLens *lens.Rule, kind lens.UpdateKind) {
 	entry, ok := rl.lookup(newLens.ID)
 	if !ok {
+		// A lens can be "unknown" to the registry for two different reasons:
+		// genuinely never activated (or already removed) — the Warn below —
+		// or REFUSED and queued in rl.refused pending a taxonomy event, in
+		// which case this edit is the operator's fix and must not be
+		// silently discarded in favor of the stale pre-edit rule the next
+		// retry would otherwise activate (this file's own header states the
+		// principle for the opposite direction: "a refused edit must not
+		// become the baseline for the next one" — replacing the queued rule
+		// here is that same principle applied to the queue itself).
+		if rl.updateRefusedForTaxonomy(newLens) {
+			rl.logger.Info("lens update replaces the pending rule queued while refused for taxonomy",
+				"lensId", newLens.ID, "kind", kind)
+			return
+		}
 		rl.logger.Warn("update on unknown lens", "lensId", newLens.ID, "kind", kind)
 		return
 	}
@@ -347,6 +432,33 @@ func (rl *reloader) update(_, newLens *lens.Rule, kind lens.UpdateKind) {
 			rl.refuse(entry, newLens.ID, "label expansion (MATCH update)", "err", err)
 			return
 		}
+		// The RUNNING pipeline now evaluates newLens — entry.rule (and the
+		// taxonomy re-derivation baseline it feeds) must track it, not the
+		// rule this reload started from (dynamic-type-taxonomy-design.md §14
+		// Fire A item 4). Re-deriving the (map, Status) baseline HERE, from
+		// the same resolver call UseFullEngineBranches just made internally,
+		// avoids a spurious redundant re-derivation on the next unrelated
+		// taxonomy event; leaving it at the conservative (nil, StatusUnknown)
+		// zero value when there is no resolver (e.g. a test reloader) or no
+		// `*` in the new rule is still safe — rederiveEntry no-ops on an
+		// empty taxExpansionLabels, and any wrong guess elsewhere would only
+		// cost one extra, never a missed, re-derivation.
+		entry.rule = newLens
+		entry.taxExpansionLabels = unionExpansionLabels(newLens)
+		var newExpansion map[string]map[string]struct{}
+		newStatus := taxonomy.StatusUnknown
+		if rl.resolver != nil && len(entry.taxExpansionLabels) > 0 {
+			newExpansion, newStatus = rl.resolver.Expand(entry.taxExpansionLabels)
+		}
+		// taxMu-guarded: a rederiveEntry-spawned Rebuild goroutine from an
+		// EARLIER taxonomy re-derivation on this same entry may still be
+		// in flight and write these fields concurrently (entry.taxMu's own
+		// doc) — this write, though it runs on the single dispatch
+		// goroutine like everything else in update(), touches fields a
+		// background goroutine also touches, so it takes the same lock.
+		entry.taxMu.Lock()
+		entry.taxExpansion, entry.taxExpansionStatus = newExpansion, newStatus
+		entry.taxMu.Unlock()
 		rl.logger.Info("lens MATCH hot-reloaded", "lensId", newLens.ID)
 		entry.reporter.SetRuleSequence(newLens.Sequence)
 		entry.reporter.SetRuleEngine(newLens.ResolvedEngine)

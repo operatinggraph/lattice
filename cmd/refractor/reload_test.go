@@ -492,6 +492,35 @@ func TestReloaderUpdate_UnknownLensIsIgnored(t *testing.T) {
 	rl.update(authPlaneRule(t), authPlaneRule(t), lens.IntoOnly)
 }
 
+// TestReloaderUpdate_UnknownButRefusedLens_ReplacesQueuedRule covers A2: an
+// "unknown lens" update is not always a genuinely-unregistered one — it can
+// also be an operator's spec edit landing while the lens is refused and
+// queued in rl.refused pending a taxonomy event. That edit must replace the
+// queued rule, not be dropped in favor of the pre-edit one the eventual
+// retry would otherwise activate — this file's header states the principle
+// for the opposite direction ("a refused edit must not become the baseline
+// for the next one"); this is that same principle applied to the queue.
+func TestReloaderUpdate_UnknownButRefusedLens_ReplacesQueuedRule(t *testing.T) {
+	rl := &reloader{
+		ctx:    context.Background(),
+		logger: discardLogger(),
+		lookup: func(string) (*pipelineEntry, bool) { return nil, false },
+	}
+	original := authPlaneRule(t)
+	rl.recordRefusedForTaxonomy(original)
+
+	edited := authPlaneRule(t)
+	edited.Sequence = 99
+
+	rl.update(original, edited, lens.MatchChange)
+
+	rl.refusedMu.Lock()
+	queued := rl.refused[edited.ID]
+	rl.refusedMu.Unlock()
+	require.NotNil(t, queued)
+	assert.Same(t, edited, queued, "the queued rule must be replaced by the edit, not left as the pre-edit rule")
+}
+
 func TestReloaderUpdate_MatchChangeSecureColumnsRefusalIsRecorded(t *testing.T) {
 	kv := startHealthKV(t)
 	reporter := health.New(kv, "lens-reload-test")
@@ -537,7 +566,7 @@ func TestNewPipelineEntry_GuardedFollowsTheAdapterNotTheRulePredicate(t *testing
 	require.NoError(t, err)
 	require.False(t, requiresGuard, "precondition: the rule predicate does not see the grant family")
 
-	entry := newPipelineEntry(r, structurallyGuardedAdapter{}, nil, nil, nil, nil)
+	entry := newPipelineEntry(r, structurallyGuardedAdapter{}, nil, nil, nil, nil, nil)
 	assert.True(t, entry.guarded, "the activated adapter's guard is what the entry records")
 
 	// And the pin it arms refuses the edit that would strand the lens's rows.
@@ -547,7 +576,7 @@ func TestNewPipelineEntry_GuardedFollowsTheAdapterNotTheRulePredicate(t *testing
 }
 
 func TestNewPipelineEntry_SnapshotsTheWholeSurface(t *testing.T) {
-	entry := newPipelineEntry(grantRule(), unguardableAdapter{}, nil, nil, nil, nil)
+	entry := newPipelineEntry(grantRule(), unguardableAdapter{}, nil, nil, nil, nil, nil)
 	assert.False(t, entry.guarded)
 	assert.Equal(t, "postgres", entry.target)
 	assert.Equal(t, "actor_read_grants", entry.table)

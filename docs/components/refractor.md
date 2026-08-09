@@ -28,7 +28,7 @@ Key sub-packages:
 | Sub-package | Role |
 |-------------|------|
 | `pipeline/` | `Pipeline` struct; drives per-lens CDC-event → evaluate → adapt loop; `LatencyRingBuffer` (128-sample window) |
-| `lens/` | `CoreKVSource` (durable consumer over `vtx.meta.>`, routes `meta.lens` class to loader); `Rule` type; `translateSpec` from `LensSpec` to `Rule`; engine selection via registry |
+| `lens/` | `CoreKVSource` (durable consumer over `vtx.meta.>` and `lnk.meta.*.subtypeOf.>`, routes `meta.lens` class to the lens loader and accumulates the dynamic type taxonomy from vertexType/canonicalName/subtypeOf events — dynamic-type-taxonomy-design.md §6.1); `Rule` type; `translateSpec` from `LensSpec` to `Rule`; engine selection via registry |
 | `adapter/` | `Adapter` interface; `nats_kv` adapter; Postgres adapter; `nats_subject` adapter (Personal Lens transport); `PoolManager` for Postgres connection pooling |
 | `adjacency/` | Adjacency KV read helpers |
 | `consumer/` | `Bootstrapper` (builds the adjacency index from link CDC events). Per-lens durable JetStream consumers are owned by each `pipeline.Pipeline` via `substrate.ConsumerSupervisor` (see Lens lifecycle step 5). |
@@ -50,7 +50,7 @@ Key sub-packages:
 
 | Contract | Source | Notes |
 |----------|--------|-------|
-| **Core KV CDC events** | Durable JetStream consumer (`substrate.SubscribeKVChanges`) on the `KV_core-kv` backing stream | Both the all-mutations stream and the `vtx.meta.>` lens-def watch run on the same durable-consumer pattern; ack position persists across restarts so a restarted Refractor resumes rather than replaying from the start. |
+| **Core KV CDC events** | Durable JetStream consumer (`substrate.SubscribeKVChanges`) on the `KV_core-kv` backing stream | Both the all-mutations stream and the lens-def/taxonomy watch (`vtx.meta.>` + `lnk.meta.*.subtypeOf.>` on one consumer, dynamic-type-taxonomy-design.md §6.1) run on the same durable-consumer pattern; ack position persists across restarts so a restarted Refractor resumes rather than replaying from the start. |
 | **Lens meta-vertices** | Core KV `vtx.meta.<NanoID>` with `class: meta.lens` and a `.spec` aspect | The `spec` aspect carries: `id`, `canonicalName`, `targetType`, `targetConfig`, `cypherRule`, `outputSchema`, `engine` (optional). `engine` must be `"full"` (or absent → full); any other value fails lens validation. |
 | **Adjacency KV** | `refractor-adjacency` bucket | Refractor's internal inbound-link index, built by `consumer/bootstrap.go` from every `lnk.*` CDC event; two directional entries per edge. EdgeID == link key. The adjacency is the inbound-link lookup index for the cypher executor. |
 
@@ -501,7 +501,7 @@ near-duplicate identities.
 ## Lens lifecycle
 
 1. **Lens definition arrives** via Core KV mutation on `vtx.meta.<NanoID>` (vertex with `class: meta.lens`) + a `.spec` aspect
-2. **`CoreKVSource`** consumes `vtx.meta.>` via the durable consumer; routes entries with class `meta.lens` to the spec parser. CDC ordering is not guaranteed — if the `.spec` aspect arrives before its parent vertex, it is buffered in `pendingSpecs` until the parent vertex's class is observed
+2. **`CoreKVSource`** consumes `vtx.meta.>` and `lnk.meta.*.subtypeOf.>` via one durable consumer; routes vertex entries with class `meta.lens` to the spec parser, and separately accumulates `meta.ddl.vertexType`/`canonicalName`/`subtypeOf` events into the dynamic type taxonomy (dynamic-type-taxonomy-design.md §6.1). CDC ordering is not guaranteed — if the `.spec` aspect arrives before its parent vertex, it is buffered in `pendingSpecs` until the parent vertex's class is observed
 3. **`translateSpec`** converts `LensSpec` → `Rule`; engine selection via `Registry.SelectForLens`; `CompiledRule` populated
 4. **`startPipeline`** (in `cmd/refractor/main.go`) constructs the adapter (opens the target KV bucket / Postgres table), wires a `pipeline.Pipeline`, installs a `LatencyRingBuffer`, launches a `health.Reporter`
 5. **The pipeline's `substrate.ConsumerSupervisor`** (built in `pipeline.Pipeline.RunOn`, configured from `cmd/refractor/main.go`) creates a durable JetStream consumer (durable name `refractor-<ruleID>`) on the `KV_core-kv` backing stream filtered to the lens's source-key prefix

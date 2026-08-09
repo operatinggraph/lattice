@@ -33,11 +33,22 @@ const deleteTimeout = 30 * time.Second
 type pipelineDeleter struct {
 	ruleID string
 	entry  *pipelineEntry
+	// clearRefused evicts ruleID from the taxonomy refused-lens registry
+	// (reloader.clearRefusedForTaxonomy) unconditionally, regardless of
+	// whether it happens to be queued there right now — deleting a lens ID
+	// must guarantee it stops being resurrectable by a later
+	// retryRefused sweep, whichever of the two Deleter triggers reached it.
+	// May be nil (tests that do not exercise the taxonomy seam).
+	clearRefused func(ruleID string)
 }
 
 // Delete implements control.Deleter. See Pipeline.RemoveConsumer's doc for
 // why the durable must be removed BEFORE the run context is cancelled.
 func (d pipelineDeleter) Delete(ctx context.Context) error {
+	if d.clearRefused != nil {
+		d.clearRefused(d.ruleID)
+	}
+
 	err := retryTransientBoot(ctx, func() error {
 		return d.entry.pipeline.RemoveConsumer(ctx)
 	})
@@ -86,6 +97,21 @@ type remover struct {
 	// (control.Service.Unregister) — the same cleanup deleteRule performs
 	// after a successful operator-triggered delete.
 	unregister func(lensID string)
+	// clearRefused evicts a tombstoned lens's ID from the taxonomy
+	// refused-lens registry (reloader.clearRefusedForTaxonomy), called
+	// UNCONDITIONALLY — not gated on take finding a registry entry. A lens
+	// refused for an unknown taxonomy expansion never reaches the pipeline
+	// registry take looks up, but CoreKVSource still calls remove for its
+	// tombstone (dispatchSpec sets s.known regardless of whether the load
+	// callback's activation attempt succeeded), so take's !ok branch is
+	// EXACTLY the path a refused lens's tombstone takes — gating the
+	// eviction on take's result would leave a deleted lens's stale rule
+	// queued forever, for retryRefused to resurrect the instant the next
+	// taxonomy event lands: it builds an adapter, registers a durable, and
+	// projects rows for a lens definition Core KV no longer has (on a grant
+	// producer, a resurrected grant writer with no definition behind it).
+	// May be nil (tests that do not exercise the taxonomy seam).
+	clearRefused func(ruleID string)
 }
 
 // remove is lens.RemoveCallback. old is CoreKVSource's last-loaded snapshot
@@ -95,15 +121,20 @@ func (rm *remover) remove(old *lens.Rule) {
 	if old == nil {
 		return
 	}
+	if rm.clearRefused != nil {
+		rm.clearRefused(old.ID)
+	}
 	entry, ok := rm.take(old.ID)
 	if !ok {
-		// Never started (activation failed before the registry insert) or
-		// already removed by a concurrent delete — nothing to tear down.
+		// Never started (activation failed before the registry insert — the
+		// clearRefused call above is what actually matters for THAT case)
+		// or already removed by a concurrent delete — nothing else to tear
+		// down.
 		return
 	}
 	delCtx, cancel := context.WithTimeout(context.Background(), deleteTimeout)
 	defer cancel()
-	if err := (pipelineDeleter{ruleID: old.ID, entry: entry}).Delete(delCtx); err != nil {
+	if err := (pipelineDeleter{ruleID: old.ID, entry: entry, clearRefused: rm.clearRefused}).Delete(delCtx); err != nil {
 		rm.logger.Error("remove tombstoned lens", "lensId", old.ID, "err", err)
 	}
 	rm.unregister(old.ID)

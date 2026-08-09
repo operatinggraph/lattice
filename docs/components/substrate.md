@@ -190,14 +190,21 @@ The large-file / blob surface — bytes live in a JetStream **Object Store**, of
 
 ### Durable KV change consumer
 
-`(*Conn).SubscribeKVChanges(ctx, bucket, keyPrefix, durableName string, opts SubscribeKVOptions) (<-chan KVEvent, error)`
+`(*Conn).SubscribeKVChanges(ctx, bucket, keyPrefixes []string, durableName string, opts SubscribeKVOptions) (<-chan KVEvent, error)`
 
 Creates a durable JetStream consumer over the `KV_<bucket>` backing stream,
-filtered to `keyPrefix`. Re-invoking with the same `durableName` resumes from
-the persisted ack position, so a restarted consumer continues rather than
+filtered to `keyPrefixes` (must be non-empty). A single-element slice uses the
+singular `FilterSubject` field; `len(keyPrefixes) > 1` uses `FilterSubjects`
+(plural — nats-server treats the two as mutually exclusive configs) instead,
+so an event under ANY of the prefixes surfaces. Every existing durable's
+config must not change shape on a redeploy that doesn't add a second prefix,
+which the singular-field-for-one-prefix rule guarantees. Re-invoking with the
+same `durableName` resumes from the
+persisted ack position, so a restarted consumer continues rather than
 replaying from the start. This is the CDC primitive Refractor's `corekv_source`
-uses to watch Core KV (both the all-mutations stream and the `vtx.meta.>`
-lens-def watch).
+uses to watch Core KV — `["vtx.meta.", "lnk.meta.*.subtypeOf.>"]` on one
+consumer, so a lens-definition change and a dynamic-type-taxonomy change
+share a single total order (dynamic-type-taxonomy-design.md §6.1).
 
 `KVEvent` fields: `Bucket`, `Key`, `Value`, `Revision` (KV revision = backing
 stream sequence), `IsDeleted` (envelope `isDeleted`, or true on a KV tombstone).
@@ -206,7 +213,7 @@ The event carries enough to reconstruct post-mutation state without an extra
 
 `SubscribeKVOptions` (zero value is valid — replay-from-new, AckExplicit,
 MaxDeliver=10):
-- `IncludeHistory bool` — replay every existing entry under `keyPrefix` from the start of the stream (default false = new mutations only).
+- `IncludeHistory bool` — replay every existing entry under each of `keyPrefixes` from the start of the stream (default false = new mutations only).
 - `AckPolicy jetstream.AckPolicy` — overrides the default `AckExplicitPolicy`; most callers leave it zero.
 - `MaxDeliver int` — redelivery bound on Nak; defaults to 10 when zero.
 - `Logger *slog.Logger` — diagnostics sink; defaults to `slog.Default()`.

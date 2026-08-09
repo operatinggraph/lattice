@@ -317,7 +317,9 @@ submitted (a fresh install, a version-bump upgrade, or a same-version `--force`
 re-apply — a same-version `install` *without* `--force` is the idempotency no-op
 above, not an activation gap), Refractor's `CoreKVSource` and the Processor's
 `DDLCache` both react to it exactly like any other CDC event: `CoreKVSource` holds a
-**durable** `vtx.meta.>` subscription for the life of the process (`internal/refractor/lens/corekv_source.go`),
+**durable** subscription over `vtx.meta.>` and `lnk.meta.*.subtypeOf.>` (one
+consumer, dynamic-type-taxonomy-design.md §6.1) for the life of the process
+(`internal/refractor/lens/corekv_source.go`),
 and its `dispatchSpec` calls the **same** load callback whether the lens vertex is
 brand new or already known — there is no install-time-only path. `DDLCache.Invalidate`
 (`internal/processor/ddl_cache.go`, called synchronously from step 8 on every committed

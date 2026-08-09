@@ -570,7 +570,7 @@ func TestCoreKVSource_MigratesFromLegacyFixedDurable(t *testing.T) {
 	// "refractor-lens-source" (the bare legacy fixed name), already caught
 	// up to the stream tip — the exact state that froze the live registry.
 	legacyCtx, cancelLegacy := context.WithCancel(ctx)
-	legacyCh, err := conn.SubscribeKVChanges(legacyCtx, "core-kv", "vtx.meta.", "refractor-lens-source",
+	legacyCh, err := conn.SubscribeKVChanges(legacyCtx, "core-kv", []string{"vtx.meta."}, "refractor-lens-source",
 		substrate.SubscribeKVOptions{IncludeHistory: true})
 	require.NoError(t, err)
 	select {

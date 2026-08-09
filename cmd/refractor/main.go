@@ -41,6 +41,7 @@ import (
 	"github.com/operatinggraph/lattice/internal/refractor/ruleengine"
 	"github.com/operatinggraph/lattice/internal/refractor/ruleengine/full"
 	"github.com/operatinggraph/lattice/internal/refractor/subjects"
+	"github.com/operatinggraph/lattice/internal/refractor/taxonomy"
 	"github.com/operatinggraph/lattice/internal/substrate"
 	"github.com/operatinggraph/lattice/internal/vault"
 )
@@ -116,6 +117,44 @@ type pipelineEntry struct {
 	// against this — not against the last-seen spec — so a refused update
 	// cannot poison the baseline and wedge the lens.
 	secureColumns []lens.SecureColumn
+
+	// rule is the *lens.Rule the RUNNING pipeline was activated with — set
+	// at activation (newPipelineEntry) and replaced only by a successful
+	// MATCH hot-reload (reload.go's MatchChange arm), never by an INTO-only
+	// one (which swaps the adapter, not the compiled rule the pipeline
+	// evaluates). A taxonomy re-derivation (reloader.rederiveEntry) needs
+	// the actual CompiledRule/CompiledBranches to call
+	// UseFullEngineBranches again — there is no cheaper thing to compare
+	// against, because the compiled rule IS the state a re-derivation
+	// replaces (dynamic-type-taxonomy-design.md §14 Fire A item 4, §17.6).
+	rule *lens.Rule
+
+	// taxExpansionLabels is the union of ExpansionLabels() across rule's
+	// CompiledRule + CompiledBranches (unionExpansionLabels), computed once
+	// whenever rule is set rather than on every taxonomy event. A rule with
+	// no `*` anywhere has an empty, non-nil union — what both
+	// newPipelineEntry and reloader.rederiveEntry use to skip a lens the
+	// taxonomy can never affect.
+	taxExpansionLabels map[string]struct{}
+
+	// taxMu guards taxExpansion/taxExpansionStatus below. Both CoreKVSource's
+	// single dispatch goroutine (reloader.rederiveEntry's read, comparing
+	// against the cached baseline) and a rederiveEntry-spawned Rebuild
+	// goroutine (the write, once Rebuild actually succeeds — see
+	// rederiveEntry's doc on why the commit is deferred) touch these fields,
+	// so every read and every write goes through taxMu.
+	taxMu sync.Mutex
+	// taxExpansion and taxExpansionStatus cache the (map, Status) the
+	// taxonomy resolver's Expand last answered for taxExpansionLabels AND
+	// that the running pipeline's consumer filter was successfully rebuilt
+	// against — the baseline reloader.rederiveEntry diffs a fresh Expand
+	// call against to tell a real taxonomy change from a no-op. Seeded at
+	// activation from the resolver (newPipelineEntry), not left at a
+	// conservative zero value — see that function's doc for why an
+	// inaccurate baseline only ever costs one redundant re-derivation,
+	// never a missed one.
+	taxExpansion       map[string]map[string]struct{}
+	taxExpansionStatus taxonomy.Status
 }
 
 // isPerEntryCapReadOutput reports whether output describes a cap-read.*
@@ -453,6 +492,23 @@ func main() {
 		registry = make(map[string]*pipelineEntry)
 		wg       sync.WaitGroup
 	)
+
+	// taxResolver is the single dynamic-type-taxonomy resolver every
+	// full-engine pipeline's `*` expansion reads (dynamic-type-taxonomy-
+	// design.md §14 Fire A item 4) — installed on every pipeline at
+	// activation via SetTaxonomyResolver (startPipeline, below) and fed by
+	// the lens source's taxonomy callback (wired near src.Start, below).
+	taxResolver := taxonomy.New()
+
+	// rl is predeclared empty here: startPipeline (defined next) must be
+	// able to record a taxonomy activation refusal on it, and startPipeline
+	// is itself one of rl's dependencies (rl.activateForTaxonomy) — so rl
+	// must exist before startPipeline's closure captures it. The remaining
+	// fields are filled in further down, once everything they close over
+	// exists; recordRefusedForTaxonomy/clearRefusedForTaxonomy only ever
+	// touch rl.refused/rl.refusedMu, which need no other field to be safe
+	// to call against this zero-value *reloader.
+	rl := &reloader{}
 
 	// capReadShredTargets is re-derived from the live registry on every shred
 	// event (not computed once here) so a package installed after this line
@@ -888,6 +944,16 @@ func main() {
 	}
 
 	startPipeline := func(r *lens.Rule) {
+		// Computed once, at function scope, so both the taxonomy-refusal
+		// recording (below, on a UseFullEngineBranches failure) and the
+		// taxonomy-refusal CLEARING (at the registry insert, far below —
+		// not right after UseFullEngineBranches succeeds, since several
+		// more return paths sit between that and a lens actually being
+		// live) read the identical value. Safe to compute unconditionally
+		// for every lens, full-engine or not: unionExpansionLabels' own
+		// type assertion answers empty for a non-full-engine rule.
+		expansionLabels := unionExpansionLabels(r)
+
 		// A Secure Lens needs the Vault before anything else is built —
 		// refusing here leaves no half-constructed state behind.
 		if len(r.Into.SecureColumns) > 0 && vaultBackend == nil {
@@ -925,6 +991,11 @@ func main() {
 			logger.Error("create pipeline", "lensId", r.ID, "err", err)
 			return
 		}
+		// Installed before UseFullEngineBranches below, like SetSecureDecryptor
+		// — SetTaxonomyResolver's own doc requires it be set before Run, and
+		// useFullEngineBranches reads it unguarded (dynamic-type-taxonomy-
+		// design.md §14 Fire A item 4).
+		p.SetTaxonomyResolver(taxResolver)
 
 		// Wire full engine when selected.
 		if r.ResolvedEngine == ruleengine.EngineFull {
@@ -985,8 +1056,36 @@ func main() {
 			}
 			if err := p.UseFullEngineBranches(fullEngine, r.CompiledRule, r.CompiledBranches); err != nil {
 				logger.Error("full engine activation", "lensId", r.ID, "err", err)
+				// A `*` lens refused specifically because its taxonomy
+				// expansion is unknown (taxonomy.StatusUnknown — no resolver
+				// snapshot yet, an unresolvable label, or a cycle/depth
+				// fault) is not permanently broken: it is dark until the
+				// taxonomy supplies what it needs, which the taxonomy
+				// callback's rl.taxonomyChanged() retries on every live
+				// event (§14 Fire A item 4, §17.6's "a boot refusal is
+				// never retried" precondition). Recorded unconditionally
+				// whenever this lens HAS expansion labels — not only when
+				// the error looks taxonomy-shaped — because any other
+				// UseFullEngineBranches failure for a `*` lens (a cycle, an
+				// unresolvable label) is exactly as retry-worthy once the
+				// taxonomy changes; a lens with NO expansion labels never
+				// reaches this branch at all, since its UseFullEngineBranches
+				// never calls the resolver and so never fails for a
+				// taxonomy reason.
+				if len(expansionLabels) > 0 {
+					rl.recordRefusedForTaxonomy(r)
+				}
 				return
 			}
+			// NOT cleared here — clearRefusedForTaxonomy runs only once this
+			// lens actually reaches the registry, far below: several more
+			// return paths sit between this line and that one
+			// (SetDiffRetraction, ValidateUnanchoredForDiffRetraction,
+			// ValidateNoFilteringWhereForConvergence, InstallActorAggregate,
+			// InstallPersonalLens, NewSecureDecryptor,
+			// ParseISO8601Duration, ...), and a lens that fails on one of
+			// them belongs in neither the registry nor refused — dark for
+			// the process's life, with nothing left to ever retry it.
 		}
 
 		// Fire 3 (negative-filter-retraction-projection-design.md §2.4): a plain
@@ -1210,11 +1309,22 @@ func main() {
 		lensCtx, cancel := context.WithCancel(ctx)
 		done := make(chan struct{})
 
-		entry := newPipelineEntry(r, adpt, p, reporter, cancel, done)
+		entry := newPipelineEntry(r, adpt, p, reporter, cancel, done, taxResolver)
 
 		mu.Lock()
 		registry[r.ID] = entry
 		mu.Unlock()
+		// The lens is genuinely live only from this point on — not from the
+		// earlier UseFullEngineBranches success above, which several more
+		// return paths still separate from ever reaching the registry (a
+		// lens failing on one of them belongs in neither the registry nor
+		// refused, or it is dark for the process's life with nothing to
+		// retry it). len(expansionLabels) > 0 gates this the same way
+		// recordRefusedForTaxonomy's call does, so a lens that was never
+		// queued (no `*`) costs a harmless no-op map delete.
+		if len(expansionLabels) > 0 {
+			rl.clearRefusedForTaxonomy(r.ID)
+		}
 
 		wg.Add(1)
 		go func() {
@@ -1233,7 +1343,7 @@ func main() {
 		// (control.Service.deleteRule) dispatches to this. remover.remove
 		// (below) drives the SAME pipelineDeleter automatically on a Core KV
 		// tombstone, so the two triggers share one removal mechanism.
-		controlSvc.RegisterDeleter(r.ID, pipelineDeleter{ruleID: r.ID, entry: entry})
+		controlSvc.RegisterDeleter(r.ID, pipelineDeleter{ruleID: r.ID, entry: entry, clearRefused: rl.clearRefusedForTaxonomy})
 		// Per-actor reconciliation is defined only for actor-aggregate lenses
 		// (capability-projection-reconciliation-design.md §3.1); the pipeline
 		// refuses structurally besides, so the registry is the routing gate
@@ -1275,18 +1385,53 @@ func main() {
 		return entry, ok
 	}
 
-	rl := &reloader{
-		ctx:          ctx,
-		logger:       logger,
-		lookup:       lookupEntry,
-		buildAdapter: buildRuleAdapter,
-		fullEngine:   fullEngine,
+	// activateIfNotRegistered is THE entry point for "load (or reload) this
+	// lens ID if it is not already running" — src.SetLoadCallback (a first
+	// CDC sighting) and rl.activateForTaxonomy (retryRefused's retry) must
+	// go through the identical existence check, not each duplicate it or,
+	// worse, one of them call the bare startPipeline directly: two callers
+	// racing startPipeline for the same ID with no guard between them could
+	// register two pipelines for one lens.
+	activateIfNotRegistered := func(r *lens.Rule) {
+		mu.Lock()
+		_, exists := registry[r.ID]
+		mu.Unlock()
+		if !exists {
+			startPipeline(r)
+		}
 	}
+
+	// Fill in the remaining fields of the rl predeclared above — every
+	// dependency below is now in scope.
+	rl.ctx = ctx
+	rl.logger = logger
+	rl.lookup = lookupEntry
+	rl.buildAdapter = buildRuleAdapter
+	rl.fullEngine = fullEngine
+	rl.resolver = taxResolver
+	rl.liveEntries = func() []*pipelineEntry {
+		mu.Lock()
+		defer mu.Unlock()
+		out := make([]*pipelineEntry, 0, len(registry))
+		for _, entry := range registry {
+			out = append(out, entry)
+		}
+		return out
+	}
+	rl.activateForTaxonomy = activateIfNotRegistered
 
 	rm := &remover{
 		logger:     logger,
 		take:       takeEntry,
 		unregister: controlSvc.Unregister,
+		// clearRefused evicts a tombstoned lens from rl.refused
+		// unconditionally, whether or not it ever reached the pipeline
+		// registry — a refused (never-activated) lens's tombstone still
+		// reaches remove (CoreKVSource.known is set for every dispatched
+		// spec regardless of whether loadCB's activation attempt
+		// succeeded), and take's registry lookup alone would miss exactly
+		// that lens, leaving it queued for retryRefused to resurrect.
+		clearRefused: rl.clearRefusedForTaxonomy,
 	}
 
 	// Wait for adjacency bootstrap before activating any lens.
@@ -1300,22 +1445,41 @@ func main() {
 	// Source 1: Core KV watch on `vtx.meta.>`, routed by envelope class
 	// `meta.lens` (Decision #5; data-contracts.md §1.2 line 70).
 	src := lens.NewCoreKVSource(conn, coreKVBucket, instance, logger)
-	src.SetLoadCallback(func(r *lens.Rule) {
-		mu.Lock()
-		_, exists := registry[r.ID]
-		mu.Unlock()
-		if !exists {
-			startPipeline(r)
-		}
-	})
+	src.SetLoadCallback(activateIfNotRegistered)
+	// ruleKnown answers "does the source still have this rule loaded" —
+	// retryRefused's belt to remover.remove/pipelineDeleter.Delete's
+	// eviction braces: a rule tombstoned while queued in refused is dropped
+	// rather than retried. src.Get is set here, after src exists, rather
+	// than where rl's other fields are filled in above.
+	rl.ruleKnown = func(ruleID string) bool {
+		_, ok := src.Get(ruleID)
+		return ok
+	}
 	src.SetUpdateCallback(rl.update)
 	src.SetRemoveCallback(rm.remove)
+	// The taxonomy trigger, on this SAME meta watch (dynamic-type-taxonomy-
+	// design.md §6.1, amendment A1; §14 Fire A item 4). Both callbacks fire
+	// on src's single dispatch goroutine — the same one SetLoadCallback/
+	// SetUpdateCallback/SetRemoveCallback above already run on — so nothing
+	// here needs a lock beyond what taxResolver and rl already take
+	// internally, and no goroutine wraps the synchronous half (only
+	// rl.taxonomyChanged's per-entry Rebuild call is async, mirroring
+	// reloader.update's MatchChange arm).
+	src.SetTaxonomyCallback(func(snap []taxonomy.TypeSnapshot) {
+		taxResolver.InstallSnapshot(snap)
+		taxResolver.SetArmed(true)
+		rl.taxonomyChanged()
+	})
+	src.SetTaxonomyDeadCallback(func() {
+		taxResolver.SetArmed(false)
+		rl.taxonomyChanged()
+	})
 	controlSvc.SetRuleGetter(src)
 	if err := src.Start(ctx); err != nil {
 		logger.Error("start core kv lens source", "err", err)
 		os.Exit(1)
 	}
-	logger.Info("core kv lens source started", "watchPrefix", "vtx.meta.>", "classFilter", "meta.lens")
+	logger.Info("core kv lens source started", "watchPrefixes", []string{"vtx.meta.>", "lnk.meta.*.subtypeOf.>"}, "classFilter", "meta.lens")
 
 	// Registry-reconciliation probe (lens-registry-restart-integrity-design.md
 	// §4 Fire B step 2) — the detection half: after a boot grace window, and

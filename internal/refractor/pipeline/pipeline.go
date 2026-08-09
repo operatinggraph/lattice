@@ -538,7 +538,7 @@ func New(
 // snapshot loaded, an unresolvable label, or a cycle/depth fault). See
 // useFullEngineBranches.
 func (p *Pipeline) UseFullEngine(eng *full.Engine, cr ruleengine.CompiledRule) error {
-	return p.useFullEngineBranches(eng, cr, nil)
+	return p.useFullEngineBranches(eng, cr, nil, false)
 }
 
 // UseFullEngineBranches is UseFullEngine's multi-walk sibling
@@ -547,10 +547,31 @@ func (p *Pipeline) UseFullEngine(eng *full.Engine, cr ruleengine.CompiledRule) e
 // CompiledBranches), cr must be branches[0]. Nil/single-element branches
 // behaves exactly like UseFullEngine. Must be called before Run.
 func (p *Pipeline) UseFullEngineBranches(eng *full.Engine, cr ruleengine.CompiledRule, branches []ruleengine.CompiledRule) error {
-	return p.useFullEngineBranches(eng, cr, branches)
+	return p.useFullEngineBranches(eng, cr, branches, false)
 }
 
-func (p *Pipeline) useFullEngineBranches(eng *full.Engine, cr ruleengine.CompiledRule, branches []ruleengine.CompiledRule) error {
+// UseFullEngineBranchesForReDerivation is UseFullEngineBranches' LIVE
+// re-derivation sibling (dynamic-type-taxonomy-design.md §14 Fire A item 4).
+// Byte-identical to UseFullEngineBranches except for the taxonomy.
+// StatusUnknown branch, where the two entry points are governed by different
+// sections of the design: an ACTIVATION (UseFullEngineBranches) refuses
+// outright per §4.2 — nothing published, stay dark, which is safe because
+// the pipeline was never running against this rule. A LIVE pipeline
+// re-deriving cannot take that same refusal without violating §6.5's "never
+// keep a stale narrow set": it is already projecting against a set the
+// resolver has just proven it cannot currently trust, so this entry point
+// degrades to the broad filter (drops the expansion; the existing
+// exhaustive=false / reprojectAll=true machinery every other non-StatusArmed
+// answer already goes through) and PUBLISHES that, instead of refusing.
+// Never wrong, only unavailable until the next successful re-derivation —
+// the caller (reloader.rederiveEntry) still drives the Rebuild that
+// re-registers the widened server-side filter; this call only updates the
+// client gate.
+func (p *Pipeline) UseFullEngineBranchesForReDerivation(eng *full.Engine, cr ruleengine.CompiledRule, branches []ruleengine.CompiledRule) error {
+	return p.useFullEngineBranches(eng, cr, branches, true)
+}
+
+func (p *Pipeline) useFullEngineBranches(eng *full.Engine, cr ruleengine.CompiledRule, branches []ruleengine.CompiledRule, liveReDerivation bool) error {
 	// Everything is derived into locals first and published under one Lock at
 	// the end (see ruleMu): a reader must never observe a half-rewritten rule.
 	// Nothing is published at all if this function returns an error part way
@@ -638,15 +659,30 @@ func (p *Pipeline) useFullEngineBranches(eng *full.Engine, cr ruleengine.Compile
 			expandedLabels, status = p.taxonomyResolver.Expand(expansionNeeded)
 		}
 		if status == taxonomy.StatusUnknown {
-			// §4.2's two-tier fork: a set-KNOWN-but-possibly-stale answer
-			// may still activate broad (below); a set UNKNOWN answer must
-			// never activate at all, because no filter width rescues a
-			// MATCHER evaluating against a wrong expansion. Nothing has
-			// been published — the pipeline's previous rule
-			// state (if any) is untouched.
-			return fmt.Errorf(
-				"pipeline: taxonomy expansion unknown for label(s) %s — no resolver snapshot, an unresolvable label, or a cycle/depth fault; refusing activation rather than risk projecting the wrong row set",
-				sortedLabelList(expansionNeeded))
+			if !liveReDerivation {
+				// §4.2's two-tier fork: a set-KNOWN-but-possibly-stale answer
+				// may still activate broad (below); a set UNKNOWN answer must
+				// never activate at all, because no filter width rescues a
+				// MATCHER evaluating against a wrong expansion. Nothing has
+				// been published — the pipeline's previous rule
+				// state (if any) is untouched.
+				return fmt.Errorf(
+					"pipeline: taxonomy expansion unknown for label(s) %s — no resolver snapshot, an unresolvable label, or a cycle/depth fault; refusing activation rather than risk projecting the wrong row set",
+					sortedLabelList(expansionNeeded))
+			}
+			// A live re-derivation is governed by §6.5, not §4.2 (see
+			// UseFullEngineBranchesForReDerivation's doc): fall through
+			// rather than refuse. expandedLabels is already nil (Expand's
+			// own StatusUnknown contract), so the exhaustive=false branch
+			// immediately below, and every nil-map-safe step after it,
+			// degrade this rule to the broad filter — and
+			// WithLabelExpansion(fullCR, nil) makes executor.go's
+			// nodeMatches fail closed for the `*` position (matches
+			// NOTHING, never falls back to the bare label), so the matcher
+			// never risks a wrong row either: unavailable, not wrong, until
+			// the next re-derivation finds a trustworthy answer again.
+			slog.Warn("pipeline: live taxonomy re-derivation found the expansion unknown — degrading to the broad filter rather than keeping a stale narrow set",
+				"ruleId", p.ruleID, "labels", sortedLabelList(expansionNeeded))
 		}
 		if status != taxonomy.StatusArmed {
 			// Known but not guaranteed current: correct-but-slower, never

@@ -8,12 +8,17 @@
 // (§5.3): the resolver is consulted once per lens activation/re-derivation
 // (internal/refractor/pipeline's useFullEngineBranches), never per binding.
 //
-// This package builds only the resolver + its resolve-time cycle/depth
-// authority (§14 Fire A item 3). Loading a live snapshot from Core KV and
-// arming the resolver from the meta-watch CDC consumer is item 4's job — a
-// Resolver constructed by New and never touched again stays permanently
-// disarmed with no snapshot, which is the fail-closed posture every
-// `*`-carrying lens must see until then.
+// This package is the resolver + its resolve-time cycle/depth authority
+// (§14 Fire A item 3). Loading a live snapshot from Core KV and arming the
+// resolver is driven by cmd/refractor/main.go, fed by
+// internal/refractor/lens.CoreKVSource's taxonomy callback (item 4, §6.1):
+// on every taxonomy-relevant CDC event the source rebuilds and hands over
+// a []TypeSnapshot, which main.go installs via InstallSnapshot then arms via
+// SetArmed(true); the source's dead callback disarms it via SetArmed(false)
+// if the underlying consumer ever dies. A Resolver constructed by New and
+// never touched again stays permanently disarmed with no snapshot, which is
+// the fail-closed posture a `*`-carrying lens sees before its process's
+// CoreKVSource has delivered a first taxonomy event.
 package taxonomy
 
 import "sync"
@@ -103,10 +108,10 @@ type TypeSnapshot struct {
 
 // InstallSnapshot replaces the resolver's whole taxonomy with snap under one
 // write lock, so a concurrent Expand never observes a half-loaded graph.
-// Item 4's CDC consumer is the only production caller, rebuilding the
-// snapshot from the meta-watch's boot replay and every live subtypeOf/type
-// edit; this design's own snapshot is empty (the resolver ships disarmed),
-// so only tests call this today.
+// cmd/refractor/main.go's taxonomy callback is the production caller,
+// invoked with the snapshot internal/refractor/lens.CoreKVSource rebuilds
+// from the meta-watch's boot replay and every live subtypeOf/type edit
+// thereafter (§6.1).
 //
 // A SubtypeOf entry naming a canonicalName absent from snap contributes no
 // edge — mirroring §3.5's uninstall hazard posture (a link whose target meta

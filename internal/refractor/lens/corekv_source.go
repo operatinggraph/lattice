@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"slices"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -14,6 +15,7 @@ import (
 	"github.com/operatinggraph/lattice/internal/refractor/adapter"
 	"github.com/operatinggraph/lattice/internal/refractor/ruleengine"
 	"github.com/operatinggraph/lattice/internal/refractor/ruleengine/full"
+	"github.com/operatinggraph/lattice/internal/refractor/taxonomy"
 	"github.com/operatinggraph/lattice/internal/substrate"
 	"github.com/operatinggraph/lattice/internal/substrate/keys"
 )
@@ -62,11 +64,17 @@ type UpdateCallback func(old, new *Rule, kind UpdateKind)
 type RemoveCallback func(old *Rule)
 
 // CoreKVSource is the lens-definition source. It subscribes to Core KV under
-// `vtx.meta.>` via a Lattice-native durable JetStream consumer
-// (substrate.SubscribeKVChanges) and routes only those updates whose envelope
-// class is `meta.lens` to the lens loader. Other meta classes
-// (`meta.ddl.*`, `meta.event.*`, etc.) are skipped silently
-// (data-contracts.md §1.2 line 70).
+// `vtx.meta.>` and `lnk.meta.*.subtypeOf.>` via a Lattice-native durable
+// JetStream consumer (substrate.SubscribeKVChanges, multi-prefix) and routes
+// only those updates whose envelope class is `meta.lens` to the lens loader.
+// Other meta classes (`meta.ddl.*`, `meta.event.*`, etc.) are skipped
+// silently for lens-loading purposes (data-contracts.md §1.2 line 70) — but
+// a `meta.ddl.vertexType` root, its `canonicalName` aspect, and a
+// `subtypeOf` link between two `meta` vertices are separately accumulated
+// into the dynamic type taxonomy (dynamic-type-taxonomy-design.md §6.1,
+// amendment A1: the taxonomy rides this SAME watch rather than getting its
+// own consumer, so a lens-definition change and a taxonomy change share one
+// total order). See SetTaxonomyCallback.
 //
 // Lens definitions arrive via the normal Processor write path as
 // `vtx.meta.<NanoID>` (vertex, class `meta.lens`) + a
@@ -74,7 +82,8 @@ type RemoveCallback func(old *Rule)
 //
 // Each boot subscribes on a fresh per-boot durable name (instance segment +
 // nonce) with IncludeHistory=true, so every boot — fresh deployment or
-// restart alike — replays the entire installed lens set; see
+// restart alike — replays the entire installed lens set (and the entire
+// taxonomy — there is no backfill window to reason about, §6.1); see
 // lensSourceDurablePrefix.
 type CoreKVSource struct {
 	conn     *substrate.Conn
@@ -97,12 +106,80 @@ type CoreKVSource struct {
 	// the parent vertex with class `meta.lens` is observed, the buffered
 	// spec is replayed through handleSpec.
 	pendingSpecs map[string][]byte // lensId → last spec body
+
+	// taxonomyCB and taxonomyDeadCB are set by SetTaxonomyCallback /
+	// SetTaxonomyDeadCallback. Both fire on this source's single dispatch
+	// goroutine (handle's caller) — see their doc.
+	taxonomyCB     func([]taxonomy.TypeSnapshot)
+	taxonomyDeadCB func()
+	// vertexTypes tracks `vtx.meta.<id>` root vertices whose class is
+	// `meta.ddl.vertexType` — the taxonomy's type vocabulary, id → its
+	// Abstract flag (dynamic-type-taxonomy-design.md §3.1/§3.2). Guarded by
+	// mu, like every other map on this source.
+	vertexTypes map[string]bool
+	// typeCanonicalNames tracks the value of a `vtx.meta.<id>.canonicalName`
+	// aspect, for whichever id it arrives under — a type meta's own name
+	// (the vocabulary a lens pattern's label names) and, read through
+	// subtypeOf, the name a taxonomy edge's parent resolves through.
+	typeCanonicalNames map[string]string
+	// subtypeOf tracks `lnk.meta.<leaf>.subtypeOf.meta.<parent>` edges: leaf
+	// id → set of parent ids.
+	subtypeOf map[string]map[string]struct{}
+	// lastTaxonomySnapshot is the []taxonomy.TypeSnapshot last passed to
+	// taxonomyCB, so recomputeTaxonomy can suppress a no-op rebuild — a
+	// redelivered or otherwise unchanged event must not re-invoke every
+	// pipeline's re-derivation.
+	lastTaxonomySnapshot []taxonomy.TypeSnapshot
 }
 
-// envelopeProbe is a minimal struct used to peek at the `class` field of
-// any document body in Core KV without committing to a full envelope shape.
+// vertexTypeClassValue is the envelope class of a type meta vertex's root
+// document (dynamic-type-taxonomy-design.md §3.1), mirroring
+// internal/pkgmgr's ddlClassVertexType.
+const vertexTypeClassValue = "meta.ddl.vertexType"
+
+// envelopeProbe is a minimal struct used to peek at the `class` field (and,
+// for a vertexType meta root, `data.abstract`) of any document body in Core
+// KV without committing to a full envelope shape.
 type envelopeProbe struct {
-	Class string `json:"class"`
+	Class string                 `json:"class"`
+	Data  map[string]interface{} `json:"data"`
+}
+
+// abstractFlagFromData reads a type meta root vertex's `data.abstract`
+// field for THIS accumulator. Absent means concrete (false — the
+// overwhelming common case, every type declaring no taxonomy membership at
+// all); a present JSON bool is read verbatim.
+//
+// A present-but-not-a-JSON-bool value is treated as CONCRETE (false) here —
+// the OPPOSITE fail-closed direction from internal/processor/ddl_cache.go's
+// reading of the identical field. That divergence is deliberate, not a
+// copy-paste drift: the two components feed opposite hazards. In
+// ddl_cache.go, `abstract=false` is the PERMISSIVE direction for the step-6
+// write-path gates it feeds — an unrecognized value resolving to false
+// would let an instance of a would-be-abstract type keep writing
+// undetected — so it fails toward true. Here, `abstract=true` REMOVES a
+// type from every expansion set (taxonomy.Resolver.collectDownLocked only
+// adds a descendant `if !info.abstract`) while Expand still reports
+// StatusArmed/StatusStale — silently NARROWING a live filter, exactly the
+// "stale narrow set" §6.5 calls the only unacceptable state. A too-broad
+// (concrete) answer here merely costs delivered-then-skipped events; a
+// too-narrow (abstract) one silently acks-and-drops. So this consumer fails
+// toward false, the permissive direction for ITS hazard. Logged either way
+// so the drift is visible rather than silently resolved.
+func abstractFlagFromData(data map[string]interface{}, key string, logger *slog.Logger) bool {
+	if data == nil {
+		return false
+	}
+	raw, present := data["abstract"]
+	if !present {
+		return false
+	}
+	if v, ok := raw.(bool); ok {
+		return v
+	}
+	logger.Warn("lens source: type meta data.abstract is present but not a JSON bool; treating as concrete (fail-closed toward the permissive direction for THIS consumer's hazard — see abstractFlagFromData's doc)",
+		"key", key, "value", raw)
+	return false
 }
 
 // sourceKindProbe peeks at a LensSpec body's `source.kind` without
@@ -341,13 +418,16 @@ func NewCoreKVSource(conn *substrate.Conn, bucket, instance string, logger *slog
 		logger = slog.Default()
 	}
 	return &CoreKVSource{
-		conn:         conn,
-		bucket:       bucket,
-		instance:     instance,
-		logger:       logger,
-		known:        make(map[string]*Rule),
-		lensVertices: make(map[string]struct{}),
-		pendingSpecs: make(map[string][]byte),
+		conn:               conn,
+		bucket:             bucket,
+		instance:           instance,
+		logger:             logger,
+		known:              make(map[string]*Rule),
+		lensVertices:       make(map[string]struct{}),
+		pendingSpecs:       make(map[string][]byte),
+		vertexTypes:        make(map[string]bool),
+		typeCanonicalNames: make(map[string]string),
+		subtypeOf:          make(map[string]map[string]struct{}),
 	}
 }
 
@@ -365,6 +445,29 @@ func (s *CoreKVSource) SetUpdateCallback(fn UpdateCallback) { s.updateCB = fn }
 // before Start.
 func (s *CoreKVSource) SetRemoveCallback(fn RemoveCallback) { s.removeCB = fn }
 
+// SetTaxonomyCallback registers the taxonomy snapshot callback
+// (dynamic-type-taxonomy-design.md §14 Fire A item 4). It fires whenever a
+// taxonomy-relevant event (a vertexType meta create/update/tombstone, a
+// canonicalName aspect create/tombstone, or a subtypeOf link create/
+// tombstone) changes the rebuilt []taxonomy.TypeSnapshot from the last one
+// emitted — never on a no-op redelivery. Fires synchronously, inline in
+// handle(), on this source's single dispatch goroutine — the same one
+// loadCB/updateCB/removeCB already run on. Must be set before Start.
+func (s *CoreKVSource) SetTaxonomyCallback(fn func([]taxonomy.TypeSnapshot)) {
+	s.taxonomyCB = fn
+}
+
+// SetTaxonomyDeadCallback registers the callback invoked once, from
+// consume's goroutine, when the events channel closes for a reason OTHER
+// than ctx cancellation — an unrecoverable subscription error
+// (runKVSubscription's doc), never a clean shutdown. This is the signal
+// item 4's taxonomy resolver disarms itself on (dynamic-type-taxonomy-
+// design.md §6.5's "resolver's consumer dies" row). Must be set before
+// Start.
+func (s *CoreKVSource) SetTaxonomyDeadCallback(fn func()) {
+	s.taxonomyDeadCB = fn
+}
+
 // Get returns the last-loaded Rule for ruleID and whether it was found.
 // Satisfies the control.RuleGetter interface so the validate control op can
 // inspect the active rule state without importing internal/lens.
@@ -375,14 +478,20 @@ func (s *CoreKVSource) Get(ruleID string) (*Rule, bool) {
 	return r, ok
 }
 
-// Start subscribes to lens-definition mutations via the substrate's
-// durable JetStream-consumer helper and launches the dispatch goroutine.
-// Returns when the subscription is established (or fails to establish).
-// The goroutine runs until ctx is cancelled.
+// Start subscribes to lens-definition mutations — and, on the same
+// consumer, taxonomy mutations (dynamic-type-taxonomy-design.md §6.1,
+// amendment A1) — via the substrate's durable JetStream-consumer helper and
+// launches the dispatch goroutine. Returns when the subscription is
+// established (or fails to establish). The goroutine runs until ctx is
+// cancelled.
 //
 // Per data-contracts.md §1.2 line 70 lens definitions are meta-vertices
 // distinguished by envelope class `meta.lens`; the subscription filter
-// is the prefix only, and class-based routing happens inside handle().
+// is the prefix only, and class-based routing happens inside handle(). The
+// second prefix, `lnk.meta.*.subtypeOf.>`, pins segment 3 (`lnk`), segment 4
+// (`meta`) and segment 6 (`subtypeOf`), wildcards the leaf id, and lets `>`
+// absorb `meta.<parentId>` — it differs from the first prefix at segment 3,
+// a position neither wildcards, so the two are not a subset pair.
 //
 // Each boot's durable name carries the instance segment (attributability)
 // plus a fresh per-boot nonce (uniqueness — see lensSourceDurablePrefix), so
@@ -405,7 +514,7 @@ func (s *CoreKVSource) Start(ctx context.Context) error {
 	events, err := s.conn.SubscribeKVChanges(
 		ctx,
 		s.bucket,
-		"vtx.meta.",
+		[]string{"vtx.meta.", "lnk.meta.*.subtypeOf.>"},
 		durable,
 		substrate.SubscribeKVOptions{
 			IncludeHistory: true,
@@ -413,7 +522,7 @@ func (s *CoreKVSource) Start(ctx context.Context) error {
 		},
 	)
 	if err != nil {
-		return fmt.Errorf("subscribe core KV vtx.meta.>: %w", err)
+		return fmt.Errorf("subscribe core KV vtx.meta.>+lnk.meta.*.subtypeOf.>: %w", err)
 	}
 	go s.consume(ctx, events, durable)
 	return nil
@@ -427,6 +536,18 @@ func (s *CoreKVSource) consume(ctx context.Context, events <-chan substrate.KVEv
 			return
 		case evt, ok := <-events:
 			if !ok {
+				// A closed channel while ctx is still live means the
+				// subscription died for a reason other than shutdown
+				// (runKVSubscription's doc: iterator stopped, decode
+				// failures exhausting MaxDeliver) — the signal item 4's
+				// taxonomy resolver disarms itself on. A close raced
+				// against ctx cancellation reports ctx.Err() != nil here
+				// too (select does not guarantee which ready case wins),
+				// which correctly skips this: that is a clean shutdown, not
+				// a dead consumer.
+				if ctx.Err() == nil && s.taxonomyDeadCB != nil {
+					s.taxonomyDeadCB()
+				}
 				return
 			}
 			s.handle(evt)
@@ -446,72 +567,128 @@ func (s *CoreKVSource) deleteOwnDurable(durable string) {
 	}
 }
 
-// handle dispatches one KV mutation from `vtx.meta.>`. Routing is driven
-// by the envelope `class` field (data-contracts.md §1.2 line 70):
+// handle dispatches one KV mutation from `vtx.meta.>` or
+// `lnk.meta.*.subtypeOf.>`. Routing is driven by key shape and, for a
+// vertex, the envelope `class` field (data-contracts.md §1.2 line 70):
 //   - vertex (3-seg) with class `meta.lens`: register as a lens vertex;
 //     replay any buffered spec aspect.
-//   - vertex (3-seg) with any other class (`meta.ddl.*`, `meta.event.*`,
-//     etc.): skip silently — not the Refractor's concern.
+//   - vertex (3-seg) with class `meta.ddl.vertexType`: tracked into the
+//     taxonomy's vertexTypes map regardless of what the lens routing below
+//     does with it (dynamic-type-taxonomy-design.md §3.1/§3.2).
+//   - vertex (3-seg) with any other class (`meta.event.*`, etc.): skip
+//     silently for lens-loading purposes — not the Refractor's concern.
+//   - aspect (4-seg) with localName `canonicalName`: tracked into the
+//     taxonomy's typeCanonicalNames map, for whichever id it arrives under.
 //   - aspect (4-seg) under a known lens vertex with localName `spec`:
 //     parse + translate + dispatch to loader.
-//   - aspect (4-seg) under an unknown parent: buffer until the parent
-//     vertex's class is observed (CDC ordering is not guaranteed).
+//   - aspect (4-seg) under an unknown parent, localName `spec`: buffer
+//     until the parent vertex's class is observed (CDC ordering is not
+//     guaranteed).
+//   - link (6-seg) `lnk.meta.<leaf>.subtypeOf.meta.<parent>`: tracked into
+//     the taxonomy's subtypeOf map.
 //
 // The IsDeleted signal covers both NATS KV tombstones (empty body) and
 // soft-delete envelopes (canonical envelope's `isDeleted: true`). Both
-// trigger lens removal.
+// trigger lens removal (vertex/aspect) or edge removal (link).
 func (s *CoreKVSource) handle(evt substrate.KVEvent) {
 	key := evt.Key
 	kind := substrate.ClassifyKey(key)
 
 	switch kind {
 	case substrate.KindVertex:
-		_, lensID, ok := substrate.ParseVertexKey(key)
+		_, id, ok := substrate.ParseVertexKey(key)
 		if !ok {
 			return
 		}
 		// Vertex delete: purge tracking + emit removal.
+		//
+		// The taxonomy maps are purged UNCONDITIONALLY here, not only when
+		// id was a tracked vertexType: typeCanonicalNames and subtypeOf can
+		// both hold entries for a NON-vertexType id too (pkgmgr writes
+		// canonicalName aspects for role and lens metas as well — see
+		// buildTaxonomySnapshotLocked's doc — and a malformed subtypeOf link
+		// could in principle name any meta as its leaf). Gating the purge on
+		// wasTaxType would leak those entries for the rest of the process's
+		// life every time such an id's root vertex is tombstoned.
 		if evt.IsDeleted {
 			s.mu.Lock()
-			delete(s.lensVertices, lensID)
-			old, existed := s.known[lensID]
-			delete(s.known, lensID)
-			delete(s.pendingSpecs, lensID)
+			delete(s.lensVertices, id)
+			old, existed := s.known[id]
+			delete(s.known, id)
+			delete(s.pendingSpecs, id)
+			_, wasTaxType := s.vertexTypes[id]
+			delete(s.vertexTypes, id)
+			_, hadCanonicalName := s.typeCanonicalNames[id]
+			delete(s.typeCanonicalNames, id)
+			_, hadOutgoingSubtypeOf := s.subtypeOf[id]
+			delete(s.subtypeOf, id)
 			s.mu.Unlock()
 			if existed {
-				s.logger.Info("lens removed", "lensId", lensID)
+				s.logger.Info("lens removed", "lensId", id)
 				if s.removeCB != nil {
 					s.removeCB(old)
 				}
 			}
+			if wasTaxType || hadCanonicalName || hadOutgoingSubtypeOf {
+				s.recomputeTaxonomy()
+			}
 			return
 		}
-		// Inspect class to decide whether this is a lens vertex.
+		// Inspect class to decide whether this is a lens vertex — or a
+		// taxonomy type meta, tracked regardless of what the lens routing
+		// below does with it.
 		var probe envelopeProbe
 		if err := json.Unmarshal(evt.Value, &probe); err != nil {
 			s.logger.Debug("core-kv subscribe: vertex envelope unmarshal failed",
 				"key", key, "err", err)
 			return
 		}
+		if probe.Class == vertexTypeClassValue {
+			abstract := abstractFlagFromData(probe.Data, key, s.logger)
+			s.mu.Lock()
+			s.vertexTypes[id] = abstract
+			s.mu.Unlock()
+			s.recomputeTaxonomy()
+		} else {
+			// A LIVE (non-tombstone) rewrite whose class is no longer
+			// meta.ddl.vertexType — an upgrade that changed what this id
+			// names. Retract it from the taxonomy the same way a tombstone
+			// would; only a tombstone retracted it before, so an id that
+			// stopped being a vertexType while staying alive stayed
+			// resolvable forever with its stale Abstract flag.
+			s.mu.Lock()
+			_, wasTaxType := s.vertexTypes[id]
+			if wasTaxType {
+				delete(s.vertexTypes, id)
+			}
+			s.mu.Unlock()
+			if wasTaxType {
+				s.recomputeTaxonomy()
+			}
+		}
 		if probe.Class != lensClassValue {
 			// Some other meta vertex (DDL, event, etc.). Not our concern.
 			return
 		}
 		s.mu.Lock()
-		s.lensVertices[lensID] = struct{}{}
-		buffered, hasBuffered := s.pendingSpecs[lensID]
+		s.lensVertices[id] = struct{}{}
+		buffered, hasBuffered := s.pendingSpecs[id]
 		if hasBuffered {
-			delete(s.pendingSpecs, lensID)
+			delete(s.pendingSpecs, id)
 		}
 		s.mu.Unlock()
 		if hasBuffered {
-			s.dispatchSpec(lensID, buffered, evt.Revision)
+			s.dispatchSpec(id, buffered, evt.Revision)
 		}
 		return
 
 	case substrate.KindAspect:
 		_, _, lensID, localName, ok := substrate.ParseAspectKey(key)
 		if !ok {
+			return
+		}
+		if localName == "canonicalName" {
+			s.handleTypeCanonicalName(lensID, evt)
 			return
 		}
 		if localName != "spec" {
@@ -547,8 +724,211 @@ func (s *CoreKVSource) handle(evt substrate.KVEvent) {
 		}
 		s.dispatchSpec(lensID, evt.Value, evt.Revision)
 		return
+
+	case substrate.KindLink:
+		s.handleSubtypeOfLink(key, evt)
 	}
-	// Unknown / link / malformed → ignore.
+	// Unknown / malformed → ignore.
+}
+
+// handleTypeCanonicalName tracks a `vtx.meta.<id>.canonicalName` aspect —
+// written by pkgmgr's DDL installer for every type meta (and, separately,
+// for role and lens metas — see buildTaxonomySnapshotLocked's own doc on
+// why that is harmless here) — into typeCanonicalNames.
+//
+// A tombstone, an unmarshal failure, and an empty/absent `data.value` all
+// CLEAR the entry rather than leave the previous value in place. This map is
+// INCREMENTALLY accumulated (unlike internal/processor/ddl_cache.go's
+// per-lookup rebuild-from-scratch, where "absent means no name" is a
+// harmless default): here, doing nothing on a malformed rewrite would leave
+// a name resolvable that the graph's current state does not assert — a
+// narrowed filter over a name nobody currently declares. Logged at Warn
+// (not Debug — a malformed aspect body silently retracting a taxonomy name
+// must be visible at the default level).
+func (s *CoreKVSource) handleTypeCanonicalName(id string, evt substrate.KVEvent) {
+	if evt.IsDeleted {
+		s.clearTypeCanonicalName(id)
+		return
+	}
+	var asp struct {
+		Data struct {
+			Value string `json:"value"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(evt.Value, &asp); err != nil {
+		s.logger.Warn("core-kv subscribe: canonicalName aspect unmarshal failed — clearing the tracked name rather than retaining a stale one",
+			"id", id, "err", err)
+		s.clearTypeCanonicalName(id)
+		return
+	}
+	if asp.Data.Value == "" {
+		s.logger.Warn("core-kv subscribe: canonicalName aspect data.value is empty or absent — clearing the tracked name rather than retaining a stale one",
+			"id", id)
+		s.clearTypeCanonicalName(id)
+		return
+	}
+	s.mu.Lock()
+	prev, existed := s.typeCanonicalNames[id]
+	s.typeCanonicalNames[id] = asp.Data.Value
+	s.mu.Unlock()
+	if !existed || prev != asp.Data.Value {
+		s.recomputeTaxonomy()
+	}
+}
+
+// clearTypeCanonicalName removes id's tracked canonicalName and, if one was
+// actually present, recomputes the taxonomy. Shared by every path that means
+// "this id no longer asserts a name" — a tombstone, an unmarshal failure, and
+// an empty value alike (handleTypeCanonicalName's own doc).
+func (s *CoreKVSource) clearTypeCanonicalName(id string) {
+	s.mu.Lock()
+	_, existed := s.typeCanonicalNames[id]
+	delete(s.typeCanonicalNames, id)
+	s.mu.Unlock()
+	if existed {
+		s.recomputeTaxonomy()
+	}
+}
+
+// handleSubtypeOfLink tracks a `lnk.meta.<leaf>.subtypeOf.meta.<parent>`
+// edge (dynamic-type-taxonomy-design.md §6.1, amendment A1) — the only link
+// shape this source's meta watch cares about. Any other link (a different
+// linkName, or either endpoint not typed `meta`) is a no-op: this is not a
+// general link source, the same posture handle's trailing "ignore" comment
+// documents for a key ClassifyKey cannot even shape-match.
+func (s *CoreKVSource) handleSubtypeOfLink(key string, evt substrate.KVEvent) {
+	type1, leaf, linkName, type2, parent, ok := substrate.ParseLinkKey(key)
+	if !ok || type1 != "meta" || linkName != "subtypeOf" || type2 != "meta" {
+		return
+	}
+	s.mu.Lock()
+	var changed bool
+	if evt.IsDeleted {
+		if parents, has := s.subtypeOf[leaf]; has {
+			if _, had := parents[parent]; had {
+				delete(parents, parent)
+				if len(parents) == 0 {
+					delete(s.subtypeOf, leaf)
+				}
+				changed = true
+			}
+		}
+	} else {
+		parents, has := s.subtypeOf[leaf]
+		if !has {
+			parents = make(map[string]struct{})
+			s.subtypeOf[leaf] = parents
+		}
+		if _, had := parents[parent]; !had {
+			parents[parent] = struct{}{}
+			changed = true
+		}
+	}
+	s.mu.Unlock()
+	if changed {
+		s.recomputeTaxonomy()
+	}
+}
+
+// recomputeTaxonomy rebuilds the whole taxonomy snapshot from the tracked
+// vertexTypes/typeCanonicalNames/subtypeOf maps and invokes taxonomyCB with
+// it — but only when the rebuilt snapshot differs from the last one emitted
+// (dynamic-type-taxonomy-design.md §14 Fire A item 4): a redelivered or
+// otherwise no-op event must not re-invoke every pipeline's re-derivation.
+// Runs on this source's single dispatch goroutine (handle's caller) — the
+// same one loadCB/updateCB already run on; taxonomyCB is invoked outside
+// the lock, mirroring loadCB/updateCB/removeCB's own pattern in this file.
+func (s *CoreKVSource) recomputeTaxonomy() {
+	s.mu.Lock()
+	snap := s.buildTaxonomySnapshotLocked()
+	changed := !taxonomySnapshotsEqual(snap, s.lastTaxonomySnapshot)
+	if changed {
+		s.lastTaxonomySnapshot = snap
+	}
+	s.mu.Unlock()
+	if changed && s.taxonomyCB != nil {
+		s.taxonomyCB(snap)
+	}
+}
+
+// buildTaxonomySnapshotLocked assembles a []taxonomy.TypeSnapshot from the
+// tracked maps. Called with s.mu held. Sorted by ID so two rebuilds over the
+// same logical state compare equal regardless of the order events arrived
+// in — SubtypeOf entries are sorted for the same reason.
+//
+// An id in vertexTypes whose canonicalName is not yet (or never will be)
+// known is OMITTED entirely, not included with an empty CanonicalName:
+// taxonomy.Resolver.InstallSnapshot already skips an empty-CanonicalName
+// entry (never admits an empty-string label), so the two are equivalent from
+// the resolver's point of view — but an op-meta (also classed
+// meta.ddl.vertexType, but pkgmgr never gives it a canonicalName aspect,
+// internal/pkgmgr/build.go's op-meta construction) would otherwise change
+// the built snapshot, and re-fire taxonomyCB, on every op install/upgrade
+// forever, for zero resolver-visible effect. Omitting it means a
+// resolver-invisible event produces no emission at all. A type still
+// legitimately racing its OWN canonicalName aspect (real out-of-order CDC)
+// simply appears once that aspect arrives, which re-triggers a rebuild the
+// normal way.
+//
+// A SubtypeOf entry is only ever a PARENT resolved through typeCanonicalNames
+// AND confirmed present in vertexTypes: typeCanonicalNames also accumulates
+// canonicalName aspects for role and lens metas (pkgmgr writes those too,
+// build.go's role and lens sections), which are never vertexTypes. Reading
+// typeCanonicalNames alone — without the vertexTypes membership check — would
+// let a subtypeOf link naming a role or lens meta as its parent resolve
+// through to a DIFFERENT, unrelated vertexType that happens to share the same
+// canonicalName, attaching the leaf as its descendant with no link to that
+// type ever declared.
+func (s *CoreKVSource) buildTaxonomySnapshotLocked() []taxonomy.TypeSnapshot {
+	ids := make([]string, 0, len(s.vertexTypes))
+	for id := range s.vertexTypes {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+
+	out := make([]taxonomy.TypeSnapshot, 0, len(ids))
+	for _, id := range ids {
+		canonicalName := s.typeCanonicalNames[id]
+		if canonicalName == "" {
+			continue
+		}
+		var subtypeOf []string
+		for parentID := range s.subtypeOf[id] {
+			if _, isType := s.vertexTypes[parentID]; !isType {
+				continue
+			}
+			if name, ok := s.typeCanonicalNames[parentID]; ok && name != "" {
+				subtypeOf = append(subtypeOf, name)
+			}
+		}
+		sort.Strings(subtypeOf)
+		out = append(out, taxonomy.TypeSnapshot{
+			ID:            id,
+			CanonicalName: canonicalName,
+			Abstract:      s.vertexTypes[id],
+			SubtypeOf:     subtypeOf,
+		})
+	}
+	return out
+}
+
+// taxonomySnapshotsEqual reports whether a and b describe the same taxonomy.
+// Both are already sorted by buildTaxonomySnapshotLocked (entries by ID,
+// each entry's SubtypeOf alphabetically), so a straight positional
+// comparison is order-independent overall.
+func taxonomySnapshotsEqual(a, b []taxonomy.TypeSnapshot) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i].ID != b[i].ID ||
+			a[i].CanonicalName != b[i].CanonicalName ||
+			a[i].Abstract != b[i].Abstract ||
+			!slices.Equal(a[i].SubtypeOf, b[i].SubtypeOf) {
+			return false
+		}
+	}
+	return true
 }
 
 // dispatchSpec parses a LensSpec body, translates it to a *Rule, and
