@@ -1,5 +1,8 @@
 # Done log archive — lattice (older shipped items, newest first)
 
+- 2026-08-08 · `b71be85d` · [identity] A credential must exist before it can be bound to a person — Inc 2 · [design](../../../implementation-artifacts/credential-binding-plane-lifecycle-design.md) §13
+- 2026-08-08 · `6c4ca0e4` · [edge-manifest] The sign-in methods pane stops telling a signed-in person they cannot sign in — Inc 3a
+- 2026-08-08 · `392ead03` · Retention-class key custody — clinic + lease-signing records custodied, read back, and name-shreddable · [design](../../../implementation-artifacts/retention-class-key-custody-design.md) §27
 - 2026-08-08 · `f425d1e9` · Contracts slimming — corpus −27%, buried rules promoted, stale-false passages corrected · [proposal](../../../implementation-artifacts/contracts-slimming-proposal.md)
 - 2026-08-07 · `54b3c8c7` · [privacy-base] Erasure is a Loom pattern with a convergent tail and a seal; the shred stops cascading
 - 2026-08-07 · `25ad55a9` · [privacy-base] erasure Fire B inc 8 — the identityErasure Loom pattern
