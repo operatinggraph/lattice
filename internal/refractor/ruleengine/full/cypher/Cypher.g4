@@ -227,8 +227,14 @@ oC_PatternElement
                   | ( '(' oC_PatternElement ')' )
                   ;
 
+// Refractor extension: a trailing '*' on a node pattern's label list is the
+// taxonomy expansion sigil — `(l:location*)` means the abstract type plus its
+// transitive subtypes. It is confined to oC_NodePattern rather than added to
+// oC_NodeLabel, because oC_NodeLabels also appears inside
+// oC_PropertyOrLabelsExpression, where a trailing '*' is the multiplication
+// operator (`n:Foo*2`).
 oC_NodePattern
-           :  '(' SP? ( oC_Variable SP? )? ( oC_NodeLabels SP? )? ( oC_Properties SP? )? ')' ;
+           :  '(' SP? ( oC_Variable SP? )? ( oC_NodeLabels '*'? SP? )? ( oC_Properties SP? )? ')' ;
 
 oC_PatternElementChain
                    :  oC_RelationshipPattern SP? oC_NodePattern ;

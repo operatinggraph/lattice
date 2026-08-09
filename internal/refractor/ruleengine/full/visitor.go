@@ -241,16 +241,44 @@ func (v *astVisitor) visitNodePattern(ctx cypher.IOC_NodePatternContext) NodePat
 	if vr := ctx.OC_Variable(); vr != nil {
 		np.Variable = identifierText(vr)
 	}
+	var labelCount int
 	if nls := ctx.OC_NodeLabels(); nls != nil {
 		labels := nls.AllOC_NodeLabel()
+		labelCount = len(labels)
 		if len(labels) > 0 {
 			if ln := labels[0].OC_LabelName(); ln != nil {
 				np.Label = ln.GetText()
 			}
 		}
 	}
+	// The grammar's `'*'?` sigil is a direct terminal child of oC_NodePattern
+	// (Cypher.g4), not an accessor on the generated context — ANTLR emits no
+	// getter for an implicit literal token, so it must be found among the
+	// context's children. Its only other terminal children are '(', ')' and
+	// SP, none of which share a token type with '*', so a token-type match on
+	// CypherParserT__4 is unambiguous.
+	for _, child := range ctx.GetChildren() {
+		if t, ok := child.(antlr.TerminalNode); ok && t.GetSymbol().GetTokenType() == cypher.CypherParserT__4 {
+			np.LabelExpand = true
+			break
+		}
+	}
 	if props := ctx.OC_Properties(); props != nil {
 		np.Properties = v.visitPropertiesMap(props)
+	}
+	if np.LabelExpand && labelCount > 1 {
+		v.fail("a label-expansion sigil (`*`) is ambiguous on a multi-label pattern %q — "+
+			"write a single label per node pattern", ctx.GetText())
+		return np
+	}
+	if np.LabelExpand {
+		// Label expansion (design §14 Fire A item 3) has no resolver:
+		// internal/refractor/taxonomy does not exist. Accepting the sigil here
+		// and letting the executor treat it as the bare label would silently
+		// match only `vtx.<label>.*` — for an abstract type, no instances at
+		// all — a silent empty result set where the author asked for a
+		// subtype union. Refuse loudly instead of guessing.
+		v.fail("label expansion (:%s*) is not available: no taxonomy resolver", np.Label)
 	}
 	return np
 }

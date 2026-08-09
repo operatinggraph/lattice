@@ -131,7 +131,7 @@ LATTICE_PROCESSOR_AUTH_MODE ?= capability
 # Load .env if it exists (ignored by git).
 -include .env
 
-.PHONY: assert-main-checkout up up-full up-full-capability dev-seed-staff provision-gateway-identity-provisioner test-real-actor-auth test-claim-ceremony up-loftspace orchestration install-packages install-loftspace run-loupe run-gateway run-loftspace-app down verify-kernel verify-package-rbac verify-package-identity verify-package-identity-hygiene verify-package-objects-base verify-package-location-domain verify-package-loftspace-domain verify-package-clinic-domain verify-package-clinic-reminders up-clinic install-clinic refresh-clinic refresh-loftspace provision-loftspace-role provision-clinic-role provision-cafe-role provision-wellness-role provision-gateway-role provision-readpath provision-vault-kek reinstall-package verify-package-service-location verify-package-edge-manifest install-edge-manifest install-ai seed-edge-demo seed-classic-demo seed-showcase install-showcase-domains install-maintenance install-front-desk install-one-bill up-facet up-facet-edge run-facet provision-facet-role verify-package-augur verify-package-lease-signing verify-conformance build vet lint-conventions lint-web lint-board lint-package-version lint-lens-anchors lint-package-standard lint-facet-discovery lint-facet-renderer-drift install-skills test test-rollback test-lease-convergence test-object-gc test-edge-idb-conformance test-crypto-shred test-system-actor-capability test-control-plane-authz test-augur-convergence test-unrouted-convergence test-cli test-hello-lattice test-health-completeness processor run-processor clean logs ps
+.PHONY: assert-main-checkout up up-full up-full-capability dev-seed-staff provision-gateway-identity-provisioner test-real-actor-auth test-claim-ceremony up-loftspace orchestration install-packages install-loftspace run-loupe run-gateway run-loftspace-app down verify-kernel verify-package-rbac verify-package-identity verify-package-identity-hygiene verify-package-objects-base verify-package-location-domain verify-package-loftspace-domain verify-package-clinic-domain verify-package-clinic-reminders up-clinic install-clinic refresh-clinic refresh-loftspace provision-loftspace-role provision-clinic-role provision-cafe-role provision-wellness-role provision-gateway-role provision-readpath provision-vault-kek reinstall-package verify-package-service-location verify-package-edge-manifest install-edge-manifest install-ai seed-edge-demo seed-classic-demo seed-showcase install-showcase-domains install-maintenance install-front-desk install-one-bill up-facet up-facet-edge run-facet provision-facet-role verify-package-augur verify-package-lease-signing verify-conformance build regen-cypher vet lint-conventions lint-web lint-board lint-package-version lint-lens-anchors lint-package-standard lint-facet-discovery lint-facet-renderer-drift install-skills test test-rollback test-lease-convergence test-object-gc test-edge-idb-conformance test-crypto-shred test-system-actor-capability test-control-plane-authz test-augur-convergence test-unrouted-convergence test-cli test-hello-lattice test-health-completeness processor run-processor clean logs ps
 
 ## assert-main-checkout — Refuse stack lifecycle from anywhere but the main working
 ## tree. docker-compose.yml mounts deploy/nats-server.conf by a RELATIVE path, so a
@@ -1936,6 +1936,20 @@ test-augur-convergence:
 .PHONY: test-unrouted-convergence
 test-unrouted-convergence:
 	go test -tags unroutedconvergence ./internal/unroutedconvergence/... -run TestUnroutedConvergence -v -p 1 -count=1 -timeout 3m
+
+## regen-cypher — Regenerate the openCypher parser (internal/refractor/ruleengine/full/cypher)
+## from Cypher.g4. Requires Java + the `antlr` CLI locally (ANTLR 4.13.2 on record — see the
+## package README for why the runtime pin stays at antlr4-go v4.13.1). NOT wired into build/CI:
+## CI has neither dependency. ANTLR also emits Cypher.interp/Cypher.tokens/CypherLexer.interp/
+## CypherLexer.tokens, which are not committed — this target removes them after generating so the
+## tree stays clean.
+regen-cypher:
+	@echo "==> Regenerating the openCypher parser from Cypher.g4..."
+	cd internal/refractor/ruleengine/full/cypher && antlr -Dlanguage=Go -package cypher -o . Cypher.g4
+	rm -f internal/refractor/ruleengine/full/cypher/Cypher.interp \
+		internal/refractor/ruleengine/full/cypher/Cypher.tokens \
+		internal/refractor/ruleengine/full/cypher/CypherLexer.interp \
+		internal/refractor/ruleengine/full/cypher/CypherLexer.tokens
 
 ## vet — Run go vet on all packages except vendored ANTLR-generated parsers
 ## (which contain expected unreachable-code patterns from the generator).

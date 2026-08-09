@@ -83,10 +83,15 @@ type PathPattern struct {
 }
 
 // NodePattern is `(var:Label {props})`. Any field may be empty.
+//
+// LabelExpand records the trailing `*` sigil: `(l:location*)` means the
+// label plus its transitive subtypes, while a bare `(l:location)` means
+// exactly `vtx.location.<id>`.
 type NodePattern struct {
-	Variable   string
-	Label      string
-	Properties map[string]Expr
+	Variable    string
+	Label       string
+	LabelExpand bool
+	Properties  map[string]Expr
 }
 
 // RelPattern is the relationship segment of a path pattern.

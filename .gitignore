@@ -74,3 +74,8 @@ loupe-demo-operator.json
 loupe-demo-operator.pending.json
 provision-demo-operator.lock
 loupe-demo.pid
+
+# ANTLR side artifacts from regenerating the openCypher parser. `make
+# regen-cypher` deletes them; a bare `go generate` leaves them behind.
+/internal/refractor/ruleengine/full/cypher/*.interp
+/internal/refractor/ruleengine/full/cypher/*.tokens
