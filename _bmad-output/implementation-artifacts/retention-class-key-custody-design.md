@@ -1279,10 +1279,13 @@ Item 3b-ii took three rounds of adversarial review to land, each closing the cro
 introduced (§19 → §21, §22 → §23, §24 → §24.7). Do not re-litigate any of them; the closed findings and the
 things confirmed sound are recorded there.
 
-**NEXT: Fire 2 — the consumers.** Fire 1 built the mechanism and deliberately shipped no user of it (§13.7):
-the clinic `.encounter` and lease-signing income `.profile` records that motivated the whole item are still
-plaintext in Core KV, and moving them is Fire 2's scope, along with the aspect splits and
-`patientDemographics.fullName`. That is the increment the `lattice.md` row now points at.
+**FIRE 2 IS IN FLIGHT. Item 1 (Clinic) Inc A is merged (`ae9c6411`); the live checkpoint is §26.4.**
+Fire 1 built the mechanism and deliberately shipped no user of it (§13.7). Clinic `.encounter` is now a
+retained record under a `clinicalRecord` holder; lease-signing's income `.profile` (Fire 2 item 2) is still
+plaintext, and `patientDemographics.fullName` still survives its subject's erasure (Inc C). Worktree:
+`/Users/andrewsolgan/Documents/GitHub/lattice-wt-clinic-retention` (branch `fire/clinic-retention-class`) —
+**landing shape: each increment lands on `main`**, which is safe because nothing reads `.encounter` until
+Inc B adds the first lens, so no boundary leaves a half-wired read path.
 
 **Done — item 1 (2026-08-07).** Custody vocabulary + write path. `CustodySpec`/`RetentionClassSpec`, the
 `retentionclass` holder + `.retentionPolicy`, `RetentionClassID`/`RetentionClassKey`, six install
@@ -2787,3 +2790,107 @@ retained reveal (tail (c)). Any change to the three grant producers or to RLS.
   `.name` on an existing identity** — `identity-domain` writes it only at `CreateUnclaimedIdentity`
   (`ddls.go:1176-1178`), so `CreatePatient`'s `fullName` has nowhere to land for an already-provisioned
   identity. These are named in the checkpoint as Inc C's first two questions.
+
+---
+
+## 26. Fire 2 item 1 (Clinic) — Inc A built and reviewed (2026-08-08, `ae9c6411`)
+
+### 26.1 What landed
+
+The split, the custody declaration, and the four re-points, exactly as §25.5 Inc A scoped them.
+`.encounter` keeps its localName and class and is now `Sensitive: true` with
+`Custody{retentionClass, "clinicalRecord"}`, holding `{summary, assessment?, plan?}`. A new
+`.documentation` aspect (class `appointmentDocumentation`, non-sensitive, same `PermittedCommands`) holds
+`{documentedAt, followUpRequested, followUpDate?}`. `RecordEncounter` writes both in one batch — one
+`required_string(p, "summary")` failure point, before either dict is built, so no path writes one aspect
+without the other. `clinic-domain` declares the class in a new `retention.go` (`RetentionClasses()`), 0.29.0;
+`clinic-reminders` 0.8.0.
+
+`verify-package-clinic-domain.go` gained the `appointmentDocumentation` DDL check and, more importantly, an
+assertion over the whole custody chain: the holder vertex, its `.retentionPolicy` body, `.sensitive`, and a
+`.custody` whose `holderKey` names that same holder. A diff-apply that installs the DDLs but drops the holder
+would otherwise install clean and then fail every `RecordEncounter` at commit.
+
+### 26.2 The scope correction, restated as a finding
+
+§9.1's census was package-scoped and missed `clinic-reminders`' `followUpRemindersSpec`, which reads the
+follow-up fields in **five** places — two RETURN aliases, the `freshUntil` CASE that arms a Weaver `@at`
+timer, and both gap predicates. §9.1 is amended in place (2026-08-08): the census is repo-wide and covers
+WHERE / CASE / predicates, not just RETURN clauses.
+
+### 26.3 Review (3-layer: opus security plane · edge-case · acceptance) — disposition
+
+**Fixed in-fire, because this fire wrote it.** The `clinicalRecord` Description claimed the record survives
+"as a PSEUDONYMIZED retained record". It does not: `vtx.patient.<id>.demographics.fullName` is plaintext,
+outside the identity `ShredIdentityKey` reaches, and projects as `patient_name` onto the same read-model rows
+that carry the visit — so a shredded patient's retained record is still identified. That Description is
+projected into the **unprotected** `retentionKeyStatus` lens, i.e. it is the operator's compliance surface,
+so the overclaim would have been the record. It now states the gap and names Inc C as what closes it. The
+same claim in `package.go`'s doc comment, and the stale "right-to-be-forgotten … remain deferred" paragraph
+in `manifest.yaml`, were corrected with it, along with README drift in both packages.
+
+**Filed, because the mechanism is platform-side and pre-existing.** Step 6.5 `continue`s past every mutation
+it cannot adjudicate, and there are **two** such arms, not one. The board already carried the empty-`class`
+arm; the sibling is `step65_encrypt.go:83`'s `if !ok || !ref.Sensitive`, where a DDL absent from the cache
+**with no live-read fault** reads as "not sensitive" and commits plaintext. The function's own comment
+defends the *faulted* empty resolution against exactly this and leaves the unfaulted miss falling through.
+Reachable via `ddl_cache.go`'s warn-and-skip on a transient KV read error (`Refresh`) and
+`step8_commit.go:335`'s warn-only `Invalidate` failure. The existing row is widened to name both arms and
+its consumer marked SHIPPED. Also filed: `internal/pkgmgr/manifest.go`'s `ManifestBlock` cross-checks every
+declared entity except `RetentionClasses`, so clinic-domain now mints a holder its own manifest never
+declares.
+
+**Reconciled, not filed.** The "renamed or uninstalled retention class strands its DEK" row acquires its
+first live subject — clinic-domain's `clinicalRecord` — and its row now says so. Its mechanism is unchanged:
+`<holder>.piiKey` is not in `declaredKeys`, so uninstall tombstones the holder and leaves the DEK live and
+undestroyable, with `ShredRetentionClassKey` refusing on the tombstoned holder.
+
+**Deliberately not filed — covered by §11's budgeted reset.** An `.encounter` written before this declaration
+holds all six fields plaintext under what is now a sensitive DDL. Nothing re-encrypts it, so
+`ShredRetentionClassKey` does not reach it, and its appointment reads as undocumented (no `.documentation`
+sibling) until a provider re-documents — which heals it, since the upsert is unconditioned. §11 budgets one
+full-stack reset for exactly this, the demo box resets nightly, and no non-resettable deployment exists. The
+class Description now states the limit rather than leaving it to the design doc. **If a deployment ever
+outlives a reset, this becomes a real row — it is a premise, not a permanent property.**
+
+**Confirmed sound, so a later fire does not re-litigate it.** The custody wiring itself: install-time
+`validateCustodyScope` accepts this declaration and rejects each of its malformed neighbours; commit-time,
+a non-identity anchor is permitted *only* for kind `retentionClass` and only when the install-resolved
+holder key parses as `vtx.retentionclass.<NanoID>`; `keyHolderFor` has no fallback to identity derivation;
+a shredded `.piiKey` fails closed *before* the empty-WrappedDEK check, so there is no key-resurrection path;
+the DEK is minted once per batch on the holder and never on the anchor. No lens, FE, Weaver target, Loom
+pattern, bridge adapter or notification path reads `.encounter` content, and the emitted
+`clinic.appointmentEncounterRecorded` event carries only `{appointmentKey}` and has no consumer anywhere.
+Nothing PHI-derived reaches the `doc` dict — no length, hash, substring or content-dependent branch. Both
+protected lenses' `authz_anchors` expressions are byte-identical across the re-point, so no row moved into
+or out of any actor's visibility.
+
+### 26.4 Checkpoint — what remains of item 1
+
+Worktree `/Users/andrewsolgan/Documents/GitHub/lattice-wt-clinic-retention`, branch
+`fire/clinic-retention-class`. Increments land on `main` individually (§14).
+
+- **Inc B — `clinicEncountersRead`.** A protected Postgres Secure Lens, provider-anchored, projecting
+  `summary` / `assessment` / `plan` via `SecureColumns` with `HolderTypes: ["retentionclass"]`. Mirror
+  `providerAppointmentsRead` for the REQUIRED `withProvider` anchor walk and
+  `authz_anchors = [nanoIdFromKey(pr.key)]` — its `clinicProviderReadGrants` producer already grants that
+  anchor, so no new producer is owed. Mirror `clinicPatientsRead` (`lenses.go:296-315`) for the secure-column
+  mechanics: the cypher projects the whole aspect `data` map and `Field` names the key inside the decrypted
+  plaintext, so three PHI fields means aliasing `a.encounter.data` three times with three `Field`s.
+  `validateSecureColumns` requires protected, no grantTable, plain projection, declared columns, non-`IntoKey`
+  columns, no reserved names.
+- **Inc C — `patientDemographics.fullName` onto the identity** (F3(b)). This is what makes §6.4's acceptance
+  criterion true for clinic, and it is not the mechanical move the ratified text implies. Two obstacles,
+  both verified live: (i) `identifiedBy` is **OPTIONAL** (`ddls.go:1087-1092`), so a patient with no identity
+  would have no name at all, and `clinicPatientsReadSpec`'s ghost-vertex filter
+  `WHERE p.demographics.data.fullName <> null` (`lenses.go:658-659`) would drop every such patient from the
+  roster — the filter needs a new subject as much as the name needs a new home; (ii) **no operation writes
+  `.name` on an existing identity** — `identity-domain` writes it only at `CreateUnclaimedIdentity`
+  (`ddls.go:1176-1178`), so `CreatePatient`'s `fullName` has nowhere to land for an already-provisioned
+  identity. Four lens sites read `fullName` today: `clinicPatients` (filter), `clinicPatientsRead` (filter +
+  `name`), `clinicAppointmentsRead` and `providerAppointmentsRead` (`patient_name`). The last three can take
+  it as a secure column off the linked identity, exactly as they already take `email`/`phone`; the first is
+  an unprotected NATS-KV lens and **cannot** — a plain lens cannot project a sensitive aspect — so
+  `clinicPatients` loses the name outright and its consumers must be censused before the move, not after.
+- **Inc D — the FE surface** rendering the decrypted note to the treating provider (`cmd/clinic-app/web`,
+  the existing encounter modal at `index.html:437-469` writes but cannot read back). Depends on Inc B.
