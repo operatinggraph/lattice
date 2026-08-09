@@ -1462,3 +1462,73 @@ increment leaves it, each grounded:
 
 **Still carried into Fire B:** the §17.2 class-gate migration hazard, and the live `vtx.location.*` test fixtures
 named in §14 Fire B.
+
+### 17.7 Fire A · Increment 4 — the trigger on the existing meta watch (2026-08-09, `a0a02919`)
+
+**Scope sentence (§14 Fire A item 4, as amended by A1):** widen `SubscribeKVChanges` to take more than one
+prefix, add the `lnk.meta.*.subtypeOf.>` branch where the handler ignored links, feed and arm the resolver from
+that watch, and wire invalidation — client gate before server filter, then `Rebuild` — for grow and shrink alike.
+
+**Shipped.** `SubscribeKVChanges` takes `[]string`; one prefix still emits the singular `FilterSubject`, so
+weaver / chronicler / loom keep their durable config byte-identical. The lens source accumulates type metas,
+their `canonicalName` aspects and the `subtypeOf` edges, emits a snapshot only when it differs, and arms the
+resolver. `pipelineEntry` retains its activated rule — the seam §17.6 called absent — so a snapshot change
+re-derives exactly the lenses whose expanded set moved, and a lens refused for an unknown expansion is retried
+when the taxonomy supplies it.
+
+**Scope-diff gate: narrow-only**, confirmed by an independent acceptance audit. Nothing from item 5 (validation
+gate, leaf-budget signal) or item 6 (health fields, Loupe) leaked in, and §17.6's `LeafBudget` precondition was
+correctly left alone as item 5/6's.
+
+**Three preconditions resolved, one deliberately not.** The re-derivation seam and the boot-refusal retry are
+built. `SetArmed`'s broad→narrowed flip is resolved *by call-site convention* — both callers immediately
+re-derive — not by a mechanism on the setter, which stays a bare public method.
+
+**Four deviations from the ratified body, each amended where it stands:**
+
+1. **§6.1's body is rewritten** (`13fc14e8`) to describe the widened watch A1 superseded it into. It had
+   retained a `FilterSubjects` block, a `DeliverPolicy` and a rationale for a second consumer this design does
+   not add.
+2. **§4.2 and §6.5 disagreed about a LIVE pipeline, and §6.5 governs it.** §4.2's refusal is an *activation*
+   rule, where publishing nothing means staying dark — safe. Applied to a live re-derivation it means continuing
+   to project against a set the resolver has just proven untrustworthy, which is precisely the stale narrow set
+   §6.5's final row forbids. A live re-derivation therefore degrades to the broad filter and publishes;
+   `WithLabelExpansion(cr, nil)` makes the matcher fail closed for the `*` position, so the lens is
+   **unavailable, never wrong**. Activation's refusal is unchanged.
+3. **A malformed `data.abstract` reads as CONCRETE here**, the opposite of `internal/processor/ddl_cache.go`.
+   The directions are not interchangeable: in the Processor `true` is restrictive, whereas here `abstract`
+   removes a type from every expansion, so `true` is the value that silently narrows a live filter. Mirroring
+   the Processor's default faithfully would have imported a threat model that does not transfer.
+4. **A `subtypeOf` parent resolves only through a tracked vertex type.** `canonicalName` aspects also exist on
+   role and lens metas (`pkgmgr/build.go:81`, `:209`), so a name shared between one of those and a real vertex
+   type would otherwise graft a leaf onto a type it never linked to.
+
+**The adversarial pass earned its keep — three cold reviewers, nineteen findings, all fixed before the merge.**
+The load-bearing class: the refused-lens registry shipped with no lifetime, so a tombstoned lens was resurrected
+by the next taxonomy event, an operator's edit to a refused lens was discarded in favour of the rule it
+replaced, and a lens failing late in activation landed in neither the registry nor the retry queue. Separately,
+the expanded set was latched as the baseline *before* `Rebuild` ran, so a failed rebuild was never retried —
+both directions producing §6.5's forbidden state. Every fix was verified by reverting it and requiring its test
+to fail.
+
+### 17.8 Checkpoint — Fire A, after increment 4
+
+**Landed on `main` (`a0a02919`); no worktree is held.** Increment 5 starts fresh.
+
+**Next — increment 5, the validation gate (§14 Fire A item 5, amendment A3).** A bare label naming no concrete
+key type is an error, not a silent empty match; `label*` on a name not declared abstract is an error; an
+expansion exceeding the ≤8-label cap raises a health signal rather than dropping silently to the broad filter.
+The unknown-label posture must be declared explicitly, since a cross-package label's resolvability depends on
+install order. §17.6's `LeafBudget` direct-vs-transitive gap is this increment's or item 6's — it is still
+un-addressed.
+
+**Two grounded preconditions increment 4 leaves, both filed as lane rows rather than carried silently:**
+
+- **`armed` asserts more than the consumer can back.** `SetArmed(true)` fires on the first replayed taxonomy
+  event, so a `*` lens activating mid-replay can narrow against a partial taxonomy; and on a NATS
+  `RECONNECTING` the pull consumer blocks without closing its channel, so the dead callback cannot fire and the
+  resolver keeps answering `StatusArmed` while blind. Both self-heal through re-derivation and neither is a
+  bounded fix — the first needs a replay-complete signal `SubscribeKVChanges` does not expose, the second a
+  consumer-liveness signal.
+- **§6.5's consumer-death row still has no health signal.** The disarm and re-derivation are wired; the operator
+  surface is item 6's `filterMode` / `filterBroadReason` work.
