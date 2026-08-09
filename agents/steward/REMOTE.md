@@ -81,3 +81,21 @@ install`). Vertical apps run against the ephemeral stack; FE verification is pos
 A remote Steward fire needs exactly: **"As Steward (<lane>), implement <item / Fire N> from
 `<design-doc path>`"** — the design doc's checkpoint section is the only cross-session memory (write
 yours before exiting), and this rider covers the environment. No conversation history required.
+
+## 7. `golangci-lint`: the pre-installed binary is too old for this repo's Go version
+
+The pre-installed `golangci-lint` on `PATH` refuses to run against this module —
+`can't load config: the Go language version (go1.25) used to build golangci-lint is lower than the
+targeted Go version (1.26.1)` — because it was itself built with an older Go toolchain than go.mod's `go`
+directive. A plain `go install` of a newer golangci-lint doesn't fix it either: `GOTOOLCHAIN=auto` only
+upgrades the toolchain when the package being built *requires* a newer one, and golangci-lint's own
+go.mod doesn't, so the install silently reuses whatever (older) toolchain is already on `PATH`. Force the
+build toolchain explicitly, matching go.mod's `go` directive and CI's pinned version
+(`.github/workflows/ci.yml`'s `golangci-lint-action` `version:`):
+
+```sh
+GOTOOLCHAIN=go1.26.1 go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.11.4
+```
+
+The result lands in `$(go env GOPATH)/bin` (typically `/root/go/bin`), which must precede the stale
+system binary on `PATH`: `export PATH="$(go env GOPATH)/bin:$PATH"` before `golangci-lint run`.
