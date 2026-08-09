@@ -1056,3 +1056,74 @@ caveat is carried (§3.4). `authz_anchors` and permission `scope` are vacuously 
 assumed, because "a type name never appears there" is exactly the kind of negative that turns out to have one
 instance. And `resolveLensRef`'s syntactic cross-package pass-through (`build.go:517-520`) is **debt, not a
 pattern** — §3.5 states explicitly that this design does not copy it.
+
+## 17. Build notes
+
+### 17.1 Fire A · Increment 1 — declaration surface + write-path gates (2026-08-08)
+
+**Scope sentence (from §14 Fire A, build order item 1, verbatim):** *"Declaration surface + write-path gates.
+`DDLSpec.Abstract`, `SubtypeOfRef`, `LeafBudget`; installer resolution (batch-local, then the
+`checkCanonicalNameCollision` scan, fail-closed on a miss — not `resolveLensRef`'s pass-through);
+`DDLCache.MetaVertexRef.Abstract` from `data.abstract`; step 6's two fail-closed gates (an abstract type segment
+in any key position; a class resolving to an abstract DDL); install-time acyclicity + depth check; the
+`LeafBudget` warning."*
+
+**Scope-diff gate: narrow-only, no substitution.** Items 2–6 of Fire A (the `*` parser extension, resolution +
+expansion, the trigger, the validation gate, observability) are **not** in this increment and no adjacent
+mechanism stands in for them. Nothing outside item 1 is built here.
+
+**Landing shape — increments land on `main` (§4's second sound shape), and the invariant is inertness.**
+This increment is unreachable in production until Fire B declares the first abstract type: no package sets
+`Abstract`, so `DDLCache` reports `Abstract == false` for every type, and both new step-6 gates evaluate their
+fail-closed arm zero times. The gates are additions that fire only on a construct nothing creates. That is the
+invariant keeping `main` correct across the increment boundary; it holds for items 2–3 as well (the resolver
+ships **disarmed**, so §4.2 forces `exhaustive = false` — correct-but-slower — until item 4's trigger lands).
+
+**Verified touch-list (checked live this fire; the design's citations predate `885f39be` and have drifted).**
+
+| Target | Verified location | Design cited |
+|---|---|---|
+| `DDLSpec` struct + `validateAll` list | `internal/pkgmgr/definition.go:756-818`, `:30-54` | §3.5 |
+| DDL→mutations loop; link-mutation precedent (`forOperation.meta`) | `internal/pkgmgr/build.go:119-173`, `:374-376` | `:106-107`, `:345` |
+| `resolveLensRef` — the pass-through **not** to copy | `internal/pkgmgr/build.go:533-551` | `:504-522` |
+| `checkCanonicalNameCollision` — the bucket scan to reuse | `internal/pkgmgr/installer.go:674-730` | `:645-707` |
+| `MetaVertexRef` struct; `loadMetaVertex` root read | `internal/processor/ddl_cache.go:24-68`, `:217-245` | `:120-174` |
+| step-6 DDL resolution + its consumer | `internal/processor/step6_resolve_ddl.go:222-266`; `step6_validate.go:156-157` | `:202-240`, `:156-157` |
+| `isValidTypeSegment` (bare regex — the gap the segment gate closes) | `internal/substrate/keys/keys.go:148-162` | `keys.go:141-155` |
+| `CreateMetaVertex` emits no `lnk.` key | `internal/bootstrap/meta_ddl.go:131-132`, `:162-167` | §3.5 |
+
+**Increment order + green checks.** (a) `DDLSpec` fields + `validateAbstractDDLScope` → `go test ./internal/pkgmgr/`.
+(b) `build.go` emits `data.abstract` / `data.leafBudget` on an abstract root and the `subtypeOf` link → same.
+(c) installer fail-closed `SubtypeOfRef` resolution + acyclicity/depth (`maxTaxonomyDepth = 4`) + the
+`LeafBudget` warning → `go test ./internal/pkgmgr/`. (d) `MetaVertexRef.Abstract` → `go test ./internal/processor/`.
+(e) the two step-6 gates → same. Full gates at close: `go build ./...`, `make vet`, `golangci-lint run ./...`,
+every `scripts/lint-*.go`, `make verify-kernel`, `go test ./...`.
+
+**In-scope gotchas.**
+
+1. **`resolveLensRef`'s NanoID pass-through is debt, not a pattern** (§3.5 says so outright). Cross-package
+   `SubtypeOfRef` resolves through the `checkCanonicalNameCollision` scan and **fails the install** when the name
+   does not resolve, is not `abstract: true`, or is tombstoned.
+2. **`LeafBudget` asymmetry (§10.2) — a leaf install is NEVER rejected**, only warned; the rejecting check is at
+   the *lens's* install and belongs to a later increment. Blocking a leaf would let one package's lens veto
+   another package's type declaration, which is the coupling this design removes.
+3. **The segment gate must cover all four key positions** — vertex root, aspect owner, and *both* link endpoints
+   (§8 rows 2–3). Covering only the vertex root leaves the endpoint restatement unguarded.
+4. **`meta` and `op` are reserved** (Contract #1 §1.2) and must be refused as abstract canonical names.
+5. **Abstract is mutually exclusive with `Script`/`PermittedCommands`** (§3.2) and is meaningful only on
+   `meta.ddl.vertexType`.
+6. The marker is **explicit** (`data.abstract`), never derived from "a vertexType with no script" — §3.2 names
+   that as the accident-of-shape failure the platform has been burned by.
+
+**Non-goals.** The `*` sigil / grammar work; `internal/refractor/taxonomy`; `WithLabelExpansion`; the four
+label-equality sites; the meta-watch `lnk.meta.*` branch; the label-validation gate; `filterMode` health fields;
+every `location-domain` and guard-census change (all Fire B).
+
+**Adjacent find filed now, not later.** ANTLR toolchain state, which decides item 2's shape: the grammar is
+`internal/refractor/ruleengine/full/cypher/Cypher.g4`, generated Go is **committed**, and there is **no**
+`go:generate`, Makefile target, or CI step that regenerates it. `oC_LabelName` resolves to `oC_SymbolicName`
+(Unicode `ID_Start`/`ID_Continue` + `Pc`), which cannot lex `*`, so `(l:location*)` is a **parse error today** —
+post-processing `ln.GetText()` in the visitor (`visitor.go:239-256`, the sole `.Label` assignment) cannot reach
+a token the lexer never produces. The host has `antlr` **4.13.2** while `go.mod` pins the runtime at
+**4.13.1**; regenerating a 570 KB parser across a generator/runtime version skew is item 2's first decision, not
+a detail. Recorded here so the next fire starts from it.
