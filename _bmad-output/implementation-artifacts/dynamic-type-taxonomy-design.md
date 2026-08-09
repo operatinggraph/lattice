@@ -1,7 +1,7 @@
 # A dynamic type taxonomy — an abstract type is graph data, and a lens label expands against it
 
-**Status: ✅ Andrew-RATIFIED 2026-08-06** — build-ready as **two fires**, both in the **Lattice lane**
-(§14, rewritten at ratification). Four amendments below are Andrew's and supersede the body where they
+**Status: ✅ Andrew-RATIFIED 2026-08-06 · Fire A increment 1 in flight** — build-ready as **two fires**, both in the **Lattice lane**
+(§14, rewritten at ratification). Five amendments below are Andrew's and supersede the body where they
 differ. Contract #1 §1.7's abstract-vertexType note is **committed** with a transitional marker. Authored
 2026-08-06, co-designed with Andrew in the ratify session; subsumes the location-domain class question.
 
@@ -45,6 +45,16 @@ differ. Contract #1 §1.7's abstract-vertexType note is **committed** with a tra
 > signal, never a silent drop to the broad filter). This makes label resolution a vocabulary lookup where
 > today it is an uninterpreted string, so the **unknown-label posture must be a declared decision** — a
 > cross-package label's resolvability depends on install order.
+>
+> **A5 (Andrew, 2026-08-08) — a CONCRETE type may have subtypes; the parent of a `subtypeOf` need not be
+> abstract.** §3.4's "a type may be both concrete and abstract-of-others" row is correct and authoritative;
+> §3.5's rule that the install fails unless the named parent is `abstract: true` was the mistaken clause and is
+> rewritten above. This is also what amendment A2 already implied — *"self ∪ all descendants at any depth (for a
+> purely abstract name, just the descendants)"* only needs its parenthetical if a **non**-purely-abstract name
+> can have descendants too. What the install still refuses is a parent that does not resolve, is tombstoned, or
+> does not name a live `meta.ddl.vertexType`: that class check, not an abstractness check, is what catches a ref
+> naming a lens or op-meta canonicalName, which is the authoring typo the guard exists for. Raised during Fire A
+> increment 1, whose build had implemented §3.5 faithfully and pinned the wrong behaviour with a test.
 >
 > **DD pass, 2026-08-06 — §§1–8 verified, §9.3's census corrected.** An independent probe checked ~35
 > citations across the four label-keyed mechanisms, anchor retraction, `seedAnchorFor`, the meta-CDC watch,
@@ -343,7 +353,10 @@ exactly as `resolveLensRef` does for a lens canonicalName (`build.go:504-522`). 
 not in-batch, and `resolveLensRef`'s fallback — accept any syntactically valid NanoID with no existence check
 (`build.go:517-520`) — **must not be copied**. `checkCanonicalNameCollision` already scans every
 `vtx.meta.*.canonicalName` in the bucket (`installer.go:645-707`), so the lookup exists; the install **fails
-closed** when the named abstract does not resolve, is not `abstract: true`, or is tombstoned. (Recorded per the
+closed** when the named parent does not resolve, does not resolve to a live `meta.ddl.vertexType` meta vertex,
+or is tombstoned. **The parent need not be abstract** — a concrete type may have subtypes (amendment A5), so
+the class check, not an abstractness check, is what catches a ref naming a lens or op-meta canonicalName.
+(Recorded per the
 *verify precedent, don't just copy it* rule: `resolveLensRef`'s pass-through is unfixed debt, not a pattern.)
 
 **Cross-package declaration needs no cooperation from the abstract's owner.** Package B declares
@@ -1103,7 +1116,8 @@ every `scripts/lint-*.go`, `make verify-kernel`, `go test ./...`.
 
 1. **`resolveLensRef`'s NanoID pass-through is debt, not a pattern** (§3.5 says so outright). Cross-package
    `SubtypeOfRef` resolves through the `checkCanonicalNameCollision` scan and **fails the install** when the name
-   does not resolve, is not `abstract: true`, or is tombstoned.
+   does not resolve, does not name a live `meta.ddl.vertexType`, or is tombstoned. The parent need not be
+   abstract (amendment A5).
 2. **`LeafBudget` asymmetry (§10.2) — a leaf install is NEVER rejected**, only warned; the rejecting check is at
    the *lens's* install and belongs to a later increment. Blocking a leaf would let one package's lens veto
    another package's type declaration, which is the coupling this design removes.
