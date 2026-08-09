@@ -26,6 +26,9 @@ const state = {
   apptsProjectionHealthy: true, // false only when /api/my-appointments explicitly reports its projection paused — lets an empty grid read as "data feed paused" instead of "no appointments"
   mySchedule: [], // the signed-in provider's OWN appointments (PROTECTED, provider-self RLS via /api/my-schedule) — the provider hat's day view
   mySchedProjectionHealthy: true, // same signal as apptsProjectionHealthy, for /api/my-schedule
+  myEncounters: {}, // appointmentKey -> clinical note row, for every documented visit the signed-in actor may read back (PROTECTED, provider-self-or-WildcardAnchor RLS via /api/my-encounters). An appointment absent from this map has no note THIS reader may see — renderApptCard treats that as "no note", never an error.
+  myEncountersLoaded: true, // whether the last /api/my-encounters fetch succeeded — false only while loadMyEncounters's catch is swallowing a transient failure. openEncounter/submitEncounter check this so a fetch failure never reads as "this documented visit has no prior note".
+  myEncountersPending: {}, // appointmentKey -> the note this session just wrote via submitEncounter, held here until a loadMyEncounters fetch reflects it. Keeps a corrected note from regressing to the pre-correction row an in-flight projection can still return.
   schedule: [],
   followups: [], // every appointment whose documented visit requested a follow-up (clinic-wide worklist)
   series: [], // clinic-wide recurring visit series worklist (PROTECTED, staff wildcard, D1.5)
@@ -2160,6 +2163,7 @@ async function loadAppts() {
     state.apptsProjectionHealthy = data.projectionHealthy !== false;
   } catch (e) {
     grid.innerHTML = "";
+    state.appts = [];
     empty.hidden = false;
     empty.textContent = "Could not load appointments: " + e.message;
     $("#appts-summary").textContent = "";
@@ -2313,6 +2317,62 @@ function renderMySchedule() {
   const n = matched.length;
   const suffix = filter === "all" ? "" : ` of ${state.mySchedule.length}`;
   $("#myschedule-summary").textContent = `${n} appointment${n === 1 ? "" : "s"}${suffix}`;
+}
+
+// loadMyEncounters fetches every documented visit's clinical note the
+// signed-in actor is entitled to read back — the PROTECTED, provider-self-or-
+// WildcardAnchor RLS read at /api/my-encounters (clinicEncountersRead never
+// grants the front desk on its own, unlike the appointment schedule reads
+// above). Keyed by appointmentKey so renderApptCard's card-level lookup is
+// O(1); showView sequences it after the active view's own grid load (loadAppts
+// or loadMySchedule) so both fetches never race for the same grid.
+//
+// A fetch failure is swallowed rather than surfaced as a grid error: the note
+// is a supplementary annotation on cards that already render fine without it
+// (the "✓ Visit documented" presence signal alone comes from the appointment
+// row, not this fetch), so a transient failure here degrades to "no note
+// shown" rather than blanking the appointment list — state.myEncountersLoaded
+// records the failure so openEncounter/submitEncounter can tell "no note"
+// from "could not check" apart, since only the latter must block a save.
+function noteMatchesPending(fetched, pending) {
+  if (!fetched) return false;
+  return (
+    (fetched.summary || "") === (pending.summary || "") &&
+    (fetched.assessment || "") === (pending.assessment || "") &&
+    (fetched.plan || "") === (pending.plan || "")
+  );
+}
+
+async function loadMyEncounters() {
+  let byAppt = {};
+  let ok = true;
+  try {
+    const data = await appGet("/api/my-encounters");
+    for (const enc of data.encounters || []) byAppt[enc.appointmentKey] = enc;
+  } catch (e) {
+    ok = false;
+  }
+  state.myEncountersLoaded = ok;
+  // submitEncounter writes state.myEncountersPending[appointmentKey]
+  // optimistically on a successful save. Projection is asynchronous, so this
+  // fetch can still return the pre-save row for a moment; keep the optimistic
+  // note in place until a fetch actually reflects it, so a corrected note can
+  // never regress to the pre-correction text (BLOCKER: submitEncounter).
+  for (const key of Object.keys(state.myEncountersPending)) {
+    const pending = state.myEncountersPending[key];
+    if (ok && noteMatchesPending(byAppt[key], pending)) {
+      delete state.myEncountersPending[key];
+    } else {
+      byAppt[key] = pending;
+    }
+  }
+  state.myEncounters = byAppt;
+  // Re-render only the grid for the view actually on screen, and only when it
+  // holds rows — loadAppts/loadMySchedule already painted this view's own
+  // error/empty state, and this fetch (which can resolve after the caller has
+  // navigated elsewhere) must never repaint over it.
+  if (state.view === "appts" && state.appts.length > 0) renderAppts();
+  if (state.view === "myschedule" && state.mySchedule.length > 0) renderMySchedule();
 }
 
 // ---- Follow-ups worklist (clinic-wide staff queue) ----
@@ -3494,11 +3554,58 @@ function renderApptCard(a, opts) {
   }
 
   // The "visit documented" presence signal + any requested follow-up (the
-  // clinicAppointments lens's operational encounter columns — the clinical content
-  // itself is PHI and never projected). Absent until the visit is documented.
+  // clinicAppointments lens's operational encounter columns). Absent until the
+  // visit is documented. This div never carries clinical content — `a` is a
+  // protectedAppointmentRow, which the write-side keeps PHI-free by design; the
+  // note itself (below) is a separate PROTECTED read (state.myEncounters).
   const documented = document.createElement("div");
   documented.className = "meta documented";
   documented.textContent = encounterSummary(a);
+
+  // The clinical note itself, when the signed-in actor is entitled to read it
+  // back (state.myEncounters, populated by loadMyEncounters from the
+  // PROTECTED, provider-self-or-WildcardAnchor /api/my-encounters). Gated on
+  // a.documentedAt && !opts.asSelf — a patient's own self-service card
+  // (opts.asSelf) never shows clinical content, only the "documented"
+  // presence signal above; the Document-visit button below is gated
+  // separately (opts.cancelable && !opts.asSelf && status === completed). An
+  // appointment this reader is not granted for simply has no entry in the
+  // map, which renders as nothing here — never an error, since RLS's silence
+  // is not a failure.
+  let noteBlock = null;
+  const note = a.documentedAt && !opts.asSelf ? state.myEncounters[a.appointmentKey] : null;
+  if (note) {
+    // A crypto-shredded record (ShredRetentionClassKey on the clinicalRecord
+    // retention class) still projects a row — documentedAt survives, but
+    // summary/assessment/plan all COALESCE to "" — so an all-empty note means
+    // the record was destroyed, not that the visit had no findings.
+    const hasContent = !!(note.summary || note.assessment || note.plan);
+    noteBlock = document.createElement("div");
+    noteBlock.className = "meta encounter-note";
+    const label = document.createElement("div");
+    label.className = "encounter-note-label";
+    label.textContent = "Clinical note";
+    noteBlock.append(label);
+    if (hasContent) {
+      const summary = document.createElement("div");
+      summary.textContent = note.summary || "";
+      noteBlock.append(summary);
+      if (note.assessment) {
+        const assessment = document.createElement("div");
+        assessment.textContent = "Assessment: " + note.assessment;
+        noteBlock.append(assessment);
+      }
+      if (note.plan) {
+        const plan = document.createElement("div");
+        plan.textContent = "Plan: " + note.plan;
+        noteBlock.append(plan);
+      }
+    } else {
+      const gone = document.createElement("div");
+      gone.textContent = "Record no longer available (retention key destroyed).";
+      noteBlock.append(gone);
+    }
+  }
 
   const actions = document.createElement("div");
   actions.className = "card-actions";
@@ -3534,10 +3641,11 @@ function renderApptCard(a, opts) {
   }
 
   // A completed visit can be documented (or its documentation corrected — the op is
-  // a re-runnable upsert). The clinical note lives behind the modal; only the
-  // "documented" + follow-up signals show on the card. Clinical documentation
-  // stays staff-only — never offered in the self-service (asSelf) patient view; a
-  // bound provider (opts.asSelf unset) reaches it from My Schedule too.
+  // a re-runnable upsert). The note block above shows the clinical content when the
+  // signed-in actor may read it back; the modal is where it is written or corrected.
+  // Clinical documentation stays staff-only — never offered in the self-service
+  // (asSelf) patient view; a bound provider (opts.asSelf unset) reaches it from My
+  // Schedule too.
   if (opts.cancelable && !opts.asSelf && (a.status || "").toLowerCase() === "completed") {
     const btns = document.createElement("span");
     btns.className = "card-btns";
@@ -3566,14 +3674,17 @@ function renderApptCard(a, opts) {
   if (statusNote.textContent) card.append(statusNote);
   if (reminder.textContent) card.append(reminder);
   if (documented.textContent) card.append(documented);
+  if (noteBlock) card.append(noteBlock);
   card.append(actions);
   return card;
 }
 
 // encounterSummary renders the operational encounter signals (the lens's
 // documentedAt / followUpRequested / followUpDate columns) for an appointment, or
-// "" when the visit has not been documented. The clinical content is PHI and is
-// never projected, so it is never shown here.
+// "" when the visit has not been documented. It never reads the clinical
+// content itself — that comes from the separate protected note lookup
+// (renderApptCard's noteBlock, state.myEncounters) — so this helper stays
+// correct to call for every viewer, including a patient's self-service card.
 function encounterSummary(a) {
   if (!a.documentedAt) return "";
   const d = new Date(a.documentedAt);
@@ -3892,27 +4003,41 @@ async function submitWellnessBooking(ev) {
 // ---- Document visit (RecordEncounter — the post-visit clinical record) ----
 //
 // RecordEncounter upserts the appointment's .encounter aspect. The RAW clinical
-// content (summary / assessment / plan) is PHI: it is captured but NEVER projected
-// (the deferred Vault plane owns its display), so the form cannot pre-fill it even
-// when correcting an existing note — only the operational follow-up signals are
-// projected and round-tripped. The op is a re-runnable upsert (re-saving replaces
-// the whole aspect).
+// content (summary / assessment / plan) is PHI, decrypted at projection only for
+// the treating provider (or a WildcardAnchor holder) through the protected
+// clinicEncountersRead read model (state.myEncounters, loadMyEncounters). The op
+// itself is a re-runnable upsert (re-saving replaces the whole aspect).
 
 function openEncounter(a, onDone) {
   state.documenting = { a, onDone };
   const who = a.patientName || shortKey(a.patientKey);
-  $("#encounter-context").textContent = a.documentedAt
-    ? `${who} · ${fmtWhen(a.startsAt, a.endsAt)} — re-documenting replaces the prior note`
-    : `${who} · ${fmtWhen(a.startsAt, a.endsAt)}`;
-  // Clinical content is never projected, so even an already-documented visit starts
-  // blank (an honest consequence of the PHI-not-projected discipline). The follow-up
-  // signals ARE projected, so they pre-fill.
-  $("#enc-summary").value = "";
-  $("#enc-assessment").value = "";
-  $("#enc-plan").value = "";
+  // A failed /api/my-encounters fetch (state.myEncountersLoaded false) makes
+  // "this visit has no prior note" indistinguishable from "there IS a prior
+  // note but this session could not read it back". For an already-documented
+  // visit that ambiguity must not reach the form: RecordEncounter is an
+  // unconditioned upsert of the whole .encounter aspect, so saving over a
+  // blank prefill would silently destroy the existing assessment/plan. Block
+  // Save until a reload actually confirms there is nothing to lose.
+  const notesUnavailable = !!a.documentedAt && !state.myEncountersLoaded;
+  $("#encounter-context").textContent = notesUnavailable
+    ? `${who} · ${fmtWhen(a.startsAt, a.endsAt)} — could not load the existing note. Reload before editing — saving now would replace it with only what you type here.`
+    : a.documentedAt
+      ? `${who} · ${fmtWhen(a.startsAt, a.endsAt)} — re-documenting replaces the prior note`
+      : `${who} · ${fmtWhen(a.startsAt, a.endsAt)}`;
+  // Pre-fill from the fetched note when the signed-in actor is entitled to read
+  // one back (state.myEncounters — absent for an undocumented visit, or when RLS
+  // simply did not grant this reader the existing note, in which case the form
+  // starts blank rather than erroring). The follow-up signals come straight off
+  // the appointment row either way, since they are always projected.
+  const note = a.documentedAt ? state.myEncounters[a.appointmentKey] : null;
+  $("#enc-summary").value = note ? note.summary || "" : "";
+  $("#enc-assessment").value = note ? note.assessment || "" : "";
+  $("#enc-plan").value = note ? note.plan || "" : "";
   $("#enc-followup").checked = !!a.followUpRequested;
   $("#enc-followup-date").value = a.followUpDate ? a.followUpDate.slice(0, 10) : "";
   toggleFollowupDate();
+  const submit = $("#encounter-submit");
+  if (submit) submit.disabled = notesUnavailable;
   $("#encounter-overlay").hidden = false;
   $("#enc-summary").focus();
 }
@@ -3934,6 +4059,13 @@ async function submitEncounter(ev) {
     return;
   }
   const a = ctx.a;
+  // Belt-and-suspenders against openEncounter's disabled submit button (MAJOR:
+  // a swallowed fetch failure must never let a blank prefill overwrite an
+  // existing note this session simply could not read back).
+  if (a.documentedAt && !state.myEncountersLoaded) {
+    toast("Could not load the existing note — reload before editing.", "err");
+    return;
+  }
   const summary = $("#enc-summary").value.trim();
   if (!summary) {
     toast("A visit summary is required.", "err");
@@ -3960,9 +4092,21 @@ async function submitEncounter(ev) {
       toast("Could not save documentation — " + msg, "err");
       return;
     }
+    // Write what was just saved into the cache synchronously, BEFORE onDone
+    // re-renders this card, so neither the card nor the next "Edit
+    // documentation" prefill can ever show older text than what this session
+    // just wrote (BLOCKER: a corrected note silently reverting, and a second
+    // Save then overwriting the correction with the stale prefill).
+    // myEncountersPending holds it until loadMyEncounters's next fetch
+    // actually reflects it — the projection may take a moment, and an
+    // immediate refetch must not regress this optimistic value.
+    const optimisticNote = { appointmentKey: a.appointmentKey, summary, assessment, plan };
+    state.myEncounters[a.appointmentKey] = optimisticNote;
+    state.myEncountersPending[a.appointmentKey] = optimisticNote;
     state.highlight = a.appointmentKey;
     closeEncounter();
     toast("Visit documented.", "ok");
+    loadMyEncounters();
     if (ctx.onDone) ctx.onDone();
   } catch (e) {
     toast("Could not save documentation: " + e.message, "err");
@@ -4098,8 +4242,11 @@ function showView(view) {
   // "appts" (My Appointments) also hosts the selected patient's own recurring
   // series panel (state.mySeries, the PROTECTED patient-self RLS fetch) — a
   // sibling of the clinic-wide "series" tab's staff fetch, not the same data.
-  if (view === "appts") loadAppts();
-  if (view === "myschedule") loadMySchedule();
+  // loadMyEncounters is sequenced AFTER its view's own grid load (rather than
+  // fired alongside it) so the two fetches can never race to repaint the same
+  // grid — see loadMyEncounters's doc comment.
+  if (view === "appts") loadAppts().then(loadMyEncounters);
+  if (view === "myschedule") loadMySchedule().then(loadMyEncounters);
   if (view === "schedule") loadSchedule();
   if (view === "followups") loadFollowups();
   if (view === "appts" || view === "series") loadSeries();

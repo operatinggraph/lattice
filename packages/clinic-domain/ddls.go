@@ -2970,7 +2970,8 @@ def execute(state, op):
         doc = {"documentedAt": time.rfc3339_utc(op.submittedAt),
                # followUpRequested is OPERATIONAL, non-PHI (the existence of a
                # follow-up, like an appointment time — projected). The clinical REASON
-               # for a follow-up lives in .encounter's plan field and is never projected.
+               # for a follow-up lives in .encounter's plan field, RAW PHI decrypted at
+               # projection into clinicEncountersRead for the treating provider only.
                "followUpRequested": optional_bool(p, "followUpRequested")}
         follow_date = optional_string(p, "followUpDate")
         if doc["followUpRequested"] and follow_date != None:

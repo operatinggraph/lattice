@@ -224,6 +224,49 @@ func TestHandleMyProviderSchedule_ValidSession_PoolUnconfigured_502(t *testing.T
 	}
 }
 
+// TestHandleMyEncounters_* mirror TestHandleMyAppointments_*/
+// TestHandleMyProviderSchedule_* — the same session-then-RLS boundary, for the
+// clinicEncountersRead-backed sibling endpoint. The RLS scoping itself (which
+// actor gets which rows) is covered separately, against a real Postgres, by
+// TestEncountersReadBoundary_RLS_Enforcement (encounters_rls_test.go); these
+// run without Postgres, so they are what `go test ./cmd/clinic-app/` actually
+// exercises locally.
+
+func TestHandleMyEncounters_NoAuthPosture_401(t *testing.T) {
+	s := noPostureServer(t)
+	rec := sessionGET(s, s.handleMyEncounters, "/api/my-encounters", nil)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401", rec.Code)
+	}
+}
+
+func TestHandleMyEncounters_NoCookie_401(t *testing.T) {
+	s, _ := devSessionServer(t, nil)
+	rec := sessionGET(s, s.handleMyEncounters, "/api/my-encounters", nil)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401 (no session cookie)", rec.Code)
+	}
+}
+
+func TestHandleMyEncounters_ForgedCookie_401(t *testing.T) {
+	s, _ := devSessionServer(t, nil)
+	forged := &http.Cookie{Name: s.session.CookieName(), Value: "not.a.valid.jwt"}
+	rec := sessionGET(s, s.handleMyEncounters, "/api/my-encounters", forged)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401 (forged cookie)", rec.Code)
+	}
+}
+
+// TestHandleMyEncounters_ValidSession_PoolUnconfigured_502: a signed-in actor
+// with no read-model pool gets a clean 502, never a nil-pointer panic.
+func TestHandleMyEncounters_ValidSession_PoolUnconfigured_502(t *testing.T) {
+	s, cookieFor := devSessionServer(t, nil) // session set, pgPool nil
+	rec := sessionGET(s, s.handleMyEncounters, "/api/my-encounters", cookieFor("Hj4kPmRtw9nbCxz5vQ2y"))
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, want 502 (pool unconfigured)", rec.Code)
+	}
+}
+
 // TestSessionCookieInteroperatesWithTheSharedDevKey proves the actual point of
 // the shared-dev-IdP interim (real-actor-write-auth-e2e-design.md §3.2): the
 // token this app's session cookie carries verifies against an independently

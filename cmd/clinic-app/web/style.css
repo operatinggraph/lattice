@@ -146,6 +146,24 @@ button.ghost:hover { background: var(--bg-input); color: var(--text); }
 .card .meta.reminder-sent { color: var(--green); }
 .card .meta.status-note { color: var(--text-dim); font-style: italic; }
 .card .meta.documented, .sched-detail .sd-meta.documented { color: var(--green); }
+.card .encounter-note {
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 8px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  color: var(--text);
+  font-size: 13px;
+}
+.card .encounter-note .encounter-note-label {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-dim);
+}
 .card.past { opacity: 0.6; }
 .card-actions { margin-top: auto; display: flex; flex-direction: column; align-items: flex-start; gap: 10px; }
 .card-btns { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
