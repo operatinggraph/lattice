@@ -38,9 +38,11 @@ big pipeline refactor) per fire, then exit (bounded).
 
 ## 1. Ground (measure before you cut)
 
-- **The pipeline:** `.github/workflows/ci.yml` — today a **single serial job** (~20 min): build → vet →
-  golangci → conventions-lint → `make up` (Docker stack + bootstrap) → `verify-kernel` → **8× `verify-package-*`**
-  → Gate 2 → Gate 3 → hello-lattice → lease-convergence → object-gc → `go test ./... -p 4` → teardown. Note
+- **The pipeline:** `.github/workflows/ci.yml` — **read it every fire; never trust a prose description of it,
+  including this one.** Its shape is exactly what you keep changing, so any snapshot recorded here decays
+  between fires — the file is the only authority for what runs where. (As of the last edit: the original
+  single serial job has been split into parallel jobs — `lint-build` · `stack-gates` · `convergence` ·
+  `unit` — so the cheap structural win is already spent; look for the long pole *within* a job.) Note
   `paths-ignore` already skips docs/`agents/**` (don't break that — it keeps doc fires off CI).
 - **The targets:** the `Makefile` (`test`, `test-*`, `verify-*`, `up`/`down`, `build`) — what each does, which
   spin their **own** ephemeral stack vs. reuse the one `make up` brought up.
@@ -65,12 +67,11 @@ Prioritize by leverage (wall-clock saved, or flake-rate killed, per unit risk). 
   **real code race / bug** (CI flakes have surfaced these — a wrong bucket name, a stale field ref) is the
   **owner / Steward's lane** → file it to `lattice.md` as a reliability pre-empt; **never paper over it.**
   **Never mask a flake with a blanket retry** — a retry hides a real failure and silently weakens the gate.
-- **Parallelize the pipeline into a job matrix.** The single serial job is the #1 speed cost. Fan out into
-  independent GH Actions jobs that run concurrently — e.g. a **lint/build** job (build/vet/golangci/conventions),
-  a **kernel + packages** job (`make up` once → verify-kernel → the verify-package chain), a **heavy-gates** job
-  (hello-lattice / lease-convergence / object-gc — each spins its own stack), and a **unit** job
-  (`go test ./...`). Wall-clock collapses from sum to max. Mind: each job needing the Docker stack runs its own
-  `make up`/`down`; keep `if: always()` teardown per job.
+- **Rebalance the job split.** Wall-clock is the *slowest job*, so the lever is the current long pole, not the
+  job count: move work off the critical-path job, split one that has grown, or merge two short ones to save
+  their setup. Re-derive the split from `ci.yml` + the measured per-job durations each time — never from a
+  remembered shape. Mind: each job needing the Docker stack runs its own `make up`/`down`; keep `if: always()`
+  teardown per job, and every gate must still appear in **exactly one** job.
 - **Caching.** Go **build cache** + **module cache** across runs (setup-go's `cache:`/`actions/cache` keyed on
   `go.sum`) so build + test don't recompile cold. Often minutes for near-zero risk.
 - **Test-suite speed.** Raise `-p` to the runner's cores where it stays green; add `t.Parallel()` to safe

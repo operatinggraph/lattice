@@ -1,6 +1,6 @@
 ---
 name: steward
-description: "Winston's advancer for one swim-lane stream (Verticals OR Lattice, named by the caller) — sense the stream's lane file + signals, select the next unit (both streams: importance-first; lattice round-robin is the starvation guard), activate the owning role at L1, admit/commit at L2, exit (bounded — the batch is sized by the design brief's fire breakdown). Two streams run in parallel on disjoint code. Design: _bmad-output/implementation-artifacts/agentic-ops-swimlanes-design.md (+ agentic-ops-design.md §6.1.1)."
+description: "Winston's advancer for one swim-lane stream (Verticals, Lattice, or Loupe — named by the caller) — sense the stream's lane file + signals, select the next unit (verticals/lattice: importance-first, with lattice round-robin as the starvation guard; loupe: the UX design's fire decomposition), activate the owning role at L1, admit/commit at L2, exit (bounded — the batch is sized by the design brief's fire breakdown). The streams run in parallel on disjoint code. Design: _bmad-output/implementation-artifacts/agentic-ops-swimlanes-design.md (+ agentic-ops-design.md §6.1.1)."
 ---
 
 # Steward — advance one stream, one fire
@@ -16,9 +16,12 @@ description: "Winston's advancer for one swim-lane stream (Verticals OR Lattice,
 - **Lattice** — platform features + component maintenance; lane file `planning-artifacts/backlog/lattice.md`.
   Select **importance-first** (§2: ratified designs → ready features → filler); round-robin across components
   is the starvation guard / tie-breaker, never the primary axis.
+- **Loupe** — the operator console, `cmd/loupe/**` only; lane file `planning-artifacts/backlog/loupe.md`.
+  Select by the **UX design's fire decomposition**, not by importance scoring (§2.6). Runs parallel to *both*
+  other streams on its own lane-private lock.
 
-The two streams run in **parallel** on disjoint code by default (verticals = `packages/<vertical>*` +
-`cmd/<x>-app`; Lattice = `internal/*` + core packages) — this is the organizing split for demand/selection, not
+The streams run in **parallel** on disjoint code by default (verticals = `packages/<vertical>*` +
+`cmd/<x>-app`; Lattice = `internal/*` + core packages; Loupe = `cmd/loupe/**`) — this is the organizing split for demand/selection, not
 what prevents collisions: two fires colliding on the same files is prevented by the mutual-exclusion lock the
 unattended fires run under (at most one fleet fire at a time), so *you* finishing a single coupled item across
 the boundary (§2 "wear the other hat") is safe. **Ladder:** drive owners at **L1**, commit at
@@ -179,6 +182,7 @@ Pre-emption order (within your stream):
      is genuinely not eligible*** (standing Andrew-block, not-yet-ratified, gates can't go green, blocked-on a
      filed primitive) — **never** why X was convenient. "I chose the easy one" is the exact bug this rule exists
      to kill.
+   - **Loupe** → the next increment in the **UX design's fire decomposition** — see §2.6.
 4. **Continuous improvement always counts as ready** (so the lane never looks empty): test-coverage gaps,
    simplification / refactor, observability build-out, and **doc sweeps** — incl. the cross-cutting docs no
    single story owns (`README.md`, `docs/architecture-overview.md`, the contracts index): the dedicated
@@ -215,6 +219,34 @@ dead end: build the non-contract parts (L2), **make the actual contract-doc edit
 — never committed, no separate request doc), design the dependent work against the proposed shape, and flag it
 on the board — Andrew ratifies a *ready* proposal, he doesn't author it. "Touches a contract" is never a
 reason to leave an item undone; only a *standing* Andrew block/shelve is.
+
+### 2.6 Loupe stream — the console advances by its UX design, not by score
+
+Everything above applies, with these substitutions. The **design-of-record** is `backlog/loupe.md`'s rows **plus
+the UX design** at `implementation-artifacts/loupe-2-ux-design.md` (its fire decomposition is at the end).
+
+- **Gate before selecting.** Build only rows that are **📋 ready** or **✅ adjudicated** (or resume a **🏗️**).
+  If *every* program row is still `🚧 blocked-on:` the UX design — i.e. Winston has not yet adjudicated Sally's
+  design — **exit quietly**: release the lock, no commits. That is a correct outcome, not a stall.
+- **Select** the next increment in the UX design's decomposition sequence (L1 shell first, then its dependency
+  order), or a couple of XS/S maintenance rows. Be ambitious within the fire; size sets review depth, not
+  eligibility.
+- **Build role is UX-then-FE** — Sally (`bmad-agent-ux-designer`) designs, the `fe-engineer` playbook builds and
+  verifies in-browser. **Vanilla JS + `go:embed`, no Node toolchain**, decision logic kept separable from DOM
+  code (the goja test-strategy split).
+- **Scope guard: `cmd/loupe/**` only.** A needed platform primitive (engine / op / substrate), deploy change, or
+  contract change → file it to `backlog/lattice.md`, mark this row `🚧 blocked-on:` it, and build the rest.
+  (Trivial established-pattern mirrors are still yours — the §2 "verify before you bounce" test applies.)
+- **Fresh worktree per fire, never reuse one:**
+  `git worktree add -b steward-loupe-<slug> /tmp/lattice-worktrees/loupe-<slug>-<timestamp> main`. A concurrent
+  fire may own an existing item-named worktree.
+- **Gates** (from the worktree): `go build ./...`, `make vet`, `golangci-lint run ./...`,
+  `STRICT=1 go run ./scripts/lint-conventions.go`, `go test ./cmd/loupe/...` + any package the fire touched.
+- **Verify headless-first** — `curl` the changed `/api/*` endpoints and assert the JSON shapes; use
+  `claude-in-chrome` against the **already-running** `http://127.0.0.1:7777` for rendered UI only (one tab,
+  closed when done; never `preview_start`). **Never `make down`** the shared core stack; if no stack is up, say
+  so and verify by tests alone. §4's MERGED ≠ RUNNING applies in full — rebuild and cycle `bin/loupe` (and
+  anything else the change reaches) from `main`, and leave the new binary running.
 
 ## 3. Activate (L1) — roles run inline, work is delegated
 
@@ -393,7 +425,8 @@ running; the **browser tab** you do not.
   fire; the **rate-limiter is the governor** — when the window trips a fire fails cheaply and the next
   resumes after reset, and every completed unit is already committed, so nothing is lost. Don't thrash or
   chase "one more." Under the fleet build lock, **renew the lease after every green unit** (re-stamp
-  `acquired_at` while your owner token still matches — the exact command is in the scheduled task's lock
+  `acquired_at` while your owner token still matches — command in
+  [`agents/unattended-fire-protocol.md`](../unattended-fire-protocol.md) §1, the authority for the whole lock
   protocol): a fire can legitimately exceed the 90-min stale threshold, and progress is what keeps it
   protected while a wedged run ages out. A purely **design** fire writes **one** design doc and exits.
 - **Multi-fire:** a big item that can't be finished + reviewed + made green in one fire keeps its **code in a

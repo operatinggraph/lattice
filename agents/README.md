@@ -11,6 +11,13 @@ Version-controlled source of truth for the **Agentic Operating Model** role-skil
 
 - **Unattended scheduled fires read `agents/<role>/SKILL.md` directly** from the working tree — no install
   step per fire. (The fleet is below.)
+- **A scheduled-task prompt REFERS to its skill; it never restates it.** The skill is the authority for what
+  the role does; the prompt carries only what the skill cannot know — which role this is, the repo path, the
+  run parameters (stream, lane file, lock), and a pointer to
+  [`unattended-fire-protocol.md`](unattended-fire-protocol.md) for the wrapper mechanics every fire shares.
+  A prompt that duplicates skill content is a **defect**: the copy is invisible from the repo, so the two
+  drift silently and a fix to one leaves the other wrong (this has cost several sessions). Change behaviour by
+  editing the skill — and if the prompt is the only place a rule exists, that rule is in the wrong file.
 - For invoking a role as `/​<role>` in a human session, the harness discovers skills under `.claude/skills/`,
   which is gitignored — so install the canonical copies with:
 
@@ -61,9 +68,10 @@ experience, the FE Engineer builds it (UX-then-FE).
 | `steward-verticals` | `steward` — **Verticals** advancer | odd hours (`42 1-23/2`) | lattice |
 | `steward-loupe` | `steward` mechanics + `fe-engineer` — **Loupe** advancer (Stream 3) | every 4h (`17 0-20/4`) | loupe |
 | `ci-whetstone` | `whetstone` — cross-cutting CI-speed | 2×/day (`48 6,18`) | lattice |
-| `lattice-designer` | `designer` — Lattice design (readiness) | odd hours (`6 1-23/2`), pipelines before the Lattice advancer | none |
+| `lattice-designer` | `designer` — Lattice design (readiness) | every 4h (`6 1-23/4`), pipelines ahead of the Lattice advancer | none |
 | `platform-surveyor` | `surveyor` — Lattice hydrator | 3×/day (`56 7,15,23`) | none |
 | `vertical-po-discovery` | `vertical-po` — Verticals hydrator | 3×/day (`41 5,13,21`) | none |
+| `lamplighter-watch` | `lamplighter` — observability watch | every 4h (`28 2-22/4`) | none |
 
 The Lattice stream is a three-stage pipeline: **Surveyor** (raw demand) → **Designer** (build-ready designs) →
 **Lattice Steward** (builds), with the **Whetstone** as a cross-cutting CI-speed loop. `owner`, `fe-engineer`,
@@ -89,11 +97,13 @@ cost them throughput for no safety benefit (this bit us directly: `steward-auton
 the Lattice backlog is big — and a fleet-wide lock meant it was competing with *every* other role's slot, not
 just the two other build-heavy ones).
 
-So: **those 3 build-heavy roles participate** in the mutual-exclusion lock: `mkdir
-/tmp/lattice-agentic-ops-build.lock` (atomic; fails if another of the 3 already holds it) before doing anything
-else, and `rm -rf` on that same path as its last action, success or failure alike. A lock older than 90 minutes
-is treated as abandoned (a crashed/killed fire that never released) and reclaimed rather than wedging that
-lane. **`steward-loupe` is the one build-heavy exception** — its `cmd/loupe/**` footprint is light enough to
+So: **those 3 build-heavy roles participate** in the mutual-exclusion lock — atomic `mkdir` before doing
+anything else, token-checked `rm -rf` as the last action, success or failure alike, and a lock older than 90
+minutes treated as abandoned (a crashed fire that never released) and reclaimed rather than wedging the lane.
+**The acquire / renew / release commands and the `LOCK-HELD` asymmetry live in
+[`unattended-fire-protocol.md`](unattended-fire-protocol.md) §1** — that is the authority; this section is only
+why the split is shaped the way it is. **`steward-loupe` is the one build-heavy exception** — its
+`cmd/loupe/**` footprint is light enough to
 coexist, so it holds its own separate lock (`/tmp/lattice-loupe-build.lock`, Andrew's 2026-07-02 dispensation)
 instead of joining the shared one; that headroom does NOT generalize (see the Verticals attempt above) —
 default a new build-heavy role to the shared lock unless you have real evidence it's as light as Loupe. The
@@ -113,16 +123,14 @@ trailer, so it happens without the skill saying anything. A **scheduled-task** f
 instruction — commits from one land author-only (no model credit at all) unless the prompt says so explicitly.
 Learned this the hard way: removing a hardcoded `Co-Authored-By: Claude Opus 4.8` line (to stop it lying once a
 different model ran the fire) silently dropped attribution entirely for every scheduled role, since nothing
-else was telling those fires to add one. Every scheduled prompt now carries an explicit **COMMIT ATTRIBUTION**
-instruction instead: name whichever model you actually are (check your own system prompt), never a hardcoded
-string. If you add an 8th scheduled role, give it the same instruction — don't assume the harness fills this in
-for you outside an interactive session.
+else was telling those fires to add one. The rule — name whichever model you actually are, never a hardcoded
+string — is [`unattended-fire-protocol.md`](unattended-fire-protocol.md) §3, which every scheduled prompt
+points at. Don't assume the harness fills this in for you outside an interactive session.
 
 ### Chips need a push — an unattended fire has no one watching the session
 
-A `spawn_task` chip only surfaces if Andrew happens to open the exact session that filed it; for one of the 7
-scheduled fires, that's easy to miss entirely. Each prompt therefore also sends a `PushNotification` immediately
-after any `spawn_task` call (its own, or one made by an inline sub-role like `owner`/`fe-engineer`/`lamplighter`)
-— terse, one line, leads with what the chip flags. If you add an 8th scheduled role, give it the same instruction.
-First real use may pause on a permission prompt nobody's there to answer since these tasks have never called
+A `spawn_task` chip only surfaces if Andrew happens to open the exact session that filed it; for one of the
+scheduled fires, that's easy to miss entirely. So every fire sends a `PushNotification` immediately after any
+`spawn_task` call — the rule is [`unattended-fire-protocol.md`](unattended-fire-protocol.md) §2. First real use
+may pause on a permission prompt nobody's there to answer, since these tasks have never called
 `PushNotification` before — click "Run now" once per task to pre-approve it ahead of that.
