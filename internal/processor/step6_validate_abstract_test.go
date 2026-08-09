@@ -289,6 +289,54 @@ func TestValidate_AbstractClass_RealInstallShape(t *testing.T) {
 	expectAbstractViolation(t, err, "abstractClass")
 }
 
+// TestValidate_AbstractEventClass_Rejected pins the event-side twin of §8 row
+// 4: an event whose class resolves to an abstract DDL is rejected exactly
+// like a document whose class does, via the same resolveGoverningDDL path.
+func TestValidate_AbstractEventClass_Rejected(t *testing.T) {
+	v, ctx := buildValidatorWithAbstract(t)
+	env := newTestEnvelope(testNanoID1)
+	result := ScriptResult{
+		Events: []EventSpec{{Class: "location", Data: map[string]interface{}{}}},
+	}
+	err := v.Validate(ctx, env, result, HydratedState{})
+	expectAbstractViolation(t, err, "abstractEventClass")
+}
+
+// TestValidate_AbstractEventClass_ConcreteAccepted is the positive vector
+// beside the negative above: an event whose class resolves EXACTLY to a
+// CONCRETE DDL ("identity", the baseline fixture setupTestPipeline seeds —
+// the same DDL TestValidate_CleanPass's mutation resolves against), in a
+// cache that also carries an abstract DDL, must still pass. This exercises
+// the ok==true, ref.Abstract==false branch specifically — a class that
+// resolves to NOTHING would only prove the ok==false branch, which is
+// already the well-established permissive default exercised throughout this
+// file (e.g. every "unrelated"-classed fixture above).
+func TestValidate_AbstractEventClass_ConcreteAccepted(t *testing.T) {
+	v, ctx := buildValidatorWithAbstract(t)
+	env := newTestEnvelope(testNanoID1)
+	result := ScriptResult{
+		Events: []EventSpec{{Class: "identity", Data: map[string]interface{}{}}},
+	}
+	if err := v.Validate(ctx, env, result, HydratedState{}); err != nil {
+		t.Fatalf("an event whose class resolves to a concrete DDL must pass: %v", err)
+	}
+}
+
+// TestValidate_AbstractEventClass_RealInstallShape closes the same test seam
+// item the mutation-side gate closes: the event-class gate must reject an
+// abstract-typed class when the DDL was loaded from the REAL install shape
+// (NanoID root + separate .canonicalName aspect), not just the shadow-key
+// fixture the other tests in this file exercise.
+func TestValidate_AbstractEventClass_RealInstallShape(t *testing.T) {
+	v, ctx := buildValidatorWithRealAbstract(t)
+	env := newTestEnvelope(testNanoID1)
+	result := ScriptResult{
+		Events: []EventSpec{{Class: "reallocation", Data: map[string]interface{}{}}},
+	}
+	err := v.Validate(ctx, env, result, HydratedState{})
+	expectAbstractViolation(t, err, "abstractEventClass")
+}
+
 // TestValidate_NonAbstractWorld_Regression proves an abstract DDL's mere
 // PRESENCE in the cache changes nothing for writes that never touch it —
 // the inertness invariant this whole increment depends on (§17.1: "no

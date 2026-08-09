@@ -80,6 +80,11 @@ func (v *ValidatorImpl) Validate(ctx context.Context, env *OperationEnvelope, re
 			return err
 		}
 	}
+	for _, ev := range result.Events {
+		if err := v.validateEventClass(ctx, ev, result, state, rid); err != nil {
+			return err
+		}
+	}
 	v.Logger.Info("step 6: validated",
 		"requestId", rid,
 		"mutations", len(result.Mutations))
@@ -336,6 +341,62 @@ func (v *ValidatorImpl) validateAbstractKeySegments(key string, kind substrate.K
 		}
 	}
 	return nil
+}
+
+// validateEventClass rejects an event whose class resolves to an abstract DDL
+// (dynamic-type-taxonomy-design.md §8 row 4, extended to events): an abstract
+// type names no instance, and an event's `class` names a type exactly the way
+// a document's `class` does, so it is gated by the same reasoning.
+//
+// Resolution goes through resolveGoverningDDL, but only its exact
+// class→DDL fast path (DDLCache.Lookup) ever runs for an event: an event
+// carries no key, so kind is passed as substrate.KindUnknown, and
+// vertexRootForResolve has no case for it — it falls through to `return ""`.
+// resolveWithFault then bails at its `root == ""` check
+// (step6_resolve_ddl.go) before the instanceOf-chain walk that lets a
+// fine-grained discriminator class resolve to its type authority ever runs.
+// That degradation is sound on its own terms — no key means nothing to walk,
+// no live read is attempted, no fault is recorded — but it is a REAL
+// asymmetry, not a detail to gloss over: a class that resolves to an
+// abstract DDL only via the chain (not the exact lookup) is rejected on the
+// mutation-side gate above and ACCEPTED here.
+//
+// The gate is additionally unreachable today, independent of the above: an
+// abstract DDL's CanonicalName must pass keys.IsValidTypeSegment
+// (abstractscope.go) — always dot-free — while BuildEventList
+// (step7_events.go) rejects any dot-free event class outright (Contract #3
+// §3.4 requires `<domain>.<eventName>`). A census of every event class under
+// packages/** found all of them dotted, none dot-free, so no event class
+// today can equal a registered abstract DDL's name. It stays as a
+// fail-closed defense-in-depth latch, not a live gate: were a dot-free event
+// class ever authored that collided with an abstract DDL's name, this
+// terminates the op cleanly here (a terminal DDLViolation reject) rather
+// than letting it fall through into BuildEventList's generic
+// "not <domain>.<eventName>" error, which the commit path's genuine-failure
+// fallback treats as retryable (Nak + redelivery) — a hot-loop against a
+// script that will never stop producing the same malformed class.
+//
+// No tombstone exemption arises here: the mutation-side exemptions exist
+// because a tombstone (MutationOp.Op == "tombstone") can only ever REMOVE an
+// instance, never create one, so exempting it can't grow the abstract-typed
+// instance set. An EventSpec carries no op and creates no instance at all —
+// publishing it is a pure announcement, not a write — so there is no
+// corrective-removal case for an exemption to preserve; every event class is
+// checked, unconditionally.
+func (v *ValidatorImpl) validateEventClass(ctx context.Context, ev EventSpec, result ScriptResult, state HydratedState, rid string) error {
+	if ev.Class == "" {
+		return nil
+	}
+	ref, ok := v.resolveGoverningDDL(ctx, ev.Class, "", substrate.KindUnknown, result, state)
+	if !ok || !ref.Abstract {
+		return nil
+	}
+	return &DDLViolation{
+		ViolatedConstraint: "abstractEventClass",
+		OperationRequestID: rid,
+		Detail: fmt.Sprintf("event class %q resolves to abstract DDL meta-vertex %q — an abstract type names no instance and may not be published as an event class",
+			ev.Class, ref.MetaVertexKey),
+	}
 }
 
 func stringInSlice(s string, list []string) bool {

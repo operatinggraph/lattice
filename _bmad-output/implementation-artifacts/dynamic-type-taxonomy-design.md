@@ -1190,8 +1190,29 @@ those vertices carry `class: "location"`, so the moment `location` is abstract e
 The class rename must therefore land in the *same* batch as the abstract declaration. Tombstones stay permitted
 throughout (deviation 2), so a partial migration is recoverable.
 
-**Filed, not folded (each with its consumer):** an **event class naming an abstract type is ungated** — §8's
-table classifies key segments and document `class` but never an event's class; consumer: the first package
-declaring an event class that names an abstract type. And **Contract #1 §1.2's `meta`/`op` reservation has no
-platform-wide enforcement** for an ordinary DDL's canonicalName — this increment guards only abstract names;
-consumer: any package declaring a DDL named `meta` or `op`.
+**Two review residuals were fixed rather than filed, and §8 gains a row.** Both were first written up as board
+rows and both failed the residual ladder's own test — each was a few lines in a file this increment already
+touched, and each named a merely *hypothetical* consumer ("the first package that ever…") rather than a real
+one, which is the weak-consumer shape a deferred tail is supposed to refuse.
+
+- **An event's `class` is gated** (`abstractEventClass`) — but **the gate is unreachable today, by
+  construction, and is kept as a fail-closed latch rather than a live gate.** Two independent rules already
+  exclude the case: an abstract `CanonicalName` must satisfy `IsValidTypeSegment` (`[a-z][a-z0-9]*`, so always
+  dot-free), and Contract #3 §3.4 requires an event class to be `<domain>.<verb>`, which `BuildEventList`
+  enforces by rejecting any dot-free class. A census found all ~140 event classes in `packages/**` dotted and
+  none dot-free, so the gate's rejection set is a strict subset of what step 8 already refuses. It earns its
+  place only because that intersection is a **guarantee held by the shape of two separate rules**, either of
+  which could relax without anyone noticing this surface reopened. Note also that the event path resolves by
+  **exact class→DDL lookup only** — an event has no key, so `vertexRootForResolve` yields `""` and the
+  instanceOf chain walk is structurally disabled; the mutation and event gates therefore do *not* answer
+  identically for a chain-resolved class. **§8's table should gain this row**, stating the exclusion and its
+  proof rather than the gate.
+- **Contract #1 §1.2's `meta`/`op` reservation is enforced for every `meta.ddl.vertexType` DDL**, not only
+  abstract ones. Deliberately not extended to aspect/link/event-type DDLs — not because a vertexType's
+  canonicalName is always a key type segment (it is **not**: 27 of 59 shipping vertexType DDLs carry a
+  canonicalName that is not a valid type segment, e.g. `workOrder` → `vtx.workorder.<id>`, and
+  `shredIdentityKey` names no vertex at all), but because an aspect DDL's canonicalName lands in a key's
+  `localName` slot and a link DDL's in the `relation` slot, so neither can ever occupy a type segment. A census
+  confirmed no existing package declares either reserved name. **This does not implement the contract's own
+  enforcement point:** §1.2 says the Processor rejects at meta-DDL commit time, and a raw `core-operations`
+  submit still bypasses the pkgmgr check.

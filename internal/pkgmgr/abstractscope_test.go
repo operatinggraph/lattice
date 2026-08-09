@@ -79,6 +79,30 @@ func TestAbstractScope_AbstractSubtypeOfAbstract_Passes(t *testing.T) {
 	}
 }
 
+// TestAbstractScope_ConcreteVertexTypeOrdinaryName_Passes is the positive
+// vector beside the "concrete vertexType canonicalName meta/op" rejections
+// below: an ordinary concrete vertexType name must still pass — the reserved-
+// name check is about the two specific names, not a blanket new rejection of
+// concrete DDLs.
+func TestAbstractScope_ConcreteVertexTypeOrdinaryName_Passes(t *testing.T) {
+	def := Definition{Name: "p", DDLs: []DDLSpec{minimalDDL("widget", "meta.ddl.vertexType", false)}}
+	if err := def.validateAbstractDDLScope(); err != nil {
+		t.Fatalf("an ordinary concrete vertexType CanonicalName must pass: %v", err)
+	}
+}
+
+// TestAbstractScope_AspectTypeDDLNamedMeta_Passes proves the reserved-name
+// check is scoped to vertexType DDLs deliberately, not by accident: an
+// aspectType DDL's CanonicalName is never written into a key's vertex-type
+// segment (Contract #1 §1.1), so §1.2's reservation does not apply to it —
+// "meta" here must be ACCEPTED.
+func TestAbstractScope_AspectTypeDDLNamedMeta_Passes(t *testing.T) {
+	def := Definition{Name: "p", DDLs: []DDLSpec{minimalDDL("meta", "meta.ddl.aspectType", false)}}
+	if err := def.validateAbstractDDLScope(); err != nil {
+		t.Fatalf("an aspectType DDL named %q must pass — the reserved-name check is scoped to vertexType DDLs only: %v", "meta", err)
+	}
+}
+
 func TestAbstractScope_Rejections(t *testing.T) {
 	cases := []struct {
 		name    string
@@ -129,6 +153,16 @@ func TestAbstractScope_Rejections(t *testing.T) {
 		{
 			name:    "abstract canonicalName op",
 			def:     Definition{Name: "p", DDLs: []DDLSpec{abstractDDL("op")}},
+			wantSub: "is reserved",
+		},
+		{
+			name:    "concrete vertexType canonicalName meta",
+			def:     Definition{Name: "p", DDLs: []DDLSpec{minimalDDL("meta", "meta.ddl.vertexType", false)}},
+			wantSub: "is reserved",
+		},
+		{
+			name:    "concrete vertexType canonicalName op",
+			def:     Definition{Name: "p", DDLs: []DDLSpec{minimalDDL("op", "meta.ddl.vertexType", false)}},
 			wantSub: "is reserved",
 		},
 		{
