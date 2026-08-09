@@ -545,7 +545,7 @@ class of defect the memoization exists to prevent.
 
 ## 6. Invalidation, the trigger, and its race
 
-### 6.1 The trigger does not exist today and cannot be grafted onto the existing watch
+### 6.1 The trigger does not exist today, and it is grafted onto the existing watch
 
 Refractor's only meta-vertex CDC source subscribes with prefix `"vtx.meta."`
 (`corekv_source.go:395-419`), which `substrate.SubscribeKVChanges` turns into the **server-side** FilterSubject
@@ -553,19 +553,30 @@ Refractor's only meta-vertex CDC source subscribes with prefix `"vtx.meta."`
 therefore never delivered to that consumer — and even if it were, the handler's switch covers only `KindVertex`
 and `KindAspect`, with `// Unknown / link / malformed → ignore` at `corekv_source.go:550`.
 
-So the taxonomy gets **its own consumer**, owned by a new `internal/refractor/taxonomy` resolver constructed once
-in `cmd/refractor/main.go` and injected into every pipeline (the shape `p.sweeper` / `p.secureDecryptor` already
-use). One watch, one cache, N pipelines.
+**Both of those are properties of today's filter and handler, not of the consumer — so the fix is to widen that
+consumer, not to add a second one (amendment A1, which supersedes this section's original conclusion and the
+matching claim in *For Andrew* correction 3).** `SubscribeKVChanges` takes a **list** of prefixes and the
+existing lens-source subscription passes both forms; the handler gains a `KindLink` branch at the ignore site
+above. The `internal/refractor/taxonomy` resolver is still constructed once in `cmd/refractor/main.go` and
+injected into every pipeline (the shape `p.sweeper` / `p.secureDecryptor` already use) — one watch, one cache,
+N pipelines. Reuse is the *correct* shape, not merely the cheap one: a lens-definition change and a taxonomy
+change invalidate the same artifact, so one consumer gives a single total order over both, where two would
+manufacture a "rule recompiled under the old taxonomy" race as a state this design would then have to handle.
 
 ```
 FilterSubjects: [ $KV.<bucket>.vtx.meta.>                       // type metas: canonicalName, abstract flag
                   $KV.<bucket>.lnk.meta.*.subtypeOf.>  ]      // the taxonomy edges
-DeliverPolicy:  DeliverLastPerSubject   (+ IncludeHistory)      // a fresh boot sees the whole taxonomy
 ```
 
 The second subject pins segment 3 (`lnk`), segment 4 (`meta`), and segment 6 (`subtypeOf`), wildcards the leaf
 id, and lets `>` absorb `meta.<abstractId>`. The two forms differ at segment 3 in a position neither wildcards, so
 they are not a subset pair — the same property `subjects.go:159-169` argues for the narrowed set.
+
+**There is no backfill window.** The reused durable is `lens-source-<instance>-<bootNonce>` with
+`IncludeHistory: true` and `PruneStaleDurables` sweeping the prior boot's, so it already replays matching
+history from the beginning on every start: the taxonomy is reconstructed at boot and live link events arrive as
+they happen. (The original `DeliverLastPerSubject` line here described the consumer this section no longer
+adds.)
 
 ### 6.2 Ordering — and it is the reverse of the naive reading
 
