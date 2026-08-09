@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 
 	"github.com/operatinggraph/lattice/internal/natsfixture"
@@ -30,6 +31,29 @@ func startEmbeddedNATS(t *testing.T) string {
 	t.Helper()
 	s := natsfixture.StartServer(t)
 	return s.ClientURL()
+}
+
+// connectSubstrate returns a *substrate.Conn over a fixture-hardened client,
+// closed via t.Cleanup.
+//
+// Tests dial through here rather than substrate.Connect because that is the
+// PRODUCTION entry point and carries nats.go's default handshake budget: 2
+// seconds for the whole INFO/CONNECT/PING/PONG exchange, pinned by a single
+// SetDeadline, with no retry on an initial connect. A host stall longer than
+// that landing inside the window fails the connect with
+// `read tcp 127.0.0.1:A->127.0.0.1:B: i/o timeout` — the signature
+// internal/natsfixture's package doc names, in whichever package happened to be
+// connecting. natsfixture.Connect gives the handshake a real budget and a
+// bounded retry; substrate.Wrap then puts the JetStream context on top, so the
+// test still exercises the same *substrate.Conn the production path builds.
+func connectSubstrate(t *testing.T, url, name string) *substrate.Conn {
+	t.Helper()
+	conn, err := substrate.Wrap(natsfixture.Connect(t, url, nats.Name(name)))
+	if err != nil {
+		t.Fatalf("substrate.Wrap: %v", err)
+	}
+	t.Cleanup(conn.Close)
+	return conn
 }
 
 // provisionHarness mirrors what `cmd/bootstrap` does: Core KV bucket
@@ -257,11 +281,7 @@ func setupTestPipeline(t *testing.T) (context.Context, *substrate.Conn, *CommitP
 	url := startEmbeddedNATS(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	t.Cleanup(cancel)
-	conn, err := substrate.Connect(ctx, substrate.ConnectOpts{URL: url, Name: "processor-test"})
-	if err != nil {
-		t.Fatalf("Connect: %v", err)
-	}
-	t.Cleanup(conn.Close)
+	conn := connectSubstrate(t, url, "processor-test")
 	provisionHarness(t, ctx, conn)
 	seedNoopScript(t, ctx, conn, "identity")
 	cp, cons, metrics := newPipeline(t, ctx, conn, testLogger())

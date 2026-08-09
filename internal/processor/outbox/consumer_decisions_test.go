@@ -63,11 +63,7 @@ func connectBare(t *testing.T) (context.Context, *substrate.Conn) {
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 	url := startEmbeddedNATS(t)
-	conn, err := substrate.Connect(ctx, substrate.ConnectOpts{URL: url, Name: "outbox-decisions-test"})
-	if err != nil {
-		t.Fatalf("connect: %v", err)
-	}
-	t.Cleanup(conn.Close)
+	conn := connectSubstrate(t, url, "outbox-decisions-test")
 	return ctx, conn
 }
 

@@ -24,11 +24,7 @@ func TestBypass2_OffNamespacePublish_NotConsumed(t *testing.T) {
 	url := startEmbeddedNATS(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	t.Cleanup(cancel)
-	conn, err := substrate.Connect(ctx, substrate.ConnectOpts{URL: url, Name: "bypass2-test"})
-	if err != nil {
-		t.Fatalf("bypass2: connect: %v", err)
-	}
-	t.Cleanup(conn.Close)
+	conn := connectSubstrate(t, url, "bypass2-test")
 	provisionHarness(t, ctx, conn)
 	widenOpsStreamSubjects(t, ctx, conn)
 
@@ -90,11 +86,7 @@ func TestBypass2_ValidLanePublish_IsConsumed(t *testing.T) {
 	url := startEmbeddedNATS(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	t.Cleanup(cancel)
-	conn, err := substrate.Connect(ctx, substrate.ConnectOpts{URL: url, Name: "bypass2-test"})
-	if err != nil {
-		t.Fatalf("bypass2: connect: %v", err)
-	}
-	t.Cleanup(conn.Close)
+	conn := connectSubstrate(t, url, "bypass2-test")
 	provisionHarness(t, ctx, conn)
 	widenOpsStreamSubjects(t, ctx, conn)
 
@@ -142,11 +134,7 @@ func TestBypass2_FilterSubjects_CoverageCheck(t *testing.T) {
 	url := startEmbeddedNATS(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	t.Cleanup(cancel)
-	conn, err := substrate.Connect(ctx, substrate.ConnectOpts{URL: url, Name: "bypass2-test"})
-	if err != nil {
-		t.Fatalf("bypass2 coverage: connect: %v", err)
-	}
-	t.Cleanup(conn.Close)
+	conn := connectSubstrate(t, url, "bypass2-test")
 	provisionHarness(t, ctx, conn)
 
 	// Create consumer using zero-value config — applyDefaults() fires.

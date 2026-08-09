@@ -58,7 +58,23 @@ func TestSupervisor_AckWindowBoundToThePump(t *testing.T) {
 
 	entered := make(chan struct{}, published)
 	release := make(chan struct{})
-	done := make(chan struct{}, published)
+
+	// The drain is tracked by DISTINCT stream sequence, not by handler
+	// invocation count. AckWait is 500ms — deliberately short, so the observation
+	// phase below can watch several full windows — and the drain that follows is
+	// serial, so on a runner slow enough to put 500ms between a delivery and its
+	// ack JetStream legitimately redelivers. Counting invocations would score
+	// that redelivery as progress and let the drain wait finish with messages
+	// still outstanding, which is the assertion right after it. A set makes the
+	// wait mean what the next assertion assumes: every published message handled.
+	var handledMu sync.Mutex
+	handled := make(map[uint64]struct{}, published)
+	progress := make(chan struct{}, 1)
+	distinctHandled := func() int {
+		handledMu.Lock()
+		defer handledMu.Unlock()
+		return len(handled)
+	}
 
 	// Registered after sup.Stop so it runs BEFORE it (cleanups are LIFO): an
 	// early t.Fatalf must not leave a pump goroutine parked in the handler with
@@ -72,13 +88,21 @@ func TestSupervisor_AckWindowBoundToThePump(t *testing.T) {
 		Stream:        stream,
 		FilterSubject: "ackw.msg",
 		AckWait:       ackWait,
-		Handler: func(_ context.Context, _ Message) (Decision, error) {
+		Handler: func(_ context.Context, m Message) (Decision, error) {
 			select {
 			case entered <- struct{}{}:
 			default:
 			}
 			<-release
-			done <- struct{}{}
+			handledMu.Lock()
+			handled[m.Sequence] = struct{}{}
+			handledMu.Unlock()
+			// Non-blocking: the pump must never park here, or Stop would wait on
+			// a handler that no reader is left to unblock.
+			select {
+			case progress <- struct{}{}:
+			default:
+			}
 			return Ack, nil
 		},
 	}
@@ -138,11 +162,12 @@ observe:
 
 	releaseAll()
 
-	for i := 0; i < published; i++ {
+	drainDeadline := time.After(30 * time.Second)
+	for distinctHandled() < published {
 		select {
-		case <-done:
-		case <-time.After(30 * time.Second):
-			t.Fatalf("only %d of %d messages drained after release", i, published)
+		case <-progress:
+		case <-drainDeadline:
+			t.Fatalf("only %d of %d distinct messages drained after release", distinctHandled(), published)
 		}
 	}
 

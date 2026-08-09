@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 
 	"github.com/operatinggraph/lattice/internal/natsfixture"
@@ -25,17 +26,30 @@ func startEmbeddedNATS(t *testing.T) string {
 	return s.ClientURL()
 }
 
+// connectSubstrate returns a *substrate.Conn over a fixture-hardened client,
+// closed via t.Cleanup. substrate.Connect is the production entry point and
+// inherits nats.go's 2s whole-handshake deadline with no retry on an initial
+// connect, so a host stall inside that window fails an untouched package with
+// the `read tcp …: i/o timeout` signature internal/natsfixture's package doc
+// names; natsfixture.Connect gives the handshake a real budget and a bounded
+// retry, and Wrap puts the same JetStream context on top.
+func connectSubstrate(t *testing.T, url, name string) *substrate.Conn {
+	t.Helper()
+	conn, err := substrate.Wrap(natsfixture.Connect(t, url, nats.Name(name)))
+	if err != nil {
+		t.Fatalf("substrate.Wrap: %v", err)
+	}
+	t.Cleanup(conn.Close)
+	return conn
+}
+
 // setup provisions Core KV (atomic publish) + core-events and returns a conn.
 func setup(t *testing.T) (context.Context, *substrate.Conn) {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 	url := startEmbeddedNATS(t)
-	conn, err := substrate.Connect(ctx, substrate.ConnectOpts{URL: url, Name: "outbox-test"})
-	if err != nil {
-		t.Fatalf("connect: %v", err)
-	}
-	t.Cleanup(conn.Close)
+	conn := connectSubstrate(t, url, "outbox-test")
 	js := conn.JetStream()
 
 	if _, err := js.CreateOrUpdateKeyValue(ctx, jetstream.KeyValueConfig{

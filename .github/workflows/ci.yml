@@ -340,10 +340,6 @@ jobs:
         # test-file line count (~53k LOC each half).
         env:
           POSTGRES_TEST_DSN: postgres://lattice:lattice_dev@localhost:5432/lattice?sslmode=disable
-          # Widens the Starlark wall budget for this parallel run only — package-install
-          # fixtures validate 100+ DDL mutations in one script call, and -p 4 contention
-          # on a shared runner can push that past the production 250ms NFR-P4 budget.
-          PROCESSOR_SCRIPT_WALL_MS: "5000"
         run: >-
           go test -count=1 -p 4 -timeout 10m
           ./cmd/cafe-app/... ./cmd/clinic-app/... ./cmd/lattice/...
@@ -391,10 +387,6 @@ jobs:
       - name: Run shard-2 tests (unit + integration)
         env:
           POSTGRES_TEST_DSN: postgres://lattice:lattice_dev@localhost:5432/lattice?sslmode=disable
-          # Widens the Starlark wall budget for this parallel run only — package-install
-          # fixtures validate 100+ DDL mutations in one script call, and -p 4 contention
-          # on a shared runner can push that past the production 250ms NFR-P4 budget.
-          PROCESSOR_SCRIPT_WALL_MS: "5000"
         run: >-
           go test -count=1 -p 4 -timeout 10m
           ./cmd/bootstrap/... ./cmd/bridge/... ./cmd/chronicler/... ./cmd/edge/...

@@ -97,11 +97,7 @@ func TestEmitAlert_LiveKV(t *testing.T) {
 	url := startEmbeddedNATS(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	t.Cleanup(cancel)
-	conn, err := substrate.Connect(ctx, substrate.ConnectOpts{URL: url, Name: "alert-test"})
-	if err != nil {
-		t.Fatalf("Connect: %v", err)
-	}
-	t.Cleanup(conn.Close)
+	conn := connectSubstrate(t, url, "alert-test")
 	provisionHarness(t, ctx, conn)
 
 	e := NewHealthAlertEmitter(conn, testHealthBucket, testLogger())
@@ -150,11 +146,7 @@ func TestRecordClaimAttempt_LiveKVCounter(t *testing.T) {
 	url := startEmbeddedNATS(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	t.Cleanup(cancel)
-	conn, err := substrate.Connect(ctx, substrate.ConnectOpts{URL: url, Name: "claim-test"})
-	if err != nil {
-		t.Fatalf("Connect: %v", err)
-	}
-	t.Cleanup(conn.Close)
+	conn := connectSubstrate(t, url, "claim-test")
 	provisionHarness(t, ctx, conn)
 
 	const instance = "proc-claim-1"
@@ -206,11 +198,7 @@ func TestEmitCapabilityAuthSignals_LiveKV(t *testing.T) {
 	url := startEmbeddedNATS(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	t.Cleanup(cancel)
-	conn, err := substrate.Connect(ctx, substrate.ConnectOpts{URL: url, Name: "step3lat-test"})
-	if err != nil {
-		t.Fatalf("Connect: %v", err)
-	}
-	t.Cleanup(conn.Close)
+	conn := connectSubstrate(t, url, "step3lat-test")
 	provisionHarness(t, ctx, conn)
 
 	const instance = "proc-lat-1"

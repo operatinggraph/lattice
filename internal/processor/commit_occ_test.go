@@ -181,12 +181,7 @@ func (c *occFakeCommitter) Commit(ctx context.Context, _ *OperationEnvelope, _ S
 
 func occConn(t *testing.T) *substrate.Conn {
 	t.Helper()
-	conn, err := substrate.Connect(context.Background(), substrate.ConnectOpts{URL: startEmbeddedNATS(t)})
-	if err != nil {
-		t.Fatalf("connect: %v", err)
-	}
-	t.Cleanup(func() { conn.Close() })
-	return conn
+	return connectSubstrate(t, startEmbeddedNATS(t), "occ-test")
 }
 
 func occWriteKey(t *testing.T, ctx context.Context, conn *substrate.Conn, key string) uint64 {

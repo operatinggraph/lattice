@@ -133,6 +133,25 @@ type harnessConfig struct {
 // harnessOpt mutates the harnessConfig before the stack boots.
 type harnessOpt func(*harnessConfig)
 
+// harnessSweepInterval is the Weaver reconciler cadence every harness runs at
+// unless a test overrides it.
+//
+// Weaver's production SweepInterval is one minute, and the convergence tests
+// here assert convergence within thirty seconds. Left at the production value
+// the sweep can therefore never tick inside a test, so these tests only ever
+// prove the EVENT-DRIVEN path: a single lost or late reprojection has no
+// recovery available before the deadline, and the test fails `Condition never
+// satisfied` at ~31s on a runner busy enough to drop one. Pacing the sweep here
+// gives the reconciler ~15 passes inside the same unchanged deadline, so the
+// suite proves what it says it proves — the application converges, by fast path
+// or by reconciliation — instead of asserting the fast path never hiccups.
+//
+// The orphan legs are unaffected: SweepOrphanWarmup keeps its 5m production
+// default, and expired-lease reclaim + level clearing are never warmup-gated.
+// MarkLease is likewise left at production, so the at-most-once mark still holds
+// an in-flight dispatch for its full lease.
+const harnessSweepInterval = 2 * time.Second
+
 // newHarness boots embedded NATS, the real bootstrap substrate (all buckets +
 // streams + primordial identities/roles via the real Seeder), installs the real
 // package chain, then starts all five engines as goroutines under a test-scoped
@@ -142,7 +161,7 @@ type harnessOpt func(*harnessConfig)
 func newHarness(t *testing.T, opts ...harnessOpt) *harness {
 	t.Helper()
 
-	var hc harnessConfig
+	hc := harnessConfig{weaverSweepInterval: harnessSweepInterval}
 	for _, opt := range opts {
 		opt(&hc)
 	}
@@ -271,11 +290,12 @@ func newHarness(t *testing.T, opts ...harnessOpt) *harness {
 	})
 	go func() { _ = loomEng.Start(ctx) }()
 
-	// --- Weaver: lane-1 (gap dispatch) + lane-3 (temporal freshness @at). The
-	// MarkLease/SweepInterval/SweepOrphanWarmup left zero take the production
-	// defaults (withDefaults); the async variant shrinks them so the reconciler
-	// sweep ticks and a mark's lease expires within the test (exercising the
-	// sweep's re-dispatch path — skip site 2).
+	// --- Weaver: lane-1 (gap dispatch) + lane-3 (temporal freshness @at).
+	// SweepInterval is paced to harnessSweepInterval so the reconciler recovers a
+	// dropped step inside the tests' own deadlines; MarkLease/SweepOrphanWarmup
+	// left zero take the production defaults (withDefaults). The async variant
+	// shrinks the lease too, so a mark actually expires within the test
+	// (exercising the sweep's re-dispatch path — skip site 2).
 	weaverEng := weaver.NewEngine(conn, weaver.Config{
 		CoreKVBucket:        bootstrap.CoreKVBucket,
 		WeaverTargetsBucket: bootstrap.WeaverTargetsBucket,

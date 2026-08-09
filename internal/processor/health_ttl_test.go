@@ -23,13 +23,9 @@ func setupTTLHarness(t *testing.T) (context.Context, *substrate.Conn) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	t.Cleanup(cancel)
 
-	conn, err := substrate.Connect(ctx, substrate.ConnectOpts{URL: s.ClientURL(), Name: "health-ttl-test"})
-	if err != nil {
-		t.Fatalf("Connect: %v", err)
-	}
-	t.Cleanup(conn.Close)
+	conn := connectSubstrate(t, s.ClientURL(), "health-ttl-test")
 
-	_, err = conn.JetStream().CreateOrUpdateKeyValue(ctx, jetstream.KeyValueConfig{
+	_, err := conn.JetStream().CreateOrUpdateKeyValue(ctx, jetstream.KeyValueConfig{
 		Bucket:         ttlTestHealthBucket,
 		LimitMarkerTTL: time.Second, // enables AllowMsgTTL so KVPutWithTTL works in tests
 	})

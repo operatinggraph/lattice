@@ -329,11 +329,7 @@ func acConnect(t *testing.T, url string) (context.Context, *substrate.Conn) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	t.Cleanup(cancel)
-	conn, err := substrate.Connect(ctx, substrate.ConnectOpts{URL: url, Name: "ac-test"})
-	if err != nil {
-		t.Fatalf("Connect: %v", err)
-	}
-	t.Cleanup(conn.Close)
+	conn := connectSubstrate(t, url, "ac-test")
 	provisionHarness(t, ctx, conn)
 	return ctx, conn
 }

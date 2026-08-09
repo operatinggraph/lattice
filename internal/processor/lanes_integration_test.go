@@ -25,11 +25,7 @@ func TestLaneSpecs_PerLaneBacklogIsolation(t *testing.T) {
 	url := startEmbeddedNATS(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	conn, err := substrate.Connect(ctx, substrate.ConnectOpts{URL: url, Name: "lane-split-test"})
-	if err != nil {
-		t.Fatalf("Connect: %v", err)
-	}
-	defer conn.Close()
+	conn := connectSubstrate(t, url, "lane-split-test")
 	provisionHarness(t, ctx, conn)
 
 	js := conn.JetStream()

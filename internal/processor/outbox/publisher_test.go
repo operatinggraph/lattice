@@ -11,7 +11,6 @@ import (
 	"github.com/nats-io/nats.go/jetstream"
 
 	"github.com/operatinggraph/lattice/internal/processor"
-	"github.com/operatinggraph/lattice/internal/substrate"
 )
 
 func TestEventSubject_Sanitization(t *testing.T) {
@@ -124,11 +123,7 @@ func TestEventPublisher_FailureSurfacesPublicationError(t *testing.T) {
 	}()
 	t.Cleanup(cancel)
 	url := startEmbeddedNATS(t)
-	conn, err := substrate.Connect(ctx, substrate.ConnectOpts{URL: url, Name: "pub-fail-test"})
-	if err != nil {
-		t.Fatalf("connect: %v", err)
-	}
-	t.Cleanup(conn.Close)
+	conn := connectSubstrate(t, url, "pub-fail-test")
 	// core-events stream is intentionally NOT provisioned.
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn}))
 	pub := NewEventPublisher(conn, logger)
