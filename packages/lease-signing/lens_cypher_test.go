@@ -301,12 +301,15 @@ func TestLeaseApplicationComplete_ProjectsLeaseTerms(t *testing.T) {
 	require.Nil(t, rows2[0].Values["termsRequestedRent"])
 }
 
-// TestLeaseApplicationComplete_ProjectsQualificationProfile proves the .profile
-// aspect's DERIVED qualification signals project as read-only scalar columns the
-// landlord surface reads, while the RAW financials (annualIncome / employerName /
-// the reference strings) stay UNprojected. The signals feed no gap (the row stays
-// violating for the unrelated applicant gaps), and an application with no .profile
-// degrades to null signal columns + profileSubmitted=false.
+// TestLeaseApplicationComplete_ProjectsQualificationProfile proves the
+// .applicationSignals aspect's DERIVED qualification signals project as
+// read-only scalar columns the landlord surface reads, while the RAW
+// financials (annualIncome / employerName / the reference strings, on
+// .profile) and the third-party identifiers (guarantorName, on
+// .underwritingParties) stay UNprojected. The signals feed no gap (the row
+// stays violating for the unrelated applicant gaps), and an application with
+// no .applicationSignals degrades to null signal columns +
+// profileSubmitted=false.
 func TestLeaseApplicationComplete_ProjectsQualificationProfile(t *testing.T) {
 	if testing.Short() {
 		t.Skip("requires NATS")
@@ -315,51 +318,54 @@ func TestLeaseApplicationComplete_ProjectsQualificationProfile(t *testing.T) {
 	f.vtx(t, "app", "leaseapp")
 	f.vtx(t, "alice", "identity")
 	f.edge(t, "applicationFor", "app", "alice")
-	// The .profile aspect as SetApplicantProfile writes it: raw fields + derived
-	// signals in one aspect. The lens reads ONLY the derived keys.
-	f.aspect(t, "app", "profile", "profile", map[string]any{
-		"annualIncome":             96000, // raw — must NOT appear in any projected column
-		"employmentStatus":         "employed",
-		"employerName":             "Acme Corp", // raw — must NOT appear
-		"references":               []any{"Prior landlord", "Manager"},
+	// The three aspects as SetApplicantProfile writes them in one batch. The
+	// lens reads ONLY .applicationSignals.
+	f.aspect(t, "app", "profile", "applicantProfile", map[string]any{
+		"annualIncome":     96000, // raw — must NOT appear in any projected column
+		"employmentStatus": "employed",
+		"employerName":     "Acme Corp", // raw — must NOT appear
+	})
+	f.aspect(t, "app", "underwritingParties", "underwritingParties", map[string]any{
+		"references":    []any{"Prior landlord", "Manager"}, // third-party names — must NOT appear
+		"guarantorName": "Pat Guarantor",                    // third-party identifier — must NOT appear
+	})
+	f.aspect(t, "app", "applicationSignals", "applicationSignals", map[string]any{
 		"incomeToRentMet":          true,
 		"employmentVerified":       true,
 		"referenceCount":           2,
 		"hasCoApplicant":           false,
 		"hasGuarantor":             true,
-		"guarantorName":            "Pat Guarantor", // raw — must NOT appear
-		"guarantorAnnualIncome":    120000,          // raw — must NOT appear
-		"guarantorIncomeToRentMet": true,            // derived — projects
+		"guarantorIncomeToRentMet": true, // derived — projects
 		"submittedAt":              "2026-06-27T10:00:00Z",
 	})
 
 	rows := f.project(t, "app")
-	require.Len(t, rows, 1, "the .profile walk keeps one row per anchor")
+	require.Len(t, rows, 1, "the .applicationSignals walk keeps one row per anchor")
 	v := rows[0].Values
-	require.Equal(t, true, v["profileSubmitted"], "profileSubmitted derives from .profile.submittedAt <> null")
+	require.Equal(t, true, v["profileSubmitted"], "profileSubmitted derives from .applicationSignals.submittedAt <> null")
 	require.Equal(t, true, v["incomeToRentMet"], "the stored derived bool projects verbatim")
 	require.Equal(t, true, v["employmentVerified"])
 	require.EqualValues(t, 2, v["referenceCount"], "referenceCount projects the op-derived count")
 	require.Equal(t, false, v["hasCoApplicant"])
 	require.Equal(t, true, v["hasGuarantor"])
 	require.Equal(t, true, v["guarantorIncomeToRentMet"], "the derived guarantor income signal projects verbatim")
-	// The RAW financials must never reach the read model (the Vault discipline).
+	// The RAW financials + third-party identifiers must never reach the read model.
 	require.NotContains(t, v, "annualIncome", "raw income must not be projected")
 	require.NotContains(t, v, "employerName", "raw employer must not be projected")
 	require.NotContains(t, v, "references", "raw reference strings must not be projected")
-	require.NotContains(t, v, "guarantorName", "raw guarantor name must not be projected")
+	require.NotContains(t, v, "guarantorName", "the guarantor's own identifier must not be projected")
 	require.NotContains(t, v, "guarantorAnnualIncome", "raw guarantor income must not be projected")
 
-	// Graceful degrade: no .profile → null signals + profileSubmitted=false.
+	// Graceful degrade: no .applicationSignals → null signals + profileSubmitted=false.
 	f.vtx(t, "app2", "leaseapp")
 	f.edge(t, "applicationFor", "app2", "alice")
 	rows2 := f.project(t, "app2")
 	require.Len(t, rows2, 1)
-	require.Equal(t, false, rows2[0].Values["profileSubmitted"], "no .profile → profileSubmitted false")
-	require.Nil(t, rows2[0].Values["incomeToRentMet"], "no .profile → null income signal")
+	require.Equal(t, false, rows2[0].Values["profileSubmitted"], "no .applicationSignals → profileSubmitted false")
+	require.Nil(t, rows2[0].Values["incomeToRentMet"], "no .applicationSignals → null income signal")
 	require.Nil(t, rows2[0].Values["referenceCount"])
 	require.Nil(t, rows2[0].Values["hasGuarantor"])
-	require.Nil(t, rows2[0].Values["guarantorIncomeToRentMet"], "no .profile → null guarantor signal")
+	require.Nil(t, rows2[0].Values["guarantorIncomeToRentMet"], "no .applicationSignals → null guarantor signal")
 }
 
 // landlordDecision writes the leaseapp's .decision aspect {value, decidedAt} — the

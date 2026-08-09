@@ -118,7 +118,7 @@ func TestRenewalsRead_ProjectsChainFacts(t *testing.T) {
 	}
 	f := newLensFixture(t)
 	f.seedOpenRenewal(t, "rn", "app", "tina", "unit1", "larry")
-	f.aspect(t, "tina", "profile", "profile", map[string]any{"hasGuarantor": true})
+	f.aspect(t, "app", "applicationSignals", "applicationSignals", map[string]any{"hasGuarantor": true})
 	f.aspect(t, "rn", "terms", "terms", map[string]any{"rentAmount": 2600, "termMonths": 12, "setAt": "2026-07-01T00:00:00Z"})
 	f.aspect(t, "rn", "guarantorVerification", "guarantorVerification", map[string]any{"verifiedAt": "2026-07-02T00:00:00Z", "method": "phone"})
 	f.aspect(t, "rn", "renewalSignature", "renewalSignature", map[string]any{"signedAt": "2026-07-03T00:00:00Z"})
@@ -136,10 +136,10 @@ func TestRenewalsRead_ProjectsChainFacts(t *testing.T) {
 	require.Equal(t, "2026-07-03T00:00:00Z", v["signed_at"])
 }
 
-// TestRenewalsRead_NoGuarantorProjectsFalseNotNull — a tenant with no .profile
-// aspect at all (never set hasGuarantor) projects has_guarantor = null
-// (unknown, matching every other profile-derived column's null-vs-false
-// convention in this package), not a dropped row.
+// TestRenewalsRead_NoGuarantorProjectsFalseNotNull — a leaseapp with no
+// .applicationSignals aspect at all (never set hasGuarantor) projects
+// has_guarantor = null (unknown, matching every other profile-derived
+// column's null-vs-false convention in this package), not a dropped row.
 func TestRenewalsRead_NoGuarantorProjectsFalseNotNull(t *testing.T) {
 	if testing.Short() {
 		t.Skip("requires NATS")
@@ -149,7 +149,7 @@ func TestRenewalsRead_NoGuarantorProjectsFalseNotNull(t *testing.T) {
 
 	rows := f.projectRenewalsRead(t)
 	require.Len(t, rows, 1)
-	require.Nil(t, rows[0].Values["has_guarantor"], "no .profile aspect -> unknown, not false")
+	require.Nil(t, rows[0].Values["has_guarantor"], "no .applicationSignals aspect -> unknown, not false")
 	require.Nil(t, rows[0].Values["terms_set_at"], "no .terms aspect yet -> null, not a dropped row")
 }
 

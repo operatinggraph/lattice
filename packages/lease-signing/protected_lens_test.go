@@ -389,18 +389,20 @@ func TestLeaseApplicationsRead_EscalatedScopedToOwnApplication(t *testing.T) {
 
 // TestLeaseApplicationsRead_ProjectsProfileSignals — the D1.5-style profile
 // signal columns (mirroring landlordLeaseApplicationsReadSpec's own addition)
-// project the derived booleans/count off .profile, never the raw financials,
-// and degrade to profile_submitted=false + null signals when no profile was
-// ever submitted.
+// project the derived booleans/count off .applicationSignals, never the raw
+// financials (on .profile), and degrade to profile_submitted=false + null
+// signals when no profile was ever submitted.
 func TestLeaseApplicationsRead_ProjectsProfileSignals(t *testing.T) {
 	if testing.Short() {
 		t.Skip("requires NATS")
 	}
 	f := newLensFixture(t)
 	f.seedApplication(t, "app", "alice", "unit1")
-	f.aspect(t, "app", "profile", "profile", map[string]any{
-		"annualIncome":             96000,
-		"employmentStatus":         "employed",
+	f.aspect(t, "app", "profile", "applicantProfile", map[string]any{
+		"annualIncome":     96000,
+		"employmentStatus": "employed",
+	})
+	f.aspect(t, "app", "applicationSignals", "applicationSignals", map[string]any{
 		"incomeToRentMet":          true,
 		"employmentVerified":       true,
 		"referenceCount":           2,
@@ -428,7 +430,7 @@ func TestLeaseApplicationsRead_ProjectsProfileSignals(t *testing.T) {
 	require.NotContains(t, v, "annualIncome", "raw income must not be projected")
 
 	noProfile := byApp[f.ids["app2"]]
-	require.Equal(t, false, noProfile["profile_submitted"], "no .profile -> profile_submitted false")
-	require.Nil(t, noProfile["income_to_rent_met"], "no .profile -> null income signal")
+	require.Equal(t, false, noProfile["profile_submitted"], "no .applicationSignals -> profile_submitted false")
+	require.Nil(t, noProfile["income_to_rent_met"], "no .applicationSignals -> null income signal")
 	require.Nil(t, noProfile["reference_count"])
 }

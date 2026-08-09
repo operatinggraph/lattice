@@ -82,7 +82,7 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 // Package is the static, install-time bundle.
 var Package = pkgmgr.Definition{
 	Name:    "lease-signing",
-	Version: "0.27.17",
+	Version: "0.28.0",
 	Description: "Loftspace lease-application convergence vertical: the leaseapp vertex type + CreateLeaseApplication/SignLease, " +
 		"the leaseApplicationComplete actorAggregate convergence lens (§10.2 keyColumn), the leaseApplicationsRead " +
 		"protected Postgres read model (Contract #6 §6.14 RLS — the applicant-self read boundary, D1.3 Fire 2; carries " +
@@ -95,18 +95,22 @@ var Package = pkgmgr.Definition{
 		"reaches AI reasoning instead of an unread Health-KV warning, the externalTask " +
 		"instanceOp/replyOp wrapper DDLs (identity-family bgcheck/payment AND the leaseapp-subject docGen triad — the " +
 		"vendor-rendered executed-lease document), the bgcheck/payment/onboarding/leaseDocument loomPatterns, SetApplicantProfile " +
-		"(the applicant's qualification profile — raw financials captured in Core KV, only derived landlord-facing " +
-		"signals projected), and the lease-renewal chain: a create-only .tenancy aspect (DecideLeaseApplication's " +
+		"(the applicant's qualification profile, split three ways along the sensitivity boundary: .profile and " +
+		".underwritingParties are SENSITIVE, DEK custodied on the package's own underwritingRecord retention class rather than " +
+		"any identity — the applicant's own raw financials and the guarantor/co-applicant's third-party identifiers " +
+		"respectively (retention-class-key-custody-design.md §8.7, RetentionClasses()) — while .applicationSignals is the " +
+		"NON-sensitive derived half the three shipped lenses project), and the lease-renewal chain: a create-only .tenancy aspect (DecideLeaseApplication's " +
 		"first approve), the renewal vertex type + its five ops, the leaseExpiry frozen-table target (opens a " +
 		"cycle), and the renewalComplete mode:planned target — the first goal-authored Weaver target (Contract #10 " +
 		"§10.8 Planner extension), sequencing a per-tenant-variable chain (conditional bgcheck refresh, conditional " +
 		"guarantor re-verify, rent-term set, tenant signature) from one declared goal + a 4-action catalog. Depends " +
 		"identity-domain + service-domain + orchestration-base.",
-	Depends:       []string{"identity-domain", "service-domain", "orchestration-base"},
-	DDLs:          DDLs(),
-	Lenses:        Lenses(),
-	Permissions:   Permissions(),
-	WeaverTargets: WeaverTargets(),
-	LoomPatterns:  LoomPatterns(),
-	OpMetas:       OpMetas(),
+	Depends:          []string{"identity-domain", "service-domain", "orchestration-base"},
+	DDLs:             DDLs(),
+	Lenses:           Lenses(),
+	Permissions:      Permissions(),
+	WeaverTargets:    WeaverTargets(),
+	LoomPatterns:     LoomPatterns(),
+	OpMetas:          OpMetas(),
+	RetentionClasses: RetentionClasses(),
 }

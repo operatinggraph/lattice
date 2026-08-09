@@ -514,7 +514,7 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 			FieldDescriptions: map[string]string{
 				"renewalKey": "The renewal cycle — filled from the renewal in view, not typed.",
 				"leaseApp":   "The application this cycle renews. Verified against the renewal's own renews link, so a tampered value is rejected.",
-				"applicant":  "The tenant. Verified against the application's own applicationFor link — a payload cannot borrow another applicant's guarantor state.",
+				"applicant":  "The tenant. Verified against the application's own applicationFor link — a payload-consistency check that the caller-supplied applicant is genuinely this leaseApp's applicant, not an authorization check. Standing to act comes from require_manages on the renewal's unit (walked renewal→renews→leaseapp→appliesToUnit); the leaseApp itself is bound to this renewal via the renewal's OWN renews link, not this field.",
 				"method":     "Optional free text recording how you verified, kept alongside the verification timestamp.",
 			},
 			Dispatch: &pkgmgr.OpDispatchSpec{
@@ -523,15 +523,18 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 				TargetField: "renewalKey",
 				TargetType:  "renewal",
 				// Both link reads are required — the script verifies the pair
-				// before it trusts the applicant's profile.
+				// before it trusts the leaseApp's applicationSignals.
 				Reads: []string{
 					"{payload.renewalKey}",
 					"lnk.renewal.{payload.renewalKey:id}.renews.leaseapp.{payload.leaseApp:id}",
 					"lnk.leaseapp.{payload.leaseApp:id}.applicationFor.identity.{payload.applicant:id}",
 				},
-				// An applicant who never filled in a profile has none; the op
-				// answers NoGuarantorToVerify rather than failing the read.
-				OptionalReads: []string{"{payload.leaseApp}.profile"},
+				// Absence is a script-visible branch, not a hydration fault: an
+				// application whose profile was never (re)submitted since the
+				// three-way split shipped has no .applicationSignals, and the
+				// script refuses with ApplicationSignalsMissing (fail closed —
+				// absent signals means UNKNOWN, not "no guarantor").
+				OptionalReads: []string{"{payload.leaseApp}.applicationSignals"},
 			},
 		},
 		{

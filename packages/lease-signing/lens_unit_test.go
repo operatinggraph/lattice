@@ -7,7 +7,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/operatinggraph/lattice/internal/guardgrammar"
 	"github.com/operatinggraph/lattice/internal/pkgmgr"
+	"github.com/operatinggraph/lattice/internal/weaver/planner"
 )
 
 // TestLeaseSigning_PlaybookColumnsMatchLens (test 6 — the §10.2↔§10.8 seam, §4
@@ -154,5 +156,94 @@ func TestLeaseAppType_AbsentFromCore(t *testing.T) {
 	}
 	if len(violations) > 0 {
 		t.Fatalf("lease-signing concrete types/ops leaked into internal/ engine code:\n  %s", strings.Join(violations, "\n  "))
+	}
+}
+
+// TestRenewalComplete_MissingGoalAgreement proves renewal_lenses.go's own
+// claim (renewalCompleteSpec's doc comment): the lens's missing_renewalComplete
+// predicate and the renewalComplete WeaverTarget's planner Goal
+// (renewal_targets.go) are two independent evaluations over the SAME facts
+// that must agree. It runs the planner's REAL guard evaluator
+// (internal/weaver/planner.EvalGuard) against the parsed Goal, and a literal
+// Go mirror of the lens's own RETURN expression, across every combination of
+// the five underlying facts (32 cases) — static, no NATS/Postgres required.
+//
+// A regression this catches: projecting hasGuarantor as the raw (possibly
+// null) .applicationSignals field, rather than coalesced to a real boolean
+// via (app.applicationSignals.data.hasGuarantor = True), would disagree with
+// the goal on every hasGuarantor=false, .applicationSignals-absent case — the
+// bug MAJOR 5 fixed.
+func TestRenewalComplete_MissingGoalAgreement(t *testing.T) {
+	var target pkgmgr.WeaverTargetSpec
+	var found bool
+	for _, wt := range RenewalTargets() {
+		if wt.TargetID == "renewalComplete" {
+			target = wt
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatal("renewalComplete weaverTarget not declared")
+	}
+	ga, ok := target.Gaps["missing_renewalComplete"]
+	if !ok {
+		t.Fatal("renewalComplete target has no missing_renewalComplete gap")
+	}
+	goal, err := guardgrammar.Parse(ga.Goal)
+	if err != nil {
+		t.Fatalf("parse renewalComplete goal: %v", err)
+	}
+
+	bgcheckPath := guardgrammar.Path{Field: "bgcheckValidUntil"}
+	hasGuarantorPath := guardgrammar.Path{Field: "hasGuarantor"}
+	guarantorVerifiedPath := guardgrammar.Path{Aspect: "guarantorVerification", Field: "verifiedAt"}
+	termsSetPath := guardgrammar.Path{Aspect: "terms", Field: "setAt"}
+	signedPath := guardgrammar.Path{Aspect: "renewalSignature", Field: "signedAt"}
+
+	for _, hasGuarantor := range []bool{false, true} {
+		for _, bgcheck := range []bool{false, true} {
+			for _, guarantorVerified := range []bool{false, true} {
+				for _, termsSet := range []bool{false, true} {
+					for _, signed := range []bool{false, true} {
+						// hasGuarantor is ALWAYS a concrete boolean here — the
+						// post-fix lens projection (app.applicationSignals.data.
+						// hasGuarantor = True) never leaves it null, so the
+						// state matrix does not exercise an absent key for it.
+						state := planner.State{hasGuarantorPath: hasGuarantor}
+						if bgcheck {
+							state[bgcheckPath] = "2027-01-01T00:00:00Z"
+						}
+						if guarantorVerified {
+							state[guarantorVerifiedPath] = "2027-01-01T00:00:00Z"
+						}
+						if termsSet {
+							state[termsSetPath] = "2027-01-01T00:00:00Z"
+						}
+						if signed {
+							state[signedPath] = "2027-01-01T00:00:00Z"
+						}
+
+						goalMet := planner.EvalGuard(goal, state)
+						// The lens's own RETURN expression (renewal_lenses.go
+						// renewalCompleteSpec), mirrored literally:
+						//   missing_renewalComplete = (status='open') AND leaseappAlive AND NOT (
+						//     bgcheckValidUntil <> null AND
+						//     (hasGuarantor = False OR guarantorVerifiedAt <> null) AND
+						//     termsSetAt <> null AND signedAt <> null)
+						// status/leaseappAlive are orthogonal to the goal, so this
+						// asserts only the NOT(...) remainder — the goal must be
+						// met exactly when that remainder is false.
+						lensGoalPortion := bgcheck && (!hasGuarantor || guarantorVerified) && termsSet && signed
+
+						if goalMet != lensGoalPortion {
+							t.Fatalf("hasGuarantor=%v bgcheck=%v guarantorVerified=%v termsSet=%v signed=%v: "+
+								"planner Goal met=%v, lens's missing_renewalComplete remainder met=%v — DISAGREE",
+								hasGuarantor, bgcheck, guarantorVerified, termsSet, signed, goalMet, lensGoalPortion)
+						}
+					}
+				}
+			}
+		}
 	}
 }

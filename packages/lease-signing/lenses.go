@@ -195,7 +195,7 @@ func Lenses() []pkgmgr.LensSpec {
 			//
 			// The 7 applicant qualification-profile signal columns (D1.5 Rec C,
 			// loftspace-d1.5-landlord-rls-decision-surface-design.md §4/§5) are
-			// pure `app.profile.data.*` scalar hops off the already-anchored
+			// pure `app.applicationSignals.data.*` scalar hops off the already-anchored
 			// leaseapp. `qualified` (D1.5 Rec-C remainder, §4 Option A) clones the
 			// service-instance readiness aggregation via the readinessOptionalMatch
 			// / readinessWithItems fragment shared with `leaseApplicationCompleteSpec`
@@ -353,20 +353,23 @@ func Lenses() []pkgmgr.LensSpec {
 //
 // APPLICANT QUALIFICATION PROFILE — the derived signals the landlord decides on.
 //
-//   - profileSubmitted (bool) — whether the applicant has recorded a .profile aspect
-//     (submittedAt <> null). incomeToRentMet / employmentVerified / referenceCount /
+//   - profileSubmitted (bool) — whether the applicant has recorded a .applicationSignals
+//     aspect (submittedAt <> null). incomeToRentMet / employmentVerified / referenceCount /
 //     hasCoApplicant / hasGuarantor / guarantorIncomeToRentMet are the DERIVED
 //     qualification signals SetApplicantProfile computes (the engine has no arithmetic
-//     / len, so the op derives them) and stores; the lens projects them verbatim. The
-//     RAW financials (annualIncome, employerName, the reference strings, and the
-//     guarantor / co-applicant detail — names, contacts, the guarantor's raw income)
-//     are deliberately NOT projected — they live in the Core-KV .profile aspect
-//     plaintext-for-now (the .ssn / .demographics discipline) and the deferred Vault
-//     plane owns their encryption + a raw-financial display. So a landlord reads
-//     "income meets 3× rent / employed / N references / guarantor covers 3× rent"
-//     without the raw figures. All feed no gap predicate (capture + surface, not a
-//     convergence gate) — a null .profile projects null signal columns, leaving
-//     convergence untouched.
+//     / len, so the op derives them) and stores on .applicationSignals; the lens
+//     projects them verbatim. The RAW financials (annualIncome, employerName, the
+//     reference strings, and the guarantor's relationship/income) live on the SENSITIVE
+//     .profile aspect, and the guarantor / co-applicant's OWN identifiers (names,
+//     contacts) live on the SENSITIVE .underwritingParties aspect — both custodied on
+//     the package's own underwritingRecord retention class (RetentionClasses) and
+//     deliberately NOT projected by this lens (retention-class-key-custody-design.md
+//     §9.1: step 6.5 encrypts a whole aspect's data map, so the derived signals must
+//     live on their own non-sensitive aspect to stay plain-lens-readable). So a landlord
+//     reads "income meets 3× rent / employed / N references / guarantor covers 3× rent"
+//     without the raw figures or the third-party identities. All feed no gap predicate
+//     (capture + surface, not a convergence gate) — a null .applicationSignals projects
+//     null signal columns, leaving convergence untouched.
 //
 // LANDLORD-GATED LISTING-LEASED CONVERGENCE — the human decision gates the lease.
 //
@@ -685,13 +688,13 @@ WITH
   app.terms.data.moveInDate AS termsMoveInDate,
   app.terms.data.leaseTermMonths AS termsLeaseTermMonths,
   app.terms.data.requestedRent AS termsRequestedRent,
-  app.profile.data.submittedAt AS profileSubmittedAt,
-  app.profile.data.incomeToRentMet AS incomeToRentMet,
-  app.profile.data.employmentVerified AS employmentVerified,
-  app.profile.data.referenceCount AS referenceCount,
-  app.profile.data.hasCoApplicant AS hasCoApplicant,
-  app.profile.data.hasGuarantor AS hasGuarantor,
-  app.profile.data.guarantorIncomeToRentMet AS guarantorIncomeToRentMet,
+  app.applicationSignals.data.submittedAt AS profileSubmittedAt,
+  app.applicationSignals.data.incomeToRentMet AS incomeToRentMet,
+  app.applicationSignals.data.employmentVerified AS employmentVerified,
+  app.applicationSignals.data.referenceCount AS referenceCount,
+  app.applicationSignals.data.hasCoApplicant AS hasCoApplicant,
+  app.applicationSignals.data.hasGuarantor AS hasGuarantor,
+  app.applicationSignals.data.guarantorIncomeToRentMet AS guarantorIncomeToRentMet,
   %s,
   count(DISTINCT CASE WHEN inst.class = 'service.backgroundCheck.instance' AND inst.dispatch.data.vendorRef <> null AND inst.outcome.data.status = null THEN inst.key ELSE null END) AS bgInflight,
   count(DISTINCT CASE WHEN inst.class = 'service.payment.instance' AND inst.dispatch.data.vendorRef <> null AND inst.outcome.data.status = null THEN inst.key ELSE null END) AS payInflight,
@@ -788,7 +791,7 @@ RETURN
 //   - profile_submitted / income_to_rent_met / employment_verified /
 //     reference_count / has_co_applicant / has_guarantor /
 //     guarantor_income_to_rent_met mirror landlordLeaseApplicationsReadSpec's own
-//     D1.5 addition: pure `app.profile.data.*` scalar hops, zero duplication.
+//     D1.5 addition: pure `app.applicationSignals.data.*` scalar hops, zero duplication.
 //   - missing_onboarding / missing_bgcheck / missing_payment / missing_signature /
 //     missing_decision / inflight_bgcheck / inflight_payment / declined_bgcheck /
 //     declined_payment / declined are the applicant's own four-gate journey
@@ -859,13 +862,13 @@ WITH
   app.terms.data.moveInDate      AS termsMoveInDate,
   app.terms.data.leaseTermMonths AS termsLeaseTermMonths,
   app.terms.data.requestedRent   AS termsRequestedRent,
-  (app.profile.data.submittedAt <> null)      AS profileSubmitted,
-  app.profile.data.incomeToRentMet            AS incomeToRentMet,
-  app.profile.data.employmentVerified         AS employmentVerified,
-  app.profile.data.referenceCount             AS referenceCount,
-  app.profile.data.hasCoApplicant             AS hasCoApplicant,
-  app.profile.data.hasGuarantor               AS hasGuarantor,
-  app.profile.data.guarantorIncomeToRentMet   AS guarantorIncomeToRentMet,
+  (app.applicationSignals.data.submittedAt <> null)      AS profileSubmitted,
+  app.applicationSignals.data.incomeToRentMet            AS incomeToRentMet,
+  app.applicationSignals.data.employmentVerified         AS employmentVerified,
+  app.applicationSignals.data.referenceCount             AS referenceCount,
+  app.applicationSignals.data.hasCoApplicant             AS hasCoApplicant,
+  app.applicationSignals.data.hasGuarantor               AS hasGuarantor,
+  app.applicationSignals.data.guarantorIncomeToRentMet   AS guarantorIncomeToRentMet,
   max(CASE WHEN leaseDocObj.key <> null AND docInst.class = 'service.docGen.instance' AND docInst.outcome.data.status = 'completed' THEN docInst.outcome.data.storeName ELSE null END) AS docStoreName,
   max(CASE WHEN leaseDocObj.key <> null AND docInst.class = 'service.docGen.instance' AND docInst.outcome.data.status = 'completed' THEN docInst.outcome.data.filename ELSE null END) AS docFilename,
   max(CASE WHEN leaseDocObj.key <> null AND docInst.class = 'service.docGen.instance' AND docInst.outcome.data.status = 'completed' THEN docInst.outcome.data.contentType ELSE null END) AS docContentType,
@@ -945,7 +948,7 @@ RETURN
 //   - profile_submitted / income_to_rent_met / employment_verified /
 //     reference_count / has_co_applicant / has_guarantor /
 //     guarantor_income_to_rent_met (D1.5 Rec C, decision-surface-design.md
-//     §4/§5) are pure scalar hops off app.profile.data.* — the SAME derived signals
+//     §4/§5) are pure scalar hops off app.applicationSignals.data.* — the SAME derived signals
 //     leaseApplicationCompleteSpec projects.
 //   - qualified (D1.5 Rec-C remainder, decision-surface-design.md §4 Option A —
 //     the readiness clone) is the SAME formula leaseApplicationCompleteSpec's
@@ -996,13 +999,13 @@ WITH
   app.terms.data.moveInDate      AS termsMoveInDate,
   app.terms.data.leaseTermMonths AS termsLeaseTermMonths,
   app.terms.data.requestedRent   AS termsRequestedRent,
-  (app.profile.data.submittedAt <> null)      AS profileSubmitted,
-  app.profile.data.incomeToRentMet            AS incomeToRentMet,
-  app.profile.data.employmentVerified         AS employmentVerified,
-  app.profile.data.referenceCount             AS referenceCount,
-  app.profile.data.hasCoApplicant             AS hasCoApplicant,
-  app.profile.data.hasGuarantor               AS hasGuarantor,
-  app.profile.data.guarantorIncomeToRentMet   AS guarantorIncomeToRentMet,
+  (app.applicationSignals.data.submittedAt <> null)      AS profileSubmitted,
+  app.applicationSignals.data.incomeToRentMet            AS incomeToRentMet,
+  app.applicationSignals.data.employmentVerified         AS employmentVerified,
+  app.applicationSignals.data.referenceCount             AS referenceCount,
+  app.applicationSignals.data.hasCoApplicant             AS hasCoApplicant,
+  app.applicationSignals.data.hasGuarantor               AS hasGuarantor,
+  app.applicationSignals.data.guarantorIncomeToRentMet   AS guarantorIncomeToRentMet,
   id.name.data                   AS applicantNameEnv,
   id.email.data                  AS applicantEmailEnv,
   id.phone.data                  AS applicantPhoneEnv,

@@ -7,6 +7,7 @@ package leasesigning_test
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
@@ -85,7 +86,7 @@ func setRenewalTerms(t *testing.T, ctx context.Context, conn *substrate.Conn, cp
 
 // verifyGuarantor submits VerifyGuarantor{renewalKey, leaseApp, applicant, method?}.
 // reads carries the (a) renews/applicationFor validation links; optionalReads
-// carries the (d) leaseApp.profile no-guarantor-on-file check.
+// carries the (d) leaseApp.applicationSignals no-guarantor-on-file check.
 func verifyGuarantor(t *testing.T, ctx context.Context, conn *substrate.Conn, cp *processor.CommitPath, cons jetstream.Consumer, label, renewalKey, leaseAppKey, applicantKey, method string, want processor.MessageOutcome) {
 	t.Helper()
 	payload := map[string]any{"renewalKey": renewalKey, "leaseApp": leaseAppKey, "applicant": applicantKey}
@@ -103,7 +104,7 @@ func verifyGuarantor(t *testing.T, ctx context.Context, conn *substrate.Conn, cp
 		Payload:       json.RawMessage(b),
 		ContextHint: &processor.ContextHint{
 			Reads:         []string{renewalKey, renewsLinkKey(renewalKey, leaseAppKey), applicationForLinkKey(leaseAppKey, applicantKey)},
-			OptionalReads: []string{leaseAppKey + ".profile"},
+			OptionalReads: []string{leaseAppKey + ".applicationSignals"},
 		},
 	}
 	testutil.PublishOp(t, conn, env)
@@ -113,7 +114,7 @@ func verifyGuarantor(t *testing.T, ctx context.Context, conn *substrate.Conn, cp
 // signRenewal submits SignRenewal{renewalKey, leaseApp, applicant}. reads
 // carries the (a) renews/applicationFor validation links + leaseApp.tenancy
 // (a renewable application always has one); optionalReads carries the (d)
-// .terms / leaseApp.profile / .guarantorVerification ordering-state reads.
+// .terms / leaseApp.applicationSignals / .guarantorVerification ordering-state reads.
 func signRenewal(t *testing.T, ctx context.Context, conn *substrate.Conn, cp *processor.CommitPath, cons jetstream.Consumer, label, renewalKey, leaseAppKey, applicantKey string, want processor.MessageOutcome) {
 	t.Helper()
 	payload, _ := json.Marshal(map[string]any{"renewalKey": renewalKey, "leaseApp": leaseAppKey, "applicant": applicantKey})
@@ -132,7 +133,7 @@ func signRenewal(t *testing.T, ctx context.Context, conn *substrate.Conn, cp *pr
 				applicationForLinkKey(leaseAppKey, applicantKey),
 				leaseAppKey + ".tenancy",
 			},
-			OptionalReads: []string{renewalKey + ".terms", leaseAppKey + ".profile", renewalKey + ".guarantorVerification"},
+			OptionalReads: []string{renewalKey + ".terms", leaseAppKey + ".applicationSignals", renewalKey + ".guarantorVerification"},
 		},
 	}
 	testutil.PublishOp(t, conn, env)
@@ -294,7 +295,13 @@ func TestSetRenewalTerms_ValidatesAndLocksAfterSignature(t *testing.T) {
 	ctx, conn := setupLeaseEnv(t)
 	cp, cons := newLeasePipeline(t, ctx, conn, "setterms")
 
-	appKey, applicantKey, _ := approveAndSignLeaseApp(t, ctx, conn, cp, cons, "BBsetterms1tHJKMNPQR")
+	appKey, applicantKey, unitKey := approveAndSignLeaseApp(t, ctx, conn, cp, cons, "BBsetterms1tHJKMNPQR")
+	// A guarantor-less profile: SignRenewal now fails closed (ApplicationSignalsMissing)
+	// when .applicationSignals is absent entirely, so a profile submission is
+	// required before this renewal can ever be signed.
+	setProfile(t, ctx, conn, cp, cons, "settermsProf", appKey, unitKey, map[string]any{
+		"annualIncome": 40000, "employmentStatus": "employed",
+	}, processor.OutcomeAccepted)
 	renewalKey := openRenewalHelper(t, ctx, conn, cp, cons, appKey)
 
 	// Non-positive rentAmount rejected.
@@ -311,7 +318,6 @@ func TestSetRenewalTerms_ValidatesAndLocksAfterSignature(t *testing.T) {
 	}
 
 	// Sign the renewal (no guarantor on this applicant), then prove TermsLocked.
-	_ = applicantKey
 	signRenewal(t, ctx, conn, cp, cons, "termsLockSig", renewalKey, appKey, applicantKey, processor.OutcomeAccepted)
 	setRenewalTerms(t, ctx, conn, cp, cons, "termsAfterSig", renewalKey, 2600, 12, processor.OutcomeRejected)
 }
@@ -360,17 +366,61 @@ func openRenewalHelper(t *testing.T, ctx context.Context, conn *substrate.Conn, 
 }
 
 // TestVerifyGuarantor_NoGuarantorToVerify_Rejected proves VerifyGuarantor
-// rejects when the applicant's profile has no guarantor (or no profile at
-// all).
+// rejects (NoGuarantorToVerify) when the applicant's profile was submitted
+// but declares no guarantor. The absent-profile case (no .applicationSignals
+// at all) is a DIFFERENT refusal — see
+// TestVerifyGuarantor_ApplicationSignalsMissing_Rejected.
 func TestVerifyGuarantor_NoGuarantorToVerify_Rejected(t *testing.T) {
 	t.Parallel()
 	ctx, conn := setupLeaseEnv(t)
 	cp, cons := newLeasePipeline(t, ctx, conn, "verifynog")
 
-	appKey, applicantKey, _ := approveAndSignLeaseApp(t, ctx, conn, cp, cons, "BBnoguar1ntHJKMNPQRS")
+	appKey, applicantKey, unitKey := approveAndSignLeaseApp(t, ctx, conn, cp, cons, "BBnoguar1ntHJKMNPQRS")
+	setProfile(t, ctx, conn, cp, cons, "verifyNoGuarProf", appKey, unitKey, map[string]any{
+		"annualIncome": 40000, "employmentStatus": "employed",
+	}, processor.OutcomeAccepted)
 	renewalKey := openRenewalHelper(t, ctx, conn, cp, cons, appKey)
 
 	verifyGuarantor(t, ctx, conn, cp, cons, "verifyNoGuar1", renewalKey, appKey, applicantKey, "", processor.OutcomeRejected)
+	if keyExists(t, ctx, conn, renewalKey+".guarantorVerification") {
+		t.Fatalf("a rejected VerifyGuarantor must not write .guarantorVerification")
+	}
+}
+
+// TestVerifyGuarantor_ApplicationSignalsMissing_Rejected proves VerifyGuarantor
+// fails CLOSED (ApplicationSignalsMissing) — not NoGuarantorToVerify — when the
+// leaseapp has no .applicationSignals aspect at all (SetApplicantProfile was
+// never submitted). Absent signals means UNKNOWN, never "no guarantor": a
+// pre-existing leaseapp whose plaintext .profile once carried
+// hasGuarantor=true must not have that guard silently skipped.
+func TestVerifyGuarantor_ApplicationSignalsMissing_Rejected(t *testing.T) {
+	t.Parallel()
+	ctx, conn := setupLeaseEnv(t)
+	cp, cons := newLeasePipeline(t, ctx, conn, "verifysigmiss")
+
+	appKey, applicantKey, _ := approveAndSignLeaseApp(t, ctx, conn, cp, cons, "BBsigmiss1tHJKMNPQRS")
+	renewalKey := openRenewalHelper(t, ctx, conn, cp, cons, appKey)
+
+	env := &processor.OperationEnvelope{
+		RequestID:     testutil.GenReqID("verifySigMiss1"),
+		Lane:          processor.LaneDefault,
+		OperationType: "VerifyGuarantor",
+		Actor:         lsActorKey,
+		SubmittedAt:   time.Now().UTC().Format(time.RFC3339),
+		Class:         "renewal",
+		Payload:       json.RawMessage(`{"renewalKey":"` + renewalKey + `","leaseApp":"` + appKey + `","applicant":"` + applicantKey + `"}`),
+		ContextHint: &processor.ContextHint{
+			Reads:         []string{renewalKey, renewsLinkKey(renewalKey, appKey), applicationForLinkKey(appKey, applicantKey)},
+			OptionalReads: []string{appKey + ".applicationSignals"},
+		},
+	}
+	outcome, reply := testutil.SubmitAndAwaitReply(t, ctx, conn, cp, cons, env)
+	if outcome != processor.OutcomeRejected {
+		t.Fatalf("outcome = %v, want Rejected", outcome)
+	}
+	if reply.Error == nil || !strings.Contains(reply.Error.Message, "ApplicationSignalsMissing") {
+		t.Fatalf("want ApplicationSignalsMissing rejection, got %v", reply.Error)
+	}
 	if keyExists(t, ctx, conn, renewalKey+".guarantorVerification") {
 		t.Fatalf("a rejected VerifyGuarantor must not write .guarantorVerification")
 	}
@@ -481,14 +531,20 @@ func TestSignRenewal_GatesOnTermsAndGuarantor_ThenExtendsTenancy(t *testing.T) {
 }
 
 // TestSignRenewal_NoGuarantor_SignsWithoutVerification proves the anyOf
-// vacuous-satisfaction path: an applicant with hasGuarantor=false never needs
-// VerifyGuarantor at all.
+// non-vacuous-satisfaction path: an applicant whose SUBMITTED profile declares
+// hasGuarantor=false never needs VerifyGuarantor at all (renewal_lenses.go
+// projects hasGuarantor as a real false via
+// (app.applicationSignals.data.hasGuarantor = True), so the goal's anyOf
+// disjunct is genuinely satisfied, not vacuously).
 func TestSignRenewal_NoGuarantor_SignsWithoutVerification(t *testing.T) {
 	t.Parallel()
 	ctx, conn := setupLeaseEnv(t)
 	cp, cons := newLeasePipeline(t, ctx, conn, "signnoguar")
 
-	appKey, applicantKey, _ := approveAndSignLeaseApp(t, ctx, conn, cp, cons, "BBsignnoguar1HJKMNPQ")
+	appKey, applicantKey, unitKey := approveAndSignLeaseApp(t, ctx, conn, cp, cons, "BBsignnoguar1HJKMNPQ")
+	setProfile(t, ctx, conn, cp, cons, "signnogProf", appKey, unitKey, map[string]any{
+		"annualIncome": 40000, "employmentStatus": "employed",
+	}, processor.OutcomeAccepted)
 	renewalKey := openRenewalHelper(t, ctx, conn, cp, cons, appKey)
 	setRenewalTerms(t, ctx, conn, cp, cons, "signnogTerms", renewalKey, 2500, 12, processor.OutcomeAccepted)
 
@@ -510,7 +566,10 @@ func TestSignRenewal_RejectsWhenNotOpen_NoDoubleExtension(t *testing.T) {
 	ctx, conn := setupLeaseEnv(t)
 	cp, cons := newLeasePipeline(t, ctx, conn, "signnotopen")
 
-	appKey, applicantKey, _ := approveAndSignLeaseApp(t, ctx, conn, cp, cons, "BBsignnotopen1HJKMNP")
+	appKey, applicantKey, unitKey := approveAndSignLeaseApp(t, ctx, conn, cp, cons, "BBsignnotopen1HJKMNP")
+	setProfile(t, ctx, conn, cp, cons, "signnotopProf", appKey, unitKey, map[string]any{
+		"annualIncome": 40000, "employmentStatus": "employed",
+	}, processor.OutcomeAccepted)
 	renewalKey := openRenewalHelper(t, ctx, conn, cp, cons, appKey)
 	setRenewalTerms(t, ctx, conn, cp, cons, "signnotopTerms", renewalKey, 2500, 12, processor.OutcomeAccepted)
 
@@ -557,6 +616,51 @@ func TestSignRenewal_LeaseAppMismatch_Rejected(t *testing.T) {
 	}
 }
 
+// TestSignRenewal_ApplicationSignalsMissing_Rejected proves SignRenewal fails
+// CLOSED (ApplicationSignalsMissing) — not a silent skip-the-guarantor-guard
+// success — when the leaseapp has no .applicationSignals aspect at all
+// (SetApplicantProfile was never submitted), even once .terms is set. Absent
+// signals means UNKNOWN, never "no guarantor": a pre-existing leaseapp whose
+// plaintext .profile once carried hasGuarantor=true must not sign unverified.
+func TestSignRenewal_ApplicationSignalsMissing_Rejected(t *testing.T) {
+	t.Parallel()
+	ctx, conn := setupLeaseEnv(t)
+	cp, cons := newLeasePipeline(t, ctx, conn, "signsigmiss")
+
+	appKey, applicantKey, _ := approveAndSignLeaseApp(t, ctx, conn, cp, cons, "BBsignsigms1HJKMNPQR")
+	renewalKey := openRenewalHelper(t, ctx, conn, cp, cons, appKey)
+	setRenewalTerms(t, ctx, conn, cp, cons, "signsigmsTerms", renewalKey, 2500, 12, processor.OutcomeAccepted)
+
+	env := &processor.OperationEnvelope{
+		RequestID:     testutil.GenReqID("signSigMiss1"),
+		Lane:          processor.LaneDefault,
+		OperationType: "SignRenewal",
+		Actor:         lsActorKey,
+		SubmittedAt:   time.Now().UTC().Format(time.RFC3339),
+		Class:         "renewal",
+		Payload:       json.RawMessage(`{"renewalKey":"` + renewalKey + `","leaseApp":"` + appKey + `","applicant":"` + applicantKey + `"}`),
+		ContextHint: &processor.ContextHint{
+			Reads: []string{
+				renewalKey,
+				renewsLinkKey(renewalKey, appKey),
+				applicationForLinkKey(appKey, applicantKey),
+				appKey + ".tenancy",
+			},
+			OptionalReads: []string{renewalKey + ".terms", appKey + ".applicationSignals", renewalKey + ".guarantorVerification"},
+		},
+	}
+	outcome, reply := testutil.SubmitAndAwaitReply(t, ctx, conn, cp, cons, env)
+	if outcome != processor.OutcomeRejected {
+		t.Fatalf("outcome = %v, want Rejected", outcome)
+	}
+	if reply.Error == nil || !strings.Contains(reply.Error.Message, "ApplicationSignalsMissing") {
+		t.Fatalf("want ApplicationSignalsMissing rejection, got %v", reply.Error)
+	}
+	if keyExists(t, ctx, conn, renewalKey+".renewalSignature") {
+		t.Fatalf("a rejected SignRenewal must not write .renewalSignature")
+	}
+}
+
 // TestCancelRenewal_TerminalAfterSignature_OtherwiseCancels proves
 // CancelRenewal flips status=cancelled (+ optional reason) while open, and
 // rejects once signed (a signed cycle cannot be cancelled).
@@ -579,7 +683,10 @@ func TestCancelRenewal_TerminalAfterSignature_OtherwiseCancels(t *testing.T) {
 	}
 
 	// A signed cycle cannot be cancelled.
-	appKey2, applicantKey2, _ := approveAndSignLeaseApp(t, ctx, conn, cp, cons, "BBcanceLsg2HJKMNPQTW")
+	appKey2, applicantKey2, unitKey2 := approveAndSignLeaseApp(t, ctx, conn, cp, cons, "BBcanceLsg2HJKMNPQTW")
+	setProfile(t, ctx, conn, cp, cons, "cancelSigProf", appKey2, unitKey2, map[string]any{
+		"annualIncome": 40000, "employmentStatus": "employed",
+	}, processor.OutcomeAccepted)
 	renewalKey2 := openRenewalHelper(t, ctx, conn, cp, cons, appKey2)
 	setRenewalTerms(t, ctx, conn, cp, cons, "cancelSigTerms", renewalKey2, 2500, 12, processor.OutcomeAccepted)
 	signRenewal(t, ctx, conn, cp, cons, "cancelSigSign", renewalKey2, appKey2, applicantKey2, processor.OutcomeAccepted)

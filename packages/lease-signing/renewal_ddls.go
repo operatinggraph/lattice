@@ -72,9 +72,10 @@ func renewalDDL() pkgmgr.DDLSpec {
 			"task auto-complete consumes the ephemeral grant on first submit). " +
 			"VerifyGuarantor{renewalKey, leaseApp, applicant, method?} is the landlord's guarantor-recheck leg: " +
 			"verifies leaseApp against the renewal's OWN renews link, verifies applicant against that leaseapp's " +
-			"OWN applicationFor link, then reads the verified applicant's .profile aspect. Rejects " +
+			"OWN applicationFor link, then reads the verified leaseApp's .applicationSignals aspect (hasGuarantor is " +
+			"written by SetApplicantProfile onto the LEASEAPP, never the applicant identity). Rejects " +
 			"LeaseAppMismatch/ApplicantMismatch on either link-verification failure, and NoGuarantorToVerify " +
-			"when the profile's hasGuarantor is not true (nothing to verify). Writes .guarantorVerification " +
+			"when .applicationSignals' hasGuarantor is not true (nothing to verify). Writes .guarantorVerification " +
 			"{verifiedAt, method}. " +
 			"SignRenewal{renewalKey, leaseApp, applicant} is the tenant's completion leg — the write-path mirror " +
 			"of the planner's signRenewal terminal-leg pre (write-path honesty: the op must not rely on the " +
@@ -83,7 +84,7 @@ func renewalDDL() pkgmgr.DDLSpec {
 			"re-extend an already-extended .tenancy.leaseEnd — the double-extension bug); rejects " +
 			"LeaseAppMismatch/ApplicantMismatch on either link-verification failure; rejects NotReadyToSign " +
 			"unless .terms is present; rejects GuarantorNotVerified when the " +
-			"verified applicant profile says hasGuarantor=true and .guarantorVerification is absent. On success it " +
+			"verified leaseApp's .applicationSignals says hasGuarantor=true and .guarantorVerification is absent. On success it " +
 			"writes .renewalSignature {signedAt}, flips the renewal root status to complete, and — in the SAME batch — " +
 			"extends the LEASEAPP's .tenancy: leaseEnd += terms.termMonths (calendar months), renewalOpensAt " +
 			"recomputed as leaseEnd - renewalWindow (the CreateAppointment multi-vertex-write precedent). The " +
@@ -95,9 +96,9 @@ func renewalDDL() pkgmgr.DDLSpec {
 			"lens (a recorded decline must not be reopened by the sweep) and is terminal in v1 (no revive op).",
 		Script: renewalDDLScript,
 		InputSchema: `{"type":"object","properties":` +
-			`{"leaseApp":{"type":"string","description":"vtx.leaseapp.<NanoID> the renewal cycle is for. Required on OpenRenewal (validated alive, must carry a .tenancy aspect); also required on VerifyGuarantor/SignRenewal, where it is verified against the renewal's OWN renews link (LeaseAppMismatch on mismatch) before its .profile is read or its .tenancy is extended."},` +
+			`{"leaseApp":{"type":"string","description":"vtx.leaseapp.<NanoID> the renewal cycle is for. Required on OpenRenewal (validated alive, must carry a .tenancy aspect); also required on VerifyGuarantor/SignRenewal, where it is verified against the renewal's OWN renews link (LeaseAppMismatch on mismatch) before its .applicationSignals is read or its .tenancy is extended."},` +
 			`"renewalKey":{"type":"string","description":"vtx.renewal.<NanoID> of the renewal cycle to act on (SetRenewalTerms/VerifyGuarantor/SignRenewal/CancelRenewal; required, validated alive)."},` +
-			`"applicant":{"type":"string","description":"vtx.identity.<NanoID> of the leaseApp's applicant. Required on VerifyGuarantor/SignRenewal; verified against the leaseApp's OWN applicationFor link (ApplicantMismatch on mismatch) before the applicant's .profile (hasGuarantor) is trusted — a tampered payload cannot borrow a different applicant's guarantor state."},` +
+			`"applicant":{"type":"string","description":"vtx.identity.<NanoID> of the leaseApp's applicant. Required on VerifyGuarantor/SignRenewal; verified against the leaseApp's OWN applicationFor link (ApplicantMismatch on mismatch) — the leaseApp's .applicationSignals (hasGuarantor) is what is actually trusted, not anything on the applicant identity; the link only proves the caller named the right application."},` +
 			`"rentAmount":{"type":"number","description":"The adjusted monthly rent for the renewed term (SetRenewalTerms; required, > 0)."},` +
 			`"termMonths":{"type":"integer","description":"The renewed lease term in months (SetRenewalTerms; required, whole number, >= ceil(renewalWindow in months))."},` +
 			`"method":{"type":"string","description":"Free-text method/note for how the guarantor was re-verified, e.g. \"phone\" or \"updated pay stub\" (VerifyGuarantor; optional)."},` +
@@ -106,9 +107,9 @@ func renewalDDL() pkgmgr.DDLSpec {
 		OutputSchema: `{"type":"object","properties":` +
 			`{"primaryKey":{"type":"string","description":"vtx.renewal.<NanoID> of the created or acted-on renewal cycle (the operation's principal key)."}}}`,
 		FieldDescription: map[string]string{
-			"leaseApp":   "Full vtx.leaseapp.<NanoID> key of the application whose renewal cycle is opening (OpenRenewal) — validated alive and required to carry a .tenancy aspect (NoTenancy otherwise). Also required on VerifyGuarantor/SignRenewal, where it is verified against the renewal's OWN renews link (LeaseAppMismatch on mismatch) rather than trusted bare from the payload. The caller lists it, and its .tenancy aspect, in ContextHint.Reads.",
+			"leaseApp":   "Full vtx.leaseapp.<NanoID> key of the application whose renewal cycle is opening (OpenRenewal) — validated alive and required to carry a .tenancy aspect (NoTenancy otherwise). Also required on VerifyGuarantor/SignRenewal, where it is verified against the renewal's OWN renews link (LeaseAppMismatch on mismatch) rather than trusted bare from the payload — this is also the vertex .applicationSignals (hasGuarantor) is read off. The caller lists it, and its .tenancy aspect, in ContextHint.Reads.",
 			"renewalKey": "Full vtx.renewal.<NanoID> key of the renewal cycle. SetRenewalTerms/VerifyGuarantor/SignRenewal/CancelRenewal all validate it is alive. The caller lists it (and, for VerifyGuarantor/SignRenewal, its renews link target) in ContextHint.Reads.",
-			"applicant":  "Full vtx.identity.<NanoID> key of the leaseApp's applicant. Required on VerifyGuarantor/SignRenewal — verified against the leaseApp's OWN applicationFor link (ApplicantMismatch on mismatch) before that applicant's .profile aspect (hasGuarantor) is read, so a caller cannot substitute a different applicant to spoof or dodge the guarantor check.",
+			"applicant":  "Full vtx.identity.<NanoID> key of the leaseApp's applicant. Required on VerifyGuarantor/SignRenewal — verified against the leaseApp's OWN applicationFor link (ApplicantMismatch on mismatch). This is a payload-consistency check, not an authorization check: it proves the caller-supplied applicant is genuinely this leaseApp's applicant. Standing to act comes from require_manages on the renewal's unit (VerifyGuarantor) or the §10.7 ephemeral task grant (SignRenewal); the leaseApp itself is bound to the renewal via the renewal's OWN renews link, not this field. hasGuarantor itself is read off the leaseApp's .applicationSignals aspect, not off this identity.",
 			"rentAmount": "The adjusted monthly rent for the renewed term (SetRenewalTerms; required, > 0). Stored on the .terms aspect.",
 			"termMonths": "The renewed lease term in months (SetRenewalTerms; required, whole number >= ceil(renewalWindow in months) — a shorter term would open the next renewal cycle immediately upon signing; a fractional value is rejected rather than silently truncated). Stored on the .terms aspect; SignRenewal later adds this value to the leaseapp's .tenancy.leaseEnd.",
 			"method":     "Free-text note on how the guarantor was re-verified (VerifyGuarantor; optional), e.g. a phone call or an updated pay stub. Stored on the .guarantorVerification aspect for the audit trail; not read by any gap predicate.",
@@ -139,7 +140,7 @@ func renewalDDL() pkgmgr.DDLSpec {
 					"applicant": "vtx.identity.<NanoID>", "method": "updated pay stub"},
 				ExpectedOutcome: "Verifies leaseApp against the renewal's OWN renews link and applicant against that " +
 					"leaseapp's OWN applicationFor link (both link-verified, never trusted bare from the payload), then " +
-					"reads the verified applicant's .profile aspect. Rejects NoGuarantorToVerify if the profile's " +
+					"reads the verified leaseApp's .applicationSignals aspect. Rejects NoGuarantorToVerify if " +
 					"hasGuarantor is not true. Writes .guarantorVerification {verifiedAt, method}. Returns primaryKey.",
 			},
 			{
@@ -148,7 +149,7 @@ func renewalDDL() pkgmgr.DDLSpec {
 					"applicant": "vtx.identity.<NanoID>"},
 				ExpectedOutcome: "Rejects RenewalNotOpen if the cycle is not open (already signed, completed, or " +
 					"cancelled); rejects NotReadyToSign unless .terms is present; rejects GuarantorNotVerified when the " +
-					"verified profile says hasGuarantor=true and .guarantorVerification is absent. On success, writes " +
+					"verified leaseApp's .applicationSignals says hasGuarantor=true and .guarantorVerification is absent. On success, writes " +
 					".renewalSignature {signedAt}, sets the renewal root status=complete, and — verifying leaseApp against " +
 					"the LIVE renews link and applicant against that leaseapp's LIVE applicationFor link — extends that " +
 					"leaseapp's .tenancy: leaseEnd += terms.termMonths (calendar months), renewalOpensAt recomputed. Both " +

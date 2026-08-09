@@ -169,20 +169,18 @@ func TestLandlordLeaseApplicationsRead_UnmanagedUnitProducesNoRow(t *testing.T) 
 // TestLandlordLeaseApplicationsRead_ProjectsProfileSignals — D1.5 Rec C: the
 // applicant qualification-profile signals (income/employment/references/
 // co-applicant/guarantor) project as informational scalars on the landlord row,
-// scalar hops off app.profile.data.* with no aggregation. An application whose
-// applicant never submitted a profile projects profile_submitted=false and every
-// signal null (unknown, not false) — asserted on the sibling app in
-// seedManagedApplication, which carries no .profile aspect.
+// scalar hops off app.applicationSignals.data.* with no aggregation. An
+// application whose applicant never submitted a profile projects
+// profile_submitted=false and every signal null (unknown, not false) —
+// asserted on the sibling app in seedManagedApplication, which carries no
+// .applicationSignals aspect.
 func TestLandlordLeaseApplicationsRead_ProjectsProfileSignals(t *testing.T) {
 	if testing.Short() {
 		t.Skip("requires NATS")
 	}
 	f := newLensFixture(t)
 	f.seedManagedApplication(t, "app", "alice", "unit1", "larry")
-	f.aspect(t, "app", "profile", "profile", map[string]any{
-		"annualIncome":             90000,
-		"employmentStatus":         "employed",
-		"references":               []any{"ref1", "ref2"},
+	f.aspect(t, "app", "applicationSignals", "applicationSignals", map[string]any{
 		"hasCoApplicant":           false,
 		"hasGuarantor":             true,
 		"employmentVerified":       true,
@@ -209,7 +207,7 @@ func TestLandlordLeaseApplicationsRead_ProjectsProfileSignals(t *testing.T) {
 	require.Equal(t, false, withProfile["guarantor_income_to_rent_met"])
 
 	noProfile := byApp[f.ids["appNoProfile"]]
-	require.Equal(t, false, noProfile["profile_submitted"], "no .profile aspect -> profile_submitted false, not null")
+	require.Equal(t, false, noProfile["profile_submitted"], "no .applicationSignals aspect -> profile_submitted false, not null")
 	require.Nil(t, noProfile["income_to_rent_met"], "no profile -> unknown, not false")
 	require.Nil(t, noProfile["employment_verified"])
 	require.Nil(t, noProfile["reference_count"])

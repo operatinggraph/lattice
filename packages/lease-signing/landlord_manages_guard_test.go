@@ -244,6 +244,15 @@ func TestLandlord_RenewalOpsConfinedToManagedUnit(t *testing.T) {
 	appTheirs, applicantTheirs, _ := approveAndSignLeaseApp(t, ctx, conn, cp, cons, "BBRenThemAntHJKMNPTU")
 	llSeedManages(t, ctx, conn, unitMine)
 
+	// A guarantor-less profile on appMine: VerifyGuarantor now fails closed
+	// (ApplicationSignalsMissing) rather than NoGuarantorToVerify when
+	// .applicationSignals is absent entirely, so the managed leg below needs a
+	// submitted profile to reach the NoGuarantorToVerify branch this test means
+	// to contrast against AuthDenied.
+	setProfile(t, ctx, conn, cp, cons, "llRenMineProf", appMine, unitMine, map[string]any{
+		"annualIncome": 40000, "employmentStatus": "employed",
+	}, processor.OutcomeAccepted)
+
 	renewalMine := openRenewalHelper(t, ctx, conn, cp, cons, appMine)
 	renewalTheirs := openRenewalHelper(t, ctx, conn, cp, cons, appTheirs)
 
@@ -267,15 +276,16 @@ func TestLandlord_RenewalOpsConfinedToManagedUnit(t *testing.T) {
 		t.Errorf("the denied SetRenewalTerms wrote %s.terms", renewalTheirs)
 	}
 
-	// VerifyGuarantor — the probe must answer BEFORE the applicant's profile is
-	// read, so an unmanaged cycle cannot be used to learn who the applicant is.
+	// VerifyGuarantor — the probe must answer BEFORE the leaseApp's
+	// .applicationSignals is read, so an unmanaged cycle cannot be used to learn
+	// who the applicant is.
 	// Neither cycle has a guarantor on file, so the MANAGED one rejects too —
 	// but on NoGuarantorToVerify, having passed the ownership probe. The
 	// discriminator is therefore the error code, not the outcome.
 	verifyHint := func(rk, ak, applicant string) *processor.ContextHint {
 		return &processor.ContextHint{
 			Reads:         []string{rk, renewsLinkKey(rk, ak), applicationForLinkKey(ak, applicant)},
-			OptionalReads: []string{ak + ".profile"},
+			OptionalReads: []string{ak + ".applicationSignals"},
 		}
 	}
 	_, unmanagedReply := llSubmitAsLandlordReply(t, ctx, conn, cp, cons, "llVerify1", "VerifyGuarantor", "renewal",

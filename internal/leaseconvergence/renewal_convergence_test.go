@@ -358,9 +358,19 @@ func TestRenewalConvergence_TwoTenantsDivergeThenDeclinePath(t *testing.T) {
 	appKeyB, applicantB, unitB := h.seedRenewableApplication("B")
 	landlordB := h.assignLandlord(unitB)
 	h.approveWithTenancy(appKeyB, applicantB, unitB)
-	// hasGuarantor defaults to false (SetApplicantProfile omitted): the goal's
-	// anyOf disjunct is satisfied vacuously — verifyGuarantor never becomes
-	// pre-eligible, so the planner must never dispatch it.
+
+	// A guarantor-less profile submission (hasGuarantor omitted): renewalComplete
+	// projects hasGuarantor as (app.applicationSignals.data.hasGuarantor = True),
+	// so this genuinely projects a real false (renewal_lenses.go) and the goal's
+	// anyOf disjunct is satisfied NON-vacuously — verifyGuarantor never becomes
+	// pre-eligible, so the planner must never dispatch it. (SignRenewal/
+	// VerifyGuarantor now fail closed — ApplicationSignalsMissing — when
+	// .applicationSignals is absent entirely, so a profile submission, even a
+	// guarantor-less one, is required before the chain can complete at all.)
+	profileReplyB := h.submitOp("SetApplicantProfile", "leaseapp", "default", bootstrap.BootstrapIdentityKey, map[string]any{
+		"leaseAppKey": appKeyB, "unit": unitB, "annualIncome": 60000, "employmentStatus": "employed",
+	}, &processor.ContextHint{Reads: []string{appKeyB}})
+	require.Equalf(t, processor.ReplyStatusAccepted, profileReplyB.Status, "SetApplicantProfile(B): %+v", profileReplyB.Error)
 
 	appIDB := appKeyB[len("vtx.leaseapp."):]
 	renewalKeyB := h.findRenewalKey(appIDB, 30*time.Second)

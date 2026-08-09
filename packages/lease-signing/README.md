@@ -41,11 +41,22 @@ keys-in-data (Contract #1); aspects hold business data (D5).
   `unit.leaseApplications` key-list index aspect (a Contract #1 violation) with
   the guard link.
 - **`SetApplicantProfile{leaseAppKey, unit, annualIncome, employmentStatus, …, hasCoApplicant?, hasGuarantor?, guarantor*?, coApplicant*?}`** —
-  writes the `.profile` aspect (UNCONDITIONED upsert). **Raw financials**
-  (income, employer, guarantor/co-applicant detail) are stored plaintext-for-now
-  and **NEVER projected** (the `.ssn`/`.demographics` Vault discipline — the
-  deferred Vault plane owns raw-financial display). The op **derives** the
-  landlord signals the lens projects (`incomeToRentMet` = gross monthly ≥ 3× the
+  writes THREE aspects, split along the retention-class-key-custody-design.md
+  §9.1 sensitivity boundary: the SENSITIVE `.profile` (class `applicantProfile`
+  — Contract #1 §1.5 namespaces the class; the key stays `.profile`) holding
+  **only** the applicant's own raw financials (income, employment, employer,
+  guarantor relationship/income); the SENSITIVE `.underwritingParties` holding
+  every THIRD-PARTY identifier (guarantor/co-applicant name/contact, and the
+  applicant's own references, since a reference names someone else); and the
+  NON-sensitive `.applicationSignals` holding the DERIVED landlord signals.
+  Both sensitive aspects are **encrypted**, DEK-custodied on the package's own
+  `underwritingRecord` retention class (`RetentionClasses`) rather than the
+  applicant's identity, and **NEVER projected** by any lens. All three aspects
+  are written in ONE UNCONDITIONED-upsert batch every submission — including
+  `.underwritingParties` when it carries no field (an empty `{}`), so a
+  re-submit that drops a prior guarantor/co-applicant/references clears them
+  rather than leaving them stale. The op **derives** the landlord signals the
+  lens projects (`incomeToRentMet` = gross monthly ≥ 3× the
   unit's listing rent, read on demand via `kv.Read`; `guarantorIncomeToRentMet`;
   `employmentVerified`; `referenceCount`; the co-applicant/guarantor booleans).
 - **`SignLease{leaseAppKey}`** — writes the `.signature` aspect `{signedAt}`

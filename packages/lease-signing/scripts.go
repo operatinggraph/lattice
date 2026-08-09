@@ -920,15 +920,28 @@ def execute(state, op):
 
     if ot == "SetApplicantProfile":
         # The applicant's qualification profile — the data a landlord decides on.
-        # It captures income / employment / references / co-applicant / guarantor
-        # on the application as a .profile aspect, and derives the landlord-facing
-        # qualification SIGNALS the lens projects. The RAW financials (annualIncome,
-        # employerName) live in the Core-KV aspect plaintext-for-now (the same
-        # discipline as identity .ssn / .demographics — the deferred Vault plane owns
-        # their encryption + a raw-financial display later) and are NEVER projected;
-        # only the DERIVED booleans/counts reach the read model, so the landlord sees
-        # "income meets 3x rent / employed / N references" without the raw figures.
-        # Re-submittable: an UNCONDITIONED upsert overwrites the prior profile.
+        # Split THREE ways along the retention-class-key-custody-design.md §9.1
+        # sensitivity boundary (step 6.5 encrypts a whole aspect's data map, so a
+        # non-sensitive field sharing a sensitive aspect's data goes unreadable to
+        # every plain lens — co-locating raw and derived facts is not an option):
+        #   .profile (SENSITIVE, underwritingRecord retention class) — the
+        #     applicant's OWN raw financials (annualIncome, employmentStatus,
+        #     employerName, references, guarantorRelationship, guarantorAnnualIncome).
+        #   .underwritingParties (SENSITIVE, SAME class, separate aspect) — the
+        #     guarantor's / co-applicant's OWN identifiers (guarantorName,
+        #     coApplicantName, coApplicantContact): a third party who never applied
+        #     and has no identity of their own to custody this on (§8.7).
+        #   .applicationSignals (NON-sensitive) — the DERIVED booleans/counts the
+        #     three shipped lenses project (incomeToRentMet, employmentVerified,
+        #     referenceCount, hasCoApplicant, hasGuarantor, guarantorIncomeToRentMet,
+        #     submittedAt), so the landlord sees qualification without the raw
+        #     figures or the third-party identities.
+        # All three are written in ONE mutation batch. Each sensitive aspect's
+        # written key set is STABLE — an omitted optional string writes as "" rather
+        # than being dropped, and a field is omitted only when it is structurally
+        # absent (no guarantor ⇒ no guarantor fields at all) — so a future per-field
+        # secure column never meets a missing key. Re-submittable: an UNCONDITIONED
+        # upsert overwrites all three aspects.
         app_key = required_string(p, "leaseAppKey")
         _, app_id = parts_of(app_key, "leaseAppKey", "leaseapp")
         if not vertex_alive(state, app_key):
@@ -1009,55 +1022,86 @@ def execute(state, op):
         if rent != None:
             income_to_rent_met = (annual_income * 1.0) / 12.0 >= INCOME_TO_RENT_RATIO * rent
 
-        # .profile (D3): raw fields (NOT projected) + derived signals (projected).
+        # .profile (SENSITIVE, underwritingRecord class): the applicant's OWN raw
+        # financials. employerName is ALWAYS present (STABLE shape) — "" when not
+        # supplied, never dropped.
         profile_data = {
-            "annualIncome":       annual_income,
-            "employmentStatus":   employment,
-            "references":         refs,
-            "hasCoApplicant":     has_co,
-            "hasGuarantor":       has_guarantor,
-            "employmentVerified": employment_verified,
-            "referenceCount":     ref_count,
-            "submittedAt":        time.rfc3339_utc(op.submittedAt),
+            "annualIncome":     annual_income,
+            "employmentStatus": employment,
+            "employerName":     employer if employer != None else "",
         }
-        if employer != None:
-            profile_data["employerName"] = employer
-        if income_to_rent_met != None:
-            profile_data["incomeToRentMet"] = income_to_rent_met
 
-        # Guarantor / co-applicant DETAIL (RAW — like the applicant's own financials,
-        # stored plaintext-for-now and NEVER projected; the deferred Vault plane owns
-        # their display). Captured only when the applicant set the corresponding flag,
-        # so clearing the flag drops the detail on the next (unconditioned) re-submit.
-        # The ONE derived, projectable signal is guarantorIncomeToRentMet — does the
+        # underwritingParties (SENSITIVE, SAME class, separate aspect): third-party
+        # identifier data — the applicant's references (who THEY name, e.g. "Prior
+        # landlord — Jane Doe", not what the applicant earns) plus the guarantor's /
+        # co-applicant's OWN identifiers — a population who never applied and has no
+        # identity of their own to custody this on (§8.7). references is omitted when
+        # the applicant supplied none (an empty list is nothing to custody).
+        underwriting_parties_data = {}
+        if len(refs) > 0:
+            underwriting_parties_data["references"] = refs
+
+        # Guarantor detail. profile_data carries guarantorRelationship /
+        # guarantorAnnualIncome (they describe the APPLICANT's qualification story,
+        # not a third-party identity); underwriting_parties_data carries
+        # guarantorName (the third party's OWN identifier). Both are STRUCTURALLY
+        # ABSENT (the whole group omitted) when there is no guarantor at all, and
+        # STABLE (always present, "" / 0 default) when hasGuarantor is true. The
+        # ONE derived, projectable signal is guarantorIncomeToRentMet — does the
         # guarantor's OWN income cover 3× the rent (the standard reason a guarantor
         # backs a thin-income application), derived from the same rent read above so a
         # landlord can lean on "guarantor covers 3× rent" rather than a bare ✓ on a
-        # below-income applicant. None when no guarantor income / no listing rent.
+        # below-income applicant. Omitted (not written) when no listing rent.
         guarantor_income_to_rent_met = None
         if has_guarantor:
             g_name = optional_string(p, "guarantorName")
             g_rel = optional_string(p, "guarantorRelationship")
             g_income = optional_number(p, "guarantorAnnualIncome")
-            if g_name != None:
-                profile_data["guarantorName"] = g_name
-            if g_rel != None:
-                profile_data["guarantorRelationship"] = g_rel
-            if g_income != None and g_income > 0:
-                profile_data["guarantorAnnualIncome"] = g_income
-                if rent != None:
-                    guarantor_income_to_rent_met = (g_income * 1.0) / 12.0 >= INCOME_TO_RENT_RATIO * rent
+            g_income_valid = g_income != None and g_income > 0
+            underwriting_parties_data["guarantorName"] = g_name if g_name != None else ""
+            profile_data["guarantorRelationship"] = g_rel if g_rel != None else ""
+            profile_data["guarantorAnnualIncome"] = g_income if g_income_valid else 0
+            if g_income_valid and rent != None:
+                guarantor_income_to_rent_met = (g_income * 1.0) / 12.0 >= INCOME_TO_RENT_RATIO * rent
+
+        # Co-applicant detail — both fields are the third party's OWN identifiers,
+        # so both go to underwritingParties. Structurally absent (the whole group
+        # omitted) when there is no co-applicant at all.
         if has_co:
             c_name = optional_string(p, "coApplicantName")
             c_contact = optional_string(p, "coApplicantContact")
-            if c_name != None:
-                profile_data["coApplicantName"] = c_name
-            if c_contact != None:
-                profile_data["coApplicantContact"] = c_contact
-        if guarantor_income_to_rent_met != None:
-            profile_data["guarantorIncomeToRentMet"] = guarantor_income_to_rent_met
+            underwriting_parties_data["coApplicantName"] = c_name if c_name != None else ""
+            underwriting_parties_data["coApplicantContact"] = c_contact if c_contact != None else ""
 
-        mutations = [make_aspect_upsert(app_key, "profile", "profile", profile_data)]
+        # .applicationSignals (NON-sensitive): the DERIVED booleans/counts the
+        # three shipped lenses project. incomeToRentMet / guarantorIncomeToRentMet
+        # are omitted (not written) when the signal is genuinely unknown (no
+        # listing rent / no guarantor), never written false.
+        signals_data = {
+            "employmentVerified": employment_verified,
+            "referenceCount":     ref_count,
+            "hasCoApplicant":     has_co,
+            "hasGuarantor":       has_guarantor,
+            "submittedAt":        time.rfc3339_utc(op.submittedAt),
+        }
+        if income_to_rent_met != None:
+            signals_data["incomeToRentMet"] = income_to_rent_met
+        if guarantor_income_to_rent_met != None:
+            signals_data["guarantorIncomeToRentMet"] = guarantor_income_to_rent_met
+
+        # Unconditioned upsert of all three aspects IN ONE BATCH (the clinic
+        # RecordEncounter precedent) — a re-submit overwrites every one, and no
+        # path ever writes one without the others. .underwritingParties is
+        # written even when it carries no field (an unconditioned upsert of
+        # {}) rather than being skipped: skipping it would leave a PRIOR
+        # submission's guarantorName/coApplicant*/references stale on a
+        # re-submit that drops them — TestSetApplicantProfile pins that a
+        # guarantor-less re-submit clears underwritingParties.guarantorName,
+        # which an omitted mutation cannot do without first reading the
+        # aspect it would otherwise blindly skip.
+        mutations = [make_aspect_upsert(app_key, "profile", "applicantProfile", profile_data),
+                     make_aspect_upsert(app_key, "underwritingParties", "underwritingParties", underwriting_parties_data),
+                     make_aspect_upsert(app_key, "applicationSignals", "applicationSignals", signals_data)]
         events = [{"class": "leaseapp.profileSubmitted",
                    "data": {"leaseAppKey": app_key}}]
         return {"mutations": mutations, "events": events,

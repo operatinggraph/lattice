@@ -348,15 +348,16 @@ def execute(state, op):
         # leaseApp against the renewal's OWN renews link, applicant against
         # that leaseapp's OWN applicationFor link (never trusted bare from the
         # payload, the Withdraw dual-endpoint-verification precedent) — then
-        # the verified applicant's .profile. Rejects NoGuarantorToVerify when
-        # there is no guarantor to verify.
+        # the verified leaseApp's .applicationSignals (hasGuarantor is written
+        # by SetApplicantProfile onto the LEASEAPP, never the applicant).
+        # Rejects NoGuarantorToVerify when there is no guarantor to verify.
         renewal_key = required_string(p, "renewalKey")
         _, renewal_id = parts_of(renewal_key, "renewalKey", "renewal")
         # workplace-exempt: (ownership-bound) the ownership probe answers FIRST --
         # ahead of the liveness check, the payload-matching probes below, and the
-        # applicant's .profile -- so a caller who does not manage the unit learns
-        # neither that this renewal exists nor which leaseapp or applicant it is
-        # for.
+        # leaseApp's .applicationSignals -- so a caller who does not manage the
+        # unit learns neither that this renewal exists nor which leaseapp or
+        # applicant it is for.
         require_manages(renewal_unit(renewal_key), "cannot verify the guarantor on renewal " + renewal_key)
         if not vertex_alive(state, renewal_key):
             fail("UnknownRenewal: " + renewal_key)
@@ -377,14 +378,20 @@ def execute(state, op):
         if app_for_lnk == None or app_for_lnk.isDeleted:
             fail("ApplicantMismatch: " + applicant + " is not the applicant of application " + app_key)
 
-        # The qualification .profile aspect lives on the LEASEAPP (written by
-        # SetApplicantProfile onto app_key), never on the applicant identity —
-        # the applicant link above is what authenticates which leaseapp's
-        # profile to read.
+        # The DERIVED hasGuarantor signal lives on the LEASEAPP's
+        # .applicationSignals aspect (written by SetApplicantProfile onto
+        # app_key), never on the applicant identity — the applicant link above
+        # is what authenticates which leaseapp's signals to read.
         # read-posture: (d) declared optionalReads at VerifyGuarantor dispatch
-        # — absent is the fail-closed no-guarantor-on-file branch.
-        profile = kv.Read(app_key + ".profile")
-        has_guarantor = profile != None and not profile.isDeleted and profile.data.get("hasGuarantor") == True
+        # — absent means the qualification signals are UNKNOWN (a leaseapp
+        # whose profile was never (re)submitted since this split shipped, e.g.
+        # a pre-existing plaintext .profile with no .applicationSignals
+        # sibling yet), never "no guarantor" — that confusion is what let a
+        # guarantor go unverified. Fail closed instead of degrading to False.
+        signals = kv.Read(app_key + ".applicationSignals")
+        if signals == None or signals.isDeleted:
+            fail("ApplicationSignalsMissing: application " + app_key + " has no .applicationSignals aspect; SetApplicantProfile must (re)write it before the guarantor can be verified")
+        has_guarantor = signals.data.get("hasGuarantor") == True
         if not has_guarantor:
             fail("NoGuarantorToVerify: application " + app_key + " has no guarantor on file")
 
@@ -442,11 +449,18 @@ def execute(state, op):
         if terms == None or terms.isDeleted:
             fail("NotReadyToSign: renewal " + renewal_key + " has no .terms set yet")
 
-        # See VerifyGuarantor: .profile lives on the LEASEAPP, not the identity.
+        # See VerifyGuarantor: .applicationSignals lives on the LEASEAPP, not
+        # the identity.
         # read-posture: (d) declared optionalReads at SignRenewal dispatch —
-        # absent is the fail-closed no-guarantor branch.
-        profile = kv.Read(app_key + ".profile")
-        has_guarantor = profile != None and not profile.isDeleted and profile.data.get("hasGuarantor") == True
+        # absent means the qualification signals are UNKNOWN, never "no
+        # guarantor" (the same confusion VerifyGuarantor guards against): a
+        # leaseapp whose profile was never (re)submitted since this split
+        # shipped must not silently skip the guarantor-verification guard.
+        # Fail closed rather than degrading has_guarantor to False.
+        signals = kv.Read(app_key + ".applicationSignals")
+        if signals == None or signals.isDeleted:
+            fail("ApplicationSignalsMissing: application " + app_key + " has no .applicationSignals aspect; SetApplicantProfile must (re)write it before this renewal can be signed")
+        has_guarantor = signals.data.get("hasGuarantor") == True
         if has_guarantor:
             # read-posture: (d) declared optionalReads at SignRenewal dispatch
             # — absent is the not-yet-verified ordering state (GuarantorNotVerified).

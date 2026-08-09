@@ -111,7 +111,7 @@ const COMPLETIONS = {
   // beyond [target] (script-read-posture-design.md §13): the renews/
   // applicationFor validation links are (a) required reads (derived from
   // target's + row.leaseApp's/row.tenant's own NanoIDs, mirroring
-  // guardLinkKey-style key reconstruction); .terms/.profile/
+  // guardLinkKey-style key reconstruction); .terms/.applicationSignals/
   // .guarantorVerification/.renewalSignature/.tenancy per the table below.
   SignRenewal: {
     title: "Sign your lease renewal",
@@ -126,7 +126,7 @@ const COMPLETIONS = {
         applicationForLinkKey(row.leaseApp, row.tenant),
         row.leaseApp + ".tenancy",
       ],
-      optionalReads: [target + ".terms", row.leaseApp + ".profile", target + ".guarantorVerification"],
+      optionalReads: [target + ".terms", row.leaseApp + ".applicationSignals", target + ".guarantorVerification"],
     }),
   },
   VerifyGuarantor: {
@@ -139,7 +139,7 @@ const COMPLETIONS = {
     extraFromRenewal: (row) => ({ leaseApp: row.leaseApp, applicant: row.tenant }),
     extraReads: (target, row) => ({
       reads: [renewsLinkKey(target, row.leaseApp), applicationForLinkKey(row.leaseApp, row.tenant)],
-      optionalReads: [row.leaseApp + ".profile"],
+      optionalReads: [row.leaseApp + ".applicationSignals"],
     }),
   },
   SetRenewalTerms: {

@@ -127,7 +127,7 @@ func TestPackage_EngineLegsStayBare(t *testing.T) {
 //     losing Protected would move identity-bearing rows onto an open surface, so
 //     the flag is pinned per lens, not just the lens name.
 func TestPackage_StructurePins(t *testing.T) {
-	if got, want := len(Package.DDLs), 10; got != want {
+	if got, want := len(Package.DDLs), 13; got != want {
 		t.Errorf("DDLs: got %d, want %d", got, want)
 	}
 	if got, want := len(Package.Lenses), 6; got != want {
@@ -160,6 +160,9 @@ func TestPackage_StructurePins(t *testing.T) {
 
 	wantDDLs := []struct{ name, class string }{
 		{"leaseapp", "meta.ddl.vertexType"},
+		{"applicantProfile", "meta.ddl.aspectType"},
+		{"underwritingParties", "meta.ddl.aspectType"},
+		{"applicationSignals", "meta.ddl.aspectType"},
 		{"leaseServiceInstance", "meta.ddl.vertexType"},
 		{"leaseServiceReply", "meta.ddl.vertexType"},
 		{"leaseServiceDispatch", "meta.ddl.vertexType"},
@@ -250,4 +253,80 @@ func TestPackage_LeaseApplicationCompleteEscalatesExhaustedToAugur(t *testing.T)
 		return
 	}
 	t.Fatal("leaseApplicationComplete target not found in Package.WeaverTargets")
+}
+
+// TestPackage_ProfileAndUnderwritingPartiesAreSensitiveAndCustodied is the
+// regression guard for the underwriting-record custody posture (mirrors
+// clinic-domain's TestPackage_EncounterAspectIsSensitiveAndCustodied): both
+// .profile and .underwritingParties must declare Sensitive + a retentionClass
+// Custody naming underwritingRecord, and the package must declare exactly
+// that retention class with the eraseOnExpiry policy. A silent loss of either
+// — Sensitive flipping back to false, or Custody being dropped/retargeted —
+// would fall back to committing the applicant's raw financials or the
+// guarantor/co-applicant's identifiers as PLAINTEXT (Sensitive false), or
+// reject at install (Custody naming an undeclared class).
+func TestPackage_ProfileAndUnderwritingPartiesAreSensitiveAndCustodied(t *testing.T) {
+	byName := map[string]pkgmgr.DDLSpec{}
+	for _, d := range Package.DDLs {
+		byName[d.CanonicalName] = d
+	}
+
+	for _, name := range []string{"applicantProfile", "underwritingParties"} {
+		asp, ok := byName[name]
+		if !ok {
+			t.Fatalf("missing %s aspectType DDL", name)
+		}
+		if !asp.Sensitive {
+			t.Fatalf("%s must be Sensitive (it carries retained underwriting data)", name)
+		}
+		if asp.Custody.Kind != pkgmgr.CustodyKindRetentionClass {
+			t.Fatalf("%s Custody.Kind = %q, want %q", name, asp.Custody.Kind, pkgmgr.CustodyKindRetentionClass)
+		}
+		if asp.Custody.RetentionClass != "underwritingRecord" {
+			t.Fatalf("%s Custody.RetentionClass = %q, want %q", name, asp.Custody.RetentionClass, "underwritingRecord")
+		}
+		if len(asp.PermittedCommands) != 1 || asp.PermittedCommands[0] != "SetApplicantProfile" {
+			t.Fatalf("%s PermittedCommands = %v, want [SetApplicantProfile]", name, asp.PermittedCommands)
+		}
+	}
+
+	if got := len(Package.RetentionClasses); got != 1 {
+		t.Fatalf("expected exactly 1 retention class, got %d", got)
+	}
+	rc := Package.RetentionClasses[0]
+	if rc.CanonicalName != "underwritingRecord" {
+		t.Fatalf("retention class CanonicalName = %q, want %q", rc.CanonicalName, "underwritingRecord")
+	}
+	if rc.Policy != pkgmgr.RetentionPolicyEraseOnExpiry {
+		t.Fatalf("retention class Policy = %q, want %q", rc.Policy, pkgmgr.RetentionPolicyEraseOnExpiry)
+	}
+	if rc.RetentionPeriod == "" {
+		t.Fatalf("retention class RetentionPeriod must be declared (it is declarative, but an unstated schedule is unauditable)")
+	}
+	if rc.Description == "" {
+		t.Fatalf("retention class Description must be declared")
+	}
+}
+
+// TestPackage_ApplicationSignalsIsNotSensitive proves the split's whole
+// point: the operational .applicationSignals aspect carries no custody at
+// all, so the three plain (unencrypted-read) lenses that project it can
+// actually read it. A regression that flips Sensitive on this DDL would make
+// leaseApplicationComplete/leaseApplicationsRead/landlordLeaseApplicationsRead's
+// qualification-signal columns unreadable by every non-Vault-aware lens.
+func TestPackage_ApplicationSignalsIsNotSensitive(t *testing.T) {
+	byName := map[string]pkgmgr.DDLSpec{}
+	for _, d := range Package.DDLs {
+		byName[d.CanonicalName] = d
+	}
+	sig, ok := byName["applicationSignals"]
+	if !ok {
+		t.Fatalf("missing applicationSignals aspectType DDL")
+	}
+	if sig.Sensitive {
+		t.Fatalf("applicationSignals must NOT be sensitive — it is the plain-lens-readable half of the split")
+	}
+	if sig.Custody.Kind != "" || sig.Custody.RetentionClass != "" {
+		t.Fatalf("applicationSignals must declare no custody, got %+v", sig.Custody)
+	}
 }

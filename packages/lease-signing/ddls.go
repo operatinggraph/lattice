@@ -11,6 +11,19 @@ import (
 //   - `leaseapp` (vertex type) — CreateLeaseApplication + SignLease. The
 //     application's applicant is a link (applicationFor → identity); the
 //     signature is a .signature aspect (D5 — root data {}).
+//   - `applicantProfile` / `underwritingParties` / `applicationSignals` — the
+//     three aspect-type DDLs SetApplicantProfile writes in one batch (the
+//     leaseapp vertexType script owns the write; these are its step-6 write
+//     gates). `applicantProfile` (SENSITIVE, custodied on the
+//     underwritingRecord retention class; LOCAL NAME stays .profile —
+//     Contract #1 §1.5 namespaces the CLASS only) carries the applicant's own
+//     raw financials; `underwritingParties` (SENSITIVE, same class) carries
+//     the guarantor/co-applicant identifiers AND the applicant's own
+//     references — every field there names a third party with no identity of
+//     its own to be custodied on (retention-class-key-custody-design.md
+//     §8.7, RetentionClasses()). `applicationSignals` (NON-sensitive) carries
+//     the derived qualification booleans/counts the three shipped lenses
+//     project. See RetentionClasses().
 //   - `leaseServiceInstance` — CreateLeaseServiceInstance, the externalTask
 //     instanceOp Loom submits: mints the claim vertex vtx.service.<handle>,
 //     records its family + the providedTo link, and emits external.<adapter>.
@@ -47,6 +60,9 @@ import (
 func DDLs() []pkgmgr.DDLSpec {
 	ddls := []pkgmgr.DDLSpec{
 		leaseAppDDL(),
+		profileAspectDDL(),
+		underwritingPartiesAspectDDL(),
+		applicationSignalsAspectDDL(),
 		leaseServiceInstanceDDL(),
 		leaseServiceReplyDDL(),
 		leaseServiceDispatchDDL(),
@@ -105,14 +121,28 @@ func leaseAppDDL() pkgmgr.DDLSpec {
 			"later signs a renewal extending leaseEnd, is never silently truncated back to the original term. " +
 			"SetApplicantProfile{leaseAppKey, unit, annualIncome, employmentStatus, employerName?, references?, hasCoApplicant?, " +
 			"hasGuarantor?, guarantorName?, guarantorRelationship?, guarantorAnnualIncome?, coApplicantName?, coApplicantContact?} " +
-			"captures the applicant's qualification profile as a .profile aspect so the landlord has something to " +
-			"decide on. The RAW financials (annualIncome, employerName, the guarantor / co-applicant detail) live in the Core-KV " +
-			"aspect plaintext-for-now (the .ssn / .demographics discipline — the deferred Vault plane owns their encryption + a " +
-			"raw display later) and are NEVER projected; the op DERIVES the landlord-facing signals (incomeToRentMet — gross monthly " +
-			"income ≥ 3× the unit's listing rent, read on demand; employmentVerified; referenceCount; hasCoApplicant; hasGuarantor; " +
-			"guarantorIncomeToRentMet — the guarantor's own income ≥ 3× rent) which the lens projects so a landlord sees qualification " +
-			"without the raw figures. UNCONDITIONED upsert (re-submittable). It verifies unit is the " +
-			"application's appliesToUnit target (the Withdraw precedent) and feeds no gap — capture + surface, not a convergence gate.",
+			"captures the applicant's qualification profile so the landlord has something to decide on, split three ways along the " +
+			"retention-class-key-custody-design.md §9.1 sensitivity boundary (one non-sensitive aspect sharing a sensitive aspect's " +
+			"data map goes unreadable to every plain lens, so co-locating raw and derived facts is not an option). The applicant's " +
+			"OWN raw financials (annualIncome, employmentStatus, employerName, guarantorRelationship, guarantorAnnualIncome) go to " +
+			"the SENSITIVE .profile aspect (class applicantProfile — Contract #1 §1.5 namespacing; the LOCAL NAME stays profile), " +
+			"custodied on the package's own underwritingRecord retention class (RetentionClasses) rather than the applicant's " +
+			"identity — the record survives the applicant's erasure. Every THIRD-PARTY identifier — the guarantor's/co-applicant's " +
+			"own name/contact (guarantorName, coApplicantName, coApplicantContact) AND the applicant's own references (who THEY " +
+			"name, e.g. \"Prior landlord — Jane Doe\") — goes to the SENSITIVE .underwritingParties aspect, same class. Neither " +
+			"sensitive aspect is ever projected by a lens. The op DERIVES the landlord-facing signals (incomeToRentMet — gross " +
+			"monthly income ≥ 3× the unit's listing rent, read on demand; employmentVerified; referenceCount; hasCoApplicant; " +
+			"hasGuarantor; guarantorIncomeToRentMet — the guarantor's own income ≥ 3× rent) into the NON-sensitive " +
+			".applicationSignals aspect, which the three shipped lenses project so a landlord sees qualification without the raw " +
+			"figures or the third-party identities. All three aspects are written in ONE mutation batch every time — a " +
+			"SetApplicantProfile that wrote .profile without .applicationSignals would leave the landlord surface silently blind " +
+			"to a submitted application, and an omitted .underwritingParties would leave a PRIOR submission's guarantor/" +
+			"co-applicant/references fields stale on a re-submit that drops them. Each sensitive aspect's written key set is " +
+			"STABLE: an omitted optional string writes as \"\" rather than being dropped (a future secure-lens column decrypting " +
+			"a missing field is a spec mismatch, not an absent value), and a field is omitted only when it is structurally absent " +
+			"(no guarantor ⇒ no guarantor fields at all; no references supplied ⇒ no references field). UNCONDITIONED upsert " +
+			"(re-submittable — a re-submit overwrites all three aspects). It verifies unit is the application's appliesToUnit " +
+			"target (the Withdraw precedent) and feeds no gap — capture + surface, not a convergence gate.",
 		Script: leaseAppDDLScript,
 		InputSchema: `{"type":"object","properties":` +
 			`{"applicant":{"type":"string","description":"vtx.identity.<NanoID> of the applicant this application is for (CreateLeaseApplication: required, validated alive; WithdrawLeaseApplication: required, verified via the applicationFor link, to free the per-(applicant, unit) guard link)."},` +
@@ -124,17 +154,17 @@ func leaseAppDDL() pkgmgr.DDLSpec {
 			`"leaseAppKey":{"type":"string","description":"vtx.leaseapp.<NanoID> of the application to sign (SignLease), withdraw (WithdrawLeaseApplication) or decide (DecideLeaseApplication); required, validated alive."},` +
 			`"decision":{"type":"string","enum":["approved","declined"],"description":"The landlord's leasing decision (DecideLeaseApplication; required). approved opens the listing-leased gate (the unit leases); declined is a terminal disposition."},` +
 			`"reason":{"type":"string","description":"Optional free-text rationale for a DecideLeaseApplication decline (applicant feedback + a fair-housing record). Stored on the .decision aspect and projected as the declineReason lens column; ignored on an approve."},` +
-			`"annualIncome":{"type":"number","description":"The applicant's gross annual income (SetApplicantProfile; required, > 0). RAW — stored in the .profile aspect, NEVER projected; only the derived incomeToRentMet boolean reaches the read model."},` +
-			`"employmentStatus":{"type":"string","enum":["employed","self-employed","unemployed","student","retired"],"description":"The applicant's employment status (SetApplicantProfile; required). employed / self-employed derive employmentVerified=true."},` +
-			`"employerName":{"type":"string","description":"The applicant's employer (SetApplicantProfile; optional). RAW — stored, never projected."},` +
-			`"references":{"type":"array","items":{"type":"string"},"description":"The applicant's references, free-text (SetApplicantProfile; optional). Only the derived referenceCount is projected, never the entries."},` +
-			`"hasCoApplicant":{"type":"boolean","description":"Whether the application has a co-applicant (SetApplicantProfile; optional, default false). Projected as a derived signal."},` +
-			`"hasGuarantor":{"type":"boolean","description":"Whether the application has a guarantor (SetApplicantProfile; optional, default false). Projected as a derived signal."},` +
-			`"guarantorName":{"type":"string","description":"The guarantor's name (SetApplicantProfile; optional, only with hasGuarantor). RAW — stored, never projected."},` +
-			`"guarantorRelationship":{"type":"string","description":"The guarantor's relationship to the applicant, e.g. parent (SetApplicantProfile; optional, only with hasGuarantor). RAW — stored, never projected."},` +
-			`"guarantorAnnualIncome":{"type":"number","description":"The guarantor's gross annual income (SetApplicantProfile; optional, only with hasGuarantor, > 0). RAW — stored, NEVER projected; only the derived guarantorIncomeToRentMet boolean reaches the read model."},` +
-			`"coApplicantName":{"type":"string","description":"The co-applicant's name (SetApplicantProfile; optional, only with hasCoApplicant). RAW — stored, never projected."},` +
-			`"coApplicantContact":{"type":"string","description":"The co-applicant's contact (email / phone) (SetApplicantProfile; optional, only with hasCoApplicant). RAW — stored, never projected."}},` +
+			`"annualIncome":{"type":"number","description":"The applicant's gross annual income (SetApplicantProfile; required, > 0). SENSITIVE — stored in the .profile aspect (underwritingRecord retention class), NEVER projected; only the derived incomeToRentMet boolean reaches the read model."},` +
+			`"employmentStatus":{"type":"string","enum":["employed","self-employed","unemployed","student","retired"],"description":"The applicant's employment status (SetApplicantProfile; required). SENSITIVE — stored in .profile. employed / self-employed derive the projected employmentVerified=true."},` +
+			`"employerName":{"type":"string","description":"The applicant's employer (SetApplicantProfile; optional). SENSITIVE — stored in .profile, never projected."},` +
+			`"references":{"type":"array","items":{"type":"string"},"description":"The applicant's references, free-text (SetApplicantProfile; optional). SENSITIVE — each names a third party, so it is stored in .underwritingParties, never .profile; only the derived referenceCount is projected, never the entries. Omitted from the write entirely when empty."},` +
+			`"hasCoApplicant":{"type":"boolean","description":"Whether the application has a co-applicant (SetApplicantProfile; optional, default false). NON-sensitive — stored + projected from .applicationSignals."},` +
+			`"hasGuarantor":{"type":"boolean","description":"Whether the application has a guarantor (SetApplicantProfile; optional, default false). NON-sensitive — stored + projected from .applicationSignals."},` +
+			`"guarantorName":{"type":"string","description":"The guarantor's name (SetApplicantProfile; optional, only with hasGuarantor). SENSITIVE — a third party's identifier, stored in .underwritingParties (underwritingRecord retention class), never projected."},` +
+			`"guarantorRelationship":{"type":"string","description":"The guarantor's relationship to the applicant, e.g. parent (SetApplicantProfile; optional, only with hasGuarantor). SENSITIVE — stored in .profile, never projected."},` +
+			`"guarantorAnnualIncome":{"type":"number","description":"The guarantor's gross annual income (SetApplicantProfile; optional, only with hasGuarantor, > 0). SENSITIVE — stored in .profile, NEVER projected; only the derived guarantorIncomeToRentMet boolean (in .applicationSignals) reaches the read model."},` +
+			`"coApplicantName":{"type":"string","description":"The co-applicant's name (SetApplicantProfile; optional, only with hasCoApplicant). SENSITIVE — a third party's identifier, stored in .underwritingParties, never projected."},` +
+			`"coApplicantContact":{"type":"string","description":"The co-applicant's contact (email / phone) (SetApplicantProfile; optional, only with hasCoApplicant). SENSITIVE — a third party's identifier, stored in .underwritingParties, never projected."}},` +
 			`"required":[]}`,
 		OutputSchema: `{"type":"object","properties":` +
 			`{"primaryKey":{"type":"string","description":"vtx.leaseapp.<NanoID> of the created or signed application (the operation's principal key)."}}}`,
@@ -145,18 +175,18 @@ func leaseAppDDL() pkgmgr.DDLSpec {
 			"leaseTermMonths":       "Requested lease term in months. Required when moveInDate is supplied; written to the .terms aspect.",
 			"requestedRent":         "Optional monthly rent the applicant offers. Written to the .terms aspect when supplied (only meaningful alongside moveInDate).",
 			"leaseAppId":            "Optional bare NanoID (no dots / key segments) for the application vertex (vtx.leaseapp.<leaseAppId>) created by CreateLeaseApplication. Supplied by a caller that must know the key before commit (the write-ahead seam). Absent → minted with nanoid.new().",
-			"leaseAppKey":           "Full vtx.leaseapp.<NanoID> key of the application to act on. SignLease validates it is alive and writes the .signature aspect (flipping missing_signature false); WithdrawLeaseApplication validates it is alive and soft-deletes it; DecideLeaseApplication validates it is alive and writes the .decision aspect; SetApplicantProfile validates it is alive and writes the .profile aspect. The caller lists it in ContextHint.Reads.",
-			"annualIncome":          "The applicant's gross annual income (SetApplicantProfile; required, > 0). RAW sensitive financial data: stored in the .profile aspect plaintext-for-now (the .ssn / .demographics discipline — the deferred Vault plane owns encryption + a raw-financial display) and NEVER projected. The op derives incomeToRentMet (gross monthly income ≥ 3× the unit's listing rent) from it, and only that boolean reaches the read model.",
-			"employmentStatus":      "The applicant's employment status (SetApplicantProfile; required): employed | self-employed | unemployed | student | retired. employed / self-employed derive the projected employmentVerified=true (an active income source); the rest are captured honestly and read as unverified.",
-			"employerName":          "The applicant's employer name (SetApplicantProfile; optional). RAW — stored in the .profile aspect, never projected.",
-			"references":            "The applicant's references as free-text strings (SetApplicantProfile; optional). Blank entries are dropped; only the derived referenceCount (the list length) is projected, never the entries themselves.",
-			"hasCoApplicant":        "Whether the application includes a co-applicant (SetApplicantProfile; optional, default false). Projected verbatim as a derived qualification signal.",
-			"hasGuarantor":          "Whether the application is backed by a guarantor (SetApplicantProfile; optional, default false). Projected verbatim as a derived qualification signal.",
-			"guarantorName":         "The guarantor's name (SetApplicantProfile; optional, captured only when hasGuarantor). RAW — stored in the .profile aspect plaintext-for-now (the .ssn / .demographics discipline — the deferred Vault plane owns its display) and NEVER projected.",
-			"guarantorRelationship": "The guarantor's relationship to the applicant, e.g. parent / employer (SetApplicantProfile; optional, captured only when hasGuarantor). RAW — stored, never projected.",
-			"guarantorAnnualIncome": "The guarantor's gross annual income (SetApplicantProfile; optional, captured only when hasGuarantor, > 0). RAW sensitive financial data — stored, NEVER projected. The op derives guarantorIncomeToRentMet (guarantor gross monthly ≥ 3× the unit's listing rent — the standard reason a guarantor backs a thin-income application) from it, and only that boolean reaches the read model.",
-			"coApplicantName":       "The co-applicant's name (SetApplicantProfile; optional, captured only when hasCoApplicant). RAW — stored, never projected (the Vault plane owns its display).",
-			"coApplicantContact":    "The co-applicant's contact — email or phone (SetApplicantProfile; optional, captured only when hasCoApplicant). RAW — stored, never projected.",
+			"leaseAppKey":           "Full vtx.leaseapp.<NanoID> key of the application to act on. SignLease validates it is alive and writes the .signature aspect (flipping missing_signature false); WithdrawLeaseApplication validates it is alive and soft-deletes it; DecideLeaseApplication validates it is alive and writes the .decision aspect; SetApplicantProfile validates it is alive and writes the .profile / .underwritingParties / .applicationSignals aspects in one batch. The caller lists it in ContextHint.Reads.",
+			"annualIncome":          "The applicant's gross annual income (SetApplicantProfile; required, > 0). SENSITIVE: stored in the .profile aspect, custodied on the package's underwritingRecord retention class (RetentionClasses) rather than the applicant's identity, and NEVER projected. The op derives incomeToRentMet (gross monthly income ≥ 3× the unit's listing rent) from it into the non-sensitive .applicationSignals aspect, and only that boolean reaches the read model.",
+			"employmentStatus":      "The applicant's employment status (SetApplicantProfile; required): employed | self-employed | unemployed | student | retired. SENSITIVE — stored in .profile. employed / self-employed derive the projected employmentVerified=true (an active income source); the rest are captured honestly and read as unverified.",
+			"employerName":          "The applicant's employer name (SetApplicantProfile; optional). SENSITIVE — stored in the .profile aspect, never projected.",
+			"references":            "The applicant's references as free-text strings (SetApplicantProfile; optional). SENSITIVE: each names a third party (e.g. \"Prior landlord — Jane Doe\"), so it is stored in the .underwritingParties aspect, not .profile. Blank entries are dropped; an empty result is omitted from the write entirely (no field, no DEK minted for nothing); only the derived referenceCount (the list length, in .applicationSignals) is projected, never the entries themselves.",
+			"hasCoApplicant":        "Whether the application includes a co-applicant (SetApplicantProfile; optional, default false). NON-sensitive — stored in .applicationSignals and projected verbatim as a derived qualification signal.",
+			"hasGuarantor":          "Whether the application is backed by a guarantor (SetApplicantProfile; optional, default false). NON-sensitive — stored in .applicationSignals and projected verbatim as a derived qualification signal.",
+			"guarantorName":         "The guarantor's name (SetApplicantProfile; optional, captured only when hasGuarantor). SENSITIVE: a third party's identifier — the guarantor never applied and has no identity of their own to custody it on, so it is stored in the .underwritingParties aspect (SAME underwritingRecord retention class as .profile, kept as a SEPARATE aspect so a later fire can rehome it without touching the financial record) and NEVER projected.",
+			"guarantorRelationship": "The guarantor's relationship to the applicant, e.g. parent / employer (SetApplicantProfile; optional, captured only when hasGuarantor). SENSITIVE — stored in .profile (it describes the applicant's own qualification story, not a third-party identifier), never projected.",
+			"guarantorAnnualIncome": "The guarantor's gross annual income (SetApplicantProfile; optional, captured only when hasGuarantor, > 0). SENSITIVE — stored in .profile, NEVER projected. The op derives guarantorIncomeToRentMet (guarantor gross monthly ≥ 3× the unit's listing rent — the standard reason a guarantor backs a thin-income application) from it into .applicationSignals, and only that boolean reaches the read model.",
+			"coApplicantName":       "The co-applicant's name (SetApplicantProfile; optional, captured only when hasCoApplicant). SENSITIVE: a third party's identifier, stored in the .underwritingParties aspect (underwritingRecord retention class), never projected.",
+			"coApplicantContact":    "The co-applicant's contact — email or phone (SetApplicantProfile; optional, captured only when hasCoApplicant). SENSITIVE: a third party's identifier, stored in .underwritingParties, never projected.",
 			"decision":              "The landlord's leasing decision (DecideLeaseApplication; required): approved or declined. Written to the .decision aspect {value, decidedAt}. A recorded decision is TERMINAL — the same value re-submits idempotently, a different value is rejected (DecisionFinal); approve is rejected (NotReadyToApprove) unless the application is signed. The convergence lens reads it: approved opens missing_listingLeased (the unit leases); declined folds into the lens's declined disposition (a terminal rejection).",
 			"reason":                "Optional free-text rationale the landlord supplies with a DecideLeaseApplication decline — applicant feedback plus a fair-housing record. Stored on the .decision aspect ({value, decidedAt, reason?}) only when supplied and projected as the declineReason lens column the applicant FE renders on the declined banner. A same-value re-submission (idempotent) can attach / update it; ignored on an approve.",
 		},
@@ -235,12 +265,17 @@ func leaseAppDDL() pkgmgr.DDLSpec {
 				},
 				ExpectedOutcome: "Validates the application is alive and that unit is its appliesToUnit target (via the link). Reads the unit's " +
 					".listing rent on demand to derive incomeToRentMet (96000/12 = 8000 ≥ 3× rent?) and, because hasGuarantor, " +
-					"guarantorIncomeToRentMet (120000/12 = 10000 ≥ 3× rent?). Writes the .profile aspect with the RAW fields (annualIncome, " +
-					"employmentStatus, employerName, references, guarantorName, guarantorRelationship, guarantorAnnualIncome) — never projected — " +
-					"plus the DERIVED signals (incomeToRentMet, employmentVerified=true, referenceCount=2, hasCoApplicant=false, hasGuarantor=true, " +
-					"guarantorIncomeToRentMet, submittedAt) that the lens projects. UNCONDITIONED upsert (re-submittable). Emits " +
-					"leaseapp.profileSubmitted{leaseAppKey}. Returns primaryKey. Rejects a non-existent application, a unit that is not the " +
-					"application's unit (UnitMismatch), a non-positive annualIncome, or an out-of-enum employmentStatus.",
+					"guarantorIncomeToRentMet (120000/12 = 10000 ≥ 3× rent?). Writes THREE aspects in one batch: the SENSITIVE .profile " +
+					"(class applicantProfile — annualIncome, employmentStatus, employerName, guarantorRelationship, " +
+					"guarantorAnnualIncome — never projected, custodied on the underwritingRecord retention class), the SENSITIVE " +
+					".underwritingParties (references, guarantorName — every field here names a third party, same class, never " +
+					"projected), and the NON-sensitive .applicationSignals (incomeToRentMet, employmentVerified=true, referenceCount=2, " +
+					"hasCoApplicant=false, hasGuarantor=true, guarantorIncomeToRentMet, submittedAt) that the three shipped lenses " +
+					"project. UNCONDITIONED upsert (re-submittable — a re-submit overwrites all three aspects, including clearing a " +
+					"PRIOR submission's guarantor/co-applicant/references fields on a re-submit that drops them). Emits " +
+					"leaseapp.profileSubmitted{leaseAppKey}. Returns primaryKey. Rejects a non-existent application, a unit that " +
+					"is not the application's unit (UnitMismatch), a non-positive annualIncome, or an out-of-enum " +
+					"employmentStatus.",
 			},
 		},
 		Effects: map[string][]json.RawMessage{
@@ -248,6 +283,200 @@ func leaseAppDDL() pkgmgr.DDLSpec {
 			// exactly the fact that closes the §10.8 playbook's missing_signature
 			// gap (targets.go).
 			"SignLease": {json.RawMessage(`{"present":"subject.signature.data.signedAt"}`)},
+		},
+	}
+}
+
+// profileAspectDDL declares the .profile aspect (class applicantProfile) — the
+// RETAINED FINANCIAL half of SetApplicantProfile's three-way split (the
+// leaseapp vertexType DDL owns the script). Declaration-only.
+//
+// The CLASS is applicantProfile, not the bare "profile" — Contract #1 §1.5
+// makes aspect-type canonicalNames globally unique, and "profile" is a generic
+// word every other package that has one (providerProfile, studioProfile,
+// instructorProfile, serviceProviderProfile) namespaces for exactly that
+// reason (clinic-domain/ddls.go states the rule). The LOCAL NAME stays
+// "profile" — the key shape vtx.leaseapp.<NanoID>.profile does not change.
+//
+// SENSITIVE, custodied on the underwritingRecord retention class
+// (RetentionClasses) rather than the applicant's own identity: a landlord's
+// underwriting decision is a business record that outlives the applicant's
+// erasure request, so its DEK lives on a holder the applicant's
+// ShredIdentityKey cannot reach — after that shred the record is still
+// readable, pseudonymized (retention-class-key-custody-design.md §6.4). Step
+// 6.5 encrypts the WHOLE aspect data map, which is why the derived,
+// non-identifying qualification signals (incomeToRentMet, employmentVerified,
+// referenceCount, hasCoApplicant, hasGuarantor, guarantorIncomeToRentMet,
+// submittedAt) live on the sibling .applicationSignals aspect instead of here,
+// and why every THIRD-PARTY identifier — the guarantor's/co-applicant's own
+// name/contact, AND the applicant's references (who THEY name) — lives on the
+// sibling .underwritingParties aspect rather than here — a different
+// population, held under the SAME class but kept separable (§8.7). This
+// aspect carries ONLY the applicant's own raw financials + the guarantor's
+// relationship/income (which describe the applicant's qualification story,
+// not a third party's identity), and NO shipped lens reads it — the retained
+// fields are captured + custodied, not yet decrypted back to any reader in
+// this fire.
+func profileAspectDDL() pkgmgr.DDLSpec {
+	return pkgmgr.DDLSpec{
+		CanonicalName:     "applicantProfile",
+		Class:             "meta.ddl.aspectType",
+		PermittedCommands: []string{"SetApplicantProfile"},
+		Sensitive:         true,
+		Custody:           pkgmgr.CustodySpec{Kind: pkgmgr.CustodyKindRetentionClass, RetentionClass: underwritingRecordRetentionClass},
+		Description: "Applicant qualification-profile aspect (lease-signing), the RETAINED FINANCIAL half of SetApplicantProfile's " +
+			"three-way split. Stored as vtx.leaseapp.<NanoID>.profile (class applicantProfile — namespaced per Contract #1 §1.5; " +
+			"the LOCAL NAME stays profile) = {annualIncome, employmentStatus, employerName, guarantorRelationship, " +
+			"guarantorAnnualIncome} — ONLY the applicant's own raw financials plus the guarantor's relationship/income (which " +
+			"describe the applicant's OWN qualification story, not a third-party identity; the guarantor's NAME, the " +
+			"co-applicant's identifiers, and the applicant's own references all live on the sibling .underwritingParties " +
+			"aspect instead, since they name a third party). SENSITIVE: its DEK is custodied on the underwritingRecord " +
+			"retention-class holder (RetentionClasses), not on the applicant's identity — the record survives " +
+			"ShredIdentityKey on its applicant as a pseudonymized retained record. The derived, non-identifying " +
+			"qualification signals (incomeToRentMet / employmentVerified / referenceCount / hasCoApplicant / hasGuarantor / " +
+			"guarantorIncomeToRentMet / submittedAt) live on the sibling .applicationSignals aspect, which is what " +
+			"leaseApplicationComplete / leaseApplicationsRead / landlordLeaseApplicationsRead project. STABLE WRITTEN " +
+			"SHAPE: employerName writes as \"\" when omitted (not dropped) so a later per-field secure column never meets a " +
+			"missing key; guarantorRelationship/guarantorAnnualIncome are omitted only when there is no guarantor at all " +
+			"(structurally absent), and always written (guarantorRelationship as \"\" if unset) when hasGuarantor is true. No " +
+			"shipped lens reads this aspect's content. Declaration-only: no op handler.",
+		Script: aspectDeclarationOnlyScript,
+		InputSchema: `{"type":"object","properties":` +
+			`{"annualIncome":{"type":"number"},"employmentStatus":{"type":"string"},"employerName":{"type":"string"},` +
+			`"guarantorRelationship":{"type":"string"},"guarantorAnnualIncome":{"type":"number"}}}`,
+		OutputSchema: `{"type":"object"}`,
+		FieldDescription: map[string]string{
+			"annualIncome":          "The applicant's gross annual income (RAW PHI-adjacent financial data — never projected; only the derived incomeToRentMet boolean, on .applicationSignals, reaches the read model).",
+			"employmentStatus":      "The applicant's employment status: employed | self-employed | unemployed | student | retired.",
+			"employerName":          "The applicant's employer. Written as \"\" when not supplied (stable shape).",
+			"guarantorRelationship": "The guarantor's relationship to the applicant, e.g. parent. Present only when the applicant has a guarantor; written as \"\" when a guarantor exists but no relationship was supplied.",
+			"guarantorAnnualIncome": "The guarantor's gross annual income. Present only when the applicant has a guarantor; never projected — only the derived guarantorIncomeToRentMet boolean (.applicationSignals) reaches the read model.",
+		},
+		Examples: []pkgmgr.ExampleSpec{
+			{
+				Name:            "applicant qualification-profile aspect",
+				Payload:         map[string]any{"annualIncome": 96000, "employmentStatus": "employed", "employerName": "Acme Corp"},
+				ExpectedOutcome: "Stored ENCRYPTED as vtx.leaseapp.<NanoID>.profile, written by SetApplicantProfile, DEK custodied on the underwritingRecord retention-class holder. Never projected by any lens.",
+			},
+		},
+	}
+}
+
+// underwritingPartiesAspectDDL declares the .underwritingParties aspect (class
+// underwritingParties) — the THIRD-PARTY IDENTIFIER half of
+// SetApplicantProfile's three-way split (the leaseapp vertexType DDL owns the
+// script). Declaration-only.
+//
+// SENSITIVE, SAME underwritingRecord retention-class custody as .profile — but
+// a SEPARATE aspect, deliberately: the guarantor and co-applicant never
+// applied, never consented to this record, and have no identity of their own
+// this platform could custody their DEK on (retention-class-key-custody-
+// design.md §8.7 rejects minting an unclaimed identity for a person who can
+// never claim it — that invents machinery to hold data they cannot reach).
+// Splitting them from .profile means a later fire can rehome or independently
+// erase the third-party identifiers without touching the applicant's own
+// financial record. references also lands here, not on .profile: a reference
+// (e.g. "Prior landlord — Jane Doe") names a third party, exactly the
+// population this aspect exists to hold — it is never the applicant's own
+// raw financial data.
+func underwritingPartiesAspectDDL() pkgmgr.DDLSpec {
+	return pkgmgr.DDLSpec{
+		CanonicalName:     "underwritingParties",
+		Class:             "meta.ddl.aspectType",
+		PermittedCommands: []string{"SetApplicantProfile"},
+		Sensitive:         true,
+		Custody:           pkgmgr.CustodySpec{Kind: pkgmgr.CustodyKindRetentionClass, RetentionClass: underwritingRecordRetentionClass},
+		Description: "Underwriting third-party identifiers aspect (lease-signing), the THIRD-PARTY half of SetApplicantProfile's " +
+			"three-way split. Stored as vtx.leaseapp.<NanoID>.underwritingParties (class underwritingParties) = {references, " +
+			"guarantorName, coApplicantName, coApplicantContact} — the applicant's references (who THEY name, e.g. " +
+			"\"Prior landlord — Jane Doe\") plus the guarantor's and co-applicant's OWN identifiers: every field here names a " +
+			"third party, a population distinct from the applicant's own raw financials (which stay on the sibling .profile " +
+			"aspect). SENSITIVE, custodied on the SAME underwritingRecord retention-class holder as .profile (RetentionClasses) " +
+			"— kept as a SEPARATE aspect rather than folded into .profile so a later fire can rehome or independently address " +
+			"these third-party identifiers without touching the applicant's financial record. Neither the guarantor nor the " +
+			"co-applicant has an identity of their own this record is custodied on (§8.7): they never applied and cannot " +
+			"exercise ShredIdentityKey against this data. STABLE WRITTEN SHAPE: guarantorName is present (defaulting to \"\" " +
+			"if unset) exactly when the applicant has a guarantor; coApplicantName/coApplicantContact are present (defaulting " +
+			"to \"\" if unset) exactly when the applicant has a co-applicant — a field is omitted only when the corresponding " +
+			"party is structurally absent (no guarantor / no co-applicant at all). references is omitted when the applicant " +
+			"supplied none. UNCONDITIONED upsert: SetApplicantProfile writes this aspect on every submission, even one with no " +
+			"references and neither a guarantor nor a co-applicant (an empty {}) — a re-submit that drops a PRIOR submission's " +
+			"guarantor/co-applicant/references fields must clear them, which an omitted mutation cannot do. No shipped lens " +
+			"reads this aspect's content. Declaration-only: no op handler.",
+		Script: aspectDeclarationOnlyScript,
+		InputSchema: `{"type":"object","properties":` +
+			`{"references":{"type":"array","items":{"type":"string"}},"guarantorName":{"type":"string"},` +
+			`"coApplicantName":{"type":"string"},"coApplicantContact":{"type":"string"}}}`,
+		OutputSchema: `{"type":"object"}`,
+		FieldDescription: map[string]string{
+			"references":         "The applicant's references, free-text (each names a third party, e.g. \"Prior landlord — Jane Doe\"). Omitted when the applicant supplied none. Never projected; only the derived count (.applicationSignals.referenceCount) reaches the read model.",
+			"guarantorName":      "The guarantor's name. Present only when the applicant has a guarantor; written as \"\" when a guarantor exists but no name was supplied. Never projected.",
+			"coApplicantName":    "The co-applicant's name. Present only when the applicant has a co-applicant; written as \"\" when unset. Never projected.",
+			"coApplicantContact": "The co-applicant's contact — email or phone. Present only when the applicant has a co-applicant; written as \"\" when unset. Never projected.",
+		},
+		Examples: []pkgmgr.ExampleSpec{
+			{
+				Name:            "underwriting third-party identifiers aspect",
+				Payload:         map[string]any{"guarantorName": "Pat Guarantor"},
+				ExpectedOutcome: "Stored ENCRYPTED as vtx.leaseapp.<NanoID>.underwritingParties, written by SetApplicantProfile, DEK custodied on the SAME underwritingRecord retention-class holder as .profile. Never projected by any lens.",
+			},
+		},
+	}
+}
+
+// applicationSignalsAspectDDL declares the .applicationSignals aspect (class
+// applicationSignals) — the DERIVED, non-identifying half of
+// SetApplicantProfile's three-way split (the leaseapp vertexType DDL owns the
+// script). Declaration-only.
+//
+// NON-sensitive, no custody: this aspect exists because step 6.5 encrypts an
+// entire aspect's data map, so these plainly operational booleans/counts
+// sharing the sensitive .profile aspect's data would be encrypted along with
+// the raw financials and unreadable to every plain lens — the aspect-level
+// sensitivity boundary forces the split. leaseApplicationComplete,
+// leaseApplicationsRead, and landlordLeaseApplicationsRead (this package's own
+// lenses) all read this aspect for the qualification-signal columns; the
+// renewal chain's VerifyGuarantor/SignRenewal ops and renewalComplete/
+// renewalsRead lenses read its hasGuarantor field.
+func applicationSignalsAspectDDL() pkgmgr.DDLSpec {
+	return pkgmgr.DDLSpec{
+		CanonicalName:     "applicationSignals",
+		Class:             "meta.ddl.aspectType",
+		PermittedCommands: []string{"SetApplicantProfile"},
+		Description: "Applicant qualification-signals aspect (lease-signing), the DERIVED half of SetApplicantProfile's " +
+			"three-way split. Stored as vtx.leaseapp.<NanoID>.applicationSignals (class applicationSignals) = {submittedAt, " +
+			"incomeToRentMet?, employmentVerified, referenceCount, hasCoApplicant, hasGuarantor, guarantorIncomeToRentMet?} — " +
+			"the OPERATIONAL, non-identifying signals a landlord's read model surfaces; every field is computed by the op, " +
+			"never a raw fact. It is a SEPARATE aspect from .profile / .underwritingParties because step 6.5 encrypts an " +
+			"entire aspect's data map: a non-sensitive field sharing a sensitive aspect's data would be encrypted along with " +
+			"the raw financials / third-party identifiers and unreadable to every plain lens, so the aspect-level sensitivity " +
+			"boundary forces this split. Consumed by leaseApplicationComplete, leaseApplicationsRead, and " +
+			"landlordLeaseApplicationsRead (this package's own lenses, D1.5 Rec C) for the seven qualification-signal " +
+			"columns, and by the renewal chain (VerifyGuarantor/SignRenewal op scripts, renewalComplete/renewalsRead lenses) " +
+			"for hasGuarantor. incomeToRentMet / guarantorIncomeToRentMet are omitted (not written) when the unit's listing " +
+			"rent is unknown at submit time — an unknown income-to-rent signal, not a false one. Declaration-only: no op " +
+			"handler.",
+		Script: aspectDeclarationOnlyScript,
+		InputSchema: `{"type":"object","properties":` +
+			`{"submittedAt":{"type":"string"},"incomeToRentMet":{"type":"boolean"},"employmentVerified":{"type":"boolean"},` +
+			`"referenceCount":{"type":"integer"},"hasCoApplicant":{"type":"boolean"},"hasGuarantor":{"type":"boolean"},` +
+			`"guarantorIncomeToRentMet":{"type":"boolean"}}}`,
+		OutputSchema: `{"type":"object"}`,
+		FieldDescription: map[string]string{
+			"submittedAt":              "RFC3339 instant the profile was (re-)submitted (canonical UTC, = op.submittedAt). Operational — projected.",
+			"incomeToRentMet":          "Whether the applicant's gross monthly income ≥ 3× the unit's listing rent. Omitted when the unit's listing rent is unknown at submit time.",
+			"employmentVerified":       "Whether the applicant reported an active income source (employed / self-employed). Operational — projected.",
+			"referenceCount":           "Count of the applicant's supplied references. Operational — projected.",
+			"hasCoApplicant":           "Whether the application has a co-applicant. Operational — projected.",
+			"hasGuarantor":             "Whether the application has a guarantor. Operational — projected; also read by the renewal chain's VerifyGuarantor/SignRenewal ops.",
+			"guarantorIncomeToRentMet": "Whether the guarantor's gross monthly income ≥ 3× the unit's listing rent. Omitted when there is no guarantor, or the unit's listing rent is unknown at submit time.",
+		},
+		Examples: []pkgmgr.ExampleSpec{
+			{
+				Name:            "applicant qualification-signals aspect",
+				Payload:         map[string]any{"submittedAt": "2026-06-27T10:00:00Z", "employmentVerified": true, "referenceCount": 2, "hasCoApplicant": false, "hasGuarantor": true},
+				ExpectedOutcome: "Stored PLAINTEXT as vtx.leaseapp.<NanoID>.applicationSignals, written by SetApplicantProfile. Read by leaseApplicationComplete / leaseApplicationsRead / landlordLeaseApplicationsRead.",
+			},
 		},
 	}
 }

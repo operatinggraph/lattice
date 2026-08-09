@@ -1,5 +1,5 @@
 name: lease-signing
-version: 0.27.17
+version: 0.28.0
 description: |
   Loftspace lease-application convergence vertical: the leaseapp vertex type
   (CreateLeaseApplication + SignLease), the leaseApplicationComplete
@@ -21,6 +21,10 @@ description: |
   backgroundCheck/collectPayment/onboarding/leaseDocument loomPatterns. The
   external-call outcome lives in the .outcome aspect and a
   pending (async) call in the .dispatch aspect (D5); vertex roots stay minimal.
+  SetApplicantProfile's qualification profile is split three ways: .profile and
+  .underwritingParties are SENSITIVE, DEK custodied on the package's own
+  underwritingRecord retention class rather than any identity; .applicationSignals
+  is the NON-sensitive derived half the three shipped lenses project.
   Also the lease-renewal chain: a create-only .tenancy aspect stamped by
   DecideLeaseApplication's first approve, the renewal vertex type + its five
   ops (OpenRenewal / SetRenewalTerms / VerifyGuarantor / SignRenewal /
@@ -36,6 +40,12 @@ declares:
   ddls:
     - canonicalName: leaseapp
       class: meta.ddl.vertexType
+    - canonicalName: applicantProfile
+      class: meta.ddl.aspectType
+    - canonicalName: underwritingParties
+      class: meta.ddl.aspectType
+    - canonicalName: applicationSignals
+      class: meta.ddl.aspectType
     - canonicalName: leaseServiceInstance
       class: meta.ddl.vertexType
     - canonicalName: leaseServiceReply

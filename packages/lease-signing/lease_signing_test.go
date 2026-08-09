@@ -26,6 +26,7 @@ import (
 	"github.com/operatinggraph/lattice/internal/processor"
 	"github.com/operatinggraph/lattice/internal/substrate"
 	"github.com/operatinggraph/lattice/internal/testutil"
+	"github.com/operatinggraph/lattice/internal/vault"
 	identitydomain "github.com/operatinggraph/lattice/packages/identity-domain"
 	leasesigning "github.com/operatinggraph/lattice/packages/lease-signing"
 	orchestrationbase "github.com/operatinggraph/lattice/packages/orchestration-base"
@@ -156,6 +157,50 @@ func readDoc(t *testing.T, ctx context.Context, conn *substrate.Conn, key string
 		t.Fatalf("unmarshal %s: %v", key, err)
 	}
 	return doc
+}
+
+// lsDecryptAspect opens a SENSITIVE aspect (.profile / .underwritingParties)
+// custodied on the package's underwritingRecord retention-class holder — never
+// the applicant's identity. Mirrors clinic-domain's clDecryptAspect: reads the
+// holder's .piiKey envelope + the aspect's ciphertext, then decrypts via the
+// shared TestVault (KEK-deterministic — a fresh TestVault(t) instance opens
+// ciphertext ANY other TestVault(t) instance wrote, since only the in-memory
+// DEK cache / shredded-set is per-instance, not the key material).
+func lsDecryptAspect(t *testing.T, ctx context.Context, conn *substrate.Conn, aspectKey string) map[string]any {
+	t.Helper()
+	holderKey := pkgmgr.RetentionClassKey("lease-signing", "underwritingRecord")
+	envEntry, err := conn.KVGet(ctx, testutil.HarnessCoreBucket, holderKey+".piiKey")
+	if err != nil {
+		t.Fatalf("KVGet %s: %v", holderKey+".piiKey", err)
+	}
+	var envDoc struct {
+		Data vault.Envelope `json:"data"`
+	}
+	if err := json.Unmarshal(envEntry.Value, &envDoc); err != nil {
+		t.Fatalf("unmarshal %s: %v", holderKey+".piiKey", err)
+	}
+
+	ctEntry, err := conn.KVGet(ctx, testutil.HarnessCoreBucket, aspectKey)
+	if err != nil {
+		t.Fatalf("KVGet %s: %v", aspectKey, err)
+	}
+	var ctDoc struct {
+		Data vault.Ciphertext `json:"data"`
+	}
+	if err := json.Unmarshal(ctEntry.Value, &ctDoc); err != nil {
+		t.Fatalf("unmarshal %s: %v", aspectKey, err)
+	}
+
+	v := testutil.TestVault(t)
+	plaintext, err := v.Decrypt(ctx, holderKey, envDoc.Data, ctDoc.Data)
+	if err != nil {
+		t.Fatalf("decrypt %s: %v", aspectKey, err)
+	}
+	var value map[string]any
+	if err := json.Unmarshal(plaintext, &value); err != nil {
+		t.Fatalf("unmarshal decrypted %s: %v", aspectKey, err)
+	}
+	return value
 }
 
 func keyExists(t *testing.T, ctx context.Context, conn *substrate.Conn, key string) bool {
@@ -1801,9 +1846,12 @@ func setProfile(t *testing.T, ctx context.Context, conn *substrate.Conn, cp *pro
 }
 
 // TestSetApplicantProfile drives the qualification-profile op through the real
-// Processor: the .profile aspect stores the raw fields + the op-derived signals,
-// incomeToRentMet is computed against the unit's listing rent, an unconditioned
-// re-submit overwrites, and a wrong unit is rejected (UnitMismatch).
+// Processor: it writes THREE aspects in one batch — .profile (the applicant's
+// own raw financials + the guarantor's relationship/income), .underwritingParties
+// (the guarantor's / co-applicant's OWN identifiers), and .applicationSignals
+// (the op-derived booleans/counts) — incomeToRentMet is computed against the
+// unit's listing rent, an unconditioned re-submit overwrites all three, and a
+// wrong unit is rejected (UnitMismatch).
 func TestSetApplicantProfile(t *testing.T) {
 	t.Parallel()
 	ctx, conn := setupLeaseEnv(t)
@@ -1827,66 +1875,85 @@ func TestSetApplicantProfile(t *testing.T) {
 		"guarantorRelationship": "parent",
 		"guarantorAnnualIncome": 120000,
 	}, processor.OutcomeAccepted)
-	pdata, _ := readDoc(t, ctx, conn, appKey+".profile")["data"].(map[string]any)
+	pdata := lsDecryptAspect(t, ctx, conn, appKey+".profile")
+	updata := lsDecryptAspect(t, ctx, conn, appKey+".underwritingParties")
+	sdata, _ := readDoc(t, ctx, conn, appKey+".applicationSignals")["data"].(map[string]any)
 	if got, _ := pdata["annualIncome"].(float64); got != 96000 {
 		t.Fatalf("profile.annualIncome (raw, stored) = %v, want 96000", pdata["annualIncome"])
 	}
 	if got, _ := pdata["employerName"].(string); got != "Acme Corp" {
 		t.Fatalf("profile.employerName = %q, want Acme Corp", got)
 	}
-	if got, _ := pdata["employmentVerified"].(bool); !got {
-		t.Fatalf("employed ⇒ employmentVerified=true, got %v", pdata["employmentVerified"])
+	if got, _ := sdata["employmentVerified"].(bool); !got {
+		t.Fatalf("employed ⇒ applicationSignals.employmentVerified=true, got %v", sdata["employmentVerified"])
 	}
-	if got, _ := pdata["referenceCount"].(float64); got != 2 {
-		t.Fatalf("referenceCount = %v, want 2", pdata["referenceCount"])
+	if got, _ := sdata["referenceCount"].(float64); got != 2 {
+		t.Fatalf("applicationSignals.referenceCount = %v, want 2", sdata["referenceCount"])
 	}
-	if got, _ := pdata["incomeToRentMet"].(bool); !got {
-		t.Fatalf("8000 ≥ 3×2000 ⇒ incomeToRentMet=true, got %v", pdata["incomeToRentMet"])
+	if got, _ := sdata["incomeToRentMet"].(bool); !got {
+		t.Fatalf("8000 ≥ 3×2000 ⇒ applicationSignals.incomeToRentMet=true, got %v", sdata["incomeToRentMet"])
 	}
-	if got, _ := pdata["hasGuarantor"].(bool); !got {
-		t.Fatalf("hasGuarantor=true expected, got %v", pdata["hasGuarantor"])
+	if got, _ := sdata["hasGuarantor"].(bool); !got {
+		t.Fatalf("applicationSignals.hasGuarantor=true expected, got %v", sdata["hasGuarantor"])
 	}
-	if got, _ := pdata["hasCoApplicant"].(bool); got {
-		t.Fatalf("hasCoApplicant defaults false, got %v", pdata["hasCoApplicant"])
+	if got, _ := sdata["hasCoApplicant"].(bool); got {
+		t.Fatalf("applicationSignals.hasCoApplicant defaults false, got %v", sdata["hasCoApplicant"])
 	}
-	// Guarantor detail is stored RAW (never projected), and the op derives
-	// guarantorIncomeToRentMet from the guarantor's income vs the same rent.
-	if got, _ := pdata["guarantorName"].(string); got != "Pat Guarantor" {
-		t.Fatalf("profile.guarantorName (raw, stored) = %q, want Pat Guarantor", got)
+	// The guarantor's OWN identifier is stored on .underwritingParties (never
+	// projected); guarantorRelationship/guarantorAnnualIncome stay on .profile
+	// (they describe the applicant's qualification story). The op derives
+	// guarantorIncomeToRentMet (on .applicationSignals) from the guarantor's
+	// income vs the same rent.
+	if got, _ := updata["guarantorName"].(string); got != "Pat Guarantor" {
+		t.Fatalf("underwritingParties.guarantorName = %q, want Pat Guarantor", got)
+	}
+	if got, _ := pdata["guarantorRelationship"].(string); got != "parent" {
+		t.Fatalf("profile.guarantorRelationship = %q, want parent", got)
 	}
 	if got, _ := pdata["guarantorAnnualIncome"].(float64); got != 120000 {
 		t.Fatalf("profile.guarantorAnnualIncome (raw, stored) = %v, want 120000", pdata["guarantorAnnualIncome"])
 	}
-	if got, _ := pdata["guarantorIncomeToRentMet"].(bool); !got {
-		t.Fatalf("120000/12 = 10000 ≥ 3×2000 ⇒ guarantorIncomeToRentMet=true, got %v", pdata["guarantorIncomeToRentMet"])
+	if got, _ := sdata["guarantorIncomeToRentMet"].(bool); !got {
+		t.Fatalf("120000/12 = 10000 ≥ 3×2000 ⇒ applicationSignals.guarantorIncomeToRentMet=true, got %v", sdata["guarantorIncomeToRentMet"])
+	}
+	// The co-applicant fields are structurally absent (no co-applicant on this
+	// submission), never written on underwritingParties.
+	if _, present := updata["coApplicantName"]; present {
+		t.Fatalf("no co-applicant ⇒ underwritingParties.coApplicantName absent, got %v", updata["coApplicantName"])
 	}
 
 	// Re-submit (unconditioned upsert): lower income, student, no employer →
-	// overwrites the whole aspect. 60000/12 = 5000 < 6000 → incomeToRentMet false.
+	// overwrites all three aspects. 60000/12 = 5000 < 6000 → incomeToRentMet false.
 	setProfile(t, ctx, conn, cp, cons, "prof2", appKey, unitKey, map[string]any{
 		"annualIncome":     60000,
 		"employmentStatus": "student",
 	}, processor.OutcomeAccepted)
-	pdata, _ = readDoc(t, ctx, conn, appKey+".profile")["data"].(map[string]any)
-	if got, _ := pdata["incomeToRentMet"].(bool); got {
-		t.Fatalf("5000 < 6000 ⇒ incomeToRentMet=false, got %v", pdata["incomeToRentMet"])
+	pdata = lsDecryptAspect(t, ctx, conn, appKey+".profile")
+	updata = lsDecryptAspect(t, ctx, conn, appKey+".underwritingParties")
+	sdata, _ = readDoc(t, ctx, conn, appKey+".applicationSignals")["data"].(map[string]any)
+	if got, _ := sdata["incomeToRentMet"].(bool); got {
+		t.Fatalf("5000 < 6000 ⇒ applicationSignals.incomeToRentMet=false, got %v", sdata["incomeToRentMet"])
 	}
-	if got, _ := pdata["employmentVerified"].(bool); got {
-		t.Fatalf("student ⇒ employmentVerified=false, got %v", pdata["employmentVerified"])
+	if got, _ := sdata["employmentVerified"].(bool); got {
+		t.Fatalf("student ⇒ applicationSignals.employmentVerified=false, got %v", sdata["employmentVerified"])
 	}
-	if _, present := pdata["employerName"]; present {
-		t.Fatalf("a re-submit without employerName must overwrite (clear) it, got %v", pdata["employerName"])
+	if got, _ := pdata["employerName"].(string); got != "" {
+		t.Fatalf("a re-submit without employerName must overwrite (clear) it to \"\" (STABLE shape), got %q", got)
 	}
-	if got, _ := pdata["referenceCount"].(float64); got != 0 {
-		t.Fatalf("no references ⇒ referenceCount=0, got %v", pdata["referenceCount"])
+	if got, _ := sdata["referenceCount"].(float64); got != 0 {
+		t.Fatalf("no references ⇒ applicationSignals.referenceCount=0, got %v", sdata["referenceCount"])
 	}
-	// The re-submit had no guarantor → the prior guarantor detail + derived signal
-	// are overwritten away (the unconditioned upsert replaces the whole aspect).
-	if _, present := pdata["guarantorName"]; present {
-		t.Fatalf("a re-submit without a guarantor must clear guarantorName, got %v", pdata["guarantorName"])
+	// The re-submit had no guarantor → the whole guarantor group is structurally
+	// absent from BOTH sensitive aspects, and the derived signal is dropped too
+	// (the unconditioned upsert replaces the whole aspect).
+	if _, present := updata["guarantorName"]; present {
+		t.Fatalf("a re-submit without a guarantor must clear underwritingParties.guarantorName, got %v", updata["guarantorName"])
 	}
-	if _, present := pdata["guarantorIncomeToRentMet"]; present {
-		t.Fatalf("no guarantor ⇒ guarantorIncomeToRentMet absent, got %v", pdata["guarantorIncomeToRentMet"])
+	if _, present := pdata["guarantorRelationship"]; present {
+		t.Fatalf("a re-submit without a guarantor must clear profile.guarantorRelationship, got %v", pdata["guarantorRelationship"])
+	}
+	if _, present := sdata["guarantorIncomeToRentMet"]; present {
+		t.Fatalf("no guarantor ⇒ applicationSignals.guarantorIncomeToRentMet absent, got %v", sdata["guarantorIncomeToRentMet"])
 	}
 
 	// A guarantor whose own income is below 3× rent → guarantorIncomeToRentMet=false
@@ -1897,10 +1964,16 @@ func TestSetApplicantProfile(t *testing.T) {
 		"hasGuarantor":          true,
 		"guarantorAnnualIncome": 50000,
 	}, processor.OutcomeAccepted)
-	pdata, _ = readDoc(t, ctx, conn, appKey+".profile")["data"].(map[string]any)
-	gv, present := pdata["guarantorIncomeToRentMet"].(bool)
+	sdata, _ = readDoc(t, ctx, conn, appKey+".applicationSignals")["data"].(map[string]any)
+	gv, present := sdata["guarantorIncomeToRentMet"].(bool)
 	if !present || gv {
-		t.Fatalf("50000/12 = 4166 < 6000 ⇒ guarantorIncomeToRentMet=false (present), got present=%v val=%v", present, pdata["guarantorIncomeToRentMet"])
+		t.Fatalf("50000/12 = 4166 < 6000 ⇒ applicationSignals.guarantorIncomeToRentMet=false (present), got present=%v val=%v", present, sdata["guarantorIncomeToRentMet"])
+	}
+	// hasGuarantor=true but no guarantorName supplied → underwritingParties still
+	// carries the key, STABLE-shape "" (never dropped).
+	updata = lsDecryptAspect(t, ctx, conn, appKey+".underwritingParties")
+	if got, present := updata["guarantorName"]; !present || got != "" {
+		t.Fatalf("hasGuarantor with no name ⇒ underwritingParties.guarantorName=\"\" (present), got present=%v val=%v", present, got)
 	}
 
 	// Wrong unit (alive, but not this application's appliesToUnit target) → reject.
@@ -1946,7 +2019,7 @@ func TestSetApplicantProfile_ConsumerSelfScope(t *testing.T) {
 
 	// The applicant profiles their OWN application → Accepted (.profile written).
 	setProfileAsConsumer(t, ctx, conn, cp, cons, "spcsSelf001", appKey, unitKey, applicant, profile(), processor.OutcomeAccepted)
-	pdata, _ := readDoc(t, ctx, conn, appKey+".profile")["data"].(map[string]any)
+	pdata := lsDecryptAspect(t, ctx, conn, appKey+".profile")
 	if got, _ := pdata["annualIncome"].(float64); got != 90000 {
 		t.Fatalf("self SetApplicantProfile should write annualIncome=90000, got %v", pdata["annualIncome"])
 	}

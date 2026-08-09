@@ -167,8 +167,9 @@ RETURN
 // leaseapp (the renews link is OPTIONAL only in cypher SHAPE — every live
 // renewal has exactly one by construction, OpenRenewal always creates it in
 // the same batch as the vertex), then fans out exactly as
-// leaseApplicationCompleteSpec does: applicationFor→identity(→.profile,
-// →providedTo service instances) and appliesToUnit→unit(<-manages-landlord).
+// leaseApplicationCompleteSpec does: the leaseapp's OWN .applicationSignals
+// (hasGuarantor), applicationFor→identity(→providedTo service instances), and
+// appliesToUnit→unit(<-manages-landlord).
 //
 //   - tenant / landlord are the deterministic MIN-key picks across their
 //     respective (single tenant; possibly-multi landlord) sets — landlord's
@@ -176,7 +177,19 @@ RETURN
 //     legal, and an engine-arbitrary pick would break one-row-per-anchor
 //     determinism, so `min(landlord.key)` is the canonical manager, v1
 //     semantic.
-//   - hasGuarantor is the applicant's raw .profile flag (no freshness).
+//   - hasGuarantor is the application's own .applicationSignals derived flag
+//     (no freshness) — read off `app` (the leaseapp this renewal renews), NOT
+//     off the identity: hasGuarantor is written by SetApplicantProfile onto
+//     the LEASEAPP, never the applicant. Projected as
+//     (app.applicationSignals.data.hasGuarantor = True) rather than the raw
+//     field: the rule engine's equality treats a null operand as FALSE, never
+//     NULL, so a leaseapp with no .applicationSignals at all (OpenRenewal
+//     requires only .tenancy, not a submitted profile) evaluates
+//     (null = True) = False and hasGuarantor projects a REAL false — never
+//     null. That matters below: the goal's anyOf disjunct compares hasGuarantor
+//     to False, and a raw-null column would make that comparison false too
+//     (null = False is ALSO False, not vacuously true), permanently stranding
+//     missing_renewalComplete regardless of bgcheck/terms/signature.
 //   - bgcheckValidUntil is the freshest COMPLETED bgcheck's validUntil,
 //     null-when-stale (the SAME freshness posture leaseApplicationCompleteSpec
 //     uses on its own providedTo fan, re-derived here since this lens walks a
@@ -209,7 +222,7 @@ WITH
   (app.key <> null AND app.isDeleted <> True) AS leaseappAlive,
   id.key                                  AS tenant,
   min(DISTINCT landlord.key)              AS landlordMin,
-  id.profile.data.hasGuarantor            AS hasGuarantor,
+  (app.applicationSignals.data.hasGuarantor = True) AS hasGuarantor,
   rn.guarantorVerification.data.verifiedAt AS guarantorVerifiedAt,
   rn.terms.data.setAt                     AS termsSetAt,
   rn.terms.data.termMonths                AS termsTermMonths,
@@ -266,9 +279,18 @@ RETURN
 //     landlords' NanoIDs into the anchor SET instead. A min-key-only anchor
 //     set would silently deny read access to a legitimate co-manager who
 //     isn't the canonical one — caught in review, not by accident.
-//   - hasGuarantor is the tenant's raw .profile flag, read here (not bridged
-//     from renewalComplete) so this lens has no runtime dependency on the
-//     Weaver-internal target.
+//   - hasGuarantor is the application's own .applicationSignals derived flag,
+//     read off `app` (the leaseapp this renewal renews) here — not bridged
+//     from renewalComplete, so this lens has no runtime dependency on the
+//     Weaver-internal target, and not off `tenant`, since SetApplicantProfile
+//     writes hasGuarantor onto the LEASEAPP, never the applicant identity.
+//     Projected RAW here, deliberately UNLIKE renewalCompleteSpec's coalesced
+//     (hasGuarantor = True) column: this lens feeds FE display, where null
+//     means "no profile submitted yet" (a state worth distinguishing from an
+//     explicit false) and TestRenewalsRead_* pins that reading; renewalComplete
+//     coalesces null to a real false because ITS null would otherwise strand
+//     the goal's anyOf disjunct (see that lens's own hasGuarantor comment) — a
+//     planner-engine correctness need this FE-display lens does not share.
 //   - authz_anchors = tenant + EVERY managing landlord's bare NanoID (§6.14's
 //     set is exactly this: any-match over an arbitrary-size set, not a pair).
 //     Both the tenant and every co-manager may read their own renewal row; a
@@ -291,7 +313,7 @@ WITH
   min(DISTINCT landlord.key)               AS landlordKey,
   collect(DISTINCT nanoIdFromKey(landlord.key)) AS landlordAnchors,
   u.address.data.line1                     AS unitAddress,
-  tenant.profile.data.hasGuarantor         AS hasGuarantor,
+  app.applicationSignals.data.hasGuarantor AS hasGuarantor,
   rn.terms.data.rentAmount                 AS rentAmount,
   rn.terms.data.termMonths                 AS termMonths,
   rn.terms.data.setAt                      AS termsSetAt,

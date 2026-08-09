@@ -212,6 +212,9 @@ jobs:
       - name: Install + verify augur package (co-installs orchestration-base)
         run: make verify-package-augur
 
+      - name: Install + verify lease-signing package (co-installs rbac/identity/orchestration-base/service-domain)
+        run: make verify-package-lease-signing
+
       - name: Run Hello Lattice integration suite (Phase 1 Gate 5)
         # Runs the six-milestone Hello Lattice vertical slice:
         # DDL definition, book creation, Lens projection, Postgres query,
