@@ -1282,10 +1282,10 @@ things confirmed sound are recorded there.
 **FIRE 2 IS IN FLIGHT. Item 1 (Clinic) Inc A is merged (`ae9c6411`); the live checkpoint is §26.4.**
 Fire 1 built the mechanism and deliberately shipped no user of it (§13.7). Clinic `.encounter` is now a
 retained record under a `clinicalRecord` holder; lease-signing's income `.profile` (Fire 2 item 2) is still
-plaintext, and `patientDemographics.fullName` still survives its subject's erasure (Inc C). Worktree:
-`/Users/andrewsolgan/Documents/GitHub/lattice-wt-clinic-retention` (branch `fire/clinic-retention-class`) —
-**landing shape: each increment lands on `main`**, which is safe because nothing reads `.encounter` until
-Inc B adds the first lens, so no boundary leaves a half-wired read path.
+plaintext, and `patientDemographics.fullName` still survives its subject's erasure (Inc C).
+**Landing shape: each increment lands on `main`** — safe because nothing reads `.encounter` until Inc B adds
+the first lens, so no boundary leaves a half-wired read path. There is therefore **no persistent worktree to
+resume into**: Inc A's is removed, and the next fire opens a fresh one from `main`.
 
 **Done — item 1 (2026-08-07).** Custody vocabulary + write path. `CustodySpec`/`RetentionClassSpec`, the
 `retentionclass` holder + `.retentionPolicy`, `RetentionClassID`/`RetentionClassKey`, six install
@@ -2867,8 +2867,8 @@ or out of any actor's visibility.
 
 ### 26.4 Checkpoint — what remains of item 1
 
-Worktree `/Users/andrewsolgan/Documents/GitHub/lattice-wt-clinic-retention`, branch
-`fire/clinic-retention-class`. Increments land on `main` individually (§14).
+Increments land on `main` individually (§14), so a resuming fire opens a **fresh** worktree from `main`
+rather than reattaching to one — Inc A's is removed and its branch deleted.
 
 - **Inc B — `clinicEncountersRead`.** A protected Postgres Secure Lens, provider-anchored, projecting
   `summary` / `assessment` / `plan` via `SecureColumns` with `HolderTypes: ["retentionclass"]`. Mirror
