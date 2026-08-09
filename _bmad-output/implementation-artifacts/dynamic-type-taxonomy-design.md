@@ -1175,13 +1175,8 @@ pinned by a test.
 **Landed on `main`; no worktree is held.** The landing invariant held: nothing declares an abstract type, so both
 gates and the taxonomy path stay unreachable until Fire B. Increment 2 starts from a fresh worktree.
 
-**Next — increment 2, the `*` sigil.** This is the decision the increment opens with, not a detail. The grammar
-is `internal/refractor/ruleengine/full/cypher/Cypher.g4`, ANTLR-generated with the output **committed** and no
-`go:generate`, Makefile target, or CI step that regenerates it. `oC_LabelName` → `oC_SymbolicName` admits Unicode
-`ID_Start`/`ID_Continue` + `Pc` and cannot lex `*`, so `(l:location*)` is a parse error *before* the visitor runs
-— post-processing `ln.GetText()` (`visitor.go:239-256`, the sole `.Label` assignment) cannot reach a token the
-lexer never emits. The host has `antlr` **4.13.2**; `go.mod` pins the runtime at **4.13.1**. So increment 2 must
-first settle: regenerate a 570 KB parser across that version skew, or pin the generator to 4.13.1.
+**Increment 2 shipped — the generator-skew decision this section framed as open is settled in §17.3** (regenerate
+with 4.13.2; the output is byte-identical to 4.13.1's, and no v4.13.2 Go runtime exists to move the pin to).
 
 **Carried into Fire B — the class gate is the migration hazard, and it is not the one §14 names.**
 `checkAbstractNoLiveInstances` will *not* block declaring `location` abstract, because location-domain mints
@@ -1216,3 +1211,96 @@ one, which is the weak-consumer shape a deferred tail is supposed to refuse.
   confirmed no existing package declares either reserved name. **This does not implement the contract's own
   enforcement point:** §1.2 says the Processor rejects at meta-DDL commit time, and a raw `core-operations`
   submit still bypasses the pkgmgr check.
+
+### 17.3 Fire A · Increment 2 — the `*` sigil (2026-08-09, `887073d9`)
+
+**Scope sentence (from §14 Fire A, build order item 2, verbatim):** *"The `*` sigil — a real parser extension
+(amendment A2, which this design predates). A label is `OC_LabelName` in the openCypher grammar, so accepting a
+trailing `*` means extending the grammar or post-processing the label text. Size it as grammar work, not a string
+tweak. `*` is the reflexive-transitive closure. `:unit` keeps meaning exactly `vtx.unit.<id>`."*
+
+**Scope-diff gate: narrow-only, no substitution.** Items 3–6 (resolution + expansion, the meta-watch trigger, the
+validation gate, observability) are not in this increment. No label **consumer** changed — `labels.go`,
+`executor.go`, `hopindex.go`, `anchor_delete.go` are untouched, confirmed by the reviewer's diffstat pass.
+
+**The grammar decision, and why §14's framing of it was wrong.** §14 item 2 assumed the extension lands on
+`oC_LabelName`. It must not: `oC_NodeLabels` is reached from `oC_PropertyOrLabelsExpression`
+(`Cypher.g4:337`) as well as from `oC_NodePattern`, and in expression position a trailing `*` is the
+multiplication operator — so extending `oC_NodeLabel` takes `n:Foo*2` away from arithmetic. The sigil is confined
+to `oC_NodePattern` instead (`Cypher.g4:230-237`), a one-production change. Inside a node pattern the only tokens
+that may follow a label list are `SP`, `{` and `)`, so the optional `'*'` competes with nothing.
+
+**The generator-skew decision (§17.2's open question), settled by measurement.** ANTLR **4.13.2** regenerates
+this grammar **byte-identically** to the committed 4.13.1 output apart from the header comment line — verified on
+the pristine pre-change grammar, and independently re-verified by the adversarial reviewer. So the skew is not a
+risk to price: regenerate with 4.13.2 and leave the runtime pin alone. The pin *cannot* move regardless — **there
+is no v4.13.2 release of the Go runtime module** (`go list -m -versions` offers v4.12.0, v4.13.0, v4.13.1). What
+makes the mismatch safe is that the Go runtime performs no tool-version handshake: `BaseRecognizer.checkVersion`
+is unexported and never called from generated Go, and `ATNDeserializer.checkVersion` validates the serialized-ATN
+format number, not the tool version. The byte-identity is a **per-grammar** result, not a general claim about the
+two generator versions — re-verify if the generator moves again.
+
+**Landing shape — inertness, again, and stronger than increment 1's.** The net behaviour change is that a
+sigil-bearing query moves from *syntax* error to *semantic* error. `(l:location*)` parses, the visitor records
+`NodePattern.LabelExpand`, and then `Parse` refuses it, because `internal/refractor/taxonomy` does not exist and a
+sigil accepted-but-treated-as-a-bare-label would match `vtx.location.*` — for an abstract type, **nothing at
+all** — turning a subtype union into a silently empty projection. Item 3 replaces the refusal with resolution.
+
+**Verified touch-list.** `Cypher.g4:230-237` (the production) · the four generated `cypher_*.go` ·
+`ast.go:86-93` (`NodePattern.LabelExpand`) · `visitor.go:244-281` (sigil detection + both refusals) ·
+`cypher/generate.go`, `cypher/grammar_pin_test.go`, `label_sigil_test.go` (new) · `Makefile` (`regen-cypher`) ·
+`.gitignore` · `cypher/README.md`.
+
+**Deviations from §14, and why.**
+
+1. **The sigil sits on `oC_NodePattern`, not `oC_NodeLabel`** — the expression-grammar collision above. §14 item
+   2's sentence naming `OC_LabelName` as the extension point is superseded by this note.
+2. **A sigil on a multi-label pattern is refused** (`(n:A:B*)`). The visitor binds only `labels[0]`, so which
+   label the sigil expands would be a guess. This establishes the one-label-per-sigil contract item 5 inherits.
+3. **The sigil binds tight** — `(l:location *)` with an intervening space is a syntax error, because `'*'`
+   precedes `SP?` in the production. Asymmetric with openCypher's otherwise-liberal `SP` placement; fail-closed
+   and pinned by a test.
+
+**Two residuals fixed in-fire rather than filed, both bounded and both in files this increment already touched.**
+
+- **The grammar had no reproduction recipe.** 570 KB of generated Go was committed with no `go:generate`, no
+  Makefile target and no CI step — increment 1 flagged this as the thing item 2 opens with. `make regen-cypher`
+  plus a `go:generate` directive supply one, and the four side artifacts ANTLR emits are gitignored so either
+  invocation leaves the tree clean.
+- **Nothing kept `Cypher.g4` in sync with the parser beside it.** Pre-existing, but this increment changes its
+  weight: the grammar stopped being a frozen upstream copy and became a live extension point. A stale parser is
+  invisible — the committed one is internally self-consistent, so it builds, vets and passes the whole suite
+  while the grammar file quietly describes a parser that is not shipping. Regeneration needs Java + the `antlr`
+  CLI, which CI does not have, so it cannot be a CI gate; `TestGrammarMatchesGeneratedParser` compares the
+  grammar's digest instead, which needs neither.
+
+**Adversarial pass (cold reviewer, opus) — no blocking and no should-fix findings.** Two claims were refuted as
+*stated* and corrected in this commit's predecessor: the visitor's soundness comment enumerated `'('` and `')'` as
+the node pattern's only other terminal children, omitting `SP` (the conclusion held — `SP` and `'*'` differ in
+token type — but a soundness claim must be true of the code it cites); and the README offered `go generate` as
+equivalent to `make regen-cypher`, which it is not. The confinement claim was proven rather than argued: a
+differential harness over **367 query literals extracted from the shipping corpus** found **zero** parse
+differences against the previous parser, and of 70 adversarial queries the only 10 that differ are sigil-bearing
+inputs that were syntax errors before. Refusal completeness was proven too — `newASTVisitor()` has exactly one
+caller (`full.go:92`, inside `Parse`), and 12 sigil placements (second pattern, `WHERE`, comprehension,
+`exists(...)`, post-`WITH` `MATCH`, `CASE WHEN`, `OR`, anonymous node) all refuse.
+
+**One live-corpus fact worth carrying:** the only `*` in the shipping package corpus is the variable-length
+relationship quantifier (`[:containedIn*0..7]`, `[:containedIn*1..]`), in ~12 lenses including
+`service-location`'s `capabilityServiceAccess` — this design's own Fire B consumer. Different grammar position,
+untouched, and pinned by a regression test.
+
+### 17.4 Checkpoint — Fire A, after increment 2
+
+**Landed on `main` (`887073d9`); no worktree is held.** The inertness invariant holds: a sigil is refused at
+parse, nothing declares an abstract type, and no label consumer has changed. Increment 3 starts fresh.
+
+**Next — increment 3, resolution + expansion (§14 Fire A item 3).** Build `internal/refractor/taxonomy` with
+`armed`; `full.WithLabelExpansion` returning a copy (§4.3); expansion in `useFullEngineBranches` under §4.2's
+exhaustiveness rule; the **four** equality sites (§5.1, anchor retraction included);
+`ruleState.seedAnchorLabels` as a set; resolver-time cycle/depth detection as the authority. The seam this
+increment leaves is exact: `visitor.go:273-281` is the refusal to replace, and `NodePattern.LabelExpand` is the
+signal already carried through the AST. The resolver ships **disarmed**, so §4.2 forces `exhaustive = false`
+(correct-but-slower) until item 4's trigger lands.
+
+**Still carried into Fire B:** the class-gate migration hazard in §17.2 is unchanged by this increment.
