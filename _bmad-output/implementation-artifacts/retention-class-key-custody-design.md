@@ -929,6 +929,13 @@ sharing a sensitive aspect's `data` becomes unreadable to every plain lens.**
 aspect, census every lens that projects any field of it, and split until the sensitive aspect's `data`
 contains nothing a plain lens reads.
 
+**Amended 2026-08-08 (Fire 2 item 1): the census is repo-wide, not package-wide.** The clinic census above
+listed three lenses — all three in `clinic-domain` — and missed a fourth consumer in a *different* package:
+`clinic-reminders`' `followUpRemindersSpec` (`followups.go:274-285`) reads
+`a.encounter.data.followUpRequested` / `.followUpDate` in five places, including the `freshUntil` CASE that
+arms a Weaver `@at` timer and both gap predicates. An aspect's declaring package does not own its readers.
+Census **every package**, and every WHERE / CASE / predicate, not just RETURN clauses.
+
 ### 9.2 Correction: lease-signing's `.profile` has no aspect-type DDL at all
 
 The demand as filed implies flipping a flag. It cannot: `.profile` is written by the **`leaseapp`
@@ -2626,3 +2633,157 @@ worth fixing, and one of them is the kind this project cares about most:
   for**") — the CLAUDE.md rule, caught on the fire that was correcting two others for it.
 - The prefetch test nested a 5s poll inside the shared 10s connection context, which on a loaded host fails
   on `ctx` instead of reporting the counts. The poll owns its deadline now.
+
+---
+
+## 25. Fire 2 item 1 (Clinic) fire brief (build note, 2026-08-08)
+
+Fire 1 is complete (§14). This is the **first consumer** of the custody plane: clinic's `.encounter` PHI
+stops being plaintext in Core KV and becomes a retained record custodied on a `clinicalRecord` key holder.
+
+### 25.1 Scope sentence (verbatim, §11 Fire 2 item 1)
+
+> **Clinic.** Split `.encounter` into the sensitive PHI aspect (`Sensitive: true`,
+> `custody.kind: retentionClass`, class `clinicalRecord`) and a non-sensitive operational sibling;
+> re-point the three shipped lenses at the sibling (§9.1); declare the retention class;
+> `clinicEncountersRead` protected Secure Lens with `HolderTypes: ["retentionclass"]`; the §6.4 obligation
+> written into the class description. **Move `patientDemographics.fullName` onto the identity** (F3(b)) —
+> without it §6.4's acceptance criterion is unmet, since the patient's name would survive their erasure in
+> plaintext. **Plus the FE surface** that renders the note to the treating provider, absorbed from the
+> struck verticals row.
+
+### 25.2 Scope-diff gate — one correction to the ratified scope, narrowing nothing
+
+**The scope sentence says "the three shipped lenses". There are FOUR consumer sites, across TWO packages.**
+`packages/clinic-reminders/followups.go:274-285` (`followUpRemindersSpec`) reads
+`a.encounter.data.followUpRequested` and `a.encounter.data.followUpDate` in five places — a RETURN pair, a
+`freshUntil` CASE, and both the `missing_followup_reminder` and `violating` predicates. It is a *different
+package* from the three clinic-domain lenses §9.1 censused. Leaving it un-re-pointed would silently disarm
+every follow-up reminder (the predicates would compare against nulls), so it is in scope by the §9.1 rule
+itself: *"before setting `Sensitive: true` on an existing aspect, census every lens that projects any field
+of it."* The census was one package too narrow. Scope widens by one file; nothing is substituted or dropped.
+
+### 25.3 Verified touch-list (every anchor re-checked live at `9fa06e10`)
+
+**packages/clinic-domain**
+- `ddls.go:921-954` — `appointmentEncounter` aspectType DDL. Today `Sensitive` unset, `PermittedCommands:
+  ["RecordEncounter"]`, `InputSchema` carrying all six fields, `FieldDescription` for all six, one Example.
+- `ddls.go:2824-2879` — `RecordEncounter` inside `patientDDLScript`'s sibling appointment vertexType script.
+  Builds one `enc` map (`:2851-2871`) and upserts it at `:2875`:
+  `make_aspect_upsert(appt_key, "encounter", "appointmentEncounter", enc)`.
+- `lenses.go:476-498` — `clinicAppointmentsSpec` (unprotected NATS-KV): `a.encounter.data.documentedAt`,
+  `.followUpRequested`, `.followUpDate`.
+- `lenses.go:693-719` — `clinicAppointmentsReadSpec` (protected PG, patient-anchored): same three, aliased
+  `documented_at` / `follow_up_requested` / `follow_up_date`.
+- `lenses.go:728-753` — `providerAppointmentsReadSpec` (protected PG, provider-anchored): same three.
+- `lenses.go:169-197` / `:222-250` — the two protected lens Go literals whose `Columns` carry
+  `documented_at` / `follow_up_requested` / `follow_up_date`.
+- `package.go:120-131` — `pkgmgr.Definition` literal. Sets Name/Depends/Version/Description/DDLs/Lenses/
+  Permissions/WeaverTargets/OpMetas. **No `RetentionClasses` field today** (nil).
+- `manifest.yaml:2` — version `0.28.19`.
+
+**packages/clinic-reminders**
+- `followups.go:274-285` — `followUpRemindersSpec`, five `a.encounter.data.*` references (see §25.2).
+- `manifest.yaml` — version bump owed alongside.
+
+**Platform API (shipped by Fire 1; re-verified, do not re-derive)**
+- `internal/pkgmgr/definition.go:168` — `Definition.RetentionClasses []RetentionClassSpec`.
+- `internal/pkgmgr/definition.go:783` / `:791` — `DDLSpec.Sensitive` / `DDLSpec.Custody`.
+- `internal/pkgmgr/definition.go:836,840,845` — `CustodyKindRetentionClass = "retentionClass"`,
+  `RetentionClassVertexType = "retentionclass"`, `RetentionPolicyEraseOnExpiry = "eraseOnExpiry"`.
+- `internal/pkgmgr/definition.go:853-886` — `CustodySpec` / `RetentionClassSpec`.
+- `internal/pkgmgr/custodyscope.go` — the install validations. **Rule 5 is NOT an availability gate**: it
+  rejects `Kind: identity` that also names a class. `retentionClass` custody is installable end to end.
+- `internal/processor/step6_validate.go:197-244` — the conditional anchoring rule. A `retentionClass`-
+  custodied sensitive aspect may anchor on a NON-identity vertex; an undeclared-custody one may not.
+- `internal/refractor/lens/corekv_source.go:839-906` — `validateSecureColumns`: protected-only, no
+  grantTable, plain projection only, column must be declared, not an `IntoKey` column, no reserved names
+  (`authz_anchors` / `projection_seq` / `is_deleted` / `deleted_at`), `HolderTypes` non-empty and each a
+  Contract #1 type segment.
+
+**The platform's own fixtures already pin this exact key shape** — `internal/processor/custody_test.go:113`
+uses `vtx.appointment.<id>.encounter` as *the* retention-class positive vector, and
+`internal/pkgmgr/custodyscope_test.go:237` uses `clinicalRecord` + `P7Y`. This fire makes the shipped
+fixture real.
+
+### 25.4 Precedents to mirror
+
+- **Secure column on a protected lens:** `packages/clinic-domain/lenses.go:296-315` — `clinicPatientsRead`
+  already projects `id.email.data AS email` / `id.phone.data AS phone` with
+  `SecureColumns: [{Column: "email", HolderTypes: ["identity"], Field: "value"}, …]`. The cypher projects
+  the *whole aspect `data` map* (the ciphertext envelope) and `Field` names the key inside the decrypted
+  plaintext. A three-field PHI aspect therefore aliases `a.encounter.data` three times with three `Field`s.
+  Second precedent: `packages/loftspace-domain/lenses.go:67-84`.
+- **Provider-anchored protected lens:** `providerAppointmentsRead` (`lenses.go:222-250` +
+  `:728-753`) — REQUIRED `withProvider` anchor walk, `authz_anchors = [nanoIdFromKey(pr.key)]`, and the
+  existing `clinicProviderReadGrants` producer already grants it. `clinicEncountersRead` reuses that anchor
+  and that grant producer verbatim; no new grant producer is needed.
+- **Declaration-only aspect DDL:** `aspectDeclarationOnlyScript`, used by `appointmentEncounter` itself.
+
+### 25.5 Increment order + green checks
+
+**Inc A — the split + the custody declaration.**
+`.encounter` KEEPS its localName and class and becomes the SENSITIVE half (`Sensitive: true`,
+`Custody{Kind: retentionClass, RetentionClass: "clinicalRecord"}`), `data = {summary, assessment?, plan?}`.
+A NEW `.documentation` aspect (class `appointmentDocumentation`, non-sensitive) takes
+`{documentedAt, followUpRequested, followUpDate?}`. `RecordEncounter` writes both. All four consumer sites
+re-point their operational reads to `.documentation`. `clinic-domain` declares the `clinicalRecord`
+retention class with the §6.4 obligation in its description. Both package versions bump.
+*Green:* `go test ./packages/clinic-domain/... ./packages/clinic-reminders/... ./internal/pkgmgr/...`.
+
+**Inc B — `clinicEncountersRead`.** A protected Postgres Secure Lens, provider-anchored, projecting
+`summary` / `assessment` / `plan` through `SecureColumns` with `HolderTypes: ["retentionclass"]`.
+*Green:* `go test ./packages/clinic-domain/...`, `make verify-package-clinic` if it exists, plus the
+lens-parse path.
+
+**Inc C — `patientDemographics.fullName` → the identity** (F3(b)). Not in this fire; see §25.8.
+
+**Inc D — the FE surface** rendering the note to the treating provider. Not in this fire; see §25.8.
+
+*Whole-fire gates:* `go build ./...`, `make vet`, `golangci-lint run ./...`,
+`STRICT=1 go run ./scripts/lint-conventions.go`, `STRICT=1 go run ./scripts/lint-board.go`,
+`go run ./scripts/lint-package-version.go`.
+
+### 25.6 In-scope gotchas
+
+1. **`.encounter` keeps the name; the SIBLING is new.** The §6.4 acceptance table names
+   `vtx.appointment.<A>.encounter` as the *PHI, custody `retentionClass`* row, and three shipped platform
+   test fixtures pin that key. Inverting it (operational keeps `.encounter`) would falsify all of them.
+2. **`followUpDate` is load-bearing for a Weaver temporal lane.** `followUpRemindersSpec`'s `freshUntil`
+   arms an `@at` timer at it. Re-pointing must preserve the null-safety of every one of the five
+   references, including inside the `CASE` and both boolean predicates.
+3. **`documentedAt` is the "visit documented" presence signal** the FE renders (`app.js:3573-3585`,
+   `encounterSummary`). It moves to `.documentation`; the FE reads it from the read model, not the aspect,
+   so no FE change is owed in Inc A — the column names are unchanged.
+4. **Pre-split corpus.** Existing `.encounter` rows on a running stack hold all six fields *plaintext*
+   under a now-sensitive DDL. Their operational fields project null (the `.documentation` aspect does not
+   exist for them) until re-documented, and the new secure lens's per-row failure path (Fire 1 item 3b-ii)
+   projects null + a privacy-tier alarm rather than wedging. §11 budgets "one full-stack reset" for exactly
+   this; a reset is Andrew's to run and is NOT this fire's to force on a shared stack.
+5. **The op writes two aspects in one batch.** Step 6 validates per mutation and step 6.5 encrypts only the
+   sensitive one; the non-sensitive sibling passes through untouched.
+6. **`clinicalRecord`'s DEK is minted once per batch, on the holder** — never on the appointment
+   (`custody_test.go`'s two assertions). Nothing in this fire may mint a key on an anchor.
+
+### 25.7 Non-goals (the drift fence)
+
+Lease-signing (Fire 2 item 2). Any change to the erasure plane, the shred workers, or `ShredIdentityKey`.
+Widening the egress path to retained refs (deferred tail (a)). Period bucketing (tail (b)). A purpose-gated
+retained reveal (tail (c)). Any change to the three grant producers or to RLS.
+
+### 25.8 Adjacent finds — filed now, not carried
+
+- **`clinic-reminders` was outside §9.1's census** (§25.2). Recorded here rather than filed, because this
+  fire fixes it. The *generalized* lesson — a sensitivity flip must census every package, not every lens in
+  the declaring package — is amended into §9.1 by this commit.
+- **Inc C and Inc D remain open** and are what keeps item 1 from closing: without Inc C the §6.4 acceptance
+  criterion is unmet for clinic (the patient's `fullName` survives their erasure in plaintext on
+  `vtx.patient.<id>.demographics`). Inc C carries two live obstacles the ratified text does not mention,
+  both verified at `9fa06e10` and both real design work rather than a mechanical move:
+  (i) the `identifiedBy` patient→identity link is **OPTIONAL** (`ddls.go:1087-1092` — wired only when
+  `CreatePatient` is given an `identityKey`), so a patient with no identity would have no name at all, and
+  `clinicPatientsReadSpec`'s ghost-vertex filter `WHERE p.demographics.data.fullName <> null`
+  (`lenses.go:658-659`) would drop every such patient from the roster; and (ii) **no operation writes
+  `.name` on an existing identity** — `identity-domain` writes it only at `CreateUnclaimedIdentity`
+  (`ddls.go:1176-1178`), so `CreatePatient`'s `fullName` has nowhere to land for an already-provisioned
+  identity. These are named in the checkpoint as Inc C's first two questions.
