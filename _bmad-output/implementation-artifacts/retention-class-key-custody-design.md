@@ -2894,3 +2894,28 @@ Worktree `/Users/andrewsolgan/Documents/GitHub/lattice-wt-clinic-retention`, bra
   `clinicPatients` loses the name outright and its consumers must be censused before the move, not after.
 - **Inc D — the FE surface** rendering the decrypted note to the treating provider (`cmd/clinic-app/web`,
   the existing encounter modal at `index.html:437-469` writes but cannot read back). Depends on Inc B.
+
+### 26.5 Proven on the running stack (2026-08-08, after `make refresh-clinic`)
+
+Package tests prove the write path in process; this is the same claim against the live stack, because a
+declaration that installs is not the same as a record that encrypts.
+
+`make verify-package-clinic-domain` — 370 assertions, all passing, including the new chain: the
+`clinicalRecord` holder vertex exists (`vtx.retentionclass.7hRMjLYwg6WSpaXj7hRM`), its `.retentionPolicy`
+declares `clinicalRecord` / `eraseOnExpiry`, `appointmentEncounter`'s `.sensitive` is `true`, and its
+`.custody` names that holder.
+
+A real `RecordEncounter` submitted through `ops.default` with a sentinel PHI string committed three keys:
+`.encounter`, `.documentation`, and **`vtx.retentionclass.<H>.piiKey`** — the DEK minted on the holder.
+Reading them back:
+
+- `.encounter.data` = `{ct, nonce, keyId}` with `keyId = vtx.retentionclass.7hRMjLYwg6WSpaXj7hRM`. The
+  ciphertext names the retention class, not the patient's identity, which is the entire point.
+- `.documentation.data` = `{documentedAt, followUpRequested, followUpDate}` in plain text, and nothing else.
+- **No `.piiKey` on the appointment and none on the patient** — custody did not fall back to the anchor or
+  to an identity.
+- The sentinel string appears in no key under either the appointment or the patient subtree.
+- `read_clinic_appointments` projects `documented_at` / `follow_up_requested` / `follow_up_date` for that
+  appointment, so the re-point resolves through Refractor against the real `.documentation` aspect.
+
+The stack carries one proof appointment (patient "Retention Proof") — it held no clinic data before this.
