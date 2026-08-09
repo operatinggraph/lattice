@@ -34,8 +34,14 @@ type protectedVisitSeriesRow struct {
 // injects the actor scope from the txn-local lattice.actor_id session
 // variable. Rows sort by next_due_at (then entity_key) so the due-soonest
 // floats up, mirroring computeVisitSeries' sort on the unprotected side.
+//
+// patient_name (SECURE, decrypted off the patient's identifiedBy identity)
+// and unlinked_patient_name (plaintext, walk-in only) are disjoint by
+// construction, so COALESCEing them together yields whichever one the
+// patient actually has — NULL only for a shredded identified patient, which
+// PatientName's pointer type already renders as "no name" on the FE.
 const selectMyVisitSeriesSQL = `
-SELECT entity_key, patient_key, patient_name, provider_key, provider_name, provider_specialty,
+SELECT entity_key, patient_key, COALESCE(patient_name, unlinked_patient_name), provider_key, provider_name, provider_specialty,
        COALESCE(interval_days, 0), COALESCE(next_due_at, ''), COALESCE(occurrence_count, 0),
        COALESCE(series_status, 'ended')
 FROM read_visit_series

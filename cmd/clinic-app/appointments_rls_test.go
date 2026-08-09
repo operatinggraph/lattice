@@ -123,6 +123,7 @@ func TestReadBoundary_RLS_Enforcement(t *testing.T) {
 		{Name: "status_note", Type: "text"},
 		{Name: "patient_key", Type: "text"},
 		{Name: "patient_name", Type: "text"},
+		{Name: "unlinked_patient_name", Type: "text"},
 		{Name: "provider_key", Type: "text"},
 		{Name: "provider_name", Type: "text"},
 		{Name: "provider_specialty", Type: "text"},

@@ -25,7 +25,7 @@ func (f *remFixture) seedVisitSeries(t *testing.T, seriesName, patientName, prov
 	f.mkVisitSeries(t, seriesName, 30, "", "2026-08-01T09:00:00Z", 2, nil)
 	f.vtx(t, patientName, "patient")
 	f.vtx(t, providerName, "provider")
-	f.aspect(t, patientName, "demographics", "patientDemographics", map[string]any{"fullName": "Alice Rivera"})
+	f.aspect(t, patientName, "demographics", "patientDemographics", map[string]any{"registeredAt": "2026-06-01T09:00:00Z", "fullName": "Alice Rivera"})
 	f.aspect(t, providerName, "profile", "providerProfile", map[string]any{"fullName": "Dr. Sam Okafor", "specialty": "Cardiology"})
 	f.edge(t, "forPatient", seriesName, patientName)
 	f.edge(t, "withProvider", seriesName, providerName)
@@ -55,7 +55,10 @@ func TestVisitSeriesRead_ProjectsPatientSelfAnchor(t *testing.T) {
 	require.Equal(t, f.ids["series"], v["series_id"], "series_id is the series' bare NanoID (the IntoKey)")
 	require.Equal(t, seriesKey, v["entity_key"])
 	require.Equal(t, patientKey, v["patient_key"])
-	require.Equal(t, "Alice Rivera", v["patient_name"])
+	// No identity on this fixture's patient, so the erasable column is null and
+	// the name sits in the plaintext fallback.
+	require.Nil(t, v["patient_name"])
+	require.Equal(t, "Alice Rivera", v["unlinked_patient_name"])
 	require.Equal(t, providerKey, v["provider_key"])
 	require.Equal(t, "Dr. Sam Okafor", v["provider_name"])
 	require.Equal(t, "Cardiology", v["provider_specialty"])
@@ -117,7 +120,7 @@ func TestVisitSeriesRead_NoProviderLinkStillProjects(t *testing.T) {
 	f := newRemFixture(t)
 	f.mkVisitSeries(t, "series", 30, "", "2026-08-01T09:00:00Z", 0, nil)
 	f.vtx(t, "alice", "patient")
-	f.aspect(t, "alice", "demographics", "patientDemographics", map[string]any{"fullName": "Alice Rivera"})
+	f.aspect(t, "alice", "demographics", "patientDemographics", map[string]any{"registeredAt": "2026-06-01T09:00:00Z", "fullName": "Alice Rivera"})
 	f.edge(t, "forPatient", "series", "alice")
 
 	rows := f.project(t, visitSeriesReadSpec)

@@ -172,9 +172,16 @@ type protectedAppointmentRow struct {
 // NULL even for a column the write-path treats as always-populated (starts_at
 // and status are written atomically with the anchor forPatient link by
 // CreateAppointment) — a defensive backstop, not a documented possible state.
+//
+// patient_name (SECURE, decrypted off the patient's identifiedBy identity) and
+// unlinked_patient_name (plaintext, walk-in only) are disjoint by
+// construction, so COALESCEing them together yields whichever one the patient
+// actually has — NULL only for a shredded identified patient, which
+// PatientName's pointer type already renders as "no name" on the FE
+// (a.patientName || shortKey(a.patientKey) in web/app.js).
 const selectMyAppointmentsSQL = `
 SELECT entity_key, COALESCE(starts_at, ''), ends_at, reason, COALESCE(status, ''), status_note,
-       patient_key, patient_name, provider_key, provider_name, provider_specialty,
+       patient_key, COALESCE(patient_name, unlinked_patient_name), provider_key, provider_name, provider_specialty,
        site_key, site_name,
        reminder_sent_at, follow_up_reminder_sent_at, documented_at,
        COALESCE(follow_up_requested, false), follow_up_date
@@ -278,7 +285,7 @@ func (s *server) handleMyAppointments(w http.ResponseWriter, r *http.Request) {
 // non-pointer string field.
 const selectMyProviderScheduleSQL = `
 SELECT entity_key, COALESCE(starts_at, ''), ends_at, reason, COALESCE(status, ''), status_note,
-       COALESCE(patient_key, ''), patient_name, provider_key, provider_name, provider_specialty,
+       COALESCE(patient_key, ''), COALESCE(patient_name, unlinked_patient_name), provider_key, provider_name, provider_specialty,
        site_key, site_name,
        reminder_sent_at, follow_up_reminder_sent_at, documented_at,
        COALESCE(follow_up_requested, false), follow_up_date

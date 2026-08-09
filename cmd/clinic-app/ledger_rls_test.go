@@ -50,6 +50,7 @@ func TestLedgerReadBoundary_WildcardRequiredNonWildcardDenied(t *testing.T) {
 		{Name: "entity_key", Type: "text"},
 		{Name: "patient_key", Type: "text"},
 		{Name: "name", Type: "text"},
+		{Name: "unlinked_name", Type: "text"},
 		{Name: "identity_key", Type: "text"},
 		{Name: "email", Type: "text"},
 		{Name: "phone", Type: "text"},

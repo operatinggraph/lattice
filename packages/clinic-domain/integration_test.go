@@ -213,8 +213,14 @@ func clReadDoc(t *testing.T, ctx context.Context, conn *substrate.Conn, key stri
 // readDecryptedAspectData, generalized to a non-identity holder key.
 func clDecryptEncounter(t *testing.T, ctx context.Context, conn *substrate.Conn, apptKey string) map[string]any {
 	t.Helper()
-	holderKey := pkgmgr.RetentionClassKey("clinic-domain", "clinicalRecord")
+	return clDecryptAspect(t, ctx, conn, pkgmgr.RetentionClassKey("clinic-domain", "clinicalRecord"), apptKey+".encounter")
+}
 
+// clDecryptAspect opens any sensitive aspect under the key holder that custodies
+// it — the retention-class holder for the clinical record, the identity itself
+// for an identity-custodied aspect like a person's .name.
+func clDecryptAspect(t *testing.T, ctx context.Context, conn *substrate.Conn, holderKey, aspectKey string) map[string]any {
+	t.Helper()
 	envEntry, err := conn.KVGet(ctx, testutil.HarnessCoreBucket, holderKey+".piiKey")
 	if err != nil {
 		t.Fatalf("KVGet %s: %v", holderKey+".piiKey", err)
@@ -226,7 +232,6 @@ func clDecryptEncounter(t *testing.T, ctx context.Context, conn *substrate.Conn,
 		t.Fatalf("unmarshal %s: %v", holderKey+".piiKey", err)
 	}
 
-	aspectKey := apptKey + ".encounter"
 	ctEntry, err := conn.KVGet(ctx, testutil.HarnessCoreBucket, aspectKey)
 	if err != nil {
 		t.Fatalf("KVGet %s: %v", aspectKey, err)
@@ -1572,13 +1577,36 @@ func TestClinic_CreatePatientWithIdentity(t *testing.T) {
 		[]string{identityKey}, processor.OutcomeAccepted)
 	patientKey := "vtx.patient." + id
 
+	// An IDENTIFIED patient's name lives on the identity's sensitive .name
+	// aspect, not here: a plaintext copy on .demographics would outlive the
+	// ShredIdentityKey that destroys the same person's contact, leaving their
+	// retained clinical record identified (F3(b)). .demographics keeps only the
+	// non-identifying registeredAt.
 	demo := clReadDoc(t, ctx, conn, patientKey+".demographics")
 	dd, _ := demo["data"].(map[string]any)
-	if dd["fullName"] != "Bea Nakamura" {
-		t.Fatalf("demographics fullName = %v, want Bea Nakamura", dd["fullName"])
+	if _, hasName := dd["fullName"]; hasName {
+		t.Fatalf("an identified patient's demographics must not carry fullName; got %v", dd["fullName"])
+	}
+	if dd["registeredAt"] == nil || dd["registeredAt"] == "" {
+		t.Fatalf("demographics registeredAt = %v, want the op's submittedAt (the lenses' ghost filter reads it)", dd["registeredAt"])
 	}
 	if _, hasEmail := dd["email"]; hasEmail {
 		t.Fatalf("demographics carries an email field %v, want none (contact PII lives on the identity)", dd["email"])
+	}
+
+	// The name landed on the identity, ENCRYPTED under that identity's own DEK —
+	// so ShredIdentityKey reaches it.
+	nameKey := identityKey + ".name"
+	nameDoc := clReadDoc(t, ctx, conn, nameKey)
+	if cls, _ := nameDoc["class"].(string); cls != "name" {
+		t.Fatalf("%s class = %q, want name", nameKey, cls)
+	}
+	nameData, _ := nameDoc["data"].(map[string]any)
+	if _, plaintext := nameData["value"].(string); plaintext {
+		t.Fatalf("%s stored the name in plaintext; a sensitive aspect must commit as a ciphertext envelope", nameKey)
+	}
+	if decrypted := clDecryptAspect(t, ctx, conn, identityKey, nameKey); decrypted["value"] != "Bea Nakamura" {
+		t.Fatalf("decrypted %s = %v, want Bea Nakamura", nameKey, decrypted["value"])
 	}
 
 	linkKey := "lnk.patient." + id + ".identifiedBy.identity.CLidentwithHJKMNPQRS"

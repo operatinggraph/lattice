@@ -624,30 +624,41 @@ func appointmentVertexTypeDDL() pkgmgr.DDLSpec {
 // demographicsAspectTypeDDL declares the .demographics aspect (class
 // patientDemographics) — the step-6 write gate for CreatePatient. Declaration-only
 // (the script lives on the patient vertexType DDL). NON-sensitive: it attaches to
-// a vtx.patient, not an identity.
+// a vtx.patient, not an identity — which is precisely why an IDENTIFIED patient's
+// name does not live here (it would outlive that person's ShredIdentityKey) and
+// why the aspect carries registeredAt, a field that identifies nobody, as the
+// presence signal the lenses' ghost-vertex filters test.
 func demographicsAspectTypeDDL() pkgmgr.DDLSpec {
 	return pkgmgr.DDLSpec{
 		CanonicalName:     demographicsAspectDDL,
 		Class:             "meta.ddl.aspectType",
 		PermittedCommands: []string{"CreatePatient"},
 		Description: "Patient demographics aspect (clinic). Stored as vtx.patient.<NanoID>.demographics (class " +
-			"patientDemographics) = {fullName}. NON-sensitive (it attaches to a patient, not an identity) and " +
-			"carries no contact PII — that lives on the identity CreatePatient's optional identityKey links via " +
-			"identifiedBy, the deferred Vault plane's unit. Written ONLY by CreatePatient (whose " +
-			"patient vertexType DDL owns the script); this aspect-type DDL is the step-6 write gate. " +
+			"patientDemographics) = {registeredAt, fullName?}. NON-sensitive (it attaches to a patient, not an " +
+			"identity) and carries no contact PII — that lives on the identity CreatePatient's optional identityKey " +
+			"links via identifiedBy. fullName is present ONLY for a patient with no such identity: when there IS " +
+			"one, the name is written to that identity's own sensitive .name aspect instead, so ShredIdentityKey " +
+			"destroys it along with the person's email and phone rather than leaving it here in plaintext to " +
+			"identify their retained clinical record (retention-class-key-custody-design.md §8.7, fork F3(b)). A " +
+			"patient with no identity has no key to shred, so no erasure promise their plaintext name could " +
+			"defeat. registeredAt is always present and identifies nobody, which is why the clinicPatients / " +
+			"clinicPatientsRead ghost-vertex filters test it rather than the name. Written ONLY by CreatePatient " +
+			"(whose patient vertexType DDL owns the script); this aspect-type DDL is the step-6 write gate. " +
 			"Declaration-only: no op handler.",
 		Script: aspectDeclarationOnlyScript,
 		InputSchema: `{"type":"object","properties":` +
-			`{"fullName":{"type":"string"}}}`,
+			`{"registeredAt":{"type":"string","description":"When the patient was registered (RFC3339, canonical UTC, = op.submittedAt). Always present; identifies nobody; the lenses' presence filter reads it."},` +
+			`"fullName":{"type":"string","description":"The patient's full name — present ONLY for a patient with no linked identity. An identified patient's name lives on that identity's sensitive .name aspect."}}}`,
 		OutputSchema: `{"type":"object"}`,
 		FieldDescription: map[string]string{
-			"fullName": "The patient's full name.",
+			"registeredAt": "When the patient was registered (canonical-UTC RFC3339, derived from op.submittedAt). Always written; non-identifying; the presence signal the projection lenses filter on.",
+			"fullName":     "The patient's full name, written here ONLY when the patient has no identifiedBy identity. With an identity, the name goes to that identity's sensitive .name aspect so a shred reaches it.",
 		},
 		Examples: []pkgmgr.ExampleSpec{
 			{
-				Name:            "patient demographics aspect",
-				Payload:         map[string]any{"fullName": "Alice Rivera"},
-				ExpectedOutcome: "Stored as vtx.patient.<NanoID>.demographics; written by CreatePatient.",
+				Name:            "patient demographics aspect (walk-in, no identity)",
+				Payload:         map[string]any{"registeredAt": "2026-08-08T17:04:00Z", "fullName": "Alice Rivera"},
+				ExpectedOutcome: "Stored as vtx.patient.<NanoID>.demographics; written by CreatePatient. An identified patient's aspect carries registeredAt alone.",
 			},
 		},
 	}
@@ -1025,6 +1036,14 @@ def make_aspect(vtx_key, local_name, cls, data):
             "document": {"class": cls, "isDeleted": False,
                          "vertexKey": vtx_key, "localName": local_name, "data": data}}
 
+def make_aspect_upsert(vtx_key, local_name, cls, data):
+    # Unconditioned update: create-if-absent / overwrite-if-present. Used for
+    # the patient's name on their identity, which CreateUnclaimedIdentity has
+    # usually already written with the same value.
+    return {"op": "update", "key": vtx_key + "." + local_name,
+            "document": {"class": cls, "isDeleted": False,
+                         "vertexKey": vtx_key, "localName": local_name, "data": data}}
+
 def make_link(key, source, target, cls, local_name, data):
     return {"op": "create", "key": key,
             "document": {"class": cls, "isDeleted": False,
@@ -1133,11 +1152,13 @@ def execute(state, op):
         full_name = required_string(p, "fullName")
         pid = bare_nanoid_or_mint(p, "patientId")
         pkey = "vtx.patient." + pid
-        demo = {"fullName": full_name}
-        mutations = [
-            make_vtx(pkey, "patient", {}),
-            make_aspect(pkey, "demographics", "patientDemographics", demo),
-        ]
+        # registeredAt is the aspect's ALWAYS-present, non-identifying field, and
+        # it is what the lenses' ghost-vertex filters test. They used to test
+        # fullName, which stops being present on an identified patient below — a
+        # filter keyed on a field that legitimately moves away would silently
+        # drop every identified patient out of the roster.
+        demo = {"registeredAt": time.rfc3339_utc(op.submittedAt)}
+        mutations = [make_vtx(pkey, "patient", {})]
         # Optional identifiedBy link to a pre-minted identity carrying the
         # patient's sensitive contact (Vault plane). The patient (later-
         # arriving) is the source, the pre-existing identity is the target
@@ -1152,6 +1173,26 @@ def execute(state, op):
             # identity (else two roster rows would decrypt/display the same
             # person's contact). See claim_identity.
             mutations.append(claim_identity(identity_key))
+            # The NAME goes on the person, not on the clinic's record of them
+            # (retention-class-key-custody-design.md §8.7, fork F3(b)). A name
+            # left plaintext on .demographics outlives the ShredIdentityKey that
+            # destroys the same person's email and phone, so a shredded patient's
+            # retained clinical record stays identified — exactly the duplication
+            # the clinicalRecord class's obligation forbids. identity-domain's
+            # name aspect DDL carries an intentionally EMPTY permittedCommands
+            # ("any identity-anchored writer is allowed") and stores {value},
+            # which is the shape written here. An UPSERT, not a create: the FE
+            # mints the identity with this same name a moment earlier, so the
+            # aspect normally already exists and this rewrites it identically.
+            mutations.append(make_aspect_upsert(identity_key, "name", "name", {"value": full_name}))
+        else:
+            # No identity means no key to shred, and so no erasure whose promise
+            # a plaintext name could defeat: an unidentified patient is outside
+            # the erasure plane rather than a hole in it. The name stays here,
+            # where the front desk can still find a walk-in nobody holds contact
+            # details for.
+            demo["fullName"] = full_name
+        mutations.append(make_aspect(pkey, "demographics", "patientDemographics", demo))
         events = [{"class": "clinic.patientCreated", "data": {"patientKey": pkey}}]
         return {"mutations": mutations, "events": events,
                 "response": {"primaryKey": pkey}}

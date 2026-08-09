@@ -56,6 +56,7 @@ func TestStaffPatientsReadBoundary_WildcardSeesEverything(t *testing.T) {
 		{Name: "entity_key", Type: "text"},
 		{Name: "patient_key", Type: "text"},
 		{Name: "name", Type: "text"},
+		{Name: "unlinked_name", Type: "text"},
 		{Name: "identity_key", Type: "text"},
 		{Name: "email", Type: "text"},
 		{Name: "phone", Type: "text"},
@@ -82,13 +83,28 @@ func TestStaffPatientsReadBoundary_WildcardSeesEverything(t *testing.T) {
 	// A's own row, never B's, and that the wildcard is still the only way to
 	// see the whole roster.
 	exec(`INSERT INTO read_clinic_patients (patient_id, entity_key, patient_key, name, authz_anchors, projection_seq)
-	      VALUES ('pat-A', 'vtx.patient.`+subPatientA+`', 'vtx.patient.`+subPatientA+`', 'Alice Rivera', '{`+subPatientA+`}', 1)`)
+	      VALUES ('pat-A', 'vtx.patient.` + subPatientA + `', 'vtx.patient.` + subPatientA + `', 'Alice Rivera', '{` + subPatientA + `}', 1)`)
 	exec(`INSERT INTO read_clinic_patients (patient_id, entity_key, patient_key, name, authz_anchors, projection_seq)
-	      VALUES ('pat-B', 'vtx.patient.`+subPatientB+`', 'vtx.patient.`+subPatientB+`', 'Bob Nguyen', '{`+subPatientB+`}', 1)`)
+	      VALUES ('pat-B', 'vtx.patient.` + subPatientB + `', 'vtx.patient.` + subPatientB + `', 'Bob Nguyen', '{` + subPatientB + `}', 1)`)
 	exec(`INSERT INTO actor_read_grants (actor_id, anchor_id, grant_source, projection_seq, is_deleted)
 	      VALUES ($1, $1, 'cap-read', 1, false)`, subPatientA)
 	exec(`INSERT INTO actor_read_grants (actor_id, anchor_id, grant_source, projection_seq, is_deleted)
 	      VALUES ($1, $2, 'cap-read.root', 1, false)`, subStaff, adapter.WildcardAnchor)
+
+	// A third row proves the name/unlinked_name fallback (the disjoint-column
+	// COALESCE selectPatientsSQL now projects): patient W is a walk-in — no
+	// identifiedBy identity, so its SECURE name column is NULL and only its
+	// plaintext unlinked_name is populated, the mirror image of A/B above. No
+	// self-grant is seeded for it, so only the wildcard staff actor can see it.
+	exec(`INSERT INTO read_clinic_patients (patient_id, entity_key, patient_key, unlinked_name, authz_anchors, projection_seq)
+	      VALUES ('pat-W', 'vtx.patient.WWWWWWWWWWWWWWWWWWWW', 'vtx.patient.WWWWWWWWWWWWWWWWWWWW', 'Wendy Walk-in', '{WWWWWWWWWWWWWWWWWWWW}', 1)`)
+
+	// A fourth row is an IDENTIFIED patient whose identity's .name aspect was
+	// shredded (ShredIdentityKey): both name and unlinked_name are NULL — the
+	// disjoint pair's only shared-empty state. queryPatients must still return
+	// this row (as "no name", never an error) rather than fail the scan.
+	exec(`INSERT INTO read_clinic_patients (patient_id, entity_key, patient_key, authz_anchors, projection_seq)
+	      VALUES ('pat-S', 'vtx.patient.SSSSSSSSSSSSSSSSSSSS', 'vtx.patient.SSSSSSSSSSSSSSSSSSSS', '{SSSSSSSSSSSSSSSSSSSS}', 1)`)
 
 	reader := poolInSchema(t, dsn, clinicRLSTestRole)
 	defer reader.Close()
@@ -114,8 +130,40 @@ func TestStaffPatientsReadBoundary_WildcardSeesEverything(t *testing.T) {
 		if code != http.StatusOK {
 			t.Fatalf("status = %d, want 200", code)
 		}
-		if len(rows) != 2 {
-			t.Fatalf("staff must see BOTH patients, got %+v", rows)
+		if len(rows) != 4 {
+			t.Fatalf("staff must see all FOUR patients (A, B, walk-in W, shredded S), got %+v", rows)
+		}
+	})
+
+	// The disjoint name/unlinked_name COALESCE (selectPatientsSQL): an
+	// identified patient's name comes from the SECURE column (A), a walk-in's
+	// comes from the plaintext column (W), and a shredded identified patient
+	// (S, both columns NULL) still comes back as a row with an empty Name
+	// rather than an error — proving protectedPatientRow.Name's plain-string
+	// COALESCE(..., '') never chokes on the all-NULL case.
+	t.Run("name falls back to unlinked_name for a walk-in, and a shredded identified patient still comes back as a row", func(t *testing.T) {
+		code, rows := get(t, cookieFor(subStaff))
+		if code != http.StatusOK {
+			t.Fatalf("status = %d, want 200", code)
+		}
+		byKey := make(map[string]protectedPatientRow, len(rows))
+		for _, r := range rows {
+			byKey[r.PatientKey] = r
+		}
+		identified, ok := byKey["vtx.patient."+subPatientA]
+		if !ok || identified.Name != "Alice Rivera" {
+			t.Fatalf("identified patient A must project its SECURE name column, got %+v (present=%v)", identified, ok)
+		}
+		walkIn, ok := byKey["vtx.patient.WWWWWWWWWWWWWWWWWWWW"]
+		if !ok || walkIn.Name != "Wendy Walk-in" {
+			t.Fatalf("walk-in patient W must fall back to unlinked_name, got %+v (present=%v)", walkIn, ok)
+		}
+		shredded, ok := byKey["vtx.patient.SSSSSSSSSSSSSSSSSSSS"]
+		if !ok {
+			t.Fatalf("a shredded identified patient (both name columns NULL) must still come back as a row, not be dropped")
+		}
+		if shredded.Name != "" {
+			t.Fatalf("a shredded identified patient's Name must be empty, not %q", shredded.Name)
 		}
 	})
 

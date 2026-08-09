@@ -183,6 +183,7 @@ func Lenses() []pkgmgr.LensSpec {
 				{Name: "status_note", Type: "text"},
 				{Name: "patient_key", Type: "text"},
 				{Name: "patient_name", Type: "text"},
+				{Name: "unlinked_patient_name", Type: "text"},
 				{Name: "provider_key", Type: "text"},
 				{Name: "provider_name", Type: "text"},
 				{Name: "provider_specialty", Type: "text"},
@@ -193,6 +194,9 @@ func Lenses() []pkgmgr.LensSpec {
 				{Name: "documented_at", Type: "text"},
 				{Name: "follow_up_requested", Type: "boolean"},
 				{Name: "follow_up_date", Type: "text"},
+			},
+			SecureColumns: []pkgmgr.SecureColumn{
+				{Column: "patient_name", HolderTypes: []string{"identity"}, Field: "value"},
 			},
 		},
 		{
@@ -236,6 +240,7 @@ func Lenses() []pkgmgr.LensSpec {
 				{Name: "status_note", Type: "text"},
 				{Name: "patient_key", Type: "text"},
 				{Name: "patient_name", Type: "text"},
+				{Name: "unlinked_patient_name", Type: "text"},
 				{Name: "provider_key", Type: "text"},
 				{Name: "provider_name", Type: "text"},
 				{Name: "provider_specialty", Type: "text"},
@@ -246,6 +251,9 @@ func Lenses() []pkgmgr.LensSpec {
 				{Name: "documented_at", Type: "text"},
 				{Name: "follow_up_requested", Type: "boolean"},
 				{Name: "follow_up_date", Type: "text"},
+			},
+			SecureColumns: []pkgmgr.SecureColumn{
+				{Column: "patient_name", HolderTypes: []string{"identity"}, Field: "value"},
 			},
 		},
 		{
@@ -305,11 +313,13 @@ func Lenses() []pkgmgr.LensSpec {
 				{Name: "entity_key", Type: "text"},
 				{Name: "patient_key", Type: "text"},
 				{Name: "name", Type: "text"},
+				{Name: "unlinked_name", Type: "text"},
 				{Name: "identity_key", Type: "text"},
 				{Name: "email", Type: "text"},
 				{Name: "phone", Type: "text"},
 			},
 			SecureColumns: []pkgmgr.SecureColumn{
+				{Column: "name", HolderTypes: []string{"identity"}, Field: "value"},
 				{Column: "email", HolderTypes: []string{"identity"}, Field: "value"},
 				{Column: "phone", HolderTypes: []string{"identity"}, Field: "value"},
 			},
@@ -615,7 +625,7 @@ RETURN
 // with no profile does not roster — the presence test reads the aspect but does not
 // project it.
 const clinicPatientsSpec = `MATCH (p:patient)
-WHERE p.demographics.data.fullName <> null
+WHERE p.demographics.data.registeredAt <> null
 RETURN
   p.key AS key,
   p.key AS patientKey`
@@ -718,13 +728,14 @@ RETURN
 // landlordLeaseApplicationsRead, so a shredded patient's contact scrubs to
 // null on the next projection touch.
 const clinicPatientsReadSpec = `MATCH (p:patient)
-WHERE p.demographics.data.fullName <> null
+WHERE p.demographics.data.registeredAt <> null
 OPTIONAL MATCH (p)-[:identifiedBy]->(id:identity)
 RETURN
   nanoIdFromKey(p.key)         AS patient_id,
   p.key                        AS entity_key,
   p.key                        AS patient_key,
-  p.demographics.data.fullName AS name,
+  id.name.data                 AS name,
+  p.demographics.data.fullName AS unlinked_name,
   id.key                       AS identity_key,
   id.email.data                AS email,
   id.phone.data                AS phone,
@@ -756,6 +767,7 @@ const clinicAppointmentsReadSpec = `MATCH (a:appointment)
 MATCH (a)-[:forPatient]->(p:patient)
 OPTIONAL MATCH (a)-[:withProvider]->(pr:provider)
 OPTIONAL MATCH (a)-[:atSite]->(site:building)
+OPTIONAL MATCH (p)-[:identifiedBy]->(pid:identity)
 RETURN
   nanoIdFromKey(a.key)                   AS appointment_id,
   a.key                                  AS entity_key,
@@ -765,7 +777,8 @@ RETURN
   a.status.data.value                    AS status,
   a.status.data.note                     AS status_note,
   p.key                                  AS patient_key,
-  p.demographics.data.fullName           AS patient_name,
+  pid.name.data                          AS patient_name,
+  p.demographics.data.fullName           AS unlinked_patient_name,
   pr.key                                 AS provider_key,
   pr.profile.data.fullName               AS provider_name,
   pr.profile.data.specialty              AS provider_specialty,
@@ -791,6 +804,7 @@ const providerAppointmentsReadSpec = `MATCH (a:appointment)
 MATCH (a)-[:withProvider]->(pr:provider)
 OPTIONAL MATCH (a)-[:forPatient]->(p:patient)
 OPTIONAL MATCH (a)-[:atSite]->(site:building)
+OPTIONAL MATCH (p)-[:identifiedBy]->(pid:identity)
 RETURN
   nanoIdFromKey(a.key)                   AS appointment_id,
   a.key                                  AS entity_key,
@@ -800,7 +814,8 @@ RETURN
   a.status.data.value                    AS status,
   a.status.data.note                     AS status_note,
   p.key                                  AS patient_key,
-  p.demographics.data.fullName           AS patient_name,
+  pid.name.data                          AS patient_name,
+  p.demographics.data.fullName           AS unlinked_patient_name,
   pr.key                                 AS provider_key,
   pr.profile.data.fullName               AS provider_name,
   pr.profile.data.specialty              AS provider_specialty,

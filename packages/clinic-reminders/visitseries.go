@@ -876,6 +876,7 @@ func visitSeriesReadLens() pkgmgr.LensSpec {
 			{Name: "entity_key", Type: "text"},
 			{Name: "patient_key", Type: "text"},
 			{Name: "patient_name", Type: "text"},
+			{Name: "unlinked_patient_name", Type: "text"},
 			{Name: "provider_key", Type: "text"},
 			{Name: "provider_name", Type: "text"},
 			{Name: "provider_specialty", Type: "text"},
@@ -883,6 +884,16 @@ func visitSeriesReadLens() pkgmgr.LensSpec {
 			{Name: "next_due_at", Type: "text"},
 			{Name: "occurrence_count", Type: "integer"},
 			{Name: "series_status", Type: "text"},
+		},
+		// The patient's name lives on their identity's sensitive .name aspect
+		// (clinic-domain's CreatePatient, retention-class-key-custody-design.md
+		// F3(b)), so this read model decrypts it at projection exactly as
+		// clinicPatientsRead does for email/phone. A patient with no identity —
+		// the walk-in nobody holds contact details for — carries their name in
+		// unlinked_patient_name instead: outside the erasure plane, so outside
+		// this column.
+		SecureColumns: []pkgmgr.SecureColumn{
+			{Column: "patient_name", HolderTypes: []string{"identity"}, Field: "value"},
 		},
 	}
 }
@@ -907,11 +918,13 @@ func visitSeriesReadLens() pkgmgr.LensSpec {
 const visitSeriesReadSpec = `MATCH (s:visitseries)
 MATCH (s)-[:forPatient]->(p:patient)
 OPTIONAL MATCH (s)-[:withProvider]->(pr:provider)
+OPTIONAL MATCH (p)-[:identifiedBy]->(pid:identity)
 RETURN
   nanoIdFromKey(s.key)          AS series_id,
   s.key                         AS entity_key,
   p.key                         AS patient_key,
-  p.demographics.data.fullName  AS patient_name,
+  pid.name.data                 AS patient_name,
+  p.demographics.data.fullName  AS unlinked_patient_name,
   pr.key                        AS provider_key,
   pr.profile.data.fullName      AS provider_name,
   pr.profile.data.specialty     AS provider_specialty,

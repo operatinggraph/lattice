@@ -14,6 +14,19 @@ import (
 // optional identifiedBy identity — so they are nil for a patient with no
 // linked identity, a linked identity missing that aspect, or a shredded one;
 // never an error, never a dropped row.
+//
+// Name is the SECURE name column and the plaintext unlinked_name column
+// coalesced together (see selectPatientsSQL) — the two are disjoint by
+// construction (a patient has an identity, in which case only name can be
+// populated, or is a walk-in, in which case only unlinked_name can be), and a
+// shredded identified patient has both NULL. Name stays a plain (non-pointer)
+// string with the SQL-side COALESCE defaulting to "": the FE's own patient
+// lookups already treat a falsy name as "no name" and fall back to the
+// patient key (nameForPatient, applySelfPatientLock in web/app.js), so an
+// empty string renders exactly like the "no name on file" case those already
+// handle, whereas an omitted/null field would surface the literal string
+// "undefined" wherever the FE assigns it straight into a DOM node with no
+// fallback (populatePatientSelect's option text).
 type protectedPatientRow struct {
 	PatientKey  string  `json:"patientKey"`
 	Name        string  `json:"name"`
@@ -32,19 +45,29 @@ type protectedPatientRow struct {
 // name for a stable switcher, mirroring the retired computePatients' sort.
 // identity_key (nil for a patient with no identifiedBy link) is what lets the
 // FE offer patient self-service booking — see the clinicPatientsRead lens spec.
+//
+// name and unlinked_name are disjoint (an identified patient's row can only
+// populate the former, a walk-in's only the latter), so COALESCE(name,
+// unlinked_name, empty string) always yields exactly the one that's set, or
+// the empty string for a shredded identified patient — see
+// protectedPatientRow's Name doc.
 const selectPatientsSQL = `
-SELECT patient_key, name, email, phone, identity_key
+SELECT patient_key, COALESCE(name, unlinked_name, ''), email, phone, identity_key
 FROM read_clinic_patients
-ORDER BY name, patient_key`
+ORDER BY COALESCE(name, unlinked_name, ''), patient_key`
 
 // selectPatientsFilteredSQL narrows the roster to a name-ILIKE match, capped
 // so a broad term can't pull the whole clinic's history into one response —
-// mirrors loftspace-app's selectSearchPeopleSQL (search.go).
+// mirrors loftspace-app's selectSearchPeopleSQL (search.go). The WHERE clause
+// matches against the same COALESCE(name, unlinked_name) the SELECT list
+// projects, so a walk-in patient (whose secure name column is NULL) is still
+// searchable by their plaintext unlinked_name instead of silently dropping
+// out of every filtered query.
 const selectPatientsFilteredSQL = `
-SELECT patient_key, name, email, phone, identity_key
+SELECT patient_key, COALESCE(name, unlinked_name, ''), email, phone, identity_key
 FROM read_clinic_patients
-WHERE name ILIKE $1
-ORDER BY name, patient_key
+WHERE COALESCE(name, unlinked_name) ILIKE $1
+ORDER BY COALESCE(name, unlinked_name, ''), patient_key
 LIMIT 50`
 
 // queryPatients runs the protected read inside a per-request transaction with a

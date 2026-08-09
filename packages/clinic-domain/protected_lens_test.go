@@ -48,7 +48,7 @@ func (f *lensFixture) seedAppointment(t *testing.T, apptName, patientName, provi
 	f.vtx(t, apptName, "appointment")
 	f.vtx(t, patientName, "patient")
 	f.vtx(t, providerName, "provider")
-	f.aspect(t, patientName, "demographics", "patientDemographics", map[string]any{"fullName": "Alice Rivera"})
+	f.aspect(t, patientName, "demographics", "patientDemographics", map[string]any{"registeredAt": "2026-06-01T09:00:00Z", "fullName": "Alice Rivera"})
 	f.aspect(t, providerName, "profile", "providerProfile", map[string]any{"fullName": "Dr. Sam Okafor", "specialty": "Cardiology"})
 	f.aspect(t, apptName, "schedule", "appointmentSchedule", map[string]any{"startsAt": "2026-07-01T15:00:00Z", "endsAt": "2026-07-01T15:30:00Z", "reason": "Annual checkup"})
 	f.aspect(t, apptName, "status", "appointmentStatus", map[string]any{"value": "scheduled"})
@@ -86,7 +86,11 @@ func TestClinicAppointmentsRead_ProjectsPatientSelfAnchor(t *testing.T) {
 	require.Equal(t, "Annual checkup", v["reason"])
 	require.Equal(t, "scheduled", v["status"])
 	require.Equal(t, patientKey, v["patient_key"])
-	require.Equal(t, "Alice Rivera", v["patient_name"])
+	// This fixture's patient carries no identity, so the erasable column is null
+	// and their name sits in the plaintext fallback (TestClinic*_IdentifiedPatientNameIsSecure
+	// covers the identified case).
+	require.Nil(t, v["patient_name"])
+	require.Equal(t, "Alice Rivera", v["unlinked_patient_name"])
 	require.Equal(t, providerKey, v["provider_key"])
 	require.Equal(t, "Dr. Sam Okafor", v["provider_name"])
 	require.Equal(t, "Cardiology", v["provider_specialty"])
@@ -155,7 +159,7 @@ func TestClinicAppointmentsRead_NoProviderLinkStillProjects(t *testing.T) {
 	f := newLensFixture(t)
 	f.vtx(t, "appt", "appointment")
 	f.vtx(t, "alice", "patient")
-	f.aspect(t, "alice", "demographics", "patientDemographics", map[string]any{"fullName": "Alice Rivera"})
+	f.aspect(t, "alice", "demographics", "patientDemographics", map[string]any{"registeredAt": "2026-06-01T09:00:00Z", "fullName": "Alice Rivera"})
 	f.aspect(t, "appt", "schedule", "appointmentSchedule", map[string]any{"startsAt": "2026-07-01T15:00:00Z"})
 	f.aspect(t, "appt", "status", "appointmentStatus", map[string]any{"value": "scheduled"})
 	f.edge(t, "forPatient", "appt", "alice")
@@ -189,7 +193,11 @@ func TestProviderAppointmentsRead_ProjectsProviderSelfAnchor(t *testing.T) {
 	require.Equal(t, f.ids["appt"], v["appointment_id"])
 	require.Equal(t, apptKey, v["entity_key"])
 	require.Equal(t, patientKey, v["patient_key"])
-	require.Equal(t, "Alice Rivera", v["patient_name"])
+	// This fixture's patient carries no identity, so the erasable column is null
+	// and their name sits in the plaintext fallback (TestClinic*_IdentifiedPatientNameIsSecure
+	// covers the identified case).
+	require.Nil(t, v["patient_name"])
+	require.Equal(t, "Alice Rivera", v["unlinked_patient_name"])
 	require.Equal(t, providerKey, v["provider_key"])
 	require.Equal(t, "Dr. Sam Okafor", v["provider_name"])
 	require.Equal(t, "2026-07-01T15:35:00Z", v["documented_at"])
@@ -283,7 +291,7 @@ func TestClinicPatientsRead_ProjectsContactEnvelopesWhole(t *testing.T) {
 	f := newLensFixture(t)
 	f.vtx(t, "alice", "patient")
 	f.vtx(t, "aliceId", "identity")
-	f.aspect(t, "alice", "demographics", "patientDemographics", map[string]any{"fullName": "Alice Rivera"})
+	f.aspect(t, "alice", "demographics", "patientDemographics", map[string]any{"registeredAt": "2026-06-01T09:00:00Z", "fullName": "Alice Rivera"})
 	emailEnv := map[string]any{"ct": "b64-email-ct", "nonce": "b64-nonce-1", "keyId": "alice-key"}
 	f.aspect(t, "aliceId", "email", "email", emailEnv)
 	// No phone aspect: the column must project null, the row must survive.
@@ -311,12 +319,13 @@ func TestClinicPatientsRead_NoIdentityLinkStillProjects(t *testing.T) {
 	}
 	f := newLensFixture(t)
 	f.vtx(t, "alice", "patient")
-	f.aspect(t, "alice", "demographics", "patientDemographics", map[string]any{"fullName": "Alice Rivera"})
+	f.aspect(t, "alice", "demographics", "patientDemographics", map[string]any{"registeredAt": "2026-06-01T09:00:00Z", "fullName": "Alice Rivera"})
 
 	rows := f.project(t, clinicPatientsReadSpec)
 	require.Len(t, rows, 1, "a patient with no linked identity still projects")
 	v := rows[0].Values
-	require.Equal(t, "Alice Rivera", v["name"])
+	require.Nil(t, v["name"], "the secure column is fed by the identity, which this patient has none of")
+	require.Equal(t, "Alice Rivera", v["unlinked_name"])
 	require.Nil(t, v["identity_key"])
 	require.Nil(t, v["email"])
 	require.Nil(t, v["phone"])
@@ -338,7 +347,7 @@ func TestClinicPatientsRead_ProjectsWorkplaceAnchor(t *testing.T) {
 	}
 	f := newLensFixture(t)
 	f.vtx(t, "alice", "patient")
-	f.aspect(t, "alice", "demographics", "patientDemographics", map[string]any{"fullName": "Alice Rivera"})
+	f.aspect(t, "alice", "demographics", "patientDemographics", map[string]any{"registeredAt": "2026-06-01T09:00:00Z", "fullName": "Alice Rivera"})
 	f.vtx(t, "appt", "appointment")
 	f.vtx(t, "drsam", "provider")
 	f.vtx(t, "riverside", "building")
@@ -366,9 +375,9 @@ func TestClinicPatientReadGrants_SelfAnchorsEachPatient(t *testing.T) {
 	}
 	f := newLensFixture(t)
 	f.vtx(t, "alice", "patient")
-	f.aspect(t, "alice", "demographics", "patientDemographics", map[string]any{"fullName": "Alice Rivera"})
+	f.aspect(t, "alice", "demographics", "patientDemographics", map[string]any{"registeredAt": "2026-06-01T09:00:00Z", "fullName": "Alice Rivera"})
 	f.vtx(t, "bob", "patient")
-	f.aspect(t, "bob", "demographics", "patientDemographics", map[string]any{"fullName": "Bob Nakamura"})
+	f.aspect(t, "bob", "demographics", "patientDemographics", map[string]any{"registeredAt": "2026-06-01T09:00:00Z", "fullName": "Bob Nakamura"})
 
 	rows := f.project(t, clinicPatientReadGrantsSpec)
 	require.Len(t, rows, 2)
@@ -497,7 +506,7 @@ func TestPatientIdentityReadGrants(t *testing.T) {
 		f := newLensFixture(t)
 		f.vtx(t, "carol", "identity")
 		f.vtx(t, "patCarol", "patient")
-		f.aspect(t, "patCarol", "demographics", "patientDemographics", map[string]any{"fullName": "Carol Okafor"})
+		f.aspect(t, "patCarol", "demographics", "patientDemographics", map[string]any{"registeredAt": "2026-06-01T09:00:00Z", "fullName": "Carol Okafor"})
 		f.edge(t, "identifiedBy", "patCarol", "carol")
 
 		rows := f.project(t, patientIdentityReadGrantsSpec)
@@ -511,7 +520,7 @@ func TestPatientIdentityReadGrants(t *testing.T) {
 	t.Run("a patient with no identifiedBy grants nothing", func(t *testing.T) {
 		f := newLensFixture(t)
 		f.vtx(t, "patCarol", "patient")
-		f.aspect(t, "patCarol", "demographics", "patientDemographics", map[string]any{"fullName": "Carol Okafor"})
+		f.aspect(t, "patCarol", "demographics", "patientDemographics", map[string]any{"registeredAt": "2026-06-01T09:00:00Z", "fullName": "Carol Okafor"})
 
 		require.Empty(t, f.project(t, patientIdentityReadGrantsSpec))
 	})
@@ -527,7 +536,7 @@ func TestPatientIdentityReadGrants(t *testing.T) {
 		f := newLensFixture(t)
 		f.vtx(t, "carol", "identity")
 		f.vtx(t, "patCarol", "patient")
-		f.aspect(t, "patCarol", "demographics", "patientDemographics", map[string]any{"fullName": "Carol Okafor"})
+		f.aspect(t, "patCarol", "demographics", "patientDemographics", map[string]any{"registeredAt": "2026-06-01T09:00:00Z", "fullName": "Carol Okafor"})
 		f.edge(t, "identifiedBy", "patCarol", "carol")
 
 		rows := f.project(t, patientIdentityReadGrantsSpec)
@@ -539,9 +548,9 @@ func TestPatientIdentityReadGrants(t *testing.T) {
 		f.vtx(t, "carol", "identity")
 		f.vtx(t, "dan", "identity")
 		f.vtx(t, "patCarol", "patient")
-		f.aspect(t, "patCarol", "demographics", "patientDemographics", map[string]any{"fullName": "Carol Okafor"})
+		f.aspect(t, "patCarol", "demographics", "patientDemographics", map[string]any{"registeredAt": "2026-06-01T09:00:00Z", "fullName": "Carol Okafor"})
 		f.vtx(t, "patDan", "patient")
-		f.aspect(t, "patDan", "demographics", "patientDemographics", map[string]any{"fullName": "Dan Ruiz"})
+		f.aspect(t, "patDan", "demographics", "patientDemographics", map[string]any{"registeredAt": "2026-06-01T09:00:00Z", "fullName": "Dan Ruiz"})
 		f.edge(t, "identifiedBy", "patCarol", "carol")
 		f.edge(t, "identifiedBy", "patDan", "dan")
 
@@ -570,7 +579,7 @@ func TestProtectedAppointmentReads_EncounterWithoutDocumentationProjectsNull(t *
 	f.vtx(t, "appt", "appointment")
 	f.vtx(t, "alice", "patient")
 	f.vtx(t, "drsam", "provider")
-	f.aspect(t, "alice", "demographics", "patientDemographics", map[string]any{"fullName": "Alice Rivera"})
+	f.aspect(t, "alice", "demographics", "patientDemographics", map[string]any{"registeredAt": "2026-06-01T09:00:00Z", "fullName": "Alice Rivera"})
 	f.aspect(t, "drsam", "profile", "providerProfile", map[string]any{"fullName": "Dr. Sam Okafor", "specialty": "Cardiology"})
 	f.aspect(t, "appt", "schedule", "appointmentSchedule", map[string]any{"startsAt": "2026-07-01T15:00:00Z", "endsAt": "2026-07-01T15:30:00Z"})
 	f.aspect(t, "appt", "status", "appointmentStatus", map[string]any{"value": "completed"})
@@ -710,4 +719,100 @@ func TestClinicEncountersRead_AnchorScopesPerProvider(t *testing.T) {
 	require.Equal(t, []string{f.ids["drsam"]}, byAppt[f.ids["apptA"]])
 	require.Equal(t, []string{f.ids["drlee"]}, byAppt[f.ids["apptB"]])
 	require.NotContains(t, byAppt[f.ids["apptA"]], f.ids["drlee"], "one provider's note must not carry another's anchor")
+}
+
+// seedIdentifiedPatient links a patient to an identity carrying the sensitive
+// .name aspect as step 6.5 commits it — a ciphertext envelope. The engine copies
+// it through; pipeline.SecureDecryptor turns it back into the name at
+// projection. What these tests prove is that the cypher reaches the envelope at
+// all, which is the half a lens spec can get wrong.
+func (f *lensFixture) seedIdentifiedPatient(t *testing.T, patientName, identityName string) map[string]any {
+	t.Helper()
+	f.vtx(t, identityName, "identity")
+	envelope := map[string]any{
+		"ct":    "3q2+7w==",
+		"nonce": "3q2+7w==",
+		"keyId": "vtx.identity." + f.ids[identityName],
+	}
+	f.aspect(t, identityName, "name", "name", envelope)
+	f.edge(t, "identifiedBy", patientName, identityName)
+	return envelope
+}
+
+// TestClinicPatientsRead_IdentifiedPatientNameIsSecure — an identified patient's
+// name arrives as the identity's ciphertext envelope in the secure `name`
+// column, and the plaintext fallback stays empty. The two columns are disjoint
+// by construction: CreatePatient writes fullName onto .demographics only when
+// there is no identity to carry it.
+func TestClinicPatientsRead_IdentifiedPatientNameIsSecure(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newLensFixture(t)
+	f.vtx(t, "alice", "patient")
+	f.aspect(t, "alice", "demographics", "patientDemographics", map[string]any{"registeredAt": "2026-06-01T09:00:00Z"})
+	envelope := f.seedIdentifiedPatient(t, "alice", "aliceId")
+
+	rows := f.project(t, clinicPatientsReadSpec)
+	require.Len(t, rows, 1, "the ghost filter now reads registeredAt, which an identified patient still carries")
+	v := rows[0].Values
+	require.Equal(t, envelope, v["name"],
+		"the secure column must carry the identity's whole .name envelope for the decryptor")
+	require.Nil(t, v["unlinked_name"],
+		"an identified patient carries no plaintext name — that is the point of the move")
+	require.Equal(t, "vtx.identity."+f.ids["aliceId"], v["identity_key"])
+}
+
+// TestAppointmentReads_IdentifiedPatientNameIsSecure — both appointment read
+// models take the patient's name off the linked identity too, so a shred nulls
+// it wherever it is displayed rather than only on the roster.
+func TestAppointmentReads_IdentifiedPatientNameIsSecure(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	for _, tc := range []struct {
+		name string
+		spec string
+	}{
+		{"clinicAppointmentsRead", clinicAppointmentsReadSpec},
+		{"providerAppointmentsRead", providerAppointmentsReadSpec},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newLensFixture(t)
+			f.seedAppointment(t, "appt", "alice", "drsam")
+			// seedAppointment seeds the walk-in shape (a plaintext demographics
+			// name). Overwrite it with what CreatePatient actually writes for an
+			// IDENTIFIED patient — registeredAt only — so the two name columns
+			// stay disjoint, which is the invariant under test.
+			f.aspect(t, "alice", "demographics", "patientDemographics", map[string]any{"registeredAt": "2026-06-01T09:00:00Z"})
+			envelope := f.seedIdentifiedPatient(t, "alice", "aliceId")
+
+			rows := f.project(t, tc.spec)
+			require.Len(t, rows, 1)
+			v := rows[0].Values
+			require.Equal(t, envelope, v["patient_name"],
+				"patient_name must be the identity's .name envelope, not a plaintext copy")
+			require.Nil(t, v["unlinked_patient_name"])
+		})
+	}
+}
+
+// TestClinicEncountersRead_CarriesNoPatientIdentifier — the clinical record's own
+// table names no patient at all, linked or not. Both name columns exist on the
+// other read models; neither belongs beside the decrypted note.
+func TestClinicEncountersRead_CarriesNoPatientIdentifier(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newLensFixture(t)
+	f.seedAppointment(t, "appt", "alice", "drsam")
+	f.seedIdentifiedPatient(t, "alice", "aliceId")
+	f.seedEncounter(t, "appt", "7hRMjLYwg6WSpaXj7hRM")
+
+	rows := f.project(t, clinicEncountersReadSpec)
+	require.Len(t, rows, 1)
+	for _, col := range []string{"patient_name", "unlinked_patient_name", "name"} {
+		require.NotContains(t, rows[0].Values, col,
+			"the clinical record's table must carry no patient identifier — a reader joins read_provider_appointments for one")
+	}
 }
