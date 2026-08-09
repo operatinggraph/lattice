@@ -216,23 +216,35 @@ dead end: build the non-contract parts (L2), **make the actual contract-doc edit
 on the board — Andrew ratifies a *ready* proposal, he doesn't author it. "Touches a contract" is never a
 reason to leave an item undone; only a *standing* Andrew block/shelve is.
 
-## 3. Activate (L1) — follow the role inline; do not spawn it
+## 3. Activate (L1) — roles run inline, work is delegated
 
-**The owning roles are SKILLS / playbooks, NOT spawnable sub-agent types.** Invoke a role via the **Skill tool**
-(`/owner`, `/fe-engineer`, `/lamplighter`) or **read + follow `agents/<role>/SKILL.md` inline as Winston** —
-**never** call the **Agent** tool with `subagent_type: owner | fe-engineer | …` (those aren't registered agent
-types; only generic types exist, and a cold generic agent would just re-derive what you already have loaded).
-You are Winston throughout: follow the playbook, build, and **admit (§4) yourself** — there is no separate
-hand-up.
+Two peer rules. They are not in tension: the first is about *who you are*, the second about *who does the work*.
 
-**Every sub-agent you DO spawn (scouts, builders, reviewers) gets an EXPLICIT `model` — never inherit.** The
-`Agent` tool defaults to the *session* model when `model` is omitted, so an omitted parameter silently runs a
-mechanical scout on the lead's expensive tier; "cheaper tier" (§ builder economics,
-[`fire-brief-template.md`](../fire-brief-template.md)) is only real if the parameter is actually passed. Choose
-per task, every call, no exceptions: **`haiku`** for mechanical read-only fan-out (Phase-0 scouts: grep/read/
-file:line collection, inventory sweeps) · **`sonnet`** for brief-driven mechanical build increments and
-single-lens review passes · **`opus`** only for genuinely judgment-heavy work (adversarial security/capability
-review, a design fork). If you can't name why the task needs the tier above, it doesn't.
+**Roles are followed inline.** `owner` / `fe-engineer` / `lamplighter` are playbooks — invoke via the **Skill
+tool** (`/owner`, `/fe-engineer`, `/lamplighter`) or read + follow `agents/<role>/SKILL.md` yourself. They are
+not registered `subagent_type`s and the spawn fails. You are Winston throughout: follow the playbook and
+**admit (§4) yourself** — there is no hand-up.
+
+**Work is delegated to generic sub-agents, and every one gets an EXPLICIT `model`.** The `Agent` tool inherits
+the *session* model when `model` is omitted, so an omitted parameter silently runs a mechanical scout on the
+lead's tier — "cheaper tier" is only real if the parameter is passed. This is not optional and does not lapse
+on a resume:
+
+| stage | agent | model |
+|---|---|---|
+| Phase-0 scout · census · inventory · file:line collection | generic, read-only | **`haiku`** |
+| mechanical build increment against a brief | generic | **`sonnet`** |
+| adversarial / security / capability-plane review | generic, **never the implementer** | **`opus`** |
+| owner · fe-engineer · lamplighter | — | inline, never spawned |
+
+If you can't name why a task needs the tier above, it doesn't.
+
+**Agent lifetime — resume the implementer, spawn reviewers cold.** After a review, send the findings **back to
+the implementer that wrote the diff** (`SendMessage` with the id its spawn returned; a completed agent resumes
+from its transcript). A fresh agent re-derives the file layout and idioms you already paid for, and — the real
+cost — cannot tell a deliberate choice from a bug, so it "fixes" things the author decided on purpose. The
+inverse holds for review: **never** resume the implementer to review its own work; a reviewer must be cold or
+it defends the diff instead of attacking it.
 
 **Phase 0 — compile the fire brief BEFORE any edit (mandatory; template + full rules:
 [`agents/fire-brief-template.md`](../fire-brief-template.md)).** Between selecting the item and opening a
@@ -393,7 +405,10 @@ running; the **browser tab** you do not.
   **Resume ceremony is light (Andrew, 2026-08-08):** a later fire reads the checkpoint, runs a **delta-scout**
   (re-verify the next increment's touch-list live), and **amends the checkpoint in the same commit as the
   increment** — no fresh committed brief, no re-derived scope, no extra board reconcile beyond the row's
-  one-line pointer. **Review cadence:** per-increment review sized to the increment's **own diff + posture
+  one-line pointer. **What a resume drops is the committed brief DOCUMENT, never the delegation:** the
+  delta-scout is still a spawned `haiku` scout and the increment still goes to a `sonnet` builder, per §3.
+  Reading "do not recompile the brief" as "do the work inline" is how a resumed fire silently loses both its
+  independent census and its adversarial review. **Review cadence:** per-increment review sized to the increment's **own diff + posture
   delta** — a posture-changing increment (gate lift, narrowing, new enforcement point) gets the full 3-layer
   pass, a mechanical middle increment gets a lead review — plus **one cumulative adversarial pass over the
   item's whole diff at close**. That closing pass, not repetition per increment, is what the security plane's
