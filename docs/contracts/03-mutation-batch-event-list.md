@@ -13,7 +13,7 @@ return {
 }
 ```
 
-Both arrays may be empty (a no-op operation has zero mutations and zero events — useful for pure validation operations that succeed/fail without changing state).
+Both arrays may be empty (a no-op operation has zero mutations and zero events — useful for pure validation operations that succeed/fail without changing state). A return value not matching this shape is rejected fail-closed at parse (`ScriptFailed`), before commit.
 
 ### 3.2 MutationBatch
 
@@ -38,23 +38,15 @@ Each mutation declares an intended state transition on a single Core KV key.
 | `document` | `create`, `update` | Document body. Includes `class`, `isDeleted`, and `data` (plus aspect/link-specific fields like `vertexKey`/`localName`/`sourceVertex`/`targetVertex`). **Provenance fields are NOT set by the script** — `createdAt`, `createdBy`, `createdByOp`, `lastModifiedAt`, `lastModifiedBy`, `lastModifiedByOp` are injected by the Processor at commit step 6 using the current operation's actor and timestamp. |
 | `expectedRevision` | optional, `update` only | Revision condition for optimistic concurrency. If omitted, Processor uses the revision read during step 4 (Hydrate). Explicit override is reserved for compensating operations that need to force a specific revision check. |
 
-### 3.3 Mutation Op Types — and why there is no `upsert`
+### 3.3 Mutation Op Types
 
 **`create`** — assert the key did not exist before this operation. Submitted with NATS revision condition `revision=0`. If the key exists in any state (including tombstoned), the atomic batch is rejected.
 
 **`update`** — assert the key existed before this operation and the script is modifying it. Submitted with NATS revision condition equal to either `expectedRevision` (if provided) or the revision read at step 4. The Processor accepts updates targeting tombstoned documents — setting `isDeleted: false` in the update payload implicitly restores the entity. There is no separate `restore` op.
 
-**`tombstone`** — assert the key existed before this operation and the script is marking it deleted. The Processor sets `isDeleted: true` and updates `lastModifiedAt`/`lastModifiedBy`/`lastModifiedByOp`. The stored document is otherwise preserved whole. A tombstone mutation carries no `document`; one supplied is not honored. A tombstone can never modify or blank the stored body: content erasure is crypto-shredding (§3.10/§3.11), and keyspace reclaim is the separately-designed `delete` verb. Tombstones are permanent; keys are not reused — a new entity requires a new NanoID.
+**`tombstone`** — assert the key existed before this operation and the script is marking it deleted. Submitted with NATS revision condition equal to the hydrated revision. The Processor sets `isDeleted: true` and updates `lastModifiedAt`/`lastModifiedBy`/`lastModifiedByOp`. The stored document is otherwise preserved whole. A tombstone mutation carries no `document`; one supplied is not honored. A tombstone can never modify or blank the stored body: content erasure is crypto-shredding (§3.10/§3.11), and keyspace reclaim is the separately-designed `delete` verb. Tombstones are permanent; keys are not reused — a new entity requires a new NanoID.
 
-**Why no `upsert`:** Operation-level idempotency is guaranteed by `requestId` + tracker-in-atomic-batch + step 2 dedup (see Contract #2 §2.4 and the Processor commit path in `lattice-architecture.md`). The Processor will apply an operation's mutations **at most once** across any number of JetStream redeliveries:
-
-- Crash before step 8 → no tracker, no mutations committed; redelivery re-executes fresh
-- Crash after step 8 → tracker exists, mutations committed; redelivery's step 2 dedup short-circuits; mutations are NOT re-applied
-- Multiple redeliveries → step 2 dedup short-circuits each one
-
-`create`/`update`/`tombstone` therefore describe the script's *intent for state transition*, not retry-safe operations. The script asserts what should be true: `create` asserts "this key did not exist before"; `update` asserts "this key existed and I'm modifying it." A mismatch between the assertion and Core KV state surfaces as a `RevisionConflict` error — which is the correct outcome, because it means the script's model of the world disagrees with reality (typically: a concurrent operation with a different `requestId` changed the same state).
-
-Silently masking that disagreement (the upsert semantic) would convert genuine data conflicts into silent data loss. The platform's preference is to fail loudly so the script author can branch explicitly.
+**There is no `upsert`.** Operation-level idempotency is `requestId` + tracker-in-atomic-batch + step-2 dedup (Contract #4 §4.4) — mutations apply **at most once** across redeliveries. The three verbs describe the script's *intent for state transition*: a mismatch between the assertion and Core KV state surfaces as `RevisionConflict`, the correct outcome — the script's model of the world disagrees with reality, and masking that (the upsert semantic) would convert genuine conflicts into silent data loss.
 
 ### 3.4 EventList
 
@@ -87,82 +79,28 @@ Batch-internal referential integrity — link endpoints and aspect host vertices
 
 The Processor performs **no** independent step-6 endpoint/host resolution and emits no dangling-reference error code. A dangling link is low-harm — readers filter `isDeleted`, and an absent endpoint reads as nothing — and convergence gaps are the Weaver's detect-and-recover domain, not a fail-closed platform reject.
 
-**Tombstoning vertices with active aspects/links:** Tombstoning a vertex does NOT automatically tombstone its aspects or links. The Processor does not cascade. If a script wants cascade behavior, it explicitly includes tombstone mutations for the dependent aspects and links in the same batch. **Why:** cascade semantics are business-logic concerns (a vertex tombstone may want to retain historical aspects for audit), and the platform refuses to make that choice on the script's behalf. Readers filter on `isDeleted` independently; tombstoning a vertex makes its key invisible to most queries even if its aspects remain.
+**Tombstoning vertices with active aspects/links:** Tombstoning a vertex does NOT automatically tombstone its aspects or links — the Processor does not cascade (cascade is a business-logic choice, not the platform's). A script wanting cascade explicitly includes the dependent tombstone mutations in the same batch. Readers filter on `isDeleted` independently; tombstoning a vertex makes its key invisible to most queries even if its aspects remain.
 
 **Within-batch ordering:** Mutations within a MutationBatch form a set, not a sequence. The atomic batch commits them all simultaneously. Scripts must declare what should be true after the operation; they do not declare ordered procedural steps.
 
 ### 3.6 Script-Generated Keys
 
-When a script creates new entities, it generates their NanoIDs inline and uses the full keys in subsequent mutations within the same batch.
+When a script creates new entities, it generates their NanoIDs inline and reuses the full key strings
+in subsequent mutations of the same batch:
 
 ```python
-def execute(state, op):
-    new_identity_id = nanoid.new()  # 20-char NanoID, custom alphabet (Contract #1)
-    identity_key = "vtx.identity." + new_identity_id
-
-    return {
-        "mutations": [
-            {
-                "op": "create",
-                "key": identity_key,
-                "document": {"class": "identity", "isDeleted": False, "data": {}}
-            },
-            {
-                "op": "create",
-                "key": identity_key + ".email",
-                "document": {
-                    "class": "email",
-                    "vertexKey": identity_key,
-                    "localName": "email",
-                    "isDeleted": False,
-                    "data": {"value": op.payload["email"], "verified": False}
-                }
-            },
-        ],
-        "events": [
-            {
-                "class": "identity.created",
-                "data": {"identityKey": identity_key, "createdBy": op.actor}
-            }
-        ]
-    }
+new_id = nanoid.new()                      # 20-char NanoID, custom alphabet (Contract #1)
+identity_key = "vtx.identity." + new_id
+# ...emit the vertex create, then aspects/links keyed on identity_key...
 ```
 
-The Starlark stdlib provides:
-- `nanoid.new()` — returns a fresh 20-char NanoID from the substrate package's custom alphabet
-- `nanoid.short()` — returns an 8-char NanoID for display codes (NOT for primary keys)
-
-Both functions are deterministic-by-seed within a single script execution if needed for testing; the Processor seeds the generator with the operation's `requestId` to ensure replay determinism (re-executing the same operation produces the same generated IDs).
+The Starlark stdlib provides `nanoid.new()` (20-char, primary keys) and `nanoid.short()` (8-char
+display codes — NOT for primary keys). The Processor seeds the generator with the operation's
+`requestId`, so replaying the same operation produces the same generated IDs.
 
 ### 3.7 Architectural Boundary — Starlark Never Touches NATS
 
-Starlark scripts are pure functions: `(state, operation) → (mutations, events)`. They have no NATS handle. They do not publish events; they declare events for the Processor to publish. They do not write to KV; they declare mutations for the Processor to apply.
-
-This is the architectural boundary that makes Starlark execution deterministic and replayable (NFR-E4). Any I/O that scripts appear to do — generating NanoIDs, reading timestamps, computing hashes — is provided by the Starlark stdlib with deterministic seeding from the operation envelope. Scripts cannot reach outside the sandbox.
-
-### 3.8 Implementation Notes
-
-**For the AI agent implementing Story 1.5 (`internal/substrate`):**
-
-- `package mutation` — Go struct definitions for `Mutation`, `MutationBatch`, `Event`, `EventList`. JSON marshaling. Enum types for `op` ∈ `{create, update, tombstone}`.
-
-**For the AI agent implementing Story 1.6 (Processor — Starlark Sandbox & JIT Hydration):**
-
-- The Starlark sandbox exposes `nanoid.new()` and `nanoid.short()` builtins. Seed the NanoID generator with the operation's `requestId` for determinism under replay.
-- Starlark's return value is parsed as `{mutations, events}` dict. Type-check each mutation and event against the Go struct shape before proceeding to step 6.
-- A script returning anything other than the expected shape is rejected with `StarlarkExecutionFailed: InvalidReturnShape`.
-
-**For the AI agent implementing Story 1.7 (Processor — DDL Validation & Atomic Batch):**
-
-- At step 6: for each mutation in the batch, resolve DDL by class (per Contract #1 §1.5), validate `document.data` against DDL schema, enforce `permittedCommands` (Story 1.10/FR57), apply sensitivity constraints. Inject provenance fields (`createdAt`, `createdBy`, `createdByOp`, `lastModifiedAt`, `lastModifiedBy`, `lastModifiedByOp`).
-- At step 6 batch-internal consistency: **no separate platform pass** — link-endpoint / aspect-host integrity is the DDL script's responsibility via declared reads (§3.5), with Weaver detect-and-recover as the convergence backstop; the Processor emits no `DanglingReference` code.
-- At step 7: reject any event whose `class` is not `<domain>.<eventName>` (no dot, or an empty domain/eventName segment) — a domain segment is required. Set the Event document's `domain` field to the class's first segment. The Processor does **not** resolve an event-type DDL or schema-validate `event.data` at commit — event schemas are a package-owned contract; there is no `UndeclaredEventType` / `EventSchemaViolation` reject.
-- At step 8: construct the NATS atomic batch with revision conditions per `mutation.op`:
-  - `create` → revision condition = 0 (create-if-absent)
-  - `update` → revision condition = `expectedRevision` if provided, else hydrated revision
-  - `tombstone` → revision condition = hydrated revision
-  - Plus the idempotency tracker write at `vtx.op.<requestId>` with revision condition = 0
-- Step 8 atomic batch failure → reply with `RevisionConflict` (or `MetaLaneCollision` if on meta lane).
+Starlark scripts are pure functions: `(state, operation) → (mutations, events)`. They have no NATS handle. They do not publish events; they declare events for the Processor to publish. They do not write to KV; they declare mutations for the Processor to apply. Any apparent I/O — NanoIDs, timestamps, hashes — is stdlib with deterministic seeding from the operation envelope; scripts cannot reach outside the sandbox (NFR-E4). Sandbox detail: `docs/components/processor.md`.
 
 ### 3.9 Substrate Batch Helpers and Committed Revisions
 
@@ -188,7 +126,7 @@ revisions[ops[i].Key] = firstSeq + uint64(i)   // for i in 0..N-1
 
 #### 3.9.1 Atomic-batch size ceiling
 
-A single operation's atomic batch is bounded by two independent NATS limits (matched to the platform pin, **NATS 2.14** — `go.mod`, `docs/vendors.md`), enforced fail-closed by the substrate batch helpers before any publish:
+A single operation's atomic batch is bounded by two independent NATS limits (the platform's NATS pin and its version gates: `docs/vendors.md`), enforced fail-closed by the substrate batch helpers before any publish:
 
 - **Message-count ceiling — 1000 messages per batch.** NATS abandons an over-limit atomic batch (ADR-50, *JetStream Batch Publishing*; server `err_code 10199`). 1000 is the NATS 2.14 server **default** (`streamDefaultMaxAtomicBatchSize`), overridable via `jetstream_limits.max_batch_size`; a deployment **must not set it below 1000** (the client-side guard would become looser than the server), and the reference `deploy/nats-server.conf` sets no override. The Processor's batch is `business mutations + the idempotency tracker + (optional) the transactional-outbox aspect`, so a single operation may emit **at most 998 business mutations** (`MaxBatchMessages − 2`). A cascade that would exceed this (e.g. tombstoning a very-high-degree hub and all its links in one op) must be decomposed by the script/pattern author into multiple operations.
 - **Per-value byte ceiling — `max_payload`.** Each batch member is an ordinary NATS message subject to the server's negotiated `max_payload` (NATS default **1 MiB**). The substrate rejects a mutation whose marshaled value (after commit-time provenance injection) exceeds `max_payload` minus a fixed header/provenance headroom. Large binary/document payloads belong in the off-graph Object Store (Contract #7 §7.2), **not** in a Core-KV aspect value.
@@ -277,15 +215,11 @@ commit. Sensitive data reaches an external event only as a **sensitive-ref** hyd
 `contextHint.egressReads` (Contract #2 §2.5 class (f)); the ref carries the at-rest ciphertext, never
 plaintext.
 
-The trigger is **consumption, not decryption**. Hydration decrypts every present declared sensitive key,
-so keying the guard on the decrypt made a *surplus* declared read — one the script never names — split the
-operation's outcome on whether that key exists: present rejected, absent committed. Since `contextHint` is
-client-supplied and step 3 authorizes without inspecting the declared read set, that answered "does this
-key exist, and is its class sensitive?" to any actor holding a grant on such an operation. An operation
-that genuinely consumes the data is rejected exactly as before. Correspondingly, "readable" is not
-"decrypted": a sensitive-classed aspect that was never encrypted at rest (no Vault configured, so the
-write path never encrypted it) counts as consumed when read — the guard does not depend on a crypto
-boundary being present to bind.
+The trigger is **consumption, not decryption** (keying on the decrypt would make a surplus declared
+read an existence oracle — the same exposure class as Contract #2 §2.5's fault-site rule). And
+"readable" is not "decrypted": a sensitive-classed aspect that was never encrypted at rest (no Vault
+configured, so the write path never encrypted it) counts as consumed when read — the guard does not
+depend on a crypto boundary being present to bind.
 
 **Live-envelope rule.** A Vault-decrypt consumer resolves the **key holder's** envelope (the holder named
 by the ciphertext's `keyId`) from the **current** `piiKey` state (the aspect, or its lens projection) **at
@@ -364,7 +298,5 @@ inert ciphertext, reclaimed by the ordinary ownership GC (`objectLiveness` → `
 
 ## Revision history
 
-| Date | Change |
-|------|--------|
-| 2026-07-22 | **Tombstone body-preservation posture (Andrew-ratified).** §3.3: a tombstone preserves the stored document whole and carries no `document` of its own — one supplied is not honored. A tombstone can never modify or blank a body: content erasure is crypto-shredding (§3.10/§3.11), keyspace reclaim is the separately-designed `delete` verb. Codifies the shipped step-8 preservation behavior; no runtime semantics change. Contract #8's UpgradePackage payload example drops its tombstone `document` husk in the same change. |
-| 2026-06-07 | **Event-domain model (Andrew-ratified, folded into Story 8.2).** §3.4: an event `class` MUST be `<domain>.<eventName>` — a domain segment (the first dot-segment) is now **required** and validated at commit step 7; a dot-free class is rejected. The published Event document carries a discrete `domain` field set by the Processor from the class's first segment (single source of truth = the class). Subject stays `events.<domain>.<eventName>`; per-domain consumers subscribe `events.<domain>.>`. Examples re-cased from PascalCase (`identityCreated`) to `<domain>.<eventName>` (`identity.created`). No envelope-shape change beyond the additive `domain` field. |
+- 2026-07-22 — §3.3 tombstone body-preservation posture ratified.
+- 2026-06-07 — §3.4 event-domain model ratified (`<domain>.<eventName>` required).
