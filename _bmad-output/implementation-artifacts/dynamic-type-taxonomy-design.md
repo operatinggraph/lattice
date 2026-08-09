@@ -1532,3 +1532,14 @@ un-addressed.
   consumer-liveness signal.
 - **§6.5's consumer-death row still has no health signal.** The disarm and re-derivation are wired; the operator
   surface is item 6's `filterMode` / `filterBroadReason` work.
+
+**One precondition GATES Fire B, and §6.3's cost bound is wrong.** §6.3 bounds the trigger's cost as *"a package
+declared a new type, which is an install event, not a data event"* — true about frequency, and irrelevant to the
+burst. `Rebuild` calls `supervisor.Reset`, which **deletes and recreates the lens's `KV_core-kv` durable**, and
+the taxonomy sweep applies that to every live entry whose expanded set moved. Measured on the running stack
+2026-08-09: `KV_core-kv` carries **118 consumers, 111 of them one-per-lens**, so a single taxonomy event can
+burst up to that many consumer deletes and creates. Andrew reports that Refractor overwhelming NATS with
+consumer-creation requests is a mechanism that has **already OOM-killed `lattice-nats`** on this host. Inert
+today only because no `packages/` lens carries `*`; the first one makes it live. **A serialized or coalesced
+rebuild scheduler is therefore a prerequisite of Fire B, not a follow-on** — filed as its own ★★★ lane row.
+This supersedes §6.3's "bounding it" paragraph, which counts trigger frequency and never counts the fan-out.

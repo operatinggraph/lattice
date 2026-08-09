@@ -1,5 +1,6 @@
 # Done log archive — lattice (older shipped items, newest first)
 
+- 2026-08-08 · `f425d1e9` · Contracts slimming — corpus −27%, buried rules promoted, stale-false passages corrected · [proposal](../../../implementation-artifacts/contracts-slimming-proposal.md)
 - 2026-08-07 · `54b3c8c7` · [privacy-base] Erasure is a Loom pattern with a convergent tail and a seal; the shred stops cascading
 - 2026-08-07 · `25ad55a9` · [privacy-base] erasure Fire B inc 8 — the identityErasure Loom pattern
 - 2026-08-07 · `6ee839d9` · [privacy-base] erasure Fire B inc 7 — the identityErasureComplete weaverTarget
