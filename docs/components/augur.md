@@ -127,8 +127,10 @@ The frozen surface is an **additive, opt-in `augur` block** on the Weaver target
 ```
 "augur": {
   "escalate":  ["unplannable" | "exhausted", ...],   # which stuck-gap triggers reach L3
-  "pattern":   "<reasoning externalTask pattern>",    # default: augurReasoning
-  "model":     "<model override>",                    # default: claude-opus-4-8
+  "op":        "<reasoning op>",                      # default: CreateAugurReasoningClaim (directOp)
+  "adapter":   "<bridge adapter>",                    # default: augur
+  "replyOp":   "<records the proposal>",              # default: RecordProposal
+  "model":     "<model override>",                    # optional
   "autoApply": {                                      # designed, Andrew-gated (currently absent)
     "actions": ["triggerLoom", "assignTask", ...],   # low-risk allow-list
     "minConfidence": 0.0..1.0

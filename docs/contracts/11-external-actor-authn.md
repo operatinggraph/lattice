@@ -1,6 +1,6 @@
 # Contract #11 — External Actor Authentication (JWT profile & subject binding)
 
-**Status:** FROZEN (Phase 3; un-deferred from the Gateway trust-boundary design's §5 deferral)
+**Status:** FROZEN (Phase 3)
 
 This contract specifies how an **external bearer token** becomes a **Lattice actor**: the accepted
 JWT profile and the subject-binding rules every verifying surface applies. It exists because multiple
@@ -123,9 +123,7 @@ The subject **is** the bare Lattice identity NanoID:
   actors included. It exists solely for the DEV-ONLY checked-in key and the dev/e2e minters that sign
   with it (dev-token, the app dev endpoints, the dev Fake IdP). It is **not** operator-selectable for a
   configured source — the impersonation-grade footgun of granting a third-party IdP arbitrary-identity
-  assertion is removed structurally, not by documentation. (A future *enrolled-NanoID* posture — an IdP
-  that writes a Lattice id back into a custom claim — would be a distinct, explicitly-added third mode,
-  not this one; deferred until a deployment drives it.)
+  assertion is removed structurally, not by documentation.
 
 ### Invariant — identical binding everywhere
 
