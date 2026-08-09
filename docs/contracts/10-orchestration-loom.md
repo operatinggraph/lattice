@@ -1,10 +1,9 @@
 # Contract #10 (Loom) — pattern definition, step completion, lifecycle ops
 
-> **A part of [Contract #10 — Orchestration Surfaces](10-orchestration-surfaces.md)** (the index +
-> shared revision history). Section numbers **§10.5 / §10.6 / §10.9** are the canonical Contract-#10
-> identifiers, unchanged by this shard. The `externalTask` step kind (§10.5 / §10.6) is Loom's surface
-> for the external-I/O **bridge**, whose own adapter/envelope contract is
-> [`docs/components/bridge.md`](../components/bridge.md).
+> **A shard of [Contract #10 — Orchestration Surfaces](10-orchestration-surfaces.md)** — §10.5 /
+> §10.6 / §10.9 keep their canonical numbers. The external-I/O **bridge**'s own adapter/envelope
+> contract is [`docs/components/bridge.md`](../components/bridge.md); this shard covers only Loom's
+> `externalTask` surface.
 
 ## 10.5 Loom pattern definition (package data)
 
@@ -13,10 +12,8 @@ A `meta.loomPattern` meta-vertex (loaded via CDC like a Lens def). A pattern dec
 Guards and step operations are relative to the subject.
 
 **Starting an instance** is the op **`StartLoomPattern{ patternRef, subjectKey }`** (`subjectKey`
-must be a vertex of `subjectType`). Authorization is per-pattern via **`authContext.target =
-vtx.meta.loomPattern.<patternId>`** + capability scope (Weaver = `scope: any`; external/per-pattern =
-`scope: specific` / task grant) — full contract in **§10.8 "`triggerLoom` authorization"**. This is
-the pattern-*start* auth (distinct from the per-step auth of §10.6/§10.7).
+must be a vertex of `subjectType`); pattern-*start* authorization is **§10.8 "`triggerLoom`
+authorization"** (distinct from the per-step auth of §10.6/§10.7).
 
 ```
 {
@@ -34,12 +31,9 @@ the pattern-*start* auth (distinct from the per-step auth of §10.6/§10.7).
 ```
 
 **`completionDomains?: ["<domain>", …]`** (optional) — the set of `events.<domain>.>` the engine
-reconciles a **durable per-domain consumer** for (D2). A **domain** is the **first segment of an event
-class** — the `<domain>` in `events.<domain>.>`. Every event class is `<domain>.<eventName>`
-(Contract #3 §3.4, validated at commit step 7), so this model is **true codebase-wide**, not
-illustrative: e.g. class `identity.created` → domain `identity`, class `orchestration.taskCompleted` →
-domain `orchestration`; `loom-<domain>` is always a valid durable name. **Defaults to `[subjectType]`**
-when omitted (covers the common same-domain flow). A flow whose steps complete in a domain other than
+reconciles a **durable per-domain consumer** for. A **domain** is the first segment of an event class
+(`<domain>.<eventName>`, Contract #3 §3.4). **Defaults to `[subjectType]`** when omitted (covers the
+common same-domain flow). A flow whose steps complete in a domain other than
 the subject's **must list it explicitly**; the §10.6 per-step completion **deadline** is the not-silent
 backstop for an omitted/mis-declared domain (FR29 never-silently-drop). The engine reads
 `completionDomains` — it does not *know* domains; per-step granularity is unnecessary because
@@ -121,12 +115,9 @@ then park; the completer is a human for userTask, the bridge for externalTask). 
   using the identity's **live** key envelope (never a stored copy — §3.10 live-envelope rule), so a
   fabricated or spliced ref and a shredded identity's ref both fail closed. An unwrap failure is a data
   error: a permanent one (unverified/shredded/malformed/absent) posts the terminal `replyOp` with
-  a failed outcome so the pattern converges; a transient one retries — never a blank field to a vendor. The **`row.<column>`** half of §10.8 templating is the **Weaver actuator's**
-  resolution (`subject`/`assignee`/`target` selection from a violation row) and is **not** reachable on
-  the Loom write path: by the time the instanceOp runs the violation row is gone, the write path must not
-  read the lagging `weaver-targets` read-model, and `triggerLoom{pattern, subject}` carries no row. (A
-  field on a *linked* vertex is reached by the instanceOp DDL's own §2.5 `kv.Read`, not a `params`
-  template.) `replyOp` is the result-op type the bridge posts back (carrying
+  a failed outcome so the pattern converges; a transient one retries — never a blank field to a vendor. The **`row.<column>`** half of §10.8 templating is the Weaver
+  actuator's resolution and is **not** reachable on the Loom write path (a field on a *linked* vertex
+  is reached by the instanceOp DDL's own §2.5 `kv.Read`, not a `params` template). `replyOp` is the result-op type the bridge posts back (carrying
   `payload.externalRef = instanceKey`, §10.6) — **its DDL records the external outcome as aspect(s) on
   the claim vertex** (**D5**: business data lives in aspects; the vertex root `data` stays minimal — at
   most a justified lifecycle scalar such as `status`), **not** as fat root `data`; `instanceOp` is the
@@ -134,34 +125,21 @@ then park; the completer is a human for userTask, the bridge for externalTask). 
 - **Loom stays pure:** the event rides the **`instanceOp`'s transactional outbox** (the op Loom submits
   through the command-outbox relay), **not** a Loom-held NATS handle — the `internal/loom`
   substrate-only boundary is unchanged.
-- **Completion is symmetric to a userTask** (amended 2026-06-18). Besides recording the outcome
-  aspect(s), the `replyOp` DDL **emits `orchestration.externalTaskCompleted` carrying
-  `payload.externalRef = instanceKey`** — the uniform orchestration-domain completion signal Loom
-  correlates on, the analog of `orchestration.taskCompleted{taskKey}` for a userTask (§10.6). An
-  externalTask pattern therefore declares **`completionDomains: ["orchestration"]`** (exactly like an
-  all-userTask pattern), and Loom's existing `loom-orchestration` consumer advances it. The event is
-  **emitted by the purpose-built `replyOp`** rather than platform-injected the way `taskCompleted` is for
-  a userTask's *oblivious* bound op — the emission mechanism differs to match the completer (a deliberate
-  result op vs an ordinary business op), the outcome (an orchestration-domain completion correlated by a
-  token) is identical. The wait for that event is **unbounded** once the `instanceOp` commits (§10.6),
-  exactly as a userTask's human wait is unbounded once its task vertex exists.
+- **Completion is symmetric to a userTask.** Besides recording the outcome aspect(s), the `replyOp`
+  DDL **emits `orchestration.externalTaskCompleted` carrying `payload.externalRef = instanceKey`** —
+  the analog of `orchestration.taskCompleted{taskKey}` (§10.6). An externalTask pattern therefore
+  declares **`completionDomains: ["orchestration"]`**, and Loom's `loom-orchestration` consumer
+  advances it. The event is emitted by the purpose-built `replyOp` (a userTask's is
+  platform-injected); the wait for it is **unbounded** once the `instanceOp` commits (§10.6), exactly
+  as a userTask's human wait is.
 
-**Async resolution (Amended 2026-06-19 — Phase 3, async external-reply).** The bridge's adapter call
-MAY resolve **asynchronously**: a real vendor returns a *pending reference* on submit and the true
-result lands later (webhook or status-poll, minutes–days). This rides the **already-unbounded wait**
-above with no change to the completion model — the bridge posts `replyOp` (hence
-`externalTaskCompleted`) whenever resolution arrives. While pending, the bridge records an interim
-**pending marker** — a package-chosen aspect on the claim vertex written via a package `dispatch` op,
-analogous to the `.outcome` aspect (D5) — and drives **re-poll + a give-up timeout** through its §10.4
-schedule lane (`schedule.bridge.>`). A timeout posts a terminal `replyOp` with a `failed` status, so a
-never-answered call **converges** rather than parking forever. The §10.6 step `deadline.<instanceId>`
-TTL bounds the **`instanceOp` submission only** — it **disarms at `instanceOp` commit** (§10.6), so it
-never survives to see the external round-trip and does **not** catch a dead bridge. The dead-call backstop
-is the **bridge's own give-up timeout** (its §10.4 `schedule.bridge.>` lane, above), which posts a terminal
-`failed` `replyOp`; a genuinely dead bridge surfaces on the **bridge's** Contract #5 Health, not a
-per-instance Loom timeout. (A single global `CallDeadline` on the unbounded bridge wait is deferred until
-real, slow adapters exist — today's fakes resolve inline.) A synchronous adapter (today's fakes) is unchanged — it resolves
-inline and posts `replyOp` immediately, writing no pending marker.
+**Async resolution.** The bridge's adapter call MAY resolve **asynchronously** — the unbounded wait
+above absorbs it with no change to the completion model. The pending-marker, re-poll, and **give-up
+timeout** obligations are the bridge's contract (`docs/components/bridge.md`, Async adapters): a
+timeout posts a terminal `failed` `replyOp`, so **a never-answered call converges rather than parking
+forever**. The §10.6 `deadline.<instanceId>` bounds the `instanceOp` submission only and disarms at
+its commit; a dead bridge surfaces on the bridge's own Contract #5 Health, never a per-instance Loom
+timeout.
 
 **Guards — pure predicate over the subject's current state.** Absent guard = step always runs.
 
@@ -213,15 +191,11 @@ re-advance.
 
 All event business fields ride the Event envelope's **`payload`** object (Contract #3 §3.4), so Loom's
 **three** structural correlation keys are **top-level `requestId`** (systemOp), **`payload.taskKey`**
-(userTask), and **`payload.externalRef`** (externalTask — *Amended 2026-06-18, 13.1*). Loom stays
-domain-ignorant — it tries each field against the durable token store (`token.<requestId>`,
-`token.<taskKey>`, `token.<externalRef>`) and **at most one live pointer resolves** — the one for the
-current pending step. Disjointness is **by field + by the single live pointer**, not by the key's type
-segment: `externalRef` is the **opaque bare-NanoID handle** Loom minted (the `instanceOp` DDL forms the
-`vtx.<type>.<handle>` claim-vertex key *from* it; the handle itself carries no type), so it needs no
-fixed shape. The `externalTask`'s write-ahead handle is that **instance key Loom mints** — it does not
-own the bridge's later result-op `requestId`, so it parks on a handle it controls and the bridge echoes
-it back as `payload.externalRef`.
+(userTask), and **`payload.externalRef`** (externalTask). Loom stays domain-ignorant — it tries each
+field against the durable token store and **at most one live pointer resolves** — the one for the
+current pending step. `externalRef` is the **opaque bare-NanoID handle** Loom minted write-ahead (the
+`instanceOp` DDL forms the `vtx.<type>.<handle>` claim-vertex key *from* it); the bridge echoes it
+back as `payload.externalRef`.
 
 ### systemOp terminals — committed on-stream, failed/rejected off-stream (deadline + probe)
 
@@ -232,8 +206,7 @@ A submitted systemOp has three orthogonal outcomes; separating them is what remo
   consumers resume from their ack floor. The outbox owns crash-recovery; the deadline does not.
 - **rejected / failed / unseen** — **off-stream** (a rejected op writes no tracker and emits no event,
   Processor denies before commit step 8), learned via the **per-step `deadline.<instanceId>` TTL**
-  (§10.3). The synchronous `ops.<lane>` submit-reply is **not** used — it blocks the consumer and forces
-  a raw NATS handle into the engine.
+  (§10.3) — never via the synchronous `ops.<lane>` submit-reply.
 
 **Step-deadline-exceeded handler.** When `deadline.<instanceId>` expires (the loom-state CDC observes
 the `KeyValuePurge`/MaxAge marker; or the reconciler fallback detects an overdue instance), the handler
@@ -263,12 +236,10 @@ false-fail finds the pointer gone → dropped (a bounded, alerted divergence, no
 
 ### userTask creation path — bounded creation-deadline + tracker probe
 
-A userTask step is **two waits in sequence**: a **bounded** wait for the task to be *created* (a machine
-action — `CreateTask` commits in milliseconds), then an **unbounded** wait for the human to act on it.
-The deadline+probe above covers the *systemOp* step; the userTask **creation** wait gets the analogous
-backstop so a rejected/lost `CreateTask` (e.g. the subject identity is dead → `CreateTask`'s no-orphan
-validation rejects it, or a taskId collision) fails the instance instead of parking `token.<taskKey>`
-forever (the silent wedge §10.6 forbids).
+A userTask step is **two waits in sequence**: a **bounded** wait for the task to be *created* (a
+machine action), then an **unbounded** wait for the human to act on it. The creation wait gets the
+analogous backstop so a rejected/lost `CreateTask` fails the instance instead of parking
+`token.<taskKey>` forever (the silent wedge §10.6 forbids).
 
 - A userTask step arms a **bounded creation-deadline** (`CreateTaskTimeout`, sized ≫ any `CreateTask`
   commit latency — **not** a human-response window).
@@ -285,50 +256,25 @@ forever (the silent wedge §10.6 forbids).
   never a direct Core-KV read) here; the module boundary (substrate-only, no raw NATS handle) is
   unchanged.
 
-**Honest nuance:** after the creation-deadline disarms (the task vertex exists), there is **no runtime
-timeout** on the human wait — so a *mis-declared userTask `completionDomains`* (one that omits the
-`orchestration` domain) is caught by a **load-time warn** when the pattern is loaded, not by a runtime
-backstop. The warn is loud; the pattern is not rejected (a future userTask completion domain could
-differ).
+**Honest nuance (binding for both async-completer kinds):** after the creation-deadline disarms, there
+is **no runtime timeout** on the human/bridge wait — so a pattern whose `completionDomains` omits
+`orchestration` (for a userTask **or** an externalTask step) is caught by a **load-time warn** when the
+pattern is loaded, not by a runtime backstop. **The warn is loud; the pattern is not rejected** (a
+future completion domain could differ). This deliberate, observable async wait is what both
+async-completer kinds accept — distinct from the **systemOp** deadline, which *does* advance on a
+tracker-present probe, because for a systemOp the op's own commit **is** the completion.
 
-### externalTask creation path — bounded creation-deadline + instanceOp-tracker probe (amended 2026-06-18)
+### externalTask creation path — same shape as userTask
 
-An externalTask step is **two waits in sequence** — exactly like a userTask, with the bridge in the
-human's role: a **bounded** wait for the `instanceOp` to *commit* (the machine action that creates the
-claim vertex + emits the `external.<adapter>` event), then an **unbounded** wait for the bridge to post
-the `replyOp`. It is therefore handled like the **userTask** creation path, **not** like a systemOp: the
-deadline backstops the *submission*, never the external round-trip, and it **must not advance the
-cursor**. (This corrects the original "exactly like a systemOp" framing, under which a committed-but-not-
-yet-replied `instanceOp` would wrongly advance the flow before the external result landed.)
-
-- An externalTask step arms a **bounded creation-deadline** (the `CreateTaskTimeout` machine-action
-  bound, sized ≫ `instanceOp` commit latency — **not** an external-call window).
-- When it fires, a read-before-act probe GETs the **`instanceOp`'s Contract #4 tracker
-  `vtx.op.<opRequestId>`** (the `opRequestId` Loom derived for the `instanceOp` — a Loom *read*, like the
-  systemOp/userTask probes; Loom cannot read the claim vertex itself, whose type is package-chosen, so it
-  probes the op tracker it owns):
-  - **tracker present** → the `instanceOp` committed: the claim vertex exists and the `external.<adapter>`
-    event was emitted, so the bridge will (eventually, at-least-once + idempotent) reply → **disarm** the
-    deadline (cursor/token untouched) and stop. The bridge wait is now **unbounded** — no further runtime
-    timeout (the bridge's durability is the guarantee; a dead bridge surfaces on the **bridge's own**
-    Contract #5 Health, not a per-instance Loom timeout). **The cursor advances only on
-    `orchestration.externalTaskCompleted` — never on this probe.**
-  - **tracker absent, `outbox.<opRequestId>` present** → the relay has not delivered the `instanceOp` yet
-    → **re-arm**; do not fail.
-  - **tracker absent, `outbox.<opRequestId>` absent** → the `instanceOp` was **rejected/lost** (the
-    external call will never happen) → `status=failed` (the atomic batch also deletes `token.<instanceKey>`
-    + `deadline.<I>`) → submit `FailPattern` (§10.9). **Alert.** (FR29 — the submission is never a silent
-    wedge.)
-- Every branch is CAS-on-`running`, mirroring the systemOp/userTask handlers. Loom only **reads** Core KV
-  here; the substrate-only boundary is unchanged.
-
-**Honest nuance (same as userTask):** after the creation-deadline disarms, there is **no runtime timeout**
-on the bridge wait — a *mis-declared externalTask `completionDomains`* (one that omits `orchestration`) is
-caught by a **load-time warn** (the analog of the userTask warn), not a runtime backstop; a permanently-
-dead bridge is closed out-of-band via `FailPattern` (the `CancelTask` analog). This deliberate, observable
-async-wait is what both async-completer step kinds (userTask, externalTask) accept — distinct from the
-**systemOp** deadline, which *does* advance on a tracker-present probe because for a systemOp the op's own
-commit **is** the completion.
+An externalTask is the same two waits with the bridge in the human's role; its creation-deadline
+backstops the **`instanceOp` submission only** and **never advances the cursor**. The probe GETs the
+`instanceOp`'s Contract #4 tracker (Loom cannot read the claim vertex, whose type is package-chosen,
+so it probes the op tracker it owns): **present** → committed; **disarm**, the bridge wait is now
+unbounded and **the cursor advances only on `orchestration.externalTaskCompleted`, never on this
+probe**; **absent + `outbox.<opRequestId>` present** → re-arm; **absent + outbox absent** →
+rejected/lost → `status=failed` (the atomic batch also deletes `token.<instanceKey>` +
+`deadline.<I>`) → `FailPattern` (§10.9) + **alert** (FR29 — the submission is never a silent wedge).
+Every branch is CAS-on-`running`; Loom only reads Core KV via the RPC here.
 
 ### Completing a userTask — by `taskKey`, via `orchestration.taskCompleted` (RESOLVED)
 
@@ -369,13 +315,6 @@ engine derives a deterministic `taskId` from `(instanceId, cursor)` and passes i
 collapses on the Contract #4 `vtx.op.<requestId>` tracker — no duplicate task. The `task` DDL is package
 data (not a frozen contract); the grant/auth path (§10.7) is unchanged.
 
-### Why this needs NO frozen-contract change
-
-- **systemOp** correlation watches the tracker keyed by the `requestId` Loom itself chose.
-- **userTask** correlation watches the generic `orchestration.taskCompleted` event, which carries the
-  `taskKey` under `payload` intrinsically.
-- Authorization reuses the existing `authContext.{task,target}` + `ephemeralGrants` (§10.7).
-
 ### Constraint
 
 `loom-state` maps `{taskKey | requestId} → instance` via the durable co-located `token.<token>`
@@ -403,10 +342,6 @@ D3 calls the cursor "rebuildable," but rebuildability only holds if these orderi
    completion comes **solely** from its `pendingToken` (taskId/requestId); re-drive must **not** re-run
    a step whose token is still pending, or it double-submits. (The §10.5 example ends on a guardless
    `SetAddress`.)
-3. **(REMOVED) Completion watch suspended until rebuild.** There is no in-memory index to rebuild — a
-   redelivered completion resolves against the durable `token.<token>` pointer (§10.3) regardless of
-   engine age or replica. The durable per-domain consumer redelivers from its ack floor, and the
-   pointer's presence is the idempotency guard, so no suspend-until-warm gate is needed.
 
 ---
 
@@ -418,14 +353,10 @@ D3 calls the cursor "rebuildable," but rebuildability only holds if these orderi
 both on the **event plane**, with no Core-KV instance state.
 
 **Instance is operational-only (binding).** A Loom instance is **operational state** — it lives **only
-in `loom-state`** (P1, the `instance.<instanceId>` cursor, §10.3) and gets **no Core-KV business
-vertex**. Its lifecycle is announced on the **event plane** (`core-events`), **not** projected as
-Core-KV business state. These ops emit their `loom.*` events the ordinary way: at commit the faithful
-`EventList` is persisted as the **outbox aspect `vtx.op.<requestId>.events`** — alongside the universal
-`vtx.op.<requestId>` tracker, in the same step-8 atomic batch — and the outbox CDC consumer publishes
-from that aspect (`internal/processor/outbox/consumer.go`, filter `$KV.<bucket>.vtx.op.*.events`). So
-each writes the **standard tracker + outbox-events aspect**; the distinguishing property is only that it
-creates **no business-domain vertex** — the instance's sole durable home is the `loom-state` cursor.
+in `loom-state`** (the `instance.<instanceId>` cursor, §10.3) and gets **no Core-KV business vertex**.
+Its lifecycle is announced on the **event plane**: these ops emit their `loom.*` events the ordinary
+way (the step-8 tracker + `vtx.op.<requestId>.events` outbox aspect, Contract #3); the distinguishing
+property is only that they create **no business-domain vertex**.
 
 **Three lifecycle ops** (shipped by `orchestration-base`; the engine stays generic), each → outbox →
 `events.loom.*` (**P2: never a direct publish**):
@@ -452,21 +383,9 @@ the event is emitted; none writes a business vertex.)
   trigger op at the Processor; Loom dedups at-least-once event redelivery on the `instanceId` (the
   `loom-state` cursor presence).
 - **`loom` is a first-class domain:** Loom *consumes* `patternStarted` (trigger) and *emits*
-  `patternCompleted`/`patternFailed`. A Loom completion is therefore itself a consumable completion
-  event — so a Phase-3 **nested** pattern (a step that runs a sub-flow and waits) simply lists `loom`
-  in its `completionDomains` (§10.5) and correlates on the sub-instance's token, with **no new
-  machinery**.
-- **Queryability** ("which flows are running") is served by **Loom's control plane** — analogous to
-  Refractor's (`internal/refractor/control/service.go`), reading `loom-state` — **not** Core KV. It is
-  its own (future) control-plane story; Weaver gets the analogous one (Story 9.4 control-API). A
-  Refractor lens over the `loom.*` event stream remains an option for a durable read model if one is
-  later wanted.
-
-**No special Processor capability needed.** Event emission already rides the outbox aspect
-(`vtx.op.<requestId>.events`) written in the commit batch, so a lifecycle op is an ordinary op that
-emits events and writes no business vertex — nothing in the pipeline special-cases it. (An op whose
-`result.Mutations` is empty but whose `result.Events` is non-empty still commits the tracker + the
-`…events` aspect and publishes; confirm no upstream guard rejects an empty *business*-mutation set.)
+  `patternCompleted`/`patternFailed` — a pattern completion is itself a consumable completion event.
+- **Queryability** ("which flows are running") is served by **Loom's control plane** reading
+  `loom-state` — never Core KV.
 
 ---
 
