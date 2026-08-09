@@ -139,6 +139,52 @@ func SeedHoldsRole(t *testing.T, ctx context.Context, conn *substrate.Conn, acto
 	SeedLink(t, ctx, conn, linkKey, "holdsRole", actorKey, roleKey)
 }
 
+// SeedCredentialActor writes the bare identity vertex a raw sign-in credential
+// is, straight to Core KV. This is what the Gateway's first-touch
+// ProvisionConsumerIdentity establishes before a person ever reaches a
+// ceremony, and ClaimIdentity / CompleteCredentialLink require it: the
+// boundTo edge they emit names this vertex as its source, and the projection
+// that reads that edge anchors on it, so a claim by an actor with no vertex
+// would commit a binding no read model can show.
+//
+// It mirrors what ProvisionConsumerIdentity's fresh-actor branch commits — the
+// vertex, a `.state` of "claimed", and the consumer holdsRole grant — because
+// a fixture narrower than the op it stands in for proves only itself: a guard
+// added later that reads the actor's state or grant would pass here and fail
+// in production. roleKey is the consumer role the caller's package resolves;
+// pass "" to seed the vertex and state without a grant, for a test that is
+// specifically about an actor holding none.
+func SeedCredentialActor(t *testing.T, ctx context.Context, conn *substrate.Conn, actorKey, roleKey string) {
+	t.Helper()
+	doc := map[string]any{
+		"key": actorKey, "class": "identity", "isDeleted": false,
+		"data": map[string]any{},
+	}
+	b, err := json.Marshal(doc)
+	if err != nil {
+		t.Fatalf("marshal credential actor %s: %v", actorKey, err)
+	}
+	if _, err := conn.KVPut(ctx, HarnessCoreBucket, actorKey, b); err != nil {
+		t.Fatalf("seed credential actor %s: %v", actorKey, err)
+	}
+
+	state := map[string]any{
+		"class": "state", "vertexKey": actorKey, "localName": "state",
+		"isDeleted": false, "data": map[string]any{"value": "claimed"},
+	}
+	sb, err := json.Marshal(state)
+	if err != nil {
+		t.Fatalf("marshal credential actor state %s: %v", actorKey, err)
+	}
+	if _, err := conn.KVPut(ctx, HarnessCoreBucket, actorKey+".state", sb); err != nil {
+		t.Fatalf("seed credential actor state %s: %v", actorKey, err)
+	}
+
+	if roleKey != "" {
+		SeedHoldsRole(t, ctx, conn, actorKey, roleKey)
+	}
+}
+
 // SeedLink writes an alive link document straight to Core KV, for tests that
 // need graph topology an op script walks (containment chains, worksAt /
 // appliesToUnit / practicesAt / locatedAt edges) without paying for the ops

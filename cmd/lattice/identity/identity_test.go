@@ -200,6 +200,43 @@ func TestIdentityClaim_CLI_HappyPath(t *testing.T) {
 		t.Fatalf("marshal claim payload: %v", err)
 	}
 
+	// A claim by an unprovisioned credential is refused, and refused
+	// generically: the CLI reaches the Processor without the Gateway's
+	// first-touch pre-flight, so the credential actor has no vertex, and the
+	// boundTo edge the claim would emit would name an endpoint that does not
+	// exist. This is the exact rejection `provision` exists to prevent, so it
+	// is asserted before the happy path rather than in a sibling test — the
+	// two halves are one story.
+	if unprovisionedOut, err := runCmd(t, NewCommand(&natsURL, &outputFmt, &defaultActor), []string{
+		"claim",
+		"--actor", testConsumerActorKey,
+		"--payload", string(claimPayload),
+	}); err == nil {
+		t.Fatalf("claim by an unprovisioned credential succeeded, want rejection (output: %s)", unprovisionedOut)
+	}
+	select {
+	case <-doneC:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for the unprovisioned claim to process")
+	}
+
+	// The credential actor must exist before it can claim. The Gateway runs
+	// this pre-flight for every actor it authenticates; a CLI credential
+	// reaches the Processor without one, which is what `provision` is for.
+	provisionOut, err := runCmd(t, NewCommand(&natsURL, &outputFmt, &defaultActor), []string{
+		"provision",
+		"--actor", testActorKey,
+		"--target-actor", testConsumerActorKey,
+	})
+	if err != nil {
+		t.Fatalf("provision: %v (output: %s)", err, provisionOut)
+	}
+	select {
+	case <-doneC:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for provision to process")
+	}
+
 	claimOut, err := runCmd(t, NewCommand(&natsURL, &outputFmt, &defaultActor), []string{
 		"claim",
 		"--actor", testConsumerActorKey,
@@ -240,6 +277,11 @@ func setupIdentityEnv(t *testing.T) (context.Context, *substrate.Conn, *processo
 		Lanes:                  []string{"default"},
 		PlatformPermissions: []processor.PlatformPermission{
 			{OperationType: "CreateUnclaimedIdentity", Scope: "any"},
+			// The same operator authority the CLI credential carries for
+			// create-unclaimed. `identity provision` mirrors the Gateway's
+			// first-touch pre-flight, and minting an identity vertex is
+			// privileged for the reason ClaimIdentity refuses to do it itself.
+			{OperationType: "ProvisionConsumerIdentity", Scope: "any"},
 		},
 		ServiceAccess:   []processor.ServiceAccessEntry{},
 		EphemeralGrants: []processor.EphemeralGrant{},

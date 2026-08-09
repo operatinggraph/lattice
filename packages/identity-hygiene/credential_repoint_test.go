@@ -494,3 +494,99 @@ func TestMergeCredentialRepoint_BoundToLinkRepoints(t *testing.T) {
 	// The secondary itself becomes a credential of the survivor.
 	assertLinkLive(t, ctx, conn, boundToKey(secondaryKey, primaryKey))
 }
+
+// --- 8. TestMergeCredentialRepoint_PrimaryAsCredentialOfSecondary ---
+
+// The primary can itself be a credential of the secondary — a person who
+// signed in as one account and later proved control of another, merged the
+// wrong way round. cred_set then contains the primary's own key, and both
+// halves of the credential→person fact would name the primary on both sides.
+//
+// The edge is refused for the reason the merge script already states: a row
+// listing a person as their own sign-in method is an UnlinkCredential target
+// that can never succeed, because the key is not an array entry. The INDEX
+// must be refused with it, and refused by RETRACTION rather than by omission:
+// a self-index is unreachable by any enumeration walking boundTo edges (there
+// is none to walk), and the one-credential-<=-one-identity guard reads exactly
+// that vertex, so leaving one — self-pointing or still naming the merged-away
+// secondary — refuses this person's every future ClaimIdentity as
+// credential-already-bound, permanently.
+func TestMergeCredentialRepoint_PrimaryAsCredentialOfSecondary(t *testing.T) {
+	ctx, conn := setupTestEnv(t)
+	cp, cons := newMergePipeline(t, ctx, conn, "mcrself")
+
+	primaryID := testutil.GenReqID("PrimCredSlf00")
+	secondaryID := testutil.GenReqID("SecCredSlf000")
+	primaryKey := "vtx.identity." + primaryID
+	secondaryKey := "vtx.identity." + secondaryID
+
+	seedIdentityVertex(t, ctx, conn, primaryKey, "claimed", "")
+	seedIdentityVertex(t, ctx, conn, secondaryKey, "claimed", "")
+	// The primary IS a credential of the secondary: the binding names it, the
+	// index resolves it to the secondary, and the edge exists.
+	seedCredentialBindingSingular(t, ctx, conn, secondaryKey, primaryKey, "2026-01-01T00:00:00Z")
+	seedCredentialIndexVertex(t, ctx, conn, primaryKey, secondaryKey, "2026-01-01T00:00:00Z")
+	seedLinkVertexWithClass(t, ctx, conn, boundToKey(primaryKey, secondaryKey), "boundTo", false,
+		map[string]any{"boundAt": "2026-01-01T00:00:00Z"})
+
+	env := &processor.OperationEnvelope{
+		RequestID:     testutil.GenReqID("MrgCredSlf000"),
+		Lane:          processor.LaneDefault,
+		OperationType: "MergeIdentity",
+		Actor:         operatorActorKey,
+		SubmittedAt:   "2026-08-08T11:00:00Z",
+		Class:         "identityHygiene",
+		Payload:       mergePayload(primaryKey, secondaryKey, []string{}),
+		ContextHint: &processor.ContextHint{
+			Reads:         mergeReads(primaryKey, secondaryKey, []string{}),
+			OptionalReads: mergeCredentialOptionalReads(primaryKey, secondaryKey),
+			Enumerations: []processor.EnumerationHint{
+				{Hub: secondaryKey, Relation: "assignedTo", Direction: "in"},
+				{Hub: secondaryKey, Relation: "indexes", Direction: "in"},
+			},
+		},
+	}
+	reqID := env.RequestID
+	testutil.PublishOp(t, conn, env)
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
+
+	// The operational seam is retracted, not re-pointed at the person: the
+	// Gateway's credential-bindings materializer deletes an actor's entry on
+	// identity.unbound and re-Puts it on identity.rebound, and "this credential
+	// resolves to itself" is spelled by the entry's ABSENCE.
+	if n := countTrackerEventClass(t, ctx, conn, reqID, "identity.unbound"); n != 1 {
+		t.Fatalf("identity.unbound count = %d, want 1 (the primary stops being a credential)", n)
+	}
+	if n := countTrackerEventClass(t, ctx, conn, reqID, "identity.rebound"); n != 1 {
+		t.Fatalf("identity.rebound count = %d, want 1 (the secondary's self-credential only)", n)
+	}
+
+	// The edge that really existed is retired, and no self-loop replaces it —
+	// never written at all, so the key does not exist rather than existing
+	// tombstoned.
+	assertLinkTombstoned(t, ctx, conn, boundToKey(primaryKey, secondaryKey))
+	if _, err := conn.KVGet(ctx, testutil.HarnessCoreBucket, boundToKey(primaryKey, primaryKey)); err == nil {
+		t.Fatalf("a self-loop boundTo was written for %s", primaryKey)
+	}
+
+	// The index is retracted, not rewritten: neither self-pointing nor left
+	// naming the merged-away secondary.
+	assertLinkTombstoned(t, ctx, conn, credentialIndexKey(primaryKey))
+
+	// Representation 2 agrees with the other three: the person is not listed
+	// as one of their own sign-in methods. identityCredentialsRead projects
+	// this array wholesale to the account screen, so an entry here would be
+	// user-visible even with the index and the edge both denying it.
+	got := primaryCredentialActorKeys(t, ctx, conn, primaryKey)
+	if got[primaryKey] {
+		t.Fatalf("primary credentials = %v, must not list the person as their own sign-in method", got)
+	}
+	if !got[secondaryKey] {
+		t.Fatalf("primary credentials = %v, missing the secondary's implicit self-credential %s", got, secondaryKey)
+	}
+
+	// And the merge still does its job for the secondary's own implicit
+	// self-credential, so the retraction above is not the script bailing out.
+	assertLinkLive(t, ctx, conn, boundToKey(secondaryKey, primaryKey))
+	assertCredentialIndexPointsTo(t, ctx, conn, secondaryKey, primaryKey)
+}

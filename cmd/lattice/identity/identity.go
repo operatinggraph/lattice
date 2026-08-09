@@ -40,6 +40,7 @@ func NewCommand(natsURL, outputFmt, defaultActor *string) *cobra.Command {
 		Short: "Submit identity domain operations",
 	}
 	cmd.AddCommand(newCreateUnclaimedCommand(natsURL, outputFmt, defaultActor))
+	cmd.AddCommand(newProvisionCommand(natsURL, outputFmt, defaultActor))
 	cmd.AddCommand(newClaimCommand(natsURL, outputFmt, defaultActor))
 	cmd.AddCommand(newReconcileBindingsCommand(natsURL, outputFmt, defaultActor))
 	return cmd

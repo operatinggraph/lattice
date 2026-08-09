@@ -290,6 +290,7 @@ func TestCompleteCredentialLink_SpentKey_Rejected(t *testing.T) {
 	ctx, conn := setupTestEnv(t)
 	cp, cons := newLinkPipeline(t, ctx, conn, "cmpl-spent")
 	testutil.SeedCapDoc(t, ctx, conn, thirdCredCapDoc())
+	testutil.SeedCredentialActor(t, ctx, conn, thirdCredActorKey, consumerRoleKey(t))
 
 	uKey := claimFreshIdentity(t, ctx, conn, cp, cons, "CmplSpent")
 	seedIdentityCapDoc(t, ctx, conn, uKey, "InitiateCredentialLink")

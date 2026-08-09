@@ -537,7 +537,15 @@ def execute(state, op):
         elif pri_binding.get("actorKey") != None:
             add_primary_credential(pri_binding.get("actorKey"), pri_binding.get("boundAt"))
     for c in cred_set:
-        add_primary_credential(c["actorKey"], c["boundAt"])
+        # The PRIMARY can itself be a credential of the secondary, and after
+        # the merge it is a credential of nothing -- a person is not their own
+        # sign-in method (the self-loop boundTo is refused for the same
+        # reason). The array is representation 2 of that same fact and
+        # identityCredentialsRead projects it wholesale to the account screen,
+        # so admitting the entry here would list the person as one of their
+        # own sign-in methods while the index and the edge both deny it.
+        if c["actorKey"] != primary:
+            add_primary_credential(c["actorKey"], c["boundAt"])
 
     # Singular actorKey/boundAt fields keep meaning "first-bound
     # credential" -- preserve primary's own if it already had one, else
@@ -734,12 +742,8 @@ def execute(state, op):
     # built from link events, so no phantom edge and no phantom row ever reach
     # the lens.
     for c in cred_set:
-        idx_key = "vtx.credentialindex." + crypto.sha256NanoID(c["actorKey"])
-        mutations.append({"op": "update", "key": idx_key,
-            "document": {"class": "credentialindex", "isDeleted": False,
-                         "data": {"actorKey": c["actorKey"], "identityKey": primary,
-                                  "boundAt": c["boundAt"]}}})
         cred_id = c["actorKey"][len("vtx.identity."):]
+        idx_key = "vtx.credentialindex." + crypto.sha256NanoID(c["actorKey"])
         if c["actorKey"] != secondary:
             # The secondary's own key is in cred_set as the implicit
             # self-credential (above) and never had an edge to itself, so only
@@ -751,12 +755,53 @@ def execute(state, op):
             # PRIMARY can itself be a credential of the secondary, and
             # rewriting that edge's target onto the primary would point it at
             # its own source. The row it would project lists a person as their
-            # own sign-in method, and in Inc 2b becomes an UnlinkCredential
-            # target that can never succeed -- the key is not an array entry.
-            # The tombstone above still stands: that edge really did exist.
-            # cred_muts overcounts by one here, which is the safe direction
-            # for a cap.
+            # own sign-in method, and it becomes an UnlinkCredential target
+            # that can never succeed -- the key is not an array entry.
+            #
+            # The INDEX gets the same treatment as the edge, and for the same
+            # reason: it says "this actor signs in as that person", and the
+            # merge has just dissolved the premise -- the primary is not a
+            # credential of anything once the secondary is folded into it. A
+            # rekeyed index here would be a self-index, which no enumeration
+            # off a boundTo edge can reach (there is none) and which by the
+            # one-credential-<=-one-identity guard would refuse this person's
+            # every future ClaimIdentity as credential-already-bound.
+            # Leaving the old one standing keeps that refusal AND points it at
+            # a merged-away identity, so the retraction is the tombstone, not
+            # the skip. A tombstone over a key that never held a live value
+            # costs nothing, exactly as for the edge above.
+            #
+            # The tombstone is CONDITIONED on the revision this pass reads the
+            # index at, and that guard is the only thing between the decision
+            # and the commit. idx_key is data-derived (it hashes an entry of
+            # the decrypted binding array), so no dispatcher can declare it and
+            # step 8 applies no hydrated revision to it -- an unconditioned
+            # retraction here would be read-and-forgotten. In the hydrate-to-
+            # commit window an UnlinkCredential can retire this index and a
+            # fresh ClaimIdentity revive it against a DIFFERENT identity; a
+            # blind tombstone would then destroy a live binding's index and
+            # leave the one-credential-<=-one-identity guard with nothing to
+            # read, letting this credential bind a second identity. Conflicting
+            # instead sends the op back through the OCC retry, which re-hydrates
+            # and re-decides. Same guard, same reason, as
+            # identity-domain's ReconcileCredentialBinding.
+            #
+            # read-posture: (e) per-candidate follow-up read off cred_set
+            # (data-derived key), fired at most once per merge -- only the
+            # primary can take this branch.
+            idx_vtx = kv.Read(idx_key)
+            if idx_vtx == None:
+                # Never existed, so there is nothing to retract and nothing to
+                # race: an unconditioned tombstone over an absent key would
+                # still be a blind write, so emit none at all.
+                continue
+            mutations.append({"op": "tombstone", "key": idx_key,
+                              "expectedRevision": idx_vtx.revision})
             continue
+        mutations.append({"op": "update", "key": idx_key,
+            "document": {"class": "credentialindex", "isDeleted": False,
+                         "data": {"actorKey": c["actorKey"], "identityKey": primary,
+                                  "boundAt": c["boundAt"]}}})
         mutations.append({"op": "update",
             "key": "lnk.identity." + cred_id + ".boundTo.identity." + primary[len("vtx.identity."):],
             "document": {"class": "boundTo", "isDeleted": False,
@@ -816,6 +861,19 @@ def execute(state, op):
     # audit stream (design §4.3). The Gateway's credential-bindings
     # materializer folds it like identity.claimed.
     for c in cred_set:
+        if c["actorKey"] == primary:
+            # The primary is not rebound onto itself -- it stops being a
+            # credential altogether. The operational seam resolves a raw
+            # credential up to its owner, and "resolves to itself" is spelled
+            # by the ABSENCE of an entry (the Gateway then acts as the raw
+            # actor, which here IS the person), so the retraction the seam
+            # needs is the unbind the materializer deletes on, not a rebound
+            # that would write the self-resolution back.
+            events.append({"class": "identity.unbound", "data": {
+                "actorKey": c["actorKey"],
+                "identityKey": secondary,
+            }})
+            continue
         events.append({"class": "identity.rebound", "data": {
             "actorKey": c["actorKey"],
             "identityKey": primary,

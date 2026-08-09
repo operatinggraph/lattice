@@ -221,6 +221,13 @@ func setupTestEnv(t *testing.T) (context.Context, *substrate.Conn) {
 	testutil.SeedCapDoc(t, ctx, conn, frontDeskCapDoc())
 	testutil.SeedHoldsRole(t, ctx, conn, staffActorKey, bootstrap.RoleOperatorKey)
 	testutil.SeedHoldsRole(t, ctx, conn, frontDeskActorKey, frontOfHouseRoleKey)
+	// The credential actors the ceremony ops submit as. ClaimIdentity and
+	// CompleteCredentialLink refuse an actor with no live identity vertex,
+	// which is what the Gateway's first-touch provisioning establishes on the
+	// real path; a cap doc alone models an actor the auth plane knows and the
+	// graph does not.
+	testutil.SeedCredentialActor(t, ctx, conn, consumerActorKey, consumerRoleKey(t))
+	testutil.SeedCredentialActor(t, ctx, conn, secondCredActorKey, consumerRoleKey(t))
 	return ctx, conn
 }
 

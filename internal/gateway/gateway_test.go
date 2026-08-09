@@ -483,17 +483,131 @@ func TestHandleOperations_ProvisioningPreflight_CacheHit(t *testing.T) {
 	}
 }
 
-// TestHandleOperations_ProvisioningPreflight_ToleratesFailure: a provisioning
-// submit error never blocks the caller's own op — the real op's own
-// capability check is the authority, not this best-effort pre-flight.
-func TestHandleOperations_ProvisioningPreflight_ToleratesFailure(t *testing.T) {
+// TestHandleOperations_ProvisioningPreflight_FailsClosedForClaim: a
+// provisioning failure 503s a raw-credential op rather than letting it
+// through. ClaimIdentity emits a link whose source is this very actor and
+// refuses a missing actor vertex behind a wire code the ceremony clients treat
+// as fatal, so proceeding would reach the person as "invalid claim key".
+func TestHandleOperations_ProvisioningPreflight_FailsClosedForClaim(t *testing.T) {
 	priv := newTestKey(t)
 	authn := testAuthenticator(t, priv, "k1")
 	token := signToken(t, priv, "k1", "CHBLgu4cFdrFKVqAaXJj")
 
 	calls := 0
+	realOpRan := false
 	fake := func(_ context.Context, env *processor.OperationEnvelope) (*processor.OperationReply, error) {
 		calls++
+		if env.OperationType == "ProvisionConsumerIdentity" {
+			return nil, errors.New("simulated NATS timeout")
+		}
+		realOpRan = true
+		return &processor.OperationReply{RequestID: env.RequestID, Status: processor.ReplyStatusAccepted}, nil
+	}
+	s := newTestServer(t, authn, fake)
+	s.ConfigureProvisioning("vtx.identity.GATEWAY00000000000A", "vtx.role.CONSUMER0000000000A")
+
+	w := doOperations(t, s, token, `{"operationType":"ClaimIdentity"}`)
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, body = %s, want 503", w.Code, w.Body.String())
+	}
+	if realOpRan {
+		t.Fatal("the caller's own op ran after the pre-flight failed; it must not")
+	}
+	if calls != 1 {
+		t.Fatalf("submit called %d times, want 1 (the failed pre-flight only)", calls)
+	}
+	if strings.Contains(w.Body.String(), "ProvisionConsumerIdentity") || strings.Contains(w.Body.String(), "simulated") {
+		t.Fatalf("503 body leaks internal detail: %s", w.Body.String())
+	}
+}
+
+// TestHandleOperations_ProvisioningPreflight_TolerantForOrdinaryOps: an op that
+// emits no credential binding keeps the best-effort posture. Its own capability
+// check is the authority, and the provisioned cache is per-process and empty
+// after every restart — failing closed here would turn one Processor hiccup
+// into a total write outage.
+func TestHandleOperations_ProvisioningPreflight_TolerantForOrdinaryOps(t *testing.T) {
+	priv := newTestKey(t)
+	authn := testAuthenticator(t, priv, "k1")
+	token := signToken(t, priv, "k1", "CHBLgu4cFdrFKVqAaXJj")
+
+	realOpRan := false
+	fake := func(_ context.Context, env *processor.OperationEnvelope) (*processor.OperationReply, error) {
+		if env.OperationType == "ProvisionConsumerIdentity" {
+			return nil, errors.New("simulated NATS timeout")
+		}
+		realOpRan = true
+		return &processor.OperationReply{RequestID: env.RequestID, Status: processor.ReplyStatusAccepted}, nil
+	}
+	s := newTestServer(t, authn, fake)
+	s.ConfigureProvisioning("vtx.identity.GATEWAY00000000000A", "vtx.role.CONSUMER0000000000A")
+
+	w := doOperations(t, s, token, `{"operationType":"PingPlatform"}`)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s, want 200", w.Code, w.Body.String())
+	}
+	if !realOpRan {
+		t.Fatal("the caller's own op did not run; an ordinary op must survive a failed pre-flight")
+	}
+}
+
+// TestHandleOperations_ProvisioningPreflight_NotAcceptedFailsClosed: a reply
+// the Processor did not accept is the same failure as a submit error — the
+// actor is not established either way.
+func TestHandleOperations_ProvisioningPreflight_NotAcceptedFailsClosed(t *testing.T) {
+	priv := newTestKey(t)
+	authn := testAuthenticator(t, priv, "k1")
+	token := signToken(t, priv, "k1", "CHBLgu4cFdrFKVqAaXJj")
+
+	fake := func(_ context.Context, env *processor.OperationEnvelope) (*processor.OperationReply, error) {
+		if env.OperationType == "ProvisionConsumerIdentity" {
+			return &processor.OperationReply{RequestID: env.RequestID, Status: processor.ReplyStatusRejected}, nil
+		}
+		t.Error("the caller's own raw-credential op must not run after a rejected pre-flight")
+		return &processor.OperationReply{RequestID: env.RequestID, Status: processor.ReplyStatusAccepted}, nil
+	}
+	s := newTestServer(t, authn, fake)
+	s.ConfigureProvisioning("vtx.identity.GATEWAY00000000000A", "vtx.role.CONSUMER0000000000A")
+
+	w := doOperations(t, s, token, `{"operationType":"CompleteCredentialLink"}`)
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, body = %s, want 503", w.Code, w.Body.String())
+	}
+}
+
+// TestHandleOperations_UnconfiguredProvisioning_StillServes: an embedding that
+// never called ConfigureProvisioning is not relying on the pre-flight, so the
+// no-op stays a no-op rather than 503ing every write.
+func TestHandleOperations_UnconfiguredProvisioning_StillServes(t *testing.T) {
+	priv := newTestKey(t)
+	authn := testAuthenticator(t, priv, "k1")
+	token := signToken(t, priv, "k1", "CHBLgu4cFdrFKVqAaXJj")
+
+	fake := func(_ context.Context, env *processor.OperationEnvelope) (*processor.OperationReply, error) {
+		if env.OperationType == "ProvisionConsumerIdentity" {
+			t.Error("provisioning must not be attempted when it was never configured")
+		}
+		return &processor.OperationReply{RequestID: env.RequestID, Status: processor.ReplyStatusAccepted}, nil
+	}
+	s := newTestServer(t, authn, fake)
+
+	w := doOperations(t, s, token, `{"operationType":"PingPlatform"}`)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s, want 200", w.Code, w.Body.String())
+	}
+}
+
+// TestWhoami_ProvisioningPreflight_ToleratesFailure: whoami keeps the
+// best-effort posture the write path gives up. It commits nothing, so a failed
+// pre-flight costs an unresolved actor, not a link written against an endpoint
+// that does not exist — and a 503 on a read-only identity probe would be worse
+// than the answer it replaces.
+func TestWhoami_ProvisioningPreflight_ToleratesFailure(t *testing.T) {
+	priv := newTestKey(t)
+	authn := testAuthenticator(t, priv, "k1")
+	token := signToken(t, priv, "k1", "CHBLgu4cFdrFKVqAaXJj")
+
+	fake := func(_ context.Context, env *processor.OperationEnvelope) (*processor.OperationReply, error) {
 		if env.OperationType == "ProvisionConsumerIdentity" {
 			return nil, errors.New("simulated NATS timeout")
 		}
@@ -502,12 +616,9 @@ func TestHandleOperations_ProvisioningPreflight_ToleratesFailure(t *testing.T) {
 	s := newTestServer(t, authn, fake)
 	s.ConfigureProvisioning("vtx.identity.GATEWAY00000000000A", "vtx.role.CONSUMER0000000000A")
 
-	w := doOperations(t, s, token, `{"operationType":"PingPlatform"}`)
+	w := doWhoami(t, s, token)
 	if w.Code != http.StatusOK {
-		t.Fatalf("status = %d, body = %s (a provisioning failure must not fail the real op)", w.Code, w.Body.String())
-	}
-	if calls != 2 {
-		t.Fatalf("submit called %d times, want 2 (provisioning attempted, then the real op still ran)", calls)
+		t.Fatalf("status = %d, body = %s (whoami must answer despite a failed pre-flight)", w.Code, w.Body.String())
 	}
 }
 

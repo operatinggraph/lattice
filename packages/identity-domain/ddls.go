@@ -115,7 +115,11 @@ func DDLs() []pkgmgr.DDLSpec {
 				"payload's identityKey must equal the one it records or the op rejects, so a caller cannot mint " +
 				"an edge the index does not already assert. Writes the index's original boundAt, never the " +
 				"submission time; re-runnable, and a tombstoned index rejects rather than reviving an unlinked " +
-				"credential.",
+				"credential. Also requires the credential to be a live identity vertex " +
+				"(credential-not-provisioned): the index names its credential in its own body and can therefore " +
+				"assert one that has no vertex, and the pre-link corpus this op exists to converge is the " +
+				"population most likely to contain them — without the check the repair path would publish " +
+				"exactly the dangling edges the bind paths refuse.",
 			Script: identityDDLScript,
 			InputSchema: `{"type":"object","properties":` +
 				`{"name":{"type":"string","maxLength":200,"description":"Person's display name. Required for CreateUnclaimedIdentity."},` +
@@ -169,9 +173,17 @@ func DDLs() []pkgmgr.DDLSpec {
 						"Duplicate detection rides the IdentityCreated event's data.duplicate flag, not the reply.",
 				},
 				{
-					Name:            "ClaimIdentity — actor claims their identity",
-					Payload:         map[string]any{"targetIdentityKey": "vtx.identity.<NanoID>", "claimKey": "<plaintextKey>"},
-					ExpectedOutcome: "Verifies claimKey hash, writes credentialBinding aspect, transitions state unclaimed→claimed, tombstones claimKey aspect, grants holdsRole→consumer to the claimed identity.",
+					Name:    "ClaimIdentity — actor claims their identity",
+					Payload: map[string]any{"targetIdentityKey": "vtx.identity.<NanoID>", "claimKey": "<plaintextKey>"},
+					ExpectedOutcome: "Verifies claimKey hash, writes credentialBinding aspect, transitions state unclaimed→claimed, " +
+						"tombstones claimKey aspect, grants holdsRole→consumer to the claimed identity. Requires the " +
+						"submitting credential (op.actor) to be a LIVE identity vertex — the emitted boundTo edge is the " +
+						"sole input to identityCredentialBindingsRead, which anchors on the credential and would project " +
+						"nothing at all for a credential that was never provisioned. An unprovisioned actor is refused " +
+						"`credential-not-provisioned` (mint it with ProvisionConsumerIdentity, or `lattice identity " +
+						"provision --actor`); a TOMBSTONED actor is refused the same way and permanently, because " +
+						"ProvisionConsumerIdentity no-ops on a tombstoned actor — a revoked credential is revoked, not " +
+						"invalid. Both collapse to the generic ClaimKeyInvalid wire code (NFR-S6).",
 				},
 				{
 					Name:    "RotateClaimKey — staff re-issues a lost claim secret",
@@ -195,7 +207,9 @@ func DDLs() []pkgmgr.DDLSpec {
 						"{actorKey:A2,boundAt} to U.credentialBinding.credentials (creating the aspect if U never had one), " +
 						"tombstones U.linkKey, emits identity.claimed{identityKey:U, actorKey:A2} — the same class " +
 						"ClaimIdentity emits, so the credential-bindings materializer folds it with zero changes. Rejects a " +
-						"wrong/spent secret, an already-bound A2, or a not-claimed U — all collapse to the same " +
+						"wrong/spent secret, an already-bound A2, an A2 that is not a live identity vertex " +
+						"(`credential-not-provisioned` — same endpoint guard and same reasoning as ClaimIdentity), " +
+						"or a not-claimed U — all collapse to the same " +
 						"generic ClaimKeyInvalid wire code ClaimIdentity uses (NFR-S6 anti-enumeration; the " +
 						"Processor's classifier reclassifies any \"ClaimKeyInvalid: <outcome>\" fail() message the " +
 						"same way regardless of which op raised it — specific outcomes surface only via Health KV).",
@@ -877,6 +891,20 @@ def identity_index_key(contact_type, normalized):
 def credential_index_key(actor_key):
     return "vtx.credentialindex." + crypto.sha256NanoID(actor_key)
 
+def vertex_alive(state, key):
+    # A hydrated key that is present, non-nil and not tombstoned. Same shape as
+    # unbind_identity_credentials.go's helper of this name, so the two scripts
+    # answer "does this vertex exist" identically. Absent and tombstoned are
+    # deliberately one answer: a revoked credential must not claim either.
+    if key not in state:
+        return False
+    doc = state[key]
+    if doc == None:
+        return False
+    if hasattr(doc, "isDeleted") and doc.isDeleted:
+        return False
+    return True
+
 def identity_id(identity_key):
     return identity_key[len("vtx.identity."):]
 
@@ -997,6 +1025,21 @@ def derive_reads(op):
         # through kv.Read, which falls through to a live GET -- but then it
         # costs a round trip per claim rather than a snapshot lookup.)
         keys += erasure_gate_keys([target, op.actor])
+        # The credential actor's OWN vertex. The emitted boundTo link is the
+        # sole input to a projection presented as a person's COMPLETE list of
+        # sign-in methods, so Contract #3 §3.5's duty applies: a script whose
+        # link must guarantee its endpoints declares them and validates them.
+        # For that reader an absent endpoint is a silent under-report, not a
+        # null -- identityCredentialBindingsRead anchors on (c:identity),
+        # so a credential with no vertex projects no row at all while the
+        # sibling credentials lens still lists it.
+        #
+        # optionalReads, never reads: absence is the very condition the guard
+        # below rejects with a named outcome, and a reads declaration would
+        # fault HydrationMiss first -- an opaque wiring error where the caller
+        # should see the ceremony's own generic refusal.
+        if is_identity_vertex_key(op.actor):
+            keys.append(op.actor)
         # Both endpoints must be WELL-FORMED, not merely prefixed. A prefix
         # check accepts "vtx.identity.x", from which this builds a link key the
         # Contract #1 grammar rejects -- and the Processor answers a malformed
@@ -1044,7 +1087,7 @@ def derive_reads(op):
         identity_key = getattr(p, "identityKey", None)
         if not is_identity_vertex_key(credential_actor_key):
             return {}
-        keys = [credential_index_key(credential_actor_key)]
+        keys = [credential_index_key(credential_actor_key), credential_actor_key]
         if is_identity_vertex_key(identity_key):
             keys.append(credential_bound_to_key(credential_actor_key, identity_key))
         # The two keys the §6 gate reads, both ends. This op's only dispatcher
@@ -1387,6 +1430,30 @@ def execute(state, op):
 
 
         actor_key = op.actor
+        # The credential must be a LIVE vertex before its boundTo edge is
+        # emitted. Contract #3 §3.5 leaves endpoint resolution to the script
+        # and this script must guarantee it: the edge is the sole input to
+        # identityCredentialBindingsRead, which anchors on (c:identity) and
+        # is presented as a person's COMPLETE list of sign-in methods. With no
+        # credential vertex the binding row never appears, while
+        # identityCredentialsRead still lists the credential -- for that
+        # reader an absent endpoint is a silent under-report, not a null.
+        #
+        # Reject rather than mint: creating the vertex is
+        # ProvisionConsumerIdentity's job, granted scope=any to
+        # identityProvisioner/operator precisely because minting identities is
+        # privileged. Minting here would make a claim secret sufficient to
+        # create an arbitrary vtx.identity.<NanoID> at a caller-chosen key
+        # under a scope=self grant, and would leave it half-provisioned -- no
+        # .state, no holdsRole -- a shape nothing else in the corpus produces.
+        #
+        # A TOMBSTONED credential takes this branch too, and that is the point:
+        # ProvisionConsumerIdentity deliberately no-ops on a tombstoned actor
+        # ("tombstoned stays tombstoned"), so a revoked credential must not be
+        # able to claim. The refusal is permanent by design, not transient.
+        if not vertex_alive(state, actor_key):
+            fail_claim("credential-not-provisioned")
+
         cred_index_key = credential_index_key(actor_key)
         cred_index = state[cred_index_key] if cred_index_key in state else None
         if cred_index != None and not (hasattr(cred_index, "isDeleted") and cred_index.isDeleted):
@@ -1640,6 +1707,16 @@ def execute(state, op):
         # on an already-bound credential regardless of declaration (finding
         # A4, mirrored from ClaimIdentity).
         actor_key = op.actor
+        # The same endpoint guard ClaimIdentity applies, for the same reason
+        # and on the same edge: this op emits the boundTo whose absence the
+        # bindings projection cannot distinguish from "no such sign-in
+        # method". Second-credential linking reaches this through the
+        # Gateway's raw-credential carve-out, so the actor here is the NEW
+        # credential -- exactly the one first-touch provisioning may have
+        # skipped.
+        if not vertex_alive(state, actor_key):
+            fail_link("credential-not-provisioned")
+
         cred_index_key = credential_index_key(actor_key)
         cred_index = state[cred_index_key] if cred_index_key in state else None
         if cred_index != None and not (hasattr(cred_index, "isDeleted") and cred_index.isDeleted):
@@ -1872,6 +1949,18 @@ def execute(state, op):
         index_data = index_vtx.data if index_vtx.data != None else {}
         if index_data.get("identityKey") != identity_key:
             fail_reconcile("owner-mismatch")
+
+        # The same endpoint guard the bind paths apply, and this op needs it
+        # most: what it exists to converge is the pre-link corpus -- bindings
+        # made before the boundTo type existed -- which is exactly the
+        # population whose credential vertex may never have been minted. Its
+        # authority is the INDEX, which records the association in its own body
+        # and can therefore name a credential that has no vertex at all; without
+        # this check the one operator-run repair path would manufacture the
+        # dangling edges the bind paths refuse, and identityCredentialBindings-
+        # Read (anchored on the credential) would still project no row for them.
+        if not vertex_alive(state, credential_actor_key):
+            fail_reconcile("credential-not-provisioned")
 
         # Erasure gate (§6), placed AFTER not-bound and owner-mismatch. This op
         # can CREATE a boundTo link that never existed -- the legacy-binding

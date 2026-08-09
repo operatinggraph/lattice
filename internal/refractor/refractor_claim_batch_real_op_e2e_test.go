@@ -193,6 +193,10 @@ func TestRefractor_CapabilityLens_RealClaimIdentityOp_E2E(t *testing.T) {
 		},
 		Roles: []string{"vtx.role.consumer"},
 	})
+	// The credential actor ClaimIdentity submits as. The op refuses an actor
+	// with no live identity vertex: the boundTo edge it emits names that
+	// vertex as its source, and the bindings projection anchors on it.
+	testutil.SeedCredentialActor(t, ctx, conn, consumerActorKey, "")
 
 	// --- arrange: a real CreateUnclaimedIdentity op ---
 	createReqID := testutil.GenReqID("RealClmCreate0")

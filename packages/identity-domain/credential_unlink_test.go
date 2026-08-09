@@ -206,6 +206,7 @@ func TestUnlinkCredential_PromotesSingularOnRemovalOfOriginalHolder(t *testing.T
 	ctx, conn := setupTestEnv(t)
 	cp, cons := newLinkPipeline(t, ctx, conn, "unlnk-promote")
 	testutil.SeedCapDoc(t, ctx, conn, thirdCredCapDoc())
+	testutil.SeedCredentialActor(t, ctx, conn, thirdCredActorKey, consumerRoleKey(t))
 
 	uKey := claimFreshIdentity(t, ctx, conn, cp, cons, "UnlnkPromote")
 	linkSecondCredential(t, ctx, conn, cp, cons, uKey, secondCredActorKey, "UnlnkPromoteLinkA2", "link-secret-promote-a2")

@@ -92,7 +92,12 @@ func (s *Server) handleWhoami(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.provisionActorIfNeeded(ctx, actor.ActorID, actor.Issuer, actor.RawSubject)
+	// Deliberately best-effort here, unlike the write path: whoami is an
+	// identity probe that commits nothing, so a failed pre-flight costs the
+	// caller an unresolved actor, not a link written against an endpoint that
+	// does not exist. The failure is already logged inside; a 503 on a
+	// read-only probe would be worse than the answer it replaces.
+	_ = s.provisionActorIfNeeded(ctx, actor.ActorID, actor.Issuer, actor.RawSubject)
 
 	resolvedActor := s.resolveActor(ctx, actor.ActorID)
 

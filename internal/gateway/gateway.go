@@ -481,8 +481,6 @@ func (s *Server) handleOperations(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.provisionActorIfNeeded(ctx, actor.ActorID, actor.Issuer, actor.RawSubject)
-
 	body, err := io.ReadAll(io.LimitReader(r.Body, maxBodyBytes+1))
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "read body: "+err.Error())
@@ -499,8 +497,32 @@ func (s *Server) handleOperations(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	_, rawCredential := rawCredentialCarveOut[req.OperationType]
+
+	// The pre-flight establishes the actor's identity vertex. It fails CLOSED
+	// for the raw-credential ops and stays best-effort for everything else,
+	// and the split is the carve-out set itself: those are exactly the ops
+	// whose script hashes op.actor and emits a boundTo edge naming that vertex
+	// as its source. Only they can commit a binding against an endpoint that
+	// does not exist, and only they refuse it behind a wire code the ceremony
+	// clients read as fatal — for them a 503 says "the platform could not set
+	// you up, try again", which is true, where proceeding says "invalid claim
+	// key", which is not. Every other op's own capability check remains the
+	// authority, so a provisioning blip must not take the whole write plane
+	// down with it: the cache is per-process and empty after every restart,
+	// so that would turn one Processor hiccup into a total write outage.
+	if err := s.provisionActorIfNeeded(ctx, actor.ActorID, actor.Issuer, actor.RawSubject); err != nil && rawCredential {
+		// Generic on the wire, detail in the log: every sibling refusal on
+		// this surface is deliberately opaque, and the error carries an
+		// internal operation type and raw transport strings.
+		s.logger.Error("gateway: provisioning pre-flight failed, refusing a credential-binding op",
+			"actor", actor.ActorID, "operationType", req.OperationType, "error", err)
+		writeError(w, http.StatusServiceUnavailable, "could not establish the actor; retry shortly")
+		return
+	}
+
 	resolvedActor := actor.ActorID
-	if _, rawCredential := rawCredentialCarveOut[req.OperationType]; !rawCredential {
+	if !rawCredential {
 		resolvedActor = s.resolveActor(ctx, actor.ActorID)
 	}
 
@@ -629,14 +651,22 @@ func consumerGrantLinkKey(actorKey, roleKey string) string {
 
 // provisionActorIfNeeded submits ProvisionConsumerIdentity under the
 // Gateway's own actor for a verified actor not yet in the in-memory
-// provisioned set. A no-op when ConfigureProvisioning was never called.
-// Tolerates any submit error or non-accepted reply — this is a best-effort
-// pre-flight, not the source of truth on capability; the caller's own op
-// (submitted right after, under its real, unforgeable actor) re-checks
-// capability independently and is denied on its own merits if provisioning
-// truly never lands. Failing here would make the whole request depend on an
-// op whose only job is convenience, so a failure just means "try again next
-// request" (logged, not surfaced to the HTTP caller).
+// provisioned set. It returns an error when it could not establish the actor,
+// and nil when the actor is provisioned (now or already). A no-op returning
+// nil when ConfigureProvisioning was never called — an embedding that never
+// configured provisioning is not relying on it.
+//
+// The error is what lets the write path fail closed for the raw-credential
+// ops: their scripts emit a boundTo edge whose source is this very actor and
+// refuse an actor vertex that does not exist (`credential-not-provisioned`).
+// That refusal is deliberately generic on the wire for anti-enumeration
+// reasons, so a swallowed failure here reaches the person as "invalid claim
+// key" — a dead end, since the ceremony clients retry only on
+// AuthDenied/{NoCapabilityEntry,OperationNotPermitted} and treat anything else
+// as fatal. A 503 is at least a true and legible answer. Every other op keeps
+// the best-effort posture: its own capability check is the authority, and one
+// failed pre-flight must not take the whole write plane down.
+//
 // idpIssuer/idpSubject are the verifier's raw provenance (VerifiedActor.Issuer/
 // .RawSubject, Contract #11 §3.3) — non-empty only for an opaque-mode token
 // (a real external IdP); a nanoid-mode dev token carries no iss claim, so
@@ -644,9 +674,9 @@ func consumerGrantLinkKey(actorKey, roleKey string) string {
 // the pair as optional). When present, the script writes them onto a fresh
 // identity as the .idpBinding aspect — the audit answer to "which IdP account
 // is this identity?"
-func (s *Server) provisionActorIfNeeded(ctx context.Context, actorID, idpIssuer, idpSubject string) {
+func (s *Server) provisionActorIfNeeded(ctx context.Context, actorID, idpIssuer, idpSubject string) error {
 	if s.gatewayActorKey == "" || s.consumerRoleKey == "" || s.provisioned.has(actorID) {
-		return
+		return nil
 	}
 	payloadFields := map[string]string{
 		"targetActorKey":  actorID,
@@ -659,12 +689,12 @@ func (s *Server) provisionActorIfNeeded(ctx context.Context, actorID, idpIssuer,
 	payload, err := json.Marshal(payloadFields)
 	if err != nil {
 		s.logger.Error("gateway: marshal provisioning payload", "actor", actorID, "error", err)
-		return
+		return fmt.Errorf("marshal provisioning payload: %w", err)
 	}
 	requestID, err := substrate.NewNanoID()
 	if err != nil {
 		s.logger.Error("gateway: generate provisioning requestId", "actor", actorID, "error", err)
-		return
+		return fmt.Errorf("generate provisioning requestId: %w", err)
 	}
 	optionalReads := []string{actorID}
 	if grantLink := consumerGrantLinkKey(actorID, s.consumerRoleKey); grantLink != "" {
@@ -701,14 +731,21 @@ func (s *Server) provisionActorIfNeeded(ctx context.Context, actorID, idpIssuer,
 	if err != nil {
 		s.logger.Warn("gateway: auto-provision consumer identity: submit failed, will retry next request",
 			"actor", actorID, "error", err)
-		return
+		return fmt.Errorf("submit ProvisionConsumerIdentity: %w", err)
 	}
 	if reply.Status != processor.ReplyStatusAccepted && reply.Status != processor.ReplyStatusDuplicate {
 		s.logger.Warn("gateway: auto-provision consumer identity: not accepted, will retry next request",
 			"actor", actorID, "status", reply.Status)
-		return
+		return fmt.Errorf("provision consumer identity: reply status %q", reply.Status)
 	}
+	// A TOMBSTONED actor takes ProvisionConsumerIdentity's deliberate
+	// "tombstoned stays tombstoned" no-op and still replies accepted, so it is
+	// recorded as provisioned here and never retried in-process. That is
+	// correct — a revoked credential must not be able to claim — and the
+	// permanent refusal it earns comes from the claim script, whose DDL
+	// description names the revoked case.
 	s.provisioned.add(actorID)
+	return nil
 }
 
 // bearerToken extracts the token from a well-formed `Authorization: Bearer
