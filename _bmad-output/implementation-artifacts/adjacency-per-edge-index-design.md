@@ -779,3 +779,144 @@ protocol) live with its row and are not re-owned here.
 full `go test ./...` (substrate + shared canary defaults), and on this host: one observed latch —
 mark key present, doc emptied, consumer-info redelivery churn gone, `instanceOf` fan-out evals
 green, marked-node `Neighbors` count ≥ 3,919.
+
+### 14.7 `[Substrate] multi_last` fire brief (build note, 2026-08-10)
+
+**Scope sentence (verbatim, board row):** "One locked, consumer-less round trip returns
+last-per-subject for a key list or filters (≤1,024 subjects; 413 above). Measured ~31µs/key vs
+153µs sequential gets; 4× the ephemeral lister on the same set. Consumers: step-4 hydration (atomic
+read-set), the ~12-file `ListKeysPrefix`-class corpus."
+
+**Verified touch-list** (checked live this fire, not from the design's citations alone):
+
+- `internal/substrate/kv.go` — new file `kv_multi.go` alongside it (package `substrate`); mirrors
+  `KVEntry` (`kv.go:18`), sentinel-error wrapping (`errors.go`), and the `Conn`/`KV` handle split
+  (`kvhandle.go:18-99`, delegate pattern at `:37-39`).
+- `internal/processor/step4_hydrate.go` — three `h.Conn.KVGet` loops confirmed at `:239-257`
+  (`declared.Reads`), `:258-296` (`declared.OptionalReads`), `:297-327` (`declared.EgressReads`);
+  the "two live GETs straddle" comment confirmed at `:216-223`; present-wins reconciliation
+  (`markRequiredAbsent`/`markHydrated`) at `:224-236`.
+- `internal/refractor/personalinterest/interest.go:213-244` — `IsRelevant`'s
+  `ListKeysPrefix`-then-`Get`-each loop, confirmed verbatim (the design's own §14.3 exemplar).
+- `docs/vendors.md:29-40` — version-gated NATS features table (row to add, mirroring the 4
+  existing rows' shape).
+- `docs/components/substrate.md` — `### KV operations` table (`:110-123`) and the file-map table
+  (`:33-49`); `### Review keeps catching (dossier)` (`:484-498`, currently 3 entries, cap 12).
+
+**Vendor grounding, done live (not paraphrased from the design doc):** downloaded
+`nats-server@v2.14.0` + `nats.go@v1.52.0` into the module cache and read the real source.
+Confirms every wire-protocol claim below to the byte:
+`JSApiMsgGetRequest.MultiLastFor` → JSON tag **`multi_last`**
+(`nats-server/server/jetstream_api.go:688`); handler `stream.getDirectMulti`
+(`nats-server/server/stream.go:5807-5916`), RLock at `:5811-5813` (the atomicity claim);
+1,024 cap → `413 Too Many Results` at `:5850-5851` via `store.MultiLastSeqs`'s `ErrTooManyResults`
+(`filestore.go`/`memstore.go`); empty-set → `404 No Results` (`:5858-5862`); mid-stream short read
+→ `404 Message Not Found` (`:5875-5877`); EOB header template `eobm` asserts `Nats-Num-Pending`
+(`:5802-5803,5914`). Response headers: `Nats-Stream`/`Nats-Subject`/`Nats-Sequence`/
+`Nats-Time-Stamp`/`Nats-Num-Pending`/`Nats-Last-Sequence`/`Nats-UpTo-Sequence`
+(`nats-server/server/stream.go:669-677`). Marker detection: `KV-Operation: DEL|PURGE`
+(`nats.go/jetstream/kv.go:494-496`) else `Nats-Marker-Reason: MaxAge|Purge|Remove`
+(`nats-server/server/stream.go:641,687-689`; `nats.go/jetstream/kv.go:968-974`). Status/description
+decode into synthetic `Status`/`Description` headers by `nats.go`'s own wire parser
+(`nats.go/nats.go:4282-4327`) — no manual status-line parsing needed client-side. Subject shape:
+request → `$JS.API.DIRECT.GET.KV_<bucket>` (`nats-server/server/jetstream_api.go:106-115`); each
+listed subject → `$KV.<bucket>.<key-or-pattern>` (`nats.go/jetstream/kv.go:483-486`, matches
+`KVPutWithTTL`'s existing `"$KV." + bucket + "." + key"` convention verbatim). `nats.go` v1.52.0 has
+no client-side `multi_last` surface — confirmed by grep, zero hits — so this is genuinely a
+hand-rolled raw-protocol addition, same posture as `AtomicBatch`/`KVPutWithTTL`.
+Added to `docs/vendors.md` in this fire's commit.
+
+**Precedents to mirror:**
+
+- Raw-protocol hand-roll shape → `KVPutWithTTL`/`KVUpdateWithTTL` (`kv.go:334-357,124-155`): build
+  the `$KV.<bucket>.<key>` subject by hand, publish via the raw `*nats.Conn`/`jetstream.JetStream`,
+  no high-level KV client call.
+- ctx-cancellable streamed-response loop → `WatchKVUpdates` (`subscribe.go:495-530`): `select` on
+  `ctx.Done()` vs. a channel, never a bare blocking read with no ctx hook.
+- Tombstone/marker classification → `decodeKVMessage`/`kvEventFromUpdate` (`subscribe.go:452-480,
+  535-553`): empty body or a non-Put operation ⇒ excluded from "live", mirrored here for the
+  fast-path's per-message `KV-Operation`/`Nats-Marker-Reason` check.
+- Bounded-retry-with-backoff shape → `connectWithRetry` (`conn.go:209-231`, `connectAttempts`/
+  `connectBackoff` consts at `:30-41`).
+- Silent-partial-result guard → `KVListKeys`'s post-drain `ctx.Err()` check (`kv.go:204-213`) —
+  mirrored in the fallback drain (§ below).
+- "Absent by omission" batched-read shape → none in-repo (genuinely new: every existing KV read is
+  single-key). No precedent to mirror for the map-keyed-by-resolved-key return shape; justified by
+  what the two consumers need (§14.2/14.3: replace "one error per absent key" with "absent from the
+  result").
+
+**Increment order (single fire, S-sized; each with a runnable green check):**
+
+1. `internal/substrate/kv_multi.go`: `(*Conn).KVGetMulti(ctx, bucket, keys) (map[string]*KVEntry,
+   error)` — fast path (multi_last, retry-whole on short-read) + stability-verified double-drain
+   fallback on 413. `(*KV).GetMulti` delegate. Green: `go test ./internal/substrate/... -run
+   KVGetMulti -v`.
+2. `internal/processor/step4_hydrate.go`: one `KVGetMulti` call over the union of the three declared
+   lists, feeding all three loops from the shared snapshot. Green: `go test
+   ./internal/processor/... -run TestHydrate -v` (existing tests, unchanged assertions).
+3. `internal/refractor/personalinterest/interest.go`: `IsRelevant` via `KV.GetMulti`. Green: `go
+   test ./internal/refractor/personalinterest/... -v` (existing tests, unchanged assertions).
+4. Docs: `docs/vendors.md` version-gate row; `docs/components/substrate.md` KV-operations table +
+   file map. Green: `go run scripts/lint-conventions.go` (doc-adjacent conventions), manual read.
+5. Whole-tree gates (§ "Exit gates" below).
+
+**In-scope gotchas** (touched components' dossier entries, copied in per the template):
+
+- `docs/components/substrate.md` dossier (3 entries, cap 12): narrowing a consumer's filter strands
+  its pending set (not touched here — no filter narrowing); the batch CAS is per-subject (not
+  touched — no `AtomicBatch` use); the retired embedded-NATS-fixture entry (already mechanized —
+  this fire's new tests use `internal/natsfixture` per the retired entry's gate).
+- Standing checklist (`agents/fire-brief-template.md` part 5): #1 new-state-needs-a-lifetime — N/A,
+  this primitive holds no state across calls. #2 every census is a premise — the "~12-file corpus"
+  premise was re-run live this fire and found to be ~50 files / ~85 call sites (§14.3's estimate
+  undercounted); resolved below, before the first edit, per the scope-diff gate. #3 a negative test
+  needs its positive vector proven first — the 413-fallback test proves the fast path first (seed
+  <1,024, assert fast-path values), then seeds past it. #5 one deterministic key, one writer — N/A,
+  read-only primitive.
+
+**Scope-diff gate result — the corpus count is falsified, scope narrowed:**
+
+The design's "~12-file `ListKeysPrefix`-class corpus" is a premise, re-run live this fire (a
+dedicated scout grep across the tree): the real count is **~50 files / ~85 call sites** spanning
+`cmd/loupe/*` (12 files), all four Verticals-owned P5 apps (`wellness-app`/`cafe-app`/
+`clinic-app`/`loftspace-app`, ~30 sites), `internal/pkgmgr` (10 sites), `internal/weaver`/
+`internal/loom` state scans, the rule-engine's whole-type anchor scans, and others — of which
+roughly 40-50 are genuine list-then-get-each conversion candidates (the rest only need key names,
+not values, and gain nothing from batching). This is an L-sized cross-cutting sweep in its own
+right, undercounted at design time, not the "~12-file" S-M-compatible tail the row's sizing
+assumed — and a large fraction is Verticals-stream-owned code (`cmd/<x>-app`), not a Lattice-stream
+mechanical mirror.
+
+Per the scope-diff gate (`agents/fire-brief-template.md` §"before the first edit": "the brief may
+narrow to the ratified scope; it may never widen it"), **this fire narrows to the substrate
+primitive plus its two most concretely-specified consumers**: step-4 hydration (exact file:line
+citations in the design, Lattice/Core, fixes a real atomicity gap) and `personalinterest.IsRelevant`
+(the design's own named exemplar, Lattice/Refractor, small and self-contained). Both are enough to
+ship "the primitive + first consumers" per §14.6's own phrase — a primitive proven by zero real
+callers is not shipped; a primitive proven by two, in two different owning components, is.
+
+The remaining ~80-site sweep is filed as its own board row (below) rather than rushed through
+unreviewed in this fire or silently dropped — each site needs its own list-then-get-vs-keys-only
+judgment call and, for the Verticals-owned quarter, arguably belongs to that stream's own steward
+run. This is a sizing correction made explicit and acted on, not a deferred question.
+
+**Adjacent finds:**
+
+- The ~85-site enumeration-corpus conversion (above) → filed to `backlog/lattice.md` as its own
+  ready row (📋 ready, mechanical, mirrors this fire's `KVGetMulti`/`GetMulti` pattern — see the
+  board diff in this fire's commit).
+- No other adjacent finds surfaced.
+
+**Non-goals (this fire does not touch):**
+
+- The adjacency `Neighbors` fallback / overflow mark (§15, Shape B) — sequenced after this row by
+  the board's own `seq:` note; this fire's `KVGetMulti` is a dependency for it, not an overlap.
+- The bulk enumeration-corpus conversion (filed, above).
+- Any bucket provisioning change — every consumer bucket here (`core-kv`, `personal-lens-interest`)
+  is already `AllowDirect`-eligible by the standard NATS KV default (confirmed live: no
+  `AllowDirect: false` anywhere in the tree; today's `kv.Get` on these buckets already rides direct
+  get).
+- A `fingerprint`/rollup return value — the design's shelved `KVSnapshotPrefix` sketch (§6.3)
+  returned one; neither of this fire's two consumers needs it (each entry's own `.Revision`
+  suffices), and the future Shape B fallback (§15.3, out of scope here) can derive a fingerprint
+  from the returned entries itself. Not built now (YAGNI); revisit if a caller needs it.
