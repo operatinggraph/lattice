@@ -6,34 +6,6 @@ import (
 	"github.com/operatinggraph/lattice/internal/substrate/keys"
 )
 
-// reservedTypeNames are the two Contract #1 §1.2 reserved type names
-// ("meta", "op") a declared type name must not collide with. Checked here
-// against EVERY vertexType DDL's own CanonicalName (§1.2: "Operator-defined
-// DDL must not register vertex types named meta or op") and, additionally for
-// an abstract DDL, against a SubtypeOfRef target name — the taxonomy
-// declaration surface (§3.2/§3.5) a SubtypeOfRef adds.
-//
-// An aspectType / linkType / eventType DDL's CanonicalName is deliberately
-// NOT checked against this list: an aspect DDL's CanonicalName lands in a
-// key's localName slot (Contract #1 §1.1's 4th segment) and a link DDL's in
-// the relation slot (segment 3 of 6) — neither position is the type segment
-// §1.2 reserves, regardless of what string either holds.
-//
-// This is NOT the claim that a vertexType DDL's CanonicalName is always
-// itself the literal type segment its install writes into a key — a census
-// over pkgregistry.All() found 27 of 59 shipping vertexType DDLs whose
-// CanonicalName differs from (or, for an op-only DDL like "shredIdentityKey",
-// never becomes) that segment, e.g. "workOrder" writes vtx.workorder.<id>.
-// keys.IsValidTypeSegment is enforced below only on a TAXONOMY-PARTICIPATING
-// DDL (Abstract, or SubtypeOfRef declared) — never on an ordinary concrete
-// vertexType DDL generally, which would reject those 27 packages. A
-// non-participating DDL's CanonicalName can be any shape at all; this
-// reserved-name check closes only the exact-name collision §1.2 names.
-var reservedTypeNames = map[string]struct{}{
-	"meta": {},
-	"op":   {},
-}
-
 // ddlClassVertexType is buildInstallBatch's own default Class when a DDLSpec
 // leaves it empty (build.go:122-124). Abstract/SubtypeOfRef are meaningful
 // only on this class, mirroring validateSensitiveClassScope's sibling
@@ -60,16 +32,34 @@ func (def Definition) validateAbstractDDLScope() error {
 
 		// Contract #1 §1.2: "Operator-defined DDL must not register vertex
 		// types named meta or op." Checked for every vertexType DDL, not only
-		// an abstract one — the abstract-specific block below no longer
-		// repeats the check. §1.2 also says this is "rejected by Processor at
-		// meta-DDL commit time"; this pkgmgr install-time validation is NOT
-		// that enforcement point — it narrows the gap for every
-		// package-declared DDL (the path every shipping DDL takes) but a raw
-		// core-operations submit that writes a vtx.meta.<NanoID> with
-		// class:meta.ddl.vertexType and a canonicalName aspect of "meta" or
-		// "op" directly, bypassing pkgmgr, is not caught by this check.
+		// an abstract one. An aspectType / linkType / eventType DDL's
+		// CanonicalName is deliberately NOT checked: an aspect DDL's name lands
+		// in a key's localName slot (§1.1's 4th segment) and a link DDL's in
+		// the relation slot (segment 3 of 6) — neither position is the type
+		// segment §1.2 reserves, whatever string it holds.
+		//
+		// §1.2's own named enforcement point is the Processor at meta-DDL
+		// commit time (internal/processor/step6_validate.go's
+		// reservedVertexTypeName gate), which is the one a raw core-operations
+		// submit cannot route around; both gates read the SAME reserved set
+		// (keys.IsReservedTypeName) so they cannot disagree. This install-time
+		// check earns its place by failing the package where the mistake was
+		// AUTHORED, naming the offending DDL index, instead of surfacing as a
+		// rejected install operation with only a mutation key to go on.
+		//
+		// The check is exact-name only, and that is not an oversight: a
+		// vertexType DDL's CanonicalName is not always the literal type segment
+		// its install writes into a key — a census over pkgregistry.All() found
+		// 27 of 59 shipping vertexType DDLs whose CanonicalName differs from
+		// (or, for an op-only DDL like "shredIdentityKey", never becomes) that
+		// segment, e.g. "workOrder" writes vtx.workorder.<id>. So
+		// keys.IsValidTypeSegment is enforced below only on a
+		// TAXONOMY-PARTICIPATING DDL (Abstract, or SubtypeOfRef declared), never
+		// on an ordinary concrete vertexType DDL, which would reject those 27
+		// packages; a non-participating DDL's CanonicalName can be any shape at
+		// all, and this check closes only the exact-name collision §1.2 names.
 		if class == ddlClassVertexType {
-			if _, reserved := reservedTypeNames[d.CanonicalName]; reserved {
+			if keys.IsReservedTypeName(d.CanonicalName) {
 				return fmt.Errorf(
 					"pkgmgr: DDL[%d]: vertexType CanonicalName %q is reserved (Contract #1 §1.2)",
 					idx, d.CanonicalName)
@@ -148,7 +138,7 @@ func (def Definition) validateAbstractDDLScope() error {
 			// authoring mistake, not surface later as "not found in the
 			// installed kernel" — the same check CanonicalName itself already
 			// gets, applied to the name a SubtypeOfRef points AT.
-			if _, reserved := reservedTypeNames[d.SubtypeOfRef]; reserved {
+			if keys.IsReservedTypeName(d.SubtypeOfRef) {
 				return fmt.Errorf(
 					"pkgmgr: DDL[%d] %q: SubtypeOfRef %q is reserved (Contract #1 §1.2)",
 					idx, d.CanonicalName, d.SubtypeOfRef)

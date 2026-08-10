@@ -165,6 +165,27 @@ func (v *ValidatorImpl) validateOne(ctx context.Context, env *OperationEnvelope,
 		}
 	}
 
+	// 2.6. Reserved vertex-type-name gate (Contract #1 §1.2): the platform
+	// reserves the type names `meta` and `op`, and operator-defined DDL may not
+	// register a vertex type under either. §1.2 names THIS as the enforcement
+	// point ("rejected by Processor at meta-DDL commit time") because it is the
+	// only one a submitter cannot route around: pkgmgr's install-time check
+	// covers every package-declared DDL, but a raw `core-operations` submit
+	// writing the meta-vertex directly never passes through pkgmgr at all, and
+	// every write to Core KV passes through here (P2 — the Processor is the
+	// sole writer).
+	//
+	// Exempt on tombstone, for the same reason as the abstract gates above:
+	// removing a registration must stay possible — it is exactly the corrective
+	// action for one that should never have existed — and a tombstone can never
+	// CREATE a registration, so exempting it can only shrink the set of
+	// reserved-name registrations, never grow it.
+	if m.Op != "tombstone" {
+		if err := v.validateReservedTypeRegistration(m, kind, result, rid); err != nil {
+			return err
+		}
+	}
+
 	// 3. Class derivation from document. For tombstones the document is
 	// optional — if absent, skip DDL lookups.
 	class := ""
@@ -341,6 +362,157 @@ func (v *ValidatorImpl) validateAbstractKeySegments(key string, kind substrate.K
 		}
 	}
 	return nil
+}
+
+// metaTypeSegment is the type segment every meta-vertex key carries
+// (Contract #1 §1.2) — the owner position a vertex-type registration is
+// written under, and the only one the reserved-name gate below inspects.
+const metaTypeSegment = "meta"
+
+// canonicalNameLocalName is the aspect local name carrying a meta-vertex's
+// lookup name (Contract #1 §1.7). The DDL cache reads the registration by
+// this KEY (`<root>.canonicalName`), never by the aspect document's own
+// class, so the gate below keys off the same segment the reader does.
+const canonicalNameLocalName = "canonicalName"
+
+// vertexTypeDDLKind is deriveDDLKind's result for class `meta.ddl.vertexType`,
+// and the Kind a DDLCache entry carries for one. A vertexType DDL is the only
+// DDL class that registers a vertex TYPE NAME, which is what Contract #1 §1.2
+// reserves: an aspectType DDL's canonical name lands in a key's localName slot
+// and a linkType DDL's in the relation slot, neither of which is a type segment.
+const vertexTypeDDLKind = "vertexType"
+
+// validateReservedTypeRegistration rejects a mutation that registers a
+// vertexType DDL under a Contract #1 §1.2 reserved type name (`meta`, `op`).
+//
+// Both shapes that can carry the name are covered, because the DDL cache reads
+// both (ddl_cache.go's loadMetaVertex) and either one alone is a complete
+// registration:
+//
+//	(1) the ASPECT `vtx.meta.<NanoID>.canonicalName`, whose `data.value` is
+//	    the name — the shape pkgmgr's install batch writes; and
+//	(2) the ROOT `vtx.meta.<NanoID>` itself, whose `data.canonicalName` is the
+//	    name — the cache's fallback when no aspect supplies one.
+//
+// Gating only the shape pkgmgr happens to emit would leave the other as a
+// one-mutation bypass of the whole rule. Shape (2) is gated unconditionally,
+// never "only when no canonicalName aspect exists": an aspect that shadows the
+// root's field today can be tombstoned tomorrow, and that tombstone is itself
+// exempt here, so the root's field would silently become the live registration
+// with no mutation left to gate it.
+func (v *ValidatorImpl) validateReservedTypeRegistration(m MutationOp, kind substrate.KeyKind, result ScriptResult, rid string) error {
+	switch kind {
+	case substrate.KindVertex:
+		metaType, _, ok := substrate.ParseVertexKey(m.Key)
+		if !ok || metaType != metaTypeSegment || m.Document == nil {
+			return nil
+		}
+		class, _ := m.Document["class"].(string)
+		if deriveDDLKind(class) != vertexTypeDDLKind {
+			return nil
+		}
+		name := documentDataString(m.Document, canonicalNameLocalName)
+		if !substrate.IsReservedTypeName(name) {
+			return nil
+		}
+		return &DDLViolation{
+			ViolatedConstraint: "reservedVertexTypeName",
+			MutationKey:        m.Key,
+			OperationRequestID: rid,
+			Detail: fmt.Sprintf("vertexType DDL meta-vertex declares data.canonicalName %q — that is a reserved platform type name and may not be registered as a vertex type (Contract #1 §1.2)",
+				name),
+		}
+
+	case substrate.KindAspect:
+		metaRootKey, metaType, _, localName, ok := substrate.ParseAspectKey(m.Key)
+		if !ok || metaType != metaTypeSegment || localName != canonicalNameLocalName || m.Document == nil {
+			return nil
+		}
+		name := documentDataString(m.Document, "value")
+		if !substrate.IsReservedTypeName(name) {
+			return nil
+		}
+		// The reservation is on vertex TYPE registration, so an owner that is
+		// some other flavor of meta-vertex — a lens, a weaverTarget, a pane —
+		// is none of this gate's business even when its canonical name happens
+		// to be one of the reserved words.
+		ownerKind, resolved := v.metaVertexDDLKind(metaRootKey, result)
+		if resolved && ownerKind != vertexTypeDDLKind {
+			return nil
+		}
+		detail := fmt.Sprintf("canonicalName aspect declares %q for meta-vertex %q — that is a reserved platform type name and may not be registered as a vertex type (Contract #1 §1.2)",
+			name, metaRootKey)
+		if !resolved {
+			// Unresolved owner ⇒ REJECT. Failing the other way (allow what we
+			// cannot classify) would hand back the exact bypass this gate
+			// exists to close: split the registration across two operations,
+			// write the root in the first and the canonicalName aspect in the
+			// second, and the aspect arrives with its owner in neither the
+			// batch nor the cache. The cost of failing closed is bounded and
+			// visible — DDLCache indexes every `vtx.meta.*` that carries a
+			// name, so the only owner it cannot classify is one that has no
+			// name yet, i.e. precisely a registration in progress — and the
+			// rejection only ever fires on a value that is literally `meta` or
+			// `op`, never on an ordinary name.
+			detail = fmt.Sprintf("%s; the owning meta-vertex's class is declared by neither this batch nor an installed DDL, so the registration cannot be shown to be anything other than a vertex type", detail)
+		}
+		return &DDLViolation{
+			ViolatedConstraint: "reservedVertexTypeName",
+			MutationKey:        m.Key,
+			OperationRequestID: rid,
+			Detail:             detail,
+		}
+	}
+	return nil
+}
+
+// metaVertexDDLKind resolves the DDL kind (deriveDDLKind's vocabulary:
+// "vertexType", "aspectType", …; empty for a non-`meta.ddl.*` meta-vertex such
+// as a lens) of the meta-vertex at metaRootKey.
+//
+// The in-flight batch is consulted FIRST and is authoritative: an install
+// writes a DDL's root and its canonicalName aspect in one batch, so the class
+// this very operation establishes is the class that will be committed — and it
+// is also the class a bypass attempt would set, which the cache by definition
+// cannot yet know. The already-installed DDL cache is the fallback, for the
+// update case where the root is long committed and only the aspect is being
+// rewritten. Neither path reads Core KV: the cache is in-memory, so the gate
+// costs nothing on the hot path and spends none of the operation's live-read
+// budget.
+//
+// resolved=false means neither source could say what the owner is; the caller
+// decides what that means, and the reserved-name gate above fails closed on it.
+func (v *ValidatorImpl) metaVertexDDLKind(metaRootKey string, result ScriptResult) (kind string, resolved bool) {
+	for _, m := range result.Mutations {
+		if m.Key != metaRootKey || m.Document == nil || mutationTombstoned(m) {
+			continue
+		}
+		if m.Op != "create" && m.Op != "update" {
+			continue // only a create/update establishes the meta-vertex's class
+		}
+		if class, ok := m.Document["class"].(string); ok {
+			return deriveDDLKind(class), true
+		}
+	}
+	if ref, ok := v.DDLs.LookupByMetaKey(metaRootKey); ok {
+		return ref.Kind, true
+	}
+	return "", false
+}
+
+// documentDataString reads a string field out of a mutation document's `data`
+// map, returning "" when the document carries no `data` object, no such field,
+// or a non-string value. A non-string is the same as absent here on purpose:
+// every reader of these fields (ddl_cache.go's loadMetaVertex) type-asserts to
+// string and ignores anything else, so a value no reader will ever treat as a
+// registered name is not one this gate should reject on either.
+func documentDataString(doc map[string]interface{}, field string) string {
+	data, ok := doc["data"].(map[string]interface{})
+	if !ok {
+		return ""
+	}
+	s, _ := data[field].(string)
+	return s
 }
 
 // validateEventClass rejects an event whose class resolves to an abstract DDL

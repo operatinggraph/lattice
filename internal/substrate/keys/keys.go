@@ -144,6 +144,40 @@ func splitVertexKey(key string) (vertexType, id string, ok bool) {
 // and at spec load, long before a ciphertext naming one of them is written.
 func IsValidTypeSegment(s string) bool { return isValidTypeSegment(s) }
 
+// reservedTypeNames are the two type names Contract #1 §1.2 reserves for the
+// platform: `meta` (schema and configuration meta-entities, distinguished by
+// the document's `class`) and `op` (idempotency trackers). Operator-defined
+// DDL may not register a vertex type under either name.
+//
+// The set lives in this leaf package because two enforcement points need the
+// SAME names and neither may own them: pkgmgr rejects a package whose
+// vertexType DDL declares one (install time), and the Processor's step-6
+// validator rejects a mutation that registers one (commit time — the
+// enforcement point §1.2 names, and the only one a raw core-operations submit
+// cannot route around). A private copy on either side would let the two drift,
+// and for a reserved-name list drift means one gate silently admitting exactly
+// what the other exists to refuse.
+var reservedTypeNames = map[string]struct{}{
+	"meta": {},
+	"op":   {},
+}
+
+// IsReservedTypeName reports whether s is one of the platform-reserved type
+// names of Contract #1 §1.2.
+//
+// This is deliberately NOT folded into IsValidTypeSegment: `meta` and `op` are
+// perfectly valid type SEGMENTS — every meta-vertex key (`vtx.meta.<NanoID>`)
+// and every idempotency tracker (`vtx.op.<requestId>`) carries one, and the
+// platform writes both constantly. What §1.2 forbids is an operator DDL
+// REGISTERING a vertex type under either name, which is a question about a
+// declared name, not about a key's shape. A caller asking "may this key
+// exist?" wants IsValidTypeSegment; a caller asking "may this name be
+// registered as a type?" wants this.
+func IsReservedTypeName(s string) bool {
+	_, reserved := reservedTypeNames[s]
+	return reserved
+}
+
 // isValidTypeSegment matches Contract #1 type pattern: [a-z][a-z0-9]*.
 func isValidTypeSegment(s string) bool {
 	if len(s) == 0 {

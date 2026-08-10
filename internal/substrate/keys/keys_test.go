@@ -124,3 +124,27 @@ func TestUnderscoreLocalNameAccepted(t *testing.T) {
 		t.Fatalf("unexpected aspect key: %q", k)
 	}
 }
+
+func TestIsReservedTypeName(t *testing.T) {
+	for _, name := range []string{"meta", "op"} {
+		if !IsReservedTypeName(name) {
+			t.Fatalf("IsReservedTypeName(%q) = false, want true (Contract #1 §1.2)", name)
+		}
+	}
+	// Names §1.2 explicitly calls out as NOT reserved — they are flavors of
+	// `meta` distinguished by a document's class, not type names of their own —
+	// plus the casing and substring near-misses a matcher must not widen to.
+	for _, name := range []string{"lens", "event", "ddl", "actor", "identity", "Meta", "operation", "opx", ""} {
+		if IsReservedTypeName(name) {
+			t.Fatalf("IsReservedTypeName(%q) = true, want false", name)
+		}
+	}
+	// Both reserved names remain valid type SEGMENTS: every meta-vertex and
+	// every idempotency tracker key carries one, so reservation must not leak
+	// into key-shape validation.
+	for _, name := range []string{"meta", "op"} {
+		if !IsValidTypeSegment(name) {
+			t.Fatalf("IsValidTypeSegment(%q) = false — a reserved name is still a legal key segment", name)
+		}
+	}
+}

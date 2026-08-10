@@ -86,3 +86,10 @@ func IsValidShortCode(s string) bool { return keys.IsValidShortCode(s) }
 // an aspect key's fourth segment. For a caller holding a local name but not yet
 // a whole key to parse.
 func IsValidLocalName(s string) bool { return keys.IsValidLocalName(s) }
+
+// IsReservedTypeName reports whether s is one of the two type names Contract #1
+// §1.2 reserves for the platform (`meta`, `op`) and so may not be registered as
+// an operator-defined vertex type. It answers a question about a DECLARED name,
+// not about a key's shape: both names are legal type segments in a key, which is
+// why this is separate from the segment validators above.
+func IsReservedTypeName(s string) bool { return keys.IsReservedTypeName(s) }
