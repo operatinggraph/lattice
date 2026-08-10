@@ -31,6 +31,12 @@
 // Checks (v0 — highest-value, lowest-false-positive):
 //   - History/changelog comments — git blame + the commit message are the
 //     record. This is the single most-violated rule (CLAUDE.md).
+//   - Review-finding-label comments — a bare, trailing reviewer-finding
+//     label such as `(A2)`, left over from a review-fix round instead of
+//     cleaned up into a description of current behavior. Restricted to a
+//     letter subset that never collides with this tree's own vocabulary
+//     (architecture principles, data-placement, the derived-key ban); see
+//     reviewFindingLabel's doc for the survey behind the shape.
 //   - `asp.` key prefix in a Go string literal — aspects are 4-segment
 //     vtx.<type>.<id>.<localName>, never an asp.* prefix (Contract #1).
 //   - P5 — a vertical application cmd reading Core KV directly. Architecture P5:
@@ -182,8 +188,29 @@ import (
 
 var (
 	historyComment = regexp.MustCompile(`//[ \t]*(Story [0-9]|Previously\b|Was:|Replaces\b|renamed from|moved from|formerly\b)`)
-	aspPrefix      = regexp.MustCompile(`"asp\.`)
-	coreKVRead     = regexp.MustCompile(`\bCoreKVBucket\b|"core-kv"`)
+	// reviewFindingLabel anchors a bare parenthesized reviewer-finding label
+	// trailing a comment — the shape a review-fix round leaves behind when a
+	// fix note ends "... (A2)" instead of being cleaned up into a
+	// description of current behavior. Two constraints, both load-bearing
+	// per a full-repo survey (neither alone reaches zero false positives):
+	// the letter is restricted to {A,B,C,E,F}, deliberately excluding the
+	// letters this tree already uses as stable vocabulary in the same
+	// parenthesized-after-a-word shape — D (data-placement, e.g. `(D5)`),
+	// G (the derived-key ban, `(G2)`), and P (architecture principles, e.g.
+	// `(P5)`); and the label must be the LAST thing on the line. Every
+	// existing (legitimate) use of a kept letter — Loupe Fire numbers
+	// (`(F14)`, `(F20)`, …), an acceptance-criteria-shaped gloss (`(C2)`),
+	// a taxonomy callback direction (`(B4)`/`(B5)`), a fault-injection case
+	// (`(E5)`), test-actor mnemonics (`(A1)`/`(A2)`/`(A3)`) — sits
+	// mid-sentence with more comment text after it, including several from
+	// this very tree's own review-fix rounds (e.g. "covers A2: ...",
+	// "covers B1: ...") that name a finding while still fully describing
+	// current behavior; a bare trailing label with nothing earning its
+	// keep after it is the leftover this check exists to catch, and no
+	// legitimate use of this letter range takes that shape today.
+	reviewFindingLabel = regexp.MustCompile(`(?:^|\s)(?://|#).*\([ABCEF][0-9]{1,2}\)\.?\s*$`)
+	aspPrefix          = regexp.MustCompile(`"asp\.`)
+	coreKVRead         = regexp.MustCompile(`\bCoreKVBucket\b|"core-kv"`)
 	// p7Discriminator — a package script emitting a discriminator-shaped aspect (a
 	// `.class` / `.family` / `.kind` localName that shadows the envelope `class`).
 	// Anchored on the Starlark aspect-emit helper so a discriminator word used
@@ -724,6 +751,9 @@ func scanSource(path string, data []byte) []finding {
 		if historyComment.MatchString(line) {
 			out = append(out, finding{file: path, line: ln, msg: "history/changelog comment — git blame + the commit message are the record"})
 		}
+		if reviewFindingLabel.MatchString(line) {
+			out = append(out, finding{file: path, line: ln, msg: "review-finding-label comment — findings live in the review record and the commit message, not code comments"})
+		}
 		if aspPrefix.MatchString(line) {
 			out = append(out, finding{file: path, line: ln, msg: "`asp.` key prefix — aspects are 4-segment vtx.<type>.<id>.<localName> (Contract #1)"})
 		}
@@ -1200,7 +1230,6 @@ func derivedKeyOnLine(line string) derivedKeyVerdict {
 	}
 	return reasonGiven
 }
-
 
 // quoteBytes renders a byte slice as a comma-separated, single-quoted list
 // for a finding message, e.g. []byte("l0") -> "'l', '0'".

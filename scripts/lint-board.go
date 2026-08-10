@@ -31,6 +31,10 @@
 //	                 8f9b0633, c97b784f all landed with the row left dangling
 //	                 after the State flip) before this check existed.
 //	WARN  dep      — a 🚧/🏗️/📋/📐 row "behind X / blocked-on X" where X reads done.
+//	WARN  openrows — a lane has more than openRowWarnMax open (non-Done-log)
+//	                 rows. Never fails, even under --strict: closure pressure
+//	                 is a signal for the steward to prefer a closure/
+//	                 consolidation unit next, not a cap that blocks filing.
 package main
 
 import (
@@ -42,11 +46,12 @@ import (
 )
 
 const (
-	rowMax       = 600    // a table data row (aim ≤300; hard cap here)
-	sectionMax   = 22     // Survey-log / PO-notes section line budget
-	doneEntryMax = 250    // a Done-log bullet must be one line
-	doneCountMax = 35     // Done-log entries before the oldest should roll to archive/ (WARN)
-	fileMaxBytes = 40_000 // a lane file ceiling (clean lattice ≈22KB)
+	rowMax         = 600    // a table data row (aim ≤300; hard cap here)
+	sectionMax     = 22     // Survey-log / PO-notes section line budget
+	doneEntryMax   = 250    // a Done-log bullet must be one line
+	doneCountMax   = 35     // Done-log entries before the oldest should roll to archive/ (WARN)
+	openRowWarnMax = 80     // open (non-Done-log) rows before a closure/consolidation unit is preferred (WARN)
+	fileMaxBytes   = 40_000 // a lane file ceiling (clean lattice ≈22KB)
 )
 
 var defaultFiles = []string{
@@ -72,7 +77,7 @@ var (
 type finding struct {
 	file string
 	line int
-	kind string // row | journal | section | doneline | filesize | dep
+	kind string // row | journal | section | doneline | filesize | dep | openrows
 	warn bool
 	msg  string
 }
@@ -148,6 +153,7 @@ func checkFile(path string) ([]finding, map[string]bool, []rowRef) {
 	secCapped := false // is the current section a Survey-log / PO-notes section?
 	inDone := false
 	doneCount := 0
+	openRowCount := 0
 
 	closeSection := func(atLine int) {
 		if secCapped && secCount > sectionMax {
@@ -197,9 +203,12 @@ func checkFile(path string) ([]finding, map[string]bool, []rowRef) {
 			}
 			if item, state := splitRow(line); item != "" {
 				rows = append(rows, rowRef{path, n, item, state})
-				if !inDone && shippedRe.MatchString(state) {
-					out = append(out, finding{path, n, "shipped", false,
-						fmt.Sprintf("row state %q reads as shipped but the row is still in the open-items table — delete the row (its Done-log line already carries the record)", state)})
+				if !inDone {
+					openRowCount++
+					if shippedRe.MatchString(state) {
+						out = append(out, finding{path, n, "shipped", false,
+							fmt.Sprintf("row state %q reads as shipped but the row is still in the open-items table — delete the row (its Done-log line already carries the record)", state)})
+					}
 				}
 			}
 		}
@@ -213,6 +222,10 @@ func checkFile(path string) ([]finding, map[string]bool, []rowRef) {
 	if doneCount > doneCountMax {
 		out = append(out, finding{path, secStart, "doneline", true,
 			fmt.Sprintf("Done log has %d entries > %d — roll the oldest to backlog/archive/", doneCount, doneCountMax)})
+	}
+	if openRowCount > openRowWarnMax {
+		out = append(out, finding{path, 0, "openrows", true,
+			fmt.Sprintf("lane has %d open rows > %d — prefer a closure/consolidation unit next (steward SKILL §4)", openRowCount, openRowWarnMax)})
 	}
 	return out, doneItems, rows
 }
