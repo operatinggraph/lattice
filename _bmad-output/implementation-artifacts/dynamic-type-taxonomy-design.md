@@ -2153,7 +2153,7 @@ onto the running stack (the real 0.2.3→0.3.0 upgrade, i.e. the tombstone path 
 
 ### 17.18 Checkpoint — Fire B COMPLETE, and the item is done
 
-**B0 (`dd7e88ff`) + B1 (`00a2ee04`) close Fire B, and Fire B closes the item.** No worktree is held.
+**B0 (`dd7e88ff`) + B1 (`7e60c4db`) close Fire B, and Fire B closes the item.** No worktree is held.
 
 **What the close pass changed about the item's own record.** §14 said "Fire B's first commit files these four
 as board rows — naming them here is not filing them." It never happened; a search over every commit that has
