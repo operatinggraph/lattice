@@ -510,9 +510,12 @@ Each increment is independently shippable and green on its own.
 | **2 — Narrow the eligible actor-aware consumers** | `NarrowedFilterEligible` swaps `actorEnumerator != nil` for the shared predicate; rewrite the `:550-561` comment (§4.6); e2e (c). Everything else is D1's shipped machinery | S | Full `-p 4` suite. Measurable alone: `capabilityRoles` intake drops to 9 subjects. Rollback is `Rebuild`, **not** a code revert (§8.3) |
 | **3 — Pattern-directed affected-anchor derivation** | New unit under `pipeline/` deriving the affected-anchor set from the compiled pattern + the changed element (3a edge-seeded, 3b node-seeded), hop index over **every** pattern source with a `complete` flag, superset invariant + fallback to the shipped BFS; wire the three actor-aware arms; **plus the sampled plain-arm shadow measurement (§4.7) — derive, compare, count, act on neither**; differential test; e2e (a) tightened to co-holder-revision-unchanged, plus (d) | M–L | Full `-p 4` suite. Built as a standalone unit so §D2 Phase 2 can wire the plain arm later without a second derivation. The shadow counters are what turn Phase 2 into a flag flip with a before-and-after |
 
-Deliberately **not** in scope: the plain-arm wiring of §D2 Phase 2 (trigger unmeasured — §4.7); any
-change to the enumerator's caps or its `reportsTo` hop; `verify-claim-ceremony.go`'s convergence poll
-(its own board row, and the harness this design is measured with); any Contract amendment.
+| **4 — Finish the narrowing** | Widen what the derivation covers (the blanket `WITH` refusal, the enumerator's singleton fast path, D2 Phase 2's plain arm, relation narrowing for actor-aware); guard the pre-install `ConsumerFilter` order; prove the mandated healer end to end; and the re-claim hydrate defect the live measurement unmasked. **Full §18.** | L | Folded 2026-08-09 (Andrew) from seven surviving rows that each pointed here as their `why`. Full `-p 4` suite (shared derivation) |
+
+Deliberately **not** in scope: ~~the plain-arm wiring of §D2 Phase 2 (trigger unmeasured — §4.7);~~ *(that
+deferral is DISCHARGED — Inc 3's shadow counters are the measurement it was waiting for, so the wiring is now
+Inc 4a)*; any change to the enumerator's caps or its `reportsTo` hop; `verify-claim-ceremony.go`'s convergence
+poll (its own board row, and the harness this design is measured with); any Contract amendment.
 
 ## 11. Pre-build gates
 
@@ -1521,3 +1524,93 @@ The plain-arm shadow and §D2 Phase 2's wiring (its own filed row, sequenced beh
 the blanket `WITH` refusal (its own filed row, §16.4) · any change to the enumerator's caps or its
 `reportsTo` hop · surfacing the act-side tally to Health KV (the log is the reader this fire owes; the
 Health surface is the divergence-audit row's shape, not this one's) · any Contract amendment.
+
+## 18. Increment 4 — finish the narrowing (folded 2026-08-09, Andrew)
+
+**Why this section exists.** Increments 0–3b shipped and the item left the board, but seven rows survived it,
+each pointing back here as its `why`. Seven fragments of one unfinished item read as seven small chores and get
+selected as none of them; they are one fire. Andrew folded them back in and reopened the parent row.
+
+**None of these is a regression from Inc 0–3.** The derivation and the narrowing are live and correct as far as
+they go. What Inc 4 finishes is the part that was deliberately deferred, plus what the Inc 2 and Inc 3b reviews
+found and the live measurement unmasked. **Nothing here blocks anything else** — the item is `🏗️ building` and
+this is the whole of what remains.
+
+**Size: L.** Four sub-increments, each independently green. Build order is 4a → 4b → 4c → 4d, but only
+4a-before-4b is a real dependency (4b guards a surface 4a widens).
+
+### 18.1 — 4a: widen what the derivation covers (the four coverage rows)
+
+The derivation acts today over a subset narrower than its own soundness argument requires. Four separate
+under-coverages, all in the same unit, all with the same acceptance shape — *the corpus census moves in the
+widening direction and no lens changes verdict for the wrong reason*:
+
+- **The affected-anchor index refuses every lens carrying a `WITH`.** The conjunct is blanket where the hazard
+  is narrow: only a variable a later clause **re-references after the `WITH` dropped it** re-seeds by bucket
+  scan. It keeps **14 of 30** actorAggregate lenses on the BFS. Narrow the conjunct to the actual hazard.
+  Consumer: the generated producer family. (§17.6)
+- **The enumerator's anchor-type fast path returns a singleton.** `Enumerate` short-circuits to `[eventKey]`
+  when the event vertex's type is the actor type, so an aspect event on one identity never reaches an anchor
+  binding it at a **non-anchor** position. Note the Inc 3b review's correction: the singleton is the *narrower*
+  of the two answers, so this is a correctness gap, not an optimization. Consumer: the first lens reading a
+  non-anchor identity position's data. (§17.6)
+- **D2 Phase 2 — reverse anchor enumeration for neighbour events.** A referenced-non-anchor-type event still
+  triggers a full per-lens recompute on the **plain-lens** corpus. Measured: **1,325 neighbour-link events
+  wedged `clinicProviders`.** §10 deferred this as "trigger unmeasured"; Inc 3's shadow counters are exactly the
+  before-and-after that removes that objection, so it is now a wiring job — **wire the plain arm to the shared
+  unit**, do not build a second derivation. (§4.7)
+- **An actor-aware lens narrows by label but never by relation.** `ConsumerFilter`'s relation dimension is gated
+  to plain pipelines: `actorAwareFanOutRelevant` judges by endpoint type alone, so a relation-pinned subject
+  would withhold a link its fan-out arm keeps. This is the remainder of **Term A**. Consumer: `capabilityRoles`.
+  (§15.11)
+
+### 18.2 — 4b: guard what the narrowing assumes (the ordering row)
+
+**A pre-install `ConsumerFilter` call would narrow with no conjunct evaluated.** The order is correct today and
+the failure mode is *inverted*: an uninstalled enumerator reads as **plain**, whose conditions activation has
+already met, so an early call yields the **most aggressive** filter with none of §4.2's conjuncts evaluated —
+and no revert widens a registered filter back. Today's correctness rests on call-site ordering, which 4a's
+widening makes easier to get wrong.
+
+Make the gate refuse rather than answer when the pipeline's install stages are incomplete — the same
+decline-don't-guess posture the taxonomy work adopted for unresolved expansions. Consumer: the next fire adding
+a `cmd/refractor` install stage. (§15.11)
+
+### 18.3 — 4c: prove the healer (the test-gap row)
+
+**Narrowing's mandated healer is never exercised end to end.** §4.2 refuses to narrow a lens without a sweep
+plan, precisely because narrowing removes the incidental reprojection that used to heal a lost row — yet **no
+test deletes a row under a narrowed consumer and requires `RunSweep` to restore it.** The conjunct that makes
+every narrowing in this design safe is the one thing with no end-to-end proof.
+
+Write that test. It is the acceptance for the whole design, not a chore: if it cannot be made to pass, the
+narrowing shipped in Inc 2 is not safe and that is a far larger finding. Consumer: the next fire editing a
+narrowed label set. (§15.11)
+
+### 18.4 — 4d: the ceremony tail the live measurement unmasked
+
+**A re-claim dies in hydrate, so NFR-S6's generic rejection never renders.** The first claim tombstones
+`.claimKey`; the re-claim still declares it, so step 4 fails `read deleted sensitive aspect` → **HTTP 500
+before the generic 400 renders**, which makes "already claimed" externally distinguishable from "bad token" —
+the exact discrimination NFR-S6's generic rejection exists to prevent. Reproduced on **3/3 live runs**.
+
+This is `internal/processor`, not Refractor. It is in this fire because it is not a Processor defect anybody
+would find on its own — it was unmasked by *this design's* live measurement (§17.7) and it is the ceremony this
+design is measured through. Wearing the other hat is cheaper than bouncing it to a lane where nothing points at
+it. (§17.7)
+
+### 18.5 Acceptance for the fire
+
+- The corpus census moves in the widening direction on 4a, with each lens's verdict change attributable to a
+  named conjunct — not a bulk re-pin.
+- 4b: a `ConsumerFilter` call before the install stages complete **refuses**; a test drives that order.
+- 4c: a row deleted under a narrowed consumer is restored by `RunSweep`, end to end.
+- 4d: a re-claim renders the **generic 400**, and a test pins that it is indistinguishable from the other
+  rejection causes.
+- Full `go test ./... -p 4` — 4a touches the shared derivation, which is a wide-blast-radius change.
+
+### 18.6 What is still deliberately NOT in this fire
+
+The enumerator's caps and its `reportsTo` hop (unchanged since §10 said so); any Contract amendment;
+`verify-claim-ceremony.go`'s convergence poll, which keeps its own board row because it is the *harness* this
+design is measured with rather than part of the design.
