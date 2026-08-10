@@ -6,13 +6,18 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func indexOf(t *testing.T, body string) HopIndex {
+func parseFull(t *testing.T, body string) *CompiledRule {
 	t.Helper()
 	cr, err := New().Parse(body)
 	require.NoError(t, err)
 	compiled, isFull := cr.(*CompiledRule)
 	require.True(t, isFull)
-	return compiled.AnchorHopIndex()
+	return compiled
+}
+
+func indexOf(t *testing.T, body string) HopIndex {
+	t.Helper()
+	return parseFull(t, body).AnchorHopIndex()
 }
 
 // The shipped cypher of the auth-plane lens the whole design is measured on
@@ -226,11 +231,6 @@ func TestAnchorHopIndex_Refusals(t *testing.T) {
 			want: "variable-length relationship",
 		},
 		{
-			name: "a WITH re-seeds by bucket scan, which no adjacency walk can see",
-			body: `MATCH (i:identity {key: $actorKey})-[:holdsRole]->(r:role) WITH r AS r MATCH (r)<-[:grantedBy]-(p:permission) RETURN r.key AS k, p.key AS pk`,
-			want: "WITH",
-		},
-		{
 			// The adversarial case: a scan-seeded position RESCUED by a hop
 			// that does not bind it. Reachability in the hop graph says
 			// "connected"; the executor still scans every unit and every
@@ -295,6 +295,323 @@ func TestAnchorHopIndex_Refusals(t *testing.T) {
 			require.Contains(t, ix.Incomplete, tc.want)
 		})
 	}
+}
+
+// TestAnchorHopIndex_WithScope is the WITH conjunct, stated as the population
+// it admits and the population it refuses.
+//
+// The hazard a WITH creates is narrow: projectItems rebuilds each row from the
+// projection aliases alone, so a name the WITH does not carry is unbound
+// afterwards and a later clause using it gets a FRESH binding — seeded from a
+// bucket by matchPath, which no adjacency walk can see. A WITH whose dropped
+// names nothing downstream mentions creates no such re-seed, and the anchor is
+// the `$actorKey` PARAMETER rather than a row column, so even dropping the
+// anchor's own variable leaves the graph walkable.
+//
+// The population it admits is therefore "every lens whose WITH is a pure stage
+// boundary" — which is what the corpus's WITHs overwhelmingly are, since they
+// exist to collapse a fan-out back to one row per anchor before the next arm
+// fans out. What every accepted case has to earn is the invariant
+// hopIndexBuilder.position assumes and cannot check for itself: that two
+// sightings of one variable name are the same executor binding. Each accepted
+// case below is a case where that holds by construction; each refused one is a
+// case where it does not, or where the projection list is a shape whose answer
+// the index declines to guess.
+func TestAnchorHopIndex_WithScope(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		body   string
+		reject string // "" == the index must be complete
+	}{
+		{
+			// Every name a later clause uses survives the boundary, so the
+			// positions the walk needs are the ones the executor really binds.
+			name: "a WITH carrying everything downstream uses is indexable",
+			body: `MATCH (i:identity {key: $actorKey})-[:holdsRole]->(r:role) WITH i, r MATCH (r)<-[:grantedBy]-(p:permission) RETURN i.key AS k, p.key AS pk`,
+		},
+		{
+			// The corpus's own shape: a staging WITH that keeps the arm's
+			// result and lets the anchor's variable go. `i` is never named
+			// again, so nothing re-seeds — and the anchor POSITION keeps its
+			// hops, which is all walkToAnchors reads.
+			name: "a WITH dropping the anchor's own variable strands nothing",
+			body: `MATCH (i:identity {key: $actorKey})-[:holdsRole]->(r:role) WITH r MATCH (r)<-[:grantedBy]-(p:permission) RETURN r.key AS k, p.key AS pk`,
+		},
+		{
+			name: "a WITH dropping a variable no later clause references is indexable",
+			body: `MATCH (i:identity {key: $actorKey})-[:holdsRole]->(r:role) OPTIONAL MATCH (i)-[:residesIn]->(u:unit) WITH i, r RETURN i.key AS k, r.key AS rk`,
+		},
+		{
+			// `WITH a AS a` is the no-op spelling of `WITH a`, and the executor
+			// treats it as one (projectItems' alias defaults to the variable's
+			// own name). A rename is a different question — see below.
+			name: "a self-aliased carry is a carry",
+			body: `MATCH (i:identity {key: $actorKey})-[:holdsRole]->(r:role) WITH i AS i, r AS r MATCH (r)<-[:grantedBy]-(p:permission) RETURN i.key AS k, p.key AS pk`,
+		},
+		{
+			// The staged-aggregation shape (packages/privacy-base's residue
+			// lens): each stage collapses the previous arm's fan-out and lets
+			// its variable go, and no arm is ever named again. The counts are
+			// values under fresh names, so they collide with no position.
+			name: "chained staging WITHs with aggregates are indexable",
+			body: `MATCH (i:identity {key: $actorKey})
+OPTIONAL MATCH (i)<-[:boundTo]-(c:credential)
+WITH i, count(c.key) AS inbound
+OPTIONAL MATCH (i)-[:indexes]->(x:credential)
+WITH i, inbound, count(x.key) AS outbound
+RETURN i.key AS k, inbound AS a, outbound AS b`,
+		},
+		{
+			// The hazard itself. `r` is gone after the WITH, so matchPath seeds
+			// the later pattern's head from the whole role bucket — a
+			// dependency on a BUCKET, which no hop can express. The builder
+			// cannot catch this on its own: position() merges the second `r`
+			// onto the first, so ground() sees an already-grounded head.
+			name:   "a dropped variable re-referenced as a later MATCH head is refused",
+			body:   `MATCH (i:identity {key: $actorKey})-[:holdsRole]->(r:role) WITH i MATCH (r)<-[:grantedBy]-(p:permission) RETURN i.key AS k, p.key AS pk`,
+			reject: "a WITH dropped `r` and a later clause re-references it",
+		},
+		{
+			// A re-reference does not have to head a pattern to be wrong. Here
+			// the second `r` is a fresh binding reached by traversal, and
+			// merging it onto the first asserts a hop between vertices no row
+			// ever relates — which can shorten a Dist and hand AnchorSideSeeds
+			// the wrong endpoint.
+			name:   "a dropped variable re-referenced anywhere in a later pattern is refused",
+			body:   `MATCH (i:identity {key: $actorKey})-[:holdsRole]->(r:role) WITH i MATCH (i)-[:managesRole]->(r) RETURN i.key AS k, r.key AS rk`,
+			reject: "a WITH dropped `r` and a later clause re-references it",
+		},
+		{
+			// The WITH's own WHERE runs on the ALREADY-projected rows
+			// (applyWith), so it reads the carried scope — a name this boundary
+			// just let go of is unbound by the time its own filter evaluates.
+			name:   "a dropped variable re-referenced by the WITH's own WHERE is refused",
+			body:   `MATCH (i:identity {key: $actorKey})-[:holdsRole]->(r:role) WITH r WHERE i.key <> null MATCH (r)<-[:grantedBy]-(p:permission) RETURN r.key AS k, p.key AS pk`,
+			reject: "a WITH dropped `i` and a later clause re-references it",
+		},
+		{
+			// Chained boundaries compose: `r` goes at the first WITH and comes
+			// back after the second. Judging only the nearest boundary would
+			// call this clean, because the second WITH dropped nothing that is
+			// named again.
+			name: "a drop and a re-reference straddling two WITHs is refused",
+			body: `MATCH (i:identity {key: $actorKey})-[:holdsRole]->(r:role)
+WITH i
+OPTIONAL MATCH (i)-[:residesIn]->(u:unit)
+WITH i, u
+MATCH (r)<-[:grantedBy]-(p:permission)
+RETURN i.key AS k, p.key AS pk`,
+			reject: "a WITH dropped `r` and a later clause re-references it",
+		},
+		{
+			// The composition worth checking explicitly: a WITH can only carry
+			// a binding the row actually HAS, and existsAsPredicate discards a
+			// WHERE pattern's bindings, so `b` is unbound both before and after
+			// this boundary. Carrying a name is therefore not evidence that a
+			// pattern headed by it is grounded — the grounding conjunct is what
+			// refuses this, and the WITH conjunct must not be read as covering
+			// it.
+			name:   "a WITH carrying a name only a WHERE pattern introduced does not ground it",
+			body:   `MATCH (i:identity {key: $actorKey}) WHERE (i)-[:blocked]->(b:badge) WITH i, b MATCH (b)-[:issuedBy]->(o:org) RETURN i.key AS k, o.key AS ok`,
+			reject: "not reached from the anchor",
+		},
+		{
+			// A rename carries the BINDING under a name the builder keys
+			// nothing to. Modelling it would mean renaming positions across the
+			// boundary; refusing costs one BFS fallback.
+			name:   "a renaming alias is a shape the index does not model",
+			body:   `MATCH (i:identity {key: $actorKey})-[:holdsRole]->(r:role) WITH i, r AS q MATCH (q)<-[:grantedBy]-(p:permission) RETURN i.key AS k, p.key AS pk`,
+			reject: "renaming the pattern variable `r` to `q`",
+		},
+		{
+			// The dangerous rename: the alias lands on a name some pattern
+			// already binds, so the builder would read the carried role as the
+			// anchor's own position.
+			name:   "a rename onto an existing pattern variable is refused by name",
+			body:   `MATCH (i:identity {key: $actorKey})-[:holdsRole]->(r:role) WITH r AS i RETURN i.key AS k`,
+			reject: "renaming the pattern variable `r` to `i`",
+		},
+		{
+			// Same graft, reached through a computed item: after this WITH `r`
+			// holds a number, while every position the builder keyed to `r`
+			// still says "role".
+			name:   "a computed item named after a pattern variable is refused",
+			body:   `MATCH (i:identity {key: $actorKey})-[:holdsRole]->(r:role) WITH i, count(r.key) AS r RETURN i.key AS k, r AS n`,
+			reject: "projecting a computed value under `r`",
+		},
+		{
+			// `WITH *` reaches the AST as an EMPTY projection list, so the
+			// surviving set is indistinguishable from "carries nothing".
+			// Reporting the shape beats reporting every variable as dropped.
+			name:   "a WITH * carries a set the AST does not record",
+			body:   `MATCH (i:identity {key: $actorKey})-[:holdsRole]->(r:role) WITH * MATCH (r)<-[:grantedBy]-(p:permission) RETURN i.key AS k, p.key AS pk`,
+			reject: "a `WITH *`",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ix := indexOf(t, tc.body)
+			if tc.reject == "" {
+				require.True(t, ix.Complete,
+					"must index this WITH, not fall back — got %q", ix.Incomplete)
+				require.GreaterOrEqual(t, ix.Anchor, 0, "an indexed query has an anchor")
+				return
+			}
+			require.False(t, ix.Complete, "must decline, not answer")
+			require.Contains(t, ix.Incomplete, tc.reject)
+		})
+	}
+}
+
+// TestAnchorHopIndex_WithScopeStagedLensWalks walks the accepted staging shape
+// all the way to a seed. `Complete` is not a verdict about the query, it is a
+// licence for the pipeline to reproject the anchors this graph derives AND NO
+// OTHERS, so a staged lens has to be shown reaching its anchor across the
+// boundary rather than merely surviving the predicate.
+func TestAnchorHopIndex_WithScopeStagedLensWalks(t *testing.T) {
+	ix := indexOf(t, `MATCH (identity:identity {key: $actorKey})
+OPTIONAL MATCH (identity)-[:holdsRole]->(role:role)
+OPTIONAL MATCH (role)<-[:grantedBy]-(perm:permission)-[:forOperation]->(op:meta)
+WITH op, role
+WHERE op.key <> null
+RETURN op.key AS anchor, role.key AS viaRole`)
+	require.True(t, ix.Complete, "the staged manifest shape must index: %s", ix.Incomplete)
+
+	// A grantedBy event is the one that matters: its anchor-side endpoint is
+	// the role, one hop from the anchor, and the walk has to reach the anchor
+	// from there rather than from the permission.
+	seeds := ix.AnchorSideSeeds("permission", "grantedBy", "role")
+	require.Len(t, seeds, 1)
+	require.Equal(t, "role", ix.Labels[seeds[0].Pos])
+	require.False(t, seeds[0].SrcIsAnchorSide)
+	require.Equal(t, 1, ix.Dist[seeds[0].Pos])
+
+	// And the far side of the boundary is still connected to the anchor, which
+	// is the property the drop of `identity` could have broken.
+	forOp := ix.AnchorSideSeeds("permission", "forOperation", "meta")
+	require.NotEmpty(t, forOp)
+	for _, s := range forOp {
+		require.GreaterOrEqual(t, ix.Dist[s.Pos], 0, "every seeded position must reach the anchor")
+	}
+}
+
+// TestAnchorHopIndex_WithClauseCarriesItsOwnPatterns covers the half of a WITH
+// that is not a scope question at all: the clause's items and its WHERE are
+// general expressions, and a pattern living in either one is a pattern the
+// graph has to contain.
+//
+// Accepting a WITH is a licence to act on this index, and the failure this
+// pins is the worst-shaped one available. A relation named ONLY inside a WITH
+// contributes no hop, so AnchorSideSeeds returns an EMPTY set — and on a
+// Complete index the caller reads empty as "no anchor can change" and skips.
+// The relation these clauses hold is typically the revocation filter, so the
+// skipped reprojection is the one that would have retracted a grant.
+//
+// The seed assertions are what make each case a positive vector: `Complete` and
+// a non-empty Hops slice would both survive a graph that indexed the wrong
+// endpoint.
+func TestAnchorHopIndex_WithClauseCarriesItsOwnPatterns(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		body string
+		// the link whose events must reach an anchor, and the position label
+		// its anchor-side seed must land on
+		srcType, rel, dstType string
+		wantSeedLabel         string
+	}{
+		{
+			// A revocation staged behind a WITH — the shape the auth plane
+			// writes revocations in, and the one where an empty seed set is an
+			// over-grant rather than a slow reprojection.
+			name: "a negated pattern in a WITH's WHERE contributes its hop",
+			body: `MATCH (a:identity {key: $actorKey})-[:holdsRole]->(r:role)
+WITH a, r WHERE NOT (r)-[:revokedBy]->(v:revocation)
+RETURN a.key AS actor_key, r.key AS role_key`,
+			srcType: "role", rel: "revokedBy", dstType: "revocation",
+			wantSeedLabel: "role",
+		},
+		{
+			// A positive WITH-WHERE pattern, which drops nothing at all — so
+			// withScopeReject is not even the predicate that admits it, and the
+			// traversal is the only thing standing between this lens and a
+			// silent skip on every scopedTo event.
+			name: "a positive pattern in a WITH's WHERE contributes its hop",
+			body: `MATCH (a:identity {key: $actorKey})-[:holdsRole]->(r:role)
+WITH a, r WHERE (r)-[:scopedTo]->(u:unit)
+RETURN a.key AS k, r.key AS rk`,
+			srcType: "role", rel: "scopedTo", dstType: "unit",
+			wantSeedLabel: "role",
+		},
+		{
+			// A comprehension in a WITH ITEM. The control for this one is the
+			// same comprehension in a RETURN, which the builder has always
+			// walked — the omission was never about comprehensions, only about
+			// which clause held them.
+			name: "a pattern comprehension in a WITH item contributes its hop",
+			body: `MATCH (a:identity {key: $actorKey})
+WITH a, [(a)-[:holdsRole]->(r:role) | r.key] AS roles
+RETURN a.key AS actor_key, roles AS roles`,
+			srcType: "identity", rel: "holdsRole", dstType: "role",
+			wantSeedLabel: "identity",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ix := indexOf(t, tc.body)
+			require.True(t, ix.Complete, "must index, not fall back — got %q", ix.Incomplete)
+
+			seeds := ix.AnchorSideSeeds(tc.srcType, tc.rel, tc.dstType)
+			require.NotEmptyf(t, seeds,
+				"a %s event derives NO anchor, which a complete index licenses the caller to read as a skip", tc.rel)
+			labels := make([]string, 0, len(seeds))
+			for _, s := range seeds {
+				labels = append(labels, ix.Labels[s.Pos])
+			}
+			require.Containsf(t, labels, tc.wantSeedLabel,
+				"the anchor-side seed must be the %s position", tc.wantSeedLabel)
+
+			// The same invariant the corpus census enforces mechanically
+			// (TestCorpusAnchorHopIndex_CompleteIndexHoldsEveryReferencedRelation),
+			// asserted here on vectors the shipped corpus does not contain: on a
+			// COMPLETE index every relation the sibling derivation names must sit
+			// on a hop. Proving the gate's own predicate catches these shapes is
+			// what stops it being a check that only ever passes.
+			rels, exhaustive := parseFull(t, tc.body).ReferencedRelations()
+			require.True(t, exhaustive, "these vectors carry only typed single hops")
+			indexed := map[string]struct{}{}
+			for _, h := range ix.Hops {
+				indexed[h.Rel] = struct{}{}
+			}
+			for rel := range rels {
+				require.Containsf(t, indexed, rel, "`%s` is read by the pattern but absent from Hops", rel)
+			}
+		})
+	}
+}
+
+// TestAnchorHopIndex_WithPatternIsNonBinding pins the POSTURE those hops arrive
+// with. A WITH's WHERE and its items both discard their bindings
+// (existsAsPredicate, evalPatternComprehension), so counting them as binding
+// would let a negated shortcut make a far position look nearer the anchor —
+// and the walk would then be seeded at the endpoint that can only reach the
+// anchor by crossing the edge a tombstone just removed.
+func TestAnchorHopIndex_WithPatternIsNonBinding(t *testing.T) {
+	ix := indexOf(t, `MATCH (a:identity {key: $actorKey})-[:holdsRole]->(r:role)
+WITH a, r WHERE NOT (a)-[:blocked]->(r)
+RETURN a.key AS k, r.key AS rk`)
+	require.True(t, ix.Complete, "%s", ix.Incomplete)
+
+	var holds, blocked *PatternHop
+	for i := range ix.Hops {
+		switch ix.Hops[i].Rel {
+		case "holdsRole":
+			holds = &ix.Hops[i]
+		case "blocked":
+			blocked = &ix.Hops[i]
+		}
+	}
+	require.NotNil(t, holds, "the MATCH hop must be indexed")
+	require.NotNil(t, blocked, "the WITH-WHERE hop must be indexed")
+	require.True(t, holds.Binding, "a MATCH pattern binds")
+	require.False(t, blocked.Binding, "a WITH's WHERE pattern is a filter, not a binding")
 }
 
 // TestAnchorHopIndex_DirectionMapping pins the arrow-to-adjacency translation

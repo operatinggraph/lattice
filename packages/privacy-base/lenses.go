@@ -269,12 +269,12 @@ RETURN
 // one arm per stage there is nothing to inflate a plain count, but it keeps the
 // counts correct if a later edit ever adds a second arm to a stage.
 //
-// The WITH costs one thing, knowingly: `AnchorHopIndex` refuses any query
-// carrying one (hopindex.go:86-90), so link events reach this lens's anchors by
-// BFS rather than the affected-anchor index — the posture 14 shipped lenses
-// already have, and fail-closed (a superset), never a missed reprojection.
-// §7.1's own spec carries a WITH too, so this costs nothing the ratified shape
-// did not already.
+// The staging WITH costs nothing on the affected-anchor index. `AnchorHopIndex`
+// refuses a query whose WITH DROPS a variable a later clause re-references
+// (withscope.go) — that shape re-seeds by whole-bucket scan, which no adjacency
+// walk can see. A pure stage boundary like these carries every variable the next
+// arm names, so link events reach this lens's anchors through the index, and the
+// walk is fail-closed (a superset) exactly as the BFS was.
 //
 // EVERY ARM IS WRITTEN ANCHOR-FIRST, and that is not a style choice. matchPath
 // seeds a path from `p.Nodes[0]` and takes the cheap adjacency walk only when
