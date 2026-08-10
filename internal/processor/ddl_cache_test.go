@@ -305,6 +305,80 @@ func TestDDLCache_Invalidate_RemovingOneAdmitterReindexes(t *testing.T) {
 	}
 }
 
+// TestDDLCache_LoadMetaVertex_SensitiveTombstoneNotHonored pins the sensitive
+// reader's deliberate asymmetry with its permittedCommands/custody/script
+// siblings: a tombstoned sensitive aspect that still declares true is NOT
+// read as absent. Step 8's tombstone arm copies the prior document whole and
+// only flips isDeleted (the same shape TestDDLCache_TombstonedCanonicalNameRetiresTheEntry
+// exercises for canonicalName), so this fixture tombstones a sensitive
+// declaration that was true and confirms the class stays sensitive — the
+// posture ddl_cache.go's sensitive-aspect comment states.
+func TestDDLCache_LoadMetaVertex_SensitiveTombstoneNotHonored(t *testing.T) {
+	t.Parallel()
+	ctx, conn, _, _, _ := setupTestPipeline(t)
+	const nanoID = "Aa1Bb2Cc3Dd4Ee5Ff6Gg"
+	root := "vtx.meta." + nanoID
+	rootDoc := []byte(`{"class":"meta.ddl.vertexType","isDeleted":false,"data":{}}`)
+	if _, err := conn.KVPut(ctx, testCoreBucket, root, rootDoc); err != nil {
+		t.Fatalf("seed root: %v", err)
+	}
+	cn := []byte(`{"class":"canonicalName","isDeleted":false,"data":{"value":"withdrawnsensitive"}}`)
+	if _, err := conn.KVPut(ctx, testCoreBucket, root+".canonicalName", cn); err != nil {
+		t.Fatalf("seed canonicalName: %v", err)
+	}
+	dead := []byte(`{"class":"sensitive","isDeleted":true,"data":{"value":true}}`)
+	if _, err := conn.KVPut(ctx, testCoreBucket, root+".sensitive", dead); err != nil {
+		t.Fatalf("seed tombstoned sensitive: %v", err)
+	}
+
+	cache := NewDDLCache(conn, testCoreBucket, testLogger())
+	ref, ok, err := cache.loadMetaVertex(ctx, root, nil)
+	if err != nil {
+		t.Fatalf("loadMetaVertex: %v", err)
+	}
+	if !ok {
+		t.Fatalf("meta-vertex must still load (only the sensitive aspect is tombstoned)")
+	}
+	if !ref.Sensitive {
+		t.Fatalf("a tombstoned sensitive aspect that declared true must NOT be honored as a withdrawal; got Sensitive=false")
+	}
+}
+
+// TestDDLCache_LoadMetaVertex_SensitiveFalseWhenLive is the positive vector
+// for the tombstone test above: a LIVE sensitive:false aspect must read as
+// false, proving the fixture and reader actually reach the aspect (rather
+// than the tombstone test passing because nothing was ever read at all).
+func TestDDLCache_LoadMetaVertex_SensitiveFalseWhenLive(t *testing.T) {
+	t.Parallel()
+	ctx, conn, _, _, _ := setupTestPipeline(t)
+	const nanoID = "Hh7Jj8Kk9Mm1Nn2Pp3Qq"
+	root := "vtx.meta." + nanoID
+	rootDoc := []byte(`{"class":"meta.ddl.vertexType","isDeleted":false,"data":{}}`)
+	if _, err := conn.KVPut(ctx, testCoreBucket, root, rootDoc); err != nil {
+		t.Fatalf("seed root: %v", err)
+	}
+	cn := []byte(`{"class":"canonicalName","isDeleted":false,"data":{"value":"liveinsensitive"}}`)
+	if _, err := conn.KVPut(ctx, testCoreBucket, root+".canonicalName", cn); err != nil {
+		t.Fatalf("seed canonicalName: %v", err)
+	}
+	live := []byte(`{"class":"sensitive","isDeleted":false,"data":{"value":false}}`)
+	if _, err := conn.KVPut(ctx, testCoreBucket, root+".sensitive", live); err != nil {
+		t.Fatalf("seed live sensitive: %v", err)
+	}
+
+	cache := NewDDLCache(conn, testCoreBucket, testLogger())
+	ref, ok, err := cache.loadMetaVertex(ctx, root, nil)
+	if err != nil {
+		t.Fatalf("loadMetaVertex: %v", err)
+	}
+	if !ok {
+		t.Fatalf("meta-vertex must load")
+	}
+	if ref.Sensitive {
+		t.Fatalf("a live sensitive:false aspect must read as false; got Sensitive=true")
+	}
+}
+
 // seedMetaDDL writes a shadow-keyed meta-vertex DDL fixture (root carries class
 // + data.canonicalName + data.permittedCommands).
 func seedMetaDDL(t *testing.T, ctx context.Context, conn *substrate.Conn, key, metaClass, canonicalName string, permittedCommands []string) {

@@ -347,14 +347,57 @@ func (c *DDLCache) loadMetaVertex(ctx context.Context, root string, _ []string) 
 		ref.PermittedCommands = extractStringSlice(rootDoc.Data["permittedCommands"])
 	}
 
-	// sensitive aspect.
+	// sensitive aspect. Unlike the permittedCommands, custody and script
+	// readers above, a tombstoned sensitive aspect is read as LIVE, not
+	// absent. That is a stated posture, not the missing filter it looks like
+	// next to its three siblings — verify the reasoning against the code
+	// before changing it, not just against this comment.
+	//
+	// The write path and the read path gate on two different declarations,
+	// not one. Encryption at write time is gated on this DDL's own Sensitive
+	// field (step65_encrypt.go's `!ok || !ref.Sensitive` check: once a
+	// mutation resolves to a sensitive class, step 6.5 encrypts it under the
+	// class DEK). Decryption at read time is gated on the LENS's own
+	// SecureColumns declaration (internal/refractor/pipeline/secure.go's
+	// SecureDecryptor, built from pkgmgr's LensSpec.SecureColumns —
+	// definition.go:1087-1093) — an independent per-lens declaration that
+	// says nothing about this DDL and is never derived from it.
+	//
+	// Because of that split, honoring a withdrawal here would not retire
+	// anything: it would split one class's rows into ciphertext (written
+	// while the aspect was live) and plaintext (written after it was
+	// tombstoned), with no migration between the two, while any lens that
+	// still declares the column secure keeps running its decryptor over
+	// both. A meta-vertex tombstone can stop future writes from being
+	// encrypted; it cannot un-encrypt what is already at rest, and reading
+	// the withdrawal as effective would quietly start writing plaintext
+	// alongside ciphertext under the same column. That is a decision about
+	// existing ciphertext, which this reader is not positioned to make, not
+	// a filter it forgot to apply.
+	//
+	// This is also why the posture is the safe one, not just the cautious
+	// one. The permittedCommands, custody and script readers all read a
+	// tombstone as ABSENT because staying live in those cases OVER-GRANTS: a
+	// type that stops declaring commands would keep admitting every command
+	// it used to, a class that revokes custody would keep writing to a DEK
+	// it disowned, a type that withdraws its script would keep executing one
+	// it no longer declares. Sensitive is the mirror image: staying live
+	// here can only OVER-PROTECT, continuing to encrypt a class whose
+	// package tried to stop declaring it sensitive. Same tombstone shape,
+	// opposite safe direction — encryption failing open toward
+	// confidentiality is the harmless side of this particular declaration.
 	if sEntry, err := c.conn.KVGet(ctx, c.coreBucket, root+".sensitive"); err == nil {
 		var asp struct {
-			Data struct {
+			IsDeleted bool `json:"isDeleted"`
+			Data      struct {
 				Value bool `json:"value"`
 			} `json:"data"`
 		}
 		if err := json.Unmarshal(sEntry.Value, &asp); err == nil {
+			if asp.IsDeleted && asp.Data.Value {
+				c.logger.Warn("ddl cache: sensitive aspect tombstoned but still declares true; withdrawal not honored, class stays sensitive",
+					"key", root+".sensitive")
+			}
 			ref.Sensitive = asp.Data.Value
 		}
 	} else if !errors.Is(err, substrate.ErrKeyNotFound) {
