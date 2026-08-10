@@ -2667,7 +2667,19 @@ the polymorphic binder, the budget contract and the rebuild governance, with nar
 >    update's governing DDL resolves from the *mutation's* class (`step6_resolve_ddl.go:419-421`), so an
 >    update carrying the concrete `class: "unit"` is governed by the `unit` DDL and clears both abstract
 >    gates. It is a 25-row field rewrite behind one op, not a rekey-and-relink.
->    The item's own guarantee — an abstract type has no live instances — is unmet
+>    **Repaired out-of-band on the desktop deployment, 2026-08-10 (Andrew-directed).** All 25 roots were
+>    rewritten to `class` = their key's type segment (19 `unit`, 6 `building`) by direct `$KV.core-kv.>` put
+>    under the processor nkey — P2's writer identity, but *around* the Processor, so there is no `vtx.op.*`
+>    for it. `lastModifiedAt/By/ByOp` were deliberately left as stored rather than forging an op that never
+>    ran: after this the documents describe their last *operation* truthfully and say nothing about this
+>    edit, and the KV revision is the only record it happened. Verified: 25/25 read back with `class` equal
+>    to the key type segment, zero remaining `"location"`, and **zero drift in any other field**; Refractor
+>    reprojected exactly 25 keys with no errors. The demo box resets nightly from package ops that already
+>    mint the concrete class, so it needs nothing. **What this does NOT do is retire the code widening** —
+>    `LEGACY_LOCATION_CLASS = "location"` still widens guards in 7 packages (cafe-, clinic-, location-,
+>    loftspace-, maintenance-, wellness-domain, service-location); that removal, and the Contract #1
+>    transitional marker's, are now unblocked and carried by the board row.
+>    The item's own guarantee — an abstract type has no live instances — was unmet
 >    in production, and 19 guard sites across 7 packages stay widened on the class axis to tolerate it (§13).
 >    The item still closes, but on a **stated disposition** rather than on an empty remainder: C1.4 is a
 >    ratified deferral, so by this section's own provenance rule it keeps its disposition **as a board row**
