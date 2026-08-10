@@ -2657,10 +2657,17 @@ the polymorphic binder, the budget contract and the rebuild governance, with nar
 > was not checked against the fire.
 >
 > 1. **"Nothing in Fire C remains open" was false.** C1.4's **data** half — the class ⟷ key-segment invariant
->    over the 69 legacy-classed location vertices — is unbuilt and migration-blocked (§17.19's checkpoint and
->    line 2472 both say so). Verified live today rather than inferred: `vtx.unit.*` = 60 keys,
->    `vtx.building.*` = 9, and a sampled root reads `{"class":"location", "isDeleted":false}` on a concrete
->    `vtx.unit.*` key. The item's own guarantee — an abstract type has no live instances — is therefore unmet
+>    over the legacy-classed location vertices — is unbuilt (§17.19's checkpoint and line 2472 both say so).
+>    **Two corrections to how this doc has counted and framed it, both from reading the live stack and the
+>    commit path rather than the prose:** the population is **25 live ROOTS** (19 `vtx.unit.*` + 6
+>    `vtx.building.*`, all `class: "location"`, none deleted) — the recurring "69" counts KV *keys*, of which
+>    44 are aspects (`.address`, `.listing`, `.presentation`) carrying their own correct classes and not
+>    participating in this invariant at all. And it is **not migration-blocked**: `class` is absent from
+>    `immutableEnvelopeFields` (`step8_commit.go:384` — only the creation triplet is preserved), and an
+>    update's governing DDL resolves from the *mutation's* class (`step6_resolve_ddl.go:419-421`), so an
+>    update carrying the concrete `class: "unit"` is governed by the `unit` DDL and clears both abstract
+>    gates. It is a 25-row field rewrite behind one op, not a rekey-and-relink.
+>    The item's own guarantee — an abstract type has no live instances — is unmet
 >    in production, and 19 guard sites across 7 packages stay widened on the class axis to tolerate it (§13).
 >    The item still closes, but on a **stated disposition** rather than on an empty remainder: C1.4 is a
 >    ratified deferral, so by this section's own provenance rule it keeps its disposition **as a board row**
