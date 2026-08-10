@@ -657,7 +657,9 @@ whose expanded set moved. Measured on the running stack: `KV_core-kv` carries **
 one-per-lens**, so a single taxonomy event can burst up to that many consumer deletes and creates — a mechanism
 that has already OOM-killed `lattice-nats` on this host. Serialization per *pipeline* does not bound a burst
 *across* pipelines. **A serialized or coalesced rebuild scheduler is therefore a prerequisite of Fire B, not a
-follow-on**, and is filed as its own ★★★ lane row that gates Fire B. Do not read the sentence above as a bound.
+follow-on.** It is **increment B0 of Fire B itself** (§14, folded in 2026-08-09 by Andrew from what was a
+separate ★★★ blocking row): Fire B owns its own prerequisite rather than waiting on an external row. Do not read
+the sentence above as a bound.
 
 **The race the brief names is closed by the same mechanism.** "A package install completes and an op mints a leaf
 instance before Refractor has processed the taxonomy event" — the rebuild's fresh cursor sees that instance
@@ -1023,7 +1025,7 @@ precedence rule. Named so it is built deliberately later, not stumbled into.
 |---|---|
 | **A missed retraction site becomes an over-grant** | The design's sharpest risk, and the reason §5.1 site 3 exists. An abstract-anchored grant producer whose `AnchorProjectionKey` still string-compares never retracts a tombstoned anchor. Mitigation: the site is enumerated, and §15's retraction test asserts it against a leaf-type tombstone specifically. |
 | **A stale narrow set silently drops events** | The only unacceptable state (§6.5). Every uncertain path degrades to `reprojectAll` instead. The asymmetry is grounded: `plainVertexRelevant`'s false branch has no fallback (`pipeline.go:722-738`), a broad filter only costs work. |
-| **Rebuild storm on a leaf install** | ~~Bounded by the count of abstract-using lenses (1 at Fire B), serialized per pipeline by `rebuildInFlight`, and triggered by install events, not data events.~~ **The stated bound is FALSIFIED (2026-08-09) — see §6.3.** `Rebuild` is a durable delete-recreate, the sweep applies it per affected lens (measured 118 consumers / 111 one-per-lens), and it has OOM-killed `lattice-nats`. Per-pipeline serialization does not bound a cross-pipeline burst. A coalesced rebuild scheduler is a **prerequisite of Fire B**, filed ★★★ and gating it. |
+| **Rebuild storm on a leaf install** | ~~Bounded by the count of abstract-using lenses (1 at Fire B), serialized per pipeline by `rebuildInFlight`, and triggered by install events, not data events.~~ **The stated bound is FALSIFIED (2026-08-09) — see §6.3.** `Rebuild` is a durable delete-recreate, the sweep applies it per affected lens (measured 118 consumers / 111 one-per-lens), and it has OOM-killed `lattice-nats`. Per-pipeline serialization does not bound a cross-pipeline burst. A coalesced rebuild scheduler is a **prerequisite of Fire B** and is now **increment B0 of Fire B** (§14). |
 | **Silent cap-driven footprint regression** | Real and dynamic. Mitigated by `leafBudget` (static, decidable, refused at the *lens's* install) + the `filterMode` health field. The degradation ladder (§10.1) means the first step is coarser narrowing, not broad. |
 | **The resolver is a new single point** | If it is wrong, every abstract-using lens is wrong. Mitigations: fail-closed to broad on every uncertainty; a corpus census test pinning each lens's expanded set (§15); and it is read-only — it never writes Core KV (P2). |
 | **Two concurrent installs form a cycle neither sees** | Real: install batches are atomic individually, not against each other. This is why **resolver-time** cycle detection is the authority and install-time is a courtesy (§5/§14). The resolver's answer is fail-closed to broad, so a cycle costs footprint, never correctness. |
@@ -1079,9 +1081,52 @@ Old Fires 1 and 2 as one fire. Internal build order:
 narrow set, and the trigger without the retraction site is an over-grant. **Review depth: full 3-layer
 adversarial regardless of size** — this touches the auth plane's retraction and narrowing gates.
 
-### Fire B — location lands and the first consumer arrives (Lattice, M).
+### Fire B — location lands and the first consumer arrives (Lattice, M–L).
 
-Old Fire 3, with the census corrected. Four type metas (three concrete sharing one script, one abstract) +
+Old Fire 3, with the census corrected — **plus the rebuild scheduler, folded in 2026-08-09 (Andrew) from what
+was a separate ★★★ blocking row.** Fire B is therefore **no longer blocked**: it owns its own prerequisite, in
+its own internal build order, rather than waiting on a row that only ever existed to gate it.
+
+#### B0 — the coalesced rebuild scheduler. FIRST, and nothing else in Fire B may land before it.
+
+**Why it is inside Fire B.** It is inert until a `packages/` lens carries `*`, and Fire B's whole content is
+landing the first one. The dependency is real but it is *internal*: the moment B1 below ships, this becomes
+live. Sequencing it as increment zero of the same fire is what keeps the two from being separated.
+
+**The mechanism.** `Rebuild` calls `supervisor.Reset`, which **deletes and recreates the lens's `KV_core-kv`
+durable**, and the taxonomy sweep applies that to every live entry whose expanded set moved. Measured on the
+running stack 2026-08-09: `KV_core-kv` carries **118 consumers, 111 of them one-per-lens**, so a single taxonomy
+event can burst up to that many consumer deletes and creates. Refractor overwhelming NATS with consumer-creation
+requests has **already OOM-killed `lattice-nats`** on this host (Andrew). §6.3's and §13's original bound counted
+trigger *frequency* and never counted the fan-out of one firing; both are struck where they stand.
+
+**What B0 must deliver:**
+
+1. **Coalesce and serialize the fan-out.** One taxonomy event must not produce N concurrent durable
+   delete-recreates. Bound the in-flight rebuilds across pipelines — the per-entry single-flight latch that
+   shipped with the fail-posture cluster (`taxRebuildPending` / `taxRebuildRunning`, `cmd/refractor`) bounds one
+   *entry* to one rebuild and is the shape to extend, not to duplicate: what is missing is the bound *across*
+   entries. Prefer coalescing a sweep's worth of moved entries into one scheduled pass over rate-limiting
+   individual resets.
+2. **Own rebuild ORDERING, which is the shrink-retraction bug.** A taxonomy *shrink* currently installs the
+   narrowed filter **before** the replay, so the dropped subtype's events are never delivered and neither
+   event-driven retraction can fire — the rows orphan permanently. `Rebuild(ctx, false)` does not truncate. §6.4
+   claims the shrink retracts; that claim holds today only for a `diffRetraction` lens. **B0 must make the
+   ordering deliver the dropped subtype's events, or truncate, or otherwise retract — and state which.** This is
+   the correctness half of B0; the coalescing is the survivability half. They land together because both are
+   decisions about *when* a rebuild runs relative to the filter it installs.
+3. **A test that pins shrink → target contents**, not just the filter. No test today asserts that a `subtypeOf`
+   tombstone removes the leaf's rows; that absence is why the gap survived Fire A's review.
+4. **Do not weaken the storm guard while fixing it.** The `unchanged && !pending` fast path exists to stop a
+   rebuild storm; a persistently failing rebuild already re-drives on every taxonomy event, which compounds this
+   exact fan-out. B0 should reduce that pressure, not add to it.
+
+**Green bar for B0:** the fan-out of one taxonomy event over the live corpus stays bounded (state the bound and
+measure it), `lattice-nats` survives a full sweep, and a shrink retracts.
+
+#### B1 — location lands and the first consumer arrives.
+
+Four type metas (three concrete sharing one script, one abstract) +
 three `subtypeOf` links; the class becomes the key type at `packages/location-domain/ddls.go:318`;
 `packages/location-domain/integration_test.go:195` updated; and `capabilityServiceAccess`
 (`packages/service-location/lenses.go:133-145`) labels `loc0`/`loc`/`exLoc` **`:location*`** — the first
@@ -1634,7 +1679,8 @@ the taxonomy sweep applies that to every live entry whose expanded set moved. Me
 burst up to that many consumer deletes and creates. Andrew reports that Refractor overwhelming NATS with
 consumer-creation requests is a mechanism that has **already OOM-killed `lattice-nats`** on this host. Inert
 today only because no `packages/` lens carries `*`; the first one makes it live. **A serialized or coalesced
-rebuild scheduler is therefore a prerequisite of Fire B, not a follow-on** — filed as its own ★★★ lane row.
+rebuild scheduler is therefore a prerequisite of Fire B, not a follow-on** — folded into Fire B as increment
+**B0** (2026-08-09, Andrew), so the fire carries its own prerequisite.
 This supersedes §6.3's "bounding it" paragraph, which counts trigger frequency and never counts the fan-out.
 
 ### 17.9 Fire A · Increment 5 — the validation gate (2026-08-09)
@@ -1708,8 +1754,10 @@ cross-package case (A declares the abstract, B the mid-type, C the leaves) still
 badge is `cmd/loupe/**`, so it belongs to the Loupe lane's lock — file it there rather than reaching across).
 Increment 5's cap log line is the placeholder that item 6 replaces with the real signal.
 
-**Fire A is otherwise complete: items 1–5 are built.** Fire B remains gated — not by anything increment 5
-leaves, but by the rebuild fan-out row above (§17.8), which must land before a `packages/` lens carries `*`.
+**Fire A is otherwise complete: items 1–5 are built.** *(Superseded 2026-08-09: this section read "Fire B
+remains gated … by the rebuild fan-out row above". That row is now Fire B's own increment **B0** (§14), so Fire
+B is unblocked and carries its prerequisite internally. The scheduler must still land before a `packages/` lens
+carries `*` — that ordering is now inside the fire, not between it and a separate row.)*
 
 **Three residuals this increment leaves, each filed with its consumer and its blocker:**
 
@@ -1781,9 +1829,13 @@ where Fire B will announce itself.
 
 **Landed on `main`; no worktree is held. Items 1–6 are all built, and Fire A is done.**
 
-**Fire B is NOT next-in-line.** It stays blocked on the rebuild fan-out row (§17.8) — `Rebuild` is a durable
-delete-recreate and the sweep applies it per affected lens (measured 118 consumers, 111 one-per-lens; it has
-OOM-killed `lattice-nats`). A coalesced rebuild scheduler is its prerequisite, not its follow-on.
+**Fire B is UNBLOCKED, and starts with its own prerequisite.** *(Amended 2026-08-09 by Andrew; this paragraph
+previously read "Fire B is NOT next-in-line. It stays blocked on the rebuild fan-out row".)* That row is now
+Fire B's increment **B0** (§14): coalesce the rebuild fan-out — `Rebuild` is a durable delete-recreate and the
+sweep applies it per affected lens (measured 118 consumers, 111 one-per-lens; it has OOM-killed `lattice-nats`)
+— **and** own the shrink ordering that currently leaves a dropped subtype's rows orphaned. Nothing else in Fire
+B lands before B0. The work did not change; what changed is that it is no longer a separate row Fire B waits
+behind.
 
 **The close pass over the item's whole diff found six defects, and they were first FILED as six rows and then
 un-filed on Andrew's direction (2026-08-09): reduce the backlog, do not grow it.** The corrected disposition —
