@@ -1785,9 +1785,13 @@ where Fire B will announce itself.
 delete-recreate and the sweep applies it per affected lens (measured 118 consumers, 111 one-per-lens; it has
 OOM-killed `lattice-nats`). A coalesced rebuild scheduler is its prerequisite, not its follow-on.
 
-**The close pass over the item's whole diff filed six rows, none of them fixable inside this increment** — each
-is an earlier increment's mechanism, each is inert until a `packages/` lens carries `*`, and each therefore
-lands as a row that **gates that consumer's fire** (the sanctioned form of a deferred defect):
+**The close pass over the item's whole diff found six defects, and they were first FILED as six rows and then
+un-filed on Andrew's direction (2026-08-09): reduce the backlog, do not grow it.** The corrected disposition —
+four fixed in-fire, two folded into rows that already existed — is recorded in §17.13. The original filing
+reasoning was that each is an earlier increment's mechanism, inert until a `packages/` lens carries `*`, and so
+eligible for the "gates that consumer's fire" exception. That reasoning was sound but beside the point: three of
+the four fixed ones are a **single decision** (what fails wide when the taxonomy cannot answer), which is
+cheaper and safer to make once than to rediscover per row. The six:
 
 - an unresolved expansion publishes a nil `LabelExpansion`, so the *matcher* blanks where §6.5 promises only a
   wider *filter* — and the re-derivation's own `Rebuild` then replays every anchor against it (★★★);
@@ -1812,3 +1816,36 @@ grew a second half during this fire. Beyond refreshing the transitional marker, 
 exemption on both commit gates. The ratified sentence said the Processor "rejects either at commit" with no
 qualifier; the shipped code exempts tombstones so a type flipped to abstract can still shed its instances.
 Certifying the clause live without that qualifier would have frozen a sentence the code does not implement.
+
+### 17.13 Disposition of the close pass's six findings (2026-08-09)
+
+Andrew's direction on this fire: **reduce the backlog, do not grow it.** Filing six rows to close one item is
+the ratio the Steward's own residual ladder exists to prevent, and the ladder puts *fix it in-fire* first for
+exactly this reason. Revised disposition:
+
+**Fixed in this fire** — one decision, four sites. §6.5 states the fail-closed posture as "an uncertain
+expansion degrades to the broad filter", and the build satisfied that on the **delivery** axis while violating
+it on the **projection** axis: the same unresolved answer also published a nil `LabelExpansion`, which makes the
+matcher refuse every `*` node. A broad filter is a widening and is safe; a blank matcher is a blackout and is
+not.
+
+- an unresolved expansion no longer publishes a nil expansion over a lens that has a working one — it keeps the
+  last known good expansion for matching and goes broad on the filter, which is what "correct but slower"
+  actually means. Activation still refuses a lens it cannot resolve at all; a live lens degrades and keeps
+  serving, and that asymmetry is now stated at the site rather than implied;
+- the affected-anchor derivation declines (`ok=false`) instead of pruning, so the caller falls back to the
+  enumerator — the decline posture every other unresolvable shape already takes;
+- `lens/corekv_source.go`'s two type-meta handlers now fail in the **same** direction, wide, and the file's
+  posture is stated rather than left to be inferred from two neighbours that disagreed;
+- the re-derivation's change-detection baseline and the client gate it describes now commit together, closing
+  the A→B→A sequence that latched a gate narrower than the filter with no race required.
+
+**Folded into rows that already existed** — neither is a new item:
+
+- the shrink-retraction gap belongs to the **rebuild fan-out** row: that work must decide rebuild ordering
+  anyway, and both gate Fire B. The row now names ordering as part of its scope;
+- the walk parser's `*` refusal belongs to the **pkgmgr label-extraction** row: both are "pkgmgr cannot
+  properly read a lens's labels."
+
+**Net effect on the lane: one row shorter than the fire found it**, after also reconciling the `[Substrate]`
+`Connect` handshake row, which a parallel session shipped (`7acac6af`) without updating this lane.
