@@ -321,9 +321,17 @@ func (m *engineManager) reapSyncDurable(identityID, deviceID, storePath string) 
 		// grants $JS.API.CONSUMER.DELETE.SYNC.<durable> for exactly the
 		// durable this CONNECT name spells (natsauth's PermissionsFor), so
 		// any other name here would be denied.
-		Name:        deviceID,
-		Token:       token,
-		InboxPrefix: "_INBOX.edge." + identityID,
+		Name: deviceID,
+		// reapDurableTimeout already bounds this whole round trip to 5s, so a
+		// reconnect budget adds no safety — it only exists to opt OUT of
+		// nats.go's own default (60 attempts, ~2s apart). 1 is the smallest
+		// value substrate.Connect can actually express as "don't linger":
+		// substrate only threads MaxReconnects into nats.go's options when
+		// the field is nonzero (internal/substrate/conn.go), so a literal 0
+		// would silently fall back to that same 60-attempt default.
+		MaxReconnects: 1,
+		Token:         token,
+		InboxPrefix:   "_INBOX.edge." + identityID,
 	})
 	if err != nil {
 		logger.Warn("facet purge: connect failed; leaving the sync durable in place", "identityId", identityID, "err", err)

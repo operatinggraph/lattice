@@ -422,11 +422,18 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	// Substrate is the integration boundary.
+	// Substrate is the integration boundary. Refractor is a long-running
+	// daemon: MaxReconnects: -1 keeps nats.go retrying forever, because a
+	// closed *nats.Conn never recovers on its own — without it, an outage
+	// long enough to exhaust nats.go's own default budget (60 attempts, ~2s
+	// apart) leaves the process alive but permanently disconnected, driving
+	// the lens engine while touching no NATS subject ever again.
 	conn, err := substrate.Connect(ctx, substrate.ConnectOpts{
-		URL:          *natsURL,
-		NKeySeedFile: envOr("NATS_NKEY", ""),
-		CredsFile:    envOr("NATS_CREDS", ""),
+		URL:           *natsURL,
+		MaxReconnects: -1,
+		ReconnectWait: 1 * time.Second,
+		NKeySeedFile:  envOr("NATS_NKEY", ""),
+		CredsFile:     envOr("NATS_CREDS", ""),
 	})
 	if err != nil {
 		logger.Error("nats connect", "err", err)

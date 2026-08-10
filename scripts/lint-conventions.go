@@ -167,6 +167,20 @@
 //     invisible until something downstream stops tolerating it. Declare
 //     `// nanoid-alphabet: (reject) <why>` for a deliberately-invalid id used
 //     to prove key/id validation rejects it.
+//   - Undeclared MaxReconnects on a cmd/** substrate.Connect (BLOCKING).
+//     substrate.Connect only threads MaxReconnects into the underlying NATS
+//     options when the field is nonzero (internal/substrate/conn.go), so a
+//     call that never mentions it silently inherits nats.go's own default —
+//     60 reconnect attempts, ~2s apart — instead of a value anyone chose.
+//     Once that budget is exhausted the *nats.Conn closes PERMANENTLY
+//     (nats.go never retries a closed connection), so a long-running
+//     component keeps running as a zombie holding a dead NATS handle: the
+//     confirmed cause of Refractor staying up for two hours, holding only its
+//     pprof socket, after an nats-server restart every other component
+//     reconnected through. The gate does not judge the value — set
+//     `MaxReconnects: -1` for a daemon that must reconnect indefinitely, or
+//     an explicit small finite value for a short-lived CLI that should fail
+//     fast — only the omission.
 //
 // Markdown/docs are intentionally out of scope: they discuss the conventions
 // (e.g. "never an asp.* prefix") and would false-positive. The 6-segment link
@@ -315,6 +329,29 @@ var (
 	// the annotate-the-noise failure that stops a default-deny gate being read.
 	derivedKeyCall  = regexp.MustCompile(`\b(SHA256NanoID|NanoIDFromPCG)\(`)
 	derivedKeyShape = regexp.MustCompile(`//\s*derived-key:(.*)$`)
+
+	// substrateConnectCall anchors a substrate.Connect( call in a cmd/** binary.
+	// maxReconnectsField is the ConnectOpts field that call must set — the
+	// omission this gate exists to catch: substrate.Connect only threads
+	// MaxReconnects into the underlying nats.Option when the field is nonzero
+	// (internal/substrate/conn.go), so a caller that never mentions it silently
+	// inherits nats.go's own default (60 reconnect attempts, ~2s apart) instead
+	// of a value anyone chose. After that default is exhausted the *nats.Conn
+	// closes permanently — nats.go never retries a closed connection — so a
+	// long-running component runs on as a zombie holding a dead NATS handle
+	// (the confirmed cause of Refractor's two-hour outage after an nats-server
+	// restart, one component of thirteen that never reconnected).
+	substrateConnectCall = regexp.MustCompile(`\bsubstrate\.Connect\(`)
+	maxReconnectsField   = regexp.MustCompile(`\bMaxReconnects\s*:`)
+	// substrateConnectOptsAssign anchors a ConnectOpts built in its own
+	// statement rather than inlined at the call (e.g. `connOpts :=
+	// substrate.ConnectOpts{...}; substrate.Connect(ctx, connOpts)`) — the one
+	// such shape in the tree today (cmd/facet/engine.go, whose ConnectOpts also
+	// carries a TokenHandler built from local variables, which the inline shape
+	// cannot express as cleanly). checkMaxReconnectsDeclared resolves the
+	// variable back to this assignment rather than false-flagging the call for
+	// not spelling MaxReconnects inline.
+	substrateConnectOptsAssign = regexp.MustCompile(`\b([A-Za-z_][A-Za-z0-9_]*)\s*(?::=|=)\s*substrate\.ConnectOpts\s*\{`)
 )
 
 // nanoidAlphabetShapes are the declarable exceptions to the NanoID-alphabet
@@ -516,6 +553,19 @@ func verticalAppCmd(path string) string {
 	return ""
 }
 
+// isUnderCmd reports whether path has a "cmd" path segment — every binary,
+// platform or vertical, whose connection lifecycle the max-reconnects gate
+// covers (unlike verticalAppCmd, it does not exclude platform binaries: the
+// omission this gate catches hit refractor, a platform binary).
+func isUnderCmd(path string) bool {
+	for _, p := range strings.Split(filepath.ToSlash(path), "/") {
+		if p == "cmd" {
+			return true
+		}
+	}
+	return false
+}
+
 type finding struct {
 	file string
 	line int
@@ -682,6 +732,14 @@ func scanSource(path string, data []byte) []finding {
 	fileMutates := postureScoped && scriptMutates.Match(data)
 	if !isTest {
 		out = append(out, checkLensProtectedByDefault(path, string(data))...)
+	}
+	// max-reconnects scope: every non-test cmd/** binary. A test's
+	// substrate.Connect targets an ephemeral embedded fixture torn down at test
+	// end, where reconnect budgets are meaningless; a shipped binary's connection
+	// is expected to outlive transient NATS trouble (or say explicitly that it
+	// should not).
+	if !isTest && isUnderCmd(slash) {
+		out = append(out, checkMaxReconnectsDeclared(path, string(data))...)
 	}
 	// internal/spike holds standalone `main` benchmarks with no *testing.T, so the
 	// fixture (which is t-bound by construction) is not available to them.
@@ -889,6 +947,151 @@ func checkLensProtectedByDefault(path, src string) []finding {
 		}
 	}
 	return out
+}
+
+// maxReconnectsScanWindow bounds how far checkMaxReconnectsDeclared walks
+// forward from a substrate.Connect( match to find the call's closing paren —
+// a safety cap against pathological input, well beyond any real ConnectOpts
+// literal's size.
+const maxReconnectsScanWindow = 4000
+
+// checkMaxReconnectsDeclared flags a substrate.Connect( call under cmd/**
+// whose argument list never mentions MaxReconnects. It walks forward from the
+// call's own opening paren to the matching closing paren via balanced-paren
+// counting (correct regardless of how the ConnectOpts{} literal is
+// formatted), then checks only that span — so a MaxReconnects field on a
+// DIFFERENT, later call is never mistaken for this one's declaration.
+//
+// The value is deliberately not inspected: -1 (reconnect forever — the right
+// answer for a long-running daemon; a closed *nats.Conn never recovers on its
+// own) and a small finite value (fail fast — the right answer for a one-shot
+// CLI invocation) are both acceptances. The only thing this gate refuses is
+// silence, which is what let 3 of 17 cmd/** binaries inherit nats.go's own
+// default (60 attempts, ~2s apart) with nobody having chosen it — the gap
+// that left Refractor's lens engine running for two hours as a zombie after
+// an nats-server restart it never reconnected from.
+func checkMaxReconnectsDeclared(path, src string) []finding {
+	var out []finding
+	for _, m := range substrateConnectCall.FindAllStringIndex(src, -1) {
+		pos := m[0]
+		lineStart := strings.LastIndexByte(src[:pos], '\n') + 1
+		lineEnd := strings.IndexByte(src[pos:], '\n')
+		if lineEnd == -1 {
+			lineEnd = len(src)
+		} else {
+			lineEnd += pos
+		}
+		if strings.HasPrefix(strings.TrimSpace(src[lineStart:lineEnd]), "//") {
+			continue
+		}
+		openParen := m[1] - 1
+		fwdLimit := openParen + maxReconnectsScanWindow
+		if fwdLimit > len(src) {
+			fwdLimit = len(src)
+		}
+		callEnd := -1
+		balance := 0
+		for i := openParen; i < fwdLimit; i++ {
+			switch src[i] {
+			case '(':
+				balance++
+			case ')':
+				balance--
+				if balance == 0 {
+					callEnd = i
+				}
+			}
+			if callEnd != -1 {
+				break
+			}
+		}
+		if callEnd == -1 {
+			continue
+		}
+		callSpan := src[openParen : callEnd+1]
+		if maxReconnectsField.MatchString(callSpan) {
+			continue
+		}
+		if !strings.Contains(callSpan, "ConnectOpts") {
+			// The ConnectOpts value isn't inlined at the call (e.g. `connOpts :=
+			// substrate.ConnectOpts{...}` in an earlier statement, then
+			// `substrate.Connect(ctx, connOpts)`) — resolve the identifier back
+			// to its own assignment before concluding the field is missing.
+			if ident := lastIdentifier(src[openParen+1 : callEnd]); ident != "" {
+				if declSpan, ok := findConnectOptsAssign(src, pos, ident); ok && maxReconnectsField.MatchString(declSpan) {
+					continue
+				}
+			}
+		}
+		line := strings.Count(src[:pos], "\n") + 1
+		out = append(out, finding{file: path, line: line, msg: "max-reconnects: substrate.Connect in cmd/** does not set MaxReconnects — omitting it inherits nats.go's own default (60 reconnect attempts, ~2s apart) instead of a value anyone chose, and once that budget is exhausted the connection closes PERMANENTLY (nats.go never retries a closed connection); a long-running component then keeps running as a zombie holding a dead NATS handle. Set MaxReconnects: -1 for a daemon that must reconnect indefinitely, or an explicit small finite value (with a comment on why fail-fast is correct here) for a short-lived CLI"})
+	}
+	return out
+}
+
+// lastIdentifier returns the trailing bare identifier in a substrate.Connect
+// call's argument list (e.g. "ctx, connOpts" -> "connOpts"), or "" if the last
+// argument is not a single bare identifier (a struct literal, a field
+// selector, a function call) — those shapes are handled by the inline
+// ConnectOpts{} check instead, and are never worth chasing further.
+func lastIdentifier(argList string) string {
+	parts := strings.Split(argList, ",")
+	last := strings.TrimSpace(parts[len(parts)-1])
+	for i := 0; i < len(last); i++ {
+		c := last[i]
+		if !(c == '_' || (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9')) {
+			return ""
+		}
+	}
+	if last == "" {
+		return ""
+	}
+	return last
+}
+
+// findConnectOptsAssign locates the composite literal of ident's nearest
+// `ident := substrate.ConnectOpts{...}` (or `=`) assignment preceding
+// callPos, and returns that literal's own text span (opening `{` through its
+// matching `}`, via balanced-brace counting — the same technique
+// checkLensProtectedByDefault uses for a LensSpec entry).
+func findConnectOptsAssign(src string, callPos int, ident string) (string, bool) {
+	bestBrace := -1
+	for _, m := range substrateConnectOptsAssign.FindAllStringSubmatchIndex(src, -1) {
+		if m[0] >= callPos {
+			break
+		}
+		if src[m[2]:m[3]] != ident {
+			continue
+		}
+		bestBrace = m[1] - 1 // index of the assignment's opening "{"
+	}
+	if bestBrace == -1 {
+		return "", false
+	}
+	fwdLimit := bestBrace + maxReconnectsScanWindow
+	if fwdLimit > len(src) {
+		fwdLimit = len(src)
+	}
+	end := -1
+	balance := 0
+	for i := bestBrace; i < fwdLimit; i++ {
+		switch src[i] {
+		case '{':
+			balance++
+		case '}':
+			balance--
+			if balance == 0 {
+				end = i
+			}
+		}
+		if end != -1 {
+			break
+		}
+	}
+	if end == -1 {
+		return "", false
+	}
+	return src[bestBrace : end+1], true
 }
 
 // checkReadPosture classifies one script kv.Read/kv.Links call line against
@@ -1467,6 +1670,36 @@ func selfTest() []string {
 			"undeclared content-addressed id derivation in a submitter"},
 		{"the lint scripts' own fixtures are exempt", "scripts/lint-conventions.go",
 			"\tsrc := \"substrate.SHA256NanoID(x)\"\n", ""},
+
+		{"an undeclared MaxReconnects in cmd/** is denied", "cmd/refractor/main.go",
+			"\tconn, err := substrate.Connect(ctx, substrate.ConnectOpts{\n" +
+				"\t\tURL: *natsURL,\n" +
+				"\t})\n",
+			"max-reconnects: substrate.Connect in cmd/** does not set MaxReconnects"},
+		{"a declared MaxReconnects: -1 (reconnect forever) passes", "cmd/refractor/main.go",
+			"\tconn, err := substrate.Connect(ctx, substrate.ConnectOpts{\n" +
+				"\t\tURL:           *natsURL,\n" +
+				"\t\tMaxReconnects: -1,\n" +
+				"\t})\n", ""},
+		{"a declared small finite MaxReconnects passes too — the gate does not judge the value", "cmd/lattice-pkg/main.go",
+			"\tconn, err := substrate.Connect(context.Background(), substrate.ConnectOpts{\n" +
+				"\t\tURL:           natsURL,\n" +
+				"\t\tMaxReconnects: 2,\n" +
+				"\t})\n", ""},
+		{"the gate is scoped to cmd/**", "internal/refractor/conn.go",
+			"\tconn, err := substrate.Connect(ctx, substrate.ConnectOpts{\n" +
+				"\t\tURL: url,\n" +
+				"\t})\n", ""},
+		{"the gate skips cmd/** test files", "cmd/refractor/main_test.go",
+			"\tconn, err := substrate.Connect(ctx, substrate.ConnectOpts{\n" +
+				"\t\tURL: url,\n" +
+				"\t})\n", ""},
+		{"a declaration on one call does not cover a different, undeclared call", "cmd/lattice-pkg/main.go",
+			"\tconn1, err := substrate.Connect(ctx, substrate.ConnectOpts{URL: url})\n" +
+				"\tconn2, err := substrate.Connect(ctx, substrate.ConnectOpts{URL: url, MaxReconnects: 2})\n",
+			"max-reconnects: substrate.Connect in cmd/** does not set MaxReconnects"},
+		{"prose mentioning the call in a comment is not a use of it", "cmd/refractor/main.go",
+			"\t// substrate.Connect(ctx, opts) needs MaxReconnects set\n", ""},
 	}
 	var failures []string
 	for _, tc := range cases {
@@ -1477,7 +1710,8 @@ func selfTest() []string {
 				!strings.HasPrefix(fd.msg, "workplace-exempt:") &&
 				!strings.HasPrefix(fd.msg, "read-posture:") &&
 				!strings.HasPrefix(fd.msg, "nanoid-alphabet:") &&
-				!strings.HasPrefix(fd.msg, "derived-key:") {
+				!strings.HasPrefix(fd.msg, "derived-key:") &&
+				!strings.HasPrefix(fd.msg, "max-reconnects:") {
 				continue
 			}
 			hits++

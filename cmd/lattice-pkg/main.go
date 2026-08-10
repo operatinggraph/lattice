@@ -49,6 +49,17 @@ type bootstrapJSON struct {
 // 30s, which only covers the final submitOp leg.
 const cliTimeout = 60 * time.Second
 
+// cliMaxReconnects bounds the reconnect budget every substrate.Connect in
+// this CLI declares. cliTimeout already fails the whole invocation loudly on
+// its own terms, so this exists to opt OUT of nats.go's own default (60
+// attempts, ~2s apart — a multi-minute hang no one chose) rather than to add
+// resilience: 1 is the smallest value substrate.Connect can actually express
+// as "don't linger" — it only threads MaxReconnects into nats.go's options
+// when the field is nonzero (internal/substrate/conn.go), so a literal 0
+// here would silently fall back to that same 60-attempt default instead of
+// disabling reconnects.
+const cliMaxReconnects = 1
+
 func main() {
 	if len(os.Args) < 2 {
 		usage()
@@ -184,10 +195,11 @@ func runApply(cmd, pkgPath, natsURL, bootstrapPath string, opts pkgmgr.ApplyOpti
 	}
 
 	conn, err := substrate.Connect(context.Background(), substrate.ConnectOpts{
-		URL:          natsURL,
-		Name:         "lattice-pkg",
-		NKeySeedFile: envOrDefault("NATS_NKEY", ""),
-		CredsFile:    envOrDefault("NATS_CREDS", ""),
+		URL:           natsURL,
+		Name:          "lattice-pkg",
+		MaxReconnects: cliMaxReconnects,
+		NKeySeedFile:  envOrDefault("NATS_NKEY", ""),
+		CredsFile:     envOrDefault("NATS_CREDS", ""),
 	})
 	if err != nil {
 		return fmt.Errorf("substrate open: %w", err)
@@ -279,10 +291,11 @@ func runUninstall(packageName, natsURL, bootstrapPath string, logger *slog.Logge
 		return err
 	}
 	conn, err := substrate.Connect(context.Background(), substrate.ConnectOpts{
-		URL:          natsURL,
-		Name:         "lattice-pkg",
-		NKeySeedFile: envOrDefault("NATS_NKEY", ""),
-		CredsFile:    envOrDefault("NATS_CREDS", ""),
+		URL:           natsURL,
+		Name:          "lattice-pkg",
+		MaxReconnects: cliMaxReconnects,
+		NKeySeedFile:  envOrDefault("NATS_NKEY", ""),
+		CredsFile:     envOrDefault("NATS_CREDS", ""),
 	})
 	if err != nil {
 		return fmt.Errorf("substrate open: %w", err)
@@ -323,10 +336,11 @@ func runApplyProposal(proposalID, natsURL, bootstrapPath string, logger *slog.Lo
 	}
 
 	conn, err := substrate.Connect(context.Background(), substrate.ConnectOpts{
-		URL:          natsURL,
-		Name:         "lattice-pkg",
-		NKeySeedFile: envOrDefault("NATS_NKEY", ""),
-		CredsFile:    envOrDefault("NATS_CREDS", ""),
+		URL:           natsURL,
+		Name:          "lattice-pkg",
+		MaxReconnects: cliMaxReconnects,
+		NKeySeedFile:  envOrDefault("NATS_NKEY", ""),
+		CredsFile:     envOrDefault("NATS_CREDS", ""),
 	})
 	if err != nil {
 		return fmt.Errorf("substrate open: %w", err)
@@ -453,10 +467,11 @@ func submitMarkApplied(ctx context.Context, conn *substrate.Conn, actor, proposa
 func runList(natsURL, bootstrapPath string, logger *slog.Logger) error {
 	_ = bootstrapPath // not strictly required for list, kept for parity
 	conn, err := substrate.Connect(context.Background(), substrate.ConnectOpts{
-		URL:          natsURL,
-		Name:         "lattice-pkg",
-		NKeySeedFile: envOrDefault("NATS_NKEY", ""),
-		CredsFile:    envOrDefault("NATS_CREDS", ""),
+		URL:           natsURL,
+		Name:          "lattice-pkg",
+		MaxReconnects: cliMaxReconnects,
+		NKeySeedFile:  envOrDefault("NATS_NKEY", ""),
+		CredsFile:     envOrDefault("NATS_CREDS", ""),
 	})
 	if err != nil {
 		return fmt.Errorf("substrate open: %w", err)
