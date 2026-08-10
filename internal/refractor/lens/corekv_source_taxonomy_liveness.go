@@ -88,6 +88,30 @@ const taxonomyEventAckWait = 2 * time.Minute
 // same line forever.
 const taxonomyProbeFailureWarnAfter = 8
 
+// taxonomyVerdict is one caught-up finding travelling from the probing
+// goroutine to the dispatch goroutine that applies it, carrying everything
+// needed to establish that the feed it measured is still the feed in front of
+// the source when it lands.
+//
+// It carries two independent facts because the two ways this source goes
+// blind reach it on different schedules. An interruption the source is TOLD
+// about — a subscription reopen, a dead consumer — has already bumped the
+// epoch by the time anything else can run, so epoch alone discards a verdict
+// that straddles it. A connection loss has not: nats.go flips its own status
+// under the connection lock and queues the disconnect callback behind every
+// other async callback in the process, so the epoch bump can lag the loss
+// without bound. connGeneration is that loss read at its source instead of
+// waiting to be told about it (substrate.Conn.ConnectionGeneration).
+type taxonomyVerdict struct {
+	// epoch is the taxonomyEpoch the probe was issued under.
+	epoch uint64
+	// connGeneration is the connection-continuity token read before the
+	// probe. A verdict is applied only if the connection is still up on the
+	// same generation — anything else means the source went blind somewhere
+	// between measuring the feed and claiming it.
+	connGeneration uint64
+}
+
 // watchTaxonomyLiveness drives the source from "not current" to "current",
 // and does nothing at all once it gets there. It runs for the source's whole
 // life because the transition is re-entered on every connection loss, and
@@ -95,10 +119,11 @@ const taxonomyProbeFailureWarnAfter = 8
 // permanently dead.
 //
 // Each pass is deliberately cheap in the common case: a mutex read while
-// armed, plus a local connection-status read (no round trip) before spending
-// a probe. The verdict carries the epoch it was computed under, so a probe
-// that straddles a disconnect is discarded by armTaxonomy rather than
-// arming across a window it never saw.
+// armed, plus a local connection-state read (no round trip) before spending a
+// probe. That same read is the verdict's other half: a verdict carries the
+// epoch AND the connection generation it was computed under, so a probe that
+// straddles an interruption is discarded by armTaxonomy rather than arming
+// across a window it never saw.
 func (s *CoreKVSource) watchTaxonomyLiveness(ctx context.Context, durable string) {
 	stream := "KV_" + s.bucket
 	ticker := time.NewTicker(taxonomyArmPollInterval)
@@ -121,7 +146,12 @@ func (s *CoreKVSource) watchTaxonomyLiveness(ctx context.Context, durable string
 			consecutiveFailures = 0
 			continue
 		}
-		if !s.conn.Connected() {
+		// Read BEFORE the probe, and carried with the verdict: the window the
+		// verdict has to be continuously connected across starts here, at the
+		// point the consumer's counters are about to be measured, not at the
+		// point the measurement comes back.
+		connGeneration, connected := s.connectionGeneration()
+		if !connected {
 			continue
 		}
 
@@ -177,7 +207,7 @@ func (s *CoreKVSource) watchTaxonomyLiveness(ctx context.Context, durable string
 		}
 		s.recordTaxonomyDrainedVerdict()
 		select {
-		case s.armCh <- epoch:
+		case s.armCh <- taxonomyVerdict{epoch: epoch, connGeneration: connGeneration}:
 		case <-s.taxonomyDeadCh:
 			// consume has exited through the dead path and will never
 			// receive again. Without this arm the send parks forever and
@@ -189,20 +219,39 @@ func (s *CoreKVSource) watchTaxonomyLiveness(ctx context.Context, durable string
 	}
 }
 
-// armTaxonomy applies a caught-up verdict computed under epoch. Called only
-// from consume's dispatch goroutine, which is what orders it behind the last
-// replayed event's snapshot (see the case in consume) — and what lets it run
-// the Changed sweep inline, on the one goroutine allowed to.
+// armTaxonomy applies a caught-up verdict. Called only from consume's
+// dispatch goroutine, which is what orders it behind the last replayed
+// event's snapshot (see the case in consume) — and what lets it run the
+// Changed sweep inline, on the one goroutine allowed to.
 //
-// Three ways a verdict is stale rather than wrong, all of them refusals: the
+// Four ways a verdict is stale rather than wrong, all of them refusals: the
 // subscription died while it was in flight; the flag is already true (nothing
-// to report, and a re-report would cost a full re-derivation sweep); or the
-// connection dropped after the probe read the consumer's counters, in which
-// case the epoch has moved and this verdict describes a feed that no longer
-// exists.
-func (s *CoreKVSource) armTaxonomy(epoch uint64) {
+// to report, and a re-report would cost a full re-derivation sweep); an
+// interruption was reported between the probe and here, moving the epoch past
+// the one this verdict was measured under; or the connection this source
+// holds is no longer the one the probe measured on.
+//
+// That last check is not a duplicate of the epoch, and the ordering is the
+// reason. The epoch moves for a connection loss only when substrate's
+// fan-out delivers it, which nats.go queues onto one serial async-callback
+// goroutine behind every other callback in the process — while the same loss
+// is readable from the connection itself the instant it happens. Between
+// those two moments the epoch still matches, so the epoch alone lets exactly
+// the verdict this barrier exists to reject through: one measured on a feed
+// that is already gone, applied by a dispatch goroutine that has just come
+// out of a long handle(), arming a resolver blind from the instant it goes
+// live. Reading the connection here, rather than waiting to be told, is what
+// closes it — and a source with no connection to read (never Started) can
+// tell nothing, so it refuses too.
+func (s *CoreKVSource) armTaxonomy(v taxonomyVerdict) {
+	connGeneration, connected := s.connectionGeneration()
+
 	s.taxLiveMu.Lock()
-	if s.taxonomyDead || s.taxonomyLive || epoch != s.taxonomyEpoch {
+	if s.taxonomyDead || s.taxonomyLive || v.epoch != s.taxonomyEpoch {
+		s.taxLiveMu.Unlock()
+		return
+	}
+	if !connected || connGeneration != v.connGeneration {
 		s.taxLiveMu.Unlock()
 		return
 	}
@@ -215,10 +264,21 @@ func (s *CoreKVSource) armTaxonomy(epoch uint64) {
 	s.taxLiveMu.Unlock()
 
 	s.logger.Info("taxonomy liveness: consumer drained — taxonomy snapshots are current",
-		"epoch", epoch)
+		"epoch", v.epoch, "connGeneration", v.connGeneration)
 	if s.taxonomyLiveness.Changed != nil {
 		s.taxonomyLiveness.Changed()
 	}
+}
+
+// connectionGeneration reads the continuity token a caught-up verdict is
+// measured against and validated with. A source constructed without a
+// connection is never Started, so it has no watcher and no feed at all — it
+// cannot establish currency, which is the one state that must never arm.
+func (s *CoreKVSource) connectionGeneration() (uint64, bool) {
+	if s.conn == nil {
+		return 0, false
+	}
+	return s.conn.ConnectionGeneration()
 }
 
 // connectionLost is substrate's connection-state fan-out arriving on the

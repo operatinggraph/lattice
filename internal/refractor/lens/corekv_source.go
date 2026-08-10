@@ -178,11 +178,21 @@ type CoreKVSource struct {
 	// taxonomyConsumerDead; and reset by process death only — nothing here
 	// persists, so a restart re-proves liveness through a fresh boot replay.
 	taxonomyLive bool
-	// taxonomyEpoch counts connection losses. It exists because the
-	// caught-up probe and its verdict are separated by a round trip: a
-	// verdict computed before a disconnect must not arm the resolver after
-	// it, and comparing the epoch the probe started under against the
-	// current one is what discards exactly those.
+	// taxonomyEpoch counts every interruption this source is TOLD about —
+	// a connection loss reported through substrate's fan-out, a subscription
+	// reopen, a dead consumer. It exists because the caught-up probe and its
+	// verdict are separated by a round trip and a hand-over: a verdict
+	// computed before an interruption must not arm the resolver after it, and
+	// comparing the epoch the probe started under against the current one is
+	// what discards exactly those.
+	//
+	// It covers the interruptions that arrive SYNCHRONOUSLY with respect to
+	// the thing they interrupt — a reopen is announced on the subscription
+	// goroutine, which cannot deliver again until the announcement returns.
+	// The connection loss is not one of those, which is why a verdict also
+	// carries a connection generation (taxonomyVerdict): the epoch cannot be
+	// bumped until nats.go's serial callback queue gets around to the
+	// disconnect, and the resolver must not arm in the meantime.
 	taxonomyEpoch uint64
 	// taxonomyDead latches once consume has reported the subscription dead.
 	// A dead source must never arm again, and would otherwise: the durable
@@ -213,14 +223,18 @@ type CoreKVSource struct {
 	taxonomyDrainedVerdicts int
 	// taxonomyLiveness is set by SetTaxonomyLivenessCallbacks.
 	taxonomyLiveness TaxonomyLiveness
-	// armCh carries a caught-up verdict (tagged with the epoch it was
-	// computed under) from watchTaxonomyLiveness to consume's dispatch
-	// goroutine. Unbuffered, and read only from consume's select, which is
-	// the whole barrier: consume cannot receive it while it is inside
-	// handle(), so a verdict can only be applied once every event that was
-	// acked when the probe ran has been fully processed — including the
-	// InstallSnapshot the last of them triggered.
-	armCh chan uint64
+	// armCh carries a caught-up verdict from watchTaxonomyLiveness to
+	// consume's dispatch goroutine. Unbuffered, and read only from consume's
+	// select, which is the whole barrier: consume cannot receive it while it
+	// is inside handle(), so a verdict can only be applied once every event
+	// that was acked when the probe ran has been fully processed — including
+	// the InstallSnapshot the last of them triggered.
+	//
+	// That barrier is also what makes a verdict ARBITRARILY old by the time
+	// it is applied: handle() can spend a lens activation on one event. The
+	// verdict therefore travels with the state it was measured against
+	// (taxonomyVerdict) rather than as a bare "yes".
+	armCh chan taxonomyVerdict
 	// sweepCh wakes the dispatch goroutine to run a sweep it is owed for a
 	// transition decided elsewhere. Buffered depth 1 with a non-blocking
 	// send: the connection-state goroutine must never park here (it is
@@ -692,7 +706,7 @@ func (s *CoreKVSource) Start(ctx context.Context) error {
 	// epoch bump during it is what stops a caught-up verdict computed across
 	// that gap from arming a resolver whose snapshot is missing whatever the
 	// reconnecting durable has yet to re-deliver.
-	s.armCh = make(chan uint64)
+	s.armCh = make(chan taxonomyVerdict)
 	s.sweepCh = make(chan struct{}, 1)
 	s.conn.OnConnectionStateChange(func(connected bool) {
 		if !connected {
@@ -765,7 +779,7 @@ func (s *CoreKVSource) consume(ctx context.Context, events <-chan substrate.KVEv
 		case <-ctx.Done():
 			s.deleteOwnDurable(durable)
 			return
-		case epoch := <-s.armCh:
+		case verdict := <-s.armCh:
 			// The replay barrier lands HERE and nowhere else. This goroutine
 			// is the one that runs handle() — and therefore InstallSnapshot
 			// — so a caught-up verdict received in this select is provably
@@ -778,7 +792,7 @@ func (s *CoreKVSource) consume(ctx context.Context, events <-chan substrate.KVEv
 			// armCh is nil for a source whose consume is driven directly
 			// (the dead-callback tests) rather than by Start; a nil channel
 			// is never ready, so this case simply never fires there.
-			s.armTaxonomy(epoch)
+			s.armTaxonomy(verdict)
 		case <-s.sweepCh:
 			// A liveness transition decided on another goroutine (a
 			// connection loss) flipped the fail-closed flag there and left
