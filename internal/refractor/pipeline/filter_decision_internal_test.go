@@ -578,6 +578,46 @@ func TestRegisterWithFilterFallback_RecordsTheRegistrationFailedFootprint(t *tes
 	require.NotNil(t, entry.LastError)
 }
 
+// TestRegisterWithFilterFallback_ApplyBroadRunsBeforeASucceedingRetry pins the
+// contract Rebuild's applyBroad closure depends on, on the one transition no
+// Rebuild fixture can reach: the fallback fires and the RETRY SUCCEEDS, so the
+// caller returns normally and goes on to report a footprint. applyBroad must
+// have run by then — that is the caller's only chance to learn its derived
+// filter was refused, and a caller that reported its derivation instead would
+// advertise a narrowed footprint over a consumer running broad.
+//
+// Asserted on the same registrationFailedDecision Rebuild's closure assigns, so
+// the two cannot drift into describing the refusal differently.
+func TestRegisterWithFilterFallback_ApplyBroadRunsBeforeASucceedingRetry(t *testing.T) {
+	p := &Pipeline{ruleID: "rwff-applybroad-order"}
+
+	// Exactly Rebuild's closure shape: the derived decision, rewritten by the
+	// fallback to what the consumer actually adopted.
+	reported := FilterDecision{Mode: health.FilterModeNarrowedLabel, LabelCount: 2}
+	calls := 0
+	require.NoError(t, p.registerWithFilterFallback(context.Background(), []string{"a.>", "b.>"}, func() {
+		reported = registrationFailedDecision()
+	}, func() error {
+		calls++
+		if calls == 1 {
+			return errors.New("injected overlapping-filter rejection")
+		}
+		return nil
+	}))
+	require.Equal(t, 2, calls, "the retry must have succeeded — this is the returns-normally path")
+	require.Equal(t, registrationFailedDecision(), reported,
+		"a caller that reaches its own report after a successful retry must already know the narrowed filter was refused")
+
+	// The positive vector: with no fallback, the caller's derived decision is
+	// untouched and it reports what it derived.
+	untouched := FilterDecision{Mode: health.FilterModeNarrowedLabel, LabelCount: 2}
+	require.NoError(t, p.registerWithFilterFallback(context.Background(), []string{"a.>"}, func() {
+		untouched = registrationFailedDecision()
+	}, func() error { return nil }))
+	require.Equal(t, FilterDecision{Mode: health.FilterModeNarrowedLabel, LabelCount: 2}, untouched,
+		"a clean registration must leave the derivation alone — otherwise every lens would report a refusal")
+}
+
 // TestRebuild_AbandonedResetDescribesWhatWasAdopted pins the ordering fix on the
 // rebuild path: the entry must describe the filter the consumer ACTUALLY got.
 // Recording the derivation before the reset made an abandoned rebuild advertise

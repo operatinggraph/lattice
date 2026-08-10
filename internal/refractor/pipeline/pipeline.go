@@ -2280,7 +2280,15 @@ func (p *Pipeline) rebuild(ctx context.Context, truncate bool, sig *rebuildSigna
 		// report below describes what was ADOPTED rather than what was derived.
 		// It is the same value registerWithFilterFallback has already written,
 		// deliberately: rewriting it is idempotent, where skipping the write
-		// would need a flag and a branch that no reachable test can exercise.
+		// would need a flag and a branch.
+		//
+		// It is load-bearing on exactly one transition — the fallback fires and
+		// the RETRY SUCCEEDS, where the derived (narrowed) decision would
+		// otherwise overwrite the refusal. No fixture reaches it: making a
+		// rebuild's first reset fail and its second succeed needs a
+		// fault-injection seam the supervisor does not offer. What IS pinned is
+		// the contract this closure depends on —
+		// TestRegisterWithFilterFallback_ApplyBroadRunsBeforeASucceedingRetry.
 		filterDecision = registrationFailedDecision()
 	}, resetWithFilter); err != nil {
 		return p.abandonRebuild(ctx, sig, fmt.Errorf("pipeline: rebuild: reset consumer: %w", err))
