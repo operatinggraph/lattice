@@ -1,10 +1,10 @@
 # A dynamic type taxonomy — an abstract type is graph data, and a lens label expands against it
 
-**Status: ✅ Andrew-RATIFIED 2026-08-06 · Fire A items 1–5 built (build notes §17); item 6 (observability) +
-the §15 census-test extension remain — the census test depends on item 6's `filterMode`** — two fires, both
-in the **Lattice lane** (§14, rewritten at ratification). **Fire B is gated on the rebuild-fan-out board row**
-(needs a coalesced rebuild scheduler; §17.8). Five amendments below are Andrew's and supersede the body where
-they differ. Contract #1 §1.7's abstract-vertexType note is **committed** with a transitional marker. Authored
+**Status: ✅ Andrew-RATIFIED 2026-08-06 · Fires A and B COMPLETE (§17.12, §17.18) · Fire C: C1–C3 built,
+C2.6 closed by measurement, C4/C5 adjudicated by the 2026-08-10 designer pass (§17.22) — nothing in the item
+remains open; the item is closeable.** Three fires, all in the **Lattice lane** (§14; Fire C folded in
+2026-08-10 by Andrew). Five amendments below are Andrew's and supersede the body where they differ.
+Contract #1 §1.7's abstract-vertexType note is **committed** with a transitional marker. Authored
 2026-08-06, co-designed with Andrew in the ratify session; subsumes the location-domain class question.
 
 > **AMENDMENTS (Andrew, ratify session 2026-08-06) — these supersede the body where they differ.**
@@ -1368,31 +1368,65 @@ Fires A/B leaned on, and each is currently vacuous or absent.
    trailing `*` in any node position (fails closed). Until this lands, §13's silent-footprint-regression risk
    is live — see the strike in §15.
 
-**C4 — the taxonomy is declared but unreadable where it would be used.** Each needs a designer pass; none has
-a ratified pattern to extend.
+**C4 — the taxonomy is declared but unreadable where it would be used.** *Adjudicated 2026-08-10
+(Andrew-directed designer pass, §17.22): one absorbed into a filed item, three thrown out. None warrants a
+design inside this item.*
 
-8. **The "any location" write guards read a package-local list, not the taxonomy** (§9.3). Consumers:
-   `WireContainedIn`, service-location's four wiring ops, `CreateMenuItem`. A Starlark taxonomy read pulls
-   Contract #2 §2.5 read-posture declarations into every dispatcher, plus a fail-closed answer.
-9. **No per-row `typeOf(x.key)` engine function** (§14) — `AnchorWalk.AnchorType`'s audit literal is what
-   forbids an abstract Path-B anchor.
-10. **No place to hang a category-level command on an abstract type** (§17.16) — one operationType across N
-    sibling leaves makes `buildByCommand` mark it ambiguous, so all 30 location submitters must name a
-    concrete class.
-11. **`subtypeOf`-driven DDL inheritance** (§9.1) — would remove location's three-way `DDLSpec` duplication,
-    but §3.4's multiple-parents ambiguity must be forbidden or given a precedence rule first.
+8. **The "any location" write guards read a package-local list, not the taxonomy** (§9.3). **Real · severity
+   LOW (fail-closed, latent) · ABSORBED into the typed-relation-signatures row filed from item 12.** It bites
+   only when a leaf is declared outside the packages that hand-copy `LOCATION_TYPES` — now **five** copies
+   (location-, service-location-, cafe-, wellness-, maintenance-domain), not §9.3's three consumers — and
+   until then the cost is that maintenance surface; a stale list refuses the new leaf, never admits anything.
+   The Starlark mechanism this item wanted designed dissolves at step 6: a script cannot resolve
+   canonicalName → meta NanoID without a scan, but the Processor already holds the taxonomy (`ddl_cache`), so
+   an endpoint signature enforced at commit IS the taxonomy-read guard — the wiring guards keep their
+   aliveness check and shed type membership.
+9. **No per-row `typeOf(x.key)` engine function** (§14). **THROWN OUT — zero consumers.** No walk-generated
+   lens wants an abstract anchor; the grammar refuses the sigil fail-closed and the refusal site documents the
+   exact unlock (`internal/pkgmgr/anchorwalk.go:729-750`: an abstract anchor label would make every grant
+   row's `anchorType` audit literal assert a type no vertex has, and making it honest needs the per-row
+   function). Re-opens when a real walk names itself; the code comment plus this line are the record — no row.
+10. **No place to hang a category-level command on an abstract type** (§17.16). **THROWN OUT — the gap
+    dissolves on inspection.** Every submitter of a location op holds the target key, and the key's type
+    segment IS the concrete class, so the explicit-class form is mechanically derivable at every site (B1
+    migrated them all); a creation op names a concrete type by necessity. `buildByCommand`'s ambiguity drop is
+    correct fail-closed behaviour, documented at the index itself (`internal/processor/ddl_cache.go`), not a
+    defect. Do not re-file the dispatcher half; the declare-once ergonomics are §12.9's recorded extension —
+    item 11's disposition.
+11. **`subtypeOf`-driven DDL inheritance** (§9.1). **THROWN OUT — negative ROI.** Today's payoff is three
+    `DDLSpec` entries sharing one script const; the mechanism puts the taxonomy inside `resolveGoverningDDL`
+    (blast radius: every mutation on the platform) and forces the multiple-parents precedence rule §3.4
+    deliberately avoids. §12.9 stays the standing record — built deliberately later when a real multi-leaf
+    corpus exists, never stumbled into.
 
-**C5 — the payoff Fire B was supposed to deliver, and didn't** (§2.1).
+**C5 — the payoff Fire B was supposed to deliver, and didn't** (§2.1). **ANSWERED 2026-08-10: recoverable —
+by a mechanism filed as its own item, not by this one.**
 
-12. **An auth lens carrying a containment walk cannot be narrowed at all.** `ReferencedLabels` clears
-    exhaustiveness for any variable-length hop, so `capabilityServiceAccess` takes the broad filter whatever it
-    labels. Narrowing it means reconciling `*0..` walks with the exhaustiveness rule — the design question the
-    measurement in §2.1 exposed.
+12. **An auth lens carrying a containment walk cannot be narrowed at all.** **Real · severity MEDIUM
+    (footprint only — broad is the safe direction, never a grant hazard) · EXTRACTED and FILED as "typed
+    relation signatures" (Read-model / projection maturity, ★★ L).** Bigger than this lens: every
+    variable-length hop in the shipped corpus is `containedIn` — census
+    `grep -rn -oE "\[:[a-zA-Z]+\*[0-9]*\.\.[0-9]*\]" packages/ internal/bootstrap/ --include="*.go" | grep -v _test`
+    returns 25 hops, all of them `containedIn` — so one relation holds the whole varlength class (§2.1's 9 +
+    this lens) on the broad filter. Exhaustiveness is a conjunct of BOTH narrowing branches — plain
+    (`pipeline.go:1419-1421`) and actor-aware (`pipeline.go:1268`) — so no wiring choice routes around it.
+    The sound mechanism is the one §17.19 confirmed does not exist: declare `containedIn: location → location`
+    against the taxonomy, enforce it at step 6 (fail-closed, key-type-segment based, so the 69 legacy-classed
+    vertices are irrelevant), and let `ReferencedLabels` count a signed hop as its endpoint type's expansion
+    instead of clearing exhaustiveness. A per-lens "assume-intermediates" annotation was considered and
+    rejected: unverified it is fail-open on the auth plane, and verifying it needs the same write gate — it
+    collapses into the signature. Narrowing this specific lens then still requires its unlabeled `op`
+    comprehension node labeled and the actor-aware conjuncts to hold — the filed row claims "removes the
+    structural blocker," not "converts the lens," which is the overclaim §9.4 already made once. **The
+    taxonomy's standing value does not include narrowing**: it is the truthful type declarations, the
+    hardened gates (C1), the polymorphic binder with new-leaf pickup on the read side, the budget contract
+    (C3.7), and rebuild governance (B0/C2.6). §2.1/§9.4 carry the strike.
 
-**Sequencing.** C1 → C2 → C3 are buildable in order (C1.3, C1.4 need their design decision first). C4 and C5
-are designer-pass items; a Fire C that ships C1–C3 and returns ratified designs for C4/C5 is a complete fire.
-**Do not close the item until C5 is answered** — it is the one that decides whether the taxonomy's original
-justification is recoverable or should be struck for good.
+**Sequencing — CLOSED 2026-08-10.** C1 → C2 → C3 shipped (§17.19–§17.21); C4/C5 are adjudicated above, and
+**C5 is answered** — the narrowing justification moves whole to the typed-relation-signatures row, so nothing
+in Fire C remains open and the item closes on the buildable record. Deliberately carried OUT of the item:
+C1.4's data half (the 69-vertex class migration, blocked; harm = the stated-wider guard arm) and the `-race`
+taxonomy-barrier row already on the board (§17.21).
 
 ## 15. Test strategy
 
@@ -2593,3 +2627,29 @@ history is that census being wrong three times.
   cannot redden main). It is flagged as a possible real fail-open rather than a flake: `[true false]` means the
   barrier armed and then disarmed, which is the exact window C2.5 (`d470c9ac`) exists to close. Filed to the
   lane, not resolved here — it is a different mechanism's correctness question, not this fire's tail.
+
+### 17.22 Fire C · C4/C5 adjudicated, and the fire closes (2026-08-10)
+
+Andrew-directed designer pass over the five items C1–C3's builds had left marked "designer-pass". The
+dispositions are written into §14 Fire C where each item stands: **C4.8 absorbed** into a new
+typed-relation-signatures row (its Starlark name-resolution problem dissolves at step 6, where the Processor
+already holds the taxonomy); **C4.9, C4.10, C4.11 thrown out** (zero consumers behind a documented
+fail-closed refusal / a gap that dissolves because every submitter derives the concrete class from the target
+key it already holds / §12.9's negative ROI, recorded there); **C5.12 answered** — the narrowing
+justification is recoverable via typed relation signatures and moves whole to that row (★★ L, Read-model /
+projection maturity), with this lens's residual conjuncts stated rather than overclaimed. **Nothing in
+Fire C remains open; the item is closeable** — its standing value is the declarations, the hardened gates,
+the polymorphic binder, the budget contract and the rebuild governance, with narrowing re-homed.
+
+**Provenance of the twelve folded items, tallied for the process record** (what Andrew asked this pass for):
+**4 ratified deferrals** re-folded (C1.4, C4.8, C4.9, C4.11 — §14 Fire B's own "filed alongside" list, each
+already dispositioned at ratification with a named consumer); **3 pre-existing platform debt** the build
+surfaced (C1.2, C1.3, C2.6's operator/boot halves); **2–3 genuine design misses** (C5.12's falsified
+headline, C4.10's unforeseen index consumer, C2.5's armed lifetime); **1–2 build defects** review caught
+(C1.1's two vacuous halves). Only the design-miss bucket is reachable by "a more thorough initial design";
+the two misses each minted a designer-skill check (a payoff claim traced conjunct-by-conjunct against the
+design's own census; an identifier-cardinality change censuses every reverse index keyed on it —
+`agents/designer/SKILL.md` §2). The deferral bucket argues the fold-back rule should discriminate by
+provenance: an item's own unmet guarantees fold back; a ratified deferral keeps its ratified disposition as a
+row; a genuinely new design question gets its designer pass at fold time — parking five of them inside a
+build fire as "designer-pass items" wedged the fire until this pass ran.

@@ -607,6 +607,38 @@ tombstones. **Capability KV is a lens projection** (projection correctness = aut
   links, not degree; the ephemeral lister 4× the multi-get on the identical set) — attach the numbers to
   the fork and the ratification becomes a table lookup.
 
+- **A PAYOFF claim is a soundness claim about value — trace the named consumer through EVERY conjunct of
+  the outcome's gate before it becomes the headline.** A design that says *"this converts consumer C from
+  state X to state Y"* has asserted that C passes every condition of Y, not just the one the design
+  removes; when C fails a second, independent condition, the claim is false, the design still ships, and
+  the item's whole justification unravels at build time. So: open the gate function that decides Y and
+  walk C through it conjunct by conjunct with file:line — exactly the discipline soundness claims already
+  get — and evaluate every exclusion bucket of the design's own census against the design's own first
+  customer. (Trialed 2026-08-10, taxonomy C5: §9.4 claimed labelling `capabilityServiceAccess` "converts
+  a permanently-unnarrowable auth-plane lens into a narrowed one" — the design's measurable win. The
+  design's own §2.1 census had counted "9 more carry a variable-length relationship (exhaustive = false)"
+  three paragraphs earlier, the headline lens carries TWO `containedIn*0..` walks, and the varlength
+  clear (`labels.go` — `MinHops != 1 || MaxHops != 1` ⇒ non-exhaustive) is a conjunct of both narrowing
+  branches (`pipeline.go:1268`, `:1419-1421`). The falsifying fact was cited in the same document as the
+  claim it falsified; B1 measured broad-before-broad-after and the headline was struck.) The tell: a
+  census that lists exclusion CLASSES while the headline names a consumer INSTANCE — nothing forces the
+  two into contact unless you run the buckets against the instance.
+
+- **When a design changes an identifier's CARDINALITY (one class → three, a shared name → per-thing
+  names), census every REVERSE INDEX keyed on it — uniqueness assumptions live in indexes, not in
+  readers.** A reader census (who reads `class == "location"`) finds the sites that break loudly. What it
+  misses is every map/index built OVER the identifier whose semantics silently assumed one-to-one:
+  splitting the value turns a function into a relation, and a well-built index degrades fail-closed
+  (drops the now-ambiguous entry) — so nothing errors, and the cost surfaces as a behaviour change at
+  every call site that relied on the index answering. Grep for maps keyed by or valued by the identifier
+  before sizing the change. (Trialed 2026-08-10, taxonomy C4.10: declaring the five location ops on three
+  concrete leaves made `buildByCommand` (`internal/processor/ddl_cache.go`) mark all five ambiguous —
+  command→class stopped being a function — so `ClassForCommand` stopped indexing them and ~15 submitters
+  needed an explicit class, discovered at a checkpoint as "the one thing B1 must decide that the design
+  did not foresee." The adjudication later found the gap dissolves — the class is derivable from the
+  target key every submitter holds — but the design should have found the index and said so, not the
+  build.)
+
 **Run the pre-build gates you write into your own designs — "ratified" ≠ "build-ready."** If a design
 self-flags a pre-build adversarial / `bmad-party-mode` pass (a deferred gate), that pass is a **Designer-lane
 obligation**: run it and **record it as run** before the design is build-ready. Do not leave it dangling for
