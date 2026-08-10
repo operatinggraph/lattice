@@ -924,7 +924,13 @@ the entry).
 
 - **A meta sweep multiplies `Rebuild`** — `supervisor.Reset` is a durable delete-recreate per lens, so any
   fan-out over the lens set is a NATS burst (has OOM-killed `lattice-nats`). Minted: dynamic-type-taxonomy
-  §17.8. Check: none in code yet — the coalesced-rebuild-scheduler board row gates taxonomy Fire B.
+  §17.8. Check: `TestTaxonomyChanged_FanOutStaysWithinTheConcurrencyBound` pins the bound; the replay drain
+  and `control.Service.rebuildRule` are still outside it.
+- **Turning on a behaviour an existing predicate gated hands it exactly the complement — and any safety
+  property that rode on that predicate is absent there.** A shrink-truncate flag reached the lenses
+  `ApplyTruncateScope` returns early for, i.e. the ones whose purge is unconfined, so it aimed a whole-bucket
+  wipe at shared `capability-kv`. Minted: dynamic-type-taxonomy B0 (cold pass, reproduced). Check: for a new
+  flag, name the population it newly affects and the invariant the old gate was silently supplying.
 - **New pipeline state without a declared lifetime** (registry / latch / armed flag) — reset, carry, and
   order it at replay, reconnect, tombstone, and retry, or the review will. Minted: dynamic-type-taxonomy
   item 4 (nineteen findings, this class load-bearing). Check: the designer's state-lifetime table +

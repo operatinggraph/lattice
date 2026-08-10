@@ -676,9 +676,24 @@ assumption the sibling design flags as having burned this lane (`lens-label-key-
 bare filter narrowing would leave every `room` row orphaned forever, and on a grant target an orphaned row is a
 live grant.
 
-So: a tombstone triggers `Rebuild` too, which re-derives the correct row set through whichever retraction the lens
-already declares (`diffRetraction`, filter retraction, or the anchor-tombstone path). **A tombstone must never
-narrow the filter in place.**
+So: a tombstone triggers `Rebuild` too, which re-derives the correct row set. **A tombstone must never narrow the
+filter in place.**
+
+**~~through whichever retraction the lens already declares (`diffRetraction`, filter retraction, or the
+anchor-tombstone path)~~ — CORRECTED at build, 2026-08-09 (B0).** That clause enumerates three transports and
+assumes every lens has one. It does not survive the census. What a rebuild actually retracts through, by shape:
+
+| Lens shape | Retracts a shrink? | By what |
+|---|---|---|
+| Target confined to the lens (a `NatsKVAdapter` with a key prefix bound by `ApplyTruncateScope`, or a Postgres table it owns) | yes | the rebuild **truncates** before it replays — B0's decision, §14 B0 item 2 |
+| Unanchored `DiffRetraction` (`staffReadGrants`) | yes, on the next delivered event | `applyDiffRetraction` lists the target's live key set and deletes what the fresh set no longer produces (`pipeline/evaluate.go:1093-1108`); it is **event-driven**, so a shrink whose new filter admits no live subject retracts nothing until one arrives |
+| A shared-bucket lens whose truncate is **unconfined** | no — **refused** | an unprefixed `NatsKVAdapter.Truncate` purges the whole bucket, so B0 gates truncation on the purge being confined rather than wiping every sibling producer's rows |
+| A `GrantTable` lens with no `DiffRetraction` (`clinic-domain`'s `demo-operator` / `console-operator`) | **no** | truncate declined (`GrantWriterAdapter` implements no `Truncater`), no diff, rows persist until an anchor tombstone |
+
+The last two rows are the honest gap. Neither is live: no shipped `packages/` lens carries a `*` label yet, so
+no lens can currently reach a taxonomy shrink at all. **A lens of either shape must not be authored with `*`
+until it declares a retraction transport** — stated at `pipelineEntry.taxRebuildTruncate` in `cmd/refractor`,
+where the next author will meet it.
 
 ### 6.5 Fail-closed posture, complete
 
@@ -1944,3 +1959,80 @@ field's documented "absent ⟺ never derived a filter" means. `bin/loupe` and `b
 predating this fire) — the `[Refractor] A node's whole adjacency list is one KV value` row, whose design sits in
 📐 awaiting-Andrew. Every instance's `instanceOf` link targets one type meta, which is precisely the
 high-in-degree shape that row describes.
+
+### 17.15 Fire B · B0 — the bounded rebuild sweep, and the shrink's retraction (2026-08-09, `dd7e88ff`)
+
+**Scope sentence (§14 B0):** coalesce and serialize the taxonomy rebuild fan-out; own rebuild ordering so a
+shrink retracts; pin shrink → target *contents*; do not weaken the storm guard.
+
+Both halves shipped. The fan-out is bounded at two concurrent `Rebuild` calls behind a 150 ms per-sweep settle
+window, on a `sync.Cond` queue that never blocks the CDC dispatch goroutine; the per-entry single-flight latch
+is extended, not duplicated, and the `unchanged && !pending` storm guard is untouched. A shrink truncates, and
+`Rebuild` now establishes that the consumer is still managed **before** it purges — a target that cannot be
+reset must not be cleared.
+
+**Three decisions this increment made, each a deviation worth stating:**
+
+1. **Truncation is gated on the purge being confined.** The pre-existing forced truncate was gated on
+   `IsActorAggregate`, which is the same predicate `ApplyTruncateScope` binds a key prefix under — so
+   "already truncates" was a subset of "scoped", and a bare shrink flag would have turned truncation on for
+   exactly the unscoped complement. An unprefixed `NatsKVAdapter.Truncate` purges the whole bucket, so on
+   `capabilityRoleIndex` (sharing `capability-kv` with three other producers and core's `cap.<actor>` rows) or
+   one-bill's four history lenses, that flag would have wiped every sibling producer. The gate refuses instead,
+   and §6.4's corrected table records which shapes retract and which do not.
+2. **A narrowing MATCH edit takes the same gate** — the identical orphaning through a different trigger, in the
+   same latch and scheduler. This **widens** §14 B0's ratified scope, which is taxonomy-shrink only; it is
+   recorded as a widening rather than folded in silently. It is decided on the label dimension the filter
+   admits, not a subject-string diff, which read two genuine *widenings* (relation-narrowed → label-narrowed,
+   and the subject-budget degrade) as shrinks.
+3. **`taxExpansionResolved` is a second field, not a reuse of `taxExpansion`** — the latter records the
+   *answer*, `(nil, StatusUnknown)` degrade included, so it cannot say what set is being matched against. A
+   degrade never truncates.
+
+**Two residuals are named where they are, not implied:** the replay drains *outside* the worker slot (`Reset`
+returns after `requestReopen`), so the bound covers concurrent consumer delete-recreates and not concurrent
+replays; and `control.Service.rebuildRule` (`internal/refractor/control/service.go:930-943`) still spawns one
+uncoordinated goroutine per request, so an operator corpus-rebuild reproduces the original burst. Routing it
+needs the control service to reach the reloader, which it has no handle on.
+
+**Verified live, with its limit stated.** `bin/refractor` and `bin/loupe` were rebuilt from `main` and cycled
+(both postdate the merge commit); `make verify-kernel` passes and the whole-repo `go test ./...` is green.
+**The scheduler is inert on the running stack** — no shipped lens carries a `*` label until B1 — so its
+behaviour is proven by test, including two mutation-tested pins (removing the gate lets a sibling producer's
+row be wiped; forcing `truncate=false` leaves the dropped subtype's row alive), not by live traffic.
+
+### 17.16 Checkpoint — Fire B, after B0
+
+**Landed on `main` (`dd7e88ff`); no worktree is held.** B1 starts fresh. B0's gate is what made B1 safe to
+land, so the order §14 fixed was load-bearing, not ceremonial.
+
+**Next — B1, and its central fork is already resolved against the code.** The ratified §9.1 shape stands
+(abstract `location`; concrete `unit`/`building`/`property` as its leaves; class becomes the key type), but
+**§9.2's stated guard landing is wrong and must not be built as written.** §9.2 says the "any location" sites
+land as `cls in LOCATION_TYPES`. Measured on the running stack 2026-08-09: **0 `vtx.location.*` instances**
+(so the abstract install is clear) but **69 live location vertices — 60 `vtx.unit.*`, 9 `vtx.building.*` —
+all carrying `class: "location"`**, which nothing rewrites. A class-list check would therefore reject every
+pre-existing location the moment location-domain upgrades. The guards go to a **key-type-segment** check
+instead, which §9.2's own argument already says "proves it more directly", and which `location_parts`
+(`packages/location-domain/ddls.go:261`) and each package's `parts_of` make mechanical. This is the migration
+window the DD pass flagged as unaddressed; it is now addressed.
+
+**The census §14 B1 told this fire to re-run, re-run:** **19** guard sites across **7** packages, not 8
+across 5 — census by the *check*, since `maintenance-domain:485` and `wellness-domain:1612` reach it through a
+generic `require_live_typed(…, "location")`. One scout claim was checked and rejected: it reported all 19 as
+the sole type guard, but loftspace's `SetListing` / `SetUnitAddress` / `SetListingStatus` each call
+`parts_of(unit, "unit", "unit")` first, so §9.2's redundancy claim holds for those.
+
+**One thing B1 must decide that the design did not foresee.** Declaring the five location ops on three
+concrete leaves makes `buildByCommand` mark all five **ambiguous** (`internal/processor/ddl_cache.go:526-583`),
+so `ClassForCommand` stops indexing them and every submitter must name a concrete class explicitly — ~15 sites
+across `scripts/`, `internal/leaseconvergence`, and `packages/clinic-domain/integration_test.go`. It is inert
+today only because every one of them already passes an explicit class (`"location"`, which becomes invalid).
+The deeper point is that the platform has **no place to hang category-level commands on an abstract type**;
+B1 lands the explicit-class form and files that gap with these submitters as its named consumer.
+
+**Also verified for B1:** no production canonicalName collision on `unit`/`building`/`property`; permissions
+are operationType-only (`PermissionSpec` carries no class), so the grant matrix is unaffected; and no read-side
+consumer reads `class == "location"` anywhere — the blast radius is write-path guards, submitters, and the
+`vtx.location.*` test fixtures in `packages/wellness-domain/workplace_confinement_test.go:460,572,575` that
+would otherwise refuse the abstract install in-process.
