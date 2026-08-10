@@ -159,6 +159,7 @@ effort without an Andrew greenlight. A row that acquires a real driver comes bac
 
 One line per shipped item (`date · SHA · [tag] title`). Oldest roll to `archive/` past ~25.
 
+- 2026-08-10 · `4b846e82` · [Weaver] a gap's external class is read from its pattern's step kinds, not its action name — the timed-out vendor call retries again, and its legs are gated (§10.3 ratified)
 - 2026-08-10 · `a951b258` · [Substrate] `CredsFile` is pre-flighted like `NKeySeedFile` already was, closing the retry-loop asymmetry review found
 - 2026-08-10 · `d592a2c8` · [Substrate] `Connect`'s initial NATS handshake gets its own timeout + bounded, ctx-aware retry budget that skips permanent auth failures
 - 2026-08-09 · `59933666` · [Pkgmgr] secure-column guard reserves all four platform RLS columns, matching Refractor's activation-time check
