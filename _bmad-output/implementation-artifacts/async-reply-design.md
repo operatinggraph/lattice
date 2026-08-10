@@ -426,9 +426,9 @@ on CI runs `31349409902`/`31346562021`; the other six convergence gates ~17s tot
 constant/wire-shape pin, four false or orphaned soundness comments, the `error`-severity downgrade, the
 uncapped-external pacing floor, `docs/components/weaver.md`'s now-false collapse-only claim, and the
 sweep-level coverage the changed behavior lacked (fresh-claimId, preserved-claimId, unindexed-fallback,
-alert-self-heal). Filed, steward-owned: `gapSuppressed`'s cap-fallback shares the same action-based
-narrowing; the harness's `io.Discard` logger; the `inflight_<g>`-on-a-userTask-gap `error` that
-lease-signing's deliberate suppression columns raise at head.
+alert-self-heal). The three the fire did not close are the **next fire's scope**, immediately below —
+they are carried here rather than as board rows because all three are the same defect class as this
+item, in the same two files, and belong to whoever holds this worktree next.
 
 **Known residual, NOT introduced here, deliberately not filed as a separate row** — the pre-`.dispatch`
 window: `inflight_<g>` is computed from `.dispatch` presence, which the *bridge* writes after the adapter
@@ -443,3 +443,41 @@ rather than on `.dispatch` — a change to the §10.3 companion-column semantics
 `missing_authoring` (capability-author) are both `triggerLoom` over externalTask-only patterns that declare
 no `inflight_<g>` today. Adding that column turns each external — and neither declares `maxretries_<g>`,
 which is exactly the case the staged contract rule now forbids and the pacing floor now catches.
+
+### The next fire — finish the classifier's blast radius (scope, 2026-08-09)
+
+Three residuals this fire surfaced and did not close. They were briefly filed as board rows and
+**folded here instead** (Andrew, 2026-08-09): all three are the same action-name-vs-dispatch-shape class
+as the item above, live in the two files this item already changes, and would only ping-pong as separate
+rows. **Sequenced after the §10.3 ratification + merge** — items 1 and 3 edit the very function the held
+worktree rewrites, so building them first would guarantee a conflict.
+
+**1. `gapSuppressed`'s cap-fallback carries the same narrowing (★ XS–S).** `evaluator.go`'s
+`gapSuppressed` still decides its default-budget fallback by `action != actionDirectOp`, the exact test
+`staleMark` was just cured of. Inert today only because both lease gaps declare `maxretries_<g>`.
+*Consumer:* the first external gap that declares none — which the staged §10.3 rule now forbids a package
+from authoring, so this becomes the engine-side backstop for that rule rather than a live-bug fix.
+*Do it with:* the `hasUsableRetryCap` helper this fire already added, so the two sites read the cap the
+same way. Green: a table case for a `triggerLoom` externalTask-only gap with no cap, asserting the
+engine default applies.
+
+**2. A userTask gap's legitimate `inflight_<g>` raises a standing `error` (★★ S).** lease-signing
+projects `inflight_onboarding` and `inflight_signature` **deliberately** (`lenses.go:495-503`) so
+`gapSuppressed` can pace two human gaps. `staleMark` calls that a lens-authoring bug and alerts `error`
+on every reclaim, so Weaver reports **unhealthy** against a correctly-authored package — live at head,
+and this fire's `!known` downgrade does not touch it. The column is valid *for suppression*; only
+trusting it for stale-reclaim must be refused. *The fix is the alert, not the lens:* refuse the
+reclassification silently (or at debug) when a declared `inflight_<g>` sits on a genuinely non-external
+gap, and keep `error` for a case that is actually unactionable. **This inverts
+`TestSweep_InflightActionMismatchIgnoredForUserTaskGap`'s premise** — that test currently *requires* the
+issue to be raised, so it is re-authored, not deleted, and the reason goes in its doc comment. Green:
+Weaver's aggregate health stays `healthy` while a lease application sits in `missing_onboarding`.
+
+**3. The harness discards every engine log (★ XS).** `internal/leaseconvergence/harness_test.go:192`
+hands Processor/Loom/Weaver/Refractor an `io.Discard` logger. That is why an `error`-severity
+`InflightActionMismatch` fired on every run of this suite for weeks and no run could show it — the
+root-cause pass for this very item only found it by repointing that logger by hand. *Do it as:* a level
+the harness can raise (env-gated or a `harnessOpt`), defaulting quiet so ordinary runs stay readable.
+*Consumer:* the next engine defect this suite would otherwise hide.
+
+Items 2 and 3 compound: 3 is why 2 went unnoticed. Build 3 first and 2 becomes observable.
