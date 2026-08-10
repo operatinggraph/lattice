@@ -27,6 +27,7 @@ import (
 	"github.com/nats-io/nats.go/jetstream"
 	"github.com/stretchr/testify/require"
 
+	"github.com/operatinggraph/lattice/internal/refractor/health"
 	"github.com/operatinggraph/lattice/internal/refractor/pipeline"
 	"github.com/operatinggraph/lattice/internal/refractor/subjects"
 	"github.com/operatinggraph/lattice/internal/substrate"
@@ -112,7 +113,7 @@ func TestNarrowedFilter_DeliversOwnTypeNeverForeignType(t *testing.T) {
 	require.NoError(t, err)
 	p.UseFullEngine(eng, cr)
 
-	filterSubjects, filterSubject := p.ConsumerFilter()
+	filterSubjects, filterSubject, _ := p.ConsumerFilter()
 	require.Empty(t, filterSubject, "a single exhaustive label must narrow, not fall back to broad")
 	require.Equal(t, []string{"$KV." + coreKVBucket + ".vtx.book.>"}, filterSubjects,
 		"this lens traverses no relationship at all, so no link form is subscribed")
@@ -184,7 +185,7 @@ func TestNarrowedFilter_RebuildRecomputesLabelSet(t *testing.T) {
 	require.NoError(t, err)
 	p.UseFullEngine(engA, crA)
 
-	filterSubjects, filterSubject := p.ConsumerFilter()
+	filterSubjects, filterSubject, _ := p.ConsumerFilter()
 	require.Empty(t, filterSubject)
 	spec := specFor(ruleID)
 	spec.FilterSubject = filterSubject
@@ -331,6 +332,17 @@ func TestNarrowedFilter_RegistrationFailureFallsBackToBroadWithHealthSignal(t *t
 	require.Equal(t, "active", entry.Status, "the fallback recovery must leave the lens active, not paused")
 	require.NotNil(t, entry.LastError)
 	require.Contains(t, *entry.LastError, "narrowed")
+
+	// The footprint half of the same event, against a REAL nats-server
+	// rejection rather than an injected error, and after the fallback's
+	// SetActive has run: the entry must describe the broad filter the consumer
+	// is genuinely on (asserted from JetStream above), not the narrowed one the
+	// lens derived — and it must still describe it once the status transition
+	// has rewritten the entry.
+	require.Equal(t, health.FilterModeBroad, entry.FilterMode,
+		"a refused narrowed registration leaves the lens on the broad filter — the entry must say so, and a status transition must not erase it")
+	require.Equal(t, health.FilterBroadReasonRegistrationFailed, entry.FilterBroadReason)
+	require.Zero(t, entry.FilterLabelCount)
 }
 
 // putLink writes a Contract #1 six-segment link key
@@ -381,7 +393,7 @@ func TestNarrowedFilter_OffRelationLinkIsNeverDelivered(t *testing.T) {
 	require.NoError(t, err)
 	p.UseFullEngine(eng, cr)
 
-	filterSubjects, filterSubject := p.ConsumerFilter()
+	filterSubjects, filterSubject, _ := p.ConsumerFilter()
 	require.Empty(t, filterSubject)
 	require.ElementsMatch(t, []string{
 		"$KV." + coreKVBucket + ".vtx.author.>",

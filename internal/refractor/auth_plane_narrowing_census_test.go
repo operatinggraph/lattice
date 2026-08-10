@@ -114,7 +114,7 @@ func TestAuthPlaneLenses_NarrowingVerdict(t *testing.T) {
 func TestAuthPlaneLenses_ConsumerFilterVerdict(t *testing.T) {
 	p := narrowingPipeline(t, "CensusRbacFiLter9999", rbacCapabilityRolesSpec(t), "identity")
 
-	filterSubjects, filterSubject := p.ConsumerFilter()
+	filterSubjects, filterSubject, _ := p.ConsumerFilter()
 	require.Empty(t, filterSubject,
 		"the shipped capabilityRoles must narrow, not fall back to the broad filter")
 

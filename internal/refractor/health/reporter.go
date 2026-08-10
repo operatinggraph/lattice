@@ -37,6 +37,24 @@ const (
 	StatusRebuilding = healthwire.StatusRebuilding
 )
 
+// FilterMode values used in health KV entries.
+const (
+	FilterModeNarrowedRelation = healthwire.FilterModeNarrowedRelation
+	FilterModeNarrowedLabel    = healthwire.FilterModeNarrowedLabel
+	FilterModeBroad            = healthwire.FilterModeBroad
+)
+
+// FilterBroadReason values used in health KV entries.
+const (
+	FilterBroadReasonNone                 = healthwire.FilterBroadReasonNone
+	FilterBroadReasonNotEligible          = healthwire.FilterBroadReasonNotEligible
+	FilterBroadReasonNonExhaustive        = healthwire.FilterBroadReasonNonExhaustive
+	FilterBroadReasonLabelCap             = healthwire.FilterBroadReasonLabelCap
+	FilterBroadReasonTaxonomyUnarmed      = healthwire.FilterBroadReasonTaxonomyUnarmed
+	FilterBroadReasonTaxonomyUnresolvable = healthwire.FilterBroadReasonTaxonomyUnresolvable
+	FilterBroadReasonRegistrationFailed   = healthwire.FilterBroadReasonRegistrationFailed
+)
+
 // Entry is the full health KV value schema. The KV key is the ruleID; the KV
 // bucket is configured via config.HealthKVBucket.
 type Entry = healthwire.Entry
@@ -144,6 +162,19 @@ func (r *Reporter) SetActive(ctx context.Context) error {
 		AckPending:         existing.AckPending,
 		AckFloorProgressAt: existing.AckFloorProgressAt,
 		LastProjectedAt:    existing.LastProjectedAt,
+		// The consumer-filter footprint, by the same rule: a status transition
+		// observes nothing about which subjects this lens's consumer filters
+		// on, so writing zeroes here would assert something no derivation
+		// established. Dropping them is worse than a reset, because the ABSENT
+		// state means "never derived a filter" — a lens that pauses would read
+		// as one that has not yet decided. Nothing restores them within a
+		// cycle either: only a re-derivation writes them, and a rebuild calls
+		// SetRebuilding on the way in and SetActive on the way out, so an
+		// omission here erases the footprint on the very operation that
+		// re-derives it.
+		FilterMode:        existing.FilterMode,
+		FilterLabelCount:  existing.FilterLabelCount,
+		FilterBroadReason: existing.FilterBroadReason,
 	}
 	if err := r.put(ctx, entry); err != nil {
 		return err
@@ -213,6 +244,19 @@ func (r *Reporter) SetPaused(ctx context.Context, reason, lastError string) erro
 		AckPending:         existing.AckPending,
 		AckFloorProgressAt: existing.AckFloorProgressAt,
 		LastProjectedAt:    existing.LastProjectedAt,
+		// The consumer-filter footprint, by the same rule: a status transition
+		// observes nothing about which subjects this lens's consumer filters
+		// on, so writing zeroes here would assert something no derivation
+		// established. Dropping them is worse than a reset, because the ABSENT
+		// state means "never derived a filter" — a lens that pauses would read
+		// as one that has not yet decided. Nothing restores them within a
+		// cycle either: only a re-derivation writes them, and a rebuild calls
+		// SetRebuilding on the way in and SetActive on the way out, so an
+		// omission here erases the footprint on the very operation that
+		// re-derives it.
+		FilterMode:        existing.FilterMode,
+		FilterLabelCount:  existing.FilterLabelCount,
+		FilterBroadReason: existing.FilterBroadReason,
 	}
 	if err := r.put(ctx, entry); err != nil {
 		return err
@@ -271,6 +315,19 @@ func (r *Reporter) SetRebuilding(ctx context.Context) error {
 		AckPending:         existing.AckPending,
 		AckFloorProgressAt: existing.AckFloorProgressAt,
 		LastProjectedAt:    existing.LastProjectedAt,
+		// The consumer-filter footprint, by the same rule: a status transition
+		// observes nothing about which subjects this lens's consumer filters
+		// on, so writing zeroes here would assert something no derivation
+		// established. Dropping them is worse than a reset, because the ABSENT
+		// state means "never derived a filter" — a lens that pauses would read
+		// as one that has not yet decided. Nothing restores them within a
+		// cycle either: only a re-derivation writes them, and a rebuild calls
+		// SetRebuilding on the way in and SetActive on the way out, so an
+		// omission here erases the footprint on the very operation that
+		// re-derives it.
+		FilterMode:        existing.FilterMode,
+		FilterLabelCount:  existing.FilterLabelCount,
+		FilterBroadReason: existing.FilterBroadReason,
 	}
 	if err := r.put(ctx, entry); err != nil {
 		return err
@@ -307,6 +364,45 @@ func (r *Reporter) RecordError(ctx context.Context, errMsg string) error {
 	slog.Info("health: error recorded",
 		"ruleId", r.ruleID,
 		"errorCount", existing.ErrorCount, "lastError", errMsg)
+	return nil
+}
+
+// SetFilterState records which Core KV consumer filter this lens's derivation
+// chose — the footprint triple FilterMode / FilterLabelCount /
+// FilterBroadReason. It is an OBSERVATION of a decision the pipeline has
+// already made: nothing here influences which subjects the lens filters on.
+//
+// Deliberately NOT a RecordError. A lens falling back to the broad filter is
+// projecting every row it should, only reading more of the stream than it
+// needs — a footprint regression, not a fault — so routing it through
+// errorCount/lastError would put a correct lens in the same bucket as a DLQ
+// write. The one broad reason that IS a fault (registration-failed) keeps its
+// own separate RecordError call at the site that decides it.
+//
+// Written wholesale, never merged: the three fields are one decision, and a
+// later derivation replaces all three. Callers pass labelCount 0 and a
+// non-empty reason for broad, and a positive labelCount with reason "" for
+// either narrowed mode. Thread-safe; serialized via writeMu against the other
+// read-modify-write callers.
+func (r *Reporter) SetFilterState(ctx context.Context, mode string, labelCount int, broadReason string) error {
+	r.writeMu.Lock()
+	defer r.writeMu.Unlock()
+
+	existing, err := r.readExisting(ctx)
+	if err != nil {
+		return fmt.Errorf("health: SetFilterState read: %w", err)
+	}
+	existing.FilterMode = mode
+	existing.FilterLabelCount = labelCount
+	existing.FilterBroadReason = broadReason
+	existing.LastUpdated = time.Now().UTC().Format(time.RFC3339)
+	existing.RuleID = r.ruleID
+	if writeErr := r.put(ctx, existing); writeErr != nil {
+		return writeErr
+	}
+	slog.Info("health: consumer filter state recorded",
+		"ruleId", r.ruleID,
+		"filterMode", mode, "filterLabelCount", labelCount, "filterBroadReason", broadReason)
 	return nil
 }
 

@@ -516,3 +516,50 @@ func TestReporter_StatusTransitions_PreserveTheCumulativeCounters(t *testing.T) 
 	require.NoError(t, r.SetPaused(ctx, "manual", "operator paused"))
 	assertCounters(t, "SetPaused")
 }
+
+// The consumer-filter footprint survives a status transition for a STRONGER
+// reason than the counters above: nothing restores it within a cycle. The
+// LagPoller re-observes the projection fields every tick, but only a filter
+// re-derivation writes these three — and a rebuild calls SetRebuilding on the
+// way in and SetActive on the way out, so dropping them would erase the
+// footprint on the very operation that re-derives it.
+//
+// Losing them is worse than a reset, too: an ABSENT filterMode means "this lens
+// has never derived a consumer filter", so a paused lens would read as one that
+// has not yet decided rather than one whose filter is known and still in place.
+func TestReporter_StatusTransitions_PreserveTheConsumerFilterFootprint(t *testing.T) {
+	ctx := context.Background()
+	kv := startHealthKV(t)
+	r := health.New(kv, "footprint-rule")
+
+	require.NoError(t, r.SetFilterState(ctx, health.FilterModeNarrowedRelation, 4, ""))
+
+	assertFootprint := func(t *testing.T, stage string) {
+		t.Helper()
+		entry, err := r.GetStatus(ctx)
+		require.NoError(t, err)
+		assert.Equal(t, health.FilterModeNarrowedRelation, entry.FilterMode, "filterMode must survive %s", stage)
+		assert.Equal(t, 4, entry.FilterLabelCount, "filterLabelCount must survive %s", stage)
+		assert.Empty(t, entry.FilterBroadReason, "filterBroadReason must survive %s", stage)
+	}
+
+	// The exact pair a rebuild writes, in order.
+	require.NoError(t, r.SetRebuilding(ctx))
+	assertFootprint(t, "SetRebuilding")
+	require.NoError(t, r.SetActive(ctx))
+	assertFootprint(t, "SetActive")
+
+	require.NoError(t, r.SetPaused(ctx, "manual", "operator paused"))
+	assertFootprint(t, "SetPaused")
+
+	// A broad reason has to survive the same three, or a lens paused while
+	// waiting on its taxonomy would present as one that never derived a filter.
+	require.NoError(t, r.SetFilterState(ctx, health.FilterModeBroad, 0, health.FilterBroadReasonTaxonomyUnresolvable))
+	require.NoError(t, r.SetRebuilding(ctx))
+	require.NoError(t, r.SetActive(ctx))
+	require.NoError(t, r.SetPaused(ctx, "manual", "operator paused"))
+	entry, err := r.GetStatus(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, health.FilterModeBroad, entry.FilterMode)
+	assert.Equal(t, health.FilterBroadReasonTaxonomyUnresolvable, entry.FilterBroadReason)
+}

@@ -28,6 +28,62 @@ const (
 	StatusRebuilding = "rebuilding"
 )
 
+// FilterMode values used in health KV entries — which Core KV consumer filter
+// a lens's own derivation chose. The vocabulary is closed and every entry that
+// has derived a filter carries exactly one of these.
+const (
+	FilterModeNarrowedRelation = "narrowed-relation"
+	FilterModeNarrowedLabel    = "narrowed-label"
+	FilterModeBroad            = "broad"
+)
+
+// FilterBroadReason values used in health KV entries — why a lens took the
+// broad filter. The vocabulary is closed and TOTAL over the states that reach
+// the broad filter, so a broad entry never carries an empty reason and no
+// reader needs a default branch:
+//
+//   - not-eligible — the lens can never narrow as it stands: it is not on the
+//     full engine at all, or (actor-aware) one of the §4.2 conjuncts its
+//     INSTALLATION supplies is missing (pattern-closure, a sweep plan, the
+//     anchor type absent from the label set, a declared secure holder type
+//     absent from it). A property of the lens's shape, not of the data.
+//   - non-exhaustive — the compiled rule CAN bind a type no label names (an
+//     unlabeled node, a variable-length hop, a name re-seeded after its
+//     labelling clause went out of scope), or a `*` label resolved to zero
+//     concrete types. The cypher is what has to change.
+//   - label-cap — the derivation was exhaustive but resolved to more labels
+//     than the narrowed filter carries. A footprint REGRESSION rather than an
+//     authoring mistake: another package's install can push a one-label lens
+//     over the cap.
+//   - taxonomy-unarmed — every referenced label resolved, but the resolver's
+//     answer is not guaranteed CURRENT: a snapshot is loaded and the
+//     invalidation consumer is not live, so the lens is deliberately
+//     correct-but-slower until it arms. Transient by construction, and the
+//     ONLY reason in this vocabulary that clears without anyone editing
+//     anything — which is exactly why the state below must not share it.
+//   - taxonomy-unresolvable — the taxonomy could not answer AT ALL: a
+//     subtypeOf cycle, an over-depth chain, an ambiguous canonicalName, a
+//     vanished abstract type, or no snapshot ever loaded. Waiting does not fix
+//     this one; a package does. An operator handed taxonomy-unarmed here would
+//     wait forever for an arming that changes nothing.
+//   - registration-failed — the lens DID derive a narrowed filter and
+//     JetStream refused to register it, so it fell back to the broad one. The
+//     only reason decided after the derivation, and the only one that also
+//     raises the entry's errorCount/lastError fault signal.
+//
+// When more than one holds, the reported reason is the one that survives
+// fixing the others (pipeline's narrowingBlockRank): non-exhaustive outranks
+// taxonomy-unresolvable outranks taxonomy-unarmed.
+const (
+	FilterBroadReasonNone                 = ""
+	FilterBroadReasonNotEligible          = "not-eligible"
+	FilterBroadReasonNonExhaustive        = "non-exhaustive"
+	FilterBroadReasonLabelCap             = "label-cap"
+	FilterBroadReasonTaxonomyUnarmed      = "taxonomy-unarmed"
+	FilterBroadReasonTaxonomyUnresolvable = "taxonomy-unresolvable"
+	FilterBroadReasonRegistrationFailed   = "registration-failed"
+)
+
 // Entry is the full health KV value schema. All field names are camelCase per
 // architecture convention. The KV key is the ruleID; the KV bucket is
 // configured via config.HealthKVBucket.
@@ -115,4 +171,34 @@ type Entry struct {
 	// plaintext belongs, indistinguishable from an erased record. This counter
 	// is the only thing that tells those two apart.
 	SecureRedactions uint64 `json:"secureRedactions,omitempty"`
+	// FilterMode is which Core KV consumer filter this lens's own derivation
+	// chose — one of the FilterMode constants above. It reports a decision the
+	// lens already makes; it never changes one, and the set of subjects a lens
+	// filters on is identical whether or not this field is written.
+	//
+	// ABSENT means the lens has NEVER DERIVED a consumer filter — an entry
+	// written by a Refractor that predates this field, or a lens that has not
+	// reached its filter derivation yet. It does NOT mean "broad": a lens on
+	// the broad filter says so, with a reason.
+	//
+	// It describes the SERVER-side delivery footprint only. A narrowed mode
+	// does not mean the lens matches fewer rows, and a broad one is never
+	// incorrect — the narrowed filter is strictly an optimization over it.
+	FilterMode string `json:"filterMode,omitempty"`
+	// FilterLabelCount is how many vertex-type labels the narrowed filter
+	// actually carries, and 0 whenever FilterMode is "broad". It is the number
+	// of labels the filter was BUILT from, not the number the cypher mentions:
+	// a `*` label contributes its resolved concrete types instead of itself, so
+	// this can move without the cypher changing. Read it beside
+	// filterBroadReason "label-cap", whose threshold it is measured against.
+	FilterLabelCount int `json:"filterLabelCount,omitempty"`
+	// FilterBroadReason is why this lens took the broad filter — one of the
+	// FilterBroadReason constants above — and "" (absent) whenever FilterMode
+	// is narrowed. Absent WITH an absent filterMode carries no claim at all;
+	// absent with a narrowed filterMode means there is nothing to explain.
+	//
+	// It names the cause the derivation actually acted on, not every condition
+	// that happened to hold: a lens can be both non-exhaustive and over the
+	// label cap, and the reason is the one that decided the outcome.
+	FilterBroadReason string `json:"filterBroadReason,omitempty"`
 }

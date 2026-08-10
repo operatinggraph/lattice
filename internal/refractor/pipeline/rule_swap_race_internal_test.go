@@ -88,7 +88,7 @@ func TestRuleSwap_ConcurrentHotReload_NoRace(t *testing.T) {
 	wg.Wait()
 
 	// The writer's last swap wins and is fully published.
-	subjects, broad := p.ConsumerFilter()
+	subjects, broad, _ := p.ConsumerFilter()
 	require.Empty(t, broad, "a two-label narrowed lens must not fall back to the broad filter")
 	require.NotEmpty(t, subjects)
 }
@@ -113,6 +113,11 @@ func TestRuleSwap_ObservedRuleIsNeverTorn(t *testing.T) {
 
 	// What each spec's snapshot must look like, whole. A snapshot matching
 	// neither entry is torn.
+	// Both specs are exhaustive, so neither publishes a narrowing-blocked
+	// reason. Carrying it in the shape anyway is what makes the net cover the
+	// field rather than the two values it happens to take here: a reason left
+	// over from another rule is exactly the half-published state this test
+	// exists to catch, and it would otherwise be invisible.
 	want := []ruleShape{
 		{labels: []string{"owner", "unit"}, relations: []string{"managedBy"}},
 		{labels: []string{"booking", "guest"}, relations: []string{"bookedBy"}},
@@ -148,6 +153,7 @@ func TestRuleSwap_ObservedRuleIsNeverTorn(t *testing.T) {
 			got := ruleShape{
 				labels:    sortedRuleKeys(rs.reprojectLabels),
 				relations: sortedRuleKeys(rs.reprojectRelations),
+				blocked:   rs.narrowingBlocked,
 			}
 			if !got.matchesAny(want) {
 				torn = append(torn, got)
@@ -159,16 +165,18 @@ func TestRuleSwap_ObservedRuleIsNeverTorn(t *testing.T) {
 	require.Empty(t, torn, "every snapshot must be one whole compiled rule, never a mix of two")
 }
 
-// ruleShape is the observable narrowing a snapshot carries — the pair that must
-// always come from one compiled rule.
+// ruleShape is the observable narrowing a snapshot carries — the label set, the
+// relation set, and the reason the labels are not exhaustive, all of which must
+// come from one compiled rule.
 type ruleShape struct {
 	labels    []string
 	relations []string
+	blocked   string
 }
 
 func (s ruleShape) matchesAny(want []ruleShape) bool {
 	for _, w := range want {
-		if slices.Equal(s.labels, w.labels) && slices.Equal(s.relations, w.relations) {
+		if slices.Equal(s.labels, w.labels) && slices.Equal(s.relations, w.relations) && s.blocked == w.blocked {
 			return true
 		}
 	}

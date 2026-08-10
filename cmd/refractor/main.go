@@ -1268,7 +1268,15 @@ func main() {
 		// already met: narrowing is granted with none of §4.2's conjuncts
 		// evaluated, relation-narrowed as well. Early is the MOST aggressive
 		// filter, and no revert widens a registered one back.
-		filterSubjects, filterSubject := p.ConsumerFilter()
+		// filterDecision is the derivation's account of the choice these two
+		// values encode (dynamic-type-taxonomy-design.md §10.3's footprint
+		// triple). It is carried down to the registry insert rather than
+		// reported here: a health write is what CREATES this lens's entry on a
+		// first-ever activation, and the return paths between here and there
+		// would leave one behind describing a lens that never ran. Purely
+		// observational either way — the spec below is built from the two
+		// filter values alone, exactly as before.
+		filterSubjects, filterSubject, filterDecision := p.ConsumerFilter()
 		p.RunOn(conn, substrate.ConsumerSpec{
 			Name:           subjects.LensDurable(r.ID),
 			Stream:         subjects.CoreKVStream(coreKVBucket),
@@ -1325,6 +1333,16 @@ func main() {
 		if len(expansionLabels) > 0 {
 			rl.clearRefusedForTaxonomy(r.ID)
 		}
+
+		// The consumer footprint ConsumerFilter derived above, published now
+		// that the lens is live — the first write to this lens's health entry on
+		// a first-ever activation, which is why it waits for the registry rather
+		// than sitting beside the derivation. It must also stay ABOVE Run: a
+		// narrowed registration Run refuses falls back to the broad filter and
+		// overwrites this triple with registration-failed, and a write landing
+		// after that would put the refused derivation back. Never fatal — a lens
+		// that cannot describe its footprint is still a lens that must run.
+		p.RecordFilterDecision(ctx, filterDecision)
 
 		wg.Add(1)
 		go func() {

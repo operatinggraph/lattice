@@ -216,7 +216,7 @@ func TestRederiveEntry_GrowThenShrink_GoesThroughRebuildBothWays(t *testing.T) {
 	// At activation: "location" resolves to a KNOWN but EMPTY set (no
 	// concrete descendants yet) — §4.2's zero-length-set rule forces the
 	// broad filter, never a stale narrow one.
-	filterSubjects, filterSubject := p.ConsumerFilter()
+	filterSubjects, filterSubject, _ := p.ConsumerFilter()
 	assert.Nil(t, filterSubjects)
 	assert.Equal(t, subjects.CoreKVFilter("CORE"), filterSubject)
 
@@ -243,7 +243,7 @@ func TestRederiveEntry_GrowThenShrink_GoesThroughRebuildBothWays(t *testing.T) {
 	resolver.SetArmed(true)
 	rl.rederiveEntry(entry)
 
-	filterSubjects, filterSubject = p.ConsumerFilter()
+	filterSubjects, filterSubject, _ = p.ConsumerFilter()
 	require.NotNil(t, filterSubjects, "the client gate must publish the widened rule state — the filter narrows, never stays broad")
 	assert.Contains(t, filterSubjects, subjects.CoreKVVertexFilter("CORE", "unit"))
 	assert.Empty(t, filterSubject)
@@ -262,7 +262,7 @@ func TestRederiveEntry_GrowThenShrink_GoesThroughRebuildBothWays(t *testing.T) {
 	resolver.SetArmed(true)
 	rl.rederiveEntry(entry)
 
-	filterSubjects, filterSubject = p.ConsumerFilter()
+	filterSubjects, filterSubject, _ = p.ConsumerFilter()
 	assert.Nil(t, filterSubjects, "a shrink goes through the SAME Rebuild path as a grow — never an in-place narrowing that leaves the OLD (now over-wide) filter's complement unexamined")
 	assert.Equal(t, subjects.CoreKVFilter("CORE"), filterSubject)
 
@@ -396,7 +396,7 @@ func TestRederiveEntry_LiveStatusUnknownDegradesToBroadRatherThanRefusing(t *tes
 	})
 
 	// Precondition: narrowed and live.
-	filterSubjects, _ := p.ConsumerFilter()
+	filterSubjects, _, _ := p.ConsumerFilter()
 	require.NotNil(t, filterSubjects, "precondition: the lens starts narrowed")
 
 	entry := &pipelineEntry{
@@ -420,7 +420,7 @@ func TestRederiveEntry_LiveStatusUnknownDegradesToBroadRatherThanRefusing(t *tes
 
 	rl.rederiveEntry(entry)
 
-	filterSubjects, filterSubject := p.ConsumerFilter()
+	filterSubjects, filterSubject, _ := p.ConsumerFilter()
 	assert.Nil(t, filterSubjects, "StatusUnknown on a LIVE re-derivation must degrade to the broad filter, not keep the stale narrow one")
 	assert.Equal(t, subjects.CoreKVFilter("CORE"), filterSubject)
 

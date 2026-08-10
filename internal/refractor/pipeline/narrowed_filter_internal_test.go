@@ -45,20 +45,20 @@ func TestNarrowedFilterEligible_Table(t *testing.T) {
 		wantOK     bool
 	}{
 		{
-			name: "plain full-engine exhaustive labels is eligible",
+			name:       "plain full-engine exhaustive labels is eligible",
 			engineKind: ruleengine.EngineFull, labels: bookOnly, wantOK: true,
 		},
 		{
-			name: "non-full engine is never eligible even with labels",
+			name:   "non-full engine is never eligible even with labels",
 			labels: bookOnly, wantOK: false,
 			// engineKind left zero-value ("") — deliberately not EngineFull.
 		},
 		{
-			name: "non-exhaustive label set (plainReprojectAll) is never eligible",
+			name:       "non-exhaustive label set (plainReprojectAll) is never eligible",
 			engineKind: ruleengine.EngineFull, all: true, wantOK: false,
 		},
 		{
-			name: "actor-aware pipeline meeting only the plain conditions is not eligible",
+			name:       "actor-aware pipeline meeting only the plain conditions is not eligible",
 			engineKind: ruleengine.EngineFull, labels: bookOnly, actorAware: true, wantOK: false,
 			// The plain branch's two conditions are necessary but nowhere near
 			// sufficient for an actor-aware pipeline: §4.2 adds pattern-closure, a
@@ -146,7 +146,7 @@ func TestNarrowedFilterEligible_ActorAwareIsTheFanOutGate(t *testing.T) {
 			require.False(t, ok)
 			require.Nil(t, labels)
 
-			filterSubjects, filterSubject := p.ConsumerFilter()
+			filterSubjects, filterSubject, _ := p.ConsumerFilter()
 			require.Empty(t, filterSubjects, "a failed conjunct must fall all the way back to the broad filter")
 			require.Equal(t, "$KV.core-kv.>", filterSubject)
 		})
@@ -182,7 +182,7 @@ func TestConsumerFilter_ActorAwareNarrowsByLabelOnly(t *testing.T) {
 		p := eligiblePipeline(t)
 		p.coreKVBucket = "core-kv"
 
-		filterSubjects, filterSubject := p.ConsumerFilter()
+		filterSubjects, filterSubject, _ := p.ConsumerFilter()
 		require.Empty(t, filterSubject, "an eligible actor-aware pipeline must not fall back to broad")
 		require.ElementsMatch(t, everyForm, filterSubjects)
 	})
@@ -195,7 +195,7 @@ func TestConsumerFilter_ActorAwareNarrowsByLabelOnly(t *testing.T) {
 		p.plainReprojectRelations = map[string]struct{}{"holdsRole": {}}
 		p.plainRelationsExhaustive = true
 
-		filterSubjects, filterSubject := p.ConsumerFilter()
+		filterSubjects, filterSubject, _ := p.ConsumerFilter()
 		require.Empty(t, filterSubject)
 		require.ElementsMatch(t, everyForm, filterSubjects,
 			"an actor-aware lens narrows by label only — its link arm has no relation gate")
@@ -212,7 +212,7 @@ func TestConsumerFilter_ActorAwareNarrowsByLabelOnly(t *testing.T) {
 		p.plainReprojectRelations = map[string]struct{}{"holdsRole": {}}
 		p.plainRelationsExhaustive = true
 
-		filterSubjects, filterSubject := p.ConsumerFilter()
+		filterSubjects, filterSubject, _ := p.ConsumerFilter()
 		require.Empty(t, filterSubject)
 		require.Contains(t, filterSubjects, "$KV.core-kv.lnk.identity.*.holdsRole.>")
 	})
@@ -228,7 +228,7 @@ func TestConsumerFilter_Table(t *testing.T) {
 			engineKind:           ruleengine.EngineFull,
 			plainReprojectLabels: map[string]struct{}{"book": {}},
 		}
-		filterSubjects, filterSubject := p.ConsumerFilter()
+		filterSubjects, filterSubject, _ := p.ConsumerFilter()
 		require.Empty(t, filterSubject)
 		require.ElementsMatch(t, []string{
 			"$KV.core-kv.vtx.book.>", "$KV.core-kv.lnk.book.>", "$KV.core-kv.lnk.*.*.*.book.>",
@@ -237,7 +237,7 @@ func TestConsumerFilter_Table(t *testing.T) {
 
 	t.Run("ineligible falls back to the broad filter", func(t *testing.T) {
 		p := &Pipeline{coreKVBucket: "core-kv"} // engineKind zero-value: not Full.
-		filterSubjects, filterSubject := p.ConsumerFilter()
+		filterSubjects, filterSubject, _ := p.ConsumerFilter()
 		require.Empty(t, filterSubjects)
 		require.Equal(t, "$KV.core-kv.>", filterSubject)
 	})
@@ -252,7 +252,7 @@ func TestConsumerFilter_Table(t *testing.T) {
 			engineKind:           ruleengine.EngineFull,
 			plainReprojectLabels: labels,
 		}
-		filterSubjects, filterSubject := p.ConsumerFilter()
+		filterSubjects, filterSubject, _ := p.ConsumerFilter()
 		require.Empty(t, filterSubjects, "label count %d exceeds the cap of %d", len(labels), maxNarrowedFilterLabels)
 		require.Equal(t, "$KV.core-kv.>", filterSubject)
 	})
@@ -267,7 +267,7 @@ func TestConsumerFilter_Table(t *testing.T) {
 			engineKind:           ruleengine.EngineFull,
 			plainReprojectLabels: labels,
 		}
-		filterSubjects, filterSubject := p.ConsumerFilter()
+		filterSubjects, filterSubject, _ := p.ConsumerFilter()
 		require.Empty(t, filterSubject)
 		require.Len(t, filterSubjects, maxNarrowedFilterLabels*3)
 	})
@@ -282,7 +282,7 @@ func TestConsumerFilter_Table(t *testing.T) {
 			engineKind:           ruleengine.EngineFull,
 			plainReprojectLabels: map[string]struct{}{},
 		}
-		filterSubjects, filterSubject := p.ConsumerFilter()
+		filterSubjects, filterSubject, _ := p.ConsumerFilter()
 		require.Empty(t, filterSubjects)
 		require.Equal(t, "$KV.core-kv.>", filterSubject)
 	})
@@ -323,7 +323,7 @@ func TestConsumerFilter_LabelCapFallback_LogsWarn(t *testing.T) {
 			engineKind:           ruleengine.EngineFull,
 			plainReprojectLabels: labels,
 		}
-		filterSubjects, filterSubject := p.ConsumerFilter()
+		filterSubjects, filterSubject, _ := p.ConsumerFilter()
 		require.Empty(t, filterSubjects)
 		require.Equal(t, "$KV.core-kv.>", filterSubject)
 
@@ -335,7 +335,7 @@ func TestConsumerFilter_LabelCapFallback_LogsWarn(t *testing.T) {
 	t.Run("ineligible (not full engine) logs nothing", func(t *testing.T) {
 		buf := captureDefaultLogger(t)
 		p := &Pipeline{ruleID: "ineligible-rule", coreKVBucket: "core-kv"}
-		_, filterSubject := p.ConsumerFilter()
+		_, filterSubject, _ := p.ConsumerFilter()
 		require.Equal(t, "$KV.core-kv.>", filterSubject)
 		require.Empty(t, buf.String(), "the not-eligible arm is an ordinary, frequent shape — it must not log")
 	})
@@ -348,7 +348,7 @@ func TestConsumerFilter_LabelCapFallback_LogsWarn(t *testing.T) {
 			engineKind:           ruleengine.EngineFull,
 			plainReprojectLabels: map[string]struct{}{},
 		}
-		_, filterSubject := p.ConsumerFilter()
+		_, filterSubject, _ := p.ConsumerFilter()
 		require.Equal(t, "$KV.core-kv.>", filterSubject)
 		require.Empty(t, buf.String(), "an empty exhaustive set is not a cap overrun — it must not log")
 	})
@@ -361,7 +361,7 @@ func TestConsumerFilter_LabelCapFallback_LogsWarn(t *testing.T) {
 			engineKind:           ruleengine.EngineFull,
 			plainReprojectLabels: map[string]struct{}{"book": {}},
 		}
-		filterSubjects, filterSubject := p.ConsumerFilter()
+		filterSubjects, filterSubject, _ := p.ConsumerFilter()
 		require.Empty(t, filterSubject)
 		require.NotEmpty(t, filterSubjects)
 		require.Empty(t, buf.String(), "the common eligible-and-narrowed path must gain nothing")
@@ -563,7 +563,7 @@ func TestConsumerFilter_RelationNarrowing(t *testing.T) {
 			plainReprojectRelations:  map[string]struct{}{"identifiedBy": {}},
 			plainRelationsExhaustive: true,
 		}
-		filterSubjects, filterSubject := p.ConsumerFilter()
+		filterSubjects, filterSubject, _ := p.ConsumerFilter()
 		require.Empty(t, filterSubject)
 		require.ElementsMatch(t, []string{
 			"$KV.core-kv.vtx.provider.>",
@@ -579,7 +579,7 @@ func TestConsumerFilter_RelationNarrowing(t *testing.T) {
 			plainReprojectLabels:     map[string]struct{}{"patient": {}},
 			plainRelationsExhaustive: true,
 		}
-		filterSubjects, filterSubject := p.ConsumerFilter()
+		filterSubjects, filterSubject, _ := p.ConsumerFilter()
 		require.Empty(t, filterSubject)
 		require.Equal(t, []string{"$KV.core-kv.vtx.patient.>"}, filterSubjects)
 	})
@@ -592,7 +592,7 @@ func TestConsumerFilter_RelationNarrowing(t *testing.T) {
 			plainReprojectRelations: map[string]struct{}{"wrote": {}},
 			// plainRelationsExhaustive false: an untyped hop somewhere.
 		}
-		filterSubjects, filterSubject := p.ConsumerFilter()
+		filterSubjects, filterSubject, _ := p.ConsumerFilter()
 		require.Empty(t, filterSubject)
 		require.ElementsMatch(t, []string{
 			"$KV.core-kv.vtx.book.>", "$KV.core-kv.lnk.book.>", "$KV.core-kv.lnk.*.*.*.book.>",
@@ -608,7 +608,7 @@ func TestConsumerFilter_RelationNarrowing(t *testing.T) {
 			engineKind:           ruleengine.EngineFull,
 			plainReprojectLabels: map[string]struct{}{"book": {}},
 		}
-		filterSubjects, _ := p.ConsumerFilter()
+		filterSubjects, _, _ := p.ConsumerFilter()
 		require.Len(t, filterSubjects, 3, "relation-blind forms, not a vertex-only set")
 	})
 
@@ -623,7 +623,7 @@ func TestConsumerFilter_RelationNarrowing(t *testing.T) {
 			plainReprojectRelations:  relations,
 			plainRelationsExhaustive: true,
 		}
-		filterSubjects, filterSubject := p.ConsumerFilter()
+		filterSubjects, filterSubject, _ := p.ConsumerFilter()
 		require.Empty(t, filterSubject, "over the SUBJECT budget degrades to relation-blind, not to broad")
 		require.Len(t, filterSubjects, len(labels)*3)
 	})

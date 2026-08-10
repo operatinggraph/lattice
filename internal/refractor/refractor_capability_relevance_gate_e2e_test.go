@@ -424,7 +424,7 @@ func TestRefractor_CapabilityLens_NarrowedFilter_UnrelatedWriteNeverDelivered_E2
 		map[string]struct{}{"identity": {}, "role": {}, "permission": {}}, filterLabels,
 		"delivery must be filtered on the label set the compiled rule actually derives")
 
-	filterSubjects, filterSubject := p.ConsumerFilter()
+	filterSubjects, filterSubject, _ := p.ConsumerFilter()
 	require.Empty(t, filterSubject,
 		"the real capabilityRoles spec must narrow, not fall back to the broad filter")
 	require.Len(t, filterSubjects, 9,

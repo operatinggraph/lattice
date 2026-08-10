@@ -132,6 +132,13 @@ type Pipeline struct {
 	plainReprojectRelations  map[string]struct{}
 	plainRelationsExhaustive bool
 
+	// plainNarrowingBlocked is why plainReprojectAll is set — one of health's
+	// FilterBroadReason values, "" when the label set is exhaustive. Purely
+	// observational: it is reported on the lens's health entry and read by no
+	// gate, so it can never change which events this lens is delivered. See
+	// ruleState.narrowingBlocked for its lifetime.
+	plainNarrowingBlocked string
+
 	// ruleMu guards every field useFullEngineBranches writes — engineKind,
 	// fullEngine, fullCR, fullCRBranches, fullCRWalkOwnedColumns, the two
 	// plainReproject pairs above, and seedAnchorLabels. Those are the only
@@ -550,6 +557,42 @@ func (p *Pipeline) UseFullEngineBranches(eng *full.Engine, cr ruleengine.Compile
 	return p.useFullEngineBranches(eng, cr, branches, false)
 }
 
+// narrowingBlockRank orders the causes that can clear a rule's exhaustiveness
+// by how much SURVIVES fixing the others — lowest rank reported. It is a table
+// rather than call order because one derivation can trip several sites and the
+// site order is not the actionability order: the unarmed-resolver site runs
+// before the zero-concrete-leaves one, so a positional rule would report a
+// cause that clears on its own for a rule that also carries one that never
+// does.
+//
+//	0  non-exhaustive        the cypher itself can bind a type no label names,
+//	                         or a `*` resolved to no concrete type at all.
+//	                         Survives BOTH arming the resolver and repairing
+//	                         the taxonomy, so it is always the true verdict.
+//	1  taxonomy-unresolvable the taxonomy cannot answer at all. Needs a package
+//	                         fix; waiting never clears it.
+//	2  taxonomy-unarmed      the answer is known but not guaranteed current.
+//	                         The one cause that clears with no edit anywhere,
+//	                         so it is reported only when it is the ONLY thing
+//	                         blocking narrowing.
+var narrowingBlockRank = map[string]int{
+	health.FilterBroadReasonNonExhaustive:        0,
+	health.FilterBroadReasonTaxonomyUnresolvable: 1,
+	health.FilterBroadReasonTaxonomyUnarmed:      2,
+}
+
+// narrowingBlockRankOf ranks an UNREGISTERED reason last rather than first.
+// Reading the map directly would give one the zero value, which silently
+// outranks every real cause — precisely the failure a written-down precedence
+// exists to remove, and precisely what a new site added without a table row
+// would hit.
+func narrowingBlockRankOf(reason string) int {
+	if rank, ok := narrowingBlockRank[reason]; ok {
+		return rank
+	}
+	return len(narrowingBlockRank)
+}
+
 // UseFullEngineBranchesForReDerivation is UseFullEngineBranches' LIVE
 // re-derivation sibling (dynamic-type-taxonomy-design.md §14 Fire A item 4).
 // Byte-identical to UseFullEngineBranches except for the taxonomy.
@@ -607,11 +650,30 @@ func (p *Pipeline) useFullEngineBranches(eng *full.Engine, cr ruleengine.Compile
 	relations := map[string]struct{}{}
 	exhaustive := true
 	relationsExhaustive := true
+	// Why this rule's label set ends up non-exhaustive, in the health entry's
+	// own vocabulary — carried onto the published ruleState so ConsumerFilter
+	// can REPORT the cause it already acts on, rather than re-deriving it from
+	// a snapshot that no longer knows which site fired. Paired with every
+	// `exhaustive = false` below and set nowhere else, which is what makes
+	// `narrowingBlocked != ""` and `!exhaustive` the same condition.
+	//
+	// The highest-RANKED cause wins (narrowingBlockRank), not the first one
+	// written: the sites do not fire in actionability order, so positional
+	// precedence would report a transient cause for a rule that also carries a
+	// permanent one and leave an operator waiting for an arming that changes
+	// nothing.
+	narrowingBlocked := ""
+	blockNarrowing := func(reason string) {
+		if narrowingBlocked == "" || narrowingBlockRankOf(reason) < narrowingBlockRankOf(narrowingBlocked) {
+			narrowingBlocked = reason
+		}
+	}
 	expansionNeeded := map[string]struct{}{}
 	for _, c := range all {
 		fullCR, isFull := c.(*full.CompiledRule)
 		if !isFull {
 			exhaustive = false
+			blockNarrowing(health.FilterBroadReasonNonExhaustive)
 			relationsExhaustive = false
 			// continue, not break: a LATER branch may still be a
 			// *full.CompiledRule carrying `*`, and expansionNeeded below
@@ -624,6 +686,7 @@ func (p *Pipeline) useFullEngineBranches(eng *full.Engine, cr ruleengine.Compile
 		ls, ok := fullCR.ReferencedLabels()
 		if !ok {
 			exhaustive = false
+			blockNarrowing(health.FilterBroadReasonNonExhaustive)
 		} else {
 			for l := range ls {
 				labels[l] = struct{}{}
@@ -708,6 +771,21 @@ func (p *Pipeline) useFullEngineBranches(eng *full.Engine, cr ruleengine.Compile
 			// wrong-but-fast. Forces the broad filter even though every
 			// referenced label above resolved exhaustively.
 			exhaustive = false
+			// Two very different states reach here, and only one of them is
+			// waiting for something. StatusStale is a loaded snapshot with a
+			// dead invalidation consumer — it clears the moment the resolver
+			// arms, with no edit anywhere. StatusUnknown is the resolver
+			// unable to answer at all (a cycle, an over-depth chain, an
+			// ambiguous canonicalName, a vanished abstract, no snapshot ever
+			// loaded), reachable here only on a LIVE re-derivation because
+			// activation refuses outright above — and it never clears until a
+			// package is fixed. Reporting them under one word tells an
+			// operator to wait out a state that will not end.
+			if status == taxonomy.StatusUnknown {
+				blockNarrowing(health.FilterBroadReasonTaxonomyUnresolvable)
+			} else {
+				blockNarrowing(health.FilterBroadReasonTaxonomyUnarmed)
+			}
 		}
 		// An abstract label with no concrete descendants (or whose
 		// descendants are all themselves abstract) resolves to a KNOWN, empty
@@ -728,6 +806,7 @@ func (p *Pipeline) useFullEngineBranches(eng *full.Engine, cr ruleengine.Compile
 		for l, set := range expandedLabels {
 			if len(set) == 0 {
 				exhaustive = false
+				blockNarrowing(health.FilterBroadReasonNonExhaustive)
 				slog.Warn("pipeline: taxonomy label resolved to zero concrete types — degrading to the broad filter",
 					"ruleId", p.ruleID, "label", l)
 			}
@@ -756,6 +835,11 @@ func (p *Pipeline) useFullEngineBranches(eng *full.Engine, cr ruleengine.Compile
 		next.reprojectLabels = labels
 		next.reprojectAll = false
 	}
+	// Published unconditionally, so the reason is derived fresh from THIS rule
+	// alongside the label set it explains and nothing survives a swap: "" here
+	// is exactly the exhaustive case, since every site that clears exhaustive
+	// sets it.
+	next.narrowingBlocked = narrowingBlocked
 	if relationsExhaustive {
 		next.reprojectRelations = relations
 		next.relationsExhaustive = true
@@ -848,6 +932,21 @@ type ruleState struct {
 	relationsExhaustive bool
 	seedAnchorLabels    map[string]struct{}
 	anchorHops          full.HopIndex
+	// narrowingBlocked is why reprojectAll is set — one of health's
+	// FilterBroadReason values, "" when the label set IS exhaustive. It rides
+	// the rule snapshot rather than living in its own state because the cause
+	// is a property OF this compiled rule and of nothing else: it is derived
+	// where the decision is made (useFullEngineBranches) and read where the
+	// decision is reported (ConsumerFilter), with a rule swap replacing it
+	// wholesale under the same atomic publication as the label set it explains.
+	// A separate latch would be a second thing to keep in sync with the very
+	// value it describes.
+	//
+	// A never-compiled pipeline (no engine wired, or a non-full one — nothing
+	// but useFullEngineBranches ever publishes a rule) carries the zero value
+	// "", which ConsumerFilter reports as not-eligible rather than as a missing
+	// reason.
+	narrowingBlocked string
 }
 
 // ruleState returns the pipeline's current compiled rule as one snapshot.
@@ -879,6 +978,7 @@ func (p *Pipeline) ruleState() ruleState {
 		relationsExhaustive: p.plainRelationsExhaustive,
 		seedAnchorLabels:    p.seedAnchorLabels,
 		anchorHops:          p.anchorHops,
+		narrowingBlocked:    p.plainNarrowingBlocked,
 	}
 }
 
@@ -898,6 +998,7 @@ func (p *Pipeline) publishRuleState(rs ruleState) {
 	p.plainRelationsExhaustive = rs.relationsExhaustive
 	p.seedAnchorLabels = rs.seedAnchorLabels
 	p.anchorHops = rs.anchorHops
+	p.plainNarrowingBlocked = rs.narrowingBlocked
 }
 
 // seedAnchorFor returns the vertex key an event on (eventLabel, eventKey) may
@@ -1201,7 +1302,12 @@ func (p *Pipeline) narrowedFilterEligible(rs ruleState) (labels map[string]struc
 // compiled rule: a narrowed, server-side FilterSubjects set when the lens
 // qualifies (NarrowedFilterEligible, and the deduped label count at or under
 // maxNarrowedFilterLabels), or the broad $KV.<bucket>.> FilterSubject
-// otherwise. Exactly one of the two return values is non-empty.
+// otherwise. Exactly one of the two filter return values is non-empty.
+//
+// The third return, FilterDecision, is a REPORT of the choice this function
+// just made, for the lens's health entry. It is derived on the same pass, from
+// the same conditions, so an operator's view of the footprint cannot disagree
+// with the footprint. It has no effect on either filter value.
 //
 // Pure over the pipeline's current state, not cached, so every caller
 // recomputes the identical value from the identical inputs with nothing to
@@ -1249,7 +1355,80 @@ func (p *Pipeline) narrowedFilterEligible(rs ruleState) (labels map[string]struc
 // re-projection from the DeliverLastPerSubject snapshot) or the convergence
 // sweep, which is why a sweep plan is one of §4.2's conjuncts rather than a
 // nice-to-have: a narrowed lens must always have a standing healer.
-func (p *Pipeline) ConsumerFilter() (filterSubjects []string, filterSubject string) {
+// FilterDecision is ConsumerFilter's account of the filter it just derived, in
+// the health entry's vocabulary (health.FilterMode* / health.FilterBroadReason*).
+//
+// It is returned BY the derivation rather than reconstructed from its result so
+// the report and the filter cannot drift: there is one traversal of the
+// conditions, and every arm that returns a filter returns the decision that
+// produced it. Reading it changes nothing — a caller that discards it gets
+// byte-identical filter subjects.
+type FilterDecision struct {
+	// Mode is which filter was chosen: health.FilterModeNarrowedRelation,
+	// health.FilterModeNarrowedLabel, or health.FilterModeBroad.
+	Mode string
+	// LabelCount is how many labels the narrowed filter carries, 0 when broad.
+	LabelCount int
+	// BroadReason is why the broad filter was chosen, "" when narrowed. Never
+	// "" when Mode is broad — see broadFilterReason.
+	BroadReason string
+}
+
+// broadFilterReason names WHY a lens that reached one of ConsumerFilter's
+// not-narrowed arms takes the broad filter. It is total over those states, with
+// no default arm to hide a shape nobody enumerated:
+//
+//   - the rule itself could not produce an exhaustive label set — the snapshot
+//     carries the site's own reason (non-exhaustive or taxonomy-unarmed), which
+//     is available precisely because reprojectAll and that reason are published
+//     together;
+//   - everything else is not-eligible: no rule compiled at all, a non-full
+//     engine, or an actor-aware lens missing one of §4.2's INSTALLED conjuncts
+//     (pattern-closure, sweep plan, anchor type, secure holder types). Those
+//     four are properties of how the lens was wired, not of its cypher, and a
+//     narrowing that never begins for one of them has no per-site cause to
+//     carry.
+//
+// It deliberately does not cover the label cap: that arm is reached only after
+// the derivation SUCCEEDED, so it names its own reason at the site.
+func broadFilterReason(rs ruleState) string {
+	if rs.narrowingBlocked != "" {
+		return rs.narrowingBlocked
+	}
+	return health.FilterBroadReasonNotEligible
+}
+
+// registrationFailedDecision is the footprint a lens ends up with when its
+// derived narrowed filter was refused and it fell back to the broad one. It has
+// one definition because two paths must agree on it byte-for-byte:
+// registerWithFilterFallback writes it the moment the fallback fires, and a
+// caller that also reports its own derivation rewrites the SAME value rather
+// than skipping its write. Making the two idempotent is what removes the
+// ordering question entirely — there is no branch left in which a derivation
+// can overwrite a refusal that came after it.
+func registrationFailedDecision() FilterDecision {
+	return FilterDecision{
+		Mode:        health.FilterModeBroad,
+		BroadReason: health.FilterBroadReasonRegistrationFailed,
+	}
+}
+
+// RecordFilterDecision reports a ConsumerFilter decision on this lens's health
+// entry. It never returns an error and never propagates one: a health write is
+// an observation of a filter that is already registered (or about to be), so
+// failing an activation or a rebuild over it would trade a working lens for a
+// missing metric. Mirrors the posture every neighbouring health call on those
+// two paths already takes — log and carry on.
+func (p *Pipeline) RecordFilterDecision(ctx context.Context, dec FilterDecision) {
+	if p.reporter == nil {
+		return
+	}
+	if err := p.reporter.SetFilterState(ctx, dec.Mode, dec.LabelCount, dec.BroadReason); err != nil {
+		slog.Error("pipeline: record consumer-filter footprint state", "ruleId", p.ruleID, "err", err)
+	}
+}
+
+func (p *Pipeline) ConsumerFilter() (filterSubjects []string, filterSubject string, decision FilterDecision) {
 	// One snapshot for both dimensions: the label set and the relation set must
 	// come from the SAME compiled rule, or a hot-reload landing between the two
 	// reads would build a filter no rule ever asked for.
@@ -1263,7 +1442,15 @@ func (p *Pipeline) ConsumerFilter() (filterSubjects []string, filterSubject stri
 	actorAware := p.actorEnumerator != nil
 	labels, ok := p.narrowedFilterEligible(rs)
 	if !ok || len(labels) == 0 {
-		return nil, subjects.CoreKVFilter(p.coreKVBucket)
+		// An eligible lens with an EMPTY label set lands here too, and reports
+		// not-eligible along with every other shape broadFilterReason covers:
+		// its rule is exhaustive, so it carries no per-site cause, and a
+		// narrowed filter with no subject in it is not a narrower filter — it
+		// is no consumer at all.
+		return nil, subjects.CoreKVFilter(p.coreKVBucket), FilterDecision{
+			Mode:        health.FilterModeBroad,
+			BroadReason: broadFilterReason(rs),
+		}
 	}
 	if len(labels) > maxNarrowedFilterLabels {
 		// Unlike the not-eligible/empty arm above (an ordinary, frequent
@@ -1277,7 +1464,10 @@ func (p *Pipeline) ConsumerFilter() (filterSubjects []string, filterSubject stri
 		// derivation, the gap named at design time).
 		slog.Warn("pipeline: narrowed filter label count exceeds the cap — falling back to the broad filter",
 			"ruleId", p.ruleID, "labelCount", len(labels), "cap", maxNarrowedFilterLabels)
-		return nil, subjects.CoreKVFilter(p.coreKVBucket)
+		return nil, subjects.CoreKVFilter(p.coreKVBucket), FilterDecision{
+			Mode:        health.FilterModeBroad,
+			BroadReason: health.FilterBroadReasonLabelCap,
+		}
 	}
 	labelList := make([]string, 0, len(labels))
 	for l := range labels {
@@ -1310,10 +1500,16 @@ func (p *Pipeline) ConsumerFilter() (filterSubjects []string, filterSubject stri
 			relationList = append(relationList, r)
 		}
 		if len(labelList)*(1+2*len(relationList)) <= maxNarrowedFilterSubjects {
-			return subjects.CoreKVRelationNarrowedFilters(p.coreKVBucket, labelList, relationList), ""
+			return subjects.CoreKVRelationNarrowedFilters(p.coreKVBucket, labelList, relationList), "", FilterDecision{
+				Mode:       health.FilterModeNarrowedRelation,
+				LabelCount: len(labelList),
+			}
 		}
 	}
-	return subjects.CoreKVNarrowedFilters(p.coreKVBucket, labelList), ""
+	return subjects.CoreKVNarrowedFilters(p.coreKVBucket, labelList), "", FilterDecision{
+		Mode:       health.FilterModeNarrowedLabel,
+		LabelCount: len(labelList),
+	}
 }
 
 // SetEnvelopeFn installs the on-wire envelope wrapper. Pass nil to clear.
@@ -1645,6 +1841,14 @@ func (p *Pipeline) registerWithFilterFallback(ctx context.Context, filterSubject
 		}
 	}
 	applyBroad()
+	// The footprint half of the same event, alongside the fault above rather
+	// than instead of it: the lens is running on a filter its own derivation
+	// did not choose, so the decision ConsumerFilter already reported is now
+	// wrong and is overwritten here. This is the one broad reason decided after
+	// the derivation, which is why it cannot come from ConsumerFilter — and it
+	// covers BOTH registration paths, since Run's initial supervisor.Add and
+	// Rebuild's supervisor.Reset each fall back through this one function.
+	p.RecordFilterDecision(ctx, registrationFailedDecision())
 	return register()
 }
 
@@ -2059,7 +2263,7 @@ func (p *Pipeline) rebuild(ctx context.Context, truncate bool, sig *rebuildSigna
 	if p.supervisor == nil {
 		return p.abandonRebuild(ctx, sig, fmt.Errorf("pipeline: rebuild: no supervisor configured"))
 	}
-	filterSubjects, filterSubject := p.ConsumerFilter()
+	filterSubjects, filterSubject, filterDecision := p.ConsumerFilter()
 	resetWithFilter := func() error {
 		if err := p.supervisor.UpdateSpec(p.consumerCfg.Name, func(spec *substrate.ConsumerSpec) {
 			spec.FilterSubjects = filterSubjects
@@ -2072,9 +2276,21 @@ func (p *Pipeline) rebuild(ctx context.Context, truncate bool, sig *rebuildSigna
 	if err := p.registerWithFilterFallback(ctx, filterSubjects, func() {
 		filterSubjects = nil
 		filterSubject = subjects.CoreKVFilter(p.coreKVBucket)
+		// The fallback re-decides the footprint as well as the filter, so the
+		// report below describes what was ADOPTED rather than what was derived.
+		// It is the same value registerWithFilterFallback has already written,
+		// deliberately: rewriting it is idempotent, where skipping the write
+		// would need a flag and a branch that no reachable test can exercise.
+		filterDecision = registrationFailedDecision()
 	}, resetWithFilter); err != nil {
 		return p.abandonRebuild(ctx, sig, fmt.Errorf("pipeline: rebuild: reset consumer: %w", err))
 	}
+	// Reported only once the consumer has actually ADOPTED this filter.
+	// Recording before the reset left an abandoned rebuild advertising a
+	// footprint the consumer never got — on the one path where the lens's
+	// PREVIOUS filter is still the live one, so the entry became wrong about a
+	// lens that is otherwise fine.
+	p.RecordFilterDecision(ctx, filterDecision)
 
 	// 4. Launch background goroutine to transition to "active" when lag reaches zero.
 	if p.reporter != nil {

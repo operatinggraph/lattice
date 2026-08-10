@@ -893,7 +893,10 @@ above).
   "ackFloorProgressAt": "<RFC3339>",
   "sweepCursor": "<anchorVertexKey>",
   "sweepReconciled": <uint64>,
-  "secureRedactions": <uint64>
+  "secureRedactions": <uint64>,
+  "filterMode": "narrowed-relation | narrowed-label | broad",
+  "filterLabelCount": <int>,
+  "filterBroadReason": "not-eligible | non-exhaustive | label-cap | taxonomy-unarmed | taxonomy-unresolvable | registration-failed"
 }
 ```
 
@@ -964,6 +967,59 @@ live on this existing entry rather than in new state, so a restarted Refractor r
 walk where it stopped instead of re-verifying from the head every boot, and the heal count
 an operator reads survives the restart. Neither is reset by a status transition — a
 pause/resume must not silently restart the walk.
+
+`filterMode` / `filterLabelCount` / `filterBroadReason` are the lens's **Core KV consumer
+footprint** — which server-side filter its own derivation chose, and, when that is the broad one,
+why (design: `dynamic-type-taxonomy-design.md` §10.3). They are written wherever the filter is
+derived: at activation, at every rebuild (a MATCH hot-reload can widen or narrow the referenced
+label set between the two), and again if a narrowed registration is refused and falls back. The
+three are one decision and are always written together.
+
+They are **observation, not control**. The set of subjects a lens filters on is identical whether
+or not these fields are written, and no gate anywhere reads them back — which is what makes them
+safe to read as evidence: they report the auth plane's narrowing decision without participating in
+it. A filter that narrows differently than the lens's own client-side gate would is an under- or
+over-grant, so the value of writing the decision down is that a regression becomes visible in Health
+KV rather than only in a delivery that never arrives.
+
+An **absent** `filterMode` means the lens has **never derived a consumer filter** — an entry written
+by a Refractor that predates these fields, or a lens that has not reached its derivation yet. It
+does **not** mean `broad`: a lens on the broad filter says so, and carries a reason. `filterMode` is
+`narrowed-relation` when the filter pins relations as well as vertex types, `narrowed-label` when it
+pins types alone (the actor-aware lenses are always at most this — their link arm judges by endpoint
+type, so a relation-pinned subject would withhold an event that arm keeps), and `broad` when the
+lens subscribes the whole `$KV.<bucket>.>`. `filterLabelCount` is how many labels the narrowed
+filter was BUILT from — a `*` label contributes its taxonomy-resolved concrete types rather than
+itself, so this can move without the cypher changing — and is `0` (omitted) on every broad entry.
+
+`filterBroadReason` is a **closed, total** vocabulary: a broad entry always carries exactly one, and
+it names the cause the derivation actually acted on, not every condition that happened to hold.
+
+| reason | what it means | who fixes it |
+| --- | --- | --- |
+| `not-eligible` | the lens cannot narrow as it stands — not on the full engine, or an actor-aware lens missing one of the conjuncts its INSTALLATION supplies (pattern-closure, a sweep plan, its anchor type in the label set, a declared secure holder type in it) | whoever wires the lens; often intentional and permanent |
+| `non-exhaustive` | the compiled rule can bind a type no label names (an unlabeled node, a variable-length hop, a name re-seeded after its labelling clause went out of scope), or a `*` label resolved to zero concrete types | the cypher author |
+| `label-cap` | the derivation was exhaustive but resolved to more labels than the narrowed filter carries | nobody, necessarily — a **footprint regression**: another package's install can push a one-label lens over the cap |
+| `taxonomy-unarmed` | every referenced label resolved, but the resolver's answer is not guaranteed **current** — a snapshot is loaded and the invalidation consumer is not live | **nobody: this one clears on its own** the moment the resolver arms. The only reason in the vocabulary that needs no edit anywhere |
+| `taxonomy-unresolvable` | the taxonomy could not answer **at all** — a `subtypeOf` cycle, an over-depth chain, an ambiguous `canonicalName`, a vanished abstract type, or no snapshot ever loaded | **a package author, and waiting never helps.** This never clears by itself; it is the reason `taxonomy-unarmed` must not be used for it |
+| `registration-failed` | the lens DID derive a narrowed filter and JetStream refused to register it | an operator: this is the one reason that is also a **fault**, and the only one that raises `errorCount`/`lastError` alongside |
+
+The two taxonomy reasons are deliberately separate words for the two halves of §4.2's fork, and the
+distinction is the whole point: `taxonomy-unarmed` is a lens waiting for something that will arrive,
+`taxonomy-unresolvable` is a lens waiting for something that will not. An operator handed the first
+where the second is true waits forever.
+
+When more than one reason holds at once, the one reported is the one that **survives fixing the
+others** — `non-exhaustive` outranks `taxonomy-unresolvable` outranks `taxonomy-unarmed`. So a lens
+whose cypher is inexhaustive AND whose resolver is unarmed reads `non-exhaustive`: arming would not
+change its verdict, and reporting the transient cause would point at the wrong repair.
+
+Only `registration-failed` is an error. A cap-driven or eligibility-driven fallback is a lens
+reading more of the stream than it needs while projecting every row it should, so it is deliberately
+kept out of `errorCount` — putting it there would file a correct lens beside a DLQ write. The
+broadening still matters, because a lens whose `filterMode` moves from narrowed to `broad` on a
+cypher edit has silently multiplied its delivery volume; `filterBroadReason` is what says whether
+that was authored, resolved, or refused.
 
 ### `health.bootstrap.complete`
 
