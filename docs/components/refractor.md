@@ -940,3 +940,13 @@ the entry).
 - **A `WITH` boundary drops unprojected variables** — any set derived from a query (labels, carried state)
   must model the drop or it re-seeds / excuses wrongly. Minted: lens-label-key-type binding design (two
   reviewers broke the same increment in opposite directions). Check: none yet.
+- **A fail-closed posture proved on the DELIVERY axis is not proved on the PROJECTION axis** — "unresolvable ⇒
+  widen the filter" reads as safe and is, for delivery; the same unresolved answer also published an empty
+  matcher, so the lens went to zero rows and a retracting lens to a mass Delete. Minted: dynamic-type-taxonomy
+  close pass (one class, three findings). Check: for each uncertain state, name every consumer the value feeds
+  and state the fail direction of each — a broad filter compensates only the consumers downstream of delivery.
+- **One latch guarding two states that commit at different times** — a change-detection baseline written after
+  an async rebuild while the gate it describes is published before it, so an A→B→A sequence takes the
+  "unchanged" fast path against a baseline that never matched the gate. Minted: dynamic-type-taxonomy inc 4
+  (found at the item's close, not at the increment's). Check: for any "has this changed?" comparison, prove the
+  compared baseline and the acted-on state share a commit point.

@@ -647,8 +647,17 @@ operator sees it.
 
 This is more expensive than the brief hoped, and it is the honest answer. Bounding it: only lenses whose expanded
 set *changed* rebuild (a set comparison, not a blanket sweep); a rebuild is already serialized per pipeline by
-`rebuildInFlight`; and the trigger frequency is "a package declared a new type," which is an install event, not a
-data event.
+`rebuildInFlight`.
+
+**~~and the trigger frequency is "a package declared a new type," which is an install event, not a data
+event.~~ — FALSIFIED by the build, 2026-08-09.** That clause counts how *often* the trigger fires and never
+counts the *fan-out* of one firing, which is where the cost actually is. `Rebuild` calls `supervisor.Reset`,
+which **deletes and recreates the lens's `KV_core-kv` durable**, and the sweep applies that to every live entry
+whose expanded set moved. Measured on the running stack: `KV_core-kv` carries **118 consumers, 111 of them
+one-per-lens**, so a single taxonomy event can burst up to that many consumer deletes and creates — a mechanism
+that has already OOM-killed `lattice-nats` on this host. Serialization per *pipeline* does not bound a burst
+*across* pipelines. **A serialized or coalesced rebuild scheduler is therefore a prerequisite of Fire B, not a
+follow-on**, and is filed as its own ★★★ lane row that gates Fire B. Do not read the sentence above as a bound.
 
 **The race the brief names is closed by the same mechanism.** "A package install completes and an op mints a leaf
 instance before Refractor has processed the taxonomy event" — the rebuild's fresh cursor sees that instance
@@ -713,15 +722,15 @@ therefore be classified. Each row is grounded.
 | Surface | Abstract allowed? | Reason (code) |
 |---|---|---|
 | **A lens pattern label** | **YES** — the driving case. | §4–5. |
-| **A vertex key's type segment** (`vtx.<type>.<id>`) | **NO — new fail-closed gate.** | No instance has an abstract type. `isValidTypeSegment` is a bare regex (`keys.go:141-155`) so nothing stops it today. Step 6 gains: reject a mutation whose key contains an abstract type segment in **any** position (vertex root, aspect owner, or either link endpoint). |
+| **A vertex key's type segment** (`vtx.<type>.<id>`) | **NO — new fail-closed gate.** | No instance has an abstract type. `isValidTypeSegment` is a bare regex (`keys.go:141-155`) so nothing stops it today. Step 6 gains: reject a mutation whose key contains an abstract type segment in **any** position (vertex root, aspect owner, or either link endpoint) — **except `tombstone`, which is exempt** (`step6_validate.go:162`, shipped `639ca605`). A tombstone cannot create an instance, so the abstract-typed instance set only shrinks through it; the exemption is what keeps a live concrete type flipped to abstract able to shed its existing instances. |
 | **A link key's endpoint type segments** | **NO** — same gate. | A link key names two concrete vertices; the endpoint type is a *restatement* of the endpoint's own key (`docs/contracts/01-addressing-and-envelope.md:11`). An abstract there names no vertex. |
-| **A document's `class`** | **NO — new fail-closed gate.** | Step 6 rejects a mutation whose class resolves to a DDL with `Abstract == true`. This is an *addition* to §1.5, not a contradiction: §1.5's permissive default covers the case where **no** DDL is found; here one is found and is structurally unusable. |
+| **A document's `class`** | **NO — new fail-closed gate.** | Step 6 rejects a mutation whose class resolves to a DDL with `Abstract == true` — **except `tombstone`, exempt for the same reason as the segment gate** (`step6_validate.go:194`, shipped `639ca605`). This is an *addition* to §1.5, not a contradiction: §1.5's permissive default covers the case where **no** DDL is found; here one is found and is structurally unusable. |
 | **An event's `class`** | **Excluded by construction, not by a live gate.** | An abstract `CanonicalName` must pass `IsValidTypeSegment` (always dot-free), and Contract #3 §3.4 requires an event class to be `<domain>.<verb>` (always dotted) — `BuildEventList` already rejects any dot-free class, so a census of all ~140 `packages/**` event classes found none dot-free. `validateEventClass`'s own check is therefore a fail-closed latch, not a live gate — it earns its place only because the exclusion is held by two separate rules intersecting, either of which could relax unnoticed (shipped `639ca605`). |
 | **`authz_anchors`** | **Vacuously N/A.** | Holds bare NanoIDs plus the reserved `*` (`adapter/rls.go:22`, `:61`, `:99`); RLS compares NanoID set membership (`:194-210`). No type name has ever appeared there. |
 | **A permission `scope`** | **Already denied.** | Closed vocabulary `any\|self\|specific\|owned`; the `default:` arm denies with `"unknown platformPermission.scope"` (`step3_auth_capability.go:570-575`). Nothing to add. |
 | **A Weaver target** | **Transitively yes, no new surface.** | `WeaverTargetSpec` carries no vertex-type field (`definition.go:231-270`); applicability comes entirely from the bound lens's own label, and the registry watches `<targetId>.>` (`weaver/engine.go:405`). An abstract reaches Weaver only *through* a lens, where §5 already handles it. |
 | **`manifest.ent`'s `entityType`** | **NO — scoped out, with a named gap.** | A per-walk **literal** (`edge-manifest/lenses.go:733-735`) that must equal `entityKey`'s own type segment for op-attach to work (`:1034-1038`), consumed by `===` comparisons in `cmd/facet/web/app.js:36`, `:293`, `:1207`. An abstract literal would desync from the concrete `entityKey` and silently break op attachment. **Nothing enforces the pairing today** — §14 files it as an authoring gate rather than leaving it implicit. |
-| **`AnchorWalk.AnchorType`** (Path-B read-grant walks) | **NO — scoped out, with the reason.** | It must equal the Chain's own anchor label by strict equality (`anchorwalk.go:389-394`) *and* is stamped as a **body-only audit literal** by `collectBranch` (`:163`, `:608-615`). An abstract anchor would write an audit value naming a kind no instance has, and fixing that needs a per-row `typeOf(x.key)` engine function — a separate item with its own consumer. The abstract **is** allowed in non-anchor chain positions. |
+| **`AnchorWalk.AnchorType`** (Path-B read-grant walks) | **NO — scoped out, with the reason.** | It must equal the Chain's own anchor label by strict equality (`anchorwalk.go:389-394`) *and* is stamped as a **body-only audit literal** by `collectBranch` (`:163`, `:608-615`). An abstract anchor would write an audit value naming a kind no instance has, and fixing that needs a per-row `typeOf(x.key)` engine function — a separate item with its own consumer. ~~The abstract **is** allowed in non-anchor chain positions.~~ **FALSIFIED by the build, 2026-08-09:** the walk parser reads a label with `p.ident()` and then requires `{` or `)`, so a trailing `*` fails `expected ')' to close the node pattern` (`anchorwalk.go:735-774`) — a `*` label is refused in **every** node position of a Path-B walk, not just the anchor. It fails closed (the install is refused), so this is an authoring/expressibility limit, not a correctness hole; filed as a lane row. |
 | **The names `meta` and `op`** | **NO.** | Contract #1 §1.2 reserves both (`:38-45`). |
 
 ### 8.1 Why the body `class` must not re-enter the resolution path
@@ -863,12 +872,35 @@ at `active|paused|rebuilding` (`:21-29`). Additive change, no status added:
 ```
 filterMode        "narrowed-relation" | "narrowed-label" | "broad"
 filterLabelCount  int
-filterBroadReason ""  |  "not-eligible" | "non-exhaustive" | "label-cap" | "taxonomy-unarmed" | "registration-failed"
+filterBroadReason ""  |  "not-eligible" | "non-exhaustive" | "label-cap"
+                      |  "taxonomy-unarmed" | "taxonomy-unresolvable" | "registration-failed"
 ```
 
-Written whenever `ConsumerFilter` is computed (activation `cmd/refractor/main.go:1019`, and `Rebuild`
-`pipeline.go:1417`), which is already the single place both callers derive the identical value from identical
-inputs (`:913-919`).
+**Amended at build, 2026-08-09 — three corrections to the paragraph this section originally carried.**
+
+1. **The reason vocabulary is SIX, not five.** `taxonomy-unarmed` originally covered every non-current taxonomy
+   answer, but the resolver returns two materially different ones and this section's own §4.2 table is built on
+   telling them apart. `taxonomy-unarmed` (`StatusStale`) is *transient* — it clears on its own when the
+   resolver arms, and an operator should wait. `taxonomy-unresolvable` (`StatusUnknown`) is **not**: a cycle, an
+   over-depth chain, an ambiguous canonicalName, or an abstract type that vanished with its package needs a
+   package fix and will never clear. Reporting both as "unarmed" told an operator to wait for something that
+   never happens, which is the one failure a health field exists to prevent.
+2. **There are THREE write points, not one.** Both derivation sites write it — activation
+   (`cmd/refractor/main.go`, where the write lands after the registry insert and above `go p.Run`, so a
+   first-ever activation cannot leave a phantom entry behind on an early-return path) and `Rebuild`
+   (`pipeline.go`) — and `registerWithFilterFallback` **overwrites** it afterwards, since
+   `registration-failed` is the one reason decided after the derivation. That one function is shared by both
+   registration paths, so instrumenting it covers both.
+3. **`not-eligible` is broader than the name suggests.** It absorbs the exhaustive-but-empty label set and four
+   *installation*-shaped actor-aware gaps (pattern-closure, sweep plan, anchor type in the label set, a declared
+   secure holder type in it) — properties of how the lens was wired, not of its cypher, none of which have a
+   per-site cause to carry. The vocabulary is **total** over the broad states: a broad entry always carries
+   exactly one reason and no reader needs a default branch.
+
+Derivation happens in one place — `ConsumerFilter` — which returns the decision *alongside* the filter rather
+than having callers reconstruct it, so an operator's view of the footprint cannot drift from the footprint.
+The line numbers this section originally cited (`main.go:1019`, `pipeline.go:1417`, `:913-919`) were stale
+before the build started; the live sites are named above.
 
 This is **not** a `RecordError`. A cap-driven fallback is a footprint regression, not a fault, and routing it
 through `errorCount`/`lastError` would make it indistinguishable in Loupe from a DLQ write failure or a refused
@@ -911,8 +943,18 @@ member of that vocabulary and belongs in the table. Proposed insertion under §1
 > set of concrete types the abstract name covers.
 
 **Committed at ratification** (2026-08-06), with a transitional marker appended: abstract types land with
-Fire A, so until that fire ships nothing declares one and the clause constrains nothing. That marker is
-removed by Fire A.
+Fire A, so until that fire ships nothing declares one and the clause constrains nothing.
+
+**Amended 2026-08-09 — the "no frozen-contract edit is staged" heading above is now out of date, and the marker
+is REWRITTEN by Fire A rather than removed.** An edit to `01-addressing-and-envelope.md` is staged
+**UNCOMMITTED in `main`** awaiting Andrew, and it does two things. First it refreshes the transitional marker:
+the mechanism is live (declaration, `subtypeOf` resolution, both Processor commit rejections), no shipped
+package declares an abstract type yet, so the clause is *enforced but not yet exercised* — the marker clears
+when Fire B ships, not when Fire A did. Second, and substantively, it records the **`tombstone` exemption** on
+both gates (§8 rows 2 and 4): the ratified clause said the Processor "rejects either at commit" with no
+qualifier, and the shipped code exempts tombstones so an abstract-flipped type can still shed its instances.
+Certifying the clause live without that qualifier would have frozen a sentence the code does not implement.
+That exemption is the part genuinely needing Andrew's eye.
 
 ## 12. Alternatives considered
 
@@ -981,7 +1023,7 @@ precedence rule. Named so it is built deliberately later, not stumbled into.
 |---|---|
 | **A missed retraction site becomes an over-grant** | The design's sharpest risk, and the reason §5.1 site 3 exists. An abstract-anchored grant producer whose `AnchorProjectionKey` still string-compares never retracts a tombstoned anchor. Mitigation: the site is enumerated, and §15's retraction test asserts it against a leaf-type tombstone specifically. |
 | **A stale narrow set silently drops events** | The only unacceptable state (§6.5). Every uncertain path degrades to `reprojectAll` instead. The asymmetry is grounded: `plainVertexRelevant`'s false branch has no fallback (`pipeline.go:722-738`), a broad filter only costs work. |
-| **Rebuild storm on a leaf install** | One leaf install rebuilds every lens whose expanded set changed. Bounded by the count of abstract-using lenses (1 at Fire B — `capabilityServiceAccess`), serialized per pipeline by `rebuildInFlight`, and triggered by install events, not data events. Named because it grows with adoption. |
+| **Rebuild storm on a leaf install** | ~~Bounded by the count of abstract-using lenses (1 at Fire B), serialized per pipeline by `rebuildInFlight`, and triggered by install events, not data events.~~ **The stated bound is FALSIFIED (2026-08-09) — see §6.3.** `Rebuild` is a durable delete-recreate, the sweep applies it per affected lens (measured 118 consumers / 111 one-per-lens), and it has OOM-killed `lattice-nats`. Per-pipeline serialization does not bound a cross-pipeline burst. A coalesced rebuild scheduler is a **prerequisite of Fire B**, filed ★★★ and gating it. |
 | **Silent cap-driven footprint regression** | Real and dynamic. Mitigated by `leafBudget` (static, decidable, refused at the *lens's* install) + the `filterMode` health field. The degradation ladder (§10.1) means the first step is coarser narrowing, not broad. |
 | **The resolver is a new single point** | If it is wrong, every abstract-using lens is wrong. Mitigations: fail-closed to broad on every uncertainty; a corpus census test pinning each lens's expanded set (§15); and it is read-only — it never writes Core KV (P2). |
 | **Two concurrent installs form a cycle neither sees** | Real: install batches are atomic individually, not against each other. This is why **resolver-time** cycle detection is the authority and install-time is a courtesy (§5/§14). The resolver's answer is fail-closed to broad, so a cycle costs footprint, never correctness. |
@@ -1128,9 +1170,15 @@ wrong reason.
 the two budgets (`pipeline.go:934-935`, `:952`). A lens whose `K + leafBudget > 8` **fails its own install**.
 
 **Corpus census test.** Owned by **Fire A item 6** (§14), not an unassigned tail — it pins `filterMode`, which
-item 6 is what makes real. Extend `internal/refractor/auth_plane_narrowing_census_test.go` to pin each shipped
-lens's `(expanded labels, exhaustive, filterMode)` verdict, so a taxonomy change that moves a verdict fails in a
-test rather than in Capability KV. Per the sibling design's §9 finding, it **must expand read-grant walks first**
+item 6 is what makes real. Extend **`internal/refractor/label_derivation_corpus_census_test.go`** (this line
+named `auth_plane_narrowing_census_test.go` until 2026-08-09 — **wrong file**: that one pins only the handful of
+auth-plane lenses through real pipelines, while the whole-corpus `corpusLabelVerdicts` map lives in the
+label-derivation file) to pin each shipped lens's `(expanded labels, exhaustive, filterMode)` verdict, so a
+taxonomy change that moves a verdict fails in a test rather than in Capability KV. **What that pin does NOT
+claim** (structural to a census reading compiled cypher rather than a running Refractor, recorded on
+`labelVerdict.mode` at build time): it derives on a *plain* pipeline, so for an actor-aware lens it is the
+cypher's own verdict and an upper bound on the runtime one; and it is per executable cypher, so a multi-walk
+lens's `name#N` rows pin each branch, not the lens's union. Per the sibling design's §9 finding, it **must expand read-grant walks first**
 (`ExpandReadGrantWalks` runs only at `pkgmgr/manifest.go:123`, `upgrade.go:138`, `definition.go:31`, so the raw
 `pkgregistry` snapshot omits the generated producers).
 
@@ -1673,3 +1721,94 @@ leaves, but by the rebuild fan-out row above (§17.8), which must land before a 
   needs `K` — the lens's own label count — at install, and pkgmgr validates that a lens spec parses without ever
   extracting its labels. Consumer: a lens author crossing the cap. Blocker: label extraction in pkgmgr.
 - **§17.8's two `armed` preconditions are untouched** and remain as filed.
+
+### 17.11 Fire A · Increment 6 — observability (2026-08-09)
+
+**Scope sentence (§14 Fire A item 6), narrowed to the Lattice lane:** the `filterMode` / `filterLabelCount` /
+`filterBroadReason` health fields written wherever the consumer filter is derived, the health-KV schema doc, and
+§15's corpus census-test extension pinning each shipped lens's `filterMode`.
+
+**Scope-diff gate: narrow-only.** Loupe's badge is in item 6's sentence but lives under `cmd/loupe/**`, which is
+the Loupe lane's own build lock — dropped from this fire rather than reached across (see the checkpoint). Fire B
+and `packages/` did not leak in. The narrowing costs nothing operationally: `controlwire.ControlResponse` embeds
+`*healthwire.Entry` and marshals every field, so the triple has a real reader the moment it is written, with no
+edit anywhere else. The Loupe badge is a rendering nicety on top of a field that is already surfaced.
+
+**Built.** `ConsumerFilter` gained a third return, a `FilterDecision`, so the report comes off the *same*
+traversal that picks the filter and cannot drift from it; the two derivation sites (activation, `Rebuild`) write
+it, and `registerWithFilterFallback` overwrites it with `registration-failed` — the one reason decided after the
+derivation, and the one function both registration paths share. The per-site cause rides `ruleState` alongside
+the label set it explains, published in the same atomic swap, so a rule swap replaces it wholesale and it can
+never describe a different rule version than the filter beside it.
+
+**The increment is OBSERVATION-ONLY, and that is the property the review actually checked.** A cold reviewer
+diffed `ConsumerFilter` arm-by-arm against `1a762626`: same snapshot, same predicates, same early returns in the
+same order, every arm gaining a third value and nothing else. `filter_decision_internal_test.go` pins the filter
+subjects beside the decision in every row, so a future edit that moves the filter while "only touching the
+metric" fails there.
+
+**Three defects the increment itself introduced were fixed, not filed** (the residual ladder's rule 2), all
+found by the close pass:
+
+1. **The reason vocabulary mislabelled the one state item 6 exists to surface.** `taxonomy-unarmed` was written
+   for both `StatusStale` *and* `StatusUnknown`, while its own doc promised the reason was "transient by
+   construction". That is true of stale and false of unknown — a cycle, an over-depth chain, an ambiguous
+   canonicalName, or an abstract type that vanished with its package never clears on its own. The vocabulary is
+   now **six**, with `taxonomy-unresolvable` for the second case (§10.3 amended). A health field that tells an
+   operator to wait for something that will never happen is worse than no field.
+2. **`blockNarrowing`'s first-writer-wins did not implement the actionability order its own comment claimed** —
+   the unarmed site runs before the zero-concrete-leaves site, so `stale + zero leaves` reported the transient
+   cause for a rule arming would not fix. Replaced by a written-down `narrowingBlockRank` table, with an
+   unregistered reason ranked *last* rather than taking the map's zero value, which would have silently
+   outranked every real cause — the exact failure a precedence table exists to remove.
+3. **`rebuild`'s abandon path left the entry advertising a filter the consumer never adopted.**
+
+**Record corrections this increment forced** (the "body stays true" rule): §10.3 was rewritten — the vocabulary
+is six not five, there are **three** write points not one, and `not-eligible` is broader than its name (it
+absorbs the exhaustive-but-empty label set and four installation-shaped actor-aware gaps). §15 named the wrong
+census file: the whole-corpus `corpusLabelVerdicts` map is in `label_derivation_corpus_census_test.go`, while
+`auth_plane_narrowing_census_test.go` pins only the auth-plane lenses through real pipelines. §6.3's and §13's
+"bounding it" claims, §8's two gate rows (the `tombstone` exemption), §8's anchorwalk row, and §11's "no
+frozen-contract edit is staged" were all amended where they stand.
+
+**What the census pin does not claim** is written on `labelVerdict.mode` rather than left for a reader to
+discover: it derives on a plain pipeline, so for an actor-aware lens it is the cypher's verdict and an upper
+bound on the runtime one; and it is per executable cypher, so a multi-walk lens's `name#N` rows pin each branch
+rather than the lens's union. It also now asserts, as a side effect, that no shipped lens carries `*` — which is
+where Fire B will announce itself.
+
+### 17.12 Checkpoint — Fire A COMPLETE
+
+**Landed on `main`; no worktree is held. Items 1–6 are all built, and Fire A is done.**
+
+**Fire B is NOT next-in-line.** It stays blocked on the rebuild fan-out row (§17.8) — `Rebuild` is a durable
+delete-recreate and the sweep applies it per affected lens (measured 118 consumers, 111 one-per-lens; it has
+OOM-killed `lattice-nats`). A coalesced rebuild scheduler is its prerequisite, not its follow-on.
+
+**The close pass over the item's whole diff filed six rows, none of them fixable inside this increment** — each
+is an earlier increment's mechanism, each is inert until a `packages/` lens carries `*`, and each therefore
+lands as a row that **gates that consumer's fire** (the sanctioned form of a deferred defect):
+
+- an unresolved expansion publishes a nil `LabelExpansion`, so the *matcher* blanks where §6.5 promises only a
+  wider *filter* — and the re-derivation's own `Rebuild` then replays every anchor against it (★★★);
+- the re-derivation's baseline commits after `Rebuild` while its client gate commits before, so an A→B→A
+  taxonomy sequence latches a gate narrower than the filter — §6.5's one unacceptable state, reachable with no
+  race at all (★★★);
+- the affected-anchor derivation prunes on an unresolved expansion, a second narrowing *downstream* of delivery
+  that the broad filter does not compensate;
+- a taxonomy shrink retracts nothing on a plain `*`-anchored lens, because the narrowed filter lands before the
+  replay that would carry the dropped subtype's events;
+- `lens/corekv_source.go`'s two type-meta handlers fail in opposite directions for the same hazard;
+- a read-grant walk refuses a `*` label in every node position, not just the anchor (fails closed).
+
+**Two residuals are deliberately NOT filed as lane rows, with the reason stated here.** The **Loupe
+`filterMode` badge** belongs to `backlog/loupe.md` and this fire may not write that lane; it is reported to
+Andrew instead, and it is a rendering nicety rather than a gap — the field is already surfaced through
+`controlwire`. The **census's per-lens fidelity limit** is documented in code at the pin itself, where the next
+reader of that map will actually meet it, rather than as a row nobody would select.
+
+**Contract #1's abstract-vertex-types clause is edited UNCOMMITTED in `main`, awaiting Andrew** — and the edit
+grew a second half during this fire. Beyond refreshing the transitional marker, it now records the `tombstone`
+exemption on both commit gates. The ratified sentence said the Processor "rejects either at commit" with no
+qualifier; the shipped code exempts tombstones so a type flipped to abstract can still shed its instances.
+Certifying the clause live without that qualifier would have frozen a sentence the code does not implement.
