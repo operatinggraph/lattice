@@ -2,22 +2,32 @@
 // the spatial base domain — the place graph — mirroring how identity-domain
 // owns the identity base domain.
 //
-// One DDL (`location`) handles all five operations:
+// Four DDLs: the ABSTRACT `location` type and its three CONCRETE leaves
+// (`unit`, `building`, `property`), each joined to it by a `subtypeOf` link.
+// The three leaves share one script and each admits all five operations:
 //
 //	CreateLocation, TombstoneLocation
 //	WireContainedIn, UnwireContainedIn
 //	SetLocationPresentation
 //
-// A location is one of three vertex types — unit, building, or property —
-// discriminated by the `locationType` op parameter (Contract #6 §6.9):
+// A location is one of the three concrete vertex types, chosen by the
+// `locationType` op parameter (Contract #6 §6.9); the class equals the key
+// type:
 //
-//	vtx.unit.<id>      class=location
-//	vtx.building.<id>  class=location
-//	vtx.property.<id>  class=location
+//	vtx.unit.<id>      class=unit
+//	vtx.building.<id>  class=building
+//	vtx.property.<id>  class=property
 //
-// Root data is minimal `{}` (D5 — business data lives in aspects). The shared
-// `location` class is what a downstream cypher rule guards on when it walks the
-// place graph; the type segment names the level.
+// Root data is minimal `{}` (D5 — business data lives in aspects). The abstract
+// `location` type names no instance: it exists so one lens label —
+// `(l:location*)` — expands against the subtypeOf links into the concrete leaf
+// set, and so a write-path guard can say "any location" by asking the key's
+// type segment rather than hardcoding the three levels in every package.
+//
+// Because all three leaves admit the same operations, the Processor cannot
+// infer a class from the operationType, so every submitter names the concrete
+// leaf matching the key it acts on. The abstract `location` is never a legal
+// envelope class.
 //
 // Containment is the `containedIn` link (location → location, transitive —
 // unit → building → property). Direction follows Contract #1 §1.1: the
@@ -26,9 +36,9 @@
 //
 //	lnk.<childType>.<childId>.containedIn.<parentType>.<parentId>
 //
-// WireContainedIn validates BOTH endpoints are alive AND location-class before
-// it writes the link — a non-location vertex can never be wired into the place
-// graph.
+// WireContainedIn validates BOTH endpoints are alive AND keyed with an admitted
+// location type segment before it writes the link — a non-location vertex can
+// never be wired into the place graph.
 //
 // A location may carry an optional `.presentation` display aspect
 // ({name, description?, icon?, category?}) — set at creation or via
@@ -45,8 +55,8 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 // Package is the static, install-time bundle.
 var Package = pkgmgr.Definition{
 	Name:        "location-domain",
-	Version:     "0.2.3",
-	Description: "Spatial base domain: unit/building/property location vertices and the containedIn containment link.",
+	Version:     "0.3.0",
+	Description: "Spatial base domain: the abstract `location` type with its unit/building/property concrete leaves, and the containedIn containment link.",
 	Depends:     []string{},
 	DDLs:        DDLs(),
 	Permissions: Permissions(),

@@ -19,13 +19,15 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 //   - The script reads ONLY by known key. No prefix scans, no adjacency
 //     lookups, no lens-output reads. Each wire op validates its link endpoints
 //     by reading each by the key the caller lists in ContextHint.Reads.
-//   - Endpoint-class validation is AT THE OP (not the lens's untyped match):
-//     residesIn and worksAt targets MUST be class=location; availableAt / unavailableAt
-//     source MUST be a service TEMPLATE (a service whose ENVELOPE class
-//     ends in `.template`) and target MUST be class=location; permitsOperation
-//     source MUST be class=service and target MUST be an op-meta vertex
-//     (vtx.meta.<id> carrying a data.operationType). A dead or wrong-class
-//     endpoint is never wired (structured ScriptError).
+//   - Endpoint validation is AT THE OP (not the lens's untyped match):
+//     residesIn and worksAt targets MUST be keyed with an admitted location
+//     type segment (unit / building / property — the key is the authority, not
+//     the root class); availableAt / unavailableAt source MUST be a service
+//     TEMPLATE (a service whose ENVELOPE class ends in `.template`) and target
+//     MUST likewise be a location key; permitsOperation source MUST be
+//     class=service and target MUST be an op-meta vertex (vtx.meta.<id>
+//     carrying a data.operationType). A dead or wrong-typed endpoint is never
+//     wired (structured ScriptError).
 //   - residesIn cardinality: MULTIPLE allowed — an identity may reside in many
 //     locations; the lens's fresh-var exclusion is residence-set-aware.
 //   - worksAt cardinality: MULTIPLE allowed — one person may work at several
@@ -83,14 +85,14 @@ func serviceLocationDDL() pkgmgr.DDLSpec {
 			"(service→op-meta: which operations a service exposes). All links: the later-arriving vertex is " +
 			"the source, the pre-existing one is the target (Contract #1 §1.1); the sentence reads 'identity " +
 			"residesIn location', 'service availableAt location'. Each Wire op validates its endpoint classes " +
-			"at the op (residesIn target=location; availableAt/unavailableAt source=a service template " +
+			"at the op (residesIn target=an admitted location type; availableAt/unavailableAt source=a service template " +
 			"[its envelope class ends in .template], target=location; permitsOperation source=service, " +
 			"target=an op-meta vertex). residesIn and worksAt cardinality are multiple. Each Unwire op tombstones the link " +
 			"by its deterministic key, and a later Wire of the same endpoints revives it.",
 		Script: serviceLocationDDLScript,
 		InputSchema: `{"type":"object","properties":` +
 			`{"identity":{"type":"string","description":"vtx.identity.<NanoID> of the person — the residesIn link source (WireResidesIn) or the worksAt link source (WireWorksAt); required, validated alive."},` +
-			`"location":{"type":"string","description":"vtx.<locType>.<NanoID> of the location (WireResidesIn target / WireWorksAt target / WireAvailableAt target / WireUnavailableAt target; required, validated alive + class=location)."},` +
+			`"location":{"type":"string","description":"vtx.<locType>.<NanoID> of the location (WireResidesIn target / WireWorksAt target / WireAvailableAt target / WireUnavailableAt target; required, validated alive + an admitted location type segment)."},` +
 			`"service":{"type":"string","description":"vtx.service.<NanoID> of the service — a template for WireAvailableAt/WireUnavailableAt (validated alive + a template, envelope class ends in .template), or any service for WirePermitsOperation (validated alive + a service.* envelope class)."},` +
 			`"operation":{"type":"string","description":"vtx.meta.<NanoID> of the op-meta vertex the service exposes — the permitsOperation link target (WirePermitsOperation; required, validated alive + carries data.operationType)."},` +
 			`"linkKey":{"type":"string","description":"The deterministic 6-segment link key of an existing link to tombstone (the Unwire ops; required, validated alive)."}},` +
@@ -99,7 +101,7 @@ func serviceLocationDDL() pkgmgr.DDLSpec {
 			`{"primaryKey":{"type":"string","description":"The link key the operation wrote (Wire ops) or tombstoned (Unwire ops). Absent on idempotent no-op replays (nothing committed)."}}}`,
 		FieldDescription: map[string]string{
 			"identity":  "Full vtx.identity.<NanoID> key of the person. WireResidesIn / WireWorksAt validate it is alive and write it as the link SOURCE (the identity is the later-arriving vertex, Contract #1 §1.1).",
-			"location":  "Full vtx.<locType>.<NanoID> key of the location. Validated alive + class=location; written as the link TARGET for residesIn / worksAt / availableAt / unavailableAt.",
+			"location":  "Full vtx.<locType>.<NanoID> key of the location. Validated alive + an admitted location type segment; written as the link TARGET for residesIn / worksAt / availableAt / unavailableAt.",
 			"service":   "Full vtx.service.<NanoID> key. For availableAt/unavailableAt it MUST be a service template (its envelope class ends in .template); for permitsOperation it MUST be a service.* envelope class. Written as the link SOURCE.",
 			"operation": "Full vtx.meta.<NanoID> key of the op-meta vertex the service exposes. WirePermitsOperation validates it is alive and carries a data.operationType, then writes it as the permitsOperation link TARGET.",
 			"linkKey":   "Full 6-segment link key of an existing link to tombstone (the Unwire ops).",
@@ -108,7 +110,7 @@ func serviceLocationDDL() pkgmgr.DDLSpec {
 			{
 				Name:    "WireResidesIn — place a resident in a unit",
 				Payload: map[string]any{"identity": "vtx.identity.<idNanoID>", "location": "vtx.unit.<unitNanoID>"},
-				ExpectedOutcome: "Validates the identity (alive) and the unit (alive + class=location), then writes " +
+				ExpectedOutcome: "Validates the identity (alive) and the unit (alive + an admitted location type segment), then writes " +
 					"lnk.identity.<idNanoID>.residesIn.unit.<unitNanoID> (class=residesIn, source=identity, target=location). " +
 					"Returns primaryKey (the link key). Idempotent: a replay where the link already exists alive commits " +
 					"nothing and omits primaryKey. A link previously tombstoned by UnwireResidesIn is REVIVED (a resident who " +
@@ -118,7 +120,7 @@ func serviceLocationDDL() pkgmgr.DDLSpec {
 			{
 				Name:    "WireWorksAt — place a staff member at their workplace",
 				Payload: map[string]any{"identity": "vtx.identity.<staffNanoID>", "location": "vtx.building.<buildingNanoID>"},
-				ExpectedOutcome: "Validates the identity (alive) and the building (alive + class=location), then writes " +
+				ExpectedOutcome: "Validates the identity (alive) and the building (alive + an admitted location type segment), then writes " +
 					"lnk.identity.<staffNanoID>.worksAt.building.<buildingNanoID> (class=worksAt, source=identity, target=location). " +
 					"Returns primaryKey (the link key). Idempotent: a replay where the link already exists alive commits nothing " +
 					"and omits primaryKey; a link previously tombstoned by UnwireWorksAt is REVIVED. worksAt cardinality is " +
@@ -129,9 +131,9 @@ func serviceLocationDDL() pkgmgr.DDLSpec {
 				Name:    "WireAvailableAt — make a laundry service available at a building",
 				Payload: map[string]any{"service": "vtx.service.<laundryTplNanoID>", "location": "vtx.building.<buildingNanoID>"},
 				ExpectedOutcome: "Validates the service is alive + a template (its envelope class ends in .template) and the " +
-					"building is alive + class=location, then writes lnk.service.<laundryTplNanoID>.availableAt.building.<buildingNanoID> " +
+					"building is alive + an admitted location type segment, then writes lnk.service.<laundryTplNanoID>.availableAt.building.<buildingNanoID> " +
 					"(class=availableAt, source=service, target=location). Returns primaryKey. Rejects with ScriptError if the " +
-					"service is not a template or the location is not class=location.",
+					"service is not a template or the location is not a location key.",
 			},
 			{
 				Name:    "WireUnavailableAt — exclude the laundry service from a penthouse",
@@ -204,10 +206,24 @@ def required_string(p, name):
         fail("InvalidArgument: " + name + ": required non-empty string")
     return v.strip()
 
-# The location types this scheme admits as link endpoints (the <locType> key
-# segment in vtx.<locType>.<NanoID>, Contract #6 §6.9). location-domain owns
-# the vertices; the scheme references them by class.
-LOCATION_CLASS = "location"
+# The concrete location levels this scheme admits as link endpoints (the
+# <locType> key segment in vtx.<locType>.<NanoID>, Contract #6 §6.9).
+# location-domain owns the vertices; this scheme references them by KEY TYPE —
+# the same authority a lens label resolves against. A location vertex's class
+# IS its own key type (unit / building / property), so no single class value
+# names the family.
+LOCATION_TYPES = ["unit", "building", "property"]
+
+# The class a location vertex minted before the taxonomy landed carries: one
+# shared discriminator across all three levels. Nothing rewrites those
+# documents, so both class shapes are live at once and this guard admits
+# either.
+LEGACY_LOCATION_CLASS = "location"
+
+# The full set of classes a live location vertex may carry: its own key type
+# (the class every newly-minted location gets) or the shared legacy
+# discriminator.
+LOCATION_CLASSES = LOCATION_TYPES + [LEGACY_LOCATION_CLASS]
 
 def parts_of(key, name, want_type):
     # Parses a VERTEX key: exactly 3 segments vtx.<type>.<NanoID>. A non-3
@@ -255,11 +271,31 @@ def class_of(state, key):
     return getattr(doc, "class")
 
 def require_live_location(state, key, name):
+    # The endpoint MUST be alive, keyed vtx.<locationType>.<NanoID> at an
+    # admitted location level, AND carry a location class.
+    # BOTH the key and the class are checked, and each catches what the other
+    # cannot. The KEY's type segment is the type authority — it is what a lens
+    # label resolves against, and it is the only thing that can say "any
+    # location" across the three levels, since a location's class is its own
+    # key type. The CLASS is what proves location-domain minted the vertex: a
+    # foreign package writing vtx.unit.<id> with a class of its own passes the
+    # key check and must still be refused.
     if not vertex_alive(state, key):
         fail("UnknownLocation: " + name + ": " + key + " is absent or tombstoned")
+    lt = key_type_of(key)
+    if lt not in LOCATION_TYPES:
+        fail("NotALocation: " + name + ": " + key + " has type segment " + str(lt) + ", required one of unit, building, property")
     cls = class_of(state, key)
-    if cls != LOCATION_CLASS:
-        fail("NotALocation: " + name + ": " + key + " has class " + str(cls) + ", required " + LOCATION_CLASS)
+    if cls not in LOCATION_CLASSES:
+        fail("NotALocation: " + name + ": " + key + " has class " + str(cls) + ", required its own location type or " + LEGACY_LOCATION_CLASS)
+
+def key_type_of(key):
+    # The type segment of a 3-segment vtx.<type>.<NanoID> key, or None for any
+    # other shape (an aspect key, a link key, a malformed string).
+    parts = key.split(".")
+    if len(parts) != 3 or parts[0] != "vtx":
+        return None
+    return parts[1]
 
 def require_live_service_template(state, key, name):
     # The service availableAt/unavailableAt source MUST be a TEMPLATE: alive and

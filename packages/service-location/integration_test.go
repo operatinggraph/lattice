@@ -17,12 +17,13 @@
 //  3. TestSL_UnavailableAt_Wire            — service-template→location exclusion link
 //  4. TestSL_PermitsOperation_Wire         — service→op-meta link
 //  5. TestSL_AvailableAt_RejectsInstance   — availableAt source must be a TEMPLATE (instance Rejected)
-//  6. TestSL_ResidesIn_RejectsNonLocation  — residesIn target must be class=location
+//  6. TestSL_ResidesIn_RejectsNonLocation  — residesIn target must be a location KEY TYPE
+//     TestSL_ResidesIn_RejectsForeignClassOnLocationKey — …and a location CLASS
 //  7. TestSL_PermitsOperation_RejectsNonOpMeta — permitsOperation target must carry operationType
 //  8. TestSL_ResidesIn_Multiple            — residesIn cardinality is multiple
 //  9. TestSL_UnauthorizedDenied            — consumer cap doc → Rejected
 //  10. TestSL_WorksAt_WireUnwire           — staff spine link shape + direction + unwire
-//  11. TestSL_WorksAt_RejectsNonLocation   — worksAt target must be class=location
+//  11. TestSL_WorksAt_RejectsNonLocation   — worksAt target must be a location KEY TYPE
 //  12. TestSL_WorksAt_Multiple             — worksAt cardinality is multiple
 package servicelocation_test
 
@@ -225,6 +226,32 @@ func submitHint(t *testing.T, ctx context.Context, conn *substrate.Conn, cp *pro
 	testutil.DriveOne(t, ctx, cp, cons, outcome)
 }
 
+// submitHintWithReason is submitHint's sibling for a REJECTION vector: it
+// returns the script's own failure message so a test can name the guard it
+// means to exercise. A bare outcome check cannot tell the location guard from
+// a hydration miss, an auth denial, or a malformed key.
+func submitHintWithReason(t *testing.T, ctx context.Context, conn *substrate.Conn, cp *processor.CommitPath, cons jetstream.Consumer,
+	label, op string, payload map[string]any, hint *processor.ContextHint) (processor.MessageOutcome, string) {
+	t.Helper()
+	pb, _ := json.Marshal(payload)
+	env := &processor.OperationEnvelope{
+		RequestID:     testutil.GenReqID(label),
+		Lane:          processor.LaneDefault,
+		OperationType: op,
+		Actor:         slStaffActorKey,
+		SubmittedAt:   time.Now().UTC().Format(time.RFC3339),
+		Class:         "serviceLocation",
+		Payload:       json.RawMessage(pb),
+		ContextHint:   hint,
+	}
+	outcome, reply := testutil.SubmitAndAwaitReply(t, ctx, conn, cp, cons, env)
+	msg := ""
+	if reply != nil && reply.Error != nil {
+		msg = reply.Error.Message
+	}
+	return outcome, msg
+}
+
 // TestSL_ResidesIn_WireUnwire wires identity→location and asserts the 6-segment
 // residesIn link shape + direction (identity=source, location=target per
 // Contract #1 §1.1 — "identity residesIn location"), then unwires it.
@@ -374,11 +401,18 @@ func assertLinkRevived(t *testing.T, ctx context.Context, conn *substrate.Conn, 
 	}
 }
 
-// TestSL_WorksAt_RejectsNonLocation proves worksAt carries the SAME
-// location-class guard as residesIn: a workplace that is alive but not
-// class=location is rejected. Without this the staff spine could be anchored on
-// an arbitrary vertex, and the workplace-anchored read grants derived from it
-// would scope to something that is not a place.
+// TestSL_WorksAt_RejectsNonLocation proves worksAt carries the SAME location
+// guard as residesIn: a workplace that is alive but whose KEY TYPE SEGMENT is
+// not a location level is rejected. Without this the staff spine could be
+// anchored on an arbitrary vertex, and the workplace-anchored read grants
+// derived from it would scope to something that is not a place.
+//
+// The guard reads the KEY, never the root class. A location vertex's class
+// equals its own key type (unit / building / property) while every location
+// minted before the taxonomy landed carries the shared class `location`, so no
+// class value names the family and a class check would reject one of the two
+// live populations. seedLocation's own fixtures — concrete key type, legacy
+// shared class — are this test's positive vector, and they pass.
 func TestSL_WorksAt_RejectsNonLocation(t *testing.T) {
 	ctx, conn := setupSLEnv(t)
 	cp, cons := newSLPipeline(t, ctx, conn, "worknonloc")
@@ -387,7 +421,7 @@ func TestSL_WorksAt_RejectsNonLocation(t *testing.T) {
 	idKey := "vtx.identity." + idID
 	seedVertex(t, ctx, conn, idKey, "identity", map[string]any{"state": "claimed"})
 	notLocID := "SLfakebdgQRHJKMNPQRS"
-	notLocKey := "vtx.building." + notLocID
+	notLocKey := "vtx.service." + notLocID
 	seedVertex(t, ctx, conn, notLocKey, "service", nil)
 
 	submitHint(t, ctx, conn, cp, cons, "slWorkNonLoc", "WireWorksAt",
@@ -528,8 +562,10 @@ func TestSL_AvailableAt_RejectsInstance(t *testing.T) {
 	}
 }
 
-// TestSL_ResidesIn_RejectsNonLocation proves the location-class guard: a
-// residesIn whose target is alive but NOT class=location is rejected.
+// TestSL_ResidesIn_RejectsNonLocation proves the location guard: a residesIn
+// whose target is alive but whose KEY TYPE SEGMENT is not a location level is
+// rejected. Its positive vector is every other residesIn test in this file,
+// which wires a seedLocation endpoint and is accepted.
 func TestSL_ResidesIn_RejectsNonLocation(t *testing.T) {
 	ctx, conn := setupSLEnv(t)
 	cp, cons := newSLPipeline(t, ctx, conn, "resnonloc")
@@ -537,15 +573,103 @@ func TestSL_ResidesIn_RejectsNonLocation(t *testing.T) {
 	idID := "SLresnonmocRHJKMNPQR"
 	idKey := "vtx.identity." + idID
 	seedVertex(t, ctx, conn, idKey, "identity", map[string]any{"state": "claimed"})
-	// A unit-typed key whose class is NOT location — the rejection comes from
-	// the class check, not the type segment.
+	// A live vertex whose type segment is not an admitted location level.
 	notLocID := "SLfakeunitQRHJKMNPQR"
-	notLocKey := "vtx.unit." + notLocID
+	notLocKey := "vtx.service." + notLocID
 	seedVertex(t, ctx, conn, notLocKey, "service", nil)
 
 	submitHint(t, ctx, conn, cp, cons, "slResNonLoc", "WireResidesIn",
 		map[string]any{"identity": idKey, "location": notLocKey},
 		wireHint(idKey, "residesIn", notLocKey), processor.OutcomeRejected)
+}
+
+// TestSL_ResidesIn_RejectsForeignClassOnLocationKey is the CLASS arm's own pin
+// on an "any location" guard, and the key arm cannot stand in for it: the
+// vector is keyed vtx.unit.<NanoID>, so every key-shaped check passes and only
+// the class refuses it.
+//
+// What it protects: `vtx.unit.*` is location-domain's keyspace, but nothing
+// stops another package minting a vertex there under a class of its own — and
+// a residesIn edge is what the whole capabilityServiceAccess auth plane walks
+// from. The positive vectors are seedLocation's own endpoints, whose concrete
+// key type carries the shared pre-taxonomy class (the live migration shape)
+// and which every other residesIn test here accepts.
+func TestSL_ResidesIn_RejectsForeignClassOnLocationKey(t *testing.T) {
+	ctx, conn := setupSLEnv(t)
+	cp, cons := newSLPipeline(t, ctx, conn, "resforeigncls")
+
+	idID := "SLresforeignHJKMNPQR"
+	idKey := "vtx.identity." + idID
+	seedVertex(t, ctx, conn, idKey, "identity", map[string]any{"state": "claimed"})
+	// A location KEY TYPE carrying a class location-domain never writes.
+	foreignID := "SLforeignCLassHJKMNP"
+	foreignKey := "vtx.unit." + foreignID
+	seedVertex(t, ctx, conn, foreignKey, "service", nil)
+
+	outcome, why := submitHintWithReason(t, ctx, conn, cp, cons, "slResForeign", "WireResidesIn",
+		map[string]any{"identity": idKey, "location": foreignKey},
+		wireHint(idKey, "residesIn", foreignKey))
+	if outcome != processor.OutcomeRejected {
+		t.Fatalf("outcome = %v, want rejected", outcome)
+	}
+	if !strings.Contains(why, "NotALocation") {
+		t.Errorf("refused with %q, want the location guard's own NotALocation", why)
+	}
+}
+
+// TestSL_ResidesIn_AcceptsPerTypeClass pins the FORWARD-migration half of the
+// class arm, which every other location fixture in this file misses: they all
+// seed the shared pre-taxonomy class, so narrowing the admitted set back to
+// just that one would leave the whole suite green while every location minted
+// AFTER the upgrade silently stopped being wireable.
+//
+// A location created by location-domain today carries its own key type as its
+// class (CreateLocation writes make_vtx(loc_key, lt, {})), so this is the shape
+// production produces from here on. Its legacy counterpart is seedLocation's
+// own output, accepted by every other residesIn test here.
+func TestSL_ResidesIn_AcceptsPerTypeClass(t *testing.T) {
+	ctx, conn := setupSLEnv(t)
+	cp, cons := newSLPipeline(t, ctx, conn, "respertype")
+
+	idID := "SLrespertypeHJKMNPQR"
+	idKey := "vtx.identity." + idID
+	seedVertex(t, ctx, conn, idKey, "identity", map[string]any{"state": "claimed"})
+	// class == the key's own type segment: what CreateLocation mints now.
+	unitID := "SLpertypeUnitHJKMNPQ"
+	unitKey := "vtx.unit." + unitID
+	seedVertex(t, ctx, conn, unitKey, "unit", nil)
+
+	submitHint(t, ctx, conn, cp, cons, "slResPerType", "WireResidesIn",
+		map[string]any{"identity": idKey, "location": unitKey},
+		wireHint(idKey, "residesIn", unitKey), processor.OutcomeAccepted)
+}
+
+// TestSL_ResidesIn_RejectsLegacyClassOnNonLocationKey discriminates the KEY arm
+// from the class arm. Every other negative vector here fails BOTH arms at once,
+// so none of them can tell a key-type guard from the class-only guard that
+// preceded it. This one carries an admitted class on a key type that is not a
+// location at all: only the key arm can refuse it.
+func TestSL_ResidesIn_RejectsLegacyClassOnNonLocationKey(t *testing.T) {
+	ctx, conn := setupSLEnv(t)
+	cp, cons := newSLPipeline(t, ctx, conn, "reslegacynonloc")
+
+	idID := "SLresLegacyHJKMNPQRS"
+	idKey := "vtx.identity." + idID
+	seedVertex(t, ctx, conn, idKey, "identity", map[string]any{"state": "claimed"})
+	// An admitted CLASS on a non-location KEY TYPE.
+	impostorID := "SLimpostorHJKMNPQRST"
+	impostorKey := "vtx.service." + impostorID
+	seedVertex(t, ctx, conn, impostorKey, "location", nil)
+
+	outcome, why := submitHintWithReason(t, ctx, conn, cp, cons, "slResLegacyBad", "WireResidesIn",
+		map[string]any{"identity": idKey, "location": impostorKey},
+		wireHint(idKey, "residesIn", impostorKey))
+	if outcome != processor.OutcomeRejected {
+		t.Fatalf("outcome = %v, want rejected", outcome)
+	}
+	if !strings.Contains(why, "NotALocation") {
+		t.Errorf("refused with %q, want the location guard's own NotALocation", why)
+	}
 }
 
 // TestSL_PermitsOperation_RejectsNonOpMeta proves the op-meta guard: a

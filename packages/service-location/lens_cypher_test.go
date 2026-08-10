@@ -34,9 +34,12 @@ func newSlFixture(t *testing.T) *slFixture {
 	return &slFixture{adjKV: adjKV, coreKV: coreKV, ids: map[string]string{}, types: map[string]string{}}
 }
 
-// vtx seeds a vertex. class is the ENVELOPE class, which differs from the key
-// type for a location (every unit/building/property carries class=location) —
-// the distinction the lens's :building label depends on.
+// vtx seeds a vertex. class is the ENVELOPE class, kept separate from the key
+// type so a fixture can reproduce either live location shape: a location minted
+// after the taxonomy landed carries its own key type as its class, while one
+// minted before carries the shared class `location`. A cypher label resolves
+// against the KEY either way, which is what the lens's :building label depends
+// on.
 func (f *slFixture) vtx(t *testing.T, name, typ, class string) string {
 	t.Helper()
 	id := lenstest.NanoID(name)
@@ -177,8 +180,8 @@ func TestStaffReadGrants_OtherRoleGrantsNothing(t *testing.T) {
 	require.Empty(t, f.project(t, staffReadGrantsSpec))
 }
 
-// worksAt accepts any class=location target, so the :building label is what
-// holds the token at building granularity. A unit workplace grants nothing —
+// worksAt accepts any location KEY TYPE, so the :building label is what holds
+// the token at building granularity. A unit workplace grants nothing —
 // were it to grant, the token would be a unit NanoID, and any lens anchoring
 // rows on a unit would silently open them.
 func TestStaffReadGrants_NonBuildingWorkplaceGrantsNothing(t *testing.T) {

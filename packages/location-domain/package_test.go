@@ -23,32 +23,70 @@ func TestPackage_ManifestMatchesDefinition(t *testing.T) {
 	}
 }
 
-// TestPackage_DDLAndOps pins the single location DDL, its four commands, the
-// four operator-scoped permission grants, and — the load-bearing scope
-// assertion — that the package declares ZERO lenses / roles / weaver / loom
-// (it is a topology-only base domain; the read-path / auth plane is SL.2).
+// TestPackage_DDLAndOps pins the FOUR-DDL taxonomy (abstract `location` +
+// concrete unit/building/property, each a subtypeOf it), the five commands
+// every concrete leaf admits, the five operator-scoped permission grants, and
+// — the load-bearing scope assertion — that the package declares ZERO lenses /
+// roles / weaver / loom (it is a topology-only base domain; the read-path /
+// auth plane is SL.2).
 func TestPackage_DDLAndOps(t *testing.T) {
-	if got := len(Package.DDLs); got != 1 {
-		t.Fatalf("expected 1 DDL, got %d", got)
+	if got := len(Package.DDLs); got != 4 {
+		t.Fatalf("expected 4 DDLs (abstract location + 3 concrete leaves), got %d", got)
 	}
-	ddl := Package.DDLs[0]
-	if ddl.CanonicalName != "location" {
-		t.Fatalf("DDL[0] canonicalName = %q, want location", ddl.CanonicalName)
-	}
-	if ddl.Class != "meta.ddl.vertexType" {
-		t.Fatalf("DDL[0] class = %q, want meta.ddl.vertexType", ddl.Class)
+	byName := map[string]pkgmgr.DDLSpec{}
+	for _, d := range Package.DDLs {
+		if d.Class != "meta.ddl.vertexType" {
+			t.Fatalf("DDL %q class = %q, want meta.ddl.vertexType", d.CanonicalName, d.Class)
+		}
+		byName[d.CanonicalName] = d
 	}
 
-	wantCmds := map[string]bool{"CreateLocation": false, "TombstoneLocation": false, "WireContainedIn": false, "UnwireContainedIn": false, "SetLocationPresentation": false}
-	for _, c := range ddl.PermittedCommands {
-		if _, ok := wantCmds[c]; !ok {
-			t.Fatalf("unexpected permittedCommand %q", c)
-		}
-		wantCmds[c] = true
+	// The abstract parent names no instance: no script, no permittedCommands.
+	abstract, ok := byName["location"]
+	if !ok {
+		t.Fatalf("no DDL declares the abstract canonicalName location (have %v)", ddlNames())
 	}
-	for c, seen := range wantCmds {
-		if !seen {
-			t.Fatalf("permittedCommands missing %q (have %v)", c, ddl.PermittedCommands)
+	if !abstract.Abstract {
+		t.Fatalf("the location DDL must declare Abstract: true")
+	}
+	if abstract.Script != "" {
+		t.Fatalf("the abstract location DDL must declare no script")
+	}
+	if len(abstract.PermittedCommands) != 0 {
+		t.Fatalf("the abstract location DDL must declare no permittedCommands, got %v", abstract.PermittedCommands)
+	}
+	if abstract.SubtypeOfRef != "" {
+		t.Fatalf("the abstract location DDL is the taxonomy root and declares no SubtypeOfRef, got %q", abstract.SubtypeOfRef)
+	}
+
+	// Each concrete leaf is a subtypeOf location, carries the shared script,
+	// and admits all five ops.
+	wantOps := []string{"CreateLocation", "TombstoneLocation", "WireContainedIn", "UnwireContainedIn", "SetLocationPresentation"}
+	for _, leafName := range LocationTypes {
+		leaf, ok := byName[leafName]
+		if !ok {
+			t.Fatalf("no DDL declares the concrete leaf %q (have %v)", leafName, ddlNames())
+		}
+		if leaf.Abstract {
+			t.Fatalf("leaf %q must not be abstract", leafName)
+		}
+		if leaf.SubtypeOfRef != "location" {
+			t.Fatalf("leaf %q subtypeOfRef = %q, want location", leafName, leaf.SubtypeOfRef)
+		}
+		if leaf.Script != locationDDLScript {
+			t.Fatalf("leaf %q must carry the shared location script", leafName)
+		}
+		seen := map[string]bool{}
+		for _, c := range leaf.PermittedCommands {
+			seen[c] = true
+		}
+		for _, want := range wantOps {
+			if !seen[want] {
+				t.Fatalf("leaf %q permittedCommands missing %q (have %v)", leafName, want, leaf.PermittedCommands)
+			}
+		}
+		if len(leaf.PermittedCommands) != len(wantOps) {
+			t.Fatalf("leaf %q permittedCommands = %v, want exactly %v", leafName, leaf.PermittedCommands, wantOps)
 		}
 	}
 
@@ -100,7 +138,7 @@ func TestPackage_DDLAndOps(t *testing.T) {
 // TestPackage_NoScans mirrors the known-key discipline guard the other
 // packages enforce: the script must read only by known key.
 func TestPackage_NoScans(t *testing.T) {
-	src := Package.DDLs[0].Script
+	src := locationDDLScript
 	for _, forbidden := range []string{"KVListKeys", "list_keys", "scan(", "keys_with_prefix"} {
 		if strings.Contains(src, forbidden) {
 			t.Errorf("location script must not reference prefix-scan helper %q", forbidden)
@@ -109,13 +147,40 @@ func TestPackage_NoScans(t *testing.T) {
 }
 
 // TestPackage_ScriptGuardsContainedIn pins the load-bearing invariants the
-// containedIn wire-op enforces: the link relation name, the shared location
-// class guard, and the direction terms (child source / parent target).
+// containedIn wire-op enforces: the link relation name, the key-type-segment
+// location guard, and the direction terms (child source / parent target).
 func TestPackage_ScriptGuardsContainedIn(t *testing.T) {
-	src := Package.DDLs[0].Script
-	for _, want := range []string{"containedIn", "NotALocation", "LOCATION_CLASS", "require_live_location"} {
+	src := locationDDLScript
+	for _, want := range []string{"containedIn", "NotALocation", "LOCATION_TYPES", "key_type_of", "require_live_location"} {
 		if !strings.Contains(src, want) {
 			t.Errorf("location script must reference %q", want)
 		}
 	}
+	// The endpoint guard is a CONJUNCTION of the key's type segment and the
+	// root class, and each conjunct catches what the other cannot: the key
+	// segment is the only thing that can say "any location" across the three
+	// levels (a location's class is its own key type), while the class is what
+	// proves location-domain minted the vertex rather than a foreign package
+	// keying under vtx.unit.*. Both must be present.
+	for _, want := range []string{"class_of", "LOCATION_CLASSES", "LEGACY_LOCATION_CLASS"} {
+		if !strings.Contains(src, want) {
+			t.Errorf("location script must reference %q — the endpoint guard checks the key AND the class", want)
+		}
+	}
+	// The class arm admits the shared legacy discriminator alongside the
+	// per-type classes: locations minted before the taxonomy landed carry
+	// `location` on a concrete key and nothing rewrites them, so a class arm
+	// that admitted only the per-type values would refuse every one of them.
+	if !strings.Contains(src, `LOCATION_CLASSES = LOCATION_TYPES + [LEGACY_LOCATION_CLASS]`) {
+		t.Error("the admitted class set must be the per-type classes PLUS the legacy shared discriminator")
+	}
+}
+
+// ddlNames lists the declared canonicalNames, for a legible failure message.
+func ddlNames() []string {
+	out := make([]string, 0, len(Package.DDLs))
+	for _, d := range Package.DDLs {
+		out = append(out, d.CanonicalName)
+	}
+	return out
 }

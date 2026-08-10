@@ -351,7 +351,7 @@ func menuItemVertexTypeDDL() pkgmgr.DDLSpec {
 		InputSchema: `{"type":"object","properties":` +
 			`{"name":{"type":"string","description":"Menu item display name (CreateMenuItem; required, non-empty)."},` +
 			`"priceCents":{"type":"number","description":"Price in integer cents; required, must be > 0 (CreateMenuItem)."},` +
-			`"locationKey":{"type":"string","description":"vtx.<locationType>.<NanoID> of the place that serves this item (CreateMenuItem; required, validated alive + class=location)."},` +
+			`"locationKey":{"type":"string","description":"vtx.<locationType>.<NanoID> of the place that serves this item (CreateMenuItem; required, validated alive + an admitted location type segment)."},` +
 			`"menuItemId":{"type":"string","description":"Optional bare NanoID for the new item (CreateMenuItem); absent → minted."},` +
 			`"menuItemKey":{"type":"string","description":"vtx.menuitem.<NanoID> of an existing item (RetireMenuItem; required, validated alive)."}},` +
 			`"required":[]}`,
@@ -360,7 +360,7 @@ func menuItemVertexTypeDDL() pkgmgr.DDLSpec {
 		FieldDescription: map[string]string{
 			"name":        "Menu item display name (CreateMenuItem; required, non-empty string), stored on the .price aspect.",
 			"priceCents":  "The item's price in integer cents; required, must be a positive number (CreateMenuItem).",
-			"locationKey": "Full vtx.<locationType>.<NanoID> key (unit|building|property — the class is always `location`) of the place that serves this item (CreateMenuItem; required, validated alive + class=location). Becomes the servedAt link, which is what makes the item reachable from a resident of that place.",
+			"locationKey": "Full vtx.<locationType>.<NanoID> key (unit|building|property — the class equals the key type) of the place that serves this item (CreateMenuItem; required, validated alive + an admitted location type segment). Becomes the servedAt link, which is what makes the item reachable from a resident of that place.",
 			"menuItemId":  "Optional bare NanoID (no dots / key segments) for the new item (vtx.menuitem.<menuItemId>). Absent → minted with nanoid.new() (CreateMenuItem).",
 			"menuItemKey": "Full vtx.menuitem.<NanoID> key of an existing item (RetireMenuItem; required, validated alive + class=menuitem).",
 		},
@@ -1489,17 +1489,49 @@ def class_of(state, key):
         return None
     return getattr(doc, "class")
 
-# The class a servedAt link's target must carry. location-domain owns the
-# vertices; this scheme references them by class, the way service-location's
-# wiring ops do.
-LOCATION_CLASS = "location"
+# The concrete location levels a servedAt link's target may carry.
+# location-domain owns the vertices; this scheme references them by KEY TYPE,
+# the way service-location's wiring ops do — a location vertex's class IS its
+# own key type, so no single class value names the family.
+LOCATION_TYPES = ["unit", "building", "property"]
+
+# The class a location vertex minted before the taxonomy landed carries: one
+# shared discriminator across all three levels. Nothing rewrites those
+# documents, so both class shapes are live at once and this guard admits
+# either.
+LEGACY_LOCATION_CLASS = "location"
+
+# The full set of classes a live location vertex may carry: its own key type
+# (the class every newly-minted location gets) or the shared legacy
+# discriminator.
+LOCATION_CLASSES = LOCATION_TYPES + [LEGACY_LOCATION_CLASS]
+
+def key_type_of(key):
+    # The type segment of a 3-segment vtx.<type>.<NanoID> key, or None for any
+    # other shape (an aspect key, a link key, a malformed string).
+    parts = key.split(".")
+    if len(parts) != 3 or parts[0] != "vtx":
+        return None
+    return parts[1]
 
 def require_live_location(state, key, name):
+    # Alive, keyed vtx.<locationType>.<NanoID> at an admitted location level,
+    # AND carrying a location class.
+    # BOTH the key and the class are checked, and each catches what the other
+    # cannot. The KEY's type segment is the type authority — it is what a lens
+    # label resolves against, and it is the only thing that can say "any
+    # location" across the three levels, since a location's class is its own
+    # key type. The CLASS is what proves location-domain minted the vertex: a
+    # foreign package writing vtx.unit.<id> with a class of its own passes the
+    # key check and must still be refused.
     if not vertex_alive(state, key):
         fail("UnknownLocation: " + name + ": " + key + " is absent or tombstoned")
+    lt = key_type_of(key)
+    if lt not in LOCATION_TYPES:
+        fail("NotALocation: " + name + ": " + key + " has type segment " + str(lt) + ", required one of unit, building, property")
     cls = class_of(state, key)
-    if cls != LOCATION_CLASS:
-        fail("NotALocation: " + name + ": " + key + " has class " + str(cls) + ", required " + LOCATION_CLASS)
+    if cls not in LOCATION_CLASSES:
+        fail("NotALocation: " + name + ": " + key + " has class " + str(cls) + ", required its own location type or " + LEGACY_LOCATION_CLASS)
 
 # --- workplace write confinement (facet-staff-worlds-design.md §3.5) ---------
 # Mirrors tabDDLScript's identically-named helpers verbatim — see that

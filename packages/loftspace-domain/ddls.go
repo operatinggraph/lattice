@@ -26,7 +26,7 @@ const (
 //   - The script reads ONLY by known key. SetListing / SetUnitAddress validate
 //     their target unit by the key the caller lists in ContextHint.Reads. No
 //     prefix scans, no adjacency lookups.
-//   - The target MUST be an alive vtx.unit.<NanoID> of class=location (the place
+//   - The target MUST be an alive vtx.unit.<NanoID> (the place
 //     graph's unit, owned by location-domain). A non-unit key, a dead vertex, or
 //     a non-location class is rejected (structured ScriptError) — listing
 //     economics attach only to a leasable unit.
@@ -37,7 +37,7 @@ const (
 //     own, gated by the aspect-type DDL being installed).
 //
 // Both aspects are NON-sensitive: rent / address are not PII in the NFR-S3
-// sense, and they attach to a vtx.unit (class=location), not an identity — so
+// sense, and they attach to a vtx.unit, not an identity — so
 // step-6's sensitiveAspectScope (which anchors sensitive aspects to identity
 // vertices) must NOT fire. Applicant income / employment is the sensitive data;
 // it lives on the identity (identity-domain), not here.
@@ -51,7 +51,7 @@ func loftspaceListingVertexDDL() pkgmgr.DDLSpec {
 		Class:             "meta.ddl.vertexType",
 		PermittedCommands: []string{"SetListing", "SetUnitAddress", "SetListingStatus"},
 		Description: "LoftSpace listing-economics DDL. Owns SetListing + SetUnitAddress + SetListingStatus, which " +
-			"attach the leasable facets onto an EXISTING location unit (vtx.unit.<NanoID>, class=location, owned by " +
+			"attach the leasable facets onto an EXISTING location unit (vtx.unit.<NanoID>, owned by " +
 			"location-domain) — this package introduces NO vertex type. SetListing writes the .listing aspect " +
 			"{rentAmount, rentCurrency, bedrooms, bathrooms?, sqft?, availableFrom (RFC3339 date), " +
 			"leaseTermMonths, status ∈ available|pending|leased|withdrawn}. SetUnitAddress writes the .address aspect " +
@@ -61,11 +61,11 @@ func loftspaceListingVertexDDL() pkgmgr.DDLSpec {
 			"leased on approval, and the op a landlord calls to take a unit off-market (withdrawn) or relist it " +
 			"(available). All three are unconditioned upserts (create-if-absent / overwrite-if-present) so " +
 			"an operator can correct a listing or flip status by hand. The target unit MUST be alive + " +
-			"class=location; the caller lists the unit key in ContextHint.Reads. Neither aspect is sensitive (they " +
+			"a vtx.unit.<NanoID> key; the caller lists the unit key in ContextHint.Reads. Neither aspect is sensitive (they " +
 			"attach to a unit, not an identity).",
 		Script: loftspaceListingDDLScript,
 		InputSchema: `{"type":"object","properties":` +
-			`{"unit":{"type":"string","description":"vtx.unit.<NanoID> of an existing location unit (required; validated alive + class=location)."},` +
+			`{"unit":{"type":"string","description":"vtx.unit.<NanoID> of an existing location unit (required; validated alive + a vtx.unit.<NanoID> key)."},` +
 			`"rentAmount":{"type":"number","description":"Monthly rent (SetListing; required, > 0)."},` +
 			`"rentCurrency":{"type":"string","description":"ISO currency code for rentAmount, e.g. USD (SetListing; required)."},` +
 			`"bedrooms":{"type":"integer","description":"Bedroom count (SetListing; required, >= 0)."},` +
@@ -83,7 +83,7 @@ func loftspaceListingVertexDDL() pkgmgr.DDLSpec {
 		OutputSchema: `{"type":"object","properties":` +
 			`{"primaryKey":{"type":"string","description":"The aspect key the operation wrote: vtx.unit.<NanoID>.listing (SetListing) or vtx.unit.<NanoID>.address (SetUnitAddress)."}}}`,
 		FieldDescription: map[string]string{
-			"unit":            "Full vtx.unit.<NanoID> key of an existing location unit. Both ops validate it is alive + class=location and write their aspect on it. The caller MUST list this key in ContextHint.Reads.",
+			"unit":            "Full vtx.unit.<NanoID> key of an existing location unit. Both ops validate it is alive + a vtx.unit.<NanoID> key and write their aspect on it. The caller MUST list this key in ContextHint.Reads.",
 			"rentAmount":      "Monthly rent as a number (> 0). Stored on the .listing aspect (SetListing).",
 			"rentCurrency":    "ISO currency code (e.g. USD) for rentAmount. Stored on the .listing aspect (SetListing).",
 			"bedrooms":        "Bedroom count, integer >= 0. Stored on the .listing aspect (SetListing).",
@@ -112,7 +112,7 @@ func loftspaceListingVertexDDL() pkgmgr.DDLSpec {
 					"leaseTermMonths": 12,
 					"status":          "available",
 				},
-				ExpectedOutcome: "Validates the unit is alive + class=location, then writes vtx.unit.<unitNanoID>.listing " +
+				ExpectedOutcome: "Validates the unit is alive + a vtx.unit.<NanoID> key, then writes vtx.unit.<unitNanoID>.listing " +
 					"(class=listing) as an unconditioned upsert. Returns primaryKey (the listing aspect key). Re-running " +
 					"with new values overwrites in place (e.g. flip status to leased). Rejects a non-unit key, a dead unit, " +
 					"or a non-location vertex with a ScriptError.",
@@ -126,7 +126,7 @@ func loftspaceListingVertexDDL() pkgmgr.DDLSpec {
 					"region": "CA",
 					"postal": "94103",
 				},
-				ExpectedOutcome: "Validates the unit is alive + class=location, then writes vtx.unit.<unitNanoID>.address " +
+				ExpectedOutcome: "Validates the unit is alive + a vtx.unit.<NanoID> key, then writes vtx.unit.<unitNanoID>.address " +
 					"(class=address) as an unconditioned upsert. Returns primaryKey (the address aspect key).",
 			},
 			{
@@ -135,7 +135,7 @@ func loftspaceListingVertexDDL() pkgmgr.DDLSpec {
 					"unit":   "vtx.unit.<unitNanoID>",
 					"status": "leased",
 				},
-				ExpectedOutcome: "Validates the unit is alive + class=location, kv.Reads the existing .listing aspect " +
+				ExpectedOutcome: "Validates the unit is alive + a vtx.unit.<NanoID> key, kv.Reads the existing .listing aspect " +
 					"(rejects NoListing if absent), and rewrites ONLY status — preserving rentAmount / bedrooms / " +
 					"availableFrom / … verbatim. Idempotent: a re-dispatch when status already equals the target is a " +
 					"clean no-op (no mutation). This is the op the leaseApplicationComplete convergence target " +
@@ -224,7 +224,7 @@ func addressAspectTypeDDL() pkgmgr.DDLSpec {
 // loftspaceListingDDLScript handles SetListing + SetUnitAddress. Known-key reads
 // only: the target unit is validated by the key the caller lists in
 // ContextHint.Reads. The target MUST be an alive vtx.unit.<NanoID> of
-// class=location. Aspect writes are unconditioned upserts (create-if-absent /
+// a vtx.unit.<NanoID> key. Aspect writes are unconditioned upserts (create-if-absent /
 // overwrite-if-present) so an operator can correct a listing or flip status.
 const loftspaceListingDDLScript = `
 def make_aspect_upsert(vtx_key, local_name, cls, data):
@@ -351,27 +351,50 @@ def require_manages(unit_key, what):
         # not own.
         fail("AuthDenied: " + op.actor + " does not manage the unit this write is for; " + what)
 
-def class_of(state, key):
-    if key not in state:
-        return None
-    doc = state[key]
-    if doc == None:
-        return None
-    if not hasattr(doc, "class"):
-        return None
-    return getattr(doc, "class")
-
 def require_live_unit(state, key):
-    # The target MUST be alive AND class=location (location-domain's unit). A
-    # dead or non-location vertex never receives listing economics.
+    # The target MUST be alive, keyed vtx.unit.<NanoID> (location-domain's unit
+    # level), AND carrying a unit class. A dead, wrong-typed or wrong-classed
+    # vertex never receives listing economics.
+    # BOTH the key and the class are checked, and each catches what the other
+    # cannot. The KEY's type segment is what distinguishes a unit from a
+    # building at all — a location's class is its own key type, and the legacy
+    # shared class names no level. The CLASS is what proves location-domain
+    # minted the vertex: a foreign package writing vtx.unit.<id> with a class
+    # of its own passes the key check and must still be refused.
     if key not in state or state[key] == None:
         fail("UnknownUnit: unit: " + key + " is absent")
     doc = state[key]
     if hasattr(doc, "isDeleted") and doc.isDeleted:
         fail("UnknownUnit: unit: " + key + " is tombstoned")
+    if key_type_of(key) != "unit":
+        fail("NotAUnit: unit: " + key + " is not a vtx.unit.<NanoID> key, required unit")
     cls = class_of(state, key)
-    if cls != "location":
-        fail("NotAUnit: unit: " + key + " has class " + str(cls) + ", required location")
+    if cls not in UNIT_CLASSES:
+        fail("NotAUnit: unit: " + key + " has class " + str(cls) + ", required unit or " + LEGACY_LOCATION_CLASS)
+
+def class_of(state, key):
+    # The vertex's root class, or None if absent. "class" is a Starlark
+    # reserved word, so getattr with the string key is required.
+    if key not in state:
+        return None
+    doc = state[key]
+    if doc == None or not hasattr(doc, "class"):
+        return None
+    return getattr(doc, "class")
+
+# The classes a live location-domain UNIT may carry: its own key type, or the
+# shared discriminator every location minted before the taxonomy landed
+# carries. Nothing rewrites those documents, so both shapes are live at once.
+LEGACY_LOCATION_CLASS = "location"
+UNIT_CLASSES = ["unit", LEGACY_LOCATION_CLASS]
+
+def key_type_of(key):
+    # The type segment of a 3-segment vtx.<type>.<NanoID> key, or None for any
+    # other shape (an aspect key, a link key, a malformed string).
+    parts = key.split(".")
+    if len(parts) != 3 or parts[0] != "vtx":
+        return None
+    return parts[1]
 
 def execute(state, op):
     ot = op.operationType

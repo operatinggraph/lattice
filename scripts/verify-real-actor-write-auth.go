@@ -227,7 +227,7 @@ func seedStaff(ctx context.Context, conn *substrate.Conn, adminKey, roleOperator
 // seedListing mints a fresh location-domain unit + loftspace-domain listing
 // (available), so SetListingStatus has a real listing to transition.
 func seedListing(ctx context.Context, conn *substrate.Conn, adminKey string) (unitKey string) {
-	locReply := submitOp(ctx, conn, adminKey, "CreateLocation", "location", map[string]any{"locationType": "unit"}, nil)
+	locReply := submitOp(ctx, conn, adminKey, "CreateLocation", "unit", map[string]any{"locationType": "unit"}, nil)
 	mustAccepted(locReply, "seed unit")
 	unitKey = locReply.PrimaryKey
 

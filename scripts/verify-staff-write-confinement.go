@@ -48,13 +48,13 @@ func main() {
 	bKey := "vtx.building." + bID
 	uKey := "vtx.unit." + uID
 
-	expect(submit(ctx, conn, admin, "CreateLocation", "location",
+	expect(submit(ctx, conn, admin, "CreateLocation", "building",
 		map[string]any{"locationType": "building", "locationId": bID}, nil),
 		"accepted", "mint building B")
-	expect(submit(ctx, conn, admin, "CreateLocation", "location",
+	expect(submit(ctx, conn, admin, "CreateLocation", "unit",
 		map[string]any{"locationType": "unit", "locationId": uID}, nil),
 		"accepted", "mint unit B")
-	expect(submit(ctx, conn, admin, "WireContainedIn", "location",
+	expect(submit(ctx, conn, admin, "WireContainedIn", "unit",
 		map[string]any{"child": uKey, "parent": bKey},
 		&processor.ContextHint{Reads: []string{uKey, bKey}}),
 		"accepted", "unit B containedIn building B")
@@ -76,10 +76,10 @@ func main() {
 	uAID := mustID()
 	uAKey := "vtx.unit." + uAID
 	riverside := "vtx.building." + showcaseBuildingID
-	expect(submit(ctx, conn, admin, "CreateLocation", "location",
+	expect(submit(ctx, conn, admin, "CreateLocation", "unit",
 		map[string]any{"locationType": "unit", "locationId": uAID}, nil),
 		"accepted", "mint a fresh unit")
-	expect(submit(ctx, conn, admin, "WireContainedIn", "location",
+	expect(submit(ctx, conn, admin, "WireContainedIn", "unit",
 		map[string]any{"child": uAKey, "parent": riverside},
 		&processor.ContextHint{Reads: []string{uAKey, riverside}}),
 		"accepted", "that unit containedIn Riverside")

@@ -569,7 +569,7 @@ func (h *harness) seedApplicant() (appKey, appID, applicantKey string) {
 	// a landlord would: CreateLocation(unit) → SetUnitAddress → SetListing. The
 	// application then applies to a REAL unit (required) and the convergence lens
 	// walks the appliesToUnit link to project its address / rent.
-	unitReply := h.submitOp("CreateLocation", "location", "default", bootstrap.BootstrapIdentityKey, map[string]any{
+	unitReply := h.submitOp("CreateLocation", "unit", "default", bootstrap.BootstrapIdentityKey, map[string]any{
 		"locationType": "unit",
 	}, nil)
 	require.Equalf(h.t, processor.ReplyStatusAccepted, unitReply.Status, "CreateLocation(unit): %+v", unitReply.Error)

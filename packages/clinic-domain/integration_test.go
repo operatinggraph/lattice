@@ -131,7 +131,7 @@ func setupClinicEnv(t *testing.T) (context.Context, *substrate.Conn) {
 // building key — the multi-site tests' location-domain endpoint.
 func clCreateBuilding(t *testing.T, ctx context.Context, conn *substrate.Conn, cp *processor.CommitPath, cons jetstream.Consumer, label string) string {
 	t.Helper()
-	id := clSubmit(t, ctx, conn, cp, cons, label, "CreateLocation", "location",
+	id := clSubmit(t, ctx, conn, cp, cons, label, "CreateLocation", "building",
 		`{"locationType":"building"}`, nil, processor.OutcomeAccepted)
 	return "vtx.building." + id
 }

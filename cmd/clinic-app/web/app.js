@@ -895,7 +895,10 @@ async function submitAddSite() {
   const btn = $("#add-site-submit");
   btn.disabled = true;
   try {
-    const locReply = await submitOp("CreateLocation", "location", { locationType: "building" });
+    // The envelope class is the CONCRETE location leaf `building`, not the
+    // abstract `location`: every leaf admits the same five location ops, so
+    // the Processor cannot infer the class and the abstract declares no script.
+    const locReply = await submitOp("CreateLocation", "building", { locationType: "building" });
     const msg1 = rejectionMessage(locReply);
     if (msg1) {
       toast("Could not create the site's location — " + msg1, "err");

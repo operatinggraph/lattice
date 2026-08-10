@@ -1121,7 +1121,21 @@ func TestReloaderUpdate_NarrowingMatchChangeRetractsTheDroppedLabelsRows(t *test
 		_, err := env.target.Get(ctx, key)
 		return err == nil
 	}
+	// revisionOf returns the target row's current revision, or 0 when absent.
+	// NATS KV revisions are the bucket's stream sequence, so a purge followed
+	// by a re-write always lands STRICTLY ABOVE whatever the row carried
+	// before — which is what lets the wait below tell a re-derived row from a
+	// surviving one.
+	revisionOf := func(key string) uint64 {
+		entry, err := env.target.Get(ctx, key)
+		if err != nil {
+			return 0
+		}
+		return entry.Revision
+	}
 	mcPollUntil(t, 5*time.Second, func() bool { return projected(roomKey) && projected(deskKey) })
+	roomRevisionBeforeEdit := revisionOf(roomKey)
+	require.NotZero(t, roomRevisionBeforeEdit, "precondition: the room row is projected before the edit")
 
 	// A row belonging to another producer of the same bucket: the retraction
 	// must be confined to this lens's own prefix.
@@ -1161,8 +1175,23 @@ func TestReloaderUpdate_NarrowingMatchChangeRetractsTheDroppedLabelsRows(t *test
 		"precondition: the edit narrowed the admitted set, so nothing will deliver a desk event again")
 
 	// Room survives the truncate via the replay; desk does not come back.
-	mcPollUntil(t, 10*time.Second, func() bool { return projected(roomKey) && !projected(deskKey) })
-	assert.True(t, projected(roomKey), "the surviving label's row must be re-derived by the replay")
+	//
+	// The wait is on the room row's REVISION rising above what it carried
+	// before the edit, not on its mere presence, and the difference is
+	// load-bearing. Truncate purges the lens's rows ONE KEY AT A TIME in list
+	// order (adapter.NatsKVAdapter.Truncate), and `vtx.desk.*` sorts ahead of
+	// `vtx.room.*`, so mid-truncate there is a real window where desk is
+	// already gone and room is still its STALE pre-truncate row. A presence
+	// check is satisfied by that window and returns before the replay has
+	// re-derived anything — after which the truncate reaches room and every
+	// assertion below reads a row that is legitimately, momentarily absent.
+	// A revision strictly above the pre-edit one can only come from the
+	// replay's own write.
+	mcPollUntil(t, 10*time.Second, func() bool {
+		return revisionOf(roomKey) > roomRevisionBeforeEdit && !projected(deskKey)
+	}, "the surviving label's row must be re-derived by the replay and the dropped label's retracted")
+	assert.Greater(t, revisionOf(roomKey), roomRevisionBeforeEdit,
+		"the surviving label's row must be re-derived by the replay")
 	assert.False(t, projected(deskKey), "the dropped label's row must be retracted — nothing else can ever reach it")
 	assert.True(t, projected(siblingKey), "the truncate must be confined to the lens's own key prefix — another producer's row in the same bucket must survive")
 	assert.Zero(t, errorCount(t, reporter), "an accepted narrowing MATCH change must not record a refusal")

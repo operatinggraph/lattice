@@ -10,7 +10,7 @@
 //
 // Coverage:
 //  1. TestClinic_SetSiteProfile              — .site aspect committed with the supplied name
-//  2. TestClinic_SetSiteProfileRejectsNonLocationBuilding — wrong-class target rejected
+//  2. TestClinic_SetSiteProfileRejectsNonLocationBuilding — non-building key type rejected
 //  3. TestClinic_AssignProviderSite           — practicesAt link committed alive, source=provider, target=building
 //  4. TestClinic_AssignProviderSiteIdempotent — re-assign is a clean no-op
 //  5. TestClinic_RemoveThenReassignProviderSite — remove tombstones; re-assign revives (CAS), alive again
@@ -21,6 +21,7 @@ package clinicdomain_test
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/nats-io/nats.go/jetstream"
@@ -108,22 +109,93 @@ func TestClinic_SetSiteProfile(t *testing.T) {
 	}
 }
 
-// TestClinic_SetSiteProfileRejectsNonLocationBuilding: a building-shaped key
-// whose class is not location is rejected (NotALocation) and no aspect is
+// clSubmitSiteProfileReason submits SetSiteProfile and returns the script's own
+// failure message, so a rejection vector can name the guard it means to
+// exercise. require_live_building is the SOLE guard on buildingKey, but a bare
+// outcome check would still be satisfied by a malformed key or a hydration
+// miss reaching step 6 first.
+func clSubmitSiteProfileReason(t *testing.T, ctx context.Context, conn *substrate.Conn,
+	cp *processor.CommitPath, cons jetstream.Consumer, label, buildingKey string) (processor.MessageOutcome, string) {
+	t.Helper()
+	env := &processor.OperationEnvelope{
+		RequestID:     testutil.GenReqID(label),
+		Lane:          processor.LaneDefault,
+		OperationType: "SetSiteProfile",
+		Actor:         clStaffActorKey,
+		SubmittedAt:   clSubmittedAnchor,
+		Class:         "clinicSite",
+		Payload:       json.RawMessage(`{"buildingKey":"` + buildingKey + `","name":"Ghost Clinic"}`),
+		ContextHint:   &processor.ContextHint{Reads: []string{buildingKey}},
+	}
+	outcome, reply := testutil.SubmitAndAwaitReply(t, ctx, conn, cp, cons, env)
+	msg := ""
+	if reply != nil && reply.Error != nil {
+		msg = reply.Error.Message
+	}
+	return outcome, msg
+}
+
+// TestClinic_SetSiteProfileRejectsNonLocationBuilding: a live vertex whose KEY
+// TYPE SEGMENT is not `building` is rejected (NotALocation) and no aspect is
 // committed.
+//
+// require_live_building is the SOLE type guard on buildingKey — nothing else in
+// this op's script constrains it — so without this rejection SetSiteProfile
+// would write a clinicSiteProfile aspect onto any live vertex the caller named.
+// The guard asks the KEY, never the root class: a location vertex's class is
+// its own key type, so a class check could not tell a building from a unit at
+// all, and a `location` check would reject every location minted after the
+// taxonomy landed.
+//
+// The negative vector below is a live UNIT — a real location, the wrong level —
+// which is the case a weaker guard would let through. Its positive vector is
+// TestClinic_SetSiteProfile above, over a real building.
 func TestClinic_SetSiteProfileRejectsNonLocationBuilding(t *testing.T) {
 	t.Parallel()
 	ctx, conn := setupClinicEnv(t)
 	cp, cons := newClinicPipeline(t, ctx, conn, "site-profile-badclass")
 
-	fakeBuilding := "vtx.building.CLnotlocatnHJKMNPQR"
-	clSeedVertex(t, ctx, conn, fakeBuilding, "identity", false) // building-shaped key, wrong class
+	notABuilding := "vtx.unit.CLnotabuiLdingHJKMNP"
+	clSeedVertex(t, ctx, conn, notABuilding, "location", false) // a real location, the WRONG level
 
-	clSubmit(t, ctx, conn, cp, cons, "spbad0001", "SetSiteProfile", "clinicSite",
-		`{"buildingKey":"`+fakeBuilding+`","name":"Ghost Clinic"}`,
-		[]string{fakeBuilding}, processor.OutcomeRejected)
-	if !clMissing(t, ctx, conn, fakeBuilding+".site") {
-		t.Fatalf("a .site aspect was committed for a non-location building")
+	outcome, why := clSubmitSiteProfileReason(t, ctx, conn, cp, cons, "spbad0001", notABuilding)
+	if outcome != processor.OutcomeRejected {
+		t.Fatalf("SetSiteProfile on a unit, not a building = %v, want rejected", outcome)
+	}
+	if !strings.Contains(why, "NotALocation") {
+		t.Errorf("refused with %q, want the building guard's own NotALocation", why)
+	}
+	if !clMissing(t, ctx, conn, notABuilding+".site") {
+		t.Fatalf("a .site aspect was committed for a key that is not a building")
+	}
+
+	// The CLASS arm, which the key arm cannot stand in for: a building KEY
+	// carrying a class location-domain never writes. `vtx.building.*` is
+	// location-domain's keyspace but nothing stops another package minting
+	// there, and the class is what proves who did.
+	foreignClass := "vtx.building.CLforeignCLassHJKMNP"
+	clSeedVertex(t, ctx, conn, foreignClass, "identity", false)
+	outcome, why = clSubmitSiteProfileReason(t, ctx, conn, cp, cons, "spbad0002", foreignClass)
+	if outcome != processor.OutcomeRejected {
+		t.Fatalf("SetSiteProfile on a building key of a foreign class = %v, want rejected", outcome)
+	}
+	if !strings.Contains(why, "NotALocation") {
+		t.Errorf("refused with %q, want the building guard's own NotALocation", why)
+	}
+	if !clMissing(t, ctx, conn, foreignClass+".site") {
+		t.Fatalf("a .site aspect was committed for a building-keyed vertex of a foreign class")
+	}
+
+	// The migration-window vector the class arm must still ADMIT: a building
+	// key carrying the shared pre-taxonomy class, which is what the live
+	// location vertices look like.
+	legacy := "vtx.building.CLgacyCLassHJKMNPQRS"
+	clSeedVertex(t, ctx, conn, legacy, "location", false)
+	clSubmit(t, ctx, conn, cp, cons, "spgood0001", "SetSiteProfile", "clinicSite",
+		`{"buildingKey":"`+legacy+`","name":"Legacy Clinic"}`,
+		[]string{legacy}, processor.OutcomeAccepted)
+	if clMissing(t, ctx, conn, legacy+".site") {
+		t.Fatalf("a legacy-classed building must still receive its .site aspect")
 	}
 }
 
@@ -295,9 +367,11 @@ func TestClinic_CreateAppointment_RejectsProviderNotAtSite(t *testing.T) {
 	}
 }
 
-// TestClinic_CreateAppointment_RejectsNonLocationSite proves a site key that
-// resolves to a non-location vertex is rejected (NotALocation), mirroring
-// SetSiteProfile's own guard.
+// TestClinic_CreateAppointment_RejectsNonLocationSite proves a site key whose
+// KEY TYPE SEGMENT is not `building` is rejected (NotALocation), mirroring
+// SetSiteProfile's own guard. The vector is a live UNIT — a real location at
+// the wrong level — and its positive sibling is TestClinic_CreateAppointment's
+// own site-bearing path over a real building.
 func TestClinic_CreateAppointment_RejectsNonLocationSite(t *testing.T) {
 	t.Parallel()
 	ctx, conn := setupClinicEnv(t)
@@ -305,8 +379,8 @@ func TestClinic_CreateAppointment_RejectsNonLocationSite(t *testing.T) {
 
 	patientKey := createPatient(t, ctx, conn, cp, cons, "apbadpat0001", "Gail Ghostsite")
 	providerKey := createProvider(t, ctx, conn, cp, cons, "apbadprv0001", "Dr. Bad Class", "Cardiology")
-	fakeSite := "vtx.building.CLapbadsiteHJKMNP"
-	clSeedVertex(t, ctx, conn, fakeSite, "identity", false) // building-shaped key, wrong class
+	fakeSite := "vtx.unit.CLapbadsiteHJKMNPQRS"
+	clSeedVertex(t, ctx, conn, fakeSite, "location", false) // a real location, the WRONG level
 
 	apptID := clCreateAppointmentWithSite(t, ctx, conn, cp, cons, "apbadappt001", patientKey, providerKey, fakeSite, processor.OutcomeRejected)
 

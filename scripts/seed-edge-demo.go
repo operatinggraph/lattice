@@ -82,19 +82,19 @@ func main() {
 
 	// --- building + unit -----------------------------------------------------
 
-	buildingReply := submitOp(ctx, conn, adminKey, "CreateLocation", "location",
+	buildingReply := submitOp(ctx, conn, adminKey, "CreateLocation", "building",
 		map[string]any{"locationType": "building",
 			"presentation": map[string]any{"name": "Riverside Building", "icon": "building"}}, nil)
 	buildingKey := buildingReply.PrimaryKey
 	fmt.Printf("==> building:        %s\n", buildingKey)
 
-	unitReply := submitOp(ctx, conn, adminKey, "CreateLocation", "location",
+	unitReply := submitOp(ctx, conn, adminKey, "CreateLocation", "unit",
 		map[string]any{"locationType": "unit",
 			"presentation": map[string]any{"name": "Unit 1", "icon": "door"}}, nil)
 	unitKey := unitReply.PrimaryKey
 	fmt.Printf("==> unit:            %s\n", unitKey)
 
-	submitOp(ctx, conn, adminKey, "WireContainedIn", "location",
+	submitOp(ctx, conn, adminKey, "WireContainedIn", "unit",
 		map[string]any{"child": unitKey, "parent": buildingKey},
 		&processor.ContextHint{Reads: []string{unitKey, buildingKey}})
 	fmt.Println("==> wired:           unit containedIn building")

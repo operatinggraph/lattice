@@ -20,7 +20,7 @@ const (
 
 // clinicSiteVertexTypeDDL declares SetSiteProfile — writes/replaces the
 // vtx.building.<id>.site aspect {name} after validating the building is alive
-// + class=location (location-domain's shared discriminator). This package
+// + keyed vtx.building.<NanoID> (location-domain mints it). This package
 // introduces no vertex type here; it contributes the aspect on top of
 // location-domain's building, the same cross-package pattern loftspace-domain
 // uses for its .listing/.address aspects.
@@ -30,27 +30,27 @@ func clinicSiteVertexTypeDDL() pkgmgr.DDLSpec {
 		Class:             "meta.ddl.vertexType",
 		PermittedCommands: []string{"SetSiteProfile"},
 		Description: "Clinic multi-site profile DDL. SetSiteProfile validates the target vtx.building.<NanoID> is " +
-			"alive + class=location (location-domain's shared discriminator; the caller lists it in ContextHint.Reads), " +
+			"alive + keyed vtx.building.<NanoID> (the caller lists it in ContextHint.Reads), " +
 			"then REPLACES its .site aspect (class clinicSiteProfile) with {name (required)} — a clinic site/branch " +
 			"display name for the site directory and (a later increment's) site-scoped booking picker. This package " +
 			"introduces no vertex type here; it contributes the aspect on top of location-domain's building, mirroring " +
 			"loftspace-domain's loftspaceListing aspect-contribution pattern.",
 		Script: clinicSiteDDLScript,
 		InputSchema: `{"type":"object","properties":` +
-			`{"buildingKey":{"type":"string","description":"vtx.building.<NanoID> of an existing location-domain building (SetSiteProfile; required, validated alive + class=location)."},` +
+			`{"buildingKey":{"type":"string","description":"vtx.building.<NanoID> of an existing location-domain building (SetSiteProfile; required, validated alive + a building key)."},` +
 			`"name":{"type":"string","description":"The clinic site/branch display name (SetSiteProfile; required)."}},` +
 			`"required":["buildingKey","name"]}`,
 		OutputSchema: `{"type":"object","properties":` +
 			`{"primaryKey":{"type":"string","description":"The vtx.building.<NanoID> whose .site aspect was written."}}}`,
 		FieldDescription: map[string]string{
-			"buildingKey": "Full vtx.building.<NanoID> key of an existing location-domain building. Validated alive + class=location. Must be listed in ContextHint.Reads.",
+			"buildingKey": "Full vtx.building.<NanoID> key of an existing location-domain building. Validated alive + a vtx.building.<NanoID> key. Must be listed in ContextHint.Reads.",
 			"name":        "The clinic site/branch display name. Stored on the .site aspect (SetSiteProfile; required — a full replace, so a re-run must resupply it).",
 		},
 		Examples: []pkgmgr.ExampleSpec{
 			{
 				Name:    "SetSiteProfile — name a clinic site",
 				Payload: map[string]any{"buildingKey": "vtx.building.<NanoID>", "name": "Downtown Clinic"},
-				ExpectedOutcome: "Validates the building is alive + class=location, then writes vtx.building.<NanoID>.site " +
+				ExpectedOutcome: "Validates the building is alive + a vtx.building.<NanoID> key, then writes vtx.building.<NanoID>.site " +
 					"(class clinicSiteProfile) = {name: \"Downtown Clinic\"}. Returns primaryKey (the building key). Rejects " +
 					"an absent / dead / non-location building.",
 			},
@@ -114,7 +114,28 @@ def vertex_alive(state, key):
         return False
     return True
 
+def require_live_building(state, key):
+    # The SOLE guard on buildingKey — nothing else in this op constrains it, so
+    # it carries the whole burden: alive, keyed vtx.building.<NanoID>, AND
+    # carrying a building class. This op writes a clinicSiteProfile aspect that
+    # belongs only on a location-domain building.
+    # BOTH the key and the class are checked, and each catches what the other
+    # cannot. The KEY's type segment is what distinguishes a building from a
+    # unit at all — a location's class is its own key type, and the legacy
+    # shared class names no level. The CLASS is what proves location-domain
+    # minted the vertex: a foreign package writing vtx.building.<id> with a
+    # class of its own passes the key check and must still be refused.
+    if not vertex_alive(state, key):
+        fail("UnknownBuilding: buildingKey: " + key + " is absent or tombstoned")
+    if key_type_of(key) != "building":
+        fail("NotALocation: buildingKey: " + key + " is not a vtx.building.<NanoID> key, required building")
+    cls = class_of(state, key)
+    if cls not in BUILDING_CLASSES:
+        fail("NotALocation: buildingKey: " + key + " has class " + str(cls) + ", required building or " + LEGACY_LOCATION_CLASS)
+
 def class_of(state, key):
+    # The vertex's root class, or None if absent. "class" is a Starlark
+    # reserved word, so getattr with the string key is required.
     if key not in state:
         return None
     doc = state[key]
@@ -122,12 +143,19 @@ def class_of(state, key):
         return None
     return getattr(doc, "class")
 
-def require_live_building(state, key):
-    if not vertex_alive(state, key):
-        fail("UnknownBuilding: buildingKey: " + key + " is absent or tombstoned")
-    cls = class_of(state, key)
-    if cls != "location":
-        fail("NotALocation: buildingKey: " + key + " has class " + str(cls) + ", required location")
+# The classes a live location-domain BUILDING may carry: its own key type, or
+# the shared discriminator every location minted before the taxonomy landed
+# carries. Nothing rewrites those documents, so both shapes are live at once.
+LEGACY_LOCATION_CLASS = "location"
+BUILDING_CLASSES = ["building", LEGACY_LOCATION_CLASS]
+
+def key_type_of(key):
+    # The type segment of a 3-segment vtx.<type>.<NanoID> key, or None for any
+    # other shape (an aspect key, a link key, a malformed string).
+    parts = key.split(".")
+    if len(parts) != 3 or parts[0] != "vtx":
+        return None
+    return parts[1]
 
 def execute(state, op):
     ot = op.operationType
@@ -166,7 +194,7 @@ func clinicSiteAssignmentVertexTypeDDL() pkgmgr.DDLSpec {
 			"\"practicesAt\", reads as \"provider practicesAt building\"; source = the provider, target = the building — " +
 			"the acting provider is the later-arriving fact, mirroring loftspace-domain's AssignUnitOwner). " +
 			"AssignProviderSite validates the provider is an alive vtx.provider and the building an alive " +
-			"vtx.building of class=location (both listed in ContextHint.Reads), then reads the deterministic per-pair " +
+			"vtx.building key (both listed in ContextHint.Reads), then reads the deterministic per-pair " +
 			"link key ON DEMAND (kv.Read) and creates it (absent), revives it via CAS (tombstoned by a prior " +
 			"RemoveProviderSite), or no-ops (already live — idempotent at-least-once). RemoveProviderSite tombstones " +
 			"the same link (idempotent: absent / already-tombstoned → clean no-op). A provider may practice at many " +
@@ -176,13 +204,13 @@ func clinicSiteAssignmentVertexTypeDDL() pkgmgr.DDLSpec {
 		Script: clinicSiteAssignmentDDLScript,
 		InputSchema: `{"type":"object","properties":` +
 			`{"provider":{"type":"string","description":"vtx.provider.<NanoID> of the provider (required; validated alive). Listed in ContextHint.Reads."},` +
-			`"building":{"type":"string","description":"vtx.building.<NanoID> of an existing location-domain building (required; validated alive + class=location). Listed in ContextHint.Reads."}},` +
+			`"building":{"type":"string","description":"vtx.building.<NanoID> of an existing location-domain building (required; validated alive + a building key). Listed in ContextHint.Reads."}},` +
 			`"required":["provider","building"]}`,
 		OutputSchema: `{"type":"object","properties":` +
 			`{"primaryKey":{"type":"string","description":"The practicesAt link key written (lnk.provider.<providerID>.practicesAt.building.<buildingID>) on create / revive / tombstone; omitted on an idempotent no-op."}}}`,
 		FieldDescription: map[string]string{
 			"provider": "Full vtx.provider.<NanoID> key of the provider. AssignProviderSite validates it is alive and uses it as the practicesAt link's source; RemoveProviderSite reconstructs the link key from it. MUST be listed in ContextHint.Reads (AssignProviderSite).",
-			"building": "Full vtx.building.<NanoID> key of the location-domain building. AssignProviderSite validates it is alive + class=location and uses it as the practicesAt link's target. MUST be listed in ContextHint.Reads (AssignProviderSite).",
+			"building": "Full vtx.building.<NanoID> key of the location-domain building. AssignProviderSite validates it is alive + a vtx.building.<NanoID> key and uses it as the practicesAt link's target. MUST be listed in ContextHint.Reads (AssignProviderSite).",
 		},
 		Examples: []pkgmgr.ExampleSpec{
 			{
@@ -191,7 +219,7 @@ func clinicSiteAssignmentVertexTypeDDL() pkgmgr.DDLSpec {
 					"provider": "vtx.provider.<providerNanoID>",
 					"building": "vtx.building.<buildingNanoID>",
 				},
-				ExpectedOutcome: "Validates the provider is alive and the building an alive class=location building, then " +
+				ExpectedOutcome: "Validates the provider is alive and the building an alive vtx.building.<NanoID> key, then " +
 					"reads lnk.provider.<providerNanoID>.practicesAt.building.<buildingNanoID> on demand and creates it " +
 					"(class \"practicesAt\"). Returns primaryKey (the link). Re-running is idempotent: already-live → clean " +
 					"no-op; a link a prior RemoveProviderSite tombstoned is revived (CAS-guarded). Rejects a dead / wrong-" +
@@ -264,7 +292,25 @@ def vertex_alive(state, key):
         return False
     return True
 
+def require_live_building(state, key):
+    # Alive, keyed vtx.building.<NanoID>, AND carrying a building class.
+    # BOTH the key and the class are checked, and each catches what the other
+    # cannot. The KEY's type segment is what distinguishes a building from a
+    # unit at all — a location's class is its own key type, and the legacy
+    # shared class names no level. The CLASS is what proves location-domain
+    # minted the vertex: a foreign package writing vtx.building.<id> with a
+    # class of its own passes the key check and must still be refused.
+    if not vertex_alive(state, key):
+        fail("UnknownBuilding: building: " + key + " is absent or tombstoned")
+    if key_type_of(key) != "building":
+        fail("NotALocation: building: " + key + " is not a vtx.building.<NanoID> key, required building")
+    cls = class_of(state, key)
+    if cls not in BUILDING_CLASSES:
+        fail("NotALocation: building: " + key + " has class " + str(cls) + ", required building or " + LEGACY_LOCATION_CLASS)
+
 def class_of(state, key):
+    # The vertex's root class, or None if absent. "class" is a Starlark
+    # reserved word, so getattr with the string key is required.
     if key not in state:
         return None
     doc = state[key]
@@ -272,12 +318,19 @@ def class_of(state, key):
         return None
     return getattr(doc, "class")
 
-def require_live_building(state, key):
-    if not vertex_alive(state, key):
-        fail("UnknownBuilding: building: " + key + " is absent or tombstoned")
-    cls = class_of(state, key)
-    if cls != "location":
-        fail("NotALocation: building: " + key + " has class " + str(cls) + ", required location")
+# The classes a live location-domain BUILDING may carry: its own key type, or
+# the shared discriminator every location minted before the taxonomy landed
+# carries. Nothing rewrites those documents, so both shapes are live at once.
+LEGACY_LOCATION_CLASS = "location"
+BUILDING_CLASSES = ["building", LEGACY_LOCATION_CLASS]
+
+def key_type_of(key):
+    # The type segment of a 3-segment vtx.<type>.<NanoID> key, or None for any
+    # other shape (an aspect key, a link key, a malformed string).
+    parts = key.split(".")
+    if len(parts) != 3 or parts[0] != "vtx":
+        return None
+    return parts[1]
 
 def execute(state, op):
     ot = op.operationType

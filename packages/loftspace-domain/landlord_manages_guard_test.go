@@ -84,7 +84,7 @@ func llCreateUnit(t *testing.T, ctx context.Context, conn *substrate.Conn,
 		OperationType: "CreateLocation",
 		Actor:         lsStaffActorKey,
 		SubmittedAt:   "2026-07-20T11:00:00Z",
-		Class:         "location",
+		Class:         "unit",
 		Payload:       json.RawMessage(`{"locationType":"unit"}`),
 	}
 	testutil.PublishOp(t, conn, env)

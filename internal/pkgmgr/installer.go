@@ -406,6 +406,18 @@ func LensID(packageName, canonicalName string) string {
 	return entityNanoID(packageName, "lens:"+canonicalName)
 }
 
+// DDLID returns the deterministic, version-independent NanoID a package's
+// declared DDL receives at install — the exact value entityNanoID computes
+// internally for a DDLSpec. Exported for the same reason as RoleID/LensID: a
+// caller that must ADDRESS a DDL's meta-vertex has no other way to compute the
+// key. The taxonomy makes that concrete — a `subtypeOf` edge is keyed
+// `lnk.meta.<DDLID(pkg, leaf)>.subtypeOf.meta.<DDLID(pkg, parent)>`
+// (dynamic-type-taxonomy-design.md §3.3), so naming one edge means resolving
+// two DDL NanoIDs.
+func DDLID(packageName, canonicalName string) string {
+	return entityNanoID(packageName, "ddl:"+canonicalName)
+}
+
 // RetentionClassID returns the deterministic, version-independent NanoID a
 // package's declared retention class receives at install — the exact value
 // entityNanoID computes internally for a RetentionClassSpec. Exported for the

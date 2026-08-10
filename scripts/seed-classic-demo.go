@@ -96,7 +96,7 @@ func main() {
 
 	unitKey := "vtx.unit." + unitID
 	if !alive(ctx, conn, unitKey) {
-		submitOp(ctx, conn, adminKey, "CreateLocation", "location",
+		submitOp(ctx, conn, adminKey, "CreateLocation", "unit",
 			map[string]any{"locationType": "unit", "locationId": unitID,
 				"presentation": map[string]any{"name": "Unit 1", "icon": "door"}}, nil)
 	}

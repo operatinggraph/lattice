@@ -3886,8 +3886,12 @@ async function submitPostListing(ev) {
     // primaryKey is the new vtx.unit key).
     let unitKey = state.editUnitKey;
     if (!editing) {
+      // The envelope class is the CONCRETE location leaf `unit`, not the
+      // abstract `location`: every leaf admits the same five location ops, so
+      // the Processor cannot infer the class and the abstract declares no
+      // script.
       const created = await opOrThrow(
-        { operationType: "CreateLocation", class: "location", payload: { locationType: "unit" } },
+        { operationType: "CreateLocation", class: "unit", payload: { locationType: "unit" } },
         "create the unit",
       );
       unitKey = created.primaryKey;

@@ -114,7 +114,7 @@ func studioVertexTypeDDL() pkgmgr.DDLSpec {
 		InputSchema: `{"type":"object","properties":` +
 			`{"name":{"type":"string","description":"The studio's display name (CreateStudio; required)."},` +
 			`"studioId":{"type":"string","description":"Optional bare NanoID for the new studio vertex (CreateStudio); absent → minted."},` +
-			`"location":{"type":"string","description":"Optional vtx.<locType>.<NanoID> location the studio is at (CreateStudio; validated alive + class=location; writes the locatedAt link). Listed in ContextHint.Reads when supplied."},` +
+			`"location":{"type":"string","description":"Optional vtx.<locType>.<NanoID> location the studio is at (CreateStudio; validated alive + an admitted location type segment; writes the locatedAt link). Listed in ContextHint.Reads when supplied."},` +
 			`"studioKey":{"type":"string","description":"vtx.studio.<NanoID> of an existing studio (TombstoneStudio; required, validated alive)."}},` +
 			`"required":[]}`,
 		OutputSchema: `{"type":"object","properties":` +
@@ -122,7 +122,7 @@ func studioVertexTypeDDL() pkgmgr.DDLSpec {
 		FieldDescription: map[string]string{
 			"name":      "The studio's display name. Stored on the .profile aspect (CreateStudio; required).",
 			"studioId":  "Optional bare NanoID (no dots / key segments) for the new studio vertex. Absent → minted with nanoid.new().",
-			"location":  "Optional full vtx.<locType>.<NanoID> key of a location-domain location (e.g. a building) the studio is at. Validated alive + class=location; CreateStudio writes the studio locatedAt location link (no authZ meaning — browse reachability only). MUST be listed in ContextHint.Reads when supplied.",
+			"location":  "Optional full vtx.<locType>.<NanoID> key of a location-domain location (e.g. a building) the studio is at. Validated alive + an admitted location type segment; CreateStudio writes the studio locatedAt location link (no authZ meaning — browse reachability only). MUST be listed in ContextHint.Reads when supplied.",
 			"studioKey": "Full vtx.studio.<NanoID> key of an existing studio vertex to tombstone (TombstoneStudio).",
 		},
 		Examples: []pkgmgr.ExampleSpec{
@@ -136,8 +136,8 @@ func studioVertexTypeDDL() pkgmgr.DDLSpec {
 				Name:    "CreateStudio — register a studio at a location",
 				Payload: map[string]any{"name": "Sunrise Yoga Room", "location": "vtx.building.<NanoID>"},
 				ExpectedOutcome: "Mints the studio + .profile as above, validates the location is alive + " +
-					"class=location, and writes lnk.studio.<id>.locatedAt.building.<NanoID> (class locatedAt). " +
-					"Rejects a dead / wrong-class location.",
+					"an admitted location type segment, and writes lnk.studio.<id>.locatedAt.building.<NanoID> (class locatedAt). " +
+					"Rejects a dead location or a key that is not a location key.",
 			},
 			{
 				Name:            "TombstoneStudio — remove a studio",
@@ -744,13 +744,13 @@ func bookingVertexTypeDDL() pkgmgr.DDLSpec {
 		OutputSchema: `{"type":"object","properties":` +
 			`{"primaryKey":{"type":"string","description":"vtx.booking.<NanoID> the operation wrote."}}}`,
 		FieldDescription: map[string]string{
-			"session":     "Full vtx.session.<NanoID> key being booked or waitlisted. CreateBooking validates it is alive + class=session, reads its capacity, claims a free seat, and writes the forSession link; JoinWaitlist runs the identical validation but claims a waitlist slot instead — both now also store this key on the booking's own .status aspect (single anchor, not a relationship — the forSession link carries the relationship), the same idiom .status.booker already uses, so a later cleanup can find the session even after it is gone. CancelBooking also requires it (the booking's actual session, validated via the forSession link) to release the held seat. SetBookingAttendance requires it to resolve the class's start time and, for an instructor caller, the ledBy binding.",
-			"booker":      "Full vtx.identity.<NanoID> key of the person booking or waitlisting. CreateBooking / JoinWaitlist validate it is alive + class=identity and write the bookedBy link.",
-			"leaseAppKey": "Optional full vtx.leaseapp.<NanoID> key the booker claims residency under (CreateBooking / JoinWaitlist). Verified via the lease's applicationFor link before granting rate=resident; a mismatch or absent lease silently falls back to rate=standard.",
-			"bookingId":   "Optional bare NanoID (no dots / key segments) for the new booking vertex. Absent → minted with nanoid.new().",
-			"bookingKey":  "Full vtx.booking.<NanoID> key of an existing booking to cancel (CancelBooking), record attendance on (SetBookingAttendance), or release (ReleaseOrphanedBooking, Weaver-dispatched only).",
-			"status":      "attended | noShow (SetBookingAttendance). Replaces .status.value; rate, seat and booker are carried forward unchanged.",
-			"instructor":  "Full vtx.instructor.<NanoID> key the caller claims to be. Required for a non-operator SetBookingAttendance caller: the script requires the caller's own identifiedBy binding to it AND the session's ledBy link to it, so a forged value only fails closed.",
+			"session":        "Full vtx.session.<NanoID> key being booked or waitlisted. CreateBooking validates it is alive + class=session, reads its capacity, claims a free seat, and writes the forSession link; JoinWaitlist runs the identical validation but claims a waitlist slot instead — both now also store this key on the booking's own .status aspect (single anchor, not a relationship — the forSession link carries the relationship), the same idiom .status.booker already uses, so a later cleanup can find the session even after it is gone. CancelBooking also requires it (the booking's actual session, validated via the forSession link) to release the held seat. SetBookingAttendance requires it to resolve the class's start time and, for an instructor caller, the ledBy binding.",
+			"booker":         "Full vtx.identity.<NanoID> key of the person booking or waitlisting. CreateBooking / JoinWaitlist validate it is alive + class=identity and write the bookedBy link.",
+			"leaseAppKey":    "Optional full vtx.leaseapp.<NanoID> key the booker claims residency under (CreateBooking / JoinWaitlist). Verified via the lease's applicationFor link before granting rate=resident; a mismatch or absent lease silently falls back to rate=standard.",
+			"bookingId":      "Optional bare NanoID (no dots / key segments) for the new booking vertex. Absent → minted with nanoid.new().",
+			"bookingKey":     "Full vtx.booking.<NanoID> key of an existing booking to cancel (CancelBooking), record attendance on (SetBookingAttendance), or release (ReleaseOrphanedBooking, Weaver-dispatched only).",
+			"status":         "attended | noShow (SetBookingAttendance). Replaces .status.value; rate, seat and booker are carried forward unchanged.",
+			"instructor":     "Full vtx.instructor.<NanoID> key the caller claims to be. Required for a non-operator SetBookingAttendance caller: the script requires the caller's own identifiedBy binding to it AND the session's ledBy link to it, so a forged value only fails closed.",
 			"noShowFeeCents": "Optional no-show fee in integer cents (SetBookingAttendance, only meaningful when status is noShow; must be > 0 when supplied, defaults to 2500 when omitted). Stored on the .status aspect; read by wellness-ledger's wellnessNoShowSettlement lens to post a DebitAccount charge. NOT carried forward on a later re-mark to attended (only rate/seat/booker/session are).",
 		},
 		Examples: []pkgmgr.ExampleSpec{
@@ -1373,6 +1373,42 @@ def require_live_typed(state, key, name, want_class):
     if cls != want_class:
         fail("WrongClass: " + name + ": " + key + " has class " + str(cls) + ", required " + want_class)
 
+# The concrete location levels a studio may be locatedAt (Contract #6 §6.9).
+# location-domain owns the vertices; this script references them by KEY TYPE —
+# a location vertex's class IS its own key type, so no single class value names
+# the family.
+LOCATION_TYPES = ["unit", "building", "property"]
+
+# The class a location vertex minted before the taxonomy landed carries: one
+# shared discriminator across all three levels. Nothing rewrites those
+# documents, so both class shapes are live at once and this guard admits
+# either.
+LEGACY_LOCATION_CLASS = "location"
+
+# The full set of classes a live location vertex may carry: its own key type
+# (the class every newly-minted location gets) or the shared legacy
+# discriminator.
+LOCATION_CLASSES = LOCATION_TYPES + [LEGACY_LOCATION_CLASS]
+
+def require_live_location(state, key, name):
+    # Alive, keyed vtx.<locationType>.<NanoID> at an admitted location level,
+    # AND carrying a location class.
+    # BOTH the key and the class are checked, and each catches what the other
+    # cannot. The KEY's type segment is the type authority — it is what a lens
+    # label resolves against, and it is the only thing that can say "any
+    # location" across the three levels, since a location's class is its own
+    # key type. The CLASS is what proves location-domain minted the vertex: a
+    # foreign package writing vtx.unit.<id> with a class of its own passes the
+    # key check and must still be refused.
+    if not vertex_alive(state, key):
+        fail("UnknownEndpoint: " + name + ": " + key + " is absent or tombstoned")
+    lt, _ = parts_of(key, name, "")
+    if lt not in LOCATION_TYPES:
+        fail("NotALocation: " + name + ": " + key + " has type segment " + str(lt) + ", required one of unit, building, property")
+    cls = class_of(state, key)
+    if cls not in LOCATION_CLASSES:
+        fail("NotALocation: " + name + ": " + key + " has class " + str(cls) + ", required its own location type or " + LEGACY_LOCATION_CLASS)
+
 # --- workplace write confinement (facet-staff-worlds-design.md §3.5) ---------
 #
 # A staff actor may write only inside the location it worksAt. Three properties
@@ -1609,7 +1645,7 @@ def execute(state, op):
         ]
         if loc != None:
             ltype, lid = parts_of(loc, "location", "")
-            require_live_typed(state, loc, "location", "location")
+            require_live_location(state, loc, "location")
             mutations.append(make_link("lnk.studio." + sid + ".locatedAt." + ltype + "." + lid,
                                        skey, loc, "locatedAt", "locatedAt", {}))
         events = [{"class": "wellness.studioCreated", "data": {"studioKey": skey}}]

@@ -174,19 +174,23 @@ func TestLoftspace_AssignRejectsDeadLandlord(t *testing.T) {
 	}
 }
 
-// TestLoftspace_AssignRejectsNonLocationUnit: a unit-shaped key whose class is
-// not location is rejected (NotAUnit) and no link is committed.
+// TestLoftspace_AssignRejectsNonLocationUnit: a live vertex whose KEY TYPE
+// SEGMENT is not `unit` is rejected (NotAUnit) and no link is committed. The
+// vector is a real BUILDING — a location at the wrong level. The type is
+// double-enforced (parts_of(unit, "unit", "unit") ahead of require_live_unit)
+// and neither guard reads the root class. TestLoftspace_AssignUnitOwner is the
+// positive vector.
 func TestLoftspace_AssignRejectsNonLocationUnit(t *testing.T) {
 	ctx, conn := setupLoftspaceEnv(t)
 	cp, cons := newLoftspacePipeline(t, ctx, conn, "non-location")
 
 	lsSeedVertex(t, ctx, conn, lsLandlordKey, "identity", false)
-	fakeUnit := "vtx.unit.LSnotlocatnHJKMNPQR"
-	lsSeedVertex(t, ctx, conn, fakeUnit, "identity", false) // unit-shaped key, wrong class
+	notAUnit := "vtx.building.LSnotaunitBLdgHJKMNP"
+	lsSeedVertex(t, ctx, conn, notAUnit, "building", false) // a real location, the WRONG level
 
-	assignUnitOwner(t, ctx, conn, cp, cons, "nonLoc0001", lsLandlordKey, fakeUnit, lsStaffActorKey, processor.OutcomeRejected)
-	if _, err := conn.KVGet(ctx, testutil.HarnessCoreBucket, manageLinkKey(lsLandlordKey, fakeUnit)); err == nil {
-		t.Fatalf("a management link was committed for a non-location unit")
+	assignUnitOwner(t, ctx, conn, cp, cons, "nonLoc0001", lsLandlordKey, notAUnit, lsStaffActorKey, processor.OutcomeRejected)
+	if _, err := conn.KVGet(ctx, testutil.HarnessCoreBucket, manageLinkKey(lsLandlordKey, notAUnit)); err == nil {
+		t.Fatalf("a management link was committed for a vertex that is not a unit")
 	}
 }
 

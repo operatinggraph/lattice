@@ -122,6 +122,40 @@ func Lenses() []pkgmgr.LensSpec {
 //     granting ancestor loc. A laundry availableAt a building but unavailableAt
 //     the actor's penthouse is excluded for the penthouse chain.
 //
+// The two POSITIVE location positions — `loc0` (the actor's residence) and
+// `loc` (the availability level reached up the containment chain) — carry
+// `:location*`, the ABSTRACT type label with the taxonomy-expansion sigil. It
+// resolves against location-domain's `subtypeOf` edges to
+// {unit, building, property}, so the binder admits any location level and only
+// a location level, without this lens naming the levels. A new leaf (a `room`,
+// a `floor`) declared by any package is picked up with no edit here.
+//
+// `exLoc` IS DELIBERATELY UNLABELLED, AND THAT ASYMMETRY IS THE SECURITY
+// PROPERTY. It sits inside a NOT (...) exclusion, so its polarity is inverted:
+// a label on a positive pattern can only remove bindings, which removes
+// access, whereas a label on a NEGATED pattern can only remove EXCLUSIONS,
+// which GRANTS access. Under a non-empty-but-incomplete expansion — the
+// taxonomy resolver armed with the `unit` leaf but not yet the `building` one,
+// which is an ordinary replay window, not a fault — a labelled `exLoc` would
+// stop binding building-level `unavailableAt` edges and hand out a service at
+// a place an operator had explicitly marked unavailable. This lens writes
+// `cap.svc.<actor>`, so that is a live authorization surface. The positive
+// positions fail CLOSED against the same partial expansion (fewer bindings,
+// less access), so leaving the negated one bare removes the fail-open half
+// entirely. `TestServiceLocationLens_PartialExpansionStillExcludes` pins it.
+//
+// WHAT THE LABELS DO AND DO NOT BUY, measured rather than assumed. They
+// constrain the BINDER: an unlabeled position binds a vertex of any type, and
+// the walk is kept honest only by which edges exist. They do NOT narrow the
+// Core-KV consumer filter: this cypher is non-exhaustive independently of any
+// label, because a variable-length relationship traverses intermediate nodes
+// of arbitrary type (`ReferencedLabels`, ruleengine/full/labels.go) and both
+// containment walks are `*0..`. The unlabeled `op` inside the pattern
+// comprehension is a second, independent blocker. So the lens keeps the broad
+// filter, and its census verdict stays `broad / modeBroad` — with `location`
+// now in its label set. The exclusion label was therefore buying no narrowing
+// either, which is why dropping it costs nothing at all.
+//
 // `svc` carries the `:service` label (matched by the `vtx.service.*` key-type)
 // as a self-contained guard — only service vertices project, even if a
 // non-service vertex were ever wired an availableAt edge. `allowedOperations` is
@@ -132,7 +166,7 @@ func Lenses() []pkgmgr.LensSpec {
 // structural denial can read directly off the root.
 const capabilityServiceAccessSpec = `
 MATCH (identity:identity {key: $actorKey})
-OPTIONAL MATCH (identity)-[:residesIn]->(loc0)-[:containedIn*0..]->(loc)<-[:availableAt]-(svc:service)
+OPTIONAL MATCH (identity)-[:residesIn]->(loc0:location*)-[:containedIn*0..]->(loc:location*)<-[:availableAt]-(svc:service)
 WHERE NOT (svc)-[:instanceOf]->(svcTpl:service)
   AND NOT (loc0)-[:containedIn*0..]->(exLoc)<-[:unavailableAt]-(svc)
 RETURN
@@ -157,10 +191,10 @@ RETURN
 // enforces this at activation (ValidateUnanchoredForDiffRetraction), so the
 // property cannot be lost by a later edit.
 //
-// The `building` label matches the vtx.building.* KEY TYPE, not the class (every
-// location vertex is class=location — location-domain/ddls.go): a worksAt wired
-// to a unit or a property therefore grants nothing, which is the intended
-// granularity. The role is matched by canonicalName, the same way
+// The `building` label matches the vtx.building.* KEY TYPE: a worksAt wired to
+// a unit or a property therefore grants nothing, which is the intended
+// granularity — so this lens deliberately keeps the concrete leaf label rather
+// than taking capabilityServiceAccess's `:location*`. The role is matched by canonicalName, the same way
 // rbac-domain's capabilityRoleIndex reads a role's name.
 const staffReadGrantsSpec = `MATCH (staff:identity)-[:holdsRole]->(r:role)
 MATCH (staff)-[:worksAt]->(b:building)

@@ -55,7 +55,7 @@ func workOrderVertexTypeDDL() pkgmgr.DDLSpec {
 		InputSchema: `{"type":"object","properties":` +
 			`{"summary":{"type":"string","description":"What is wrong (ReportIssue; required)."},` +
 			`"priority":{"type":"string","enum":["low","normal","urgent"],"description":"How urgent the issue is (ReportIssue; optional, default normal)."},` +
-			`"location":{"type":"string","description":"vtx.<locType>.<NanoID> of the place the issue is at (ReportIssue; required, validated alive + class=location)."},` +
+			`"location":{"type":"string","description":"vtx.<locType>.<NanoID> of the place the issue is at (ReportIssue; required, validated alive + an admitted location type segment)."},` +
 			`"workOrderId":{"type":"string","description":"Optional bare NanoID for the new work-order vertex (ReportIssue); absent → minted."},` +
 			`"workOrderKey":{"type":"string","description":"vtx.workorder.<NanoID> being resolved (ResolveWorkOrder; required, validated alive)."},` +
 			`"notes":{"type":"string","description":"What was done to resolve it (ResolveWorkOrder; required)."}},` +
@@ -65,7 +65,7 @@ func workOrderVertexTypeDDL() pkgmgr.DDLSpec {
 		FieldDescription: map[string]string{
 			"summary":      "One line describing the issue, e.g. \"Boiler in the basement is cycling\" (ReportIssue; required). Shown as the work order's label everywhere — keep it free of resident PII, since it rides the SYNC plane to staff devices (D3).",
 			"priority":     "low | normal | urgent (ReportIssue; optional, default normal).",
-			"location":     "Full vtx.<locType>.<NanoID> key of the location-domain place the issue is at (a unit, a building). Validated alive + class=location; written as the workorder locatedAt location link. MUST be listed in ContextHint.Reads.",
+			"location":     "Full vtx.<locType>.<NanoID> key of the location-domain place the issue is at (a unit, a building). Validated alive + an admitted location type segment; written as the workorder locatedAt location link. MUST be listed in ContextHint.Reads.",
 			"workOrderId":  "Optional bare NanoID (no dots / key segments) for the new work-order vertex. Absent → minted with nanoid.new().",
 			"workOrderKey": "Full vtx.workorder.<NanoID> key of the work order being resolved (ResolveWorkOrder). Auto-filled by a task-driven client from the task's scopedTo target, not typed.",
 			"notes":        "What was actually done (ResolveWorkOrder; required). TERMINAL: the same notes re-submit harmlessly — which is what makes an offline drain retry safe — but different notes are rejected, so a resolution can never silently flip.",
@@ -74,7 +74,7 @@ func workOrderVertexTypeDDL() pkgmgr.DDLSpec {
 			{
 				Name:    "ReportIssue — raise a work order at a unit",
 				Payload: map[string]any{"summary": "Kitchen tap is dripping", "priority": "normal", "location": "vtx.unit.<NanoID>"},
-				ExpectedOutcome: "Validates the location is alive + class=location and that the caller worksAt a location covering it " +
+				ExpectedOutcome: "Validates the location is alive + an admitted location type segment and that the caller worksAt a location covering it " +
 					"(root exempt). Mints vtx.workorder.<NanoID> (class=workorder, root {}) + the .report aspect + " +
 					"lnk.workorder.<id>.locatedAt.unit.<NanoID>. Returns primaryKey (the work-order key).",
 			},
@@ -242,6 +242,42 @@ def require_live_typed(state, key, name, want_class):
     cls = class_of(state, key)
     if cls != want_class:
         fail("WrongClass: " + name + ": " + key + " has class " + str(cls) + ", required " + want_class)
+
+# The concrete location levels an issue may be reported at (Contract #6 §6.9).
+# location-domain owns the vertices; this script references them by KEY TYPE —
+# a location vertex's class IS its own key type, so no single class value names
+# the family.
+LOCATION_TYPES = ["unit", "building", "property"]
+
+# The class a location vertex minted before the taxonomy landed carries: one
+# shared discriminator across all three levels. Nothing rewrites those
+# documents, so both class shapes are live at once and this guard admits
+# either.
+LEGACY_LOCATION_CLASS = "location"
+
+# The full set of classes a live location vertex may carry: its own key type
+# (the class every newly-minted location gets) or the shared legacy
+# discriminator.
+LOCATION_CLASSES = LOCATION_TYPES + [LEGACY_LOCATION_CLASS]
+
+def require_live_location(state, key, name):
+    # Alive, keyed vtx.<locationType>.<NanoID> at an admitted location level,
+    # AND carrying a location class.
+    # BOTH the key and the class are checked, and each catches what the other
+    # cannot. The KEY's type segment is the type authority — it is what a lens
+    # label resolves against, and it is the only thing that can say "any
+    # location" across the three levels, since a location's class is its own
+    # key type. The CLASS is what proves location-domain minted the vertex: a
+    # foreign package writing vtx.unit.<id> with a class of its own passes the
+    # key check and must still be refused.
+    if not vertex_alive(state, key):
+        fail("UnknownEndpoint: " + name + ": " + key + " is absent or tombstoned")
+    lt, _ = parts_of(key, name, "")
+    if lt not in LOCATION_TYPES:
+        fail("NotALocation: " + name + ": " + key + " has type segment " + str(lt) + ", required one of unit, building, property")
+    cls = class_of(state, key)
+    if cls not in LOCATION_CLASSES:
+        fail("NotALocation: " + name + ": " + key + " has class " + str(cls) + ", required its own location type or " + LEGACY_LOCATION_CLASS)
 
 # --- workplace write confinement (facet-staff-worlds-design.md §3.5) ---------
 #
@@ -482,7 +518,7 @@ def execute(state, op):
         priority = priority_of(p)
         loc = required_string(p, "location")
         ltype, lid = parts_of(loc, "location", "")
-        require_live_typed(state, loc, "location", "location")
+        require_live_location(state, loc, "location")
 
         # Confinement on a CREATE differs from F4's four resolve-the-target
         # sites in exactly one way, and the difference is safe: there is no

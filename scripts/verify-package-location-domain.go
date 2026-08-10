@@ -6,10 +6,16 @@
 // Connects to a running Lattice NATS instance and checks that the
 // location-domain package has been correctly installed. Asserts:
 //
-//	1 location DDL meta-vertex (vtx.meta.<NanoID>) with class=meta.ddl.vertexType
-//	8 DDL aspects: .canonicalName=location, .permittedCommands (5 ops),
-//	               .description, .script, .inputSchema, .outputSchema,
-//	               .fieldDescription, .examples (each with a valid aspect envelope)
+//	4 DDL meta-vertices (vtx.meta.<NanoID>), all class=meta.ddl.vertexType:
+//	               the ABSTRACT `location` (data.abstract=true; .script and
+//	               .permittedCommands absent on a fresh install, tombstoned on
+//	               a cell upgraded in place — never live) and the three CONCRETE leaves
+//	               unit/building/property (data.abstract absent/false, the
+//	               shared .script, .permittedCommands with all 5 ops)
+//	               — each with .canonicalName, .description, .inputSchema,
+//	               .outputSchema, .fieldDescription, .examples
+//	3 subtypeOf links lnk.meta.<leafId>.subtypeOf.meta.<locationId>, leaf ->
+//	               abstract, class=subtypeOf
 //	5 permission vertices (CreateLocation, TombstoneLocation, WireContainedIn,
 //	               UnwireContainedIn, SetLocationPresentation), scope any
 //	5 grantedBy links (each op → operator)
@@ -39,6 +45,10 @@ const (
 )
 
 var locationExpectedOps = []string{"CreateLocation", "TombstoneLocation", "WireContainedIn", "UnwireContainedIn", "SetLocationPresentation"}
+
+// locationLeafCanonicals are the three CONCRETE location types, each declared
+// a subtypeOf the abstract `location` above.
+var locationLeafCanonicals = []string{"unit", "building", "property"}
 
 func main() {
 	natsURL := pkgverify.EnvOrDefault("NATS_URL", nats.DefaultURL)
@@ -102,52 +112,131 @@ func main() {
 
 	fmt.Printf("verify-package-location-domain: scanning %d Core KV keys...\n", len(allKeys))
 
-	// 1. location DDL meta-vertex.
-	locDDLKey, err := pkgverify.FindMetaByCanonical(ctx, coreKV, allKeys, locationDDLCanonical)
-	if err != nil || locDDLKey == "" {
-		fail("location DDL meta-vertex", fmt.Sprintf("vtx.meta.*.canonicalName=%q not found: %v", locationDDLCanonical, err))
-	} else {
-		ok(fmt.Sprintf("location DDL meta-vertex exists: %s", locDDLKey))
+	// 1-5. The FOUR type metas the taxonomy declares: the abstract `location`
+	// and its three concrete leaves, plus the subtypeOf edge from each leaf.
+	metaKeyOf := func(canonical string) string {
+		k, err := pkgverify.FindMetaByCanonical(ctx, coreKV, allKeys, canonical)
+		if err != nil || k == "" {
+			fail(canonical+" DDL meta-vertex", fmt.Sprintf("vtx.meta.*.canonicalName=%q not found: %v", canonical, err))
+			return ""
+		}
+		ok(fmt.Sprintf("%s DDL meta-vertex exists: %s", canonical, k))
+		return k
 	}
-
-	if locDDLKey != "" {
-		// 2. class.
-		if env, err := pkgverify.GetEnvelope(ctx, coreKV, locDDLKey); err != nil {
-			fail(locDDLKey+" class", fmt.Sprintf("cannot read: %v", err))
+	// checkRoot asserts the meta root's class + liveness, and that data.abstract
+	// matches what the declaration says (present and true for the abstract type,
+	// absent or false for a concrete leaf — the marker is EXPLICIT, never
+	// derived from the absence of a script).
+	checkRoot := func(metaKey, canonical string, wantAbstract bool) {
+		env, err := pkgverify.GetEnvelope(ctx, coreKV, metaKey)
+		if err != nil {
+			fail(metaKey+" root", fmt.Sprintf("cannot read: %v", err))
+			return
+		}
+		if cls, _ := env["class"].(string); cls != "meta.ddl.vertexType" {
+			fail(metaKey+" class", fmt.Sprintf("got %q want meta.ddl.vertexType", cls))
 		} else {
-			if cls, _ := env["class"].(string); cls != "meta.ddl.vertexType" {
-				fail(locDDLKey+" class", fmt.Sprintf("got %q want meta.ddl.vertexType", cls))
-			} else {
-				ok(locDDLKey + " class=meta.ddl.vertexType")
+			ok(metaKey + " class=meta.ddl.vertexType")
+		}
+		if isDeleted, _ := env["isDeleted"].(bool); isDeleted {
+			fail(metaKey+" isDeleted", "vertex is tombstoned")
+		} else {
+			ok(metaKey + " isDeleted=false")
+		}
+		data, _ := env["data"].(map[string]any)
+		gotAbstract, _ := data["abstract"].(bool)
+		if gotAbstract != wantAbstract {
+			fail(metaKey+" data.abstract", fmt.Sprintf("%s: got %v want %v", canonical, gotAbstract, wantAbstract))
+		} else {
+			ok(fmt.Sprintf("%s data.abstract=%v", metaKey, wantAbstract))
+		}
+	}
+	checkCanonicalName := func(metaKey, canonical string) {
+		cnKey := metaKey + ".canonicalName"
+		env, err := pkgverify.GetEnvelope(ctx, coreKV, cnKey)
+		if err != nil {
+			fail(cnKey, fmt.Sprintf("missing: %v", err))
+			return
+		}
+		data, _ := env["data"].(map[string]any)
+		if val, _ := data["value"].(string); val != canonical {
+			fail(cnKey, fmt.Sprintf("value=%q want %q", val, canonical))
+		} else {
+			ok(cnKey + " value=" + canonical)
+		}
+		if err := pkgverify.CheckAspectEnvelope(env, cnKey, metaKey, "canonicalName"); err != nil {
+			fail(cnKey+" envelope", err.Error())
+		} else {
+			ok(cnKey + " envelope shape OK")
+		}
+	}
+	checkAspectsPresent := func(metaKey string, aspects []string) {
+		for _, asp := range aspects {
+			k := metaKey + "." + asp
+			env, err := pkgverify.GetEnvelope(ctx, coreKV, k)
+			if err != nil {
+				fail(k, fmt.Sprintf("missing: %v", err))
+				continue
 			}
 			if isDeleted, _ := env["isDeleted"].(bool); isDeleted {
-				fail(locDDLKey+" isDeleted", "vertex is tombstoned")
+				fail(k, "tombstoned — a declared aspect must be live")
+				continue
+			}
+			ok(k + " present")
+			if err := pkgverify.CheckAspectEnvelope(env, k, metaKey, asp); err != nil {
+				fail(k+" envelope", err.Error())
 			} else {
-				ok(locDDLKey + " isDeleted=false")
+				ok(k + " envelope shape OK")
 			}
 		}
-
-		// 3. canonicalName.
-		cnKey := locDDLKey + ".canonicalName"
-		if env, err := pkgverify.GetEnvelope(ctx, coreKV, cnKey); err != nil {
-			fail(cnKey, fmt.Sprintf("missing: %v", err))
-		} else {
-			data, _ := env["data"].(map[string]any)
-			val, _ := data["value"].(string)
-			if val != locationDDLCanonical {
-				fail(cnKey, fmt.Sprintf("value=%q want %q", val, locationDDLCanonical))
-			} else {
-				ok(cnKey + " value=location")
+	}
+	// checkAspectsWithdrawn asserts an aspect an ABSTRACT type must not
+	// declare. Withdrawn has TWO on-disk shapes and both are correct: the key
+	// is absent (a fresh install never wrote it) or present-but-TOMBSTONED (an
+	// in-place upgrade of a concrete type to an abstract one — a DDL keeps its
+	// meta-vertex NanoID across versions per Contract #8 §8.1, so pkgmgr's
+	// diff tombstones the aspects the new version stops declaring, and a
+	// tombstone retains the prior document with only isDeleted flipped). The
+	// upgrade shape is the one every already-installed cell has, so demanding
+	// an absent key would fail this gate on exactly those stacks. What is NOT
+	// acceptable is a LIVE aspect.
+	checkAspectsWithdrawn := func(metaKey string, aspects []string) {
+		for _, asp := range aspects {
+			k := metaKey + "." + asp
+			env, err := pkgverify.GetEnvelope(ctx, coreKV, k)
+			if err != nil {
+				ok(k + " absent (abstract type)")
+				continue
 			}
-			if err := pkgverify.CheckAspectEnvelope(env, cnKey, locDDLKey, "canonicalName"); err != nil {
-				fail(cnKey+" envelope", err.Error())
-			} else {
-				ok(cnKey + " envelope shape OK")
+			if isDeleted, _ := env["isDeleted"].(bool); isDeleted {
+				ok(k + " tombstoned (abstract type, upgraded in place)")
+				continue
 			}
+			fail(k, "live, but an abstract type declares neither a script nor a permittedCommands gate")
 		}
+	}
 
-		// 4. permittedCommands.
-		pcKey := locDDLKey + ".permittedCommands"
+	// The abstract parent.
+	abstractKey := metaKeyOf(locationDDLCanonical)
+	if abstractKey != "" {
+		checkRoot(abstractKey, locationDDLCanonical, true)
+		checkCanonicalName(abstractKey, locationDDLCanonical)
+		checkAspectsWithdrawn(abstractKey, []string{"permittedCommands", "script"})
+		checkAspectsPresent(abstractKey, []string{"description", "inputSchema", "outputSchema", "fieldDescription", "examples"})
+	}
+
+	// The three concrete leaves, each carrying the shared script + the five ops
+	// and a live subtypeOf edge to the abstract parent.
+	for _, leaf := range locationLeafCanonicals {
+		leafKey := metaKeyOf(leaf)
+		if leafKey == "" {
+			continue
+		}
+		checkRoot(leafKey, leaf, false)
+		checkCanonicalName(leafKey, leaf)
+		checkAspectsPresent(leafKey, []string{"description", "script", "inputSchema", "outputSchema", "fieldDescription", "examples"})
+
+		pcKey := leafKey + ".permittedCommands"
 		if env, err := pkgverify.GetEnvelope(ctx, coreKV, pcKey); err != nil {
 			fail(pcKey, fmt.Sprintf("missing: %v", err))
 		} else {
@@ -168,27 +257,42 @@ func main() {
 			if allPresent && len(cmds) == len(locationExpectedOps) {
 				ok(fmt.Sprintf("%s contains all %d commands", pcKey, len(locationExpectedOps)))
 			}
-			if err := pkgverify.CheckAspectEnvelope(env, pcKey, locDDLKey, "permittedCommands"); err != nil {
+			if err := pkgverify.CheckAspectEnvelope(env, pcKey, leafKey, "permittedCommands"); err != nil {
 				fail(pcKey+" envelope", err.Error())
 			} else {
 				ok(pcKey + " envelope shape OK")
 			}
 		}
 
-		// 5. remaining aspects present + valid envelope.
-		for _, asp := range []string{"description", "script", "inputSchema", "outputSchema", "fieldDescription", "examples"} {
-			k := locDDLKey + "." + asp
-			if env, err := pkgverify.GetEnvelope(ctx, coreKV, k); err != nil {
-				fail(k, fmt.Sprintf("missing: %v", err))
-			} else {
-				ok(k + " present")
-				if err := pkgverify.CheckAspectEnvelope(env, k, locDDLKey, asp); err != nil {
-					fail(k+" envelope", err.Error())
-				} else {
-					ok(k + " envelope shape OK")
-				}
-			}
+		if abstractKey == "" {
+			continue
 		}
+		// The taxonomy edge, leaf -> abstract (Contract #1 §1.1: the
+		// later-arriving vertex is the source).
+		linkKey := "lnk.meta." + strings.TrimPrefix(leafKey, "vtx.meta.") +
+			".subtypeOf.meta." + strings.TrimPrefix(abstractKey, "vtx.meta.")
+		env, err := pkgverify.GetEnvelope(ctx, coreKV, linkKey)
+		if err != nil {
+			fail(linkKey, fmt.Sprintf("subtypeOf edge missing: %v", err))
+			continue
+		}
+		if isDeleted, _ := env["isDeleted"].(bool); isDeleted {
+			fail(linkKey, "subtypeOf edge is tombstoned")
+			continue
+		}
+		if cls, _ := env["class"].(string); cls != "subtypeOf" {
+			fail(linkKey, fmt.Sprintf("class=%q want subtypeOf", cls))
+			continue
+		}
+		if src, _ := env["sourceVertex"].(string); src != leafKey {
+			fail(linkKey, fmt.Sprintf("sourceVertex=%q want the leaf %q", src, leafKey))
+			continue
+		}
+		if tgt, _ := env["targetVertex"].(string); tgt != abstractKey {
+			fail(linkKey, fmt.Sprintf("targetVertex=%q want the abstract %q", tgt, abstractKey))
+			continue
+		}
+		ok(fmt.Sprintf("%s subtypeOf %s", leaf, locationDDLCanonical))
 	}
 
 	// 6. permission vertices + scope + grantedBy-operator links.

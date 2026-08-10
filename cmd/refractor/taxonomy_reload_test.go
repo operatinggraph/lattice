@@ -876,7 +876,21 @@ func TestRederiveEntry_ShrinkRetractsTheDroppedSubtypesRowsFromTheTarget(t *test
 		_, err := env.target.Get(ctx, key)
 		return err == nil
 	}
+	// revisionOf returns the target row's current revision, or 0 when absent.
+	// NATS KV revisions are the bucket's stream sequence, so a purge followed
+	// by a re-write always lands STRICTLY ABOVE whatever the row carried
+	// before — which is what lets the wait below tell a re-derived row from a
+	// surviving one.
+	revisionOf := func(key string) uint64 {
+		entry, err := env.target.Get(ctx, key)
+		if err != nil {
+			return 0
+		}
+		return entry.Revision
+	}
 	mcPollUntil(t, 5*time.Second, func() bool { return projected(roomKey) && projected(deskKey) })
+	roomRevisionBeforeShrink := revisionOf(roomKey)
+	require.NotZero(t, roomRevisionBeforeShrink, "precondition: the room row is projected before the shrink")
 
 	// A row this lens does not own, in the same target bucket. The retraction
 	// must not reach it: an unconfined purge of a shared bucket is a wipe of
@@ -908,11 +922,23 @@ func TestRederiveEntry_ShrinkRetractsTheDroppedSubtypesRowsFromTheTarget(t *test
 		"precondition: the gate narrowed, so nothing will deliver a desk event again")
 
 	// The surviving leaf comes back from the replay and the dropped one does
-	// not. Polling both together cannot pass on the pre-shrink state (desk is
-	// present there) nor on the mid-rebuild empty target (room is absent there).
-	mcPollUntil(t, 10*time.Second, func() bool { return projected(roomKey) && !projected(deskKey) })
+	// not.
+	//
+	// The wait is on the room row's REVISION rising above what it carried
+	// before the shrink, not on its mere presence. Presence alone admits a
+	// third state beyond the pre-shrink and fully-empty ones: Truncate purges
+	// the lens's rows ONE KEY AT A TIME in list order
+	// (adapter.NatsKVAdapter.Truncate), and `vtx.desk.*` is listed ahead of
+	// `vtx.room.*`, so mid-truncate desk is already gone while room is still
+	// its STALE pre-shrink row. A presence check passes there, before the
+	// replay has re-derived anything. A revision strictly above the pre-shrink
+	// one can only come from the replay's own write.
+	mcPollUntil(t, 10*time.Second, func() bool {
+		return revisionOf(roomKey) > roomRevisionBeforeShrink && !projected(deskKey)
+	}, "the surviving subtype's row must be re-derived by the replay and the dropped subtype's retracted")
 
-	assert.True(t, projected(roomKey), "the surviving subtype's row must be re-derived by the replay")
+	assert.Greater(t, revisionOf(roomKey), roomRevisionBeforeShrink,
+		"the surviving subtype's row must be re-derived by the replay")
 	assert.False(t, projected(deskKey), "the dropped subtype's row must be retracted — nothing else can ever reach it")
 	assert.True(t, projected(siblingKey), "the truncate must be confined to the lens's own key prefix — another producer's row in the same bucket must survive")
 	assert.Zero(t, errorCount(t, reporter), "the truncating rebuild must not have recorded a failure")

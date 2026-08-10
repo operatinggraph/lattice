@@ -102,16 +102,28 @@ func buildOpGroups(metaKeys []string, get kvGetter) []opGroup {
 }
 
 // metaData decodes the .data object of a Core KV envelope, returning nil when
-// the key is absent or the value is not a JSON object carrying a data field.
+// the key is absent, TOMBSTONED, or not a JSON object carrying a data field.
+//
+// A tombstone retains the prior document and only flips isDeleted (the
+// Processor's commit path), so a withdrawn declaration still reads back with
+// all its old content. Every consumer here wants "what does this meta declare
+// NOW", so a deleted aspect must read as absent — otherwise a type that
+// withdrew its permittedCommands (an in-place upgrade to an abstract type
+// does exactly that) keeps offering every command it used to as a submittable
+// operation.
 func metaData(get kvGetter, key string) map[string]any {
 	raw, ok := get(key)
 	if !ok {
 		return nil
 	}
 	var env struct {
-		Data map[string]any `json:"data"`
+		IsDeleted bool           `json:"isDeleted"`
+		Data      map[string]any `json:"data"`
 	}
 	if json.Unmarshal(raw, &env) != nil {
+		return nil
+	}
+	if env.IsDeleted {
 		return nil
 	}
 	return env.Data

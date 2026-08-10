@@ -13,6 +13,7 @@ package maintenancedomain_test
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
@@ -321,6 +322,36 @@ func mdSubmitResolve(t *testing.T, ctx context.Context, conn *substrate.Conn,
 	return testutil.DriveOne(t, ctx, cp, cons, "")
 }
 
+// mdSubmitReportIssueWithReason is mdSubmitReportIssue's sibling for a
+// REJECTION vector: it returns the script's own failure message so a test can
+// name the guard it means to exercise. A bare outcome check cannot tell the
+// location guard from the workplace-confinement guard beside it.
+func mdSubmitReportIssueWithReason(t *testing.T, ctx context.Context, conn *substrate.Conn,
+	cp *processor.CommitPath, cons jetstream.Consumer, label, actorKey, location, summary, workOrderID string) (processor.MessageOutcome, string) {
+	t.Helper()
+	payload := map[string]any{"summary": summary, "location": location}
+	if workOrderID != "" {
+		payload["workOrderId"] = workOrderID
+	}
+	b, _ := json.Marshal(payload)
+	env := &processor.OperationEnvelope{
+		RequestID:     testutil.GenReqID(label),
+		Lane:          processor.LaneDefault,
+		OperationType: "ReportIssue",
+		Actor:         actorKey,
+		SubmittedAt:   "2026-07-21T09:00:00Z",
+		Class:         "workOrder",
+		Payload:       json.RawMessage(b),
+		ContextHint:   &processor.ContextHint{Reads: []string{location}},
+	}
+	outcome, reply := testutil.SubmitAndAwaitReply(t, ctx, conn, cp, cons, env)
+	msg := ""
+	if reply != nil && reply.Error != nil {
+		msg = reply.Error.Message
+	}
+	return outcome, msg
+}
+
 // TestReportIssue_CommitsWorkOrderAtLocation is the producer half: the work
 // order, its report aspect, and the locatedAt link land in one batch.
 func TestReportIssue_CommitsWorkOrderAtLocation(t *testing.T) {
@@ -354,6 +385,83 @@ func TestReportIssue_CommitsWorkOrderAtLocation(t *testing.T) {
 	}
 	if !mdKeyLive(ctx, conn, "lnk.workorder."+woID+".locatedAt.unit."+mdUnitAID) {
 		t.Errorf("locatedAt link not committed — the work order has no place")
+	}
+}
+
+// TestReportIssue_RejectsNonLocationTarget pins the migrated location guard on
+// ReportIssue's `location` payload field. The guard reads the KEY's type
+// segment — a location vertex's class equals its own key type, and every
+// location minted before the taxonomy landed still carries the shared class
+// `location`, so no class value names the family and a class check would
+// reject one of the two live populations.
+//
+// The negative vector is a live IDENTITY (a real vertex, not a location) and
+// the positive vector is the same op over mdUnitAKey, which mdSeedWorld seeds
+// with a concrete key type and the legacy shared class — the exact production
+// migration shape. Asserting both is what keeps the rejection attributable to
+// the guard rather than to the fixture.
+func TestReportIssue_RejectsNonLocationTarget(t *testing.T) {
+	ctx, conn := setupMaintenanceEnv(t)
+	cp, cons := mdPipeline(t, ctx, conn, "mdnonloc")
+	mdSeedWorld(t, ctx, conn)
+
+	// Positive: a legacy-classed unit is still a location.
+	if got := mdSubmitReportIssue(t, ctx, conn, cp, cons, "mdnlp0000000000001",
+		mdActorKey, mdUnitAKey, "Tap drips", "BBMANTWQRKPHJKMNPQRS"); got != processor.OutcomeAccepted {
+		t.Fatalf("ReportIssue at a legacy-classed unit = %v, want Accepted", got)
+	}
+	// Negative: a live vertex whose type segment is not a location level.
+	got, why := mdSubmitReportIssueWithReason(t, ctx, conn, cp, cons, "mdnln0000000000002",
+		mdActorKey, mdTechKey, "Tap drips", "BBMANTWQRKNHJKMNPQRS")
+	if got != processor.OutcomeRejected {
+		t.Fatalf("ReportIssue at a non-location target = %v, want Rejected", got)
+	}
+	if !strings.Contains(why, "NotALocation") {
+		t.Errorf("refused with %q, want the location guard's own NotALocation", why)
+	}
+	if mdKeyLive(ctx, conn, "vtx.workorder.BBMANTWQRKNHJKMNPQRS") {
+		t.Fatal("a work order was committed against a vertex that is not a location")
+	}
+}
+
+// TestReportIssue_AcceptsPerTypeClass pins the FORWARD-migration half of the
+// class arm, which every other location fixture in this package misses:
+// mdSeedWorld seeds the shared pre-taxonomy class everywhere, so narrowing the
+// admitted class set back to just that one leaves the whole suite green while
+// every location minted AFTER the upgrade silently stops being reportable-at.
+//
+// A location created by location-domain today carries its own key type as its
+// class (CreateLocation writes make_vtx(loc_key, lt, {})), so this is the shape
+// production produces from here on.
+func TestReportIssue_AcceptsPerTypeClass(t *testing.T) {
+	ctx, conn := setupMaintenanceEnv(t)
+	cp, cons := mdPipeline(t, ctx, conn, "mdpertype")
+	mdSeedWorld(t, ctx, conn)
+
+	// class == the key's own type segment: what CreateLocation mints now.
+	perType := "vtx.unit.BBMANTPERTYPEUNTAHJK"
+	mdSeedVertex(t, ctx, conn, perType, "unit")
+	if got := mdSubmitReportIssue(t, ctx, conn, cp, cons, "mdpt00000000000001",
+		mdActorKey, perType, "Tap drips", "BBMANTWQRKTHJKMNPQRS"); got != processor.OutcomeAccepted {
+		t.Fatalf("ReportIssue at a per-type-classed unit = %v, want Accepted", got)
+	}
+
+	// The KEY arm's own discriminator: an admitted CLASS on a key type that is
+	// not a location at all. Every other negative vector here fails both arms
+	// at once and so cannot tell the key guard from the class-only guard that
+	// preceded it.
+	impostor := "vtx.workorder.BBMANTMPSTRWQHJKMNPQ"
+	mdSeedVertex(t, ctx, conn, impostor, "location")
+	got, why := mdSubmitReportIssueWithReason(t, ctx, conn, cp, cons, "mdpt00000000000002",
+		mdActorKey, impostor, "Tap drips", "BBMANTWQRKUHJKMNPQRS")
+	if got != processor.OutcomeRejected {
+		t.Fatalf("ReportIssue at a non-location target = %v, want Rejected", got)
+	}
+	if !strings.Contains(why, "NotALocation") {
+		t.Errorf("refused with %q, want the location guard's own NotALocation", why)
+	}
+	if mdKeyLive(ctx, conn, "vtx.workorder.BBMANTWQRKUHJKMNPQRS") {
+		t.Fatal("a work order was committed against a vertex that is not a location")
 	}
 }
 

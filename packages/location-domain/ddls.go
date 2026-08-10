@@ -2,13 +2,31 @@ package locationdomain
 
 import "github.com/operatinggraph/lattice/internal/pkgmgr"
 
-// DDLs returns the package's DDL meta-vertex declarations.
+// DDLs returns the package's DDL meta-vertex declarations: the abstract
+// `location` type and its three concrete leaves.
 //
-// Single DDL `location` (vertex-type class) handles all four ops for the three
-// location types (unit / building / property):
+// The taxonomy (dynamic-type-taxonomy-design.md §3) is four vertexType metas
+// joined by three subtypeOf links:
 //
-//	CreateLocation, TombstoneLocation
-//	WireContainedIn, UnwireContainedIn
+//	location (abstract — no script, no permittedCommands, names no instance)
+//	  ^          ^          ^
+//	unit     building   property   (concrete — each carries the shared script)
+//
+// Each leaf declares SubtypeOfRef "location", so the installer emits
+// `lnk.meta.<leafId>.subtypeOf.meta.<locationId>` into this package's own
+// atomic install batch. A lens pattern written `(l:location*)` expands against
+// those links to the concrete leaf set {unit, building, property}.
+//
+// The three leaves share ONE Starlark body (locationDDLScript): the five ops
+// are the same for every level, and the level is the key's own type segment
+// plus the CreateLocation payload's locationType field.
+//
+// Because all three leaves admit the same five operationTypes, the Processor's
+// operationType→class reverse index treats each of them as ambiguous and drops
+// it (internal/processor/ddl_cache.go buildByCommand), so EVERY submitter of a
+// location op must name a concrete class explicitly — `"unit"`, `"building"`,
+// or `"property"`, matching the key it creates or wires. The abstract
+// `"location"` is never a legal envelope class: it declares no script.
 //
 // Architectural rules (binding — same known-key discipline as service-domain /
 // identity-domain):
@@ -17,28 +35,29 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 //     lookups, no lens-output reads. WireContainedIn validates BOTH link
 //     endpoints (the child + parent location) by reading each by the key the
 //     caller lists in ContextHint.Reads.
-//   - Both endpoints of a containedIn link MUST be alive AND class=location: a
-//     non-location vertex (or a dead one) is never wired into the place graph
-//     (structured ScriptError). Endpoint-class validation is at the op — a
-//     downstream cypher rule's untyped match is not relied on.
+//   - Both endpoints of a containedIn link MUST be alive AND keyed with an
+//     admitted location type segment: a non-location vertex (or a dead one) is
+//     never wired into the place graph (structured ScriptError). Endpoint-type
+//     validation is at the op — a downstream cypher rule's untyped match is not
+//     relied on.
 //   - Canonical-name uniqueness for new location vertices is NOT enforced here.
 //     The script assigns a fresh NanoID and writes; locations have no canonical
 //     name (the place graph is topology, not a named registry).
 //
 // Location shape (Contract #6 §6.9 + Contract #1 §1.1 + D5 — root data minimal,
-// the type is the key segment, the class is the shared discriminator):
+// the class equals the key type):
 //
-//	vtx.unit.<id>       class=location   root data = {}
-//	vtx.building.<id>   class=location   root data = {}
-//	vtx.property.<id>   class=location   root data = {}
+//	vtx.unit.<id>       class=unit       root data = {}
+//	vtx.building.<id>   class=building   root data = {}
+//	vtx.property.<id>   class=property   root data = {}
 //	lnk.<childType>.<childId>.containedIn.<parentType>.<parentId>   class=containedIn
 //
-// The shared class is a BODY discriminator, so a lens reads it as a property
-// predicate — `MATCH (l {class: "location"})`, in seed or traversal position.
-// A cypher label is the key type (`:unit`, `:building`, `:property`) and never
-// resolves against the body, so `MATCH (l:location)` matches nothing. The
-// enforcement that actually holds the place graph closed is op-side: the
-// endpoint-class check above, not any downstream cypher.
+// The ADDRESS is the sole authority for a location's type: a cypher label is
+// the key type (`:unit`, `:building`, `:property`, or `:location*` for the
+// whole family) and never resolves against the body. Every write-path guard
+// reads the key's type segment for the same reason — a class comparison cannot
+// name the family, and pre-existing locations minted before the taxonomy
+// landed carry a class that is not their key type.
 //
 // The containedIn link's source is the later-arriving CHILD (the contained
 // vertex), the target is the pre-existing PARENT (the container) — Contract #1
@@ -50,99 +69,162 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 //   - CreateLocation: nothing (the script mints a fresh NanoID).
 //   - TombstoneLocation: the existing location vertex key.
 //   - WireContainedIn: BOTH endpoints (child + parent) so each is hydrated and
-//     its alive + location-class is validated. The link key is deterministic
+//     its alive + location-type is validated. The link key is deterministic
 //     from the endpoint keys.
 //   - UnwireContainedIn: the deterministic containedIn link key (computed from
 //     child + parent by the caller — see the key shape above).
 func DDLs() []pkgmgr.DDLSpec {
-	return []pkgmgr.DDLSpec{locationDDL()}
+	return []pkgmgr.DDLSpec{
+		locationAbstractDDL(),
+		locationLeafDDL("unit"),
+		locationLeafDDL("building"),
+		locationLeafDDL("property"),
+	}
 }
 
-func locationDDL() pkgmgr.DDLSpec {
+// LocationTypes are the concrete location levels the abstract `location` type
+// covers — the leaf canonicalNames, which are also the `<locationType>` key
+// segment in `vtx.<locationType>.<NanoID>` (Contract #6 §6.9).
+var LocationTypes = []string{"unit", "building", "property"}
+
+// locationAbstractDDL declares the abstract `location` type: the taxonomy
+// parent every concrete level is a subtypeOf. It carries no Script and no
+// PermittedCommands — no instance ever keys `vtx.location.<id>` and no
+// document ever carries `class: "location"` (dynamic-type-taxonomy-design.md
+// §3.2, enforced by the step-6 abstract key-segment and class gates).
+//
+// It keeps the same self-description aspects a concrete type carries (§3.2 —
+// "identical shape, plus an explicit marker"): the schemas below describe the
+// location op family this type is the parent of, which its three leaves
+// implement. LeafBudget is left unset, taking the default 8 — the narrowed
+// filter's label cap — since three leaves sit well inside it.
+func locationAbstractDDL() pkgmgr.DDLSpec {
 	return pkgmgr.DDLSpec{
-		CanonicalName:     "location",
+		CanonicalName: "location",
+		Class:         "meta.ddl.vertexType",
+		Abstract:      true,
+		Description: "Abstract location type — the taxonomy parent of the three concrete location levels " +
+			"unit, building and property (each joined by a subtypeOf link). It names no instance: no vertex " +
+			"is keyed vtx.location.<NanoID> and no document carries class=location. It declares no script " +
+			"and no permittedCommands; the five location operations (CreateLocation, TombstoneLocation, " +
+			"WireContainedIn, UnwireContainedIn, SetLocationPresentation) are declared on each concrete leaf, " +
+			"and a submitter names the leaf that matches the key it acts on. A lens pattern written " +
+			"(l:location*) expands against the subtypeOf links into {unit, building, property}, which is what " +
+			"lets one label speak for the whole place graph without hardcoding the levels.",
+		InputSchema:      locationInputSchema,
+		OutputSchema:     locationOutputSchema,
+		FieldDescription: locationFieldDescription(),
+		Examples:         locationExamples(),
+	}
+}
+
+// locationLeafDDL declares one concrete location level (unit / building /
+// property) as a subtypeOf the abstract `location` type. All three share
+// locationDDLScript — the five ops are identical at every level, and the level
+// is the key's own type segment.
+func locationLeafDDL(locationType string) pkgmgr.DDLSpec {
+	return pkgmgr.DDLSpec{
+		CanonicalName:     locationType,
 		Class:             "meta.ddl.vertexType",
+		SubtypeOfRef:      "location",
 		PermittedCommands: []string{"CreateLocation", "TombstoneLocation", "WireContainedIn", "UnwireContainedIn", "SetLocationPresentation"},
-		Description: "Location domain DDL. Vertex shape: vtx.<locationType>.<NanoID>, class=location, root data = {} " +
-			"(minimal, D5). locationType is one of {unit, building, property} (Contract #6 §6.9): it names the key " +
-			"type segment; the class is the shared discriminator `location`. Containment is the containedIn LINK " +
-			"(location→location, transitive — unit→building→property). containedIn direction: the contained CHILD " +
-			"is the later-arriving source, the container PARENT is the pre-existing target (Contract #1 §1.1); the " +
-			"sentence reads 'unit containedIn building'. CreateLocation mints a location vertex of the requested " +
-			"type, and — when supplied — writes an optional client-facing display name as the location's " +
-			".presentation aspect (display-name-convention-design.md class 2: nameable business vertices ride the " +
-			"proven service-domain {name, description?, icon?, category?} shape; a bare NanoID is never a primary " +
-			"label). SetLocationPresentation sets/replaces the .presentation aspect on an existing live location " +
-			"(the live-world editor for a name CreateLocation didn't set). TombstoneLocation soft-deletes one. " +
-			"WireContainedIn writes the containedIn link only after validating BOTH endpoints are alive AND " +
-			"class=location (a non-location vertex is never wired into the place graph). UnwireContainedIn " +
-			"tombstones the link by its deterministic key.",
-		Script: locationDDLScript,
-		InputSchema: `{"type":"object","properties":` +
-			`{"locationType":{"type":"string","enum":["unit","building","property"],"description":"The location level (unit|building|property); sets the vtx.<locationType>.<NanoID> key prefix (CreateLocation)."},` +
-			`"locationId":{"type":"string","description":"Optional bare NanoID for the new location vertex (CreateLocation); absent → minted."},` +
-			`"presentation":{"type":"object","description":"Optional client-facing display metadata {name, description?, icon?, category?} written as the location's .presentation aspect (CreateLocation and SetLocationPresentation). Absent on CreateLocation → no aspect (undescribed location). Required non-empty on SetLocationPresentation.",` +
-			`"properties":{"name":{"type":"string"},"description":{"type":"string"},"icon":{"type":"string"},"category":{"type":"string"}}},` +
-			`"locationKey":{"type":"string","description":"vtx.<locationType>.<NanoID> of an existing location (TombstoneLocation and SetLocationPresentation; required, validated alive + class=location)."},` +
-			`"child":{"type":"string","description":"vtx.<locationType>.<NanoID> of the contained (child) location — the containedIn link source (WireContainedIn; required, validated alive + class=location)."},` +
-			`"parent":{"type":"string","description":"vtx.<locationType>.<NanoID> of the container (parent) location — the containedIn link target (WireContainedIn; required, validated alive + class=location)."},` +
-			`"linkKey":{"type":"string","description":"lnk.<childType>.<childId>.containedIn.<parentType>.<parentId> of an existing containedIn link (UnwireContainedIn; required, validated alive)."}},` +
-			`"required":[]}`,
-		OutputSchema: `{"type":"object","properties":` +
-			`{"primaryKey":{"type":"string","description":"The principal Core KV key the operation wrote: the location vertex key for CreateLocation/TombstoneLocation, or the containedIn link key for WireContainedIn/UnwireContainedIn. Absent on idempotent no-op replays (nothing committed)."}}}`,
-		FieldDescription: map[string]string{
-			"locationType": "The location level, one of {unit, building, property}. Determines the vtx.<locationType>.<NanoID> key prefix for CreateLocation; the class is always `location`.",
-			"locationId":   "Optional bare NanoID (no dots / key segments) for the new location vertex (vtx.<locationType>.<locationId>). Absent → minted with nanoid.new().",
-			"presentation": "Optional client-facing display metadata {name, description?, icon?, category?}. On CreateLocation it is written verbatim as the location's .presentation aspect when supplied (absent → no aspect, an undescribed location — degrade-gracefully). On SetLocationPresentation it is required (a non-empty object with at least one field). Never plaintext PII — locations are non-identity business vertices (display-name-convention-design.md D2).",
-			"locationKey":  "Full vtx.<locationType>.<NanoID> key of an existing location vertex — the tombstone target (TombstoneLocation) or the presentation subject (SetLocationPresentation), validated alive + class=location.",
-			"child":        "Full vtx.<locationType>.<NanoID> key of the contained (child) location. WireContainedIn validates it is alive + class=location and writes it as the containedIn link SOURCE (the child is the later-arriving vertex, Contract #1 §1.1).",
-			"parent":       "Full vtx.<locationType>.<NanoID> key of the container (parent) location. WireContainedIn validates it is alive + class=location and writes it as the containedIn link TARGET.",
-			"linkKey":      "Full lnk.<childType>.<childId>.containedIn.<parentType>.<parentId> key of an existing containedIn link to tombstone (UnwireContainedIn).",
+		Description: "Location domain DDL for the `" + locationType + "` level, a subtypeOf the abstract " +
+			"`location` type. Vertex shape: vtx." + locationType + ".<NanoID>, class=" + locationType + ", " +
+			"root data = {} (minimal, D5) — the class equals the key type. The three location levels " +
+			"{unit, building, property} (Contract #6 §6.9) share one script; the level is the key type " +
+			"segment plus CreateLocation's locationType payload field. Containment is the containedIn LINK " +
+			"(location→location, transitive — unit→building→property). containedIn direction: the contained " +
+			"CHILD is the later-arriving source, the container PARENT is the pre-existing target (Contract #1 " +
+			"§1.1); the sentence reads 'unit containedIn building'. CreateLocation mints a location vertex of " +
+			"the requested type, and — when supplied — writes an optional client-facing display name as the " +
+			"location's .presentation aspect (display-name-convention-design.md class 2: nameable business " +
+			"vertices ride the proven service-domain {name, description?, icon?, category?} shape; a bare " +
+			"NanoID is never a primary label). SetLocationPresentation sets/replaces the .presentation aspect " +
+			"on an existing live location (the live-world editor for a name CreateLocation didn't set). " +
+			"TombstoneLocation soft-deletes one. WireContainedIn writes the containedIn link only after " +
+			"validating BOTH endpoints are alive AND keyed with an admitted location type segment (a " +
+			"non-location vertex is never wired into the place graph). UnwireContainedIn tombstones the link " +
+			"by its deterministic key.",
+		Script:           locationDDLScript,
+		InputSchema:      locationInputSchema,
+		OutputSchema:     locationOutputSchema,
+		FieldDescription: locationFieldDescription(),
+		Examples:         locationExamples(),
+	}
+}
+
+const locationInputSchema = `{"type":"object","properties":` +
+	`{"locationType":{"type":"string","enum":["unit","building","property"],"description":"The location level (unit|building|property); sets the vtx.<locationType>.<NanoID> key prefix and the vertex class (CreateLocation)."},` +
+	`"locationId":{"type":"string","description":"Optional bare NanoID for the new location vertex (CreateLocation); absent → minted."},` +
+	`"presentation":{"type":"object","description":"Optional client-facing display metadata {name, description?, icon?, category?} written as the location's .presentation aspect (CreateLocation and SetLocationPresentation). Absent on CreateLocation → no aspect (undescribed location). Required non-empty on SetLocationPresentation.",` +
+	`"properties":{"name":{"type":"string"},"description":{"type":"string"},"icon":{"type":"string"},"category":{"type":"string"}}},` +
+	`"locationKey":{"type":"string","description":"vtx.<locationType>.<NanoID> of an existing location (TombstoneLocation and SetLocationPresentation; required, validated alive + an admitted location type segment)."},` +
+	`"child":{"type":"string","description":"vtx.<locationType>.<NanoID> of the contained (child) location — the containedIn link source (WireContainedIn; required, validated alive + an admitted location type segment)."},` +
+	`"parent":{"type":"string","description":"vtx.<locationType>.<NanoID> of the container (parent) location — the containedIn link target (WireContainedIn; required, validated alive + an admitted location type segment)."},` +
+	`"linkKey":{"type":"string","description":"lnk.<childType>.<childId>.containedIn.<parentType>.<parentId> of an existing containedIn link (UnwireContainedIn; required, validated alive)."}},` +
+	`"required":[]}`
+
+const locationOutputSchema = `{"type":"object","properties":` +
+	`{"primaryKey":{"type":"string","description":"The principal Core KV key the operation wrote: the location vertex key for CreateLocation/TombstoneLocation, or the containedIn link key for WireContainedIn/UnwireContainedIn. Absent on idempotent no-op replays (nothing committed)."}}}`
+
+func locationFieldDescription() map[string]string {
+	return map[string]string{
+		"locationType": "The location level, one of {unit, building, property}. Determines the vtx.<locationType>.<NanoID> key prefix for CreateLocation; the vertex class equals that same type.",
+		"locationId":   "Optional bare NanoID (no dots / key segments) for the new location vertex (vtx.<locationType>.<locationId>). Absent → minted with nanoid.new().",
+		"presentation": "Optional client-facing display metadata {name, description?, icon?, category?}. On CreateLocation it is written verbatim as the location's .presentation aspect when supplied (absent → no aspect, an undescribed location — degrade-gracefully). On SetLocationPresentation it is required (a non-empty object with at least one field). Never plaintext PII — locations are non-identity business vertices (display-name-convention-design.md D2).",
+		"locationKey":  "Full vtx.<locationType>.<NanoID> key of an existing location vertex — the tombstone target (TombstoneLocation) or the presentation subject (SetLocationPresentation), validated alive + an admitted location type segment.",
+		"child":        "Full vtx.<locationType>.<NanoID> key of the contained (child) location. WireContainedIn validates it is alive + an admitted location type segment and writes it as the containedIn link SOURCE (the child is the later-arriving vertex, Contract #1 §1.1).",
+		"parent":       "Full vtx.<locationType>.<NanoID> key of the container (parent) location. WireContainedIn validates it is alive + an admitted location type segment and writes it as the containedIn link TARGET.",
+		"linkKey":      "Full lnk.<childType>.<childId>.containedIn.<parentType>.<parentId> key of an existing containedIn link to tombstone (UnwireContainedIn).",
+	}
+}
+
+func locationExamples() []pkgmgr.ExampleSpec {
+	return []pkgmgr.ExampleSpec{
+		{
+			Name:    "CreateLocation — mint a building",
+			Payload: map[string]any{"locationType": "building"},
+			ExpectedOutcome: "Mints vtx.building.<NanoID> (class=building, root data {}). Returns primaryKey " +
+				"(the location key). Accepts an optional caller-supplied bare-NanoID locationId. The envelope " +
+				"class must be the concrete leaf `building`.",
 		},
-		Examples: []pkgmgr.ExampleSpec{
-			{
-				Name:    "CreateLocation — mint a building",
-				Payload: map[string]any{"locationType": "building"},
-				ExpectedOutcome: "Mints vtx.building.<NanoID> (class=location, root data {}). Returns primaryKey " +
-					"(the location key). Accepts an optional caller-supplied bare-NanoID locationId.",
-			},
-			{
-				Name:    "CreateLocation — mint a named building",
-				Payload: map[string]any{"locationType": "building", "presentation": map[string]any{"name": "Riverside Building", "icon": "building"}},
-				ExpectedOutcome: "Mints vtx.building.<NanoID> plus its .presentation aspect {name: \"Riverside Building\", " +
-					"icon: \"building\"} (class 2 display source). Returns primaryKey (the location key). An absent or " +
-					"empty presentation writes no aspect (the location stays undescribed and renders a typed fallback).",
-			},
-			{
-				Name:    "SetLocationPresentation — name an existing unit",
-				Payload: map[string]any{"locationKey": "vtx.unit.<unitNanoID>", "presentation": map[string]any{"name": "Unit 1"}},
-				ExpectedOutcome: "Writes/replaces the .presentation aspect {name: \"Unit 1\"} on the live location. Returns " +
-					"primaryKey (the location key). Rejects with ScriptError if the location is absent, tombstoned, not " +
-					"class=location, or the presentation object is empty.",
-			},
-			{
-				Name:    "WireContainedIn — place a unit inside a building",
-				Payload: map[string]any{"child": "vtx.unit.<unitNanoID>", "parent": "vtx.building.<buildingNanoID>"},
-				ExpectedOutcome: "Validates both the unit (child) and building (parent) are alive + class=location, then " +
-					"writes lnk.unit.<unitNanoID>.containedIn.building.<buildingNanoID> (class=containedIn, source=child, " +
-					"target=parent). Returns primaryKey (the link key). Idempotent: a replay where the link already exists " +
-					"alive commits nothing and omits primaryKey. Rejects with ScriptError if either endpoint is absent, " +
-					"dead, or not class=location.",
-			},
-			{
-				Name:    "UnwireContainedIn — detach a unit from its building",
-				Payload: map[string]any{"linkKey": "lnk.unit.<unitNanoID>.containedIn.building.<buildingNanoID>"},
-				ExpectedOutcome: "Tombstones the containedIn link. Returns primaryKey (the link key). Rejects with " +
-					"ScriptError if the link is absent or already dead.",
-			},
+		{
+			Name:    "CreateLocation — mint a named building",
+			Payload: map[string]any{"locationType": "building", "presentation": map[string]any{"name": "Riverside Building", "icon": "building"}},
+			ExpectedOutcome: "Mints vtx.building.<NanoID> plus its .presentation aspect {name: \"Riverside Building\", " +
+				"icon: \"building\"} (class 2 display source). Returns primaryKey (the location key). An absent or " +
+				"empty presentation writes no aspect (the location stays undescribed and renders a typed fallback).",
+		},
+		{
+			Name:    "SetLocationPresentation — name an existing unit",
+			Payload: map[string]any{"locationKey": "vtx.unit.<unitNanoID>", "presentation": map[string]any{"name": "Unit 1"}},
+			ExpectedOutcome: "Writes/replaces the .presentation aspect {name: \"Unit 1\"} on the live location. Returns " +
+				"primaryKey (the location key). Rejects with ScriptError if the location is absent, tombstoned, not " +
+				"keyed with an admitted location type segment, or the presentation object is empty.",
+		},
+		{
+			Name:    "WireContainedIn — place a unit inside a building",
+			Payload: map[string]any{"child": "vtx.unit.<unitNanoID>", "parent": "vtx.building.<buildingNanoID>"},
+			ExpectedOutcome: "Validates both the unit (child) and building (parent) are alive + keyed with an admitted " +
+				"location type segment, then writes lnk.unit.<unitNanoID>.containedIn.building.<buildingNanoID> " +
+				"(class=containedIn, source=child, target=parent). Returns primaryKey (the link key). Idempotent: a " +
+				"replay where the link already exists alive commits nothing and omits primaryKey. Rejects with " +
+				"ScriptError if either endpoint is absent, dead, or not a location key.",
+		},
+		{
+			Name:    "UnwireContainedIn — detach a unit from its building",
+			Payload: map[string]any{"linkKey": "lnk.unit.<unitNanoID>.containedIn.building.<buildingNanoID>"},
+			ExpectedOutcome: "Tombstones the containedIn link. Returns primaryKey (the link key). Rejects with " +
+				"ScriptError if the link is absent or already dead.",
 		},
 	}
 }
 
-// locationDDLScript handles the four location ops. Known-key reads only
-// (WireContainedIn validates both link endpoints by the keys the caller listed
-// in ContextHint.Reads). Both endpoints MUST be alive + class=location. Root
-// data is minimal {} (D5); the type is the key segment, the class is `location`.
+// locationDDLScript handles the five location ops for all three concrete
+// levels. Known-key reads only (WireContainedIn validates both link endpoints
+// by the keys the caller listed in ContextHint.Reads). Both endpoints MUST be
+// alive + keyed with an admitted location type segment. Root data is minimal
+// {} (D5); the class equals the key's type segment.
 const locationDDLScript = `
 def make_vtx(key, cls, data):
     return {"op": "create", "key": key,
@@ -183,15 +265,21 @@ def required_string(p, name):
         fail("InvalidArgument: " + name + ": required non-empty string")
     return v.strip()
 
-# The location types this package admits (the <locationType> key segment in
-# vtx.<locationType>.<NanoID>, Contract #6 §6.9). One location DDL handles all
-# three; the type is the key prefix + an op payload field, not a DDL per type.
+# The concrete location levels this package admits (the <locationType> key
+# segment in vtx.<locationType>.<NanoID>, Contract #6 §6.9). Each is a declared
+# vertex type in its own right, a subtypeOf the abstract 'location' type; one
+# script serves all three, and a location vertex's class IS its key type.
 LOCATION_TYPES = ["unit", "building", "property"]
 
-# The class every location vertex carries (the shared discriminator a
-# downstream cypher rule guards on). The type segment names the level; the
-# class is constant.
-LOCATION_CLASS = "location"
+# The class a location vertex minted before the taxonomy landed carries: one
+# shared discriminator across all three levels. Nothing rewrites those
+# documents, so both class shapes are live at once and the guards admit either.
+LEGACY_LOCATION_CLASS = "location"
+
+# The full set of classes a live location vertex may carry: its own key type
+# (the class every newly-minted location gets) or the shared legacy
+# discriminator.
+LOCATION_CLASSES = LOCATION_TYPES + [LEGACY_LOCATION_CLASS]
 
 def required_location_type(p):
     lt = required_string(p, "locationType")
@@ -258,6 +346,27 @@ def bare_nanoid_or_mint(p, name):
             fail("InvalidArgument: " + name + ": must carry no dots / key segments, wildcards, or whitespace; got " + v)
     return v
 
+def key_type_of(key):
+    # The type segment of a 3-segment vtx.<type>.<NanoID> key, or None for any
+    # other shape (an aspect key, a link key, a malformed string).
+    parts = split_key(key)
+    if len(parts) != 3 or parts[0] != "vtx":
+        return None
+    return parts[1]
+
+def class_of(state, key):
+    # The vertex's root class, or None if absent. "class" is a Starlark
+    # reserved word, so it cannot be read via dotted attribute access
+    # (doc.class) — getattr with the string key is required.
+    if key not in state:
+        return None
+    doc = state[key]
+    if doc == None:
+        return None
+    if not hasattr(doc, "class"):
+        return None
+    return getattr(doc, "class")
+
 def location_parts(key, name):
     # Parses a LOCATION vertex key: exactly 3 segments vtx.<locationType>.<NanoID>
     # where <locationType> is an admitted location type. A non-3-segment key
@@ -289,28 +398,27 @@ def vertex_alive(state, key):
         return False
     return True
 
-def class_of(state, key):
-    # The vertex's root class, or None if absent.
-    if key not in state:
-        return None
-    doc = state[key]
-    if doc == None:
-        return None
-    # "class" is a Starlark reserved word, so it cannot be read via dotted
-    # attribute access (doc.class) — getattr with the string key is required.
-    if not hasattr(doc, "class"):
-        return None
-    return getattr(doc, "class")
-
 def require_live_location(state, key, name):
-    # Endpoint-class validation (the load-bearing containedIn guard): the
-    # endpoint MUST be alive AND class=location. A dead or non-location vertex
-    # is never wired into the place graph.
+    # Endpoint validation (the load-bearing containedIn guard): the endpoint
+    # MUST be alive, keyed vtx.<locationType>.<NanoID> at an admitted location
+    # level, AND carry a location class. A dead, wrong-typed or wrong-classed
+    # vertex is never wired into the place graph.
+    #
+    # BOTH the key and the class are checked, and each catches what the other
+    # cannot. The KEY's type segment is the type authority — it is what a lens
+    # label resolves against, and it is the only thing that can say "any
+    # location" across the three levels, since a location's class is its own
+    # key type. The CLASS is what proves location-domain minted the vertex: a
+    # foreign package writing vtx.unit.<id> with a class of its own passes the
+    # key check and must still be refused.
     if not vertex_alive(state, key):
         fail("UnknownLocation: " + name + ": " + key + " is absent or tombstoned")
+    lt = key_type_of(key)
+    if lt not in LOCATION_TYPES:
+        fail("NotALocation: " + name + ": " + key + " has type segment " + str(lt) + ", required one of unit, building, property")
     cls = class_of(state, key)
-    if cls != LOCATION_CLASS:
-        fail("NotALocation: " + name + ": " + key + " has class " + str(cls) + ", required " + LOCATION_CLASS)
+    if cls not in LOCATION_CLASSES:
+        fail("NotALocation: " + name + ": " + key + " has class " + str(cls) + ", required its own location type or " + LEGACY_LOCATION_CLASS)
 
 def execute(state, op):
     ot = op.operationType
@@ -320,9 +428,9 @@ def execute(state, op):
         lt = required_location_type(p)
         loc_id = bare_nanoid_or_mint(p, "locationId")
         loc_key = "vtx." + lt + "." + loc_id
-        # Root data minimal (D5): {} on root; the type is the key segment, the
-        # class is the shared LOCATION_CLASS discriminator.
-        mutations = [make_vtx(loc_key, LOCATION_CLASS, {})]
+        # Root data minimal (D5): {} on root; the class equals the key's type
+        # segment, so the address is the sole authority for the type.
+        mutations = [make_vtx(loc_key, lt, {})]
         # Optional client-facing display name (class-2 .presentation aspect).
         # Absent → no aspect: an undescribed location renders a typed fallback,
         # not "Unnamed" (display-name-convention-design.md renderer floor rule).
@@ -337,7 +445,7 @@ def execute(state, op):
     if ot == "SetLocationPresentation":
         loc_key = required_string(p, "locationKey")
         location_parts(loc_key, "locationKey")
-        # The subject MUST be a live location (endpoint-class validation, same
+        # The subject MUST be a live location (endpoint-type validation, same
         # guard the wire op applies): a name is never pinned to a dead or
         # non-location vertex.
         require_live_location(state, loc_key, "locationKey")
@@ -366,8 +474,8 @@ def execute(state, op):
         # A location cannot contain itself.
         if child == parent:
             fail("InvalidArgument: child and parent must differ; got " + child)
-        # BOTH endpoints alive + class=location (endpoint-class validation at
-        # the op, not the lens).
+        # BOTH endpoints alive + an admitted location type segment
+        # (endpoint-type validation at the op, not the lens).
         require_live_location(state, child, "child")
         require_live_location(state, parent, "parent")
         # containedIn direction (Contract #1 §1.1): the contained CHILD is the

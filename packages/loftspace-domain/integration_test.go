@@ -13,7 +13,7 @@
 //  1. TestLoftspace_SetListingAndAddress — listing + address aspects on a unit, optional fields
 //  2. TestLoftspace_SetListingUpsert     — re-publish overwrites in place (status available→leased)
 //  3. TestLoftspace_RejectsBadStatus     — status not in {available,pending,leased} → Rejected
-//  4. TestLoftspace_RejectsNonUnit       — target alive but class≠location → Rejected (NotAUnit guard)
+//  4. TestLoftspace_RejectsNonUnit       — target alive but not a vtx.unit key → Rejected (NotAUnit guard)
 //  5. TestLoftspace_RejectsDeadUnit      — tombstoned unit → Rejected
 //  6. TestLoftspace_UnauthorizedDenied   — consumer cap (no listing ops) → Rejected
 package loftspacedomain_test
@@ -22,6 +22,7 @@ import (
 	"context"
 	"encoding/json"
 	"math/rand/v2"
+	"strings"
 	"testing"
 	"time"
 
@@ -159,7 +160,7 @@ func createUnit(t *testing.T, ctx context.Context, conn *substrate.Conn, cp *pro
 		OperationType: "CreateLocation",
 		Actor:         lsStaffActorKey,
 		SubmittedAt:   time.Now().UTC().Format(time.RFC3339),
-		Class:         "location",
+		Class:         "unit",
 		Payload:       json.RawMessage(`{"locationType":"unit"}`),
 	}
 	testutil.PublishOp(t, conn, env)
@@ -183,6 +184,30 @@ func setListing(t *testing.T, ctx context.Context, conn *substrate.Conn, cp *pro
 	}
 	testutil.PublishOp(t, conn, env)
 	testutil.DriveOne(t, ctx, cp, cons, want)
+}
+
+// setListingWithReason is setListing's sibling for a REJECTION vector: it
+// returns the script's own failure message so a test can name the guard it
+// means to exercise. A bare outcome check cannot tell the unit guard from an
+// ownership probe or a malformed key.
+func setListingWithReason(t *testing.T, ctx context.Context, conn *substrate.Conn, cp *processor.CommitPath, cons jetstream.Consumer, label, unitKey, payload string) (processor.MessageOutcome, string) {
+	t.Helper()
+	env := &processor.OperationEnvelope{
+		RequestID:     testutil.GenReqID(label),
+		Lane:          processor.LaneDefault,
+		OperationType: "SetListing",
+		Actor:         lsStaffActorKey,
+		SubmittedAt:   time.Now().UTC().Format(time.RFC3339),
+		Class:         "loftspaceListing",
+		Payload:       json.RawMessage(payload),
+		ContextHint:   &processor.ContextHint{Reads: []string{unitKey}},
+	}
+	outcome, reply := testutil.SubmitAndAwaitReply(t, ctx, conn, cp, cons, env)
+	msg := ""
+	if reply != nil && reply.Error != nil {
+		msg = reply.Error.Message
+	}
+	return outcome, msg
 }
 
 // setListingStatus submits SetListingStatus on the given unit. class="" mirrors
@@ -415,23 +440,69 @@ func TestLoftspace_RejectsBadStatus(t *testing.T) {
 	}
 }
 
-// TestLoftspace_RejectsNonUnit proves the class guard: a target that is alive
-// and key-shaped as a unit (vtx.unit.<id>) but is NOT class=location is
-// rejected — listing economics attach only to a real location unit.
+// TestLoftspace_RejectsNonUnit proves the unit guard: a target that is alive
+// but whose KEY TYPE SEGMENT is not `unit` is rejected — listing economics
+// attach only to a real location unit, never to a building or a property.
+//
+// The vector is a live BUILDING: a real location at the wrong level, which is
+// the case a family-wide "any location" guard would let through. The type is
+// double-enforced here (parts_of(unit, "unit", "unit") ahead of
+// require_live_unit), and NEITHER reads the root class — a location vertex's
+// class is its own key type, and pre-taxonomy locations still carry the shared
+// class `location`, so no class value distinguishes the levels.
+// TestLoftspace_SetListing above is the positive vector.
 func TestLoftspace_RejectsNonUnit(t *testing.T) {
 	ctx, conn := setupLoftspaceEnv(t)
 	cp, cons := newLoftspacePipeline(t, ctx, conn, "non-unit")
 
-	fakeKey := "vtx.unit.LSfakeunitHJKMNPQR"
-	lsSeedVertex(t, ctx, conn, fakeKey, "identity", false) // unit-shaped key, wrong class
+	notAUnit := "vtx.building.LSfakebLdgHJKMNPQRST"
+	lsSeedVertex(t, ctx, conn, notAUnit, "building", false) // a real location, the WRONG level
 
-	setListing(t, ctx, conn, cp, cons, "nonUnit0001", fakeKey,
-		`{"unit":"`+fakeKey+`","rentAmount":1,"rentCurrency":"USD","bedrooms":1,"availableFrom":"2026-08-01T00:00:00Z","leaseTermMonths":12,"status":"available"}`,
+	setListing(t, ctx, conn, cp, cons, "nonUnit0001", notAUnit,
+		`{"unit":"`+notAUnit+`","rentAmount":1,"rentCurrency":"USD","bedrooms":1,"availableFrom":"2026-08-01T00:00:00Z","leaseTermMonths":12,"status":"available"}`,
 		processor.OutcomeRejected)
 
-	if _, err := conn.KVGet(ctx, testutil.HarnessCoreBucket, fakeKey+".listing"); err == nil {
-		t.Fatalf("a listing was committed on a non-location vertex %s", fakeKey)
+	if _, err := conn.KVGet(ctx, testutil.HarnessCoreBucket, notAUnit+".listing"); err == nil {
+		t.Fatalf("a listing was committed on a vertex that is not a unit: %s", notAUnit)
 	}
+}
+
+// TestLoftspace_RejectsForeignClassOnUnitKey is the CLASS arm's own pin, and
+// the key arm cannot stand in for it: the vector is keyed vtx.unit.<NanoID>,
+// so every key-shaped check passes and only the class refuses it.
+//
+// What it protects: `vtx.unit.*` is location-domain's keyspace, but nothing
+// stops another package minting a vertex there under a class of its own. The
+// class arm is what proves location-domain minted this unit before listing
+// economics attach to it. Its positive vector is the accepted SetListing over
+// a real unit elsewhere in this file, plus the legacy-classed acceptance below.
+func TestLoftspace_RejectsForeignClassOnUnitKey(t *testing.T) {
+	ctx, conn := setupLoftspaceEnv(t)
+	cp, cons := newLoftspacePipeline(t, ctx, conn, "foreign-class")
+
+	foreign := "vtx.unit.LSforeignCLassHJKMNP"
+	lsSeedVertex(t, ctx, conn, foreign, "identity", false) // a unit KEY, a foreign class
+
+	got, why := setListingWithReason(t, ctx, conn, cp, cons, "foreignCls1", foreign,
+		`{"unit":"`+foreign+`","rentAmount":1,"rentCurrency":"USD","bedrooms":1,"availableFrom":"2026-08-01T00:00:00Z","leaseTermMonths":12,"status":"available"}`)
+	if got != processor.OutcomeRejected {
+		t.Fatalf("SetListing on a unit-keyed vertex of a foreign class = %v, want Rejected", got)
+	}
+	if !strings.Contains(why, "NotAUnit") {
+		t.Errorf("refused with %q, want the unit guard's own NotAUnit", why)
+	}
+	if _, err := conn.KVGet(ctx, testutil.HarnessCoreBucket, foreign+".listing"); err == nil {
+		t.Fatalf("a listing was committed on a unit-keyed vertex of a foreign class: %s", foreign)
+	}
+
+	// The legacy-classed unit is the migration-window vector the class arm must
+	// still admit: a concrete key type carrying the shared pre-taxonomy class,
+	// which is what the 69 live location vertices look like.
+	legacy := "vtx.unit.LSgacyCLassHJKMNPQRS"
+	lsSeedVertex(t, ctx, conn, legacy, "location", false)
+	setListing(t, ctx, conn, cp, cons, "legacyCls01", legacy,
+		`{"unit":"`+legacy+`","rentAmount":1,"rentCurrency":"USD","bedrooms":1,"availableFrom":"2026-08-01T00:00:00Z","leaseTermMonths":12,"status":"available"}`,
+		processor.OutcomeAccepted)
 }
 
 // TestLoftspace_RejectsDeadUnit proves the alive guard: a tombstoned unit is

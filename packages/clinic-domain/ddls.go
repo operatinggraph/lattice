@@ -450,7 +450,7 @@ func appointmentVertexTypeDDL() pkgmgr.DDLSpec {
 			"a residentVisit link (appointment→leaseapp) is written — a mismatch or absent lease falls " +
 			"through silently, never a hard failure. CreateAppointment also accepts an optional site (vtx.building.<NanoID>, " +
 			"a location-domain building carrying a clinicSite .site profile): when supplied, the building must be alive + " +
-			"class=location AND the provider must practicesAt it (the clinicSiteAssignment link) — a wrong-class building or " +
+			"a vtx.building.<NanoID> key AND the provider must practicesAt it (the clinicSiteAssignment link) — a wrong-typed key or " +
 			"a provider not assigned to that site is REJECTED (UnknownSite / NotALocation / ProviderNotAtSite; unlike " +
 			"leaseAppKey this is a hard requirement once supplied, not a silent fall-through), and an atSite link " +
 			"(appointment→building) is written. Omitted site records no site (backward-compatible; does not yet gate " +
@@ -488,7 +488,7 @@ func appointmentVertexTypeDDL() pkgmgr.DDLSpec {
 			`"endsAt":{"type":"string","description":"Appointment end, RFC3339 (CreateAppointment / RescheduleAppointment; required). Caller supplies canonical UTC, aligned to the 15-minute grid; span capped at 96 cells / 24h (AppointmentTooLong)."},` +
 			`"reason":{"type":"string","description":"Visit reason / chief complaint (CreateAppointment / RescheduleAppointment; optional — on RescheduleAppointment an omitted reason clears it)."},` +
 			`"leaseAppKey":{"type":"string","description":"Optional vtx.leaseapp.<NanoID> the patient claims residency under (CreateAppointment; optional). Checked against the lease's applicationFor link matching the patient's identifiedBy identity — a mismatch falls through with no residentVisit link, never a hard failure."},` +
-			`"site":{"type":"string","description":"Optional vtx.building.<NanoID> clinic site the appointment is booked at (CreateAppointment). When supplied, validated alive + class=location AND that the provider practicesAt it (clinicSiteAssignment) — a mismatch is REJECTED, not a silent fall-through. Writes an atSite link (appointment→building)."},` +
+			`"site":{"type":"string","description":"Optional vtx.building.<NanoID> clinic site the appointment is booked at (CreateAppointment). When supplied, validated alive + a vtx.building.<NanoID> key AND that the provider practicesAt it (clinicSiteAssignment) — a mismatch is REJECTED, not a silent fall-through. Writes an atSite link (appointment→building)."},` +
 			`"appointmentId":{"type":"string","description":"Optional bare NanoID for the new appointment vertex (CreateAppointment); absent → minted."},` +
 			`"appointmentKey":{"type":"string","description":"vtx.appointment.<NanoID> of an existing appointment (RescheduleAppointment / SetAppointmentStatus / MarkPastDueNoShow / BackfillAppointmentSite / TombstoneAppointment; required, validated alive)."},` +
 			`"status":{"type":"string","enum":["scheduled","confirmed","checkedIn","completed","cancelled","noShow"],"description":"New status (SetAppointmentStatus; required). Transitioning TO a terminal value (completed/cancelled/noShow) for the first time also requires provider + patient (to release the held slot-claim cells; omitted on a non-terminal transition or an idempotent same-value re-set)."},` +
@@ -509,7 +509,7 @@ func appointmentVertexTypeDDL() pkgmgr.DDLSpec {
 			"endsAt":            "Appointment end (RFC3339, canonical UTC). Stored on the .schedule aspect (CreateAppointment / RescheduleAppointment; required). Must align to the 15-minute grid; span capped at 96 cells / 24h (AppointmentTooLong).",
 			"reason":            "Optional visit reason / chief complaint. Stored on the .schedule aspect when present (CreateAppointment / RescheduleAppointment; on RescheduleAppointment an omitted reason clears it).",
 			"leaseAppKey":       "Optional full vtx.leaseapp.<NanoID> key the patient claims residency under (CreateAppointment). Verified via the lease's applicationFor link matching the patient's own identifiedBy identity before writing a residentVisit link (appointment→leaseapp); a mismatch or absent lease silently omits the link.",
-			"site":              "Optional full vtx.building.<NanoID> clinic site key (CreateAppointment). Validated alive + class=location AND that the provider practicesAt it (clinicSiteAssignment link) — rejected (UnknownSite / NotALocation / ProviderNotAtSite) if either check fails, not a silent fall-through. Writes an atSite link (appointment→building); omitted → no site recorded.",
+			"site":              "Optional full vtx.building.<NanoID> clinic site key (CreateAppointment). Validated alive + a vtx.building.<NanoID> key AND that the provider practicesAt it (clinicSiteAssignment link) — rejected (UnknownSite / NotALocation / ProviderNotAtSite) if either check fails, not a silent fall-through. Writes an atSite link (appointment→building); omitted → no site recorded.",
 			"appointmentId":     "Optional bare NanoID (no dots / key segments) for the new appointment vertex. Absent → minted with nanoid.new().",
 			"appointmentKey":    "Full vtx.appointment.<NanoID> key of an existing appointment (RescheduleAppointment rewrites its .schedule; SetAppointmentStatus / MarkPastDueNoShow / BackfillAppointmentSite validate it alive + class=appointment; TombstoneAppointment validates it alive).",
 			"status":            "New appointment status, one of {scheduled, confirmed, checkedIn, completed, cancelled, noShow} (SetAppointmentStatus; required). The first transition to a terminal value also requires provider + patient.",
@@ -2099,26 +2099,50 @@ def require_live_typed(state, key, name, want_class):
     if cls != want_class:
         fail("WrongClass: " + name + ": " + key + " has class " + str(cls) + ", required " + want_class)
 
+def key_type_of(key):
+    # The type segment of a 3-segment vtx.<type>.<NanoID> key, or None for any
+    # other shape (an aspect key, a link key, a malformed string).
+    parts = key.split(".")
+    if len(parts) != 3 or parts[0] != "vtx":
+        return None
+    return parts[1]
+
 def doc_class(doc):
     if doc == None or not hasattr(doc, "class"):
         return None
     return getattr(doc, "class")
 
+# The classes a live location-domain BUILDING may carry: its own key type, or
+# the shared discriminator every location minted before the taxonomy landed
+# carries. Nothing rewrites those documents, so both shapes are live at once.
+LEGACY_LOCATION_CLASS = "location"
+BUILDING_CLASSES = ["building", LEGACY_LOCATION_CLASS]
+
 def require_site_membership(site_key, provider):
     # Optional site association (Increment 2 — see the multi-site design note).
     # Unlike leaseAppKey, once supplied this is a HARD requirement, not a silent
-    # fall-through: the site must be alive + class=location AND the provider
-    # must practicesAt it (the clinicSiteAssignment link), or the whole op
-    # rejects. Both reads are on-demand (kv.Read) rather than a state[]
+    # fall-through: the site must be alive + a vtx.building.<NanoID> key AND the
+    # provider must practicesAt it (the clinicSiteAssignment link), or the whole
+    # op rejects. Both reads are on-demand (kv.Read) rather than a state[]
     # snapshot, mirroring clinicSite/clinicSiteAssignment's own scripts.
+    #
+    # BOTH the key and the class are checked, and each catches what the other
+    # cannot. The KEY's type segment is what distinguishes a building from a
+    # unit at all — a location's class is its own key type, and the legacy
+    # shared class names no level — and a practicesAt link's target is a
+    # building. The CLASS is what proves location-domain minted the vertex: a
+    # foreign package writing vtx.building.<id> with a class of its own passes
+    # the key check and must still be refused.
     # read-posture: (d) declared optionalReads by CreateAppointment's dispatcher
     # (cmd/clinic-app/web/app.js submitAppointment) — site is optional overall,
     # so a hard-required declared read would be wrong when it's omitted.
     site_doc = kv.Read(site_key)
     if site_doc == None or site_doc.isDeleted:
         fail("UnknownSite: site: " + site_key + " is absent or tombstoned")
-    if doc_class(site_doc) != "location":
-        fail("NotALocation: site: " + site_key + " has class " + str(doc_class(site_doc)) + ", required location")
+    if key_type_of(site_key) != "building":
+        fail("NotALocation: site: " + site_key + " is not a vtx.building.<NanoID> key, required building")
+    if doc_class(site_doc) not in BUILDING_CLASSES:
+        fail("NotALocation: site: " + site_key + " has class " + str(doc_class(site_doc)) + ", required building or " + LEGACY_LOCATION_CLASS)
     _, provider_id = parts_of(provider, "provider", "provider")
     _, site_id = parts_of(site_key, "site", "building")
     link_key = "lnk.provider." + provider_id + ".practicesAt.building." + site_id

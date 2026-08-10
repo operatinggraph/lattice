@@ -46,7 +46,7 @@ func loftspaceOwnershipVertexDDL() pkgmgr.DDLSpec {
 			"\"landlord manages unit\"; source = the identity, target = the unit). This is the ownership relationship the " +
 			"cap-read.residence grant lens projects so a landlord reads only their own units' lease applications (D1.3). " +
 			"AssignUnitOwner validates the landlord is an alive vtx.identity and the unit an alive vtx.unit of " +
-			"class=location (both listed in ContextHint.Reads), then reads the deterministic per-pair link key ON DEMAND " +
+			"a vtx.unit.<NanoID> key (both listed in ContextHint.Reads), then reads the deterministic per-pair link key ON DEMAND " +
 			"(kv.Read) and creates it (absent), revives it via CAS (tombstoned by a prior RemoveUnitOwner), or no-ops " +
 			"(already live — idempotent at-least-once). RemoveUnitOwner tombstones the same link (idempotent: absent / " +
 			"already-tombstoned → clean no-op), the reversible complement so an ownership transfer needs no " +
@@ -60,13 +60,13 @@ func loftspaceOwnershipVertexDDL() pkgmgr.DDLSpec {
 		Script: loftspaceOwnershipDDLScript,
 		InputSchema: `{"type":"object","properties":` +
 			`{"landlord":{"type":"string","description":"vtx.identity.<NanoID> of the landlord / property-manager identity (required; validated alive). Listed in ContextHint.Reads."},` +
-			`"unit":{"type":"string","description":"vtx.unit.<NanoID> of an existing location unit (required; validated alive + class=location). Listed in ContextHint.Reads."}},` +
+			`"unit":{"type":"string","description":"vtx.unit.<NanoID> of an existing location unit (required; validated alive + a vtx.unit.<NanoID> key). Listed in ContextHint.Reads."}},` +
 			`"required":["landlord","unit"]}`,
 		OutputSchema: `{"type":"object","properties":` +
 			`{"primaryKey":{"type":"string","description":"The management link key written (lnk.identity.<landlordID>.manages.unit.<unitID>) on create / revive / tombstone; omitted on an idempotent no-op."}}}`,
 		FieldDescription: map[string]string{
 			"landlord": "Full vtx.identity.<NanoID> key of the landlord / property-manager. AssignUnitOwner validates it is alive and uses it as the management link's source; RemoveUnitOwner reconstructs the link key from it. The caller MUST list this key in ContextHint.Reads (AssignUnitOwner).",
-			"unit":     "Full vtx.unit.<NanoID> key of the location-domain unit being managed. AssignUnitOwner validates it is alive + class=location and uses it as the management link's target. The caller MUST list this key in ContextHint.Reads (AssignUnitOwner).",
+			"unit":     "Full vtx.unit.<NanoID> key of the location-domain unit being managed. AssignUnitOwner validates it is alive + a vtx.unit.<NanoID> key and uses it as the management link's target. The caller MUST list this key in ContextHint.Reads (AssignUnitOwner).",
 		},
 		Examples: []pkgmgr.ExampleSpec{
 			{
@@ -75,7 +75,7 @@ func loftspaceOwnershipVertexDDL() pkgmgr.DDLSpec {
 					"landlord": "vtx.identity.<landlordNanoID>",
 					"unit":     "vtx.unit.<unitNanoID>",
 				},
-				ExpectedOutcome: "Validates the landlord is an alive identity and the unit an alive class=location unit, then " +
+				ExpectedOutcome: "Validates the landlord is an alive identity and the unit an alive vtx.unit.<NanoID> key, then " +
 					"reads lnk.identity.<landlordNanoID>.manages.unit.<unitNanoID> on demand and creates it (class \"manages\"). " +
 					"Returns primaryKey (the link). Re-running is idempotent: already-live → clean no-op (empty response); a link " +
 					"a prior RemoveUnitOwner tombstoned is revived (CAS-guarded). Rejects a non-identity landlord, a non-unit / " +
@@ -226,7 +226,27 @@ def vertex_alive(state, key):
         return False
     return True
 
+def require_live_unit(state, key):
+    # The unit MUST be alive, keyed vtx.unit.<NanoID> (location-domain's unit
+    # level), AND carrying a unit class. A dead, wrong-typed or wrong-classed
+    # vertex never receives a management link.
+    # BOTH the key and the class are checked, and each catches what the other
+    # cannot. The KEY's type segment is what distinguishes a unit from a
+    # building at all — a location's class is its own key type, and the legacy
+    # shared class names no level. The CLASS is what proves location-domain
+    # minted the vertex: a foreign package writing vtx.unit.<id> with a class
+    # of its own passes the key check and must still be refused.
+    if not vertex_alive(state, key):
+        fail("UnknownUnit: unit: " + key + " is absent or tombstoned")
+    if key_type_of(key) != "unit":
+        fail("NotAUnit: unit: " + key + " is not a vtx.unit.<NanoID> key, required unit")
+    cls = class_of(state, key)
+    if cls not in UNIT_CLASSES:
+        fail("NotAUnit: unit: " + key + " has class " + str(cls) + ", required unit or " + LEGACY_LOCATION_CLASS)
+
 def class_of(state, key):
+    # The vertex's root class, or None if absent. "class" is a Starlark
+    # reserved word, so getattr with the string key is required.
     if key not in state:
         return None
     doc = state[key]
@@ -234,14 +254,19 @@ def class_of(state, key):
         return None
     return getattr(doc, "class")
 
-def require_live_unit(state, key):
-    # The unit MUST be alive AND class=location (location-domain's unit). A dead or
-    # non-location vertex never receives a management link.
-    if not vertex_alive(state, key):
-        fail("UnknownUnit: unit: " + key + " is absent or tombstoned")
-    cls = class_of(state, key)
-    if cls != "location":
-        fail("NotAUnit: unit: " + key + " has class " + str(cls) + ", required location")
+# The classes a live location-domain UNIT may carry: its own key type, or the
+# shared discriminator every location minted before the taxonomy landed
+# carries. Nothing rewrites those documents, so both shapes are live at once.
+LEGACY_LOCATION_CLASS = "location"
+UNIT_CLASSES = ["unit", LEGACY_LOCATION_CLASS]
+
+def key_type_of(key):
+    # The type segment of a 3-segment vtx.<type>.<NanoID> key, or None for any
+    # other shape (an aspect key, a link key, a malformed string).
+    parts = key.split(".")
+    if len(parts) != 3 or parts[0] != "vtx":
+        return None
+    return parts[1]
 
 def execute(state, op):
     ot = op.operationType
@@ -259,7 +284,7 @@ def execute(state, op):
 
         # No-orphan invariant (FR29 / P4): both endpoints MUST be alive. The
         # landlord is alive-checked (so the caller lists it in Reads); the unit is
-        # alive + class=location.
+        # alive + a vtx.unit.<NanoID> key.
         if not vertex_alive(state, landlord):
             fail("UnknownLandlord: " + landlord + " is absent or tombstoned")
         require_live_unit(state, unit)

@@ -90,6 +90,15 @@ type DDLAspects struct {
 	// these values.
 	// Source: vtx.meta.<id>.permittedCommands → data.commands
 	PermittedCommands []string
+
+	// Abstract reports whether this DDL declares a type that names no
+	// instance (dynamic-type-taxonomy-design.md §3.2) — a taxonomy parent a
+	// `:<name>*` lens label expands against. An abstract type declares
+	// neither a script nor a permittedCommands gate, so Script is "" and
+	// PermittedCommands is nil for one, and an agent must NOT try to submit
+	// against it: it picks a concrete subtype instead.
+	// Source: vtx.meta.<id> → data.abstract
+	Abstract bool
 }
 
 // Traverser is the cold-start traversal client for a Lattice-aware AI agent.
@@ -287,8 +296,10 @@ func (t *Traverser) DiscoverDDL(ctx context.Context, operationType string) (stri
 
 		// canonicalName aspect shape: {"data": {"value": "<name>"}, "isDeleted": false, ...}
 		var aspDoc struct {
-			Data      struct{ Value string `json:"value"` } `json:"data"`
-			IsDeleted bool                                  `json:"isDeleted"`
+			Data struct {
+				Value string `json:"value"`
+			} `json:"data"`
+			IsDeleted bool `json:"isDeleted"`
 		}
 		if err := json.Unmarshal(entry.Value, &aspDoc); err != nil {
 			continue
@@ -382,8 +393,16 @@ type aspectEnvelope struct {
 }
 
 // ReadDDLAspects reads the seven self-description aspects from a DDL
-// meta-vertex. All seven aspects are required; missing any returns
-// ErrAspectMissing (wrapped with the aspect name).
+// meta-vertex. Missing one returns ErrAspectMissing (wrapped with the aspect
+// name), with a single exception that is a property of the type, not a
+// tolerance for sloppiness: an ABSTRACT DDL (data.abstract on the root,
+// dynamic-type-taxonomy-design.md §3.2) declares neither `.script` nor
+// `.permittedCommands`, because it names no instance and no operation is ever
+// submitted against it. For that type alone those two absences are the correct
+// shape and are reported as Abstract plus a zero Script / nil
+// PermittedCommands. A CONCRETE DDL missing either still errors — which is the
+// whole point of keying the exemption on the marker rather than on the
+// absence.
 //
 // This is step 4 of the cold-start traversal algorithm: after DiscoverDDL
 // returns the meta-vertex key, ReadDDLAspects gives the agent full schema
@@ -401,12 +420,15 @@ func (t *Traverser) ReadDDLAspects(ctx context.Context, ddlKey string) (*DDLAspe
 	}
 	var vtxDoc struct {
 		IsDeleted bool `json:"isDeleted"`
+		Data      struct {
+			Abstract bool `json:"abstract"`
+		} `json:"data"`
 	}
 	if err := json.Unmarshal(vtxEntry.Value, &vtxDoc); err != nil || vtxDoc.IsDeleted {
 		return nil, fmt.Errorf("aiagent: DDL %s is tombstoned", ddlKey)
 	}
 
-	aspects := &DDLAspects{}
+	aspects := &DDLAspects{Abstract: vtxDoc.Data.Abstract}
 
 	// description aspect: data.text
 	descEntry, err := t.conn.KVGet(ctx, t.coreBucket, ddlKey+".description")
@@ -508,9 +530,23 @@ func (t *Traverser) ReadDDLAspects(ctx context.Context, ddlKey string) (*DDLAspe
 	}
 	aspects.Examples = exData.Examples
 
-	// script aspect: data.source
+	// script aspect: data.source. An abstract type declares none — it names no
+	// instance, so there is nothing to execute.
+	//
+	// "Declares none" has TWO on-disk shapes and only one of them is a missing
+	// key. A fresh install never writes the aspect. An IN-PLACE UPGRADE of a
+	// concrete type to an abstract one TOMBSTONES it instead: a DDL keeps its
+	// meta-vertex NanoID across versions (Contract #8 §8.1), so pkgmgr's diff
+	// emits a tombstone for the aspect the new version stops declaring, and a
+	// tombstone retains the prior document with only isDeleted flipped
+	// (processor step8_commit). The upgrade shape is the one every already-
+	// installed cell takes, so treating only the absent shape as legitimate
+	// would fail cold-start traversal on exactly the stacks that have one.
 	scriptEntry, err := t.conn.KVGet(ctx, t.coreBucket, ddlKey+".script")
 	if err != nil {
+		if aspects.Abstract && errors.Is(err, substrate.ErrKeyNotFound) {
+			return t.finishAbstractAspects(ctx, ddlKey, aspects)
+		}
 		return nil, fmt.Errorf("%w: script at %s: %w", ErrAspectMissing, ddlKey, err)
 	}
 	var scriptEnv aspectEnvelope
@@ -518,6 +554,9 @@ func (t *Traverser) ReadDDLAspects(ctx context.Context, ddlKey string) (*DDLAspe
 		return nil, fmt.Errorf("aiagent: parse script aspect at %s: %w", ddlKey, err)
 	}
 	if scriptEnv.IsDeleted {
+		if aspects.Abstract {
+			return t.finishAbstractAspects(ctx, ddlKey, aspects)
+		}
 		return nil, fmt.Errorf("%w: script at %s: aspect is tombstoned", ErrAspectMissing, ddlKey)
 	}
 	var scriptData struct {
@@ -528,9 +567,13 @@ func (t *Traverser) ReadDDLAspects(ctx context.Context, ddlKey string) (*DDLAspe
 	}
 	aspects.Script = scriptData.Source
 
-	// permittedCommands aspect: data.commands ([]string)
+	// permittedCommands aspect: data.commands ([]string). An abstract type
+	// declares none, in either of the two shapes described above.
 	pcEntry, err := t.conn.KVGet(ctx, t.coreBucket, ddlKey+".permittedCommands")
 	if err != nil {
+		if aspects.Abstract && errors.Is(err, substrate.ErrKeyNotFound) {
+			return aspects, nil
+		}
 		return nil, fmt.Errorf("%w: permittedCommands at %s: %w", ErrAspectMissing, ddlKey, err)
 	}
 	var pcEnv aspectEnvelope
@@ -538,6 +581,9 @@ func (t *Traverser) ReadDDLAspects(ctx context.Context, ddlKey string) (*DDLAspe
 		return nil, fmt.Errorf("aiagent: parse permittedCommands aspect at %s: %w", ddlKey, err)
 	}
 	if pcEnv.IsDeleted {
+		if aspects.Abstract {
+			return aspects, nil
+		}
 		return nil, fmt.Errorf("%w: permittedCommands at %s: aspect is tombstoned", ErrAspectMissing, ddlKey)
 	}
 	var pcData struct {
@@ -549,4 +595,33 @@ func (t *Traverser) ReadDDLAspects(ctx context.Context, ddlKey string) (*DDLAspe
 	aspects.PermittedCommands = pcData.Commands
 
 	return aspects, nil
+}
+
+// finishAbstractAspects completes a read for an abstract DDL whose `.script`
+// is withdrawn by design: it still has to answer the permittedCommands
+// question, which for an abstract type is "also withdrawn, also by design".
+// Withdrawn means the key is absent (a fresh install) or present-but-
+// tombstoned (an in-place upgrade); both are accepted.
+//
+// A LIVE permittedCommands aspect on an abstract meta is neither, and is
+// reported rather than swallowed: the installer emits none for an abstract
+// DDL, so a live one is a malformed declaration, and letting it through would
+// widen the exemption from "an abstract type declares neither" into "an
+// abstract type may declare anything".
+func (t *Traverser) finishAbstractAspects(ctx context.Context, ddlKey string, aspects *DDLAspects) (*DDLAspects, error) {
+	entry, err := t.conn.KVGet(ctx, t.coreBucket, ddlKey+".permittedCommands")
+	if err != nil {
+		if errors.Is(err, substrate.ErrKeyNotFound) {
+			return aspects, nil
+		}
+		return nil, fmt.Errorf("%w: permittedCommands at %s: %w", ErrAspectMissing, ddlKey, err)
+	}
+	var pcEnv aspectEnvelope
+	if err := json.Unmarshal(entry.Value, &pcEnv); err != nil {
+		return nil, fmt.Errorf("aiagent: parse permittedCommands aspect at %s: %w", ddlKey, err)
+	}
+	if pcEnv.IsDeleted {
+		return aspects, nil
+	}
+	return nil, fmt.Errorf("aiagent: abstract DDL %s declares a live permittedCommands aspect — an abstract type names no instance and admits no operation", ddlKey)
 }

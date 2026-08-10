@@ -108,10 +108,15 @@ type typeInfo struct {
 
 // Resolver holds a Refractor-local snapshot of the platform's subtypeOf
 // taxonomy. The zero value returned by New has no snapshot and is not
-// armed — Expand on it always answers StatusUnknown, which is the
-// inertness invariant increments 1 and 2 already established: nothing in
-// the shipped corpus declares an abstract type yet, so nothing depends on
-// this resolver knowing anything until Fire B's first consumer lands.
+// armed — Expand on it always answers StatusUnknown.
+//
+// The corpus DOES declare an abstract type: location-domain ships `location`
+// with its unit/building/property leaves, and service-location's
+// capabilityServiceAccess is the first lens that expands against it. So a
+// pipeline whose rule carries a `*` label depends on this resolver having been
+// fed, and StatusUnknown is a REFUSAL to activate rather than an inert
+// pass-through (§4.2). A rule with no `*` anywhere never calls Expand at all
+// and is unaffected either way.
 type Resolver struct {
 	mu sync.RWMutex
 

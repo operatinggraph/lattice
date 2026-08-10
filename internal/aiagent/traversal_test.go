@@ -400,6 +400,108 @@ func TestReadDDLAspects_MissingAspect(t *testing.T) {
 	}
 }
 
+// seedAbstractDDL seeds a meta-vertex in the exact shape pkgmgr's
+// buildInstallBatch writes for an Abstract DDL: `data.abstract` on the root,
+// the five self-description aspects, and NEITHER `.script` NOR
+// `.permittedCommands` (dynamic-type-taxonomy-design.md §3.2). location-domain
+// ships the first one of these.
+func seedAbstractDDL(t *testing.T, ctx context.Context, conn *substrate.Conn, ddlKey string) {
+	t.Helper()
+	putKV(t, ctx, conn, unitCoreBucket, ddlKey, map[string]any{
+		"class": "meta.ddl.vertexType", "isDeleted": false,
+		"data": map[string]any{"abstract": true},
+	})
+	putKV(t, ctx, conn, unitCoreBucket, ddlKey+".description", map[string]any{
+		"class": "description", "isDeleted": false,
+		"data": map[string]any{"text": "Abstract taxonomy parent."},
+	})
+	putKV(t, ctx, conn, unitCoreBucket, ddlKey+".inputSchema", map[string]any{
+		"class": "inputSchema", "isDeleted": false,
+		"data": map[string]any{"schema": `{"type":"object","properties":{}}`},
+	})
+	putKV(t, ctx, conn, unitCoreBucket, ddlKey+".outputSchema", map[string]any{
+		"class": "outputSchema", "isDeleted": false,
+		"data": map[string]any{"schema": `{"type":"object","properties":{}}`},
+	})
+	putKV(t, ctx, conn, unitCoreBucket, ddlKey+".fieldDescription", map[string]any{
+		"class": "fieldDescription", "isDeleted": false,
+		"data": map[string]any{"fieldDescriptions": map[string]any{"locationType": "The level."}},
+	})
+	putKV(t, ctx, conn, unitCoreBucket, ddlKey+".examples", map[string]any{
+		"class": "examples", "isDeleted": false,
+		"data": map[string]any{"examples": []any{}},
+	})
+}
+
+// TestReadDDLAspects_AbstractDDLHasNoScriptOrCommands: an abstract type names
+// no instance, so it declares neither a script nor a permittedCommands gate,
+// and those two absences are its correct shape rather than missing aspects.
+// The read succeeds, reports Abstract, and leaves both fields zero — which is
+// what tells an agent to pick a concrete subtype instead of trying to submit.
+func TestReadDDLAspects_AbstractDDLHasNoScriptOrCommands(t *testing.T) {
+	ctx, conn, tr := setupUnitEnv(t)
+
+	ddlKey := "vtx.meta." + "AbstractDDLHJKMNPQRS"
+	seedAbstractDDL(t, ctx, conn, ddlKey)
+
+	got, err := tr.ReadDDLAspects(ctx, ddlKey)
+	if err != nil {
+		t.Fatalf("an abstract DDL must read cleanly without a script or permittedCommands: %v", err)
+	}
+	if !got.Abstract {
+		t.Error("Abstract: got false, want true (data.abstract is set on the root)")
+	}
+	if got.Script != "" {
+		t.Errorf("Script: got %q, want empty for an abstract type", got.Script)
+	}
+	if len(got.PermittedCommands) != 0 {
+		t.Errorf("PermittedCommands: got %v, want none for an abstract type", got.PermittedCommands)
+	}
+	if got.Description != "Abstract taxonomy parent." {
+		t.Errorf("Description: got %q", got.Description)
+	}
+}
+
+// TestReadDDLAspects_ConcreteDDLMissingScriptStillErrors is the discriminating
+// half: the exemption is keyed on the abstract MARKER, never on the absence
+// itself, so the identical seed WITHOUT data.abstract must still fail. Without
+// this pin the tolerance would silently cover a concrete DDL whose script
+// failed to install — the case ErrAspectMissing exists to catch.
+func TestReadDDLAspects_ConcreteDDLMissingScriptStillErrors(t *testing.T) {
+	ctx, conn, tr := setupUnitEnv(t)
+
+	ddlKey := "vtx.meta." + "ConcretNoScriptHJKMN"
+	seedAbstractDDL(t, ctx, conn, ddlKey)
+	// The same aspect set, but the root does NOT declare abstract.
+	putKV(t, ctx, conn, unitCoreBucket, ddlKey, map[string]any{
+		"class": "meta.ddl.vertexType", "isDeleted": false, "data": map[string]any{},
+	})
+
+	if _, err := tr.ReadDDLAspects(ctx, ddlKey); !errors.Is(err, aiagent.ErrAspectMissing) {
+		t.Fatalf("a CONCRETE DDL with no script must still return ErrAspectMissing, got: %v", err)
+	}
+}
+
+// TestReadDDLAspects_AbstractDDLWithPermittedCommandsIsMalformed: the
+// exemption tolerates ABSENCE, never a contradiction. An abstract meta that
+// carries a permittedCommands aspect is a declaration the installer cannot
+// produce, and reporting it is what keeps the exemption from widening into
+// "an abstract type may declare anything".
+func TestReadDDLAspects_AbstractDDLWithPermittedCommandsIsMalformed(t *testing.T) {
+	ctx, conn, tr := setupUnitEnv(t)
+
+	ddlKey := "vtx.meta." + "AbstractWithCmdsHJKM"
+	seedAbstractDDL(t, ctx, conn, ddlKey)
+	putKV(t, ctx, conn, unitCoreBucket, ddlKey+".permittedCommands", map[string]any{
+		"class": "permittedCommands", "isDeleted": false,
+		"data": map[string]any{"commands": []any{"SomeOp"}},
+	})
+
+	if _, err := tr.ReadDDLAspects(ctx, ddlKey); err == nil {
+		t.Fatal("an abstract DDL declaring permittedCommands must be reported, not accepted")
+	}
+}
+
 // TestDiscoverDDL_DuplicateCanonicalName asserts that DiscoverDDL returns an
 // error (not ErrDDLNotFound) when two live meta-vertices share the same
 // canonicalName — indicating inconsistent cell state.

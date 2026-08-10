@@ -255,6 +255,84 @@ func TestWorkplace_CreateStudioConfinedToTheStaffersBuilding(t *testing.T) {
 	}
 }
 
+// TestWorkplace_CreateStudioRejectsNonLocation pins the migrated location guard
+// on CreateStudio's optional `location`: the locatedAt target must be keyed
+// with an admitted location type segment. The guard reads the KEY, never the
+// root class — a location vertex's class equals its own key type, while every
+// location minted before the taxonomy landed carries the shared class
+// `location`, so no class value names the family.
+//
+// Both calls are made as the OPERATOR, which is exempt from workplace
+// confinement, so the difference between them is the location guard alone.
+// The positive vector is wcBuildingAKey: a concrete key type carrying the
+// legacy shared class — the live production migration shape.
+func TestWorkplace_CreateStudioRejectsNonLocation(t *testing.T) {
+	ctx, conn := setupDomainEnv(t)
+	cp, cons := newDomainPipeline(t, ctx, conn, "wdwcstudioloc")
+	wcSeedStaff(t, ctx, conn)
+
+	if _, got := wcCreateStudioAs(t, ctx, conn, cp, cons,
+		"wdwcstudiol000000001", "Legacy Class Studio", wcBuildingAKey, domainActorKey); got != processor.OutcomeAccepted {
+		t.Fatalf("operator CreateStudio at a legacy-classed building = %v, want Accepted", got)
+	}
+	studio, got, why := wcCreateStudioAsWithReason(t, ctx, conn, cp, cons,
+		"wdwcstudiol000000002", "Nonplace Studio", wcStaffKey, domainActorKey)
+	if got != processor.OutcomeRejected {
+		t.Fatalf("operator CreateStudio at a non-location key type = %v, want Rejected", got)
+	}
+	// The location guard's own message, so a hydration miss or any other
+	// refusal cannot stand in for it.
+	if !strings.Contains(why, "NotALocation") {
+		t.Errorf("refused with %q, want the location guard's own NotALocation", why)
+	}
+	if keyExists(t, ctx, conn, studio) {
+		t.Errorf("the denied CreateStudio wrote %s; it must be denied before any mutation", studio)
+	}
+}
+
+// TestWorkplace_CreateStudioAcceptsPerTypeClass pins the FORWARD-migration
+// half of the class arm, which every other location fixture in this package
+// misses: they all seed the shared pre-taxonomy class, so narrowing the
+// admitted class set back to just that one leaves the whole suite green while
+// every location minted AFTER the upgrade silently stops accepting a studio.
+//
+// A location created by location-domain today carries its own key type as its
+// class (CreateLocation writes make_vtx(loc_key, lt, {})), so this is the shape
+// production produces from here on. Both calls run as the OPERATOR, which is
+// exempt from workplace confinement, so the location guard is the only thing
+// separating them.
+func TestWorkplace_CreateStudioAcceptsPerTypeClass(t *testing.T) {
+	ctx, conn := setupDomainEnv(t)
+	cp, cons := newDomainPipeline(t, ctx, conn, "wdwcstudiopertype")
+	wcSeedStaff(t, ctx, conn)
+
+	// class == the key's own type segment: what CreateLocation mints now.
+	perType := "vtx.building.BBWELLPERTYPEBLDGHJK"
+	seedVertex(t, ctx, conn, perType, "building", map[string]any{})
+	if _, got := wcCreateStudioAs(t, ctx, conn, cp, cons,
+		"wdwcstudiopt00000001", "Per Type Studio", perType, domainActorKey); got != processor.OutcomeAccepted {
+		t.Fatalf("operator CreateStudio at a per-type-classed building = %v, want Accepted", got)
+	}
+
+	// The KEY arm's own discriminator: an admitted CLASS on a key type that is
+	// not a location at all. Every other negative vector here fails both arms
+	// at once and so cannot tell the key guard from the class-only guard that
+	// preceded it.
+	impostor := "vtx.session.BBWELLMPSTRSESSNHJKM"
+	seedVertex(t, ctx, conn, impostor, "location", map[string]any{})
+	studio, got, why := wcCreateStudioAsWithReason(t, ctx, conn, cp, cons,
+		"wdwcstudiopt00000002", "Impostor Studio", impostor, domainActorKey)
+	if got != processor.OutcomeRejected {
+		t.Fatalf("CreateStudio at an admitted CLASS on a non-location key type = %v, want Rejected", got)
+	}
+	if !strings.Contains(why, "NotALocation") {
+		t.Errorf("refused with %q, want the location guard's own NotALocation", why)
+	}
+	if keyExists(t, ctx, conn, studio) {
+		t.Errorf("the denied CreateStudio wrote %s; it must be denied before any mutation", studio)
+	}
+}
+
 // TestWorkplace_StaffBookAndCancelConfinedToTheirBuilding walks both booking
 // ops over the two-hop resolution (session -atStudio-> studio -locatedAt->
 // location) that carries the confinement.
@@ -456,8 +534,14 @@ const (
 	wcBuildingCID  = "BBWELLWKPLACEBLDGCHJ"
 	wcBuildingCKey = "vtx.building." + wcBuildingCID
 
+	// A sub-building space is keyed at the `unit` level — the finest concrete
+	// location leaf. It is seeded carrying the pre-taxonomy shared class
+	// `location`, which is exactly the live production shape: every location
+	// minted before the taxonomy landed keys under a concrete type but carries
+	// that shared class, and nothing rewrites those documents. Every guard
+	// these tests drive therefore has to decide location-ness from the KEY.
 	wcSharedRoomID  = "BBWELLWKPLACERMXYZHJ"
-	wcSharedRoomKey = "vtx.location." + wcSharedRoomID
+	wcSharedRoomKey = "vtx.unit." + wcSharedRoomID
 )
 
 // wcSeedStaffAt wires an additional front-of-house identity at one building,
@@ -489,10 +573,10 @@ func TestWorkplace_SharedRoomCoveredByEveryContainmentParent(t *testing.T) {
 	// neither C.
 	seedVertex(t, ctx, conn, wcSharedRoomKey, "location", map[string]any{})
 	testutil.SeedLink(t, ctx, conn,
-		"lnk.location."+wcSharedRoomID+".containedIn.building."+wcBuildingAID,
+		"lnk.unit."+wcSharedRoomID+".containedIn.building."+wcBuildingAID,
 		"containedIn", wcSharedRoomKey, wcBuildingAKey)
 	testutil.SeedLink(t, ctx, conn,
-		"lnk.location."+wcSharedRoomID+".containedIn.building."+wcBuildingBID,
+		"lnk.unit."+wcSharedRoomID+".containedIn.building."+wcBuildingBID,
 		"containedIn", wcSharedRoomKey, wcBuildingBKey)
 
 	wcSeedStaffAt(t, ctx, conn, wcStaffBKey, wcStaffBID, wcBuildingBKey, wcBuildingBID)
@@ -569,10 +653,10 @@ func wcCreateStudioAsWithReason(t *testing.T, ctx context.Context, conn *substra
 
 const (
 	wcDeadFloorID  = "BBWELLWKPLACEDEADFLR"
-	wcDeadFloorKey = "vtx.location." + wcDeadFloorID
+	wcDeadFloorKey = "vtx.unit." + wcDeadFloorID
 
 	wcAtticID  = "BBWELLWKPLACEATTCRMH"
-	wcAtticKey = "vtx.location." + wcAtticID
+	wcAtticKey = "vtx.unit." + wcAtticID
 )
 
 // TestWorkplace_TombstonedAncestorConfersNothing pins the vertex-liveness half of
@@ -594,10 +678,10 @@ func TestWorkplace_TombstonedAncestorConfersNothing(t *testing.T) {
 	seedVertex(t, ctx, conn, wcAtticKey, "location", map[string]any{})
 	seedVertex(t, ctx, conn, wcDeadFloorKey, "location", map[string]any{})
 	testutil.SeedLink(t, ctx, conn,
-		"lnk.location."+wcAtticID+".containedIn.location."+wcDeadFloorID,
+		"lnk.unit."+wcAtticID+".containedIn.unit."+wcDeadFloorID,
 		"containedIn", wcAtticKey, wcDeadFloorKey)
 	testutil.SeedLink(t, ctx, conn,
-		"lnk.location."+wcDeadFloorID+".containedIn.building."+wcBuildingAID,
+		"lnk.unit."+wcDeadFloorID+".containedIn.building."+wcBuildingAID,
 		"containedIn", wcDeadFloorKey, wcBuildingAKey)
 
 	// POSITIVE SIBLING: while the floor is alive, the two-hop chain authorizes.
@@ -827,10 +911,10 @@ func TestWorkplace_ContainmentCycleTerminates(t *testing.T) {
 	seedVertex(t, ctx, conn, wcAtticKey, "location", map[string]any{})
 	seedVertex(t, ctx, conn, wcDeadFloorKey, "location", map[string]any{})
 	testutil.SeedLink(t, ctx, conn,
-		"lnk.location."+wcAtticID+".containedIn.location."+wcDeadFloorID,
+		"lnk.unit."+wcAtticID+".containedIn.unit."+wcDeadFloorID,
 		"containedIn", wcAtticKey, wcDeadFloorKey)
 	testutil.SeedLink(t, ctx, conn,
-		"lnk.location."+wcDeadFloorID+".containedIn.location."+wcAtticID,
+		"lnk.unit."+wcDeadFloorID+".containedIn.unit."+wcAtticID,
 		"containedIn", wcDeadFloorKey, wcAtticKey)
 
 	studio, got, why := wcCreateStudioAsWithReason(t, ctx, conn, cp, cons,

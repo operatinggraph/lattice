@@ -560,8 +560,11 @@ func (ex *executor) currentNode(b binding, n NodePattern) *nodeRef {
 // sigil (NodePattern.LabelExpand) — `<type>` is a member of the label's
 // resolved downward closure (dynamic-type-taxonomy-design.md §5.1 site 1).
 // Fine-grained classification lives in the body's `class` field (Contract #1
-// §1) and is matched with a property predicate — `MATCH (l {class:
-// "location"})` — never with a label.
+// §1) and is matched with a property predicate — `MATCH (n {class:
+// "service.laundry.template"})` — never with a label. A polymorphic TYPE
+// question is the label's job, not the body's: `(l:location*)` expands against
+// the declared taxonomy to the concrete key types, which is what a body
+// predicate cannot do at all now that a location's class is its own key type.
 //
 // This is the reading of a label that every other mechanism already applies,
 // and each of them depends on the binder agreeing: the labeled seed scan

@@ -56,6 +56,7 @@ import (
 	"github.com/operatinggraph/lattice/internal/refractor/pipeline"
 	"github.com/operatinggraph/lattice/internal/refractor/ruleengine"
 	"github.com/operatinggraph/lattice/internal/refractor/ruleengine/full"
+	"github.com/operatinggraph/lattice/internal/refractor/taxonomy"
 )
 
 type labelVerdict struct {
@@ -204,11 +205,18 @@ var corpusLabelVerdicts = map[string]labelVerdict{
 	// consumers take the unconditional fan-out. The label set is still pinned:
 	// widening it is safe, but a label DROPPING out is how a broad lens quietly
 	// stops being judged against a type it reads.
-	"applicantRosterRead":         {broad, "building identity leaseapp unit", modeBroad},
-	"cafeIdentitiesRead":          {broad, "identity leaseapp", modeBroad},
-	"cafeLeaseWorkplaces":         {broad, "leaseapp", modeBroad},
-	"capabilityEphemeral":         {broad, "identity role task", modeBroad},
-	"capabilityServiceAccess":     {broad, "identity service", modeBroad},
+	"applicantRosterRead": {broad, "building identity leaseapp unit", modeBroad},
+	"cafeIdentitiesRead":  {broad, "identity leaseapp", modeBroad},
+	"cafeLeaseWorkplaces": {broad, "leaseapp", modeBroad},
+	"capabilityEphemeral": {broad, "identity role task", modeBroad},
+	// `location` is the ABSTRACT label the lens carries with the `*` sigil; the
+	// column is the cypher's own referenced-label set, pre-expansion. The
+	// verdict stays BROAD, and not because of the label count: two
+	// `containedIn*0..` hops and the unlabeled `op` inside the pattern
+	// comprehension each clear exhaustiveness on their own, independent of
+	// every label (ruleengine/full/labels.go). Labelling the three location
+	// positions constrains the BINDER, not the delivery footprint.
+	"capabilityServiceAccess":     {broad, "identity location service", modeBroad},
 	"clauseSatisfaction":          {broad, "account clause identity transaction", modeBroad},
 	"edgeCatalog#0":               {broad, "identity meta service", modeBroad},
 	"edgeEntityMenuItems":         {broad, "identity menuitem", modeBroad},
@@ -264,15 +272,57 @@ func consumerFilterMode(t *testing.T, name string, eng *full.Engine, cr ruleengi
 	require.NoErrorf(t, err, "%s census adapter", name)
 	p, err := pipeline.New("census-"+name, "nats_kv", bootstrap.CoreKVBucket, nil, nil, adpt, nil)
 	require.NoErrorf(t, err, "%s census pipeline", name)
-	// A `*`-carrying cypher would refuse here (no resolver installed answers
-	// StatusUnknown, and §4.2 refuses activation rather than guess an
-	// expansion), so this require is also the census's assertion that the
-	// shipped corpus carries no taxonomy sigil yet. When one lands, this is the
-	// line that says so, and its mode becomes a function of the live resolver
-	// rather than of the cypher.
+	// The corpus DOES carry taxonomy sigils now (capabilityServiceAccess's
+	// `:location*`), and a `*`-carrying cypher refuses activation outright when
+	// the expansion is unknown (§4.2's third tier). So the census installs a
+	// resolver armed with the corpus's OWN declared taxonomy — derived from the
+	// same pkgregistry DDL specs the installer emits subtypeOf links from, never
+	// a hand-written leaf list. A lens's verdict is therefore a function of the
+	// declared taxonomy, which is exactly what a taxonomy-driven expansion makes
+	// it in production: declare a fourth location leaf and this census moves.
+	p.SetTaxonomyResolver(corpusTaxonomyResolver(t))
 	require.NoErrorf(t, p.UseFullEngine(eng, cr), "%s must activate against a plain pipeline", name)
 	_, _, dec := p.ConsumerFilter()
 	return dec.Mode
+}
+
+// corpusTaxonomyResolver builds an armed taxonomy resolver from every
+// vertexType DDL the installed corpus declares — its Abstract flag and its
+// SubtypeOfRef parent, the two fields the installer turns into the
+// `data.abstract` marker and the `lnk.meta.<leaf>.subtypeOf.meta.<parent>`
+// edge (dynamic-type-taxonomy-design.md §3.2/§3.3). Reading the declarations
+// rather than restating their consequences is what keeps this census honest:
+// a package that adds, removes, or re-parents a leaf moves the verdicts here
+// with no edit to this file.
+func corpusTaxonomyResolver(t *testing.T) *taxonomy.Resolver {
+	t.Helper()
+	var snap []taxonomy.TypeSnapshot
+	for _, name := range pkgregistry.Names() {
+		def, ok := pkgregistry.Lookup(name)
+		require.Truef(t, ok, "registered package %q must resolve", name)
+		for _, d := range def.DDLs {
+			class := d.Class
+			if class == "" {
+				class = "meta.ddl.vertexType"
+			}
+			if class != "meta.ddl.vertexType" {
+				continue
+			}
+			ts := taxonomy.TypeSnapshot{
+				ID:            pkgmgr.DDLID(name, d.CanonicalName),
+				CanonicalName: d.CanonicalName,
+				Abstract:      d.Abstract,
+			}
+			if d.SubtypeOfRef != "" {
+				ts.SubtypeOf = []string{d.SubtypeOfRef}
+			}
+			snap = append(snap, ts)
+		}
+	}
+	r := taxonomy.New()
+	r.InstallSnapshot(snap)
+	r.SetArmed(true)
+	return r
 }
 
 // corpusLabelDerivation derives every installed cypher's verdict the way

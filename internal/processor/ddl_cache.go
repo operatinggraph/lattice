@@ -313,12 +313,22 @@ func (c *DDLCache) loadMetaVertex(ctx context.Context, root string, _ []string) 
 		return ref, false, nil
 	}
 
-	// permittedCommands aspect.
+	// permittedCommands aspect. A tombstone retains the prior document, so the
+	// declaration must be read as ABSENT when deleted — the same rule the
+	// custody reader below states, and it binds here for a sharper reason. An
+	// in-place upgrade keeps a DDL's meta-vertex NanoID (Contract #8 §8.1), so
+	// a package that stops emitting this aspect gets it TOMBSTONED, never
+	// removed (pkgmgr diffManifest → step8_commit's tombstone arm, which
+	// copies the prior document whole and only flips isDeleted). Reading a
+	// tombstone as live would leave a type that declares no commands admitting
+	// every command it used to — and for a type upgraded to ABSTRACT that
+	// inverts the one invariant the abstract marker exists to assert.
 	if pcEntry, err := c.conn.KVGet(ctx, c.coreBucket, root+".permittedCommands"); err == nil {
 		var asp struct {
-			Data map[string]interface{} `json:"data"`
+			IsDeleted bool                   `json:"isDeleted"`
+			Data      map[string]interface{} `json:"data"`
 		}
-		if err := json.Unmarshal(pcEntry.Value, &asp); err == nil && asp.Data != nil {
+		if err := json.Unmarshal(pcEntry.Value, &asp); err == nil && asp.Data != nil && !asp.IsDeleted {
 			ref.PermittedCommands = extractStringSlice(asp.Data["commands"])
 		}
 	} else if !errors.Is(err, substrate.ErrKeyNotFound) {
@@ -392,14 +402,20 @@ func (c *DDLCache) loadMetaVertex(ctx context.Context, root string, _ []string) 
 		}
 	}
 
-	// script aspect.
+	// script aspect. Read as ABSENT when tombstoned, for the same reason the
+	// permittedCommands and custody readers do: an in-place upgrade tombstones
+	// the aspects a package stops emitting rather than removing them, so a
+	// retained script would keep executing for a class whose package withdrew
+	// it — and on a concrete type upgraded to ABSTRACT, would keep executing
+	// for a type that declares none at all.
 	if scEntry, err := c.conn.KVGet(ctx, c.coreBucket, root+".script"); err == nil {
 		var asp struct {
-			Data struct {
+			IsDeleted bool `json:"isDeleted"`
+			Data      struct {
 				Source string `json:"source"`
 			} `json:"data"`
 		}
-		if err := json.Unmarshal(scEntry.Value, &asp); err == nil {
+		if err := json.Unmarshal(scEntry.Value, &asp); err == nil && !asp.IsDeleted {
 			ref.ScriptSource = asp.Data.Source
 		}
 	} else if !errors.Is(err, substrate.ErrKeyNotFound) {

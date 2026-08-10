@@ -34,9 +34,22 @@ type ManifestBlock struct {
 
 // ManifestDDL is one DDL declaration entry. Class defaults to
 // `meta.ddl.vertexType` when omitted.
+//
+// Abstract and SubtypeOf carry the taxonomy declaration
+// (dynamic-type-taxonomy-design.md §3.5). Without them a package declaring an
+// abstract type and its concrete leaves lists several indistinguishable
+// vertexType rows, and the manifest — whose whole job is to be the reviewable
+// statement of what a package declares — cannot say which is the parent, nor
+// catch a Definition that silently flips one.
 type ManifestDDL struct {
 	CanonicalName string `yaml:"canonicalName"`
 	Class         string `yaml:"class,omitempty"`
+	// Abstract mirrors DDLSpec.Abstract: this type names no instance and is a
+	// taxonomy parent only.
+	Abstract bool `yaml:"abstract,omitempty"`
+	// SubtypeOf mirrors DDLSpec.SubtypeOfRef: the canonicalName of the type
+	// this one is a subtypeOf. Empty for a type that declares no parent.
+	SubtypeOf string `yaml:"subtypeOf,omitempty"`
 }
 
 // ManifestLens is one Lens declaration entry.
@@ -155,6 +168,19 @@ func (m *Manifest) VerifyAgainstDefinition(d Definition) error {
 		if dm.CanonicalName != d.DDLs[i].CanonicalName {
 			return fmt.Errorf("pkgmgr: DDL[%d] canonicalName mismatch: manifest=%q definition=%q",
 				i, dm.CanonicalName, d.DDLs[i].CanonicalName)
+		}
+		// The taxonomy fields are part of a DDL's identity, not decoration: a
+		// type flipping between abstract and concrete changes whether it may
+		// carry a script, whether any instance may key or class under it, and
+		// what a `*` lens label expands to. A manifest that cannot disagree
+		// with the Definition about them cannot review them.
+		if dm.Abstract != d.DDLs[i].Abstract {
+			return fmt.Errorf("pkgmgr: DDL[%d] (%s) abstract mismatch: manifest=%v definition=%v",
+				i, dm.CanonicalName, dm.Abstract, d.DDLs[i].Abstract)
+		}
+		if dm.SubtypeOf != d.DDLs[i].SubtypeOfRef {
+			return fmt.Errorf("pkgmgr: DDL[%d] (%s) subtypeOf mismatch: manifest=%q definition=%q",
+				i, dm.CanonicalName, dm.SubtypeOf, d.DDLs[i].SubtypeOfRef)
 		}
 	}
 	for i, lm := range m.Declares.Lenses {

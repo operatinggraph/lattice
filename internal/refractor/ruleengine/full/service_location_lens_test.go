@@ -33,15 +33,48 @@ import (
 //     the target's type: an instance points at a :service template (excluded), a
 //     template points at a vtx.meta.* DDL (admitted).
 
-// slServiceAccess runs the LITERAL capabilityServiceAccess lens spec for the
-// given actor and returns the serviceAccess[] entries (the per-service maps).
-func slServiceAccess(t *testing.T, adjKV, coreKV *substrate.KV, body, actorKey string) []map[string]any {
+// slLocationExpansion is the taxonomy answer a running Refractor hands this
+// lens: location-domain declares the abstract `location` type with three
+// concrete leaves joined by subtypeOf, so a `:location*` pattern position
+// admits exactly {unit, building, property}. The pipeline resolves this once
+// at activation and threads it onto a COPY of the compiled rule
+// (full.WithLabelExpansion); a bare Parse carries no expansion at all, and a
+// `*` position with no resolved set matches NOTHING by design — fail closed,
+// never fall back to the bare-label reading. These tests therefore have to
+// install it to reproduce the running shape, and
+// TestServiceLocationLens_UnresolvedExpansionProjectsNothing pins the
+// fail-closed half.
+func slLocationExpansion() map[string]map[string]struct{} {
+	return map[string]map[string]struct{}{
+		"location": {"unit": {}, "building": {}, "property": {}},
+	}
+}
+
+// slExec parses body, threads the taxonomy expansion onto the compiled rule
+// exactly as the pipeline does, and executes it.
+func slExec(t *testing.T, adjKV, coreKV *substrate.KV, body, actorKey string, exp map[string]map[string]struct{}) []ruleengine.ProjectionResult {
 	t.Helper()
-	out := parseExec(t, body, ruleengine.EventContext{Parameters: map[string]any{
+	eng := New()
+	cr, err := eng.Parse(body)
+	require.NoError(t, err)
+	rule := ruleengine.CompiledRule(cr)
+	if exp != nil {
+		rule = WithLabelExpansion(cr.(*CompiledRule), exp)
+	}
+	out, err := eng.ExecuteWith(context.Background(), rule, ruleengine.EventContext{Parameters: map[string]any{
 		"actorKey":    actorKey,
 		"now":         float64(time.Now().Unix()),
 		"projectedAt": time.Now().UTC().Format(time.RFC3339),
 	}}, adjKV, coreKV)
+	require.NoError(t, err)
+	return out
+}
+
+// slServiceAccess runs the LITERAL capabilityServiceAccess lens spec for the
+// given actor and returns the serviceAccess[] entries (the per-service maps).
+func slServiceAccess(t *testing.T, adjKV, coreKV *substrate.KV, body, actorKey string) []map[string]any {
+	t.Helper()
+	out := slExec(t, adjKV, coreKV, body, actorKey, slLocationExpansion())
 	require.Len(t, out, 1, "actor must project exactly one (anchored) row")
 	raw, ok := out[0].Values["serviceAccess"].([]any)
 	if !ok {
@@ -355,4 +388,219 @@ func TestServiceLocationLens_MultiResidence_FullExclusion(t *testing.T) {
 	got := serviceKeys(slServiceAccess(t, adjKV, coreKV, body, actorKey))
 	require.NotContainsf(t, got, gymKey,
 		"a gym unavailableAt both residences must be excluded entirely; got %v", got)
+}
+
+// TestServiceLocationLens_AbstractLabelRejectsNonLocationResidence is the
+// discriminating pin for the `:location*` labels this lens carries on loc0 /
+// loc / exLoc. The label resolves against location-domain's subtypeOf edges to
+// {unit, building, property}, so a residesIn edge pointing at a vertex OUTSIDE
+// that set binds nothing and confers no service — where an unlabeled position
+// bound any type at all and would have projected the service.
+//
+// Its positive vector is the sibling below, run over the identical fixture with
+// only the residence's KEY TYPE changed: same edges, same service, a `unit`
+// instead of a `tab`. Without that pair a passing negative would be
+// indistinguishable from a fixture that simply never matched.
+func TestServiceLocationLens_AbstractLabelRejectsNonLocationResidence(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	adjKV, coreKV := startExecKVs(t)
+	reg := newFixtureRegistry()
+	body := servicelocation.Lenses()[0].Spec
+
+	actorKey := putRawVertex(t, reg, coreKV, "oddResident", "identity", "identity", map[string]any{})
+	// A `tab` is a real vertex type and emphatically not a location level.
+	putRawVertex(t, reg, coreKV, "notAPlace", "tab", "tab", map[string]any{})
+	laundryKey := putRawVertex(t, reg, coreKV, "laundry", "service", "service", map[string]any{})
+	slClassAspect(t, coreKV, laundryKey, "service.laundry.template")
+
+	putEdge(t, reg, adjKV, "residesIn", "oddResident", "notAPlace")
+	putEdge(t, reg, adjKV, "availableAt", "laundry", "notAPlace")
+
+	got := serviceKeys(slServiceAccess(t, adjKV, coreKV, body, actorKey))
+	require.NotContainsf(t, got, laundryKey,
+		"a residesIn edge to a non-location key type must confer nothing; got %v", got)
+}
+
+// TestServiceLocationLens_AbstractLabelAcceptsEveryLeaf is the positive vector
+// for the test above, and it also pins that the expansion covers ALL THREE
+// leaves rather than whichever one the corpus happens to use most: the same
+// availability shape is asserted with the residence keyed at each of unit,
+// building and property in turn.
+func TestServiceLocationLens_AbstractLabelAcceptsEveryLeaf(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	for _, leaf := range []string{"unit", "building", "property"} {
+		t.Run(leaf, func(t *testing.T) {
+			adjKV, coreKV := startExecKVs(t)
+			reg := newFixtureRegistry()
+			body := servicelocation.Lenses()[0].Spec
+
+			actorKey := putRawVertex(t, reg, coreKV, "leafResident", "identity", "identity", map[string]any{})
+			putRawVertex(t, reg, coreKV, "home", leaf, "location", map[string]any{})
+			laundryKey := putRawVertex(t, reg, coreKV, "laundry", "service", "service", map[string]any{})
+			slClassAspect(t, coreKV, laundryKey, "service.laundry.template")
+
+			putEdge(t, reg, adjKV, "residesIn", "leafResident", "home")
+			putEdge(t, reg, adjKV, "availableAt", "laundry", "home")
+
+			got := serviceKeys(slServiceAccess(t, adjKV, coreKV, body, actorKey))
+			require.Containsf(t, got, laundryKey,
+				"a residence keyed at the %s level must reach its availableAt service; got %v", leaf, got)
+		})
+	}
+}
+
+// TestServiceLocationLens_UnresolvedExpansionProjectsNothing pins the
+// fail-closed half of the `*` sigil at the BINDER, over the same fixture the
+// positive vector above accepts. A `*` position whose label has no resolved
+// expansion matches nothing — it never degrades to the bare-label reading, and
+// it never binds any type the way an unlabeled position would.
+//
+// This is why the pipeline REFUSES ACTIVATION when the taxonomy answer is
+// unknown (dynamic-type-taxonomy-design.md §4.2's third tier): reaching the
+// executor with no expansion is a silent empty projection, which on this
+// auth-plane lens means an empty serviceAccess set rather than a visible fault.
+func TestServiceLocationLens_UnresolvedExpansionProjectsNothing(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	adjKV, coreKV := startExecKVs(t)
+	reg := newFixtureRegistry()
+	body := servicelocation.Lenses()[0].Spec
+
+	actorKey := putRawVertex(t, reg, coreKV, "resident", "identity", "identity", map[string]any{})
+	putRawVertex(t, reg, coreKV, "home", "unit", "location", map[string]any{})
+	laundryKey := putRawVertex(t, reg, coreKV, "laundry", "service", "service", map[string]any{})
+	slClassAspect(t, coreKV, laundryKey, "service.laundry.template")
+
+	putEdge(t, reg, adjKV, "residesIn", "resident", "home")
+	putEdge(t, reg, adjKV, "availableAt", "laundry", "home")
+
+	// Same fixture, NO expansion installed.
+	out := slExec(t, adjKV, coreKV, body, actorKey, nil)
+	require.Len(t, out, 1, "the anchored identity row still projects")
+	raw, _ := out[0].Values["serviceAccess"].([]any)
+	for _, e := range raw {
+		m, ok := e.(map[string]any)
+		if !ok || m["service"] == nil {
+			continue
+		}
+		t.Fatalf("with no resolved expansion a `:location*` position must bind nothing; got service %v", m["service"])
+	}
+}
+
+// TestServiceLocationLens_PartialExpansionStillExcludes is the polarity pin,
+// and it is the reason `exLoc` carries no label while `loc0` and `loc` do.
+//
+// The fixture is the one a partial expansion breaks: the service is
+// availableAt the actor's own UNIT and unavailableAt the BUILDING that unit
+// sits in. The exclusion therefore has to bind a building-level node while the
+// positive walk binds only unit-level ones.
+//
+// The taxonomy is armed with `unit` alone — an ordinary replay window, not a
+// fault: location-domain's three subtypeOf edges are three separate Core-KV
+// keys, and the resolver is armed the moment the first arrives. If `exLoc`
+// carried `:location*`, it could not bind the building under that expansion,
+// the NOT (...) would find nothing to exclude, and the service would be
+// GRANTED at a place an operator explicitly marked unavailable. Because the
+// node is bare, the exclusion still fires.
+//
+// Read the polarity, because it is the whole argument: on a POSITIVE pattern a
+// label removes bindings and therefore removes access (fail closed); on a
+// NEGATED one it removes exclusions and therefore adds access (fail open).
+// Only the negated position has to stay bare.
+func TestServiceLocationLens_PartialExpansionStillExcludes(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	// Both expansions must reach the same verdict: the full one is the steady
+	// state, the partial one is the window that used to open the hole.
+	for _, tc := range []struct {
+		name string
+		exp  map[string]map[string]struct{}
+	}{
+		{"full expansion", slLocationExpansion()},
+		{"partial expansion — only the unit leaf has been replayed", map[string]map[string]struct{}{
+			"location": {"unit": {}},
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			adjKV, coreKV := startExecKVs(t)
+			reg := newFixtureRegistry()
+			body := servicelocation.Lenses()[0].Spec
+
+			actorKey := putRawVertex(t, reg, coreKV, "resident", "identity", "identity", map[string]any{})
+			putRawVertex(t, reg, coreKV, "penthouse", "unit", "unit", map[string]any{})
+			putRawVertex(t, reg, coreKV, "building", "building", "building", map[string]any{})
+			laundryKey := putRawVertex(t, reg, coreKV, "laundry", "service", "service", map[string]any{})
+			slClassAspect(t, coreKV, laundryKey, "service.laundry.template")
+
+			putEdge(t, reg, adjKV, "residesIn", "resident", "penthouse")
+			putEdge(t, reg, adjKV, "containedIn", "penthouse", "building")
+			// Available at the actor's OWN unit — reachable under either
+			// expansion, so the grant is never withheld for the wrong reason.
+			putEdge(t, reg, adjKV, "availableAt", "laundry", "penthouse")
+			// Unavailable at the BUILDING — the exclusion the partial
+			// expansion must not be able to silence.
+			putEdge(t, reg, adjKV, "unavailableAt", "laundry", "building")
+
+			out := slExec(t, adjKV, coreKV, body, actorKey, tc.exp)
+			require.Len(t, out, 1, "the anchored identity row still projects")
+			raw, _ := out[0].Values["serviceAccess"].([]any)
+			for _, e := range raw {
+				m, ok := e.(map[string]any)
+				if !ok || m["service"] == nil {
+					continue
+				}
+				if m["service"] == laundryKey {
+					t.Fatalf("a building-level unavailableAt must exclude the service under %s — "+
+						"labelling a node inside NOT (...) removes exclusions, which grants access an operator denied", tc.name)
+				}
+			}
+		})
+	}
+}
+
+// TestServiceLocationLens_PartialExpansionPositiveFailsClosed is the other half
+// of the polarity argument, asserted rather than reasoned: under the SAME
+// partial expansion, a building-level grant the positive walk can no longer
+// bind simply does not appear. Fewer bindings, less access — the safe
+// direction, and the reason `loc0` and `loc` keep their labels.
+func TestServiceLocationLens_PartialExpansionPositiveFailsClosed(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	adjKV, coreKV := startExecKVs(t)
+	reg := newFixtureRegistry()
+	body := servicelocation.Lenses()[0].Spec
+
+	actorKey := putRawVertex(t, reg, coreKV, "resident", "identity", "identity", map[string]any{})
+	putRawVertex(t, reg, coreKV, "penthouse", "unit", "unit", map[string]any{})
+	putRawVertex(t, reg, coreKV, "building", "building", "building", map[string]any{})
+	laundryKey := putRawVertex(t, reg, coreKV, "laundry", "service", "service", map[string]any{})
+	slClassAspect(t, coreKV, laundryKey, "service.laundry.template")
+
+	putEdge(t, reg, adjKV, "residesIn", "resident", "penthouse")
+	putEdge(t, reg, adjKV, "containedIn", "penthouse", "building")
+	putEdge(t, reg, adjKV, "availableAt", "laundry", "building")
+
+	// Full expansion: the building-level grant reaches the resident.
+	full := serviceKeys(slServiceAccess(t, adjKV, coreKV, body, actorKey))
+	require.Containsf(t, full, laundryKey, "under the full expansion the building grant reaches the unit resident; got %v", full)
+
+	// Partial expansion: `loc` cannot bind the building, so the grant is
+	// withheld. Correct-but-less, never more.
+	out := slExec(t, adjKV, coreKV, body, actorKey, map[string]map[string]struct{}{"location": {"unit": {}}})
+	require.Len(t, out, 1)
+	raw, _ := out[0].Values["serviceAccess"].([]any)
+	for _, e := range raw {
+		m, ok := e.(map[string]any)
+		if !ok || m["service"] == nil {
+			continue
+		}
+		t.Fatalf("a positive position under a partial expansion must fail CLOSED; got a grant for %v", m["service"])
+	}
 }

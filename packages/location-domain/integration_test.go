@@ -5,13 +5,16 @@
 // Lattice surface a real package sees: seed the kernel, install rbac-domain +
 // identity-domain + identity-hygiene + location-domain through the Processor,
 // then submit the four ops and assert the committed Core-KV shape — a location
-// is a real class=location vertex with root data {} (D5), and containedIn is a
-// child→parent link whose endpoints are validated alive + location-class.
+// is a real vertex whose class equals its key type, with root data {} (D5), and
+// containedIn is a child→parent link whose endpoints are validated alive + an
+// admitted location key type.
 //
 // Coverage:
-//  1. TestLocation_CreateAllTypes        — vtx.unit/building/property, class=location, root {}
+//  1. TestLocation_CreateAllTypes        — vtx.unit/building/property, class = the key type, root {}
 //  2. TestLocation_ContainedInChain      — unit→building→property link key shape + direction
-//  3. TestLocation_WireRejectsNonLocation — containedIn to a non-location vertex → Rejected
+//  3. TestLocation_WireRejectsNonLocation — containedIn to a non-location key type → Rejected
+//     TestLocation_WireRejectsForeignClassOnLocationKey — …and to a location key of a foreign class
+//     TestLocation_WireAcceptsLegacyClassedEndpoint — a pre-taxonomy class=location building still wires
 //  4. TestLocation_WireRejectsDeadEndpoint — containedIn to a tombstoned location → Rejected
 //  5. TestLocation_UnwireContainedIn     — link tombstone
 //  6. TestLocation_TombstoneLocation     — vertex tombstone
@@ -171,7 +174,7 @@ func createLocation(t *testing.T, ctx context.Context, conn *substrate.Conn, cp 
 		OperationType: "CreateLocation",
 		Actor:         locStaffActorKey,
 		SubmittedAt:   time.Now().UTC().Format(time.RFC3339),
-		Class:         "location",
+		Class:         locType,
 		Payload:       json.RawMessage(`{"locationType":"` + locType + `"}`),
 	}
 	testutil.PublishOp(t, conn, env)
@@ -179,8 +182,20 @@ func createLocation(t *testing.T, ctx context.Context, conn *substrate.Conn, cp 
 	return locKey
 }
 
+// leafClassOf returns the envelope class a location op must carry for a given
+// location key: the key's own type segment. Every concrete leaf admits the
+// same five operationTypes, so the Processor cannot infer the class and every
+// submitter names it.
+func leafClassOf(locKey string) string {
+	parts := strings.Split(locKey, ".")
+	if len(parts) != 3 {
+		return ""
+	}
+	return parts[1]
+}
+
 // TestLocation_CreateAllTypes mints a unit, a building, and a property; asserts
-// each is a class=location vertex with root data minimal ({}, D5) under the
+// each carries a class equal to its own key type, with root data minimal ({}, D5) under the
 // vtx.<locationType>.<NanoID> key shape (Contract #6 §6.9).
 func TestLocation_CreateAllTypes(t *testing.T) {
 	ctx, conn := setupLocationEnv(t)
@@ -192,8 +207,8 @@ func TestLocation_CreateAllTypes(t *testing.T) {
 			t.Fatalf("%s key = %q, want vtx.%s.<id>", locType, locKey, locType)
 		}
 		doc := readDoc(t, ctx, conn, locKey)
-		if doc["class"] != "location" {
-			t.Fatalf("%s class = %v, want location", locType, doc["class"])
+		if doc["class"] != locType {
+			t.Fatalf("%s class = %v, want %s (the class equals the key type)", locType, doc["class"], locType)
 		}
 		if del, _ := doc["isDeleted"].(bool); del {
 			t.Fatalf("%s should be alive", locType)
@@ -233,7 +248,7 @@ func TestLocation_CreatePresentation(t *testing.T) {
 		OperationType: "CreateLocation",
 		Actor:         locStaffActorKey,
 		SubmittedAt:   time.Now().UTC().Format(time.RFC3339),
-		Class:         "location",
+		Class:         "building",
 		Payload:       json.RawMessage(`{"locationType":"building","presentation":{"name":"Riverside Building","icon":"building"}}`),
 	}
 	testutil.PublishOp(t, conn, env)
@@ -277,7 +292,7 @@ func TestLocation_SetLocationPresentation(t *testing.T) {
 			OperationType: "SetLocationPresentation",
 			Actor:         locStaffActorKey,
 			SubmittedAt:   time.Now().UTC().Format(time.RFC3339),
-			Class:         "location",
+			Class:         "unit",
 			Payload:       json.RawMessage(payload),
 			ContextHint:   &processor.ContextHint{Reads: []string{unitKey}},
 		}
@@ -310,14 +325,14 @@ func TestLocation_SetLocationPresentation(t *testing.T) {
 	// A dead subject is rejected (endpoint-class/alive guard).
 	deadID := "LDdeadunitHJKMNPQRST"
 	deadKey := "vtx.unit." + deadID
-	seedDeletedVertex(t, ctx, conn, deadKey, "location")
+	seedDeletedVertex(t, ctx, conn, deadKey, "unit")
 	env := &processor.OperationEnvelope{
 		RequestID:     testutil.GenReqID("setPresDead1"),
 		Lane:          processor.LaneDefault,
 		OperationType: "SetLocationPresentation",
 		Actor:         locStaffActorKey,
 		SubmittedAt:   time.Now().UTC().Format(time.RFC3339),
-		Class:         "location",
+		Class:         "unit",
 		Payload:       json.RawMessage(`{"locationKey":"` + deadKey + `","presentation":{"name":"Ghost"}}`),
 		ContextHint:   &processor.ContextHint{Reads: []string{deadKey}},
 	}
@@ -347,7 +362,7 @@ func TestLocation_ContainedInChain(t *testing.T) {
 			OperationType: "WireContainedIn",
 			Actor:         locStaffActorKey,
 			SubmittedAt:   time.Now().UTC().Format(time.RFC3339),
-			Class:         "location",
+			Class:         leafClassOf(child),
 			Payload:       json.RawMessage(`{"child":"` + child + `","parent":"` + parent + `"}`),
 			ContextHint:   &processor.ContextHint{Reads: []string{child, parent}},
 		}
@@ -383,8 +398,14 @@ func TestLocation_ContainedInChain(t *testing.T) {
 }
 
 // TestLocation_WireRejectsNonLocation proves the endpoint-class guard: wiring
-// containedIn to a vertex that exists + is alive but is NOT class=location (an
-// identity here) is rejected — the link is never committed into the place graph.
+// containedIn to a vertex that exists + is alive but whose KEY TYPE SEGMENT is
+// not an admitted location level (an identity here) is rejected — the link is
+// never committed into the place graph.
+//
+// The type authority is the ADDRESS. A location vertex's class equals its own
+// key type, so no single class value names the family; asking the key's type
+// segment is what lets one guard say "any location" across all three levels,
+// and it is the same authority a `:location*` lens label resolves against.
 func TestLocation_WireRejectsNonLocation(t *testing.T) {
 	ctx, conn := setupLocationEnv(t)
 	cp, cons := newLocationPipeline(t, ctx, conn, "non-location")
@@ -392,10 +413,9 @@ func TestLocation_WireRejectsNonLocation(t *testing.T) {
 	unitKey := createLocation(t, ctx, conn, cp, cons, "unit")
 
 	// A live identity vertex masquerading as a containment parent — same key
-	// arity as a location, wrong class. Use a unit-typed key so location_parts
-	// passes and the rejection comes from the CLASS check, not the type segment.
+	// arity as a location, a type segment that is not a location level.
 	notLocID := "LDfakeparentHJKMNPQR"
-	notLocKey := "vtx.unit." + notLocID
+	notLocKey := "vtx.identity." + notLocID
 	seedVertex(t, ctx, conn, notLocKey, "identity", map[string]any{})
 
 	env := &processor.OperationEnvelope{
@@ -404,7 +424,7 @@ func TestLocation_WireRejectsNonLocation(t *testing.T) {
 		OperationType: "WireContainedIn",
 		Actor:         locStaffActorKey,
 		SubmittedAt:   time.Now().UTC().Format(time.RFC3339),
-		Class:         "location",
+		Class:         "unit",
 		Payload:       json.RawMessage(`{"child":"` + unitKey + `","parent":"` + notLocKey + `"}`),
 		ContextHint:   &processor.ContextHint{Reads: []string{unitKey, notLocKey}},
 	}
@@ -413,9 +433,98 @@ func TestLocation_WireRejectsNonLocation(t *testing.T) {
 
 	// No containedIn link should exist.
 	unitID := strings.TrimPrefix(unitKey, "vtx.unit.")
-	lnk := "lnk.unit." + unitID + ".containedIn.unit." + notLocID
+	lnk := "lnk.unit." + unitID + ".containedIn.identity." + notLocID
 	if _, err := conn.KVGet(ctx, testutil.HarnessCoreBucket, lnk); err == nil {
 		t.Fatalf("containedIn link to a non-location vertex was committed: %s", lnk)
+	}
+}
+
+// TestLocation_WireRejectsForeignClassOnLocationKey is the CLASS arm's own
+// pin, and the key arm cannot stand in for it: the vector is keyed
+// vtx.building.<NanoID>, so location_parts and the key-segment check both pass
+// and only the class refuses it.
+//
+// What it protects: `vtx.building.*` is location-domain's keyspace, but
+// nothing stops another package minting a vertex there under a class of its
+// own, and the place graph must stay closed over vertices location-domain
+// actually minted. Its positive vector is
+// TestLocation_WireAcceptsLegacyClassedEndpoint below, over the same key type.
+func TestLocation_WireRejectsForeignClassOnLocationKey(t *testing.T) {
+	ctx, conn := setupLocationEnv(t)
+	cp, cons := newLocationPipeline(t, ctx, conn, "foreign-class")
+
+	unitKey := createLocation(t, ctx, conn, cp, cons, "unit")
+
+	foreignID := "LDforeignCLassHJKMNP"
+	foreignKey := "vtx.building." + foreignID
+	seedVertex(t, ctx, conn, foreignKey, "identity", map[string]any{})
+
+	env := &processor.OperationEnvelope{
+		RequestID:     testutil.GenReqID("wireForeign1"),
+		Lane:          processor.LaneDefault,
+		OperationType: "WireContainedIn",
+		Actor:         locStaffActorKey,
+		SubmittedAt:   time.Now().UTC().Format(time.RFC3339),
+		Class:         "unit",
+		Payload:       json.RawMessage(`{"child":"` + unitKey + `","parent":"` + foreignKey + `"}`),
+		ContextHint:   &processor.ContextHint{Reads: []string{unitKey, foreignKey}},
+	}
+	outcome, reply := testutil.SubmitAndAwaitReply(t, ctx, conn, cp, cons, env)
+	if outcome != processor.OutcomeRejected {
+		t.Fatalf("outcome = %v, want rejected", outcome)
+	}
+	// The endpoint guard's own error code, so a rejection from any other check
+	// — a malformed key, a hydration miss, an auth denial — cannot stand in
+	// for the class arm this vector exists to exercise.
+	if reply == nil || reply.Error == nil || !strings.Contains(reply.Error.Message, "NotALocation") {
+		t.Fatalf("refused with %v, want the endpoint guard's own NotALocation", reply)
+	}
+
+	unitID := strings.TrimPrefix(unitKey, "vtx.unit.")
+	lnk := "lnk.unit." + unitID + ".containedIn.building." + foreignID
+	if _, err := conn.KVGet(ctx, testutil.HarnessCoreBucket, lnk); err == nil {
+		t.Fatalf("containedIn link to a location-keyed vertex of a foreign class was committed: %s", lnk)
+	}
+}
+
+// TestLocation_WireAcceptsLegacyClassedEndpoint is the migration-window pin,
+// and it is the reason no write-path guard may read the root class. A location
+// minted before the taxonomy landed carries the shared class `location` on a
+// `vtx.unit.<id>` key, and nothing rewrites those documents. A class-based
+// guard — whether `cls == "location"` or `cls in {unit,building,property}` —
+// necessarily rejects one of the two live populations. The key-type-segment
+// guard accepts both, which is the whole migration.
+//
+// Its positive/negative pair is TestLocation_WireRejectsNonLocation above: the
+// same op, the same shape, a parent whose type segment is not a location.
+func TestLocation_WireAcceptsLegacyClassedEndpoint(t *testing.T) {
+	ctx, conn := setupLocationEnv(t)
+	cp, cons := newLocationPipeline(t, ctx, conn, "legacy-class")
+
+	unitKey := createLocation(t, ctx, conn, cp, cons, "unit")
+
+	// A pre-taxonomy building: correct key type, the old shared class.
+	legacyID := "LDgacyBuiLdHJKMNPQRS"
+	legacyKey := "vtx.building." + legacyID
+	seedVertex(t, ctx, conn, legacyKey, "location", map[string]any{})
+
+	env := &processor.OperationEnvelope{
+		RequestID:     testutil.GenReqID("wireLegacy01"),
+		Lane:          processor.LaneDefault,
+		OperationType: "WireContainedIn",
+		Actor:         locStaffActorKey,
+		SubmittedAt:   time.Now().UTC().Format(time.RFC3339),
+		Class:         "unit",
+		Payload:       json.RawMessage(`{"child":"` + unitKey + `","parent":"` + legacyKey + `"}`),
+		ContextHint:   &processor.ContextHint{Reads: []string{unitKey, legacyKey}},
+	}
+	testutil.PublishOp(t, conn, env)
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
+
+	unitID := strings.TrimPrefix(unitKey, "vtx.unit.")
+	lnk := "lnk.unit." + unitID + ".containedIn.building." + legacyID
+	if _, err := conn.KVGet(ctx, testutil.HarnessCoreBucket, lnk); err != nil {
+		t.Fatalf("containedIn link to a legacy-classed building was refused: %s: %v", lnk, err)
 	}
 }
 
@@ -430,7 +539,7 @@ func TestLocation_WireRejectsDeadEndpoint(t *testing.T) {
 
 	deadBldgID := "LDdeadbuiLdHJKMNPQRS"
 	deadBldgKey := "vtx.building." + deadBldgID
-	seedDeletedVertex(t, ctx, conn, deadBldgKey, "location")
+	seedDeletedVertex(t, ctx, conn, deadBldgKey, "building")
 
 	env := &processor.OperationEnvelope{
 		RequestID:     testutil.GenReqID("wireDead0001"),
@@ -438,7 +547,7 @@ func TestLocation_WireRejectsDeadEndpoint(t *testing.T) {
 		OperationType: "WireContainedIn",
 		Actor:         locStaffActorKey,
 		SubmittedAt:   time.Now().UTC().Format(time.RFC3339),
-		Class:         "location",
+		Class:         "unit",
 		Payload:       json.RawMessage(`{"child":"` + unitKey + `","parent":"` + deadBldgKey + `"}`),
 		ContextHint:   &processor.ContextHint{Reads: []string{unitKey, deadBldgKey}},
 	}
@@ -464,7 +573,7 @@ func TestLocation_UnwireContainedIn(t *testing.T) {
 		OperationType: "WireContainedIn",
 		Actor:         locStaffActorKey,
 		SubmittedAt:   time.Now().UTC().Format(time.RFC3339),
-		Class:         "location",
+		Class:         "unit",
 		Payload:       json.RawMessage(`{"child":"` + unitKey + `","parent":"` + buildingKey + `"}`),
 		ContextHint:   &processor.ContextHint{Reads: []string{unitKey, buildingKey}},
 	}
@@ -477,7 +586,7 @@ func TestLocation_UnwireContainedIn(t *testing.T) {
 		OperationType: "UnwireContainedIn",
 		Actor:         locStaffActorKey,
 		SubmittedAt:   time.Now().UTC().Format(time.RFC3339),
-		Class:         "location",
+		Class:         "unit",
 		Payload:       json.RawMessage(`{"linkKey":"` + lnk + `"}`),
 		ContextHint:   &processor.ContextHint{Reads: []string{lnk}},
 	}
@@ -503,7 +612,7 @@ func TestLocation_TombstoneLocation(t *testing.T) {
 		OperationType: "TombstoneLocation",
 		Actor:         locStaffActorKey,
 		SubmittedAt:   time.Now().UTC().Format(time.RFC3339),
-		Class:         "location",
+		Class:         "building",
 		Payload:       json.RawMessage(`{"locationKey":"` + bldgKey + `"}`),
 		ContextHint:   &processor.ContextHint{Reads: []string{bldgKey}},
 	}
@@ -528,7 +637,7 @@ func TestLocation_UnauthorizedDenied(t *testing.T) {
 		OperationType: "CreateLocation",
 		Actor:         locConsumerKey,
 		SubmittedAt:   time.Now().UTC().Format(time.RFC3339),
-		Class:         "location",
+		Class:         "unit",
 		Payload:       json.RawMessage(`{"locationType":"unit"}`),
 	}
 	testutil.PublishOp(t, conn, env)

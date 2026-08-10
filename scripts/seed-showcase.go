@@ -305,23 +305,23 @@ func main() {
 
 	// --- building + two units --------------------------------------------
 
-	submitOp(ctx, conn, adminKey, "CreateLocation", "location",
+	submitOp(ctx, conn, adminKey, "CreateLocation", "building",
 		map[string]any{"locationType": "building", "locationId": buildingID,
 			"presentation": showcaseLocationNames[buildingKey]}, nil)
 	fmt.Println("==> building:        " + buildingKey)
 
-	submitOp(ctx, conn, adminKey, "CreateLocation", "location",
+	submitOp(ctx, conn, adminKey, "CreateLocation", "unit",
 		map[string]any{"locationType": "unit", "locationId": unit1ID,
 			"presentation": showcaseLocationNames[unit1Key]}, nil)
-	submitOp(ctx, conn, adminKey, "WireContainedIn", "location",
+	submitOp(ctx, conn, adminKey, "WireContainedIn", "unit",
 		map[string]any{"child": unit1Key, "parent": buildingKey},
 		&processor.ContextHint{Reads: []string{unit1Key, buildingKey}})
 	fmt.Println("==> unit1:           " + unit1Key + " containedIn building")
 
-	submitOp(ctx, conn, adminKey, "CreateLocation", "location",
+	submitOp(ctx, conn, adminKey, "CreateLocation", "unit",
 		map[string]any{"locationType": "unit", "locationId": unit2ID,
 			"presentation": showcaseLocationNames[unit2Key]}, nil)
-	submitOp(ctx, conn, adminKey, "WireContainedIn", "location",
+	submitOp(ctx, conn, adminKey, "WireContainedIn", "unit",
 		map[string]any{"child": unit2Key, "parent": buildingKey},
 		&processor.ContextHint{Reads: []string{unit2Key, buildingKey}})
 	fmt.Println("==> unit2:           " + unit2Key + " containedIn building")
@@ -1535,7 +1535,7 @@ func seedLocationPresentation(ctx context.Context, conn *substrate.Conn, adminKe
 		if alive(ctx, conn, locKey+".presentation") {
 			continue
 		}
-		submitOp(ctx, conn, adminKey, "SetLocationPresentation", "location",
+		submitOp(ctx, conn, adminKey, "SetLocationPresentation", locationLeafClass(locKey),
 			map[string]any{"locationKey": locKey, "presentation": showcaseLocationNames[locKey]},
 			&processor.ContextHint{Reads: []string{locKey}})
 		fmt.Printf("==> named location:  %s (%s)\n", locKey, showcaseLocationNames[locKey]["name"])
@@ -1552,10 +1552,10 @@ func seedLocationPresentation(ctx context.Context, conn *substrate.Conn, adminKe
 // defacement-bounded model as every other demo write.
 func seedStaffWorklistApplication(ctx context.Context, conn *substrate.Conn, adminKey, staffKey string) {
 	if !alive(ctx, conn, unit3Key) {
-		submitOp(ctx, conn, adminKey, "CreateLocation", "location",
+		submitOp(ctx, conn, adminKey, "CreateLocation", "unit",
 			map[string]any{"locationType": "unit", "locationId": unit3ID,
 				"presentation": showcaseLocationNames[unit3Key]}, nil)
-		submitOp(ctx, conn, adminKey, "WireContainedIn", "location",
+		submitOp(ctx, conn, adminKey, "WireContainedIn", "unit",
 			map[string]any{"child": unit3Key, "parent": buildingKey},
 			&processor.ContextHint{Reads: []string{unit3Key, buildingKey}})
 	}
@@ -1627,10 +1627,10 @@ func seedStaffWorklistApplication(ctx context.Context, conn *substrate.Conn, adm
 // too, where it layers in whatever is missing without re-submitting what is not.
 func seedLandlordWorld(ctx context.Context, conn *substrate.Conn, adminKey, consumerRoleKey string) string {
 	if !alive(ctx, conn, unit4Key) {
-		submitOp(ctx, conn, adminKey, "CreateLocation", "location",
+		submitOp(ctx, conn, adminKey, "CreateLocation", "unit",
 			map[string]any{"locationType": "unit", "locationId": unit4ID,
 				"presentation": showcaseLocationNames[unit4Key]}, nil)
-		submitOp(ctx, conn, adminKey, "WireContainedIn", "location",
+		submitOp(ctx, conn, adminKey, "WireContainedIn", "unit",
 			map[string]any{"child": unit4Key, "parent": buildingKey},
 			&processor.ContextHint{Reads: []string{unit4Key, buildingKey}})
 	}
@@ -1708,10 +1708,10 @@ func seedLandlordWorld(ctx context.Context, conn *substrate.Conn, adminKey, cons
 // safe on every rerun.
 func seedRenewalDemoTenancy(ctx context.Context, conn *substrate.Conn, adminKey, landlordKey string) {
 	if !alive(ctx, conn, unit5Key) {
-		submitOp(ctx, conn, adminKey, "CreateLocation", "location",
+		submitOp(ctx, conn, adminKey, "CreateLocation", "unit",
 			map[string]any{"locationType": "unit", "locationId": unit5ID,
 				"presentation": showcaseLocationNames[unit5Key]}, nil)
-		submitOp(ctx, conn, adminKey, "WireContainedIn", "location",
+		submitOp(ctx, conn, adminKey, "WireContainedIn", "unit",
 			map[string]any{"child": unit5Key, "parent": buildingKey},
 			&processor.ContextHint{Reads: []string{unit5Key, buildingKey}})
 	}
@@ -2151,6 +2151,21 @@ func findOpMetaByType(ctx context.Context, conn *substrate.Conn, operationType s
 		os.Exit(1)
 	}
 	return opMetaKey
+}
+
+// locationLeafClass returns the envelope class a location op must carry for a
+// given location key: the key's own type segment (unit / building / property).
+// Every concrete location leaf admits the same five operationTypes, so the
+// Processor's operationType->class index treats them as ambiguous and every
+// submitter names the leaf explicitly; the abstract `location` declares no
+// script and is never a legal envelope class.
+func locationLeafClass(locationKey string) string {
+	parts := strings.Split(locationKey, ".")
+	if len(parts) != 3 {
+		fmt.Fprintf(os.Stderr, "FATAL: %q is not a vtx.<locationType>.<NanoID> key\n", locationKey)
+		os.Exit(1)
+	}
+	return parts[1]
 }
 
 // linkKey builds the deterministic 6-segment link key for "source <relation>

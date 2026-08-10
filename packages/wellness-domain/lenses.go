@@ -292,11 +292,14 @@ RETURN
 // the Starlark walk runs `range(WORKPLACE_MAX_DEPTH)` testing depths 0..7,
 // while `*0..N` here admits depths 0..N inclusive (the executor matches the
 // zero-hop node and THEN runs hops 1..N). `*0..8` would therefore admit a
-// staffer nine levels up whose writes require_workplace refuses. The location nodes carry no label because a location
-// is any vertex of class `location` whatever its type segment — a building, a
-// floor, a room — the same reason edge-manifest's workplace chains leave them
-// bare; the labelled `(s:studio)` head is what keeps the comprehension anchored
-// rather than seeding the whole keyspace.
+// staffer nine levels up whose writes require_workplace refuses. The location
+// nodes carry no label because the chain must admit a location at ANY level —
+// a building, a floor, a room — and a bare node is the simplest way to say so,
+// the same reason edge-manifest's workplace chains leave them bare.
+// (`:location*`, the abstract label with the taxonomy sigil, would say it
+// precisely, but it makes the walk depend on the taxonomy resolver being armed
+// for no gain here.) The labelled `(s:studio)` head is what keeps the
+// comprehension anchored rather than seeding the whole keyspace.
 const wellnessSessionsSpec = `MATCH (se:session)
 OPTIONAL MATCH (se)-[:atStudio]->(s:studio)
 OPTIONAL MATCH (se)-[:ledBy]->(i:instructor)

@@ -160,11 +160,14 @@ func Lenses() []pkgmgr.LensSpec {
 // The list-comprehension form (lease-signing's authz_anchors idiom, mirrored
 // by wellness-domain's own coveringLocations) keeps the row one-per-lease — an
 // OPTIONAL MATCH on a multi-parent unit would fan the lease into several rows
-// instead. The location nodes carry no label because a location is any vertex
-// of class `location` whatever its type segment — a building, a floor, a unit
-// — the same reason edge-manifest's workplace chains leave them bare; the
-// labelled `(l:leaseapp)` head is what keeps the comprehension anchored rather
-// than seeding the whole keyspace.
+// instead. The location nodes carry no label because the chain must admit a
+// location at ANY level — a building, a floor, a unit — and a bare node is the
+// simplest way to say so, the same reason edge-manifest's workplace chains
+// leave them bare. (`:location*`, the abstract label with the taxonomy sigil,
+// would say it precisely, but it makes the walk depend on the taxonomy
+// resolver being armed for no gain here.) The labelled `(l:leaseapp)` head is
+// what keeps the comprehension anchored rather than seeding the whole
+// keyspace.
 //
 // A lease whose unit is unwired — or which has no appliesToUnit at all —
 // projects an EMPTY set, which the boundary reads as "no workplace covers

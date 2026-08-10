@@ -240,18 +240,28 @@ func TestPackage_LensCypher(t *testing.T) {
 		"$actorKey",
 		"residesIn",
 		"containedIn*0..",
-		"<-[:availableAt]-(svc:service)",         // service is the INBOUND side (not inverted) + :service guard
-		"<-[:unavailableAt]-(svc)",               // exclusion, same direction
-		"NOT (svc)-[:instanceOf]->",              // template guard (instances carry instanceOf)
-		"NOT (loc0)-[:containedIn*0..]->(exLoc)", // per-chain exclusion anchored on the granting residence
-		"exLoc",                                  // the fresh exclusion location var
-		"operationType <> null",                  // allowedOperations drops ops with no operationType
+		"<-[:availableAt]-(svc:service)", // service is the INBOUND side (not inverted) + :service guard
+		"<-[:unavailableAt]-(svc)",       // exclusion, same direction
+		"NOT (svc)-[:instanceOf]->",      // template guard (instances carry instanceOf)
+		"NOT (loc0)-[:containedIn*0..]->(exLoc)<-[:unavailableAt]-(svc)", // per-chain exclusion anchored on the granting residence, its node deliberately BARE
+		"exLoc",                 // the fresh exclusion location var
+		"(loc0:location*)",      // the residence binds only a location LEVEL (abstract label + `*`)
+		"(loc:location*)",       // ditto the availability level reached up the chain
+		"operationType <> null", // allowedOperations drops ops with no operationType
 		"permitsOperation",
 		"serviceAccess",
 	} {
 		if !strings.Contains(src, want) {
 			t.Errorf("capabilityServiceAccess cypher must contain %q", want)
 		}
+	}
+	// The exclusion node must stay BARE. A label on a NEGATED pattern can only
+	// remove exclusions, so under a partial taxonomy expansion it grants access
+	// an operator explicitly denied — the inverse of what a label does in
+	// positive position. This lens writes cap.svc.<actor>, so the asymmetry is
+	// pinned here rather than left to a reader's care.
+	if strings.Contains(src, "(exLoc:") {
+		t.Errorf("exLoc sits inside NOT (...) and must carry no label — a label there removes exclusions, which GRANTS access")
 	}
 	// serviceClass is not projected — the residence scheme has no use for it and
 	// it could only carry the bare root class "service" (the rich discriminator

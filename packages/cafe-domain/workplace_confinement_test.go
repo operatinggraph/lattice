@@ -3,6 +3,7 @@ package cafedomain_test
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
@@ -350,6 +351,31 @@ func wcSubmitCreateMenuItem(t *testing.T, ctx context.Context, conn *substrate.C
 	return testutil.DriveOne(t, ctx, cp, cons, "")
 }
 
+// wcSubmitCreateMenuItemWithReason is wcSubmitCreateMenuItem's sibling for a
+// REJECTION vector: it returns the script's own failure message so a test can
+// name the guard it means to exercise. A bare outcome check cannot tell the
+// location guard from the workplace-confinement guard beside it.
+func wcSubmitCreateMenuItemWithReason(t *testing.T, ctx context.Context, conn *substrate.Conn,
+	cp *processor.CommitPath, cons jetstream.Consumer, label, locationKey, actorKey string) (processor.MessageOutcome, string) {
+	t.Helper()
+	env := &processor.OperationEnvelope{
+		RequestID:     testutil.GenReqID(label),
+		Lane:          processor.LaneDefault,
+		OperationType: "CreateMenuItem",
+		Actor:         actorKey,
+		SubmittedAt:   "2026-08-05T12:00:00Z",
+		Class:         "menuitem",
+		Payload:       json.RawMessage(`{"name":"Latte","priceCents":450,"locationKey":"` + locationKey + `"}`),
+		ContextHint:   &processor.ContextHint{Reads: []string{locationKey}},
+	}
+	outcome, reply := testutil.SubmitAndAwaitReply(t, ctx, conn, cp, cons, env)
+	msg := ""
+	if reply != nil && reply.Error != nil {
+		msg = reply.Error.Message
+	}
+	return outcome, msg
+}
+
 // wcSubmitRetireMenuItem submits RetireMenuItem{menuItemKey} as an arbitrary
 // actor on the standing path, declaring exactly what a staff caller would.
 func wcSubmitRetireMenuItem(t *testing.T, ctx context.Context, conn *substrate.Conn,
@@ -385,6 +411,78 @@ func TestWorkplace_MenuItemStaffConfinedToWorkplace(t *testing.T) {
 	}
 	if got := wcSubmitCreateMenuItem(t, ctx, conn, cp, cons, "wcmib00000000000002", wcBuildingBKey, wcStaffKey); got != processor.OutcomeRejected {
 		t.Fatalf("staff CreateMenuItem at ANOTHER building = %v, want Rejected", got)
+	}
+}
+
+// TestWorkplace_MenuItemRejectsNonLocation pins the migrated location guard on
+// CreateMenuItem's `locationKey`: the servedAt target must be keyed with an
+// admitted location type segment. The guard reads the KEY, never the root
+// class — a location vertex's class equals its own key type, while every
+// location minted before the taxonomy landed carries the shared class
+// `location`, so no class value names the family.
+//
+// Both calls are made as the OPERATOR, which is exempt from workplace
+// confinement, so the difference between them is the location guard alone.
+// Verified by mutation: disabling the guard turns the negative green, which a
+// staff-actor version of this test did NOT — the confinement guard was
+// refusing it instead. The positive vector is seedWorkplaceTopology's
+// building: a concrete key type carrying the legacy shared class, which is the
+// live production migration shape.
+func TestWorkplace_MenuItemRejectsNonLocation(t *testing.T) {
+	ctx, conn := setupDomainEnv(t)
+	testutil.SeedCapDoc(t, ctx, conn, wcMenuCapDoc())
+	cp, cons := newDomainPipeline(t, ctx, conn, "wcmenunonloc")
+	seedWorkplaceTopology(t, ctx, conn)
+
+	if got := wcSubmitCreateMenuItem(t, ctx, conn, cp, cons, "wcmlp00000000000001", wcBuildingAKey, domainActorKey); got != processor.OutcomeAccepted {
+		t.Fatalf("operator CreateMenuItem at a legacy-classed building = %v, want Accepted", got)
+	}
+	got, why := wcSubmitCreateMenuItemWithReason(t, ctx, conn, cp, cons, "wcmln00000000000002", wcStaffKey, domainActorKey)
+	if got != processor.OutcomeRejected {
+		t.Fatalf("CreateMenuItem servedAt a non-location target = %v, want Rejected", got)
+	}
+	if !strings.Contains(why, "NotALocation") {
+		t.Errorf("refused with %q, want the location guard's own NotALocation", why)
+	}
+}
+
+// TestWorkplace_MenuItemAcceptsPerTypeClass pins the FORWARD-migration half of
+// the class arm, which every other location fixture in this package misses:
+// seedWorkplaceTopology seeds the shared pre-taxonomy class everywhere, so
+// narrowing the admitted class set back to just that one leaves the whole
+// suite green while every location minted AFTER the upgrade silently stops
+// being servable.
+//
+// A location created by location-domain today carries its own key type as its
+// class (CreateLocation writes make_vtx(loc_key, lt, {})), so this is the shape
+// production produces from here on. Both calls are made as the OPERATOR, which
+// is exempt from workplace confinement, so the only thing separating them is
+// the location guard.
+func TestWorkplace_MenuItemAcceptsPerTypeClass(t *testing.T) {
+	ctx, conn := setupDomainEnv(t)
+	testutil.SeedCapDoc(t, ctx, conn, wcMenuCapDoc())
+	cp, cons := newDomainPipeline(t, ctx, conn, "wcmenupertype")
+	seedWorkplaceTopology(t, ctx, conn)
+
+	// class == the key's own type segment: what CreateLocation mints now.
+	perType := "vtx.building.BBCAFEPERTYPEBLDGAHJ"
+	seedVertex(t, ctx, conn, perType, "building", map[string]any{})
+	if got := wcSubmitCreateMenuItem(t, ctx, conn, cp, cons, "wcmpt00000000000001", perType, domainActorKey); got != processor.OutcomeAccepted {
+		t.Fatalf("operator CreateMenuItem at a per-type-classed building = %v, want Accepted", got)
+	}
+
+	// The KEY arm's own discriminator: an admitted CLASS on a key type that is
+	// not a location at all. Every other negative vector here fails both arms
+	// at once and so cannot tell the key guard from the class-only guard that
+	// preceded it.
+	impostor := "vtx.tab.BBCAFEMPSTRTABHJKMNP"
+	seedVertex(t, ctx, conn, impostor, "location", map[string]any{})
+	got, why := wcSubmitCreateMenuItemWithReason(t, ctx, conn, cp, cons, "wcmpt00000000000002", impostor, domainActorKey)
+	if got != processor.OutcomeRejected {
+		t.Fatalf("CreateMenuItem servedAt a non-location target = %v, want Rejected", got)
+	}
+	if !strings.Contains(why, "NotALocation") {
+		t.Errorf("refused with %q, want the location guard's own NotALocation", why)
 	}
 }
 

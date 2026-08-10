@@ -68,7 +68,7 @@ func (h *harness) seedRenewableApplication(label string) (appKey, applicantKey, 
 	require.Equalf(h.t, processor.ReplyStatusAccepted, idReply.Status, "CreateUnclaimedIdentity(%s): %+v", label, idReply.Error)
 	applicantKey = idReply.PrimaryKey
 
-	unitReply := h.submitOp("CreateLocation", "location", "default", bootstrap.BootstrapIdentityKey, map[string]any{
+	unitReply := h.submitOp("CreateLocation", "unit", "default", bootstrap.BootstrapIdentityKey, map[string]any{
 		"locationType": "unit",
 	}, nil)
 	require.Equalf(h.t, processor.ReplyStatusAccepted, unitReply.Status, "CreateLocation(%s): %+v", label, unitReply.Error)
