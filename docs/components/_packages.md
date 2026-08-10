@@ -189,11 +189,23 @@ Field semantics:
     meta-vertex, which subsequent reads treat as non-contributing). The
     installer also refuses a `subtypeOf` graph that is cyclic or requires an
     upward walk deeper than 4 hops.
-  - **leafBudget**: (abstract types only) the expected upper bound on direct
-    `subtypeOf` children before a dependent lens's narrowed-filter label cap
-    is at risk; defaults to 8 when unset. Exceeding it is a WARNING on the
-    install/upgrade result, never a rejection — one package's lens narrowing
-    must never veto another package's type declaration.
+  - **leafBudget**: (abstract types only) the abstract type's own promise about
+    how large its transitive concrete-leaf set may grow — the bound a dependent
+    lens prices its narrowed-filter label cap against. It has two consumers,
+    landing on deliberately different actors:
+    - A **leaf installer** that pushes the transitive count past the budget is
+      **WARNED, never rejected** — one package's lens narrowing must never veto
+      another package's type declaration.
+    - A **lens author** whose own lens cannot fit `K + Σ leafBudget ≤ 8` is
+      **REFUSED at their own install**, where they can act on it
+      (`ErrLensLabelCap`). `K` is the lens's referenced labels minus its whole
+      expansion set, and the gate engages only for an *exhaustive* lens carrying
+      a `*` sigil. The remedy is to rewrite a redundant concrete label as the
+      sigil, or to ask the abstract type's owner for a smaller budget — **not**
+      to delete the label, which clears exhaustiveness and makes the lens broad.
+    An abstract type that declares no budget takes the whole cap (8), which
+    forces `K = 0` for every consuming lens; the installer warns when a
+    declaration omits it.
 - **declares.lenses[]**: each entry maps to one Lens meta-vertex + its canonical
   aspects (canonicalName, spec, adapter, etc.). The Refractor auto-picks-up new
   lenses via its `vtx.meta.>` watch.

@@ -913,24 +913,31 @@ design-time obligation rather than a live bug.
 
 An abstract type declares `LeafBudget int` (default 8, the label cap). Then:
 
-> **Build status (2026-08-10):** BOTH halves are built. The leaf-installer half counts the **transitive**
-> closure (§17.9). The lens-author half — the `K + leafBudget ≤ maxNarrowedFilterLabels` refusal — is built on
-> the Fire C branch (C3.7, `df70a6a3`), **awaiting cold review before it merges**; `K` became computable when
-> pkgmgr's injected parser seam was widened to return the spec's label facts. `K` is the referenced set minus
-> the WHOLE expansion set (the runtime's own deletion pass is blind to which label is being priced), budgets
-> are summed across expansion labels, and the gate engages only for an **exhaustive** lens carrying a sigil —
-> a non-exhaustive one takes the broad filter regardless, so refusing its install would be a false refusal.
+> **Build status:** BOTH halves are built and merged. The leaf-installer half counts the **transitive**
+> closure (§17.9). The lens-author half is the `K + Σ leafBudget ≤ maxNarrowedFilterLabels` refusal
+> (`internal/pkgmgr/lenslabelcap.go`); `K` is computable because pkgmgr's injected parser seam returns the
+> spec's label facts. `K` is the referenced set minus the WHOLE expansion set (the runtime's own deletion
+> pass is blind to which label is being priced), budgets are **summed** across expansion labels, and the gate
+> engages only for an **exhaustive** lens carrying a sigil — a non-exhaustive one takes the broad filter
+> regardless, so refusing its install would be a false refusal.
 >
-> **⚠️ ANDREW — the default makes this refusal maximally strict, and the corpus takes the default.**
-> `leafBudgetDefault` and `maxNarrowedFilterLabels` are both **8**, so an abstract type that leaves
-> `LeafBudget` unset forces `K + 8 ≤ 8`, i.e. **`K` must be 0**: the first author to write `(l:location*)`
-> alongside *any* other label in an exhaustive lens is refused, and the fix lives in someone else's package.
-> `location-domain` leaves it unset deliberately (`ddls.go:99`, reasoning "three leaves sit well inside it") —
-> which is the **warning** half's logic applied to the **refusal** half, where it inverts. The build implements
-> the ratified arithmetic faithfully and fails closed in the defensible direction (an abstract that promises
-> nothing about its growth cannot be relied on for narrowing), but the ergonomics are a ratification call:
-> either `location-domain` declares a real budget (4–5), or the default stops meaning "the whole cap".
-> **Not decided here.**
+> **The default means the whole cap, and that is deliberate — so an abstract type must declare a real
+> budget** (Winston-ratified 2026-08-10; `LeafBudget` is not contract surface, so this is an implementation
+> call). `leafBudgetDefault` and `maxNarrowedFilterLabels` are both **8**, so an abstract type that leaves
+> `LeafBudget` unset forces `K + 8 ≤ 8`, i.e. **`K` must be 0**. That is the correct *semantics* — an
+> abstract that promises nothing about its growth cannot be relied on for narrowing — and it is kept. What
+> was wrong was that the omission was **silent**, and that the corpus's only abstract type took the default
+> by accident: `location-domain` reasoned "three leaves sit well inside it", which is the **warning** half's
+> logic applied to the **refusal** half, where it inverts. Both halves of that are now closed:
+> `location-domain` declares **`LeafBudget: 5`** — §10.1's own modeled growth (three shipped levels plus the
+> projected `room`/`hallway` row), leaving consuming lenses `K ≤ 3`, exactly that table's "narrowed, zero
+> headroom" row — and an abstract declaration that omits `LeafBudget` now **warns** on the install result,
+> naming the consequence, on the existing `LeafBudgetWarnings` channel.
+>
+> **A concrete `*` is charged its current resolved closure, as a floor rather than a bound.** A concrete
+> type's growth is governed by no budget, so no declared worst case exists for it; charging zero (and
+> subtracting it from `K`) admitted lenses the runtime then took broad, which is the regression this gate
+> exists to remove.
 
 - **A lens author gets a decidable answer.** At the *lens's* install, `K + leafBudget ≤ maxNarrowedFilterLabels`
   is checked, and the install **fails** if the lens cannot fit its own worst case. The lens author owns their own
@@ -2438,3 +2445,63 @@ convergence suite passes locally at that commit.
   this fire and has no ratified pattern to extend: no link-type DDL declares endpoint types anywhere
   (`TargetType` is an op-dispatch field, not a link endpoint), so bounding a variable-length hop's type set
   needs a mechanism that does not exist. **The item does not close until C5 is answered.**
+
+### 17.20 Fire C · C3.7 reviewed and merged, and the four things review changed (2026-08-10)
+
+C3.7 carried the cap contract's first **refusal** consumer and had never had a cold pass. Three cold
+reviewers ran it on three lenses — refusal arithmetic, enforcement reachability, runtime fidelity + posture.
+**No blocking defect in the shipped arithmetic**, and the claim the fire rested on holds by construction, not
+by census: `pipeline.go`'s only change is replacing two local consts with numerically identical aliases of
+`subjects.MaxNarrowedFilterLabels`, so no shipped lens's `ConsumerFilter` can move. Two reviewer claims were
+adjudicated *against* the reviewer and are recorded below so they are not re-raised.
+
+**What review changed.**
+
+1. **A concrete `*` was charged zero AND subtracted from `K`.** The runtime unions `resolved(e)` for every
+   expansion label, and a concrete label's closure always contains itself — an activating concrete `*` has
+   ≥2 members. So the gate admitted lenses the runtime then took broad: the exact silent regression it
+   exists to remove. A non-abstract expansion label is now charged its current resolved closure, floor 1,
+   and the `len(charged) == 0` short-circuit is gone — a lens whose only sigil is concrete used to escape
+   pricing entirely, even at `K = 12`.
+2. **The refusal's own advice defeated the gate.** It told a refused author to drop the redundant concrete
+   label; dropping a label makes the node an unlabeled non-re-reference, which clears exhaustiveness and
+   takes the lens broad forever. The message now names the two safe moves (rewrite the concrete label *as*
+   the sigil; ask the abstract's owner for a smaller budget) and says which lookalike move is not one.
+3. **The gate was silently disarmed in 30 of 34 fixtures.** `Installer.SpecParser` is a nil-able field and
+   nil means skip, so `go test ./packages/<x>/` could pass on a package `bin/lattice-pkg` refuses. All test
+   fixtures now build through `testutil.NewInstaller`, and `scripts/lint-conventions.go` pins
+   `pkgmgr.NewInstaller` to its sanctioned callers — mirroring the `natsfixture` precedent in that same file.
+4. **The corpus tripwire covered 1 package of 31 and skipped multi-branch lenses.** Its `if l.Spec == ""`
+   loop skipped exactly the `SpecBranches` shape production prefers. It now sweeps the whole registry — 31
+   packages, 104 `Spec` lenses and 3 branch lenses — selecting bodies as `lensCapCandidates` does. Proven by
+   mutation rather than by reverting: a `*` planted in `edge-manifest`'s branch-composed `edgeTasks` is
+   caught by the new test and invisible to the old one.
+
+**Adjudicated against the reviewer, deliberately.** *(a)* The **overlap subtraction** (`K ∩ currentLeaves(e)`)
+was proposed to fix the sum's over-count and is **unsound**: if an overlapping leaf later leaves the closure
+while the abstract adds new ones, the subtraction under-counts and admits a lens that goes broad. The
+over-count stays; only the advice was wrong (item 2). *(b)* The **read-fault fail direction** — this gate
+errors on a `KVGet`/unmarshal fault where `taxonomy.go` swallows the identical fault — is correct as built:
+the two sites have different consumers. `taxonomy.go`'s output is an advisory warning string, so a fault
+there costs nothing; this gate's output decides whether an install proceeds. The adjudication is recorded at
+`abstractLeafBudget`'s doc so the next reviewer does not re-raise it.
+
+**§10.2's `⚠️ ANDREW` banner is resolved and rewritten in place** — the default keeps meaning the whole cap
+(correct semantics for a type that promises nothing), `location-domain` declares `LeafBudget: 5`, and an
+abstract declaration that omits the budget now warns. `LeafBudget` appears nowhere in `docs/contracts/*`, so
+this was an implementation call, not a ratification one.
+
+**Lessons routed:** three new classes to `docs/components/pkgmgr.md`'s dossier (nil-able injected dependency
+disarming its gate; a partial sum reported as a worst case; a remedy that defeats the gate), and the
+"installer parses but never reads a lens spec's labels" entry **retired** — mechanized by the seam plus the
+corpus sweep.
+
+**CHECKPOINT — Fire C, after C3.7.**
+
+- **Done:** C1.1, C1.2, C1.3, C1.4's authoring half, C2.5, C2.6 (answered by measurement), C3.7. All on
+  `main`, CI green. The worktree `/Users/andrewsolgan/Documents/GitHub/lattice-wt-taxonomy-fire-c` is spent.
+- **Next:** C2.6's remaining fan-out at its corrected size — the operator corpus-rebuild's uncoordinated
+  goroutine (`control/service.go:930-943`) and the replay drain, routed through B0's scheduler. **Fairness
+  and correctness, not memory** — any brief citing boot memory as the driver is citing a measurement that no
+  longer holds (§17.19).
+- **Still designer-pass:** C4 (items 8–11) and C5 (item 12). **The item does not close until C5 is answered.**
