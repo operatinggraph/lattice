@@ -159,6 +159,15 @@ jobs:
         # falls back to free-text for.
         run: STRICT=1 go run ./scripts/lint-facet-renderer-drift.go
 
+      - name: Manifest entityKey/entityType pairing lint (edge-manifest)
+        # Every edge-manifest lens tail's `"<literal>" AS entityType` must
+        # equal the label its `<var>.key AS entityKey` variable is bound to in
+        # the lens's own Walk Chain, and must never name a type any package
+        # declares `Abstract: true` — cmd/facet's op-attach + payload-resolve
+        # compare entityType to entityKey's own vertex-type segment with
+        # `===`, silently, so a drifted literal breaks that entity kind alone.
+        run: STRICT=1 go run ./scripts/lint-manifest-entity-type.go
+
       - name: Board lint (the backlog is an index, not a journal)
         # Backstop on code commits (board-only commits hit board-lint.yml,
         # which the main paths-ignore skips): fails on an over-budget row, a
