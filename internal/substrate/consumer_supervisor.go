@@ -38,6 +38,28 @@ type ConsumerSupervisor struct {
 type managedConsumer struct {
 	spec    ConsumerSpec
 	workers []*pumpWorker
+	// resetMu serializes THIS consumer's delete-recreate pair, and nothing else.
+	//
+	// Recreating a durable is two server calls under one name, and the server
+	// has no notion of them belonging together: two callers interleaving them
+	// can have one delete land between the other's delete and create, which the
+	// server answers by failing the create outright (a 500 while it writes the
+	// consumer's metadata into a directory the other request has just removed).
+	// Nothing above this package excludes concurrent resets of one consumer, so
+	// the pair has to exclude itself.
+	//
+	// It lives on the managedConsumer rather than on the supervisor so two
+	// DIFFERENT durables still recreate concurrently — the hazard is a shared
+	// name, not shared server capacity, and the supervisor-wide alternative
+	// would serialize a whole corpus behind one slow round trip.
+	//
+	// What it does NOT cover, deliberately: the pump's reopen, and the drain
+	// behind it. Both are unbounded in a way the delete-recreate is not (a
+	// handler's latency is not bounded by this package, and a busy consumer
+	// never goes idle), so holding this across either would turn a
+	// millisecond-wide mutual exclusion into a stall. ResetAwaitReopen's
+	// snapshot, request and wait all happen after it is released.
+	resetMu sync.Mutex
 }
 
 // pumpWorker is one supervised pump goroutine: its context cancel, a done
@@ -181,29 +203,157 @@ func stopWorkers(workers []*pumpWorker) {
 // Reset; otherwise Reset on an unmanaged name returns an error.
 //
 // Reset is the migration target for Refractor's rebuild delete-recreate-swap.
+//
+// Reset does not wait for the pumps: requestReopen is a non-blocking signal, so
+// Reset returns while each pump still has its old iterator open. A caller that
+// holds a bounded resource across a reset, and wants that resource to cover the
+// handover rather than half of it, wants ResetAwaitReopen instead.
 func (s *ConsumerSupervisor) Reset(ctx context.Context, name string) error {
-	s.mu.Lock()
-	mc, exists := s.managed[name]
-	s.mu.Unlock()
-	if !exists {
-		return fmt.Errorf("substrate: ConsumerSupervisor: reset %q: not managed", name)
+	mc, _, err := s.recreateDurable(ctx, name)
+	if err != nil {
+		return err
 	}
-
-	// Unconditional delete (TOCTOU-safe): tolerate ErrConsumerNotFound.
-	if err := s.conn.js.DeleteConsumer(ctx, mc.spec.Stream, name); err != nil &&
-		!errors.Is(err, jetstream.ErrConsumerNotFound) {
-		return fmt.Errorf("substrate: ConsumerSupervisor: reset %q: delete: %w", name, err)
-	}
-
-	if _, err := s.createConsumer(ctx, mc.spec); err != nil {
-		return fmt.Errorf("substrate: ConsumerSupervisor: reset %q: create: %w", name, err)
-	}
-
 	// Signal every pump to re-open its iterator against the recreated durable.
 	for _, w := range mc.workers {
 		w.state.requestReopen()
 	}
 	return nil
+}
+
+// ResetAwaitReopen is Reset plus a bounded, BEST-EFFORT wait for each pump to
+// have re-opened against the recreated durable.
+//
+// It exists for a caller that holds a bounded resource across a reset — a
+// concurrency slot taken so the server is not asked for many simultaneous
+// durable transitions at once. Reset alone returns while every pump still holds
+// its old iterator, so such a caller releases its resource with the handover
+// half-done and the bound covers less than it names.
+//
+// EXACTLY what the wait guarantees, which is less than "the pump has reopened
+// against the durable I just created":
+//
+//   - It guarantees the acknowledgement was not one the caller failed to wait
+//     for. The snapshot is taken before the reopen is requested, so an open that
+//     had already completed cannot satisfy it.
+//   - It does NOT guarantee the acknowledging open was of the NEW durable. A
+//     pump that finished opening the OLD durable and had not yet announced it
+//     will announce into this caller's snapshot, releasing it early. Closing
+//     that would mean tying the acknowledgement to the durable's identity, which
+//     is a larger mechanism than the guarantee is worth: the consequence is the
+//     same as an expired budget below — a resource released early, with nothing
+//     left inconsistent, and the pump reopening on its own regardless.
+//
+// So this is a handover BARRIER, best-effort, not a handover proof.
+//
+// It also does NOT cover the DRAIN. Once the iterator is open, the redelivery
+// behind it is ordinary pump traffic. A busy consumer's pump never goes idle in
+// steady state, so waiting for the drain would hold the caller's resource for
+// that consumer's whole lifetime and stall every other reset behind it. The
+// boundary is "the consumer is being read again", not "the backlog is gone".
+//
+// The wait is BOUNDED and non-fatal. A pump only notices the reopen request when
+// its current message returns from the handler (the drain's watcher calls Stop
+// on the iterator, which does not interrupt a running handler), and a handler's
+// latency is not bounded by this package — see keepAckAlive. So an unbounded
+// wait here is a stall waiting to happen. On expiry this logs and returns nil:
+// the durable HAS been recreated, and the pump reopens on its own
+// nextReopenDelay backoff, so a timeout means "we stopped waiting", not "the
+// reset failed". A cancelled ctx is different in kind — the caller is gone, not
+// merely impatient — and returns ctx.Err().
+//
+// A worker holding any pause reason is not waited on. A paused pump cannot
+// reopen until an operator Resume, so waiting on one burns the whole budget to
+// learn nothing; it is signalled like any other and left to reopen when it is
+// resumed.
+//
+// Overlapping calls on one consumer are safe and independent: the
+// acknowledgement is a channel close, so one waiter cannot consume another's.
+//
+// A non-positive wait requests the reopen and returns without waiting.
+func (s *ConsumerSupervisor) ResetAwaitReopen(ctx context.Context, name string, wait time.Duration) error {
+	mc, spec, err := s.recreateDurable(ctx, name)
+	if err != nil {
+		return err
+	}
+
+	// Snapshot BEFORE requesting: reopenSnapshot returns the channel the next
+	// open will close, so taking it afterwards could hand back one a completed
+	// open had already installed, which nothing further would close.
+	reopened := make([]<-chan struct{}, 0, len(mc.workers))
+	for _, w := range mc.workers {
+		if w.state.anyReason() {
+			continue
+		}
+		reopened = append(reopened, w.state.reopenSnapshot())
+	}
+	for _, w := range mc.workers {
+		w.state.requestReopen()
+	}
+	if wait <= 0 || len(reopened) == 0 {
+		return nil
+	}
+
+	// One timer for the whole call, not one per worker: the caller gave a single
+	// budget, and N workers must not multiply it into N × wait.
+	timer := time.NewTimer(wait)
+	defer timer.Stop()
+	for _, ch := range reopened {
+		select {
+		case <-ch:
+		case <-ctx.Done():
+			return fmt.Errorf("substrate: ConsumerSupervisor: reset %q: awaiting reopen: %w", name, ctx.Err())
+		case <-timer.C:
+			specLogger(spec).Warn("substrate: ConsumerSupervisor: reset recreated the durable but its pump did not reopen within the wait; "+
+				"the pump retries on its own backoff",
+				"consumer", name, "wait", wait)
+			return nil
+		}
+	}
+	return nil
+}
+
+// recreateDurable is the delete-recreate half both reset entry points share. It
+// returns the managed consumer so the caller can drive its workers, and the spec
+// the recreate actually used; it does not touch the workers itself, because the
+// two entry points differ precisely in what they do with them afterwards.
+//
+// The spec is COPIED out under s.mu and everything downstream reads the copy.
+// mc.spec is mutable shared state — UpdateSpec rewrites it in place under the
+// same lock, and a reset is exactly what a caller runs right after an UpdateSpec
+// — so reading the field directly across the JetStream calls is both a data race
+// and a torn read: the delete could address one stream and the create another.
+// The copy is shallow, which is all that is needed; UpdateSpec swaps whole
+// fields rather than mutating through them.
+//
+// The pair runs under the consumer's own resetMu (see its declaration for what
+// that does and does not cover). Lock order: s.mu is taken only for the registry
+// lookup and the copy, and released before resetMu is acquired, so no goroutine
+// ever waits for a per-consumer reset while holding the registry lock.
+func (s *ConsumerSupervisor) recreateDurable(ctx context.Context, name string) (*managedConsumer, ConsumerSpec, error) {
+	s.mu.Lock()
+	mc, exists := s.managed[name]
+	var spec ConsumerSpec
+	if exists {
+		spec = mc.spec
+	}
+	s.mu.Unlock()
+	if !exists {
+		return nil, ConsumerSpec{}, fmt.Errorf("substrate: ConsumerSupervisor: reset %q: not managed", name)
+	}
+
+	mc.resetMu.Lock()
+	defer mc.resetMu.Unlock()
+
+	// Unconditional delete (TOCTOU-safe): tolerate ErrConsumerNotFound.
+	if err := s.conn.js.DeleteConsumer(ctx, spec.Stream, name); err != nil &&
+		!errors.Is(err, jetstream.ErrConsumerNotFound) {
+		return nil, ConsumerSpec{}, fmt.Errorf("substrate: ConsumerSupervisor: reset %q: delete: %w", name, err)
+	}
+
+	if _, err := s.createConsumer(ctx, spec); err != nil {
+		return nil, ConsumerSpec{}, fmt.Errorf("substrate: ConsumerSupervisor: reset %q: create: %w", name, err)
+	}
+	return mc, spec, nil
 }
 
 // UpdateSpec replaces the desired spec for an already-managed consumer without

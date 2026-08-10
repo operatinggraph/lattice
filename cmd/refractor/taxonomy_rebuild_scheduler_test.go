@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"sync"
 	"sync/atomic"
@@ -11,7 +12,10 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/operatinggraph/lattice/internal/natsfixture"
+	"github.com/operatinggraph/lattice/internal/refractor/control"
 	"github.com/operatinggraph/lattice/internal/refractor/lens"
+	"github.com/operatinggraph/lattice/internal/refractor/rebuildgate"
 	"github.com/operatinggraph/lattice/internal/refractor/taxonomy"
 )
 
@@ -109,6 +113,119 @@ func TestTaxonomyChanged_FanOutStaysWithinTheConcurrencyBound(t *testing.T) {
 		assert.False(t, pending, "%s: a successful rebuild clears the pending flag", entry.rule.ID)
 		assert.False(t, running, "%s: the single-flight latch must be handed back", entry.rule.ID)
 	}
+}
+
+// TestRebuildGate_TaxonomyAndControlPathsShareOneBound pins the reason the gate
+// is a shared instance rather than one per path.
+//
+// A rebuild is a durable JetStream delete-recreate whichever path asked for it,
+// so a bound held separately by the reload scheduler and by the operator control
+// plane leaves their SUM unbounded. Both are wired to one gate in main.go, and
+// this drives both ends for real — a taxonomy rebuild held open while the
+// "rebuild" control op is issued over NATS for the same lens — to prove the
+// control path waits rather than reproducing the burst the scheduler exists to
+// prevent.
+func TestRebuildGate_TaxonomyAndControlPathsShareOneBound(t *testing.T) {
+	const ruleID = "lens-shared-gate"
+
+	_, nc := natsfixture.Server(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
+	gate := rebuildgate.New(taxonomyRebuildConcurrency)
+
+	var mu sync.Mutex
+	var inFlight, peak int
+	var order []string
+	release := make(chan struct{})
+
+	enter := func(who string) {
+		mu.Lock()
+		inFlight++
+		if inFlight > peak {
+			peak = inFlight
+		}
+		order = append(order, who)
+		mu.Unlock()
+	}
+	leave := func() {
+		mu.Lock()
+		inFlight--
+		mu.Unlock()
+	}
+	ran := func() []string {
+		mu.Lock()
+		defer mu.Unlock()
+		return append([]string(nil), order...)
+	}
+
+	rl := &reloader{
+		ctx:    ctx,
+		logger: discardLogger(),
+		rebuildPipeline: func(*pipelineEntry, bool) error {
+			enter("taxonomy")
+			<-release
+			leave()
+			return nil
+		},
+	}
+	rl.taxRebuild.settle = time.Millisecond
+	rl.taxRebuild.setGate(gate)
+
+	svc := control.NewService()
+	svc.SetCapabilityChecker(control.NewStubCapabilityChecker(nil))
+	svc.SetRebuildGate(gate)
+	svc.RegisterRebuilder(ruleID, sharedGateRebuilder{enter: enter, leave: leave})
+	require.NoError(t, svc.StartNATSListener(ctx, nc))
+
+	entry := &pipelineEntry{rule: &lens.Rule{ID: ruleID}}
+	markTaxonomyRebuildPending(entry, false)
+	rl.startTaxonomyRebuild(entry, ruleID, "shared-gate")
+	mcPollUntil(t, 5*time.Second, func() bool { return len(ran()) == 1 },
+		"the taxonomy rebuild never started")
+
+	body, err := json.Marshal(map[string]any{})
+	require.NoError(t, err)
+	reply, err := nc.Request(control.ControlSubject(ruleID, "rebuild"), body, 2*time.Second)
+	require.NoError(t, err)
+	var resp control.ControlResponse
+	require.NoError(t, json.Unmarshal(reply.Data, &resp))
+	require.Empty(t, resp.Error)
+	require.NotNil(t, resp.Rebuild)
+	require.True(t, resp.Rebuild.Started, "the control op still acks immediately — it queues, it does not refuse")
+
+	require.Never(t, func() bool { return len(ran()) > 1 }, 200*time.Millisecond, 5*time.Millisecond,
+		"the control plane must not rebuild a lens the reload path is already rebuilding")
+
+	close(release)
+	mcPollUntil(t, 5*time.Second, func() bool { return len(ran()) == 2 },
+		"the control rebuild never ran once the taxonomy rebuild released the lens")
+
+	assert.Equal(t, []string{"taxonomy", "control"}, ran(),
+		"the control rebuild runs AFTER the taxonomy one, not instead of it — the gate serializes, it never coalesces")
+	mu.Lock()
+	defer mu.Unlock()
+	assert.Equal(t, 1, peak, "one lens may never be rebuilt by two paths at once")
+}
+
+// sharedGateRebuilder is the control-plane end of the shared-gate test: a
+// Rebuilder that records its call against the same counters the reload path
+// writes, so "at once" is measured across both paths rather than within one.
+type sharedGateRebuilder struct {
+	enter func(string)
+	leave func()
+}
+
+func (r sharedGateRebuilder) Rebuild(context.Context, bool) error {
+	r.enter("control")
+	r.leave()
+	return nil
+}
+
+func (r sharedGateRebuilder) RebuildAndWait(context.Context, bool, time.Duration) error {
+	r.enter("control")
+	r.leave()
+	return nil
 }
 
 // TestTaxonomyRebuildScheduler_ShutdownAbandonsQueuedJobs pins the drain half

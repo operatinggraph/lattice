@@ -307,7 +307,7 @@ func TestHandle_AShutdownMidRebuildIsRetriedNotAcked(t *testing.T) {
 
 // The two "not known to be rebuilt, but not the lens's fault" classes must not
 // reach the pause arm. Pausing here is self-perpetuating: a paused lens cannot
-// drain a rebuild (Rebuild's supervisor.Reset requests a reopen without clearing
+// drain a rebuild (Rebuild's supervisor reset requests a reopen without clearing
 // a pause), so a lens whose rescan legitimately outran the budget once would
 // burn the whole budget, time out and re-pause on every later destruction —
 // serving its pre-destruction rows the entire time. That is the wedge the budget

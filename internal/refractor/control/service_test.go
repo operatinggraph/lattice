@@ -405,6 +405,167 @@ func TestControl_Rebuild_RuleNotRegistered(t *testing.T) {
 	assert.Nil(t, resp.Rebuild)
 }
 
+// gatedRebuilder holds every Rebuild call open until release is closed, and
+// records the calls in order with the truncate each was given — so a test can
+// assert both how MANY rebuilds a burst of requests produced and what each of
+// them was asked to do.
+type gatedRebuilder struct {
+	mu       sync.Mutex
+	calls    []bool
+	inFlight int
+	peak     int
+	released chan struct{}
+}
+
+func newGatedRebuilder() *gatedRebuilder {
+	return &gatedRebuilder{released: make(chan struct{})}
+}
+
+func (g *gatedRebuilder) Rebuild(_ context.Context, truncate bool) error {
+	g.mu.Lock()
+	g.calls = append(g.calls, truncate)
+	g.inFlight++
+	if g.inFlight > g.peak {
+		g.peak = g.inFlight
+	}
+	g.mu.Unlock()
+
+	<-g.released
+
+	g.mu.Lock()
+	g.inFlight--
+	g.mu.Unlock()
+	return nil
+}
+
+func (g *gatedRebuilder) RebuildAndWait(ctx context.Context, truncate bool, _ time.Duration) error {
+	return g.Rebuild(ctx, truncate)
+}
+
+func (g *gatedRebuilder) release() { close(g.released) }
+
+func (g *gatedRebuilder) callCount() int {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return len(g.calls)
+}
+
+func (g *gatedRebuilder) truncates() []bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return append([]bool(nil), g.calls...)
+}
+
+func (g *gatedRebuilder) peakInFlight() int {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.peak
+}
+
+// TestControl_Rebuild_BurstForOneLensCollapsesToOneInFlightPlusOneQueued pins
+// the "rebuild" op's admission.
+//
+// The op acks the instant it accepts a request, so nothing upstream throttles
+// the caller: without per-lens admission, the request rate IS the rate of
+// concurrent durable delete-recreates aimed at the NATS server. A burst for one
+// lens must therefore produce at most one rebuild in flight plus at most one
+// further pass covering everything that arrived while it ran — and every request
+// must still be ACCEPTED, because a coalesced request is answered by that
+// further pass, not refused.
+func TestControl_Rebuild_BurstForOneLensCollapsesToOneInFlightPlusOneQueued(t *testing.T) {
+	nc, _ := startControlTestServerConn(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
+	svc := control.NewService()
+	svc.SetCapabilityChecker(control.NewStubCapabilityChecker(nil))
+	gr := newGatedRebuilder()
+	svc.RegisterRebuilder("rebuild-burst", gr)
+	require.NoError(t, svc.StartNATSListener(ctx, nc))
+
+	resp := sendControlRequest(t, nc, control.ControlRequest{Op: "rebuild", RuleID: "rebuild-burst"})
+	require.NotNil(t, resp.Rebuild)
+	require.True(t, resp.Rebuild.Started)
+	require.Eventually(t, func() bool { return gr.callCount() == 1 }, 5*time.Second, time.Millisecond,
+		"the first request must drive a rebuild")
+
+	// Four more while that one is held open. Exactly one of them asks for a
+	// truncate: a truncate is a retraction the rebuild OWES, not a description
+	// of state the queued pass will re-read, so coalescing may drop the
+	// redundant request but never the flag.
+	for i := 0; i < 4; i++ {
+		resp := sendControlRequest(t, nc, control.ControlRequest{
+			Op:       "rebuild",
+			RuleID:   "rebuild-burst",
+			Truncate: i == 1,
+		})
+		require.NotNil(t, resp.Rebuild, "a coalesced request is still accepted, not refused")
+		require.True(t, resp.Rebuild.Started)
+	}
+
+	require.Never(t, func() bool { return gr.callCount() > 1 }, 200*time.Millisecond, 5*time.Millisecond,
+		"a burst for one lens may never put a second Rebuild in flight alongside the first")
+
+	gr.release()
+	require.Eventually(t, func() bool { return gr.callCount() == 2 }, 5*time.Second, time.Millisecond,
+		"the queued request must be served once the in-flight rebuild finishes")
+	require.Never(t, func() bool { return gr.callCount() > 2 }, 200*time.Millisecond, 5*time.Millisecond,
+		"four queued requests collapse into ONE further pass, not four")
+
+	assert.Equal(t, []bool{false, true}, gr.truncates(),
+		"the truncate a coalesced request asked for must survive into the queued pass")
+	assert.Equal(t, 1, gr.peakInFlight(), "one lens may never have two rebuilds running at once")
+}
+
+// TestControl_Rebuild_DefaultGateIsInstalledAndBoundsEveryLens pins that the
+// gate field is live from construction and cannot be cleared.
+//
+// A nil-able gate treated as "no gate" is how a bound gets silently disarmed
+// everywhere the wiring does not reach — so NewService installs a limit-1 gate,
+// and SetRebuildGate(nil) keeps it. The observable difference is global: at
+// limit 1, rebuilds of two DIFFERENT lenses do not overlap either. A nil field
+// would not merely fail this assertion, it would panic at the first rebuild.
+func TestControl_Rebuild_DefaultGateIsInstalledAndBoundsEveryLens(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		prepare func(*control.Service)
+	}{
+		{name: "as constructed", prepare: func(*control.Service) {}},
+		{name: "after SetRebuildGate(nil)", prepare: func(s *control.Service) { s.SetRebuildGate(nil) }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			nc, _ := startControlTestServerConn(t)
+			ctx, cancel := context.WithCancel(context.Background())
+			t.Cleanup(cancel)
+
+			svc := control.NewService()
+			svc.SetCapabilityChecker(control.NewStubCapabilityChecker(nil))
+			tc.prepare(svc)
+
+			gr := newGatedRebuilder()
+			svc.RegisterRebuilder("gate-lens-a", gr)
+			svc.RegisterRebuilder("gate-lens-b", gr)
+			require.NoError(t, svc.StartNATSListener(ctx, nc))
+
+			for _, ruleID := range []string{"gate-lens-a", "gate-lens-b"} {
+				resp := sendControlRequest(t, nc, control.ControlRequest{Op: "rebuild", RuleID: ruleID})
+				require.NotNil(t, resp.Rebuild)
+				require.True(t, resp.Rebuild.Started)
+			}
+
+			require.Eventually(t, func() bool { return gr.callCount() == 1 }, 5*time.Second, time.Millisecond,
+				"the first lens's rebuild must start")
+			require.Never(t, func() bool { return gr.callCount() > 1 }, 200*time.Millisecond, 5*time.Millisecond,
+				"the default gate bounds rebuilds at one across ALL lenses, not one per lens")
+
+			gr.release()
+			require.Eventually(t, func() bool { return gr.callCount() == 2 }, 5*time.Second, time.Millisecond,
+				"the second lens's rebuild must run once a slot frees")
+			assert.Equal(t, 1, gr.peakInFlight())
+		})
+	}
+}
+
 // ── Pause op tests ────────────────────────────────────────────────────────────
 
 // mockPauser records Pause calls so tests can assert the pipeline was told to pause.
@@ -821,6 +982,49 @@ func TestControl_RebuildRule_WaitsForTheRescanRatherThanStartingIt(t *testing.T)
 		"RebuildRule must take the WAITING arm — the fire-and-forget Rebuild carries no completion")
 	assert.Equal(t, 90*time.Second, mr.waitBudget(),
 		"the caller's wait budget must reach the Rebuilder; swallowing it would restore the unbounded wait")
+}
+
+// TestControl_RebuildRule_DoesNotQueueBehindTheRebuildGate pins the decision
+// that this arm stays OUTSIDE the shared rebuild bound.
+//
+// Its budget is a drain wait measured in tens of minutes
+// (classkeyshredded.DefaultRebuildWait), so a slot held across it would freeze
+// every path that can actually burst — the taxonomy sweep and the operator op —
+// for that whole window, and would hold a slot across a drain one layer above
+// the boundary ResetAwaitReopen draws one layer below. Here the shared bound's
+// only slot is fully occupied, and this call must run anyway.
+func TestControl_RebuildRule_DoesNotQueueBehindTheRebuildGate(t *testing.T) {
+	svc := control.NewService()
+
+	holder := newGatedRebuilder()
+	svc.RegisterRebuilder("slot-holder", holder)
+	syncArm := &mockRebuilder{}
+	svc.RegisterRebuilder("sync-arm-lens", syncArm)
+
+	// Occupy the default gate's single slot via the async op's driver, and hold
+	// it there for the duration of this test.
+	nc, _ := startControlTestServerConn(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	svc.SetCapabilityChecker(control.NewStubCapabilityChecker(nil))
+	require.NoError(t, svc.StartNATSListener(ctx, nc))
+	sendControlRequest(t, nc, control.ControlRequest{Op: "rebuild", RuleID: "slot-holder"})
+	require.Eventually(t, func() bool { return holder.callCount() == 1 }, 5*time.Second, time.Millisecond,
+		"the async op must be holding the gate's only slot")
+
+	done := make(chan error, 1)
+	go func() { done <- svc.RebuildRule(context.Background(), "sync-arm-lens", false, time.Minute) }()
+	select {
+	case err := <-done:
+		require.NoError(t, err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("RebuildRule must not queue behind the rebuild gate — its wait budget is far too long to hold a slot for")
+	}
+	rebuilt, _ := syncArm.wasRebuilt()
+	assert.True(t, rebuilt)
+	assert.True(t, syncArm.wasWaitedOn(), "the waiting arm is what the caller needs; the gate must not change that")
+
+	holder.release()
 }
 
 func TestControl_RebuildRule_UnregisteredRuleIsNotSilentlyTreatedAsRebuilt(t *testing.T) {

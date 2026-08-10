@@ -76,6 +76,24 @@ type pumpState struct {
 	// reopenTrigger signals the pump to drop its current iterator and re-open
 	// against a recreated durable (Reset).
 	reopenTrigger chan struct{}
+	// reopenedCh is the acknowledgement to reopenTrigger's request: the pump
+	// CLOSES it once the consumer AND its messages iterator are both open, and
+	// installs a fresh one in the same critical section. A waiter snapshots the
+	// current channel and waits for that close.
+	//
+	// A closed channel rather than a delivered value, because the
+	// acknowledgement has an unbounded audience. There is no bound on how many
+	// callers may reset one consumer at once — the reset paths do not exclude
+	// each other — and a signal that can be RECEIVED is a signal one waiter can
+	// take from another: with a token, two overlapping waiters both arm, the
+	// pump reopens once, one of them consumes the token and the other waits out
+	// its whole budget and reports a pump that had in fact reopened. A close
+	// releases every holder of that snapshot at once and cannot be stolen.
+	//
+	// Guarded by mu, like every other field here, because the close and the
+	// replacement must be one step: a waiter that read the field between them
+	// would hold a channel nothing will ever close.
+	reopenedCh chan struct{}
 
 	// reopenFailures counts consecutive open failures since the last
 	// successful open, driving nextReopenDelay's exponential growth. Reset to
@@ -90,6 +108,7 @@ func newPumpState() *pumpState {
 		forceResumeCh: make(chan struct{}, 1),
 		pauseTrigger:  make(chan struct{}, 1),
 		reopenTrigger: make(chan struct{}, 1),
+		reopenedCh:    make(chan struct{}),
 	}
 }
 
@@ -137,6 +156,31 @@ func (st *pumpState) operatorResume() {
 }
 
 func (st *pumpState) requestReopen() { nonBlockingSend(st.reopenTrigger) }
+
+// reopenSnapshot returns the channel the NEXT successful open will close. A
+// waiter takes this BEFORE requesting the reopen it intends to wait for; taking
+// it afterwards could hand back a channel installed by an open that had already
+// happened, which nothing further would close.
+func (st *pumpState) reopenSnapshot() <-chan struct{} {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	return st.reopenedCh
+}
+
+// signalReopened announces that this pump's consumer and messages iterator are
+// both open: it releases every waiter holding the current snapshot and installs
+// the channel the next open will close.
+//
+// Called on every successful open, not only after a reset. The pump has no way
+// to tell which opens someone is waiting on, and an announcement nobody is
+// waiting for costs one channel allocation.
+func (st *pumpState) signalReopened() {
+	st.mu.Lock()
+	released := st.reopenedCh
+	st.reopenedCh = make(chan struct{})
+	st.mu.Unlock()
+	close(released)
+}
 
 // nextReopenDelay returns the delay before the next open attempt and records
 // the attempt: reopenBackoff on the first failure since the last successful
@@ -283,7 +327,14 @@ func (s *ConsumerSupervisor) runPump(ctx context.Context, spec ConsumerSpec, st 
 			continue
 		}
 
+		// Both halves of the open have succeeded — the consumer handle AND the
+		// messages iterator. Announcing the reopen any earlier would be a lie a
+		// waiter cannot detect: a consumer that opened and an iterator that then
+		// failed goes back round this loop on nextReopenDelay, and a waiter
+		// released at the first half would have stopped waiting for a transition
+		// that had not happened.
 		st.resetReopenBackoff()
+		st.signalReopened()
 		class, drainErr := s.drain(ctx, spec, st, mc)
 		s.handleDrainOutcome(ctx, spec, st, class, drainErr)
 	}
