@@ -1320,8 +1320,21 @@ Fires A/B leaned on, and each is currently vacuous or absent.
      past 7.6 GiB and was OOM-killed inside 70s. **The dev stack runs Refractor again**, so this item's
      "consequence today" no longer holds. What remains here is the **fan-out** mechanism proper — ~111
      consumers opened at once, the operator corpus-rebuild's uncoordinated goroutine
-     (`control/service.go:930-943`), and the replay drain — none of which Shape B touched. Re-measure the boot
-     profile before sizing that work: the dominant term is gone, so the remaining cost is now unquantified.
+     (`control/service.go:930-943`), and the replay drain — none of which Shape B touched.
+
+     **RE-MEASURED 2026-08-10, and the remaining cost is ~0.** A full `make cycle-refractor` on the live stack
+     (174 JetStream consumers, 118 of them on `KV_core-kv`), sampled every 5s for 150s across the boot:
+     `lattice-nats` RSS oscillated between **861 and 965 MiB** with **no excursion at all** — flat against a
+     ~920 MiB pre-cycle baseline, against a 7.6 GiB ceiling. Refractor's own RSS settled at ~196 MB. So the
+     consumer fan-out, on its own, does not move NATS memory measurably: **the adjacency hub's payload spin was
+     not merely the dominant term, it was effectively the whole term.**
+
+     **This retires the OOM framing for the rest of this item, and re-sizes what is left.** Routing the
+     operator corpus-rebuild through B0's scheduler and bounding the replay drain are still worth doing — an
+     uncoordinated goroutine per rebuild request is a real concurrency defect, and it is what B0 exists to
+     prevent — but they are **fairness and correctness** work, not memory work, and nothing here justifies
+     sizing them as an OOM fix. Any future brief that cites boot memory as the driver is citing a measurement
+     that no longer holds.
 
 **C3 — the cap contract has a warning consumer and no refusal consumer** (§17.10 · `capabilitymaterializer.go:791`,
 `anchorwalk.go:735`).
@@ -2373,12 +2386,18 @@ with Refractor up 1h18m. The morning's boot path could not run Refractor at all.
   this path" is wrong and an in-band edge would be ordered with `handle()` by construction — no `armCh`, no
   probing goroutine, no epoch. It does not cover the no-traffic reconnect case, and switching mechanisms would
   invalidate the ordering argument review just verified, so it is recorded rather than built.
-- **Next, in order:** C2.5's review findings → C3.7 (the cap-arithmetic refusal consumer; the blocking fact is
-  that `pkgmgr`'s injected `CypherParser` interface returns only `error`, so `K` is uncomputable — the seam has
-  to widen to yield a spec's referenced labels, and `full.CompiledRule.ReferencedLabels()` is the existing API
-  to expose) → C1.4's authoring-lint half → C2.6's remaining fan-out (BOOT's dominant term is gone; the
-  operator corpus-rebuild's uncoordinated goroutine at `control/service.go:930-943` and the replay drain
-  remain, and the control service still holds no handle on B0's scheduler).
+- **C2.5 SHIPPED `d470c9ac`**, CI green, and verified live rather than inferred: the cycled Refractor logged
+  `taxonomy liveness: consumer drained — taxonomy snapshots are current` at epoch 0, ~2s after boot, with zero
+  errors in the run. `bin/refractor` and `bin/facet` were rebuilt and cycled (both changed behaviour); every
+  other binary was rebuilt but NOT cycled — the substrate change installs handler slots no other binary
+  registers against and latches a flag on Close, so their behaviour is unchanged and a stack-wide restart was
+  not warranted.
+- **C2.6 answered by measurement, not built** — see C2 item 6 above. The boot fan-out costs ~0; the remaining
+  work there is fairness/correctness, not memory, and must not be re-briefed as an OOM fix.
+- **Next, in order:** C3.7 (the cap-arithmetic refusal consumer; the blocking fact is that `pkgmgr`'s injected
+  `CypherParser` interface returns only `error`, so `K` is uncomputable — the seam has to widen to yield a
+  spec's referenced labels, and `full.CompiledRule.ReferencedLabels()` is the existing API to expose) →
+  C1.4's authoring-lint half → C2.6's remaining fan-out at its corrected size.
 - **Still designer-pass, unchanged:** C4 (items 8–11) and C5 (item 12). C5's reconciliation was re-grounded
   this fire and has no ratified pattern to extend: no link-type DDL declares endpoint types anywhere
   (`TargetType` is an op-dispatch field, not a link endpoint), so bounding a variable-length hop's type set
