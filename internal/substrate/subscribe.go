@@ -532,6 +532,22 @@ func (c *Conn) runKVSubscription(
 		if stopped {
 			return
 		}
+		// A closed connection ends the loop, and it is checked BEFORE the
+		// is-it-gone probe because that probe cannot answer over a closed
+		// connection and resolves an unanswerable question to "keep trying" —
+		// the right default for a stall, and an infinite one here. There is
+		// nothing to re-open against and never will be: nats.go reports
+		// IsClosed only after a deliberate Close or after the reconnect budget
+		// is exhausted, neither of which a later attempt repairs. Without this
+		// the loop spins at the backoff interval for as long as the caller's
+		// ctx outlives its connection — which for every test that closes a
+		// fixture connection before cancelling its context is the rest of the
+		// process, burning CPU that starves whatever runs alongside it.
+		if c.nc.IsClosed() {
+			logger.Debug("substrate: SubscribeKVChanges: connection closed, closing the event channel",
+				"durable", durableName, "err", err)
+			return
+		}
 		if c.subscriptionIsGone(ctx, cons, err) {
 			logger.Error("substrate: SubscribeKVChanges: subscription is gone, closing the event channel",
 				"durable", durableName, "err", err)

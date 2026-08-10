@@ -380,3 +380,67 @@ func TestSubscribeKVChanges_SurvivesAConnectionOutage(t *testing.T) {
 		t.Fatal("the subscription stopped delivering after the connection came back")
 	}
 }
+
+// TestSubscribeKVChanges_ClosingTheConnectionEndsTheLoop pins the reopen
+// loop's other terminal condition, and it is the one that costs CPU rather
+// than correctness when it is missing.
+//
+// The is-it-gone probe is a ConsumerInfo round trip, and over a closed
+// connection it cannot answer. Its unanswerable case deliberately resolves to
+// "keep trying", which is right for a stall and catastrophic here: the loop
+// re-opens, fails instantly with a connection-closed error, waits the backoff
+// and does it again, for as long as the caller's context outlives its
+// connection. Every test that closes a fixture connection before cancelling
+// its context is exactly that shape, so the loop runs for the remainder of the
+// process and starves whatever is scheduled beside it.
+//
+// The channel must close, because a closed connection genuinely is the end of
+// the feed: nats.go reports IsClosed only after a deliberate Close or an
+// exhausted reconnect budget, and no later attempt repairs either.
+func TestSubscribeKVChanges_ClosingTheConnectionEndsTheLoop(t *testing.T) {
+	s := natsfixture.StartServer(t)
+	// The context deliberately OUTLIVES the connection — that ordering is the
+	// whole point. Cancelling first would exit the loop through the ctx check
+	// and prove nothing about the connection-closed path.
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	conn, err := Connect(ctx, ConnectOpts{URL: s.ClientURL()})
+	require.NoError(t, err)
+
+	kv, err := conn.JetStream().CreateKeyValue(ctx, jetstream.KeyValueConfig{Bucket: "closed-kv"})
+	require.NoError(t, err)
+
+	events, err := conn.SubscribeKVChanges(ctx, "closed-kv", []string{"vtx.meta."}, "closed-durable",
+		SubscribeKVOptions{IncludeHistory: true, MaxPrefetch: 1, AckWait: 30 * time.Second})
+	require.NoError(t, err)
+
+	// Positive vector: the subscription is genuinely live before the close, so
+	// a closed channel afterwards is caused by the close and not by a
+	// subscription that never worked.
+	_, err = kv.Put(ctx, "vtx.meta.BefareShutdawnAAAAAA", []byte(`{"class":"meta.lens"}`))
+	require.NoError(t, err)
+	select {
+	case evt, ok := <-events:
+		require.True(t, ok, "precondition: the subscription delivers before the close")
+		require.Equal(t, "vtx.meta.BefareShutdawnAAAAAA", evt.Key)
+	case <-ctx.Done():
+		t.Fatal("no event before the close")
+	}
+
+	conn.Close()
+
+	// Draining rather than asserting on the first receive: an event already in
+	// flight when Close lands is a legal thing to see first.
+	deadline := time.After(20 * time.Second)
+	for {
+		select {
+		case _, ok := <-events:
+			if !ok {
+				return // closed — the loop terminated
+			}
+		case <-deadline:
+			t.Fatal("the event channel never closed after the connection was closed — the reopen loop is spinning")
+		}
+	}
+}
