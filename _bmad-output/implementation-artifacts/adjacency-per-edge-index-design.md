@@ -660,8 +660,10 @@ on that path. The build plan is §15.
   enumeration (max sequence over matched link subjects, markers included) — same mechanics §3.3
   specifies, scoped to marked nodes; unmarked nodes keep the doc revision untouched.
 - **Mark lifecycle** (the new-state-lifetime discipline): the mark is a monotonic per-node latch,
-  set by `Build` at the degree threshold, stored as the node's `adj.<nodeId>` value (a sentinel doc
-  — no new keyspace), never unset (degree shrinking below threshold is not worth un-marking),
+  set by `Build` at the degree threshold, ~~stored as the node's `adj.<nodeId>` value (a sentinel doc
+  — no new keyspace)~~ **stored at its own `adjmark.<nodeId>` key — struck 2026-08-10 (Fire B1 brief
+  §16.4a): §15.1 supersedes this clause, because an old binary's `Build` unmarshals a sentinel doc to
+  zero edges and silently un-marks the hub**, never unset (degree shrinking below threshold is not worth un-marking),
   reset only by the same environment wipes that reset the bucket, and replayed deterministically by
   the Bootstrapper (the rebuild crosses the threshold the same way). Threshold ~1,000 edges
   (~270 KB doc): well under both the 1 MiB jam and the 1,024 typed-read cap, high enough that
@@ -686,7 +688,15 @@ three raw-document-parsing e2es read unmarked nodes).
 `adjmark.<nodeId>` in the same bucket (tiny value, e.g. `{"at":<seq>}`), plus an in-process
 monotonic cache (`map[nodeID]struct{}`, loaded lazily: first `Build`/`Neighbors` touch of a node
 consults the cache, missing → one `Get`, result cached; marks are never unset, so the cache never
-invalidates). **Why not an `overflow` field inside `adj.<nodeId>`:** a mixed-fleet window would
+invalidates).
+**Amended 2026-08-10 (Fire B1 brief §16.4b): the cache is a WRITE-PATH optimization only.** As
+specified above it holds *marked* nodes, so a miss means "not known to be marked" and costs an extra
+`Get` on every read of an unmarked node — i.e. on essentially every read, permanently, contradicting
+§14.4's "common-case read 153 µs — unchanged". Caching the negative is unavailable (another
+instance's mark would never be observed). **`Neighbors` instead reads `adj.<id>` and `adjmark.<id>`
+in ONE `KVGetMulti` call**: one round trip, and atomic — two sequential `Get`s would let a node
+latching between them return the just-emptied document with no mark, an empty edge list presented as
+authoritative. The positive cache survives in `Build` only, and is never consulted to conclude absence. **Why not an `overflow` field inside `adj.<nodeId>`:** a mixed-fleet window would
 corrupt it — an old binary's `Build` unmarshals the sentinel doc to zero edges, appends one, and
 writes back a 1-edge document, silently *unmarking* the hub; the new binary then reads a
 1-edge index as authoritative for a 3,900-edge node (converged-but-wrong) until degree re-crosses
@@ -733,9 +743,14 @@ KV's canonical link keyspace with **both directional filters in one request** �
   read is free because multi_last returns values); synthesize the `EdgeEntry` exactly as
   `processLinkEnvelope` derives it (EdgeID = link key; direction by which endpoint is `nodeId`;
   a self-link yields both directional entries — the §4 self-loop fix arrives for marked nodes).
-- **Fingerprint** (the returned `uint64`): max sequence over every matched subject, markers and
-  soft-tombstones included — monotonic per change, equality-compared by `footprintValid`
-  unchanged; unmarked nodes keep the document revision untouched. The §3.3 timing precondition is
+- **Fingerprint** (the returned `uint64`): ~~max sequence over every matched subject, markers and
+  soft-tombstones included — monotonic per change~~ **an order-independent 64-bit hash over the
+  matched set's `(subject → revision)` pairs — struck 2026-08-10 (Fire B1 brief §16.5)**: markers are
+  *unavailable*, since `KVGetMulti` drops them before returning (`kv_multi.go:273,308-313`), and a
+  max-sequence over the surviving live set misses a hard delete whenever the deleted subject was not
+  the maximum. The hash is strictly stronger and still equality-compared by `footprintValid`
+  (`evaluate.go:389,411`), which never orders the value — so the struck "monotonic" property was
+  never load-bearing. Unmarked nodes keep the document revision untouched. The §3.3 timing precondition is
   inherited only in the narrow purge case and core-kv has no marker-TTL machinery — nothing new.
 
 **Ordering guarantee on the marked path needs no pre-apply**: the pipelines' link pre-apply exists
@@ -920,3 +935,226 @@ run. This is a sizing correction made explicit and acted on, not a deferred ques
   returned one; neither of this fire's two consumers needs it (each entry's own `.Revision`
   suffices), and the future Shape B fallback (§15.3, out of scope here) can derive a fingerprint
   from the returned entries itself. Not built now (YAGNI); revisit if a caller needs it.
+
+## 16. Fire B1 brief (build note, 2026-08-10)
+
+Phase-0 compilation for the Shape B build fire. Scouts: three read-only `haiku` agents over the
+adjacency write/read paths, the shipped `KVGetMulti` primitive, and the docs/dossier surface.
+Everything below was verified live at compile time; the design's citations were treated as leads.
+
+### 16.1 Scope sentence (verbatim, §15.6)
+
+> **B1 (one Steward fire, after the substrate row ships): §15.1–15.5** + the component-doc rewrite
+> (§6.9's scope, adjusted to B) + the `docs/vendors.md` version-gate row. Independently shippable
+> and green.
+
+**Green bar (verbatim, §15 "Exit gates (B1)"):** `go build ./...`, `make vet`,
+`golangci-lint run ./...`, `make verify-kernel`, full `go test ./...`, and on this host: one
+observed latch — mark key present, doc emptied, consumer-info redelivery churn gone, `instanceOf`
+fan-out evals green, marked-node `Neighbors` count ≥ 3,919.
+
+### 16.2 Census re-run live — the premise HOLDS, pinned
+
+`nats --context lattice-cli stream subjects KV_core-kv '$KV.core-kv.lnk.>' --names`, endpoint IDs
+counted per node (9,702 link subjects total):
+
+| node | degree (live, 2026-08-10) | design said | latches at 3,072? |
+|---|---|---|---|
+| `pFf8PviwpWugC6kepFf8` (service-template meta) | **3,920** (3,919 in + 1 out) | 3,919 | **yes — the only one** |
+| `edu97ixj2CJB6auNi6L4` (identity hub) | **2,337** | 2,335 | no (735 of headroom) |
+| third-largest | **602** | — | no |
+
+**§15.2's "exactly one live node latches" is confirmed live.** The gap between #2 and #3 is 3.9×, so
+the threshold is not near any cliff.
+
+### 16.3 Verified touch-list (`file:line`, checked live)
+
+| file | what | design cite | verified? |
+|---|---|---|---|
+| `internal/refractor/subjects/subjects.go:48` | `AdjKey`; **no** `AdjMarkKey`/`AdjPrefix` exists | §15.1 | ✅ |
+| `internal/refractor/adjacency/builder.go:76,89` | `Build` → `upsertEdge` CAS loop — the latch branch's home | §15.2 | ✅ |
+| `internal/refractor/adjacency/store.go:19` | `Neighbors` single `kv.Get` — the fallback's home | §15.3 | ✅ |
+| `internal/refractor/consumer/bootstrap.go:166,223` | the two `Build` call sites; **both `Nak` on any error** | §15.2 riders | ✅ |
+| `internal/refractor/consumer/bootstrap.go:201-220` | inline directional-event pair #1 | `EventsForLink` | ✅ |
+| `internal/refractor/pipeline/evaluate.go:816-829` | inline pair #2 (link fan-out pre-apply) | `EventsForLink` | ✅ |
+| `internal/refractor/pipeline/pipeline.go:2913-2922` | inline pair #3 (plain-link reprojection) | `EventsForLink` | ✅ |
+| `internal/substrate/kv_multi.go:168` | `KVGetMulti` — the fallback read's primitive | §15.3 | ✅ |
+| `internal/substrate/batch.go:201-219` | `checkBatchSize` — reject-only, **no approach warning** | canary rider | ✅ |
+| `internal/refractor/pipeline/evaluate.go:383-435` | `footprintValid` — the fingerprint's only consumer | §15.3 | ✅ |
+| `docs/components/refractor.md:515-530` | the adjacency-shape section to rewrite | §6.9 | ✅ |
+
+**Rotted / corrected citations:**
+
+- **`EventsForLink` does not exist.** §14.5's "three duplicated constructors" describes three
+  *inline* constructions, not three functions. The census of **three is confirmed** (the rows
+  above). The rider creates the helper and folds all three.
+- **`docs/vendors.md` already carries the `multi_last` version-gate row** (line 40), landed by the
+  substrate fire. **Dependency re-verified and dropped from this fire's scope** — not load-bearing
+  for this green bar.
+- **`docs/components/refractor.md:515-530` is already wrong today**, independently of this change:
+  it documents the key as `adj.<type1>.<id1>.<linkName>` holding a list of `<type2>.<id2>`, while
+  the code stores `adj.<nodeId>` → `[]EdgeEntry`. The rewrite fixes the pre-existing defect in the
+  same pass (it is inside the section this fire must rewrite anyway).
+- **`refractor-adjacency` is `PerKeyTTL:false`** (`internal/bootstrap/platform_buckets.go:84`).
+  §6.6's `PerKeyTTL:true` belonged to shelved Shape C; §15's "no provisioning change" is correct and
+  binding. `adjmark.<id>` shares the bucket and collides with no `adj.`-prefixed scan (distinct
+  prefix token).
+
+### 16.4 Two design defects resolved here, before the first edit (Winston, §0)
+
+**(a) §15.1 vs §14.5 contradict each other on where the mark lives.** §14.5 says the mark is
+"stored as the node's `adj.<nodeId>` value (a sentinel doc — no new keyspace)"; §15.1 specifies a
+separate `adjmark.<nodeId>` key and argues *why* (an old binary's `Build` unmarshals a sentinel doc
+to zero edges and silently un-marks the hub). **§15.1 wins** — the ratification record names §15 as
+the build plan, and §15.1's mixed-fleet argument is the sounder one. §14.5's clause is struck below.
+
+**(b) §15.1's in-process mark cache contradicts §14.4's "common-case read unchanged".** The cache is
+specified as `map[nodeID]struct{}` — a set of *marked* nodes — so a miss means "not known to be
+marked" and costs one extra `Get`. Since almost every node is unmarked, almost every `Neighbors`
+call would pay that `Get` **forever**, doubling the 153 µs common-case read the §14.4 table promises
+is *unchanged*. Caching the negative instead is not available: a mark set by another instance would
+never be observed.
+
+**Resolution: `Neighbors` reads the doc and the mark in ONE `KVGetMulti` call** over
+`["adj.<id>", "adjmark.<id>"]` on `refractor-adjacency`. This is the same mechanism (consult the
+mark, read the doc) with a correct implementation, not a substituted one:
+
+- **One round trip**, so §14.4's common-case guarantee holds (§14.1 measured multi_last at ~31 µs/key
+  against 153 µs for a sequential `Get`).
+- **Atomic**, which closes a race two sequential `Get`s would open: a node latching *between* the doc
+  read and the mark read returns the just-emptied document with no mark — an empty edge list
+  presented as authoritative. That is precisely the silent-wrong answer this item exists to kill.
+- **No negative-cache coherence rule needed.** The in-process positive cache survives as a pure
+  write-path optimization in `Build` (a mark is monotonic, so a cached positive can never go stale);
+  it is never consulted to conclude *absence*.
+
+### 16.5 A third defect: the ratified fingerprint is not derivable from the primitive
+
+§15.3 specifies the marked-node fingerprint as "max sequence over every matched subject, **markers
+and soft-tombstones included**". **`KVGetMulti` strips hard-delete markers before returning**
+(`kv_multi.go:273,308-313,461,488-493` — `parseDirectGetEntry` reports `isMarker` and the caller
+drops those entries). Markers are therefore unavailable to any consumer of this primitive, and a
+max-sequence fingerprint over the surviving live set **misses a hard delete** whenever the deleted
+subject was not the maximum.
+
+**Resolution: the fingerprint is a 64-bit hash over the matched set's `(subject → revision)` pairs**
+(order-independent). Strictly stronger than max-sequence — a dropped-out subject changes it — and
+sound against its only consumer: `footprintValid` compares the value by **equality**
+(`evaluate.go:389,411`), never by ordering, so §15.3's "monotonic" property is not load-bearing.
+Note the substrate fire's own non-goals already routed this here: *"the future Shape B fallback
+(§15.3 …) can derive a fingerprint from the returned entries itself."*
+
+**Builder obligation:** grep every consumer of `EvalFootprint.EdgeRevisions` and confirm none
+requires ordering before landing the hash. Known consumers: `evaluate.go:393`,
+`branchmerge.go:289-297`, `full/executor.go:305`.
+
+### 16.6 What `footprintValid` actually does with a marked node (grounding §15.3)
+
+`footprintValid` has **two arms** (`evaluate.go:405-434`), and the ratified text does not distinguish
+them:
+
+- **Selector arm** (the §13.4 common path): re-reads `Neighbors` and compares the *matched EdgeID
+  set* per `(relation, direction)` selector. **It never touches the revision** — so for a marked
+  node this arm is correct on the strength of the fallback read's completeness alone.
+- **Fallback arm** (`!hasSelectors || sel.Fallback` — untyped or variable-length hops): compares the
+  revision, i.e. the fingerprint. This is the *only* consumer of §16.5's value.
+
+Consequence to accept knowingly: validation re-reads `Neighbors`, so a marked node touched by an
+untyped hop pays a **second** fallback read per validated evaluation. Acceptable — one node, and
+`fetchEdges` memoizes within an evaluation (`full/executor.go:900-906`).
+
+### 16.7 Precedents to mirror
+
+| edit | precedent (`file:line`) |
+|---|---|
+| `AdjMarkKey` (validation + panic-on-bad-token) | `subjects.AdjKey`, `subjects/subjects.go:48` + its tests `subjects_test.go:50-67` |
+| two-key atomic read | `KVGetMulti` doc contract, `kv_multi.go:123-167`; consumer pattern `internal/processor/step4_hydrate.go` |
+| wildcard filters as first-class input | `kv_multi.go:130-142` (the doc's explicit filter contract) |
+| link-key parse → endpoints | `substrate.ParseLinkKey`, `internal/substrate/keys/keys.go:113` — **reuse, never re-implement** |
+| `EdgeEntry` synthesis (incl. self-link ⇒ both directions) | `processLinkEnvelope`, `consumer/bootstrap.go:201-220` |
+| soft-tombstone (`isDeleted`) probe | `consumer/bootstrap.go:191-197` |
+| `Term` vs `Nak` classification | `consumer/bootstrap.go:147-164` (the existing `Term` arms) |
+| size guard at a write chokepoint | `substrate/batch.go:201-219` (`checkBatchSize`, reject arm) |
+
+### 16.8 Increment order + runnable green checks
+
+1. **Inc 1 — the latch** *(posture-changing → `opus`)*. `subjects.AdjMarkKey`; the two-key atomic
+   read helper; `Build`'s latch branch (both arms: `adjOverflowDegree = 3072`, `adjOverflowBytes =
+   800 KiB`, consts with a test override); marked-path no-ops on upsert *and* removal; the
+   in-process positive cache (write path only, per §16.4b).
+   `go test ./internal/refractor/adjacency/... ./internal/refractor/subjects/... -count=1`
+2. **Inc 2 — the fallback read** *(posture-changing → `opus`)*. `Neighbors`' marked branch: one
+   `KVGetMulti` on `core-kv` with both directional filters (`lnk.*.<id>.>` and
+   `lnk.*.*.*.*.<id>`); `EdgeEntry` synthesis via `ParseLinkKey`; soft-tombstone drop; the §16.5
+   hash fingerprint.
+   `go test ./internal/refractor/adjacency/... ./internal/refractor/pipeline/... -count=1`
+3. **Inc 3 — the riders** *(mechanical → `sonnet`)*. `EventsForLink` folding all three inline sites;
+   `Build`-error classification at the event boundary (`IsInvalidKeyError` ⇒ `Term`, transport ⇒
+   `Nak`); the ½-`max_payload` approach warning at both write chokepoints.
+   `go test ./internal/refractor/... ./internal/substrate/... -count=1`
+4. **Inc 4 — proof + docs** *(`sonnet`)*. The §15.5 e2e through the real Bootstrapper at a
+   test-override threshold; `docs/components/refractor.md:515-530` rewritten to Shape B (fixing the
+   pre-existing shape error noted in §16.3).
+   `go test ./internal/refractor/... -count=1` · `go build ./...` · `make vet` ·
+   `golangci-lint run ./...` · `make verify-kernel` · `STRICT=1 go run ./scripts/lint-conventions.go`
+5. **Inc 5 — live latch on this host** *(Winston, inline)*. Rebuild `bin/refractor` from `main`,
+   start it against the running stack, observe: `adjmark.pFf8PviwpWugC6kepFf8` present, `adj.` doc
+   emptied, `maximum payload exceeded` gone from the log, `lattice-nats` RSS stable,
+   `Neighbors` returns ≥ 3,919 edges for the hub.
+
+### 16.9 In-scope gotchas
+
+**Standing checklist** (`agents/fire-brief-template.md`) — #1 and #5 bind hardest here:
+
+1. **New state needs a LIFETIME.** The mark and its cache are new state. State table required, and
+   §16.4b already forces part of it (a positive cache is monotonic; absence is never cached).
+   Boundaries to answer explicitly: replay (the Bootstrapper re-crosses the threshold
+   deterministically), reconnect, tombstone, restart, bucket wipe, mixed-binary window.
+2. **Every census is a premise** — done, §16.2, pinned live.
+3. **A negative test needs its positive vector proven first** — the latch tests must fail against
+   un-latched code; revert-and-watch-it-fail before landing.
+4. **Removal needs a transport AND an observer** — the marked path's *removal* arm is a no-op by
+   design; the fallback read is what retracts (a soft-tombstoned link leaves the set). Prove that
+   with a test, not by argument.
+5. **One deterministic key, one writer** — `adjmark.<id>` is written from `Build`, which runs on
+   three concurrent paths (bootstrap, fan-out pre-apply, plain-link reprojection). The latch must be
+   **idempotent under concurrent create** (§15.5 names this test); use create-then-tolerate-exists,
+   never create-only-or-fail.
+6. **Precedent may carry debt** — `docs/components/refractor.md`'s adjacency section is a live
+   example (§16.3).
+
+**Refractor dossier entries this fire trips** (`docs/components/refractor.md:918-972`, verbatim
+subjects): *"New pipeline state without a declared lifetime (registry / latch / armed flag) — reset,
+carry, and order it at replay, reconnect, tombstone, and retry, or the review will"* — this fire
+adds exactly such a latch; *"One latch guarding two states that commit at different times"* — the
+mark and the emptied document commit separately, and §16.4b is the answer to the read side of it;
+*"Site censuses derived from key shapes undercount"* — §16.2 derived degree from link subjects, which
+is the matcher's own keyspace here, so it does not undercount.
+
+**Substrate dossier** (`docs/components/substrate.md:486-501`): *"The batch CAS is per-subject, not
+whole-stream"* — relevant to the latch's concurrency argument.
+
+**Other obligations:** `MERGED ≠ RUNNING` — `bin/refractor` **and** every other binary linking
+`internal/refractor/adjacency` must be rebuilt (derive mechanically with the §4 `go list -deps`
+loop). No package version bump (no `packages/` edit). No `provision-readpath` (no new lens). No
+contract edit — confirmed: the adjacency index appears in Contracts #2 and #6 only as a referenced
+implementation detail, with no specified storage shape.
+
+### 16.10 Adjacent finds
+
+- **`internal/refractor/consumer/bootstrap.go:133`** acks any empty-bodied message as a KV tombstone
+  *before* classifying the key, so a hard-deleted link never retracts its adjacency edge. Pre-existing,
+  outside this fire's scope sentence, and **absorbed into this run's batch as its own unit** if the
+  fire's own increments land clean — not filed as a deferral row.
+- No other adjacent finds surfaced.
+
+### 16.11 Non-goals (the drift fence)
+
+- **B2** (typed fallback narrowing) — §15.6 gates it on a named trigger that has not fired: the
+  identity hub is at 2,337 of 3,072 (§16.2). Dead scaffolding today.
+- **Shape C** (per-edge rekey, §3–§13) — shelved, needs a new ratification.
+- **Un-marking** a node whose degree later shrinks — §14.5 rules it out.
+- **Any bucket provisioning, permission, durable, or contract change** — §15 and §16.3.
+- **Health-KV emission** for the adjacency index — none exists today and none is in scope; the §15.2
+  mark log line is this fire's only new operator signal.
+- **The taxonomy item's Fire C** — sequenced behind this row by its own design doc (§14 item 6).
