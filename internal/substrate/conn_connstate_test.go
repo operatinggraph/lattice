@@ -180,3 +180,83 @@ func TestOnConnectionStateChange_NoEdgeForTheInitialConnect(t *testing.T) {
 	require.Never(t, func() bool { return len(edges) > 0 }, 300*time.Millisecond, 10*time.Millisecond,
 		"a healthy, never-interrupted connection must report no state edges at all")
 }
+
+// TestConnectionGeneration_ReportsTheLossAheadOfTheFanOut pins the reason
+// ConnectionGeneration exists alongside a perfectly good connection-state
+// fan-out: the fan-out is the SLOWER of the two signals, by an interval
+// nothing bounds.
+//
+// nats.go flips the connection's own status under the connection lock and
+// then queues the disconnect callback onto one serial async-callback
+// goroutine shared by every callback in the process. A listener anywhere in
+// that queue therefore learns of a loss strictly after the connection itself
+// could have told it — and a caller holding a conclusion it drew while
+// connected, waiting to be TOLD before it discards that conclusion, acts on
+// it in the meantime.
+//
+// The gap is held open deterministically rather than raced: a listener parked
+// at the head of the fan-out holds every later listener with it, which is the
+// same shape as a busy callback queue and pins the window at its start.
+func TestConnectionGeneration_ReportsTheLossAheadOfTheFanOut(t *testing.T) {
+	s := natsfixture.StartServer(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	proxy := newSeveringProxy(t, s.Addr().String())
+	conn, err := Connect(ctx, ConnectOpts{
+		URL:           proxy.url,
+		MaxReconnects: -1,
+		ReconnectWait: 25 * time.Millisecond,
+	})
+	require.NoError(t, err)
+	t.Cleanup(conn.Close)
+
+	before, connected := conn.ConnectionGeneration()
+	require.True(t, connected, "precondition: a fresh connection reads as connected")
+
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	var enterOnce, releaseOnce sync.Once
+	releaseGate := func() { releaseOnce.Do(func() { close(release) }) }
+	// Registered after the Close cleanup so it runs BEFORE it (LIFO): a
+	// fan-out goroutine left parked outlives the test otherwise.
+	t.Cleanup(releaseGate)
+	conn.OnConnectionStateChange(func(c bool) {
+		if c {
+			return
+		}
+		enterOnce.Do(func() {
+			close(entered)
+			<-release
+		})
+	})
+	// Behind the gate, standing for every component listener that learns of a
+	// loss only when the queue reaches it.
+	late := make(chan bool, 4)
+	conn.OnConnectionStateChange(func(c bool) { late <- c })
+
+	proxy.sever()
+	select {
+	case <-entered:
+	case <-ctx.Done():
+		t.Fatal("the fan-out never reported the loss")
+	}
+	require.Empty(t, late, "precondition: the listener behind the gate must not have been told yet")
+
+	gen, connected := conn.ConnectionGeneration()
+	require.False(t, connected,
+		"the connection must report itself down while its own fan-out is still queued — a caller that waits "+
+			"for the callback keeps acting on a connection that is already gone")
+	require.Equal(t, before, gen,
+		"a loss with no repair yet leaves the counter alone: connected is what carries this half of the fact")
+
+	releaseGate()
+	proxy.restore()
+	require.Eventually(t, conn.Connected, 20*time.Second, 10*time.Millisecond)
+
+	after, connected := conn.ConnectionGeneration()
+	require.True(t, connected)
+	require.Greater(t, after, before,
+		"and a repaired connection must not compare equal to the one measured before the loss — otherwise a "+
+			"caller re-reading the token after a full drop-and-repair cannot tell it apart from no interruption at all")
+}

@@ -291,6 +291,50 @@ func (c *Conn) reportConnectionState(connected bool) {
 // reconnect buffer waiting to time out.
 func (c *Conn) Connected() bool { return c.nc != nil && c.nc.IsConnected() }
 
+// ConnectionGeneration returns a token that changes across every connection
+// loss, read SYNCHRONOUSLY from nats.go's own state. It answers a question
+// OnConnectionStateChange structurally cannot: "has this connection been up,
+// without interruption, between these two instants" — asked by a caller that
+// holds a conclusion drawn at the first instant and is about to act on it at
+// the second.
+//
+// The distinction is not academic, because the two signals disagree for a
+// window with no upper bound. nats.go's processOpErr flips the status to
+// RECONNECTING under the connection lock and only THEN spawns doReconnect,
+// which pushes DisconnectedErrCB onto the single serial async-callback queue
+// that every other connection callback in the process shares. So the loss is
+// visible here — and to Connected — strictly BEFORE the fan-out reports it,
+// by however long that queue is busy. A caller that treats "no disarming
+// callback has arrived" as "the connection is still the one I measured" is
+// reading the slower of two signals.
+//
+// The pair is what makes it a continuity test rather than a liveness one.
+// connected alone misses a drop that has already been repaired; the counter
+// alone misses a drop that has not been repaired yet. nats.go increments
+// Reconnects (Stats) once per successful re-establishment, under the
+// connection lock and before it queues ReconnectedCB, and never resets it —
+// so equal counters plus connected at both instants means no re-establishment
+// happened in between, and a connection that went down and came back cannot
+// come back without one.
+//
+// The counter is read on both sides of the status read so that a
+// re-establishment landing BETWEEN the two reads cannot be missed by both:
+// such a read reports not-connected, because a caller cannot be told a
+// generation it was never continuously inside. Every ambiguity here resolves
+// to not-connected, since the callers are fail-closed by construction.
+func (c *Conn) ConnectionGeneration() (generation uint64, connected bool) {
+	if c.nc == nil {
+		return 0, false
+	}
+	before := c.nc.Stats().Reconnects
+	up := c.nc.IsConnected()
+	after := c.nc.Stats().Reconnects
+	if before != after {
+		return after, false
+	}
+	return after, up
+}
+
 // connectWithRetry dials url with a bounded retry, giving the INITIAL
 // handshake the same stall-tolerance internal/natsfixture gives test
 // connects: the per-attempt Timeout (already in opts) absorbs a slow

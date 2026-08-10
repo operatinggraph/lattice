@@ -535,6 +535,127 @@ func TestCoreKVSource_TaxonomyBarrier_VerdictStraddlingAConnectionLossIsDiscarde
 	require.Empty(t, rig.edges(), "no arming edge should ever have been reported")
 }
 
+// TestCoreKVSource_TaxonomyBarrier_VerdictAppliedBeforeTheDisarmCallbackIsDiscarded
+// pins the ORDERING the test above can only race for, and it is the ordering
+// the whole epoch comparison silently assumed: that by the time a verdict is
+// applied, a connection loss preceding it has already bumped the epoch.
+//
+// It has not, and nothing makes it. nats.go's processOpErr flips the
+// connection's own status under the connection lock and then spawns
+// doReconnect, which QUEUES the disconnect callback onto the single serial
+// async-callback goroutine every callback in the process shares; substrate's
+// fan-out — and so connectionLost, and so the epoch bump — runs whenever that
+// queue reaches it. Meanwhile the verdict's own hand-over is unbounded in the
+// other direction: it is parked on armCh until the dispatch goroutine leaves
+// handle(), which can be a whole lens activation. Two unbounded delays with
+// no ordering between them is not a race that is unlikely to lose, it is a
+// coin flip, and the losing side arms a resolver over a feed that is gone.
+//
+// Held deterministically rather than raced: a listener registered BEFORE the
+// source's own occupies the head of substrate's fan-out (registration order,
+// one goroutine at a time), so blocking in it holds connectionLost — and the
+// epoch — exactly where the assumption sits, with the connection provably
+// already down.
+func TestCoreKVSource_TaxonomyBarrier_VerdictAppliedBeforeTheDisarmCallbackIsDiscarded(t *testing.T) {
+	shrinkArmPollInterval(t)
+	s := natsfixture.StartServer(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	proxy := newCuttableProxy(t, s.Addr().String())
+	rig := newTaxonomyBarrierRig(t, ctx, proxy.url)
+	parentID := mustNanoID(t)
+	leafIDs := barrierNanoIDs(t, 3)
+	seedTaxonomyLeaves(t, ctx, rig.kv, parentID, leafIDs)
+
+	// Registered before Start, so it sits ahead of the source's own listener
+	// in substrate's fan-out. Released unconditionally at teardown: the
+	// fan-out goroutine is nats.go's, and leaving it parked would wedge the
+	// connection's Close.
+	gateEntered := make(chan struct{})
+	gateRelease := make(chan struct{})
+	var gateOnce, releaseOnce sync.Once
+	releaseGate := func() { releaseOnce.Do(func() { close(gateRelease) }) }
+	t.Cleanup(releaseGate)
+	rig.conn.OnConnectionStateChange(func(connected bool) {
+		if connected {
+			return
+		}
+		gateOnce.Do(func() {
+			close(gateEntered)
+			<-gateRelease
+		})
+	})
+
+	var holdOnce sync.Once
+	held := make(chan struct{})
+	release := make(chan struct{})
+	rig.onObservation = func(o barrierObservation) {
+		if o.leaves < len(leafIDs) {
+			return
+		}
+		holdOnce.Do(func() {
+			close(held)
+			<-release
+		})
+	}
+
+	require.NoError(t, rig.src.Start(ctx))
+	select {
+	case <-held:
+	case <-ctx.Done():
+		t.Fatal("the replay never reached the snapshot that completes the closure")
+	}
+
+	// Same positive control as the test above: a verdict must exist and be
+	// parked on armCh before the connection is cut, or the refusal below has
+	// nothing to refuse.
+	require.Eventually(t, func() bool {
+		return rig.src.TaxonomyLivenessStatus().DrainedVerdicts > 0
+	}, 20*time.Second, 5*time.Millisecond,
+		"precondition: a caught-up verdict must exist and be parked on armCh BEFORE the connection is cut")
+
+	proxy.cut()
+	select {
+	case <-gateEntered:
+	case <-ctx.Done():
+		t.Fatal("the connection-state fan-out never reported the loss")
+	}
+	// The window is now pinned open from both ends: the connection is down
+	// and readable as down, and connectionLost is parked one listener behind
+	// this one, so the epoch still holds the value the parked verdict was
+	// measured under.
+	require.False(t, rig.conn.Connected(),
+		"precondition: the connection must read as down while the disarm callback is still held")
+	rig.src.taxLiveMu.Lock()
+	epochWhileHeld := rig.src.taxonomyEpoch
+	rig.src.taxLiveMu.Unlock()
+	require.Zero(t, epochWhileHeld,
+		"precondition: the epoch must NOT have moved yet — that lag is the window under test, and a test "+
+			"that lets it close first proves only what the epoch comparison already proved")
+
+	close(release)
+	require.Never(t, func() bool {
+		_, status := rig.expandLocation()
+		return status == taxonomy.StatusArmed
+	}, 2*time.Second, 20*time.Millisecond,
+		"a verdict measured on a connection that is now down must be refused on the connection's own evidence — "+
+			"waiting to be TOLD the connection dropped arms the resolver in the meantime")
+	require.Empty(t, rig.edges(), "no arming edge should ever have been reported")
+
+	// And the refusal must not have wedged anything: once the disarm lands and
+	// the connection is genuinely back, the ordinary drain probe re-arms.
+	releaseGate()
+	proxy.restore()
+	require.Eventually(t, func() bool {
+		leaves, status := rig.expandLocation()
+		return status == taxonomy.StatusArmed && leaves == len(leafIDs)
+	}, 30*time.Second, 10*time.Millisecond,
+		"a discarded verdict must cost only latency — the re-established feed re-arms through the same probe")
+	require.Equal(t, []bool{true}, rig.edges(),
+		"exactly one arming edge, the one earned after the reconnect drained")
+}
+
 // TestCoreKVSource_TaxonomyBarrier_ConsumerConfigKeepsTheDrainTestSound pins
 // the three consumer settings the barrier's soundness rests on, on the live
 // consumer rather than in the call that asks for them.
@@ -692,8 +813,21 @@ func TestCoreKVSource_TaxonomyBarrier_ASubscriptionReopenDisarms(t *testing.T) {
 // subscription: the proposition is about what a caught-up verdict is allowed
 // to do AFTER the death, and hand-delivering the verdict is the only way to
 // exercise that without waiting on JetStream's own failure timing.
+//
+// The connection is real, and has to be, even though nothing is subscribed on
+// it. A hand-delivered verdict is validated against the connection it claims
+// to have been measured on, so a source holding no connection refuses every
+// verdict for that reason alone — and this test would then pass with the
+// death latch deleted, proving nothing about it.
 func TestCoreKVSource_TaxonomyBarrier_DeadSubscriptionCanNeverArm(t *testing.T) {
-	src := NewCoreKVSource(nil, "core-kv", "dead-latch", discardTestLogger())
+	s := natsfixture.StartServer(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	conn, err := substrate.Connect(ctx, substrate.ConnectOpts{URL: s.ClientURL()})
+	require.NoError(t, err)
+	t.Cleanup(conn.Close)
+
+	src := NewCoreKVSource(conn, "core-kv", "dead-latch", discardTestLogger())
 	var edges []bool
 	src.SetTaxonomyLivenessCallbacks(TaxonomyLiveness{
 		Armed:   func(armed bool) { edges = append(edges, armed) },
@@ -705,7 +839,10 @@ func TestCoreKVSource_TaxonomyBarrier_DeadSubscriptionCanNeverArm(t *testing.T) 
 	src.taxLiveMu.Lock()
 	epoch := src.taxonomyEpoch
 	src.taxLiveMu.Unlock()
-	src.armTaxonomy(epoch)
+	connGeneration, connected := src.connectionGeneration()
+	require.True(t, connected,
+		"precondition: the verdict must be hand-delivered on a live connection, or the death latch is not what refuses it")
+	src.armTaxonomy(taxonomyVerdict{epoch: epoch, connGeneration: connGeneration})
 
 	require.Empty(t, edges,
 		"a caught-up verdict after the subscription died must never arm — the durable reads drained precisely "+
