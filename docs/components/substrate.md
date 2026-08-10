@@ -99,7 +99,7 @@ trust boundary (untrusted input is never passed directly to a key builder).
 
 | Symbol | Description |
 |--------|-------------|
-| `Connect(ctx, ConnectOpts) (*Conn, error)` | Establish a new NATS + JetStream connection. `ConnectOpts` fields: `URL`, `Name`, `MaxReconnects`, `ReconnectWait`. Defaults to `nats://localhost:4222` if URL is empty. |
+| `Connect(ctx, ConnectOpts) (*Conn, error)` | Establish a new NATS + JetStream connection. `ConnectOpts` fields: `URL`, `Name`, `Timeout`, `MaxReconnects`, `ReconnectWait`. Defaults to `nats://localhost:4222` if URL is empty. The **initial** handshake gets its own explicit budget — `Timeout` per attempt (zero ⇒ a generous substrate default, deliberately not nats.go's bare 2s) and a small bounded retry that absorbs a dial reset outright, distinct from `MaxReconnects`/`ReconnectWait`, which govern reconnects only *after* this first connection succeeds. |
 | `Wrap(nc *nats.Conn) (*Conn, error)` | Adapt an existing `*nats.Conn` into a substrate `*Conn`. Useful when callers need custom `nats.Options` beyond `ConnectOpts`. |
 | `(*Conn).NATS() *nats.Conn` | Escape hatch to the underlying NATS connection. Use only when no typed substrate helper exists. |
 | `(*Conn).JetStream() jetstream.JetStream` | Escape hatch to the underlying JetStream context. |

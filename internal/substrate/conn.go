@@ -10,6 +10,28 @@ import (
 	"github.com/nats-io/nats.go/jetstream"
 )
 
+const (
+	// defaultConnectTimeout is the per-attempt handshake budget Connect uses
+	// when ConnectOpts.Timeout is zero, replacing nats.go's own 2s default
+	// (processConnectInit pins the whole INFO+CONNECT+PING/PONG exchange to
+	// this under one conn.SetDeadline). Matches internal/natsfixture's
+	// connectTimeout: sized to swallow a host stall, not to hide a server
+	// that is genuinely unreachable.
+	defaultConnectTimeout = 20 * time.Second
+
+	// connectAttempts bounds the retry on the INITIAL connect. nats.go's
+	// MaxReconnects/ReconnectWait only govern reconnects after a connection
+	// has been established once; a stall that resets the socket outright
+	// during the first dial is not covered by a longer Timeout alone, so the
+	// first attempt gets a bounded retry too. Matches natsfixture's
+	// connectAttempts.
+	connectAttempts = 4
+
+	// connectBackoff is the pause between initial-connect retries. Matches
+	// natsfixture's connectBackoff.
+	connectBackoff = 250 * time.Millisecond
+)
+
 // ConnectOpts configures the NATS connection substrate establishes on
 // behalf of callers. Only the URL is required; the remaining fields have
 // sensible defaults for Lattice components.
@@ -23,6 +45,11 @@ type ConnectOpts struct {
 	// Name is the connection name reported to NATS (helpful for debugging
 	// component identity in NATS monitoring).
 	Name string
+	// Timeout bounds each initial-handshake attempt (nats.Timeout). Zero
+	// means "use substrate's own default" (defaultConnectTimeout) —
+	// deliberately NOT "use the nats.go default": nats.go's bare 2s default
+	// is exactly the trap this field exists to avoid (see connectWithRetry).
+	Timeout time.Duration
 	// MaxReconnects controls the reconnect retry budget. Zero means
 	// "use the nats.go default". Set to -1 for unlimited.
 	MaxReconnects int
@@ -90,7 +117,11 @@ func Connect(ctx context.Context, opts ConnectOpts) (*Conn, error) {
 	if opts.URL == "" {
 		opts.URL = nats.DefaultURL
 	}
-	natsOpts := []nats.Option{}
+	timeout := opts.Timeout
+	if timeout <= 0 {
+		timeout = defaultConnectTimeout
+	}
+	natsOpts := []nats.Option{nats.Timeout(timeout)}
 	if opts.Name != "" {
 		natsOpts = append(natsOpts, nats.Name(opts.Name))
 	}
@@ -128,7 +159,7 @@ func Connect(ctx context.Context, opts ConnectOpts) (*Conn, error) {
 	if opts.TokenHandler != nil {
 		natsOpts = append(natsOpts, nats.TokenHandler(opts.TokenHandler))
 	}
-	nc, err := nats.Connect(opts.URL, natsOpts...)
+	nc, err := connectWithRetry(opts.URL, natsOpts...)
 	if err != nil {
 		return nil, fmt.Errorf("substrate: nats connect: %w", err)
 	}
@@ -138,11 +169,33 @@ func Connect(ctx context.Context, opts ConnectOpts) (*Conn, error) {
 		return nil, fmt.Errorf("substrate: jetstream context: %w", err)
 	}
 	// nats.Connect does not accept a context; context-based cancellation of the
-	// initial dial is not possible via the nats.go API. Callers that need to bound
-	// connection time should set ConnectOpts.MaxReconnects and ReconnectWait to
-	// limit the retry loop rather than relying on context deadlines.
+	// initial dial is not possible via the nats.go API. The initial dial's own
+	// worst-case bound is connectAttempts * (opts.Timeout + connectBackoff);
+	// ConnectOpts.MaxReconnects / ReconnectWait govern only reconnects after
+	// this first connection succeeds.
 	_ = ctx
 	return &Conn{nc: nc, js: js, buckets: make(map[string]jetstream.KeyValue), objectStores: make(map[string]jetstream.ObjectStore)}, nil
+}
+
+// connectWithRetry dials url with a bounded retry, giving the INITIAL
+// handshake the same stall-tolerance internal/natsfixture gives test
+// connects: a longer per-attempt Timeout (already in opts) absorbs a slow
+// handshake, and the retry absorbs a stall that resets the socket outright
+// (which no timeout, however generous, can absorb — a reset returns
+// immediately). Reconnects after a connection has been established once are
+// governed separately, by nats.go's own MaxReconnects/ReconnectWait.
+func connectWithRetry(url string, opts ...nats.Option) (*nats.Conn, error) {
+	var err error
+	for attempt := 1; ; attempt++ {
+		var nc *nats.Conn
+		if nc, err = nats.Connect(url, opts...); err == nil {
+			return nc, nil
+		}
+		if attempt == connectAttempts {
+			return nil, err
+		}
+		time.Sleep(connectBackoff)
+	}
 }
 
 // Wrap adapts an existing *nats.Conn into a substrate *Conn. Useful when
