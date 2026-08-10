@@ -581,6 +581,32 @@ tombstones. **Capability KV is a lens projection** (projection correctness = aut
   that owns it** — the same fire's estimate was half the real blast radius, and the "shared helper that
   already exists" was an unexported `_test.go` function in one of nine affected packages.
 
+- **A mechanism's PERMISSION ENVELOPE is part of the mechanism — before a design routes any call through
+  a privileged API, check the natsperm matrix for the CALLING identity.** "The substrate supports X" is
+  half a grounding; the other half is "may THIS component invoke X", and Lattice's answer is deliberately
+  asymmetric: full `$KV.<bucket>.>` publish rights coexist with a denial of every stream-admin verb on
+  the same bucket — **owner included** (`natsperm/matrix.go` `protectedStreamDenies`; a green conformance
+  test asserts it). (Trialed 2026-08-09, adjacency: the draft's migration purged via
+  `$JS.API.STREAM.PURGE.*` — denied, boot-dead on every host; a precedent didn't transfer because
+  `CancelSchedule` purges a non-`KV_` stream outside the deny loop.) Useful envelope facts: per-key KV
+  Delete/Purge are **rollup publishes** (inside the KV grant), and a publish can carry `Nats-TTL` — so
+  self-expiring markers replace any janitor that would need the denied admin verb. Cite the allow/deny in
+  the design's grounding table for every `$JS.API.*` call it introduces.
+
+- **When grounding surfaces a NEW primitive mid-design, re-run the alternatives table against it —
+  starting with "delete the component"; and MEASURE a read-path fork before asking for ratification.**
+  A rejected alternative was rejected against the world *before* the primitive existed; the primitive
+  that fixes a component often obsoletes it, and the principal's first question will be "do we still
+  need the thing?" (Trialed 2026-08-09: multi-subject direct get was found while redesigning adjacency
+  *storage*; it partially dissolved my own alternatives-table rejection of "no index at all" — multi_last
+  returns bodies, so the soft-tombstone objection evaporated — and Andrew's response to the finished
+  per-edge design was exactly that question, plus "keep the doc and mark the rare hubs", a shape my
+  table had never priced because the primitive arrived after the table was written.) And when the fork
+  hinges on read costs, a ~60-line read-only spike against the live stack settles in minutes what prose
+  argues abstractly (measured: 31 µs/key batched vs 153 µs sequential; the no-index inbound walk ∝ total
+  links, not degree; the ephemeral lister 4× the multi-get on the identical set) — attach the numbers to
+  the fork and the ratification becomes a table lookup.
+
 **Run the pre-build gates you write into your own designs — "ratified" ≠ "build-ready."** If a design
 self-flags a pre-build adversarial / `bmad-party-mode` pass (a deferred gate), that pass is a **Designer-lane
 obligation**: run it and **record it as run** before the design is build-ready. Do not leave it dangling for
