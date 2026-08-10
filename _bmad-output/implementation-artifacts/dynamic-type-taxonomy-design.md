@@ -1244,6 +1244,79 @@ resolution must have exactly one authority before an abstract label expands. Seq
 Fire B's first commit files these four as board rows (`backlog/lattice.md`) — naming them here is not
 filing them.
 
+### Fire C — the mechanism's own guarantees, and the reach it was scoped out of (Lattice, L). Added 2026-08-10 (Andrew).
+
+Fires A and B shipped the taxonomy and its first consumer. **Everything those two fires filed as a separate
+board row is folded back here** — twelve rows, retired from `backlog/lattice.md` and carried as this fire's
+content so the item owns its own tail instead of scattering it. The item stays **🏗️ building** until Fire C
+closes. Each item below keeps its filing coordinates; the design-doc section that minted it is named.
+
+**C1 — the guarantees the abstract type asserts but nothing enforces.** Build first: these are the gates
+Fires A/B leaned on, and each is currently vacuous or absent.
+
+1. **The abstract-flip guard is vacuous twice over** (§17.9 · `internal/pkgmgr/taxonomy.go`).
+   `checkAbstractNoLiveInstances` scans `vtx.<canonicalName>.` only, so **(a)** a differently-keyed type
+   (`workOrder` → `vtx.wo.<id>`) scans empty and flips unguarded, and **(b)** — found by B1's security pass —
+   it never checks the *class* side, so location's flip passed while **69 live documents carry the now-abstract
+   `class: "location"`**. Both blind spots, one guard. Note (b) cannot simply be switched on: tightening it
+   would have refused B1's own install.
+2. **The meta/op reserved-name gate is pkgmgr-only, not Processor-enforced** (§17.2). Contract #1 §1.2 states a
+   commit-time gate that does not exist; only the install-time check runs.
+3. **A withdrawn `Sensitive` or `canonicalName` is still read as live** (§17.17 · `ddl_cache.go`). Sibling of
+   the `script`/`permittedCommands` readers B1 fixed — same function, same missing `isDeleted` filter.
+   **Needs design before build:** honoring a `Sensitive` withdrawal stops encrypting a class on upgraded cells,
+   which is a decision about existing ciphertext, not a filter.
+4. **`entityType` ⟷ `entityKey` pairing is an unenforced convention** (§14). **Blocked on the same 69
+   vertices** — they violate the invariant the gate would assert, so this needs a migration story first, not
+   just a gate.
+
+**C2 — the resolver's answer is trusted further than it can be backed.**
+
+5. **`armed` asserts more than its consumer can back** (§17.8), in three shapes: `SetArmed(true)` fires on the
+   first replayed event so a `*` lens activating mid-replay narrows against a **partial** taxonomy; a NATS
+   `RECONNECTING` leaves it answering `StatusArmed` blind; a restart inside an unresolved window makes
+   activation refuse the lens, so its rows stay *and* revocations stop applying. **Its consumer is now live**
+   (`capabilityServiceAccess`), which is what makes this C2's first item. B1 removed the *fail-open* half by
+   leaving `exLoc` unlabeled; the remaining exposure is fail-closed, and a replay-complete barrier closes it.
+6. **An operator corpus-rebuild bypasses B0's coalescing scheduler** (§17.15 ·
+   `internal/refractor/control/service.go:930-943`) — one uncoordinated goroutine per request reproduces the
+   consumer delete-recreate burst that has OOM-killed `lattice-nats`. Routing it needs the control service to
+   reach the reloader, which it has no handle on.
+
+**C3 — the cap contract has a warning consumer and no refusal consumer** (§17.10 · `capabilitymaterializer.go:791`,
+`anchorwalk.go:735`).
+
+7. The installer checks a lens spec *parses* but never extracts its node labels, so `K` is uncomputable and
+   §10.2's `K + leafBudget ≤ maxNarrowedFilterLabels` refusal cannot run. The walk parser also refuses a
+   trailing `*` in any node position (fails closed). Until this lands, §13's silent-footprint-regression risk
+   is live — see the strike in §15.
+
+**C4 — the taxonomy is declared but unreadable where it would be used.** Each needs a designer pass; none has
+a ratified pattern to extend.
+
+8. **The "any location" write guards read a package-local list, not the taxonomy** (§9.3). Consumers:
+   `WireContainedIn`, service-location's four wiring ops, `CreateMenuItem`. A Starlark taxonomy read pulls
+   Contract #2 §2.5 read-posture declarations into every dispatcher, plus a fail-closed answer.
+9. **No per-row `typeOf(x.key)` engine function** (§14) — `AnchorWalk.AnchorType`'s audit literal is what
+   forbids an abstract Path-B anchor.
+10. **No place to hang a category-level command on an abstract type** (§17.16) — one operationType across N
+    sibling leaves makes `buildByCommand` mark it ambiguous, so all 30 location submitters must name a
+    concrete class.
+11. **`subtypeOf`-driven DDL inheritance** (§9.1) — would remove location's three-way `DDLSpec` duplication,
+    but §3.4's multiple-parents ambiguity must be forbidden or given a precedence rule first.
+
+**C5 — the payoff Fire B was supposed to deliver, and didn't** (§2.1).
+
+12. **An auth lens carrying a containment walk cannot be narrowed at all.** `ReferencedLabels` clears
+    exhaustiveness for any variable-length hop, so `capabilityServiceAccess` takes the broad filter whatever it
+    labels. Narrowing it means reconciling `*0..` walks with the exhaustiveness rule — the design question the
+    measurement in §2.1 exposed.
+
+**Sequencing.** C1 → C2 → C3 are buildable in order (C1.3, C1.4 need their design decision first). C4 and C5
+are designer-pass items; a Fire C that ships C1–C3 and returns ratified designs for C4/C5 is a complete fire.
+**Do not close the item until C5 is answered** — it is the one that decides whether the taxonomy's original
+justification is recoverable or should be struck for good.
+
 ## 15. Test strategy
 
 **Resolver (`internal/refractor/taxonomy`).** Downward closure over one level, multi-level
@@ -2151,9 +2224,18 @@ upgraded cells, which is a privacy decision about existing ciphertext, not a fil
 onto the running stack (the real 0.2.3→0.3.0 upgrade, i.e. the tombstone path above) and both
 `verify-package-*` targets pass against it. Whole-repo `go test ./... -p 4` green across three runs.
 
-### 17.18 Checkpoint — Fire B COMPLETE, and the item is done
+### 17.18 Checkpoint — Fire B COMPLETE; the item continues into Fire C
 
-**B0 (`dd7e88ff`) + B1 (`7e60c4db`) close Fire B, and Fire B closes the item.** No worktree is held.
+**B0 (`dd7e88ff`) + B1 (`7e60c4db`) close Fire B.** No worktree is held. **The item stays 🏗️ building.**
+
+**Next: Fire C (§14), and it is already assembled.** Andrew's call on 2026-08-10: rather than let this item
+close and leave twelve rows of its own tail scattered across `backlog/lattice.md`, the tail folds back into the
+item. All twelve are retired from the board and carried as Fire C's content, grouped C1–C5 with a build order —
+C1 the guarantees the abstract type asserts but nothing enforces, C2 the resolver trusted further than it can
+be backed, C3 the cap contract's missing refusal consumer, C4 the taxonomy declared but unreadable where it
+would be used, C5 the narrowing payoff that measured false. C1–C3 are buildable (two need a design decision
+first); C4 and C5 are designer-pass items. **The item does not close until C5 is answered** — it decides
+whether the original justification is recoverable or should be struck for good.
 
 **What the close pass changed about the item's own record.** §14 said "Fire B's first commit files these four
 as board rows — naming them here is not filing them." It never happened; a search over every commit that has
