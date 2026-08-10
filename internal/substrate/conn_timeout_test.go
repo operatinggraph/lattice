@@ -300,6 +300,10 @@ func TestConnect_CtxDeadline_StopsRetryingOnceExhausted(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected Connect to error once ctx's deadline passes, got nil")
 	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("expected errors.Is(err, context.DeadlineExceeded) so a caller can distinguish "+
+			"ctx expiry from the last dial failure, got: %v", err)
+	}
 	if got := attempts(); got >= connectAttempts {
 		t.Fatalf("a %v ctx deadline should stop retrying before all %d attempts run (each reset is near-instant, backoff is %v) — proxy saw %d",
 			budget, connectAttempts, connectBackoff, got)

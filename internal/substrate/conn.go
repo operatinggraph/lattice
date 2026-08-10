@@ -206,7 +206,7 @@ func connectWithRetry(ctx context.Context, url string, opts ...nats.Option) (*na
 	for attempt := 1; ; attempt++ {
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			if err != nil {
-				return nil, err
+				return nil, fmt.Errorf("%w (retry stopped: %w)", err, ctxErr)
 			}
 			return nil, ctxErr
 		}
@@ -220,7 +220,7 @@ func connectWithRetry(ctx context.Context, url string, opts ...nats.Option) (*na
 		select {
 		case <-time.After(connectBackoff):
 		case <-ctx.Done():
-			return nil, err
+			return nil, fmt.Errorf("%w (retry stopped: %w)", err, ctx.Err())
 		}
 	}
 }
