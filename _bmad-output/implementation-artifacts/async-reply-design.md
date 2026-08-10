@@ -273,3 +273,100 @@ seams:
 
 Increment 1 is launched first; it is safe to build/test in isolation (only `fakeAsyncCheck` ever returns
 Pending, so real flows are unaffected until Increment 3 wires a real async adapter).
+
+---
+
+## Fire brief — the external-gap classifier reads the action, not the gap (build note, 2026-08-09)
+
+**1. Scope sentence.** The three `TestAsyncConvergence_*` legs run in no CI gate and two fail at clean
+`main`: after the bridge timeout posts its terminal `failed` outcome, Weaver never dispatches a fresh
+retry. Restore the ratified timeout→failed→fresh-retry leg, then put all three legs under a gate.
+**Green bar:** `go test -tags leaseshortwindow ./internal/leaseconvergence/ -run TestAsyncConvergence`
+all three PASS, and `make test-lease-convergence` selects them.
+
+**2. Root cause (proven live, not inferred).** `staleMark` classifies a gap as EXTERNAL by its *dispatch
+action* — `ga.Action != actionDirectOp && ga.Action != actionProposedOp` → not external
+(`internal/weaver/evaluator.go:339`). But this package's two vendor-backed gaps are `triggerLoom` of an
+**externalTask** pattern (`packages/lease-signing/targets.go:90-91`; `patterns.go:38-65`, both
+`Kind: "externalTask"`, no userTask step). So a genuine external gap is judged a package authoring bug.
+Observed at the instant of failure, 7ms after the failed outcome lands:
+
+> `ERROR weaver: target leaseApplicationComplete: row column inflight_bgcheck is declared but gap
+> missing_bgcheck's playbook action "triggerLoom" is not external-dispatch (directOp/proposedOp);
+> ignoring the marker`
+
+Consequences, both live and not test-only:
+- Lane-1 (`evaluator.go:300`) computes `stale=false` with `found=true` → the **anti-storm drop**; the
+  retry never dispatches on the CDC touch the outcome produces.
+- The sweep (`reconciler.go:530`) sets `confirmedConcluded=false` → `collapseOnlyReclaim` is true → the
+  userTask backoff paces the reclaim **and** preserves the claimId, so any eventual re-dispatch collapses
+  onto the already-terminal Loom instance — exactly the no-op that `reconciler.go:597-611` warns of.
+- `maxretries_bgcheck` / the Augur `exhausted` escalation are unreachable: the dispatch count never climbs.
+- A standing **`error`-severity** `InflightActionMismatch` Health issue for a correctly-authored package.
+
+**3. The contract is on the fix's side — no contract change.** Contract #10 §10.3
+(`docs/contracts/10-orchestration-substrate.md:233`) defines an external gap by **companion-column
+presence**, never by action: *"External gaps are unchanged — their reclaim re-dispatch is intended,
+episode-scoped on `markRevision` and bounded by `inflight_<g>` + `maxretries_<g>`; `directOp` likewise."*
+The engine's action test is a narrowing the contract never asked for. This design's own §Component spine
+frames the external gap as a **triggerLoom** gap ("Weaver already is the ensure-eventually / re-trigger
+on gap engine (triggerLoom on a violating gap)"), so the fix restores ratified behavior.
+
+**4. Chosen mechanism — ask the real question, at zero read cost.** The contract's actual distinction is
+"triggerLoom of a **userTask-containing** pattern" (the reconciler's own comment, `reconciler.go:516-529`).
+Weaver cannot answer that today: `patternMeta` stores only the meta-vertex key
+(`registry.go:348`, `:1067-1089`). But `indexPattern` **already holds the whole spec body** —
+`unwrapSpecBody(body, "steps")` — and probes only `patternId`. Extend `patternSpecProbe` to record whether
+any step is `Kind: "userTask"`, carried on the existing `patternMeta`/`patternOwner` lifetime (created at
+index, dropped by `removePatternLocked`). No new KV read, no new cache lifetime, no `GapActionSpec` schema
+change, no package edits or version bumps.
+
+*Rejected:* a `GapActionSpec.External` flag (schema change + every package re-declares what the engine can
+already derive); a dispatch-time spec read (new read path on the hot dispatch leg).
+
+**Fail-safe direction:** an unknown / not-yet-indexed pattern counts as **userTask-containing**. A
+duplicated human task is worse than a delayed retry, and the misclassification self-corrects the moment
+the pattern indexes. This also keeps `TestSweep_InflightActionMismatchIgnoredForUserTaskGap` green
+unchanged — it seeds `patternMeta` directly with no spec.
+
+**5. Verified touch-list** (checked live at `ddba78d2`):
+- `internal/weaver/registry.go:1057-1060` — `patternSpecProbe`: add the steps probe.
+- `internal/weaver/registry.go:1067-1090` — `indexPattern`: record userTask-containment.
+- `internal/weaver/registry.go:348` / `:1092-1101` — the map + `removePatternLocked`: same lifetime.
+- `internal/weaver/evaluator.go:330-347` — `staleMark`: replace the action test with the containment test;
+  keep the `InflightActionMismatch` alert for the case it was written for.
+- `internal/weaver/reconciler.go:53-56` — `collapseOnlyReclaim`: follows `confirmedConcluded`, unchanged.
+- `Makefile:1746` — the `-run` filter selects `TestLeaseConvergence|TestRenewalConvergence` only; the three
+  `TestAsyncConvergence_*` match neither (verified with `go test -list`). Widen it.
+
+**6. Precedents to mirror.** The probe-at-index pattern is `indexPattern` itself. The alert + self-clear
+pair is `issueKeyInflightMismatch` (`evaluator.go:338-345`). The gate widening mirrors the existing
+`test-lease-convergence` recipe.
+
+**7. Increment order.**
+1. Registry: probe step kinds + carry containment. Green: `go test ./internal/weaver/ -run TestSweep -count=1`.
+2. `staleMark`: containment-based classifier. Green: `go test ./internal/weaver/... -count=1` (incl.
+   `TestSweep_InflightActionMismatchIgnoredForUserTaskGap`, which must pass **unchanged**).
+3. Prove the fix end to end: all three `TestAsyncConvergence_*` pass; revert increment 2 and watch
+   `_Timeout_FailedThenOneRetry` fail again (the mechanism-disabled check).
+4. Gate: widen the `Makefile` `-run` filter; confirm with `go test -list`.
+
+**8. In-scope gotchas.**
+- *New state needs a LIFETIME:* the containment flag rides `patternMeta`'s existing lifetime — state table
+  is created at index / replaced by `removePatternLocked` / rebuilt on replay. No new boundary.
+- *A negative test needs its positive vector proven first:* increment 3's revert-and-watch-it-fail is that
+  proof; a green suite alone does not pin this fix.
+- *Precedent may carry debt:* `gapSuppressed` (`evaluator.go:896`) carries the **same** action-based
+  narrowing for its cap-fallback term. It is not load-bearing for this green bar (the lease gaps declare
+  `maxretries_<g>`, so the fallback never fires) — noted, not fixed here, and filed as a row.
+- Weaver's logger in `internal/leaseconvergence/harness_test.go:192` is `io.Discard`, which is why this
+  `error` alert has been invisible to every run of this suite. Leave it discarded; note it.
+
+**9. Adjacent finds — filed before the first edit.**
+- `[Weaver] gapSuppressed's cap-fallback shares the same action-based external-gap test` — the sibling of
+  this defect, inert today. **steward-owned · next run.**
+- `[Tooling] The lease-convergence harness discards every engine log` — an `error`-severity Health alert
+  fired on every run of this suite and no run could show it. **steward-owned · next run.**
+
+**10. Non-goals.** No change to `gapSuppressed`'s cap-fallback, to the bridge's timeout semantics, to the
+lens, to any package, or to `docs/contracts/*`.
