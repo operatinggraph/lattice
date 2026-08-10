@@ -1849,3 +1849,46 @@ not.
 
 **Net effect on the lane: one row shorter than the fire found it**, after also reconciling the `[Substrate]`
 `Connect` handshake row, which a parallel session shipped (`7acac6af`) without updating this lane.
+
+### 17.14 The fail-posture cluster shipped (2026-08-09)
+
+`a811b38e` (increment 6) · `1d4869e5` · `b361d848` (the cluster). CI green on each.
+
+**The four fixes landed as one decision**, per §17.13. A cold adversarial pass over the cluster returned **no
+blocking findings** and endorsed the direction with an argument worth keeping: `StatusUnknown` is never "a type
+was removed" — a removal is a normal *resolved* answer that narrows correctly through the ordinary path. Unknown
+fires only on resolver faults (no snapshot, unresolvable label, ambiguous canonicalName, cycle, over-depth). So
+the stale window the carry-forward permits requires an edit that is simultaneously narrowing *and*
+resolver-breaking, and even then the tombstone of the underlying link still retracts the row normally, because
+the filter is broad and the matcher still binds the concrete types. What persists is "a type the taxonomy no
+longer classifies", not "an access the graph withdrew". Against that, the old direction was a **mass Delete
+driven by a package error**, reachable from a rename collision window.
+
+**Its four non-blocking findings were fixed rather than filed**, and two of them were the same class this fire
+exists to clean up:
+
+- the "nothing carried" guard was a **nil-check where the safety property is a coverage-check** — a carried map
+  covering `{location}` with the rule needing `{location, org}` passed it, and `org*` then matched nothing. It
+  was unreachable only by a *global* argument about reload ordering. Now a per-label coverage test, local to the
+  rule in hand;
+- the retention in `corekv_source` could **permanently poison a label**: `InstallSnapshot` poisons every id
+  sharing a canonicalName, so an unreadable rename that freed a name for a new type left two claimants and took
+  the whole closure to `StatusUnknown` forever — unbounded, where the clearing it replaced was bounded and
+  self-healing. Retained names are now tracked as retained and never participate in a collision. Retention still
+  does **not** recover the new name; the comment says so rather than implying otherwise;
+- a documented baseline invariant claimed an atomicity two mutexes do not provide, and was false by construction
+  on the degrade path. Corrected to what the code does, including the single-dispatch-goroutine assumption;
+- the carry-forward gate suppressed a durably-true `non-exhaustive` verdict in favour of the transient
+  `taxonomy-unresolvable`, breaking the rank table's own stated rule. The flag is gone; every path is judged.
+
+**Verified live, not just in tests.** After cycling `bin/refractor` (Makefile `cycle-refractor`), **111 of 114**
+lens health entries carry `filterMode`, split across `narrowed-relation` and `narrowed-label`. The three without
+it were last written 2026-07-29/30 — orphaned entries for lenses that no longer run, which is exactly what the
+field's documented "absent ⟺ never derived a filter" means. `bin/loupe` and `bin/lattice` were rebuilt too
+(both link the changed packages); all three binaries postdate the merge commit.
+
+**Unrelated live condition, already filed and NOT caused by this work:** the stack logs
+`adj.<typeMetaId>: nats: maximum payload exceeded` continuously (~35k occurrences, earliest 06:47 today, long
+predating this fire) — the `[Refractor] A node's whole adjacency list is one KV value` row, whose design sits in
+📐 awaiting-Andrew. Every instance's `instanceOf` link targets one type meta, which is precisely the
+high-in-degree shape that row describes.
