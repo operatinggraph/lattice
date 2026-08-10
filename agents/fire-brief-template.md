@@ -30,12 +30,35 @@ Scouts are *not* roles: the owning roles (`owner`, `fe-engineer`, …) remain sk
 4. **Increment order** — sequenced increments, each with its own green check; the fire's green bar turned
    into **runnable commands** (test invocations, curls), not prose.
 5. **In-scope gotchas** — the CLAUDE.md / memory / design-doc obligations THIS fire trips (lockstep rules,
-   package version bumps, `provision-readpath`, hot-reload vs restart, full-suite triggers, …).
+   package version bumps, `provision-readpath`, hot-reload vs restart, full-suite triggers, …) — **plus,
+   copied in verbatim: the touched components' "Review keeps catching" dossier entries**
+   (`docs/components/<c>.md`, the section at the end) **and the standing checklist below**. The dossier is
+   how a prior review's findings reach this builder; a brief that skips it re-purchases them.
 6. **Adjacent finds** — everything discovered that is out of scope: **file each as a board row NOW**, before
    the first edit (or state why one is deliberately not filed). Pre-build filing is the healthy half of
    residual discovery; mid-build filings should become rare. (On-ship residuals then run the Steward's triage
    ladder — fix-in-fire first, and a fire never files a defect it introduced; `agents/steward/SKILL.md` §4.)
 7. **Non-goals** — what the fire deliberately does not touch (the drift fence).
+
+## The standing checklist (copied into every brief's part 5)
+
+The cross-component failure classes review keeps re-finding — **capped at six lines**: an entry retires when
+a lint/test gate mechanizes it, and a new one must displace an old one past six (a checklist that grows
+stops being walked). The builder walks it before the first edit; the reviewers walk it after.
+
+1. **New state needs a LIFETIME, not a data structure** — before building any registry / cache / latch /
+   watch / accumulated set, write its state table: created / reset / carried / ordered at every boundary
+   (crash, replay, reconnect, tombstone, upgrade). "Track it as we go" names a mechanism where a rule belongs.
+2. **Every census is a premise** — re-run any stated count live before relying on it, and write predicates
+   over the enumerated state table, never one clause over a multi-shape set.
+3. **A negative test needs its positive vector proven first**, and every fix is proven by reverting it and
+   watching its test fail — a test that passes with the mechanism disabled pins nothing.
+4. **Removal needs a transport AND an observer** — read what each consumer actually tests, at what
+   granularity; an upsert-only writer retracts nothing whose key drops out.
+5. **One deterministic key, one writer** — a create-only writer bricks the second; a second writer needs an
+   explicit arbitration or a single owner, decided before it is added.
+6. **Precedent may carry debt** — verify a mirrored pattern against the rule it claims to follow before
+   copying it; "the neighbor does it" is not grounding.
 
 ## The scope-diff gate (before the first edit)
 
@@ -44,7 +67,11 @@ Diff parts 2–4 against part 1, **item-by-item**: every touch must trace to the
 claim≠login lesson). Also re-verify declared dependencies **both ways**: a listed dependency that is not
 load-bearing for *this* green bar is noted and dropped; an unlisted one that is → stop and resequence.
 Divergence you cannot resolve by narrowing → route per the Steward's §0 (decide-don't-defer), never build
-through it silently.
+through it silently. **Every census/count the design states is a PREMISE:** re-run the design's own
+executable census (its command + expected count — the designer skill requires the pair) live and pin the
+number; a mismatch is resolved here, before the first edit, never left for the admit review to trip over
+(trialed 2026-08-09: a ratified "four label-equality sites" was six — all three cold reviewers found the
+same two misses independently, both failing toward silent over-grant).
 
 ## Placement + lifecycle
 

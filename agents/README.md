@@ -56,6 +56,7 @@ docs (the backlog, design docs, contracts) are edited directly in `main` (contra
 | `owner/` | **Builder** (invoked by an advancer) | Advance one component **or** package by one unit via the hardened story loop (ground → design → dev → review → gates). Code in a worktree; docs in `main`. |
 | `fe-engineer/` | **Builder** (invoked by an advancer) | Build web front-ends from a UX design — **Loupe's operator UI *and* the vertical apps** — vanilla HTML/CSS/JS + Go handlers; verifies in-browser. Reads lens projections (P5), never Core KV (Loupe excepted). |
 | `lamplighter/` | **Cross-cutting ops** (L0/L1) | Observability watch — read Health KV → classify anomalies → surface remediation candidates. Never silently fixes. |
+| `retro/` | **Process metrology** (L0) | Weekly read-only audit of the fleet's own loop: fire shape vs ratified plans, review fix-round economics, backlog net flow, dossier→lint promotions, code growth. One capped log entry; drift flagged 🔭 for Andrew. Never edits process docs or code. |
 
 The **UX Designer (Sally)** is the bmad skill **`bmad-agent-ux-designer`** (not tracked here); she designs the
 experience, the FE Engineer builds it (UX-then-FE).
@@ -72,6 +73,7 @@ experience, the FE Engineer builds it (UX-then-FE).
 | `platform-surveyor` | `surveyor` — Lattice hydrator | 3×/day (`56 7,15,23`) | none |
 | `vertical-po-discovery` | `vertical-po` — Verticals hydrator | 3×/day (`41 5,13,21`) | none |
 | `lamplighter-watch` | `lamplighter` — observability watch | every 4h (`28 2-22/4`) | none |
+| `steward-retro` | `retro` — process metrology | weekly (Mon `13 7 * * 1`) | none |
 
 The Lattice stream is a three-stage pipeline: **Surveyor** (raw demand) → **Designer** (build-ready designs) →
 **Lattice Steward** (builds), with the **Whetstone** as a cross-cutting CI-speed loop. `owner`, `fe-engineer`,

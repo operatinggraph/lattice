@@ -266,10 +266,14 @@ on a resume:
 |---|---|---|
 | Phase-0 scout · census · inventory · file:line collection | generic, read-only | **`haiku`** |
 | mechanical build increment against a brief | generic | **`sonnet`** |
+| posture-changing / state-machine build increment (new registry · cache · latch · watch, gate lift, narrowing, new enforcement point) | generic | **`opus`** |
 | adversarial / security / capability-plane review | generic, **never the implementer** | **`opus`** |
 | owner · fe-engineer · lamplighter | — | inline, never spawned |
 
-If you can't name why a task needs the tier above, it doesn't.
+If you can't name why a task needs the tier above, it doesn't. The builder tier follows the increment's
+**risk class**, not a flat default — the state-machine/lifecycle class is where reviews keep finding their
+blockers, and a cheap build there just moves the spend into a larger opus fix round (trialed 2026-08-09,
+taxonomy item 4: the fix round ran ≈2.6× the initial build).
 
 **Agent lifetime — resume the implementer, spawn reviewers cold.** After a review, send the findings **back to
 the implementer that wrote the diff** (`SendMessage` with the id its spawn returned; a completed agent resumes
@@ -445,7 +449,18 @@ running; the **browser tab** you do not.
   delta** — a posture-changing increment (gate lift, narrowing, new enforcement point) gets the full 3-layer
   pass, a mechanical middle increment gets a lead review — plus **one cumulative adversarial pass over the
   item's whole diff at close**. That closing pass, not repetition per increment, is what the security plane's
-  full-depth guarantee means for a multi-fire item.
+  full-depth guarantee means for a multi-fire item. **Review depth is THIS skill's decision:** a design doc
+  may *raise* the floor for **named** increments (state which, and why they are posture-changing); a blanket
+  "full 3-layer per increment regardless of size" clause is not honored — apply the sizing above and let the
+  close pass carry the guarantee (trialed 2026-08-09: a blanket clause ran three cold reviewers on a
+  mechanical parser increment that returned zero blocking findings). **The close pass also CLASSIFIES what
+  the item's reviews found** — design-gap / implementation-bug / brief-gap / convention / review-over-reach,
+  per component — and routes the lessons: a component-shaped class appends one line to the owning
+  `docs/components/<c>.md` **"Review keeps catching" dossier** (capped 12; entry = class · minting incident ·
+  the check that catches it); a class seen a **second** time across items gets its check mechanized (a
+  `scripts/lint-*.go` extension or a mandated test shape), the dossier entry retiring when the gate lands.
+  Fire briefs copy the touched components' dossier entries into part 5 (`agents/fire-brief-template.md`), so
+  a lesson reaches the next builder's context instead of dying in a build note.
 - **You are the board's editor — keep it an INDEX, not a journal (the row discipline, §5 of the swimlanes
   design; load-bearing — the lane files once hit 250–300 KB of in-cell journals and no role could `Read`
   one).** Update your lane file in `main` as you go (📋 → 🏗️ → ✅), **directly in main** (not a worktree).
@@ -465,7 +480,10 @@ running; the **browser tab** you do not.
   reserved … Build: Inc 1→2`; ✓ `🏗️ building · [design](…) · next: Inc 1 series lens`). All of that lives in
   the **commit message + the design doc**. **Hard budget:** a row aims ≤300 chars (cap 600); the survey-log /
   Done-log are capped one-liners. `scripts/lint-board.go` fails a board commit that exceeds these — **run it
-  before you push any board change.**
+  before you push any board change.** It also **WARNs past 80 open rows in a lane** — advisory by design
+  (legitimate filing is never blocked), but while a lane is over the line each batch includes at least one
+  **closure/consolidation unit** (build a ready row out, fold duplicates, finish a 🏗️ tail): the backlog
+  shrinks by building.
 - **On ship, reconcile the item's neighbors (write-time consistency — do this, not a per-pick re-verify).**
   Staleness is *written* when an item ships: the shipped item gets a clean Done entry, but its **neighbors
   silently drift** (their states still reference the old world). So the moment you mark an item ✅ done, check
@@ -480,7 +498,9 @@ running; the **browser tab** you do not.
 - **On ship, residuals run a triage LADDER — fixing beats filing (Andrew, 2026-08-08).** When the fire you
   admit names residuals, take each one through, in order: **(1) fix it in-fire** when it is bounded and its
   consumer is nameable — *especially* when the unblocking consumer shipped in this very fire; **(2)** a defect
-  **this fire introduced is never filed — fix it or don't ship the increment**; **(3) fold** it into an
+  **this fire introduced is never filed — fix it or don't ship the increment** (one narrow exception: a
+  defect in a mechanism this fire introduced that is **inert until a named future consumer** may be filed as
+  a row that **gates that consumer's fire** — never as a free-floating residual); **(3) fold** it into an
   existing named row when one covers it; **(4) file** what survives as a capped row in the owning lane **in
   the same docs commit as the ✅ flip**, naming the residual's **consumer** *and* the concrete **blocker**
   that stops it being finished now — or state in that commit why one is deliberately not filed (standing
@@ -488,7 +508,12 @@ running; the **browser tab** you do not.
   invisible to lane selection — so file what survives the ladder — but the ladder comes first: **the backlog
   shrinks by building, not grows by reviewing.** Same discipline for forward-references: code/comments must
   not point at another fire's *assumed* future deliverable — point at a filed row or the other design's
-  ratified scope, else you've created a seam nobody owns. *(Trialed 2026-07-18: an honestly-named tail with no
+  ratified scope, else you've created a seam nobody owns. **Rows-or-nothing binds the design doc too:** a
+  residual named in a build note / found-work section either links its row or states, in the same commit, why
+  one is deliberately not filed — a bare "filed" claim with no row is a false record, and the cumulative
+  close pass verifies the item's whole residual accounting (every residual sentence resolves to a row, a fix,
+  or a stated why-not; trialed 2026-08-09: four §17 residuals carried no row, one claiming "is filed").
+  *(Trialed 2026-07-18: an honestly-named tail with no
   row starved until a live host wedged. Trialed 2026-08-07/08: two initiatives filed 24 review-residual rows
   and closed 4 — three filings were the fires' own defects, one with its named consumer already shipped
   in-fire.)*

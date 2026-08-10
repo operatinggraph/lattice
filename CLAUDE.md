@@ -137,3 +137,10 @@ progress-tracking (the lane file's row state in `backlog/{lattice,verticals}.md`
 
 The bmad `create-story` / `dev-story` / `code-review` / review-hunter skills still exist locally in
 `_bmad/` for ad-hoc manual use, but are not the default path and are not part of the scheduled closure.
+
+**The improvement loop is part of the workflow, not optional polish.** Each component doc
+(`docs/components/<c>.md`) ends with a **"Review keeps catching" dossier** — the component's recurring
+review-finding classes. Any build brief copies the touched components' entries in (`agents/fire-brief-template.md`
+part 5, plus that file's standing checklist), and an item's close review classifies its findings, appends new
+classes, and promotes a twice-seen class to a `scripts/lint-*.go` gate (`agents/steward/SKILL.md` §4). A lesson
+that lives only in a build note or a chat correction does not reach the next fire.

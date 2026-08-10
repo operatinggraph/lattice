@@ -599,6 +599,16 @@ greenfield redesign. Cover, as the feature warrants:
 - **The shape:** the data model (which vertices / aspects / links / **lenses** / ops), the read path (which
   lens projection serves it, P5), the write path (which operations, P2), and any **orchestration** (Loom
   pattern / Weaver convergence lens / `@at`/`@every` / directOp) — name the precedent you're mirroring.
+- **A state-lifetime table for every NEW stateful mechanism** (registry, cache, latch, watch, accumulated
+  set): created / reset / carried / ordered at every boundary the neighboring state already honors (crash,
+  replay, reconnect, tombstone, upgrade). Naming a data structure where a rule belongs hands the builder an
+  increment whose review finds the lifetime the hard way (trialed 2026-08-09, taxonomy item 4: nineteen
+  findings, the load-bearing class exactly this — a refused-lens registry shipped with no lifetime).
+- **Executable censuses** — any count the design relies on ("four call sites", "N consumers", "only X reads
+  this") ships as the command that derives it + the expected result (+ the pinning test when the census gates
+  correctness), so the build's Phase-0 re-runs it mechanically instead of trusting prose (trialed 2026-08-09,
+  taxonomy item 3: a ratified "four equality sites" was six). §2's census reflexes say how to *derive* one;
+  this is the doc obligation that keeps the derivation **re-runnable** after the doc ships.
 - **Contract surface:** exactly which `docs/contracts/*` sections it touches (if any) and whether it needs a
   *change* vs. just *building to* them. **If an existing convention/constraint creates friction, question
   whether the convention deserves to exist** — flag it for Andrew with a proposed touch-up — rather than
@@ -648,7 +658,11 @@ greenfield redesign. Cover, as the feature warrants:
     "Phase A now," Personal Lens "build dark now") — all the same reflex. There is rarely pressure to ship
     dead scaffolding; "the design is ready and sequenced" is the correct output, not "we started building."
 - **Decomposition for the Steward:** break L/XL into the increments the Steward will build fire-by-fire, each
-  independently shippable + green, so the build is multi-fire-friendly.
+  independently shippable + green, so the build is multi-fire-friendly. Two obligations: **every test the
+  design prescribes is OWNED by a named increment** (an unowned test is built by nobody — trialed 2026-08-09:
+  a §15 census test with no owning increment survived five build notes unbuilt), and **review depth stays the
+  Steward's sizing** (`agents/steward/SKILL.md` §4) — name which increments are posture-changing (those get
+  the full pass); never write a blanket every-increment-full-depth clause.
 
 For a substantial / cross-cutting design, run an **adversarial or party review** (`bmad-party-mode`, or an
 adversarial pass) and fold the findings in — the architect doesn't ship an unreviewed shape for an L/XL feature.

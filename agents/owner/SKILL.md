@@ -96,7 +96,9 @@ security-plane change; a thorough lead review for a small, well-scoped, green fo
 
 `go build ./...` · `make vet` · `golangci-lint run ./...` · `STRICT=1 go run ./scripts/lint-conventions.go` ·
 the relevant `go test` packages · `make verify-kernel` and/or `make verify-package-<x>` if DDL / permissions /
-keys were touched. Update `docs/components/<component>.md` (docs-in-Definition-of-Done).
+keys were touched. Update `docs/components/<component>.md` (docs-in-Definition-of-Done). A review that minted
+a **new failure class** appends it to that doc's "Review keeps catching" dossier (one line: class · minting
+incident · the check; capped 12 — mechanize into a gate or displace before exceeding the cap).
 
 ## 7. Hand up
 
