@@ -913,11 +913,24 @@ design-time obligation rather than a live bug.
 
 An abstract type declares `LeafBudget int` (default 8, the label cap). Then:
 
-> **Build status (2026-08-09):** the leaf-installer half below is built and now counts the **transitive**
-> closure (§17.9). The lens-author half — the `K + leafBudget ≤ maxNarrowedFilterLabels` check at the *lens's*
-> install — is **not built**: pkgmgr validates that a lens spec parses but never extracts its node labels, so
-> `K` is not computable there today. `LeafBudget` therefore has a warning consumer but no refusal consumer.
-> Filed as a lane row with that gap named; do not read the paragraph below as shipped.
+> **Build status (2026-08-10):** BOTH halves are built. The leaf-installer half counts the **transitive**
+> closure (§17.9). The lens-author half — the `K + leafBudget ≤ maxNarrowedFilterLabels` refusal — is built on
+> the Fire C branch (C3.7, `df70a6a3`), **awaiting cold review before it merges**; `K` became computable when
+> pkgmgr's injected parser seam was widened to return the spec's label facts. `K` is the referenced set minus
+> the WHOLE expansion set (the runtime's own deletion pass is blind to which label is being priced), budgets
+> are summed across expansion labels, and the gate engages only for an **exhaustive** lens carrying a sigil —
+> a non-exhaustive one takes the broad filter regardless, so refusing its install would be a false refusal.
+>
+> **⚠️ ANDREW — the default makes this refusal maximally strict, and the corpus takes the default.**
+> `leafBudgetDefault` and `maxNarrowedFilterLabels` are both **8**, so an abstract type that leaves
+> `LeafBudget` unset forces `K + 8 ≤ 8`, i.e. **`K` must be 0**: the first author to write `(l:location*)`
+> alongside *any* other label in an exhaustive lens is refused, and the fix lives in someone else's package.
+> `location-domain` leaves it unset deliberately (`ddls.go:99`, reasoning "three leaves sit well inside it") —
+> which is the **warning** half's logic applied to the **refusal** half, where it inverts. The build implements
+> the ratified arithmetic faithfully and fails closed in the defensible direction (an abstract that promises
+> nothing about its growth cannot be relied on for narrowing), but the ergonomics are a ratification call:
+> either `location-domain` declares a real budget (4–5), or the default stops meaning "the whole cap".
+> **Not decided here.**
 
 - **A lens author gets a decidable answer.** At the *lens's* install, `K + leafBudget ≤ maxNarrowedFilterLabels`
   is checked, and the install **fails** if the lens cannot fit its own worst case. The lens author owns their own
@@ -2399,12 +2412,15 @@ with Refractor up 1h18m. The morning's boot path could not run Refractor at all.
   equal it across all eight pairs, and refuses a literal naming any abstract type. Wired into CI and the
   Makefile. Verified load-bearing by perturbing the real corpus, not a synthetic fixture. The item's DATA half
   (class ⟷ key segment over the 69 vertices) stays migration-blocked and unbuilt.
-- **C3.7 is BUILT BUT NOT MERGED, deliberately.** It sits on `fire/taxonomy-fire-c` (see the commit at the
-  branch tip) and is a cross-cutting widening of `pkgmgr`'s injected `CypherParser` seam that reaches
-  `cmd/lattice`, `cmd/lattice-pkg`, `cmd/loupe`, `internal/testutil` and four `packages/*` test files. It has
-  had NO cold adversarial review. It was held back because this fire had already put `main` red once and a
-  wide interface change landing unreviewed at the tail of a long run is the wrong risk — not because anything
-  is known to be wrong with it. **The next fire's first job is to review it, then merge or amend it.**
+- **C3.7 is BUILT BUT NOT MERGED, deliberately — `df70a6a3` on `fire/taxonomy-fire-c`**, rebased onto `main`
+  at `99b2a338`, all gates and the full untagged suite green on the branch. It is a cross-cutting widening of
+  `pkgmgr`'s injected `CypherParser` seam reaching `cmd/lattice`, `cmd/lattice-pkg`, `cmd/loupe`,
+  `internal/testutil` and four `packages/*` test files. It has had **no cold adversarial review**. Held back
+  because this fire had already put `main` red once, and a wide interface change landing unreviewed at the
+  tail of a long run is the wrong risk — not because anything is known to be wrong with it.
+  **The next fire's first job is to review it, then merge or amend it**, and the review should start at the
+  default-budget finding in §10.2's banner, which is the one thing in it that changes platform behaviour for
+  authors rather than just adding a gate.
 - **Then:** C2.6's remaining fan-out at its corrected size (fairness, not memory).
 
 **What went wrong in this fire, recorded so it is not repeated.** `d470c9ac` (C2.5) went to `main` RED and I
