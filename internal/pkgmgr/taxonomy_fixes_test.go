@@ -1,18 +1,23 @@
 package pkgmgr
 
 import (
+	"context"
 	"errors"
 	"strings"
 	"testing"
 )
 
-// Three more distinct valid Contract #1 NanoIDs for the direct
-// scanInstalledSubtypeOfEdgesFromKeys unit test below, drawn from the same
-// Alphabet (no I/l/O/0) as the other test NanoID constants in this package.
+// Distinct valid Contract #1 NanoIDs for the direct
+// scanInstalledSubtypeOfEdgesFromKeys unit test and the live-instance guard
+// tests below, drawn from the same Alphabet (no I/l/O/0) as the other test
+// NanoID constants in this package.
 const (
 	testTaxonomyNanoID1 = "Bb2Cc3Dd4Ee5Ff6Gg7Hh"
 	testTaxonomyNanoID2 = "Jj8Kk9Mm1Nn2Pp3Qq4Rr"
 	testTaxonomyNanoID3 = "Ss5Tt6Uu7Vv8Ww9Xx1Yy"
+	testTaxonomyNanoID4 = "Aa1Bb2Cc3Dd4Ee5Ff6Gg"
+	testTaxonomyNanoID5 = "Hh7Jj8Kk9Mm1Nn2Pp3Qq"
+	testTaxonomyNanoID6 = "Rr4Ss5Tt6Uu7Vv8Ww9Xx"
 )
 
 // TestInstaller_CanonicalNameCollision_ShadowKeyShape restores the pre-fire
@@ -190,6 +195,147 @@ func TestInstaller_Abstract_AllowedWhenPriorInstanceTombstoned(t *testing.T) {
 	v2 := Definition{Name: "unit-domain2", Version: "0.2.0", DDLs: []DDLSpec{abstractDDL("unit")}}
 	if _, err := inst.Upgrade(ctx, v2); err != nil {
 		t.Fatalf("a tombstoned prior instance must not block declaring Abstract: %v", err)
+	}
+}
+
+// abstractFlipFixture installs pkg declaring canonicalName as an ordinary
+// CONCRETE vertexType, optionally seeds one document at instanceKey, then
+// upgrades the package to declare that same type Abstract — the flip the
+// live-instance guard exists to judge. It returns the upgrade's error (nil
+// when the flip landed), so the tests below differ from one another in
+// nothing but the seeded document.
+func abstractFlipFixture(t *testing.T, pkg, canonicalName, instanceKey, instanceDoc string) error {
+	t.Helper()
+	ctx, conn, inst := newInstallerHarness(t)
+
+	v1 := Definition{Name: pkg, Version: "0.1.0", DDLs: []DDLSpec{minimalDDL(canonicalName, "meta.ddl.vertexType", false)}}
+	if _, err := inst.Install(ctx, v1); err != nil {
+		t.Fatalf("install %s v0.1.0 (concrete): %v", pkg, err)
+	}
+	if instanceKey != "" {
+		if _, err := conn.KVPut(ctx, CoreBucket, instanceKey, []byte(instanceDoc)); err != nil {
+			t.Fatalf("seed %s: %v", instanceKey, err)
+		}
+	}
+
+	v2 := Definition{Name: pkg, Version: "0.2.0", DDLs: []DDLSpec{abstractDDL(canonicalName)}}
+	_, err := inst.Upgrade(ctx, v2)
+	return err
+}
+
+// TestInstaller_Abstract_FlipWithNoInstances_Installs is the positive vector
+// the two refusals below are measured against: the IDENTICAL fixture, with no
+// document seeded at all, must complete the concrete -> Abstract flip. Without
+// it a refusal proves only that the fixture is broken somewhere.
+func TestInstaller_Abstract_FlipWithNoInstances_Installs(t *testing.T) {
+	if err := abstractFlipFixture(t, "workorder-domain", "workorder", "", ""); err != nil {
+		t.Fatalf("a type with no live instance at all must flip to Abstract cleanly: %v", err)
+	}
+}
+
+// TestInstaller_Abstract_RefusedWhenDifferentlyKeyedInstanceCarriesClass is
+// the differently-keyed instance: "workorder" is declared Abstract while its
+// only live instance is keyed vtx.wo.<id> — an equally valid but DIFFERENT
+// type segment, so nothing under "vtx.workorder." exists to find. The
+// document's own class is the type assertion, which is what makes this
+// instance visible at all.
+func TestInstaller_Abstract_RefusedWhenDifferentlyKeyedInstanceCarriesClass(t *testing.T) {
+	instanceKey := "vtx.wo." + testTaxonomyNanoID4
+	err := abstractFlipFixture(t, "workorder-domain", "workorder", instanceKey,
+		`{"class":"workorder","isDeleted":false,"data":{}}`)
+	if err == nil {
+		t.Fatal("expected the upgrade to be refused: a live instance of \"workorder\" exists at a vtx.wo.* key")
+	}
+	if !strings.Contains(err.Error(), "workorder") || !strings.Contains(err.Error(), instanceKey) {
+		t.Errorf("error should name the type and the offending key; got %v", err)
+	}
+}
+
+// TestInstaller_Abstract_RefusedWhenConcreteKeyCarriesClass is the shape a
+// taxonomy produces in the field: a live document sitting on a CONCRETE
+// subtype's key (vtx.unit.<id>) while declaring the ancestor's class
+// ("location"). Declaring "location" Abstract for the first time must be
+// refused — that document is an instance of "location" and would be frozen by
+// the flip.
+func TestInstaller_Abstract_RefusedWhenConcreteKeyCarriesClass(t *testing.T) {
+	instanceKey := "vtx.unit." + testTaxonomyNanoID5
+	err := abstractFlipFixture(t, "location-domain", "location", instanceKey,
+		`{"class":"location","isDeleted":false,"data":{}}`)
+	if err == nil {
+		t.Fatal("expected the upgrade to be refused: a live document on vtx.unit.* declares class \"location\"")
+	}
+	if !strings.Contains(err.Error(), "location") || !strings.Contains(err.Error(), instanceKey) {
+		t.Errorf("error should name the type and the offending key; got %v", err)
+	}
+}
+
+// TestInstaller_Abstract_AllowedWhenClassCarryingInstanceTombstoned is the
+// tombstone half for the class test, beside the key-prefix test's own
+// (TestInstaller_Abstract_AllowedWhenPriorInstanceTombstoned): a tombstoned
+// document is not a live instance whichever test would have found it, so the
+// flip must land.
+func TestInstaller_Abstract_AllowedWhenClassCarryingInstanceTombstoned(t *testing.T) {
+	instanceKey := "vtx.unit." + testTaxonomyNanoID5
+	if err := abstractFlipFixture(t, "location-domain", "location", instanceKey,
+		`{"class":"location","isDeleted":true,"data":{}}`); err != nil {
+		t.Fatalf("a tombstoned class-carrying document must not block declaring Abstract: %v", err)
+	}
+}
+
+// TestInstaller_Abstract_AlreadyAbstract_RedeclareAllowedWithLiveInstances is
+// the shape location-domain itself ships: "location" is ALREADY installed
+// abstract and its concrete subtypes' live documents carry class "location".
+// Re-declaring Abstract asserts nothing new — once the marker is live, step
+// 6's abstract gates refuse every non-tombstone write naming the type, so the
+// instance set can only shrink — and the package must stay re-installable.
+// The guard judges the FLIP, not the state.
+func TestInstaller_Abstract_AlreadyAbstract_RedeclareAllowedWithLiveInstances(t *testing.T) {
+	ctx, conn, inst := newInstallerHarness(t)
+
+	abstract := abstractDDL("location")
+	leaf := minimalDDL("unit", "meta.ddl.vertexType", false)
+	leaf.SubtypeOfRef = "location"
+	v1 := Definition{Name: "location-domain", Version: "0.1.0", DDLs: []DDLSpec{abstract, leaf}}
+	if _, err := inst.Install(ctx, v1); err != nil {
+		t.Fatalf("install location-domain v0.1.0: %v", err)
+	}
+
+	instanceKey := "vtx.unit." + testTaxonomyNanoID6
+	if _, err := conn.KVPut(ctx, CoreBucket, instanceKey,
+		[]byte(`{"class":"location","isDeleted":false,"data":{}}`)); err != nil {
+		t.Fatalf("seed live class-carrying instance: %v", err)
+	}
+
+	v2 := Definition{Name: "location-domain", Version: "0.2.0", DDLs: []DDLSpec{abstract, leaf}}
+	if _, err := inst.Upgrade(ctx, v2); err != nil {
+		t.Fatalf("re-declaring Abstract on an already-abstract type must stay installable with live instances present: %v", err)
+	}
+}
+
+// TestInstaller_Abstract_NoDeclaration_ReadsNoDocuments proves the cost
+// property: a Definition declaring no Abstract DDL reads NO documents, so an
+// ordinary install never pays for the guard. The Installer here carries a nil
+// Conn — every KV read the guard could issue would panic on it — so the check
+// returning cleanly over a key list full of plausible instance keys IS the
+// assertion. (An Installer's Conn is a concrete *substrate.Conn, so there is
+// no injectable counting seam to assert against instead.)
+func TestInstaller_Abstract_NoDeclaration_ReadsNoDocuments(t *testing.T) {
+	inst := &Installer{}
+	def := Definition{
+		Name: "concrete-only-pkg",
+		DDLs: []DDLSpec{minimalDDL("widget", "meta.ddl.vertexType", false)},
+	}
+	scan := metaScanResult{
+		keys: []string{
+			"vtx.widget." + testTaxonomyNanoID1,
+			"vtx.wo." + testTaxonomyNanoID2,
+			"vtx.widget." + testTaxonomyNanoID3 + ".label",
+		},
+		names:   map[string]string{"widget": testTaxonomyNanoID4},
+		fetched: true,
+	}
+	if err := inst.checkAbstractNoLiveInstances(context.Background(), def, scan); err != nil {
+		t.Fatalf("a def declaring no Abstract DDL must read nothing and return nil: %v", err)
 	}
 }
 

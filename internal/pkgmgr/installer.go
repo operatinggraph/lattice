@@ -315,7 +315,7 @@ func (i *Installer) buildManifestBatch(ctx context.Context, def Definition, scan
 			return nil, nil, "", nil, err
 		}
 	}
-	if err := i.checkAbstractNoLiveInstances(ctx, def, scan.keys); err != nil {
+	if err := i.checkAbstractNoLiveInstances(ctx, def, scan); err != nil {
 		return nil, nil, "", nil, err
 	}
 	subtypeAbstractIDs, leafBudgetWarnings, err := i.resolveTaxonomy(ctx, def, scan)
