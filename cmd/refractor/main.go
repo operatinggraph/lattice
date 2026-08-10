@@ -429,7 +429,11 @@ func main() {
 	// apart) leaves the process alive but permanently disconnected, driving
 	// the lens engine while touching no NATS subject ever again.
 	conn, err := substrate.Connect(ctx, substrate.ConnectOpts{
-		URL:           *natsURL,
+		URL: *natsURL,
+		// Name is what identifies this process in `nats connz` during an
+		// incident; without it the engine holding the most subscriptions on
+		// the server is the one nobody can put a name to.
+		Name:          "lattice-refractor:" + instance,
 		MaxReconnects: -1,
 		ReconnectWait: 1 * time.Second,
 		NKeySeedFile:  envOr("NATS_NKEY", ""),
