@@ -67,7 +67,7 @@ func TestInstallFlow_CoInstallWithIdentityDomain(t *testing.T) {
 	stop := testutil.RunMetaInstallPipeline(t, ctx, conn)
 	defer stop()
 
-	inst := pkgmgr.NewInstaller(conn, bootstrap.BootstrapIdentityKey)
+	inst := testutil.NewInstaller(conn, bootstrap.BootstrapIdentityKey)
 	inst.RoleIDs = map[string]string{"operator": bootstrap.RoleOperatorID}
 
 	if _, err := inst.Install(ctx, rbacdomain.Package); err != nil {
@@ -297,7 +297,7 @@ func TestInstallFlow_AbstractLocationRefusedAsInstance(t *testing.T) {
 	}
 
 	stop := testutil.RunMetaInstallPipeline(t, ctx, conn)
-	inst := pkgmgr.NewInstaller(conn, bootstrap.BootstrapIdentityKey)
+	inst := testutil.NewInstaller(conn, bootstrap.BootstrapIdentityKey)
 	inst.RoleIDs = map[string]string{"operator": bootstrap.RoleOperatorID}
 	if _, err := inst.Install(ctx, rbacdomain.Package); err != nil {
 		stop()
@@ -440,7 +440,7 @@ func TestUpgrade_ConcreteLocationToAbstract(t *testing.T) {
 	}
 
 	stop := testutil.RunMetaInstallPipeline(t, ctx, conn)
-	inst := pkgmgr.NewInstaller(conn, bootstrap.BootstrapIdentityKey)
+	inst := testutil.NewInstaller(conn, bootstrap.BootstrapIdentityKey)
 	inst.RoleIDs = map[string]string{"operator": bootstrap.RoleOperatorID}
 	if _, err := inst.Install(ctx, rbacdomain.Package); err != nil {
 		stop()

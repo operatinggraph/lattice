@@ -16,10 +16,19 @@ import (
 // production code too — just not pkgmgr's).
 type fullCypherParser struct{}
 
-func (fullCypherParser) Parse(ruleBody string) error {
-	_, err := full.New().Parse(ruleBody)
-	return err
+func (fullCypherParser) Parse(ruleBody string) (SpecLabels, error) {
+	facts, err := full.SpecLabels(ruleBody)
+	if err != nil {
+		return SpecLabels{}, err
+	}
+	return SpecLabels{
+		Referenced: facts.Referenced,
+		Exhaustive: facts.Exhaustive,
+		Expansion:  facts.Expansion,
+	}, nil
 }
+
+var _ CypherParser = fullCypherParser{}
 
 func lensContent(t *testing.T, lc LensArtifactContent) json.RawMessage {
 	t.Helper()

@@ -19,7 +19,6 @@ import (
 	"github.com/operatinggraph/lattice/internal/bootstrap"
 	"github.com/operatinggraph/lattice/internal/controlauth"
 	"github.com/operatinggraph/lattice/internal/gateway/auth"
-	"github.com/operatinggraph/lattice/internal/pkgmgr"
 	"github.com/operatinggraph/lattice/internal/processor"
 	"github.com/operatinggraph/lattice/internal/substrate"
 )
@@ -579,7 +578,7 @@ func (s *server) handlePackages(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := s.reqContext(r)
 	defer cancel()
 
-	pkgs, err := pkgmgr.NewInstaller(conn, s.adminActor).List(ctx)
+	pkgs, err := newInstaller(conn, s.adminActor).List(ctx)
 	if err != nil {
 		s.writeError(w, http.StatusBadGateway, "list packages: "+err.Error())
 		return

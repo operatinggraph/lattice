@@ -631,3 +631,46 @@ func TestParseLinearPattern_RenameIsPositional(t *testing.T) {
 		t.Errorf("render = %q, want %q", got, want)
 	}
 }
+
+// The read-grant Walk grammar refuses the taxonomy-expansion sigil in every
+// node position, and refuses it BY NAME rather than as a stray-character parse
+// failure at some offset. The refusal is the point (node()'s doc has why: the
+// walk's AnchorType is written into every grant row as a literal audit field,
+// which an abstract label would make false for every concrete anchor it binds);
+// naming it is what tells a package author that, instead of leaving them to read
+// it as a typo.
+//
+// Both spacings, because the openCypher grammar the lens engine compiles against
+// admits whitespace between the label and the sigil — a walk clause written that
+// way carries the sigil just as much, and must not slip past into a bare `)`
+// complaint.
+func TestParseLinearPattern_RefusesTheTaxonomySigilByName(t *testing.T) {
+	for _, src := range []string{
+		"(identity)-[:residesIn]->(l:location*)",
+		"(identity)-[:residesIn]->(l:location *)",
+		"(l:location*)-[:containedIn]->(c:building)",
+	} {
+		_, err := parseLinearPattern(src)
+		if err == nil {
+			t.Errorf("%q must not parse — a Walk chain names concrete types only", src)
+			continue
+		}
+		if !strings.Contains(err.Error(), "taxonomy-expansion sigil") {
+			t.Errorf("%q must be refused by name, not as an offset complaint; got %v", src, err)
+		}
+	}
+}
+
+// The positive vector for the refusal above: the identical clauses without the
+// sigil parse, so each rejection is caused by the `*` and not by the label, the
+// relation, or the fixture's shape.
+func TestParseLinearPattern_SigilRefusalHasAPositiveVector(t *testing.T) {
+	for _, src := range []string{
+		"(identity)-[:residesIn]->(l:location)",
+		"(l:location)-[:containedIn]->(c:building)",
+	} {
+		if _, err := parseLinearPattern(src); err != nil {
+			t.Errorf("%q must parse — only the sigil is refused: %v", src, err)
+		}
+	}
+}

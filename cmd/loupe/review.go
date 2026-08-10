@@ -435,21 +435,42 @@ func (s *server) reviewAugurDetail(w http.ResponseWriter, r *http.Request, id st
 	s.writeJSON(w, http.StatusOK, row)
 }
 
-// loupeCypherParser adapts ruleengine/full.Engine to pkgmgr.CypherParser —
-// the same adapter cmd/lattice/capability/cypherparser.go wires for the CLI's
-// own re-validation path. Living here (not in internal/pkgmgr) avoids the
-// import cycle pkgmgr.CypherParser's doc explains: full's own test binary
-// transitively imports pkgmgr, so pkgmgr itself cannot import full directly.
-// cmd/loupe is an independent leaf package, so it can wire the two together
-// exactly as the CLI does.
+// loupeCypherParser adapts ruleengine/full to pkgmgr.CypherParser — the same
+// adapter cmd/lattice/capability/cypherparser.go wires for the CLI's own
+// re-validation path. Living here (not in internal/pkgmgr) avoids the import
+// cycle pkgmgr.CypherParser's doc explains: full's own test binary transitively
+// imports pkgmgr, so pkgmgr itself cannot import full directly. cmd/loupe is an
+// independent leaf package, so it can wire the two together exactly as the CLI
+// does.
 type loupeCypherParser struct{}
 
-func (loupeCypherParser) Parse(ruleBody string) error {
-	_, err := full.New().Parse(ruleBody)
-	return err
+func (loupeCypherParser) Parse(ruleBody string) (pkgmgr.SpecLabels, error) {
+	facts, err := full.SpecLabels(ruleBody)
+	if err != nil {
+		return pkgmgr.SpecLabels{}, err
+	}
+	return pkgmgr.SpecLabels{
+		Referenced: facts.Referenced,
+		Exhaustive: facts.Exhaustive,
+		Expansion:  facts.Expansion,
+	}, nil
 }
 
 var _ pkgmgr.CypherParser = loupeCypherParser{}
+
+// newInstaller is Loupe's only installer constructor, so every handler gets the
+// same wiring — including the spec parser the install-time narrowed-filter
+// budget gate needs (pkgmgr.Installer.SpecParser,
+// dynamic-type-taxonomy-design.md §10.2). Calling pkgmgr.NewInstaller directly
+// from a handler would silently drop that gate for whichever path forgot, which
+// is exactly the kind of per-call-site divergence a single constructor removes.
+// Per-handler wiring that is NOT common to all of them (RoleIDs, Submit) stays
+// at the call sites.
+func newInstaller(conn *substrate.Conn, adminActor string) *pkgmgr.Installer {
+	inst := pkgmgr.NewInstaller(conn, adminActor)
+	inst.SpecParser = loupeCypherParser{}
+	return inst
+}
 
 // heldPermissionsForCapabilityActor reads actor's live Contract #6 §6.1
 // capability projection from the capability-kv bucket
@@ -688,7 +709,7 @@ func (s *server) reviewCapabilityApply(w http.ResponseWriter, r *http.Request, i
 		return
 	}
 
-	inst := pkgmgr.NewInstaller(conn, s.adminActor)
+	inst := newInstaller(conn, s.adminActor)
 	inst.RoleIDs = kernelRoleIDs()
 	inst.Submit = s.pkgmgrSubmit
 

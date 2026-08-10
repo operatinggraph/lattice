@@ -75,7 +75,7 @@ func InstallPhase1Packages(t *testing.T, ctx context.Context, conn *substrate.Co
 	stop := RunMetaInstallPipeline(t, ctx, conn)
 	defer stop()
 
-	inst := pkgmgr.NewInstaller(conn, bootstrap.BootstrapIdentityKey)
+	inst := NewInstaller(conn, bootstrap.BootstrapIdentityKey)
 	inst.RoleIDs = StandardRoleIDs()
 
 	for _, def := range []pkgmgr.Definition{

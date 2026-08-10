@@ -166,6 +166,35 @@ func CoreKVLinkTargetFilter(bucket, label string) string {
 	return "$KV." + bucket + ".lnk.*.*.*." + label + ".>"
 }
 
+// MaxNarrowedFilterLabels caps how many distinct vertex-type labels a narrowed
+// Core KV consumer filter may be derived from. Each label expands to three
+// filter-subject forms (CoreKVNarrowedFilters), so this bounds how large the
+// FilterSubjects slice JetStream evaluates per delivered message gets before
+// the broad `$KV.<bucket>.>` filter — simpler, and just as fail-safe — is the
+// better choice.
+//
+// It lives here, beside the builder whose output it bounds, because TWO
+// packages must agree on it and neither owns the other:
+// internal/refractor/pipeline decides at runtime whether a lens narrows, and
+// internal/pkgmgr refuses at install time a lens whose worst-case expanded
+// label count would cross it (dynamic-type-taxonomy-design.md §10.2 — an
+// abstract type's LeafBudget defaults to exactly this value). Two constants
+// tied only by a comment drift the moment either side moves, and the drift is
+// silent in the direction that matters: an install-time gate computing against
+// a stale cap either refuses lenses the runtime would have narrowed, or waves
+// through lenses it would not.
+const MaxNarrowedFilterLabels = 8
+
+// MaxNarrowedFilterSubjects caps the TOTAL filter-subject count of a
+// relation-narrowed set, whose size is |labels| x (1 + 2|relations|) and so is
+// no longer bounded by MaxNarrowedFilterLabels alone. It is set to exactly the
+// relation-blind ceiling (MaxNarrowedFilterLabels x 3, the width
+// CoreKVNarrowedFilters emits), so no lens that narrows by label can stop
+// narrowing because the relation dimension was added: a lens over budget here
+// falls back to the relation-blind narrowed set, and only a lens over the LABEL
+// budget falls all the way back to the broad filter.
+const MaxNarrowedFilterSubjects = MaxNarrowedFilterLabels * 3
+
 // CoreKVNarrowedFilters returns the deduped, deterministically-ordered set of
 // JetStream filter subjects that together cover every Core KV key a plain
 // full-engine lens's referenced labels can affect: for each label, its vertex

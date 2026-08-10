@@ -428,7 +428,7 @@ func (s *server) packagesApply(w http.ResponseWriter, r *http.Request, requireIn
 		DryRun:           r.FormValue("dryRun") == "true",
 		RequireInstalled: requireInstalled,
 	}
-	inst := pkgmgr.NewInstaller(conn, s.adminActor)
+	inst := newInstaller(conn, s.adminActor)
 	inst.RoleIDs = kernelRoleIDs()
 	inst.Submit = s.pkgmgrSubmit
 
@@ -481,7 +481,7 @@ func (s *server) handlePackagesUninstall(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	inst := pkgmgr.NewInstaller(conn, s.adminActor)
+	inst := newInstaller(conn, s.adminActor)
 	inst.RoleIDs = kernelRoleIDs()
 	inst.Submit = s.pkgmgrSubmit
 

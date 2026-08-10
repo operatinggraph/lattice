@@ -96,3 +96,12 @@ func EntityNanoIDForTest(name, tag string) string {
 func PermTagForTest(operationType, scope string) string {
 	return permTag(operationType, scope)
 }
+
+// LensNeedsCapCheckForTest exposes the install-time label-cap gate's only
+// precondition — exhaustive, and carrying at least one `*` sigil — to the
+// external pkgmgr_test package. It exists so a test can pin the exemption of
+// the SHIPPED sigil-bearing lens against that package's REAL source, which the
+// internal test package cannot import: packages/service-location imports
+// pkgmgr, so `package pkgmgr` importing it back would cycle. Test-only; not
+// part of the public API.
+func LensNeedsCapCheckForTest(facts SpecLabels) bool { return lensNeedsCapCheck(facts) }

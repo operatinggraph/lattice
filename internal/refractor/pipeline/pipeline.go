@@ -24,22 +24,18 @@ import (
 	"github.com/operatinggraph/lattice/internal/substrate"
 )
 
-// maxNarrowedFilterLabels caps how many referenced labels ConsumerFilter will
-// derive a narrowed FilterSubjects set from. Each label expands to up to 3
-// filter-subject forms (subjects.CoreKVNarrowedFilters), so this bounds how
-// large the FilterSubjects slice JetStream evaluates per delivered message
-// gets before the broad filter — simpler, and just as fail-safe — is the
-// better choice.
-const maxNarrowedFilterLabels = 8
-
-// maxNarrowedFilterSubjects caps the TOTAL filter-subject count of a
-// relation-narrowed set, whose size is |labels| x (1 + 2|relations|) and so is
-// no longer bounded by maxNarrowedFilterLabels alone. It is set to exactly the
-// relation-blind ceiling (maxNarrowedFilterLabels x 3), so no lens that narrows
-// today can stop narrowing because the relation dimension was added: a lens
-// over budget here falls back to the relation-blind narrowed set, and only a
-// lens over the LABEL budget falls all the way back to the broad filter.
-const maxNarrowedFilterSubjects = maxNarrowedFilterLabels * 3
+// maxNarrowedFilterLabels and maxNarrowedFilterSubjects are the narrowed-filter
+// budgets this package derives a consumer filter against. Both are aliases of
+// the single definitions in internal/refractor/subjects, which owns them
+// because the label cap has a second, independent reader: internal/pkgmgr
+// refuses at install time a lens whose worst-case expanded label count would
+// cross it (dynamic-type-taxonomy-design.md §10.2). Aliased rather than
+// referenced inline so every use site in this file reads as the local budget it
+// has always been, while there remains exactly one number.
+const (
+	maxNarrowedFilterLabels   = subjects.MaxNarrowedFilterLabels
+	maxNarrowedFilterSubjects = subjects.MaxNarrowedFilterSubjects
+)
 
 // ProbeInterval is the delay between consecutive probe attempts during an infrastructure pause.
 // Exported so tests can override it to a short value for fast recovery detection.

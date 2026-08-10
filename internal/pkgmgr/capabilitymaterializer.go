@@ -37,16 +37,62 @@ func enabledArtifactKindsList() []string {
 	return kinds
 }
 
-// CypherParser abstracts the static openCypher parse check the "lens" kind's §5
-// validation needs. Injected rather than pkgmgr importing
-// internal/refractor/ruleengine/full directly: that package's own test binary
-// transitively imports pkgmgr (parse_test.go → packages/identity-hygiene →
-// pkgmgr), so a direct production import here would be a cycle. A caller
-// (tests today; the bridge's capabilityAuthor adapter in a later increment)
-// supplies a full.New()-backed implementation.
+// SpecLabels is what a static parse of one lens spec tells the installer about
+// the label set the runtime would derive that lens's narrowed Core KV consumer
+// filter from — a field-for-field mirror of
+// internal/refractor/ruleengine/full.LabelFacts, carried as pkgmgr's own type
+// for the same reason LensSpec.Source mirrors chronicler's config by JSON shape
+// rather than by Go type: pkgmgr must not import the engine (see CypherParser).
+//
+// The three fields are the inputs the runtime folds together
+// (pipeline.useFullEngineBranches): the referenced set, minus each expansion
+// label's raw text, plus that label's resolved concrete closure. Referenced
+// therefore CONTAINS the raw text of every Expansion member — the engine's
+// ReferencedLabels collects label text blind to the `*` sigil — which is why
+// every count derived from these two subtracts before it adds.
+type SpecLabels struct {
+	// Referenced is every vertex-type label the spec's patterns can bind.
+	Referenced map[string]struct{}
+
+	// Exhaustive reports whether Referenced is authoritative. False means the
+	// runtime must treat every type as relevant — an unlabeled node pattern
+	// that is not a re-reference, or any variable-length relationship — and the
+	// consumer filter goes broad however few labels the set holds.
+	Exhaustive bool
+
+	// Expansion is the subset of labels written with the trailing `*`
+	// taxonomy-expansion sigil, each of which the runtime replaces with the
+	// concrete types the taxonomy resolves it to.
+	Expansion map[string]struct{}
+}
+
+// CypherParser abstracts the static openCypher parse pkgmgr needs in two
+// places: the "lens" kind's §5 capability-artifact validation, and the
+// install-time narrowed-filter budget gate (dynamic-type-taxonomy-design.md
+// §10.2), which needs a spec's label sets and cannot get them from a
+// parse-only answer.
+//
+// Injected rather than pkgmgr importing internal/refractor/ruleengine/full
+// directly: that package's own test binary transitively imports pkgmgr
+// (parse_test.go → packages/identity-hygiene → pkgmgr), so a direct production
+// import here would be a cycle. A caller (cmd/lattice, cmd/loupe, tests)
+// supplies a full.SpecLabels-backed implementation.
+//
+// ONE METHOD, WIDENED, rather than a second optional interface the callers
+// type-assert. An optional interface makes a missing implementation a silent
+// capability gap — an adapter that never grew the second method still satisfies
+// CypherParser, still compiles, and the budget gate simply never runs for
+// whichever caller wired it. That is precisely the quiet fail-open §10.2 exists
+// to replace with a decidable answer. Widening the one method makes the
+// compiler the enforcement point instead: every implementer must answer, and
+// each adapter's `var _ pkgmgr.CypherParser` assertion fails loudly the day one
+// does not.
 type CypherParser interface {
-	// Parse returns a non-nil error if ruleBody fails to statically parse.
-	Parse(ruleBody string) error
+	// Parse statically parses ruleBody, returning a non-nil error if it does
+	// not parse and the spec's label facts if it does. The label facts are
+	// derived from the SAME parse as the error, so a caller can never pair a
+	// successful parse with label sets compiled from a different body.
+	Parse(ruleBody string) (SpecLabels, error)
 }
 
 // ArtifactValidationReport is the §5 record-time deterministic-validation
@@ -797,7 +843,7 @@ func validateLensArtifact(lc LensArtifactContent, parser CypherParser) ArtifactV
 	}
 	if lc.Spec == "" {
 		errs = append(errs, "spec is required")
-	} else if err := parser.Parse(lc.Spec); err != nil {
+	} else if _, err := parser.Parse(lc.Spec); err != nil {
 		errs = append(errs, fmt.Sprintf("cypher spec does not parse: %v", err))
 	}
 

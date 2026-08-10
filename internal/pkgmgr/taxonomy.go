@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/operatinggraph/lattice/internal/refractor/subjects"
 	"github.com/operatinggraph/lattice/internal/substrate"
 )
 
@@ -24,10 +25,14 @@ const subtypeOfRelation = "subtypeOf"
 // install error (never silently truncated).
 const maxTaxonomyDepth = 4
 
-// leafBudgetDefault is the narrowed-filter label cap (maxNarrowedFilterLabels,
-// internal/refractor/ruleengine/full/pipeline.go) an abstract type's
-// LeafBudget defaults to when the author leaves it unset (§10.2).
-const leafBudgetDefault = 8
+// leafBudgetDefault is the budget an abstract type's LeafBudget takes when its
+// author leaves it unset (§10.2). It IS the narrowed-filter label cap, read
+// from the one definition of that number (internal/refractor/subjects) rather
+// than restated here: both of this package's readers of it — resolveTaxonomy's
+// leaf-count warning and checkLensLabelCap's refusal — are pricing a lens's
+// eventual consumer filter against internal/refractor/pipeline's budget, and a
+// second copy of the value would let the two sides disagree silently.
+const leafBudgetDefault = subjects.MaxNarrowedFilterLabels
 
 // ErrSubtypeOfRefUnresolved is returned by Install/Upgrade/Apply when a
 // DDLSpec.SubtypeOfRef does not resolve to a live vertexType meta-vertex —

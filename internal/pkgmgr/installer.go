@@ -55,6 +55,22 @@ type Installer struct {
 	// (loupe-operator-auth-lift-design.md §3.2). nil (the default)
 	// preserves today's direct-NATS behavior unchanged.
 	Submit func(ctx context.Context, operationType, class, requestID string, payload map[string]any) (*processor.OperationReply, error)
+
+	// SpecParser supplies the static openCypher parse the install-time
+	// narrowed-filter budget gate needs (checkLensLabelCap,
+	// dynamic-type-taxonomy-design.md §10.2): it reads each declared lens's
+	// label sets so the installer can price a `*` label's declared worst case
+	// against the cap before the lens ever reaches Refractor.
+	//
+	// Optional, and unset leaves that gate silent — which is a diagnostic loss,
+	// not an enforcement hole. The property is enforced unconditionally at
+	// runtime by pipeline.ConsumerFilter's own cap (broad filter, a warn log,
+	// and filterBroadReason "label-cap" on the lens's health entry); what an
+	// unwired installer loses is the EARLY, decidable answer at the actor who
+	// can fix it. Every production entry point wires it (cmd/lattice-pkg,
+	// cmd/loupe); it is a field rather than a NewInstaller argument because
+	// pkgmgr cannot construct one itself — CypherParser's doc has the cycle.
+	SpecParser CypherParser
 }
 
 // NewInstaller builds a default-configured installer.
@@ -301,14 +317,20 @@ func (i *Installer) buildManifestBatch(ctx context.Context, def Definition, scan
 		retentionClassNanoIDs[idx] = RetentionClassID(def.Name, rc.CanonicalName)
 	}
 
-	// dynamic-type-taxonomy-design.md §3.5/§8: resolve every declared
-	// SubtypeOfRef (batch-local first, then the installed kernel), and
-	// refuse a newly-declared Abstract type that still has live instances
-	// (checkAbstractNoLiveInstances, taxonomy.go). A def using neither
-	// mechanism (needsTaxonomyScan false) performs zero extra reads — and
-	// when the caller (Install) already fetched scan, neither does this def
-	// re-list the bucket even when it DOES use one.
-	if !scan.fetched && needsTaxonomyScan(def) {
+	// dynamic-type-taxonomy-design.md §3.5/§8/§10.2: resolve every declared
+	// SubtypeOfRef (batch-local first, then the installed kernel), refuse a
+	// newly-declared Abstract type that still has live instances
+	// (checkAbstractNoLiveInstances, taxonomy.go), and refuse a lens whose own
+	// abstract labels cannot fit the narrowed-filter label cap at their declared
+	// worst case (checkLensLabelCap, lenslabelcap.go). A def using none of the
+	// three (needsTaxonomyScan false, and no lens carrying the `*` sigil)
+	// performs zero extra reads — and when the caller (Install) already fetched
+	// scan, neither does this def re-list the bucket even when it DOES use one.
+	//
+	// The lens parse runs FIRST and reads no KV, because whether the label-cap
+	// gate needs the scan at all is a property of the parsed specs.
+	lensLabels := i.lensSpecLabels(def)
+	if !scan.fetched && (needsTaxonomyScan(def) || needsLensCapScan(lensLabels)) {
 		var err error
 		scan, err = i.scanMeta(ctx)
 		if err != nil {
@@ -316,6 +338,9 @@ func (i *Installer) buildManifestBatch(ctx context.Context, def Definition, scan
 		}
 	}
 	if err := i.checkAbstractNoLiveInstances(ctx, def, scan); err != nil {
+		return nil, nil, "", nil, err
+	}
+	if err := i.checkLensLabelCap(ctx, def, lensLabels, scan); err != nil {
 		return nil, nil, "", nil, err
 	}
 	subtypeAbstractIDs, leafBudgetWarnings, err := i.resolveTaxonomy(ctx, def, scan)

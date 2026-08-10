@@ -725,6 +725,29 @@ func (p *patScanner) ident() (string, int, int) {
 }
 
 // node parses `( [var] [:label] [{props}] )`.
+//
+// The taxonomy-expansion sigil (`(l:location*)`, dynamic-type-taxonomy-design.md
+// §3.2) is NOT part of this grammar, and its absence is a decision rather than an
+// omission — refused by name below so a package author reads the reason instead
+// of an offset.
+//
+// A walk chain's node labels are not free-floating pattern text: the label bound
+// to AnchorVar must equal the declared AnchorType (parseOneWalk), and that
+// AnchorType is written into every produced grant row as a LITERAL audit field
+// (collectBranch's `anchorType: '%s'`), read downstream by
+// personalinterest.IsRelevant and the §6.14 anchor-coverage gate. An abstract
+// label on the anchor would make every row assert a type no vertex has: the
+// anchor keys are concrete (vtx.unit.*, vtx.building.*) while the audit field
+// says `location`. Making that honest needs a PER-ROW anchor type, which is the
+// engine function the design names as unbuilt (§14's C4 item 9), not a parser
+// change here.
+//
+// Accepting it only in the non-anchor positions was considered and rejected: it
+// buys a half-mechanism with no declared consumer — the sigil's value is
+// polymorphism at the anchor, since the intermediate hops are already constrained
+// by which edges exist — and it would put the auth plane's own reachability walk
+// on the taxonomy resolver for a widening nobody asked for. So the whole grammar
+// refuses, and the refusal is explicit.
 func (p *patScanner) node(lp *linearPattern) error {
 	if p.peek() != '(' {
 		return fmt.Errorf("expected a node pattern `(...)` at offset %d", p.i)
@@ -749,6 +772,18 @@ func (p *patScanner) node(lp *linearPattern) error {
 		}
 	}
 	p.skipSpace()
+	// Detected AFTER the optional whitespace skip, not immediately after the
+	// label ident, because the openCypher grammar the lens engine compiles
+	// against admits `SP?` between the label and the sigil (Cypher.g4's
+	// oC_NodePattern) — so `(l:location *)` carries the sigil there and must be
+	// refused here by the same name, not fall through to a bare ')' complaint.
+	if p.peek() == '*' {
+		return fmt.Errorf(
+			"node label %q carries the taxonomy-expansion sigil `*` at offset %d — a read-grant Walk chain "+
+				"names concrete types only: the walk's anchor type is written into every grant row as a literal "+
+				"audit field, which an abstract label would make false for every concrete anchor it binds",
+			label, p.i)
+	}
 	if p.peek() == '{' {
 		depth := 0
 		for !p.eof() {

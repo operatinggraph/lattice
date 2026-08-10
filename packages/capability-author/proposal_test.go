@@ -51,9 +51,16 @@ const (
 // design (compute the §5 verdict BEFORE submitting RecordCapabilityProposal).
 type fullCypherParser struct{}
 
-func (fullCypherParser) Parse(ruleBody string) error {
-	_, err := full.New().Parse(ruleBody)
-	return err
+func (fullCypherParser) Parse(ruleBody string) (pkgmgr.SpecLabels, error) {
+	facts, err := full.SpecLabels(ruleBody)
+	if err != nil {
+		return pkgmgr.SpecLabels{}, err
+	}
+	return pkgmgr.SpecLabels{
+		Referenced: facts.Referenced,
+		Exhaustive: facts.Exhaustive,
+		Expansion:  facts.Expansion,
+	}, nil
 }
 
 // staffCapDoc grants the staff actor every one of the package's ops — modeled

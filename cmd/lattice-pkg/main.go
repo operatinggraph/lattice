@@ -206,7 +206,7 @@ func runApply(cmd, pkgPath, natsURL, bootstrapPath string, opts pkgmgr.ApplyOpti
 	}
 	defer conn.Close()
 
-	inst := pkgmgr.NewInstaller(conn, adminActor)
+	inst := newInstaller(conn, adminActor)
 	inst.RoleIDs = roleIDsFromBootstrap(bs)
 	ctx, cancel := context.WithTimeout(context.Background(), cliTimeout)
 	defer cancel()
@@ -302,7 +302,7 @@ func runUninstall(packageName, natsURL, bootstrapPath string, logger *slog.Logge
 	}
 	defer conn.Close()
 
-	inst := pkgmgr.NewInstaller(conn, adminActor)
+	inst := newInstaller(conn, adminActor)
 	ctx, cancel := context.WithTimeout(context.Background(), cliTimeout)
 	defer cancel()
 	res, err := inst.Uninstall(ctx, packageName)
@@ -355,7 +355,7 @@ func runApplyProposal(proposalID, natsURL, bootstrapPath string, logger *slog.Lo
 		return fmt.Errorf("build apply plan: %w", err)
 	}
 
-	inst := pkgmgr.NewInstaller(conn, adminActor)
+	inst := newInstaller(conn, adminActor)
 	inst.RoleIDs = roleIDsFromBootstrap(bs)
 	res, err := inst.Apply(ctx, plan.Definition, pkgmgr.ApplyOptions{})
 	if err != nil {
@@ -478,7 +478,7 @@ func runList(natsURL, bootstrapPath string, logger *slog.Logger) error {
 	}
 	defer conn.Close()
 
-	inst := pkgmgr.NewInstaller(conn, "")
+	inst := newInstaller(conn, "")
 	ctx, cancel := context.WithTimeout(context.Background(), cliTimeout)
 	defer cancel()
 	pkgs, err := inst.List(ctx)
