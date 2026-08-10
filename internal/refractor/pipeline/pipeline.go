@@ -1625,6 +1625,65 @@ func (p *Pipeline) ConsumerFilter() (filterSubjects []string, filterSubject stri
 	}
 }
 
+// ConsumerFilterLabels reports the label set the lens's Core KV consumer
+// currently ADMITS, and whether it is narrowed to that set at all. A broad
+// filter answers (nil, false): it admits every label in the bucket, which is
+// not a set that can be compared with another.
+//
+// It answers the LABEL dimension of what ConsumerFilter derives, and it applies
+// the same eligibility and the same label cap, so the two never disagree about
+// whether the lens is narrowed. Callers comparing what a lens admitted BEFORE a
+// rule swap against what it admits after (cmd/refractor's hot-reload retraction
+// decision) need exactly this: the filter SUBJECTS encode the relation
+// dimension too, so diffing their strings reports a relation-narrowed filter
+// widening to a label-narrowed one — strictly more admitted — as though labels
+// had been dropped.
+func (p *Pipeline) ConsumerFilterLabels() (map[string]struct{}, bool) {
+	rs := p.ruleState()
+	labels, ok := p.narrowedFilterEligible(rs)
+	if !ok || len(labels) == 0 || len(labels) > maxNarrowedFilterLabels {
+		return nil, false
+	}
+	out := make(map[string]struct{}, len(labels))
+	for l := range labels {
+		out[l] = struct{}{}
+	}
+	return out, true
+}
+
+// RebuildTruncateIsScoped reports whether a truncating rebuild on this
+// pipeline's CURRENT adapter would clear only the rows this lens wrote.
+//
+// It is the precondition for asking for a truncate that is not already forced:
+// NatsKVAdapter.Truncate with no bound key prefix purges the WHOLE bucket, and
+// several shipped lenses share a bucket with other producers (capability-kv
+// carries the core cap.<actor> surface alongside per-package producers). For
+// those, a truncate is not a rebuild of this lens — it is a wipe of everyone
+// else's rows, healed only at sweep pace.
+//
+// Scoped means one of two things:
+//
+//   - the adapter carries a key prefix (projection.ApplyTruncateScope bound the
+//     lens's own declared output prefix onto it), so the purge is confined to
+//     the keys under it; or
+//   - the adapter truncates a target it does not share by construction — a
+//     Postgres table named by the lens's own INTO, whose one shared instance
+//     (actor_read_grants) is served by GrantWriterAdapter, which deliberately
+//     implements no Truncater at all and so answers false here.
+//
+// An adapter that cannot truncate answers false: asking for a truncate it will
+// decline would make the caller believe rows were cleared that were not.
+func (p *Pipeline) RebuildTruncateIsScoped() bool {
+	adpt := p.currentAdapter()
+	if _, ok := adpt.(adapter.Truncater); !ok {
+		return false
+	}
+	if prefixed, ok := adpt.(interface{ KeyPrefix() string }); ok {
+		return prefixed.KeyPrefix() != ""
+	}
+	return true
+}
+
 // SetEnvelopeFn installs the on-wire envelope wrapper. Pass nil to clear.
 // Clears any installed MultiEnvelopeFn — the two are alternatives, never both
 // active on the same pipeline. Must be called before Run.
@@ -2304,6 +2363,46 @@ func (p *Pipeline) rebuildWithSignal(ctx context.Context, truncate bool) (*rebui
 	return sig, nil
 }
 
+// resolveTruncate applies the guarded-target force rule to a rebuild's
+// requested truncate. A guarded bucket forces it: the target's monotonic
+// watermarks would reject a lower-seq historical replay, leaving rejected-write
+// holes, and truncating clears the watermarks with the data so the stream
+// replays from empty and the highest-seq write wins — a steady state identical
+// to a from-scratch projection (Contract #6 §6.2). The force keys off Guarded()
+// so the pipeline never learns lens canonical names.
+//
+// The force applies only to a target that can actually be truncated. A guarded
+// target that cannot (the grant family, which shares one table across every
+// producer and so must never TRUNCATE it) gets the honest account instead:
+// forcing there would announce a repair the Truncater branch then silently
+// declines, leaving the operator to believe the watermarks were cleared when a
+// replay is still about to be rejected against them.
+//
+// "Rejected against them" is only half of what happens, and the half an
+// operator reaching for a rebuild usually does not want. The §6.14 guard lives
+// in the ON CONFLICT arm, so a row still PRESENT replays against its own stored
+// seq and is a no-op, while a row ABSENT — the out-of-band restore or partial
+// wipe a rebuild is the response to — takes the plain INSERT and is re-derived.
+// So an un-truncatable guarded rebuild is a repair for exactly the divergence it
+// looks powerless against, and saying only that rows "survive" discourages the
+// action that fixes it.
+func resolveTruncate(adpt adapter.Adapter, ruleID string, truncate bool) bool {
+	if truncate {
+		return true
+	}
+	g, ok := adpt.(interface{ Guarded() bool })
+	if !ok || !g.Guarded() {
+		return false
+	}
+	if _, truncatable := adpt.(adapter.Truncater); !truncatable {
+		slog.Info("pipeline: rebuild: guarded target cannot be truncated (shared with other producers) — the replay re-derives rows that are ABSENT and leaves rows already present at or above their stored watermark unchanged; this repairs an out-of-band wipe but does not rewrite live rows",
+			"ruleId", ruleID)
+		return false
+	}
+	slog.Info("pipeline: rebuild: guarded bucket forces truncate (avoids rejected-write holes)", "ruleId", ruleID)
+	return true
+}
+
 func (p *Pipeline) rebuild(ctx context.Context, truncate bool, sig *rebuildSignal) error {
 	// Mark the rebuild in flight before the status write so a concurrent
 	// supervisor health persist (probe recovery, operator resume) cannot
@@ -2323,40 +2422,23 @@ func (p *Pipeline) rebuild(ctx context.Context, truncate bool, sig *rebuildSigna
 		}
 	}
 
-	// 2. Optional target-store truncation. A guarded bucket forces truncate: its
-	// monotonic watermarks would reject a lower-seq historical replay, leaving
-	// rejected-write holes. Truncating clears the watermarks with the data so the
-	// stream replays from empty and the highest-seq write wins, yielding a steady
-	// state identical to a from-scratch projection (Contract #6 §6.2). The force
-	// keys off Guarded() so the pipeline never learns lens canonical names.
-	//
-	// The force applies only to a target that can actually be truncated. A
-	// guarded target that cannot (the grant family, which shares one table
-	// across every producer and so must never TRUNCATE it) gets the honest
-	// account instead: forcing there would announce a repair that the
-	// Truncater branch below then silently declines, leaving the operator to
-	// believe the watermarks were cleared when a replay is still about to be
-	// rejected against them.
-	//
-	// "Rejected against them" is only half of what happens, and the half an
-	// operator reaching for a rebuild usually does not want. The §6.14 guard
-	// lives in the ON CONFLICT arm, so a row still PRESENT replays against its
-	// own stored seq and is a no-op, while a row ABSENT — the out-of-band
-	// restore or partial wipe a rebuild is the response to — takes the plain
-	// INSERT and is re-derived. So an un-truncatable guarded rebuild is a
-	// repair for exactly the divergence it looks powerless against, and saying
-	// only that rows "survive" discourages the action that fixes it.
-	if g, ok := p.currentAdapter().(interface{ Guarded() bool }); ok && g.Guarded() && !truncate {
-		if _, truncatable := p.currentAdapter().(adapter.Truncater); truncatable {
-			slog.Info("pipeline: rebuild: guarded bucket forces truncate (avoids rejected-write holes)",
-				"ruleId", p.ruleID)
-			truncate = true
-		} else {
-			slog.Info("pipeline: rebuild: guarded target cannot be truncated (shared with other producers) — the replay re-derives rows that are ABSENT and leaves rows already present at or above their stored watermark unchanged; this repairs an out-of-band wipe but does not rewrite live rows",
-				"ruleId", p.ruleID)
-		}
-	}
+	// 2. Optional target-store truncation, after the guarded-target force rule
+	// (resolveTruncate) has had its say about what the request really means.
+	truncate = resolveTruncate(p.currentAdapter(), p.ruleID, truncate)
 	if truncate {
+		// A target you cannot reset is a target you must not clear. The truncate
+		// below is irreversible, while the only thing that re-derives the rows it
+		// removes is the reset further down — a supervisor call that answers "not
+		// managed" for a consumer already removed. Establishing that here rather
+		// than discovering it at the reset is what keeps a lens deletion from
+		// leaving a purged target behind: pipelineDeleter.Delete removes the
+		// durable BEFORE it cancels the run context, so a rebuild racing a delete
+		// finds the consumer gone while the pipeline still looks alive.
+		if p.supervisor == nil || !p.supervisor.IsManaged(p.consumerCfg.Name) {
+			return p.abandonRebuild(ctx, sig, fmt.Errorf(
+				"pipeline: rebuild: consumer %q is not managed — refusing to truncate a target that cannot be re-derived",
+				p.consumerCfg.Name))
+		}
 		adpt := p.currentAdapter()
 		if t, ok := adpt.(adapter.Truncater); ok {
 			if err := t.Truncate(ctx); err != nil {

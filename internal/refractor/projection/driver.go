@@ -500,9 +500,21 @@ func ApplyGuard(adpt adapter.Adapter, r *lens.Rule) error {
 // the swap rather than through activation.
 //
 // A rule with no derivable prefix leaves the adapter untouched, which truncates
-// the whole bucket. That is not a downgrade: a lens with no output key pattern
-// is not a shared-target lens, and a dedicated target's rebuild has to clear
-// everything to reach the empty high-water state §6.2 wants.
+// the WHOLE bucket. That is the right default for a lens owning its target
+// outright — a dedicated target's rebuild has to clear everything to reach the
+// empty high-water state §6.2 wants — but it is NOT evidence that the lens owns
+// it. A lens can share a bucket and still reach this function's early returns:
+// rbac-domain's capabilityRoleIndex is neither an actor-aggregate nor carries
+// an output key pattern, and writes capability-kv beside the core cap.<actor>
+// surface; one-bill's four plain lenses share one history bucket. So an
+// unscoped adapter means "unconfined", never "unshared", and a caller deciding
+// whether to ASK for a truncate must read it as unconfined —
+// Pipeline.RebuildTruncateIsScoped is that test, and it refuses.
+//
+// What keeps the truncates that already happen safe is that they are FORCED
+// only for a guarded adapter, and the guard has the same actor-aggregate driver
+// this scoping does (projection.RequiresGuard): every lens truncating on a
+// rebuild today is a lens this function has scoped.
 func ApplyTruncateScope(adpt adapter.Adapter, r *lens.Rule) {
 	nkv, ok := adpt.(*adapter.NatsKVAdapter)
 	if !ok {
