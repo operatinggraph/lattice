@@ -271,7 +271,21 @@ func newPipelineEntry(
 		taxExpansionLabels: labels,
 		taxExpansion:       expansion,
 		taxExpansionStatus: status,
+		// The shrink baseline is seeded from the same answer, and only when
+		// that answer is resolved — an activation that could not resolve the
+		// expansion has no set the gate is matching against to shrink FROM.
+		taxExpansionResolved: resolvedExpansion(expansion, status),
 	}
+}
+
+// resolvedExpansion returns expansion when status is resolved, and nil
+// otherwise — the seed for pipelineEntry.taxExpansionResolved, which records
+// only answers a filter can actually be built from.
+func resolvedExpansion(expansion map[string]map[string]struct{}, status taxonomy.Status) map[string]map[string]struct{} {
+	if status == taxonomy.StatusUnknown {
+		return nil
+	}
+	return expansion
 }
 
 // reloader applies a lens-definition update to the running pipeline registry.
@@ -320,6 +334,21 @@ type reloader struct {
 	// without going through either of those two. nil in tests that supply
 	// no source; retryRefused then retries every queued rule unconditionally.
 	ruleKnown func(ruleID string) bool
+
+	// taxRebuild is the bounded, coalescing scheduler every owed Rebuild runs
+	// on — the one thing standing between a taxonomy event over a
+	// hundred-lens corpus and a hundred simultaneous durable delete-recreates
+	// (see taxonomyRebuildConcurrency). Usable at its zero value: it starts its
+	// workers on the first enqueue, so the many tests that build a bare
+	// &reloader{} need no constructor.
+	taxRebuild taxonomyRebuildScheduler
+
+	// rebuildPipeline performs one entry's rebuild. nil in production, where
+	// runRebuild calls entry.pipeline.Rebuild directly; supplied by tests that
+	// need to observe or block the rebuild itself — the fan-out bound is a
+	// property of the SCHEDULER, and pinning it against real pipelines would
+	// mean a hundred live JetStream consumers per assertion.
+	rebuildPipeline func(entry *pipelineEntry, truncate bool) error
 
 	refusedMu sync.Mutex
 	// refused holds every lens whose activation failed at
@@ -428,10 +457,26 @@ func (rl *reloader) update(_, newLens *lens.Rule, kind lens.UpdateKind) {
 				}
 			}
 		}
+		// The label set the OLD rule admits, read before the swap replaces it:
+		// two different compiled rules share no other currency, and comparing
+		// what each ADMITS is what tells a MATCH edit that narrowed the set
+		// from one that widened it.
+		prevLabels, prevNarrowed := entry.pipeline.ConsumerFilterLabels()
 		if err := entry.pipeline.UseFullEngineBranches(rl.fullEngine, newLens.CompiledRule, newLens.CompiledBranches); err != nil {
 			rl.refuse(entry, newLens.ID, "label expansion (MATCH update)", "err", err)
 			return
 		}
+		// A narrowing MATCH edit orphans rows for exactly the reason a taxonomy
+		// shrink does, and by exactly the same mechanism: the new filter admits
+		// no event for the labels it dropped, so no delivery can ever retract
+		// the rows the old rule already projected for them. The rebuild this
+		// arm already owes therefore has to truncate — see
+		// pipelineEntry.taxRebuildTruncate for which target shapes that
+		// actually retracts on, and which retract through DiffRetraction
+		// instead.
+		nextLabels, nextNarrowed := entry.pipeline.ConsumerFilterLabels()
+		matchShrank := consumerFilterShrank(prevLabels, prevNarrowed, nextLabels, nextNarrowed) &&
+			rl.truncateIsSafe(entry, newLens.ID)
 		// The RUNNING pipeline now evaluates newLens — entry.rule (and the
 		// taxonomy re-derivation baseline it feeds) must track it, not the
 		// rule this reload started from (dynamic-type-taxonomy-design.md §14
@@ -456,8 +501,18 @@ func (rl *reloader) update(_, newLens *lens.Rule, kind lens.UpdateKind) {
 		// though it runs on the single dispatch goroutine like everything
 		// else in update(), touches fields a background goroutine also
 		// touches, so it takes the same lock.
+		//
+		// The shrink baseline tracks the new rule's answer too, so the next
+		// taxonomy event compares against the labels the RUNNING rule expands,
+		// not the ones the previous one did. An unresolved answer leaves it
+		// alone (entry.taxExpansionResolved's own doc): the worst that costs is
+		// one redundant truncating rebuild, when a later resolved answer for a
+		// different label set reads as a shrink of the old one.
 		entry.taxMu.Lock()
 		entry.taxExpansion, entry.taxExpansionStatus = newExpansion, newStatus
+		if resolved := resolvedExpansion(newExpansion, newStatus); resolved != nil {
+			entry.taxExpansionResolved = resolved
+		}
 		entry.taxMu.Unlock()
 		rl.logger.Info("lens MATCH hot-reloaded", "lensId", newLens.ID)
 		entry.reporter.SetRuleSequence(newLens.Sequence)
@@ -490,7 +545,7 @@ func (rl *reloader) update(_, newLens *lens.Rule, kind lens.UpdateKind) {
 		// gate and owes it a rebuild for exactly the same reason, and a MATCH
 		// edit landing beside a taxonomy event would otherwise race two
 		// rebuilds whose answers describe different gates.
-		markTaxonomyRebuildPending(entry)
+		markTaxonomyRebuildPending(entry, matchShrank)
 		rl.startTaxonomyRebuild(entry, newLens.ID,
 			"MATCH hot-reload: rebuild failed — the Core KV consumer filter may still carry the pre-edit label set")
 	}

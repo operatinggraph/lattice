@@ -73,6 +73,80 @@ func taxonomyExpansionEqual(
 	return true
 }
 
+// expansionShrank reports whether next drops anything prevResolved carried —
+// a label gone entirely, or a label that kept fewer members than it had.
+//
+// That is the question a retraction turns on. A GROW is self-repairing: the
+// widened filter delivers the newly-admitted type's events and the replay
+// projects them. A SHRINK is not: the narrowed filter admits no event for the
+// dropped subtype, so nothing will ever arrive to retract the rows already
+// projected for it, and they orphan in the target (on a grant-producing lens,
+// as live grants). The rebuild behind a shrink therefore has to clear the
+// target and re-derive from what the new gate admits.
+//
+// Members ADDED, and labels added, are not a shrink — a set can grow and
+// shrink at once, and the "or" of the two is still a shrink, which is what the
+// per-label scan over prevResolved answers.
+//
+// prevResolved is the last RESOLVED answer (pipelineEntry.taxExpansionResolved),
+// never the raw last answer: comparing against a (nil, StatusUnknown) degrade
+// would read every label as dropped and truncate a live lens over a transient
+// resolver fault. An empty or nil prevResolved is never a shrink — there is
+// nothing recorded to have lost.
+func expansionShrank(prevResolved, next map[string]map[string]struct{}) bool {
+	for label, prevMembers := range prevResolved {
+		nextMembers, ok := next[label]
+		if !ok {
+			return true
+		}
+		for member := range prevMembers {
+			if _, ok := nextMembers[member]; !ok {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// consumerFilterShrank reports whether the label set a lens's Core KV consumer
+// ADMITS got smaller across a rule swap — the MATCH-edit counterpart of
+// expansionShrank, and the same retraction question.
+//
+// It works on Pipeline.ConsumerFilterLabels' answer rather than on the filter
+// SUBJECTS, because the subjects encode the relation dimension as well as the
+// label one: a lens narrowing its relation set publishes
+// `...lnk.<label>.*.<relation>.>` where a label-narrowed one publishes
+// `...lnk.<label>.>`, and those two strings share no prefix even though the
+// second admits strictly MORE. Diffing subject strings therefore reports a
+// widening — a relation-narrowed filter falling back to label-narrowed, or the
+// subject-budget degrade — as though labels had been dropped, which would ask
+// for a truncate on a lens that lost nothing.
+//
+// A lens that is not narrowed admits every label in the bucket, so
+// not-narrowed → narrowed is the largest shrink there is, and narrowed →
+// not-narrowed is a grow.
+//
+// What it does NOT answer is a narrowing WITHIN the label dimension it
+// compares: a same-labels edit that only tightens the relation set or a WHERE
+// predicate reads as no change here. Those rows are retracted by the
+// anchor-presence check on the replayed event instead
+// (Pipeline.evaluatePlain) — the event that would re-derive the row is still
+// delivered, which is exactly what a dropped LABEL takes away.
+func consumerFilterShrank(prevLabels map[string]struct{}, prevNarrowed bool, nextLabels map[string]struct{}, nextNarrowed bool) bool {
+	if !prevNarrowed {
+		return nextNarrowed
+	}
+	if !nextNarrowed {
+		return false
+	}
+	for label := range prevLabels {
+		if _, ok := nextLabels[label]; !ok {
+			return true
+		}
+	}
+	return false
+}
+
 // taxonomyChanged re-derives every live lens whose expansion-label union is
 // non-empty against the current taxonomy resolver state, and retries
 // activation for every lens previously refused because its expansion was
@@ -83,6 +157,12 @@ func taxonomyExpansionEqual(
 // lens.CoreKVSource.SetTaxonomyCallback's doc for why nothing here needs its
 // own goroutine (rederiveEntry's Rebuild call is the one exception,
 // mirroring reloader.update's MatchChange arm exactly).
+//
+// The loop below is the fan-out one taxonomy event produces over the whole live
+// corpus. Each entry's Rebuild is a durable JetStream consumer delete-recreate,
+// so it is queued on the bounded rebuild scheduler rather than started here —
+// see taxonomyRebuildConcurrency. The enqueue never blocks, which is what keeps
+// the sweep off the dispatch goroutine every other lens's events arrive on.
 func (rl *reloader) taxonomyChanged() {
 	for _, entry := range rl.liveEntries() {
 		rl.rederiveEntry(entry)
@@ -101,14 +181,19 @@ func (rl *reloader) taxonomyChanged() {
 // A real change re-runs exactly the §6.2-§6.4 sequence reloader.update's
 // MatchChange arm does: UseFullEngineBranchesForReDerivation (the client
 // gate) synchronously first, THEN Rebuild (the server filter + cursor
-// reset) in its own goroutine — publishing the client gate widens or
+// reset) off this goroutine, on the bounded rebuild scheduler
+// (taxonomy_rebuild_scheduler.go) — publishing the client gate widens or
 // narrows what the pipeline ADMITS immediately, and only the Rebuild
 // afterward can move a JetStream consumer's cursor, so the ordering is
 // load-bearing in both directions (§6.2's asymmetric-consequence argument:
 // a too-broad server filter merely costs extra delivered-then-skipped
 // events, while a too-narrow client gate silently acks-and-drops with no
 // other write path). A shrink goes through Rebuild exactly like a grow —
-// never an in-place filter narrowing (§6.4). UseFullEngineBranchesForReDerivation
+// never an in-place filter narrowing (§6.4) — but TRUNCATING, which is the
+// whole of the retraction: the narrowed filter admits no event for the dropped
+// subtype, so clearing the target and re-deriving from what the new gate
+// admits is the only thing that removes its already-projected rows
+// (entry.taxRebuildTruncate). UseFullEngineBranchesForReDerivation
 // (not UseFullEngineBranches) is used deliberately: a LIVE re-derivation
 // that finds the expansion StatusUnknown must degrade to the broad filter,
 // never keep projecting against a set just proven untrustworthy (§6.5) —
@@ -143,6 +228,11 @@ func (rl *reloader) rederiveEntry(entry *pipelineEntry) {
 	entry.taxMu.Lock()
 	unchanged := taxonomyExpansionEqual(expanded, status, entry.taxExpansion, entry.taxExpansionStatus)
 	pending := entry.taxRebuildPending
+	// A shrink is only ever computed from a RESOLVED answer. StatusUnknown
+	// degrades to the broad filter and keeps the last known good matcher
+	// (§6.5), so it drops nothing — reading it as a shrink would blank a live
+	// lens's target over a transient resolver fault.
+	shrank := status != taxonomy.StatusUnknown && expansionShrank(entry.taxExpansionResolved, expanded)
 	entry.taxMu.Unlock()
 	if unchanged && !pending {
 		return
@@ -168,81 +258,177 @@ func (rl *reloader) rederiveEntry(entry *pipelineEntry) {
 		entry.taxMu.Lock()
 		entry.taxExpansion = expanded
 		entry.taxExpansionStatus = status
+		if status != taxonomy.StatusUnknown {
+			entry.taxExpansionResolved = expanded
+		}
 		entry.taxMu.Unlock()
 	}
 	// An unchanged answer republishes nothing — the gate already in force IS
-	// the answer — and only re-drives the rebuild it is still owed.
-	markTaxonomyRebuildPending(entry)
+	// the answer — and only re-drives the rebuild it is still owed. The
+	// truncate the shrink owes is committed by the SAME critical section that
+	// advances taxGen: a rebuild worker reading the two apart would compute
+	// "not superseded" against the new generation and clear a pending flag for
+	// a truncate it never performed.
+	markTaxonomyRebuildPending(entry, !unchanged && shrank && rl.truncateIsSafe(entry, ruleID))
 	rl.startTaxonomyRebuild(entry, ruleID,
 		"taxonomy re-derivation: rebuild failed — the Core KV consumer filter may still carry the pre-change label set; a later taxonomy event will retry")
 }
 
 // markTaxonomyRebuildPending records that entry's client gate has just been
-// (re)published and owes a Rebuild. Advancing taxGen here is what retires any
-// rebuild goroutine still working for an older gate: its answer describes a
-// gate no longer in force, so it must not clear the flag this sets.
-func markTaxonomyRebuildPending(entry *pipelineEntry) {
+// (re)published and owes a Rebuild, truncating when truncate is set. Advancing
+// taxGen here is what retires any rebuild goroutine still working for an older
+// gate: its answer describes a gate no longer in force, so it must not clear
+// the flag this sets.
+//
+// The truncate is committed HERE, in the same critical section as the taxGen
+// bump, and never by the caller in a section of its own. A worker that read the
+// flag between the two would compare its captured generation against the
+// already-advanced one, find itself NOT superseded, and clear taxRebuildPending
+// and taxRebuildTruncate together for a truncate it never performed — the
+// shrink silently not retracting, which is the whole defect the flag exists to
+// prevent. It is only ever raised, never lowered: a grow arriving while a
+// shrink's rebuild is still owed must not cancel the truncate that rebuild owes.
+func markTaxonomyRebuildPending(entry *pipelineEntry, truncate bool) {
 	entry.taxMu.Lock()
 	entry.taxRebuildPending = true
+	if truncate {
+		entry.taxRebuildTruncate = true
+	}
 	entry.taxGen++
 	entry.taxMu.Unlock()
 }
 
-// startTaxonomyRebuild drives the Rebuild owed to entry's current client gate,
-// in its own goroutine — Rebuild is a network round trip and this runs on
-// CoreKVSource's single dispatch goroutine, which every other lens's events
-// share (reloader.update's MatchChange arm spawns for the same reason).
+// truncateIsSafe reports whether the rebuild entry owes may clear its target,
+// and says so on the lens's log when it may not.
 //
-// At most one such goroutine runs per entry, and it re-reads the gate
-// generation after each attempt: a publication that lands while a rebuild is
-// in flight is picked up by the SAME goroutine on its next pass instead of
-// racing a second one, so the entry converges on the newest gate rather than
-// on whichever rebuild happened to finish last. A failure leaves
-// taxRebuildPending set and stops — the next taxonomy event is what retries,
-// exactly as this file's rederiveEntry doc describes — and is recorded on the
-// lens's health entry under failureReason.
+// A shrink retracts by truncating, but only a target whose truncate is CONFINED
+// to this lens's rows may be cleared: NatsKVAdapter.Truncate with no bound key
+// prefix purges the whole bucket, and several shipped lenses share a bucket
+// with other producers (see Pipeline.RebuildTruncateIsScoped, and
+// pipelineEntry.taxRebuildTruncate for what a refused truncate means for the
+// dropped rows). Wiping every sibling producer's keys is not a smaller harm
+// than leaving this lens's dropped rows behind; it is a much larger one.
+func (rl *reloader) truncateIsSafe(entry *pipelineEntry, ruleID string) bool {
+	if entry.pipeline == nil || !entry.pipeline.RebuildTruncateIsScoped() {
+		rl.logger.Warn("lens admitted-set shrank but its target truncate is not confined to this lens's rows — "+
+			"the rebuild will NOT clear the target, so rows for the dropped labels are not retracted by it",
+			"lensId", ruleID)
+		return false
+	}
+	return true
+}
+
+// startTaxonomyRebuild queues the Rebuild owed to entry's current client gate,
+// off CoreKVSource's single dispatch goroutine — Rebuild is a network round
+// trip and that goroutine is shared by every other lens's events
+// (reloader.update's MatchChange arm queues for the same reason). The enqueue
+// itself never blocks, whatever the queue depth: blocking here would stall the
+// source, not merely the sweep.
+//
+// The work does NOT get a goroutine of its own. One taxonomy event re-derives
+// the whole live corpus, and a goroutine per entry would ask the NATS server
+// for one durable delete-recreate per lens all at once; the scheduler holds
+// that fan-out to taxonomyRebuildConcurrency at a time (see its doc).
+//
+// At most one job runs per entry, and it re-reads the gate generation after
+// each attempt: a publication that lands while a rebuild is in flight is picked
+// up by the SAME job on its next pass instead of racing a second one, so the
+// entry converges on the newest gate rather than on whichever rebuild happened
+// to finish last. That latch — taxRebuildRunning, taken here — is also what
+// coalesces the queue: an entry already queued or already running is never
+// queued twice. A failure leaves taxRebuildPending (and taxRebuildTruncate) set
+// and stops — the next taxonomy event is what retries, exactly as this file's
+// rederiveEntry doc describes — and is recorded on the lens's health entry
+// under failureReason.
 func (rl *reloader) startTaxonomyRebuild(entry *pipelineEntry, ruleID, failureReason string) {
 	entry.taxMu.Lock()
 	if entry.taxRebuildRunning {
-		// The running goroutine re-reads taxGen on its way out and will make
-		// another pass for the gate just published.
+		// The queued (or running) job re-reads taxGen on its way out and will
+		// make another pass for the gate just published.
 		entry.taxMu.Unlock()
 		return
 	}
 	entry.taxRebuildRunning = true
 	entry.taxMu.Unlock()
 
-	go func() {
-		for {
-			entry.taxMu.Lock()
-			gen, pending := entry.taxGen, entry.taxRebuildPending
-			if !pending {
-				entry.taxRebuildRunning = false
-				entry.taxMu.Unlock()
-				return
-			}
+	rl.taxRebuild.enqueue(rl.ctx, taxonomyRebuildJob{
+		entry:   entry,
+		run:     func() { rl.driveTaxonomyRebuild(entry, ruleID, failureReason) },
+		abandon: func() { releaseTaxonomyRebuild(entry) },
+	})
+}
+
+// releaseTaxonomyRebuild hands back the single-flight latch without touching
+// taxRebuildPending or taxRebuildTruncate: the rebuild those two describe is
+// still owed, and leaving them set is what lets the next taxonomy event drive
+// it.
+func releaseTaxonomyRebuild(entry *pipelineEntry) {
+	entry.taxMu.Lock()
+	entry.taxRebuildRunning = false
+	entry.taxMu.Unlock()
+}
+
+// driveTaxonomyRebuild is the body of one queued job: rebuild for the gate in
+// force, and loop while a newer gate lands underneath it. It runs on a
+// scheduler worker, so it occupies one of the taxonomyRebuildConcurrency slots
+// for its whole life — including across the loop, which is what keeps a lens
+// being re-derived repeatedly from taking a second slot.
+//
+// That loop is also the one starvation shape here: a lens whose gate is
+// republished faster than its rebuilds finish holds its slot indefinitely, and
+// with the bound at 2 a pair of such lenses would stall every other lens's
+// rebuild behind them. It is bounded in practice by taxonomy events being
+// operator/package-driven rather than data-driven, and by the settle window
+// (taxonomyRebuildSettle) collapsing a burst into one pass. No backoff is
+// applied; if this is ever observed, that is the mechanism to add.
+//
+// A rebuild for a lens deleted while the job sat queued is not special-cased
+// here. Pipeline.rebuild establishes that the supervisor still manages the
+// consumer BEFORE it truncates anything, so a deleted lens's rebuild fails
+// without clearing a target nothing would re-derive.
+func (rl *reloader) driveTaxonomyRebuild(entry *pipelineEntry, ruleID, failureReason string) {
+	for {
+		entry.taxMu.Lock()
+		gen, pending, truncate := entry.taxGen, entry.taxRebuildPending, entry.taxRebuildTruncate
+		if !pending {
+			entry.taxRebuildRunning = false
 			entry.taxMu.Unlock()
-
-			err := entry.pipeline.Rebuild(rl.ctx, false)
-
-			entry.taxMu.Lock()
-			superseded := entry.taxGen != gen
-			if err == nil && !superseded {
-				entry.taxRebuildPending = false
-			}
-			if !superseded {
-				entry.taxRebuildRunning = false
-			}
-			entry.taxMu.Unlock()
-
-			if err != nil {
-				rl.refuse(entry, ruleID, failureReason, "err", err)
-			}
-			if !superseded {
-				return
-			}
+			return
 		}
-	}()
+		entry.taxMu.Unlock()
+
+		err := rl.runRebuild(entry, truncate)
+
+		entry.taxMu.Lock()
+		superseded := entry.taxGen != gen
+		if err == nil && !superseded {
+			// Cleared together, under one critical section: a pending rebuild
+			// that has lost the truncate it owes would replay a shrink without
+			// retracting anything.
+			entry.taxRebuildPending = false
+			entry.taxRebuildTruncate = false
+		}
+		if !superseded {
+			entry.taxRebuildRunning = false
+		}
+		entry.taxMu.Unlock()
+
+		if err != nil {
+			rl.refuse(entry, ruleID, failureReason, "err", err)
+		}
+		if !superseded {
+			return
+		}
+	}
+}
+
+// runRebuild performs entry's rebuild, through rl.rebuildPipeline when a test
+// injected one and against the real pipeline otherwise.
+func (rl *reloader) runRebuild(entry *pipelineEntry, truncate bool) error {
+	if rl.rebuildPipeline != nil {
+		return rl.rebuildPipeline(entry, truncate)
+	}
+	return entry.pipeline.Rebuild(rl.ctx, truncate)
 }
 
 // retryRefused re-attempts activation for every lens recorded in refused —

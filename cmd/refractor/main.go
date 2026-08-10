@@ -137,7 +137,8 @@ type pipelineEntry struct {
 	// taxonomy can never affect.
 	taxExpansionLabels map[string]struct{}
 
-	// taxMu guards taxExpansion/taxExpansionStatus/taxGen/taxRebuild* below.
+	// taxMu guards taxExpansion/taxExpansionStatus/taxExpansionResolved/
+	// taxGen/taxRebuild* below.
 	// Both CoreKVSource's single dispatch goroutine (reloader.rederiveEntry's
 	// compare-and-commit) and the rebuild goroutine it starts touch these
 	// fields, so every read and every write goes through taxMu.
@@ -180,6 +181,26 @@ type pipelineEntry struct {
 	// a missed one.
 	taxExpansion       map[string]map[string]struct{}
 	taxExpansionStatus taxonomy.Status
+	// taxExpansionResolved is the last RESOLVED (non-StatusUnknown) expansion
+	// answer — the set the running gate is actually matching against, which is
+	// exactly what taxExpansion cannot tell you: taxExpansion records the
+	// ANSWER, and on the §6.5 degrade path that answer is (nil, StatusUnknown)
+	// while the gate keeps matching against the last known good set.
+	//
+	// It exists so reloader.rederiveEntry can tell a SHRINK from a grow: a
+	// shrink must truncate the target before the replay, or the dropped
+	// subtype's already-projected rows orphan forever (no event for a type the
+	// narrowed filter no longer admits will ever arrive to retract them — on a
+	// grant-producing lens an orphaned row is a live grant).
+	//
+	// Lifetime: seeded at activation alongside taxExpansion (newPipelineEntry)
+	// when the first answer is resolved; replaced on every later resolved
+	// answer, whether from a taxonomy re-derivation or a MATCH hot-reload;
+	// NEVER cleared by a StatusUnknown answer, because an unresolved expansion
+	// changes nothing about what the gate is matching against; and untouched by
+	// a failed rebuild, so the shrink it describes is still detectable on the
+	// retry.
+	taxExpansionResolved map[string]map[string]struct{}
 	// taxGen counts publications of this entry's client gate — a taxonomy
 	// re-derivation or a MATCH hot-reload. A rebuild goroutine captures it
 	// before it starts and compares on the way out, so the answer of a
@@ -195,6 +216,65 @@ type pipelineEntry struct {
 	// baseline that IS in effect, and the outstanding rebuild is what still
 	// needs driving.
 	taxRebuildPending bool
+	// taxRebuildTruncate makes the owed rebuild clear the target store before
+	// it replays — set when the set the gate publishes SHRANK, either because
+	// the taxonomy dropped a subtype (rederiveEntry) or because a MATCH edit
+	// narrowed the label set (reloader.update). The narrowed filter admits no
+	// event for what was dropped, so nothing will ever be delivered that could
+	// retract those rows one by one.
+	//
+	// Sticky until a rebuild SUCCEEDS: a shrink whose rebuild failed must retry
+	// WITH the truncate, so it is cleared in the same taxMu critical section
+	// that clears taxRebuildPending and never on its own — the two can then not
+	// disagree about what the outstanding rebuild owes. A grow landing while a
+	// shrink's rebuild is still owed leaves the flag set, which merely makes
+	// that rebuild a full re-derivation from empty: strictly the safe
+	// direction, since the replay re-projects everything the current gate
+	// admits.
+	//
+	// The flag asks for a truncate; whether the shrink actually retracts is a
+	// property of the lens's TARGET, and there are three cases.
+	//
+	//   - The lens scopes its own rows in a shared bucket. A NATS-KV
+	//     actor-aggregate whose Output declares a literal key prefix (the
+	//     capability-kv `cap.svc.{actorSuffix}` shape) gets that prefix bound
+	//     onto its adapter by projection.ApplyTruncateScope, so the purge covers
+	//     its rows and no sibling producer's. This is the case the flag is
+	//     built for, and the one an unscoped purge would turn into a
+	//     platform-wide authorization wipe.
+	//   - The lens owns its target outright — no key prefix, or a Postgres
+	//     table of its own. Truncate clears the whole target, which is exactly
+	//     the from-empty state a §6.2 replay converges to.
+	//   - The lens declares DiffRetraction. The shared grant table implements
+	//     no adapter.Truncater at all, so the truncate is declined with a log
+	//     line and the retraction rides the transport the lens already declares
+	//     (§6.4): a diffRetraction lens never seeds its evaluation, so every
+	//     replayed event recomputes the lens's complete row set, and
+	//     Pipeline.applyDiffRetraction deletes every key the target still
+	//     carries that the fresh set no longer produces — scoped to the lens's
+	//     own grant_source. It needs one delivered event to run on: a rebuild
+	//     whose narrowed filter admits no live subject retracts nothing until
+	//     the next event the lens reacts to.
+	//
+	// Two shapes retract NOTHING on a shrink, and the flag is deliberately NOT
+	// set for either — a truncate that cannot be confined does more damage than
+	// the orphaned rows it would remove.
+	//
+	//   - An UNSCOPED shared target: a NATS-KV lens sharing its bucket with
+	//     other producers but declaring no output key prefix
+	//     (rbac-domain's capabilityRoleIndex on capability-kv; one-bill's four
+	//     lenses on one history bucket). NatsKVAdapter.Truncate would purge the
+	//     whole bucket — every sibling producer's rows, healed only at sweep
+	//     pace. reloader.truncateIsSafe refuses it, through
+	//     Pipeline.RebuildTruncateIsScoped, and says so on the lens's log.
+	//   - An un-truncatable target with no DiffRetraction: a GrantTable lens
+	//     that retracts through anchor tombstones alone.
+	//
+	// For both, the dropped rows persist until an anchor tombstone, a sweep or
+	// an operator reaches them. A lens of either shape must not be authored with
+	// a `*` label, or edited to narrow its labels, until it either scopes its
+	// target or declares a retraction transport.
+	taxRebuildTruncate bool
 	// taxRebuildRunning reports that a goroutine is currently driving the
 	// pending rebuild. At most one runs per entry: it re-reads taxGen after
 	// each attempt and loops when a newer gate landed underneath it, so

@@ -28,17 +28,34 @@ func (a *guardedTruncAdapter) Truncate(context.Context) error {
 	return nil
 }
 
-// rebuildTruncates constructs a pipeline over ad and calls Rebuild(truncate).
-// Rebuild's truncate branch runs before the supervisor reset, so it returns the
-// no-supervisor error after the truncate decision — exactly the window this test
-// inspects. Returns whether Truncate was invoked.
+// rebuildTruncates reports whether a rebuild over ad would clear the target for
+// the requested truncate — resolveTruncate's answer, which is the force rule
+// itself. It is asked directly rather than through Rebuild because a rebuild
+// refuses to truncate a target whose consumer the supervisor does not manage
+// (a target you cannot reset is a target you must not clear), and a
+// supervisor-less fixture is in exactly that state. That refusal has its own
+// test below; the real truncate is exercised end-to-end against a live pipeline
+// in cmd/refractor's taxonomy shrink coverage.
 func rebuildTruncates(t *testing.T, ad *guardedTruncAdapter, truncate bool) bool {
 	t.Helper()
-	p, err := New("rule-force-trunc", "nats_kv", "CORE", nil, nil, ad, nil)
+	return resolveTruncate(ad, "rule-force-trunc", truncate)
+}
+
+// TestRebuild_UnmanagedConsumerRefusesBeforeTruncating pins the ordering the
+// helper above works around, and the reason for it: a rebuild whose consumer the
+// supervisor does not manage cannot reset the durable, so nothing will replay
+// the rows a truncate removes. Discovering that AFTER the purge — which is what
+// deciding it at the reset would mean — leaves the target empty with no path
+// back. The live window is a lens deletion: pipelineDeleter.Delete removes the
+// durable BEFORE it cancels the run context.
+func TestRebuild_UnmanagedConsumerRefusesBeforeTruncating(t *testing.T) {
+	ad := &guardedTruncAdapter{guarded: true}
+	p, err := New("rule-unmanaged-trunc", "nats_kv", "CORE", nil, nil, ad, nil)
 	require.NoError(t, err)
-	// No supervisor configured: Rebuild errors after the truncate branch.
-	require.Error(t, p.Rebuild(context.Background(), truncate))
-	return ad.truncated
+
+	require.Error(t, p.Rebuild(context.Background(), true))
+	assert.False(t, ad.truncated,
+		"a rebuild that cannot reset the consumer must refuse before it clears the target")
 }
 
 // TestRebuild_GuardedBucketForcesTruncate asserts the force rule: a guarded

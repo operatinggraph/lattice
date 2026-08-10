@@ -23,6 +23,7 @@ import (
 	"github.com/operatinggraph/lattice/internal/refractor/ruleengine"
 	"github.com/operatinggraph/lattice/internal/refractor/ruleengine/full"
 	"github.com/operatinggraph/lattice/internal/refractor/subjects"
+	"github.com/operatinggraph/lattice/internal/refractor/taxonomy"
 	"github.com/operatinggraph/lattice/internal/substrate"
 )
 
@@ -96,6 +97,33 @@ func TestBuildAdapter_GuardRequiredButTargetCannotEnforce_FailsClosed(t *testing
 		return unguardableAdapter{}, nil
 	})
 	require.Error(t, err)
+}
+
+// TestBuildAdapter_SharedBucketRule_BindsTheTruncateScope pins the OTHER rule
+// property every adapter built for a lens must acquire. A rebuild truncates
+// through whatever adapter the lens is running on, and an unscoped NATS-KV
+// truncate purges the whole bucket — for a lens sharing capability-kv with the
+// platform's core authorization surfaces, a platform-wide grant wipe rather
+// than a rebuild. buildAdapter is the single point every adapter passes
+// through, activation and INTO-hot-reload replacement alike, so the binding is
+// pinned here rather than at either call site.
+//
+// projection.ApplyTruncateScope's own semantics (which keys the prefix covers,
+// and that a sibling producer's rows survive a real purge) are pinned in
+// internal/refractor/projection.
+func TestBuildAdapter_SharedBucketRule_BindsTheTruncateScope(t *testing.T) {
+	r := authPlaneRule(t)
+	r.Output.OutputKeyPattern = "cap.svc.{actorSuffix}"
+
+	adpt, err := buildAdapter(r, func(*lens.Rule) (adapter.Adapter, error) {
+		return newKVAdapter(t), nil
+	})
+	require.NoError(t, err)
+
+	kvAdapter, ok := adpt.(*adapter.NatsKVAdapter)
+	require.True(t, ok)
+	assert.Equal(t, "cap.svc.", kvAdapter.KeyPrefix(),
+		"a lens sharing its bucket must truncate only the keys it owns")
 }
 
 func TestBuildAdapter_TargetError_Propagates(t *testing.T) {
@@ -883,8 +911,11 @@ func mcCompile(t *testing.T, eng *full.Engine, query string, keyFields []string)
 	return fullCR
 }
 
-// mcPollUntil retries check every 20ms until it returns true or timeout expires.
-func mcPollUntil(t *testing.T, timeout time.Duration, check func() bool) {
+// mcPollUntil retries check every 20ms until it returns true or timeout
+// expires — the package's one deterministic wait (CLAUDE.md: polling with a
+// condition, never a fixed sleep standing in for synchronisation). msg, when
+// given, says what the caller was waiting for.
+func mcPollUntil(t *testing.T, timeout time.Duration, check func() bool, msg ...string) {
 	t.Helper()
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
@@ -892,6 +923,9 @@ func mcPollUntil(t *testing.T, timeout time.Duration, check func() bool) {
 			return
 		}
 		time.Sleep(20 * time.Millisecond)
+	}
+	if len(msg) > 0 {
+		t.Fatalf("%s (within %s)", msg[0], timeout)
 	}
 	t.Fatal("condition not met within timeout")
 }
@@ -1008,4 +1042,128 @@ func TestReloaderUpdate_AcceptedMatchChangeReprojectsExistingEntries(t *testing.
 		}
 		return got["marker"] == "NEW-VALUE"
 	})
+}
+
+// TestReloaderUpdate_NarrowingMatchChangeRetractsTheDroppedLabelsRows pins the
+// MATCH-edit half of the retraction: an accepted MATCH change that NARROWS the
+// admitted label set must retract the rows the old rule projected for the
+// labels it dropped, not leave them in the target forever.
+//
+// The mechanism is identical to a taxonomy shrink's, and so is the harm: from
+// the swap onward the consumer filter admits no event for the dropped label, so
+// no delivery, no sweep and no anchor tombstone can reach those rows again. The
+// existing MATCH-change test asserts a REPROJECTION (a row whose value changes);
+// this one asserts a RETRACTION (a row that must cease to exist), which only the
+// truncate ahead of the replay produces.
+func TestReloaderUpdate_NarrowingMatchChangeRetractsTheDroppedLabelsRows(t *testing.T) {
+	env := startMatchChangeEnv(t)
+	ctx := context.Background()
+
+	fullEngine := full.New()
+	oldCR := mcCompile(t, fullEngine, "MATCH (l:location*) RETURN l.key AS locKey", []string{"locKey"})
+
+	adpt, err := adapter.New(env.target, []string{"locKey"}, adapter.DeleteModeHard)
+	require.NoError(t, err)
+	// The lens's own truncate scope (projection.ApplyTruncateScope binds this
+	// from the declared output prefix): without it the rebuild refuses to
+	// truncate at all rather than purge a bucket the lens may share.
+	adpt.SetKeyPrefix("vtx.")
+	healthKV, err := env.conn.OpenKV(ctx, "HEALTH-lens-mc")
+	require.NoError(t, err)
+	reporter := health.New(healthKV, "lens-mc-narrow")
+
+	p, err := pipeline.New("lens-mc-narrow", "nats_kv", "CORE", env.adjKV, env.coreKV, adpt, reporter)
+	require.NoError(t, err)
+
+	resolver := taxonomy.New()
+	installLocationTaxonomy(resolver, "room", "desk")
+	p.SetTaxonomyResolver(resolver)
+	require.NoError(t, p.UseFullEngineBranches(fullEngine, oldCR, nil))
+
+	p.RunOn(env.conn, substrate.ConsumerSpec{
+		Name:          "refractor-lens-mc-narrow",
+		Stream:        subjects.CoreKVStream("CORE"),
+		FilterSubject: subjects.CoreKVFilter("CORE"),
+		DeliverPolicy: substrate.DeliverLastPerSubject,
+		DeliverGroup:  "refractor-lens-mc-narrow",
+		AckWait:       2 * time.Second,
+	})
+	runCtx, cancel := context.WithCancel(ctx)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		p.Run(runCtx)
+	}()
+	t.Cleanup(func() {
+		cancel()
+		<-done
+	})
+	mcPollUntil(t, 5*time.Second, func() bool {
+		_, err := p.Pending(ctx)
+		return err == nil
+	})
+
+	const (
+		roomKey = "vtx.room.Tsnt1McNarrowRoomAaa"
+		deskKey = "vtx.desk.Tsnt1McNarrowDeskAaa"
+	)
+	for _, key := range []string{roomKey, deskKey} {
+		body, err := json.Marshal(map[string]any{
+			"isDeleted":      false,
+			"createdAt":      "2026-01-01T00:00:00Z",
+			"lastModifiedAt": "2026-01-01T00:00:00Z",
+		})
+		require.NoError(t, err)
+		_, err = env.coreKV.Put(ctx, key, body)
+		require.NoError(t, err)
+	}
+	projected := func(key string) bool {
+		_, err := env.target.Get(ctx, key)
+		return err == nil
+	}
+	mcPollUntil(t, 5*time.Second, func() bool { return projected(roomKey) && projected(deskKey) })
+
+	// A row belonging to another producer of the same bucket: the retraction
+	// must be confined to this lens's own prefix.
+	const siblingKey = "sibling.producer.row"
+	_, err = env.target.Put(ctx, siblingKey, []byte(`{"owner":"another lens"}`))
+	require.NoError(t, err)
+
+	// The edit: the lens stops covering the whole `location` subtree and
+	// projects rooms only. `desk` is dropped from the admitted set.
+	newCR := mcCompile(t, fullEngine, "MATCH (l:room) RETURN l.key AS locKey", []string{"locKey"})
+	newLens := &lens.Rule{
+		ID:             "lens-mc-narrow",
+		ResolvedEngine: ruleengine.EngineFull,
+		CompiledRule:   newCR,
+		Sequence:       9,
+		Into:           lens.IntoConfig{Target: "nats_kv", Key: lens.KeyField{"locKey"}},
+	}
+	oldLens := &lens.Rule{ID: "lens-mc-narrow", Into: lens.IntoConfig{Target: "nats_kv", Key: lens.KeyField{"locKey"}}}
+
+	entry := &pipelineEntry{
+		target:   "nats_kv",
+		pipeline: p,
+		reporter: reporter,
+	}
+	rl := &reloader{
+		ctx:        ctx,
+		logger:     discardLogger(),
+		lookup:     func(string) (*pipelineEntry, bool) { return entry, true },
+		fullEngine: fullEngine,
+		resolver:   resolver,
+	}
+
+	rl.update(oldLens, newLens, lens.MatchChange)
+
+	filterSubjects, _, _ := p.ConsumerFilter()
+	require.NotContains(t, filterSubjects, subjects.CoreKVVertexFilter("CORE", "desk"),
+		"precondition: the edit narrowed the admitted set, so nothing will deliver a desk event again")
+
+	// Room survives the truncate via the replay; desk does not come back.
+	mcPollUntil(t, 10*time.Second, func() bool { return projected(roomKey) && !projected(deskKey) })
+	assert.True(t, projected(roomKey), "the surviving label's row must be re-derived by the replay")
+	assert.False(t, projected(deskKey), "the dropped label's row must be retracted — nothing else can ever reach it")
+	assert.True(t, projected(siblingKey), "the truncate must be confined to the lens's own key prefix — another producer's row in the same bucket must survive")
+	assert.Zero(t, errorCount(t, reporter), "an accepted narrowing MATCH change must not record a refusal")
 }

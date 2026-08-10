@@ -8,10 +8,13 @@ package pipeline
 // in the rebuild path", and §19.1 B2/B3).
 //
 // Both tests drive Rebuild without a supervisor, so it returns its
-// no-supervisor error after the phase under test — the same window
-// rebuild_force_truncate_internal_test.go inspects. Serialization is observed
-// through the adapter's Truncate, which Rebuild calls inside the section being
-// serialized, rather than through a hook in production code.
+// no-supervisor error after the phase under test. Serialization is observed
+// through the adapter's Guarded() — the truncate-force decision, which Rebuild
+// makes inside the section being serialized and before it touches the target —
+// rather than through a hook in production code. It is deliberately NOT
+// observed through Truncate: a rebuild refuses to truncate a target whose
+// consumer the supervisor does not manage, which is exactly the state a
+// supervisor-less fixture is in.
 
 import (
 	"context"
@@ -25,8 +28,9 @@ import (
 	"github.com/operatinggraph/lattice/internal/refractor/control"
 )
 
-// blockingTruncAdapter parks inside Truncate until released, so a test can hold
-// one rebuild in its critical section and observe whether a second enters.
+// blockingTruncAdapter parks inside the truncate-force decision until released,
+// so a test can hold one rebuild in its critical section and observe whether a
+// second enters.
 type blockingTruncAdapter struct {
 	arrived chan struct{}
 	release chan struct{}
@@ -42,10 +46,14 @@ func (a *blockingTruncAdapter) Upsert(context.Context, map[string]any, map[strin
 func (a *blockingTruncAdapter) Delete(context.Context, map[string]any, uint64) error { return nil }
 func (a *blockingTruncAdapter) Probe(context.Context) error                          { return nil }
 func (a *blockingTruncAdapter) Close() error                                         { return nil }
-func (a *blockingTruncAdapter) Truncate(context.Context) error {
+func (a *blockingTruncAdapter) Truncate(context.Context) error                       { return nil }
+
+// Guarded is consulted by resolveTruncate, inside the serialized section and
+// ahead of any write to the target.
+func (a *blockingTruncAdapter) Guarded() bool {
 	a.arrived <- struct{}{}
 	<-a.release
-	return nil
+	return false
 }
 
 func newRebuildWaitPipeline(t *testing.T) *Pipeline {
@@ -104,11 +112,13 @@ func TestRebuildAndWait_SerializesConcurrentCallers(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			// Each errors on the missing supervisor; the ORDERING is the assertion.
-			_ = p.RebuildAndWait(context.Background(), true, 0)
+			// truncate=false so the force rule actually consults Guarded() — a
+			// requested truncate short-circuits that decision.
+			_ = p.RebuildAndWait(context.Background(), false, 0)
 		}()
 	}
 
-	// One caller reaches Truncate and parks there.
+	// One caller reaches the truncate decision and parks there.
 	select {
 	case <-ad.arrived:
 	case <-time.After(5 * time.Second):
