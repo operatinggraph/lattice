@@ -631,7 +631,7 @@ collapses to the same single request *with values included*. The >1,024 cases ke
 
 | | **A — delete the index** | **B — doc + overflow mark (recommended)** | **C — per-edge rekey (§3–§13)** |
 |---|---|---|---|
-| Common-case read | multi_last on core-kv: outbound ~0.3 ms; inbound 0.5 ms+walk | **`kv.Get` doc, 153 µs — unchanged** | prefix multi_last ~0.3–1 ms |
+| Common-case read | multi_last on core-kv: outbound ~0.3 ms; inbound 0.5 ms+walk | ~~**`kv.Get` doc, 153 µs — unchanged**~~ **a 2-key `multi_last` (doc + mark), ~300 µs — struck 2026-08-10 (Fire B1 close review)**: any shape that consults a mark on the read path pays a second read, so "unchanged" was never available. The ratified §15.1 cache does not avoid it either — it caches only *positives*, so an unmarked node misses on every read and pays two sequential `Get`s (~306 µs) for the same answer, non-atomically. Batching is the cheaper of the two, not free. | prefix multi_last ~0.3–1 ms |
 | Hub read (>1,024°) | consumer fallback on core-kv, ~10² ms-class | same fallback, **only for marked nodes**; typed hops via `lnk.*.*.<rel>.*.<id>` ride multi_last (~0.6 ms) | prefix consumer fallback on the adjacency bucket (no full-tree walk); typed prefix push-down (Inc 2) |
 | Scale behavior | inbound walk ∝ **total links**; BFS multiplies it per visited node (3,912-visit enumeration ≈ 0.6 s today → ~15 s at 100 K links) | non-hub reads flat; marked-hub fallback ∝ hub degree + walk | all reads ∝ degree — the only shape that stays flat |
 | Write path | **none** (Core KV is the index) | unchanged CAS doc (≤ threshold ⇒ bounded ~270 KB rewrites); mark branch ends the jam | O(1) puts, no CAS |
@@ -689,14 +689,31 @@ three raw-document-parsing e2es read unmarked nodes).
 monotonic cache (`map[nodeID]struct{}`, loaded lazily: first `Build`/`Neighbors` touch of a node
 consults the cache, missing → one `Get`, result cached; marks are never unset, so the cache never
 invalidates).
-**Amended 2026-08-10 (Fire B1 brief §16.4b): the cache is a WRITE-PATH optimization only.** As
+**Amended twice, 2026-08-10 — the cache is GONE. The close review found it BLOCKING and it was
+deleted, not guarded.** A process-global cache that `Build` short-circuits on while `Neighbors` reads
+the truth from KV disagrees with itself the moment the durable mark disappears under a live process —
+and that is reachable: `lattice-nats` is ephemeral (`docker-compose.yml:31`), an operator may purge
+the bucket to force an index rebuild, and the Refractor now *survives* a NATS outage rather than
+restarting with it (`08ca1f23`, `MaxReconnects=-1`). A warm cache then no-ops every rebuild write
+while `Neighbors` finds neither mark nor document and returns an **empty edge set as authoritative,
+permanently, silently** — the frozen-read failure class again, on the same node, taking every
+capability grant derived through that hub with it. The original state table answered this boundary
+with "every environment that wipes the bucket restarts the Refractor with it", which is an
+environmental assertion the preceding commit had already falsified on purpose. The cache was a pure
+optimization — a miss performs the read `upsertEdge` makes anyway — so it bought nothing and risked
+a silent wrong answer. Deleting state beat guarding it. The first amendment, kept below for the
+mechanism it settled:
+
+**(Fire B1 brief §16.4b): the cache is a WRITE-PATH optimization only.** As
 specified above it holds *marked* nodes, so a miss means "not known to be marked" and costs an extra
 `Get` on every read of an unmarked node — i.e. on essentially every read, permanently, contradicting
 §14.4's "common-case read 153 µs — unchanged". Caching the negative is unavailable (another
 instance's mark would never be observed). **`Neighbors` instead reads `adj.<id>` and `adjmark.<id>`
 in ONE `KVGetMulti` call**: one round trip, and atomic — two sequential `Get`s would let a node
 latching between them return the just-emptied document with no mark, an empty edge list presented as
-authoritative. The positive cache survives in `Build` only, and is never consulted to conclude absence. **Why not an `overflow` field inside `adj.<nodeId>`:** a mixed-fleet window would
+authoritative. ~~The positive cache survives in `Build` only, and is never consulted to conclude absence.~~
+**Struck 2026-08-10 (close pass) — the cache was deleted outright; see the amendment at the head of §15.1
+for why a monotonic positive is still not safe to hold in process memory across a bucket wipe.** **Why not an `overflow` field inside `adj.<nodeId>`:** a mixed-fleet window would
 corrupt it — an old binary's `Build` unmarshals the sentinel doc to zero edges, appends one, and
 writes back a 1-edge document, silently *unmarking* the hub; the new binary then reads a
 1-edge index as authoritative for a 3,900-edge node (converged-but-wrong) until degree re-crosses
@@ -720,7 +737,11 @@ node latches — the already-jammed `leaseServiceInstance` meta (3,919°), **on 
 `Build` touch: the jam and the Nak loop end there**, structurally. The 2,335° identity hub stays on
 its 645 KB document (~150 µs reads, unchanged) with ~10 months of headroom at its observed growth;
 §15.6's trigger names what happens as it approaches. Thresholds are consts with a test override.
-Riders in the same increment (§14.5): the four-segment validation → `Term` at the event boundary,
+Riders in the same increment (§14.5): ~~the four-segment validation → `Term` at the event boundary~~
+**struck 2026-08-10 (Fire B1 close review) — inapplicable under Shape B.** That rider came from a
+Shape C finding about a 4-segment-derived `adj.` key; under B the key is a single token, and the
+event boundary's reserved-character screen already matches `subjects.validateToken`
+character-for-character, so the panic it guarded is unreachable. The remaining three shipped:
 `Build`-error classification (`IsInvalidKeyError` ⇒ permanent ⇒ `Term`; transport ⇒ `Nak`), the
 `EventsForLink` consolidation, and the ½-max_payload canary at both write chokepoints.
 
@@ -734,10 +755,29 @@ KV's canonical link keyspace with **both directional filters in one request** �
   snapshot of both directions (§7). Measured shape: ~5 ms at 180 matches, walk term ~35 µs/1K link
   subjects (§14.1).
 - **413**: the consumer-snapshot fallback — one ephemeral `DeliverLastPerSubject` consumer with
-  `FilterSubjects: [both]` on `KV_core-kv`, drained under the **§6.3.2 stability protocol**
+  `FilterSubjects: [both]` on `KV_core-kv`, ~~drained under the **§6.3.2 stability protocol**
   (double-drain, compare (subject → sequence) maps, bounded retries; `InitialConsumerPending`
   failure and ctx expiry are hard errors) — core-kv is history-1, so the tearing analysis applies
-  verbatim.
+  verbatim~~ **drained ONCE — struck 2026-08-10 (Fire B1 close review), and this is the correction
+  that keeps the fire from reinstating its own failure mode.**
+
+  Two reviewers found it independently. A marked node has ~3,920 matching subjects, so it is
+  **always** past the 1,024 fast-path cap (`nats-server@v2.14.0/server/stream.go:5809`) — the
+  fallback is not the exception for a marked node, it is the only path. Under the double-drain, a
+  single write to *any* of that node's ~3,900 incident links between the two passes fails the
+  comparison, and three such attempts return a hard error the pipelines turn into a `Nak` →
+  redelivery. The node that latches is by construction the one taking writes fastest, so the
+  amplification loop this fire exists to end would return on the read side.
+
+  **The atomicity was over-strong for this consumer, not merely expensive.** The stability protocol
+  exists so a read-set backing a transactional decision cannot straddle a write. An adjacency edge
+  set is not that: each edge is an independent fact, its consumers re-validate through the footprint
+  (`footprintValid` re-reads and compares), and the document path this replaces was never atomic
+  against the CDC lag either. Requiring more atomicity from the fallback than the document ever
+  provided buys nothing and costs availability. One complete drain — keeping the
+  `received != NumPending` short-read guard, which is what actually proves completeness — is the
+  right guarantee. §14.1 reading 4 had already established that hubs take this path from day one;
+  what it did not work through is what the path does while the graph is being written.
 - Each matched message: parse the Contract #1 link key from the subject; drop hard-DEL markers
   (empty body / `KV-Operation` header) and soft tombstones (`isDeleted` in the returned body — the
   read is free because multi_last returns values); synthesize the `EdgeEntry` exactly as
@@ -1019,8 +1059,13 @@ never be observed.
 `["adj.<id>", "adjmark.<id>"]` on `refractor-adjacency`. This is the same mechanism (consult the
 mark, read the doc) with a correct implementation, not a substituted one:
 
-- **One round trip**, so §14.4's common-case guarantee holds (§14.1 measured multi_last at ~31 µs/key
-  against 153 µs for a sequential `Get`).
+- **One round trip.** ~~so §14.4's common-case guarantee holds (§14.1 measured multi_last at ~31 µs/key
+  against 153 µs for a sequential `Get`)~~ — **struck 2026-08-10 (close review): this misapplied the
+  measurement and the guarantee it claimed does not exist.** §14.1's 31 µs is an *amortized per-key*
+  figure; the request figures are `kvget` **153 µs** p50 and `multi10` **306 µs** p50, so a 2-key
+  request pays roughly the request floor — about 2× a single `Get`. The correct claim is comparative,
+  not absolute: batching costs the same as §15.1's two sequential `Get`s and is atomic, and no shape
+  that reads a mark can match a bare `kv.Get`. §14.4's row is struck to match.
 - **Atomic**, which closes a race two sequential `Get`s would open: a node latching *between* the doc
   read and the mark read returns the just-emptied document with no mark — an empty edge list
   presented as authoritative. That is precisely the silent-wrong answer this item exists to kill.
@@ -1081,12 +1126,15 @@ untyped hop pays a **second** fallback read per validated evaluation. Acceptable
 1. **Inc 1 — the latch** *(posture-changing → `opus`)*. `subjects.AdjMarkKey`; the two-key atomic
    read helper; `Build`'s latch branch (both arms: `adjOverflowDegree = 3072`, `adjOverflowBytes =
    800 KiB`, consts with a test override); marked-path no-ops on upsert *and* removal; the
-   in-process positive cache (write path only, per §16.4b).
+   ~~in-process positive cache (write path only, per §16.4b)~~ **— struck 2026-08-10 (close pass):
+   no cache shipped at all, the mark is read from KV on every event.**
    `go test ./internal/refractor/adjacency/... ./internal/refractor/subjects/... -count=1`
 2. **Inc 2 — the fallback read** *(posture-changing → `opus`)*. `Neighbors`' marked branch: one
-   `KVGetMulti` on `core-kv` with both directional filters (`lnk.*.<id>.>` and
+   ~~`KVGetMulti`~~ **`KVGetMultiNoSnapshot`** on `core-kv` with both directional filters (`lnk.*.<id>.>` and
    `lnk.*.*.*.*.<id>`); `EdgeEntry` synthesis via `ParseLinkKey`; soft-tombstone drop; the §16.5
-   hash fingerprint.
+   hash fingerprint. **Amended 2026-08-10: this increment introduced a new public substrate primitive
+   rather than consuming the existing one, and changed `drainDirectGetFallback`'s stopping condition
+   for every caller — see §15.3's amendment and §16.12.**
    `go test ./internal/refractor/adjacency/... ./internal/refractor/pipeline/... -count=1`
 3. **Inc 3 — the riders** *(mechanical → `sonnet`)*. `EventsForLink` folding all three inline sites;
    `Build`-error classification at the event boundary (`IsInvalidKeyError` ⇒ `Term`, transport ⇒
@@ -1158,3 +1206,57 @@ implementation detail, with no specified storage shape.
 - **Health-KV emission** for the adjacency index — none exists today and none is in scope; the §15.2
   mark log line is this fire's only new operator signal.
 - **The taxonomy item's Fire C** — sequenced behind this row by its own design doc (§14 item 6).
+
+### 16.12 Close pass — what the four review rounds found, and how it classifies
+
+Four cold reviews ran over this item: three in parallel over the initial build (correctness/capability-plane,
+edge-cases/state-lifetime, acceptance/scope) and one cumulative pass over the whole diff after two fix rounds.
+All four were read-only and none was the implementer.
+
+**The ratified core mechanism survived every round intact** — the mark key, the batched two-key read, the
+fallback enumeration, and the hash fingerprint were each attacked directly and none broke. **Every defect
+found was in state the build added around that mechanism, or in the shared substrate the fix rounds reached
+for.** That shape is the item's main lesson: the risk was never in the thing the design reasoned hardest
+about.
+
+**The two blocking findings.**
+
+1. **A process-global mark cache could outlive the bucket it described.** `Build` short-circuited on it while
+   `Neighbors` read KV, so a bucket wipe under a live process (the container is ephemeral; the Refractor now
+   *survives* a NATS outage rather than restarting with it, `08ca1f23`) left the write path no-oping every
+   rebuild while the read path returned an **empty edge set as authoritative, permanently and silently** —
+   the frozen-read failure class again, taking every capability grant derived through the hub. The state
+   table had named the boundary and answered it with an environmental assertion. Deleted, not guarded.
+2. **The fallback would have reinstated the failure mode on the read side.** A marked node is always past the
+   1,024-subject cap, so it always takes the consumer drain, whose double-drain stability check fails when
+   *any* of its ~3,900 links moves between passes — on the node that by construction takes writes fastest.
+   Resolved by recognizing the atomicity was over-strong for this consumer (§15.3's amendment).
+
+**A defect in shipped substrate, found while fixing the second.** `drainDirectGetFallback` bounded its fetch
+by an initial `NumPending`. On a history-1 stream that count is not a reliable stopping target — overwriting
+a key erases the message the count was counting and appends a new one, so the counts can balance while a
+subject is never observed. The drain now runs until the server reports nothing pending. This was live in
+`d8cc803c` and reachable by `personalinterest`'s wildcard read, not only by this fire.
+
+**And a defect the fix round itself introduced**, caught by the close pass: once the drain accumulated across
+rounds, a tombstone delivered in a later round no longer retracted an entry collected in an earlier one — a
+hard-deleted link returned as live, into the same BFS. **That is the same defect class this fire was fixing
+one layer up** (`consumer/bootstrap.go` acking an empty body before classifying the key). Twice in one item,
+at two layers, is what makes it worth mechanizing.
+
+| component | design-gap | impl-bug | brief-gap | convention |
+|---|---|---|---|---|
+| `refractor/adjacency` | 2 | 2 | 1 | 3 |
+| `substrate` | 0 | 3 | 0 | 2 |
+| `refractor/consumer` | 0 | 0 | 1 | 0 |
+| docs / process | 0 | 0 | 0 | 3 |
+
+No finding across four rounds was review-over-reach; all six of the first round's findings landed as real
+mechanism changes rather than comment edits. Two findings corrected the **brief** rather than the build:
+§16.4b's cost justification misapplied §14.1's amortized per-key figure, and §16.2's census counted link
+subjects in Core KV where the latch guard needs entries in the stored document (settled live at Inc 5).
+
+**Promoted to the component dossiers** (`docs/components/{refractor,substrate}.md`): the process-local cache
+of durable state without a named wipe/reconnect boundary; the multi-round read that skips tombstones instead
+of retracting them; and the vendor-behaviour claim asserted in a comment with no pinned `file:line` behind it
+(`kv_multi.go` cites the pinned server source for every constant — the one comment that did not was wrong).
