@@ -896,3 +896,30 @@ What ships today in `internal/weaver` + `cmd/weaver`, and what is deliberately d
 - Lane-2 on-demand evaluation (built, unexercised in demo).
 - The Augur's autonomy boundary (`augur.autoApply` — a proposal skipping the human gate) — parsed + validated, not enabled; Andrew-gated (Fire 3).
 - Real external adapters (Stripe/background-check) — Phase 3 integration.
+
+## Review keeps catching (dossier)
+
+Same contract as every dossier: fire briefs copy the applicable entries into part 5
+(`agents/fire-brief-template.md`); the item-close review appends new ones (`agents/steward/SKILL.md` §4);
+**capped at 12 one-liners**; an entry retires when a lint/test gate mechanizes it.
+
+- **A gap class is decided by the dispatch's SHAPE, never by its action name** — `directOp`/`triggerLoom`/
+  `assignTask` are how a gap dispatches, not what it concludes on; an `externalTask`-bodied `triggerLoom`
+  concludes on a vendor outcome exactly like a `directOp`. Minted: `staleMark` classified external-vs-userTask
+  by action name, so lease-signing's `missing_bgcheck`/`missing_payment` never retried after a timeout and
+  raised a standing `error` for a correctly-authored package. Check: `TestStaleMark_ExternalDispatchClassifier`.
+- **Classify by whitelist, not blacklist, when the vocabulary can grow** — "has a userTask step ⇒ parks" reads
+  a *parse* miss (zero steps, a drifted envelope, a renamed field, a future fourth step kind) as a confident
+  "no", landing on the unsafe side silently. "Every step is a known non-parking kind" fails safe by
+  construction. Minted: the first cut of the pattern-step probe. Check: the unrecognised-kind + empty-steps
+  cases in the classifier table.
+- **A restated cross-package constant needs a test that pins it** — Weaver may not import `internal/loom`
+  (`boundary_test.go`), so step-kind strings are hand-copied; nothing failed if they drifted, and the drift
+  failed unsafe. Check: `TestPatternStepKinds_MatchLoomVocabulary` (test-file-only import, boundary intact).
+- **A test that hand-seeds an engine's internal registry map pins the FALLBACK, not its name** — every sweep
+  test seeded `patternMeta` bare, so each one silently became a proof about unindexed patterns. Minted: the
+  whole reclaim/backoff corpus at this fire's close. Check: `seedPatternSpec`, which builds the aspect
+  envelope CDC actually delivers.
+- **An `error`-severity Health issue must not fire on a self-healing condition** — an unreplayed pattern is
+  replay lag, not a package bug, and the sweep reaches that branch on every restart. Minted: the `!known`
+  branch of the same classifier. Check: `TestSweep_InflightMarkerIgnoredForUnindexedPattern` asserts no issue.

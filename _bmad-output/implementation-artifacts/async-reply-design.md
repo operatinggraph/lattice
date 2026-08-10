@@ -395,3 +395,51 @@ pair is `issueKeyInflightMismatch` (`evaluator.go:338-345`). The gate widening m
 
 **10. Non-goals.** No change to `gapSuppressed`'s cap-fallback, to the bridge's timeout semantics, to the
 lens, to any package, or to `docs/contracts/*`.
+
+### Checkpoint — held for Andrew's §10.3 ratification (2026-08-09)
+
+**Worktree:** `/private/tmp/lattice-worktrees/async-retry-1786329239`, branch `steward-lattice-async-retry`
+(10 files, nothing committed). **Base:** `ddba78d2`; re-derive against merged `main` before the merge.
+
+**Done — the fire is complete and green, not partial.** Registry probes pattern step kinds at index time
+(whitelist: external-eligible iff ≥1 step and every kind is `systemOp`/`externalTask`); `staleMark`
+classifies by that instead of the action name; the transient (unreplayed-pattern) branch logs instead of
+raising `error`; an external gap with no usable `maxretries_<g>` keeps the backoff pacing so the engine is
+never unpaced-and-unbounded even if a package violates the new contract rule; `make test-lease-convergence`
+selects all three `TestAsyncConvergence_*`. Gates: `go build`, `make vet`, `golangci-lint` (0),
+`lint-conventions` (0), `lint-lens-anchors`/`lint-package-standard`/`lint-package-version`/`lint-board`,
+`go test ./internal/weaver/...` incl. `-race`, `gofmt -l` — all clean. Three async legs 3/3, verified
+independently by the lead (69s). Negative control observed: with the classifier change reverted and the
+registry probe kept, `_Timeout_FailedThenOneRetry` fails again with the identical assertion.
+
+**Why it is NOT committed.** The behavior it restores is forbidden by a frozen-contract sentence
+(§10.3 "never by re-triggering the pattern", unqualified over `triggerLoom`). The §10.3 edit is staged
+**UNCOMMITTED in `main`** — that diff is the proposal. **On ratification: merge the worktree and commit the
+contract edit in the same scoped commit.** Nothing else is outstanding.
+
+**Measured CI cost of the gate widening** (the reason it is safe to widen): lease-convergence step 86s/88s
+on CI runs `31349409902`/`31346562021`; the other six convergence gates ~17s total; job 111s/109s against
+`timeout-minutes: 15`. Local widening measured +69s (57.8s → 127.1s), CI/local ≈1.45× → projected step
+~188s, job ~212s. 4.2× headroom to the job ceiling, 3.2× to the target's own 10m. No timeout raised.
+
+**Residuals — the review's finds, each resolved or filed.** Fixed in-fire: the whitelist inversion, the
+constant/wire-shape pin, four false or orphaned soundness comments, the `error`-severity downgrade, the
+uncapped-external pacing floor, `docs/components/weaver.md`'s now-false collapse-only claim, and the
+sweep-level coverage the changed behavior lacked (fresh-claimId, preserved-claimId, unindexed-fallback,
+alert-self-heal). Filed, steward-owned: `gapSuppressed`'s cap-fallback shares the same action-based
+narrowing; the harness's `io.Discard` logger; the `inflight_<g>`-on-a-userTask-gap `error` that
+lease-signing's deliberate suppression columns raise at head.
+
+**Known residual, NOT introduced here, deliberately not filed as a separate row** — the pre-`.dispatch`
+window: `inflight_<g>` is computed from `.dispatch` presence, which the *bridge* writes after the adapter
+accepts, so a committed-but-unacknowledged call reads not-in-flight. A mark whose whole lease expires inside
+that window mints a second vendor call. It is a property of the lens's `inflight` definition, shared with
+every `directOp` external gap today; the 30-minute production lease is ~36000× the observed ~50ms window,
+and `maxretries_<g>` bounds it. Closing it properly means anchoring `inflight_<g>` on the claim vertex
+rather than on `.dispatch` — a change to the §10.3 companion-column semantics across every package, i.e.
+**a designer pass**, and it belongs with the §10.3 decision above rather than as a row filed around it.
+
+**Two inert classification flips** worth knowing before a lens edit: `missing_leaseDoc` (lease-signing) and
+`missing_authoring` (capability-author) are both `triggerLoom` over externalTask-only patterns that declare
+no `inflight_<g>` today. Adding that column turns each external — and neither declares `maxretries_<g>`,
+which is exactly the case the staged contract rule now forbids and the pacing floor now catches.
