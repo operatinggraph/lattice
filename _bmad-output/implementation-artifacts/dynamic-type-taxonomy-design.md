@@ -1315,7 +1315,11 @@ Fires A/B leaned on, and each is currently vacuous or absent.
    (`capabilityServiceAccess`), which is what makes this C2's first item. B1 removed the *fail-open* half by
    leaving `exLoc` unlabeled; the remaining exposure is fail-closed, and a replay-complete barrier closes it.
 6. **Three paths still bypass B0's coalescing scheduler**, and the third is now measured rather than feared.
-   B0 bounded the *taxonomy sweep*; these are outside it.
+   B0 bounded the *taxonomy sweep*; these are outside it. **CLOSED 2026-08-10 — none of the three is a bypass
+   any more, and the count was the wrong frame:** BOOT was retired by `208409f0`, the operator path is bounded
+   by a shared gate rather than by reaching the reloader, and the replay drain is a stated non-guarantee rather
+   than a gap, with the boundary moved to the handover the bound can actually hold. §17.21 carries the shape,
+   the two reproductions that shaped it, and what is deliberately still outside.
    - **An operator corpus-rebuild** (§17.15 · `internal/refractor/control/service.go:930-943`) — one
      uncoordinated goroutine per request. Routing it needs the control service to reach the reloader, which it
      has no handle on.
@@ -2200,9 +2204,13 @@ reset must not be cleared.
 
 **Two residuals are named where they are, not implied:** the replay drains *outside* the worker slot (`Reset`
 returns after `requestReopen`), so the bound covers concurrent consumer delete-recreates and not concurrent
-replays; and `control.Service.rebuildRule` (`internal/refractor/control/service.go:930-943`) still spawns one
-uncoordinated goroutine per request, so an operator corpus-rebuild reproduces the original burst. Routing it
-needs the control service to reach the reloader, which it has no handle on.
+replays; and `control.Service.rebuildRule` still spawns one uncoordinated goroutine per request, so an operator
+corpus-rebuild reproduces the original burst. Routing it needs the control service to reach the reloader, which
+it has no handle on. *(2026-08-10, C2.6: both are resolved, and the second sentence's diagnosis was wrong —
+routing needed no reloader handle at all. The bound was extracted into a shared `rebuildgate.Gate` that
+`cmd/refractor` installs on both the scheduler and the control service, so neither path holds a bound of its
+own. The replay drain was not routed and could not be: see §17.21 for why the boundary moved to the handover
+instead.)*
 
 **Verified live, with its limit stated.** `bin/refractor` and `bin/loupe` were rebuilt from `main` and cycled
 (both postdate the merge commit); `make verify-kernel` passes and the whole-repo `go test ./...` is green.
@@ -2320,7 +2328,8 @@ came due at this admit and is recorded: B1's lens anchors on concrete `identity`
 
 **B0's two residuals still resolve to nothing, and one of them matters.**
 `control.Service.rebuildRule` spawns an uncoordinated goroutine per request, so an operator corpus-rebuild
-reproduces the exact fan-out B0 exists to prevent. Filed rather than carried silently.
+reproduces the exact fan-out B0 exists to prevent. Filed rather than carried silently. *(2026-08-10: closed by
+C2.6 — §17.21.)*
 
 **The headline that did not survive.** §9.4 promised this fire converted a permanently-broad auth-plane lens
 into a narrowed one, and called it the measurable win. Measured: the lens is non-exhaustive independently of
@@ -2505,3 +2514,82 @@ corpus sweep.
   and correctness, not memory** — any brief citing boot memory as the driver is citing a measurement that no
   longer holds (§17.19).
 - **Still designer-pass:** C4 (items 8–11) and C5 (item 12). **The item does not close until C5 is answered.**
+
+### 17.21 Fire C · C2.6's fan-out closes, and the ratified routing was the wrong mechanism (2026-08-10)
+
+The item said "routed through B0's scheduler", and diagnosed the blocker as the control service having no
+handle on the reloader. **Both were wrong, and the build says so rather than working around them.** The
+scheduler is the taxonomy path's *queue* — its settle window and per-entry coalescing are meaningful only to
+that path — while the thing both paths need is the *bound*. So the bound was extracted into
+`internal/refractor/rebuildgate`: a keyed serializer with a global ceiling, one instance `cmd/refractor`
+installs on the scheduler and on `control.Service`. No reloader handle was needed at any point.
+
+**Why the bound had to be global, and why per-path was never a bound.** A rebuild is a durable delete-recreate
+and costs the server the same whoever asked. Two paths holding two bounds leave the sum unbounded — the shape
+the item exists to remove. The gate deliberately **never coalesces**: a taxonomy rebuild joining an operator
+rebuild that started before the taxonomy changed would report success for a pass that never saw the change,
+and a `truncate=true` joining a `truncate=false` would report success for a truncation that never happened.
+It serializes; callers coalesce above it, where they can see what two requests mean.
+
+**The slot now covers the handover, and that is the replay half — reclassified, not built.** Routing the
+replay drain through a scheduler is not possible in the shape the item assumed: a busy lens's pump never goes
+idle, so a slot held to the end of a drain is a slot held for the lens's lifetime, stalling every other
+rebuild behind it. What *was* half-covered is the transition — `Reset` returned once the durable was
+recreated and the pumps were merely *asked* to reopen. `ConsumerSupervisor.ResetAwaitReopen` closes that with
+a bounded, non-fatal wait. **The replay behind the reopened iterator is a stated non-guarantee, at the
+constant that declares the bound**, together with the second exclusion: the synchronous `RebuildAndWait` arm,
+which runs one at a time inside a serial durable handler and would hold a global slot across a 30-minute
+drain budget. Process-wide concurrency is the bound plus at most one.
+
+**What the three cold reviewers changed.** No blocking defect; the gate's deadlock-freedom, starvation
+resistance and latch accounting each survived direct attack with probes, and the privacy-critical attestation
+path was proven fail-closed (a lens cannot be attested rebuilt while its pump never reopened).
+
+1. **A single-token acknowledgement let one of two waiters steal the other's wakeup** (reproduced: `302ms` and
+   `3.002s` on a 3s budget). The loser burned its whole budget and logged that a pump had not reopened when it
+   had. The acknowledgement is now a **broadcast** — a closed-and-replaced channel — so one reopen releases
+   every waiter, and the drain-before-request ordering it replaced is gone rather than documented.
+2. **A claim the code could not back was weakened, not defended.** The wait cannot mean "the reopen I asked
+   for": a pump that finished opening against the old durable and is descheduled before signalling can release
+   a later waiter. It is documented as a **best-effort handover barrier**, with the residual race's consequence
+   named (a slot released early — the same as the timeout).
+3. **Two false soundness citations.** Both exclusion arguments cited `Pipeline.rebuildSerial` as serializing
+   per lens; it serializes `RebuildAndWait` callers against each other only, and says so in its own doc. The
+   conclusion survives on a different mechanism — exactly one `classkeyshredded.Manager`, inline handler — and
+   the consequence the wrong citation hid is now stated: a synchronous rebuild of lens X can overlap a gated
+   rebuild of lens X.
+4. **The retired OOM framing had crept back in** — a new package doc argued the bound from "the shape that has
+   taken the server down". Struck. §17.19's measurement stands: the adjacency hub's payload spin was
+   effectively the whole term, and this is fairness and correctness work.
+5. **Two mechanisms were shipped unpinned**, both caught by mutation: reverting `pipeline.go` from
+   `ResetAwaitReopen` to `Reset` passed the entire suite, and deleting `Reset`'s `requestReopen` loop passed
+   substrate, Weaver and Loom. Both now have tests that fail on the reversion. The second needed its premise
+   corrected first — a deleted durable is self-announcing, so the pump reopens either way and no latency bound
+   can pin it; the test asserts the *signal*, in the one state where nothing consumes it.
+
+**Two pre-existing defects the fire exposed, fixed here rather than filed.** `DeleteConsumer` +
+`createConsumer` was not atomic per durable name, so two racing resets failed at the server with
+`err_code=10012` (68 of 80 in a probe) — and that error is neither of `classkeyshredded`'s two tolerated
+classes, so it reached the **pause arm**: a healthy lens paused, on the privacy-critical path, because two
+rebuilds raced. A per-consumer mutex now spans the pair and nothing else. Separately, `recreateDurable` read
+`mc.spec` outside `s.mu` while `UpdateSpec` mutated it — a data race *and* a torn read that could delete
+against one stream and create against another.
+
+**Lessons routed:** `docs/components/refractor.md`'s "a meta sweep multiplies `Rebuild`" entry now names the
+per-path-bound failure and cites checks that actually cover the shipped wiring; `docs/components/substrate.md`
+records the reset invariant. A class worth watching for a second sighting: **a bound whose enforcement points
+are the callers needs its exclusions censused, or the next caller is a silent bypass** — this item's whole
+history is that census being wrong three times.
+
+**CHECKPOINT — Fire C, after C2.6.**
+
+- **Done:** C1.1, C1.2, C1.3, C1.4's authoring half, C2.5, C2.6, C3.7. All on `main`, CI green. The worktree
+  `/private/tmp/lattice-worktrees/taxonomy-c26-1786389536` is spent.
+- **Next:** nothing buildable remains in Fire C. C4 (items 8–11) and C5 (item 12) are designer-pass, and
+  **the item does not close until C5 is answered** — it decides whether the taxonomy's original justification
+  is recoverable or should be struck.
+- **Carried, needs its own item:** `TestCoreKVSource_TaxonomyBarrier_VerdictStraddlingAConnectionLossIsDiscarded`
+  fails under `-race` (2/8 with this change, **5/8 without** — pre-existing, and CI does not run `-race`, so it
+  cannot redden main). It is flagged as a possible real fail-open rather than a flake: `[true false]` means the
+  barrier armed and then disarmed, which is the exact window C2.5 (`d470c9ac`) exists to close. Filed to the
+  lane, not resolved here — it is a different mechanism's correctness question, not this fire's tail.
