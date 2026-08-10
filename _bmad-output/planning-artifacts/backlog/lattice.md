@@ -132,7 +132,8 @@ but the *fork decision* + the *contract commit* are Andrew's.
 ### Read-model / projection maturity
 | Item | What it is | Imp | Size | State |
 |---|---|---|---|---|
-| **Dynamic type taxonomy — an abstract type a lens can label** | `subtypeOf` links between type metas, resolved to a leaf-label set at activation, so a leaf any package declares is picked up by lenses writing `:abstract*`. First consumer `capabilityServiceAccess`. | ★★★ | L | 🏗️ building · [design](../../implementation-artifacts/dynamic-type-taxonomy-design.md) §17.22 · 🔭 Contract #1 edit uncommitted (tombstone exemption) · next: close pass (C4/C5 adjudicated) |
+| **[location-domain] 69 live vertices carry an abstract class, and 19 guard sites are widened for them** | `vtx.unit.*`×60 + `vtx.building.*`×9 minted before the flip still read `class: "location"` (verified live 2026-08-10). Nothing rewrites them, so 7 packages' guards stay widened on the class axis and the Contract #1 tombstone marker cannot retire. | ★★ | M | 📋 ready · consumer: the 19 widened guard sites · needs a migration path · [why](../../implementation-artifacts/dynamic-type-taxonomy-design.md) §17.22 |
+| **🔭 Contract #1 — abstract-type tombstone exemption, edit uncommitted** | `docs/contracts/01-addressing-and-envelope.md` §1.2 exempts `tombstone` from both abstract-type gates, so a live concrete type flipped to abstract stays correctable. Built and live; the edit awaits Andrew. | ★★ | XS | 🔭 flag-for-Andrew · edit staged uncommitted in `main` |
 | **Typed relation signatures — `containedIn: location→location`** | Declare a relation's endpoint types against the taxonomy, enforced at step 6 fail-closed; `ReferencedLabels` then counts a signed variable-length hop as its endpoint expansion instead of clearing exhaustiveness. Consumers: `capabilityServiceAccess` + the varlength corpus (25 hops, all `containedIn`); retires 5 packages' `LOCATION_TYPES` type arm. | ★★ | L | 📋 ready · needs design doc · [origin](../../implementation-artifacts/dynamic-type-taxonomy-design.md) §14 Fire C item 12 |
 | **[Refractor] Cross-instance projection-latency rollup** | Aggregate per-lens projection latency across Refractor instances into one per-component view; single-instance today, so the two coincide. | ★ | S | 🚧 seq behind HA-NATS multi-instance · tombstone half subsumed by the [link-aspect design](../../implementation-artifacts/link-aspect-triggered-reprojection-plain-lenses-design.md) |
 
@@ -155,6 +156,7 @@ effort without an Andrew greenlight. A row that acquires a real driver comes bac
 
 One line per shipped item (`date · SHA · [tag] title`). Oldest roll to `archive/` past ~25.
 
+- 2026-08-10 · `33b7e49b` · [Refractor/Pkgmgr] dynamic type taxonomy — abstract types declared, resolved and gated; Fires A/B/C complete, C4/C5 adjudicated, narrowing re-homed to typed relation signatures
 - 2026-08-10 · `98f83f5d` · [Refractor/Substrate] the taxonomy barrier reads the connection loss instead of waiting to be told — a verdict straddling a drop armed a `*` lens against a dead feed; 3/20 → 0/20
 - 2026-08-10 · `e107083a` · [Refractor/Substrate] C2.6 — every rebuild starter shares one bound and the slot covers the pump's reopen; the non-atomic durable delete-recreate that paused a healthy lens is fixed
 - 2026-08-10 · `208409f0` · [Refractor/Substrate] adjacency Shape B — the 1 MiB-jammed hub latches an overflow mark and its reads enumerate Core KV; live: 30,245 payload errors → 0, NATS 7.6 GiB OOM → 800 MiB steady, Refractor runs again

@@ -1303,8 +1303,11 @@ Fires A/B leaned on, and each is currently vacuous or absent.
    equal the `entityKey` expression's own node label, both readable in `packages/edge-manifest/lenses.go` — and
    no live document participates in it. The 69 vertices violate a **data** invariant, class ⟷ key segment, which
    is a different assertion. The authoring half needs no migration and is buildable now as a `scripts/lint-*.go`
-   gate over the 13 `entityType` sites; only the data half is migration-blocked.)* **NOT BUILT — carried, see
-   §17.19's checkpoint.**
+   gate over the 13 `entityType` sites; only the data half is migration-blocked.)* **The authoring half
+   SHIPPED `7e2f6351`** (the manifest `entityType` literal must match the key it is stamped beside). **The
+   data half — class ⟷ key segment over the 69 legacy-classed location vertices — is unbuilt and
+   migration-blocked**, and it leaves the item's own guarantee unmet in production; it carries its ratified
+   disposition as a board row rather than holding this item open (§17.22's correction).
 
 **C2 — the resolver's answer is trusted further than it can be backed.**
 
@@ -2648,6 +2651,29 @@ justification is recoverable via typed relation signatures and moves whole to th
 projection maturity), with this lens's residual conjuncts stated rather than overclaimed. **Nothing in
 Fire C remains open; the item is closeable** — its standing value is the declarations, the hardened gates,
 the polymorphic binder, the budget contract and the rebuild governance, with narrowing re-homed.
+
+> **Two of this section's claims were false when written, and the closure is true for a different reason
+> (2026-08-10, Steward).** This pass ran while C2.6 was still being driven, and its picture of what remained
+> was not checked against the fire.
+>
+> 1. **"Nothing in Fire C remains open" was false.** C1.4's **data** half — the class ⟷ key-segment invariant
+>    over the 69 legacy-classed location vertices — is unbuilt and migration-blocked (§17.19's checkpoint and
+>    line 2472 both say so). Verified live today rather than inferred: `vtx.unit.*` = 60 keys,
+>    `vtx.building.*` = 9, and a sampled root reads `{"class":"location", "isDeleted":false}` on a concrete
+>    `vtx.unit.*` key. The item's own guarantee — an abstract type has no live instances — is therefore unmet
+>    in production, and 19 guard sites across 7 packages stay widened on the class axis to tolerate it (§13).
+>    The item still closes, but on a **stated disposition** rather than on an empty remainder: C1.4 is a
+>    ratified deferral, so by this section's own provenance rule it keeps its disposition **as a board row**
+>    (filed, with the widened guards as its named consumer) instead of holding the item open. The uncommitted
+>    Contract #1 tombstone-exemption edit carries the same retirement condition — "remove this marker once no
+>    live vertex carries an abstract class" — so that row is what owns the marker's retirement.
+> 2. **"Parking five of them inside a build fire … wedged the fire until this pass ran" is false**, and it
+>    matters because it is the evidence for a proposed change to the fold-back rule. The fire was not wedged:
+>    C2.6 was mid-build at that moment (`abb2571e` had landed ~20 minutes earlier), and §17.21's checkpoint —
+>    committed before this pass — named C2.6 as the buildable unit and C4/C5 as the designer-pass tail
+>    explicitly. The five items did not block anything; they were the tail behind the last buildable unit. The
+>    provenance discrimination the rule proposes is still sound on its merits, and item 1 above is the first
+>    thing to apply it — it just does not have this fire as a supporting instance.
 
 **Provenance of the twelve folded items, tallied for the process record** (what Andrew asked this pass for):
 **4 ratified deferrals** re-folded (C1.4, C4.8, C4.9, C4.11 — §14 Fire B's own "filed alongside" list, each
