@@ -1614,3 +1614,73 @@ it. (§17.7)
 The enumerator's caps and its `reportsTo` hop (unchanged since §10 said so); any Contract amendment;
 `verify-claim-ceremony.go`'s convergence poll, which keeps its own board row because it is the *harness* this
 design is measured with rather than part of the design.
+
+## 19. Increment 4 build note (2026-08-10) — delta-scout, adjudications, checkpoint
+
+Resume of a multi-fire item, so this is the §4 delta-scout rather than a fresh committed brief. Every anchor
+below was re-read live against `main@13ff8615`.
+
+### 19.1 Verified touch-list
+
+| Sub-increment | Mechanism, at the line that decides it |
+|---|---|
+| 4a-1 WITH conjunct | `ruleengine/full/hopindex.go:190-194` — `AnchorHopIndex` walks `cr.Query.Clauses` and returns `Incomplete` on the FIRST `*With`, whatever it carries. The carried-variable set is already extracted by `labels.go:86-103` (`carryLabeled`) and later clauses' referenced variables by `labels.go:68-74` / `:114-140`, so the narrow predicate is expressible with no new AST access. |
+| 4a-2 singleton fast path | `pipeline/actor_enumerator.go:105-109` — `eventVertexType == e.actorType` returns `[]string{eventVertexKey}` and skips the frontier walk at `:112-175`. |
+| 4a-3 D2 Phase 2 | Actor-aware arm reaches the shared unit at `pipeline/evaluate.go:776`, `:834`, `:887` (`affectedAnchors`, `anchor_derivation_mode.go:119`). The plain arm does not: `pipeline.go:2890-2950` (`evalPlainLinkReprojection`) loops endpoints into `evaluatePlainFromVertex` (`:2944`), and `seedAnchorFor` (`:1152`) returns `""` for a non-anchor label. |
+| 4a-4 Term A relation dimension | `pipeline.go:1621` gates the relation-narrowed form on `!actorAware`; `actorAwareFanOutRelevant` (`:1328-1345`) takes types only, no relation. |
+| 4b ordering guard | `ConsumerFilter` (`pipeline.go:1555`) reads `p.actorEnumerator != nil` (`:1416`) to pick plain-vs-actor-aware. Install order is `UseFullEngineBranches` → `InstallActorAggregate` → `SetSecureDecryptor` → `ConsumerFilter` → `RunOn` (`cmd/refractor/main.go:1205`, `:1311`, `:1380`, `:1427`, `:1428`). |
+| 4c healer proof | `RunSweep` at `pipeline/sweep.go:330`. Closest precedent `refractor_business_sweep_e2e_test.go:196-262` (write → project → `targetKV.Purge` → `RunSweep` → poll restored); no narrowed-consumer variant exists. |
+| 4d re-claim | `packages/identity-domain/ddls.go:1521` tombstones `.claimKey`; `opmetas.go:233-237` still declares it under `reads`; `sensitive_decrypt.go:152-160` errors on the tombstone; `step4_hydrate.go:287-288` wraps it as a plain error, so `commit_path.go:931` classifies `ErrCodeInternalError` and `gateway.go:909` renders **500**. |
+
+### 19.2 Premises re-run, and the two that did not survive
+
+- **Corpus census (checklist #2).** `go test ./internal/refractor/ -run 'Census|Corpus'` green at head; the
+  pinned corpus is **114 executable cyphers, 31 of them `modeBroad`**. That is the number 4a moves, and each
+  move must be attributable to a named conjunct (§18.5).
+- **The WITH refusal is live, not theoretical.** `refractor.log` at the running stack shows
+  `reason: "query carries a WITH — a dropped variable re-seeds by bucket scan, not by link"` on six distinct
+  `ruleId`s in one activation pass, alongside `"the lens's row depends on inputs outside its compiled pattern"`
+  and `"pattern carries a variable-length relationship"`.
+- **CORRECTED — the Inc-3 shadow counters exist.** A scout reported them unbuilt. They are built:
+  `pipeline/anchor_derivation_shadow.go` carries `DerivationShadowStats`, `AnchorDerivationShadow()`,
+  `SetAnchorDerivationSampling`, and both the shadow and act-mode tallies. §18.1's "the shadow counters are the
+  before-and-after" premise holds; 4a-3 is the wiring job it says it is.
+- **CORRECTED — `optionalReads` does not fix 4d.** The obvious reading of §18.4 ("the re-claim still declares
+  it") suggests demoting `.claimKey` to `optionalReads`. It does not work: `step4_hydrate.go:318-319` runs the
+  same `decryptSensitiveDoc` on an optional key that is *present-but-deleted*, so the 500 is unchanged. It is
+  also against Contract #2 §2.5, which reserves `optionalReads` for keys that are never required. Rejected.
+
+### 19.3 Adjudications made here (decide-don't-defer)
+
+- **4d is an asymmetry between the plain and sensitive read paths, and that is what gets fixed.** A deleted
+  PLAIN aspect declared under `reads` is hydrated and handed to the script with `IsDeleted: true`, and the
+  script filters it — which is exactly what `ddls.go:1464` is written to do (`claim_key_aspect == None or …
+  isDeleted` → `fail_claim("invalid-key")`). A deleted SENSITIVE aspect instead fails the whole operation at
+  `sensitive_decrypt.go:160`. The fix keeps that line's security property and drops only its blast radius:
+  **deliver the doc with `IsDeleted: true` and the sensitive payload SCRUBBED** — never the retained
+  ciphertext (step 8 preserves the prior document), never plaintext — so a script that forgets to filter reads
+  nothing rather than the secret. The `egress` disposition keeps refusing outright: a ref the bridge could open
+  must not leave the Processor at all.
+- **4b refuses to NARROW, it does not refuse activation.** The hazard is asymmetric — an over-narrow filter is
+  unrecoverable (a JetStream filter update never rewinds the cursor) while a broad one is merely wasteful and
+  heals on the next rebuild. So an incomplete-install call yields the **broad** filter plus a
+  `FilterDecision.BroadReason` naming the incompleteness, loudly logged; it does not take a healthy lens down
+  for a caller-ordering bug.
+- **4b reads a DECLARED kind, not a new readiness latch.** There is no install-complete flag today, and adding
+  one is precisely the "new state without a lifetime" class this component's dossier keeps catching. Instead
+  disambiguate the only ambiguous input: `actorEnumerator == nil` means either *genuinely plain* or
+  *actor-aware, not yet installed*. Compare the lens's **declared** projection kind against the installed
+  components — declared actor-aware with no enumerator is the incomplete case. No new lifecycle.
+
+### 19.4 CHECKPOINT
+
+- **Worktrees:** `/tmp/lattice-worktrees/authplane-inc4-*` (branch `steward-authplane-inc4`) carries 4a/4b/4c,
+  all `internal/refractor`; `/tmp/lattice-worktrees/authplane-inc4d-*` (branch `steward-authplane-inc4d`)
+  carries 4d, `internal/processor` + `packages/identity-domain`. Disjoint, so they land independently.
+- **Landing shape:** land each sub-increment on `main` as it goes green. The invariant that keeps `main`
+  correct at every boundary is the one the design has had since §4.2 — every conjunct is fail-closed and every
+  derivation that cannot resolve falls back to the shipped `ActorEnumerator` BFS, so a partially-landed Inc 4
+  is never narrower than its predecessor, only wider.
+- **Order:** 4a-1 → 4a-2 → 4d (parallel worktree) → 4c → 4b → 4a-4 → 4a-3. This departs from §18's 4a→4b→4c→4d
+  only in putting the two correctness gaps (4a-2's under-approximation, 4d's live anti-enumeration hole) ahead
+  of the guard and the proof; §18.1's only stated dependency, 4a-before-4b, is preserved.
