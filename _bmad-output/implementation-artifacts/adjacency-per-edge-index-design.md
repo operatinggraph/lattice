@@ -1,52 +1,31 @@
 # Adjacency under the 1 MiB ceiling — and the multi-subject direct-get primitive
 
-**Status: 📐 awaiting-Andrew (ratification — now a three-shape fork, §14)** · Designer fire
-2026-08-09 (Winston); **redirected by Andrew 2026-08-09** after the multi-subject direct-get finding,
-re-grounded with live measurements 2026-08-10 (§14). Board row:
-`[Refractor] A node's whole adjacency list is one KV value, so a high-in-degree node cannot be indexed`
-(★★★, M). Adversarial pass on the original per-edge shape: **run and folded** (§13); its
-shape-independent findings carry into every candidate (§14.5).
+**Status: ✅ Andrew-ratified 2026-08-10 — Shape B (overflow mark + Core-KV fallback), §15 is the
+build plan.** Designer fire 2026-08-09 (Winston); redirected by Andrew 2026-08-09 after the
+multi-subject direct-get finding; measured 2026-08-10 (§14); **ratified "go with B" 2026-08-10**.
+Board row: `[Refractor] A node's whole adjacency list is one KV value…` (★★★). The **substrate
+multi-subject direct-get primitive** is its own ratified board row (Andrew-directed) and builds
+**first** — §15's fallback read consumes it.
 
-## For Andrew
+## Ratification record (Andrew, 2026-08-10)
 
-Two decisions live here now, one settled and one yours.
+- **Shape B ratified**: keep the per-node document for ordinary nodes; when a node crosses the
+  overflow threshold, `Build` latches a **mark** and stops absorbing its edges; a marked node's
+  reads fall back to Core-KV link enumeration (commit-fresh). Build plan: **§15**.
+- **Shape A (delete the index) rejected**: the inbound trailing-wildcard walk prices every read at
+  O(total links) under the core-kv read lock, and the ActorEnumerator BFS multiplies it per visited
+  node (§14.4).
+- **Shape C (per-edge rekey, §3–§13) SHELVED**: the fully-specified, adversarially-reviewed scale
+  successor. **Do not build without a new ratification** — its trigger is hub *count* growth
+  (several marked nodes whose fallback reads dominate eval timings), not calendar time.
+- **The multi-subject direct-get substrate primitive is ratified to build** (Andrew: "definitely
+  file… as a new substrate function"): `KVGetMulti` per §6.3.1's protocol rules (no continuation,
+  EOB `Nats-Num-Pending == 0` assertion, 404/413 handling) + the consumer-snapshot fallback with
+  the §6.3.2 stability protocol, plus the first consumers (step-4 hydration, the
+  enumeration-corpus conversions, §14.2–14.3). Measured record: §14.1.
 
-**Settled (you directed it; filed on the board): the multi-subject direct-get primitive.** One
-request to `$JS.API.DIRECT.GET.KV_<bucket>` with `multi_last` returns last-value-per-subject for an
-explicit key list *or* subject filters, computed and streamed **atomically under the stream read
-lock**, no consumer involved, ≤1,024 subjects per request (413 above — hard, unpageable). Measured
-on this host (§14.1): **~31 µs/key amortized at 10–100 keys vs 153 µs per sequential `kv.Get`
-(~5×)**, and **4× faster than the ephemeral-consumer lister on the identical 180-key result set**.
-First consumers: **step-4 hydration** (the exact-key read-set becomes one atomic round trip —
-`step4_hydrate.go`'s own comment documents today's Get-straddle it removes) and the
-**`ListKeysPrefix`-class enumerations** (~12 non-test files: pkgmgr censuses, Loupe browse, vertical
-apps' P5 list endpoints, the full engine's whole-type scans). Filed as its own board row; ADR-31 is
-the vendor authority and is silent on numbers, so the spike above is the record.
-
-**Yours: what happens to the adjacency index.** Three shapes, §14.4 has the full matrix:
-
-- **A — delete the index**: serve neighbors from Core KV directly (`lnk.*.<id>.>` outbound,
-  `lnk.*.*.*.*.<id>` inbound; bodies come back, so soft-tombstone filtering is free). Removes the
-  bucket, Bootstrapper, three writers, pre-apply, Ready gate. Measured cost: the inbound
-  trailing-wildcard walk is ~0.4 ms over today's ~10 K link subjects and **scales with total links,
-  not degree** (~35 µs/1K subjects), runs under the core-kv read lock against the Processor's write
-  path, and both live hubs already 413 into a consumer fallback that costs ~100 ms-class at hub
-  degree. The ActorEnumerator BFS multiplies that per visited node. Leanest; correct today; not the
-  scale path.
-- **B — keep the document, mark the hubs (my recommendation)**: docs unchanged for 99.9 % of nodes
-  (one 153 µs get, zero migration); when a doc would cross a degree threshold (~1,000 edges),
-  `Build` replaces it with a small **overflow mark** and stops absorbing that node's edges; a marked
-  node's reads fall back to Core-KV enumeration — typed hops via `lnk.*.*.<rel>.*.<id>` usually
-  come back under 1,024 and ride multi_last (~0.6 ms); untyped/BFS reads pay the consumer path.
-  The jammed hub self-heals on first post-deploy touch. Smallest diff, no migration, and "fallback
-  to ephemeral for the rare hubs" — your bottom line — is the whole change.
-- **C — per-edge rekey** (the fully-specified §3–§6 body): uniform O(degree) prefix reads,
-  strongest at scale, but the most machinery — v2-durable migration, TTL'd markers, the
-  stability-verified fallback. Keep on the shelf as the scale successor unless you want it now.
-
-**No frozen-contract change in any shape.** The bucket is Refractor-private operational state
-(lattice-architecture P1; Contract #2 §kv.Links). Shape B needs no provisioning or permission edits
-at all; C needs the `PerKeyTTL` registry row; A needs neither but deletes a component.
+**No frozen-contract change, no provisioning change, no permission change** in Shape B. The bucket
+stays Refractor-private operational state (lattice-architecture P1; Contract #2 §kv.Links).
 
 ---
 
@@ -179,11 +158,11 @@ never call stream purge. Every mechanism in this design is chosen to fit inside 
 one thing per-key publishes cannot do is make a *subject* vanish, which is what the TTL'd markers
 in §3.2/§6.5 are for.
 
-## 3. Shape C — one key per directional edge (full spec; no longer the standing recommendation, see §14)
+## 3. Shape C — one key per directional edge (SHELVED 2026-08-10 — do not build)
 
-§3–§13 are the complete, adversarially-reviewed specification of the per-edge rekey. They remain the
-build plan **if** Andrew picks Shape C; §14 holds the measured three-way comparison and the current
-recommendation (Shape B).
+§3–§13 are the complete, adversarially-reviewed specification of the per-edge rekey, **shelved at
+ratification in favor of Shape B (§15)**. They are retained as the scale successor's ready spec —
+building them requires a new ratification. Nothing below this line is part of the ratified build.
 
 ### 3.1 Key and value
 
@@ -661,14 +640,11 @@ collapses to the same single request *with values included*. The >1,024 cases ke
 | Core-kv coupling | every neighbor read locks the write stream | only marked-hub reads do | none (separate bucket) |
 | Jam removal | total | total (mark swallows; jammed doc self-heals on first touch) | total |
 
-**Recommendation: B now, C shelved as the scale successor, A rejected for the BFS/walk arithmetic.**
-B is Andrew's "keep existing structure, mark the rare too-many-links vertices, fall back to
-ephemeral" — measured, it keeps the 153 µs common case with zero migration, ends the jam and the
-Nak loop (the overflow branch makes oversize unreachable), and the marked-hub fallback inherits
-Shape A's one real virtue (commit-fresh reads straight off Core KV, no pre-apply needed on that
-path). A's leanness is real but its inbound walk term prices every BFS crossing at O(total-links)
-under the write lock — wrong direction for the one graph store everything shares. C's uniformity
-is worth having when hub *counts* grow, not before; its spec stays ready.
+**Outcome — RATIFIED: B** (Andrew, 2026-08-10: "go with B"); C shelved as the scale successor; A
+rejected for the BFS/walk arithmetic. B keeps the 153 µs common case with zero migration, ends the
+jam and the Nak loop (the overflow latch makes oversize unreachable), and the marked-hub fallback
+inherits Shape A's one real virtue: commit-fresh reads straight off Core KV, needing no pre-apply
+on that path. The build plan is §15.
 
 ### 14.5 What carries into Shape B from the §13 review (shape-independent findings)
 
@@ -696,5 +672,110 @@ is worth having when hub *counts* grow, not before; its spec stays ready.
 The substrate primitive + first consumers is its own row (`[Substrate] multi-subject direct get`,
 ★★★): the `KVGetMulti` function (exact lists + filters, EOB/404/413/short-read handling per §6.3.1),
 step-4 hydration adoption, and the enumeration-corpus conversions — valuable under every shape
-above, and first regardless of the adjacency decision. The adjacency row stays 📐 on this doc
-pending the A/B/C call.
+above, and first regardless of the adjacency decision.
+
+## 15. Shape B build plan — RATIFIED (builds after the substrate primitive row)
+
+The whole change is: a per-node **overflow latch**, a **fallback read** for latched nodes, and
+nothing else. No migration, no durable change, no provisioning or permission edits, and — unlike
+Shape C — **zero test migration** (no fixture in the tree drives a node past the threshold, and the
+three raw-document-parsing e2es read unmarked nodes).
+
+### 15.1 The mark — a separate key, not a field in the document
+
+`adjmark.<nodeId>` in the same bucket (tiny value, e.g. `{"at":<seq>}`), plus an in-process
+monotonic cache (`map[nodeID]struct{}`, loaded lazily: first `Build`/`Neighbors` touch of a node
+consults the cache, missing → one `Get`, result cached; marks are never unset, so the cache never
+invalidates). **Why not an `overflow` field inside `adj.<nodeId>`:** a mixed-fleet window would
+corrupt it — an old binary's `Build` unmarshals the sentinel doc to zero edges, appends one, and
+writes back a 1-edge document, silently *unmarking* the hub; the new binary then reads a
+1-edge index as authoritative for a 3,900-edge node (converged-but-wrong) until degree re-crosses
+the threshold weeks later. A separate key is invisible to the old binary, so the worst mixed-window
+outcome is harmless doc churn the new binary ignores. Lifetime: created by `Build` at threshold,
+read by `Build`/`Neighbors` through the cache, never unset (a node whose degree later shrinks keeps
+paying the fallback — fine, marks are rare), wiped only with the bucket, deterministically
+re-latched by the Bootstrapper replay (the rebuild crosses the same threshold).
+
+### 15.2 `Build` — the latch branch
+
+On the upsert path, after computing the post-upsert edge list: if the node is already marked → skip
+the doc entirely (write nothing). Else if `len(edges) > adjOverflowDegree` **or**
+`len(marshaled) > adjOverflowBytes` → create `adjmark.<nodeId>`, best-effort overwrite the document
+with an empty-edges body (reclaims the jammed ~1 MiB and leaves a breadcrumb; the mark key is the
+authority, so an old binary trampling the doc changes nothing), cache the mark, return nil. Removal
+path on a marked node: no-op. Thresholds: **`adjOverflowDegree = 3072`, `adjOverflowBytes =
+800 KiB`** (both, because degree alone does not bound bytes at variable entry size; 3,072 × ~268 B ≈
+823 KB keeps unmarked documents comfortably under the 1 MiB jam). At these values exactly one live
+node latches — the already-jammed `leaseServiceInstance` meta (3,919°), **on its first post-deploy
+`Build` touch: the jam and the Nak loop end there**, structurally. The 2,335° identity hub stays on
+its 645 KB document (~150 µs reads, unchanged) with ~10 months of headroom at its observed growth;
+§15.6's trigger names what happens as it approaches. Thresholds are consts with a test override.
+Riders in the same increment (§14.5): the four-segment validation → `Term` at the event boundary,
+`Build`-error classification (`IsInvalidKeyError` ⇒ permanent ⇒ `Term`; transport ⇒ `Nak`), the
+`EventsForLink` consolidation, and the ½-max_payload canary at both write chokepoints.
+
+### 15.3 `Neighbors` — the fallback read for marked nodes
+
+Unmarked (the 99.9 % path): today's single `Get`, byte-for-byte unchanged. Marked: enumerate Core
+KV's canonical link keyspace with **both directional filters in one request** —
+`lnk.*.<nodeId>.>` (outbound) and `lnk.*.*.*.*.<nodeId>` (inbound) — via the substrate primitive:
+
+- **≤1,024 combined matched subjects**: one `multi_last` request — one atomic, stream-locked
+  snapshot of both directions (§7). Measured shape: ~5 ms at 180 matches, walk term ~35 µs/1K link
+  subjects (§14.1).
+- **413**: the consumer-snapshot fallback — one ephemeral `DeliverLastPerSubject` consumer with
+  `FilterSubjects: [both]` on `KV_core-kv`, drained under the **§6.3.2 stability protocol**
+  (double-drain, compare (subject → sequence) maps, bounded retries; `InitialConsumerPending`
+  failure and ctx expiry are hard errors) — core-kv is history-1, so the tearing analysis applies
+  verbatim.
+- Each matched message: parse the Contract #1 link key from the subject; drop hard-DEL markers
+  (empty body / `KV-Operation` header) and soft tombstones (`isDeleted` in the returned body — the
+  read is free because multi_last returns values); synthesize the `EdgeEntry` exactly as
+  `processLinkEnvelope` derives it (EdgeID = link key; direction by which endpoint is `nodeId`;
+  a self-link yields both directional entries — the §4 self-loop fix arrives for marked nodes).
+- **Fingerprint** (the returned `uint64`): max sequence over every matched subject, markers and
+  soft-tombstones included — monotonic per change, equality-compared by `footprintValid`
+  unchanged; unmarked nodes keep the document revision untouched. The §3.3 timing precondition is
+  inherited only in the narrow purge case and core-kv has no marker-TTL machinery — nothing new.
+
+**Ordering guarantee on the marked path needs no pre-apply**: the pipelines' link pre-apply exists
+because the *index* could lag the CDC event; a marked node's read goes straight to Core KV, where
+the link the event describes is **already committed** (the event *is* the commit's CDC). `Build`'s
+marked-path no-op is therefore correct, not a gap. Unmarked nodes keep the pre-apply verbatim.
+
+### 15.4 What this does to the §1.2 failure, day one
+
+The dedicated consumer's next delivery touching the hub latches the mark; every queued and future
+`instanceOf` event then costs a no-op ack — the 14×-amplified redelivery loop, the per-lens fan-out
+failures, and the frozen-wrong 3,912-edge reads all end. Marked-hub reads return the **complete,
+current** edge set (3,919 and counting) at consumer-fallback cost — correct-but-slower strictly
+dominates frozen-wrong. Every eval memoizes per evaluation (`fetchEdges`), derivation and BFS
+memoize per call, so each evaluation pays at most one fallback read per marked node it touches.
+
+### 15.5 Tests (owned by Increment B1)
+
+Regression e2e through the real Bootstrapper with the test-override threshold (e.g. 8): seed past
+it → mark key exists, doc emptied, `Neighbors` returns *all* edges via fallback, link fan-out
+evaluations green; soft-tombstone one link → it leaves the fallback read (retraction transport);
+add an edge between footprint capture and validation on the marked node → drift detected;
+concurrent `Build`s from three writers latch idempotently; an unmarked node's doc path byte-stable.
+Unit: latch monotonicity, both threshold arms, marked-path no-ops, `EdgeEntry` synthesis incl.
+self-loop, mark-cache lazy load. The substrate primitive's own tests (fast path, 413, stability
+protocol) live with its row and are not re-owned here.
+
+### 15.6 Increments and the B2 trigger
+
+- **B1 (one Steward fire, after the substrate row ships): §15.1–15.5** + the component-doc rewrite
+  (§6.9's scope, adjusted to B) + the `docs/vendors.md` version-gate row. Independently shippable
+  and green.
+- **B2 (typed fallback narrowing — S, gated on a named trigger)**: for marked nodes, typed hops
+  read `lnk.*.<id>.<rel>.>` + `lnk.*.*.<rel>.*.<id>` — per-relation subsets ride multi_last
+  (~0.6 ms) instead of the consumer drain. **Trigger: the mark latching on a node whose neighbors
+  the capability plane walks** (concretely: the 2,335° identity hub approaching 3,072 — the §15.2
+  mark log line is the alarm). Until then B2 is dead scaffolding: today's sole marked node is the
+  service meta, whose traversals are not latency-coupled to the auth plane.
+
+**Exit gates (B1):** `go build ./...`, `make vet`, `golangci-lint run ./...`, `make verify-kernel`,
+full `go test ./...` (substrate + shared canary defaults), and on this host: one observed latch —
+mark key present, doc emptied, consumer-info redelivery churn gone, `instanceOf` fan-out evals
+green, marked-node `Neighbors` count ≥ 3,919.
