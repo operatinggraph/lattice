@@ -17,16 +17,17 @@
 
 ## 2. Principles
 
-- **Budget-blind, bounded batch, then exit (Andrew, 2026-08-08).** A fire cannot see the budget, so it never
-  guesses in either direction: it does a **bounded batch** — a few small items, or a big item's **next
-  fire-breakdown increment(s) as its design brief defines them** (the ratified fire plan sets the unit size;
-  never a thinner improvised slice, never "queue still non-empty" as a reason to continue) — commits each
-  unit green, and **exits**. The exit is load-bearing: **context is finite** (an open-ended run trips
-  compaction mid-work), and **a paused schedule is the fleet-control lever** — a run that drains the queue
-  would outlive the pause. Throughput = **well-filled fires × parallel streams**; **the rate-limiter is the
-  governor** — a tripped window fails cheaply and committed units are never lost. Under the fleet build lock
-  a run **renews the lease after every green unit**, so a legitimately-long fire is never stale-reclaimed and
-  a wedged one ages out.
+- **Budget-blind, bounded batch, then exit (Andrew, 2026-08-08; unit corrected 2026-08-09).** A run cannot
+  see the budget, so it never guesses in either direction: it does a **bounded batch** — a few small items,
+  or a big (L+) item's **next FIRE of its ratified fire plan, WHOLE** (the unit is the fire, never the
+  increment: the brief's increment order is the fire's internal build sequence, driven end-to-end in one
+  run; never a thinner improvised slice, never "queue still non-empty" as a reason to continue) — commits
+  each unit green, and **exits**. A mid-fire exit is legitimate only on a hard stop (lock reclaimed, main
+  red, rate-limit tripped), which leaves the 🏗️ checkpoint. The exit stays load-bearing: **a paused schedule
+  is the fleet-control lever** — a run that drains the queue would outlive the pause. Throughput = **runs
+  that finish their fire × parallel streams**; **the rate-limiter is the governor** — a tripped window fails
+  cheaply and committed units are never lost. Under the fleet build lock a run **renews the lease after
+  every green unit**, so a legitimately-long fire is never stale-reclaimed and a wedged one ages out.
 - **Two parallel streams, split along the no-collision seam.** App-vertical work (packages + FE) and Lattice
   platform work touch **disjoint code areas**, so they run **concurrently** without colliding. Lattice work
   stays **serial within itself** (features + maintenance both live in `internal/*` — splitting them would
@@ -143,14 +144,16 @@ Each advancer fire:
 2. **Pre-empt** on reliability/observability red.
 3. **Select** — Verticals: top importance×readiness ready item; Lattice: importance-first (round-robin as
    starvation guard). Resume any in-flight (🏗️) item first.
-4. **Advance** a **bounded batch** — several XS/S/M, or a big (L+) item's next fire-breakdown
-   increment(s) per its design brief — each its own green commit, renewing the build-lock lease;
-   **then exit** (context is finite, and a paused schedule must actually pause the fleet).
-5. **Multi-fire** for big items: persistent worktree + a 🏗️ CHECKPOINT in the design doc (one-line row
-   pointer). Resumes are light: delta-scout + checkpoint amended in the increment's own commit — no fresh
-   committed brief. Review sized to each increment's diff + posture delta, plus **one cumulative adversarial
-   pass at close**. Landing shape per the design doc: merge-once-when-complete, or per-increment landings
-   when every boundary is independently green and safe.
+4. **Advance** a **bounded batch** — several XS/S/M, or a big (L+) item's **next fire, whole** (every
+   increment of it, built + reviewed + green in this run) — each unit its own green commit, renewing the
+   build-lock lease; **then exit** (a paused schedule must actually pause the fleet; mid-fire exit only on
+   a hard stop).
+5. **Multi-fire** for big items: runs split at **fire boundaries** (plus hard-stop recovery); persistent
+   worktree + a 🏗️ CHECKPOINT in the design doc (one-line row pointer). Resumes are light: delta-scout +
+   checkpoint amended in the increment's own commit — no fresh committed brief. Review sized to each
+   increment's diff + posture delta, plus **one cumulative adversarial pass at close**. Landing shape per
+   the design doc: merge-once-when-complete, or per-increment landings when every boundary is independently
+   green and safe.
 
 **Between Select and Advance, every build ITEM gets a FIRE BRIEF at first selection (Phase 0; rules +
 template: `agents/fire-brief-template.md` — Winston 2026-07-23, first trialed on persona-worlds W0):**
@@ -162,11 +165,14 @@ builder execute instead of rediscover — and lets mechanical increments run on 
 create-story→dev-story chain's story file, reborn per-item at selection time — **once per item, never per
 resume** (resumes run the delta-scout).
 
-**Residuals run a triage ladder (Andrew, 2026-08-08) — fixing beats filing:** fix in-fire when bounded with
-a nameable consumer; a defect the fire introduced is never filed; else fold into an existing row; else file
-with named consumer + blocker in the ✅ flip's docs commit. And the design doc's **body stays true**: a build
-that falsifies a ratified claim amends that body text in the same commit — build notes are checkpoints, not
-journals. Full rules: `agents/steward/SKILL.md` §4.
+**What a fire discovers is the Steward's to FIX (Andrew, 2026-08-09, superseding the 08-08 ladder):**
+introduced defects, exposed pre-existing gaps, broken adjacent mechanisms alike — fixed in-fire, as the
+run's next unit, or as the Steward's own next pick (a filed row is a checkpoint of the Steward's queue,
+never a hand-off). Filing has exactly **two outs**, stated on the row: it needs **Andrew** (standing block /
+frozen-contract commit / architectural fork), or it needs a **designer pass** (substantial new design, no
+ratified pattern to extend). And the design doc's **body stays true**: a build that falsifies a ratified
+claim amends that body text in the same commit — build notes are checkpoints, not journals. Full rules:
+`agents/steward/SKILL.md` §4.
 
 Cadence: both advancers fire densely + staggered; the two hydrators on their own cadence. Tune **up** until the
 limiter occasionally trips — that trip is the signal the window is fully used.
