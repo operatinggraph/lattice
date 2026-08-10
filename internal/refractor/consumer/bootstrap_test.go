@@ -15,6 +15,7 @@ import (
 	"github.com/operatinggraph/lattice/internal/natsfixture"
 	"github.com/operatinggraph/lattice/internal/refractor/adjacency"
 	"github.com/operatinggraph/lattice/internal/refractor/consumer"
+	"github.com/operatinggraph/lattice/internal/refractor/subjects"
 	"github.com/operatinggraph/lattice/internal/substrate"
 )
 
@@ -113,8 +114,10 @@ func TestBootstrapper_ReadyAfterLargeBacklog(t *testing.T) {
 	}
 
 	// At the instant Ready fires, EVERY seeded edge must already be indexed —
-	// Ready must not have been raised on a partially-built index.
-	edges, _, err := adjacency.Neighbors(ctx, adjKV, "nodeBig")
+	// Ready must not have been raised on a partially-built index. No node these
+	// tests seed comes near the overflow threshold, so every read here is served
+	// from the adjacency document and never needs a Core KV handle.
+	edges, _, err := adjacency.Neighbors(ctx, adjKV, nil, "nodeBig")
 	require.NoError(t, err)
 	assert.Len(t, edges, backlog,
 		"all %d edges must be indexed at the instant Ready fires (prefetch-race guard)", backlog)
@@ -160,7 +163,7 @@ func TestBootstrapper_ReadyAfterProcessingMessages(t *testing.T) {
 	}
 
 	// Both edges must appear in the adjacency index.
-	edges, _, err := adjacency.Neighbors(ctx, adjKV, "nodeA")
+	edges, _, err := adjacency.Neighbors(ctx, adjKV, nil, "nodeA")
 	require.NoError(t, err)
 	assert.Len(t, edges, 2)
 
@@ -239,7 +242,7 @@ func TestBootstrapper_LinkEnvelopeBridge(t *testing.T) {
 	}
 
 	// Source-side: identityID → outbound `holdsRole` → roleID.
-	srcEdges, _, err := adjacency.Neighbors(ctx, adjKV, identityID)
+	srcEdges, _, err := adjacency.Neighbors(ctx, adjKV, nil, identityID)
 	require.NoError(t, err)
 	require.Len(t, srcEdges, 1, "src adjacency must have one outbound edge")
 	assert.Equal(t, "outbound", srcEdges[0].Direction)
@@ -249,7 +252,7 @@ func TestBootstrapper_LinkEnvelopeBridge(t *testing.T) {
 	assert.Equal(t, linkKey, srcEdges[0].EdgeID)
 
 	// Dst-side: roleID → inbound `holdsRole` → identityID.
-	dstEdges, _, err := adjacency.Neighbors(ctx, adjKV, roleID)
+	dstEdges, _, err := adjacency.Neighbors(ctx, adjKV, nil, roleID)
 	require.NoError(t, err)
 	require.Len(t, dstEdges, 1, "dst adjacency must have one inbound edge")
 	assert.Equal(t, "inbound", dstEdges[0].Direction)
@@ -318,16 +321,102 @@ func TestBootstrapper_LinkEnvelopeBridge_Tombstone(t *testing.T) {
 	// guarantees the tombstone follows the live event.
 	deadline := time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) {
-		srcEdges, _, _ := adjacency.Neighbors(ctx, adjKV, identityID)
-		dstEdges, _, _ := adjacency.Neighbors(ctx, adjKV, roleID)
+		srcEdges, _, _ := adjacency.Neighbors(ctx, adjKV, nil, identityID)
+		dstEdges, _, _ := adjacency.Neighbors(ctx, adjKV, nil, roleID)
 		if len(srcEdges) == 0 && len(dstEdges) == 0 {
 			return
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
-	srcEdges, _, _ := adjacency.Neighbors(ctx, adjKV, identityID)
-	dstEdges, _, _ := adjacency.Neighbors(ctx, adjKV, roleID)
+	srcEdges, _, _ := adjacency.Neighbors(ctx, adjKV, nil, identityID)
+	dstEdges, _, _ := adjacency.Neighbors(ctx, adjKV, nil, roleID)
 	t.Fatalf("link tombstone did not remove both adjacency entries: src=%v dst=%v", srcEdges, dstEdges)
+}
+
+// TestBootstrapper_LinkHardDeleteRetracts covers the SECOND retraction
+// transport a link key carries: a NATS KV hard delete (KVDelete/Purge, an
+// empty-bodied message) rather than an `isDeleted: true` envelope overwrite.
+// internal/refractor/refractor_capability_linkfanout_e2e_test.go's (c') case
+// exercises exactly this vector against the capability pipeline
+// (coreKV.Delete on a grantedBy link key); this is the same vector against
+// the dedicated adjacency Bootstrapper, which must classify the key as a
+// link BEFORE its generic empty-body-is-a-tombstone check, or the hard
+// delete never reaches the bridge that retracts it.
+//
+// The Bootstrapper starts BEFORE either write, and the live Put and the
+// Delete are two separate LIVE deliveries to the running consumer — not two
+// writes seeded ahead of a fresh consumer's startup. That distinction is
+// load-bearing: this bucket's History defaults to 1 (one revision per
+// subject), so a Put immediately followed by a Delete, both seeded before a
+// consumer starts, compacts the live message out of the stream before a
+// fresh DeliverAllPolicy consumer ever sees it — the assertion "no edges
+// remain" would then hold whether or not the hard-delete classification
+// fix works, because the edge was never indexed in the first place. Driving
+// both writes through the already-running consumer instead proves the edge
+// is genuinely present before the delete, and genuinely gone after it.
+func TestBootstrapper_LinkHardDeleteRetracts(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS JetStream")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	js, nc := startJS(t)
+	conn, err := substrate.Wrap(nc)
+	require.NoError(t, err)
+
+	coreKV, err := js.CreateKeyValue(ctx, jetstream.KeyValueConfig{Bucket: "core-boot-linkharddel"})
+	require.NoError(t, err)
+	_, err = js.CreateKeyValue(ctx, jetstream.KeyValueConfig{Bucket: "adj-boot-linkharddel"})
+	require.NoError(t, err)
+	adjKV, err := conn.OpenKV(ctx, "adj-boot-linkharddel")
+	require.NoError(t, err)
+
+	identityID := stableNanoIDForBootstrap("carol")
+	roleID := stableNanoIDForBootstrap("editor2")
+	linkKey := substrate.LinkKey("identity", identityID, "holdsRole", "role", roleID)
+
+	b := consumer.NewBootstrapper(conn, "core-boot-linkharddel", adjKV)
+	go func() { _ = b.Run(ctx) }()
+	select {
+	case <-b.Ready():
+	case <-ctx.Done():
+		t.Fatal("timed out waiting for bootstrap Ready on an empty stream")
+	}
+
+	live := map[string]any{"key": linkKey, "class": "holdsRole", "isDeleted": false}
+	body, err := json.Marshal(live)
+	require.NoError(t, err)
+	_, err = coreKV.Put(ctx, linkKey, body)
+	require.NoError(t, err)
+
+	bothEdgesPresent := func() bool {
+		srcEdges, _, _ := adjacency.Neighbors(ctx, adjKV, nil, identityID)
+		dstEdges, _, _ := adjacency.Neighbors(ctx, adjKV, nil, roleID)
+		return len(srcEdges) == 1 && len(dstEdges) == 1
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for !bothEdgesPresent() && time.Now().Before(deadline) {
+		time.Sleep(20 * time.Millisecond)
+	}
+	require.True(t, bothEdgesPresent(), "the live link must be indexed before the hard delete can prove anything")
+
+	// The hard delete: an empty-bodied NATS KV tombstone, not a JSON
+	// isDeleted:true overwrite.
+	require.NoError(t, coreKV.Delete(ctx, linkKey))
+
+	deadline = time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		srcEdges, _, _ := adjacency.Neighbors(ctx, adjKV, nil, identityID)
+		dstEdges, _, _ := adjacency.Neighbors(ctx, adjKV, nil, roleID)
+		if len(srcEdges) == 0 && len(dstEdges) == 0 {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	srcEdges, _, _ := adjacency.Neighbors(ctx, adjKV, nil, identityID)
+	dstEdges, _, _ := adjacency.Neighbors(ctx, adjKV, nil, roleID)
+	t.Fatalf("a hard-deleted link key did not remove both adjacency entries: src=%v dst=%v", srcEdges, dstEdges)
 }
 
 func TestBootstrapper_SkipsNonEdgeEntries(t *testing.T) {
@@ -363,4 +452,124 @@ func TestBootstrapper_SkipsNonEdgeEntries(t *testing.T) {
 	case <-ctx.Done():
 		t.Fatal("timed out waiting for bootstrap Ready with non-edge entries")
 	}
+}
+
+// TestBootstrapper_OverflowLatchEndToEnd proves the whole Shape B mechanism
+// through the real Bootstrapper — not adjacency.Build/Neighbors called
+// directly, but the durable consumer's own link-envelope bridge driving a
+// node past a (test-lowered) overflow threshold during its startup backlog
+// drain. It covers every clause of §15.5's regression list: the mark and the
+// emptied document after the latch, the fallback read serving every edge
+// (including the one whose Build call was the latch itself), a retraction
+// landing on the fallback after the latch, and an unmarked node's ordinary
+// document path staying untouched by any of it.
+func TestBootstrapper_OverflowLatchEndToEnd(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS JetStream")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	defer adjacency.SetOverflowThresholds(8, 1<<20)()
+
+	js, nc := startJS(t)
+	conn, err := substrate.Wrap(nc)
+	require.NoError(t, err)
+
+	coreKV, err := js.CreateKeyValue(ctx, jetstream.KeyValueConfig{Bucket: "core-boot-overflow"})
+	require.NoError(t, err)
+	_, err = js.CreateKeyValue(ctx, jetstream.KeyValueConfig{Bucket: "adj-boot-overflow"})
+	require.NoError(t, err)
+	adjKV, err := conn.OpenKV(ctx, "adj-boot-overflow")
+	require.NoError(t, err)
+	coreKVHandle, err := conn.OpenKV(ctx, "core-boot-overflow")
+	require.NoError(t, err)
+
+	hub := stableNanoIDForBootstrap("hub")
+
+	// Seed one more outbound link from hub than the lowered degree=8
+	// threshold tolerates, all before the bootstrapper starts — its own
+	// startup backlog drain is what crosses the latch.
+	const linkCount = 9
+	wantEdges := make([]string, linkCount)
+	for i := 0; i < linkCount; i++ {
+		partner := stableNanoIDForBootstrap(fmt.Sprintf("overflowPartner%d", i))
+		linkKey := substrate.LinkKey("identity", hub, "hasFriend", "identity", partner)
+		body, marshalErr := json.Marshal(map[string]any{"key": linkKey, "isDeleted": false})
+		require.NoError(t, marshalErr)
+		_, putErr := coreKV.Put(ctx, linkKey, body)
+		require.NoError(t, putErr)
+		wantEdges[i] = linkKey
+	}
+
+	// A second, unrelated node whose degree never approaches the threshold:
+	// the control case proving the latch existing elsewhere changes nothing
+	// about how an ordinary node is stored.
+	loneID := stableNanoIDForBootstrap("overflowLone")
+	lonePartner := stableNanoIDForBootstrap("overflowLonePartner")
+	loneLinkKey := substrate.LinkKey("identity", loneID, "hasFriend", "identity", lonePartner)
+	loneBody, err := json.Marshal(map[string]any{"key": loneLinkKey, "isDeleted": false})
+	require.NoError(t, err)
+	_, err = coreKV.Put(ctx, loneLinkKey, loneBody)
+	require.NoError(t, err)
+
+	b := consumer.NewBootstrapper(conn, "core-boot-overflow", adjKV)
+	go func() { _ = b.Run(ctx) }()
+	select {
+	case <-b.Ready():
+	case <-ctx.Done():
+		t.Fatal("timed out waiting for bootstrap Ready with an overflowing hub")
+	}
+
+	// The mark exists, and the document the latch emptied is a live,
+	// zero-edge document — not deleted.
+	_, err = adjKV.Get(ctx, subjects.AdjMarkKey(hub))
+	require.NoError(t, err, "the hub must be overflow-marked")
+
+	docEntry, err := adjKV.Get(ctx, subjects.AdjKey(hub))
+	require.NoError(t, err, "the latch empties the document, it does not delete it")
+	var doc adjacency.AdjValue
+	require.NoError(t, json.Unmarshal(docEntry.Value, &doc))
+	assert.Empty(t, doc.Edges, "a latched node's document must hold no edges")
+
+	// Neighbors serves every edge — all nine, including the one whose Build
+	// call tripped the latch and was therefore never itself indexed into the
+	// document — via the Core KV fallback.
+	edges, _, err := adjacency.Neighbors(ctx, adjKV, coreKVHandle, hub)
+	require.NoError(t, err)
+	gotEdges := make([]string, len(edges))
+	for i, e := range edges {
+		gotEdges[i] = e.EdgeID
+	}
+	assert.ElementsMatch(t, wantEdges, gotEdges,
+		"the fallback read must serve every edge the document stopped tracking")
+
+	// Soft-tombstoning one link removes it from the fallback read. No wait
+	// is needed: a marked node's write path is a no-op (Build never absorbs
+	// the retraction into the document), so Core KV is the retraction's only
+	// transport, and neighborsFromCoreKV reads it live at call time.
+	tombKey := wantEdges[0]
+	tombBody, err := json.Marshal(map[string]any{"key": tombKey, "isDeleted": true})
+	require.NoError(t, err)
+	_, err = coreKV.Put(ctx, tombKey, tombBody)
+	require.NoError(t, err)
+
+	edgesAfter, _, err := adjacency.Neighbors(ctx, adjKV, coreKVHandle, hub)
+	require.NoError(t, err)
+	require.Len(t, edgesAfter, linkCount-1)
+	gotAfter := make([]string, len(edgesAfter))
+	for i, e := range edgesAfter {
+		gotAfter[i] = e.EdgeID
+	}
+	assert.NotContains(t, gotAfter, tombKey, "a soft-tombstoned link must leave the fallback read")
+
+	// The unmarked node carries no mark and keeps its ordinary document.
+	_, err = adjKV.Get(ctx, subjects.AdjMarkKey(loneID))
+	require.ErrorIs(t, err, substrate.ErrKeyNotFound, "an unmarked node must carry no overflow mark")
+
+	loneEdges, loneRev, err := adjacency.Neighbors(ctx, adjKV, coreKVHandle, loneID)
+	require.NoError(t, err)
+	require.Len(t, loneEdges, 1)
+	assert.Equal(t, loneLinkKey, loneEdges[0].EdgeID)
+	assert.NotZero(t, loneRev, "an unmarked node's fingerprint is its document revision")
 }

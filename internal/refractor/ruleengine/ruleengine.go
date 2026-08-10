@@ -77,31 +77,38 @@ type ProjectionResult struct {
 }
 
 // EvalFootprint is the read-surface certificate one full-engine ExecuteWith
-// call produces: every Core KV key (vertex or aspect) and every adjacency
-// node the evaluation read, each paired with the KV revision observed (0 for
-// a key that was absent). A validating caller re-reads every entry after the
-// evaluation and compares revisions to detect a mid-evaluation write to any
-// key the row depended on — an absence flipping to present (or the reverse)
-// counts as a moved revision, since 0 is itself a recorded value, not a
-// missing map entry.
+// call produces: every Core KV key (vertex or aspect) the evaluation read,
+// paired with the KV revision observed (0 for a key that was absent), and
+// every adjacency node it read, paired with the fingerprint
+// adjacency.Neighbors returned for it. A validating caller re-reads every
+// entry after the evaluation and compares against the recorded value to
+// detect a mid-evaluation write to anything the row depended on — an
+// absence flipping to present (or the reverse) counts as a moved value,
+// since 0 is itself a recorded revision, not a missing map entry.
 type EvalFootprint struct {
 	// NodeRevisions maps a Core KV vertex or aspect key to the revision it
 	// was read at.
 	NodeRevisions map[string]uint64
-	// EdgeRevisions maps an adjacency NodeID to the revision its edge
-	// document was read at.
+	// EdgeRevisions maps an adjacency NodeID to the fingerprint
+	// adjacency.Neighbors returned when the evaluation read that node's
+	// edges: an ordinary node's document revision, or — for a node whose
+	// edge count or document size has crossed adjacency's overflow
+	// threshold — a hash over the Core KV link set adjacency.Neighbors
+	// enumerated in place of a document (see adjacency.Neighbors). Either
+	// way the value is opaque to this package: a validating caller only
+	// ever compares it for equality against a fresh read.
 	EdgeRevisions map[string]uint64
 	// EdgeSelectors maps an adjacency NodeID (same keyspace as EdgeRevisions)
-	// to the selector-scoped read-surface record §13.4 adds: which
-	// (relation type, direction) pairs the walk consulted on that node, and
-	// which edge identities passed each selector. A validating caller
-	// re-applies the recorded selectors to a fresh read instead of comparing
-	// the whole document's revision, so a write to an UNRELATED relation on
-	// a shared hub node (a role, an op-meta, a location) no longer reads as
-	// drift. EdgeRevisions is unchanged and still the fallback comparison
-	// for any node whose entry here has Fallback set (or is altogether
-	// absent — a defensive case, since every fetchEdges call goes through
-	// traverseRel's recording).
+	// to the selector-scoped read-surface record (§13.4): which (relation
+	// type, direction) pairs the walk consulted on that node, and which edge
+	// identities passed each selector. A validating caller re-applies the
+	// recorded selectors to a fresh read instead of comparing the node's
+	// whole edge set, so a write to an UNRELATED relation on a shared hub
+	// node (a role, an op-meta, a location) does not read as drift.
+	// EdgeRevisions remains the fallback comparison for any node whose
+	// entry here has Fallback set (or is altogether absent — a defensive
+	// case, since every fetchEdges call goes through traverseRel's
+	// recording).
 	EdgeSelectors map[string]EdgeSelectorFootprint
 }
 
@@ -123,8 +130,9 @@ type EdgeSelector struct {
 // (RelType == "") that consumes every edge regardless of type, or a
 // variable-length hop whose expansion cannot be attributed to a single
 // relation name — validation then falls back to comparing the node's whole-
-// document revision (EvalFootprint.EdgeRevisions) instead of this narrower
-// selector-scoped comparison, coarser being the always-safe direction.
+// edge-set fingerprint (EvalFootprint.EdgeRevisions) instead of this
+// narrower selector-scoped comparison, coarser being the always-safe
+// direction.
 type EdgeSelectorFootprint struct {
 	Fallback bool
 	Matched  map[EdgeSelector]map[string]struct{} // selector -> matched EdgeIDs

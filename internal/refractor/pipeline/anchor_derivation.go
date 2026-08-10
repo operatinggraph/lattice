@@ -203,7 +203,7 @@ func (p *Pipeline) walkToAnchors(ctx context.Context, idx full.HopIndex, seeds [
 			return nil, errDerivationTooWide
 		}
 		reads++
-		edges, _, err := adjacency.Neighbors(ctx, p.adjKV, id)
+		edges, _, err := adjacency.Neighbors(ctx, p.adjKV, p.coreKV, id)
 		if err != nil {
 			return nil, fmt.Errorf("pipeline: anchor derivation: neighbours of %q: %w", id, err)
 		}

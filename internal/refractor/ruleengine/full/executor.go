@@ -907,7 +907,7 @@ func (ex *executor) fetchEdges(adjNodeID string) ([]adjacency.EdgeEntry, error) 
 	if edges, ok := ex.edges[adjNodeID]; ok {
 		return edges, nil
 	}
-	edges, revision, err := adjacency.Neighbors(ex.ctx, ex.adjKV, adjNodeID)
+	edges, revision, err := adjacency.Neighbors(ex.ctx, ex.adjKV, ex.coreKV, adjNodeID)
 	if err != nil {
 		return nil, err
 	}

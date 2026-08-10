@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/nats-io/nats.go"
@@ -204,18 +206,122 @@ func (c *Conn) checkBatchSize(ops []BatchOp) error {
 	}
 	limit := c.valueSizeLimit()
 	for i, op := range ops {
-		if !op.Delete && len(op.Value) > limit {
+		if op.Delete {
+			continue
+		}
+		if len(op.Value) > limit {
 			return fmt.Errorf("%w: op[%d] key=%q value=%d bytes > %d",
 				ErrValueTooLarge, i, op.Key, len(op.Value), limit)
 		}
+		warnIfApproachingSizeLimit(op.Bucket, op.Key, len(op.Value), limit)
 	}
 	return nil
 }
 
 // valueSizeLimit derives the per-message payload ceiling from the
 // connection's server-negotiated max_payload, less ValueHeadroomBytes.
+//
+// It is read live on every call rather than memoized, because max_payload is
+// not fixed for a connection's lifetime: Conn.MaxPayload reads
+// nc.info.MaxPayload (nats.go@v1.52.0/nats.go:6300-6304), and nc.info is
+// replaced wholesale by processInfo (:4049-4059) — which runs both for the
+// (re)connect handshake and for every asynchronous INFO the server pushes
+// mid-connection (processAsyncInfo, :4141-4146). A server config reload, or
+// a reconnect onto a differently-configured cluster member, therefore moves
+// it. A memoized ceiling that missed a DECREASE would wave a value through
+// this guard for the server to reject — the oversize-write failure the guard
+// exists to prevent — so the read stays live. Its cost is nc.mu's read lock,
+// which is nothing beside the network round trip every caller is already
+// making; checkBatchSize additionally hoists it out of its per-op loop.
 func (c *Conn) valueSizeLimit() int {
 	return int(c.nc.MaxPayload()) - ValueHeadroomBytes
+}
+
+// sizeWarnInterval bounds how often warnIfApproachingSizeLimit re-emits a
+// log line for the SAME (bucket, key).
+const sizeWarnInterval = time.Minute
+
+// sizeWarnMaxTracked bounds the throttle map so a spread of many distinct
+// large keys cannot grow it without limit. Only a key whose value has
+// crossed the halfway mark ever enters it, which every environment observed
+// so far keeps to a handful of nodes — this cap is a backstop against a
+// pathological spread, not a population the ordinary case is expected to
+// approach. On overflow the whole map is cleared rather than evicting one
+// entry at a time (see warnIfApproachingSizeLimit).
+const sizeWarnMaxTracked = 4096
+
+// sizeWarnState is the per-key throttle: the last time each (bucket, key)
+// pair's approaching-the-ceiling warning fired. Per-key, not process-global
+// — a single shared timestamp lets any one key that STAYS past the halfway
+// mark (an adjacency hub rewritten on every event, say) claim every
+// interval's one warning forever, silencing every other key's first
+// warning for as long as that one keeps writing. Per-key costs a bounded
+// map instead (sizeWarnMaxTracked) rather than that failure.
+var sizeWarnState = struct {
+	mu   sync.Mutex
+	last map[string]time.Time
+}{last: map[string]time.Time{}}
+
+// sizeWarnKey joins bucket and key into sizeWarnState's map key. The NUL
+// separator keeps a bucket/key split from being spelled two ways (a bucket
+// named "a" + key "b:c" must not collide with bucket "a:b" + key "c"); NUL
+// cannot appear in either half (a NATS bucket or KV key name never carries
+// nulls).
+func sizeWarnKey(bucket, key string) string { return bucket + "\x00" + key }
+
+// warnIfApproachingSizeLimit logs at most once per sizeWarnInterval, per
+// (bucket, key), when a KV write's value has passed HALF of limit — the
+// ceiling checkBatchSize (and the plain KV write methods in kv.go) reject a
+// value for crossing outright. It exists to put a growing document in the
+// log well before the write that finally jams, rather than that failure
+// surfacing with no lead time (see the adjacency package's overflow latch,
+// the specific mechanism this canary is meant to buy an operator time
+// ahead of).
+//
+// The common-case cost is one integer comparison: size <= limit/2 returns
+// immediately, with no allocation and no lock. Only a value past the
+// halfway mark pays the map lookup that enforces the per-key interval.
+//
+// limit <= 0 (an unconnected or closed Conn reports MaxPayload()==0, which
+// ValueHeadroomBytes then drives negative) has no meaningful ceiling to
+// warn about approaching, and is excluded rather than left to satisfy
+// size <= limit/2 for every size and fire on every write.
+//
+// time.Now() (not a raw UnixNano capture) is deliberate: a Time obtained
+// this way carries a monotonic reading, and comparing two such Times via
+// Sub uses it — so a wall-clock step (an NTP correction, a manual clock
+// change) cannot suppress or spuriously re-arm the throttle the way a
+// UnixNano-integer comparison would.
+func warnIfApproachingSizeLimit(bucket, key string, size, limit int) {
+	if limit <= 0 || size <= limit/2 {
+		return
+	}
+	now := time.Now()
+	k := sizeWarnKey(bucket, key)
+
+	sizeWarnState.mu.Lock()
+	if last, ok := sizeWarnState.last[k]; ok && now.Sub(last) < sizeWarnInterval {
+		sizeWarnState.mu.Unlock()
+		return
+	}
+	if len(sizeWarnState.last) >= sizeWarnMaxTracked {
+		// A full clear rather than an LRU eviction. The cost is real and
+		// worth stating: a hot set larger than the cap resets every key's
+		// interval on each overflow, so the steady state approaches one
+		// warning per insertion — noisier than the interval promises,
+		// though never silent, which is the direction that matters for a
+		// canary. Reaching it takes thousands of distinct keys each
+		// holding a value past the halfway mark (~2 GiB of hot large
+		// values at the default ceiling), so this is a backstop against a
+		// pathological spread rather than a case the ordinary path is
+		// expected to meet.
+		sizeWarnState.last = map[string]time.Time{}
+	}
+	sizeWarnState.last[k] = now
+	sizeWarnState.mu.Unlock()
+
+	slog.Warn("substrate: KV value approaching the payload size ceiling",
+		"bucket", bucket, "key", key, "bytes", size, "limit", limit)
 }
 
 // kvBucketSubject returns the JetStream publish subject for a Core KV key.

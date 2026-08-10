@@ -129,18 +129,24 @@ func (b *Bootstrapper) handle(ctx context.Context, msg substrate.Message) substr
 // from src, one inbound from dst. All other messages go through the legacy
 // CoreKVEvent path keyed on `nodeId`.
 func (b *Bootstrapper) processMsg(ctx context.Context, msg substrate.Message) substrate.Decision {
-	// NATS KV tombstone entries (DEL/PURGE operations) have empty bodies — ack and skip.
-	if len(msg.Body) == 0 {
-		return substrate.Ack
-	}
-
 	// Recover the Core KV key from the JetStream subject ($KV.<bucket>.<key>).
 	key := strings.TrimPrefix(msg.Subject, b.subjectPrefx)
 
-	// Branch on Contract #1 §1.5 key shape. Link envelopes feed the bridge;
-	// everything else falls through to the legacy `CoreKVEvent` path.
+	// Branch on Contract #1 §1.5 key shape BEFORE the empty-body check below:
+	// a hard-deleted link key (NATS KV-Delete/Purge) arrives as an empty
+	// body — the same wire shape as every other KV tombstone — and unlike a
+	// non-link tombstone it carries a retraction the adjacency index must
+	// apply. Link envelopes feed the bridge, which classifies its own empty
+	// body into that retraction; everything else falls through to the
+	// legacy `CoreKVEvent` path below.
 	if substrate.ClassifyKey(key) == substrate.KindLink {
 		return b.processLinkEnvelope(ctx, msg, key)
+	}
+
+	// NATS KV tombstone entries (DEL/PURGE operations) have empty bodies —
+	// ack and skip. A link key never reaches this line (branched above).
+	if len(msg.Body) == 0 {
+		return substrate.Ack
 	}
 
 	var evt adjacency.CoreKVEvent
@@ -164,6 +170,11 @@ func (b *Bootstrapper) processMsg(ctx context.Context, msg substrate.Message) su
 	}
 
 	if buildErr := adjacency.Build(ctx, b.adjKV, evt); buildErr != nil {
+		if substrate.IsInvalidKeyError(buildErr) {
+			slog.Error("adjacency bootstrap: build: unwritable key — discarding",
+				"err", buildErr, "subject", msg.Subject)
+			return substrate.Term
+		}
 		slog.Error("adjacency bootstrap: build", "err", buildErr, "subject", msg.Subject)
 		return substrate.Nak
 	}
@@ -185,42 +196,37 @@ func (b *Bootstrapper) processLinkEnvelope(ctx context.Context, msg substrate.Me
 		return substrate.Term
 	}
 
-	// Pull the `isDeleted` field out of the value envelope. We only need that one
-	// field; an inline struct keeps the bridge cheap and decoupled from the full
-	// LinkEnvelope shape.
-	var meta struct {
-		IsDeleted bool `json:"isDeleted"`
-	}
-	if jsonErr := json.Unmarshal(msg.Body, &meta); jsonErr != nil {
-		slog.Error("adjacency bootstrap: link bridge: unmarshal envelope", "err", jsonErr, "key", key)
-		return substrate.Term
+	// A hard-deleted link key (NATS KV-Delete/Purge) is an empty body — the
+	// wire shape processMsg branched here on. It is a SECOND retraction
+	// transport alongside the JSON envelope's own `isDeleted` field (the
+	// soft tombstone): either shape removes the edge from both endpoints'
+	// adjacency documents the same way, so an empty body maps straight to
+	// isDeleted without attempting to unmarshal a body that plainly isn't
+	// JSON.
+	isDeleted := len(msg.Body) == 0
+	if !isDeleted {
+		// Pull the `isDeleted` field out of the value envelope. We only need
+		// that one field; an inline struct keeps the bridge cheap and
+		// decoupled from the full LinkEnvelope shape.
+		var meta struct {
+			IsDeleted bool `json:"isDeleted"`
+		}
+		if jsonErr := json.Unmarshal(msg.Body, &meta); jsonErr != nil {
+			slog.Error("adjacency bootstrap: link bridge: unmarshal envelope", "err", jsonErr, "key", key)
+			return substrate.Term
+		}
+		isDeleted = meta.IsDeleted
 	}
 
 	// Emit both directional events. The link key serves as a unique EdgeID per
 	// Decision #1 (Contract #1 link keys are globally unique).
-	outbound := adjacency.CoreKVEvent{
-		CoreKvKey:   key,
-		EdgeID:      key,
-		Name:        linkName,
-		Direction:   "outbound",
-		NodeID:      srcID,
-		OtherNodeID: dstID,
-		OtherType:   dstType,
-		IsDeleted:   meta.IsDeleted,
-	}
-	inbound := adjacency.CoreKVEvent{
-		CoreKvKey:   key,
-		EdgeID:      key,
-		Name:        linkName,
-		Direction:   "inbound",
-		NodeID:      dstID,
-		OtherNodeID: srcID,
-		OtherType:   srcType,
-		IsDeleted:   meta.IsDeleted,
-	}
-
-	for _, evt := range []adjacency.CoreKVEvent{outbound, inbound} {
+	for _, evt := range adjacency.EventsForLink(key, srcType, srcID, linkName, dstType, dstID, isDeleted) {
 		if buildErr := adjacency.Build(ctx, b.adjKV, evt); buildErr != nil {
+			if substrate.IsInvalidKeyError(buildErr) {
+				slog.Error("adjacency bootstrap: link bridge: build: unwritable key — discarding",
+					"err", buildErr, "key", key, "nodeId", evt.NodeID, "direction", evt.Direction)
+				return substrate.Term
+			}
 			slog.Error("adjacency bootstrap: link bridge: build",
 				"err", buildErr, "key", key, "nodeId", evt.NodeID, "direction", evt.Direction)
 			return substrate.Nak

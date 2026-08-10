@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"testing"
+	"time"
 )
 
 func TestKVGetMulti_ExactKeys_MixedPresentAbsent(t *testing.T) {
@@ -358,4 +359,56 @@ func TestKV_GetMulti_Delegate(t *testing.T) {
 	if _, ok := got[key]; !ok {
 		t.Errorf("delegate did not return %q: %+v", key, got)
 	}
+}
+
+// TestDirectGetFetchWait_ClampsToTheCallerDeadline pins the bound a caller on
+// a latency-sensitive path depends on. jetstream's Fetch takes no context in
+// the pinned client, so a round cannot be interrupted once it starts — the
+// wait it is handed is the only lever, and a drain that ignored the caller's
+// deadline would multiply the standing wait by its round budget while the
+// caller believed it had capped the call.
+func TestDirectGetFetchWait_ClampsToTheCallerDeadline(t *testing.T) {
+	t.Parallel()
+
+	t.Run("no deadline uses the standing wait", func(t *testing.T) {
+		wait, err := directGetFetchWait(context.Background())
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if wait != directGetFallbackFetchWait {
+			t.Fatalf("wait = %v, want the standing %v", wait, directGetFallbackFetchWait)
+		}
+	})
+
+	t.Run("a nearer deadline clamps the wait", func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+		defer cancel()
+		wait, err := directGetFetchWait(ctx)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if wait <= 0 || wait > 200*time.Millisecond {
+			t.Fatalf("wait = %v, want it clamped into (0, 200ms]", wait)
+		}
+	})
+
+	t.Run("a farther deadline leaves the standing wait", func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Hour)
+		defer cancel()
+		wait, err := directGetFetchWait(ctx)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if wait != directGetFallbackFetchWait {
+			t.Fatalf("wait = %v, want the standing %v", wait, directGetFallbackFetchWait)
+		}
+	})
+
+	t.Run("an expired deadline refuses to start a round", func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(context.Background(), -time.Second)
+		defer cancel()
+		if _, err := directGetFetchWait(ctx); !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("err = %v, want context.DeadlineExceeded", err)
+		}
+	})
 }

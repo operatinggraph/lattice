@@ -2,12 +2,15 @@ package full
 
 import (
 	"context"
+	"encoding/json"
 	"testing"
 
 	"github.com/stretchr/testify/require"
 
 	"github.com/operatinggraph/lattice/internal/refractor/adjacency"
 	"github.com/operatinggraph/lattice/internal/refractor/ruleengine"
+	"github.com/operatinggraph/lattice/internal/refractor/subjects"
+	"github.com/operatinggraph/lattice/internal/substrate"
 )
 
 // Each test below re-derives the CURRENT edge-identity set for a selector
@@ -59,7 +62,7 @@ func TestExecutor_SelectorScopedFootprint_UnrelatedEdgeAdded_NoDrift(t *testing.
 	require.False(t, sel.Fallback, "a typed queuedFor hop must not fall back to whole-document comparison")
 	require.Len(t, sel.Matched, 1, "exactly one selector was consulted on this node")
 
-	edges, _, err := adjacency.Neighbors(context.Background(), adjKV, roleID)
+	edges, _, err := adjacency.Neighbors(context.Background(), adjKV, coreKV, roleID)
 	require.NoError(t, err)
 	for selector, wantIDs := range sel.Matched {
 		require.Equal(t, "queuedFor", selector.RelType)
@@ -113,7 +116,7 @@ func TestExecutor_SelectorScopedFootprint_RelatedEdgeAdded_Drift(t *testing.T) {
 	require.True(t, ok)
 	require.False(t, sel.Fallback)
 
-	edges, _, err := adjacency.Neighbors(context.Background(), adjKV, roleID)
+	edges, _, err := adjacency.Neighbors(context.Background(), adjKV, coreKV, roleID)
 	require.NoError(t, err)
 	drifted := false
 	for selector, wantIDs := range sel.Matched {
@@ -178,7 +181,7 @@ func TestExecutor_SelectorScopedFootprint_UntypedHop_FallsBackAndDriftsOnEither(
 		require.True(t, sel.Fallback, "an untyped hop must fall back to whole-document comparison")
 
 		wantRev := fp.EdgeRevisions[roleID]
-		_, gotRev, err := adjacency.Neighbors(context.Background(), adjKV, roleID)
+		_, gotRev, err := adjacency.Neighbors(context.Background(), adjKV, coreKV, roleID)
 		require.NoError(t, err)
 		require.NotEqualf(t, wantRev, gotRev,
 			"the whole-document revision must have moved (fallback path) after the mutation")
@@ -196,4 +199,71 @@ func TestExecutor_SelectorScopedFootprint_UntypedHop_FallsBackAndDriftsOnEither(
 			putEdge(t, reg, adjKV, "queuedFor", "taskR", "role")
 		})
 	})
+}
+
+// markNodeOverflowed sets a node's overflow latch, so its edges come from Core
+// KV's link keyspace instead of its adjacency document.
+func markNodeOverflowed(t *testing.T, adjKV *substrate.KV, nodeID string) {
+	t.Helper()
+	_, err := adjKV.Create(context.Background(), subjects.AdjMarkKey(nodeID), []byte(`{"degree":9999}`))
+	require.NoError(t, err)
+}
+
+// putLink writes a Contract #1 link envelope into Core KV WITHOUT indexing it
+// into the adjacency document — the state of every edge on a latched node,
+// where the write path stops absorbing edges and Core KV is the only record.
+func putLink(t *testing.T, reg *fixtureRegistry, coreKV *substrate.KV, name, fromName, toName string) string {
+	t.Helper()
+	fromID, toID := reg.idByName[fromName], reg.idByName[toName]
+	require.NotEmpty(t, fromID, "fixture: %q not registered", fromName)
+	require.NotEmpty(t, toID, "fixture: %q not registered", toName)
+	key := substrate.LinkKey(reg.typeByID[fromID], fromID, name, reg.typeByID[toID], toID)
+	body, err := json.Marshal(map[string]any{"key": key, "isDeleted": false})
+	require.NoError(t, err)
+	_, err = coreKV.Put(context.Background(), key, body)
+	require.NoError(t, err)
+	return key
+}
+
+// TestExecutor_TraversesAnOverflowMarkedNode runs a real query across a node
+// whose adjacency document holds nothing, because it is latched. Everything
+// the walk needs — the neighbour's id, its TYPE (to rebuild its vertex key for
+// the labelled pattern node), the relation, the direction — has to come out of
+// the link keys alone, and the footprint has to come back with the selector
+// the hop consulted.
+func TestExecutor_TraversesAnOverflowMarkedNode(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	adjKV, coreKV := startExecKVs(t)
+	reg := newFixtureRegistry()
+	putVertex(t, reg, coreKV, "role", "role", nil)
+	putVertex(t, reg, coreKV, "task1", "task", nil)
+	putVertex(t, reg, coreKV, "task2", "task", nil)
+
+	roleID := reg.idByName["role"]
+	markNodeOverflowed(t, adjKV, roleID)
+	putLink(t, reg, coreKV, "queuedFor", "task1", "role")
+	putLink(t, reg, coreKV, "queuedFor", "task2", "role")
+
+	eng := New()
+	cr, err := eng.Parse(`MATCH (r:role {key: $k})<-[:queuedFor]-(t:task) RETURN t.key AS taskKey`)
+	require.NoError(t, err)
+
+	rows, fp, err := eng.ExecuteWithFootprint(context.Background(), cr,
+		ruleengine.EventContext{Parameters: map[string]any{"k": vtxKey(reg, "role")}},
+		adjKV, coreKV)
+	require.NoError(t, err)
+
+	got := make([]string, 0, len(rows))
+	for _, row := range rows {
+		got = append(got, row.Values["taskKey"].(string))
+	}
+	require.ElementsMatch(t, []string{vtxKey(reg, "task1"), vtxKey(reg, "task2")}, got,
+		"a latched node's neighbours must resolve through the Core KV fallback")
+
+	sel, ok := fp.EdgeSelectors[roleID]
+	require.True(t, ok, "the hop must still record its selector on a marked node")
+	require.False(t, sel.Fallback)
+	require.NotZero(t, fp.EdgeRevisions[roleID], "and carry the fallback's fingerprint")
 }

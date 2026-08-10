@@ -394,17 +394,18 @@ func (p *Pipeline) footprintValid(ctx context.Context, fp ruleengine.EvalFootpri
 		// §13.4: a node the walk consulted through a typed selector is
 		// validated by re-applying that selector to a fresh read and
 		// comparing the matched edge-identity set, not by comparing the
-		// node's whole adjacency-document revision — a sibling write to an
+		// node's whole-edge-set fingerprint — a sibling write to an
 		// UNRELATED relation on a shared hub node (a role, an op-meta, a
-		// location) no longer reads as drift. A node absent from
+		// location) does not read as drift. A node absent from
 		// EdgeSelectors entirely (defensive only — fetchEdges has exactly
 		// one caller, traverseRel, which always records a selector) or
 		// present with Fallback set (an untyped hop, which consumes every
-		// edge regardless of type) keeps the original, coarser whole-
-		// document comparison — coarser is always the safe direction.
+		// edge regardless of type) is validated by the coarser whole-set
+		// fingerprint comparison instead — coarser is always the safe
+		// direction.
 		sel, hasSelectors := fp.EdgeSelectors[nodeID]
 		if !hasSelectors || sel.Fallback {
-			_, gotRev, err := adjacency.Neighbors(ctx, p.adjKV, nodeID)
+			_, gotRev, err := adjacency.Neighbors(ctx, p.adjKV, p.coreKV, nodeID)
 			if err != nil {
 				return false, err
 			}
@@ -413,7 +414,7 @@ func (p *Pipeline) footprintValid(ctx context.Context, fp ruleengine.EvalFootpri
 			}
 			continue
 		}
-		edges, _, err := adjacency.Neighbors(ctx, p.adjKV, nodeID)
+		edges, _, err := adjacency.Neighbors(ctx, p.adjKV, p.coreKV, nodeID)
 		if err != nil {
 			return false, err
 		}
@@ -817,15 +818,7 @@ func (p *Pipeline) evaluateLinkFanOut(ctx context.Context, rs ruleState, linkKey
 	// is its own EdgeID (Contract #1 link keys are globally unique), so a
 	// create upserts and a tombstone removes by that EdgeID — matching the
 	// dedicated consumer's directional events exactly.
-	outbound := adjacency.CoreKVEvent{
-		CoreKvKey: linkKey, EdgeID: linkKey, Name: linkName, Direction: "outbound",
-		NodeID: srcID, OtherNodeID: dstID, OtherType: dstType, IsDeleted: isDeleted,
-	}
-	inbound := adjacency.CoreKVEvent{
-		CoreKvKey: linkKey, EdgeID: linkKey, Name: linkName, Direction: "inbound",
-		NodeID: dstID, OtherNodeID: srcID, OtherType: srcType, IsDeleted: isDeleted,
-	}
-	for _, evt := range []adjacency.CoreKVEvent{outbound, inbound} {
+	for _, evt := range adjacency.EventsForLink(linkKey, srcType, srcID, linkName, dstType, dstID, isDeleted) {
 		if err := adjacency.Build(ctx, p.adjKV, evt); err != nil {
 			return nil, nil, fmt.Errorf("pipeline: link fan-out: adjacency build for %q: %w", linkKey, err)
 		}

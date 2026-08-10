@@ -498,3 +498,19 @@ Same contract as every dossier: fire briefs copy the applicable entries into par
 - **RETIRED (the model of a retired entry):** hand-rolled embedded-NATS test fixtures inherit nats.go's
   2-second no-retry handshake — mechanized: `lint-conventions` blocks bare `nats.Connect` in tests; use
   `internal/natsfixture`.
+- **A multi-round or incremental read must RETRACT, not merely skip, a tombstone** — a delete marker
+  arriving in a later round than the entry it kills leaves the accumulated map holding a hard-deleted key,
+  and downstream that is an over-grant. A single-round read hides the class entirely, because the marker is
+  always the subject's last message. Minted: adjacency Shape B, twice in one item — `consumer/bootstrap.go`
+  acking an empty body before classifying the key, and `drainDirectGetFallback` skipping markers once it
+  accumulated across rounds. Check: every multi-phase read gets a case deleting a key BETWEEN the phases,
+  not before them.
+- **A process-local memo of server-owned state must name its invalidation boundary** — a `sync.Once` or map
+  caching a value the server owns has no path back when the server changes it. Minted: adjacency Shape B —
+  a mark cache that outlived a wiped bucket (deleted), and a `MaxPayload` memo whose "fixed for the
+  connection's lifetime" premise the pinned nats.go contradicts via `processAsyncInfo` (reverted). Check:
+  for any such memo, name the boundary that moves the source and either follow it or say why it cannot move.
+- **A vendor-behaviour claim in a comment needs a pinned `file:line`** — this package cites
+  `nats-server/server/*.go:NNN` for every protocol constant; the one comment that asserted a nats.go
+  contract without a citation was wrong. Minted: adjacency Shape B (`valueSizeLimit`'s memo justification).
+  Check: a claim about vendor behaviour carries the pinned source location, or it is a hypothesis.

@@ -30,7 +30,7 @@ Key sub-packages:
 | `pipeline/` | `Pipeline` struct; drives per-lens CDC-event → evaluate → adapt loop; `LatencyRingBuffer` (128-sample window) |
 | `lens/` | `CoreKVSource` (durable consumer over `vtx.meta.>` and `lnk.meta.*.subtypeOf.>`, routes `meta.lens` class to the lens loader and accumulates the dynamic type taxonomy from vertexType/canonicalName/subtypeOf events — dynamic-type-taxonomy-design.md §6.1); `Rule` type; `translateSpec` from `LensSpec` to `Rule`; engine selection via registry |
 | `adapter/` | `Adapter` interface; `nats_kv` adapter; Postgres adapter; `nats_subject` adapter (Personal Lens transport); `PoolManager` for Postgres connection pooling |
-| `adjacency/` | Adjacency KV read helpers |
+| `adjacency/` | Adjacency KV read/write: `Build` (CAS upsert/remove, with the per-node overflow latch), `Neighbors` (the document read, or the Core-KV fallback read for an overflow-marked node), `EventsForLink` (the directional-event-pair constructor every link consumer shares) |
 | `consumer/` | `Bootstrapper` (builds the adjacency index from link CDC events). Per-lens durable JetStream consumers are owned by each `pipeline.Pipeline` via `substrate.ConsumerSupervisor` (see Lens lifecycle step 5). |
 | `control/` | `Service` — control plane on the NATS `micro.Service` framework; endpoints at `lattice.ctrl.refractor.<lensId>.<op>` |
 | `health/` | `LatticeHeartbeater`; `Reporter`; `AuditWriter` (subjects `lattice.refractor.audit.<lensId>`); `LagPoller` (subjects `lattice.refractor.metrics.<lensId>`) |
@@ -52,7 +52,7 @@ Key sub-packages:
 |----------|--------|-------|
 | **Core KV CDC events** | Durable JetStream consumer (`substrate.SubscribeKVChanges`) on the `KV_core-kv` backing stream | Both the all-mutations stream and the lens-def/taxonomy watch (`vtx.meta.>` + `lnk.meta.*.subtypeOf.>` on one consumer, dynamic-type-taxonomy-design.md §6.1) run on the same durable-consumer pattern; ack position persists across restarts so a restarted Refractor resumes rather than replaying from the start. |
 | **Lens meta-vertices** | Core KV `vtx.meta.<NanoID>` with `class: meta.lens` and a `.spec` aspect | The `spec` aspect carries: `id`, `canonicalName`, `targetType`, `targetConfig`, `cypherRule`, `outputSchema`, `engine` (optional). `engine` must be `"full"` (or absent → full); any other value fails lens validation. |
-| **Adjacency KV** | `refractor-adjacency` bucket | Refractor's internal inbound-link index, built by `consumer/bootstrap.go` from every `lnk.*` CDC event; two directional entries per edge. EdgeID == link key. The adjacency is the inbound-link lookup index for the cypher executor. |
+| **Adjacency KV** | `refractor-adjacency` bucket | Refractor's internal per-node edge index, built by `consumer/bootstrap.go` from every `lnk.*` CDC event; one document per node (`adj.<nodeId>`) holding every edge that touches it, one entry per direction. EdgeID == link key. A node whose edge count or document size crosses a threshold latches and is read via a direct Core KV enumeration instead of its document — see "Refractor adjacency KV" below. |
 
 ---
 
@@ -521,13 +521,33 @@ component writes to it.
 | Property | Value |
 |----------|-------|
 | Bucket name | `refractor-adjacency` |
-| Builder | `consumer/bootstrap.go` (`Bootstrapper.Run`) — processes every `lnk.*` CDC event |
-| Entry shape | Two directional entries per link: `adj.<type1>.<id1>.<linkName>` → list of `<type2>.<id2>` EdgeIDs |
+| Builder | `consumer/bootstrap.go` (`Bootstrapper.Run`) — processes every `lnk.*` CDC event via `adjacency.EventsForLink` + `adjacency.Build` |
+| Entry shape | One document per node: `adj.<nodeId>` → `{"edges": [EdgeEntry, ...]}`. Each edge on a node is one `EdgeEntry` (`Direction`, `Name`, `OtherNodeID`, `OtherType`, `EdgeID`); a link contributes one entry to each of its two endpoints' documents — an outbound entry on the source node's document, an inbound entry on the destination's |
 | EdgeID | == link key; consistent across adjacency + Core KV |
-| Purpose | Inbound-link lookup index for the cypher executor (graph traversal without a global scan) |
+| Purpose | Inbound/outbound-link lookup index for the cypher executor (graph traversal without a global scan) |
 
-Within Refractor the adjacency is consumed directly by the cypher executor for
-inbound-link enumeration without a global `lnk.*` scan.
+Within Refractor the adjacency index is consumed directly by the cypher
+executor for inbound- and outbound-link enumeration without a global `lnk.*`
+scan.
+
+### The overflow latch
+
+Every edge on a node lives in that one node's document, so a node whose
+degree grows without bound eventually produces a document the NATS payload
+ceiling refuses to accept: the write fails permanently, the failing message
+redelivers forever, and every read of that node keeps returning the last
+document that did fit — a frozen, silently wrong edge set. The overflow
+latch (`internal/refractor/adjacency/overflow.go`) is the structural answer.
+
+| Property | Value |
+|----------|-------|
+| Mark key | `adjmark.<nodeId>`, same bucket, a distinct key prefix from `adj.<nodeId>` so an older binary that has never heard of the latch cannot see it, let alone unmark a node by rewriting the document |
+| Thresholds | `3,072` edges **or** an `800 KiB` marshaled document, whichever comes first — entries are variable-length, so neither threshold bounds the other |
+| Latch effect | The `Build` call that carries a node past either threshold creates the mark (create-tolerating-conflict, so the several concurrent writers of one node's edges converge on one mark instead of racing), best-effort empties the node's document to reclaim the space, and becomes a no-op for every later event on that node — an added edge is not absorbed and a retracted one is not removed, because Core KV is now the node's authoritative record |
+| Read effect | `Neighbors` reads a node's document and its mark in one batched `KVGetMulti` call, so a node latching mid-read can never present the just-emptied document as a complete answer. An unmarked node's read is that same two-key batched request, returning the document's KV revision as the fingerprint. A marked node's read enumerates Core KV's `lnk.*` keyspace directly for both directions, drops soft-tombstoned links, and returns a fingerprint hashed over the matched `(key, revision)` set in place of a document revision |
+| Freshness | A marked node's read is commit-fresh: Core KV holds a link the instant its write commits, so a marked node needs no help from the pipelines' link pre-apply (below) to see an edge that triggered the read. An unmarked node's document can still lag its own triggering CDC event by one write, which is exactly what the link pre-apply closes |
+| Cost | An unmarked node's read is a two-key batched request (the document plus the mark), roughly 2× a plain single-key `Get` (a multi-key request measures near 306 µs against a single `Get`'s 153 µs) — the same cost two sequential `Get`s would pay while also being non-atomic, so batching is the cheaper of those two ways to consult a mark on the read path, not a free one. A marked node's read is a further, larger Core KV enumeration: slower still, but complete, where a jammed write and a frozen, wrong edge set are not |
+| Lifetime | Created the first time a node's `Build` carries it past either threshold; never lifted — a node whose degree later shrinks keeps paying the fallback read rather than risk reintroducing the jam on its next growth spurt. Durable across restarts and reconnects (it is ordinary KV state); re-latched deterministically by the Bootstrapper's replay, which re-crosses the same threshold on the same edges; wiped only when the bucket itself is wiped |
 
 ### Link fan-out on the capability pipeline
 
@@ -910,7 +930,6 @@ band — so a one-cycle spike does not flap the heartbeat.)
 | Personal Lens / Secure Lens | Fires 1–4 (PL.1 transport, PL.2 fan-out + Interest Set, PL.3 D1 security gate, PL.4 Hydration Hook) shipped; Retraction R1 (server-side keyset frames) shipped, R2 (Edge-side consumption) pending; PL.5 pending | Per-identity security-filtered projection. PL.1's `nats_subject` target adapter + PL.2's `ActorEnumerator` fan-out/Interest Set + PL.3's `capabilityread`-backed D1 gate + PL.4's `personal.hydrate` cold-bulk-projection RPC + Retraction R1's per-actor keyset frame (above) ship dark; the NATS `SUB` boundary (Fork 3, subscribe-ACL) and the `personal.{register,deregister,hydrate}` request-body identity binding are now closed (per-identity-nats-subscribe-acl-design.md Fires 1–2) — full untrusted-multi-identity exposure still waits on that design's Fire 3 (Edge design EDGE.3 handoff); Vault ciphertext + transient-key composition (PL.5) remains |
 | Multi-cell lens routing | Phase 3 | Current pipeline is single-cell |
 | Cross-instance latency aggregation | Phase 3 | Current `LatencyRingBuffer` is per-instance; no cluster-level rollup |
-| Link-envelope tombstone re-projection | Phase 3 | Currently adjacency entries are left in place on tombstone; re-projection on tombstone is not triggered |
 | Substrate-level write restriction on lens target buckets | 🔭 Designed (ratified 2026-06-27) | Today the defense against fabricated lens-target writes is overwrite-by-reprojection only; the **NATS account write-restriction** design scopes per-component NKey publish permissions so only Refractor writes the lens/auth buckets (credential seam shipped; enforcement pending) |
 
 ---
@@ -969,3 +988,10 @@ the entry).
   "unchanged" fast path against a baseline that never matched the gate. Minted: dynamic-type-taxonomy inc 4
   (found at the item's close, not at the increment's). Check: for any "has this changed?" comparison, prove the
   compared baseline and the acted-on state share a commit point.
+- **An index whose entries are read from one place and gated from another must agree about absence** — the
+  adjacency overflow latch cached "this node is marked" in process memory while the reader answered from KV,
+  so a bucket wiped under a live process (the engine survives a NATS outage rather than restarting with it)
+  left the writer no-oping every rebuild and the reader returning an EMPTY edge set as authoritative, with no
+  error and no log line. Minted: adjacency Shape B close review (the state table had named the boundary and
+  answered it with an environmental assertion). Check: a cache of durable state is consulted for PRESENCE
+  only, never to conclude absence — or it is deleted, which is what shipped.

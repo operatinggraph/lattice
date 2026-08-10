@@ -47,10 +47,11 @@ import (
 //     set is returned (no error — per brief, "log a warning and
 //     proceed").
 //
-// adjKV and coreKV are the live KV handles; coreKV is used only when
-// resolving the type of a neighbour whose EdgeEntry doesn't carry
-// OtherType (legacy edge events). For Contract #1 link envelopes
-// fed through the 3.2b link bridge OtherType is always set.
+// adjKV and coreKV are the live KV handles, passed through to every
+// adjacency.Neighbors call this type makes. coreKV is required whenever a
+// lookup reaches an overflow-marked node: Neighbors' Core KV fallback read
+// enumerates that node's link keyspace directly, and a nil coreKV there is
+// an error, never a silently short edge list (see adjacency.Neighbors).
 type ActorEnumerator struct {
 	adjKV     *substrate.KV
 	coreKV    *substrate.KV
@@ -145,7 +146,7 @@ func (e *ActorEnumerator) Enumerate(ctx context.Context, eventVertexKey, eventVe
 	// single, non-recursive hop the type doc comment describes. It does not
 	// itself call addHierarchyManager on what it finds.
 	addHierarchyManager := func(reportID string) error {
-		edges, _, err := adjacency.Neighbors(ctx, e.adjKV, reportID)
+		edges, _, err := adjacency.Neighbors(ctx, e.adjKV, e.coreKV, reportID)
 		if err != nil {
 			return fmt.Errorf("pipeline: actor enumerator: hierarchy neighbours of %q: %w", reportID, err)
 		}
@@ -164,7 +165,7 @@ func (e *ActorEnumerator) Enumerate(ctx context.Context, eventVertexKey, eventVe
 		if cur.depth >= e.maxDepth {
 			continue
 		}
-		edges, _, err := adjacency.Neighbors(ctx, e.adjKV, cur.nodeID)
+		edges, _, err := adjacency.Neighbors(ctx, e.adjKV, e.coreKV, cur.nodeID)
 		if err != nil {
 			return nil, fmt.Errorf("pipeline: actor enumerator: neighbours of %q: %w", cur.nodeID, err)
 		}

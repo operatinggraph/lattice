@@ -66,6 +66,7 @@ func (c *Conn) KVPut(ctx context.Context, bucket, key string, value []byte) (uin
 	if err != nil {
 		return 0, err
 	}
+	warnIfApproachingSizeLimit(bucket, key, len(value), c.valueSizeLimit())
 	rev, err := kv.Put(ctx, key, value)
 	if err != nil {
 		return 0, fmt.Errorf("substrate: KV put %s/%s: %w", bucket, key, err)
@@ -80,6 +81,7 @@ func (c *Conn) KVCreate(ctx context.Context, bucket, key string, value []byte) (
 	if err != nil {
 		return 0, err
 	}
+	warnIfApproachingSizeLimit(bucket, key, len(value), c.valueSizeLimit())
 	rev, err := kv.Create(ctx, key, value)
 	if err != nil {
 		if IsRevisionConflict(err) {
@@ -110,6 +112,7 @@ func (c *Conn) KVCreateWithTTL(ctx context.Context, bucket, key string, value []
 	if err != nil {
 		return 0, err
 	}
+	warnIfApproachingSizeLimit(bucket, key, len(value), c.valueSizeLimit())
 	rev, err := kv.Create(ctx, key, value, jetstream.KeyTTL(ttl))
 	if err != nil {
 		if IsRevisionConflict(err) {
@@ -139,6 +142,7 @@ func (c *Conn) KVUpdateWithTTL(ctx context.Context, bucket, key string, value []
 	if ttl <= 0 {
 		return c.KVUpdate(ctx, bucket, key, value, expectedRevision)
 	}
+	warnIfApproachingSizeLimit(bucket, key, len(value), c.valueSizeLimit())
 	msg := nats.NewMsg("$KV." + bucket + "." + key)
 	msg.Data = value
 	ack, err := c.js.PublishMsg(ctx, msg,
@@ -162,6 +166,7 @@ func (c *Conn) KVUpdate(ctx context.Context, bucket, key string, value []byte, e
 	if err != nil {
 		return 0, err
 	}
+	warnIfApproachingSizeLimit(bucket, key, len(value), c.valueSizeLimit())
 	rev, err := kv.Update(ctx, key, value, expectedRevision)
 	if err != nil {
 		if errors.Is(err, jetstream.ErrKeyNotFound) {
@@ -257,6 +262,7 @@ func (c *Conn) KVListKeysPrefix(ctx context.Context, bucket, prefix string) ([]s
 // 6-segment link key `lnk.<srcType>.<srcId>.<rel>.<tgtType>.<tgtId>`:
 //   - source-bounded: `lnk.<t>.<id>.<rel>.>`        (hub id in the prefix)
 //   - target-bounded: `lnk.*.*.<rel>.<t>.<id>`      (hub id in the suffix)
+//
 // Both are server-side subject filters, so the read is bounded by the hub's
 // degree in that direction — never the keyspace.
 //
@@ -345,6 +351,7 @@ func (c *Conn) KVPutWithTTL(ctx context.Context, bucket, key string, value []byt
 	if ttl <= 0 {
 		return c.KVPut(ctx, bucket, key, value)
 	}
+	warnIfApproachingSizeLimit(bucket, key, len(value), c.valueSizeLimit())
 	subj := "$KV." + bucket + "." + key
 	msg := nats.NewMsg(subj)
 	msg.Data = value

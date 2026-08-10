@@ -72,6 +72,14 @@ func (k *KV) GetMulti(ctx context.Context, keys []string) (map[string]*KVEntry, 
 	return k.conn.KVGetMulti(ctx, k.bucket, keys)
 }
 
+// GetMultiNoSnapshot reads every live entry among keys — complete, but not
+// necessarily from one instant. Read Conn.KVGetMultiNoSnapshot's contract
+// before choosing it over GetMulti: it is the weaker primitive, and only a
+// caller whose keys are independent facts is entitled to it.
+func (k *KV) GetMultiNoSnapshot(ctx context.Context, keys []string) (map[string]*KVEntry, error) {
+	return k.conn.KVGetMultiNoSnapshot(ctx, k.bucket, keys)
+}
+
 // ListKeysPrefix returns every key under the given key prefix. See
 // Conn.KVListKeysPrefix.
 func (k *KV) ListKeysPrefix(ctx context.Context, prefix string) ([]string, error) {

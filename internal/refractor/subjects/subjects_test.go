@@ -67,6 +67,38 @@ func TestAdjKey_InvalidInputPanics(t *testing.T) {
 	assert.Panics(t, func() { AdjKey("node id") })
 }
 
+func TestAdjMarkKey(t *testing.T) {
+	tests := []struct {
+		nodeID, want string
+	}{
+		{"nodeA", "adjmark.nodeA"},
+		{"agreement-123", "adjmark.agreement-123"},
+	}
+	for _, tt := range tests {
+		assert.Equal(t, tt.want, AdjMarkKey(tt.nodeID))
+	}
+}
+
+func TestAdjMarkKey_InvalidInputPanics(t *testing.T) {
+	assert.Panics(t, func() { AdjMarkKey("") })
+	assert.Panics(t, func() { AdjMarkKey("node.id") })
+	assert.Panics(t, func() { AdjMarkKey("node*") })
+	assert.Panics(t, func() { AdjMarkKey("node>") })
+	assert.Panics(t, func() { AdjMarkKey("node id") })
+}
+
+// TestAdjMarkKey_DisjointFromAdjKeyPrefix pins the property the two keys'
+// coexistence in one bucket rests on: no mark key is ever picked up by a scan
+// of the document keyspace, and no document key by a scan of the mark
+// keyspace. A shared first segment (e.g. "adj.mark.<id>") would break both
+// directions silently — the bootstrapper's document scan would read marks as
+// nodes named "mark".
+func TestAdjMarkKey_DisjointFromAdjKeyPrefix(t *testing.T) {
+	const nodeID = "nodeA"
+	require.False(t, strings.HasPrefix(AdjMarkKey(nodeID), "adj."))
+	require.False(t, strings.HasPrefix(AdjKey(nodeID), "adjmark."))
+}
+
 func TestAudit(t *testing.T) {
 	tests := []struct {
 		lensID, want string

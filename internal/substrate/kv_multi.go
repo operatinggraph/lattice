@@ -93,6 +93,13 @@ const (
 	directGetFallbackRetryBackoff = 50 * time.Millisecond
 	// directGetFallbackFetchWait bounds each ephemeral consumer's Fetch call.
 	directGetFallbackFetchWait = 10 * time.Second
+	// directGetFallbackDrainRounds bounds how many fetch rounds one drain
+	// takes to empty the consumer's pending set. A round drains everything
+	// pending when it started, so each round leaves only what was written
+	// during the previous one and the backlog shrinks fast; more rounds than
+	// this means a writer is outpacing the reader indefinitely, which is a
+	// loud error rather than a partial answer.
+	directGetFallbackDrainRounds = 8
 	// directGetFallbackConsumerTTL cleans up an ephemeral fallback consumer
 	// server-side even if this process dies mid-drain before its own
 	// best-effort delete runs.
@@ -111,6 +118,9 @@ var (
 	// errDirectGetFallbackUnstable means the fallback's double-drain never
 	// agreed within directGetFallbackRetries attempts.
 	errDirectGetFallbackUnstable = errors.New("substrate: KV get-multi: fallback snapshot did not stabilize")
+	// errDirectGetFallbackNeverDrained means one drain never emptied the
+	// consumer's pending set within directGetFallbackDrainRounds rounds.
+	errDirectGetFallbackNeverDrained = errors.New("substrate: KV get-multi: fallback consumer never drained")
 )
 
 // directGetMultiRequest is the raw JetStream Direct Get API request body for
@@ -156,6 +166,20 @@ type directGetMultiRequest struct {
 // snapshot, never a torn one). An empty keys returns an empty map, nil
 // error.
 //
+// LATENCY, and why a caller on a latency-sensitive path must pass a deadline:
+// the fast path is bounded by directGetMultiDefaultTimeout per attempt. The
+// fallback is not comparably cheap. One drain runs up to
+// directGetFallbackDrainRounds rounds, each bounded by a fetch wait that the
+// pinned jetstream client cannot interrupt once it starts, and the
+// stability check runs two drains per attempt over directGetFallbackRetries
+// attempts. At the constants above that is a worst case of 8 x 10s = 80s per
+// drain and 6 drains = 480s for the whole call — reached only when every
+// round's pull is starved, but reachable. A ctx WITH a deadline caps all of
+// it: each round's wait is clamped to the time remaining, so the call cannot
+// outlive the deadline by more than one round's setup.
+// KVGetMultiNoSnapshot runs a single drain and so is bounded by 80s, or by
+// the caller's deadline.
+//
 // The fast path's response is also bounded by the connection's negotiated
 // MaxPending (a send-budget ceiling independent of the 1,024-subject cap —
 // 64 MiB by default). A matched set whose AGGREGATE VALUE SIZE exceeds it
@@ -166,6 +190,62 @@ type directGetMultiRequest struct {
 // caller in this codebase today reads small, bounded sets well under this
 // ceiling; a future caller of large-valued keys should chunk its request.
 func (c *Conn) KVGetMulti(ctx context.Context, bucket string, keys []string) (map[string]*KVEntry, error) {
+	return c.kvGetMulti(ctx, bucket, keys, true)
+}
+
+// KVGetMultiNoSnapshot is KVGetMulti with the point-in-time guarantee
+// dropped, for a caller that needs the whole matched set but never needed it
+// to come from one instant.
+//
+// What it KEEPS, in full:
+//
+//   - The fast path, unchanged. At or under 1,024 matched subjects the
+//     response is still computed under the stream's read lock, so a small
+//     read is atomic here exactly as in KVGetMulti — the two differ only past
+//     the cap.
+//   - Completeness. The drain runs until the server reports nothing pending
+//     (drainDirectGetFallback), so every subject live across the read is
+//     observed at one of its revisions, and a drain that cannot reach that
+//     point is a loud error rather than a silently short map. That property,
+//     not the stability comparison, is what proves the answer whole — which
+//     is why dropping the comparison does not weaken it.
+//   - Every other behavior of the primitive: filters, marker dropping,
+//     soft-tombstone inclusion, key shape, error wrapping.
+//
+// What it DROPS: past the 1,024-subject cap, the stability verification.
+// KVGetMulti drains twice and compares the two (key -> revision) maps,
+// retrying until they agree, so the set it returns provably existed
+// simultaneously. This drains ONCE. A write landing mid-drain can therefore
+// leave the result blending two instants — one entry carrying a revision from
+// before the write while another carries one from after, and a key created
+// during the drain appearing or not.
+//
+// WHY that is the right trade for some callers, and why it is not a general
+// upgrade: the double drain fails, hard, whenever ANY matched key moves
+// between the passes. Over a large set on a busy subject space that is not an
+// edge case but the normal condition, and the failure is total — no partial
+// answer, just an error the caller turns into a retry, on a read that was
+// expensive to begin with. A caller whose read set is a collection of
+// INDEPENDENT facts, each valid on its own, and which re-validates its work
+// by another route (re-reading and comparing a footprint, say), gains nothing
+// from the simultaneity and pays for it in availability. A caller assembling
+// a read set that BACKS A DECISION — a balance, a quorum, a set-membership
+// test whose answer changes if two members disagree about when they were read
+// — needs KVGetMulti and must not reach for this.
+//
+// The first caller is the Refractor's overflow-marked adjacency read: some
+// thousands of independent edges on the single busiest node in the graph,
+// re-validated per evaluation by the pipeline's footprint comparison. Under
+// KVGetMulti that read fails whenever the node is taking writes, which for
+// the node that overflowed is essentially always.
+func (c *Conn) KVGetMultiNoSnapshot(ctx context.Context, bucket string, keys []string) (map[string]*KVEntry, error) {
+	return c.kvGetMulti(ctx, bucket, keys, false)
+}
+
+// kvGetMulti is the shared body of both entry points. verifyStable selects
+// what happens past the fast path's 1,024-subject cap: the stability-verified
+// double drain, or a single one.
+func (c *Conn) kvGetMulti(ctx context.Context, bucket string, keys []string, verifyStable bool) (map[string]*KVEntry, error) {
 	if len(keys) == 0 {
 		return map[string]*KVEntry{}, nil
 	}
@@ -179,7 +259,10 @@ func (c *Conn) KVGetMulti(ctx context.Context, bucket string, keys []string) (ma
 		return entries, nil
 	}
 	if errors.Is(err, errDirectGetTooManyResults) {
-		return c.kvGetMultiFallback(ctx, bucket, subjects, pre)
+		if verifyStable {
+			return c.kvGetMultiFallback(ctx, bucket, subjects, pre)
+		}
+		return c.drainDirectGetFallback(ctx, bucket, "KV_"+bucket, dedupeStrings(subjects), pre)
 	}
 	return nil, err
 }
@@ -417,6 +500,32 @@ func directGetSnapshotsAgree(a, b map[string]*KVEntry) bool {
 // entries it observed. The consumer is deleted (best-effort) when the drain
 // finishes; InactiveThreshold also reclaims it server-side if this process
 // dies first.
+//
+// "Full" means drained until the SERVER reports nothing pending, not until a
+// count taken at the start has been met, and the difference is the whole
+// correctness of this function under a bucket taking writes. The count is not
+// a reliable stopping target on a history-1 stream: overwriting a key erases
+// the message the initial pending set was counting and appends a new one at a
+// later sequence. The rewritten subject IS still delivered — from its new
+// sequence, later in the stream — but a fetch bounded by the initial count can
+// stop before reaching it, while the counts balance (one message erased ahead
+// of the cursor, one appended behind it) and the drain looks complete. Two
+// rewrites of one undelivered subject are enough to lose it that way. Draining
+// until the server reports nothing pending is what actually establishes that
+// every subject live across the read was observed, at one of its revisions.
+//
+// Because the map accumulates across rounds, a NATS-level tombstone delivered
+// in a later round must REMOVE the live entry an earlier round collected for
+// the same subject, not merely be skipped. A key hard-deleted mid-drain is
+// deleted, and any read that treats this map as a live set — an authorization
+// walk over a hub's links, say — must never be handed the revoked entry.
+//
+// The rounds are bounded. Under a writer fast enough to keep the consumer
+// permanently behind, the pending set never empties, and this returns a loud
+// error rather than the silent partial the count-bounded fetch would have
+// returned. Each round's fetch is bounded by the caller's deadline when there
+// is one, so a caller on a latency-sensitive path can cap the whole drain; see
+// KVGetMulti's doc for the ceiling without one.
 func (c *Conn) drainDirectGetFallback(ctx context.Context, bucket, streamName string, subjects []string, pre string) (map[string]*KVEntry, error) {
 	cons, err := c.js.CreateConsumer(ctx, streamName, jetstream.ConsumerConfig{
 		DeliverPolicy:     jetstream.DeliverLastPerSubjectPolicy,
@@ -434,72 +543,108 @@ func (c *Conn) drainDirectGetFallback(ctx context.Context, bucket, streamName st
 		_ = c.js.DeleteConsumer(dctx, streamName, name)
 	}()
 
-	info, err := cons.Info(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("substrate: KV get-multi %s: fallback consumer info: %w", bucket, err)
-	}
+	entries := map[string]*KVEntry{}
+	for round := 0; round < directGetFallbackDrainRounds; round++ {
+		info, err := cons.Info(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("substrate: KV get-multi %s: fallback consumer info: %w", bucket, err)
+		}
+		if info.NumPending == 0 {
+			if err := ctx.Err(); err != nil {
+				return nil, fmt.Errorf("substrate: KV get-multi %s: fallback: %w", bucket, err)
+			}
+			return entries, nil
+		}
 
-	entries := make(map[string]*KVEntry, info.NumPending)
-	if info.NumPending == 0 {
+		wait, werr := directGetFetchWait(ctx)
+		if werr != nil {
+			return nil, fmt.Errorf("substrate: KV get-multi %s: fallback: %w", bucket, werr)
+		}
+		batch, err := cons.Fetch(int(info.NumPending), jetstream.FetchMaxWait(wait))
+		if err != nil {
+			return nil, fmt.Errorf("substrate: KV get-multi %s: fallback fetch: %w", bucket, err)
+		}
+		for msg := range batch.Messages() {
+			key, entry, perr := parseDirectGetFallbackEntry(msg, bucket, pre)
+			if perr != nil {
+				return nil, fmt.Errorf("substrate: KV get-multi %s: fallback: %w", bucket, perr)
+			}
+			if entry == nil {
+				// A NATS-level tombstone. It may be retracting an entry a
+				// previous round already collected as live, so deleting is the
+				// only correct handling — skipping would return a hard-deleted
+				// key as present.
+				delete(entries, key)
+				continue
+			}
+			entries[key] = entry
+		}
+		// jetstream's Fetch reports no error on a batch that falls short of
+		// the requested count (FetchMaxWait expiry maps to
+		// ErrNoMessages/ErrTimeout, both explicitly excluded from
+		// batch.Error()), which is why a short round is never read as
+		// completion here — only the server's own pending count is.
+		if err := batch.Error(); err != nil {
+			return nil, fmt.Errorf("substrate: KV get-multi %s: fallback drain: %w", bucket, err)
+		}
 		if err := ctx.Err(); err != nil {
 			return nil, fmt.Errorf("substrate: KV get-multi %s: fallback: %w", bucket, err)
 		}
-		return entries, nil
-	}
-
-	batch, err := cons.Fetch(int(info.NumPending), jetstream.FetchMaxWait(directGetFallbackFetchWait))
-	if err != nil {
-		return nil, fmt.Errorf("substrate: KV get-multi %s: fallback fetch: %w", bucket, err)
-	}
-	received := 0
-	for msg := range batch.Messages() {
-		received++
-		entry, isMarker, perr := parseDirectGetFallbackEntry(msg, bucket, pre)
-		if perr != nil {
-			return nil, fmt.Errorf("substrate: KV get-multi %s: fallback: %w", bucket, perr)
-		}
-		if !isMarker {
-			entries[entry.Key] = entry
+		if hook := kvDrainRoundHook(ctx); hook != nil {
+			hook(round)
 		}
 	}
-	if err := batch.Error(); err != nil {
-		return nil, fmt.Errorf("substrate: KV get-multi %s: fallback drain: %w", bucket, err)
-	}
-	// InitialConsumerPending hardening, mirroring the in-repo key-lister
-	// guard (kv.go:204-213): jetstream's Fetch reports no error on a batch
-	// that falls short of the requested count (FetchMaxWait expiry maps to
-	// ErrNoMessages/ErrTimeout, both explicitly excluded from batch.Error())
-	// — so received must be checked against the count NumPending promised,
-	// not merely against zero. Anything short of that count is a silent
-	// partial the caller must never read as "confirmed complete".
-	if received != int(info.NumPending) {
-		return nil, fmt.Errorf("substrate: KV get-multi %s: fallback: expected %d pending, received %d", bucket, info.NumPending, received)
-	}
-	if err := ctx.Err(); err != nil {
-		return nil, fmt.Errorf("substrate: KV get-multi %s: fallback: %w", bucket, err)
-	}
-	return entries, nil
+	return nil, fmt.Errorf("substrate: KV get-multi %s: fallback: %w", bucket, errDirectGetFallbackNeverDrained)
 }
 
 // parseDirectGetFallbackEntry mirrors parseDirectGetEntry for the fallback
 // drain's jetstream.Msg shape (Fetch delivers jetstream.Msg, not *nats.Msg).
-func parseDirectGetFallbackEntry(msg jetstream.Msg, bucket, pre string) (entry *KVEntry, isMarker bool, err error) {
+//
+// It reports the resolved key for EVERY message, tombstone or not, and a nil
+// entry for a NATS-level tombstone. The key has to survive the marker case
+// because the drain accumulates across rounds: naming the dead subject is what
+// lets the caller retract an entry an earlier round collected.
+func parseDirectGetFallbackEntry(msg jetstream.Msg, bucket, pre string) (key string, entry *KVEntry, err error) {
+	key = strings.TrimPrefix(msg.Subject(), pre)
 	hdr := msg.Headers()
 	if op := hdr.Get(directGetKVOpHdr); op == directGetKVOpDelete || op == directGetKVOpPurge {
-		return nil, true, nil
+		return key, nil, nil
 	}
 	if hdr.Get(directGetMarkerReasonHdr) != "" {
-		return nil, true, nil
+		return key, nil, nil
 	}
 	meta, err := msg.Metadata()
 	if err != nil {
-		return nil, false, fmt.Errorf("fallback message metadata: %w", err)
+		return key, nil, fmt.Errorf("fallback message metadata: %w", err)
 	}
-	return &KVEntry{
+	return key, &KVEntry{
 		Bucket:    bucket,
-		Key:       strings.TrimPrefix(msg.Subject(), pre),
+		Key:       key,
 		Value:     msg.Data(),
 		Revision:  meta.Sequence.Stream,
 		Timestamp: meta.Timestamp,
-	}, false, nil
+	}, nil
+}
+
+// directGetFetchWait bounds one fetch round. jetstream's Fetch takes no
+// context in the pinned client, so the caller's deadline cannot interrupt a
+// round once it starts — only the wait it was given can. A round whose pending
+// count included messages erased before the pull filled blocks for the whole
+// wait, and the drain multiplies that by its round budget, so a caller with a
+// deadline must have it honored inside the round and not merely between
+// rounds. With no deadline the standing wait applies.
+func directGetFetchWait(ctx context.Context) (time.Duration, error) {
+	wait := directGetFallbackFetchWait
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		return wait, nil
+	}
+	remaining := time.Until(deadline)
+	if remaining <= 0 {
+		return 0, context.DeadlineExceeded
+	}
+	if remaining < wait {
+		return remaining, nil
+	}
+	return wait, nil
 }

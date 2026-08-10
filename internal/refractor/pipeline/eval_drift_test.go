@@ -13,6 +13,7 @@ import (
 	"github.com/operatinggraph/lattice/internal/refractor/health"
 	"github.com/operatinggraph/lattice/internal/refractor/ruleengine"
 	"github.com/operatinggraph/lattice/internal/refractor/ruleengine/full"
+	"github.com/operatinggraph/lattice/internal/refractor/subjects"
 	"github.com/operatinggraph/lattice/internal/substrate"
 )
 
@@ -122,7 +123,7 @@ func TestFootprintValid_EdgeRevisionChanged(t *testing.T) {
 
 	const idID = "Tfp5JdentityEeeeeeee"
 	buildCollisionEdge(t, adjKV, "holdsRole", "identity", idID, "role", "Tfp5RgAaaaaaaaaaaaaa")
-	_, rev, err := adjacency.Neighbors(ctx, adjKV, idID)
+	_, rev, err := adjacency.Neighbors(ctx, adjKV, coreKV, idID)
 	require.NoError(t, err)
 	require.NotZero(t, rev)
 
@@ -162,7 +163,7 @@ func TestFootprintValid_EdgeSelector_UnrelatedEdgeAdded_NoDrift(t *testing.T) {
 
 	const roleID = "Tfp6RoLeAaaaaaaaaaaa"
 	buildCollisionEdge(t, adjKV, "queuedFor", "task", "Tfp6TaskAaaaaaaaaaaa", "role", roleID)
-	edges, rev, err := adjacency.Neighbors(ctx, adjKV, roleID)
+	edges, rev, err := adjacency.Neighbors(ctx, adjKV, coreKV, roleID)
 	require.NoError(t, err)
 	require.Len(t, edges, 1)
 	queuedForID := edges[0].EdgeID
@@ -206,7 +207,7 @@ func TestFootprintValid_EdgeSelector_RelatedEdgeAdded_Drift(t *testing.T) {
 
 	const roleID = "Tfp7RoLeAaaaaaaaaaaa"
 	buildCollisionEdge(t, adjKV, "queuedFor", "task", "Tfp7TaskAaaaaaaaaaaa", "role", roleID)
-	edges, rev, err := adjacency.Neighbors(ctx, adjKV, roleID)
+	edges, rev, err := adjacency.Neighbors(ctx, adjKV, coreKV, roleID)
 	require.NoError(t, err)
 	require.Len(t, edges, 1)
 	queuedForID := edges[0].EdgeID
@@ -250,7 +251,7 @@ func TestFootprintValid_EdgeSelector_Fallback_DriftsOnEither(t *testing.T) {
 
 	const roleID = "Tfp8RoLeAaaaaaaaaaaa"
 	buildCollisionEdge(t, adjKV, "queuedFor", "task", "Tfp8TaskAaaaaaaaaaaa", "role", roleID)
-	_, rev, err := adjacency.Neighbors(ctx, adjKV, roleID)
+	_, rev, err := adjacency.Neighbors(ctx, adjKV, coreKV, roleID)
 	require.NoError(t, err)
 
 	p := &Pipeline{coreKV: coreKV, adjKV: adjKV}
@@ -285,7 +286,7 @@ func TestFootprintValid_EdgeSelector_AbsentFromSelectors_FallsBack(t *testing.T)
 
 	const roleID = "Tfp9RoLeAaaaaaaaaaaa"
 	buildCollisionEdge(t, adjKV, "queuedFor", "task", "Tfp9TaskAaaaaaaaaaaa", "role", roleID)
-	_, rev, err := adjacency.Neighbors(ctx, adjKV, roleID)
+	_, rev, err := adjacency.Neighbors(ctx, adjKV, coreKV, roleID)
 	require.NoError(t, err)
 
 	p := &Pipeline{coreKV: coreKV, adjKV: adjKV}
@@ -576,4 +577,119 @@ func TestExecuteFullForActor_NonAuthPlaneLens_SkipsValidation(t *testing.T) {
 	require.Len(t, results, 1)
 	require.Equal(t, "original", results[0].Row["roleName"],
 		"a non-auth-plane lens returns its first (unvalidated) execution unchanged")
+}
+
+// --- footprintValid against an overflow-marked node ---
+
+// hubNanoID pads a readable prefix out to the canonical 20-character NanoID
+// length. These seeds become real link keys, and substrate.LinkKey panics on
+// an id that is not a canonical NanoID.
+func hubNanoID(t *testing.T, prefix string) string {
+	t.Helper()
+	id := prefix + strings.Repeat("a", substrate.NanoIDLength-len(prefix))
+	require.True(t, substrate.IsValidNanoID(id), "seed id %q must be a canonical NanoID", id)
+	return id
+}
+
+// markedHubKV seeds a node that is overflow-marked in the adjacency bucket and
+// whose edges therefore come from Core KV's link keyspace, returning the
+// pipeline that reads it.
+func markedHubKV(t *testing.T, hubID string) (*Pipeline, *substrate.KV, *substrate.KV) {
+	t.Helper()
+	coreKV, adjKV, _ := newCollisionKVs(t)
+	_, err := adjKV.Create(context.Background(), subjects.AdjMarkKey(hubID), []byte(`{"degree":9999}`))
+	require.NoError(t, err)
+	return &Pipeline{coreKV: coreKV, adjKV: adjKV}, coreKV, adjKV
+}
+
+// seedHubLink writes one Contract #1 link envelope into Core KV.
+func seedHubLink(t *testing.T, coreKV *substrate.KV, srcType, srcID, relation, dstType, dstID string) string {
+	t.Helper()
+	key := substrate.LinkKey(srcType, srcID, relation, dstType, dstID)
+	body, err := json.Marshal(map[string]any{"key": key, "isDeleted": false})
+	require.NoError(t, err)
+	_, err = coreKV.Put(context.Background(), key, body)
+	require.NoError(t, err)
+	return key
+}
+
+// TestFootprintValid_MarkedNode_FallbackArm drives footprintValid's revision
+// arm with a marked node, so the §16.5 hash reaches its only consumer. An
+// untyped or variable-length hop records no selector, and validation then
+// compares the fingerprint — which for a marked node is the hash over its
+// link set, not a document revision.
+func TestFootprintValid_MarkedNode_FallbackArm(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping NATS-backed test in short mode")
+	}
+	ctx := context.Background()
+	hubID := hubNanoID(t, "hub6")
+	p, coreKV, adjKV := markedHubKV(t, hubID)
+
+	seedHubLink(t, coreKV, "identity", hubID, "holdsRole", "role", hubNanoID(t, "rz6a"))
+
+	_, rev, err := adjacency.Neighbors(ctx, adjKV, coreKV, hubID)
+	require.NoError(t, err)
+	require.NotZero(t, rev, "a marked node's fingerprint is a hash, never the absent-document 0")
+
+	fp := ruleengine.EvalFootprint{EdgeRevisions: map[string]uint64{hubID: rev}}
+	valid, verr := p.footprintValid(ctx, fp)
+	require.NoError(t, verr)
+	require.True(t, valid, "an unchanged link set must validate")
+
+	// An edge lands on the hub after the footprint was captured. The write
+	// path indexes nothing for a marked node, so the fallback read is the only
+	// thing that can see it — and it must, or the evaluation commits against a
+	// graph that moved.
+	seedHubLink(t, coreKV, "identity", hubID, "holdsRole", "role", hubNanoID(t, "rz6b"))
+
+	valid, verr = p.footprintValid(ctx, fp)
+	require.NoError(t, verr)
+	require.False(t, valid, "a link added to a marked node must read as drift")
+}
+
+// TestFootprintValid_MarkedNode_SelectorArm drives the other arm: a typed hop
+// records a matched EdgeID set, and validation re-derives it from a fresh
+// read. For a marked node both the capture and the re-derivation come from the
+// fallback, so this also pins that the fallback's Direction vocabulary is the
+// one DirectionMatches expects — a mismatch there would make every typed hop
+// on a marked node read as permanent drift.
+func TestFootprintValid_MarkedNode_SelectorArm(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping NATS-backed test in short mode")
+	}
+	ctx := context.Background()
+	hubID := hubNanoID(t, "hub7")
+	p, coreKV, adjKV := markedHubKV(t, hubID)
+
+	held := seedHubLink(t, coreKV, "identity", hubID, "holdsRole", "role", hubNanoID(t, "rz7a"))
+
+	selector := ruleengine.EdgeSelector{RelType: "holdsRole", Direction: "out"}
+	fp := ruleengine.EvalFootprint{
+		EdgeRevisions: map[string]uint64{hubID: 1},
+		EdgeSelectors: map[string]ruleengine.EdgeSelectorFootprint{
+			hubID: {Matched: map[ruleengine.EdgeSelector]map[string]struct{}{
+				selector: {held: struct{}{}},
+			}},
+		},
+	}
+
+	valid, verr := p.footprintValid(ctx, fp)
+	require.NoError(t, verr)
+	require.True(t, valid, "the selector's matched set is unchanged")
+
+	// A write on a relation the walk never followed must NOT read as drift —
+	// the selector scoping has to survive the fallback read too.
+	seedHubLink(t, coreKV, "identity", hubID, "worksAt", "org", hubNanoID(t, "gg7a"))
+	valid, verr = p.footprintValid(ctx, fp)
+	require.NoError(t, verr)
+	require.True(t, valid, "an unrelated relation on a marked hub is not drift")
+
+	// A second edge under the SAME selector is.
+	seedHubLink(t, coreKV, "identity", hubID, "holdsRole", "role", hubNanoID(t, "rz7b"))
+	valid, verr = p.footprintValid(ctx, fp)
+	require.NoError(t, verr)
+	require.False(t, valid, "a second holdsRole edge changes the selector's matched set")
+
+	_ = adjKV
 }

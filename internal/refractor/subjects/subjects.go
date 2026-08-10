@@ -50,6 +50,24 @@ func AdjKey(nodeID string) string {
 	return fmt.Sprintf("adj.%s", nodeID)
 }
 
+// AdjMarkKey returns the adjacency KV key carrying nodeID's overflow latch:
+// the marker saying this node's edge set is too large to keep in its AdjKey
+// document, so its edge reads enumerate Core KV's link keyspace instead. The
+// mark's PRESENCE is the whole signal; its body is an operator breadcrumb.
+//
+// It deliberately lives in the same bucket as AdjKey but under its own first
+// segment. Sharing the bucket keeps the mark and the document readable in one
+// batched request (the read must be atomic, or a node latching between two
+// sequential reads returns the just-emptied document as authoritative); the
+// distinct segment keeps it out of every `adj.`-prefixed scan and, more
+// importantly, out of sight of a binary that predates the latch — such a
+// binary rewrites the emptied document harmlessly and can never un-mark the
+// node, which a sentinel value inside the document itself would let it do.
+func AdjMarkKey(nodeID string) string {
+	validateToken("nodeID", nodeID)
+	return fmt.Sprintf("adjmark.%s", nodeID)
+}
+
 // PersonalSync returns the NATS subject for a Personal Lens's per-identity
 // delta stream (personal-secure-lens-design.md Fire 1): prefix is the lens's
 // configured subjectPrefix (a multi-segment convention, e.g.

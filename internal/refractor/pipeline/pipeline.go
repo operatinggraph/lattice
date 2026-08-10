@@ -2910,12 +2910,7 @@ func (p *Pipeline) evalPlainLinkReprojection(ctx context.Context, rs ruleState, 
 		}
 		isDeleted, _ = linkProps["isDeleted"].(bool)
 	}
-	for _, evt := range []adjacency.CoreKVEvent{
-		{CoreKvKey: key, EdgeID: key, Name: linkName, Direction: "outbound",
-			NodeID: id1, OtherNodeID: id2, OtherType: type2, IsDeleted: isDeleted},
-		{CoreKvKey: key, EdgeID: key, Name: linkName, Direction: "inbound",
-			NodeID: id2, OtherNodeID: id1, OtherType: type1, IsDeleted: isDeleted},
-	} {
+	for _, evt := range adjacency.EventsForLink(key, type1, id1, linkName, type2, id2, isDeleted) {
 		if err := adjacency.Build(ctx, p.adjKV, evt); err != nil {
 			slog.Error("pipeline: plain link reprojection: adjacency build",
 				"ruleId", p.ruleID, "entityId", key, "err", err)
