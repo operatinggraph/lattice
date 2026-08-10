@@ -1297,6 +1297,16 @@ Fires A/B leaned on, and each is currently vacuous or absent.
      the already-ratified **adjacency-per-edge-index** item, whose `multi_last` prerequisite has now shipped, so
      **Fire C should sequence behind or alongside it** rather than treat boot fan-out as a separate problem.
 
+     **SHIPPED 2026-08-10 (`208409f0`), and it resolved the BOOT half of this item.** Adjacency Shape B
+     latched the hub on its first post-deploy touch; measured on the running stack immediately after:
+     `maximum payload exceeded` **30,245 → 0**, the adjacency bootstrap **completes** instead of Nak-looping,
+     and `lattice-nats` holds **~800 MiB steady with Refractor up** where every prior boot took it from ~2 GiB
+     past 7.6 GiB and was OOM-killed inside 70s. **The dev stack runs Refractor again**, so this item's
+     "consequence today" no longer holds. What remains here is the **fan-out** mechanism proper — ~111
+     consumers opened at once, the operator corpus-rebuild's uncoordinated goroutine
+     (`control/service.go:930-943`), and the replay drain — none of which Shape B touched. Re-measure the boot
+     profile before sizing that work: the dominant term is gone, so the remaining cost is now unquantified.
+
 **C3 — the cap contract has a warning consumer and no refusal consumer** (§17.10 · `capabilitymaterializer.go:791`,
 `anchorwalk.go:735`).
 
