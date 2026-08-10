@@ -38,6 +38,7 @@ import (
 	"github.com/operatinggraph/lattice/internal/refractor/lens"
 	"github.com/operatinggraph/lattice/internal/refractor/pipeline"
 	"github.com/operatinggraph/lattice/internal/refractor/projection"
+	"github.com/operatinggraph/lattice/internal/refractor/rebuildgate"
 	"github.com/operatinggraph/lattice/internal/refractor/ruleengine"
 	"github.com/operatinggraph/lattice/internal/refractor/ruleengine/full"
 	"github.com/operatinggraph/lattice/internal/refractor/subjects"
@@ -534,7 +535,18 @@ func main() {
 	}()
 
 	poolManager := adapter.NewPoolManager()
+
+	// ONE gate for every path that starts a lens rebuild — the taxonomy reload
+	// scheduler (rl.taxRebuild, below) and the operator "rebuild" control op.
+	// Each rebuild is a durable JetStream delete-recreate, and the server pays
+	// the same for it whichever path asked; a bound held per path would leave
+	// the sum unbounded, which is the burst taxonomyRebuildConcurrency exists to
+	// prevent. Sharing the instance also serializes the two paths per lens, so
+	// an operator rebuild and a taxonomy rebuild of one lens cannot interleave.
+	rebuildGate := rebuildgate.New(taxonomyRebuildConcurrency)
+
 	controlSvc := control.NewService()
+	controlSvc.SetRebuildGate(rebuildGate)
 	controlSvc.SetPersonalInterestKV(personalInterestKV)
 	controlSvc.SetCoreKV(coreKV)
 	checker, err := wireControlChecker(ctx, conn, "refractor", controlauth.RefractorOps, logger)
@@ -1559,6 +1571,11 @@ func main() {
 	// dependency below is now in scope.
 	rl.ctx = ctx
 	rl.logger = logger
+	// The same gate controlSvc runs its "rebuild" op on, so the two paths share
+	// one ceiling on concurrent durable delete-recreates. Installed before the
+	// first lens activates, which is the only point at which an enqueue could
+	// otherwise install a private one of its own.
+	rl.taxRebuild.setGate(rebuildGate)
 	rl.lookup = lookupEntry
 	rl.buildAdapter = buildRuleAdapter
 	rl.fullEngine = fullEngine

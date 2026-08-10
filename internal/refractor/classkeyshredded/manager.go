@@ -100,11 +100,12 @@ const (
 	// and these are the lenses that carry sensitive columns, and it is BOUNDED
 	// because the wait happens inside a strictly serial durable handler: an
 	// unbounded one stops every later class-key destruction for the life of the
-	// process. A paused lens makes that concrete — Rebuild's supervisor.Reset
-	// requests a reopen without clearing a pause, so its pump stays parked and
-	// its outstanding count never reaches zero. The handler creates that
-	// condition itself by pausing a lens whose rebuild failed, so the next
-	// event would enumerate the same lens and wedge.
+	// process. A paused lens makes that concrete — Rebuild's supervisor reset
+	// requests a reopen without clearing a pause (and does not wait on a paused
+	// pump, precisely because that wait could never be satisfied), so its pump
+	// stays parked and its outstanding count never reaches zero. The handler
+	// creates that condition itself by pausing a lens whose rebuild failed, so
+	// the next event would enumerate the same lens and wedge.
 	DefaultRebuildWait = 30 * time.Minute
 	// DefaultHandlerBudget bounds the WHOLE handler, not one lens. RebuildWait
 	// is per target inside the loop, so N targets make the handler's real upper
@@ -415,11 +416,11 @@ func (m *Manager) handleClassKeyShredded(ctx context.Context, msg substrate.Mess
 		// The two "not known to be rebuilt, but not the lens's fault" classes.
 		// They must be told apart from a rebuild failure BEFORE the pause arm
 		// below, because pausing here is self-perpetuating: a paused lens cannot
-		// drain a rebuild (supervisor.Reset requests a reopen without clearing a
-		// pause), so a lens whose rescan legitimately outran the budget once
-		// would burn the whole budget, time out and re-pause on every later
-		// destruction — while serving its pre-destruction rows the entire time.
-		// That is the wedge the budget was added to remove, relocated. The
+		// drain a rebuild (the supervisor's reset requests a reopen without
+		// clearing a pause), so a lens whose rescan legitimately outran the
+		// budget once would burn the whole budget, time out and re-pause on every
+		// later destruction — while serving its pre-destruction rows the entire
+		// time. That is the wedge the budget was added to remove, relocated. The
 		// attestation is still withheld (allClean is already false): the lens is
 		// left running, and the operator's row stays visibly in-flight.
 		if errors.Is(err, control.ErrRebuildWaitTimeout) || errors.Is(err, control.ErrRebuildNotDrained) {

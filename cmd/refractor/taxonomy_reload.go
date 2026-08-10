@@ -353,6 +353,7 @@ func (rl *reloader) startTaxonomyRebuild(entry *pipelineEntry, ruleID, failureRe
 
 	rl.taxRebuild.enqueue(rl.ctx, taxonomyRebuildJob{
 		entry:   entry,
+		key:     ruleID,
 		run:     func() { rl.driveTaxonomyRebuild(entry, ruleID, failureReason) },
 		abandon: func() { releaseTaxonomyRebuild(entry) },
 	})

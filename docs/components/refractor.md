@@ -941,10 +941,23 @@ The component's recurring review-finding classes — fire briefs copy the applic
 **Capped at 12 one-liners**; an entry RETIRES when a lint/test gate mechanizes it (name the gate, strike
 the entry).
 
-- **A meta sweep multiplies `Rebuild`** — `supervisor.Reset` is a durable delete-recreate per lens, so any
-  fan-out over the lens set is a NATS burst (has OOM-killed `lattice-nats`). Minted: dynamic-type-taxonomy
-  §17.8. Check: `TestTaxonomyChanged_FanOutStaysWithinTheConcurrencyBound` pins the bound; the replay drain
-  and `control.Service.rebuildRule` are still outside it.
+- **A meta sweep multiplies `Rebuild`** — a rebuild is a durable delete-recreate per lens, so any fan-out over
+  the lens set floods the server's consumer management and starves every other lens behind it; a bound held
+  per PATH leaves the sum unbounded, and a bound released mid-handover covers less than it claims (this is a
+  concurrency/fairness bound — **not** memory; §17.19 retired that attribution). Minted:
+  dynamic-type-taxonomy §17.8. Check, claim by claim: every path that can BURST (reload scheduler, `rebuild`
+  op) runs on one shared `internal/refractor/rebuildgate.Gate` —
+  `TestTaxonomyChanged_FanOutStaysWithinTheConcurrencyBound`,
+  `TestRebuildGate_TaxonomyAndControlPathsShareOneBound`; the slot spans the handover *in the shipped
+  rebuild* — `TestRebuild_HoldsUntilTheConsumerPumpHasReopened` (fails if `Pipeline.Rebuild` reverts to a
+  non-waiting reset); the barrier itself, including overlapping waiters —
+  `TestSupervisor_ResetAwaitReopen_{ReturnsOnlyAfterThePumpReopens,OverlappingWaitersAreBothReleased}`. The
+  barrier is best-effort by design (an open already in flight can release a waiter early; consequence is a
+  slot released early). Two things sit outside the bound BY CHOICE, not as holes: the replay DRAIN, and the
+  synchronous `RebuildRule` arm — at most one exists process-wide because there is one `classkeyshredded`
+  manager on one inline durable handler (*not* `rebuildSerial`, which excludes only those callers from each
+  other), while its drain-wait budget is tens of minutes. Worst case is the bound plus one, and that one can
+  overlap a gated rebuild of the same lens.
 - **Turning on a behaviour an existing predicate gated hands it exactly the complement — and any safety
   property that rode on that predicate is absent there.** A shrink-truncate flag reached the lenses
   `ApplyTruncateScope` returns early for, i.e. the ones whose purge is unconfined, so it aimed a whole-bucket

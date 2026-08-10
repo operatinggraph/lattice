@@ -37,6 +37,21 @@ const (
 	maxNarrowedFilterSubjects = subjects.MaxNarrowedFilterSubjects
 )
 
+// rebuildReopenWait bounds how long a rebuild waits for the pump to re-open
+// against the durable it just recreated (ConsumerSupervisor.ResetAwaitReopen).
+//
+// A rebuild runs inside a bounded rebuild slot, and the point of that bound is
+// that the NATS server is not asked for many simultaneous durable transitions;
+// the reopen is part of the transition, so the slot has to cover it. Ten seconds
+// is set against what the wait is actually blocked on: a pump only sees the
+// reopen request once its in-flight message returns from the handler, and a
+// projection handler that has been running longer than this is not a reopen this
+// caller should keep a slot for. It is deliberately far below the handler
+// latencies a rebuild-completion watch tolerates — this bounds the HANDOVER, not
+// the rescan, and the rescan has its own watcher. Expiry is not a failure: the
+// durable is recreated either way and the pump reopens on its own backoff.
+const rebuildReopenWait = 10 * time.Second
+
 // ProbeInterval is the delay between consecutive probe attempts during an infrastructure pause.
 // Exported so tests can override it to a short value for fast recovery detection.
 var ProbeInterval = 10 * time.Second
@@ -1959,7 +1974,7 @@ func (p *Pipeline) HotReloadInto(newAdpt adapter.Adapter) error {
 
 // registerWithFilterFallback runs register — the supervisor call that
 // (re)creates this lens's Core KV durable (supervisor.Add for the initial
-// Run, supervisor.Reset for a Rebuild) — and, if it fails while filterSubjects
+// Run, supervisor.ResetAwaitReopen for a Rebuild) — and, if it fails while filterSubjects
 // is non-empty (a narrowed consumer was attempted), falls back to the broad
 // Core KV filter: logs loudly, records the fact on the lens's own health
 // entry (RecordError — the same per-lens errorCount/lastError surface
@@ -2015,7 +2030,7 @@ func (p *Pipeline) registerWithFilterFallback(ctx context.Context, filterSubject
 	// wrong and is overwritten here. This is the one broad reason decided after
 	// the derivation, which is why it cannot come from ConsumerFilter — and it
 	// covers BOTH registration paths, since Run's initial supervisor.Add and
-	// Rebuild's supervisor.Reset each fall back through this one function.
+	// Rebuild's supervisor reset each fall back through this one function.
 	p.RecordFilterDecision(ctx, registrationFailedDecision())
 	return register()
 }
@@ -2462,7 +2477,7 @@ func (p *Pipeline) rebuild(ctx context.Context, truncate bool, sig *rebuildSigna
 		}); err != nil {
 			return err
 		}
-		return p.supervisor.Reset(ctx, p.consumerCfg.Name)
+		return p.supervisor.ResetAwaitReopen(ctx, p.consumerCfg.Name, rebuildReopenWait)
 	}
 	if err := p.registerWithFilterFallback(ctx, filterSubjects, func() {
 		filterSubjects = nil

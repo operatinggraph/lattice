@@ -20,6 +20,7 @@ import (
 	"github.com/operatinggraph/lattice/internal/refractor/health"
 	"github.com/operatinggraph/lattice/internal/refractor/lens"
 	"github.com/operatinggraph/lattice/internal/refractor/personalinterest"
+	"github.com/operatinggraph/lattice/internal/refractor/rebuildgate"
 	"github.com/operatinggraph/lattice/internal/substrate"
 	"github.com/operatinggraph/lattice/internal/vault"
 )
@@ -43,8 +44,9 @@ var ErrRuleNotRegistered = errors.New("control: rule not registered")
 //     reporter and so no watcher at all).
 //
 // Neither is a fault of the LENS, so neither may be answered by PAUSING it. A
-// paused lens cannot drain a rebuild — Rebuild's supervisor.Reset requests a
-// reopen without clearing a pause — so pausing a merely-slow lens is
+// paused lens cannot drain a rebuild — Rebuild's supervisor reset requests a
+// reopen without clearing a pause, and does not wait on a paused pump precisely
+// because that wait could never be satisfied — so pausing a merely-slow lens is
 // self-perpetuating: every later destruction burns the whole budget, times out,
 // and re-pauses it while it keeps serving its pre-destruction rows. Both mean
 // "not known to be rebuilt": withhold the attestation, do not pause.
@@ -335,6 +337,24 @@ type Service struct {
 	// (Fire 2, control-plane-capability-authz-design.md). nil (the default)
 	// keeps Fire 1 behavior; set via SetActorVerifier.
 	actorVerifier *controlauth.ActorVerifier
+	// rebuildGate bounds how many lens rebuilds the "rebuild" op may have
+	// running at once and serializes them per lens. NEVER nil: NewService
+	// installs a limit-1 gate and SetRebuildGate refuses to clear it, because
+	// every rebuild is a durable JetStream delete-recreate and the whole point
+	// of the field is that no path reaches the server unbounded. The bound is
+	// shared, not per-path — cmd/refractor installs the same instance the
+	// taxonomy reload scheduler runs on, so an operator sweep and a taxonomy
+	// sweep add up to one bound rather than two.
+	rebuildGate *rebuildgate.Gate
+	// rebuildInFlight/rebuildQueued hold the "rebuild" op's per-lens
+	// admission, both guarded by mu. A ruleID is in rebuildInFlight while a
+	// driver goroutine is running or about to run a rebuild for it, and in
+	// rebuildQueued (with the truncate the queued request asks for) when one
+	// further request is owed after the current one. At most one of each per
+	// lens: the op answers Started immediately, so without this the ack rate
+	// IS the goroutine-spawn rate.
+	rebuildInFlight map[string]struct{}
+	rebuildQueued   map[string]bool
 }
 
 // NewService creates a new Service with empty registries. The control plane
@@ -354,7 +374,36 @@ func NewService() *Service {
 		personalHydratorByRuleID: make(map[string]Hydrator),
 		reporters:                make(map[string]*health.Reporter),
 		capability:               newDenyAllChecker(nil),
+		rebuildGate:              rebuildgate.New(1),
+		rebuildInFlight:          make(map[string]struct{}),
+		rebuildQueued:            make(map[string]bool),
 	}
+}
+
+// SetRebuildGate installs the rebuild gate this service's "rebuild" op runs on
+// — the shared instance cmd/refractor also gives the taxonomy reload scheduler,
+// so the two paths share ONE bound on concurrent durable delete-recreates
+// instead of holding one each.
+//
+// A nil gate is IGNORED, keeping the limit-1 default NewService installed, and
+// logged. The field is never nil at any point in this object's life, and no
+// argument can make it so: a wiring path that is never taken, or forgotten, must
+// leave the service TIGHTER than intended, never unbounded. Treating nil as
+// "skip the gate" is the shape that silently disarms a gate everywhere the
+// wiring does not reach.
+//
+// Thread-safe; may be called at any time. A rebuild already driving on the
+// previous gate finishes on it — the two gates then bound their own callers
+// separately for that window, which is bounded by the in-flight rebuild.
+func (s *Service) SetRebuildGate(g *rebuildgate.Gate) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if g == nil {
+		slog.Warn("control: ignoring a nil rebuild gate; keeping the bounded default",
+			"limit", 1)
+		return
+	}
+	s.rebuildGate = g
 }
 
 // SetActorVerifier wires JWT verification onto the control plane's
@@ -648,12 +697,26 @@ func (s *Service) PauseRule(ctx context.Context, ruleID string) error {
 }
 
 // RebuildRule rebuilds ruleID's projection and blocks until the rescan has
-// drained, serialized per lens by the underlying pipeline. The in-process
-// equivalent of the "rebuild" control-plane op, but with the completion the RPC
+// drained. The pipeline serializes concurrent RebuildRule callers for one lens
+// against EACH OTHER (Pipeline.rebuildSerial) — and against nothing else, which
+// matters below. The in-process equivalent of the "rebuild" control-plane op,
+// but with the completion the RPC
 // arm deliberately does not wait for: it answers "{Started: true}" immediately,
 // which is right for an operator at a CLI and useless to a caller that must
 // ATTEST a rebuild finished before recording an erasure step
 // (retention-class-key-custody-design.md §6.3 step 4).
+//
+// This arm does NOT take the rebuild gate, and that is a decision rather than an
+// omission — taxonomyRebuildConcurrency's doc in cmd/refractor carries the whole
+// of it. In short: this path cannot burst, because the deployment runs exactly
+// one classkeyshredded.Manager whose handler is inline on a single durable and
+// walks its targets sequentially — a counting argument about the process, NOT
+// rebuildSerial, which excludes only these callers from each other. Meanwhile
+// its wait budget is measured in tens of minutes, so a slot held across it would
+// stall every path that CAN burst. The residue is that this arm is invisible to
+// the gate's per-lens exclusion, so it may overlap a gated rebuild of the same
+// lens; they meet at the supervisor's handover barrier, which admits concurrent
+// waiters by design.
 //
 // Returns an error if ruleID is not registered, if the rebuild fails, if its
 // wait is cancelled, as ErrRebuildWaitTimeout if wait expires with the rescan
@@ -926,22 +989,102 @@ func (s *Service) getHealth(ctx context.Context, ruleID string) ControlResponse 
 	return ControlResponse{Entry: &entry}
 }
 
-// rebuildRule is async: it looks up the registered Rebuilder, launches the rebuild in
-// a background goroutine, and returns an ack immediately (AC5, AC6).
-// Errors from the background rebuild are logged via slog; they do not surface to the caller.
+// rebuildRule is async: it looks up the registered Rebuilder, admits the
+// rebuild, and returns an ack immediately (AC5, AC6). Errors from the background
+// rebuild are logged via slog; they do not surface to the caller.
+//
+// The rebuild itself runs on s.rebuildGate, which bounds how many are in flight
+// across every path that starts one — this op and cmd/refractor's taxonomy
+// reload scheduler alike. Each is a durable JetStream delete-recreate, and a
+// corpus-wide operator sweep is exactly as expensive to the NATS server as a
+// corpus-wide taxonomy sweep, so the bound has to span both.
+//
+// Admission, per lens, is at most ONE in flight plus at most ONE queued:
+//
+//   - nothing in flight — mark it in flight and start the single driver
+//     goroutine below, which serves this request and then any that queued behind
+//     it, in the same goroutine. The op answers Started the instant it is
+//     accepted, so a goroutine per request means the request rate IS the
+//     goroutine rate; the driver is what keeps one lens's operator traffic to
+//     one.
+//   - in flight, nothing queued — record the queued request and its truncate.
+//   - in flight and one already queued — OR this request's truncate into the
+//     queued one and drop the rest of it. Dropping the redundant REQUEST is
+//     sound because the queued rebuild has not started: it will observe all
+//     state as of its own start, which is after this request arrived, so it
+//     already answers for it. Dropping the truncate would NOT be sound — a
+//     truncate is a retraction the rebuild owes, not a description of state it
+//     will re-read — hence the OR, and hence the flag only ever being raised
+//     here, never lowered.
 func (s *Service) rebuildRule(ruleID string, truncate bool) ControlResponse {
 	s.mu.Lock()
 	r, ok := s.rebuilderByRuleID[ruleID]
-	s.mu.Unlock()
 	if !ok {
+		s.mu.Unlock()
 		return ControlResponse{Error: fmt.Sprintf("rule %q not registered", ruleID)}
 	}
-	go func() {
-		if err := r.Rebuild(context.Background(), truncate); err != nil {
+	if _, busy := s.rebuildInFlight[ruleID]; busy {
+		s.rebuildQueued[ruleID] = s.rebuildQueued[ruleID] || truncate
+		s.mu.Unlock()
+		return ControlResponse{Rebuild: &RebuildResult{Started: true}}
+	}
+	s.rebuildInFlight[ruleID] = struct{}{}
+	s.mu.Unlock()
+
+	go s.driveRebuilds(ruleID, r, truncate)
+	return ControlResponse{Rebuild: &RebuildResult{Started: true}}
+}
+
+// driveRebuilds is the single per-lens driver started by rebuildRule: it runs
+// the admitted rebuild through the gate, then serves whatever queued behind it
+// on the same goroutine, and clears the in-flight mark once the queue is empty.
+//
+// The gate is re-read each pass rather than captured, so a rebuild queued across
+// a SetRebuildGate call runs on the gate in force when it starts. r is captured
+// once, matching what an in-flight rebuild already holds: a lens deregistered
+// while a rebuild was queued fails inside Pipeline.rebuild, which establishes
+// that the supervisor still manages the consumer before it truncates anything —
+// so a stale Rebuilder refuses rather than clearing a target nothing re-derives.
+//
+// ctx is context.Background(), not the request's: the request context dies with
+// its reply, and this work outlives the ack by design.
+//
+// The consequence, stated because nothing else in this file states it: the gate
+// wait here is UNCANCELLABLE. This service holds no lifecycle handle, so at
+// process teardown a driver already queued for a slot keeps waiting, and a
+// rebuild admitted at that moment BEGINS during teardown rather than being
+// abandoned. What that costs is bounded — the rebuild is a durable recreate the
+// pump reconciles on its next open, and Pipeline.rebuild refuses outright once
+// the supervisor stops managing the consumer — so it is left as it is rather
+// than answered with a lifecycle this type does not otherwise have.
+func (s *Service) driveRebuilds(ruleID string, r Rebuilder, truncate bool) {
+	for {
+		s.mu.Lock()
+		gate := s.rebuildGate
+		s.mu.Unlock()
+
+		if err := gate.Do(context.Background(), ruleID, func() error {
+			return r.Rebuild(context.Background(), truncate)
+		}); err != nil {
 			slog.Error("control: rebuild failed", "ruleId", ruleID, "err", err)
 		}
-	}()
-	return ControlResponse{Rebuild: &RebuildResult{Started: true}}
+
+		s.mu.Lock()
+		queuedTruncate, queued := s.rebuildQueued[ruleID]
+		if !queued {
+			// The in-flight mark is dropped in the SAME critical section that
+			// found the queue empty. Splitting them would open a window in which
+			// a request sees nothing in flight, starts a second driver, and this
+			// one is still live — two drivers for one lens, which is exactly the
+			// admission this bookkeeping exists to hold.
+			delete(s.rebuildInFlight, ruleID)
+			s.mu.Unlock()
+			return
+		}
+		delete(s.rebuildQueued, ruleID)
+		truncate = queuedTruncate
+		s.mu.Unlock()
+	}
 }
 
 // reprojectActor re-executes one actor's projection for ruleID and reconciles
