@@ -34,12 +34,11 @@ Scouts are *not* roles: the owning roles (`owner`, `fe-engineer`, …) remain sk
    copied in verbatim: the touched components' "Review keeps catching" dossier entries**
    (`docs/components/<c>.md`, the section at the end) **and the standing checklist below**. The dossier is
    how a prior review's findings reach this builder; a brief that skips it re-purchases them.
-6. **Adjacent finds** — everything discovered that is out of scope: **file each as a board row NOW**, before
-   the first edit (or state why one is deliberately not filed). Pre-build filing is the healthy half of
-   residual discovery; mid-build filings should become rare. (A filed adjacent find is still the **Steward's
-   own work** unless it hits one of the two outs — needs Andrew, or needs a designer pass; the row is a
-   checkpoint of the Steward's queue, not a hand-off, and on-ship residuals follow the same fix-with-two-outs
-   rule; `agents/steward/SKILL.md` §4.)
+6. **Adjacent finds** — everything discovered that is out of the FIRE's scope. Each one is either
+   **absorbed into this run's batch as its own unit** (the default: the run fixes what it finds; the fire's
+   scope stays narrow while the batch grows), or filed ONLY under one of the two outs — **needs Andrew**, or
+   **needs a designer pass** — with the out stated on the row. There is no third path and no "file for
+   later" (`agents/steward/SKILL.md` §4). Listing the finds here is scoping, not filing.
 7. **Non-goals** — what the fire deliberately does not touch (the drift fence).
 
 ## The standing checklist (copied into every brief's part 5)

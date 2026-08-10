@@ -165,14 +165,15 @@ builder execute instead of rediscover — and lets mechanical increments run on 
 create-story→dev-story chain's story file, reborn per-item at selection time — **once per item, never per
 resume** (resumes run the delta-scout).
 
-**What a fire discovers is the Steward's to FIX (Andrew, 2026-08-09, superseding the 08-08 ladder):**
-introduced defects, exposed pre-existing gaps, broken adjacent mechanisms alike — fixed in-fire, as the
-run's next unit, or as the Steward's own next pick (a filed row is a checkpoint of the Steward's queue,
-never a hand-off). Filing has exactly **two outs**, stated on the row: it needs **Andrew** (standing block /
-frozen-contract commit / architectural fork), or it needs a **designer pass** (substantial new design, no
-ratified pattern to extend). And the design doc's **body stays true**: a build that falsifies a ratified
-claim amends that body text in the same commit — build notes are checkpoints, not journals. Full rules:
-`agents/steward/SKILL.md` §4.
+**What a fire discovers, that run FIXES (Andrew, 2026-08-09):** introduced defects, exposed pre-existing
+gaps, broken adjacent mechanisms alike — fixed **before the run exits** (the batch grows to absorb them;
+the lock lease and the rate-limiter govern a long run, and a hard stop leaves the 🏗️ checkpoint the next
+run finishes first). **There is no deferral row** — not "steward-owned", not "next run", not "gating a
+later fire". The only two rows a discovery may produce, each stating its out: it needs **Andrew** (standing
+block / frozen-contract commit / architectural fork), or it needs a **designer pass** (substantial new
+design, no ratified pattern to extend). And the design doc's **body stays true**: a build that falsifies a
+ratified claim amends that body text in the same commit — build notes are checkpoints, not journals. Full
+rules: `agents/steward/SKILL.md` §4.
 
 Cadence: both advancers fire densely + staggered; the two hydrators on their own cadence. Tune **up** until the
 limiter occasionally trips — that trip is the signal the window is fully used.

@@ -429,7 +429,9 @@ running; the **browser tab** you do not.
   (trialed 2026-08-08/09: a ratified two-fire plan ran as ~10 one-increment runs — ten resume ceremonies for
   one fire's work); a mid-fire exit is legitimate only on a **hard stop** — lock reclaimed, main red, the
   rate-limit window tripped — and leaves the 🏗️ checkpoint. Never an improvised thinner slice sized to the
-  schedule, and never "the queue is still non-empty" as a reason to continue past the batch — **then exit.**
+  schedule, and never "the queue is still non-empty" as a reason to continue past the batch (the batch
+  GROWS to absorb what its own fires surface — the discovery rule below — but never pulls the next queue
+  item past itself) — **then exit.**
   The exit stays load-bearing: **a paused schedule is Andrew's fleet-control lever** (a run that drains the
   queue outlives the pause). Throughput comes from **runs that finish their fire**, not from many thin runs;
   the **rate-limiter is the governor** — when the window trips the fire fails cheaply, every committed unit
@@ -503,28 +505,33 @@ running; the **browser tab** you do not.
   items are the **un-picked** ones; the picked item self-corrects during grounding anyway). *(Trialed
   2026-06-30: shipping D1.3 left its prerequisite still marked 🏗️ building and a dependent's blocker stale —
   both surfaced only by an after-the-fact sweep, which this step exists to pre-empt.)*
-- **What a fire discovers is YOURS TO FIX — filing has exactly two outs (Andrew, 2026-08-09, superseding
-  the 08-08 ladder).** Anything a fire surfaces — a defect it introduced, a pre-existing gap it exposed, an
-  adjacent mechanism found broken — is the **Steward's responsibility to fix**: in this fire when it touches
-  the item's mechanism; as this run's next unit when adjacent; else as your OWN next pick, where the row you
-  file is a checkpoint of your own queue, not a hand-off (state it: `steward-owned · next run`). "Out of
-  ratified scope", "pre-existing", "not a bounded fix", "no nameable consumer yet" are **not outs** — they
-  are the do-less-file-more defect this rule exists to kill (trialed 2026-08-07/09: 24 review-residual rows
-  filed vs 4 closed; a fire's own inert defect filed as "gating" a later fire instead of being fixed). A
-  defect **this fire introduced is never filed — fix it or don't ship the increment.** The only two outs,
-  each stated on the row it produces: **(1) it needs ANDREW** — a standing Andrew block, a frozen-contract
-  *commit*, or a named architectural fork (prepare + flag per §0, build everything around it); **(2) it
-  needs a DESIGNER pass** — a genuinely substantial new design with no ratified pattern to extend (§2.5's
-  test), filed naming the design need. Fold into an existing named row rather than duplicating; a row that
-  is filed lands **in the same docs commit as the ✅ flip**, naming consumer + blocker + **which out**. A row
-  exists to carry work, never to shed it: **the backlog shrinks by building, not grows by reviewing.**
+- **What a fire discovers, THIS RUN fixes — the only excuse is Andrew or a designer pass (Andrew,
+  2026-08-09).** Anything a fire surfaces — a defect it introduced, a pre-existing gap it exposed, an
+  adjacent mechanism found broken — gets **fixed before this run exits**: in the fire when it touches the
+  item's mechanism, as the batch's next unit(s) otherwise. **The batch grows to absorb what its own fires
+  surface** — that is what bounded means: bounded by the work in hand, not by the schedule; the lease
+  renewal protects a long run, the rate-limiter governs, and a hard stop leaves the 🏗️ checkpoint that the
+  next run finishes FIRST — hard-stop recovery is not a filing category. **There is no deferral row.** Not
+  "steward-owned", not "next run", not "gating a later fire", not "residual" — every such label is the same
+  do-less-file-more defect wearing a new name, and every prior form of it was jumped into within a day
+  (trialed 2026-08-07/09: 24 review-residual rows filed vs 4 closed under "fix when bounded"; an own-defect
+  filed as "gating Fire B" under the inert exception). "Out of ratified scope", "pre-existing", "not a
+  bounded fix", "no nameable consumer yet", "would double the run" are **not excuses — they are the job.**
+  A defect this fire introduced is never filed under any label: fix it or don't ship. The **only two rows**
+  a discovery may produce, each stating its out: **(1) it needs ANDREW** — a standing Andrew block, a
+  frozen-contract *commit*, or a named architectural fork (prepare + flag per §0 — and the buildable
+  remainder around it is still this run's to fix); **(2) it needs a DESIGNER pass** — a genuinely
+  substantial new design with no ratified pattern to extend (§2.5's test), filed naming the design need —
+  and everything around it that needs no design is still this run's to fix. When a discovery lands on an
+  existing named row, prefer **fixing that row now** over annotating it. **The backlog shrinks by building,
+  not grows by reviewing.**
   Same discipline for forward-references: code/comments must
   not point at another fire's *assumed* future deliverable — point at a filed row or the other design's
-  ratified scope, else you've created a seam nobody owns. **Rows-or-nothing binds the design doc too:** a
-  residual named in a build note / found-work section either links its row or states, in the same commit, why
-  one is deliberately not filed — a bare "filed" claim with no row is a false record, and the cumulative
-  close pass verifies the item's whole residual accounting (every residual sentence resolves to a row, a fix,
-  or a stated why-not; trialed 2026-08-09: four §17 residuals carried no row, one claiming "is filed").
+  ratified scope, else you've created a seam nobody owns. **The accounting binds the design doc too:** a
+  discovery named in a build note / found-work section resolves, in the same commit, to a **fix** or to one
+  of the **two outs' rows** (linked) — nothing else, and a bare "filed" claim with no row is a false record.
+  The cumulative close pass verifies the item's whole accounting (trialed 2026-08-09: four §17 residuals
+  carried no row, one claiming "is filed").
 - **The design doc's BODY stays true — a falsified ratified claim is amended where it stands (Andrew,
   2026-08-08).** When a build falsifies a ratified claim, weakens a stated guarantee, or lands a mechanism the
   body argues against, **rewrite/strike that body text in the same commit as the increment** (dated — the
