@@ -2335,11 +2335,44 @@ with Refractor up 1h18m. The morning's boot path could not run Refractor at all.
 **CHECKPOINT — Fire C, after C1.**
 
 - **Done:** C1.1, C1.2, C1.3 (both halves, oppositely resolved). All on `main`, CI green.
-- **In flight at this checkpoint:** C2.5 (the `armed` replay-complete barrier) is built and frozen at
-  `8032295f` in the worktree, under a 3-layer adversarial pass. It uses the pre-existing
-  `substrate.ConsumerCaughtUp` rather than a hand-rolled barrier, and adds a connection-state listener fan-out
-  to `substrate.Conn` — a shared primitive every binary uses, which is why it is being reviewed at that depth
-  before it merges. **Do not merge `8032295f` without reading those verdicts.**
+- **In flight at this checkpoint:** C2.5 (the `armed` replay-complete barrier), frozen at `8032295f` in the
+  worktree. It uses the pre-existing `substrate.ConsumerCaughtUp` rather than a hand-rolled barrier, and adds a
+  connection-state listener fan-out to `substrate.Conn` — a shared primitive every binary uses, which is why it
+  got the full 3-layer pass. **`8032295f` MUST NOT be merged as it stands.** The three verdicts are in; what
+  survived and what did not is recorded here so no later fire re-derives it.
+
+  **What survived review:** the `armCh` ordering argument (substrate sends on the unbuffered channel *then*
+  acks, so no event is in flight while the counters read zero); the poller is genuinely latched and singular,
+  and cannot be doubled by a flap; `ConsumerCaughtUp`'s counter arithmetic is conserved for this consumer's
+  configuration; and the footprint worry is empty — `capabilityServiceAccess` is the only shipped lens carrying
+  the sigil, and it cannot narrow regardless, so the barrier trades away nothing that exists today.
+
+  **The four blockers, all at boundaries the build did not enumerate:**
+  1. **Two producer goroutines, not one** — derived independently by two reviewers. Wiring
+     `rl.taxonomyChanged()` to the connection-state callback breaks the single-dispatch-goroutine confinement
+     that `main.go:175-181` and `taxonomy_reload.go:154-159` both assert in prose. `taxLiveMu` serializes
+     liveness callbacks against each other only; the snapshot callback fires outside it. Two consequences,
+     both proved: `rederiveEntry` publishes its gate outside `taxMu` and records its baseline inside it, so
+     concurrent calls commit baselines in the opposite order from their publishes and leave a *narrowed* gate
+     recorded as armed while the resolver is disarmed — which never self-heals, because the next event
+     compares equal and short-circuits; and `activateIfNotRegistered` drops `mu` between its existence check
+     and `startPipeline`, so two callers register two pipelines for one lens ID, the loser's `cancel` dropped.
+     The fix is to route the disarm through `consume`'s select as the arm already is.
+  2. **`cmd/facet` already owns the handler slots** (`engine.go:176-177`, set *after* `substrate.Connect`), so
+     the new fan-out is dead code on every Facet connection. The build's "no caller in the repo sets them" was
+     false.
+  3. **`Close()` fires the disconnect edge** — `NoCallbacksAfterClientClose` defaults false at the nats.go pin,
+     so shutdown runs a full sweep against a closed connection.
+  4. **`ConsumerCaughtUp` can read true for a message that was never processed** — a MaxDeliver-exhausted
+     message is removed from `o.pending` after `o.npc` was already decremented, so it counts in neither. This
+     one attacks the barrier's own soundness, and `SubscribeKVChanges` (`MaxDeliver: 10`, no `AckWait`, no
+     prefetch bound) makes it reachable rather than theoretical.
+
+  **A simplification candidate, deliberately not taken now:** `substrate.Message.NumPending` already carries an
+  in-band drain signal that `decodeKVMessage` discards, so the build's "there is no replay-finished edge on
+  this path" is wrong and an in-band edge would be ordered with `handle()` by construction — no `armCh`, no
+  probing goroutine, no epoch. It does not cover the no-traffic reconnect case, and switching mechanisms would
+  invalidate the ordering argument review just verified, so it is recorded rather than built.
 - **Next, in order:** C2.5's review findings → C3.7 (the cap-arithmetic refusal consumer; the blocking fact is
   that `pkgmgr`'s injected `CypherParser` interface returns only `error`, so `K` is uncomputable — the seam has
   to widen to yield a spec's referenced labels, and `full.CompiledRule.ReferencedLabels()` is the existing API
