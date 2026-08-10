@@ -304,13 +304,38 @@ Consequences, both live and not test-only:
 - `maxretries_bgcheck` / the Augur `exhausted` escalation are unreachable: the dispatch count never climbs.
 - A standing **`error`-severity** `InflightActionMismatch` Health issue for a correctly-authored package.
 
-**3. The contract is on the fix's side — no contract change.** Contract #10 §10.3
-(`docs/contracts/10-orchestration-substrate.md:233`) defines an external gap by **companion-column
-presence**, never by action: *"External gaps are unchanged — their reclaim re-dispatch is intended,
-episode-scoped on `markRevision` and bounded by `inflight_<g>` + `maxretries_<g>`; `directOp` likewise."*
-The engine's action test is a narrowing the contract never asked for. This design's own §Component spine
-frames the external gap as a **triggerLoom** gap ("Weaver already is the ensure-eventually / re-trigger
-on gap engine (triggerLoom on a violating gap)"), so the fix restores ratified behavior.
+**3. ~~The contract is on the fix's side — no contract change.~~ WRONG — corrected 2026-08-09 by the
+close review.** The original claim quoted one sentence of §10.3's reclaim bullet
+(`docs/contracts/10-orchestration-substrate.md:233`) — *"External gaps are unchanged — their reclaim
+re-dispatch is intended, episode-scoped on `markRevision` and bounded by `inflight_<g>` +
+`maxretries_<g>`; `directOp` likewise"* — and concluded no contract edit was needed. **The same bullet
+contains two sentences that say the opposite, and the brief never quoted them:**
+
+- `:206-209` puts **`triggerLoom`'s Loom `instanceId`** unconditionally in the claimId-**preserved-verbatim**
+  class ("A userTask reclaim is keyed by the open-episode identity…").
+- `:237-240` — *"a still-open gap whose instance terminated is resolved by level-reconciled
+  mark-clearing, **never by re-triggering the pattern**"* — unqualified over `triggerLoom`. That is
+  exactly the state this fix acts on (the bridge's give-up terminates the instance; `missing_bgcheck`
+  stays open), and re-triggering the pattern is exactly what it does.
+
+So §10.3 as frozen is internally inconsistent: it sanctions external-gap reclaim re-dispatch and
+forbids `triggerLoom` re-trigger, with no rule for a `triggerLoom` that *is* an external gap. The
+load-bearing phrase this design leaned on — "triggerLoom of a **userTask-containing** pattern" —
+appears in `reconciler.go`'s comment and **nowhere in `docs/contracts/`**; a code comment was being
+cited as contract authority.
+
+**A contract edit is therefore staged in `main`, UNCOMMITTED, for Andrew** — that diff is the proposal.
+It scopes :206-209 to the userTask class, carves the externalTask-only `triggerLoom` into the external
+class explicitly, states that the class is read from the pattern's step kinds rather than the action
+name, and adds the rule the engine now depends on: **a gap declaring `inflight_<g>` MUST declare
+`maxretries_<g>`** (the fresh-claimId path has no collapse to pace it, so the budget is its only bound).
+Supporting intent already exists at `10-orchestration-weaver.md:163`, which names `triggerLoom` of an
+externalTask-bodied pattern as *the* external-remediation path — so this is a clarification of an
+inconsistency, not a change of direction.
+
+**The lesson, for the next brief:** a soundness claim must quote the whole clause it rests on. Quoting
+the one sentence that agrees with you is how a fire ships a contract violation believing it is
+compliant.
 
 **4. Chosen mechanism — ask the real question, at zero read cost.** The contract's actual distinction is
 "triggerLoom of a **userTask-containing** pattern" (the reconciler's own comment, `reconciler.go:516-529`).
