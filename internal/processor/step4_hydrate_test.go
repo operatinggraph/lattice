@@ -59,7 +59,7 @@ func TestHydrate_RequiredAbsent_RecordedNotFaulted(t *testing.T) {
 	h := NewHydrator(conn, testCoreBucket, testLogger())
 
 	env := newTestEnvelope(testNanoID1)
-	missingKey := "vtx.identity.MissingMissingMissing"
+	missingKey := "vtx.identity." + testNanoIDAbsent
 	env.ContextHint = &ContextHint{Reads: []string{missingKey}}
 
 	state, err := h.Hydrate(ctx, env)
@@ -243,6 +243,63 @@ func TestHydrate_MissingClass(t *testing.T) {
 	}
 }
 
+// TestHydrate_WildcardReadKey_RejectedNotExpanded pins the boundary
+// KVGetMulti's batching removed: unlike single-key KVGet (which rejects "*"/
+// ">" via nats.go's own key-charset check), KVGetMulti treats an
+// unrecognized string as a NATS subject FILTER. contextHint is
+// client-supplied and step 3 authorizes without inspecting it, so a
+// wildcard-shaped declared key must fail loudly here — never silently turn
+// one declared read into a scan of every vertex in the bucket.
+func TestHydrate_WildcardReadKey_RejectedNotExpanded(t *testing.T) {
+	t.Parallel()
+	ctx, conn, _, _, _ := setupTestPipeline(t)
+	h := NewHydrator(conn, testCoreBucket, testLogger())
+
+	// Seed several unrelated vertices a wildcard would match if it reached
+	// KVGetMulti unvalidated.
+	for i, id := range []string{testNanoID1, testNanoID2, testNanoID3} {
+		key := "vtx.identity." + id
+		doc := []byte(`{"class":"identity","isDeleted":false,"data":{"n":` + string(rune('0'+i)) + `}}`)
+		if _, err := conn.KVPut(ctx, testCoreBucket, key, doc); err != nil {
+			t.Fatalf("seed %s: %v", key, err)
+		}
+	}
+
+	for _, wildcard := range []string{"vtx.identity.>", "vtx.*.abc", ">"} {
+		env := newTestEnvelope(testNanoID1)
+		env.ContextHint = &ContextHint{Reads: []string{wildcard}}
+
+		state, err := h.Hydrate(ctx, env)
+		var hErr *HydrationError
+		if !errors.As(err, &hErr) {
+			t.Fatalf("wildcard %q: expected *HydrationError, got %T: %v (state=%+v)", wildcard, err, err, state)
+		}
+		if hErr.Code != "InvalidReadKey" {
+			t.Fatalf("wildcard %q: Code = %q, want InvalidReadKey", wildcard, hErr.Code)
+		}
+		if hErr.MissingKey != wildcard {
+			t.Fatalf("wildcard %q: MissingKey = %q, want it to name the rejected key", wildcard, hErr.MissingKey)
+		}
+	}
+}
+
+// TestHydrate_OptionalReadsWildcard_AlsoRejected proves the validation
+// covers all three declared-read lists, not just Reads.
+func TestHydrate_OptionalReadsWildcard_AlsoRejected(t *testing.T) {
+	t.Parallel()
+	ctx, conn, _, _, _ := setupTestPipeline(t)
+	h := NewHydrator(conn, testCoreBucket, testLogger())
+
+	env := newTestEnvelope(testNanoID1)
+	env.ContextHint = &ContextHint{OptionalReads: []string{"vtx.identity.>"}}
+
+	_, err := h.Hydrate(ctx, env)
+	var hErr *HydrationError
+	if !errors.As(err, &hErr) || hErr.Code != "InvalidReadKey" {
+		t.Fatalf("expected InvalidReadKey *HydrationError, got %T: %v", err, err)
+	}
+}
+
 // Ensure the parsed VertexDoc carries the key for downstream consumers.
 func TestHydrate_VertexDocCarriesKey(t *testing.T) {
 	t.Parallel()
@@ -324,9 +381,9 @@ func TestHydrate_RepeatedKeyResolvesOnce(t *testing.T) {
 		[]byte(`{"class":"identity","isDeleted":false,"data":{"name":"A"}}`)); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
-	absentReadKey := "vtx.identity.AbsentAbsentAbsent1"
-	absentEgressKey := "vtx.identity.AbsentAbsentAbsent2"
-	absentOptionalKey := "vtx.identity.AbsentAbsentAbsent3"
+	absentReadKey := "vtx.identity." + testNanoIDAbsent
+	absentEgressKey := "vtx.identity." + testNanoIDAbsent2
+	absentOptionalKey := "vtx.identity." + testNanoIDAbsent3
 
 	repeat := func(key string, n int) []string {
 		out := make([]string, n)

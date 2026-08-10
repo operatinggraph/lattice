@@ -215,6 +215,15 @@ func (h *HydratorImpl) Hydrate(ctx context.Context, env *OperationEnvelope) (Hyd
 	// locks the whole matched set under the stream's read lock, so no key —
 	// whichever list names it — can straddle a concurrent create or purge
 	// the way three separate live GETs could.
+	//
+	// KVGetMulti treats an unrecognized string as a NATS subject FILTER, not
+	// a rejected key — unlike the single-key KVGet path this replaces, which
+	// incidentally rejected "*"/">" via nats.go's own key-charset check.
+	// contextHint is client-supplied and step 3 authorizes without
+	// inspecting it (see above), so every declared key is validated as a
+	// well-formed Contract #1 key BEFORE it can reach the batched primitive:
+	// a wildcard (or any other malformed string) here must fail loudly, not
+	// silently turn one declared read into a full-bucket scan.
 	readKeys := distinctKeys(declared.Reads)
 	optionalReadKeys := distinctKeys(declared.OptionalReads)
 	egressReadKeys := distinctKeys(declared.EgressReads)
@@ -222,9 +231,17 @@ func (h *HydratorImpl) Hydrate(ctx context.Context, env *OperationEnvelope) (Hyd
 	unionKeys = append(unionKeys, readKeys...)
 	unionKeys = append(unionKeys, optionalReadKeys...)
 	unionKeys = append(unionKeys, egressReadKeys...)
-	snapshot, err := h.Conn.KVGetMulti(ctx, h.CoreBucket, distinctKeys(unionKeys))
+	unionKeys = distinctKeys(unionKeys)
+	for _, key := range unionKeys {
+		if substrate.ClassifyKey(key) == substrate.KindUnknown {
+			return HydratedState{}, &HydrationError{
+				Code: "InvalidReadKey", MissingKey: key, OperationRequestID: rid,
+			}
+		}
+	}
+	snapshot, err := h.Conn.KVGetMulti(ctx, h.CoreBucket, unionKeys)
 	if err != nil {
-		return HydratedState{}, fmt.Errorf("step4: get-multi: %w", err)
+		return HydratedState{}, fmt.Errorf("step4: get-multi (%d keys): %w", len(unionKeys), err)
 	}
 
 	hydrated := make(map[string]VertexDoc)

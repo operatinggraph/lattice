@@ -53,19 +53,38 @@ const (
 	directGetMarkerReasonHdr = "Nats-Marker-Reason"
 
 	// directGetRetries bounds the fast-path retry-whole loop. A short read
-	// (a mid-stream "404 Message Not Found", or the response channel closing
-	// before EOB) is abnormal by construction — the request never sets
-	// batch/max_bytes, so the legal response is always well under the
-	// server's send budget — a small bounded retry absorbs a transient blip
-	// without masking a persistent fault. Each attempt is independently
-	// atomic; a retry never merges partial results across attempts.
+	// (a mid-stream "404 Message Not Found", or a lost/dropped response) is
+	// abnormal by construction — the request never sets batch/max_bytes, so
+	// the legal response is always well under the server's send budget — a
+	// small bounded retry absorbs a transient blip without masking a
+	// persistent fault. Each attempt is independently atomic; a retry never
+	// merges partial results across attempts.
 	directGetRetries      = 3
 	directGetRetryBackoff = 50 * time.Millisecond
 
-	// directGetChanBuffer sizes the raw response subscription's channel deep
-	// enough that the server's largest legal single burst (1,024 entries)
-	// never blocks on a slow consumer mid-drain.
-	directGetChanBuffer = 1024
+	// directGetChanBuffer sizes the raw response subscription's channel. The
+	// server's largest legal single burst is 1,024 DATA messages PLUS one
+	// EOB — 1,025 total (nats-server's getDirectMulti sends one message per
+	// matched subject, then an EOB status message). ChanSubscribe does not
+	// block a full channel; nats.go does a non-blocking send and DROPS the
+	// message on a full buffer (raising a slow-consumer async error) — so
+	// this must clear the real burst size with real headroom, not just meet
+	// it exactly (a buffer sized to precisely 1,024 loses the EOB itself on
+	// the very burst it was sized for).
+	directGetChanBuffer = 2048
+
+	// directGetMultiDefaultTimeout bounds ONE fast-path attempt when the
+	// caller's ctx carries no deadline of its own. Every OTHER substrate KV
+	// read gets an equivalent bound for free from nats.go's high-level
+	// client (jetstream's defaultAPITimeout, applied by
+	// wrapContextWithoutDeadline underneath KVGet) — this hand-rolled raw
+	// protocol bypasses that safety net entirely, so a lost response (a
+	// dropped connection, a server restart, a dropped EOB despite the
+	// buffer above) would otherwise block the caller forever on a
+	// deadline-free ctx instead of surfacing as a retryable short read.
+	// Matches nats.go's own default so behavior stays consistent with every
+	// other KV call in this package.
+	directGetMultiDefaultTimeout = 5 * time.Second
 
 	// directGetFallbackRetries bounds the stability-verified double-drain
 	// retry loop: two consecutive drains disagreeing means a write raced the
@@ -107,6 +126,20 @@ type directGetMultiRequest struct {
 // multi-subject counterpart to KVGet. The whole response is computed under
 // the stream's read lock (nats-server's getDirectMulti), so distinct keys
 // never straddle a concurrent write the way N sequential KVGet calls can.
+//
+// KVGetMulti does NOT validate keys the way KVGet incidentally does (via
+// nats.go's own key-charset check, which happens to reject "*"/">"):
+// because filters are a first-class part of this primitive's contract, an
+// unrecognized string is a FILTER, not a rejected input — "*"/">" match
+// broadly rather than erroring. A caller that must not let a wildcard
+// through (e.g. treating client-supplied, untrusted strings as declared
+// exact keys) is responsible for validating each key's shape itself before
+// calling — see internal/processor/step4_hydrate.go's ClassifyKey guard for
+// the pattern. Callers should also not mix a wildcard filter with a literal
+// key it would itself match: the fast path dedups such overlaps
+// server-side, but the 1,024+ fallback's consumer FilterSubjects rejects
+// genuine overlaps outright (exact duplicates are dedupe'd for the caller;
+// a filter subsuming another entry is not).
 //
 // The returned map is keyed by the resolved bare key (bucket prefix
 // stripped, same shape as KVGet's KVEntry.Key) and holds only keys that
@@ -179,6 +212,13 @@ func (c *Conn) directGetMulti(ctx context.Context, bucket string, subjects []str
 // directGetMultiOnce issues a single multi_last request-response cycle. The
 // subscription is created before the request is published (never the
 // reverse), so no response can arrive before this process is listening.
+//
+// When ctx carries no deadline, this attempt is bounded by
+// directGetMultiDefaultTimeout — a self-imposed budget, never the caller's
+// own cancellation. Losing the race against that synthetic budget (the
+// caller's ctx is still live) is reported as errDirectGetShortRead so the
+// retry-whole loop absorbs it; the caller's OWN ctx ending is always
+// reported and respected as-is, never retried.
 func (c *Conn) directGetMultiOnce(ctx context.Context, bucket string, subjects []string, pre string) (map[string]*KVEntry, error) {
 	streamName := "KV_" + bucket
 	reqSubj := fmt.Sprintf(directGetMultiAPIT, streamName)
@@ -187,7 +227,17 @@ func (c *Conn) directGetMultiOnce(ctx context.Context, bucket string, subjects [
 		return nil, fmt.Errorf("substrate: KV get-multi %s: encode request: %w", bucket, err)
 	}
 
-	inbox := nats.NewInbox()
+	attemptCtx := ctx
+	cancel := func() {}
+	if _, hasDeadline := ctx.Deadline(); !hasDeadline {
+		attemptCtx, cancel = context.WithTimeout(ctx, directGetMultiDefaultTimeout)
+	}
+	defer cancel()
+
+	// c.nc.NewInbox (not the package-level nats.NewInbox) honors this
+	// connection's CustomInboxPrefix, required for the response to be
+	// delivered at all on a per-identity subscribe-ACL-scoped connection.
+	inbox := c.nc.NewInbox()
 	ch := make(chan *nats.Msg, directGetChanBuffer)
 	sub, err := c.nc.ChanSubscribe(inbox, ch)
 	if err != nil {
@@ -205,8 +255,11 @@ func (c *Conn) directGetMultiOnce(ctx context.Context, bucket string, subjects [
 	entries := make(map[string]*KVEntry, len(subjects))
 	for {
 		select {
-		case <-ctx.Done():
-			return nil, fmt.Errorf("substrate: KV get-multi %s: %w", bucket, ctx.Err())
+		case <-attemptCtx.Done():
+			if cerr := ctx.Err(); cerr != nil {
+				return nil, fmt.Errorf("substrate: KV get-multi %s: %w", bucket, cerr)
+			}
+			return nil, fmt.Errorf("substrate: KV get-multi %s: %w: no response within %s", bucket, errDirectGetShortRead, directGetMultiDefaultTimeout)
 		case m, ok := <-ch:
 			if !ok {
 				return nil, fmt.Errorf("substrate: KV get-multi %s: %w: response subscription closed before EOB", bucket, errDirectGetShortRead)
@@ -289,8 +342,19 @@ func parseDirectGetEntry(m *nats.Msg, bucket, pre string) (entry *KVEntry, isMar
 // TWICE and compares the two (key -> revision) maps: equal means no write
 // raced either pass, so the set is a true point-in-time state; unequal
 // retries (bounded, short backoff).
+//
+// Exact-duplicate subjects are collapsed before building the consumer's
+// FilterSubjects: the fast path's multi_last dedups matches server-side, but
+// a pull consumer's FilterSubjects rejects overlapping entries outright
+// (err_code=10138) — an exact duplicate is the one overlap case cheap and
+// safe to resolve here. A wildcard filter that itself SUBSUMES another
+// listed entry (e.g. "vtx.identity.>" alongside "vtx.identity.<id>") is not
+// collapsed — general NATS subject-subsumption detection is out of scope —
+// and still hard-fails the fallback with the server's own overlap error;
+// callers must not mix a filter with a literal it would itself match.
 func (c *Conn) kvGetMultiFallback(ctx context.Context, bucket string, subjects []string, pre string) (map[string]*KVEntry, error) {
 	streamName := "KV_" + bucket
+	subjects = dedupeStrings(subjects)
 	var lastErr error
 	for attempt := 1; attempt <= directGetFallbackRetries; attempt++ {
 		first, err := c.drainDirectGetFallback(ctx, bucket, streamName, subjects, pre)
@@ -315,6 +379,21 @@ func (c *Conn) kvGetMultiFallback(ctx context.Context, bucket string, subjects [
 		}
 	}
 	return nil, fmt.Errorf("substrate: KV get-multi %s: fallback: %d attempts exhausted: %w", bucket, directGetFallbackRetries, lastErr)
+}
+
+// dedupeStrings returns subjects with exact-duplicate entries collapsed,
+// order preserved from the first occurrence.
+func dedupeStrings(subjects []string) []string {
+	seen := make(map[string]struct{}, len(subjects))
+	out := make([]string, 0, len(subjects))
+	for _, s := range subjects {
+		if _, dup := seen[s]; dup {
+			continue
+		}
+		seen[s] = struct{}{}
+		out = append(out, s)
+	}
+	return out
 }
 
 // directGetSnapshotsAgree reports whether two fallback drains observed the
@@ -387,11 +466,14 @@ func (c *Conn) drainDirectGetFallback(ctx context.Context, bucket, streamName st
 		return nil, fmt.Errorf("substrate: KV get-multi %s: fallback drain: %w", bucket, err)
 	}
 	// InitialConsumerPending hardening, mirroring the in-repo key-lister
-	// guard (kv.go:204-213): NumPending said >0 but the fetch delivered
-	// nothing is a silent partial the caller must never read as "confirmed
-	// empty".
-	if received == 0 {
-		return nil, fmt.Errorf("substrate: KV get-multi %s: fallback: expected %d pending, received 0", bucket, info.NumPending)
+	// guard (kv.go:204-213): jetstream's Fetch reports no error on a batch
+	// that falls short of the requested count (FetchMaxWait expiry maps to
+	// ErrNoMessages/ErrTimeout, both explicitly excluded from batch.Error())
+	// — so received must be checked against the count NumPending promised,
+	// not merely against zero. Anything short of that count is a silent
+	// partial the caller must never read as "confirmed complete".
+	if received != int(info.NumPending) {
+		return nil, fmt.Errorf("substrate: KV get-multi %s: fallback: expected %d pending, received %d", bucket, info.NumPending, received)
 	}
 	if err := ctx.Err(); err != nil {
 		return nil, fmt.Errorf("substrate: KV get-multi %s: fallback: %w", bucket, err)

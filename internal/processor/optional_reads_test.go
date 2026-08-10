@@ -57,7 +57,7 @@ func TestHydrate_OptionalReads_AbsentIsKnownAbsent(t *testing.T) {
 	ctx, conn, _, _, _ := setupTestPipeline(t)
 	h := NewHydrator(conn, testCoreBucket, testLogger())
 
-	missing := "vtx.task.NeverCreatedNeverSeen00"
+	missing := "vtx.task." + testNanoIDAbsent
 	env := newTestEnvelope(testNanoID1)
 	env.ContextHint = &ContextHint{OptionalReads: []string{missing}}
 
@@ -85,7 +85,7 @@ func TestHydrate_OptionalReads_ReadsStayFailClosed(t *testing.T) {
 	h := NewHydrator(conn, testCoreBucket, testLogger())
 	_ = conn
 
-	missing := "vtx.identity.MissingMissingMissing"
+	missing := "vtx.identity." + testNanoIDAbsent
 	env := newTestEnvelope(testNanoID1)
 	env.ContextHint = &ContextHint{
 		Reads:         []string{missing},

@@ -9,6 +9,15 @@ import (
 const (
 	testNanoID1 = "Hj4kPmRtw9nbCxz5vQ2y"
 	testNanoID2 = "St6mP3qBn4rT8wYxK7Vc"
+	// testNanoIDAbsent{,2,3} are well-formed NanoIDs (valid Contract #1
+	// shape) never seeded by any test — the correct stand-in for "a declared
+	// read key that does not exist" now that KVGetMulti's key-shape
+	// validation (step4_hydrate.go) rejects anything that ISN'T a valid
+	// NanoID, not just a NATS wildcard. Three distinct constants exist for
+	// tests that need multiple, independently-tracked absent keys at once.
+	testNanoIDAbsent  = "AbsentNeverSeenzzzz1"
+	testNanoIDAbsent2 = "AbsentNeverSeenzzzz2"
+	testNanoIDAbsent3 = "AbsentNeverSeenzzzz3"
 )
 
 func TestParseEnvelope_HappyPath(t *testing.T) {

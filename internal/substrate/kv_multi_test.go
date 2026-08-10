@@ -1,6 +1,7 @@
 package substrate
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"testing"
@@ -234,6 +235,104 @@ func TestKVGetMulti_UnprovisionedBucket_Errors(t *testing.T) {
 	}
 	if errors.Is(err, errDirectGetTooManyResults) || errors.Is(err, errDirectGetShortRead) {
 		t.Errorf("unprovisioned-bucket error should not be classified as a retry/fallback signal: %v", err)
+	}
+}
+
+// TestKVGetMulti_DeadlineFreeCtx_NormalPathUnaffected exercises the
+// self-imposed-timeout wrapping branch (directGetMultiOnce wraps a
+// deadline-free ctx in directGetMultiDefaultTimeout) on the ordinary,
+// fast-reply path — proving the wrap adds no latency or behavior change
+// when nothing is actually stuck. The complementary "genuinely stuck
+// request self-bounds instead of hanging forever" property is the
+// documented fix for the reviewed bug (every other substrate KV read gets
+// an equivalent bound for free from nats.go's own defaultAPITimeout); it is
+// not re-proven here with a simulated lost response, which would need a
+// mock transport to do deterministically rather than a timing race.
+func TestKVGetMulti_DeadlineFreeCtx_NormalPathUnaffected(t *testing.T) {
+	t.Parallel()
+	c, provCtx := newTestConn(t)
+	bucket := "core-kv"
+	provisionCoreBucket(provCtx, t, c, bucket)
+
+	key := VertexKey("identity", testNanoID1)
+	if _, err := c.KVPut(provCtx, bucket, key, []byte(`{"isDeleted":false}`)); err != nil {
+		t.Fatalf("put: %v", err)
+	}
+
+	got, err := c.KVGetMulti(context.Background(), bucket, []string{key})
+	if err != nil {
+		t.Fatalf("KVGetMulti with a deadline-free ctx: %v", err)
+	}
+	if _, ok := got[key]; !ok {
+		t.Errorf("missing %q: %+v", key, got)
+	}
+}
+
+// TestKVGetMulti_Exactly1024_FastPathComplete pins the boundary a prior
+// review found under-buffered: nats-server's multi_last sends 1,024 data
+// messages PLUS one EOB (1,025 total) at the cap — one short of what the
+// response channel used to be sized for. This seeds exactly the cap and
+// requires a complete, correct fast-path result (not a fallback — 1,024
+// stays on the fast path; 1,025 would trip it).
+func TestKVGetMulti_Exactly1024_FastPathComplete(t *testing.T) {
+	c, ctx := newTestConn(t)
+	bucket := "core-kv"
+	provisionCoreBucket(ctx, t, c, bucket)
+
+	const n = 1024
+	keys := make([]string, n)
+	for i := 0; i < n; i++ {
+		id := DeriveNanoID("kv-multi-1024-boundary-test", fmt.Sprintf("%d", i))
+		key := VertexKey("identity", id)
+		if _, err := c.KVPut(ctx, bucket, key, []byte(fmt.Sprintf(`{"isDeleted":false,"data":{"i":%d}}`, i))); err != nil {
+			t.Fatalf("put %d: %v", i, err)
+		}
+		keys[i] = key
+	}
+
+	got, err := c.KVGetMulti(ctx, bucket, keys)
+	if err != nil {
+		t.Fatalf("KVGetMulti at exactly 1024: %v", err)
+	}
+	if len(got) != n {
+		t.Fatalf("got %d entries, want %d (a dropped EOB or data message would under-count)", len(got), n)
+	}
+	for i, k := range keys {
+		if _, ok := got[k]; !ok {
+			t.Fatalf("key %d (%s) missing from result", i, k)
+		}
+	}
+}
+
+// TestKVGetMulti_Over1024_DuplicateSubjects_FallbackDedupes pins a review
+// finding: the server's multi_last dedups matching subjects itself, but a
+// pull consumer's FilterSubjects hard-rejects exact overlaps
+// (err_code=10138) — so a caller-supplied duplicate key that's harmless on
+// the fast path used to break the 413 fallback. dedupeStrings closes that.
+func TestKVGetMulti_Over1024_DuplicateSubjects_FallbackDedupes(t *testing.T) {
+	c, ctx := newTestConn(t)
+	bucket := "core-kv"
+	provisionCoreBucket(ctx, t, c, bucket)
+
+	const n = 1100
+	keys := make([]string, 0, n+1)
+	for i := 0; i < n; i++ {
+		id := DeriveNanoID("kv-multi-dup-fallback-test", fmt.Sprintf("%d", i))
+		key := VertexKey("identity", id)
+		if _, err := c.KVPut(ctx, bucket, key, []byte(`{"isDeleted":false}`)); err != nil {
+			t.Fatalf("put %d: %v", i, err)
+		}
+		keys = append(keys, key)
+	}
+	// Duplicate the first key — same key named twice in one request.
+	keys = append(keys, keys[0])
+
+	got, err := c.KVGetMulti(ctx, bucket, keys)
+	if err != nil {
+		t.Fatalf("KVGetMulti with a duplicate key over the fallback threshold: %v", err)
+	}
+	if len(got) != n {
+		t.Fatalf("got %d entries, want %d", len(got), n)
 	}
 }
 
