@@ -380,7 +380,9 @@ running; the **browser tab** you do not.
   fix is committed, CI-green, and **still not live**. This has now bitten repeatedly, and "verify the stack is
   up" does **not** catch it — a stale binary is a perfectly healthy *running process*. Liveness is not
   freshness. **Derive the affected binaries mechanically — never from memory**, because a change reaches
-  binaries you won't think of (an `internal/weaver` fix also ships in `bin/lattice`, the all-in-one):
+  binaries you won't think of (an `internal/weaver` fix also ships in `bin/lattice` — the unified operator
+  **CLI**, whose `lattice weaver` subcommand links the package; it is not a daemon, so it needs a rebuild but
+  no cycle. Derive what to *cycle* from what is actually running, not from the dependency list alone):
 
   ```sh
   # for each internal/ package this fire touched:

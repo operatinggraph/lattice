@@ -1278,10 +1278,24 @@ Fires A/B leaned on, and each is currently vacuous or absent.
    activation refuse the lens, so its rows stay *and* revocations stop applying. **Its consumer is now live**
    (`capabilityServiceAccess`), which is what makes this C2's first item. B1 removed the *fail-open* half by
    leaving `exLoc` unlabeled; the remaining exposure is fail-closed, and a replay-complete barrier closes it.
-6. **An operator corpus-rebuild bypasses B0's coalescing scheduler** (§17.15 ·
-   `internal/refractor/control/service.go:930-943`) — one uncoordinated goroutine per request reproduces the
-   consumer delete-recreate burst that has OOM-killed `lattice-nats`. Routing it needs the control service to
-   reach the reloader, which it has no handle on.
+6. **Three paths still bypass B0's coalescing scheduler**, and the third is now measured rather than feared.
+   B0 bounded the *taxonomy sweep*; these are outside it.
+   - **An operator corpus-rebuild** (§17.15 · `internal/refractor/control/service.go:930-943`) — one
+     uncoordinated goroutine per request. Routing it needs the control service to reach the reloader, which it
+     has no handle on.
+   - **The replay drain** — `Reset` returns after `requestReopen`, so the bound covers concurrent consumer
+     delete-recreates and not concurrent replays.
+   - **BOOT, and it is the one that actually kills the host** *(measured 2026-08-10, three consecutive
+     reproductions)*. A refractor start opens ~111 consumers at once and runs the adjacency bootstrap. Measured
+     on the running stack: `lattice-nats` RSS goes **~2 GiB → >7.6 GiB in about 70 seconds** and is OOM-killed
+     every time. All three of the day's OOM kills followed a refractor cycle within minutes.
+     **Consequence today: the dev stack cannot run Refractor at all** — the lens engine is deliberately left
+     down, because starting it takes NATS and every other component with it.
+     Compounding it, and probably dominant: the adjacency bootstrap spins on
+     `adj.pFf8PviwpWugC6kepFf8` (a service-template meta targeted by `instanceOf` from every instance) with
+     `nats: maximum payload exceeded` — **89,533 occurrences** in one log, earliest `2026-08-09T06:47`. That is
+     the already-ratified **adjacency-per-edge-index** item, whose `multi_last` prerequisite has now shipped, so
+     **Fire C should sequence behind or alongside it** rather than treat boot fan-out as a separate problem.
 
 **C3 — the cap contract has a warning consumer and no refusal consumer** (§17.10 · `capabilitymaterializer.go:791`,
 `anchorwalk.go:735`).
