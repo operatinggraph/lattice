@@ -347,8 +347,17 @@ type targetSource struct {
 	ownerTargetID map[string]string    // vertex id → targetId it registered
 	patternMeta   map[string]string    // patternId (and vertex id) → vtx.meta.<id>
 	patternOwner  map[string][]string
-	opMetaByType  map[string]string                // operationType → vtx.meta.<opId>
-	opEffects     map[string][]*guardgrammar.Guard // op-meta vertex id → its parsed .effects guards
+	// patternExternalEligible records, per INDEXED pattern (keyed by its
+	// vtx.meta.<id> key), whether EVERY one of its steps is a kind that runs to
+	// completion without parking on a human — see externalEligibleSteps for the
+	// whitelist. Absence of a key means "not indexed", distinct from an indexed
+	// pattern that is not eligible; patternIsExternalEligible reports the two
+	// apart. Written from the same spec body indexPattern already parses (no
+	// extra read) and dropped by removePatternLocked, so it shares patternMeta's
+	// exact lifetime.
+	patternExternalEligible map[string]bool
+	opMetaByType            map[string]string                // operationType → vtx.meta.<opId>
+	opEffects               map[string][]*guardgrammar.Guard // op-meta vertex id → its parsed .effects guards
 }
 
 // pendingSpecWarnAfter bounds how long a spec aspect may wait for its parent
@@ -362,21 +371,22 @@ func newTargetSource(conn *substrate.Conn, bucket, instance string, issues *issu
 		logger = slog.Default()
 	}
 	return &targetSource{
-		conn:          conn,
-		bucket:        bucket,
-		instance:      instance,
-		logger:        logger,
-		issues:        issues,
-		classes:       make(map[string]string),
-		pendingSpecs:  make(map[string][]byte),
-		pendingSince:  make(map[string]time.Time),
-		targets:       make(map[string]*Target),
-		targetOwner:   make(map[string]string),
-		ownerTargetID: make(map[string]string),
-		patternMeta:   make(map[string]string),
-		patternOwner:  make(map[string][]string),
-		opMetaByType:  make(map[string]string),
-		opEffects:     make(map[string][]*guardgrammar.Guard),
+		conn:                    conn,
+		bucket:                  bucket,
+		instance:                instance,
+		logger:                  logger,
+		issues:                  issues,
+		classes:                 make(map[string]string),
+		pendingSpecs:            make(map[string][]byte),
+		pendingSince:            make(map[string]time.Time),
+		targets:                 make(map[string]*Target),
+		targetOwner:             make(map[string]string),
+		ownerTargetID:           make(map[string]string),
+		patternMeta:             make(map[string]string),
+		patternOwner:            make(map[string][]string),
+		patternExternalEligible: make(map[string]bool),
+		opMetaByType:            make(map[string]string),
+		opEffects:               make(map[string][]*guardgrammar.Guard),
 	}
 }
 
@@ -1054,16 +1064,62 @@ func (s *targetSource) flagOrphanedSpecs() {
 
 // --- meta.loomPattern index (triggerLoom resolution) ------------------------
 
-// patternSpecProbe reads the patternId off a loom-pattern spec body.
+// The Contract #10 §10.5 step-kind vocabulary. systemOp and externalTask both
+// run to completion on their own; userTask creates a task and parks until a
+// human performs the bound op. The source of truth is internal/loom/pattern.go
+// (loom.StepKindSystemOp/StepKindUserTask/StepKindExternalTask); Weaver may not
+// import internal/loom (the engine-isolation rule in doc.go, enforced by
+// boundary_test.go's go list -deps check), so the canonical strings are
+// restated here and pinned against loom's by
+// TestPatternStepKinds_MatchLoomVocabulary.
+const (
+	stepKindSystemOp     = "systemOp"
+	stepKindUserTask     = "userTask"
+	stepKindExternalTask = "externalTask"
+)
+
+// patternStepProbe reads one step's kind off a loom-pattern spec body. The
+// field name must match what internal/pkgmgr's loomPatternSpecBody emits.
+type patternStepProbe struct {
+	Kind string `json:"kind"`
+}
+
+// patternSpecProbe reads the patternId and the step kinds off a loom-pattern
+// spec body. The step kinds answer one question for the external-dispatch gap
+// classifier (evaluator.go staleMark): can this pattern run to an outcome with
+// no human in it?
 type patternSpecProbe struct {
-	PatternID string `json:"patternId"`
+	PatternID string             `json:"patternId"`
+	Steps     []patternStepProbe `json:"steps"`
+}
+
+// externalEligibleSteps reports whether every step of a pattern is a kind that
+// concludes without parking on a human — the property that makes a triggerLoom
+// gap over the pattern an EXTERNAL dispatch (evaluator.go externalDispatchGap).
+//
+// It is deliberately a WHITELIST of known non-parking kinds rather than a
+// userTask blacklist, so every case the probe cannot positively account for
+// lands on the human-safe side: a spec with zero steps, a step whose `kind` is
+// empty (a drifted envelope, or a renamed wire field), and a kind added to
+// §10.5 after this build was compiled all read false. Only a step list this
+// build fully understands earns the external classification.
+func externalEligibleSteps(steps []patternStepProbe) bool {
+	if len(steps) == 0 {
+		return false
+	}
+	for _, s := range steps {
+		if s.Kind != stepKindSystemOp && s.Kind != stepKindExternalTask {
+			return false
+		}
+	}
+	return true
 }
 
 // indexPattern records patternId → vtx.meta.<id> for a meta.loomPattern
-// vertex. The vertex id itself is indexed too, so a playbook may name a
-// pattern by its canonical patternId or by the vertex NanoID; either resolves
-// to the pattern vertex key the Actuator uses as patternRef and
-// authContext.target.
+// vertex, plus whether the pattern's steps make it external-eligible. The
+// vertex id itself is indexed too, so a playbook may name a pattern by its
+// canonical patternId or by the vertex NanoID; either resolves to the pattern
+// vertex key the Actuator uses as patternRef and authContext.target.
 func (s *targetSource) indexPattern(id string, body []byte) {
 	specBody, err := unwrapSpecBody(body, "steps")
 	if err != nil {
@@ -1080,17 +1136,20 @@ func (s *targetSource) indexPattern(id string, body []byte) {
 	if probe.PatternID != "" && probe.PatternID != id {
 		refs = append(refs, probe.PatternID)
 	}
+	eligible := externalEligibleSteps(probe.Steps)
 	s.mu.Lock()
 	s.removePatternLocked(id)
 	for _, ref := range refs {
 		s.patternMeta[ref] = key
 	}
 	s.patternOwner[id] = refs
+	s.patternExternalEligible[key] = eligible
 	s.mu.Unlock()
 }
 
 // removePatternLocked drops every patternId entry registered by the deleted
-// pattern vertex id. Caller holds s.mu.
+// pattern vertex id, along with its step-kind classification. Caller holds
+// s.mu.
 func (s *targetSource) removePatternLocked(id string) {
 	for _, ref := range s.patternOwner[id] {
 		if s.patternMeta[ref] == "vtx.meta."+id {
@@ -1098,6 +1157,7 @@ func (s *targetSource) removePatternLocked(id string) {
 		}
 	}
 	delete(s.patternOwner, id)
+	delete(s.patternExternalEligible, "vtx.meta."+id)
 }
 
 // patternMetaKey resolves a playbook pattern reference (patternId literal,
@@ -1106,6 +1166,11 @@ func (s *targetSource) removePatternLocked(id string) {
 func (s *targetSource) patternMetaKey(ref string) (string, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return s.patternMetaKeyLocked(ref)
+}
+
+// patternMetaKeyLocked is patternMetaKey's body. Caller holds s.mu.
+func (s *targetSource) patternMetaKeyLocked(ref string) (string, bool) {
 	if k, ok := s.patternMeta[ref]; ok {
 		return k, true
 	}
@@ -1115,6 +1180,28 @@ func (s *targetSource) patternMetaKey(ref string) (string, bool) {
 		}
 	}
 	return "", false
+}
+
+// patternIsExternalEligible answers, for a playbook pattern reference, whether
+// the pattern runs to an outcome with no human in it — every step a kind this
+// build knows to be non-parking (externalEligibleSteps).
+//
+// known is false when the reference resolves to no pattern whose SPEC the
+// registry has indexed: an un-replayed or never-installed pattern, or a
+// patternMeta entry registered without a spec body. Callers must not read
+// eligible in that case — the classification is unavailable, not negative.
+func (s *targetSource) patternIsExternalEligible(ref string) (eligible, known bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	key, ok := s.patternMetaKeyLocked(ref)
+	if !ok {
+		return false, false
+	}
+	e, indexed := s.patternExternalEligible[key]
+	if !indexed {
+		return false, false
+	}
+	return e, true
 }
 
 // --- op meta-vertex index (assignTask forOperation resolution) --------------

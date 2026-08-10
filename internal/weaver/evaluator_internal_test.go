@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -366,6 +367,127 @@ func TestGapSuppressed_Companions(t *testing.T) {
 				t.Fatalf("a non-directOp action must never report budgetIsDefault=true")
 			}
 		})
+	}
+}
+
+// inflightMismatchMessage returns the InflightActionMismatch issue message open
+// for targetID, or "" when none is. Each caller uses its own targetID, so the
+// shared issue cache cannot leak one case's alert into another's assertion.
+func inflightMismatchMessage(e *Engine, targetID string) string {
+	for _, issue := range e.issues.snapshot() {
+		if issue.Code == "InflightActionMismatch" && strings.Contains(issue.Message, "target "+targetID+":") {
+			return issue.Message
+		}
+	}
+	return ""
+}
+
+// TestStaleMark_ExternalDispatchClassifier unit-tests the Contract #10 §10.3
+// external-gap classifier behind staleMark: a declared inflight_<g> is trusted
+// only for a dispatch that concludes on an EXTERNAL call's outcome, and that is
+// decided by the dispatch's real shape, not by its action name. directOp
+// qualifies outright. A triggerLoom qualifies iff EVERY indexed step is a kind
+// known not to park — the externalTask-only shape lease-signing's
+// backgroundCheck/collectPayment gaps use, whose post-timeout retry depends on
+// reading external here.
+//
+// The not-external paths are surfaced differently, and the assertion is on the
+// operator-visible MESSAGE rather than merely on an alert existing: a permanent
+// mismatch (a parking pattern, a step kind this build does not recognise, or an
+// action that never calls out) raises an `error` Health issue naming which,
+// while an unindexed pattern is transient replay lag and must raise none at all.
+func TestStaleMark_ExternalDispatchClassifier(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	h := newHandlerHarness(t, ctx)
+
+	// Real pattern specs indexed through indexPattern in the CDC aspect envelope
+	// (seedPatternSpec), so the classification comes from the registry's own
+	// step-kind probe over the real wire shape.
+	seedPatternSpec(t, h.engine.source, "bgcheckFlow", stepKindExternalTask)
+	seedPatternSpec(t, h.engine.source, "onboardFlow", stepKindSystemOp, stepKindUserTask)
+	seedPatternSpec(t, h.engine.source, "futureFlow", "agentTask")
+
+	const col = "missing_x"
+	concluded := map[string]any{col: true, "inflight_x": false}
+	inFlight := map[string]any{col: true, "inflight_x": true}
+
+	cases := []struct {
+		name string
+		ga   GapAction
+		row  map[string]any
+		// wantStale is staleMark's verdict; wantAlertSubstr is the substring the
+		// InflightActionMismatch message must contain ("" = no alert at all).
+		wantStale       bool
+		wantAlertSubstr string
+	}{
+		{"directOp, call concluded", GapAction{Action: actionDirectOp, Operation: "SetStatus"}, concluded, true, ""},
+		{"proposedOp, call concluded", GapAction{Action: actionProposedOp}, concluded, true, ""},
+		{"triggerLoom over an externalTask-only pattern", GapAction{Action: actionTriggerLoom, Pattern: "bgcheckFlow"}, concluded, true, ""},
+		{"triggerLoom over an externalTask-only pattern, still in flight", GapAction{Action: actionTriggerLoom, Pattern: "bgcheckFlow"}, inFlight, false, ""},
+		{"triggerLoom over a parking pattern", GapAction{Action: actionTriggerLoom, Pattern: "onboardFlow"}, concluded, false, `pattern "onboardFlow" is not externalTask-only`},
+		{"triggerLoom over an unrecognised step kind", GapAction{Action: actionTriggerLoom, Pattern: "futureFlow"}, concluded, false, `pattern "futureFlow" is not externalTask-only`},
+		{"triggerLoom over an unindexed pattern is transient, not an alert", GapAction{Action: actionTriggerLoom, Pattern: "neverInstalled"}, concluded, false, ""},
+		{"assignTask never dispatches externally", GapAction{Action: actionAssignTask, Operation: "SignLease"}, concluded, false, `action "assignTask" never makes an external call`},
+		{"no inflight_<g> declared", GapAction{Action: actionDirectOp}, map[string]any{col: true}, false, ""},
+	}
+	for i, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			targetID := fmt.Sprintf("fixtureClassifier%d", i)
+			if got := h.engine.staleMark(targetID, tc.row, col, tc.ga); got != tc.wantStale {
+				t.Fatalf("staleMark(%+v, %v) = %v, want %v", tc.ga, tc.row, got, tc.wantStale)
+			}
+			msg := inflightMismatchMessage(h.engine, targetID)
+			switch {
+			case tc.wantAlertSubstr == "" && msg != "":
+				t.Fatalf("no InflightActionMismatch alert expected, got %q", msg)
+			case tc.wantAlertSubstr != "" && !strings.Contains(msg, tc.wantAlertSubstr):
+				t.Fatalf("InflightActionMismatch message = %q, want it to contain %q", msg, tc.wantAlertSubstr)
+			}
+		})
+	}
+}
+
+// TestStaleMark_MismatchAlertSelfHeals proves the alert tracks a LIVE condition
+// rather than latching: a triggerLoom gap over a parking pattern raises the
+// InflightActionMismatch issue, and re-authoring that patternId with an
+// externalTask-only spec — the package fix the message asks for — both clears
+// the issue on the very next staleMark and flips the gap to external. The
+// classifier's table test cannot see this, since every case there uses a fresh
+// targetID; without it, deleting staleMark's e.issues.clear goes unnoticed.
+func TestStaleMark_MismatchAlertSelfHeals(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	h := newHandlerHarness(t, ctx)
+
+	const targetID = "fixtureSelfHeal"
+	const col = "missing_x"
+	row := map[string]any{col: true, "inflight_x": false}
+	ga := GapAction{Action: actionTriggerLoom, Pattern: "mixedFlow"}
+
+	seedPatternSpec(t, h.engine.source, "mixedFlow", stepKindExternalTask, stepKindUserTask)
+	if stale := h.engine.staleMark(targetID, row, col, ga); stale {
+		t.Fatal("a parking pattern must not read as a concluded external gap")
+	}
+	if msg := inflightMismatchMessage(h.engine, targetID); msg == "" {
+		t.Fatal("a misauthored inflight_<g> over a parking pattern must raise InflightActionMismatch")
+	}
+
+	// The package fix: the same patternId re-authored with the userTask removed.
+	seedPatternSpec(t, h.engine.source, "mixedFlow", stepKindExternalTask)
+	if stale := h.engine.staleMark(targetID, row, col, ga); !stale {
+		t.Fatal("after the fix the gap must read as a concluded EXTERNAL gap")
+	}
+	if msg := inflightMismatchMessage(h.engine, targetID); msg != "" {
+		t.Fatalf("the mismatch issue must clear once the gap classifies clean, still open: %q", msg)
 	}
 }
 

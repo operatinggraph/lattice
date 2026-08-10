@@ -711,17 +711,47 @@ func TestReclaim_StableUserTaskIdentity(t *testing.T) {
 	}
 }
 
-// TestSweep_InflightActionMismatchIgnoredForUserTaskGap proves the
-// staleMark/ga.Action cross-check: a triggerLoom gap has no external-call
-// outcome, so a lens mistakenly declaring its inflight_<g> companion column
-// (a package authoring bug) must NOT be trusted as proof the gap is a
-// concluded EXTERNAL gap. Before the cross-check, this mark would have been
-// misclassified confirmedConcluded=true and reclaimed with a FRESH claimId
-// (§10.3's external-gap behavior), collapsing the "retry" onto a new,
-// unrelated Loom instance and violating §10.3's claimId-verbatim rule for a
-// human userTask gap. The reclaim must instead preserve the mark's claimId
-// exactly like TestReclaim_StableUserTaskIdentity, and the mismatch must
-// surface as a Health issue rather than fail silently (FR29).
+// seedInflightMismatchFixture wires the shared shape the three reclaim-
+// classification proofs below need: a triggerLoom gap over patternRef, a
+// violating row that DECLARES inflight_<g> reading false (which, without the
+// classifier, would read as "the external call concluded"), and an
+// expired-lease mark carrying claimID. It deliberately does not index the
+// pattern — each caller seeds (or withholds) the spec that is its subject.
+func seedInflightMismatchFixture(t *testing.T, ctx context.Context, h *sweepHarness,
+	targetID, gap, patternRef, claimID string, extraRow map[string]any) (entityID, key string) {
+	t.Helper()
+	h.seedTarget(&Target{
+		TargetID: targetID,
+		Gaps:     map[string]GapAction{gap: {Action: actionTriggerLoom, Pattern: patternRef, Subject: "row.entityKey"}},
+	})
+	entityID = testNanoID(t)
+	key = markKey(targetID, entityID, gap)
+	row := map[string]any{
+		"entityKey": "vtx.leaseApp." + entityID, "violating": true, gap: true,
+		inflightColumnPrefix + strings.TrimPrefix(gap, gapColumnPrefix): false,
+	}
+	for k, v := range extraRow {
+		row[k] = v
+	}
+	h.putRow(t, ctx, targetID, entityID, row)
+	m := fixtureMark(targetID, entityID, gap, "triggerLoom", pastLease())
+	m.ClaimID = claimID
+	h.putMark(t, ctx, key, m)
+	return entityID, key
+}
+
+// TestSweep_InflightActionMismatchIgnoredForUserTaskGap proves the classifier
+// over a REAL parking pattern: the gap's pattern is indexed from a spec whose
+// steps include a userTask, so triggering it concludes on a person and a lens
+// mistakenly declaring its inflight_<g> companion column (a package authoring
+// bug) must NOT be trusted as proof the gap is a concluded EXTERNAL gap.
+// Without the cross-check this mark is misclassified confirmedConcluded=true
+// and reclaimed with a FRESH claimId (§10.3's external-gap behavior),
+// collapsing the "retry" onto a new, unrelated Loom instance and violating
+// §10.3's claimId-verbatim rule for a human userTask gap. The reclaim must
+// instead preserve the mark's claimId exactly like
+// TestReclaim_StableUserTaskIdentity, and the mismatch must surface as a Health
+// issue rather than fail silently (FR29).
 func TestSweep_InflightActionMismatchIgnoredForUserTaskGap(t *testing.T) {
 	t.Parallel()
 	if testing.Short() {
@@ -734,25 +764,9 @@ func TestSweep_InflightActionMismatchIgnoredForUserTaskGap(t *testing.T) {
 	const targetID = "fixtureInflightMismatch"
 	const gap = "missing_onboarding"
 	const claimID = "Lk2Pn6mQrtwzKbcXvP3T"
-	h.seedTarget(&Target{
-		TargetID: targetID,
-		Gaps:     map[string]GapAction{gap: {Action: actionTriggerLoom, Pattern: "onboardFlow", Subject: "row.entityKey"}},
-	})
-	h.engine.source.mu.Lock()
-	h.engine.source.patternMeta["onboardFlow"] = "vtx.meta." + testNanoID(t)
-	h.engine.source.mu.Unlock()
+	seedPatternSpec(t, h.engine.source, "onboardFlow", stepKindSystemOp, stepKindUserTask)
+	entityID, _ := seedInflightMismatchFixture(t, ctx, h, targetID, gap, "onboardFlow", claimID, nil)
 
-	entityID := testNanoID(t)
-	key := markKey(targetID, entityID, gap)
-	// A misauthored lens: inflight_<g> declared on a triggerLoom gap, reading
-	// false (which, absent the cross-check, reads as "call concluded").
-	h.putRow(t, ctx, targetID, entityID, map[string]any{
-		"entityKey": "vtx.leaseApp." + entityID, "violating": true, gap: true, "inflight_onboarding": false,
-	})
-
-	m := fixtureMark(targetID, entityID, gap, "triggerLoom", pastLease())
-	m.ClaimID = claimID
-	h.putMark(t, ctx, key, m)
 	h.pass(ctx)
 	h.nextOp(t)
 
@@ -766,6 +780,164 @@ func TestSweep_InflightActionMismatchIgnoredForUserTaskGap(t *testing.T) {
 	}
 	if !hasIssueCode(h.engine.issues.snapshot(), "InflightActionMismatch") {
 		t.Fatalf("expected an InflightActionMismatch Health issue for the misdeclared column")
+	}
+}
+
+// TestSweep_InflightMarkerIgnoredForUnindexedPattern is the fail-safe leg of the
+// same classifier, and the one a restarted Weaver actually walks: the sweep
+// reclaims marks left in weaver-state while the meta.loomPattern registry is
+// still replaying, so the gap's pattern resolves to no indexed spec. The
+// classification is unavailable, not negative, and the engine takes the
+// human-safe side — claimId preserved verbatim, exactly as if the pattern
+// parked. Crucially it must do so QUIETLY: replay lag is transient and
+// self-healing, so raising the `error` InflightActionMismatch issue here would
+// make Weaver report unhealthy on every restart.
+func TestSweep_InflightMarkerIgnoredForUnindexedPattern(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	h := newSweepHarness(t, ctx)
+
+	const targetID = "fixtureInflightUnindexed"
+	const gap = "missing_onboarding"
+	const claimID = "Qw4Er5Ty6Uh7Pn8As9Df"
+	// patternMeta resolves (so planGap can dispatch) but no SPEC was ever
+	// indexed — the registry mid-replay, and the only way to reach the branch.
+	h.engine.source.mu.Lock()
+	h.engine.source.patternMeta["ghostFlow"] = "vtx.meta." + testNanoID(t)
+	h.engine.source.mu.Unlock()
+	entityID, _ := seedInflightMismatchFixture(t, ctx, h, targetID, gap, "ghostFlow", claimID, nil)
+
+	h.pass(ctx)
+	h.nextOp(t)
+
+	rec, _, found, err := h.engine.marks.get(ctx, targetID, entityID, gap)
+	if err != nil || !found {
+		t.Fatalf("re-armed mark missing: err=%v found=%v", err, found)
+	}
+	if rec.ClaimID != claimID {
+		t.Fatalf("an unindexed pattern must fail SAFE (claimId preserved): got %q want %q", rec.ClaimID, claimID)
+	}
+	if hasIssueCode(h.engine.issues.snapshot(), "InflightActionMismatch") {
+		t.Fatal("registry replay lag is transient — it must not raise the error-severity InflightActionMismatch issue")
+	}
+}
+
+// TestSweep_ExternalTaskOnlyPatternReclaimsWithFreshClaimId is the headline
+// behavior of the classifier, and the reason lease-signing's post-timeout
+// bgcheck retry works: the SAME fixture as the two proofs above, except the
+// pattern's indexed spec is externalTask-only. That gap concludes on a vendor
+// outcome, not a person, so with inflight_<g> false the reclaim is a genuinely
+// fresh attempt — §10.3's "re-call a dead vendor / mint a fresh service
+// instance" — and must mint a FRESH claimId, since deriveStableInstanceID is
+// claimId-seeded and reusing the old one would collapse the retry onto the
+// already-terminal Loom instance. The row carries maxretries_<g> as §10.3
+// requires of any gap declaring inflight_<g>, so the bounded-retry cap, not the
+// backoff timer, is what paces it.
+func TestSweep_ExternalTaskOnlyPatternReclaimsWithFreshClaimId(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	h := newSweepHarness(t, ctx)
+
+	const targetID = "fixtureExternalGapFresh"
+	const gap = "missing_bgcheck"
+	const claimID = "Zx1Cv2Bn3Mk4Kj5Hg6Fd"
+	seedPatternSpec(t, h.engine.source, "bgcheckFlow", stepKindExternalTask)
+	entityID, _ := seedInflightMismatchFixture(t, ctx, h, targetID, gap, "bgcheckFlow", claimID,
+		map[string]any{"maxretries_bgcheck": 3})
+
+	h.pass(ctx)
+	op := h.nextOp(t)
+
+	rec, _, found, err := h.engine.marks.get(ctx, targetID, entityID, gap)
+	if err != nil || !found {
+		t.Fatalf("re-armed mark missing: err=%v found=%v", err, found)
+	}
+	if rec.ClaimID == claimID {
+		t.Fatalf("an externalTask-only pattern's reclaim is a FRESH attempt and must mint a new claimId, kept %q", claimID)
+	}
+	if rec.ClaimID == "" {
+		t.Fatal("the reclaim must mint a claimId, not blank it")
+	}
+	if hasIssueCode(h.engine.issues.snapshot(), "InflightActionMismatch") {
+		t.Fatal("an externalTask-only pattern is a legitimate external gap — no mismatch issue")
+	}
+	// The dispatched op carries the fresh identity: a claimId-seeded instanceId
+	// distinct from the one the terminal attempt used.
+	payload, _ := op["payload"].(map[string]any)
+	if payload == nil {
+		t.Fatalf("dispatched op has no payload: %v", op)
+	}
+	if got, want := payload["instanceId"], deriveStableInstanceID(targetID, entityID, gap, claimID); got == want {
+		t.Fatalf("instanceId %v collapses onto the terminal attempt's — the retry would be a no-op", got)
+	}
+	if got, want := payload["instanceId"], deriveStableInstanceID(targetID, entityID, gap, rec.ClaimID); got != want {
+		t.Fatalf("instanceId = %v, want it seeded from the re-armed mark's fresh claimId (%v)", got, want)
+	}
+}
+
+// TestSweep_UncappedExternalGapIsStillPaced covers the defense-in-depth term for
+// Contract #10 §10.3's "a gap declaring inflight_<g> MUST declare
+// maxretries_<g>" rule. An external gap's reclaim is deliberately not
+// collapse-only, and gapSuppressed refuses to substitute the engine's default
+// budget for a row that declares inflight_<g> — so a lens that declares the
+// marker without a usable cap would otherwise get a fresh vendor call every
+// mark-lease expiry, unbounded AND unpaced, forever. The reclaim must fall back
+// to the backoff timer: mark untouched, no op, and the hold counted on
+// sweepReclaimsSuppressed. Identical to
+// TestSweep_ExternalTaskOnlyPatternReclaimsWithFreshClaimId except the cap.
+func TestSweep_UncappedExternalGapIsStillPaced(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	// A 1h base makes "dispatched moments ago" deterministically inside the
+	// backoff window regardless of test-host speed.
+	h := newSweepHarness(t, ctx, func(c *Config) { c.ReclaimBackoffBase = time.Hour })
+
+	const targetID = "fixtureUncappedExternal"
+	const gap = "missing_bgcheck"
+	const claimID = "Pm2Nk9Xj8Uh7Yg6Tf5Rd"
+	seedPatternSpec(t, h.engine.source, "bgcheckFlow", stepKindExternalTask)
+	// No maxretries_bgcheck on the row — the contract violation this guards.
+	entityID, key := seedInflightMismatchFixture(t, ctx, h, targetID, gap, "bgcheckFlow", claimID, nil)
+	// fixtureMark ages ClaimedAt by 2h; bring it back to "just dispatched" so the
+	// 1h backoff window is live.
+	rec, _, _, err := h.engine.marks.get(ctx, targetID, entityID, gap)
+	if err != nil {
+		t.Fatalf("read seeded mark: %v", err)
+	}
+	rec.ClaimedAt = substrate.FormatTimestamp(time.Now())
+	body, err := json.Marshal(rec)
+	if err != nil {
+		t.Fatalf("marshal mark: %v", err)
+	}
+	if _, err := h.conn.KVPut(ctx, "weaver-state", key, body); err != nil {
+		t.Fatalf("refresh ClaimedAt: %v", err)
+	}
+	entry, err := h.conn.KVGet(ctx, "weaver-state", key)
+	if err != nil {
+		t.Fatalf("read back mark: %v", err)
+	}
+
+	h.pass(ctx)
+
+	h.requireNoOp(t)
+	after, err := h.conn.KVGet(ctx, "weaver-state", key)
+	if err != nil || after.Revision != entry.Revision {
+		t.Fatalf("a paced reclaim must leave the mark untouched (rev %d → %v, err=%v)", entry.Revision, after.Revision, err)
+	}
+	if _, suppressed, _, _, _ := h.engine.sweep.metrics(); suppressed != 1 {
+		t.Fatalf("reclaimsSuppressed = %d, want 1 — an uncapped external gap must be paced, never left unbounded and unpaced", suppressed)
 	}
 }
 

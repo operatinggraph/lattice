@@ -41,20 +41,34 @@ const bgcheckRetryCap = 3
 // timing out (the retry / exhausted legs). callDeadline is the per-call give-up
 // horizon.
 //
-// The MarkLease (2s) is deliberately SHORT relative to the no-double-dispatch hold
-// (well above 2s in the caller) so the dispatch mark's lease expires and the
-// reconciler sweep's reclaim leg (skip site 2 — the load-bearing one) actually
+// The MarkLease is deliberately SHORT relative to the no-double-dispatch hold
+// (several multiples of it in the caller) so the dispatch mark's lease expires and
+// the reconciler sweep's reclaim leg (skip site 2 — the load-bearing one) actually
 // runs DURING the hold. The hold also asserts sweepLastRunAt advanced, so the AC
 // fails loudly rather than passing vacuously if the sweeper never ticked under CI
 // load.
+//
+// asyncMarkLease has a FLOOR these tests may not go below. inflight_<g> is
+// projected from the .dispatch aspect, which the BRIDGE writes only once the
+// adapter has accepted the call, so between the dispatch op committing and
+// .dispatch landing the row reads inflight=false over a call that already exists
+// (see staleMark's doc in internal/weaver/evaluator.go). A mark whose whole lease
+// expires inside that window is reclaimed as an external-and-concluded gap and
+// mints a genuinely SECOND call — correct per §10.3, but not what the
+// no-double-dispatch AC is measuring, and on a loaded CI runner it would read as a
+// flake. The lease must outlast a bridge turnaround by a wide margin: 5s against
+// the ~50ms observed here is ~100×; production's 30-minute default is ~36000×.
+const asyncMarkLease = 5 * time.Second
+
 func asyncConvergeOpts(adapter *bridge.FakeAsyncCheck, callDeadline time.Duration) []harnessOpt {
 	return []harnessOpt{
 		func(hc *harnessConfig) {
 			hc.bgcheckAsync = adapter
-			// A short lease so the dispatch mark expires fast → the sweep's reclaim
-			// leg runs (skip site 2). SweepInterval ≤ MarkLease (the engine clamps
-			// otherwise), and the warm-up is clamped up to ≥ SweepInterval.
-			hc.weaverMarkLease = 2 * time.Second
+			// Short enough that the dispatch mark expires repeatedly inside a test's
+			// hold → the sweep's reclaim leg runs (skip site 2); long enough to clear
+			// the pre-.dispatch window above. SweepInterval ≤ MarkLease (the engine
+			// clamps otherwise), and the warm-up is clamped up to ≥ SweepInterval.
+			hc.weaverMarkLease = asyncMarkLease
 			hc.weaverSweepInterval = 500 * time.Millisecond
 			hc.weaverSweepWarmup = 500 * time.Millisecond
 			// A short poll cadence so a resolvable call resolves quickly.
@@ -129,13 +143,17 @@ func TestAsyncConvergence_NoDoubleDispatch_AcrossSweepTick(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping the all-engines async convergence e2e in -short mode")
 	}
-	// PollsUntilResolved=6 at a 500ms cadence → resolves ~3s in, comfortably
-	// before the 75s freshness window lapses but after several mark-lease (2s)
-	// expiries + sweep (500ms) ticks have had the chance to re-dispatch.
-	adapter := bridge.NewFakeAsyncCheck(6)
+	// PollsUntilResolved=50 at a 500ms cadence → resolves ~25s in: comfortably
+	// before the 75s freshness window lapses, and AFTER the whole in-flight hold
+	// below, so every one of that hold's mark-lease expiries + sweep ticks lands
+	// while the call is genuinely still pending. (At 6 polls the call resolved ~3s
+	// in — less than one asyncMarkLease — so the hold was measuring a closed gap,
+	// not the in-flight skip.)
+	adapter := bridge.NewFakeAsyncCheck(50)
 	// CallDeadline far beyond resolution so the happy path is a poll-resolve, not
-	// a timeout.
-	h := newHarness(t, asyncConvergeOpts(adapter, 60*time.Second)...)
+	// a timeout — with enough headroom that a runner polling at half speed still
+	// resolves well inside it.
+	h := newHarness(t, asyncConvergeOpts(adapter, 120*time.Second)...)
 	appKey, appID, applicantKey := h.seedApplicant()
 
 	// Drive PII + sign so the only externalTask gaps are bgcheck + payment; the
@@ -165,23 +183,22 @@ func TestAsyncConvergence_NoDoubleDispatch_AcrossSweepTick(t *testing.T) {
 	// vacuously if the sweeper stalled under CI load).
 	sweepBefore := h.weaverSweepLastRun()
 
-	// Hold across several mark-lease expiries (2s) + sweep ticks (500ms): the
-	// in-flight call must NOT be re-dispatched. Exactly ONE bgcheck instance +
-	// exactly ONE real vendor side-effect throughout (the side-effect counter is
-	// keyed by the bare instance handle == idempotencyKey). The 10s hold spans
-	// several full mark-lease (2s) windows, so the sweep's reclaim leg (skip site
-	// 2) is exercised repeatedly.
+	// Hold across several mark-lease expiries + sweep ticks (500ms): the in-flight
+	// call must NOT be re-dispatched. Exactly ONE bgcheck instance + exactly ONE
+	// real vendor side-effect throughout (the side-effect counter is keyed by the
+	// bare instance handle == idempotencyKey). The hold spans four full
+	// asyncMarkLease windows, so the sweep's reclaim leg (skip site 2) is
+	// exercised repeatedly — and the call is still pending for all of them.
 	require.Neverf(t, func() bool {
 		return h.countBgcheckInstances(applicantID) > 1 || adapter.SideEffects(bgHandle) > 1
-	}, 10*time.Second, 300*time.Millisecond, "NO second dispatch while the call is in flight, even across a mark-lease expiry + sweep tick (skip site 2)")
+	}, 4*asyncMarkLease, 300*time.Millisecond, "NO second dispatch while the call is in flight, even across a mark-lease expiry + sweep tick (skip site 2)")
 
 	// The sweeper genuinely ran during the hold (its last-run instant advanced past
-	// one full mark-lease, the 2s asyncConvergeOpts sets) — so the
-	// no-double-dispatch guarantee above was actually tested against skip site 2,
-	// not a stalled sweeper.
+	// one full mark-lease) — so the no-double-dispatch guarantee above was actually
+	// tested against skip site 2, not a stalled sweeper.
 	require.Eventuallyf(t, func() bool {
-		return h.weaverSweepLastRun().After(sweepBefore.Add(2 * time.Second))
-	}, 15*time.Second, 200*time.Millisecond, "the reconciler sweep must complete a pass (past one mark-lease) during the in-flight hold, so skip site 2 is genuinely exercised")
+		return h.weaverSweepLastRun().After(sweepBefore.Add(asyncMarkLease))
+	}, 25*time.Second, 200*time.Millisecond, "the reconciler sweep must complete a pass (past one mark-lease) during the in-flight hold, so skip site 2 is genuinely exercised")
 
 	// The poll chain resolves the call → the gap closes and the application
 	// converges. Still exactly one external call.
@@ -276,12 +293,12 @@ func TestAsyncConvergence_BoundedRetry_Exhausted(t *testing.T) {
 
 	// Once the budget is spent, Weaver stops auto-dispatching: the bgcheck instance
 	// count must NOT grow beyond the cap (no op fires through either skip site).
-	// Hold well past several mark-lease (2s) + CallDeadline (2s) windows so a
-	// would-be sweep re-dispatch or a post-timeout retry would have fired if the
-	// budget were not enforced.
+	// Hold three full asyncMarkLease windows (and many CallDeadline (2s) windows)
+	// so a would-be sweep re-dispatch or a post-timeout retry would have fired if
+	// the budget were not enforced.
 	require.Neverf(t, func() bool {
 		return h.countBgcheckInstances(applicantID) > bgcheckRetryCap
-	}, 10*time.Second, 300*time.Millisecond, "no further bgcheck dispatch once the retry budget (bgcheckRetryCap) is spent")
+	}, 3*asyncMarkLease, 300*time.Millisecond, "no further bgcheck dispatch once the retry budget (bgcheckRetryCap) is spent")
 
 	require.Equal(t, bgcheckRetryCap, h.countBgcheckInstances(applicantID),
 		"exactly bgcheckRetryCap bgcheck instances — the budget caps the chain")

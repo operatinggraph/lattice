@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -280,23 +281,28 @@ func (e *Engine) dispatchGap(ctx context.Context, target *Target, targetID, enti
 	// External gaps are unchanged — their reclaim re-dispatch is intended
 	// (re-call a dead vendor / mint a fresh service instance), episode-scoped
 	// on markRevision and bounded by inflight_<g> + maxretries_<g>") — a lens
-	// author marks a gap as belonging to that class by declaring its
-	// inflight_<g> companion column at all; the human userTask gaps
-	// (assignTask, and triggerLoom of a userTask-containing pattern) declare
-	// no such column and are structurally untouched by this branch (staleMark
-	// returns false immediately below), so their claimId stays preserved
-	// verbatim exactly as §10.3 requires. staleMark reading false on a
-	// declared column does NOT need to distinguish "confirmed concluded" from
-	// "not yet dispatched" — for a real external gap, inflight_<g> is computed
-	// from actual outcome-presence (e.g. "dispatch aspect set, outcome aspect
-	// absent"), so it cannot read false while a call is genuinely still
-	// pending: a still-pending call keeps inflight_<g>=true, which
-	// gapSuppressed (checked before dispatchGap is ever reached) would already
-	// be blocking on. The additional `!leaseLive` requirement below only rules
-	// out the brief, same-process propagation-lag window right after THIS
-	// mark's own fresh dispatch (before its own effects have reprojected into
-	// this row) — an in-memory CDC round trip, milliseconds, not the mark's
-	// lease (seconds to the production default of 30 minutes).
+	// author nominates a gap for that class by declaring its inflight_<g>
+	// companion column at all, and staleMark's own externalDispatchGap
+	// classifier confirms the dispatch really is one (directOp/proposedOp, or a
+	// triggerLoom whose pattern is external-eligible). The human userTask gaps
+	// (assignTask; triggerLoom of a pattern that parks) fail that classifier
+	// whether or not they declare the column, so this branch never touches them
+	// and their claimId stays preserved verbatim exactly as §10.3 requires.
+	//
+	// inflight_<g> reading false is NOT proof no call is outstanding. A lens
+	// computes it from artifact presence — lease-signing uses "dispatch aspect
+	// set AND outcome aspect absent" (packages/lease-signing/lenses.go) — and
+	// the .dispatch aspect is written by the BRIDGE, only once the adapter has
+	// accepted the call. Between the dispatch op committing (the Loom instance
+	// and its claim vertex exist) and .dispatch landing, a call is
+	// committed-and-queued while inflight_<g> still reads false, so a reclaim
+	// in that window mints a genuinely second call. What bounds the exposure is
+	// the `!leaseLive` requirement below: the mark's whole lease must have
+	// expired first (production default 30 minutes), which is orders of
+	// magnitude longer than a bridge turnaround. It is a window, not an
+	// impossibility — tests that shorten the mark lease have to keep it well
+	// clear of that turnaround (see asyncConvergeOpts in
+	// internal/leaseconvergence).
 	stale := found && !leaseLive(rec.LeaseExpiresAt, time.Now()) && e.staleMark(targetID, row, col, ga)
 	return e.fireEpisode(ctx, targetID, entityID, entityKey, col, action, pl, msg.NumDelivered != 1, rec, markRev, found, stale)
 }
@@ -305,28 +311,32 @@ func (e *Engine) dispatchGap(ctx context.Context, target *Target, targetID, enti
 // (Contract #10 §10.3) whose row currently shows no call in flight, so a
 // found mark for it is a stale bookkeeping remnant of a concluded attempt,
 // not a live episode. See the dispatchGap call site for the full contract
-// citation and why an absent inflight_<g> column (the human userTask gaps)
-// makes this unconditionally false, leaving their reclaim untouched (claimId
-// preserved verbatim, per §10.3).
+// citation. An absent inflight_<g> column makes this unconditionally false, so
+// a gap that never nominated itself for the external class keeps its reclaim
+// untouched (claimId preserved verbatim, per §10.3).
 //
-// A declared inflight_<g> is only trustworthy for a gap whose playbook action
-// can actually make an external call with a later, outcome-driven conclusion
-// (directOp; proposedOp, since an Augur proposal's materialized inner action
-// is data-dependent and may itself be directOp — Contract #10 §10.8). The
-// userTask actions (assignTask, triggerLoom) and surface never have such an
-// outcome, so a lens declaring inflight_<g> alongside one of them is a lens-
-// authoring bug, not a real external gap — this mirrors the rec.Action class
-// check reconciler.go's reclaim does for backoff pacing, applied instead to
-// the playbook's static ga.Action. Trusting the marker anyway would let a
-// misauthored column silently reclassify a human episode's reclaim as an
-// external-gap stale-reconcile, dropping its §10.3 claimId-preservation
-// guarantee. On mismatch, the marker is ignored (treated as absent) and a
-// Health issue is raised on its own key (issueKeyInflightMismatch, never
-// issueKeyGap — planGap's success path unconditionally clears issueKeyGap
-// on every clean dispatch, which a reclaim always attempts right after this
-// check, so sharing that key would wipe the alert before the same pass ends);
-// the issue self-clears once staleMark next runs clean for this gap (e.g.
-// after a package fix removes the column or retargets the action).
+// A declared inflight_<g> is only trustworthy for a gap whose dispatch can
+// actually make an external call with a later, outcome-driven conclusion —
+// externalDispatchGap decides that, from the dispatch's real shape rather than
+// from its action name alone. A gap that concludes on a human instead (an
+// assignTask, or a triggerLoom of a pattern that parks) has no such outcome, so
+// a lens declaring inflight_<g> alongside one is a lens-authoring bug, not a
+// real external gap. Trusting the marker anyway would let a misauthored column
+// silently reclassify a human episode's reclaim as an external-gap
+// stale-reconcile, dropping its §10.3 claimId-preservation guarantee.
+//
+// Either way the marker is ignored (treated as absent), but the two failure
+// modes are surfaced differently. A PERMANENT mismatch — an action or an
+// indexed pattern that can never be external-dispatch — is an `error` Health
+// issue on its own key (issueKeyInflightMismatch, never issueKeyGap: planGap's
+// success path unconditionally clears issueKeyGap on every clean dispatch,
+// which a reclaim always attempts right after this check, so sharing that key
+// would wipe the alert before the same pass ends); it self-clears once
+// staleMark next runs clean for this gap, e.g. after a package fix removes the
+// column or retargets the action. A TRANSIENT one — the referenced pattern's
+// spec has not replayed into the registry yet — is only logged: every Weaver
+// restart passes through it, it heals itself within the replay window, and
+// planGap raises its own UnresolvedReference issue if it does not.
 func (e *Engine) staleMark(targetID string, row map[string]any, col string, ga GapAction) bool {
 	g, ok := strings.CutPrefix(col, gapColumnPrefix)
 	if !ok {
@@ -335,15 +345,71 @@ func (e *Engine) staleMark(targetID string, row map[string]any, col string, ga G
 	if _, declared := row[inflightColumnPrefix+g]; !declared {
 		return false
 	}
-	key := issueKeyInflightMismatch(targetID, col)
-	if ga.Action != actionDirectOp && ga.Action != actionProposedOp {
-		e.alert(key, "error", "InflightActionMismatch",
+	external, transient, why := e.externalDispatchGap(ga, row)
+	if !external {
+		if transient {
+			e.logger.Debug("weaver: ignoring the inflight_<g> marker for now; "+why,
+				"targetId", targetID, "gap", col)
+			return false
+		}
+		e.alert(issueKeyInflightMismatch(targetID, col), "error", "InflightActionMismatch",
 			"target "+targetID+": row column "+inflightColumnPrefix+g+" is declared but gap "+col+
-				"'s playbook action \""+ga.Action+"\" is not external-dispatch (directOp/proposedOp); ignoring the marker")
+				" is not external-dispatch ("+why+"); ignoring the marker")
 		return false
 	}
-	e.issues.clear(key)
+	e.issues.clear(issueKeyInflightMismatch(targetID, col))
 	return !e.boolColumn(targetID, row, inflightColumnPrefix+g)
+}
+
+// externalDispatchGap reports whether ga's dispatch concludes on an EXTERNAL
+// call's outcome — the class Contract #10 §10.3 governs with inflight_<g> +
+// maxretries_<g>. When it does not, why explains it and transient says whether
+// the answer could change on its own (so the caller logs rather than alerts).
+//
+// directOp qualifies outright; so does proposedOp, since an Augur proposal's
+// materialized inner action is data-dependent and may itself be directOp
+// (§10.8). triggerLoom is decided by the PATTERN, not the action: a pattern
+// whose every step is a known non-parking kind runs to an outcome with no human
+// in it — precisely the shape lease-signing's backgroundCheck and collectPayment
+// gaps use — while a pattern that parks (a userTask step, or any step kind this
+// build cannot vouch for — externalEligibleSteps) concludes on a person, and
+// re-dispatching it would mint a duplicate human task.
+//
+// An UNKNOWN pattern — one whose spec the registry has not indexed — is
+// classified NOT external, the fail-safe direction: a duplicated human task is
+// a worse outcome than a delayed retry, and the classification self-corrects
+// the moment the spec replays. That is the transient case. It is genuinely
+// reachable from the SWEEP, which calls staleMark well before planGap (see
+// reconciler.go reclaim) — so a Weaver restart with marks already in
+// weaver-state hits it on every pass until the registry finishes replaying.
+// Lane-1 does not: planGap runs first there and defers the gap on an
+// unresolvable pattern before dispatchGap ever consults staleMark.
+//
+// assignTask and surface never make an external call.
+func (e *Engine) externalDispatchGap(ga GapAction, row map[string]any) (external, transient bool, why string) {
+	switch ga.Action {
+	case actionDirectOp, actionProposedOp:
+		return true, false, ""
+	case actionTriggerLoom:
+		ref, perr := resolveStringParam("pattern", ga.Pattern, row)
+		if perr != nil {
+			// A row-templated pattern reference that resolves null is a row-data
+			// problem the next projection can fix, not a fixed playbook mistake.
+			return false, true, "its triggerLoom pattern reference does not resolve: " + perr.msg
+		}
+		eligible, known := e.source.patternIsExternalEligible(ref)
+		switch {
+		case !known:
+			return false, true, "pattern " + strconv.Quote(ref) + " has no indexed spec yet, so it " +
+				"counts as parking on a human until one replays"
+		case !eligible:
+			return false, false, "pattern " + strconv.Quote(ref) + " is not externalTask-only — it has a " +
+				"userTask step, no steps at all, or a step kind this build does not recognise"
+		}
+		return true, false, ""
+	default:
+		return false, false, "its playbook action " + strconv.Quote(ga.Action) + " never makes an external call"
+	}
 }
 
 // planGap resolves one gap's plan (Evaluator L2 + Strategist), routing a
@@ -489,10 +555,13 @@ func (e *Engine) fireEpisode(ctx context.Context, targetID, entityID, entityKey,
 		// Mints a FRESH claimId rather than preserving rec.ClaimID — Contract
 		// #10 §10.3: "External gaps... their reclaim re-dispatch is intended
 		// (re-call a dead vendor / mint a fresh service instance)," unlike the
-		// human userTask gaps (assignTask; triggerLoom of a userTask-containing
-		// pattern), whose §10.3-mandated claimId-verbatim preservation this
-		// branch never reaches (they declare no inflight_<g> column, so
-		// staleMark is unconditionally false for them — see dispatchGap).
+		// human userTask gaps (assignTask; triggerLoom of a pattern that parks),
+		// whose §10.3-mandated claimId-verbatim preservation this branch never
+		// reaches. Note that is NOT because they leave inflight_<g> undeclared —
+		// lease-signing's lens declares inflight_onboarding and
+		// inflight_signature over exactly such gaps — but because staleMark's
+		// externalDispatchGap classifier rejects them on the dispatch's shape
+		// regardless of the column (see dispatchGap).
 		// Reusing the old claimId here would seed the fresh triggerLoom
 		// dispatch with the SAME already-terminal Loom-instance identity
 		// (deriveStableInstanceID is claimId-seeded, strategist.go), making it
@@ -917,6 +986,21 @@ func (e *Engine) gapSuppressed(ctx context.Context, targetID, entityID string, r
 		return true, true, budgetIsDefault
 	}
 	return false, false, false
+}
+
+// hasUsableRetryCap reports whether the row carries a positive maxretries_<g>
+// for this gap — the same column, read the same way, that gapSuppressed caps
+// the dispatch chain on. It answers only "would the cap term ever fire", not
+// whether the budget is spent, and it never falls back to the engine default
+// (gapSuppressed's own default is directOp-only and explicitly declines to
+// apply to a row that declares inflight_<g>).
+func (e *Engine) hasUsableRetryCap(targetID string, row map[string]any, gapCol string) bool {
+	g, ok := strings.CutPrefix(gapCol, gapColumnPrefix)
+	if !ok {
+		return false
+	}
+	capN, ok := e.intColumn(targetID, row, maxretriesColumnPrefix+g)
+	return ok && capN > 0
 }
 
 // escalateExhaustedGap redirects a gap whose retry budget is spent

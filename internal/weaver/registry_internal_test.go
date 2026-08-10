@@ -9,6 +9,12 @@ import (
 	"time"
 
 	"github.com/operatinggraph/lattice/internal/guardgrammar"
+	// internal/loom is imported by this TEST FILE ONLY, to pin the step-kind
+	// vocabulary registry.go restates (TestPatternStepKinds_MatchLoomVocabulary).
+	// weaver's production code must never import it — weaver_test's
+	// TestModuleBoundary_OnlySubstrate checks `go list -deps` on the non-test
+	// package, which this import does not enter.
+	"github.com/operatinggraph/lattice/internal/loom"
 	"github.com/operatinggraph/lattice/internal/substrate"
 )
 
@@ -28,6 +34,151 @@ func testNanoID(t *testing.T) string {
 		t.Fatalf("NewNanoID: %v", err)
 	}
 	return id
+}
+
+// seedPatternSpec indexes a meta.loomPattern spec through the registry's real
+// indexPattern path, wrapped in the same `{class, isDeleted, data, vertexKey,
+// localName}` aspect envelope internal/pkgmgr's docAspect emits and CDC
+// delivers — so a fixture exercises unwrapSpecBody and the real wire field
+// names rather than a hand-rolled inner shape. Each stepKind becomes one step
+// carrying the field set loomPatternSpecBody emits for that kind. Returns the
+// pattern's vtx.meta.<id> key.
+func seedPatternSpec(t *testing.T, s *targetSource, patternID string, stepKinds ...string) string {
+	t.Helper()
+	id := testNanoID(t)
+	vertexKey := "vtx.meta." + id
+	steps := make([]any, 0, len(stepKinds))
+	for _, kind := range stepKinds {
+		step := map[string]any{"kind": kind}
+		if kind == stepKindExternalTask {
+			step["adapter"] = "backgroundCheck"
+			step["instanceOp"] = "CreateLeaseServiceInstance"
+			step["replyOp"] = "RecordLeaseServiceOutcome"
+		} else {
+			step["operation"] = "NoopStep"
+		}
+		steps = append(steps, step)
+	}
+	body, err := json.Marshal(map[string]any{
+		"class":     "loomPatternSpec",
+		"isDeleted": false,
+		"vertexKey": vertexKey,
+		"localName": "spec",
+		"data": map[string]any{
+			"patternId": patternID, "subjectType": "identity", "steps": steps,
+		},
+	})
+	if err != nil {
+		t.Fatalf("marshal pattern spec: %v", err)
+	}
+	s.indexPattern(id, body)
+	return vertexKey
+}
+
+// TestPatternStepKinds_MatchLoomVocabulary pins registry.go's restated step-kind
+// strings against their source of truth in internal/loom. Weaver's PRODUCTION
+// code may not import internal/loom — weaver_test's
+// TestModuleBoundary_OnlySubstrate enforces that via `go list -deps`, which
+// reads the non-test package's imports only — so the vocabulary is restated in
+// registry.go and compared here. Without this, a §10.5 vocabulary change would
+// leave externalEligibleSteps quietly misreading every spec.
+func TestPatternStepKinds_MatchLoomVocabulary(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct{ name, restated, canonical string }{
+		{"systemOp", stepKindSystemOp, loom.StepKindSystemOp},
+		{"userTask", stepKindUserTask, loom.StepKindUserTask},
+		{"externalTask", stepKindExternalTask, loom.StepKindExternalTask},
+	} {
+		if tc.restated != tc.canonical {
+			t.Errorf("%s: weaver restates %q but internal/loom's canonical value is %q",
+				tc.name, tc.restated, tc.canonical)
+		}
+	}
+}
+
+// TestExternalEligibleSteps_Whitelist pins the fail-safe DIRECTION of the
+// step-kind classification: external eligibility is a whitelist of kinds this
+// build knows to be non-parking, so every shape the probe cannot positively
+// account for — no steps at all, an empty kind (a drifted envelope or a renamed
+// wire field), a kind from a future §10.5 revision — reads NOT eligible and the
+// gap keeps the human-safe classification. A blacklist ("contains no userTask")
+// would read all three as eligible and risk a duplicated human task.
+func TestExternalEligibleSteps_Whitelist(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name  string
+		kinds []string
+		want  bool
+	}{
+		{"externalTask only", []string{stepKindExternalTask}, true},
+		{"systemOp only", []string{stepKindSystemOp}, true},
+		{"systemOp then externalTask", []string{stepKindSystemOp, stepKindExternalTask}, true},
+		{"any userTask disqualifies", []string{stepKindExternalTask, stepKindUserTask}, false},
+		{"no steps at all", nil, false},
+		{"empty kind", []string{""}, false},
+		{"unrecognised future kind", []string{stepKindExternalTask, "agentTask"}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			steps := make([]patternStepProbe, 0, len(tc.kinds))
+			for _, k := range tc.kinds {
+				steps = append(steps, patternStepProbe{Kind: k})
+			}
+			if got := externalEligibleSteps(steps); got != tc.want {
+				t.Fatalf("externalEligibleSteps(%v) = %v, want %v", tc.kinds, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestPatternIsExternalEligible_LifecycleAndEnvelope drives the classification
+// through the real CDC-shaped envelope and the registry's own lifetime: an
+// unindexed reference is unknown (never a confident false), an indexed
+// externalTask-only pattern is eligible under every reference form, a
+// userTask-containing one is not, a re-authored spec flips the answer, and
+// removing the pattern vertex drops the classification back to unknown.
+func TestPatternIsExternalEligible_LifecycleAndEnvelope(t *testing.T) {
+	t.Parallel()
+	s := newTestSource(t)
+
+	if _, known := s.patternIsExternalEligible("neverInstalled"); known {
+		t.Fatal("an unindexed pattern reference must report known=false, never a confident classification")
+	}
+
+	key := seedPatternSpec(t, s, "bgcheckFlow", stepKindExternalTask)
+	for _, ref := range []string{"bgcheckFlow", strings.TrimPrefix(key, "vtx.meta."), key} {
+		eligible, known := s.patternIsExternalEligible(ref)
+		if !known || !eligible {
+			t.Fatalf("externalTask-only pattern via ref %q: eligible=%v known=%v, want true/true", ref, eligible, known)
+		}
+	}
+
+	humanKey := seedPatternSpec(t, s, "onboardFlow", stepKindSystemOp, stepKindUserTask)
+	if eligible, known := s.patternIsExternalEligible("onboardFlow"); !known || eligible {
+		t.Fatalf("userTask-containing pattern: eligible=%v known=%v, want false/true", eligible, known)
+	}
+
+	// A package fix re-authors the same patternId on a new vertex with no
+	// userTask step: the live classification follows the new spec.
+	seedPatternSpec(t, s, "onboardFlow", stepKindSystemOp)
+	if eligible, known := s.patternIsExternalEligible("onboardFlow"); !known || !eligible {
+		t.Fatalf("re-authored pattern: eligible=%v known=%v, want true/true", eligible, known)
+	}
+
+	// Deleting the pattern vertex drops the classification with its aliases —
+	// back to unknown rather than to a stale answer — and touches nothing else.
+	s.mu.Lock()
+	s.removePatternLocked(strings.TrimPrefix(key, "vtx.meta."))
+	s.mu.Unlock()
+	if _, known := s.patternIsExternalEligible("bgcheckFlow"); known {
+		t.Fatal("a removed pattern must report known=false again")
+	}
+	if _, ok := s.patternExternalEligible[key]; ok {
+		t.Fatalf("removePatternLocked leaked the step-kind entry for %q", key)
+	}
+	if _, ok := s.patternExternalEligible[humanKey]; !ok {
+		t.Fatalf("removing one pattern must not drop another's entry (%q)", humanKey)
+	}
 }
 
 func vertexEvent(t *testing.T, id, class string) substrate.KVEvent {

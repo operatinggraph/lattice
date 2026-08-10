@@ -204,7 +204,8 @@ value: { targetId, entityKey, gap, action, claimId?, claimedAt, leaseExpiresAt, 
   on catching the transitional flip (a coalescing watch can drop edges). `claimedAt` tags the
   episode so a stale mark from a prior closed episode can't shadow a fresh re-open.
 - **Re-fire after lease expiry — consumer-enforced idempotency by deterministic open-episode identity.**
-  A userTask reclaim is keyed by the **open-episode identity**: the mark's `claimId` (a fresh NanoID
+  A **userTask** reclaim — `assignTask`, and `triggerLoom` of a **userTask-containing** pattern — is
+  keyed by the **open-episode identity**: the mark's `claimId` (a fresh NanoID
   minted at the mark's CAS-create, **preserved verbatim** across every reclaim-`replace`) seeds the
   dispatched artifact's id — `assignTask`'s `taskId` and `triggerLoom`'s Loom `instanceId`. Weaver
   re-publishes **without** a producer-side existence check (a producer GET races the publish→commit
@@ -237,7 +238,17 @@ value: { targetId, entityKey, gap, action, claimId?, claimedAt, leaseExpiresAt, 
   **`triggerLoom` self-heal is bounded by Loom's instance lifecycle, not a tombstone read:** if the
   instance has reached a terminal state, a re-emitted `patternStarted` is dropped (no re-create); a
   still-open gap whose instance terminated is resolved by level-reconciled mark-clearing, never by
-  re-triggering the pattern.
+  re-triggering the pattern. **This is the userTask-containing case.** A `triggerLoom` whose pattern
+  is **externalTask-only** (the §13.1 external-remediation path — `triggerLoom` a pattern whose body
+  is an `externalTask`, `10-orchestration-weaver.md`) is an **external gap** under the rule above, not
+  a userTask one: mark-clearing cannot resolve it, because the gap stays open precisely when the
+  vendor call concluded without satisfying it. Its reclaim mints a **fresh** `claimId` ⇒ a new
+  `instanceId` ⇒ a genuinely new instance and a new vendor call — the "re-call a dead vendor / mint a
+  fresh service instance" this same bullet already sanctions — gated on `inflight_<g>` reading false
+  and hard-bounded by `maxretries_<g>`. **A gap that declares `inflight_<g>` MUST declare
+  `maxretries_<g>`:** the fresh-`claimId` path has no collapse to pace it, so the budget is its only
+  bound. Which class a `triggerLoom` falls in is read from the pattern's own step kinds, never from
+  the playbook action name.
 - `entityKey` carries the full `vtx.<type>.<id>` (doc-is-truth); the key holds only the ID.
 
 #### Reserved (non-mark) `weaver-state` key shapes

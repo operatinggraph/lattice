@@ -520,20 +520,36 @@ func (s *sweeper) reclaim(ctx context.Context, key string, markRev uint64, rec *
 	// / mint a fresh service instance), episode-scoped on markRevision and
 	// bounded by inflight_<g> + maxretries_<g>," distinct from the human
 	// userTask gaps (assignTask; triggerLoom of a userTask-containing
-	// pattern), which declare no such column and are governed instead by
-	// §10.3's claimId-verbatim-preservation rule — staleMark returns false
-	// unconditionally for them, so confirmedConcluded never applies. It gates
+	// pattern), which are governed instead by §10.3's
+	// claimId-verbatim-preservation rule — staleMark's externalDispatchGap
+	// classifier reads false for them even when a lens misdeclares the column,
+	// so confirmedConcluded never applies to them. It gates
 	// both the backoff pacing below (that pacing exists to avoid phantom-task
 	// churn on a still-open human episode; §10.3 already bounds an external
 	// gap's retry by inflight_<g>/maxretries_<g> instead) and the claimId
 	// choice (below the pacing block).
 	confirmedConcluded := e.staleMark(targetID, row, gapColumn, ga)
 
-	// Default per-key TTL backstop for the re-armed mark; widened below for a
-	// paced userTask reclaim.
+	// Default per-key TTL backstop for the re-armed mark; widened below for any
+	// paced reclaim, so the mark outlives its own backoff window.
 	markTTL := markTTLBackstopFactor * e.marks.lease
 	collapseOnly := collapseOnlyReclaim(rec.Action, confirmedConcluded)
-	if collapseOnly {
+
+	// Defense in depth for Contract #10 §10.3's rule that a gap declaring
+	// inflight_<g> MUST also declare maxretries_<g>. An external gap's reclaim is
+	// deliberately NOT collapse-only — each one is a fresh vendor call — and is
+	// meant to be bounded by that cap rather than paced by the timer below. A
+	// lens that declares inflight_<g> without a usable cap gets neither:
+	// gapSuppressed explicitly declines to substitute the engine's default budget
+	// for a row that declares inflight_<g> (its own pacing is not this engine's
+	// to second-guess), so the gap would re-dispatch a fresh external call every
+	// mark-lease expiry, forever. No shipped package does this, and install-time
+	// validation is the real fix; until then, pace it. Still unbounded in count,
+	// but no longer unbounded AND unpaced, and the hold is visible on the
+	// sweepReclaimsSuppressed metric.
+	uncappedExternal := confirmedConcluded && !e.hasUsableRetryCap(targetID, row, gapColumn)
+
+	if collapseOnly || uncappedExternal {
 		// Collapse-only reclaim: pace repeat reclaims with an exponential backoff
 		// keyed on the mark's own ClaimedAt + dispatch-count — the consumer
 		// collapses any repeat re-dispatch anyway, so re-firing every sweep is
@@ -545,15 +561,13 @@ func (s *sweeper) reclaim(ctx context.Context, key string, markRev uint64, rec *
 		// inner action {triggerLoom, assignTask, directOp} the proposal
 		// materialises to, since the mark's recorded Action is always the OUTER
 		// static playbook entry "proposedOp", never the inner one). An ordinary
-		// (non-Augur) directOp/external reclaim never reaches here (action check)
-		// — it is the intended bounded retry (§inflight_<g>/maxretries_<g>), never
-		// backed off. confirmedConcluded also skips pacing: it is only ever
-		// true for an EXTERNAL gap (§10.3 above), whose retry is already
-		// bounded by inflight_<g>/maxretries_<g>, not by this userTask-phantom-
-		// churn timer — applying the timer here was the pre-existing drift from
-		// §10.3's "reclaim re-dispatch is intended" text for external gaps.
-		// Best-effort: a count read or ClaimedAt parse failure falls through to
-		// a normal (unpaced) reclaim.
+		// (non-Augur) directOp/external reclaim never reaches here on the
+		// collapseOnly term — it is the intended bounded retry
+		// (§inflight_<g>/maxretries_<g>), never backed off; confirmedConcluded
+		// clears the term for exactly that reason. It reaches here only on the
+		// uncappedExternal term above, where the cap that was supposed to bound
+		// it is missing. Best-effort either way: a count read or ClaimedAt parse
+		// failure falls through to a normal (unpaced) reclaim.
 		if count, err := e.marks.getDispatchCount(ctx, targetID, entityID, gapColumn); err != nil {
 			e.logger.Debug("weaver sweep: reclaim backoff dispatch-count read failed; not pacing",
 				"targetId", targetID, "entityId", entityID, "gap", gapColumn, "err", err)
@@ -565,7 +579,8 @@ func (s *sweeper) reclaim(ctx context.Context, key string, markRev uint64, rec *
 				// re-enters this cheap compare until ClaimedAt ages past the interval.
 				e.logger.Debug("weaver sweep: reclaim backed off; episode dispatched recently",
 					"targetId", targetID, "entityId", entityID, "gap", gapColumn,
-					"action", rec.Action, "dispatchCount", count, "elapsed", elapsed)
+					"action", rec.Action, "dispatchCount", count, "elapsed", elapsed,
+					"uncappedExternal", uncappedExternal)
 				s.bump(&s.reclaimsSuppressed)
 				return
 			}

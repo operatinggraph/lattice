@@ -396,12 +396,15 @@ pair is `issueKeyInflightMismatch` (`evaluator.go:338-345`). The gate widening m
 **10. Non-goals.** No change to `gapSuppressed`'s cap-fallback, to the bridge's timeout semantics, to the
 lens, to any package, or to `docs/contracts/*`.
 
-### Checkpoint — held for Andrew's §10.3 ratification (2026-08-09)
+### SHIPPED — Andrew ratified §10.3 and the fire merged (2026-08-09)
 
-**Worktree:** `/private/tmp/lattice-worktrees/async-retry-1786329239`, branch `steward-lattice-async-retry`
-(10 files, nothing committed). **Base:** `ddba78d2`; re-derive against merged `main` before the merge.
+**Andrew ratified the staged §10.3 edit on 2026-08-09; the contract edit and the code landed in one
+commit.** The worktree (`steward-lattice-async-retry`, base `ddba78d2`) is merged and retired. Re-derived
+against merged `main` first: 12 intervening commits, all docs, **zero code changes**, so the patch applied
+clean and every gate was re-run on the merged tree — build, vet, golangci (0), lint-conventions (0),
+lint-board, gofmt, `go test ./internal/weaver/...`, and the three async legs 3/3 (69s).
 
-**Done — the fire is complete and green, not partial.** Registry probes pattern step kinds at index time
+**What shipped.** Registry probes pattern step kinds at index time
 (whitelist: external-eligible iff ≥1 step and every kind is `systemOp`/`externalTask`); `staleMark`
 classifies by that instead of the action name; the transient (unreplayed-pattern) branch logs instead of
 raising `error`; an external gap with no usable `maxretries_<g>` keeps the backoff pacing so the engine is
@@ -412,10 +415,12 @@ selects all three `TestAsyncConvergence_*`. Gates: `go build`, `make vet`, `gola
 independently by the lead (69s). Negative control observed: with the classifier change reverted and the
 registry probe kept, `_Timeout_FailedThenOneRetry` fails again with the identical assertion.
 
-**Why it is NOT committed.** The behavior it restores is forbidden by a frozen-contract sentence
-(§10.3 "never by re-triggering the pattern", unqualified over `triggerLoom`). The §10.3 edit is staged
-**UNCOMMITTED in `main`** — that diff is the proposal. **On ratification: merge the worktree and commit the
-contract edit in the same scoped commit.** Nothing else is outstanding.
+**Why it needed a contract decision.** The behavior it restores was forbidden by a frozen-contract
+sentence — §10.3's "never by re-triggering the pattern", unqualified over `triggerLoom` — so the fire
+stopped short of committing and staged the §10.3 edit uncommitted as the proposal. **Ratified 2026-08-09**;
+the contract now scopes that sentence to the userTask class, carves the externalTask-only `triggerLoom`
+into the external class, states that the class is read from the pattern's step kinds rather than the
+action name, and requires a gap declaring `inflight_<g>` to declare `maxretries_<g>`.
 
 **Measured CI cost of the gate widening** (the reason it is safe to widen): lease-convergence step 86s/88s
 on CI runs `31349409902`/`31346562021`; the other six convergence gates ~17s total; job 111s/109s against

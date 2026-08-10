@@ -69,9 +69,12 @@ func TestSweep_ReclaimBackoff_SuppressesRecentUserTask(t *testing.T) {
 		TargetID: targetID,
 		Gaps:     map[string]GapAction{"missing_x": {Action: actionTriggerLoom, Pattern: "ghostFlow", Subject: "row.entityKey"}},
 	})
-	h.engine.source.mu.Lock()
-	h.engine.source.patternMeta["ghostFlow"] = "vtx.meta." + testNanoID(t)
-	h.engine.source.mu.Unlock()
+	// A REAL userTask-containing spec, not a bare patternMeta entry: these
+	// fixtures are about the collapse-only backoff for a gap that concludes on a
+	// person, so the pattern has to actually be one — otherwise the classifier
+	// reaches them only through its unindexed fail-safe and the tests would keep
+	// passing for the wrong reason.
+	seedPatternSpec(t, h.engine.source, "ghostFlow", stepKindUserTask)
 
 	entityID := testNanoID(t)
 	key := markKey(targetID, entityID, "missing_x")
@@ -112,9 +115,12 @@ func TestSweep_ReclaimBackoff_FiresWhenAged(t *testing.T) {
 		TargetID: targetID,
 		Gaps:     map[string]GapAction{"missing_x": {Action: actionTriggerLoom, Pattern: "ghostFlow", Subject: "row.entityKey"}},
 	})
-	h.engine.source.mu.Lock()
-	h.engine.source.patternMeta["ghostFlow"] = "vtx.meta." + testNanoID(t)
-	h.engine.source.mu.Unlock()
+	// A REAL userTask-containing spec, not a bare patternMeta entry: these
+	// fixtures are about the collapse-only backoff for a gap that concludes on a
+	// person, so the pattern has to actually be one — otherwise the classifier
+	// reaches them only through its unindexed fail-safe and the tests would keep
+	// passing for the wrong reason.
+	seedPatternSpec(t, h.engine.source, "ghostFlow", stepKindUserTask)
 
 	entityID := testNanoID(t)
 	key := markKey(targetID, entityID, "missing_x")
@@ -242,9 +248,12 @@ func TestSweep_ReclaimBackoff_MarkTTLOutlastsBackoff(t *testing.T) {
 		TargetID: targetID,
 		Gaps:     map[string]GapAction{"missing_x": {Action: actionTriggerLoom, Pattern: "ghostFlow", Subject: "row.entityKey"}},
 	})
-	h.engine.source.mu.Lock()
-	h.engine.source.patternMeta["ghostFlow"] = "vtx.meta." + testNanoID(t)
-	h.engine.source.mu.Unlock()
+	// A REAL userTask-containing spec, not a bare patternMeta entry: these
+	// fixtures are about the collapse-only backoff for a gap that concludes on a
+	// person, so the pattern has to actually be one — otherwise the classifier
+	// reaches them only through its unindexed fail-safe and the tests would keep
+	// passing for the wrong reason.
+	seedPatternSpec(t, h.engine.source, "ghostFlow", stepKindUserTask)
 
 	entityID := testNanoID(t)
 	key := markKey(targetID, entityID, "missing_x")
