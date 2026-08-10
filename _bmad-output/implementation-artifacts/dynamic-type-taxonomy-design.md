@@ -1258,17 +1258,33 @@ Fires A/B leaned on, and each is currently vacuous or absent.
    `checkAbstractNoLiveInstances` scans `vtx.<canonicalName>.` only, so **(a)** a differently-keyed type
    (`workOrder` → `vtx.wo.<id>`) scans empty and flips unguarded, and **(b)** — found by B1's security pass —
    it never checks the *class* side, so location's flip passed while **69 live documents carry the now-abstract
-   `class: "location"`**. Both blind spots, one guard. Note (b) cannot simply be switched on: tightening it
-   would have refused B1's own install.
+   `class: "location"`**. Both blind spots, one guard. **SHIPPED `890df614` + `a16a4e33`.** *(2026-08-10: this
+   item claimed "(b) cannot simply be switched on: tightening it would have refused B1's own install." That is
+   false as stated — it is true only of a guard that ignores the installed marker. Guarding the FLIP alone,
+   and skipping a type whose meta-vertex already carries `data.abstract`, switches (b) on at full strength
+   while leaving location-domain re-installable, because step 6's gates mean an already-abstract type's live
+   instance set can only shrink.)*
 2. **The meta/op reserved-name gate is pkgmgr-only, not Processor-enforced** (§17.2). Contract #1 §1.2 states a
-   commit-time gate that does not exist; only the install-time check runs.
-3. **A withdrawn `Sensitive` or `canonicalName` is still read as live** (§17.17 · `ddl_cache.go`). Sibling of
-   the `script`/`permittedCommands` readers B1 fixed — same function, same missing `isDeleted` filter.
-   **Needs design before build:** honoring a `Sensitive` withdrawal stops encrypting a class on upgraded cells,
-   which is a decision about existing ciphertext, not a filter.
-4. **`entityType` ⟷ `entityKey` pairing is an unenforced convention** (§14). **Blocked on the same 69
-   vertices** — they violate the invariant the gate would assert, so this needs a migration story first, not
-   just a gate.
+   commit-time gate that does not exist; only the install-time check runs. **SHIPPED `0011f5ad` + `a16a4e33`**,
+   kind-agnostic — see §17.19 for why the vertexType-only reading was unsound.
+3. **A withdrawn `Sensitive` or `canonicalName` is still read as live** (§17.17 · `ddl_cache.go`).
+   **SHIPPED `a16a4e33` (canonicalName) + `fbcaa7eb` (sensitive) — and they are NOT the same bug.** *(2026-08-10:
+   this item called both a "sibling of the `script`/`permittedCommands` readers — same function, same missing
+   `isDeleted` filter." Falsified by the build. A withdrawn `canonicalName` read as live OVER-GRANTS: every gate
+   keyed off `DDLs.Lookup` keeps answering for a name its owner withdrew, and nothing else in the meta-vertex
+   carries the lookup name, so no second write can retire it — that half needed the filter and got it. A
+   withdrawn `Sensitive` read as live only OVER-PROTECTS, because encryption gates on the DDL's `Sensitive`
+   while decryption gates on the LENS's independent `SecureColumns`; honoring it would split one class into
+   ciphertext and plaintext halves under a decryptor still running over both. That half deliberately KEEPS the
+   permissive read, now stated and logged rather than accidental.)*
+4. **`entityType` ⟷ `entityKey` pairing is an unenforced convention** (§14). *(2026-08-10: this item's
+   "blocked on the same 69 vertices" conflates two different invariants and is false for the half that matters.
+   `entityType`⟷`entityKey` is a **static authoring** property of the lens source — a per-walk literal that must
+   equal the `entityKey` expression's own node label, both readable in `packages/edge-manifest/lenses.go` — and
+   no live document participates in it. The 69 vertices violate a **data** invariant, class ⟷ key segment, which
+   is a different assertion. The authoring half needs no migration and is buildable now as a `scripts/lint-*.go`
+   gate over the 13 `entityType` sites; only the data half is migration-blocked.)* **NOT BUILT — carried, see
+   §17.19's checkpoint.**
 
 **C2 — the resolver's answer is trusted further than it can be backed.**
 
@@ -2280,3 +2296,57 @@ any label (`labels.go:135-138` clears it for any variable-length hop, and this l
 no win. What shipped is a truthful type declaration, a tighter binder, and the polymorphism the label-binding
 fire removed. Making this lens narrowable means reconciling variable-length containment walks with the
 exhaustiveness rule: a design question, filed as one.
+
+### 17.19 Fire C · C1 complete, and what review made of it (2026-08-10)
+
+**Shipped: `890df614` · `0011f5ad` · `a16a4e33` · `fbcaa7eb`.** C1 items 1, 2 and 3 are closed; item 4's premise
+was corrected (above) and its buildable half is carried. Worktree
+`/Users/andrewsolgan/Documents/GitHub/lattice-wt-taxonomy-fire-c`, branch `fire/taxonomy-fire-c`.
+
+**The reserved-name gate asks about the NAME, not the kind.** C1 item 2 was built first as a vertexType-only
+gate, and a cold bypass review broke it three ways in one sitting — each proved with a runnable probe, not
+argued. All three shared one root cause: the gate reasoned about *which kind of meta-vertex* was registering
+the name, and about *which mutation in a batch* established the class. Both are the wrong question.
+`DDLCache.Refresh` indexes **every** meta-vertex carrying a `canonicalName` into `byName` regardless of class,
+and `validateAbstractKeySegments` resolves a key's type segment through that index with **no kind filter** — so
+a lens named `meta` is a type-segment authority. Registering one as abstract was accepted, after which every
+write to every `vtx.meta.*` key was refused and no package could be installed again. The gate is now
+kind-agnostic, which also kills the two-operation path (register a lens under the name, flip its class
+afterwards) because the only mutation carrying the name is refused at its first step.
+
+**`classOf` disagreed with the substrate about which write wins.** The same review found `classOf`
+(`step6_resolve_ddl.go`) taking the FIRST matching mutation in a batch where the substrate commits the LAST, so
+a decoy class placed ahead of the real one steered the governing-DDL walk at will. Fixed in the same commit,
+with the batch-tombstone arm folded in — the in-flight batch is the truth, the rule `batchDead` already applies
+to links. Not in Fire C's ratified scope; it is a defect this fire's own review surfaced, so this fire fixed it.
+
+**The guard's corpus read had to exclude the churn population.** Making the flip guard class-aware means reading
+every vertex root in Core KV. The first cut excluded nothing and so walked every `vtx.op.<requestId>`
+idempotency tracker — a 24h-horizon population that on a busy kernel is millions of keys, against a 45–60s
+install deadline, on paths including the long-lived Loupe server process. Reserved namespaces cannot satisfy
+either test (a reserved canonicalName is refused before the guard runs; `op-tracker` carries a hyphen no type
+segment admits), so excluding them is lossless and the argument sits beside the code. The residual cost —
+O(all business vertex roots), on a flip only — is stated at the call site rather than implied away.
+
+**Live confirmation that Shape B holds.** Measured on the running stack during this fire: 173 JetStream
+consumers, **118 of them on `KV_core-kv`** (the lens fan-out C2 item 6 is about), NATS steady at **904 MiB**
+with Refractor up 1h18m. The morning's boot path could not run Refractor at all.
+
+**CHECKPOINT — Fire C, after C1.**
+
+- **Done:** C1.1, C1.2, C1.3 (both halves, oppositely resolved). All on `main`, CI green.
+- **In flight at this checkpoint:** C2.5 (the `armed` replay-complete barrier) is built and frozen at
+  `8032295f` in the worktree, under a 3-layer adversarial pass. It uses the pre-existing
+  `substrate.ConsumerCaughtUp` rather than a hand-rolled barrier, and adds a connection-state listener fan-out
+  to `substrate.Conn` — a shared primitive every binary uses, which is why it is being reviewed at that depth
+  before it merges. **Do not merge `8032295f` without reading those verdicts.**
+- **Next, in order:** C2.5's review findings → C3.7 (the cap-arithmetic refusal consumer; the blocking fact is
+  that `pkgmgr`'s injected `CypherParser` interface returns only `error`, so `K` is uncomputable — the seam has
+  to widen to yield a spec's referenced labels, and `full.CompiledRule.ReferencedLabels()` is the existing API
+  to expose) → C1.4's authoring-lint half → C2.6's remaining fan-out (BOOT's dominant term is gone; the
+  operator corpus-rebuild's uncoordinated goroutine at `control/service.go:930-943` and the replay drain
+  remain, and the control service still holds no handle on B0's scheduler).
+- **Still designer-pass, unchanged:** C4 (items 8–11) and C5 (item 12). C5's reconciliation was re-grounded
+  this fire and has no ratified pattern to extend: no link-type DDL declares endpoint types anywhere
+  (`TargetType` is an op-dispatch field, not a link endpoint), so bounding a variable-length hop's type set
+  needs a mechanism that does not exist. **The item does not close until C5 is answered.**

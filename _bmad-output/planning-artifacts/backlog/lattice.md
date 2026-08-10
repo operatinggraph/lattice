@@ -132,7 +132,7 @@ but the *fork decision* + the *contract commit* are Andrew's.
 ### Read-model / projection maturity
 | Item | What it is | Imp | Size | State |
 |---|---|---|---|---|
-| **Dynamic type taxonomy — an abstract type a lens can label** | `subtypeOf` links between type metas, resolved to a leaf-label set at activation, so a leaf any package declares is picked up by lenses writing `:abstract*`. First consumer `capabilityServiceAccess`. | ★★★ | L | 🏗️ building · Fires A+B shipped · [design](../../implementation-artifacts/dynamic-type-taxonomy-design.md) §14 · next: Fire C (C1 guarantees) |
+| **Dynamic type taxonomy — an abstract type a lens can label** | `subtypeOf` links between type metas, resolved to a leaf-label set at activation, so a leaf any package declares is picked up by lenses writing `:abstract*`. First consumer `capabilityServiceAccess`. | ★★★ | L | 🏗️ building · [design](../../implementation-artifacts/dynamic-type-taxonomy-design.md) §17.19 · next: C2.5 review findings, then C3.7 |
 | **[Refractor] Cross-instance projection-latency rollup** | Aggregate per-lens projection latency across Refractor instances into one per-component view; single-instance today, so the two coincide. | ★ | S | 🚧 seq behind HA-NATS multi-instance · tombstone half subsumed by the [link-aspect design](../../implementation-artifacts/link-aspect-triggered-reprojection-plain-lenses-design.md) |
 
 ### Refinements & ops
