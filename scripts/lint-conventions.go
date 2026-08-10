@@ -61,6 +61,17 @@
 //     whichever package happened to be connecting, typically one the author
 //     never touched, with `read tcp 127.0.0.1:A->B: i/o timeout`. The signal is
 //     the server constructor; natsfixture itself is exempt.
+//   - nats.go connection-state handler slots set outside internal/substrate.
+//     SetDisconnectErrHandler / SetDisconnectHandler / SetReconnectHandler /
+//     SetClosedHandler each hold exactly ONE callback on a *nats.Conn, and
+//     every Lattice binary shares one connection across its components — so a
+//     second registrant silently unregisters the first, and the component
+//     that lost its slot keeps serving as though the connection never
+//     dropped. Nothing about that failure is observable at runtime: no error,
+//     no log, just an edge that stops arriving. substrate.Conn owns the slots
+//     and fans out through OnConnectionStateChange, which any number of
+//     listeners may hold. internal/substrate itself is exempt (it is the
+//     owner).
 //   - Read-posture classification (Contract #2 §2.5; BLOCKING — fails
 //     --strict, per the script-read-posture design §13's flip once the
 //     platform + verticals sweeps closed the debt list). Every script
@@ -265,6 +276,12 @@ var (
 	// direct call must carry, capturing the class and its trailing `<why>`.
 	bareConnectCall  = regexp.MustCompile(`\bnats\.Connect\(`)
 	natsConnectShape = regexp.MustCompile(`//\s*nats-connect:\s*\(([a-z-]+)\)(.*)$`)
+	// connStateHandlerCall anchors a nats.go connection-state handler being
+	// set on a *nats.Conn. Each of these is a single slot, so a second setter
+	// anywhere in a process silently unregisters the first — a failure with no
+	// runtime symptom at all. substrate.Conn owns them and multiplexes through
+	// OnConnectionStateChange.
+	connStateHandlerCall = regexp.MustCompile(`\.Set(?:DisconnectErr|Disconnect|Reconnect|Closed)Handler\(`)
 	// authContext.target shape declaration (authcontext-target-validated-
 	// primitive-design.md §5.5). authCtxTargetRef anchors any script reference
 	// to the forwarded, unvalidated field; authCtxTargetShape is the annotation
@@ -426,6 +443,11 @@ const loadOrGenerateExemptFile = "internal/pkgmgr/installer_test.go"
 // natsfixturePkg owns the embedded-NATS fixture, so it is the one place allowed to
 // construct a server directly.
 const natsfixturePkg = "internal/natsfixture/"
+
+// substratePkg owns the *nats.Conn and its single-slot connection-state
+// handlers, so it is the one place allowed to set them; every other component
+// registers through substrate.Conn.OnConnectionStateChange.
+const substratePkg = "internal/substrate/"
 
 // natsConnectClasses are the two reasons a test may dial NATS directly instead of
 // through natsfixture.Connect. Both are cases where the fixture's generous
@@ -746,6 +768,12 @@ func scanSource(path string, data []byte) []finding {
 	embeddedNATSScoped := !strings.HasPrefix(slash, natsfixturePkg) && !strings.HasPrefix(slash, "internal/spike/")
 	// natsfixture proves the bare default's behavior, so it dials directly.
 	bareConnectScoped := isTest && !strings.HasPrefix(slash, natsfixturePkg)
+	// internal/substrate OWNS the connection-state handler slots and is the
+	// one place allowed to set them; everyone else registers through
+	// OnConnectionStateChange. Scoped to non-test files: a test that builds
+	// its own throwaway *nats.Conn and watches it directly is nobody else's
+	// signal to lose.
+	connStateScoped := !isTest && !strings.HasPrefix(slash, substratePkg)
 	var connectAt map[int]annotation
 	if bareConnectScoped {
 		connectAt = annotationSpans(strings.Split(string(data), "\n"), natsConnectShape)
@@ -829,6 +857,9 @@ func scanSource(path string, data []byte) []finding {
 			} else if strings.TrimSpace(a.why) == "" {
 				out = append(out, finding{file: path, line: ln, msg: "nats-connect: (" + a.shape + ") declaration carries no `<why>` — name what makes a long handshake budget wrong here, so the next reader need not re-derive it"})
 			}
+		}
+		if connStateScoped && connStateHandlerCall.MatchString(line) {
+			out = append(out, finding{file: path, line: ln, msg: "nats.go connection-state handler set outside internal/substrate — each of these is a SINGLE slot on the *nats.Conn, so this silently unregisters whatever substrate (or another component) already set, and the loser keeps serving as though the connection never dropped, with no error and no log; register through substrate.Conn.OnConnectionStateChange(func(connected bool)) instead, which any number of listeners may hold"})
 		}
 		if embeddedNATSScoped && embeddedNATSCtor.MatchString(line) {
 			out = append(out, finding{file: path, line: ln, msg: "hand-rolled embedded NATS fixture — a bare nats.Connect inherits nats.go's 2s whole-handshake deadline with no retry, so a host stall fails a random untouched package with `read tcp ...: i/o timeout`; use natsfixture.Server(t) / natsfixture.StartServer(t) (internal/natsfixture)"})

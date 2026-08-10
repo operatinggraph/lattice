@@ -123,6 +123,24 @@ type Conn struct {
 	mu           sync.Mutex
 	buckets      map[string]jetstream.KeyValue
 	objectStores map[string]jetstream.ObjectStore
+
+	// connStateMu guards connStateListeners and closing. A dedicated mutex, not mu
+	// above: mu is held across a KeyValue open (a network round trip), and a
+	// connection-state event arriving mid-open must not queue behind it —
+	// the whole value of the disconnect edge is that it reaches its
+	// listeners promptly.
+	connStateMu sync.Mutex
+	// connStateListeners are the callbacks OnConnectionStateChange
+	// registered, in registration order. Add-only for the connection's life:
+	// every caller is a process-lifetime component whose listener outlives
+	// each use, so a deregister would be a way to get the edge silently
+	// dropped, not a feature.
+	connStateListeners []func(connected bool)
+	// closing latches when Close is called, so the disconnect edge nats.go
+	// pushes for a deliberate shutdown never reaches a listener
+	// (OnConnectionStateChange's doc). Guarded by connStateMu, which is what
+	// makes the latch and the fan-out's read of it non-interleaving.
+	closing bool
 }
 
 // Connect establishes a new NATS + JetStream connection using opts.
@@ -185,8 +203,93 @@ func Connect(ctx context.Context, opts ConnectOpts) (*Conn, error) {
 		nc.Close()
 		return nil, fmt.Errorf("substrate: jetstream context: %w", err)
 	}
-	return &Conn{nc: nc, js: js, buckets: make(map[string]jetstream.KeyValue), objectStores: make(map[string]jetstream.ObjectStore)}, nil
+	return newConn(nc, js), nil
 }
+
+// newConn builds the substrate handle around an established connection and
+// installs the one pair of nats.go connection-state handlers every
+// OnConnectionStateChange listener is fanned out from.
+//
+// The indirection is what makes the signal shareable. nats.go's
+// SetDisconnectErrHandler/SetReconnectHandler are SINGLE slots on the
+// *nats.Conn — a second component setting one silently unregisters the
+// first, and every Lattice binary shares one *Conn across its components.
+// Owning the slots here and fanning out is the only shape in which two
+// callers can both learn the connection dropped.
+func newConn(nc *nats.Conn, js jetstream.JetStream) *Conn {
+	c := &Conn{
+		nc:           nc,
+		js:           js,
+		buckets:      make(map[string]jetstream.KeyValue),
+		objectStores: make(map[string]jetstream.ObjectStore),
+	}
+	nc.SetDisconnectErrHandler(func(*nats.Conn, error) { c.reportConnectionState(false) })
+	nc.SetReconnectHandler(func(*nats.Conn) { c.reportConnectionState(true) })
+	return c
+}
+
+// OnConnectionStateChange registers fn to be called with false whenever the
+// underlying NATS connection is lost (the start of nats.go's RECONNECTING
+// window) and true whenever it is re-established. It never fires for the
+// initial connect — a caller holding a *Conn is by construction connected —
+// and never once Close has been called, which is a shutdown, not a loss.
+//
+// The Close suppression is Close's own doing, not nats.go's. nats.go's
+// Conn.Close calls close(CLOSED, !Opts.NoCallbacksAfterClientClose, nil), and
+// that option defaults false, so a deliberate shutdown pushes the SAME
+// DisconnectedErrCB an outage does. A listener taking that at face value acts
+// on "the connection is gone, degrade" during teardown — for a listener whose
+// degrade path is a corpus-wide re-derivation, against a connection that can
+// no longer carry a single request. Close therefore latches the fan-out off
+// before it closes the connection (see Close).
+//
+// The signal is a CONNECTION fact, not a data-currency one. A listener that
+// needs "am I up to date" must establish that separately (ConsumerCaughtUp):
+// true here means only that bytes can flow again, while whatever landed in
+// the stream during the outage is still undelivered at that instant. Reading
+// the reconnect edge as "caught up" is exactly how a consumer comes back
+// claiming a freshness it does not have.
+//
+// fn runs on nats.go's async-callback goroutine, which dispatches these in
+// order and one at a time, so listeners are never re-entered and never race
+// each other — and must be PROMPT for the same reason: a listener that
+// blocks delays every later connection-state callback in the process,
+// including its own reconnect. Register before the work that depends on the
+// signal; there is no deregister (see connStateListeners).
+func (c *Conn) OnConnectionStateChange(fn func(connected bool)) {
+	if fn == nil {
+		return
+	}
+	c.connStateMu.Lock()
+	defer c.connStateMu.Unlock()
+	c.connStateListeners = append(c.connStateListeners, fn)
+}
+
+// reportConnectionState fans one nats.go connection-state edge out to every
+// registered listener, in registration order. The listener slice is copied
+// under the lock and the callbacks run outside it, so a listener that
+// registers another listener (or takes a lock of its own that some other
+// goroutine holds while registering) cannot deadlock against this fan-out.
+func (c *Conn) reportConnectionState(connected bool) {
+	c.connStateMu.Lock()
+	if c.closing {
+		c.connStateMu.Unlock()
+		return
+	}
+	listeners := make([]func(bool), len(c.connStateListeners))
+	copy(listeners, c.connStateListeners)
+	c.connStateMu.Unlock()
+	for _, fn := range listeners {
+		fn(connected)
+	}
+}
+
+// Connected reports whether the underlying connection is currently
+// established. It is a local read of nats.go's own connection status — no
+// round trip — so it is cheap enough to consult on a poll loop, and is the
+// right pre-check before an operation that would otherwise sit in the
+// reconnect buffer waiting to time out.
+func (c *Conn) Connected() bool { return c.nc != nil && c.nc.IsConnected() }
 
 // connectWithRetry dials url with a bounded retry, giving the INITIAL
 // handshake the same stall-tolerance internal/natsfixture gives test
@@ -280,12 +383,28 @@ func wipeBytes(buf []byte) {
 
 // Wrap adapts an existing *nats.Conn into a substrate *Conn. Useful when
 // callers need custom nats.Options beyond ConnectOpts.
+//
+// The wrapped connection's disconnect and reconnect handler slots become
+// substrate's (newConn's doc says why they must have exactly one owner), so
+// a caller wanting either edge asks for it through OnConnectionStateChange
+// rather than setting the nats.go handler itself — a handler set on nc
+// before Wrap is replaced, and one set after would replace substrate's and
+// silently blind every OnConnectionStateChange listener. scripts/lint-conventions.go
+// enforces that, since nothing about the failure is visible at runtime.
+//
+// Wrapping the SAME *nats.Conn twice is therefore not equivalent to holding
+// one Conn twice: the handler slots follow the LAST wrap, so only the newest
+// Conn's listeners are fanned out to. internal/bootstrap does exactly this
+// (primordial.go and reconcile.go each wrap the caller's connection), which
+// is harmless only because neither registers a listener. A caller that needs
+// connection-state edges must keep the Conn it registered on, and must not
+// let another Wrap of the same *nats.Conn outlive it.
 func Wrap(nc *nats.Conn) (*Conn, error) {
 	js, err := jetstream.New(nc)
 	if err != nil {
 		return nil, fmt.Errorf("substrate: jetstream context: %w", err)
 	}
-	return &Conn{nc: nc, js: js, buckets: make(map[string]jetstream.KeyValue), objectStores: make(map[string]jetstream.ObjectStore)}, nil
+	return newConn(nc, js), nil
 }
 
 // NATS returns the underlying *nats.Conn. Provided as an escape hatch for
@@ -311,7 +430,18 @@ func (c *Conn) Request(ctx context.Context, subject string, body []byte) ([]byte
 }
 
 // Close shuts down the connection. Safe to call multiple times.
+//
+// The latch is set BEFORE the underlying close, not after: nats.go pushes its
+// DisconnectedErrCB from the close path itself, so a latch set afterwards
+// would race the very callback it exists to suppress — and the fan-out's
+// listeners would act on a phantom outage during teardown
+// (OnConnectionStateChange's doc has the mechanism). Nothing un-latches it: a
+// closed connection never reconnects, so there is no state after this worth
+// reporting.
 func (c *Conn) Close() {
+	c.connStateMu.Lock()
+	c.closing = true
+	c.connStateMu.Unlock()
 	if c.nc != nil {
 		c.nc.Close()
 	}

@@ -143,6 +143,131 @@ type CoreKVSource struct {
 	// redelivered or otherwise unchanged event must not re-invoke every
 	// pipeline's re-derivation.
 	lastTaxonomySnapshot []taxonomy.TypeSnapshot
+
+	// taxLiveMu guards the taxonomy-liveness state below —
+	// taxonomyLive/taxonomyEpoch/taxonomyDead/taxonomySweepDue — and is held
+	// across the ARMED half of the liveness report (TaxonomyLiveness.Armed, a
+	// flag flip) and nothing else.
+	//
+	// Two producers move that flag: the dispatch goroutine arms, substrate's
+	// connection-state fan-out disarms. Serializing the decision and the flag
+	// flip under one lock is what makes the flag's value match the state at
+	// every instant — releasing it before flipping would let a disarm's state
+	// change land while an already-decided arm was still on its way to the
+	// consumer, and the consumer would be told "live" last.
+	//
+	// The CHANGED half is deliberately outside it. That callback re-derives
+	// the whole live lens corpus, so holding a lock across it would put
+	// network I/O under a mutex that nats.go's single serial callback
+	// goroutine also takes. It runs on the dispatch goroutine only, which is
+	// what keeps it single-producer without a lock at all.
+	//
+	// Lock order: mu is never held while taxLiveMu is taken. The reverse is
+	// also true for everything invoked UNDER taxLiveMu — the Armed callback
+	// is a flag flip and touches nothing here. It is emphatically NOT true of
+	// the Changed callback (it reaches reloader.retryRefused → ruleKnown →
+	// Get, which takes mu), which is a second reason that one runs outside.
+	taxLiveMu sync.Mutex
+	// taxonomyLive is the last liveness verdict REPORTED, so an unchanged
+	// verdict is never re-reported (each report costs a re-derivation sweep
+	// over every live lens).
+	//
+	// Lifetime: starts false (a source that has never drained its replay is
+	// not current); set true by armTaxonomy once the durable is drained; set
+	// false by connectionLost on every connection loss; latched false by
+	// taxonomyConsumerDead; and reset by process death only — nothing here
+	// persists, so a restart re-proves liveness through a fresh boot replay.
+	taxonomyLive bool
+	// taxonomyEpoch counts connection losses. It exists because the
+	// caught-up probe and its verdict are separated by a round trip: a
+	// verdict computed before a disconnect must not arm the resolver after
+	// it, and comparing the epoch the probe started under against the
+	// current one is what discards exactly those.
+	taxonomyEpoch uint64
+	// taxonomyDead latches once consume has reported the subscription dead.
+	// A dead source must never arm again, and would otherwise: the durable
+	// still exists server-side with nothing consuming it, so it reads
+	// perfectly caught up forever.
+	taxonomyDead bool
+	// taxonomySweepDue records that a liveness transition has flipped the
+	// flag but its Changed sweep has not run yet. It exists because the two
+	// halves of a report are split across goroutines on the DISARM path: the
+	// flag flips immediately, wherever the loss was observed, and the sweep
+	// is owed to the dispatch goroutine. Cleared by the dispatch goroutine
+	// when it runs the sweep; a second loss before that adds nothing (one
+	// sweep re-derives against current state regardless of how many
+	// transitions it covers).
+	taxonomySweepDue bool
+	// taxonomyUnarmedSince is when the source last stopped being — or, from
+	// construction, has never yet become — armed. It is what turns "unarmed"
+	// into an observable DURATION on the health entry: unarmed for a second
+	// during boot replay is the design working, unarmed for ten minutes is an
+	// incident, and the flag alone cannot tell them apart.
+	taxonomyUnarmedSince time.Time
+	// taxonomyProbeFailures is the current run of consecutive caught-up probe
+	// failures, published for the same reason.
+	taxonomyProbeFailures int
+	// taxonomyDrainedVerdicts counts caught-up verdicts the watcher has
+	// produced, armed or discarded alike — see recordTaxonomyDrainedVerdict
+	// for the two states it separates.
+	taxonomyDrainedVerdicts int
+	// taxonomyLiveness is set by SetTaxonomyLivenessCallbacks.
+	taxonomyLiveness TaxonomyLiveness
+	// armCh carries a caught-up verdict (tagged with the epoch it was
+	// computed under) from watchTaxonomyLiveness to consume's dispatch
+	// goroutine. Unbuffered, and read only from consume's select, which is
+	// the whole barrier: consume cannot receive it while it is inside
+	// handle(), so a verdict can only be applied once every event that was
+	// acked when the probe ran has been fully processed — including the
+	// InstallSnapshot the last of them triggered.
+	armCh chan uint64
+	// sweepCh wakes the dispatch goroutine to run a sweep it is owed for a
+	// transition decided elsewhere. Buffered depth 1 with a non-blocking
+	// send: the connection-state goroutine must never park here (it is
+	// nats.go's single serial callback goroutine), and a second wake while
+	// one is already queued is redundant — taxonomySweepDue, not the channel
+	// depth, is what records the debt.
+	sweepCh chan struct{}
+	// taxonomyDeadCh is closed exactly once, by taxonomyConsumerDead, to
+	// unpark a liveness watcher already blocked handing a verdict to a
+	// consume that has left its select for good.
+	taxonomyDeadCh chan struct{}
+}
+
+// TaxonomyLiveness is the pair of callbacks a taxonomy consumer registers
+// with SetTaxonomyLivenessCallbacks. They are separate because they have
+// genuinely different contracts, and collapsing them into one callback is
+// what forces a caller to choose between a slow fail-closed flag and a sweep
+// running on the wrong goroutine.
+type TaxonomyLiveness struct {
+	// Armed flips the consumer's fail-closed flag —
+	// taxonomy.Resolver.SetArmed and nothing more. Invoked UNDER the source's
+	// liveness lock, from whichever goroutine observed the transition
+	// (substrate's connection-state fan-out for a loss, the dispatch
+	// goroutine for an arm), so it must be a non-blocking in-memory write: no
+	// I/O, no lock that any other liveness participant holds, no re-entry
+	// into this source.
+	//
+	// It runs there precisely because disarming must not wait. The flag is
+	// what makes a `*` lens's next Expand answer StatusStale instead of
+	// StatusArmed, and every instant it lags the truth is an instant a lens
+	// can narrow against a taxonomy nobody is maintaining.
+	Armed func(armed bool)
+	// Changed re-derives whatever the caller derives from the resolver's
+	// answer. Invoked on this source's single dispatch goroutine, outside
+	// every lock, exactly like the snapshot callback — which is the point:
+	// the snapshot path and the liveness path both re-derive the same live
+	// lens corpus, and two goroutines doing that concurrently interleave
+	// their publishes with their baselines (cmd/refractor's rederiveEntry
+	// commits its baseline under a per-entry lock but publishes outside it)
+	// and race the activation path's check-then-register. Confinement to one
+	// goroutine is the ordering argument for both.
+	//
+	// It may lag its Armed edge by one event's handling. That is deliberate
+	// and safe: it re-derives from the resolver's CURRENT answer rather than
+	// from the edge that scheduled it, so a sweep that arrives after two
+	// transitions produces the same result as two sweeps.
+	Changed func()
 }
 
 // vertexTypeClassValue is the envelope class of a type meta vertex's root
@@ -442,6 +567,13 @@ func NewCoreKVSource(conn *substrate.Conn, bucket, instance string, logger *slog
 		typeCanonicalNames: make(map[string]string),
 		retainedTypeNames:  make(map[string]struct{}),
 		subtypeOf:          make(map[string]map[string]struct{}),
+		// A source is unarmed from the instant it exists, and the clock on
+		// that state starts here rather than at Start: the boot replay it has
+		// to drain before it can arm begins with the process, and a health
+		// entry that only started counting at Start would under-report every
+		// slow boot.
+		taxonomyUnarmedSince: time.Now(),
+		taxonomyDeadCh:       make(chan struct{}),
 	}
 }
 
@@ -474,12 +606,41 @@ func (s *CoreKVSource) SetTaxonomyCallback(fn func([]taxonomy.TypeSnapshot)) {
 // SetTaxonomyDeadCallback registers the callback invoked once, from
 // consume's goroutine, when the events channel closes for a reason OTHER
 // than ctx cancellation — an unrecoverable subscription error
-// (runKVSubscription's doc), never a clean shutdown. This is the signal
-// item 4's taxonomy resolver disarms itself on (dynamic-type-taxonomy-
-// design.md §6.5's "resolver's consumer dies" row). Must be set before
-// Start.
+// (runKVSubscription's doc), never a clean shutdown. This is the TERMINAL
+// half of the resolver's disarm signal (dynamic-type-taxonomy-design.md
+// §6.5's "resolver's consumer dies" row): a source that reports here never
+// reports liveness again, where the recoverable losses
+// SetTaxonomyLivenessCallback reports do come back. Exactly one of the two
+// callbacks reports any given transition — this one is not accompanied by a
+// liveness(false), so a caller wiring both never pays two re-derivation
+// sweeps for one event. Must be set before Start.
 func (s *CoreKVSource) SetTaxonomyDeadCallback(fn func()) {
 	s.taxonomyDeadCB = fn
+}
+
+// SetTaxonomyLivenessCallbacks registers the pair that reports whether the
+// taxonomy snapshots this source emits are LIVE-CURRENT — the claim
+// taxonomy.Resolver.SetArmed encodes and §4.2's armed tier is sold on. The
+// pair fires only on a change, on true/false edges:
+//
+//   - true once this boot's durable consumer has drained everything it owes
+//     (substrate.Conn.ConsumerCaughtUp: nothing pending delivery AND nothing
+//     delivered-but-unacked) — i.e. once the whole boot replay has been not
+//     just delivered but PROCESSED. Until then the snapshots already handed
+//     to taxonomyCB describe a prefix of the taxonomy, and a `*` lens
+//     activating against one narrows on a downward closure whose leaves have
+//     simply not been read yet.
+//   - false the moment the NATS connection drops. A durable resumes from its
+//     ack floor, so nothing is lost — but during the window the source is
+//     blind, and a resolver still answering StatusArmed is asserting a
+//     currency nobody is maintaining. It goes true again only after the same
+//     drained test passes on the re-established connection, never on the
+//     reconnect edge itself.
+//
+// See TaxonomyLiveness for which goroutine each half runs on and why they
+// are not the same one. Must be set before Start.
+func (s *CoreKVSource) SetTaxonomyLivenessCallbacks(cbs TaxonomyLiveness) {
+	s.taxonomyLiveness = cbs
 }
 
 // Get returns the last-loaded Rule for ruleID and whether it was found.
@@ -525,21 +686,77 @@ func (s *CoreKVSource) Start(ctx context.Context) error {
 	if err := s.conn.PruneStaleDurables(ctx, s.bucket, lensSourceDurablePrefix, durable, s.logger); err != nil {
 		s.logger.Warn("prune stale lens-source durables failed", "err", err)
 	}
+	// The taxonomy-liveness half, wired BEFORE the subscription exists. A
+	// connection lost between here and the first delivered event must count:
+	// it is the window in which the boot replay itself is running, and an
+	// epoch bump during it is what stops a caught-up verdict computed across
+	// that gap from arming a resolver whose snapshot is missing whatever the
+	// reconnecting durable has yet to re-deliver.
+	s.armCh = make(chan uint64)
+	s.sweepCh = make(chan struct{}, 1)
+	s.conn.OnConnectionStateChange(func(connected bool) {
+		if !connected {
+			s.connectionLost()
+		}
+		// The reconnect edge is deliberately ignored. Being connected again
+		// says bytes can flow, not that the durable has re-delivered what
+		// landed while it could not — watchTaxonomyLiveness re-establishes
+		// that the same way it did at boot, which is the only test that
+		// backs the claim StatusArmed makes.
+	})
 	events, err := s.conn.SubscribeKVChanges(
 		ctx,
 		s.bucket,
 		[]string{"vtx.meta.", "lnk.meta.*.subtypeOf.>"},
 		durable,
-		substrate.SubscribeKVOptions{
-			IncludeHistory: true,
-			Logger:         s.logger,
-		},
+		s.subscribeOptions(),
 	)
 	if err != nil {
 		return fmt.Errorf("subscribe core KV vtx.meta.>+lnk.meta.*.subtypeOf.>: %w", err)
 	}
+	go s.watchTaxonomyLiveness(ctx, durable)
 	go s.consume(ctx, events, durable)
 	return nil
+}
+
+// subscribeOptions is the subscription posture this source needs, named so it
+// can be asserted rather than only read. Every field below is a premise of the
+// taxonomy-liveness barrier's correctness (watchTaxonomyLiveness), and a
+// premise nobody can test is one that drifts.
+func (s *CoreKVSource) subscribeOptions() substrate.SubscribeKVOptions {
+	return substrate.SubscribeKVOptions{
+		IncludeHistory: true,
+		Logger:         s.logger,
+		// A delivery budget is the wrong tool for this stream. A message this
+		// consumer exhausts is Termed by the server and dropped from its
+		// pending set, and a Termed taxonomy event is state loss with no other
+		// write path: the type or the subtypeOf edge it carried is simply
+		// missing from every snapshot this process ever builds again, with
+		// nothing to repair it and — worse — nothing to distinguish it from a
+		// type that does not exist. Redelivering forever is the fail-closed
+		// direction; it costs a retry loop, where the bound costs correctness.
+		MaxDeliver: -1,
+		// The ack clock has to start when the WORK does, not when the message
+		// reaches the client's buffer. handle() is strictly serial and can do
+		// real work per event (a lens activation), so with nats.go's default
+		// 500-message prefetch a queued event sits through every preceding
+		// event's handler and can exhaust any AckWait before anything has
+		// looked at it. Prefetch of one plus a generous wait keeps a delivery
+		// counted once per genuine attempt — which is also what keeps
+		// ConsumerCaughtUp's two counters a sound "has everything been
+		// handled" test rather than a "has everything been shipped to a
+		// buffer" one.
+		MaxPrefetch: 1,
+		AckWait:     taxonomyEventAckWait,
+		// A stalled-and-re-opened iterator is a gap this source could not see
+		// through, and it is the interruption that leaves no other trace: the
+		// channel stays open, nothing is lost (the durable resumes from its
+		// ack floor), and the connection never dropped — so without this hook
+		// the resolver keeps answering StatusArmed straight through it.
+		// Treated exactly like a connection loss, because it is the same fact:
+		// for that window this source was not reading the taxonomy.
+		OnReopen: s.subscriptionReopened,
+	}
 }
 
 func (s *CoreKVSource) consume(ctx context.Context, events <-chan substrate.KVEvent, durable string) {
@@ -548,6 +765,29 @@ func (s *CoreKVSource) consume(ctx context.Context, events <-chan substrate.KVEv
 		case <-ctx.Done():
 			s.deleteOwnDurable(durable)
 			return
+		case epoch := <-s.armCh:
+			// The replay barrier lands HERE and nowhere else. This goroutine
+			// is the one that runs handle() — and therefore InstallSnapshot
+			// — so a caught-up verdict received in this select is provably
+			// behind every event that had been acked when the probe ran.
+			// Applying it on the probing goroutine instead would race the
+			// last replayed event: substrate acks a message as soon as this
+			// loop RECEIVES it, well before handle() has folded it into the
+			// snapshot.
+			//
+			// armCh is nil for a source whose consume is driven directly
+			// (the dead-callback tests) rather than by Start; a nil channel
+			// is never ready, so this case simply never fires there.
+			s.armTaxonomy(epoch)
+		case <-s.sweepCh:
+			// A liveness transition decided on another goroutine (a
+			// connection loss) flipped the fail-closed flag there and left
+			// its re-derivation sweep owed to this one. Running it here is
+			// what keeps the sweep single-producer: the snapshot path above
+			// re-derives the same live lens corpus, and two goroutines doing
+			// that concurrently interleave a publish with another's baseline
+			// commit and race the activation path's check-then-register.
+			s.runDueTaxonomySweep()
 		case evt, ok := <-events:
 			if !ok {
 				// A closed channel while ctx is still live means the
@@ -559,8 +799,17 @@ func (s *CoreKVSource) consume(ctx context.Context, events <-chan substrate.KVEv
 				// too (select does not guarantee which ready case wins),
 				// which correctly skips this: that is a clean shutdown, not
 				// a dead consumer.
-				if ctx.Err() == nil && s.taxonomyDeadCB != nil {
-					s.taxonomyDeadCB()
+				if ctx.Err() == nil {
+					// The latch first, so a caught-up verdict already in
+					// flight from watchTaxonomyLiveness cannot arm behind
+					// the death report. It also stops the watcher, which
+					// would otherwise keep probing a durable that still
+					// exists server-side and, with nobody consuming it,
+					// reads perfectly caught up forever.
+					s.taxonomyConsumerDead()
+					if s.taxonomyDeadCB != nil {
+						s.taxonomyDeadCB()
+					}
 				}
 				return
 			}

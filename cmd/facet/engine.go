@@ -7,8 +7,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/nats-io/nats.go"
-
 	"github.com/operatinggraph/lattice/internal/edge/agent"
 	"github.com/operatinggraph/lattice/internal/edge/overlay"
 	"github.com/operatinggraph/lattice/internal/edge/store"
@@ -169,12 +167,19 @@ func newEngine(ctx context.Context, cfg engineConfig, identityID, deviceID, toke
 	} else if ok {
 		fd.markResumed(cursor)
 	}
-	// Connectivity handlers key the offline banner on this connection's own
-	// host↔NATS state (design §4.4), not the browser↔host SSE transport —
-	// nats.go calls these on every disconnect/reconnect cycle regardless of
-	// how many times the underlying TCP connection actually flaps.
-	conn.NATS().SetDisconnectErrHandler(func(_ *nats.Conn, _ error) { fd.setConnected(false) })
-	conn.NATS().SetReconnectHandler(func(_ *nats.Conn) { fd.setConnected(true) })
+	// Connectivity keys the offline banner on this connection's own host↔NATS
+	// state (design §4.4), not the browser↔host SSE transport — the edge
+	// fires on every disconnect/reconnect cycle regardless of how many times
+	// the underlying TCP connection actually flaps, and setConnected already
+	// swallows a repeat of the state it is already in.
+	//
+	// Registered through substrate rather than on the raw *nats.Conn: nats.go's
+	// disconnect and reconnect handler slots hold ONE callback each, so setting
+	// them here would unregister substrate's own pair and silently blind every
+	// other listener on this connection (substrate.Conn.OnConnectionStateChange
+	// has the mechanism). scripts/lint-conventions.go enforces it, because
+	// nothing about that failure is visible at runtime.
+	conn.OnConnectionStateChange(fd.setConnected)
 	overlayStore := overlay.New(st)
 	mgr, err := edgesync.New(ctrl, st, edgesync.Config{
 		IdentityID: identityID,

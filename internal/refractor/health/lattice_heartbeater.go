@@ -393,6 +393,27 @@ type capIssue struct {
 }
 
 // LatticeHealthDoc mirrors Contract #5 §5.2 (same shape as Processor).
+// TaxonomyLivenessSnapshot is the taxonomy resolver's currency claim as the
+// heartbeat renders it. It mirrors lens.TaxonomyLivenessStatus rather than
+// importing it: internal/refractor/health does not depend on
+// internal/refractor/lens, and the health entry's shape is its own contract
+// (docs/observability/health-kv-schema.md) regardless of who produces it.
+type TaxonomyLivenessSnapshot struct {
+	// Armed is the claim itself: the resolver's snapshot is backed by a live,
+	// drained invalidation consumer, so a `*` lens may narrow against it.
+	Armed bool
+	// Dead reports that the feeding subscription failed terminally, so Armed
+	// can never become true again without a restart — the difference between
+	// "waiting" and "will wait forever".
+	Dead bool
+	// UnarmedSince is when the resolver last stopped being (or has never yet
+	// become) armed. Zero while armed.
+	UnarmedSince time.Time
+	// ProbeFailures is the current run of consecutive drain-probe failures,
+	// the ordinary reason a resolver stays unarmed with nothing else to show.
+	ProbeFailures int
+}
+
 type LatticeHealthDoc struct {
 	Key         string         `json:"key"`
 	Component   string         `json:"component"`
@@ -465,6 +486,19 @@ type LatticeHeartbeater struct {
 	// the counterpart to lensLags that stays a legitimate 0 rather than
 	// vanishing when the registry is empty. nil omits the field.
 	LensCountProvider func() int
+
+	// TaxonomyLivenessProvider optionally returns the taxonomy resolver's
+	// currency claim — emitted as metrics.taxonomyLiveness
+	// (dynamic-type-taxonomy-design.md §4.2). It exists because that state is
+	// otherwise invisible: an unarmed resolver forces every `*`-carrying lens
+	// onto the broad filter, and the per-lens reason recording that
+	// (filterBroadReason `taxonomy-unarmed`) is the LOWEST-ranked cause, so a
+	// lens that is also non-exhaustive for its own reasons reports that
+	// instead and the unarmed state never surfaces at all. A resolver stuck
+	// unarmed is an instance-level fact and belongs on the instance's entry,
+	// not inferred from whichever reason a lens happened to rank first. nil
+	// omits the field.
+	TaxonomyLivenessProvider func() TaxonomyLivenessSnapshot
 
 	// RegistryReconciliationProvider optionally returns the lens IDs
 	// currently declared in Core KV (a `meta.lens` vertex + spec) but absent
@@ -691,6 +725,24 @@ func (h *LatticeHeartbeater) emit(ctx context.Context, status string) {
 	// issue below.
 	if h.LensCountProvider != nil {
 		metrics["lensesRegistered"] = h.LensCountProvider()
+	}
+	// Taxonomy currency (dynamic-type-taxonomy-design.md §4.2). Emitted every
+	// cycle including the healthy armed:true state, so an observer can render
+	// the green case and — more to the point — can tell "unarmed for a second
+	// during boot replay", which is the design working, from "unarmed for ten
+	// minutes", which is not. unarmedSeconds is the field that distinguishes
+	// them; the flag alone cannot.
+	if h.TaxonomyLivenessProvider != nil {
+		tl := h.TaxonomyLivenessProvider()
+		entry := map[string]any{
+			"armed":         tl.Armed,
+			"dead":          tl.Dead,
+			"probeFailures": tl.ProbeFailures,
+		}
+		if !tl.Armed && !tl.UnarmedSince.IsZero() {
+			entry["unarmedSeconds"] = int64(now.Sub(tl.UnarmedSince).Seconds())
+		}
+		metrics["taxonomyLiveness"] = entry
 	}
 	// Capability-lens liveness backstop: surface a §5.5 issue (and degrade status)
 	// when an auth-plane lens is paused or lagging beyond threshold. The

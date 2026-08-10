@@ -1612,17 +1612,45 @@ func main() {
 	src.SetUpdateCallback(rl.update)
 	src.SetRemoveCallback(rm.remove)
 	// The taxonomy trigger, on this SAME meta watch (dynamic-type-taxonomy-
-	// design.md §6.1, amendment A1; §14 Fire A item 4). Both callbacks fire
-	// on src's single dispatch goroutine — the same one SetLoadCallback/
-	// SetUpdateCallback/SetRemoveCallback above already run on — so nothing
-	// here needs a lock beyond what taxResolver and rl already take
-	// internally, and no goroutine wraps the synchronous half (only
-	// rl.taxonomyChanged's per-entry Rebuild call is async, mirroring
+	// design.md §6.1, amendment A1; §14 Fire A item 4). The snapshot and dead
+	// callbacks fire on src's single dispatch goroutine — the same one
+	// SetLoadCallback/SetUpdateCallback/SetRemoveCallback above already run
+	// on — so nothing here needs a lock beyond what taxResolver and rl
+	// already take internally, and no goroutine wraps the synchronous half
+	// (only rl.taxonomyChanged's per-entry Rebuild call is async, mirroring
 	// reloader.update's MatchChange arm).
+	//
+	// The liveness pair PRESERVES that confinement rather than breaking it,
+	// which is why it is a pair. Armed is a resolver flag flip, so it runs
+	// wherever the transition was observed — including substrate's
+	// connection-state goroutine — and the fail-closed direction never waits
+	// on whatever event this dispatch goroutine happens to be inside. Changed
+	// is rl.taxonomyChanged, and it runs HERE, because that sweep is exactly
+	// the second writer the ordering arguments above rule out: two goroutines
+	// re-deriving the live corpus interleave one rederiveEntry's publish with
+	// another's baseline commit (published outside entry.taxMu, recorded
+	// inside it), and race activateIfNotRegistered's check-then-register into
+	// two pipelines for one lens.
+	//
+	// The GRAPH and the CURRENCY of it are separate signals on purpose
+	// (taxonomy.Resolver.SetArmed's doc): a snapshot is installed the moment
+	// one is rebuilt, including the partial ones the boot replay emits, while
+	// arming waits until the source can show its consumer has drained. Arming
+	// here on every snapshot instead — which is what the presence of a
+	// snapshot tempts — would report StatusArmed over a taxonomy the replay
+	// is still halfway through, and a `*` lens activating in that window
+	// narrows on a downward closure whose leaves have not been read yet.
 	src.SetTaxonomyCallback(func(snap []taxonomy.TypeSnapshot) {
 		taxResolver.InstallSnapshot(snap)
-		taxResolver.SetArmed(true)
 		rl.taxonomyChanged()
+	})
+	src.SetTaxonomyLivenessCallbacks(lens.TaxonomyLiveness{
+		Armed: func(armed bool) { taxResolver.SetArmed(armed) },
+		// Both directions re-derive. Arming lets every live `*` lens narrow
+		// from the broad filter it took while the taxonomy was unproven;
+		// disarming widens it back before the blind window can be served
+		// through a narrow client gate that acks-and-drops.
+		Changed: rl.taxonomyChanged,
 	})
 	src.SetTaxonomyDeadCallback(func() {
 		taxResolver.SetArmed(false)
@@ -1653,6 +1681,21 @@ func main() {
 	registryProbe := health.NewRegistryProbe(conn, coreKVBucket, registeredLensIDs, logger)
 	go registryProbe.Run(ctx)
 	hb.RegistryReconciliationProvider = registryProbe.Missing
+
+	// Taxonomy currency on this instance's own entry. Without it the only
+	// trace of a resolver that never arms is a per-lens filterBroadReason,
+	// and that reason ranks LAST — so the one shipped `*` lens, which is
+	// non-exhaustive for its own reasons, reports that instead and an
+	// indefinitely-unarmed platform looks perfectly healthy.
+	hb.TaxonomyLivenessProvider = func() health.TaxonomyLivenessSnapshot {
+		st := src.TaxonomyLivenessStatus()
+		return health.TaxonomyLivenessSnapshot{
+			Armed:         st.Armed,
+			Dead:          st.Dead,
+			UnarmedSince:  st.UnarmedSince,
+			ProbeFailures: st.ProbeFailures,
+		}
+	}
 
 	// The same reconciliation, on demand, is the retention-class destruction
 	// consumer's readiness gate. It enumerates live lenses by declared holder

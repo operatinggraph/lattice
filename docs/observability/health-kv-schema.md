@@ -140,6 +140,27 @@ heartbeat, always present once `LensCountProvider` is wired — the counterpart 
 `lensLags`/`lensLatency` that stays a legitimate `0` instead of vanishing when the registry
 is empty (`refractor-lens-registry-restart-integrity-design.md` §4 Fire B step 1).
 
+`metrics.taxonomyLiveness` (object) reports whether this instance's dynamic-type taxonomy
+resolver is **armed** — whether the snapshot every `*`-carrying lens narrows against is backed
+by a live, fully-drained invalidation consumer (`dynamic-type-taxonomy-design.md` §4.2).
+Emitted every heartbeat once `TaxonomyLivenessProvider` is wired, including the healthy
+`armed: true` case, so an observer can render the green state as well as the anomaly.
+
+| field | meaning |
+|---|---|
+| `armed` | the claim itself. `false` forces **every** `*`-carrying lens onto the broad filter |
+| `dead` | the feeding subscription failed terminally — `armed` cannot become true again without a restart. The difference between "waiting" and "waiting forever" |
+| `probeFailures` | current run of consecutive drain-probe failures; the ordinary reason a resolver stays unarmed with nothing else to show for it |
+| `unarmedSeconds` | how long it has been unarmed. Absent while armed |
+
+`unarmedSeconds` is the field that carries the alert, not `armed`: unarmed for a second during
+boot replay is the barrier working as designed, unarmed for ten minutes is an incident, and the
+flag alone cannot tell them apart. It is emitted here — on the instance's own entry — rather
+than left to be inferred from the per-lens `filterBroadReason`, because that reason
+(`taxonomy-unarmed`) is the **lowest-ranked** cause in the vocabulary below: a lens that is also
+non-exhaustive for its own reasons reports that instead, and the unarmed state surfaces nowhere
+at all.
+
 `LensRegistryIncomplete` (severity `error`) is a heartbeat issue code: a lens declared in
 Core KV (a `meta.lens` vertex + spec) but absent from the running registry, raised by a
 background registry-reconciliation probe (`internal/refractor/health/registry_probe.go`,
@@ -502,6 +523,7 @@ currently reserved-but-unemitted.
   "uptime": "<ISO-8601-duration>",
   "metrics": {
     "lensesRegistered": <int>,
+    "taxonomyLiveness": {"armed": <bool>, "dead": <bool>, "probeFailures": <int>, "unarmedSeconds": <int64>},
     "lensLags": {"<lensCanonicalName>": <uint64>, ...},
     "lensLatency": {
       "<lensCanonicalName>": {

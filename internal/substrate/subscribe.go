@@ -38,8 +38,51 @@ type SubscribeKVOptions struct {
 	// AckPolicy overrides the default AckExplicitPolicy. Most callers
 	// should leave this zero.
 	AckPolicy jetstream.AckPolicy
-	// MaxDeliver bounds redelivery on Nak. Defaults to 10 when zero.
+	// MaxDeliver bounds redelivery on Nak. Defaults to 10 when zero. A
+	// NEGATIVE value is passed through as JetStream's unlimited redelivery,
+	// which is the right posture for a subscription whose events carry state
+	// with no other write path: a message Termed by an exhausted delivery
+	// budget is silently gone, and the derived state built from the stream is
+	// wrong from then on with nothing left to repair it.
 	MaxDeliver int
+	// AckWait is how long JetStream waits for an ack before redelivering. Zero
+	// leaves JetStream's 30s default, which is right for a caller that drains
+	// the returned channel promptly and wrong for one that does real work per
+	// event: the dispatch side is strictly serial, so a consumer spending
+	// longer than AckWait on one event has it redelivered WHILE STILL BEING
+	// HANDLED, burning a delivery against MaxDeliver every time.
+	//
+	// Setting it is not sufficient on its own — see MaxPrefetch. Mirrors
+	// DurableConsumerConfig.AckWait (consumer.go) deliberately: same shape,
+	// same hazard, same answer.
+	AckWait time.Duration
+	// MaxPrefetch caps how many messages the client pulls ahead of the
+	// caller's consumption. Zero leaves nats.go's DefaultMaxMessages (500),
+	// which AckWait alone cannot rescue: the ack clock starts when a message
+	// is DELIVERED INTO THE CLIENT BUFFER, not when the caller receives it, so
+	// on a DeliverAll replay a queued message can exhaust any AckWait before
+	// anyone has looked at it. A caller doing real work per event should set
+	// 1, so the ack clock starts when the work does.
+	MaxPrefetch int
+	// OnReopen, when set, is called each time the messages iterator is
+	// re-opened after a transient stall — each time, that is, that this
+	// subscription had a gap it could not see through. Nil (the default)
+	// means nobody is watching and a reopen stays silent, exactly as it is
+	// for every caller that does not set it.
+	//
+	// It exists because "the channel never closed" and "I have missed
+	// nothing" are different claims. No message is LOST across a reopen: the
+	// ack floor is the position, and everything undelivered comes back. But
+	// between the stall and that redelivery the caller is blind, so a caller
+	// that derives a FRESHNESS claim from this stream — "what I hold is
+	// current" — must withdraw it for the gap, where a caller deriving only
+	// eventual state can ignore the reopen entirely. That asymmetry is why
+	// this is opt-in rather than a channel-close.
+	//
+	// Invoked on the subscription's own goroutine, before the reopen, holding
+	// nothing. It must be prompt and must not block: this subscription cannot
+	// re-open, and so cannot deliver anything, until it returns.
+	OnReopen func()
 	// Logger is used for internal diagnostic messages (decode failures,
 	// channel-blocked drops). Defaults to slog.Default().
 	Logger *slog.Logger
@@ -78,10 +121,15 @@ type SubscribeKVOptions struct {
 // durability, so re-invoking with the same durableName resumes from it (the
 // runKVSubscription loop only closes the channel; it never deletes the durable).
 // Deleting the durable is an explicit, separate call (DeleteDurable /
-// PruneStaleDurables / DeleteStreamConsumer). Unrecoverable subscription errors
-// (iterator stops, decode failures that exhaust MaxDeliver) also close
-// the channel — callers should treat channel close as the signal that
-// the subscription is gone.
+// PruneStaleDurables / DeleteStreamConsumer).
+//
+// The channel also closes when the subscription is TERMINALLY gone — the
+// server-side consumer deleted or not found, or a malformed request
+// (terminalSubscriptionError). Callers may therefore treat channel close as
+// "this feed is over" and act on it. A merely stalled iterator does NOT close
+// it: the iterator is re-opened against the same durable, which resumes from
+// its ack floor, so an idle stream's missed heartbeat costs a reopen rather
+// than the subscription.
 //
 // Backpressure: the channel is unbuffered. The dispatch loop will not
 // ack a message until the caller has consumed the previous event, which
@@ -139,6 +187,7 @@ func (c *Conn) SubscribeKVChanges(
 		DeliverPolicy: deliverPolicy,
 		AckPolicy:     ackPolicy,
 		MaxDeliver:    maxDeliver,
+		AckWait:       opts.AckWait,
 	}
 	if len(normalizedPrefixes) == 1 {
 		cfg.FilterSubject = subjectPrefix + normalizedPrefixes[0]
@@ -157,7 +206,7 @@ func (c *Conn) SubscribeKVChanges(
 	}
 
 	out := make(chan KVEvent)
-	go c.runKVSubscription(ctx, cons, durableName, bucket, subjectPrefix, out, logger)
+	go c.runKVSubscription(ctx, cons, durableName, bucket, subjectPrefix, opts.MaxPrefetch, opts.OnReopen, out, logger)
 	return out, nil
 }
 
@@ -379,8 +428,72 @@ func normalizePrefix(p string) (string, error) {
 		"(append '.' for prefix-and-children, or '>' for all descendants)", p)
 }
 
+// subscriptionReopenBackoff is the pause before re-opening the messages
+// iterator after a TRANSIENT failure, so a server that is refusing pull
+// requests is not hammered. Sized well under any caller's own liveness
+// window: the reopen is the repair, and a slow repair is a blind window for
+// whatever the caller derives from this stream.
+const subscriptionReopenBackoff = 250 * time.Millisecond
+
+// consumerExistsProbeTimeout bounds the "is my consumer still there" question
+// asked before a reopen. Short: it runs on a path that is already failing, and
+// an unanswered probe is treated as "still there" (keep reopening), which is
+// the recoverable direction.
+const consumerExistsProbeTimeout = 5 * time.Second
+
+// terminalSubscriptionError reports whether an iterator error ITSELF says the
+// subscription is gone rather than momentarily unhappy.
+//
+// It is a fast path, not the authority — see subscriptionIsGone, which exists
+// because this classification is not decidable from the error alone. Only
+// errors that name the consumer's absence, or a malformed request, qualify:
+// neither is repaired by asking again. Everything else — most importantly
+// jetstream.ErrNoHeartbeat, which nats.go raises whenever it sees no traffic
+// for two heartbeat intervals and which parseMessagesOpts arms by DEFAULT
+// (ReportMissingHeartbeats) — is a stall on its face, and treating a stall as
+// death is how an idle stream retires a subscription that had nothing wrong
+// with it.
+func terminalSubscriptionError(err error) bool {
+	return errors.Is(err, jetstream.ErrConsumerDeleted) ||
+		errors.Is(err, jetstream.ErrConsumerNotFound) ||
+		errors.Is(err, jetstream.ErrBadRequest)
+}
+
+// subscriptionIsGone decides whether to stop reopening, and it asks the SERVER
+// rather than trusting the error text.
+//
+// The error alone is not enough, and the gap is not hypothetical: a consumer
+// deleted out from under a live iterator very often surfaces as
+// jetstream.ErrNoHeartbeat, because the server simply stops answering and the
+// client's heartbeat monitor is what notices. That error is indistinguishable
+// from an idle stream's routine stall — so a classifier reading only the error
+// reopens forever against a consumer that no longer exists, and the caller,
+// whose whole contract is "channel close means the feed is over", is never
+// told. (internal/refractor/lens is that caller: channel-close is what latches
+// its taxonomy resolver permanently unarmed.)
+//
+// So the fast path is the error, and the authority is a ConsumerInfo lookup: a
+// consumer-not-found answer is proof of death, and every other outcome —
+// including a probe that cannot complete because the connection is down —
+// resolves to "keep trying", the direction that costs a retry rather than a
+// subscription.
+func (c *Conn) subscriptionIsGone(ctx context.Context, cons jetstream.Consumer, err error) bool {
+	if terminalSubscriptionError(err) {
+		return true
+	}
+	probeCtx, cancel := context.WithTimeout(ctx, consumerExistsProbeTimeout)
+	defer cancel()
+	_, infoErr := cons.Info(probeCtx)
+	return errors.Is(infoErr, jetstream.ErrConsumerNotFound)
+}
+
 // runKVSubscription drives the consumer iterator until ctx is cancelled
-// or the iterator returns an unrecoverable error, then closes out.
+// or the subscription is terminally gone, then closes out. A transient
+// iterator failure re-opens the iterator against the same durable instead,
+// which resumes from its ack floor — mirroring runDurableConsumer's own
+// reopen loop (consumer.go), for the same reason: the position is the
+// durable's, not the iterator's, so re-opening costs nothing and losing the
+// subscription over a heartbeat gap costs the caller its whole feed.
 //
 // IMPORTANT — durable-position semantics: this function deliberately does
 // NOT delete the JetStream consumer on shutdown. The whole point of a
@@ -399,16 +512,71 @@ func (c *Conn) runKVSubscription(
 	ctx context.Context,
 	cons jetstream.Consumer,
 	durableName, bucket, subjectPrefix string,
+	maxPrefetch int,
+	onReopen func(),
 	out chan<- KVEvent,
 	logger *slog.Logger,
 ) {
 	defer close(out)
 
-	mc, err := cons.Messages()
-	if err != nil {
-		logger.Error("substrate: SubscribeKVChanges: open messages iterator",
+	var msgOpts []jetstream.PullMessagesOpt
+	if maxPrefetch > 0 {
+		msgOpts = append(msgOpts, jetstream.PullMaxMessages(maxPrefetch))
+	}
+
+	for {
+		if ctx.Err() != nil {
+			return
+		}
+		stopped, err := c.pumpKVSubscription(ctx, cons, durableName, bucket, subjectPrefix, msgOpts, out, logger)
+		if stopped {
+			return
+		}
+		if c.subscriptionIsGone(ctx, cons, err) {
+			logger.Error("substrate: SubscribeKVChanges: subscription is gone, closing the event channel",
+				"durable", durableName, "err", err)
+			return
+		}
+		logger.Warn("substrate: SubscribeKVChanges: iterator stalled, re-opening against the same durable",
 			"durable", durableName, "err", err)
-		return
+		// Announced BEFORE the backoff and the reopen, not after: the gap has
+		// already happened by the time we get here, and a caller whose
+		// freshness claim is now false should be told while it is false rather
+		// than once the feed is healthy again. Everything undelivered still
+		// redelivers from the ack floor — what is being reported is the blind
+		// window, not a loss.
+		if onReopen != nil {
+			onReopen()
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(subscriptionReopenBackoff):
+		}
+	}
+}
+
+// pumpKVSubscription opens one messages iterator and drives it until it
+// fails or ctx is cancelled. stopped is true when the caller must give up
+// entirely (ctx done); otherwise err is why this iterator ended and the
+// caller decides whether that is terminal.
+//
+// The iterator is a per-attempt resource — opened, deferred-stopped, and
+// discarded here — which is what keeps the ctx-cancellation watcher below
+// bound to the iterator it can actually stop. A single long-lived watcher
+// over a variable holding "the current iterator" would be reading that
+// variable without synchronisation across reopens.
+func (c *Conn) pumpKVSubscription(
+	ctx context.Context,
+	cons jetstream.Consumer,
+	durableName, bucket, subjectPrefix string,
+	msgOpts []jetstream.PullMessagesOpt,
+	out chan<- KVEvent,
+	logger *slog.Logger,
+) (stopped bool, err error) {
+	mc, err := cons.Messages(msgOpts...)
+	if err != nil {
+		return false, fmt.Errorf("open messages iterator: %w", err)
 	}
 	defer mc.Stop()
 
@@ -424,27 +592,25 @@ func (c *Conn) runKVSubscription(
 	}()
 
 	for {
-		msg, err := mc.Next()
-		if err != nil {
+		msg, nextErr := mc.Next()
+		if nextErr != nil {
 			if ctx.Err() != nil {
-				return
+				return true, nil
 			}
-			logger.Warn("substrate: SubscribeKVChanges: iterator stopped",
-				"durable", durableName, "err", err)
-			return
+			return false, nextErr
 		}
 
 		evt := decodeKVMessage(msg, bucket, subjectPrefix)
 
 		select {
 		case <-ctx.Done():
-			return
+			return true, nil
 		case out <- evt:
 		}
 
-		if err := msg.Ack(); err != nil {
+		if ackErr := msg.Ack(); ackErr != nil {
 			logger.Warn("substrate: SubscribeKVChanges: ack failed",
-				"durable", durableName, "key", evt.Key, "err", err)
+				"durable", durableName, "key", evt.Key, "err", ackErr)
 		}
 	}
 }

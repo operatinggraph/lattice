@@ -13,11 +13,19 @@
 // resolver is driven by cmd/refractor/main.go, fed by
 // internal/refractor/lens.CoreKVSource's taxonomy callback (item 4, §6.1):
 // on every taxonomy-relevant CDC event the source rebuilds and hands over
-// a []TypeSnapshot, which main.go installs via InstallSnapshot then arms via
-// SetArmed(true); the source's dead callback disarms it via SetArmed(false)
-// if the underlying consumer ever dies. A Resolver constructed by New and
-// never touched again stays permanently disarmed with no snapshot, which is
-// the fail-closed posture a `*`-carrying lens sees before its process's
+// a []TypeSnapshot, which main.go installs via InstallSnapshot.
+//
+// Arming is a SEPARATE signal from that snapshot, and deliberately so. The
+// two halves of §4.2's armed test answer two different questions — "do I
+// have a graph to walk" (InstallSnapshot) and "is the consumer that feeds me
+// live AND current" (SetArmed) — and only the source that owns the consumer
+// can answer the second. It reports it through main.go's liveness callback:
+// true once its per-boot durable has drained the whole boot replay (so the
+// snapshot describes the WHOLE taxonomy, not the prefix of it that had been
+// replayed so far), false the moment the NATS connection drops under it or
+// its subscription dies. A Resolver constructed by New and never touched
+// again stays permanently disarmed with no snapshot, which is the
+// fail-closed posture a `*`-carrying lens sees before its process's
 // CoreKVSource has delivered a first taxonomy event.
 //
 // # Only a `*`-carrying label is a taxonomy vocabulary lookup
@@ -126,8 +134,30 @@ type Resolver struct {
 	poisoned      map[string]bool     // meta NanoID -> its CanonicalName collided with another entry's
 	poisonedNames map[string]bool     // canonicalName -> true, for a name deleted from byName above: lets a DIRECT query of that name report the ambiguity rather than "unknown"
 
+	// loaded records that a snapshot has been installed at least once. Set
+	// by InstallSnapshot, never cleared: a resolver that has once seen the
+	// graph keeps answering from its last snapshot, which is the whole point
+	// of StatusStale existing as a tier distinct from StatusUnknown.
 	loaded bool
-	armed  bool
+	// consumerLive is the other half of §4.2's armed test: the claim that the
+	// invalidation consumer feeding InstallSnapshot is alive AND has nothing
+	// left to deliver, so the loaded snapshot is current rather than merely
+	// last-known.
+	//
+	// Its lifetime, at every boundary, because a latch with no stated one is
+	// how a false StatusArmed gets built:
+	//   - starts false — New ships disarmed, and nothing here ever infers
+	//     liveness from having been fed;
+	//   - set true ONLY by SetArmed(true), which its own doc bounds to a
+	//     caller that has proved the feed drained;
+	//   - set false by SetArmed(false) on a connection loss or a dead
+	//     subscription, from whatever goroutine observes it — disarming is
+	//     the always-safe direction, so it is never deferred for ordering;
+	//   - CARRIED, deliberately, across InstallSnapshot (see its doc);
+	//   - reset on a process restart by construction — a new process builds a
+	//     new Resolver via New, so nothing survives a restart and the boot
+	//     replay must re-prove liveness from scratch.
+	consumerLive bool
 }
 
 // New returns a Resolver with no snapshot loaded and not armed.
@@ -246,21 +276,52 @@ func (r *Resolver) InstallSnapshot(snap []TypeSnapshot) {
 	r.poisoned = poisoned
 	r.poisonedNames = poisonedNames
 	r.loaded = true
-	// A reload must never carry a previous life's armed flag forward — a
-	// stale true here would report StatusArmed on the very next Expand call
-	// before item 4's consumer has confirmed this new snapshot is
-	// live-current. SetArmed is the only path that may set it true again.
-	r.armed = false
+	// consumerLive is deliberately untouched. It describes the FEED, not the
+	// snapshot: every snapshot reaching this method was rebuilt and handed
+	// over by that same feed, so a new one is evidence the feed is working,
+	// never a reason to doubt it. Clearing it here would also make the flag
+	// unusable in the shape §4.2 needs — the consumer reports liveness on
+	// EDGES (drained; connection lost), so a reload that cleared the flag
+	// would leave every taxonomy edit after the first permanently reporting
+	// StatusStale with no event left to re-arm it. What actually guards
+	// against a stale true is that nothing infers liveness from being fed:
+	// only SetArmed moves it, and the mid-replay snapshots this method
+	// installs during a boot replay arrive while it is still false.
 }
 
-// SetArmed marks the resolver's invalidation consumer live (true) or dead
+// SetArmed marks the resolver's invalidation consumer live (true) or not
 // (false) — the other half of §4.2's "armed" test alongside a loaded
-// snapshot. A Resolver never calls this itself; item 4's CDC consumer flips
-// it once live at boot and again if it ever dies.
+// snapshot. A Resolver never calls this itself; the CDC consumer that feeds
+// InstallSnapshot owns the signal.
+//
+// What true has to mean, and what it must not be read to mean. StatusArmed
+// tells useFullEngineBranches the expansion set is exhaustive, which lets a
+// lens publish a NARROWED consumer filter and a client gate that
+// acks-and-drops everything outside it — so a true here that is not backed
+// is the one unacceptable state (§6.5), while a false costs only a broad
+// filter on a lens that still runs. A caller may therefore pass true only
+// once it has positively established BOTH that the feed is connected and
+// that it has delivered everything it owes:
+//
+//   - not merely "an event arrived". The feed replays the whole taxonomy on
+//     every boot, so its first events describe a PARTIAL graph, and a `*`
+//     lens activating against one narrows on a downward closure whose leaves
+//     have simply not been read yet.
+//   - not merely "the connection came back". A reconnect resumes the durable
+//     from its ack floor; the edits that landed during the blind window are
+//     still in flight at that instant.
+//
+// internal/refractor/lens.CoreKVSource's liveness callback is the production
+// caller and carries the barrier it uses (substrate.Conn.ConsumerCaughtUp,
+// routed through its own dispatch goroutine).
+//
+// false may be passed from any goroutine at any time: disarming can only
+// move an answer from StatusArmed to StatusStale, which is the safe
+// direction, so it is never ordered behind anything.
 func (r *Resolver) SetArmed(armed bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.armed = armed
+	r.consumerLive = armed
 }
 
 // maxReasonNameLen bounds how much of a raw name Expand's reason strings
@@ -359,7 +420,7 @@ func (r *Resolver) Expand(labels map[string]struct{}) (map[string]map[string]str
 			inert[label] = struct{}{}
 		}
 	}
-	if r.armed {
+	if r.consumerLive {
 		return out, inert, StatusArmed, ""
 	}
 	return out, inert, StatusStale, ""

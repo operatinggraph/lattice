@@ -467,25 +467,52 @@ func TestInstallSnapshot_EmptyCanonicalName_NeverResolvable(t *testing.T) {
 	requireSet(t, exp["unit"], "unit", "room")
 }
 
-// TestInstallSnapshot_ResetsArmed pins that a reload never carries a
-// previous life's armed flag forward — only SetArmed may arm the resolver,
-// so a consumer that dies and later re-installs a snapshot before
-// re-arming must see StatusStale, not a stale StatusArmed.
-func TestInstallSnapshot_ResetsArmed(t *testing.T) {
+// TestArmedIsTheFeedsClaim_NeverInferredFromBeingFed pins the split the two
+// halves of §4.2's armed test are built on: InstallSnapshot answers "do I
+// have a graph", SetArmed answers "is the feed live and current", and NEITHER
+// is allowed to imply the other.
+//
+// Both directions matter, and they fail in opposite ways:
+//
+//   - A snapshot must never arm. The feed replays the whole taxonomy at boot,
+//     so its early snapshots are prefixes of the graph; a resolver that armed
+//     on being fed would report StatusArmed over one, and a `*` lens
+//     activating then narrows on a closure whose leaves have not been read
+//     yet — §6.5's one unacceptable state.
+//   - A snapshot must never DISARM either. The feed reports liveness on
+//     edges (drained; connection lost), so a reload that cleared the flag
+//     would leave every taxonomy edit after the first stuck on StatusStale
+//     with no event left to re-arm it — a permanently broad filter bought for
+//     nothing, since the snapshot came from that same live feed.
+func TestArmedIsTheFeedsClaim_NeverInferredFromBeingFed(t *testing.T) {
 	snap := []TypeSnapshot{
 		{ID: unitID, CanonicalName: "unit"},
 		{ID: roomID, CanonicalName: "room", SubtypeOf: []string{"unit"}},
 	}
 	r := New()
 	r.InstallSnapshot(snap)
+	if _, _, status, _ := r.Expand(map[string]struct{}{"unit": {}}); status != StatusStale {
+		t.Fatalf("status = %v, want StatusStale — a snapshot on its own is a graph, not a currency claim", status)
+	}
+
 	r.SetArmed(true)
 	if _, _, status, _ := r.Expand(map[string]struct{}{"unit": {}}); status != StatusArmed {
-		t.Fatalf("status = %v, want StatusArmed before reload", status)
+		t.Fatalf("status = %v, want StatusArmed once the feed has claimed liveness", status)
 	}
 
 	r.InstallSnapshot(snap)
+	if _, _, status, _ := r.Expand(map[string]struct{}{"unit": {}}); status != StatusArmed {
+		t.Fatalf("status = %v, want StatusArmed after a reload — the snapshot came from the same live feed, and "+
+			"clearing here would strand the resolver stale until the next liveness EDGE, which may never come", status)
+	}
+
+	r.SetArmed(false)
 	if _, _, status, _ := r.Expand(map[string]struct{}{"unit": {}}); status != StatusStale {
-		t.Fatalf("status = %v, want StatusStale immediately after a reload — armed must not survive InstallSnapshot", status)
+		t.Fatalf("status = %v, want StatusStale — only the feed retracts its own claim", status)
+	}
+	r.InstallSnapshot(snap)
+	if _, _, status, _ := r.Expand(map[string]struct{}{"unit": {}}); status != StatusStale {
+		t.Fatalf("status = %v, want StatusStale — a snapshot arriving while the feed is disarmed must not re-arm it", status)
 	}
 }
 
