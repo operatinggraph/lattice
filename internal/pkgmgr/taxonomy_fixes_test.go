@@ -5,6 +5,8 @@ import (
 	"errors"
 	"strings"
 	"testing"
+
+	"github.com/operatinggraph/lattice/internal/substrate"
 )
 
 // Distinct valid Contract #1 NanoIDs for the direct
@@ -336,6 +338,146 @@ func TestInstaller_Abstract_NoDeclaration_ReadsNoDocuments(t *testing.T) {
 	}
 	if err := inst.checkAbstractNoLiveInstances(context.Background(), def, scan); err != nil {
 		t.Fatalf("a def declaring no Abstract DDL must read nothing and return nil: %v", err)
+	}
+}
+
+// fillerNanoID returns the n-th of a deterministic sequence of distinct,
+// valid 20-character Contract #1 NanoIDs (base-58 over substrate.Alphabet,
+// left-padded with its first character) — enough of them to build a candidate
+// list longer than abstractGuardReadChunk without hand-writing a thousand
+// constants.
+func fillerNanoID(n int) string {
+	id := make([]byte, substrate.NanoIDLength)
+	for pos := range id {
+		id[pos] = substrate.Alphabet[0]
+	}
+	for pos := substrate.NanoIDLength - 1; pos >= 0 && n > 0; pos-- {
+		id[pos] = substrate.Alphabet[n%len(substrate.Alphabet)]
+		n /= len(substrate.Alphabet)
+	}
+	return string(id)
+}
+
+// TestReadLiveInstanceCandidates_ExcludesReservedNamespaces pins the SCOPE of
+// the class test's candidate set. `vtx.op.*` is the kernel's highest-churn
+// namespace (one idempotency tracker per committed operation, keyed by a
+// NanoID request id, so every one of them is a well-formed vertex root), and
+// reading it would put a corpus-sized guard read past the CLI's and Loupe's
+// install timeouts for keys that can never match either test. Neither reserved
+// namespace may be read; a business root beside them must still be.
+func TestReadLiveInstanceCandidates_ExcludesReservedNamespaces(t *testing.T) {
+	ctx, conn, inst := newInstallerHarness(t)
+
+	businessKey := "vtx.widget." + testTaxonomyNanoID1
+	trackerKey := "vtx.op." + testTaxonomyNanoID2
+	metaKey := "vtx.meta." + testTaxonomyNanoID3
+	seed := map[string]string{
+		businessKey: `{"class":"widget","isDeleted":false,"data":{}}`,
+		trackerKey:  `{"class":"op-tracker","isDeleted":false,"data":{}}`,
+		metaKey:     `{"class":"meta.ddl.vertexType","isDeleted":false,"data":{}}`,
+	}
+	keys := make([]string, 0, len(seed))
+	for k, doc := range seed {
+		if _, err := conn.KVPut(ctx, CoreBucket, k, []byte(doc)); err != nil {
+			t.Fatalf("seed %s: %v", k, err)
+		}
+		keys = append(keys, k)
+	}
+
+	docs, err := inst.readLiveInstanceCandidates(ctx, keys, []string{"vtx.widget."})
+	if err != nil {
+		t.Fatalf("readLiveInstanceCandidates: %v", err)
+	}
+	if _, ok := docs[businessKey]; !ok {
+		t.Errorf("business vertex root %s must be a candidate, got %v", businessKey, docs)
+	}
+	if _, ok := docs[trackerKey]; ok {
+		t.Errorf("idempotency tracker %s must never be read by the live-instance guard", trackerKey)
+	}
+	if _, ok := docs[metaKey]; ok {
+		t.Errorf("meta-vertex root %s must never be read by the live-instance guard", metaKey)
+	}
+}
+
+// TestInstaller_Abstract_UnreadableMarker_FailsWithTrueCause pins the error
+// posture of the flip test. When the installed marker cannot be read, the
+// guard must NOT silently reclassify a re-assertion as a flip: doing so runs
+// the class test, which on a migrated taxonomy finds the legacy documents
+// still carrying the abstract ancestor's class and refuses the install with an
+// error blaming the operator's data for what was a bad read. The failure has
+// to name the meta-vertex.
+func TestInstaller_Abstract_UnreadableMarker_FailsWithTrueCause(t *testing.T) {
+	ctx, conn, inst := newInstallerHarness(t)
+
+	metaKey := "vtx.meta." + testTaxonomyNanoID4
+	if _, err := conn.KVPut(ctx, CoreBucket, metaKey, []byte(`{"class":"meta.ddl.`)); err != nil {
+		t.Fatalf("seed unreadable meta root: %v", err)
+	}
+	instanceKey := "vtx.unit." + testTaxonomyNanoID5
+	if _, err := conn.KVPut(ctx, CoreBucket, instanceKey,
+		[]byte(`{"class":"location","isDeleted":false,"data":{}}`)); err != nil {
+		t.Fatalf("seed legacy class-carrying instance: %v", err)
+	}
+
+	def := Definition{Name: "location-domain", Version: "0.2.0", DDLs: []DDLSpec{abstractDDL("location")}}
+	scan := metaScanResult{
+		keys:    []string{metaKey, instanceKey},
+		names:   map[string]string{"location": testTaxonomyNanoID4},
+		fetched: true,
+	}
+
+	err := inst.checkAbstractNoLiveInstances(ctx, def, scan)
+	if err == nil {
+		t.Fatal("expected an error: the installed abstract marker could not be read")
+	}
+	if !strings.Contains(err.Error(), metaKey) {
+		t.Errorf("error must name the unreadable meta-vertex %s; got %v", metaKey, err)
+	}
+	if strings.Contains(err.Error(), "live instance already exists") {
+		t.Errorf("a bad marker read must not be reported as a live-instance refusal; got %v", err)
+	}
+}
+
+// TestInstaller_Abstract_LiveInstanceBeyondFirstReadChunk proves the guard
+// reads the WHOLE candidate list, not just its first chunk: the only live
+// instance sits past abstractGuardReadChunk, so a loop that stopped at the
+// first chunk (or mis-clamped its tail) would let the install through. The
+// paired first-chunk-only call is what proves the key really is beyond the
+// boundary — without it a refusal could just mean the fixture seeded a
+// matching document somewhere the first chunk already covers.
+func TestInstaller_Abstract_LiveInstanceBeyondFirstReadChunk(t *testing.T) {
+	ctx, conn, inst := newInstallerHarness(t)
+
+	instanceKey := "vtx.widget." + testTaxonomyNanoID1
+	if _, err := conn.KVPut(ctx, CoreBucket, instanceKey,
+		[]byte(`{"class":"widget","isDeleted":false,"data":{}}`)); err != nil {
+		t.Fatalf("seed live instance: %v", err)
+	}
+
+	// A full first chunk of keys that were listed but no longer exist (an
+	// absent key is the guard's ordinary case), then the live instance, then a
+	// short tail so the final chunk exercises the end-of-list clamp.
+	firstChunk := make([]string, 0, abstractGuardReadChunk)
+	for n := 0; n < abstractGuardReadChunk; n++ {
+		firstChunk = append(firstChunk, "vtx.filler."+fillerNanoID(n))
+	}
+	keys := append(append([]string{}, firstChunk...), instanceKey)
+	for n := 0; n < 3; n++ {
+		keys = append(keys, "vtx.filler."+fillerNanoID(abstractGuardReadChunk+n))
+	}
+
+	def := Definition{Name: "widget-domain", Version: "0.1.0", DDLs: []DDLSpec{abstractDDL("widget")}}
+
+	if err := inst.checkAbstractNoLiveInstances(ctx, def, metaScanResult{keys: firstChunk, fetched: true}); err != nil {
+		t.Fatalf("the live instance must lie BEYOND the first chunk, but a first-chunk-only scan already found something: %v", err)
+	}
+
+	err := inst.checkAbstractNoLiveInstances(ctx, def, metaScanResult{keys: keys, fetched: true})
+	if err == nil {
+		t.Fatal("expected refusal: a live \"widget\" instance sits past the first read chunk")
+	}
+	if !strings.Contains(err.Error(), instanceKey) {
+		t.Errorf("error should name the offending key %s; got %v", instanceKey, err)
 	}
 }
 

@@ -482,14 +482,18 @@ func (i *Installer) resolveExternalSubtypeTarget(ctx context.Context, ref string
 // vtx.building.* / vtx.property.* keys, and a guard that ignored the
 // already-installed marker would refuse location-domain's own re-install
 // forever. The invariant is unchanged in strength: no type NEWLY acquires
-// the abstract marker while live instances exist.
+// the abstract marker while live instances exist. A marker that cannot be
+// READ is neither assumed present nor absent — the install fails naming it
+// (installedAbstractMarker), because either assumption turns a bad read into
+// a confident wrong answer about somebody's data.
 //
 // TWO TESTS, both of which must find nothing:
 //
 //   - CLASS. A vertex's `class` IS its type assertion, independent of the key
-//     segment it happens to sit on, so any well-formed vertex root
-//     (ClassifyKey == KindVertex — the only shape step 6 will commit a root
-//     under) whose document declares class == CanonicalName and is not
+//     segment it happens to sit on, so any well-formed BUSINESS vertex root
+//     (ParseVertexKey succeeds — the only shape step 6 will commit a root
+//     under — and its type segment is not one Contract #1 §1.2 reserves for
+//     the platform) whose document declares class == CanonicalName and is not
 //     tombstoned is a live instance. This is what catches a type whose
 //     instances key under a DIFFERENT segment than its canonicalName —
 //     declaring Abstract on "workorder" while every instance is keyed
@@ -509,36 +513,48 @@ func (i *Installer) resolveExternalSubtypeTarget(ctx context.Context, ref string
 // segment the instance actually uses" — no case-insensitive comparison is
 // needed or meaningful here.
 //
+// WHAT THE CLASS TEST COSTS, stated plainly rather than left to be
+// discovered: its candidate set is every business vertex root in Core KV, so a
+// flip pays one KVGetMulti round-trip per abstractGuardReadChunk keys of the
+// whole corpus. That is inherent — a type's instances are identified by their
+// documents, and there is no index from a class to the keys asserting it — and
+// it is affordable only because the flip narrowing above means a routine
+// install pays none of it. The platform-reserved namespaces are excluded (see
+// readLiveInstanceCandidates); nothing else can be.
+//
 // The residuals, named plainly rather than implied covered:
 //
 //   - A document neither test can read. An unparseable body is treated as not
 //     live by both, deliberately and identically: the class test's candidate
-//     set is every vertex root in the bucket, so reading a corrupt body as an
-//     instance would let one damaged document ANYWHERE block every abstract
-//     declaration platform-wide, and a guard whose two tests disagreed about
-//     that would answer differently depending on which one saw a key first.
+//     set is every business vertex root in the bucket, so reading a corrupt
+//     body as an instance would let one damaged document ANYWHERE block every
+//     abstract declaration platform-wide, and a guard whose two tests
+//     disagreed about that would answer differently depending on which one saw
+//     a key first.
+//   - A document squatting a reserved namespace. A root under `vtx.op.*` or
+//     `vtx.meta.*` is never read (readLiveInstanceCandidates), so one carrying
+//     a business class there is invisible to the class test. Contract #1 §1.2
+//     reserves both namespaces for the platform and no platform writer puts a
+//     business class in either.
 //   - An instance written after the caller took its key list. It is in
 //     neither candidate set, so neither test can see it. Step 6's write-path
 //     gates remain the enforcement point for anything landing after the
 //     declaration; this guard answers for the state the install was planned
 //     against.
 func (i *Installer) checkAbstractNoLiveInstances(ctx context.Context, def Definition, scan metaScanResult) error {
-	// Which declarations are actually FLIPS. isAbstractMetaVertex's
-	// batchAbstract argument is passed nil on purpose: the question is what
-	// the INSTALLED kernel already says, and this batch's own Abstract
-	// declaration is the very thing under test — consulting it would make
-	// every declaration look like a no-op re-assertion of itself. Its read
-	// resolves a fault or a malformed body to CONCRETE, which lands on the
-	// fail-CLOSED side here (an unreadable marker means the guard runs).
-	installedAbstract := map[string]bool{}
 	flipping := make([]int, 0, len(def.DDLs))
 	for idx, d := range def.DDLs {
 		if !d.Abstract {
 			continue
 		}
-		if metaID, installed := scan.names[d.CanonicalName]; installed &&
-			i.isAbstractMetaVertex(ctx, metaID, nil, installedAbstract) {
-			continue
+		if metaID, installed := scan.names[d.CanonicalName]; installed {
+			alreadyAbstract, err := i.installedAbstractMarker(ctx, metaID)
+			if err != nil {
+				return fmt.Errorf("pkgmgr: DDL[%d] %q: %w", idx, d.CanonicalName, err)
+			}
+			if alreadyAbstract {
+				continue
+			}
 		}
 		flipping = append(flipping, idx)
 	}
@@ -559,15 +575,8 @@ func (i *Installer) checkAbstractNoLiveInstances(ctx context.Context, def Defini
 		d := def.DDLs[idx]
 		prefix := prefixes[n]
 		for _, k := range scan.keys {
-			entry, present := docs[k]
-			if !present {
-				continue
-			}
-			var env struct {
-				Class     string `json:"class"`
-				IsDeleted bool   `json:"isDeleted"`
-			}
-			if uerr := json.Unmarshal(entry.Value, &env); uerr != nil || env.IsDeleted {
+			doc, live := docs[k]
+			if !live {
 				continue
 			}
 			if strings.HasPrefix(k, prefix) {
@@ -575,14 +584,53 @@ func (i *Installer) checkAbstractNoLiveInstances(ctx context.Context, def Defini
 					"pkgmgr: DDL[%d] %q: Abstract is true but a live instance already exists (e.g. %s) — declare Abstract only over a type with no live instances",
 					idx, d.CanonicalName, k)
 			}
-			if env.Class == d.CanonicalName && substrate.ClassifyKey(k) == substrate.KindVertex {
+			if doc.root && doc.class == d.CanonicalName {
 				return fmt.Errorf(
 					"pkgmgr: DDL[%d] %q: Abstract is true but a live instance already exists (e.g. %s, whose document declares class %q — a vertex's class is its type regardless of the key segment it sits on) — declare Abstract only over a type with no live instances",
-					idx, d.CanonicalName, k, env.Class)
+					idx, d.CanonicalName, k, doc.class)
 			}
 		}
 	}
 	return nil
+}
+
+// installedAbstractMarker reports whether the already-installed meta-vertex
+// metaID carries a LIVE data.abstract == true marker — the question that
+// decides whether a DDL's Abstract declaration is a flip or a re-assertion.
+//
+// It exists beside isAbstractMetaVertex rather than reusing it because the two
+// need opposite error postures. That one may never fail: it feeds the LeafBudget
+// count, an advisory signal whose whole licence is "never worse than no signal",
+// so it resolves every fault to concrete. Here a fault resolved to concrete
+// would silently reclassify a re-assertion AS a flip, and the class test would
+// then refuse the install naming a live instance — blaming the operator's data
+// for what was a transient read on a meta-vertex. Only a genuinely ABSENT
+// marker (ErrKeyNotFound, or a tombstoned root, both meaning the kernel holds
+// no live abstract declaration for this type) resolves to false; a transport
+// fault or an unreadable body is returned so the install fails naming its true
+// cause.
+func (i *Installer) installedAbstractMarker(ctx context.Context, metaID string) (bool, error) {
+	rootKey := "vtx.meta." + metaID
+	entry, err := i.Conn.KVGet(ctx, CoreBucket, rootKey)
+	if err != nil {
+		if errors.Is(err, substrate.ErrKeyNotFound) {
+			return false, nil
+		}
+		return false, fmt.Errorf("read installed abstract marker %s: %w", rootKey, err)
+	}
+	var env struct {
+		IsDeleted bool `json:"isDeleted"`
+		Data      struct {
+			Abstract bool `json:"abstract"`
+		} `json:"data"`
+	}
+	if uerr := json.Unmarshal(entry.Value, &env); uerr != nil {
+		return false, fmt.Errorf("read installed abstract marker %s: unmarshal failed: %w", rootKey, uerr)
+	}
+	if env.IsDeleted {
+		return false, nil
+	}
+	return env.Data.Abstract, nil
 }
 
 // abstractGuardReadChunk bounds one KVGetMulti request the live-instance
@@ -593,33 +641,73 @@ func (i *Installer) checkAbstractNoLiveInstances(ctx context.Context, def Defini
 // cap keeps even a corpus-sized read entirely on the cheap path.
 const abstractGuardReadChunk = 1024
 
+// instanceDoc is the only thing either live-instance test needs from a
+// candidate document: the class it asserts, and whether its key is a vertex
+// ROOT (an aspect carries a class too, and an aspect's class is an aspect type,
+// never an assertion that its owner is an instance of that type). Projecting at
+// read time means each document is unmarshalled exactly once no matter how many
+// types the batch flips, and the far larger entry map is dropped instead of
+// held across the match loop.
+type instanceDoc struct {
+	class string
+	root  bool
+}
+
 // readLiveInstanceCandidates batch-reads every Core KV document either
-// live-instance test could need: every well-formed vertex root in keys (the
-// class test's candidate set — the class assertion is what makes a document
-// an instance, so no key segment can be ruled out in advance) plus every key
-// under one of prefixes, whatever its shape (the key-prefix test's, which
-// covers aspects too). The result is keyed by bare key; an absent key is one
-// that was listed but is no longer there, which both tests read as not live.
+// live-instance test could need and returns the LIVE ones projected to
+// instanceDoc. A key absent from the result was listed but is now gone,
+// tombstoned, or unreadable — all of which both tests read as not live.
 //
-// WHY CHUNKING IS SOUND HERE even though it splits the read across
-// independent snapshots: the guard's answer is an OR over strictly per-key
-// facts — "is THIS vertex a live instance of the type being declared
-// abstract" — with no invariant spanning two keys, and one live instance
-// anywhere is already enough to refuse. A chunk boundary can therefore only
-// mis-read a key whose own document changed mid-read, which is exactly what
-// the caller's pre-existing key-list snapshot already permits: an instance
-// created after that list was taken is invisible to the guard whether the
-// documents come from one snapshot or twenty. No chunk boundary can
-// manufacture a false PASS that a single atomic read over the same key list
-// would have caught.
-func (i *Installer) readLiveInstanceCandidates(ctx context.Context, keys, prefixes []string) (map[string]*substrate.KVEntry, error) {
+// The candidate set is every business vertex root in keys (the class test's —
+// the class assertion is what makes a document an instance, so no business key
+// segment can be ruled out in advance) plus every key under one of prefixes,
+// whatever its shape (the key-prefix test's, which covers aspects too).
+//
+// WHY THE RESERVED NAMESPACES ARE EXCLUDED, and why that cannot hide a live
+// instance. `vtx.op.*` (idempotency trackers) and `vtx.meta.*` (schema and
+// configuration meta-entities) are Contract #1 §1.2's reserved type names, and
+// the op namespace is the highest-churn one in the kernel — a 24h retention
+// horizon over a busy kernel leaves it holding orders of magnitude more roots
+// than the business graph, which would put the whole read past every caller's
+// timeout (cmd/lattice-pkg's 60s CLI budget, Loupe's 45s apply budget) for
+// keys that can never match either test:
+//
+//   - No prefix can ever name them. A prefix is "vtx.<CanonicalName>." and an
+//     Abstract DDL is class vertexType, whose CanonicalName abstractscope.go
+//     refuses when keys.IsReservedTypeName says it is reserved — checked by
+//     validateAbstractDDLScope, which every entry point runs (preflight) before
+//     this guard.
+//   - No reserved root's class can ever equal one. A flipping CanonicalName
+//     also passes keys.IsValidTypeSegment ([a-z][a-z0-9]*, same gate), while a
+//     tracker's class is the literal "op-tracker" (internal/processor/tracker.go)
+//     and a meta-vertex's is "meta.ddl.*" / "meta.lens" — a hyphen and a dot
+//     respectively, neither of which that alphabet admits.
+//
+// WHY CHUNKING IS SOUND HERE even though it splits the read across independent
+// snapshots: the guard's answer is an OR over strictly per-key facts — "is THIS
+// vertex a live instance of the type being declared abstract" — with no
+// invariant spanning two keys, and one live instance anywhere is already enough
+// to refuse. A chunk boundary can therefore only mis-read a key whose own
+// document changed mid-read, which is exactly what the caller's pre-existing
+// key-list snapshot already permits: an instance created after that list was
+// taken is invisible to the guard whether the documents come from one snapshot
+// or twenty. No chunk boundary can manufacture a false PASS that a single
+// atomic read over the same key list would have caught.
+//
+// A chunk that fails is returned as an error naming its first key, never
+// skipped: a read fault means the guard cannot answer for that slice of the
+// corpus, and an install that proceeded on a partial answer would be exactly
+// the silent flip-over-live-instances this guard exists to prevent.
+func (i *Installer) readLiveInstanceCandidates(ctx context.Context, keys, prefixes []string) (map[string]instanceDoc, error) {
 	candidates := make([]string, 0, len(keys))
 	seen := make(map[string]bool, len(keys))
+	roots := make(map[string]bool, len(keys))
 	for _, k := range keys {
 		if seen[k] {
 			continue
 		}
-		wanted := substrate.ClassifyKey(k) == substrate.KindVertex
+		vertexType, _, isRoot := substrate.ParseVertexKey(k)
+		wanted := isRoot && !substrate.IsReservedTypeName(vertexType)
 		if !wanted {
 			for _, p := range prefixes {
 				if strings.HasPrefix(k, p) {
@@ -632,10 +720,11 @@ func (i *Installer) readLiveInstanceCandidates(ctx context.Context, keys, prefix
 			continue
 		}
 		seen[k] = true
+		roots[k] = isRoot
 		candidates = append(candidates, k)
 	}
 
-	docs := make(map[string]*substrate.KVEntry, len(candidates))
+	docs := make(map[string]instanceDoc, len(candidates))
 	for start := 0; start < len(candidates); start += abstractGuardReadChunk {
 		end := start + abstractGuardReadChunk
 		if end > len(candidates) {
@@ -643,10 +732,18 @@ func (i *Installer) readLiveInstanceCandidates(ctx context.Context, keys, prefix
 		}
 		chunk, err := i.Conn.KVGetMulti(ctx, CoreBucket, candidates[start:end])
 		if err != nil {
-			return nil, fmt.Errorf("pkgmgr: read live-instance candidates: %w", err)
+			return nil, fmt.Errorf("pkgmgr: read live-instance candidates (%d keys from %s): %w",
+				end-start, candidates[start], err)
 		}
 		for k, entry := range chunk {
-			docs[k] = entry
+			var env struct {
+				Class     string `json:"class"`
+				IsDeleted bool   `json:"isDeleted"`
+			}
+			if uerr := json.Unmarshal(entry.Value, &env); uerr != nil || env.IsDeleted {
+				continue
+			}
+			docs[k] = instanceDoc{class: env.Class, root: roots[k]}
 		}
 	}
 	return docs, nil

@@ -388,17 +388,39 @@ func sortEdges(edges []instanceOfEdge) {
 // classOf resolves the class of the vertex at targetKey, preferring the batch,
 // then the working set, then a single on-demand Core KV read. Used to detect a
 // terminal whose own class is itself a registered DDL.
+//
+// Within the batch the LAST mutation on the key wins, which is why the scan
+// runs to the end rather than returning at its first match: a batch carrying
+// two writes to one key commits only the last of them (substrate/batch.go's
+// duplicate-key semantics), so classifying by the first reads a class that
+// never reaches Core KV — and a decoy create placed ahead of the real update
+// would steer the governing-DDL walk at will. reconcileBatchInstanceOf folds
+// the link side of this same walk under exactly that rule.
 func (r *ddlResolver) classOf(ctx context.Context, targetKey string, result ScriptResult, state HydratedState, fault *error) (string, bool) {
-	for _, m := range result.Mutations {
-		if m.Key != targetKey || m.Document == nil || mutationTombstoned(m) {
+	var last *MutationOp
+	for i := range result.Mutations {
+		m := &result.Mutations[i]
+		if m.Key != targetKey {
 			continue
 		}
-		if m.Op != "create" && m.Op != "update" {
-			continue // only a create/update establishes the vertex's class
+		switch m.Op {
+		case "create", "update", "tombstone":
+			last = m
 		}
-		if c, ok := m.Document["class"].(string); ok {
+	}
+	if last != nil {
+		if mutationTombstoned(*last) {
+			// The batch removes the vertex, so after commit it carries no class
+			// at all and must not resolve through the committed layers below —
+			// the in-flight batch is the truth, the same way batchDead
+			// suppresses a committed link the batch tombstoned.
+			return "", false
+		}
+		if c, ok := last.Document["class"].(string); ok {
 			return c, true
 		}
+		// A write that restates no class leaves the committed one standing, so
+		// fall through to the layers below rather than call the vertex classless.
 	}
 	if doc, ok := state.Context.Hydrated[targetKey]; ok && !doc.IsDeleted {
 		return doc.Class, true

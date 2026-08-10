@@ -285,14 +285,22 @@ func (c *DDLCache) loadMetaVertex(ctx context.Context, root string, _ []string) 
 		ref.CanonicalName = parts[2]
 	}
 
-	// Try to load the canonicalName aspect (preferred lookup name).
+	// Try to load the canonicalName aspect (preferred lookup name). A tombstone
+	// retains the prior document, so the name must be read as ABSENT when
+	// deleted — the same rule the permittedCommands, custody and script readers
+	// below state, and the one that makes a registration REMOVABLE at all. Read
+	// a tombstoned name as live and the entry keeps serving under it forever:
+	// nothing else in the meta-vertex carries the lookup name, so there is no
+	// second write that could retire it, and every gate keyed off DDLs.Lookup
+	// keeps answering for a name its owner has withdrawn.
 	if cnEntry, err := c.conn.KVGet(ctx, c.coreBucket, root+".canonicalName"); err == nil {
 		var asp struct {
-			Data struct {
+			IsDeleted bool `json:"isDeleted"`
+			Data      struct {
 				Value string `json:"value"`
 			} `json:"data"`
 		}
-		if err := json.Unmarshal(cnEntry.Value, &asp); err == nil {
+		if err := json.Unmarshal(cnEntry.Value, &asp); err == nil && !asp.IsDeleted {
 			if asp.Data.Value != "" {
 				ref.CanonicalName = asp.Data.Value
 			}

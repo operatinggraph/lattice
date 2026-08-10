@@ -493,3 +493,92 @@ func TestResolveGoverningDDL_LiveReadBudgetExhaustedFailsOpen(t *testing.T) {
 		t.Fatalf("exhausted live-read budget must fail open to permissive, got: %v", err)
 	}
 }
+
+// classTargetMut writes `class` onto the shared classOf-terminal vertex key.
+// Several of these in one batch is the duplicate-key shape the commit path
+// collapses to its last member.
+func classTargetMut(op, class string) MutationOp {
+	return MutationOp{
+		Op:  op,
+		Key: "vtx.widget." + tgtID,
+		Document: map[string]interface{}{
+			"class":     class,
+			"isDeleted": false,
+			"data":      map[string]interface{}{},
+		},
+	}
+}
+
+// buildAbstractWidgetValidator seeds the `widget` type DDL alongside an
+// ABSTRACT `location` DDL, so a classOf terminal can be pointed at either a
+// concrete or an abstract authority within one batch.
+func buildAbstractWidgetValidator(t *testing.T) (*ValidatorImpl, context.Context) {
+	t.Helper()
+	ctx, conn, _, _, _ := setupTestPipeline(t)
+	seedWidgetTypeDDL(t, ctx, conn)
+	seedAbstractDDL(t, ctx, conn, "location")
+	cache := NewDDLCache(conn, testCoreBucket, testLogger())
+	if err := cache.Refresh(ctx); err != nil {
+		t.Fatalf("Refresh: %v", err)
+	}
+	return NewValidator(cache, conn, testCoreBucket, testLogger()), ctx
+}
+
+// walkFromInstance resolves the governing DDL for the fine-grained instance
+// vertex whose only route to a type authority is the instanceOf link into the
+// classOf terminal — the path classOf sits on.
+func walkFromInstance(t *testing.T, v *ValidatorImpl, ctx context.Context, muts []MutationOp) (MetaVertexRef, bool) {
+	t.Helper()
+	result := ScriptResult{Mutations: append([]MutationOp{
+		instanceVertexMut("create", instID),
+		instanceOfLinkMut(instID, "widget", tgtID),
+	}, muts...)}
+	return v.resolveGoverningDDL(ctx, "widget.deluxe.instance",
+		"vtx.widget."+instID, substrate.KindVertex, result, HydratedState{})
+}
+
+// TestResolveGoverningDDL_ClassOfLastWriteWins pins the commit path's own
+// duplicate-key rule inside the resolver: a batch writing a key twice commits
+// only the last write, so the terminal's class is the LAST one the batch
+// declares. The single-mutation control below it proves the fixture reaches
+// classOf at all, so the decoy case cannot pass by failing to resolve.
+func TestResolveGoverningDDL_ClassOfLastWriteWins(t *testing.T) {
+	t.Parallel()
+	v, ctx := buildAbstractWidgetValidator(t)
+
+	// Control: the concrete class alone resolves to the widget authority.
+	ref, ok := walkFromInstance(t, v, ctx, []MutationOp{classTargetMut("create", "widget")})
+	if !ok || ref.CanonicalName != "widget" {
+		t.Fatalf("control: want the widget DDL, got ok=%v name=%q", ok, ref.CanonicalName)
+	}
+
+	// A benign decoy ahead of the real write must not be what classifies the
+	// terminal — only the update reaches Core KV.
+	ref, ok = walkFromInstance(t, v, ctx, []MutationOp{
+		classTargetMut("create", "widget"),
+		classTargetMut("update", "location"),
+	})
+	if !ok {
+		t.Fatalf("the last write's class is registered and must resolve")
+	}
+	if ref.CanonicalName != "location" || !ref.Abstract {
+		t.Fatalf("terminal must be classified by the LAST write (abstract %q), got name=%q abstract=%v",
+			"location", ref.CanonicalName, ref.Abstract)
+	}
+}
+
+// TestResolveGoverningDDL_ClassOfBatchTombstoneWins is the removal half of the
+// same rule: a batch whose last write on the terminal is a tombstone leaves no
+// vertex to classify after commit, so the walk must resolve to nothing rather
+// than fall back to the class an earlier mutation in the same batch declared.
+func TestResolveGoverningDDL_ClassOfBatchTombstoneWins(t *testing.T) {
+	t.Parallel()
+	v, ctx := buildAbstractWidgetValidator(t)
+	ref, ok := walkFromInstance(t, v, ctx, []MutationOp{
+		classTargetMut("create", "widget"),
+		{Op: "tombstone", Key: "vtx.widget." + tgtID},
+	})
+	if ok {
+		t.Fatalf("a terminal the batch tombstones must resolve to no governing DDL, got %q", ref.CanonicalName)
+	}
+}

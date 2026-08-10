@@ -341,3 +341,51 @@ func TestDDLCache_Invalidate_AspectKeyResolvesToRoot(t *testing.T) {
 		t.Fatalf("identity should still be present after aspect invalidate")
 	}
 }
+
+// TestDDLCache_TombstonedCanonicalNameRetiresTheEntry pins that a tombstoned
+// canonicalName aspect stops being served. The name is the ONLY handle any
+// consumer has on a meta-vertex — DDLs.Lookup is keyed by it — and step 8's
+// tombstone arm retains the prior document whole rather than removing the key,
+// so reading a deleted aspect as live would make a registration permanent: no
+// second write exists that could ever retire the name. The root here carries a
+// NanoID and no data.canonicalName, the real install shape, so once the aspect
+// is gone the meta-vertex has no name from any source and drops out entirely.
+func TestDDLCache_TombstonedCanonicalNameRetiresTheEntry(t *testing.T) {
+	t.Parallel()
+	ctx, conn, _, _, _ := setupTestPipeline(t)
+	const nanoID = "Nn7Pp8Qq9Rr1Ss2Tt3Uu"
+	root := "vtx.meta." + nanoID
+	rootDoc := []byte(`{"class":"meta.ddl.vertexType","isDeleted":false,"data":{}}`)
+	if _, err := conn.KVPut(ctx, testCoreBucket, root, rootDoc); err != nil {
+		t.Fatalf("seed root: %v", err)
+	}
+	live := []byte(`{"class":"canonicalName","isDeleted":false,"vertexKey":"` + root +
+		`","localName":"canonicalName","data":{"value":"retireme"}}`)
+	if _, err := conn.KVPut(ctx, testCoreBucket, root+".canonicalName", live); err != nil {
+		t.Fatalf("seed canonicalName: %v", err)
+	}
+
+	cache := NewDDLCache(conn, testCoreBucket, testLogger())
+	if err := cache.Refresh(ctx); err != nil {
+		t.Fatalf("Refresh: %v", err)
+	}
+	if _, ok := cache.Lookup("retireme"); !ok {
+		t.Fatalf("a live canonicalName aspect must be served — the fixture never registered")
+	}
+
+	// Step 8's tombstone arm copies the prior document and flips isDeleted.
+	dead := []byte(`{"class":"canonicalName","isDeleted":true,"vertexKey":"` + root +
+		`","localName":"canonicalName","data":{"value":"retireme"}}`)
+	if _, err := conn.KVPut(ctx, testCoreBucket, root+".canonicalName", dead); err != nil {
+		t.Fatalf("tombstone canonicalName: %v", err)
+	}
+	if err := cache.Invalidate(ctx, root+".canonicalName"); err != nil {
+		t.Fatalf("Invalidate: %v", err)
+	}
+	if ref, ok := cache.Lookup("retireme"); ok {
+		t.Fatalf("a tombstoned canonicalName aspect must retire the entry, still serving %+v", ref)
+	}
+	if _, ok := cache.LookupByMetaKey(root); ok {
+		t.Fatalf("the meta-vertex has no name from any source and must leave the index")
+	}
+}
