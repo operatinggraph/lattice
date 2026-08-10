@@ -347,10 +347,26 @@ func corpusLabelDerivation(t *testing.T) map[string]labelVerdict {
 		require.Falsef(t, dup, "two installed lenses share the canonical name %q", name)
 		got[name] = labelVerdict{exhaustive, strings.Join(sorted, " "), consumerFilterMode(t, name, eng, cr)}
 	}
+	forEachCorpusCypher(t, derive)
+	return got
+}
+
+// forEachCorpusCypher calls visit once per EXECUTABLE cypher the installed
+// corpus ships, under the canonical name every census in this package keys its
+// pins by (`name#N` for one branch of a multi-walk lens, in Walks declaration
+// order).
+//
+// It is the enumeration every corpus census in this package has to agree on —
+// read-grant walks expanded first, SpecBranches enumerated rather than Spec
+// alone — for the two reasons this file's header gives. A second census that
+// swept the registry its own way would quietly cover a different corpus and
+// pin a different thing.
+func forEachCorpusCypher(t *testing.T, visit func(name, spec string)) {
+	t.Helper()
 	addLens := func(l pkgmgr.LensSpec) {
 		if len(l.SpecBranches) > 0 {
 			for i, b := range l.SpecBranches {
-				derive(fmt.Sprintf("%s#%d", l.CanonicalName, i), b)
+				visit(fmt.Sprintf("%s#%d", l.CanonicalName, i), b)
 			}
 			return
 		}
@@ -366,7 +382,7 @@ func corpusLabelDerivation(t *testing.T) map[string]labelVerdict {
 				"lens %q has no cypher but sources %q, not an event stream", l.CanonicalName, l.Source.Kind)
 			return
 		}
-		derive(l.CanonicalName, l.Spec)
+		visit(l.CanonicalName, l.Spec)
 	}
 
 	for _, name := range pkgregistry.Names() {
@@ -384,9 +400,8 @@ func corpusLabelDerivation(t *testing.T) map[string]labelVerdict {
 		bootstrap.CapabilityReadGrantsLensDefinition(),
 		bootstrap.CapabilityReadWildcardGrantsLensDefinition(),
 	} {
-		derive(l.CanonicalName, l.CypherRule)
+		visit(l.CanonicalName, l.CypherRule)
 	}
-	return got
 }
 
 func TestCorpusLabelDerivation_PinnedVerdicts(t *testing.T) {

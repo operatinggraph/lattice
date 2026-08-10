@@ -14,6 +14,17 @@ package full
 // A pattern position one derivation reads and another does not would make the
 // three disagree about the same link key.
 //
+// Lockstep is a checkable claim, not a sentiment: all three visit MATCH's
+// patterns and its WHERE, RETURN's items, and WITH's items AND its WHERE
+// (relations.go's clause switch, labels.go's per-segment walk). A pattern can
+// appear in any of them, and the two WITH positions are the easy ones to miss —
+// a revocation filter staged behind a WITH is written there and nowhere else.
+// Missing one is not a pessimisation here the way it is for the other two: they
+// would report a set too SMALL and their callers reproject anyway, while this
+// one would report Complete with the relation absent from Hops, and
+// AnchorSideSeeds' empty answer on a complete index is read as "no anchor can
+// change".
+//
 // Complete == false means the index is NOT authoritative and the caller must
 // not use it at all — neither to derive a set nor to skip. "Not in the index"
 // and "not indexable" are different answers, and only the first one licenses a
@@ -179,19 +190,11 @@ func (cr *CompiledRule) AnchorHopIndex() HopIndex {
 		return HopIndex{Anchor: -1, Incomplete: "no compiled query"}
 	}
 
-	// A WITH rebuilds every binding from its projection items alone, so a
-	// variable it does not carry is unbound downstream and an unlabeled pattern
-	// node re-using that name re-seeds through the whole-bucket scan
-	// (labels.go's scope argument). That re-seeded position depends on its
-	// BUCKET, not on any link, so an adjacency walk cannot see the dependency
-	// and would report a SMALLER affected set than the truth. Refusing the
-	// whole query is the only fail-closed answer: the derivation's invariant is
-	// a superset, and this is the one shape that breaks it downward.
-	for _, c := range cr.Query.Clauses {
-		if _, isWith := c.(*With); isWith {
-			return HopIndex{Anchor: -1, Incomplete: "query carries a WITH — a dropped variable re-seeds by bucket scan, not by link"}
-		}
-	}
+	// Evaluated before the builder because the builder's own position merging
+	// assumes what this answers: that two sightings of one variable name are
+	// the same executor binding. Across a WITH boundary that holds only while
+	// the WITH carried the name (withScopeReject).
+	withReject := withScopeReject(cr.Query.Clauses)
 
 	b := &hopIndexBuilder{byVar: make(map[string]int), anchor: -1}
 	for _, c := range cr.Query.Clauses {
@@ -199,6 +202,25 @@ func (cr *CompiledRule) AnchorHopIndex() HopIndex {
 		case *Match:
 			for _, p := range cl.Patterns {
 				b.addPattern(p, true)
+			}
+			b.addExpr(cl.Where)
+		case *With:
+			// A WITH's items and its WHERE are general expressions, and either
+			// may hold a PatternExpr or a PatternComprehension — a revocation
+			// filter (`WITH a, r WHERE NOT (r)-[:revokedBy]->(v:revocation)`) or
+			// a projected walk (`WITH a, [(a)-[:holdsRole]->(x:role) | x.key]`).
+			// They reach the graph as NON-BINDING patterns, the same posture a
+			// MATCH's own WHERE takes: existsAsPredicate and
+			// evalPatternComprehension call matchPath and discard the bindings,
+			// so those hops can be walked but establish no position's binding.
+			//
+			// Omitting this arm is not a pessimisation. A relation named ONLY
+			// here would contribute no hop while the index still reported
+			// Complete, so AnchorSideSeeds would answer "no anchor can change"
+			// for that relation's events — a strict SUBSET, which §4.7 licenses
+			// the caller to act on as a skip.
+			for _, it := range cl.Items {
+				b.addExpr(it.Expr)
 			}
 			b.addExpr(cl.Where)
 		case *Return:
@@ -234,6 +256,15 @@ func (cr *CompiledRule) AnchorHopIndex() HopIndex {
 		idx.Incomplete = "the anchor pattern position carries the `*` taxonomy-expansion sigil — the derivation cannot construct a single anchor key prefix for an expanded set"
 	case b.reject != "":
 		idx.Incomplete = b.reject
+	case withReject != "":
+		// Reported ahead of b.ungrounded because the two describe the same
+		// hazard — a position the executor seeds from its BUCKET — and this one
+		// names the boundary that caused it. Where both fire, the grounding
+		// conjunct is the SYMPTOM: `ground` merges a post-WITH sighting onto the
+		// pre-WITH position and can therefore call a stranded head grounded, so
+		// its silence is not evidence and this conjunct must be evaluated
+		// independently of it.
+		idx.Incomplete = withReject
 	case b.ungrounded != "":
 		// The conjunct whose omission is unsound. Every other one widens the
 		// derived set; this one would shrink it to empty and license a skip
