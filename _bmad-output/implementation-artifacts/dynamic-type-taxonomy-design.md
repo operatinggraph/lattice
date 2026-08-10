@@ -274,8 +274,17 @@ to bind only locations.
 
 **This is the honest demand picture, and it does not weaken the case — it sharpens it.** The taxonomy's first
 customer is `capabilityServiceAccess`, which today buys polymorphism at the price of a broad filter and no
-anchor seeding. Labelling those three nodes `:location` converts a permanently-unnarrowable auth-plane lens into a
-narrowed one. That is a concrete, live, nameable consumer — not a speculative one.
+anchor seeding. It is a concrete, live, nameable consumer — not a speculative one.
+
+> **Struck at B1 (2026-08-10), measured rather than argued.** This paragraph claimed labelling the three nodes
+> `:location` "converts a permanently-unnarrowable auth-plane lens into a narrowed one," and §9.4 called that
+> the design's measurable win. **It is false.** `ReferencedLabels` clears exhaustiveness for *any*
+> variable-length hop (`ruleengine/full/labels.go:135-138`), and this lens carries two `containedIn*0..` walks;
+> the unlabeled `op` in its pattern comprehension is a second, independent blocker. `ConsumerFilter` therefore
+> takes the broad arm before any cap arithmetic runs. The lens was broad before the labels and is broad after —
+> **no delivery regression, and no narrowing win either.** What the label actually buys is a tighter *binder*
+> and a truthful type declaration. Making this lens narrowable means reconciling variable-length containment
+> walks with the exhaustiveness rule, which is a design question, not a build one — see the lane row.
 
 ## 3. The taxonomy data model
 
@@ -690,10 +699,17 @@ assumes every lens has one. It does not survive the census. What a rebuild actua
 | A shared-bucket lens whose truncate is **unconfined** | no — **refused** | an unprefixed `NatsKVAdapter.Truncate` purges the whole bucket, so B0 gates truncation on the purge being confined rather than wiping every sibling producer's rows |
 | A `GrantTable` lens with no `DiffRetraction` (`clinic-domain`'s `demo-operator` / `console-operator`) | **no** | truncate declined (`GrantWriterAdapter` implements no `Truncater`), no diff, rows persist until an anchor tombstone |
 
-The last two rows are the honest gap. Neither is live: no shipped `packages/` lens carries a `*` label yet, so
-no lens can currently reach a taxonomy shrink at all. **A lens of either shape must not be authored with `*`
-until it declares a retraction transport** — stated at `pipelineEntry.taxRebuildTruncate` in `cmd/refractor`,
-where the next author will meet it.
+The last two rows are the honest gap. **A lens of either shape must not be authored with `*` until it declares
+a retraction transport** — stated at `pipelineEntry.taxRebuildTruncate` in `cmd/refractor`, where the next
+author will meet it.
+
+> **Updated at B1 (2026-08-10) — the "nothing carries `*` yet" premise no longer holds.** This paragraph said
+> no shipped `packages/` lens carried a `*` label, so no lens could reach a taxonomy shrink at all. B1 lands the
+> first: `capabilityServiceAccess` labels `loc0`/`loc` `:location*`. It falls in **neither** gap row — it is an
+> `actorAggregate`, so `ApplyTruncateScope` binds its purge to a key prefix and B0's confinement gate lets it
+> truncate, which is the retraction transport. The two gap shapes (an unconfined shared-bucket truncate; a
+> `GrantTable` lens with no `DiffRetraction`) remain unreached, and the authoring constraint above is now a live
+> rule rather than a precaution.
 
 ### 6.5 Fail-closed posture, complete
 
@@ -782,7 +798,24 @@ Letting `class` back in would break that three ways:
 The three concrete DDLs share one script const (they already do — one Starlark body serves all three key types),
 so the duplication is three `DDLSpec` entries pointing at the same `Script`, not three scripts.
 
-### 9.2 The guard census — 8 sites, 5 packages
+### 9.2 The guard census — 19 sites, 7 packages
+
+> **Corrected at B1 (2026-08-10). Read §17.16 and §17.17 before building anything from this section — its
+> stated landing is wrong and must not be built as written.** Two things in §9.2/§9.3 below are false:
+>
+> 1. **The count.** Censusing by the *wrapper name* found 8 sites in 5 packages. Censusing by the *check* finds
+>    **19 sites across 7 packages** — `maintenance-domain` and `wellness-domain` reach it through a generic
+>    `require_live_typed(…, "location")` that no grep for the named wrappers catches.
+> 2. **The landing.** `cls in LOCATION_TYPES` **cannot be built.** Measured on the running stack: **69 live
+>    location vertices — 60 `vtx.unit.*`, 9 `vtx.building.*` — all carrying `class: "location"`**, which nothing
+>    rewrites. A class-list check rejects every pre-existing location the moment location-domain upgrades. The
+>    guards landed as a **conjunction**: key type segment ∈ `LOCATION_TYPES` **and** class ∈
+>    `LOCATION_TYPES + ["location"]`. The legacy disjunct is what carries the migration window; the key arm is
+>    what §9.2 below correctly says "proves it more directly."
+>
+> That conjunction is a **widening on the class axis** versus the pre-diff `cls == "location"` (it now admits a
+> location carrying its own leaf class — the entire point), and strictly stronger on the key axis. It is
+> recorded as a widening, not asserted as uniformly stricter.
 
 The `cls != "location"` check is hand-copied eight times. All eight break when the class becomes the key type.
 
@@ -803,8 +836,11 @@ proxy for "location-domain minted this key," and the key-segment check proves it
 **drop the class check** and become *stricter*, not looser — including the site Andrew named, #7, whose own error
 string is already `NotAUnit`.
 
-**Sites 1–3 genuinely want "any location."** Their minimal landing is `cls in LOCATION_TYPES` against a
-package-local list — behaviourally identical to today, with the list where it already is.
+**Sites 1–3 genuinely want "any location."** ~~Their minimal landing is `cls in LOCATION_TYPES` against a
+package-local list — behaviourally identical to today, with the list where it already is.~~ **Struck at B1
+(2026-08-10):** that landing rejects all 69 live legacy-classed locations. What shipped is the conjunction in
+the banner above — a key-type-segment check plus a class set that admits the legacy discriminator. Sites 4–8
+took the same conjunction narrowed to their single leaf.
 
 ### 9.3 The fork (§For-Andrew)
 
@@ -826,8 +862,21 @@ domain reason, and `staffReadGrants` names its narrowness as intended behaviour.
 
 The lens that changes is **`capabilityServiceAccess`** (`packages/service-location/lenses.go:133-145`), which
 today leaves `loc0`/`loc`/`exLoc` **unlabeled** to get polymorphism, paying `exhaustive = false` — broad filter,
-no client skip, no anchor seeding. Labelling those three `:location` converts a permanently-unnarrowable
-auth-plane lens into a narrowed one. That is the design's first live customer, and it is the measurable win.
+no client skip, no anchor seeding. It is the design's first live customer.
+
+> **Amended at B1 (2026-08-10) — this section's "measurable win" was false, and only TWO of the three nodes
+> got the label.** See the §2.1 banner for the measurement: the lens is non-exhaustive independently of any
+> label, so it was broad before and is broad after. Two corrections landed:
+>
+> - **`loc0` and `loc` carry `:location*`. `exLoc` deliberately does NOT.** `exLoc` sits inside
+>   `NOT (loc0)-[:containedIn*0..]->(exLoc)<-[:unavailableAt]-(svc)`. A label on a *positive* pattern can only
+>   narrow (fail-closed); a label on a *negated* pattern can only remove exclusions — it **grants**. Under a
+>   non-empty-but-incomplete expansion a building-level `unavailableAt` silently stops firing and the service is
+>   granted at a place an operator explicitly marked unavailable. This lens mints `cap.svc.<actor>`, so that is a
+>   live authorization over-grant. It was reproduced as a failing test before the label was removed, and
+>   `service-location/package_test.go` now fails the build if `(exLoc:` reappears.
+> - **The polarity asymmetry is a general authoring hazard**, not a fact about this lens: an expansion sigil is
+>   fail-closed in a positive position and fail-open in a negated one. Recorded in the Refractor dossier.
 
 ## 10. Cap arithmetic and operator visibility
 
@@ -1046,7 +1095,7 @@ precedence rule. Named so it is built deliberately later, not stumbled into.
 | **Two concurrent installs form a cycle neither sees** | Real: install batches are atomic individually, not against each other. This is why **resolver-time** cycle detection is the authority and install-time is a courtesy (§5/§14). The resolver's answer is fail-closed to broad, so a cycle costs footprint, never correctness. |
 | **`nodeMatches` is the hottest path in the engine** | Generalizing it adds one map probe over a pre-resolved single-entry set for a concrete label. No graph read, no allocation (§4.4). Measured in Fire A rather than asserted. |
 | **`entityType` desync** | An abstract `entityType` literal would silently break `cmd/facet` op-attach, and nothing enforces the pairing today. Scoped out (§8) and filed as an authoring gate (§14) rather than left implicit. |
-| **The class rename touches five packages' guards** | Five of eight sites become *stricter* (drop a redundant check); three keep a local list. Full-suite gate, and the integration test at `packages/location-domain/integration_test.go:195` (which asserts `class == "location"`) must be updated to assert class == key type — a test that pins the old invariant is exactly what should fail. |
+| **The class rename touches seven packages' guards** | *(corrected at B1, 2026-08-10 — was "five packages / five of eight sites become stricter; three keep a local list")* **19 sites across 7 packages.** Every one became a conjunction of key-type-segment **and** class ∈ `LOCATION_TYPES + ["location"]`: stricter on the key axis, widened on the class axis to carry the 69 live legacy-classed locations. `packages/location-domain/integration_test.go:195` asserted `class == "location"` and was updated to assert class == key type — a test pinning the old invariant is exactly what should fail. |
 | **Collision with in-flight Refractor designs** | `lens-label-key-type-binding-design.md` **must land first** (this design's §8.1 requires the class out of the resolution path). `full-engine-independent-branch-decomposition` touches the same executor file — sequence, no semantic overlap with §5's sites. |
 
 ## 14. Decomposition — TWO fires, both in the Lattice lane (rewritten at ratification)
@@ -1144,8 +1193,10 @@ measure it), `lattice-nats` survives a full sweep, and a shrink retracts.
 Four type metas (three concrete sharing one script, one abstract) +
 three `subtypeOf` links; the class becomes the key type at `packages/location-domain/ddls.go:318`;
 `packages/location-domain/integration_test.go:195` updated; and `capabilityServiceAccess`
-(`packages/service-location/lenses.go:133-145`) labels `loc0`/`loc`/`exLoc` **`:location*`** — the first
-live consumer, converting a permanently-broad auth-plane lens into a narrowed one.
+(`packages/service-location/lenses.go:133-145`) labels `loc0`/`loc` **`:location*`** — the first live consumer.
+*(Corrected at B1, 2026-08-10: `exLoc` is deliberately left bare — labelling a node inside `NOT (...)` removes
+exclusions and grants access, see §9.4. And the label converts nothing: the lens is non-exhaustive independently
+of its labels and stays broad, see the §2.1 banner.)*
 
 **Three corrections this fire must honor, from the DD pass** (the doc's §9.2 census is wrong and must be
 re-run rather than trusted):
@@ -1227,7 +1278,12 @@ wrong reason.
 
 **Cap.** A lens at `K + |leaves| = 8` narrows; at 9 it takes the broad filter and its health entry reads
 `filterBroadReason = "label-cap"`. The relation ladder: assert relation-narrowed → relation-blind → broad across
-the two budgets (`pipeline.go:934-935`, `:952`). A lens whose `K + leafBudget > 8` **fails its own install**.
+the two budgets (`pipeline.go:934-935`, `:952`). ~~A lens whose `K + leafBudget > 8` **fails its own install**.~~
+**Struck at B1 (2026-08-10): no such refusal exists**, and this line contradicted §10.2's own build-status note
+200 lines earlier. pkgmgr validates that a lens spec parses but never extracts its node labels, so `K` is not
+computable at the lens's install; `LeafBudget` has a warning consumer and no refusal consumer. The
+silent-footprint-regression risk §13 lists is therefore **live, not retired** — the lane row for extracting lens
+labels is what closes it.
 
 **Corpus census test.** Owned by **Fire A item 6** (§14), not an unassigned tail — it pins `filterMode`, which
 item 6 is what makes real. Extend **`internal/refractor/label_derivation_corpus_census_test.go`** (this line
@@ -1581,6 +1637,10 @@ return — is the refusal posture's necessary plumbing, handled at both producti
    `*`-anchored lens gets no affected-anchor fast path.** Fire B's consumer is unaffected (its anchor is the
    concrete `identity`; only non-anchor positions carry `*`). **Deliberately not filed as a board row** — no
    nameable consumer exists yet (a `*`-anchored lens arrives no earlier than Fire B); revisit at Fire B admit.
+   **Revisited at Fire B admit (2026-08-10): still no consumer, so still unfiled.** B1's lens anchors on the
+   concrete `identity` and carries `*` only in non-anchor positions, exactly as predicted here — so no shipped
+   lens is `*`-anchored and the fast-path refusal remains unreachable. This is the revisit the line asked for,
+   recorded rather than silently dropped; the next `*`-anchored lens is what makes it filable.
 
 **Inertness holds, and it is proven rather than asserted.** No production caller of `SetTaxonomyResolver` exists,
 so every `*` lens would refuse activation — and no `packages/` lens carries the sigil (the corpus's only `*` is
@@ -1675,7 +1735,10 @@ The unknown-label posture must be declared explicitly, since a cross-package lab
 install order. §17.6's `LeafBudget` direct-vs-transitive gap is this increment's or item 6's — it is still
 un-addressed.
 
-**Two grounded preconditions increment 4 leaves, both filed as lane rows rather than carried silently:**
+**Two grounded preconditions increment 4 leaves, neither carried silently** *(disposition corrected at B1's
+close pass, 2026-08-10: the original wording said "both filed as lane rows," which is true of the first only —
+the second was routed to Fire A item 6, and item 6 shipped it. A close pass read the sentence literally, went
+looking for a second row, and found none; the wording was the defect, not the accounting):*
 
 - **`armed` asserts more than the consumer can back.** `SetArmed(true)` fires on the first replayed taxonomy
   event, so a `*` lens activating mid-replay can narrow against a partial taxonomy; and on a NATS
@@ -2036,3 +2099,78 @@ are operationType-only (`PermissionSpec` carries no class), so the grant matrix 
 consumer reads `class == "location"` anywhere — the blast radius is write-path guards, submitters, and the
 `vtx.location.*` test fixtures in `packages/wellness-domain/workplace_confinement_test.go:460,572,575` that
 would otherwise refuse the abstract install in-process.
+
+### 17.17 Fire B · B1 — location lands abstract, and the item closes (2026-08-10)
+
+**Scope sentence (§14 B1):** four type metas + three `subtypeOf` links; the class becomes the key type;
+the guard census re-run and migrated; `capabilityServiceAccess` labels its location nodes. All of it landed;
+nothing was substituted. §9.2/§9.3/§13/§15/§6.4/§2.1/§9.4 were amended **in place** where the build falsified
+them — this note is not the record, the body is.
+
+**The migration state decided the design, and it was measured, not assumed.** 0 live `vtx.location.*` (so the
+abstract install is clear) but **69 live location vertices — 60 `vtx.unit.*`, 9 `vtx.building.*` — all carrying
+`class: "location"`**, which nothing rewrites. So the guards cannot read the class alone (§9.2's landing) and
+cannot read the key alone either (that drops a real check). All 19 sites across 7 packages became the
+conjunction. **Against the pre-diff guard this is incomparable, not stricter** — it newly admits a location
+carrying its own leaf class, which is the entire forward-migration path — and it is recorded as a widening
+rather than asserted away. Four packages had that widened arm **unpinned** until the close pass: narrowing
+their class set back to `["location"]` left the whole suite green while every post-upgrade location silently
+stopped being wireable. Each now carries a positive vector, mutation-verified. Loftspace needed none — its
+`createUnit` submits the real op, so five existing tests already cross that boundary.
+
+**Three decisions this increment made:**
+
+1. **`exLoc` is deliberately unlabeled** while `loc0`/`loc` carry `:location*`. An expansion sigil is
+   fail-closed in a positive pattern and fail-**open** in a negated one: constraining the binder inside
+   `NOT (...)` removes exclusions, so under a partial expansion a building-level `unavailableAt` stops firing
+   and the lens grants a service where an operator denied it. Reproduced as a failing test first. A string pin
+   in `service-location/package_test.go` fails the build if the label returns.
+2. **`TombstoneLocation` keeps no class arm**, alone among the guards. Tombstone is the corrective path and
+   must stay maximally available — the same rationale as Contract #1's tombstone exemption. A deliberate
+   asymmetry, not an oversight.
+3. **The abstract DDL keeps its schemas** (`build.go` requires all four on every DDL) and **`WireContainedIn`
+   takes the child's leaf as its envelope class** (the child is the link's source).
+
+**The upgrade path is not the fresh-install path, and only the fresh one was designed.** `DDLID` is
+version-independent, so the abstract reuses 0.2.3's meta NanoID; `build.go` stops emitting `.script` and
+`.permittedCommands`; `diffManifest` therefore **tombstones** them; and a tombstone retains the prior document
+whole. Five readers took a revoked declaration as live — `ddl_cache`'s `permittedCommands` and `script`
+(whose `custody` sibling three blocks above already filtered, and documented why), the aiagent traversal
+(whose abstract exemption keyed on `ErrKeyNotFound`, and the key *exists*), `verify-package-location-domain`
+(which would have failed on every upgraded stack — this fire's own gate), and Loupe's op catalog (a phantom
+`location` group). `TestUpgrade_ConcreteLocationToAbstract` runs the real upgrade and pins each reader;
+reverting the fixes reproduces the inversion verbatim. **No test anywhere had ever upgraded a concrete DDL to
+an abstract one.**
+
+**Two sibling readers in that same function are NOT fixed** — `sensitive` and `canonicalName` have the
+identical missing filter, so a package that withdraws `Sensitive: true` keeps the class sensitive forever.
+Not introduced here, and *not* a safe mechanical fix: honoring the withdrawal stops encrypting a class on
+upgraded cells, which is a privacy decision about existing ciphertext, not a filter. Filed for a designer pass.
+
+**Verified live.** `make verify-kernel` passes; location-domain 0.3.0 and service-location were diff-applied
+onto the running stack (the real 0.2.3→0.3.0 upgrade, i.e. the tombstone path above) and both
+`verify-package-*` targets pass against it. Whole-repo `go test ./... -p 4` green across three runs.
+
+### 17.18 Checkpoint — Fire B COMPLETE, and the item is done
+
+**B0 (`dd7e88ff`) + B1 (`00a2ee04`) close Fire B, and Fire B closes the item.** No worktree is held.
+
+**What the close pass changed about the item's own record.** §14 said "Fire B's first commit files these four
+as board rows — naming them here is not filing them." It never happened; a search over every commit that has
+touched the backlog found no row for any of the four, in any lane, since ratification. They are filed
+(`f4f4741b`), with the fifth the build surfaced (no place to hang a category-level command on an abstract
+type). §17.8's "both filed as lane rows" was a **wording** defect, not a false record: the second item was
+routed to Fire A item 6, which shipped it (`filterBroadReason` is live). §17.6's deferred fast-path revisit
+came due at this admit and is recorded: B1's lens anchors on concrete `identity`, so still no consumer.
+
+**B0's two residuals still resolve to nothing, and one of them matters.**
+`control.Service.rebuildRule` spawns an uncoordinated goroutine per request, so an operator corpus-rebuild
+reproduces the exact fan-out B0 exists to prevent. Filed rather than carried silently.
+
+**The headline that did not survive.** §9.4 promised this fire converted a permanently-broad auth-plane lens
+into a narrowed one, and called it the measurable win. Measured: the lens is non-exhaustive independently of
+any label (`labels.go:135-138` clears it for any variable-length hop, and this lens has two), so
+`ConsumerFilter` takes the broad arm before cap arithmetic runs. Broad before, broad after — no regression and
+no win. What shipped is a truthful type declaration, a tighter binder, and the polymorphism the label-binding
+fire removed. Making this lens narrowable means reconciling variable-length containment walks with the
+exhaustiveness rule: a design question, filed as one.

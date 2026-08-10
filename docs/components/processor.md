@@ -531,7 +531,22 @@ Same contract as every dossier: fire briefs copy the applicable entries into par
   package-authoring debugging. Check: none yet.
 - **A gate's negative test must first prove its positive vector reaches the gate** — two taxonomy gates
   shipped with tests that passed by planting keys the Processor itself refuses upstream (vacuous pass).
-  Minted: dynamic-type-taxonomy items 1 + 5. Check: standing checklist #3 (revert-the-fix discipline).
+  Minted: dynamic-type-taxonomy items 1 + 5; **seen a third time at B1** in a new shape — five packages'
+  negatives were refused by an arm other than the one under test, and the *accepted* side of a widened class
+  set had no vector at all. Check: standing checklist #3 (revert-the-fix discipline). **Mechanize on the next
+  sighting in a DIFFERENT item** (all three so far are this one): for each `fail(` reachable from a `require_*`
+  helper, require the package's tests to assert that failure's own error prefix AND one accepted submit
+  through the same helper.
+- **A tombstone retains the prior document, so a reader that does not filter `isDeleted` sees a revoked
+  declaration as live** — `ddl_cache`'s custody reader filters and says why; the `script` and
+  `permittedCommands` readers three blocks away did not, so an upgrade that stops emitting an aspect leaves it
+  readable forever. Minted: dynamic-type-taxonomy B1 (concrete→abstract upgrade returned `Abstract:true` with
+  the old script and all five commands). Check: the aspect-disposition assertion on an UPGRADE path, not just
+  a fresh install.
+- **Declaring one operationType on N sibling classes makes `ClassForCommand` drop it** — `buildByCommand`
+  marks it ambiguous (`ddl_cache.go:526-583`), so every submitter must name a concrete class and the failure
+  is silent until a live submit. Minted: dynamic-type-taxonomy B1 (30 submitters, inert only because each
+  already passed an explicit class that then became invalid). Check: none yet.
 - **Starlark WALL binds before the live-read budget** — one `kv.Read` per listed key; CI masks the wall
   (`PROCESSOR_SCRIPT_WALL_MS=5000`), so a locally-green script can still be wall-bound live. Minted:
   sensitive-param egress work. Check: none yet.

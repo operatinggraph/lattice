@@ -938,6 +938,19 @@ the entry).
 - **Site censuses derived from key shapes undercount** — `nodeMatches` also admits a vertex whose body
   `class`/`label` matches, so derive label/equality censuses from the matcher, not the key grammar. Minted:
   dynamic-type-taxonomy §5.1 census correction (four → six). Check: executable census, re-run at Phase 0.
+- **An expansion sigil is fail-CLOSED in a positive pattern and fail-OPEN in a negated one** — constraining
+  the binder inside `NOT (...)` removes exclusions, i.e. grants. A `*` label on an auth lens's exclusion walk
+  turns a partial taxonomy expansion into an over-grant, and the two arms of the same lens then fail in
+  opposite directions. Minted: dynamic-type-taxonomy B1 (`capabilityServiceAccess`'s `exLoc`, which mints
+  `cap.svc.<actor>`; reproduced as a failing test before removal). Check: per-lens string pin today
+  (`service-location/package_test.go`); a `lint-lens-anchors` "sigil inside a negated pattern" rule on the
+  second sighting.
+- **A label narrows the binder, not necessarily the consumer filter** — `ReferencedLabels` clears
+  exhaustiveness for *any* variable-length hop (`ruleengine/full/labels.go:135-138`) and `ConsumerFilter`
+  takes the broad arm before cap arithmetic, so a lens carrying a `*0..` walk is broad whatever its labels.
+  Minted: dynamic-type-taxonomy §9.4, whose headline "converts an unnarrowable lens into a narrowed one"
+  survived three increments before anyone measured it. Check:
+  `label_derivation_corpus_census_test.go` pins `(labels, exhaustive, filterMode)` per shipped lens.
 - **Lens lag is not read-model incompleteness** — anti-join / field-diff against the source before designing
   any drain or backfill. Minted: capability-projection reconciliation. Check: none yet.
 - **An upsert-only reprojection retracts nothing whose key drops out** — on the security plane that is an

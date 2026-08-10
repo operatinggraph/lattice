@@ -401,6 +401,24 @@ reads all `vtx.package.>` keys and prints them.
 See `packages/identity-hygiene/` for the canonical example (DDL + Lens +
 permission), or `packages/rbac-domain/` for paired forward/inverse ops.
 
+## Review keeps catching (dossier)
+
+The recurring review-finding classes for package authoring — fire briefs copy the applicable entries into
+part 5 (`agents/fire-brief-template.md`), the item-close review appends new ones
+(`agents/steward/SKILL.md` §4). **Capped at 12 one-liners**; an entry RETIRES when a lint/test gate
+mechanizes it (name the gate, strike the entry).
+
+- **A cross-package type guard must survive the migration window in BOTH directions** — when a type's class
+  or key shape changes, the old and new populations are live simultaneously and nothing rewrites the old
+  documents, so a guard admitting only one is a silent outage on the other. Minted: dynamic-type-taxonomy B1
+  (`cls == "location"` would have rejected all 69 live locations; the accepted-widening arm was then unpinned
+  in 4 of 7 packages, so narrowing it back left the whole suite green). Check: every guard needs a *positive*
+  vector per live shape, not just a negative — and mutation-test each by narrowing the set.
+- **Census the CHECK, not the wrapper** — a generic helper (`require_live_typed(…, "location")`) reaches the
+  same guard as the named wrapper, so a grep for wrapper names undercounts. Minted: dynamic-type-taxonomy §9.2
+  (8 sites / 5 packages claimed; 19 / 7 real, plus two JavaScript submit sites no Go census would find).
+  Check: grep the predicate and the error string, then re-derive at Phase 0.
+
 ## Related contracts
 
 - **Contract #1** §1.3, §1.5 — vertex / aspect / link key shapes the install write set must conform to.
