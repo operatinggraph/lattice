@@ -38,6 +38,7 @@ Key files:
 | `envelope.go` | `NewDocumentEnvelopeAt`, `AspectEnvelope`, `LinkEnvelope` — document wire shapes |
 | `conn.go` | `Connect`, `Wrap`, `*Conn`; `NATS()` and `JetStream()` escape hatches; lazy `buckets` cache |
 | `kv.go` | `KVGet`, `KVPut`, `KVCreate`, `KVUpdate`, `KVListKeys`, `KVPutWithTTL`, `KVDelete` |
+| `kv_multi.go` | `KVGetMulti` — batched multi-subject direct get (raw `multi_last` protocol + stability-verified 413 fallback) |
 | `kvhandle.go` | `KV` (an opened bucket handle) + `(*Conn).OpenKV` — used where a caller holds one bucket handle across many reads (e.g. Refractor control's validate sampler) |
 | `batch.go` | `AtomicBatch`, `PublishBatch`, `BatchOp`, `PublishOp`, `BatchAck`, `PublishBatchAck`; raw-protocol implementation |
 | `publish.go` | `Publish`, `PublishCore`, `ScheduleEvery`, `CancelSchedule`, `DeriveScheduleOccurrenceRequestID` — the publish + `@every` schedule surface (see [scheduling.md](./scheduling.md)) |
@@ -119,6 +120,7 @@ are wrapped with operation context for log correlation.
 | `KVCreate(ctx, bucket, key, value) (revision, error)` | Write only if key does not already exist. Returns `ErrRevisionConflict` if key exists. |
 | `KVUpdate(ctx, bucket, key, value, expectedRevision) (revision, error)` | Write only if current revision matches. Returns `ErrRevisionConflict` on mismatch, `ErrKeyNotFound` if key was purged. |
 | `KVListKeys(ctx, bucket) ([]string, error)` | Return all keys in bucket. Order unspecified. Used by DDL cache at Processor startup to enumerate `vtx.meta.>`. Heavy on large buckets — scope to bounded key sets only. |
+| `KVGetMulti(ctx, bucket, keys) (map[string]*KVEntry, error)` | Batched read of every LIVE entry among `keys` (exact keys and/or NATS wildcard filters) in one atomic, point-in-time snapshot — the raw `multi_last` direct-get protocol (ADR-31, `docs/vendors.md`), computed under the stream's read lock. Result is keyed by resolved key; an absent key is simply missing from the map (no per-key error). ≤1,024 combined matched subjects rides the fast path; beyond that, transparently falls back to a stability-verified (double-drain, compared) ephemeral-consumer read. `KV.GetMulti` is the bucket-handle delegate. |
 | `KVPutWithTTL(ctx, bucket, key, value, ttl) (sequence, error)` | Write with a per-message TTL via the `Nats-TTL` header. Bucket must have `AllowMsgTTL` enabled. Used for op-tracker entries (Contract #4 §4.3 — 24h TTL). Same mechanism as `AtomicBatch`'s per-op TTL. |
 | `KVDelete(ctx, bucket, key) error` | Soft-delete (writes a delete marker). Subsequent reads return `ErrKeyNotFound`. |
 

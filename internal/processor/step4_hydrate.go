@@ -210,17 +210,37 @@ func (h *HydratorImpl) Hydrate(ctx context.Context, env *OperationEnvelope) (Hyd
 	// exist?" for any actor holding any operation grant, over any key, before a
 	// script runs. Touching the key requires naming it in the payload, which is
 	// the path the operation's own guards stand on.
+	// The three declared-read lists are hydrated from ONE atomic snapshot
+	// (KVGetMulti), not three sequential per-key GET passes: a batched read
+	// locks the whole matched set under the stream's read lock, so no key —
+	// whichever list names it — can straddle a concurrent create or purge
+	// the way three separate live GETs could.
+	readKeys := distinctKeys(declared.Reads)
+	optionalReadKeys := distinctKeys(declared.OptionalReads)
+	egressReadKeys := distinctKeys(declared.EgressReads)
+	unionKeys := make([]string, 0, len(readKeys)+len(optionalReadKeys)+len(egressReadKeys))
+	unionKeys = append(unionKeys, readKeys...)
+	unionKeys = append(unionKeys, optionalReadKeys...)
+	unionKeys = append(unionKeys, egressReadKeys...)
+	snapshot, err := h.Conn.KVGetMulti(ctx, h.CoreBucket, distinctKeys(unionKeys))
+	if err != nil {
+		return HydratedState{}, fmt.Errorf("step4: get-multi: %w", err)
+	}
+
 	hydrated := make(map[string]VertexDoc)
 	var knownAbsent map[string]struct{}
 	var requiredAbsent map[string]struct{}
-	// A key may appear twice in one list (nothing rejects that), and the two
-	// live GETs straddle any concurrent create or purge, so the same key can
-	// probe both present and absent within one hydration. These two keep the
-	// maps disjoint, with PRESENT winning: a hydrated doc is a real read the
-	// script can serve, whereas a stale absence would fault an operation whose
-	// key is sitting right there in the working set. The "" guard at each loop
-	// head is what keeps the empty string out of requiredAbsent — both the
-	// tracker and the mutation check use "" as their no-fault sentinel.
+	// A key may appear twice in one list, or across lists (nothing rejects
+	// either). These two keep the disposition maps disjoint, with PRESENT
+	// winning: a hydrated doc is a real read the script can serve, whereas a
+	// stale absence would fault an operation whose key is sitting right
+	// there in the working set. Every loop below resolves against the SAME
+	// snapshot, so "present" and "absent" already agree for a repeated key
+	// before these guards run — they restate the disjointness invariant,
+	// not a race between reads. The "" guard at each loop head (distinctKeys'
+	// blank filter) is what keeps the empty string out of requiredAbsent —
+	// both the tracker and the mutation check use "" as their no-fault
+	// sentinel.
 	markRequiredAbsent := func(key string) {
 		if _, present := hydrated[key]; present {
 			return
@@ -236,14 +256,11 @@ func (h *HydratorImpl) Hydrate(ctx context.Context, env *OperationEnvelope) (Hyd
 	}
 	tracker := &sensitiveReadTracker{}
 	var egressKeys map[string]struct{}
-	for _, key := range distinctKeys(declared.Reads) {
-		entry, err := h.Conn.KVGet(ctx, h.CoreBucket, key)
-		if err != nil {
-			if errors.Is(err, substrate.ErrKeyNotFound) {
-				markRequiredAbsent(key)
-				continue
-			}
-			return HydratedState{}, fmt.Errorf("step4: read %s: %w", key, err)
+	for _, key := range readKeys {
+		entry, ok := snapshot[key]
+		if !ok {
+			markRequiredAbsent(key)
+			continue
 		}
 		doc, err := parseVertexDoc(entry.Value, key)
 		if err != nil {
@@ -255,7 +272,7 @@ func (h *HydratorImpl) Hydrate(ctx context.Context, env *OperationEnvelope) (Hyd
 		}
 		markHydrated(key, doc)
 	}
-	for _, key := range distinctKeys(declared.OptionalReads) {
+	for _, key := range optionalReadKeys {
 		// A key in both lists keeps the fail-closed `reads` semantics: it
 		// either hydrated above or was recorded required-absent, so it is
 		// never demoted to absence-tolerant by a duplicate optionalReads
@@ -268,21 +285,13 @@ func (h *HydratorImpl) Hydrate(ctx context.Context, env *OperationEnvelope) (Hyd
 		if _, ok := requiredAbsent[key]; ok {
 			continue
 		}
-		// A duplicate optionalReads entry already probed absent: skip the
-		// second live GET (nil-map read is safe).
-		if _, ok := knownAbsent[key]; ok {
-			continue
-		}
-		entry, err := h.Conn.KVGet(ctx, h.CoreBucket, key)
-		if err != nil {
-			if errors.Is(err, substrate.ErrKeyNotFound) {
-				if knownAbsent == nil {
-					knownAbsent = map[string]struct{}{}
-				}
-				knownAbsent[key] = struct{}{}
-				continue
+		entry, ok := snapshot[key]
+		if !ok {
+			if knownAbsent == nil {
+				knownAbsent = map[string]struct{}{}
 			}
-			return HydratedState{}, fmt.Errorf("step4: read %s: %w", key, err)
+			knownAbsent[key] = struct{}{}
+			continue
 		}
 		doc, err := parseVertexDoc(entry.Value, key)
 		if err != nil {
@@ -294,7 +303,7 @@ func (h *HydratorImpl) Hydrate(ctx context.Context, env *OperationEnvelope) (Hyd
 		}
 		markHydrated(key, doc)
 	}
-	for _, key := range distinctKeys(declared.EgressReads) {
+	for _, key := range egressReadKeys {
 		if egressKeys == nil {
 			egressKeys = map[string]struct{}{}
 		}
@@ -307,13 +316,10 @@ func (h *HydratorImpl) Hydrate(ctx context.Context, env *OperationEnvelope) (Hyd
 		if _, ok := hydrated[key]; ok {
 			continue
 		}
-		entry, err := h.Conn.KVGet(ctx, h.CoreBucket, key)
-		if err != nil {
-			if errors.Is(err, substrate.ErrKeyNotFound) {
-				markRequiredAbsent(key)
-				continue
-			}
-			return HydratedState{}, fmt.Errorf("step4: read %s: %w", key, err)
+		entry, ok := snapshot[key]
+		if !ok {
+			markRequiredAbsent(key)
+			continue
 		}
 		doc, err := parseVertexDoc(entry.Value, key)
 		if err != nil {

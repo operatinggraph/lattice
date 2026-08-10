@@ -211,24 +211,19 @@ func Deregister(ctx context.Context, kv *substrate.KV, identityID, deviceID stri
 // declared Anchors; the union of ALL the identity's devices is checked (they
 // share one subject) — any one match makes the delta relevant.
 func IsRelevant(ctx context.Context, kv *substrate.KV, identityID, anchorType, anchorID string) (bool, error) {
-	keys, err := kv.ListKeysPrefix(ctx, identityID+".")
+	// One batched read (filter + values in the same round trip) replaces the
+	// former list-then-get-each loop.
+	entries, err := kv.GetMulti(ctx, []string{identityID + ".>"})
 	if err != nil {
-		return false, fmt.Errorf("personalinterest: list devices for %q: %w", identityID, err)
+		return false, fmt.Errorf("personalinterest: get devices for %q: %w", identityID, err)
 	}
-	if len(keys) == 0 {
+	if len(entries) == 0 {
 		return true, nil
 	}
-	for _, key := range keys {
-		entry, err := kv.Get(ctx, key)
-		if err != nil {
-			if errors.Is(err, substrate.ErrKeyNotFound) {
-				continue
-			}
-			return false, fmt.Errorf("personalinterest: get %q: %w", key, err)
-		}
+	for _, entry := range entries {
 		var doc registrationDoc
 		if err := json.Unmarshal(entry.Value, &doc); err != nil {
-			return false, fmt.Errorf("personalinterest: unmarshal %q: %w", key, err)
+			return false, fmt.Errorf("personalinterest: unmarshal %q: %w", entry.Key, err)
 		}
 		if len(doc.Types) == 0 && len(doc.Anchors) == 0 {
 			return true, nil

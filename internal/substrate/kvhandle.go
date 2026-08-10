@@ -66,6 +66,12 @@ func (k *KV) ListKeys(ctx context.Context) ([]string, error) {
 	return k.conn.KVListKeys(ctx, k.bucket)
 }
 
+// GetMulti reads every live entry among keys in one atomic snapshot, keyed
+// by resolved key. See Conn.KVGetMulti.
+func (k *KV) GetMulti(ctx context.Context, keys []string) (map[string]*KVEntry, error) {
+	return k.conn.KVGetMulti(ctx, k.bucket, keys)
+}
+
 // ListKeysPrefix returns every key under the given key prefix. See
 // Conn.KVListKeysPrefix.
 func (k *KV) ListKeysPrefix(ctx context.Context, prefix string) ([]string, error) {

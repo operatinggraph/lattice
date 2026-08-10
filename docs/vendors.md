@@ -37,6 +37,7 @@ Feature availability is version-gated; cite the version that introduced a featur
 | Atomic batch (single-stream multi-key, revision-conditioned) | NATS 2.12 | The Processor step-8 commit; the reason all Core KV is one stream. |
 | `@at` one-shot message schedules (ADR-51) | NATS 2.12 | The temporal lane's freshness timers + the bridge poll/timeout lane (Contract #10 §10.4). |
 | `@every` / 6-field cron / timezone message schedules (ADR-51) | NATS 2.14 | Recurring schedules — the cron-killer (Contract #10 §10.4 "Recurring schedules"). |
+| Multi-subject direct get (`multi_last`, ADR-31) | NATS 2.11 | Batched KV read: `substrate.KVGetMulti` (`internal/substrate/kv_multi.go`). Whole response computed under the stream read lock (atomic); 1,024-subject hard cap → `413`, falls back to a stability-verified consumer drain. No `nats.go` v1.52.0 client surface — hand-rolled raw protocol, same posture as `KVPutWithTTL`. |
 
 **Platform floor: NATS 2.14** (the highest of the above). Pinned in `go.mod` + `docker-compose.yml`;
 owned by this file (contracts cite it, never restate it). Do not assume a lower floor — `@every`/cron need 2.14 and the platform
