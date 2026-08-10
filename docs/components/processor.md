@@ -550,3 +550,13 @@ Same contract as every dossier: fire briefs copy the applicable entries into par
 - **Starlark WALL binds before the live-read budget** — one `kv.Read` per listed key; CI masks the wall
   (`PROCESSOR_SCRIPT_WALL_MS=5000`), so a locally-green script can still be wall-bound live. Minted:
   sensitive-param egress work. Check: none yet.
+- **A gate that consults the in-flight batch must resolve LAST-write-wins** — the substrate commits
+  duplicate keys last-write-wins (`batch.go`), so a first-match scan classifies on a mutation that never
+  reaches Core KV, and a decoy placed ahead of the real write steers the gate at will. Minted:
+  dynamic-type-taxonomy C1.2 (`classOf`, and the reserved-name gate's own kind lookup).
+  Check: every loop over `result.Mutations` that picks a winner scans to the end.
+- **A name-scoped gate must not carve out by meta-vertex KIND** — `Refresh` indexes every meta-vertex
+  carrying a `canonicalName` into `byName` regardless of class, and `validateAbstractKeySegments` resolves
+  a type segment through it with no kind filter, so a lens can hold a name the gate believed only a
+  vertexType DDL could. Minted: dynamic-type-taxonomy C1.2 (a lens named `meta`, declared abstract, bricked
+  every `vtx.meta.*` write). Check: the gate keys on the name as indexed, not on the declarer's class.

@@ -2394,10 +2394,30 @@ with Refractor up 1h18m. The morning's boot path could not run Refractor at all.
   not warranted.
 - **C2.6 answered by measurement, not built** — see C2 item 6 above. The boot fan-out costs ~0; the remaining
   work there is fairness/correctness, not memory, and must not be re-briefed as an OOM fix.
-- **Next, in order:** C3.7 (the cap-arithmetic refusal consumer; the blocking fact is that `pkgmgr`'s injected
-  `CypherParser` interface returns only `error`, so `K` is uncomputable — the seam has to widen to yield a
-  spec's referenced labels, and `full.CompiledRule.ReferencedLabels()` is the existing API to expose) →
-  C1.4's authoring-lint half → C2.6's remaining fan-out at its corrected size.
+- **C1.4's authoring half SHIPPED `7e2f6351`** — `scripts/lint-manifest-entity-type.go` resolves each
+  `entityKey` variable back to the label its Walk Chain binds it to, requires the `entityType` literal to
+  equal it across all eight pairs, and refuses a literal naming any abstract type. Wired into CI and the
+  Makefile. Verified load-bearing by perturbing the real corpus, not a synthetic fixture. The item's DATA half
+  (class ⟷ key segment over the 69 vertices) stays migration-blocked and unbuilt.
+- **C3.7 is BUILT BUT NOT MERGED, deliberately.** It sits on `fire/taxonomy-fire-c` (see the commit at the
+  branch tip) and is a cross-cutting widening of `pkgmgr`'s injected `CypherParser` seam that reaches
+  `cmd/lattice`, `cmd/lattice-pkg`, `cmd/loupe`, `internal/testutil` and four `packages/*` test files. It has
+  had NO cold adversarial review. It was held back because this fire had already put `main` red once and a
+  wide interface change landing unreviewed at the tail of a long run is the wrong risk — not because anything
+  is known to be wrong with it. **The next fire's first job is to review it, then merge or amend it.**
+- **Then:** C2.6's remaining fan-out at its corrected size (fairness, not memory).
+
+**What went wrong in this fire, recorded so it is not repeated.** `d470c9ac` (C2.5) went to `main` RED and I
+reported it green. Two causes, both process: the CI watch was written as
+`gh run watch --exit-status > log; echo $?; tail log`, so the exit code observed was `tail`'s, not the watch's —
+the "never pipe a CI watch" rule exists for exactly this. And the local full-suite check was `go test ./...`,
+which silently omits the **build-tagged** suites (`-tags leaseshortwindow` convergence, and its siblings), so
+the convergence job was never in the "green" it claimed. The underlying defect was real and is fixed in
+`48563907`: C2.5's new reopen loop exits only on ctx-cancel or a consumer-is-gone probe, and a CLOSED
+connection is neither — the probe cannot answer over one, and its unanswerable case means keep-trying, so the
+loop spun at its backoff for the life of the process and starved an unrelated package's test into failing. A
+later convergence failure on the fix commit was the known parallel-load flake: one re-run green, and the full
+convergence suite passes locally at that commit.
 - **Still designer-pass, unchanged:** C4 (items 8–11) and C5 (item 12). C5's reconciliation was re-grounded
   this fire and has no ratified pattern to extend: no link-type DDL declares endpoint types anywhere
   (`TargetType` is an op-dispatch field, not a link endpoint), so bounding a variable-length hop's type set

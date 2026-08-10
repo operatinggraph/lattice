@@ -514,3 +514,9 @@ Same contract as every dossier: fire briefs copy the applicable entries into par
   `nats-server/server/*.go:NNN` for every protocol constant; the one comment that asserted a nats.go
   contract without a citation was wrong. Minted: adjacency Shape B (`valueSizeLimit`'s memo justification).
   Check: a claim about vendor behaviour carries the pinned source location, or it is a hypothesis.
+- **A reopen/retry loop needs a connection-closed exit of its own** — an "is it really gone" probe is a
+  round trip, so it cannot answer over a closed connection, and its unanswerable case resolves to keep
+  trying: right for a stall, unbounded for a close. The loop then spins at its backoff for as long as the
+  caller's ctx outlives its connection, which for every test that closes a fixture before cancelling is the
+  rest of the process — it reddened an unrelated package by starvation. Minted: dynamic-type-taxonomy C2.5.
+  Check: the loop tests `nc.IsClosed()` BEFORE any probe, since the probe is what cannot decide it.

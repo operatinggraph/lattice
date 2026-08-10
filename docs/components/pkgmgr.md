@@ -36,5 +36,10 @@ Same contract as every dossier: fire briefs copy the applicable entries into par
 - **The installer parses but never reads a lens spec's labels** — any authoring check that assumes label
   availability at install time is uncomputable until the label-extraction board row lands. Minted:
   dynamic-type-taxonomy §17.10. Check: that row.
+- **A corpus-wide guard read must exclude the churn namespaces** — an install-time scan over every vertex
+  root also walks `vtx.op.<requestId>` idempotency trackers, a 24h-horizon population that is millions of
+  keys on a busy kernel, against a 45-60s install deadline (and the long-lived Loupe process). Minted:
+  dynamic-type-taxonomy C1.1. Check: the candidate set excludes reserved segments, and the losslessness of
+  the exclusion is argued at the call site rather than assumed.
 - **RETIRED (the model of a retired entry):** a package-content edit without a version bump silently
   no-ops on a live stack — mechanized: `scripts/lint-package-version.go`.
