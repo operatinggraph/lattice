@@ -2,12 +2,41 @@ package substrate
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
 
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
+)
+
+const (
+	// defaultConnectTimeout is the per-attempt handshake budget Connect uses
+	// when ConnectOpts.Timeout is zero, replacing nats.go's own 2s default
+	// (processConnectInit pins the whole INFO+CONNECT+PING/PONG exchange to
+	// this under one conn.SetDeadline). nats.go applies Opts.Timeout to
+	// EVERY dial alike — the initial connect and every automatic reconnect
+	// (doReconnect calls createConn, which applies it identically) — so
+	// this is deliberately smaller than internal/natsfixture's 20s: a test
+	// fixture connects once and never reconnects, but a long-running
+	// component's reconnect cadence (e.g. cmd/processor's
+	// ReconnectWait: 1s) would otherwise slow by the same multiple on every
+	// cycle against a genuinely unreachable server, not just a loaded one.
+	defaultConnectTimeout = 10 * time.Second
+
+	// connectAttempts bounds the retry on the INITIAL connect only —
+	// reconnects after a connection has been established once are nats.go's
+	// own loop (MaxReconnects/ReconnectWait), never this one. A stall that
+	// resets the socket outright during the first dial is not covered by a
+	// longer Timeout alone (a reset returns immediately, however generous
+	// the budget), so the first attempt gets a bounded retry too. Matches
+	// internal/natsfixture's connectAttempts.
+	connectAttempts = 4
+
+	// connectBackoff is the pause between initial-connect retries. Matches
+	// internal/natsfixture's connectBackoff.
+	connectBackoff = 250 * time.Millisecond
 )
 
 // ConnectOpts configures the NATS connection substrate establishes on
@@ -23,6 +52,16 @@ type ConnectOpts struct {
 	// Name is the connection name reported to NATS (helpful for debugging
 	// component identity in NATS monitoring).
 	Name string
+	// Timeout bounds each dial's handshake — the initial connect AND every
+	// automatic reconnect alike (nats.go applies the same budget to both;
+	// see connectWithRetry). Zero means "use substrate's own default"
+	// (defaultConnectTimeout) — deliberately NOT "use the nats.go default":
+	// nats.go's bare 2s default is exactly the trap this field exists to
+	// avoid. The INITIAL connect additionally gets a small bounded retry
+	// (connectWithRetry) that MaxReconnects/ReconnectWait do not apply to;
+	// a ctx passed to Connect bounds that retry loop between attempts, not
+	// Timeout itself.
+	Timeout time.Duration
 	// MaxReconnects controls the reconnect retry budget. Zero means
 	// "use the nats.go default". Set to -1 for unlimited.
 	MaxReconnects int
@@ -90,7 +129,11 @@ func Connect(ctx context.Context, opts ConnectOpts) (*Conn, error) {
 	if opts.URL == "" {
 		opts.URL = nats.DefaultURL
 	}
-	natsOpts := []nats.Option{}
+	timeout := opts.Timeout
+	if timeout <= 0 {
+		timeout = defaultConnectTimeout
+	}
+	natsOpts := []nats.Option{nats.Timeout(timeout)}
 	if opts.Name != "" {
 		natsOpts = append(natsOpts, nats.Name(opts.Name))
 	}
@@ -128,7 +171,7 @@ func Connect(ctx context.Context, opts ConnectOpts) (*Conn, error) {
 	if opts.TokenHandler != nil {
 		natsOpts = append(natsOpts, nats.TokenHandler(opts.TokenHandler))
 	}
-	nc, err := nats.Connect(opts.URL, natsOpts...)
+	nc, err := connectWithRetry(ctx, opts.URL, natsOpts...)
 	if err != nil {
 		return nil, fmt.Errorf("substrate: nats connect: %w", err)
 	}
@@ -137,12 +180,60 @@ func Connect(ctx context.Context, opts ConnectOpts) (*Conn, error) {
 		nc.Close()
 		return nil, fmt.Errorf("substrate: jetstream context: %w", err)
 	}
-	// nats.Connect does not accept a context; context-based cancellation of the
-	// initial dial is not possible via the nats.go API. Callers that need to bound
-	// connection time should set ConnectOpts.MaxReconnects and ReconnectWait to
-	// limit the retry loop rather than relying on context deadlines.
-	_ = ctx
 	return &Conn{nc: nc, js: js, buckets: make(map[string]jetstream.KeyValue), objectStores: make(map[string]jetstream.ObjectStore)}, nil
+}
+
+// connectWithRetry dials url with a bounded retry, giving the INITIAL
+// handshake the same stall-tolerance internal/natsfixture gives test
+// connects: the per-attempt Timeout (already in opts) absorbs a slow
+// handshake, and the retry absorbs a stall that resets the socket outright
+// (which no timeout, however generous, can absorb — a reset returns
+// immediately). An auth-time rejection is never retried (permanentConnectError).
+//
+// ctx bounds the retry LOOP — a new attempt is not started once ctx is done
+// — but never shrinks Timeout itself. nats.Connect is a blocking call with
+// no context hook (the nats.go API has none), so an attempt already under
+// way cannot be interrupted early; and Timeout is baked into the resulting
+// *nats.Conn and reused by nats.go's own reconnect loop for that
+// connection's whole remaining life (createConn, called from both Connect
+// and doReconnect, always reads it off Opts), so deriving it from a
+// transient ctx's remaining budget would leave a long-lived connection
+// permanently under-budgeted long after that ctx is gone. A caller with a
+// tight ctx deadline and a single stalled attempt can still see one
+// over-budget dial; only the retry beyond it is bounded by ctx.
+func connectWithRetry(ctx context.Context, url string, opts ...nats.Option) (*nats.Conn, error) {
+	var err error
+	for attempt := 1; ; attempt++ {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			if err != nil {
+				return nil, fmt.Errorf("%w (retry stopped: %w)", err, ctxErr)
+			}
+			return nil, ctxErr
+		}
+		var nc *nats.Conn
+		if nc, err = nats.Connect(url, opts...); err == nil {
+			return nc, nil
+		}
+		if permanentConnectError(err) || attempt == connectAttempts {
+			return nil, err
+		}
+		select {
+		case <-time.After(connectBackoff):
+		case <-ctx.Done():
+			return nil, fmt.Errorf("%w (retry stopped: %w)", err, ctx.Err())
+		}
+	}
+}
+
+// permanentConnectError reports whether err is an auth-time rejection a
+// retry cannot fix — the same credential presented again is rejected
+// again, so retrying only turns one fast, clear denial into several slower
+// ones (and, for TokenHandler, calls the handler needlessly on each).
+func permanentConnectError(err error) bool {
+	return errors.Is(err, nats.ErrAuthorization) ||
+		errors.Is(err, nats.ErrAuthExpired) ||
+		errors.Is(err, nats.ErrAuthRevoked) ||
+		errors.Is(err, nats.ErrAccountAuthExpired)
 }
 
 // Wrap adapts an existing *nats.Conn into a substrate *Conn. Useful when
