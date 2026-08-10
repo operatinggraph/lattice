@@ -912,3 +912,31 @@ band — so a one-cycle spike does not flap the heartbeat.)
 | Cross-instance latency aggregation | Phase 3 | Current `LatencyRingBuffer` is per-instance; no cluster-level rollup |
 | Link-envelope tombstone re-projection | Phase 3 | Currently adjacency entries are left in place on tombstone; re-projection on tombstone is not triggered |
 | Substrate-level write restriction on lens target buckets | 🔭 Designed (ratified 2026-06-27) | Today the defense against fabricated lens-target writes is overwrite-by-reprojection only; the **NATS account write-restriction** design scopes per-component NKey publish permissions so only Refractor writes the lens/auth buckets (credential seam shipped; enforcement pending) |
+
+---
+
+## Review keeps catching (dossier)
+
+The component's recurring review-finding classes — fire briefs copy the applicable entries into part 5
+(`agents/fire-brief-template.md`), the item-close review appends new ones (`agents/steward/SKILL.md` §4).
+**Capped at 12 one-liners**; an entry RETIRES when a lint/test gate mechanizes it (name the gate, strike
+the entry).
+
+- **A meta sweep multiplies `Rebuild`** — `supervisor.Reset` is a durable delete-recreate per lens, so any
+  fan-out over the lens set is a NATS burst (has OOM-killed `lattice-nats`). Minted: dynamic-type-taxonomy
+  §17.8. Check: none in code yet — the coalesced-rebuild-scheduler board row gates taxonomy Fire B.
+- **New pipeline state without a declared lifetime** (registry / latch / armed flag) — reset, carry, and
+  order it at replay, reconnect, tombstone, and retry, or the review will. Minted: dynamic-type-taxonomy
+  item 4 (nineteen findings, this class load-bearing). Check: the designer's state-lifetime table +
+  standing checklist #1.
+- **Site censuses derived from key shapes undercount** — `nodeMatches` also admits a vertex whose body
+  `class`/`label` matches, so derive label/equality censuses from the matcher, not the key grammar. Minted:
+  dynamic-type-taxonomy §5.1 census correction (four → six). Check: executable census, re-run at Phase 0.
+- **Lens lag is not read-model incompleteness** — anti-join / field-diff against the source before designing
+  any drain or backfill. Minted: capability-projection reconciliation. Check: none yet.
+- **An upsert-only reprojection retracts nothing whose key drops out** — on the security plane that is an
+  over-grant. Minted: negative/retraction design pass (designer SKILL §2). Check: none yet (the retraction
+  primitive is its own backlog item).
+- **A `WITH` boundary drops unprojected variables** — any set derived from a query (labels, carried state)
+  must model the drop or it re-seeds / excuses wrongly. Minted: lens-label-key-type binding design (two
+  reviewers broke the same increment in opposite directions). Check: none yet.

@@ -517,3 +517,21 @@ degradation signals in Health KV dashboards.
 - **Multi-cell routing** (Phase 3): the current pipeline is single-cell; operation routing across cells is Phase 3.
 - **NATS account-level auth** (🔭 Designed — ratified 2026-06-27): the current connection uses no NATS account-level auth. NATS account-level write restriction on Capability KV — substrate-level enforcement beneath the overwrite-by-reprojection guarantee — is the **NATS account write-restriction** design (per-component NKey users; only the Processor's connection may write `$KV.core-kv.>`); **Fire 1 shipped** (the dark, no-op credential seam, `75e9acc`), the enforcement turn-on (Fire 2) is pending.
 - **Multi-aspect atomic OCC** for `UpdateMetaVertex`: `expectedRevision` is asserted on a single aspect; atomic OCC across several changed aspects in one update is deferred.
+
+---
+
+## Review keeps catching (dossier)
+
+Same contract as every dossier: fire briefs copy the applicable entries into part 5
+(`agents/fire-brief-template.md`); the item-close review appends new ones (`agents/steward/SKILL.md` §4);
+**capped at 12 one-liners**; an entry retires when a lint/test gate mechanizes it.
+
+- **A silently-rejected op logs at Info** — step-3 / step-6 refusal reasons sit below TestLogger's WARN
+  default, so a "nothing happened" symptom needs the log level dropped before any other theory. Minted:
+  package-authoring debugging. Check: none yet.
+- **A gate's negative test must first prove its positive vector reaches the gate** — two taxonomy gates
+  shipped with tests that passed by planting keys the Processor itself refuses upstream (vacuous pass).
+  Minted: dynamic-type-taxonomy items 1 + 5. Check: standing checklist #3 (revert-the-fix discipline).
+- **Starlark WALL binds before the live-read budget** — one `kv.Read` per listed key; CI masks the wall
+  (`PROCESSOR_SCRIPT_WALL_MS=5000`), so a locally-green script can still be wall-bound live. Minted:
+  sensitive-param egress work. Check: none yet.

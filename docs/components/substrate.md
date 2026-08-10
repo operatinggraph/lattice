@@ -478,3 +478,21 @@ All three are plain `errors.New` sentinels wrapped with context via
 | Inner-package migration of Refractor sub-packages to substrate | ✅ Done | `internal/refractor` (non-test) now reaches NATS only through `substrate.Conn` — the sole residual raw `nats.go`/`jetstream` handle is `control/service.go`'s `micro.Service` responder (the accepted exception). The one remaining raw `js.CreateKeyValue` lives in `cmd/refractor` (target-bucket provisioning, out of inner-package scope — provisioning belongs to bootstrap, no `substrate.EnsureKV`). |
 | `AdjacencyForNode` substrate helper | Not built | A standalone `(*Conn).AdjacencyForNode` was contemplated for inbound-link enumeration but never needed — the adjacency index is read directly by Refractor's cypher executor. Revisit only if another component needs adjacency lookups outside Refractor. |
 | Cross-bucket atomic batch | Not planned (NATS limitation) | Cross-bucket atomicity is not supported by the NATS atomic batch primitive. Callers that need cross-bucket coordination must implement application-level compensation. |
+
+---
+
+## Review keeps catching (dossier)
+
+Same contract as every dossier: fire briefs copy the applicable entries into part 5
+(`agents/fire-brief-template.md`); the item-close review appends new ones (`agents/steward/SKILL.md` §4);
+**capped at 12 one-liners**; an entry retires when a lint/test gate mechanizes it.
+
+- **Narrowing a JetStream consumer's filter strands its pending set** — messages pending under the old
+  filter never redeliver under the new one; widen-then-drain or recreate the consumer. Minted: the
+  JetStream filter-narrowing incident. Check: none yet.
+- **The batch CAS is per-subject** (`Nats-Expected-Last-Subject-Sequence`), not whole-stream —
+  different-key writes never serialize, so don't design contention remedies for a lock that does not
+  exist. Minted: `substrate/batch.go` grounding (designer SKILL §2 trial). Check: none yet.
+- **RETIRED (the model of a retired entry):** hand-rolled embedded-NATS test fixtures inherit nats.go's
+  2-second no-retry handshake — mechanized: `lint-conventions` blocks bare `nats.Connect` in tests; use
+  `internal/natsfixture`.
