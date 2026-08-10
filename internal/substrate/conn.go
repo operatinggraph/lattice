@@ -4,11 +4,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"sync"
 	"time"
 
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
+	"github.com/nats-io/nkeys"
 )
 
 const (
@@ -163,6 +165,9 @@ func Connect(ctx context.Context, opts ConnectOpts) (*Conn, error) {
 		natsOpts = append(natsOpts, nkeyOpt)
 	}
 	if opts.CredsFile != "" {
+		if err := credsFilePreflight(opts.CredsFile); err != nil {
+			return nil, err
+		}
 		natsOpts = append(natsOpts, nats.UserCredentials(opts.CredsFile))
 	}
 	if opts.Token != "" {
@@ -234,6 +239,43 @@ func permanentConnectError(err error) bool {
 		errors.Is(err, nats.ErrAuthExpired) ||
 		errors.Is(err, nats.ErrAuthRevoked) ||
 		errors.Is(err, nats.ErrAccountAuthExpired)
+}
+
+// credsFilePreflight validates credsFile eagerly, the same way
+// nats.NkeyOptionFromSeed already validates NKeySeedFile before Connect
+// ever reaches connectWithRetry — a missing or malformed file is a
+// permanent, pre-dial-detectable error, not the transient stall the retry
+// loop exists to absorb; nats.UserCredentials' own userCB/sigCB parse the
+// file lazily inside the dial, which connectWithRetry cannot tell apart
+// from a stalled handshake.
+//
+// Only the NKey seed half is actually checked: nkeys.ParseDecoratedJWT
+// never returns an error (a file with no delimited JWT section falls back
+// to treating its whole raw content as a bare JWT), so a malformed file's
+// only detectable failure is nkeys.ParseDecoratedNKey finding no valid
+// seed — exactly the failure nats.go's own sigHandler would hit at dial
+// time, just surfaced here instead.
+func credsFilePreflight(credsFile string) error {
+	contents, err := os.ReadFile(credsFile)
+	if err != nil {
+		return fmt.Errorf("substrate: read creds file %q: %w", credsFile, err)
+	}
+	defer wipeBytes(contents)
+	kp, err := nkeys.ParseDecoratedNKey(contents)
+	if err != nil {
+		return fmt.Errorf("substrate: creds file %q: parse NKey seed: %w", credsFile, err)
+	}
+	kp.Wipe()
+	return nil
+}
+
+// wipeBytes overwrites buf in place — mirrors nats.go's own handling of
+// creds/seed file contents (never left sitting in memory longer than
+// needed).
+func wipeBytes(buf []byte) {
+	for i := range buf {
+		buf[i] = 'x'
+	}
 }
 
 // Wrap adapts an existing *nats.Conn into a substrate *Conn. Useful when

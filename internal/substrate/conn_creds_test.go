@@ -136,16 +136,41 @@ func TestConnect_BadNKeySeed_Errors(t *testing.T) {
 }
 
 // A missing credentials file surfaces as a connect error rather than a silent
-// anonymous fallback.
+// anonymous fallback — and fails at the credsFilePreflight seam, before ever
+// dialing (an unreachable URL still errors this way, since the pre-flight
+// never reaches connectWithRetry), mirroring TestConnect_BadNKeySeed_Errors.
 func TestConnect_MissingCredsFile_Errors(t *testing.T) {
-	t.Parallel()
-	url := startEmbeddedNATS(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	t.Cleanup(cancel)
 
-	_, err := Connect(ctx, ConnectOpts{URL: url, CredsFile: filepath.Join(t.TempDir(), "absent.creds")})
+	_, err := Connect(ctx, ConnectOpts{URL: "nats://127.0.0.1:1", CredsFile: filepath.Join(t.TempDir(), "absent.creds")})
 	if err == nil {
 		t.Fatal("expected error for missing creds file, got nil")
+	}
+	if !strings.Contains(err.Error(), "read creds file") {
+		t.Fatalf("error = %q, want it to mention reading the creds file", err)
+	}
+}
+
+// A malformed credentials file is caught by the same pre-flight seam.
+// nkeys.ParseDecoratedJWT never errors (a file with no delimited JWT
+// section falls back to treating its raw content as a bare JWT), so
+// validity rests entirely on nkeys.ParseDecoratedNKey finding a real seed;
+// garbage content has none.
+func TestConnect_MalformedCredsFile_Errors(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "garbage.creds")
+	if err := os.WriteFile(path, []byte("not a valid creds file"), 0o600); err != nil {
+		t.Fatalf("write garbage creds file: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	t.Cleanup(cancel)
+
+	_, err := Connect(ctx, ConnectOpts{URL: "nats://127.0.0.1:1", CredsFile: path})
+	if err == nil {
+		t.Fatal("expected error for a malformed creds file, got nil")
+	}
+	if !strings.Contains(err.Error(), "parse NKey seed") {
+		t.Fatalf("error = %q, want it to mention the NKey seed parse failure", err)
 	}
 }
 
