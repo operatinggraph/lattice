@@ -486,3 +486,23 @@ the harness can raise (env-gated or a `harnessOpt`), defaulting quiet so ordinar
 *Consumer:* the next engine defect this suite would otherwise hide.
 
 Items 2 and 3 compound: 3 is why 2 went unnoticed. Build 3 first and 2 becomes observable.
+
+**4. The egress unwrap turns projection lag into a permanent failure (★★ S) — found by this fire's own
+CI run, NOT fixed.** `internal/bridge/egress.go:199-214` reads the holder's envelope from the
+`privacy-pii-key-envelopes` **lens read model** and retries on the redelivery cadence, capped at
+`maxEgressUnwrapAttempts` (5). The code already distinguishes the two failure shapes — it sets
+`verb = "not yet projected"` for `ErrKeyNotFound` — and then treats them identically: past the budget,
+both become `permanentEgressFailure`. So a bounded attempt count meets an unbounded projection lag, and
+the externalTask dies with `BridgeEgressUnwrapFailed` rather than waiting.
+
+Observed on CI run `31356506548` (this item's own merge): `TestLeaseConvergence_FR58_RetriedExternalCall_AtMostOnce`
+failed with `piiKeyEnvelope for vtx.identity.a2g2n5BFU2t9manjPPdv unusable after 5 attempts`, the bgcheck
+posted `status: failed`, and the application never converged. Green on re-run; 3/3 locally. **This fire did
+not cause it — the classifier is nowhere in that path — but it plausibly raised its odds: widening the gate
+added ~69s of contention to the same job, which is exactly what starves a projection.** Recording that
+honestly rather than filing it as an unrelated flake.
+
+*Consumer:* any lease application whose PII lands while Refractor is behind — a real production shape, not
+a test artifact. *The fix is the transient/permanent boundary, not the number:* a not-yet-projected read is
+categorically different from an unparseable row or a dead bucket, and only the latter two are permanent. Do
+not simply raise 5 to a bigger 5. Green: the FR58 leg under induced projection lag.
