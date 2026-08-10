@@ -36,7 +36,6 @@ import (
 
 	"github.com/operatinggraph/lattice/internal/bootstrap"
 	"github.com/operatinggraph/lattice/internal/natsfixture"
-	"github.com/operatinggraph/lattice/internal/pkgmgr"
 	"github.com/operatinggraph/lattice/internal/processor"
 	"github.com/operatinggraph/lattice/internal/refractor/adapter"
 	"github.com/operatinggraph/lattice/internal/refractor/consumer"
@@ -105,7 +104,7 @@ func TestEdgeManifest_Fire2_E2E_ProducerFlip_AdmitRevokeLegacyDrain(t *testing.T
 	require.NoError(t, err)
 	defer metaCC.Stop()
 
-	installer := pkgmgr.NewInstaller(conn, bootstrap.BootstrapIdentityKey)
+	installer := testutil.NewInstaller(conn, bootstrap.BootstrapIdentityKey)
 	// Every identity-domain role, derived from the package itself rather than
 	// listed by hand: edge-manifest offers panes to roles this fixture does
 	// not otherwise care about, and a hand-listed subset fails the install the

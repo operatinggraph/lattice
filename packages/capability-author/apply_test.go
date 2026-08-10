@@ -275,7 +275,7 @@ func applyRealPackage(t *testing.T, ctx context.Context, conn *substrate.Conn, p
 	stop := testutil.RunMetaInstallPipeline(t, ctx, conn)
 	defer stop()
 
-	inst := pkgmgr.NewInstaller(conn, bootstrap.BootstrapIdentityKey)
+	inst := testutil.NewInstaller(conn, bootstrap.BootstrapIdentityKey)
 	inst.RoleIDs = testutil.StandardRoleIDs()
 	res, err := inst.Apply(ctx, plan.Definition, pkgmgr.ApplyOptions{})
 	if err != nil {

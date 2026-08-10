@@ -133,7 +133,7 @@ func newHarness(t *testing.T, prepare func(*bridge.FakeAugur)) *harness {
 	// InstallPackage op path (registers the CreateAugurReasoningClaim +
 	// RecordProposal op-meta the Processor's operationType→class index resolves,
 	// and the augur capability vertices).
-	installer := pkgmgr.NewInstaller(conn, bootstrap.BootstrapIdentityKey)
+	installer := testutil.NewInstaller(conn, bootstrap.BootstrapIdentityKey)
 	installer.RoleIDs = map[string]string{"operator": bootstrap.RoleOperatorID}
 	for _, pkg := range []pkgmgr.Definition{
 		rbacdomain.Package, identitydomain.Package, orchestrationbase.Package, augurpkg.Package,

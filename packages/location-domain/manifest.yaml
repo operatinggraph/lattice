@@ -1,5 +1,5 @@
 name: location-domain
-version: 0.3.0
+version: 0.3.1
 description: |
   Spatial base domain — the place graph. Declares the ABSTRACT `location` type
   and its three CONCRETE leaves unit/building/property (Contract #6 §6.9), each

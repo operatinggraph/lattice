@@ -132,7 +132,7 @@ func TestInstallFlow_M5B2_DomainOpWithoutRestart(t *testing.T) {
 	defer stop()
 
 	// Install rbac-domain via InstallPackage through this pipeline.
-	inst := pkgmgr.NewInstaller(conn, bootstrap.BootstrapIdentityKey)
+	inst := testutil.NewInstaller(conn, bootstrap.BootstrapIdentityKey)
 	inst.RoleIDs = map[string]string{"operator": bootstrap.RoleOperatorID}
 	if _, err := inst.Install(ctx, rbacdomain.Package); err != nil {
 		t.Fatalf("install rbac-domain: %v", err)
@@ -182,7 +182,7 @@ func TestInstallFlow_F001_ReinstallNoOrphans(t *testing.T) {
 	stop := testutil.RunMetaInstallPipeline(t, ctx, conn)
 	defer stop()
 
-	inst := pkgmgr.NewInstaller(conn, bootstrap.BootstrapIdentityKey)
+	inst := testutil.NewInstaller(conn, bootstrap.BootstrapIdentityKey)
 	inst.RoleIDs = map[string]string{"operator": bootstrap.RoleOperatorID}
 
 	// rbac-domain first (identity-domain depends on it for grant targets;
@@ -223,7 +223,7 @@ func TestInstallFlow_F001_ReinstallNoOrphans(t *testing.T) {
 	ctx2, conn2 := bareKernelEnv(t)
 	stop2 := testutil.RunMetaInstallPipeline(t, ctx2, conn2)
 	defer stop2()
-	inst2 := pkgmgr.NewInstaller(conn2, bootstrap.BootstrapIdentityKey)
+	inst2 := testutil.NewInstaller(conn2, bootstrap.BootstrapIdentityKey)
 	inst2.RoleIDs = map[string]string{"operator": bootstrap.RoleOperatorID}
 	if _, err := inst2.Install(ctx2, rbacdomain.Package); err != nil {
 		t.Fatalf("reinstall rbac-domain: %v", err)

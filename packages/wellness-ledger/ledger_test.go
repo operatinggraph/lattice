@@ -60,7 +60,7 @@ func setupLedgerEnv(t *testing.T) (context.Context, *substrate.Conn) {
 	ctx, conn := testutil.SetupPackageTestEnv(t) // rbac + identity + hygiene
 	stop := testutil.RunMetaInstallPipeline(t, ctx, conn)
 	defer stop()
-	inst := pkgmgr.NewInstaller(conn, bootstrap.BootstrapIdentityKey)
+	inst := testutil.NewInstaller(conn, bootstrap.BootstrapIdentityKey)
 	// wlConsumerRoleID stands in for identity-domain's real `consumer` role
 	// NanoID — these tests don't install identity-domain (the lease-signing
 	// lsConsumerRoleID idiom, mirrored by clinic-ledger's ledConsumerRoleID).

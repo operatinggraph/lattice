@@ -133,7 +133,7 @@ func setupMaintenanceEnv(t *testing.T) (context.Context, *substrate.Conn) {
 	ctx, conn := testutil.SetupPackageTestEnv(t) // rbac + identity + hygiene
 	stop := testutil.RunMetaInstallPipeline(t, ctx, conn)
 	defer stop()
-	inst := pkgmgr.NewInstaller(conn, bootstrap.BootstrapIdentityKey)
+	inst := testutil.NewInstaller(conn, bootstrap.BootstrapIdentityKey)
 	inst.RoleIDs = map[string]string{
 		"operator":     bootstrap.RoleOperatorID,
 		"frontOfHouse": pkgmgr.RoleID("identity-domain", "frontOfHouse"),

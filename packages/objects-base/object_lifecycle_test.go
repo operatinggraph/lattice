@@ -16,7 +16,6 @@ import (
 	"github.com/nats-io/nats.go/jetstream"
 
 	"github.com/operatinggraph/lattice/internal/bootstrap"
-	"github.com/operatinggraph/lattice/internal/pkgmgr"
 	"github.com/operatinggraph/lattice/internal/processor"
 	"github.com/operatinggraph/lattice/internal/substrate"
 	"github.com/operatinggraph/lattice/internal/testutil"
@@ -55,7 +54,7 @@ func setupObjectsEnv(t *testing.T) (context.Context, *substrate.Conn) {
 	t.Helper()
 	ctx, conn := testutil.SetupPackageTestEnv(t) // installs rbac + identity + hygiene
 	stop := testutil.RunMetaInstallPipeline(t, ctx, conn)
-	inst := pkgmgr.NewInstaller(conn, bootstrap.BootstrapIdentityKey)
+	inst := testutil.NewInstaller(conn, bootstrap.BootstrapIdentityKey)
 	inst.RoleIDs = map[string]string{"operator": bootstrap.RoleOperatorID}
 	if _, err := inst.Install(ctx, objectsbase.Package); err != nil {
 		stop()

@@ -67,8 +67,10 @@ type Installer struct {
 	// runtime by pipeline.ConsumerFilter's own cap (broad filter, a warn log,
 	// and filterBroadReason "label-cap" on the lens's health entry); what an
 	// unwired installer loses is the EARLY, decidable answer at the actor who
-	// can fix it. Every production entry point wires it (cmd/lattice-pkg,
-	// cmd/loupe); it is a field rather than a NewInstaller argument because
+	// can fix it. Every production INSTALL entry point wires it (cmd/lattice-pkg,
+	// cmd/loupe) — the one production Installer built without it, the probe
+	// IsPackageInstalled constructs, never installs anything, so the gate has
+	// nothing to be silent about there. It is a field rather than a NewInstaller argument because
 	// pkgmgr cannot construct one itself — CypherParser's doc has the cycle.
 	SpecParser CypherParser
 }
@@ -347,6 +349,12 @@ func (i *Installer) buildManifestBatch(ctx context.Context, def Definition, scan
 	if err != nil {
 		return nil, nil, "", nil, err
 	}
+	// The second §10.2 advisory, on the same channel and aimed at the same
+	// operator: an abstract type this batch declares with no LeafBudget takes
+	// the whole label cap, which refuses every consuming lens that names any
+	// other concrete label. Appended after resolveTaxonomy's own sorted set so
+	// the combined list stays deterministic (this half is declaration-ordered).
+	leafBudgetWarnings = append(leafBudgetWarnings, def.undeclaredLeafBudgetWarnings()...)
 
 	ops, declared, err := i.buildInstallBatch(def, pkgKey, ddlNanoIDs, lensNanoIDs, permNanoIDs, roleNanoIDs,
 		weaverTargetNanoIDs, loomPatternNanoIDs, opMetaNanoIDs, paneNanoIDs, retentionClassNanoIDs,

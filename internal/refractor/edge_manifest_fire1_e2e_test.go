@@ -299,7 +299,7 @@ func TestEdgeManifest_Fire1_E2E_FiveRowKindsAndRequestService(t *testing.T) {
 	require.NoError(t, err)
 	defer metaCC.Stop()
 
-	installer := pkgmgr.NewInstaller(conn, bootstrap.BootstrapIdentityKey)
+	installer := testutil.NewInstaller(conn, bootstrap.BootstrapIdentityKey)
 	installer.RoleIDs = map[string]string{"operator": bootstrap.RoleOperatorID, "frontOfHouse": pkgmgr.RoleID("identity-domain", "frontOfHouse"), "provider": pkgmgr.RoleID("identity-domain", "provider")}
 	_, err = installer.Install(ctx, servicedomain.Package)
 	require.NoError(t, err, "installing service-domain (RequestService's DDL) must succeed")

@@ -16,7 +16,6 @@ import (
 	"github.com/nats-io/nats.go/jetstream"
 
 	"github.com/operatinggraph/lattice/internal/bootstrap"
-	"github.com/operatinggraph/lattice/internal/pkgmgr"
 	"github.com/operatinggraph/lattice/internal/processor"
 	"github.com/operatinggraph/lattice/internal/substrate"
 	"github.com/operatinggraph/lattice/internal/testutil"
@@ -69,7 +68,7 @@ func installOrchestrationBase(t *testing.T, ctx context.Context, conn *substrate
 	t.Helper()
 	stop := testutil.RunMetaInstallPipeline(t, ctx, conn)
 	defer stop()
-	inst := pkgmgr.NewInstaller(conn, bootstrap.BootstrapIdentityKey)
+	inst := testutil.NewInstaller(conn, bootstrap.BootstrapIdentityKey)
 	inst.RoleIDs = testutil.StandardRoleIDs()
 	if _, err := inst.Install(ctx, orchestrationbase.Package); err != nil {
 		t.Fatalf("install orchestration-base: %v", err)
@@ -249,7 +248,7 @@ func TestInstall_Idempotent(t *testing.T) {
 	ctx, conn := testutil.SetupPackageTestEnv(t)
 	stop := testutil.RunMetaInstallPipeline(t, ctx, conn)
 	defer stop()
-	inst := pkgmgr.NewInstaller(conn, bootstrap.BootstrapIdentityKey)
+	inst := testutil.NewInstaller(conn, bootstrap.BootstrapIdentityKey)
 	inst.RoleIDs = testutil.StandardRoleIDs()
 
 	res1, err := inst.Install(ctx, orchestrationbase.Package)

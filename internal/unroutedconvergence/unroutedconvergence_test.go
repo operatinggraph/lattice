@@ -101,7 +101,7 @@ func newHarness(t *testing.T) *harness {
 	// op path — registers the real unroutedTasks meta.weaverTarget (the
 	// `missing_claim` gap materialised to the new §10.8 `surface` action) the
 	// same way any package's weaverTargets install.
-	installer := pkgmgr.NewInstaller(conn, bootstrap.BootstrapIdentityKey)
+	installer := testutil.NewInstaller(conn, bootstrap.BootstrapIdentityKey)
 	installer.RoleIDs = map[string]string{"operator": bootstrap.RoleOperatorID}
 	for _, pkg := range []pkgmgr.Definition{rbacdomain.Package, identitydomain.Package, orchestrationbase.Package} {
 		_, err := installer.Install(ctx, pkg)

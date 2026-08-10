@@ -777,12 +777,28 @@ func (p *patScanner) node(lp *linearPattern) error {
 	// against admits `SP?` between the label and the sigil (Cypher.g4's
 	// oC_NodePattern) — so `(l:location *)` carries the sigil there and must be
 	// refused here by the same name, not fall through to a bare ')' complaint.
+	//
+	// This position is also reachable with NO label at all — `(l *)`, where the
+	// sigil follows the variable and the `:` branch above never ran — so the
+	// offender is named by whichever coordinate the author can actually find it
+	// by: the label when there is one, the node's own variable otherwise, and
+	// the bare offset when the pattern is anonymous. Naming an empty label
+	// would send an author looking for a label that is not in their source.
 	if p.peek() == '*' {
+		var where string
+		switch {
+		case label != "":
+			where = fmt.Sprintf("node label %q", label)
+		case v.name != "":
+			where = fmt.Sprintf("node pattern %q", v.name)
+		default:
+			where = "an unlabeled node pattern"
+		}
 		return fmt.Errorf(
-			"node label %q carries the taxonomy-expansion sigil `*` at offset %d — a read-grant Walk chain "+
+			"%s carries the taxonomy-expansion sigil `*` at offset %d — a read-grant Walk chain "+
 				"names concrete types only: the walk's anchor type is written into every grant row as a literal "+
 				"audit field, which an abstract label would make false for every concrete anchor it binds",
-			label, p.i)
+			where, p.i)
 	}
 	if p.peek() == '{' {
 		depth := 0

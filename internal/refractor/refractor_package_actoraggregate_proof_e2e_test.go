@@ -148,7 +148,7 @@ func TestRefractor_PackageActorAggregateLens_ProjectsWithZeroCoreEdits(t *testin
 	defer metaCC.Stop()
 
 	// --- install the throwaway package via the REAL InstallPackage path ---
-	installer := pkgmgr.NewInstaller(conn, bootstrap.BootstrapIdentityKey)
+	installer := testutil.NewInstaller(conn, bootstrap.BootstrapIdentityKey)
 	installer.RoleIDs = map[string]string{"operator": bootstrap.RoleOperatorID}
 	res, err := installer.Install(ctx, proofRosterPackage())
 	require.NoError(t, err, "InstallPackage of the throwaway actor-aggregate lens must succeed")

@@ -661,6 +661,36 @@ func TestParseLinearPattern_RefusesTheTaxonomySigilByName(t *testing.T) {
 	}
 }
 
+// The sigil position is reachable with NO label at all — `(l *)`, where the
+// sigil follows the variable and the label branch never ran — so the refusal has
+// to name a coordinate the author can find in their own source. Reporting an
+// empty label sends them looking for a label that is not there; the variable, or
+// the offset alone for an anonymous pattern, is what they can act on.
+func TestParseLinearPattern_UnlabeledSigilNamesAFindableCoordinate(t *testing.T) {
+	for _, tc := range []struct {
+		src  string
+		want string
+	}{
+		{"(identity)-[:residesIn]->(l *)", `node pattern "l"`},
+		{"(identity)-[:residesIn]->( *)", "an unlabeled node pattern"},
+	} {
+		_, err := parseLinearPattern(tc.src)
+		if err == nil {
+			t.Errorf("%q must not parse — a Walk chain names concrete types only", tc.src)
+			continue
+		}
+		if !strings.Contains(err.Error(), "taxonomy-expansion sigil") {
+			t.Errorf("%q must be refused by name; got %v", tc.src, err)
+		}
+		if !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("%q must name %q; got %v", tc.src, tc.want, err)
+		}
+		if strings.Contains(err.Error(), `node label ""`) {
+			t.Errorf("%q must not report an empty label — there is no label in the source; got %v", tc.src, err)
+		}
+	}
+}
+
 // The positive vector for the refusal above: the identical clauses without the
 // sigil parse, so each rejection is caused by the `*` and not by the label, the
 // relation, or the fixture's shape.

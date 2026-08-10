@@ -58,7 +58,7 @@ func setupLedgerEnv(t *testing.T) (context.Context, *substrate.Conn) {
 	ctx, conn := testutil.SetupPackageTestEnv(t) // rbac + identity + hygiene
 	stop := testutil.RunMetaInstallPipeline(t, ctx, conn)
 	defer stop()
-	inst := pkgmgr.NewInstaller(conn, bootstrap.BootstrapIdentityKey)
+	inst := testutil.NewInstaller(conn, bootstrap.BootstrapIdentityKey)
 	// ledConsumerRoleID stands in for identity-domain's real `consumer` role
 	// NanoID: clinic-domain's CreateAppointment scope=self grant (GrantsTo:
 	// "consumer") needs a role id registered directly, since these tests don't

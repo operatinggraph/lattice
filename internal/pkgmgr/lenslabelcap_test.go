@@ -249,25 +249,70 @@ func TestLensLabelCap_CrossPackageBudget_UnderCapInstalls(t *testing.T) {
 	}
 }
 
-// An expansion label naming a type nothing declares is skipped, never refused:
-// install ORDER is unconstrained, so a lens package may legally land before the
-// package declaring the abstract it expands. Refusing here would invent an
-// ordering the platform does not have — and the runtime is the fail-closed
-// point for it (useFullEngineBranches refuses to ACTIVATE a `*` lens whose
-// expansion is unresolvable).
+// An expansion label naming a type nothing declares carries NO charge: install
+// ORDER is unconstrained, so a lens package may legally land before the package
+// declaring the abstract it expands, and inventing a budget for it would invent
+// an ordering the platform does not have. K=8 is exactly at the cap, so this
+// installs only because the unresolvable label contributed zero — had it taken
+// the default budget the total would be 16.
 func TestLensLabelCap_UnresolvableExpansionLabel_Installs(t *testing.T) {
 	ctx, inst := capHarness(t)
 
-	def := capLensDef("cap-unresolvable", capLensSpec(9, "nosuchtype"), nil)
+	def := capLensDef("cap-unresolvable", capLensSpec(8, "nosuchtype"), nil)
 	if _, err := inst.Install(ctx, def); err != nil {
 		t.Fatalf("an expansion label naming no declared type carries no budget to enforce: %v", err)
 	}
 }
 
-// A `*` on a CONCRETE type is legal (§3.4/amendment A5) and carries no budget —
-// LeafBudget is refused on a non-abstract DDL, so there is no declaration to
-// price and no fix available to an author refused over one.
-func TestLensLabelCap_ConcreteExpansionTarget_Installs(t *testing.T) {
+// The same lens one concrete label further along is refused on K ALONE, and the
+// refusal has to say so. A lens whose own concrete labels already exceed the cap
+// can never narrow in any world — every expansion label contributes at least
+// itself once it resolves — so leniency about the unresolvable label is not
+// leniency about the lens. What the message owes the author is honesty about
+// which number it computed: the un-priced label is NAMED and the total is called
+// a floor, so nobody goes hunting for a budget to shrink that was never charged.
+func TestLensLabelCap_UnresolvableExpansionLabel_StillPricesK(t *testing.T) {
+	ctx, inst := capHarness(t)
+
+	def := capLensDef("cap-unresolvable-over", capLensSpec(9, "nosuchtype"), nil)
+	_, err := inst.Install(ctx, def)
+	if !errors.Is(err, ErrLensLabelCap) {
+		t.Fatalf("K=9 alone is over the cap of %d whatever the expansion resolves to; got %v",
+			subjects.MaxNarrowedFilterLabels, err)
+	}
+	for _, want := range []string{"nosuchtype", "floor"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("a partially-priced count must name what it did NOT price and call itself a floor (missing %q); got %v", want, err)
+		}
+	}
+}
+
+// A partially-priced expansion SET, which is the shape the message above exists
+// for: one abstract resolves and is charged, one label resolves to nothing at
+// all. The arithmetic runs over a proper subset, so the refusal must name both
+// halves — the budget it charged and the label it could not price.
+func TestLensLabelCap_PartiallyPricedExpansion_NamesBothHalves(t *testing.T) {
+	ctx, inst := capHarness(t)
+
+	def := capLensDef("cap-partial", capLensSpec(4, "location", "nosuchtype"), map[string]int{"location": 5})
+	_, err := inst.Install(ctx, def)
+	if !errors.Is(err, ErrLensLabelCap) {
+		t.Fatalf("K=4 plus a budget-5 abstract is 9 against a cap of %d and must be refused; got %v",
+			subjects.MaxNarrowedFilterLabels, err)
+	}
+	for _, want := range []string{"location (abstract, LeafBudget 5)", "nosuchtype", "floor"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("the refusal must name %q so the author is not sent to shrink the wrong budget; got %v", want, err)
+		}
+	}
+}
+
+// A `*` on a CONCRETE type is legal (§3.4/amendment A5) and IS charged. The
+// runtime unions in resolved(e) for every expansion label alike, and a concrete
+// closure is reflexive — never smaller than one — so K=8 beside a concrete
+// sigil is 9 against a cap of 8, and a gate that charged the sigil zero would
+// call it 8 and let it through.
+func TestLensLabelCap_ConcreteExpansionTarget_ChargedItsClosure_Refused(t *testing.T) {
 	ctx, inst := capHarness(t)
 
 	owner := Definition{
@@ -279,9 +324,86 @@ func TestLensLabelCap_ConcreteExpansionTarget_Installs(t *testing.T) {
 		t.Fatalf("install the concrete type's owning package: %v", err)
 	}
 
-	def := capLensDef("cap-concrete-star", capLensSpec(9, "place"), nil)
+	def := capLensDef("cap-concrete-star", capLensSpec(8, "place"), nil)
+	_, err := inst.Install(ctx, def)
+	if !errors.Is(err, ErrLensLabelCap) {
+		t.Fatalf("K=8 plus a concrete `*` whose closure is 1 is 9 against a cap of %d and must be refused; got %v",
+			subjects.MaxNarrowedFilterLabels, err)
+	}
+	for _, want := range []string{"place", "closure 1"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("the refusal must show what the concrete sigil was charged (missing %q); got %v", want, err)
+		}
+	}
+}
+
+// The boundary beneath that refusal, so the charge is proven to be ONE and not
+// merely "something non-zero large enough to refuse": the same lens with one
+// fewer concrete label is exactly at the cap and installs.
+func TestLensLabelCap_ConcreteExpansionTarget_UnderCapInstalls(t *testing.T) {
+	ctx, inst := capHarness(t)
+
+	owner := Definition{
+		Name:    "concrete-owner",
+		Version: "0.1.0",
+		DDLs:    []DDLSpec{minimalDDL("place", ddlClassVertexType, false)},
+	}
+	if _, err := inst.Install(ctx, owner); err != nil {
+		t.Fatalf("install the concrete type's owning package: %v", err)
+	}
+
+	def := capLensDef("cap-concrete-star-ok", capLensSpec(7, "place"), nil)
 	if _, err := inst.Install(ctx, def); err != nil {
-		t.Fatalf("a `*` on a concrete type has no LeafBudget to charge: %v", err)
+		t.Fatalf("K=7 plus a concrete closure of 1 is exactly at the cap and must install: %v", err)
+	}
+}
+
+// The charge is the CLOSURE, not a flat one — the property a floor of 1 alone
+// would hide. `place` here has two concrete subtypes, so the resolver expands
+// `(p:place*)` into three types and the gate charges three: K=6 crosses the cap
+// and K=5 sits exactly on it. A gate charging a flat 1 passes both.
+func TestLensLabelCap_ConcreteExpansionTarget_ChargesTheWholeClosure(t *testing.T) {
+	ctx, inst := capHarness(t)
+
+	room := minimalDDL("room", ddlClassVertexType, false)
+	room.SubtypeOfRef = "place"
+	hallway := minimalDDL("hallway", ddlClassVertexType, false)
+	hallway.SubtypeOfRef = "place"
+	owner := Definition{
+		Name:    "concrete-tree-owner",
+		Version: "0.1.0",
+		DDLs:    []DDLSpec{minimalDDL("place", ddlClassVertexType, false), room, hallway},
+	}
+	if _, err := inst.Install(ctx, owner); err != nil {
+		t.Fatalf("install the concrete type and its two subtypes: %v", err)
+	}
+
+	over := capLensDef("cap-concrete-closure-over", capLensSpec(6, "place"), nil)
+	err := func() error { _, e := inst.Install(ctx, over); return e }()
+	if !errors.Is(err, ErrLensLabelCap) {
+		t.Fatalf("K=6 plus a concrete closure of 3 is 9 against a cap of %d and must be refused; got %v",
+			subjects.MaxNarrowedFilterLabels, err)
+	}
+	if !strings.Contains(err.Error(), "closure 3") {
+		t.Errorf("the charge must be the closure size (3), not a flat floor of 1; got %v", err)
+	}
+
+	under := capLensDef("cap-concrete-closure-ok", capLensSpec(5, "place"), nil)
+	if _, err := inst.Install(ctx, under); err != nil {
+		t.Fatalf("K=5 plus a concrete closure of 3 is exactly at the cap and must install: %v", err)
+	}
+}
+
+// A concrete type this SAME batch declares is priced too, against the
+// declaration landing in this install rather than against the absent installed
+// one — the concrete mirror of the batch-local abstract path.
+func TestLensLabelCap_BatchLocalConcreteExpansionTarget_Refused(t *testing.T) {
+	ctx, inst := capHarness(t)
+
+	def := capLensDef("cap-batch-concrete", capLensSpec(8, "place"), nil)
+	def.DDLs = append(def.DDLs, minimalDDL("place", ddlClassVertexType, false))
+	if _, err := inst.Install(ctx, def); !errors.Is(err, ErrLensLabelCap) {
+		t.Fatalf("a lens expanding a concrete type its OWN package declares must be priced against that declaration; got %v", err)
 	}
 }
 
@@ -356,6 +478,108 @@ func TestLensLabelCap_SingleBranchUnderCap_Installs(t *testing.T) {
 	}
 	if _, err := inst.Install(ctx, def); err != nil {
 		t.Fatalf("one branch naming 2 concrete labels against a budget of 5 is at the cap and must install: %v", err)
+	}
+}
+
+// Every offending lens in one package is reported in ONE refusal. A package
+// declaring three over-budget lenses would otherwise need three install
+// attempts to learn about three problems its author can see at once, each
+// attempt hiding the next.
+func TestLensLabelCap_AllOffendingLensesReportedAtOnce(t *testing.T) {
+	ctx, inst := capHarness(t)
+
+	def := capLensDef("cap-many-offenders", capLensSpec(4, "location"), map[string]int{"location": 5})
+	def.Lenses[0].CanonicalName = "capLensOne"
+	second := def.Lenses[0]
+	second.CanonicalName = "capLensTwo"
+	second.Bucket = "cap-many-offenders-two-targets"
+	second.Spec = capLensSpec(6, "location")
+	def.Lenses = append(def.Lenses, second)
+
+	_, err := inst.Install(ctx, def)
+	if !errors.Is(err, ErrLensLabelCap) {
+		t.Fatalf("both lenses are over the cap and the install must be refused; got %v", err)
+	}
+	for _, want := range []string{"capLensOne", "capLensTwo"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("one refusal must name every offending lens (missing %q); got %v", want, err)
+		}
+	}
+}
+
+// The refusal's ADVICE, pinned as behaviour because the obvious move is the
+// wrong one. Deleting the offending label does not shrink the count — an
+// unlabeled node pattern clears the lens's exhaustiveness, which takes the
+// consumer filter broad forever. A refusal that recommended it would trade a
+// loud failure for the exact silent regression this gate exists to detect, so
+// the message must say the two safe moves AND say that removal is not one.
+func TestLensLabelCap_RefusalDoesNotAdviseDroppingTheLabel(t *testing.T) {
+	ctx, inst := capHarness(t)
+
+	def := capLensDef("cap-advice", capLensSpec(4, "location"), map[string]int{"location": 5})
+	_, err := inst.Install(ctx, def)
+	if !errors.Is(err, ErrLensLabelCap) {
+		t.Fatalf("K=4 against a declared budget of 5 is over the cap and must be refused; got %v", err)
+	}
+	for _, want := range []string{
+		"rewrite a redundant concrete label",
+		"smaller LeafBudget",
+		"Do NOT simply remove the label",
+		"BROAD",
+	} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("the refusal must carry the safe remedy and the warning against the unsafe one (missing %q); got %v", want, err)
+		}
+	}
+}
+
+// An abstract type that declares no LeafBudget is WARNED about at its own
+// install, naming the consequence rather than the omission: the default it
+// takes IS the whole label cap, so it leaves a consuming lens room for no other
+// concrete label at all. A warning and never a rejection — LeafBudget is
+// legally omissible and "no promise ⇒ assume worst case" is the right default;
+// the signal exists to make that default's cost visible to the one actor who
+// can change it, not to argue with it.
+func TestLeafBudget_UndeclaredOnAbstract_WarnsNeverRejects(t *testing.T) {
+	ctx, _, inst := newInstallerHarness(t)
+
+	def := Definition{Name: "silent-abstract", Version: "0.1.0", DDLs: []DDLSpec{abstractDDL("location")}}
+	res, err := inst.Install(ctx, def)
+	if err != nil {
+		t.Fatalf("an omitted LeafBudget is legal and must never fail an install: %v", err)
+	}
+	var warning string
+	for _, w := range res.LeafBudgetWarnings {
+		if strings.Contains(w, "location") {
+			warning = w
+		}
+	}
+	if warning == "" {
+		t.Fatalf("an abstract type declaring no LeafBudget must be warned about; got %v", res.LeafBudgetWarnings)
+	}
+	for _, want := range []string{"declares no LeafBudget", "whole narrowed-filter label cap"} {
+		if !strings.Contains(warning, want) {
+			t.Errorf("the warning must name the CONSEQUENCE (missing %q); got %q", want, warning)
+		}
+	}
+}
+
+// The negative half, which is what makes the warning above a signal rather than
+// noise: an abstract type that DOES declare a budget is silent.
+func TestLeafBudget_DeclaredOnAbstract_NoWarning(t *testing.T) {
+	ctx, _, inst := newInstallerHarness(t)
+
+	abstract := abstractDDL("location")
+	abstract.LeafBudget = 5
+	def := Definition{Name: "declared-abstract", Version: "0.1.0", DDLs: []DDLSpec{abstract}}
+	res, err := inst.Install(ctx, def)
+	if err != nil {
+		t.Fatalf("install: %v", err)
+	}
+	for _, w := range res.LeafBudgetWarnings {
+		if strings.Contains(w, "declares no LeafBudget") {
+			t.Errorf("a declared LeafBudget must produce no undeclared-budget warning; got %q", w)
+		}
 	}
 }
 

@@ -131,7 +131,7 @@ func newHarness(t *testing.T) *harness {
 	h.awaitLensWired("capability", 20*time.Second)
 	h.awaitCapDoc("cap.identity."+bootstrap.BootstrapIdentityID, 20*time.Second)
 
-	installer := pkgmgr.NewInstaller(conn, bootstrap.BootstrapIdentityKey)
+	installer := testutil.NewInstaller(conn, bootstrap.BootstrapIdentityKey)
 	installer.RoleIDs = map[string]string{"operator": bootstrap.RoleOperatorID}
 	for _, pkg := range []pkgmgr.Definition{rbacdomain.Package, identitydomain.Package, controlauthz.Package} {
 		_, err := installer.Install(ctx, pkg)

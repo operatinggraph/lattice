@@ -135,7 +135,7 @@ func TestRefractor_LeaseSigningConvergence_ProjectsScalarColumns(t *testing.T) {
 
 	// --- install the REAL lease-signing convergence lens via InstallPackage ---
 	pkg, _ := leaseSigningLensPackage(t)
-	installer := pkgmgr.NewInstaller(conn, bootstrap.BootstrapIdentityKey)
+	installer := testutil.NewInstaller(conn, bootstrap.BootstrapIdentityKey)
 	installer.RoleIDs = map[string]string{"operator": bootstrap.RoleOperatorID}
 	res, err := installer.Install(ctx, pkg)
 	require.NoError(t, err, "InstallPackage of the lease-signing convergence lens must succeed")

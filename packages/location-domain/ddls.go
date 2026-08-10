@@ -96,13 +96,24 @@ var LocationTypes = []string{"unit", "building", "property"}
 // It keeps the same self-description aspects a concrete type carries (§3.2 —
 // "identical shape, plus an explicit marker"): the schemas below describe the
 // location op family this type is the parent of, which its three leaves
-// implement. LeafBudget is left unset, taking the default 8 — the narrowed
-// filter's label cap — since three leaves sit well inside it.
+// implement.
+//
+// LeafBudget is 5 — this type's promise to every lens author that
+// `(l:location*)` will not expand past five concrete types. Five is §10.1's own
+// modeled growth: the three levels shipped here (unit, building, property) plus
+// the room and hallway rows that section's table projects. A consuming lens is
+// priced against it at THAT lens's own install (pkgmgr's checkLensLabelCap):
+// K + 5 ≤ 8 leaves K ≤ 3, so a lens may name three concrete labels of its own
+// beside this one and still narrow its Core KV consumer — §10.1's "narrowed,
+// zero headroom" row. The number is declared rather than omitted because an
+// abstract type that declares none takes the WHOLE label cap as its budget,
+// which leaves a consuming lens room for no other concrete label at all.
 func locationAbstractDDL() pkgmgr.DDLSpec {
 	return pkgmgr.DDLSpec{
 		CanonicalName: "location",
 		Class:         "meta.ddl.vertexType",
 		Abstract:      true,
+		LeafBudget:    5,
 		Description: "Abstract location type — the taxonomy parent of the three concrete location levels " +
 			"unit, building and property (each joined by a subtypeOf link). It names no instance: no vertex " +
 			"is keyed vtx.location.<NanoID> and no document carries class=location. It declares no script " +

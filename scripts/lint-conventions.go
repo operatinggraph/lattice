@@ -72,6 +72,14 @@
 //     and fans out through OnConnectionStateChange, which any number of
 //     listeners may hold. internal/substrate itself is exempt (it is the
 //     owner).
+//   - A package-qualified pkgmgr.NewInstaller call outside its sanctioned
+//     callers. Installer.SpecParser stays nil unless the caller wires it by
+//     hand, and a nil SpecParser silently disables the install-time lens
+//     label-cap gate (internal/pkgmgr/lenslabelcap.go) — a fixture or entry
+//     point that constructs the installer directly proves nothing about that
+//     gate. testutil.NewInstaller (internal/testutil) wires SpecParser once;
+//     internal/pkgmgr itself, cmd/lattice-pkg, and cmd/loupe are the other
+//     sanctioned callers.
 //   - Read-posture classification (Contract #2 §2.5; BLOCKING — fails
 //     --strict, per the script-read-posture design §13's flip once the
 //     platform + verticals sweeps closed the debt list). Every script
@@ -369,6 +377,12 @@ var (
 	// variable back to this assignment rather than false-flagging the call for
 	// not spelling MaxReconnects inline.
 	substrateConnectOptsAssign = regexp.MustCompile(`\b([A-Za-z_][A-Za-z0-9_]*)\s*(?::=|=)\s*substrate\.ConnectOpts\s*\{`)
+	// pkgmgrNewInstallerCall anchors a package-qualified pkgmgr.NewInstaller
+	// call. internal/pkgmgr's own callers (including IsPackageInstalled) invoke
+	// the unqualified NewInstaller and so never match this — the qualified form
+	// only appears outside the package, which is exactly where SpecParser is
+	// left nil unless the caller wires it by hand.
+	pkgmgrNewInstallerCall = regexp.MustCompile(`\bpkgmgr\.NewInstaller\(`)
 )
 
 // nanoidAlphabetShapes are the declarable exceptions to the NanoID-alphabet
@@ -443,6 +457,10 @@ const loadOrGenerateExemptFile = "internal/pkgmgr/installer_test.go"
 // natsfixturePkg owns the embedded-NATS fixture, so it is the one place allowed to
 // construct a server directly.
 const natsfixturePkg = "internal/natsfixture/"
+
+// pkgmgrPkg owns the pkgmgr.Installer, so it is the one place allowed to call
+// its own NewInstaller unqualified (see pkgmgrInstallerScoped).
+const pkgmgrPkg = "internal/pkgmgr/"
 
 // substratePkg owns the *nats.Conn and its single-slot connection-state
 // handlers, so it is the one place allowed to set them; every other component
@@ -768,6 +786,16 @@ func scanSource(path string, data []byte) []finding {
 	embeddedNATSScoped := !strings.HasPrefix(slash, natsfixturePkg) && !strings.HasPrefix(slash, "internal/spike/")
 	// natsfixture proves the bare default's behavior, so it dials directly.
 	bareConnectScoped := isTest && !strings.HasPrefix(slash, natsfixturePkg)
+	// pkgmgrInstallerScoped restricts pkgmgr.NewInstaller to its sanctioned
+	// callers: internal/pkgmgr itself (including IsPackageInstalled, which
+	// calls the unqualified form and so never matches pkgmgrNewInstallerCall
+	// anyway), the two production entry points that wire SpecParser by hand
+	// (cmd/lattice-pkg, cmd/loupe), and internal/testutil, whose NewInstaller
+	// wraps pkgmgr.NewInstaller with SpecParser already wired.
+	pkgmgrInstallerScoped := !strings.HasPrefix(slash, pkgmgrPkg) &&
+		!strings.HasPrefix(slash, "internal/testutil/") &&
+		!strings.HasPrefix(slash, "cmd/lattice-pkg/") &&
+		!strings.HasPrefix(slash, "cmd/loupe/")
 	// internal/substrate OWNS the connection-state handler slots and is the
 	// one place allowed to set them; everyone else registers through
 	// OnConnectionStateChange. Scoped to non-test files: a test that builds
@@ -863,6 +891,9 @@ func scanSource(path string, data []byte) []finding {
 		}
 		if embeddedNATSScoped && embeddedNATSCtor.MatchString(line) {
 			out = append(out, finding{file: path, line: ln, msg: "hand-rolled embedded NATS fixture — a bare nats.Connect inherits nats.go's 2s whole-handshake deadline with no retry, so a host stall fails a random untouched package with `read tcp ...: i/o timeout`; use natsfixture.Server(t) / natsfixture.StartServer(t) (internal/natsfixture)"})
+		}
+		if pkgmgrInstallerScoped && pkgmgrNewInstallerCall.MatchString(line) {
+			out = append(out, finding{file: path, line: ln, msg: "pkgmgr.NewInstaller call outside its sanctioned callers — SpecParser stays nil unless the caller wires it by hand, and a nil SpecParser silently disables the install-time lens label-cap gate (internal/pkgmgr/lenslabelcap.go); use testutil.NewInstaller(conn, adminActor) (internal/testutil), which wires it"})
 		}
 		if loadOrGenerateScoped && loadOrGenerateCall.MatchString(line) {
 			out = append(out, finding{file: path, line: ln, msg: "per-test bootstrap.LoadOrGenerate — re-populates internal/bootstrap's globals per test, which races under t.Parallel(); use testutil.EnsurePrimordials(t) instead (bootstrap-primordial-globals-race-design.md §4)"})

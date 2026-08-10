@@ -150,7 +150,7 @@ func TestRefractor_KeyColumnLens_ProjectsBareNanoIDKey(t *testing.T) {
 	defer metaCC.Stop()
 
 	// --- install the throwaway keyColumn package via the REAL InstallPackage path ---
-	installer := pkgmgr.NewInstaller(conn, bootstrap.BootstrapIdentityKey)
+	installer := testutil.NewInstaller(conn, bootstrap.BootstrapIdentityKey)
 	installer.RoleIDs = map[string]string{"operator": bootstrap.RoleOperatorID}
 	res, err := installer.Install(ctx, proofConvergencePackage())
 	require.NoError(t, err, "InstallPackage of the throwaway keyColumn lens must succeed")

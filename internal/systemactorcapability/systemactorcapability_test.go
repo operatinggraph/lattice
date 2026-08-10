@@ -141,7 +141,7 @@ func newHarness(t *testing.T) *harness {
 	// makes rbac-domain's `capabilityRoles` lens discoverable mid-loop;
 	// startCapabilitySource's watch picks it up and wires it the moment it
 	// appears (awaitLensWired below blocks on that separately). ---
-	installer := pkgmgr.NewInstaller(conn, bootstrap.BootstrapIdentityKey)
+	installer := testutil.NewInstaller(conn, bootstrap.BootstrapIdentityKey)
 	installer.RoleIDs = map[string]string{"operator": bootstrap.RoleOperatorID}
 	for _, pkg := range []pkgmgr.Definition{
 		rbacdomain.Package, identitydomain.Package, orchestrationbase.Package, objectsbase.Package, privacybase.Package,

@@ -70,7 +70,7 @@ func setupRemEnv(t *testing.T) (context.Context, *substrate.Conn) {
 	t.Helper()
 	ctx, conn := testutil.SetupPackageTestEnv(t) // rbac + identity + hygiene
 	stop := testutil.RunMetaInstallPipeline(t, ctx, conn)
-	inst := pkgmgr.NewInstaller(conn, bootstrap.BootstrapIdentityKey)
+	inst := testutil.NewInstaller(conn, bootstrap.BootstrapIdentityKey)
 	// remConsumerRoleID stands in for identity-domain's real `consumer` role
 	// NanoID: clinic-domain's CreateAppointment scope=self grant (GrantsTo:
 	// "consumer") needs a role id registered directly, since these tests don't

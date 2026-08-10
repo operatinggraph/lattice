@@ -111,6 +111,10 @@ func (def Definition) validateAbstractDDLScope() error {
 					"pkgmgr: DDL[%d] %q: Abstract is true but PermittedCommands is set — an abstract type declares no permitted commands",
 					idx, d.CanonicalName)
 			}
+			// An UNDECLARED budget (zero) is legal and is not checked here —
+			// it is warned about instead, by undeclaredLeafBudgetWarnings
+			// below, because the default it takes is a trap rather than a
+			// mistake.
 			if d.LeafBudget < 0 {
 				return fmt.Errorf(
 					"pkgmgr: DDL[%d] %q: LeafBudget is negative (%d)",
@@ -151,4 +155,51 @@ func (def Definition) validateAbstractDDLScope() error {
 		}
 	}
 	return nil
+}
+
+// undeclaredLeafBudgetWarnings names every abstract vertexType DDL in def that
+// declares no LeafBudget, and states the consequence rather than the omission
+// (dynamic-type-taxonomy-design.md §10.2).
+//
+// Omitting LeafBudget is LEGAL and the default it takes is the right semantics:
+// an owner who makes no promise about how far their abstract type will grow
+// cannot be relied on to leave a consuming lens any room, so the type takes the
+// whole narrowed-filter label cap as its budget. What the warning supplies is
+// VISIBILITY of the consequence, which the omission itself carries no trace of.
+// leafBudgetDefault IS the cap, so an omission
+// forces every consuming lens to K + cap ≤ cap, i.e. K == 0: the first author
+// to write `(t:<type>*)` beside ANY other concrete label in an exhaustive lens
+// is refused at THEIR install (checkLensLabelCap), by a default set in a
+// package they do not own. Saying so at the declaring package's own install is
+// what gives the type's owner the chance to declare a real number first.
+//
+// A WARNING, never a rejection, and it rides the SAME advisory channel as the
+// leaf-count overrun resolveTaxonomy computes (Install/Upgrade/Apply's
+// LeafBudgetWarnings, printed by cmd/lattice-pkg): both are §10.2 signals about
+// an abstract type's growth promise, aimed at the same operator, and refusing
+// an install over an omissible field would block a package that has done
+// nothing wrong.
+//
+// Pure (no I/O) and declaration-ordered, the same doctrine as
+// validateAbstractDDLScope whose sibling it is.
+func (def Definition) undeclaredLeafBudgetWarnings() []string {
+	var out []string
+	for idx, d := range def.DDLs {
+		if !d.Abstract || d.LeafBudget > 0 {
+			continue
+		}
+		class := d.Class
+		if class == "" {
+			class = ddlClassVertexType
+		}
+		if class != ddlClassVertexType {
+			continue
+		}
+		out = append(out, fmt.Sprintf(
+			"DDL[%d] %q: abstract type declares no LeafBudget, so it takes the whole narrowed-filter label cap (%d) as its budget — "+
+				"no exhaustive lens can name ANY other concrete label alongside (%s*) and still narrow its Core KV consumer; "+
+				"declare a LeafBudget here to leave a consuming lens room",
+			idx, d.CanonicalName, leafBudgetDefault, d.CanonicalName))
+	}
+	return out
 }

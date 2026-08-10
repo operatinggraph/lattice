@@ -114,7 +114,7 @@ func newHarness(t *testing.T) *harness {
 	go func() { _ = outbox.New(conn, bootstrap.CoreKVBucket, logger).Run(ctx) }()
 
 	// Install rbac → identity → objects-base via the real InstallPackage op path.
-	installer := pkgmgr.NewInstaller(conn, bootstrap.BootstrapIdentityKey)
+	installer := testutil.NewInstaller(conn, bootstrap.BootstrapIdentityKey)
 	installer.RoleIDs = map[string]string{"operator": bootstrap.RoleOperatorID}
 	for _, pkg := range []pkgmgr.Definition{rbacdomain.Package, identitydomain.Package, objectsbase.Package} {
 		_, err := installer.Install(ctx, pkg)

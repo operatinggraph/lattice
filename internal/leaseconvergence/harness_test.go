@@ -353,7 +353,7 @@ func newHarness(t *testing.T, opts ...harnessOpt) *harness {
 // lease-signing via the real InstallPackage op path (the installer publishes to
 // ops.meta; the meta-lane Processor commits each atomic batch).
 func (h *harness) installChain() {
-	installer := pkgmgr.NewInstaller(h.conn, bootstrap.BootstrapIdentityKey)
+	installer := testutil.NewInstaller(h.conn, bootstrap.BootstrapIdentityKey)
 	installer.RoleIDs = testutil.StandardRoleIDs()
 	for _, pkg := range []pkgmgr.Definition{
 		rbacdomain.Package,
