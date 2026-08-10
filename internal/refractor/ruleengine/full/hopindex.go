@@ -78,9 +78,13 @@ type HopIndex struct {
 	// for every position where LabelExpand[i] is true — nil until
 	// WithLabelExpansion populates it. A LabelExpand position with no entry
 	// here (because WithLabelExpansion was never called, or the resolver had
-	// nothing for that label) admits NOTHING: the derivation fails closed
-	// rather than falling back to Labels[i]'s bare (and for an abstract
-	// label, meaningless) string.
+	// nothing for that label) admits NOTHING rather than falling back to
+	// Labels[i]'s bare (and for an abstract label, meaningless) string.
+	//
+	// Admitting nothing is fail-closed for a matcher and fail-OPEN-downward
+	// for a walk, so a consumer whose invariant is a superset must not run
+	// against such an index at all: UnresolvedExpansionPosition is the test,
+	// and pipeline.derivationIndex is the consumer that declines on it.
 	Expanded []map[string]struct{}
 }
 
@@ -118,6 +122,31 @@ func (ix HopIndex) WithLabelExpansion(exp map[string]map[string]struct{}) HopInd
 		next.Expanded = expanded
 	}
 	return next
+}
+
+// UnresolvedExpansionPosition returns the first `*` position with no resolved
+// concrete set, or -1 when every one of them has one. It is the question
+// "is this index's taxonomy half answerable at all", asked once per rule
+// state rather than per edge.
+//
+// The per-edge behaviour of an unresolved position (admitsType and
+// PatternStep.ToExpanded alike) is to admit nothing, which PRUNES the walk —
+// and pruning is the unsound direction for a derivation whose invariant is a
+// superset: a pruned far end is an affected anchor the caller never
+// reprojects, i.e. a revocation skipped. Fail-closed for a MATCHER and
+// fail-closed for a DERIVATION are opposite motions, so the derivation must
+// decline the whole index up front and let its caller fall back to the BFS,
+// rather than walk one that silently narrows.
+func (ix HopIndex) UnresolvedExpansionPosition() int {
+	for i, isExpand := range ix.LabelExpand {
+		if !isExpand {
+			continue
+		}
+		if i >= len(ix.Expanded) || ix.Expanded[i] == nil {
+			return i
+		}
+	}
+	return -1
 }
 
 // admitsType reports whether position pos — labeled ix.Labels[pos], and

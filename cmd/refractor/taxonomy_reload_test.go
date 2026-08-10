@@ -273,16 +273,18 @@ func TestRederiveEntry_GrowThenShrink_GoesThroughRebuildBothWays(t *testing.T) {
 	assert.Zero(t, status.ErrorCount, "neither re-derivation should have recorded a refusal")
 }
 
-// TestRederiveEntry_RebuildFailureLeavesBaselineStaleSoTheNextEventRetries
-// covers C1: entry.taxExpansion/taxExpansionStatus must NOT advance until
-// Rebuild actually succeeds. No p.RunOn is called, so Rebuild fails
-// immediately and deterministically ("no supervisor configured") — isolating
-// the fix from any real NATS I/O timing. After the failure, the baseline
-// must still be its pre-attempt zero value, and a second rederiveEntry call
-// (the resolver unchanged) must retry the whole sequence rather than
-// comparing equal against a baseline the running consumer's filter never
-// actually adopted.
-func TestRederiveEntry_RebuildFailureLeavesBaselineStaleSoTheNextEventRetries(t *testing.T) {
+// TestRederiveEntry_RebuildFailureLeavesTheRebuildPendingSoTheNextEventRetries
+// covers C1: a failed Rebuild must not let the NEXT taxonomy event compare
+// equal and skip. No p.RunOn is called, so Rebuild fails immediately and
+// deterministically ("no supervisor configured") — isolating the fix from any
+// real NATS I/O timing.
+//
+// The baseline itself DOES advance: it describes the client gate, which the
+// synchronous publish already put in force. What records the unfinished half
+// is entry.taxRebuildPending, and it is what makes the second rederiveEntry
+// call (the resolver unchanged) re-drive the rebuild instead of returning
+// early on an answer that has not changed.
+func TestRederiveEntry_RebuildFailureLeavesTheRebuildPendingSoTheNextEventRetries(t *testing.T) {
 	kv := startHealthKV(t)
 	reporter := health.New(kv, "lens-tax-rebuildfail")
 
@@ -319,16 +321,18 @@ func TestRederiveEntry_RebuildFailureLeavesBaselineStaleSoTheNextEventRetries(t 
 	}, 3*time.Second, 20*time.Millisecond, "the Rebuild failure must be recorded on health")
 
 	entry.taxMu.Lock()
-	staleExpansion, staleStatus := entry.taxExpansion, entry.taxExpansionStatus
+	baseline, baselineStatus, pending := entry.taxExpansion, entry.taxExpansionStatus, entry.taxRebuildPending
 	entry.taxMu.Unlock()
-	require.Nil(t, staleExpansion, "the baseline must NOT advance when Rebuild fails")
-	require.Equal(t, taxonomy.StatusUnknown, staleStatus, "the baseline stays at its pre-attempt zero value")
+	require.Equal(t, map[string]map[string]struct{}{"location": {"unit": {}}}, baseline,
+		"the baseline describes the client gate, which the synchronous publish put in force")
+	require.Equal(t, taxonomy.StatusArmed, baselineStatus)
+	require.True(t, pending, "the gate's Rebuild never succeeded, and that is what must be recorded")
 
 	before := errorCount(t, reporter)
 	rl.rederiveEntry(entry)
 	require.Eventually(t, func() bool {
 		return errorCount(t, reporter) > before
-	}, 3*time.Second, 20*time.Millisecond, "a stale baseline must make the next event retry (and fail again), not compare equal and skip")
+	}, 3*time.Second, 20*time.Millisecond, "an outstanding rebuild must make the next event retry (and fail again), not compare equal and skip")
 }
 
 func errorCount(t *testing.T, reporter *health.Reporter) uint64 {
@@ -446,4 +450,94 @@ func waitForRebuildCycle(t *testing.T, p *pipeline.Pipeline, timeout time.Durati
 		time.Sleep(5 * time.Millisecond)
 	}
 	t.Fatalf("rebuild did not complete a full in-flight cycle within %s", timeout)
+}
+
+// TestRederiveEntry_TaxonomyReturnsToTheBaseline_RepublishesTheGateItLeft is
+// the A→B→A sequence, and it needs no race: every step is a synchronous call.
+//
+// The client gate and the server-side consumer filter are moved by different
+// halves of the same sequence — the gate by the synchronous publish, the
+// filter by the Rebuild after it — so a change-detection baseline that
+// advances only when the Rebuild SUCCEEDS describes neither. E0 is in force
+// on both. (1) The taxonomy loses `desk`, so the gate is published as E1 and
+// the Rebuild fails on an ordinary blip, leaving the consumer's filter on E0.
+// (2) The package is reinstalled and the answer returns to E0 — which, against
+// a baseline that never left E0, compares EQUAL. Returning early there strands
+// a client gate on E1 over a server filter on E0: every `vtx.desk.*` event is
+// delivered and then dropped by the gate, with no other write path to either
+// side. §6.5's one unacceptable state.
+//
+// So the assertion is that the gate comes back to the set the server side
+// never left, and that the rebuild it is still owed is driven again.
+func TestRederiveEntry_TaxonomyReturnsToTheBaseline_RepublishesTheGateItLeft(t *testing.T) {
+	kv := startHealthKV(t)
+	reporter := health.New(kv, "lens-tax-aba")
+
+	adpt, err := adapter.New(nil, []string{"key"}, adapter.DeleteModeHard)
+	require.NoError(t, err)
+	// No RunOn: every Rebuild fails immediately and deterministically ("no
+	// supervisor configured"), which is this test's stand-in for the NATS blip.
+	p, err := pipeline.New("lens-tax-aba", "nats_kv", "CORE", nil, nil, adpt, reporter)
+	require.NoError(t, err)
+
+	fullEngine := full.New()
+	cr := mcCompile(t, fullEngine, "MATCH (l:location*) RETURN l.key AS key", []string{"key"})
+
+	resolver := taxonomy.New()
+	installLocationTaxonomy := func(leaves ...string) {
+		snap := []taxonomy.TypeSnapshot{{ID: "meta-location", CanonicalName: "location", Abstract: true}}
+		for _, leaf := range leaves {
+			snap = append(snap, taxonomy.TypeSnapshot{ID: "meta-" + leaf, CanonicalName: leaf, SubtypeOf: []string{"location"}})
+		}
+		resolver.InstallSnapshot(snap)
+		resolver.SetArmed(true)
+	}
+
+	// E0 — the state both the gate and the (never-rebuilt-since) consumer
+	// filter are in when the sequence starts.
+	installLocationTaxonomy("room", "desk")
+	p.SetTaxonomyResolver(resolver)
+	require.NoError(t, p.UseFullEngineBranches(fullEngine, cr, nil))
+	e0Subjects, _, _ := p.ConsumerFilter()
+	require.Contains(t, e0Subjects, subjects.CoreKVVertexFilter("CORE", "desk"), "precondition: E0 admits desk")
+
+	labels := map[string]struct{}{"location": {}}
+	e0, _, e0Status, _ := resolver.Expand(labels)
+	entry := &pipelineEntry{
+		pipeline:           p,
+		reporter:           reporter,
+		rule:               &lens.Rule{ID: "lens-tax-aba", ResolvedEngine: ruleengine.EngineFull, CompiledRule: cr},
+		taxExpansionLabels: labels,
+		taxExpansion:       e0,
+		taxExpansionStatus: e0Status,
+	}
+	rl := &reloader{ctx: context.Background(), logger: discardLogger(), fullEngine: fullEngine, resolver: resolver}
+
+	// (1) desk's subtypeOf is tombstoned. The gate moves to E1; the Rebuild
+	// behind it fails, so the consumer filter stays on E0.
+	installLocationTaxonomy("room")
+	rl.rederiveEntry(entry)
+	require.Eventually(t, func() bool {
+		return errorCount(t, reporter) > 0
+	}, 3*time.Second, 20*time.Millisecond, "the Rebuild failure must be recorded on health")
+
+	e1Subjects, _, _ := p.ConsumerFilter()
+	require.NotContains(t, e1Subjects, subjects.CoreKVVertexFilter("CORE", "desk"),
+		"the gate narrowed to E1 while the consumer filter it never rebuilt still admits desk")
+
+	// (2) The package is reinstalled: the answer returns to E0.
+	installLocationTaxonomy("room", "desk")
+	before := errorCount(t, reporter)
+	rl.rederiveEntry(entry)
+
+	backSubjects, _, _ := p.ConsumerFilter()
+	require.Contains(t, backSubjects, subjects.CoreKVVertexFilter("CORE", "desk"),
+		"the gate must return to the set the server side never left — otherwise every desk event is "+
+			"delivered by the filter and silently dropped by the gate, with nothing left to repair it")
+	require.Contains(t, backSubjects, subjects.CoreKVVertexFilter("CORE", "room"))
+	require.ElementsMatch(t, e0Subjects, backSubjects, "gate and filter agree again, on E0")
+
+	require.Eventually(t, func() bool {
+		return errorCount(t, reporter) > before
+	}, 3*time.Second, 20*time.Millisecond, "the rebuild the gate is still owed must be driven again")
 }

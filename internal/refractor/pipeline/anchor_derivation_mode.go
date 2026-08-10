@@ -186,6 +186,9 @@ func (p *Pipeline) noteStaticDerivationRefusal(rs ruleState) {
 		reason = "no convergence sweep plan is installed, so nothing would heal a missed row"
 	case !rs.anchorHops.Complete:
 		reason = rs.anchorHops.Incomplete
+	case rs.anchorHops.UnresolvedExpansionPosition() >= 0:
+		reason = fmt.Sprintf("pattern position %d carries the `*` taxonomy-expansion sigil with no resolved concrete set — the walk would prune far ends it cannot confirm, which under-approximates",
+			rs.anchorHops.UnresolvedExpansionPosition())
 	default:
 		reason = "the anchor position's label is not the enumerator's actor type"
 	}

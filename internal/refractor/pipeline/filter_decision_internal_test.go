@@ -359,18 +359,34 @@ func TestUseFullEngineBranches_PublishesTheBroadReason(t *testing.T) {
 	})
 
 	t.Run("a live re-derivation finding the expansion unknown is taxonomy-unresolvable", func(t *testing.T) {
-		p := taxonomyReasonPipeline(t, "reason-unresolvable")
-		// A resolver that has never loaded a snapshot answers StatusUnknown to
-		// any Expand. Only a LIVE re-derivation reaches the reason site with
-		// that answer: an ACTIVATION refuses outright (§4.2) and publishes
-		// nothing at all.
-		p.SetTaxonomyResolver(taxonomy.New())
-
 		eng := full.New()
 		cr, err := eng.Parse(`MATCH (i:identity) MATCH (i)-[:worksAt]->(l:location*) RETURN i.key AS key, l.key AS locKey`)
 		require.NoError(t, err)
-		require.Error(t, p.UseFullEngine(eng, cr),
+
+		// Only a LIVE re-derivation reaches the reason site with a
+		// StatusUnknown answer: an ACTIVATION refuses outright (§4.2) and
+		// publishes nothing at all. The positive vector, on its own pipeline.
+		refuser := taxonomyReasonPipeline(t, "reason-unresolvable-activation")
+		refuser.SetTaxonomyResolver(taxonomy.New())
+		require.Error(t, refuser.UseFullEngine(eng, cr),
 			"activation must still refuse an unknown expansion — the positive vector that proves the re-derivation below is the only way here")
+
+		// A lens can only re-derive if it activated, and activation requires a
+		// resolvable expansion — which is also the last known good set the
+		// degrade keeps matching against.
+		p := taxonomyReasonPipeline(t, "reason-unresolvable")
+		resolver := taxonomy.New()
+		resolver.InstallSnapshot([]taxonomy.TypeSnapshot{
+			{ID: taxID("TAXunresLocMeta"), CanonicalName: "location", Abstract: true},
+			{ID: taxID("TAXunresUnitMeta"), CanonicalName: "unit", SubtypeOf: []string{"location"}},
+		})
+		resolver.SetArmed(true)
+		p.SetTaxonomyResolver(resolver)
+		require.NoError(t, p.UseFullEngine(eng, cr))
+
+		// The taxonomy stops being able to answer for "location" at all.
+		resolver.InstallSnapshot([]taxonomy.TypeSnapshot{{ID: taxID("TAXunresOtherMeta"), CanonicalName: "somethingElse"}})
+		resolver.SetArmed(true)
 
 		require.NoError(t, p.UseFullEngineBranchesForReDerivation(eng, cr, nil))
 		require.True(t, p.ruleState().reprojectAll)
@@ -471,13 +487,23 @@ func TestUseFullEngineBranches_ReasonPrecedenceIsRankedNotPositional(t *testing.
 
 	t.Run("an unlabeled node AND an unresolvable taxonomy reports non-exhaustive", func(t *testing.T) {
 		p := taxonomyReasonPipeline(t, "reason-both-unresolvable")
-		p.SetTaxonomyResolver(taxonomy.New())
+		resolver := taxonomy.New()
+		resolver.InstallSnapshot([]taxonomy.TypeSnapshot{
+			{ID: taxID("TAXbothUnresLocMeta"), CanonicalName: "location", Abstract: true},
+			{ID: taxID("TAXbothUnresUnitMeta"), CanonicalName: "unit", SubtypeOf: []string{"location"}},
+		})
+		resolver.SetArmed(true)
+		p.SetTaxonomyResolver(resolver)
 
 		eng := full.New()
 		// `o` unlabeled (the ReferencedLabels site, rank 0, which fires FIRST)
-		// plus a `*` no resolver can expand (rank 1).
+		// plus a `*` the resolver stops being able to expand (rank 1).
 		cr, err := eng.Parse(`MATCH (i:identity) MATCH (i)-[:worksAt]->(l:location*) MATCH (i)-[:managedBy]->(o) RETURN i.key AS key, l.key AS locKey, o.name AS ownerName`)
 		require.NoError(t, err)
+		require.NoError(t, p.UseFullEngine(eng, cr))
+
+		resolver.InstallSnapshot([]taxonomy.TypeSnapshot{{ID: taxID("TAXbothUnresOtherMeta"), CanonicalName: "somethingElse"}})
+		resolver.SetArmed(true)
 		require.NoError(t, p.UseFullEngineBranchesForReDerivation(eng, cr, nil))
 
 		require.Equal(t, health.FilterBroadReasonNonExhaustive, p.ruleState().narrowingBlocked,

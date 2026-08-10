@@ -122,6 +122,19 @@ type CoreKVSource struct {
 	// (the vocabulary a lens pattern's label names) and, read through
 	// subtypeOf, the name a taxonomy edge's parent resolves through.
 	typeCanonicalNames map[string]string
+	// retainedTypeNames marks the ids in typeCanonicalNames whose current
+	// value came from a body this source could not READ — an unmarshal
+	// failure or an empty data.value, which retain the last known good name
+	// rather than retract it (handleTypeCanonicalName). Cleared the moment a
+	// readable body lands, and purged with the name itself.
+	//
+	// The distinction exists because a retained name is a name nothing
+	// currently ASSERTS, and taxonomy.Resolver.InstallSnapshot poisons every
+	// id sharing a canonicalName: an unreadable rename that frees a name for
+	// a new type would otherwise leave two claimants, poison both, and take
+	// the whole containing label to StatusUnknown permanently.
+	// effectiveCanonicalNamesLocked is where it is spent.
+	retainedTypeNames map[string]struct{}
 	// subtypeOf tracks `lnk.meta.<leaf>.subtypeOf.meta.<parent>` edges: leaf
 	// id → set of parent ids.
 	subtypeOf map[string]map[string]struct{}
@@ -427,6 +440,7 @@ func NewCoreKVSource(conn *substrate.Conn, bucket, instance string, logger *slog
 		pendingSpecs:       make(map[string][]byte),
 		vertexTypes:        make(map[string]bool),
 		typeCanonicalNames: make(map[string]string),
+		retainedTypeNames:  make(map[string]struct{}),
 		subtypeOf:          make(map[string]map[string]struct{}),
 	}
 }
@@ -590,6 +604,24 @@ func (s *CoreKVSource) deleteOwnDurable(durable string) {
 // The IsDeleted signal covers both NATS KV tombstones (empty body) and
 // soft-delete envelopes (canonical envelope's `isDeleted: true`). Both
 // trigger lens removal (vertex/aspect) or edge removal (link).
+//
+// # Fail direction, for every taxonomy site below
+//
+// The taxonomy state this function accumulates feeds lens consumer filters,
+// and the two ways of being wrong about it are not symmetric
+// (dynamic-type-taxonomy-design.md §6.5): a taxonomy that is too WIDE costs
+// delivered-then-skipped events, while one that is too NARROW drives a
+// narrowing rebuild whose consumer filter silently ack-drops real events —
+// the one unacceptable state. So every site here follows one rule:
+//
+//   - A body this source cannot READ retracts nothing. The vertex envelope
+//     that fails to unmarshal, the canonicalName aspect that fails to
+//     unmarshal or carries no value, the `data.abstract` that is not a JSON
+//     bool (abstractFlagFromData, which resolves to the wider `concrete`)
+//     — each keeps the widest reading consistent with what was last known.
+//   - Only the GRAPH retracts. A tombstone, and a live rewrite whose class
+//     is no longer `meta.ddl.vertexType`, are assertions the source read
+//     successfully and must honour, so both remove state.
 func (s *CoreKVSource) handle(evt substrate.KVEvent) {
 	key := evt.Key
 	kind := substrate.ClassifyKey(key)
@@ -620,6 +652,7 @@ func (s *CoreKVSource) handle(evt substrate.KVEvent) {
 			delete(s.vertexTypes, id)
 			_, hadCanonicalName := s.typeCanonicalNames[id]
 			delete(s.typeCanonicalNames, id)
+			delete(s.retainedTypeNames, id)
 			_, hadOutgoingSubtypeOf := s.subtypeOf[id]
 			delete(s.subtypeOf, id)
 			s.mu.Unlock()
@@ -639,7 +672,11 @@ func (s *CoreKVSource) handle(evt substrate.KVEvent) {
 		// below does with it.
 		var probe envelopeProbe
 		if err := json.Unmarshal(evt.Value, &probe); err != nil {
-			s.logger.Debug("core-kv subscribe: vertex envelope unmarshal failed",
+			// Whatever this id was tracked as, it stays tracked as: an
+			// unreadable body retracts nothing (see the fail-direction note
+			// on this function). Warn, not Debug, because the retained state
+			// is now knowingly ahead of a body nobody could parse.
+			s.logger.Warn("core-kv subscribe: vertex envelope unmarshal failed — retaining whatever taxonomy state this id already had",
 				"key", key, "err", err)
 			return
 		}
@@ -736,15 +773,28 @@ func (s *CoreKVSource) handle(evt substrate.KVEvent) {
 // for role and lens metas — see buildTaxonomySnapshotLocked's own doc on
 // why that is harmless here) — into typeCanonicalNames.
 //
-// A tombstone, an unmarshal failure, and an empty/absent `data.value` all
-// CLEAR the entry rather than leave the previous value in place. This map is
-// INCREMENTALLY accumulated (unlike internal/processor/ddl_cache.go's
-// per-lookup rebuild-from-scratch, where "absent means no name" is a
-// harmless default): here, doing nothing on a malformed rewrite would leave
-// a name resolvable that the graph's current state does not assert — a
-// narrowed filter over a name nobody currently declares. Logged at Warn
-// (not Debug — a malformed aspect body silently retracting a taxonomy name
-// must be visible at the default level).
+// Only a TOMBSTONE clears the entry. An unmarshal failure and an
+// empty/absent `data.value` retain the last known good name, mark it retained
+// (retainTypeCanonicalName), and say so at Warn — this file's standing posture (see the package-level fail-direction
+// note on handle): a body this source cannot read is not an assertion that
+// the graph has retracted anything, and the two directions are not
+// symmetric. An extra name in the taxonomy costs footprint — a filter
+// subject that matches events the matcher then skips. A MISSING name
+// removes the type from the snapshot, shrinks every abstract closure it
+// belongs to, and drives a NARROWING rebuild whose consumer filter
+// ack-drops the events it no longer admits: the "stale narrow set"
+// dynamic-type-taxonomy-design.md §6.5 calls the only unacceptable state.
+// abstractFlagFromData reasons the identical hazard thirty lines up and
+// reaches the identical answer.
+//
+// What retention does NOT do is rescue an unreadable RENAME. A `desk`→`bench`
+// rewrite whose body will not parse leaves the filter narrowed on
+// `vtx.desk.*` and blind to `vtx.bench.*` either way; retaining is chosen
+// because it keeps the CLOSURE the label already had rather than collapsing
+// it, not because it recovers the new name. The retained name is marked so it
+// can never collide with the one the rename freed — see
+// effectiveCanonicalNamesLocked, without which retention would trade a
+// bounded, self-healing shrink for a permanent StatusUnknown.
 func (s *CoreKVSource) handleTypeCanonicalName(id string, evt substrate.KVEvent) {
 	if evt.IsDeleted {
 		s.clearTypeCanonicalName(id)
@@ -756,34 +806,58 @@ func (s *CoreKVSource) handleTypeCanonicalName(id string, evt substrate.KVEvent)
 		} `json:"data"`
 	}
 	if err := json.Unmarshal(evt.Value, &asp); err != nil {
-		s.logger.Warn("core-kv subscribe: canonicalName aspect unmarshal failed — clearing the tracked name rather than retaining a stale one",
+		s.logger.Warn("core-kv subscribe: canonicalName aspect unmarshal failed — retaining the last known good name rather than narrowing the taxonomy on a body this source cannot read",
 			"id", id, "err", err)
-		s.clearTypeCanonicalName(id)
+		s.retainTypeCanonicalName(id)
 		return
 	}
 	if asp.Data.Value == "" {
-		s.logger.Warn("core-kv subscribe: canonicalName aspect data.value is empty or absent — clearing the tracked name rather than retaining a stale one",
+		s.logger.Warn("core-kv subscribe: canonicalName aspect data.value is empty or absent — retaining the last known good name; only a tombstone retracts one",
 			"id", id)
-		s.clearTypeCanonicalName(id)
+		s.retainTypeCanonicalName(id)
 		return
 	}
 	s.mu.Lock()
 	prev, existed := s.typeCanonicalNames[id]
 	s.typeCanonicalNames[id] = asp.Data.Value
+	_, wasRetained := s.retainedTypeNames[id]
+	delete(s.retainedTypeNames, id)
 	s.mu.Unlock()
-	if !existed || prev != asp.Data.Value {
+	if !existed || prev != asp.Data.Value || wasRetained {
+		s.recomputeTaxonomy()
+	}
+}
+
+// retainTypeCanonicalName marks id's tracked name as one no readable body
+// currently asserts, and recomputes if that is news. The mark is what keeps
+// the retention from being worse than the shrink it avoids: a retained name
+// is dropped rather than allowed to collide (effectiveCanonicalNamesLocked).
+//
+// An id with no tracked name at all is left alone — there is nothing being
+// retained, so nothing to qualify.
+func (s *CoreKVSource) retainTypeCanonicalName(id string) {
+	s.mu.Lock()
+	_, hasName := s.typeCanonicalNames[id]
+	_, already := s.retainedTypeNames[id]
+	if hasName && !already {
+		s.retainedTypeNames[id] = struct{}{}
+	}
+	s.mu.Unlock()
+	if hasName && !already {
 		s.recomputeTaxonomy()
 	}
 }
 
 // clearTypeCanonicalName removes id's tracked canonicalName and, if one was
-// actually present, recomputes the taxonomy. Shared by every path that means
-// "this id no longer asserts a name" — a tombstone, an unmarshal failure, and
-// an empty value alike (handleTypeCanonicalName's own doc).
+// actually present, recomputes the taxonomy. Called only where the graph
+// itself says the name is gone — the aspect's tombstone, and the vertex
+// delete that purges every map at once — never where this source merely
+// failed to read a body (handleTypeCanonicalName's own doc).
 func (s *CoreKVSource) clearTypeCanonicalName(id string) {
 	s.mu.Lock()
 	_, existed := s.typeCanonicalNames[id]
 	delete(s.typeCanonicalNames, id)
+	delete(s.retainedTypeNames, id)
 	s.mu.Unlock()
 	if existed {
 		s.recomputeTaxonomy()
@@ -886,9 +960,10 @@ func (s *CoreKVSource) buildTaxonomySnapshotLocked() []taxonomy.TypeSnapshot {
 	}
 	sort.Strings(ids)
 
+	names := s.effectiveCanonicalNamesLocked()
 	out := make([]taxonomy.TypeSnapshot, 0, len(ids))
 	for _, id := range ids {
-		canonicalName := s.typeCanonicalNames[id]
+		canonicalName := names[id]
 		if canonicalName == "" {
 			continue
 		}
@@ -897,7 +972,7 @@ func (s *CoreKVSource) buildTaxonomySnapshotLocked() []taxonomy.TypeSnapshot {
 			if _, isType := s.vertexTypes[parentID]; !isType {
 				continue
 			}
-			if name, ok := s.typeCanonicalNames[parentID]; ok && name != "" {
+			if name, ok := names[parentID]; ok && name != "" {
 				subtypeOf = append(subtypeOf, name)
 			}
 		}
@@ -908,6 +983,50 @@ func (s *CoreKVSource) buildTaxonomySnapshotLocked() []taxonomy.TypeSnapshot {
 			Abstract:      s.vertexTypes[id],
 			SubtypeOf:     subtypeOf,
 		})
+	}
+	return out
+}
+
+// effectiveCanonicalNamesLocked returns the name each tracked vertexType id
+// contributes to the snapshot. It is typeCanonicalNames with one exclusion: a
+// RETAINED name — one no readable body currently asserts
+// (retainedTypeNames) — is dropped whenever another vertexType claims the
+// same name.
+//
+// The exclusion is what bounds the fail-wide posture. taxonomy.Resolver.
+// InstallSnapshot poisons EVERY id sharing a canonicalName and
+// collectDownLocked refuses on reaching a poisoned one, so two claimants take
+// the whole containing label to StatusUnknown — permanently, since nothing
+// about the graph is wrong and no later event repairs it. An unreadable
+// rename plus a new type taking the freed name is exactly that shape. Keeping
+// the retained name out of the collision costs at most what clearing it
+// always cost (that one id drops out, bounded and self-healing on the next
+// readable body) and never costs a label its whole closure.
+//
+// A name claimed only by retained ids is dropped from all of them: with no
+// readable claimant there is no truth to prefer, and poisoning would again be
+// the unbounded answer to a bounded problem.
+//
+// Only vertexType ids are counted. typeCanonicalNames also accumulates names
+// for role and lens metas, which never enter a snapshot and so can never
+// collide inside one.
+func (s *CoreKVSource) effectiveCanonicalNamesLocked() map[string]string {
+	claims := make(map[string]int, len(s.vertexTypes))
+	for id := range s.vertexTypes {
+		if name := s.typeCanonicalNames[id]; name != "" {
+			claims[name]++
+		}
+	}
+	out := make(map[string]string, len(s.vertexTypes))
+	for id := range s.vertexTypes {
+		name := s.typeCanonicalNames[id]
+		if name == "" {
+			continue
+		}
+		if _, retained := s.retainedTypeNames[id]; retained && claims[name] > 1 {
+			continue
+		}
+		out[id] = name
 	}
 	return out
 }

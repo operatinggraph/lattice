@@ -115,15 +115,26 @@ func (rl *reloader) taxonomyChanged() {
 // unlike ACTIVATION, which correctly refuses outright (§4.2). See that
 // method's doc.
 //
-// The baseline (entry.taxExpansion/taxExpansionStatus) is committed only
-// once Rebuild actually returns nil — not right after the synchronous
-// UseFullEngineBranchesForReDerivation call. A Rebuild failure is an
-// ordinary NATS blip (supervisor.Reset), and committing the new baseline
-// before it succeeds would make the NEXT taxonomy event compare equal
-// against an answer the running consumer's filter never actually adopted —
-// silently swallowing the retry §6.5 requires. Leaving the baseline stale
-// on failure means the next taxonomy event (finding the SAME difference
-// against the SAME stale baseline) retries the whole sequence again.
+// The baseline (entry.taxExpansion/taxExpansionStatus) is committed
+// immediately after the publish it describes, on this same goroutine, which
+// is what makes "unchanged" answerable at all: it means "the gate the
+// pipeline is publishing right now came out of exactly this resolver answer".
+// It records the ANSWER, not the set the gate matches against — on the
+// degrade path those differ, and entry.taxExpansion's own doc has the full
+// statement, including why the two writes are ordered by this goroutine
+// rather than by a lock. Whether the consumer's registered filter has caught
+// up is the separate question entry.taxRebuildPending answers, and the fast
+// path returns early only when BOTH hold — the answer is unchanged AND the
+// rebuild behind it succeeded.
+//
+// One latch for both facts is what the A→B→A sequence breaks. Baseline E0;
+// the taxonomy moves to E1, so the gate is published as E1 and the Rebuild
+// fails on an ordinary NATS blip; the taxonomy moves back to E0. With the
+// baseline advanced only on rebuild success it would still read E0, compare
+// EQUAL to the fresh answer, and return early — leaving a client gate on E1
+// over a consumer filter on E0 with no other write path to either. Splitting
+// them makes the second event find (unchanged, pending) and drive the
+// outstanding rebuild, which is the whole of what is still owed.
 func (rl *reloader) rederiveEntry(entry *pipelineEntry) {
 	if len(entry.taxExpansionLabels) == 0 {
 		return
@@ -131,34 +142,106 @@ func (rl *reloader) rederiveEntry(entry *pipelineEntry) {
 	expanded, _, status, _ := rl.resolver.Expand(entry.taxExpansionLabels)
 	entry.taxMu.Lock()
 	unchanged := taxonomyExpansionEqual(expanded, status, entry.taxExpansion, entry.taxExpansionStatus)
+	pending := entry.taxRebuildPending
 	entry.taxMu.Unlock()
-	if unchanged {
+	if unchanged && !pending {
 		return
 	}
 	ruleID := entry.rule.ID
-	if err := entry.pipeline.UseFullEngineBranchesForReDerivation(rl.fullEngine, entry.rule.CompiledRule, entry.rule.CompiledBranches); err != nil {
-		// The pipeline keeps its previous rule state — useFullEngineBranches
-		// publishes nothing on error (pipeline.go's own doc). Left un-cached
-		// (entry.taxExpansion untouched) so the NEXT taxonomy event tries
-		// again rather than latching onto a failed answer as if it were the
-		// current baseline.
-		rl.refuse(entry, ruleID,
-			"taxonomy re-derivation: label expansion refused — the pipeline keeps its previous rule state",
-			"err", err)
-		return
-	}
-	go func() {
-		err := entry.pipeline.Rebuild(rl.ctx, false)
-		if err != nil {
+	if !unchanged {
+		if err := entry.pipeline.UseFullEngineBranchesForReDerivation(rl.fullEngine, entry.rule.CompiledRule, entry.rule.CompiledBranches); err != nil {
+			// The pipeline keeps its previous rule state — useFullEngineBranches
+			// publishes nothing on error (pipeline.go's own doc). The baseline
+			// is left describing that still-published gate, so the NEXT taxonomy
+			// event tries again rather than latching onto a failed answer as if
+			// it were the current one.
 			rl.refuse(entry, ruleID,
-				"taxonomy re-derivation: rebuild failed — the Core KV consumer filter may still carry the pre-change label set; a later taxonomy event will retry",
+				"taxonomy re-derivation: label expansion refused — the pipeline keeps its previous rule state",
 				"err", err)
 			return
 		}
+		// The answer the gate came out of — which on the StatusUnknown
+		// degrade is (nil, Unknown) while the gate itself matches against the
+		// pipeline's carried expansion. Recording the answer is what makes the
+		// resolver's return to a resolvable state compare UNEQUAL and
+		// republish (taxonomyExpansionEqual compares Status first).
 		entry.taxMu.Lock()
 		entry.taxExpansion = expanded
 		entry.taxExpansionStatus = status
 		entry.taxMu.Unlock()
+	}
+	// An unchanged answer republishes nothing — the gate already in force IS
+	// the answer — and only re-drives the rebuild it is still owed.
+	markTaxonomyRebuildPending(entry)
+	rl.startTaxonomyRebuild(entry, ruleID,
+		"taxonomy re-derivation: rebuild failed — the Core KV consumer filter may still carry the pre-change label set; a later taxonomy event will retry")
+}
+
+// markTaxonomyRebuildPending records that entry's client gate has just been
+// (re)published and owes a Rebuild. Advancing taxGen here is what retires any
+// rebuild goroutine still working for an older gate: its answer describes a
+// gate no longer in force, so it must not clear the flag this sets.
+func markTaxonomyRebuildPending(entry *pipelineEntry) {
+	entry.taxMu.Lock()
+	entry.taxRebuildPending = true
+	entry.taxGen++
+	entry.taxMu.Unlock()
+}
+
+// startTaxonomyRebuild drives the Rebuild owed to entry's current client gate,
+// in its own goroutine — Rebuild is a network round trip and this runs on
+// CoreKVSource's single dispatch goroutine, which every other lens's events
+// share (reloader.update's MatchChange arm spawns for the same reason).
+//
+// At most one such goroutine runs per entry, and it re-reads the gate
+// generation after each attempt: a publication that lands while a rebuild is
+// in flight is picked up by the SAME goroutine on its next pass instead of
+// racing a second one, so the entry converges on the newest gate rather than
+// on whichever rebuild happened to finish last. A failure leaves
+// taxRebuildPending set and stops — the next taxonomy event is what retries,
+// exactly as this file's rederiveEntry doc describes — and is recorded on the
+// lens's health entry under failureReason.
+func (rl *reloader) startTaxonomyRebuild(entry *pipelineEntry, ruleID, failureReason string) {
+	entry.taxMu.Lock()
+	if entry.taxRebuildRunning {
+		// The running goroutine re-reads taxGen on its way out and will make
+		// another pass for the gate just published.
+		entry.taxMu.Unlock()
+		return
+	}
+	entry.taxRebuildRunning = true
+	entry.taxMu.Unlock()
+
+	go func() {
+		for {
+			entry.taxMu.Lock()
+			gen, pending := entry.taxGen, entry.taxRebuildPending
+			if !pending {
+				entry.taxRebuildRunning = false
+				entry.taxMu.Unlock()
+				return
+			}
+			entry.taxMu.Unlock()
+
+			err := entry.pipeline.Rebuild(rl.ctx, false)
+
+			entry.taxMu.Lock()
+			superseded := entry.taxGen != gen
+			if err == nil && !superseded {
+				entry.taxRebuildPending = false
+			}
+			if !superseded {
+				entry.taxRebuildRunning = false
+			}
+			entry.taxMu.Unlock()
+
+			if err != nil {
+				rl.refuse(entry, ruleID, failureReason, "err", err)
+			}
+			if !superseded {
+				return
+			}
+		}
 	}()
 }
 

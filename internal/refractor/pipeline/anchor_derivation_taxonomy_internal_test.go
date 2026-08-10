@@ -179,3 +179,52 @@ func TestDeriveAnchorsForVertex_LabelExpand_MiddlePositionPrunesFarEnd(t *testin
 		"office is not a member of location's resolved set — the hop from therm2 must be pruned, "+
 			"not kept on the 'cannot confirm' theory that applies only to a missing OtherType")
 }
+
+// TestDerivationIndex_UnresolvedExpansion_DeclinesInsteadOfPruning is the
+// backstop for the one direction this whole derivation may not move in. A
+// `*` position with no resolved concrete set admits NOTHING, so every far end
+// the walk reaches through it is PRUNED — and an empty derived set on a
+// Complete index is read by affectedAnchors as a real answer with no BFS
+// behind it. The anchor whose grant the event revokes is simply never
+// reprojected.
+//
+// So the index is declined whole, and the caller keeps the shipped
+// ActorEnumerator BFS, exactly as it does for every other shape the
+// derivation cannot resolve. The same rule state with its expansion intact
+// derives the anchor, which is what makes the empty set a real miss rather
+// than a truthful "nothing is affected".
+func TestDerivationIndex_UnresolvedExpansion_DeclinesInsteadOfPruning(t *testing.T) {
+	adjKV := newActorEnumeratorAdjKV(t)
+	f := newEnumFixture(t, adjKV)
+	f.vertex("alice", "identity")
+	f.vertex("loft1", "unit")
+	f.edge("manages", "alice", "loft1")
+
+	p := derivationPipelineWithTaxonomy(t, adjKV, locationTaxonomySpec, armedLocationResolver())
+	ctx := context.Background()
+
+	resolved := p.ruleState()
+	require.True(t, resolved.anchorHops.Complete)
+	derived, ok, err := p.deriveAnchorsForVertex(ctx, resolved, f.key("loft1", "unit"), "unit")
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.ElementsMatch(t, []string{f.key("alice", "identity")}, derived,
+		"precondition: with the expansion resolved, this event DOES affect alice's row")
+
+	// The same lens, same pattern graph, with the `*` position's expansion
+	// missing — what a rule state published while the resolver could not
+	// answer carries.
+	unresolved := resolved
+	unresolved.anchorHops.Expanded = nil
+	require.GreaterOrEqual(t, unresolved.anchorHops.UnresolvedExpansionPosition(), 0)
+
+	_, ok = p.derivationIndex(unresolved)
+	require.False(t, ok, "an index with an unresolved `*` position must be declined, not walked")
+
+	derived, ok, err = p.deriveAnchorsForVertex(ctx, unresolved, f.key("loft1", "unit"), "unit")
+	require.NoError(t, err)
+	require.False(t, ok,
+		"the derivation must DECLINE so the caller falls back to the BFS — returning an empty set with "+
+			"ok==true reports 'no anchor is affected' for an event that revokes alice's grant")
+	require.Empty(t, derived)
+}

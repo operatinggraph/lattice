@@ -300,13 +300,16 @@ func TestCoreKVSource_Taxonomy_CanonicalNameTombstoneClearsEntry(t *testing.T) {
 	require.Empty(t, (*received)[len(*received)-1], "the entry is omitted once its canonicalName is gone — the vertexType root is still live")
 }
 
-// TestCoreKVSource_Taxonomy_MalformedOrEmptyCanonicalNameClearsThePreviousName
-// covers B1: once a name is established, a malformed rewrite (bad JSON) and
-// an empty data.value must each CLEAR the previously-tracked name, never
-// silently retain it — this map is incrementally accumulated, so "do
-// nothing" here is not the harmless default it is in ddl_cache.go's
-// from-scratch rebuild.
-func TestCoreKVSource_Taxonomy_MalformedOrEmptyCanonicalNameClearsThePreviousName(t *testing.T) {
+// TestCoreKVSource_Taxonomy_MalformedOrEmptyCanonicalNameRetainsThePreviousName
+// pins this file's fail direction (handle's own note, and
+// dynamic-type-taxonomy-design.md §6.5) at its sharpest site: a malformed
+// rewrite (bad JSON) and an empty data.value are each a body this source
+// could not READ, never an assertion that the graph retracted the name. Clearing on them removes the type from the snapshot,
+// shrinks every abstract closure it belongs to, and drives a NARROWING
+// rebuild whose consumer filter ack-drops the events it no longer admits —
+// while an over-wide name costs nothing but a filter subject the matcher
+// then skips. Only a tombstone retracts.
+func TestCoreKVSource_Taxonomy_MalformedOrEmptyCanonicalNameRetainsThePreviousName(t *testing.T) {
 	src, received := testTaxonomySource(t)
 	id := mustNanoID(t)
 
@@ -316,20 +319,23 @@ func TestCoreKVSource_Taxonomy_MalformedOrEmptyCanonicalNameClearsThePreviousNam
 
 	*received = nil
 	src.handle(substrate.KVEvent{Key: "vtx.meta." + id + ".canonicalName", Value: []byte(`not json`)})
-	require.NotEmpty(t, *received, "a malformed rewrite must clear the previous name")
-	require.Empty(t, (*received)[len(*received)-1], "the entry disappears once its name is cleared")
+	require.Empty(t, *received, "an unreadable body changes no taxonomy state, so nothing is re-emitted")
 
-	// Re-establish, then clear via an explicit empty data.value.
-	src.handle(substrate.KVEvent{Key: "vtx.meta." + id + ".canonicalName", Value: canonicalNameBody(t, "unit")})
-	require.Len(t, (*received)[len(*received)-1], 1)
-	*received = nil
 	emptyBody, err := json.Marshal(map[string]any{
 		"class": "canonicalName", "isDeleted": false, "data": map[string]any{"value": ""},
 	})
 	require.NoError(t, err)
 	src.handle(substrate.KVEvent{Key: "vtx.meta." + id + ".canonicalName", Value: emptyBody})
-	require.NotEmpty(t, *received, "an empty data.value must clear the previous name too")
-	require.Empty(t, (*received)[len(*received)-1])
+	require.Empty(t, *received, "an empty data.value is the same non-assertion")
+
+	// The retention is what the next real change proves: an unrelated edit to
+	// the same type re-emits a snapshot that still carries the name.
+	src.handle(substrate.KVEvent{Key: "vtx.meta." + id, Value: vertexTypeBody(t, true)})
+	require.NotEmpty(t, *received, "flipping the abstract flag IS a real change")
+	require.Equal(t,
+		[]taxonomy.TypeSnapshot{{ID: id, CanonicalName: "unit", Abstract: true}},
+		(*received)[len(*received)-1],
+		"the last known good name survived both unreadable bodies")
 }
 
 // TestCoreKVSource_Taxonomy_ClassChangeRetractsVertexType covers B2: a LIVE
@@ -400,4 +406,59 @@ func subtypeOfOf(snap []taxonomy.TypeSnapshot, id string) []string {
 		}
 	}
 	return nil
+}
+
+// TestCoreKVSource_Taxonomy_RetainedNameNeverPoisonsTheNameARenameFreed is the
+// bound on the fail-wide posture, asserted through the RESOLVER rather than
+// the snapshot — because the harm is entirely in what InstallSnapshot does
+// with two claimants of one name.
+//
+// X is `desk` under the abstract `location`. An upgrade rewrites X's
+// canonicalName to `bench` with a body that will not parse, so `desk` is
+// retained; the same upgrade installs Y under the freed name `desk`. Two
+// claimants poison both ids AND the name, and collectDownLocked then refuses
+// on reaching either — `location` answers StatusUnknown forever, with nothing
+// about the graph wrong and no later event to repair it. Retention must never
+// buy that: the retained claim drops out, exactly as clearing always did, and
+// `location` keeps resolving.
+func TestCoreKVSource_Taxonomy_RetainedNameNeverPoisonsTheNameARenameFreed(t *testing.T) {
+	src, received := testTaxonomySource(t)
+	locationID, xID, yID := mustNanoID(t), mustNanoID(t), mustNanoID(t)
+
+	src.handle(substrate.KVEvent{Key: "vtx.meta." + locationID, Value: vertexTypeBody(t, true)})
+	src.handle(substrate.KVEvent{Key: "vtx.meta." + locationID + ".canonicalName", Value: canonicalNameBody(t, "location")})
+	src.handle(substrate.KVEvent{Key: "vtx.meta." + xID, Value: vertexTypeBody(t, false)})
+	src.handle(substrate.KVEvent{Key: "vtx.meta." + xID + ".canonicalName", Value: canonicalNameBody(t, "desk")})
+	src.handle(substrate.KVEvent{Key: "lnk.meta." + xID + ".subtypeOf.meta." + locationID, Value: subtypeOfLinkBody(t)})
+
+	resolveLocation := func() (map[string]map[string]struct{}, taxonomy.Status) {
+		r := taxonomy.New()
+		r.InstallSnapshot((*received)[len(*received)-1])
+		r.SetArmed(true)
+		exp, _, status, _ := r.Expand(map[string]struct{}{"location": {}})
+		return exp, status
+	}
+	exp, status := resolveLocation()
+	require.Equal(t, taxonomy.StatusArmed, status)
+	require.Equal(t, map[string]map[string]struct{}{"location": {"desk": {}}}, exp, "precondition")
+
+	// The rename X: desk → bench arrives unreadable, and Y takes `desk`.
+	src.handle(substrate.KVEvent{Key: "vtx.meta." + xID + ".canonicalName", Value: []byte(`not json`)})
+	src.handle(substrate.KVEvent{Key: "vtx.meta." + yID, Value: vertexTypeBody(t, false)})
+	src.handle(substrate.KVEvent{Key: "vtx.meta." + yID + ".canonicalName", Value: canonicalNameBody(t, "desk")})
+	src.handle(substrate.KVEvent{Key: "lnk.meta." + yID + ".subtypeOf.meta." + locationID, Value: subtypeOfLinkBody(t)})
+
+	exp, status = resolveLocation()
+	require.Equal(t, taxonomy.StatusArmed, status,
+		"a retained name must not collide with the name a rename freed — two claimants poison both ids and take "+
+			"location to StatusUnknown permanently, which is far worse than the shrink retention exists to avoid")
+	require.Equal(t, map[string]map[string]struct{}{"location": {"desk": {}}}, exp,
+		"the readable claimant owns the name; the retained one simply drops out, as clearing always made it")
+
+	// A readable body for X ends the retention, and both types resolve.
+	src.handle(substrate.KVEvent{Key: "vtx.meta." + xID + ".canonicalName", Value: canonicalNameBody(t, "bench")})
+	exp, status = resolveLocation()
+	require.Equal(t, taxonomy.StatusArmed, status)
+	require.Equal(t, map[string]map[string]struct{}{"location": {"bench": {}, "desk": {}}}, exp,
+		"the exclusion is not sticky — a readable body restores the id's claim")
 }

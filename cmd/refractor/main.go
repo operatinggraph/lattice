@@ -137,24 +137,69 @@ type pipelineEntry struct {
 	// taxonomy can never affect.
 	taxExpansionLabels map[string]struct{}
 
-	// taxMu guards taxExpansion/taxExpansionStatus below. Both CoreKVSource's
-	// single dispatch goroutine (reloader.rederiveEntry's read, comparing
-	// against the cached baseline) and a rederiveEntry-spawned Rebuild
-	// goroutine (the write, once Rebuild actually succeeds — see
-	// rederiveEntry's doc on why the commit is deferred) touch these fields,
-	// so every read and every write goes through taxMu.
+	// taxMu guards taxExpansion/taxExpansionStatus/taxGen/taxRebuild* below.
+	// Both CoreKVSource's single dispatch goroutine (reloader.rederiveEntry's
+	// compare-and-commit) and the rebuild goroutine it starts touch these
+	// fields, so every read and every write goes through taxMu.
 	taxMu sync.Mutex
-	// taxExpansion and taxExpansionStatus cache the (map, Status) the
-	// taxonomy resolver's Expand last answered for taxExpansionLabels AND
-	// that the running pipeline's consumer filter was successfully rebuilt
-	// against — the baseline reloader.rederiveEntry diffs a fresh Expand
-	// call against to tell a real taxonomy change from a no-op. Seeded at
-	// activation from the resolver (newPipelineEntry), not left at a
-	// conservative zero value — see that function's doc for why an
-	// inaccurate baseline only ever costs one redundant re-derivation,
-	// never a missed one.
+	// taxExpansion and taxExpansionStatus are the resolver ANSWER that
+	// produced the client gate the running pipeline currently publishes — the
+	// baseline reloader.rederiveEntry diffs a fresh Expand call against to
+	// tell a real taxonomy change from a no-op.
+	//
+	// "The answer that produced it", not "the set it matches against": on the
+	// degrade path the two differ by construction. A StatusUnknown answer is
+	// (nil, StatusUnknown) here, while the gate published from it matches
+	// against the pipeline's last known good expansion
+	// (Pipeline.carriedLabelExpansion). That is the right thing to diff
+	// against anyway — change detection asks whether the RESOLVER moved — and
+	// it is what makes the return-to-resolvable republish: taxonomyExpansionEqual
+	// compares Status first, so (nil, StatusUnknown) is unequal to every
+	// resolvable answer, degraded gate included.
+	//
+	// Whether the server-side consumer filter has caught up is a separate
+	// question with its own field (taxRebuildPending). Folding the two into
+	// one latch would make a failed rebuild leave a baseline describing a gate
+	// that was never in effect, and then swallow the very event that would
+	// repair it.
+	//
+	// The assignment and the publication it describes are NOT one atomic step:
+	// they are separate critical sections under two different mutexes (the
+	// pipeline's ruleMu, then this taxMu). What orders them is that every
+	// writer — reloader.rederiveEntry, reloader.update, and the taxonomy
+	// callbacks that drive them — runs on CoreKVSource's single dispatch
+	// goroutine, so no second publication can interleave between a publish and
+	// the baseline that records it. taxMu is still taken on every access
+	// because the rebuild goroutine reads these fields off that goroutine. A
+	// writer added anywhere else needs an ordering argument of its own; the
+	// lock alone will not supply one.
+	//
+	// Seeded at activation from the resolver (newPipelineEntry), not left at
+	// a conservative zero value — see that function's doc for why an
+	// inaccurate baseline only ever costs one redundant re-derivation, never
+	// a missed one.
 	taxExpansion       map[string]map[string]struct{}
 	taxExpansionStatus taxonomy.Status
+	// taxGen counts publications of this entry's client gate — a taxonomy
+	// re-derivation or a MATCH hot-reload. A rebuild goroutine captures it
+	// before it starts and compares on the way out, so the answer of a
+	// rebuild that a newer publication has already superseded is discarded
+	// instead of clearing a flag that describes a gate it never saw.
+	taxGen uint64
+	// taxRebuildPending reports that the gate taxExpansion describes has no
+	// SUCCESSFUL Rebuild behind it — the consumer's registered filter may
+	// still carry an older label set. It is what keeps rederiveEntry's
+	// unchanged fast path (which exists to stop a rebuild storm) from
+	// swallowing a taxonomy that moved away and came back: the sequence
+	// E0 → E1 (gate published, rebuild failed) → E0 compares equal against a
+	// baseline that IS in effect, and the outstanding rebuild is what still
+	// needs driving.
+	taxRebuildPending bool
+	// taxRebuildRunning reports that a goroutine is currently driving the
+	// pending rebuild. At most one runs per entry: it re-reads taxGen after
+	// each attempt and loops when a newer gate landed underneath it, so
+	// re-derivations settle in publication order rather than racing.
+	taxRebuildRunning bool
 }
 
 // isPerEntryCapReadOutput reports whether output describes a cap-read.*

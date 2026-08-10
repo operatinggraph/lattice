@@ -106,19 +106,28 @@ func (p *Pipeline) deriveAnchorsForLink(ctx context.Context, rs ruleState, linkK
 }
 
 // derivationIndex returns the compiled pattern graph to walk under, and whether
-// this pipeline may use one at all. Both conjuncts beyond HopIndex.Complete are
-// about this pipeline rather than the query:
+// this pipeline may use one at all. Two of the conjuncts beyond
+// HopIndex.Complete are about this pipeline rather than the query:
 //
 //   - an ActorEnumerator must be installed, because the derived set is only
 //     ever compared with — or substituted for — its answer; and
 //   - the anchor position's own label must be the enumerator's actor type, or
 //     the keys this walk builds would name a different kind of vertex than the
 //     one the evaluation binds.
+//
+// The remaining one is about the taxonomy: a `*` position with no resolved
+// expansion makes the walk PRUNE every far end it cannot confirm
+// (UnresolvedExpansionPosition's doc), and an empty derived set on a Complete
+// index is read as a real answer with no BFS behind it. So the index is
+// declined whole, exactly like every other shape it cannot resolve.
 func (p *Pipeline) derivationIndex(rs ruleState) (full.HopIndex, bool) {
 	if p.actorEnumerator == nil {
 		return full.HopIndex{}, false
 	}
 	if !rs.anchorHops.Complete {
+		return full.HopIndex{}, false
+	}
+	if rs.anchorHops.UnresolvedExpansionPosition() >= 0 {
 		return full.HopIndex{}, false
 	}
 	if l := rs.anchorHops.Labels[rs.anchorHops.Anchor]; l != p.actorEnumerator.actorType {
@@ -231,11 +240,16 @@ func (p *Pipeline) walkToAnchors(ctx context.Context, idx full.HopIndex, seeds [
 				// the far end's type is unknown, so the pattern's label cannot
 				// rule it out and the walk keeps it. A `*` far end prunes by
 				// set membership against its taxonomy-resolved downward
-				// closure instead of string equality — and, symmetrically to
-				// full/executor.go's nodeMatches, an unresolved expansion
-				// (step.ToExpanded == nil) fails closed by pruning, never by
-				// falling back to ToLabel's bare (and possibly abstract, so
-				// meaningless as a key type) string.
+				// closure instead of string equality.
+				//
+				// An unresolved expansion (step.ToExpanded == nil) prunes
+				// here, and pruning is the UNSOUND direction for this walk —
+				// which is why derivationIndex declines an index carrying such
+				// a position before the walk ever starts, leaving this arm
+				// unreachable from the pipeline. It stays as written for a
+				// caller that builds a HopIndex directly, where pruning is
+				// still better than falling back to ToLabel's bare (and
+				// possibly abstract, so meaningless as a key type) string.
 				if step.ToLabelExpand {
 					if e.OtherType != "" {
 						if step.ToExpanded == nil {

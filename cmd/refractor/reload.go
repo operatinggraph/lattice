@@ -450,12 +450,12 @@ func (rl *reloader) update(_, newLens *lens.Rule, kind lens.UpdateKind) {
 		if rl.resolver != nil && len(entry.taxExpansionLabels) > 0 {
 			newExpansion, _, newStatus, _ = rl.resolver.Expand(entry.taxExpansionLabels)
 		}
-		// taxMu-guarded: a rederiveEntry-spawned Rebuild goroutine from an
-		// EARLIER taxonomy re-derivation on this same entry may still be
-		// in flight and write these fields concurrently (entry.taxMu's own
-		// doc) — this write, though it runs on the single dispatch
-		// goroutine like everything else in update(), touches fields a
-		// background goroutine also touches, so it takes the same lock.
+		// taxMu-guarded: a rebuild goroutine from an EARLIER taxonomy
+		// re-derivation on this same entry may still be in flight and read
+		// these fields concurrently (entry.taxMu's own doc) — this write,
+		// though it runs on the single dispatch goroutine like everything
+		// else in update(), touches fields a background goroutine also
+		// touches, so it takes the same lock.
 		entry.taxMu.Lock()
 		entry.taxExpansion, entry.taxExpansionStatus = newExpansion, newStatus
 		entry.taxMu.Unlock()
@@ -484,12 +484,14 @@ func (rl *reloader) update(_, newLens *lens.Rule, kind lens.UpdateKind) {
 		// refusal on this path the new spec has already been accepted by the time
 		// this runs, so a log line was the only account of a lens now serving a
 		// rule it cannot see all the events for.
-		go func() {
-			if err := entry.pipeline.Rebuild(rl.ctx, false); err != nil {
-				rl.refuse(entry, newLens.ID,
-					"MATCH hot-reload: rebuild failed — the Core KV consumer filter may still carry the pre-edit label set",
-					"err", err)
-			}
-		}()
+		//
+		// Driven through the same per-entry rebuild latch a taxonomy
+		// re-derivation uses (taxonomy_reload.go): this arm publishes a client
+		// gate and owes it a rebuild for exactly the same reason, and a MATCH
+		// edit landing beside a taxonomy event would otherwise race two
+		// rebuilds whose answers describe different gates.
+		markTaxonomyRebuildPending(entry)
+		rl.startTaxonomyRebuild(entry, newLens.ID,
+			"MATCH hot-reload: rebuild failed — the Core KV consumer filter may still carry the pre-edit label set")
 	}
 }

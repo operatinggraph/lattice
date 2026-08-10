@@ -17,6 +17,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/operatinggraph/lattice/internal/refractor/adapter"
+	"github.com/operatinggraph/lattice/internal/refractor/health"
 	"github.com/operatinggraph/lattice/internal/refractor/ruleengine/full"
 	"github.com/operatinggraph/lattice/internal/refractor/taxonomy"
 	"github.com/operatinggraph/lattice/internal/substrate"
@@ -473,4 +474,184 @@ func TestPlainLens_LabelExpandAnchor_LeafTombstoneRetractsGrantShapedRow(t *test
 	require.ErrorIs(t, err, substrate.ErrKeyNotFound,
 		"an abstract-anchored lens's leaf-type tombstone must retract the row through a real target write — "+
 			"left as bare equality, this never fires: a grant that never revokes")
+}
+
+// TestReDerivation_UnknownTaxonomy_KeepsMatchingWhileTheFilterGoesBroad is
+// §6.5's whole promise on the LIVE path, observed where it actually bites:
+// not on the consumer filter (which a broad answer rescues) but on the
+// MATCHER. A live re-derivation that finds the expansion unknown publishes
+// the broad filter — and must publish it over a rule that still binds the
+// concrete types it was already binding.
+//
+// Publishing the resolver's nil answer instead satisfies every filter-level
+// assertion and still takes the lens to zero rows: nodeMatches finds no
+// entry for the `*` label and binds nothing. The caller's very next act
+// (reloader.rederiveEntry) is a Rebuild, which replays the whole corpus
+// against that matcher — a mass retraction on any lens that retracts, a mass
+// revoke on a grant lens. So this executes the published rule and asserts a
+// row, which is the only assertion the nil answer cannot pass.
+func TestReDerivation_UnknownTaxonomy_KeepsMatchingWhileTheFilterGoesBroad(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping NATS-backed test in short mode")
+	}
+	coreKV, adjKV, targetKV := newCollisionKVs(t)
+
+	eng := full.New()
+	cr, err := eng.Parse(`MATCH (l:location*) RETURN l.key AS key, l.name AS name`)
+	require.NoError(t, err)
+	fullCR := cr.(*full.CompiledRule)
+	fullCR.KeyColumns = []string{"key"}
+	require.NoError(t, fullCR.ValidateKeyColumns())
+
+	adpt, err := adapter.New(targetKV, []string{"key"}, adapter.DeleteModeHard)
+	require.NoError(t, err)
+	p, err := New("rederive-unknown-keeps-matching", "nats_kv", "CORE", adjKV, coreKV, adpt, nil)
+	require.NoError(t, err)
+
+	resolver := taxonomy.New()
+	resolver.InstallSnapshot([]taxonomy.TypeSnapshot{
+		{ID: taxID("TAXliveLocationMeta"), CanonicalName: "location", Abstract: true},
+		{ID: taxID("TAXliveUnitMeta"), CanonicalName: "unit", SubtypeOf: []string{"location"}},
+	})
+	resolver.SetArmed(true)
+	p.SetTaxonomyResolver(resolver)
+	require.NoError(t, p.UseFullEngine(eng, cr))
+	require.False(t, p.ruleState().reprojectAll, "precondition: the lens starts narrowed on the resolved set")
+
+	// The taxonomy stops being able to answer for "location" at all — the
+	// package that declared the abstract is uninstalled, a cross-package
+	// chain exceeds maxDepth, or a canonicalName collision opens. Expand
+	// answers (nil, StatusUnknown) from here on.
+	resolver.InstallSnapshot([]taxonomy.TypeSnapshot{
+		{ID: taxID("TAXliveOtherMeta"), CanonicalName: "somethingElse"},
+	})
+	resolver.SetArmed(true)
+
+	require.NoError(t, p.UseFullEngineBranchesForReDerivation(eng, cr, nil),
+		"a LIVE re-derivation degrades; it never refuses like activation")
+
+	rs := p.ruleState()
+	require.True(t, rs.reprojectAll, "the DELIVERY axis degrades: broad filter, no client skip")
+	require.Equal(t, health.FilterBroadReasonTaxonomyUnresolvable, rs.narrowingBlocked,
+		"the reported cause is the taxonomy, not a rule that names a type no label covers")
+
+	const unitID = "LVEunitAAAAAAAAAAAAA"
+	unitKey := "vtx.unit." + unitID
+	unitBody := seedVertexBody(t, coreKV, unitKey, "unit", map[string]any{"name": "Loft A"})
+	handleVertexEvent(t, p, unitKey, unitBody, 1)
+
+	row := targetRow(t, targetKV, unitKey)
+	require.Equal(t, unitKey, row["key"],
+		"the degraded lens must still project its concrete types — a broad filter over a matcher that "+
+			"binds nothing is not correct-but-slower, it is zero rows and a mass retraction behind them")
+	require.Equal(t, map[string]map[string]struct{}{"location": {"unit": {}}}, rs.labelExpansion,
+		"and the mechanism that bought the row: the PROJECTION axis kept the last resolved expansion")
+}
+
+// TestReDerivation_UnknownTaxonomy_WithNothingCarried_Refuses pins the one
+// asymmetry the degrade path keeps: it degrades to the LAST KNOWN GOOD
+// expansion, so a pipeline that has never resolved one has nothing to
+// degrade to and refuses exactly as activation does, rather than publishing
+// a matcher that binds nothing. No RUNNING `*` lens can be in this state —
+// UseFullEngineBranches refuses activation on an unknown expansion — which
+// is precisely why this arm must never be reached by publishing instead.
+func TestReDerivation_UnknownTaxonomy_WithNothingCarried_Refuses(t *testing.T) {
+	eng := full.New()
+	cr, err := eng.Parse(`MATCH (l:location*) RETURN l.key AS key`)
+	require.NoError(t, err)
+
+	p, err := New("rederive-unknown-nothing-carried", "nats_kv", "CORE", nil, nil, &keyListerAdapter{}, nil)
+	require.NoError(t, err)
+	p.SetTaxonomyResolver(taxonomy.New())
+
+	err = p.UseFullEngineBranchesForReDerivation(eng, cr, nil)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "no previously-resolved expansion")
+	require.Empty(t, p.ruleState().engineKind, "a refused re-derivation must publish nothing")
+}
+
+// TestReDerivation_UnknownTaxonomy_PartiallyCoveringCarry_Refuses pins the
+// carry-forward guard as a COVERAGE test rather than a presence test. A rule
+// expanding {location, org} against a carried map that only knows `location`
+// would publish a matcher blank on `org*` alone — one map is threaded into
+// every `*` position (full.WithLabelExpansion), and nodeMatches binds nothing
+// for a label the map does not mention. That is the same zero-row Rebuild the
+// whole degrade path exists to prevent, reached through a narrower door, so
+// the arm refuses instead and names the label it could not cover.
+func TestReDerivation_UnknownTaxonomy_PartiallyCoveringCarry_Refuses(t *testing.T) {
+	eng := full.New()
+	oneLabel, err := eng.Parse(`MATCH (l:location*) RETURN l.key AS key`)
+	require.NoError(t, err)
+	twoLabels, err := eng.Parse(`MATCH (l:location*) MATCH (o:org*) RETURN l.key AS key, o.key AS orgKey`)
+	require.NoError(t, err)
+
+	p, err := New("rederive-partial-carry", "nats_kv", "CORE", nil, nil, &keyListerAdapter{}, nil)
+	require.NoError(t, err)
+
+	resolver := taxonomy.New()
+	resolver.InstallSnapshot([]taxonomy.TypeSnapshot{
+		{ID: taxID("TAXpartialLocMeta"), CanonicalName: "location", Abstract: true},
+		{ID: taxID("TAXpartialUnitMeta"), CanonicalName: "unit", SubtypeOf: []string{"location"}},
+	})
+	resolver.SetArmed(true)
+	p.SetTaxonomyResolver(resolver)
+
+	// The published expansion covers `location` and nothing else.
+	require.NoError(t, p.UseFullEngine(eng, oneLabel))
+	require.Equal(t, map[string]map[string]struct{}{"location": {"unit": {}}}, p.ruleState().labelExpansion)
+	genBefore := p.ruleState().gen
+
+	// The taxonomy stops answering, and the rule re-derived carries a SECOND
+	// expanded label the carried map has never held.
+	resolver.InstallSnapshot([]taxonomy.TypeSnapshot{{ID: taxID("TAXpartialOtherMeta"), CanonicalName: "somethingElse"}})
+	resolver.SetArmed(true)
+
+	err = p.UseFullEngineBranchesForReDerivation(eng, twoLabels, nil)
+	require.Error(t, err, "a carried map that covers only some of the rule's `*` labels must not be published")
+	require.Contains(t, err.Error(), "[org]", "the refusal names the label it could not cover")
+
+	rs := p.ruleState()
+	require.Equal(t, genBefore, rs.gen,
+		"a refused re-derivation publishes nothing — the previous rule keeps running")
+	require.Equal(t, map[string]map[string]struct{}{"location": {"unit": {}}}, rs.labelExpansion)
+}
+
+// TestReDerivation_UnknownTaxonomy_CarriedEmptySetStaysNonExhaustive pins the
+// reported CAUSE for a carried set that is genuinely empty. `location` is an
+// abstract with no concrete descendants: a resolved, real, empty answer. That
+// makes the lens non-exhaustive DURABLY — rank 0, which narrowingBlockRank
+// calls the true verdict precisely because it survives both arming the
+// resolver and repairing the taxonomy. Reporting the degrade's
+// taxonomy-unresolvable over it would send an operator to fix a taxonomy that,
+// once fixed, leaves this lens exactly as broad as it is now.
+func TestReDerivation_UnknownTaxonomy_CarriedEmptySetStaysNonExhaustive(t *testing.T) {
+	eng := full.New()
+	cr, err := eng.Parse(`MATCH (i:identity) MATCH (i)-[:worksAt]->(l:location*) RETURN i.key AS key, l.key AS locKey`)
+	require.NoError(t, err)
+
+	p, err := New("rederive-carried-empty", "nats_kv", "CORE", nil, nil, &keyListerAdapter{}, nil)
+	require.NoError(t, err)
+
+	resolver := taxonomy.New()
+	resolver.InstallSnapshot([]taxonomy.TypeSnapshot{
+		{ID: taxID("TAXcarriedEmptyLocMeta"), CanonicalName: "location", Abstract: true},
+	})
+	resolver.SetArmed(true)
+	p.SetTaxonomyResolver(resolver)
+
+	require.NoError(t, p.UseFullEngine(eng, cr))
+	require.Equal(t, map[string]map[string]struct{}{"location": {}}, p.ruleState().labelExpansion,
+		"precondition: the carried answer is resolved and genuinely empty")
+	require.Equal(t, health.FilterBroadReasonNonExhaustive, p.ruleState().narrowingBlocked)
+
+	resolver.InstallSnapshot([]taxonomy.TypeSnapshot{{ID: taxID("TAXcarriedEmptyOtherMeta"), CanonicalName: "somethingElse"}})
+	resolver.SetArmed(true)
+	require.NoError(t, p.UseFullEngineBranchesForReDerivation(eng, cr, nil))
+
+	rs := p.ruleState()
+	require.True(t, rs.reprojectAll)
+	require.Equal(t, health.FilterBroadReasonNonExhaustive, rs.narrowingBlocked,
+		"an empty carried set is non-exhaustive whatever the resolver is doing — the durable cause outranks the transient one")
+	_, _, dec := p.ConsumerFilter()
+	require.Equal(t, health.FilterBroadReasonNonExhaustive, dec.BroadReason)
 }

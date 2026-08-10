@@ -210,6 +210,24 @@ type Pipeline struct {
 	// the enumerator's BFS.
 	anchorHops full.HopIndex
 
+	// labelExpansion is the taxonomy expansion the PUBLISHED rule state
+	// matches against — the very map threaded into full.WithLabelExpansion,
+	// HopIndex.WithLabelExpansion and seedAnchorLabels by the publication that
+	// installed it, nil for a lens with no `*` anywhere. Guarded by ruleMu and
+	// republished with the rule it describes, so it can never name a set the
+	// running matcher is not actually using.
+	//
+	// It is also this pipeline's LAST KNOWN GOOD expansion, which is what a
+	// live re-derivation reads when the resolver has stopped being able to
+	// answer (useFullEngineBranches' StatusUnknown arm). Its lifetime is the
+	// published rule state's, exactly: born at the activation that first
+	// resolved an expansion, replaced wholesale by every later publication,
+	// and gone when the process is. It is deliberately NOT persisted across a
+	// restart — a fresh process re-activates through UseFullEngineBranches,
+	// which refuses a lens whose expansion is unknown rather than running it
+	// against a set no live resolver vouches for.
+	labelExpansion map[string]map[string]struct{}
+
 	// diffRetraction opts a plain lens into Fire 3's neighbor-driven / multi-row
 	// target-diff retraction (negative-filter-retraction-projection-design.md
 	// §2.4): when Fire 2's read-free AnchorProjectionKey check cannot derive a
@@ -603,13 +621,21 @@ func narrowingBlockRankOf(reason string) int {
 // re-deriving cannot take that same refusal without violating §6.5's "never
 // keep a stale narrow set": it is already projecting against a set the
 // resolver has just proven it cannot currently trust, so this entry point
-// degrades to the broad filter (drops the expansion; the existing
-// exhaustive=false / reprojectAll=true machinery every other non-StatusArmed
-// answer already goes through) and PUBLISHES that, instead of refusing.
-// Never wrong, only unavailable until the next successful re-derivation —
-// the caller (reloader.rederiveEntry) still drives the Rebuild that
-// re-registers the widened server-side filter; this call only updates the
-// client gate.
+// degrades to the broad filter (the existing exhaustive=false /
+// reprojectAll=true machinery every other non-StatusArmed answer already goes
+// through) and PUBLISHES that, instead of refusing.
+//
+// The degradation is on the DELIVERY axis alone. The matcher keeps this
+// pipeline's last known good expansion (Pipeline.labelExpansion), because a
+// broad filter over a blank matcher is not "slower", it is zero rows — and a
+// Rebuild against zero rows retracts every row the lens has ever written.
+// Correct-but-slower means the row set stays right and only the narrowing is
+// lost. The one state that cannot degrade is a rule with a label the carried
+// expansion does not cover, which refuses like activation does and which no
+// RUNNING `*` lens can be in (see the StatusUnknown arm's own comment). Never wrong, only un-narrowed, until the next successful
+// re-derivation — the caller (reloader.rederiveEntry) still drives the
+// Rebuild that re-registers the widened server-side filter; this call only
+// updates the client gate.
 func (p *Pipeline) UseFullEngineBranchesForReDerivation(eng *full.Engine, cr ruleengine.CompiledRule, branches []ruleengine.CompiledRule) error {
 	return p.useFullEngineBranches(eng, cr, branches, true)
 }
@@ -736,17 +762,52 @@ func (p *Pipeline) useFullEngineBranches(eng *full.Engine, cr ruleengine.Compile
 					sortedLabelList(expansionNeeded), reason)
 			}
 			// A live re-derivation is governed by §6.5, not §4.2 (see
-			// UseFullEngineBranchesForReDerivation's doc): fall through
-			// rather than refuse. expandedLabels is already nil (Expand's
-			// own StatusUnknown contract), so the exhaustive=false branch
-			// immediately below, and every nil-map-safe step after it,
-			// degrade this rule to the broad filter — and
-			// WithLabelExpansion(fullCR, nil) makes executor.go's
-			// nodeMatches fail closed for the `*` position (matches
-			// NOTHING, never falls back to the bare label), so the matcher
-			// never risks a wrong row either: unavailable, not wrong, until
-			// the next re-derivation finds a trustworthy answer again.
-			slog.Warn("pipeline: live taxonomy re-derivation found the expansion unknown — degrading to the broad filter rather than keeping a stale narrow set",
+			// UseFullEngineBranchesForReDerivation's doc): degrade rather
+			// than refuse — but degrade on the DELIVERY axis only. Expand
+			// answered nil (its own StatusUnknown contract), and publishing
+			// that nil would carry the degradation onto the PROJECTION axis
+			// too: executor.go's nodeMatches finds no entry for the `*`
+			// label and binds nothing, so the lens matches zero rows, and
+			// the Rebuild the caller drives next replays every anchor
+			// against that blank matcher — on a lens with filter/diff/
+			// presence retraction, a mass Delete; on a grant lens, a mass
+			// revoke. §6.5 promises a broad FILTER, which costs delivered-
+			// then-skipped events; it never promises an empty matcher.
+			//
+			// So the matcher keeps this pipeline's last known good
+			// expansion (carriedLabelExpansion — the set the currently
+			// published rule state is already matching against) while
+			// exhaustive=false below takes the filter broad and reports
+			// taxonomy-unresolvable. Correct-but-slower, which is what §6.5
+			// asks for: the rows stay right, only the narrowing is lost,
+			// until a later re-derivation finds a trustworthy answer.
+			//
+			// With nothing carried there is nothing to degrade TO, and this
+			// arm refuses like activation does — the asymmetry between the
+			// two entry points is "activation refuses; a LIVE lens degrades
+			// and keeps serving", and a lens with no published expansion is
+			// not a live one: UseFullEngineBranches refuses any `*` lens
+			// whose expansion is unknown, so every running `*` lens reached
+			// its RunOn with an expansion published. This is the belt to
+			// that brace, and it fails the way the brace does.
+			//
+			// What makes the carry safe is COVERAGE, not mere presence: every
+			// label this rule expands must have an entry, because
+			// full.WithLabelExpansion threads one map into all of them and
+			// executor.go's nodeMatches binds nothing for a `*` label the map
+			// does not mention. A map covering some labels and not others
+			// would publish a partly-blank matcher, which is the same zero-row
+			// Rebuild this arm exists to prevent, reached by a narrower door.
+			// Tested here against expansionNeeded rather than argued from what
+			// the caller's rule can be: the guard has to hold for the rule in
+			// hand, not for the ordering of the reload that produced it.
+			expandedLabels = p.carriedLabelExpansion()
+			if missing := labelsWithoutExpansion(expansionNeeded, expandedLabels); len(missing) > 0 {
+				return fmt.Errorf(
+					"pipeline: live taxonomy re-derivation found the expansion unknown for label(s) %s — %s; this pipeline has no previously-resolved expansion for label(s) %s to keep matching against, so it refuses rather than publish a matcher that binds nothing for them",
+					sortedLabelList(expansionNeeded), reason, sortedLabelList(missing))
+			}
+			slog.Warn("pipeline: live taxonomy re-derivation found the expansion unknown — degrading to the broad filter and keeping the last resolved expansion for matching, rather than keeping a stale narrow set or blanking the matcher",
 				"ruleId", p.ruleID, "labels", sortedLabelList(expansionNeeded), "reason", reason)
 		} else if !liveReDerivation && len(inert) > 0 {
 			// ACTIVATION-only (taxonomy.Resolver.Expand's doc has the full
@@ -803,6 +864,13 @@ func (p *Pipeline) useFullEngineBranches(eng *full.Engine, cr ruleengine.Compile
 		// relying on the plain reprojection gate — so this is plain-lens
 		// specific.) Forces the broad filter instead, exactly like a
 		// not-yet-armed resolver.
+		// Judged on every path, a carried expansion included: a label whose
+		// concrete set is empty is non-exhaustive DURABLY — arming the
+		// resolver and repairing the taxonomy both leave it so — and rank 0 is
+		// the true verdict for exactly that reason (narrowingBlockRank). A
+		// degrade that reported taxonomy-unresolvable over it would send an
+		// operator to fix a taxonomy that, once fixed, leaves the lens broad
+		// anyway.
 		for l, set := range expandedLabels {
 			if len(set) == 0 {
 				exhaustive = false
@@ -851,6 +919,10 @@ func (p *Pipeline) useFullEngineBranches(eng *full.Engine, cr ruleengine.Compile
 	// with no `*` keeps the exact rule object it was given, preserving
 	// identity as well as behaviour.
 	if len(expansionNeeded) > 0 {
+		// Recorded on the same snapshot the wrapped rules ride, so the
+		// pipeline's last-known-good is by construction the set its matcher is
+		// using — the two cannot drift, because one publication writes both.
+		next.labelExpansion = expandedLabels
 		wrapped := make([]ruleengine.CompiledRule, len(all))
 		for i, c := range all {
 			if fullCR, isFull := c.(*full.CompiledRule); isFull {
@@ -911,6 +983,24 @@ func sortedLabelList(labels map[string]struct{}) []string {
 	return out
 }
 
+// labelsWithoutExpansion returns the labels in needed that exp has no entry
+// for — the coverage test the live-re-derivation carry-forward turns on.
+//
+// A PRESENT but empty set is covered: an abstract with no concrete
+// descendants is a real, resolved answer (§3.4), and the pattern binding
+// nothing is then the truth rather than a blank matcher. Only a MISSING key
+// is the un-carryable case, because that is the one executor.go's nodeMatches
+// cannot tell apart from "never resolved".
+func labelsWithoutExpansion(needed map[string]struct{}, exp map[string]map[string]struct{}) map[string]struct{} {
+	missing := map[string]struct{}{}
+	for l := range needed {
+		if _, ok := exp[l]; !ok {
+			missing[l] = struct{}{}
+		}
+	}
+	return missing
+}
+
 // ruleState is a coherent snapshot of everything useFullEngineBranches
 // rewrites — the fields ruleMu guards. Taken once per consumer entry and
 // threaded down, so a MATCH hot-reload landing mid-event cannot show one gate
@@ -932,6 +1022,10 @@ type ruleState struct {
 	relationsExhaustive bool
 	seedAnchorLabels    map[string]struct{}
 	anchorHops          full.HopIndex
+	// labelExpansion is the taxonomy expansion this rule state's matcher,
+	// anchor graph and seed set were all built from — see the Pipeline field
+	// of the same name, which this publishes into.
+	labelExpansion map[string]map[string]struct{}
 	// narrowingBlocked is why reprojectAll is set — one of health's
 	// FilterBroadReason values, "" when the label set IS exhaustive. It rides
 	// the rule snapshot rather than living in its own state because the cause
@@ -978,8 +1072,26 @@ func (p *Pipeline) ruleState() ruleState {
 		relationsExhaustive: p.plainRelationsExhaustive,
 		seedAnchorLabels:    p.seedAnchorLabels,
 		anchorHops:          p.anchorHops,
+		labelExpansion:      p.labelExpansion,
 		narrowingBlocked:    p.plainNarrowingBlocked,
 	}
+}
+
+// carriedLabelExpansion returns the expansion the currently published rule
+// state matches against — this pipeline's last known good answer, nil when no
+// publication has ever resolved one.
+//
+// It is read exactly once, by useFullEngineBranches' live-re-derivation
+// StatusUnknown arm, BEFORE that call publishes anything: keeping the matcher
+// on the set it is already using is what makes an unresolvable taxonomy a
+// delivery widening rather than a projection blackout. That arm checks the
+// map COVERS every label the rule in hand expands (labelsWithoutExpansion)
+// before using it — this returns whatever was last published, which is not by
+// itself a promise about any particular rule's labels.
+func (p *Pipeline) carriedLabelExpansion() map[string]map[string]struct{} {
+	p.ruleMu.RLock()
+	defer p.ruleMu.RUnlock()
+	return p.labelExpansion
 }
 
 // publishRuleState installs a freshly-derived rule as one atomic swap.
@@ -998,6 +1110,7 @@ func (p *Pipeline) publishRuleState(rs ruleState) {
 	p.plainRelationsExhaustive = rs.relationsExhaustive
 	p.seedAnchorLabels = rs.seedAnchorLabels
 	p.anchorHops = rs.anchorHops
+	p.labelExpansion = rs.labelExpansion
 	p.plainNarrowingBlocked = rs.narrowingBlocked
 }
 
