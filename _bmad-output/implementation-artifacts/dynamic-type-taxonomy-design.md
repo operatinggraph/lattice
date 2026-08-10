@@ -1,8 +1,10 @@
 # A dynamic type taxonomy — an abstract type is graph data, and a lens label expands against it
 
-**Status: ✅ Andrew-RATIFIED 2026-08-06 · Fire A increment 1 in flight** — build-ready as **two fires**, both in the **Lattice lane**
-(§14, rewritten at ratification). Five amendments below are Andrew's and supersede the body where they
-differ. Contract #1 §1.7's abstract-vertexType note is **committed** with a transitional marker. Authored
+**Status: ✅ Andrew-RATIFIED 2026-08-06 · Fire A items 1–5 built (build notes §17); item 6 (observability) +
+the §15 census-test extension remain — the census test depends on item 6's `filterMode`** — two fires, both
+in the **Lattice lane** (§14, rewritten at ratification). **Fire B is gated on the rebuild-fan-out board row**
+(needs a coalesced rebuild scheduler; §17.8). Five amendments below are Andrew's and supersede the body where
+they differ. Contract #1 §1.7's abstract-vertexType note is **committed** with a transitional marker. Authored
 2026-08-06, co-designed with Andrew in the ratify session; subsumes the location-domain class question.
 
 > **AMENDMENTS (Andrew, ratify session 2026-08-06) — these supersede the body where they differ.**
@@ -39,12 +41,25 @@ differ. Contract #1 §1.7's abstract-vertexType note is **committed** with a tra
 > **A3 — A bare label naming no concrete key type is an ERROR, not an empty match.** "`:location` finds
 > nothing because it is abstract" is right about the semantics and wrong as a runtime behaviour: a lens
 > that silently projects nothing is the failure class this session spent its day removing. The taxonomy
-> supplies a vocabulary for the first time, so the case is detectable. The gate gets three checks: a bare
-> label naming no concrete key type (error — a typo, or a forgotten `*`); `label*` where the name is not
-> declared abstract (error — nothing to expand); and an expansion exceeding the ≤8-label cap (a health
-> signal, never a silent drop to the broad filter). This makes label resolution a vocabulary lookup where
-> today it is an uninterpreted string, so the **unknown-label posture must be a declared decision** — a
-> cross-package label's resolvability depends on install order.
+> supplies a vocabulary for the first time, so the case is detectable.
+>
+> **Current status (2026-08-09, recorded per the body-amendment rule; grounding: §17.9, Fire A increment
+> 5).** The gate shipped with **two** checks, not three. `label*` where the computed closure is provably
+> `{itself}` (inert — nothing to expand) is refused at activation and accepted on a live re-derivation
+> (§4.2's fourth tier; amendment A5 means a concrete name with real subtypes expands normally, so this is
+> narrower than "name not declared abstract"). An expansion exceeding the ≤8-label cap logs a line today,
+> not a health signal — narrowed because that signal belongs to item 6's `filterMode` work as one coherent
+> unit, not a field shipped ahead of it. **The third check — a bare label naming no concrete key type is an
+> error — was RETIRED at build, not built and not deferred:** a lens label names a vertex key-type segment
+> while the resolver's vocabulary is keyed by a `meta.ddl.vertexType`'s canonicalName, and the live corpus
+> proves those two namespaces differ (`workOrder` → `vtx.workorder.<id>`; five kernel labels name no
+> vertexType meta at all) — so the runtime check could not distinguish an author's typo from a correct
+> kernel label, and would take live lenses dark across at least five packages. The posture is instead
+> **declared**, in `internal/refractor/taxonomy`'s package doc, not enforced.
+>
+> This makes label resolution a vocabulary lookup where today it is an uninterpreted string, so the
+> **unknown-label posture must be a declared decision** — a cross-package label's resolvability depends on
+> install order.
 >
 > **A5 (Andrew, 2026-08-08) — a CONCRETE type may have subtypes; the parent of a `subtypeOf` need not be
 > abstract.** §3.4's "a type may be both concrete and abstract-of-others" row is correct and authoritative;
@@ -84,7 +99,7 @@ differ. Contract #1 §1.7's abstract-vertexType note is **committed** with a tra
 > which pre-rename vertices still carry the old shared class while new guards expect the per-type one.
 
 Designer fire 2026-08-06 · owner: Refractor (rule engine) + Processor (step 6 gate) + pkgmgr (declaration surface) ·
-Size **L** (3 fires) · Imp **★★★** · depends on `lens-label-key-type-binding-design.md` (✅ ratified `f365d80a`)
+Size **L** (Fires A, B) · Imp **★★★** · depends on `lens-label-key-type-binding-design.md` (✅ ratified `f365d80a`)
 
 ---
 
@@ -129,13 +144,13 @@ the shared bare class is dropped. Two of the eight genuinely want *any location*
 `WireContainedIn` and `service-location`'s four wiring ops — and those are the only sites that need a taxonomy
 *read on the write path*. That read has a real cost (Contract #2 §2.5 read-posture declarations at every
 dispatcher, plus a fail-closed answer when the taxonomy is unreadable), and it is a genuinely separable mechanism
-from the read-path expansion this design is about. **My recommendation: build the read path (Fires 1–2), land
-location-domain with those two guards checking `cls in LOCATION_TYPES` against a package-local list (Fire 3), and
+from the read-path expansion this design is about. **My recommendation: build the read path (Fire A), land
+location-domain with those two guards checking `cls in LOCATION_TYPES` against a package-local list (Fire B), and
 file the taxonomy-read guard as its own row with these two sites named as its consumer.** The alternative — one
 larger fire that also does the write path — is defensible; I am not asking you to accept the local list as
 permanent, only to decide whether it ships in this design or the next.
 
-**Honest size: L, three fires.** It touches Processor (one new fail-closed gate), pkgmgr (a declaration surface, a
+**Honest size: L, two fires.** It touches Processor (one new fail-closed gate), pkgmgr (a declaration surface, a
 cross-package name resolution, an install preflight), Refractor (a new resolver + consumer, four matcher sites, an
 exhaustiveness rule, a health field), and five packages. It is not shrinkable to M without dropping either the
 invalidation trigger (which makes the whole thing unsound) or the retraction site (which makes it an over-grant).
@@ -435,8 +450,9 @@ later stage's component as absent).
 
 ### 4.3 Where the per-pattern expansion lives (and why it must be a copy)
 
-The four equality sites in §5 need the expansion for a *specific* `NodePattern`, and two of them are inside the
-executor, which receives a `*full.CompiledRule` — not the `ruleState`.
+The six equality sites in §5 (the ratified four, §5.1, plus the two found at build, §5.1a–b) need the
+expansion for a *specific* `NodePattern`, and several are inside the executor, which receives a
+`*full.CompiledRule` — not the `ruleState`.
 
 `CompiledRule` is `{Query *Query; KeyColumns []string}` (`ast.go:247-258`), and rule state is published
 **copy-on-write** precisely so a reader can never observe a half-rewritten rule (`pipeline.go:574-581`,
@@ -700,6 +716,7 @@ therefore be classified. Each row is grounded.
 | **A vertex key's type segment** (`vtx.<type>.<id>`) | **NO — new fail-closed gate.** | No instance has an abstract type. `isValidTypeSegment` is a bare regex (`keys.go:141-155`) so nothing stops it today. Step 6 gains: reject a mutation whose key contains an abstract type segment in **any** position (vertex root, aspect owner, or either link endpoint). |
 | **A link key's endpoint type segments** | **NO** — same gate. | A link key names two concrete vertices; the endpoint type is a *restatement* of the endpoint's own key (`docs/contracts/01-addressing-and-envelope.md:11`). An abstract there names no vertex. |
 | **A document's `class`** | **NO — new fail-closed gate.** | Step 6 rejects a mutation whose class resolves to a DDL with `Abstract == true`. This is an *addition* to §1.5, not a contradiction: §1.5's permissive default covers the case where **no** DDL is found; here one is found and is structurally unusable. |
+| **An event's `class`** | **Excluded by construction, not by a live gate.** | An abstract `CanonicalName` must pass `IsValidTypeSegment` (always dot-free), and Contract #3 §3.4 requires an event class to be `<domain>.<verb>` (always dotted) — `BuildEventList` already rejects any dot-free class, so a census of all ~140 `packages/**` event classes found none dot-free. `validateEventClass`'s own check is therefore a fail-closed latch, not a live gate — it earns its place only because the exclusion is held by two separate rules intersecting, either of which could relax unnoticed (shipped `639ca605`). |
 | **`authz_anchors`** | **Vacuously N/A.** | Holds bare NanoIDs plus the reserved `*` (`adapter/rls.go:22`, `:61`, `:99`); RLS compares NanoID set membership (`:194-210`). No type name has ever appeared there. |
 | **A permission `scope`** | **Already denied.** | Closed vocabulary `any\|self\|specific\|owned`; the `default:` arm denies with `"unknown platformPermission.scope"` (`step3_auth_capability.go:570-575`). Nothing to add. |
 | **A Weaver target** | **Transitively yes, no new surface.** | `WeaverTargetSpec` carries no vertex-type field (`definition.go:231-270`); applicability comes entirely from the bound lens's own label, and the registry watches `<targetId>.>` (`weaver/engine.go:405`). An abstract reaches Weaver only *through* a lens, where §5 already handles it. |
@@ -734,7 +751,7 @@ Letting `class` back in would break that three ways:
 | One DDL, `CanonicalName: "location"`, governing three key types (`packages/location-domain/ddls.go:56`) | **Four** type metas: concrete `unit`, `building`, `property` (each with the DDL's existing script + permittedCommands), and **abstract `location`** (`Abstract: true`, no script) |
 | `LOCATION_CLASS = "location"` written onto all three (`:187`, `:318`) | `make_vtx(loc_key, lt, {})` — **class equals the key type**, satisfying the invariant the sibling design's census says every other package already meets (`lens-label-key-type-binding-design.md:108-110`) |
 | No taxonomy | `lnk.meta.<unitId>.subtypeOf.meta.<locationId>` × 3, emitted in location-domain's own install batch |
-| `LOCATION_TYPES = [...]` hardcoded in Starlark (`:182`) | Still present for the write-side guards in Fire 3 (§9.3); the *read* side no longer consults it |
+| `LOCATION_TYPES = [...]` hardcoded in Starlark (`:182`) | Still present for the write-side guards in Fire B (§9.3); the *read* side no longer consults it |
 
 The three concrete DDLs share one script const (they already do — one Starlark body serves all three key types),
 so the duplication is three `DDLSpec` entries pointing at the same `Script`, not three scripts.
@@ -771,7 +788,7 @@ those ops — `contextHint.reads` for a required key, or an annotated class-(e) 
 a fail-closed answer when the taxonomy is unreadable. That is a real mechanism with its own read-posture surface,
 and it is separable from the read-path expansion.
 
-**Recommendation: local list in Fire 3, taxonomy-read guard filed as its own row with sites 1–3 named as its
+**Recommendation: local list in Fire B, taxonomy-read guard filed as its own row with sites 1–3 named as its
 consumer.** Not deferred vaguely — the consumer is enumerated above, which is what the *deferred tail must name
 its consumer* rule requires. I flag it as a fork rather than deciding it because it is the one place where "the
 right long-term shape" and "this design's boundary" genuinely disagree, and that is your call, not mine.
@@ -964,11 +981,11 @@ precedence rule. Named so it is built deliberately later, not stumbled into.
 |---|---|
 | **A missed retraction site becomes an over-grant** | The design's sharpest risk, and the reason §5.1 site 3 exists. An abstract-anchored grant producer whose `AnchorProjectionKey` still string-compares never retracts a tombstoned anchor. Mitigation: the site is enumerated, and §15's retraction test asserts it against a leaf-type tombstone specifically. |
 | **A stale narrow set silently drops events** | The only unacceptable state (§6.5). Every uncertain path degrades to `reprojectAll` instead. The asymmetry is grounded: `plainVertexRelevant`'s false branch has no fallback (`pipeline.go:722-738`), a broad filter only costs work. |
-| **Rebuild storm on a leaf install** | One leaf install rebuilds every lens whose expanded set changed. Bounded by the count of abstract-using lenses (1 at Fire 3 — `capabilityServiceAccess`), serialized per pipeline by `rebuildInFlight`, and triggered by install events, not data events. Named because it grows with adoption. |
+| **Rebuild storm on a leaf install** | One leaf install rebuilds every lens whose expanded set changed. Bounded by the count of abstract-using lenses (1 at Fire B — `capabilityServiceAccess`), serialized per pipeline by `rebuildInFlight`, and triggered by install events, not data events. Named because it grows with adoption. |
 | **Silent cap-driven footprint regression** | Real and dynamic. Mitigated by `leafBudget` (static, decidable, refused at the *lens's* install) + the `filterMode` health field. The degradation ladder (§10.1) means the first step is coarser narrowing, not broad. |
 | **The resolver is a new single point** | If it is wrong, every abstract-using lens is wrong. Mitigations: fail-closed to broad on every uncertainty; a corpus census test pinning each lens's expanded set (§15); and it is read-only — it never writes Core KV (P2). |
 | **Two concurrent installs form a cycle neither sees** | Real: install batches are atomic individually, not against each other. This is why **resolver-time** cycle detection is the authority and install-time is a courtesy (§5/§14). The resolver's answer is fail-closed to broad, so a cycle costs footprint, never correctness. |
-| **`nodeMatches` is the hottest path in the engine** | Generalizing it adds one map probe over a pre-resolved single-entry set for a concrete label. No graph read, no allocation (§4.4). Measured in Fire 2 rather than asserted. |
+| **`nodeMatches` is the hottest path in the engine** | Generalizing it adds one map probe over a pre-resolved single-entry set for a concrete label. No graph read, no allocation (§4.4). Measured in Fire A rather than asserted. |
 | **`entityType` desync** | An abstract `entityType` literal would silently break `cmd/facet` op-attach, and nothing enforces the pairing today. Scoped out (§8) and filed as an authoring gate (§14) rather than left implicit. |
 | **The class rename touches five packages' guards** | Five of eight sites become *stricter* (drop a redundant check); three keep a local list. Full-suite gate, and the integration test at `packages/location-domain/integration_test.go:195` (which asserts `class == "location"`) must be updated to assert class == key type — a test that pins the old invariant is exactly what should fail. |
 | **Collision with in-flight Refractor designs** | `lens-label-key-type-binding-design.md` **must land first** (this design's §8.1 requires the class out of the resolution path). `full-engine-independent-branch-decomposition` touches the same executor file — sequence, no semantic overlap with §5's sites. |
@@ -1013,7 +1030,8 @@ Old Fires 1 and 2 as one fire. Internal build order:
    unknown-label posture explicitly — resolution becomes a vocabulary lookup where today it is an
    uninterpreted string, and a cross-package label's resolvability depends on install order.
 6. **Observability.** `filterMode` / `filterLabelCount` / `filterBroadReason` health fields, the schema doc,
-   Loupe's badge.
+   Loupe's badge. Also owns §15's corpus census-test extension (pin each shipped lens's `(expanded labels,
+   exhaustive, filterMode)` verdict) — it asserts on `filterMode`, so it cannot land before this item does.
 
 **Not splittable, and the design's own argument for that stands:** expansion without the trigger is a stale
 narrow set, and the trigger without the retraction site is an over-grant. **Review depth: full 3-layer
@@ -1070,6 +1088,9 @@ resolution must have exactly one authority before an abstract label expands. Seq
    §3.4 caveat: this extension would reintroduce the multiple-parents ambiguity and must forbid multiple
    parents or declare a precedence rule first.
 
+Fire B's first commit files these four as board rows (`backlog/lattice.md`) — naming them here is not
+filing them.
+
 ## 15. Test strategy
 
 **Resolver (`internal/refractor/taxonomy`).** Downward closure over one level, multi-level
@@ -1078,8 +1099,8 @@ contributes its leaves but **not itself** (§3.4); a cycle ⇒ `armed = false`; 
 tombstoned target meta stops contributing; an empty expanded set ⇒ non-exhaustive. Each asserted on the
 `(set, armed)` pair, never on `set` alone.
 
-**The four equality sites**, each with an abstract label, each written to **fail against the un-generalized
-code**:
+**The six equality sites** (the ratified four below; §5.1a–b's two carry their own pins, landed at item 3),
+each with an abstract label, each written to **fail against the un-generalized code**:
 1. `nodeMatches` binds `vtx.building.<id>` for `(l:location*)` and does **not** bind `vtx.patient.<id>`.
 2. `seedAnchorBinds` accepts a `vtx.unit.<id>` seed for an anchor written `(l:location*)`.
 3. **`AnchorProjectionKey` retracts** on a `vtx.unit.<id>` **tombstone** for a `:location`-anchored lens. This is
@@ -1096,7 +1117,7 @@ falsified precondition**: a `vtx.room.<id>` written **before** `room` is declare
 bare filter-update implementation fails it. (c) **Tombstone**: a `subtypeOf` tombstone retracts the leaf's rows
 rather than orphaning them (row-set shrink, §6.4).
 
-**Fail-closed gates (Fire 1).** A mutation whose key carries an abstract type segment is rejected — in vertex
+**Fail-closed gates (Fire A).** A mutation whose key carries an abstract type segment is rejected — in vertex
 root, aspect owner, **and both** link endpoint positions. A mutation whose class resolves to an abstract DDL is
 rejected. An install whose `SubtypeOfRef` names a nonexistent / non-abstract / tombstoned meta fails. An
 install-time cycle is refused. Each also has a **positive vector first**, so no negative test can pass for the
@@ -1106,7 +1127,8 @@ wrong reason.
 `filterBroadReason = "label-cap"`. The relation ladder: assert relation-narrowed → relation-blind → broad across
 the two budgets (`pipeline.go:934-935`, `:952`). A lens whose `K + leafBudget > 8` **fails its own install**.
 
-**Corpus census test.** Extend `internal/refractor/auth_plane_narrowing_census_test.go` to pin each shipped
+**Corpus census test.** Owned by **Fire A item 6** (§14), not an unassigned tail — it pins `filterMode`, which
+item 6 is what makes real. Extend `internal/refractor/auth_plane_narrowing_census_test.go` to pin each shipped
 lens's `(expanded labels, exhaustive, filterMode)` verdict, so a taxonomy change that moves a verdict fails in a
 test rather than in Capability KV. Per the sibling design's §9 finding, it **must expand read-grant walks first**
 (`ExpandReadGrantWalks` runs only at `pkgmgr/manifest.go:123`, `upgrade.go:138`, `definition.go:31`, so the raw
@@ -1115,7 +1137,7 @@ test rather than in Capability KV. Per the sibling design's §9 finding, it **mu
 **Gates.** `go build ./...` · `make vet` · `golangci-lint run ./...` (cache-cleaned) · `make verify-kernel` ·
 `make verify-package-*` for location-domain / service-location / loftspace-domain / clinic-domain / cafe-domain
 (DDL + permissions touched) · **all** `scripts/lint-*.go` under `STRICT=1` · the **full `go test ./... -p 4`**.
-The full suite is required, not optional: Fire 2 changes a matcher every lens in the corpus consumes, and Fire 3
+The full suite is required, not optional: Fire A changes a matcher every lens in the corpus consumes, and Fire B
 changes a class every location-touching package reads — both are *wide-blast-radius default* changes.
 
 ## 16. Adversarial pass (run this fire, findings folded)
@@ -1167,7 +1189,7 @@ all are folded above. Recording them because the ones that changed it are the de
    `packages/location-domain/ddls.go:56` declares one `meta.ddl.vertexType` with `CanonicalName: "location"`
    governing three key types. The draft treated the class rename as a cosmetic tail; it is a **prerequisite** —
    without it there is nothing for `unit` to be a taxonomy node *of*. → §3.1 and §9.1 restated; the rename is
-   Fire 3's first step, not its last.
+   Fire B's first step, not its last.
 
 **Also checked, no change needed.** `subjects.CoreKVNarrowedFilters`' pairwise-non-subset property holds for any
 label list, so a longer expanded list cannot produce the pair nats-server rejects (`subjects.go:159-169`). The
@@ -1318,7 +1340,8 @@ one, which is the weak-consumer shape a deferred tail is supposed to refuse.
   `localName` slot and a link DDL's in the `relation` slot, so neither can ever occupy a type segment. A census
   confirmed no existing package declares either reserved name. **This does not implement the contract's own
   enforcement point:** §1.2 says the Processor rejects at meta-DDL commit time, and a raw `core-operations`
-  submit still bypasses the pkgmgr check.
+  submit still bypasses the pkgmgr check. Filed as a board row (`backlog/lattice.md`, `[Processor]` group),
+  consumer named as Contract #1 §1.2's own stated gate.
 
 ### 17.3 Fire A · Increment 2 — the `*` sigil (2026-08-09, `887073d9`)
 
@@ -1448,7 +1471,8 @@ return — is the refusal posture's necessary plumbing, handled at both producti
    anchor's key cannot be constructed safely. Refusing falls back to the ActorEnumerator BFS — correct-but-slower,
    the same posture every other unresolvable shape in that builder takes. **Consequence to design around: a
    `*`-anchored lens gets no affected-anchor fast path.** Fire B's consumer is unaffected (its anchor is the
-   concrete `identity`; only non-anchor positions carry `*`).
+   concrete `identity`; only non-anchor positions carry `*`). **Deliberately not filed as a board row** — no
+   nameable consumer exists yet (a `*`-anchored lens arrives no earlier than Fire B); revisit at Fire B admit.
 
 **Inertness holds, and it is proven rather than asserted.** No production caller of `SetTaxonomyResolver` exists,
 so every `*` lens would refuse activation — and no `packages/` lens carries the sigil (the corpus's only `*` is
@@ -1615,7 +1639,8 @@ everything it is allowed to see. A case-divergence scan was built first and **re
 reviewers independently proved it unsatisfiable (for two lowercase-ASCII strings `EqualFold ⟺ ==`), and its
 only test passed by planting a key through a raw `KVPut` that the Processor itself would refuse. Dead code
 carrying a safety claim is worse than no code; the residual it could not close — a canonicalName that is a
-valid segment but simply not the one its instances use — is filed, not implied.
+valid segment but simply not the one its instances use — is filed as the "[Pkgmgr] `checkAbstractNoLiveInstances`
+is vacuous when canonicalName ≠ key segment" row in `backlog/lattice.md`, not implied.
 
 **The adversarial pass was load-bearing again — three cold reviewers, one availability cliff.** The inert-sigil
 refusal originally applied on every path, so a **different** package uninstalling the last leaf under a live,
