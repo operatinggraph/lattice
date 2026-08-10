@@ -1684,3 +1684,57 @@ below was re-read live against `main@13ff8615`.
 - **Order:** 4a-1 → 4a-2 → 4d (parallel worktree) → 4c → 4b → 4a-4 → 4a-3. This departs from §18's 4a→4b→4c→4d
   only in putting the two correctness gaps (4a-2's under-approximation, 4d's live anti-enumeration hole) ahead
   of the guard and the proof; §18.1's only stated dependency, 4a-before-4b, is preserved.
+
+### 19.5 Increment 4d — the census the fire owed, and what review corrected
+
+**The tombstoneable-sensitive-aspect census.** §18.4 framed 4d purely as `ClaimIdentity` and never enumerated
+what else the read-path change reaches. Twelve aspect classes are declared `Sensitive` across the corpus; three
+are ever tombstoned by an operation.
+
+| Sensitive aspect | Tombstoned by | Consumer reading it afterward | Disposition |
+|---|---|---|---|
+| `.claimKey` | `ClaimIdentity` (`identity-domain/ddls.go:1521`) | the re-claim, declared by four dispatchers | fail → proceed; the script's `isDeleted` clause (`:1464`) renders the generic refusal. This is 4d. |
+| `.linkKey` | `CompleteCredentialLink` (`:1760`) | the re-complete, declared `optionalReads` by `cmd/facet/credentials.go:165` + `cmd/loftspace-app/credentials_link.go:153` | fail → proceed; same defect, same fix, guarded at `:1727`. |
+| `.credentialBinding` | `MergeIdentity`, secondary side (`identity-hygiene/ddls.go:821`) | `UnlinkCredential` (`:1841`), `CompleteCredentialLink` (`:1855`), `MergeIdentity` itself (`:487`) | fail → proceed, correctly — all three filter `isDeleted` and render a named refusal. |
+| `.name` / `.email` / `.phone` | never | `MergeIdentity`'s aspectConflictResolution arm | would have been fail → **silent skip**; closed by the guard below. |
+| `ssn` · `dob` · `idpBinding` · `appointmentEncounter` · `applicantProfile` · `underwritingParties` | never | — | none. |
+
+**The defect this increment introduced, and closed.** Before the change, a tombstoned `secondary.{name,email,phone}`
+failed the whole merge; after it, `"value" in sec_aspect.data` reads False on the scrubbed body and the requested
+`secondary-wins` overwrite is **silently skipped while the merge reports success**. Loud-to-silent is strictly
+worse, so it is fixed here rather than filed: the ACR arm now refuses by name. That arm had **no test anywhere in
+the repo** before this fire — both the positive vector (a live aspect really carries across) and the refusal are
+new.
+
+**Two claims review corrected, recorded so neither is re-derived.**
+
+- The `secure.go` precedent cited in the original comment does not support the egress refusal. `secure.go:302-304`
+  returns `ErrKeyNotFound`, but its caller at `:227-235` turns that into `failure.Terminal`, so the row does **not**
+  project; "the row still projects" is the `ErrKeyShredded` branch at `:243-247`, a different condition. Either way
+  it is about a dead key *envelope*, not a dead sensitive *aspect*. The citation is dropped; the egress refusal
+  stands on the capability argument alone.
+- A scrubbed body does **not** render as `None` to the script. `starlarksandbox/convert.go:19-30` always returns a
+  `*Dict`, so an empty map is an empty dict, and an unguarded `aspect.data["hash"]` would raise a Starlark KeyError
+  → `ScriptFailed` with line and column, which is *more* revealing than the generic refusal, not less. The scrub
+  bounds what leaks; it does not replace the script's own `isDeleted` guard, and that guard now has a test that
+  fails when it is deleted.
+
+**The enumeration oracle the acceptance actually required.** §18.5 asks for a test pinning that a re-claim is
+indistinguishable from the other rejection causes. The first attempt satisfied it by nulling `ContextHint` on the
+absent-target arm — which no dispatcher does. On the deployed path an absent target was `markRequiredAbsent` →
+`stateMapValue.Get` fault → `ErrCodeHydrationFailed` with `details{code, missingKey}` **echoing the probed key
+back**, against `ClaimKeyInvalid` with nil details for a wrong or spent key: a working identity-existence oracle,
+one request per guess, on the public claim endpoint. The package already names this exact hazard for the
+`derive_reads` path (`ddls.go:946-950`) and guards it there; the dispatcher-declared path had the same hazard
+unguarded, which left the script's own `no-target` branch (`:1409-1411`) unreachable. The three keys move to
+`optionalReads` at the descriptor and at every dispatcher — an incomplete sweep would be inert, since a key in
+both lists keeps fail-closed `reads` semantics (`step4_hydrate.go:292-304`).
+
+**Residual — the timing oracle, which this fire does NOT close.** The tombstoned path returns at
+`sensitive_decrypt.go:190`, before `readPiiKeyEnvelope`'s `KVGet` (`:224`) and the AEAD decrypt (`:228`), and the
+script then exits at `wrong-state` (`ddls.go:1423`) rather than running on to `:1472`. So already-claimed is
+measurably faster than wrong-key by one KV round-trip plus a decrypt. The wire shape is identical; the latency is
+not. This design's own standard makes that a real finding — `ddls.go:1489` rejects an alternative gate placement
+partly because it would hand a caller holding no valid secret "a measurably shorter path". Equalizing it is a
+constant-time-rejection mechanism with no ratified pattern to extend, so it is filed for a designer pass rather
+than improvised here.
