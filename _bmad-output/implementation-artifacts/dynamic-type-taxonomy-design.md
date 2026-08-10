@@ -2449,6 +2449,14 @@ with Refractor up 1h18m. The morning's boot path could not run Refractor at all.
   this path" is wrong and an in-band edge would be ordered with `handle()` by construction — no `armCh`, no
   probing goroutine, no epoch. It does not cover the no-traffic reconnect case, and switching mechanisms would
   invalidate the ordering argument review just verified, so it is recorded rather than built.
+- **C2.5's epoch turned out to be half the mechanism** *(2026-08-10, `98f83f5d`)*. The epoch discards a verdict
+  that straddles an interruption the source is **told** about, and a connection loss is not one of those:
+  nats.go flips its own status under the connection lock and queues the disconnect callback behind every other
+  async callback in the process, so the epoch bump lags the loss without bound. A verdict that measured a live
+  feed and landed after the drop matched its epoch and armed — 3 failures in 20 runs, the `[true false]` edge.
+  Arming now also requires the connection to still be up on the same `substrate.Conn.ConnectionGeneration`,
+  read before the probe. The epoch stays, for the interruptions that *are* synchronous. **The epoch is the
+  signal you are told; the generation is the one you read.**
 - **C2.5 SHIPPED `d470c9ac`**, CI green, and verified live rather than inferred: the cycled Refractor logged
   `taxonomy liveness: consumer drained — taxonomy snapshots are current` at epoch 0, ~2s after boot, with zero
   errors in the run. `bin/refractor` and `bin/facet` were rebuilt and cycled (both changed behaviour); every
