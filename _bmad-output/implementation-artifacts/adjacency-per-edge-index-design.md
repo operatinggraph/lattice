@@ -1,51 +1,52 @@
-# Adjacency per-edge index — one KV key per directional edge, not one document per node
+# Adjacency under the 1 MiB ceiling — and the multi-subject direct-get primitive
 
-**Status: 📐 awaiting-Andrew (ratification)** · Designer fire 2026-08-09 (Winston) · Board row:
+**Status: 📐 awaiting-Andrew (ratification — now a three-shape fork, §14)** · Designer fire
+2026-08-09 (Winston); **redirected by Andrew 2026-08-09** after the multi-subject direct-get finding,
+re-grounded with live measurements 2026-08-10 (§14). Board row:
 `[Refractor] A node's whole adjacency list is one KV value, so a high-in-degree node cannot be indexed`
-(★★★, M, filed with a live erroring consumer). Adversarial pass: **run and folded** (§13 — two
-independent reviewers; two blockers found and resolved by reshaping the migration and the fallback
-read protocol).
+(★★★, M). Adversarial pass on the original per-edge shape: **run and folded** (§13); its
+shape-independent findings carry into every candidate (§14.5).
 
 ## For Andrew
 
-The Refractor adjacency index stores a node's entire edge list as one JSON document at `adj.<nodeId>`;
-a hub's document grows with in-degree until it crosses NATS `max_payload` (1 MiB) and every further
-edge write fails forever. On this host the `leaseServiceInstance` meta's document sits at **1,048,427
-bytes — 149 bytes under the ceiling — with 3,912 edges**, the dedicated adjacency consumer is in a
-permanent immediate-redelivery loop (consumer sequence 1,675,481 against a 118,330-message stream),
-and the **second-largest document is an ordinary business identity at 61% of the ceiling**. This
-design rekeys the index to **one small KV key per directional edge**
-(`adj.<nodeId>.<rel>.<dir>.<otherId>`), read back by a new substrate prefix-snapshot primitive. The
-`adjacency` package's public API (`Build` / `Neighbors`) keeps its exact signatures, so all three
-writers, all four readers, and the §13.4 evaluation-footprint mechanism survive unchanged. Migration
-is **structural, not stateful**: the new binary consumes through a new durable name and a new key
-shape that coexist with (and never read) the old ones — no marker, no purge, no admin API, and the
-existing `Ready()` boot gate holds lenses back until the rebuilt index is complete by construction.
+Two decisions live here now, one settled and one yours.
 
-**Two things for your eyes:**
+**Settled (you directed it; filed on the board): the multi-subject direct-get primitive.** One
+request to `$JS.API.DIRECT.GET.KV_<bucket>` with `multi_last` returns last-value-per-subject for an
+explicit key list *or* subject filters, computed and streamed **atomically under the stream read
+lock**, no consumer involved, ≤1,024 subjects per request (413 above — hard, unpageable). Measured
+on this host (§14.1): **~31 µs/key amortized at 10–100 keys vs 153 µs per sequential `kv.Get`
+(~5×)**, and **4× faster than the ephemeral-consumer lister on the identical 180-key result set**.
+First consumers: **step-4 hydration** (the exact-key read-set becomes one atomic round trip —
+`step4_hydrate.go`'s own comment documents today's Get-straddle it removes) and the
+**`ListKeysPrefix`-class enumerations** (~12 non-test files: pkgmgr censuses, Loupe browse, vertical
+apps' P5 list endpoints, the full engine's whole-type scans). Filed as its own board row; ADR-31 is
+the vendor authority and is silent on numbers, so the spike above is the record.
 
-1. **The read primitive (fork, §6.3):** recommended shape = **multi-subject direct get** for nodes
-   ≤1,024 keys (one server-locked atomic request — round-trip parity with today's single `Get`) +
-   a **stability-verified watcher snapshot** for larger nodes (the server hard-caps multi-get at
-   1,024 subjects). Honest cost statement: the two live hubs are already past 1,024, so *their*
-   reads ride the costlier path from day one — which is why **Increment 2 (typed-hop push-down) is
-   part of this design, not an optional follow-on**: it moves typed walks (the capability plane's
-   hub crossings) back onto the atomic fast path by reading only `adj.<node>.<rel>.>`. The
-   alternative — watcher-only, one mechanism — regresses every uncached node read platform-wide to
-   ~3 RTT + an ephemeral consumer; rejected (§10.7).
-2. **One provisioning edit, zero permission edits:** the bucket registry row gains
-   `PerKeyTTL: true` (bootstrap-owned; legal to enable on a live stream at our pin —
-   `nats-server@v2.14.0/stream.go:2301-2304` rejects only *disabling*). Everything else the
-   migration and hygiene need is a plain KV **publish** under Refractor's existing
-   `$KV.refractor-adjacency.>` grant — the adversarial pass caught that my first draft's
-   stream-purge migration was **denied by the natsperm matrix** (owner included, by design, with a
-   green conformance test asserting it), and the shape was rebuilt to need no admin API at all
-   (§6.4, §13).
+**Yours: what happens to the adjacency index.** Three shapes, §14.4 has the full matrix:
 
-**No frozen-contract change.** The adjacency bucket is Refractor-private operational state
-(lattice-architecture P1; Contract #2 §kv.Links names it Refractor-private explicitly). The key shape
-inside the bucket is not contract surface. `docs/components/refractor.md` §"Refractor adjacency KV"
-is rewritten at build time (its current "Entry shape" row is stale even for today's code — §9.4).
+- **A — delete the index**: serve neighbors from Core KV directly (`lnk.*.<id>.>` outbound,
+  `lnk.*.*.*.*.<id>` inbound; bodies come back, so soft-tombstone filtering is free). Removes the
+  bucket, Bootstrapper, three writers, pre-apply, Ready gate. Measured cost: the inbound
+  trailing-wildcard walk is ~0.4 ms over today's ~10 K link subjects and **scales with total links,
+  not degree** (~35 µs/1K subjects), runs under the core-kv read lock against the Processor's write
+  path, and both live hubs already 413 into a consumer fallback that costs ~100 ms-class at hub
+  degree. The ActorEnumerator BFS multiplies that per visited node. Leanest; correct today; not the
+  scale path.
+- **B — keep the document, mark the hubs (my recommendation)**: docs unchanged for 99.9 % of nodes
+  (one 153 µs get, zero migration); when a doc would cross a degree threshold (~1,000 edges),
+  `Build` replaces it with a small **overflow mark** and stops absorbing that node's edges; a marked
+  node's reads fall back to Core-KV enumeration — typed hops via `lnk.*.*.<rel>.*.<id>` usually
+  come back under 1,024 and ride multi_last (~0.6 ms); untyped/BFS reads pay the consumer path.
+  The jammed hub self-heals on first post-deploy touch. Smallest diff, no migration, and "fallback
+  to ephemeral for the rare hubs" — your bottom line — is the whole change.
+- **C — per-edge rekey** (the fully-specified §3–§6 body): uniform O(degree) prefix reads,
+  strongest at scale, but the most machinery — v2-durable migration, TTL'd markers, the
+  stability-verified fallback. Keep on the shelf as the scale successor unless you want it now.
+
+**No frozen-contract change in any shape.** The bucket is Refractor-private operational state
+(lattice-architecture P1; Contract #2 §kv.Links). Shape B needs no provisioning or permission edits
+at all; C needs the `PerKeyTTL` registry row; A needs neither but deletes a component.
 
 ---
 
@@ -178,7 +179,11 @@ never call stream purge. Every mechanism in this design is chosen to fit inside 
 one thing per-key publishes cannot do is make a *subject* vanish, which is what the TTL'd markers
 in §3.2/§6.5 are for.
 
-## 3. The shape — one key per directional edge
+## 3. Shape C — one key per directional edge (full spec; no longer the standing recommendation, see §14)
+
+§3–§13 are the complete, adversarially-reviewed specification of the per-edge rekey. They remain the
+build plan **if** Andrew picks Shape C; §14 holds the measured three-way comparison and the current
+recommendation (Shape B).
 
 ### 3.1 Key and value
 
@@ -586,3 +591,110 @@ Material outcomes, all folded above:
 Claims that survived attack unchanged: fast-path RLock atomicity, the 1,024/413 grounding,
 per-edge/whole-doc convergence equivalence, fingerprint monotonicity absent marker removal, the
 natsperm admissibility of `DIRECT.GET`, and the key-charset legality of well-formed segments.
+
+## 14. Redirect 2026-08-09/10 — the primitive vs the component, measured
+
+Andrew's ratification response: the multi-subject direct get is the interesting object — file it as
+a substrate function, check performance (vendor first, spike if unpublished), and reconsider whether
+the adjacency index should exist at all, or stay as-is with an overflow fallback for rare hubs.
+
+### 14.1 Measurements (this host, 2026-08-10)
+
+No published vendor numbers exist: ADR-31 documents the *motivation* — serve KV reads from **all
+stream replicas as a responder queue group** and "bypass administrative API overhead", trading away
+read-after-write coherency on R>1 (moot at our R1; and today's `kv.Get` is already a direct get on
+AllowDirect buckets, so batching is coherency-neutral vs the status quo). So: a read-only spike
+(scratchpad `dgspike`, nats.go v1.52.0, `lattice.nk`) against the live core-kv — 50.7 K values,
+~10 K link subjects, kernel processes running. p50/p95 of full request-drain:
+
+| Case | Shape | p50 | p95 | Per-key |
+|---|---|---|---|---|
+| `single` | raw `last_by_subj` ×400 | 182 µs | 1.38 ms | 182 µs |
+| `kvget` | jetstream `kv.Get` ×400 (today's path) | **153 µs** | 180 µs | 153 µs |
+| `multi10` | `multi_last`, 10 explicit keys ×100 | 306 µs | 410 µs | **31 µs** |
+| `multi100` | `multi_last`, 100 explicit keys ×100 | 3.16 ms | 9.43 ms | **32 µs** |
+| `outpfx` | filter `lnk.permission.<id>.>` (5 matches) | 294 µs | 363 µs | — |
+| `inwild` | filter `lnk.*.*.*.*.<id>` (180 matches) | 5.28 ms | 16.4 ms | — |
+| `inwild1` | same shape, 1 match | **536 µs** | 605 µs | — |
+| `cap413` | filter over the 3,919-subject instanceOf hub | 1.28 ms → **413** | — | — |
+| `lister` | `ListKeysFiltered` (ephemeral consumer), same 180 keys | **22.9 ms** | 40.4 ms | — |
+
+Readings: (1) **batched exact-key reads amortize ~5× better than sequential gets** (31 vs 153
+µs/key) and are atomic. (2) `inwild1` isolates the trailing-literal **subject-tree walk: ~350–400 µs
+over ~10 K link subjects — the term scales with *total links in the stream*, not the node's degree**
+(~35 µs/1K subjects ⇒ ~4 ms at 100 K links, ~40 ms at 1 M), and it runs under the core-kv stream
+read lock, i.e. against the Processor's commit path. Delivery adds ~30 µs/message. (3) The
+ephemeral-consumer path costs **4.3×** the multi_last equivalent on the identical result set — and
+that ratio grows as the set shrinks (consumer setup is the floor). (4) The 1,024 cap 413s on the
+real hub today; any no-index or overflow shape needs the consumer fallback for hubs from day one.
+
+### 14.2 Application: step-4 hydration (file with the primitive)
+
+`step4_hydrate.go` issues one `KVGet` per declared key across three sequential loops
+(`:240,:276,:310`), and its own comment (`:215-223`) documents that "the two live GETs straddle any
+concurrent create or purge" — the straddle machinery (present-wins reconciliation) exists *because*
+the reads are not atomic. One `multi_last` with the exact declared key list replaces N round trips
+with one (a 10-key set: ~1.5 ms → ~0.3 ms), returns absent-by-omission and tombstones-by-marker
+consistently from **one locked snapshot**, and consistent revisions mean fewer step-8 OCC retries.
+Cap guard: read-sets ≫ 1,024 fall back to the loop (or split) — today's sets are nowhere near it.
+
+### 14.3 Application: the ephemeral-enumeration corpus
+
+~12 non-test files run watcher-backed enumerations per call today (`ListKeysPrefix` /
+`ListKeysFiltered` / `KVListKeys`): pkgmgr installer censuses (10 sites), the Refractor NATS-KV
+adapter, Loupe browse surfaces (weaver/review/vertex/lens/server), `cmd/wellness-app` +
+`cmd/loftspace-app` P5 list endpoints, weaver state scans, and the full engine's whole-type anchor
+scans (`executor.go`, 3 sites). Every ≤1,024 case is a one-round-trip multi_last candidate at ~4×+
+measured savings — several also do ListKeys-then-Get-each (`personalinterest.IsRelevant`), which
+collapses to the same single request *with values included*. The >1,024 cases keep the lister.
+
+### 14.4 The three shapes for the adjacency index
+
+| | **A — delete the index** | **B — doc + overflow mark (recommended)** | **C — per-edge rekey (§3–§13)** |
+|---|---|---|---|
+| Common-case read | multi_last on core-kv: outbound ~0.3 ms; inbound 0.5 ms+walk | **`kv.Get` doc, 153 µs — unchanged** | prefix multi_last ~0.3–1 ms |
+| Hub read (>1,024°) | consumer fallback on core-kv, ~10² ms-class | same fallback, **only for marked nodes**; typed hops via `lnk.*.*.<rel>.*.<id>` ride multi_last (~0.6 ms) | prefix consumer fallback on the adjacency bucket (no full-tree walk); typed prefix push-down (Inc 2) |
+| Scale behavior | inbound walk ∝ **total links**; BFS multiplies it per visited node (3,912-visit enumeration ≈ 0.6 s today → ~15 s at 100 K links) | non-hub reads flat; marked-hub fallback ∝ hub degree + walk | all reads ∝ degree — the only shape that stays flat |
+| Write path | **none** (Core KV is the index) | unchanged CAS doc (≤ threshold ⇒ bounded ~270 KB rewrites); mark branch ends the jam | O(1) puts, no CAS |
+| Machinery delta | −bucket −Bootstrapper −3 writers −pre-apply −Ready gate | +mark branch, +marked-node fallback read, +marked-node fingerprint | +v2 migration, +TTL markers, +stability fallback |
+| Freshness | commit-fresh (no CDC lag, pre-apply obsolete) | doc lags as today; marked nodes commit-fresh | index lags as today |
+| Core-kv coupling | every neighbor read locks the write stream | only marked-hub reads do | none (separate bucket) |
+| Jam removal | total | total (mark swallows; jammed doc self-heals on first touch) | total |
+
+**Recommendation: B now, C shelved as the scale successor, A rejected for the BFS/walk arithmetic.**
+B is Andrew's "keep existing structure, mark the rare too-many-links vertices, fall back to
+ephemeral" — measured, it keeps the 153 µs common case with zero migration, ends the jam and the
+Nak loop (the overflow branch makes oversize unreachable), and the marked-hub fallback inherits
+Shape A's one real virtue (commit-fresh reads straight off Core KV, no pre-apply needed on that
+path). A's leanness is real but its inbound walk term prices every BFS crossing at O(total-links)
+under the write lock — wrong direction for the one graph store everything shares. C's uniformity
+is worth having when hub *counts* grow, not before; its spec stays ready.
+
+### 14.5 What carries into Shape B from the §13 review (shape-independent findings)
+
+- **The consumer fallback on core-kv is a history-1 watcher too** — the §6.3.2 tearing analysis and
+  the stability-verified double-drain protocol apply verbatim to B's marked-node reads.
+- **Term/Nak classification** (`IsInvalidKeyError` ⇒ permanent) and the four-segment validation at
+  the event boundary: hygiene that ships regardless (B's mark branch removes the *size* trigger,
+  not the class).
+- **The ½-max_payload canary at both chokepoints** (KV family + `checkBatchSize`): B keeps
+  aggregate documents, so the approach-warning matters *more* under B than C.
+- **`EventsForLink` consolidation** (three duplicated constructors): still right.
+- **Marked-node footprint fingerprint**: `EdgeRevisions` for a marked node comes from the fallback
+  enumeration (max sequence over matched link subjects, markers included) — same mechanics §3.3
+  specifies, scoped to marked nodes; unmarked nodes keep the doc revision untouched.
+- **Mark lifecycle** (the new-state-lifetime discipline): the mark is a monotonic per-node latch,
+  set by `Build` at the degree threshold, stored as the node's `adj.<nodeId>` value (a sentinel doc
+  — no new keyspace), never unset (degree shrinking below threshold is not worth un-marking),
+  reset only by the same environment wipes that reset the bucket, and replayed deterministically by
+  the Bootstrapper (the rebuild crosses the threshold the same way). Threshold ~1,000 edges
+  (~270 KB doc): well under both the 1 MiB jam and the 1,024 typed-read cap, high enough that
+  marked nodes are genuinely hubs.
+
+### 14.6 Filed on the board
+
+The substrate primitive + first consumers is its own row (`[Substrate] multi-subject direct get`,
+★★★): the `KVGetMulti` function (exact lists + filters, EOB/404/413/short-read handling per §6.3.1),
+step-4 hydration adoption, and the enumeration-corpus conversions — valuable under every shape
+above, and first regardless of the adjacency decision. The adjacency row stays 📐 on this doc
+pending the A/B/C call.

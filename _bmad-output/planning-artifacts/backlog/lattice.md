@@ -137,6 +137,7 @@ but the *fork decision* + the *contract commit* are Andrew's.
 ### Read-model / projection maturity
 | Item | What it is | Imp | Size | State |
 |---|---|---|---|---|
+| **[Substrate] Multi-subject direct get (`multi_last`) as a read primitive** | One locked, consumer-less round trip returns last-per-subject for a key list or filters (≤1,024 subjects; 413 above). Measured ~31µs/key vs 153µs sequential gets; 4× the ephemeral lister on the same set. Consumers: step-4 hydration (atomic read-set), the ~12-file `ListKeysPrefix`-class corpus. | ★★★ | S–M | 📋 ready · Andrew-directed 2026-08-09 · [spike + protocol](../../implementation-artifacts/adjacency-per-edge-index-design.md) §14 |
 | **Dynamic type taxonomy — an abstract type a lens can label** | `subtypeOf` links between type metas, resolved to a leaf-label set at activation, so a leaf any package declares is picked up by lenses writing `:abstract*`. Recovers the polymorphism the label-binding fire removes; first consumer `capabilityServiceAccess`. | ★★★ | L | 📋 ready · Fire A shipped · [design](../../implementation-artifacts/dynamic-type-taxonomy-design.md) §14 · next: Fire B|
 | **[Refractor] Cross-instance projection-latency rollup** | Aggregate per-lens projection latency across Refractor instances into one per-component view; single-instance today, so the two coincide. | ★ | S | 🚧 seq behind HA-NATS multi-instance · tombstone half subsumed by the [link-aspect design](../../implementation-artifacts/link-aspect-triggered-reprojection-plain-lenses-design.md) |
 
