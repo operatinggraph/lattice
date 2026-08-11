@@ -241,6 +241,17 @@ on every boot forever. **Fire 2 must advance the cursor on `Term` as well as on 
 disposed message is a position the node has passed. (Found by the §9 pass; it is exactly the
 "a removed component was silently load-bearing" class.)
 
+**AMENDED 2026-08-11 (build time): the ack floor was carrying TWO obligations, and this section found
+only one.** The second is the one that matters more — **the ack floor held the resume position behind
+un-acked holes.** A `Nak`ed frame kept the floor below itself while later frames were delivered, so a
+re-attach redelivered it. The persisted cursor does *not* do this: it is a high-water mark that later
+successes advance straight past the hole. Naming poison disposal as "one other obligation" and stopping
+there is what let the first Fire 2 build ship a permanent-skip path — the 3-layer review found it, twice,
+independently. Fire 2 therefore does two things, not one: it advances the cursor on `Term`, **and** it
+makes the persisted position a contiguous floor that never passes an unresolved sequence. The lesson
+generalizes past this fire: when a mechanism is demoted, enumerate *every* obligation it was carrying —
+finding one and moving on is the same defect wearing a smaller hat.
+
 ### 3.5 What is deliberately *not* changed
 
 - **`Rehydrate`** (`sync.go:205`, the agent's `RevisionConflict` re-audit) runs mid-session against an
@@ -411,7 +422,7 @@ render a partial world.
 | **Version skew** — new node ↔ old control plane | `SyncStartSeq` absent ⇒ `0` ⇒ `DeliverAll` ⇒ exactly today. Old node ↔ new control plane: the extra field is ignored. |
 | **Delete-then-create is destructive to a concurrent consumer on the same durable name** | Durable names are per `(identity, device)`; `cmd/facet` mints one device id per engine and the browser shell holds a leader lock so only the leader opens the durable. This is a real sharp edge, so Fire 2 states it in the seam's doc comment: *the caller must own the durable*. |
 | **Crash between delete and create** | Safe — the next boot recreates from the local cursor, which is unaffected. |
-| **A start position ahead of what the node actually applied** | Impossible on the warm path (`cursor + 1` is by definition applied+persisted) and impossible on the hydrate path (§3.2's forward-only argument). |
+| **A start position ahead of what the node actually applied** | **AMENDED 2026-08-11 (build time) — this row was WRONG on the warm path and the build fixes it.** The original text read *"Impossible on the warm path (`cursor + 1` is by definition applied+persisted)"*. It is not: the persisted cursor is a **high-water mark, not a contiguous floor**. `handle` writes the sequence of whichever message just succeeded, so a frame that `Nak`s on a transient store error leaves a hole while later frames advance the cursor past it — and `cursor + 1` then starts *above* the hole. Combined with the delete-then-create this design mandates, the server ack floor that used to hold that hole for redelivery is discarded, so the frame is never delivered again and `gapped()` (`cursor < firstSeq`) cannot see it. A skipped `delete`/`keyset` frame leaves the local mirror holding a key the actor lost authorization to. Closed in Fire 2 by making the persisted position a genuine contiguous floor — never advanced past the lowest unresolved sequence. The hydrate path was and remains sound (§3.2's forward-only argument). |
 | **A pruned start sequence** (`cursor + 1 < firstSeq`) | Cannot reach the consumer: `personal.syncgap` runs first and forces the hydrate path, which uses `SyncStartSeq` instead. If it somehow did, JetStream starts at the first available message — the over-deliver direction. |
 
 ---
