@@ -160,7 +160,8 @@ shape**) or injected by the fan-out envelope (the **PL.2 shape**) — never both
 - **Hydration Hook (Fire PL.4, `internal/refractor/pipeline.Pipeline.Hydrate`).** The cold-start
   catch-up path for a device that missed the SYNC stream's retention window (or is starting for the
   first time): the control-plane RPC `lattice.ctrl.refractor.personal.hydrate` — request body
-  `{identityId, deviceId?}`, response `{personalHydrate: {hydrated: true, revision, lenses}}` —
+  `{identityId, deviceId?}`, response
+  `{personalHydrate: {hydrated: true, revision, lenses, syncStartSeq}}` —
   re-executes the personal cypher for that one identity via the same `reprojectActors` machinery the
   live cross-vertex fan-out uses (§ above), publishes every resulting row as a normal upsert/delete
   through the active adapter, then (via the adapter's optional `KeySetPublisher` interface) its own
@@ -174,7 +175,16 @@ shape**) or injected by the fan-out envelope (the **PL.2 shape**) — never both
   (`Progress().LastAppliedSeq`) captured *before* reprojection runs, so any live incremental delta
   applied concurrently with or after the hydrate call necessarily carries a revision at or above
   this snapshot's — the Edge's last-writer-wins-by-revision resolution can never let a bulk
-  hydration snapshot regress a fresher incremental delta that raced it. When `deviceId` is given and
+  hydration snapshot regress a fresher incremental delta that raced it. `syncStartSeq` is a
+  **different counter** and the two must not be conflated: it is the **SYNC stream's** last sequence,
+  read once from a freshly fetched `StreamInfo` before the hydrator fan-out (the seam
+  `Service.SetSyncLastSeq`, wired in `cmd/refractor/main.go` beside `SetSyncFirstSeq`), whereas
+  `revision` is a **CDC** projection sequence. The burst that follows is a projection of the world as
+  of that SYNC sequence, so a cold or gapped Edge node starts its durable consumer at
+  `syncStartSeq + 1` and never reads the retained history the burst already accounts for
+  (`edge-cold-signin-delivery-position-design.md` §3.2/§3.4). The field is fail-soft: an unset seam or
+  a read error returns `0` and hydration still succeeds — a node reading `0` asserts no start position
+  and takes the subject's whole retained history, the over-deliver direction. When `deviceId` is given and
   the Interest Set KV is configured, the resulting revision is best-effort recorded into that
   device's Interest Set doc (`revisionCursor`, preserving its existing `types`/`anchors` filter) —
   bookkeeping only; the Edge itself decides warm-vs-cold hydration from its own local cursor, not

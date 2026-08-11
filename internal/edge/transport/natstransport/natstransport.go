@@ -16,6 +16,7 @@ package natstransport
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/nats-io/nats.go"
 
@@ -40,11 +41,34 @@ var (
 // RunDurableConsumer runs cfg's durable JetStream consumer, translating each
 // delivered message into a Delta and the handler's verdict back into a
 // substrate decision.
+//
+// Every attach DELETES the named durable before creating it, whatever
+// cfg.StartSeq says. That is forced by the server, not chosen here: JetStream
+// rejects a changed DeliverPolicy or OptStartSeq on an existing consumer
+// (nats-server 2.14 server/consumer.go:2435,:2438), so a durable created at one
+// position can never be created at another — including back to the unpositioned
+// DeliverAll form a zero StartSeq asks for. Deleting only when a position is
+// named would leave a node that resolves to zero unable to attach AT ALL, which
+// is a far worse failure than the replay a fresh DeliverAll consumer costs. A
+// zero StartSeq means "this node asserts no position", and taking the subject's
+// whole retained history is the honest reading of that.
+//
+// **The caller must own the durable** — any other reader attached to the same
+// durable name has its consumer removed underneath it, losing that consumer's
+// in-flight deliveries and ack floor. The Sync Manager satisfies this: the
+// durable name is per (identity, device) and one node holds it at a time. It is
+// also why that Manager takes its resume position from its own persisted cursor
+// rather than from the ack floor this delete discards.
 func (s *Conn) RunDurableConsumer(ctx context.Context, cfg transport.ConsumerConfig, h transport.Handler) error {
+	if err := s.conn.DeleteStreamConsumer(ctx, cfg.Stream, cfg.Durable); err != nil {
+		return fmt.Errorf("natstransport: reposition durable %q on %q to sequence %d: %w",
+			cfg.Durable, cfg.Stream, cfg.StartSeq, err)
+	}
 	return s.conn.RunDurableConsumer(ctx, substrate.DurableConsumerConfig{
 		Stream:        cfg.Stream,
 		FilterSubject: cfg.FilterSubject,
 		Durable:       cfg.Durable,
+		StartSeq:      cfg.StartSeq,
 		Logger:        cfg.Logger,
 	}, func(ctx context.Context, msg substrate.Message) substrate.Decision {
 		switch h(ctx, transport.Delta{Subject: msg.Subject, Body: msg.Body, Sequence: msg.Sequence}) {

@@ -18,7 +18,8 @@ import (
 
 // Delta is one message delivered by a DeltaSource: the raw envelope payload
 // plus the stream sequence that ordered it. Sequence is what the Sync Manager
-// persists as its cursor, so a resuming consumer can detect a retention gap.
+// persists as its cursor — the value a resuming consumer detects a retention
+// gap against, and the value it resumes delivery from (ConsumerConfig.StartSeq).
 type Delta struct {
 	Subject  string
 	Body     []byte
@@ -49,7 +50,17 @@ type ConsumerConfig struct {
 	Stream        string
 	Durable       string
 	FilterSubject string
-	Logger        *slog.Logger
+	// StartSeq is the stream sequence delivery must begin at: the position
+	// the node has already accounted for, plus one
+	// (edge-cold-signin-delivery-position-design.md §3.4). A hydrating node
+	// names the sequence its hydration snapshot was taken at, because the
+	// burst it just received already carries the effect of everything below
+	// that point; a warm node names its own persisted cursor. The zero value
+	// asserts no position and delivers the subject's whole retained history.
+	//
+	// Repositioning an existing durable is destructive — see DeltaSource.
+	StartSeq uint64
+	Logger   *slog.Logger
 }
 
 // DeltaSource is the inbound half of the seam: a durable, resumable feed of
@@ -60,7 +71,26 @@ type ConsumerConfig struct {
 // (edge-syncgap-control-rpc-design.md §3.3).
 type DeltaSource interface {
 	// RunDurableConsumer delivers cfg's stream/filter to h until ctx is
-	// cancelled, resuming from the durable's own ack floor across restarts.
+	// cancelled, starting at cfg.StartSeq — or, when that is zero, at the
+	// beginning of the durable's retained history.
+	//
+	// SHARP EDGE: an implementation honoring StartSeq RECREATES the durable on
+	// EVERY attach, not only when a position is named, because a server
+	// refuses to move an existing consumer's delivery position in either
+	// direction — an already-positioned durable cannot be re-created
+	// unpositioned either, so a conditional delete would leave a node that
+	// resolves to zero unable to attach at all. **The caller must own the
+	// durable**: any other reader on the same durable name loses its consumer
+	// mid-flight, along with its ack floor. The Sync Manager satisfies this
+	// because the durable name is per (identity, device) and one node holds it
+	// at a time.
+	//
+	// NOT universally honored. The browser host's implementation
+	// (internal/edge/browser/jstransport.go) drops StartSeq and attaches at the
+	// position its durable already holds. That over-delivers rather than
+	// skipping, so a browser node stays correct — it just still walks the
+	// retained history a positioned node steps over. A caller must not read a
+	// non-zero StartSeq as a guarantee about what will arrive.
 	RunDurableConsumer(ctx context.Context, cfg ConsumerConfig, h Handler) error
 }
 

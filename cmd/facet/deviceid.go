@@ -16,10 +16,11 @@ import (
 // uploaded.
 //
 // A device id must persist for exactly as long as the mirror it belongs to.
-// The durable consumer it names (edgesync.DurableName) resumes from its own
-// JetStream ack floor, so an id that changes per engine build strands the
-// previous durable forever — which is why this lives beside the cursor that
-// durable maintains, not in memory.
+// It names both the durable consumer (edgesync.DurableName) and, through the
+// store it is read from, the resume cursor that positions that consumer — so
+// an id that changes per engine build strands the previous durable forever and
+// abandons the cursor beside it. That is why this lives in the store with the
+// cursor, not in memory.
 const deviceIDLocalName = "facet.deviceId"
 
 // resolveDeviceID returns st's persisted device id, minting and storing one

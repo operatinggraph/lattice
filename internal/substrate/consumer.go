@@ -95,6 +95,31 @@ type DurableConsumerConfig struct {
 	// Durable is the durable consumer name. Re-running with the same name
 	// resumes from the last-acked sequence.
 	Durable string
+	// StartSeq is the stream sequence delivery begins at, for a caller that
+	// holds its own record of what it has already processed and wants the
+	// consumer positioned there rather than at the stream's retained
+	// beginning. A value > 0 selects DeliverByStartSequencePolicy with
+	// OptStartSeq; the zero value selects DeliverAllPolicy, so a caller that
+	// has no position to assert gets the whole retained history.
+	//
+	// The position is honored only when the durable is CREATED. JetStream
+	// refuses to update DeliverPolicy or OptStartSeq on an existing consumer
+	// (nats-server 2.14 server/consumer.go:2435,:2438) — in BOTH directions,
+	// so an existing positioned durable cannot be re-created unpositioned
+	// either. A caller that changes the position it asks for, including back
+	// to zero, has to delete the durable first: see DeleteStreamConsumer, and
+	// note that deleting a durable someone else is reading is destructive to
+	// that reader.
+	//
+	// An out-of-range position never fails the create, but the two directions
+	// are not equally benign. A sequence past the last retained message is
+	// respected and the consumer waits. A sequence BELOW the first retained
+	// message is silently clamped UP to it — the SKIP direction: the caller
+	// named a start the stream no longer holds and gets no signal that the
+	// span between is missing. A caller whose correctness depends on that span
+	// must detect the shortfall itself before asking (the Edge does, via the
+	// personal.syncgap control RPC).
+	StartSeq uint64
 	// MaxDeliver bounds redelivery on Nak. A value <= 0 omits the bound,
 	// leaving JetStream's default (unlimited redelivery).
 	MaxDeliver int
@@ -133,16 +158,20 @@ type DurableConsumerConfig struct {
 // cfg and drives it, invoking handler for each delivered message and applying
 // the returned Decision, until ctx is cancelled. It blocks until ctx is done.
 //
-// The consumer uses DeliverAllPolicy + AckExplicitPolicy: delivery starts at
-// the beginning of the durable's history and every message is acknowledged by
-// the handler's Decision. Empty-body messages are delivered to the handler
-// (the primitive is policy-free about body content); the handler decides what
-// they mean.
+// The consumer uses AckExplicitPolicy — every message is acknowledged by the
+// handler's Decision — and takes its delivery start from cfg.StartSeq:
+// DeliverAllPolicy (the beginning of the durable's history) when it is zero,
+// DeliverByStartSequencePolicy at that sequence otherwise. Empty-body messages
+// are delivered to the handler (the primitive is policy-free about body
+// content); the handler decides what they mean.
 //
 // Re-running with the same cfg.Durable resumes from the last-acked sequence:
 // the consumer is NOT deleted on shutdown — its persisted position is the point
 // of "durable". Operators who need to retire a durable must delete it
-// explicitly.
+// explicitly. That persisted position is also why cfg.StartSeq applies only to
+// a durable this call creates: against an existing one the server rejects a
+// changed delivery position outright, so a caller re-positioning a durable it
+// owns must delete it before calling.
 func (c *Conn) RunDurableConsumer(ctx context.Context, cfg DurableConsumerConfig, handler HandlerFunc) error {
 	if cfg.Stream == "" {
 		return fmt.Errorf("substrate: RunDurableConsumer: Stream required")
@@ -164,6 +193,10 @@ func (c *Conn) RunDurableConsumer(ctx context.Context, cfg DurableConsumerConfig
 		FilterSubject: cfg.FilterSubject,
 		DeliverPolicy: jetstream.DeliverAllPolicy,
 		AckPolicy:     jetstream.AckExplicitPolicy,
+	}
+	if cfg.StartSeq > 0 {
+		consCfg.DeliverPolicy = jetstream.DeliverByStartSequencePolicy
+		consCfg.OptStartSeq = cfg.StartSeq
 	}
 	if cfg.MaxDeliver > 0 {
 		consCfg.MaxDeliver = cfg.MaxDeliver

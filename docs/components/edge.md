@@ -59,11 +59,36 @@ package, built incrementally per the design's §7 Steward decomposition (EDGE.1 
 - **`internal/edge/sync`** — the Sync Manager (design §3.2): a durable JetStream consumer
   (`substrate.RunDurableConsumer`, stable per-`(identityId, deviceId)` durable name) on the Personal-Lens
   `SYNC` stream, filtered to the actor's own `lattice.sync.user.<id>` subject. Each delivered delta drives
-  `store.ApplyUpsert`/`ApplyDelete` and advances `store.SetCursor` to the message's stream sequence — a
-  malformed envelope is `Term`inated (poison, never redelivered), an apply failure is `Nak`ed for retry. On
-  cold start (no local cursor) or a detected **gap**, it calls the Personal-Lens
-  `personal.register`/`personal.hydrate` control RPCs (`internal/refractor/control`) before subscribing; a
-  warm cursor still within retention skips both and resumes incrementally from the durable's own ack floor.
+  `store.ApplyUpsert`/`ApplyDelete` — a malformed envelope is `Term`inated (poison, never redelivered), an
+  apply failure is `Nak`ed for retry.
+  The persisted cursor is a **contiguous resume floor, not a high-water mark**: `store.SetCursor` records
+  the highest sequence with no lower sequence still awaiting redelivery, so a `Nak`ed frame pins it while
+  higher frames keep applying. That distinction is load-bearing precisely because the next attach deletes
+  the durable (below) and with it the server-side ack floor that was holding the `Nak`ed frame open — a
+  cursor written as "whatever just succeeded" would resume above the hole and lose that frame silently,
+  and a lost `delete`/`keyset` frame leaves the mirror holding a key the actor no longer has. Gap
+  detection cannot catch it: `cursor < firstSeq` does not fire for a cursor that is too **high**. Both
+  terminal dispositions advance the floor — `Ack` because the delta is applied, `Term` because the
+  disposal is permanent and the server will never offer the frame again, so leaving it behind would
+  resurrect the same poison frame on every boot.
+  On cold start (no local cursor) or a detected **gap**, it calls the Personal-Lens
+  `personal.register`/`personal.hydrate` control RPCs (`internal/refractor/control`) before subscribing.
+  **The hydrate repositions the feed** (edge-cold-signin-delivery-position-design.md): `personal.hydrate`
+  returns `syncStartSeq`, the SYNC sequence its burst was taken from, and the node starts its consumer at
+  `syncStartSeq + 1` — the burst already carries the effect of everything below that point, so nothing
+  published before the snapshot is ever delivered. A warm cursor still within retention skips the RPCs and
+  starts at `cursor + 1`. **The local cursor is the single resume authority**; the durable's server-side
+  ack floor is a per-session delivery detail, not the position. A `syncStartSeq` of `0` (a control host
+  with no position seam) or a persisted cursor of `0` asserts no position and takes the whole retained
+  subject. A frame can only be skipped by resuming **above** it, and neither input allows that — a
+  hydrate's snapshot sequence is a position its own burst already accounts for, and the cursor is a floor
+  no unresolved sequence sits below — so every fallback here over-delivers. Because a server refuses to
+  move an existing consumer's `DeliverPolicy`/`OptStartSeq` in **either** direction
+  ([`docs/vendors.md`](../vendors.md), NATS row), the node **deletes and recreates the durable on every
+  attach**, not only when it names a position: a durable already created positioned could not otherwise
+  be re-created unpositioned, so a conditional delete would leave a node that resolves to `0` unable to
+  attach at all. That unconditional recreate is also how an already-running `DeliverAll` durable is
+  upgraded, with no operator step.
   Gap detection is a control-plane RPC, not a JetStream admin call: the node holds no `$JS.API.STREAM.*`
   grant, so `gapped()` asks `personal.syncgap` (request `{identityId, deviceId, cursor}`, response
   `{personalSyncGap: {gapped}}`) — the Refractor compares the cursor to the SYNC stream's earliest retained

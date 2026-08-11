@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"strings"
+	stdsync "sync"
 	"testing"
 	"time"
 
@@ -88,7 +90,8 @@ func TestManager_EnsureFresh_ColdStartMakesNoSyncGapCall(t *testing.T) {
 	tr := &fakeControlTransport{reply: happyControlReply(false)}
 	mgr := newFakeManager(t, tr, 0, false)
 
-	require.NoError(t, mgr.ensureFresh(ctx))
+	_, freshErr := mgr.ensureFresh(ctx)
+	require.NoError(t, freshErr)
 	assert.NotContains(t, tr.requests, "syncgap", "cold start must not call syncgap")
 	assert.Contains(t, tr.requests, "hydrate", "cold start must hydrate")
 }
@@ -101,7 +104,8 @@ func TestManager_EnsureFresh_WarmGappedTrueHydrates(t *testing.T) {
 	tr := &fakeControlTransport{reply: happyControlReply(true)}
 	mgr := newFakeManager(t, tr, 5, true)
 
-	require.NoError(t, mgr.ensureFresh(ctx))
+	_, freshErr := mgr.ensureFresh(ctx)
+	require.NoError(t, freshErr)
 	assert.Equal(t, "syncgap", tr.requests[0], "warm resume asks syncgap first")
 	assert.Contains(t, tr.requests, "hydrate", "gapped=true must re-hydrate")
 }
@@ -131,7 +135,8 @@ func TestManager_EnsureFresh_HydrationRequestedTrueHydratesEvenWhenNotGapped(t *
 	}}
 	mgr := newFakeManager(t, tr, 5, true)
 
-	require.NoError(t, mgr.ensureFresh(ctx))
+	_, freshErr := mgr.ensureFresh(ctx)
+	require.NoError(t, freshErr)
 	assert.Equal(t, "syncgap", tr.requests[0], "warm resume asks syncgap first")
 	assert.Contains(t, tr.requests, "hydrate", "a pending hydration request must re-hydrate even though the cursor is not gapped")
 }
@@ -145,8 +150,29 @@ func TestManager_EnsureFresh_NeitherGappedNorRequestedSkipsHydrate(t *testing.T)
 	tr := &fakeControlTransport{reply: happyControlReply(false)}
 	mgr := newFakeManager(t, tr, 5, true)
 
-	require.NoError(t, mgr.ensureFresh(ctx))
+	startSeq, freshErr := mgr.ensureFresh(ctx)
+	require.NoError(t, freshErr)
 	assert.NotContains(t, tr.requests, "hydrate", "neither gapped nor a pending hydration request must not re-hydrate")
+	assert.Equal(t, uint64(6), startSeq, "a warm resume starts one past its own cursor")
+}
+
+// TestManager_EnsureFresh_WarmCursorZeroAssertsNoPosition pins the one warm
+// cursor value that is not a position. A stored zero records no applied
+// message, so cursor+1 would claim the node had passed sequence 1 without ever
+// seeing it; the node must assert nothing and take the whole retained subject
+// instead. Reaching it needs the control plane to answer not-gapped for a zero
+// cursor — its predicate is `cursor < firstSeq`, so a non-empty stream sends a
+// zero cursor down the hydrate path instead.
+func TestManager_EnsureFresh_WarmCursorZeroAssertsNoPosition(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	tr := &fakeControlTransport{reply: happyControlReply(false)}
+	mgr := newFakeManager(t, tr, 0, true)
+
+	startSeq, freshErr := mgr.ensureFresh(ctx)
+	require.NoError(t, freshErr)
+	assert.Zero(t, startSeq, "a persisted cursor of zero must not become a start of one")
+	assert.NotContains(t, tr.requests, "hydrate", "a not-gapped answer must not hydrate, whatever the cursor")
 }
 
 // TestManager_EnsureFresh_AbsentSyncGapResultErrors is the silent-data-loss
@@ -163,7 +189,7 @@ func TestManager_EnsureFresh_AbsentSyncGapResultErrors(t *testing.T) {
 	}}
 	mgr := newFakeManager(t, tr, 5, true)
 
-	err := mgr.ensureFresh(ctx)
+	_, err := mgr.ensureFresh(ctx)
 	require.Error(t, err, "an absent syncgap result must never be treated as gapped=false")
 	assert.NotContains(t, tr.requests, "hydrate", "an unverifiable gap answer must not resume, and must not blindly hydrate either")
 }
@@ -181,7 +207,7 @@ func TestManager_EnsureFresh_SyncGapRetryIsBounded(t *testing.T) {
 	}}
 	mgr := newFakeManager(t, tr, 5, true)
 
-	err := mgr.ensureFresh(ctx)
+	_, err := mgr.ensureFresh(ctx)
 	require.Error(t, err, "a persistent syncgap failure must fail closed, never resume unverified")
 	assert.Len(t, tr.requests, syncGapMaxAttempts, "the retry must be bounded to syncGapMaxAttempts")
 }
@@ -221,6 +247,172 @@ func (transientErrStore) ApplyUpsert(string, string, uint64, json.RawMessage) (b
 	return false, errors.New("edge/store: simulated transient backing-engine failure")
 }
 
+// gatedStore is a real store whose ApplyUpsert fails — transiently, so handle()
+// Naks — for one chosen key while the gate is closed. It models the failure the
+// contiguous-floor discipline exists for: a single delta that must be given
+// again while every other delta around it applies normally.
+// It carries a second, independent gate on SetCursor, for the case where the
+// delta applies but its position cannot be recorded.
+type gatedStore struct {
+	edgestore.Store
+	mu           stdsync.Mutex
+	failKey      string
+	closed       bool
+	cursorClosed bool
+}
+
+func newGatedStore(inner edgestore.Store, failKey string) *gatedStore {
+	return &gatedStore{Store: inner, failKey: failKey, closed: true}
+}
+
+func (g *gatedStore) open() {
+	g.mu.Lock()
+	g.closed = false
+	g.mu.Unlock()
+}
+
+func (g *gatedStore) setCursorFails(fails bool) {
+	g.mu.Lock()
+	g.cursorClosed = fails
+	g.mu.Unlock()
+}
+
+func (g *gatedStore) ApplyUpsert(key, lens string, revision uint64, data json.RawMessage) (bool, error) {
+	g.mu.Lock()
+	blocked := g.closed && key == g.failKey
+	g.mu.Unlock()
+	if blocked {
+		return false, errors.New("edge/store: simulated transient backing-engine failure")
+	}
+	return g.Store.ApplyUpsert(key, lens, revision, data)
+}
+
+func (g *gatedStore) SetCursor(seq uint64) error {
+	g.mu.Lock()
+	blocked := g.cursorClosed
+	g.mu.Unlock()
+	if blocked {
+		return errors.New("edge/store: simulated cursor write failure")
+	}
+	return g.Store.SetCursor(seq)
+}
+
+// TestManager_Handle_CursorWriteFailureKeepsTermAndReholdsAck covers the two
+// dispositions a failed cursor write must NOT collapse into one another.
+//
+// A Term must stay a Term. The message is already gone server-side, this
+// consumer sets no delivery bound, and Term exists here precisely to escape a
+// hot loop — degrading it to Nak would spin forever on the one payload that can
+// never succeed. An Ack must instead become a Nak AND go back to holding the
+// floor: a delta whose position was not recorded has not been passed, so the
+// floor must not move over it when a later delta resolves.
+func TestManager_Handle_CursorWriteFailureKeepsTermAndReholdsAck(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	st := newGatedStore(openTestStore(t), "")
+	require.NoError(t, st.SetCursor(9))
+	mgr, err := New(&fakeControlTransport{}, st, Config{
+		IdentityID: "identityA", DeviceID: "deviceX", Logger: testutil.TestLogger(),
+	})
+	require.NoError(t, err)
+	mgr.floor.reset(9)
+
+	upsertAt := func(seq uint64) transport.Delta {
+		key := fmt.Sprintf("manifest.task.writefailwritefail%02d", seq)
+		b, err := json.Marshal(deltaEnvelope{Op: "upsert", Key: key, Revision: seq, Data: json.RawMessage(`{"x":1}`)})
+		require.NoError(t, err)
+		return transport.Delta{Sequence: seq, Body: b}
+	}
+
+	st.setCursorFails(true)
+	assert.Equal(t, transport.Term, mgr.handle(ctx, transport.Delta{Sequence: 10, Body: []byte("not json")}),
+		"a poison frame whose cursor write fails must stay Term'd, never degrade to an unbounded redelivery")
+	assert.Equal(t, transport.Nak, mgr.handle(ctx, upsertAt(11)),
+		"an applied delta whose position could not be recorded must be asked for again")
+
+	st.setCursorFails(false)
+	require.Equal(t, transport.Ack, mgr.handle(ctx, upsertAt(12)))
+
+	cursor, ok, err := st.Cursor()
+	require.NoError(t, err)
+	require.True(t, ok)
+	assert.Equal(t, uint64(10), cursor,
+		"the floor must reach the Term'd sequence 10 and stop below 11, which is still outstanding")
+}
+
+// TestManager_Handle_CursorIsAContiguousFloorNotAHighWaterMark is the
+// regression vector for the resume position's other half. The cursor positions
+// the next attach, and that attach deletes the durable — discarding the
+// server-side ack floor that was holding a Nak'd message open. So a cursor
+// written as "the sequence that just succeeded" would sit ABOVE a hole, and the
+// held message would never be delivered again. Nothing downstream would notice:
+// gap detection tests `cursor < firstSeq`, and a cursor that is too high is not
+// a gap.
+//
+// The scenario is exactly the one prefetch makes routine: sequence 100 Naks,
+// 101-105 are already buffered and apply, and the process could die at any
+// point after. The persisted cursor must read 99 throughout.
+func TestManager_Handle_CursorIsAContiguousFloorNotAHighWaterMark(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	heldKey := "manifest.task.heldheldheldheldheld"
+	st := newGatedStore(openTestStore(t), heldKey)
+	// The node resumed at 100, so everything at or below 99 is accounted for.
+	require.NoError(t, st.SetCursor(99))
+
+	mgr, err := New(&fakeControlTransport{}, st, Config{
+		IdentityID: "identityA", DeviceID: "deviceX", Logger: testutil.TestLogger(),
+	})
+	require.NoError(t, err)
+	mgr.floor.reset(99)
+
+	body := func(env deltaEnvelope) []byte {
+		b, err := json.Marshal(env)
+		require.NoError(t, err)
+		return b
+	}
+	cursorNow := func() uint64 {
+		seq, ok, err := st.Cursor()
+		require.NoError(t, err)
+		require.True(t, ok)
+		return seq
+	}
+
+	held := transport.Delta{Sequence: 100, Body: body(deltaEnvelope{
+		Op: "upsert", Key: heldKey, Revision: 1, Data: json.RawMessage(`{"held":true}`),
+	})}
+	require.Equal(t, transport.Nak, mgr.handle(ctx, held),
+		"a transient apply failure must ask for the delta again")
+	assert.Equal(t, uint64(99), cursorNow(), "a Nak must not advance the cursor")
+
+	// The messages prefetch already buffered behind the hole. They apply
+	// cleanly, and every one of them is ABOVE the sequence still outstanding.
+	for seq := uint64(101); seq <= 105; seq++ {
+		key := fmt.Sprintf("manifest.task.followerfollower%03d", seq)
+		decision := mgr.handle(ctx, transport.Delta{Sequence: seq, Body: body(deltaEnvelope{
+			Op: "upsert", Key: key, Revision: seq, Data: json.RawMessage(`{"follower":true}`),
+		})})
+		require.Equal(t, transport.Ack, decision)
+	}
+	assert.Equal(t, uint64(99), cursorNow(),
+		"the cursor must stay at the contiguous floor while sequence 100 is outstanding — a crash here must resume at 100, not 106")
+
+	// The redelivery lands. Now nothing is outstanding, so the floor jumps to
+	// everything already resolved above it.
+	st.open()
+	require.Equal(t, transport.Ack, mgr.handle(ctx, held))
+	assert.Equal(t, uint64(105), cursorNow(),
+		"resolving the hole must release the floor to the highest resolved sequence")
+
+	// A duplicate of the same message arriving after the floor has passed it
+	// must not drag the cursor backwards — the floor is a maximum, and the
+	// write is skipped when it would not advance.
+	require.Equal(t, transport.Ack, mgr.handle(ctx, held))
+	assert.Equal(t, uint64(105), cursorNow(), "a late redelivery must never rewind the cursor")
+}
+
 func openInterestKV(t *testing.T, ctx context.Context, conn *substrate.Conn) *substrate.KV {
 	t.Helper()
 	_, err := conn.JetStream().CreateKeyValue(ctx, jetstream.KeyValueConfig{Bucket: "personal-lens-interest"})
@@ -248,7 +440,24 @@ func (f *fakeHydrator) Hydrate(ctx context.Context, identityID string) (uint64, 
 	return f.revision, nil
 }
 
+// startControlService starts the personal control plane a live Manager talks
+// to, wired the way cmd/refractor wires it: both SYNC stream-position seams
+// present.
 func startControlService(t *testing.T, ctx context.Context, conn *substrate.Conn, h control.Hydrator, interestKV *substrate.KV) {
+	t.Helper()
+	startControlServiceSeams(t, ctx, conn, h, interestKV, true)
+}
+
+// startControlServiceWithoutStartSeq starts the same control plane with the
+// hydrate delivery-position seam left unset — a control host that answers
+// personal.hydrate with SyncStartSeq == 0, which every node must handle by
+// asserting no start position and taking the subject's full retained history.
+func startControlServiceWithoutStartSeq(t *testing.T, ctx context.Context, conn *substrate.Conn, h control.Hydrator, interestKV *substrate.KV) {
+	t.Helper()
+	startControlServiceSeams(t, ctx, conn, h, interestKV, false)
+}
+
+func startControlServiceSeams(t *testing.T, ctx context.Context, conn *substrate.Conn, h control.Hydrator, interestKV *substrate.KV, wireStartSeq bool) {
 	t.Helper()
 	svc := control.NewService()
 	svc.SetCapabilityChecker(control.NewStubCapabilityChecker(nil))
@@ -264,6 +473,17 @@ func startControlService(t *testing.T, ctx context.Context, conn *substrate.Conn
 		}
 		return s.CachedInfo().State.FirstSeq, nil
 	})
+	if wireStartSeq {
+		// The hydrate delivery-position seam, same fresh-fetch posture as
+		// cmd/refractor's: the sequence the burst is a snapshot of.
+		svc.SetSyncLastSeq(func(ctx context.Context) (uint64, error) {
+			s, err := conn.JetStream().Stream(ctx, DefaultStream)
+			if err != nil {
+				return 0, err
+			}
+			return s.CachedInfo().State.LastSeq, nil
+		})
+	}
 	require.NoError(t, svc.StartNATSListener(ctx, conn.NATS()))
 }
 
@@ -358,7 +578,8 @@ func TestManager_EnsureFresh_WarmCursorSkipsHydrate(t *testing.T) {
 	mgr, err := New(natstransport.New(conn), st, Config{IdentityID: "identityA", DeviceID: "deviceX", Logger: testutil.TestLogger()})
 	require.NoError(t, err)
 
-	assert.NoError(t, mgr.ensureFresh(ctx))
+	_, freshErr := mgr.ensureFresh(ctx)
+	assert.NoError(t, freshErr)
 	assert.Empty(t, h.calledWith, "a warm cursor (gapped=false) must not trigger hydrate")
 }
 
@@ -400,7 +621,8 @@ func TestManager_EnsureFresh_GapTriggersHydrate(t *testing.T) {
 	mgr, err := New(natstransport.New(conn), st, Config{IdentityID: recipient, DeviceID: "deviceX", Logger: testutil.TestLogger()})
 	require.NoError(t, err)
 
-	require.NoError(t, mgr.ensureFresh(ctx))
+	_, freshErr := mgr.ensureFresh(ctx)
+	require.NoError(t, freshErr)
 	assert.Equal(t, []string{recipient}, h.calledWith)
 }
 
@@ -492,7 +714,8 @@ func TestManager_Handle_HydrationCompleteGateIgnoresStaleReplayedMarker(t *testi
 	})
 	require.NoError(t, err)
 
-	require.NoError(t, mgr.hydrate(ctx))
+	_, hydrateErr := mgr.hydrate(ctx)
+	require.NoError(t, hydrateErr)
 
 	body := func(env deltaEnvelope) []byte {
 		b, err := json.Marshal(env)
@@ -724,7 +947,8 @@ func TestManager_Hydrate_PrunesDeadLensAttributions(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	require.NoError(t, mgr.hydrate(ctx))
+	_, hydrateErr := mgr.hydrate(ctx)
+	require.NoError(t, hydrateErr)
 
 	entry, ok, err := st.Get(deadKey)
 	require.NoError(t, err)

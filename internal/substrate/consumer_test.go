@@ -474,3 +474,117 @@ func TestRunDurableConsumer_ZeroAckWaitLeavesTheDefault(t *testing.T) {
 		t.Fatalf("AckWait = %v, want JetStream's 30s default left untouched", info.Config.AckWait)
 	}
 }
+
+// TestRunDurableConsumer_StartSeqPositionsDelivery verifies the delivery
+// position seam in both directions from one setup: the same stream, the same
+// filter, five messages already retained. A consumer with StartSeq unset is
+// handed all five (DeliverAllPolicy); a consumer naming the fourth message's
+// sequence is handed only the last two. The pair is the point — an assertion
+// that "few messages arrived" pins nothing unless the many-messages case is
+// reachable from the identical setup.
+func TestRunDurableConsumer_StartSeqPositionsDelivery(t *testing.T) {
+	t.Parallel()
+	c, ctx := newTestConn(t)
+	bucket := "core-kv"
+	provisionCoreBucket(ctx, t, c, bucket)
+
+	stream := "KV_" + bucket
+	filter := "$KV." + bucket + ".vtx.meta.>"
+	keys := []string{"alpha", "beta", "gamma", "delta", "epsilon"}
+	// A KV revision IS the backing stream's sequence for that message, so the
+	// put acks give the positions a consumer can be aimed at.
+	seqOf := make(map[string]uint64, len(keys))
+	for _, k := range keys {
+		rev, err := c.KVPut(ctx, bucket, "vtx.meta."+k, []byte(`{"v":1}`))
+		if err != nil {
+			t.Fatalf("KVPut %q: %v", k, err)
+		}
+		seqOf[k] = rev
+	}
+
+	collect := func(durable string, startSeq uint64, want int) map[string]bool {
+		t.Helper()
+		runCtx, cancel := context.WithCancel(ctx)
+		defer cancel()
+		seen := make(chan string, 16)
+		go func() {
+			_ = c.RunDurableConsumer(runCtx, DurableConsumerConfig{
+				Stream:        stream,
+				FilterSubject: filter,
+				Durable:       durable,
+				StartSeq:      startSeq,
+			}, func(_ context.Context, msg Message) Decision {
+				seen <- msg.Subject
+				return Ack
+			})
+		}()
+		got := map[string]bool{}
+		deadline := time.After(10 * time.Second)
+		for len(got) < want {
+			select {
+			case s := <-seen:
+				got[s] = true
+			case <-deadline:
+				t.Fatalf("durable %q: timed out after %d/%d messages: %v", durable, len(got), want, got)
+			}
+		}
+		// Keep reading until the consumer reports nothing pending and nothing
+		// unacked, so `got` is everything this consumer was given rather than
+		// the first `want` of it — otherwise a count assertion on the result
+		// could never fail.
+		tick := time.NewTicker(10 * time.Millisecond)
+		defer tick.Stop()
+		for {
+			select {
+			case s := <-seen:
+				got[s] = true
+				continue
+			default:
+			}
+			caughtUp, err := c.ConsumerCaughtUp(ctx, stream, durable)
+			if err == nil && caughtUp {
+				return got
+			}
+			select {
+			case s := <-seen:
+				got[s] = true
+			case <-tick.C:
+			case <-deadline:
+				t.Fatalf("durable %q: never settled, saw %v", durable, got)
+			}
+		}
+	}
+
+	// The positive vector: no position asserted, the whole retained history
+	// arrives.
+	all := collect("dc-test-startseq-all", 0, len(keys))
+	for _, k := range keys {
+		if !all["$KV."+bucket+".vtx.meta."+k] {
+			t.Fatalf("StartSeq unset must deliver the full history, missing %q: %v", k, all)
+		}
+	}
+
+	// The same five messages, a consumer positioned at the fourth: the first
+	// three are below the position and must never be delivered.
+	from := collect("dc-test-startseq-from-delta", seqOf["delta"], 2)
+	if len(from) != 2 {
+		t.Fatalf("positioned consumer delivered %d messages, want exactly delta+epsilon: %v", len(from), from)
+	}
+	for _, k := range []string{"alpha", "beta", "gamma"} {
+		if from["$KV."+bucket+".vtx.meta."+k] {
+			t.Fatalf("positioned consumer delivered %q, which sits below its start sequence: %v", k, from)
+		}
+	}
+
+	cons, err := c.js.Consumer(ctx, stream, "dc-test-startseq-from-delta")
+	if err != nil {
+		t.Fatalf("look up positioned consumer: %v", err)
+	}
+	info, err := cons.Info(ctx)
+	if err != nil {
+		t.Fatalf("positioned consumer info: %v", err)
+	}
+	if info.Config.OptStartSeq != seqOf["delta"] {
+		t.Fatalf("OptStartSeq = %d, want %d", info.Config.OptStartSeq, seqOf["delta"])
+	}
+}
