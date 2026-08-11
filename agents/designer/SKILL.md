@@ -655,6 +655,25 @@ tombstones. **Capability KV is a lens projection** (projection correctness = aut
   target key every submitter holds — but the design should have found the index and said so, not the
   build.)
 
+- **A REASSURING NEGATIVE is the cheapest thing to get wrong — and reading one guard in a file does not
+  license a claim about a different construct in it. Delegate the census to FALSIFY the row's number, not
+  to confirm it.** Two errors in one draft (2026-08-11, typed relation signatures), both caught only because
+  an independent census ran in parallel with the drafting. (1) I repeated the item's *"25 variable-length
+  hops"* and even wrote a per-file breakdown from it; the grep counts **lines mentioning a hop**, and
+  **eleven of the 25 are one doc-comment sentence copy-pasted across nine files** that contain no executable
+  hop at all — 14 real. The unit was wrong in the row, in C5.12, and in my draft, and a per-file table made
+  it look derived. (2) I wrote a census-width *caveat* asserting the generated corpus contributes zero
+  because `anchorwalk.go`'s walk parser "refuses a trailing `*`" — true of a **node-position sigil**
+  (`:787-802`), which I had read, and false of the **relation range** (`:837`, `-[ :type [*range] ]->`),
+  which I had not; `edge-manifest` uses it, and one `chainResidence` const compiles into many generated
+  lenses no source grep can see. **The tells:** a caveat that *ends* an inquiry ("so the glob IS the
+  population", "so nothing else is affected", "so the corpus contributes zero") is doing the most load-bearing
+  work in the section and gets the least scrutiny, because it reassures; and a claim about construct B
+  sourced from the guard you read for construct A is an unopened mechanism wearing a citation. **The
+  structural fix that worked:** run the independent census **concurrently with the drafting**, briefed to
+  *verify or correct* the row's figure and to widen the sweep past the glob — not afterwards as a check on a
+  draft that has already hardened around the number.
+
 **Run the pre-build gates you write into your own designs — "ratified" ≠ "build-ready."** If a design
 self-flags a pre-build adversarial / `bmad-party-mode` pass (a deferred gate), that pass is a **Designer-lane
 obligation**: run it and **record it as run** before the design is build-ready. Do not leave it dangling for
