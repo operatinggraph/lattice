@@ -57,6 +57,12 @@ const (
 	// list the index declines to model rather than guess at.
 	hopWithDropped    = "a WITH dropped"
 	hopWithUnmodelled = "the WITH scope walk cannot model"
+
+	// hopUnmodelledExpr is addExpr's default-deny arm. No shipped cypher
+	// reaches it — every Expr the parser produces today is modelled — but the
+	// vocabulary is named here so the arm's reason is a pinned conjunct on the
+	// day some new AST node does reach it, rather than an unreadable row.
+	hopUnmodelledExpr = "is not modelled by the hop index"
 )
 
 // corpusAnchorIndexVerdicts pins the conjunct for every anchored cypher the
@@ -251,6 +257,7 @@ func TestCorpusAnchorHopIndex_EveryReasonIsAKnownConjunct(t *testing.T) {
 		hopExpandedAnchor,
 		hopWithDropped,
 		hopWithUnmodelled,
+		hopUnmodelledExpr,
 	}
 	for name, reason := range corpusAnchorIndexDerivation(t) {
 		if reason == "" {

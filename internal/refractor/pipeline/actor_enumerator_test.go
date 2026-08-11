@@ -9,6 +9,7 @@ import (
 
 	"github.com/operatinggraph/lattice/internal/natsfixture"
 	"github.com/operatinggraph/lattice/internal/refractor/adjacency"
+	"github.com/operatinggraph/lattice/internal/refractor/failure"
 	"github.com/operatinggraph/lattice/internal/substrate"
 )
 
@@ -215,9 +216,62 @@ func TestActorEnumerator_ReportsToHopAppliesToDirectAssignment(t *testing.T) {
 	}, actors)
 }
 
+// TestActorEnumerator_ActorTypeEventReachesTheAnchorAbove pins the union: an
+// event on a vertex of the actor type must still reach the anchors that bind
+// that vertex at a NON-anchor position. `capabilityEphemeral`'s
+// (identity)<-[:reportsTo]-(report:identity) is exactly such a position, so a
+// mutation on the report has to reproject the manager as well. The one-key
+// answer returns the report alone, which on the auth plane is a stale grant.
+func TestActorEnumerator_ActorTypeEventReachesTheAnchorAbove(t *testing.T) {
+	adjKV := newActorEnumeratorAdjKV(t)
+	f := newEnumFixture(t, adjKV)
+
+	report := f.vertex("report", "identity")
+	f.vertex("manager", "identity")
+	f.edge("reportsTo", "report", "manager")
+
+	enum := NewActorEnumerator(adjKV, nil, "identity")
+	actors, err := enum.Enumerate(context.Background(), report, "identity")
+	require.NoError(t, err)
+	require.ElementsMatch(t, []string{
+		substrate.VertexKey("identity", f.idByName["report"]),
+		substrate.VertexKey("identity", f.idByName["manager"]),
+	}, actors, "the manager binds the changed identity at a non-anchor position")
+}
+
+// TestActorEnumerator_ActorTypeEventReturnsItsOwnVertexExactlyOnce is the
+// no-regression half: the changed actor is still in the answer, and the walk
+// re-reaching it — here through the hierarchy hop off a subordinate that
+// reportsTo it — does not put it there twice.
+func TestActorEnumerator_ActorTypeEventReturnsItsOwnVertexExactlyOnce(t *testing.T) {
+	adjKV := newActorEnumeratorAdjKV(t)
+	f := newEnumFixture(t, adjKV)
+
+	manager := f.vertex("manager", "identity")
+	f.vertex("report", "identity")
+	f.edge("reportsTo", "report", "manager")
+
+	enum := NewActorEnumerator(adjKV, nil, "identity")
+	actors, err := enum.Enumerate(context.Background(), manager, "identity")
+	require.NoError(t, err)
+	require.ElementsMatch(t, []string{
+		substrate.VertexKey("identity", f.idByName["manager"]),
+		substrate.VertexKey("identity", f.idByName["report"]),
+	}, actors)
+	seen := 0
+	for _, a := range actors {
+		if a == manager {
+			seen++
+		}
+	}
+	require.Equal(t, 1, seen, "the event's own actor appears once, not once per path that reaches it")
+}
+
 // TestActorEnumerator_ReportsToHopRespectsActorCap confirms the hierarchy
-// hop still honors maxActors — it is a normal addActor call, not a
-// cap-bypassing side channel.
+// hop still reaches maxActors — it is a normal addActor call, not a
+// cap-bypassing side channel — and that reaching it now REFUSES. A truncated
+// answer here is a silent subset of the affected anchors, indistinguishable from
+// a complete one; walkToAnchors refuses the identical hazard on its own read cap.
 func TestActorEnumerator_ReportsToHopRespectsActorCap(t *testing.T) {
 	adjKV := newActorEnumeratorAdjKV(t)
 	f := newEnumFixture(t, adjKV)
@@ -230,6 +284,191 @@ func TestActorEnumerator_ReportsToHopRespectsActorCap(t *testing.T) {
 
 	enum := NewActorEnumerator(adjKV, nil, "identity").WithCaps(0, 1)
 	actors, err := enum.Enumerate(context.Background(), task, "task")
+	require.ErrorIs(t, err, ErrActorSetTooWide)
+	require.Nil(t, actors, "a refusal returns no set at all — a short one would read as complete")
+	require.Equal(t, failure.CatStructural, failure.Classify(err),
+		"the event stays pending and the lens pauses; it is never acked on a subset")
+}
+
+// TestActorEnumerator_UnderTheCapStillAnswers is the positive vector the refusal
+// above needs: the same two-actor graph one seat below the cap returns both,
+// so the test above is pinning the cap and not merely a broken enumerator.
+func TestActorEnumerator_UnderTheCapStillAnswers(t *testing.T) {
+	adjKV := newActorEnumeratorAdjKV(t)
+	f := newEnumFixture(t, adjKV)
+
+	task := f.vertex("task", "task")
+	f.vertex("report", "identity")
+	f.vertex("manager", "identity")
+	f.edge("assignedTo", "report", "task")
+	f.edge("reportsTo", "report", "manager")
+
+	enum := NewActorEnumerator(adjKV, nil, "identity").WithCaps(0, 2)
+	actors, err := enum.Enumerate(context.Background(), task, "task")
 	require.NoError(t, err)
-	require.Len(t, actors, 1)
+	require.ElementsMatch(t, []string{
+		substrate.VertexKey("identity", f.idByName["report"]),
+		substrate.VertexKey("identity", f.idByName["manager"]),
+	}, actors)
+}
+
+// reportsToSpec binds the actor type at a NON-anchor position: `report` is an
+// identity whose data the anchor's own row renders. It is `capabilityEphemeral`'s
+// reportsTo 2-hop reduced to the one position that makes the point.
+const reportsToSpec = `
+MATCH (identity:identity {key: $actorKey})
+OPTIONAL MATCH (identity)<-[:reportsTo]-(report:identity)
+RETURN identity.key AS actorKey, report.data.name AS reportName
+`
+
+// untypedRolesSpec is rolesSpec with its one hop left untyped — a shape
+// AnchorHopIndex refuses outright ("pattern carries an untyped relationship",
+// live on `objectLiveness` and `objectAttachments`), so nothing about the
+// pattern's positions is knowable and the one-key answer cannot be proven.
+//
+// A WITH used to serve this vector; Increment 4a-1 narrowed that refusal to the
+// dropped-variable hazard, so `WITH identity, role` now indexes completely and
+// the vector had to move to a conjunct the corpus still declines on.
+const untypedRolesSpec = `
+MATCH (identity:identity {key: $actorKey})
+OPTIONAL MATCH (identity)-[r]->(role:role)
+RETURN identity.key AS actorKey, role.key AS rk
+`
+
+// TestEnumerateAnchors_SingleActorPositionKeepsTheOneKeyAnswer is the narrowing
+// the union must not cost. capabilityRoles binds `identity` at the anchor and
+// nowhere else, so a mutation on one holder cannot move a co-holder's row — and
+// the control below shows the walk really would have returned all three.
+func TestEnumerateAnchors_SingleActorPositionKeepsTheOneKeyAnswer(t *testing.T) {
+	p, f, _ := rolesFixture(t)
+	p.SetSweepPlan(SweepPlan{AnchorType: "identity", KeyPrefix: "cap.identity."})
+	ctx := context.Background()
+	rs := p.ruleState()
+	alice := f.key("alice", "identity")
+
+	require.True(t, p.oneKeyAnswerSound(rs),
+		"capabilityRoles binds the actor type only at the anchor, and a sweep stands behind the narrowing")
+
+	anchors, err := p.enumerateAnchors(ctx, rs, alice, "identity")
+	require.NoError(t, err)
+	require.Equal(t, []string{alice}, anchors)
+
+	walked, err := p.actorEnumerator.Enumerate(ctx, alice, "identity")
+	require.NoError(t, err)
+	require.ElementsMatch(t, []string{
+		alice, f.key("bob", "identity"), f.key("carol", "identity"),
+	}, walked, "the walk reaches every co-holder — which is what the proof lets this lens skip")
+}
+
+// TestEnumerateAnchors_NonAnchorActorPositionUnionsTheWalk is the correctness
+// gap 4a-2 closes: the actor type binds at two positions, so an event on the
+// report has to carry the manager with it.
+func TestEnumerateAnchors_NonAnchorActorPositionUnionsTheWalk(t *testing.T) {
+	adjKV := newActorEnumeratorAdjKV(t)
+	f := newEnumFixture(t, adjKV)
+	report := f.vertex("report", "identity")
+	f.vertex("manager", "identity")
+	f.edge("reportsTo", "report", "manager")
+
+	p := derivationPipeline(t, adjKV, reportsToSpec)
+	p.SetSweepPlan(SweepPlan{AnchorType: "identity", KeyPrefix: "cap.identity."})
+	rs := p.ruleState()
+
+	require.True(t, ActorTypeBindsAnchorOnly(p.ruleState().anchorHops, "identity") == false,
+		"`report` is a second position binding the actor type")
+	require.False(t, p.oneKeyAnswerSound(rs),
+		"and so the one-key answer is unsound even with a healer installed")
+
+	anchors, err := p.enumerateAnchors(context.Background(), rs, report, "identity")
+	require.NoError(t, err)
+	require.ElementsMatch(t, []string{report, f.key("manager", "identity")}, anchors)
+}
+
+// TestEnumerateAnchors_IncompleteIndexUnionsTheWalk fails the proof closed on its
+// first input: a refused index never indexed the positions the count reads, so
+// its answer is a floor and licenses nothing.
+func TestEnumerateAnchors_IncompleteIndexUnionsTheWalk(t *testing.T) {
+	adjKV := newActorEnumeratorAdjKV(t)
+	f := newEnumFixture(t, adjKV)
+	alice := f.vertex("alice", "identity")
+	f.vertex("bob", "identity")
+	f.vertex("admin", "role")
+	f.edge("holdsRole", "alice", "admin")
+	f.edge("holdsRole", "bob", "admin")
+
+	p := derivationPipeline(t, adjKV, untypedRolesSpec)
+	p.SetSweepPlan(SweepPlan{AnchorType: "identity", KeyPrefix: "cap.identity."})
+	rs := p.ruleState()
+	require.False(t, rs.anchorHops.Complete)
+	require.Contains(t, rs.anchorHops.Incomplete, "untyped relationship")
+	require.False(t, p.oneKeyAnswerSound(rs))
+
+	anchors, err := p.enumerateAnchors(context.Background(), rs, alice, "identity")
+	require.NoError(t, err)
+	require.ElementsMatch(t, []string{alice, f.key("bob", "identity")}, anchors)
+}
+
+// TestEnumerateAnchors_TheHealerIsTheConjunctNotPatternClosure pins both halves
+// of the adjudication.
+//
+// Pattern closure does NOT decide it: a lens carrying inputs outside its pattern
+// still cannot have anchor Y's row moved by actor X's vertex, because every
+// out-of-pattern input the tree carries is keyed on the evaluating actor.
+//
+// The standing healer DOES: answering with one key stops reprojecting peers the
+// walk used to reach incidentally, and that accident is the only thing that
+// converges a row a Capability-KV grant flip left stale. So the same pipeline —
+// pattern-eligible, patternClosedOutput false either way — flips on the sweep
+// plan alone. That is what holds the personal corpus on the walk, since
+// projection/driver.go:417-421 gives it no plan.
+func TestEnumerateAnchors_TheHealerIsTheConjunctNotPatternClosure(t *testing.T) {
+	p, f, _ := rolesFixture(t)
+	rs := p.ruleState()
+	alice := f.key("alice", "identity")
+	ctx := context.Background()
+
+	require.False(t, p.PatternClosedOutput(), "the flag is off on both sides of this test")
+	require.True(t, ActorTypeBindsAnchorOnly(rs.anchorHops, "identity"),
+		"pattern-eligible: the actor type binds only at the anchor")
+
+	require.False(t, p.oneKeyAnswerSound(rs),
+		"no sweep plan — the lens must keep the accidental heal")
+	walked, err := p.enumerateAnchors(ctx, rs, alice, "identity")
+	require.NoError(t, err)
+	require.ElementsMatch(t, []string{
+		alice, f.key("bob", "identity"), f.key("carol", "identity"),
+	}, walked)
+
+	p.SetSweepPlan(SweepPlan{AnchorType: "identity", KeyPrefix: "cap.identity."})
+	require.True(t, p.oneKeyAnswerSound(p.ruleState()),
+		"pattern closure never changed; the healer is what moved the verdict")
+	narrowed, err := p.enumerateAnchors(ctx, p.ruleState(), alice, "identity")
+	require.NoError(t, err)
+	require.Equal(t, []string{alice}, narrowed)
+}
+
+// TestEnumerateAnchors_KnobOffRestoresTheOneKeyAnswer pins the operator's way
+// back. The widening's cost is the co-holder population, bounded by nothing the
+// design fixes, and REFRACTOR_ANCHOR_DERIVATION=off does not reach it — that
+// knob routes to the enumerator, which is the walking arm.
+func TestEnumerateAnchors_KnobOffRestoresTheOneKeyAnswer(t *testing.T) {
+	adjKV := newActorEnumeratorAdjKV(t)
+	f := newEnumFixture(t, adjKV)
+	report := f.vertex("report", "identity")
+	f.vertex("manager", "identity")
+	f.edge("reportsTo", "report", "manager")
+
+	p := derivationPipeline(t, adjKV, reportsToSpec)
+	rs := p.ruleState()
+	ctx := context.Background()
+
+	widened, err := p.enumerateAnchors(ctx, rs, report, "identity")
+	require.NoError(t, err)
+	require.ElementsMatch(t, []string{report, f.key("manager", "identity")}, widened)
+
+	p.SetActorPeerAnchorMode(PeerAnchorModeOff)
+	narrowed, err := p.enumerateAnchors(ctx, rs, report, "identity")
+	require.NoError(t, err)
+	require.Equal(t, []string{report}, narrowed,
+		"the knob reinstates the prior under-approximation — a containment lever, not a posture")
 }

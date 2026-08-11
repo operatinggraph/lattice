@@ -1079,6 +1079,30 @@ func main() {
 	// which mode produced it without inferring it from the line's own name.
 	logger.Info("anchor-derivation mode", "mode", anchorDerivation.String())
 
+	// REFRACTOR_ACTOR_PEER_ANCHORS is the way back from §18.1's widening: `on`
+	// (the default) lets an event on a vertex of a lens's own actor type reach
+	// the anchors whose pattern binds that vertex at a non-anchor position, `off`
+	// answers with the changed vertex alone. Set here for the same reason the
+	// mode above is — two places build pipelines and one of them could be missed.
+	//
+	// It is a SEPARATE switch from the mode above, and deliberately so: that
+	// one's `off` routes to the ActorEnumerator, which is the arm that walks, so
+	// it cannot turn this off. `off` here reinstates a known under-approximation
+	// (a grant outliving its source), and like the mode it bounds the next event
+	// rather than healing a row already stale — that is Rebuild's job or the
+	// sweep's.
+	peerAnchors := pipeline.DefaultActorPeerAnchorMode()
+	if v := os.Getenv("REFRACTOR_ACTOR_PEER_ANCHORS"); v != "" {
+		m, err := pipeline.ParsePeerAnchorMode(v)
+		if err != nil {
+			logger.Error("invalid REFRACTOR_ACTOR_PEER_ANCHORS; keeping the default", "value", v, "err", err)
+		} else {
+			pipeline.SetDefaultActorPeerAnchorMode(m)
+			peerAnchors = m
+		}
+	}
+	logger.Info("actor peer-anchor mode", "mode", peerAnchors.String())
+
 	// projectionRevision reads the current Core KV revision for an arbitrary
 	// key. The actor-aggregate envelope uses it to populate
 	// `projectedFromRevisions`. Errors and absent keys collapse to 0, which the

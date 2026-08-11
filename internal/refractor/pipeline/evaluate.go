@@ -149,44 +149,90 @@ func (p *Pipeline) evaluateForEntryRaw(ctx context.Context, rs ruleState, entry 
 	// installed, expand the event into the set of affected actors and
 	// re-execute the cypher per actor so their capability set is
 	// re-projected with the updated topology.
+	//
+	// An event on a vertex of the ACTOR type is an anchor's own event, and the
+	// arms below own that anchor's disposition. But a pattern may bind the actor
+	// type at a NON-anchor position too — `capabilityEphemeral`'s
+	// (identity)<-[:reportsTo]-(report:identity) — and then this vertex sits
+	// inside OTHER anchors' rows as well. Those peers are reprojected here.
+	//
+	// The two dispositions are computed apart and stay apart: the event's own
+	// anchor may be RETRACTED (the tombstone arm), while a peer only ever goes
+	// through reprojectActors. Nothing here deletes a row because the walk named
+	// its anchor; a shape that did would convert a missed retraction into a mass
+	// retraction, which is the worse failure.
+	//
+	// reprojectActors CAN still emit a Delete for a peer, by four paths, and each
+	// is that peer's own genuine retraction rather than this event's: the peer's
+	// vertex is gone (reprojectActors' missing-actor branch); its envelope
+	// declines with ErrDeleteProjection (executeFullForActorOnce — and
+	// `capabilityEphemeral`'s envelope really does decline, for a manager whose
+	// every grant was delegated through the report that just vanished, which is
+	// the correct answer rather than an artifact of this arm); a doc-mode
+	// EmptyBehavior:delete lens evaluates to zero rows (zeroRowRetraction, whose
+	// own presence check refuses to manufacture a tombstone for an anchor that
+	// never held a row); or a perEntry lens's prefix diff drops a child the actor
+	// no longer holds (multiEntryRetractions). All four are computed from the
+	// peer's OWN freshly re-executed row set, and footprintValid re-reads that
+	// read surface and retries on any revision move, so a torn read cannot
+	// manufacture one either.
+	var peers []string
+	var peerResults []ruleengine.EvalResult
 	if p.actorEnumerator != nil {
 		eventType, _, _ := substrate.ParseVertexKey(entry.CoreKVKey)
 		if eventType != p.actorEnumerator.actorType {
 			return p.evaluateFanOut(ctx, rs, entry)
 		}
+		var err error
+		if p.peerAnchorsEnabled() {
+			if peers, err = p.peerAnchorsOf(ctx, rs, entry.CoreKVKey, eventType); err != nil {
+				return nil, nil, err
+			}
+		}
+		if len(peers) > 0 {
+			if peerResults, err = p.reprojectActors(ctx, rs, peers); err != nil {
+				return nil, nil, err
+			}
+		}
 	}
 
-	// Actor tombstone: the actor itself (the vertex event's own key) is the
-	// sole enumerated actor. A personal (KeySetPublisher) target has no
-	// cap-shaped delete key that fits its wire shape (natssubject.Delete
-	// requires __actor in Keys, which a bare "key" map lacks) — publishing
-	// one is the identity-tombstone defect this design closes structurally
-	// (§3.4): return no result, just the enumerated actor, so
-	// emitPersonalFrames's empty frame retracts every key for this identity
-	// instead. A perEntry lens has no single cap-shaped parent key to delete
-	// either — its live rows are the actor's per-anchor children — so it
-	// reuses multiEntryRetractions with an empty fresh set: every currently
+	// Actor tombstone: the tombstoned actor's own projection is RETRACTED, in
+	// one of three shapes. Any peer anchor rides alongside as peerResults — a
+	// reprojection, never a retraction; only the vertex named by this event went
+	// away.
+	//
+	// A personal (KeySetPublisher) target has no cap-shaped delete key that fits
+	// its wire shape (natssubject.Delete requires __actor in Keys, which a bare
+	// "key" map lacks) — publishing one is the identity-tombstone defect this
+	// design closes structurally (§3.4): return no result of its own, just the
+	// enumerated actor, so emitPersonalFrames's empty frame retracts every key
+	// for this identity instead. A perEntry lens has no single cap-shaped parent
+	// key to delete either — its live rows are the actor's per-anchor children —
+	// so it reuses multiEntryRetractions with an empty fresh set: every currently
 	// live child under the actor's prefix is tombstoned
 	// (cap-read-per-anchor-grant-keys-design.md §4.2). A doc-mode capability
 	// (or other actor-aware) target keeps the existing Delete-against-cap-key
 	// shortcut.
 	if entry.IsDeleted && p.actorEnumerator != nil {
 		if _, isPersonal := p.currentAdapter().(adapter.KeySetPublisher); isPersonal {
-			return nil, []string{entry.CoreKVKey}, nil
+			// The event actor leads the list with no rows of its own, so its
+			// frame is empty and retracts; each peer's frame carries the keys
+			// its reprojection just produced.
+			return peerResults, append([]string{entry.CoreKVKey}, peers...), nil
 		}
 		if p.multiEnvelopeFn != nil {
 			tombstones, rerr := p.multiEntryRetractions(ctx, entry.CoreKVKey, nil)
 			if rerr != nil {
 				return nil, nil, rerr
 			}
-			return tombstones, nil, nil
+			return append(tombstones, peerResults...), actorsTouchedWithPeers(entry.CoreKVKey, peers), nil
 		}
 		delKey := p.actorDeleteKeyFor(entry.CoreKVKey)
-		return []ruleengine.EvalResult{{
+		return append([]ruleengine.EvalResult{{
 			Delete: true,
 			Keys:   map[string]any{"key": delKey},
 			Row:    nil,
-		}}, nil, nil
+		}}, peerResults...), actorsTouchedWithPeers(entry.CoreKVKey, peers), nil
 	}
 
 	// Plain-projection anchor tombstone: retract the row the deleted anchor
@@ -248,14 +294,64 @@ func (p *Pipeline) evaluateForEntryRaw(ctx context.Context, rs ruleState, entry 
 			}
 		}
 	}
-	// No frame here even when actorEnumerator != nil: frame emission is
+	// No frame when the walk reached no peer, which is the overwhelmingly common
+	// case and the one the original cost argument was about: frame emission is
 	// scoped to the reprojectActors code path (fan-out + Hydrate,
-	// personal-lens-retraction-design.md's "For Andrew" summary) — this
-	// branch is the actor's OWN vertex re-evaluating itself outside that
-	// path (e.g. an identity property edit), which fires on every such
-	// mutation and would make frames far chattier than the design costs
-	// for. A later fan-out event or hydrate still converges any drift.
-	return results, nil, nil
+	// personal-lens-retraction-design.md's "For Andrew" summary), and with no
+	// peer this branch is the actor's OWN vertex re-evaluating itself outside
+	// that path (e.g. an identity property edit), which fires on every such
+	// mutation and would make frames far chattier than the design costs for. A
+	// later fan-out event or hydrate still converges any drift.
+	//
+	// Once a peer IS reached the branch has become a reprojectActors caller and
+	// the frames are re-priced deliberately, not inherited. A peer's key set
+	// really moved, and a personal client prunes only on a frame it receives
+	// (emitPersonalFrames' doc) — withholding one is the retraction miss this
+	// whole design exists to close, so peers must be framed. The event's own
+	// actor rides along: dropping it would break actorsTouchedWithPeers' retry
+	// contract below, and its marginal cost is one frame on an event that is
+	// already publishing a frame per peer.
+	return append(results, peerResults...), actorsTouchedWithPeers(entry.CoreKVKey, peers), nil
+}
+
+// actorsTouchedWithPeers names every actor an actor-type vertex event's write
+// touched. With no peer reached it reports nil, which is the "the actor's own
+// vertex re-evaluating itself" signal writeResults' transient-retry fallback
+// reads (it substitutes the CDC key, which IS that actor). With peers it names
+// them AND the event's own actor — dropping the latter would leave a failed
+// write for the actor the event is about unqueued, since the fallback no longer
+// fires once the list is non-empty.
+func actorsTouchedWithPeers(self string, peers []string) []string {
+	if len(peers) == 0 {
+		return nil
+	}
+	return append([]string{self}, peers...)
+}
+
+// peerAnchorsOf returns the anchors OTHER than vertexKey whose rows an event on
+// vertexKey — itself a vertex of the actor type — can move. It asks the same
+// affected-anchor question the fan-out arms ask, through the same seam, so the
+// pattern-directed derivation gets first refusal here too: for a lens binding
+// the actor type only at the anchor it answers {vertexKey} with no adjacency
+// read at all, and the caller does no extra work.
+func (p *Pipeline) peerAnchorsOf(ctx context.Context, rs ruleState, vertexKey, vertexType string) ([]string, error) {
+	anchors, err := p.affectedAnchors(ctx, rs, vertexKey,
+		func() ([]string, bool, error) {
+			return p.deriveAnchorsForVertex(ctx, rs, vertexKey, vertexType)
+		},
+		func() ([]string, error) {
+			return p.enumerateAnchors(ctx, rs, vertexKey, vertexType)
+		})
+	if err != nil {
+		return nil, fmt.Errorf("pipeline: peer-anchor enumerate from %q: %w", vertexKey, err)
+	}
+	peers := make([]string, 0, len(anchors))
+	for _, a := range anchors {
+		if a != vertexKey {
+			peers = append(peers, a)
+		}
+	}
+	return peers, nil
 }
 
 // maxFootprintRetries bounds footprint validation's inline re-execution to
@@ -778,7 +874,7 @@ func (p *Pipeline) evaluateFanOut(ctx context.Context, rs ruleState, entry rulee
 			return p.deriveAnchorsForVertex(ctx, rs, entry.CoreKVKey, eventType)
 		},
 		func() ([]string, error) {
-			return p.actorEnumerator.Enumerate(ctx, entry.CoreKVKey, eventType)
+			return p.enumerateAnchors(ctx, rs, entry.CoreKVKey, eventType)
 		})
 	if err != nil {
 		return nil, nil, fmt.Errorf("pipeline: fan-out enumerate: %w", err)
@@ -840,7 +936,7 @@ func (p *Pipeline) evaluateLinkFanOut(ctx context.Context, rs ruleState, linkKey
 			// the results. Either endpoint may be (or reach) an actor.
 			actorSet := map[string]struct{}{}
 			for _, ep := range []struct{ key, typ string }{{srcVtx, srcType}, {dstVtx, dstType}} {
-				actors, err := p.actorEnumerator.Enumerate(ctx, ep.key, ep.typ)
+				actors, err := p.enumerateAnchors(ctx, rs, ep.key, ep.typ)
 				if err != nil {
 					return nil, fmt.Errorf("pipeline: link fan-out enumerate from %q: %w", ep.key, err)
 				}
@@ -871,12 +967,16 @@ func (p *Pipeline) evaluateLinkFanOut(ctx context.Context, rs ruleState, linkKey
 // role .description) carries no vertex-root change, so affected actors are
 // reprojected by seeding the fan-out from the aspect's parent vertex.
 //
-// When the parent vertex is itself an actor (e.g. an identity .state flip), the
-// enumerator returns it as a singleton and only that actor is reprojected. When
-// the parent is a non-actor vertex (e.g. a role .description), the enumerator
-// walks adjacency to the actors that reach it. Adjacency is untouched — an
-// aspect change never alters graph topology — so, unlike the link fan-out, no
-// adjacency.Build is performed here.
+// When the parent is a non-actor vertex (e.g. a role .description), the
+// enumerator walks adjacency to the actors that reach it. When the parent is
+// itself an actor (e.g. an identity .state flip), that actor is reprojected —
+// alone only where the compiled pattern proves no other anchor binds it
+// (enumerateAnchors), and otherwise alongside every anchor the walk from it
+// reaches, since a pattern binding the actor type at a non-anchor position
+// makes one identity's aspect part of another identity's row.
+//
+// Adjacency is untouched — an aspect change never alters graph topology — so,
+// unlike the link fan-out, no adjacency.Build is performed here.
 func (p *Pipeline) evaluateAspectFanOut(ctx context.Context, rs ruleState, aspectKey string) ([]ruleengine.EvalResult, []string, error) {
 	parentVtx, parentType, _, _, ok := substrate.ParseAspectKey(aspectKey)
 	if !ok {
@@ -889,7 +989,7 @@ func (p *Pipeline) evaluateAspectFanOut(ctx context.Context, rs ruleState, aspec
 			return p.deriveAnchorsForAspect(ctx, rs, aspectKey)
 		},
 		func() ([]string, error) {
-			return p.actorEnumerator.Enumerate(ctx, parentVtx, parentType)
+			return p.enumerateAnchors(ctx, rs, parentVtx, parentType)
 		})
 	if err != nil {
 		return nil, nil, fmt.Errorf("pipeline: aspect fan-out enumerate from %q: %w", parentVtx, err)
