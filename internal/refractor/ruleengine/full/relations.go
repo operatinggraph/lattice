@@ -103,6 +103,27 @@ func (cr *CompiledRule) ReferencedRelations() (relations map[string]struct{}, ex
 				addExpr(alt.Then)
 			}
 			addExpr(x.Else)
+		case *Literal, *ParameterRef, *VariableRef:
+			// The LEAVES of the expression grammar: none of them can hold a
+			// PathPattern, so there is nothing under them to walk. Named
+			// explicitly rather than swept into the default arm below, because
+			// that arm's job is to notice an expression shape this walk does not
+			// model, and a leaf falling into it would take every query
+			// non-exhaustive.
+		default:
+			// An Expr shape this walk does not model. It may carry a PathPattern
+			// (PatternExpr and PatternComprehension already do), and a relation
+			// reached only through it would be missing from an otherwise
+			// authoritative set — which is the one error mode with no recovery:
+			// the consumer never learns the link changed, and on the auth plane
+			// that is a grant that never retracts. Reporting the set as
+			// non-exhaustive costs delivered-then-skipped events and nothing
+			// else, so the unmodelled case takes that side.
+			//
+			// Adding a case above is what removes the cost. Adding an Expr type
+			// without one degrades this lens to the broad filter rather than
+			// narrowing it wrongly.
+			exhaustive = false
 		}
 	}
 

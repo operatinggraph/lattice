@@ -176,6 +176,30 @@ func (cr *CompiledRule) ReferencedLabels() (labels map[string]struct{}, exhausti
 				addExpr(alt.Then)
 			}
 			addExpr(x.Else)
+		case *Literal, *ParameterRef, *VariableRef:
+			// The LEAVES of the expression grammar: none of them can hold a
+			// PathPattern, so there is nothing under them to walk. Named
+			// explicitly rather than swept into the default arm below, because
+			// that arm's job is to notice an expression shape this walk does not
+			// model, and a leaf falling into it would take every query
+			// non-exhaustive.
+		default:
+			// An Expr shape this walk does not model. It may bind a node whose
+			// type no other clause mentions (PatternExpr and PatternComprehension
+			// already do), and a label reached only through it would be missing
+			// from an otherwise authoritative set — which is the one error mode
+			// with no recovery: the consumer never learns the vertex changed, and
+			// on the auth plane that is a grant that never retracts. Reporting the
+			// set as non-exhaustive costs delivered-then-skipped events and
+			// nothing else, so the unmodelled case takes that side — the same
+			// posture ReferencedRelations takes on the other half of a link key,
+			// so neither dimension is authoritative over a shape the other has
+			// given up on.
+			//
+			// Adding a case above is what removes the cost. Adding an Expr type
+			// without one degrades this lens to the broad filter rather than
+			// narrowing it wrongly.
+			exhaustive = false
 		}
 	}
 	// Both passes run per WITH segment, in source order: pass 1 must see the

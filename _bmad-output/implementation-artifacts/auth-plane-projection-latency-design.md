@@ -1884,9 +1884,17 @@ census would have absorbed it instead of failing. It now installs off the defini
 attributable to the `!actorAware` relation gate that has been live since Increment 2 — the census had been
 pinning a plain-pipeline fiction NARROWER than production. It also resolves a standing disagreement: the
 corpus census pinned `capabilityRoles: modeRelation` while `TestAuthPlaneLenses_ConsumerFilterVerdict`
-asserts relation-blind subjects for the shipped lens. The two now agree. **These 22 rows are expected to move
-BACK to `modeRelation` when 4a-4 opens the relation dimension** — that is the widening signal §18.5 asks 4a-4
-to produce, and a 4a-4 that does not move them has not done its job.
+asserts relation-blind subjects for the shipped lens. The two now agree.
+
+**Amended 2026-08-10 by §21 — four of those 22 were themselves a fiction, and the prediction below was wrong
+as written.** This section originally said all 22 would move BACK to `modeRelation` when 4a-4 opened the
+relation dimension. **18 did.** The other four (`edgeInstances`, `edgeProviderQueue`, `edgeProviderSchedule`,
+`edgeStaffPanes`) are **Personal** lenses, and the install-fidelity fix above had reached only half its own
+lesson: it corrected *which predicate* selects the install but still hand-rolled *what the install does*,
+supplying pattern-closure and a sweep plan that `projection.InstallPersonalLens` does not install. Those four
+went to **broad**, with four more Personal rows beside them. The widening signal §18.5 asks 4a-4 for is
+therefore **18 rows**, and the residue is the point: a census that mirrors production by hand will keep
+drifting one hand-rolled step at a time until it *calls* what production calls. §21 makes it call them.
 
 **Health-KV vocabulary.** `filterBroadReason` is declared closed and total, so `install-incomplete` landed in
 the schema doc in the same change — JSON example, the reason→owner table, and the precedence rule, where it
@@ -1902,3 +1910,89 @@ answer. The caveat is stated at `ConsumerFilter`, where the soundness claim is m
 The secure decryptor is the one install stage the guard cannot cover — nothing in a cypher declares a lens
 secure — and secure ∧ actorAggregate is refused at spec load today; whoever lifts that ban owes the guard a
 declared signal.
+
+## 21. Increment 4a-4 build note (2026-08-10) — Term A's relation dimension, and the census that stops guessing
+
+**The gate that had to move first was the client's, not the server's.** §15.11 made the relation dimension
+plain-only for a reason it stated exactly: `plainLinkReactsTo` is the plain arm's client-side counterpart, so
+a relation-narrowed server filter withholds only what the arm was already skipping — while the actor-aware
+arm judged by endpoint type alone, so narrowing it server-side would have added a *second, independently
+fallible* judgment, the one thing `NarrowedFilterEligible`'s invariant forbids. So the increment is ordered:
+give the actor-aware link arm a relation gate, and only then lift `!actorAware`.
+
+`plainLinkReactsTo` becomes `linkRelationReactsTo` — one relation predicate, read by both arms, so the
+decision has no second copy to drift. `actorAwareLinkRelevant` composes §4.2 eligibility, that predicate, and
+the endpoint test; `linkEventRelevant` is the KindLink twin of `vertexEventRelevant`, and the plain arm's own
+two checks were collapsed into it.
+
+**The set-equality, which is the whole soundness claim.** For `lnk.tA.idA.rel.tB.idB`, server admission is
+`rel ∈ relations ∧ (tA ∈ labels ∨ tB ∈ labels)` — the source-pinned form `lnk.L.*.R.>` and the target-pinned
+`lnk.*.*.R.L.>` — and the client arm now proceeds on that same expression. Cold review attacked it at the
+token level rather than the prose level and it held: no key segment can carry a dot (type segments are
+`[a-z][a-z0-9]*`, NanoIDs are 58 alphanumerics, `validateToken` panics on `.`/`*`/`>`), so token positions
+cannot shift; and the check was mutation-proven by injecting an off-by-one into
+`CoreKVLinkTargetRelationFilter`, which the set-equality test caught.
+
+The one asymmetry is stated at the gate: over the subject budget the filter degrades to relation-blind while
+the arm keeps skipping, so **S ⊋ C** — delivered-then-acked, one queue slot, never a lost event. The
+unrecoverable direction, C ⊄ S, does not exist. Four lenses now subscribe to **no link subject at all**;
+review re-verified each cypher independently and all four are single-node anchors with no relationship
+pattern, so that is the strongest correct narrowing rather than an over-narrow.
+
+**Term A's remainder is gone for `capabilityRoles`:** 3 labels × {`holdsRole`, `grantedBy`} = 15 pinned
+subjects replacing 9 relation-blind ones, and `lnk.identity.<id>.bookedBy.booking.<id>` no longer costs it a
+queue slot.
+
+**Two movements, disjoint, separately attributable.** 115 corpus rows: `narrowed-relation` 39 → 57,
+`narrowed-label` 44 → 18, `broad` 32 → 40.
+
+- **18 rows `narrowed-label` → `narrowed-relation`**, attributable to the relation dimension opening. The set
+  is exactly `actorAggregate ∧ labelsExhaustive ∧ relationsExhaustive ∧ subjects ≤ 24` — no lens outside that
+  conjunction moved and none inside it stayed. Six actorAggregate lenses with exhaustive relation sets stayed
+  `narrowed-label` on the **subject budget** alone (`clinicNoShowSettlement`,
+  `edgeManifestProviderReadGrants`, `leaseExpiry`, `renewalComplete`, `wellnessClassPriceSettlement`,
+  `wellnessNoShowSettlement`).
+- **8 Personal rows → `broad`**, attributable to the install-fidelity fix (§20's amendment). Ten further
+  Personal rows keep their pinned `broad` **value** while their **reason** moves `non-exhaustive` →
+  `not-eligible`. All 18 Personal lenses are broad, which is what production does.
+
+**The census now calls what production calls.** It runs `cmd/refractor`'s own switch —
+`projection.IsActorAggregate` → `InstallActorAggregate`, `IsPersonalLens` → `InstallPersonalLens` — instead
+of hand-rolling an install, and a **refused** install is now a test failure rather than a mode: a lens
+`cmd/refractor` refuses registers no consumer, so pinning its filter is the same fiction the
+install-completeness guard exists to refuse. This also made the census sensitive to `sweepEnrolment`'s
+refusal, which today refuses nobody.
+
+Two residuals could not be borrowed and are asserted rather than assumed, each stating its own limit:
+`pkgmgr.lensSpecBody` and `lens.translateSpec` are unexported and the latter needs a live `CoreKVSource`
+watch, so the `*lens.Rule` is hand-built — but the output descriptor crosses by the **same JSON the real
+transport uses**, round-trip-asserted lossless, and `TestCorpusLensRule_MatchesTheInstallSwitch` pins the
+declaration↔install bi-conditional in both directions over all 115 cyphers. And every actor-aggregate lens
+declares `nats-kv` today, so the census's adapter is production's — `TestCorpusInstallers_OnlyReachAdaptersTheCensusModels`
+asserts that rather than faking a Postgres double, because a double would be a second place claiming to know
+which optional interfaces each adapter satisfies, and that claim going stale **is** this defect class.
+(It would matter: `PostgresAdapter` satisfies neither `PrefixKeyLister` nor `RowReader`, so a Postgres
+actor-aggregate lens loses its sweep plan and §4.2's healer conjunct with it.)
+
+**The hazard review named, now guarded.** `TestPersonalLenses_NeverAcquireTheNarrowedFilter` states at corpus
+level that every Personal lens takes the broad filter, and its failure message points at
+`InstallPersonalLens`. It is mutation-proven: threading a sweep plan and pattern-closure into that installer
+fails it. Without that guard, a future convergence-healer change would have given Personal lenses relation
+narrowing in production while the census sat green — and `edgeStaffPanes`' D1 `cap-read` gate is
+out-of-pattern, so it would have begun withholding link events in the unrecoverable direction.
+
+**Both exhaustiveness walks now default-deny.** `ReferencedLabels` and `ReferencedRelations` name their three
+leaf `Expr` types explicitly and set `exhaustive = false` on anything else, matching the hop index's existing
+posture. Zero corpus verdicts moved.
+
+**§20's `addExpr` caveat, corrected where it stands.** That caveat is about a **third** walk —
+`hopIndexBuilder.addExpr` — which already default-denied. It survives the two fixes above for a reason worth
+stating: the rejection marks the index incomplete, but the buried `{key: $actorKey}` position was never
+created, so no anchor is recorded and `DeclaresActorAnchor` (which reads `Anchor >= 0` independently of
+`Complete`, deliberately) stays silent. What changed is the cost of that silence. All three walks cover the
+identical clause set, so an `Expr` the hop index cannot model is now one the other two also refuse — that
+query reports non-exhaustive labels *and* relations, `reprojectAll` goes true, and the lens takes the broad
+filter on its own. **The guard's gap is now a missing diagnosis, not a missing refusal**, and it reopens the
+moment one walk gains a case the others lack — which is why all three name their leaves explicitly.
+(`label_expansion.go` holds a fourth `addExpr`; a `*`-sigil label hidden in an unmodelled `Expr` escapes
+expansion there, contained by the same argument.)

@@ -188,3 +188,46 @@ func TestPatternInsidePropertyMapIsWalkedByBothDerivations(t *testing.T) {
 	require.Contains(t, rels, "borrowedBy",
 		"only reachable through NodePattern.Properties — no other clause names this relation")
 }
+
+// TestReferencedRelations_UnmodelledExprIsNonExhaustive pins the walk's
+// fail-closed arm: an Expr shape addExpr does not model may carry a PathPattern,
+// so the relation set it produced cannot be claimed authoritative.
+//
+// The direction is what matters. A relation reachable only through an
+// unmodelled expression, reported inside an exhaustive set, is a link the
+// narrowed consumer never subscribes to and the client arm never acts on —
+// undeliverable, and unrecoverable once the filter is registered. Reporting
+// non-exhaustive costs the broad filter and nothing else.
+//
+// The leaves are asserted in the same test because they are the reason the arm
+// cannot be a bare default: Literal, ParameterRef and VariableRef reach it on
+// ordinary queries, and sweeping them in would take the whole corpus broad.
+func TestReferencedRelations_UnmodelledExprIsNonExhaustive(t *testing.T) {
+	withWhere := func(where Expr) *CompiledRule {
+		return &CompiledRule{Query: &Query{Clauses: []Clause{
+			&Match{
+				Patterns: []PathPattern{{
+					Nodes: []NodePattern{{Variable: "b", Label: "book"}, {Variable: "a", Label: "author"}},
+					Rels:  []RelPattern{{Type: "wrote"}},
+				}},
+				Where: where,
+			},
+		}}}
+	}
+
+	rels, exhaustive := withWhere(&Literal{Value: "x"}).ReferencedRelations()
+	require.True(t, exhaustive, "a literal holds no pattern — it must not cost exhaustiveness")
+	require.Equal(t, map[string]struct{}{"wrote": {}}, rels)
+
+	_, exhaustive = withWhere(&ParameterRef{Name: "actorKey"}).ReferencedRelations()
+	require.True(t, exhaustive, "a parameter reference holds no pattern")
+
+	_, exhaustive = withWhere(&VariableRef{Name: "b"}).ReferencedRelations()
+	require.True(t, exhaustive, "a variable reference holds no pattern")
+
+	rels, exhaustive = withWhere(fakeUnknownExpr{}).ReferencedRelations()
+	require.False(t, exhaustive,
+		"an Expr this walk does not model may hold a PathPattern whose relation is missing from the set — the set cannot be authoritative")
+	require.Equal(t, map[string]struct{}{"wrote": {}}, rels,
+		"the relations it did find are still reported — only the exhaustiveness claim is withdrawn")
+}

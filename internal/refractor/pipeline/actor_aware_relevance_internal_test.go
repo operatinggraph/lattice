@@ -285,6 +285,60 @@ func TestHandle_ActorAware_LinkEvent_NeitherEndpointSkipped(t *testing.T) {
 	require.Len(t, adpt.upserts, 1, "one bindable endpoint is enough to keep the fan-out")
 }
 
+// TestHandle_ActorAware_LinkEvent_UntraversedRelationSkipped proves the KindLink
+// arm's other conjunct on the live delivery path: a link whose relation the
+// lens's patterns never traverse is acked with no fan-out, EVEN WHEN an endpoint
+// type binds — the case a relation-narrowed consumer filter withholds
+// server-side, which is sound only because this arm skips it anyway.
+//
+// The last sub-case is the non-vacuousness proof, and it is the one that would
+// catch the dangerous edit: with the relation set NOT exhaustive the filter
+// wildcards that segment, so the identical link must reach the fan-out and
+// write. A skip that survived losing exhaustiveness would be a client gate
+// narrower than the subjects the server registered.
+func TestHandle_ActorAware_LinkEvent_UntraversedRelationSkipped(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping NATS-backed test in short mode")
+	}
+	ctx := context.Background()
+
+	offRelation := substrate.LinkKey("identity", aargID(t, "actr"), "bookedBy", "unit", aargID(t, "unit"))
+	traversed := substrate.LinkKey("identity", aargID(t, "actr"), "occupies", "unit", aargID(t, "unit"))
+
+	t.Run("an exhaustive relation set skips the off-relation link", func(t *testing.T) {
+		p, adpt, _ := newGatedFanOutPipeline(t)
+		p.plainReprojectRelations = map[string]struct{}{"occupies": {}}
+		p.plainRelationsExhaustive = true
+
+		dec, err := p.handle(ctx, substrate.Message{
+			Subject: "$KV.CORE." + offRelation, Body: []byte(`{"isDeleted":false}`), Sequence: 1})
+		require.NoError(t, err)
+		require.Equal(t, substrate.Ack, dec)
+		require.Empty(t, adpt.upserts,
+			"no traversal can consume this relation, so the bindable identity endpoint must not save it")
+
+		dec, err = p.handle(ctx, substrate.Message{
+			Subject: "$KV.CORE." + traversed, Body: []byte(`{"isDeleted":false}`), Sequence: 2})
+		require.NoError(t, err)
+		require.Equal(t, substrate.Ack, dec)
+		require.Len(t, adpt.upserts, 1,
+			"the lens's own relation must still fan out — this skip must not blind the arm")
+	})
+
+	t.Run("a non-exhaustive relation set keeps the SAME link", func(t *testing.T) {
+		p, adpt, _ := newGatedFanOutPipeline(t)
+		p.plainReprojectRelations = map[string]struct{}{"occupies": {}}
+		p.plainRelationsExhaustive = false
+
+		dec, err := p.handle(ctx, substrate.Message{
+			Subject: "$KV.CORE." + offRelation, Body: []byte(`{"isDeleted":false}`), Sequence: 1})
+		require.NoError(t, err)
+		require.Equal(t, substrate.Ack, dec)
+		require.Len(t, adpt.upserts, 1,
+			"without an exhaustive relation set the filter wildcards the segment, so the arm must act on what it is handed")
+	})
+}
+
 // TestHandle_ActorAware_IneligiblePipelineStaysBroad is the fail-closed proof at
 // the arm level, and the non-vacuousness proof for the three tests above: the
 // SAME three unbindable events they assert are skipped must each reach the

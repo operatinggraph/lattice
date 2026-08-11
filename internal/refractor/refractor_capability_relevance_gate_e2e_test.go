@@ -352,6 +352,12 @@ func waitGateConsumerSettled(t *testing.T, conn *substrate.Conn, durable string,
 // capability write. A client-side relevance skip already produces the absence of
 // a write; what the narrowed consumer adds is that the event never costs the lens
 // a queue slot, and only the server's own counter can see that.
+//
+// It is also the live-server half of the set-equality
+// TestAuthPlaneLenses_LinkAdmissionIsSetEqualToTheLinkArm proves against an
+// oracle: the link written on an untraversed relation is asserted withheld by a
+// real nats-server AND skipped by the lens's own link arm, so the two halves are
+// checked against the same key on the same pipeline.
 func TestRefractor_CapabilityLens_NarrowedFilter_UnrelatedWriteNeverDelivered_E2E(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping narrowed-filter capability e2e test in -short mode")
@@ -427,8 +433,8 @@ func TestRefractor_CapabilityLens_NarrowedFilter_UnrelatedWriteNeverDelivered_E2
 	filterSubjects, filterSubject, _ := p.ConsumerFilter()
 	require.Empty(t, filterSubject,
 		"the real capabilityRoles spec must narrow, not fall back to the broad filter")
-	require.Len(t, filterSubjects, 9,
-		"three labels expand to 3 forms each — label-narrowed, never relation-narrowed")
+	require.Len(t, filterSubjects, 15,
+		"three labels expand to the vertex form plus both link directions for each of the two traversed relations")
 
 	spec := e2eSpec(rule.ID, bootstrap.CoreKVBucket)
 	spec.FilterSubject = filterSubject
@@ -534,13 +540,22 @@ func TestRefractor_CapabilityLens_NarrowedFilter_UnrelatedWriteNeverDelivered_E2
 	putVertex("unit", unitID, map[string]any{"name": "narrow-unit"})
 	putLink("booking", bookingID, "forUnit", "unit", unitID)
 
-	// A link with exactly ONE endpoint in the label set must still be delivered,
-	// and its relation (bookedBy) is one this lens never traverses. So this single
-	// write pins both halves of the alignment: the filter set pins each label in
-	// both the source and the target position precisely because the link arm skips
-	// only when NEITHER endpoint can bind, and it must NOT pin the relation,
-	// because that arm has no relation gate to be conservative against.
+	// A link touching the ANCHOR ITSELF, over a relation this lens never
+	// traverses. It is the discriminating case for the relation dimension: its
+	// identity endpoint satisfies both endpoint-type tests, so only the relation
+	// segment can withhold it. The two halves of that judgment are asserted
+	// against this one key — the arm skips it, and the server never hands it over
+	// (the count below).
+	require.False(t, p.LinkEventRelevant("bookedBy", "identity", "booking"),
+		"the link arm must skip a relation the pattern never walks — the conjunct that entitles the filter to pin the relation segment")
 	putLink("identity", identityID, "bookedBy", "booking", bookingID)
+
+	// The positive vector. Without it the count below is satisfied by a consumer
+	// that receives nothing at all, and the exclusion would prove nothing: a link
+	// on a TRAVERSED relation between two in-label endpoints must still land.
+	require.True(t, p.LinkEventRelevant("holdsRole", "identity", "role"),
+		"the arm must keep the lens's own relation")
+	putLink("identity", identityID, "holdsRole", "role", roleID)
 
 	// A fence: one in-label write published AFTER all the business traffic.
 	// JetStream delivers a single consumer's messages in stream order, so once the
@@ -552,12 +567,12 @@ func TestRefractor_CapabilityLens_NarrowedFilter_UnrelatedWriteNeverDelivered_E2
 
 	settled := waitGateConsumerSettled(t, conn, durable, fenceSeq)
 
-	// The half-in-label link was DELIVERED, so the fan-out ran on it. Delivery is
-	// only half the claim: re-projecting an event that touches the anchor over a
-	// relation the pattern never walks must leave the grant exactly as it was.
+	// Nothing in this traffic revokes anything, so the grant must survive it —
+	// including the re-delivered holdsRole link, whose reprojection has to be
+	// idempotent.
 	require.True(t, hasCreateLedger(),
-		"the delivered out-of-pattern link must not have disturbed the projected grant")
+		"the delivered business traffic must not have disturbed the projected grant")
 
 	require.EqualValues(t, baseline+2, settled.Delivered.Consumer,
-		"exactly two deliveries: the half-in-label identity→booking link and the fence — the booking vertex, its aspect, the unit vertex and the booking→unit link must never have cost this lens a queue slot")
+		"exactly two deliveries: the holdsRole link and the fence — the booking vertex, its aspect, the unit vertex, the booking→unit link and the identity→booking link on an untraversed relation must never have cost this lens a queue slot")
 }

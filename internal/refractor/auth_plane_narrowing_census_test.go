@@ -14,6 +14,7 @@
 package refractor_test
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -104,41 +105,160 @@ func TestAuthPlaneLenses_NarrowingVerdict(t *testing.T) {
 // at all. The two must stay one decision, so the filter set is pinned against
 // the real shipped cypher and not only against a hand-built fixture.
 //
-// It also pins the one dimension the two decisions do NOT share. capabilityRoles
-// types every traversed edge, so its relation set is exhaustive and the plain
-// path would relation-narrow the link forms. An actor-aware lens must not: its
-// link arm judges by endpoint type alone, so a relation-pinned subject would
-// withhold a link joining an in-label endpoint over an untraversed relation —
-// an event that arm keeps. Asserted here by the ABSENCE of any relation-pinned
-// form, because the failure it guards against is silent and unrecoverable by a
-// revert (a JetStream filter update never rewinds the cursor).
+// capabilityRoles types every traversed edge, so its relation set is exhaustive
+// and its link subjects pin the relation segment in both directions.
 func TestAuthPlaneLenses_ConsumerFilterVerdict(t *testing.T) {
 	p := narrowingPipeline(t, "CensusRbacFiLter9999", rbacCapabilityRolesSpec(t), "identity")
 
-	filterSubjects, filterSubject, _ := p.ConsumerFilter()
+	filterSubjects, filterSubject, decision := p.ConsumerFilter()
 	require.Empty(t, filterSubject,
 		"the shipped capabilityRoles must narrow, not fall back to the broad filter")
+	require.Equal(t, health.FilterModeNarrowedRelation, decision.Mode)
+	require.Equal(t, 3, decision.LabelCount)
 
 	bucket := bootstrap.CoreKVBucket
 	require.ElementsMatch(t, []string{
 		"$KV." + bucket + ".vtx.identity.>",
-		"$KV." + bucket + ".lnk.identity.>",
-		"$KV." + bucket + ".lnk.*.*.*.identity.>",
+		"$KV." + bucket + ".lnk.identity.*.holdsRole.>",
+		"$KV." + bucket + ".lnk.*.*.holdsRole.identity.>",
+		"$KV." + bucket + ".lnk.identity.*.grantedBy.>",
+		"$KV." + bucket + ".lnk.*.*.grantedBy.identity.>",
 		"$KV." + bucket + ".vtx.role.>",
-		"$KV." + bucket + ".lnk.role.>",
-		"$KV." + bucket + ".lnk.*.*.*.role.>",
+		"$KV." + bucket + ".lnk.role.*.holdsRole.>",
+		"$KV." + bucket + ".lnk.*.*.holdsRole.role.>",
+		"$KV." + bucket + ".lnk.role.*.grantedBy.>",
+		"$KV." + bucket + ".lnk.*.*.grantedBy.role.>",
 		"$KV." + bucket + ".vtx.permission.>",
-		"$KV." + bucket + ".lnk.permission.>",
-		"$KV." + bucket + ".lnk.*.*.*.permission.>",
+		"$KV." + bucket + ".lnk.permission.*.holdsRole.>",
+		"$KV." + bucket + ".lnk.*.*.holdsRole.permission.>",
+		"$KV." + bucket + ".lnk.permission.*.grantedBy.>",
+		"$KV." + bucket + ".lnk.*.*.grantedBy.permission.>",
 	}, filterSubjects,
-		"three labels expand to the vertex form plus both link directions, and nothing else")
+		"three labels expand to the vertex form plus each traversed relation in both link directions, and nothing else")
+}
 
-	for _, s := range filterSubjects {
-		require.NotContains(t, s, ".holdsRole.",
-			"a relation-pinned subject on an actor-aware lens withholds what its link arm keeps")
-		require.NotContains(t, s, ".grantedBy.",
-			"a relation-pinned subject on an actor-aware lens withholds what its link arm keeps")
+// TestAuthPlaneLenses_LinkAdmissionIsSetEqualToTheLinkArm is the invariant the
+// narrowing rests on, over the real shipped capabilityRoles cypher: for every
+// link CDC key, the SERVER-side narrowed filter admits it if and only if the
+// pipeline's own link arm would do work for it.
+//
+// Only one of the two directions is unrecoverable, and it is the reason this is
+// asserted rather than reasoned about. A link the arm keeps but the filter
+// withholds is an event the lens never sees — on a grant lens a retraction that
+// never lands — and no revert recovers it, because a JetStream filter update
+// never rewinds the consumer's cursor (nats-server v2.14.0). The opposite
+// direction merely costs a queue slot. Equality is asserted anyway, because it
+// is what makes the pair maintainable: an edit that widens the client gate
+// without widening the subjects is exactly the unrecoverable direction, and
+// only an equality catches it from the safe side.
+//
+// The candidate space is the cross product that discriminates the two
+// dimensions independently: an endpoint type in the label set against one
+// outside it, in EACH position, over a traversed relation against an untraversed
+// one. `want` is hand-derived from the cypher — the pattern is
+// (identity)-[:holdsRole]->(role)<-[:grantedBy]-(permission), so a link matters
+// only when its relation is one of those two AND at least one endpoint is one of
+// the three labels — so neither side of the equality is pinned against the
+// other's implementation, and the subject-matching oracle below is exercised in
+// both directions rather than trusted.
+func TestAuthPlaneLenses_LinkAdmissionIsSetEqualToTheLinkArm(t *testing.T) {
+	p := narrowingPipeline(t, "CensusRbacSetEq99999", rbacCapabilityRolesSpec(t), "identity")
+	filterSubjects, filterSubject, _ := p.ConsumerFilter()
+	require.Empty(t, filterSubject, "this proof is only about a NARROWED consumer")
+
+	const inA, inB, out = "identity", "role", "booking"
+	const traversed, untraversed = "holdsRole", "bookedBy"
+
+	cases := []struct {
+		typeA, relation, typeB string
+		want                   bool
+		why                    string
+	}{
+		{inA, traversed, inB, true, "both endpoints in the label set, over a relation the pattern walks"},
+		{inA, "grantedBy", inB, true, "the pattern's other traversed relation"},
+		{out, traversed, inB, true, "the TARGET endpoint binds — the target-pinned link form is why both positions are emitted"},
+		{inA, traversed, out, true, "the SOURCE endpoint binds"},
+		{inA, untraversed, inB, false, "no traversal can consume a relation the pattern never walks, whatever binds"},
+		{inA, untraversed, out, false, "a bindable SOURCE endpoint does not rescue an untraversed relation"},
+		{out, untraversed, inB, false, "the same, in the target position"},
+		{out, traversed, out, false, "a traversed relation between two types the pattern cannot bind"},
+		{out, untraversed, out, false, "neither dimension matches"},
 	}
+
+	var admitted, withheld int
+	for _, tc := range cases {
+		name := tc.typeA + "-" + tc.relation + "-" + tc.typeB
+		t.Run(name, func(t *testing.T) {
+			key := "lnk." + tc.typeA + ".AAAAAAAAAAAAAAAAAAAA." + tc.relation + "." + tc.typeB + ".BBBBBBBBBBBBBBBBBBBB"
+			subject := "$KV." + bootstrap.CoreKVBucket + "." + key
+
+			serverAdmits := false
+			for _, f := range filterSubjects {
+				if natsSubjectMatches(f, subject) {
+					serverAdmits = true
+					break
+				}
+			}
+			clientKeeps := p.LinkEventRelevant(tc.relation, tc.typeA, tc.typeB)
+
+			require.Equalf(t, tc.want, serverAdmits,
+				"the narrowed filter must %s this link: %s", admitWord(tc.want), tc.why)
+			require.Equalf(t, tc.want, clientKeeps,
+				"the link arm must %s this link: %s", keepWord(tc.want), tc.why)
+			require.Equalf(t, clientKeeps, serverAdmits,
+				"server admission and the client link arm must be SET-EQUAL — a link the arm keeps and the filter withholds is an event no revert recovers")
+		})
+		if tc.want {
+			admitted++
+		} else {
+			withheld++
+		}
+	}
+	require.Positive(t, admitted, "a set-equality over an empty admitted set proves nothing")
+	require.Positive(t, withheld, "a set-equality over an empty withheld set proves nothing")
+}
+
+func admitWord(want bool) string {
+	if want {
+		return "admit"
+	}
+	return "withhold"
+}
+
+func keepWord(want bool) string {
+	if want {
+		return "keep"
+	}
+	return "skip"
+}
+
+// natsSubjectMatches reports whether a concrete subject matches a filter subject
+// under NATS wildcard semantics: `*` matches exactly one token, `>` matches one
+// or more trailing tokens, and everything else is literal (nats.io subject
+// wildcards; our pin is NATS 2.14).
+//
+// It is a test ORACLE, deliberately independent of the filter builder, so the
+// equality above is a claim about what a server would deliver rather than a
+// restatement of what subjects.CoreKVRelationNarrowedFilters emitted. What keeps
+// the oracle honest is that the table drives it to both answers against
+// hand-derived expectations, and that the live-server counterpart of the same
+// discrimination runs in
+// TestRefractor_CapabilityLens_NarrowedFilter_UnrelatedWriteNeverDelivered_E2E.
+func natsSubjectMatches(filter, subject string) bool {
+	f := strings.Split(filter, ".")
+	s := strings.Split(subject, ".")
+	for i, tok := range f {
+		if tok == ">" {
+			return len(s) > i
+		}
+		if i >= len(s) {
+			return false
+		}
+		if tok != "*" && tok != s[i] {
+			return false
+		}
+	}
+	return len(f) == len(s)
 }
 
 // TestNonExhaustiveAuthPlaneLenses_StayBroad is the negative half: the auth-plane
@@ -213,18 +333,24 @@ func TestConsumerFilter_RefusesToNarrowBeforeInstallCompletes(t *testing.T) {
 
 	filterSubjects, filterSubject, decision = p.ConsumerFilter()
 	require.Empty(t, filterSubject)
-	require.Equal(t, health.FilterModeNarrowedLabel, decision.Mode)
+	require.Equal(t, health.FilterModeNarrowedRelation, decision.Mode)
 	require.Equal(t, 3, decision.LabelCount)
 	require.ElementsMatch(t, []string{
 		"$KV." + bootstrap.CoreKVBucket + ".vtx.identity.>",
-		"$KV." + bootstrap.CoreKVBucket + ".lnk.identity.>",
-		"$KV." + bootstrap.CoreKVBucket + ".lnk.*.*.*.identity.>",
+		"$KV." + bootstrap.CoreKVBucket + ".lnk.identity.*.holdsRole.>",
+		"$KV." + bootstrap.CoreKVBucket + ".lnk.*.*.holdsRole.identity.>",
+		"$KV." + bootstrap.CoreKVBucket + ".lnk.identity.*.grantedBy.>",
+		"$KV." + bootstrap.CoreKVBucket + ".lnk.*.*.grantedBy.identity.>",
 		"$KV." + bootstrap.CoreKVBucket + ".vtx.role.>",
-		"$KV." + bootstrap.CoreKVBucket + ".lnk.role.>",
-		"$KV." + bootstrap.CoreKVBucket + ".lnk.*.*.*.role.>",
+		"$KV." + bootstrap.CoreKVBucket + ".lnk.role.*.holdsRole.>",
+		"$KV." + bootstrap.CoreKVBucket + ".lnk.*.*.holdsRole.role.>",
+		"$KV." + bootstrap.CoreKVBucket + ".lnk.role.*.grantedBy.>",
+		"$KV." + bootstrap.CoreKVBucket + ".lnk.*.*.grantedBy.role.>",
 		"$KV." + bootstrap.CoreKVBucket + ".vtx.permission.>",
-		"$KV." + bootstrap.CoreKVBucket + ".lnk.permission.>",
-		"$KV." + bootstrap.CoreKVBucket + ".lnk.*.*.*.permission.>",
+		"$KV." + bootstrap.CoreKVBucket + ".lnk.permission.*.holdsRole.>",
+		"$KV." + bootstrap.CoreKVBucket + ".lnk.*.*.holdsRole.permission.>",
+		"$KV." + bootstrap.CoreKVBucket + ".lnk.permission.*.grantedBy.>",
+		"$KV." + bootstrap.CoreKVBucket + ".lnk.*.*.grantedBy.permission.>",
 	}, filterSubjects)
 
 	labels, narrowed = p.ConsumerFilterLabels()

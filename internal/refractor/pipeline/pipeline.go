@@ -1218,25 +1218,32 @@ func (rs ruleState) plainReactsTo(vertexType string) bool {
 	return ok
 }
 
-// plainLinkReactsTo reports whether the plain link reprojection arm should
-// re-execute this lens for a link event on the given relation. It is
-// plainReactsTo's companion on the other half of the link key: that one asks
-// whether either ENDPOINT TYPE can bind, this one whether the RELATION between
-// them is one the lens's patterns actually traverse. A link satisfying only the
-// endpoint test — `lnk.service.<id>.providedTo.identity.<id>` reaching a lens
-// whose sole relationship pattern is `(pr)-[:identifiedBy]->(id:identity)` —
-// cannot appear in any traversal, and re-executing for it is pure cost.
+// linkRelationReactsTo reports whether a link event on the given relation can
+// affect this lens at all. It is the RELATION half of a link key's judgment,
+// and every link arm pairs it with an ENDPOINT-TYPE half: the plain arm's
+// plainReactsTo on each endpoint (evalPlainLinkReprojection), the actor-aware
+// arm's §4.2 label set (actorAwareLinkRelevant). That half asks whether either
+// endpoint type can bind, this one whether the relation between them is one the
+// lens's patterns actually traverse. A link satisfying only the endpoint test —
+// `lnk.service.<id>.providedTo.identity.<id>` reaching a lens whose sole
+// relationship pattern is `(pr)-[:identifiedBy]->(id:identity)` — cannot appear
+// in any traversal, and re-executing for it is pure cost.
 //
-// The false case lands in the SAME already-sanctioned skip class as
-// evalPlainLinkReprojection's "neither endpoint type is bindable": no
-// reprojection, and no adjacency self-apply, whose authoritative writer is the
-// dedicated whole-stream adjacency consumer rather than any lens pipeline.
+// ONE predicate for both arms is what entitles ConsumerFilter to pin the
+// relation segment of a narrowed filter's link subjects: the server then
+// withholds exactly the links some arm skips anyway, rather than making a
+// second, independently-fallible judgment about them.
+//
+// The false case lands in the SAME already-sanctioned skip class as the
+// endpoint test's: no reprojection, and no adjacency self-apply, whose
+// authoritative writer is the dedicated whole-stream adjacency consumer rather
+// than any lens pipeline.
 //
 // Every uncertain case defaults to relevant, exactly as plainReactsTo does: a
 // non-full engine, an empty/unparsed relation, or a non-exhaustive relation set
 // (an untyped or variable-length relationship anywhere in the lens) all
 // reproject.
-func (rs ruleState) plainLinkReactsTo(relation string) bool {
+func (rs ruleState) linkRelationReactsTo(relation string) bool {
 	if rs.engineKind != ruleengine.EngineFull {
 		return true
 	}
@@ -1371,6 +1378,54 @@ func (p *Pipeline) actorAwareFanOutRelevant(rs ruleState, types ...string) bool 
 	if !ok {
 		return true
 	}
+	return anyTypeBindable(labels, types...)
+}
+
+// actorAwareLinkRelevant reports whether the actor-aware link fan-out must run
+// for a link event on the given relation between the given endpoint types. It
+// is actorAwareFanOutRelevant's link form, carrying the conjunct the aspect and
+// vertex arms have no key segment for: a link is relevant when the lens's
+// patterns TRAVERSE its relation AND either endpoint type can bind.
+//
+// The two conjuncts arm together, behind the one §4.2 eligibility answer. That
+// is what makes the pair the exact client-side counterpart of a
+// relation-narrowed filter's link subjects, which pin a (label, relation) pair
+// in each direction: a lens that fails §4.2 keeps the unconditional fan-out on
+// both axes and takes the broad filter, and a lens that clears it skips on both
+// axes and has its server-side subjects pinned on both.
+//
+// The relation conjunct is sound for the same reason the endpoint one is, and
+// on the same terms: an event that cannot enter any traversal cannot move a row
+// that is a function of the pattern-bound subgraph, which is exactly what
+// §4.2's patternClosedOutput conjunct asserts and what a Personal lens's
+// out-of-pattern read gate denies. The fan-out's idempotent adjacency
+// pre-apply is lost with either skip, and that is sound for both: it exists to
+// stop THIS pipeline's reprojection racing ahead of its own trigger edge
+// (evaluateLinkFanOut), and there is no reprojection left to order.
+//
+// The enumerator's own breadth is untouched. It walks adjacency
+// relation-blind, including the fixed reportsTo hop, and adjacency is written
+// by the dedicated whole-stream consumer rather than by this pipeline's
+// deliveries — so a skipped link narrows nothing about WHICH anchors a later
+// relevant event reaches.
+func (p *Pipeline) actorAwareLinkRelevant(rs ruleState, relation, typeA, typeB string) bool {
+	labels, ok := p.actorAwareNarrowingLabels(rs)
+	if !ok {
+		return true
+	}
+	if !rs.linkRelationReactsTo(relation) {
+		return false
+	}
+	return anyTypeBindable(labels, typeA, typeB)
+}
+
+// anyTypeBindable reports whether any of types is one the label set can bind.
+// It skips only on a POSITIVE proof that no named type is in the set, so an
+// empty list and any type that failed to parse both read as bindable.
+func anyTypeBindable(labels map[string]struct{}, types ...string) bool {
+	if len(types) == 0 {
+		return true
+	}
 	for _, t := range types {
 		if t == "" {
 			return true
@@ -1390,6 +1445,32 @@ func (p *Pipeline) vertexEventRelevant(rs ruleState, vertexType string) bool {
 		return p.actorAwareFanOutRelevant(rs, vertexType)
 	}
 	return rs.plainVertexRelevant(vertexType)
+}
+
+// linkEventRelevant is the single gate both link arms consult, the KindLink
+// counterpart of vertexEventRelevant: an actor-aware lens judges by §4.2's
+// conjunction plus the traversed-relation set, a plain lens by plainReactsTo on
+// each endpoint plus the same relation set. False means the link cannot appear
+// in any of the lens's traversals, so the arm acks and skips it.
+func (p *Pipeline) linkEventRelevant(rs ruleState, relation, typeA, typeB string) bool {
+	if p.actorEnumerator != nil {
+		return p.actorAwareLinkRelevant(rs, relation, typeA, typeB)
+	}
+	return rs.linkRelationReactsTo(relation) &&
+		(rs.plainReactsTo(typeA) || rs.plainReactsTo(typeB))
+}
+
+// LinkEventRelevant reports whether this pipeline's link arm would do any work
+// for a link CDC event on a Contract #1 lnk.<typeA>.<idA>.<relation>.<typeB>.
+// <idB> key — the CLIENT-side half of the decision whose SERVER-side half is the
+// link subjects ConsumerFilter derives.
+//
+// It exists so a census can assert the two halves against each other on the real
+// shipped corpus rather than assuming they agree. It answers off the same gate
+// the delivery path runs, never a restatement of it: a probe that reimplemented
+// the condition would agree with a broken gate.
+func (p *Pipeline) LinkEventRelevant(relation, typeA, typeB string) bool {
+	return p.linkEventRelevant(p.ruleState(), relation, typeA, typeB)
 }
 
 // SetPatternClosedOutput declares that this lens's row for an anchor is a
@@ -1442,7 +1523,10 @@ func (p *Pipeline) PatternClosedOutput() bool { return p.patternClosedOutput }
 // a label's vertex form already covers its aspects — which is what the aspect
 // arm judges by parent type. It emits a source-pinned AND a target-pinned link
 // form, so a link is admitted when EITHER endpoint type is in the set — which is
-// what the link arm judges, skipping only when NEITHER is.
+// what the link arm judges, skipping only when NEITHER is. The RELATION segment
+// of those link forms is a separate dimension with its own client conjunct and
+// its own degradation, decided at ConsumerFilter rather than here: this
+// accessor answers the label question alone.
 //
 // A pipeline whose install has not finished answers (nil, false) here, not the
 // plain branch's verdict — see narrowedFilterEligible. An eligibility answered
@@ -1515,10 +1599,11 @@ func (p *Pipeline) narrowedFilterEligible(rs ruleState) (labels map[string]struc
 // (full engine, exhaustive labels) UseFullEngineBranches has already satisfied.
 // The result would be a narrowed filter granted with NONE of §4.2's conjuncts
 // evaluated: no pattern-closure, no sweep plan, no anchor-type-in-labels, no
-// decryptor check — and the relation dimension would apply too, because that
-// gate also reads the enumerator. An early call therefore reaches for the MOST
-// aggressive filter, not the broadest, and a missed anchor soft-delete is an
-// over-grant that (per the paragraph below) no revert recovers.
+// decryptor check — with the relation dimension riding along on top, since the
+// rule's relation set is exhaustive whatever the host has installed. An early
+// call therefore reaches for the MOST aggressive filter, not the broadest, and a
+// missed anchor soft-delete is an over-grant that (per the paragraph below) no
+// revert recovers.
 //
 // The install-completeness guard is what closes that off for every lens whose
 // declaration this pipeline can see. It compares the lens's DECLARED kind
@@ -1644,13 +1729,24 @@ func (p *Pipeline) ConsumerFilter() (filterSubjects []string, filterSubject stri
 	// come from the SAME compiled rule, or a hot-reload landing between the two
 	// reads would build a filter no rule ever asked for.
 	rs := p.ruleState()
-	// One read of the actor dimension for the whole derivation, for the same
-	// reason rs is one snapshot: this function consults it twice (eligibility,
-	// then the relation gate below), and two reads could straddle a change and
-	// build a filter no single pipeline shape ever asked for. ruleState cannot
-	// carry this — actor-awareness is installed, not compiled — so it is hoisted
-	// here instead.
-	actorAware := p.actorEnumerator != nil
+	// The ACTOR dimension is read more than once on this path — the guard just
+	// below, then again inside narrowedFilterEligible and actorAwareNarrowingLabels
+	// — and it deliberately is not hoisted into a local, because a hoist here
+	// would cover only the first of those and read as though it covered them all.
+	// What makes the repeated reads safe is the field's LIFETIME, not a snapshot:
+	// p.actorEnumerator is install-time-only state whose sole writers
+	// (projection.InstallActorAggregate, projection.InstallPersonalLens) each
+	// store a freshly-built enumerator on the activation goroutine before RunOn,
+	// and nothing anywhere clears it. The transition is monotone nil → non-nil and
+	// happens once, so the reads can only straddle it in that direction: a later
+	// read seeing an enumerator the guard did not is an install still in flight,
+	// which the §4.2 conjuncts then evaluate against components not yet supplied
+	// — every one of them defaulting to its unsafe-side value, i.e. broad. The
+	// reverse straddle would be the dangerous one (the guard satisfied, then the
+	// plain branch taken with none of §4.2 evaluated), and it requires a writer
+	// that sets the field back to nil. An edit that adds one owes this site a
+	// single read.
+	//
 	// The install-completeness guard, evaluated before any verdict because a
 	// verdict derived from an unfinished install is not a verdict about this
 	// lens at all: the plain branch it would take answers a question about a
@@ -1664,7 +1760,7 @@ func (p *Pipeline) ConsumerFilter() (filterSubjects []string, filterSubject stri
 	// broad filter costs delivered-then-skipped events and heals on the next
 	// rebuild, while an over-narrow one is unrecoverable, so a caller-ordering
 	// bug must not take a healthy lens down.
-	if !actorAware && rs.declaresActorAnchor {
+	if p.actorEnumerator == nil && rs.declaresActorAnchor {
 		slog.Error("pipeline: consumer filter derived before the lens's install stages completed — refusing to narrow, falling back to the broad filter",
 			"ruleId", p.ruleID)
 		return nil, subjects.CoreKVFilter(p.coreKVBucket), FilterDecision{
@@ -1712,27 +1808,29 @@ func (p *Pipeline) ConsumerFilter() (filterSubjects []string, filterSubject stri
 	// back independently, and a lens that narrows by label today never stops
 	// because its relations do not qualify.
 	//
-	// The relation dimension is PLAIN-ONLY, and that is a correctness gate, not
-	// a budget one. Reaching it with !actorAware means the lens is GENUINELY
-	// plain rather than merely not-yet-installed — the install-completeness
-	// guard above has already returned for any rule that DECLARES an actor
-	// anchor — and that is what entitles this arm to name the plain client gate
-	// as its counterpart at all.
+	// The relation dimension is a CORRECTNESS gate before it is a budget one,
+	// and what entitles it is that both pipeline shapes carry the matching
+	// client-side conjunct off this same published relation set:
+	// linkRelationReactsTo, consulted by the plain link arm
+	// (evalPlainLinkReprojection) and by the actor-aware one
+	// (actorAwareLinkRelevant). A relation-pinned subject therefore withholds
+	// exactly the links whose relation an arm skips anyway — strictly more
+	// conservative than a gate that ran regardless, never the
+	// second, independently-fallible judgment NarrowedFilterEligible's invariant
+	// forbids.
 	//
-	// It is sound for a plain lens because plainLinkReactsTo is its
-	// client-side counterpart: the arm already skips a link whose relation the
-	// patterns never traverse, so the server withholding that link is strictly
-	// more conservative than a gate that ran regardless. The actor-aware link arm
-	// has no relation gate — actorAwareFanOutRelevant judges by ENDPOINT TYPE
-	// alone, skipping only when NEITHER endpoint can bind — so narrowing by
-	// relation there would withhold events its client gate keeps: a second,
-	// independently-fallible judgment, which is the one thing
-	// NarrowedFilterEligible's invariant forbids. This is reachable rather than
-	// theoretical (capabilityRoles derives an exhaustive relation set), and the
-	// event it would lose is a real one: a link joining an in-label endpoint to an
-	// out-of-label one over a relation the pattern never walks. Extending the
-	// dimension means giving the fan-out arm a relation gate first.
-	if !actorAware && rs.relationsExhaustive {
+	// The pairing holds arm by arm because each arm's relation conjunct arms on
+	// the SAME condition that got the lens here. The plain arm's is the one this
+	// branch is reached under; the actor-aware arm's is §4.2's conjunction,
+	// which is the answer narrowedFilterEligible returned above. A lens failing
+	// either keeps the unconditional fan-out AND takes the broad filter — one
+	// decision, not two.
+	//
+	// Over the subject budget the filter falls back to the relation-blind set
+	// while the client conjunct keeps skipping, and that is the only asymmetry
+	// left. It is the safe direction: the server delivers links the arm then
+	// acks and skips, which costs a queue slot and never an event.
+	if rs.relationsExhaustive {
 		relationList := make([]string, 0, len(rs.reprojectRelations))
 		for r := range rs.reprojectRelations {
 			relationList = append(relationList, r)
@@ -2840,14 +2938,14 @@ func (p *Pipeline) handle(ctx context.Context, msg substrate.Message) (substrate
 		// link-derived rows and retracting an endpoint anchor that a
 		// required-link removal drops from the matched set.
 		if p.actorEnumerator != nil {
-			// Skipped only when NEITHER endpoint type can bind. The fan-out's
-			// idempotent adjacency pre-apply is lost with the skip and that is
-			// sound: it exists to stop THIS pipeline's reprojection racing ahead
-			// of its own trigger edge (evaluateLinkFanOut), and the
-			// authoritative adjacency write is the dedicated whole-stream
-			// consumer's, not this one's. No reprojection, nothing to order.
-			if t1, _, _, t2, _, pok := substrate.ParseLinkKey(key); pok &&
-				!p.actorAwareFanOutRelevant(rs, t1, t2) {
+			// Skipped when the patterns never traverse this relation, or when
+			// NEITHER endpoint type can bind — the two conjuncts a
+			// relation-narrowed consumer filter pins server-side, judged here
+			// off the same published sets. A key that fails to parse falls
+			// through so the fan-out raises the real error rather than being
+			// silently dropped here.
+			if t1, _, relation, t2, _, pok := substrate.ParseLinkKey(key); pok &&
+				!p.linkEventRelevant(rs, relation, t1, t2) {
 				return substrate.Ack, nil
 			}
 			return p.evalLinkFanOut(ctx, rs, msg, key, tombstone)
@@ -3012,20 +3110,15 @@ func (p *Pipeline) evalPlainLinkReprojection(ctx context.Context, rs ruleState, 
 	if !ok {
 		return substrate.Ack, nil
 	}
-	if !rs.plainLinkReactsTo(linkName) {
-		// The lens's patterns never traverse this relation, so the link
-		// cannot appear in any of them whatever its endpoints are — the same
-		// skip class as the endpoint test below, for the same reason.
+	if !p.linkEventRelevant(rs, linkName, type1, type2) {
+		// Either the lens's patterns never traverse this relation, or neither
+		// endpoint type is bindable by them; either way the link cannot appear
+		// in its traversals. Skip — including the adjacency self-apply: the
+		// dedicated consumer owns the index, this lens just doesn't need it
+		// applied-before-read.
 		return substrate.Ack, nil
 	}
 	reacts1, reacts2 := rs.plainReactsTo(type1), rs.plainReactsTo(type2)
-	if !reacts1 && !reacts2 {
-		// Neither endpoint type is bindable by the lens's patterns — the
-		// link cannot appear in its traversals; skip (including the
-		// adjacency self-apply: the dedicated consumer owns the index, this
-		// lens just doesn't need it applied-before-read).
-		return substrate.Ack, nil
-	}
 	isDeleted := len(msg.Body) == 0
 	if !isDeleted {
 		var linkProps map[string]any

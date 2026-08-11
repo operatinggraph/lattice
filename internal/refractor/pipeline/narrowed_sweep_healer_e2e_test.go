@@ -241,15 +241,16 @@ func TestNarrowedConsumer_ConvergenceSweepIsTheOnlyRemainingHealer_E2E(t *testin
 	narrowedSubjects, narrowedBroad, narrowedDecision := narrowed.pipeline.ConsumerFilter()
 	require.Empty(t, narrowedBroad,
 		"the lens satisfies every §4.2 conjunct — a broad filter here means the narrowing under test never happened")
-	require.Equal(t, health.FilterModeNarrowedLabel, narrowedDecision.Mode)
+	require.Equal(t, health.FilterModeNarrowedRelation, narrowedDecision.Mode)
 	require.ElementsMatch(t, []string{
 		"$KV." + coreKVBucket + ".vtx.identity.>",
-		"$KV." + coreKVBucket + ".lnk.identity.>",
-		"$KV." + coreKVBucket + ".lnk.*.*.*.identity.>",
+		"$KV." + coreKVBucket + ".lnk.identity.*.holdsRole.>",
+		"$KV." + coreKVBucket + ".lnk.*.*.holdsRole.identity.>",
 		"$KV." + coreKVBucket + ".vtx.role.>",
-		"$KV." + coreKVBucket + ".lnk.role.>",
-		"$KV." + coreKVBucket + ".lnk.*.*.*.role.>",
-	}, narrowedSubjects, "the three forms per referenced label, and nothing outside {identity, role}")
+		"$KV." + coreKVBucket + ".lnk.role.*.holdsRole.>",
+		"$KV." + coreKVBucket + ".lnk.*.*.holdsRole.role.>",
+	}, narrowedSubjects,
+		"the vertex form per referenced label plus the one traversed relation in both link directions — nothing outside {identity, role} x {holdsRole}")
 
 	controlSubjects, controlBroad, controlDecision := control.pipeline.ConsumerFilter()
 	require.Empty(t, controlSubjects,

@@ -34,6 +34,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/operatinggraph/lattice/internal/refractor/lens"
 	"github.com/operatinggraph/lattice/internal/refractor/ruleengine/full"
 )
 
@@ -144,7 +145,7 @@ func corpusAnchorIndexDerivation(t *testing.T) map[string]string {
 	t.Helper()
 	eng := full.New()
 	got := map[string]string{}
-	forEachCorpusCypher(t, func(name, spec string, _ bool) {
+	forEachCorpusCypher(t, func(name, spec string, _ *lens.Rule, _, _ bool) {
 		cr, err := eng.Parse(spec)
 		require.NoErrorf(t, err, "%s must parse", name)
 		fullCR, isFull := cr.(*full.CompiledRule)
@@ -212,7 +213,7 @@ func TestCorpusAnchorHopIndex_PinnedConjuncts(t *testing.T) {
 func TestCorpusAnchorHopIndex_CompleteIndexHoldsEveryReferencedRelation(t *testing.T) {
 	eng := full.New()
 	checked := 0
-	forEachCorpusCypher(t, func(name, spec string, _ bool) {
+	forEachCorpusCypher(t, func(name, spec string, _ *lens.Rule, _, _ bool) {
 		cr, err := eng.Parse(spec)
 		require.NoErrorf(t, err, "%s must parse", name)
 		fullCR, isFull := cr.(*full.CompiledRule)

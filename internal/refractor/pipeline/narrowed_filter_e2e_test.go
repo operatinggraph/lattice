@@ -369,10 +369,11 @@ func putLink(t *testing.T, kv *substrate.KV, typeA, idA, relation, typeB, idB st
 // to NOTHING else, even though a `borrowedBy` link between the same two types
 // satisfies both endpoint-type tests.
 //
-// Before the relation segment was pinned, the filter forms were
-// lnk.book.> and lnk.*.*.*.author.>, so every link on either type reached the
-// lens and drove a full re-execute — 1,325 of them, live, on a lens that could
-// never bind one.
+// The relation segment is the whole of what this test measures, and the size of
+// the term it removes is why: a relation-BLIND narrowed set selects on "one
+// endpoint has this type" (lnk.book.>, lnk.*.*.*.author.>), which on a hub type
+// is close to the whole link keyspace — the shape that put 1,325 unbindable
+// links through clinicProviders' re-execute.
 //
 // Read off the consumer's own Delivered.Consumer at a settled (NumPending == 0)
 // checkpoint, so it is a server-side delivery tally and not a client-side skip.

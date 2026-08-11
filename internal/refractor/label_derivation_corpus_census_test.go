@@ -40,7 +40,11 @@
 package refractor_test
 
 import (
+	"encoding/json"
 	"fmt"
+	"io"
+	"log/slog"
+	"reflect"
 	"sort"
 	"strings"
 	"testing"
@@ -53,6 +57,7 @@ import (
 	"github.com/operatinggraph/lattice/internal/pkgregistry"
 	"github.com/operatinggraph/lattice/internal/refractor/adapter"
 	"github.com/operatinggraph/lattice/internal/refractor/health"
+	"github.com/operatinggraph/lattice/internal/refractor/lens"
 	"github.com/operatinggraph/lattice/internal/refractor/pipeline"
 	"github.com/operatinggraph/lattice/internal/refractor/projection"
 	"github.com/operatinggraph/lattice/internal/refractor/ruleengine"
@@ -68,19 +73,29 @@ type labelVerdict struct {
 	// health.FilterMode{NarrowedRelation,NarrowedLabel,Broad}, taken from the
 	// real pipeline.ConsumerFilter, not recomputed here
 	// (dynamic-type-taxonomy-design.md §10.3's footprint vocabulary). It is the
-	// operator-visible consequence of the two columns beside it: exhaustive
-	// decides narrow-vs-broad, the label COUNT decides whether the cap keeps it
-	// narrow, and the relation set decides which of the two narrowed modes it
-	// lands in — a lens can keep an unchanged label set and still double its
-	// delivery volume by losing a relation type.
+	// operator-visible consequence of the columns beside it and of the lens's
+	// INSTALL: exhaustive decides whether narrowing is derivable at all, the
+	// label COUNT decides whether the cap keeps it narrow, the relation set
+	// decides which of the two narrowed modes it lands in — a lens can keep an
+	// unchanged label set and still double its delivery volume by losing a
+	// relation type — and the installer decides whether §4.2's conjuncts are
+	// satisfied in the first place.
+	//
+	// That last input is why `{narrow, "<labels>", modeBroad}` is a real and
+	// correct row rather than a contradiction, and every one of them is a
+	// PERSONAL lens: its cypher derives an exhaustive label set, and it still
+	// takes the broad filter because InstallPersonalLens supplies neither
+	// pattern-closure nor a sweep plan. A Personal Lens reads the D1 read gate
+	// (cap-read.<domain>.<actor>) and the Interest Set outside its compiled
+	// pattern, so an event no label names can still change what it projects.
 	//
 	// "Installed the way production installs it" is load-bearing, and it is what
 	// consumerFilterMode below spends its extra lines on. Asking a BARE pipeline
 	// what filter an actor-aware lens earns is not a conservative reading of that
 	// lens — it is a reading of a lens no deployment runs. The actor-aware
-	// conjunction has conjuncts the plain branch never evaluates, and the
-	// relation dimension is gated OFF for it, so the plain answer can be strictly
-	// NARROWER than the truth. ConsumerFilter refuses that question outright
+	// conjunction has conjuncts the plain branch never evaluates, so the plain
+	// answer can be strictly NARROWER than the truth. ConsumerFilter refuses that
+	// question outright
 	// (health.FilterBroadReasonInstallIncomplete), which is why the census
 	// supplies the install rather than pinning a fiction.
 	//
@@ -110,23 +125,23 @@ const (
 // installed corpus ships, keyed by canonical name (`name#N` for one branch of a
 // multi-walk lens, in Walks declaration order).
 var corpusLabelVerdicts = map[string]labelVerdict{
-	"appointmentReminders":           {narrow, "appointment patient provider", modeLabel},
-	"augurDispatchPending":           {narrow, "augurproposal", modeLabel},
+	"appointmentReminders":           {narrow, "appointment patient provider", modeRelation},
+	"augurDispatchPending":           {narrow, "augurproposal", modeRelation},
 	"augurProposals":                 {narrow, "augurproposal", modeRelation},
 	"availableListings":              {narrow, "unit", modeRelation},
 	"cafeLeaseAccounts":              {narrow, "cafeaccount leaseapp", modeRelation},
 	"cafeLedgerHistory":              {narrow, "cafeaccount cafetransaction leaseapp", modeRelation},
-	"cafeStaleTabSettlement":         {narrow, "tab", modeLabel},
-	"cafeTabSettlement":              {narrow, "cafetransaction leaseapp tab", modeLabel},
-	"capability":                     {narrow, "identity role", modeLabel},
+	"cafeStaleTabSettlement":         {narrow, "tab", modeRelation},
+	"cafeTabSettlement":              {narrow, "cafetransaction leaseapp tab", modeRelation},
+	"capability":                     {narrow, "identity role", modeRelation},
 	"capabilityAuthorContext":        {narrow, "meta", modeRelation},
-	"capabilityAuthorPending":        {narrow, "capabilityproposal", modeLabel},
+	"capabilityAuthorPending":        {narrow, "capabilityproposal", modeRelation},
 	"capabilityProposals":            {narrow, "capabilityproposal", modeRelation},
-	"capabilityRead":                 {narrow, "identity", modeLabel},
+	"capabilityRead":                 {narrow, "identity", modeRelation},
 	"capabilityReadGrants":           {narrow, "identity", modeRelation},
 	"capabilityReadWildcardGrants":   {narrow, "identity role", modeRelation},
 	"capabilityRoleIndex":            {narrow, "permission role", modeRelation},
-	"capabilityRoles":                {narrow, "identity permission role", modeLabel},
+	"capabilityRoles":                {narrow, "identity permission role", modeRelation},
 	"clinicAppointments":             {narrow, "appointment building patient provider", modeLabel},
 	"clinicAppointmentsRead":         {narrow, "appointment building identity patient provider", modeLabel},
 	"clinicLedgerHistory":            {narrow, "appointment clinicaccount clinictransaction patient", modeLabel},
@@ -138,21 +153,21 @@ var corpusLabelVerdicts = map[string]labelVerdict{
 	"clinicPatientsRead":             {narrow, "appointment building identity patient provider", modeLabel},
 	"clinicProviderReadGrants":       {narrow, "provider", modeRelation},
 	"clinicProviders":                {narrow, "identity provider", modeRelation},
-	"clinicSiteBackfill":             {narrow, "appointment building", modeLabel},
+	"clinicSiteBackfill":             {narrow, "appointment building", modeRelation},
 	"clinicSites":                    {narrow, "building", modeRelation},
 	"consoleOperatorReadGrants":      {narrow, "identity role", modeRelation},
 	"demoOperatorReadGrants":         {narrow, "identity role", modeRelation},
 	"duplicateCandidates":            {narrow, "identity", modeRelation},
-	"edgeCatalog#1":                  {narrow, "identity meta permission role service", modeLabel},
-	"edgeEntityBookings":             {narrow, "booking identity instructor session studio", modeLabel},
-	"edgeEntitySessions#1":           {narrow, "identity instructor session studio", modeLabel},
-	"edgeEntityTabs":                 {narrow, "identity leaseapp tab unit", modeLabel},
-	"edgeInstances":                  {narrow, "identity service", modeLabel},
+	"edgeCatalog#1":                  {narrow, "identity meta permission role service", modeBroad},
+	"edgeEntityBookings":             {narrow, "booking identity instructor session studio", modeBroad},
+	"edgeEntitySessions#1":           {narrow, "identity instructor session studio", modeBroad},
+	"edgeEntityTabs":                 {narrow, "identity leaseapp tab unit", modeBroad},
+	"edgeInstances":                  {narrow, "identity service", modeBroad},
 	"edgeManifestProviderReadGrants": {narrow, "appointment identity instructor provider service serviceprovider session", modeLabel},
-	"edgeProviderQueue":              {narrow, "identity service serviceprovider", modeLabel},
-	"edgeProviderSchedule":           {narrow, "appointment identity provider", modeLabel},
-	"edgeStaffPanes":                 {narrow, "identity meta role", modeLabel},
-	"followUpReminders":              {narrow, "appointment patient provider", modeLabel},
+	"edgeProviderQueue":              {narrow, "identity service serviceprovider", modeBroad},
+	"edgeProviderSchedule":           {narrow, "appointment identity provider", modeBroad},
+	"edgeStaffPanes":                 {narrow, "identity meta role", modeBroad},
+	"followUpReminders":              {narrow, "appointment patient provider", modeRelation},
 	"frontDeskBookings":              {narrow, "booking leaseapp session", modeRelation},
 	"frontDeskLeaseDetails":          {narrow, "leaseapp unit", modeRelation},
 	"frontDeskVisits":                {narrow, "appointment leaseapp", modeRelation},
@@ -162,14 +177,14 @@ var corpusLabelVerdicts = map[string]labelVerdict{
 	"leaseAccounts":                  {narrow, "account leaseapp", modeRelation},
 	"leaseApplicationsRead":          {narrow, "augurproposal identity leaseapp object service unit", modeLabel},
 	"leaseExpiry":                    {narrow, "identity leaseapp renewal unit", modeLabel},
-	"leaseRentSettlement":            {narrow, "clause leaseapp", modeLabel},
+	"leaseRentSettlement":            {narrow, "clause leaseapp", modeRelation},
 	"ledgerHistory":                  {narrow, "account clause leaseapp transaction", modeLabel},
 	"oneBillCafeEntries":             {narrow, "cafeaccount cafetransaction leaseapp", modeRelation},
 	"oneBillClinicEntries":           {narrow, "clinicaccount clinictransaction identity leaseapp patient", modeLabel},
 	"oneBillRentEntries":             {narrow, "account leaseapp transaction", modeRelation},
 	"oneBillWellnessEntries":         {narrow, "identity leaseapp wellnessaccount wellnesstransaction", modeLabel},
-	"pastDueAppointments":            {narrow, "appointment patient provider", modeLabel},
-	"pastDueBookings":                {narrow, "booking identity session", modeLabel},
+	"pastDueAppointments":            {narrow, "appointment patient provider", modeRelation},
+	"pastDueBookings":                {narrow, "booking identity session", modeRelation},
 	"patientIdentityReadGrants":      {narrow, "identity patient", modeRelation},
 	"piiKeyEnvelope":                 {narrow, "identity", modeRelation},
 	"providerAppointmentsRead":       {narrow, "appointment building identity patient provider", modeLabel},
@@ -189,18 +204,18 @@ var corpusLabelVerdicts = map[string]labelVerdict{
 	"retentionKeyStatus":                {narrow, "retentionclass", modeRelation},
 	"shredStatus":                       {narrow, "identity", modeRelation},
 	"staffReadGrants":                   {narrow, "building identity role", modeRelation},
-	"unroutedTasks":                     {narrow, "role task", modeLabel},
-	"visitSeriesDue":                    {narrow, "patient provider visitseries", modeLabel},
+	"unroutedTasks":                     {narrow, "role task", modeRelation},
+	"visitSeriesDue":                    {narrow, "patient provider visitseries", modeRelation},
 	"visitSeriesRead":                   {narrow, "building identity patient provider visitseries", modeLabel},
-	"wellnessBookingReminders":          {narrow, "booking identity session", modeLabel},
+	"wellnessBookingReminders":          {narrow, "booking identity session", modeRelation},
 	"wellnessBookings":                  {narrow, "booking identity session studio", modeLabel},
 	"wellnessClassPriceSettlement":      {narrow, "booking identity session wellnessaccount wellnesstransaction", modeLabel},
 	"wellnessInstructors":               {narrow, "instructor studio", modeRelation},
 	"wellnessLedgerHistory":             {narrow, "identity wellnessaccount wellnesstransaction", modeRelation},
 	"wellnessMemberAccounts":            {narrow, "booking identity wellnessaccount", modeRelation},
 	"wellnessNoShowSettlement":          {narrow, "booking identity wellnessaccount wellnesstransaction", modeLabel},
-	"wellnessOrphanedBookingSettlement": {narrow, "booking session", modeLabel},
-	"wellnessRefundSettlement":          {narrow, "wellnessrefund wellnesstransaction", modeLabel},
+	"wellnessOrphanedBookingSettlement": {narrow, "booking session", modeRelation},
+	"wellnessRefundSettlement":          {narrow, "wellnessrefund wellnesstransaction", modeRelation},
 	"wellnessStudios":                   {narrow, "studio", modeRelation},
 
 	// Broad: something in the cypher binds a type no label names — an unlabeled
@@ -267,16 +282,27 @@ var corpusLabelVerdicts = map[string]labelVerdict{
 // the caps are the pipeline package's own unexported constants precisely so
 // there is one place that knows them.
 //
-// actorAware comes from the LENS DEFINITION (forEachCorpusCypher's doc), which
-// is the only source cmd/refractor's install switch consults. Deciding it here
-// from the cypher instead would make the census install components a deployment
-// would not, and the mode it pinned would then be a mode no deployment can
-// produce.
-func consumerFilterMode(t *testing.T, name string, eng *full.Engine, cr ruleengine.CompiledRule, actorAware bool) string {
+// It installs through the PRODUCTION installers — projection.InstallActorAggregate
+// and projection.InstallPersonalLens, dispatched by projection.IsActorAggregate /
+// projection.IsPersonalLens, which is cmd/refractor's own switch (main.go). That
+// is load-bearing rather than tidy. The two installers supply DIFFERENT §4.2
+// conjuncts: the actor-aggregate one declares pattern-closure and enrols a sweep
+// plan, the personal one supplies neither, because a Personal Lens consults the
+// D1 read gate and the Interest Set outside its compiled pattern. A census that
+// hand-rolled one install for both shapes would report every Personal lens
+// narrowed while production runs it broad — and would go on reporting it narrowed
+// if a later change made that narrowing real, which is the direction no revert
+// recovers.
+//
+// A refused install is a lens that does not RUN, so it is a failure here rather
+// than a mode: cmd/refractor registers no consumer for it at all, and pinning
+// whatever filter a half-installed pipeline would derive is exactly the fiction
+// the install-completeness guard exists to refuse.
+func consumerFilterMode(t *testing.T, name string, eng *full.Engine, cr ruleengine.CompiledRule, rule *lens.Rule) string {
 	t.Helper()
 	adpt, err := adapter.New(nil, []string{"key"}, adapter.DeleteModeHard)
 	require.NoErrorf(t, err, "%s census adapter", name)
-	p, err := pipeline.New("census-"+name, "nats_kv", bootstrap.CoreKVBucket, nil, nil, adpt, nil)
+	p, err := pipeline.New(rule.ID, "nats_kv", bootstrap.CoreKVBucket, nil, nil, adpt, nil)
 	require.NoErrorf(t, err, "%s census pipeline", name)
 	// The corpus DOES carry taxonomy sigils now (capabilityServiceAccess's
 	// `:location*`), and a `*`-carrying cypher refuses activation outright when
@@ -288,29 +314,133 @@ func consumerFilterMode(t *testing.T, name string, eng *full.Engine, cr ruleengi
 	// it in production: declare a fourth location leaf and this census moves.
 	p.SetTaxonomyResolver(corpusTaxonomyResolver(t))
 	require.NoErrorf(t, p.UseFullEngine(eng, cr), "%s must activate", name)
-	// The install stages an actor-aware lens gets, in cmd/refractor's own order
-	// (UseFullEngine → InstallActorAggregate → ConsumerFilter). The three
-	// components arrive together in production and so they do here; supplying
-	// only some of them would pin a footprint no deployment can produce.
-	//
-	// The anchor TYPE is the one input taken off the pattern, because
-	// pkgmgr.LensSpec's descriptor and the cypher must agree on it anyway: the
-	// descriptor's anchor is the vertex the pattern pins with `{key: $actorKey}`,
-	// so that position's own label IS the anchor type. An actor-aware lens whose
-	// pattern pins nothing has no anchor position to read, and the census fails
-	// it in TestCorpusLenses_DeclaredAnchorMatchesInstalledKind rather than
-	// guessing one here.
-	if fullCR, isFull := cr.(*full.CompiledRule); isFull && actorAware {
-		ix := fullCR.AnchorHopIndex()
-		require.GreaterOrEqualf(t, ix.Anchor, 0,
-			"%s is installed actor-aware but its pattern pins no $actorKey position", name)
-		anchorType := ix.Labels[ix.Anchor]
-		p.SetActorEnumerator(pipeline.NewActorEnumerator(nil, nil, anchorType))
-		p.SetPatternClosedOutput(true)
-		p.SetSweepPlan(pipeline.SweepPlan{AnchorType: anchorType, KeyPrefix: "census-" + name + "."})
+
+	// cmd/refractor's install order and its install SWITCH, both taken from the
+	// production sources rather than restated: UseFullEngine, then whichever
+	// installer the lens definition selects, then ConsumerFilter.
+	logger := slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelError}))
+	switch {
+	case projection.IsActorAggregate(rule):
+		require.Truef(t, projection.InstallActorAggregate(
+			p, adpt, rule, func(string) uint64 { return 0 }, nil, nil, logger),
+			"%s is declared actorAggregate but its own installer refuses it — the lens would never register", name)
+	case projection.IsPersonalLens(rule):
+		// requireReadGate is false because no census can thread a live
+		// Capability KV handle; it gates registration on the D1 read gate and
+		// nothing that ConsumerFilter reads. Every conjunct that DOES decide the
+		// filter comes from the installer itself.
+		require.Truef(t, projection.InstallPersonalLens(
+			p, rule, nil, nil, nil, nil, false, logger),
+			"%s is declared Personal but its own installer refuses it — the lens would never register", name)
 	}
 	_, _, dec := p.ConsumerFilter()
 	return dec.Mode
+}
+
+// corpusLensRule builds the *lens.Rule the production installers take, from the
+// package's own declared LensSpec.
+//
+// It is the ONE hop this census cannot borrow from production. pkgmgr serializes
+// a LensSpec into the lens meta-vertex's `spec` aspect (pkgmgr's lensSpecBody)
+// and Refractor's CoreKVSource parses it back (lens.translateSpec); both are
+// unexported, and neither is reachable without a live Core KV. So the fields the
+// install switch and the installers actually read are set here, and the residual
+// gap is asserted directly in TestCorpusLensRule_MatchesTheInstallSwitch rather
+// than argued.
+//
+// The OUTPUT DESCRIPTOR is not copied field by field: it is carried across by the
+// same JSON the real transport uses, so a field pkgmgr declares and Refractor
+// does not read (or a tag that drifts between them) fails here instead of
+// silently dropping a descriptor field the installer would have acted on.
+func corpusLensRule(t *testing.T, name string, l pkgmgr.LensSpec) *lens.Rule {
+	t.Helper()
+	// The authored adapter name to the runtime target type, the mapping
+	// pkgmgr.lensSpecBody performs on its way into the lens meta-vertex. An empty
+	// adapter is nats-kv, which is the same default that switch's bare arm takes.
+	var target string
+	switch l.Adapter {
+	case "postgres":
+		target = "postgres"
+	case "nats-subject":
+		target = "nats_subject"
+	default:
+		target = "nats_kv"
+	}
+	keyFields := l.IntoKey
+	if len(keyFields) == 0 {
+		keyFields = []string{"key"}
+	}
+	return &lens.Rule{
+		ID:             "census-" + name,
+		CanonicalName:  l.CanonicalName,
+		ProjectionKind: l.ProjectionKind,
+		ResolvedEngine: ruleengine.EngineFull,
+		Into: lens.IntoConfig{
+			Target:   target,
+			Bucket:   l.Bucket,
+			Key:      lens.KeyField(keyFields),
+			Personal: l.Personal,
+		},
+		Output: descriptorAcrossTheWire(t, name, l.Output),
+	}
+}
+
+// descriptorAcrossTheWire re-reads an authored output descriptor as Refractor
+// reads it: through the JSON both sides carry it in. nil in, nil out — a lens
+// with no descriptor declares none.
+//
+// The round-trip is asserted LOSSLESS in the field-set sense: re-marshalling the
+// Refractor-side struct must reproduce the authored JSON. A descriptor field
+// pkgmgr emits that lens.OutputDescriptorSpec has no tag for would otherwise
+// vanish here, and the installer would then act on a descriptor the package did
+// not write.
+func descriptorAcrossTheWire(t *testing.T, name string, authored any) *lens.OutputDescriptorSpec {
+	t.Helper()
+	if authored == nil || reflect.ValueOf(authored).IsNil() {
+		return nil
+	}
+	raw, err := json.Marshal(authored)
+	require.NoErrorf(t, err, "%s output descriptor must serialize", name)
+	var desc lens.OutputDescriptorSpec
+	require.NoErrorf(t, json.Unmarshal(raw, &desc), "%s output descriptor must parse as Refractor reads it", name)
+	back, err := json.Marshal(&desc)
+	require.NoErrorf(t, err, "%s output descriptor must re-serialize", name)
+	var authoredFields, parsedFields map[string]any
+	require.NoError(t, json.Unmarshal(raw, &authoredFields))
+	require.NoError(t, json.Unmarshal(back, &parsedFields))
+	for k, v := range authoredFields {
+		require.Containsf(t, parsedFields, k,
+			"%s declares output descriptor field %q that Refractor's own struct drops — the installer would act on a descriptor the package did not write", name, k)
+		require.Equalf(t, v, parsedFields[k], "%s output descriptor field %q changed value across the wire", name, k)
+	}
+	return &desc
+}
+
+// TestCorpusLensRule_MatchesTheInstallSwitch closes the one hop corpusLensRule
+// has to hand-build. The census is only as honest as its answer to "which
+// installer does this lens get", so that answer is asserted against the two
+// production predicates for every executable cypher the corpus ships, in both
+// directions — a rule that satisfies neither predicate must be a lens the
+// declaration really does leave plain.
+//
+// It is a test rather than an assertion inside the label census for the reason
+// TestCorpusLenses_DeclaredAnchorMatchesInstalledKind is: the census would
+// ABSORB a disagreement, reporting a mode for an install no deployment performs.
+func TestCorpusLensRule_MatchesTheInstallSwitch(t *testing.T) {
+	checked := 0
+	forEachCorpusCypher(t, func(name, spec string, rule *lens.Rule, declaredActorAggregate, declaredPersonal bool) {
+		require.Equalf(t, declaredActorAggregate, projection.IsActorAggregate(rule),
+			"%s: the declaration says actorAggregate=%v, but the rule the census installs from reads %v",
+			name, declaredActorAggregate, projection.IsActorAggregate(rule))
+		require.Equalf(t, declaredPersonal, projection.IsPersonalLens(rule),
+			"%s: the declaration says Personal=%v, but the rule the census installs from reads %v — a Personal lens read as plain gets pattern-closure and a sweep plan it never has in production",
+			name, declaredPersonal, projection.IsPersonalLens(rule))
+		require.Falsef(t, declaredActorAggregate && declaredPersonal,
+			"%s declares both projectionKind=actorAggregate and Personal — cmd/refractor's switch would silently pick the first arm", name)
+		checked++
+	})
+	require.Greaterf(t, checked, 100,
+		"the corpus enumeration collapsed to %d cyphers — this invariant is only worth what it covers", checked)
 }
 
 // corpusTaxonomyResolver builds an armed taxonomy resolver from every
@@ -359,7 +489,7 @@ func corpusLabelDerivation(t *testing.T) map[string]labelVerdict {
 	eng := full.New()
 	got := make(map[string]labelVerdict)
 
-	derive := func(name, spec string, actorAware bool) {
+	derive := func(name, spec string, rule *lens.Rule, _, _ bool) {
 		cr, err := eng.Parse(spec)
 		require.NoErrorf(t, err, "%s must parse", name)
 		fullCR, isFull := cr.(*full.CompiledRule)
@@ -372,7 +502,8 @@ func corpusLabelDerivation(t *testing.T) map[string]labelVerdict {
 		sort.Strings(sorted)
 		_, dup := got[name]
 		require.Falsef(t, dup, "two installed lenses share the canonical name %q", name)
-		got[name] = labelVerdict{exhaustive, strings.Join(sorted, " "), consumerFilterMode(t, name, eng, cr, actorAware)}
+		rule.CompiledRule = cr
+		got[name] = labelVerdict{exhaustive, strings.Join(sorted, " "), consumerFilterMode(t, name, eng, cr, rule)}
 	}
 	forEachCorpusCypher(t, derive)
 	return got
@@ -389,21 +520,27 @@ func corpusLabelDerivation(t *testing.T) map[string]labelVerdict {
 // swept the registry its own way would quietly cover a different corpus and
 // pin a different thing.
 //
-// actorAware is the lens DEFINITION's answer to "does activation install the
-// cross-vertex fan-out for this lens", read off the same two aspects
-// cmd/refractor's install switch reads (projection.IsActorAggregate /
-// projection.IsPersonalLens, main.go) and off nothing else — notably NOT off
-// the cypher. A census that decided it from the cypher would be deciding by a
+// rule is the *lens.Rule cmd/refractor's install switch dispatches on, built
+// from the lens DEFINITION and off nothing else — notably NOT off the cypher. A
+// census that decided the install shape from the cypher would be deciding by a
 // different rule than the deployment it claims to model, and would absorb the
 // exact disagreement between the two that
 // TestCorpusLenses_DeclaredAnchorMatchesInstalledKind exists to catch.
-func forEachCorpusCypher(t *testing.T, visit func(name, spec string, actorAware bool)) {
+//
+// declaredActorAggregate and declaredPersonal are the same two answers read
+// straight off the declaration, handed over beside the rule so
+// TestCorpusLensRule_MatchesTheInstallSwitch can hold the rule to them. They are
+// mutually exclusive by that test's assertion, not by construction — the
+// declaration surface permits both flags and cmd/refractor's switch would
+// silently take the first arm.
+func forEachCorpusCypher(t *testing.T, visit func(name, spec string, rule *lens.Rule, declaredActorAggregate, declaredPersonal bool)) {
 	t.Helper()
 	addLens := func(l pkgmgr.LensSpec) {
-		actorAware := l.ProjectionKind == projection.ActorAggregateKind || l.Personal
+		aggregate := l.ProjectionKind == projection.ActorAggregateKind
 		if len(l.SpecBranches) > 0 {
 			for i, b := range l.SpecBranches {
-				visit(fmt.Sprintf("%s#%d", l.CanonicalName, i), b, actorAware)
+				branchName := fmt.Sprintf("%s#%d", l.CanonicalName, i)
+				visit(branchName, b, corpusLensRule(t, branchName, l), aggregate, l.Personal)
 			}
 			return
 		}
@@ -419,7 +556,7 @@ func forEachCorpusCypher(t *testing.T, visit func(name, spec string, actorAware 
 				"lens %q has no cypher but sources %q, not an event stream", l.CanonicalName, l.Source.Kind)
 			return
 		}
-		visit(l.CanonicalName, l.Spec, actorAware)
+		visit(l.CanonicalName, l.Spec, corpusLensRule(t, l.CanonicalName, l), aggregate, l.Personal)
 	}
 
 	for _, name := range pkgregistry.Names() {
@@ -440,9 +577,36 @@ func forEachCorpusCypher(t *testing.T, visit func(name, spec string, actorAware 
 		// bootstrap.LensDefinition carries projectionKind and no Personal flag —
 		// the kernel ships no Personal lens, and the seeder writes the same
 		// projectionKind aspect a package lens declares, so activation switches
-		// on it identically.
-		visit(l.CanonicalName, l.CypherRule, l.ProjectionKind == projection.ActorAggregateKind)
+		// on it identically. It reaches the same builder through the same
+		// LensSpec shape rather than a second one.
+		spec := pkgmgr.LensSpec{
+			CanonicalName:  l.CanonicalName,
+			Adapter:        l.Adapter,
+			Bucket:         l.TargetBucket,
+			ProjectionKind: l.ProjectionKind,
+			Output:         bootstrapDescriptorAsPkgmgr(t, l),
+		}
+		visit(l.CanonicalName, l.CypherRule, corpusLensRule(t, l.CanonicalName, spec),
+			l.ProjectionKind == projection.ActorAggregateKind, false)
 	}
+}
+
+// bootstrapDescriptorAsPkgmgr re-reads a kernel lens's output descriptor as a
+// package one, through the same JSON both declaration surfaces serialize into
+// the lens meta-vertex. The kernel and the packages declare descriptors in two
+// structs precisely because neither package may import the other; the wire shape
+// is what they share, so it is what this census crosses on.
+func bootstrapDescriptorAsPkgmgr(t *testing.T, l bootstrap.LensDefinition) *pkgmgr.OutputDescriptorSpec {
+	t.Helper()
+	if l.Output == nil {
+		return nil
+	}
+	raw, err := json.Marshal(l.Output)
+	require.NoErrorf(t, err, "%s kernel output descriptor must serialize", l.CanonicalName)
+	var out pkgmgr.OutputDescriptorSpec
+	require.NoErrorf(t, json.Unmarshal(raw, &out),
+		"%s kernel output descriptor must parse into the package descriptor shape", l.CanonicalName)
+	return &out
 }
 
 // TestCorpusLenses_DeclaredAnchorMatchesInstalledKind pins the bi-conditional
@@ -474,7 +638,8 @@ func forEachCorpusCypher(t *testing.T, visit func(name, spec string, actorAware 
 func TestCorpusLenses_DeclaredAnchorMatchesInstalledKind(t *testing.T) {
 	eng := full.New()
 	checked := 0
-	forEachCorpusCypher(t, func(name, spec string, actorAware bool) {
+	forEachCorpusCypher(t, func(name, spec string, rule *lens.Rule, declaredActorAggregate, declaredPersonal bool) {
+		actorAware := declaredActorAggregate || declaredPersonal
 		cr, err := eng.Parse(spec)
 		require.NoErrorf(t, err, "%s must parse", name)
 		fullCR, isFull := cr.(*full.CompiledRule)
@@ -536,4 +701,86 @@ func TestCorpusLabelDerivation_WalkComposedLensesStillNarrow(t *testing.T) {
 		require.Truef(t, have.exhaustive,
 			"%s labels its walk variables inside OPTIONAL clauses — it must still narrow", name)
 	}
+}
+
+// TestPersonalLenses_NeverAcquireTheNarrowedFilter states at corpus level the
+// consequence the pinned table above only carries as data: every Personal lens
+// the corpus ships takes the BROAD filter, and it does so because its own
+// installer withholds §4.2's conjuncts.
+//
+// It is worth its own name because of the direction the mistake runs. A Personal
+// Lens's row depends on the D1 read gate (cap-read.<domain>.<actor>) and the
+// Interest Set, neither of which its compiled pattern binds — so a role event
+// that widens an actor's grants is exactly the event a narrowed filter would
+// withhold, and withholding it is a grant that never appears or never retracts.
+// Threading a sweep plan through InstallPersonalLens is a plausible convergence
+// change that would hand every one of these lenses a narrowed filter, relation
+// segment included, as a side effect nobody asked for; no filter update rewinds
+// a JetStream cursor, so it is not a change a revert undoes.
+//
+// The pattern-closure seam itself is pinned on a fixture in
+// projection.TestPatternClosure_OnlyActorAggregateAssertsIt. This is the corpus
+// half: that the seam holds for every lens actually installed.
+func TestPersonalLenses_NeverAcquireTheNarrowedFilter(t *testing.T) {
+	eng := full.New()
+	checked := 0
+	forEachCorpusCypher(t, func(name, spec string, rule *lens.Rule, _, declaredPersonal bool) {
+		if !declaredPersonal {
+			return
+		}
+		cr, err := eng.Parse(spec)
+		require.NoErrorf(t, err, "%s must parse", name)
+		rule.CompiledRule = cr
+		require.Equalf(t, health.FilterModeBroad, consumerFilterMode(t, name, eng, cr, rule),
+			"%s is a Personal lens: its row depends on the D1 read gate and the Interest Set, both outside its compiled pattern, so no narrowed filter may ever be derived for it. "+
+				"If this failed because InstallPersonalLens now supplies a sweep plan or pattern-closure, that install change is the thing to review", name)
+		checked++
+	})
+	require.Positivef(t, checked, "no Personal lens was reached — this invariant is only worth what it covers")
+}
+
+// TestCorpusInstallers_OnlyReachAdaptersTheCensusModels states the census's
+// remaining limit rather than quietly exceeding it: it builds ONE adapter shape
+// (the NATS-KV one) for every lens, so its verdicts are only honest while every
+// lens whose installer consults an adapter declares that target.
+//
+// The install decisions that read the adapter are both capability type
+// assertions, and both fall the generous way here:
+//
+//   - sweepEnrolment refuses a lens whose target cannot enumerate keys under a
+//     prefix (adapter.PrefixKeyLister). A refusal means NO sweep plan, which
+//     fails §4.2's healer conjunct and puts the lens on the broad filter —
+//     while this census, holding a NATS-KV adapter, would report it narrowed.
+//   - a perEntry descriptor (entryKeyColumn) additionally requires
+//     adapter.RowReader, and InstallActorAggregate REFUSES registration without
+//     it, so such a lens would not run at all.
+//
+// Today every actor-aggregate lens in the corpus declares nats-kv, so the shape
+// the census builds is the shape production builds. The Postgres adapters
+// (PostgresAdapter, GrantWriterAdapter, ProtectedAdapter) implement neither
+// optional interface, so a Postgres actor-aggregate lens would take the broad
+// filter in production and a perEntry one would be refused outright — which is
+// why this is asserted rather than left as a note. The corpus's Postgres lenses
+// are all PLAIN, and §4.2 never consults an adapter for a plain lens.
+//
+// A Personal lens needs no arm here: InstallPersonalLens takes no adapter at
+// all, so its verdict cannot depend on one.
+//
+// The fix when this fails is to give the census the adapter the lens declares,
+// not to widen this assertion. A capability-shaped double would be a second
+// place that claims to know which optional interfaces each production adapter
+// satisfies, and that claim going stale is this whole class of defect.
+func TestCorpusInstallers_OnlyReachAdaptersTheCensusModels(t *testing.T) {
+	checked := 0
+	forEachCorpusCypher(t, func(name, spec string, rule *lens.Rule, _, _ bool) {
+		if !projection.IsActorAggregate(rule) {
+			return
+		}
+		require.Equalf(t, "nats_kv", rule.Into.Target,
+			"%s is an actor-aggregate lens declaring target %q, but this census builds a NATS-KV adapter for every lens. "+
+				"sweepEnrolment and the perEntry install both branch on adapter capability, so the verdict pinned for this lens is not the one production derives — give the census this lens's real adapter",
+			name, rule.Into.Target)
+		checked++
+	})
+	require.Positivef(t, checked, "no actor-aggregate lens was reached — this limit is only worth what it covers")
 }

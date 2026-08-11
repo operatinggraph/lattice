@@ -147,3 +147,48 @@ RETURN perm.key AS key`)
 	require.True(t, exhaustive, "a renamed carry keeps the label under the new name")
 	require.Equal(t, map[string]struct{}{"identity": {}, "role": {}, "permission": {}}, labels)
 }
+
+// TestReferencedLabels_UnmodelledExprIsNonExhaustive pins the walk's fail-closed
+// arm, the twin of TestReferencedRelations_UnmodelledExprIsNonExhaustive on the
+// other half of a link key. Both dimensions feed the same narrowed consumer
+// filter, so a shape one walk gives up on and the other silently accepts would
+// leave the filter authoritative on exactly the half that cannot see it.
+//
+// The direction is what matters. A label reachable only through an unmodelled
+// expression, reported inside an exhaustive set, is a vertex type the narrowed
+// consumer never subscribes to and the client gate never acts on — undeliverable,
+// and unrecoverable once the filter is registered. Reporting non-exhaustive costs
+// the broad filter and nothing else.
+//
+// The leaves are asserted in the same test because they are the reason the arm
+// cannot be a bare default: Literal, ParameterRef and VariableRef reach it on
+// ordinary queries, and sweeping them in would take the whole corpus broad.
+func TestReferencedLabels_UnmodelledExprIsNonExhaustive(t *testing.T) {
+	withWhere := func(where Expr) *CompiledRule {
+		return &CompiledRule{Query: &Query{Clauses: []Clause{
+			&Match{
+				Patterns: []PathPattern{{
+					Nodes: []NodePattern{{Variable: "b", Label: "book"}, {Variable: "a", Label: "author"}},
+					Rels:  []RelPattern{{Type: "wrote", MinHops: 1, MaxHops: 1}},
+				}},
+				Where: where,
+			},
+		}}}
+	}
+
+	labels, exhaustive := withWhere(&Literal{Value: "x"}).ReferencedLabels()
+	require.True(t, exhaustive, "a literal binds no node — it must not cost exhaustiveness")
+	require.Equal(t, map[string]struct{}{"book": {}, "author": {}}, labels)
+
+	_, exhaustive = withWhere(&ParameterRef{Name: "actorKey"}).ReferencedLabels()
+	require.True(t, exhaustive, "a parameter reference binds no node")
+
+	_, exhaustive = withWhere(&VariableRef{Name: "b"}).ReferencedLabels()
+	require.True(t, exhaustive, "a variable reference binds no node")
+
+	labels, exhaustive = withWhere(fakeUnknownExpr{}).ReferencedLabels()
+	require.False(t, exhaustive,
+		"an Expr this walk does not model may bind a node whose type is missing from the set — the set cannot be authoritative")
+	require.Equal(t, map[string]struct{}{"book": {}, "author": {}}, labels,
+		"the labels it did find are still reported — only the exhaustiveness claim is withdrawn")
+}

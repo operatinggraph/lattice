@@ -1008,9 +1008,12 @@ An **absent** `filterMode` means the lens has **never derived a consumer filter*
 by a Refractor that predates these fields, or a lens that has not reached its derivation yet. It
 does **not** mean `broad`: a lens on the broad filter says so, and carries a reason. `filterMode` is
 `narrowed-relation` when the filter pins relations as well as vertex types, `narrowed-label` when it
-pins types alone (the actor-aware lenses are always at most this — their link arm judges by endpoint
-type, so a relation-pinned subject would withhold an event that arm keeps), and `broad` when the
-lens subscribes the whole `$KV.<bucket>.>`. `filterLabelCount` is how many labels the narrowed
+pins types alone (an untyped or variable-length relationship anywhere in the cypher, or a
+`labels x (1 + 2 x relations)` subject count over the budget), and `broad` when the
+lens subscribes the whole `$KV.<bucket>.>`. Both narrowed modes are reachable by plain and
+actor-aware lenses alike: each shape's link arm carries the matching relation conjunct, so a
+relation-pinned subject withholds only links that arm skips anyway.
+`filterLabelCount` is how many labels the narrowed
 filter was BUILT from — a `*` label contributes its taxonomy-resolved concrete types rather than
 itself, so this can move without the cypher changing — and is `0` (omitted) on every broad entry.
 

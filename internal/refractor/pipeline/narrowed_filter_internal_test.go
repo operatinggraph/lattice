@@ -153,23 +153,23 @@ func TestNarrowedFilterEligible_ActorAwareIsTheFanOutGate(t *testing.T) {
 	}
 }
 
-// TestConsumerFilter_ActorAwareNarrowsByLabelOnly pins the derivation end of
-// Increment 2, in both dimensions.
+// TestConsumerFilter_ActorAwareNarrowing pins the derivation end of the
+// actor-aware narrowing, in both dimensions, against the client gate each one
+// has to match.
 //
-// The LABEL dimension: an eligible actor-aware pipeline's filter set is the same
+// The LABEL dimension: a rule with no exhaustive relation set gets the same
 // three-forms-per-label expansion the plain path gets — the vertex form (which
 // subsumes the label's aspect keys, Contract #1 §1.5) plus both link directions,
 // which is the alignment the fan-out arms' own skip conditions require.
 //
-// The RELATION dimension: it must NOT apply, even when the compiled rule's
-// relation set is exhaustive and would fit the subject budget. Relation
-// narrowing is sound for a plain lens because plainLinkReactsTo already skips a
-// link on an untraversed relation; the actor-aware link arm judges by endpoint
-// type alone, so withholding by relation would deny it an event its client gate
-// keeps. The subject that proves it is asserted by name below: a source-pinned
-// relation form must never appear.
-func TestConsumerFilter_ActorAwareNarrowsByLabelOnly(t *testing.T) {
-	everyForm := []string{
+// The RELATION dimension: an exhaustive relation set pins the relation segment,
+// and the link arm carries the matching conjunct. Both halves are asserted on
+// the SAME pipeline, because either alone is the failure: subjects pinned
+// without the arm's conjunct withhold events the arm keeps (unrecoverable — no
+// filter update rewinds a JetStream cursor), and the arm's conjunct without the
+// subjects is a skip that still costs a queue slot.
+func TestConsumerFilter_ActorAwareNarrowing(t *testing.T) {
+	relationBlindForms := []string{
 		"$KV.core-kv.vtx.identity.>",
 		"$KV.core-kv.lnk.identity.>",
 		"$KV.core-kv.lnk.*.*.*.identity.>",
@@ -178,34 +178,64 @@ func TestConsumerFilter_ActorAwareNarrowsByLabelOnly(t *testing.T) {
 		"$KV.core-kv.lnk.*.*.*.role.>",
 	}
 
-	t.Run("relation-blind rule narrows to every form", func(t *testing.T) {
+	t.Run("a non-exhaustive relation set narrows by label alone", func(t *testing.T) {
 		p := eligiblePipeline(t)
 		p.coreKVBucket = "core-kv"
 
 		filterSubjects, filterSubject, _ := p.ConsumerFilter()
 		require.Empty(t, filterSubject, "an eligible actor-aware pipeline must not fall back to broad")
-		require.ElementsMatch(t, everyForm, filterSubjects)
+		require.ElementsMatch(t, relationBlindForms, filterSubjects)
+		require.True(t, p.LinkEventRelevant("anything", "identity", "role"),
+			"with no exhaustive relation set the arm must keep every link its endpoints admit — the filter wildcards that segment")
 	})
 
-	t.Run("an exhaustive relation set does not narrow the link forms", func(t *testing.T) {
+	t.Run("an exhaustive relation set narrows the link forms, and the arm skips to match", func(t *testing.T) {
 		p := eligiblePipeline(t)
 		p.coreKVBucket = "core-kv"
-		// What capabilityRoles actually derives: every traversed edge typed, so
-		// the plain path here would relation-narrow.
+		// What capabilityRoles actually derives: every traversed edge typed.
 		p.plainReprojectRelations = map[string]struct{}{"holdsRole": {}}
 		p.plainRelationsExhaustive = true
 
 		filterSubjects, filterSubject, _ := p.ConsumerFilter()
 		require.Empty(t, filterSubject)
-		require.ElementsMatch(t, everyForm, filterSubjects,
-			"an actor-aware lens narrows by label only — its link arm has no relation gate")
-		require.NotContains(t, filterSubjects, "$KV.core-kv.lnk.identity.*.holdsRole.>",
-			"a relation-pinned form would withhold a link on an untraversed relation whose endpoint type the fan-out arm still binds")
+		require.ElementsMatch(t, []string{
+			"$KV.core-kv.vtx.identity.>",
+			"$KV.core-kv.lnk.identity.*.holdsRole.>",
+			"$KV.core-kv.lnk.*.*.holdsRole.identity.>",
+			"$KV.core-kv.vtx.role.>",
+			"$KV.core-kv.lnk.role.*.holdsRole.>",
+			"$KV.core-kv.lnk.*.*.holdsRole.role.>",
+		}, filterSubjects)
+
+		require.True(t, p.LinkEventRelevant("holdsRole", "identity", "role"),
+			"the traversed relation between two bindable endpoints is what the pinned forms admit")
+		require.True(t, p.LinkEventRelevant("holdsRole", "identity", "booking"),
+			"one bindable endpoint is enough, exactly as the source-pinned form admits it")
+		require.False(t, p.LinkEventRelevant("bookedBy", "identity", "booking"),
+			"the arm must skip the link the relation-pinned forms withhold — this is the conjunct that makes the pinning sound")
+		require.False(t, p.LinkEventRelevant("holdsRole", "booking", "unit"),
+			"a traversed relation between two unbindable endpoints matches no (label, relation) form")
 	})
 
-	t.Run("the same rule on a plain pipeline does relation-narrow", func(t *testing.T) {
-		// The control that keeps the assertion above from passing because
-		// relation narrowing is broken outright rather than gated.
+	t.Run("an INELIGIBLE actor-aware lens keeps every link and takes the broad filter", func(t *testing.T) {
+		// The conjuncts arm together or not at all: a lens whose §4.2 answer is
+		// no must not acquire the relation skip while its filter stays broad.
+		p := eligiblePipeline(t)
+		p.coreKVBucket = "core-kv"
+		p.patternClosedOutput = false
+		p.plainReprojectRelations = map[string]struct{}{"holdsRole": {}}
+		p.plainRelationsExhaustive = true
+
+		filterSubjects, filterSubject, _ := p.ConsumerFilter()
+		require.Empty(t, filterSubjects)
+		require.Equal(t, "$KV.core-kv.>", filterSubject)
+		require.True(t, p.LinkEventRelevant("bookedBy", "identity", "booking"),
+			"a broad filter delivers this link, so the arm must still act on it")
+	})
+
+	t.Run("the same rule on a plain pipeline relation-narrows too", func(t *testing.T) {
+		// The control that keeps the assertions above from passing because
+		// relation narrowing is broken outright rather than derived.
 		p := eligiblePipeline(t)
 		p.coreKVBucket = "core-kv"
 		p.actorEnumerator = nil
@@ -215,6 +245,7 @@ func TestConsumerFilter_ActorAwareNarrowsByLabelOnly(t *testing.T) {
 		filterSubjects, filterSubject, _ := p.ConsumerFilter()
 		require.Empty(t, filterSubject)
 		require.Contains(t, filterSubjects, "$KV.core-kv.lnk.identity.*.holdsRole.>")
+		require.False(t, p.LinkEventRelevant("bookedBy", "identity", "booking"))
 	})
 }
 
@@ -629,37 +660,39 @@ func TestConsumerFilter_RelationNarrowing(t *testing.T) {
 	})
 }
 
-// TestPlainLinkReactsTo pins the client-side relation gate — load-bearing for
-// any lens that keeps a broader filter than its relation set would allow
-// (over the subject budget, or actor-aware). Every uncertain input defaults to
-// relevant, exactly as plainReactsTo does.
-func TestPlainLinkReactsTo(t *testing.T) {
+// TestLinkRelationReactsTo pins the client-side relation gate both link arms
+// share — load-bearing twice over: it is what entitles a narrowed filter to pin
+// the relation segment at all, and it is the only thing still skipping when a
+// lens keeps a broader filter than its relation set would allow (over the
+// subject budget). Every uncertain input defaults to relevant, exactly as
+// plainReactsTo does.
+func TestLinkRelationReactsTo(t *testing.T) {
 	narrowed := &Pipeline{
 		engineKind:               ruleengine.EngineFull,
 		plainReprojectRelations:  map[string]struct{}{"identifiedBy": {}},
 		plainRelationsExhaustive: true,
 	}
-	require.True(t, narrowed.ruleState().plainLinkReactsTo("identifiedBy"))
-	require.False(t, narrowed.ruleState().plainLinkReactsTo("providedTo"),
+	require.True(t, narrowed.ruleState().linkRelationReactsTo("identifiedBy"))
+	require.False(t, narrowed.ruleState().linkRelationReactsTo("providedTo"),
 		"the exact live shape: a relation the lens never traverses")
-	require.True(t, narrowed.ruleState().plainLinkReactsTo(""), "an unparsed relation defaults to relevant")
+	require.True(t, narrowed.ruleState().linkRelationReactsTo(""), "an unparsed relation defaults to relevant")
 
 	noRels := &Pipeline{
 		engineKind:               ruleengine.EngineFull,
 		plainRelationsExhaustive: true,
 	}
-	require.False(t, noRels.ruleState().plainLinkReactsTo("anything"),
+	require.False(t, noRels.ruleState().linkRelationReactsTo("anything"),
 		"a lens with no relationship pattern reacts to no link at all")
 
 	notExhaustive := &Pipeline{
 		engineKind:              ruleengine.EngineFull,
 		plainReprojectRelations: map[string]struct{}{"identifiedBy": {}},
 	}
-	require.True(t, notExhaustive.ruleState().plainLinkReactsTo("providedTo"))
+	require.True(t, notExhaustive.ruleState().linkRelationReactsTo("providedTo"))
 
 	notFull := &Pipeline{
 		plainReprojectRelations:  map[string]struct{}{"identifiedBy": {}},
 		plainRelationsExhaustive: true,
 	}
-	require.True(t, notFull.ruleState().plainLinkReactsTo("providedTo"), "a non-full engine has no relation data to trust")
+	require.True(t, notFull.ruleState().linkRelationReactsTo("providedTo"), "a non-full engine has no relation data to trust")
 }
