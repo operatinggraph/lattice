@@ -105,7 +105,10 @@ func (*Engine) Parse(ruleBody string) (ruleengine.CompiledRule, error) {
 		}
 	}
 
-	return &CompiledRule{Query: v.query}, nil
+	return &CompiledRule{
+		Query:             v.query,
+		groupingRedundant: analyseGroupingRedundancy(v.query),
+	}, nil
 }
 
 // Execute is implemented in executor.go (Story 3.1b-ii). The interface-level

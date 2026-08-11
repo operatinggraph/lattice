@@ -22,7 +22,7 @@ import (
 // Each "logical" test name (alice, admin, room, ...) maps to a fixed
 // valid 20-char NanoID; helpers materialize the corresponding
 // vtx.<type>.<id> Core KV key when calling putVertex / putEdge.
-func startExecKVs(t *testing.T) (adjKV, coreKV *substrate.KV) {
+func startExecKVs(t testing.TB) (adjKV, coreKV *substrate.KV) {
 	t.Helper()
 	_, nc := natsfixture.Server(t)
 
@@ -85,7 +85,7 @@ func c1NanoID(name string) string {
 // the NanoID is deterministically derived from name. Registers the
 // mapping so putEdge can resolve `name` to a vtx key. Returns the
 // full vtx key for callers that need to set up MATCH (i {key: ...}).
-func putVertex(t *testing.T, reg *fixtureRegistry, kv *substrate.KV, name, class string, extra map[string]any) string {
+func putVertex(t testing.TB, reg *fixtureRegistry, kv *substrate.KV, name, class string, extra map[string]any) string {
 	t.Helper()
 	id := c1NanoID(name)
 	vtxKey := "vtx." + class + "." + id
@@ -105,7 +105,7 @@ func putVertex(t *testing.T, reg *fixtureRegistry, kv *substrate.KV, name, class
 
 // putEdge writes both inbound and outbound adjacency entries for one edge.
 // fromName/toName must have been registered via putVertex.
-func putEdge(t *testing.T, reg *fixtureRegistry, adjKV *substrate.KV, name, fromName, toName string) {
+func putEdge(t testing.TB, reg *fixtureRegistry, adjKV *substrate.KV, name, fromName, toName string) {
 	t.Helper()
 	ctx := context.Background()
 	fromID := reg.idByName[fromName]

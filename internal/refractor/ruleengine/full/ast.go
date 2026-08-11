@@ -273,6 +273,17 @@ type CompiledRule struct {
 	// contain both `(a:location)` and `(b:location*)`, and only the second
 	// ever looks in this map.
 	LabelExpansion map[string]map[string]struct{}
+
+	// groupingRedundant marks, per projecting clause, the items whose value is
+	// already determined by the aliases still in that clause's grouping key —
+	// so rendering them into the key cannot change the partition (grouping.go).
+	// Absent clause, absent mask, and nil map all mean "render everything",
+	// which is the executor's behaviour with no analysis at all: a directly
+	// constructed *CompiledRule gets nil here and is unaffected.
+	//
+	// Written once by Parse, over the Query above, and never mutated
+	// afterwards — a compiled rule is shared across concurrent evaluations.
+	groupingRedundant map[Clause][]bool
 }
 
 // EngineName implements ruleengine.CompiledRule.

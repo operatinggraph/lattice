@@ -79,7 +79,7 @@ const (
 //
 // Host is pinned to loopback so a test server is never reachable off-box and
 // never trips the macOS firewall prompt.
-func Options(t *testing.T) *natsserver.Options {
+func Options(t testing.TB) *natsserver.Options {
 	t.Helper()
 	return &natsserver.Options{
 		Host:      "127.0.0.1",
@@ -94,7 +94,7 @@ func Options(t *testing.T) *natsserver.Options {
 // StartServer starts an embedded NATS server with JetStream and registers its
 // teardown. Use it when the test needs to control its own client options;
 // otherwise prefer Server.
-func StartServer(t *testing.T) *natsserver.Server {
+func StartServer(t testing.TB) *natsserver.Server {
 	t.Helper()
 	return StartServerWith(t, Options(t))
 }
@@ -103,7 +103,7 @@ func StartServer(t *testing.T) *natsserver.Server {
 // registering the same teardown. Callers that need a non-default option (a
 // custom auth block, say) should start from Options(t) and amend it, so the
 // port and store-dir invariants above are preserved.
-func StartServerWith(t *testing.T, opts *natsserver.Options) *natsserver.Server {
+func StartServerWith(t testing.TB, opts *natsserver.Options) *natsserver.Server {
 	t.Helper()
 	s, err := natsserver.NewServer(opts)
 	if err != nil {
@@ -126,7 +126,7 @@ func StartServerWith(t *testing.T, opts *natsserver.Options) *natsserver.Server 
 
 // Server starts an embedded NATS server with JetStream and returns it together
 // with a connected client. Both are torn down via t.Cleanup.
-func Server(t *testing.T) (*natsserver.Server, *nats.Conn) {
+func Server(t testing.TB) (*natsserver.Server, *nats.Conn) {
 	t.Helper()
 	s := StartServer(t)
 	return s, Connect(t, s.ClientURL())
@@ -135,7 +135,7 @@ func Server(t *testing.T) (*natsserver.Server, *nats.Conn) {
 // Connect dials url with a stall-tolerant handshake budget and a bounded retry,
 // closing the connection via t.Cleanup. Extra options are appended after the
 // defaults, so a caller can override the timeout deliberately.
-func Connect(t *testing.T, url string, opts ...nats.Option) *nats.Conn {
+func Connect(t testing.TB, url string, opts ...nats.Option) *nats.Conn {
 	t.Helper()
 	nc, err := connect(url, opts...)
 	if err != nil {

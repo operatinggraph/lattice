@@ -70,7 +70,7 @@ type edgeManifestReadGrantCorpus struct {
 
 // seedEdgeManifestReadGrantCorpus builds the corpus described above under a
 // single resident identity, returning its own vtx key as actorKey.
-func seedEdgeManifestReadGrantCorpus(t *testing.T) edgeManifestReadGrantCorpus {
+func seedEdgeManifestReadGrantCorpus(t testing.TB) edgeManifestReadGrantCorpus {
 	t.Helper()
 	adjKV, coreKV := startExecKVs(t)
 	reg := newFixtureRegistry()

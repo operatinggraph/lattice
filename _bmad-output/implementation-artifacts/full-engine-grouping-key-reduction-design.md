@@ -173,10 +173,35 @@ Every one of them is discarded: the string is joined, used as a map key, and nev
 value is **the same value in every row** — stage *k−1* collapsed to one row per actor, so all `rows_k`
 rows descend from a single binding and share the identical slice header.
 
-The three generated producers are the **entire** census of this shape. Every other multi-`WITH` lens in
-the corpus (14 in `packages/edge-manifest/lenses.go`) carries only `*nodeRef` values, which render in
-O(1) — so there is no second victim, and the generalization probe (§2 reflex: *the mechanism, not the
-instance*) closes with a bounded answer rather than a hopeful one.
+**Corrected 2026-08-11 (build). The claim that stood here — "the three generated producers are the
+entire census of this shape; every other multi-`WITH` lens in the corpus carries only `*nodeRef` values,
+which render in O(1)" — was FALSE in both halves**, and it was arrived at by reading cypher by eye, which
+is the failure mode the Refractor dossier already names ("site censuses derived from key shapes
+undercount — derive the census from the matcher").
+
+The population of the carried-accumulator shape is **four** lenses, not three:
+
+| Lens | Shape | Verdict |
+|---|---|---|
+| `edgeManifestReadGrants` / `…Staff…` / `…Provider…` | 9 / 5 / 3 staged `WITH`s carrying `collect(DISTINCT …)` lists | reduces; effective key `{identity}` at every stage |
+| `identityErasureResidue` (`packages/privacy-base/lenses.go`) | **five** chained aggregating `WITH`s carrying `count(DISTINCT …)` **int64** scalars forward as bare carries | reduces; effective key `{i}` at every stage, stages 2–5 armed |
+
+`identityErasureResidue` is the GDPR erasure-completion lens, it is not in edge-manifest, and its carried
+values are scalars rather than node refs — so both clauses of the original sentence fail on it. It is
+immune to a wrong reduction for the same structural reason the producers are (`MATCH (i:identity {key:
+$actorKey})` binds one identity ⇒ one group per stage), and a merge there would *inflate* a residue count,
+driving `violating` true, which is fail-closed. But that immunity was never checked before the build armed
+a mask on it; it is checked now, by an equivalence test over a corpus with residue on all five relations.
+
+`cafeTabSettlement` (`packages/cafe-domain/lenses.go`) is a second multi-`WITH` the eye-census missed. It
+carries no accumulator and is **refused** — its first clause groups on `l` and its second does not carry
+`l` — so nothing about it changes; it is pinned as a refusal so that stays deliberate.
+
+The census is now **executable**, not prose: `internal/refractor/grouping_reduction_corpus_census_test.go`
+derives the verdict for every one of the ~114 cyphers the installed corpus ships (sharing the label
+census's own corpus enumerator, read-grant walks expanded and `SpecBranches` included) and pins each. A
+lens that starts or stops reducing, or whose effective grouping key moves, fails there. That is what
+closes the generalization probe with a bounded answer instead of a hopeful one.
 
 ## 4. The shape — functional-dependence key reduction
 
@@ -218,7 +243,7 @@ nonAgg   = { i : !containsAggregator(I[i].Expr) }
 agg      = { i :  containsAggregator(I[i].Expr) }
 carried  = { alias(i) : i ∈ nonAgg, I[i].Expr is *VariableRef{Name: alias(i)} }
 
-if duplicate aliases in I            → redundant(C) = ∅; key = aliases(nonAgg); det = aliases(agg)   // fail-closed
+if duplicate aliases in I            → redundant(C) = ∅; key = aliases(nonAgg); det = ∅              // fail-closed
 else if key ⊄ carried                → redundant(C) = ∅; key = aliases(nonAgg); det = aliases(agg)   // fail-closed
 else
     redundant(C) = { i ∈ nonAgg : alias(i) ∈ det ∩ carried }
@@ -228,10 +253,35 @@ else
 
 `Match` clauses are skipped — they cannot rebind (§4.1), so they cannot invalidate a dependence.
 
-**Inductive soundness.** `key ∩ det = ∅` by construction. `key_old ⊆ carried` and
-`key_old ∩ redundant = ∅`, so `key_old ⊆ key_new` — every alias previously determined by `key_old` stays
-determined by `key_new`, and each newly aggregated alias is determined by `C`'s actual grouping key, which
-equals `key_new` because only determined items were dropped.
+**Amended 2026-08-11 (build): the duplicate-alias branch above read `det = aliases(agg)`, and it was
+FAIL-OPEN.** Those two sets intersect exactly when one alias is named twice with one item aggregating and
+one not — which is the case that takes the branch. `WITH n.owner AS a, collect(n.key) AS a` left `a` in
+both `key` and `det`, so the next clause read `a` as determined-and-carried, dropped it from the key, and
+merged every group into one; driving two differently-valued rows through the following clause returned
+**1 row instead of 2**. On a read-grant producer that is the over-grant the whole design exists to prevent,
+and the shape is one keystroke from the generated producers' own (`WITH identity, collect(…) AS identity`).
+
+The root cause is not set arithmetic but a **name collision**: the analysis reasons in ALIASES while the
+executor keys its groups on the value of every non-aggregating ITEM, index-tagged. The two agree exactly
+while each alias names one item, and stop agreeing the moment an alias names two. Both halves then break —
+the row's value for that alias is whichever item wrote it last (not what the analysis recorded under the
+name), and the alias SET is coarser than the executor's item-indexed key, so an aggregate of that clause is
+not a function of it either. So the weaker repair of "the aggregating aliases minus the non-aggregating
+ones" is also wrong: `WITH n.owner AS a, n.rank AS a, collect(n.key) AS b` leaves that set disjoint from
+`key` and still lets `b` be dropped, merging two groups that differ only in `b`. A clause whose aliases are
+not unique therefore determines **nothing**, which is what the line now says. (Both witnesses are pinned in
+`grouping_alias_collision_test.go`.)
+
+**Inductive soundness.** `key_old ⊆ carried` and `key_old ∩ redundant = ∅`, so `key_old ⊆ key_new` — every
+alias previously determined by `key_old` stays determined by `key_new`, and each newly aggregated alias is
+determined by `C`'s actual grouping key, which equals `key_new` because only determined items were dropped.
+
+`key ∩ det = ∅` is required for that induction, and — **amended 2026-08-11 (build)** — the first draft's
+claim that it holds *"by construction"* was false, as the duplicate-alias branch above shows. It holds only
+where each alias names exactly one item, which is a property of the clause, not of the construction. The
+build therefore enforces it as CODE rather than as a claim: every return from `analyseGroupingClause` goes
+through one exit that collapses `det` to ∅ when the two sets intersect, so a violated invariant reaches the
+safe state instead of proceeding on a premise just shown false.
 
 **Worked on the real generated producer** (14 declared walks across three domains,
 `packages/edge-manifest/lenses.go:390-399`):
@@ -265,9 +315,22 @@ that consumes it.
 - **`evalExpr` still runs per row for a redundant item.** Only the *rendering* is skipped. This is a
   design constraint, not an oversight: an expression's evaluation is what populates the node/edge memos
   that `ex.footprint()` certifies (`executor.go:280-298`). Skipping evaluation would shrink the read
-  surface a validating auth-plane caller compares after evaluation (`pipeline/evaluate.go:351-393`) and
-  turn a footprint match into a mismatch. A bare `VariableRef` reads nothing, so the cost is a map lookup
-  — and the footprint stays **bit-identical**.
+  surface a validating auth-plane caller re-reads after evaluation. A bare `VariableRef` reads nothing, so
+  the cost is a map lookup — and the footprint stays **bit-identical**.
+
+  **Amended 2026-08-11 (build): the CONSEQUENCE stated here was backwards, in the fail-open direction.**
+  The draft said a shrunken footprint would "turn a footprint match into a mismatch" — a spurious drift
+  retry. It does the opposite. `footprintValid` (`pipeline/evaluate.go:479-534`) iterates the **recorded**
+  footprint and re-reads only the keys it names; there is no coverage assertion and no comparison against
+  any second footprint, so removing an entry can only remove an opportunity to return false. A shrunken
+  footprint validates **fewer keys and passes more readily**. The harm is a silent loss of drift-detection
+  coverage on exactly the auth-plane lenses this design is for — a `cap-read.*` slice assembled across two
+  instants and then trusted, i.e. a revocation that landed mid-evaluation surviving as a grant — and not a
+  retry anyone would notice. Stated precisely because the wrong version is *reassuring*: a builder taking
+  §9.6's named trigger, reading "spurious retry", measuring none, and concluding the constraint is bogus
+  would silently weaken that coverage. The trigger is live — generalizing past bare carries reaches
+  `PropertyAccess`, whose `resolveProperty` (`executor.go:1826-1836`) issues a Core-KV aspect point-read
+  that lands in the memo and therefore in the footprint.
 - **Group order.** Groups are ordered by first appearance (`executor.go:1149`). The partition is
   unchanged, so first-appearance order — and therefore `collect` element order and output row order — is
   unchanged.
@@ -500,10 +563,18 @@ scope note.
 ### 10.2 The footprint must stay bit-identical (added the §4.4 constraint)
 
 The obvious "optimization" is to skip evaluating a redundant item entirely, since its value is only needed
-once. That would change the evaluation's **read-surface footprint**, which auth-plane lenses compare
-against KV after evaluation (`pipeline/evaluate.go:351-393`) — turning a match into a spurious drift
-retry, on exactly the lens family this design is for. §4.4 now states "evaluate, don't render" as a
-constraint with its reason, so a builder cannot reach for the wrong shortcut.
+once. That would change the evaluation's **read-surface footprint**, which auth-plane lenses re-read
+against KV after evaluation, on exactly the lens family this design is for. §4.4 states "evaluate, don't
+render" as a constraint with its reason, so a builder cannot reach for the wrong shortcut.
+
+**Amended 2026-08-11 (build): this section's stated harm — "turning a match into a spurious drift retry" —
+was backwards, and in the fail-open direction.** `footprintValid` re-reads only the keys the RECORDED
+footprint names (`pipeline/evaluate.go:479-534`), with no coverage assertion, so a shrunken footprint
+checks fewer keys and *passes* rather than mismatching. The real harm is a silent loss of drift-detection
+coverage — a torn `cap-read.*` slice trusted, a mid-evaluation revocation surviving as a grant. The
+adversarial pass reached the right constraint by the wrong argument, which is worse than reaching it by
+none: the wrong argument is falsifiable by measurement (no retries appear) and would license removing the
+constraint. §4.4 carries the corrected reason.
 
 ### 10.3 The `key ⊄ carried` fail-closed branch was missing an alias-rename case
 

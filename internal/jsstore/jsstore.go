@@ -25,7 +25,7 @@ import (
 // logs rather than fails if a residual file somehow outlasts the window (the OS
 // reclaims the temp dir regardless). Because the directory is allocated here
 // rather than via t.TempDir(), the framework registers no competing removal.
-func Dir(t *testing.T) string {
+func Dir(t testing.TB) string {
 	t.Helper()
 	dir, err := os.MkdirTemp("", "nats-jetstream-")
 	if err != nil {

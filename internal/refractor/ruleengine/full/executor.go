@@ -134,6 +134,21 @@ type executor struct {
 	// stays a map lookup). Nil for a rule with no `*` pattern, matching
 	// CompiledRule.LabelExpansion's own zero value.
 	labelExpansion map[string]map[string]struct{}
+
+	// groupingRedundant is the compiled rule's parse-time grouping analysis
+	// (grouping.go), read through redundantFor as each projecting clause runs.
+	// Nil means every non-aggregating item is rendered into the grouping key.
+	groupingRedundant map[Clause][]bool
+}
+
+// redundantFor returns c's redundant-item mask, or nil when the rule carries no
+// analysis for it — the unreduced path, which is what a directly constructed
+// *CompiledRule takes.
+func (ex *executor) redundantFor(c Clause) []bool {
+	if ex.groupingRedundant == nil {
+		return nil
+	}
+	return ex.groupingRedundant[c]
 }
 
 // cancelCheckInterval is how many checkpoint calls pass between context
@@ -230,18 +245,19 @@ func (e *Engine) ExecuteWithFootprint(
 	}
 
 	ex := &executor{
-		ctx:            ctx,
-		adjKV:          adjKV,
-		coreKV:         coreKV,
-		params:         ec.Parameters,
-		keyColumns:     compiled.KeyColumns,
-		seedAnchor:     seedAnchorFor(compiled.Query, ec.SeedAnchor, compiled.LabelExpansion),
-		nodes:          map[string]*nodeRef{},
-		edges:          map[string][]adjacency.EdgeEntry{},
-		edgeRevisions:  map[string]uint64{},
-		edgeSelectors:  map[string]*ruleengine.EdgeSelectorFootprint{},
-		maxBindings:    e.maxBindings,
-		labelExpansion: compiled.LabelExpansion,
+		ctx:               ctx,
+		adjKV:             adjKV,
+		coreKV:            coreKV,
+		params:            ec.Parameters,
+		keyColumns:        compiled.KeyColumns,
+		seedAnchor:        seedAnchorFor(compiled.Query, ec.SeedAnchor, compiled.LabelExpansion),
+		nodes:             map[string]*nodeRef{},
+		edges:             map[string][]adjacency.EdgeEntry{},
+		edgeRevisions:     map[string]uint64{},
+		edgeSelectors:     map[string]*ruleengine.EdgeSelectorFootprint{},
+		maxBindings:       e.maxBindings,
+		labelExpansion:    compiled.LabelExpansion,
+		groupingRedundant: compiled.groupingRedundant,
 	}
 
 	bindings := []binding{{}}
@@ -1116,9 +1132,33 @@ func (ex *executor) traverseRel(b binding, from *nodeRef, rel RelPattern, to Nod
 // --- WITH ---
 
 func (ex *executor) applyWith(bindings []binding, w *With) ([]binding, error) {
-	projected, err := ex.projectItems(bindings, w.Items)
+	projected, err := ex.projectItems(bindings, w.Items, ex.redundantFor(w))
 	if err != nil {
 		return nil, err
+	}
+	// WITH DISTINCT de-duplicates the projected rows, first occurrence wins, by
+	// the same injective rendering applyReturn's DISTINCT and the grouping path
+	// key on — never json.Marshal, which renders every *nodeRef as `{}` and so
+	// collapses two rows that differ only in the node they bound.
+	//
+	// It runs on the PROJECTED rows and before the WHERE, matching Cypher's
+	// `WITH DISTINCT … WHERE …`: the filter reads the distinct set. With no
+	// ORDER BY/SKIP/LIMIT in the clause the two orders yield the same rows for
+	// any row predicate — a duplicate pair is identical, so a filter keeps both
+	// copies or neither — so what this ordering buys is the predicate being
+	// evaluated once per distinct row rather than once per duplicate, and the
+	// semantics staying right the day the clause gains a row limit.
+	if w.Distinct {
+		seen := make(map[string]struct{}, len(projected))
+		deduped := projected[:0]
+		for _, row := range projected {
+			key := normalizeForKey(map[string]any(row))
+			if _, exists := seen[key]; !exists {
+				seen[key] = struct{}{}
+				deduped = append(deduped, row)
+			}
+		}
+		projected = deduped
 	}
 	if w.Where != nil {
 		var filtered []binding
@@ -1139,7 +1179,14 @@ func (ex *executor) applyWith(bindings []binding, w *With) ([]binding, error) {
 // projectItems evaluates each ProjectionItem against the inbound bindings.
 // If any item is an aggregating expression (e.g. collect), the result is
 // grouped by the non-aggregating items.
-func (ex *executor) projectItems(bindings []binding, items []ProjectionItem) ([]binding, error) {
+//
+// redundant is the clause's parse-time grouping analysis (grouping.go), indexed
+// by item: a marked item is still EVALUATED — its value is what the group row
+// projects, and evaluating it is what keeps this evaluation's read-surface
+// footprint bit-identical — but contributes no fragment to the grouping key,
+// because the aliases still in that key already determine its value. A nil or
+// short slice renders every item, which is the behaviour with no analysis.
+func (ex *executor) projectItems(bindings []binding, items []ProjectionItem, redundant []bool) ([]binding, error) {
 	// Decide aggregating vs non-aggregating per item.
 	itemAggregating := make([]bool, len(items))
 	anyAggregating := false
@@ -1202,6 +1249,12 @@ func (ex *executor) projectItems(bindings []binding, items []ProjectionItem) ([]
 				return nil, err
 			}
 			groupVals[i] = v
+			if i < len(redundant) && redundant[i] {
+				continue
+			}
+			// Each fragment is index-tagged, so omitting item i cannot make two
+			// different item sets render alike: injectivity over the retained
+			// items is preserved without touching normalizeForKey.
 			keyParts = append(keyParts, fmt.Sprintf("%d=%v", i, normalizeForKey(v)))
 		}
 		k := strings.Join(keyParts, "|")
@@ -1294,7 +1347,7 @@ func containsAggregator(e Expr) bool {
 // --- RETURN ---
 
 func (ex *executor) applyReturn(bindings []binding, r *Return) ([]ruleengine.ProjectionResult, error) {
-	rows, err := ex.projectItems(bindings, r.Items)
+	rows, err := ex.projectItems(bindings, r.Items, ex.redundantFor(r))
 	if err != nil {
 		return nil, err
 	}
